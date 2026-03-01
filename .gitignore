@@ -1,0 +1,6 @@
+*.o
+dsco
+*.dSYM/
+*.swp
+*.tmp
+baseline.db
