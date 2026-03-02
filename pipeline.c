@@ -100,8 +100,11 @@ static bool simple_match(const char *line, const char *pattern) {
 /* ── Pipeline creation ───────────────────────────────────────────────── */
 
 pipeline_t *pipeline_create(const char *input) {
+    if (!input) return NULL;
     pipeline_t *p = calloc(1, sizeof(pipeline_t));
+    if (!p) return NULL;
     p->input = strdup(input);
+    if (!p->input) { free(p); return NULL; }
     p->lines = split_lines(input, &p->line_count);
     p->line_cap = p->line_count;
     return p;
@@ -669,14 +672,19 @@ static const stage_name_t STAGE_NAMES[] = {
 };
 
 pipeline_t *pipeline_parse(const char *input, const char *spec) {
+    if (!input || !spec) return NULL;
     pipeline_t *p = pipeline_create(input);
+    if (!p) return NULL;
 
     /* Parse spec: "stage:arg|stage:arg|..." */
     char *spec_copy = strdup(spec);
+    if (!spec_copy) { pipeline_free(p); return NULL; }
     char *save = NULL;
     char *token = strtok_r(spec_copy, "|", &save);
 
     while (token) {
+        /* Enforce max stage count */
+        if (p->stage_count >= PIPE_MAX_STAGES) break;
         /* Trim whitespace */
         while (*token == ' ') token++;
         char *end = token + strlen(token);
@@ -710,7 +718,9 @@ pipeline_t *pipeline_parse(const char *input, const char *spec) {
 }
 
 char *pipeline_run(const char *input, const char *spec) {
+    if (!input || !spec) return NULL;
     pipeline_t *p = pipeline_parse(input, spec);
+    if (!p) return NULL;
     char *result = pipeline_execute(p);
     pipeline_free(p);
     return result;

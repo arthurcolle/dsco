@@ -1,17 +1,43 @@
 #include "llm.h"
 #include "tools.h"
+#include "semantic.h"
 #include "config.h"
 #include <stdlib.h>
 #include <string.h>
 #include <stdio.h>
+#include <signal.h>
 #include <curl/curl.h>
+
+/* Global interrupt flag — set by SIGINT handler in agent.c.
+   Declared extern here so the streaming code can check it. */
+extern volatile int g_interrupted;
+
+/* ── Semantic tool index (initialized lazily) ──────────────────────────── */
+static tfidf_index_t  s_tool_index;
+static bool           s_tool_index_built = false;
+
+static void ensure_tool_index(void) {
+    if (s_tool_index_built) return;
+    int count;
+    const tool_def_t *tools = tools_get_all(&count);
+
+    const char *names[SEM_MAX_DOCS];
+    const char *descs[SEM_MAX_DOCS];
+    for (int i = 0; i < count && i < SEM_MAX_DOCS; i++) {
+        names[i] = tools[i].name;
+        descs[i] = tools[i].description;
+    }
+    sem_tools_index_build(&s_tool_index, names, descs, count);
+    s_tool_index_built = true;
+}
 
 /* ── Conversation management ───────────────────────────────────────────── */
 
 void conv_init(conversation_t *c) {
     c->cap = 32;
     c->count = 0;
-    c->msgs = calloc(c->cap, sizeof(message_t));
+    c->msgs = safe_malloc(c->cap * sizeof(message_t));
+    memset(c->msgs, 0, c->cap * sizeof(message_t));
 }
 
 void conv_free(conversation_t *c) {
@@ -31,9 +57,25 @@ void conv_free(conversation_t *c) {
 }
 
 static message_t *conv_add(conversation_t *c, msg_role_t role) {
+    if (c->count >= MAX_MESSAGES) {
+        fprintf(stderr, "dsco: conversation limit reached (%d messages), dropping oldest\n", MAX_MESSAGES);
+        /* Free the oldest message */
+        message_t *old = &c->msgs[0];
+        for (int j = 0; j < old->content_count; j++) {
+            free(old->content[j].type);
+            free(old->content[j].text);
+            free(old->content[j].tool_name);
+            free(old->content[j].tool_id);
+            free(old->content[j].tool_input);
+        }
+        free(old->content);
+        memmove(&c->msgs[0], &c->msgs[1], (c->count - 1) * sizeof(message_t));
+        c->count--;
+    }
     if (c->count >= c->cap) {
         c->cap *= 2;
-        c->msgs = realloc(c->msgs, c->cap * sizeof(message_t));
+        if (c->cap > MAX_MESSAGES) c->cap = MAX_MESSAGES;
+        c->msgs = safe_realloc(c->msgs, c->cap * sizeof(message_t));
     }
     message_t *m = &c->msgs[c->count++];
     memset(m, 0, sizeof(*m));
@@ -42,43 +84,94 @@ static message_t *conv_add(conversation_t *c, msg_role_t role) {
 }
 
 static msg_content_t *msg_add_content(message_t *m) {
-    m->content = realloc(m->content, (m->content_count + 1) * sizeof(msg_content_t));
+    m->content = safe_realloc(m->content, (m->content_count + 1) * sizeof(msg_content_t));
     msg_content_t *mc = &m->content[m->content_count++];
     memset(mc, 0, sizeof(*mc));
     return mc;
 }
 
+void conv_pop_last(conversation_t *c) {
+    if (c->count <= 0) return;
+    c->count--;
+    message_t *m = &c->msgs[c->count];
+    for (int j = 0; j < m->content_count; j++) {
+        free(m->content[j].type);
+        free(m->content[j].text);
+        free(m->content[j].tool_name);
+        free(m->content[j].tool_id);
+        free(m->content[j].tool_input);
+    }
+    free(m->content);
+    memset(m, 0, sizeof(*m));
+}
+
+void conv_trim_old_results(conversation_t *c, int keep_recent, int max_chars) {
+    if (max_chars <= 0) max_chars = 512;
+    int cutoff = c->count - keep_recent;
+    if (cutoff <= 0) return;
+
+    for (int i = 0; i < cutoff; i++) {
+        message_t *m = &c->msgs[i];
+        for (int j = 0; j < m->content_count; j++) {
+            msg_content_t *mc = &m->content[j];
+            /* Only truncate tool_result text content */
+            if (mc->type && strcmp(mc->type, "tool_result") == 0 && mc->text) {
+                int len = (int)strlen(mc->text);
+                if (len > max_chars) {
+                    char *trimmed = safe_malloc(max_chars + 64);
+                    snprintf(trimmed, max_chars + 64,
+                             "[truncated %d→%d chars] %.*s",
+                             len, max_chars, max_chars, mc->text);
+                    free(mc->text);
+                    mc->text = trimmed;
+                }
+            }
+        }
+    }
+}
+
 void conv_add_user_text(conversation_t *c, const char *text) {
     message_t *m = conv_add(c, ROLE_USER);
     msg_content_t *mc = msg_add_content(m);
-    mc->type = strdup("text");
-    mc->text = strdup(text);
+    mc->type = safe_strdup("text");
+    mc->text = safe_strdup(text);
 }
 
 void conv_add_assistant_text(conversation_t *c, const char *text) {
     message_t *m = conv_add(c, ROLE_ASSISTANT);
     msg_content_t *mc = msg_add_content(m);
-    mc->type = strdup("text");
-    mc->text = strdup(text);
+    mc->type = safe_strdup("text");
+    mc->text = safe_strdup(text);
 }
 
 void conv_add_assistant_tool_use(conversation_t *c, const char *tool_id,
                                   const char *tool_name, const char *tool_input) {
     message_t *m = conv_add(c, ROLE_ASSISTANT);
     msg_content_t *mc = msg_add_content(m);
-    mc->type = strdup("tool_use");
-    mc->tool_id = strdup(tool_id);
-    mc->tool_name = strdup(tool_name);
-    mc->tool_input = tool_input ? strdup(tool_input) : strdup("{}");
+    mc->type = safe_strdup("tool_use");
+    mc->tool_id = safe_strdup(tool_id);
+    mc->tool_name = safe_strdup(tool_name);
+    mc->tool_input = tool_input ? safe_strdup(tool_input) : safe_strdup("{}");
 }
 
 void conv_add_tool_result(conversation_t *c, const char *tool_id,
                           const char *result, bool is_error) {
-    message_t *m = conv_add(c, ROLE_USER);
+    /* Reuse the last message if it's already a user message with tool_result
+       content — multiple tool results for the same turn must be combined
+       into a single user message to satisfy the alternating-role requirement. */
+    message_t *m = NULL;
+    if (c->count > 0 && c->msgs[c->count - 1].role == ROLE_USER &&
+        c->msgs[c->count - 1].content_count > 0 &&
+        c->msgs[c->count - 1].content[0].type &&
+        strcmp(c->msgs[c->count - 1].content[0].type, "tool_result") == 0) {
+        m = &c->msgs[c->count - 1];
+    } else {
+        m = conv_add(c, ROLE_USER);
+    }
     msg_content_t *mc = msg_add_content(m);
-    mc->type = strdup("tool_result");
-    mc->tool_id = strdup(tool_id);
-    mc->text = strdup(result);
+    mc->type = safe_strdup("tool_result");
+    mc->tool_id = safe_strdup(tool_id);
+    mc->text = safe_strdup(result);
     mc->is_error = is_error;
 }
 
@@ -86,11 +179,11 @@ void conv_add_assistant_raw(conversation_t *c, parsed_response_t *resp) {
     message_t *m = conv_add(c, ROLE_ASSISTANT);
     for (int i = 0; i < resp->count; i++) {
         msg_content_t *mc = msg_add_content(m);
-        mc->type = strdup(resp->blocks[i].type);
-        if (resp->blocks[i].text) mc->text = strdup(resp->blocks[i].text);
-        if (resp->blocks[i].tool_name) mc->tool_name = strdup(resp->blocks[i].tool_name);
-        if (resp->blocks[i].tool_id) mc->tool_id = strdup(resp->blocks[i].tool_id);
-        if (resp->blocks[i].tool_input) mc->tool_input = strdup(resp->blocks[i].tool_input);
+        mc->type = safe_strdup(resp->blocks[i].type);
+        if (resp->blocks[i].text) mc->text = safe_strdup(resp->blocks[i].text);
+        if (resp->blocks[i].tool_name) mc->tool_name = safe_strdup(resp->blocks[i].tool_name);
+        if (resp->blocks[i].tool_id) mc->tool_id = safe_strdup(resp->blocks[i].tool_id);
+        if (resp->blocks[i].tool_input) mc->tool_input = safe_strdup(resp->blocks[i].tool_input);
     }
 }
 
@@ -107,7 +200,30 @@ static void append_content_block(jbuf_t *b, msg_content_t *mc) {
         jbuf_append(b, ",\"name\":");
         jbuf_append_json_str(b, mc->tool_name);
         jbuf_append(b, ",\"input\":");
-        jbuf_append(b, mc->tool_input ? mc->tool_input : "{}");
+        /* Validate tool_input is a JSON object before embedding raw */
+        bool valid_json = false;
+        if (mc->tool_input && mc->tool_input[0] == '{') {
+            /* Quick validation: matching braces */
+            int depth = 0;
+            const char *p = mc->tool_input;
+            bool in_str = false;
+            for (; *p; p++) {
+                if (in_str) {
+                    if (*p == '\\' && p[1]) { p++; continue; }
+                    if (*p == '"') in_str = false;
+                } else {
+                    if (*p == '"') in_str = true;
+                    else if (*p == '{') depth++;
+                    else if (*p == '}') depth--;
+                }
+            }
+            valid_json = (depth == 0 && !in_str);
+        }
+        if (valid_json) {
+            jbuf_append(b, mc->tool_input);
+        } else {
+            jbuf_append(b, "{}");
+        }
         jbuf_append(b, "}");
     } else if (strcmp(mc->type, "tool_result") == 0) {
         jbuf_append(b, "{\"type\":\"tool_result\",\"tool_use_id\":");
@@ -119,7 +235,24 @@ static void append_content_block(jbuf_t *b, msg_content_t *mc) {
     }
 }
 
-static void append_tools_json(jbuf_t *b) {
+/* Essential tools always included regardless of semantic score */
+static const char *ALWAYS_INCLUDE_TOOLS[] = {
+    "bash", "run_command", "read_file", "write_file", "edit_file",
+    "list_directory", "find_files", "grep_files",
+    "spawn_agent", "create_swarm", "swarm_collect", "agent_status",
+    "self_inspect", "inspect_file",
+    NULL
+};
+
+static bool is_always_included(const char *name) {
+    for (int i = 0; ALWAYS_INCLUDE_TOOLS[i]; i++) {
+        if (strcmp(name, ALWAYS_INCLUDE_TOOLS[i]) == 0) return true;
+    }
+    return false;
+}
+
+/* Append ALL tools (used for first turn or when no context available) */
+static void append_tools_json_all(jbuf_t *b) {
     int count;
     const tool_def_t *tools = tools_get_all(&count);
     jbuf_append(b, ",\"tools\":[");
@@ -139,6 +272,74 @@ static void append_tools_json(jbuf_t *b) {
     jbuf_append(b, "]");
 }
 
+/* Append semantically-selected tools based on query relevance.
+   Includes essential tools + top-K relevant tools by BM25+cosine score.
+   Max tools = SEM_TOOL_BUDGET (default 40). */
+#define SEM_TOOL_BUDGET 40
+
+static void append_tools_json_semantic(jbuf_t *b, const char *query) {
+    ensure_tool_index();
+
+    int count;
+    const tool_def_t *tools = tools_get_all(&count);
+
+    /* Rank tools by relevance to query */
+    tool_score_t scores[SEM_MAX_DOCS];
+    int ranked = sem_tools_rank(&s_tool_index, query, scores, count, count);
+
+    /* Build inclusion set: essential + top-K by score */
+    bool include[SEM_MAX_DOCS];
+    memset(include, 0, sizeof(bool) * count);
+
+    /* Always include essential tools */
+    int included = 0;
+    for (int i = 0; i < count; i++) {
+        if (is_always_included(tools[i].name)) {
+            include[i] = true;
+            included++;
+        }
+    }
+
+    /* Add top-ranked tools up to budget */
+    for (int r = 0; r < ranked && included < SEM_TOOL_BUDGET; r++) {
+        int ti = scores[r].tool_index;
+        if (!include[ti]) {
+            include[ti] = true;
+            included++;
+        }
+    }
+
+    /* Serialize selected tools */
+    jbuf_append(b, ",\"tools\":[");
+    int written = 0;
+    int last_written = -1;
+    for (int i = 0; i < count; i++) {
+        if (!include[i]) continue;
+        if (written > 0) jbuf_append(b, ",");
+        jbuf_append(b, "{\"name\":");
+        jbuf_append_json_str(b, tools[i].name);
+        jbuf_append(b, ",\"description\":");
+        jbuf_append_json_str(b, tools[i].description);
+        jbuf_append(b, ",\"input_schema\":");
+        jbuf_append(b, tools[i].input_schema_json);
+        jbuf_append(b, "}");
+        last_written = i;
+        written++;
+    }
+    /* Add cache_control to the last tool */
+    if (last_written >= 0 && written > 0) {
+        /* Back up over closing "}" to add cache_control */
+        b->len--;
+        b->data[b->len] = '\0';
+        jbuf_append(b, ",\"cache_control\":{\"type\":\"ephemeral\"}}");
+    }
+    jbuf_append(b, "]");
+
+    /* Log tool selection info */
+    fprintf(stderr, "  %s[semantic: %d/%d tools selected]%s\n",
+            "\033[2m", written, count, "\033[0m");
+}
+
 char *llm_build_request(conversation_t *c, const char *model, int max_tokens) {
     jbuf_t b;
     jbuf_init(&b, 16384);
@@ -154,21 +355,93 @@ char *llm_build_request(conversation_t *c, const char *model, int max_tokens) {
     jbuf_append_json_str(&b, SYSTEM_PROMPT);
     jbuf_append(&b, ",\"cache_control\":{\"type\":\"ephemeral\"}}]");
 
-    append_tools_json(&b);
+    append_tools_json_all(&b);
 
-    /* Messages */
+    /* Messages — merge consecutive same-role messages for API compliance */
     jbuf_append(&b, ",\"messages\":[");
+    int msg_written = 0;
     for (int i = 0; i < c->count; i++) {
-        if (i > 0) jbuf_append(&b, ",");
         message_t *m = &c->msgs[i];
-        jbuf_append(&b, "{\"role\":");
-        jbuf_append_json_str(&b, m->role == ROLE_USER ? "user" : "assistant");
-        jbuf_append(&b, ",\"content\":[");
-        for (int j = 0; j < m->content_count; j++) {
-            if (j > 0) jbuf_append(&b, ",");
-            append_content_block(&b, &m->content[j]);
+        /* Check if this message has the same role as the previous;
+           if so, merge content blocks into the previous message object */
+        bool merge_with_prev = (i > 0 && c->msgs[i - 1].role == m->role && msg_written > 0);
+        if (merge_with_prev) {
+            /* Back up over the closing "]}" of the previous message */
+            b.len -= 2;
+            b.data[b.len] = '\0';
+            /* Append a comma and the new content blocks */
+            for (int j = 0; j < m->content_count; j++) {
+                jbuf_append(&b, ",");
+                append_content_block(&b, &m->content[j]);
+            }
+            jbuf_append(&b, "]}");
+        } else {
+            if (msg_written > 0) jbuf_append(&b, ",");
+            jbuf_append(&b, "{\"role\":");
+            jbuf_append_json_str(&b, m->role == ROLE_USER ? "user" : "assistant");
+            jbuf_append(&b, ",\"content\":[");
+            for (int j = 0; j < m->content_count; j++) {
+                if (j > 0) jbuf_append(&b, ",");
+                append_content_block(&b, &m->content[j]);
+            }
+            jbuf_append(&b, "]}");
+            msg_written++;
         }
-        jbuf_append(&b, "]}");
+    }
+    jbuf_append(&b, "]}");
+
+    return b.data;
+}
+
+char *llm_build_request_semantic(conversation_t *c, const char *model,
+                                  int max_tokens, const char *query_hint) {
+    jbuf_t b;
+    jbuf_init(&b, 16384);
+
+    jbuf_append(&b, "{\"model\":");
+    jbuf_append_json_str(&b, model);
+    jbuf_append(&b, ",\"max_tokens\":");
+    jbuf_append_int(&b, max_tokens);
+    jbuf_append(&b, ",\"stream\":true");
+
+    /* System prompt with cache breakpoint */
+    jbuf_append(&b, ",\"system\":[{\"type\":\"text\",\"text\":");
+    jbuf_append_json_str(&b, SYSTEM_PROMPT);
+    jbuf_append(&b, ",\"cache_control\":{\"type\":\"ephemeral\"}}]");
+
+    /* Semantic tool selection: pick relevant tools based on query */
+    if (query_hint && query_hint[0]) {
+        append_tools_json_semantic(&b, query_hint);
+    } else {
+        append_tools_json_all(&b);
+    }
+
+    /* Messages — merge consecutive same-role messages for API compliance */
+    jbuf_append(&b, ",\"messages\":[");
+    int msg_written = 0;
+    for (int i = 0; i < c->count; i++) {
+        message_t *m = &c->msgs[i];
+        bool merge_with_prev = (i > 0 && c->msgs[i - 1].role == m->role && msg_written > 0);
+        if (merge_with_prev) {
+            b.len -= 2;
+            b.data[b.len] = '\0';
+            for (int j = 0; j < m->content_count; j++) {
+                jbuf_append(&b, ",");
+                append_content_block(&b, &m->content[j]);
+            }
+            jbuf_append(&b, "]}");
+        } else {
+            if (msg_written > 0) jbuf_append(&b, ",");
+            jbuf_append(&b, "{\"role\":");
+            jbuf_append_json_str(&b, m->role == ROLE_USER ? "user" : "assistant");
+            jbuf_append(&b, ",\"content\":[");
+            for (int j = 0; j < m->content_count; j++) {
+                if (j > 0) jbuf_append(&b, ",");
+                append_content_block(&b, &m->content[j]);
+            }
+            jbuf_append(&b, "]}");
+            msg_written++;
+        }
     }
     jbuf_append(&b, "]}");
 
@@ -204,7 +477,63 @@ typedef struct {
     jbuf_t          line_buf;
     bool            got_error;
     char           *error_msg;
+
+    /* Repetition detection */
+    char            rep_window[256];   /* sliding window of recent text */
+    int             rep_window_len;
+    int             rep_score;         /* consecutive repetition hits */
+    bool            rep_abort;         /* set true to abort stream */
 } sse_state_t;
+
+/* Detect repetitive output by checking if recent text repeats a short pattern.
+   Returns true if the stream should be aborted. */
+static void rep_detect_feed(sse_state_t *s, const char *text) {
+    int tlen = (int)strlen(text);
+    for (int i = 0; i < tlen; i++) {
+        if (s->rep_window_len < (int)sizeof(s->rep_window) - 1) {
+            s->rep_window[s->rep_window_len++] = text[i];
+        } else {
+            /* Shift window left by half */
+            int half = s->rep_window_len / 2;
+            memmove(s->rep_window, s->rep_window + half, s->rep_window_len - half);
+            s->rep_window_len -= half;
+            s->rep_window[s->rep_window_len++] = text[i];
+        }
+    }
+    s->rep_window[s->rep_window_len] = '\0';
+
+    /* Check for repeating pattern: if any substring of length 4-30
+       repeats 6+ times consecutively in the window, flag it */
+    if (s->rep_window_len < 32) return;
+
+    for (int plen = 4; plen <= 30 && plen * 6 <= s->rep_window_len; plen++) {
+        const char *pat = s->rep_window + s->rep_window_len - plen;
+        int reps = 0;
+        int pos = s->rep_window_len - plen;
+        while (pos >= plen) {
+            pos -= plen;
+            if (memcmp(s->rep_window + pos, pat, plen) == 0) {
+                reps++;
+            } else {
+                break;
+            }
+        }
+        if (reps >= 5) {
+            s->rep_abort = true;
+            fprintf(stderr, "\n\033[33m⚠ repetition detected, aborting stream\033[0m\n");
+            return;
+        }
+    }
+}
+
+/* Curl progress callback — allows Ctrl+C to abort transfers */
+static int stream_progress_cb(void *clientp, curl_off_t dltotal, curl_off_t dlnow,
+                                curl_off_t ultotal, curl_off_t ulnow) {
+    (void)dltotal; (void)dlnow; (void)ultotal; (void)ulnow;
+    sse_state_t *s = (sse_state_t *)clientp;
+    if (g_interrupted || s->rep_abort) return 1;  /* non-zero aborts transfer */
+    return 0;
+}
 
 static void sse_finalize_block(sse_state_t *s) {
     if (s->current_index < 0) return;
@@ -212,14 +541,18 @@ static void sse_finalize_block(sse_state_t *s) {
     if (idx >= MAX_CONTENT_BLOCKS) return;
 
     content_block_t *blk = &s->blocks[idx];
-    blk->type = s->cur_type ? strdup(s->cur_type) : strdup("text");
+    blk->type = s->cur_type ? safe_strdup(s->cur_type) : safe_strdup("text");
 
     if (s->cur_type && strcmp(s->cur_type, "text") == 0) {
-        blk->text = strdup(s->text_buf.data ? s->text_buf.data : "");
+        blk->text = safe_strdup(s->text_buf.data ? s->text_buf.data : "");
     } else if (s->cur_type && strcmp(s->cur_type, "tool_use") == 0) {
-        blk->tool_name = s->cur_tool_name ? strdup(s->cur_tool_name) : NULL;
-        blk->tool_id = s->cur_tool_id ? strdup(s->cur_tool_id) : NULL;
-        blk->tool_input = strdup(s->input_buf.data ? s->input_buf.data : "{}");
+        blk->tool_name = s->cur_tool_name ? safe_strdup(s->cur_tool_name) : NULL;
+        blk->tool_id = s->cur_tool_id ? safe_strdup(s->cur_tool_id) : NULL;
+        if (s->input_buf.data && s->input_buf.data[0] != '\0') {
+            blk->tool_input = safe_strdup(s->input_buf.data);
+        } else {
+            blk->tool_input = safe_strdup("{}");
+        }
     }
 
     free(s->cur_type); s->cur_type = NULL;
@@ -261,6 +594,11 @@ static void sse_handle_event(sse_state_t *s, const char *data) {
                 s->cur_tool_name = json_get_str(cb_raw, "name");
                 free(s->cur_tool_id);
                 s->cur_tool_id = json_get_str(cb_raw, "id");
+                jbuf_reset(&s->input_buf);
+                /* NOTE: content_block_start always sends "input":{} as a
+                   placeholder.  The real input arrives via input_json_delta
+                   events.  Do NOT seed input_buf here — otherwise we get
+                   {}{"url":"..."} which is invalid JSON. */
 
                 if (s->tool_cb && s->cur_tool_name) {
                     s->tool_cb(s->cur_tool_name, s->cur_tool_id, s->cb_ctx);
@@ -277,6 +615,7 @@ static void sse_handle_event(sse_state_t *s, const char *data) {
                 if (text) {
                     jbuf_append(&s->text_buf, text);
                     if (s->text_cb) s->text_cb(text, s->cb_ctx);
+                    rep_detect_feed(s, text);
                     free(text);
                 }
             } else if (delta_type && strcmp(delta_type, "input_json_delta") == 0) {
@@ -392,7 +731,17 @@ stream_result_t llm_stream(const char *api_key, const char *request_json,
     curl_easy_setopt(curl, CURLOPT_POSTFIELDS, request_json);
     curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, stream_write_cb);
     curl_easy_setopt(curl, CURLOPT_WRITEDATA, &state);
-    curl_easy_setopt(curl, CURLOPT_TIMEOUT, 300L);
+    /* Progress callback for Ctrl+C abort and repetition detection */
+    curl_easy_setopt(curl, CURLOPT_XFERINFOFUNCTION, stream_progress_cb);
+    curl_easy_setopt(curl, CURLOPT_XFERINFODATA, &state);
+    curl_easy_setopt(curl, CURLOPT_NOPROGRESS, 0L);
+    /* No hard CURLOPT_TIMEOUT — streaming responses can legitimately take
+       10+ minutes for large tool-use generations.  Instead, use low-speed
+       detection: abort only if fewer than 100 bytes arrive in 120 seconds,
+       which catches genuine stalls without killing long streams. */
+    curl_easy_setopt(curl, CURLOPT_LOW_SPEED_LIMIT, 100L);   /* bytes/sec */
+    curl_easy_setopt(curl, CURLOPT_LOW_SPEED_TIME, 120L);    /* seconds   */
+    curl_easy_setopt(curl, CURLOPT_CONNECTTIMEOUT, 30L);     /* connect phase only */
     curl_easy_setopt(curl, CURLOPT_HTTP_VERSION, CURL_HTTP_VERSION_2TLS);
     curl_easy_setopt(curl, CURLOPT_TCP_KEEPALIVE, 1L);
     curl_easy_setopt(curl, CURLOPT_TCP_KEEPIDLE, 30L);
@@ -407,7 +756,11 @@ stream_result_t llm_stream(const char *api_key, const char *request_json,
     curl_slist_free_all(headers);
     curl_easy_cleanup(curl);
 
-    if (res != CURLE_OK) {
+    if (res == CURLE_ABORTED_BY_CALLBACK) {
+        /* Aborted by Ctrl+C or repetition detection — treat partial stream
+           as ok so we can still process whatever content blocks arrived */
+        result.ok = (state.block_count > 0 || state.text_buf.len > 0);
+    } else if (res != CURLE_OK) {
         fprintf(stderr, "dsco: stream failed: %s\n", curl_easy_strerror(res));
         result.ok = false;
     } else if (state.got_error) {
@@ -425,17 +778,24 @@ stream_result_t llm_stream(const char *api_key, const char *request_json,
         result.ok = true;
     }
 
+    /* Finalize any incomplete block (connection dropped mid-stream) */
+    if (state.current_index >= 0) {
+        sse_finalize_block(&state);
+    }
+
     /* Build parsed response from accumulated blocks */
     result.parsed.count = state.block_count;
-    result.parsed.blocks = calloc(state.block_count > 0 ? state.block_count : 1,
-                                   sizeof(content_block_t));
+    result.parsed.blocks = safe_malloc((state.block_count > 0 ? state.block_count : 1)
+                                       * sizeof(content_block_t));
+    memset(result.parsed.blocks, 0, (state.block_count > 0 ? state.block_count : 1)
+                                     * sizeof(content_block_t));
     for (int i = 0; i < state.block_count; i++) {
         result.parsed.blocks[i] = state.blocks[i]; /* move ownership */
     }
     result.parsed.stop_reason = state.stop_reason; /* move ownership */
     result.usage = state.usage;
 
-    /* Cleanup */
+    /* Cleanup — cur_type etc. already freed by sse_finalize_block */
     free(state.error_msg);
     free(state.cur_type);
     free(state.cur_tool_name);

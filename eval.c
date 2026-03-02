@@ -494,8 +494,18 @@ static double parse_assign(eval_ctx_t *ctx) {
     return parse_ternary(ctx);
 }
 
+#define EVAL_MAX_DEPTH 256
+
 static double parse_expr(eval_ctx_t *ctx) {
-    return parse_assign(ctx);
+    if (ctx->has_error) return NAN;
+    if (ctx->depth >= EVAL_MAX_DEPTH) {
+        set_error(ctx, "expression too deeply nested");
+        return NAN;
+    }
+    ctx->depth++;
+    double result = parse_assign(ctx);
+    ctx->depth--;
+    return result;
 }
 
 /* ── Public API ──────────────────────────────────────────────────────── */
@@ -506,6 +516,7 @@ double eval_expr(eval_ctx_t *ctx, const char *expr) {
     ctx->has_error = false;
     ctx->error[0] = '\0';
     ctx->base = 10;
+    ctx->depth = 0;
 
     double result = parse_expr(ctx);
 
@@ -589,6 +600,7 @@ void bigint_from_str(bigint_t *b, const char *s) {
     memset(b, 0, sizeof(*b));
     if (*s == '-') { b->negative = true; s++; }
     int slen = (int)strlen(s);
+    if (slen > BIGINT_MAX_DIGITS) slen = BIGINT_MAX_DIGITS;
     b->len = slen;
     for (int i = 0; i < slen; i++) {
         b->digits[i] = s[slen - 1 - i] - '0';
@@ -609,7 +621,7 @@ void bigint_add(const bigint_t *a, const bigint_t *b, bigint_t *result) {
     memset(result, 0, sizeof(*result));
     int maxlen = a->len > b->len ? a->len : b->len;
     int carry = 0;
-    for (int i = 0; i < maxlen || carry; i++) {
+    for (int i = 0; (i < maxlen || carry) && result->len < BIGINT_MAX_DIGITS; i++) {
         int sum = carry;
         if (i < a->len) sum += a->digits[i];
         if (i < b->len) sum += b->digits[i];
@@ -623,7 +635,7 @@ void bigint_mul(const bigint_t *a, const bigint_t *b, bigint_t *result) {
     result->negative = a->negative != b->negative;
     for (int i = 0; i < a->len; i++) {
         int carry = 0;
-        for (int j = 0; j < b->len || carry; j++) {
+        for (int j = 0; (j < b->len || carry) && (i + j) < BIGINT_MAX_DIGITS; j++) {
             int prod = result->digits[i + j] + carry;
             if (j < b->len) prod += a->digits[i] * b->digits[j];
             result->digits[i + j] = prod % 10;
@@ -641,6 +653,13 @@ void bigint_factorial(int n, bigint_t *result) {
     memset(result, 0, sizeof(*result));
     result->digits[0] = 1;
     result->len = 1;
+
+    if (n < 0 || n > 10000) {
+        /* Refuse unreasonable inputs to prevent hanging */
+        result->digits[0] = 0;
+        result->len = 0;
+        return;
+    }
 
     for (int i = 2; i <= n; i++) {
         char num[16];

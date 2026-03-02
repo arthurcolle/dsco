@@ -13,6 +13,11 @@
 #include <fcntl.h>
 #include <poll.h>
 
+#ifdef __APPLE__
+#include <mach-o/dyld.h>
+#include <libgen.h>
+#endif
+
 /* ── Time helper ──────────────────────────────────────────────────────── */
 
 static double now_sec(void) {
@@ -28,35 +33,78 @@ void swarm_init(swarm_t *s, const char *api_key, const char *model) {
     s->api_key = api_key;
     s->default_model = model;
 
-    /* Find our own binary */
+    /* Find our own binary — needed to fork sub-agent processes */
     char self[4096];
+    self[0] = '\0';
+
+#ifdef __APPLE__
+    /* macOS: _NSGetExecutablePath gives us the actual binary path */
     uint32_t size = sizeof(self);
-    /* Try /proc/self/exe first, then fallback */
-    ssize_t len = readlink("/proc/self/exe", self, sizeof(self) - 1);
-    if (len > 0) {
-        self[len] = '\0';
-        s->dsco_path = strdup(self);
-    } else {
-        /* macOS: use _NSGetExecutablePath if available, or fallback to PATH */
-        s->dsco_path = strdup("dsco");
+    if (_NSGetExecutablePath(self, &size) == 0) {
+        /* Resolve symlinks to get canonical path */
+        char *resolved = realpath(self, NULL);
+        if (resolved) {
+            s->dsco_path = resolved;  /* already malloc'd by realpath */
+        } else {
+            s->dsco_path = safe_strdup(self);
+        }
+    } else
+#endif
+    {
+        /* Linux: /proc/self/exe */
+        ssize_t len = readlink("/proc/self/exe", self, sizeof(self) - 1);
+        if (len > 0) {
+            self[len] = '\0';
+            s->dsco_path = safe_strdup(self);
+        } else {
+            /* Last resort: try to find dsco relative to cwd or via PATH */
+            char cwd[2048];
+            if (getcwd(cwd, sizeof(cwd))) {
+                snprintf(self, sizeof(self), "%s/dsco", cwd);
+                if (access(self, X_OK) == 0) {
+                    s->dsco_path = safe_strdup(self);
+                } else {
+                    s->dsco_path = safe_strdup("dsco");
+                }
+            } else {
+                s->dsco_path = safe_strdup("dsco");
+            }
+        }
     }
-    (void)size;
 }
 
 void swarm_destroy(swarm_t *s) {
-    /* Kill all running children */
+    /* Kill all running children — SIGTERM first, then SIGKILL after grace period */
     for (int i = 0; i < s->child_count; i++) {
         swarm_child_t *c = &s->children[i];
         if (c->status == SWARM_RUNNING || c->status == SWARM_STREAMING) {
-            kill(c->pid, SIGTERM);
-            waitpid(c->pid, NULL, WNOHANG);
+            kill(-c->pid, SIGTERM);  /* kill process group */
         }
-        if (c->pipe_fd >= 0) close(c->pipe_fd);
-        if (c->err_fd >= 0) close(c->err_fd);
-        free(c->output);
-        free(c->stream_buf);
+    }
+
+    /* Brief grace period for orderly shutdown */
+    usleep(200000);  /* 200ms */
+
+    /* Force-kill any still running, then blocking reap to avoid zombies */
+    for (int i = 0; i < s->child_count; i++) {
+        swarm_child_t *c = &s->children[i];
+        if (c->status == SWARM_RUNNING || c->status == SWARM_STREAMING) {
+            int status;
+            pid_t w = waitpid(c->pid, &status, WNOHANG);
+            if (w == 0) {
+                /* Still alive — force kill */
+                kill(-c->pid, SIGKILL);
+                waitpid(c->pid, NULL, 0);  /* blocking reap */
+            }
+        }
+        /* Close pipes AFTER reap to prevent use-after-free in child_read */
+        if (c->pipe_fd >= 0) { close(c->pipe_fd); c->pipe_fd = -1; }
+        if (c->err_fd >= 0)  { close(c->err_fd);  c->err_fd = -1; }
+        free(c->output);    c->output = NULL;
+        free(c->stream_buf); c->stream_buf = NULL;
     }
     free((void *)s->dsco_path);
+    s->dsco_path = NULL;
 }
 
 /* ── Spawn ────────────────────────────────────────────────────────────── */
@@ -81,43 +129,64 @@ int swarm_spawn_in_group(swarm_t *s, int group_id, const char *task, const char 
     int id = s->child_count;
 
     if (pid == 0) {
-        /* Child process */
+        /* ── Child process ── */
         close(stdout_pipe[0]);
         close(stderr_pipe[0]);
 
         dup2(stdout_pipe[1], STDOUT_FILENO);
-        dup2(stderr_pipe[1], STDERR_FILENO);
+        dup2(stdout_pipe[1], STDERR_FILENO);  /* merge stderr into stdout */
         close(stdout_pipe[1]);
         close(stderr_pipe[1]);
 
+        /* New process group for clean kill */
+        setpgid(0, 0);
+
         const char *m = model ? model : s->default_model;
         const char *bin = s->dsco_path;
+
+        /* Ensure child inherits API key */
+        if (s->api_key && s->api_key[0]) {
+            setenv("ANTHROPIC_API_KEY", s->api_key, 1);
+        }
+
+        /* Pass parent instance for lineage tracking */
         const char *parent_instance = getenv("DSCO_INSTANCE_ID");
         if (parent_instance && parent_instance[0]) {
             setenv("DSCO_PARENT_INSTANCE_ID", parent_instance, 1);
         }
 
-        /* exec dsco with the task as one-shot prompt */
-        execlp(bin, bin, "-m", m, task, NULL);
-        /* If exec fails */
-        fprintf(stderr, "swarm: exec failed: %s\n", strerror(errno));
+        /* Mark this as a sub-agent and track depth for hierarchical swarms */
+        setenv("DSCO_SUBAGENT", "1", 1);
+
+        /* Compute and propagate depth */
+        const char *cur_depth = getenv("DSCO_SWARM_DEPTH");
+        int depth = cur_depth ? atoi(cur_depth) + 1 : 1;
+        char depth_str[16];
+        snprintf(depth_str, sizeof(depth_str), "%d", depth);
+        setenv("DSCO_SWARM_DEPTH", depth_str, 1);
+
+        /* Use execl with absolute path (not execlp which searches PATH) */
+        execl(bin, bin, "-m", m, task, NULL);
+
+        /* If exec fails, write a clear error */
+        fprintf(stdout, "swarm: exec failed for '%s': %s\n", bin, strerror(errno));
         _exit(127);
     }
 
-    /* Parent */
+    /* ── Parent ── */
     close(stdout_pipe[1]);
+    close(stderr_pipe[0]);  /* stderr merged into stdout in child */
     close(stderr_pipe[1]);
 
-    /* Make pipes non-blocking */
+    /* Make pipe non-blocking */
     fcntl(stdout_pipe[0], F_SETFL, O_NONBLOCK);
-    fcntl(stderr_pipe[0], F_SETFL, O_NONBLOCK);
 
     swarm_child_t *c = &s->children[id];
     memset(c, 0, sizeof(*c));
     c->id = id;
     c->pid = pid;
     c->pipe_fd = stdout_pipe[0];
-    c->err_fd = stderr_pipe[0];
+    c->err_fd = -1;  /* merged into pipe_fd */
     c->status = SWARM_RUNNING;
     c->group_id = group_id;
     c->start_time = now_sec();
@@ -126,11 +195,11 @@ int swarm_spawn_in_group(swarm_t *s, int group_id, const char *task, const char 
     if (model) snprintf(c->model, sizeof(c->model), "%s", model);
 
     c->output_cap = 4096;
-    c->output = malloc(c->output_cap);
+    c->output = safe_malloc(c->output_cap);
     c->output[0] = '\0';
     c->output_len = 0;
 
-    c->stream_buf = malloc(4096);
+    c->stream_buf = safe_malloc(4096);
     c->stream_buf[0] = '\0';
     c->stream_buf_len = 0;
 
@@ -195,7 +264,7 @@ static void child_read(swarm_child_t *c, int fd, swarm_stream_cb cb, void *ctx) 
         while (c->output_len + (size_t)n + 1 > c->output_cap) {
             c->output_cap *= 2;
             if (c->output_cap > SWARM_MAX_OUTPUT) c->output_cap = SWARM_MAX_OUTPUT;
-            c->output = realloc(c->output, c->output_cap);
+            c->output = safe_realloc(c->output, c->output_cap);
         }
 
         if (c->output_len + (size_t)n < c->output_cap) {

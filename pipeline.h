@@ -21,7 +21,7 @@
  *   pipeline_free(p);
  */
 
-#define PIPE_MAX_STAGES     16
+#define PIPE_MAX_STAGES     50
 #define PIPE_MAX_LINES      65536
 #define PIPE_MAX_LINE_LEN   4096
 #define PIPE_MAX_OUTPUT      (256 * 1024)

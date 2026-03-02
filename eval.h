@@ -39,6 +39,7 @@ typedef struct {
     char        error[256];
     bool        has_error;
     int         base;       /* output base: 10, 16, 8, 2 */
+    int         depth;      /* recursion depth counter */
 } eval_ctx_t;
 
 /* Initialize evaluator context */

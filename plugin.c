@@ -22,7 +22,14 @@ typedef void        (*plugin_cleanup_fn)(void);
 /* ── Load a single plugin ────────────────────────────────────────────── */
 
 bool plugin_load(plugin_registry_t *reg, const char *path) {
+    if (!reg || !path) return false;
     if (reg->count >= PLUGIN_MAX_PLUGINS) return false;
+
+    /* Reject directory traversal in plugin paths */
+    if (strstr(path, "..") != NULL) {
+        fprintf(stderr, "  plugin: rejecting path with '..': %s\n", path);
+        return false;
+    }
 
     void *handle = dlopen(path, RTLD_NOW | RTLD_LOCAL);
     if (!handle) {
@@ -58,10 +65,16 @@ bool plugin_load(plugin_registry_t *reg, const char *path) {
     p->tools = get_tools();
     p->tool_count = get_count();
     strncpy(p->path, path, sizeof(p->path) - 1);
+    p->path[sizeof(p->path) - 1] = '\0';
     p->loaded = true;
+
+    /* Validate tool_count from plugin */
+    if (p->tool_count < 0) p->tool_count = 0;
+    if (!p->tools) p->tool_count = 0;
+
     reg->count++;
 
-    /* Copy tools into flat registry */
+    /* Copy tools into flat registry with bounds check */
     for (int i = 0; i < p->tool_count && reg->extra_tool_count < PLUGIN_MAX_TOOLS; i++) {
         reg->extra_tools[reg->extra_tool_count++] = p->tools[i];
     }
@@ -133,6 +146,8 @@ void plugin_init(plugin_registry_t *reg) {
     struct dirent *ent;
     while ((ent = readdir(dir)) != NULL) {
         if (!is_plugin(ent->d_name)) continue;
+        /* Reject entries with directory traversal */
+        if (strstr(ent->d_name, "..") != NULL) continue;
 
         char path[2048];
         snprintf(path, sizeof(path), "%s/%s", reg->plugin_dir, ent->d_name);

@@ -10,6 +10,7 @@
 /* ── Helpers ──────────────────────────────────────────────────────────── */
 
 static char *read_file(const char *path, size_t *out_len) {
+    if (!path) return NULL;
     FILE *f = fopen(path, "r");
     if (!f) return NULL;
     fseek(f, 0, SEEK_END);
@@ -17,6 +18,7 @@ static char *read_file(const char *path, size_t *out_len) {
     fseek(f, 0, SEEK_SET);
     if (sz <= 0) { fclose(f); return NULL; }
     char *buf = malloc(sz + 1);
+    if (!buf) { fclose(f); return NULL; }
     size_t n = fread(buf, 1, sz, f);
     buf[n] = '\0';
     fclose(f);
@@ -24,16 +26,26 @@ static char *read_file(const char *path, size_t *out_len) {
     return buf;
 }
 
+/* Cap maximum nodes to prevent unbounded growth */
+#define AST_MAX_NODES 65536
+
 static void ast_add_node(ast_file_t *f, ast_node_t *node) {
+    if (f->count >= AST_MAX_NODES) return;
     if (f->count >= f->capacity) {
-        f->capacity = f->capacity ? f->capacity * 2 : 64;
-        f->nodes = realloc(f->nodes, f->capacity * sizeof(ast_node_t));
+        int newcap = f->capacity ? f->capacity * 2 : 64;
+        if (newcap > AST_MAX_NODES) newcap = AST_MAX_NODES;
+        ast_node_t *tmp = realloc(f->nodes, newcap * sizeof(ast_node_t));
+        if (!tmp) return;
+        f->nodes = tmp;
+        f->capacity = newcap;
     }
     f->nodes[f->count++] = *node;
 }
 
 static void ast_add_include(ast_file_t *f, const char *inc) {
-    f->includes = realloc(f->includes, (f->include_count + 1) * sizeof(char *));
+    char **tmp = realloc(f->includes, (f->include_count + 1) * sizeof(char *));
+    if (!tmp) return;
+    f->includes = tmp;
     f->includes[f->include_count++] = strdup(inc);
 }
 
@@ -94,7 +106,9 @@ static char *extract_ident(const char *p) {
     while (is_ident_char(*p)) p++;
     if (p == start) return NULL;
     int len = (int)(p - start);
+    if (len > 4096) len = 4096; /* cap identifier length */
     char *s = malloc(len + 1);
+    if (!s) return NULL;
     memcpy(s, start, len);
     s[len] = '\0';
     return s;
@@ -532,7 +546,9 @@ ast_project_t *ast_introspect(const char *project_dir) {
         ast_file_t *af = ast_parse_file(path);
         if (!af) continue;
 
-        proj->files = realloc(proj->files, (proj->file_count + 1) * sizeof(ast_file_t *));
+        ast_file_t **tmp = realloc(proj->files, (proj->file_count + 1) * sizeof(ast_file_t *));
+        if (!tmp) { ast_free_file(af); continue; }
+        proj->files = tmp;
         proj->files[proj->file_count++] = af;
 
         proj->total_lines += af->total_lines;

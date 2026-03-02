@@ -58,7 +58,19 @@ void  conv_add_tool_result(conversation_t *c, const char *tool_id,
                            const char *result, bool is_error);
 void  conv_add_assistant_raw(conversation_t *c, parsed_response_t *resp);
 
+void  conv_pop_last(conversation_t *c);
+
+/* Trim old tool results to keep conversation under budget.
+   Keeps last `keep_recent` messages intact, truncates tool_result
+   text in older messages to max_chars. */
+void  conv_trim_old_results(conversation_t *c, int keep_recent, int max_chars);
+
 char *llm_build_request(conversation_t *c, const char *model, int max_tokens);
+
+/* Semantic-aware request builder: uses BM25+TF-IDF to select relevant tools
+   based on the latest user query, reducing request size and improving routing. */
+char *llm_build_request_semantic(conversation_t *c, const char *model,
+                                  int max_tokens, const char *query_hint);
 
 /* Streaming API call. Calls text_cb with text deltas in real-time.
  * Returns accumulated result. Caller must json_free_response(&result.parsed). */

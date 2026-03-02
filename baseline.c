@@ -178,6 +178,7 @@ bool baseline_start(const char *model, const char *mode) {
     if (parent && parent[0]) {
         snprintf(g_baseline.parent_instance_id,
                  sizeof(g_baseline.parent_instance_id), "%s", parent);
+        sanitize_token(g_baseline.parent_instance_id);
     } else {
         g_baseline.parent_instance_id[0] = '\0';
     }
@@ -651,6 +652,13 @@ int baseline_serve_http(int port, const char *default_instance_filter) {
         }
         req[nr] = '\0';
 
+        /* Reject oversized requests (max 64KB) */
+        if (nr > 65536) {
+            send_response(client_fd, "413 Payload Too Large", "text/plain", "request too large\n");
+            close(client_fd);
+            continue;
+        }
+
         char method[16] = {0};
         char uri[2048] = {0};
         if (sscanf(req, "%15s %2047s", method, uri) != 2) {
@@ -668,6 +676,14 @@ int baseline_serve_http(int port, const char *default_instance_filter) {
         char path[1024];
         char instance_filter[256];
         split_path(uri, path, sizeof(path));
+
+        /* Reject directory traversal attempts */
+        if (strstr(path, "..") != NULL) {
+            send_response(client_fd, "400 Bad Request", "text/plain", "invalid path\n");
+            close(client_fd);
+            continue;
+        }
+
         resolve_instance_filter(uri, default_instance_filter,
                                 instance_filter, sizeof(instance_filter));
 

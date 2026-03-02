@@ -12,6 +12,7 @@
 #define SWARM_MAX_OUTPUT    (256 * 1024)
 #define SWARM_LABEL_LEN     128
 #define SWARM_GROUP_NAME_LEN 64
+#define SWARM_MAX_DEPTH     4   /* max nesting depth for hierarchical swarms */
 
 typedef enum {
     SWARM_PENDING,
