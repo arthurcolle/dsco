@@ -4,6 +4,38 @@
 #include <stdio.h>
 #include <ctype.h>
 
+/* ── Safe allocation wrappers ──────────────────────────────────────────── */
+
+void *safe_malloc(size_t size) {
+    if (size == 0) size = 1;
+    void *p = malloc(size);
+    if (!p) {
+        fprintf(stderr, "dsco: fatal: malloc(%zu) failed\n", size);
+        abort();
+    }
+    return p;
+}
+
+void *safe_realloc(void *ptr, size_t size) {
+    if (size == 0) size = 1;
+    void *p = realloc(ptr, size);
+    if (!p) {
+        fprintf(stderr, "dsco: fatal: realloc(%zu) failed\n", size);
+        abort();
+    }
+    return p;
+}
+
+char *safe_strdup(const char *s) {
+    if (!s) return NULL;
+    char *p = strdup(s);
+    if (!p) {
+        fprintf(stderr, "dsco: fatal: strdup failed\n");
+        abort();
+    }
+    return p;
+}
+
 /* ── jbuf: dynamic string builder ──────────────────────────────────────── */
 
 void jbuf_init(jbuf_t *b, size_t cap) {
@@ -26,11 +58,11 @@ void jbuf_reset(jbuf_t *b) {
 
 static void jbuf_grow(jbuf_t *b, size_t need) {
     if (b->len + need + 1 <= b->cap) return;
+    /* Guard against size_t overflow */
     size_t newcap = b->cap * 2;
+    if (newcap < b->cap) newcap = b->len + need + 1; /* overflow: use exact */
     if (newcap < b->len + need + 1) newcap = b->len + need + 1;
-    char *p = realloc(b->data, newcap);
-    if (!p) { fprintf(stderr, "dsco: out of memory\n"); exit(1); }
-    b->data = p;
+    b->data = safe_realloc(b->data, newcap);
     b->cap = newcap;
 }
 
@@ -310,7 +342,8 @@ bool json_parse_response(const char *json, parsed_response_t *out) {
     vp++;
 
     int cap = 8;
-    out->blocks = calloc(cap, sizeof(content_block_t));
+    out->blocks = safe_malloc(cap * sizeof(content_block_t));
+    memset(out->blocks, 0, cap * sizeof(content_block_t));
     out->count = 0;
 
     vp = skip_ws(vp);
@@ -318,7 +351,7 @@ bool json_parse_response(const char *json, parsed_response_t *out) {
         if (*vp == '{') {
             if (out->count >= cap) {
                 cap *= 2;
-                out->blocks = realloc(out->blocks, cap * sizeof(content_block_t));
+                out->blocks = safe_realloc(out->blocks, cap * sizeof(content_block_t));
             }
             out->blocks[out->count] = parse_content_block(vp);
             out->count++;

@@ -103,6 +103,7 @@ void sha256_final(sha256_ctx_t *ctx, uint8_t hash[32]) {
 }
 
 void sha256_hex(const uint8_t *data, size_t len, char hex[65]) {
+    if (!data || !hex) { if (hex) hex[0] = '\0'; return; }
     sha256_ctx_t ctx;
     uint8_t hash[32];
     sha256_init(&ctx);
@@ -200,6 +201,7 @@ void md5_final(md5_ctx_t *ctx, uint8_t hash[16]) {
 }
 
 void md5_hex(const uint8_t *data, size_t len, char hex[33]) {
+    if (!data || !hex) { if (hex) hex[0] = '\0'; return; }
     md5_ctx_t ctx;
     uint8_t hash[16];
     md5_init(&ctx);
@@ -215,6 +217,8 @@ void md5_hex(const uint8_t *data, size_t len, char hex[33]) {
 void hmac_sha256(const uint8_t *key, size_t key_len,
                  const uint8_t *data, size_t data_len,
                  uint8_t out[32]) {
+    if (!key || !data || !out) { if (out) memset(out, 0, 32); return; }
+    if (key_len > 1048576) { memset(out, 0, 32); return; } /* reject keys > 1MB */
     uint8_t k_pad[64];
     uint8_t k_hash[32];
 
@@ -252,6 +256,8 @@ void hmac_sha256(const uint8_t *key, size_t key_len,
 void hmac_sha256_hex(const uint8_t *key, size_t key_len,
                      const uint8_t *data, size_t data_len,
                      char hex[65]) {
+    if (!hex) return;
+    if (!key || !data) { hex[0] = '\0'; return; }
     uint8_t mac[32];
     hmac_sha256(key, key_len, data, data_len, mac);
     hex_encode(mac, 32, hex);

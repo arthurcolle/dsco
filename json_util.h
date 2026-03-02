@@ -11,6 +11,11 @@ typedef struct {
     size_t cap;
 } jbuf_t;
 
+/* Safe allocation helpers — abort on OOM rather than corrupt state */
+void  *safe_malloc(size_t size);
+void  *safe_realloc(void *ptr, size_t size);
+char  *safe_strdup(const char *s);
+
 void   jbuf_init(jbuf_t *b, size_t initial_cap);
 void   jbuf_free(jbuf_t *b);
 void   jbuf_reset(jbuf_t *b);

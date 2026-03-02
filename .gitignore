@@ -4,3 +4,4 @@ dsco
 *.swp
 *.tmp
 baseline.db
+.dsco/
