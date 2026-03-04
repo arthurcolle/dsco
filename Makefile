@@ -3,7 +3,14 @@ GIT_HASH := $(shell git rev-parse --short HEAD 2>/dev/null || echo "unknown")
 BUILD_DATE := $(shell date -u +%Y-%m-%dT%H:%M:%SZ)
 UNAME_S := $(shell uname -s)
 
+# Directories
+SRC_DIR = src
+INC_DIR = include
+TEST_DIR = tests
+BUILD_DIR ?= build
+
 BASE_CFLAGS = -Wall -Wextra -O2 -std=c11 -D_POSIX_C_SOURCE=200809L \
+	-I$(INC_DIR) \
 	-DBUILD_DATE='"$(BUILD_DATE)"' -DGIT_HASH='"$(GIT_HASH)"'
 CFLAGS ?= $(BASE_CFLAGS)
 LDFLAGS ?=
@@ -11,10 +18,17 @@ LDLIBS ?= -lcurl -lsqlite3 -ldl -lm
 
 TARGET = dsco
 DEBUG_TARGET = $(TARGET)-debug
-SRCS = main.c agent.c llm.c tools.c json_util.c ast.c swarm.c tui.c md.c baseline.c setup.c crypto.c eval.c pipeline.c plugin.c semantic.c ipc.c mcp.c provider.c integrations.c error.c trace.c output_guard.c
-TEST_SRCS = test.c json_util.c llm.c tools.c ast.c swarm.c tui.c md.c baseline.c setup.c crypto.c eval.c pipeline.c plugin.c semantic.c ipc.c mcp.c provider.c integrations.c error.c trace.c output_guard.c
 
-BUILD_DIR ?= build
+SRC_NAMES = main.c agent.c llm.c tools.c json_util.c ast.c swarm.c tui.c \
+	md.c baseline.c setup.c crypto.c eval.c pipeline.c plugin.c \
+	semantic.c ipc.c mcp.c provider.c integrations.c error.c trace.c \
+	output_guard.c
+TEST_SRC_NAMES = test.c
+
+SRCS = $(addprefix $(SRC_DIR)/, $(SRC_NAMES))
+# Test links against all src objects except main.c and agent.c
+LIB_SRCS = $(filter-out $(SRC_DIR)/main.c $(SRC_DIR)/agent.c, $(SRCS))
+
 OBJ_DIR := $(BUILD_DIR)/obj
 DEBUG_OBJ_DIR := $(BUILD_DIR)/obj-debug
 TEST_OBJ_DIR := $(BUILD_DIR)/test
@@ -23,13 +37,14 @@ UBSAN_OBJ_DIR := $(BUILD_DIR)/ubsan
 ASAN_TEST_OBJ_DIR := $(BUILD_DIR)/asan-test
 UBSAN_TEST_OBJ_DIR := $(BUILD_DIR)/ubsan-test
 
-OBJS = $(SRCS:%.c=$(OBJ_DIR)/%.o)
-TEST_OBJS = $(TEST_SRCS:%.c=$(TEST_OBJ_DIR)/%.o)
-DEBUG_OBJS = $(SRCS:%.c=$(DEBUG_OBJ_DIR)/%.o)
-ASAN_OBJS = $(SRCS:%.c=$(ASAN_OBJ_DIR)/%.o)
-UBSAN_OBJS = $(SRCS:%.c=$(UBSAN_OBJ_DIR)/%.o)
-ASAN_TEST_OBJS = $(TEST_SRCS:%.c=$(ASAN_TEST_OBJ_DIR)/%.o)
-UBSAN_TEST_OBJS = $(TEST_SRCS:%.c=$(UBSAN_TEST_OBJ_DIR)/%.o)
+OBJS = $(SRC_NAMES:%.c=$(OBJ_DIR)/%.o)
+LIB_OBJS = $(filter-out $(OBJ_DIR)/main.o $(OBJ_DIR)/agent.o, $(OBJS))
+TEST_OBJS = $(TEST_SRC_NAMES:%.c=$(TEST_OBJ_DIR)/%.o) $(LIB_OBJS:$(OBJ_DIR)/%=$(TEST_OBJ_DIR)/%)
+DEBUG_OBJS = $(SRC_NAMES:%.c=$(DEBUG_OBJ_DIR)/%.o)
+ASAN_OBJS = $(SRC_NAMES:%.c=$(ASAN_OBJ_DIR)/%.o)
+UBSAN_OBJS = $(SRC_NAMES:%.c=$(UBSAN_OBJ_DIR)/%.o)
+ASAN_TEST_OBJS = $(TEST_SRC_NAMES:%.c=$(ASAN_TEST_OBJ_DIR)/%.o) $(LIB_OBJS:$(OBJ_DIR)/%=$(ASAN_TEST_OBJ_DIR)/%)
+UBSAN_TEST_OBJS = $(TEST_SRC_NAMES:%.c=$(UBSAN_TEST_OBJ_DIR)/%.o) $(LIB_OBJS:$(OBJ_DIR)/%=$(UBSAN_TEST_OBJ_DIR)/%)
 
 ASAN_CFLAGS = $(BASE_CFLAGS) -O1 -g -fno-omit-frame-pointer -fsanitize=address
 ASAN_LDFLAGS = -fsanitize=address
@@ -61,25 +76,36 @@ $(DEBUG_TARGET): $(DEBUG_OBJS)
 $(TARGET): $(OBJS)
 	$(CC) $(CFLAGS) -o $@ $^ $(LDFLAGS) $(LDLIBS)
 
-$(OBJ_DIR)/%.o: %.c | $(OBJ_DIR)
+# Source compilation rules
+$(OBJ_DIR)/%.o: $(SRC_DIR)/%.c | $(OBJ_DIR)
 	$(CC) $(CFLAGS) -c -o $@ $<
 
-$(DEBUG_OBJ_DIR)/%.o: %.c | $(DEBUG_OBJ_DIR)
+$(DEBUG_OBJ_DIR)/%.o: $(SRC_DIR)/%.c | $(DEBUG_OBJ_DIR)
 	$(CC) $(DEBUG_CFLAGS) -c -o $@ $<
 
-$(TEST_OBJ_DIR)/%.o: %.c | $(TEST_OBJ_DIR)
-	$(CC) $(CFLAGS) -c -o $@ $<
-
-$(ASAN_OBJ_DIR)/%.o: %.c | $(ASAN_OBJ_DIR)
+$(ASAN_OBJ_DIR)/%.o: $(SRC_DIR)/%.c | $(ASAN_OBJ_DIR)
 	$(CC) $(ASAN_CFLAGS) -c -o $@ $<
 
-$(UBSAN_OBJ_DIR)/%.o: %.c | $(UBSAN_OBJ_DIR)
+$(UBSAN_OBJ_DIR)/%.o: $(SRC_DIR)/%.c | $(UBSAN_OBJ_DIR)
 	$(CC) $(UBSAN_CFLAGS) -c -o $@ $<
 
-$(ASAN_TEST_OBJ_DIR)/%.o: %.c | $(ASAN_TEST_OBJ_DIR)
+# Test compilation rules — test sources from tests/, lib sources from src/
+$(TEST_OBJ_DIR)/test.o: $(TEST_DIR)/test.c | $(TEST_OBJ_DIR)
+	$(CC) $(CFLAGS) -c -o $@ $<
+
+$(TEST_OBJ_DIR)/%.o: $(SRC_DIR)/%.c | $(TEST_OBJ_DIR)
+	$(CC) $(CFLAGS) -c -o $@ $<
+
+$(ASAN_TEST_OBJ_DIR)/test.o: $(TEST_DIR)/test.c | $(ASAN_TEST_OBJ_DIR)
 	$(CC) $(ASAN_CFLAGS) -c -o $@ $<
 
-$(UBSAN_TEST_OBJ_DIR)/%.o: %.c | $(UBSAN_TEST_OBJ_DIR)
+$(ASAN_TEST_OBJ_DIR)/%.o: $(SRC_DIR)/%.c | $(ASAN_TEST_OBJ_DIR)
+	$(CC) $(ASAN_CFLAGS) -c -o $@ $<
+
+$(UBSAN_TEST_OBJ_DIR)/test.o: $(TEST_DIR)/test.c | $(UBSAN_TEST_OBJ_DIR)
+	$(CC) $(UBSAN_CFLAGS) -c -o $@ $<
+
+$(UBSAN_TEST_OBJ_DIR)/%.o: $(SRC_DIR)/%.c | $(UBSAN_TEST_OBJ_DIR)
 	$(CC) $(UBSAN_CFLAGS) -c -o $@ $<
 
 $(OBJ_DIR) $(DEBUG_OBJ_DIR) $(TEST_OBJ_DIR) $(ASAN_OBJ_DIR) $(UBSAN_OBJ_DIR) $(ASAN_TEST_OBJ_DIR) $(UBSAN_TEST_OBJ_DIR):
@@ -124,7 +150,7 @@ clang-tidy:
 		echo "clang-tidy not found" >&2; \
 		exit 1; \
 	fi
-	clang-tidy $(SRCS) -- -I. -std=c11 -D_POSIX_C_SOURCE=200809L
+	clang-tidy $(SRCS) -- -I$(INC_DIR) -std=c11 -D_POSIX_C_SOURCE=200809L
 
 cppcheck:
 	@if ! command -v cppcheck >/dev/null 2>&1; then \
@@ -136,7 +162,8 @@ cppcheck:
 		--error-exitcode=1 \
 		--inline-suppr \
 		--suppress=missingIncludeSystem \
-		$(SRCS) *.h
+		-I$(INC_DIR) \
+		$(SRCS) $(INC_DIR)/*.h
 
 static-analysis: clang-tidy cppcheck
 
