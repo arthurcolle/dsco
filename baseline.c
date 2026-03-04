@@ -589,6 +589,71 @@ static void send_response(int fd, const char *status, const char *ctype, const c
     if (body_len > 0) send_all(fd, body, body_len);
 }
 
+static const char *guess_mime(const char *path) {
+    const char *dot = strrchr(path, '.');
+    if (!dot) return "application/octet-stream";
+    if (strcmp(dot, ".html") == 0 || strcmp(dot, ".htm") == 0) return "text/html";
+    if (strcmp(dot, ".css") == 0) return "text/css";
+    if (strcmp(dot, ".js") == 0) return "application/javascript";
+    if (strcmp(dot, ".json") == 0) return "application/json";
+    if (strcmp(dot, ".png") == 0) return "image/png";
+    if (strcmp(dot, ".jpg") == 0 || strcmp(dot, ".jpeg") == 0) return "image/jpeg";
+    if (strcmp(dot, ".svg") == 0) return "image/svg+xml";
+    if (strcmp(dot, ".ico") == 0) return "image/x-icon";
+    if (strcmp(dot, ".woff2") == 0) return "font/woff2";
+    if (strcmp(dot, ".woff") == 0) return "font/woff";
+    return "application/octet-stream";
+}
+
+static void serve_static_file(int fd, const char *filepath) {
+    /* Path traversal protection */
+    if (strstr(filepath, "..") != NULL || filepath[0] == '/') {
+        send_response(fd, "403 Forbidden", "text/plain", "forbidden\n");
+        return;
+    }
+
+    FILE *f = fopen(filepath, "rb");
+    if (!f) {
+        send_response(fd, "404 Not Found", "text/plain", "not found\n");
+        return;
+    }
+
+    fseek(f, 0, SEEK_END);
+    long fsize = ftell(f);
+    fseek(f, 0, SEEK_SET);
+
+    if (fsize < 0 || fsize > 50 * 1024 * 1024) { /* 50MB limit */
+        fclose(f);
+        send_response(fd, "413 Payload Too Large", "text/plain", "file too large\n");
+        return;
+    }
+
+    char *buf = malloc((size_t)fsize);
+    if (!buf) {
+        fclose(f);
+        send_response(fd, "500 Internal Server Error", "text/plain", "out of memory\n");
+        return;
+    }
+
+    size_t nread = fread(buf, 1, (size_t)fsize, f);
+    fclose(f);
+
+    const char *mime = guess_mime(filepath);
+    char hdr[512];
+    int n = snprintf(hdr, sizeof(hdr),
+                     "HTTP/1.1 200 OK\r\n"
+                     "Content-Type: %s; charset=utf-8\r\n"
+                     "Content-Length: %zu\r\n"
+                     "Cache-Control: no-store\r\n"
+                     "Connection: close\r\n\r\n",
+                     mime, nread);
+    if (n > 0) {
+        send_all(fd, hdr, (size_t)n);
+        send_all(fd, buf, nread);
+    }
+    free(buf);
+}
+
 int baseline_serve_http(int port, const char *default_instance_filter) {
     if (!g_baseline.ready || !g_baseline.db) {
         return -1;
@@ -641,8 +706,15 @@ int baseline_serve_http(int port, const char *default_instance_filter) {
         int client_fd = accept(server_fd, NULL, NULL);
         if (client_fd < 0) {
             if (errno == EINTR) break;
+            usleep(10000);  /* avoid busy-spin on persistent accept errors */
             continue;
         }
+
+        struct timeval rcv_timeout;
+        rcv_timeout.tv_sec = 2;
+        rcv_timeout.tv_usec = 0;
+        setsockopt(client_fd, SOL_SOCKET, SO_RCVTIMEO,
+                   &rcv_timeout, sizeof(rcv_timeout));
 
         char req[8192];
         ssize_t nr = recv(client_fd, req, sizeof(req) - 1, 0);
@@ -707,6 +779,12 @@ int baseline_serve_http(int port, const char *default_instance_filter) {
             jbuf_free(&json);
         } else if (strcmp(path, "/health") == 0) {
             send_response(client_fd, "200 OK", "text/plain", "ok\n");
+        } else if (strcmp(path, "/freight") == 0 || strcmp(path, "/freight/") == 0) {
+            serve_static_file(client_fd, "www/freight.html");
+        } else if (strncmp(path, "/www/", 5) == 0) {
+            /* Static file serving from www/ directory */
+            const char *rel = path + 1; /* skip leading / */
+            serve_static_file(client_fd, rel);
         } else {
             send_response(client_fd, "404 Not Found", "text/plain", "not found\n");
         }
@@ -717,4 +795,258 @@ int baseline_serve_http(int port, const char *default_instance_filter) {
     close(server_fd);
     baseline_log("server", "timeline_server_stop", NULL, NULL);
     return 0;
+}
+
+/* ── Trace span system ────────────────────────────────────────────────── */
+
+static bool ensure_trace_schema(void) {
+    if (!g_baseline.ready || !g_baseline.db) return false;
+
+    const char *schema =
+        "CREATE TABLE IF NOT EXISTS trace_spans ("
+        "  span_id TEXT PRIMARY KEY,"
+        "  trace_id TEXT NOT NULL,"
+        "  parent_span TEXT,"
+        "  name TEXT NOT NULL,"
+        "  start_epoch REAL NOT NULL,"
+        "  end_epoch REAL,"
+        "  status TEXT DEFAULT 'running',"
+        "  metadata_json TEXT"
+        ");"
+        "CREATE INDEX IF NOT EXISTS idx_trace_spans_trace ON trace_spans(trace_id, start_epoch);"
+        "CREATE INDEX IF NOT EXISTS idx_trace_spans_time ON trace_spans(start_epoch DESC);";
+
+    return exec_sql(schema);
+}
+
+static double trace_now_epoch(void) {
+    struct timeval tv;
+    gettimeofday(&tv, NULL);
+    return tv.tv_sec + tv.tv_usec / 1e6;
+}
+
+void trace_new_id(char *out, size_t out_len) {
+    /* Simple UUID v4 generator using /dev/urandom */
+    unsigned char bytes[16];
+    FILE *f = fopen("/dev/urandom", "rb");
+    if (f) {
+        size_t n = fread(bytes, 1, 16, f);
+        fclose(f);
+        if (n < 16) {
+            /* Fallback: use time + pid */
+            struct timeval tv;
+            gettimeofday(&tv, NULL);
+            memset(bytes, 0, 16);
+            memcpy(bytes, &tv, sizeof(tv) < 16 ? sizeof(tv) : 16);
+            bytes[0] ^= (unsigned char)getpid();
+        }
+    } else {
+        struct timeval tv;
+        gettimeofday(&tv, NULL);
+        memset(bytes, 0, 16);
+        memcpy(bytes, &tv, sizeof(tv) < 16 ? sizeof(tv) : 16);
+    }
+    /* Set version 4 and variant bits */
+    bytes[6] = (bytes[6] & 0x0F) | 0x40;
+    bytes[8] = (bytes[8] & 0x3F) | 0x80;
+
+    snprintf(out, out_len,
+             "%02x%02x%02x%02x-%02x%02x-%02x%02x-%02x%02x-%02x%02x%02x%02x%02x%02x",
+             bytes[0], bytes[1], bytes[2], bytes[3],
+             bytes[4], bytes[5], bytes[6], bytes[7],
+             bytes[8], bytes[9], bytes[10], bytes[11],
+             bytes[12], bytes[13], bytes[14], bytes[15]);
+}
+
+bool trace_span_begin(const char *trace_id, const char *name,
+                      const char *parent_span, char *span_id_out) {
+    if (!g_baseline.ready || !g_baseline.db) return false;
+
+    static bool schema_ok = false;
+    if (!schema_ok) {
+        schema_ok = ensure_trace_schema();
+        if (!schema_ok) return false;
+    }
+
+    trace_new_id(span_id_out, 37);
+
+    sqlite3_stmt *st = NULL;
+    const char *sql =
+        "INSERT INTO trace_spans(span_id, trace_id, parent_span, name, start_epoch)"
+        " VALUES(?1, ?2, ?3, ?4, ?5);";
+
+    if (sqlite3_prepare_v2(g_baseline.db, sql, -1, &st, NULL) != SQLITE_OK)
+        return false;
+
+    sqlite3_bind_text(st, 1, span_id_out, -1, SQLITE_TRANSIENT);
+    sqlite3_bind_text(st, 2, trace_id, -1, SQLITE_TRANSIENT);
+    if (parent_span && parent_span[0])
+        sqlite3_bind_text(st, 3, parent_span, -1, SQLITE_TRANSIENT);
+    else
+        sqlite3_bind_null(st, 3);
+    sqlite3_bind_text(st, 4, name, -1, SQLITE_TRANSIENT);
+    sqlite3_bind_double(st, 5, trace_now_epoch());
+
+    bool ok = (sqlite3_step(st) == SQLITE_DONE);
+    sqlite3_finalize(st);
+    return ok;
+}
+
+bool trace_span_end(const char *span_id, const char *status,
+                    const char *metadata_json) {
+    if (!g_baseline.ready || !g_baseline.db) return false;
+
+    sqlite3_stmt *st = NULL;
+    const char *sql =
+        "UPDATE trace_spans SET end_epoch = ?1, status = ?2, metadata_json = ?3"
+        " WHERE span_id = ?4;";
+
+    if (sqlite3_prepare_v2(g_baseline.db, sql, -1, &st, NULL) != SQLITE_OK)
+        return false;
+
+    sqlite3_bind_double(st, 1, trace_now_epoch());
+    sqlite3_bind_text(st, 2, status ? status : "ok", -1, SQLITE_TRANSIENT);
+    if (metadata_json)
+        sqlite3_bind_text(st, 3, metadata_json, -1, SQLITE_TRANSIENT);
+    else
+        sqlite3_bind_null(st, 3);
+    sqlite3_bind_text(st, 4, span_id, -1, SQLITE_TRANSIENT);
+
+    bool ok = (sqlite3_step(st) == SQLITE_DONE);
+    sqlite3_finalize(st);
+    return ok;
+}
+
+void trace_query_recent(int limit) {
+    if (!g_baseline.ready || !g_baseline.db) {
+        fprintf(stderr, "  trace: baseline not initialized\n");
+        return;
+    }
+
+    ensure_trace_schema();
+
+    sqlite3_stmt *st = NULL;
+    const char *sql =
+        "SELECT trace_id, name, start_epoch, "
+        "  COALESCE(end_epoch, 0) as end_epoch, status, "
+        "  COUNT(*) OVER (PARTITION BY trace_id) as span_count "
+        "FROM trace_spans "
+        "WHERE parent_span IS NULL "
+        "ORDER BY start_epoch DESC LIMIT ?1;";
+
+    if (sqlite3_prepare_v2(g_baseline.db, sql, -1, &st, NULL) != SQLITE_OK) {
+        fprintf(stderr, "  trace: query failed: %s\n", sqlite3_errmsg(g_baseline.db));
+        return;
+    }
+    sqlite3_bind_int(st, 1, limit > 0 ? limit : 10);
+
+    fprintf(stderr, "\n  \033[1mRecent Traces\033[0m\n");
+    fprintf(stderr, "  \033[2m%-36s  %-20s  %8s  %6s  %s\033[0m\n",
+            "TRACE_ID", "NAME", "DUR(ms)", "SPANS", "STATUS");
+
+    int count = 0;
+    while (sqlite3_step(st) == SQLITE_ROW) {
+        const char *trace_id = (const char *)sqlite3_column_text(st, 0);
+        const char *name = (const char *)sqlite3_column_text(st, 1);
+        double start = sqlite3_column_double(st, 2);
+        double end = sqlite3_column_double(st, 3);
+        const char *status = (const char *)sqlite3_column_text(st, 4);
+        int spans = sqlite3_column_int(st, 5);
+
+        double dur_ms = end > 0 ? (end - start) * 1000.0 : -1;
+        if (dur_ms >= 0) {
+            fprintf(stderr, "  %-36s  %-20s  %7.0fms  %6d  %s\n",
+                    trace_id, name, dur_ms, spans, status);
+        } else {
+            fprintf(stderr, "  %-36s  %-20s  %8s  %6d  %s\n",
+                    trace_id, name, "running", spans, status);
+        }
+        count++;
+    }
+    sqlite3_finalize(st);
+
+    if (count == 0) {
+        fprintf(stderr, "  \033[2mno traces recorded yet\033[0m\n");
+    }
+    fprintf(stderr, "\n");
+}
+
+void trace_print_waterfall(const char *trace_id) {
+    if (!g_baseline.ready || !g_baseline.db || !trace_id) return;
+
+    sqlite3_stmt *st = NULL;
+    const char *sql =
+        "SELECT span_id, parent_span, name, start_epoch, "
+        "  COALESCE(end_epoch, ?2) as end_epoch, status "
+        "FROM trace_spans WHERE trace_id = ?1 "
+        "ORDER BY start_epoch ASC;";
+
+    if (sqlite3_prepare_v2(g_baseline.db, sql, -1, &st, NULL) != SQLITE_OK)
+        return;
+
+    sqlite3_bind_text(st, 1, trace_id, -1, SQLITE_TRANSIENT);
+    sqlite3_bind_double(st, 2, trace_now_epoch());
+
+    double min_start = 1e18, max_end = 0;
+    typedef struct { char name[128]; double start; double end; char status[16]; int depth; } span_row_t;
+    span_row_t rows[64];
+    int n = 0;
+
+    while (sqlite3_step(st) == SQLITE_ROW && n < 64) {
+        const char *parent = (const char *)sqlite3_column_text(st, 1);
+        const char *nm = (const char *)sqlite3_column_text(st, 2);
+        double s = sqlite3_column_double(st, 3);
+        double e = sqlite3_column_double(st, 4);
+        const char *stat = (const char *)sqlite3_column_text(st, 5);
+
+        snprintf(rows[n].name, sizeof(rows[n].name), "%s", nm ? nm : "?");
+        rows[n].start = s;
+        rows[n].end = e;
+        snprintf(rows[n].status, sizeof(rows[n].status), "%s", stat ? stat : "?");
+        rows[n].depth = (parent && parent[0]) ? 1 : 0;
+
+        if (s < min_start) min_start = s;
+        if (e > max_end) max_end = e;
+        n++;
+    }
+    sqlite3_finalize(st);
+
+    if (n == 0) {
+        fprintf(stderr, "  no spans found for trace %s\n", trace_id);
+        return;
+    }
+
+    double total = max_end - min_start;
+    if (total <= 0) total = 0.001;
+
+    int bar_width = 40;
+    fprintf(stderr, "\n  \033[1mTrace Waterfall: %s\033[0m\n", trace_id);
+    fprintf(stderr, "  \033[2m%-20s  %8s  [%*s]\033[0m\n",
+            "SPAN", "DUR(ms)", bar_width, "");
+
+    for (int i = 0; i < n; i++) {
+        double dur_ms = (rows[i].end - rows[i].start) * 1000.0;
+        int offset = (int)((rows[i].start - min_start) / total * bar_width);
+        int width = (int)((rows[i].end - rows[i].start) / total * bar_width);
+        if (width < 1) width = 1;
+        if (offset + width > bar_width) width = bar_width - offset;
+        if (offset < 0) offset = 0;
+
+        char bar[128];
+        memset(bar, ' ', bar_width);
+        bar[bar_width] = '\0';
+        const char *color = strcmp(rows[i].status, "error") == 0 ? "\033[31m" :
+                            strcmp(rows[i].status, "timeout") == 0 ? "\033[33m" :
+                            "\033[32m";
+        fprintf(stderr, "  %s%-20s  %7.0fms  [",
+                rows[i].depth ? "  " : "", rows[i].name, dur_ms);
+        for (int j = 0; j < bar_width; j++) {
+            if (j >= offset && j < offset + width)
+                fprintf(stderr, "%s\xe2\x96\x88\033[0m", color);
+            else
+                fprintf(stderr, "\033[2m\xc2\xb7\033[0m");
+        }
+        fprintf(stderr, "] %s\n", rows[i].status);
+    }
+    fprintf(stderr, "  \033[2mtotal: %.0fms\033[0m\n\n", total * 1000.0);
 }

@@ -1,0 +1,122 @@
+name: ci
+
+on:
+  pull_request:
+  push:
+    branches: [ main, master ]
+
+jobs:
+  build-and-test:
+    name: build-test (${{ matrix.os }}, ${{ matrix.cc }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            cc: gcc
+          - os: ubuntu-latest
+            cc: clang
+          - os: macos-latest
+            cc: clang
+    env:
+      CC: ${{ matrix.cc }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install dependencies (Ubuntu)
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libcurl4-openssl-dev libsqlite3-dev libreadline-dev
+
+      - name: Build
+        run: make -j2
+
+      - name: Unit tests
+        run: make test
+
+  sanitizers:
+    runs-on: ubuntu-latest
+    env:
+      CC: clang
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y clang libcurl4-openssl-dev libsqlite3-dev libreadline-dev
+
+      - name: ASan build and tests
+        run: |
+          make clean
+          make asan
+          make asan-test
+
+      - name: UBSan build and tests
+        run: |
+          make clean
+          make ubsan
+          make ubsan-test
+
+  static-analysis:
+    runs-on: ubuntu-latest
+    env:
+      CC: clang
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y clang clang-tidy cppcheck libcurl4-openssl-dev libsqlite3-dev libreadline-dev
+
+      - name: clang-tidy
+        run: make clang-tidy
+
+      - name: cppcheck
+        run: make cppcheck
+
+  lint-and-docs:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y clang-format
+
+      - name: Format check
+        run: make format-check
+
+      - name: Generated docs check
+        run: make docs-check
+
+  version-check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Version consistency
+        run: ./scripts/check_version_consistency.sh
+
+  pre-commit:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.x'
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y clang-format shellcheck
+          python3 -m pip install --upgrade pip pre-commit
+
+      - name: Run pre-commit
+        run: pre-commit run --all-files

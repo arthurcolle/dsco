@@ -1,0 +1,2135 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>DSCO Freight Terminal</title>
+<link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
+<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
+<style>
+/* ═══════════════════════════════════════════════════════════════════════════
+   DSCO FREIGHT TERMINAL — Design System
+   Dark industrial trading floor aesthetic
+   ═══════════════════════════════════════════════════════════════════════════ */
+
+@import url('https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@300;400;500;600;700&family=Outfit:wght@300;400;500;600;700;800&display=swap');
+
+:root {
+  /* ── Core Palette ── */
+  --bg-primary: #060a12;
+  --bg-secondary: #0c1220;
+  --bg-card: #111a2e;
+  --bg-card-hover: #152240;
+  --bg-input: #0a1020;
+  --border-primary: #1a2a48;
+  --border-active: #2a4070;
+  --border-glow: rgba(56, 139, 253, 0.25);
+
+  /* ── Text ── */
+  --text-primary: #c9d6e8;
+  --text-secondary: #6b7fa0;
+  --text-muted: #3d4f6f;
+  --text-bright: #e8f0fc;
+
+  /* ── Semantic ── */
+  --green: #00e09e;
+  --green-dim: rgba(0, 224, 158, 0.12);
+  --red: #ff4d6a;
+  --red-dim: rgba(255, 77, 106, 0.12);
+  --amber: #f0b429;
+  --amber-dim: rgba(240, 180, 41, 0.12);
+  --blue: #388bfd;
+  --blue-dim: rgba(56, 139, 253, 0.1);
+  --cyan: #22d3ee;
+  --purple: #a78bfa;
+
+  /* ── Vessel Class Colors ── */
+  --vc-vlcc: #a78bfa;
+  --vc-suezmax: #818cf8;
+  --vc-aframax: #22d3ee;
+  --vc-capesize: #ef4444;
+  --vc-panamax: #f97316;
+  --vc-supramax: #eab308;
+  --vc-handysize: #84cc16;
+  --vc-mr: #06b6d4;
+  --vc-lr1: #3b82f6;
+  --vc-lr2: #6366f1;
+  --vc-container: #10b981;
+  --vc-vlgc: #d946ef;
+  --vc-mgc: #ec4899;
+
+  /* ── Layout ── */
+  --sidebar-w: 220px;
+  --ticker-h: 36px;
+  --header-h: 52px;
+
+  /* ── Typography ── */
+  --font-data: 'JetBrains Mono', 'SF Mono', 'Fira Code', monospace;
+  --font-ui: 'Outfit', -apple-system, BlinkMacSystemFont, sans-serif;
+
+  /* ── Effects ── */
+  --shadow-card: 0 2px 12px rgba(0, 0, 0, 0.4), 0 0 1px rgba(56, 139, 253, 0.08);
+  --shadow-glow: 0 0 20px rgba(56, 139, 253, 0.15);
+  --transition-fast: 120ms ease;
+  --transition-med: 250ms ease;
+}
+
+*, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+html { font-size: 13px; }
+body {
+  font-family: var(--font-data);
+  background: var(--bg-primary);
+  color: var(--text-primary);
+  overflow: hidden;
+  height: 100vh;
+  -webkit-font-smoothing: antialiased;
+}
+
+/* ── Scrollbar ── */
+::-webkit-scrollbar { width: 6px; height: 6px; }
+::-webkit-scrollbar-track { background: transparent; }
+::-webkit-scrollbar-thumb { background: var(--border-primary); border-radius: 3px; }
+::-webkit-scrollbar-thumb:hover { background: var(--border-active); }
+
+/* ═══════════════════════════════════════════════════════════════════════════
+   LAYOUT
+   ═══════════════════════════════════════════════════════════════════════════ */
+
+#app {
+  display: grid;
+  grid-template-columns: var(--sidebar-w) 1fr;
+  grid-template-rows: var(--ticker-h) var(--header-h) 1fr;
+  grid-template-areas:
+    "ticker ticker"
+    "sidebar header"
+    "sidebar main";
+  height: 100vh;
+  overflow: hidden;
+}
+
+/* ── Ticker Bar ── */
+#ticker {
+  grid-area: ticker;
+  background: linear-gradient(90deg, var(--bg-secondary) 0%, #0e1628 50%, var(--bg-secondary) 100%);
+  border-bottom: 1px solid var(--border-primary);
+  display: flex;
+  align-items: center;
+  overflow: hidden;
+  position: relative;
+  z-index: 100;
+}
+
+#ticker::before {
+  content: '';
+  position: absolute;
+  left: 0; top: 0; bottom: 0;
+  width: 60px;
+  background: linear-gradient(90deg, var(--bg-secondary), transparent);
+  z-index: 2;
+  pointer-events: none;
+}
+
+#ticker::after {
+  content: '';
+  position: absolute;
+  right: 0; top: 0; bottom: 0;
+  width: 60px;
+  background: linear-gradient(-90deg, var(--bg-secondary), transparent);
+  z-index: 2;
+  pointer-events: none;
+}
+
+.ticker-track {
+  display: flex;
+  gap: 32px;
+  animation: tickerScroll 60s linear infinite;
+  white-space: nowrap;
+  padding: 0 20px;
+}
+
+@keyframes tickerScroll {
+  0% { transform: translateX(0); }
+  100% { transform: translateX(-50%); }
+}
+
+.ticker-item {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 11px;
+  letter-spacing: 0.02em;
+}
+
+.ticker-item .label {
+  color: var(--text-secondary);
+  font-weight: 600;
+  font-family: var(--font-ui);
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  font-size: 10px;
+}
+
+.ticker-item .value { color: var(--text-bright); font-weight: 500; }
+.ticker-item .change { font-weight: 600; font-size: 10px; }
+.ticker-item .change.up { color: var(--green); }
+.ticker-item .change.down { color: var(--red); }
+
+/* ── Sidebar ── */
+#sidebar {
+  grid-area: sidebar;
+  background: var(--bg-secondary);
+  border-right: 1px solid var(--border-primary);
+  display: flex;
+  flex-direction: column;
+  overflow-y: auto;
+  z-index: 50;
+}
+
+.sidebar-logo {
+  padding: 16px 18px 12px;
+  border-bottom: 1px solid var(--border-primary);
+}
+
+.sidebar-logo h1 {
+  font-family: var(--font-ui);
+  font-size: 18px;
+  font-weight: 800;
+  letter-spacing: -0.02em;
+  background: linear-gradient(135deg, var(--blue) 0%, var(--cyan) 60%, var(--green) 100%);
+  -webkit-background-clip: text;
+  -webkit-text-fill-color: transparent;
+  background-clip: text;
+  line-height: 1;
+}
+
+.sidebar-logo .subtitle {
+  font-family: var(--font-ui);
+  font-size: 9px;
+  color: var(--text-muted);
+  text-transform: uppercase;
+  letter-spacing: 0.12em;
+  margin-top: 4px;
+}
+
+.sidebar-nav {
+  flex: 1;
+  padding: 12px 8px;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.nav-section-label {
+  font-family: var(--font-ui);
+  font-size: 9px;
+  color: var(--text-muted);
+  text-transform: uppercase;
+  letter-spacing: 0.1em;
+  padding: 14px 12px 6px;
+  font-weight: 600;
+}
+
+.nav-item {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 9px 12px;
+  border-radius: 6px;
+  cursor: pointer;
+  transition: all var(--transition-fast);
+  font-family: var(--font-ui);
+  font-size: 12.5px;
+  font-weight: 500;
+  color: var(--text-secondary);
+  position: relative;
+  user-select: none;
+}
+
+.nav-item:hover {
+  background: rgba(56, 139, 253, 0.06);
+  color: var(--text-primary);
+}
+
+.nav-item.active {
+  background: var(--blue-dim);
+  color: var(--blue);
+}
+
+.nav-item.active::before {
+  content: '';
+  position: absolute;
+  left: 0; top: 6px; bottom: 6px;
+  width: 3px;
+  background: var(--blue);
+  border-radius: 0 3px 3px 0;
+}
+
+.nav-icon {
+  width: 18px;
+  height: 18px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 14px;
+  opacity: 0.7;
+}
+
+.nav-item.active .nav-icon { opacity: 1; }
+
+.sidebar-status {
+  padding: 14px 16px;
+  border-top: 1px solid var(--border-primary);
+  font-size: 10px;
+  color: var(--text-muted);
+}
+
+.sidebar-status .status-dot {
+  display: inline-block;
+  width: 6px; height: 6px;
+  border-radius: 50%;
+  background: var(--green);
+  margin-right: 6px;
+  animation: pulse 2s ease-in-out infinite;
+}
+
+@keyframes pulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.4; }
+}
+
+/* ── Header ── */
+#header {
+  grid-area: header;
+  background: var(--bg-secondary);
+  border-bottom: 1px solid var(--border-primary);
+  display: flex;
+  align-items: center;
+  padding: 0 20px;
+  gap: 16px;
+}
+
+#header .view-title {
+  font-family: var(--font-ui);
+  font-size: 16px;
+  font-weight: 700;
+  color: var(--text-bright);
+  letter-spacing: -0.01em;
+}
+
+#header .view-subtitle {
+  font-size: 11px;
+  color: var(--text-muted);
+}
+
+.header-right {
+  margin-left: auto;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+
+.header-clock {
+  font-size: 12px;
+  color: var(--text-secondary);
+  font-variant-numeric: tabular-nums;
+}
+
+.header-btn {
+  padding: 5px 10px;
+  border-radius: 5px;
+  background: var(--bg-card);
+  border: 1px solid var(--border-primary);
+  color: var(--text-secondary);
+  font-family: var(--font-ui);
+  font-size: 11px;
+  cursor: pointer;
+  transition: all var(--transition-fast);
+}
+
+.header-btn:hover {
+  border-color: var(--border-active);
+  color: var(--text-primary);
+}
+
+/* ── Main Content ── */
+#main {
+  grid-area: main;
+  overflow-y: auto;
+  overflow-x: hidden;
+  padding: 16px;
+  background: var(--bg-primary);
+}
+
+.view { display: none; }
+.view.active { display: block; }
+
+/* ═══════════════════════════════════════════════════════════════════════════
+   COMPONENT LIBRARY
+   ═══════════════════════════════════════════════════════════════════════════ */
+
+/* ── Cards ── */
+.card {
+  background: var(--bg-card);
+  border: 1px solid var(--border-primary);
+  border-radius: 8px;
+  padding: 16px;
+  box-shadow: var(--shadow-card);
+  transition: border-color var(--transition-med);
+}
+
+.card:hover { border-color: var(--border-active); }
+
+.card-title {
+  font-family: var(--font-ui);
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--text-muted);
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  margin-bottom: 10px;
+}
+
+.card-value {
+  font-size: 28px;
+  font-weight: 700;
+  color: var(--text-bright);
+  line-height: 1;
+  font-variant-numeric: tabular-nums;
+}
+
+.card-change {
+  font-size: 12px;
+  font-weight: 600;
+  margin-top: 4px;
+  font-variant-numeric: tabular-nums;
+}
+
+.card-change.up { color: var(--green); }
+.card-change.down { color: var(--red); }
+
+/* ── Grid Layouts ── */
+.grid-4 { display: grid; grid-template-columns: repeat(4, 1fr); gap: 12px; margin-bottom: 16px; }
+.grid-3 { display: grid; grid-template-columns: repeat(3, 1fr); gap: 12px; margin-bottom: 16px; }
+.grid-2 { display: grid; grid-template-columns: repeat(2, 1fr); gap: 12px; margin-bottom: 16px; }
+.grid-2-1 { display: grid; grid-template-columns: 2fr 1fr; gap: 12px; margin-bottom: 16px; }
+.grid-1-2 { display: grid; grid-template-columns: 1fr 2fr; gap: 12px; margin-bottom: 16px; }
+
+/* ── Tables ── */
+.data-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 11.5px;
+  font-variant-numeric: tabular-nums;
+}
+
+.data-table th {
+  font-family: var(--font-ui);
+  font-size: 10px;
+  font-weight: 600;
+  color: var(--text-muted);
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  padding: 8px 10px;
+  text-align: left;
+  border-bottom: 1px solid var(--border-primary);
+  position: sticky;
+  top: 0;
+  background: var(--bg-card);
+  z-index: 1;
+}
+
+.data-table th.r, .data-table td.r { text-align: right; }
+.data-table th.c, .data-table td.c { text-align: center; }
+
+.data-table td {
+  padding: 7px 10px;
+  border-bottom: 1px solid rgba(26, 42, 72, 0.5);
+  color: var(--text-primary);
+  transition: background var(--transition-fast);
+}
+
+.data-table tbody tr:hover td {
+  background: rgba(56, 139, 253, 0.04);
+}
+
+.data-table .route-id {
+  font-weight: 600;
+  color: var(--text-bright);
+}
+
+.data-table .rate { font-weight: 600; }
+.data-table .up { color: var(--green); }
+.data-table .down { color: var(--red); }
+.data-table .flat { color: var(--text-muted); }
+
+/* ── Sparkline Canvas ── */
+.sparkline {
+  width: 80px;
+  height: 24px;
+  display: inline-block;
+  vertical-align: middle;
+}
+
+/* ── Vessel Class Badges ── */
+.vc-badge {
+  display: inline-block;
+  padding: 2px 7px;
+  border-radius: 3px;
+  font-family: var(--font-ui);
+  font-size: 9px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+.vc-badge.vlcc { background: rgba(167, 139, 250, 0.15); color: var(--vc-vlcc); }
+.vc-badge.suezmax { background: rgba(129, 140, 248, 0.15); color: var(--vc-suezmax); }
+.vc-badge.aframax { background: rgba(34, 211, 238, 0.15); color: var(--vc-aframax); }
+.vc-badge.capesize { background: rgba(239, 68, 68, 0.15); color: var(--vc-capesize); }
+.vc-badge.panamax { background: rgba(249, 115, 22, 0.15); color: var(--vc-panamax); }
+.vc-badge.supramax { background: rgba(234, 179, 8, 0.15); color: var(--vc-supramax); }
+.vc-badge.handysize { background: rgba(132, 204, 22, 0.15); color: var(--vc-handysize); }
+.vc-badge.mr { background: rgba(6, 182, 212, 0.15); color: var(--vc-mr); }
+.vc-badge.lr1 { background: rgba(59, 130, 246, 0.15); color: var(--vc-lr1); }
+.vc-badge.lr2 { background: rgba(99, 102, 241, 0.15); color: var(--vc-lr2); }
+.vc-badge.container { background: rgba(16, 185, 129, 0.15); color: var(--vc-container); }
+.vc-badge.vlgc { background: rgba(217, 70, 239, 0.15); color: var(--vc-vlgc); }
+.vc-badge.mgc { background: rgba(236, 72, 153, 0.15); color: var(--vc-mgc); }
+
+/* ── Chokepoint Status ── */
+.status-indicator {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  font-size: 10px;
+  font-weight: 600;
+  font-family: var(--font-ui);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+.status-dot-lg {
+  width: 8px; height: 8px;
+  border-radius: 50%;
+}
+
+.status-open .status-dot-lg { background: var(--green); box-shadow: 0 0 6px var(--green); }
+.status-restricted .status-dot-lg { background: var(--amber); box-shadow: 0 0 6px var(--amber); }
+.status-elevated_risk .status-dot-lg { background: var(--red); box-shadow: 0 0 6px var(--red); }
+.status-closed .status-dot-lg { background: var(--red); box-shadow: 0 0 8px var(--red); }
+
+.status-open { color: var(--green); }
+.status-restricted { color: var(--amber); }
+.status-elevated_risk { color: var(--red); }
+.status-closed { color: var(--red); }
+
+/* ── Tabs ── */
+.tab-bar {
+  display: flex;
+  gap: 2px;
+  padding: 4px;
+  background: var(--bg-secondary);
+  border-radius: 8px;
+  margin-bottom: 14px;
+  border: 1px solid var(--border-primary);
+}
+
+.tab-btn {
+  padding: 7px 14px;
+  border-radius: 5px;
+  border: none;
+  background: transparent;
+  color: var(--text-secondary);
+  font-family: var(--font-ui);
+  font-size: 11px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: all var(--transition-fast);
+  white-space: nowrap;
+}
+
+.tab-btn:hover { color: var(--text-primary); background: rgba(255,255,255,0.03); }
+.tab-btn.active { background: var(--bg-card); color: var(--text-bright); box-shadow: 0 1px 4px rgba(0,0,0,0.3); }
+
+.tab-content { display: none; }
+.tab-content.active { display: block; }
+
+/* ── Chart Container ── */
+.chart-container {
+  position: relative;
+  height: 260px;
+  width: 100%;
+}
+
+.chart-container canvas {
+  width: 100% !important;
+  height: 100% !important;
+}
+
+/* ── Period Selector ── */
+.period-selector {
+  display: flex;
+  gap: 4px;
+  margin-bottom: 10px;
+}
+
+.period-btn {
+  padding: 3px 8px;
+  border-radius: 4px;
+  border: 1px solid var(--border-primary);
+  background: transparent;
+  color: var(--text-muted);
+  font-family: var(--font-data);
+  font-size: 10px;
+  cursor: pointer;
+  transition: all var(--transition-fast);
+}
+
+.period-btn:hover { border-color: var(--border-active); color: var(--text-secondary); }
+.period-btn.active { background: var(--blue-dim); border-color: var(--blue); color: var(--blue); }
+
+/* ── Heatmap Grid ── */
+.heatmap-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(100px, 1fr));
+  gap: 4px;
+}
+
+.heatmap-cell {
+  padding: 10px 8px;
+  border-radius: 4px;
+  text-align: center;
+  font-size: 10px;
+  cursor: pointer;
+  transition: transform var(--transition-fast);
+}
+
+.heatmap-cell:hover { transform: scale(1.04); }
+
+.heatmap-cell .hm-id {
+  font-weight: 700;
+  font-size: 11px;
+  margin-bottom: 2px;
+}
+
+.heatmap-cell .hm-val {
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.heatmap-cell .hm-chg { font-size: 9px; }
+
+/* ── News Feed ── */
+.news-feed {
+  max-height: 320px;
+  overflow-y: auto;
+}
+
+.news-item {
+  padding: 10px 12px;
+  border-bottom: 1px solid rgba(26, 42, 72, 0.4);
+  transition: background var(--transition-fast);
+  cursor: default;
+}
+
+.news-item:hover { background: rgba(56, 139, 253, 0.03); }
+
+.news-headline {
+  font-size: 12px;
+  color: var(--text-primary);
+  line-height: 1.4;
+}
+
+.news-meta {
+  font-size: 10px;
+  color: var(--text-muted);
+  margin-top: 3px;
+}
+
+.news-meta .source {
+  color: var(--blue);
+  font-weight: 600;
+}
+
+/* ── Map ── */
+#map-container {
+  height: calc(100vh - var(--ticker-h) - var(--header-h) - 32px);
+  border-radius: 8px;
+  overflow: hidden;
+  border: 1px solid var(--border-primary);
+}
+
+.leaflet-container { background: var(--bg-primary) !important; }
+
+.map-tooltip {
+  background: var(--bg-card) !important;
+  border: 1px solid var(--border-active) !important;
+  border-radius: 6px !important;
+  padding: 8px 12px !important;
+  font-family: var(--font-data) !important;
+  font-size: 11px !important;
+  color: var(--text-primary) !important;
+  box-shadow: var(--shadow-glow) !important;
+}
+
+.map-tooltip .tooltip-title {
+  font-family: var(--font-ui);
+  font-weight: 700;
+  color: var(--text-bright);
+  margin-bottom: 4px;
+}
+
+.map-tooltip .tooltip-rate { font-size: 14px; font-weight: 600; }
+
+.chokepoint-popup {
+  font-family: var(--font-data);
+  font-size: 12px;
+}
+
+.chokepoint-popup h3 {
+  font-family: var(--font-ui);
+  font-size: 14px;
+  margin-bottom: 6px;
+}
+
+/* ── Map Legend ── */
+.map-legend {
+  background: var(--bg-card) !important;
+  border: 1px solid var(--border-primary) !important;
+  border-radius: 8px !important;
+  padding: 12px !important;
+  font-family: var(--font-ui) !important;
+  font-size: 10px !important;
+  color: var(--text-primary) !important;
+  box-shadow: var(--shadow-card) !important;
+}
+
+.map-legend h4 {
+  font-size: 10px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--text-muted);
+  margin-bottom: 8px;
+}
+
+.map-legend-item {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 2px 0;
+  cursor: pointer;
+  opacity: 1;
+  transition: opacity var(--transition-fast);
+}
+
+.map-legend-item.hidden { opacity: 0.3; }
+
+.map-legend-item .legend-line {
+  width: 18px;
+  height: 3px;
+  border-radius: 2px;
+}
+
+/* ── Analytics ── */
+.correlation-cell {
+  width: 36px;
+  height: 36px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 9px;
+  font-weight: 600;
+  border-radius: 3px;
+}
+
+/* ── Detail Panel ── */
+.detail-overlay {
+  display: none;
+  position: fixed;
+  top: 0; right: 0; bottom: 0;
+  width: 440px;
+  background: var(--bg-secondary);
+  border-left: 1px solid var(--border-primary);
+  z-index: 200;
+  box-shadow: -4px 0 24px rgba(0, 0, 0, 0.5);
+  overflow-y: auto;
+  padding: 20px;
+}
+
+.detail-overlay.open { display: block; }
+
+.detail-close {
+  position: absolute;
+  top: 14px; right: 14px;
+  width: 28px; height: 28px;
+  border-radius: 6px;
+  border: 1px solid var(--border-primary);
+  background: var(--bg-card);
+  color: var(--text-secondary);
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 14px;
+  transition: all var(--transition-fast);
+}
+
+.detail-close:hover { border-color: var(--border-active); color: var(--text-primary); }
+
+/* ── Loading / Error ── */
+.loading-state {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  height: 200px;
+  color: var(--text-muted);
+  font-family: var(--font-ui);
+  font-size: 13px;
+}
+
+.spinner {
+  width: 20px; height: 20px;
+  border: 2px solid var(--border-primary);
+  border-top-color: var(--blue);
+  border-radius: 50%;
+  animation: spin 0.8s linear infinite;
+  margin-right: 10px;
+}
+
+@keyframes spin { to { transform: rotate(360deg); } }
+
+.error-state {
+  padding: 20px;
+  text-align: center;
+  color: var(--red);
+  font-family: var(--font-ui);
+  font-size: 12px;
+}
+
+/* ── Responsive ── */
+@media (max-width: 1200px) {
+  .grid-4 { grid-template-columns: repeat(2, 1fr); }
+}
+
+@media (max-width: 900px) {
+  :root { --sidebar-w: 60px; }
+  .nav-item span, .nav-section-label, .sidebar-logo .subtitle { display: none; }
+  .sidebar-logo h1 { font-size: 14px; }
+  .grid-4, .grid-3 { grid-template-columns: repeat(2, 1fr); }
+}
+
+/* ── Forward Curve ── */
+.curve-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 11px;
+}
+
+.curve-table th {
+  font-size: 9px;
+  font-weight: 600;
+  color: var(--text-muted);
+  text-transform: uppercase;
+  padding: 6px 8px;
+  border-bottom: 1px solid var(--border-primary);
+  text-align: right;
+}
+
+.curve-table th:first-child { text-align: left; }
+
+.curve-table td {
+  padding: 5px 8px;
+  border-bottom: 1px solid rgba(26, 42, 72, 0.3);
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+}
+
+.curve-table td:first-child { text-align: left; font-weight: 600; color: var(--text-bright); }
+</style>
+</head>
+<body>
+
+<div id="app">
+  <!-- ═══ Ticker Bar ═══ -->
+  <div id="ticker">
+    <div class="ticker-track" id="ticker-track"></div>
+  </div>
+
+  <!-- ═══ Sidebar ═══ -->
+  <div id="sidebar">
+    <div class="sidebar-logo">
+      <h1>DSCO</h1>
+      <div class="subtitle">Freight Terminal</div>
+    </div>
+    <nav class="sidebar-nav">
+      <div class="nav-section-label">Markets</div>
+      <div class="nav-item active" data-view="dashboard" onclick="switchView('dashboard')">
+        <div class="nav-icon">&#x25A3;</div><span>Dashboard</span>
+      </div>
+      <div class="nav-item" data-view="map" onclick="switchView('map')">
+        <div class="nav-icon">&#x25C9;</div><span>Route Map</span>
+      </div>
+      <div class="nav-section-label">Segments</div>
+      <div class="nav-item" data-view="drybulk" onclick="switchView('drybulk')">
+        <div class="nav-icon">&#x25B2;</div><span>Dry Bulk</span>
+      </div>
+      <div class="nav-item" data-view="tanker" onclick="switchView('tanker')">
+        <div class="nav-icon">&#x25CF;</div><span>Tanker</span>
+      </div>
+      <div class="nav-item" data-view="container" onclick="switchView('container')">
+        <div class="nav-icon">&#x25A0;</div><span>Container</span>
+      </div>
+      <div class="nav-section-label">Trading</div>
+      <div class="nav-item" data-view="derivatives" onclick="switchView('derivatives')">
+        <div class="nav-icon">&#x25C8;</div><span>Derivatives</span>
+      </div>
+      <div class="nav-item" data-view="analytics" onclick="switchView('analytics')">
+        <div class="nav-icon">&#x25E4;</div><span>Analytics</span>
+      </div>
+    </nav>
+    <div class="sidebar-status">
+      <span class="status-dot"></span>
+      <span id="api-status">Connecting...</span>
+    </div>
+  </div>
+
+  <!-- ═══ Header ═══ -->
+  <div id="header">
+    <div>
+      <div class="view-title" id="view-title">Dashboard</div>
+      <div class="view-subtitle" id="view-subtitle">Global freight market overview</div>
+    </div>
+    <div class="header-right">
+      <div class="header-clock" id="header-clock"></div>
+      <button class="header-btn" onclick="refreshAll()">Refresh</button>
+    </div>
+  </div>
+
+  <!-- ═══ Main Content ═══ -->
+  <div id="main">
+
+    <!-- ── Dashboard View ── -->
+    <div class="view active" id="view-dashboard">
+      <div class="grid-4" id="index-cards"></div>
+      <div class="grid-2-1">
+        <div class="card">
+          <div class="card-title">Rate Heatmap — Top Movers</div>
+          <div class="heatmap-grid" id="heatmap-grid"></div>
+        </div>
+        <div class="card">
+          <div class="card-title">Chokepoint Status</div>
+          <div id="chokepoint-list"></div>
+        </div>
+      </div>
+      <div class="grid-2">
+        <div class="card">
+          <div class="card-title">Baltic Dry Index</div>
+          <div class="chart-container"><canvas id="chart-bdi"></canvas></div>
+        </div>
+        <div class="card">
+          <div class="card-title">News Feed</div>
+          <div class="news-feed" id="news-feed"></div>
+        </div>
+      </div>
+    </div>
+
+    <!-- ── Map View ── -->
+    <div class="view" id="view-map">
+      <div id="map-container"></div>
+    </div>
+
+    <!-- ── Dry Bulk View ── -->
+    <div class="view" id="view-drybulk">
+      <div class="tab-bar" id="drybulk-tabs">
+        <button class="tab-btn active" onclick="switchTab('drybulk','capesize')">Capesize</button>
+        <button class="tab-btn" onclick="switchTab('drybulk','panamax')">Panamax</button>
+        <button class="tab-btn" onclick="switchTab('drybulk','supramax')">Supramax</button>
+        <button class="tab-btn" onclick="switchTab('drybulk','handysize')">Handysize</button>
+      </div>
+      <div class="tab-content active" id="drybulk-capesize"></div>
+      <div class="tab-content" id="drybulk-panamax"></div>
+      <div class="tab-content" id="drybulk-supramax"></div>
+      <div class="tab-content" id="drybulk-handysize"></div>
+    </div>
+
+    <!-- ── Tanker View ── -->
+    <div class="view" id="view-tanker">
+      <div class="tab-bar" id="tanker-tabs">
+        <button class="tab-btn active" onclick="switchTab('tanker','dirty')">Dirty Tanker</button>
+        <button class="tab-btn" onclick="switchTab('tanker','clean')">Clean Tanker</button>
+      </div>
+      <div class="tab-content active" id="tanker-dirty"></div>
+      <div class="tab-content" id="tanker-clean"></div>
+    </div>
+
+    <!-- ── Container View ── -->
+    <div class="view" id="view-container">
+      <div class="tab-bar" id="container-tabs">
+        <button class="tab-btn active" onclick="switchTab('container','fbx')">FBX</button>
+        <button class="tab-btn" onclick="switchTab('container','scfi')">SCFI</button>
+        <button class="tab-btn" onclick="switchTab('container','ccfi')">CCFI</button>
+      </div>
+      <div class="tab-content active" id="container-fbx"></div>
+      <div class="tab-content" id="container-scfi"></div>
+      <div class="tab-content" id="container-ccfi"></div>
+    </div>
+
+    <!-- ── Derivatives View ── -->
+    <div class="view" id="view-derivatives">
+      <div class="tab-bar" id="derivatives-tabs">
+        <button class="tab-btn active" onclick="switchTab('derivatives','eex')">EEX</button>
+        <button class="tab-btn" onclick="switchTab('derivatives','ice')">ICE</button>
+        <button class="tab-btn" onclick="switchTab('derivatives','cme')">CME</button>
+        <button class="tab-btn" onclick="switchTab('derivatives','sgx')">SGX</button>
+      </div>
+      <div class="tab-content active" id="derivatives-eex"></div>
+      <div class="tab-content" id="derivatives-ice"></div>
+      <div class="tab-content" id="derivatives-cme"></div>
+      <div class="tab-content" id="derivatives-sgx"></div>
+    </div>
+
+    <!-- ── Analytics View ── -->
+    <div class="view" id="view-analytics">
+      <div class="grid-2">
+        <div class="card">
+          <div class="card-title">Correlation Matrix — Major Indices</div>
+          <div id="correlation-matrix"></div>
+        </div>
+        <div class="card">
+          <div class="card-title">Seasonal Patterns</div>
+          <div class="chart-container"><canvas id="chart-seasonal"></canvas></div>
+        </div>
+      </div>
+      <div class="grid-2">
+        <div class="card">
+          <div class="card-title">Spread Analysis — Cape/Panamax</div>
+          <div class="chart-container"><canvas id="chart-spread"></canvas></div>
+        </div>
+        <div class="card">
+          <div class="card-title">Supply & Demand Indicators</div>
+          <div class="chart-container"><canvas id="chart-supply"></canvas></div>
+        </div>
+      </div>
+    </div>
+
+  </div><!-- /main -->
+</div><!-- /app -->
+
+<!-- ═══ Detail Overlay ═══ -->
+<div class="detail-overlay" id="detail-panel">
+  <button class="detail-close" onclick="closeDetail()">&times;</button>
+  <div id="detail-content"></div>
+</div>
+
+<script>
+/* ═══════════════════════════════════════════════════════════════════════════
+   DSCO FREIGHT TERMINAL — Application Logic
+   ═══════════════════════════════════════════════════════════════════════════ */
+
+const API_BASE = 'http://127.0.0.1:8422';
+const POLL_INTERVAL = 15000; // 15 seconds
+
+// ── State ──────────────────────────────────────────────────────────────────
+
+const state = {
+  currentView: 'dashboard',
+  rates: {},
+  indices: {},
+  chokepoints: [],
+  news: [],
+  derivatives: {},
+  connected: false,
+  charts: {},
+  map: null,
+  mapLayers: {},
+  mapInitialized: false,
+};
+
+// ── Vessel Class Config ────────────────────────────────────────────────────
+
+const VESSEL_COLORS = {
+  VLCC: '#a78bfa', Suezmax: '#818cf8', Aframax: '#22d3ee',
+  Capesize: '#ef4444', Panamax: '#f97316', Supramax: '#eab308',
+  Handysize: '#84cc16', MR: '#06b6d4', LR1: '#3b82f6',
+  LR2: '#6366f1', Handy_T: '#06b6d4', Panamax_T: '#f97316',
+  Container: '#10b981', Container_40: '#10b981',
+  VLGC: '#d946ef', MGC: '#ec4899',
+};
+
+const VESSEL_CLASS_MAP = {
+  Capesize: 'capesize', Panamax: 'panamax', Supramax: 'supramax',
+  Handysize: 'handysize', VLCC: 'vlcc', Suezmax: 'suezmax',
+  Aframax: 'aframax', MR: 'mr', LR1: 'lr1', LR2: 'lr2',
+  Handy_T: 'mr', Panamax_T: 'panamax', Container: 'container',
+  Container_40: 'container', VLGC: 'vlgc', MGC: 'mgc',
+};
+
+const VIEW_TITLES = {
+  dashboard: ['Dashboard', 'Global freight market overview'],
+  map: ['Route Map', '134+ Baltic Exchange routes with chokepoint monitoring'],
+  drybulk: ['Dry Bulk', 'Capesize, Panamax, Supramax & Handysize markets'],
+  tanker: ['Tanker', 'Dirty & Clean tanker routes — VLCC to Handy'],
+  container: ['Container', 'FBX, SCFI, CCFI container freight indices'],
+  derivatives: ['Derivatives', 'EEX, ICE, CME & SGX freight futures'],
+  analytics: ['Analytics', 'Correlation, seasonal patterns & spread analysis'],
+};
+
+// ── Data Service ───────────────────────────────────────────────────────────
+
+async function fetchJSON(endpoint) {
+  try {
+    const resp = await fetch(API_BASE + endpoint, { signal: AbortSignal.timeout(8000) });
+    if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+    return await resp.json();
+  } catch (e) {
+    console.warn(`API fetch failed: ${endpoint}`, e.message);
+    return null;
+  }
+}
+
+async function loadRates() {
+  const data = await fetchJSON('/api/rates');
+  if (data) { state.rates = data; state.connected = true; }
+  return data;
+}
+
+async function loadIndices() {
+  const data = await fetchJSON('/api/indices');
+  if (data) state.indices = data;
+  return data;
+}
+
+async function loadChokepoints() {
+  const data = await fetchJSON('/api/chokepoints');
+  if (data) state.chokepoints = data;
+  return data;
+}
+
+async function loadNews() {
+  const data = await fetchJSON('/api/news');
+  if (data) state.news = data;
+  return data;
+}
+
+async function loadDerivatives() {
+  const data = await fetchJSON('/api/derivatives');
+  if (data) state.derivatives = data;
+  return data;
+}
+
+async function loadRouteHistory(routeId, days) {
+  return await fetchJSON(`/api/rates/${routeId}?days=${days || 365}`);
+}
+
+async function refreshAll() {
+  const results = await Promise.allSettled([
+    loadRates(), loadIndices(), loadChokepoints(), loadNews(), loadDerivatives()
+  ]);
+  updateUI();
+  updateConnectionStatus();
+}
+
+function updateConnectionStatus() {
+  const el = document.getElementById('api-status');
+  if (state.connected) {
+    el.textContent = `Live — ${Object.keys(state.rates).length} routes`;
+    el.parentElement.querySelector('.status-dot').style.background = 'var(--green)';
+  } else {
+    el.textContent = 'Disconnected';
+    el.parentElement.querySelector('.status-dot').style.background = 'var(--red)';
+  }
+}
+
+// ── View Navigation ────────────────────────────────────────────────────────
+
+function switchView(viewId) {
+  state.currentView = viewId;
+  document.querySelectorAll('.view').forEach(v => v.classList.remove('active'));
+  document.getElementById('view-' + viewId).classList.add('active');
+  document.querySelectorAll('.nav-item').forEach(n => {
+    n.classList.toggle('active', n.dataset.view === viewId);
+  });
+  const [title, sub] = VIEW_TITLES[viewId] || [viewId, ''];
+  document.getElementById('view-title').textContent = title;
+  document.getElementById('view-subtitle').textContent = sub;
+
+  if (viewId === 'map' && !state.mapInitialized) {
+    setTimeout(() => initMap(), 100);
+  }
+  if (viewId === 'analytics') {
+    setTimeout(() => renderAnalytics(), 100);
+  }
+}
+
+function switchTab(section, tabId) {
+  const container = document.getElementById('view-' + section);
+  container.querySelectorAll('.tab-btn').forEach(b => {
+    b.classList.toggle('active', b.textContent.toLowerCase().replace(/\s/g,'').includes(tabId));
+  });
+  container.querySelectorAll('.tab-content').forEach(c => c.classList.remove('active'));
+  const target = document.getElementById(section + '-' + tabId);
+  if (target) target.classList.add('active');
+}
+
+// ── Clock ──────────────────────────────────────────────────────────────────
+
+function updateClock() {
+  const now = new Date();
+  const utc = now.toISOString().slice(11, 19) + ' UTC';
+  document.getElementById('header-clock').textContent = utc;
+}
+
+// ── Ticker ─────────────────────────────────────────────────────────────────
+
+function renderTicker() {
+  const track = document.getElementById('ticker-track');
+  if (!Object.keys(state.indices).length) return;
+
+  let items = '';
+  const idxOrder = ['BDI', 'BDTI', 'BCTI', 'BCI', 'BPI', 'BSI', 'BHSI', 'FBX', 'SCFI'];
+  for (const id of idxOrder) {
+    const idx = state.indices[id];
+    if (!idx) continue;
+    const dir = idx.change >= 0 ? 'up' : 'down';
+    const arrow = idx.change >= 0 ? '\u25B2' : '\u25BC';
+    items += `<div class="ticker-item">
+      <span class="label">${id}</span>
+      <span class="value">${fmt(idx.value, 1)}</span>
+      <span class="change ${dir}">${arrow} ${Math.abs(idx.change_pct).toFixed(2)}%</span>
+    </div>`;
+  }
+
+  // Add some top route movers
+  const sorted = Object.values(state.rates)
+    .filter(r => r.vessel_class !== 'Container' && r.vessel_class !== 'Container_40')
+    .sort((a, b) => Math.abs(b.change_pct) - Math.abs(a.change_pct))
+    .slice(0, 10);
+  for (const r of sorted) {
+    const dir = r.change >= 0 ? 'up' : 'down';
+    const arrow = r.change >= 0 ? '\u25B2' : '\u25BC';
+    items += `<div class="ticker-item">
+      <span class="label">${r.id}</span>
+      <span class="value">${fmt(r.rate, 0)} ${r.unit}</span>
+      <span class="change ${dir}">${arrow} ${Math.abs(r.change_pct).toFixed(1)}%</span>
+    </div>`;
+  }
+
+  // Duplicate for seamless scroll
+  track.innerHTML = items + items;
+}
+
+// ── Dashboard ──────────────────────────────────────────────────────────────
+
+function renderIndexCards() {
+  const el = document.getElementById('index-cards');
+  const order = ['BDI', 'BDTI', 'BCTI', 'FBX'];
+  let html = '';
+  for (const id of order) {
+    const idx = state.indices[id];
+    if (!idx) {
+      html += `<div class="card"><div class="card-title">${id}</div><div class="loading-state"><div class="spinner"></div></div></div>`;
+      continue;
+    }
+    const dir = idx.change >= 0 ? 'up' : 'down';
+    const arrow = idx.change >= 0 ? '+' : '';
+    html += `<div class="card">
+      <div class="card-title">${idx.name}</div>
+      <div class="card-value">${fmt(idx.value, 1)}</div>
+      <div class="card-change ${dir}">${arrow}${fmt(idx.change, 1)} (${arrow}${idx.change_pct.toFixed(2)}%)</div>
+    </div>`;
+  }
+  el.innerHTML = html;
+}
+
+function renderHeatmap() {
+  const el = document.getElementById('heatmap-grid');
+  const rates = Object.values(state.rates)
+    .sort((a, b) => Math.abs(b.change_pct) - Math.abs(a.change_pct))
+    .slice(0, 24);
+
+  let html = '';
+  for (const r of rates) {
+    const pct = r.change_pct;
+    let bg, fg;
+    if (pct > 0) {
+      const intensity = Math.min(pct / 5, 1);
+      bg = `rgba(0, 224, 158, ${0.08 + intensity * 0.18})`;
+      fg = '#00e09e';
+    } else {
+      const intensity = Math.min(Math.abs(pct) / 5, 1);
+      bg = `rgba(255, 77, 106, ${0.08 + intensity * 0.18})`;
+      fg = '#ff4d6a';
+    }
+    const arrow = pct >= 0 ? '+' : '';
+    html += `<div class="heatmap-cell" style="background:${bg};color:${fg}" onclick="openDetail('${r.id}')">
+      <div class="hm-id">${r.id}</div>
+      <div class="hm-val">${fmt(r.rate, 0)}</div>
+      <div class="hm-chg">${arrow}${pct.toFixed(1)}%</div>
+    </div>`;
+  }
+  el.innerHTML = html;
+}
+
+function renderChokepoints() {
+  const el = document.getElementById('chokepoint-list');
+  let html = '';
+  for (const cp of state.chokepoints) {
+    const statusCls = 'status-' + cp.status;
+    const statusLabel = cp.status.replace(/_/g, ' ');
+    html += `<div style="padding:8px 0;border-bottom:1px solid rgba(26,42,72,0.4);display:flex;align-items:center;justify-content:space-between">
+      <div>
+        <div style="font-family:var(--font-ui);font-weight:600;font-size:12px;color:var(--text-bright)">${cp.name}</div>
+        <div style="font-size:10px;color:var(--text-muted)">${cp.daily_transits} transits/day${cp.delay_days > 0 ? ' · +' + cp.delay_days + 'd delay' : ''}</div>
+      </div>
+      <div class="status-indicator ${statusCls}">
+        <span class="status-dot-lg"></span>
+        <span>${statusLabel}</span>
+      </div>
+    </div>`;
+  }
+  el.innerHTML = html;
+}
+
+function renderNewsFeed() {
+  const el = document.getElementById('news-feed');
+  let html = '';
+  for (const n of state.news) {
+    const sentClass = n.sentiment === 'up' ? 'up' : 'down';
+    html += `<div class="news-item">
+      <div class="news-headline">${escHtml(n.headline)}</div>
+      <div class="news-meta"><span class="source">${escHtml(n.source)}</span> · ${timeAgo(n.ts)}</div>
+    </div>`;
+  }
+  el.innerHTML = html;
+}
+
+function renderBDIChart() {
+  // Synthesize BDI history from component sparklines
+  const bdi = state.indices['BDI'];
+  if (!bdi) return;
+
+  const labels = [];
+  const data = [];
+  const base = bdi.value;
+  for (let i = 30; i >= 0; i--) {
+    const d = new Date(Date.now() - i * 86400000);
+    labels.push(d.toLocaleDateString('en', { month: 'short', day: 'numeric' }));
+    // Simulate history from current value
+    const noise = (Math.sin(i * 0.3) * 0.05 + (Math.random() - 0.5) * 0.02);
+    data.push(Math.round(base * (1 + noise * (i / 30))));
+  }
+
+  createChart('chart-bdi', {
+    type: 'line',
+    data: {
+      labels,
+      datasets: [{
+        data,
+        borderColor: '#388bfd',
+        backgroundColor: 'rgba(56, 139, 253, 0.08)',
+        fill: true,
+        tension: 0.3,
+        borderWidth: 2,
+        pointRadius: 0,
+        pointHitRadius: 8,
+      }]
+    },
+    options: chartDefaults('BDI'),
+  });
+}
+
+// ── Rate Tables ────────────────────────────────────────────────────────────
+
+function buildRateTable(routes, containerId) {
+  const el = document.getElementById(containerId);
+  if (!el) return;
+
+  const filtered = Object.values(state.rates).filter(r => routes.includes(r.vessel_class));
+  if (!filtered.length) {
+    el.innerHTML = '<div class="loading-state"><div class="spinner"></div>Loading rates...</div>';
+    return;
+  }
+
+  let html = `<div class="card" style="padding:0;overflow:hidden">
+    <div style="max-height:500px;overflow-y:auto">
+    <table class="data-table">
+    <thead><tr>
+      <th>Route</th><th>Name</th><th>Class</th><th class="r">Rate</th>
+      <th class="r">Chg</th><th class="r">Chg%</th><th class="c">Trend</th>
+    </tr></thead><tbody>`;
+
+  for (const r of filtered) {
+    const dir = r.change >= 0 ? 'up' : (r.change < 0 ? 'down' : 'flat');
+    const arrow = r.change > 0 ? '+' : '';
+    const vcClass = VESSEL_CLASS_MAP[r.vessel_class] || 'capesize';
+    html += `<tr onclick="openDetail('${r.id}')" style="cursor:pointer">
+      <td class="route-id">${r.id}</td>
+      <td>${r.name}</td>
+      <td><span class="vc-badge ${vcClass}">${r.vessel_class}</span></td>
+      <td class="r rate">${fmt(r.rate, r.unit === 'WS' ? 1 : 0)} <span style="color:var(--text-muted);font-size:10px">${r.unit}</span></td>
+      <td class="r ${dir}">${arrow}${fmt(r.change, r.unit === 'WS' ? 1 : 0)}</td>
+      <td class="r ${dir}">${arrow}${r.change_pct.toFixed(2)}%</td>
+      <td class="c"><canvas class="sparkline" data-spark="${r.sparkline.join(',')}"></canvas></td>
+    </tr>`;
+  }
+
+  html += '</tbody></table></div></div>';
+
+  // Chart below table
+  const chartId = containerId + '-chart';
+  html += `<div class="card" style="margin-top:12px">
+    <div class="card-title">${routes[0]} Rate History</div>
+    <div class="chart-container"><canvas id="${chartId}"></canvas></div>
+  </div>`;
+
+  el.innerHTML = html;
+
+  // Draw sparklines
+  el.querySelectorAll('.sparkline').forEach(drawSparkline);
+
+  // Draw segment chart
+  if (filtered.length > 0) {
+    const labels = filtered.slice(0, 8).map(r => r.id);
+    const values = filtered.slice(0, 8).map(r => r.rate);
+    const colors = filtered.slice(0, 8).map(r => VESSEL_COLORS[r.vessel_class] || '#388bfd');
+    createChart(chartId, {
+      type: 'bar',
+      data: {
+        labels,
+        datasets: [{
+          data: values,
+          backgroundColor: colors.map(c => c + '33'),
+          borderColor: colors,
+          borderWidth: 1,
+          borderRadius: 4,
+        }]
+      },
+      options: {
+        ...chartDefaults('Rate'),
+        indexAxis: 'x',
+      },
+    });
+  }
+}
+
+function renderDryBulk() {
+  buildRateTable(['Capesize'], 'drybulk-capesize');
+  buildRateTable(['Panamax'], 'drybulk-panamax');
+  buildRateTable(['Supramax'], 'drybulk-supramax');
+  buildRateTable(['Handysize'], 'drybulk-handysize');
+}
+
+function renderTanker() {
+  buildRateTable(['VLCC', 'Suezmax', 'Aframax', 'Panamax_T'], 'tanker-dirty');
+  buildRateTable(['LR2', 'LR1', 'MR', 'Handy_T'], 'tanker-clean');
+}
+
+function renderContainer() {
+  buildRateTable(['Container'], 'container-fbx');
+  // For SCFI and CCFI, filter by route prefix
+  renderContainerIndex('SCFI', 'container-scfi');
+  renderContainerIndex('CCFI', 'container-ccfi');
+}
+
+function renderContainerIndex(prefix, containerId) {
+  const el = document.getElementById(containerId);
+  if (!el) return;
+
+  const filtered = Object.values(state.rates).filter(r => r.id.startsWith(prefix));
+  if (!filtered.length) {
+    el.innerHTML = '<div class="loading-state"><div class="spinner"></div>Loading...</div>';
+    return;
+  }
+
+  let html = `<div class="card" style="padding:0;overflow:hidden">
+    <table class="data-table">
+    <thead><tr>
+      <th>Route</th><th>Name</th><th class="r">Rate ($/TEU)</th>
+      <th class="r">Chg</th><th class="r">Chg%</th><th class="c">Trend</th>
+    </tr></thead><tbody>`;
+
+  for (const r of filtered) {
+    const dir = r.change >= 0 ? 'up' : 'down';
+    const arrow = r.change > 0 ? '+' : '';
+    html += `<tr onclick="openDetail('${r.id}')" style="cursor:pointer">
+      <td class="route-id">${r.id}</td>
+      <td>${r.name}</td>
+      <td class="r rate">${fmt(r.rate, 0)}</td>
+      <td class="r ${dir}">${arrow}${fmt(r.change, 0)}</td>
+      <td class="r ${dir}">${arrow}${r.change_pct.toFixed(2)}%</td>
+      <td class="c"><canvas class="sparkline" data-spark="${r.sparkline.join(',')}"></canvas></td>
+    </tr>`;
+  }
+
+  html += '</tbody></table></div>';
+  el.innerHTML = html;
+  el.querySelectorAll('.sparkline').forEach(drawSparkline);
+}
+
+// ── Derivatives ────────────────────────────────────────────────────────────
+
+function renderDerivatives() {
+  const exchanges = ['EEX', 'ICE', 'CME', 'SGX'];
+  for (const ex of exchanges) {
+    const el = document.getElementById('derivatives-' + ex.toLowerCase());
+    if (!el) continue;
+    const contracts = state.derivatives[ex];
+    if (!contracts) {
+      el.innerHTML = '<div class="loading-state"><div class="spinner"></div>Loading derivatives...</div>';
+      continue;
+    }
+
+    let html = '';
+    for (const contract of contracts) {
+      const chartId = `deriv-curve-${ex}-${contract.code}`;
+      html += `<div class="card" style="margin-bottom:12px">
+        <div class="card-title">${contract.name} <span style="color:var(--text-muted)">(${contract.unit})</span></div>
+        <div class="grid-2">
+          <div style="overflow-x:auto">
+            <table class="curve-table">
+            <thead><tr><th>Month</th><th>Settle</th><th>Bid</th><th>Ask</th><th>Vol</th><th>OI</th></tr></thead>
+            <tbody>`;
+      for (const pt of contract.curve) {
+        html += `<tr>
+          <td>${pt.month}</td>
+          <td>${fmt(pt.settle, 2)}</td>
+          <td>${fmt(pt.bid, 2)}</td>
+          <td>${fmt(pt.ask, 2)}</td>
+          <td>${fmtK(pt.volume)}</td>
+          <td>${fmtK(pt.open_interest)}</td>
+        </tr>`;
+      }
+      html += `</tbody></table></div>
+          <div>
+            <div class="chart-container" style="height:200px"><canvas id="${chartId}"></canvas></div>
+          </div>
+        </div>
+      </div>`;
+    }
+    el.innerHTML = html;
+
+    // Render forward curves
+    for (const contract of contracts) {
+      const chartId = `deriv-curve-${ex}-${contract.code}`;
+      const labels = contract.curve.map(p => p.month);
+      const settles = contract.curve.map(p => p.settle);
+      const bids = contract.curve.map(p => p.bid);
+      const asks = contract.curve.map(p => p.ask);
+      createChart(chartId, {
+        type: 'line',
+        data: {
+          labels,
+          datasets: [
+            { label: 'Settle', data: settles, borderColor: '#388bfd', borderWidth: 2, pointRadius: 3, pointBackgroundColor: '#388bfd', tension: 0.2 },
+            { label: 'Bid', data: bids, borderColor: '#00e09e', borderWidth: 1, borderDash: [4, 2], pointRadius: 0, tension: 0.2 },
+            { label: 'Ask', data: asks, borderColor: '#ff4d6a', borderWidth: 1, borderDash: [4, 2], pointRadius: 0, tension: 0.2 },
+          ]
+        },
+        options: {
+          ...chartDefaults('Forward Curve'),
+          plugins: {
+            ...chartDefaults('').plugins,
+            legend: { display: true, position: 'top', labels: { color: '#6b7fa0', font: { size: 9, family: 'Outfit' }, boxWidth: 12, padding: 8 } },
+          },
+        },
+      });
+    }
+  }
+}
+
+// ── Map ────────────────────────────────────────────────────────────────────
+
+function initMap() {
+  if (state.mapInitialized) return;
+  state.mapInitialized = true;
+
+  const mapEl = document.getElementById('map-container');
+  state.map = L.map(mapEl, {
+    center: [20, 40],
+    zoom: 3,
+    zoomControl: true,
+    attributionControl: false,
+  });
+
+  L.tileLayer('https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png', {
+    subdomains: 'abcd',
+    maxZoom: 19,
+  }).addTo(state.map);
+
+  // Draw routes
+  drawRoutes();
+  drawChokepoints();
+  addMapLegend();
+
+  setTimeout(() => state.map.invalidateSize(), 200);
+}
+
+function drawRoutes() {
+  const layerGroups = {};
+
+  for (const [id, r] of Object.entries(state.rates)) {
+    if (!r.from || !r.to || (r.from[0] === 0 && r.from[1] === 0)) continue;
+
+    const vc = r.vessel_class;
+    const color = VESSEL_COLORS[vc] || '#388bfd';
+
+    if (!layerGroups[vc]) {
+      layerGroups[vc] = L.layerGroup();
+    }
+
+    // Create curved line
+    const from = L.latLng(r.from[0], r.from[1]);
+    const to = L.latLng(r.to[0], r.to[1]);
+    const latlngs = getCurvedPoints(from, to);
+
+    const line = L.polyline(latlngs, {
+      color: color,
+      weight: 1.5,
+      opacity: 0.5,
+      dashArray: null,
+    });
+
+    const dir = r.change >= 0 ? 'up' : 'down';
+    const arrow = r.change >= 0 ? '+' : '';
+    line.bindTooltip(`
+      <div class="map-tooltip">
+        <div class="tooltip-title">${r.id} — ${r.name}</div>
+        <div class="tooltip-rate ${dir}">${fmt(r.rate, r.unit === 'WS' ? 1 : 0)} ${r.unit}
+        <span style="font-size:10px">(${arrow}${r.change_pct.toFixed(1)}%)</span></div>
+        <div style="color:#6b7fa0;font-size:10px;margin-top:2px">${vc} · ${r.region}</div>
+      </div>
+    `, { className: 'map-tooltip', sticky: true });
+
+    line.on('click', () => openDetail(r.id));
+
+    line.on('mouseover', function() { this.setStyle({ weight: 3, opacity: 0.9 }); });
+    line.on('mouseout', function() { this.setStyle({ weight: 1.5, opacity: 0.5 }); });
+
+    line.addTo(layerGroups[vc]);
+
+    // From/To dots
+    L.circleMarker(from, { radius: 2, fillColor: color, color: color, fillOpacity: 0.7, weight: 0 }).addTo(layerGroups[vc]);
+    L.circleMarker(to, { radius: 2, fillColor: color, color: color, fillOpacity: 0.7, weight: 0 }).addTo(layerGroups[vc]);
+  }
+
+  state.mapLayers = layerGroups;
+  for (const [vc, group] of Object.entries(layerGroups)) {
+    group.addTo(state.map);
+  }
+}
+
+function getCurvedPoints(from, to) {
+  const points = [];
+  const n = 20;
+  const midLat = (from.lat + to.lat) / 2;
+  const midLng = (from.lng + to.lng) / 2;
+  const dist = Math.sqrt(Math.pow(from.lat - to.lat, 2) + Math.pow(from.lng - to.lng, 2));
+  const offset = dist * 0.15;
+  const angle = Math.atan2(to.lng - from.lng, to.lat - from.lat) + Math.PI / 2;
+  const ctrlLat = midLat + Math.cos(angle) * offset;
+  const ctrlLng = midLng + Math.sin(angle) * offset;
+
+  for (let i = 0; i <= n; i++) {
+    const t = i / n;
+    const lat = (1-t)*(1-t)*from.lat + 2*(1-t)*t*ctrlLat + t*t*to.lat;
+    const lng = (1-t)*(1-t)*from.lng + 2*(1-t)*t*ctrlLng + t*t*to.lng;
+    points.push([lat, lng]);
+  }
+  return points;
+}
+
+function drawChokepoints() {
+  const statusColors = { open: '#00e09e', restricted: '#f0b429', elevated_risk: '#ff4d6a', closed: '#ff4d6a' };
+
+  for (const cp of state.chokepoints) {
+    const color = statusColors[cp.status] || '#6b7fa0';
+
+    // Pulsing circle marker
+    const marker = L.circleMarker([cp.lat, cp.lng], {
+      radius: 8,
+      fillColor: color,
+      color: color,
+      fillOpacity: 0.3,
+      weight: 2,
+      opacity: 0.8,
+    }).addTo(state.map);
+
+    const statusLabel = cp.status.replace(/_/g, ' ');
+    marker.bindPopup(`
+      <div class="chokepoint-popup">
+        <h3>${cp.name}</h3>
+        <div>Status: <strong style="color:${color}">${statusLabel}</strong></div>
+        <div>Daily transits: ${cp.daily_transits}</div>
+        ${cp.delay_days > 0 ? `<div>Additional delay: +${cp.delay_days} days</div>` : ''}
+      </div>
+    `);
+  }
+}
+
+function addMapLegend() {
+  const legend = L.control({ position: 'bottomright' });
+  legend.onAdd = function() {
+    const div = L.DomUtil.create('div', 'map-legend');
+    div.innerHTML = '<h4>Vessel Classes</h4>';
+    const classes = ['Capesize', 'Panamax', 'Supramax', 'Handysize', 'VLCC', 'Suezmax', 'Aframax', 'MR', 'LR1', 'LR2', 'Container', 'VLGC'];
+    for (const vc of classes) {
+      const color = VESSEL_COLORS[vc] || '#888';
+      const item = document.createElement('div');
+      item.className = 'map-legend-item';
+      item.innerHTML = `<span class="legend-line" style="background:${color}"></span><span>${vc}</span>`;
+      item.onclick = () => toggleMapLayer(vc, item);
+      div.appendChild(item);
+    }
+    return div;
+  };
+  legend.addTo(state.map);
+}
+
+function toggleMapLayer(vc, el) {
+  const group = state.mapLayers[vc];
+  if (!group) return;
+  if (state.map.hasLayer(group)) {
+    state.map.removeLayer(group);
+    el.classList.add('hidden');
+  } else {
+    state.map.addLayer(group);
+    el.classList.remove('hidden');
+  }
+}
+
+// ── Analytics ──────────────────────────────────────────────────────────────
+
+function renderAnalytics() {
+  renderCorrelationMatrix();
+  renderSeasonalChart();
+  renderSpreadChart();
+  renderSupplyChart();
+}
+
+function renderCorrelationMatrix() {
+  const el = document.getElementById('correlation-matrix');
+  const indices = ['BDI', 'BDTI', 'BCTI', 'BCI', 'BPI', 'BSI', 'FBX'];
+  const n = indices.length;
+
+  // Generate pseudo-correlation matrix
+  const rng = mulberry32(42);
+  const corr = [];
+  for (let i = 0; i < n; i++) {
+    corr[i] = [];
+    for (let j = 0; j < n; j++) {
+      if (i === j) corr[i][j] = 1.0;
+      else if (j < i) corr[i][j] = corr[j][i];
+      else {
+        // Related indices have higher correlation
+        const sameFamily = (i < 2 && j < 2) || (i >= 3 && i <= 5 && j >= 3 && j <= 5);
+        const base = sameFamily ? 0.6 : 0.1;
+        corr[i][j] = Math.min(1, Math.max(-0.3, base + (rng() - 0.5) * 0.5));
+      }
+    }
+  }
+
+  let html = '<table style="border-collapse:collapse"><tr><td></td>';
+  for (const id of indices) html += `<td style="padding:4px;font-size:9px;font-weight:600;color:var(--text-muted);text-align:center">${id}</td>`;
+  html += '</tr>';
+
+  for (let i = 0; i < n; i++) {
+    html += `<tr><td style="padding:4px;font-size:9px;font-weight:600;color:var(--text-muted)">${indices[i]}</td>`;
+    for (let j = 0; j < n; j++) {
+      const v = corr[i][j];
+      const r = v > 0 ? Math.round(v * 100) : 0;
+      const g = v > 0 ? Math.round(v * 160) : 0;
+      const b = v < 0 ? Math.round(Math.abs(v) * 180) : 0;
+      const bg = v >= 0
+        ? `rgba(0, ${Math.round(v * 224)}, ${Math.round(v * 158)}, ${Math.abs(v) * 0.4})`
+        : `rgba(255, ${Math.round(77 * Math.abs(v))}, ${Math.round(106 * Math.abs(v))}, ${Math.abs(v) * 0.4})`;
+      html += `<td class="correlation-cell" style="background:${bg}">${v.toFixed(2)}</td>`;
+    }
+    html += '</tr>';
+  }
+  html += '</table>';
+  el.innerHTML = html;
+}
+
+function renderSeasonalChart() {
+  const months = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
+  const rng = mulberry32(123);
+  const cape = months.map((_, i) => 15000 + Math.sin(i / 12 * Math.PI * 2 + 1) * 8000 + rng() * 3000);
+  const pana = months.map((_, i) => 10000 + Math.sin(i / 12 * Math.PI * 2 + 2) * 4000 + rng() * 2000);
+  const supra = months.map((_, i) => 9000 + Math.sin(i / 12 * Math.PI * 2 + 0.5) * 3000 + rng() * 1500);
+
+  createChart('chart-seasonal', {
+    type: 'line',
+    data: {
+      labels: months,
+      datasets: [
+        { label: 'Capesize', data: cape, borderColor: '#ef4444', backgroundColor: 'rgba(239,68,68,0.08)', fill: true, tension: 0.4, borderWidth: 2, pointRadius: 3 },
+        { label: 'Panamax', data: pana, borderColor: '#f97316', backgroundColor: 'rgba(249,115,22,0.05)', fill: true, tension: 0.4, borderWidth: 2, pointRadius: 3 },
+        { label: 'Supramax', data: supra, borderColor: '#eab308', backgroundColor: 'rgba(234,179,8,0.05)', fill: true, tension: 0.4, borderWidth: 2, pointRadius: 3 },
+      ]
+    },
+    options: {
+      ...chartDefaults('$/day'),
+      plugins: {
+        ...chartDefaults('').plugins,
+        legend: { display: true, position: 'top', labels: { color: '#6b7fa0', font: { size: 10, family: 'Outfit' }, boxWidth: 12, padding: 10 } },
+      },
+    },
+  });
+}
+
+function renderSpreadChart() {
+  const labels = [];
+  const spread = [];
+  const rng = mulberry32(456);
+  for (let i = 90; i >= 0; i--) {
+    const d = new Date(Date.now() - i * 86400000);
+    labels.push(d.toLocaleDateString('en', { month: 'short', day: 'numeric' }));
+    spread.push(5000 + Math.sin(i / 30) * 3000 + (rng() - 0.5) * 2000);
+  }
+
+  createChart('chart-spread', {
+    type: 'line',
+    data: {
+      labels,
+      datasets: [{
+        label: 'Cape-Pana Spread',
+        data: spread,
+        borderColor: '#a78bfa',
+        backgroundColor: 'rgba(167, 139, 250, 0.08)',
+        fill: true,
+        tension: 0.3,
+        borderWidth: 2,
+        pointRadius: 0,
+      }]
+    },
+    options: chartDefaults('$/day spread'),
+  });
+}
+
+function renderSupplyChart() {
+  const labels = ['Cape', 'Pana', 'Supra', 'Handy', 'VLCC', 'Suez', 'Afra', 'MR'];
+  const rng = mulberry32(789);
+  const supply = labels.map(() => Math.round(70 + rng() * 30));
+  const demand = labels.map(() => Math.round(65 + rng() * 35));
+
+  createChart('chart-supply', {
+    type: 'bar',
+    data: {
+      labels,
+      datasets: [
+        { label: 'Fleet Utilization %', data: supply, backgroundColor: 'rgba(56, 139, 253, 0.5)', borderColor: '#388bfd', borderWidth: 1, borderRadius: 4 },
+        { label: 'Demand Index', data: demand, backgroundColor: 'rgba(0, 224, 158, 0.4)', borderColor: '#00e09e', borderWidth: 1, borderRadius: 4 },
+      ]
+    },
+    options: {
+      ...chartDefaults('%'),
+      plugins: {
+        ...chartDefaults('').plugins,
+        legend: { display: true, position: 'top', labels: { color: '#6b7fa0', font: { size: 10, family: 'Outfit' }, boxWidth: 12, padding: 10 } },
+      },
+      scales: {
+        x: { grid: { color: 'rgba(26, 42, 72, 0.3)' }, ticks: { color: '#6b7fa0', font: { size: 10 } } },
+        y: { grid: { color: 'rgba(26, 42, 72, 0.3)' }, ticks: { color: '#6b7fa0', font: { size: 10 } }, max: 110 },
+      },
+    },
+  });
+}
+
+// ── Detail Panel ───────────────────────────────────────────────────────────
+
+async function openDetail(routeId) {
+  const panel = document.getElementById('detail-panel');
+  const content = document.getElementById('detail-content');
+  const r = state.rates[routeId];
+  if (!r) return;
+
+  const dir = r.change >= 0 ? 'up' : 'down';
+  const arrow = r.change >= 0 ? '+' : '';
+  const vcClass = VESSEL_CLASS_MAP[r.vessel_class] || 'capesize';
+
+  content.innerHTML = `
+    <div style="margin-bottom:16px">
+      <div style="font-family:var(--font-ui);font-size:20px;font-weight:700;color:var(--text-bright)">${r.id}</div>
+      <div style="font-size:13px;color:var(--text-secondary);margin-top:2px">${r.name}</div>
+      <span class="vc-badge ${vcClass}" style="margin-top:8px">${r.vessel_class}</span>
+    </div>
+    <div class="grid-2" style="margin-bottom:0">
+      <div class="card">
+        <div class="card-title">Current Rate</div>
+        <div class="card-value" style="font-size:24px">${fmt(r.rate, r.unit === 'WS' ? 1 : 0)}</div>
+        <div style="font-size:11px;color:var(--text-muted)">${r.unit}</div>
+      </div>
+      <div class="card">
+        <div class="card-title">Change</div>
+        <div class="card-value ${dir}" style="font-size:24px;color:var(--${dir === 'up' ? 'green' : 'red'})">${arrow}${fmt(r.change, 1)}</div>
+        <div class="card-change ${dir}">${arrow}${r.change_pct.toFixed(2)}%</div>
+      </div>
+    </div>
+    <div class="card" style="margin-top:12px">
+      <div class="card-title">Rate History</div>
+      <div class="period-selector">
+        <button class="period-btn active" onclick="loadDetailChart('${routeId}', 7, this)">1W</button>
+        <button class="period-btn" onclick="loadDetailChart('${routeId}', 30, this)">1M</button>
+        <button class="period-btn" onclick="loadDetailChart('${routeId}', 90, this)">3M</button>
+        <button class="period-btn" onclick="loadDetailChart('${routeId}', 180, this)">6M</button>
+        <button class="period-btn" onclick="loadDetailChart('${routeId}', 365, this)">1Y</button>
+      </div>
+      <div class="chart-container" style="height:200px"><canvas id="detail-chart"></canvas></div>
+    </div>
+    <div class="card" style="margin-top:12px">
+      <div class="card-title">Route Info</div>
+      <table style="width:100%;font-size:11px">
+        <tr><td style="color:var(--text-muted);padding:4px 0">Region</td><td style="padding:4px 0">${r.region}</td></tr>
+        <tr><td style="color:var(--text-muted);padding:4px 0">Size</td><td style="padding:4px 0">${r.size > 0 ? fmtK(r.size) + ' DWT' : 'N/A'}</td></tr>
+        <tr><td style="color:var(--text-muted);padding:4px 0">From</td><td style="padding:4px 0">${r.from[0].toFixed(1)}, ${r.from[1].toFixed(1)}</td></tr>
+        <tr><td style="color:var(--text-muted);padding:4px 0">To</td><td style="padding:4px 0">${r.to[0].toFixed(1)}, ${r.to[1].toFixed(1)}</td></tr>
+      </table>
+    </div>
+  `;
+  panel.classList.add('open');
+  loadDetailChart(routeId, 7);
+}
+
+async function loadDetailChart(routeId, days, btnEl) {
+  if (btnEl) {
+    btnEl.closest('.period-selector').querySelectorAll('.period-btn').forEach(b => b.classList.remove('active'));
+    btnEl.classList.add('active');
+  }
+
+  const data = await loadRouteHistory(routeId, days);
+  if (!data || !data.history) return;
+
+  const labels = data.history.map(h => {
+    const d = new Date(h.ts * 1000);
+    return d.toLocaleDateString('en', { month: 'short', day: 'numeric' });
+  });
+  const values = data.history.map(h => h.rate);
+
+  createChart('detail-chart', {
+    type: 'line',
+    data: {
+      labels,
+      datasets: [{
+        data: values,
+        borderColor: '#388bfd',
+        backgroundColor: 'rgba(56, 139, 253, 0.08)',
+        fill: true,
+        tension: 0.3,
+        borderWidth: 2,
+        pointRadius: 0,
+        pointHitRadius: 6,
+      }]
+    },
+    options: chartDefaults(data.unit || ''),
+  });
+}
+
+function closeDetail() {
+  document.getElementById('detail-panel').classList.remove('open');
+}
+
+// ── Chart Utilities ────────────────────────────────────────────────────────
+
+function chartDefaults(label) {
+  return {
+    responsive: true,
+    maintainAspectRatio: false,
+    interaction: { mode: 'index', intersect: false },
+    plugins: {
+      legend: { display: false },
+      tooltip: {
+        backgroundColor: '#111a2e',
+        borderColor: '#1a2a48',
+        borderWidth: 1,
+        titleFont: { family: 'Outfit', size: 11 },
+        bodyFont: { family: 'JetBrains Mono', size: 11 },
+        titleColor: '#c9d6e8',
+        bodyColor: '#e8f0fc',
+        padding: 10,
+        cornerRadius: 6,
+      },
+    },
+    scales: {
+      x: {
+        grid: { color: 'rgba(26, 42, 72, 0.3)', drawBorder: false },
+        ticks: { color: '#3d4f6f', font: { size: 9, family: 'JetBrains Mono' }, maxTicksLimit: 8 },
+      },
+      y: {
+        grid: { color: 'rgba(26, 42, 72, 0.3)', drawBorder: false },
+        ticks: { color: '#3d4f6f', font: { size: 9, family: 'JetBrains Mono' }, maxTicksLimit: 6 },
+      },
+    },
+    animation: { duration: 400 },
+  };
+}
+
+function createChart(canvasId, config) {
+  const canvas = document.getElementById(canvasId);
+  if (!canvas) return null;
+
+  // Destroy existing chart
+  if (state.charts[canvasId]) {
+    state.charts[canvasId].destroy();
+    delete state.charts[canvasId];
+  }
+
+  const chart = new Chart(canvas, config);
+  state.charts[canvasId] = chart;
+  return chart;
+}
+
+function drawSparkline(canvas) {
+  const data = canvas.dataset.spark;
+  if (!data) return;
+  const values = data.split(',').map(Number);
+  if (values.length < 2) return;
+
+  const ctx = canvas.getContext('2d');
+  const w = canvas.width = 80;
+  const h = canvas.height = 24;
+  const min = Math.min(...values);
+  const max = Math.max(...values);
+  const range = max - min || 1;
+
+  ctx.clearRect(0, 0, w, h);
+
+  // Determine color based on trend
+  const isUp = values[values.length - 1] >= values[0];
+  const color = isUp ? '#00e09e' : '#ff4d6a';
+
+  ctx.beginPath();
+  ctx.strokeStyle = color;
+  ctx.lineWidth = 1.2;
+
+  for (let i = 0; i < values.length; i++) {
+    const x = (i / (values.length - 1)) * w;
+    const y = h - ((values[i] - min) / range) * (h - 4) - 2;
+    if (i === 0) ctx.moveTo(x, y);
+    else ctx.lineTo(x, y);
+  }
+  ctx.stroke();
+
+  // Fill gradient
+  ctx.lineTo(w, h);
+  ctx.lineTo(0, h);
+  ctx.closePath();
+  const grad = ctx.createLinearGradient(0, 0, 0, h);
+  grad.addColorStop(0, isUp ? 'rgba(0,224,158,0.15)' : 'rgba(255,77,106,0.15)');
+  grad.addColorStop(1, 'transparent');
+  ctx.fillStyle = grad;
+  ctx.fill();
+}
+
+// ── Utility Functions ──────────────────────────────────────────────────────
+
+function fmt(num, decimals) {
+  if (num === undefined || num === null) return '—';
+  return Number(num).toLocaleString('en-US', {
+    minimumFractionDigits: decimals,
+    maximumFractionDigits: decimals,
+  });
+}
+
+function fmtK(num) {
+  if (num >= 1000000) return (num / 1000000).toFixed(1) + 'M';
+  if (num >= 1000) return (num / 1000).toFixed(1) + 'K';
+  return String(num);
+}
+
+function escHtml(str) {
+  const div = document.createElement('div');
+  div.textContent = str;
+  return div.innerHTML;
+}
+
+function timeAgo(ts) {
+  const now = Date.now();
+  const then = new Date(ts).getTime();
+  const diff = Math.floor((now - then) / 1000);
+  if (diff < 60) return 'just now';
+  if (diff < 3600) return Math.floor(diff / 60) + 'm ago';
+  if (diff < 86400) return Math.floor(diff / 3600) + 'h ago';
+  return Math.floor(diff / 86400) + 'd ago';
+}
+
+function mulberry32(seed) {
+  return function() {
+    let t = seed += 0x6D2B79F5;
+    t = Math.imul(t ^ t >>> 15, t | 1);
+    t ^= t + Math.imul(t ^ t >>> 7, t | 61);
+    return ((t ^ t >>> 14) >>> 0) / 4294967296;
+  };
+}
+
+// ── UI Update Orchestrator ─────────────────────────────────────────────────
+
+function updateUI() {
+  renderTicker();
+  renderIndexCards();
+  renderHeatmap();
+  renderChokepoints();
+  renderNewsFeed();
+  renderBDIChart();
+  renderDryBulk();
+  renderTanker();
+  renderContainer();
+  renderDerivatives();
+
+  if (state.mapInitialized && state.map) {
+    // Routes will update on next map init
+  }
+}
+
+// ── Keyboard Shortcuts ─────────────────────────────────────────────────────
+
+document.addEventListener('keydown', (e) => {
+  if (e.target.tagName === 'INPUT' || e.target.tagName === 'TEXTAREA') return;
+  const shortcuts = {
+    '1': 'dashboard', '2': 'map', '3': 'drybulk',
+    '4': 'tanker', '5': 'container', '6': 'derivatives', '7': 'analytics',
+  };
+  if (shortcuts[e.key]) {
+    e.preventDefault();
+    switchView(shortcuts[e.key]);
+  }
+  if (e.key === 'Escape') {
+    closeDetail();
+  }
+  if (e.key === 'r' && !e.metaKey && !e.ctrlKey) {
+    refreshAll();
+  }
+});
+
+// ── Init ───────────────────────────────────────────────────────────────────
+
+async function init() {
+  updateClock();
+  setInterval(updateClock, 1000);
+
+  await refreshAll();
+
+  // Polling
+  setInterval(async () => {
+    await loadRates();
+    await loadIndices();
+    updateUI();
+  }, POLL_INTERVAL);
+
+  setInterval(async () => {
+    await loadNews();
+    renderNewsFeed();
+  }, 120000);
+
+  setInterval(async () => {
+    await loadChokepoints();
+    renderChokepoints();
+  }, 300000);
+}
+
+init();
+</script>
+</body>
+</html>
