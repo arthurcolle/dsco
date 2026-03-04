@@ -7,6 +7,8 @@
 #include "md.h"
 #include "baseline.h"
 #include "setup.h"
+#include "trace.h"
+#include "output_guard.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -18,12 +20,22 @@ static md_renderer_t s_oneshot_md;
 /* Signal handler for clean IPC shutdown in sub-agent mode */
 static volatile sig_atomic_t g_main_interrupted = 0;
 
+static void init_trace_runtime(void) {
+#ifdef DSCO_DEV_BINARY
+    if (!getenv("DSCO_TRACE")) {
+        setenv("DSCO_TRACE", "debug", 1);
+    }
+#endif
+    TRACE_INIT();
+}
+
 static void main_sigterm_handler(int sig) {
     (void)sig;
     g_main_interrupted = 1;
 }
 
 static void main_atexit_handler(void) {
+    TRACE_SHUTDOWN();
     ipc_shutdown();
 }
 
@@ -43,6 +55,7 @@ static void usage(const char *prog) {
         "  --timeline-server        Run local timeline web server\n"
         "  --timeline-port PORT     Timeline webserver port (default: 8421)\n"
         "  --timeline-instance ID   Filter timeline to one instance ID\n"
+        "  --version              Print version and build info\n"
         "  -h          Show this help\n"
         "\n"
         "Interactive mode: run without a prompt\n"
@@ -60,16 +73,24 @@ static void usage(const char *prog) {
 /* One-shot mode: simple print callbacks */
 static void oneshot_text_cb(const char *text, void *ctx) {
     (void)ctx;
+    TRACE_DEBUG("text_cb len=%zu first16=%.16s", strlen(text), text);
     md_feed_str(&s_oneshot_md, text);
+    fflush(stdout);
 }
 
 static void oneshot_tool_cb(const char *name, const char *id, void *ctx) {
     (void)id; (void)ctx;
     fprintf(stderr, "\033[2m\033[36m► %s\033[0m\n", name);
+    fflush(stderr);
     baseline_log("tool", name, "tool_use started", NULL);
 }
 
 int main(int argc, char **argv) {
+    (void)atexit(main_atexit_handler);
+    init_trace_runtime();
+    (void)output_guard_init();
+    TRACE_INFO("main start");
+
     const char *cli_profile = NULL;
     for (int i = 1; i < argc; i++) {
         if (strcmp(argv[i], "--profile") == 0 && i + 1 < argc) {
@@ -119,6 +140,11 @@ int main(int argc, char **argv) {
     for (int i = 1; i < argc; i++) {
         if (strcmp(argv[i], "-h") == 0 || strcmp(argv[i], "--help") == 0) {
             usage(argv[0]);
+            return 0;
+        }
+        if (strcmp(argv[i], "--version") == 0 || strcmp(argv[i], "-v") == 0) {
+            printf("dsco v%s (built %s, %s)\n", DSCO_VERSION, BUILD_DATE, GIT_HASH);
+            free(oneshot_prompt);
             return 0;
         }
         if (strcmp(argv[i], "-m") == 0 && i + 1 < argc) {
@@ -227,10 +253,13 @@ int main(int argc, char **argv) {
     if (oneshot_prompt) {
         tools_init();
         md_init(&s_oneshot_md, stdout);
+
         conversation_t conv;
         conv_init(&conv);
         conv_add_user_text(&conv, oneshot_prompt);
         baseline_log("user", "oneshot_prompt", oneshot_prompt, NULL);
+        session_state_t oneshot_session;
+        session_state_init(&oneshot_session, model);
 
         int turns = 0;
         while (turns < MAX_AGENT_TURNS) {
@@ -247,7 +276,7 @@ int main(int argc, char **argv) {
             stream_result_t sr = llm_stream(api_key, req,
                                              oneshot_text_cb,
                                              oneshot_tool_cb,
-                                             NULL);
+                                             NULL, NULL);
             free(req);
 
             if (!sr.ok) {
@@ -273,8 +302,14 @@ int main(int argc, char **argv) {
                     has_tool_use = true;
                     char *tr = safe_malloc(MAX_TOOL_RESULT);
                     tr[0] = '\0';
-                    bool ok = tools_execute(blk->tool_name, blk->tool_input,
-                                            tr, MAX_TOOL_RESULT);
+                    const char *tier = session_trust_tier_to_string(oneshot_session.trust_tier);
+                    bool ok = tools_is_allowed_for_tier(blk->tool_name, tier, tr, MAX_TOOL_RESULT);
+                    if (ok) {
+                        ok = tools_execute_for_tier(blk->tool_name, blk->tool_input, tier,
+                                                    tr, MAX_TOOL_RESULT);
+                    } else {
+                        baseline_log("security", "tool_blocked", tr, NULL);
+                    }
                     conv_add_tool_result(&conv, blk->tool_id, tr, !ok);
                     baseline_log(ok ? "tool_result" : "tool_error",
                                  blk->tool_name ? blk->tool_name : "tool",
@@ -298,7 +333,6 @@ int main(int argc, char **argv) {
         /* Sub-agent mode: after initial task, check IPC queue for more work */
         if (getenv("DSCO_SUBAGENT") && getenv("DSCO_IPC_DB")) {
             ipc_init(NULL, NULL);
-            atexit(main_atexit_handler);
             struct sigaction sa_term;
             sa_term.sa_handler = main_sigterm_handler;
             sa_term.sa_flags = 0;
@@ -311,7 +345,7 @@ int main(int argc, char **argv) {
             ipc_set_status(IPC_AGENT_IDLE, "initial task complete");
 
             /* Check for queued tasks — long-running agent mode */
-            for (int task_round = 0; task_round < 10 && !g_main_interrupted; task_round++) {
+            while (!g_main_interrupted) {
                 ipc_task_t task;
                 if (!ipc_task_claim(&task)) break;
 
@@ -323,7 +357,7 @@ int main(int argc, char **argv) {
 
                 int t2 = 0;
                 bool task_ok = true;
-                while (t2 < MAX_AGENT_TURNS) {
+                while (t2 < MAX_AGENT_TURNS && !g_main_interrupted) {
                     t2++;
                     md_reset(&s_oneshot_md);
                     char *req2 = llm_build_request(&conv, model, MAX_TOKENS);
@@ -331,7 +365,8 @@ int main(int argc, char **argv) {
 
                     stream_result_t sr2 = llm_stream(api_key, req2,
                                                       oneshot_text_cb,
-                                                      oneshot_tool_cb, NULL);
+                                                      oneshot_tool_cb,
+                                                      NULL, NULL);
                     free(req2);
                     if (!sr2.ok) {
                         json_free_response(&sr2.parsed);
@@ -350,9 +385,15 @@ int main(int argc, char **argv) {
                             has_tu = true;
                             char *tr = safe_malloc(MAX_TOOL_RESULT);
                             tr[0] = '\0';
-                            tools_execute(blk->tool_name, blk->tool_input,
-                                          tr, MAX_TOOL_RESULT);
-                            conv_add_tool_result(&conv, blk->tool_id, tr, false);
+                            const char *tier = session_trust_tier_to_string(oneshot_session.trust_tier);
+                            bool ok = tools_is_allowed_for_tier(blk->tool_name, tier, tr, MAX_TOOL_RESULT);
+                            if (ok) {
+                                ok = tools_execute_for_tier(blk->tool_name, blk->tool_input, tier,
+                                                            tr, MAX_TOOL_RESULT);
+                            } else {
+                                baseline_log("security", "tool_blocked", tr, NULL);
+                            }
+                            conv_add_tool_result(&conv, blk->tool_id, tr, !ok);
                             free(tr);
                         }
                     }

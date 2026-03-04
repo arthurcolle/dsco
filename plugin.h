@@ -25,6 +25,8 @@
 #define PLUGIN_MAX_PLUGINS   32
 #define PLUGIN_MAX_TOOLS     256
 #define PLUGIN_DIR_NAME      ".dsco/plugins"
+#define PLUGIN_MANIFEST_FILE "plugin-manifest.json"
+#define PLUGINS_LOCK_FILE    "plugins.lock"
 
 typedef struct {
     const char *name;
@@ -64,6 +66,12 @@ bool plugin_load(plugin_registry_t *reg, const char *path);
 
 /* Unload a single plugin by name */
 bool plugin_unload(plugin_registry_t *reg, const char *name);
+
+/* Validate plugin packaging metadata (manifest + lockfile) */
+bool plugin_validate_manifest_file(const char *path, char *out, size_t out_len);
+bool plugin_validate_lockfile_file(const char *path, char *out, size_t out_len);
+bool plugin_validate_manifest_and_lock(const char *manifest_path, const char *lock_path,
+                                       char *out, size_t out_len);
 
 /* Global plugin registry */
 extern plugin_registry_t g_plugins;

@@ -1,0 +1,4015 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Freight Intelligence Report</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;600;700&family=IBM+Plex+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+  <style>
+    :root {
+      --bg: #eef2f4;
+      --surface: #ffffff;
+      --surface-soft: #f8fafb;
+      --ink: #12263f;
+      --ink-soft: #4e647b;
+      --line: #cfdae3;
+      --teal: #0a6f78;
+      --teal-soft: #d6eef0;
+      --orange: #ca6702;
+      --orange-soft: #ffecd6;
+      --red: #a83d2a;
+      --red-soft: #f9e1dc;
+      --green: #2f8f6b;
+      --green-soft: #d9efe6;
+      --shadow: 0 8px 28px rgba(12, 44, 74, 0.08);
+      --radius: 14px;
+      --font-ui: "Space Grotesk", sans-serif;
+      --font-mono: "IBM Plex Mono", monospace;
+    }
+
+    * {
+      box-sizing: border-box;
+    }
+
+    html, body {
+      margin: 0;
+      padding: 0;
+      background: var(--bg);
+      color: var(--ink);
+      font-family: var(--font-ui);
+      scroll-behavior: smooth;
+    }
+
+    body {
+      position: relative;
+      min-height: 100vh;
+      line-height: 1.45;
+    }
+
+    body::before,
+    body::after {
+      content: "";
+      position: fixed;
+      z-index: -1;
+      pointer-events: none;
+      filter: blur(0.5px);
+    }
+
+    body::before {
+      width: 420px;
+      height: 420px;
+      top: -120px;
+      right: -90px;
+      background: radial-gradient(circle at center, #bde5ea 0%, rgba(189, 229, 234, 0) 72%);
+    }
+
+    body::after {
+      width: 360px;
+      height: 360px;
+      bottom: -100px;
+      left: -70px;
+      background: radial-gradient(circle at center, #f7dcc1 0%, rgba(247, 220, 193, 0) 70%);
+    }
+
+    a {
+      color: inherit;
+    }
+
+    .page {
+      width: min(1200px, calc(100% - 2rem));
+      margin: 1rem auto 2.5rem;
+      display: grid;
+      gap: 1rem;
+    }
+
+    .hero {
+      background: linear-gradient(145deg, #0f3c50 0%, #12566a 62%, #1f6c73 100%);
+      border-radius: 18px;
+      color: #f4f8fa;
+      padding: 1.2rem;
+      box-shadow: var(--shadow);
+      overflow: hidden;
+      position: relative;
+      isolation: isolate;
+    }
+
+    .hero::before {
+      content: "";
+      position: absolute;
+      width: 240px;
+      height: 240px;
+      right: -90px;
+      top: -70px;
+      border-radius: 50%;
+      background: radial-gradient(circle at center, rgba(255, 255, 255, 0.28) 0%, rgba(255, 255, 255, 0.03) 70%);
+      z-index: -1;
+    }
+
+    .hero::after {
+      content: "";
+      position: absolute;
+      left: -35px;
+      bottom: -55px;
+      width: 260px;
+      height: 140px;
+      border-radius: 100px;
+      background: linear-gradient(90deg, rgba(202, 103, 2, 0.38), rgba(202, 103, 2, 0));
+      transform: rotate(-10deg);
+      z-index: -1;
+    }
+
+    .hero-head {
+      display: flex;
+      justify-content: space-between;
+      gap: 1rem;
+      align-items: flex-start;
+      flex-wrap: wrap;
+    }
+
+    .hero h1 {
+      margin: 0;
+      font-size: clamp(1.5rem, 3vw, 2.2rem);
+      letter-spacing: 0.01em;
+      line-height: 1.1;
+    }
+
+    .hero p {
+      margin: 0.55rem 0 0;
+      max-width: 760px;
+      color: #d5e9ee;
+      font-size: 0.98rem;
+    }
+
+    .stamp {
+      font-family: var(--font-mono);
+      font-size: 0.79rem;
+      color: #cbe2ea;
+      background: rgba(13, 33, 49, 0.35);
+      border: 1px solid rgba(201, 227, 234, 0.32);
+      padding: 0.45rem 0.65rem;
+      border-radius: 8px;
+      white-space: nowrap;
+    }
+
+    .kpi-row {
+      margin-top: 1rem;
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+      gap: 0.65rem;
+    }
+
+    .kpi {
+      background: rgba(13, 33, 49, 0.37);
+      border: 1px solid rgba(202, 227, 236, 0.3);
+      border-radius: 10px;
+      padding: 0.55rem 0.65rem;
+    }
+
+    .kpi .label {
+      font-size: 0.72rem;
+      text-transform: uppercase;
+      letter-spacing: 0.08em;
+      color: #bad7df;
+      margin-bottom: 0.16rem;
+    }
+
+    .kpi .value {
+      font-size: 1.1rem;
+      font-weight: 700;
+      letter-spacing: 0.01em;
+      color: #f2f8fa;
+    }
+
+    .top-nav {
+      position: sticky;
+      top: 0.55rem;
+      z-index: 20;
+      background: rgba(255, 255, 255, 0.8);
+      border: 1px solid #d4dfe8;
+      border-radius: 12px;
+      backdrop-filter: blur(6px);
+      display: flex;
+      flex-wrap: wrap;
+      gap: 0.45rem;
+      padding: 0.45rem;
+      box-shadow: 0 4px 14px rgba(26, 47, 72, 0.08);
+    }
+
+    .top-nav a {
+      text-decoration: none;
+      color: var(--ink);
+      font-size: 0.84rem;
+      font-weight: 600;
+      padding: 0.45rem 0.65rem;
+      border-radius: 9px;
+      transition: background 160ms ease, color 160ms ease, transform 160ms ease;
+    }
+
+    .top-nav a:hover {
+      background: var(--teal-soft);
+      color: #0c5262;
+      transform: translateY(-1px);
+    }
+
+    .section {
+      background: var(--surface);
+      border: 1px solid #d6e1e9;
+      border-radius: var(--radius);
+      box-shadow: var(--shadow);
+      padding: 1rem;
+      opacity: 0;
+      transform: translateY(14px);
+      transition: opacity 380ms ease, transform 380ms ease;
+    }
+
+    .section.show {
+      opacity: 1;
+      transform: translateY(0);
+    }
+
+    .section-head {
+      display: flex;
+      justify-content: space-between;
+      gap: 0.8rem;
+      align-items: flex-start;
+      flex-wrap: wrap;
+      margin-bottom: 0.8rem;
+    }
+
+    .section h2 {
+      margin: 0;
+      font-size: 1.22rem;
+      line-height: 1.2;
+    }
+
+    .section p {
+      margin: 0.35rem 0 0;
+      color: var(--ink-soft);
+      font-size: 0.9rem;
+      max-width: 900px;
+    }
+
+    .badge {
+      display: inline-flex;
+      align-items: center;
+      gap: 0.35rem;
+      font-size: 0.72rem;
+      letter-spacing: 0.05em;
+      text-transform: uppercase;
+      font-family: var(--font-mono);
+      border-radius: 999px;
+      padding: 0.2rem 0.55rem;
+      border: 1px solid transparent;
+    }
+
+    .badge.teal {
+      background: var(--teal-soft);
+      color: #0b5969;
+      border-color: #b4dbe0;
+    }
+
+    .badge.orange {
+      background: var(--orange-soft);
+      color: #8d4a00;
+      border-color: #f4d9b5;
+    }
+
+    .controls {
+      display: grid;
+      gap: 0.6rem;
+      margin-bottom: 0.85rem;
+    }
+
+    .search-row {
+      display: flex;
+      gap: 0.5rem;
+      flex-wrap: wrap;
+      align-items: center;
+    }
+
+    .search-row input {
+      flex: 1;
+      min-width: 220px;
+      border-radius: 10px;
+      border: 1px solid #c8d6e2;
+      padding: 0.58rem 0.72rem;
+      font-size: 0.9rem;
+      font-family: var(--font-ui);
+      background: #fbfdfe;
+      color: var(--ink);
+    }
+
+    .search-row input:focus {
+      outline: 2px solid #8dc7ce;
+      border-color: #8dc7ce;
+      outline-offset: 0;
+    }
+
+    .chip-row {
+      display: flex;
+      gap: 0.45rem;
+      flex-wrap: wrap;
+    }
+
+    .chip {
+      border: 1px solid #c6d5e1;
+      background: #fff;
+      color: var(--ink-soft);
+      padding: 0.37rem 0.65rem;
+      font-size: 0.8rem;
+      border-radius: 999px;
+      font-family: var(--font-mono);
+      cursor: pointer;
+      transition: background 160ms ease, color 160ms ease, border-color 160ms ease;
+    }
+
+    .chip:hover {
+      border-color: #96bdc4;
+      color: #215766;
+    }
+
+    .chip.active {
+      background: var(--teal-soft);
+      color: #0c5262;
+      border-color: #99c7ce;
+    }
+
+    .tab-shell {
+      display: grid;
+      gap: 0.7rem;
+    }
+
+    .tab-top {
+      display: flex;
+      justify-content: space-between;
+      gap: 0.55rem;
+      align-items: center;
+      flex-wrap: wrap;
+    }
+
+    .tab-buttons {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 0.45rem;
+    }
+
+    .tab-btn {
+      border: 1px solid #c6d5e1;
+      background: #fff;
+      color: #2a4a66;
+      padding: 0.42rem 0.62rem;
+      border-radius: 10px;
+      font-family: var(--font-mono);
+      font-size: 0.76rem;
+      cursor: pointer;
+      transition: border-color 150ms ease, transform 150ms ease, background 150ms ease;
+    }
+
+    .tab-btn:hover {
+      border-color: #91b9c8;
+      transform: translateY(-1px);
+      background: #f4fafb;
+    }
+
+    .tab-btn.active {
+      border-color: #8ab7c6;
+      background: var(--teal-soft);
+      color: #0f5564;
+      font-weight: 600;
+    }
+
+    .tab-panel {
+      border: 1px solid #d6e2ec;
+      border-radius: 12px;
+      background: #f8fcfe;
+      padding: 0.72rem;
+      display: grid;
+      gap: 0.6rem;
+      min-height: 230px;
+    }
+
+    .tab-panel-head {
+      display: flex;
+      justify-content: space-between;
+      gap: 0.6rem;
+      flex-wrap: wrap;
+      align-items: flex-start;
+    }
+
+    .tab-panel-title {
+      font-size: 1rem;
+      font-weight: 700;
+      color: #143754;
+    }
+
+    .tab-panel-sub {
+      font-size: 0.82rem;
+      color: #42607a;
+      margin-top: 0.22rem;
+    }
+
+    .pulse-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(170px, 1fr));
+      gap: 0.5rem;
+    }
+
+    .pulse-card {
+      border: 1px solid #d5e2eb;
+      border-radius: 10px;
+      background: #fff;
+      padding: 0.48rem;
+      display: grid;
+      gap: 0.25rem;
+    }
+
+    .pulse-card .label {
+      font-size: 0.72rem;
+      color: #4a6580;
+      text-transform: uppercase;
+      letter-spacing: 0.06em;
+      font-family: var(--font-mono);
+    }
+
+    .pulse-card .value {
+      font-size: 1rem;
+      font-weight: 700;
+      color: #193d59;
+    }
+
+    .meter {
+      width: 100%;
+      height: 8px;
+      border-radius: 999px;
+      overflow: hidden;
+      background: #dfe8ef;
+    }
+
+    .meter > span {
+      display: block;
+      height: 100%;
+      width: 0;
+      background: linear-gradient(90deg, #2a8189, #5ebec2);
+      transition: width 480ms ease;
+    }
+
+    .route-board {
+      overflow-x: auto;
+    }
+
+    .route-board table {
+      min-width: 620px;
+    }
+
+    .score-line {
+      display: inline-flex;
+      align-items: center;
+      gap: 0.45rem;
+    }
+
+    .score-track {
+      width: 104px;
+      height: 7px;
+      border-radius: 999px;
+      background: #dde8f1;
+      overflow: hidden;
+    }
+
+    .score-fill {
+      display: block;
+      height: 100%;
+      width: 0;
+      transition: width 420ms ease;
+    }
+
+    .score-fill.long {
+      background: linear-gradient(90deg, #1f8660, #59bf92);
+    }
+
+    .score-fill.short {
+      background: linear-gradient(90deg, #a33d2a, #dd7668);
+    }
+
+    .timeline-filters {
+      display: flex;
+      gap: 0.42rem;
+      flex-wrap: wrap;
+    }
+
+    .timeline-item {
+      border: 1px solid #d4e1eb;
+      border-radius: 10px;
+      background: #fff;
+      padding: 0.5rem 0.58rem;
+      display: grid;
+      gap: 0.2rem;
+    }
+
+    .timeline-item .head {
+      display: flex;
+      justify-content: space-between;
+      gap: 0.5rem;
+      align-items: center;
+      flex-wrap: wrap;
+    }
+
+    .timeline-item .date {
+      font-family: var(--font-mono);
+      font-size: 0.73rem;
+      color: #3f5f7d;
+    }
+
+    .timeline-item .evt {
+      font-size: 0.84rem;
+      color: #173754;
+      font-weight: 600;
+    }
+
+    .timeline-item .meta {
+      font-size: 0.78rem;
+      color: #47627c;
+    }
+
+    .rival-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(210px, 1fr));
+      gap: 0.48rem;
+    }
+
+    .rival-card {
+      border: 1px solid #d4e1eb;
+      border-radius: 10px;
+      background: #fff;
+      padding: 0.5rem;
+      display: grid;
+      gap: 0.26rem;
+    }
+
+    .rival-card .who {
+      font-size: 0.86rem;
+      font-weight: 700;
+      color: #183a56;
+    }
+
+    .rival-card .line {
+      font-size: 0.79rem;
+      color: #42607a;
+    }
+
+    .tool-grid,
+    .chain-grid,
+    .company-grid,
+    .people-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(250px, 1fr));
+      gap: 0.7rem;
+    }
+
+    .tool-card,
+    .company-card,
+    .person-card,
+    .tier-card {
+      background: var(--surface-soft);
+      border: 1px solid #dae4ec;
+      border-radius: 12px;
+      padding: 0.75rem;
+      display: grid;
+      gap: 0.45rem;
+      transition: border-color 160ms ease, transform 160ms ease, box-shadow 160ms ease;
+    }
+
+    .tool-card:hover,
+    .company-card:hover,
+    .person-card:hover,
+    .tier-card:hover {
+      border-color: #a2c1cc;
+      transform: translateY(-2px);
+      box-shadow: 0 5px 14px rgba(27, 60, 89, 0.08);
+    }
+
+    .tool-head,
+    .company-head,
+    .person-head {
+      display: flex;
+      justify-content: space-between;
+      gap: 0.5rem;
+      align-items: flex-start;
+    }
+
+    .name {
+      font-weight: 700;
+      font-size: 0.98rem;
+      line-height: 1.22;
+    }
+
+    .subtle {
+      color: var(--ink-soft);
+      font-size: 0.82rem;
+    }
+
+    .mono {
+      font-family: var(--font-mono);
+      font-size: 0.75rem;
+      color: #35536f;
+    }
+
+    .pill-row {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 0.35rem;
+    }
+
+    .pill {
+      font-size: 0.7rem;
+      font-family: var(--font-mono);
+      text-transform: uppercase;
+      letter-spacing: 0.05em;
+      border: 1px solid #ccdae5;
+      border-radius: 999px;
+      padding: 0.18rem 0.48rem;
+      background: #fff;
+      color: #3f5f7b;
+    }
+
+    .pill.risk {
+      border-color: #e8c0b9;
+      background: var(--red-soft);
+      color: #9e3422;
+    }
+
+    .pill.alpha {
+      border-color: #b9d9cb;
+      background: var(--green-soft);
+      color: #1f7756;
+    }
+
+    .pill.context {
+      border-color: #cbd8ea;
+      background: #ebf1f8;
+      color: #3f5e7b;
+    }
+
+    .pill.execution {
+      border-color: #f0d7b4;
+      background: #fef1e1;
+      color: #8f5609;
+    }
+
+    .desc {
+      color: #233d5a;
+      font-size: 0.86rem;
+      line-height: 1.4;
+      display: -webkit-box;
+      -webkit-line-clamp: 3;
+      -webkit-box-orient: vertical;
+      overflow: hidden;
+    }
+
+    .desc.open {
+      display: block;
+      overflow: visible;
+      -webkit-line-clamp: initial;
+    }
+
+    .ghost-btn {
+      justify-self: start;
+      border: 1px solid #bed0dd;
+      background: #fff;
+      color: #2a4e6b;
+      padding: 0.25rem 0.52rem;
+      font-size: 0.74rem;
+      border-radius: 8px;
+      font-family: var(--font-mono);
+      cursor: pointer;
+    }
+
+    .ghost-btn:hover {
+      border-color: #94b8c8;
+      color: #124a60;
+    }
+
+    .loop-layout,
+    .chain-layout {
+      display: grid;
+      gap: 0.8rem;
+      grid-template-columns: 280px 1fr;
+      align-items: start;
+    }
+
+    .list-pane {
+      display: grid;
+      gap: 0.4rem;
+    }
+
+    .list-btn {
+      width: 100%;
+      text-align: left;
+      border: 1px solid #cddae6;
+      background: #f9fbfd;
+      color: #21415f;
+      border-radius: 10px;
+      padding: 0.52rem 0.62rem;
+      cursor: pointer;
+      transition: border-color 160ms ease, background 160ms ease, transform 160ms ease;
+    }
+
+    .list-btn .step {
+      font-family: var(--font-mono);
+      font-size: 0.72rem;
+      letter-spacing: 0.05em;
+      text-transform: uppercase;
+      color: #4c6883;
+    }
+
+    .list-btn .title {
+      font-size: 0.9rem;
+      font-weight: 700;
+      color: #163552;
+      margin-top: 0.12rem;
+      display: block;
+    }
+
+    .list-btn:hover {
+      border-color: #97bcc8;
+      background: #f3f9fa;
+      transform: translateX(1px);
+    }
+
+    .list-btn.active {
+      border-color: #8db8c6;
+      background: var(--teal-soft);
+    }
+
+    .detail-pane {
+      background: var(--surface-soft);
+      border: 1px solid #d7e3ec;
+      border-radius: 12px;
+      padding: 0.75rem;
+      min-height: 250px;
+    }
+
+    .detail-pane h3 {
+      margin: 0;
+      font-size: 1.02rem;
+    }
+
+    .detail-pane .deck {
+      margin: 0.35rem 0 0.5rem;
+      color: #3b5772;
+      font-size: 0.88rem;
+    }
+
+    .bullets {
+      margin: 0;
+      padding-left: 1.1rem;
+      color: #24415f;
+      font-size: 0.86rem;
+    }
+
+    .bullets li + li {
+      margin-top: 0.26rem;
+    }
+
+    .decision {
+      margin-top: 0.65rem;
+      border-left: 3px solid var(--orange);
+      background: #fff3e6;
+      border-radius: 8px;
+      padding: 0.56rem 0.6rem;
+      color: #6f430c;
+      font-size: 0.84rem;
+    }
+
+    .table-wrap {
+      overflow-x: auto;
+      border: 1px solid #d5e1ea;
+      border-radius: 12px;
+      background: #fbfdff;
+    }
+
+    table {
+      width: 100%;
+      border-collapse: collapse;
+      min-width: 680px;
+    }
+
+    th,
+    td {
+      text-align: left;
+      padding: 0.55rem 0.62rem;
+      border-bottom: 1px solid #e2ebf1;
+      vertical-align: top;
+      font-size: 0.84rem;
+    }
+
+    th {
+      background: #edf4f9;
+      color: #163552;
+      font-family: var(--font-mono);
+      font-size: 0.72rem;
+      letter-spacing: 0.06em;
+      text-transform: uppercase;
+    }
+
+    tr:last-child td {
+      border-bottom: none;
+    }
+
+    .cost {
+      white-space: nowrap;
+      font-family: var(--font-mono);
+    }
+
+    .stats-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+      gap: 0.6rem;
+      margin-top: 0.7rem;
+    }
+
+    .stat {
+      border: 1px solid #d7e3eb;
+      border-radius: 10px;
+      background: #f9fcff;
+      padding: 0.58rem;
+      display: grid;
+      gap: 0.32rem;
+    }
+
+    .stat .k {
+      font-size: 0.72rem;
+      color: #49637d;
+      text-transform: uppercase;
+      letter-spacing: 0.06em;
+      font-family: var(--font-mono);
+    }
+
+    .stat .v {
+      font-size: 1rem;
+      font-weight: 700;
+      color: #173854;
+    }
+
+    .tier-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
+      gap: 0.7rem;
+    }
+
+    .tier-title {
+      font-size: 0.9rem;
+      font-weight: 700;
+      color: #143350;
+    }
+
+    .tier-sub {
+      font-family: var(--font-mono);
+      font-size: 0.72rem;
+      color: #54708b;
+      text-transform: uppercase;
+      letter-spacing: 0.06em;
+    }
+
+    .bar {
+      width: 100%;
+      height: 8px;
+      border-radius: 999px;
+      overflow: hidden;
+      background: #dde8f1;
+      margin-top: 0.2rem;
+    }
+
+    .bar > span {
+      display: block;
+      height: 100%;
+      width: 0;
+      background: linear-gradient(90deg, #267f87, #48a7ad);
+      transition: width 900ms ease;
+    }
+
+    .sim-grid {
+      display: grid;
+      grid-template-columns: 300px 1fr;
+      gap: 0.8rem;
+      align-items: start;
+    }
+
+    .sim-controls {
+      display: grid;
+      gap: 0.34rem;
+      background: #f8fbfd;
+      border: 1px solid #d7e3ed;
+      border-radius: 12px;
+      padding: 0.68rem;
+    }
+
+    .sim-controls.compact {
+      gap: 0.45rem;
+      padding: 0;
+      border: none;
+      background: transparent;
+    }
+
+    .slider-label {
+      font-size: 0.8rem;
+      color: #2c4864;
+      display: flex;
+      justify-content: space-between;
+      gap: 0.4rem;
+      align-items: center;
+      margin-top: 0.15rem;
+    }
+
+    .sim-range {
+      width: 100%;
+      accent-color: #1f7a82;
+    }
+
+    .sim-controls select {
+      width: 100%;
+      border: 1px solid #c8d6e2;
+      border-radius: 9px;
+      background: #fff;
+      color: #183854;
+      font-family: var(--font-ui);
+      font-size: 0.84rem;
+      padding: 0.4rem 0.55rem;
+    }
+
+    .sim-controls select:focus {
+      outline: 2px solid #90c4ca;
+      border-color: #90c4ca;
+    }
+
+    .sim-output {
+      display: grid;
+      gap: 0.7rem;
+    }
+
+    .sim-kpi-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+      gap: 0.45rem;
+    }
+
+    .sim-kpi {
+      border: 1px solid #d4e0ea;
+      border-radius: 10px;
+      background: #f8fcff;
+      padding: 0.5rem 0.55rem;
+      display: grid;
+      gap: 0.15rem;
+    }
+
+    .sim-kpi .k {
+      font-size: 0.69rem;
+      text-transform: uppercase;
+      letter-spacing: 0.05em;
+      color: #5a738c;
+      font-family: var(--font-mono);
+    }
+
+    .sim-kpi .v {
+      font-size: 1.04rem;
+      font-weight: 700;
+      color: #1a3c58;
+    }
+
+    .edge-grid,
+    .playbook-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
+      gap: 0.7rem;
+    }
+
+    .decay-row {
+      margin-top: 0.48rem;
+      display: grid;
+      gap: 0.2rem;
+    }
+
+    .decay-row-head {
+      display: flex;
+      justify-content: space-between;
+      gap: 0.5rem;
+      font-size: 0.8rem;
+      color: #2b4863;
+    }
+
+    .decay-track {
+      width: 100%;
+      height: 9px;
+      border-radius: 999px;
+      background: #dfe9f2;
+      overflow: hidden;
+    }
+
+    .decay-fill {
+      height: 100%;
+      width: 0;
+      background: linear-gradient(90deg, #1c7781, #4db0b5);
+      transition: width 800ms ease;
+    }
+
+    .rank-list {
+      display: grid;
+      gap: 0.36rem;
+      margin-top: 0.5rem;
+    }
+
+    .rank-item {
+      border: 1px solid #d6e2eb;
+      border-radius: 9px;
+      background: #f9fcfe;
+      padding: 0.42rem 0.5rem;
+      display: flex;
+      justify-content: space-between;
+      gap: 0.55rem;
+      align-items: center;
+    }
+
+    .rank-item .left {
+      display: grid;
+      gap: 0.08rem;
+    }
+
+    .rank-item .tool {
+      font-size: 0.79rem;
+      font-family: var(--font-mono);
+      color: #193b57;
+    }
+
+    .rank-item .note {
+      font-size: 0.74rem;
+      color: #4d6680;
+    }
+
+    .rank-score {
+      font-family: var(--font-mono);
+      font-size: 0.8rem;
+      border: 1px solid #bad6c2;
+      color: #1f6f4f;
+      background: #deefe5;
+      border-radius: 999px;
+      padding: 0.18rem 0.42rem;
+      white-space: nowrap;
+    }
+
+    .checklist {
+      display: grid;
+      gap: 0.33rem;
+      margin-top: 0.45rem;
+    }
+
+    .check-item {
+      display: flex;
+      align-items: center;
+      gap: 0.4rem;
+      border: 1px solid #d6e2eb;
+      border-radius: 8px;
+      padding: 0.34rem 0.45rem;
+      background: #fbfdff;
+      font-size: 0.81rem;
+      color: #1e3f5d;
+    }
+
+    .check-item input {
+      accent-color: #217b82;
+    }
+
+    .progress-track {
+      margin-top: 0.55rem;
+      width: 100%;
+      height: 10px;
+      border-radius: 999px;
+      background: #dfe8ef;
+      overflow: hidden;
+    }
+
+    .progress-track > span {
+      display: block;
+      width: 0;
+      height: 100%;
+      background: linear-gradient(90deg, #1e7c84, #53b7bc);
+      transition: width 300ms ease;
+    }
+
+    .map-pre {
+      margin: 0.4rem 0 0;
+      white-space: pre-wrap;
+      font-size: 0.74rem;
+      line-height: 1.42;
+      font-family: var(--font-mono);
+      color: #234260;
+      background: #f7fbfd;
+      border: 1px solid #d7e2eb;
+      border-radius: 9px;
+      padding: 0.5rem;
+    }
+
+    .advanced-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(270px, 1fr));
+      gap: 0.7rem;
+    }
+
+    .preset-row,
+    .mc-controls {
+      display: grid;
+      gap: 0.4rem;
+      margin-top: 0.45rem;
+    }
+
+    .preset-row {
+      display: flex;
+      flex-wrap: wrap;
+      align-items: center;
+    }
+
+    .preset-row .text-input {
+      flex: 1 1 100%;
+    }
+
+    .preset-row select {
+      flex: 1 1 170px;
+      min-width: 150px;
+      border: 1px solid #c8d6e2;
+      border-radius: 9px;
+      background: #fff;
+      color: #183854;
+      font-family: var(--font-ui);
+      font-size: 0.84rem;
+      padding: 0.4rem 0.55rem;
+    }
+
+    .text-input {
+      width: 100%;
+      border-radius: 9px;
+      border: 1px solid #c8d6e2;
+      padding: 0.46rem 0.58rem;
+      font-family: var(--font-ui);
+      font-size: 0.84rem;
+      color: #163754;
+      background: #fff;
+    }
+
+    .text-input:focus {
+      outline: 2px solid #90c4ca;
+      border-color: #90c4ca;
+    }
+
+    .preset-row > .ghost-btn {
+      justify-self: start;
+    }
+
+    .mc-controls .ghost-btn {
+      justify-self: start;
+    }
+
+    .mc-histogram {
+      margin-top: 0.6rem;
+      border: 1px solid #d8e3ec;
+      border-radius: 10px;
+      background: #f7fbfd;
+      padding: 0.42rem;
+      display: grid;
+      grid-template-columns: repeat(12, minmax(0, 1fr));
+      gap: 0.26rem;
+      align-items: end;
+      min-height: 104px;
+    }
+
+    .mc-bar {
+      border-radius: 4px 4px 0 0;
+      background: linear-gradient(180deg, #4caeb4, #1f7880);
+      min-height: 3px;
+      height: 8px;
+      transition: height 520ms ease;
+    }
+
+    .mc-axis {
+      grid-column: 1 / -1;
+      display: flex;
+      justify-content: space-between;
+      font-size: 0.68rem;
+      color: #4d667f;
+      font-family: var(--font-mono);
+      padding-top: 0.2rem;
+    }
+
+    .alert-list {
+      margin-top: 0.52rem;
+      display: grid;
+      gap: 0.36rem;
+    }
+
+    .alert-item {
+      border: 1px solid #d6e2eb;
+      border-radius: 9px;
+      background: #f9fcfe;
+      padding: 0.44rem 0.5rem;
+      display: grid;
+      gap: 0.24rem;
+    }
+
+    .alert-item .head {
+      display: flex;
+      justify-content: space-between;
+      gap: 0.5rem;
+      align-items: center;
+      flex-wrap: wrap;
+    }
+
+    .alert-item .title {
+      font-size: 0.82rem;
+      font-weight: 700;
+      color: #173a56;
+    }
+
+    .alert-item .desc {
+      font-size: 0.78rem;
+      color: #46627c;
+      display: block;
+      overflow: visible;
+    }
+
+    .foot {
+      text-align: center;
+      font-size: 0.76rem;
+      color: #5d7389;
+      font-family: var(--font-mono);
+      margin-top: 0.4rem;
+    }
+
+    .hidden {
+      display: none !important;
+    }
+
+    @media (max-width: 960px) {
+      .loop-layout,
+      .chain-layout,
+      .sim-grid {
+        grid-template-columns: 1fr;
+      }
+    }
+
+    @media (max-width: 720px) {
+      .page {
+        width: calc(100% - 1rem);
+        margin: 0.5rem auto 1.5rem;
+      }
+
+      .hero,
+      .section {
+        padding: 0.8rem;
+      }
+
+      .top-nav {
+        top: 0.35rem;
+      }
+
+      .name {
+        font-size: 0.93rem;
+      }
+
+      .desc,
+      .subtle,
+      .mono {
+        font-size: 0.8rem;
+      }
+
+      .search-row input {
+        width: 100%;
+      }
+    }
+  </style>
+</head>
+<body>
+  <main class="page">
+    <header class="hero" id="top">
+      <div class="hero-head">
+        <div>
+          <h1>Freight Quant Intelligence Report</h1>
+          <p>Integrated operating brief across sanctions risk, freight market fundamentals, execution tooling, data provider economics, and competitive intelligence for maritime alpha generation.</p>
+        </div>
+        <div class="stamp" id="stamp">Report Date</div>
+      </div>
+      <div class="kpi-row" id="hero-kpis"></div>
+    </header>
+
+    <nav class="top-nav">
+      <a href="#command-tabs">Command Tabs</a>
+      <a href="#tool-monitor">Tool Monitor</a>
+      <a href="#agent-loop">Agent Loop</a>
+      <a href="#signal-chains">Signal Chains</a>
+      <a href="#scenario-lab">Scenario Lab</a>
+      <a href="#providers">Provider Stack</a>
+      <a href="#competitive">Competitive Intel</a>
+      <a href="#market-structure">Market Structure</a>
+      <a href="#edge-lab">Edge Lab</a>
+      <a href="#playbook">Playbook</a>
+      <a href="#advanced-lab">Advanced Lab</a>
+      <a href="#people">Power Players</a>
+    </nav>
+
+    <section class="section" id="command-tabs">
+      <div class="section-head">
+        <div>
+          <h2>Command Deck Tabs</h2>
+          <p>Tabbed situational cockpit for macro stress, route conviction, catalyst timing, and competitor behavior. Keyboard shortcut: <code>[</code> and <code>]</code> to switch tabs.</p>
+        </div>
+        <span class="badge teal">live tabbed intel</span>
+      </div>
+      <div class="tab-shell">
+        <div class="tab-top">
+          <div class="tab-buttons" id="intel-tab-buttons"></div>
+          <button class="chip" id="intel-tab-cycle">Auto-cycle off</button>
+        </div>
+        <div id="intel-tab-panels"></div>
+      </div>
+    </section>
+
+    <section class="section" id="tool-monitor">
+      <div class="section-head">
+        <div>
+          <h2>Priority Tool Monitor</h2>
+          <p>Focused panel for geopolitical risk, structural fleet fundamentals, and executable freight trading infrastructure.</p>
+        </div>
+        <span class="badge teal" id="tool-count-badge">17 tools</span>
+      </div>
+      <div class="controls">
+        <div class="search-row">
+          <input id="tool-search" type="search" placeholder="Search tools by name, provider, domain, or keyword">
+        </div>
+        <div class="chip-row" id="domain-chips"></div>
+        <div class="chip-row" id="signal-chips"></div>
+      </div>
+      <div class="tool-grid" id="tool-grid"></div>
+      <p class="subtle mono hidden" id="tool-empty"></p>
+    </section>
+
+    <section class="section" id="agent-loop">
+      <div class="section-head">
+        <div>
+          <h2>Freight Quant Agent Loop</h2>
+          <p>Cadence: every 15 minutes or event-triggered. Workflow bridges sensing, pricing, flow intelligence, and direct execution.</p>
+        </div>
+        <span class="badge orange">7-step process</span>
+      </div>
+      <div class="loop-layout">
+        <div class="list-pane" id="loop-list"></div>
+        <div class="detail-pane" id="loop-detail"></div>
+      </div>
+    </section>
+
+    <section class="section" id="signal-chains">
+      <div class="section-head">
+        <div>
+          <h2>Signal Chain Scenarios</h2>
+          <p>Composed event pipelines that convert raw feeds into route-level trade expressions.</p>
+        </div>
+        <span class="badge teal">4 reference chains</span>
+      </div>
+      <div class="chain-layout">
+        <div class="list-pane" id="chain-list"></div>
+        <div class="detail-pane" id="chain-detail"></div>
+      </div>
+    </section>
+
+    <section class="section" id="scenario-lab">
+      <div class="section-head">
+        <div>
+          <h2>Scenario Workbench</h2>
+          <p>Stress core freight routes by adjusting chokepoint disruption, sanctions pressure, congestion, bunker shock, and demand impulse.</p>
+        </div>
+        <span class="badge teal">interactive model</span>
+      </div>
+      <div class="sim-grid">
+        <div class="sim-controls">
+          <label class="slider-label" for="sim-hormuz">Hormuz disruption <span id="sim-hormuz-value" class="mono">55%</span></label>
+          <input id="sim-hormuz" class="sim-range" type="range" min="0" max="100" value="55">
+
+          <label class="slider-label" for="sim-bab">Bab el-Mandeb disruption <span id="sim-bab-value" class="mono">45%</span></label>
+          <input id="sim-bab" class="sim-range" type="range" min="0" max="100" value="45">
+
+          <label class="slider-label" for="sim-sanctions">Sanctions intensity <span id="sim-sanctions-value" class="mono">60%</span></label>
+          <input id="sim-sanctions" class="sim-range" type="range" min="0" max="100" value="60">
+
+          <label class="slider-label" for="sim-congestion">Port congestion <span id="sim-congestion-value" class="mono">50%</span></label>
+          <input id="sim-congestion" class="sim-range" type="range" min="0" max="100" value="50">
+
+          <label class="slider-label" for="sim-bunker">Bunker cost shock <span id="sim-bunker-value" class="mono">35%</span></label>
+          <input id="sim-bunker" class="sim-range" type="range" min="0" max="100" value="35">
+
+          <label class="slider-label" for="sim-china">China demand impulse <span id="sim-china-value" class="mono">+12</span></label>
+          <input id="sim-china" class="sim-range" type="range" min="-50" max="50" value="12">
+
+          <label class="slider-label" for="sim-risk">Risk appetite <span id="sim-risk-value" class="mono">58%</span></label>
+          <input id="sim-risk" class="sim-range" type="range" min="0" max="100" value="58">
+        </div>
+        <div class="sim-output">
+          <div class="sim-kpi-grid" id="sim-kpis"></div>
+          <div class="table-wrap">
+            <table>
+              <thead>
+                <tr>
+                  <th>Route</th>
+                  <th>Segment</th>
+                  <th>Alpha Score</th>
+                  <th>Bias</th>
+                  <th>Primary Driver</th>
+                </tr>
+              </thead>
+              <tbody id="sim-route-body"></tbody>
+            </table>
+          </div>
+          <div class="decision" id="sim-summary"></div>
+        </div>
+      </div>
+    </section>
+
+    <section class="section" id="providers">
+      <div class="section-head">
+        <div>
+          <h2>Data Provider Stack</h2>
+          <p>Coverage map of benchmark freight data, alternative maritime intelligence, and macro sources.</p>
+        </div>
+        <span class="badge orange">$93k-$305k / year</span>
+      </div>
+      <div class="table-wrap">
+        <table>
+          <thead>
+            <tr>
+              <th>Provider</th>
+              <th>Core Data</th>
+              <th>Estimated Cost</th>
+            </tr>
+          </thead>
+          <tbody id="provider-body"></tbody>
+        </table>
+      </div>
+    </section>
+
+    <section class="section" id="competitive">
+      <div class="section-head">
+        <div>
+          <h2>Competitive Intelligence</h2>
+          <p>Who runs what stack, where defensibility comes from, and which participants monetize signals vs keep them internal.</p>
+        </div>
+        <span class="badge teal" id="company-count-badge">11 entities</span>
+      </div>
+      <div class="controls">
+        <div class="search-row">
+          <input id="company-search" type="search" placeholder="Search firms, edge, data stack, or geography">
+        </div>
+        <div class="chip-row" id="company-type-chips"></div>
+      </div>
+      <div class="company-grid" id="company-grid"></div>
+      <p class="subtle mono hidden" id="company-empty"></p>
+      <div class="stats-grid" id="market-stats"></div>
+    </section>
+
+    <section class="section" id="market-structure">
+      <div class="section-head">
+        <div>
+          <h2>Market Structure and Edge Hierarchy</h2>
+          <p>Information advantage decays fast in freight. Tiering clarifies where edge is structural vs commoditized.</p>
+        </div>
+        <span class="badge orange">asymmetric information flow</span>
+      </div>
+      <div class="tier-grid" id="tier-grid"></div>
+      <div class="tier-grid" style="margin-top: 0.7rem;" id="insight-grid"></div>
+    </section>
+
+    <section class="section" id="edge-lab">
+      <div class="section-head">
+        <div>
+          <h2>Edge Decay and Reliability Lab</h2>
+          <p>Relative half-life by signal family plus tool-level reliability scores for prioritization and failover planning.</p>
+        </div>
+        <span class="badge orange">signal governance</span>
+      </div>
+      <div class="edge-grid">
+        <article class="tier-card">
+          <div class="tier-title">Signal Half-Life (Operational)</div>
+          <div id="decay-bars"></div>
+        </article>
+        <article class="tier-card">
+          <div class="tier-title">Tool Reliability Leaderboard</div>
+          <div class="subtle">Estimated reliability based on source quality, latency path, and operational determinism.</div>
+          <div class="rank-list" id="reliability-list"></div>
+        </article>
+      </div>
+    </section>
+
+    <section class="section" id="playbook">
+      <div class="section-head">
+        <div>
+          <h2>Execution Playbook</h2>
+          <p>Operational checklist and venue selection logic before placing freight risk.</p>
+        </div>
+        <span class="badge teal">operator mode</span>
+      </div>
+      <div class="playbook-grid">
+        <article class="tier-card">
+          <div class="tier-title">Pre-Trade Checklist</div>
+          <div class="checklist" id="pretrade-checklist"></div>
+          <div class="progress-track"><span id="check-progress-bar"></span></div>
+          <div class="subtle mono" id="check-progress-text"></div>
+        </article>
+
+        <article class="tier-card">
+          <div class="tier-title">Venue Selector</div>
+          <div class="sim-controls compact">
+            <label class="slider-label" for="venue-urgency">Urgency</label>
+            <select id="venue-urgency">
+              <option value="high">High</option>
+              <option value="medium" selected>Medium</option>
+              <option value="low">Low</option>
+            </select>
+
+            <label class="slider-label" for="venue-size">Order size</label>
+            <select id="venue-size">
+              <option value="large">Large</option>
+              <option value="medium" selected>Medium</option>
+              <option value="small">Small</option>
+            </select>
+
+            <label class="slider-label" for="venue-liquidity">Screen liquidity</label>
+            <select id="venue-liquidity">
+              <option value="high">High</option>
+              <option value="medium" selected>Medium</option>
+              <option value="low">Low</option>
+            </select>
+
+            <label class="slider-label" for="venue-anon">Need anonymity</label>
+            <select id="venue-anon">
+              <option value="yes">Yes</option>
+              <option value="no" selected>No</option>
+            </select>
+          </div>
+          <div class="decision" id="venue-decision"></div>
+        </article>
+
+        <article class="tier-card">
+          <div class="tier-title">Ecosystem Map</div>
+          <pre class="map-pre">Physical World -> Data Layer -> Intelligence -> Capital
+Vessels/Ports/Cargoes -> Kpler/Vortexa/Signal/Oceanbolt/Ursa -> Citadel/CargoMetrics/Trafigura -> CME/SGX/ICE/ETFs
+                    -> Baltic Exchange + Clarksons benchmark layer</pre>
+          <div class="subtle">Meta-rule: speed of validated signal beats breadth of delayed signal.</div>
+        </article>
+      </div>
+    </section>
+
+    <section class="section" id="advanced-lab">
+      <div class="section-head">
+        <div>
+          <h2>Advanced Quant Lab</h2>
+          <p>Persistent scenario presets, Monte Carlo stress distributions, and real-time alert rules driven from the active market state.</p>
+        </div>
+        <span class="badge orange">research mode</span>
+      </div>
+      <div class="advanced-grid">
+        <article class="tier-card">
+          <div class="tier-title">Scenario Preset Manager</div>
+          <div class="preset-row">
+            <select id="preset-select"></select>
+            <button class="ghost-btn" id="preset-apply">Apply</button>
+          </div>
+          <div class="preset-row">
+            <input id="preset-name" class="text-input" type="text" placeholder="Save current scenario as...">
+          </div>
+          <div class="preset-row">
+            <button class="ghost-btn" id="preset-save">Save Preset</button>
+            <button class="ghost-btn" id="preset-delete">Delete Preset</button>
+            <button class="ghost-btn" id="preset-reset">Reset Baseline</button>
+          </div>
+          <div class="subtle mono" id="preset-status"></div>
+        </article>
+
+        <article class="tier-card">
+          <div class="tier-title">Monte Carlo Stress Engine</div>
+          <div class="mc-controls">
+            <label class="slider-label" for="mc-runs">Simulation runs</label>
+            <select id="mc-runs">
+              <option value="250">250</option>
+              <option value="500" selected>500</option>
+              <option value="1000">1000</option>
+              <option value="2000">2000</option>
+            </select>
+
+            <label class="slider-label" for="mc-shock">Shock width <span id="mc-shock-value" class="mono">18%</span></label>
+            <input id="mc-shock" class="sim-range" type="range" min="5" max="40" value="18">
+
+            <button class="ghost-btn" id="mc-run">Run Stress Test</button>
+          </div>
+          <div class="sim-kpi-grid" id="mc-kpis"></div>
+          <div class="mc-histogram" id="mc-histogram"></div>
+          <div class="subtle mono" id="mc-summary"></div>
+        </article>
+
+        <article class="tier-card">
+          <div class="tier-title">Alert Engine</div>
+          <div class="subtle">Rule-based alerts update from scenario state and stress distribution outputs.</div>
+          <div class="alert-list" id="alert-list"></div>
+        </article>
+      </div>
+    </section>
+
+    <section class="section" id="people">
+      <div class="section-head">
+        <div>
+          <h2>Power Players</h2>
+          <p>Founders, operators, and analysts shaping freight and maritime intelligence markets.</p>
+        </div>
+        <span class="badge teal" id="people-count-badge">12 profiles</span>
+      </div>
+      <div class="people-grid" id="people-grid"></div>
+    </section>
+
+    <div class="foot">Freight intelligence report for research and scenario planning. Source base: Institutional Investor, Neudata, FreightWaves, vendor materials, and public filings.</div>
+  </main>
+
+  <script>
+    const toolDomains = {
+      geopolitical: [
+        {
+          name: "sanctions_tracker",
+          description: "Sanctions monitoring for OFAC SDN updates, EU sanctions, and vessel blacklists. New sanctions reduce compliant fleet supply and can reprice route risk quickly.",
+          cadence: "end_of_day",
+          signal: "risk",
+          access: "none",
+          cost: "FREE",
+          decay: "days",
+          provider: "OFAC / EU / UN / WindwardAI",
+          rate: "unlimited"
+        },
+        {
+          name: "war_risk_premiums",
+          description: "War risk insurance premiums by zone published via Lloyd's Joint War Committee and broker channels. Premium spikes are market-implied conflict escalation signals.",
+          cadence: "end_of_day",
+          signal: "alpha",
+          access: "subscription",
+          cost: "FREE",
+          decay: "hours",
+          provider: "Lloyd's JWC / Insurance brokers",
+          rate: "none"
+        },
+        {
+          name: "caldara_iacoviello_gpr",
+          description: "Caldara-Iacoviello Geopolitical Risk Index used by central banks and institutions as a benchmark geopolitical context factor.",
+          cadence: "monthly",
+          signal: "context",
+          access: "none",
+          cost: "FREE",
+          decay: "days",
+          provider: "Matteo Iacoviello (Federal Reserve Board)",
+          rate: "none"
+        },
+        {
+          name: "piracy_attack_log",
+          description: "IMB Piracy Reporting Centre feeds and incident database. Attack clusters can force rerouting, tighten supply, and increase voyage costs.",
+          cadence: "end_of_day",
+          signal: "risk",
+          access: "none",
+          cost: "FREE",
+          decay: "days",
+          provider: "ICC International Maritime Bureau",
+          rate: "none"
+        }
+      ],
+      fundamental: [
+        {
+          name: "fleet_supply_database",
+          description: "Global fleet counts by vessel class, age profile, and DWT. Base denominator for supply-demand analysis.",
+          cadence: "monthly",
+          signal: "alpha",
+          access: "subscription",
+          cost: "FREE",
+          decay: "days",
+          provider: "Clarksons Research / Equasis / IHS Markit",
+          rate: "none"
+        },
+        {
+          name: "orderbook_deliveries",
+          description: "Shipyard orderbook and expected delivery schedule. Orderbook-to-fleet ratio remains the key forward supply indicator.",
+          cadence: "monthly",
+          signal: "alpha",
+          access: "subscription",
+          cost: "FREE",
+          decay: "days",
+          provider: "Clarksons / VesselsValue / Braemar",
+          rate: "none"
+        },
+        {
+          name: "scrapping_demolition",
+          description: "Vessel demolition trends. Rising scrapping removes tonnage and can support freight rates.",
+          cadence: "monthly",
+          signal: "alpha",
+          access: "subscription",
+          cost: "FREE",
+          decay: "days",
+          provider: "Clarksons / GMS / Best Oasis",
+          rate: "none"
+        },
+        {
+          name: "newbuild_prices",
+          description: "Newbuilding prices by vessel class. High newbuild pricing can constrain fresh ordering and cap future supply growth.",
+          cadence: "monthly",
+          signal: "context",
+          access: "subscription",
+          cost: "FREE",
+          decay: "days",
+          provider: "Clarksons / VesselsValue",
+          rate: "none"
+        },
+        {
+          name: "secondhand_vessel_sales",
+          description: "Sale and purchase market transactions used as real-time asset valuation proxies across classes.",
+          cadence: "end_of_day",
+          signal: "alpha",
+          access: "api_key",
+          cost: "$0.10",
+          decay: "days",
+          provider: "VesselsValue / Clarksons / Allied",
+          rate: "100/day"
+        },
+        {
+          name: "dry_dock_schedule",
+          description: "Dry-docking and survey schedules. Vessels in dock are temporarily removed from tradable supply.",
+          cadence: "monthly",
+          signal: "context",
+          access: "subscription",
+          cost: "FREE",
+          decay: "days",
+          provider: "Clarksons / ClassNK / Lloyd's Register",
+          rate: "none"
+        },
+        {
+          name: "shipping_equity_prices",
+          description: "Listed shipping equities (Frontline, Euronav, Star Bulk, Golden Ocean, ZIM, Maersk, Hapag-Lloyd) used for cross-asset divergence detection.",
+          cadence: "delayed",
+          signal: "alpha",
+          access: "api_key",
+          cost: "FREE",
+          decay: "minutes",
+          provider: "Yahoo Finance / Alpha Vantage",
+          rate: "75/min"
+        }
+      ],
+      execution: [
+        {
+          name: "cme_order_entry",
+          description: "CME REST order entry for cleared freight futures. Submit, modify, and cancel on Globex with full auditability.",
+          cadence: "realtime",
+          signal: "execution",
+          access: "oauth",
+          cost: "FREE",
+          decay: "seconds",
+          provider: "CME Group",
+          rate: "100/sec"
+        },
+        {
+          name: "otc_ffa_rfq",
+          description: "OTC FFA RFQ channel via broker platforms including Clarksons, SSY, Braemar, and FIS.",
+          cadence: "near_realtime",
+          signal: "execution",
+          access: "oauth",
+          cost: "FREE",
+          decay: "seconds",
+          provider: "FIS / Clarksons / SSY / Braemar",
+          rate: "10/min"
+        },
+        {
+          name: "portfolio_state",
+          description: "Live positions, P&L, margin utilization, and risk decomposition for open FFA and futures exposure.",
+          cadence: "realtime",
+          signal: "execution",
+          access: "none",
+          cost: "FREE",
+          decay: "seconds",
+          provider: "Internal PMS",
+          rate: "unlimited"
+        },
+        {
+          name: "risk_limits",
+          description: "Pre-trade limit checks for route concentration, portfolio VaR, drawdown limits, and notional exposure.",
+          cadence: "realtime",
+          signal: "execution",
+          access: "none",
+          cost: "FREE",
+          decay: "seconds",
+          provider: "Internal Risk Engine",
+          rate: "unlimited"
+        },
+        {
+          name: "margin_calculator",
+          description: "Initial and variation margin impact estimates for proposed FFA positions.",
+          cadence: "near_realtime",
+          signal: "execution",
+          access: "api_key",
+          cost: "FREE",
+          decay: "minutes",
+          provider: "CME CORE / SGX / Internal",
+          rate: "100/min"
+        },
+        {
+          name: "execution_tca",
+          description: "Post-trade quality analytics for slippage vs benchmark, market impact, and venue routing efficiency.",
+          cadence: "delayed",
+          signal: "execution",
+          access: "none",
+          cost: "FREE",
+          decay: "hours",
+          provider: "Internal Analytics",
+          rate: "unlimited"
+        }
+      ]
+    };
+
+    const loopSteps = [
+      {
+        step: "Step 1",
+        title: "Sense",
+        summary: "Collect state changes across geopolitics, transit chokepoints, and vessel positioning.",
+        bullets: [
+          "gdelt_event_stream for last 15-minute geopolitical triggers",
+          "chokepoint_transit_count across all six chokepoints",
+          "ais_vessel_positions for fleet re-positioning",
+          "port_congestion at key loading and discharge ports",
+          "war_risk_premiums as insurance market risk signal"
+        ]
+      },
+      {
+        step: "Step 2",
+        title: "Price",
+        summary: "Map market-implied valuation across spot, forwards, and energy inputs.",
+        bullets: [
+          "baltic_spot_rates for latest route assessments",
+          "baltic_ffa_curves for term-structure shape",
+          "cme_freight_settlements for cleared prices",
+          "ice_brent_wti_spread and bunker_prices for voyage economics",
+          "container_indices as cross-segment context"
+        ]
+      },
+      {
+        step: "Step 3",
+        title: "Flow",
+        summary: "Infer commodity flow shifts and ton-mile demand pressure by vessel class.",
+        bullets: [
+          "crude_cargo_flows and iron_ore_shipments",
+          "lng_cargo_tracker and floating_storage",
+          "ton_mile_demand for core freight demand metric",
+          "onshore_oil_storage vs consensus inventory expectations"
+        ]
+      },
+      {
+        step: "Step 4",
+        title: "Context",
+        summary: "Anchor short-term signals in macro and structural supply context.",
+        bullets: [
+          "treasury_yield_curve and china_pmi",
+          "china_steel_production and opec_production",
+          "fleet_supply_database and orderbook_deliveries",
+          "shipping_equity_prices for equity/FFA divergence"
+        ]
+      },
+      {
+        step: "Step 5",
+        title: "Decide",
+        summary: "Aggregate signals into route-level and curve-level trading hypotheses.",
+        bullets: [
+          "regime classification: crisis, normal, recovery",
+          "route alpha scoring from -100 to +100",
+          "calendar spread and cross-asset relative-value identification",
+          "Kelly-informed sizing constrained by risk limits"
+        ]
+      },
+      {
+        step: "Step 6",
+        title: "Execute",
+        summary: "Run compliance and risk checks then route to cleared or OTC venues.",
+        bullets: [
+          "risk_limits and portfolio_state pre-trade",
+          "margin_calculator for collateral impact",
+          "cme_order_entry or otc_ffa_rfq execution path",
+          "execution_tca for post-trade quality control"
+        ]
+      },
+      {
+        step: "Step 7",
+        title: "Learn",
+        summary: "Close the loop by scoring predictive quality and signal decay.",
+        bullets: [
+          "P&L attribution by signal source",
+          "tool reliability scoring over rolling windows",
+          "edge decay estimation by signal family",
+          "Bayesian parameter updates for next cycle"
+        ]
+      }
+    ];
+
+    const signalChains = [
+      {
+        name: "Hormuz Crisis Trade",
+        subtitle: "Acute geopolitical disruption in MEG transit",
+        events: [
+          "gdelt_event_stream(Hormuz blockade): risk_score 95",
+          "chokepoint_transit_count(hormuz): transits -70% vs average",
+          "war_risk_premiums(persian_gulf): 0.25% to 0.50%",
+          "ais_vessel_positions around Hormuz: 150 tankers anchored",
+          "floating_storage(MEG): +200%, tonnage absorbed",
+          "ton_mile_demand(VLCC): +25% from rerouting"
+        ],
+        decision: "Long TD3C front month and TD15, short TD3C Q3 for backwardation expression, plus long LPG VLGC USG-Japan."
+      },
+      {
+        name: "China Restocking Play",
+        subtitle: "Dry bulk demand inflection with tight supply backdrop",
+        events: [
+          "china_pmi: 52.3 (up from 49.8)",
+          "china_steel_production: +8% month over month",
+          "iron_ore_shipments from Brazil accelerating",
+          "port_congestion at Qingdao: waiting vessels +30%",
+          "fleet growth for Capesize near 1.2%",
+          "orderbook-to-fleet around 8%"
+        ],
+        decision: "Long Cape 5TC Q2 FFA and long Capesize vs Panamax spread."
+      },
+      {
+        name: "Sanctions Evasion Alpha",
+        subtitle: "Effective fleet shrink from dark and sanctioned tonnage",
+        events: [
+          "sanctions_tracker: 15 new VLCC sanctions this month",
+          "dark_fleet_tracking: dark fleet near 12% of VLCC",
+          "ship_to_ship_transfers in SE Asia: +60%",
+          "AIS clustering anomalies among tanker vessels",
+          "Baltic spot rates TD3C and TD15 elevated"
+        ],
+        decision: "Treat compliant VLCC supply as structurally smaller than headline fleet and stay long VLCC FFAs across the curve."
+      },
+      {
+        name: "Container Dual-Chokepoint Crisis",
+        subtitle: "Compounded rerouting through Bab el-Mandeb and Hormuz",
+        events: [
+          "Red Sea attack flow still active",
+          "chokepoint_transit_count(bab_el_mandeb): -85%",
+          "chokepoint_transit_count(hormuz): -70%",
+          "FBX01 China-USWC index: +40%",
+          "Singapore congestion rises from rerouting",
+          "ton-mile demand for container flows +30%"
+        ],
+        decision: "Long container equity proxies (ZIM and Maersk) where direct container FFA liquidity is limited."
+      }
+    ];
+
+    const providers = [
+      ["Baltic Exchange", "FFA curves, spot rates, benchmark indices", "$2-5k/yr"],
+      ["CME Group", "Cleared FFA settlements, order entry", "Per trade"],
+      ["SGX AsiaClear", "OTC FFA clearing", "Per trade"],
+      ["Kpler / MarineTraffic", "AIS, cargo flows, freight analytics", "$10-50k/yr"],
+      ["Vortexa", "Energy cargo tracking, floating storage", "$20-80k/yr"],
+      ["Spire Maritime", "AIS positions, high-frequency latency", "$5-20k/yr"],
+      ["FRED", "Macro: yields, oil, FX, risk", "FREE"],
+      ["EIA", "Petroleum status and supply reports", "FREE"],
+      ["GDELT", "Geopolitical event and sentiment feed", "FREE"],
+      ["OFAC / sanctions sources", "SDN list and blacklist updates", "FREE"],
+      ["Clarksons Research", "Fleet, orderbook, S&P, newbuild", "$15-30k/yr"],
+      ["VesselsValue", "Live vessel valuations and S&P", "$5-15k/yr"],
+      ["Windward AI", "Dark fleet and sanctions-evasion analytics", "$10-30k/yr"],
+      ["Ursa / Kayrros", "Satellite oil storage monitoring", "$20-50k/yr"],
+      ["Freightos", "Container index data (FBX)", "FREE tier"],
+      ["Ship&Bunker / Platts", "Bunker fuel prices", "$1-5k/yr"],
+      ["IMB Piracy Centre", "Piracy incidents and live map", "FREE"]
+    ];
+
+    const companies = [
+      {
+        name: "CargoMetrics",
+        type: "quant_fund",
+        scale: "~$250M peak",
+        hq: "Boston",
+        founded: "2008",
+        strategy: "Systematic futures and FX driven by proprietary AIS signal extraction.",
+        edge: "First mover in AIS-to-alpha with decade-scale historical signal archives.",
+        stack: ["Proprietary AIS network", "Custom trade data ingestion", "Baltic benchmarks", "Macro overlays"],
+        licensing: "Yes",
+        notes: "Hybrid model: fund + data vendor."
+      },
+      {
+        name: "Citadel Commodities",
+        type: "multi_strategy_fund",
+        scale: "$65B+ firmwide",
+        hq: "Miami / Chicago / London",
+        founded: "1990",
+        strategy: "Discretionary and systematic commodity trading across energy, metals, and ags.",
+        edge: "Weather intelligence capability with dedicated atmospheric science talent.",
+        stack: ["Weather models", "Kpler/Vortexa AIS", "Satellite alt-data", "Platts/Argus + exchange feeds"],
+        licensing: "No",
+        notes: "All edge treated as proprietary research IP."
+      },
+      {
+        name: "Breakwave Advisors",
+        type: "freight_specialist",
+        scale: "BDRY + BWET ETFs",
+        hq: "New York",
+        founded: "2017",
+        strategy: "Long-only freight futures exposure packaged as ETFs.",
+        edge: "Institutional access wrapper for investors that cannot clear FFAs directly.",
+        stack: ["Baltic data suite", "CME/SGX settlements", "Clarksons fundamentals", "AIS research context"],
+        licensing: "No",
+        notes: "Public research output supports investor education."
+      },
+      {
+        name: "Trafigura",
+        type: "trading_house",
+        scale: "$318B revenue (2023)",
+        hq: "Geneva / Singapore",
+        founded: "1993",
+        strategy: "Physical commodity trading with freight as integrated cost and alpha center.",
+        edge: "Own physical flows provide near-ground-truth insight before market consensus.",
+        stack: ["Kpler", "Vortexa", "Platts", "Internal CTRM + logistics systems"],
+        licensing: "No",
+        notes: "Operational data moat dominates external vendor data."
+      },
+      {
+        name: "Vitol",
+        type: "trading_house",
+        scale: "$500B+ revenue",
+        hq: "Geneva / Rotterdam / Houston / Singapore",
+        founded: "1966",
+        strategy: "Global oil and products trading with freight as strategic profit lever.",
+        edge: "Massive lifted volume and expanding digital infrastructure for routing and demand.",
+        stack: ["Kpler", "Vortexa", "Argus/Platts", "Internal risk + logistics stack"],
+        licensing: "No",
+        notes: "Heavy investment in data infrastructure and automation."
+      },
+      {
+        name: "Glencore",
+        type: "trading_house",
+        scale: "$220B+ revenue",
+        hq: "Baar",
+        founded: "1974",
+        strategy: "Integrated mining and commodity trading with freight embedded in operations.",
+        edge: "Physical asset ownership across supply chain creates unmatched proprietary throughput data.",
+        stack: ["Kpler", "Platts", "Clarksons/SSY", "Internal operational telemetry"],
+        licensing: "No",
+        notes: "Structural physical edge over pure-financial competitors."
+      },
+      {
+        name: "Signal Ocean",
+        type: "data_vendor",
+        scale: "Maritime intelligence platform",
+        hq: "London / Athens",
+        founded: "2018",
+        strategy: "AI maritime analytics integrating AIS, fixture intelligence, and route economics.",
+        edge: "Data fusion and predictive vessel movement models with AXSMarine integration.",
+        stack: ["Proprietary AIS processing", "AXSMarine datasets", "General Index", "Emissions analytics"],
+        licensing: "Yes",
+        notes: "Positioned as a one-stop maritime decision layer."
+      },
+      {
+        name: "Oceanbolt (Veson)",
+        type: "data_vendor",
+        scale: "Dry bulk intelligence",
+        hq: "Oslo / Boston",
+        founded: "2019",
+        strategy: "Commodity-linked dry bulk flow intelligence from AIS and berth-level inference.",
+        edge: "High-quality commodity inference using geospatial berth databases.",
+        stack: ["AIS engine", "Berth intelligence", "Trade flow ML", "API-first delivery"],
+        licensing: "Yes",
+        notes: "Particularly strong in dry bulk use-cases."
+      },
+      {
+        name: "PierSight",
+        type: "satellite",
+        scale: "$8M funding",
+        hq: "India",
+        founded: "2023",
+        strategy: "Building SAR + AIS constellation for persistent maritime surveillance.",
+        edge: "Dark-vessel and STS detection under weather and no-light conditions.",
+        stack: ["Own SAR constellation", "AIS-2.0/VDES", "MATSYA analytics"],
+        licensing: "Early access",
+        notes: "Potential cost disruption in maritime SAR data."
+      },
+      {
+        name: "Ursa Space Systems",
+        type: "satellite",
+        scale: "Global storage analytics",
+        hq: "Ithaca",
+        founded: "2015",
+        strategy: "SAR-derived oil storage intelligence used to front-run inventory reports.",
+        edge: "Lead time advantage before official EIA releases.",
+        stack: ["Multi-vendor SAR imagery", "1.7M tank dataset", "Proprietary processing"],
+        licensing: "Yes",
+        notes: "Established hedge-fund workflow for inventory anticipation."
+      },
+      {
+        name: "Clarksons Research",
+        type: "research",
+        scale: "Industry benchmark data house",
+        hq: "London",
+        founded: "1852",
+        strategy: "Definitive fleet, orderbook, S&P, newbuild, and fixture coverage.",
+        edge: "Depth of history and breadth of vessel-level market coverage.",
+        stack: ["Fleet database", "Orderbook", "S&P tape", "Time-series research"],
+        licensing: "Yes",
+        notes: "Core structural dataset in nearly every shipping workflow."
+      }
+    ];
+
+    const marketStats = [
+      ["Alt-data market size", "$18.74B (2025)"],
+      ["2030 projection", "$135.8B"],
+      ["Commodity-data demand", "+577% YoY requests"],
+      ["Average datasets per fund", "20 / year"],
+      ["Average spend per fund", "$1.6M / year"],
+      ["Budget trend", "95% maintain or increase"],
+      ["Citadel commodity P&L", ">$4B (2023)"],
+      ["Kpler funding", "$200M"],
+      ["Vortexa funding", "$34M"],
+      ["PierSight funding", "$8M"]
+    ];
+
+    const tiers = [
+      {
+        title: "Tier 1: Real-Time Physical Flow",
+        cadence: "minutes",
+        points: [
+          "Physical traders see their own cargo before external datasets.",
+          "Kpler and Vortexa infer market-wide flows from AIS + ML.",
+          "CargoMetrics converts vessel telemetry into tradable factor series."
+        ]
+      },
+      {
+        title: "Tier 2: Daily Assessed Prices",
+        cadence: "T+0 evening",
+        points: [
+          "Baltic assessments anchor spot and forward freight benchmarks.",
+          "Platts and Argus provide physical commodity price context.",
+          "CME and SGX settlements define cleared valuation marks."
+        ]
+      },
+      {
+        title: "Tier 3: Alternative Data",
+        cadence: "hours to days",
+        points: [
+          "Satellite storage signals can lead official inventory releases.",
+          "SAR detects dark vessels and sanctions-evasion behavior.",
+          "Event-stream and weather feeds add short-horizon scenario edge."
+        ]
+      },
+      {
+        title: "Tier 4: Fundamental / Structural",
+        cadence: "days to months",
+        points: [
+          "Fleet and orderbook data drive medium-term supply expectations.",
+          "Government and macro series frame broad cycle direction.",
+          "Valuation datasets map capital-cycle pressure across classes."
+        ]
+      },
+      {
+        title: "Tier 5: Academic / Long Cycle",
+        cadence: "months to years",
+        points: [
+          "Orderbook-to-fleet ratio maps multi-year supply pressure.",
+          "Regulatory frameworks (EEXI/CII) shift effective supply.",
+          "Trade-lane realignment changes durable ton-mile baselines."
+        ]
+      }
+    ];
+
+    const insights = [
+      {
+        title: "Edge Hierarchy",
+        lines: [
+          "Physical flow > Satellite/AIS > Assessed prices > Government reports > Consensus"
+        ]
+      },
+      {
+        title: "Primary Alpha Zones",
+        lines: [
+          "1) Physical flow asymmetry",
+          "2) AIS cargo inference",
+          "3) Satellite inventory lead",
+          "4) Weather-demand coupling",
+          "5) Geopolitical chokepoint detection",
+          "6) Dark fleet effective supply",
+          "7) Cross-asset dislocation"
+        ]
+      },
+      {
+        title: "What No One Has Yet",
+        lines: [
+          "Real-time cargo-content certainty",
+          "Transparent OTC FFA order book",
+          "Complete dark-fleet visibility",
+          "Live Chinese strategic reserve data",
+          "Forward charterer expectation tape"
+        ]
+      }
+    ];
+
+    const people = [
+      {
+        name: "Scott Borgerson",
+        role: "Founder and former CEO",
+        org: "CargoMetrics",
+        why: "Proved AIS data can be transformed into systematic trading alpha."
+      },
+      {
+        name: "Sebastian Barrack",
+        role: "Head of Commodities",
+        org: "Citadel",
+        why: "Scaled one of the strongest weather-enhanced commodity trading desks."
+      },
+      {
+        name: "John Kartsonas",
+        role: "Founder and Managing Partner",
+        org: "Breakwave Advisors",
+        why: "Created public ETF access to freight-futures exposure."
+      },
+      {
+        name: "Fabio Kuhn",
+        role: "Co-Founder and CEO",
+        org: "Vortexa",
+        why: "Built one of the dominant energy cargo-intelligence platforms."
+      },
+      {
+        name: "Etienne Amic",
+        role: "Co-Founder",
+        org: "Vortexa",
+        why: "Connected institutional commodity networks to data-platform execution."
+      },
+      {
+        name: "Francois Cazor",
+        role: "Co-Founder",
+        org: "Kpler",
+        why: "Scaled LNG tracker roots into broad commodity intelligence infrastructure."
+      },
+      {
+        name: "Ioannis Martinos",
+        role: "Founder and CEO",
+        org: "Signal Ocean",
+        why: "Combined operator-level shipping experience with data platform strategy."
+      },
+      {
+        name: "Niclas Daehli Priess",
+        role: "Co-Founder",
+        org: "Oceanbolt",
+        why: "Advanced dry-bulk commodity inference with berth-level geospatial modeling."
+      },
+      {
+        name: "Adam Maher",
+        role: "CEO and Co-Founder",
+        org: "Ursa Space Systems",
+        why: "Commercialized satellite oil-storage intelligence for trading workflows."
+      },
+      {
+        name: "Gaurav Seth",
+        role: "CEO and Co-Founder",
+        org: "PierSight",
+        why: "Pushing maritime-focused SAR + AIS constellation economics."
+      },
+      {
+        name: "Martin Stopford",
+        role: "Non-Executive President",
+        org: "Clarksons Research",
+        why: "Architect of modern shipping-economics research standards."
+      },
+      {
+        name: "Omar Nokta",
+        role: "Senior Equity Analyst",
+        org: "Jefferies / Clarksons",
+        why: "Bridges shipping fundamentals and institutional capital-market narratives."
+      }
+    ];
+
+    const scenarioRoutes = [
+      {
+        route: "TD3C MEG-China VLCC",
+        segment: "Tanker",
+        driver: "Hormuz and sanctions",
+        beta: { hormuz: 1.1, bab: 0.25, sanctions: 0.95, congestion: 0.3, bunker: -0.2, china: 0.45, risk: 0.4 }
+      },
+      {
+        route: "TD15 WAF-China VLCC",
+        segment: "Tanker",
+        driver: "Rerouting ton-mile uplift",
+        beta: { hormuz: 0.8, bab: 0.2, sanctions: 0.7, congestion: 0.35, bunker: -0.15, china: 0.5, risk: 0.25 }
+      },
+      {
+        route: "Cape 5TC Q2",
+        segment: "Dry Bulk",
+        driver: "China industrial demand",
+        beta: { hormuz: 0.1, bab: 0.05, sanctions: 0.15, congestion: 0.25, bunker: -0.2, china: 1.05, risk: 0.2 }
+      },
+      {
+        route: "Panamax 4TC",
+        segment: "Dry Bulk",
+        driver: "Cross-basin grain and coal flow",
+        beta: { hormuz: 0.05, bab: 0.1, sanctions: 0.1, congestion: 0.28, bunker: -0.25, china: 0.6, risk: 0.2 }
+      },
+      {
+        route: "FBX01 China-USWC",
+        segment: "Container",
+        driver: "Dual chokepoint rerouting",
+        beta: { hormuz: 0.45, bab: 1.1, sanctions: 0.2, congestion: 0.7, bunker: -0.3, china: 0.35, risk: 0.15 }
+      },
+      {
+        route: "FBX11 China-Europe",
+        segment: "Container",
+        driver: "Red Sea sensitivity",
+        beta: { hormuz: 0.2, bab: 1.05, sanctions: 0.1, congestion: 0.78, bunker: -0.35, china: 0.4, risk: 0.15 }
+      },
+      {
+        route: "LNG Atlantic-Asia",
+        segment: "Gas",
+        driver: "Canal and chokepoint optionality",
+        beta: { hormuz: 0.3, bab: 0.45, sanctions: 0.55, congestion: 0.32, bunker: -0.18, china: 0.55, risk: 0.3 }
+      },
+      {
+        route: "LPG USG-Japan",
+        segment: "Gas",
+        driver: "Tonnage absorption under risk",
+        beta: { hormuz: 0.45, bab: 0.35, sanctions: 0.6, congestion: 0.25, bunker: -0.12, china: 0.5, risk: 0.35 }
+      }
+    ];
+
+    const decayProfiles = [
+      { family: "Execution microstructure", halfLifeHours: 0.3 },
+      { family: "Order book / liquidity", halfLifeHours: 0.8 },
+      { family: "War-risk premium repricing", halfLifeHours: 6 },
+      { family: "AIS routing anomalies", halfLifeHours: 14 },
+      { family: "Sanctions fleet impact", halfLifeHours: 60 },
+      { family: "Port congestion", halfLifeHours: 96 },
+      { family: "Macro + fundamentals", halfLifeHours: 360 }
+    ];
+
+    const reliabilityScores = [
+      { tool: "risk_limits", score: 97, note: "Internal deterministic engine" },
+      { tool: "portfolio_state", score: 96, note: "Internal state with direct controls" },
+      { tool: "margin_calculator", score: 93, note: "Clearing + internal checks" },
+      { tool: "sanctions_tracker", score: 91, note: "Regulatory source updates" },
+      { tool: "war_risk_premiums", score: 89, note: "Broker and JWC publication quality" },
+      { tool: "fleet_supply_database", score: 88, note: "High-quality curated vendor feed" },
+      { tool: "orderbook_deliveries", score: 86, note: "Strong structural signal, slower cadence" },
+      { tool: "shipping_equity_prices", score: 84, note: "Market-feed noise but high timeliness" },
+      { tool: "piracy_attack_log", score: 82, note: "Event reporting latency in some regions" },
+      { tool: "caldara_iacoviello_gpr", score: 80, note: "Robust benchmark, low frequency" }
+    ];
+
+    const pretradeChecklistItems = [
+      { id: "limits", label: "Risk limits green (route and portfolio)" },
+      { id: "exposure", label: "Current exposure mapped vs target trade" },
+      { id: "margin", label: "Margin impact validated against collateral buffer" },
+      { id: "liquidity", label: "Venue liquidity and expected slippage reviewed" },
+      { id: "event", label: "Event-risk window checked (sanctions, chokepoints)" },
+      { id: "hedge", label: "Hedge leg and stop structure defined" },
+      { id: "audit", label: "Execution rationale logged for TCA attribution" }
+    ];
+
+    const intelTabs = [
+      { key: "pulse", label: "Macro Pulse", note: "System pressure and momentum" },
+      { key: "routes", label: "Route Board", note: "Live conviction map" },
+      { key: "timeline", label: "Catalyst Timeline", note: "Forward event windows" },
+      { key: "rivals", label: "Rival Playbook", note: "Competitor behavior map" }
+    ];
+
+    const catalystTimelineTemplates = [
+      { offsetDays: 1, title: "OFAC/EU sanctions digest window", impact: "high", lane: "Tanker", source: "Sanctions tracker" },
+      { offsetDays: 2, title: "Broker war-risk premium refresh", impact: "high", lane: "Tanker/Container", source: "JWC + brokers" },
+      { offsetDays: 3, title: "China steel restart checkpoint", impact: "medium", lane: "Dry Bulk", source: "Macro + flow check" },
+      { offsetDays: 4, title: "Port congestion weekly recalibration", impact: "medium", lane: "All", source: "AIS + port ops" },
+      { offsetDays: 5, title: "CME/SGX liquidity regime check", impact: "high", lane: "Execution", source: "Exchange depth/TCA" },
+      { offsetDays: 7, title: "Dark-fleet transfer anomaly review", impact: "medium", lane: "Tanker", source: "SAR + STS feed" },
+      { offsetDays: 9, title: "Container rerouting persistence test", impact: "low", lane: "Container", source: "Transit + FBX context" },
+      { offsetDays: 12, title: "Orderbook and demolition balance check", impact: "low", lane: "Structural", source: "Clarksons stack" }
+    ];
+
+    const rivalPlaybook = [
+      {
+        actor: "Citadel Commodities",
+        likelyMove: "Increase dispersion trades when weather/geopolitical variance expands.",
+        watch: "Rapid spread widening in cross-commodity curves.",
+        counter: "Lean on flow data timing and avoid crowded macro-beta expressions."
+      },
+      {
+        actor: "CargoMetrics",
+        likelyMove: "Exploit AIS micro-anomalies before price assessors catch up.",
+        watch: "Fast factor flips on route-level systematic books.",
+        counter: "Tighten event-to-execution latency and emphasize chokepoint nowcasting."
+      },
+      {
+        actor: "Trafigura / Vitol",
+        likelyMove: "Use physical optionality to absorb dislocations before paper reprices.",
+        watch: "Freight hedging activity around physical cargo pivots.",
+        counter: "Track rerouting ton-miles and proxy physical optionality via curve structures."
+      },
+      {
+        actor: "Breakwave-style ETF flows",
+        likelyMove: "Trend-follow front liquid dry bulk curves.",
+        watch: "Flow-driven squeezes around roll windows.",
+        counter: "Front-run roll pressure and fade over-extended ETF beta moves."
+      },
+      {
+        actor: "Signal/Kpler-powered discretionary desks",
+        likelyMove: "React quickly to route congestion + sanctions composites.",
+        watch: "Synchronized shifts in tanker and container proxies.",
+        counter: "Prioritize differentiated signals (dark fleet, reliability-adjusted feeds)."
+      },
+      {
+        actor: "Broker-led OTC pools",
+        likelyMove: "Warehouse risk selectively during thin screen liquidity.",
+        watch: "Wider spreads and RFQ response asymmetry.",
+        counter: "Pre-split orders, route by urgency, and monitor TCA drift in real time."
+      }
+    ];
+
+    const storageKeys = {
+      workspace: "freight_report_workspace_v2",
+      presets: "freight_report_custom_presets_v2"
+    };
+
+    const builtinPresets = {
+      Baseline: { hormuz: 55, bab: 45, sanctions: 60, congestion: 50, bunker: 35, china: 12, risk: 58 },
+      Hormuz_Crisis: { hormuz: 92, bab: 40, sanctions: 82, congestion: 68, bunker: 62, china: -4, risk: 32 },
+      China_Restock: { hormuz: 38, bab: 30, sanctions: 48, congestion: 44, bunker: 28, china: 34, risk: 66 },
+      Dual_Chokepoint: { hormuz: 84, bab: 88, sanctions: 76, congestion: 83, bunker: 58, china: 8, risk: 26 },
+      Demand_Slump: { hormuz: 30, bab: 26, sanctions: 34, congestion: 35, bunker: 22, china: -34, risk: 40 }
+    };
+
+    const allTools = Object.entries(toolDomains).flatMap(([domain, entries]) =>
+      entries.map((entry) => ({ ...entry, domain }))
+    );
+
+    const state = {
+      domain: "all",
+      signal: "all",
+      toolQuery: "",
+      companyType: "all",
+      companyQuery: "",
+      loopIndex: 0,
+      chainIndex: 0,
+      checklistDone: new Set(),
+      activeTab: "pulse",
+      timelineImpact: "all",
+      scenarioScores: [],
+      tabCycleOn: false,
+      customPresets: {},
+      activePreset: "Baseline",
+      mcResult: null,
+      mcRuns: 500,
+      mcShock: 18,
+      lastSnapshot: null,
+      presetStatus: "Built-in and custom presets are available."
+    };
+
+    let tabCycleTimer = null;
+
+    function titleCase(text) {
+      return text.replace(/_/g, " ").replace(/\b\w/g, (m) => m.toUpperCase());
+    }
+
+    function countBySignal(signal) {
+      return allTools.filter((t) => t.signal === signal).length;
+    }
+
+    function clamp(value, min, max) {
+      return Math.max(min, Math.min(max, value));
+    }
+
+    function normalizeToSigned(value, min, max) {
+      return ((value - min) / (max - min)) * 2 - 1;
+    }
+
+    function safeLoadJSON(key, fallback) {
+      try {
+        const raw = window.localStorage.getItem(key);
+        if (!raw) return fallback;
+        const parsed = JSON.parse(raw);
+        return parsed && typeof parsed === "object" ? parsed : fallback;
+      } catch (error) {
+        return fallback;
+      }
+    }
+
+    function safeSaveJSON(key, value) {
+      try {
+        window.localStorage.setItem(key, JSON.stringify(value));
+      } catch (error) {
+        // no-op in restricted contexts
+      }
+    }
+
+    function getPresetMap() {
+      return { ...builtinPresets, ...state.customPresets };
+    }
+
+    function computeScenarioSnapshot(inputs) {
+      const factors = {
+        hormuz: normalizeToSigned(inputs.hormuz, 0, 100),
+        bab: normalizeToSigned(inputs.bab, 0, 100),
+        sanctions: normalizeToSigned(inputs.sanctions, 0, 100),
+        congestion: normalizeToSigned(inputs.congestion, 0, 100),
+        bunker: normalizeToSigned(inputs.bunker, 0, 100),
+        china: normalizeToSigned(inputs.china, -50, 50),
+        risk: normalizeToSigned(inputs.risk, 0, 100)
+      };
+
+      const scoredRoutes = scenarioRoutes
+        .map((route) => {
+          let raw = 0;
+          Object.entries(route.beta).forEach(([factor, beta]) => {
+            raw += beta * factors[factor];
+          });
+          const alphaScore = clamp(Math.round(raw * 40), -100, 100);
+          const bias = alphaScore >= 15 ? "Long" : alphaScore <= -15 ? "Short" : "Neutral";
+          return { ...route, alphaScore, bias };
+        })
+        .sort((a, b) => Math.abs(b.alphaScore) - Math.abs(a.alphaScore));
+
+      const segmentAverage = (segment) => {
+        const group = scoredRoutes.filter((r) => r.segment === segment);
+        if (!group.length) return 0;
+        return Math.round(group.reduce((sum, r) => sum + r.alphaScore, 0) / group.length);
+      };
+
+      let regime = "Normal";
+      if (inputs.hormuz >= 65 || inputs.bab >= 70) regime = "Crisis";
+      if (inputs.china >= 20 && inputs.sanctions < 50 && regime !== "Crisis") regime = "Recovery";
+
+      const strongestLong = scoredRoutes.find((r) => r.alphaScore > 0) || null;
+      const strongestShort = scoredRoutes.find((r) => r.alphaScore < 0) || null;
+      const composite = Math.round(scoredRoutes.reduce((sum, r) => sum + r.alphaScore, 0) / scoredRoutes.length);
+
+      return {
+        factors,
+        scoredRoutes,
+        regime,
+        strongestLong,
+        strongestShort,
+        tankerAvg: segmentAverage("Tanker"),
+        dryAvg: segmentAverage("Dry Bulk"),
+        containerAvg: segmentAverage("Container"),
+        gasAvg: segmentAverage("Gas"),
+        composite
+      };
+    }
+
+    function applyScenarioInputs(values) {
+      const keys = ["hormuz", "bab", "sanctions", "congestion", "bunker", "china", "risk"];
+      keys.forEach((key) => {
+        const el = document.getElementById(`sim-${key}`);
+        if (!el) return;
+        const next = values[key];
+        if (typeof next === "number" && Number.isFinite(next)) {
+          const min = Number(el.min);
+          const max = Number(el.max);
+          el.value = String(clamp(next, min, max));
+        }
+      });
+      renderScenarioLab();
+    }
+
+    function gaussianRandom() {
+      let u = 0;
+      let v = 0;
+      while (u === 0) u = Math.random();
+      while (v === 0) v = Math.random();
+      return Math.sqrt(-2 * Math.log(u)) * Math.cos(2 * Math.PI * v);
+    }
+
+    function persistWorkspaceState() {
+      const venueUrgency = document.getElementById("venue-urgency");
+      const venueSize = document.getElementById("venue-size");
+      const venueLiquidity = document.getElementById("venue-liquidity");
+      const venueAnon = document.getElementById("venue-anon");
+      const mcRuns = document.getElementById("mc-runs");
+      const mcShock = document.getElementById("mc-shock");
+
+      const payload = {
+        scenarioInputs: readScenarioInputs(),
+        checklistDone: Array.from(state.checklistDone),
+        activeTab: state.activeTab,
+        timelineImpact: state.timelineImpact,
+        activePreset: state.activePreset,
+        venue: {
+          urgency: venueUrgency ? venueUrgency.value : "medium",
+          size: venueSize ? venueSize.value : "medium",
+          liquidity: venueLiquidity ? venueLiquidity.value : "medium",
+          anon: venueAnon ? venueAnon.value : "no"
+        },
+        mc: {
+          runs: mcRuns ? Number(mcRuns.value) : state.mcRuns,
+          shock: mcShock ? Number(mcShock.value) : state.mcShock
+        }
+      };
+
+      safeSaveJSON(storageKeys.workspace, payload);
+      safeSaveJSON(storageKeys.presets, state.customPresets);
+    }
+
+    function loadPersistedState() {
+      state.customPresets = safeLoadJSON(storageKeys.presets, {});
+      const payload = safeLoadJSON(storageKeys.workspace, {});
+      if (!payload || typeof payload !== "object") return;
+
+      if (Array.isArray(payload.checklistDone)) {
+        state.checklistDone = new Set(payload.checklistDone);
+      }
+
+      if (typeof payload.activeTab === "string" && intelTabs.some((tab) => tab.key === payload.activeTab)) {
+        state.activeTab = payload.activeTab;
+      }
+
+      if (typeof payload.timelineImpact === "string") {
+        state.timelineImpact = payload.timelineImpact;
+      }
+
+      if (typeof payload.activePreset === "string") {
+        state.activePreset = payload.activePreset;
+      }
+
+      const venue = payload.venue || {};
+      const setIfPresent = (id, value) => {
+        const el = document.getElementById(id);
+        if (el && typeof value === "string") el.value = value;
+      };
+      setIfPresent("venue-urgency", venue.urgency);
+      setIfPresent("venue-size", venue.size);
+      setIfPresent("venue-liquidity", venue.liquidity);
+      setIfPresent("venue-anon", venue.anon);
+
+      const mc = payload.mc || {};
+      if (typeof mc.runs === "number" && Number.isFinite(mc.runs)) state.mcRuns = mc.runs;
+      if (typeof mc.shock === "number" && Number.isFinite(mc.shock)) state.mcShock = mc.shock;
+
+      if (payload.scenarioInputs && typeof payload.scenarioInputs === "object") {
+        applyScenarioInputs(payload.scenarioInputs);
+      }
+    }
+
+    function getScenarioScores() {
+      if (state.scenarioScores.length) return [...state.scenarioScores];
+      return scenarioRoutes.map((route) => ({ ...route, alphaScore: 0, bias: "Neutral" }));
+    }
+
+    function formatShortDate(offsetDays) {
+      const date = new Date();
+      date.setDate(date.getDate() + offsetDays);
+      return date.toLocaleDateString(undefined, { month: "short", day: "2-digit" });
+    }
+
+    function switchTab(targetKey) {
+      if (!intelTabs.some((tab) => tab.key === targetKey)) return;
+      state.activeTab = targetKey;
+      renderTabButtons();
+      renderActiveTabPanel();
+      persistWorkspaceState();
+    }
+
+    function switchTabByOffset(direction) {
+      const idx = intelTabs.findIndex((tab) => tab.key === state.activeTab);
+      const nextIdx = (idx + direction + intelTabs.length) % intelTabs.length;
+      switchTab(intelTabs[nextIdx].key);
+    }
+
+    function setTabCycle(enabled) {
+      state.tabCycleOn = enabled;
+      if (tabCycleTimer) {
+        clearInterval(tabCycleTimer);
+        tabCycleTimer = null;
+      }
+
+      if (enabled) {
+        tabCycleTimer = setInterval(() => switchTabByOffset(1), 6000);
+      }
+
+      const cycleBtn = document.getElementById("intel-tab-cycle");
+      if (cycleBtn) {
+        cycleBtn.textContent = enabled ? "Auto-cycle on" : "Auto-cycle off";
+        cycleBtn.classList.toggle("active", enabled);
+      }
+      persistWorkspaceState();
+    }
+
+    function renderTabButtons() {
+      const mount = document.getElementById("intel-tab-buttons");
+      if (!mount) return;
+      mount.innerHTML = intelTabs
+        .map(
+          (tab) => `
+            <button class="tab-btn ${state.activeTab === tab.key ? "active" : ""}" data-intel-tab="${tab.key}">
+              ${tab.label}
+            </button>
+          `
+        )
+        .join("");
+
+      mount.querySelectorAll("[data-intel-tab]").forEach((btn) => {
+        btn.addEventListener("click", () => switchTab(btn.dataset.intelTab));
+      });
+    }
+
+    function renderPulseTab(mount) {
+      const inputs = readScenarioInputs();
+      const scores = getScenarioScores();
+      const absTop = scores.length ? Math.max(...scores.map((r) => Math.abs(r.alphaScore))) : 0;
+      const segments = ["Tanker", "Dry Bulk", "Container", "Gas"];
+      const segDispersion = segments.map((seg) => {
+        const items = scores.filter((r) => r.segment === seg);
+        if (!items.length) return 0;
+        const mean = items.reduce((sum, r) => sum + r.alphaScore, 0) / items.length;
+        return Math.abs(mean);
+      });
+
+      const pulseMetrics = [
+        {
+          label: "Geopolitical Heat",
+          value: Math.round((inputs.hormuz + inputs.bab + inputs.sanctions) / 3),
+          hint: "hormuz + bab + sanctions"
+        },
+        {
+          label: "Supply Tightness",
+          value: clamp(Math.round(0.5 * inputs.sanctions + 0.35 * inputs.congestion + 0.15 * inputs.hormuz), 0, 100),
+          hint: "sanctions + congestion"
+        },
+        {
+          label: "Demand Pulse",
+          value: clamp(50 + inputs.china, 0, 100),
+          hint: "china impulse adjusted"
+        },
+        {
+          label: "Execution Stress",
+          value: clamp(Math.round(0.4 * inputs.bunker + 0.25 * inputs.congestion + 0.35 * (100 - inputs.risk)), 0, 100),
+          hint: "bunker + risk appetite"
+        },
+        {
+          label: "Cross-Segment Dispersion",
+          value: clamp(Math.round(segDispersion.reduce((sum, v) => sum + v, 0) / segDispersion.length), 0, 100),
+          hint: "segment average spread"
+        },
+        {
+          label: "Max Route Conviction",
+          value: clamp(absTop, 0, 100),
+          hint: "top absolute alpha"
+        }
+      ];
+
+      mount.innerHTML = `
+        <div class="tab-panel">
+          <div class="tab-panel-head">
+            <div>
+              <div class="tab-panel-title">Macro Pulse Dashboard</div>
+              <div class="tab-panel-sub">Live derived from Scenario Workbench parameters and route-level signal engine.</div>
+            </div>
+            <span class="pill">real-time derived</span>
+          </div>
+          <div class="pulse-grid">
+            ${pulseMetrics
+              .map(
+                (metric, idx) => `
+                  <article class="pulse-card">
+                    <div class="label">${metric.label}</div>
+                    <div class="value">${metric.value}</div>
+                    <div class="meter"><span data-pulse-width="${metric.value}" data-pulse-delay="${idx * 50}"></span></div>
+                    <div class="subtle mono">${metric.hint}</div>
+                  </article>
+                `
+              )
+              .join("")}
+          </div>
+        </div>
+      `;
+
+      requestAnimationFrame(() => {
+        mount.querySelectorAll("[data-pulse-width]").forEach((el) => {
+          setTimeout(() => {
+            el.style.width = `${el.dataset.pulseWidth}%`;
+          }, Number(el.dataset.pulseDelay));
+        });
+      });
+    }
+
+    function renderRoutesTab(mount) {
+      const scores = getScenarioScores().sort((a, b) => Math.abs(b.alphaScore) - Math.abs(a.alphaScore));
+      const topLong = scores.find((r) => r.alphaScore > 0);
+      const topShort = scores.find((r) => r.alphaScore < 0);
+
+      mount.innerHTML = `
+        <div class="tab-panel">
+          <div class="tab-panel-head">
+            <div>
+              <div class="tab-panel-title">Route Conviction Board</div>
+              <div class="tab-panel-sub">Highest absolute alpha routes across tanker, dry bulk, container, and gas.</div>
+            </div>
+            <span class="pill">${scores.length} routes</span>
+          </div>
+          <div class="route-board">
+            <table>
+              <thead>
+                <tr>
+                  <th>Route</th>
+                  <th>Segment</th>
+                  <th>Score Intensity</th>
+                  <th>Bias</th>
+                  <th>Driver</th>
+                </tr>
+              </thead>
+              <tbody>
+                ${scores
+                  .map((route, idx) => {
+                    const width = clamp(Math.abs(route.alphaScore), 0, 100);
+                    const dirClass = route.alphaScore >= 0 ? "long" : "short";
+                    return `
+                      <tr>
+                        <td><strong>${route.route}</strong></td>
+                        <td>${route.segment}</td>
+                        <td>
+                          <span class="score-line">
+                            <strong>${route.alphaScore}</strong>
+                            <span class="score-track"><span class="score-fill ${dirClass}" data-score-width="${width}" data-score-delay="${idx * 40}"></span></span>
+                          </span>
+                        </td>
+                        <td>${route.bias}</td>
+                        <td>${route.driver}</td>
+                      </tr>
+                    `;
+                  })
+                  .join("")}
+              </tbody>
+            </table>
+          </div>
+          <div class="decision">
+            <strong>Spread Lens:</strong>
+            Preferred long expression: ${topLong ? `${topLong.route} (${topLong.alphaScore})` : "none"}.
+            Preferred hedge/short expression: ${topShort ? `${topShort.route} (${topShort.alphaScore})` : "none"}.
+          </div>
+        </div>
+      `;
+
+      requestAnimationFrame(() => {
+        mount.querySelectorAll("[data-score-width]").forEach((el) => {
+          setTimeout(() => {
+            el.style.width = `${el.dataset.scoreWidth}%`;
+          }, Number(el.dataset.scoreDelay));
+        });
+      });
+    }
+
+    function renderTimelineTab(mount) {
+      const impactOrder = { high: 3, medium: 2, low: 1 };
+      const events = [...catalystTimelineTemplates]
+        .sort((a, b) => impactOrder[b.impact] - impactOrder[a.impact] || a.offsetDays - b.offsetDays)
+        .filter((evt) => state.timelineImpact === "all" || evt.impact === state.timelineImpact);
+
+      mount.innerHTML = `
+        <div class="tab-panel">
+          <div class="tab-panel-head">
+            <div>
+              <div class="tab-panel-title">Catalyst Timeline Watchlist</div>
+              <div class="tab-panel-sub">Forward-looking event windows for signal validation and trade pacing.</div>
+            </div>
+            <span class="pill">${events.length} events</span>
+          </div>
+          <div class="timeline-filters">
+            <button class="chip ${state.timelineImpact === "all" ? "active" : ""}" data-impact-filter="all">All</button>
+            <button class="chip ${state.timelineImpact === "high" ? "active" : ""}" data-impact-filter="high">High</button>
+            <button class="chip ${state.timelineImpact === "medium" ? "active" : ""}" data-impact-filter="medium">Medium</button>
+            <button class="chip ${state.timelineImpact === "low" ? "active" : ""}" data-impact-filter="low">Low</button>
+          </div>
+          <div class="rival-grid">
+            ${events
+              .map((evt) => {
+                const impactClass = evt.impact === "high" ? "risk" : evt.impact === "medium" ? "context" : "alpha";
+                return `
+                  <article class="timeline-item">
+                    <div class="head">
+                      <span class="date">${formatShortDate(evt.offsetDays)} (T+${evt.offsetDays}d)</span>
+                      <span class="pill ${impactClass}">${evt.impact}</span>
+                    </div>
+                    <div class="evt">${evt.title}</div>
+                    <div class="meta">${evt.lane} | ${evt.source}</div>
+                  </article>
+                `;
+              })
+              .join("")}
+          </div>
+        </div>
+      `;
+
+      mount.querySelectorAll("[data-impact-filter]").forEach((btn) => {
+        btn.addEventListener("click", () => {
+          state.timelineImpact = btn.dataset.impactFilter;
+          renderActiveTabPanel();
+          persistWorkspaceState();
+        });
+      });
+    }
+
+    function renderRivalsTab(mount) {
+      mount.innerHTML = `
+        <div class="tab-panel">
+          <div class="tab-panel-head">
+            <div>
+              <div class="tab-panel-title">Rival Playbook Scanner</div>
+              <div class="tab-panel-sub">Anticipated behavior map by participant archetype and suggested response.</div>
+            </div>
+            <span class="pill">${rivalPlaybook.length} profiles</span>
+          </div>
+          <div class="rival-grid">
+            ${rivalPlaybook
+              .map(
+                (item) => `
+                  <article class="rival-card">
+                    <div class="who">${item.actor}</div>
+                    <div class="line"><strong>Likely move:</strong> ${item.likelyMove}</div>
+                    <div class="line"><strong>What to watch:</strong> ${item.watch}</div>
+                    <div class="line"><strong>Counter:</strong> ${item.counter}</div>
+                  </article>
+                `
+              )
+              .join("")}
+          </div>
+        </div>
+      `;
+    }
+
+    function renderActiveTabPanel() {
+      const mount = document.getElementById("intel-tab-panels");
+      if (!mount) return;
+      if (state.activeTab === "pulse") return renderPulseTab(mount);
+      if (state.activeTab === "routes") return renderRoutesTab(mount);
+      if (state.activeTab === "timeline") return renderTimelineTab(mount);
+      return renderRivalsTab(mount);
+    }
+
+    function renderCommandTabs() {
+      renderTabButtons();
+      renderActiveTabPanel();
+      const cycleBtn = document.getElementById("intel-tab-cycle");
+      if (cycleBtn) {
+        cycleBtn.textContent = state.tabCycleOn ? "Auto-cycle on" : "Auto-cycle off";
+        cycleBtn.classList.toggle("active", state.tabCycleOn);
+      }
+    }
+
+    function renderHeroKpis() {
+      const total = allTools.length;
+      const realtime = allTools.filter((t) => ["realtime", "near_realtime"].includes(t.cadence)).length;
+      const free = allTools.filter((t) => t.cost.toUpperCase().includes("FREE")).length;
+      const alpha = countBySignal("alpha");
+
+      const kpis = [
+        ["Monitored Tools", String(total)],
+        ["Alpha Signals", String(alpha)],
+        ["Realtime/Near-RT", String(realtime)],
+        ["Free or Included", String(free)],
+        ["Domains Covered", "3"],
+        ["Scenario Chains", String(signalChains.length)]
+      ];
+
+      const mount = document.getElementById("hero-kpis");
+      mount.innerHTML = kpis
+        .map(([label, value]) => `\n          <div class="kpi">\n            <div class="label">${label}</div>\n            <div class="value">${value}</div>\n          </div>\n        `)
+        .join("");
+    }
+
+    function renderToolChips() {
+      const domainChips = [
+        ["all", `All (${allTools.length})`],
+        ["geopolitical", `Geopolitical (${toolDomains.geopolitical.length})`],
+        ["fundamental", `Fundamental (${toolDomains.fundamental.length})`],
+        ["execution", `Execution (${toolDomains.execution.length})`]
+      ];
+
+      document.getElementById("domain-chips").innerHTML = domainChips
+        .map(([key, label]) => `<button class="chip ${state.domain === key ? "active" : ""}" data-domain="${key}">${label}</button>`)
+        .join("");
+
+      const signalChips = [
+        ["all", "Signal: All"],
+        ["risk", `Risk (${countBySignal("risk")})`],
+        ["alpha", `Alpha (${countBySignal("alpha")})`],
+        ["context", `Context (${countBySignal("context")})`],
+        ["execution", `Execution (${countBySignal("execution")})`]
+      ];
+
+      document.getElementById("signal-chips").innerHTML = signalChips
+        .map(([key, label]) => `<button class="chip ${state.signal === key ? "active" : ""}" data-signal="${key}">${label}</button>`)
+        .join("");
+
+      document.querySelectorAll("[data-domain]").forEach((btn) => {
+        btn.addEventListener("click", () => {
+          state.domain = btn.dataset.domain;
+          renderToolChips();
+          renderTools();
+        });
+      });
+
+      document.querySelectorAll("[data-signal]").forEach((btn) => {
+        btn.addEventListener("click", () => {
+          state.signal = btn.dataset.signal;
+          renderToolChips();
+          renderTools();
+        });
+      });
+    }
+
+    function toolCardTemplate(tool, idx) {
+      const descId = `tool-desc-${idx}`;
+      return `
+        <article class="tool-card">
+          <div class="tool-head">
+            <div>
+              <div class="name mono">${tool.name}</div>
+              <div class="subtle">${titleCase(tool.domain)}</div>
+            </div>
+            <span class="pill ${tool.signal}">${tool.signal}</span>
+          </div>
+          <p class="desc" id="${descId}">${tool.description}</p>
+          <button class="ghost-btn" data-expand="${descId}">Expand</button>
+          <div class="pill-row">
+            <span class="pill">${tool.cadence}</span>
+            <span class="pill">access:${tool.access}</span>
+            <span class="pill">cost:${tool.cost}</span>
+            <span class="pill">decay:${tool.decay}</span>
+          </div>
+          <div class="subtle"><strong>Provider:</strong> ${tool.provider}</div>
+          <div class="subtle mono"><strong>Rate:</strong> ${tool.rate}</div>
+        </article>
+      `;
+    }
+
+    function renderTools() {
+      const query = state.toolQuery.trim().toLowerCase();
+      const filtered = allTools.filter((tool) => {
+        if (state.domain !== "all" && tool.domain !== state.domain) return false;
+        if (state.signal !== "all" && tool.signal !== state.signal) return false;
+        if (!query) return true;
+
+        const haystack = [
+          tool.name,
+          tool.description,
+          tool.provider,
+          tool.domain,
+          tool.signal,
+          tool.cadence,
+          tool.access,
+          tool.rate
+        ]
+          .join(" ")
+          .toLowerCase();
+
+        return haystack.includes(query);
+      });
+
+      const grid = document.getElementById("tool-grid");
+      const empty = document.getElementById("tool-empty");
+
+      if (!filtered.length) {
+        grid.innerHTML = "";
+        empty.textContent = "No tools matched your filters.";
+        empty.classList.remove("hidden");
+        return;
+      }
+
+      empty.classList.add("hidden");
+      grid.innerHTML = filtered.map((tool, idx) => toolCardTemplate(tool, idx)).join("");
+
+      document.querySelectorAll("[data-expand]").forEach((btn) => {
+        btn.addEventListener("click", () => {
+          const target = document.getElementById(btn.dataset.expand);
+          const opened = target.classList.toggle("open");
+          btn.textContent = opened ? "Collapse" : "Expand";
+        });
+      });
+
+      document.getElementById("tool-count-badge").textContent = `${filtered.length} tools`;
+    }
+
+    function renderLoop() {
+      const list = document.getElementById("loop-list");
+      list.innerHTML = loopSteps
+        .map(
+          (s, i) => `
+            <button class="list-btn ${i === state.loopIndex ? "active" : ""}" data-loop-index="${i}">
+              <span class="step">${s.step}</span>
+              <span class="title">${s.title}</span>
+            </button>
+          `
+        )
+        .join("");
+
+      document.querySelectorAll("[data-loop-index]").forEach((btn) => {
+        btn.addEventListener("click", () => {
+          state.loopIndex = Number(btn.dataset.loopIndex);
+          renderLoop();
+        });
+      });
+
+      const selected = loopSteps[state.loopIndex];
+      document.getElementById("loop-detail").innerHTML = `
+        <h3>${selected.step} - ${selected.title}</h3>
+        <p class="deck">${selected.summary}</p>
+        <ul class="bullets">
+          ${selected.bullets.map((b) => `<li>${b}</li>`).join("")}
+        </ul>
+      `;
+    }
+
+    function renderChains() {
+      const list = document.getElementById("chain-list");
+      list.innerHTML = signalChains
+        .map(
+          (chain, i) => `
+            <button class="list-btn ${i === state.chainIndex ? "active" : ""}" data-chain-index="${i}">
+              <span class="step">Chain ${i + 1}</span>
+              <span class="title">${chain.name}</span>
+            </button>
+          `
+        )
+        .join("");
+
+      document.querySelectorAll("[data-chain-index]").forEach((btn) => {
+        btn.addEventListener("click", () => {
+          state.chainIndex = Number(btn.dataset.chainIndex);
+          renderChains();
+        });
+      });
+
+      const selected = signalChains[state.chainIndex];
+      document.getElementById("chain-detail").innerHTML = `
+        <h3>${selected.name}</h3>
+        <p class="deck">${selected.subtitle}</p>
+        <ul class="bullets">
+          ${selected.events.map((e) => `<li>${e}</li>`).join("")}
+        </ul>
+        <div class="decision"><strong>Decision:</strong> ${selected.decision}</div>
+      `;
+    }
+
+    function readScenarioInputs() {
+      return {
+        hormuz: Number(document.getElementById("sim-hormuz").value),
+        bab: Number(document.getElementById("sim-bab").value),
+        sanctions: Number(document.getElementById("sim-sanctions").value),
+        congestion: Number(document.getElementById("sim-congestion").value),
+        bunker: Number(document.getElementById("sim-bunker").value),
+        china: Number(document.getElementById("sim-china").value),
+        risk: Number(document.getElementById("sim-risk").value)
+      };
+    }
+
+    function updateScenarioValueLabels(values) {
+      document.getElementById("sim-hormuz-value").textContent = `${values.hormuz}%`;
+      document.getElementById("sim-bab-value").textContent = `${values.bab}%`;
+      document.getElementById("sim-sanctions-value").textContent = `${values.sanctions}%`;
+      document.getElementById("sim-congestion-value").textContent = `${values.congestion}%`;
+      document.getElementById("sim-bunker-value").textContent = `${values.bunker}%`;
+      document.getElementById("sim-china-value").textContent = values.china > 0 ? `+${values.china}` : `${values.china}`;
+      document.getElementById("sim-risk-value").textContent = `${values.risk}%`;
+    }
+
+    function renderScenarioLab() {
+      const inputs = readScenarioInputs();
+      updateScenarioValueLabels(inputs);
+      const snapshot = computeScenarioSnapshot(inputs);
+      state.scenarioScores = snapshot.scoredRoutes;
+      state.lastSnapshot = snapshot;
+
+      document.getElementById("sim-kpis").innerHTML = `
+        <article class="sim-kpi"><div class="k">Regime</div><div class="v">${snapshot.regime}</div></article>
+        <article class="sim-kpi"><div class="k">Tanker Composite</div><div class="v">${snapshot.tankerAvg}</div></article>
+        <article class="sim-kpi"><div class="k">Dry Bulk Composite</div><div class="v">${snapshot.dryAvg}</div></article>
+        <article class="sim-kpi"><div class="k">Container Composite</div><div class="v">${snapshot.containerAvg}</div></article>
+      `;
+
+      document.getElementById("sim-route-body").innerHTML = snapshot.scoredRoutes
+        .map((r) => {
+          const scoreClass = r.alphaScore >= 15 ? "alpha" : r.alphaScore <= -15 ? "risk" : "context";
+          return `
+            <tr>
+              <td><strong>${r.route}</strong></td>
+              <td>${r.segment}</td>
+              <td><span class="pill ${scoreClass}">${r.alphaScore}</span></td>
+              <td>${r.bias}</td>
+              <td>${r.driver}</td>
+            </tr>
+          `;
+        })
+        .join("");
+
+      document.getElementById("sim-summary").innerHTML = `
+        <strong>Model Output:</strong> ${snapshot.regime} regime. 
+        Highest-conviction long: ${snapshot.strongestLong ? `<strong>${snapshot.strongestLong.route}</strong> (${snapshot.strongestLong.alphaScore})` : "none"}.
+        Highest-conviction short/hedge: ${snapshot.strongestShort ? `<strong>${snapshot.strongestShort.route}</strong> (${snapshot.strongestShort.alphaScore})` : "none"}.
+      `;
+
+      if (document.getElementById("intel-tab-panels")) {
+        renderActiveTabPanel();
+      }
+      if (document.getElementById("advanced-lab")) {
+        renderAdvancedLab();
+      }
+      persistWorkspaceState();
+    }
+
+    function renderProviders() {
+      const body = document.getElementById("provider-body");
+      body.innerHTML = providers
+        .map(
+          ([name, data, cost]) => `
+            <tr>
+              <td><strong>${name}</strong></td>
+              <td>${data}</td>
+              <td class="cost">${cost}</td>
+            </tr>
+          `
+        )
+        .join("");
+    }
+
+    function renderCompanyTypeChips() {
+      const typeMap = {
+        all: "All",
+        quant_fund: "Quant Fund",
+        multi_strategy_fund: "Multi-Strategy",
+        freight_specialist: "Freight Specialist",
+        trading_house: "Trading House",
+        data_vendor: "Data Vendor",
+        satellite: "Satellite",
+        research: "Research"
+      };
+
+      const entries = Object.entries(typeMap).map(([key, label]) => {
+        const count = key === "all" ? companies.length : companies.filter((c) => c.type === key).length;
+        return [key, `${label} (${count})`];
+      });
+
+      document.getElementById("company-type-chips").innerHTML = entries
+        .map(([key, label]) => `<button class="chip ${state.companyType === key ? "active" : ""}" data-company-type="${key}">${label}</button>`)
+        .join("");
+
+      document.querySelectorAll("[data-company-type]").forEach((btn) => {
+        btn.addEventListener("click", () => {
+          state.companyType = btn.dataset.companyType;
+          renderCompanyTypeChips();
+          renderCompanies();
+        });
+      });
+    }
+
+    function renderCompanies() {
+      const query = state.companyQuery.trim().toLowerCase();
+      const filtered = companies.filter((company) => {
+        if (state.companyType !== "all" && company.type !== state.companyType) return false;
+
+        if (!query) return true;
+
+        const hay = [
+          company.name,
+          company.type,
+          company.scale,
+          company.hq,
+          company.strategy,
+          company.edge,
+          company.licensing,
+          company.notes,
+          company.stack.join(" ")
+        ]
+          .join(" ")
+          .toLowerCase();
+
+        return hay.includes(query);
+      });
+
+      const grid = document.getElementById("company-grid");
+      const empty = document.getElementById("company-empty");
+
+      if (!filtered.length) {
+        grid.innerHTML = "";
+        empty.textContent = "No entities matched your filters.";
+        empty.classList.remove("hidden");
+        return;
+      }
+
+      empty.classList.add("hidden");
+      grid.innerHTML = filtered
+        .map(
+          (c) => `
+            <article class="company-card">
+              <div class="company-head">
+                <div>
+                  <div class="name">${c.name}</div>
+                  <div class="subtle">${titleCase(c.type)} | ${c.hq} | founded ${c.founded}</div>
+                </div>
+                <span class="pill">${c.scale}</span>
+              </div>
+              <div class="subtle"><strong>Strategy:</strong> ${c.strategy}</div>
+              <div class="subtle"><strong>Edge:</strong> ${c.edge}</div>
+              <div class="pill-row">
+                ${c.stack.map((s) => `<span class="pill">${s}</span>`).join("")}
+              </div>
+              <div class="subtle"><strong>Signal licensing:</strong> ${c.licensing}</div>
+              <div class="subtle mono">${c.notes}</div>
+            </article>
+          `
+        )
+        .join("");
+
+      document.getElementById("company-count-badge").textContent = `${filtered.length} entities`;
+    }
+
+    function renderMarketStats() {
+      const mount = document.getElementById("market-stats");
+      mount.innerHTML = marketStats
+        .map(
+          ([k, v], i) => `
+            <article class="stat">
+              <div class="k">${k}</div>
+              <div class="v">${v}</div>
+              <div class="bar"><span data-width="${Math.max(18, 95 - i * 6)}"></span></div>
+            </article>
+          `
+        )
+        .join("");
+
+      requestAnimationFrame(() => {
+        mount.querySelectorAll("[data-width]").forEach((bar) => {
+          bar.style.width = `${bar.dataset.width}%`;
+        });
+      });
+    }
+
+    function renderMarketStructure() {
+      const tierGrid = document.getElementById("tier-grid");
+      tierGrid.innerHTML = tiers
+        .map(
+          (tier) => `
+            <article class="tier-card">
+              <div class="tier-sub">${tier.cadence}</div>
+              <div class="tier-title">${tier.title}</div>
+              <ul class="bullets">
+                ${tier.points.map((p) => `<li>${p}</li>`).join("")}
+              </ul>
+            </article>
+          `
+        )
+        .join("");
+
+      const insightGrid = document.getElementById("insight-grid");
+      insightGrid.innerHTML = insights
+        .map(
+          (block) => `
+            <article class="tier-card">
+              <div class="tier-title">${block.title}</div>
+              <ul class="bullets">
+                ${block.lines.map((line) => `<li>${line}</li>`).join("")}
+              </ul>
+            </article>
+          `
+        )
+        .join("");
+    }
+
+    function renderEdgeLab() {
+      const decayMount = document.getElementById("decay-bars");
+      const maxHalfLife = Math.max(...decayProfiles.map((d) => d.halfLifeHours));
+
+      decayMount.innerHTML = decayProfiles
+        .map((d, i) => {
+          const width = Math.round((d.halfLifeHours / maxHalfLife) * 100);
+          return `
+            <div class="decay-row">
+              <div class="decay-row-head">
+                <span>${d.family}</span>
+                <span class="mono">${d.halfLifeHours}h</span>
+              </div>
+              <div class="decay-track"><span class="decay-fill" data-decay-width="${width}" data-delay="${i * 70}"></span></div>
+            </div>
+          `;
+        })
+        .join("");
+
+      requestAnimationFrame(() => {
+        decayMount.querySelectorAll("[data-decay-width]").forEach((el) => {
+          setTimeout(() => {
+            el.style.width = `${el.dataset.decayWidth}%`;
+          }, Number(el.dataset.delay));
+        });
+      });
+
+      const rankMount = document.getElementById("reliability-list");
+      rankMount.innerHTML = reliabilityScores
+        .sort((a, b) => b.score - a.score)
+        .map(
+          (r) => `
+            <article class="rank-item">
+              <div class="left">
+                <div class="tool">${r.tool}</div>
+                <div class="note">${r.note}</div>
+              </div>
+              <span class="rank-score">${r.score}/100</span>
+            </article>
+          `
+        )
+        .join("");
+    }
+
+    function updateChecklistProgress() {
+      const complete = state.checklistDone.size;
+      const total = pretradeChecklistItems.length;
+      const percent = Math.round((complete / total) * 100);
+      document.getElementById("check-progress-bar").style.width = `${percent}%`;
+      document.getElementById("check-progress-text").textContent = `${complete}/${total} controls complete (${percent}%)`;
+    }
+
+    function renderPlaybook() {
+      const mount = document.getElementById("pretrade-checklist");
+      mount.innerHTML = pretradeChecklistItems
+        .map(
+          (item) => `
+            <label class="check-item">
+              <input type="checkbox" data-check-id="${item.id}" ${state.checklistDone.has(item.id) ? "checked" : ""}>
+              <span>${item.label}</span>
+            </label>
+          `
+        )
+        .join("");
+
+      mount.querySelectorAll("[data-check-id]").forEach((el) => {
+        el.addEventListener("change", () => {
+          const id = el.dataset.checkId;
+          if (el.checked) {
+            state.checklistDone.add(id);
+          } else {
+            state.checklistDone.delete(id);
+          }
+          updateChecklistProgress();
+          renderAdvancedLab();
+          persistWorkspaceState();
+        });
+      });
+
+      updateChecklistProgress();
+      evaluateVenueDecision();
+    }
+
+    function evaluateVenueDecision() {
+      const urgency = document.getElementById("venue-urgency").value;
+      const size = document.getElementById("venue-size").value;
+      const liquidity = document.getElementById("venue-liquidity").value;
+      const anon = document.getElementById("venue-anon").value;
+
+      let cmeScore = 0;
+      let otcScore = 0;
+      const reasons = [];
+
+      if (urgency === "high") {
+        cmeScore += 2;
+        reasons.push("high urgency favors screen execution speed");
+      }
+      if (urgency === "low") {
+        otcScore += 1;
+        reasons.push("lower urgency allows brokered RFQ workflow");
+      }
+      if (size === "large") {
+        otcScore += 2;
+        reasons.push("large clip favors OTC liquidity sourcing");
+      }
+      if (size === "small") {
+        cmeScore += 1;
+        reasons.push("smaller size can cross on lit venue");
+      }
+      if (liquidity === "high") {
+        cmeScore += 2;
+        reasons.push("strong screen depth supports CME");
+      }
+      if (liquidity === "low") {
+        otcScore += 2;
+        reasons.push("thin screen depth favors broker risk transfer");
+      }
+      if (anon === "yes") {
+        otcScore += 2;
+        reasons.push("anonymity preference tilts toward OTC RFQ");
+      }
+
+      if (!reasons.length) {
+        reasons.push("inputs are balanced with no dominant venue constraint");
+      }
+
+      const preferredVenue = cmeScore >= otcScore ? "CME Order Entry" : "OTC FFA RFQ";
+      const confidence = Math.abs(cmeScore - otcScore) <= 1 ? "balanced" : "high-conviction";
+
+      document.getElementById("venue-decision").innerHTML = `
+        <strong>Recommended venue:</strong> ${preferredVenue}<br>
+        <strong>Confidence:</strong> ${confidence} (${cmeScore} CME vs ${otcScore} OTC)<br>
+        <strong>Rationale:</strong> ${reasons.join("; ")}.
+      `;
+    }
+
+    function renderPresetManager() {
+      const select = document.getElementById("preset-select");
+      if (!select) return;
+
+      const presets = getPresetMap();
+      const names = Object.keys(presets);
+      if (!names.length) {
+        select.innerHTML = "";
+        return;
+      }
+
+      if (!presets[state.activePreset]) {
+        state.activePreset = names[0];
+      }
+
+      select.innerHTML = names
+        .map((name) => {
+          const isCustom = Object.prototype.hasOwnProperty.call(state.customPresets, name);
+          const selected = name === state.activePreset ? "selected" : "";
+          return `<option value="${name}" ${selected}>${name}${isCustom ? " [custom]" : ""}</option>`;
+        })
+        .join("");
+
+      const status = document.getElementById("preset-status");
+      if (status) status.textContent = state.presetStatus;
+    }
+
+    function quantile(values, q) {
+      if (!values.length) return 0;
+      const sorted = [...values].sort((a, b) => a - b);
+      const pos = (sorted.length - 1) * q;
+      const base = Math.floor(pos);
+      const rest = pos - base;
+      if (sorted[base + 1] === undefined) return sorted[base];
+      return sorted[base] + rest * (sorted[base + 1] - sorted[base]);
+    }
+
+    function runMonteCarloSimulation() {
+      const runSelect = document.getElementById("mc-runs");
+      const shockSlider = document.getElementById("mc-shock");
+      const runs = runSelect ? Number(runSelect.value) : state.mcRuns;
+      const shockPct = shockSlider ? Number(shockSlider.value) : state.mcShock;
+
+      state.mcRuns = runs;
+      state.mcShock = shockPct;
+
+      const base = readScenarioInputs();
+      const composites = [];
+      let upsideCases = 0;
+      let downsideCases = 0;
+      let tankerBull = 0;
+      let dryBull = 0;
+      let containerBull = 0;
+      const topRouteFreq = {};
+
+      for (let i = 0; i < runs; i += 1) {
+        const perturbed = {
+          hormuz: clamp(base.hormuz + gaussianRandom() * shockPct, 0, 100),
+          bab: clamp(base.bab + gaussianRandom() * shockPct, 0, 100),
+          sanctions: clamp(base.sanctions + gaussianRandom() * shockPct, 0, 100),
+          congestion: clamp(base.congestion + gaussianRandom() * shockPct, 0, 100),
+          bunker: clamp(base.bunker + gaussianRandom() * shockPct, 0, 100),
+          china: clamp(base.china + gaussianRandom() * (shockPct / 2), -50, 50),
+          risk: clamp(base.risk + gaussianRandom() * shockPct, 0, 100)
+        };
+
+        const snap = computeScenarioSnapshot(perturbed);
+        composites.push(snap.composite);
+        if (snap.composite >= 15) upsideCases += 1;
+        if (snap.composite <= -15) downsideCases += 1;
+        if (snap.tankerAvg >= 15) tankerBull += 1;
+        if (snap.dryAvg >= 15) dryBull += 1;
+        if (snap.containerAvg >= 15) containerBull += 1;
+        if (snap.strongestLong) {
+          const key = snap.strongestLong.route;
+          topRouteFreq[key] = (topRouteFreq[key] || 0) + 1;
+        }
+      }
+
+      const bins = Array.from({ length: 12 }, () => 0);
+      composites.forEach((value) => {
+        const idx = clamp(Math.floor(((value + 100) / 200) * bins.length), 0, bins.length - 1);
+        bins[idx] += 1;
+      });
+
+      const topRoute = Object.entries(topRouteFreq).sort((a, b) => b[1] - a[1])[0];
+      state.mcResult = {
+        runs,
+        shockPct,
+        mean: Math.round(composites.reduce((sum, value) => sum + value, 0) / composites.length),
+        q05: Math.round(quantile(composites, 0.05)),
+        q50: Math.round(quantile(composites, 0.5)),
+        q95: Math.round(quantile(composites, 0.95)),
+        upsideProb: Math.round((upsideCases / runs) * 100),
+        downsideProb: Math.round((downsideCases / runs) * 100),
+        tankerBullProb: Math.round((tankerBull / runs) * 100),
+        dryBullProb: Math.round((dryBull / runs) * 100),
+        containerBullProb: Math.round((containerBull / runs) * 100),
+        bins,
+        topRoute: topRoute ? topRoute[0] : null,
+        topRouteProb: topRoute ? Math.round((topRoute[1] / runs) * 100) : 0
+      };
+
+      renderAdvancedLab();
+      persistWorkspaceState();
+    }
+
+    function renderMonteCarloPanel() {
+      const runSelect = document.getElementById("mc-runs");
+      const shockSlider = document.getElementById("mc-shock");
+      const shockValue = document.getElementById("mc-shock-value");
+      const kpiMount = document.getElementById("mc-kpis");
+      const histMount = document.getElementById("mc-histogram");
+      const summary = document.getElementById("mc-summary");
+      if (!runSelect || !shockSlider || !kpiMount || !histMount || !summary) return;
+
+      runSelect.value = String(state.mcRuns);
+      shockSlider.value = String(state.mcShock);
+      if (shockValue) shockValue.textContent = `${state.mcShock}%`;
+
+      if (!state.mcResult) {
+        kpiMount.innerHTML = `
+          <article class="sim-kpi"><div class="k">Expected Composite</div><div class="v">-</div></article>
+          <article class="sim-kpi"><div class="k">5th Percentile</div><div class="v">-</div></article>
+          <article class="sim-kpi"><div class="k">95th Percentile</div><div class="v">-</div></article>
+          <article class="sim-kpi"><div class="k">Upside Probability</div><div class="v">-</div></article>
+        `;
+        histMount.innerHTML = `<div class="subtle mono">Run stress test to generate distribution.</div>`;
+        summary.textContent = "No simulation results yet.";
+        return;
+      }
+
+      const result = state.mcResult;
+      kpiMount.innerHTML = `
+        <article class="sim-kpi"><div class="k">Expected Composite</div><div class="v">${result.mean}</div></article>
+        <article class="sim-kpi"><div class="k">5th Percentile</div><div class="v">${result.q05}</div></article>
+        <article class="sim-kpi"><div class="k">95th Percentile</div><div class="v">${result.q95}</div></article>
+        <article class="sim-kpi"><div class="k">Upside Probability</div><div class="v">${result.upsideProb}%</div></article>
+      `;
+
+      const maxBin = Math.max(...result.bins, 1);
+      histMount.innerHTML = `
+        ${result.bins
+          .map((count, idx) => {
+            const h = Math.max(4, Math.round((count / maxBin) * 76));
+            return `<div class="mc-bar" data-mc-height="${h}" data-mc-delay="${idx * 24}"></div>`;
+          })
+          .join("")}
+        <div class="mc-axis"><span>-100</span><span>0</span><span>+100</span></div>
+      `;
+
+      requestAnimationFrame(() => {
+        histMount.querySelectorAll("[data-mc-height]").forEach((bar) => {
+          setTimeout(() => {
+            bar.style.height = `${bar.dataset.mcHeight}px`;
+          }, Number(bar.dataset.mcDelay));
+        });
+      });
+
+      summary.textContent =
+        `Runs ${result.runs}, shock ${result.shockPct}%. Downside ${result.downsideProb}% vs upside ${result.upsideProb}%. ` +
+        `Most frequent long leader: ${result.topRoute || "n/a"} (${result.topRouteProb}%).`;
+    }
+
+    function alertPillClass(level) {
+      if (level === "critical") return "risk";
+      if (level === "high") return "execution";
+      if (level === "medium") return "context";
+      return "alpha";
+    }
+
+    function renderAlertEngine() {
+      const mount = document.getElementById("alert-list");
+      if (!mount) return;
+
+      const inputs = readScenarioInputs();
+      const snap = state.lastSnapshot || computeScenarioSnapshot(inputs);
+      const mc = state.mcResult;
+      const alerts = [];
+
+      if (inputs.hormuz >= 80 && inputs.sanctions >= 70) {
+        alerts.push({
+          level: "critical",
+          title: "Transit Shock Concentration",
+          desc: "Hormuz disruption and sanctions intensity are both elevated; tanker routing risk is highly convex."
+        });
+      }
+      if (snap.regime === "Crisis" && snap.tankerAvg >= 25) {
+        alerts.push({
+          level: "high",
+          title: "Tanker Crisis Regime Long Bias",
+          desc: "Crisis regime with strong tanker composite suggests directional exposure should be paired with downside hedge."
+        });
+      }
+      if (snap.dryAvg >= 20 && inputs.china >= 20) {
+        alerts.push({
+          level: "medium",
+          title: "Dry Bulk Demand Breakout",
+          desc: "China impulse and dry composite are aligned; watch Cape/Panamax spread acceleration."
+        });
+      }
+      if (mc && mc.downsideProb >= 35) {
+        alerts.push({
+          level: "high",
+          title: "Stress Tail Risk Elevated",
+          desc: `Monte Carlo downside probability at ${mc.downsideProb}% warrants tighter sizing and margin buffer.`
+        });
+      }
+      if (mc && mc.upsideProb >= 55 && mc.q95 >= 25) {
+        alerts.push({
+          level: "medium",
+          title: "Positive Convexity Window",
+          desc: `Stress engine indicates upside skew (${mc.upsideProb}% upside probability).`
+        });
+      }
+      if (state.checklistDone.size < Math.ceil(pretradeChecklistItems.length * 0.6)) {
+        alerts.push({
+          level: "info",
+          title: "Execution Governance Incomplete",
+          desc: "Less than 60% of pre-trade controls are checked."
+        });
+      }
+      if (!alerts.length) {
+        alerts.push({
+          level: "info",
+          title: "No Active Alert",
+          desc: "Current state is balanced with no dominant systemic warning."
+        });
+      }
+
+      mount.innerHTML = alerts
+        .map(
+          (alert) => `
+            <article class="alert-item">
+              <div class="head">
+                <div class="title">${alert.title}</div>
+                <span class="pill ${alertPillClass(alert.level)}">${alert.level}</span>
+              </div>
+              <div class="desc">${alert.desc}</div>
+            </article>
+          `
+        )
+        .join("");
+    }
+
+    function renderAdvancedLab() {
+      renderPresetManager();
+      renderMonteCarloPanel();
+      renderAlertEngine();
+    }
+
+    function applyPresetByName(name) {
+      const presets = getPresetMap();
+      if (!presets[name]) return false;
+      state.activePreset = name;
+      state.presetStatus = `Applied preset: ${name}`;
+      applyScenarioInputs(presets[name]);
+      renderAdvancedLab();
+      persistWorkspaceState();
+      return true;
+    }
+
+    function saveCurrentPreset(name) {
+      if (!name) return false;
+      if (Object.prototype.hasOwnProperty.call(builtinPresets, name)) return false;
+      state.customPresets[name] = readScenarioInputs();
+      state.activePreset = name;
+      state.presetStatus = `Saved custom preset: ${name}`;
+      renderAdvancedLab();
+      persistWorkspaceState();
+      return true;
+    }
+
+    function deleteCurrentPreset(name) {
+      if (!name) return false;
+      if (!Object.prototype.hasOwnProperty.call(state.customPresets, name)) return false;
+      delete state.customPresets[name];
+      state.activePreset = "Baseline";
+      state.presetStatus = `Deleted custom preset: ${name}`;
+      applyPresetByName("Baseline");
+      renderAdvancedLab();
+      persistWorkspaceState();
+      return true;
+    }
+
+    function renderPeople() {
+      const grid = document.getElementById("people-grid");
+      grid.innerHTML = people
+        .map(
+          (person) => `
+            <article class="person-card">
+              <div class="person-head">
+                <div>
+                  <div class="name">${person.name}</div>
+                  <div class="subtle">${person.role}</div>
+                </div>
+                <span class="pill">${person.org}</span>
+              </div>
+              <div class="subtle">${person.why}</div>
+            </article>
+          `
+        )
+        .join("");
+
+      document.getElementById("people-count-badge").textContent = `${people.length} profiles`;
+    }
+
+    function initObservers() {
+      const observer = new IntersectionObserver(
+        (entries) => {
+          entries.forEach((entry) => {
+            if (entry.isIntersecting) {
+              entry.target.classList.add("show");
+            }
+          });
+        },
+        { threshold: 0.1 }
+      );
+
+      document.querySelectorAll(".section").forEach((section) => observer.observe(section));
+    }
+
+    function initEvents() {
+      document.getElementById("tool-search").addEventListener("input", (e) => {
+        state.toolQuery = e.target.value;
+        renderTools();
+      });
+
+      document.getElementById("company-search").addEventListener("input", (e) => {
+        state.companyQuery = e.target.value;
+        renderCompanies();
+      });
+
+      ["sim-hormuz", "sim-bab", "sim-sanctions", "sim-congestion", "sim-bunker", "sim-china", "sim-risk"].forEach((id) => {
+        document.getElementById(id).addEventListener("input", renderScenarioLab);
+      });
+
+      ["venue-urgency", "venue-size", "venue-liquidity", "venue-anon"].forEach((id) => {
+        document.getElementById(id).addEventListener("change", () => {
+          evaluateVenueDecision();
+          persistWorkspaceState();
+        });
+      });
+
+      const presetSelect = document.getElementById("preset-select");
+      const presetApply = document.getElementById("preset-apply");
+      const presetSave = document.getElementById("preset-save");
+      const presetDelete = document.getElementById("preset-delete");
+      const presetReset = document.getElementById("preset-reset");
+      const presetName = document.getElementById("preset-name");
+      const mcRuns = document.getElementById("mc-runs");
+      const mcShock = document.getElementById("mc-shock");
+      const mcRun = document.getElementById("mc-run");
+      const mcShockValue = document.getElementById("mc-shock-value");
+
+      if (presetSelect) {
+        presetSelect.addEventListener("change", () => {
+          state.activePreset = presetSelect.value;
+          state.presetStatus = `Selected preset: ${presetSelect.value}`;
+          renderPresetManager();
+          persistWorkspaceState();
+        });
+      }
+
+      if (presetApply && presetSelect) {
+        presetApply.addEventListener("click", () => {
+          applyPresetByName(presetSelect.value);
+        });
+      }
+
+      if (presetSave && presetName) {
+        presetSave.addEventListener("click", () => {
+          const raw = presetName.value.trim();
+          if (!raw) {
+            state.presetStatus = "Enter a preset name to save.";
+            renderPresetManager();
+            return;
+          }
+          const normalized = raw.replace(/\s+/g, "_").replace(/[^A-Za-z0-9_-]/g, "");
+          const ok = saveCurrentPreset(normalized);
+          if (!ok) {
+            state.presetStatus = "Unable to save preset. Built-in names are reserved.";
+            renderPresetManager();
+            return;
+          }
+          presetName.value = "";
+        });
+      }
+
+      if (presetDelete && presetSelect) {
+        presetDelete.addEventListener("click", () => {
+          const target = presetSelect.value;
+          const ok = deleteCurrentPreset(target);
+          if (!ok) {
+            state.presetStatus = "Only custom presets can be deleted.";
+            renderPresetManager();
+          }
+        });
+      }
+
+      if (presetReset) {
+        presetReset.addEventListener("click", () => {
+          state.checklistDone = new Set();
+          state.timelineImpact = "all";
+          state.activeTab = "pulse";
+          state.presetStatus = "Workspace reset to Baseline.";
+          applyPresetByName("Baseline");
+          renderPlaybook();
+          renderCommandTabs();
+          runMonteCarloSimulation();
+        });
+      }
+
+      if (mcRuns) {
+        mcRuns.addEventListener("change", () => {
+          state.mcRuns = Number(mcRuns.value);
+          renderMonteCarloPanel();
+          persistWorkspaceState();
+        });
+      }
+
+      if (mcShock) {
+        mcShock.addEventListener("input", () => {
+          state.mcShock = Number(mcShock.value);
+          if (mcShockValue) mcShockValue.textContent = `${state.mcShock}%`;
+          persistWorkspaceState();
+        });
+      }
+
+      if (mcRun) {
+        mcRun.addEventListener("click", runMonteCarloSimulation);
+      }
+
+      const cycleBtn = document.getElementById("intel-tab-cycle");
+      if (cycleBtn) {
+        cycleBtn.addEventListener("click", () => setTabCycle(!state.tabCycleOn));
+      }
+
+      document.addEventListener("keydown", (event) => {
+        const active = document.activeElement;
+        const tag = active ? active.tagName : "";
+        const isTypingContext = ["INPUT", "TEXTAREA", "SELECT"].includes(tag);
+        if (isTypingContext) return;
+        if (event.key === "]") {
+          event.preventDefault();
+          switchTabByOffset(1);
+        } else if (event.key === "[") {
+          event.preventDefault();
+          switchTabByOffset(-1);
+        }
+      });
+
+      document.addEventListener("visibilitychange", () => {
+        if (document.hidden && state.tabCycleOn) {
+          setTabCycle(false);
+        }
+      });
+    }
+
+    function stampDate() {
+      const now = new Date();
+      const stamp = now.toLocaleString(undefined, {
+        year: "numeric",
+        month: "short",
+        day: "2-digit",
+        hour: "2-digit",
+        minute: "2-digit"
+      });
+      document.getElementById("stamp").textContent = `Generated ${stamp}`;
+    }
+
+    function init() {
+      stampDate();
+      loadPersistedState();
+      renderHeroKpis();
+      renderCommandTabs();
+      renderToolChips();
+      renderTools();
+      renderLoop();
+      renderChains();
+      renderScenarioLab();
+      renderProviders();
+      renderCompanyTypeChips();
+      renderCompanies();
+      renderMarketStats();
+      renderMarketStructure();
+      renderEdgeLab();
+      renderPlaybook();
+      renderAdvancedLab();
+      renderPeople();
+      initEvents();
+      initObservers();
+      if (!state.mcResult) {
+        runMonteCarloSimulation();
+      }
+    }
+
+    init();
+  </script>
+</body>
+</html>

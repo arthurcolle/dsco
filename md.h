@@ -96,6 +96,10 @@ typedef struct {
     /* Line accumulator for streaming */
     char line_buf[MD_LINE_MAX];
     int  line_len;
+    char *line_overflow;
+    int  line_overflow_len;
+    int  line_overflow_cap;
+    bool out_is_tty;
 
     /* Block-level state */
     md_state_t state;
@@ -147,6 +151,16 @@ typedef struct {
     char prev_line[MD_LINE_MAX]; /* for setext heading detection */
     bool prev_line_valid;
     int  blockquote_depth;       /* nested > tracking */
+    char last_para_line[MD_LINE_MAX]; /* suppress accidental adjacent duplicates */
+    bool last_para_line_valid;
+
+    /* Streaming partial-line echo */
+    int  partial_echo_pos;       /* how many buffered chars were partially echoed */
+
+    /* Feature hooks (set by agent.c) */
+    int  paragraph_char_count;   /* F6: paragraph fade-in char counter */
+    bool heatmap_enabled;        /* F1: token heatmap in render_inline */
+    bool diff_code_enabled;      /* F38: diff-aware code blocks */
 } md_renderer_t;
 
 /* Initialize renderer. out=stdout typically. */

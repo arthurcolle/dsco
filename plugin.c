@@ -1,7 +1,9 @@
 #include "plugin.h"
+#include "json_util.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <ctype.h>
 #include <dirent.h>
 #include <dlfcn.h>
 #include <sys/stat.h>
@@ -18,6 +20,250 @@ typedef tool_def_t *(*plugin_tools_fn)(void);
 typedef int         (*plugin_count_fn)(void);
 typedef bool        (*plugin_init_fn)(void);
 typedef void        (*plugin_cleanup_fn)(void);
+
+typedef struct {
+    char name[128];
+    char version[64];
+    char hash[65];
+    char signer[128];
+    int capabilities;
+} plugin_manifest_info_t;
+
+typedef struct {
+    bool ok;
+    int count;
+} cap_iter_ctx_t;
+
+typedef struct {
+    const plugin_manifest_info_t *manifest;
+    bool ok;
+    int count;
+    bool found_pin;
+    char names[64][128];
+    int names_count;
+    char err[256];
+} lock_iter_ctx_t;
+
+static const char *k_manifest_schema =
+    "{\"type\":\"object\",\"properties\":{"
+    "\"name\":{\"type\":\"string\"},"
+    "\"version\":{\"type\":\"string\"},"
+    "\"hash\":{\"type\":\"string\"},"
+    "\"signer\":{\"type\":\"string\"},"
+    "\"capabilities\":{\"type\":\"array\"}"
+    "},\"required\":[\"name\",\"version\",\"hash\",\"signer\",\"capabilities\"]}";
+
+static const char *k_lock_schema =
+    "{\"type\":\"object\",\"properties\":{"
+    "\"schema_version\":{\"type\":\"integer\"},"
+    "\"plugins\":{\"type\":\"array\"}"
+    "},\"required\":[\"schema_version\",\"plugins\"]}";
+
+static const char *k_lock_entry_schema =
+    "{\"type\":\"object\",\"properties\":{"
+    "\"name\":{\"type\":\"string\"},"
+    "\"version\":{\"type\":\"string\"},"
+    "\"hash\":{\"type\":\"string\"}"
+    "},\"required\":[\"name\",\"version\",\"hash\"]}";
+
+static bool is_sha256_hex(const char *s) {
+    if (!s) return false;
+    if (strlen(s) != 64) return false;
+    for (int i = 0; i < 64; i++) {
+        if (!isxdigit((unsigned char)s[i])) return false;
+    }
+    return true;
+}
+
+static bool read_text_file(const char *path, char **out, char *err, size_t err_len) {
+    *out = NULL;
+    if (!path || !path[0]) {
+        snprintf(err, err_len, "empty path");
+        return false;
+    }
+    FILE *f = fopen(path, "rb");
+    if (!f) {
+        snprintf(err, err_len, "cannot open %s", path);
+        return false;
+    }
+    if (fseek(f, 0, SEEK_END) != 0) {
+        fclose(f);
+        snprintf(err, err_len, "failed seeking %s", path);
+        return false;
+    }
+    long sz = ftell(f);
+    if (sz < 0 || sz > (2 * 1024 * 1024)) {
+        fclose(f);
+        snprintf(err, err_len, "invalid file size for %s", path);
+        return false;
+    }
+    rewind(f);
+    char *buf = safe_malloc((size_t)sz + 1);
+    size_t n = fread(buf, 1, (size_t)sz, f);
+    fclose(f);
+    buf[n] = '\0';
+    *out = buf;
+    return true;
+}
+
+static void cap_iter_cb(const char *element_start, void *ctx) {
+    cap_iter_ctx_t *it = (cap_iter_ctx_t *)ctx;
+    if (!it->ok) return;
+    const char *p = element_start;
+    while (*p && isspace((unsigned char)*p)) p++;
+    if (*p != '"') {
+        it->ok = false;
+        return;
+    }
+    it->count++;
+}
+
+static bool parse_manifest_json(const char *json, plugin_manifest_info_t *out,
+                                char *err, size_t err_len) {
+    json_validation_t v = json_validate_schema(json, k_manifest_schema);
+    if (!v.valid) {
+        snprintf(err, err_len, "manifest schema invalid: %s", v.error);
+        return false;
+    }
+
+    char *name = json_get_str(json, "name");
+    char *version = json_get_str(json, "version");
+    char *hash = json_get_str(json, "hash");
+    char *signer = json_get_str(json, "signer");
+
+    if (!name || !*name || !version || !*version || !signer || !*signer) {
+        snprintf(err, err_len, "manifest fields name/version/signer must be non-empty strings");
+        free(name);
+        free(version);
+        free(hash);
+        free(signer);
+        return false;
+    }
+    if (!is_sha256_hex(hash)) {
+        snprintf(err, err_len, "manifest hash must be a 64-char hex sha256 digest");
+        free(name);
+        free(version);
+        free(hash);
+        free(signer);
+        return false;
+    }
+
+    cap_iter_ctx_t cap = { .ok = true, .count = 0 };
+    int cap_n = json_array_foreach(json, "capabilities", cap_iter_cb, &cap);
+    if (!cap.ok || cap_n <= 0 || cap.count <= 0) {
+        snprintf(err, err_len, "manifest capabilities must be a non-empty string array");
+        free(name);
+        free(version);
+        free(hash);
+        free(signer);
+        return false;
+    }
+
+    memset(out, 0, sizeof(*out));
+    snprintf(out->name, sizeof(out->name), "%s", name);
+    snprintf(out->version, sizeof(out->version), "%s", version);
+    snprintf(out->hash, sizeof(out->hash), "%s", hash);
+    snprintf(out->signer, sizeof(out->signer), "%s", signer);
+    out->capabilities = cap.count;
+
+    free(name);
+    free(version);
+    free(hash);
+    free(signer);
+    return true;
+}
+
+static void lock_iter_cb(const char *element_start, void *ctx) {
+    lock_iter_ctx_t *it = (lock_iter_ctx_t *)ctx;
+    if (!it->ok) return;
+
+    json_validation_t v = json_validate_schema(element_start, k_lock_entry_schema);
+    if (!v.valid) {
+        snprintf(it->err, sizeof(it->err), "lock entry schema invalid: %s", v.error);
+        it->ok = false;
+        return;
+    }
+
+    char *name = json_get_str(element_start, "name");
+    char *version = json_get_str(element_start, "version");
+    char *hash = json_get_str(element_start, "hash");
+    if (!name || !version || !hash || !*name || !*version || !is_sha256_hex(hash)) {
+        snprintf(it->err, sizeof(it->err), "lock entry has invalid name/version/hash");
+        free(name);
+        free(version);
+        free(hash);
+        it->ok = false;
+        return;
+    }
+
+    for (int i = 0; i < it->names_count; i++) {
+        if (strcmp(it->names[i], name) == 0) {
+            snprintf(it->err, sizeof(it->err), "duplicate lock entry for plugin '%s'", name);
+            free(name);
+            free(version);
+            free(hash);
+            it->ok = false;
+            return;
+        }
+    }
+    if (it->names_count < (int)(sizeof(it->names) / sizeof(it->names[0]))) {
+        snprintf(it->names[it->names_count], sizeof(it->names[it->names_count]), "%s", name);
+        it->names_count++;
+    }
+
+    if (it->manifest &&
+        strcmp(name, it->manifest->name) == 0 &&
+        strcmp(version, it->manifest->version) == 0 &&
+        strcmp(hash, it->manifest->hash) == 0) {
+        it->found_pin = true;
+    }
+
+    it->count++;
+    free(name);
+    free(version);
+    free(hash);
+}
+
+static bool validate_lock_json(const char *json, const plugin_manifest_info_t *manifest,
+                               int *plugins_count_out, bool *has_manifest_pin_out,
+                               char *err, size_t err_len) {
+    json_validation_t v = json_validate_schema(json, k_lock_schema);
+    if (!v.valid) {
+        snprintf(err, err_len, "lockfile schema invalid: %s", v.error);
+        return false;
+    }
+    int schema_version = json_get_int(json, "schema_version", 0);
+    if (schema_version <= 0) {
+        snprintf(err, err_len, "lockfile schema_version must be >= 1");
+        return false;
+    }
+
+    lock_iter_ctx_t it;
+    memset(&it, 0, sizeof(it));
+    it.ok = true;
+    it.manifest = manifest;
+    int entry_count = json_array_foreach(json, "plugins", lock_iter_cb, &it);
+    if (!it.ok) {
+        snprintf(err, err_len, "%s", it.err[0] ? it.err : "lockfile plugin list invalid");
+        return false;
+    }
+    if (entry_count <= 0 || it.count <= 0) {
+        snprintf(err, err_len, "lockfile plugins must contain at least one entry");
+        return false;
+    }
+    if (plugins_count_out) *plugins_count_out = it.count;
+    if (has_manifest_pin_out) *has_manifest_pin_out = it.found_pin;
+    return true;
+}
+
+static void plugin_metadata_default_path(const char *file_name, char *out, size_t out_len) {
+    const char *home = getenv("HOME");
+    if (!home || !*home) {
+        snprintf(out, out_len, ".dsco/plugins/%s", file_name);
+        return;
+    }
+    snprintf(out, out_len, "%s/%s/%s", home, PLUGIN_DIR_NAME, file_name);
+}
 
 /* ── Load a single plugin ────────────────────────────────────────────── */
 
@@ -227,4 +473,119 @@ void plugin_list(const plugin_registry_t *reg, char *out, size_t out_len) {
     n = snprintf(out + pos, out_len - pos,
                  "\nPlugin directory: %s\n", reg->plugin_dir);
     if (n > 0) pos += (size_t)n;
+}
+
+bool plugin_validate_manifest_file(const char *path, char *out, size_t out_len) {
+    char resolved[1024];
+    if (!path || !*path) {
+        plugin_metadata_default_path(PLUGIN_MANIFEST_FILE, resolved, sizeof(resolved));
+        path = resolved;
+    }
+
+    char *json = NULL;
+    char err[256];
+    if (!read_text_file(path, &json, err, sizeof(err))) {
+        snprintf(out, out_len, "manifest validation failed: %s", err);
+        return false;
+    }
+
+    plugin_manifest_info_t info;
+    bool ok = parse_manifest_json(json, &info, err, sizeof(err));
+    free(json);
+    if (!ok) {
+        snprintf(out, out_len, "manifest validation failed (%s): %s", path, err);
+        return false;
+    }
+
+    snprintf(out, out_len,
+             "manifest valid: path=%s name=%s version=%s signer=%s hash=%s capabilities=%d",
+             path, info.name, info.version, info.signer, info.hash, info.capabilities);
+    return true;
+}
+
+bool plugin_validate_lockfile_file(const char *path, char *out, size_t out_len) {
+    char resolved[1024];
+    if (!path || !*path) {
+        plugin_metadata_default_path(PLUGINS_LOCK_FILE, resolved, sizeof(resolved));
+        path = resolved;
+    }
+
+    char *json = NULL;
+    char err[256];
+    if (!read_text_file(path, &json, err, sizeof(err))) {
+        snprintf(out, out_len, "lockfile validation failed: %s", err);
+        return false;
+    }
+
+    int plugin_count = 0;
+    bool ok = validate_lock_json(json, NULL, &plugin_count, NULL, err, sizeof(err));
+    free(json);
+    if (!ok) {
+        snprintf(out, out_len, "lockfile validation failed (%s): %s", path, err);
+        return false;
+    }
+
+    snprintf(out, out_len, "lockfile valid: path=%s plugins=%d", path, plugin_count);
+    return true;
+}
+
+bool plugin_validate_manifest_and_lock(const char *manifest_path, const char *lock_path,
+                                       char *out, size_t out_len) {
+    char manifest_resolved[1024];
+    char lock_resolved[1024];
+    if (!manifest_path || !*manifest_path) {
+        plugin_metadata_default_path(PLUGIN_MANIFEST_FILE, manifest_resolved, sizeof(manifest_resolved));
+        manifest_path = manifest_resolved;
+    }
+    if (!lock_path || !*lock_path) {
+        plugin_metadata_default_path(PLUGINS_LOCK_FILE, lock_resolved, sizeof(lock_resolved));
+        lock_path = lock_resolved;
+    }
+
+    char *manifest_json = NULL;
+    char *lock_json = NULL;
+    char err[256];
+
+    if (!read_text_file(manifest_path, &manifest_json, err, sizeof(err))) {
+        snprintf(out, out_len, "plugin validation failed: %s", err);
+        return false;
+    }
+    if (!read_text_file(lock_path, &lock_json, err, sizeof(err))) {
+        free(manifest_json);
+        snprintf(out, out_len, "plugin validation failed: %s", err);
+        return false;
+    }
+
+    plugin_manifest_info_t manifest;
+    if (!parse_manifest_json(manifest_json, &manifest, err, sizeof(err))) {
+        free(manifest_json);
+        free(lock_json);
+        snprintf(out, out_len, "plugin validation failed (%s): %s", manifest_path, err);
+        return false;
+    }
+
+    int lock_plugins = 0;
+    bool has_pin = false;
+    if (!validate_lock_json(lock_json, &manifest, &lock_plugins, &has_pin, err, sizeof(err))) {
+        free(manifest_json);
+        free(lock_json);
+        snprintf(out, out_len, "plugin validation failed (%s): %s", lock_path, err);
+        return false;
+    }
+
+    free(manifest_json);
+    free(lock_json);
+
+    if (!has_pin) {
+        snprintf(out, out_len,
+                 "plugin validation failed: %s %s (hash=%s) missing from %s",
+                 manifest.name, manifest.version, manifest.hash, lock_path);
+        return false;
+    }
+
+    snprintf(out, out_len,
+             "plugin metadata valid: manifest=%s lock=%s name=%s version=%s hash=%s caps=%d lock_plugins=%d",
+             manifest_path, lock_path, manifest.name, manifest.version, manifest.hash,
+             manifest.capabilities, lock_plugins);
+    return true;
 }

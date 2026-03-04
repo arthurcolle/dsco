@@ -1,7 +1,36 @@
+# Build artifacts
 *.o
+build/
 dsco
+dsco-debug
+dsco-asan
+dsco-ubsan
+test_runner
+asan-test_runner
+ubsan-test_runner
 *.dSYM/
+
+# Editor / OS
 *.swp
+*.swo
+*~
+.DS_Store
 *.tmp
+
+# Runtime data
 baseline.db
 .dsco/
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+venv/
+
+# IDE
+.vscode/
+.idea/
+
+# Private notes
+notes/
