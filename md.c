@@ -1,11 +1,15 @@
 #include "md.h"
 #include "tui.h"
+#include "config.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <ctype.h>
 #include <sys/ioctl.h>
 #include <unistd.h>
+
+/* Line accumulator helpers for unbounded streamed lines */
+#define MD_LINE_OVERFLOW_INITIAL 1024
 
 /* ── Helpers ──────────────────────────────────────────────────────────── */
 
@@ -45,15 +49,6 @@ static int vis_len(const char *s) {
         len++;
     }
     return len;
-}
-
-/* Strip leading/trailing whitespace in-place, return new start */
-static char *str_trim(char *s) {
-    while (*s == ' ' || *s == '\t') s++;
-    int len = (int)strlen(s);
-    while (len > 0 && (s[len-1] == ' ' || s[len-1] == '\t' || s[len-1] == '\n' || s[len-1] == '\r'))
-        s[--len] = '\0';
-    return s;
 }
 
 /* ── LaTeX Symbol Table ───────────────────────────────────────────────── */
@@ -956,38 +951,152 @@ static void render_inline(FILE *out, const char *text) {
 
 /* ── Table Rendering ──────────────────────────────────────────────────── */
 
-static bool is_table_separator(const char *line) {
-    line = str_trim((char *)line);
-    if (*line != '|') return false;
-    for (const char *p = line; *p; p++) {
-        if (*p != '|' && *p != '-' && *p != ':' && *p != ' ')
-            return false;
+static void table_free_cells(char **cells, int cols) {
+    for (int i = 0; i < cols; i++) {
+        free(cells[i]);
+        cells[i] = NULL;
     }
+}
+
+static void trim_inplace(char *s) {
+    if (!s || !*s) return;
+    char *start = s;
+    while (*start && isspace((unsigned char)*start)) start++;
+    if (start != s) memmove(s, start, strlen(start) + 1);
+    size_t len = strlen(s);
+    while (len > 0 && isspace((unsigned char)s[len - 1])) s[--len] = '\0';
+}
+
+static bool parse_table_row(const char *line, char **cells, int *out_cols) {
+    if (!line || !out_cols) return false;
+
+    char buf[MD_LINE_MAX];
+    snprintf(buf, sizeof(buf), "%s", line);
+    trim_inplace(buf);
+    if (!buf[0]) return false;
+
+    bool has_leading_pipe = (buf[0] == '|');
+    size_t blen = strlen(buf);
+    bool has_trailing_pipe = (blen > 0 && buf[blen - 1] == '|');
+    bool saw_delim = false;
+
+    int count = 0;
+    char cell[MD_LINE_MAX];
+    int cell_len = 0;
+
+    for (const char *p = buf;; p++) {
+        char ch = *p;
+        if (ch == '\\' && p[1] == '|') {
+            if (cell_len < MD_LINE_MAX - 1) cell[cell_len++] = '|';
+            p++;
+            continue;
+        }
+        if (ch == '|' || ch == '\0') {
+            if (ch == '|') saw_delim = true;
+            cell[cell_len] = '\0';
+            trim_inplace(cell);
+            if (count >= MD_TABLE_MAXCOL) {
+                table_free_cells(cells, count);
+                return false;
+            }
+            cells[count++] = strdup(cell);
+            cell_len = 0;
+            if (ch == '\0') break;
+            continue;
+        }
+        if (cell_len < MD_LINE_MAX - 1) cell[cell_len++] = ch;
+    }
+
+    if (!saw_delim || count < 2) {
+        table_free_cells(cells, count);
+        return false;
+    }
+
+    if (has_leading_pipe && count > 0 && cells[0] && cells[0][0] == '\0') {
+        free(cells[0]);
+        for (int i = 1; i < count; i++) cells[i - 1] = cells[i];
+        cells[--count] = NULL;
+    }
+    if (has_trailing_pipe && count > 0 && cells[count - 1] && cells[count - 1][0] == '\0') {
+        free(cells[count - 1]);
+        cells[--count] = NULL;
+    }
+
+    if (count < 2) {
+        table_free_cells(cells, count);
+        return false;
+    }
+
+    *out_cols = count;
     return true;
 }
 
-static int parse_table_row(const char *line, char cells[][256], int max_cols) {
-    const char *p = line;
-    while (*p == ' ' || *p == '\t') p++;
-    if (*p == '|') p++;
+static bool parse_table_separator(char **cells, int cols, md_align_t *align) {
+    if (!cells || cols <= 0 || !align) return false;
 
-    int col = 0;
-    while (*p && col < max_cols) {
-        const char *start = p;
-        while (*p && *p != '|') p++;
+    for (int c = 0; c < cols; c++) {
+        if (!cells[c]) return false;
+        char tmp[MD_LINE_MAX];
+        snprintf(tmp, sizeof(tmp), "%s", cells[c]);
+        trim_inplace(tmp);
+        int len = (int)strlen(tmp);
+        if (len == 0) return false;
 
-        /* Trim cell content */
-        int len = (int)(p - start);
-        while (len > 0 && (start[len-1] == ' ' || start[len-1] == '\t')) len--;
-        while (len > 0 && (*start == ' ' || *start == '\t')) { start++; len--; }
-        if (len >= 256) len = 255;
-        memcpy(cells[col], start, len);
-        cells[col][len] = '\0';
-        col++;
+        bool left_colon = (tmp[0] == ':');
+        bool right_colon = (tmp[len - 1] == ':');
+        int start = left_colon ? 1 : 0;
+        int end = right_colon ? len - 1 : len;
+        if (end - start < 1) return false;
 
-        if (*p == '|') p++;
+        for (int i = start; i < end; i++) {
+            if (tmp[i] != '-') return false;
+        }
+
+        if (left_colon && right_colon) align[c] = MD_ALIGN_CENTER;
+        else if (right_colon) align[c] = MD_ALIGN_RIGHT;
+        else align[c] = MD_ALIGN_LEFT;
     }
-    return col;
+
+    return true;
+}
+
+static bool table_store_row(md_renderer_t *r, char **cells, int cols) {
+    if (!r || r->table_rows >= MD_TABLE_MAXROW) return false;
+
+    if (r->table_cols <= 0) {
+        r->table_cols = cols < MD_TABLE_MAXCOL ? cols : MD_TABLE_MAXCOL;
+    }
+
+    int row = r->table_rows;
+    int use_cols = r->table_cols < MD_TABLE_MAXCOL ? r->table_cols : MD_TABLE_MAXCOL;
+    for (int c = 0; c < use_cols; c++) {
+        const char *src = (c < cols && cells[c]) ? cells[c] : "";
+        r->table_cells[row][c] = strdup(src);
+    }
+    r->table_rows++;
+    return true;
+}
+
+static void render_table_fallback(FILE *out, md_renderer_t *r) {
+    for (int row = 0; row < r->table_rows; row++) {
+        for (int c = 0; c < r->table_cols; c++) {
+            if (c > 0) fprintf(out, " | ");
+            if (r->table_cells[row][c]) render_inline(out, r->table_cells[row][c]);
+        }
+        fprintf(out, "\n");
+    }
+}
+
+static void render_table(FILE *out, md_renderer_t *r);
+static void table_free(md_renderer_t *r);
+
+static void flush_table_or_fallback(FILE *out, md_renderer_t *r) {
+    if (r->state != MD_STATE_TABLE) return;
+
+    if (r->table_has_sep && r->table_rows > 0) render_table(out, r);
+    else render_table_fallback(out, r);
+    table_free(r);
+    r->state = MD_STATE_NORMAL;
 }
 
 /* Compute the visible width of markdown text after rendering (strip formatting markers).
@@ -1428,7 +1537,18 @@ static void render_code_block(FILE *out, const char *code, const char *lang, int
                 TUI_FG256(240), lineno, TUI_RESET,
                 TUI_DIM, TUI_RESET);
 
-        render_code_line(out, line, lang);
+        /* F38: Diff-aware code blocks — color +/- lines */
+        if (g_tui_features && g_tui_features->diff_code_blocks &&
+            (line[0] == '+' || line[0] == '-' || (line[0] == '@' && len > 1 && line[1] == '@'))) {
+            if (line[0] == '+')
+                fprintf(out, "%s%s%s", TUI_GREEN, line, TUI_RESET);
+            else if (line[0] == '-')
+                fprintf(out, "%s%s%s", TUI_RED, line, TUI_RESET);
+            else
+                fprintf(out, "%s%s%s%s", TUI_BOLD, TUI_CYAN, line, TUI_RESET);
+        } else {
+            render_code_line(out, line, lang);
+        }
         fprintf(out, "\n");
 
         lineno++;
@@ -1454,6 +1574,22 @@ static void render_line(md_renderer_t *r, char *line) {
     while (len > 0 && (line[len-1] == '\n' || line[len-1] == '\r' ||
                        line[len-1] == ' ' || line[len-1] == '\t'))
         line[--len] = '\0';
+
+    /* Suppress accidental adjacent duplicate long lines in normal prose.
+       This avoids repeated model sentences while preserving short repeated tokens. */
+    bool suppress_dup_paragraph_line = false;
+    if (r->state != MD_STATE_NORMAL) {
+        r->last_para_line_valid = false;
+    } else {
+        if (len >= 40 &&
+            r->last_para_line_valid &&
+            strcmp(r->last_para_line, line) == 0) {
+            suppress_dup_paragraph_line = true;
+        }
+        strncpy(r->last_para_line, line, MD_LINE_MAX - 1);
+        r->last_para_line[MD_LINE_MAX - 1] = '\0';
+        r->last_para_line_valid = true;
+    }
 
     /* ── Code fence start ── */
     if ((line[0] == '`' && line[1] == '`' && line[2] == '`') ||
@@ -1502,40 +1638,56 @@ static void render_line(md_renderer_t *r, char *line) {
     }
 
     /* ── Table detection ── */
-    if (line[0] == '|' || (strchr(line, '|') && r->state == MD_STATE_TABLE)) {
-        if (is_table_separator(line)) {
-            r->table_has_sep = true;
-            return;
+    {
+        char *cells[MD_TABLE_MAXCOL] = {0};
+        int cols = 0;
+        bool parsed_row = parse_table_row(line, cells, &cols);
+        md_align_t parsed_align[MD_TABLE_MAXCOL] = {0};
+
+        if (r->state == MD_STATE_TABLE) {
+            if (!parsed_row) {
+                flush_table_or_fallback(out, r);
+            } else if (!r->table_has_sep &&
+                       r->table_rows == 1 &&
+                       parse_table_separator(cells, cols, parsed_align)) {
+                r->table_has_sep = true;
+                int ac = cols < r->table_cols ? cols : r->table_cols;
+                for (int c = 0; c < ac; c++) r->table_align[c] = parsed_align[c];
+                table_free_cells(cells, cols);
+                return;
+            } else if (!r->table_has_sep && r->table_rows == 1) {
+                /* First row had pipes but no separator followed — not a table. */
+                flush_table_or_fallback(out, r);
+            } else {
+                bool stored = table_store_row(r, cells, cols);
+                table_free_cells(cells, cols);
+                if (!stored) flush_table_or_fallback(out, r);
+                return;
+            }
         }
 
-        /* Parse this row */
-        char cells[MD_TABLE_MAXCOL][256];
-        int ncols = parse_table_row(line, cells, MD_TABLE_MAXCOL);
+        if (parsed_row) {
+            bool is_separator = parse_table_separator(cells, cols, parsed_align);
+            if (!is_separator && cols >= 2) {
+                /* If a deferred setext base line precedes the table, emit it first. */
+                if (r->prev_line_valid) {
+                    render_inline(out, r->prev_line);
+                    fprintf(out, "\n");
+                    r->prev_line_valid = false;
+                }
 
-        if (ncols > 0 && r->table_rows < MD_TABLE_MAXROW) {
-            if (r->state != MD_STATE_TABLE) {
+                table_free(r);
                 r->state = MD_STATE_TABLE;
-                r->table_cols = ncols;
+                r->table_cols = cols < MD_TABLE_MAXCOL ? cols : MD_TABLE_MAXCOL;
                 r->table_rows = 0;
+                r->table_has_sep = false;
+                for (int c = 0; c < MD_TABLE_MAXCOL; c++) r->table_align[c] = MD_ALIGN_LEFT;
+                (void)table_store_row(r, cells, cols);
+                table_free_cells(cells, cols);
+                return;
             }
-            if (ncols > r->table_cols) r->table_cols = ncols;
-
-            for (int c = 0; c < ncols; c++) {
-                r->table_cells[r->table_rows][c] = strdup(cells[c]);
-            }
-            for (int c = ncols; c < r->table_cols; c++) {
-                r->table_cells[r->table_rows][c] = strdup("");
-            }
-            r->table_rows++;
+            table_free_cells(cells, cols);
         }
-        return;
-    }
-
-    /* Flush pending table if we're no longer in one */
-    if (r->state == MD_STATE_TABLE) {
-        render_table(out, r);
-        table_free(r);
-        r->state = MD_STATE_NORMAL;
     }
 
     /* ── Multi-line LaTeX display block ── */
@@ -1608,6 +1760,8 @@ static void render_line(md_renderer_t *r, char *line) {
         r->in_list = false;
         r->list_depth = 0;
         r->blockquote_depth = 0;
+        /* F6: Reset paragraph fade-in counter */
+        r->paragraph_char_count = 0;
         return;
     }
     r->last_was_blank = false;
@@ -1969,6 +2123,7 @@ static void render_line(md_renderer_t *r, char *line) {
     }
 
     /* ── Normal paragraph ── */
+    if (suppress_dup_paragraph_line) return;
     render_inline(out, line);
     fprintf(out, "\n");
 }
@@ -1976,26 +2131,128 @@ static void render_line(md_renderer_t *r, char *line) {
 /* ── Public API ───────────────────────────────────────────────────────── */
 
 void md_init(md_renderer_t *r, FILE *out) {
+    if (r->line_overflow) free(r->line_overflow);
     memset(r, 0, sizeof(*r));
     r->out = out;
     r->term_width = term_width();
+    r->out_is_tty = out && isatty(fileno(out));
+}
+
+/* Erase partial echo that may have wrapped across multiple terminal lines */
+static void erase_partial_echo(md_renderer_t *r) {
+    if (!r->out_is_tty || r->partial_echo_pos <= 0) return;
+    if (r->line_len <= 0 && r->line_overflow_len <= 0) return;
+
+    char *full_line = NULL;
+    bool heap_line = false;
+
+    if (r->line_overflow_len > 0) {
+        size_t full_len = (size_t)r->line_len + (size_t)r->line_overflow_len;
+        full_line = malloc(full_len + 1);
+        if (full_line) {
+            memcpy(full_line, r->line_buf, (size_t)r->line_len);
+            memcpy(full_line + r->line_len, r->line_overflow, (size_t)r->line_overflow_len);
+            full_line[full_len] = '\0';
+            heap_line = true;
+        }
+    }
+
+    if (!full_line) {
+        r->line_buf[r->line_len] = '\0';
+        full_line = r->line_buf;
+    }
+
+    /* Calculate visible width of the echoed portion */
+    size_t line_len = strlen(full_line);
+    int vw_pos = r->partial_echo_pos;
+    if ((size_t)vw_pos > line_len) vw_pos = (int)line_len;
+    char saved = '\0';
+    if (vw_pos >= 0 && vw_pos < (int)line_len) {
+        saved = full_line[vw_pos];
+        full_line[vw_pos] = '\0';
+    }
+    int vw = vis_len(full_line);
+    if (vw_pos >= 0 && vw_pos < (int)line_len) {
+        full_line[vw_pos] = saved;
+    }
+
+    int tw = r->term_width > 0 ? r->term_width : term_width();
+    int extra_lines = (vw > 0 && tw > 0) ? (vw - 1) / tw : 0;
+
+    /* Move up through wrapped lines, clearing each */
+    for (int i = 0; i < extra_lines; i++) {
+        fprintf(r->out, "\033[A\033[2K");
+    }
+    fprintf(r->out, "\r\033[K");
+
+    if (heap_line) free(full_line);
 }
 
 void md_feed(md_renderer_t *r, const char *text, size_t len) {
+    bool emitted = false;
+
     for (size_t i = 0; i < len; i++) {
         char ch = text[i];
 
         if (ch == '\n') {
-            r->line_buf[r->line_len] = '\0';
-            render_line(r, r->line_buf);
+            /* Erase the partial echo before rendering the full line. */
+            if (r->out_is_tty && r->state == MD_STATE_NORMAL) erase_partial_echo(r);
+
+            char *full_line = NULL;
+            bool heap_line = false;
+            if (r->line_overflow_len > 0) {
+                size_t full_len = (size_t)r->line_len + (size_t)r->line_overflow_len;
+                full_line = malloc(full_len + 1);
+                if (full_line) {
+                    memcpy(full_line, r->line_buf, (size_t)r->line_len);
+                    memcpy(full_line + r->line_len, r->line_overflow, (size_t)r->line_overflow_len);
+                    full_line[full_len] = '\0';
+                    heap_line = true;
+                }
+            }
+            if (!full_line) {
+                r->line_buf[r->line_len] = '\0';
+                full_line = r->line_buf;
+            }
+            render_line(r, full_line);
+            if (heap_line) free(full_line);
+
             r->line_len = 0;
+            r->line_overflow_len = 0;
+            r->partial_echo_pos = 0;
             fflush(r->out);
         } else {
+            bool emit_partial = r->out_is_tty && r->state == MD_STATE_NORMAL;
+            bool stored = true;
             if (r->line_len < MD_LINE_MAX - 1) {
                 r->line_buf[r->line_len++] = ch;
+            } else {
+                if (r->line_overflow_len >= r->line_overflow_cap) {
+                    int new_cap = r->line_overflow_cap > 0
+                                  ? r->line_overflow_cap * 2
+                                  : MD_LINE_OVERFLOW_INITIAL;
+                    if (new_cap <= 0) new_cap = MD_LINE_OVERFLOW_INITIAL;
+                    char *grown = realloc(r->line_overflow, (size_t)new_cap);
+                    if (grown) {
+                        r->line_overflow = grown;
+                        r->line_overflow_cap = new_cap;
+                    }
+                }
+                if (r->line_overflow_len < r->line_overflow_cap) {
+                    r->line_overflow[r->line_overflow_len++] = ch;
+                } else {
+                    stored = false;
+                }
+            }
+            if (stored && emit_partial) {
+                fwrite(&ch, 1, 1, r->out);
+                r->partial_echo_pos++;
+                emitted = true;
             }
         }
     }
+
+    if (emitted) fflush(r->out);
 }
 
 void md_feed_str(md_renderer_t *r, const char *text) {
@@ -2003,11 +2260,31 @@ void md_feed_str(md_renderer_t *r, const char *text) {
 }
 
 void md_flush(md_renderer_t *r) {
-    /* Flush any partial line */
-    if (r->line_len > 0) {
-        r->line_buf[r->line_len] = '\0';
-        render_line(r, r->line_buf);
+    /* Flush any partial line — erase streaming echo first */
+    if (r->line_len > 0 || r->line_overflow_len > 0) {
+        if (r->out_is_tty) erase_partial_echo(r);
+
+        char *full_line = NULL;
+        bool heap_line = false;
+        if (r->line_overflow_len > 0) {
+            size_t full_len = (size_t)r->line_len + (size_t)r->line_overflow_len;
+            full_line = malloc(full_len + 1);
+            if (full_line) {
+                memcpy(full_line, r->line_buf, (size_t)r->line_len);
+                memcpy(full_line + r->line_len, r->line_overflow, (size_t)r->line_overflow_len);
+                full_line[full_len] = '\0';
+                heap_line = true;
+            }
+        }
+        if (!full_line) {
+            r->line_buf[r->line_len] = '\0';
+            full_line = r->line_buf;
+        }
+        render_line(r, full_line);
+        if (heap_line) free(full_line);
         r->line_len = 0;
+        r->line_overflow_len = 0;
+        r->partial_echo_pos = 0;
     }
 
     /* Flush deferred setext line */
@@ -2018,11 +2295,7 @@ void md_flush(md_renderer_t *r) {
     }
 
     /* Flush pending table */
-    if (r->state == MD_STATE_TABLE) {
-        render_table(r->out, r);
-        table_free(r);
-        r->state = MD_STATE_NORMAL;
-    }
+    if (r->state == MD_STATE_TABLE) flush_table_or_fallback(r->out, r);
 
     /* Flush pending code block (unclosed) */
     if (r->state == MD_STATE_CODE_BLOCK && r->code_len > 0) {
@@ -2059,7 +2332,11 @@ void md_reset(md_renderer_t *r) {
     table_free(r);
 
     FILE *out = r->out;
+    bool out_is_tty = r->out_is_tty;
+    char *line_overflow = r->line_overflow;
     memset(r, 0, sizeof(*r));
     r->out = out;
     r->term_width = term_width();
+    r->out_is_tty = out_is_tty;
+    if (line_overflow) free(line_overflow);
 }

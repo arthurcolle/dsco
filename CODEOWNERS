@@ -1,0 +1,14 @@
+# Default ownership
+* @arthurcolle
+
+# CI and policy
+.github/workflows/* @arthurcolle
+SECURITY.md @arthurcolle
+
+# Core runtime
+*.c @arthurcolle
+*.h @arthurcolle
+
+# Docs and scripts
+docs/* @arthurcolle
+scripts/* @arthurcolle

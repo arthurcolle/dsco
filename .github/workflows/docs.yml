@@ -1,0 +1,61 @@
+name: docs
+
+on:
+  pull_request:
+    paths:
+      - 'README.md'
+      - 'CHANGELOG.md'
+      - 'docs/**'
+      - '*.h'
+      - 'tools.c'
+      - 'scripts/gen_*.sh'
+      - '.github/workflows/docs.yml'
+  push:
+    branches: [ main, master ]
+    paths:
+      - 'README.md'
+      - 'CHANGELOG.md'
+      - 'docs/**'
+      - '*.h'
+      - 'tools.c'
+      - 'scripts/gen_*.sh'
+      - '.github/workflows/docs.yml'
+
+jobs:
+  generated-docs-check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Check generated docs are up to date
+        run: |
+          chmod +x scripts/gen_api_reference.sh scripts/gen_tool_catalog.sh
+          ./scripts/gen_api_reference.sh --check
+          ./scripts/gen_tool_catalog.sh --check
+
+  markdown-lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: markdownlint
+        uses: DavidAnson/markdownlint-cli2-action@v17
+        with:
+          globs: |
+            README.md
+            CHANGELOG.md
+            docs/**/*.md
+
+  links-check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Link check
+        uses: lycheeverse/lychee-action@v2
+        with:
+          args: >-
+            --verbose
+            --no-progress
+            --exclude-mail
+            --exclude '^http://127\\.0\\.0\\.1'
+            --exclude '^https://127\\.0\\.0\\.1'
+            README.md CHANGELOG.md docs/**/*.md
+          fail: true

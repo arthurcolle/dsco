@@ -1,0 +1,5 @@
+config:
+  default: true
+  MD013: false  # line length (generated API/tool docs)
+  MD033: false  # inline HTML tags in markdown tables
+  MD041: false  # first line heading rule can conflict in generated docs

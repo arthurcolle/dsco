@@ -257,24 +257,38 @@ bool swarm_group_complete(swarm_t *s, int group_id) {
 static void child_read(swarm_child_t *c, int fd, swarm_stream_cb cb, void *ctx) {
     char buf[4096];
     ssize_t n;
-    while ((n = read(fd, buf, sizeof(buf) - 1)) > 0) {
+    int chunks = 0;
+    const int max_chunks_per_poll = 64;
+    while (chunks < max_chunks_per_poll &&
+           (n = read(fd, buf, sizeof(buf) - 1)) > 0) {
+        chunks++;
         buf[n] = '\0';
 
         /* Grow output buffer if needed */
-        while (c->output_len + (size_t)n + 1 > c->output_cap) {
+        size_t needed = c->output_len + (size_t)n + 1;
+        while (needed > c->output_cap && c->output_cap < SWARM_MAX_OUTPUT) {
             c->output_cap *= 2;
             if (c->output_cap > SWARM_MAX_OUTPUT) c->output_cap = SWARM_MAX_OUTPUT;
             c->output = safe_realloc(c->output, c->output_cap);
         }
 
-        if (c->output_len + (size_t)n < c->output_cap) {
+        if (needed <= c->output_cap) {
             memcpy(c->output + c->output_len, buf, n);
             c->output_len += n;
+            c->output[c->output_len] = '\0';
+        } else if (c->output_cap > c->output_len + 1) {
+            /* Cap reached: append what still fits and keep draining fd. */
+            size_t room = c->output_cap - c->output_len - 1;
+            memcpy(c->output + c->output_len, buf, room);
+            c->output_len += room;
             c->output[c->output_len] = '\0';
         }
 
         if (cb) cb(c->id, buf, n, ctx);
         c->status = SWARM_STREAMING;
+    }
+    if (n < 0 && errno != EAGAIN && errno != EWOULDBLOCK) {
+        c->status = SWARM_ERROR;
     }
 }
 

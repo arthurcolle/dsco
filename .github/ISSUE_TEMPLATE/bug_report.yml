@@ -1,0 +1,44 @@
+name: Bug report
+description: Report a defect or regression
+labels: [bug]
+body:
+  - type: textarea
+    id: summary
+    attributes:
+      label: Summary
+      description: What happened?
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: Reproduction steps
+      description: Minimal commands/input to reproduce
+      placeholder: |
+        1.
+        2.
+        3.
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected behavior
+    validations:
+      required: true
+  - type: textarea
+    id: actual
+    attributes:
+      label: Actual behavior
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: dsco version / git hash
+      placeholder: output of ./dsco --version
+  - type: textarea
+    id: logs
+    attributes:
+      label: Logs / traces
+      description: Include relevant `/status`, `/metrics`, `/telemetry`, or timeline excerpts
