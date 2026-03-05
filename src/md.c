@@ -117,6 +117,39 @@ static const char *SUB_DIGITS[] = {
     "\xE2\x82\x88", "\xE2\x82\x89"
 };
 
+/* Copy brace-delimited group from *pp into out, tracking nested {}.
+ * Assumes *pp points PAST the opening '{'. Advances *pp past closing '}'.
+ * Returns number of chars written. */
+static int copy_brace_group(const char **pp, char *out, char *end) {
+    const char *p = *pp;
+    char *start = out;
+    int depth = 1;
+    while (*p && depth > 0 && out < end) {
+        if (*p == '{') depth++;
+        else if (*p == '}') { depth--; if (depth == 0) break; }
+        *out++ = *p++;
+    }
+    if (*p == '}') p++; /* skip closing brace */
+    *pp = p;
+    return (int)(out - start);
+}
+
+/* Math function names: \sin → sin, \cos → cos, etc. */
+typedef struct { const char *cmd; const char *text; } latex_func_t;
+static const latex_func_t LATEX_FUNCS[] = {
+    {"\\sin",    "sin"},    {"\\cos",    "cos"},    {"\\tan",    "tan"},
+    {"\\cot",    "cot"},    {"\\sec",    "sec"},    {"\\csc",    "csc"},
+    {"\\arcsin", "arcsin"}, {"\\arccos", "arccos"}, {"\\arctan", "arctan"},
+    {"\\sinh",   "sinh"},   {"\\cosh",   "cosh"},   {"\\tanh",   "tanh"},
+    {"\\log",    "log"},    {"\\ln",     "ln"},     {"\\exp",    "exp"},
+    {"\\lim",    "lim"},    {"\\max",    "max"},    {"\\min",    "min"},
+    {"\\sup",    "sup"},    {"\\inf",    "inf"},    {"\\det",    "det"},
+    {"\\dim",    "dim"},    {"\\mod",    "mod"},    {"\\gcd",    "gcd"},
+    {"\\arg",    "arg"},    {"\\deg",    "deg"},
+    {"\\operatorname", ""}, /* handled specially below */
+    {NULL, NULL}
+};
+
 /* Replace LaTeX symbols in-place within a buffer */
 static void latex_replace_symbols(char *buf, int bufsize) {
     char tmp[MD_LINE_MAX];
@@ -128,29 +161,25 @@ static void latex_replace_symbols(char *buf, int bufsize) {
         if (*p == '\\') {
             /* Check compound commands FIRST (before symbol table) */
             if (str_starts(p, "\\frac{") == 6) {
-                /* \frac{a}{b} → (a)/(b) */
+                /* \frac{a}{b} → (a)/(b) with brace-depth tracking */
                 p += 6;
                 if (out < end) *out++ = '(';
-                while (*p && *p != '}' && out < end) *out++ = *p++;
-                if (*p == '}') p++;
+                out += copy_brace_group(&p, out, end);
                 if (out < end) *out++ = ')';
                 if (out < end) *out++ = '/';
                 if (*p == '{') p++;
                 if (out < end) *out++ = '(';
-                while (*p && *p != '}' && out < end) *out++ = *p++;
-                if (*p == '}') p++;
+                out += copy_brace_group(&p, out, end);
                 if (out < end) *out++ = ')';
             } else if (str_starts(p, "\\boxed{") == 7) {
-                /* \boxed{content} → [content] with box-drawing */
+                /* \boxed{content} → ⟨ content ⟩ */
                 p += 7;
-                /* U+2503 ┃ as delimiters for visibility */
                 const char *lbox = "\xe2\x9f\xa8"; /* ⟨ */
                 const char *rbox = "\xe2\x9f\xa9"; /* ⟩ */
                 int llen = (int)strlen(lbox);
                 if (out + llen < end) { memcpy(out, lbox, llen); out += llen; }
                 if (out < end) *out++ = ' ';
-                while (*p && *p != '}' && out < end) *out++ = *p++;
-                if (*p == '}') p++;
+                out += copy_brace_group(&p, out, end);
                 if (out < end) *out++ = ' ';
                 int rlen = (int)strlen(rbox);
                 if (out + rlen < end) { memcpy(out, rbox, rlen); out += rlen; }
@@ -161,17 +190,16 @@ static void latex_replace_symbols(char *buf, int bufsize) {
                 int slen = (int)strlen(sq);
                 if (out + slen < end) { memcpy(out, sq, slen); out += slen; }
                 if (out < end) *out++ = '(';
-                while (*p && *p != '}' && out < end) *out++ = *p++;
-                if (*p == '}') p++;
+                out += copy_brace_group(&p, out, end);
                 if (out < end) *out++ = ')';
             } else if (str_starts(p, "\\text{") == 6 || str_starts(p, "\\mathrm{") == 8 ||
                        str_starts(p, "\\mathbf{") == 8 || str_starts(p, "\\mathit{") == 8 ||
-                       str_starts(p, "\\textbf{") == 7 || str_starts(p, "\\textit{") == 7) {
-                /* \text{...} → just the content */
+                       str_starts(p, "\\textbf{") == 7 || str_starts(p, "\\textit{") == 7 ||
+                       str_starts(p, "\\operatorname{") == 15) {
+                /* \text{...} → just the content, with brace depth */
                 while (*p && *p != '{') p++;
                 if (*p == '{') p++;
-                while (*p && *p != '}' && out < end) *out++ = *p++;
-                if (*p == '}') p++;
+                out += copy_brace_group(&p, out, end);
             } else if (str_starts(p, "\\left") == 5 || str_starts(p, "\\right") == 6 ||
                        str_starts(p, "\\bigl") == 5 || str_starts(p, "\\bigr") == 5 ||
                        str_starts(p, "\\Bigl") == 5 || str_starts(p, "\\Bigr") == 5) {
@@ -182,43 +210,87 @@ static void latex_replace_symbols(char *buf, int bufsize) {
                 if (*p == '.') p++; /* \right. → nothing */
                 else if (*p && out < end) *out++ = *p++;
             } else {
-                /* Try symbol table */
+                /* Try math function names: \sin → sin, \cos → cos, etc. */
                 bool found = false;
-                for (int i = 0; LATEX_SYMBOLS[i].tex; i++) {
-                    int n = str_starts(p, LATEX_SYMBOLS[i].tex);
-                    if (n > 0) {
-                        /* Ensure it's a complete token: next char must not be alpha */
-                        if (!isalpha((unsigned char)p[n])) {
-                            int slen = (int)strlen(LATEX_SYMBOLS[i].utf8);
-                            if (out + slen < end) {
-                                memcpy(out, LATEX_SYMBOLS[i].utf8, slen);
-                                out += slen;
-                            }
-                            p += n;
-                            found = true;
-                            break;
+                for (int i = 0; LATEX_FUNCS[i].cmd; i++) {
+                    int n = str_starts(p, LATEX_FUNCS[i].cmd);
+                    if (n > 0 && !isalpha((unsigned char)p[n])) {
+                        const char *txt = LATEX_FUNCS[i].text;
+                        int slen = (int)strlen(txt);
+                        if (slen > 0 && out + slen < end) {
+                            memcpy(out, txt, slen);
+                            out += slen;
                         }
+                        p += n;
+                        found = true;
+                        break;
                     }
                 }
-                if (!found) *out++ = *p++;
+                if (found) { /* already handled */ }
+                /* Try symbol table */
+                else {
+                    for (int i = 0; LATEX_SYMBOLS[i].tex; i++) {
+                        int n = str_starts(p, LATEX_SYMBOLS[i].tex);
+                        if (n > 0) {
+                            if (!isalpha((unsigned char)p[n])) {
+                                int slen = (int)strlen(LATEX_SYMBOLS[i].utf8);
+                                if (out + slen < end) {
+                                    memcpy(out, LATEX_SYMBOLS[i].utf8, slen);
+                                    out += slen;
+                                }
+                                p += n;
+                                found = true;
+                                break;
+                            }
+                        }
+                    }
+                    if (!found) *out++ = *p++;
+                }
             }
         } else if (*p == '^' && p[1] == '{') {
-            /* ^{...} superscript */
+            /* ^{...} superscript — handle \commands inside braces */
             p += 2;
-            while (*p && *p != '}' && out < end) {
-                if (*p >= '0' && *p <= '9') {
+            int depth = 1;
+            while (*p && depth > 0 && out < end) {
+                if (*p == '{') { depth++; p++; continue; }
+                if (*p == '}') { depth--; if (depth == 0) break; p++; continue; }
+                if (*p == '\\') {
+                    /* Try symbol table + math funcs inside superscript */
+                    bool sym_found = false;
+                    for (int i = 0; LATEX_SYMBOLS[i].tex; i++) {
+                        int n = str_starts(p, LATEX_SYMBOLS[i].tex);
+                        if (n > 0 && !isalpha((unsigned char)p[n])) {
+                            int slen = (int)strlen(LATEX_SYMBOLS[i].utf8);
+                            if (out + slen < end) { memcpy(out, LATEX_SYMBOLS[i].utf8, slen); out += slen; }
+                            p += n; sym_found = true; break;
+                        }
+                    }
+                    if (!sym_found) {
+                        for (int i = 0; LATEX_FUNCS[i].cmd; i++) {
+                            int n = str_starts(p, LATEX_FUNCS[i].cmd);
+                            if (n > 0 && !isalpha((unsigned char)p[n])) {
+                                const char *txt = LATEX_FUNCS[i].text;
+                                int slen = (int)strlen(txt);
+                                if (slen > 0 && out + slen < end) { memcpy(out, txt, slen); out += slen; }
+                                p += n; sym_found = true; break;
+                            }
+                        }
+                    }
+                    if (!sym_found) { *out++ = *p++; }
+                } else if (*p >= '0' && *p <= '9') {
                     const char *s = SUPER_DIGITS[*p - '0'];
                     int slen = (int)strlen(s);
                     if (out + slen < end) { memcpy(out, s, slen); out += slen; }
-                } else if (*p == 'n') {
-                    /* superscript n */
+                    p++;
+                } else if (*p == 'n' && (p[1] == '}' || p[1] == ' ' || p[1] == '\0')) {
+                    /* superscript n only if standalone (not part of a word) */
                     const char *s = "\xE2\x81\xBF";
                     int slen = (int)strlen(s);
                     if (out + slen < end) { memcpy(out, s, slen); out += slen; }
+                    p++;
                 } else {
-                    *out++ = *p;
+                    *out++ = *p++;
                 }
-                p++;
             }
             if (*p == '}') p++;
         } else if (*p == '^' && p[1] >= '0' && p[1] <= '9') {
@@ -229,17 +301,31 @@ static void latex_replace_symbols(char *buf, int bufsize) {
             if (out + slen < end) { memcpy(out, s, slen); out += slen; }
             p++;
         } else if (*p == '_' && p[1] == '{') {
-            /* _{...} subscript */
+            /* _{...} subscript — handle \commands inside braces */
             p += 2;
-            while (*p && *p != '}' && out < end) {
-                if (*p >= '0' && *p <= '9') {
+            int depth = 1;
+            while (*p && depth > 0 && out < end) {
+                if (*p == '{') { depth++; p++; continue; }
+                if (*p == '}') { depth--; if (depth == 0) break; p++; continue; }
+                if (*p == '\\') {
+                    bool sym_found = false;
+                    for (int i = 0; LATEX_SYMBOLS[i].tex; i++) {
+                        int n = str_starts(p, LATEX_SYMBOLS[i].tex);
+                        if (n > 0 && !isalpha((unsigned char)p[n])) {
+                            int slen = (int)strlen(LATEX_SYMBOLS[i].utf8);
+                            if (out + slen < end) { memcpy(out, LATEX_SYMBOLS[i].utf8, slen); out += slen; }
+                            p += n; sym_found = true; break;
+                        }
+                    }
+                    if (!sym_found) { *out++ = *p++; }
+                } else if (*p >= '0' && *p <= '9') {
                     const char *s = SUB_DIGITS[*p - '0'];
                     int slen = (int)strlen(s);
                     if (out + slen < end) { memcpy(out, s, slen); out += slen; }
+                    p++;
                 } else {
-                    *out++ = *p;
+                    *out++ = *p++;
                 }
-                p++;
             }
             if (*p == '}') p++;
         } else if (*p == '_' && p[1] >= '0' && p[1] <= '9') {
@@ -348,6 +434,7 @@ static void render_inline(FILE *out, const char *text) {
             while (p[ticks] == '`') ticks++;
             /* Find matching closing backticks of same count */
             const char *end = start + ticks;
+            bool code_found = false;
             while (*end) {
                 int closing = 0;
                 while (end[closing] == '`') closing++;
@@ -362,10 +449,12 @@ static void render_inline(FILE *out, const char *text) {
                     fwrite(cs, 1, clen, out);
                     fprintf(out, "%s", TUI_RESET);
                     p = end + ticks;
-                    continue;
+                    code_found = true;
+                    break;
                 }
                 end += closing > 0 ? closing : 1;
             }
+            if (code_found) continue;
             /* No match — output literal backticks */
             for (int i = 0; i < ticks; i++) fputc('`', out);
             p = start + ticks;
