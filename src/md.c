@@ -126,24 +126,82 @@ static void latex_replace_symbols(char *buf, int bufsize) {
 
     while (*p && out < end) {
         if (*p == '\\') {
-            bool found = false;
-            for (int i = 0; LATEX_SYMBOLS[i].tex; i++) {
-                int n = str_starts(p, LATEX_SYMBOLS[i].tex);
-                if (n > 0) {
-                    /* Ensure it's a complete token: next char must not be alpha */
-                    if (!isalpha((unsigned char)p[n])) {
-                        int slen = (int)strlen(LATEX_SYMBOLS[i].utf8);
-                        if (out + slen < end) {
-                            memcpy(out, LATEX_SYMBOLS[i].utf8, slen);
-                            out += slen;
+            /* Check compound commands FIRST (before symbol table) */
+            if (str_starts(p, "\\frac{") == 6) {
+                /* \frac{a}{b} → (a)/(b) */
+                p += 6;
+                if (out < end) *out++ = '(';
+                while (*p && *p != '}' && out < end) *out++ = *p++;
+                if (*p == '}') p++;
+                if (out < end) *out++ = ')';
+                if (out < end) *out++ = '/';
+                if (*p == '{') p++;
+                if (out < end) *out++ = '(';
+                while (*p && *p != '}' && out < end) *out++ = *p++;
+                if (*p == '}') p++;
+                if (out < end) *out++ = ')';
+            } else if (str_starts(p, "\\boxed{") == 7) {
+                /* \boxed{content} → [content] with box-drawing */
+                p += 7;
+                /* U+2503 ┃ as delimiters for visibility */
+                const char *lbox = "\xe2\x9f\xa8"; /* ⟨ */
+                const char *rbox = "\xe2\x9f\xa9"; /* ⟩ */
+                int llen = (int)strlen(lbox);
+                if (out + llen < end) { memcpy(out, lbox, llen); out += llen; }
+                if (out < end) *out++ = ' ';
+                while (*p && *p != '}' && out < end) *out++ = *p++;
+                if (*p == '}') p++;
+                if (out < end) *out++ = ' ';
+                int rlen = (int)strlen(rbox);
+                if (out + rlen < end) { memcpy(out, rbox, rlen); out += rlen; }
+            } else if (str_starts(p, "\\sqrt{") == 6) {
+                /* \sqrt{x} → √(x) */
+                p += 6;
+                const char *sq = "\xe2\x88\x9a"; /* √ */
+                int slen = (int)strlen(sq);
+                if (out + slen < end) { memcpy(out, sq, slen); out += slen; }
+                if (out < end) *out++ = '(';
+                while (*p && *p != '}' && out < end) *out++ = *p++;
+                if (*p == '}') p++;
+                if (out < end) *out++ = ')';
+            } else if (str_starts(p, "\\text{") == 6 || str_starts(p, "\\mathrm{") == 8 ||
+                       str_starts(p, "\\mathbf{") == 8 || str_starts(p, "\\mathit{") == 8 ||
+                       str_starts(p, "\\textbf{") == 7 || str_starts(p, "\\textit{") == 7) {
+                /* \text{...} → just the content */
+                while (*p && *p != '{') p++;
+                if (*p == '{') p++;
+                while (*p && *p != '}' && out < end) *out++ = *p++;
+                if (*p == '}') p++;
+            } else if (str_starts(p, "\\left") == 5 || str_starts(p, "\\right") == 6 ||
+                       str_starts(p, "\\bigl") == 5 || str_starts(p, "\\bigr") == 5 ||
+                       str_starts(p, "\\Bigl") == 5 || str_starts(p, "\\Bigr") == 5) {
+                /* Skip sizing commands, output the delimiter */
+                while (*p && *p != '(' && *p != ')' && *p != '[' && *p != ']' &&
+                       *p != '|' && *p != '{' && *p != '}' && *p != '.' && !isspace((unsigned char)*p))
+                    p++;
+                if (*p == '.') p++; /* \right. → nothing */
+                else if (*p && out < end) *out++ = *p++;
+            } else {
+                /* Try symbol table */
+                bool found = false;
+                for (int i = 0; LATEX_SYMBOLS[i].tex; i++) {
+                    int n = str_starts(p, LATEX_SYMBOLS[i].tex);
+                    if (n > 0) {
+                        /* Ensure it's a complete token: next char must not be alpha */
+                        if (!isalpha((unsigned char)p[n])) {
+                            int slen = (int)strlen(LATEX_SYMBOLS[i].utf8);
+                            if (out + slen < end) {
+                                memcpy(out, LATEX_SYMBOLS[i].utf8, slen);
+                                out += slen;
+                            }
+                            p += n;
+                            found = true;
+                            break;
                         }
-                        p += n;
-                        found = true;
-                        break;
                     }
                 }
+                if (!found) *out++ = *p++;
             }
-            if (!found) *out++ = *p++;
         } else if (*p == '^' && p[1] == '{') {
             /* ^{...} superscript */
             p += 2;
@@ -190,35 +248,9 @@ static void latex_replace_symbols(char *buf, int bufsize) {
             int slen = (int)strlen(s);
             if (out + slen < end) { memcpy(out, s, slen); out += slen; }
             p++;
-        } else if (str_starts(p, "\\frac{") == 6) {
-            /* \frac{a}{b} → a/b */
-            p += 6;
-            while (*p && *p != '}' && out < end) *out++ = *p++;
-            if (*p == '}') p++;
-            if (*p == '{') p++;
-            if (out < end) *out++ = '/';
-            while (*p && *p != '}' && out < end) *out++ = *p++;
-            if (*p == '}') p++;
-        } else if (str_starts(p, "\\text{") == 6 || str_starts(p, "\\mathrm{") == 8 ||
-                   str_starts(p, "\\mathbf{") == 8 || str_starts(p, "\\mathit{") == 8 ||
-                   str_starts(p, "\\textbf{") == 7 || str_starts(p, "\\textit{") == 7) {
-            /* \text{...} → just the content */
-            while (*p && *p != '{') p++;
-            if (*p == '{') p++;
-            while (*p && *p != '}' && out < end) *out++ = *p++;
-            if (*p == '}') p++;
         } else if (*p == '{' || *p == '}') {
             /* Skip bare braces in math mode */
             p++;
-        } else if (str_starts(p, "\\left") == 5 || str_starts(p, "\\right") == 6 ||
-                   str_starts(p, "\\bigl") == 5 || str_starts(p, "\\bigr") == 5 ||
-                   str_starts(p, "\\Bigl") == 5 || str_starts(p, "\\Bigr") == 5) {
-            /* Skip sizing commands, output the delimiter */
-            while (*p && *p != '(' && *p != ')' && *p != '[' && *p != ']' &&
-                   *p != '|' && *p != '{' && *p != '}' && *p != '.' && !isspace((unsigned char)*p))
-                p++;
-            if (*p == '.') p++; /* \right. → nothing */
-            else if (*p && out < end) *out++ = *p++;
         } else {
             *out++ = *p++;
         }

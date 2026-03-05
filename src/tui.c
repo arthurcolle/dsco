@@ -1,4 +1,5 @@
 #include "tui.h"
+#include "config.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -1608,16 +1609,47 @@ void tui_thinking_feed(tui_thinking_state_t *t, const char *text) {
         t->active = true;
         t->start_time = tui_now();
         t->char_count = 0;
+        t->summary_len = 0;
+        t->summary_done = false;
+        t->summary[0] = '\0';
     }
     t->char_count += (int)strlen(text);
+
+    /* Capture first sentence/line for summary display */
+    if (!t->summary_done) {
+        for (const char *c = text; *c && !t->summary_done; c++) {
+            if (*c == '\n' || *c == '.' || *c == '!' || *c == '?') {
+                /* Include the punctuation, skip newlines */
+                if (*c != '\n' && t->summary_len < TUI_THINKING_SUMMARY_MAX - 1) {
+                    t->summary[t->summary_len++] = *c;
+                }
+                t->summary[t->summary_len] = '\0';
+                t->summary_done = true;
+            } else if (t->summary_len < TUI_THINKING_SUMMARY_MAX - 4) {
+                t->summary[t->summary_len++] = *c;
+                t->summary[t->summary_len] = '\0';
+            } else {
+                /* Truncate with ellipsis */
+                t->summary[t->summary_len] = '\0';
+                strncat(t->summary, "...", TUI_THINKING_SUMMARY_MAX - t->summary_len - 1);
+                t->summary_len = (int)strlen(t->summary);
+                t->summary_done = true;
+            }
+        }
+    }
 }
 
 void tui_thinking_end(tui_thinking_state_t *t) {
     if (!t->active) return;
     double elapsed = tui_now() - t->start_time;
     int est_tokens = (t->char_count + 3) / 4;
-    fprintf(stderr, "  %s[thinking: ~%d tokens, %.1fs]%s\n",
-            TUI_DIM, est_tokens, elapsed, TUI_RESET);
+    if (t->summary[0]) {
+        fprintf(stderr, "  %s[thinking] %s%s\n", TUI_DIM, t->summary, TUI_RESET);
+        fprintf(stderr, "  %s~%d tokens, %.1fs%s\n", TUI_DIM, est_tokens, elapsed, TUI_RESET);
+    } else {
+        fprintf(stderr, "  %s[thinking: ~%d tokens, %.1fs]%s\n",
+                TUI_DIM, est_tokens, elapsed, TUI_RESET);
+    }
     t->active = false;
     t->char_count = 0;
 }
@@ -2596,4 +2628,776 @@ bool tui_features_toggle(tui_features_t *f, const char *name) {
 
     fprintf(stderr, "  %sunknown feature: %s%s\n", TUI_RED, name, TUI_RESET);
     return false;
+}
+
+/* ═══════════════════════════════════════════════════════════════════════
+ *  ADVANCED STATEFUL ABSTRACTIONS — IMPLEMENTATIONS
+ * ═══════════════════════════════════════════════════════════════════════ */
+
+/* ── Notification Queue ──────────────────────────────────────────────── */
+
+void tui_notif_queue_init(tui_notif_queue_t *q) {
+    memset(q, 0, sizeof(*q));
+    pthread_mutex_init(&q->mutex, NULL);
+    q->next_id = 1;
+}
+
+static const char *notif_level_icon(tui_notif_level_t level) {
+    switch (level) {
+    case TUI_NOTIF_DEBUG:    return "\xE2\x80\xA2";  /* • */
+    case TUI_NOTIF_INFO:     return "\xE2\x84\xB9";  /* ℹ */
+    case TUI_NOTIF_SUCCESS:  return "\xE2\x9C\x93";  /* ✓ */
+    case TUI_NOTIF_WARNING:  return "\xE2\x9A\xA0";  /* ⚠ */
+    case TUI_NOTIF_ERROR:    return "\xE2\x9C\x97";  /* ✗ */
+    case TUI_NOTIF_CRITICAL: return "\xE2\x9C\x98";  /* ✘ */
+    default: return " ";
+    }
+}
+
+static const char *notif_level_color(tui_notif_level_t level) {
+    switch (level) {
+    case TUI_NOTIF_DEBUG:    return TUI_DIM;
+    case TUI_NOTIF_INFO:     return TUI_CYAN;
+    case TUI_NOTIF_SUCCESS:  return TUI_GREEN;
+    case TUI_NOTIF_WARNING:  return TUI_YELLOW;
+    case TUI_NOTIF_ERROR:    return TUI_RED;
+    case TUI_NOTIF_CRITICAL: return TUI_BRED;
+    default: return TUI_RESET;
+    }
+}
+
+static double notif_default_ttl(tui_notif_level_t level) {
+    switch (level) {
+    case TUI_NOTIF_DEBUG:    return 5.0;
+    case TUI_NOTIF_INFO:     return 15.0;
+    case TUI_NOTIF_SUCCESS:  return 10.0;
+    case TUI_NOTIF_WARNING:  return 30.0;
+    case TUI_NOTIF_ERROR:    return 0.0;  /* persist */
+    case TUI_NOTIF_CRITICAL: return 0.0;  /* persist */
+    default: return 10.0;
+    }
+}
+
+int tui_notif_push(tui_notif_queue_t *q, tui_notif_level_t level,
+                    const char *tag, const char *fmt, ...) {
+    pthread_mutex_lock(&q->mutex);
+
+    /* Coalesce: if same tag+level+msg already exists, increment count */
+    char msg[TUI_NOTIF_MSG_MAX];
+    va_list ap;
+    va_start(ap, fmt);
+    vsnprintf(msg, sizeof(msg), fmt, ap);
+    va_end(ap);
+
+    for (int i = 0; i < q->count; i++) {
+        if (!q->queue[i].dismissed && q->queue[i].level == level &&
+            tag && q->queue[i].tag[0] && strcmp(q->queue[i].tag, tag) == 0 &&
+            strcmp(q->queue[i].msg, msg) == 0) {
+            q->queue[i].count++;
+            q->queue[i].created_at = tui_now();
+            int id = q->queue[i].id;
+            pthread_mutex_unlock(&q->mutex);
+            return id;
+        }
+    }
+
+    /* Evict oldest if full */
+    if (q->count >= TUI_NOTIF_QUEUE_MAX) {
+        /* Remove oldest dismissed or lowest priority */
+        int victim = 0;
+        for (int i = 1; i < q->count; i++) {
+            if (q->queue[i].dismissed && !q->queue[victim].dismissed) { victim = i; break; }
+            if (q->queue[i].created_at < q->queue[victim].created_at) victim = i;
+        }
+        if (victim < q->count - 1)
+            memmove(&q->queue[victim], &q->queue[victim + 1],
+                    (q->count - victim - 1) * sizeof(tui_notif_t));
+        q->count--;
+    }
+
+    tui_notif_t *n = &q->queue[q->count];
+    memset(n, 0, sizeof(*n));
+    n->id = q->next_id++;
+    n->level = level;
+    strncpy(n->msg, msg, TUI_NOTIF_MSG_MAX - 1);
+    if (tag) strncpy(n->tag, tag, TUI_NOTIF_TAG_MAX - 1);
+    n->created_at = tui_now();
+    n->ttl_sec = notif_default_ttl(level);
+    n->count = 1;
+    q->count++;
+    q->unread++;
+
+    /* Bell for critical */
+    if (level == TUI_NOTIF_CRITICAL) {
+        fprintf(stderr, "\a");
+    }
+
+    int id = n->id;
+    pthread_mutex_unlock(&q->mutex);
+    return id;
+}
+
+void tui_notif_dismiss(tui_notif_queue_t *q, int id) {
+    pthread_mutex_lock(&q->mutex);
+    for (int i = 0; i < q->count; i++) {
+        if (q->queue[i].id == id) {
+            q->queue[i].dismissed = true;
+            break;
+        }
+    }
+    pthread_mutex_unlock(&q->mutex);
+}
+
+void tui_notif_dismiss_tag(tui_notif_queue_t *q, const char *tag) {
+    pthread_mutex_lock(&q->mutex);
+    for (int i = 0; i < q->count; i++) {
+        if (tag && q->queue[i].tag[0] && strcmp(q->queue[i].tag, tag) == 0) {
+            q->queue[i].dismissed = true;
+        }
+    }
+    pthread_mutex_unlock(&q->mutex);
+}
+
+void tui_notif_gc(tui_notif_queue_t *q) {
+    pthread_mutex_lock(&q->mutex);
+    double now = tui_now();
+    int dst = 0;
+    for (int i = 0; i < q->count; i++) {
+        bool expired = (q->queue[i].ttl_sec > 0 &&
+                       (now - q->queue[i].created_at) > q->queue[i].ttl_sec);
+        if (!q->queue[i].dismissed && !expired) {
+            if (dst != i) q->queue[dst] = q->queue[i];
+            dst++;
+        }
+    }
+    q->count = dst;
+    pthread_mutex_unlock(&q->mutex);
+}
+
+void tui_notif_render(tui_notif_queue_t *q) {
+    pthread_mutex_lock(&q->mutex);
+    if (q->count == 0) { pthread_mutex_unlock(&q->mutex); return; }
+
+    double now = tui_now();
+    bool any = false;
+    for (int i = 0; i < q->count; i++) {
+        tui_notif_t *n = &q->queue[i];
+        if (n->dismissed) continue;
+        if (n->ttl_sec > 0 && (now - n->created_at) > n->ttl_sec) continue;
+
+        if (!any) {
+            fprintf(stderr, "  %s\xe2\x94\x80\xe2\x94\x80 notifications %s\n",
+                    TUI_DIM, TUI_RESET);
+            any = true;
+        }
+
+        const char *icon = notif_level_icon(n->level);
+        const char *color = notif_level_color(n->level);
+        double age = now - n->created_at;
+
+        fprintf(stderr, "  %s%s%s %s%s%s", color, icon, TUI_RESET, color, n->msg, TUI_RESET);
+        if (n->count > 1)
+            fprintf(stderr, " %s(\xC3\x97%d)%s", TUI_DIM, n->count, TUI_RESET);
+        if (n->tag[0])
+            fprintf(stderr, " %s[%s]%s", TUI_DIM, n->tag, TUI_RESET);
+        if (age > 60)
+            fprintf(stderr, " %s%.0fm ago%s", TUI_DIM, age / 60, TUI_RESET);
+
+        fprintf(stderr, "\n");
+        n->seen = true;
+    }
+    q->unread = 0;
+    pthread_mutex_unlock(&q->mutex);
+}
+
+int tui_notif_unread(tui_notif_queue_t *q) {
+    pthread_mutex_lock(&q->mutex);
+    int n = q->unread;
+    pthread_mutex_unlock(&q->mutex);
+    return n;
+}
+
+void tui_notif_clear_all(tui_notif_queue_t *q) {
+    pthread_mutex_lock(&q->mutex);
+    q->count = 0;
+    q->unread = 0;
+    pthread_mutex_unlock(&q->mutex);
+}
+
+/* ── Toast System ────────────────────────────────────────────────────── */
+
+void tui_toast_init(tui_toast_t *t) {
+    memset(t, 0, sizeof(*t));
+    pthread_mutex_init(&t->mutex, NULL);
+}
+
+void tui_toast_show(tui_toast_t *t, tui_notif_level_t level,
+                     double duration_sec, const char *fmt, ...) {
+    pthread_mutex_lock(&t->mutex);
+
+    /* Find empty slot or overwrite oldest */
+    int slot = -1;
+    double oldest = 1e18;
+    int oldest_idx = 0;
+    for (int i = 0; i < TUI_TOAST_MAX; i++) {
+        if (!t->toasts[i].active) { slot = i; break; }
+        if (t->toasts[i].expire_at < oldest) {
+            oldest = t->toasts[i].expire_at;
+            oldest_idx = i;
+        }
+    }
+    if (slot < 0) slot = oldest_idx;
+
+    tui_toast_entry_t *e = &t->toasts[slot];
+    va_list ap;
+    va_start(ap, fmt);
+    vsnprintf(e->msg, TUI_TOAST_MSG_MAX, fmt, ap);
+    va_end(ap);
+
+    e->level = level;
+    e->expire_at = tui_now() + duration_sec;
+    e->active = true;
+
+    const char *icon = notif_level_icon(level);
+    snprintf(e->icon, sizeof(e->icon), "%s", icon);
+
+    if (slot >= t->count) t->count = slot + 1;
+
+    /* Render immediately */
+    const char *color = notif_level_color(level);
+    fprintf(stderr, "  %s%s %s%s\n", color, e->icon, e->msg, TUI_RESET);
+    fflush(stderr);
+
+    pthread_mutex_unlock(&t->mutex);
+}
+
+void tui_toast_tick(tui_toast_t *t) {
+    pthread_mutex_lock(&t->mutex);
+    double now = tui_now();
+    for (int i = 0; i < t->count; i++) {
+        if (t->toasts[i].active && now >= t->toasts[i].expire_at) {
+            t->toasts[i].active = false;
+        }
+    }
+    pthread_mutex_unlock(&t->mutex);
+}
+
+void tui_toast_destroy(tui_toast_t *t) {
+    pthread_mutex_destroy(&t->mutex);
+}
+
+/* ── State Machine Framework ─────────────────────────────────────────── */
+
+void tui_fsm_init(tui_fsm_t *fsm, const char *name, void *ctx) {
+    memset(fsm, 0, sizeof(*fsm));
+    if (name) strncpy(fsm->name, name, TUI_FSM_NAME_MAX - 1);
+    fsm->ctx = ctx;
+    fsm->current = -1;
+}
+
+int tui_fsm_add_state(tui_fsm_t *fsm, const char *name,
+                       tui_fsm_action_fn on_enter, tui_fsm_action_fn on_exit,
+                       tui_fsm_action_fn on_tick) {
+    if (fsm->state_count >= TUI_FSM_MAX_STATES) return -1;
+    int idx = fsm->state_count++;
+    tui_fsm_state_t *s = &fsm->states[idx];
+    if (name) strncpy(s->name, name, TUI_FSM_NAME_MAX - 1);
+    s->on_enter = on_enter;
+    s->on_exit = on_exit;
+    s->on_tick = on_tick;
+
+    /* First state added becomes initial state */
+    if (fsm->current < 0) {
+        fsm->current = idx;
+        fsm->state_entered_at = tui_now();
+        if (s->on_enter) s->on_enter(fsm->ctx);
+    }
+    return idx;
+}
+
+void tui_fsm_add_transition(tui_fsm_t *fsm, int from, int to, int event,
+                             tui_fsm_guard_fn guard, tui_fsm_action_fn action) {
+    if (fsm->trans_count >= TUI_FSM_MAX_TRANS) return;
+    tui_fsm_trans_t *t = &fsm->transitions[fsm->trans_count++];
+    t->from = from;
+    t->to = to;
+    t->event = event;
+    t->guard = guard;
+    t->action = action;
+}
+
+bool tui_fsm_send(tui_fsm_t *fsm, int event) {
+    for (int i = 0; i < fsm->trans_count; i++) {
+        tui_fsm_trans_t *t = &fsm->transitions[i];
+        if (t->from == fsm->current && t->event == event) {
+            /* Check guard */
+            if (t->guard && !t->guard(fsm->ctx)) continue;
+
+            /* Exit current state */
+            if (fsm->states[fsm->current].on_exit)
+                fsm->states[fsm->current].on_exit(fsm->ctx);
+
+            /* Record history */
+            if (fsm->history_len < TUI_FSM_HISTORY_SIZE)
+                fsm->history[fsm->history_len++] = fsm->current;
+
+            /* Transition action */
+            if (t->action) t->action(fsm->ctx);
+
+            /* Enter new state */
+            fsm->current = t->to;
+            fsm->state_entered_at = tui_now();
+            if (fsm->states[fsm->current].on_enter)
+                fsm->states[fsm->current].on_enter(fsm->ctx);
+
+            return true;
+        }
+    }
+    return false;
+}
+
+void tui_fsm_tick(tui_fsm_t *fsm) {
+    if (fsm->current >= 0 && fsm->current < fsm->state_count) {
+        if (fsm->states[fsm->current].on_tick)
+            fsm->states[fsm->current].on_tick(fsm->ctx);
+    }
+}
+
+const char *tui_fsm_current_name(const tui_fsm_t *fsm) {
+    if (fsm->current >= 0 && fsm->current < fsm->state_count)
+        return fsm->states[fsm->current].name;
+    return "(none)";
+}
+
+double tui_fsm_time_in_state(const tui_fsm_t *fsm) {
+    return tui_now() - fsm->state_entered_at;
+}
+
+void tui_fsm_debug(const tui_fsm_t *fsm) {
+    fprintf(stderr, "  %sFSM '%s': state=%s (%.1fs)%s\n",
+            TUI_DIM, fsm->name, tui_fsm_current_name(fsm),
+            tui_fsm_time_in_state(fsm), TUI_RESET);
+    if (fsm->history_len > 0) {
+        fprintf(stderr, "  %shistory: ", TUI_DIM);
+        for (int i = 0; i < fsm->history_len; i++) {
+            if (i > 0) fprintf(stderr, " \xe2\x86\x92 ");  /* → */
+            fprintf(stderr, "%s", fsm->states[fsm->history[i]].name);
+        }
+        fprintf(stderr, " \xe2\x86\x92 %s%s\n",
+                tui_fsm_current_name(fsm), TUI_RESET);
+    }
+}
+
+/* ── Render Context ──────────────────────────────────────────────────── */
+
+void tui_render_ctx_init(tui_render_ctx_t *rc) {
+    memset(rc, 0, sizeof(*rc));
+    pthread_mutex_init(&rc->mutex, NULL);
+    rc->term_width = tui_term_width();
+    rc->term_height = tui_term_height();
+}
+
+int tui_render_slot_alloc(tui_render_ctx_t *rc, tui_slot_type_t type, int z_order) {
+    pthread_mutex_lock(&rc->mutex);
+    if (rc->slot_count >= TUI_RENDER_SLOTS_MAX) {
+        pthread_mutex_unlock(&rc->mutex);
+        return -1;
+    }
+    int idx = rc->slot_count++;
+    tui_render_slot_t *s = &rc->slots[idx];
+    memset(s, 0, sizeof(*s));
+    s->type = type;
+    s->row = -1;
+    s->z_order = z_order;
+    s->dirty = true;
+    rc->layout_dirty = true;
+    pthread_mutex_unlock(&rc->mutex);
+    return idx;
+}
+
+void tui_render_slot_update(tui_render_ctx_t *rc, int slot_id, const char *content) {
+    if (slot_id < 0 || slot_id >= rc->slot_count) return;
+    pthread_mutex_lock(&rc->mutex);
+    tui_render_slot_t *s = &rc->slots[slot_id];
+    if (strcmp(s->content, content) != 0) {
+        strncpy(s->content, content, TUI_RENDER_CONTENT_MAX - 1);
+        s->dirty = true;
+    }
+    pthread_mutex_unlock(&rc->mutex);
+}
+
+void tui_render_slot_free(tui_render_ctx_t *rc, int slot_id) {
+    if (slot_id < 0 || slot_id >= rc->slot_count) return;
+    pthread_mutex_lock(&rc->mutex);
+    rc->slots[slot_id].type = TUI_SLOT_EMPTY;
+    rc->slots[slot_id].dirty = false;
+    rc->layout_dirty = true;
+    pthread_mutex_unlock(&rc->mutex);
+}
+
+void tui_render_slot_dirty(tui_render_ctx_t *rc, int slot_id) {
+    if (slot_id < 0 || slot_id >= rc->slot_count) return;
+    pthread_mutex_lock(&rc->mutex);
+    rc->slots[slot_id].dirty = true;
+    pthread_mutex_unlock(&rc->mutex);
+}
+
+void tui_render_flush(tui_render_ctx_t *rc) {
+    pthread_mutex_lock(&rc->mutex);
+    double now = tui_now();
+
+    /* Sort by z_order for rendering */
+    for (int i = 0; i < rc->slot_count; i++) {
+        tui_render_slot_t *s = &rc->slots[i];
+        if (s->type == TUI_SLOT_EMPTY || !s->dirty) continue;
+        if (s->content[0]) {
+            fprintf(stderr, "%s", s->content);
+        }
+        s->dirty = false;
+        s->last_render = now;
+    }
+    fflush(stderr);
+    rc->layout_dirty = false;
+    pthread_mutex_unlock(&rc->mutex);
+}
+
+void tui_render_ctx_destroy(tui_render_ctx_t *rc) {
+    pthread_mutex_destroy(&rc->mutex);
+}
+
+/* ── Multi-Phase Progress ────────────────────────────────────────────── */
+
+void tui_multi_progress_init(tui_multi_progress_t *mp, const char *title) {
+    memset(mp, 0, sizeof(*mp));
+    pthread_mutex_init(&mp->mutex, NULL);
+    if (title) strncpy(mp->title, title, TUI_PROGRESS_NAME_MAX - 1);
+    mp->start_time = tui_now();
+    mp->ema_alpha = 0.3;
+    mp->current_phase = -1;
+}
+
+int tui_multi_progress_add_phase(tui_multi_progress_t *mp, const char *name, double weight) {
+    pthread_mutex_lock(&mp->mutex);
+    if (mp->phase_count >= TUI_PROGRESS_PHASES_MAX) {
+        pthread_mutex_unlock(&mp->mutex);
+        return -1;
+    }
+    int idx = mp->phase_count++;
+    tui_progress_phase_t *p = &mp->phases[idx];
+    memset(p, 0, sizeof(*p));
+    if (name) strncpy(p->name, name, TUI_PROGRESS_NAME_MAX - 1);
+    p->weight = weight > 0 ? weight : 1.0;
+    pthread_mutex_unlock(&mp->mutex);
+    return idx;
+}
+
+void tui_multi_progress_start_phase(tui_multi_progress_t *mp, int phase_idx) {
+    pthread_mutex_lock(&mp->mutex);
+    if (phase_idx >= 0 && phase_idx < mp->phase_count) {
+        /* Complete previous phase if still active */
+        if (mp->current_phase >= 0 && mp->phases[mp->current_phase].active) {
+            mp->phases[mp->current_phase].progress = 1.0;
+            mp->phases[mp->current_phase].complete = true;
+            mp->phases[mp->current_phase].active = false;
+            mp->phases[mp->current_phase].end_time = tui_now();
+        }
+        mp->current_phase = phase_idx;
+        mp->phases[phase_idx].active = true;
+        mp->phases[phase_idx].start_time = tui_now();
+    }
+    pthread_mutex_unlock(&mp->mutex);
+}
+
+void tui_multi_progress_update(tui_multi_progress_t *mp, double progress) {
+    pthread_mutex_lock(&mp->mutex);
+    if (mp->current_phase >= 0 && mp->current_phase < mp->phase_count) {
+        double prev = mp->phases[mp->current_phase].progress;
+        mp->phases[mp->current_phase].progress = progress > 1.0 ? 1.0 : progress;
+
+        /* Update EMA rate */
+        double dt = tui_now() - mp->phases[mp->current_phase].start_time;
+        if (dt > 0.1 && progress > prev) {
+            double rate = progress / dt;
+            if (mp->ema_rate <= 0) mp->ema_rate = rate;
+            else mp->ema_rate = mp->ema_alpha * rate + (1 - mp->ema_alpha) * mp->ema_rate;
+        }
+    }
+    pthread_mutex_unlock(&mp->mutex);
+}
+
+void tui_multi_progress_complete_phase(tui_multi_progress_t *mp) {
+    pthread_mutex_lock(&mp->mutex);
+    if (mp->current_phase >= 0 && mp->current_phase < mp->phase_count) {
+        mp->phases[mp->current_phase].progress = 1.0;
+        mp->phases[mp->current_phase].complete = true;
+        mp->phases[mp->current_phase].active = false;
+        mp->phases[mp->current_phase].end_time = tui_now();
+    }
+    pthread_mutex_unlock(&mp->mutex);
+}
+
+double tui_multi_progress_total(tui_multi_progress_t *mp) {
+    pthread_mutex_lock(&mp->mutex);
+    double total_weight = 0, weighted_progress = 0;
+    for (int i = 0; i < mp->phase_count; i++) {
+        total_weight += mp->phases[i].weight;
+        weighted_progress += mp->phases[i].weight * mp->phases[i].progress;
+    }
+    double result = total_weight > 0 ? weighted_progress / total_weight : 0;
+    pthread_mutex_unlock(&mp->mutex);
+    return result;
+}
+
+double tui_multi_progress_eta_sec(tui_multi_progress_t *mp) {
+    pthread_mutex_lock(&mp->mutex);
+    double total = tui_multi_progress_total(mp);
+    double remaining = 1.0 - total;
+    double eta = -1;
+    if (mp->ema_rate > 0 && remaining > 0) {
+        eta = remaining / mp->ema_rate;
+    }
+    pthread_mutex_unlock(&mp->mutex);
+    return eta;
+}
+
+void tui_multi_progress_render(tui_multi_progress_t *mp) {
+    pthread_mutex_lock(&mp->mutex);
+    if (mp->phase_count == 0) { pthread_mutex_unlock(&mp->mutex); return; }
+
+    int width = tui_term_width() - 8;
+    if (width < 20) width = 20;
+    if (width > 80) width = 80;
+
+    double total_pct = 0;
+    double total_weight = 0;
+    for (int i = 0; i < mp->phase_count; i++) total_weight += mp->phases[i].weight;
+
+    fprintf(stderr, "  %s%s%s\n", TUI_BOLD, mp->title, TUI_RESET);
+
+    for (int i = 0; i < mp->phase_count; i++) {
+        tui_progress_phase_t *p = &mp->phases[i];
+        const char *icon = p->complete ? "\xe2\x9c\x93" :
+                          p->active   ? "\xe2\x97\x89" : "\xe2\x97\x8b"; /* ✓ ◉ ○ */
+        const char *color = p->complete ? TUI_GREEN :
+                           p->active   ? TUI_CYAN : TUI_DIM;
+
+        int bar_w = (int)(width * p->weight / total_weight);
+        if (bar_w < 5) bar_w = 5;
+        int filled = (int)(bar_w * p->progress);
+
+        fprintf(stderr, "  %s%s%s %s%-12s%s ", color, icon, TUI_RESET,
+                color, p->name, TUI_RESET);
+
+        /* Bar */
+        fprintf(stderr, "%s", color);
+        for (int j = 0; j < bar_w; j++) {
+            fprintf(stderr, "%s", j < filled ? "\xe2\x96\x88" : "\xe2\x96\x91"); /* █ ░ */
+        }
+        fprintf(stderr, "%s", TUI_RESET);
+
+        fprintf(stderr, " %s%.0f%%%s", TUI_DIM, p->progress * 100, TUI_RESET);
+
+        if (p->complete && p->end_time > p->start_time) {
+            fprintf(stderr, " %s(%.1fs)%s", TUI_DIM,
+                    p->end_time - p->start_time, TUI_RESET);
+        }
+        fprintf(stderr, "\n");
+
+        total_pct += p->progress * p->weight / total_weight;
+    }
+
+    /* Total bar */
+    fprintf(stderr, "  %s", TUI_BOLD);
+    int total_bar = width - 10;
+    int total_filled = (int)(total_bar * total_pct);
+    for (int j = 0; j < total_bar; j++) {
+        fprintf(stderr, "%s", j < total_filled ? "\xe2\x96\x88" : "\xe2\x96\x91");
+    }
+    fprintf(stderr, " %.0f%%%s", total_pct * 100, TUI_RESET);
+
+    double eta = mp->ema_rate > 0 ? (1.0 - total_pct) / mp->ema_rate : -1;
+    if (eta > 0) {
+        if (eta < 60)
+            fprintf(stderr, " %sETA %.0fs%s", TUI_DIM, eta, TUI_RESET);
+        else
+            fprintf(stderr, " %sETA %.1fm%s", TUI_DIM, eta / 60, TUI_RESET);
+    }
+    fprintf(stderr, "\n");
+
+    pthread_mutex_unlock(&mp->mutex);
+}
+
+void tui_multi_progress_destroy(tui_multi_progress_t *mp) {
+    pthread_mutex_destroy(&mp->mutex);
+}
+
+/* ── Event Bus ───────────────────────────────────────────────────────── */
+
+void tui_event_bus_init(tui_event_bus_t *bus) {
+    memset(bus, 0, sizeof(*bus));
+    pthread_mutex_init(&bus->mutex, NULL);
+}
+
+int tui_event_subscribe(tui_event_bus_t *bus, tui_event_type_t type,
+                         tui_event_handler_fn handler, void *ctx) {
+    pthread_mutex_lock(&bus->mutex);
+    if (bus->sub_count >= TUI_EVT_SUBS_MAX) {
+        pthread_mutex_unlock(&bus->mutex);
+        return -1;
+    }
+    int idx = bus->sub_count++;
+    bus->subs[idx].type = type;
+    bus->subs[idx].handler = handler;
+    bus->subs[idx].ctx = ctx;
+    bus->subs[idx].active = true;
+    pthread_mutex_unlock(&bus->mutex);
+    return idx;
+}
+
+void tui_event_unsubscribe(tui_event_bus_t *bus, int sub_id) {
+    pthread_mutex_lock(&bus->mutex);
+    if (sub_id >= 0 && sub_id < bus->sub_count) {
+        bus->subs[sub_id].active = false;
+    }
+    pthread_mutex_unlock(&bus->mutex);
+}
+
+void tui_event_emit(tui_event_bus_t *bus, const tui_event_t *event) {
+    pthread_mutex_lock(&bus->mutex);
+
+    /* Record in history ring buffer */
+    int h = bus->history_head;
+    bus->history[h] = *event;
+    bus->history[h].timestamp = tui_now();
+    bus->history_head = (h + 1) % 64;
+    if (bus->history_count < 64) bus->history_count++;
+
+    /* Dispatch to subscribers */
+    for (int i = 0; i < bus->sub_count; i++) {
+        if (bus->subs[i].active && bus->subs[i].type == event->type) {
+            bus->subs[i].handler(event, bus->subs[i].ctx);
+        }
+    }
+    pthread_mutex_unlock(&bus->mutex);
+}
+
+void tui_event_emit_simple(tui_event_bus_t *bus, tui_event_type_t type,
+                            const char *source) {
+    tui_event_t e;
+    memset(&e, 0, sizeof(e));
+    e.type = type;
+    e.source = source;
+    e.timestamp = tui_now();
+    tui_event_emit(bus, &e);
+}
+
+void tui_event_bus_dump(const tui_event_bus_t *bus, int max_events) {
+    static const char *evt_names[] = {
+        "stream_start", "stream_text", "stream_end",
+        "thinking_start", "thinking_end",
+        "tool_start", "tool_complete", "tool_error",
+        "turn_start", "turn_end",
+        "progress", "context_pressure", "cost_update",
+        "session_load", "session_save", "compact",
+        "retry", "error", "custom"
+    };
+
+    fprintf(stderr, "  %s\xe2\x94\x80\xe2\x94\x80 event bus "
+            "(%d subs, %d events) \xe2\x94\x80\xe2\x94\x80%s\n",
+            TUI_DIM, bus->sub_count, bus->history_count, TUI_RESET);
+
+    int start = bus->history_count < 64 ? 0 : bus->history_head;
+    int total = bus->history_count < max_events ? bus->history_count : max_events;
+
+    for (int i = 0; i < total; i++) {
+        int idx = (start + bus->history_count - total + i) % 64;
+        const tui_event_t *e = &bus->history[idx];
+        const char *ename = (e->type < TUI_EVT__COUNT) ? evt_names[e->type] : "?";
+        fprintf(stderr, "  %s%.3f%s %s%-18s%s %s%s%s\n",
+                TUI_DIM, e->timestamp - bus->history[start].timestamp, TUI_RESET,
+                TUI_CYAN, ename, TUI_RESET,
+                TUI_DIM, e->source ? e->source : "", TUI_RESET);
+    }
+}
+
+void tui_event_bus_destroy(tui_event_bus_t *bus) {
+    pthread_mutex_destroy(&bus->mutex);
+}
+
+/* ── Streaming Display Pipeline ──────────────────────────────────────── */
+
+void tui_stream_state_init(tui_stream_state_t *ss) {
+    memset(ss, 0, sizeof(*ss));
+    ss->phase = TUI_STREAM_IDLE;
+}
+
+void tui_stream_state_transition(tui_stream_state_t *ss,
+                                  tui_stream_phase_t new_phase) {
+    ss->phase = new_phase;
+    ss->phase_start = tui_now();
+}
+
+void tui_stream_state_token(tui_stream_state_t *ss, int count) {
+    ss->text_tokens += count;
+    ss->tokens_this_second += count;
+
+    double now = tui_now();
+    if (now - ss->last_second >= 1.0) {
+        double tps = ss->tokens_this_second / (now - ss->last_second);
+        if (tps > ss->peak_tok_per_sec) ss->peak_tok_per_sec = tps;
+        ss->avg_tok_per_sec = (ss->avg_tok_per_sec * ss->sample_count + tps) /
+                              (ss->sample_count + 1);
+        ss->sample_count++;
+        ss->tokens_this_second = 0;
+        ss->last_second = now;
+    }
+}
+
+const char *tui_stream_phase_name(tui_stream_phase_t phase) {
+    switch (phase) {
+    case TUI_STREAM_IDLE:          return "idle";
+    case TUI_STREAM_THINKING:      return "thinking";
+    case TUI_STREAM_TEXT:          return "text";
+    case TUI_STREAM_TOOL_PENDING:  return "tool_pending";
+    case TUI_STREAM_TOOL_RUNNING:  return "tool_running";
+    case TUI_STREAM_TOOL_COMPLETE: return "tool_complete";
+    case TUI_STREAM_DONE:          return "done";
+    case TUI_STREAM_ERROR:         return "error";
+    default: return "?";
+    }
+}
+
+tui_stream_phase_t tui_stream_state_phase(const tui_stream_state_t *ss) {
+    return ss->phase;
+}
+
+void tui_stream_state_render_badge(const tui_stream_state_t *ss) {
+    const char *name = tui_stream_phase_name(ss->phase);
+    const char *color = TUI_DIM;
+    switch (ss->phase) {
+    case TUI_STREAM_THINKING:     color = TUI_MAGENTA; break;
+    case TUI_STREAM_TEXT:         color = TUI_GREEN;   break;
+    case TUI_STREAM_TOOL_PENDING: color = TUI_YELLOW;  break;
+    case TUI_STREAM_TOOL_RUNNING: color = TUI_CYAN;    break;
+    case TUI_STREAM_ERROR:        color = TUI_RED;     break;
+    default: break;
+    }
+
+    double elapsed = tui_now() - ss->phase_start;
+    fprintf(stderr, "  %s[%s %.1fs]%s", color, name, elapsed, TUI_RESET);
+
+    if (ss->text_tokens > 0) {
+        fprintf(stderr, " %s%d tok%s", TUI_DIM, ss->text_tokens, TUI_RESET);
+    }
+    if (ss->tool_count > 0) {
+        fprintf(stderr, " %s%d tools%s", TUI_DIM, ss->tool_count, TUI_RESET);
+        if (ss->tool_errors > 0) {
+            fprintf(stderr, " %s(%d err)%s", TUI_RED, ss->tool_errors, TUI_RESET);
+        }
+    }
+    if (ss->peak_tok_per_sec > 0) {
+        fprintf(stderr, " %speak:%.0f tok/s%s", TUI_DIM,
+                ss->peak_tok_per_sec, TUI_RESET);
+    }
+    fprintf(stderr, "\n");
 }
