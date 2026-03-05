@@ -377,10 +377,14 @@ void tui_cadence_feed(tui_cadence_t *c, const char *text);
 void tui_cadence_flush(tui_cadence_t *c);
 
 /* ── F4: Collapsible Thinking ─────────────────────────────────────────── */
+#define TUI_THINKING_SUMMARY_MAX 120
 typedef struct {
     int    char_count;
     double start_time;
     bool   active;
+    char   summary[TUI_THINKING_SUMMARY_MAX]; /* first sentence excerpt */
+    int    summary_len;
+    bool   summary_done;  /* stop capturing after first sentence */
 } tui_thinking_state_t;
 
 void tui_thinking_init(tui_thinking_state_t *t);
@@ -602,5 +606,334 @@ bool tui_features_toggle(tui_features_t *f, const char *name);
 /* ── Extend status bar with clock ─────────────────────────────────────── */
 /* Added show_clock field — use tui_status_bar_set_clock() */
 void tui_status_bar_set_clock(tui_status_bar_t *sb, bool show);
+
+/* ═══════════════════════════════════════════════════════════════════════
+ *  ADVANCED STATEFUL ABSTRACTIONS
+ * ═══════════════════════════════════════════════════════════════════════ */
+
+/* ── Notification Queue ──────────────────────────────────────────────── */
+/* Priority-based, auto-dismissing, stackable notification system.
+ * Notifications can persist across turns or auto-dismiss after TTL. */
+
+typedef enum {
+    TUI_NOTIF_DEBUG,       /* dim, auto-dismiss fast */
+    TUI_NOTIF_INFO,        /* cyan, standard TTL */
+    TUI_NOTIF_SUCCESS,     /* green, standard TTL */
+    TUI_NOTIF_WARNING,     /* yellow, longer TTL */
+    TUI_NOTIF_ERROR,       /* red, persists until dismissed */
+    TUI_NOTIF_CRITICAL,    /* bold red + bell, persists */
+} tui_notif_level_t;
+
+#define TUI_NOTIF_QUEUE_MAX  32
+#define TUI_NOTIF_MSG_MAX    256
+#define TUI_NOTIF_TAG_MAX    32
+
+typedef struct {
+    int               id;
+    tui_notif_level_t level;
+    char              msg[TUI_NOTIF_MSG_MAX];
+    char              tag[TUI_NOTIF_TAG_MAX];     /* grouping tag (e.g. "api", "tool") */
+    double            created_at;                  /* epoch seconds */
+    double            ttl_sec;                     /* 0 = persist forever */
+    bool              dismissed;
+    bool              seen;                        /* rendered at least once */
+    int               count;                       /* coalesced duplicate count */
+} tui_notif_t;
+
+typedef struct {
+    pthread_mutex_t  mutex;
+    tui_notif_t      queue[TUI_NOTIF_QUEUE_MAX];
+    int              count;
+    int              next_id;
+    int              unread;
+} tui_notif_queue_t;
+
+void tui_notif_queue_init(tui_notif_queue_t *q);
+int  tui_notif_push(tui_notif_queue_t *q, tui_notif_level_t level,
+                     const char *tag, const char *fmt, ...);
+void tui_notif_dismiss(tui_notif_queue_t *q, int id);
+void tui_notif_dismiss_tag(tui_notif_queue_t *q, const char *tag);
+void tui_notif_gc(tui_notif_queue_t *q);           /* expire TTL'd entries */
+void tui_notif_render(tui_notif_queue_t *q);        /* render visible stack */
+int  tui_notif_unread(tui_notif_queue_t *q);
+void tui_notif_clear_all(tui_notif_queue_t *q);
+
+/* ── Toast System ────────────────────────────────────────────────────── */
+/* Ephemeral single-line messages that appear briefly and vanish.
+ * Uses async thread for timed display. */
+
+#define TUI_TOAST_MAX 8
+#define TUI_TOAST_MSG_MAX 128
+
+typedef struct {
+    char   msg[TUI_TOAST_MSG_MAX];
+    char   icon[8];             /* emoji/unicode prefix */
+    double expire_at;           /* epoch seconds */
+    bool   active;
+    tui_notif_level_t level;
+} tui_toast_entry_t;
+
+typedef struct {
+    pthread_mutex_t   mutex;
+    tui_toast_entry_t toasts[TUI_TOAST_MAX];
+    int               count;
+    pthread_t         thread;
+    volatile bool     running;
+} tui_toast_t;
+
+void tui_toast_init(tui_toast_t *t);
+void tui_toast_show(tui_toast_t *t, tui_notif_level_t level,
+                     double duration_sec, const char *fmt, ...);
+void tui_toast_tick(tui_toast_t *t);   /* expire old toasts, render active */
+void tui_toast_destroy(tui_toast_t *t);
+
+/* ── State Machine Framework ─────────────────────────────────────────── */
+/* Generic finite state machine for UI components.
+ * Supports enter/exit callbacks, guarded transitions, and state history. */
+
+#define TUI_FSM_MAX_STATES    16
+#define TUI_FSM_MAX_TRANS     64
+#define TUI_FSM_HISTORY_SIZE  32
+#define TUI_FSM_NAME_MAX      32
+
+typedef void (*tui_fsm_action_fn)(void *ctx);
+typedef bool (*tui_fsm_guard_fn)(void *ctx);
+
+typedef struct {
+    char              name[TUI_FSM_NAME_MAX];
+    tui_fsm_action_fn on_enter;
+    tui_fsm_action_fn on_exit;
+    tui_fsm_action_fn on_tick;   /* called every render cycle while in this state */
+} tui_fsm_state_t;
+
+typedef struct {
+    int               from;       /* state index */
+    int               to;         /* state index */
+    int               event;      /* event ID */
+    tui_fsm_guard_fn  guard;      /* NULL = always allowed */
+    tui_fsm_action_fn action;     /* transition action */
+} tui_fsm_trans_t;
+
+typedef struct {
+    char              name[TUI_FSM_NAME_MAX];   /* FSM name for debugging */
+    tui_fsm_state_t   states[TUI_FSM_MAX_STATES];
+    int               state_count;
+    tui_fsm_trans_t   transitions[TUI_FSM_MAX_TRANS];
+    int               trans_count;
+    int               current;                    /* current state index */
+    int               history[TUI_FSM_HISTORY_SIZE];
+    int               history_len;
+    void             *ctx;                        /* user context */
+    double            state_entered_at;           /* for time-in-state queries */
+} tui_fsm_t;
+
+void tui_fsm_init(tui_fsm_t *fsm, const char *name, void *ctx);
+int  tui_fsm_add_state(tui_fsm_t *fsm, const char *name,
+                        tui_fsm_action_fn on_enter, tui_fsm_action_fn on_exit,
+                        tui_fsm_action_fn on_tick);
+void tui_fsm_add_transition(tui_fsm_t *fsm, int from, int to, int event,
+                             tui_fsm_guard_fn guard, tui_fsm_action_fn action);
+bool tui_fsm_send(tui_fsm_t *fsm, int event);   /* returns true if transition occurred */
+void tui_fsm_tick(tui_fsm_t *fsm);               /* calls current state's on_tick */
+const char *tui_fsm_current_name(const tui_fsm_t *fsm);
+double tui_fsm_time_in_state(const tui_fsm_t *fsm);
+void tui_fsm_debug(const tui_fsm_t *fsm);        /* print state + history */
+
+/* ── Render Context ──────────────────────────────────────────────────── */
+/* Tracks what's currently displayed on the terminal for smart redraws.
+ * Enables partial updates without full clear/repaint. */
+
+#define TUI_RENDER_SLOTS_MAX 16
+#define TUI_RENDER_CONTENT_MAX 512
+
+typedef enum {
+    TUI_SLOT_EMPTY,
+    TUI_SLOT_SPINNER,
+    TUI_SLOT_PROGRESS,
+    TUI_SLOT_NOTIFICATION,
+    TUI_SLOT_TOAST,
+    TUI_SLOT_STATUS,
+    TUI_SLOT_PANEL,
+    TUI_SLOT_TEXT,
+} tui_slot_type_t;
+
+typedef struct {
+    tui_slot_type_t type;
+    int             row;          /* terminal row (-1 = floating) */
+    int             height;       /* lines occupied */
+    char            content[TUI_RENDER_CONTENT_MAX]; /* last rendered snapshot */
+    bool            dirty;        /* needs redraw */
+    double          last_render;  /* timestamp */
+    int             z_order;      /* stacking priority */
+} tui_render_slot_t;
+
+typedef struct {
+    tui_render_slot_t slots[TUI_RENDER_SLOTS_MAX];
+    int               slot_count;
+    int               term_width;
+    int               term_height;
+    bool              layout_dirty;
+    pthread_mutex_t   mutex;
+} tui_render_ctx_t;
+
+void tui_render_ctx_init(tui_render_ctx_t *rc);
+int  tui_render_slot_alloc(tui_render_ctx_t *rc, tui_slot_type_t type, int z_order);
+void tui_render_slot_update(tui_render_ctx_t *rc, int slot_id, const char *content);
+void tui_render_slot_free(tui_render_ctx_t *rc, int slot_id);
+void tui_render_slot_dirty(tui_render_ctx_t *rc, int slot_id);
+void tui_render_flush(tui_render_ctx_t *rc); /* redraw all dirty slots */
+void tui_render_ctx_destroy(tui_render_ctx_t *rc);
+
+/* ── Multi-Phase Progress ────────────────────────────────────────────── */
+/* Named phases with ETA estimation, throughput tracking, and phase transitions. */
+
+#define TUI_PROGRESS_PHASES_MAX 8
+#define TUI_PROGRESS_NAME_MAX   48
+
+typedef struct {
+    char   name[TUI_PROGRESS_NAME_MAX];
+    double weight;     /* relative weight for total progress */
+    double progress;   /* 0.0 - 1.0 within this phase */
+    double start_time;
+    double end_time;   /* 0 = not finished */
+    bool   active;
+    bool   complete;
+} tui_progress_phase_t;
+
+typedef struct {
+    char                  title[TUI_PROGRESS_NAME_MAX];
+    tui_progress_phase_t  phases[TUI_PROGRESS_PHASES_MAX];
+    int                   phase_count;
+    int                   current_phase;
+    double                start_time;
+    double                last_render;
+    /* ETA estimation via exponential moving average */
+    double                ema_rate;     /* units per second */
+    double                ema_alpha;    /* smoothing factor */
+    pthread_mutex_t       mutex;
+} tui_multi_progress_t;
+
+void   tui_multi_progress_init(tui_multi_progress_t *mp, const char *title);
+int    tui_multi_progress_add_phase(tui_multi_progress_t *mp, const char *name, double weight);
+void   tui_multi_progress_start_phase(tui_multi_progress_t *mp, int phase_idx);
+void   tui_multi_progress_update(tui_multi_progress_t *mp, double progress);
+void   tui_multi_progress_complete_phase(tui_multi_progress_t *mp);
+void   tui_multi_progress_render(tui_multi_progress_t *mp);
+double tui_multi_progress_total(tui_multi_progress_t *mp);   /* 0.0 - 1.0 */
+double tui_multi_progress_eta_sec(tui_multi_progress_t *mp); /* estimated seconds remaining */
+void   tui_multi_progress_destroy(tui_multi_progress_t *mp);
+
+/* ── Event Bus ───────────────────────────────────────────────────────── */
+/* Lightweight pub/sub for decoupled UI updates. Components subscribe
+ * to event types and receive callbacks when events fire. */
+
+typedef enum {
+    TUI_EVT_STREAM_START,
+    TUI_EVT_STREAM_TEXT,
+    TUI_EVT_STREAM_END,
+    TUI_EVT_THINKING_START,
+    TUI_EVT_THINKING_END,
+    TUI_EVT_TOOL_START,
+    TUI_EVT_TOOL_COMPLETE,
+    TUI_EVT_TOOL_ERROR,
+    TUI_EVT_TURN_START,
+    TUI_EVT_TURN_END,
+    TUI_EVT_PROGRESS,
+    TUI_EVT_CONTEXT_PRESSURE,
+    TUI_EVT_COST_UPDATE,
+    TUI_EVT_SESSION_LOAD,
+    TUI_EVT_SESSION_SAVE,
+    TUI_EVT_COMPACT,
+    TUI_EVT_RETRY,
+    TUI_EVT_ERROR,
+    TUI_EVT_CUSTOM,
+    TUI_EVT__COUNT
+} tui_event_type_t;
+
+typedef struct {
+    tui_event_type_t type;
+    const char      *source;     /* component name */
+    double           timestamp;
+    union {
+        struct { const char *text; int len; }        text;
+        struct { const char *name; const char *id; } tool;
+        struct { double pct; const char *label; }    progress;
+        struct { int used; int max; }                context;
+        struct { double total; double delta; }       cost;
+        struct { int code; const char *msg; }        error;
+        struct { int key; void *data; }              custom;
+    } data;
+} tui_event_t;
+
+typedef void (*tui_event_handler_fn)(const tui_event_t *event, void *ctx);
+
+#define TUI_EVT_SUBS_MAX 64
+
+typedef struct {
+    tui_event_type_t      type;
+    tui_event_handler_fn  handler;
+    void                 *ctx;
+    bool                  active;
+} tui_evt_sub_t;
+
+typedef struct {
+    tui_evt_sub_t   subs[TUI_EVT_SUBS_MAX];
+    int             sub_count;
+    pthread_mutex_t mutex;
+    /* Ring buffer for recent events (debugging/replay) */
+    tui_event_t     history[64];
+    int             history_head;
+    int             history_count;
+} tui_event_bus_t;
+
+void tui_event_bus_init(tui_event_bus_t *bus);
+int  tui_event_subscribe(tui_event_bus_t *bus, tui_event_type_t type,
+                          tui_event_handler_fn handler, void *ctx);
+void tui_event_unsubscribe(tui_event_bus_t *bus, int sub_id);
+void tui_event_emit(tui_event_bus_t *bus, const tui_event_t *event);
+void tui_event_emit_simple(tui_event_bus_t *bus, tui_event_type_t type,
+                            const char *source);
+void tui_event_bus_dump(const tui_event_bus_t *bus, int max_events);
+void tui_event_bus_destroy(tui_event_bus_t *bus);
+
+/* ── Streaming Display Pipeline ──────────────────────────────────────── */
+/* Formalizes the streaming state machine with proper phase tracking,
+ * composable middleware, and metrics collection. */
+
+typedef enum {
+    TUI_STREAM_IDLE,
+    TUI_STREAM_THINKING,
+    TUI_STREAM_TEXT,
+    TUI_STREAM_TOOL_PENDING,    /* tool announced, input accumulating */
+    TUI_STREAM_TOOL_RUNNING,    /* tool executing */
+    TUI_STREAM_TOOL_COMPLETE,
+    TUI_STREAM_DONE,
+    TUI_STREAM_ERROR,
+} tui_stream_phase_t;
+
+typedef struct {
+    tui_stream_phase_t phase;
+    double             phase_start;
+    int                thinking_tokens;
+    int                text_tokens;
+    int                tool_count;
+    int                tool_errors;
+    double             total_tool_ms;
+    char               current_tool[64];
+    /* Throughput tracking */
+    int                tokens_this_second;
+    double             last_second;
+    double             peak_tok_per_sec;
+    double             avg_tok_per_sec;
+    int                sample_count;
+} tui_stream_state_t;
+
+void              tui_stream_state_init(tui_stream_state_t *ss);
+void              tui_stream_state_transition(tui_stream_state_t *ss,
+                                              tui_stream_phase_t new_phase);
+void              tui_stream_state_token(tui_stream_state_t *ss, int count);
+void              tui_stream_state_render_badge(const tui_stream_state_t *ss);
+const char       *tui_stream_phase_name(tui_stream_phase_t phase);
+tui_stream_phase_t tui_stream_state_phase(const tui_stream_state_t *ss);
 
 #endif
