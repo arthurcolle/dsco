@@ -4132,14 +4132,15 @@ static bool tool_agent_status(const char *input, char *result, size_t rlen) {
                 TUI_BYELLOW, TUI_RESET, active, total);
         for (int i = 0; i < total; i++) {
             swarm_child_t *c = swarm_get(&g_swarm, i);
-            const char *icon = "○";
+            const tui_glyphs_t *gl = tui_glyph();
+            const char *icon = gl->circle_open;
             const char *color = TUI_DIM;
             if (c->status == SWARM_RUNNING || c->status == SWARM_STREAMING) {
-                icon = "◉"; color = TUI_BCYAN;
+                icon = gl->circle_dot; color = TUI_BCYAN;
             } else if (c->status == SWARM_DONE) {
-                icon = "✓"; color = TUI_GREEN;
+                icon = gl->ok; color = TUI_GREEN;
             } else if (c->status == SWARM_ERROR) {
-                icon = "✗"; color = TUI_RED;
+                icon = gl->fail; color = TUI_RED;
             }
             fprintf(stderr, "    %s%s%s #%d %s%.50s%s\n",
                     color, icon, TUI_RESET, i, TUI_DIM, c->task, TUI_RESET);
