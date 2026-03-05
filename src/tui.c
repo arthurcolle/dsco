@@ -163,14 +163,27 @@ void tui_panel(const tui_panel_t *p) {
 
 /* ── Spinners ─────────────────────────────────────────────────────────── */
 
-static const char *SPINNER_FRAMES[][12] = {
-    [SPINNER_DOTS]    = {"⠋","⠙","⠹","⠸","⠼","⠴","⠦","⠧","⠇","⠏",NULL},
-    [SPINNER_BRAILLE] = {"⣾","⣽","⣻","⢿","⡿","⣟","⣯","⣷",NULL},
-    [SPINNER_LINE]    = {"-","\\","|","/",NULL},
-    [SPINNER_ARROW]   = {"←","↖","↑","↗","→","↘","↓","↙",NULL},
-    [SPINNER_STAR]    = {"✶","✸","✹","✺","✹","✷",NULL},
-    [SPINNER_PULSE]   = {"◐","◓","◑","◒",NULL},
-};
+/* Spinner frames — resolved from glyph tier at runtime */
+static void spinner_get_frames(tui_spinner_type_t type,
+                               const char *const **out_frames, int *out_count) {
+    const tui_glyphs_t *g = tui_glyph();
+    switch (type) {
+    case SPINNER_DOTS:
+        *out_frames = g->spin_dots; *out_count = g->spin_dots_n; break;
+    case SPINNER_BRAILLE:
+        *out_frames = g->spin_thick; *out_count = g->spin_thick_n; break;
+    case SPINNER_LINE:
+        *out_frames = g->spin_line; *out_count = g->spin_line_n; break;
+    case SPINNER_ARROW:
+        *out_frames = g->spin_arrow; *out_count = g->spin_arrow_n; break;
+    case SPINNER_STAR:
+        *out_frames = g->spin_star; *out_count = g->spin_star_n; break;
+    case SPINNER_PULSE:
+        *out_frames = g->spin_pulse; *out_count = g->spin_pulse_n; break;
+    default:
+        *out_frames = g->spin_dots; *out_count = g->spin_dots_n; break;
+    }
+}
 
 void tui_spinner_init(tui_spinner_t *s, tui_spinner_type_t type,
                       const char *label, const char *color) {
@@ -183,9 +196,9 @@ void tui_spinner_init(tui_spinner_t *s, tui_spinner_type_t type,
 
 void tui_spinner_tick(tui_spinner_t *s) {
     if (!s->active) return;
-    const char **frames = SPINNER_FRAMES[s->type];
-    int count = 0;
-    while (frames[count]) count++;
+    const char *const *frames; int count;
+    spinner_get_frames(s->type, &frames, &count);
+    if (count <= 0) return;
 
     tui_clear_line();
     fprintf(stderr, "  %s%s%s %s%s%s",
@@ -198,8 +211,8 @@ void tui_spinner_tick(tui_spinner_t *s) {
 void tui_spinner_done(tui_spinner_t *s, const char *final_label) {
     s->active = false;
     tui_clear_line();
-    fprintf(stderr, "  %s✿%s %s%s%s\n",
-            TUI_GREEN, TUI_RESET,
+    fprintf(stderr, "  %s%s%s %s%s%s\n",
+            TUI_GREEN, tui_glyph()->florette, TUI_RESET,
             TUI_DIM, final_label ? final_label : "done", TUI_RESET);
 }
 
@@ -337,7 +350,7 @@ void tui_tag(const char *text, const char *color) {
 
 void tui_header(const char *text, const char *color) {
     fprintf(stderr, "\n%s%s%s %s%s\n",
-            color ? color : TUI_BWHITE, TUI_BOLD, "●", text, TUI_RESET);
+            color ? color : TUI_BWHITE, TUI_BOLD, tui_glyph()->bullet, text, TUI_RESET);
 }
 
 void tui_subheader(const char *text) {
@@ -460,7 +473,8 @@ void tui_stream_tool(const char *name, const char *id) {
 
 void tui_stream_tool_result(const char *name, bool ok, const char *preview) {
     (void)name;
-    const char *icon = ok ? "✓" : "✗";
+    const tui_glyphs_t *gl = tui_glyph();
+    const char *icon = ok ? gl->ok : gl->fail;
     const char *color = ok ? TUI_GREEN : TUI_RED;
 
     char trunc[128];
@@ -497,18 +511,19 @@ void tui_swarm_panel(tui_swarm_entry_t *entries, int count, int width) {
     for (int i = 0; i < count; i++) {
         tui_swarm_entry_t *e = &entries[i];
 
+        const tui_glyphs_t *gl = tui_glyph();
         const char *status_color = TUI_DIM;
-        const char *status_icon = "○";
+        const char *status_icon = gl->circle_open;
 
         if (strcmp(e->status, "running") == 0) {
             status_color = TUI_BCYAN;
-            status_icon = "◉";
+            status_icon = gl->circle_dot;
         } else if (strcmp(e->status, "done") == 0) {
             status_color = TUI_GREEN;
-            status_icon = "✓";
+            status_icon = gl->ok;
         } else if (strcmp(e->status, "error") == 0) {
             status_color = TUI_RED;
-            status_icon = "✗";
+            status_icon = gl->fail;
         }
 
         fprintf(stderr, "  %s%s%s %s#%d%s %s%s%s",
@@ -520,7 +535,7 @@ void tui_swarm_panel(tui_swarm_entry_t *entries, int count, int width) {
             int bar_w = 20;
             int filled = (int)(e->progress * bar_w);
             fprintf(stderr, " %s", TUI_GREEN);
-            for (int j = 0; j < filled; j++) fprintf(stderr, "▮");
+            for (int j = 0; j < filled; j++) fprintf(stderr, "%s", tui_glyph()->block_med);
             fprintf(stderr, "%s", TUI_DIM);
             for (int j = filled; j < bar_w; j++) fprintf(stderr, "▯");
             fprintf(stderr, "%s", TUI_RESET);
@@ -541,6 +556,432 @@ void tui_swarm_panel(tui_swarm_entry_t *entries, int count, int width) {
         }
     }
     fprintf(stderr, "\n");
+}
+
+/* ══════════════════════════════════════════════════════════════════════════
+ * GLYPH TIER SYSTEM — embedded glyph tables with ASCII/Unicode/Full tiers
+ * ══════════════════════════════════════════════════════════════════════════ */
+
+static tui_glyph_tier_t s_glyph_tier = (tui_glyph_tier_t)-1;
+
+/* Nerd Font codepoints as UTF-8 byte sequences.
+ * Nerd Font PUA glyphs are in U+E000–U+F8FF (3-byte UTF-8)
+ * and U+F0000–U+10FFFF (4-byte UTF-8 for Material Design). */
+#define NF(hex) hex  /* just documentation — we use raw UTF-8 bytes */
+
+/* ── Nerd Font tier: modern 2026 terminals with patched fonts ──────── */
+static const tui_glyphs_t GLYPHS_NERD = {
+    /* Status — Nerd Font codicons/FA */
+    .ok   = "\xef\x80\x8c",             /* nf-fa-check        U+F00C */
+    .fail = "\xef\x80\x8d",             /* nf-fa-times        U+F00D */
+    .warn = "\xef\x81\xb1",             /* nf-fa-warning      U+F071 */
+    .info = "\xef\x84\xa9",             /* nf-fa-info_circle  U+F129 */
+    /* Bullets — Nerd Font */
+    .bullet      = "\xef\x84\x92",      /* nf-fa-circle       U+F111 */
+    .circle_open = "\xef\x84\x90",      /* nf-fa-circle_o     U+F10C */
+    .circle_dot  = "\xef\x84\x92",      /* nf-fa-circle       U+F111 */
+    .circle_ring = "\xef\x84\x90",      /* nf-fa-circle_o     U+F10C */
+    .diamond     = "\xef\x88\x99",      /* nf-fa-diamond      U+F219 */
+    .diamond_open= "\xef\x88\x99",      /* nf-fa-diamond      U+F219 */
+    .sparkle     = "\xef\x83\xab",      /* nf-fa-star         U+F0EB -> lightbulb */
+    .florette    = "\xef\x80\x8c",      /* nf-fa-check        U+F00C */
+    /* Arrows — Nerd Font */
+    .arrow_right = "\xef\x81\xa1",      /* nf-fa-arrow_right  U+F061 */
+    .arrow_left  = "\xef\x81\xa0",      /* nf-fa-arrow_left   U+F060 */
+    .arrow_up    = "\xef\x81\xa2",      /* nf-fa-arrow_up     U+F062 */
+    .arrow_down  = "\xef\x81\xa3",      /* nf-fa-arrow_down   U+F063 */
+    .arrow_cycle = "\xef\x80\xa1",      /* nf-fa-refresh      U+F021 */
+    /* Blocks — standard Unicode (universally supported) */
+    .block_full  = "\xe2\x96\x88",
+    .block_med   = "\xe2\x96\xae",
+    .block_light = "\xe2\x96\x91",
+    .block_dark  = "\xe2\x96\x93",
+    .vblock = {" ",
+        "\xe2\x96\x81","\xe2\x96\x82","\xe2\x96\x83","\xe2\x96\x84",
+        "\xe2\x96\x85","\xe2\x96\x86","\xe2\x96\x87","\xe2\x96\x88"},
+    /* Spinners — braille (universally supported with nerd fonts) */
+    .spin_dots = {
+        "\xe2\xa0\x8b","\xe2\xa0\x99","\xe2\xa0\xb9","\xe2\xa0\xb8",
+        "\xe2\xa0\xbc","\xe2\xa0\xb4","\xe2\xa0\xa6","\xe2\xa0\xa7",
+        "\xe2\xa0\x87","\xe2\xa0\x8f"},
+    .spin_dots_n = 10,
+    .spin_thick = {
+        "\xe2\xa3\xbe","\xe2\xa3\xbd","\xe2\xa3\xbb","\xe2\xa2\xbf",
+        "\xe2\xa1\xbf","\xe2\xa3\x9f","\xe2\xa3\xaf","\xe2\xa3\xb7"},
+    .spin_thick_n = 8,
+    .spin_orbit = {
+        "\xe2\x97\x9c","\xe2\x97\x9d","\xe2\x97\x9e","\xe2\x97\x9f"},
+    .spin_orbit_n = 4,
+    .spin_orbit_inner = {"\xe2\x97\xa0","\xe2\x97\xa1"},
+    .spin_orbit_inner_n = 2,
+    .spin_pulse = {
+        "\xe2\x97\x90","\xe2\x97\x93","\xe2\x97\x91","\xe2\x97\x92"},
+    .spin_pulse_n = 4,
+    .spin_line = {"-","\\","|","/"},
+    .spin_line_n = 4,
+    .spin_arrow = {
+        "\xe2\x86\x90","\xe2\x86\x96","\xe2\x86\x91","\xe2\x86\x97",
+        "\xe2\x86\x92","\xe2\x86\x98","\xe2\x86\x93","\xe2\x86\x99"},
+    .spin_arrow_n = 8,
+    .spin_star = {
+        "\xe2\x9c\xb6","\xe2\x9c\xb8","\xe2\x9c\xb9",
+        "\xe2\x9c\xba","\xe2\x9c\xb9","\xe2\x9c\xb7"},
+    .spin_star_n = 6,
+    /* Icons — Nerd Font */
+    .icon_think     = "\xef\x83\xab",   /* nf-fa-lightbulb_o  U+F0EB */
+    .icon_lightning  = "\xef\x83\xa7",   /* nf-fa-bolt         U+F0E7 */
+    .icon_gear       = "\xef\x80\x93",   /* nf-fa-cog          U+F013 */
+    .icon_timer      = "\xef\x80\x97",   /* nf-fa-clock_o      U+F017 */
+    .icon_lock       = "\xef\x80\xa3",   /* nf-fa-lock         U+F023 */
+    .icon_money      = "\xef\x85\x95",   /* nf-fa-money        U+F155 */
+    .icon_globe      = "\xef\x82\xac",   /* nf-fa-globe        U+F0AC */
+    .icon_rocket     = "\xef\x84\xb5",   /* nf-fa-rocket       U+F135 */
+    .icon_fire       = "\xef\x81\xad",   /* nf-fa-fire         U+F06D */
+    .icon_link       = "\xef\x83\x81",   /* nf-fa-link         U+F0C1 */
+    .icon_eyes       = "\xef\x81\xae",   /* nf-fa-eye          U+F06E */
+    /* Nerd Font extras */
+    .icon_folder     = "\xef\x81\xbc",   /* nf-fa-folder       U+F07C */
+    .icon_file       = "\xef\x85\x9b",   /* nf-fa-file_text_o  U+F15B (really U+F0F6) */
+    .icon_code       = "\xef\x84\xa1",   /* nf-fa-code         U+F121 */
+    .icon_terminal   = "\xef\x84\xa0",   /* nf-fa-terminal     U+F120 */
+    .icon_git        = "\xef\x84\xa6",   /* nf-fa-code_fork    U+F126 */
+    .icon_database   = "\xef\x87\x80",   /* nf-fa-database     U+F1C0 */
+    .icon_cloud      = "\xef\x83\x82",   /* nf-fa-cloud        U+F0C2 */
+    .icon_bug        = "\xef\x86\x88",   /* nf-fa-bug          U+F188 */
+    .icon_cpu        = "\xef\x88\x9b",   /* nf-fa-microchip    U+F21B (close) */
+    .icon_network    = "\xef\x83\xa0",   /* nf-fa-sitemap      U+F0E8 */
+    .icon_key        = "\xef\x82\x84",   /* nf-fa-key          U+F084 */
+    .icon_shield     = "\xef\x84\xb2",   /* nf-fa-shield       U+F132 */
+    .icon_search     = "\xef\x80\x82",   /* nf-fa-search       U+F002 */
+    .icon_download   = "\xef\x80\x99",   /* nf-fa-download     U+F019 */
+    .icon_upload     = "\xef\x82\x93",   /* nf-fa-upload       U+F093 */
+    .icon_sync       = "\xef\x80\xa1",   /* nf-fa-refresh      U+F021 */
+    .icon_play       = "\xef\x81\x8b",   /* nf-fa-play         U+F04B */
+    .icon_pause      = "\xef\x81\x8c",   /* nf-fa-pause        U+F04C */
+    .icon_stop       = "\xef\x81\x8d",   /* nf-fa-stop         U+F04D */
+    .icon_skip       = "\xef\x81\x8e",   /* nf-fa-forward      U+F04E */
+    .icon_chat       = "\xef\x81\xb5",   /* nf-fa-comment      U+F075 */
+    .icon_robot      = "\xef\x84\xa4",   /* nf-fa-android      U+F17B (close) */
+    .icon_brain      = "\xef\x83\xab",   /* nf-fa-lightbulb_o  U+F0EB */
+    .icon_wand       = "\xef\x83\x90",   /* nf-fa-magic        U+F0D0 */
+    .icon_graph      = "\xef\x83\xa0",   /* nf-fa-sitemap      U+F0E8 */
+    /* Powerline separators */
+    .pl_right      = "\xee\x82\xb0",     /* U+E0B0 */
+    .pl_right_thin = "\xee\x82\xb1",     /* U+E0B1 */
+    .pl_left       = "\xee\x82\xb2",     /* U+E0B2 */
+    .pl_left_thin  = "\xee\x82\xb3",     /* U+E0B3 */
+    .pl_round_right= "\xee\x82\xb4",     /* U+E0B4 */
+    .pl_round_left = "\xee\x82\xb6",     /* U+E0B6 */
+    /* Box drawing */
+    .hline = "\xe2\x94\x80", .hline_heavy = "\xe2\x94\x81",
+    .vline = "\xe2\x94\x82",
+    .corner_tl = "\xe2\x95\xad", .corner_tr = "\xe2\x95\xae",
+    .corner_bl = "\xe2\x95\xb0", .corner_br = "\xe2\x95\xaf",
+    /* Trail dots */
+    .dot_large = "\xe2\x80\xa2", .dot_medium = "\xc2\xb7", .dot_small = ".",
+};
+
+/* ── Full tier: emoji + all Unicode ──────────────────────────────────── */
+static const tui_glyphs_t GLYPHS_FULL = {
+    /* Status */
+    .ok = "\xe2\x9c\x93",             /* ✓ */
+    .fail = "\xe2\x9c\x97",           /* ✗ */
+    .warn = "\xe2\x9a\xa0",           /* ⚠ */
+    .info = "\xe2\x84\xb9",           /* ℹ */
+    /* Bullets */
+    .bullet = "\xe2\x97\x8f",         /* ● */
+    .circle_open = "\xe2\x97\x8b",    /* ○ */
+    .circle_dot = "\xe2\x97\x89",     /* ◉ */
+    .circle_ring = "\xe2\x97\x8e",    /* ◎ */
+    .diamond = "\xe2\x97\x86",        /* ◆ */
+    .diamond_open = "\xe2\x97\x87",   /* ◇ */
+    .sparkle = "\xe2\x9c\xa6",        /* ✦ */
+    .florette = "\xe2\x9c\xbf",       /* ✿ */
+    /* Arrows */
+    .arrow_right = "\xe2\x86\x92",    /* → */
+    .arrow_left = "\xe2\x86\x90",     /* ← */
+    .arrow_up = "\xe2\x96\xb2",       /* ▲ */
+    .arrow_down = "\xe2\x96\xbc",     /* ▼ */
+    .arrow_cycle = "\xe2\x86\xbb",    /* ↻ */
+    /* Blocks */
+    .block_full = "\xe2\x96\x88",     /* █ */
+    .block_med = "\xe2\x96\xae",      /* ▮ */
+    .block_light = "\xe2\x96\x91",    /* ░ */
+    .block_dark = "\xe2\x96\x93",     /* ▓ */
+    .vblock = {" ",
+        "\xe2\x96\x81", "\xe2\x96\x82", "\xe2\x96\x83", "\xe2\x96\x84",
+        "\xe2\x96\x85", "\xe2\x96\x86", "\xe2\x96\x87", "\xe2\x96\x88"},
+    /* Spinners — braille dots */
+    .spin_dots = {
+        "\xe2\xa0\x8b","\xe2\xa0\x99","\xe2\xa0\xb9","\xe2\xa0\xb8",
+        "\xe2\xa0\xbc","\xe2\xa0\xb4","\xe2\xa0\xa6","\xe2\xa0\xa7",
+        "\xe2\xa0\x87","\xe2\xa0\x8f"},
+    .spin_dots_n = 10,
+    /* Spinners — thick braille */
+    .spin_thick = {
+        "\xe2\xa3\xbe","\xe2\xa3\xbd","\xe2\xa3\xbb","\xe2\xa2\xbf",
+        "\xe2\xa1\xbf","\xe2\xa3\x9f","\xe2\xa3\xaf","\xe2\xa3\xb7"},
+    .spin_thick_n = 8,
+    /* Spinners — orbital arcs */
+    .spin_orbit = {
+        "\xe2\x97\x9c","\xe2\x97\x9d","\xe2\x97\x9e","\xe2\x97\x9f"},
+    .spin_orbit_n = 4,
+    .spin_orbit_inner = {"\xe2\x97\xa0","\xe2\x97\xa1"},
+    .spin_orbit_inner_n = 2,
+    /* Spinners — pulse */
+    .spin_pulse = {
+        "\xe2\x97\x90","\xe2\x97\x93","\xe2\x97\x91","\xe2\x97\x92"},
+    .spin_pulse_n = 4,
+    /* Spinners — line */
+    .spin_line = {"-","\\","|","/"},
+    .spin_line_n = 4,
+    /* Spinners — arrow */
+    .spin_arrow = {
+        "\xe2\x86\x90","\xe2\x86\x96","\xe2\x86\x91","\xe2\x86\x97",
+        "\xe2\x86\x92","\xe2\x86\x98","\xe2\x86\x93","\xe2\x86\x99"},
+    .spin_arrow_n = 8,
+    /* Spinners — star */
+    .spin_star = {
+        "\xe2\x9c\xb6","\xe2\x9c\xb8","\xe2\x9c\xb9",
+        "\xe2\x9c\xba","\xe2\x9c\xb9","\xe2\x9c\xb7"},
+    .spin_star_n = 6,
+    /* Icons — emoji */
+    .icon_think = "\xf0\x9f\xa7\xa0",     /* 🧠 */
+    .icon_lightning = "\xe2\x9a\xa1",      /* ⚡ */
+    .icon_gear = "\xe2\x9a\x99",           /* ⚙ */
+    .icon_timer = "\xe2\x8f\xb1",          /* ⏱ */
+    .icon_lock = "\xf0\x9f\x94\x92",       /* 🔒 */
+    .icon_money = "\xf0\x9f\x92\xb0",      /* 💰 */
+    .icon_globe = "\xf0\x9f\x8c\x90",      /* 🌐 */
+    .icon_rocket = "\xf0\x9f\x9a\x80",     /* 🚀 */
+    .icon_fire = "\xf0\x9f\x94\xa5",        /* 🔥 */
+    .icon_link = "\xf0\x9f\x94\x97",        /* 🔗 */
+    .icon_eyes = "\xf0\x9f\x91\x80",        /* 👀 */
+    /* Box drawing */
+    .hline = "\xe2\x94\x80",              /* ─ */
+    .hline_heavy = "\xe2\x94\x81",        /* ━ */
+    .vline = "\xe2\x94\x82",              /* │ */
+    .corner_tl = "\xe2\x95\xad",          /* ╭ */
+    .corner_tr = "\xe2\x95\xae",          /* ╮ */
+    .corner_bl = "\xe2\x95\xb0",          /* ╰ */
+    .corner_br = "\xe2\x95\xaf",          /* ╯ */
+    /* Trail dots */
+    .dot_large = "\xe2\x80\xa2",           /* • */
+    .dot_medium = "\xc2\xb7",             /* · */
+    .dot_small = ".",
+};
+
+/* ── Unicode tier: BMP only, no emoji ────────────────────────────────── */
+static const tui_glyphs_t GLYPHS_UNICODE = {
+    .ok = "\xe2\x9c\x93", .fail = "\xe2\x9c\x97",
+    .warn = "(!)", .info = "(i)",
+    .bullet = "\xe2\x97\x8f", .circle_open = "\xe2\x97\x8b",
+    .circle_dot = "\xe2\x97\x89", .circle_ring = "\xe2\x97\x8e",
+    .diamond = "\xe2\x97\x86", .diamond_open = "\xe2\x97\x87",
+    .sparkle = "\xe2\x9c\xa6", .florette = "\xe2\x9c\xbf",
+    .arrow_right = "\xe2\x86\x92", .arrow_left = "\xe2\x86\x90",
+    .arrow_up = "\xe2\x96\xb2", .arrow_down = "\xe2\x96\xbc",
+    .arrow_cycle = "\xe2\x86\xbb",
+    .block_full = "\xe2\x96\x88", .block_med = "\xe2\x96\xae",
+    .block_light = "\xe2\x96\x91", .block_dark = "\xe2\x96\x93",
+    .vblock = {" ",
+        "\xe2\x96\x81","\xe2\x96\x82","\xe2\x96\x83","\xe2\x96\x84",
+        "\xe2\x96\x85","\xe2\x96\x86","\xe2\x96\x87","\xe2\x96\x88"},
+    .spin_dots = {
+        "\xe2\xa0\x8b","\xe2\xa0\x99","\xe2\xa0\xb9","\xe2\xa0\xb8",
+        "\xe2\xa0\xbc","\xe2\xa0\xb4","\xe2\xa0\xa6","\xe2\xa0\xa7",
+        "\xe2\xa0\x87","\xe2\xa0\x8f"},
+    .spin_dots_n = 10,
+    .spin_thick = {
+        "\xe2\xa3\xbe","\xe2\xa3\xbd","\xe2\xa3\xbb","\xe2\xa2\xbf",
+        "\xe2\xa1\xbf","\xe2\xa3\x9f","\xe2\xa3\xaf","\xe2\xa3\xb7"},
+    .spin_thick_n = 8,
+    .spin_orbit = {
+        "\xe2\x97\x9c","\xe2\x97\x9d","\xe2\x97\x9e","\xe2\x97\x9f"},
+    .spin_orbit_n = 4,
+    .spin_orbit_inner = {"\xe2\x97\xa0","\xe2\x97\xa1"},
+    .spin_orbit_inner_n = 2,
+    .spin_pulse = {
+        "\xe2\x97\x90","\xe2\x97\x93","\xe2\x97\x91","\xe2\x97\x92"},
+    .spin_pulse_n = 4,
+    .spin_line = {"-","\\","|","/"},
+    .spin_line_n = 4,
+    .spin_arrow = {
+        "\xe2\x86\x90","\xe2\x86\x96","\xe2\x86\x91","\xe2\x86\x97",
+        "\xe2\x86\x92","\xe2\x86\x98","\xe2\x86\x93","\xe2\x86\x99"},
+    .spin_arrow_n = 8,
+    .spin_star = {
+        "\xe2\x9c\xb6","\xe2\x9c\xb8","\xe2\x9c\xb9",
+        "\xe2\x9c\xba","\xe2\x9c\xb9","\xe2\x9c\xb7"},
+    .spin_star_n = 6,
+    /* No emoji — use BMP symbols instead */
+    .icon_think = "\xc2\xa7",              /* § */
+    .icon_lightning = "\xe2\x9a\xa1",      /* ⚡ (BMP) */
+    .icon_gear = "\xe2\x9a\x99",           /* ⚙ (BMP) */
+    .icon_timer = "\xe2\x97\x8b",          /* ○ (fallback) */
+    .icon_lock = "#",
+    .icon_money = "$",
+    .icon_globe = "\xe2\x97\x89",          /* ◉ */
+    .icon_rocket = "\xe2\x96\xb2",         /* ▲ */
+    .icon_fire = "~",
+    .icon_link = "=",
+    .icon_eyes = "\xe2\x97\x8b",           /* ○ */
+    .hline = "\xe2\x94\x80", .hline_heavy = "\xe2\x94\x81",
+    .vline = "\xe2\x94\x82",
+    .corner_tl = "\xe2\x95\xad", .corner_tr = "\xe2\x95\xae",
+    .corner_bl = "\xe2\x95\xb0", .corner_br = "\xe2\x95\xaf",
+    .dot_large = "\xe2\x80\xa2", .dot_medium = "\xc2\xb7", .dot_small = ".",
+};
+
+/* ── ASCII tier: pure 7-bit ASCII ────────────────────────────────────── */
+static const tui_glyphs_t GLYPHS_ASCII = {
+    .ok = "+", .fail = "x", .warn = "!", .info = "i",
+    .bullet = "*", .circle_open = "o", .circle_dot = "@", .circle_ring = "O",
+    .diamond = "*", .diamond_open = "<>", .sparkle = "*", .florette = "*",
+    .arrow_right = "->", .arrow_left = "<-", .arrow_up = "^", .arrow_down = "v",
+    .arrow_cycle = "~",
+    .block_full = "#", .block_med = "=", .block_light = ".", .block_dark = "#",
+    .vblock = {" ", "_", "_", ".", ".", ":", ":", "#", "#"},
+    .spin_dots = {"-","\\","|","/","-","\\","|","/","-","\\"},
+    .spin_dots_n = 4,
+    .spin_thick = {"-","\\","|","/","-","\\","|","/"},
+    .spin_thick_n = 4,
+    .spin_orbit = {"-","\\","|","/"},
+    .spin_orbit_n = 4,
+    .spin_orbit_inner = {"~","~"},
+    .spin_orbit_inner_n = 2,
+    .spin_pulse = {"-","\\","|","/"},
+    .spin_pulse_n = 4,
+    .spin_line = {"-","\\","|","/"},
+    .spin_line_n = 4,
+    .spin_arrow = {"<","\\","^","/",">","\\","v","/"},
+    .spin_arrow_n = 8,
+    .spin_star = {"*","+","*","+","*","+"},
+    .spin_star_n = 6,
+    .icon_think = "?", .icon_lightning = "!", .icon_gear = "*",
+    .icon_timer = "@", .icon_lock = "#", .icon_money = "$",
+    .icon_globe = "@", .icon_rocket = "^", .icon_fire = "~",
+    .icon_link = "=", .icon_eyes = "o",
+    .hline = "-", .hline_heavy = "=", .vline = "|",
+    .corner_tl = "+", .corner_tr = "+", .corner_bl = "+", .corner_br = "+",
+    .dot_large = "*", .dot_medium = ".", .dot_small = ".",
+};
+
+tui_glyph_tier_t tui_detect_glyph_tier(void) {
+    if ((int)s_glyph_tier != -1) return s_glyph_tier;
+
+    /* Allow explicit override via DSCO_GLYPH env var */
+    const char *override = getenv("DSCO_GLYPH");
+    if (override) {
+        if (strcmp(override, "ascii") == 0) {
+            s_glyph_tier = TUI_GLYPH_ASCII;
+            return s_glyph_tier;
+        }
+        if (strcmp(override, "unicode") == 0) {
+            s_glyph_tier = TUI_GLYPH_UNICODE;
+            return s_glyph_tier;
+        }
+        if (strcmp(override, "full") == 0) {
+            s_glyph_tier = TUI_GLYPH_FULL;
+            return s_glyph_tier;
+        }
+        if (strcmp(override, "nerd") == 0) {
+            s_glyph_tier = TUI_GLYPH_NERD;
+            return s_glyph_tier;
+        }
+    }
+
+    /* Not a TTY → ASCII only */
+    if (!isatty(STDERR_FILENO)) {
+        s_glyph_tier = TUI_GLYPH_ASCII;
+        return s_glyph_tier;
+    }
+
+    /* Check locale for UTF-8 support */
+    const char *lang = getenv("LANG");
+    const char *lc_all = getenv("LC_ALL");
+    const char *lc_ctype = getenv("LC_CTYPE");
+    bool has_utf8 = false;
+
+    const char *locale_vars[] = { lc_all, lc_ctype, lang };
+    for (int li = 0; li < 3 && !has_utf8; li++) {
+        if (locale_vars[li] &&
+            (strstr(locale_vars[li], "UTF-8") || strstr(locale_vars[li], "utf-8") ||
+             strstr(locale_vars[li], "utf8")  || strstr(locale_vars[li], "UTF8"))) {
+            has_utf8 = true;
+        }
+    }
+
+    if (!has_utf8) {
+        s_glyph_tier = TUI_GLYPH_ASCII;
+        return s_glyph_tier;
+    }
+
+    /* Check for terminals known to support emoji / full Unicode */
+    const char *term_prog = getenv("TERM_PROGRAM");
+    const char *term_prog_v = getenv("TERM_PROGRAM_VERSION");
+    (void)term_prog_v;
+
+    /* Detect Nerd Font: DSCO_NERD_FONT=1 or NERD_FONT=1 env var */
+    const char *nerd_flag = getenv("DSCO_NERD_FONT");
+    if (!nerd_flag) nerd_flag = getenv("NERD_FONT");
+    bool has_nerd = (nerd_flag && (strcmp(nerd_flag, "1") == 0 ||
+                                   strcmp(nerd_flag, "true") == 0 ||
+                                   strcmp(nerd_flag, "yes") == 0));
+
+    /* These modern terminals render emoji and full Unicode well */
+    if (term_prog && (
+            strcmp(term_prog, "iTerm.app") == 0 ||
+            strcmp(term_prog, "WezTerm") == 0 ||
+            strcmp(term_prog, "Hyper") == 0 ||
+            strcmp(term_prog, "vscode") == 0)) {
+        s_glyph_tier = has_nerd ? TUI_GLYPH_NERD : TUI_GLYPH_FULL;
+        return s_glyph_tier;
+    }
+
+    /* kitty always supports full Unicode, often has Nerd Fonts */
+    const char *term = getenv("TERM");
+    if (term && strstr(term, "kitty")) {
+        s_glyph_tier = has_nerd ? TUI_GLYPH_NERD : TUI_GLYPH_FULL;
+        return s_glyph_tier;
+    }
+
+    /* Alacritty: good Unicode but emoji rendering varies */
+    if (term && strstr(term, "alacritty")) {
+        s_glyph_tier = TUI_GLYPH_UNICODE;
+        return s_glyph_tier;
+    }
+
+    /* macOS Terminal.app: decent Unicode, patchy emoji */
+    if (term_prog && strcmp(term_prog, "Apple_Terminal") == 0) {
+        s_glyph_tier = TUI_GLYPH_UNICODE;
+        return s_glyph_tier;
+    }
+
+    /* Linux console: very limited */
+    if (term && strcmp(term, "linux") == 0) {
+        s_glyph_tier = TUI_GLYPH_ASCII;
+        return s_glyph_tier;
+    }
+
+    /* Default: if we have UTF-8 locale, assume Unicode BMP is safe */
+    s_glyph_tier = TUI_GLYPH_UNICODE;
+    return s_glyph_tier;
+}
+
+const tui_glyphs_t *tui_glyph(void) {
+    tui_glyph_tier_t tier = tui_detect_glyph_tier();
+    switch (tier) {
+    case TUI_GLYPH_NERD:    return &GLYPHS_NERD;
+    case TUI_GLYPH_FULL:    return &GLYPHS_FULL;
+    case TUI_GLYPH_UNICODE: return &GLYPHS_UNICODE;
+    case TUI_GLYPH_ASCII:
+    default:                return &GLYPHS_ASCII;
+    }
+}
+
+void tui_set_glyph_tier(tui_glyph_tier_t tier) {
+    s_glyph_tier = tier;
 }
 
 /* ══════════════════════════════════════════════════════════════════════════
@@ -742,11 +1183,6 @@ tui_rgb_t tui_tool_rgb(tui_tool_type_t type) {
  * ASYNC SPINNER (single tool)
  * ══════════════════════════════════════════════════════════════════════════ */
 
-static const char *BRAILLE_FRAMES[] = {
-    "⠋","⠙","⠹","⠸","⠼","⠴","⠦","⠧","⠇","⠏"
-};
-#define BRAILLE_FRAME_COUNT 10
-
 static double tui_now_sec(void) {
     struct timeval tv;
     gettimeofday(&tv, NULL);
@@ -782,8 +1218,12 @@ static void *async_spinner_thread(void *arg) {
         } else if (color) {
             pos += snprintf(buf + pos, sizeof(buf) - pos, "%s", color);
         }
-        pos += snprintf(buf + pos, sizeof(buf) - pos, "%s" TUI_RESET,
-                        BRAILLE_FRAMES[frame % BRAILLE_FRAME_COUNT]);
+        {
+            const tui_glyphs_t *g = tui_glyph();
+            int fc = g->spin_dots_n > 0 ? g->spin_dots_n : 1;
+            pos += snprintf(buf + pos, sizeof(buf) - pos, "%s" TUI_RESET,
+                            g->spin_dots[frame % fc]);
+        }
 
         /* Label + elapsed */
         pos += snprintf(buf + pos, sizeof(buf) - pos, " %s%s%s %s(%.1fs)%s",
@@ -858,7 +1298,8 @@ void tui_async_spinner_stop(tui_async_spinner_t *s, bool ok,
         }
     }
 
-    const char *icon = ok ? "✓" : "✗";
+    const tui_glyphs_t *gl = tui_glyph();
+    const char *icon = ok ? gl->ok : gl->fail;
     const char *icon_color = ok ? TUI_GREEN : TUI_RED;
 
     fprintf(stderr, "  %s%s%s %s%s%s%s %s(%s)%s",
@@ -928,12 +1369,16 @@ static void *batch_spinner_thread(void *arg) {
             } else {
                 double elapsed = now - bs->start_time;
                 tui_rgb_t rgb = tui_tool_rgb(e->type);
-                pos += snprintf(buf + pos, sizeof(buf) - pos,
-                        "  \033[38;2;%d;%d;%dm%s" TUI_RESET " %s%s%s %s(%.1fs)%s",
-                        rgb.r, rgb.g, rgb.b,
-                        BRAILLE_FRAMES[frame % BRAILLE_FRAME_COUNT],
-                        tui_tool_color(e->type), e->name, TUI_RESET,
-                        TUI_DIM, elapsed, TUI_RESET);
+                {
+                    const tui_glyphs_t *gl = tui_glyph();
+                    int fc = gl->spin_dots_n > 0 ? gl->spin_dots_n : 1;
+                    pos += snprintf(buf + pos, sizeof(buf) - pos,
+                            "  \033[38;2;%d;%d;%dm%s" TUI_RESET " %s%s%s %s(%.1fs)%s",
+                            rgb.r, rgb.g, rgb.b,
+                            gl->spin_dots[frame % fc],
+                            tui_tool_color(e->type), e->name, TUI_RESET,
+                            TUI_DIM, elapsed, TUI_RESET);
+                }
             }
             pos += snprintf(buf + pos, sizeof(buf) - pos, "\n");
 
@@ -1101,11 +1546,11 @@ static void welcome_animated(const char *model, int tool_count, const char *vers
              version, model, tool_count);
     int info_pad = CENTER_PAD(0);
     for (int i = 0; i < info_pad; i++) fputc(' ', stderr);
-    tui_gradient_text("✦", 300.0f, 300.0f, 0.5f, 1.0f);
+    tui_gradient_text(tui_glyph()->sparkle, 300.0f, 300.0f, 0.5f, 1.0f);
     fprintf(stderr, "  ");
     tui_gradient_text(info_plain, 270.0f, 350.0f, 0.35f, 0.9f);
     fprintf(stderr, "  ");
-    tui_gradient_text("✦", 340.0f, 340.0f, 0.5f, 1.0f);
+    tui_gradient_text(tui_glyph()->sparkle, 340.0f, 340.0f, 0.5f, 1.0f);
     fprintf(stderr, "\n\n");
 
     /* Capabilities in a cute centered pill layout with dot separators */
@@ -1126,7 +1571,7 @@ static void welcome_animated(const char *model, int tool_count, const char *vers
                 tui_gradient_text("·", cap_hues[i], cap_hues[i], 0.4f, 0.7f);
                 fprintf(stderr, "  ");
             }
-            tui_gradient_text("◆", cap_hues[i], cap_hues[i], 0.5f, 1.0f);
+            tui_gradient_text(tui_glyph()->diamond, cap_hues[i], cap_hues[i], 0.5f, 1.0f);
             fprintf(stderr, " %s%s%s", TUI_DIM, caps[i], TUI_RESET);
         }
         fprintf(stderr, "\n");
@@ -1142,7 +1587,7 @@ static void welcome_animated(const char *model, int tool_count, const char *vers
                 tui_gradient_text("·", cap_hues[i], cap_hues[i], 0.4f, 0.7f);
                 fprintf(stderr, "  ");
             }
-            tui_gradient_text("◆", cap_hues[i], cap_hues[i], 0.5f, 1.0f);
+            tui_gradient_text(tui_glyph()->diamond, cap_hues[i], cap_hues[i], 0.5f, 1.0f);
             fprintf(stderr, " %s%s%s", TUI_DIM, caps[i], TUI_RESET);
         }
         fprintf(stderr, "\n");
@@ -1537,7 +1982,8 @@ void tui_error_typed(tui_err_type_t type, const char *msg) {
         tui_error(msg);
         return;
     }
-    const char *icons[] = {"🌐", "⚡", "⚠", "⏱", "🔒", "💰"};
+    const tui_glyphs_t *gl = tui_glyph();
+    const char *icons[] = {gl->icon_globe, gl->icon_lightning, gl->warn, gl->icon_timer, gl->icon_lock, gl->icon_money};
     const char *labels[] = {"NETWORK", "API", "VALIDATION", "TIMEOUT", "AUTH", "BUDGET"};
     const char *colors[] = {TUI_BRED, TUI_BMAGENTA, TUI_BYELLOW, TUI_BCYAN, TUI_RED, TUI_YELLOW};
     int idx = (int)type;
@@ -2584,11 +3030,12 @@ void tui_heatmap_word(const char *word, int len, FILE *out) {
 void tui_features_list(const tui_features_t *f) {
     if (!f) return;
     const bool *flags = (const bool *)f;
+    const tui_glyphs_t *gl = tui_glyph();
     fprintf(stderr, "  %s%sUI Features:%s\n", TUI_BOLD, TUI_BCYAN, TUI_RESET);
     for (int i = 0; i < TUI_FEATURE_COUNT; i++) {
         fprintf(stderr, "    %s[%s]%s F%-2d %s\n",
                 flags[i] ? TUI_GREEN : TUI_RED,
-                flags[i] ? "✓" : "✗",
+                flags[i] ? gl->ok : gl->fail,
                 TUI_RESET,
                 i + 1, tui_feature_name(i));
     }
@@ -2601,12 +3048,15 @@ bool tui_features_toggle(tui_features_t *f, const char *name) {
     for (int i = 0; i < TUI_FEATURE_COUNT; i++) {
         if (strcasecmp(tui_feature_name(i), name) == 0) {
             flags[i] = !flags[i];
-            fprintf(stderr, "  %s%s%s %s → %s%s%s\n",
-                    flags[i] ? TUI_GREEN : TUI_RED,
-                    flags[i] ? "✓" : "✗", TUI_RESET,
-                    tui_feature_name(i),
-                    flags[i] ? TUI_GREEN : TUI_RED,
-                    flags[i] ? "on" : "off", TUI_RESET);
+            {
+                const tui_glyphs_t *gl = tui_glyph();
+                fprintf(stderr, "  %s%s%s %s %s %s%s%s\n",
+                        flags[i] ? TUI_GREEN : TUI_RED,
+                        flags[i] ? gl->ok : gl->fail, TUI_RESET,
+                        tui_feature_name(i), gl->arrow_right,
+                        flags[i] ? TUI_GREEN : TUI_RED,
+                        flags[i] ? "on" : "off", TUI_RESET);
+            }
             return true;
         }
     }
@@ -2617,12 +3067,15 @@ bool tui_features_toggle(tui_features_t *f, const char *name) {
     if (num >= 1 && num <= TUI_FEATURE_COUNT) {
         int idx = num - 1;
         flags[idx] = !flags[idx];
-        fprintf(stderr, "  %s%s%s F%d %s → %s%s%s\n",
-                flags[idx] ? TUI_GREEN : TUI_RED,
-                flags[idx] ? "✓" : "✗", TUI_RESET,
-                num, tui_feature_name(idx),
-                flags[idx] ? TUI_GREEN : TUI_RED,
-                flags[idx] ? "on" : "off", TUI_RESET);
+        {
+            const tui_glyphs_t *gl = tui_glyph();
+            fprintf(stderr, "  %s%s%s F%d %s %s %s%s%s\n",
+                    flags[idx] ? TUI_GREEN : TUI_RED,
+                    flags[idx] ? gl->ok : gl->fail, TUI_RESET,
+                    num, tui_feature_name(idx), gl->arrow_right,
+                    flags[idx] ? TUI_GREEN : TUI_RED,
+                    flags[idx] ? "on" : "off", TUI_RESET);
+        }
         return true;
     }
 
@@ -3400,4 +3853,302 @@ void tui_stream_state_render_badge(const tui_stream_state_t *ss) {
                 ss->peak_tok_per_sec, TUI_RESET);
     }
     fprintf(stderr, "\n");
+}
+
+/* ══════════════════════════════════════════════════════════════════════════
+ *  Stream Heartbeat — anti-hang visual feedback
+ *  Gorgeous animated indicator that auto-detects silent streams.
+ * ══════════════════════════════════════════════════════════════════════════ */
+
+/* ── Phase icons — resolved from glyph tier ──────────────────────────── */
+static const char *hb_phase_icon(const char *phase) {
+    const tui_glyphs_t *g = tui_glyph();
+    if (!phase || !*phase) return g->diamond;
+    if (strstr(phase, "think"))    return g->icon_think;
+    if (strstr(phase, "fallback")) return g->arrow_cycle;
+    if (strstr(phase, "receiv"))   return g->icon_lightning;
+    if (strstr(phase, "tool"))     return g->icon_gear;
+    return g->diamond;
+}
+
+/* ── Breathing wave — 8 block elements that pulse in a sine wave ──── */
+static void hb_render_wave(char *buf, int *pos, int bufsz,
+                           double t, bool use_rgb) {
+    const tui_glyphs_t *g = tui_glyph();
+    int wave_width = 12;
+
+    for (int i = 0; i < wave_width; i++) {
+        /* Sine wave with phase offset per column */
+        double phase = t * 3.0 + (double)i * 0.55;
+        double val = (sin(phase) + 1.0) * 0.5; /* 0..1 */
+        int block_idx = (int)(val * 8.0);
+        if (block_idx < 0) block_idx = 0;
+        if (block_idx > 8) block_idx = 8;
+
+        if (use_rgb) {
+            /* Gradient hue: shift through purple→cyan→pink over time */
+            float hue = fmodf(270.0f + (float)i * 10.0f + (float)t * 25.0f, 360.0f);
+            float sat = 0.50f + (float)val * 0.30f;
+            float bri = 0.40f + (float)val * 0.55f;
+            tui_rgb_t c = tui_hsv_to_rgb(hue, sat, bri);
+            *pos += snprintf(buf + *pos, bufsz - *pos,
+                             "\033[38;2;%d;%d;%dm%s",
+                             c.r, c.g, c.b, g->vblock[block_idx]);
+        } else {
+            /* 256-color fallback — cycle through purples */
+            int color = 129 + (i % 6);
+            *pos += snprintf(buf + *pos, bufsz - *pos,
+                             "\033[38;5;%dm%s", color, g->vblock[block_idx]);
+        }
+    }
+    *pos += snprintf(buf + *pos, bufsz - *pos, TUI_RESET);
+}
+
+/* ── Trailing dots that fade ────────────────────────────────────────── */
+static void hb_render_trail(char *buf, int *pos, int bufsz,
+                            int frame, bool use_rgb) {
+    const tui_glyphs_t *g = tui_glyph();
+    const char *dot_strs[] = { g->dot_large, g->dot_medium, g->dot_small };
+    int n = 3;
+    for (int i = 0; i < n; i++) {
+        (void)frame;
+        float brightness = 1.0f - (float)i * 0.3f;
+        if (brightness < 0.2f) brightness = 0.2f;
+        if (use_rgb) {
+            float hue = 280.0f + (float)i * 20.0f;
+            tui_rgb_t c = tui_hsv_to_rgb(hue, 0.4f, brightness);
+            *pos += snprintf(buf + *pos, bufsz - *pos,
+                             "\033[38;2;%d;%d;%dm%s",
+                             c.r, c.g, c.b, dot_strs[i]);
+        } else {
+            int gray = 240 + (int)(brightness * 15.0f);
+            if (gray > 255) gray = 255;
+            *pos += snprintf(buf + *pos, bufsz - *pos,
+                             "\033[38;5;%dm%s", gray, dot_strs[i]);
+        }
+    }
+    *pos += snprintf(buf + *pos, bufsz - *pos, TUI_RESET);
+}
+
+/* ── Format bytes nicely ────────────────────────────────────────────── */
+static void hb_format_bytes(char *out, int outsz, unsigned long bytes) {
+    if (bytes < 1024)
+        snprintf(out, outsz, "%luB", bytes);
+    else if (bytes < 1024 * 1024)
+        snprintf(out, outsz, "%.1fKB", (double)bytes / 1024.0);
+    else
+        snprintf(out, outsz, "%.1fMB", (double)bytes / (1024.0 * 1024.0));
+}
+
+/* ── Format elapsed with sub-second precision ───────────────────────── */
+static void hb_format_elapsed(char *out, int outsz, double secs) {
+    if (secs < 10.0)
+        snprintf(out, outsz, "%.1fs", secs);
+    else if (secs < 60.0)
+        snprintf(out, outsz, "%.0fs", secs);
+    else if (secs < 3600.0)
+        snprintf(out, outsz, "%dm%02ds", (int)(secs / 60.0), (int)secs % 60);
+    else
+        snprintf(out, outsz, "%dh%02dm", (int)(secs / 3600.0), ((int)secs % 3600) / 60);
+}
+
+static void *stream_heartbeat_thread(void *arg) {
+    tui_stream_heartbeat_t *hb = (tui_stream_heartbeat_t *)arg;
+    int frame = 0;
+    bool use_rgb = tui_detect_color_level() >= TUI_COLOR_256;
+    bool truecolor = tui_supports_truecolor();
+
+    while (1) {
+        struct timespec ts = { .tv_sec = 0, .tv_nsec = 80000000 }; /* 80ms — smooth */
+        nanosleep(&ts, NULL);
+
+        pthread_mutex_lock(&hb->mutex);
+        bool running      = hb->running;
+        double now         = tui_now_sec();
+        double silence     = now - hb->last_poke;
+        double elapsed     = now - hb->start_time;
+        double thresh      = hb->silence_thresh;
+        unsigned long bytes = hb->bytes_recv;
+        const char *phase  = hb->phase_label;
+        bool was_visible   = hb->visible;
+        pthread_mutex_unlock(&hb->mutex);
+
+        if (!running) {
+            if (was_visible) {
+                fprintf(stderr, "\033[2K\r");
+                fflush(stderr);
+            }
+            break;
+        }
+
+        if (silence >= thresh) {
+            char buf[1024];
+            int pos = 0;
+
+            /* Clear line and indent */
+            pos += snprintf(buf + pos, sizeof(buf) - pos, "\033[2K\r  ");
+
+            /* ── Spinner glyph — orbital or braille depending on color level ── */
+            {
+                const tui_glyphs_t *g = tui_glyph();
+                if (truecolor) {
+                    float spin_hue = fmodf(270.0f + (float)frame * 8.0f, 360.0f);
+                    tui_rgb_t sc = tui_hsv_to_rgb(spin_hue, 0.6f, 0.95f);
+                    int oc = g->spin_orbit_n > 0 ? g->spin_orbit_n : 1;
+                    pos += snprintf(buf + pos, sizeof(buf) - pos,
+                        "\033[38;2;%d;%d;%dm%s" TUI_RESET " ",
+                        sc.r, sc.g, sc.b,
+                        g->spin_orbit[frame % oc]);
+                } else if (use_rgb) {
+                    int color = 129 + (frame % 6);
+                    int dc = g->spin_dots_n > 0 ? g->spin_dots_n : 1;
+                    pos += snprintf(buf + pos, sizeof(buf) - pos,
+                        "\033[38;5;%dm%s" TUI_RESET " ",
+                        color, g->spin_dots[frame % dc]);
+                } else {
+                    int dc = g->spin_dots_n > 0 ? g->spin_dots_n : 1;
+                    pos += snprintf(buf + pos, sizeof(buf) - pos,
+                        TUI_MAGENTA "%s" TUI_RESET " ",
+                        g->spin_dots[frame % dc]);
+                }
+            }
+
+            /* ── Phase icon + label ───────────────────────────────────── */
+            const char *icon = hb_phase_icon(phase);
+            const char *label;
+            if (phase && *phase)
+                label = phase;
+            else if (bytes > 0)
+                label = "streaming";
+            else
+                label = "connecting";
+
+            if (truecolor) {
+                /* Subtle gradient on the label text */
+                float lh = fmodf(290.0f + (float)frame * 2.0f, 360.0f);
+                tui_rgb_t lc = tui_hsv_to_rgb(lh, 0.25f, 0.75f);
+                pos += snprintf(buf + pos, sizeof(buf) - pos,
+                    "%s \033[38;2;%d;%d;%dm%s" TUI_RESET,
+                    icon, lc.r, lc.g, lc.b, label);
+            } else {
+                pos += snprintf(buf + pos, sizeof(buf) - pos,
+                    "%s " TUI_DIM "%s" TUI_RESET, icon, label);
+            }
+
+            /* ── Trailing dots ────────────────────────────────────────── */
+            pos += snprintf(buf + pos, sizeof(buf) - pos, " ");
+            hb_render_trail(buf, &pos, sizeof(buf), frame, truecolor);
+
+            /* ── Separator ────────────────────────────────────────────── */
+            pos += snprintf(buf + pos, sizeof(buf) - pos, "  ");
+
+            /* ── Breathing wave ───────────────────────────────────────── */
+            if (use_rgb && silence >= thresh + 1.0) {
+                /* Only show wave after an extra second of silence */
+                hb_render_wave(buf, &pos, sizeof(buf), elapsed, truecolor);
+                pos += snprintf(buf + pos, sizeof(buf) - pos, "  ");
+            }
+
+            /* ── Stats: bytes + elapsed ───────────────────────────────── */
+            if (truecolor) {
+                tui_rgb_t dim_c = tui_hsv_to_rgb(260.0f, 0.15f, 0.55f);
+                pos += snprintf(buf + pos, sizeof(buf) - pos,
+                    "\033[38;2;%d;%d;%dm", dim_c.r, dim_c.g, dim_c.b);
+            } else {
+                pos += snprintf(buf + pos, sizeof(buf) - pos, TUI_DIM);
+            }
+
+            if (bytes > 0) {
+                char bytes_str[32];
+                hb_format_bytes(bytes_str, sizeof(bytes_str), bytes);
+                pos += snprintf(buf + pos, sizeof(buf) - pos, "%s ", bytes_str);
+            }
+
+            char elapsed_str[32];
+            hb_format_elapsed(elapsed_str, sizeof(elapsed_str), elapsed);
+            {
+                const tui_glyphs_t *g = tui_glyph();
+                pos += snprintf(buf + pos, sizeof(buf) - pos,
+                    "%s %s" TUI_RESET, g->icon_timer, elapsed_str);
+
+                /* ── Inner orbit glyph (truecolor only, gentle accent) ──── */
+                if (truecolor && silence >= thresh + 2.0) {
+                    float ih = fmodf(320.0f + (float)frame * 12.0f, 360.0f);
+                    tui_rgb_t ic = tui_hsv_to_rgb(ih, 0.4f, 0.8f);
+                    int oinc = g->spin_orbit_inner_n > 0 ? g->spin_orbit_inner_n : 1;
+                    pos += snprintf(buf + pos, sizeof(buf) - pos,
+                        " \033[38;2;%d;%d;%dm%s" TUI_RESET,
+                        ic.r, ic.g, ic.b,
+                        g->spin_orbit_inner[frame % oinc]);
+                }
+            }
+
+            /* Write atomically */
+            fwrite(buf, 1, pos, stderr);
+            fflush(stderr);
+
+            pthread_mutex_lock(&hb->mutex);
+            hb->visible = true;
+            pthread_mutex_unlock(&hb->mutex);
+
+            frame++;
+        } else if (was_visible) {
+            /* Output resumed — clear indicator */
+            fprintf(stderr, "\033[2K\r");
+            fflush(stderr);
+
+            pthread_mutex_lock(&hb->mutex);
+            hb->visible = false;
+            pthread_mutex_unlock(&hb->mutex);
+        }
+    }
+    return NULL;
+}
+
+void tui_stream_heartbeat_start(tui_stream_heartbeat_t *hb) {
+    memset(hb, 0, sizeof(*hb));
+    pthread_mutex_init(&hb->mutex, NULL);
+    hb->running = true;
+    hb->visible = false;
+    double now = tui_now_sec();
+    hb->last_poke = now;
+    hb->start_time = now;
+    hb->silence_thresh = 2.0;
+    hb->bytes_recv = 0;
+    hb->phase_label = NULL;
+    hb->poke_count = 0;
+    hb->phase_changes = 0;
+    pthread_create(&hb->thread, NULL, stream_heartbeat_thread, hb);
+}
+
+void tui_stream_heartbeat_poke(tui_stream_heartbeat_t *hb, const char *phase) {
+    pthread_mutex_lock(&hb->mutex);
+    hb->last_poke = tui_now_sec();
+    if (phase != hb->phase_label) {
+        hb->phase_changes++;
+        hb->phase_label = phase;
+    }
+    hb->poke_count++;
+    pthread_mutex_unlock(&hb->mutex);
+}
+
+void tui_stream_heartbeat_recv(tui_stream_heartbeat_t *hb, size_t bytes) {
+    pthread_mutex_lock(&hb->mutex);
+    hb->bytes_recv += bytes;
+    pthread_mutex_unlock(&hb->mutex);
+}
+
+void tui_stream_heartbeat_stop(tui_stream_heartbeat_t *hb) {
+    pthread_mutex_lock(&hb->mutex);
+    hb->running = false;
+    pthread_mutex_unlock(&hb->mutex);
+
+    pthread_join(hb->thread, NULL);
+    pthread_mutex_destroy(&hb->mutex);
+
+    if (hb->visible) {
+        fprintf(stderr, "\033[2K\r");
+        fflush(stderr);
+        hb->visible = false;
+    }
 }

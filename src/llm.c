@@ -12,11 +12,17 @@
 #include <unistd.h>
 #include <sys/stat.h>
 #include <errno.h>
+#include <stdint.h>
 #include <curl/curl.h>
 
 /* Global interrupt flag — set by SIGINT handler in agent.c.
    Declared extern here so the streaming code can check it. */
 extern volatile int g_interrupted;
+
+/* Stream heartbeat — when non-NULL, the write callback feeds byte counts
+   into this so the heartbeat thread can track receive activity. */
+#include "tui.h"
+tui_stream_heartbeat_t *g_stream_heartbeat = NULL;
 
 /* ── Session state ─────────────────────────────────────────────────────── */
 
@@ -1324,15 +1330,26 @@ typedef struct {
     int             telemetry_thinking_chars; /* thinking text chars     */
     bool            telemetry_got_first;     /* whether first delta seen */
 
-    /* ── Streaming repetition detection ────────────────────────────── */
-#define REPDET_WINDOW  2048   /* rolling window of recent text          */
-#define REPDET_CHECK   512    /* check every N text bytes               */
-#define REPDET_THRESH  8      /* min pattern repetitions to trigger     */
-#define REPDET_MIN_PAT 4      /* min pattern length to consider         */
+    /* ── Streaming degeneration detector ──────────────────────────── */
+#define REPDET_WINDOW    4096  /* rolling window of recent text         */
+#define REPDET_CHECK     256   /* check every N text bytes              */
+#define REPDET_MIN_PAT   3    /* shortest repeating unit to detect      */
+#define REPDET_MAX_PAT   256  /* longest repeating unit to scan         */
+#define REPDET_THRESH    6    /* exact-repeat reps to trigger           */
+#define REPDET_NGRAM_SZ  4    /* n-gram size for entropy analysis       */
+#define REPDET_NGRAM_TAB 512  /* hash table buckets for n-gram counts   */
+#define REPDET_ENTROPY_LO 1.5 /* bits — below this = degenerate        */
+#define REPDET_STALL_WIN 512  /* bytes to measure compression ratio     */
+#define REPDET_STALL_THR 0.15 /* unique-byte ratio below = stalled      */
     char            repdet_buf[REPDET_WINDOW];
     int             repdet_len;
+    int             repdet_total_fed;        /* lifetime bytes fed        */
     int             repdet_bytes_since_check;
     bool            repdet_tripped;
+    char            repdet_diag[256];        /* human-readable diagnosis  */
+
+    /* n-gram frequency table (rolling, rebuilt each check) */
+    uint16_t        repdet_ngram[REPDET_NGRAM_TAB];
 } sse_state_t;
 
 /* Remove terminal control bytes/escape sequences from streamed model text.
@@ -1382,23 +1399,53 @@ static void strip_terminal_controls_inplace(char *s) {
     *w = '\0';
 }
 
-/* ── Streaming repetition detector ──────────────────────────────────────
- * Detects degenerate model output like "self_inspectself_inspect..." by
- * looking for short repeating patterns in a rolling window of recent text.
- * Returns true if repetition detected and stream should be aborted.       */
-static bool repdet_check(sse_state_t *s) {
-    if (s->repdet_len < REPDET_MIN_PAT * REPDET_THRESH) return false;
+/* ══════════════════════════════════════════════════════════════════════════
+ * Streaming degeneration detector
+ *
+ * Three independent strategies, any one trips the abort:
+ *
+ * 1. EXACT REPEAT — finds the shortest period P (3–256 bytes) such that
+ *    the tail of the window consists of ≥ REPDET_THRESH identical copies
+ *    of a P-byte pattern.  O(window * max_pat) but bounded by constants.
+ *
+ * 2. N-GRAM ENTROPY — hashes every overlapping 4-gram in the window into
+ *    a 512-bucket table, computes Shannon entropy over the distribution.
+ *    Healthy text ≈ 6–8 bits; degenerate loops drop below REPDET_ENTROPY_LO.
+ *    Only activates after 1 KB has been seen (avoids false positives on
+ *    short JSON fragments).
+ *
+ * 3. BYTE STALL — counts distinct byte values in the last 512 bytes.
+ *    If the ratio of unique bytes to window length drops below 0.15, the
+ *    output has collapsed to a tiny alphabet (e.g. one repeated word).
+ *    Only activates after 2 KB has been seen.
+ *
+ * The detector feeds from both text_delta and input_json_delta events,
+ * using a single 4 KB rolling window.  It checks every 256 new bytes.
+ * ══════════════════════════════════════════════════════════════════════════ */
 
+/* FNV-1a 32-bit for short n-grams → bucket index */
+static inline uint32_t repdet_fnv(const char *p, int n) {
+    uint32_t h = 0x811c9dc5u;
+    for (int i = 0; i < n; i++) {
+        h ^= (uint32_t)(unsigned char)p[i];
+        h *= 0x01000193u;
+    }
+    return h;
+}
+
+/* Strategy 1: exact periodic repeat detection.
+ * For each candidate period length, scan backwards from the tail checking
+ * for consecutive identical copies.  Uses early-exit so small periods that
+ * don't repeat are rejected quickly. */
+static bool repdet_exact(sse_state_t *s) {
     const char *buf = s->repdet_buf;
     int len = s->repdet_len;
+    if (len < REPDET_MIN_PAT * REPDET_THRESH) return false;
 
-    /* Try pattern lengths from REPDET_MIN_PAT up to len/REPDET_THRESH */
     int max_pat = len / REPDET_THRESH;
-    if (max_pat > 128) max_pat = 128;
+    if (max_pat > REPDET_MAX_PAT) max_pat = REPDET_MAX_PAT;
 
     for (int plen = REPDET_MIN_PAT; plen <= max_pat; plen++) {
-        /* Check if the last `plen * REPDET_THRESH` bytes are all repetitions
-           of the pattern at the end of the buffer */
         const char *pat = buf + len - plen;
         int reps = 1;
         int pos = len - plen * 2;
@@ -1407,8 +1454,91 @@ static bool repdet_check(sse_state_t *s) {
             reps++;
             pos -= plen;
         }
-        if (reps >= REPDET_THRESH) return true;
+        if (reps >= REPDET_THRESH) {
+            /* Extract a preview of the repeating unit */
+            int preview_len = plen < 60 ? plen : 60;
+            char preview[64];
+            memcpy(preview, pat, (size_t)preview_len);
+            preview[preview_len] = '\0';
+            /* Sanitize for display */
+            for (int i = 0; i < preview_len; i++)
+                if ((unsigned char)preview[i] < 32) preview[i] = '.';
+            snprintf(s->repdet_diag, sizeof(s->repdet_diag),
+                     "exact repeat: \"%s\"%s x%d (period=%d)",
+                     preview, plen > 60 ? "..." : "", reps, plen);
+            return true;
+        }
     }
+    return false;
+}
+
+/* Strategy 2: n-gram Shannon entropy.
+ * Low entropy means the same few n-grams dominate → degenerate output. */
+static bool repdet_entropy(sse_state_t *s) {
+    int len = s->repdet_len;
+    if (len < REPDET_NGRAM_SZ + 1) return false;
+    /* Only trigger after enough data to be meaningful */
+    if (s->repdet_total_fed < 1024) return false;
+
+    memset(s->repdet_ngram, 0, sizeof(s->repdet_ngram));
+
+    int ngram_count = len - REPDET_NGRAM_SZ + 1;
+    for (int i = 0; i < ngram_count; i++) {
+        uint32_t h = repdet_fnv(s->repdet_buf + i, REPDET_NGRAM_SZ);
+        s->repdet_ngram[h % REPDET_NGRAM_TAB]++;
+    }
+
+    /* Compute entropy over bucket distribution */
+    double entropy = 0.0;
+    double inv_n = 1.0 / (double)ngram_count;
+    for (int i = 0; i < REPDET_NGRAM_TAB; i++) {
+        if (s->repdet_ngram[i] == 0) continue;
+        double p = (double)s->repdet_ngram[i] * inv_n;
+        entropy -= p * log2(p);
+    }
+
+    if (entropy < REPDET_ENTROPY_LO) {
+        snprintf(s->repdet_diag, sizeof(s->repdet_diag),
+                 "low n-gram entropy: %.2f bits (threshold=%.1f, window=%d bytes)",
+                 entropy, REPDET_ENTROPY_LO, len);
+        return true;
+    }
+    return false;
+}
+
+/* Strategy 3: byte-alphabet stall detection.
+ * If the last N bytes use very few distinct byte values, the output
+ * has collapsed (e.g., "aaaaaaa" or alternating between 2-3 chars). */
+static bool repdet_stall(sse_state_t *s) {
+    int len = s->repdet_len;
+    if (len < REPDET_STALL_WIN) return false;
+    if (s->repdet_total_fed < 2048) return false;
+
+    /* Count distinct bytes in the tail */
+    uint8_t seen[256];
+    memset(seen, 0, sizeof(seen));
+    const char *tail = s->repdet_buf + len - REPDET_STALL_WIN;
+    int distinct = 0;
+    for (int i = 0; i < REPDET_STALL_WIN; i++) {
+        uint8_t b = (uint8_t)tail[i];
+        if (!seen[b]) { seen[b] = 1; distinct++; }
+    }
+
+    double ratio = (double)distinct / (double)REPDET_STALL_WIN;
+    if (ratio < REPDET_STALL_THR) {
+        snprintf(s->repdet_diag, sizeof(s->repdet_diag),
+                 "byte stall: %d distinct bytes in %d (ratio=%.3f, threshold=%.2f)",
+                 distinct, REPDET_STALL_WIN, ratio, REPDET_STALL_THR);
+        return true;
+    }
+    return false;
+}
+
+/* Run all strategies and trip if any fires. */
+static bool repdet_check(sse_state_t *s) {
+    if (repdet_exact(s))   return true;
+    if (repdet_entropy(s)) return true;
+    if (repdet_stall(s))   return true;
     return false;
 }
 
@@ -1417,7 +1547,6 @@ static void repdet_feed(sse_state_t *s, const char *text, size_t tlen) {
 
     /* Append to rolling window */
     if (s->repdet_len + (int)tlen > REPDET_WINDOW) {
-        /* Shift window left */
         int shift = s->repdet_len + (int)tlen - REPDET_WINDOW;
         if (shift > s->repdet_len) shift = s->repdet_len;
         memmove(s->repdet_buf, s->repdet_buf + shift, (size_t)(s->repdet_len - shift));
@@ -1430,6 +1559,7 @@ static void repdet_feed(sse_state_t *s, const char *text, size_t tlen) {
     }
     memcpy(s->repdet_buf + s->repdet_len, text, (size_t)copylen);
     s->repdet_len += copylen;
+    s->repdet_total_fed += copylen;
 
     s->repdet_bytes_since_check += copylen;
     if (s->repdet_bytes_since_check >= REPDET_CHECK) {
@@ -1437,17 +1567,32 @@ static void repdet_feed(sse_state_t *s, const char *text, size_t tlen) {
         if (repdet_check(s)) {
             s->repdet_tripped = true;
             fprintf(stderr,
-                "\n\033[33m[dsco] repetitive output detected — aborting stream\033[0m\n");
+                "\n\033[33m[dsco] degenerate output detected — aborting stream\033[0m\n"
+                "\033[2m  %s\033[0m\n", s->repdet_diag);
             g_interrupted = 1;
         }
     }
 }
 
-/* Curl progress callback — allows Ctrl+C to abort transfers */
+/* Reset repdet state (called between content blocks of different types) */
+static void repdet_reset(sse_state_t *s) {
+    s->repdet_len = 0;
+    s->repdet_bytes_since_check = 0;
+    s->repdet_total_fed = 0;
+    s->repdet_diag[0] = '\0';
+    /* NOTE: do not reset repdet_tripped — once tripped, stay tripped */
+}
+
+/* Curl progress callback — allows Ctrl+C to abort transfers and feeds
+   the stream heartbeat with download activity information. */
 static int stream_progress_cb(void *clientp, curl_off_t dltotal, curl_off_t dlnow,
                                 curl_off_t ultotal, curl_off_t ulnow) {
-    (void)clientp; (void)dltotal; (void)dlnow; (void)ultotal; (void)ulnow;
+    (void)clientp; (void)dltotal; (void)ultotal; (void)ulnow;
     if (g_interrupted) return 1;  /* non-zero aborts transfer */
+    /* Keep heartbeat alive when curl is actively receiving, even if
+       no SSE events have fired yet (e.g. during HTTP/2 negotiation) */
+    if (dlnow > 0 && g_stream_heartbeat)
+        tui_stream_heartbeat_recv(g_stream_heartbeat, 0);  /* 0 = just a ping */
     return 0;
 }
 
@@ -1517,6 +1662,7 @@ static void sse_finalize_block(sse_state_t *s) {
     free(s->cur_tool_id); s->cur_tool_id = NULL;
     jbuf_reset(&s->text_buf);
     jbuf_reset(&s->input_buf);
+    repdet_reset(s);
     s->current_index = -1;
 }
 
@@ -1578,8 +1724,8 @@ static void sse_handle_event(sse_state_t *s, const char *data) {
                 free(s->cur_tool_id);
                 s->cur_tool_id = json_get_str(cb_raw, "id");
                 if (s->cur_tool_name) {
-                    fprintf(stderr, "  \033[1m\033[36m\xe2\x9a\xa1\033[0m \033[2m%s (server)\033[0m\n",
-                            s->cur_tool_name);
+                    fprintf(stderr, "  \033[1m\033[36m%s\033[0m \033[2m%s (server)\033[0m\n",
+                            tui_glyph()->icon_lightning, s->cur_tool_name);
                     fflush(stderr);
                 }
                 jbuf_reset(&s->input_buf);
@@ -1725,6 +1871,10 @@ static size_t stream_write_cb(void *ptr, size_t size, size_t nmemb, void *userda
     sse_state_t *s = (sse_state_t *)userdata;
 
     if (g_interrupted) return 0;
+
+    /* Feed byte count to heartbeat for activity tracking */
+    if (g_stream_heartbeat)
+        tui_stream_heartbeat_recv(g_stream_heartbeat, total);
 
     const char *p = (const char *)ptr;
     for (size_t i = 0; i < total; i++) {
