@@ -12,6 +12,7 @@
 #include "pipeline.h"
 #include "eval.h"
 #include "plugin.h"
+#include "trace.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -9350,12 +9351,22 @@ bool tools_is_allowed_for_tier(const char *name, const char *tier,
 
 static bool tools_execute_internal(const char *name, const char *input_json,
                                    char *result, size_t result_len) {
+    TRACE_INFO("tool_call name=%s", name ? name : "(null)");
+    TRACE_DEBUG("tool_input name=%s input=%.*s", name ? name : "(null)",
+                (int)(input_json ? (strlen(input_json) < 512 ? strlen(input_json) : 512) : 0),
+                input_json ? input_json : "");
+
     /* O(1) hash map lookup */
     int idx = tool_map_lookup(&g_tool_map, name);
 
     if (idx >= 0 && idx < s_tool_count) {
         /* Builtin tool */
+        struct timeval t0, t1;
+        gettimeofday(&t0, NULL);
         bool ok = s_tools[idx].execute(input_json, result, result_len);
+        gettimeofday(&t1, NULL);
+        long elapsed_us = (t1.tv_sec - t0.tv_sec) * 1000000L + (t1.tv_usec - t0.tv_usec);
+        TRACE_INFO("tool_result name=%s ok=%d elapsed_us=%ld", name, ok, elapsed_us);
         ctx_maybe_offload_tool_result(name, input_json, ok, result, result_len);
         return ok;
     }
@@ -9364,7 +9375,12 @@ static bool tools_execute_internal(const char *name, const char *input_json,
         /* Plugin tool: index is -(i+1) */
         int pi = -(idx + 1);
         if (pi < g_plugins.extra_tool_count) {
+            struct timeval t0, t1;
+            gettimeofday(&t0, NULL);
             bool ok = g_plugins.extra_tools[pi].execute(input_json, result, result_len);
+            gettimeofday(&t1, NULL);
+            long elapsed_us = (t1.tv_sec - t0.tv_sec) * 1000000L + (t1.tv_usec - t0.tv_usec);
+            TRACE_INFO("tool_result name=%s source=plugin ok=%d elapsed_us=%ld", name, ok, elapsed_us);
             ctx_maybe_offload_tool_result(name, input_json, ok, result, result_len);
             return ok;
         }
@@ -9374,22 +9390,34 @@ static bool tools_execute_internal(const char *name, const char *input_json,
         /* External tool (MCP): index is -(10000+i) */
         int ei = -(idx + 10000);
         if (ei >= 0 && ei < g_external_tool_count && g_external_tools[ei].cb) {
+            struct timeval t0, t1;
+            gettimeofday(&t0, NULL);
             char *ext_result = g_external_tools[ei].cb(name, input_json,
                                                          g_external_tools[ei].ctx);
+            gettimeofday(&t1, NULL);
+            long elapsed_us = (t1.tv_sec - t0.tv_sec) * 1000000L + (t1.tv_usec - t0.tv_usec);
             if (ext_result) {
                 snprintf(result, result_len, "%s", ext_result);
                 free(ext_result);
+                TRACE_INFO("tool_result name=%s source=mcp ok=1 elapsed_us=%ld", name, elapsed_us);
                 return true;
             }
             snprintf(result, result_len, "external tool '%s' returned no result", name);
+            TRACE_WARN("tool_result name=%s source=mcp ok=0 elapsed_us=%ld", name, elapsed_us);
             return false;
         }
     }
 
     /* Fallback: linear scan (shouldn't normally reach here if map is correct) */
+    TRACE_DEBUG("tool_fallback name=%s using linear scan", name);
     for (int i = 0; i < s_tool_count; i++) {
         if (strcmp(s_tools[i].name, name) == 0) {
+            struct timeval t0, t1;
+            gettimeofday(&t0, NULL);
             bool ok = s_tools[i].execute(input_json, result, result_len);
+            gettimeofday(&t1, NULL);
+            long elapsed_us = (t1.tv_sec - t0.tv_sec) * 1000000L + (t1.tv_usec - t0.tv_usec);
+            TRACE_INFO("tool_result name=%s ok=%d elapsed_us=%ld (fallback)", name, ok, elapsed_us);
             ctx_maybe_offload_tool_result(name, input_json, ok, result, result_len);
             return ok;
         }
@@ -9397,11 +9425,13 @@ static bool tools_execute_internal(const char *name, const char *input_json,
     for (int i = 0; i < g_plugins.extra_tool_count; i++) {
         if (strcmp(g_plugins.extra_tools[i].name, name) == 0) {
             bool ok = g_plugins.extra_tools[i].execute(input_json, result, result_len);
+            TRACE_INFO("tool_result name=%s source=plugin ok=%d (fallback)", name, ok);
             ctx_maybe_offload_tool_result(name, input_json, ok, result, result_len);
             return ok;
         }
     }
 
+    TRACE_ERROR("tool_unknown name=%s", name);
     snprintf(result, result_len, "unknown tool: %s", name);
     DSCO_SET_ERR(DSCO_ERR_TOOL, "unknown tool: %s", name);
     return false;

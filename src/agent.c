@@ -733,6 +733,68 @@ static void on_stream_tool_start(const char *name, const char *id, void *ctx) {
     baseline_log("tool", name, "tool_use started", NULL);
 }
 
+/* Print condensed tool arguments (dimmed, under the tool name) */
+static void print_tool_args(const char *name, const char *input_json) {
+    (void)name;
+    if (!input_json || strcmp(input_json, "{}") == 0) return;
+
+    /* For common tools, extract the most relevant field */
+    char preview[256];
+    preview[0] = '\0';
+
+    /* Try to extract key values from JSON for common tools */
+    char *cmd = json_get_str(input_json, "command");
+    char *code = json_get_str(input_json, "code");
+    char *query = json_get_str(input_json, "query");
+    char *path = json_get_str(input_json, "file_path");
+    char *url = json_get_str(input_json, "url");
+    char *pattern = json_get_str(input_json, "pattern");
+    char *expr = json_get_str(input_json, "expression");
+
+    if (cmd) {
+        /* bash/shell: show command */
+        snprintf(preview, sizeof(preview), "$ %.*s", 200, cmd);
+    } else if (code) {
+        /* code execution: show first line */
+        const char *nl = strchr(code, '\n');
+        int len = nl ? (int)(nl - code) : (int)strlen(code);
+        if (len > 200) len = 200;
+        snprintf(preview, sizeof(preview), "%.*s%s", len, code, nl ? " ..." : "");
+    } else if (path && pattern) {
+        snprintf(preview, sizeof(preview), "%s ~ /%s/", path, pattern);
+    } else if (path) {
+        snprintf(preview, sizeof(preview), "%s", path);
+    } else if (query) {
+        snprintf(preview, sizeof(preview), "%.*s", 200, query);
+    } else if (url) {
+        snprintf(preview, sizeof(preview), "%.*s", 200, url);
+    } else if (pattern) {
+        snprintf(preview, sizeof(preview), "/%.*s/", 200, pattern);
+    } else if (expr) {
+        snprintf(preview, sizeof(preview), "%.*s", 200, expr);
+    } else {
+        /* Fallback: show truncated raw JSON, skip outer braces */
+        const char *start = input_json;
+        if (*start == '{') start++;
+        int len = (int)strlen(start);
+        if (len > 0 && start[len-1] == '}') len--;
+        if (len > 200) len = 200;
+        if (len > 0) snprintf(preview, sizeof(preview), "%.*s", len, start);
+    }
+
+    free(cmd); free(code); free(query); free(path);
+    free(url); free(pattern); free(expr);
+
+    if (preview[0]) {
+        /* Replace newlines with spaces for single-line display */
+        for (char *c = preview; *c; c++) {
+            if (*c == '\n' || *c == '\r') *c = ' ';
+        }
+        fprintf(stderr, "    %s%s%s\n", TUI_DIM, preview, TUI_RESET);
+        fflush(stderr);
+    }
+}
+
 static void print_tool_result_ex(const char *name, bool ok, const char *result, double elapsed_ms) {
     const char *nl = strchr(result, '\n');
     int len = nl ? (int)(nl - result) : (int)strlen(result);
@@ -2044,6 +2106,9 @@ void agent_run(const char *api_key, const char *model) {
                 for (int i = 0; i < sr.parsed.count; i++) {
                     content_block_t *blk = &sr.parsed.blocks[i];
                     if (blk->type && strcmp(blk->type, "tool_use") == 0) {
+                        /* Show tool arguments */
+                        print_tool_args(blk->tool_name, blk->tool_input);
+
                         char trust_reason[256];
                         const char *tier = session_trust_tier_to_string(session.trust_tier);
                         if (!tools_is_allowed_for_tier(blk->tool_name, tier,
@@ -2181,6 +2246,9 @@ void agent_run(const char *api_key, const char *model) {
                     content_block_t *blk = &sr.parsed.blocks[i];
                     if (g_interrupted) break;
                     if (blk->type && strcmp(blk->type, "tool_use") == 0) {
+                        /* Show tool arguments */
+                        print_tool_args(blk->tool_name, blk->tool_input);
+
                         char trust_reason[256];
                         const char *tier = session_trust_tier_to_string(session.trust_tier);
                         if (!tools_is_allowed_for_tier(blk->tool_name, tier,

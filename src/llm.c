@@ -1323,6 +1323,16 @@ typedef struct {
     double          telemetry_first_tool;    /* first tool_use block    */
     int             telemetry_thinking_chars; /* thinking text chars     */
     bool            telemetry_got_first;     /* whether first delta seen */
+
+    /* ── Streaming repetition detection ────────────────────────────── */
+#define REPDET_WINDOW  2048   /* rolling window of recent text          */
+#define REPDET_CHECK   512    /* check every N text bytes               */
+#define REPDET_THRESH  8      /* min pattern repetitions to trigger     */
+#define REPDET_MIN_PAT 4      /* min pattern length to consider         */
+    char            repdet_buf[REPDET_WINDOW];
+    int             repdet_len;
+    int             repdet_bytes_since_check;
+    bool            repdet_tripped;
 } sse_state_t;
 
 /* Remove terminal control bytes/escape sequences from streamed model text.
@@ -1370,6 +1380,67 @@ static void strip_terminal_controls_inplace(char *s) {
     }
 
     *w = '\0';
+}
+
+/* ── Streaming repetition detector ──────────────────────────────────────
+ * Detects degenerate model output like "self_inspectself_inspect..." by
+ * looking for short repeating patterns in a rolling window of recent text.
+ * Returns true if repetition detected and stream should be aborted.       */
+static bool repdet_check(sse_state_t *s) {
+    if (s->repdet_len < REPDET_MIN_PAT * REPDET_THRESH) return false;
+
+    const char *buf = s->repdet_buf;
+    int len = s->repdet_len;
+
+    /* Try pattern lengths from REPDET_MIN_PAT up to len/REPDET_THRESH */
+    int max_pat = len / REPDET_THRESH;
+    if (max_pat > 128) max_pat = 128;
+
+    for (int plen = REPDET_MIN_PAT; plen <= max_pat; plen++) {
+        /* Check if the last `plen * REPDET_THRESH` bytes are all repetitions
+           of the pattern at the end of the buffer */
+        const char *pat = buf + len - plen;
+        int reps = 1;
+        int pos = len - plen * 2;
+        while (pos >= 0) {
+            if (memcmp(pat, buf + pos, (size_t)plen) != 0) break;
+            reps++;
+            pos -= plen;
+        }
+        if (reps >= REPDET_THRESH) return true;
+    }
+    return false;
+}
+
+static void repdet_feed(sse_state_t *s, const char *text, size_t tlen) {
+    if (s->repdet_tripped || tlen == 0) return;
+
+    /* Append to rolling window */
+    if (s->repdet_len + (int)tlen > REPDET_WINDOW) {
+        /* Shift window left */
+        int shift = s->repdet_len + (int)tlen - REPDET_WINDOW;
+        if (shift > s->repdet_len) shift = s->repdet_len;
+        memmove(s->repdet_buf, s->repdet_buf + shift, (size_t)(s->repdet_len - shift));
+        s->repdet_len -= shift;
+    }
+    int copylen = (int)tlen;
+    if (copylen > REPDET_WINDOW) {
+        text += (tlen - (size_t)REPDET_WINDOW);
+        copylen = REPDET_WINDOW;
+    }
+    memcpy(s->repdet_buf + s->repdet_len, text, (size_t)copylen);
+    s->repdet_len += copylen;
+
+    s->repdet_bytes_since_check += copylen;
+    if (s->repdet_bytes_since_check >= REPDET_CHECK) {
+        s->repdet_bytes_since_check = 0;
+        if (repdet_check(s)) {
+            s->repdet_tripped = true;
+            fprintf(stderr,
+                "\n\033[33m[dsco] repetitive output detected — aborting stream\033[0m\n");
+            g_interrupted = 1;
+        }
+    }
 }
 
 /* Curl progress callback — allows Ctrl+C to abort transfers */
@@ -1550,6 +1621,7 @@ static void sse_handle_event(sse_state_t *s, const char *data) {
                             s->telemetry_got_first = true;
                         }
                         jbuf_append(&s->text_buf, text);
+                        repdet_feed(s, text, strlen(text));
                         if (s->text_cb)
                             s->text_cb(text, s->cb_ctx);
                     }
@@ -1575,6 +1647,7 @@ static void sse_handle_event(sse_state_t *s, const char *data) {
                 char *partial = json_get_str(delta_raw, "partial_json");
                 if (partial) {
                     jbuf_append(&s->input_buf, partial);
+                    repdet_feed(s, partial, strlen(partial));
                     free(partial);
                 }
             } else if (delta_type && strcmp(delta_type, "content_delta") == 0) {
