@@ -1,5 +1,6 @@
 #include "agent.h"
 #include "config.h"
+#include "tui.h"
 #include "llm.h"
 #include "tools.h"
 #include "json_util.h"
@@ -80,7 +81,21 @@ static void oneshot_text_cb(const char *text, void *ctx) {
 
 static void oneshot_tool_cb(const char *name, const char *id, void *ctx) {
     (void)id; (void)ctx;
-    fprintf(stderr, "\033[2m\033[36m► %s\033[0m\n", name);
+    /* Powerline-style tool announce for oneshot mode */
+    {
+        tui_tool_type_t tt = tui_classify_tool(name);
+        tui_rgb_t rgb = tui_tool_rgb(tt);
+        const tui_glyphs_t *gl = tui_glyph();
+        bool use_pl = tui_detect_color_level() >= TUI_COLOR_256;
+        if (use_pl && gl->pl_right[0]) {
+            int r = (int)(rgb.r * 0.55), g2 = (int)(rgb.g * 0.55), b = (int)(rgb.b * 0.55);
+            fprintf(stderr, "\033[48;2;%d;%d;%dm\033[38;2;220;220;220m %s %s \033[0m"
+                            "\033[38;2;%d;%d;%dm%s\033[0m\n",
+                    r, g2, b, gl->icon_lightning, name, r, g2, b, gl->pl_right);
+        } else {
+            fprintf(stderr, "\033[2m\033[36m► %s\033[0m\n", name);
+        }
+    }
     fflush(stderr);
     baseline_log("tool", name, "tool_use started", NULL);
 }

@@ -77,6 +77,10 @@ void tui_clear_line(void);
 void tui_save_cursor(void);
 void tui_restore_cursor(void);
 
+/* Terminal output mutex — serialize cursor-positioned writes between threads */
+void tui_term_lock(void);
+void tui_term_unlock(void);
+
 /* ── Box drawing ──────────────────────────────────────────────────────── */
 
 /* Draw a box with optional title, width auto-detected from terminal */
@@ -350,6 +354,9 @@ typedef enum {
     TUI_TOOL_WRITE,   /* gold/yellow — file writing */
     TUI_TOOL_EXEC,    /* purple — command execution */
     TUI_TOOL_WEB,     /* green — web/network */
+    TUI_TOOL_CRYPTO,  /* pink/magenta — crypto/hash operations */
+    TUI_TOOL_MATH,    /* orange — math/eval/compute */
+    TUI_TOOL_DATA,    /* teal — search/query/database */
     TUI_TOOL_OTHER,   /* cyan — default */
 } tui_tool_type_t;
 
@@ -373,7 +380,8 @@ typedef struct {
 void tui_async_spinner_start(tui_async_spinner_t *s, const char *label,
                              tui_tool_type_t tool_type);
 void tui_async_spinner_stop(tui_async_spinner_t *s, bool ok,
-                            const char *result_preview, double elapsed_ms);
+                            const char *result_preview, double elapsed_ms,
+                            const char *suffix);
 
 /* ── Batch Spinner (multi-tool) ───────────────────────────────────────── */
 
@@ -381,6 +389,7 @@ void tui_async_spinner_stop(tui_async_spinner_t *s, bool ok,
 
 typedef struct {
     char     name[64];
+    char     args_preview[128];   /* tool args shown inline while spinning */
     bool     done;
     bool     ok;
     char     preview[128];
@@ -402,6 +411,9 @@ void tui_batch_spinner_complete(tui_batch_spinner_t *bs, int idx, bool ok,
                                 const char *preview, double elapsed_ms);
 void tui_batch_spinner_stop(tui_batch_spinner_t *bs);
 
+/* Aggregate summary line after batch completion */
+void tui_batch_summary(const tui_batch_spinner_t *bs, const char *cost_suffix);
+
 /* ── Live Status Bar ──────────────────────────────────────────────────── */
 
 typedef struct {
@@ -415,6 +427,7 @@ typedef struct {
     double   cost;
     int      turn;
     int      tools_used;
+    int      panel_rows;    /* total bottom panel rows: input + sep + status (default 3) */
 } tui_status_bar_t;
 
 void tui_status_bar_init(tui_status_bar_t *sb, const char *model);
@@ -423,6 +436,11 @@ void tui_status_bar_update(tui_status_bar_t *sb, int in_tok, int out_tok,
 void tui_status_bar_enable(tui_status_bar_t *sb);
 void tui_status_bar_disable(tui_status_bar_t *sb);
 void tui_status_bar_render(tui_status_bar_t *sb);
+
+/* ── Input Panel (persistent bottom panel) ────────────────────────────── */
+void tui_input_panel_render(tui_status_bar_t *sb, const char *prompt_hint);
+void tui_input_panel_clear(tui_status_bar_t *sb);
+void tui_bottom_panel_refresh(tui_status_bar_t *sb, const char *prompt_hint);
 
 /* ── Swarm UI ─────────────────────────────────────────────────────────── */
 typedef struct {
@@ -486,7 +504,13 @@ const char *tui_theme_bright(void);
 const char *tui_theme_accent(void);
 
 /* ── F30: Section Dividers with Context ───────────────────────────────── */
-void tui_section_divider(int turn, int tools, double cost, const char *model);
+void tui_section_divider(int turn, int tools, double cost, const char *model,
+                         double tok_per_sec);
+/* Enhanced section divider with success/fail/cache/context stats */
+void tui_section_divider_ex(int turn, int tools_ok, int tools_fail,
+                            int cache_hits, double cost, const char *model,
+                            double tok_per_sec, double ctx_pct,
+                            const char *git_branch);
 
 /* ── F31: Status Bar Clock ────────────────────────────────────────────── */
 /* show_clock field added to tui_status_bar_t below */

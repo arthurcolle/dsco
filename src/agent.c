@@ -1,3 +1,6 @@
+#ifndef _DARWIN_C_SOURCE
+#define _DARWIN_C_SOURCE
+#endif
 #include "agent.h"
 #include "llm.h"
 #include "tools.h"
@@ -24,6 +27,7 @@
 #include <strings.h>
 #include <pthread.h>
 #include <sys/time.h>
+#include <termios.h>
 #include "crypto.h"
 #include "output_guard.h"
 
@@ -491,14 +495,73 @@ static void sigint_handler(int sig) {
     (void)sig;
     /* First Ctrl+C interrupts current stream/tool round.
        Second Ctrl+C is a hard exit if we're already interrupted/stuck. */
-    if (g_interrupted) _exit(130);
+    if (g_interrupted) {
+        /* Reset terminal state before hard exit:
+           - Reset scroll region to full terminal
+           - Disable bracketed paste mode
+           - Reset all SGR attributes
+           - Show cursor */
+        const char reset[] = "\033[r\033[?2004l\033[0m\033[?25h\n";
+        (void)write(STDERR_FILENO, reset, sizeof(reset) - 1);
+        _exit(130);
+    }
     g_interrupted = 1;
 }
 
 static void sigtstp_handler(int sig) {
     (void)sig;
-    /* Honor Ctrl+Z immediately. SIGSTOP is uncatchable and ensures suspend. */
-    kill(getpid(), SIGSTOP);
+    /* Reset terminal state before suspend so the parent shell isn't corrupted */
+    const char reset[] = "\033[r\033[?2004l\033[0m\033[?25h";
+    (void)write(STDERR_FILENO, reset, sizeof(reset) - 1);
+    /* Re-raise default SIGTSTP to actually suspend */
+    signal(SIGTSTP, SIG_DFL);
+    raise(SIGTSTP);
+}
+
+/* ── Terminal cleanup atexit handler ───────────────────────────────────── */
+static void terminal_reset_atexit(void) {
+    /* Safety net: always restore terminal to sane state on exit.
+       This catches all exit() paths including readline EOF, quit command, etc.
+       Reset: scroll region, bracketed paste, SGR attributes, cursor visibility. */
+    fprintf(stderr, "\033[r\033[?2004l\033[0m\033[?25h");
+    fflush(stderr);
+}
+
+/* ── SIGWINCH handler (terminal resize) ────────────────────────────────── */
+static tui_status_bar_t *g_winch_sb = NULL;  /* set in agent_run */
+static volatile sig_atomic_t g_winch_pending = 0;
+
+static void sigwinch_handler(int sig) {
+    (void)sig;
+    /* Only set flag — actual resize handling happens in main loop
+       (fprintf/mutex are not async-signal-safe) */
+    g_winch_pending = 1;
+}
+
+/* Called from main loop to handle deferred SIGWINCH resize */
+static void handle_pending_winch(void) {
+    if (!g_winch_pending) return;
+    g_winch_pending = 0;
+
+    if (!g_winch_sb || !g_winch_sb->visible) return;
+
+    int rows = tui_term_height();
+    int panel = g_winch_sb->panel_rows > 0 ? g_winch_sb->panel_rows : 3;
+    int scroll_bottom = rows - panel;
+
+    tui_term_lock();
+    /* Reset scroll region to new dimensions */
+    fprintf(stderr, "\033[1;%dr", scroll_bottom);
+
+    /* Clear old panel rows (may have shifted) then redraw */
+    for (int i = 0; i < panel; i++) {
+        fprintf(stderr, "\033[%d;1H\033[2K", rows - i);
+    }
+    fflush(stderr);
+    tui_term_unlock();
+
+    tui_status_bar_render(g_winch_sb);
+    tui_input_panel_render(g_winch_sb, NULL);
 }
 
 /* ── Auto-save ─────────────────────────────────────────────────────────── */
@@ -525,6 +588,9 @@ static void exit_autosave_handler(void) {
 static void sigterm_autosave(int sig) {
     (void)sig;
     if (g_autosave_conv) autosave(g_autosave_conv, g_autosave_session);
+    /* Reset terminal before exit — scroll region, bracketed paste, SGR */
+    const char reset[] = "\033[r\033[?2004l\033[0m\033[?25h\n";
+    (void)write(STDERR_FILENO, reset, sizeof(reset) - 1);
     _exit(0);
 }
 
@@ -654,12 +720,14 @@ static void on_stream_text(const char *text, void *ctx) {
     tui_stream_heartbeat_poke(&s_heartbeat, NULL);
     /* End thinking block if transitioning thinking → text */
     if (s_in_thinking_block) {
+        tui_term_lock();
         if (g_features.collapsible_thinking) {
             tui_thinking_end(&s_thinking);
         } else {
             fprintf(stderr, "\033[0m\n");
             fflush(stderr);
         }
+        tui_term_unlock();
         s_in_thinking_block = false;
     }
     if (!s_in_text_block) {
@@ -667,6 +735,7 @@ static void on_stream_text(const char *text, void *ctx) {
         tui_word_counter_init(&s_word_counter);
     }
     /* F2: Typing cadence — buffer and flush at steady rate */
+    tui_term_lock();
     if (g_features.typing_cadence) {
         tui_cadence_feed(&s_cadence, text);
         /* Flush cadence buffer into markdown renderer */
@@ -678,12 +747,13 @@ static void on_stream_text(const char *text, void *ctx) {
     } else {
         md_feed_str(&s_md, text);
     }
+    fflush(stderr);
+    tui_term_unlock();
     /* F5: Live word count */
     tui_word_counter_feed(&s_word_counter, text);
     tui_word_counter_render(&s_word_counter);
     /* F39: Throughput tracking */
     tui_throughput_tick(&s_throughput, tui_estimate_tokens(text));
-    fflush(stdout);
 }
 
 static void on_stream_thinking(const char *text, void *ctx) {
@@ -694,17 +764,21 @@ static void on_stream_thinking(const char *text, void *ctx) {
         tui_thinking_init(&s_thinking);
         /* Print thinking header (since llm.c defers to us when callback is set) */
         if (!g_features.collapsible_thinking) {
+            tui_term_lock();
             fprintf(stderr, "  \033[2m\033[3m[thinking]\n");
             fflush(stderr);
+            tui_term_unlock();
         }
     }
     /* F4: Collapsible thinking — count silently instead of printing */
+    tui_term_lock();
     if (g_features.collapsible_thinking) {
         tui_thinking_feed(&s_thinking, text);
     } else {
         fprintf(stderr, " %s", text);
         fflush(stderr);
     }
+    tui_term_unlock();
 }
 
 static void on_stream_tool_start(const char *name, const char *id, void *ctx) {
@@ -720,9 +794,11 @@ static void on_stream_tool_start(const char *name, const char *id, void *ctx) {
         s_in_thinking_block = false;
     }
     if (s_in_text_block) {
+        tui_term_lock();
         md_flush(&s_md);
-        printf("\n");
-        fflush(stdout);
+        fprintf(stderr, "\n");
+        fflush(stderr);
+        tui_term_unlock();
         /* F5: End word counter */
         tui_word_counter_end(&s_word_counter);
         s_in_text_block = false;
@@ -733,22 +809,16 @@ static void on_stream_tool_start(const char *name, const char *id, void *ctx) {
         int fn = tui_citation_add(&s_citations, name, id, NULL, 0);
         fprintf(stderr, "  %s[%d]%s ", TUI_DIM, fn, TUI_RESET);
     }
-    tui_tool_type_t tt = tui_classify_tool(name);
-    const char *tc = tui_tool_color(tt);
-    fprintf(stderr, "  %s%s⚡%s %s%s%s\n", TUI_BOLD, tc, TUI_RESET,
-            TUI_DIM, name, TUI_RESET);
-    fflush(stderr);
+    /* Defer printing ⚡ name — will be merged with args at execution time */
     baseline_log("tool", name, "tool_use started", NULL);
 }
 
-/* Print condensed tool arguments (dimmed, under the tool name) */
-static void print_tool_args(const char *name, const char *input_json) {
+/* Extract tool args into a single-line preview string */
+static void extract_tool_preview(const char *name, const char *input_json,
+                                  char *out, size_t out_sz) {
     (void)name;
+    out[0] = '\0';
     if (!input_json || strcmp(input_json, "{}") == 0) return;
-
-    /* For common tools, extract the most relevant field */
-    char preview[256];
-    preview[0] = '\0';
 
     /* Try to extract key values from JSON for common tools */
     char *cmd = json_get_str(input_json, "command");
@@ -759,48 +829,74 @@ static void print_tool_args(const char *name, const char *input_json) {
     char *pattern = json_get_str(input_json, "pattern");
     char *expr = json_get_str(input_json, "expression");
 
+    int max = (int)out_sz - 1;
+    if (max > 200) max = 200;
+
     if (cmd) {
-        /* bash/shell: show command */
-        snprintf(preview, sizeof(preview), "$ %.*s", 200, cmd);
+        snprintf(out, out_sz, "$ %.*s", max - 2, cmd);
     } else if (code) {
-        /* code execution: show first line */
         const char *nl = strchr(code, '\n');
         int len = nl ? (int)(nl - code) : (int)strlen(code);
-        if (len > 200) len = 200;
-        snprintf(preview, sizeof(preview), "%.*s%s", len, code, nl ? " ..." : "");
+        if (len > max) len = max;
+        snprintf(out, out_sz, "%.*s%s", len, code, nl ? " ..." : "");
     } else if (path && pattern) {
-        snprintf(preview, sizeof(preview), "%s ~ /%s/", path, pattern);
+        snprintf(out, out_sz, "%s ~ /%s/", path, pattern);
     } else if (path) {
-        snprintf(preview, sizeof(preview), "%s", path);
+        snprintf(out, out_sz, "%s", path);
     } else if (query) {
-        snprintf(preview, sizeof(preview), "%.*s", 200, query);
+        snprintf(out, out_sz, "%.*s", max, query);
     } else if (url) {
-        snprintf(preview, sizeof(preview), "%.*s", 200, url);
+        snprintf(out, out_sz, "%.*s", max, url);
     } else if (pattern) {
-        snprintf(preview, sizeof(preview), "/%.*s/", 200, pattern);
+        snprintf(out, out_sz, "/%.*s/", max - 2, pattern);
     } else if (expr) {
-        snprintf(preview, sizeof(preview), "%.*s", 200, expr);
+        snprintf(out, out_sz, "%.*s", max, expr);
     } else {
-        /* Fallback: show truncated raw JSON, skip outer braces */
         const char *start = input_json;
         if (*start == '{') start++;
         int len = (int)strlen(start);
         if (len > 0 && start[len-1] == '}') len--;
-        if (len > 200) len = 200;
-        if (len > 0) snprintf(preview, sizeof(preview), "%.*s", len, start);
+        if (len > max) len = max;
+        if (len > 0) snprintf(out, out_sz, "%.*s", len, start);
     }
 
     free(cmd); free(code); free(query); free(path);
     free(url); free(pattern); free(expr);
 
-    if (preview[0]) {
-        /* Replace newlines with spaces for single-line display */
-        for (char *c = preview; *c; c++) {
-            if (*c == '\n' || *c == '\r') *c = ' ';
-        }
-        fprintf(stderr, "    %s%s%s\n", TUI_DIM, preview, TUI_RESET);
-        fflush(stderr);
+    /* Replace newlines with spaces for single-line display */
+    for (char *c = out; *c; c++) {
+        if (*c == '\n' || *c == '\r') *c = ' ';
     }
+}
+
+/* Print combined tool indicator — powerline pill in truecolor, fallback ⚡ */
+static void print_tool_start_line(const char *name, const char *input_json) {
+    tui_tool_type_t tt = tui_classify_tool(name);
+    const char *tc = tui_tool_color(tt);
+    tui_rgb_t rgb = tui_tool_rgb(tt);
+    char preview[256];
+    extract_tool_preview(name, input_json, preview, sizeof(preview));
+
+    bool use_powerline = tui_detect_color_level() >= TUI_COLOR_256;
+    const tui_glyphs_t *gl = tui_glyph();
+
+    if (use_powerline && gl->pl_right[0]) {
+        /* Powerline pill:  ⚡ name ▶ args */
+        int r = (int)(rgb.r * 0.65), g2 = (int)(rgb.g * 0.65), b = (int)(rgb.b * 0.65);
+        fprintf(stderr, "  \033[48;2;%d;%d;%dm\033[38;2;255;255;255m %s %s \033[0m",
+                r, g2, b, gl->icon_lightning, name);
+        fprintf(stderr, "\033[38;2;%d;%d;%dm%s%s",
+                r, g2, b, gl->pl_right, TUI_RESET);
+        if (preview[0])
+            fprintf(stderr, " %s%s%s", TUI_DIM, preview, TUI_RESET);
+    } else {
+        fprintf(stderr, "  %s%s⚡%s %s%s%s", TUI_BOLD, tc, TUI_RESET,
+                TUI_DIM, name, TUI_RESET);
+        if (preview[0])
+            fprintf(stderr, "  %s%s%s", TUI_DIM, preview, TUI_RESET);
+    }
+    fprintf(stderr, "\n");
+    fflush(stderr);
 }
 
 static void print_tool_result_ex(const char *name, bool ok, const char *result, double elapsed_ms) {
@@ -840,40 +936,86 @@ static void print_tool_result(const char *name, bool ok, const char *result) {
 }
 
 static void print_usage_ex(usage_t *u, const char *model, session_state_t *session) {
-    fprintf(stderr, "%s  [in:%d out:%d", TUI_DIM, u->input_tokens, u->output_tokens);
-    if (u->cache_read_input_tokens > 0)
-        fprintf(stderr, " cache-read:%d", u->cache_read_input_tokens);
-    if (u->cache_creation_input_tokens > 0)
-        fprintf(stderr, " cache-write:%d", u->cache_creation_input_tokens);
+    bool truecolor = tui_supports_truecolor();
+    const tui_glyphs_t *gl = tui_glyph();
 
-    /* Per-turn cost */
-    const model_info_t *mi = model_lookup(model);
-    if (mi) {
-        double turn_cost = u->input_tokens * mi->input_price / 1e6
-                         + u->output_tokens * mi->output_price / 1e6
-                         + u->cache_read_input_tokens * mi->cache_read_price / 1e6
-                         + u->cache_creation_input_tokens * mi->cache_write_price / 1e6;
-        fprintf(stderr, " $%.4f", turn_cost);
-        if (session) {
-            double total_cost = session_cost(session);
-            fprintf(stderr, " (total: $%.4f)", total_cost);
+    if (truecolor) {
+        tui_rgb_t dim_c = tui_hsv_to_rgb(220.0f, 0.10f, 0.45f);
+        tui_rgb_t in_c  = tui_hsv_to_rgb(210.0f, 0.30f, 0.60f);
+        tui_rgb_t out_c = tui_hsv_to_rgb(160.0f, 0.30f, 0.60f);
+
+        fprintf(stderr, "  \033[38;2;%d;%d;%dm[", dim_c.r, dim_c.g, dim_c.b);
+        fprintf(stderr, "\033[38;2;%d;%d;%dmin:%d", in_c.r, in_c.g, in_c.b, u->input_tokens);
+        fprintf(stderr, " \033[38;2;%d;%d;%dmout:%d", out_c.r, out_c.g, out_c.b, u->output_tokens);
+
+        if (u->cache_read_input_tokens > 0) {
+            tui_rgb_t cr = tui_hsv_to_rgb(120.0f, 0.25f, 0.55f);
+            fprintf(stderr, " \033[38;2;%d;%d;%dm%scache-read:%d",
+                    cr.r, cr.g, cr.b, gl->icon_lightning, u->cache_read_input_tokens);
         }
+        if (u->cache_creation_input_tokens > 0) {
+            tui_rgb_t cw = tui_hsv_to_rgb(40.0f, 0.30f, 0.60f);
+            fprintf(stderr, " \033[38;2;%d;%d;%dmcache-write:%d",
+                    cw.r, cw.g, cw.b, u->cache_creation_input_tokens);
+        }
+
+        const model_info_t *mi = model_lookup(model);
+        if (mi) {
+            double turn_cost = u->input_tokens * mi->input_price / 1e6
+                             + u->output_tokens * mi->output_price / 1e6
+                             + u->cache_read_input_tokens * mi->cache_read_price / 1e6
+                             + u->cache_creation_input_tokens * mi->cache_write_price / 1e6;
+            /* Cost color: green cheap → yellow → red expensive */
+            float cost_hue = turn_cost < 0.01 ? 120.0f
+                           : turn_cost < 0.10 ? 120.0f - (float)((turn_cost - 0.01) / 0.09) * 60.0f
+                           : turn_cost < 1.00 ? 60.0f - (float)((turn_cost - 0.10) / 0.90) * 60.0f
+                           : 0.0f;
+            tui_rgb_t cost_c = tui_hsv_to_rgb(cost_hue, 0.45f, 0.75f);
+            fprintf(stderr, " \033[38;2;%d;%d;%dm%s$%.4f",
+                    cost_c.r, cost_c.g, cost_c.b, gl->icon_money, turn_cost);
+            if (session) {
+                double total = session_cost(session);
+                tui_rgb_t tot_c = tui_hsv_to_rgb(220.0f, 0.10f, 0.50f);
+                fprintf(stderr, " \033[38;2;%d;%d;%dm(total: $%.4f)",
+                        tot_c.r, tot_c.g, tot_c.b, total);
+            }
+        }
+        fprintf(stderr, "\033[38;2;%d;%d;%dm]\033[0m\n", dim_c.r, dim_c.g, dim_c.b);
+    } else {
+        fprintf(stderr, "%s  [in:%d out:%d", TUI_DIM, u->input_tokens, u->output_tokens);
+        if (u->cache_read_input_tokens > 0)
+            fprintf(stderr, " cache-read:%d", u->cache_read_input_tokens);
+        if (u->cache_creation_input_tokens > 0)
+            fprintf(stderr, " cache-write:%d", u->cache_creation_input_tokens);
+        const model_info_t *mi = model_lookup(model);
+        if (mi) {
+            double turn_cost = u->input_tokens * mi->input_price / 1e6
+                             + u->output_tokens * mi->output_price / 1e6
+                             + u->cache_read_input_tokens * mi->cache_read_price / 1e6
+                             + u->cache_creation_input_tokens * mi->cache_write_price / 1e6;
+            fprintf(stderr, " $%.4f", turn_cost);
+            if (session) {
+                double total = session_cost(session);
+                fprintf(stderr, " (total: $%.4f)", total);
+            }
+        }
+        fprintf(stderr, "]%s\n", TUI_RESET);
     }
-    fprintf(stderr, "]%s\n", TUI_RESET);
 }
 
 /* ── Read input line (readline or fgets) ───────────────────────────────── */
 
-static char *read_input_line(char *buf, size_t buf_sz) {
+static char *read_input_line_prompt(char *buf, size_t buf_sz, const char *prompt) {
+    const char *p = prompt ? prompt : "\033[1m\033[95m\xe2\x9d\xaf\033[0m ";
 #ifdef HAVE_READLINE
-    char *line = readline("\033[1m\033[95m\xe2\x9d\xaf\033[0m ");
+    char *line = readline(p);
     if (!line) return NULL;
     if (line[0]) add_history(line);
     snprintf(buf, buf_sz, "%s", line);
     free(line);
     return buf;
 #else
-    fprintf(stderr, "%s%s\xe2\x9d\xaf%s ", TUI_BOLD, TUI_BMAGENTA, TUI_RESET);
+    fprintf(stderr, "%s", p);
     fflush(stderr);
     if (!fgets(buf, (int)buf_sz, stdin)) {
         if (ferror(stdin) && errno == EINTR) {
@@ -897,6 +1039,10 @@ static char *read_input_line(char *buf, size_t buf_sz) {
 /* ── Main agent loop ───────────────────────────────────────────────────── */
 
 void agent_run(const char *api_key, const char *model) {
+    /* Register terminal reset FIRST — ensures scroll region, bracketed paste,
+       and SGR attrs are cleaned up on ANY exit path through exit(). */
+    atexit(terminal_reset_atexit);
+
     struct sigaction sa_int;
     memset(&sa_int, 0, sizeof(sa_int));
     sa_int.sa_handler = sigint_handler;
@@ -919,7 +1065,7 @@ void agent_run(const char *api_key, const char *model) {
 
     tools_init();
     dsco_locks_init(&g_locks);
-    md_init(&s_md, stdout);
+    md_init(&s_md, stderr);
 
     /* Initialize 40 UI features */
     tui_features_init(&g_features);
@@ -996,11 +1142,51 @@ void agent_run(const char *api_key, const char *model) {
     /* Welcome banner */
     tui_welcome(session.model, tool_count, DSCO_VERSION);
 
+    /* Enhanced startup info */
+    {
+        /* Active feature count */
+        int active_features = 0;
+        const bool *flags = (const bool *)&g_features;
+        for (int fi = 0; fi < TUI_FEATURE_COUNT; fi++)
+            if (flags[fi]) active_features++;
+
+        fprintf(stderr, "  %s%d/%d features active%s · %strust: %s%s",
+                TUI_DIM, active_features, TUI_FEATURE_COUNT, TUI_RESET,
+                TUI_DIM, session_trust_tier_to_string(session.trust_tier), TUI_RESET);
+
+        /* Git branch on startup (F19) */
+        if (g_features.branch_indicator) {
+            FILE *gf = popen("git rev-parse --abbrev-ref HEAD 2>/dev/null", "r");
+            if (gf) {
+                char branch[128] = "";
+                if (fgets(branch, sizeof(branch), gf)) {
+                    size_t bl = strlen(branch);
+                    if (bl > 0 && branch[bl-1] == '\n') branch[bl-1] = '\0';
+                    if (branch[0])
+                        fprintf(stderr, " · %s%s %s%s", TUI_BMAGENTA,
+                                tui_glyph()->icon_git ? tui_glyph()->icon_git : "",
+                                branch, TUI_RESET);
+                }
+                pclose(gf);
+            }
+        }
+        fprintf(stderr, "\n");
+    }
+
     /* Initialize status bar */
     tui_status_bar_t status_bar;
     tui_status_bar_init(&status_bar, session.model);
     /* F31: Enable status bar clock */
     tui_status_bar_set_clock(&status_bar, g_features.status_clock);
+
+    /* SIGWINCH handler for terminal resize */
+    g_winch_sb = &status_bar;
+    struct sigaction sa_winch;
+    memset(&sa_winch, 0, sizeof(sa_winch));
+    sa_winch.sa_handler = sigwinch_handler;
+    sigemptyset(&sa_winch.sa_mask);
+    sa_winch.sa_flags = SA_RESTART;
+    sigaction(SIGWINCH, &sa_winch, NULL);
 
     fprintf(stderr, "  %stype your request, or 'quit' to exit%s %s\n\n", TUI_DIM, TUI_RESET, tui_glyph()->sparkle);
 
@@ -1008,10 +1194,66 @@ void agent_run(const char *api_key, const char *model) {
         g_interrupted = 0;
         output_guard_reset();
 
-        if (!read_input_line(input_buf, sizeof(input_buf))) break;
+        /* Build dynamic prompt: [turn N] model · $cost · context% ▸ */
+        char dyn_prompt[256];
+        {
+            double cost = session_cost(&session);
+            int ctx_used = session.total_input_tokens + session.total_output_tokens;
+            int ctx_max = session.context_window > 0 ? session.context_window : CONTEXT_WINDOW_TOKENS;
+            double ctx_pct = ctx_max > 0 ? 100.0 * ctx_used / ctx_max : 0;
+            const char *ctx_color = ctx_pct < 60 ? TUI_GREEN : (ctx_pct < 85 ? TUI_YELLOW : TUI_RED);
+
+            /* Shorten model name for prompt */
+            const model_info_t *mi = model_lookup(session.model);
+            const char *short_model = mi ? mi->alias : session.model;
+
+            if (session.turn_count > 0) {
+                snprintf(dyn_prompt, sizeof(dyn_prompt),
+                    "\001" TUI_DIM "\002" "[" "\001" TUI_RESET "\002"
+                    "\001" TUI_BCYAN "\002" "t%d" "\001" TUI_RESET "\002"
+                    "\001" TUI_DIM "\002" "] " "\001" TUI_RESET "\002"
+                    "\001" TUI_BWHITE "\002" "%s" "\001" TUI_RESET "\002"
+                    "\001" TUI_DIM "\002" " · " "\001" TUI_RESET "\002"
+                    "\001" TUI_GREEN "\002" "$%.2f" "\001" TUI_RESET "\002"
+                    "\001" TUI_DIM "\002" " · " "\001" TUI_RESET "\002"
+                    "\001%s\002" "%.0f%%" "\001" TUI_RESET "\002"
+                    "\001" TUI_DIM "\002" " ▸" "\001" TUI_RESET "\002" " ",
+                    session.turn_count, short_model, cost, ctx_color, ctx_pct);
+            } else {
+                snprintf(dyn_prompt, sizeof(dyn_prompt),
+                    "\001" TUI_BOLD "\002" "\001" TUI_BMAGENTA "\002"
+                    "❯" "\001" TUI_RESET "\002" " ");
+            }
+        }
+
+        /* ── Synchronize terminal state before input ──────────────────
+         * After streaming, cursor position may be undefined.
+         * Reset scroll region, flush stderr, then re-establish the
+         * bottom panel and place cursor on the input row.  This prevents
+         * the input prompt from appearing in the middle of output. */
+        fflush(stderr);
+        if (!read_input_line_prompt(input_buf, sizeof(input_buf), dyn_prompt)) break;
 
         size_t len = strlen(input_buf);
         if (len == 0) continue;
+
+        /* Strip bracketed paste markers if present */
+        {
+            char *ps = strstr(input_buf, "\033[200~");
+            if (ps) memmove(ps, ps + 6, strlen(ps + 6) + 1);
+            char *pe = strstr(input_buf, "\033[201~");
+            if (pe) *pe = '\0';
+        }
+
+        /* Detect multi-line paste (newlines in input) */
+        {
+            int newlines = 0;
+            for (const char *p = input_buf; *p; p++) if (*p == '\n') newlines++;
+            if (newlines > 0) {
+                fprintf(stderr, "  %s[%d lines pasted]%s\n", TUI_DIM, newlines + 1, TUI_RESET);
+            }
+        }
+
         if (strcmp(input_buf, "quit") == 0 || strcmp(input_buf, "exit") == 0) break;
 
         /* ── Slash commands ────────────────────────────────────────────── */
@@ -1127,22 +1369,6 @@ void agent_run(const char *api_key, const char *model) {
                 tui_success(msg);
             }
             baseline_log("command", "/force", session.tool_choice, NULL);
-            continue;
-        }
-        /* /budget — thinking budget control */
-        if (strncmp(input_buf, "/budget", 7) == 0) {
-            const char *arg = input_buf + 7;
-            while (*arg == ' ') arg++;
-            if (*arg == '\0') {
-                fprintf(stderr, "  %sthinking: adaptive (auto)%s\n", TUI_DIM, TUI_RESET);
-                fprintf(stderr, "  %susage: /budget <tokens> (min 1024) or /budget auto%s\n",
-                        TUI_DIM, TUI_RESET);
-            } else {
-                /* Stored in session — will be used in llm_build_request_ex */
-                /* TODO: implement budget_tokens in session_state_t + request builder */
-                fprintf(stderr, "  %sthinking budget: %s (not yet wired — using adaptive)%s\n",
-                        TUI_DIM, arg, TUI_RESET);
-            }
             continue;
         }
         /* /prefill — seed assistant response */
@@ -1355,17 +1581,34 @@ void agent_run(const char *api_key, const char *model) {
                     else if (strcmp(category, "ast") == 0) cat_color = TUI_BMAGENTA;
                     fprintf(stderr, "  %s%s%s\n", cat_color, category, TUI_RESET);
                 }
-                fprintf(stderr, "    %s%-22s%s %s%s%s\n",
-                        TUI_CYAN, tools[i].name, TUI_RESET,
-                        TUI_DIM, tools[i].description, TUI_RESET);
+                /* Show call count from metrics if any */
+                const tool_metric_t *tm = tool_metrics_get(&tool_metrics, tools[i].name);
+                if (tm && tm->calls > 0) {
+                    fprintf(stderr, "    %s%-22s%s %s%3dx%s %s%s%s\n",
+                            TUI_CYAN, tools[i].name, TUI_RESET,
+                            TUI_BWHITE, tm->calls, TUI_RESET,
+                            TUI_DIM, tools[i].description, TUI_RESET);
+                } else {
+                    fprintf(stderr, "    %s%-22s%s     %s%s%s\n",
+                            TUI_CYAN, tools[i].name, TUI_RESET,
+                            TUI_DIM, tools[i].description, TUI_RESET);
+                }
             }
-            /* List MCP/external tools */
+            /* List MCP/external tools grouped by server */
             if (g_external_tool_count > 0) {
                 fprintf(stderr, "  %smcp%s\n", TUI_BYELLOW, TUI_RESET);
                 for (int i = 0; i < g_external_tool_count; i++) {
-                    fprintf(stderr, "    %s%-22s%s %s%s%s\n",
-                            TUI_CYAN, g_external_tools[i].name, TUI_RESET,
-                            TUI_DIM, g_external_tools[i].description, TUI_RESET);
+                    const tool_metric_t *tm = tool_metrics_get(&tool_metrics, g_external_tools[i].name);
+                    if (tm && tm->calls > 0) {
+                        fprintf(stderr, "    %s%-22s%s %s%3dx%s %s%s%s\n",
+                                TUI_CYAN, g_external_tools[i].name, TUI_RESET,
+                                TUI_BWHITE, tm->calls, TUI_RESET,
+                                TUI_DIM, g_external_tools[i].description, TUI_RESET);
+                    } else {
+                        fprintf(stderr, "    %s%-22s%s     %s%s%s\n",
+                                TUI_CYAN, g_external_tools[i].name, TUI_RESET,
+                                TUI_DIM, g_external_tools[i].description, TUI_RESET);
+                    }
                 }
             }
             fprintf(stderr, "\n  %s%d builtin + %d MCP + web_search + code_execution%s\n\n",
@@ -1390,6 +1633,7 @@ void agent_run(const char *api_key, const char *model) {
             fprintf(stderr, "  %s/web%s        toggle web search\n", TUI_CYAN, TUI_RESET);
             fprintf(stderr, "  %s/code%s       toggle code execution\n", TUI_CYAN, TUI_RESET);
             fprintf(stderr, "  %s/budget [$]%s  set cost budget\n", TUI_CYAN, TUI_RESET);
+            fprintf(stderr, "  %s/thinking [auto|>=1024]%s set thinking budget (in tokens)\n", TUI_CYAN, TUI_RESET);
             fprintf(stderr, "  %s/trust [tier]%s set trust tier (trusted/standard/untrusted)\n", TUI_CYAN, TUI_RESET);
             fprintf(stderr, "  %s/status%s     full session status\n", TUI_CYAN, TUI_RESET);
             fprintf(stderr, "  %s/tools%s      list all tools\n", TUI_CYAN, TUI_RESET);
@@ -1401,6 +1645,9 @@ void agent_run(const char *api_key, const char *model) {
             fprintf(stderr, "  %s/features%s   toggle UI features (F1-F40)\n", TUI_CYAN, TUI_RESET);
             fprintf(stderr, "  %s/perf%s       latency waterfall + throughput\n", TUI_CYAN, TUI_RESET);
             fprintf(stderr, "  %s/minimap%s    conversation minimap\n", TUI_CYAN, TUI_RESET);
+            fprintf(stderr, "  %s/dashboard%s  rich session overview panel\n", TUI_CYAN, TUI_RESET);
+            fprintf(stderr, "  %s/top%s        tool leaderboard by calls\n", TUI_CYAN, TUI_RESET);
+            fprintf(stderr, "  %s/flame%s      flame timeline for tool executions\n", TUI_CYAN, TUI_RESET);
             fprintf(stderr, "  %s/help%s       show this help\n", TUI_CYAN, TUI_RESET);
             fprintf(stderr, "  %squit%s        exit dsco\n", TUI_CYAN, TUI_RESET);
             fprintf(stderr, "\n");
@@ -1806,6 +2053,213 @@ void agent_run(const char *api_key, const char *model) {
             continue;
         }
 
+        /* /dashboard — rich session overview */
+        if (strcmp(input_buf, "/dashboard") == 0) {
+            fprintf(stderr, "\n");
+            tui_header("Dashboard", TUI_BCYAN);
+            double cost = session_cost(&session);
+            const model_info_t *mi = model_lookup(session.model);
+            int ctx_used = session.total_input_tokens + session.total_output_tokens;
+            int ctx_max = session.context_window > 0 ? session.context_window : CONTEXT_WINDOW_TOKENS;
+            double avg_ttft = session.telemetry_samples > 0
+                ? session.total_ttft_ms / session.telemetry_samples : 0;
+            double avg_stream = session.telemetry_samples > 0
+                ? session.total_stream_ms / session.telemetry_samples : 0;
+            double avg_tps = avg_stream > 0 && session.total_output_tokens > 0
+                ? (session.total_output_tokens / (double)session.telemetry_samples)
+                  / (avg_stream / 1000.0) : 0;
+
+            /* Count total tools from metrics */
+            int dash_total_tools = 0;
+            for (int ti = 0; ti < tool_metrics.count; ti++)
+                dash_total_tools += tool_metrics.entries[ti].calls;
+
+            /* Session stats */
+            fprintf(stderr, "  %s┌─ Session ───────────────────────────────────┐%s\n", TUI_DIM, TUI_RESET);
+            fprintf(stderr, "  %s│%s  Turns: %s%-6d%s  Tools: %s%-6d%s  Msgs: %s%-4d%s  %s│%s\n",
+                    TUI_DIM, TUI_RESET, TUI_BWHITE, session.turn_count, TUI_RESET,
+                    TUI_BWHITE, dash_total_tools, TUI_RESET,
+                    TUI_BWHITE, conv.count, TUI_RESET, TUI_DIM, TUI_RESET);
+            fprintf(stderr, "  %s│%s  Model: %s%-20s%s  Trust: %s%-8s%s %s│%s\n",
+                    TUI_DIM, TUI_RESET, TUI_BCYAN, mi ? mi->alias : session.model, TUI_RESET,
+                    TUI_BYELLOW, session_trust_tier_to_string(session.trust_tier), TUI_RESET,
+                    TUI_DIM, TUI_RESET);
+            fprintf(stderr, "  %s└─────────────────────────────────────────────┘%s\n", TUI_DIM, TUI_RESET);
+
+            /* Cost breakdown */
+            fprintf(stderr, "\n  %s┌─ Cost ─────────────────────────────────────┐%s\n", TUI_DIM, TUI_RESET);
+            if (mi) {
+                double in_cost = session.total_input_tokens * mi->input_price / 1e6;
+                double out_cost = session.total_output_tokens * mi->output_price / 1e6;
+                double cache_r = session.total_cache_read_tokens * mi->cache_read_price / 1e6;
+                double cache_w = session.total_cache_write_tokens * mi->cache_write_price / 1e6;
+                fprintf(stderr, "  %s│%s  Input:  %s$%.4f%s (%dk tok)                %s│%s\n",
+                        TUI_DIM, TUI_RESET, TUI_GREEN, in_cost, TUI_RESET,
+                        session.total_input_tokens / 1000, TUI_DIM, TUI_RESET);
+                fprintf(stderr, "  %s│%s  Output: %s$%.4f%s (%dk tok)                %s│%s\n",
+                        TUI_DIM, TUI_RESET, TUI_GREEN, out_cost, TUI_RESET,
+                        session.total_output_tokens / 1000, TUI_DIM, TUI_RESET);
+                fprintf(stderr, "  %s│%s  Cache:  %s$%.4f%s read + %s$%.4f%s write    %s│%s\n",
+                        TUI_DIM, TUI_RESET, TUI_BCYAN, cache_r, TUI_RESET,
+                        TUI_BCYAN, cache_w, TUI_RESET, TUI_DIM, TUI_RESET);
+                fprintf(stderr, "  %s│%s  Total:  %s%s$%.4f%s                         %s│%s\n",
+                        TUI_DIM, TUI_RESET, TUI_BOLD, TUI_BGREEN, cost, TUI_RESET,
+                        TUI_DIM, TUI_RESET);
+            }
+            if (g_cost_budget > 0) {
+                fprintf(stderr, "  %s│%s  Budget: $%.2f (%.0f%% used)               %s│%s\n",
+                        TUI_DIM, TUI_RESET, g_cost_budget, 100.0 * cost / g_cost_budget,
+                        TUI_DIM, TUI_RESET);
+            }
+            fprintf(stderr, "  %s└─────────────────────────────────────────────┘%s\n", TUI_DIM, TUI_RESET);
+
+            /* Context gauge */
+            fprintf(stderr, "\n  %sContext:%s ", TUI_DIM, TUI_RESET);
+            tui_context_gauge(ctx_used, ctx_max, 40);
+
+            /* Streaming performance */
+            if (session.telemetry_samples > 0) {
+                fprintf(stderr, "  %s┌─ Streaming ─────────────────────────────────┐%s\n", TUI_DIM, TUI_RESET);
+                fprintf(stderr, "  %s│%s  Avg TTFT:  %s%.0fms%s                          %s│%s\n",
+                        TUI_DIM, TUI_RESET, TUI_BCYAN, avg_ttft, TUI_RESET, TUI_DIM, TUI_RESET);
+                fprintf(stderr, "  %s│%s  Avg tok/s: %s%.0f%s                             %s│%s\n",
+                        TUI_DIM, TUI_RESET, TUI_BCYAN, avg_tps, TUI_RESET, TUI_DIM, TUI_RESET);
+                fprintf(stderr, "  %s└─────────────────────────────────────────────┘%s\n", TUI_DIM, TUI_RESET);
+            }
+
+            /* Top tools */
+            if (tool_metrics.count > 0) {
+                fprintf(stderr, "\n  %sTop Tools:%s\n", TUI_DIM, TUI_RESET);
+                /* Find top 5 by call count */
+                int indices[5] = {-1,-1,-1,-1,-1};
+                for (int t = 0; t < 5 && t < tool_metrics.count; t++) {
+                    int best = -1;
+                    for (int i = 0; i < tool_metrics.count; i++) {
+                        bool skip = false;
+                        for (int j = 0; j < t; j++) if (indices[j] == i) skip = true;
+                        if (skip) continue;
+                        if (best < 0 || tool_metrics.entries[i].calls > tool_metrics.entries[best].calls)
+                            best = i;
+                    }
+                    if (best >= 0) indices[t] = best;
+                }
+                for (int t = 0; t < 5; t++) {
+                    if (indices[t] < 0) break;
+                    tool_metric_t *e = &tool_metrics.entries[indices[t]];
+                    double avg = e->calls > 0 ? e->total_latency_ms / e->calls : 0;
+                    fprintf(stderr, "    %s%d.%s %s%-20s%s %s%d calls%s  avg %s%.0fms%s\n",
+                            TUI_DIM, t+1, TUI_RESET,
+                            TUI_CYAN, e->name, TUI_RESET,
+                            TUI_BWHITE, e->calls, TUI_RESET,
+                            TUI_DIM, avg, TUI_RESET);
+                }
+            }
+
+            /* Cache hit rate */
+            int cache_total = tool_cache.hits + tool_cache.misses;
+            if (cache_total > 0) {
+                fprintf(stderr, "\n  %sCache:%s %d/%d hits (%.0f%%)\n",
+                        TUI_DIM, TUI_RESET, tool_cache.hits, cache_total,
+                        100.0 * tool_cache.hits / cache_total);
+            }
+
+            /* Git branch */
+            {
+                FILE *gf = popen("git rev-parse --abbrev-ref HEAD 2>/dev/null", "r");
+                if (gf) {
+                    char branch[128] = "";
+                    if (fgets(branch, sizeof(branch), gf)) {
+                        size_t bl = strlen(branch);
+                        if (bl > 0 && branch[bl-1] == '\n') branch[bl-1] = '\0';
+                        if (branch[0])
+                            fprintf(stderr, "  %sGit:%s %s%s%s\n", TUI_DIM, TUI_RESET,
+                                    TUI_BMAGENTA, branch, TUI_RESET);
+                    }
+                    pclose(gf);
+                }
+            }
+
+            /* Fallback chain */
+            if (session.fallback_count > 0) {
+                fprintf(stderr, "  %sFallback:%s ", TUI_DIM, TUI_RESET);
+                for (int fi = 0; fi < session.fallback_count; fi++)
+                    fprintf(stderr, "%s%s%s%s", fi ? " → " : "",
+                            TUI_BYELLOW, session.fallback_models[fi], TUI_RESET);
+                fprintf(stderr, "\n");
+            }
+
+            /* Active features count */
+            {
+                int active = 0;
+                const bool *flags = (const bool *)&g_features;
+                for (int fi = 0; fi < TUI_FEATURE_COUNT; fi++)
+                    if (flags[fi]) active++;
+                fprintf(stderr, "  %sFeatures:%s %d/%d active\n", TUI_DIM, TUI_RESET, active, TUI_FEATURE_COUNT);
+            }
+
+            fprintf(stderr, "\n");
+            continue;
+        }
+
+        /* /top — tool leaderboard */
+        if (strcmp(input_buf, "/top") == 0) {
+            fprintf(stderr, "\n");
+            tui_header("Tool Leaderboard", TUI_BCYAN);
+            if (tool_metrics.count == 0) {
+                fprintf(stderr, "  %sno tool calls recorded yet%s\n\n", TUI_DIM, TUI_RESET);
+            } else {
+                /* Sort indices by call count descending */
+                int idx[256];
+                int n = tool_metrics.count > 256 ? 256 : tool_metrics.count;
+                for (int i = 0; i < n; i++) idx[i] = i;
+                for (int i = 0; i < n - 1; i++) {
+                    for (int j = i + 1; j < n; j++) {
+                        if (tool_metrics.entries[idx[j]].calls > tool_metrics.entries[idx[i]].calls) {
+                            int tmp = idx[i]; idx[i] = idx[j]; idx[j] = tmp;
+                        }
+                    }
+                }
+                fprintf(stderr, "  %s%-4s %-22s %6s %7s %8s %8s%s\n", TUI_DIM,
+                        "RANK", "TOOL", "CALLS", "OK%", "AVG(ms)", "COST", TUI_RESET);
+
+                const model_info_t *mi_top = model_lookup(session.model);
+                for (int i = 0; i < n; i++) {
+                    tool_metric_t *e = &tool_metrics.entries[idx[i]];
+                    double avg = e->calls > 0 ? e->total_latency_ms / e->calls : 0;
+                    double ok_pct = e->calls > 0 ? 100.0 * e->successes / e->calls : 0;
+                    /* Estimate tool cost: rough token estimate per call */
+                    double est_cost = 0;
+                    if (mi_top) est_cost = e->calls * 500.0 * (mi_top->input_price + mi_top->output_price) / 2.0 / 1e6;
+
+                    const char *speed_color = avg < 500 ? TUI_GREEN : (avg < 2000 ? TUI_YELLOW : TUI_RED);
+                    const char *ok_color = ok_pct >= 95 ? TUI_GREEN : (ok_pct >= 80 ? TUI_YELLOW : TUI_RED);
+
+                    fprintf(stderr, "  %s%2d.%s  %s%-22s%s %6d %s%6.0f%%%s %s%7.0f%s %s$%.3f%s\n",
+                            TUI_DIM, i + 1, TUI_RESET,
+                            TUI_CYAN, e->name, TUI_RESET,
+                            e->calls,
+                            ok_color, ok_pct, TUI_RESET,
+                            speed_color, avg, TUI_RESET,
+                            TUI_DIM, est_cost, TUI_RESET);
+                }
+                fprintf(stderr, "\n");
+            }
+            continue;
+        }
+
+        /* /flame — flame timeline for last turn */
+        if (strcmp(input_buf, "/flame") == 0) {
+            fprintf(stderr, "\n");
+            tui_header("Flame Timeline", TUI_BCYAN);
+            if (s_flame.count == 0) {
+                fprintf(stderr, "  %sno tool executions recorded this session%s\n\n", TUI_DIM, TUI_RESET);
+            } else {
+                tui_flame_render(&s_flame);
+                fprintf(stderr, "\n");
+            }
+            continue;
+        }
+
         baseline_log("user", "prompt", input_buf, NULL);
 
         /* F19: Branch detection */
@@ -2031,9 +2485,11 @@ void agent_run(const char *api_key, const char *model) {
                which causes erase_partial_echo to miss the echoed line
                and produce duplicate output. */
             if (s_in_text_block) {
+                tui_term_lock();
                 md_flush(&s_md);
-                printf("\n");
-                fflush(stdout);
+                fprintf(stderr, "\n");
+                fflush(stderr);
+                tui_term_unlock();
                 s_in_text_block = false;
             }
 
@@ -2059,24 +2515,37 @@ void agent_run(const char *api_key, const char *model) {
             session.total_cache_write_tokens += sr.usage.cache_creation_input_tokens;
             session.turn_count++;
 
-            print_usage_ex(&sr.usage, session.model, &session);
+            /* Pre-count tool_use blocks so we can suppress noisy per-turn
+               usage/telemetry lines when tools will show inline metadata */
+            int tool_count_this_turn = 0;
+            for (int ti = 0; ti < sr.parsed.count; ti++) {
+                content_block_t *tb = &sr.parsed.blocks[ti];
+                if (tb->type && strcmp(tb->type, "tool_use") == 0)
+                    tool_count_this_turn++;
+            }
 
-            /* Update status bar with full cost (including cache pricing) */
+            /* Only print usage/telemetry for non-tool turns (tool turns fold it inline) */
+            if (tool_count_this_turn == 0)
+                print_usage_ex(&sr.usage, session.model, &session);
+
+            /* Update and render status bar with full cost (including cache pricing) */
             {
                 double cost = session_cost(&session);
                 tui_status_bar_update(&status_bar,
                     session.total_input_tokens, session.total_output_tokens,
                     cost, session.turn_count, total_tools_used);
+                tui_status_bar_render(&status_bar);
             }
 
-            /* Streaming telemetry */
+            /* Streaming telemetry — suppress for tool turns */
             if (sr.telemetry.ttft_ms > 0) {
                 session.total_ttft_ms += sr.telemetry.ttft_ms;
                 session.total_stream_ms += sr.telemetry.total_ms;
                 session.telemetry_samples++;
-                fprintf(stderr, "%s  [ttft:%.0fms total:%.0fms %.0f tok/s]%s\n",
-                        TUI_DIM, sr.telemetry.ttft_ms, sr.telemetry.total_ms,
-                        sr.telemetry.tokens_per_sec, TUI_RESET);
+                if (tool_count_this_turn == 0)
+                    fprintf(stderr, "%s  [ttft:%.0fms total:%.0fms %.0f tok/s]%s\n",
+                            TUI_DIM, sr.telemetry.ttft_ms, sr.telemetry.total_ms,
+                            sr.telemetry.tokens_per_sec, TUI_RESET);
                 /* F40: Save latency breakdown for /perf */
                 s_last_latency.dns_ms = sr.telemetry.latency.dns_ms;
                 s_last_latency.connect_ms = sr.telemetry.latency.connect_ms;
@@ -2084,12 +2553,10 @@ void agent_run(const char *api_key, const char *model) {
                 s_last_latency.ttfb_ms = sr.telemetry.latency.ttfb_ms;
                 s_last_latency.total_ms = sr.telemetry.latency.total_ms;
             }
-            /* F39: Render throughput sparkline */
-            tui_throughput_render(&s_throughput);
-            /* F7: Render citation footnotes */
-            tui_citation_render(&s_citations);
+            /* F39: Throughput data kept for /perf; rendered inline in section divider */
+            /* F7: Citations already shown inline as [N] markers during streaming */
             tui_citation_init(&s_citations); /* reset for next turn */
-            /* Reset per-turn flame + DAG */
+            /* Reset per-turn flame + DAG (data kept for /perf) */
             tui_flame_init(&s_flame);
             tui_dag_init(&s_dag);
 
@@ -2109,13 +2576,7 @@ void agent_run(const char *api_key, const char *model) {
                (local tool results, tool-generated media, etc.). */
             bool needs_followup_turn = false;
 
-            /* Count tool_use blocks */
-            int tool_count_this_turn = 0;
-            for (int i = 0; i < sr.parsed.count; i++) {
-                content_block_t *blk = &sr.parsed.blocks[i];
-                if (blk->type && strcmp(blk->type, "tool_use") == 0)
-                    tool_count_this_turn++;
-            }
+            /* tool_count_this_turn already computed above */
             total_tools_used += tool_count_this_turn;
 
             if (tool_count_this_turn == 1) {
@@ -2124,8 +2585,8 @@ void agent_run(const char *api_key, const char *model) {
                 for (int i = 0; i < sr.parsed.count; i++) {
                     content_block_t *blk = &sr.parsed.blocks[i];
                     if (blk->type && strcmp(blk->type, "tool_use") == 0) {
-                        /* Show tool arguments */
-                        print_tool_args(blk->tool_name, blk->tool_input);
+                        /* Show merged ⚡ name + args on one line */
+                        print_tool_start_line(blk->tool_name, blk->tool_input);
 
                         char trust_reason[256];
                         const char *tier = session_trust_tier_to_string(session.trust_tier);
@@ -2158,8 +2619,28 @@ void agent_run(const char *api_key, const char *model) {
                         pthread_mutex_unlock(&g_locks.cache_lock);
 
                         if (cache_hit) {
-                            /* F14: Cached badge */
-                            tui_cached_badge(blk->tool_name);
+                            /* Compact cached result — powerline style with [cached] badge */
+                            const tui_glyphs_t *cgl = tui_glyph();
+                            const char *nl = tool_result[0] ? strchr(tool_result, '\n') : NULL;
+                            int plen = nl ? (int)(nl - tool_result) : (int)strlen(tool_result);
+                            if (plen > 80) plen = 80;
+                            bool use_pl = tui_detect_color_level() >= TUI_COLOR_256;
+                            if (use_pl) {
+                                /* Green pill for cached */
+                                fprintf(stderr, "  \033[48;2;40;120;60m\033[38;2;200;255;200m %s %s \033[0m",
+                                        cgl->ok, blk->tool_name);
+                                fprintf(stderr, "\033[38;2;40;120;60m%s%s",
+                                        cgl->pl_right ? cgl->pl_right : "", TUI_RESET);
+                                fprintf(stderr, " %s⚡cached%s", TUI_DIM, TUI_RESET);
+                            } else {
+                                fprintf(stderr, "  %s%s%s %s%s%s %s[cached]%s",
+                                        TUI_GREEN, cgl->ok, TUI_RESET,
+                                        TUI_BOLD, blk->tool_name, TUI_RESET,
+                                        TUI_DIM, TUI_RESET);
+                            }
+                            if (plen > 0)
+                                fprintf(stderr, " %s%.*s%s", TUI_DIM, plen, tool_result, TUI_RESET);
+                            fprintf(stderr, "\n");
                         } else {
                             /* Trace span for tool execution */
                             char tool_span[37] = "";
@@ -2184,9 +2665,28 @@ void agent_run(const char *api_key, const char *model) {
                             bool was_timeout = wd.timed_out;
                             watchdog_stop(&wd);
 
-                            /* Stop spinner — shows completion line */
+                            /* Build inline usage+cost suffix */
+                            char spin_suffix[128] = "";
+                            {
+                                const model_info_t *mi = model_lookup(session.model);
+                                if (mi) {
+                                    double tc2 = sr.usage.input_tokens * mi->input_price / 1e6
+                                               + sr.usage.output_tokens * mi->output_price / 1e6
+                                               + sr.usage.cache_read_input_tokens * mi->cache_read_price / 1e6
+                                               + sr.usage.cache_creation_input_tokens * mi->cache_write_price / 1e6;
+                                    snprintf(spin_suffix, sizeof(spin_suffix),
+                                             "[in:%d out:%d $%.4f]",
+                                             sr.usage.input_tokens, sr.usage.output_tokens, tc2);
+                                } else {
+                                    snprintf(spin_suffix, sizeof(spin_suffix),
+                                             "[in:%d out:%d]",
+                                             sr.usage.input_tokens, sr.usage.output_tokens);
+                                }
+                            }
+
+                            /* Stop spinner — shows completion line with inline metadata */
                             tui_async_spinner_stop(&spinner, ok && !was_timeout,
-                                                   tool_result, elapsed);
+                                                   tool_result, elapsed, spin_suffix);
 
                             /* If watchdog set g_interrupted (not user), clear it */
                             if (was_timeout && g_tool_timed_out) {
@@ -2228,12 +2728,7 @@ void agent_run(const char *api_key, const char *model) {
 
                             trace_span_end(tool_span, was_timeout ? "timeout" : (ok ? "ok" : "error"), NULL);
                         }
-                        /* Spinner already printed result for non-cached; only print for cache hits */
-                        if (cache_hit) print_tool_result(blk->tool_name, ok, tool_result);
-                        /* F13: Per-tool cost annotation */
-                        tui_tool_cost(blk->tool_name, sr.usage.input_tokens,
-                                      sr.usage.output_tokens, session.model);
-                        fprintf(stderr, "\n");
+                        /* Spinner printed result for non-cached; cache-hit printed inline above */
                         conv_add_tool_result(&conv, blk->tool_id, tool_result, !ok);
                         free(tool_result);
                     }
@@ -2264,8 +2759,17 @@ void agent_run(const char *api_key, const char *model) {
                     content_block_t *blk = &sr.parsed.blocks[i];
                     if (g_interrupted) break;
                     if (blk->type && strcmp(blk->type, "tool_use") == 0) {
-                        /* Show tool arguments */
-                        print_tool_args(blk->tool_name, blk->tool_input);
+                        /* Populate args preview into batch entry (shown inline by spinner thread) */
+                        {
+                            char bp[128];
+                            extract_tool_preview(blk->tool_name, blk->tool_input, bp, sizeof(bp));
+                            pthread_mutex_lock(&batch_spinner.mutex);
+                            if (batch_idx < batch_spinner.count)
+                                snprintf(batch_spinner.entries[batch_idx].args_preview,
+                                         sizeof(batch_spinner.entries[batch_idx].args_preview),
+                                         "%s", bp);
+                            pthread_mutex_unlock(&batch_spinner.mutex);
+                        }
 
                         char trust_reason[256];
                         const char *tier = session_trust_tier_to_string(session.trust_tier);
@@ -2361,18 +2865,61 @@ void agent_run(const char *api_key, const char *model) {
 
                 /* Stop batch spinner — final state is already rendered */
                 tui_batch_spinner_stop(&batch_spinner);
+
+                /* Batch aggregate summary */
+                if (batch_n >= 2) {
+                    const model_info_t *mi = model_lookup(session.model);
+                    char batch_cost_suffix[128] = "";
+                    if (mi) {
+                        double tc2 = sr.usage.input_tokens * mi->input_price / 1e6
+                                   + sr.usage.output_tokens * mi->output_price / 1e6
+                                   + sr.usage.cache_read_input_tokens * mi->cache_read_price / 1e6
+                                   + sr.usage.cache_creation_input_tokens * mi->cache_write_price / 1e6;
+                        snprintf(batch_cost_suffix, sizeof(batch_cost_suffix),
+                                 "[in:%d out:%d $%.4f]",
+                                 sr.usage.input_tokens, sr.usage.output_tokens, tc2);
+                    }
+                    tui_batch_summary(&batch_spinner, batch_cost_suffix);
+                }
             }
 
-            /* F8: Render flame timeline after multi-tool turns */
-            tui_flame_render(&s_flame);
-            /* F10: Render tool dependency graph */
+            /* F10: Render tool dependency graph (compact, 1 line) */
             tui_dag_render(&s_dag);
 
-            /* F30: Section divider between turns */
+            /* F30: Enhanced section divider with success/fail/cache/context */
             {
                 double turn_cost = session_cost(&session);
-                tui_section_divider(session.turn_count, tool_count_this_turn,
-                                    turn_cost, session.model);
+                double tps = sr.telemetry.tokens_per_sec;
+                int ctx_used = session.total_input_tokens + session.total_output_tokens;
+                int ctx_max = session.context_window > 0 ? session.context_window : CONTEXT_WINDOW_TOKENS;
+                double ctx_pct = ctx_max > 0 ? 100.0 * ctx_used / ctx_max : 0;
+
+                /* Count successes/failures for this turn from flame data */
+                int turn_ok = 0, turn_fail = 0, turn_cache = 0;
+                for (int fi = 0; fi < s_flame.count; fi++) {
+                    if (s_flame.entries[fi].ok) turn_ok++; else turn_fail++;
+                }
+                /* If no flame data, assume all tools succeeded */
+                if (s_flame.count == 0 && tool_count_this_turn > 0)
+                    turn_ok = tool_count_this_turn;
+                turn_cache = tool_cache.hits;  /* session-level cache hits */
+
+                /* Get git branch for divider */
+                char div_branch[128] = "";
+                if (g_features.branch_indicator) {
+                    FILE *gbf = popen("git rev-parse --abbrev-ref HEAD 2>/dev/null", "r");
+                    if (gbf) {
+                        if (fgets(div_branch, sizeof(div_branch), gbf)) {
+                            size_t bl = strlen(div_branch);
+                            if (bl > 0 && div_branch[bl-1] == '\n') div_branch[bl-1] = '\0';
+                        }
+                        pclose(gbf);
+                    }
+                }
+
+                tui_section_divider_ex(session.turn_count, turn_ok, turn_fail,
+                                       turn_cache, turn_cost, session.model, tps,
+                                       ctx_pct, div_branch);
             }
 
             /* Check for tool-generated images */
@@ -2509,13 +3056,24 @@ void agent_run(const char *api_key, const char *model) {
                     TUI_DIM, turns, total_input, total_output, total_cache_read,
                     multi_turn_cost, TUI_RESET);
         }
-        printf("\n");
+        /* Use stderr for the blank line separator — stdout writes can
+           desync with the scroll region and push the cursor into the
+           bottom panel, causing input to appear in the middle. */
+        fprintf(stderr, "\n");
+        fflush(stderr);
 
         /* Periodic auto-save every 5 turns */
         if (session.turn_count % 5 == 0 && conv.count > 0) {
             autosave(&conv, &session);
         }
     }
+
+    /* Disable bracketed paste mode */
+    fprintf(stderr, "\033[?2004l");
+    fflush(stderr);
+
+    g_winch_sb = NULL;
+    tui_status_bar_disable(&status_bar);
 
     g_autosave_conv = NULL;
     g_autosave_session = NULL;
