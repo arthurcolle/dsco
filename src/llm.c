@@ -1433,6 +1433,51 @@ static inline uint32_t repdet_fnv(const char *p, int n) {
     return h;
 }
 
+/* Check if a byte pattern consists entirely of benign formatting characters:
+ * box-drawing (U+2500–U+257F), dashes, equals, underscores, spaces, stars,
+ * em-dash (U+2014), en-dash (U+2013), horizontal ellipsis (U+2026), bullets. */
+static bool repdet_is_formatting(const char *pat, int plen) {
+    int i = 0;
+    while (i < plen) {
+        unsigned char c = (unsigned char)pat[i];
+        if (c < 0x80) {
+            /* ASCII: allow common formatting chars */
+            if (c == '-' || c == '=' || c == '_' || c == ' ' ||
+                c == '*' || c == '#' || c == '~' || c == '.' ||
+                c == '|' || c == '+') {
+                i++;
+                continue;
+            }
+            return false;
+        }
+        /* UTF-8: decode codepoint */
+        uint32_t cp = 0;
+        int seqlen = 0;
+        if ((c & 0xE0) == 0xC0)      { cp = c & 0x1F; seqlen = 2; }
+        else if ((c & 0xF0) == 0xE0)  { cp = c & 0x0F; seqlen = 3; }
+        else if ((c & 0xF8) == 0xF0)  { cp = c & 0x07; seqlen = 4; }
+        else return false;
+        if (i + seqlen > plen) return false;
+        for (int j = 1; j < seqlen; j++) {
+            unsigned char cont = (unsigned char)pat[i + j];
+            if ((cont & 0xC0) != 0x80) return false;
+            cp = (cp << 6) | (cont & 0x3F);
+        }
+        /* Allow box-drawing U+2500–U+257F, em/en-dash, ellipsis, bullets */
+        if ((cp >= 0x2500 && cp <= 0x257F) || /* box drawing */
+            cp == 0x2014 || cp == 0x2013 ||   /* em-dash, en-dash */
+            cp == 0x2026 ||                    /* horizontal ellipsis */
+            cp == 0x2022 || cp == 0x25CF ||    /* bullets */
+            cp == 0x2502 || cp == 0x2503)      /* already in box-drawing but be explicit */
+        {
+            i += seqlen;
+            continue;
+        }
+        return false;
+    }
+    return true;
+}
+
 /* Strategy 1: exact periodic repeat detection.
  * For each candidate period length, scan backwards from the tail checking
  * for consecutive identical copies.  Uses early-exit so small periods that
@@ -1455,6 +1500,8 @@ static bool repdet_exact(sse_state_t *s) {
             pos -= plen;
         }
         if (reps >= REPDET_THRESH) {
+            /* Skip benign formatting patterns (box-drawing, dashes, etc.) */
+            if (repdet_is_formatting(pat, plen)) continue;
             /* Extract a preview of the repeating unit */
             int preview_len = plen < 60 ? plen : 60;
             char preview[64];

@@ -57,6 +57,12 @@ int tui_term_height(void) {
     return 24;
 }
 
+/* ── Terminal output mutex — serializes cursor-positioned writes ──────── */
+static pthread_mutex_t g_term_mutex = PTHREAD_MUTEX_INITIALIZER;
+
+void tui_term_lock(void)   { pthread_mutex_lock(&g_term_mutex); }
+void tui_term_unlock(void) { pthread_mutex_unlock(&g_term_mutex); }
+
 void tui_cursor_hide(void)    { fprintf(stderr, "\033[?25l"); }
 void tui_cursor_show(void)    { fprintf(stderr, "\033[?25h"); }
 void tui_cursor_move(int r, int c) { fprintf(stderr, "\033[%d;%dH", r, c); }
@@ -456,14 +462,16 @@ void tui_stream_start(void) {
 }
 
 void tui_stream_text(const char *text) {
-    fputs(text, stdout);
-    fflush(stdout);
+    tui_term_lock();
+    fputs(text, stderr);
+    fflush(stderr);
+    tui_term_unlock();
 }
 
 void tui_stream_tool(const char *name, const char *id) {
     (void)id;
     if (s_stream_active) {
-        printf("\n");
+        fprintf(stderr, "\n");
         s_stream_active = false;
     }
     fprintf(stderr, "  %s%s⚡%s %s%s%s\n",
@@ -1127,10 +1135,27 @@ void tui_gradient_divider(int width, float h_start, float h_end) {
 }
 
 void tui_transition_divider(void) {
-    int w = tui_term_width();
-    fprintf(stderr, "  %s", TUI_DIM);
-    for (int i = 0; i < w - 4; i++) fprintf(stderr, "·");
-    fprintf(stderr, "%s\n", TUI_RESET);
+    bool use_rgb = tui_detect_color_level() >= TUI_COLOR_256;
+    if (use_rgb) {
+        /* Subtle center-fading dot trail */
+        int w = tui_term_width();
+        int dots = w / 3;
+        if (dots < 8) dots = 8;
+        if (dots > 40) dots = 40;
+        int pad = (w - dots) / 2;
+        fprintf(stderr, "%*s", pad, "");
+        for (int i = 0; i < dots; i++) {
+            float t = (float)i / (float)(dots - 1);
+            /* Fade from edges: bright center, dim edges */
+            float brightness = 0.25f + 0.35f * (1.0f - fabsf(2.0f * t - 1.0f));
+            float hue = 260.0f + t * 40.0f;
+            tui_rgb_t c = tui_hsv_to_rgb(hue, 0.2f, brightness);
+            fprintf(stderr, "\033[38;2;%d;%d;%dm·", c.r, c.g, c.b);
+        }
+        fprintf(stderr, TUI_RESET "\n");
+    } else {
+        fprintf(stderr, "\n");
+    }
 }
 
 /* ══════════════════════════════════════════════════════════════════════════
@@ -1139,42 +1164,71 @@ void tui_transition_divider(void) {
 
 tui_tool_type_t tui_classify_tool(const char *name) {
     if (!name) return TUI_TOOL_OTHER;
+    /* Crypto — must match before generic "hash" */
+    if (strstr(name, "sha") || strstr(name, "md5") || strstr(name, "hmac") ||
+        strstr(name, "encrypt") || strstr(name, "decrypt") || strstr(name, "hash") ||
+        strstr(name, "base64") || strstr(name, "uuid") || strstr(name, "jwt") ||
+        strstr(name, "hkdf") || strstr(name, "random_bytes") || strstr(name, "crypto"))
+        return TUI_TOOL_CRYPTO;
+    /* Math/eval */
+    if (strstr(name, "eval") || strstr(name, "calc") || strstr(name, "math") ||
+        strstr(name, "factorial") || strstr(name, "compute"))
+        return TUI_TOOL_MATH;
+    /* Data/search/query */
+    if (strstr(name, "search") || strstr(name, "find") || strstr(name, "query") ||
+        strstr(name, "sql") || strstr(name, "database") || strstr(name, "market") ||
+        strstr(name, "quote") || strstr(name, "context_search") ||
+        strstr(name, "context_get") || strstr(name, "grep"))
+        return TUI_TOOL_DATA;
+    /* Read */
     if (strstr(name, "read") || strstr(name, "list") || strstr(name, "get") ||
-        strstr(name, "search") || strstr(name, "find") || strstr(name, "cat") ||
-        strstr(name, "tree") || strstr(name, "ls") || strstr(name, "stat"))
+        strstr(name, "cat") || strstr(name, "tree") || strstr(name, "ls") ||
+        strstr(name, "head") || strstr(name, "tail") || strstr(name, "stat") ||
+        strstr(name, "sysinfo") || strstr(name, "date"))
         return TUI_TOOL_READ;
+    /* Write */
     if (strstr(name, "write") || strstr(name, "create") || strstr(name, "edit") ||
         strstr(name, "patch") || strstr(name, "update") || strstr(name, "delete") ||
-        strstr(name, "mkdir") || strstr(name, "mv") || strstr(name, "rm"))
+        strstr(name, "mkdir") || strstr(name, "mv") || strstr(name, "rm") ||
+        strstr(name, "save") || strstr(name, "append"))
         return TUI_TOOL_WRITE;
+    /* Exec */
     if (strstr(name, "exec") || strstr(name, "run") || strstr(name, "shell") ||
-        strstr(name, "bash") || strstr(name, "cmd") || strstr(name, "eval"))
+        strstr(name, "bash") || strstr(name, "cmd") || strstr(name, "python") ||
+        strstr(name, "compile") || strstr(name, "build") || strstr(name, "pipeline"))
         return TUI_TOOL_EXEC;
+    /* Web */
     if (strstr(name, "http") || strstr(name, "fetch") || strstr(name, "curl") ||
         strstr(name, "web") || strstr(name, "api") || strstr(name, "request") ||
-        strstr(name, "download"))
+        strstr(name, "download") || strstr(name, "url") || strstr(name, "browse"))
         return TUI_TOOL_WEB;
     return TUI_TOOL_OTHER;
 }
 
 const char *tui_tool_color(tui_tool_type_t type) {
     switch (type) {
-        case TUI_TOOL_READ:  return TUI_BBLUE;
-        case TUI_TOOL_WRITE: return TUI_BYELLOW;
-        case TUI_TOOL_EXEC:  return TUI_BMAGENTA;
-        case TUI_TOOL_WEB:   return TUI_BGREEN;
-        case TUI_TOOL_OTHER: return TUI_BCYAN;
+        case TUI_TOOL_READ:   return TUI_BBLUE;
+        case TUI_TOOL_WRITE:  return TUI_BYELLOW;
+        case TUI_TOOL_EXEC:   return TUI_BMAGENTA;
+        case TUI_TOOL_WEB:    return TUI_BGREEN;
+        case TUI_TOOL_CRYPTO: return TUI_BRED;
+        case TUI_TOOL_MATH:   return TUI_BYELLOW;
+        case TUI_TOOL_DATA:   return TUI_BCYAN;
+        case TUI_TOOL_OTHER:  return TUI_BCYAN;
     }
     return TUI_BCYAN;
 }
 
 tui_rgb_t tui_tool_rgb(tui_tool_type_t type) {
     switch (type) {
-        case TUI_TOOL_READ:  return (tui_rgb_t){100, 149, 237}; /* cornflower blue */
-        case TUI_TOOL_WRITE: return (tui_rgb_t){255, 193,  37}; /* gold */
-        case TUI_TOOL_EXEC:  return (tui_rgb_t){178, 102, 255}; /* purple */
-        case TUI_TOOL_WEB:   return (tui_rgb_t){ 80, 220, 120}; /* green */
-        case TUI_TOOL_OTHER: return (tui_rgb_t){  0, 210, 230}; /* cyan */
+        case TUI_TOOL_READ:   return (tui_rgb_t){100, 149, 237}; /* cornflower blue */
+        case TUI_TOOL_WRITE:  return (tui_rgb_t){255, 193,  37}; /* gold */
+        case TUI_TOOL_EXEC:   return (tui_rgb_t){178, 102, 255}; /* purple */
+        case TUI_TOOL_WEB:    return (tui_rgb_t){ 80, 220, 120}; /* green */
+        case TUI_TOOL_CRYPTO: return (tui_rgb_t){255, 100, 150}; /* hot pink */
+        case TUI_TOOL_MATH:   return (tui_rgb_t){255, 165,  50}; /* orange */
+        case TUI_TOOL_DATA:   return (tui_rgb_t){  0, 200, 200}; /* teal */
+        case TUI_TOOL_OTHER:  return (tui_rgb_t){  0, 210, 230}; /* cyan */
     }
     return (tui_rgb_t){0, 210, 230};
 }
@@ -1192,6 +1246,7 @@ static double tui_now_sec(void) {
 static void *async_spinner_thread(void *arg) {
     tui_async_spinner_t *s = (tui_async_spinner_t *)arg;
     int frame = 0;
+    bool truecolor = tui_supports_truecolor();
 
     while (1) {
         pthread_mutex_lock(&s->mutex);
@@ -1205,37 +1260,80 @@ static void *async_spinner_thread(void *arg) {
 
         if (!running) break;
 
-        /* Build the entire spinner line in a buffer, then write atomically
-           to avoid interleaving with stdout streaming output. */
-        char buf[512];
+        char buf[1024];
         int pos = 0;
         pos += snprintf(buf + pos, sizeof(buf) - pos, "\033[2K\r  ");
 
-        /* Spinner character with color */
-        if (use_rgb) {
+        const tui_glyphs_t *g = tui_glyph();
+
+        if (truecolor) {
+            /* Hue-rotating spinner glyph */
+            float base_hue = use_rgb
+                ? (rgb.r > rgb.b ? (rgb.r > rgb.g ? 0.0f : 120.0f) : 240.0f)
+                : 270.0f;
+            float spin_hue = fmodf(base_hue + (float)frame * 9.0f, 360.0f);
+            tui_rgb_t sc = tui_hsv_to_rgb(spin_hue, 0.7f, 0.95f);
+            int oc = g->spin_orbit_n > 0 ? g->spin_orbit_n : 1;
             pos += snprintf(buf + pos, sizeof(buf) - pos,
-                            "\033[38;2;%d;%d;%dm", rgb.r, rgb.g, rgb.b);
-        } else if (color) {
-            pos += snprintf(buf + pos, sizeof(buf) - pos, "%s", color);
-        }
-        {
-            const tui_glyphs_t *g = tui_glyph();
+                    "\033[38;2;%d;%d;%dm%s\033[0m",
+                    sc.r, sc.g, sc.b, g->spin_orbit[frame % oc]);
+
+            /* Tool name in its type color */
+            pos += snprintf(buf + pos, sizeof(buf) - pos,
+                    " \033[1m\033[38;2;%d;%d;%dm%s\033[0m",
+                    rgb.r, rgb.g, rgb.b, label ? label : "");
+
+            /* Micro progress bar — 8 chars, fills over time (wraps at 10s) */
+            {
+                float progress = fmodf((float)elapsed / 10.0f, 1.0f);
+                int bar_w = 8;
+                int filled = (int)(progress * bar_w);
+                pos += snprintf(buf + pos, sizeof(buf) - pos, " ");
+                for (int b = 0; b < bar_w; b++) {
+                    float bh = fmodf(spin_hue + (float)b * 15.0f, 360.0f);
+                    tui_rgb_t bc = tui_hsv_to_rgb(bh, 0.4f, b < filled ? 0.8f : 0.25f);
+                    pos += snprintf(buf + pos, sizeof(buf) - pos,
+                            "\033[38;2;%d;%d;%dm%s",
+                            bc.r, bc.g, bc.b,
+                            b < filled ? g->vblock[7] : g->vblock[1]);
+                }
+                pos += snprintf(buf + pos, sizeof(buf) - pos, "\033[0m");
+            }
+
+            /* Elapsed timer with breathing brightness */
+            {
+                float breath = 0.55f + 0.25f * sinf((float)elapsed * 2.0f);
+                tui_rgb_t tc = tui_hsv_to_rgb(210.0f, 0.15f, breath);
+                char es[16];
+                if (elapsed < 10.0)
+                    snprintf(es, sizeof(es), "%.1fs", elapsed);
+                else
+                    snprintf(es, sizeof(es), "%.0fs", elapsed);
+                pos += snprintf(buf + pos, sizeof(buf) - pos,
+                        " \033[38;2;%d;%d;%dm%s\033[0m",
+                        tc.r, tc.g, tc.b, es);
+            }
+        } else {
+            /* Fallback: basic spinner */
+            if (use_rgb) {
+                pos += snprintf(buf + pos, sizeof(buf) - pos,
+                                "\033[38;2;%d;%d;%dm", rgb.r, rgb.g, rgb.b);
+            } else if (color) {
+                pos += snprintf(buf + pos, sizeof(buf) - pos, "%s", color);
+            }
             int fc = g->spin_dots_n > 0 ? g->spin_dots_n : 1;
             pos += snprintf(buf + pos, sizeof(buf) - pos, "%s" TUI_RESET,
                             g->spin_dots[frame % fc]);
+            pos += snprintf(buf + pos, sizeof(buf) - pos, " %s%s%s %s(%.1fs)%s",
+                    TUI_BOLD, label ? label : "", TUI_RESET,
+                    TUI_DIM, elapsed, TUI_RESET);
         }
 
-        /* Label + elapsed */
-        pos += snprintf(buf + pos, sizeof(buf) - pos, " %s%s%s %s(%.1fs)%s",
-                TUI_BOLD, label ? label : "", TUI_RESET,
-                TUI_DIM, elapsed, TUI_RESET);
-
-        /* Single write to stderr */
         fwrite(buf, 1, pos, stderr);
         fflush(stderr);
 
         frame++;
-        usleep(100000); /* 10fps */
+        usleep(80000); /* 12.5fps for smoother animation */
     }
     return NULL;
 }
@@ -1261,7 +1359,8 @@ void tui_async_spinner_start(tui_async_spinner_t *s, const char *label,
 }
 
 void tui_async_spinner_stop(tui_async_spinner_t *s, bool ok,
-                            const char *result_preview, double elapsed_ms) {
+                            const char *result_preview, double elapsed_ms,
+                            const char *suffix) {
     pthread_mutex_lock(&s->mutex);
     s->running = false;
     pthread_mutex_unlock(&s->mutex);
@@ -1300,16 +1399,42 @@ void tui_async_spinner_stop(tui_async_spinner_t *s, bool ok,
 
     const tui_glyphs_t *gl = tui_glyph();
     const char *icon = ok ? gl->ok : gl->fail;
-    const char *icon_color = ok ? TUI_GREEN : TUI_RED;
+    bool use_rgb = tui_detect_color_level() >= TUI_COLOR_256;
 
-    fprintf(stderr, "  %s%s%s %s%s%s%s %s(%s)%s",
-            icon_color, icon, TUI_RESET,
-            TUI_BOLD, s->label ? s->label : "", TUI_RESET,
-            size_str,
-            TUI_DIM, elapsed_str, TUI_RESET);
+    if (use_rgb) {
+        /* Rich result line with colored elapsed and tool-type tinted name */
+        tui_rgb_t name_rgb = s->use_rgb ? s->rgb : (tui_rgb_t){100, 200, 255};
+        tui_rgb_t icon_rgb = ok ? (tui_rgb_t){80, 220, 120} : (tui_rgb_t){255, 80, 80};
+        /* Elapsed color: green for fast (<500ms), yellow mid, red slow (>5s) */
+        float speed_hue = elapsed_ms < 500 ? 120.0f
+                        : elapsed_ms < 2000 ? 120.0f - (float)(elapsed_ms - 500) / 1500.0f * 60.0f
+                        : elapsed_ms < 5000 ? 60.0f - (float)(elapsed_ms - 2000) / 3000.0f * 60.0f
+                        : 0.0f;
+        tui_rgb_t elapsed_rgb = tui_hsv_to_rgb(speed_hue, 0.5f, 0.75f);
+
+        fprintf(stderr, "  \033[38;2;%d;%d;%dm%s\033[0m "
+                        "\033[38;2;%d;%d;%dm%s%s\033[0m"
+                        "%s "
+                        "\033[38;2;%d;%d;%dm(%s)\033[0m",
+                icon_rgb.r, icon_rgb.g, icon_rgb.b, icon,
+                name_rgb.r, name_rgb.g, name_rgb.b,
+                s->label ? s->label : "", TUI_RESET,
+                size_str,
+                elapsed_rgb.r, elapsed_rgb.g, elapsed_rgb.b, elapsed_str);
+    } else {
+        const char *icon_color = ok ? TUI_GREEN : TUI_RED;
+        fprintf(stderr, "  %s%s%s %s%s%s%s %s(%s)%s",
+                icon_color, icon, TUI_RESET,
+                TUI_BOLD, s->label ? s->label : "", TUI_RESET,
+                size_str,
+                TUI_DIM, elapsed_str, TUI_RESET);
+    }
 
     if (preview[0]) {
         fprintf(stderr, " %s%s%s", TUI_DIM, preview, TUI_RESET);
+    }
+    if (suffix && suffix[0]) {
+        fprintf(stderr, "  %s%s%s", TUI_DIM, suffix, TUI_RESET);
     }
     fprintf(stderr, "\n");
 }
@@ -1349,19 +1474,28 @@ static void *batch_spinner_thread(void *arg) {
             pos += snprintf(buf + pos, sizeof(buf) - pos, "\033[2K\r");
 
             if (e->done) {
-                const char *icon = e->ok ? "\xe2\x9c\x93" : "\xe2\x9c\x97";
-                const char *color = e->ok ? TUI_GREEN : TUI_RED;
                 char elapsed_str[32];
                 if (e->elapsed_ms < 1000.0)
                     snprintf(elapsed_str, sizeof(elapsed_str), "%.0fms", e->elapsed_ms);
                 else
                     snprintf(elapsed_str, sizeof(elapsed_str), "%.1fs", e->elapsed_ms / 1000.0);
 
+                /* Speed-based elapsed color */
+                float speed_hue = e->elapsed_ms < 500 ? 120.0f
+                    : e->elapsed_ms < 2000 ? 120.0f - (float)(e->elapsed_ms - 500) / 1500.0f * 60.0f
+                    : e->elapsed_ms < 5000 ? 60.0f - (float)(e->elapsed_ms - 2000) / 3000.0f * 60.0f
+                    : 0.0f;
+                tui_rgb_t er = tui_hsv_to_rgb(speed_hue, 0.5f, 0.75f);
+                tui_rgb_t ir = e->ok ? (tui_rgb_t){80, 220, 120} : (tui_rgb_t){255, 80, 80};
+                tui_rgb_t nr = tui_tool_rgb(e->type);
+
                 pos += snprintf(buf + pos, sizeof(buf) - pos,
-                        "  %s%s%s %s%s%s %s(%s)%s",
-                        color, icon, TUI_RESET,
-                        tui_tool_color(e->type), e->name, TUI_RESET,
-                        TUI_DIM, elapsed_str, TUI_RESET);
+                        "  \033[38;2;%d;%d;%dm%s\033[0m "
+                        "\033[38;2;%d;%d;%dm%s\033[0m "
+                        "\033[38;2;%d;%d;%dm(%s)\033[0m",
+                        ir.r, ir.g, ir.b, e->ok ? "\xe2\x9c\x93" : "\xe2\x9c\x97",
+                        nr.r, nr.g, nr.b, e->name,
+                        er.r, er.g, er.b, elapsed_str);
                 if (e->preview[0]) {
                     pos += snprintf(buf + pos, sizeof(buf) - pos,
                             " %s%.60s%s", TUI_DIM, e->preview, TUI_RESET);
@@ -1369,15 +1503,52 @@ static void *batch_spinner_thread(void *arg) {
             } else {
                 double elapsed = now - bs->start_time;
                 tui_rgb_t rgb = tui_tool_rgb(e->type);
+                const tui_glyphs_t *gl = tui_glyph();
+
+                /* Hue-rotating orbital spinner per entry */
+                float base_h = (float)(i * 45) + 270.0f;
+                float spin_h = fmodf(base_h + (float)frame * 9.0f, 360.0f);
+                tui_rgb_t sc = tui_hsv_to_rgb(spin_h, 0.7f, 0.95f);
+                int oc = gl->spin_orbit_n > 0 ? gl->spin_orbit_n : 1;
+                pos += snprintf(buf + pos, sizeof(buf) - pos,
+                        "  \033[38;2;%d;%d;%dm%s\033[0m",
+                        sc.r, sc.g, sc.b,
+                        gl->spin_orbit[frame % oc]);
+
+                /* Tool name in type color */
+                pos += snprintf(buf + pos, sizeof(buf) - pos,
+                        " \033[38;2;%d;%d;%dm%s\033[0m",
+                        rgb.r, rgb.g, rgb.b, e->name);
+
+                /* Mini 4-char progress pulse */
                 {
-                    const tui_glyphs_t *gl = tui_glyph();
-                    int fc = gl->spin_dots_n > 0 ? gl->spin_dots_n : 1;
+                    float progress = fmodf((float)elapsed / 8.0f, 1.0f);
+                    int pw = 4;
+                    int filled = (int)(progress * pw);
+                    pos += snprintf(buf + pos, sizeof(buf) - pos, " ");
+                    for (int b = 0; b < pw; b++) {
+                        float bh = fmodf(spin_h + (float)b * 20.0f, 360.0f);
+                        tui_rgb_t bc = tui_hsv_to_rgb(bh, 0.4f, b < filled ? 0.75f : 0.2f);
+                        pos += snprintf(buf + pos, sizeof(buf) - pos,
+                                "\033[38;2;%d;%d;%dm%s",
+                                bc.r, bc.g, bc.b,
+                                b < filled ? gl->vblock[7] : gl->vblock[1]);
+                    }
+                    pos += snprintf(buf + pos, sizeof(buf) - pos, "\033[0m");
+                }
+
+                if (e->args_preview[0]) {
                     pos += snprintf(buf + pos, sizeof(buf) - pos,
-                            "  \033[38;2;%d;%d;%dm%s" TUI_RESET " %s%s%s %s(%.1fs)%s",
-                            rgb.r, rgb.g, rgb.b,
-                            gl->spin_dots[frame % fc],
-                            tui_tool_color(e->type), e->name, TUI_RESET,
-                            TUI_DIM, elapsed, TUI_RESET);
+                            " %s%.50s%s", TUI_DIM, e->args_preview, TUI_RESET);
+                }
+
+                /* Breathing elapsed */
+                {
+                    float breath = 0.45f + 0.3f * sinf((float)elapsed * 2.0f);
+                    tui_rgb_t tc = tui_hsv_to_rgb(210.0f, 0.15f, breath);
+                    pos += snprintf(buf + pos, sizeof(buf) - pos,
+                            " \033[38;2;%d;%d;%dm(%.1fs)\033[0m",
+                            tc.r, tc.g, tc.b, elapsed);
                 }
             }
             pos += snprintf(buf + pos, sizeof(buf) - pos, "\n");
@@ -1447,6 +1618,59 @@ void tui_batch_spinner_stop(tui_batch_spinner_t *bs) {
     tui_cursor_show();
 }
 
+void tui_batch_summary(const tui_batch_spinner_t *bs, const char *cost_suffix) {
+    if (bs->count < 2) return;
+
+    int ok_count = 0, fail_count = 0, cached = 0;
+    double total_ms = 0, max_ms = 0;
+    for (int i = 0; i < bs->count; i++) {
+        const tui_batch_entry_t *e = &bs->entries[i];
+        if (e->ok) ok_count++; else fail_count++;
+        if (e->preview[0] && strncmp(e->preview, "cached", 6) == 0) {
+            cached++;
+        } else {
+            total_ms += e->elapsed_ms;
+            if (e->elapsed_ms > max_ms) max_ms = e->elapsed_ms;
+        }
+    }
+    (void)ok_count;
+    int executed = bs->count - cached;
+    double avg_ms = executed > 0 ? total_ms / executed : 0;
+
+    const tui_glyphs_t *gl = tui_glyph();
+
+    /* Summary: ✓ 5 tools (42ms avg, 120ms max) [2 cached]  [in:N out:N $cost] */
+    fprintf(stderr, "  %s%s%s %s%d tool%s%s",
+            fail_count == 0 ? TUI_GREEN : TUI_YELLOW,
+            fail_count == 0 ? gl->ok : gl->warn,
+            TUI_RESET,
+            TUI_BOLD, bs->count, bs->count == 1 ? "" : "s", TUI_RESET);
+
+    if (executed > 0) {
+        char avg_str[32], max_str[32];
+        if (avg_ms < 1000.0)
+            snprintf(avg_str, sizeof(avg_str), "%.0fms", avg_ms);
+        else
+            snprintf(avg_str, sizeof(avg_str), "%.1fs", avg_ms / 1000.0);
+        if (max_ms < 1000.0)
+            snprintf(max_str, sizeof(max_str), "%.0fms", max_ms);
+        else
+            snprintf(max_str, sizeof(max_str), "%.1fs", max_ms / 1000.0);
+        fprintf(stderr, " %s(%s avg, %s max)%s",
+                TUI_DIM, avg_str, max_str, TUI_RESET);
+    }
+    if (cached > 0) {
+        fprintf(stderr, " %s[%d cached]%s", TUI_DIM, cached, TUI_RESET);
+    }
+    if (fail_count > 0) {
+        fprintf(stderr, " %s[%d failed]%s", TUI_RED, fail_count, TUI_RESET);
+    }
+    if (cost_suffix && cost_suffix[0]) {
+        fprintf(stderr, "  %s%s%s", TUI_DIM, cost_suffix, TUI_RESET);
+    }
+    fprintf(stderr, "\n");
+}
+
 /* ══════════════════════════════════════════════════════════════════════════
  * ANIMATED WELCOME BANNER
  * ══════════════════════════════════════════════════════════════════════════ */
@@ -1464,12 +1688,12 @@ static void welcome_animated(const char *model, int tool_count, const char *vers
 
     /* ASCII art lines (plain text, no ANSI) */
     const char *art[] = {
-        "  ██████╗  ███████╗  ██████╗  ██████╗ ",
-        "  ██╔══██╗ ██╔════╝ ██╔════╝ ██╔═══██╗",
-        "  ██║  ██║ ███████╗ ██║      ██║   ██║",
-        "  ██║  ██║ ╚════██║ ██║      ██║   ██║",
-        "  ██████╔╝ ███████║ ╚██████╗ ╚██████╔╝",
-        "  ╚═════╝  ╚══════╝  ╚═════╝  ╚═════╝ ",
+        "██████╗  ███████╗  ██████╗  ██████╗ ",
+        "██╔══██╗ ██╔════╝ ██╔════╝ ██╔═══██╗",
+        "██║  ██║ ███████╗ ██║      ██║   ██║",
+        "██║  ██║ ╚════██║ ██║      ██║   ██║",
+        "██████╔╝ ███████║ ╚██████╗ ╚██████╔╝",
+        "╚═════╝  ╚══════╝  ╚═════╝  ╚═════╝ ",
     };
     int art_lines = 6;
     /* art_width unused after left-align change */
@@ -1618,6 +1842,7 @@ void tui_status_bar_init(tui_status_bar_t *sb, const char *model) {
     if (model) snprintf(sb->model, sizeof(sb->model), "%s", model);
     sb->enabled = false;
     sb->visible = false;
+    sb->panel_rows = 3;  /* input row + separator + status bar */
 }
 
 void tui_status_bar_update(tui_status_bar_t *sb, int in_tok, int out_tok,
@@ -1637,17 +1862,22 @@ void tui_status_bar_enable(tui_status_bar_t *sb) {
     pthread_mutex_lock(&sb->mutex);
     sb->enabled = true;
     sb->visible = true;
+    int panel = sb->panel_rows > 0 ? sb->panel_rows : 3;
     pthread_mutex_unlock(&sb->mutex);
 
     int rows = tui_term_height();
-    /* Set scroll region: rows 1 to (rows-1), pinning last line */
-    fprintf(stderr, "\033[1;%dr", rows - 1);
+    tui_term_lock();
+    /* Set scroll region: rows 1 to (rows - panel), reserving bottom panel */
+    fprintf(stderr, "\033[1;%dr", rows - panel);
+    fflush(stderr);
+    tui_term_unlock();
     tui_status_bar_render(sb);
 }
 
 void tui_status_bar_disable(tui_status_bar_t *sb) {
     pthread_mutex_lock(&sb->mutex);
     bool was_visible = sb->visible;
+    int panel = sb->panel_rows > 0 ? sb->panel_rows : 3;
     sb->enabled = false;
     sb->visible = false;
     pthread_mutex_unlock(&sb->mutex);
@@ -1655,14 +1885,18 @@ void tui_status_bar_disable(tui_status_bar_t *sb) {
     if (!was_visible) return;  /* Don't touch scroll region if never shown */
 
     int rows = tui_term_height();
+    tui_term_lock();
     /* Reset scroll region to full terminal */
     fprintf(stderr, "\033[r");  /* reset to default */
-    /* Clear the status bar line */
+    /* Clear all bottom panel rows */
     tui_save_cursor();
-    tui_cursor_move(rows, 1);
-    tui_clear_line();
+    for (int i = 0; i < panel; i++) {
+        tui_cursor_move(rows - i, 1);
+        tui_clear_line();
+    }
     tui_restore_cursor();
     fflush(stderr);
+    tui_term_unlock();
 }
 
 void tui_status_bar_render(tui_status_bar_t *sb) {
@@ -1694,6 +1928,7 @@ void tui_status_bar_render(tui_status_bar_t *sb) {
 
     pthread_mutex_unlock(&sb->mutex);
 
+    tui_term_lock();
     tui_save_cursor();
     tui_cursor_move(rows, 1);
 
@@ -1719,6 +1954,66 @@ void tui_status_bar_render(tui_status_bar_t *sb) {
 
     tui_restore_cursor();
     fflush(stderr);
+    tui_term_unlock();
+}
+
+/* ── Input Panel (persistent bottom panel) ─────────────────────────────── */
+
+void tui_input_panel_render(tui_status_bar_t *sb, const char *prompt_hint) {
+    pthread_mutex_lock(&sb->mutex);
+    if (!sb->visible) {
+        pthread_mutex_unlock(&sb->mutex);
+        return;
+    }
+    pthread_mutex_unlock(&sb->mutex);
+
+    int rows = tui_term_height();
+    int cols = tui_term_width();
+    int sep_row = rows - 1;   /* separator line */
+    int input_row = rows - 2; /* input line */
+
+    tui_term_lock();
+    tui_save_cursor();
+
+    /* Draw separator on row N-1 */
+    tui_cursor_move(sep_row, 1);
+    fprintf(stderr, "\033[2K");  /* clear line */
+    fprintf(stderr, "\033[2m");  /* dim */
+    for (int i = 0; i < cols; i++) fprintf(stderr, "─");
+    fprintf(stderr, "\033[0m");
+
+    /* Draw input placeholder on row N-2 */
+    tui_cursor_move(input_row, 1);
+    fprintf(stderr, "\033[2K");  /* clear line */
+    if (prompt_hint && *prompt_hint) {
+        fprintf(stderr, "%s", prompt_hint);
+    } else {
+        fprintf(stderr, "\033[1m\033[95m❯\033[0m \033[5m█\033[0m");
+    }
+
+    tui_restore_cursor();
+    fflush(stderr);
+    tui_term_unlock();
+}
+
+void tui_input_panel_clear(tui_status_bar_t *sb) {
+    (void)sb;
+    int rows = tui_term_height();
+    tui_term_lock();
+    tui_save_cursor();
+    /* Clear input row and separator row */
+    tui_cursor_move(rows - 2, 1);
+    fprintf(stderr, "\033[2K");
+    tui_cursor_move(rows - 1, 1);
+    fprintf(stderr, "\033[2K");
+    tui_restore_cursor();
+    fflush(stderr);
+    tui_term_unlock();
+}
+
+void tui_bottom_panel_refresh(tui_status_bar_t *sb, const char *prompt_hint) {
+    tui_status_bar_render(sb);
+    tui_input_panel_render(sb, prompt_hint);
 }
 
 /* ══════════════════════════════════════════════════════════════════════════
@@ -1946,25 +2241,131 @@ const char *tui_theme_accent(void) {
 
 /* ── F30: Section Dividers with Context ───────────────────────────────── */
 
-void tui_section_divider(int turn, int tools, double cost, const char *model) {
+void tui_section_divider(int turn, int tools, double cost, const char *model,
+                         double tok_per_sec) {
     (void)model;
     if (g_tui_features && !g_tui_features->section_dividers) return;
     int w = tui_term_width();
     char info[256];
-    snprintf(info, sizeof(info), " turn %d · %d tool%s · $%.3f ",
-             turn, tools, tools == 1 ? "" : "s", cost);
+    if (tok_per_sec > 0) {
+        snprintf(info, sizeof(info), " turn %d · %d tool%s · $%.3f · %.0f tok/s ",
+                 turn, tools, tools == 1 ? "" : "s", cost, tok_per_sec);
+    } else {
+        snprintf(info, sizeof(info), " turn %d · %d tool%s · $%.3f ",
+                 turn, tools, tools == 1 ? "" : "s", cost);
+    }
     int info_len = (int)strlen(info);
     int left = (w - info_len - 2) / 2;
     int right = w - info_len - left - 2;
     if (left < 2) left = 2;
     if (right < 2) right = 2;
 
-    fprintf(stderr, "\n%s", TUI_DIM);
-    for (int i = 0; i < left; i++) fprintf(stderr, "─");
-    fprintf(stderr, "%s%s%s%s", TUI_RESET, TUI_DIM, info, TUI_RESET);
-    fprintf(stderr, "%s", TUI_DIM);
-    for (int i = 0; i < right; i++) fprintf(stderr, "─");
-    fprintf(stderr, "%s\n\n", TUI_RESET);
+    bool use_gradient = tui_detect_color_level() >= TUI_COLOR_256;
+    if (use_gradient) {
+        /* Left gradient: purple → cyan */
+        for (int i = 0; i < left; i++) {
+            float t = (float)i / (float)(left > 1 ? left - 1 : 1);
+            float h = 280.0f + t * (190.0f - 280.0f + 360.0f);
+            if (h >= 360.0f) h -= 360.0f;
+            tui_rgb_t c = tui_hsv_to_rgb(h, 0.35f, 0.55f);
+            fprintf(stderr, "\033[38;2;%d;%d;%dm─", c.r, c.g, c.b);
+        }
+        fprintf(stderr, TUI_RESET);
+        /* Info text with subtle accent */
+        {
+            tui_rgb_t tc = tui_hsv_to_rgb(210.0f, 0.20f, 0.65f);
+            fprintf(stderr, "\033[38;2;%d;%d;%dm%s" TUI_RESET, tc.r, tc.g, tc.b, info);
+        }
+        /* Right gradient: cyan → purple */
+        for (int i = 0; i < right; i++) {
+            float t = (float)i / (float)(right > 1 ? right - 1 : 1);
+            float h = 190.0f + t * (280.0f - 190.0f);
+            tui_rgb_t c = tui_hsv_to_rgb(h, 0.35f, 0.55f);
+            fprintf(stderr, "\033[38;2;%d;%d;%dm─", c.r, c.g, c.b);
+        }
+        fprintf(stderr, TUI_RESET "\n");
+    } else {
+        fprintf(stderr, "%s", TUI_DIM);
+        for (int i = 0; i < left; i++) fprintf(stderr, "─");
+        fprintf(stderr, "%s%s%s%s", TUI_RESET, TUI_DIM, info, TUI_RESET);
+        fprintf(stderr, "%s", TUI_DIM);
+        for (int i = 0; i < right; i++) fprintf(stderr, "─");
+        fprintf(stderr, "%s\n", TUI_RESET);
+    }
+}
+
+/* ── F30 Enhanced: Section Divider with success/fail/cache/context ───── */
+
+void tui_section_divider_ex(int turn, int tools_ok, int tools_fail,
+                            int cache_hits, double cost, const char *model,
+                            double tok_per_sec, double ctx_pct,
+                            const char *git_branch) {
+    (void)model;
+    if (g_tui_features && !g_tui_features->section_dividers) return;
+    int w = tui_term_width();
+    char info[384];
+    int pos = 0;
+
+    pos += snprintf(info + pos, sizeof(info) - pos, " t%d", turn);
+
+    int total_tools = tools_ok + tools_fail;
+    if (total_tools > 0) {
+        pos += snprintf(info + pos, sizeof(info) - pos, " · %d tool%s",
+                        total_tools, total_tools == 1 ? "" : "s");
+        if (tools_fail > 0)
+            pos += snprintf(info + pos, sizeof(info) - pos, " (%d fail)", tools_fail);
+    }
+
+    if (cache_hits > 0)
+        pos += snprintf(info + pos, sizeof(info) - pos, " · %d cached", cache_hits);
+
+    pos += snprintf(info + pos, sizeof(info) - pos, " · $%.3f", cost);
+
+    if (tok_per_sec > 0)
+        pos += snprintf(info + pos, sizeof(info) - pos, " · %.0f tok/s", tok_per_sec);
+
+    /* Context pressure */
+    const char *ctx_indicator = ctx_pct < 60 ? "●" : (ctx_pct < 85 ? "◐" : "◉");
+    pos += snprintf(info + pos, sizeof(info) - pos, " · %.0f%% %s", ctx_pct, ctx_indicator);
+
+    if (git_branch && git_branch[0] && g_tui_features && g_tui_features->branch_indicator)
+        pos += snprintf(info + pos, sizeof(info) - pos, " · %s", git_branch);
+
+    snprintf(info + pos, sizeof(info) - pos, " ");
+
+    int info_len = (int)strlen(info);
+    int left = (w - info_len - 2) / 2;
+    int right = w - info_len - left - 2;
+    if (left < 2) left = 2;
+    if (right < 2) right = 2;
+
+    bool use_gradient = tui_detect_color_level() >= TUI_COLOR_256;
+    if (use_gradient) {
+        for (int i = 0; i < left; i++) {
+            float t = (float)i / (float)(left > 1 ? left - 1 : 1);
+            float h = 280.0f + t * (190.0f - 280.0f + 360.0f);
+            if (h >= 360.0f) h -= 360.0f;
+            tui_rgb_t c = tui_hsv_to_rgb(h, 0.35f, 0.55f);
+            fprintf(stderr, "\033[38;2;%d;%d;%dm─", c.r, c.g, c.b);
+        }
+        fprintf(stderr, TUI_RESET);
+        tui_rgb_t tc = tui_hsv_to_rgb(210.0f, 0.20f, 0.65f);
+        fprintf(stderr, "\033[38;2;%d;%d;%dm%s" TUI_RESET, tc.r, tc.g, tc.b, info);
+        for (int i = 0; i < right; i++) {
+            float t = (float)i / (float)(right > 1 ? right - 1 : 1);
+            float h = 190.0f + t * (280.0f - 190.0f);
+            tui_rgb_t c = tui_hsv_to_rgb(h, 0.35f, 0.55f);
+            fprintf(stderr, "\033[38;2;%d;%d;%dm─", c.r, c.g, c.b);
+        }
+        fprintf(stderr, TUI_RESET "\n");
+    } else {
+        fprintf(stderr, "%s", TUI_DIM);
+        for (int i = 0; i < left; i++) fprintf(stderr, "─");
+        fprintf(stderr, "%s%s%s%s", TUI_RESET, TUI_DIM, info, TUI_RESET);
+        fprintf(stderr, "%s", TUI_DIM);
+        for (int i = 0; i < right; i++) fprintf(stderr, "─");
+        fprintf(stderr, "%s\n", TUI_RESET);
+    }
 }
 
 /* ── F31: Status Bar Clock ────────────────────────────────────────────── */
@@ -2089,8 +2490,28 @@ void tui_thinking_end(tui_thinking_state_t *t) {
     if (!t->active) return;
     double elapsed = tui_now() - t->start_time;
     int est_tokens = (t->char_count + 3) / 4;
-    if (t->summary[0]) {
-        fprintf(stderr, "  %s[thinking] %s%s\n", TUI_DIM, t->summary, TUI_RESET);
+    bool truecolor = tui_supports_truecolor();
+    const tui_glyphs_t *gl = tui_glyph();
+
+    if (truecolor && t->summary[0]) {
+        /* Gradient thinking badge: brain icon + summary */
+        tui_rgb_t badge_bg = tui_hsv_to_rgb(275.0f, 0.35f, 0.30f);
+        tui_rgb_t badge_fg = tui_hsv_to_rgb(275.0f, 0.20f, 0.90f);
+        tui_rgb_t meta_c   = tui_hsv_to_rgb(260.0f, 0.15f, 0.50f);
+        fprintf(stderr, "  \033[48;2;%d;%d;%dm\033[38;2;%d;%d;%dm %s thinking \033[0m",
+                badge_bg.r, badge_bg.g, badge_bg.b,
+                badge_fg.r, badge_fg.g, badge_fg.b,
+                gl->icon_brain);
+        fprintf(stderr, "\033[38;2;%d;%d;%dm%s\033[0m",
+                badge_bg.r, badge_bg.g, badge_bg.b, gl->pl_right);
+        /* Summary as italic dim */
+        fprintf(stderr, " %s%s%s\n", TUI_DIM TUI_ITALIC, t->summary, TUI_RESET);
+        /* Token/time metadata on second line */
+        fprintf(stderr, "  \033[38;2;%d;%d;%dm  ~%d tokens, %.1fs\033[0m\n",
+                meta_c.r, meta_c.g, meta_c.b, est_tokens, elapsed);
+    } else if (t->summary[0]) {
+        fprintf(stderr, "  %s%s[thinking]%s %s%s%s\n",
+                TUI_DIM, gl->icon_think, TUI_RESET, TUI_DIM TUI_ITALIC, t->summary, TUI_RESET);
         fprintf(stderr, "  %s~%d tokens, %.1fs%s\n", TUI_DIM, est_tokens, elapsed, TUI_RESET);
     } else {
         fprintf(stderr, "  %s[thinking: ~%d tokens, %.1fs]%s\n",
@@ -3975,8 +4396,12 @@ static void *stream_heartbeat_thread(void *arg) {
 
         if (!running) {
             if (was_visible) {
-                fprintf(stderr, "\033[2K\r");
+                int hb_rows = tui_term_height();
+                int hb_row  = hb_rows - 1;
+                tui_term_lock();
+                fprintf(stderr, "\0337\033[%d;1H\033[2K\0338", hb_row);
                 fflush(stderr);
+                tui_term_unlock();
             }
             break;
         }
@@ -3985,8 +4410,11 @@ static void *stream_heartbeat_thread(void *arg) {
             char buf[1024];
             int pos = 0;
 
-            /* Clear line and indent */
-            pos += snprintf(buf + pos, sizeof(buf) - pos, "\033[2K\r  ");
+            /* Save cursor, move to separator row (bottom panel), render there */
+            int hb_rows = tui_term_height();
+            int hb_row  = hb_rows - 1;   /* separator row — reuse for heartbeat */
+            pos += snprintf(buf + pos, sizeof(buf) - pos,
+                "\0337\033[%d;1H\033[2K  ", hb_row);
 
             /* ── Spinner glyph — orbital or braille depending on color level ── */
             {
@@ -4083,9 +4511,15 @@ static void *stream_heartbeat_thread(void *arg) {
                 }
             }
 
-            /* Write atomically */
+            /* Restore cursor after positioned write */
+            pos += snprintf(buf + pos, sizeof(buf) - pos, "\0338");
+
+            /* Write atomically under term lock to avoid cursor races
+               with the main streaming thread */
+            tui_term_lock();
             fwrite(buf, 1, pos, stderr);
             fflush(stderr);
+            tui_term_unlock();
 
             pthread_mutex_lock(&hb->mutex);
             hb->visible = true;
@@ -4093,9 +4527,13 @@ static void *stream_heartbeat_thread(void *arg) {
 
             frame++;
         } else if (was_visible) {
-            /* Output resumed — clear indicator */
-            fprintf(stderr, "\033[2K\r");
+            /* Output resumed — clear heartbeat from separator row */
+            int hb_rows = tui_term_height();
+            int hb_row  = hb_rows - 1;
+            tui_term_lock();
+            fprintf(stderr, "\0337\033[%d;1H\033[2K\0338", hb_row);
             fflush(stderr);
+            tui_term_unlock();
 
             pthread_mutex_lock(&hb->mutex);
             hb->visible = false;
