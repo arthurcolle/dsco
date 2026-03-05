@@ -167,6 +167,151 @@ void tui_stream_tool(const char *name, const char *id);
 void tui_stream_tool_result(const char *name, bool ok, const char *preview);
 void tui_stream_end(void);
 
+/* ── Glyph Tier System ─────────────────────────────────────────────────── */
+/* Four rendering tiers based on terminal + font capabilities.
+ * All glyphs used in the binary are defined here with fallbacks.
+ * Detection runs once at startup and caches the result.
+ *
+ * 2026 standard: Nerd Font v3+ assumed for modern terminals.
+ * Nerd Font codepoints live in the Private Use Area:
+ *   - Powerline:       U+E0A0–U+E0D4
+ *   - Powerline Extra: U+E0B0–U+E0D4
+ *   - Devicons:        U+E700–U+E7C5
+ *   - Font Awesome:    U+F000–U+F2E0
+ *   - Octicons:        U+F400–U+F532
+ *   - Material:        U+F0001–U+F1AF0
+ *   - Weather:         U+E300–U+E3E3
+ *   - Codicons:        U+EA60–U+EC00
+ */
+
+typedef enum {
+    TUI_GLYPH_ASCII,    /* pure ASCII — works everywhere */
+    TUI_GLYPH_UNICODE,  /* BMP Unicode — box drawing, braille, symbols */
+    TUI_GLYPH_FULL,     /* full Unicode — emoji, supplementary planes */
+    TUI_GLYPH_NERD,     /* Nerd Font v3+ — devicons, powerline, FA, etc. */
+} tui_glyph_tier_t;
+
+typedef struct {
+    /* ── Status indicators ──────────────────────────────────────────── */
+    const char *ok;              /* nf:  / full: ✓  / uni: ✓  / ascii: + */
+    const char *fail;            /* nf:  / full: ✗  / uni: ✗  / ascii: x */
+    const char *warn;            /* nf:  / full: ⚠  / uni: (!) / ascii: ! */
+    const char *info;            /* nf:  / full: ℹ  / uni: (i) / ascii: i */
+
+    /* ── Bullets & markers ──────────────────────────────────────────── */
+    const char *bullet;          /* nf:  / full: ●  / ascii: * */
+    const char *circle_open;     /* nf:  / full: ○  / ascii: o */
+    const char *circle_dot;      /* nf:  / full: ◉  / ascii: @ */
+    const char *circle_ring;     /* nf:  / full: ◎  / ascii: O */
+    const char *diamond;         /* nf:  / full: ◆  / ascii: * */
+    const char *diamond_open;    /* nf:  / full: ◇  / ascii: <> */
+    const char *sparkle;         /* nf:  / full: ✦  / ascii: * */
+    const char *florette;        /* nf:  / full: ✿  / ascii: * */
+
+    /* ── Arrows & motion ────────────────────────────────────────────── */
+    const char *arrow_right;     /* nf:  / full: →  / ascii: -> */
+    const char *arrow_left;      /* nf:  / full: ←  / ascii: <- */
+    const char *arrow_up;        /* nf:  / full: ▲  / ascii: ^ */
+    const char *arrow_down;      /* nf:  / full: ▼  / ascii: v */
+    const char *arrow_cycle;     /* nf:  / full: ↻  / ascii: ~ */
+
+    /* ── Progress blocks ────────────────────────────────────────────── */
+    const char *block_full;
+    const char *block_med;
+    const char *block_light;
+    const char *block_dark;
+    const char *vblock[9];       /* [0]=space [1]=▁ .. [8]=█ */
+
+    /* ── Spinners ───────────────────────────────────────────────────── */
+    const char *spin_dots[10];
+    int         spin_dots_n;
+    const char *spin_thick[8];
+    int         spin_thick_n;
+    const char *spin_orbit[4];
+    int         spin_orbit_n;
+    const char *spin_orbit_inner[2];
+    int         spin_orbit_inner_n;
+    const char *spin_pulse[4];
+    int         spin_pulse_n;
+    const char *spin_line[4];
+    int         spin_line_n;
+    const char *spin_arrow[8];
+    int         spin_arrow_n;
+    const char *spin_star[6];
+    int         spin_star_n;
+
+    /* ── Contextual icons ───────────────────────────────────────────── */
+    const char *icon_think;      /* nf:  brain/lightbulb */
+    const char *icon_lightning;  /* nf:  */
+    const char *icon_gear;       /* nf:  */
+    const char *icon_timer;      /* nf:  */
+    const char *icon_lock;       /* nf:  */
+    const char *icon_money;      /* nf:  */
+    const char *icon_globe;      /* nf:  */
+    const char *icon_rocket;     /* nf:  */
+    const char *icon_fire;       /* nf:  */
+    const char *icon_link;       /* nf:  */
+    const char *icon_eyes;       /* nf:  */
+
+    /* ── Nerd Font extras (NULL on lower tiers) ─────────────────────── */
+    const char *icon_folder;     /* nf:  */
+    const char *icon_file;       /* nf:  */
+    const char *icon_code;       /* nf:  */
+    const char *icon_terminal;   /* nf:  */
+    const char *icon_git;        /* nf:  */
+    const char *icon_database;   /* nf:  */
+    const char *icon_cloud;      /* nf:  */
+    const char *icon_bug;        /* nf:  */
+    const char *icon_cpu;        /* nf:  */
+    const char *icon_network;    /* nf: 󰛳  */
+    const char *icon_key;        /* nf:  */
+    const char *icon_shield;     /* nf: 󰒃  */
+    const char *icon_search;     /* nf:  */
+    const char *icon_download;   /* nf:  */
+    const char *icon_upload;     /* nf:  */
+    const char *icon_sync;       /* nf:  */
+    const char *icon_play;       /* nf:  */
+    const char *icon_pause;      /* nf:  */
+    const char *icon_stop;       /* nf:  */
+    const char *icon_skip;       /* nf:  */
+    const char *icon_chat;       /* nf:  */
+    const char *icon_robot;      /* nf: 󰚩  */
+    const char *icon_brain;      /* nf: 󰧑  */
+    const char *icon_wand;       /* nf:  */
+    const char *icon_graph;      /* nf:  */
+
+    /* ── Powerline separators ───────────────────────────────────────── */
+    const char *pl_right;        /* nf:  U+E0B0 */
+    const char *pl_right_thin;   /* nf:  U+E0B1 */
+    const char *pl_left;         /* nf:  U+E0B2 */
+    const char *pl_left_thin;    /* nf:  U+E0B3 */
+    const char *pl_round_right;  /* nf:  U+E0B4 */
+    const char *pl_round_left;   /* nf:  U+E0B6 */
+
+    /* ── Box-drawing ────────────────────────────────────────────────── */
+    const char *hline;
+    const char *hline_heavy;
+    const char *vline;
+    const char *corner_tl;
+    const char *corner_tr;
+    const char *corner_bl;
+    const char *corner_br;
+
+    /* ── Dot trail for heartbeat ────────────────────────────────────── */
+    const char *dot_large;
+    const char *dot_medium;
+    const char *dot_small;
+} tui_glyphs_t;
+
+/* Detect glyph tier and cache */
+tui_glyph_tier_t  tui_detect_glyph_tier(void);
+
+/* Get the active glyph set (singleton, initialized on first call) */
+const tui_glyphs_t *tui_glyph(void);
+
+/* Override tier (e.g. from env var DSCO_GLYPH=ascii|unicode|full) */
+void tui_set_glyph_tier(tui_glyph_tier_t tier);
+
 /* ── True Color Foundation ─────────────────────────────────────────────── */
 
 typedef struct { unsigned char r, g, b; } tui_rgb_t;
@@ -935,5 +1080,31 @@ void              tui_stream_state_token(tui_stream_state_t *ss, int count);
 void              tui_stream_state_render_badge(const tui_stream_state_t *ss);
 const char       *tui_stream_phase_name(tui_stream_phase_t phase);
 tui_stream_phase_t tui_stream_state_phase(const tui_stream_state_t *ss);
+
+/* ── Stream Heartbeat (anti-hang visual feedback) ─────────────────────── */
+/* Background thread that detects when a stream is active but no visible
+ * output has reached the terminal.  After a configurable silence threshold
+ * (default 2 s) it shows a subtle pulsing indicator on stderr so the user
+ * knows the process hasn't frozen.  The indicator auto-hides as soon as
+ * any visible output fires (text, thinking, tool start). */
+
+typedef struct {
+    pthread_t       thread;
+    pthread_mutex_t mutex;
+    volatile bool   running;        /* false → thread should exit */
+    volatile bool   visible;        /* heartbeat indicator currently on screen */
+    double          last_poke;      /* timestamp of last visible output */
+    double          start_time;     /* when stream started */
+    double          silence_thresh; /* seconds before showing indicator (def 2.0) */
+    unsigned long   bytes_recv;     /* total bytes received from curl */
+    const char     *phase_label;    /* current phase hint (nullable) */
+    int             poke_count;     /* total pokes received */
+    int             phase_changes;  /* number of phase transitions */
+} tui_stream_heartbeat_t;
+
+void tui_stream_heartbeat_start(tui_stream_heartbeat_t *hb);
+void tui_stream_heartbeat_poke(tui_stream_heartbeat_t *hb, const char *phase);
+void tui_stream_heartbeat_recv(tui_stream_heartbeat_t *hb, size_t bytes);
+void tui_stream_heartbeat_stop(tui_stream_heartbeat_t *hb);
 
 #endif

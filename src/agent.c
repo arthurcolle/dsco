@@ -25,6 +25,7 @@
 #include <pthread.h>
 #include <sys/time.h>
 #include "crypto.h"
+#include "output_guard.h"
 
 #ifdef HAVE_READLINE
 #include <readline/readline.h>
@@ -32,6 +33,9 @@
 #endif
 
 volatile int g_interrupted = 0;
+
+/* Stream heartbeat global — shared with llm.c write callback */
+extern tui_stream_heartbeat_t *g_stream_heartbeat;
 
 /* ── MCP integration ───────────────────────────────────────────────────── */
 
@@ -643,9 +647,11 @@ static tui_citation_t       s_citations;
 static tui_throughput_t     s_throughput;
 static tui_ghost_t          s_ghost;
 static tui_latency_breakdown_t s_last_latency;
+static tui_stream_heartbeat_t  s_heartbeat;
 
 static void on_stream_text(const char *text, void *ctx) {
     (void)ctx;
+    tui_stream_heartbeat_poke(&s_heartbeat, NULL);
     /* End thinking block if transitioning thinking → text */
     if (s_in_thinking_block) {
         if (g_features.collapsible_thinking) {
@@ -682,6 +688,7 @@ static void on_stream_text(const char *text, void *ctx) {
 
 static void on_stream_thinking(const char *text, void *ctx) {
     (void)ctx;
+    tui_stream_heartbeat_poke(&s_heartbeat, "thinking...");
     if (!s_in_thinking_block) {
         s_in_thinking_block = true;
         tui_thinking_init(&s_thinking);
@@ -702,6 +709,7 @@ static void on_stream_thinking(const char *text, void *ctx) {
 
 static void on_stream_tool_start(const char *name, const char *id, void *ctx) {
     (void)ctx;
+    tui_stream_heartbeat_poke(&s_heartbeat, NULL);
     if (s_in_thinking_block) {
         /* F4: End collapsible thinking */
         if (g_features.collapsible_thinking) {
@@ -817,7 +825,7 @@ static void print_tool_result_ex(const char *name, bool ok, const char *result, 
 
     fprintf(stderr, "    %s%s%s %s%s%s%s %s(%s)%s %s%.*s%s\n",
             ok ? TUI_GREEN : TUI_RED,
-            ok ? "✓" : "✗",
+            ok ? tui_glyph()->ok : tui_glyph()->fail,
             TUI_RESET,
             tc, name, TUI_RESET,
             size_str,
@@ -994,10 +1002,11 @@ void agent_run(const char *api_key, const char *model) {
     /* F31: Enable status bar clock */
     tui_status_bar_set_clock(&status_bar, g_features.status_clock);
 
-    fprintf(stderr, "  %stype your request, or 'quit' to exit%s \xe2\x9c\xa8\n\n", TUI_DIM, TUI_RESET);
+    fprintf(stderr, "  %stype your request, or 'quit' to exit%s %s\n\n", TUI_DIM, TUI_RESET, tui_glyph()->sparkle);
 
     while (1) {
         g_interrupted = 0;
+        output_guard_reset();
 
         if (!read_input_line(input_buf, sizeof(input_buf))) break;
 
@@ -1932,6 +1941,10 @@ void agent_run(const char *api_key, const char *model) {
             char llm_span[37] = "";
             trace_span_begin(trace_id, "llm_stream", prompt_span, llm_span);
 
+            /* Start heartbeat — auto-detects silent stream and shows spinner */
+            tui_stream_heartbeat_start(&s_heartbeat);
+            g_stream_heartbeat = &s_heartbeat;
+
             stream_result_t sr = g_provider
                 ? g_provider->stream(g_provider, api_key, req,
                                       on_stream_text, on_stream_tool_start,
@@ -1947,6 +1960,7 @@ void agent_run(const char *api_key, const char *model) {
                     if (strcmp(fb_model, session.model) == 0) continue;
 
                     fprintf(stderr, "  %sfallback: trying %s%s\n", TUI_YELLOW, fb_model, TUI_RESET);
+                    tui_stream_heartbeat_poke(&s_heartbeat, "fallback...");
                     json_free_response(&sr.parsed);
 
                     /* Rebuild request with fallback model */
@@ -1982,6 +1996,10 @@ void agent_run(const char *api_key, const char *model) {
                 }
             }
             free(req);
+
+            /* Stop heartbeat — stream is done */
+            g_stream_heartbeat = NULL;
+            tui_stream_heartbeat_stop(&s_heartbeat);
 
             /* Reset forced tool_choice after first turn (single-shot) */
             if (turns == 1 && session.tool_choice[0]) {
