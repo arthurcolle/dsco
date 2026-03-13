@@ -13,8 +13,10 @@
 #include "baseline.h"
 #include "plugin.h"
 #include "setup.h"
+#include "workspace.h"
 #include "mcp.h"
 #include "provider.h"
+#include "topology.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -37,6 +39,7 @@
 #endif
 
 volatile int g_interrupted = 0;
+static md_renderer_t s_md;
 
 /* Stream heartbeat global — shared with llm.c write callback */
 extern tui_stream_heartbeat_t *g_stream_heartbeat;
@@ -491,11 +494,15 @@ static int process_dragged_images(char *input_buf, conversation_t *conv) {
     return img_count;
 }
 
+static void terminal_input_echo_suspend(void);
+static void terminal_input_echo_restore(void);
+
 static void sigint_handler(int sig) {
     (void)sig;
     /* First Ctrl+C interrupts current stream/tool round.
        Second Ctrl+C is a hard exit if we're already interrupted/stuck. */
     if (g_interrupted) {
+        terminal_input_echo_restore();
         /* Reset terminal state before hard exit:
            - Reset scroll region to full terminal
            - Disable bracketed paste mode
@@ -511,6 +518,7 @@ static void sigint_handler(int sig) {
 static void sigtstp_handler(int sig) {
     (void)sig;
     /* Reset terminal state before suspend so the parent shell isn't corrupted */
+    terminal_input_echo_restore();
     const char reset[] = "\033[r\033[?2004l\033[0m\033[?25h";
     (void)write(STDERR_FILENO, reset, sizeof(reset) - 1);
     /* Re-raise default SIGTSTP to actually suspend */
@@ -520,6 +528,7 @@ static void sigtstp_handler(int sig) {
 
 /* ── Terminal cleanup atexit handler ───────────────────────────────────── */
 static void terminal_reset_atexit(void) {
+    terminal_input_echo_restore();
     /* Safety net: always restore terminal to sane state on exit.
        This catches all exit() paths including readline EOF, quit command, etc.
        Reset: scroll region, bracketed paste, SGR attributes, cursor visibility. */
@@ -647,6 +656,247 @@ static void print_context(session_state_t *session, int last_input_tokens) {
     fprintf(stderr, "]\n\n");
 }
 
+static void print_topology_summary(const topology_t *topo) {
+    if (!topo) return;
+    char ascii[4096];
+    const char *strategy = "parallel";
+    if (topo->strategy == EXEC_LINEAR) strategy = "linear";
+    else if (topo->strategy == EXEC_PARALLEL_STAGES) strategy = "parallel_stages";
+    else if (topo->strategy == EXEC_FULL_PARALLEL) strategy = "full_parallel";
+    else if (topo->strategy == EXEC_ITERATIVE) strategy = "iterative";
+    else if (topo->strategy == EXEC_TOURNAMENT) strategy = "tournament";
+    else if (topo->strategy == EXEC_CONSENSUS) strategy = "consensus";
+    topology_render_ascii(topo, ascii, sizeof(ascii));
+    fprintf(stderr, "\n");
+    tui_header("Topology", TUI_BYELLOW);
+    fprintf(stderr, "  %sName:%s        %s\n", TUI_DIM, TUI_RESET, topo->name);
+    fprintf(stderr, "  %sCategory:%s    %s\n", TUI_DIM, TUI_RESET, topo_category_label(topo->category));
+    fprintf(stderr, "  %sStrategy:%s    %s\n", TUI_DIM, TUI_RESET, strategy);
+    fprintf(stderr, "  %sAgents:%s      %d\n", TUI_DIM, TUI_RESET, topo->total_agents);
+    fprintf(stderr, "  %sLatency:%s     %.1fx\n", TUI_DIM, TUI_RESET, topo->est_latency_mult);
+    fprintf(stderr, "  %sRunnable:%s    %s\n", TUI_DIM, TUI_RESET, topology_is_runnable(topo) ? "yes" : "no");
+    fprintf(stderr, "\n%s\n\n", ascii);
+}
+
+static void print_topology_registry_brief(void) {
+    int count = 0;
+    const topology_t *tops = topology_registry(&count);
+    fprintf(stderr, "\n");
+    tui_header("Topologies", TUI_BYELLOW);
+    for (int i = 0; i < count; i++) {
+        fprintf(stderr, "  %sT%02d%s %-18s %s%-11s%s agents=%-2d lat=%.1fx\n",
+                TUI_CYAN, tops[i].id, TUI_RESET,
+                tops[i].name,
+                TUI_DIM, topo_category_label(tops[i].category), TUI_RESET,
+                tops[i].total_agents, tops[i].est_latency_mult);
+    }
+    fprintf(stderr, "\n");
+}
+
+static void print_swarm_summary(int focus_group, bool verbose) {
+    swarm_t *sw = tools_swarm_instance();
+    if (!sw) return;
+
+    swarm_poll(sw, 0);
+
+    int total = sw->child_count;
+    if (total == 0) {
+        fprintf(stderr, "\n");
+        tui_header("Swarm", TUI_BYELLOW);
+        fprintf(stderr, "  %sno active or completed swarm agents in this session%s\n\n",
+                TUI_DIM, TUI_RESET);
+        return;
+    }
+
+    int running = swarm_active_count(sw);
+    int done = 0;
+    int errored = 0;
+    int killed = 0;
+    double total_cost = 0.0;
+    for (int i = 0; i < sw->child_count; i++) {
+        swarm_child_t *c = &sw->children[i];
+        if (c->status == SWARM_DONE) done++;
+        else if (c->status == SWARM_ERROR) errored++;
+        else if (c->status == SWARM_KILLED) killed++;
+        total_cost += c->est_cost_usd;
+    }
+
+    fprintf(stderr, "\n");
+    tui_header("Swarm", TUI_BYELLOW);
+    fprintf(stderr, "  %sAgents:%s      %d\n", TUI_DIM, TUI_RESET, total);
+    fprintf(stderr, "  %sGroups:%s      %d\n", TUI_DIM, TUI_RESET, sw->group_count);
+    fprintf(stderr, "  %sActive:%s      %d\n", TUI_DIM, TUI_RESET, running);
+    fprintf(stderr, "  %sEst cost:%s    $%.4f\n", TUI_DIM, TUI_RESET, total_cost);
+    tui_agent_rollup(total, done, running, errored + killed);
+
+    if (sw->group_count > 0) {
+        fprintf(stderr, "\n  %sGroups:%s\n", TUI_DIM, TUI_RESET);
+        for (int i = 0; i < sw->group_count; i++) {
+            swarm_group_t *g = &sw->groups[i];
+            if (focus_group >= 0 && g->id != focus_group) continue;
+            fprintf(stderr,
+                    "    %s#%d%s %-18s %s%d/%d done%s %serr=%d%s %s$%.4f%s\n",
+                    TUI_CYAN, g->id, TUI_RESET,
+                    g->name,
+                    TUI_DIM, swarm_group_done_count(sw, i), g->child_count, TUI_RESET,
+                    swarm_group_error_count(sw, i) > 0 ? TUI_RED : TUI_DIM,
+                    swarm_group_error_count(sw, i), TUI_RESET,
+                    TUI_BCYAN, swarm_group_est_cost_usd(sw, i), TUI_RESET);
+        }
+    }
+
+    if (verbose) {
+        fprintf(stderr, "\n  %sAgents:%s\n", TUI_DIM, TUI_RESET);
+        for (int i = 0; i < sw->child_count; i++) {
+            swarm_child_t *c = &sw->children[i];
+            if (focus_group >= 0 && c->group_id != focus_group) continue;
+            fprintf(stderr,
+                    "    %s#%d%s %-10s %s[%s]%s %s%.48s%s %s%.1fs%s %s$%.4f%s\n",
+                    TUI_CYAN, c->id, TUI_RESET,
+                    swarm_status_str(c->status),
+                    TUI_DIM, c->model[0] ? c->model : "default", TUI_RESET,
+                    TUI_DIM, c->task, TUI_RESET,
+                    TUI_DIM, swarm_child_elapsed_sec(c), TUI_RESET,
+                    TUI_BCYAN, c->est_cost_usd, TUI_RESET);
+        }
+    }
+
+    {
+        tui_agent_node_t nodes[1 + SWARM_MAX_GROUPS + SWARM_MAX_CHILDREN];
+        char labels[1 + SWARM_MAX_GROUPS + SWARM_MAX_CHILDREN][96];
+        int node_count = 0;
+        int group_node_ids[SWARM_MAX_GROUPS];
+        memset(group_node_ids, -1, sizeof(group_node_ids));
+
+        nodes[node_count].id = 1;
+        nodes[node_count].parent_id = -1;
+        labels[node_count][0] = '\0';
+        snprintf(labels[node_count], sizeof(labels[node_count]), "root session");
+        nodes[node_count].task = labels[node_count];
+        nodes[node_count].status = running > 0 ? "running" : (errored + killed > 0 ? "error" : "done");
+        node_count++;
+
+        for (int i = 0; i < sw->group_count && node_count < (int)(sizeof(nodes) / sizeof(nodes[0])); i++) {
+            swarm_group_t *g = &sw->groups[i];
+            if (focus_group >= 0 && g->id != focus_group) continue;
+            group_node_ids[i] = 100 + g->id;
+            nodes[node_count].id = group_node_ids[i];
+            nodes[node_count].parent_id = 1;
+            snprintf(labels[node_count], sizeof(labels[node_count]), "group #%d %s", g->id, g->name);
+            nodes[node_count].task = labels[node_count];
+            nodes[node_count].status = swarm_group_complete(sw, i) ? "done" : "running";
+            node_count++;
+        }
+
+        for (int i = 0; i < sw->child_count && node_count < (int)(sizeof(nodes) / sizeof(nodes[0])); i++) {
+            swarm_child_t *c = &sw->children[i];
+            if (focus_group >= 0 && c->group_id != focus_group) continue;
+            nodes[node_count].id = 1000 + c->id;
+            nodes[node_count].parent_id = (c->group_id >= 0 && c->group_id < SWARM_MAX_GROUPS &&
+                                           group_node_ids[c->group_id] > 0)
+                                            ? group_node_ids[c->group_id] : 1;
+            snprintf(labels[node_count], sizeof(labels[node_count]), "#%d %.64s", c->id, c->task);
+            nodes[node_count].task = labels[node_count];
+            nodes[node_count].status = swarm_status_str(c->status);
+            node_count++;
+        }
+
+        tui_agent_topology(nodes, node_count);
+    }
+
+    {
+        tui_swarm_entry_t entries[SWARM_MAX_CHILDREN];
+        char previews[SWARM_MAX_CHILDREN][96];
+        int entry_count = 0;
+        for (int i = 0; i < sw->child_count && entry_count < SWARM_MAX_CHILDREN; i++) {
+            swarm_child_t *c = &sw->children[i];
+            if (focus_group >= 0 && c->group_id != focus_group) continue;
+            entries[entry_count].id = c->id;
+            entries[entry_count].task = c->task;
+            entries[entry_count].status = swarm_status_str(c->status);
+            entries[entry_count].progress =
+                (c->status == SWARM_DONE || c->status == SWARM_ERROR || c->status == SWARM_KILLED)
+                    ? 1.0 : 0.5;
+            previews[entry_count][0] = '\0';
+            if (c->output && c->output_len > 0) {
+                const char *tail = c->output;
+                size_t tail_len = c->output_len;
+                if (tail_len > 88) {
+                    tail += tail_len - 88;
+                }
+                snprintf(previews[entry_count], sizeof(previews[entry_count]), "%.88s", tail);
+            }
+            entries[entry_count].last_output = previews[entry_count];
+            entry_count++;
+        }
+        if (entry_count > 0) {
+            tui_swarm_panel(entries, entry_count, 72);
+        }
+    }
+
+    {
+        tui_swarm_cost_entry_t entries[SWARM_MAX_CHILDREN];
+        char names[SWARM_MAX_CHILDREN][32];
+        int entry_count = 0;
+        double shown_total = 0.0;
+        for (int i = 0; i < sw->child_count && entry_count < SWARM_MAX_CHILDREN; i++) {
+            swarm_child_t *c = &sw->children[i];
+            if (focus_group >= 0 && c->group_id != focus_group) continue;
+            snprintf(names[entry_count], sizeof(names[entry_count]), "#%d %.24s", c->id, c->task);
+            entries[entry_count].name = names[entry_count];
+            entries[entry_count].cost = c->est_cost_usd;
+            entries[entry_count].in_tok = c->est_input_tokens;
+            entries[entry_count].out_tok = c->est_output_tokens;
+            shown_total += c->est_cost_usd;
+            entry_count++;
+        }
+        tui_swarm_cost(entries, entry_count, shown_total);
+    }
+
+    fprintf(stderr, "\n");
+}
+
+static bool run_topology_prompt(session_state_t *session, const char *api_key,
+                                conversation_t *conv, const char *prompt,
+                                int *last_input_tokens) {
+    topology_plan_t plan;
+    const char *preferred = session->active_topology[0] ? session->active_topology : NULL;
+    if (!topology_plan_build(preferred, session->topology_auto, prompt, &plan)) return false;
+
+    char *out = safe_malloc(MAX_RESPONSE_SIZE);
+    topology_run_stats_t stats;
+    bool ok = topology_plan_run(&plan, api_key, session->model, prompt, out, MAX_RESPONSE_SIZE, &stats);
+
+    conv_add_user_text(conv, prompt);
+    md_reset(&s_md);
+    md_feed_str(&s_md, out);
+    md_flush(&s_md);
+    fprintf(stderr, "\n");
+    conv_add_assistant_text(conv, out);
+    session->turn_count++;
+    if (last_input_tokens) *last_input_tokens = (int)strlen(prompt) / 4;
+
+    fprintf(stderr, "  %stopology:%s %s", TUI_DIM, TUI_RESET, plan.topology.name);
+    if (plan.is_dynamic) {
+        fprintf(stderr, " %s(dynamic)%s", TUI_DIM, TUI_RESET);
+    } else if (session->topology_auto && !session->active_topology[0]) {
+        fprintf(stderr, " %s(auto-static)%s", TUI_DIM, TUI_RESET);
+    }
+    fprintf(stderr, "  %sagents:%s %d  %siterations:%s %d  %sest:$%.4f%s\n",
+            TUI_DIM, TUI_RESET, stats.agents_spawned,
+            TUI_DIM, TUI_RESET, stats.iterations,
+            TUI_BCYAN, stats.est_cost_usd, TUI_RESET);
+    if (plan.rationale[0]) {
+        fprintf(stderr, "  %splan:%s %s\n", TUI_DIM, TUI_RESET, plan.rationale);
+    }
+
+    baseline_log(ok ? "swarm" : "swarm_error",
+                 ok ? "topology_prompt" : "topology_prompt_failed",
+                 plan.topology.name, NULL);
+    free(out);
+    return true;
+}
+
 /* ── Readline tab completion ───────────────────────────────────────────── */
 
 #ifdef HAVE_READLINE
@@ -655,8 +905,14 @@ static const char *s_commands[] = {
     "/plugins", "/plugins validate", "/help", "/model", "/cost", "/context", "/effort",
     "/compact", "/version", "/force", "/budget", "/trust", "/web", "/code",
     "/mcp", "/provider", "/status", "/temp", "/thinking", "/fallback",
-    "/metrics", "/telemetry", "/cache", "/trace",
-    "/features", "/perf", "/minimap",
+    "/metrics", "/telemetry", "/cache", "/trace", "/topology",
+    "/topology list", "/topology show", "/topology use", "/topology run",
+    "/topology auto", "/topology off",
+    "/swarm", "/swarm status", "/swarm show", "/swarm wait",
+    "/swarm kill", "/swarm kill-group",
+    "/features", "/perf", "/minimap", "/workspace", "/workspace bootstrap",
+    "/workspace reload", "/workspace prompt", "/skills", "/skills show",
+    "/skills use", "/skills clear", "/identity", "/user", "/soul", "/memory",
     "quit", "exit", NULL
 };
 
@@ -699,8 +955,6 @@ static char **command_completion(const char *text, int start, int end) {
 
 static bool s_in_text_block = false;
 static bool s_in_thinking_block = false;
-static md_renderer_t s_md;
-
 /* ── 40 Features: static state ──────────────────────────────────────────── */
 static tui_features_t       g_features;
 static tui_cadence_t        s_cadence;
@@ -714,6 +968,32 @@ static tui_throughput_t     s_throughput;
 static tui_ghost_t          s_ghost;
 static tui_latency_breakdown_t s_last_latency;
 static tui_stream_heartbeat_t  s_heartbeat;
+static void terminal_input_echo_suspend(void);
+static void terminal_input_echo_restore(void);
+static struct termios       s_saved_termios;
+static bool                 s_saved_termios_valid = false;
+static bool                 s_input_echo_suspended = false;
+
+static void terminal_input_echo_suspend(void) {
+    if (s_input_echo_suspended || !isatty(STDIN_FILENO)) return;
+
+    struct termios tio;
+    if (tcgetattr(STDIN_FILENO, &tio) != 0) return;
+    s_saved_termios = tio;
+    s_saved_termios_valid = true;
+    tio.c_lflag &= (tcflag_t)~(ECHO | ECHONL);
+    if (tcsetattr(STDIN_FILENO, TCSANOW, &tio) == 0) {
+        s_input_echo_suspended = true;
+    }
+}
+
+static void terminal_input_echo_restore(void) {
+    if (!s_input_echo_suspended || !isatty(STDIN_FILENO)) return;
+    if (s_saved_termios_valid) {
+        tcsetattr(STDIN_FILENO, TCSAFLUSH, &s_saved_termios);
+    }
+    s_input_echo_suspended = false;
+}
 
 static void on_stream_text(const char *text, void *ctx) {
     (void)ctx;
@@ -1038,7 +1318,8 @@ static char *read_input_line_prompt(char *buf, size_t buf_sz, const char *prompt
 
 /* ── Main agent loop ───────────────────────────────────────────────────── */
 
-void agent_run(const char *api_key, const char *model) {
+void agent_run(const char *api_key, const char *model,
+               const char *topology_name, bool topology_auto) {
     /* Register terminal reset FIRST — ensures scroll region, bracketed paste,
        and SGR attrs are cleaned up on ANY exit path through exit(). */
     atexit(terminal_reset_atexit);
@@ -1114,10 +1395,21 @@ void agent_run(const char *api_key, const char *model) {
     /* Session state */
     session_state_t session;
     session_state_init(&session, model);
+    if (topology_name && topology_name[0]) {
+        const topology_t *cli_topology = topology_find(topology_name);
+        if (cli_topology) {
+            snprintf(session.active_topology, sizeof(session.active_topology), "%s", cli_topology->name);
+        } else {
+            fprintf(stderr, "  %swarning:%s unknown topology '%s'\n", TUI_BYELLOW, TUI_RESET, topology_name);
+        }
+    }
+    session.topology_auto = topology_auto;
     g_autosave_session = &session;
 
     /* Initialize provider based on model */
     ensure_provider(&session, api_key);
+    tools_set_runtime_api_key(api_key);
+    tools_set_runtime_model(session.model);
 
     char input_buf[MAX_INPUT_LINE];
     int last_input_tokens = 0;
@@ -1171,6 +1463,11 @@ void agent_run(const char *api_key, const char *model) {
             }
         }
         fprintf(stderr, "\n");
+        if (session.active_topology[0]) {
+            fprintf(stderr, "  %stopology:%s %s\n", TUI_DIM, TUI_RESET, session.active_topology);
+        } else if (session.topology_auto) {
+            fprintf(stderr, "  %stopology:%s auto\n", TUI_DIM, TUI_RESET);
+        }
     }
 
     /* Initialize status bar */
@@ -1193,6 +1490,7 @@ void agent_run(const char *api_key, const char *model) {
     while (1) {
         g_interrupted = 0;
         output_guard_reset();
+        terminal_input_echo_restore();
 
         /* Build dynamic prompt: [turn N] model · $cost · context% ▸ */
         char dyn_prompt[256];
@@ -1244,6 +1542,9 @@ void agent_run(const char *api_key, const char *model) {
             char *pe = strstr(input_buf, "\033[201~");
             if (pe) *pe = '\0';
         }
+        dsco_strip_terminal_controls_inplace(input_buf);
+        len = strlen(input_buf);
+        if (len == 0) continue;
 
         /* Detect multi-line paste (newlines in input) */
         {
@@ -1284,6 +1585,7 @@ void agent_run(const char *api_key, const char *model) {
                 const char *resolved = model_resolve_alias(arg);
                 snprintf(session.model, sizeof(session.model), "%s", resolved);
                 session.context_window = model_context_window(resolved);
+                tools_set_runtime_model(session.model);
                 const model_info_t *mi = model_lookup(resolved);
                 char msg[256];
                 snprintf(msg, sizeof(msg), "model switched to %s (ctx: %dk)",
@@ -1514,6 +1816,208 @@ void agent_run(const char *api_key, const char *model) {
             baseline_log("command", "/sessions", NULL, NULL);
             continue;
         }
+        if (strcmp(input_buf, "/workspace") == 0 ||
+            strcmp(input_buf, "/workspace bootstrap") == 0 ||
+            strcmp(input_buf, "/workspace reload") == 0 ||
+            strcmp(input_buf, "/workspace prompt") == 0) {
+            if (strcmp(input_buf, "/workspace bootstrap") == 0) {
+                char summary[768];
+                int rc = dsco_workspace_bootstrap(summary, sizeof(summary));
+                if (rc < 0) tui_error(summary);
+                else tui_success(summary);
+            } else if (strcmp(input_buf, "/workspace reload") == 0) {
+                dsco_workspace_prompt_invalidate();
+                tui_success("workspace prompt cache reloaded");
+            } else if (strcmp(input_buf, "/workspace prompt") == 0) {
+                const char *prompt = dsco_workspace_prompt();
+                if (prompt && *prompt) fprintf(stderr, "\n%s\n\n", prompt);
+                else tui_info("workspace prompt is empty");
+            } else {
+                dsco_workspace_status_t ws;
+                char summary[768];
+                dsco_workspace_status(&ws, summary, sizeof(summary));
+                fprintf(stderr, "\n");
+                tui_header("Workspace", TUI_BCYAN);
+                fprintf(stderr, "  %sRoot:%s        %s\n", TUI_DIM, TUI_RESET, dsco_workspace_root());
+                fprintf(stderr, "  %sIdentity:%s    %s\n", TUI_DIM, TUI_RESET, ws.has_identity ? "present" : "missing");
+                fprintf(stderr, "  %sUser:%s        %s\n", TUI_DIM, TUI_RESET, ws.has_user ? "present" : "missing");
+                fprintf(stderr, "  %sSoul:%s        %s\n", TUI_DIM, TUI_RESET, ws.has_soul ? "present" : "missing");
+                fprintf(stderr, "  %sMemory:%s      %s\n", TUI_DIM, TUI_RESET, ws.has_memory ? "present" : "missing");
+                fprintf(stderr, "  %sSkills:%s      %d installed\n", TUI_DIM, TUI_RESET, ws.installed_skills);
+                fprintf(stderr, "  %sActive skill:%s %s\n", TUI_DIM, TUI_RESET,
+                        session.active_skill[0] ? session.active_skill : "(none)");
+                fprintf(stderr, "  %sLegacy prompt:%s %s\n\n", TUI_DIM, TUI_RESET,
+                        ws.has_legacy_prompt ? "present" : "missing");
+            }
+            baseline_log("command", "/workspace", NULL, NULL);
+            continue;
+        }
+        if (strcmp(input_buf, "/skills") == 0 || strncmp(input_buf, "/skills ", 8) == 0) {
+            const char *arg = input_buf + 7;
+            while (*arg == ' ') arg++;
+            if (*arg == '\0') {
+                char out[8192];
+                int rc = dsco_workspace_list_skills(out, sizeof(out));
+                if (rc < 0) tui_error(out);
+                else fprintf(stderr, "\n%s\n\n", out);
+            } else if (strncmp(arg, "show ", 5) == 0) {
+                const char *name = arg + 5;
+                while (*name == ' ') name++;
+                char out[16384];
+                if (dsco_workspace_show_skill(name, out, sizeof(out)) < 0) tui_error(out);
+                else fprintf(stderr, "\n%s\n\n", out);
+            } else if (strncmp(arg, "use ", 4) == 0) {
+                const char *name = arg + 4;
+                while (*name == ' ') name++;
+                char out[4096];
+                if (dsco_workspace_show_skill(name, out, sizeof(out)) < 0) {
+                    tui_error(out);
+                } else {
+                    snprintf(session.active_skill, sizeof(session.active_skill), "%s", name);
+                    char msg[192];
+                    snprintf(msg, sizeof(msg), "active skill set to %s", name);
+                    tui_success(msg);
+                }
+            } else if (strcmp(arg, "clear") == 0 || strcmp(arg, "off") == 0) {
+                session.active_skill[0] = '\0';
+                tui_success("active skill cleared");
+            } else {
+                tui_error("usage: /skills | /skills show <name> | /skills use <name> | /skills clear");
+            }
+            baseline_log("command", "/skills", NULL, NULL);
+            continue;
+        }
+        if (strcmp(input_buf, "/topology") == 0 || strncmp(input_buf, "/topology ", 10) == 0) {
+            const char *arg = input_buf + 9;
+            while (*arg == ' ') arg++;
+            if (*arg == '\0') {
+                fprintf(stderr, "\n");
+                tui_header("Topology", TUI_BYELLOW);
+                fprintf(stderr, "  %sActive:%s      %s\n", TUI_DIM, TUI_RESET,
+                        session.active_topology[0] ? session.active_topology : "(none)");
+                fprintf(stderr, "  %sAuto:%s        %s\n", TUI_DIM, TUI_RESET,
+                        session.topology_auto ? "on" : "off");
+                fprintf(stderr, "  %sUsage:%s       /topology list | show <name> | use <name> | run <name> <task> | auto | off\n\n",
+                        TUI_DIM, TUI_RESET);
+            } else if (strcmp(arg, "list") == 0) {
+                print_topology_registry_brief();
+            } else if (strncmp(arg, "show ", 5) == 0) {
+                const char *name = arg + 5;
+                while (*name == ' ') name++;
+                const topology_t *topo = topology_find(name);
+                if (!topo) tui_error("topology not found");
+                else print_topology_summary(topo);
+            } else if (strncmp(arg, "use ", 4) == 0) {
+                const char *name = arg + 4;
+                while (*name == ' ') name++;
+                const topology_t *topo = topology_find(name);
+                if (!topo) {
+                    tui_error("topology not found");
+                } else {
+                    snprintf(session.active_topology, sizeof(session.active_topology), "%s", topo->name);
+                    session.topology_auto = false;
+                    char msg[192];
+                    snprintf(msg, sizeof(msg), "active topology set to %s", topo->name);
+                    tui_success(msg);
+                }
+            } else if (strncmp(arg, "run ", 4) == 0) {
+                char *copy = safe_strdup(arg + 4);
+                char *name = copy;
+                while (*name == ' ') name++;
+                char *task = name;
+                while (*task && *task != ' ') task++;
+                if (*task) {
+                    *task++ = '\0';
+                    while (*task == ' ') task++;
+                }
+                const topology_t *topo = topology_find(name);
+                if (!topo || !task || !*task) {
+                    tui_error("usage: /topology run <name> <task>");
+                } else {
+                    char saved_topology[sizeof(session.active_topology)];
+                    bool saved_auto = session.topology_auto;
+                    snprintf(saved_topology, sizeof(saved_topology), "%s", session.active_topology);
+                    snprintf(session.active_topology, sizeof(session.active_topology), "%s", topo->name);
+                    session.topology_auto = false;
+                    (void)run_topology_prompt(&session, api_key, &conv, task, &last_input_tokens);
+                    snprintf(session.active_topology, sizeof(session.active_topology), "%s", saved_topology);
+                    session.topology_auto = saved_auto;
+                }
+                free(copy);
+            } else if (strcmp(arg, "auto") == 0 || strcmp(arg, "auto on") == 0) {
+                session.topology_auto = true;
+                session.active_topology[0] = '\0';
+                tui_success("topology auto-selection enabled");
+            } else if (strcmp(arg, "off") == 0 || strcmp(arg, "clear") == 0 ||
+                       strcmp(arg, "auto off") == 0) {
+                session.topology_auto = false;
+                session.active_topology[0] = '\0';
+                tui_success("topology selection disabled");
+            } else {
+                tui_error("usage: /topology list | show <name> | use <name> | run <name> <task> | auto | off");
+            }
+            baseline_log("command", "/topology", session.active_topology[0] ? session.active_topology : NULL, NULL);
+            continue;
+        }
+        if (strcmp(input_buf, "/swarm") == 0 || strncmp(input_buf, "/swarm ", 7) == 0) {
+            const char *arg = input_buf + 6;
+            while (*arg == ' ') arg++;
+            if (*arg == '\0' || strcmp(arg, "status") == 0 || strcmp(arg, "list") == 0) {
+                print_swarm_summary(-1, true);
+            } else if (strncmp(arg, "show ", 5) == 0) {
+                int gid = atoi(arg + 5);
+                swarm_t *sw = tools_swarm_instance();
+                if (gid < 0 || gid >= sw->group_count) tui_error("invalid group id");
+                else print_swarm_summary(gid, true);
+            } else if (strncmp(arg, "wait ", 5) == 0) {
+                int gid = -1;
+                int timeout = 300;
+                if (sscanf(arg + 5, "%d %d", &gid, &timeout) < 1) {
+                    tui_error("usage: /swarm wait <group_id> [timeout_s]");
+                } else {
+                    char in[128];
+                    char out[MAX_RESPONSE_SIZE];
+                    snprintf(in, sizeof(in), "{\"group_id\":%d,\"timeout\":%d}", gid, timeout);
+                    if (!tools_execute("swarm_collect", in, out, sizeof(out))) {
+                        tui_error(out);
+                    } else {
+                        print_swarm_summary(gid, true);
+                    }
+                }
+            } else if (strncmp(arg, "kill-group ", 11) == 0) {
+                int gid = atoi(arg + 11);
+                swarm_t *sw = tools_swarm_instance();
+                if (gid < 0 || gid >= sw->group_count) {
+                    tui_error("invalid group id");
+                } else {
+                    swarm_group_kill(sw, gid);
+                    swarm_poll(sw, 0);
+                    tui_success("swarm group terminated");
+                    print_swarm_summary(gid, true);
+                }
+            } else if (strncmp(arg, "kill ", 5) == 0) {
+                int aid = atoi(arg + 5);
+                swarm_t *sw = tools_swarm_instance();
+                if (!swarm_kill(sw, aid)) tui_error("agent not running");
+                else {
+                    tui_success("swarm agent terminated");
+                    print_swarm_summary(-1, true);
+                }
+            } else {
+                tui_error("usage: /swarm | status | show <group_id> | wait <group_id> [timeout_s] | kill <agent_id> | kill-group <group_id>");
+            }
+            baseline_log("command", "/swarm", arg && *arg ? arg : NULL, NULL);
+            continue;
+        }
+        if (strcmp(input_buf, "/identity") == 0 || strcmp(input_buf, "/user") == 0 ||
+            strcmp(input_buf, "/soul") == 0 || strcmp(input_buf, "/memory") == 0) {
+            const char *doc = input_buf + 1;
+            char out[16384];
+            if (dsco_workspace_read_doc(doc, out, sizeof(out)) < 0) tui_error(out);
+            else fprintf(stderr, "\n%s\n\n", out);
+            baseline_log("command", doc, NULL, NULL);
+            continue;
+        }
         if (strcmp(input_buf, "/setup") == 0 || strcmp(input_buf, "/setup --force") == 0) {
             bool force = (strcmp(input_buf, "/setup --force") == 0);
             char summary[768];
@@ -1628,6 +2132,16 @@ void agent_run(const char *api_key, const char *model) {
             fprintf(stderr, "  %s/save [name]%s save session\n", TUI_CYAN, TUI_RESET);
             fprintf(stderr, "  %s/load [name]%s load session\n", TUI_CYAN, TUI_RESET);
             fprintf(stderr, "  %s/sessions%s   list saved sessions\n", TUI_CYAN, TUI_RESET);
+            fprintf(stderr, "  %s/workspace%s  show claw workspace status\n", TUI_CYAN, TUI_RESET);
+            fprintf(stderr, "  %s/workspace bootstrap%s create missing workspace files\n", TUI_CYAN, TUI_RESET);
+            fprintf(stderr, "  %s/workspace reload%s reload composed workspace prompt\n", TUI_CYAN, TUI_RESET);
+            fprintf(stderr, "  %s/skills%s     list installed skills\n", TUI_CYAN, TUI_RESET);
+            fprintf(stderr, "  %s/skills use [name]%s activate one skill for future turns\n", TUI_CYAN, TUI_RESET);
+            fprintf(stderr, "  %s/skills show [name]%s print a skill body\n", TUI_CYAN, TUI_RESET);
+            fprintf(stderr, "  %s/identity%s   show workspace identity file\n", TUI_CYAN, TUI_RESET);
+            fprintf(stderr, "  %s/user%s       show workspace user file\n", TUI_CYAN, TUI_RESET);
+            fprintf(stderr, "  %s/soul%s       show workspace soul file\n", TUI_CYAN, TUI_RESET);
+            fprintf(stderr, "  %s/memory%s     show workspace memory file\n", TUI_CYAN, TUI_RESET);
             fprintf(stderr, "  %s/setup%s      save API keys to %s\n", TUI_CYAN, TUI_RESET, dsco_setup_env_path());
             fprintf(stderr, "  %s/force [tool]%s force next tool call\n", TUI_CYAN, TUI_RESET);
             fprintf(stderr, "  %s/web%s        toggle web search\n", TUI_CYAN, TUI_RESET);
@@ -1635,6 +2149,8 @@ void agent_run(const char *api_key, const char *model) {
             fprintf(stderr, "  %s/budget [$]%s  set cost budget\n", TUI_CYAN, TUI_RESET);
             fprintf(stderr, "  %s/thinking [auto|>=1024]%s set thinking budget (in tokens)\n", TUI_CYAN, TUI_RESET);
             fprintf(stderr, "  %s/trust [tier]%s set trust tier (trusted/standard/untrusted)\n", TUI_CYAN, TUI_RESET);
+            fprintf(stderr, "  %s/topology%s   list/show/use/run topologies\n", TUI_CYAN, TUI_RESET);
+            fprintf(stderr, "  %s/swarm%s      inspect/wait/kill swarm agents and groups\n", TUI_CYAN, TUI_RESET);
             fprintf(stderr, "  %s/status%s     full session status\n", TUI_CYAN, TUI_RESET);
             fprintf(stderr, "  %s/tools%s      list all tools\n", TUI_CYAN, TUI_RESET);
             fprintf(stderr, "  %s/plugins%s    list loaded plugins\n", TUI_CYAN, TUI_RESET);
@@ -1817,6 +2333,19 @@ void agent_run(const char *api_key, const char *model) {
             fprintf(stderr, "  %sEffort:%s      %s\n", TUI_DIM, TUI_RESET, session.effort);
             fprintf(stderr, "  %sTrust tier:%s  %s\n", TUI_DIM, TUI_RESET,
                     session_trust_tier_to_string(session.trust_tier));
+            fprintf(stderr, "  %sActive skill:%s %s\n", TUI_DIM, TUI_RESET,
+                    session.active_skill[0] ? session.active_skill : "(none)");
+            fprintf(stderr, "  %sTopology:%s    %s%s%s\n", TUI_DIM, TUI_RESET,
+                    session.active_topology[0] ? session.active_topology : "(none)",
+                    session.topology_auto ? " " : "",
+                    session.topology_auto ? "(auto)" : "");
+            {
+                swarm_t *sw = tools_swarm_instance();
+                swarm_poll(sw, 0);
+                fprintf(stderr, "  %sSwarm:%s       %d agents / %d groups / %d active\n",
+                        TUI_DIM, TUI_RESET, sw->child_count, sw->group_count,
+                        swarm_active_count(sw));
+            }
             if (session.temperature >= 0)
                 fprintf(stderr, "  %sTemperature:%s %.2f\n", TUI_DIM, TUI_RESET, session.temperature);
             if (session.thinking_budget > 0)
@@ -1848,6 +2377,25 @@ void agent_run(const char *api_key, const char *model) {
             fprintf(stderr, "  %sCache:%s       %d hits / %d misses\n", TUI_DIM, TUI_RESET,
                     tool_cache.hits, tool_cache.misses);
             fprintf(stderr, "  %sTotal tools:%s %d\n\n", TUI_DIM, TUI_RESET, tool_count);
+            if (session.active_topology[0]) {
+                const topology_t *topo = topology_find(session.active_topology);
+                if (topo) {
+                    char ascii[4096];
+                    topology_render_ascii(topo, ascii, sizeof(ascii));
+                    fprintf(stderr, "%s\n\n", ascii);
+                }
+            }
+            if (tools_swarm_instance()->child_count > 0) {
+                swarm_t *sw = tools_swarm_instance();
+                int swarm_done = 0, swarm_running = 0, swarm_errored = 0;
+                for (int i = 0; i < sw->child_count; i++) {
+                    if (sw->children[i].status == SWARM_DONE) swarm_done++;
+                    else if (sw->children[i].status == SWARM_RUNNING || sw->children[i].status == SWARM_STREAMING) swarm_running++;
+                    else if (sw->children[i].status == SWARM_ERROR || sw->children[i].status == SWARM_KILLED) swarm_errored++;
+                }
+                tui_agent_rollup(sw->child_count, swarm_done, swarm_running, swarm_errored);
+                fprintf(stderr, "\n");
+            }
             continue;
         }
         /* /temp — temperature control */
@@ -2084,7 +2632,32 @@ void agent_run(const char *api_key, const char *model) {
                     TUI_DIM, TUI_RESET, TUI_BCYAN, mi ? mi->alias : session.model, TUI_RESET,
                     TUI_BYELLOW, session_trust_tier_to_string(session.trust_tier), TUI_RESET,
                     TUI_DIM, TUI_RESET);
+            fprintf(stderr, "  %s│%s  Topology: %s%-17s%s  Auto: %s%-3s%s %s│%s\n",
+                    TUI_DIM, TUI_RESET,
+                    TUI_BWHITE, session.active_topology[0] ? session.active_topology : "(none)", TUI_RESET,
+                    TUI_BWHITE, session.topology_auto ? "on" : "off", TUI_RESET,
+                    TUI_DIM, TUI_RESET);
             fprintf(stderr, "  %s└─────────────────────────────────────────────┘%s\n", TUI_DIM, TUI_RESET);
+
+            {
+                swarm_t *sw = tools_swarm_instance();
+                swarm_poll(sw, 0);
+                if (sw->child_count > 0) {
+                    double swarm_cost = 0.0;
+                    for (int i = 0; i < sw->child_count; i++) swarm_cost += sw->children[i].est_cost_usd;
+                    fprintf(stderr, "\n  %s┌─ Swarm ────────────────────────────────────┐%s\n", TUI_DIM, TUI_RESET);
+                    fprintf(stderr, "  %s│%s  Agents: %s%-4d%s  Groups: %s%-4d%s  Active: %s%-4d%s %s│%s\n",
+                            TUI_DIM, TUI_RESET,
+                            TUI_BWHITE, sw->child_count, TUI_RESET,
+                            TUI_BWHITE, sw->group_count, TUI_RESET,
+                            TUI_BCYAN, swarm_active_count(sw), TUI_RESET,
+                            TUI_DIM, TUI_RESET);
+                    fprintf(stderr, "  %s│%s  Est:    %s$%.4f%s                                %s│%s\n",
+                            TUI_DIM, TUI_RESET, TUI_BCYAN, swarm_cost, TUI_RESET,
+                            TUI_DIM, TUI_RESET);
+                    fprintf(stderr, "  %s└─────────────────────────────────────────────┘%s\n", TUI_DIM, TUI_RESET);
+                }
+            }
 
             /* Cost breakdown */
             fprintf(stderr, "\n  %s┌─ Cost ─────────────────────────────────────┐%s\n", TUI_DIM, TUI_RESET);
@@ -2260,6 +2833,11 @@ void agent_run(const char *api_key, const char *model) {
             continue;
         }
 
+        if ((session.active_topology[0] || session.topology_auto) &&
+            run_topology_prompt(&session, api_key, &conv, input_buf, &last_input_tokens)) {
+            continue;
+        }
+
         baseline_log("user", "prompt", input_buf, NULL);
 
         /* F19: Branch detection */
@@ -2345,6 +2923,7 @@ void agent_run(const char *api_key, const char *model) {
         int total_input = 0, total_output = 0, total_cache_read = 0;
         int total_tools_used = 0;
         int pause_turn_streak = 0;
+        tools_context_turn_begin();
 
         /* Per-prompt trace ID */
         char trace_id[37];
@@ -2355,8 +2934,9 @@ void agent_run(const char *api_key, const char *model) {
         /* Per-turn arena allocator */
         arena_t turn_arena;
         arena_init(&turn_arena);
+        terminal_input_echo_suspend();
 
-        while (turns < MAX_AGENT_TURNS && !g_interrupted) {
+        while (turns < dsco_max_agent_turns() && !g_interrupted) {
             turns++;
             s_in_text_block = false;
             md_reset(&s_md);
@@ -2617,6 +3197,7 @@ void agent_run(const char *api_key, const char *model) {
                                                           blk->tool_input, tool_result,
                                                           MAX_TOOL_RESULT, &ok);
                         pthread_mutex_unlock(&g_locks.cache_lock);
+                        dsco_strip_terminal_controls_inplace(tool_result);
 
                         if (cache_hit) {
                             /* Compact cached result — powerline style with [cached] badge */
@@ -2640,6 +3221,20 @@ void agent_run(const char *api_key, const char *model) {
                             }
                             if (plen > 0)
                                 fprintf(stderr, " %s%.*s%s", TUI_DIM, plen, tool_result, TUI_RESET);
+                            /* Inline cost suffix — same data as spinner completion */
+                            {
+                                const model_info_t *mi = model_lookup(session.model);
+                                if (mi) {
+                                    double tc = sr.usage.input_tokens * mi->input_price / 1e6
+                                              + sr.usage.output_tokens * mi->output_price / 1e6
+                                              + sr.usage.cache_read_input_tokens * mi->cache_read_price / 1e6
+                                              + sr.usage.cache_creation_input_tokens * mi->cache_write_price / 1e6;
+                                    fprintf(stderr, " %s[in:%d out:%d $%.4f]%s",
+                                            TUI_DIM,
+                                            sr.usage.input_tokens, sr.usage.output_tokens, tc,
+                                            TUI_RESET);
+                                }
+                            }
                             fprintf(stderr, "\n");
                         } else {
                             /* Trace span for tool execution */
@@ -2660,6 +3255,7 @@ void agent_run(const char *api_key, const char *model) {
                             double t0 = now_ms();
                             ok = tools_execute_for_tier(blk->tool_name, blk->tool_input, tier,
                                                         tool_result, MAX_TOOL_RESULT);
+                            dsco_strip_terminal_controls_inplace(tool_result);
                             double elapsed = (now_ms() - t0) * 1000.0;
 
                             bool was_timeout = wd.timed_out;
@@ -2803,6 +3399,7 @@ void agent_run(const char *api_key, const char *model) {
                                                         blk->tool_input, tool_result,
                                                         MAX_TOOL_RESULT, &ok);
                         pthread_mutex_unlock(&g_locks.cache_lock);
+                        dsco_strip_terminal_controls_inplace(tool_result);
 
                         if (cache_hit) {
                             tui_batch_spinner_complete(&batch_spinner, batch_idx, ok,
@@ -2820,6 +3417,7 @@ void agent_run(const char *api_key, const char *model) {
                             double t0 = now_ms();
                             ok = tools_execute_for_tier(blk->tool_name, blk->tool_input, tier,
                                                         tool_result, MAX_TOOL_RESULT);
+                            dsco_strip_terminal_controls_inplace(tool_result);
                             double elapsed = (now_ms() - t0) * 1000.0;
 
                             bool was_timeout = wd.timed_out;
@@ -3040,14 +3638,15 @@ void agent_run(const char *api_key, const char *model) {
         /* End prompt-level trace span */
         trace_span_end(prompt_span, g_interrupted ? "interrupted" : "ok", NULL);
         arena_free(&turn_arena);
+        terminal_input_echo_restore();
 
         if (g_interrupted) {
             fprintf(stderr, "\n");
             tui_warning("interrupted (press Ctrl+C again to force quit)");
         }
-        if (turns >= MAX_AGENT_TURNS) {
+        if (turns >= dsco_max_agent_turns()) {
             char msg[64];
-            snprintf(msg, sizeof(msg), "max turns reached (%d)", MAX_AGENT_TURNS);
+            snprintf(msg, sizeof(msg), "max turns reached (%d)", dsco_max_agent_turns());
             tui_warning(msg);
         }
         if (turns > 1) {
@@ -3069,6 +3668,7 @@ void agent_run(const char *api_key, const char *model) {
     }
 
     /* Disable bracketed paste mode */
+    terminal_input_echo_restore();
     fprintf(stderr, "\033[?2004l");
     fflush(stderr);
 
