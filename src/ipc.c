@@ -364,6 +364,21 @@ bool ipc_agent_alive(const char *agent_id) {
     return (now_ts() - info.last_heartbeat) < IPC_STALE_SEC;
 }
 
+int ipc_reap_dead_agents(double stale_s) {
+    if (!g_ipc.ready) return 0;
+    const char *sql = "UPDATE agents SET status='dead' "
+                      "WHERE status IN ('starting','running','idle') "
+                      "AND last_heartbeat > 0 AND (?1 - last_heartbeat) > ?2";
+    sqlite3_stmt *stmt = NULL;
+    if (sqlite3_prepare_v2(g_ipc.db, sql, -1, &stmt, NULL) != SQLITE_OK) return 0;
+    sqlite3_bind_double(stmt, 1, now_ts());
+    sqlite3_bind_double(stmt, 2, stale_s);
+    int rc = sqlite3_step(stmt);
+    int changed = (rc == SQLITE_DONE) ? sqlite3_changes(g_ipc.db) : 0;
+    sqlite3_finalize(stmt);
+    return changed;
+}
+
 /* ═══════════════════════════════════════════════════════════════════════════
  * Messaging
  * ═══════════════════════════════════════════════════════════════════════════ */
@@ -645,6 +660,21 @@ int ipc_task_pending_count(void) {
     if (sqlite3_step(stmt) == SQLITE_ROW) count = sqlite3_column_int(stmt, 0);
     sqlite3_finalize(stmt);
     return count;
+}
+
+int ipc_task_requeue_stale(double timeout_s) {
+    if (!g_ipc.ready) return 0;
+    const char *sql = "UPDATE tasks SET status='pending', assigned_to='', started_at=0 "
+                      "WHERE status IN ('assigned','running') "
+                      "AND started_at > 0 AND (?1 - started_at) > ?2";
+    sqlite3_stmt *stmt = NULL;
+    if (sqlite3_prepare_v2(g_ipc.db, sql, -1, &stmt, NULL) != SQLITE_OK) return 0;
+    sqlite3_bind_double(stmt, 1, now_ts());
+    sqlite3_bind_double(stmt, 2, timeout_s);
+    int rc = sqlite3_step(stmt);
+    int changed = (rc == SQLITE_DONE) ? sqlite3_changes(g_ipc.db) : 0;
+    sqlite3_finalize(stmt);
+    return changed;
 }
 
 /* ═══════════════════════════════════════════════════════════════════════════
