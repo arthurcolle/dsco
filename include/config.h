@@ -2,6 +2,7 @@
 #define DSCO_CONFIG_H
 
 #include <stdbool.h>
+#include <stdlib.h>
 #include <string.h>
 #include <stddef.h>
 
@@ -38,6 +39,15 @@
 
 /* Agent loop */
 #define MAX_AGENT_TURNS     50
+/* Override at runtime via DSCO_MAX_AGENT_TURNS */
+static inline int dsco_max_agent_turns(void) {
+    const char *e = getenv("DSCO_MAX_AGENT_TURNS");
+    if (e && e[0]) {
+        int v = atoi(e);
+        if (v >= 1 && v <= 500) return v;
+    }
+    return MAX_AGENT_TURNS;
+}
 
 /* Context window / token budget */
 #define CONTEXT_WINDOW_TOKENS  200000  /* claude-opus-4-6 */
@@ -50,6 +60,8 @@
 #define DSCO_MCP_CONFIG      "~/.dsco/mcp.json"
 #define DSCO_SYSTEM_PROMPT   "~/.dsco/system_prompt.txt"
 #define DSCO_PLUGINS_DIR     "~/.dsco/plugins"
+#define DSCO_WORKSPACE_DIR   "~/.dsco/workspace"
+#define DSCO_WORKSPACE_SKILLS_DIR "~/.dsco/workspace/skills"
 
 /* Max content blocks in a single response */
 #define MAX_CONTENT_BLOCKS  128
@@ -131,7 +143,7 @@ static inline int model_context_window(const char *name) {
 /* System prompt */
 #define SYSTEM_PROMPT \
     "You are dsco, an agentic CLI with self-introspection, swarm, crypto, pipeline, " \
-    "and plugin capabilities. You have 110+ tools including file I/O, compilation, " \
+    "and plugin capabilities. You have 170+ tools including file I/O, compilation, " \
     "shell, git, network, and these special capabilities:\n" \
     "1) AST SELF-INTROSPECTION: Use self_inspect, inspect_file, call_graph, and " \
     "dependency_graph to understand any C codebase at the AST level — including " \
@@ -142,6 +154,11 @@ static inline int model_context_window(const char *name) {
     "Monitor with agent_status, collect with swarm_collect. " \
     "For complex tasks, decompose into hierarchies: a coordinator spawns " \
     "specialist agents, each of which can spawn workers.\n" \
+    "2b) ADVANCED TOPOLOGIES: Use topology_list to inspect the built-in " \
+    "execution graphs and topology_run to execute tasks through named or " \
+    "auto-selected topologies. Prefer topology_run over create_swarm when the " \
+    "work needs structured fanout/fanin, hierarchies, feedback loops, " \
+    "competitive selection, or domain-specific orchestration.\n" \
     "3) CRYPTO TOOLKIT: Pure C SHA-256, MD5, HMAC-SHA256, HKDF, base64, UUID v4, " \
     "random bytes, JWT decode. Use sha256, md5, hmac, uuid, random_bytes, " \
     "base64_tool, jwt_decode, hkdf.\n" \
@@ -157,6 +174,9 @@ static inline int model_context_window(const char *name) {
     "multi-line operations. Supports cwd parameter for directory context. " \
     "Default 120s timeout. Preferred over run_command, but do not use bash when a dedicated tool exists.\n" \
     "8) MARKET DATA: Use market_quote for live ticker/stock/crypto/forex prices.\n" \
+    "9) SOUL EVOLUTION: Use soul_read to inspect, and soul_write/soul_append/soul_replace to mutate " \
+    "the workspace SOUL.md over time. Treat this as persistent personality state and apply incremental, " \
+    "coherent updates.\n" \
     "You operate in a streaming loop. Be concise. Prefer action over explanation. " \
     "When tasks are parallelizable, use swarms. When you need code understanding, " \
     "use AST tools before editing. You can call many tools in a single response — " \
