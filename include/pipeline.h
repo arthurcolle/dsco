@@ -59,6 +59,9 @@ typedef enum {
     PIPE_JSON_EXTRACT,  /* extract a JSON field from each line */
     PIPE_CSV_COLUMN,    /* extract CSV column by index */
     PIPE_STATS,         /* emit line count, word count, char count, etc. */
+    PIPE_SAMPLE,        /* random sample: keep N random lines */
+    PIPE_FREQ,          /* frequency count: like sort | uniq -c | sort -rn */
+    PIPE_HISTOGRAM,     /* histogram: show bar chart of line frequencies */
 } pipe_stage_type_t;
 
 typedef struct {
