@@ -8,6 +8,9 @@
 #include "md.h"
 #include "baseline.h"
 #include "setup.h"
+#include "provider.h"
+#include "topology.h"
+#include "workspace.h"
 #include "trace.h"
 #include "output_guard.h"
 #include <stdio.h>
@@ -15,6 +18,8 @@
 #include <string.h>
 #include <curl/curl.h>
 #include <signal.h>
+#include <fcntl.h>
+#include <unistd.h>
 
 static md_renderer_t s_oneshot_md;
 
@@ -35,6 +40,24 @@ static void main_sigterm_handler(int sig) {
     g_main_interrupted = 1;
 }
 
+/* Crash handler — save diagnostic info before dying */
+static void crash_handler(int sig) {
+    /* Async-signal-safe only: write, _exit */
+    const char *name = sig == SIGSEGV ? "SIGSEGV" :
+                       sig == SIGBUS  ? "SIGBUS"  :
+                       sig == SIGABRT ? "SIGABRT" : "UNKNOWN";
+    int fd = open("/tmp/dsco_crash.log", O_WRONLY | O_CREAT | O_APPEND, 0644);
+    if (fd >= 0) {
+        char buf[256];
+        int n = snprintf(buf, sizeof(buf), "\n[dsco crash] signal=%s(%d) pid=%d\n", name, sig, getpid());
+        if (n > 0) write(fd, buf, (size_t)n);
+        close(fd);
+    }
+    /* Re-raise with default handler */
+    signal(sig, SIG_DFL);
+    raise(sig);
+}
+
 static void main_atexit_handler(void) {
     TRACE_SHUTDOWN();
     ipc_shutdown();
@@ -48,14 +71,19 @@ static void usage(const char *prog) {
         "\n"
         "Options:\n"
         "  -m MODEL    Model name (default: %s)\n"
-        "  -k KEY      API key (default: $ANTHROPIC_API_KEY)\n"
+        "  -k KEY      API key (default: provider env for selected model)\n"
         "  --profile NAME         Setup profile (default: default)\n"
         "  --setup                Save detected API keys/tokens into dsco env file\n"
         "  --setup-force          Overwrite existing saved values from current env\n"
         "  --setup-report         Show masked setup/config status\n"
+        "  --workspace-bootstrap  Create claw workspace files under ~/.dsco/workspace\n"
+        "  --workspace-status     Show claw workspace status\n"
         "  --timeline-server        Run local timeline web server\n"
         "  --timeline-port PORT     Timeline webserver port (default: 8421)\n"
         "  --timeline-instance ID   Filter timeline to one instance ID\n"
+        "  --topology NAME        Run/select an agent topology\n"
+        "  --topology-auto        Auto-pick a topology for the task\n"
+        "  --topology-list        List available topologies\n"
         "  --version              Print version and build info\n"
         "  -h          Show this help\n"
         "\n"
@@ -63,12 +91,53 @@ static void usage(const char *prog) {
         "One-shot mode:    %s 'write a hello world in C and compile it'\n"
         "\n"
         "Environment:\n"
-        "  ANTHROPIC_API_KEY   Your Anthropic API key\n"
+        "  ANTHROPIC_API_KEY   Anthropic API key\n"
+        "  OPENROUTER_API_KEY  OpenRouter API key for namespaced org/model IDs\n"
         "  DSCO_MODEL          Default model override\n"
         "  DSCO_PROFILE        Setup profile name\n"
         "  DSCO_ENV_FILE       Override setup env file path\n"
         "  DSCO_BASELINE_DB    Override sqlite baseline path\n",
     DSCO_VERSION, prog, DEFAULT_MODEL, prog);
+}
+
+static void print_topology_list(void) {
+    int count = 0;
+    const topology_t *tops = topology_registry(&count);
+    printf("Available topologies (%d):\n", count);
+    for (int i = 0; i < count; i++) {
+        printf("  T%02d %-18s %-12s agents=%d latency=%.1fx\n",
+               tops[i].id, tops[i].name, topo_category_label(tops[i].category),
+               tops[i].total_agents, tops[i].est_latency_mult);
+    }
+}
+
+static int run_oneshot_topology(const char *api_key, const char *model,
+                                const char *topology_name, bool topology_auto,
+                                const char *prompt) {
+    topology_plan_t plan;
+    if (!topology_plan_build(topology_name, topology_auto, prompt, &plan)) {
+        fprintf(stderr, "error: topology not found\n");
+        return 1;
+    }
+
+    char *result = safe_malloc(MAX_RESPONSE_SIZE);
+    topology_run_stats_t stats;
+    bool ok = topology_plan_run(&plan, api_key, model, prompt, result, MAX_RESPONSE_SIZE, &stats);
+    md_reset(&s_oneshot_md);
+    md_feed_str(&s_oneshot_md, result);
+    md_flush(&s_oneshot_md);
+    printf("\n");
+    fprintf(stderr, "  %stopology:%s %s  %sagents:%s %d  %siterations:%s %d  %sest:$%.4f%s\n",
+            TUI_DIM, TUI_RESET, plan.topology.name,
+            TUI_DIM, TUI_RESET, stats.agents_spawned,
+            TUI_DIM, TUI_RESET, stats.iterations,
+            TUI_BCYAN, stats.est_cost_usd, TUI_RESET);
+    if (plan.rationale[0]) {
+        fprintf(stderr, "  %splan:%s %s\n", TUI_DIM, TUI_RESET, plan.rationale);
+    }
+    baseline_log("swarm", ok ? "topology_run" : "topology_run_failed", plan.topology.name, NULL);
+    free(result);
+    return ok ? 0 : 1;
 }
 
 /* One-shot mode: simple print callbacks */
@@ -141,7 +210,7 @@ int main(int argc, char **argv) {
         }
     }
 
-    const char *api_key = getenv("ANTHROPIC_API_KEY");
+    const char *api_key = NULL;
     const char *model = getenv("DSCO_MODEL");
     if (!model) model = DEFAULT_MODEL;
     char *oneshot_prompt = NULL;
@@ -149,8 +218,13 @@ int main(int argc, char **argv) {
     bool setup_mode = false;
     bool setup_force = false;
     bool setup_report_mode = false;
+    bool workspace_bootstrap_mode = false;
+    bool workspace_status_mode = false;
     int timeline_port = 8421;
     const char *timeline_instance_filter = NULL;
+    const char *topology_name = NULL;
+    bool topology_auto = false;
+    bool topology_list_mode = false;
 
     for (int i = 1; i < argc; i++) {
         if (strcmp(argv[i], "-h") == 0 || strcmp(argv[i], "--help") == 0) {
@@ -176,6 +250,10 @@ int main(int argc, char **argv) {
         } else if (strcmp(argv[i], "--setup-report") == 0) {
             setup_mode = true;
             setup_report_mode = true;
+        } else if (strcmp(argv[i], "--workspace-bootstrap") == 0) {
+            workspace_bootstrap_mode = true;
+        } else if (strcmp(argv[i], "--workspace-status") == 0) {
+            workspace_status_mode = true;
         } else if (strcmp(argv[i], "--timeline-server") == 0) {
             timeline_server_mode = true;
         } else if (strcmp(argv[i], "--timeline-port") == 0 && i + 1 < argc) {
@@ -187,6 +265,12 @@ int main(int argc, char **argv) {
             }
         } else if (strcmp(argv[i], "--timeline-instance") == 0 && i + 1 < argc) {
             timeline_instance_filter = argv[++i];
+        } else if (strcmp(argv[i], "--topology") == 0 && i + 1 < argc) {
+            topology_name = argv[++i];
+        } else if (strcmp(argv[i], "--topology-auto") == 0) {
+            topology_auto = true;
+        } else if (strcmp(argv[i], "--topology-list") == 0) {
+            topology_list_mode = true;
         } else {
             size_t total = 0;
             for (int j = i; j < argc; j++) total += strlen(argv[j]) + 1;
@@ -198,6 +282,39 @@ int main(int argc, char **argv) {
             }
             break;
         }
+    }
+
+    {
+        char workspace_summary[768];
+        int ws_created = dsco_workspace_bootstrap(workspace_summary, sizeof(workspace_summary));
+        if (ws_created < 0) {
+            fprintf(stderr, "warning: %s\n", workspace_summary);
+        } else if (workspace_bootstrap_mode) {
+            printf("%s\n", workspace_summary);
+            free(oneshot_prompt);
+            return 0;
+        } else if (ws_created > 0) {
+            fprintf(stderr, "%s\n", workspace_summary);
+        }
+    }
+
+    if (workspace_status_mode) {
+        dsco_workspace_status_t st;
+        char workspace_summary[768];
+        if (dsco_workspace_status(&st, workspace_summary, sizeof(workspace_summary)) < 0) {
+            fprintf(stderr, "workspace status failed\n");
+            free(oneshot_prompt);
+            return 1;
+        }
+        printf("%s\n", workspace_summary);
+        free(oneshot_prompt);
+        return 0;
+    }
+
+    if (topology_list_mode) {
+        print_topology_list();
+        free(oneshot_prompt);
+        return 0;
     }
 
     if (setup_mode) {
@@ -248,8 +365,14 @@ int main(int argc, char **argv) {
     }
 
     if (!api_key || api_key[0] == '\0') {
-        fprintf(stderr, "error: ANTHROPIC_API_KEY not set\n");
-        fprintf(stderr, "  export ANTHROPIC_API_KEY=sk-ant-...\n");
+        const char *provider = provider_detect(model, NULL);
+        api_key = provider_resolve_api_key(provider);
+    }
+
+    if (!api_key || api_key[0] == '\0') {
+        const char *provider = provider_detect(model, NULL);
+        fprintf(stderr, "error: API key not set for provider '%s'\n", provider);
+        fprintf(stderr, "  use -k KEY or export the provider-specific env var\n");
         free(oneshot_prompt);
         return 1;
     }
@@ -267,7 +390,15 @@ int main(int argc, char **argv) {
 
     if (oneshot_prompt) {
         tools_init();
+        tools_set_runtime_api_key(api_key);
+        tools_set_runtime_model(model);
         md_init(&s_oneshot_md, stdout);
+
+        if (topology_name || topology_auto) {
+            int rc = run_oneshot_topology(api_key, model, topology_name, topology_auto, oneshot_prompt);
+            free(oneshot_prompt);
+            return rc;
+        }
 
         conversation_t conv;
         conv_init(&conv);
@@ -275,23 +406,31 @@ int main(int argc, char **argv) {
         baseline_log("user", "oneshot_prompt", oneshot_prompt, NULL);
         session_state_t oneshot_session;
         session_state_init(&oneshot_session, model);
+        const char *oneshot_provider_name = provider_detect(oneshot_session.model, api_key);
+        provider_t *oneshot_provider = provider_create(oneshot_provider_name);
 
         int turns = 0;
-        while (turns < MAX_AGENT_TURNS) {
+        while (turns < dsco_max_agent_turns()) {
             turns++;
             md_reset(&s_oneshot_md);
 
-            char *req = llm_build_request(&conv, model, MAX_TOKENS);
+            char *req = oneshot_provider
+                ? oneshot_provider->build_request(oneshot_provider, &conv, &oneshot_session, MAX_TOKENS)
+                : llm_build_request_ex(&conv, &oneshot_session, MAX_TOKENS);
             if (!req) {
                 fprintf(stderr, "error: failed to build request\n");
                 baseline_log("error", "request_build_failed", NULL, NULL);
                 break;
             }
 
-            stream_result_t sr = llm_stream(api_key, req,
-                                             oneshot_text_cb,
-                                             oneshot_tool_cb,
-                                             NULL, NULL);
+            stream_result_t sr = oneshot_provider
+                ? oneshot_provider->stream(oneshot_provider, api_key, req,
+                                           oneshot_text_cb, oneshot_tool_cb,
+                                           NULL, NULL)
+                : llm_stream(api_key, req,
+                             oneshot_text_cb,
+                             oneshot_tool_cb,
+                             NULL, NULL);
             free(req);
 
             if (!sr.ok) {
@@ -354,6 +493,11 @@ int main(int argc, char **argv) {
             sigemptyset(&sa_term.sa_mask);
             sigaction(SIGTERM, &sa_term, NULL);
 
+            /* Crash handlers — log diagnostics before dying */
+            signal(SIGSEGV, crash_handler);
+            signal(SIGBUS,  crash_handler);
+            signal(SIGABRT, crash_handler);
+
             const char *depth_s = getenv("DSCO_SWARM_DEPTH");
             ipc_register(getenv("DSCO_PARENT_INSTANCE_ID"),
                          depth_s ? atoi(depth_s) : 0, "worker", "*");
@@ -372,16 +516,22 @@ int main(int argc, char **argv) {
 
                 int t2 = 0;
                 bool task_ok = true;
-                while (t2 < MAX_AGENT_TURNS && !g_main_interrupted) {
+                while (t2 < dsco_max_agent_turns() && !g_main_interrupted) {
                     t2++;
                     md_reset(&s_oneshot_md);
-                    char *req2 = llm_build_request(&conv, model, MAX_TOKENS);
+                    char *req2 = oneshot_provider
+                        ? oneshot_provider->build_request(oneshot_provider, &conv, &oneshot_session, MAX_TOKENS)
+                        : llm_build_request_ex(&conv, &oneshot_session, MAX_TOKENS);
                     if (!req2) { task_ok = false; break; }
 
-                    stream_result_t sr2 = llm_stream(api_key, req2,
-                                                      oneshot_text_cb,
-                                                      oneshot_tool_cb,
-                                                      NULL, NULL);
+                    stream_result_t sr2 = oneshot_provider
+                        ? oneshot_provider->stream(oneshot_provider, api_key, req2,
+                                                   oneshot_text_cb, oneshot_tool_cb,
+                                                   NULL, NULL)
+                        : llm_stream(api_key, req2,
+                                     oneshot_text_cb,
+                                     oneshot_tool_cb,
+                                     NULL, NULL);
                     free(req2);
                     if (!sr2.ok) {
                         json_free_response(&sr2.parsed);
@@ -439,10 +589,11 @@ int main(int argc, char **argv) {
             ipc_shutdown();
         }
 
+        provider_free(oneshot_provider);
         conv_free(&conv);
         free(oneshot_prompt);
     } else {
-        agent_run(api_key, model);
+        agent_run(api_key, model, topology_name, topology_auto);
     }
 
     curl_global_cleanup();
