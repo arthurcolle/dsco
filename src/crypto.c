@@ -263,6 +263,24 @@ void hmac_sha256_hex(const uint8_t *key, size_t key_len,
     hex_encode(mac, 32, hex);
 }
 
+/* ── Constant-time comparison (prevents timing side-channels) ──────── */
+
+static int ct_compare(const uint8_t *a, const uint8_t *b, size_t len) {
+    volatile uint8_t diff = 0;
+    for (size_t i = 0; i < len; i++)
+        diff |= a[i] ^ b[i];
+    return diff == 0;
+}
+
+bool hmac_sha256_verify(const uint8_t *key, size_t key_len,
+                        const uint8_t *data, size_t data_len,
+                        const uint8_t expected_mac[32]) {
+    if (!key || !data || !expected_mac) return false;
+    uint8_t computed[32];
+    hmac_sha256(key, key_len, data, data_len, computed);
+    return ct_compare(computed, expected_mac, 32);
+}
+
 /* ═══════════════════════════════════════════════════════════════════════════
  * Base64 encode/decode
  * ═══════════════════════════════════════════════════════════════════════════ */
