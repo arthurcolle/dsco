@@ -17,6 +17,7 @@
 #include "mcp.h"
 #include "provider.h"
 #include "topology.h"
+#include "router.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -39,6 +40,18 @@
 #endif
 
 volatile int g_interrupted = 0;
+
+/* Escape key state machine — first ESC pauses, second ESC cancels */
+typedef enum { ESC_RUNNING = 0, ESC_PAUSED = 1 } escape_state_t;
+static volatile sig_atomic_t g_escape_state = ESC_RUNNING;
+
+/* ESC key poller (background thread during streaming) */
+static volatile int  g_esc_poller_active = 0;
+static pthread_t     g_esc_poller_tid;
+
+/* Timestamp when current agent turn started (for pause display) */
+static double g_turn_start_time = 0.0;
+
 static md_renderer_t s_md;
 
 /* Stream heartbeat global — shared with llm.c write callback */
@@ -149,9 +162,25 @@ static provider_t *g_provider = NULL;
 
 static void ensure_provider(session_state_t *session, const char *api_key) {
     const char *pname = provider_detect(session->model, api_key);
+    /* If the detected provider's native key is missing, fall back to OpenRouter */
+    if (strcmp(pname, "anthropic") != 0) {
+        const char *native_key = provider_resolve_api_key(pname);
+        if (!native_key || !native_key[0]) {
+            const char *or_key = getenv("OPENROUTER_API_KEY");
+            if (or_key && or_key[0]) pname = "openrouter";
+        }
+    }
     if (g_provider && strcmp(g_provider->name, pname) == 0) return;
     provider_free(g_provider);
     g_provider = provider_create(pname);
+}
+
+/* Resolve the API key for the current provider, falling back to the session
+ * key (typically the Anthropic key) if the provider has no key of its own. */
+static const char *resolve_provider_key(const char *session_key) {
+    if (!g_provider) return session_key;
+    const char *k = provider_resolve_api_key(g_provider->name);
+    return (k && k[0]) ? k : session_key;
 }
 
 /* ── Image drag-and-drop support ─────────────────────────────────────── */
@@ -499,19 +528,15 @@ static void terminal_input_echo_restore(void);
 
 static void sigint_handler(int sig) {
     (void)sig;
-    /* First Ctrl+C interrupts current stream/tool round.
-       Second Ctrl+C is a hard exit if we're already interrupted/stuck. */
+    /* First Ctrl+C: pause current streaming turn (ESC_PAUSED state).
+       Second Ctrl+C: hard exit (already interrupted/stuck). */
     if (g_interrupted) {
         terminal_input_echo_restore();
-        /* Reset terminal state before hard exit:
-           - Reset scroll region to full terminal
-           - Disable bracketed paste mode
-           - Reset all SGR attributes
-           - Show cursor */
         const char reset[] = "\033[r\033[?2004l\033[0m\033[?25h\n";
         (void)write(STDERR_FILENO, reset, sizeof(reset) - 1);
         _exit(130);
     }
+    g_escape_state = ESC_PAUSED;
     g_interrupted = 1;
 }
 
@@ -981,7 +1006,11 @@ static void terminal_input_echo_suspend(void) {
     if (tcgetattr(STDIN_FILENO, &tio) != 0) return;
     s_saved_termios = tio;
     s_saved_termios_valid = true;
-    tio.c_lflag &= (tcflag_t)~(ECHO | ECHONL);
+    /* Disable echo and canonical mode so the ESC poller can read individual
+       keystrokes (e.g. ESC = 0x1b) without waiting for Enter. */
+    tio.c_lflag &= (tcflag_t)~(ECHO | ECHONL | ICANON);
+    tio.c_cc[VMIN]  = 0;   /* non-blocking reads */
+    tio.c_cc[VTIME] = 0;
     if (tcsetattr(STDIN_FILENO, TCSANOW, &tio) == 0) {
         s_input_echo_suspended = true;
     }
@@ -993,6 +1022,108 @@ static void terminal_input_echo_restore(void) {
         tcsetattr(STDIN_FILENO, TCSAFLUSH, &s_saved_termios);
     }
     s_input_echo_suspended = false;
+}
+
+/* ── ESC key poller thread ─────────────────────────────────────────────── */
+/* Runs during LLM streaming (stdin is in raw non-blocking mode).
+   Detects a standalone ESC (0x1b) and triggers the pause state machine.
+   Escape sequences (arrow keys etc.) are distinguished by a follow-up byte
+   arriving within 20 ms; if one does, the sequence is drained and ignored. */
+
+static void *esc_poll_thread_fn(void *arg) {
+    (void)arg;
+    while (g_esc_poller_active) {
+        fd_set rfd;
+        struct timeval tv = {0, 30000};  /* 30 ms poll */
+        FD_ZERO(&rfd);
+        FD_SET(STDIN_FILENO, &rfd);
+        if (select(STDIN_FILENO + 1, &rfd, NULL, NULL, &tv) <= 0)
+            continue;
+
+        char c = 0;
+        if (read(STDIN_FILENO, &c, 1) != 1 || c != '\033')
+            continue;
+
+        /* Wait 20 ms for potential escape-sequence follow-up */
+        struct timeval tv2 = {0, 20000};
+        fd_set rfd2;
+        FD_ZERO(&rfd2);
+        FD_SET(STDIN_FILENO, &rfd2);
+        if (select(STDIN_FILENO + 1, &rfd2, NULL, NULL, &tv2) > 0) {
+            char buf[8];
+            (void)read(STDIN_FILENO, buf, sizeof(buf));  /* drain and ignore */
+            continue;
+        }
+
+        /* Standalone ESC */
+        if (g_escape_state == ESC_RUNNING && !g_interrupted) {
+            g_escape_state = ESC_PAUSED;
+            g_interrupted  = 1;
+        } else if (g_escape_state == ESC_PAUSED) {
+            /* Second ESC → hard exit */
+            const char msg[] = "\n\033[r\033[?2004l\033[0m\033[?25h\n";
+            (void)write(STDERR_FILENO, msg, sizeof(msg) - 1);
+            _exit(130);
+        }
+    }
+    return NULL;
+}
+
+static void esc_poller_start(void) {
+    if (g_esc_poller_active) return;
+    g_esc_poller_active = 1;
+    pthread_create(&g_esc_poller_tid, NULL, esc_poll_thread_fn, NULL);
+}
+
+static void esc_poller_stop(void) {
+    if (!g_esc_poller_active) return;
+    g_esc_poller_active = 0;
+    pthread_join(g_esc_poller_tid, NULL);
+}
+
+/* ── Pause menu ────────────────────────────────────────────────────────── */
+/* Called when the turns loop exits due to ESC_PAUSED.
+   Returns true if the user chose to resume, false to cancel. */
+
+static bool show_pause_menu(int cur_turn, int max_turns, double elapsed_sec) {
+    struct termios tio_saved, tio_raw;
+    bool tio_ok = (isatty(STDIN_FILENO) && tcgetattr(STDIN_FILENO, &tio_saved) == 0);
+    if (tio_ok) {
+        tio_raw = tio_saved;
+        tio_raw.c_lflag &= (tcflag_t)~(ECHO | ECHONL | ICANON);
+        tio_raw.c_cc[VMIN]  = 1;
+        tio_raw.c_cc[VTIME] = 0;
+        tcsetattr(STDIN_FILENO, TCSANOW, &tio_raw);
+    }
+
+    int max_t = max_turns > 0 ? max_turns : 1;
+    fprintf(stderr, "\n  %s⏸  paused%s  (turn %d/%d · %.0fs elapsed)\n",
+            TUI_YELLOW, TUI_RESET, cur_turn, max_t, elapsed_sec);
+    fprintf(stderr, "  %s[R]%s Resume  %s[C]%s Cancel  "
+                    "%s(Esc again = cancel)%s  ▸ ",
+            TUI_BOLD, TUI_RESET, TUI_BOLD, TUI_RESET, TUI_DIM, TUI_RESET);
+    fflush(stderr);
+
+    bool resume = false;
+    for (;;) {
+        char key = 0;
+        if (read(STDIN_FILENO, &key, 1) != 1) break;
+        if (key == 'r' || key == 'R')                      { resume = true;  break; }
+        if (key == 'c' || key == 'C' || key == '\033' ||
+            key == 'q' || key == 'Q' || key == '\003' /* Ctrl+C */) {
+            resume = false;
+            break;
+        }
+        fprintf(stderr, "\r  %s[R]%s Resume  %s[C]%s Cancel  "
+                        "%s(Esc again = cancel)%s  ▸ ",
+                TUI_BOLD, TUI_RESET, TUI_BOLD, TUI_RESET, TUI_DIM, TUI_RESET);
+        fflush(stderr);
+    }
+
+    if (tio_ok)
+        tcsetattr(STDIN_FILENO, TCSANOW, &tio_saved);
+    fprintf(stderr, "\n");
+    return resume;
 }
 
 static void on_stream_text(const char *text, void *ctx) {
@@ -1413,6 +1544,7 @@ void agent_run(const char *api_key, const char *model,
 
     char input_buf[MAX_INPUT_LINE];
     int last_input_tokens = 0;
+    int consecutive_tool_failures = 0;  /* for router failure escalation */
 
     int tool_count;
     tools_get_all(&tool_count);
@@ -1488,7 +1620,8 @@ void agent_run(const char *api_key, const char *model,
     fprintf(stderr, "  %stype your request, or 'quit' to exit%s %s\n\n", TUI_DIM, TUI_RESET, tui_glyph()->sparkle);
 
     while (1) {
-        g_interrupted = 0;
+        g_interrupted   = 0;
+        g_escape_state  = ESC_RUNNING;
         output_guard_reset();
         terminal_input_echo_restore();
 
@@ -1585,6 +1718,7 @@ void agent_run(const char *api_key, const char *model,
                 const char *resolved = model_resolve_alias(arg);
                 snprintf(session.model, sizeof(session.model), "%s", resolved);
                 session.context_window = model_context_window(resolved);
+                session.model_locked = true;  /* user explicitly chose; block auto-switching */
                 tools_set_runtime_model(session.model);
                 const model_info_t *mi = model_lookup(resolved);
                 char msg[256];
@@ -1598,6 +1732,61 @@ void agent_run(const char *api_key, const char *model,
                 }
             }
             baseline_log("command", "/model", session.model, NULL);
+            continue;
+        }
+        if (strncmp(input_buf, "/route", 6) == 0) {
+            const char *arg = input_buf + 6;
+            while (*arg == ' ') arg++;
+            if (*arg == '\0' || strcmp(arg, "status") == 0) {
+                char buf[4096];
+                router_to_json(&g_router, buf, sizeof(buf));
+                fprintf(stderr, "  %srouter status:%s\n  policy: %s\n  session_cost: $%.4f\n%s\n",
+                        TUI_DIM, TUI_RESET,
+                        router_policy_name(g_router.policy),
+                        g_router.session_cost_usd, buf);
+            } else if (strncmp(arg, "policy ", 7) == 0) {
+                const char *pol = arg + 7;
+                g_router.policy = router_policy_parse(pol);
+                char msg[128];
+                snprintf(msg, sizeof(msg), "routing policy → %s",
+                         router_policy_name(g_router.policy));
+                tui_success(msg);
+            } else if (strncmp(arg, "budget ", 7) == 0) {
+                double b = atof(arg + 7);
+                g_router.cost_budget_usd = b;
+                char msg[128];
+                snprintf(msg, sizeof(msg), "cost budget → $%.4f", b);
+                tui_success(msg);
+            } else if (strcmp(arg, "history") == 0) {
+                char buf[8192];
+                router_history_to_json(&g_router, buf, sizeof(buf));
+                fprintf(stderr, "%s\n", buf);
+            } else if (strcmp(arg, "recommend") == 0) {
+                int ctx_pct = last_input_tokens * 100
+                              / (session.context_window > 0 ? session.context_window : 200000);
+                task_complexity_t c = router_classify_task(NULL, session.turn_count, 0, ctx_pct);
+                router_decision_t rd = router_decide(&g_router, session.model, c,
+                                                      session_cost(&session), 0.0,
+                                                      consecutive_tool_failures);
+                fprintf(stderr,
+                    "  %srouter recommend:%s %s  (complexity=%s reason=%s confidence=%.0f%%)\n"
+                    "  %s%s%s\n",
+                    TUI_DIM, TUI_RESET, rd.model_id,
+                    task_complexity_name(rd.complexity),
+                    switch_reason_name(rd.reason),
+                    (double)rd.confidence * 100.0,
+                    TUI_DIM, rd.rationale, TUI_RESET);
+            } else if (strcmp(arg, "unlock") == 0) {
+                session.model_locked = false;
+                tui_success("model unlocked — router may now auto-switch");
+            } else if (strcmp(arg, "lock") == 0) {
+                session.model_locked = true;
+                tui_success("model locked — router will not auto-switch");
+            } else {
+                fprintf(stderr, "  usage: /route [status|policy <name>|budget <usd>|history|recommend|lock|unlock]\n");
+                fprintf(stderr, "  policies: fixed cost latency quality balanced adaptive\n");
+            }
+            baseline_log("command", "/route", arg, NULL);
             continue;
         }
         if (strncmp(input_buf, "/effort", 7) == 0) {
@@ -2935,7 +3124,10 @@ void agent_run(const char *api_key, const char *model,
         arena_t turn_arena;
         arena_init(&turn_arena);
         terminal_input_echo_suspend();
+        esc_poller_start();
+        g_turn_start_time = now_ms();
 
+resume_turn_loop:
         while (turns < dsco_max_agent_turns() && !g_interrupted) {
             turns++;
             s_in_text_block = false;
@@ -2971,6 +3163,19 @@ void agent_run(const char *api_key, const char *model,
                 break;
             }
 
+            /* Pre-flight context check: estimate tokens from payload size */
+            {
+                size_t payload_chars = req ? strlen(req) : 0;
+                int est_tokens = (int)(payload_chars / 4);
+                int ctx_limit = session.context_window > 0 ? session.context_window : CONTEXT_WINDOW_TOKENS;
+                if (est_tokens > (int)(ctx_limit * TOKEN_BUDGET_COMPACT)) {
+                    fprintf(stderr, "  \033[33m%s context pressure: ~%dk/%dk tokens (%.0f%%) — consider /compact\033[0m\n",
+                            tui_glyph()->warn,
+                            est_tokens / 1000, ctx_limit / 1000,
+                            100.0 * est_tokens / ctx_limit);
+                }
+            }
+
             /* Stream via provider with fallback chain */
             char llm_span[37] = "";
             trace_span_begin(trace_id, "llm_stream", prompt_span, llm_span);
@@ -2979,8 +3184,9 @@ void agent_run(const char *api_key, const char *model,
             tui_stream_heartbeat_start(&s_heartbeat);
             g_stream_heartbeat = &s_heartbeat;
 
+            const char *cur_key = resolve_provider_key(api_key);
             stream_result_t sr = g_provider
-                ? g_provider->stream(g_provider, api_key, req,
+                ? g_provider->stream(g_provider, cur_key, req,
                                       on_stream_text, on_stream_tool_start,
                                       on_stream_thinking, NULL)
                 : llm_stream(api_key, req,
@@ -3140,6 +3346,73 @@ void agent_run(const char *api_key, const char *model,
             tui_flame_init(&s_flame);
             tui_dag_init(&s_dag);
 
+            /* ── Router: record turn + decide successor model ─────────────── */
+            {
+                const model_info_t *cur_mi = model_lookup(session.model);
+                double turn_cost = 0.0;
+                if (cur_mi) {
+                    turn_cost = sr.usage.input_tokens  * cur_mi->input_price  / 1e6
+                              + sr.usage.output_tokens * cur_mi->output_price / 1e6
+                              + sr.usage.cache_read_input_tokens    * cur_mi->cache_read_price  / 1e6
+                              + sr.usage.cache_creation_input_tokens * cur_mi->cache_write_price / 1e6;
+                }
+                router_record_turn(&g_router, session.model,
+                                   sr.usage.input_tokens, sr.usage.output_tokens,
+                                   sr.telemetry.total_ms, turn_cost,
+                                   sr.telemetry.tokens_per_sec, sr.ok);
+
+                if (tool_count_this_turn == 0) {
+                    /* Only suggest after non-tool turns to avoid noise */
+                    int ctx_window_now = session.context_window > 0
+                                        ? session.context_window : CONTEXT_WINDOW_TOKENS;
+                    int ctx_pct = sr.usage.input_tokens * 100
+                                  / (ctx_window_now > 0 ? ctx_window_now : 200000);
+                    task_complexity_t complexity =
+                        router_classify_task(NULL, session.turn_count,
+                                             0, ctx_pct);
+                    router_decision_t rd =
+                        router_decide(&g_router, session.model, complexity,
+                                      session_cost(&session),
+                                      sr.telemetry.total_ms,
+                                      consecutive_tool_failures);
+                    if (rd.should_switch
+                        && rd.model_id[0]
+                        && strcmp(rd.model_id, session.model) != 0
+                        && !session.model_locked) {
+                        /* Only switch within the same provider unless cross-provider
+                         * routing is explicitly opted in via environment variable. */
+                        const char *cur_pname = provider_detect(session.model, NULL);
+                        const char *rd_pname  = provider_detect(rd.model_id, NULL);
+                        bool cross_provider   = (strcmp(cur_pname, rd_pname) != 0);
+                        bool allow_cross      = (getenv("DSCO_ALLOW_CROSS_PROVIDER_ROUTING") != NULL);
+                        if (cross_provider && !allow_cross) goto skip_router_switch;
+                        /* Verify the target provider key is usable (not just non-empty) */
+                        const char *rd_key = provider_resolve_api_key(rd_pname);
+                        bool rd_routable = (rd_key && rd_key[0]);
+                        if (!rd_routable) {
+                            const char *or_key = getenv("OPENROUTER_API_KEY");
+                            rd_routable = (or_key && or_key[0]);
+                        }
+                        if (rd_routable) {
+                            char prev_model[128];
+                            snprintf(prev_model, sizeof(prev_model), "%s", session.model);
+                            snprintf(session.model, sizeof(session.model),
+                                     "%s", rd.model_id);
+                            session.context_window = model_context_window(rd.model_id);
+                            tools_set_runtime_model(session.model);
+                            ensure_provider(&session, api_key);
+                            fprintf(stderr,
+                                "  \033[2m[router] %s → %s  reason=%s  confidence=%.0f%%\033[0m\n",
+                                prev_model,
+                                session.model,
+                                switch_reason_name(rd.reason),
+                                (double)rd.confidence * 100.0);
+                        }
+                        skip_router_switch:;
+                    }
+                }
+            }
+
             /* Token budget awareness */
             int ctx_window = session.context_window > 0 ? session.context_window : CONTEXT_WINDOW_TOKENS;
             if (sr.usage.input_tokens > (int)(ctx_window * TOKEN_BUDGET_WARN)) {
@@ -3256,6 +3529,16 @@ void agent_run(const char *api_key, const char *model,
                             ok = tools_execute_for_tier(blk->tool_name, blk->tool_input, tier,
                                                         tool_result, MAX_TOOL_RESULT);
                             dsco_strip_terminal_controls_inplace(tool_result);
+
+                            /* Warn model if output was truncated */
+                            size_t result_len = strlen(tool_result);
+                            if (result_len >= MAX_TOOL_RESULT - 256) {
+                                size_t cur = strlen(tool_result);
+                                snprintf(tool_result + cur, MAX_TOOL_RESULT - cur,
+                                         "\n[WARNING: output truncated at %zu bytes — full output exceeds %d byte limit]",
+                                         result_len, MAX_TOOL_RESULT);
+                            }
+
                             double elapsed = (now_ms() - t0) * 1000.0;
 
                             bool was_timeout = wd.timed_out;
@@ -3418,6 +3701,16 @@ void agent_run(const char *api_key, const char *model,
                             ok = tools_execute_for_tier(blk->tool_name, blk->tool_input, tier,
                                                         tool_result, MAX_TOOL_RESULT);
                             dsco_strip_terminal_controls_inplace(tool_result);
+
+                            /* Warn model if output was truncated */
+                            size_t result_len2 = strlen(tool_result);
+                            if (result_len2 >= MAX_TOOL_RESULT - 256) {
+                                size_t cur = strlen(tool_result);
+                                snprintf(tool_result + cur, MAX_TOOL_RESULT - cur,
+                                         "\n[WARNING: output truncated at %zu bytes — full output exceeds %d byte limit]",
+                                         result_len2, MAX_TOOL_RESULT);
+                            }
+
                             double elapsed = (now_ms() - t0) * 1000.0;
 
                             bool was_timeout = wd.timed_out;
@@ -3637,10 +3930,24 @@ void agent_run(const char *api_key, const char *model,
 
         /* End prompt-level trace span */
         trace_span_end(prompt_span, g_interrupted ? "interrupted" : "ok", NULL);
+        esc_poller_stop();
         arena_free(&turn_arena);
         terminal_input_echo_restore();
 
-        if (g_interrupted) {
+        if (g_interrupted && g_escape_state == ESC_PAUSED) {
+            double elapsed = now_ms() - g_turn_start_time;
+            bool resume = show_pause_menu(turns, dsco_max_agent_turns(), elapsed);
+            if (resume) {
+                g_interrupted  = 0;
+                g_escape_state = ESC_RUNNING;
+                /* Re-enter raw mode and restart the turns loop from where we paused */
+                terminal_input_echo_suspend();
+                esc_poller_start();
+                goto resume_turn_loop;
+            }
+            /* User chose to cancel — fall through to normal post-loop handling */
+            g_escape_state = ESC_RUNNING;
+        } else if (g_interrupted) {
             fprintf(stderr, "\n");
             tui_warning("interrupted (press Ctrl+C again to force quit)");
         }
