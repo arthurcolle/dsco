@@ -60,6 +60,7 @@ void   jbuf_free(jbuf_t *b);
 void   jbuf_reset(jbuf_t *b);
 void   jbuf_append(jbuf_t *b, const char *s);
 void   jbuf_append_len(jbuf_t *b, const char *s, size_t n);
+void   jbuf_appendf(jbuf_t *b, const char *fmt, ...) __attribute__((format(printf, 2, 3)));
 void   jbuf_append_char(jbuf_t *b, char c);
 void   jbuf_append_json_str(jbuf_t *b, const char *s);
 void   jbuf_append_int(jbuf_t *b, int v);

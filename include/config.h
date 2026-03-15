@@ -2,10 +2,11 @@
 #define DSCO_CONFIG_H
 
 #include <stdbool.h>
+#include <stdlib.h>
 #include <string.h>
 #include <stddef.h>
 
-#define DSCO_VERSION "0.7.0"
+#define DSCO_VERSION "0.8.0"
 
 /* Build info — set via Makefile CFLAGS */
 #ifndef BUILD_DATE
@@ -38,6 +39,15 @@
 
 /* Agent loop */
 #define MAX_AGENT_TURNS     50
+/* Override at runtime via DSCO_MAX_AGENT_TURNS */
+static inline int dsco_max_agent_turns(void) {
+    const char *e = getenv("DSCO_MAX_AGENT_TURNS");
+    if (e && e[0]) {
+        int v = atoi(e);
+        if (v >= 1 && v <= 500) return v;
+    }
+    return MAX_AGENT_TURNS;
+}
 
 /* Context window / token budget */
 #define CONTEXT_WINDOW_TOKENS  200000  /* claude-opus-4-6 */
@@ -50,6 +60,8 @@
 #define DSCO_MCP_CONFIG      "~/.dsco/mcp.json"
 #define DSCO_SYSTEM_PROMPT   "~/.dsco/system_prompt.txt"
 #define DSCO_PLUGINS_DIR     "~/.dsco/plugins"
+#define DSCO_WORKSPACE_DIR   "~/.dsco/workspace"
+#define DSCO_WORKSPACE_SKILLS_DIR "~/.dsco/workspace/skills"
 
 /* Max content blocks in a single response */
 #define MAX_CONTENT_BLOCKS  128
@@ -131,7 +143,7 @@ static inline int model_context_window(const char *name) {
 /* System prompt */
 #define SYSTEM_PROMPT \
     "You are dsco, an agentic CLI with self-introspection, swarm, crypto, pipeline, " \
-    "and plugin capabilities. You have 110+ tools including file I/O, compilation, " \
+    "and plugin capabilities. You have 170+ tools including file I/O, compilation, " \
     "shell, git, network, and these special capabilities:\n" \
     "1) AST SELF-INTROSPECTION: Use self_inspect, inspect_file, call_graph, and " \
     "dependency_graph to understand any C codebase at the AST level — including " \
@@ -142,6 +154,11 @@ static inline int model_context_window(const char *name) {
     "Monitor with agent_status, collect with swarm_collect. " \
     "For complex tasks, decompose into hierarchies: a coordinator spawns " \
     "specialist agents, each of which can spawn workers.\n" \
+    "2b) ADVANCED TOPOLOGIES: Use topology_list to inspect the built-in " \
+    "execution graphs and topology_run to execute tasks through named or " \
+    "auto-selected topologies. Prefer topology_run over create_swarm when the " \
+    "work needs structured fanout/fanin, hierarchies, feedback loops, " \
+    "competitive selection, or domain-specific orchestration.\n" \
     "3) CRYPTO TOOLKIT: Pure C SHA-256, MD5, HMAC-SHA256, HKDF, base64, UUID v4, " \
     "random bytes, JWT decode. Use sha256, md5, hmac, uuid, random_bytes, " \
     "base64_tool, jwt_decode, hkdf.\n" \
@@ -157,6 +174,9 @@ static inline int model_context_window(const char *name) {
     "multi-line operations. Supports cwd parameter for directory context. " \
     "Default 120s timeout. Preferred over run_command, but do not use bash when a dedicated tool exists.\n" \
     "8) MARKET DATA: Use market_quote for live ticker/stock/crypto/forex prices.\n" \
+    "9) SOUL EVOLUTION: Use soul_read to inspect, and soul_write/soul_append/soul_replace to mutate " \
+    "the workspace SOUL.md over time. Treat this as persistent personality state and apply incremental, " \
+    "coherent updates.\n" \
     "You operate in a streaming loop. Be concise. Prefer action over explanation. " \
     "When tasks are parallelizable, use swarms. When you need code understanding, " \
     "use AST tools before editing. You can call many tools in a single response — " \
@@ -219,34 +239,35 @@ static inline void tui_features_init(tui_features_t *f) {
     f->error_severity        = true;  /* F32: typed error messages */
     f->notify_bell           = true;  /* F34: notification bell */
     f->drag_drop_preview     = true;  /* F23: image drop preview badge */
+    f->section_dividers      = true;  /* F30: turn dividers with inline stats */
+    f->tool_dep_graph        = true;  /* F10: compact tool chain display */
+    f->citation_footnotes    = true;  /* F7:  tool→footnote mapping (post-stream) */
+    f->flame_timeline        = true;  /* F8:  flame chart after multi-tool turns */
+    f->tool_cost             = true;  /* F13: per-tool cost annotation */
+    f->branch_indicator      = true;  /* F19: git branch detection */
+    f->agent_rollup          = true;  /* F27: swarm summary on completion */
+    f->ascii_charts          = true;  /* F35: inline bar charts */
+    f->table_sort            = true;  /* F36: sort indicators in tables */
+    f->throughput_graph       = true;  /* F39: streaming throughput sparkline */
 
-    /* Disabled by default — these cause rendering corruption:
+    /* Disabled by default — these cause rendering corruption or noise:
      * F1  token_heatmap       — modifies inline text rendering
      * F2  typing_cadence      — buffers stdout, causes partial writes
      * F5  live_word_count     — cursor save/restore to row 1 during streaming
      * F6  paragraph_fade      — interferes with streaming text
-     * F7  citation_footnotes  — adds noise after every turn
-     * F8  flame_timeline      — adds noise after every turn
      * F9  live_stdout_tee     — tees tool output during execution
-     * F10 tool_dep_graph      — renders DAG after tools
      * F12 result_sparkline    — tries to detect numbers in output
-     * F13 tool_cost           — per-tool cost annotation noise
      * F16 conv_minimap        — cursor manipulation
-     * F19 branch_indicator    — branch detection indicator
      * F21 ghost_suggestions   — ghost command suggestions
      * F22 prompt_tokens       — prompt token counter
      * F25 agent_topology      — agent tree visualization
      * F26 ipc_message_line    — dim IPC log lines
      * F28 swarm_cost          — per-agent cost table
      * F29 adaptive_theme      — auto-detect (safe but leave off for simplicity)
-     * F30 section_dividers    — turn dividers with context
      * F31 status_clock        — clock in status bar
      * F33 smooth_scroll       — paginated code blocks
-     * F35 ascii_charts        — inline bar charts
-     * F36 table_sort          — sort indicators in tables
      * F37 json_tree           — JSON tree view
      * F38 diff_code_blocks    — diff-aware code blocks
-     * F39 throughput_graph    — streaming throughput sparkline
      * F40 latency_waterfall   — cURL latency breakdown
      */
 }
