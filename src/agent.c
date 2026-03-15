@@ -131,7 +131,38 @@ static bool rate_limiter_acquire(rate_limiter_t *rl) {
 
 /* ── Cost budget ───────────────────────────────────────────────────────── */
 
-static double g_cost_budget = 0.0;  /* 0 = unlimited */
+static double g_cost_budget = 0.0;      /* 0 = unlimited */
+static double g_daily_budget = 0.0;     /* 0 = unlimited */
+
+/* Default budgets applied when no env var is set.
+   Override with DSCO_BUDGET=<dollars> and DSCO_DAILY_BUDGET=<dollars>.
+   Set to 0 to disable (DSCO_BUDGET=0). */
+#define DEFAULT_SESSION_BUDGET  10.0    /* $10/session */
+#define DEFAULT_DAILY_BUDGET    50.0    /* $50/day     */
+
+static void init_cost_budgets(void) {
+    const char *sb = getenv("DSCO_BUDGET");
+    if (sb && sb[0]) {
+        g_cost_budget = atof(sb);
+    } else {
+        g_cost_budget = DEFAULT_SESSION_BUDGET;
+    }
+
+    const char *db = getenv("DSCO_DAILY_BUDGET");
+    if (db && db[0]) {
+        g_daily_budget = atof(db);
+    } else {
+        g_daily_budget = DEFAULT_DAILY_BUDGET;
+    }
+
+    /* Sub-agents inherit parent's remaining budget via env */
+    const char *child_budget = getenv("DSCO_CHILD_BUDGET");
+    if (child_budget && child_budget[0]) {
+        double cb = atof(child_budget);
+        if (cb > 0 && (g_cost_budget <= 0 || cb < g_cost_budget))
+            g_cost_budget = cb;
+    }
+}
 
 static double session_cost(session_state_t *session) {
     const model_info_t *mi = model_lookup(session->model);
@@ -143,11 +174,31 @@ static double session_cost(session_state_t *session) {
 }
 
 static bool check_cost_budget(session_state_t *session) {
-    if (g_cost_budget <= 0) return true;
     double cost = session_cost(session);
+
+    /* Daily budget (cross-session, from baseline DB) */
+    if (g_daily_budget > 0) {
+        double daily = baseline_daily_cost() + cost;
+        if (daily >= g_daily_budget) {
+            fprintf(stderr, "  %s%sdaily budget exceeded: $%.2f / $%.2f%s\n",
+                    TUI_BOLD, TUI_RED, daily, g_daily_budget, TUI_RESET);
+            fprintf(stderr, "  %soverride: export DSCO_DAILY_BUDGET=<amount> or DSCO_DAILY_BUDGET=0%s\n",
+                    TUI_DIM, TUI_RESET);
+            return false;
+        }
+        if (daily >= g_daily_budget * 0.8) {
+            fprintf(stderr, "  %sdaily spend: $%.2f / $%.2f (%.0f%%)%s\n",
+                    TUI_YELLOW, daily, g_daily_budget, 100.0 * daily / g_daily_budget, TUI_RESET);
+        }
+    }
+
+    /* Session budget */
+    if (g_cost_budget <= 0) return true;
     if (cost >= g_cost_budget) {
-        fprintf(stderr, "  %s%scost budget exceeded: $%.4f / $%.4f%s\n",
+        fprintf(stderr, "  %s%ssession budget exceeded: $%.4f / $%.4f%s\n",
                 TUI_BOLD, TUI_RED, cost, g_cost_budget, TUI_RESET);
+        fprintf(stderr, "  %soverride: /budget <amount> or export DSCO_BUDGET=<amount>%s\n",
+                TUI_DIM, TUI_RESET);
         return false;
     }
     if (cost >= g_cost_budget * 0.9) {
@@ -181,6 +232,8 @@ static void ensure_provider(session_state_t *session, const char *api_key) {
 static const char *resolve_provider_key(const char *session_key) {
     if (!g_provider) return session_key;
     const char *k = provider_resolve_api_key(g_provider->name);
+    fprintf(stderr, "DEBUG resolve_provider_key: provider=%s resolved_key=%s\n",
+            g_provider->name, k ? (strlen(k) > 8 ? "present" : "(short)") : "(null)");
     return (k && k[0]) ? k : session_key;
 }
 
@@ -1680,6 +1733,9 @@ void agent_run(const char *api_key, const char *model,
         }
     }
 
+    /* Initialize cost budgets from env vars */
+    init_cost_budgets();
+
     /* Welcome banner */
     tui_welcome(session.model, tool_count, DSCO_VERSION);
 
@@ -1733,6 +1789,19 @@ void agent_run(const char *api_key, const char *model,
     sigemptyset(&sa_winch.sa_mask);
     sa_winch.sa_flags = SA_RESTART;
     sigaction(SIGWINCH, &sa_winch, NULL);
+
+    /* Show budget status at startup */
+    {
+        double daily = baseline_daily_cost();
+        if (g_cost_budget > 0 || g_daily_budget > 0) {
+            fprintf(stderr, "  %sbudget:%s", TUI_DIM, TUI_RESET);
+            if (g_cost_budget > 0)
+                fprintf(stderr, " session $%.2f", g_cost_budget);
+            if (g_daily_budget > 0)
+                fprintf(stderr, " · daily $%.2f/$%.2f", daily, g_daily_budget);
+            fprintf(stderr, "\n");
+        }
+    }
 
     fprintf(stderr, "  %stype your request, or 'quit' to exit%s %s\n\n", TUI_DIM, TUI_RESET, tui_glyph()->sparkle);
 
@@ -2576,22 +2645,44 @@ void agent_run(const char *api_key, const char *model,
             while (*arg == ' ') arg++;
             if (*arg == '\0') {
                 double cost = session_cost(&session);
-                if (g_cost_budget > 0) {
-                    fprintf(stderr, "  %scost:%s $%.4f / $%.4f (%.0f%%)\n", TUI_DIM, TUI_RESET,
-                            cost, g_cost_budget, 100.0 * cost / g_cost_budget);
-                } else {
-                    fprintf(stderr, "  %scost:%s $%.4f (no budget set)\n", TUI_DIM, TUI_RESET, cost);
-                }
-                fprintf(stderr, "  %susage: /budget <dollars> or /budget off%s\n", TUI_DIM, TUI_RESET);
+                double daily = baseline_daily_cost() + cost;
+                fprintf(stderr, "  %ssession:%s $%.4f", TUI_DIM, TUI_RESET, cost);
+                if (g_cost_budget > 0)
+                    fprintf(stderr, " / $%.2f (%.0f%%)", g_cost_budget, 100.0 * cost / g_cost_budget);
+                else
+                    fprintf(stderr, " (no session limit)");
+                fprintf(stderr, "\n");
+                fprintf(stderr, "  %sdaily:%s   $%.2f", TUI_DIM, TUI_RESET, daily);
+                if (g_daily_budget > 0)
+                    fprintf(stderr, " / $%.2f (%.0f%%)", g_daily_budget, 100.0 * daily / g_daily_budget);
+                else
+                    fprintf(stderr, " (no daily limit)");
+                fprintf(stderr, "\n");
+                fprintf(stderr, "  %susage: /budget <dollars> | /budget daily <dollars> | /budget off%s\n",
+                        TUI_DIM, TUI_RESET);
             } else if (strcmp(arg, "off") == 0 || strcmp(arg, "none") == 0) {
                 g_cost_budget = 0;
-                tui_success("cost budget disabled");
+                g_daily_budget = 0;
+                tui_success("all cost budgets disabled");
+            } else if (strncmp(arg, "daily ", 6) == 0) {
+                double db = atof(arg + 6);
+                if (db > 0) {
+                    g_daily_budget = db;
+                    char msg[128];
+                    snprintf(msg, sizeof(msg), "daily budget set to $%.2f", db);
+                    tui_success(msg);
+                } else if (strcmp(arg + 6, "off") == 0) {
+                    g_daily_budget = 0;
+                    tui_success("daily budget disabled");
+                } else {
+                    tui_error("daily budget must be a positive number");
+                }
             } else {
                 double budget = atof(arg);
                 if (budget > 0) {
                     g_cost_budget = budget;
                     char msg[128];
-                    snprintf(msg, sizeof(msg), "cost budget set to $%.2f", budget);
+                    snprintf(msg, sizeof(msg), "session budget set to $%.2f", budget);
                     tui_success(msg);
                 } else {
                     tui_error("budget must be a positive number");
@@ -4006,10 +4097,14 @@ resume_turn_loop:
                 tui_notify("dsco", "response complete");
             }
 
-            baseline_log("turn",
+            baseline_log_usage("turn",
                          done ? "turn_done" : "turn_continue",
                          sr.parsed.stop_reason ? sr.parsed.stop_reason : "",
-                         NULL);
+                         NULL,
+                         sr.usage.input_tokens,
+                         sr.usage.output_tokens,
+                         sr.usage.cache_read_input_tokens,
+                         sr.usage.cache_creation_input_tokens);
 
             /* IPC: heartbeat + inject pending messages */
             ipc_heartbeat();

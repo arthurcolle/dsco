@@ -16,6 +16,9 @@
 #include "provider.h"
 #include "topology.h"
 #include "workspace.h"
+#include "governance.h"
+#include "memory_tier.h"
+#include "talons.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -137,6 +140,7 @@ static void ensure_swarm(void) {
             key = provider_resolve_api_key(provider);
         }
         swarm_init(&g_swarm, key, model);
+        swarm_detect_executors(&g_swarm);
         g_swarm_inited = true;
     }
 }
@@ -5666,6 +5670,317 @@ static bool tool_swarm_collect(const char *input, char *result, size_t rlen) {
 }
 
 /* ═══════════════════════════════════════════════════════════════════════════
+ * EXTERNAL EXECUTOR TOOLS — Claude Code / Codex CLI integration
+ * ═══════════════════════════════════════════════════════════════════════════ */
+
+static executor_type_t parse_executor_type(const char *name) {
+    if (!name || !name[0] || strcmp(name, "dsco") == 0 || strcmp(name, "auto") == 0)
+        return EXECUTOR_DSCO;
+    if (strcmp(name, "claude") == 0) return EXECUTOR_CLAUDE;
+    if (strcmp(name, "codex") == 0)  return EXECUTOR_CODEX;
+    return EXECUTOR_DSCO;
+}
+
+static bool tool_executor_status(const char *input, char *result, size_t rlen) {
+    (void)input;
+    ensure_swarm();
+    executor_registry_t *e = &g_swarm.executors;
+
+    jbuf_t b;
+    jbuf_init(&b, 1024);
+    jbuf_append(&b, "{\"executors\":{");
+    jbuf_append(&b, "\"dsco\":{\"available\":true,\"path\":");
+    jbuf_append_json_str(&b, g_swarm.dsco_path ? g_swarm.dsco_path : "dsco");
+    jbuf_append(&b, "}");
+
+    jbuf_appendf(&b, ",\"claude\":{\"available\":%s", e->claude_available ? "true" : "false");
+    if (e->claude_available) {
+        jbuf_append(&b, ",\"path\":");
+        jbuf_append_json_str(&b, e->claude_path);
+        jbuf_append(&b, ",\"model\":");
+        jbuf_append_json_str(&b, e->claude_model);
+    }
+    jbuf_append(&b, "}");
+
+    jbuf_appendf(&b, ",\"codex\":{\"available\":%s", e->codex_available ? "true" : "false");
+    if (e->codex_available) {
+        jbuf_append(&b, ",\"path\":");
+        jbuf_append_json_str(&b, e->codex_path);
+        jbuf_append(&b, ",\"model\":");
+        jbuf_append_json_str(&b, e->codex_model);
+    }
+    jbuf_append(&b, "}");
+
+    /* Budget info */
+    if (g_swarm.swarm_budget_usd > 0) {
+        char bud[32], spent[32];
+        snprintf(bud, sizeof(bud), "%.6f", g_swarm.swarm_budget_usd);
+        snprintf(spent, sizeof(spent), "%.6f", g_swarm.spent_usd);
+        jbuf_appendf(&b, "},\"budget\":{\"total_usd\":%s,\"spent_usd\":%s,"
+                     "\"remaining_usd\":%.6f}",
+                     bud, spent, swarm_budget_remaining(&g_swarm));
+    } else {
+        jbuf_append(&b, "},\"budget\":\"unlimited\"");
+    }
+    jbuf_append(&b, "}");
+
+    int written = (int)b.len < (int)rlen - 1 ? (int)b.len : (int)rlen - 1;
+    memcpy(result, b.data, written);
+    result[written] = '\0';
+    jbuf_free(&b);
+
+    /* TUI feedback */
+    fprintf(stderr, "  %s🔌%s executors: dsco=%s✓%s",
+            TUI_BMAGENTA, TUI_RESET, TUI_GREEN, TUI_RESET);
+    if (e->claude_available)
+        fprintf(stderr, " claude=%s✓%s(%s)", TUI_GREEN, TUI_RESET, e->claude_model);
+    else
+        fprintf(stderr, " claude=%s✗%s", TUI_RED, TUI_RESET);
+    if (e->codex_available)
+        fprintf(stderr, " codex=%s✓%s(%s)", TUI_GREEN, TUI_RESET, e->codex_model);
+    else
+        fprintf(stderr, " codex=%s✗%s", TUI_RED, TUI_RESET);
+    fprintf(stderr, "\n");
+
+    return true;
+}
+
+static bool tool_spawn_executor(const char *input, char *result, size_t rlen) {
+    ensure_swarm();
+
+    int depth = current_swarm_depth();
+    if (depth >= SWARM_MAX_DEPTH) {
+        snprintf(result, rlen,
+                 "{\"error\":\"max swarm depth %d reached\"}",
+                 SWARM_MAX_DEPTH);
+        return false;
+    }
+
+    char *task = json_get_str(input, "task");
+    char *model = json_get_str(input, "model");
+    char *exec_name = json_get_str(input, "executor");
+    double budget = json_get_double(input, "budget", 0.0);
+
+    if (!task) {
+        snprintf(result, rlen, "error: task required");
+        free(model); free(exec_name);
+        return false;
+    }
+
+    executor_type_t exec_type = parse_executor_type(exec_name);
+
+    /* Validate executor availability */
+    if (exec_type == EXECUTOR_CLAUDE && !g_swarm.executors.claude_available) {
+        snprintf(result, rlen, "{\"error\":\"claude CLI not available — "
+                 "install Claude Code and set ANTHROPIC_API_KEY\"}");
+        free(task); free(model); free(exec_name);
+        return false;
+    }
+    if (exec_type == EXECUTOR_CODEX && !g_swarm.executors.codex_available) {
+        snprintf(result, rlen, "{\"error\":\"codex CLI not available — "
+                 "install OpenAI Codex and authenticate with `codex auth`\"}");
+        free(task); free(model); free(exec_name);
+        return false;
+    }
+
+    /* Budget check before spawn */
+    if (g_swarm.swarm_budget_usd > 0) {
+        double remaining = swarm_budget_remaining(&g_swarm);
+        double est = swarm_estimate_task_cost(&g_swarm, model ? model : g_swarm.default_model);
+        if (est > remaining) {
+            snprintf(result, rlen,
+                     "{\"error\":\"insufficient swarm budget: estimated $%.4f > remaining $%.4f\"}",
+                     est, remaining);
+            free(task); free(model); free(exec_name);
+            return false;
+        }
+    }
+
+    int id = swarm_spawn_executor(&g_swarm, -1, task, model, exec_type);
+    if (id < 0) {
+        snprintf(result, rlen, "{\"error\":\"failed to spawn %s executor\"}",
+                 executor_type_name(exec_type));
+        free(task); free(model); free(exec_name);
+        return false;
+    }
+
+    /* Set per-child budget if specified */
+    swarm_child_t *c = swarm_get(&g_swarm, id);
+    if (budget > 0) c->budget_usd = budget;
+
+    /* Pre-estimate cost */
+    c->est_cost_usd = swarm_estimate_task_cost(&g_swarm,
+        model ? model : (exec_type == EXECUTOR_CLAUDE ? g_swarm.executors.claude_model
+                                                       : g_swarm.executors.codex_model));
+
+    snprintf(result, rlen,
+             "{\"agent_id\":%d,\"pid\":%d,\"executor\":\"%s\",\"model\":\"%s\","
+             "\"est_cost_usd\":%.6f,\"status\":\"running\","
+             "\"hint\":\"Use agent_status to monitor\"}",
+             id, (int)c->pid, executor_type_name(exec_type), c->model,
+             c->est_cost_usd);
+
+    fprintf(stderr, "  %s⚡%s spawned %s%s%s agent #%d: %s%.60s%s\n",
+            TUI_BCYAN, TUI_RESET,
+            TUI_BOLD, executor_type_name(exec_type), TUI_RESET,
+            id, TUI_DIM, task, TUI_RESET);
+
+    free(task); free(model); free(exec_name);
+    return true;
+}
+
+static bool tool_create_executor_swarm(const char *input, char *result, size_t rlen) {
+    ensure_swarm();
+
+    int depth = current_swarm_depth();
+    if (depth >= SWARM_MAX_DEPTH) {
+        snprintf(result, rlen, "{\"error\":\"max swarm depth reached\"}");
+        return false;
+    }
+
+    char *name = json_get_str(input, "name");
+    char *default_executor = json_get_str(input, "executor");
+    char *default_model = json_get_str(input, "model");
+    double total_budget = json_get_double(input, "budget", 0.0);
+
+    if (!name) {
+        snprintf(result, rlen, "error: name required");
+        free(default_executor); free(default_model);
+        return false;
+    }
+
+    int gid = swarm_group_create(&g_swarm, name);
+    if (gid < 0) {
+        snprintf(result, rlen, "{\"error\":\"max groups reached\"}");
+        free(name); free(default_executor); free(default_model);
+        return false;
+    }
+
+    /* Parse tasks array — each task can specify its own executor and model */
+    char *tasks_raw = json_get_raw(input, "tasks");
+    if (!tasks_raw || *tasks_raw != '[') {
+        snprintf(result, rlen, "error: tasks array required");
+        free(name); free(default_executor); free(default_model); free(tasks_raw);
+        return false;
+    }
+
+    /* Simple JSON array parsing — tasks can be strings or objects */
+    swarm_task_parse_ctx_t parse_ctx;
+    memset(&parse_ctx, 0, sizeof(parse_ctx));
+    json_array_foreach(input, "tasks", parse_swarm_task_element, &parse_ctx);
+
+    if (parse_ctx.parse_error || parse_ctx.count == 0) {
+        for (int i = 0; i < parse_ctx.count; i++) {
+            free(parse_ctx.specs[i].task);
+            free(parse_ctx.specs[i].model);
+        }
+        free(tasks_raw); free(name); free(default_executor); free(default_model);
+        snprintf(result, rlen, "error: malformed or empty tasks array");
+        return false;
+    }
+
+    /* Compute per-child budget partition */
+    double per_child_budget = 0;
+    if (total_budget > 0) {
+        per_child_budget = total_budget / (double)parse_ctx.count;
+    }
+
+    int spawned = 0;
+    for (int i = 0; i < parse_ctx.count; i++) {
+        const char *task_model = (parse_ctx.specs[i].model && parse_ctx.specs[i].model[0])
+            ? parse_ctx.specs[i].model : default_model;
+
+        /* Check if task object has an executor field (stored in model as "exec:name" hack) */
+        executor_type_t exec_type = parse_executor_type(default_executor);
+
+        /* Try to extract executor from the task spec — check for "executor" key in the raw JSON */
+        /* For now use the default executor */
+
+        int cid = swarm_spawn_executor(&g_swarm, gid, parse_ctx.specs[i].task,
+                                        task_model, exec_type);
+        if (cid >= 0) {
+            swarm_child_t *c = swarm_get(&g_swarm, cid);
+            if (per_child_budget > 0) c->budget_usd = per_child_budget;
+            c->est_cost_usd = swarm_estimate_task_cost(&g_swarm,
+                task_model ? task_model : g_swarm.default_model);
+            spawned++;
+        }
+    }
+
+    /* TUI feedback */
+    fprintf(stderr, "\n  %s⚡%s Swarm %s\"%s\"%s (%s): %d agents\n",
+            TUI_BYELLOW, TUI_RESET, TUI_BOLD, name, TUI_RESET,
+            executor_type_name(parse_executor_type(default_executor)), spawned);
+    for (int i = 0; i < parse_ctx.count; i++) {
+        fprintf(stderr, "    %s◉%s %s%.60s%s\n",
+                TUI_BCYAN, TUI_RESET, TUI_DIM, parse_ctx.specs[i].task, TUI_RESET);
+    }
+    if (total_budget > 0) {
+        fprintf(stderr, "    %s$%s budget: $%.4f total ($%.4f/agent)\n",
+                TUI_BYELLOW, TUI_RESET, total_budget, per_child_budget);
+    }
+    fprintf(stderr, "\n");
+
+    /* Build result */
+    jbuf_t b;
+    jbuf_init(&b, 1024);
+    jbuf_append(&b, "{\"group_id\":");
+    jbuf_append_int(&b, gid);
+    jbuf_append(&b, ",\"name\":");
+    jbuf_append_json_str(&b, name);
+    jbuf_append(&b, ",\"executor\":");
+    jbuf_append_json_str(&b, executor_type_name(parse_executor_type(default_executor)));
+    jbuf_append(&b, ",\"agents_spawned\":");
+    jbuf_append_int(&b, spawned);
+    if (total_budget > 0) {
+        char bud[32];
+        snprintf(bud, sizeof(bud), "%.6f", total_budget);
+        jbuf_append(&b, ",\"budget_usd\":");
+        jbuf_append(&b, bud);
+    }
+    jbuf_append(&b, ",\"agent_ids\":[");
+    swarm_group_t *g = &g_swarm.groups[gid];
+    for (int i = 0; i < g->child_count; i++) {
+        if (i > 0) jbuf_append(&b, ",");
+        jbuf_append_int(&b, g->child_ids[i]);
+    }
+    jbuf_append(&b, "]}");
+
+    int written = (int)b.len < (int)rlen - 1 ? (int)b.len : (int)rlen - 1;
+    memcpy(result, b.data, written);
+    result[written] = '\0';
+    jbuf_free(&b);
+
+    for (int i = 0; i < parse_ctx.count; i++) {
+        free(parse_ctx.specs[i].task);
+        free(parse_ctx.specs[i].model);
+    }
+    free(tasks_raw); free(name); free(default_executor); free(default_model);
+    return true;
+}
+
+static bool tool_swarm_budget(const char *input, char *result, size_t rlen) {
+    ensure_swarm();
+    double budget = json_get_double(input, "budget_usd", -1.0);
+    if (budget >= 0) {
+        swarm_set_budget(&g_swarm, budget);
+        snprintf(result, rlen,
+                 "{\"budget_usd\":%.6f,\"remaining_usd\":%.6f,\"status\":\"set\"}",
+                 budget, swarm_budget_remaining(&g_swarm));
+        fprintf(stderr, "  %s💰%s swarm budget set: $%.4f\n",
+                TUI_BYELLOW, TUI_RESET, budget);
+    } else {
+        double remaining = swarm_budget_remaining(&g_swarm);
+        snprintf(result, rlen,
+                 "{\"budget_usd\":%.6f,\"spent_usd\":%.6f,\"remaining_usd\":%.6f,"
+                 "\"children\":%d,\"active\":%d}",
+                 g_swarm.swarm_budget_usd, g_swarm.spent_usd, remaining,
+                 g_swarm.child_count, swarm_active_count(&g_swarm));
+    }
+    return true;
+}
+
+/* ═══════════════════════════════════════════════════════════════════════════
  * IPC TOOLS — inter-agent communication
  * ═══════════════════════════════════════════════════════════════════════════ */
 
@@ -9241,6 +9556,684 @@ static bool tool_xml_extract(const char *input, char *result, size_t rlen) {
     return true;
 }
 
+/* ═══════════════════════════════════════════════════════════════════════════
+ * Wings + Talons Tool Implementations
+ * ═══════════════════════════════════════════════════════════════════════════ */
+
+/* Global governance engine — singleton for this process */
+static governance_engine_t g_governance;  /* immune system */
+static memory_store_t g_memory;           /* wings: cognitive memory */
+static talons_engine_t g_talons;          /* talons: competitive execution */
+static bool g_wt_initialized = false;
+
+static void ensure_wt_init(void) {
+    if (!g_wt_initialized) {
+        governance_init(&g_governance);
+        memory_store_init(&g_memory);
+        talons_init(&g_talons);
+        /* Register self as agent */
+        const char *self_id = getenv("DSCO_AGENT_ID");
+        if (!self_id) self_id = "root";
+        governance_register_agent(&g_governance, self_id, PRINCIPAL_TIER_2, 10000);
+        g_wt_initialized = true;
+    }
+}
+
+/* ── Pheromone Tools ──────────────────────────────────────────────────── */
+
+static bool tool_pheromone_deposit(const char *input, char *result, size_t rlen) {
+    ensure_wt_init();
+    char *type_s = json_get_str(input,"type");
+    char *region = json_get_str(input,"region");
+    char *source = json_get_str(input,"source");
+    char *meta = json_get_str(input,"meta");
+    double concentration = json_get_double(input, "concentration", 0);
+    if (concentration <= 0) concentration = 0.5;
+
+    pheromone_type_t type = PHERO_PROGRESS;
+    if (type_s) {
+        if (strcasecmp(type_s, "attraction") == 0) type = PHERO_ATTRACTION;
+        else if (strcasecmp(type_s, "warning") == 0) type = PHERO_WARNING;
+        else if (strcasecmp(type_s, "success") == 0) type = PHERO_SUCCESS;
+        else if (strcasecmp(type_s, "help_needed") == 0) type = PHERO_HELP_NEEDED;
+        else if (strcasecmp(type_s, "capacity") == 0) type = PHERO_CAPACITY;
+    }
+
+    int id = pheromone_deposit(&g_governance.pheromones, type, concentration,
+                                region ? region : "global",
+                                source ? source : "agent", meta);
+    snprintf(result, rlen,
+             "{\"ok\":true,\"signal_id\":%d,\"type\":\"%s\",\"concentration\":%.3f,\"region\":\"%s\"}",
+             id, pheromone_type_name(type), concentration, region ? region : "global");
+    free(type_s); free(region); free(source); free(meta);
+    return true;
+}
+
+static bool tool_pheromone_sense(const char *input, char *result, size_t rlen) {
+    ensure_wt_init();
+    char *type_s = json_get_str(input,"type");
+    char *region = json_get_str(input,"region");
+
+    if (!type_s) {
+        /* Sense all types */
+        pheromone_gradient_t grads[PHERO_TYPE_COUNT];
+        int n = pheromone_sense_all(&g_governance.pheromones,
+                                     region ? region : "global",
+                                     PHERO_AGG_SUM, grads, PHERO_TYPE_COUNT);
+        jbuf_t b = {0};
+        jbuf_appendf(&b, "{\"region\":\"%s\",\"gradients\":[", region ? region : "global");
+        for (int i = 0; i < n; i++) {
+            jbuf_appendf(&b, "%s{\"type\":\"%s\",\"concentration\":%.4f,\"signals\":%d}",
+                         i ? "," : "", pheromone_type_name(grads[i].type),
+                         grads[i].concentration, grads[i].signal_count);
+        }
+        jbuf_appendf(&b, "]}");
+        snprintf(result, rlen, "%s", b.data ? b.data : "{}");
+        jbuf_free(&b);
+    } else {
+        pheromone_type_t type = PHERO_PROGRESS;
+        if (strcasecmp(type_s, "attraction") == 0) type = PHERO_ATTRACTION;
+        else if (strcasecmp(type_s, "warning") == 0) type = PHERO_WARNING;
+        else if (strcasecmp(type_s, "success") == 0) type = PHERO_SUCCESS;
+        else if (strcasecmp(type_s, "help_needed") == 0) type = PHERO_HELP_NEEDED;
+        else if (strcasecmp(type_s, "capacity") == 0) type = PHERO_CAPACITY;
+
+        pheromone_gradient_t g;
+        pheromone_gradient(&g_governance.pheromones, type,
+                           region ? region : "global", PHERO_AGG_SUM, &g);
+        snprintf(result, rlen,
+                 "{\"type\":\"%s\",\"concentration\":%.4f,\"signals\":%d,"
+                 "\"strongest_source\":\"%s\",\"strongest_age\":%.1f}",
+                 pheromone_type_name(type), g.concentration, g.signal_count,
+                 g.strongest_source, g.strongest_age);
+    }
+    free(type_s); free(region);
+    return true;
+}
+
+static bool tool_pheromone_status(const char *input, char *result, size_t rlen) {
+    (void)input;
+    ensure_wt_init();
+    pheromone_status_json(&g_governance.pheromones, result, rlen);
+    return true;
+}
+
+/* ── OODA Tools ───────────────────────────────────────────────────────── */
+
+static bool tool_ooda_begin(const char *input, char *result, size_t rlen) {
+    (void)input;
+    ensure_wt_init();
+    int id = ooda_begin(&g_governance.ooda);
+    snprintf(result, rlen, "{\"ok\":true,\"cycle_id\":%d,\"phase\":\"observe\"}", id);
+    return true;
+}
+
+static bool tool_ooda_observe(const char *input, char *result, size_t rlen) {
+    ensure_wt_init();
+    char *content = json_get_str(input,"observation");
+    char *source = json_get_str(input,"source");
+    double confidence = json_get_double(input, "confidence", 0);
+    if (confidence <= 0) confidence = 0.7;
+
+    bool ok = ooda_observe(&g_governance.ooda, content ? content : "",
+                           source ? source : "tool", confidence);
+    snprintf(result, rlen, "{\"ok\":%s,\"observations\":%d}",
+             ok ? "true" : "false", g_governance.ooda.current.observation_count);
+    free(content); free(source);
+    return true;
+}
+
+static bool tool_ooda_orient(const char *input, char *result, size_t rlen) {
+    ensure_wt_init();
+    char *factor = json_get_str(input,"factor");
+    double weight = json_get_double(input, "weight", 0);
+    if (weight <= 0) weight = 0.5;
+    bool constraint = json_get_bool(input, "constraint", false);
+
+    bool ok = ooda_orient_add(&g_governance.ooda, factor ? factor : "",
+                               weight, constraint);
+
+    /* Also set context if provided */
+    double budget = json_get_double(input, "budget", 0);
+    int tier = (int)json_get_double(input, "tier", 0);
+    bool safety = json_get_bool(input, "safety_critical", false);
+    if (budget > 0 || tier > 0 || safety)
+        ooda_orient_context(&g_governance.ooda, budget, tier, safety);
+
+    snprintf(result, rlen, "{\"ok\":%s,\"factors\":%d,\"phase\":\"%s\"}",
+             ok ? "true" : "false", g_governance.ooda.current.factor_count,
+             ooda_phase_name(g_governance.ooda.current.phase));
+    free(factor);
+    return true;
+}
+
+static bool tool_ooda_decide(const char *input, char *result, size_t rlen) {
+    (void)input;
+    ensure_wt_init();
+    ooda_action_t action = ooda_decide(&g_governance.ooda);
+    const ooda_decision_t *d = ooda_current_decision(&g_governance.ooda);
+    if (d) {
+        snprintf(result, rlen,
+                 "{\"action\":\"%s\",\"confidence\":%.3f,"
+                 "\"capability\":\"%s\",\"reason\":\"%s\","
+                 "\"requires_confirmation\":%s}",
+                 ooda_action_name(action), d->confidence,
+                 ooda_capability_name(d->capability), d->reason,
+                 d->requires_confirmation ? "true" : "false");
+    } else {
+        snprintf(result, rlen, "{\"action\":\"%s\",\"error\":\"no decision\"}", ooda_action_name(action));
+    }
+    return true;
+}
+
+static bool tool_ooda_complete(const char *input, char *result, size_t rlen) {
+    ensure_wt_init();
+    bool success = json_get_bool(input, "success", false);
+    char *res = json_get_str(input,"result");
+
+    ooda_act_result(&g_governance.ooda, success, res ? res : "");
+    bool ok = ooda_complete(&g_governance.ooda);
+    snprintf(result, rlen,
+             "{\"ok\":%s,\"total_cycles\":%d,\"success_rate\":%.2f}",
+             ok ? "true" : "false", g_governance.ooda.total_cycles,
+             ooda_success_rate(&g_governance.ooda, 10));
+    free(res);
+    return true;
+}
+
+static bool tool_ooda_status(const char *input, char *result, size_t rlen) {
+    (void)input;
+    ensure_wt_init();
+    ooda_to_json(&g_governance.ooda, result, rlen);
+    return true;
+}
+
+/* ── Kill Switch Tools ────────────────────────────────────────────────── */
+
+static bool tool_killswitch_trigger(const char *input, char *result, size_t rlen) {
+    ensure_wt_init();
+    char *level_s = json_get_str(input,"level");
+    char *target = json_get_str(input,"target");
+    char *reason = json_get_str(input,"reason");
+    double timeout = json_get_double(input, "timeout", 0);
+    bool cascade = json_get_bool(input, "cascade", false);
+
+    kill_level_t level = KILL_AGENT;
+    if (level_s) {
+        if (strcasecmp(level_s, "workflow") == 0) level = KILL_WORKFLOW;
+        else if (strcasecmp(level_s, "service") == 0) level = KILL_SERVICE;
+        else if (strcasecmp(level_s, "pheromone") == 0) level = KILL_PHEROMONE;
+        else if (strcasecmp(level_s, "system") == 0) level = KILL_SYSTEM;
+    }
+
+    int id = killswitch_trigger(&g_governance.killswitches, level,
+                                 target ? target : "*",
+                                 reason ? reason : "manual trigger",
+                                 KILL_TRIGGER_MANUAL, 1, timeout, cascade);
+    snprintf(result, rlen,
+             "{\"ok\":%s,\"kill_id\":%d,\"level\":\"%s\",\"target\":\"%s\"}",
+             id >= 0 ? "true" : "false", id,
+             killswitch_level_name(level), target ? target : "*");
+    free(level_s); free(target); free(reason);
+    return true;
+}
+
+static bool tool_killswitch_resolve(const char *input, char *result, size_t rlen) {
+    ensure_wt_init();
+    int kill_id = (int)json_get_double(input, "kill_id", 0);
+    bool ok = killswitch_resolve(&g_governance.killswitches, kill_id, 1);
+    snprintf(result, rlen, "{\"ok\":%s,\"kill_id\":%d}", ok ? "true" : "false", kill_id);
+    return true;
+}
+
+static bool tool_killswitch_status(const char *input, char *result, size_t rlen) {
+    (void)input;
+    ensure_wt_init();
+    killswitch_status_json(&g_governance.killswitches, result, rlen);
+    return true;
+}
+
+/* ── Governance Tools ─────────────────────────────────────────────────── */
+
+static bool tool_governance_status(const char *input, char *result, size_t rlen) {
+    (void)input;
+    ensure_wt_init();
+    governance_status_json(&g_governance, result, rlen);
+    return true;
+}
+
+static bool tool_governance_authorize(const char *input, char *result, size_t rlen) {
+    ensure_wt_init();
+    char *agent_id = json_get_str(input,"agent_id");
+    char *action = json_get_str(input,"action");
+    double gsu_cost = json_get_double(input, "gsu_cost", 0);
+
+    bool ok = governance_authorize(&g_governance,
+                                    agent_id ? agent_id : "root",
+                                    action ? action : "unknown", gsu_cost);
+    snprintf(result, rlen,
+             "{\"authorized\":%s,\"agent\":\"%s\",\"action\":\"%s\",\"gsu_cost\":%.2f}",
+             ok ? "true" : "false", agent_id ? agent_id : "root",
+             action ? action : "unknown", gsu_cost);
+    free(agent_id); free(action);
+    return true;
+}
+
+static bool tool_governance_checkpoint(const char *input, char *result, size_t rlen) {
+    ensure_wt_init();
+    char *agent_id = json_get_str(input,"agent_id");
+    char *action = json_get_str(input,"action");
+    double gsu_cost = json_get_double(input, "gsu_cost", 0);
+    char *context = json_get_str(input,"context");
+
+    bool ok = governance_checkpoint(&g_governance,
+                                     agent_id ? agent_id : "root",
+                                     action ? action : "unknown",
+                                     gsu_cost, context);
+    double remaining = governance_remaining_gsu(&g_governance,
+                                                 agent_id ? agent_id : "root");
+    snprintf(result, rlen,
+             "{\"permitted\":%s,\"agent\":\"%s\",\"action\":\"%s\","
+             "\"gsu_charged\":%.2f,\"gsu_remaining\":%.2f}",
+             ok ? "true" : "false", agent_id ? agent_id : "root",
+             action ? action : "unknown", gsu_cost, remaining);
+    free(agent_id); free(action); free(context);
+    return true;
+}
+
+static bool tool_governance_budget(const char *input, char *result, size_t rlen) {
+    ensure_wt_init();
+    char *agent_id = json_get_str(input,"agent_id");
+    const char *aid = agent_id ? agent_id : "root";
+
+    const agent_envelope_t *a = governance_get_agent(&g_governance, aid);
+    if (a) {
+        snprintf(result, rlen,
+                 "{\"agent\":\"%s\",\"tier\":\"%s\","
+                 "\"allocated\":%.2f,\"consumed\":%.2f,\"remaining\":%.2f,"
+                 "\"capability\":\"%s\",\"can_spawn\":%s,\"can_kill\":%s}",
+                 aid, governance_tier_name(a->tier),
+                 a->budget.allocated, a->budget.consumed,
+                 a->budget.allocated - a->budget.consumed - a->budget.reserved,
+                 ooda_capability_name(a->capability),
+                 a->can_spawn ? "true" : "false",
+                 a->can_kill ? "true" : "false");
+    } else {
+        snprintf(result, rlen, "{\"error\":\"agent not found\",\"agent\":\"%s\"}", aid);
+    }
+    free(agent_id);
+    return true;
+}
+
+static bool tool_governance_audit(const char *input, char *result, size_t rlen) {
+    ensure_wt_init();
+    int last_n = (int)json_get_double(input, "last_n", 0);
+    if (last_n <= 0) last_n = 20;
+    governance_audit_json(&g_governance, result, rlen, last_n);
+    return true;
+}
+
+static bool tool_governance_param(const char *input, char *result, size_t rlen) {
+    ensure_wt_init();
+    char *name = json_get_str(input,"name");
+    double value = json_get_double(input, "value", 0);
+
+    if (!name) {
+        /* List all params */
+        jbuf_t b = {0};
+        jbuf_appendf(&b, "{\"params\":[");
+        for (int i = 0; i < g_governance.softcoded_count; i++) {
+            jbuf_appendf(&b, "%s{\"name\":\"%s\",\"value\":%.4f,\"min\":%.4f,"
+                         "\"max\":%.4f,\"default\":%.4f}",
+                         i ? "," : "",
+                         g_governance.softcoded[i].name,
+                         g_governance.softcoded[i].value,
+                         g_governance.softcoded[i].min_value,
+                         g_governance.softcoded[i].max_value,
+                         g_governance.softcoded[i].default_value);
+        }
+        jbuf_appendf(&b, "]}");
+        snprintf(result, rlen, "%s", b.data ? b.data : "{}");
+        jbuf_free(&b);
+    } else if (value != 0) {
+        bool ok = governance_set_param(&g_governance, name, value, 1);
+        snprintf(result, rlen, "{\"ok\":%s,\"name\":\"%s\",\"value\":%.4f}",
+                 ok ? "true" : "false", name, governance_get_param(&g_governance, name));
+    } else {
+        double v = governance_get_param(&g_governance, name);
+        snprintf(result, rlen, "{\"name\":\"%s\",\"value\":%.4f}", name, v);
+    }
+    free(name);
+    return true;
+}
+
+/* ── Memory Tier Tools ────────────────────────────────────────────────── */
+
+static bool tool_memory_store(const char *input, char *result, size_t rlen) {
+    ensure_wt_init();
+    char *key = json_get_str(input,"key");
+    char *value = json_get_str(input,"value");
+    char *tier_s = json_get_str(input,"tier");
+    double importance = json_get_double(input, "importance", 0);
+    if (importance <= 0) importance = 0.5;
+
+    if (!key || !value) {
+        snprintf(result, rlen, "{\"error\":\"key and value required\"}");
+        free(key); free(value); free(tier_s);
+        return false;
+    }
+
+    memory_tier_t tier = MEM_WORKING;
+    if (tier_s) {
+        if (strcasecmp(tier_s, "episodic") == 0) tier = MEM_EPISODIC;
+        else if (strcasecmp(tier_s, "semantic") == 0) tier = MEM_SEMANTIC;
+    }
+
+    int id = memory_store(&g_memory, tier, key, value, importance);
+    snprintf(result, rlen,
+             "{\"ok\":true,\"id\":%d,\"key\":\"%s\",\"tier\":\"%s\","
+             "\"importance\":%.2f,\"halflife\":%.0f}",
+             id, key, memory_tier_name(tier), importance,
+             memory_tier_halflife(tier));
+    free(key); free(value); free(tier_s);
+    return true;
+}
+
+static bool tool_memory_recall(const char *input, char *result, size_t rlen) {
+    ensure_wt_init();
+    char *key = json_get_str(input,"key");
+    char *query = json_get_str(input,"query");
+    char *tag = json_get_str(input,"tag");
+
+    if (key) {
+        const memory_entry_t *e = memory_recall(&g_memory, key);
+        if (e) {
+            snprintf(result, rlen,
+                     "{\"found\":true,\"key\":\"%s\",\"value\":\"%.*s\","
+                     "\"tier\":\"%s\",\"strength\":%.4f,\"importance\":%.2f,"
+                     "\"accesses\":%d,\"pinned\":%s}",
+                     e->key, (int)(rlen > 512 ? rlen - 512 : 256), e->value,
+                     memory_tier_name(e->tier), e->strength, e->importance,
+                     e->access_count, e->pinned ? "true" : "false");
+        } else {
+            snprintf(result, rlen, "{\"found\":false,\"key\":\"%s\"}", key);
+        }
+    } else if (query) {
+        const memory_entry_t *hits[16];
+        int n = memory_search(&g_memory, query, hits, 16);
+        jbuf_t b = {0};
+        jbuf_appendf(&b, "{\"results\":[");
+        for (int i = 0; i < n; i++) {
+            jbuf_appendf(&b, "%s{\"key\":\"%s\",\"tier\":\"%s\","
+                         "\"strength\":%.4f,\"importance\":%.2f}",
+                         i ? "," : "", hits[i]->key,
+                         memory_tier_name(hits[i]->tier),
+                         hits[i]->strength, hits[i]->importance);
+        }
+        jbuf_appendf(&b, "],\"count\":%d}", n);
+        snprintf(result, rlen, "%s", b.data ? b.data : "{}");
+        jbuf_free(&b);
+    } else if (tag) {
+        const memory_entry_t *hits[16];
+        int n = memory_recall_by_tag(&g_memory, tag, hits, 16);
+        jbuf_t b = {0};
+        jbuf_appendf(&b, "{\"tag\":\"%s\",\"results\":[", tag);
+        for (int i = 0; i < n; i++) {
+            jbuf_appendf(&b, "%s{\"key\":\"%s\",\"tier\":\"%s\"}",
+                         i ? "," : "", hits[i]->key,
+                         memory_tier_name(hits[i]->tier));
+        }
+        jbuf_appendf(&b, "],\"count\":%d}", n);
+        snprintf(result, rlen, "%s", b.data ? b.data : "{}");
+        jbuf_free(&b);
+    } else {
+        snprintf(result, rlen, "{\"error\":\"provide key, query, or tag\"}");
+    }
+    free(key); free(query); free(tag);
+    return true;
+}
+
+static bool tool_memory_promote(const char *input, char *result, size_t rlen) {
+    ensure_wt_init();
+    char *key = json_get_str(input,"key");
+    if (!key) {
+        snprintf(result, rlen, "{\"error\":\"key required\"}");
+        return false;
+    }
+    bool ok = memory_promote(&g_memory, key);
+    if (ok) {
+        const memory_entry_t *e = memory_recall(&g_memory, key);
+        snprintf(result, rlen, "{\"ok\":true,\"key\":\"%s\",\"new_tier\":\"%s\"}",
+                 key, e ? memory_tier_name(e->tier) : "unknown");
+    } else {
+        snprintf(result, rlen, "{\"ok\":false,\"key\":\"%s\",\"reason\":\"not found or already semantic\"}", key);
+    }
+    free(key);
+    return true;
+}
+
+static bool tool_memory_forget(const char *input, char *result, size_t rlen) {
+    ensure_wt_init();
+    char *key = json_get_str(input,"key");
+    if (!key) {
+        snprintf(result, rlen, "{\"error\":\"key required\"}");
+        return false;
+    }
+    bool ok = memory_forget(&g_memory, key);
+    snprintf(result, rlen, "{\"ok\":%s,\"key\":\"%s\"}", ok ? "true" : "false", key);
+    free(key);
+    return true;
+}
+
+static bool tool_memory_status(const char *input, char *result, size_t rlen) {
+    (void)input;
+    ensure_wt_init();
+    memory_status_json(&g_memory, result, rlen);
+    return true;
+}
+
+/* ── Talons Tools (Competitive Execution) ─────────────────────────────── */
+
+static bool tool_talons_goal_create(const char *input, char *result, size_t rlen) {
+    ensure_wt_init();
+    char *desc = json_get_str(input, "description");
+    char *grip_s = json_get_str(input, "grip");
+    char *strategy_s = json_get_str(input, "strategy");
+    double priority = json_get_double(input, "priority", 0);
+    double deadline = json_get_double(input, "deadline", 0);
+    if (priority <= 0) priority = 0.5;
+
+    grip_strength_t grip = GRIP_HOLDING;
+    if (grip_s) {
+        if (strcasecmp(grip_s, "tentative") == 0) grip = GRIP_TENTATIVE;
+        else if (strcasecmp(grip_s, "locked") == 0) grip = GRIP_LOCKED;
+        else if (strcasecmp(grip_s, "death_grip") == 0) grip = GRIP_DEATH_GRIP;
+    }
+
+    strategy_type_t strategy = STRATEGY_DIRECT;
+    if (strategy_s) {
+        if (strcasecmp(strategy_s, "flanking") == 0) strategy = STRATEGY_FLANKING;
+        else if (strcasecmp(strategy_s, "tournament") == 0) strategy = STRATEGY_TOURNAMENT;
+        else if (strcasecmp(strategy_s, "escalation") == 0) strategy = STRATEGY_ESCALATION;
+        else if (strcasecmp(strategy_s, "divide") == 0) strategy = STRATEGY_DIVIDE;
+        else if (strcasecmp(strategy_s, "ambush") == 0) strategy = STRATEGY_AMBUSH;
+    }
+
+    int id = talons_goal_create(&g_talons, desc, priority, grip, strategy, deadline);
+    snprintf(result, rlen,
+             "{\"ok\":true,\"goal_id\":%d,\"description\":\"%.*s\","
+             "\"grip\":\"%s\",\"strategy\":\"%s\",\"priority\":%.2f,"
+             "\"max_attempts\":%d}",
+             id, 80, desc ? desc : "",
+             talons_grip_name(grip), talons_strategy_name(strategy),
+             priority, grip == GRIP_TENTATIVE ? 1 : grip == GRIP_HOLDING ? 3 : grip == GRIP_LOCKED ? 7 : 20);
+    free(desc); free(grip_s); free(strategy_s);
+    return true;
+}
+
+static bool tool_talons_goal_advance(const char *input, char *result, size_t rlen) {
+    ensure_wt_init();
+    int goal_id = (int)json_get_double(input, "goal_id", 0);
+    char *action = json_get_str(input, "action");
+    char *res_text = json_get_str(input, "result");
+    double cost = json_get_double(input, "cost", 0);
+    double confidence = json_get_double(input, "confidence", 0);
+
+    bool ok = false;
+    const char *new_state = "unknown";
+
+    if (!action) {
+        snprintf(result, rlen, "{\"error\":\"action required: stalk|strike|grip|capture|escaped|abandon\"}");
+        free(action); free(res_text);
+        return false;
+    }
+
+    if (strcasecmp(action, "stalk") == 0) {
+        ok = talons_goal_stalk(&g_talons, goal_id);
+        new_state = "stalking";
+    } else if (strcasecmp(action, "strike") == 0) {
+        ok = talons_goal_strike(&g_talons, goal_id);
+        new_state = "striking";
+    } else if (strcasecmp(action, "grip") == 0) {
+        ok = talons_goal_grip(&g_talons, goal_id);
+        new_state = "gripping";
+    } else if (strcasecmp(action, "capture") == 0) {
+        ok = talons_goal_capture(&g_talons, goal_id, res_text, cost);
+        new_state = "captured";
+    } else if (strcasecmp(action, "escaped") == 0) {
+        bool retrying = talons_goal_escaped(&g_talons, goal_id, res_text, cost);
+        new_state = retrying ? "stalking (retry)" : "escaped";
+        ok = true;
+    } else if (strcasecmp(action, "abandon") == 0) {
+        ok = talons_goal_abandon(&g_talons, goal_id, res_text);
+        new_state = "abandoned";
+    }
+
+    if (confidence > 0) talons_goal_update_confidence(&g_talons, goal_id, confidence);
+
+    const goal_t *g = talons_goal_get(&g_talons, goal_id);
+    snprintf(result, rlen,
+             "{\"ok\":%s,\"goal_id\":%d,\"new_state\":\"%s\","
+             "\"attempts\":%d,\"confidence\":%.3f}",
+             ok ? "true" : "false", goal_id, new_state,
+             g ? g->attempts : 0, g ? g->confidence : 0);
+    free(action); free(res_text);
+    return true;
+}
+
+static bool tool_talons_tournament(const char *input, char *result, size_t rlen) {
+    ensure_wt_init();
+    char *action = json_get_str(input, "action");
+    char *objective = json_get_str(input, "objective");
+    int tid = (int)json_get_double(input, "tournament_id", 0);
+    int cid = (int)json_get_double(input, "competitor_id", 0);
+    char *label = json_get_str(input, "label");
+    double score = json_get_double(input, "score", 0);
+    double cost = json_get_double(input, "cost", 0);
+    char *res_text = json_get_str(input, "result");
+
+    if (!action) {
+        snprintf(result, rlen, "{\"error\":\"action required: begin|add|result|decide\"}");
+        goto done;
+    }
+
+    if (strcasecmp(action, "begin") == 0) {
+        double wq = json_get_double(input, "weight_quality", 0);
+        double ws = json_get_double(input, "weight_speed", 0);
+        double wc = json_get_double(input, "weight_cost", 0);
+        double deadline = json_get_double(input, "deadline", 0);
+        int id = talons_tournament_begin(&g_talons, objective, deadline,
+                                          wq > 0 ? wq : 0.5,
+                                          ws > 0 ? ws : 0.3,
+                                          wc > 0 ? wc : 0.2);
+        snprintf(result, rlen, "{\"ok\":true,\"tournament_id\":%d,\"objective\":\"%.*s\"}",
+                 id, 80, objective ? objective : "");
+    } else if (strcasecmp(action, "add") == 0) {
+        char *strat_s = json_get_str(input, "strategy");
+        strategy_type_t strat = STRATEGY_DIRECT;
+        if (strat_s && strcasecmp(strat_s, "flanking") == 0) strat = STRATEGY_FLANKING;
+        int id = talons_tournament_add(&g_talons, tid, label, strat);
+        snprintf(result, rlen, "{\"ok\":%s,\"competitor_id\":%d}", id >= 0 ? "true" : "false", id);
+        free(strat_s);
+    } else if (strcasecmp(action, "result") == 0) {
+        bool ok = talons_tournament_result(&g_talons, tid, cid, score, cost, res_text);
+        const tournament_t *tr = talons_tournament_get(&g_talons, tid);
+        snprintf(result, rlen,
+                 "{\"ok\":%s,\"decided\":%s,\"winner\":%d}",
+                 ok ? "true" : "false",
+                 (tr && tr->decided) ? "true" : "false",
+                 tr ? tr->winner_id : -1);
+    } else if (strcasecmp(action, "decide") == 0) {
+        int winner = talons_tournament_decide(&g_talons, tid);
+        snprintf(result, rlen, "{\"winner_id\":%d}", winner);
+    } else {
+        snprintf(result, rlen, "{\"error\":\"unknown action: %s\"}", action);
+    }
+
+done:
+    free(action); free(objective); free(label); free(res_text);
+    return true;
+}
+
+static bool tool_talons_recommend(const char *input, char *result, size_t rlen) {
+    ensure_wt_init();
+    double time_pressure = json_get_double(input, "time_pressure", 0);
+    double budget = json_get_double(input, "resource_budget", 0);
+    double complexity = json_get_double(input, "complexity", 0);
+    if (time_pressure <= 0) time_pressure = 0.5;
+    if (budget <= 0) budget = 0.5;
+    if (complexity <= 0) complexity = 0.5;
+
+    strategy_type_t rec = talons_recommend_strategy(&g_talons, time_pressure, budget, complexity);
+    snprintf(result, rlen,
+             "{\"recommended\":\"%s\",\"context\":{\"time_pressure\":%.2f,"
+             "\"resource_budget\":%.2f,\"complexity\":%.2f},"
+             "\"best_overall\":\"%s\",\"win_rate\":%.3f}",
+             talons_strategy_name(rec), time_pressure, budget, complexity,
+             talons_strategy_name(talons_best_strategy(&g_talons)),
+             talons_win_rate(&g_talons, 20));
+    return true;
+}
+
+static bool tool_talons_status(const char *input, char *result, size_t rlen) {
+    (void)input;
+    ensure_wt_init();
+    talons_status_json(&g_talons, result, rlen);
+    return true;
+}
+
+/* ── Wings+Talons+Immune unified meta tool ────────────────────────────── */
+
+static bool tool_wings_talons_status(const char *input, char *result, size_t rlen) {
+    (void)input;
+    ensure_wt_init();
+    governance_tick(&g_governance);
+    memory_tick(&g_memory);
+
+    jbuf_t b = {0};
+    jbuf_appendf(&b, "{\"version\":\"v0.9.0\",\"wings\":{\"pheromones\":");
+
+    char pbuf[4096];
+    pheromone_status_json(&g_governance.pheromones, pbuf, sizeof(pbuf));
+    jbuf_appendf(&b, "%s,\"memory\":", pbuf);
+
+    char mbuf[4096];
+    memory_status_json(&g_memory, mbuf, sizeof(mbuf));
+    jbuf_appendf(&b, "%s},\"talons\":", mbuf);
+
+    char tbuf[4096];
+    talons_status_json(&g_talons, tbuf, sizeof(tbuf));
+    jbuf_appendf(&b, "%s,\"immune_system\":", tbuf);
+
+    char ibuf[8192];
+    governance_status_json(&g_governance, ibuf, sizeof(ibuf));
+    jbuf_appendf(&b, "%s}", ibuf);
+
+    snprintf(result, rlen, "%s", b.data ? b.data : "{}");
+    jbuf_free(&b);
+    return true;
+}
+
 static const tool_def_t s_tools[] = {
     /* ── File Tools ──────────────────────────────────────────────────────── */
     {
@@ -10046,6 +11039,33 @@ static const tool_def_t s_tools[] = {
         .execute = tool_swarm_collect
     },
     /* ═══════════════════════════════════════════════════════════════════════
+     * EXTERNAL EXECUTOR TOOLS — Claude Code / Codex CLI as sub-executors
+     * ═══════════════════════════════════════════════════════════════════════ */
+    {
+        .name = "executor_status",
+        .description = "Check which external executor backends are available (dsco, Claude Code CLI, OpenAI Codex CLI). Shows authentication status, resolved paths, and budget info.",
+        .input_schema_json = "{\"type\":\"object\",\"properties\":{}}",
+        .execute = tool_executor_status
+    },
+    {
+        .name = "spawn_executor",
+        .description = "Spawn an agent using a specific executor backend: 'dsco' (default), 'claude' (Claude Code CLI in print mode), or 'codex' (OpenAI Codex CLI exec mode). Each executor uses its own model and API access. Great for cross-model verification, competitive evaluation, or leveraging different strengths.",
+        .input_schema_json = "{\"type\":\"object\",\"properties\":{\"task\":{\"type\":\"string\",\"description\":\"Task prompt\"},\"executor\":{\"type\":\"string\",\"description\":\"Executor: dsco, claude, or codex\"},\"model\":{\"type\":\"string\",\"description\":\"Model override\"},\"budget\":{\"type\":\"number\",\"description\":\"Max budget in USD for this agent (0=unlimited)\"}},\"required\":[\"task\",\"executor\"]}",
+        .execute = tool_spawn_executor
+    },
+    {
+        .name = "create_executor_swarm",
+        .description = "Create a swarm that runs on a specific executor backend (dsco/claude/codex). All agents use the same executor. Supports per-agent budget partitioning. Use this to run parallel tasks through Claude Code or Codex CLI.",
+        .input_schema_json = "{\"type\":\"object\",\"properties\":{\"name\":{\"type\":\"string\",\"description\":\"Swarm group name\"},\"executor\":{\"type\":\"string\",\"description\":\"Executor: dsco, claude, or codex\"},\"tasks\":{\"type\":\"array\",\"description\":\"Task prompts or {task,model} objects\",\"items\":{\"oneOf\":[{\"type\":\"string\"},{\"type\":\"object\",\"properties\":{\"task\":{\"type\":\"string\"},\"model\":{\"type\":\"string\"}},\"required\":[\"task\"]}]}},\"model\":{\"type\":\"string\",\"description\":\"Default model\"},\"budget\":{\"type\":\"number\",\"description\":\"Total budget in USD (split across agents)\"}},\"required\":[\"name\",\"executor\",\"tasks\"]}",
+        .execute = tool_create_executor_swarm
+    },
+    {
+        .name = "swarm_budget",
+        .description = "Set or query the global swarm budget. When set, agents that exceed their budget are auto-killed. Pass budget_usd to set, omit to query.",
+        .input_schema_json = "{\"type\":\"object\",\"properties\":{\"budget_usd\":{\"type\":\"number\",\"description\":\"Total swarm budget in USD (0=unlimited)\"}}}",
+        .execute = tool_swarm_budget
+    },
+    /* ═══════════════════════════════════════════════════════════════════════
      * IPC — INTER-AGENT COMMUNICATION TOOLS
      * ═══════════════════════════════════════════════════════════════════════ */
     {
@@ -10575,6 +11595,196 @@ static const tool_def_t s_tools[] = {
         .input_schema_json = "{\"type\":\"object\",\"properties\":{\"text\":{\"type\":\"string\",\"description\":\"XML/HTML text\"},\"file\":{\"type\":\"string\",\"description\":\"XML/HTML file path\"},\"tag\":{\"type\":\"string\",\"description\":\"Tag name to extract\"},\"attribute\":{\"type\":\"string\",\"description\":\"Attribute name to extract (omit for inner text)\"}},\"required\":[\"tag\"]}",
         .execute = tool_xml_extract
     },
+
+    /* ═══ Wings + Talons ═══════════════════════════════════════════════════ */
+
+    /* ── Pheromone Coordination (Wings) ────────────────────────────────── */
+    {
+        .name = "pheromone_deposit",
+        .description = "Deposit a pheromone signal for stigmergic coordination. Types: PROGRESS, ATTRACTION, WARNING, SUCCESS, HELP_NEEDED, CAPACITY. Signals decay exponentially (~69s half-life).",
+        .input_schema_json = "{\"type\":\"object\",\"properties\":{\"type\":{\"type\":\"string\",\"description\":\"Signal type: progress|attraction|warning|success|help_needed|capacity\"},\"concentration\":{\"type\":\"number\",\"description\":\"Signal strength 0.0-1.0 (default 0.5)\"},\"region\":{\"type\":\"string\",\"description\":\"Spatial tag for the signal (default: global)\"},\"source\":{\"type\":\"string\",\"description\":\"Emitting agent ID\"},\"meta\":{\"type\":\"string\",\"description\":\"JSON metadata\"}},\"required\":[]}",
+        .execute = tool_pheromone_deposit
+    },
+    {
+        .name = "pheromone_sense",
+        .description = "Read pheromone concentration gradients. Sense all types in a region, or a specific type. Returns aggregated concentration and signal count.",
+        .input_schema_json = "{\"type\":\"object\",\"properties\":{\"type\":{\"type\":\"string\",\"description\":\"Signal type to sense (omit for all)\"},\"region\":{\"type\":\"string\",\"description\":\"Region to sense (default: global)\"}},\"required\":[]}",
+        .execute = tool_pheromone_sense
+    },
+    {
+        .name = "pheromone_status",
+        .description = "Get pheromone field statistics: active signals, deposits, reads, per-type counts.",
+        .input_schema_json = "{\"type\":\"object\",\"properties\":{},\"required\":[]}",
+        .execute = tool_pheromone_status
+    },
+
+    /* ── OODA Discipline (Talons) ─────────────────────────────────────── */
+    {
+        .name = "ooda_begin",
+        .description = "Start a new OODA cycle (Observe->Orient->Decide->Act). Returns cycle ID. Call before significant decisions.",
+        .input_schema_json = "{\"type\":\"object\",\"properties\":{},\"required\":[]}",
+        .execute = tool_ooda_begin
+    },
+    {
+        .name = "ooda_observe",
+        .description = "Add an observation to the current OODA cycle. Gather information without bias.",
+        .input_schema_json = "{\"type\":\"object\",\"properties\":{\"observation\":{\"type\":\"string\",\"description\":\"What was observed\"},\"source\":{\"type\":\"string\",\"description\":\"Observation source\"},\"confidence\":{\"type\":\"number\",\"description\":\"Confidence 0.0-1.0\"}},\"required\":[\"observation\"]}",
+        .execute = tool_ooda_observe
+    },
+    {
+        .name = "ooda_orient",
+        .description = "Add orientation factors: constraints, budget, safety context. Sets the decision-making context.",
+        .input_schema_json = "{\"type\":\"object\",\"properties\":{\"factor\":{\"type\":\"string\",\"description\":\"Orientation factor\"},\"weight\":{\"type\":\"number\",\"description\":\"Factor importance 0.0-1.0\"},\"constraint\":{\"type\":\"boolean\",\"description\":\"Is this a hard constraint?\"},\"budget\":{\"type\":\"number\",\"description\":\"GSU budget remaining\"},\"tier\":{\"type\":\"integer\",\"description\":\"Principal tier 0-3\"},\"safety_critical\":{\"type\":\"boolean\",\"description\":\"Is action safety-critical?\"}},\"required\":[\"factor\"]}",
+        .execute = tool_ooda_orient
+    },
+    {
+        .name = "ooda_decide",
+        .description = "Compute OODA decision. Returns action (EXECUTE/DELEGATE/WAIT/REST/ESCALATE) based on confidence thresholds.",
+        .input_schema_json = "{\"type\":\"object\",\"properties\":{},\"required\":[]}",
+        .execute = tool_ooda_decide
+    },
+    {
+        .name = "ooda_complete",
+        .description = "Complete OODA cycle with action result. Archives to history for learning.",
+        .input_schema_json = "{\"type\":\"object\",\"properties\":{\"success\":{\"type\":\"boolean\",\"description\":\"Did the action succeed?\"},\"result\":{\"type\":\"string\",\"description\":\"Action result description\"}},\"required\":[\"success\"]}",
+        .execute = tool_ooda_complete
+    },
+    {
+        .name = "ooda_status",
+        .description = "Get OODA engine status: total cycles, action distribution, success rate, thresholds.",
+        .input_schema_json = "{\"type\":\"object\",\"properties\":{},\"required\":[]}",
+        .execute = tool_ooda_status
+    },
+
+    /* ── Kill Switches (Talons) ───────────────────────────────────────── */
+    {
+        .name = "killswitch_trigger",
+        .description = "Trigger a kill switch. 5 levels: agent, workflow, service, pheromone, system. Emergency shutdown mechanism.",
+        .input_schema_json = "{\"type\":\"object\",\"properties\":{\"level\":{\"type\":\"string\",\"description\":\"Kill level: agent|workflow|service|pheromone|system\"},\"target\":{\"type\":\"string\",\"description\":\"Target to kill (agent_id, workflow_name, etc.)\"},\"reason\":{\"type\":\"string\",\"description\":\"Why the kill switch was triggered\"},\"timeout\":{\"type\":\"number\",\"description\":\"Auto-resolve after seconds (0=never)\"},\"cascade\":{\"type\":\"boolean\",\"description\":\"Trigger downstream kills\"}},\"required\":[\"level\",\"target\",\"reason\"]}",
+        .execute = tool_killswitch_trigger
+    },
+    {
+        .name = "killswitch_resolve",
+        .description = "Resolve (lift) a kill switch by ID.",
+        .input_schema_json = "{\"type\":\"object\",\"properties\":{\"kill_id\":{\"type\":\"integer\",\"description\":\"Kill switch ID to resolve\"}},\"required\":[\"kill_id\"]}",
+        .execute = tool_killswitch_resolve
+    },
+    {
+        .name = "killswitch_status",
+        .description = "Get kill switch registry status: active kills, system halt state, per-level counts.",
+        .input_schema_json = "{\"type\":\"object\",\"properties\":{},\"required\":[]}",
+        .execute = tool_killswitch_status
+    },
+
+    /* ── Governance (Talons master) ───────────────────────────────────── */
+    {
+        .name = "governance_status",
+        .description = "Get full governance engine status including pheromones, OODA, kill switches, agents, budgets.",
+        .input_schema_json = "{\"type\":\"object\",\"properties\":{},\"required\":[]}",
+        .execute = tool_governance_status
+    },
+    {
+        .name = "governance_authorize",
+        .description = "Check if an action is authorized (hardcoded rules, budget, kill switches). Records to audit trail.",
+        .input_schema_json = "{\"type\":\"object\",\"properties\":{\"agent_id\":{\"type\":\"string\",\"description\":\"Agent requesting authorization\"},\"action\":{\"type\":\"string\",\"description\":\"Action to authorize\"},\"gsu_cost\":{\"type\":\"number\",\"description\":\"GSU cost of the action\"}},\"required\":[\"action\"]}",
+        .execute = tool_governance_authorize
+    },
+    {
+        .name = "governance_checkpoint",
+        .description = "Full governance gate: hardcoded check -> budget check -> kill switch check -> authorize -> audit -> pheromone emit. Call before significant actions.",
+        .input_schema_json = "{\"type\":\"object\",\"properties\":{\"agent_id\":{\"type\":\"string\",\"description\":\"Agent ID\"},\"action\":{\"type\":\"string\",\"description\":\"Action description\"},\"gsu_cost\":{\"type\":\"number\",\"description\":\"GSU cost\"},\"context\":{\"type\":\"string\",\"description\":\"Additional context\"}},\"required\":[\"action\"]}",
+        .execute = tool_governance_checkpoint
+    },
+    {
+        .name = "governance_budget",
+        .description = "Get agent budget details: allocated, consumed, remaining GSU, capability tier, permissions.",
+        .input_schema_json = "{\"type\":\"object\",\"properties\":{\"agent_id\":{\"type\":\"string\",\"description\":\"Agent to query (default: root)\"}},\"required\":[]}",
+        .execute = tool_governance_budget
+    },
+    {
+        .name = "governance_audit",
+        .description = "Get audit trail of governance decisions (authorizations and denials).",
+        .input_schema_json = "{\"type\":\"object\",\"properties\":{\"last_n\":{\"type\":\"integer\",\"description\":\"Number of recent entries (default 20)\"}},\"required\":[]}",
+        .execute = tool_governance_audit
+    },
+    {
+        .name = "governance_param",
+        .description = "Get or set softcoded governance parameters (pheromone decay, OODA thresholds, agent limits, etc.).",
+        .input_schema_json = "{\"type\":\"object\",\"properties\":{\"name\":{\"type\":\"string\",\"description\":\"Parameter name (omit to list all)\"},\"value\":{\"type\":\"number\",\"description\":\"New value (omit to read)\"}},\"required\":[]}",
+        .execute = tool_governance_param
+    },
+
+    /* ── Three-Tier Memory (Wings) ────────────────────────────────────── */
+    {
+        .name = "memory_store",
+        .description = "Store a memory. Tiers: working (60s decay), episodic (1h decay), semantic (permanent). Auto-consolidation promotes important/frequent memories upward.",
+        .input_schema_json = "{\"type\":\"object\",\"properties\":{\"key\":{\"type\":\"string\",\"description\":\"Memory key\"},\"value\":{\"type\":\"string\",\"description\":\"Memory content\"},\"tier\":{\"type\":\"string\",\"description\":\"Tier: working|episodic|semantic (default: working)\"},\"importance\":{\"type\":\"number\",\"description\":\"Importance 0.0-1.0 (default 0.5)\"}},\"required\":[\"key\",\"value\"]}",
+        .execute = tool_memory_store
+    },
+    {
+        .name = "memory_recall",
+        .description = "Recall memories by key, search query, or tag. Updates access count (aids consolidation).",
+        .input_schema_json = "{\"type\":\"object\",\"properties\":{\"key\":{\"type\":\"string\",\"description\":\"Exact key to recall\"},\"query\":{\"type\":\"string\",\"description\":\"Substring search in keys and values\"},\"tag\":{\"type\":\"string\",\"description\":\"Tag to search\"}},\"required\":[]}",
+        .execute = tool_memory_recall
+    },
+    {
+        .name = "memory_promote",
+        .description = "Manually promote a memory to the next tier (working->episodic->semantic).",
+        .input_schema_json = "{\"type\":\"object\",\"properties\":{\"key\":{\"type\":\"string\",\"description\":\"Memory key to promote\"}},\"required\":[\"key\"]}",
+        .execute = tool_memory_promote
+    },
+    {
+        .name = "memory_forget",
+        .description = "Delete a memory by key.",
+        .input_schema_json = "{\"type\":\"object\",\"properties\":{\"key\":{\"type\":\"string\",\"description\":\"Memory key to forget\"}},\"required\":[\"key\"]}",
+        .execute = tool_memory_forget
+    },
+    {
+        .name = "memory_status",
+        .description = "Get memory system status: per-tier counts, promotions, evictions, consolidations.",
+        .input_schema_json = "{\"type\":\"object\",\"properties\":{},\"required\":[]}",
+        .execute = tool_memory_status
+    },
+
+    /* ── Talons: Competitive Execution ───────────────────────────────── */
+    {
+        .name = "talons_goal",
+        .description = "Create a goal for competitive pursuit. Set grip strength (tentative/holding/locked/death_grip) and strategy (direct/flanking/tournament/escalation/divide/ambush). Grip determines retry persistence.",
+        .input_schema_json = "{\"type\":\"object\",\"properties\":{\"description\":{\"type\":\"string\",\"description\":\"What to capture/achieve\"},\"priority\":{\"type\":\"number\",\"description\":\"Priority 0.0-1.0\"},\"grip\":{\"type\":\"string\",\"description\":\"Grip strength: tentative|holding|locked|death_grip\"},\"strategy\":{\"type\":\"string\",\"description\":\"Strategy: direct|flanking|tournament|escalation|divide|ambush\"},\"deadline\":{\"type\":\"number\",\"description\":\"Deadline as epoch timestamp (0=none)\"}},\"required\":[\"description\"]}",
+        .execute = tool_talons_goal_create
+    },
+    {
+        .name = "talons_advance",
+        .description = "Advance a goal through hunt states: stalk (plan) -> strike (execute) -> grip (close to done) -> capture (win) or escaped (fail, may auto-retry based on grip strength) or abandon.",
+        .input_schema_json = "{\"type\":\"object\",\"properties\":{\"goal_id\":{\"type\":\"integer\",\"description\":\"Goal ID\"},\"action\":{\"type\":\"string\",\"description\":\"stalk|strike|grip|capture|escaped|abandon\"},\"result\":{\"type\":\"string\",\"description\":\"Result description\"},\"cost\":{\"type\":\"number\",\"description\":\"Resource cost\"},\"confidence\":{\"type\":\"number\",\"description\":\"Updated confidence 0.0-1.0\"}},\"required\":[\"goal_id\",\"action\"]}",
+        .execute = tool_talons_goal_advance
+    },
+    {
+        .name = "talons_tournament",
+        .description = "Race N strategies for an objective. Actions: begin (start tournament), add (add competitor), result (record outcome), decide (pick winner). Scored by quality/speed/cost weights.",
+        .input_schema_json = "{\"type\":\"object\",\"properties\":{\"action\":{\"type\":\"string\",\"description\":\"begin|add|result|decide\"},\"tournament_id\":{\"type\":\"integer\",\"description\":\"Tournament ID\"},\"objective\":{\"type\":\"string\",\"description\":\"What to achieve (for begin)\"},\"label\":{\"type\":\"string\",\"description\":\"Competitor label (for add)\"},\"strategy\":{\"type\":\"string\",\"description\":\"Competitor strategy (for add)\"},\"competitor_id\":{\"type\":\"integer\",\"description\":\"Competitor ID (for result)\"},\"score\":{\"type\":\"number\",\"description\":\"Quality score 0-1 (for result)\"},\"cost\":{\"type\":\"number\",\"description\":\"Resource cost (for result)\"},\"result\":{\"type\":\"string\",\"description\":\"Result text (for result)\"},\"weight_quality\":{\"type\":\"number\"},\"weight_speed\":{\"type\":\"number\"},\"weight_cost\":{\"type\":\"number\"},\"deadline\":{\"type\":\"number\"}},\"required\":[\"action\"]}",
+        .execute = tool_talons_tournament
+    },
+    {
+        .name = "talons_recommend",
+        .description = "Get strategy recommendation based on learned win/loss history and current context (time pressure, resources, complexity).",
+        .input_schema_json = "{\"type\":\"object\",\"properties\":{\"time_pressure\":{\"type\":\"number\",\"description\":\"0.0 (relaxed) to 1.0 (urgent)\"},\"resource_budget\":{\"type\":\"number\",\"description\":\"0.0 (scarce) to 1.0 (abundant)\"},\"complexity\":{\"type\":\"number\",\"description\":\"0.0 (simple) to 1.0 (complex)\"}},\"required\":[]}",
+        .execute = tool_talons_recommend
+    },
+    {
+        .name = "talons_status",
+        .description = "Get Talons engine stats: win rate, active goals, strategy success rates, hunt history.",
+        .input_schema_json = "{\"type\":\"object\",\"properties\":{},\"required\":[]}",
+        .execute = tool_talons_status
+    },
+
+    /* ── Wings+Talons+Immune System unified status ────────────────────── */
+    {
+        .name = "wings_talons_status",
+        .description = "Get unified system status: Wings (pheromones, memory), Talons (goals, tournaments, win rate), Immune System (governance, kill switches, OODA, budgets).",
+        .input_schema_json = "{\"type\":\"object\",\"properties\":{},\"required\":[]}",
+        .execute = tool_wings_talons_status
+    },
 };
 
 static const int s_tool_count = sizeof(s_tools) / sizeof(s_tools[0]);
@@ -10972,7 +12182,9 @@ bool tools_is_allowed_for_tier(const char *name, const char *tier,
             "http_request", "json_api", "curl_raw", "port_scan",
             "websocket_test",
             /* orchestration/control-plane mutation */
-            "spawn_agent", "agent_kill", "create_swarm", "ipc_send",
+            "spawn_agent", "agent_kill", "create_swarm",
+            "spawn_executor", "create_executor_swarm", "swarm_budget",
+            "ipc_send",
             "ipc_recv", "ipc_scratch_put", "ipc_task_submit",
             "ipc_set_role", "env_set", "plugin_load", "plugin_reload",
             NULL
@@ -11239,6 +12451,10 @@ static const tool_timeout_cfg_t s_timeout_overrides[] = {
     { "agent_wait",    3660 },
     { "create_swarm",   300 },
     { "swarm_collect", 3660 },
+    { "spawn_executor",         300 },
+    { "create_executor_swarm",  300 },
+    { "executor_status",         30 },
+    { "swarm_budget",            30 },
     { "http_request",    60 },
     { "curl",            60 },
     { "market_quote",    30 },
