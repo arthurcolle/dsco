@@ -133,12 +133,37 @@ static bool ensure_schema(void) {
         "  category TEXT NOT NULL,"
         "  title TEXT NOT NULL,"
         "  detail TEXT,"
-        "  metadata_json TEXT"
+        "  metadata_json TEXT,"
+        "  input_tokens INTEGER DEFAULT 0,"
+        "  output_tokens INTEGER DEFAULT 0,"
+        "  cache_read_tokens INTEGER DEFAULT 0,"
+        "  cache_write_tokens INTEGER DEFAULT 0,"
+        "  est_cost_usd REAL DEFAULT 0.0"
         ");"
         "CREATE INDEX IF NOT EXISTS idx_events_instance_time ON events(instance_id, ts_epoch DESC);"
         "CREATE INDEX IF NOT EXISTS idx_events_time ON events(ts_epoch DESC);";
 
-    return exec_sql(schema);
+    if (!exec_sql(schema)) return false;
+
+    /* Migration: add token columns if they don't exist (for existing DBs).
+     * ALTER TABLE ADD COLUMN errors are expected if columns already exist — suppress. */
+    {
+        const char *migrations[] = {
+            "ALTER TABLE events ADD COLUMN input_tokens INTEGER DEFAULT 0;",
+            "ALTER TABLE events ADD COLUMN output_tokens INTEGER DEFAULT 0;",
+            "ALTER TABLE events ADD COLUMN cache_read_tokens INTEGER DEFAULT 0;",
+            "ALTER TABLE events ADD COLUMN cache_write_tokens INTEGER DEFAULT 0;",
+            "ALTER TABLE events ADD COLUMN est_cost_usd REAL DEFAULT 0.0;",
+            NULL
+        };
+        for (int i = 0; migrations[i]; i++) {
+            char *err = NULL;
+            sqlite3_exec(g_baseline.db, migrations[i], NULL, NULL, &err);
+            sqlite3_free(err); /* silently ignore "duplicate column" */
+        }
+    }
+
+    return true;
 }
 
 bool baseline_start(const char *model, const char *mode) {
@@ -264,6 +289,180 @@ bool baseline_log(const char *category, const char *title,
     bool ok = (sqlite3_step(st) == SQLITE_DONE);
     sqlite3_finalize(st);
     return ok;
+}
+
+/* ── Cost estimation for common models ───────────────────────────────── */
+static double estimate_cost(const char *model, int in_tok, int out_tok,
+                            int cache_read, int cache_write) {
+    /* Pricing per million tokens (USD) */
+    double in_rate  = 3.0;   /* default: Sonnet */
+    double out_rate = 15.0;
+    double cr_rate  = 0.30;  /* cache read discount */
+    double cw_rate  = 3.75;  /* cache write premium */
+
+    if (model) {
+        if (strstr(model, "opus")) {
+            in_rate = 15.0; out_rate = 75.0; cr_rate = 1.50; cw_rate = 18.75;
+        } else if (strstr(model, "haiku")) {
+            in_rate = 0.25; out_rate = 1.25; cr_rate = 0.025; cw_rate = 0.30;
+        }
+        /* else sonnet defaults */
+    }
+
+    double cost = 0.0;
+    int base_in = in_tok - cache_read - cache_write;
+    if (base_in < 0) base_in = 0;
+    cost += (base_in  / 1000000.0) * in_rate;
+    cost += (out_tok  / 1000000.0) * out_rate;
+    cost += (cache_read  / 1000000.0) * cr_rate;
+    cost += (cache_write / 1000000.0) * cw_rate;
+    return cost;
+}
+
+bool baseline_log_usage(const char *category, const char *title,
+                        const char *detail, const char *metadata_json,
+                        int input_tokens, int output_tokens,
+                        int cache_read_tokens, int cache_write_tokens) {
+    if (!g_baseline.ready || !g_baseline.db) return false;
+
+    double cost = estimate_cost(NULL, input_tokens, output_tokens,
+                                cache_read_tokens, cache_write_tokens);
+
+    sqlite3_stmt *st = NULL;
+    const char *ins =
+        "INSERT INTO events(instance_id, category, title, detail, metadata_json,"
+        " input_tokens, output_tokens, cache_read_tokens, cache_write_tokens, est_cost_usd)"
+        " VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10);";
+
+    if (sqlite3_prepare_v2(g_baseline.db, ins, -1, &st, NULL) != SQLITE_OK) {
+        return false;
+    }
+
+    sqlite3_bind_text(st, 1, g_baseline.instance_id, -1, SQLITE_TRANSIENT);
+    sqlite3_bind_text(st, 2, (category && category[0]) ? category : "event", -1, SQLITE_TRANSIENT);
+    sqlite3_bind_text(st, 3, (title && title[0]) ? title : "untitled", -1, SQLITE_TRANSIENT);
+    if (detail) sqlite3_bind_text(st, 4, detail, -1, SQLITE_TRANSIENT);
+    else sqlite3_bind_null(st, 4);
+    if (metadata_json) sqlite3_bind_text(st, 5, metadata_json, -1, SQLITE_TRANSIENT);
+    else sqlite3_bind_null(st, 5);
+    sqlite3_bind_int(st, 6, input_tokens);
+    sqlite3_bind_int(st, 7, output_tokens);
+    sqlite3_bind_int(st, 8, cache_read_tokens);
+    sqlite3_bind_int(st, 9, cache_write_tokens);
+    sqlite3_bind_double(st, 10, cost);
+
+    bool ok = (sqlite3_step(st) == SQLITE_DONE);
+    sqlite3_finalize(st);
+    return ok;
+}
+
+/* ── Credit assignment: aggregate token/cost per instance tree ──────── */
+char *baseline_credit_report(const char *root_instance_id) {
+    if (!g_baseline.ready || !g_baseline.db) return NULL;
+
+    const char *root = root_instance_id ? root_instance_id : g_baseline.instance_id;
+
+    const char *sql =
+        "WITH RECURSIVE tree AS ("
+        "  SELECT instance_id, parent_instance_id, pid, model, started_at, ended_at, 0 as depth"
+        "  FROM instances WHERE instance_id = ?1"
+        "  UNION ALL"
+        "  SELECT i.instance_id, i.parent_instance_id, i.pid, i.model, i.started_at, i.ended_at, t.depth + 1"
+        "  FROM instances i JOIN tree t ON i.parent_instance_id = t.instance_id"
+        ")"
+        "SELECT "
+        "  t.pid, t.model, t.depth,"
+        "  CASE WHEN t.ended_at IS NOT NULL "
+        "    THEN printf('%.1f', (julianday(t.ended_at) - julianday(t.started_at)) * 86400)"
+        "    ELSE 'active' END as duration,"
+        "  COALESCE(SUM(e.input_tokens), 0) as total_in,"
+        "  COALESCE(SUM(e.output_tokens), 0) as total_out,"
+        "  COALESCE(SUM(e.cache_read_tokens), 0) as total_cache_read,"
+        "  COALESCE(SUM(e.cache_write_tokens), 0) as total_cache_write,"
+        "  COALESCE(SUM(e.est_cost_usd), 0.0) as total_cost,"
+        "  COUNT(CASE WHEN e.category = 'tool' THEN 1 END) as tool_calls,"
+        "  COUNT(CASE WHEN e.category = 'turn' THEN 1 END) as api_turns "
+        "FROM tree t "
+        "LEFT JOIN events e ON e.instance_id = t.instance_id "
+        "GROUP BY t.instance_id "
+        "ORDER BY t.started_at;";
+
+    sqlite3_stmt *st = NULL;
+    if (sqlite3_prepare_v2(g_baseline.db, sql, -1, &st, NULL) != SQLITE_OK) {
+        return NULL;
+    }
+    sqlite3_bind_text(st, 1, root, -1, SQLITE_TRANSIENT);
+
+    /* Build JSON array */
+    jbuf_t buf;
+    jbuf_init(&buf, 2048);
+    jbuf_append(&buf, "{\"root\":\"");
+    jbuf_append(&buf, root);
+    jbuf_append(&buf, "\",\"instances\":[");
+
+    int total_in = 0, total_out = 0;
+    double total_cost = 0.0;
+    int count = 0;
+
+    while (sqlite3_step(st) == SQLITE_ROW) {
+        if (count > 0) jbuf_append(&buf, ",");
+
+        int pid    = sqlite3_column_int(st, 0);
+        const char *model = (const char *)sqlite3_column_text(st, 1);
+        int depth  = sqlite3_column_int(st, 2);
+        const char *dur = (const char *)sqlite3_column_text(st, 3);
+        int in_t   = sqlite3_column_int(st, 4);
+        int out_t  = sqlite3_column_int(st, 5);
+        int cr_t   = sqlite3_column_int(st, 6);
+        int cw_t   = sqlite3_column_int(st, 7);
+        double cost= sqlite3_column_double(st, 8);
+        int tools  = sqlite3_column_int(st, 9);
+        int turns  = sqlite3_column_int(st, 10);
+
+        total_in += in_t;
+        total_out += out_t;
+        total_cost += cost;
+
+        char row[512];
+        snprintf(row, sizeof(row),
+            "{\"pid\":%d,\"model\":\"%s\",\"depth\":%d,\"duration_s\":\"%s\","
+            "\"input_tokens\":%d,\"output_tokens\":%d,"
+            "\"cache_read\":%d,\"cache_write\":%d,"
+            "\"est_cost_usd\":%.6f,\"tool_calls\":%d,\"api_turns\":%d}",
+            pid, model ? model : "unknown", depth, dur ? dur : "?",
+            in_t, out_t, cr_t, cw_t, cost, tools, turns);
+        jbuf_append(&buf, row);
+        count++;
+    }
+    sqlite3_finalize(st);
+
+    char summary[256];
+    snprintf(summary, sizeof(summary),
+        "],\"summary\":{\"instance_count\":%d,\"total_input_tokens\":%d,"
+        "\"total_output_tokens\":%d,\"total_est_cost_usd\":%.6f}}",
+        count, total_in, total_out, total_cost);
+    jbuf_append(&buf, summary);
+
+    /* Return the buffer data — caller must free() */
+    char *result = buf.data;
+    /* Don't call jbuf_free — caller owns the allocation */
+    return result;
+}
+
+double baseline_daily_cost(void) {
+    if (!g_baseline.ready || !g_baseline.db) return 0.0;
+
+    const char *sql =
+        "SELECT COALESCE(SUM(est_cost_usd), 0.0) FROM events "
+        "WHERE ts_epoch >= (julianday('now','start of day') - 2440587.5) * 86400.0;";
+    sqlite3_stmt *st = NULL;
+    double cost = 0.0;
+    if (sqlite3_prepare_v2(g_baseline.db, sql, -1, &st, NULL) == SQLITE_OK) {
+        if (sqlite3_step(st) == SQLITE_ROW)
+            cost = sqlite3_column_double(st, 0);
+        sqlite3_finalize(st);
+    }
+    return cost;
 }
 
 const char *baseline_instance_id(void) {

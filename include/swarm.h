@@ -23,6 +23,24 @@ typedef enum {
     SWARM_KILLED,
 } swarm_status_t;
 
+/* ── Executor backends ────────────────────────────────────────────────── */
+
+typedef enum {
+    EXECUTOR_DSCO   = 0,  /* default: fork dsco binary                  */
+    EXECUTOR_CLAUDE = 1,  /* Claude Code CLI: claude -p --output-format json */
+    EXECUTOR_CODEX  = 2,  /* OpenAI Codex CLI: codex exec --json        */
+} executor_type_t;
+
+/* Executor availability (detected at init) */
+typedef struct {
+    bool     claude_available;   /* claude CLI found and authenticated     */
+    bool     codex_available;    /* codex CLI found and authenticated      */
+    char     claude_path[512];   /* resolved path to claude binary         */
+    char     codex_path[512];    /* resolved path to codex binary          */
+    char     claude_model[128];  /* default claude model (from --version)  */
+    char     codex_model[128];   /* default codex model (from config)      */
+} executor_registry_t;
+
 typedef void (*swarm_stream_cb)(int child_id, const char *data, size_t len, void *ctx);
 
 typedef struct {
@@ -51,8 +69,13 @@ typedef struct {
 
     /* Cost tracking */
     double         est_cost_usd;
+    double         budget_usd;         /* allocated budget partition (0 = unlimited) */
     int            est_input_tokens;
     int            est_output_tokens;
+    double         reported_cost_usd;  /* actual cost parsed from executor output  */
+
+    /* Executor */
+    executor_type_t executor;          /* which backend spawned this child */
 
     /* Group membership */
     int            group_id;       /* -1 if ungrouped */
@@ -81,6 +104,13 @@ typedef struct {
     const char    *api_key;
     const char    *default_model;
     const char    *dsco_path;     /* path to dsco binary */
+
+    /* Budget system */
+    double         swarm_budget_usd;  /* total budget for all swarm ops (0=unlimited) */
+    double         spent_usd;         /* accumulated spend across all children */
+
+    /* External executor registry */
+    executor_registry_t executors;
 } swarm_t;
 
 /* ── Lifecycle ────────────────────────────────────────────────────────── */
@@ -90,6 +120,18 @@ void swarm_destroy(swarm_t *s);
 /* ── Spawn sub-dsco ───────────────────────────────────────────────────── */
 int  swarm_spawn(swarm_t *s, const char *task, const char *model);
 int  swarm_spawn_in_group(swarm_t *s, int group_id, const char *task, const char *model);
+
+/* ── External executor spawn ─────────────────────────────────────────── */
+int  swarm_spawn_executor(swarm_t *s, int group_id, const char *task,
+                           const char *model, executor_type_t executor);
+void swarm_detect_executors(swarm_t *s);
+const char *executor_type_name(executor_type_t t);
+
+/* ── Budget partitioning ─────────────────────────────────────────────── */
+void swarm_set_budget(swarm_t *s, double budget_usd);
+double swarm_budget_remaining(swarm_t *s);
+double swarm_estimate_task_cost(swarm_t *s, const char *model);
+void swarm_enforce_budgets(swarm_t *s);  /* kill over-budget children */
 
 /* ── Groups ───────────────────────────────────────────────────────────── */
 int  swarm_group_create(swarm_t *s, const char *name);

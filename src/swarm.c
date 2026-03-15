@@ -1,4 +1,6 @@
 #include "swarm.h"
+#include "config.h"
+#include "router.h"
 #include "json_util.h"
 #include "tui.h"
 #include <stdio.h>
@@ -17,6 +19,10 @@
 #include <mach-o/dyld.h>
 #include <libgen.h>
 #endif
+
+/* ── Forward declarations ─────────────────────────────────────────────── */
+
+static void parse_child_cost_report(swarm_child_t *c);
 
 /* ── Time helper ──────────────────────────────────────────────────────── */
 
@@ -166,6 +172,32 @@ int swarm_spawn_in_group(swarm_t *s, int group_id, const char *task, const char 
         char depth_str[16];
         snprintf(depth_str, sizeof(depth_str), "%d", depth);
         setenv("DSCO_SWARM_DEPTH", depth_str, 1);
+
+        /* Propagate IPC DB path so children share the same IPC namespace */
+        const char *ipc_db = getenv("DSCO_IPC_DB");
+        if (ipc_db && ipc_db[0]) {
+            setenv("DSCO_IPC_DB", ipc_db, 1);
+        } else {
+            /* Auto-create IPC DB path scoped to root ancestor */
+            char ipc_path[512];
+            snprintf(ipc_path, sizeof(ipc_path), "/tmp/dsco_ipc_%s.db",
+                     parent_instance ? parent_instance : "orphan");
+            setenv("DSCO_IPC_DB", ipc_path, 1);
+        }
+
+        /* Propagate remaining budget to child as a hard cap */
+        if (s->swarm_budget_usd > 0) {
+            double remaining = swarm_budget_remaining(s);
+            int n_pending = 0;
+            for (int ci = 0; ci < s->child_count; ci++)
+                if (s->children[ci].status == SWARM_RUNNING) n_pending++;
+            double child_share = remaining / (n_pending + 1);  /* +1 for this new child */
+            if (child_share > 0) {
+                char cb[32];
+                snprintf(cb, sizeof(cb), "%.4f", child_share);
+                setenv("DSCO_CHILD_BUDGET", cb, 1);
+            }
+        }
 
         /* Use execl with absolute path (not execlp which searches PATH) */
         execl(bin, bin, "-m", m, task, NULL);
@@ -417,8 +449,16 @@ int swarm_poll_stream(swarm_t *s, int timeout_ms, swarm_stream_cb cb, void *ctx)
                 c->status = SWARM_KILLED;
                 c->exit_code = -1;
             }
+
+            /* Parse cost from external executor output on completion */
+            if (c->executor != EXECUTOR_DSCO) {
+                parse_child_cost_report(c);
+            }
         }
     }
+
+    /* Enforce budget limits after polling */
+    swarm_enforce_budgets(s);
 
     return events;
 }
@@ -470,6 +510,319 @@ void swarm_group_kill(swarm_t *s, int group_id) {
     }
 }
 
+/* ── Executor name helper ──────────────────────────────────────────────── */
+
+const char *executor_type_name(executor_type_t t) {
+    switch (t) {
+        case EXECUTOR_DSCO:   return "dsco";
+        case EXECUTOR_CLAUDE: return "claude";
+        case EXECUTOR_CODEX:  return "codex";
+    }
+    return "unknown";
+}
+
+/* ── Executor detection ───────────────────────────────────────────────── */
+
+static bool detect_binary(const char *name, char *out_path, size_t out_len) {
+    /* Check common locations + PATH */
+    const char *candidates[] = {
+        "/opt/homebrew/bin",
+        "/usr/local/bin",
+        "/usr/bin",
+        NULL
+    };
+
+    /* First try which(1) for PATH-based lookup */
+    char cmd[256];
+    snprintf(cmd, sizeof(cmd), "which %s 2>/dev/null", name);
+    FILE *f = popen(cmd, "r");
+    if (f) {
+        char line[512];
+        if (fgets(line, sizeof(line), f)) {
+            /* Strip trailing newline */
+            size_t l = strlen(line);
+            while (l > 0 && (line[l-1] == '\n' || line[l-1] == '\r')) line[--l] = '\0';
+            if (l > 0 && access(line, X_OK) == 0) {
+                snprintf(out_path, out_len, "%s", line);
+                pclose(f);
+                return true;
+            }
+        }
+        pclose(f);
+    }
+
+    /* Fallback: check known paths */
+    for (int i = 0; candidates[i]; i++) {
+        char path[1024];
+        snprintf(path, sizeof(path), "%s/%s", candidates[i], name);
+        if (access(path, X_OK) == 0) {
+            snprintf(out_path, out_len, "%s", path);
+            return true;
+        }
+    }
+    return false;
+}
+
+static bool check_claude_auth(void) {
+    /* Check if ANTHROPIC_API_KEY is set — that's enough for -p mode */
+    const char *key = getenv("ANTHROPIC_API_KEY");
+    return (key && key[0]);
+}
+
+static bool check_codex_auth(void) {
+    /* Check if codex auth.json exists and has tokens */
+    const char *home = getenv("HOME");
+    if (!home) return false;
+    char path[1024];
+    snprintf(path, sizeof(path), "%s/.codex/auth.json", home);
+    return (access(path, R_OK) == 0);
+}
+
+void swarm_detect_executors(swarm_t *s) {
+    executor_registry_t *e = &s->executors;
+    memset(e, 0, sizeof(*e));
+
+    /* Detect Claude Code CLI */
+    if (detect_binary("claude", e->claude_path, sizeof(e->claude_path))) {
+        e->claude_available = check_claude_auth();
+        if (e->claude_available) {
+            snprintf(e->claude_model, sizeof(e->claude_model), "claude-sonnet-4-6");
+        }
+    }
+
+    /* Detect OpenAI Codex CLI */
+    if (detect_binary("codex", e->codex_path, sizeof(e->codex_path))) {
+        e->codex_available = check_codex_auth();
+        if (e->codex_available) {
+            snprintf(e->codex_model, sizeof(e->codex_model), "gpt-5.3-codex-spark");
+        }
+    }
+}
+
+/* ── External executor spawn ─────────────────────────────────────────── */
+
+int swarm_spawn_executor(swarm_t *s, int group_id, const char *task,
+                          const char *model, executor_type_t executor) {
+    if (executor == EXECUTOR_DSCO) {
+        return swarm_spawn_in_group(s, group_id, task, model);
+    }
+
+    if (s->child_count >= SWARM_MAX_CHILDREN) return -1;
+
+    executor_registry_t *e = &s->executors;
+    const char *bin = NULL;
+    const char **argv = NULL;
+
+    /* Build argv depending on executor type */
+    const char *exec_argv[32];
+    memset(exec_argv, 0, sizeof(exec_argv));
+
+    if (executor == EXECUTOR_CLAUDE) {
+        if (!e->claude_available) return -1;
+        bin = e->claude_path;
+        const char *m = (model && model[0]) ? model : e->claude_model;
+        exec_argv[0] = bin;
+        exec_argv[1] = "-p";               /* print mode — non-interactive */
+        exec_argv[2] = "--output-format";
+        exec_argv[3] = "json";
+        exec_argv[4] = "--model";
+        exec_argv[5] = m;
+        exec_argv[6] = "--dangerously-skip-permissions";
+        exec_argv[7] = "--no-session-persistence";
+        exec_argv[8] = task;
+        exec_argv[9] = NULL;
+    } else if (executor == EXECUTOR_CODEX) {
+        if (!e->codex_available) return -1;
+        bin = e->codex_path;
+        const char *m = (model && model[0]) ? model : e->codex_model;
+        exec_argv[0] = bin;
+        exec_argv[1] = "exec";
+        exec_argv[2] = "--json";
+        exec_argv[3] = "-m";
+        exec_argv[4] = m;
+        exec_argv[5] = "--dangerously-bypass-approvals-and-sandbox";
+        exec_argv[6] = "--ephemeral";
+        exec_argv[7] = task;
+        exec_argv[8] = NULL;
+    } else {
+        return -1;
+    }
+    argv = exec_argv;
+
+    int stdout_pipe[2];
+    if (pipe(stdout_pipe) < 0) return -1;
+
+    pid_t pid = fork();
+    if (pid < 0) {
+        close(stdout_pipe[0]); close(stdout_pipe[1]);
+        return -1;
+    }
+
+    int id = s->child_count;
+    int depth = 1; /* external executors are always depth 1 from dsco's perspective */
+
+    if (pid == 0) {
+        /* ── Child process ── */
+        close(stdout_pipe[0]);
+        dup2(stdout_pipe[1], STDOUT_FILENO);
+        dup2(stdout_pipe[1], STDERR_FILENO);
+        close(stdout_pipe[1]);
+        setpgid(0, 0);
+
+        /* Propagate working directory */
+        char cwd[2048];
+        if (getcwd(cwd, sizeof(cwd))) chdir(cwd);
+
+        execv(bin, (char *const *)argv);
+        fprintf(stdout, "swarm: exec failed for '%s': %s\n", bin, strerror(errno));
+        _exit(127);
+    }
+
+    /* ── Parent ── */
+    close(stdout_pipe[1]);
+    fcntl(stdout_pipe[0], F_SETFL, O_NONBLOCK);
+
+    swarm_child_t *c = &s->children[id];
+    memset(c, 0, sizeof(*c));
+    c->id = id;
+    c->pid = pid;
+    c->pipe_fd = stdout_pipe[0];
+    c->err_fd = -1;
+    c->status = SWARM_RUNNING;
+    c->group_id = group_id;
+    c->start_time = now_sec();
+    c->depth = depth;
+    c->executor = executor;
+
+    snprintf(c->task, SWARM_LABEL_LEN, "%s", task);
+    if (model) snprintf(c->model, sizeof(c->model), "%s", model);
+    else {
+        const char *dm = (executor == EXECUTOR_CLAUDE) ? e->claude_model : e->codex_model;
+        snprintf(c->model, sizeof(c->model), "%s", dm);
+    }
+
+    c->output_cap = 4096;
+    c->output = safe_malloc(c->output_cap);
+    c->output[0] = '\0';
+    c->output_len = 0;
+    c->stream_buf = safe_malloc(4096);
+    c->stream_buf[0] = '\0';
+    c->stream_buf_len = 0;
+
+    s->child_count++;
+
+    if (group_id >= 0 && group_id < s->group_count) {
+        swarm_group_t *g = &s->groups[group_id];
+        if (g->child_count < SWARM_MAX_CHILDREN) {
+            g->child_ids[g->child_count++] = id;
+        }
+    }
+
+    return id;
+}
+
+/* ── Budget system ────────────────────────────────────────────────────── */
+
+void swarm_set_budget(swarm_t *s, double budget_usd) {
+    s->swarm_budget_usd = budget_usd;
+}
+
+double swarm_budget_remaining(swarm_t *s) {
+    if (s->swarm_budget_usd <= 0) return 1e9; /* unlimited */
+    double spent = 0;
+    for (int i = 0; i < s->child_count; i++) {
+        double cost = s->children[i].reported_cost_usd > 0
+                    ? s->children[i].reported_cost_usd
+                    : s->children[i].est_cost_usd;
+        spent += cost;
+    }
+    s->spent_usd = spent;
+    return s->swarm_budget_usd - spent;
+}
+
+double swarm_estimate_task_cost(swarm_t *s, const char *model) {
+    (void)s;
+    /* Use router EMA if available, else estimate from registry pricing */
+    extern router_t g_router;
+    router_model_stat_t *st = router_get_stats(&g_router, model);
+    if (st && st->ema_cost_per_turn > 0) {
+        return st->ema_cost_per_turn;
+    }
+    /* Fallback: estimate from registry (assume ~2k input + 500 output tokens) */
+    const model_info_t *mi = model_lookup(model);
+    if (mi) {
+        return mi->input_price * 2000 / 1e6 + mi->output_price * 500 / 1e6;
+    }
+    return 0.01; /* safe default: $0.01 per task */
+}
+
+void swarm_enforce_budgets(swarm_t *s) {
+    if (s->swarm_budget_usd <= 0) return;
+    double total_spent = 0;
+    for (int i = 0; i < s->child_count; i++) {
+        swarm_child_t *c = &s->children[i];
+        double cost = c->reported_cost_usd > 0 ? c->reported_cost_usd : c->est_cost_usd;
+        total_spent += cost;
+
+        /* Per-child budget enforcement */
+        if (c->budget_usd > 0 && cost > c->budget_usd &&
+            (c->status == SWARM_RUNNING || c->status == SWARM_STREAMING)) {
+            fprintf(stderr, "  %s⚠%s agent #%d over budget ($%.4f > $%.4f) — killing\n",
+                    TUI_YELLOW, TUI_RESET, c->id, cost, c->budget_usd);
+            swarm_kill(s, c->id);
+        }
+    }
+    s->spent_usd = total_spent;
+
+    /* Global swarm budget enforcement */
+    if (total_spent >= s->swarm_budget_usd) {
+        fprintf(stderr, "  %s%sswarm budget exhausted: $%.4f / $%.4f — killing all%s\n",
+                TUI_BOLD, TUI_RED, total_spent, s->swarm_budget_usd, TUI_RESET);
+        for (int i = 0; i < s->child_count; i++) {
+            swarm_child_t *c = &s->children[i];
+            if (c->status == SWARM_RUNNING || c->status == SWARM_STREAMING)
+                swarm_kill(s, c->id);
+        }
+    }
+}
+
+/* Parse cost from executor JSON output.
+ * Claude: {"total_cost_usd":0.01234, ...}
+ * Codex: tracks tokens in --json output
+ */
+static void parse_child_cost_report(swarm_child_t *c) {
+    if (!c->output || c->output_len == 0) return;
+
+    /* Try to find total_cost_usd in the output (Claude JSON format) */
+    const char *cost_str = strstr(c->output, "\"total_cost_usd\":");
+    if (cost_str) {
+        cost_str += 17; /* skip key */
+        c->reported_cost_usd = strtod(cost_str, NULL);
+        return;
+    }
+    /* Try "total_cost": (alternative key) */
+    cost_str = strstr(c->output, "\"total_cost\":");
+    if (cost_str) {
+        cost_str += 13;
+        c->reported_cost_usd = strtod(cost_str, NULL);
+        return;
+    }
+    /* Codex: parse token usage and compute cost */
+    const char *in_tok = strstr(c->output, "\"prompt_tokens\":");
+    const char *out_tok = strstr(c->output, "\"completion_tokens\":");
+    if (in_tok && out_tok) {
+        int input_tokens = atoi(in_tok + 16);
+        int output_tokens = atoi(out_tok + 20);
+        c->est_input_tokens = input_tokens;
+        c->est_output_tokens = output_tokens;
+        const model_info_t *mi = model_lookup(c->model);
+        if (mi) {
+            c->reported_cost_usd = input_tokens * mi->input_price / 1e6
+                                 + output_tokens * mi->output_price / 1e6;
+        }
+    }
+}
+
 /* ── JSON output ──────────────────────────────────────────────────────── */
 
 int swarm_status_json(swarm_t *s, char *buf, size_t len) {
@@ -506,10 +859,50 @@ int swarm_status_json(swarm_t *s, char *buf, size_t len) {
         jbuf_append(&b, elapsed_str);
         jbuf_append(&b, ",\"output_bytes\":");
         jbuf_append_int(&b, (int)c->output_len);
+        jbuf_append(&b, ",\"executor\":");
+        jbuf_append_json_str(&b, executor_type_name(c->executor));
+        if (c->budget_usd > 0) {
+            char bud[32];
+            snprintf(bud, sizeof(bud), "%.6f", c->budget_usd);
+            jbuf_append(&b, ",\"budget_usd\":");
+            jbuf_append(&b, bud);
+        }
+        if (c->reported_cost_usd > 0) {
+            char rc[32];
+            snprintf(rc, sizeof(rc), "%.6f", c->reported_cost_usd);
+            jbuf_append(&b, ",\"reported_cost_usd\":");
+            jbuf_append(&b, rc);
+        }
         jbuf_append(&b, "}");
     }
 
-    jbuf_append(&b, "],\"group_details\":[");
+    /* Swarm budget summary */
+    if (s->swarm_budget_usd > 0) {
+        char spent[32], bud[32];
+        snprintf(spent, sizeof(spent), "%.6f", s->spent_usd);
+        snprintf(bud, sizeof(bud), "%.6f", s->swarm_budget_usd);
+        jbuf_append(&b, "],\"budget\":{\"total_usd\":");
+        jbuf_append(&b, bud);
+        jbuf_append(&b, ",\"spent_usd\":");
+        jbuf_append(&b, spent);
+        jbuf_append(&b, "},\"group_details\":[");
+    } else {
+        jbuf_append(&b, "],\"group_details\":[");
+    }
+
+    /* Executor availability */
+    jbuf_t exec_info;
+    jbuf_init(&exec_info, 256);
+    jbuf_append(&exec_info, "{\"dsco\":true");
+    jbuf_appendf(&exec_info, ",\"claude\":%s", s->executors.claude_available ? "true" : "false");
+    jbuf_appendf(&exec_info, ",\"codex\":%s", s->executors.codex_available ? "true" : "false");
+    jbuf_append(&exec_info, "}");
+
+    /* We'll inject this after group_details */
+    char *exec_json = exec_info.data ? safe_strdup(exec_info.data) : safe_strdup("{}");
+    jbuf_free(&exec_info);
+
+    /* Continue with group_details (remove duplicate "],\"group_details\":[") */
     for (int i = 0; i < s->group_count; i++) {
         if (i > 0) jbuf_append(&b, ",");
         swarm_group_t *g = &s->groups[i];
@@ -523,7 +916,10 @@ int swarm_status_json(swarm_t *s, char *buf, size_t len) {
         jbuf_append(&b, swarm_group_complete(s, i) ? "true" : "false");
         jbuf_append(&b, "}");
     }
-    jbuf_append(&b, "]}}");
+    jbuf_append(&b, "],\"executors\":");
+    jbuf_append(&b, exec_json);
+    free(exec_json);
+    jbuf_append(&b, "}}");
 
     int written = (int)b.len < (int)len - 1 ? (int)b.len : (int)len - 1;
     memcpy(buf, b.data, written);
