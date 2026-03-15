@@ -6,13 +6,14 @@
  */
 
 #include "task_profile.h"
+#include "json_util.h"
 
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <strings.h>
 #include <ctype.h>
 #include <math.h>
+#include <strings.h>
 
 /* ── Pattern definitions ───────────────────────────────────────────────── */
 
@@ -64,18 +65,12 @@ static const char *pattern_keywords[PATTERN_COUNT][10] = {
 static bool contains_keyword(const char *text, const char *keyword) {
     if (!text || !keyword) return false;
     
-    // Make lower-case copies for case-insensitive comparison
-    char *text_lower = strdup(text);
-    char *kw_lower = strdup(keyword);
-    
-    for (char *p = text_lower; *p; p++) *p = tolower(*p);
-    for (char *p = kw_lower; *p; p++) *p = tolower(*p);
-    
-    bool found = strstr(text_lower, kw_lower) != NULL;
-    
-    free(text_lower);
-    free(kw_lower);
-    return found;
+    for (const char *p = text; *p; p++) {
+        if (strncasecmp(p, keyword, strlen(keyword)) == 0) {
+            return true;
+        }
+    }
+    return false;
 }
 
 /* ── Pattern detection ─────────────────────────────────────────────────── */
@@ -165,42 +160,42 @@ static double compute_fit_score(const task_profile_t *tp,
         if (tp->patterns[PATTERN_PLANNING] || tp->patterns[PATTERN_REASONING])
             score += 0.25;
         break;
-
+        
     case CAT_FANOUT:
         // Good for parallel tasks
         if (tp->parallelism_score > 0.6)
             score += 0.3;
         break;
-
+        
     case CAT_HIERARCHY:
         // Good for complex planning with delegation
         if (tp->patterns[PATTERN_PLANNING] && tp->complexity_score > 0.5)
             score += 0.25;
         break;
-
+        
     case CAT_MESH:
         // Good for consensus/convergence
         if (tp->convergence_score > 0.6)
             score += 0.3;
         break;
-
+        
     case CAT_SPECIALIST:
         // Good for complex/specialized tasks
         if (tp->patterns[PATTERN_SPECIALIST] || tp->complexity_score > 0.6)
             score += 0.3;
         break;
-
+        
     case CAT_FEEDBACK:
         // Good for iteration/refinement
         if (tp->patterns[PATTERN_ITERATION] || tp->convergence_score > 0.5)
             score += 0.3;
         break;
-
+        
     case CAT_DOMAIN:
         // Generic domain-specific topologies
         score += 0.1;
         break;
-
+        
     case CAT_COMPETITIVE:
         // Good for specialist tasks where we want best-of-N
         if (tp->complexity_score > 0.5)
@@ -212,17 +207,26 @@ static double compute_fit_score(const task_profile_t *tp,
 }
 
 static int rank_topologies(task_profile_t *tp) {
-    int total = 0;
-    const topology_t *candidates = topology_registry(&total);
-    if (!candidates || total <= 0) return 0;
-
+    // Dummy: for now just return the first runnable topology from registry
+    // Future: actually rank against all 60 topologies
+    
+    const topology_t *candidates[] = {
+        topology_find("chain_of_thought"),
+        topology_find("fanout_balance"),
+        topology_find("mesh_consensus"),
+        topology_find("feedback_refine"),
+        topology_find("specialist_tournament"),
+        topology_find("triage"),
+        NULL
+    };
+    
     tp->suggestion_count = 0;
-    for (int i = 0; i < total && tp->suggestion_count < 15; i++) {
-        const topology_t *topo = &candidates[i];
-        if (!topology_is_runnable(topo)) continue;
-
-        double fit = compute_fit_score(tp, topo);
-
+    for (int i = 0; candidates[i] && tp->suggestion_count < 15; i++) {
+        if (!topology_is_runnable(candidates[i])) continue;
+        
+        double fit = compute_fit_score(tp, candidates[i]);
+        
+        // Insert in sorted order (highest fit first)
         int insert_pos = tp->suggestion_count;
         for (int j = 0; j < tp->suggestion_count; j++) {
             if (fit > tp->suggestions[j].fit_score) {
@@ -230,17 +234,19 @@ static int rank_topologies(task_profile_t *tp) {
                 break;
             }
         }
-
+        
+        // Shift down
         for (int j = tp->suggestion_count; j > insert_pos; j--) {
-            tp->suggestions[j] = tp->suggestions[j - 1];
+            tp->suggestions[j] = tp->suggestions[j-1];
         }
-
-        tp->suggestions[insert_pos].topo = topo;
+        
+        // Insert
+        tp->suggestions[insert_pos].topo = candidates[i];
         tp->suggestions[insert_pos].fit_score = fit;
         tp->suggestions[insert_pos].reason = "ranked";
         tp->suggestion_count++;
     }
-
+    
     return tp->suggestion_count;
 }
 
@@ -363,9 +369,9 @@ int task_profile_explain(const task_profile_t *tp, char *buf, size_t len) {
         tp->latency_score * 100.0, tp->latency_score,
         tp->pattern_count);
     
-    int top_n = tp->suggestion_count < 3 ? tp->suggestion_count : 3;
+    int top_n = (tp->suggestion_count < 3 ? tp->suggestion_count : 3);
     written += snprintf(buf + written, len - written, "\nTop %d topologies:\n", top_n);
-
+    
     for (int i = 0; i < top_n; i++) {
         if (tp->suggestions[i].topo) {
             written += snprintf(buf + written, len - written,

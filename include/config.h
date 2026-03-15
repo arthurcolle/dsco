@@ -6,7 +6,7 @@
 #include <string.h>
 #include <stddef.h>
 
-#define DSCO_VERSION "0.8.0"
+#define DSCO_VERSION "0.9.0"
 
 /* Build info — set via Makefile CFLAGS */
 #ifndef BUILD_DATE
@@ -81,37 +81,122 @@ typedef struct {
 } model_info_t;
 
 static const model_info_t MODEL_REGISTRY[] = {
-    /* Anthropic */
-    { "opus",   "claude-opus-4-6",             200000, 32000,  15.0,  75.0,  1.50, 18.75, 1 },
-    { "sonnet", "claude-sonnet-4-6",           200000, 16000,   3.0,  15.0,  0.30,  3.75, 1 },
-    { "haiku",  "claude-haiku-4-5-20251001",   200000,  8192,   0.80,  4.0,  0.08,  1.00, 0 },
-    /* OpenAI */
-    { "gpt4o",      "gpt-4o",                 128000, 16384,   2.50, 10.0,  0, 0, 0 },
-    { "gpt4o-mini", "gpt-4o-mini",            128000, 16384,   0.15,  0.60, 0, 0, 0 },
-    { "o1",         "o1",                      200000, 100000, 15.0,  60.0,  0, 0, 1 },
-    { "o3-mini",    "o3-mini",                 200000, 100000,  1.10,  4.40, 0, 0, 1 },
-    /* Groq (fast inference) */
-    { "llama70b",   "llama-3.3-70b-versatile", 128000, 32768,   0.59,  0.79, 0, 0, 0 },
-    { "llama8b",    "llama-3.1-8b-instant",    128000, 8192,    0.05,  0.08, 0, 0, 0 },
-    { "mixtral",    "mixtral-8x7b-32768",       32768, 32768,   0.24,  0.24, 0, 0, 0 },
-    /* DeepSeek */
-    { "deepseek",   "deepseek-chat",           128000, 8192,    0.14,  0.28, 0, 0, 1 },
-    { "deepseek-r", "deepseek-reasoner",       128000, 8192,    0.55,  2.19, 0, 0, 1 },
-    /* Mistral */
-    { "mistral-l",  "mistral-large-latest",    128000, 8192,    2.0,   6.0,  0, 0, 0 },
-    { "mistral-s",  "mistral-small-latest",    128000, 8192,    0.1,   0.3,  0, 0, 0 },
-    { "codestral",  "codestral-latest",        256000, 8192,    0.3,   0.9,  0, 0, 0 },
-    /* Together */
-    { "qwen72b",    "Qwen/Qwen2.5-72B-Instruct-Turbo", 128000, 8192, 0.6, 0.6, 0, 0, 0 },
-    /* Cohere */
-    { "command-r",  "command-r-plus",          128000, 4096,    2.5,  10.0,  0, 0, 0 },
-    /* Cerebras */
-    { "cerebras",   "llama3.1-70b",            128000, 8192,    0.60,  0.60, 0, 0, 0 },
-    /* xAI */
-    { "grok",       "grok-2",                  128000, 8192,    2.0,  10.0,  0, 0, 0 },
-    /* Perplexity */
-    { "pplx",       "sonar-pro",               200000, 8192,    3.0,  15.0,  0, 0, 0 },
-    { "pplx-small", "sonar",                   128000, 8192,    1.0,   1.0,  0, 0, 0 },
+    /* ── Anthropic (native API) ──────────────────────────────────────────── */
+    { "opus",         "claude-opus-4-6",             200000, 32000,  15.0,  75.0,  1.50, 18.75, 1 },
+    { "sonnet",       "claude-sonnet-4-6",           200000, 16000,   3.0,  15.0,  0.30,  3.75, 1 },
+    { "haiku",        "claude-haiku-4-5-20251001",   200000,  8192,   0.80,  4.0,  0.08,  1.00, 0 },
+    /* ── Anthropic (OpenRouter IDs — for cross-provider routing) ─────── */
+    { "or-opus46",    "anthropic/claude-opus-4.6",    1000000, 32000,  5.0,  25.0,  0, 0, 1 },
+    { "or-sonnet46",  "anthropic/claude-sonnet-4.6",  1000000, 16000,  3.0,  15.0,  0, 0, 1 },
+    { "or-opus45",    "anthropic/claude-opus-4.5",     200000, 32000,  5.0,  25.0,  0, 0, 1 },
+    { "or-sonnet45",  "anthropic/claude-sonnet-4.5",  1000000, 16000,  3.0,  15.0,  0, 0, 1 },
+    /* ── OpenAI — GPT-5.x family (2026 frontier) ────────────────────── */
+    { "gpt54-pro",    "openai/gpt-5.4-pro",          1050000, 32768, 30.0, 180.0,  0, 0, 1 },
+    { "gpt54",        "openai/gpt-5.4",              1050000, 32768,  2.50, 15.0,  0, 0, 1 },
+    { "gpt53-codex",  "openai/gpt-5.3-codex",         400000, 32768,  1.75, 14.0,  0, 0, 1 },
+    { "gpt53",        "openai/gpt-5.3-chat",           128000, 32768,  1.75, 14.0,  0, 0, 1 },
+    { "gpt52-pro",    "openai/gpt-5.2-pro",            400000, 32768, 21.0, 168.0,  0, 0, 1 },
+    { "gpt52",        "openai/gpt-5.2",                400000, 32768,  1.75, 14.0,  0, 0, 1 },
+    { "gpt52-codex",  "openai/gpt-5.2-codex",          400000, 32768,  1.75, 14.0,  0, 0, 1 },
+    { "gpt51",        "openai/gpt-5.1",                400000, 32768,  1.25, 10.0,  0, 0, 1 },
+    { "gpt51-codex",  "openai/gpt-5.1-codex",          400000, 32768,  1.25, 10.0,  0, 0, 1 },
+    { "gpt5",         "openai/gpt-5",                   400000, 32768,  1.25, 10.0,  0, 0, 1 },
+    { "gpt5-pro",     "openai/gpt-5-pro",               400000, 32768, 15.0, 120.0,  0, 0, 1 },
+    { "gpt5-codex",   "openai/gpt-5-codex",             400000, 32768,  1.25, 10.0,  0, 0, 1 },
+    { "gpt5-mini",    "openai/gpt-5-mini",              400000, 32768,  0.25,  2.0,  0, 0, 0 },
+    { "gpt5-nano",    "openai/gpt-5-nano",              400000, 32768,  0.05,  0.40, 0, 0, 0 },
+    /* ── OpenAI — GPT-4.x / 4o family ───────────────────────────────── */
+    { "gpt41",        "openai/gpt-4.1",               1047576, 32768,  2.0,   8.0,  0, 0, 0 },
+    { "gpt41-mini",   "openai/gpt-4.1-mini",          1047576, 32768,  0.40,  1.60, 0, 0, 0 },
+    { "gpt41-nano",   "openai/gpt-4.1-nano",          1047576, 32768,  0.10,  0.40, 0, 0, 0 },
+    { "gpt4o",        "openai/gpt-4o",                 128000, 16384,  2.50, 10.0,  0, 0, 0 },
+    { "gpt4o-mini",   "openai/gpt-4o-mini",            128000, 16384,  0.15,  0.60, 0, 0, 0 },
+    /* ── OpenAI — o-series reasoning ─────────────────────────────────── */
+    { "o4-mini",      "openai/o4-mini",                200000, 100000,  1.10,  4.40, 0, 0, 1 },
+    { "o4-mini-hi",   "openai/o4-mini-high",           200000, 100000,  1.10,  4.40, 0, 0, 1 },
+    { "o3",           "openai/o3",                     200000, 100000,  2.0,   8.0,  0, 0, 1 },
+    { "o3-pro",       "openai/o3-pro",                 200000, 100000, 20.0,  80.0,  0, 0, 1 },
+    { "o3-mini",      "openai/o3-mini",                200000, 100000,  1.10,  4.40, 0, 0, 1 },
+    { "o1",           "openai/o1",                     200000, 100000, 15.0,  60.0,  0, 0, 1 },
+    /* ── OpenAI — open-source models ─────────────────────────────────── */
+    { "gpt-oss",      "openai/gpt-oss-120b",           131072, 32768,  0.04,  0.19, 0, 0, 0 },
+    /* ── Google Gemini ───────────────────────────────────────────────── */
+    { "gem31-pro",    "google/gemini-3.1-pro-preview", 1048576, 32768,  2.0,  12.0,  0, 0, 1 },
+    { "gem31-flash",  "google/gemini-3.1-flash-lite-preview", 1048576, 32768, 0.25, 1.50, 0, 0, 0 },
+    { "gem3-pro",     "google/gemini-3-pro-preview",   1048576, 32768,  2.0,  12.0,  0, 0, 1 },
+    { "gem3-flash",   "google/gemini-3-flash-preview", 1048576, 32768,  0.50,  3.0,  0, 0, 0 },
+    { "gem25-pro",    "google/gemini-2.5-pro",         1048576, 32768,  1.25, 10.0,  0, 0, 1 },
+    { "gem25-flash",  "google/gemini-2.5-flash",       1048576, 32768,  0.30,  2.50, 0, 0, 0 },
+    /* ── xAI Grok ────────────────────────────────────────────────────── */
+    { "grok4",        "x-ai/grok-4.20-beta",           2000000, 32768,  2.0,   6.0,  0, 0, 1 },
+    { "grok4-ma",     "x-ai/grok-4.20-multi-agent-beta", 2000000, 32768, 2.0,  6.0,  0, 0, 1 },
+    /* ── Moonshot Kimi ───────────────────────────────────────────────── */
+    { "kimi",         "moonshotai/kimi-k2.5",           262144, 16384,  0.45,  2.20, 0, 0, 1 },
+    { "kimi-k2",      "moonshotai/kimi-k2",             131000, 16384,  0.55,  2.20, 0, 0, 0 },
+    { "kimi-think",   "moonshotai/kimi-k2-thinking",    131072, 16384,  0.47,  2.00, 0, 0, 1 },
+    /* ── Zhipu GLM ───────────────────────────────────────────────────── */
+    { "glm5",         "z-ai/glm-5",                    202752, 65536,  0.72,  2.30, 0, 0, 1 },
+    { "glm5-turbo",   "z-ai/glm-5-turbo",              202752, 65536,  0.96,  3.20, 0, 0, 1 },
+    { "glm47",        "z-ai/glm-4.7",                  202752, 65536,  0.38,  1.98, 0, 0, 1 },
+    { "glm47-flash",  "z-ai/glm-4.7-flash",            202752, 65536,  0.06,  0.40, 0, 0, 0 },
+    /* ── DeepSeek ────────────────────────────────────────────────────── */
+    { "ds-v32",       "deepseek/deepseek-v3.2",        163840, 32768,  0.26,  0.38, 0, 0, 0 },
+    { "ds-v31",       "deepseek/deepseek-v3.1-terminus", 163840, 32768, 0.21, 0.79, 0, 0, 0 },
+    { "ds-chat",      "deepseek/deepseek-chat",         163840, 32768,  0.32,  0.89, 0, 0, 0 },
+    { "ds-r1",        "deepseek/deepseek-r1-0528",      163840, 32768,  0.45,  2.15, 0, 0, 1 },
+    /* ── Qwen 3.5 ────────────────────────────────────────────────────── */
+    { "qwen-flash",   "qwen/qwen3.5-flash-02-23",     1000000, 32768,  0.10,  0.40, 0, 0, 0 },
+    { "qwen-plus",    "qwen/qwen3.5-plus-02-15",      1000000, 32768,  0.26,  1.56, 0, 0, 0 },
+    { "qwen-397b",    "qwen/qwen3.5-397b-a17b",        262144, 32768,  0.39,  2.34, 0, 0, 0 },
+    { "qwen-122b",    "qwen/qwen3.5-122b-a10b",        262144, 32768,  0.26,  2.08, 0, 0, 0 },
+    { "qwen-coder",   "qwen/qwen3-coder-next",         262144, 32768,  0.12,  0.75, 0, 0, 0 },
+    { "qwen-think",   "qwen/qwen3-max-thinking",       262144, 32768,  0.78,  3.90, 0, 0, 1 },
+    /* ── Meta Llama ──────────────────────────────────────────────────── */
+    { "llama4-mav",   "meta-llama/llama-4-maverick",   1048576, 32768,  0.15,  0.60, 0, 0, 0 },
+    { "llama4-scout", "meta-llama/llama-4-scout",       327680, 32768,  0.08,  0.30, 0, 0, 0 },
+    { "llama33-70b",  "meta-llama/llama-3.3-70b-instruct", 131072, 32768, 0.10, 0.32, 0, 0, 0 },
+    /* ── Mistral (2025/2026) ─────────────────────────────────────────── */
+    { "mistral-l3",   "mistralai/mistral-large-2512",   262144, 32768,  0.50,  1.50, 0, 0, 0 },
+    { "devstral",     "mistralai/devstral-2512",         262144, 32768,  0.40,  2.00, 0, 0, 0 },
+    { "mistral-med",  "mistralai/mistral-medium-3.1",    131072, 32768,  0.40,  2.00, 0, 0, 0 },
+    { "mistral-s32",  "mistralai/mistral-small-3.2-24b-instruct", 131072, 32768, 0.06, 0.18, 0, 0, 0 },
+    { "codestral",    "mistralai/codestral-2508",        256000, 32768,  0.30,  0.90, 0, 0, 0 },
+    /* ── ByteDance Seed ──────────────────────────────────────────────── */
+    { "seed2",        "bytedance-seed/seed-2.0-lite",    262144, 32768,  0.25,  2.00, 0, 0, 0 },
+    { "seed2-mini",   "bytedance-seed/seed-2.0-mini",    262144, 32768,  0.10,  0.40, 0, 0, 0 },
+    /* ── Amazon Nova ─────────────────────────────────────────────────── */
+    { "nova-premier", "amazon/nova-premier-v1",         1000000, 32768,  2.50, 12.50, 0, 0, 1 },
+    { "nova2-lite",   "amazon/nova-2-lite-v1",          1000000, 32768,  0.30,  2.50, 0, 0, 0 },
+    /* ── MiniMax ─────────────────────────────────────────────────────── */
+    { "minimax",      "minimax/minimax-m2.5",            196608, 32768,  0.25,  1.20, 0, 0, 0 },
+    /* ── Writer ──────────────────────────────────────────────────────── */
+    { "palmyra",      "writer/palmyra-x5",              1040000, 32768,  0.60,  6.00, 0, 0, 0 },
+    /* ── NVIDIA ──────────────────────────────────────────────────────── */
+    { "nemotron",     "nvidia/nemotron-3-super-120b-a12b:free", 262144, 32768, 0, 0, 0, 0, 0 },
+    /* ── Cohere ──────────────────────────────────────────────────────── */
+    { "command-a",    "cohere/command-a",                256000, 32768,  2.50, 10.0,  0, 0, 0 },
+    /* ── NousResearch ────────────────────────────────────────────────── */
+    { "hermes4",      "nousresearch/hermes-4-405b",      131072, 32768,  1.00,  3.00, 0, 0, 0 },
+    /* ── StepFun ─────────────────────────────────────────────────────── */
+    { "step35",       "stepfun/step-3.5-flash",          256000, 32768,  0.10,  0.30, 0, 0, 0 },
+    /* ── Inception Mercury ───────────────────────────────────────────── */
+    { "mercury",      "inception/mercury-2",             128000, 32768,  0.25,  0.75, 0, 0, 0 },
+    /* ── Baidu ERNIE ─────────────────────────────────────────────────── */
+    { "ernie45",      "baidu/ernie-4.5-300b-a47b",      123000, 32768,  0.28,  1.10, 0, 0, 0 },
+    /* ── Arcee AI ────────────────────────────────────────────────────── */
+    { "arcee-reason", "arcee-ai/maestro-reasoning",      131072, 32768,  0.90,  3.30, 0, 0, 1 },
+    /* ── Xiaomi ──────────────────────────────────────────────────────── */
+    { "mimo",         "xiaomi/mimo-v2-flash",            262144, 32768,  0.09,  0.29, 0, 0, 0 },
+    /* ── Aion Labs ───────────────────────────────────────────────────── */
+    { "aion",         "aion-labs/aion-2.0",              131072, 32768,  0.80,  1.60, 0, 0, 0 },
+    /* ── KwaiPilot ───────────────────────────────────────────────────── */
+    { "kat-coder",    "kwaipilot/kat-coder-pro",         256000, 32768,  0.21,  0.83, 0, 0, 1 },
+    /* ── Groq (fast native inference, not OpenRouter) ────────────────── */
+    { "llama70b",     "llama-3.3-70b-versatile",         128000, 32768,  0.59,  0.79, 0, 0, 0 },
+    { "llama8b",      "llama-3.1-8b-instant",            128000,  8192,  0.05,  0.08, 0, 0, 0 },
+    /* ── Perplexity ──────────────────────────────────────────────────── */
+    { "pplx",         "sonar-pro",                       200000,  8192,  3.0,  15.0,  0, 0, 0 },
+    { "pplx-small",   "sonar",                           128000,  8192,  1.0,   1.0,  0, 0, 0 },
     { NULL, NULL, 0, 0, 0, 0, 0, 0, 0 }
 };
 
@@ -142,45 +227,41 @@ static inline int model_context_window(const char *name) {
 
 /* System prompt */
 #define SYSTEM_PROMPT \
-    "You are dsco, an agentic CLI with self-introspection, swarm, crypto, pipeline, " \
-    "and plugin capabilities. You have 170+ tools including file I/O, compilation, " \
-    "shell, git, network, and these special capabilities:\n" \
-    "1) AST SELF-INTROSPECTION: Use self_inspect, inspect_file, call_graph, and " \
-    "dependency_graph to understand any C codebase at the AST level — including " \
-    "your own source code. Analyze functions, complexity, dependencies.\n" \
-    "2) HIERARCHICAL SWARMS: Use spawn_agent to launch sub-dsco processes that " \
-    "can themselves spawn sub-agents (up to depth 4). Use create_swarm for " \
-    "parallel agent groups. Sub-agents inherit all tools and API access. " \
-    "Monitor with agent_status, collect with swarm_collect. " \
-    "For complex tasks, decompose into hierarchies: a coordinator spawns " \
-    "specialist agents, each of which can spawn workers.\n" \
-    "2b) ADVANCED TOPOLOGIES: Use topology_list to inspect the built-in " \
-    "execution graphs and topology_run to execute tasks through named or " \
-    "auto-selected topologies. Prefer topology_run over create_swarm when the " \
-    "work needs structured fanout/fanin, hierarchies, feedback loops, " \
-    "competitive selection, or domain-specific orchestration.\n" \
-    "3) CRYPTO TOOLKIT: Pure C SHA-256, MD5, HMAC-SHA256, HKDF, base64, UUID v4, " \
-    "random bytes, JWT decode. Use sha256, md5, hmac, uuid, random_bytes, " \
-    "base64_tool, jwt_decode, hkdf.\n" \
-    "4) PIPELINE ENGINE: Chain data transforms using coroutines (Tatham's technique). " \
-    "Use pipeline with spec like 'filter:error|sort|uniq|head:20'. 30+ stages " \
-    "including filter, sort, map, regex, json_extract, csv_column, stats.\n" \
-    "5) EXPRESSION EVALUATOR: Use eval for math expressions with variables, " \
-    "functions (sin/cos/log/sqrt/gcd/fib), hex/oct/bin literals, factorial. " \
-    "Use big_factorial for exact large factorials.\n" \
-    "6) PLUGIN SYSTEM: Dynamic .dylib/.so plugins from ~/.dsco/plugins/. " \
-    "Use plugin_list, plugin_reload, plugin_load.\n" \
-    "7) BASH: Use the 'bash' tool for all shell commands, scripts, pipes, and " \
-    "multi-line operations. Supports cwd parameter for directory context. " \
-    "Default 120s timeout. Preferred over run_command, but do not use bash when a dedicated tool exists.\n" \
-    "8) MARKET DATA: Use market_quote for live ticker/stock/crypto/forex prices.\n" \
-    "9) SOUL EVOLUTION: Use soul_read to inspect, and soul_write/soul_append/soul_replace to mutate " \
-    "the workspace SOUL.md over time. Treat this as persistent personality state and apply incremental, " \
-    "coherent updates.\n" \
-    "You operate in a streaming loop. Be concise. Prefer action over explanation. " \
-    "When tasks are parallelizable, use swarms. When you need code understanding, " \
-    "use AST tools before editing. You can call many tools in a single response — " \
-    "use parallel tool calls aggressively for independent operations."
+    "You are dsco, an agentic CLI built on the Overmind Soul architecture.\n" \
+    "Three-layer design: Wings (soar) + Talons (win) + Immune System (survive).\n\n" \
+    "WINGS (Autonomy & Emergence):\n" \
+    "- PHEROMONE COORDINATION: Stigmergic signals (PROGRESS/ATTRACTION/WARNING/SUCCESS/" \
+    "HELP_NEEDED/CAPACITY) with exponential decay. Coordinate without central planning.\n" \
+    "- THREE-TIER MEMORY: Working (60s), Episodic (1h), Semantic (permanent). " \
+    "Auto-consolidation promotes important memories upward.\n" \
+    "- HIERARCHICAL SWARMS: Sub-agent hierarchies (depth 6). " \
+    "topology_run for fanout/fanin, debate, competition.\n" \
+    "- CAPABILITY MATCHING: EXPERT/PROFICIENT/COMPETENT/NOVICE. " \
+    "Self-assess and delegate when outmatched.\n\n" \
+    "TALONS (Competitive Execution — the ability to WIN):\n" \
+    "- GOAL PURSUIT: Track goals through hunt states: nascent -> stalking -> " \
+    "striking -> gripping -> captured (win) or escaped (fail). " \
+    "Use talons_goal to create, talons_advance to progress.\n" \
+    "- GRIP STRENGTH: tentative (1 retry), holding (3), locked (7), death_grip (20). " \
+    "Failed goals auto-retry based on grip. Escalate grip for critical objectives.\n" \
+    "- TOURNAMENT SELECTION: Race N strategies in parallel, pick the winner. " \
+    "Use talons_tournament to begin/add/result/decide. Scored by quality/speed/cost.\n" \
+    "- STRATEGY ENGINE: direct, flanking, tournament, escalation, divide, ambush. " \
+    "talons_recommend learns from win/loss history to suggest best approach.\n" \
+    "- ADAPTIVE: Strategy success rates updated from every hunt. The system gets " \
+    "better at winning over time.\n\n" \
+    "IMMUNE SYSTEM (Guardrails & Safety):\n" \
+    "- OODA DISCIPLINE: Observe->Orient->Decide->Act for non-trivial decisions.\n" \
+    "- KILL SWITCHES: 5 granularities (agent/workflow/service/pheromone/system).\n" \
+    "- GSU BUDGETS: Resource accounting with hard limits — no overdraft.\n" \
+    "- PRINCIPAL TIERS: Tier 0 (Founder) > Tier 1 (Operator) > Tier 2 (Agent) > Tier 3 (User).\n" \
+    "- HARDCODED BEHAVIORS: Non-bypassable rules (must-always/must-never).\n" \
+    "- GOVERNANCE CHECKPOINT: hardcoded -> budget -> killswitch -> authorize -> audit.\n\n" \
+    "TOOLS (200+): File I/O, git, network, shell, crypto, pipeline engine, " \
+    "math evaluator, AST introspection, plugins, market data, soul evolution.\n" \
+    "MULTI-EXECUTOR SWARMS: dsco (fork self), claude (Claude Code CLI), codex (OpenAI Codex).\n\n" \
+    "Be concise. Prefer action over explanation. Use parallel tool calls aggressively. " \
+    "Create goals for complex tasks. Use tournaments when multiple approaches exist."
 
 /* ── TUI Feature Flags ─────────────────────────────────────────────────── */
 
