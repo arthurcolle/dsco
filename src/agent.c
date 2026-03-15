@@ -18,6 +18,7 @@
 #include "provider.h"
 #include "topology.h"
 #include "router.h"
+#include "swarm.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -925,46 +926,160 @@ static bool run_topology_prompt(session_state_t *session, const char *api_key,
 /* ── Readline tab completion ───────────────────────────────────────────── */
 
 #ifdef HAVE_READLINE
-static const char *s_commands[] = {
-    "/clear", "/save", "/load", "/sessions", "/setup", "/tools",
-    "/plugins", "/plugins validate", "/help", "/model", "/cost", "/context", "/effort",
-    "/compact", "/version", "/force", "/budget", "/trust", "/web", "/code",
-    "/mcp", "/provider", "/status", "/temp", "/thinking", "/fallback",
-    "/metrics", "/telemetry", "/cache", "/trace", "/topology",
-    "/topology list", "/topology show", "/topology use", "/topology run",
-    "/topology auto", "/topology off",
-    "/swarm", "/swarm status", "/swarm show", "/swarm wait",
-    "/swarm kill", "/swarm kill-group",
-    "/features", "/perf", "/minimap", "/workspace", "/workspace bootstrap",
-    "/workspace reload", "/workspace prompt", "/skills", "/skills show",
-    "/skills use", "/skills clear", "/identity", "/user", "/soul", "/memory",
-    "quit", "exit", NULL
+typedef struct {
+    const char *command;
+    const char *description;
+} slash_command_t;
+
+static const slash_command_t s_slash_commands[] = {
+    {"/clear",        "reset conversation"},
+    {"/save",         "save session"},
+    {"/load",         "load session"},
+    {"/sessions",     "list saved sessions"},
+    {"/setup",        "detect and store API keys"},
+    {"/setup --force", "store keys and overwrite existing values"},
+    {"/setup report",  "show environment setup status"},
+    {"/tools",        "list available tools"},
+    {"/plugins",      "list loaded plugins"},
+    {"/plugins validate", "validate plugin manifest + lockfile"},
+    {"/help",         "show slash command help"},
+    {"/model",        "show or change active model"},
+    {"/route",        "show/update model routing policy"},
+    {"/cost",         "show session cost"},
+    {"/context",      "show context usage"},
+    {"/effort",       "set effort: low/medium/high"},
+    {"/compact",      "trim conversation history"},
+    {"/version",      "show version/build information"},
+    {"/force",        "control next tool choice"},
+    {"/prefill",      "set prefill text for the next response"},
+    {"/json",         "set JSON mode for next response"},
+    {"/budget",       "set session cost budget"},
+    {"/trust",        "set trust tier"},
+    {"/web",          "toggle web search"},
+    {"/code",         "toggle code execution"},
+    {"/mcp",          "show MCP servers and tools"},
+    {"/mcp reload",   "reload MCP servers/tools"},
+    {"/provider",     "show/detect API provider"},
+    {"/status",       "show full session status"},
+    {"/temp",         "set request temperature"},
+    {"/thinking",     "set thinking budget"},
+    {"/fallback",     "set model fallback chain"},
+    {"/metrics",      "show per-tool metrics"},
+    {"/telemetry",    "show streaming telemetry"},
+    {"/cache",        "show/clear tool cache"},
+    {"/trace",        "show recent trace spans"},
+    {"/topology",     "show/select/run topologies"},
+    {"/topology list", "show topology registry"},
+    {"/topology show", "inspect a topology"},
+    {"/topology use", "set active topology"},
+    {"/topology run", "run one-off topology"},
+    {"/topology auto", "enable topology auto-selection"},
+    {"/topology off", "disable topology auto-selection"},
+    {"/swarm",        "view / manage swarm"},
+    {"/swarm status", "show swarm status"},
+    {"/swarm show",   "show a specific swarm group"},
+    {"/swarm wait",   "wait for swarm group completion"},
+    {"/swarm kill",   "kill a swarm agent"},
+    {"/swarm kill-group", "kill a whole swarm group"},
+    {"/features",     "toggle UI features"},
+    {"/perf",         "show latency and throughput"},
+    {"/minimap",      "show conversation minimap"},
+    {"/workspace",    "show workspace summary"},
+    {"/workspace bootstrap", "create workspace files"},
+    {"/workspace reload", "reload workspace prompt cache"},
+    {"/workspace prompt", "show active workspace prompt"},
+    {"/skills",       "list active skills"},
+    {"/skills show",  "show a skill body"},
+    {"/skills use",   "set active skill"},
+    {"/skills clear", "clear active skill"},
+    {"/identity",     "show workspace identity doc"},
+    {"/user",         "show workspace user doc"},
+    {"/soul",         "show workspace soul doc"},
+    {"/memory",       "show workspace memory doc"},
+    {"/dashboard",    "show rich session dashboard"},
+    {"/top",          "show tool leaderboard"},
+    {"/flame",        "show tool flame timeline"},
+    {"quit",          "exit dsco"},
+    {"exit",          "exit dsco"},
+    {NULL, NULL}
 };
+
+static const char *command_description(const char *command) {
+    for (size_t i = 0; s_slash_commands[i].command; i++) {
+        if (strcmp(s_slash_commands[i].command, command) == 0) {
+            return s_slash_commands[i].description;
+        }
+    }
+    return "";
+}
 
 static char *command_generator(const char *text, int state) {
     static int idx, len;
-    if (!state) { idx = 0; len = (int)strlen(text); }
-    while (s_commands[idx]) {
-        const char *cmd = s_commands[idx++];
-        if (strncmp(cmd, text, (size_t)len) == 0)
-            return strdup(cmd);
-    }
-    /* Also complete model aliases */
     static int model_idx;
-    if (idx == 0) model_idx = 0; /* won't reach here but guard */
-    if (strncmp(text, "/model ", 7) == 0) {
+    static int mode;
+    if (!state) {
+        idx = 0;
+        model_idx = 0;
+        len = (int)strlen(text);
+        mode = (strncmp(text, "/model ", 7) == 0) ? 1 : 0;
+    }
+
+    if (mode == 1) {
         const char *partial = text + 7;
-        int plen = (int)strlen(partial);
-        for (int i = model_idx; MODEL_REGISTRY[i].alias; i++) {
-            model_idx = i + 1;
-            if (strncmp(MODEL_REGISTRY[i].alias, partial, (size_t)plen) == 0) {
-                char *r = malloc(8 + strlen(MODEL_REGISTRY[i].alias));
-                sprintf(r, "/model %s", MODEL_REGISTRY[i].alias);
+        while (*partial == ' ') partial++;
+        int p_len = (int)strlen(partial);
+        while (MODEL_REGISTRY[model_idx].alias) {
+            const char *alias = MODEL_REGISTRY[model_idx].alias;
+            model_idx++;
+            if (strncmp(alias, partial, (size_t)p_len) == 0) {
+                size_t need = strlen("/model ") + strlen(alias) + 1;
+                char *r = malloc(need + 1);
+                if (!r) return NULL;
+                snprintf(r, need + 1, "/model %s", alias);
                 return r;
             }
         }
+        return NULL;
+    }
+
+    while (s_slash_commands[idx].command) {
+        const char *cmd = s_slash_commands[idx++].command;
+        if (strncmp(cmd, text, (size_t)len) == 0) return strdup(cmd);
     }
     return NULL;
+}
+
+static void command_completion_display(char **matches, int num_matches, int max_length) {
+    (void)max_length;
+    if (!matches || num_matches <= 0) return;
+
+    int max_cmd = 0;
+    for (int i = 0; i < num_matches; i++) {
+        int cmd_len = (int)strlen(matches[i]);
+        if (cmd_len > max_cmd) max_cmd = cmd_len;
+    }
+
+    fprintf(rl_outstream, "\n");
+    for (int i = 0; i < num_matches; i++) {
+        const char *cmd = matches[i];
+        const char *desc = command_description(cmd);
+        if (!desc[0] && strncmp(cmd, "/model ", 7) == 0) {
+            desc = "set model alias";
+        }
+        fprintf(rl_outstream, "  %-*s", max_cmd, cmd);
+        if (desc && desc[0]) fprintf(rl_outstream, "  %s", desc);
+        fprintf(rl_outstream, "\n");
+    }
+    rl_forced_update_display();
+}
+
+static int slash_completion_key(int count, int key) {
+    (void)count;
+    (void)key;
+
+    rl_insert_text("/");
+    if (rl_point == 1) rl_complete(0, '\t');
+    return 0;
 }
 
 static char **command_completion(const char *text, int start, int end) {
@@ -1515,6 +1630,8 @@ void agent_run(const char *api_key, const char *model,
 
 #ifdef HAVE_READLINE
     rl_attempted_completion_function = command_completion;
+    rl_completion_display_matches_hook = (VFunction *)command_completion_display;
+    rl_bind_key('/', slash_completion_key);
     rl_basic_word_break_characters = " \t\n";
 #endif
 

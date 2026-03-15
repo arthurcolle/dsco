@@ -3,6 +3,7 @@
 #include <string.h>
 #include <stdio.h>
 #include <ctype.h>
+#include <stdarg.h>
 
 /* ── Safe allocation wrappers ──────────────────────────────────────────── */
 
@@ -72,6 +73,15 @@ void jbuf_append(jbuf_t *b, const char *s) {
     memcpy(b->data + b->len, s, n);
     b->len += n;
     b->data[b->len] = '\0';
+}
+
+void jbuf_appendf(jbuf_t *b, const char *fmt, ...) {
+    char tmp[1024];
+    va_list ap;
+    va_start(ap, fmt);
+    int n = vsnprintf(tmp, sizeof(tmp), fmt, ap);
+    va_end(ap);
+    if (n > 0) jbuf_append_len(b, tmp, (size_t)(n < (int)sizeof(tmp) ? n : (int)sizeof(tmp)-1));
 }
 
 void jbuf_append_len(jbuf_t *b, const char *s, size_t n) {

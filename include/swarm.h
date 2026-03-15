@@ -7,12 +7,12 @@
 
 /* ── Sub-dsco process handle ──────────────────────────────────────────── */
 
-#define SWARM_MAX_CHILDREN  32
-#define SWARM_MAX_GROUPS    8
-#define SWARM_MAX_OUTPUT    (256 * 1024)
+#define SWARM_MAX_CHILDREN  64  /* doubled: dynamic topologies need 33+ concurrent agents (coordinator + 8 leads × 4 workers) */
+#define SWARM_MAX_GROUPS    16  /* doubled: concurrent topology phases (recon + analysis + synthesis) consume groups fast */
+#define SWARM_MAX_OUTPUT    (512 * 1024) /* doubled: dynamic topology agents produce richer synthesis/code outputs */
 #define SWARM_LABEL_LEN     128
 #define SWARM_GROUP_NAME_LEN 64
-#define SWARM_MAX_DEPTH     4   /* max nesting depth for hierarchical swarms */
+#define SWARM_MAX_DEPTH     6   /* increased: topology_runner layer + conditional branching adds 2 depth levels vs flat 4 */
 
 typedef enum {
     SWARM_PENDING,
@@ -47,6 +47,12 @@ typedef struct {
     /* Timing */
     double         start_time;
     double         end_time;
+    int            depth;
+
+    /* Cost tracking */
+    double         est_cost_usd;
+    int            est_input_tokens;
+    int            est_output_tokens;
 
     /* Group membership */
     int            group_id;       /* -1 if ungrouped */
@@ -102,6 +108,12 @@ int  swarm_poll_stream(swarm_t *s, int timeout_ms, swarm_stream_cb cb, void *ctx
 swarm_child_t  *swarm_get(swarm_t *s, int child_id);
 const char     *swarm_status_str(swarm_status_t st);
 int             swarm_active_count(swarm_t *s);
+int             swarm_group_active_count(swarm_t *s, int group_id);
+int             swarm_group_done_count(swarm_t *s, int group_id);
+int             swarm_group_error_count(swarm_t *s, int group_id);
+int             swarm_group_killed_count(swarm_t *s, int group_id);
+double          swarm_group_est_cost_usd(swarm_t *s, int group_id);
+double          swarm_child_elapsed_sec(const swarm_child_t *c);
 
 /* Kill a child */
 bool swarm_kill(swarm_t *s, int child_id);

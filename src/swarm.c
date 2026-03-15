@@ -128,6 +128,10 @@ int swarm_spawn_in_group(swarm_t *s, int group_id, const char *task, const char 
 
     int id = s->child_count;
 
+    /* Compute depth before fork so parent can record it */
+    const char *cur_depth_env = getenv("DSCO_SWARM_DEPTH");
+    int depth = cur_depth_env ? atoi(cur_depth_env) + 1 : 1;
+
     if (pid == 0) {
         /* ── Child process ── */
         close(stdout_pipe[0]);
@@ -158,9 +162,7 @@ int swarm_spawn_in_group(swarm_t *s, int group_id, const char *task, const char 
         /* Mark this as a sub-agent and track depth for hierarchical swarms */
         setenv("DSCO_SUBAGENT", "1", 1);
 
-        /* Compute and propagate depth */
-        const char *cur_depth = getenv("DSCO_SWARM_DEPTH");
-        int depth = cur_depth ? atoi(cur_depth) + 1 : 1;
+        /* Propagate depth */
         char depth_str[16];
         snprintf(depth_str, sizeof(depth_str), "%d", depth);
         setenv("DSCO_SWARM_DEPTH", depth_str, 1);
@@ -190,6 +192,7 @@ int swarm_spawn_in_group(swarm_t *s, int group_id, const char *task, const char 
     c->status = SWARM_RUNNING;
     c->group_id = group_id;
     c->start_time = now_sec();
+    c->depth = depth;
 
     snprintf(c->task, SWARM_LABEL_LEN, "%s", task);
     if (model) snprintf(c->model, sizeof(c->model), "%s", model);
@@ -250,6 +253,59 @@ bool swarm_group_complete(swarm_t *s, int group_id) {
             return false;
     }
     return true;
+}
+
+/* ── Group statistics helpers ────────────────────────────────────────── */
+
+static int swarm_group_count_status(swarm_t *s, int group_id, swarm_status_t include_status) {
+    if (group_id < 0 || group_id >= s->group_count) return 0;
+    swarm_group_t *g = &s->groups[group_id];
+    int count = 0;
+    for (int i = 0; i < g->child_count; i++) {
+        swarm_child_t *c = &s->children[g->child_ids[i]];
+        if (c && c->status == include_status) count++;
+    }
+    return count;
+}
+
+int swarm_group_active_count(swarm_t *s, int group_id) {
+    if (group_id < 0 || group_id >= s->group_count) return 0;
+    swarm_group_t *g = &s->groups[group_id];
+    int count = 0;
+    for (int i = 0; i < g->child_count; i++) {
+        swarm_child_t *c = &s->children[g->child_ids[i]];
+        if (c && (c->status == SWARM_RUNNING || c->status == SWARM_STREAMING)) count++;
+    }
+    return count;
+}
+
+int swarm_group_done_count(swarm_t *s, int group_id) {
+    return swarm_group_count_status(s, group_id, SWARM_DONE);
+}
+
+int swarm_group_error_count(swarm_t *s, int group_id) {
+    return swarm_group_count_status(s, group_id, SWARM_ERROR);
+}
+
+int swarm_group_killed_count(swarm_t *s, int group_id) {
+    return swarm_group_count_status(s, group_id, SWARM_KILLED);
+}
+
+double swarm_group_est_cost_usd(swarm_t *s, int group_id) {
+    if (group_id < 0 || group_id >= s->group_count) return 0.0;
+    swarm_group_t *g = &s->groups[group_id];
+    double total = 0.0;
+    for (int i = 0; i < g->child_count; i++) {
+        swarm_child_t *c = &s->children[g->child_ids[i]];
+        if (c) total += c->est_cost_usd;
+    }
+    return total;
+}
+
+double swarm_child_elapsed_sec(const swarm_child_t *c) {
+    if (!c) return 0.0;
+    double now = now_sec();
+    return (c->end_time > 0 ? c->end_time : now) - c->start_time;
 }
 
 /* ── Read from child fd, append to output ─────────────────────────────── */
