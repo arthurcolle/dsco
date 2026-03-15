@@ -14,8 +14,14 @@
 #include "tools.h"
 #include <stdlib.h>
 #include <string.h>
+#include <strings.h>
 #include <stdio.h>
 #include <curl/curl.h>
+
+/* Forward declarations */
+static char *openai_build_request(provider_t *p, conversation_t *conv,
+                                   session_state_t *session, int max_tokens);
+static struct curl_slist *openai_build_headers(provider_t *p, const char *api_key);
 
 /* ── Anthropic Provider ────────────────────────────────────────────────── */
 
@@ -51,6 +57,99 @@ static stream_result_t anthropic_stream(provider_t *p, const char *api_key,
                                           void *cb_ctx) {
     (void)p;
     return llm_stream(api_key, request_json, text_cb, tool_cb, thinking_cb, cb_ctx);
+}
+
+/* ── OpenRouter Provider ────────────────────────────────────────────────── */
+
+static struct curl_slist *openrouter_build_headers(provider_t *p, const char *api_key) {
+    struct curl_slist *hdrs = openai_build_headers(p, api_key);
+    const char *referer = getenv("DSCO_OR_REFERER");
+    if (!referer) referer = "https://github.com/dsco-cli";
+    char hdr[512];
+    snprintf(hdr, sizeof(hdr), "HTTP-Referer: %s", referer);
+    hdrs = curl_slist_append(hdrs, hdr);
+    const char *title = getenv("DSCO_OR_TITLE");
+    if (!title) title = "dsco";
+    snprintf(hdr, sizeof(hdr), "X-Title: %s", title);
+    hdrs = curl_slist_append(hdrs, hdr);
+    return hdrs;
+}
+
+/* Builds an OpenAI-compat request then optionally injects OpenRouter-specific
+ * fields controlled via env vars:
+ *   DSCO_OR_TRANSFORMS      — e.g. "middle-out"  → "transforms":["<value>"]
+ *   DSCO_OR_ROUTE           — e.g. "fallback"    → "route":"<value>"
+ *   DSCO_OR_PROVIDER_ORDER  — comma-sep list     → "provider":{"order":[...]}
+ *   DSCO_OR_REQUIRE_PARAMS  — "1" or "true"      → "provider":{"require_parameters":true}
+ */
+static char *openrouter_build_request(provider_t *p, conversation_t *conv,
+                                       session_state_t *session, int max_tokens) {
+    char *base = openai_build_request(p, conv, session, max_tokens);
+    if (!base) return NULL;
+
+    const char *transforms  = getenv("DSCO_OR_TRANSFORMS");
+    const char *route       = getenv("DSCO_OR_ROUTE");
+    const char *prov_order  = getenv("DSCO_OR_PROVIDER_ORDER");
+    const char *req_params  = getenv("DSCO_OR_REQUIRE_PARAMS");
+
+    if (!transforms && !route && !prov_order && !req_params) return base;
+
+    /* Strip trailing '}' */
+    size_t len = strlen(base);
+    if (len == 0 || base[len - 1] != '}') return base;
+    base[len - 1] = '\0';
+
+    jbuf_t b;
+    jbuf_init(&b, len + 512);
+    jbuf_append(&b, base);
+    free(base);
+
+    if (transforms) {
+        jbuf_append(&b, ",\"transforms\":[");
+        jbuf_append_json_str(&b, transforms);
+        jbuf_append(&b, "]");
+    }
+    if (route) {
+        jbuf_append(&b, ",\"route\":");
+        jbuf_append_json_str(&b, route);
+    }
+    if (prov_order || req_params) {
+        jbuf_append(&b, ",\"provider\":{");
+        bool wrote = false;
+        if (prov_order) {
+            jbuf_append(&b, "\"order\":[");
+            const char *cur = prov_order;
+            bool first = true;
+            while (*cur) {
+                const char *end = strchr(cur, ',');
+                if (!end) end = cur + strlen(cur);
+                size_t n = (size_t)(end - cur);
+                char name[128];
+                if (n >= sizeof(name)) n = sizeof(name) - 1;
+                memcpy(name, cur, n);
+                name[n] = '\0';
+                /* trim leading/trailing spaces */
+                char *s = name;
+                while (*s == ' ') s++;
+                char *e = s + strlen(s) - 1;
+                while (e > s && *e == ' ') *e-- = '\0';
+                if (!first) jbuf_append(&b, ",");
+                jbuf_append_json_str(&b, s);
+                first = false;
+                cur = *end ? end + 1 : end;
+            }
+            jbuf_append(&b, "]");
+            wrote = true;
+        }
+        if (req_params && (req_params[0] == '1' ||
+                           strcasecmp(req_params, "true") == 0)) {
+            if (wrote) jbuf_append(&b, ",");
+            jbuf_append(&b, "\"require_parameters\":true");
+        }
+        jbuf_append(&b, "}");
+    }
+    jbuf_append(&b, "}");
+    return b.data;
 }
 
 /* ── OpenAI-compatible Provider ────────────────────────────────────────── */
@@ -155,12 +254,25 @@ static char *openai_build_request(provider_t *p, conversation_t *conv,
     }
     jbuf_append(&b, "]");
 
-    /* Tools — convert to OpenAI format */
+    /* Tools — convert to OpenAI format.
+     * Cap at DSCO_OR_MAX_TOOLS (default 64) for OpenRouter models to avoid
+     * exceeding provider tool limits. Set to 0 to disable tools entirely. */
     int tool_count;
     const tool_def_t *tools = tools_get_all(&tool_count);
-    if (tool_count > 0) {
+    int max_tools_send = 128;
+    const char *mt_env = getenv("DSCO_OR_MAX_TOOLS");
+    if (mt_env && mt_env[0]) {
+        max_tools_send = atoi(mt_env);
+        if (max_tools_send < 0) max_tools_send = 0;
+    } else {
+        /* Auto-detect: if model has org/ prefix (OpenRouter), cap at 64 */
+        const char *m = session ? session->model : "";
+        if (strstr(m, "/")) max_tools_send = 64;
+    }
+    if (tool_count > 0 && max_tools_send > 0) {
         jbuf_append(&b, ",\"tools\":[");
-        for (int i = 0; i < tool_count && i < 128; i++) {
+        int send = tool_count < max_tools_send ? tool_count : max_tools_send;
+        for (int i = 0; i < send; i++) {
             if (i > 0) jbuf_append(&b, ",");
             jbuf_append(&b, "{\"type\":\"function\",\"function\":{\"name\":");
             jbuf_append_json_str(&b, tools[i].name);
@@ -334,7 +446,11 @@ static stream_result_t openai_stream(provider_t *p, const char *api_key,
     CURL *curl = curl_easy_init();
     if (!curl) { result.ok = false; return result; }
 
-    struct curl_slist *hdrs = openai_build_headers(p, api_key);
+    fprintf(stderr, "DEBUG openai_stream: api_key=%s url=%s\n",
+            api_key ? (strlen(api_key) > 8 ? api_key : "(short)") : "(null)", od->api_url);
+    struct curl_slist *hdrs = p->build_headers
+        ? p->build_headers(p, api_key)
+        : openai_build_headers(p, api_key);
     hdrs = curl_slist_append(hdrs, "Accept: text/event-stream");
 
     oai_sse_state_t state = {0};
@@ -400,9 +516,16 @@ static stream_result_t openai_stream(provider_t *p, const char *api_key,
         result.usage = state.usage;
     } else {
         result.ok = false;
-        if (state.line_buf.len > 0) {
+        if (res != CURLE_OK) {
+            fprintf(stderr, "dsco: curl error: %s (HTTP %d, url: %s)\n",
+                    curl_easy_strerror(res), (int)http_code, od->api_url);
+        } else if (state.line_buf.len > 0) {
             fprintf(stderr, "dsco: OpenAI HTTP %d: %.*s\n",
-                    (int)http_code, 200, state.line_buf.data);
+                    (int)http_code, (int)(state.line_buf.len < 500 ? state.line_buf.len : 500),
+                    state.line_buf.data);
+        } else {
+            fprintf(stderr, "dsco: OpenAI request failed HTTP %d (no body, url: %s)\n",
+                    (int)http_code, od->api_url);
         }
         free(state.stop_reason);
         free(state.tool_name);
@@ -486,6 +609,15 @@ provider_t *provider_create(const char *name) {
         return p;
     }
 
+    /* OpenRouter gets its own header/request builders */
+    if (strcmp(name, "openrouter") == 0) {
+        const provider_endpoint_t *ep = find_endpoint("openrouter");
+        provider_t *p = create_openai_compat(ep->name, ep->base_url, ep->env_key);
+        p->build_headers = openrouter_build_headers;
+        p->build_request = openrouter_build_request;
+        return p;
+    }
+
     /* All other providers use OpenAI-compatible API */
     const provider_endpoint_t *ep = find_endpoint(name);
     if (ep) {
@@ -508,34 +640,43 @@ const char *provider_detect(const char *model, const char *api_key) {
     if (!model && !api_key) return "anthropic";
 
     if (model) {
+        /* Explicit provider prefix: "openrouter:model/id" */
+        if (strncmp(model, "openrouter:", 11) == 0)
+            return "openrouter";
+        /* OpenRouter auto-router */
+        if (strncmp(model, "openrouter/", 11) == 0 || strcmp(model, "auto") == 0)
+            return "openrouter";
         /* Anthropic */
         if (strstr(model, "claude") || strstr(model, "opus") ||
             strstr(model, "sonnet") || strstr(model, "haiku"))
             return "anthropic";
         /* OpenAI */
         if (strstr(model, "gpt") || strncmp(model, "o1", 2) == 0 ||
-            strncmp(model, "o3", 2) == 0 || strstr(model, "chatgpt"))
+            strncmp(model, "o3", 2) == 0 || strncmp(model, "o4", 2) == 0 ||
+            strstr(model, "codex-spark") || strstr(model, "chatgpt"))
             return "openai";
-        /* Groq */
-        if (strstr(model, "llama") || strstr(model, "mixtral") ||
-            strstr(model, "gemma"))
+        /* Groq — only when no slash (native model IDs have no org prefix) */
+        if (!strstr(model, "/") &&
+            (strstr(model, "llama") || strstr(model, "mixtral") ||
+             strstr(model, "gemma")))
             return "groq";
-        /* DeepSeek */
-        if (strstr(model, "deepseek"))
+        /* DeepSeek native */
+        if (!strstr(model, "/") && strstr(model, "deepseek"))
             return "deepseek";
-        /* Mistral */
-        if (strstr(model, "mistral") || strstr(model, "codestral") ||
-            strstr(model, "pixtral"))
+        /* Mistral native */
+        if (!strstr(model, "/") &&
+            (strstr(model, "mistral") || strstr(model, "codestral") ||
+             strstr(model, "pixtral")))
             return "mistral";
-        /* Together */
-        if (strstr(model, "Qwen") || strstr(model, "together") ||
-            strstr(model, "/"))  /* HF-style org/model IDs */
+        /* Together native */
+        if (!strstr(model, "/") &&
+            (strstr(model, "Qwen") || strstr(model, "together")))
             return "together";
         /* Cohere */
         if (strstr(model, "command"))
             return "cohere";
-        /* xAI */
-        if (strstr(model, "grok"))
+        /* xAI — native only for bare "grok" IDs, x-ai/ prefix goes to OpenRouter */
+        if (strstr(model, "grok") && !strstr(model, "/"))
             return "xai";
         /* Perplexity */
         if (strstr(model, "sonar") || strstr(model, "pplx"))
@@ -543,9 +684,31 @@ const char *provider_detect(const char *model, const char *api_key) {
         /* Cerebras */
         if (strstr(model, "cerebras"))
             return "cerebras";
-        /* OpenRouter */
-        if (strstr(model, "openrouter") || strstr(model, "auto"))
+        /* OpenRouter model ID patterns: any org/ prefix routes to OR */
+        if (strstr(model, "x-ai/") || strstr(model, "moonshotai/") ||
+            strstr(model, "z-ai/") || strstr(model, "google/") ||
+            strstr(model, "anthropic/") || strstr(model, "openai/") ||
+            strstr(model, "meta-llama/") || strstr(model, "mistralai/") ||
+            strstr(model, "deepseek/") || strstr(model, "qwen/") ||
+            strstr(model, "bytedance-seed/") || strstr(model, "amazon/") ||
+            strstr(model, "minimax/") || strstr(model, "writer/") ||
+            strstr(model, "nvidia/") || strstr(model, "cohere/") ||
+            strstr(model, "nousresearch/") || strstr(model, "stepfun/") ||
+            strstr(model, "inception/") || strstr(model, "baidu/") ||
+            strstr(model, "arcee-ai/") || strstr(model, "xiaomi/") ||
+            strstr(model, "aion-labs/") || strstr(model, "kwaipilot/") ||
+            strstr(model, "liquid/") || strstr(model, "allenai/") ||
+            strstr(model, "nex-agi/") || strstr(model, "essentialai/") ||
+            strstr(model, "upstage/") || strstr(model, "morph/") ||
+            strstr(model, "alibaba/") || strstr(model, "relace/") ||
+            strstr(model, "meituan/") || strstr(model, "ibm-granite/"))
             return "openrouter";
+        /* HF-style org/model IDs — prefer OpenRouter if key is present */
+        if (strstr(model, "/")) {
+            const char *or_key = getenv("OPENROUTER_API_KEY");
+            if (or_key && or_key[0]) return "openrouter";
+            return "together";
+        }
     }
 
     /* Check API key patterns */

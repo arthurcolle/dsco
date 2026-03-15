@@ -4024,7 +4024,13 @@ double tui_multi_progress_total(tui_multi_progress_t *mp) {
 
 double tui_multi_progress_eta_sec(tui_multi_progress_t *mp) {
     pthread_mutex_lock(&mp->mutex);
-    double total = tui_multi_progress_total(mp);
+    double total = 0.0;
+    double weighted_progress = 0.0;
+    for (int i = 0; i < mp->phase_count; i++) {
+        total += mp->phases[i].weight;
+        weighted_progress += mp->phases[i].weight * mp->phases[i].progress;
+    }
+    total = total > 0.0 ? weighted_progress / total : 0.0;
     double remaining = 1.0 - total;
     double eta = -1;
     if (mp->ema_rate > 0 && remaining > 0) {
