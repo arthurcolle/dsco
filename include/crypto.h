@@ -40,6 +40,11 @@ void hmac_sha256_hex(const uint8_t *key, size_t key_len,
                      const uint8_t *data, size_t data_len,
                      char hex[65]);
 
+/* Constant-time HMAC-SHA256 verification (timing-safe) */
+bool hmac_sha256_verify(const uint8_t *key, size_t key_len,
+                        const uint8_t *data, size_t data_len,
+                        const uint8_t expected_mac[32]);
+
 /* ── Base64 encode/decode ────────────────────────────────────────────── */
 
 size_t base64_encode(const uint8_t *src, size_t src_len, char *dst, size_t dst_len);

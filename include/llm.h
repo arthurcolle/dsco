@@ -93,6 +93,8 @@ typedef enum {
 
 typedef struct {
     char   model[128];        /* current model ID */
+    char   active_skill[128];
+    char   active_topology[48];
     char   effort[16];        /* "low", "medium", "high" */
     dsco_trust_tier_t trust_tier; /* tool permission tier */
     bool   web_search;        /* enable server-side web search */
@@ -122,10 +124,12 @@ typedef struct {
     /* Fallback chain */
     char   fallback_models[4][128];
     int    fallback_count;
+    bool   model_locked;      /* block auto-routing model switches */
     /* Telemetry aggregates */
     double total_ttft_ms;
     double total_stream_ms;
     int    telemetry_samples;
+    bool   topology_auto;
 } session_state_t;
 
 void  session_state_init(session_state_t *s, const char *model);
@@ -168,6 +172,7 @@ stream_result_t llm_stream(const char *api_key, const char *request_json,
                            stream_tool_start_cb tool_cb,
                            stream_thinking_cb thinking_cb,
                            void *cb_ctx);
+void dsco_strip_terminal_controls_inplace(char *s);
 
 /* ── Per-tool metrics ──────────────────────────────────────────────────── */
 

@@ -520,28 +520,34 @@ int ast_count_type(ast_file_t *f, ast_node_type_t type) {
 
 /* ── Project-level introspection ──────────────────────────────────────── */
 
-ast_project_t *ast_introspect(const char *project_dir) {
-    ast_project_t *proj = calloc(1, sizeof(ast_project_t));
+static bool is_c_or_h(const char *name) {
+    size_t n = strlen(name);
+    if (n < 2) return false;
+    return (name[n-2] == '.' && (name[n-1] == 'c' || name[n-1] == 'h'));
+}
 
-    DIR *dir = opendir(project_dir);
-    if (!dir) return proj;
+static void ast_collect_dir(ast_project_t *proj, const char *dir_path, int depth) {
+    if (depth > 8) return;  /* prevent runaway recursion */
+    DIR *dir = opendir(dir_path);
+    if (!dir) return;
 
     struct dirent *entry;
     while ((entry = readdir(dir))) {
         const char *name = entry->d_name;
-        size_t nlen = strlen(name);
-        if (nlen < 3) continue;
-
-        /* Only .c and .h files */
-        bool is_c = (name[nlen-2] == '.' && name[nlen-1] == 'c');
-        bool is_h = (name[nlen-2] == '.' && name[nlen-1] == 'h');
-        if (!is_c && !is_h) continue;
+        if (name[0] == '.') continue;  /* skip hidden + . and .. */
 
         char path[4096];
-        snprintf(path, sizeof(path), "%s/%s", project_dir, name);
+        snprintf(path, sizeof(path), "%s/%s", dir_path, name);
 
         struct stat st;
-        if (stat(path, &st) != 0 || !S_ISREG(st.st_mode)) continue;
+        if (stat(path, &st) != 0) continue;
+
+        if (S_ISDIR(st.st_mode)) {
+            ast_collect_dir(proj, path, depth + 1);
+            continue;
+        }
+
+        if (!S_ISREG(st.st_mode) || !is_c_or_h(name)) continue;
 
         ast_file_t *af = ast_parse_file(path);
         if (!af) continue;
@@ -560,6 +566,11 @@ ast_project_t *ast_introspect(const char *project_dir) {
     }
 
     closedir(dir);
+}
+
+ast_project_t *ast_introspect(const char *project_dir) {
+    ast_project_t *proj = calloc(1, sizeof(ast_project_t));
+    ast_collect_dir(proj, project_dir, 0);
     return proj;
 }
 

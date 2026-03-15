@@ -1,3 +1,6 @@
+#ifndef _DARWIN_C_SOURCE
+#define _DARWIN_C_SOURCE
+#endif
 #include "agent.h"
 #include "llm.h"
 #include "tools.h"
@@ -10,8 +13,12 @@
 #include "baseline.h"
 #include "plugin.h"
 #include "setup.h"
+#include "workspace.h"
 #include "mcp.h"
 #include "provider.h"
+#include "topology.h"
+#include "router.h"
+#include "swarm.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -24,7 +31,9 @@
 #include <strings.h>
 #include <pthread.h>
 #include <sys/time.h>
+#include <termios.h>
 #include "crypto.h"
+#include "output_guard.h"
 
 #ifdef HAVE_READLINE
 #include <readline/readline.h>
@@ -32,6 +41,22 @@
 #endif
 
 volatile int g_interrupted = 0;
+
+/* Escape key state machine — first ESC pauses, second ESC cancels */
+typedef enum { ESC_RUNNING = 0, ESC_PAUSED = 1 } escape_state_t;
+static volatile sig_atomic_t g_escape_state = ESC_RUNNING;
+
+/* ESC key poller (background thread during streaming) */
+static volatile int  g_esc_poller_active = 0;
+static pthread_t     g_esc_poller_tid;
+
+/* Timestamp when current agent turn started (for pause display) */
+static double g_turn_start_time = 0.0;
+
+static md_renderer_t s_md;
+
+/* Stream heartbeat global — shared with llm.c write callback */
+extern tui_stream_heartbeat_t *g_stream_heartbeat;
 
 /* ── MCP integration ───────────────────────────────────────────────────── */
 
@@ -138,9 +163,25 @@ static provider_t *g_provider = NULL;
 
 static void ensure_provider(session_state_t *session, const char *api_key) {
     const char *pname = provider_detect(session->model, api_key);
+    /* If the detected provider's native key is missing, fall back to OpenRouter */
+    if (strcmp(pname, "anthropic") != 0) {
+        const char *native_key = provider_resolve_api_key(pname);
+        if (!native_key || !native_key[0]) {
+            const char *or_key = getenv("OPENROUTER_API_KEY");
+            if (or_key && or_key[0]) pname = "openrouter";
+        }
+    }
     if (g_provider && strcmp(g_provider->name, pname) == 0) return;
     provider_free(g_provider);
     g_provider = provider_create(pname);
+}
+
+/* Resolve the API key for the current provider, falling back to the session
+ * key (typically the Anthropic key) if the provider has no key of its own. */
+static const char *resolve_provider_key(const char *session_key) {
+    if (!g_provider) return session_key;
+    const char *k = provider_resolve_api_key(g_provider->name);
+    return (k && k[0]) ? k : session_key;
 }
 
 /* ── Image drag-and-drop support ─────────────────────────────────────── */
@@ -483,18 +524,79 @@ static int process_dragged_images(char *input_buf, conversation_t *conv) {
     return img_count;
 }
 
+static void terminal_input_echo_suspend(void);
+static void terminal_input_echo_restore(void);
+
 static void sigint_handler(int sig) {
     (void)sig;
-    /* First Ctrl+C interrupts current stream/tool round.
-       Second Ctrl+C is a hard exit if we're already interrupted/stuck. */
-    if (g_interrupted) _exit(130);
+    /* First Ctrl+C: pause current streaming turn (ESC_PAUSED state).
+       Second Ctrl+C: hard exit (already interrupted/stuck). */
+    if (g_interrupted) {
+        terminal_input_echo_restore();
+        const char reset[] = "\033[r\033[?2004l\033[0m\033[?25h\n";
+        (void)write(STDERR_FILENO, reset, sizeof(reset) - 1);
+        _exit(130);
+    }
+    g_escape_state = ESC_PAUSED;
     g_interrupted = 1;
 }
 
 static void sigtstp_handler(int sig) {
     (void)sig;
-    /* Honor Ctrl+Z immediately. SIGSTOP is uncatchable and ensures suspend. */
-    kill(getpid(), SIGSTOP);
+    /* Reset terminal state before suspend so the parent shell isn't corrupted */
+    terminal_input_echo_restore();
+    const char reset[] = "\033[r\033[?2004l\033[0m\033[?25h";
+    (void)write(STDERR_FILENO, reset, sizeof(reset) - 1);
+    /* Re-raise default SIGTSTP to actually suspend */
+    signal(SIGTSTP, SIG_DFL);
+    raise(SIGTSTP);
+}
+
+/* ── Terminal cleanup atexit handler ───────────────────────────────────── */
+static void terminal_reset_atexit(void) {
+    terminal_input_echo_restore();
+    /* Safety net: always restore terminal to sane state on exit.
+       This catches all exit() paths including readline EOF, quit command, etc.
+       Reset: scroll region, bracketed paste, SGR attributes, cursor visibility. */
+    fprintf(stderr, "\033[r\033[?2004l\033[0m\033[?25h");
+    fflush(stderr);
+}
+
+/* ── SIGWINCH handler (terminal resize) ────────────────────────────────── */
+static tui_status_bar_t *g_winch_sb = NULL;  /* set in agent_run */
+static volatile sig_atomic_t g_winch_pending = 0;
+
+static void sigwinch_handler(int sig) {
+    (void)sig;
+    /* Only set flag — actual resize handling happens in main loop
+       (fprintf/mutex are not async-signal-safe) */
+    g_winch_pending = 1;
+}
+
+/* Called from main loop to handle deferred SIGWINCH resize */
+static void handle_pending_winch(void) {
+    if (!g_winch_pending) return;
+    g_winch_pending = 0;
+
+    if (!g_winch_sb || !g_winch_sb->visible) return;
+
+    int rows = tui_term_height();
+    int panel = g_winch_sb->panel_rows > 0 ? g_winch_sb->panel_rows : 3;
+    int scroll_bottom = rows - panel;
+
+    tui_term_lock();
+    /* Reset scroll region to new dimensions */
+    fprintf(stderr, "\033[1;%dr", scroll_bottom);
+
+    /* Clear old panel rows (may have shifted) then redraw */
+    for (int i = 0; i < panel; i++) {
+        fprintf(stderr, "\033[%d;1H\033[2K", rows - i);
+    }
+    fflush(stderr);
+    tui_term_unlock();
+
+    tui_status_bar_render(g_winch_sb);
+    tui_input_panel_render(g_winch_sb, NULL);
 }
 
 /* ── Auto-save ─────────────────────────────────────────────────────────── */
@@ -521,6 +623,9 @@ static void exit_autosave_handler(void) {
 static void sigterm_autosave(int sig) {
     (void)sig;
     if (g_autosave_conv) autosave(g_autosave_conv, g_autosave_session);
+    /* Reset terminal before exit — scroll region, bracketed paste, SGR */
+    const char reset[] = "\033[r\033[?2004l\033[0m\033[?25h\n";
+    (void)write(STDERR_FILENO, reset, sizeof(reset) - 1);
     _exit(0);
 }
 
@@ -577,43 +682,404 @@ static void print_context(session_state_t *session, int last_input_tokens) {
     fprintf(stderr, "]\n\n");
 }
 
+static void print_topology_summary(const topology_t *topo) {
+    if (!topo) return;
+    char ascii[4096];
+    const char *strategy = "parallel";
+    if (topo->strategy == EXEC_LINEAR) strategy = "linear";
+    else if (topo->strategy == EXEC_PARALLEL_STAGES) strategy = "parallel_stages";
+    else if (topo->strategy == EXEC_FULL_PARALLEL) strategy = "full_parallel";
+    else if (topo->strategy == EXEC_ITERATIVE) strategy = "iterative";
+    else if (topo->strategy == EXEC_TOURNAMENT) strategy = "tournament";
+    else if (topo->strategy == EXEC_CONSENSUS) strategy = "consensus";
+    topology_render_ascii(topo, ascii, sizeof(ascii));
+    fprintf(stderr, "\n");
+    tui_header("Topology", TUI_BYELLOW);
+    fprintf(stderr, "  %sName:%s        %s\n", TUI_DIM, TUI_RESET, topo->name);
+    fprintf(stderr, "  %sCategory:%s    %s\n", TUI_DIM, TUI_RESET, topo_category_label(topo->category));
+    fprintf(stderr, "  %sStrategy:%s    %s\n", TUI_DIM, TUI_RESET, strategy);
+    fprintf(stderr, "  %sAgents:%s      %d\n", TUI_DIM, TUI_RESET, topo->total_agents);
+    fprintf(stderr, "  %sLatency:%s     %.1fx\n", TUI_DIM, TUI_RESET, topo->est_latency_mult);
+    fprintf(stderr, "  %sRunnable:%s    %s\n", TUI_DIM, TUI_RESET, topology_is_runnable(topo) ? "yes" : "no");
+    fprintf(stderr, "\n%s\n\n", ascii);
+}
+
+static void print_topology_registry_brief(void) {
+    int count = 0;
+    const topology_t *tops = topology_registry(&count);
+    fprintf(stderr, "\n");
+    tui_header("Topologies", TUI_BYELLOW);
+    for (int i = 0; i < count; i++) {
+        fprintf(stderr, "  %sT%02d%s %-18s %s%-11s%s agents=%-2d lat=%.1fx\n",
+                TUI_CYAN, tops[i].id, TUI_RESET,
+                tops[i].name,
+                TUI_DIM, topo_category_label(tops[i].category), TUI_RESET,
+                tops[i].total_agents, tops[i].est_latency_mult);
+    }
+    fprintf(stderr, "\n");
+}
+
+static void print_swarm_summary(int focus_group, bool verbose) {
+    swarm_t *sw = tools_swarm_instance();
+    if (!sw) return;
+
+    swarm_poll(sw, 0);
+
+    int total = sw->child_count;
+    if (total == 0) {
+        fprintf(stderr, "\n");
+        tui_header("Swarm", TUI_BYELLOW);
+        fprintf(stderr, "  %sno active or completed swarm agents in this session%s\n\n",
+                TUI_DIM, TUI_RESET);
+        return;
+    }
+
+    int running = swarm_active_count(sw);
+    int done = 0;
+    int errored = 0;
+    int killed = 0;
+    double total_cost = 0.0;
+    for (int i = 0; i < sw->child_count; i++) {
+        swarm_child_t *c = &sw->children[i];
+        if (c->status == SWARM_DONE) done++;
+        else if (c->status == SWARM_ERROR) errored++;
+        else if (c->status == SWARM_KILLED) killed++;
+        total_cost += c->est_cost_usd;
+    }
+
+    fprintf(stderr, "\n");
+    tui_header("Swarm", TUI_BYELLOW);
+    fprintf(stderr, "  %sAgents:%s      %d\n", TUI_DIM, TUI_RESET, total);
+    fprintf(stderr, "  %sGroups:%s      %d\n", TUI_DIM, TUI_RESET, sw->group_count);
+    fprintf(stderr, "  %sActive:%s      %d\n", TUI_DIM, TUI_RESET, running);
+    fprintf(stderr, "  %sEst cost:%s    $%.4f\n", TUI_DIM, TUI_RESET, total_cost);
+    tui_agent_rollup(total, done, running, errored + killed);
+
+    if (sw->group_count > 0) {
+        fprintf(stderr, "\n  %sGroups:%s\n", TUI_DIM, TUI_RESET);
+        for (int i = 0; i < sw->group_count; i++) {
+            swarm_group_t *g = &sw->groups[i];
+            if (focus_group >= 0 && g->id != focus_group) continue;
+            fprintf(stderr,
+                    "    %s#%d%s %-18s %s%d/%d done%s %serr=%d%s %s$%.4f%s\n",
+                    TUI_CYAN, g->id, TUI_RESET,
+                    g->name,
+                    TUI_DIM, swarm_group_done_count(sw, i), g->child_count, TUI_RESET,
+                    swarm_group_error_count(sw, i) > 0 ? TUI_RED : TUI_DIM,
+                    swarm_group_error_count(sw, i), TUI_RESET,
+                    TUI_BCYAN, swarm_group_est_cost_usd(sw, i), TUI_RESET);
+        }
+    }
+
+    if (verbose) {
+        fprintf(stderr, "\n  %sAgents:%s\n", TUI_DIM, TUI_RESET);
+        for (int i = 0; i < sw->child_count; i++) {
+            swarm_child_t *c = &sw->children[i];
+            if (focus_group >= 0 && c->group_id != focus_group) continue;
+            fprintf(stderr,
+                    "    %s#%d%s %-10s %s[%s]%s %s%.48s%s %s%.1fs%s %s$%.4f%s\n",
+                    TUI_CYAN, c->id, TUI_RESET,
+                    swarm_status_str(c->status),
+                    TUI_DIM, c->model[0] ? c->model : "default", TUI_RESET,
+                    TUI_DIM, c->task, TUI_RESET,
+                    TUI_DIM, swarm_child_elapsed_sec(c), TUI_RESET,
+                    TUI_BCYAN, c->est_cost_usd, TUI_RESET);
+        }
+    }
+
+    {
+        tui_agent_node_t nodes[1 + SWARM_MAX_GROUPS + SWARM_MAX_CHILDREN];
+        char labels[1 + SWARM_MAX_GROUPS + SWARM_MAX_CHILDREN][96];
+        int node_count = 0;
+        int group_node_ids[SWARM_MAX_GROUPS];
+        memset(group_node_ids, -1, sizeof(group_node_ids));
+
+        nodes[node_count].id = 1;
+        nodes[node_count].parent_id = -1;
+        labels[node_count][0] = '\0';
+        snprintf(labels[node_count], sizeof(labels[node_count]), "root session");
+        nodes[node_count].task = labels[node_count];
+        nodes[node_count].status = running > 0 ? "running" : (errored + killed > 0 ? "error" : "done");
+        node_count++;
+
+        for (int i = 0; i < sw->group_count && node_count < (int)(sizeof(nodes) / sizeof(nodes[0])); i++) {
+            swarm_group_t *g = &sw->groups[i];
+            if (focus_group >= 0 && g->id != focus_group) continue;
+            group_node_ids[i] = 100 + g->id;
+            nodes[node_count].id = group_node_ids[i];
+            nodes[node_count].parent_id = 1;
+            snprintf(labels[node_count], sizeof(labels[node_count]), "group #%d %s", g->id, g->name);
+            nodes[node_count].task = labels[node_count];
+            nodes[node_count].status = swarm_group_complete(sw, i) ? "done" : "running";
+            node_count++;
+        }
+
+        for (int i = 0; i < sw->child_count && node_count < (int)(sizeof(nodes) / sizeof(nodes[0])); i++) {
+            swarm_child_t *c = &sw->children[i];
+            if (focus_group >= 0 && c->group_id != focus_group) continue;
+            nodes[node_count].id = 1000 + c->id;
+            nodes[node_count].parent_id = (c->group_id >= 0 && c->group_id < SWARM_MAX_GROUPS &&
+                                           group_node_ids[c->group_id] > 0)
+                                            ? group_node_ids[c->group_id] : 1;
+            snprintf(labels[node_count], sizeof(labels[node_count]), "#%d %.64s", c->id, c->task);
+            nodes[node_count].task = labels[node_count];
+            nodes[node_count].status = swarm_status_str(c->status);
+            node_count++;
+        }
+
+        tui_agent_topology(nodes, node_count);
+    }
+
+    {
+        tui_swarm_entry_t entries[SWARM_MAX_CHILDREN];
+        char previews[SWARM_MAX_CHILDREN][96];
+        int entry_count = 0;
+        for (int i = 0; i < sw->child_count && entry_count < SWARM_MAX_CHILDREN; i++) {
+            swarm_child_t *c = &sw->children[i];
+            if (focus_group >= 0 && c->group_id != focus_group) continue;
+            entries[entry_count].id = c->id;
+            entries[entry_count].task = c->task;
+            entries[entry_count].status = swarm_status_str(c->status);
+            entries[entry_count].progress =
+                (c->status == SWARM_DONE || c->status == SWARM_ERROR || c->status == SWARM_KILLED)
+                    ? 1.0 : 0.5;
+            previews[entry_count][0] = '\0';
+            if (c->output && c->output_len > 0) {
+                const char *tail = c->output;
+                size_t tail_len = c->output_len;
+                if (tail_len > 88) {
+                    tail += tail_len - 88;
+                }
+                snprintf(previews[entry_count], sizeof(previews[entry_count]), "%.88s", tail);
+            }
+            entries[entry_count].last_output = previews[entry_count];
+            entry_count++;
+        }
+        if (entry_count > 0) {
+            tui_swarm_panel(entries, entry_count, 72);
+        }
+    }
+
+    {
+        tui_swarm_cost_entry_t entries[SWARM_MAX_CHILDREN];
+        char names[SWARM_MAX_CHILDREN][32];
+        int entry_count = 0;
+        double shown_total = 0.0;
+        for (int i = 0; i < sw->child_count && entry_count < SWARM_MAX_CHILDREN; i++) {
+            swarm_child_t *c = &sw->children[i];
+            if (focus_group >= 0 && c->group_id != focus_group) continue;
+            snprintf(names[entry_count], sizeof(names[entry_count]), "#%d %.24s", c->id, c->task);
+            entries[entry_count].name = names[entry_count];
+            entries[entry_count].cost = c->est_cost_usd;
+            entries[entry_count].in_tok = c->est_input_tokens;
+            entries[entry_count].out_tok = c->est_output_tokens;
+            shown_total += c->est_cost_usd;
+            entry_count++;
+        }
+        tui_swarm_cost(entries, entry_count, shown_total);
+    }
+
+    fprintf(stderr, "\n");
+}
+
+static bool run_topology_prompt(session_state_t *session, const char *api_key,
+                                conversation_t *conv, const char *prompt,
+                                int *last_input_tokens) {
+    topology_plan_t plan;
+    const char *preferred = session->active_topology[0] ? session->active_topology : NULL;
+    if (!topology_plan_build(preferred, session->topology_auto, prompt, &plan)) return false;
+
+    char *out = safe_malloc(MAX_RESPONSE_SIZE);
+    topology_run_stats_t stats;
+    bool ok = topology_plan_run(&plan, api_key, session->model, prompt, out, MAX_RESPONSE_SIZE, &stats);
+
+    conv_add_user_text(conv, prompt);
+    md_reset(&s_md);
+    md_feed_str(&s_md, out);
+    md_flush(&s_md);
+    fprintf(stderr, "\n");
+    conv_add_assistant_text(conv, out);
+    session->turn_count++;
+    if (last_input_tokens) *last_input_tokens = (int)strlen(prompt) / 4;
+
+    fprintf(stderr, "  %stopology:%s %s", TUI_DIM, TUI_RESET, plan.topology.name);
+    if (plan.is_dynamic) {
+        fprintf(stderr, " %s(dynamic)%s", TUI_DIM, TUI_RESET);
+    } else if (session->topology_auto && !session->active_topology[0]) {
+        fprintf(stderr, " %s(auto-static)%s", TUI_DIM, TUI_RESET);
+    }
+    fprintf(stderr, "  %sagents:%s %d  %siterations:%s %d  %sest:$%.4f%s\n",
+            TUI_DIM, TUI_RESET, stats.agents_spawned,
+            TUI_DIM, TUI_RESET, stats.iterations,
+            TUI_BCYAN, stats.est_cost_usd, TUI_RESET);
+    if (plan.rationale[0]) {
+        fprintf(stderr, "  %splan:%s %s\n", TUI_DIM, TUI_RESET, plan.rationale);
+    }
+
+    baseline_log(ok ? "swarm" : "swarm_error",
+                 ok ? "topology_prompt" : "topology_prompt_failed",
+                 plan.topology.name, NULL);
+    free(out);
+    return true;
+}
+
 /* ── Readline tab completion ───────────────────────────────────────────── */
 
 #ifdef HAVE_READLINE
-static const char *s_commands[] = {
-    "/clear", "/save", "/load", "/sessions", "/setup", "/tools",
-    "/plugins", "/plugins validate", "/help", "/model", "/cost", "/context", "/effort",
-    "/compact", "/version", "/force", "/budget", "/trust", "/web", "/code",
-    "/mcp", "/provider", "/status", "/temp", "/thinking", "/fallback",
-    "/metrics", "/telemetry", "/cache", "/trace",
-    "/features", "/perf", "/minimap",
-    "quit", "exit", NULL
+typedef struct {
+    const char *command;
+    const char *description;
+} slash_command_t;
+
+static const slash_command_t s_slash_commands[] = {
+    {"/clear",        "reset conversation"},
+    {"/save",         "save session"},
+    {"/load",         "load session"},
+    {"/sessions",     "list saved sessions"},
+    {"/setup",        "detect and store API keys"},
+    {"/setup --force", "store keys and overwrite existing values"},
+    {"/setup report",  "show environment setup status"},
+    {"/tools",        "list available tools"},
+    {"/plugins",      "list loaded plugins"},
+    {"/plugins validate", "validate plugin manifest + lockfile"},
+    {"/help",         "show slash command help"},
+    {"/model",        "show or change active model"},
+    {"/route",        "show/update model routing policy"},
+    {"/cost",         "show session cost"},
+    {"/context",      "show context usage"},
+    {"/effort",       "set effort: low/medium/high"},
+    {"/compact",      "trim conversation history"},
+    {"/version",      "show version/build information"},
+    {"/force",        "control next tool choice"},
+    {"/prefill",      "set prefill text for the next response"},
+    {"/json",         "set JSON mode for next response"},
+    {"/budget",       "set session cost budget"},
+    {"/trust",        "set trust tier"},
+    {"/web",          "toggle web search"},
+    {"/code",         "toggle code execution"},
+    {"/mcp",          "show MCP servers and tools"},
+    {"/mcp reload",   "reload MCP servers/tools"},
+    {"/provider",     "show/detect API provider"},
+    {"/status",       "show full session status"},
+    {"/temp",         "set request temperature"},
+    {"/thinking",     "set thinking budget"},
+    {"/fallback",     "set model fallback chain"},
+    {"/metrics",      "show per-tool metrics"},
+    {"/telemetry",    "show streaming telemetry"},
+    {"/cache",        "show/clear tool cache"},
+    {"/trace",        "show recent trace spans"},
+    {"/topology",     "show/select/run topologies"},
+    {"/topology list", "show topology registry"},
+    {"/topology show", "inspect a topology"},
+    {"/topology use", "set active topology"},
+    {"/topology run", "run one-off topology"},
+    {"/topology auto", "enable topology auto-selection"},
+    {"/topology off", "disable topology auto-selection"},
+    {"/swarm",        "view / manage swarm"},
+    {"/swarm status", "show swarm status"},
+    {"/swarm show",   "show a specific swarm group"},
+    {"/swarm wait",   "wait for swarm group completion"},
+    {"/swarm kill",   "kill a swarm agent"},
+    {"/swarm kill-group", "kill a whole swarm group"},
+    {"/features",     "toggle UI features"},
+    {"/perf",         "show latency and throughput"},
+    {"/minimap",      "show conversation minimap"},
+    {"/workspace",    "show workspace summary"},
+    {"/workspace bootstrap", "create workspace files"},
+    {"/workspace reload", "reload workspace prompt cache"},
+    {"/workspace prompt", "show active workspace prompt"},
+    {"/skills",       "list active skills"},
+    {"/skills show",  "show a skill body"},
+    {"/skills use",   "set active skill"},
+    {"/skills clear", "clear active skill"},
+    {"/identity",     "show workspace identity doc"},
+    {"/user",         "show workspace user doc"},
+    {"/soul",         "show workspace soul doc"},
+    {"/memory",       "show workspace memory doc"},
+    {"/dashboard",    "show rich session dashboard"},
+    {"/top",          "show tool leaderboard"},
+    {"/flame",        "show tool flame timeline"},
+    {"quit",          "exit dsco"},
+    {"exit",          "exit dsco"},
+    {NULL, NULL}
 };
+
+static const char *command_description(const char *command) {
+    for (size_t i = 0; s_slash_commands[i].command; i++) {
+        if (strcmp(s_slash_commands[i].command, command) == 0) {
+            return s_slash_commands[i].description;
+        }
+    }
+    return "";
+}
 
 static char *command_generator(const char *text, int state) {
     static int idx, len;
-    if (!state) { idx = 0; len = (int)strlen(text); }
-    while (s_commands[idx]) {
-        const char *cmd = s_commands[idx++];
-        if (strncmp(cmd, text, (size_t)len) == 0)
-            return strdup(cmd);
-    }
-    /* Also complete model aliases */
     static int model_idx;
-    if (idx == 0) model_idx = 0; /* won't reach here but guard */
-    if (strncmp(text, "/model ", 7) == 0) {
+    static int mode;
+    if (!state) {
+        idx = 0;
+        model_idx = 0;
+        len = (int)strlen(text);
+        mode = (strncmp(text, "/model ", 7) == 0) ? 1 : 0;
+    }
+
+    if (mode == 1) {
         const char *partial = text + 7;
-        int plen = (int)strlen(partial);
-        for (int i = model_idx; MODEL_REGISTRY[i].alias; i++) {
-            model_idx = i + 1;
-            if (strncmp(MODEL_REGISTRY[i].alias, partial, (size_t)plen) == 0) {
-                char *r = malloc(8 + strlen(MODEL_REGISTRY[i].alias));
-                sprintf(r, "/model %s", MODEL_REGISTRY[i].alias);
+        while (*partial == ' ') partial++;
+        int p_len = (int)strlen(partial);
+        while (MODEL_REGISTRY[model_idx].alias) {
+            const char *alias = MODEL_REGISTRY[model_idx].alias;
+            model_idx++;
+            if (strncmp(alias, partial, (size_t)p_len) == 0) {
+                size_t need = strlen("/model ") + strlen(alias) + 1;
+                char *r = malloc(need + 1);
+                if (!r) return NULL;
+                snprintf(r, need + 1, "/model %s", alias);
                 return r;
             }
         }
+        return NULL;
+    }
+
+    while (s_slash_commands[idx].command) {
+        const char *cmd = s_slash_commands[idx++].command;
+        if (strncmp(cmd, text, (size_t)len) == 0) return strdup(cmd);
     }
     return NULL;
+}
+
+static void command_completion_display(char **matches, int num_matches, int max_length) {
+    (void)max_length;
+    if (!matches || num_matches <= 0) return;
+
+    int max_cmd = 0;
+    for (int i = 0; i < num_matches; i++) {
+        int cmd_len = (int)strlen(matches[i]);
+        if (cmd_len > max_cmd) max_cmd = cmd_len;
+    }
+
+    fprintf(rl_outstream, "\n");
+    for (int i = 0; i < num_matches; i++) {
+        const char *cmd = matches[i];
+        const char *desc = command_description(cmd);
+        if (!desc[0] && strncmp(cmd, "/model ", 7) == 0) {
+            desc = "set model alias";
+        }
+        fprintf(rl_outstream, "  %-*s", max_cmd, cmd);
+        if (desc && desc[0]) fprintf(rl_outstream, "  %s", desc);
+        fprintf(rl_outstream, "\n");
+    }
+    rl_forced_update_display();
+}
+
+static int slash_completion_key(int count, int key) {
+    (void)count;
+    (void)key;
+
+    rl_insert_text("/");
+    if (rl_point == 1) rl_complete(0, '\t');
+    return 0;
 }
 
 static char **command_completion(const char *text, int start, int end) {
@@ -629,8 +1095,6 @@ static char **command_completion(const char *text, int start, int end) {
 
 static bool s_in_text_block = false;
 static bool s_in_thinking_block = false;
-static md_renderer_t s_md;
-
 /* ── 40 Features: static state ──────────────────────────────────────────── */
 static tui_features_t       g_features;
 static tui_cadence_t        s_cadence;
@@ -643,17 +1107,153 @@ static tui_citation_t       s_citations;
 static tui_throughput_t     s_throughput;
 static tui_ghost_t          s_ghost;
 static tui_latency_breakdown_t s_last_latency;
+static tui_stream_heartbeat_t  s_heartbeat;
+static void terminal_input_echo_suspend(void);
+static void terminal_input_echo_restore(void);
+static struct termios       s_saved_termios;
+static bool                 s_saved_termios_valid = false;
+static bool                 s_input_echo_suspended = false;
+
+static void terminal_input_echo_suspend(void) {
+    if (s_input_echo_suspended || !isatty(STDIN_FILENO)) return;
+
+    struct termios tio;
+    if (tcgetattr(STDIN_FILENO, &tio) != 0) return;
+    s_saved_termios = tio;
+    s_saved_termios_valid = true;
+    /* Disable echo and canonical mode so the ESC poller can read individual
+       keystrokes (e.g. ESC = 0x1b) without waiting for Enter. */
+    tio.c_lflag &= (tcflag_t)~(ECHO | ECHONL | ICANON);
+    tio.c_cc[VMIN]  = 0;   /* non-blocking reads */
+    tio.c_cc[VTIME] = 0;
+    if (tcsetattr(STDIN_FILENO, TCSANOW, &tio) == 0) {
+        s_input_echo_suspended = true;
+    }
+}
+
+static void terminal_input_echo_restore(void) {
+    if (!s_input_echo_suspended || !isatty(STDIN_FILENO)) return;
+    if (s_saved_termios_valid) {
+        tcsetattr(STDIN_FILENO, TCSAFLUSH, &s_saved_termios);
+    }
+    s_input_echo_suspended = false;
+}
+
+/* ── ESC key poller thread ─────────────────────────────────────────────── */
+/* Runs during LLM streaming (stdin is in raw non-blocking mode).
+   Detects a standalone ESC (0x1b) and triggers the pause state machine.
+   Escape sequences (arrow keys etc.) are distinguished by a follow-up byte
+   arriving within 20 ms; if one does, the sequence is drained and ignored. */
+
+static void *esc_poll_thread_fn(void *arg) {
+    (void)arg;
+    while (g_esc_poller_active) {
+        fd_set rfd;
+        struct timeval tv = {0, 30000};  /* 30 ms poll */
+        FD_ZERO(&rfd);
+        FD_SET(STDIN_FILENO, &rfd);
+        if (select(STDIN_FILENO + 1, &rfd, NULL, NULL, &tv) <= 0)
+            continue;
+
+        char c = 0;
+        if (read(STDIN_FILENO, &c, 1) != 1 || c != '\033')
+            continue;
+
+        /* Wait 20 ms for potential escape-sequence follow-up */
+        struct timeval tv2 = {0, 20000};
+        fd_set rfd2;
+        FD_ZERO(&rfd2);
+        FD_SET(STDIN_FILENO, &rfd2);
+        if (select(STDIN_FILENO + 1, &rfd2, NULL, NULL, &tv2) > 0) {
+            char buf[8];
+            (void)read(STDIN_FILENO, buf, sizeof(buf));  /* drain and ignore */
+            continue;
+        }
+
+        /* Standalone ESC */
+        if (g_escape_state == ESC_RUNNING && !g_interrupted) {
+            g_escape_state = ESC_PAUSED;
+            g_interrupted  = 1;
+        } else if (g_escape_state == ESC_PAUSED) {
+            /* Second ESC → hard exit */
+            const char msg[] = "\n\033[r\033[?2004l\033[0m\033[?25h\n";
+            (void)write(STDERR_FILENO, msg, sizeof(msg) - 1);
+            _exit(130);
+        }
+    }
+    return NULL;
+}
+
+static void esc_poller_start(void) {
+    if (g_esc_poller_active) return;
+    g_esc_poller_active = 1;
+    pthread_create(&g_esc_poller_tid, NULL, esc_poll_thread_fn, NULL);
+}
+
+static void esc_poller_stop(void) {
+    if (!g_esc_poller_active) return;
+    g_esc_poller_active = 0;
+    pthread_join(g_esc_poller_tid, NULL);
+}
+
+/* ── Pause menu ────────────────────────────────────────────────────────── */
+/* Called when the turns loop exits due to ESC_PAUSED.
+   Returns true if the user chose to resume, false to cancel. */
+
+static bool show_pause_menu(int cur_turn, int max_turns, double elapsed_sec) {
+    struct termios tio_saved, tio_raw;
+    bool tio_ok = (isatty(STDIN_FILENO) && tcgetattr(STDIN_FILENO, &tio_saved) == 0);
+    if (tio_ok) {
+        tio_raw = tio_saved;
+        tio_raw.c_lflag &= (tcflag_t)~(ECHO | ECHONL | ICANON);
+        tio_raw.c_cc[VMIN]  = 1;
+        tio_raw.c_cc[VTIME] = 0;
+        tcsetattr(STDIN_FILENO, TCSANOW, &tio_raw);
+    }
+
+    int max_t = max_turns > 0 ? max_turns : 1;
+    fprintf(stderr, "\n  %s⏸  paused%s  (turn %d/%d · %.0fs elapsed)\n",
+            TUI_YELLOW, TUI_RESET, cur_turn, max_t, elapsed_sec);
+    fprintf(stderr, "  %s[R]%s Resume  %s[C]%s Cancel  "
+                    "%s(Esc again = cancel)%s  ▸ ",
+            TUI_BOLD, TUI_RESET, TUI_BOLD, TUI_RESET, TUI_DIM, TUI_RESET);
+    fflush(stderr);
+
+    bool resume = false;
+    for (;;) {
+        char key = 0;
+        if (read(STDIN_FILENO, &key, 1) != 1) break;
+        if (key == 'r' || key == 'R')                      { resume = true;  break; }
+        if (key == 'c' || key == 'C' || key == '\033' ||
+            key == 'q' || key == 'Q' || key == '\003' /* Ctrl+C */) {
+            resume = false;
+            break;
+        }
+        fprintf(stderr, "\r  %s[R]%s Resume  %s[C]%s Cancel  "
+                        "%s(Esc again = cancel)%s  ▸ ",
+                TUI_BOLD, TUI_RESET, TUI_BOLD, TUI_RESET, TUI_DIM, TUI_RESET);
+        fflush(stderr);
+    }
+
+    if (tio_ok)
+        tcsetattr(STDIN_FILENO, TCSANOW, &tio_saved);
+    fprintf(stderr, "\n");
+    return resume;
+}
 
 static void on_stream_text(const char *text, void *ctx) {
     (void)ctx;
+    tui_stream_heartbeat_poke(&s_heartbeat, NULL);
     /* End thinking block if transitioning thinking → text */
     if (s_in_thinking_block) {
+        tui_term_lock();
         if (g_features.collapsible_thinking) {
             tui_thinking_end(&s_thinking);
         } else {
             fprintf(stderr, "\033[0m\n");
             fflush(stderr);
         }
+        tui_term_unlock();
         s_in_thinking_block = false;
     }
     if (!s_in_text_block) {
@@ -661,6 +1261,7 @@ static void on_stream_text(const char *text, void *ctx) {
         tui_word_counter_init(&s_word_counter);
     }
     /* F2: Typing cadence — buffer and flush at steady rate */
+    tui_term_lock();
     if (g_features.typing_cadence) {
         tui_cadence_feed(&s_cadence, text);
         /* Flush cadence buffer into markdown renderer */
@@ -672,36 +1273,43 @@ static void on_stream_text(const char *text, void *ctx) {
     } else {
         md_feed_str(&s_md, text);
     }
+    fflush(stderr);
+    tui_term_unlock();
     /* F5: Live word count */
     tui_word_counter_feed(&s_word_counter, text);
     tui_word_counter_render(&s_word_counter);
     /* F39: Throughput tracking */
     tui_throughput_tick(&s_throughput, tui_estimate_tokens(text));
-    fflush(stdout);
 }
 
 static void on_stream_thinking(const char *text, void *ctx) {
     (void)ctx;
+    tui_stream_heartbeat_poke(&s_heartbeat, "thinking...");
     if (!s_in_thinking_block) {
         s_in_thinking_block = true;
         tui_thinking_init(&s_thinking);
         /* Print thinking header (since llm.c defers to us when callback is set) */
         if (!g_features.collapsible_thinking) {
+            tui_term_lock();
             fprintf(stderr, "  \033[2m\033[3m[thinking]\n");
             fflush(stderr);
+            tui_term_unlock();
         }
     }
     /* F4: Collapsible thinking — count silently instead of printing */
+    tui_term_lock();
     if (g_features.collapsible_thinking) {
         tui_thinking_feed(&s_thinking, text);
     } else {
         fprintf(stderr, " %s", text);
         fflush(stderr);
     }
+    tui_term_unlock();
 }
 
 static void on_stream_tool_start(const char *name, const char *id, void *ctx) {
     (void)ctx;
+    tui_stream_heartbeat_poke(&s_heartbeat, NULL);
     if (s_in_thinking_block) {
         /* F4: End collapsible thinking */
         if (g_features.collapsible_thinking) {
@@ -712,9 +1320,11 @@ static void on_stream_tool_start(const char *name, const char *id, void *ctx) {
         s_in_thinking_block = false;
     }
     if (s_in_text_block) {
+        tui_term_lock();
         md_flush(&s_md);
-        printf("\n");
-        fflush(stdout);
+        fprintf(stderr, "\n");
+        fflush(stderr);
+        tui_term_unlock();
         /* F5: End word counter */
         tui_word_counter_end(&s_word_counter);
         s_in_text_block = false;
@@ -725,22 +1335,16 @@ static void on_stream_tool_start(const char *name, const char *id, void *ctx) {
         int fn = tui_citation_add(&s_citations, name, id, NULL, 0);
         fprintf(stderr, "  %s[%d]%s ", TUI_DIM, fn, TUI_RESET);
     }
-    tui_tool_type_t tt = tui_classify_tool(name);
-    const char *tc = tui_tool_color(tt);
-    fprintf(stderr, "  %s%s⚡%s %s%s%s\n", TUI_BOLD, tc, TUI_RESET,
-            TUI_DIM, name, TUI_RESET);
-    fflush(stderr);
+    /* Defer printing ⚡ name — will be merged with args at execution time */
     baseline_log("tool", name, "tool_use started", NULL);
 }
 
-/* Print condensed tool arguments (dimmed, under the tool name) */
-static void print_tool_args(const char *name, const char *input_json) {
+/* Extract tool args into a single-line preview string */
+static void extract_tool_preview(const char *name, const char *input_json,
+                                  char *out, size_t out_sz) {
     (void)name;
+    out[0] = '\0';
     if (!input_json || strcmp(input_json, "{}") == 0) return;
-
-    /* For common tools, extract the most relevant field */
-    char preview[256];
-    preview[0] = '\0';
 
     /* Try to extract key values from JSON for common tools */
     char *cmd = json_get_str(input_json, "command");
@@ -751,48 +1355,74 @@ static void print_tool_args(const char *name, const char *input_json) {
     char *pattern = json_get_str(input_json, "pattern");
     char *expr = json_get_str(input_json, "expression");
 
+    int max = (int)out_sz - 1;
+    if (max > 200) max = 200;
+
     if (cmd) {
-        /* bash/shell: show command */
-        snprintf(preview, sizeof(preview), "$ %.*s", 200, cmd);
+        snprintf(out, out_sz, "$ %.*s", max - 2, cmd);
     } else if (code) {
-        /* code execution: show first line */
         const char *nl = strchr(code, '\n');
         int len = nl ? (int)(nl - code) : (int)strlen(code);
-        if (len > 200) len = 200;
-        snprintf(preview, sizeof(preview), "%.*s%s", len, code, nl ? " ..." : "");
+        if (len > max) len = max;
+        snprintf(out, out_sz, "%.*s%s", len, code, nl ? " ..." : "");
     } else if (path && pattern) {
-        snprintf(preview, sizeof(preview), "%s ~ /%s/", path, pattern);
+        snprintf(out, out_sz, "%s ~ /%s/", path, pattern);
     } else if (path) {
-        snprintf(preview, sizeof(preview), "%s", path);
+        snprintf(out, out_sz, "%s", path);
     } else if (query) {
-        snprintf(preview, sizeof(preview), "%.*s", 200, query);
+        snprintf(out, out_sz, "%.*s", max, query);
     } else if (url) {
-        snprintf(preview, sizeof(preview), "%.*s", 200, url);
+        snprintf(out, out_sz, "%.*s", max, url);
     } else if (pattern) {
-        snprintf(preview, sizeof(preview), "/%.*s/", 200, pattern);
+        snprintf(out, out_sz, "/%.*s/", max - 2, pattern);
     } else if (expr) {
-        snprintf(preview, sizeof(preview), "%.*s", 200, expr);
+        snprintf(out, out_sz, "%.*s", max, expr);
     } else {
-        /* Fallback: show truncated raw JSON, skip outer braces */
         const char *start = input_json;
         if (*start == '{') start++;
         int len = (int)strlen(start);
         if (len > 0 && start[len-1] == '}') len--;
-        if (len > 200) len = 200;
-        if (len > 0) snprintf(preview, sizeof(preview), "%.*s", len, start);
+        if (len > max) len = max;
+        if (len > 0) snprintf(out, out_sz, "%.*s", len, start);
     }
 
     free(cmd); free(code); free(query); free(path);
     free(url); free(pattern); free(expr);
 
-    if (preview[0]) {
-        /* Replace newlines with spaces for single-line display */
-        for (char *c = preview; *c; c++) {
-            if (*c == '\n' || *c == '\r') *c = ' ';
-        }
-        fprintf(stderr, "    %s%s%s\n", TUI_DIM, preview, TUI_RESET);
-        fflush(stderr);
+    /* Replace newlines with spaces for single-line display */
+    for (char *c = out; *c; c++) {
+        if (*c == '\n' || *c == '\r') *c = ' ';
     }
+}
+
+/* Print combined tool indicator — powerline pill in truecolor, fallback ⚡ */
+static void print_tool_start_line(const char *name, const char *input_json) {
+    tui_tool_type_t tt = tui_classify_tool(name);
+    const char *tc = tui_tool_color(tt);
+    tui_rgb_t rgb = tui_tool_rgb(tt);
+    char preview[256];
+    extract_tool_preview(name, input_json, preview, sizeof(preview));
+
+    bool use_powerline = tui_detect_color_level() >= TUI_COLOR_256;
+    const tui_glyphs_t *gl = tui_glyph();
+
+    if (use_powerline && gl->pl_right[0]) {
+        /* Powerline pill:  ⚡ name ▶ args */
+        int r = (int)(rgb.r * 0.65), g2 = (int)(rgb.g * 0.65), b = (int)(rgb.b * 0.65);
+        fprintf(stderr, "  \033[48;2;%d;%d;%dm\033[38;2;255;255;255m %s %s \033[0m",
+                r, g2, b, gl->icon_lightning, name);
+        fprintf(stderr, "\033[38;2;%d;%d;%dm%s%s",
+                r, g2, b, gl->pl_right, TUI_RESET);
+        if (preview[0])
+            fprintf(stderr, " %s%s%s", TUI_DIM, preview, TUI_RESET);
+    } else {
+        fprintf(stderr, "  %s%s⚡%s %s%s%s", TUI_BOLD, tc, TUI_RESET,
+                TUI_DIM, name, TUI_RESET);
+        if (preview[0])
+            fprintf(stderr, "  %s%s%s", TUI_DIM, preview, TUI_RESET);
+    }
+    fprintf(stderr, "\n");
+    fflush(stderr);
 }
 
 static void print_tool_result_ex(const char *name, bool ok, const char *result, double elapsed_ms) {
@@ -817,7 +1447,7 @@ static void print_tool_result_ex(const char *name, bool ok, const char *result, 
 
     fprintf(stderr, "    %s%s%s %s%s%s%s %s(%s)%s %s%.*s%s\n",
             ok ? TUI_GREEN : TUI_RED,
-            ok ? "✓" : "✗",
+            ok ? tui_glyph()->ok : tui_glyph()->fail,
             TUI_RESET,
             tc, name, TUI_RESET,
             size_str,
@@ -832,40 +1462,86 @@ static void print_tool_result(const char *name, bool ok, const char *result) {
 }
 
 static void print_usage_ex(usage_t *u, const char *model, session_state_t *session) {
-    fprintf(stderr, "%s  [in:%d out:%d", TUI_DIM, u->input_tokens, u->output_tokens);
-    if (u->cache_read_input_tokens > 0)
-        fprintf(stderr, " cache-read:%d", u->cache_read_input_tokens);
-    if (u->cache_creation_input_tokens > 0)
-        fprintf(stderr, " cache-write:%d", u->cache_creation_input_tokens);
+    bool truecolor = tui_supports_truecolor();
+    const tui_glyphs_t *gl = tui_glyph();
 
-    /* Per-turn cost */
-    const model_info_t *mi = model_lookup(model);
-    if (mi) {
-        double turn_cost = u->input_tokens * mi->input_price / 1e6
-                         + u->output_tokens * mi->output_price / 1e6
-                         + u->cache_read_input_tokens * mi->cache_read_price / 1e6
-                         + u->cache_creation_input_tokens * mi->cache_write_price / 1e6;
-        fprintf(stderr, " $%.4f", turn_cost);
-        if (session) {
-            double total_cost = session_cost(session);
-            fprintf(stderr, " (total: $%.4f)", total_cost);
+    if (truecolor) {
+        tui_rgb_t dim_c = tui_hsv_to_rgb(220.0f, 0.10f, 0.45f);
+        tui_rgb_t in_c  = tui_hsv_to_rgb(210.0f, 0.30f, 0.60f);
+        tui_rgb_t out_c = tui_hsv_to_rgb(160.0f, 0.30f, 0.60f);
+
+        fprintf(stderr, "  \033[38;2;%d;%d;%dm[", dim_c.r, dim_c.g, dim_c.b);
+        fprintf(stderr, "\033[38;2;%d;%d;%dmin:%d", in_c.r, in_c.g, in_c.b, u->input_tokens);
+        fprintf(stderr, " \033[38;2;%d;%d;%dmout:%d", out_c.r, out_c.g, out_c.b, u->output_tokens);
+
+        if (u->cache_read_input_tokens > 0) {
+            tui_rgb_t cr = tui_hsv_to_rgb(120.0f, 0.25f, 0.55f);
+            fprintf(stderr, " \033[38;2;%d;%d;%dm%scache-read:%d",
+                    cr.r, cr.g, cr.b, gl->icon_lightning, u->cache_read_input_tokens);
         }
+        if (u->cache_creation_input_tokens > 0) {
+            tui_rgb_t cw = tui_hsv_to_rgb(40.0f, 0.30f, 0.60f);
+            fprintf(stderr, " \033[38;2;%d;%d;%dmcache-write:%d",
+                    cw.r, cw.g, cw.b, u->cache_creation_input_tokens);
+        }
+
+        const model_info_t *mi = model_lookup(model);
+        if (mi) {
+            double turn_cost = u->input_tokens * mi->input_price / 1e6
+                             + u->output_tokens * mi->output_price / 1e6
+                             + u->cache_read_input_tokens * mi->cache_read_price / 1e6
+                             + u->cache_creation_input_tokens * mi->cache_write_price / 1e6;
+            /* Cost color: green cheap → yellow → red expensive */
+            float cost_hue = turn_cost < 0.01 ? 120.0f
+                           : turn_cost < 0.10 ? 120.0f - (float)((turn_cost - 0.01) / 0.09) * 60.0f
+                           : turn_cost < 1.00 ? 60.0f - (float)((turn_cost - 0.10) / 0.90) * 60.0f
+                           : 0.0f;
+            tui_rgb_t cost_c = tui_hsv_to_rgb(cost_hue, 0.45f, 0.75f);
+            fprintf(stderr, " \033[38;2;%d;%d;%dm%s$%.4f",
+                    cost_c.r, cost_c.g, cost_c.b, gl->icon_money, turn_cost);
+            if (session) {
+                double total = session_cost(session);
+                tui_rgb_t tot_c = tui_hsv_to_rgb(220.0f, 0.10f, 0.50f);
+                fprintf(stderr, " \033[38;2;%d;%d;%dm(total: $%.4f)",
+                        tot_c.r, tot_c.g, tot_c.b, total);
+            }
+        }
+        fprintf(stderr, "\033[38;2;%d;%d;%dm]\033[0m\n", dim_c.r, dim_c.g, dim_c.b);
+    } else {
+        fprintf(stderr, "%s  [in:%d out:%d", TUI_DIM, u->input_tokens, u->output_tokens);
+        if (u->cache_read_input_tokens > 0)
+            fprintf(stderr, " cache-read:%d", u->cache_read_input_tokens);
+        if (u->cache_creation_input_tokens > 0)
+            fprintf(stderr, " cache-write:%d", u->cache_creation_input_tokens);
+        const model_info_t *mi = model_lookup(model);
+        if (mi) {
+            double turn_cost = u->input_tokens * mi->input_price / 1e6
+                             + u->output_tokens * mi->output_price / 1e6
+                             + u->cache_read_input_tokens * mi->cache_read_price / 1e6
+                             + u->cache_creation_input_tokens * mi->cache_write_price / 1e6;
+            fprintf(stderr, " $%.4f", turn_cost);
+            if (session) {
+                double total = session_cost(session);
+                fprintf(stderr, " (total: $%.4f)", total);
+            }
+        }
+        fprintf(stderr, "]%s\n", TUI_RESET);
     }
-    fprintf(stderr, "]%s\n", TUI_RESET);
 }
 
 /* ── Read input line (readline or fgets) ───────────────────────────────── */
 
-static char *read_input_line(char *buf, size_t buf_sz) {
+static char *read_input_line_prompt(char *buf, size_t buf_sz, const char *prompt) {
+    const char *p = prompt ? prompt : "\033[1m\033[95m\xe2\x9d\xaf\033[0m ";
 #ifdef HAVE_READLINE
-    char *line = readline("\033[1m\033[95m\xe2\x9d\xaf\033[0m ");
+    char *line = readline(p);
     if (!line) return NULL;
     if (line[0]) add_history(line);
     snprintf(buf, buf_sz, "%s", line);
     free(line);
     return buf;
 #else
-    fprintf(stderr, "%s%s\xe2\x9d\xaf%s ", TUI_BOLD, TUI_BMAGENTA, TUI_RESET);
+    fprintf(stderr, "%s", p);
     fflush(stderr);
     if (!fgets(buf, (int)buf_sz, stdin)) {
         if (ferror(stdin) && errno == EINTR) {
@@ -888,7 +1564,12 @@ static char *read_input_line(char *buf, size_t buf_sz) {
 
 /* ── Main agent loop ───────────────────────────────────────────────────── */
 
-void agent_run(const char *api_key, const char *model) {
+void agent_run(const char *api_key, const char *model,
+               const char *topology_name, bool topology_auto) {
+    /* Register terminal reset FIRST — ensures scroll region, bracketed paste,
+       and SGR attrs are cleaned up on ANY exit path through exit(). */
+    atexit(terminal_reset_atexit);
+
     struct sigaction sa_int;
     memset(&sa_int, 0, sizeof(sa_int));
     sa_int.sa_handler = sigint_handler;
@@ -911,7 +1592,7 @@ void agent_run(const char *api_key, const char *model) {
 
     tools_init();
     dsco_locks_init(&g_locks);
-    md_init(&s_md, stdout);
+    md_init(&s_md, stderr);
 
     /* Initialize 40 UI features */
     tui_features_init(&g_features);
@@ -949,6 +1630,8 @@ void agent_run(const char *api_key, const char *model) {
 
 #ifdef HAVE_READLINE
     rl_attempted_completion_function = command_completion;
+    rl_completion_display_matches_hook = (VFunction *)command_completion_display;
+    rl_bind_key('/', slash_completion_key);
     rl_basic_word_break_characters = " \t\n";
 #endif
 
@@ -960,13 +1643,25 @@ void agent_run(const char *api_key, const char *model) {
     /* Session state */
     session_state_t session;
     session_state_init(&session, model);
+    if (topology_name && topology_name[0]) {
+        const topology_t *cli_topology = topology_find(topology_name);
+        if (cli_topology) {
+            snprintf(session.active_topology, sizeof(session.active_topology), "%s", cli_topology->name);
+        } else {
+            fprintf(stderr, "  %swarning:%s unknown topology '%s'\n", TUI_BYELLOW, TUI_RESET, topology_name);
+        }
+    }
+    session.topology_auto = topology_auto;
     g_autosave_session = &session;
 
     /* Initialize provider based on model */
     ensure_provider(&session, api_key);
+    tools_set_runtime_api_key(api_key);
+    tools_set_runtime_model(session.model);
 
     char input_buf[MAX_INPUT_LINE];
     int last_input_tokens = 0;
+    int consecutive_tool_failures = 0;  /* for router failure escalation */
 
     int tool_count;
     tools_get_all(&tool_count);
@@ -988,21 +1683,128 @@ void agent_run(const char *api_key, const char *model) {
     /* Welcome banner */
     tui_welcome(session.model, tool_count, DSCO_VERSION);
 
+    /* Enhanced startup info */
+    {
+        /* Active feature count */
+        int active_features = 0;
+        const bool *flags = (const bool *)&g_features;
+        for (int fi = 0; fi < TUI_FEATURE_COUNT; fi++)
+            if (flags[fi]) active_features++;
+
+        fprintf(stderr, "  %s%d/%d features active%s · %strust: %s%s",
+                TUI_DIM, active_features, TUI_FEATURE_COUNT, TUI_RESET,
+                TUI_DIM, session_trust_tier_to_string(session.trust_tier), TUI_RESET);
+
+        /* Git branch on startup (F19) */
+        if (g_features.branch_indicator) {
+            FILE *gf = popen("git rev-parse --abbrev-ref HEAD 2>/dev/null", "r");
+            if (gf) {
+                char branch[128] = "";
+                if (fgets(branch, sizeof(branch), gf)) {
+                    size_t bl = strlen(branch);
+                    if (bl > 0 && branch[bl-1] == '\n') branch[bl-1] = '\0';
+                    if (branch[0])
+                        fprintf(stderr, " · %s%s %s%s", TUI_BMAGENTA,
+                                tui_glyph()->icon_git ? tui_glyph()->icon_git : "",
+                                branch, TUI_RESET);
+                }
+                pclose(gf);
+            }
+        }
+        fprintf(stderr, "\n");
+        if (session.active_topology[0]) {
+            fprintf(stderr, "  %stopology:%s %s\n", TUI_DIM, TUI_RESET, session.active_topology);
+        } else if (session.topology_auto) {
+            fprintf(stderr, "  %stopology:%s auto\n", TUI_DIM, TUI_RESET);
+        }
+    }
+
     /* Initialize status bar */
     tui_status_bar_t status_bar;
     tui_status_bar_init(&status_bar, session.model);
     /* F31: Enable status bar clock */
     tui_status_bar_set_clock(&status_bar, g_features.status_clock);
 
-    fprintf(stderr, "  %stype your request, or 'quit' to exit%s \xe2\x9c\xa8\n\n", TUI_DIM, TUI_RESET);
+    /* SIGWINCH handler for terminal resize */
+    g_winch_sb = &status_bar;
+    struct sigaction sa_winch;
+    memset(&sa_winch, 0, sizeof(sa_winch));
+    sa_winch.sa_handler = sigwinch_handler;
+    sigemptyset(&sa_winch.sa_mask);
+    sa_winch.sa_flags = SA_RESTART;
+    sigaction(SIGWINCH, &sa_winch, NULL);
+
+    fprintf(stderr, "  %stype your request, or 'quit' to exit%s %s\n\n", TUI_DIM, TUI_RESET, tui_glyph()->sparkle);
 
     while (1) {
-        g_interrupted = 0;
+        g_interrupted   = 0;
+        g_escape_state  = ESC_RUNNING;
+        output_guard_reset();
+        terminal_input_echo_restore();
 
-        if (!read_input_line(input_buf, sizeof(input_buf))) break;
+        /* Build dynamic prompt: [turn N] model · $cost · context% ▸ */
+        char dyn_prompt[256];
+        {
+            double cost = session_cost(&session);
+            int ctx_used = session.total_input_tokens + session.total_output_tokens;
+            int ctx_max = session.context_window > 0 ? session.context_window : CONTEXT_WINDOW_TOKENS;
+            double ctx_pct = ctx_max > 0 ? 100.0 * ctx_used / ctx_max : 0;
+            const char *ctx_color = ctx_pct < 60 ? TUI_GREEN : (ctx_pct < 85 ? TUI_YELLOW : TUI_RED);
+
+            /* Shorten model name for prompt */
+            const model_info_t *mi = model_lookup(session.model);
+            const char *short_model = mi ? mi->alias : session.model;
+
+            if (session.turn_count > 0) {
+                snprintf(dyn_prompt, sizeof(dyn_prompt),
+                    "\001" TUI_DIM "\002" "[" "\001" TUI_RESET "\002"
+                    "\001" TUI_BCYAN "\002" "t%d" "\001" TUI_RESET "\002"
+                    "\001" TUI_DIM "\002" "] " "\001" TUI_RESET "\002"
+                    "\001" TUI_BWHITE "\002" "%s" "\001" TUI_RESET "\002"
+                    "\001" TUI_DIM "\002" " · " "\001" TUI_RESET "\002"
+                    "\001" TUI_GREEN "\002" "$%.2f" "\001" TUI_RESET "\002"
+                    "\001" TUI_DIM "\002" " · " "\001" TUI_RESET "\002"
+                    "\001%s\002" "%.0f%%" "\001" TUI_RESET "\002"
+                    "\001" TUI_DIM "\002" " ▸" "\001" TUI_RESET "\002" " ",
+                    session.turn_count, short_model, cost, ctx_color, ctx_pct);
+            } else {
+                snprintf(dyn_prompt, sizeof(dyn_prompt),
+                    "\001" TUI_BOLD "\002" "\001" TUI_BMAGENTA "\002"
+                    "❯" "\001" TUI_RESET "\002" " ");
+            }
+        }
+
+        /* ── Synchronize terminal state before input ──────────────────
+         * After streaming, cursor position may be undefined.
+         * Reset scroll region, flush stderr, then re-establish the
+         * bottom panel and place cursor on the input row.  This prevents
+         * the input prompt from appearing in the middle of output. */
+        fflush(stderr);
+        if (!read_input_line_prompt(input_buf, sizeof(input_buf), dyn_prompt)) break;
 
         size_t len = strlen(input_buf);
         if (len == 0) continue;
+
+        /* Strip bracketed paste markers if present */
+        {
+            char *ps = strstr(input_buf, "\033[200~");
+            if (ps) memmove(ps, ps + 6, strlen(ps + 6) + 1);
+            char *pe = strstr(input_buf, "\033[201~");
+            if (pe) *pe = '\0';
+        }
+        dsco_strip_terminal_controls_inplace(input_buf);
+        len = strlen(input_buf);
+        if (len == 0) continue;
+
+        /* Detect multi-line paste (newlines in input) */
+        {
+            int newlines = 0;
+            for (const char *p = input_buf; *p; p++) if (*p == '\n') newlines++;
+            if (newlines > 0) {
+                fprintf(stderr, "  %s[%d lines pasted]%s\n", TUI_DIM, newlines + 1, TUI_RESET);
+            }
+        }
+
         if (strcmp(input_buf, "quit") == 0 || strcmp(input_buf, "exit") == 0) break;
 
         /* ── Slash commands ────────────────────────────────────────────── */
@@ -1033,6 +1835,8 @@ void agent_run(const char *api_key, const char *model) {
                 const char *resolved = model_resolve_alias(arg);
                 snprintf(session.model, sizeof(session.model), "%s", resolved);
                 session.context_window = model_context_window(resolved);
+                session.model_locked = true;  /* user explicitly chose; block auto-switching */
+                tools_set_runtime_model(session.model);
                 const model_info_t *mi = model_lookup(resolved);
                 char msg[256];
                 snprintf(msg, sizeof(msg), "model switched to %s (ctx: %dk)",
@@ -1045,6 +1849,61 @@ void agent_run(const char *api_key, const char *model) {
                 }
             }
             baseline_log("command", "/model", session.model, NULL);
+            continue;
+        }
+        if (strncmp(input_buf, "/route", 6) == 0) {
+            const char *arg = input_buf + 6;
+            while (*arg == ' ') arg++;
+            if (*arg == '\0' || strcmp(arg, "status") == 0) {
+                char buf[4096];
+                router_to_json(&g_router, buf, sizeof(buf));
+                fprintf(stderr, "  %srouter status:%s\n  policy: %s\n  session_cost: $%.4f\n%s\n",
+                        TUI_DIM, TUI_RESET,
+                        router_policy_name(g_router.policy),
+                        g_router.session_cost_usd, buf);
+            } else if (strncmp(arg, "policy ", 7) == 0) {
+                const char *pol = arg + 7;
+                g_router.policy = router_policy_parse(pol);
+                char msg[128];
+                snprintf(msg, sizeof(msg), "routing policy → %s",
+                         router_policy_name(g_router.policy));
+                tui_success(msg);
+            } else if (strncmp(arg, "budget ", 7) == 0) {
+                double b = atof(arg + 7);
+                g_router.cost_budget_usd = b;
+                char msg[128];
+                snprintf(msg, sizeof(msg), "cost budget → $%.4f", b);
+                tui_success(msg);
+            } else if (strcmp(arg, "history") == 0) {
+                char buf[8192];
+                router_history_to_json(&g_router, buf, sizeof(buf));
+                fprintf(stderr, "%s\n", buf);
+            } else if (strcmp(arg, "recommend") == 0) {
+                int ctx_pct = last_input_tokens * 100
+                              / (session.context_window > 0 ? session.context_window : 200000);
+                task_complexity_t c = router_classify_task(NULL, session.turn_count, 0, ctx_pct);
+                router_decision_t rd = router_decide(&g_router, session.model, c,
+                                                      session_cost(&session), 0.0,
+                                                      consecutive_tool_failures);
+                fprintf(stderr,
+                    "  %srouter recommend:%s %s  (complexity=%s reason=%s confidence=%.0f%%)\n"
+                    "  %s%s%s\n",
+                    TUI_DIM, TUI_RESET, rd.model_id,
+                    task_complexity_name(rd.complexity),
+                    switch_reason_name(rd.reason),
+                    (double)rd.confidence * 100.0,
+                    TUI_DIM, rd.rationale, TUI_RESET);
+            } else if (strcmp(arg, "unlock") == 0) {
+                session.model_locked = false;
+                tui_success("model unlocked — router may now auto-switch");
+            } else if (strcmp(arg, "lock") == 0) {
+                session.model_locked = true;
+                tui_success("model locked — router will not auto-switch");
+            } else {
+                fprintf(stderr, "  usage: /route [status|policy <name>|budget <usd>|history|recommend|lock|unlock]\n");
+                fprintf(stderr, "  policies: fixed cost latency quality balanced adaptive\n");
+            }
+            baseline_log("command", "/route", arg, NULL);
             continue;
         }
         if (strncmp(input_buf, "/effort", 7) == 0) {
@@ -1118,22 +1977,6 @@ void agent_run(const char *api_key, const char *model) {
                 tui_success(msg);
             }
             baseline_log("command", "/force", session.tool_choice, NULL);
-            continue;
-        }
-        /* /budget — thinking budget control */
-        if (strncmp(input_buf, "/budget", 7) == 0) {
-            const char *arg = input_buf + 7;
-            while (*arg == ' ') arg++;
-            if (*arg == '\0') {
-                fprintf(stderr, "  %sthinking: adaptive (auto)%s\n", TUI_DIM, TUI_RESET);
-                fprintf(stderr, "  %susage: /budget <tokens> (min 1024) or /budget auto%s\n",
-                        TUI_DIM, TUI_RESET);
-            } else {
-                /* Stored in session — will be used in llm_build_request_ex */
-                /* TODO: implement budget_tokens in session_state_t + request builder */
-                fprintf(stderr, "  %sthinking budget: %s (not yet wired — using adaptive)%s\n",
-                        TUI_DIM, arg, TUI_RESET);
-            }
             continue;
         }
         /* /prefill — seed assistant response */
@@ -1279,6 +2122,208 @@ void agent_run(const char *api_key, const char *model) {
             baseline_log("command", "/sessions", NULL, NULL);
             continue;
         }
+        if (strcmp(input_buf, "/workspace") == 0 ||
+            strcmp(input_buf, "/workspace bootstrap") == 0 ||
+            strcmp(input_buf, "/workspace reload") == 0 ||
+            strcmp(input_buf, "/workspace prompt") == 0) {
+            if (strcmp(input_buf, "/workspace bootstrap") == 0) {
+                char summary[768];
+                int rc = dsco_workspace_bootstrap(summary, sizeof(summary));
+                if (rc < 0) tui_error(summary);
+                else tui_success(summary);
+            } else if (strcmp(input_buf, "/workspace reload") == 0) {
+                dsco_workspace_prompt_invalidate();
+                tui_success("workspace prompt cache reloaded");
+            } else if (strcmp(input_buf, "/workspace prompt") == 0) {
+                const char *prompt = dsco_workspace_prompt();
+                if (prompt && *prompt) fprintf(stderr, "\n%s\n\n", prompt);
+                else tui_info("workspace prompt is empty");
+            } else {
+                dsco_workspace_status_t ws;
+                char summary[768];
+                dsco_workspace_status(&ws, summary, sizeof(summary));
+                fprintf(stderr, "\n");
+                tui_header("Workspace", TUI_BCYAN);
+                fprintf(stderr, "  %sRoot:%s        %s\n", TUI_DIM, TUI_RESET, dsco_workspace_root());
+                fprintf(stderr, "  %sIdentity:%s    %s\n", TUI_DIM, TUI_RESET, ws.has_identity ? "present" : "missing");
+                fprintf(stderr, "  %sUser:%s        %s\n", TUI_DIM, TUI_RESET, ws.has_user ? "present" : "missing");
+                fprintf(stderr, "  %sSoul:%s        %s\n", TUI_DIM, TUI_RESET, ws.has_soul ? "present" : "missing");
+                fprintf(stderr, "  %sMemory:%s      %s\n", TUI_DIM, TUI_RESET, ws.has_memory ? "present" : "missing");
+                fprintf(stderr, "  %sSkills:%s      %d installed\n", TUI_DIM, TUI_RESET, ws.installed_skills);
+                fprintf(stderr, "  %sActive skill:%s %s\n", TUI_DIM, TUI_RESET,
+                        session.active_skill[0] ? session.active_skill : "(none)");
+                fprintf(stderr, "  %sLegacy prompt:%s %s\n\n", TUI_DIM, TUI_RESET,
+                        ws.has_legacy_prompt ? "present" : "missing");
+            }
+            baseline_log("command", "/workspace", NULL, NULL);
+            continue;
+        }
+        if (strcmp(input_buf, "/skills") == 0 || strncmp(input_buf, "/skills ", 8) == 0) {
+            const char *arg = input_buf + 7;
+            while (*arg == ' ') arg++;
+            if (*arg == '\0') {
+                char out[8192];
+                int rc = dsco_workspace_list_skills(out, sizeof(out));
+                if (rc < 0) tui_error(out);
+                else fprintf(stderr, "\n%s\n\n", out);
+            } else if (strncmp(arg, "show ", 5) == 0) {
+                const char *name = arg + 5;
+                while (*name == ' ') name++;
+                char out[16384];
+                if (dsco_workspace_show_skill(name, out, sizeof(out)) < 0) tui_error(out);
+                else fprintf(stderr, "\n%s\n\n", out);
+            } else if (strncmp(arg, "use ", 4) == 0) {
+                const char *name = arg + 4;
+                while (*name == ' ') name++;
+                char out[4096];
+                if (dsco_workspace_show_skill(name, out, sizeof(out)) < 0) {
+                    tui_error(out);
+                } else {
+                    snprintf(session.active_skill, sizeof(session.active_skill), "%s", name);
+                    char msg[192];
+                    snprintf(msg, sizeof(msg), "active skill set to %s", name);
+                    tui_success(msg);
+                }
+            } else if (strcmp(arg, "clear") == 0 || strcmp(arg, "off") == 0) {
+                session.active_skill[0] = '\0';
+                tui_success("active skill cleared");
+            } else {
+                tui_error("usage: /skills | /skills show <name> | /skills use <name> | /skills clear");
+            }
+            baseline_log("command", "/skills", NULL, NULL);
+            continue;
+        }
+        if (strcmp(input_buf, "/topology") == 0 || strncmp(input_buf, "/topology ", 10) == 0) {
+            const char *arg = input_buf + 9;
+            while (*arg == ' ') arg++;
+            if (*arg == '\0') {
+                fprintf(stderr, "\n");
+                tui_header("Topology", TUI_BYELLOW);
+                fprintf(stderr, "  %sActive:%s      %s\n", TUI_DIM, TUI_RESET,
+                        session.active_topology[0] ? session.active_topology : "(none)");
+                fprintf(stderr, "  %sAuto:%s        %s\n", TUI_DIM, TUI_RESET,
+                        session.topology_auto ? "on" : "off");
+                fprintf(stderr, "  %sUsage:%s       /topology list | show <name> | use <name> | run <name> <task> | auto | off\n\n",
+                        TUI_DIM, TUI_RESET);
+            } else if (strcmp(arg, "list") == 0) {
+                print_topology_registry_brief();
+            } else if (strncmp(arg, "show ", 5) == 0) {
+                const char *name = arg + 5;
+                while (*name == ' ') name++;
+                const topology_t *topo = topology_find(name);
+                if (!topo) tui_error("topology not found");
+                else print_topology_summary(topo);
+            } else if (strncmp(arg, "use ", 4) == 0) {
+                const char *name = arg + 4;
+                while (*name == ' ') name++;
+                const topology_t *topo = topology_find(name);
+                if (!topo) {
+                    tui_error("topology not found");
+                } else {
+                    snprintf(session.active_topology, sizeof(session.active_topology), "%s", topo->name);
+                    session.topology_auto = false;
+                    char msg[192];
+                    snprintf(msg, sizeof(msg), "active topology set to %s", topo->name);
+                    tui_success(msg);
+                }
+            } else if (strncmp(arg, "run ", 4) == 0) {
+                char *copy = safe_strdup(arg + 4);
+                char *name = copy;
+                while (*name == ' ') name++;
+                char *task = name;
+                while (*task && *task != ' ') task++;
+                if (*task) {
+                    *task++ = '\0';
+                    while (*task == ' ') task++;
+                }
+                const topology_t *topo = topology_find(name);
+                if (!topo || !task || !*task) {
+                    tui_error("usage: /topology run <name> <task>");
+                } else {
+                    char saved_topology[sizeof(session.active_topology)];
+                    bool saved_auto = session.topology_auto;
+                    snprintf(saved_topology, sizeof(saved_topology), "%s", session.active_topology);
+                    snprintf(session.active_topology, sizeof(session.active_topology), "%s", topo->name);
+                    session.topology_auto = false;
+                    (void)run_topology_prompt(&session, api_key, &conv, task, &last_input_tokens);
+                    snprintf(session.active_topology, sizeof(session.active_topology), "%s", saved_topology);
+                    session.topology_auto = saved_auto;
+                }
+                free(copy);
+            } else if (strcmp(arg, "auto") == 0 || strcmp(arg, "auto on") == 0) {
+                session.topology_auto = true;
+                session.active_topology[0] = '\0';
+                tui_success("topology auto-selection enabled");
+            } else if (strcmp(arg, "off") == 0 || strcmp(arg, "clear") == 0 ||
+                       strcmp(arg, "auto off") == 0) {
+                session.topology_auto = false;
+                session.active_topology[0] = '\0';
+                tui_success("topology selection disabled");
+            } else {
+                tui_error("usage: /topology list | show <name> | use <name> | run <name> <task> | auto | off");
+            }
+            baseline_log("command", "/topology", session.active_topology[0] ? session.active_topology : NULL, NULL);
+            continue;
+        }
+        if (strcmp(input_buf, "/swarm") == 0 || strncmp(input_buf, "/swarm ", 7) == 0) {
+            const char *arg = input_buf + 6;
+            while (*arg == ' ') arg++;
+            if (*arg == '\0' || strcmp(arg, "status") == 0 || strcmp(arg, "list") == 0) {
+                print_swarm_summary(-1, true);
+            } else if (strncmp(arg, "show ", 5) == 0) {
+                int gid = atoi(arg + 5);
+                swarm_t *sw = tools_swarm_instance();
+                if (gid < 0 || gid >= sw->group_count) tui_error("invalid group id");
+                else print_swarm_summary(gid, true);
+            } else if (strncmp(arg, "wait ", 5) == 0) {
+                int gid = -1;
+                int timeout = 300;
+                if (sscanf(arg + 5, "%d %d", &gid, &timeout) < 1) {
+                    tui_error("usage: /swarm wait <group_id> [timeout_s]");
+                } else {
+                    char in[128];
+                    char out[MAX_RESPONSE_SIZE];
+                    snprintf(in, sizeof(in), "{\"group_id\":%d,\"timeout\":%d}", gid, timeout);
+                    if (!tools_execute("swarm_collect", in, out, sizeof(out))) {
+                        tui_error(out);
+                    } else {
+                        print_swarm_summary(gid, true);
+                    }
+                }
+            } else if (strncmp(arg, "kill-group ", 11) == 0) {
+                int gid = atoi(arg + 11);
+                swarm_t *sw = tools_swarm_instance();
+                if (gid < 0 || gid >= sw->group_count) {
+                    tui_error("invalid group id");
+                } else {
+                    swarm_group_kill(sw, gid);
+                    swarm_poll(sw, 0);
+                    tui_success("swarm group terminated");
+                    print_swarm_summary(gid, true);
+                }
+            } else if (strncmp(arg, "kill ", 5) == 0) {
+                int aid = atoi(arg + 5);
+                swarm_t *sw = tools_swarm_instance();
+                if (!swarm_kill(sw, aid)) tui_error("agent not running");
+                else {
+                    tui_success("swarm agent terminated");
+                    print_swarm_summary(-1, true);
+                }
+            } else {
+                tui_error("usage: /swarm | status | show <group_id> | wait <group_id> [timeout_s] | kill <agent_id> | kill-group <group_id>");
+            }
+            baseline_log("command", "/swarm", arg && *arg ? arg : NULL, NULL);
+            continue;
+        }
+        if (strcmp(input_buf, "/identity") == 0 || strcmp(input_buf, "/user") == 0 ||
+            strcmp(input_buf, "/soul") == 0 || strcmp(input_buf, "/memory") == 0) {
+            const char *doc = input_buf + 1;
+            char out[16384];
+            if (dsco_workspace_read_doc(doc, out, sizeof(out)) < 0) tui_error(out);
+            else fprintf(stderr, "\n%s\n\n", out);
+            baseline_log("command", doc, NULL, NULL);
+            continue;
+        }
         if (strcmp(input_buf, "/setup") == 0 || strcmp(input_buf, "/setup --force") == 0) {
             bool force = (strcmp(input_buf, "/setup --force") == 0);
             char summary[768];
@@ -1346,17 +2391,34 @@ void agent_run(const char *api_key, const char *model) {
                     else if (strcmp(category, "ast") == 0) cat_color = TUI_BMAGENTA;
                     fprintf(stderr, "  %s%s%s\n", cat_color, category, TUI_RESET);
                 }
-                fprintf(stderr, "    %s%-22s%s %s%s%s\n",
-                        TUI_CYAN, tools[i].name, TUI_RESET,
-                        TUI_DIM, tools[i].description, TUI_RESET);
+                /* Show call count from metrics if any */
+                const tool_metric_t *tm = tool_metrics_get(&tool_metrics, tools[i].name);
+                if (tm && tm->calls > 0) {
+                    fprintf(stderr, "    %s%-22s%s %s%3dx%s %s%s%s\n",
+                            TUI_CYAN, tools[i].name, TUI_RESET,
+                            TUI_BWHITE, tm->calls, TUI_RESET,
+                            TUI_DIM, tools[i].description, TUI_RESET);
+                } else {
+                    fprintf(stderr, "    %s%-22s%s     %s%s%s\n",
+                            TUI_CYAN, tools[i].name, TUI_RESET,
+                            TUI_DIM, tools[i].description, TUI_RESET);
+                }
             }
-            /* List MCP/external tools */
+            /* List MCP/external tools grouped by server */
             if (g_external_tool_count > 0) {
                 fprintf(stderr, "  %smcp%s\n", TUI_BYELLOW, TUI_RESET);
                 for (int i = 0; i < g_external_tool_count; i++) {
-                    fprintf(stderr, "    %s%-22s%s %s%s%s\n",
-                            TUI_CYAN, g_external_tools[i].name, TUI_RESET,
-                            TUI_DIM, g_external_tools[i].description, TUI_RESET);
+                    const tool_metric_t *tm = tool_metrics_get(&tool_metrics, g_external_tools[i].name);
+                    if (tm && tm->calls > 0) {
+                        fprintf(stderr, "    %s%-22s%s %s%3dx%s %s%s%s\n",
+                                TUI_CYAN, g_external_tools[i].name, TUI_RESET,
+                                TUI_BWHITE, tm->calls, TUI_RESET,
+                                TUI_DIM, g_external_tools[i].description, TUI_RESET);
+                    } else {
+                        fprintf(stderr, "    %s%-22s%s     %s%s%s\n",
+                                TUI_CYAN, g_external_tools[i].name, TUI_RESET,
+                                TUI_DIM, g_external_tools[i].description, TUI_RESET);
+                    }
                 }
             }
             fprintf(stderr, "\n  %s%d builtin + %d MCP + web_search + code_execution%s\n\n",
@@ -1376,12 +2438,25 @@ void agent_run(const char *api_key, const char *model) {
             fprintf(stderr, "  %s/save [name]%s save session\n", TUI_CYAN, TUI_RESET);
             fprintf(stderr, "  %s/load [name]%s load session\n", TUI_CYAN, TUI_RESET);
             fprintf(stderr, "  %s/sessions%s   list saved sessions\n", TUI_CYAN, TUI_RESET);
+            fprintf(stderr, "  %s/workspace%s  show claw workspace status\n", TUI_CYAN, TUI_RESET);
+            fprintf(stderr, "  %s/workspace bootstrap%s create missing workspace files\n", TUI_CYAN, TUI_RESET);
+            fprintf(stderr, "  %s/workspace reload%s reload composed workspace prompt\n", TUI_CYAN, TUI_RESET);
+            fprintf(stderr, "  %s/skills%s     list installed skills\n", TUI_CYAN, TUI_RESET);
+            fprintf(stderr, "  %s/skills use [name]%s activate one skill for future turns\n", TUI_CYAN, TUI_RESET);
+            fprintf(stderr, "  %s/skills show [name]%s print a skill body\n", TUI_CYAN, TUI_RESET);
+            fprintf(stderr, "  %s/identity%s   show workspace identity file\n", TUI_CYAN, TUI_RESET);
+            fprintf(stderr, "  %s/user%s       show workspace user file\n", TUI_CYAN, TUI_RESET);
+            fprintf(stderr, "  %s/soul%s       show workspace soul file\n", TUI_CYAN, TUI_RESET);
+            fprintf(stderr, "  %s/memory%s     show workspace memory file\n", TUI_CYAN, TUI_RESET);
             fprintf(stderr, "  %s/setup%s      save API keys to %s\n", TUI_CYAN, TUI_RESET, dsco_setup_env_path());
             fprintf(stderr, "  %s/force [tool]%s force next tool call\n", TUI_CYAN, TUI_RESET);
             fprintf(stderr, "  %s/web%s        toggle web search\n", TUI_CYAN, TUI_RESET);
             fprintf(stderr, "  %s/code%s       toggle code execution\n", TUI_CYAN, TUI_RESET);
             fprintf(stderr, "  %s/budget [$]%s  set cost budget\n", TUI_CYAN, TUI_RESET);
+            fprintf(stderr, "  %s/thinking [auto|>=1024]%s set thinking budget (in tokens)\n", TUI_CYAN, TUI_RESET);
             fprintf(stderr, "  %s/trust [tier]%s set trust tier (trusted/standard/untrusted)\n", TUI_CYAN, TUI_RESET);
+            fprintf(stderr, "  %s/topology%s   list/show/use/run topologies\n", TUI_CYAN, TUI_RESET);
+            fprintf(stderr, "  %s/swarm%s      inspect/wait/kill swarm agents and groups\n", TUI_CYAN, TUI_RESET);
             fprintf(stderr, "  %s/status%s     full session status\n", TUI_CYAN, TUI_RESET);
             fprintf(stderr, "  %s/tools%s      list all tools\n", TUI_CYAN, TUI_RESET);
             fprintf(stderr, "  %s/plugins%s    list loaded plugins\n", TUI_CYAN, TUI_RESET);
@@ -1392,6 +2467,9 @@ void agent_run(const char *api_key, const char *model) {
             fprintf(stderr, "  %s/features%s   toggle UI features (F1-F40)\n", TUI_CYAN, TUI_RESET);
             fprintf(stderr, "  %s/perf%s       latency waterfall + throughput\n", TUI_CYAN, TUI_RESET);
             fprintf(stderr, "  %s/minimap%s    conversation minimap\n", TUI_CYAN, TUI_RESET);
+            fprintf(stderr, "  %s/dashboard%s  rich session overview panel\n", TUI_CYAN, TUI_RESET);
+            fprintf(stderr, "  %s/top%s        tool leaderboard by calls\n", TUI_CYAN, TUI_RESET);
+            fprintf(stderr, "  %s/flame%s      flame timeline for tool executions\n", TUI_CYAN, TUI_RESET);
             fprintf(stderr, "  %s/help%s       show this help\n", TUI_CYAN, TUI_RESET);
             fprintf(stderr, "  %squit%s        exit dsco\n", TUI_CYAN, TUI_RESET);
             fprintf(stderr, "\n");
@@ -1561,6 +2639,19 @@ void agent_run(const char *api_key, const char *model) {
             fprintf(stderr, "  %sEffort:%s      %s\n", TUI_DIM, TUI_RESET, session.effort);
             fprintf(stderr, "  %sTrust tier:%s  %s\n", TUI_DIM, TUI_RESET,
                     session_trust_tier_to_string(session.trust_tier));
+            fprintf(stderr, "  %sActive skill:%s %s\n", TUI_DIM, TUI_RESET,
+                    session.active_skill[0] ? session.active_skill : "(none)");
+            fprintf(stderr, "  %sTopology:%s    %s%s%s\n", TUI_DIM, TUI_RESET,
+                    session.active_topology[0] ? session.active_topology : "(none)",
+                    session.topology_auto ? " " : "",
+                    session.topology_auto ? "(auto)" : "");
+            {
+                swarm_t *sw = tools_swarm_instance();
+                swarm_poll(sw, 0);
+                fprintf(stderr, "  %sSwarm:%s       %d agents / %d groups / %d active\n",
+                        TUI_DIM, TUI_RESET, sw->child_count, sw->group_count,
+                        swarm_active_count(sw));
+            }
             if (session.temperature >= 0)
                 fprintf(stderr, "  %sTemperature:%s %.2f\n", TUI_DIM, TUI_RESET, session.temperature);
             if (session.thinking_budget > 0)
@@ -1592,6 +2683,25 @@ void agent_run(const char *api_key, const char *model) {
             fprintf(stderr, "  %sCache:%s       %d hits / %d misses\n", TUI_DIM, TUI_RESET,
                     tool_cache.hits, tool_cache.misses);
             fprintf(stderr, "  %sTotal tools:%s %d\n\n", TUI_DIM, TUI_RESET, tool_count);
+            if (session.active_topology[0]) {
+                const topology_t *topo = topology_find(session.active_topology);
+                if (topo) {
+                    char ascii[4096];
+                    topology_render_ascii(topo, ascii, sizeof(ascii));
+                    fprintf(stderr, "%s\n\n", ascii);
+                }
+            }
+            if (tools_swarm_instance()->child_count > 0) {
+                swarm_t *sw = tools_swarm_instance();
+                int swarm_done = 0, swarm_running = 0, swarm_errored = 0;
+                for (int i = 0; i < sw->child_count; i++) {
+                    if (sw->children[i].status == SWARM_DONE) swarm_done++;
+                    else if (sw->children[i].status == SWARM_RUNNING || sw->children[i].status == SWARM_STREAMING) swarm_running++;
+                    else if (sw->children[i].status == SWARM_ERROR || sw->children[i].status == SWARM_KILLED) swarm_errored++;
+                }
+                tui_agent_rollup(sw->child_count, swarm_done, swarm_running, swarm_errored);
+                fprintf(stderr, "\n");
+            }
             continue;
         }
         /* /temp — temperature control */
@@ -1797,6 +2907,243 @@ void agent_run(const char *api_key, const char *model) {
             continue;
         }
 
+        /* /dashboard — rich session overview */
+        if (strcmp(input_buf, "/dashboard") == 0) {
+            fprintf(stderr, "\n");
+            tui_header("Dashboard", TUI_BCYAN);
+            double cost = session_cost(&session);
+            const model_info_t *mi = model_lookup(session.model);
+            int ctx_used = session.total_input_tokens + session.total_output_tokens;
+            int ctx_max = session.context_window > 0 ? session.context_window : CONTEXT_WINDOW_TOKENS;
+            double avg_ttft = session.telemetry_samples > 0
+                ? session.total_ttft_ms / session.telemetry_samples : 0;
+            double avg_stream = session.telemetry_samples > 0
+                ? session.total_stream_ms / session.telemetry_samples : 0;
+            double avg_tps = avg_stream > 0 && session.total_output_tokens > 0
+                ? (session.total_output_tokens / (double)session.telemetry_samples)
+                  / (avg_stream / 1000.0) : 0;
+
+            /* Count total tools from metrics */
+            int dash_total_tools = 0;
+            for (int ti = 0; ti < tool_metrics.count; ti++)
+                dash_total_tools += tool_metrics.entries[ti].calls;
+
+            /* Session stats */
+            fprintf(stderr, "  %s┌─ Session ───────────────────────────────────┐%s\n", TUI_DIM, TUI_RESET);
+            fprintf(stderr, "  %s│%s  Turns: %s%-6d%s  Tools: %s%-6d%s  Msgs: %s%-4d%s  %s│%s\n",
+                    TUI_DIM, TUI_RESET, TUI_BWHITE, session.turn_count, TUI_RESET,
+                    TUI_BWHITE, dash_total_tools, TUI_RESET,
+                    TUI_BWHITE, conv.count, TUI_RESET, TUI_DIM, TUI_RESET);
+            fprintf(stderr, "  %s│%s  Model: %s%-20s%s  Trust: %s%-8s%s %s│%s\n",
+                    TUI_DIM, TUI_RESET, TUI_BCYAN, mi ? mi->alias : session.model, TUI_RESET,
+                    TUI_BYELLOW, session_trust_tier_to_string(session.trust_tier), TUI_RESET,
+                    TUI_DIM, TUI_RESET);
+            fprintf(stderr, "  %s│%s  Topology: %s%-17s%s  Auto: %s%-3s%s %s│%s\n",
+                    TUI_DIM, TUI_RESET,
+                    TUI_BWHITE, session.active_topology[0] ? session.active_topology : "(none)", TUI_RESET,
+                    TUI_BWHITE, session.topology_auto ? "on" : "off", TUI_RESET,
+                    TUI_DIM, TUI_RESET);
+            fprintf(stderr, "  %s└─────────────────────────────────────────────┘%s\n", TUI_DIM, TUI_RESET);
+
+            {
+                swarm_t *sw = tools_swarm_instance();
+                swarm_poll(sw, 0);
+                if (sw->child_count > 0) {
+                    double swarm_cost = 0.0;
+                    for (int i = 0; i < sw->child_count; i++) swarm_cost += sw->children[i].est_cost_usd;
+                    fprintf(stderr, "\n  %s┌─ Swarm ────────────────────────────────────┐%s\n", TUI_DIM, TUI_RESET);
+                    fprintf(stderr, "  %s│%s  Agents: %s%-4d%s  Groups: %s%-4d%s  Active: %s%-4d%s %s│%s\n",
+                            TUI_DIM, TUI_RESET,
+                            TUI_BWHITE, sw->child_count, TUI_RESET,
+                            TUI_BWHITE, sw->group_count, TUI_RESET,
+                            TUI_BCYAN, swarm_active_count(sw), TUI_RESET,
+                            TUI_DIM, TUI_RESET);
+                    fprintf(stderr, "  %s│%s  Est:    %s$%.4f%s                                %s│%s\n",
+                            TUI_DIM, TUI_RESET, TUI_BCYAN, swarm_cost, TUI_RESET,
+                            TUI_DIM, TUI_RESET);
+                    fprintf(stderr, "  %s└─────────────────────────────────────────────┘%s\n", TUI_DIM, TUI_RESET);
+                }
+            }
+
+            /* Cost breakdown */
+            fprintf(stderr, "\n  %s┌─ Cost ─────────────────────────────────────┐%s\n", TUI_DIM, TUI_RESET);
+            if (mi) {
+                double in_cost = session.total_input_tokens * mi->input_price / 1e6;
+                double out_cost = session.total_output_tokens * mi->output_price / 1e6;
+                double cache_r = session.total_cache_read_tokens * mi->cache_read_price / 1e6;
+                double cache_w = session.total_cache_write_tokens * mi->cache_write_price / 1e6;
+                fprintf(stderr, "  %s│%s  Input:  %s$%.4f%s (%dk tok)                %s│%s\n",
+                        TUI_DIM, TUI_RESET, TUI_GREEN, in_cost, TUI_RESET,
+                        session.total_input_tokens / 1000, TUI_DIM, TUI_RESET);
+                fprintf(stderr, "  %s│%s  Output: %s$%.4f%s (%dk tok)                %s│%s\n",
+                        TUI_DIM, TUI_RESET, TUI_GREEN, out_cost, TUI_RESET,
+                        session.total_output_tokens / 1000, TUI_DIM, TUI_RESET);
+                fprintf(stderr, "  %s│%s  Cache:  %s$%.4f%s read + %s$%.4f%s write    %s│%s\n",
+                        TUI_DIM, TUI_RESET, TUI_BCYAN, cache_r, TUI_RESET,
+                        TUI_BCYAN, cache_w, TUI_RESET, TUI_DIM, TUI_RESET);
+                fprintf(stderr, "  %s│%s  Total:  %s%s$%.4f%s                         %s│%s\n",
+                        TUI_DIM, TUI_RESET, TUI_BOLD, TUI_BGREEN, cost, TUI_RESET,
+                        TUI_DIM, TUI_RESET);
+            }
+            if (g_cost_budget > 0) {
+                fprintf(stderr, "  %s│%s  Budget: $%.2f (%.0f%% used)               %s│%s\n",
+                        TUI_DIM, TUI_RESET, g_cost_budget, 100.0 * cost / g_cost_budget,
+                        TUI_DIM, TUI_RESET);
+            }
+            fprintf(stderr, "  %s└─────────────────────────────────────────────┘%s\n", TUI_DIM, TUI_RESET);
+
+            /* Context gauge */
+            fprintf(stderr, "\n  %sContext:%s ", TUI_DIM, TUI_RESET);
+            tui_context_gauge(ctx_used, ctx_max, 40);
+
+            /* Streaming performance */
+            if (session.telemetry_samples > 0) {
+                fprintf(stderr, "  %s┌─ Streaming ─────────────────────────────────┐%s\n", TUI_DIM, TUI_RESET);
+                fprintf(stderr, "  %s│%s  Avg TTFT:  %s%.0fms%s                          %s│%s\n",
+                        TUI_DIM, TUI_RESET, TUI_BCYAN, avg_ttft, TUI_RESET, TUI_DIM, TUI_RESET);
+                fprintf(stderr, "  %s│%s  Avg tok/s: %s%.0f%s                             %s│%s\n",
+                        TUI_DIM, TUI_RESET, TUI_BCYAN, avg_tps, TUI_RESET, TUI_DIM, TUI_RESET);
+                fprintf(stderr, "  %s└─────────────────────────────────────────────┘%s\n", TUI_DIM, TUI_RESET);
+            }
+
+            /* Top tools */
+            if (tool_metrics.count > 0) {
+                fprintf(stderr, "\n  %sTop Tools:%s\n", TUI_DIM, TUI_RESET);
+                /* Find top 5 by call count */
+                int indices[5] = {-1,-1,-1,-1,-1};
+                for (int t = 0; t < 5 && t < tool_metrics.count; t++) {
+                    int best = -1;
+                    for (int i = 0; i < tool_metrics.count; i++) {
+                        bool skip = false;
+                        for (int j = 0; j < t; j++) if (indices[j] == i) skip = true;
+                        if (skip) continue;
+                        if (best < 0 || tool_metrics.entries[i].calls > tool_metrics.entries[best].calls)
+                            best = i;
+                    }
+                    if (best >= 0) indices[t] = best;
+                }
+                for (int t = 0; t < 5; t++) {
+                    if (indices[t] < 0) break;
+                    tool_metric_t *e = &tool_metrics.entries[indices[t]];
+                    double avg = e->calls > 0 ? e->total_latency_ms / e->calls : 0;
+                    fprintf(stderr, "    %s%d.%s %s%-20s%s %s%d calls%s  avg %s%.0fms%s\n",
+                            TUI_DIM, t+1, TUI_RESET,
+                            TUI_CYAN, e->name, TUI_RESET,
+                            TUI_BWHITE, e->calls, TUI_RESET,
+                            TUI_DIM, avg, TUI_RESET);
+                }
+            }
+
+            /* Cache hit rate */
+            int cache_total = tool_cache.hits + tool_cache.misses;
+            if (cache_total > 0) {
+                fprintf(stderr, "\n  %sCache:%s %d/%d hits (%.0f%%)\n",
+                        TUI_DIM, TUI_RESET, tool_cache.hits, cache_total,
+                        100.0 * tool_cache.hits / cache_total);
+            }
+
+            /* Git branch */
+            {
+                FILE *gf = popen("git rev-parse --abbrev-ref HEAD 2>/dev/null", "r");
+                if (gf) {
+                    char branch[128] = "";
+                    if (fgets(branch, sizeof(branch), gf)) {
+                        size_t bl = strlen(branch);
+                        if (bl > 0 && branch[bl-1] == '\n') branch[bl-1] = '\0';
+                        if (branch[0])
+                            fprintf(stderr, "  %sGit:%s %s%s%s\n", TUI_DIM, TUI_RESET,
+                                    TUI_BMAGENTA, branch, TUI_RESET);
+                    }
+                    pclose(gf);
+                }
+            }
+
+            /* Fallback chain */
+            if (session.fallback_count > 0) {
+                fprintf(stderr, "  %sFallback:%s ", TUI_DIM, TUI_RESET);
+                for (int fi = 0; fi < session.fallback_count; fi++)
+                    fprintf(stderr, "%s%s%s%s", fi ? " → " : "",
+                            TUI_BYELLOW, session.fallback_models[fi], TUI_RESET);
+                fprintf(stderr, "\n");
+            }
+
+            /* Active features count */
+            {
+                int active = 0;
+                const bool *flags = (const bool *)&g_features;
+                for (int fi = 0; fi < TUI_FEATURE_COUNT; fi++)
+                    if (flags[fi]) active++;
+                fprintf(stderr, "  %sFeatures:%s %d/%d active\n", TUI_DIM, TUI_RESET, active, TUI_FEATURE_COUNT);
+            }
+
+            fprintf(stderr, "\n");
+            continue;
+        }
+
+        /* /top — tool leaderboard */
+        if (strcmp(input_buf, "/top") == 0) {
+            fprintf(stderr, "\n");
+            tui_header("Tool Leaderboard", TUI_BCYAN);
+            if (tool_metrics.count == 0) {
+                fprintf(stderr, "  %sno tool calls recorded yet%s\n\n", TUI_DIM, TUI_RESET);
+            } else {
+                /* Sort indices by call count descending */
+                int idx[256];
+                int n = tool_metrics.count > 256 ? 256 : tool_metrics.count;
+                for (int i = 0; i < n; i++) idx[i] = i;
+                for (int i = 0; i < n - 1; i++) {
+                    for (int j = i + 1; j < n; j++) {
+                        if (tool_metrics.entries[idx[j]].calls > tool_metrics.entries[idx[i]].calls) {
+                            int tmp = idx[i]; idx[i] = idx[j]; idx[j] = tmp;
+                        }
+                    }
+                }
+                fprintf(stderr, "  %s%-4s %-22s %6s %7s %8s %8s%s\n", TUI_DIM,
+                        "RANK", "TOOL", "CALLS", "OK%", "AVG(ms)", "COST", TUI_RESET);
+
+                const model_info_t *mi_top = model_lookup(session.model);
+                for (int i = 0; i < n; i++) {
+                    tool_metric_t *e = &tool_metrics.entries[idx[i]];
+                    double avg = e->calls > 0 ? e->total_latency_ms / e->calls : 0;
+                    double ok_pct = e->calls > 0 ? 100.0 * e->successes / e->calls : 0;
+                    /* Estimate tool cost: rough token estimate per call */
+                    double est_cost = 0;
+                    if (mi_top) est_cost = e->calls * 500.0 * (mi_top->input_price + mi_top->output_price) / 2.0 / 1e6;
+
+                    const char *speed_color = avg < 500 ? TUI_GREEN : (avg < 2000 ? TUI_YELLOW : TUI_RED);
+                    const char *ok_color = ok_pct >= 95 ? TUI_GREEN : (ok_pct >= 80 ? TUI_YELLOW : TUI_RED);
+
+                    fprintf(stderr, "  %s%2d.%s  %s%-22s%s %6d %s%6.0f%%%s %s%7.0f%s %s$%.3f%s\n",
+                            TUI_DIM, i + 1, TUI_RESET,
+                            TUI_CYAN, e->name, TUI_RESET,
+                            e->calls,
+                            ok_color, ok_pct, TUI_RESET,
+                            speed_color, avg, TUI_RESET,
+                            TUI_DIM, est_cost, TUI_RESET);
+                }
+                fprintf(stderr, "\n");
+            }
+            continue;
+        }
+
+        /* /flame — flame timeline for last turn */
+        if (strcmp(input_buf, "/flame") == 0) {
+            fprintf(stderr, "\n");
+            tui_header("Flame Timeline", TUI_BCYAN);
+            if (s_flame.count == 0) {
+                fprintf(stderr, "  %sno tool executions recorded this session%s\n\n", TUI_DIM, TUI_RESET);
+            } else {
+                tui_flame_render(&s_flame);
+                fprintf(stderr, "\n");
+            }
+            continue;
+        }
+
+        if ((session.active_topology[0] || session.topology_auto) &&
+            run_topology_prompt(&session, api_key, &conv, input_buf, &last_input_tokens)) {
+            continue;
+        }
+
         baseline_log("user", "prompt", input_buf, NULL);
 
         /* F19: Branch detection */
@@ -1882,6 +3229,7 @@ void agent_run(const char *api_key, const char *model) {
         int total_input = 0, total_output = 0, total_cache_read = 0;
         int total_tools_used = 0;
         int pause_turn_streak = 0;
+        tools_context_turn_begin();
 
         /* Per-prompt trace ID */
         char trace_id[37];
@@ -1892,8 +3240,12 @@ void agent_run(const char *api_key, const char *model) {
         /* Per-turn arena allocator */
         arena_t turn_arena;
         arena_init(&turn_arena);
+        terminal_input_echo_suspend();
+        esc_poller_start();
+        g_turn_start_time = now_ms();
 
-        while (turns < MAX_AGENT_TURNS && !g_interrupted) {
+resume_turn_loop:
+        while (turns < dsco_max_agent_turns() && !g_interrupted) {
             turns++;
             s_in_text_block = false;
             md_reset(&s_md);
@@ -1928,12 +3280,30 @@ void agent_run(const char *api_key, const char *model) {
                 break;
             }
 
+            /* Pre-flight context check: estimate tokens from payload size */
+            {
+                size_t payload_chars = req ? strlen(req) : 0;
+                int est_tokens = (int)(payload_chars / 4);
+                int ctx_limit = session.context_window > 0 ? session.context_window : CONTEXT_WINDOW_TOKENS;
+                if (est_tokens > (int)(ctx_limit * TOKEN_BUDGET_COMPACT)) {
+                    fprintf(stderr, "  \033[33m%s context pressure: ~%dk/%dk tokens (%.0f%%) — consider /compact\033[0m\n",
+                            tui_glyph()->warn,
+                            est_tokens / 1000, ctx_limit / 1000,
+                            100.0 * est_tokens / ctx_limit);
+                }
+            }
+
             /* Stream via provider with fallback chain */
             char llm_span[37] = "";
             trace_span_begin(trace_id, "llm_stream", prompt_span, llm_span);
 
+            /* Start heartbeat — auto-detects silent stream and shows spinner */
+            tui_stream_heartbeat_start(&s_heartbeat);
+            g_stream_heartbeat = &s_heartbeat;
+
+            const char *cur_key = resolve_provider_key(api_key);
             stream_result_t sr = g_provider
-                ? g_provider->stream(g_provider, api_key, req,
+                ? g_provider->stream(g_provider, cur_key, req,
                                       on_stream_text, on_stream_tool_start,
                                       on_stream_thinking, NULL)
                 : llm_stream(api_key, req,
@@ -1947,6 +3317,7 @@ void agent_run(const char *api_key, const char *model) {
                     if (strcmp(fb_model, session.model) == 0) continue;
 
                     fprintf(stderr, "  %sfallback: trying %s%s\n", TUI_YELLOW, fb_model, TUI_RESET);
+                    tui_stream_heartbeat_poke(&s_heartbeat, "fallback...");
                     json_free_response(&sr.parsed);
 
                     /* Rebuild request with fallback model */
@@ -1983,6 +3354,10 @@ void agent_run(const char *api_key, const char *model) {
             }
             free(req);
 
+            /* Stop heartbeat — stream is done */
+            g_stream_heartbeat = NULL;
+            tui_stream_heartbeat_stop(&s_heartbeat);
+
             /* Reset forced tool_choice after first turn (single-shot) */
             if (turns == 1 && session.tool_choice[0]) {
                 session.tool_choice[0] = '\0';
@@ -2013,9 +3388,11 @@ void agent_run(const char *api_key, const char *model) {
                which causes erase_partial_echo to miss the echoed line
                and produce duplicate output. */
             if (s_in_text_block) {
+                tui_term_lock();
                 md_flush(&s_md);
-                printf("\n");
-                fflush(stdout);
+                fprintf(stderr, "\n");
+                fflush(stderr);
+                tui_term_unlock();
                 s_in_text_block = false;
             }
 
@@ -2041,24 +3418,37 @@ void agent_run(const char *api_key, const char *model) {
             session.total_cache_write_tokens += sr.usage.cache_creation_input_tokens;
             session.turn_count++;
 
-            print_usage_ex(&sr.usage, session.model, &session);
+            /* Pre-count tool_use blocks so we can suppress noisy per-turn
+               usage/telemetry lines when tools will show inline metadata */
+            int tool_count_this_turn = 0;
+            for (int ti = 0; ti < sr.parsed.count; ti++) {
+                content_block_t *tb = &sr.parsed.blocks[ti];
+                if (tb->type && strcmp(tb->type, "tool_use") == 0)
+                    tool_count_this_turn++;
+            }
 
-            /* Update status bar with full cost (including cache pricing) */
+            /* Only print usage/telemetry for non-tool turns (tool turns fold it inline) */
+            if (tool_count_this_turn == 0)
+                print_usage_ex(&sr.usage, session.model, &session);
+
+            /* Update and render status bar with full cost (including cache pricing) */
             {
                 double cost = session_cost(&session);
                 tui_status_bar_update(&status_bar,
                     session.total_input_tokens, session.total_output_tokens,
                     cost, session.turn_count, total_tools_used);
+                tui_status_bar_render(&status_bar);
             }
 
-            /* Streaming telemetry */
+            /* Streaming telemetry — suppress for tool turns */
             if (sr.telemetry.ttft_ms > 0) {
                 session.total_ttft_ms += sr.telemetry.ttft_ms;
                 session.total_stream_ms += sr.telemetry.total_ms;
                 session.telemetry_samples++;
-                fprintf(stderr, "%s  [ttft:%.0fms total:%.0fms %.0f tok/s]%s\n",
-                        TUI_DIM, sr.telemetry.ttft_ms, sr.telemetry.total_ms,
-                        sr.telemetry.tokens_per_sec, TUI_RESET);
+                if (tool_count_this_turn == 0)
+                    fprintf(stderr, "%s  [ttft:%.0fms total:%.0fms %.0f tok/s]%s\n",
+                            TUI_DIM, sr.telemetry.ttft_ms, sr.telemetry.total_ms,
+                            sr.telemetry.tokens_per_sec, TUI_RESET);
                 /* F40: Save latency breakdown for /perf */
                 s_last_latency.dns_ms = sr.telemetry.latency.dns_ms;
                 s_last_latency.connect_ms = sr.telemetry.latency.connect_ms;
@@ -2066,14 +3456,79 @@ void agent_run(const char *api_key, const char *model) {
                 s_last_latency.ttfb_ms = sr.telemetry.latency.ttfb_ms;
                 s_last_latency.total_ms = sr.telemetry.latency.total_ms;
             }
-            /* F39: Render throughput sparkline */
-            tui_throughput_render(&s_throughput);
-            /* F7: Render citation footnotes */
-            tui_citation_render(&s_citations);
+            /* F39: Throughput data kept for /perf; rendered inline in section divider */
+            /* F7: Citations already shown inline as [N] markers during streaming */
             tui_citation_init(&s_citations); /* reset for next turn */
-            /* Reset per-turn flame + DAG */
+            /* Reset per-turn flame + DAG (data kept for /perf) */
             tui_flame_init(&s_flame);
             tui_dag_init(&s_dag);
+
+            /* ── Router: record turn + decide successor model ─────────────── */
+            {
+                const model_info_t *cur_mi = model_lookup(session.model);
+                double turn_cost = 0.0;
+                if (cur_mi) {
+                    turn_cost = sr.usage.input_tokens  * cur_mi->input_price  / 1e6
+                              + sr.usage.output_tokens * cur_mi->output_price / 1e6
+                              + sr.usage.cache_read_input_tokens    * cur_mi->cache_read_price  / 1e6
+                              + sr.usage.cache_creation_input_tokens * cur_mi->cache_write_price / 1e6;
+                }
+                router_record_turn(&g_router, session.model,
+                                   sr.usage.input_tokens, sr.usage.output_tokens,
+                                   sr.telemetry.total_ms, turn_cost,
+                                   sr.telemetry.tokens_per_sec, sr.ok);
+
+                if (tool_count_this_turn == 0) {
+                    /* Only suggest after non-tool turns to avoid noise */
+                    int ctx_window_now = session.context_window > 0
+                                        ? session.context_window : CONTEXT_WINDOW_TOKENS;
+                    int ctx_pct = sr.usage.input_tokens * 100
+                                  / (ctx_window_now > 0 ? ctx_window_now : 200000);
+                    task_complexity_t complexity =
+                        router_classify_task(NULL, session.turn_count,
+                                             0, ctx_pct);
+                    router_decision_t rd =
+                        router_decide(&g_router, session.model, complexity,
+                                      session_cost(&session),
+                                      sr.telemetry.total_ms,
+                                      consecutive_tool_failures);
+                    if (rd.should_switch
+                        && rd.model_id[0]
+                        && strcmp(rd.model_id, session.model) != 0
+                        && !session.model_locked) {
+                        /* Only switch within the same provider unless cross-provider
+                         * routing is explicitly opted in via environment variable. */
+                        const char *cur_pname = provider_detect(session.model, NULL);
+                        const char *rd_pname  = provider_detect(rd.model_id, NULL);
+                        bool cross_provider   = (strcmp(cur_pname, rd_pname) != 0);
+                        bool allow_cross      = (getenv("DSCO_ALLOW_CROSS_PROVIDER_ROUTING") != NULL);
+                        if (cross_provider && !allow_cross) goto skip_router_switch;
+                        /* Verify the target provider key is usable (not just non-empty) */
+                        const char *rd_key = provider_resolve_api_key(rd_pname);
+                        bool rd_routable = (rd_key && rd_key[0]);
+                        if (!rd_routable) {
+                            const char *or_key = getenv("OPENROUTER_API_KEY");
+                            rd_routable = (or_key && or_key[0]);
+                        }
+                        if (rd_routable) {
+                            char prev_model[128];
+                            snprintf(prev_model, sizeof(prev_model), "%s", session.model);
+                            snprintf(session.model, sizeof(session.model),
+                                     "%s", rd.model_id);
+                            session.context_window = model_context_window(rd.model_id);
+                            tools_set_runtime_model(session.model);
+                            ensure_provider(&session, api_key);
+                            fprintf(stderr,
+                                "  \033[2m[router] %s → %s  reason=%s  confidence=%.0f%%\033[0m\n",
+                                prev_model,
+                                session.model,
+                                switch_reason_name(rd.reason),
+                                (double)rd.confidence * 100.0);
+                        }
+                        skip_router_switch:;
+                    }
+                }
+            }
 
             /* Token budget awareness */
             int ctx_window = session.context_window > 0 ? session.context_window : CONTEXT_WINDOW_TOKENS;
@@ -2091,13 +3546,7 @@ void agent_run(const char *api_key, const char *model) {
                (local tool results, tool-generated media, etc.). */
             bool needs_followup_turn = false;
 
-            /* Count tool_use blocks */
-            int tool_count_this_turn = 0;
-            for (int i = 0; i < sr.parsed.count; i++) {
-                content_block_t *blk = &sr.parsed.blocks[i];
-                if (blk->type && strcmp(blk->type, "tool_use") == 0)
-                    tool_count_this_turn++;
-            }
+            /* tool_count_this_turn already computed above */
             total_tools_used += tool_count_this_turn;
 
             if (tool_count_this_turn == 1) {
@@ -2106,8 +3555,8 @@ void agent_run(const char *api_key, const char *model) {
                 for (int i = 0; i < sr.parsed.count; i++) {
                     content_block_t *blk = &sr.parsed.blocks[i];
                     if (blk->type && strcmp(blk->type, "tool_use") == 0) {
-                        /* Show tool arguments */
-                        print_tool_args(blk->tool_name, blk->tool_input);
+                        /* Show merged ⚡ name + args on one line */
+                        print_tool_start_line(blk->tool_name, blk->tool_input);
 
                         char trust_reason[256];
                         const char *tier = session_trust_tier_to_string(session.trust_tier);
@@ -2138,10 +3587,45 @@ void agent_run(const char *api_key, const char *model) {
                                                           blk->tool_input, tool_result,
                                                           MAX_TOOL_RESULT, &ok);
                         pthread_mutex_unlock(&g_locks.cache_lock);
+                        dsco_strip_terminal_controls_inplace(tool_result);
 
                         if (cache_hit) {
-                            /* F14: Cached badge */
-                            tui_cached_badge(blk->tool_name);
+                            /* Compact cached result — powerline style with [cached] badge */
+                            const tui_glyphs_t *cgl = tui_glyph();
+                            const char *nl = tool_result[0] ? strchr(tool_result, '\n') : NULL;
+                            int plen = nl ? (int)(nl - tool_result) : (int)strlen(tool_result);
+                            if (plen > 80) plen = 80;
+                            bool use_pl = tui_detect_color_level() >= TUI_COLOR_256;
+                            if (use_pl) {
+                                /* Green pill for cached */
+                                fprintf(stderr, "  \033[48;2;40;120;60m\033[38;2;200;255;200m %s %s \033[0m",
+                                        cgl->ok, blk->tool_name);
+                                fprintf(stderr, "\033[38;2;40;120;60m%s%s",
+                                        cgl->pl_right ? cgl->pl_right : "", TUI_RESET);
+                                fprintf(stderr, " %s⚡cached%s", TUI_DIM, TUI_RESET);
+                            } else {
+                                fprintf(stderr, "  %s%s%s %s%s%s %s[cached]%s",
+                                        TUI_GREEN, cgl->ok, TUI_RESET,
+                                        TUI_BOLD, blk->tool_name, TUI_RESET,
+                                        TUI_DIM, TUI_RESET);
+                            }
+                            if (plen > 0)
+                                fprintf(stderr, " %s%.*s%s", TUI_DIM, plen, tool_result, TUI_RESET);
+                            /* Inline cost suffix — same data as spinner completion */
+                            {
+                                const model_info_t *mi = model_lookup(session.model);
+                                if (mi) {
+                                    double tc = sr.usage.input_tokens * mi->input_price / 1e6
+                                              + sr.usage.output_tokens * mi->output_price / 1e6
+                                              + sr.usage.cache_read_input_tokens * mi->cache_read_price / 1e6
+                                              + sr.usage.cache_creation_input_tokens * mi->cache_write_price / 1e6;
+                                    fprintf(stderr, " %s[in:%d out:%d $%.4f]%s",
+                                            TUI_DIM,
+                                            sr.usage.input_tokens, sr.usage.output_tokens, tc,
+                                            TUI_RESET);
+                                }
+                            }
+                            fprintf(stderr, "\n");
                         } else {
                             /* Trace span for tool execution */
                             char tool_span[37] = "";
@@ -2161,14 +3645,44 @@ void agent_run(const char *api_key, const char *model) {
                             double t0 = now_ms();
                             ok = tools_execute_for_tier(blk->tool_name, blk->tool_input, tier,
                                                         tool_result, MAX_TOOL_RESULT);
+                            dsco_strip_terminal_controls_inplace(tool_result);
+
+                            /* Warn model if output was truncated */
+                            size_t result_len = strlen(tool_result);
+                            if (result_len >= MAX_TOOL_RESULT - 256) {
+                                size_t cur = strlen(tool_result);
+                                snprintf(tool_result + cur, MAX_TOOL_RESULT - cur,
+                                         "\n[WARNING: output truncated at %zu bytes — full output exceeds %d byte limit]",
+                                         result_len, MAX_TOOL_RESULT);
+                            }
+
                             double elapsed = (now_ms() - t0) * 1000.0;
 
                             bool was_timeout = wd.timed_out;
                             watchdog_stop(&wd);
 
-                            /* Stop spinner — shows completion line */
+                            /* Build inline usage+cost suffix */
+                            char spin_suffix[128] = "";
+                            {
+                                const model_info_t *mi = model_lookup(session.model);
+                                if (mi) {
+                                    double tc2 = sr.usage.input_tokens * mi->input_price / 1e6
+                                               + sr.usage.output_tokens * mi->output_price / 1e6
+                                               + sr.usage.cache_read_input_tokens * mi->cache_read_price / 1e6
+                                               + sr.usage.cache_creation_input_tokens * mi->cache_write_price / 1e6;
+                                    snprintf(spin_suffix, sizeof(spin_suffix),
+                                             "[in:%d out:%d $%.4f]",
+                                             sr.usage.input_tokens, sr.usage.output_tokens, tc2);
+                                } else {
+                                    snprintf(spin_suffix, sizeof(spin_suffix),
+                                             "[in:%d out:%d]",
+                                             sr.usage.input_tokens, sr.usage.output_tokens);
+                                }
+                            }
+
+                            /* Stop spinner — shows completion line with inline metadata */
                             tui_async_spinner_stop(&spinner, ok && !was_timeout,
-                                                   tool_result, elapsed);
+                                                   tool_result, elapsed, spin_suffix);
 
                             /* If watchdog set g_interrupted (not user), clear it */
                             if (was_timeout && g_tool_timed_out) {
@@ -2210,12 +3724,7 @@ void agent_run(const char *api_key, const char *model) {
 
                             trace_span_end(tool_span, was_timeout ? "timeout" : (ok ? "ok" : "error"), NULL);
                         }
-                        /* Spinner already printed result for non-cached; only print for cache hits */
-                        if (cache_hit) print_tool_result(blk->tool_name, ok, tool_result);
-                        /* F13: Per-tool cost annotation */
-                        tui_tool_cost(blk->tool_name, sr.usage.input_tokens,
-                                      sr.usage.output_tokens, session.model);
-                        fprintf(stderr, "\n");
+                        /* Spinner printed result for non-cached; cache-hit printed inline above */
                         conv_add_tool_result(&conv, blk->tool_id, tool_result, !ok);
                         free(tool_result);
                     }
@@ -2246,8 +3755,17 @@ void agent_run(const char *api_key, const char *model) {
                     content_block_t *blk = &sr.parsed.blocks[i];
                     if (g_interrupted) break;
                     if (blk->type && strcmp(blk->type, "tool_use") == 0) {
-                        /* Show tool arguments */
-                        print_tool_args(blk->tool_name, blk->tool_input);
+                        /* Populate args preview into batch entry (shown inline by spinner thread) */
+                        {
+                            char bp[128];
+                            extract_tool_preview(blk->tool_name, blk->tool_input, bp, sizeof(bp));
+                            pthread_mutex_lock(&batch_spinner.mutex);
+                            if (batch_idx < batch_spinner.count)
+                                snprintf(batch_spinner.entries[batch_idx].args_preview,
+                                         sizeof(batch_spinner.entries[batch_idx].args_preview),
+                                         "%s", bp);
+                            pthread_mutex_unlock(&batch_spinner.mutex);
+                        }
 
                         char trust_reason[256];
                         const char *tier = session_trust_tier_to_string(session.trust_tier);
@@ -2281,6 +3799,7 @@ void agent_run(const char *api_key, const char *model) {
                                                         blk->tool_input, tool_result,
                                                         MAX_TOOL_RESULT, &ok);
                         pthread_mutex_unlock(&g_locks.cache_lock);
+                        dsco_strip_terminal_controls_inplace(tool_result);
 
                         if (cache_hit) {
                             tui_batch_spinner_complete(&batch_spinner, batch_idx, ok,
@@ -2298,6 +3817,17 @@ void agent_run(const char *api_key, const char *model) {
                             double t0 = now_ms();
                             ok = tools_execute_for_tier(blk->tool_name, blk->tool_input, tier,
                                                         tool_result, MAX_TOOL_RESULT);
+                            dsco_strip_terminal_controls_inplace(tool_result);
+
+                            /* Warn model if output was truncated */
+                            size_t result_len2 = strlen(tool_result);
+                            if (result_len2 >= MAX_TOOL_RESULT - 256) {
+                                size_t cur = strlen(tool_result);
+                                snprintf(tool_result + cur, MAX_TOOL_RESULT - cur,
+                                         "\n[WARNING: output truncated at %zu bytes — full output exceeds %d byte limit]",
+                                         result_len2, MAX_TOOL_RESULT);
+                            }
+
                             double elapsed = (now_ms() - t0) * 1000.0;
 
                             bool was_timeout = wd.timed_out;
@@ -2343,18 +3873,61 @@ void agent_run(const char *api_key, const char *model) {
 
                 /* Stop batch spinner — final state is already rendered */
                 tui_batch_spinner_stop(&batch_spinner);
+
+                /* Batch aggregate summary */
+                if (batch_n >= 2) {
+                    const model_info_t *mi = model_lookup(session.model);
+                    char batch_cost_suffix[128] = "";
+                    if (mi) {
+                        double tc2 = sr.usage.input_tokens * mi->input_price / 1e6
+                                   + sr.usage.output_tokens * mi->output_price / 1e6
+                                   + sr.usage.cache_read_input_tokens * mi->cache_read_price / 1e6
+                                   + sr.usage.cache_creation_input_tokens * mi->cache_write_price / 1e6;
+                        snprintf(batch_cost_suffix, sizeof(batch_cost_suffix),
+                                 "[in:%d out:%d $%.4f]",
+                                 sr.usage.input_tokens, sr.usage.output_tokens, tc2);
+                    }
+                    tui_batch_summary(&batch_spinner, batch_cost_suffix);
+                }
             }
 
-            /* F8: Render flame timeline after multi-tool turns */
-            tui_flame_render(&s_flame);
-            /* F10: Render tool dependency graph */
+            /* F10: Render tool dependency graph (compact, 1 line) */
             tui_dag_render(&s_dag);
 
-            /* F30: Section divider between turns */
+            /* F30: Enhanced section divider with success/fail/cache/context */
             {
                 double turn_cost = session_cost(&session);
-                tui_section_divider(session.turn_count, tool_count_this_turn,
-                                    turn_cost, session.model);
+                double tps = sr.telemetry.tokens_per_sec;
+                int ctx_used = session.total_input_tokens + session.total_output_tokens;
+                int ctx_max = session.context_window > 0 ? session.context_window : CONTEXT_WINDOW_TOKENS;
+                double ctx_pct = ctx_max > 0 ? 100.0 * ctx_used / ctx_max : 0;
+
+                /* Count successes/failures for this turn from flame data */
+                int turn_ok = 0, turn_fail = 0, turn_cache = 0;
+                for (int fi = 0; fi < s_flame.count; fi++) {
+                    if (s_flame.entries[fi].ok) turn_ok++; else turn_fail++;
+                }
+                /* If no flame data, assume all tools succeeded */
+                if (s_flame.count == 0 && tool_count_this_turn > 0)
+                    turn_ok = tool_count_this_turn;
+                turn_cache = tool_cache.hits;  /* session-level cache hits */
+
+                /* Get git branch for divider */
+                char div_branch[128] = "";
+                if (g_features.branch_indicator) {
+                    FILE *gbf = popen("git rev-parse --abbrev-ref HEAD 2>/dev/null", "r");
+                    if (gbf) {
+                        if (fgets(div_branch, sizeof(div_branch), gbf)) {
+                            size_t bl = strlen(div_branch);
+                            if (bl > 0 && div_branch[bl-1] == '\n') div_branch[bl-1] = '\0';
+                        }
+                        pclose(gbf);
+                    }
+                }
+
+                tui_section_divider_ex(session.turn_count, turn_ok, turn_fail,
+                                       turn_cache, turn_cost, session.model, tps,
+                                       ctx_pct, div_branch);
             }
 
             /* Check for tool-generated images */
@@ -2474,15 +4047,30 @@ void agent_run(const char *api_key, const char *model) {
 
         /* End prompt-level trace span */
         trace_span_end(prompt_span, g_interrupted ? "interrupted" : "ok", NULL);
+        esc_poller_stop();
         arena_free(&turn_arena);
+        terminal_input_echo_restore();
 
-        if (g_interrupted) {
+        if (g_interrupted && g_escape_state == ESC_PAUSED) {
+            double elapsed = now_ms() - g_turn_start_time;
+            bool resume = show_pause_menu(turns, dsco_max_agent_turns(), elapsed);
+            if (resume) {
+                g_interrupted  = 0;
+                g_escape_state = ESC_RUNNING;
+                /* Re-enter raw mode and restart the turns loop from where we paused */
+                terminal_input_echo_suspend();
+                esc_poller_start();
+                goto resume_turn_loop;
+            }
+            /* User chose to cancel — fall through to normal post-loop handling */
+            g_escape_state = ESC_RUNNING;
+        } else if (g_interrupted) {
             fprintf(stderr, "\n");
             tui_warning("interrupted (press Ctrl+C again to force quit)");
         }
-        if (turns >= MAX_AGENT_TURNS) {
+        if (turns >= dsco_max_agent_turns()) {
             char msg[64];
-            snprintf(msg, sizeof(msg), "max turns reached (%d)", MAX_AGENT_TURNS);
+            snprintf(msg, sizeof(msg), "max turns reached (%d)", dsco_max_agent_turns());
             tui_warning(msg);
         }
         if (turns > 1) {
@@ -2491,13 +4079,25 @@ void agent_run(const char *api_key, const char *model) {
                     TUI_DIM, turns, total_input, total_output, total_cache_read,
                     multi_turn_cost, TUI_RESET);
         }
-        printf("\n");
+        /* Use stderr for the blank line separator — stdout writes can
+           desync with the scroll region and push the cursor into the
+           bottom panel, causing input to appear in the middle. */
+        fprintf(stderr, "\n");
+        fflush(stderr);
 
         /* Periodic auto-save every 5 turns */
         if (session.turn_count % 5 == 0 && conv.count > 0) {
             autosave(&conv, &session);
         }
     }
+
+    /* Disable bracketed paste mode */
+    terminal_input_echo_restore();
+    fprintf(stderr, "\033[?2004l");
+    fflush(stderr);
+
+    g_winch_sb = NULL;
+    tui_status_bar_disable(&status_bar);
 
     g_autosave_conv = NULL;
     g_autosave_session = NULL;

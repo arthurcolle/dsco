@@ -41,6 +41,8 @@ typedef struct {
     bool initialized;
     int repeat_limit;
     size_t repeat_min_bytes;
+    size_t motif_min_bytes;
+    bool motif_skip_path_like;
     size_t max_total_bytes;
     volatile int tripped;
     og_stream_t streams[2];
@@ -169,6 +171,37 @@ static int repeated_prefix_count(const char *s) {
     return best;
 }
 
+static bool frame_is_path_like(const char *s) {
+    if (!s || s[0] == '\0') return false;
+
+    size_t len = strlen(s);
+    if (len < 128) return false;
+
+    int slash_count = 0;
+    int non_path_chars = 0;
+    int space_count = 0;
+    int alpha_count = 0;
+
+    for (size_t i = 0; i < len; i++) {
+        unsigned char c = (unsigned char)s[i];
+        if (c == '/' || c == '\\') slash_count++;
+        else if (isspace(c)) space_count++;
+        else if (isalnum(c) || c == '_' || c == '-' || c == '.') alpha_count++;
+        else non_path_chars++;
+    }
+
+    if (space_count > 0) return false;
+    if (slash_count < 3) return false;
+    if (alpha_count == 0) return false;
+
+    int core_len = (int)len - space_count;
+    if (core_len <= 0) return false;
+
+    if (non_path_chars * 10 > core_len) return false;
+    if (slash_count * 100 < core_len * 15) return false;
+    return true;
+}
+
 static int diagnostic_fd(void) {
     og_stream_t *err = &g_og.streams[1];
     if (err->active && err->mirror_fd >= 0) return err->mirror_fd;
@@ -177,21 +210,21 @@ static int diagnostic_fd(void) {
     return STDERR_FILENO;
 }
 
-__attribute__((noreturn))
 static void output_guard_trip(const og_stream_t *s, const char *reason) {
     if (__sync_lock_test_and_set(&g_og.tripped, 1)) {
-        _exit(70);
+        return;  /* Already tripped — just suppress. */
     }
 
     int fd = diagnostic_fd();
     char msg[1400];
     int n = snprintf(
         msg, sizeof(msg),
-        "\n\n[output-guard] ABORTING runaway display output\n"
+        "\n\n[output-guard] suppressing runaway display output\n"
         "[output-guard] stream=%s reason=%s\n"
         "[output-guard] repeat_limit=%d repeat_count=%d repeat_bytes=%zu total_bytes=%zu\n"
         "[output-guard] last_frame=\"%s\"\n"
-        "[output-guard] Set DSCO_OUTPUT_GUARD=0 to disable for debugging.\n\n",
+        "[output-guard] Output suppressed until stream settles. "
+        "Set DSCO_OUTPUT_GUARD=0 to disable.\n\n",
         s && s->name ? s->name : "unknown",
         reason ? reason : "repeat flood",
         g_og.repeat_limit,
@@ -201,8 +234,8 @@ static void output_guard_trip(const og_stream_t *s, const char *reason) {
         (s && s->last_preview[0]) ? s->last_preview : "(empty)");
     if (n > 0) write_all_fd(fd, msg, (size_t)n);
 
-    /* Hard stop: avoid further output storms immediately. */
-    _exit(70);
+    /* Don't _exit — keep draining pipes to prevent deadlock.
+     * The LLM-level repdet will abort the stream gracefully. */
 }
 
 static void finalize_frame(og_stream_t *s, char delim) {
@@ -246,8 +279,15 @@ static void finalize_frame(og_stream_t *s, char delim) {
         }
     }
 
-    /* Catch repeated motifs inside one long frame, e.g. "pin ON -> pin OFF" spam. */
-    if (len >= 256) {
+    /* Catch repeated motifs inside one long frame, e.g. "pin ON -> pin OFF" spam.
+     * Require a large payload so long but finite path-like lines don't trigger
+     * on normal legitimate output (for example a long source-path fragment).
+     */
+    size_t motif_min_bytes = g_og.motif_min_bytes > 0 ? g_og.motif_min_bytes : OG_DEFAULT_REPEAT_MIN_BYTES;
+    if (motif_min_bytes < g_og.repeat_min_bytes) motif_min_bytes = g_og.repeat_min_bytes;
+    if (motif_min_bytes < 256) motif_min_bytes = 256;
+
+    if (len >= motif_min_bytes && !(g_og.motif_skip_path_like && frame_is_path_like(norm))) {
         int in_frame_reps = repeated_prefix_count(norm);
         if (in_frame_reps > g_og.repeat_limit) {
             output_guard_trip(s, "in-frame repeated motif flood");
@@ -280,7 +320,7 @@ static void *stream_thread(void *arg) {
     og_stream_t *s = (og_stream_t *)arg;
     char buf[8192];
 
-    while (!g_og.tripped) {
+    for (;;) {
         ssize_t n = read(s->read_fd, buf, sizeof(buf));
         if (n < 0) {
             if (errno == EINTR) continue;
@@ -289,8 +329,16 @@ static void *stream_thread(void *arg) {
         if (n == 0) break;
 
         s->total_bytes += (size_t)n;
+
+        if (g_og.tripped) {
+            /* Keep draining pipe to prevent writer deadlock,
+             * but don't mirror or process — output is suppressed. */
+            continue;
+        }
+
         if (s->total_bytes > g_og.max_total_bytes) {
             output_guard_trip(s, "total output byte budget exceeded");
+            continue;
         }
 
         write_all_fd(s->mirror_fd, buf, (size_t)n);
@@ -341,6 +389,20 @@ static bool install_stream(og_stream_t *s, int out_fd, const char *name) {
     return true;
 }
 
+void output_guard_reset(void) {
+    if (!g_og.initialized) return;
+    __sync_lock_release(&g_og.tripped);
+    for (int i = 0; i < 2; i++) {
+        og_stream_t *s = &g_og.streams[i];
+        if (!s->active) continue;
+        s->repeat_count = 0;
+        s->repeat_bytes = 0;
+        s->last_norm[0] = '\0';
+        s->last_preview[0] = '\0';
+        s->frame_len = 0;
+    }
+}
+
 bool output_guard_init(void) {
     if (g_og.initialized) return true;
 
@@ -355,6 +417,11 @@ bool output_guard_init(void) {
                                         OG_DEFAULT_REPEAT_LIMIT, 1, 1000000);
     g_og.repeat_min_bytes = env_size_clamped("DSCO_OUTPUT_REPEAT_MIN_BYTES",
                                              OG_DEFAULT_REPEAT_MIN_BYTES, 1, (size_t)1 << 30);
+    g_og.motif_min_bytes = env_size_clamped("DSCO_OUTPUT_MOTIF_MIN_BYTES",
+                                            OG_DEFAULT_REPEAT_MIN_BYTES, 256,
+                                            (size_t)1 << 30);
+    g_og.motif_skip_path_like = env_int_clamped("DSCO_OUTPUT_MOTIF_SKIP_PATHLIKE",
+                                               1, 0, 1) != 0;
     g_og.max_total_bytes = env_size_clamped("DSCO_OUTPUT_MAX_BYTES",
                                             OG_DEFAULT_MAX_TOTAL_BYTES, 1024, (size_t)1 << 32);
     g_og.tripped = 0;
