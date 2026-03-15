@@ -2,6 +2,7 @@
 #include "error.h"
 #include "tools.h"
 #include "config.h"
+#include "workspace.h"
 #include <stdlib.h>
 #include <string.h>
 #include <strings.h>
@@ -12,11 +13,17 @@
 #include <unistd.h>
 #include <sys/stat.h>
 #include <errno.h>
+#include <stdint.h>
 #include <curl/curl.h>
 
 /* Global interrupt flag — set by SIGINT handler in agent.c.
    Declared extern here so the streaming code can check it. */
 extern volatile int g_interrupted;
+
+/* Stream heartbeat — when non-NULL, the write callback feeds byte counts
+   into this so the heartbeat thread can track receive activity. */
+#include "tui.h"
+tui_stream_heartbeat_t *g_stream_heartbeat = NULL;
 
 /* ── Session state ─────────────────────────────────────────────────────── */
 
@@ -65,6 +72,8 @@ void session_state_init(session_state_t *s, const char *model) {
     s->top_p = -1.0;
     s->top_k = -1;
     s->thinking_budget = 0;
+    s->active_topology[0] = '\0';
+    s->topology_auto = false;
 }
 
 /* ── Per-tool metrics ──────────────────────────────────────────────────── */
@@ -228,22 +237,28 @@ static const char *s_injection_patterns[] = {
     NULL
 };
 
+static bool contains_case_insensitive(const char *haystack, const char *needle) {
+    size_t nlen = needle ? strlen(needle) : 0;
+    if (!haystack || !needle || nlen == 0) return false;
+
+    for (const char *p = haystack; *p; p++) {
+        size_t j = 0;
+        while (j < nlen && p[j]) {
+            unsigned char a = (unsigned char)p[j];
+            unsigned char b = (unsigned char)needle[j];
+            if (tolower(a) != tolower(b)) break;
+            j++;
+        }
+        if (j == nlen) return true;
+    }
+    return false;
+}
+
 injection_level_t detect_prompt_injection(const char *text) {
     if (!text || !text[0]) return INJECTION_NONE;
     int hits = 0;
     for (int i = 0; s_injection_patterns[i]; i++) {
-        const char *pat = s_injection_patterns[i];
-        size_t plen = strlen(pat);
-        for (const char *p = text; *p; p++) {
-            bool match = true;
-            for (size_t j = 0; j < plen && p[j]; j++) {
-                char a = p[j], b = pat[j];
-                if (a >= 'A' && a <= 'Z') a += 32;
-                if (b >= 'A' && b <= 'Z') b += 32;
-                if (a != b) { match = false; break; }
-            }
-            if (match) { hits++; break; }
-        }
+        if (contains_case_insensitive(text, s_injection_patterns[i])) hits++;
     }
     if (hits >= 3) return INJECTION_HIGH;
     if (hits >= 2) return INJECTION_MED;
@@ -251,33 +266,8 @@ injection_level_t detect_prompt_injection(const char *text) {
     return INJECTION_NONE;
 }
 
-/* ── Custom system prompt ──────────────────────────────────────────────── */
-
-static char *s_custom_system_prompt = NULL;
-static bool  s_custom_prompt_loaded = false;
-
 const char *llm_get_custom_system_prompt(void) {
-    if (s_custom_prompt_loaded) return s_custom_system_prompt;
-    s_custom_prompt_loaded = true;
-
-    char path[512];
-    const char *home = getenv("HOME");
-    if (!home) return NULL;
-    snprintf(path, sizeof(path), "%s/.dsco/system_prompt.txt", home);
-
-    FILE *f = fopen(path, "r");
-    if (!f) return NULL;
-
-    fseek(f, 0, SEEK_END);
-    long sz = ftell(f);
-    if (sz <= 0 || sz > 32768) { fclose(f); return NULL; }
-    fseek(f, 0, SEEK_SET);
-
-    s_custom_system_prompt = safe_malloc((size_t)sz + 1);
-    size_t nr = fread(s_custom_system_prompt, 1, (size_t)sz, f);
-    s_custom_system_prompt[nr] = '\0';
-    fclose(f);
-    return s_custom_system_prompt;
+    return dsco_workspace_prompt();
 }
 
 /* ── Debug logging for failed requests ─────────────────────────────────── */
@@ -404,8 +394,24 @@ bool conv_save_ex(conversation_t *c, const session_state_t *session, const char 
 
     fprintf(f, "{");
     if (session) {
-        fprintf(f, "\"session\":{\"trust_tier\":\"%s\"},",
-                session_trust_tier_to_string(session->trust_tier));
+        jbuf_t sb;
+        jbuf_init(&sb, 512);
+        jbuf_append(&sb, "\"session\":{");
+        jbuf_append(&sb, "\"trust_tier\":");
+        jbuf_append_json_str(&sb, session_trust_tier_to_string(session->trust_tier));
+        if (session->active_skill[0]) {
+            jbuf_append(&sb, ",\"active_skill\":");
+            jbuf_append_json_str(&sb, session->active_skill);
+        }
+        if (session->active_topology[0]) {
+            jbuf_append(&sb, ",\"active_topology\":");
+            jbuf_append_json_str(&sb, session->active_topology);
+        }
+        jbuf_append(&sb, ",\"topology_auto\":");
+        jbuf_append(&sb, session->topology_auto ? "true" : "false");
+        jbuf_append(&sb, "},");
+        fwrite(sb.data, 1, sb.len, f);
+        jbuf_free(&sb);
     }
     fprintf(f, "\"messages\":[\n");
     for (int i = 0; i < c->count; i++) {
@@ -479,6 +485,17 @@ bool conv_load_ex(conversation_t *c, session_state_t *session, const char *path)
                 if (ok) session->trust_tier = parsed;
                 free(tier);
             }
+            char *skill = json_get_str(session_raw, "active_skill");
+            if (skill) {
+                snprintf(session->active_skill, sizeof(session->active_skill), "%s", skill);
+                free(skill);
+            }
+            char *topology = json_get_str(session_raw, "active_topology");
+            if (topology) {
+                snprintf(session->active_topology, sizeof(session->active_topology), "%s", topology);
+                free(topology);
+            }
+            session->topology_auto = json_get_bool(session_raw, "topology_auto", false);
             free(session_raw);
         }
     }
@@ -657,7 +674,8 @@ void conv_add_tool_result(conversation_t *c, const char *tool_id,
     msg_content_t *mc = msg_add_content(m);
     mc->type = safe_strdup("tool_result");
     mc->tool_id = safe_strdup(tool_id);
-    mc->text = safe_strdup(result);
+    mc->text = safe_strdup(result ? result : "");
+    dsco_strip_terminal_controls_inplace(mc->text);
     mc->is_error = is_error;
 }
 
@@ -980,6 +998,7 @@ static void append_content_block(jbuf_t *b, msg_content_t *mc) {
                strcmp(mc->type, "code_execution_tool_result") == 0) {
         /* Server-side tool results require structured content (list/object). */
         bool require_array = (strcmp(mc->type, "web_search_tool_result") == 0);
+        bool require_object = (strcmp(mc->type, "code_execution_tool_result") == 0);
         if (!mc->tool_id || !mc->tool_id[0]) {
             jbuf_append(b, "{\"type\":\"text\",\"text\":");
             jbuf_append_json_str(
@@ -995,13 +1014,25 @@ static void append_content_block(jbuf_t *b, msg_content_t *mc) {
         jbuf_append_json_str(b, mc->tool_id ? mc->tool_id : "");
         jbuf_append(b, ",\"content\":");
         char *raw_content = extract_server_result_content_raw(mc, require_array);
-        if (raw_content) {
+        const char *raw_p = raw_content ? skip_json_ws(raw_content) : NULL;
+        if (raw_content &&
+            ((require_array && raw_p && *raw_p == '[') ||
+             (require_object && raw_p && *raw_p == '{') ||
+             (!require_array && !require_object && raw_p &&
+              (*raw_p == '{' || *raw_p == '[')))) {
             jbuf_append(b, raw_content);
             free(raw_content);
         } else {
             /* Fallback that preserves schema validity when no structured
                content could be recovered from persisted history. */
-            jbuf_append(b, "[]");
+            if (raw_content) free(raw_content);
+            if (require_object) {
+                jbuf_append(b,
+                            "{\"type\":\"code_execution_tool_result_error\","
+                            "\"error_code\":\"unavailable\"}");
+            } else {
+                jbuf_append(b, "[]");
+            }
         }
         jbuf_append(b, "}");
     } else {
@@ -1157,11 +1188,24 @@ char *llm_build_request_ex(conversation_t *c, session_state_t *session, int max_
 
     /* System prompt with cache breakpoint */
     const char *custom = llm_get_custom_system_prompt();
+    char *active_skill_prompt = NULL;
     jbuf_append(&b, ",\"system\":[");
     if (custom) {
         jbuf_append(&b, "{\"type\":\"text\",\"text\":");
         jbuf_append_json_str(&b, custom);
         jbuf_append(&b, "},");
+    }
+    if (session->active_skill[0]) {
+        const char *skill = dsco_workspace_skill_prompt(session->active_skill);
+        if (skill && *skill) {
+            size_t n = strlen(skill) + strlen(session->active_skill) + 32;
+            active_skill_prompt = safe_malloc(n);
+            snprintf(active_skill_prompt, n, "[Active Skill: %s]\n%s",
+                     session->active_skill, skill);
+            jbuf_append(&b, "{\"type\":\"text\",\"text\":");
+            jbuf_append_json_str(&b, active_skill_prompt);
+            jbuf_append(&b, "},");
+        }
     }
     jbuf_append(&b, "{\"type\":\"text\",\"text\":");
     jbuf_append_json_str(&b, SYSTEM_PROMPT);
@@ -1229,6 +1273,7 @@ char *llm_build_request_ex(conversation_t *c, session_state_t *session, int max_
     /* Reset single-shot options after use */
     if (session->prefill[0]) session->prefill[0] = '\0';
     if (session->stop_seq[0]) session->stop_seq[0] = '\0';
+    free(active_skill_prompt);
 
     return b.data;
 }
@@ -1324,21 +1369,33 @@ typedef struct {
     int             telemetry_thinking_chars; /* thinking text chars     */
     bool            telemetry_got_first;     /* whether first delta seen */
 
-    /* ── Streaming repetition detection ────────────────────────────── */
-#define REPDET_WINDOW  2048   /* rolling window of recent text          */
-#define REPDET_CHECK   512    /* check every N text bytes               */
-#define REPDET_THRESH  8      /* min pattern repetitions to trigger     */
-#define REPDET_MIN_PAT 4      /* min pattern length to consider         */
+    /* ── Streaming degeneration detector ──────────────────────────── */
+#define REPDET_WINDOW    4096  /* rolling window of recent text         */
+#define REPDET_CHECK     256   /* check every N text bytes              */
+#define REPDET_MIN_PAT   3    /* shortest repeating unit to detect      */
+#define REPDET_MAX_PAT   256  /* longest repeating unit to scan         */
+#define REPDET_THRESH    6    /* exact-repeat reps to trigger           */
+#define REPDET_NGRAM_SZ  4    /* n-gram size for entropy analysis       */
+#define REPDET_NGRAM_TAB 512  /* hash table buckets for n-gram counts   */
+#define REPDET_ENTROPY_LO 1.5 /* bits — below this = degenerate        */
+#define REPDET_STALL_WIN 512  /* bytes to measure alphabet collapse     */
+#define REPDET_STALL_THR 0.08 /* unique-byte ratio below = stalled      */
     char            repdet_buf[REPDET_WINDOW];
     int             repdet_len;
+    int             repdet_total_fed;        /* lifetime bytes fed        */
     int             repdet_bytes_since_check;
     bool            repdet_tripped;
+    bool            repdet_subagent;
+    char            repdet_diag[256];        /* human-readable diagnosis  */
+
+    /* n-gram frequency table (rolling, rebuilt each check) */
+    uint16_t        repdet_ngram[REPDET_NGRAM_TAB];
 } sse_state_t;
 
 /* Remove terminal control bytes/escape sequences from streamed model text.
    This prevents malformed or hostile ANSI/CSI sequences from leaking into
    rendered output while preserving regular UTF-8 text. */
-static void strip_terminal_controls_inplace(char *s) {
+void dsco_strip_terminal_controls_inplace(char *s) {
     if (!s || !*s) return;
 
     unsigned char *r = (unsigned char *)s;
@@ -1382,23 +1439,173 @@ static void strip_terminal_controls_inplace(char *s) {
     *w = '\0';
 }
 
-/* ── Streaming repetition detector ──────────────────────────────────────
- * Detects degenerate model output like "self_inspectself_inspect..." by
- * looking for short repeating patterns in a rolling window of recent text.
- * Returns true if repetition detected and stream should be aborted.       */
-static bool repdet_check(sse_state_t *s) {
-    if (s->repdet_len < REPDET_MIN_PAT * REPDET_THRESH) return false;
+/* ══════════════════════════════════════════════════════════════════════════
+ * Streaming degeneration detector
+ *
+ * Three independent strategies, any one trips the abort:
+ *
+ * 1. EXACT REPEAT — finds the shortest period P (3–256 bytes) such that
+ *    the tail of the window consists of ≥ REPDET_THRESH identical copies
+ *    of a P-byte pattern.  O(window * max_pat) but bounded by constants.
+ *
+ * 2. N-GRAM ENTROPY — hashes every overlapping 4-gram in the window into
+ *    a 512-bucket table, computes Shannon entropy over the distribution.
+ *    Healthy text ≈ 6–8 bits; degenerate loops drop below REPDET_ENTROPY_LO.
+ *    Only activates after 1 KB has been seen (avoids false positives on
+ *    short JSON fragments).
+ *
+ * 3. BYTE STALL — counts distinct byte values in the last 512 bytes.
+ *    If the ratio of unique bytes to the byte alphabet drops below 0.08,
+ *    the output has collapsed to a tiny alphabet (e.g. one repeated word).
+ *    Only activates after 2 KB has been seen.
+ *
+ * The detector feeds from text_delta events only, using a single 4 KB
+ * rolling window. It checks every 256 new bytes.
+ * ══════════════════════════════════════════════════════════════════════════ */
 
+static int repdet_exact_threshold(const sse_state_t *s) {
+    return s->repdet_subagent ? 8 : REPDET_THRESH;
+}
+
+static int repdet_entropy_min_feed(const sse_state_t *s) {
+    return s->repdet_subagent ? 2048 : 1024;
+}
+
+static double repdet_entropy_threshold(const sse_state_t *s) {
+    return s->repdet_subagent ? 0.75 : REPDET_ENTROPY_LO;
+}
+
+static int repdet_stall_min_feed(const sse_state_t *s) {
+    return s->repdet_subagent ? 4096 : 2048;
+}
+
+static double repdet_stall_threshold(const sse_state_t *s) {
+    return s->repdet_subagent ? 0.08 : REPDET_STALL_THR;
+}
+
+/* FNV-1a 32-bit for short n-grams → bucket index */
+static inline uint32_t repdet_fnv(const char *p, int n) {
+    uint32_t h = 0x811c9dc5u;
+    for (int i = 0; i < n; i++) {
+        h ^= (uint32_t)(unsigned char)p[i];
+        h *= 0x01000193u;
+    }
+    return h;
+}
+
+/* Check if a byte pattern consists entirely of benign formatting characters:
+ * box-drawing (U+2500–U+257F), dashes, equals, underscores, spaces, stars,
+ * em-dash (U+2014), en-dash (U+2013), horizontal ellipsis (U+2026), bullets. */
+static bool repdet_is_formatting(const char *pat, int plen) {
+    int i = 0;
+    while (i < plen) {
+        unsigned char c = (unsigned char)pat[i];
+        if (c < 0x80) {
+            /* ASCII: allow common formatting chars */
+            if (c == '-' || c == '=' || c == '_' || c == ' ' ||
+                c == '\n' || c == '\r' || c == '\t' ||
+                c == '*' || c == '#' || c == '~' || c == '.' ||
+                c == '|' || c == '+') {
+                i++;
+                continue;
+            }
+            return false;
+        }
+        /* UTF-8: decode codepoint */
+        uint32_t cp = 0;
+        int seqlen = 0;
+        if ((c & 0xE0) == 0xC0)      { cp = c & 0x1F; seqlen = 2; }
+        else if ((c & 0xF0) == 0xE0)  { cp = c & 0x0F; seqlen = 3; }
+        else if ((c & 0xF8) == 0xF0)  { cp = c & 0x07; seqlen = 4; }
+        else return false;
+        if (i + seqlen > plen) return false;
+        for (int j = 1; j < seqlen; j++) {
+            unsigned char cont = (unsigned char)pat[i + j];
+            if ((cont & 0xC0) != 0x80) return false;
+            cp = (cp << 6) | (cont & 0x3F);
+        }
+        /* Allow box-drawing U+2500–U+257F, em/en-dash, ellipsis, bullets */
+        if ((cp >= 0x2500 && cp <= 0x257F) || /* box drawing */
+            cp == 0x2014 || cp == 0x2013 ||   /* em-dash, en-dash */
+            cp == 0x2026 ||                    /* horizontal ellipsis */
+            cp == 0x2022 || cp == 0x25CF ||    /* bullets */
+            cp == 0x2502 || cp == 0x2503)      /* already in box-drawing but be explicit */
+        {
+            i += seqlen;
+            continue;
+        }
+        return false;
+    }
+    return true;
+}
+
+/* Like repdet_is_formatting(), but tolerant of a rolling window that may
+ * begin or end in the middle of a UTF-8 codepoint. */
+static bool repdet_is_formatting_window(const char *pat, int plen) {
+    int i = 0;
+    bool saw_any = false;
+
+    if (!pat || plen <= 0) return false;
+
+    while (i < plen && (((unsigned char)pat[i] & 0xC0) == 0x80)) i++;
+
+    while (i < plen) {
+        unsigned char c = (unsigned char)pat[i];
+        if (c < 0x80) {
+            if (c == '-' || c == '=' || c == '_' || c == ' ' ||
+                c == '\n' || c == '\r' || c == '\t' ||
+                c == '*' || c == '#' || c == '~' || c == '.' ||
+                c == '|' || c == '+') {
+                saw_any = true;
+                i++;
+                continue;
+            }
+            return false;
+        }
+
+        uint32_t cp = 0;
+        int seqlen = 0;
+        if ((c & 0xE0) == 0xC0)      { cp = c & 0x1F; seqlen = 2; }
+        else if ((c & 0xF0) == 0xE0) { cp = c & 0x0F; seqlen = 3; }
+        else if ((c & 0xF8) == 0xF0) { cp = c & 0x07; seqlen = 4; }
+        else return false;
+
+        if (i + seqlen > plen) break;
+        for (int j = 1; j < seqlen; j++) {
+            unsigned char cont = (unsigned char)pat[i + j];
+            if ((cont & 0xC0) != 0x80) return false;
+            cp = (cp << 6) | (cont & 0x3F);
+        }
+
+        if ((cp >= 0x2500 && cp <= 0x257F) ||
+            cp == 0x2014 || cp == 0x2013 ||
+            cp == 0x2026 ||
+            cp == 0x2022 || cp == 0x25CF ||
+            cp == 0x2502 || cp == 0x2503) {
+            saw_any = true;
+            i += seqlen;
+            continue;
+        }
+        return false;
+    }
+
+    return saw_any;
+}
+
+/* Strategy 1: exact periodic repeat detection.
+ * For each candidate period length, scan backwards from the tail checking
+ * for consecutive identical copies.  Uses early-exit so small periods that
+ * don't repeat are rejected quickly. */
+static bool repdet_exact(sse_state_t *s) {
     const char *buf = s->repdet_buf;
     int len = s->repdet_len;
+    int exact_thresh = repdet_exact_threshold(s);
+    if (len < REPDET_MIN_PAT * exact_thresh) return false;
 
-    /* Try pattern lengths from REPDET_MIN_PAT up to len/REPDET_THRESH */
-    int max_pat = len / REPDET_THRESH;
-    if (max_pat > 128) max_pat = 128;
+    int max_pat = len / exact_thresh;
+    if (max_pat > REPDET_MAX_PAT) max_pat = REPDET_MAX_PAT;
 
     for (int plen = REPDET_MIN_PAT; plen <= max_pat; plen++) {
-        /* Check if the last `plen * REPDET_THRESH` bytes are all repetitions
-           of the pattern at the end of the buffer */
         const char *pat = buf + len - plen;
         int reps = 1;
         int pos = len - plen * 2;
@@ -1407,17 +1614,110 @@ static bool repdet_check(sse_state_t *s) {
             reps++;
             pos -= plen;
         }
-        if (reps >= REPDET_THRESH) return true;
+        if (reps >= exact_thresh) {
+            /* Skip benign formatting patterns (box-drawing, dashes, etc.) */
+            if (repdet_is_formatting(pat, plen)) continue;
+            /* Extract a preview of the repeating unit */
+            int preview_len = plen < 60 ? plen : 60;
+            char preview[64];
+            memcpy(preview, pat, (size_t)preview_len);
+            preview[preview_len] = '\0';
+            /* Sanitize for display */
+            for (int i = 0; i < preview_len; i++)
+                if ((unsigned char)preview[i] < 32) preview[i] = '.';
+            snprintf(s->repdet_diag, sizeof(s->repdet_diag),
+                     "exact repeat: \"%s\"%s x%d (period=%d)",
+                     preview, plen > 60 ? "..." : "", reps, plen);
+            return true;
+        }
     }
+    return false;
+}
+
+/* Strategy 2: n-gram Shannon entropy.
+ * Low entropy means the same few n-grams dominate → degenerate output. */
+static bool repdet_entropy(sse_state_t *s) {
+    int len = s->repdet_len;
+    if (len < REPDET_NGRAM_SZ + 1) return false;
+    /* Only trigger after enough data to be meaningful */
+    if (s->repdet_total_fed < repdet_entropy_min_feed(s)) return false;
+
+    memset(s->repdet_ngram, 0, sizeof(s->repdet_ngram));
+
+    int ngram_count = len - REPDET_NGRAM_SZ + 1;
+    for (int i = 0; i < ngram_count; i++) {
+        uint32_t h = repdet_fnv(s->repdet_buf + i, REPDET_NGRAM_SZ);
+        s->repdet_ngram[h % REPDET_NGRAM_TAB]++;
+    }
+
+    /* Compute entropy over bucket distribution */
+    double entropy = 0.0;
+    double inv_n = 1.0 / (double)ngram_count;
+    for (int i = 0; i < REPDET_NGRAM_TAB; i++) {
+        if (s->repdet_ngram[i] == 0) continue;
+        double p = (double)s->repdet_ngram[i] * inv_n;
+        entropy -= p * log2(p);
+    }
+
+    double threshold = repdet_entropy_threshold(s);
+    if (entropy < threshold) {
+        snprintf(s->repdet_diag, sizeof(s->repdet_diag),
+                 "low n-gram entropy: %.2f bits (threshold=%.1f, window=%d bytes)",
+                 entropy, threshold, len);
+        return true;
+    }
+    return false;
+}
+
+/* Strategy 3: byte-alphabet stall detection.
+ * If the last N bytes use very few distinct byte values, the output
+ * has collapsed (e.g., "aaaaaaa" or alternating between 2-3 chars). */
+static bool repdet_stall(sse_state_t *s) {
+    int len = s->repdet_len;
+    if (len < REPDET_STALL_WIN) return false;
+    if (s->repdet_total_fed < repdet_stall_min_feed(s)) return false;
+
+    /* Count distinct bytes in the tail */
+    uint8_t seen[256];
+    memset(seen, 0, sizeof(seen));
+    const char *tail = s->repdet_buf + len - REPDET_STALL_WIN;
+    if (repdet_is_formatting_window(tail, REPDET_STALL_WIN)) {
+        return false;
+    }
+    int distinct = 0;
+    for (int i = 0; i < REPDET_STALL_WIN; i++) {
+        uint8_t b = (uint8_t)tail[i];
+        if (!seen[b]) { seen[b] = 1; distinct++; }
+    }
+
+    /* Normalize against the byte alphabet, not the sample width.
+       Healthy prose only uses a subset of 256 byte values, so dividing
+       by the 512-byte window badly over-penalizes normal text. */
+    double ratio = (double)distinct / 256.0;
+    double threshold = repdet_stall_threshold(s);
+    if (ratio < threshold) {
+        snprintf(s->repdet_diag, sizeof(s->repdet_diag),
+                 "byte stall: %d distinct bytes in %d (alphabet-ratio=%.3f, threshold=%.2f)",
+                 distinct, REPDET_STALL_WIN, ratio, threshold);
+        return true;
+    }
+    return false;
+}
+
+/* Run all strategies and trip if any fires. */
+static bool repdet_check(sse_state_t *s) {
+    if (repdet_exact(s))   return true;
+    if (repdet_entropy(s)) return true;
+    if (repdet_stall(s))   return true;
     return false;
 }
 
 static void repdet_feed(sse_state_t *s, const char *text, size_t tlen) {
     if (s->repdet_tripped || tlen == 0) return;
+    if (repdet_is_formatting(text, (int)tlen)) return;
 
     /* Append to rolling window */
     if (s->repdet_len + (int)tlen > REPDET_WINDOW) {
-        /* Shift window left */
         int shift = s->repdet_len + (int)tlen - REPDET_WINDOW;
         if (shift > s->repdet_len) shift = s->repdet_len;
         memmove(s->repdet_buf, s->repdet_buf + shift, (size_t)(s->repdet_len - shift));
@@ -1430,6 +1730,7 @@ static void repdet_feed(sse_state_t *s, const char *text, size_t tlen) {
     }
     memcpy(s->repdet_buf + s->repdet_len, text, (size_t)copylen);
     s->repdet_len += copylen;
+    s->repdet_total_fed += copylen;
 
     s->repdet_bytes_since_check += copylen;
     if (s->repdet_bytes_since_check >= REPDET_CHECK) {
@@ -1437,17 +1738,47 @@ static void repdet_feed(sse_state_t *s, const char *text, size_t tlen) {
         if (repdet_check(s)) {
             s->repdet_tripped = true;
             fprintf(stderr,
-                "\n\033[33m[dsco] repetitive output detected — aborting stream\033[0m\n");
-            g_interrupted = 1;
+                "\n\033[33m[dsco] degenerate output detected — aborting stream\033[0m\n"
+                "\033[2m  %s\033[0m\n", s->repdet_diag);
         }
     }
 }
 
-/* Curl progress callback — allows Ctrl+C to abort transfers */
+/* Reset repdet state (called between content blocks of different types) */
+static void repdet_reset(sse_state_t *s) {
+    s->repdet_len = 0;
+    s->repdet_bytes_since_check = 0;
+    s->repdet_total_fed = 0;
+    s->repdet_diag[0] = '\0';
+    /* NOTE: do not reset repdet_tripped — once tripped, stay tripped */
+}
+
+bool llm_repdet_text_is_degenerate(const char *text, bool subagent,
+                                   char *diag, size_t diag_len) {
+    sse_state_t s = {0};
+    s.repdet_subagent = subagent;
+
+    if (text && text[0]) {
+        repdet_feed(&s, text, strlen(text));
+    }
+
+    if (diag && diag_len > 0) {
+        snprintf(diag, diag_len, "%s", s.repdet_diag);
+    }
+    return s.repdet_tripped;
+}
+
+/* Curl progress callback — allows Ctrl+C to abort transfers and feeds
+   the stream heartbeat with download activity information. */
 static int stream_progress_cb(void *clientp, curl_off_t dltotal, curl_off_t dlnow,
                                 curl_off_t ultotal, curl_off_t ulnow) {
-    (void)clientp; (void)dltotal; (void)dlnow; (void)ultotal; (void)ulnow;
-    if (g_interrupted) return 1;  /* non-zero aborts transfer */
+    sse_state_t *s = (sse_state_t *)clientp;
+    (void)dltotal; (void)ultotal; (void)ulnow;
+    if (g_interrupted || (s && s->repdet_tripped)) return 1;  /* non-zero aborts transfer */
+    /* Keep heartbeat alive when curl is actively receiving, even if
+       no SSE events have fired yet (e.g. during HTTP/2 negotiation) */
+    if (dlnow > 0 && g_stream_heartbeat)
+        tui_stream_heartbeat_recv(g_stream_heartbeat, 0);  /* 0 = just a ping */
     return 0;
 }
 
@@ -1495,6 +1826,8 @@ static void sse_finalize_block(sse_state_t *s) {
                (strcmp(s->cur_type, "web_search_tool_result") == 0 ||
                 strcmp(s->cur_type, "code_execution_tool_result") == 0)) {
         /* Server-side tool results — preserve structured content payload. */
+        bool is_code_execution =
+            (strcmp(s->cur_type, "code_execution_tool_result") == 0);
         blk->tool_id = s->cur_tool_id ? safe_strdup(s->cur_tool_id) : NULL;
         blk->text = safe_strdup(s->text_buf.data ? s->text_buf.data : "");
         if (s->input_buf.data && s->input_buf.data[0]) {
@@ -1503,9 +1836,13 @@ static void sse_finalize_block(sse_state_t *s) {
                    (s->text_buf.data[0] == '[' || s->text_buf.data[0] == '{')) {
             blk->tool_input = safe_strdup(s->text_buf.data);
         } else {
-            blk->tool_input = safe_strdup("[]");
+            blk->tool_input = safe_strdup(
+                is_code_execution
+                    ? "{\"type\":\"code_execution_tool_result_error\","
+                      "\"error_code\":\"unavailable\"}"
+                    : "[]");
         }
-        if (strcmp(s->cur_type, "code_execution_tool_result") == 0 &&
+        if (is_code_execution &&
             s->text_buf.data && s->text_buf.data[0]) {
             fprintf(stderr, "    \033[32m\xe2\x9c\x93\033[0m \033[2mcode output: %.*s\033[0m\n",
                     120, s->text_buf.data);
@@ -1517,6 +1854,7 @@ static void sse_finalize_block(sse_state_t *s) {
     free(s->cur_tool_id); s->cur_tool_id = NULL;
     jbuf_reset(&s->text_buf);
     jbuf_reset(&s->input_buf);
+    repdet_reset(s);
     s->current_index = -1;
 }
 
@@ -1578,8 +1916,8 @@ static void sse_handle_event(sse_state_t *s, const char *data) {
                 free(s->cur_tool_id);
                 s->cur_tool_id = json_get_str(cb_raw, "id");
                 if (s->cur_tool_name) {
-                    fprintf(stderr, "  \033[1m\033[36m\xe2\x9a\xa1\033[0m \033[2m%s (server)\033[0m\n",
-                            s->cur_tool_name);
+                    fprintf(stderr, "  \033[1m\033[36m%s\033[0m \033[2m%s (server)\033[0m\n",
+                            tui_glyph()->icon_lightning, s->cur_tool_name);
                     fflush(stderr);
                 }
                 jbuf_reset(&s->input_buf);
@@ -1613,7 +1951,7 @@ static void sse_handle_event(sse_state_t *s, const char *data) {
             if (delta_type && strcmp(delta_type, "text_delta") == 0) {
                 char *text = json_get_str(delta_raw, "text");
                 if (text) {
-                    strip_terminal_controls_inplace(text);
+                    dsco_strip_terminal_controls_inplace(text);
                     if (text[0] != '\0') {
                         /* TTFT telemetry */
                         if (!s->telemetry_got_first) {
@@ -1630,7 +1968,7 @@ static void sse_handle_event(sse_state_t *s, const char *data) {
             } else if (delta_type && strcmp(delta_type, "thinking_delta") == 0) {
                 char *thinking = json_get_str(delta_raw, "thinking");
                 if (thinking) {
-                    strip_terminal_controls_inplace(thinking);
+                    dsco_strip_terminal_controls_inplace(thinking);
                     if (thinking[0] != '\0') {
                         jbuf_append(&s->text_buf, thinking);
                         /* Stream thinking text dimmed+italic via callback or stderr */
@@ -1647,13 +1985,13 @@ static void sse_handle_event(sse_state_t *s, const char *data) {
                 char *partial = json_get_str(delta_raw, "partial_json");
                 if (partial) {
                     jbuf_append(&s->input_buf, partial);
-                    repdet_feed(s, partial, strlen(partial));
                     free(partial);
                 }
             } else if (delta_type && strcmp(delta_type, "content_delta") == 0) {
                 /* Server-side tool result content delta — may be text or JSON */
                 char *content = json_get_str(delta_raw, "content");
                 if (content) {
+                    dsco_strip_terminal_controls_inplace(content);
                     jbuf_append(&s->text_buf, content);
                     if (s->cur_type &&
                         (strcmp(s->cur_type, "web_search_tool_result") == 0 ||
@@ -1724,11 +2062,15 @@ static size_t stream_write_cb(void *ptr, size_t size, size_t nmemb, void *userda
     size_t total = size * nmemb;
     sse_state_t *s = (sse_state_t *)userdata;
 
-    if (g_interrupted) return 0;
+    if (g_interrupted || s->repdet_tripped) return 0;
+
+    /* Feed byte count to heartbeat for activity tracking */
+    if (g_stream_heartbeat)
+        tui_stream_heartbeat_recv(g_stream_heartbeat, total);
 
     const char *p = (const char *)ptr;
     for (size_t i = 0; i < total; i++) {
-        if (g_interrupted) return 0;
+        if (g_interrupted || s->repdet_tripped) return 0;
         if (p[i] == '\n') {
             if (s->line_buf.len > 0) {
                 sse_process_line(s, s->line_buf.data);
@@ -1825,14 +2167,29 @@ stream_result_t llm_stream(const char *api_key, const char *request_json,
     jbuf_init(&state.input_buf, 4096);
     jbuf_init(&state.line_buf, 4096);
     state.telemetry_start = cache_now_sec();
+    {
+        const char *subagent = getenv("DSCO_SUBAGENT");
+        state.repdet_subagent = subagent && subagent[0] && strcmp(subagent, "0") != 0;
+    }
 
     /* Streaming checkpoint for retry resilience */
     stream_checkpoint_t checkpoint;
     stream_checkpoint_init(&checkpoint);
 
     /* Retry loop with exponential backoff */
+    /* Configurable via DSCO_LLM_MAX_RETRIES and DSCO_LLM_RETRY_DELAY_MS */
     int max_retries = 3;
-    int retry_delay_ms = 1000;  /* 1s, 2s, 4s */
+    int retry_delay_ms = 1000;
+    const char *env_retries = getenv("DSCO_LLM_MAX_RETRIES");
+    const char *env_delay = getenv("DSCO_LLM_RETRY_DELAY_MS");
+    if (env_retries && env_retries[0]) {
+        int v = atoi(env_retries);
+        if (v >= 0 && v <= 10) max_retries = v;
+    }
+    if (env_delay && env_delay[0]) {
+        int v = atoi(env_delay);
+        if (v >= 100 && v <= 30000) retry_delay_ms = v;
+    }
     CURLcode res = CURLE_OK;
     long http_code = 0;
 
@@ -1879,7 +2236,7 @@ stream_result_t llm_stream(const char *api_key, const char *request_json,
         setup_curl_opts(curl, headers, request_json, &state);
 
         res = curl_easy_perform(curl);
-        if (res == CURLE_WRITE_ERROR && g_interrupted) {
+        if (res != CURLE_OK && (g_interrupted || state.repdet_tripped)) {
             res = CURLE_ABORTED_BY_CALLBACK;
         }
 

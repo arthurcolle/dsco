@@ -4,6 +4,7 @@
 #include <stdbool.h>
 #include <stddef.h>
 #include <pthread.h>
+#include "swarm.h"
 
 /* Tool definition */
 typedef struct {
@@ -14,6 +15,12 @@ typedef struct {
 } tool_def_t;
 
 void             tools_init(void);
+void             tools_set_runtime_api_key(const char *api_key);
+void             tools_set_runtime_model(const char *model);
+const char      *tools_runtime_api_key(void);
+const char      *tools_runtime_model(void);
+void             tools_context_turn_begin(void);
+swarm_t         *tools_swarm_instance(void);
 const tool_def_t *tools_get_all(int *count);
 int              tools_builtin_count(void);
 bool             tools_execute(const char *name, const char *input_json,

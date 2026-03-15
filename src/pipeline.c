@@ -5,6 +5,7 @@
 #include <string.h>
 #include <ctype.h>
 #include <regex.h>
+#include <time.h>
 
 /* ═══════════════════════════════════════════════════════════════════════════
  * Coroutine-based streaming pipeline engine
@@ -597,6 +598,78 @@ static void apply_stage(char ***lines, int *count, pipe_stage_t *stage) {
         break;
     }
 
+    case PIPE_SAMPLE: {
+        int n = stage->int_arg > 0 ? stage->int_arg : 10;
+        if (n >= *count) break;
+        /* Fisher-Yates partial shuffle */
+        srand((unsigned)time(NULL));
+        for (int i = *count - 1; i > 0 && i >= *count - n; i--) {
+            int j = rand() % (i + 1);
+            char *tmp = (*lines)[i]; (*lines)[i] = (*lines)[j]; (*lines)[j] = tmp;
+        }
+        /* Keep last n lines */
+        for (int i = 0; i < *count - n; i++) free((*lines)[i]);
+        memmove(*lines, *lines + (*count - n), n * sizeof(char*));
+        *count = n;
+        break;
+    }
+    case PIPE_FREQ: {
+        /* Sort, count unique, sort by count descending */
+        qsort(*lines, *count, sizeof(char*), cmp_str);
+        char **out = NULL; int oc = 0;
+        int i = 0;
+        while (i < *count) {
+            int j = i + 1;
+            while (j < *count && strcmp((*lines)[i], (*lines)[j]) == 0) j++;
+            char buf[PIPE_MAX_LINE_LEN];
+            snprintf(buf, sizeof(buf), "%7d %s", j - i, (*lines)[i]);
+            out = realloc(out, (oc + 1) * sizeof(char*));
+            out[oc++] = strdup(buf);
+            i = j;
+        }
+        for (int k = 0; k < *count; k++) free((*lines)[k]);
+        free(*lines);
+        *lines = out; *count = oc;
+        /* Sort by count descending */
+        qsort(*lines, *count, sizeof(char*), cmp_str_r);
+        break;
+    }
+    case PIPE_HISTOGRAM: {
+        /* Count frequencies then show bars */
+        qsort(*lines, *count, sizeof(char*), cmp_str);
+        char **out = NULL; int oc = 0;
+        int max_freq = 0;
+        /* First pass: find max frequency */
+        int i = 0;
+        typedef struct { char *key; int count; } hentry_t;
+        hentry_t *entries = NULL; int ne = 0;
+        while (i < *count) {
+            int j = i + 1;
+            while (j < *count && strcmp((*lines)[i], (*lines)[j]) == 0) j++;
+            int freq = j - i;
+            if (freq > max_freq) max_freq = freq;
+            entries = realloc(entries, (ne + 1) * sizeof(hentry_t));
+            entries[ne].key = (*lines)[i]; entries[ne].count = freq;
+            ne++; i = j;
+        }
+        /* Build histogram bars */
+        int bar_max = 40;
+        for (int k = 0; k < ne; k++) {
+            int bar_len = max_freq > 0 ? (entries[k].count * bar_max / max_freq) : 0;
+            if (bar_len < 1 && entries[k].count > 0) bar_len = 1;
+            char bar[64]; for (int b = 0; b < bar_len && b < 63; b++) bar[b] = '#'; bar[bar_len < 63 ? bar_len : 63] = '\0';
+            char buf[PIPE_MAX_LINE_LEN];
+            snprintf(buf, sizeof(buf), "%7d %s %s", entries[k].count, bar, entries[k].key);
+            out = realloc(out, (oc + 1) * sizeof(char*));
+            out[oc++] = strdup(buf);
+        }
+        free(entries);
+        for (int k = 0; k < *count; k++) free((*lines)[k]);
+        free(*lines);
+        *lines = out; *count = oc;
+        break;
+    }
+
     } /* end switch */
 }
 
@@ -668,6 +741,11 @@ static const stage_name_t STAGE_NAMES[] = {
     {"jq",           PIPE_JSON_EXTRACT},
     {"csv_column",   PIPE_CSV_COLUMN},
     {"stats",        PIPE_STATS},
+    {"sample",       PIPE_SAMPLE},
+    {"freq",         PIPE_FREQ},
+    {"frequency",    PIPE_FREQ},
+    {"histogram",    PIPE_HISTOGRAM},
+    {"hist",         PIPE_HISTOGRAM},
     {NULL, 0}
 };
 
