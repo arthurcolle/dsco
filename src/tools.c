@@ -34,6 +34,7 @@
 #include <stdint.h>
 #include <ctype.h>
 #include <math.h>
+#include <regex.h>
 
 extern volatile int g_interrupted;
 
@@ -8803,6 +8804,443 @@ static bool tool_view_pdf(const char *input, char *result, size_t rlen) {
 #define S_ASLIDE "{\"type\":\"object\",\"properties\":{\"symbols\":{\"type\":\"string\",\"description\":\"Comma-separated symbols\"},\"range\":{\"type\":\"string\",\"description\":\"Date range\"},\"interval\":{\"type\":\"string\",\"description\":\"DAILY, WEEKLY, MONTHLY, 1min-60min\"},\"window_size\":{\"type\":\"string\",\"description\":\"Sliding window size (min 10)\"},\"calculations\":{\"type\":\"string\",\"description\":\"Metrics to calculate\"},\"ohlc\":{\"type\":\"string\",\"description\":\"open, high, low, close\"}},\"required\":[\"symbols\",\"range\",\"interval\",\"window_size\",\"calculations\"]}"
 #define S_KWD "{\"type\":\"object\",\"properties\":{\"keywords\":{\"type\":\"string\",\"description\":\"Search keywords (company name or partial ticker)\"}},\"required\":[\"keywords\"]}"
 
+
+/* ═══ CSV PARSE ═══ */
+static bool tool_csv_parse(const char *input, char *result, size_t rlen) {
+    char *text = json_get_str(input, "text");
+    char *file = json_get_str(input, "file");
+    int column = json_get_int(input, "column", -1);
+    char *delimiter_str = json_get_str(input, "delimiter");
+    char delim = (delimiter_str && delimiter_str[0]) ? delimiter_str[0] : ',';
+    bool headers = json_get_bool(input, "headers", true);
+    char *data = NULL;
+    if (file) {
+        FILE *f = fopen(file, "r");
+        if (!f) { snprintf(result, rlen, "error: cannot open %s", file); free(text); free(file); free(delimiter_str); return false; }
+        fseek(f, 0, SEEK_END); long sz = ftell(f); fseek(f, 0, SEEK_SET);
+        if (sz > 1024*1024) sz = 1024*1024; /* cap at 1MB */
+        data = safe_malloc((size_t)sz + 1);
+        size_t n = fread(data, 1, (size_t)sz, f); data[n] = 0;
+        fclose(f);
+    } else if (text) {
+        data = safe_strdup(text);
+    } else {
+        snprintf(result, rlen, "error: text or file required");
+        free(delimiter_str);
+        return false;
+    }
+    jbuf_t b; jbuf_init(&b, strlen(data) + 256);
+    jbuf_append(&b, "{\"rows\":[");
+    char *line = data, *next;
+    int row = 0;
+    char **header_names = NULL; int ncols_header = 0;
+    while (line && *line) {
+        next = strchr(line, '\n');
+        if (next) *next++ = 0;
+        /* Trim \r */
+        size_t ll = strlen(line); if (ll > 0 && line[ll-1] == '\r') line[ll-1] = 0;
+        if (row == 0 && headers) {
+            /* Parse header names */
+            char *h = line;
+            while (h) {
+                char *sep = strchr(h, delim);
+                if (sep) *sep = 0;
+                header_names = realloc(header_names, (ncols_header+1)*sizeof(char*));
+                header_names[ncols_header++] = safe_strdup(h);
+                h = sep ? sep+1 : NULL;
+            }
+            row++; line = next; continue;
+        }
+        if (column >= 0) {
+            /* Extract specific column */
+            char *col = line; int ci = 0;
+            while (ci < column && col) { col = strchr(col, delim); if (col) col++; ci++; }
+            if (col) {
+                char *end = strchr(col, delim); if (end) *end = 0;
+                if (row > (headers ? 1 : 0)) jbuf_append(&b, ",");
+                jbuf_append(&b, "\""); jbuf_append_json_str(&b, col); jbuf_append(&b, "\"");
+            }
+        } else {
+            if (row > (headers ? 1 : 0)) jbuf_append(&b, ",");
+            jbuf_append(&b, "[");
+            char *col = line; int ci = 0;
+            while (col) {
+                char *sep = strchr(col, delim); if (sep) *sep = 0;
+                if (ci > 0) jbuf_append(&b, ",");
+                jbuf_append(&b, "\""); jbuf_append_json_str(&b, col); jbuf_append(&b, "\"");
+                col = sep ? sep+1 : NULL; ci++;
+            }
+            jbuf_append(&b, "]");
+        }
+        row++; line = next;
+    }
+    jbuf_appendf(&b, "],\"total_rows\":%d", row - (headers ? 1 : 0));
+    if (header_names) {
+        jbuf_append(&b, ",\"headers\":[");
+        for (int i = 0; i < ncols_header; i++) {
+            if (i) jbuf_append(&b, ",");
+            jbuf_append(&b, "\""); jbuf_append_json_str(&b, header_names[i]); jbuf_append(&b, "\"");
+            free(header_names[i]);
+        }
+        jbuf_append(&b, "]");
+        free(header_names);
+    }
+    jbuf_append(&b, "}");
+    snprintf(result, rlen, "%s", b.data ? b.data : "{}");
+    jbuf_free(&b); free(data); free(text); free(file); free(delimiter_str);
+    return true;
+}
+/* ═══ REGEX MATCH ═══ */
+static bool tool_regex_match(const char *input, char *result, size_t rlen) {
+    char *text = json_get_str(input, "text");
+    char *pattern = json_get_str(input, "pattern");
+    bool global = json_get_bool(input, "global", false);
+    if (!text || !pattern) {
+        snprintf(result, rlen, "{\"error\":\"text and pattern required\"}");
+        free(text); free(pattern); return false;
+    }
+    regex_t re;
+    if (regcomp(&re, pattern, REG_EXTENDED) != 0) {
+        snprintf(result, rlen, "{\"error\":\"invalid regex\"}");
+        free(text); free(pattern); return false;
+    }
+    jbuf_t b; jbuf_init(&b, 512);
+    jbuf_append(&b, "{\"matches\":[");
+    char *p = text; int count = 0; regmatch_t m;
+    while (regexec(&re, p, 1, &m, p == text ? 0 : REG_NOTBOL) == 0) {
+        if (count > 0) jbuf_append(&b, ",");
+        jbuf_append(&b, "\"");
+        for (regoff_t i = m.rm_so; i < m.rm_eo; i++) jbuf_appendf(&b, "%c", p[i]);
+        jbuf_append(&b, "\"");
+        count++;
+        p += m.rm_eo;
+        if (!global || m.rm_eo == 0) break;
+    }
+    regfree(&re);
+    jbuf_appendf(&b, "],\"count\":%d}", count);
+    snprintf(result, rlen, "%s", b.data ? b.data : "{}");
+    jbuf_free(&b); free(text); free(pattern);
+    return true;
+}
+
+/* ═══ URL PARSE ═══ */
+static bool tool_url_parse(const char *input, char *result, size_t rlen) {
+    char *url = json_get_str(input, "url");
+    if (!url) { snprintf(result, rlen, "{\"error\":\"url required\"}"); return false; }
+    char scheme[64]="", host[256]="", path[1024]="", query[1024]="", fragment[256]="";
+    int port = 0;
+    char *p = url;
+    /* scheme */
+    char *sep = strstr(p, "://");
+    if (sep) {
+        size_t slen = (size_t)(sep - p); if (slen >= sizeof(scheme)) slen = sizeof(scheme)-1;
+        strncpy(scheme, p, slen); scheme[slen] = 0;
+        p = sep + 3;
+    }
+    /* host:port */
+    char *slash = strchr(p, '/');
+    char *qmark = strchr(p, '?');
+    char *hash  = strchr(p, '#');
+    char *hostend = slash ? slash : (qmark ? qmark : (hash ? hash : p + strlen(p)));
+    size_t hlen = (size_t)(hostend - p); if (hlen >= sizeof(host)) hlen = sizeof(host)-1;
+    strncpy(host, p, hlen); host[hlen] = 0;
+    char *colon = strrchr(host, ':');
+    if (colon && colon > host) { port = atoi(colon+1); *colon = 0; }
+    p = hostend;
+    /* path */
+    if (*p == '/') {
+        char *pe = qmark ? qmark : (hash ? hash : p + strlen(p));
+        size_t plen = (size_t)(pe - p); if (plen >= sizeof(path)) plen = sizeof(path)-1;
+        strncpy(path, p, plen); path[plen] = 0; p = pe;
+    }
+    /* query */
+    if (*p == '?') {
+        p++;
+        char *qe = hash ? hash : p + strlen(p);
+        size_t qlen = (size_t)(qe - p); if (qlen >= sizeof(query)) qlen = sizeof(query)-1;
+        strncpy(query, p, qlen); query[qlen] = 0; p = qe;
+    }
+    /* fragment */
+    if (*p == '#') { strncpy(fragment, p+1, sizeof(fragment)-1); }
+    snprintf(result, rlen,
+        "{\"scheme\":\"%s\",\"host\":\"%s\",\"port\":%d,\"path\":\"%s\",\"query\":\"%s\",\"fragment\":\"%s\"}",
+        scheme, host, port, path, query, fragment);
+    free(url);
+    return true;
+}
+
+/* ═══ SEMVER COMPARE ═══ */
+static bool tool_semver(const char *input, char *result, size_t rlen) {
+    char *va = json_get_str(input, "version_a");
+    char *vb = json_get_str(input, "version_b");
+    if (!va || !vb) { snprintf(result, rlen, "{\"error\":\"version_a and version_b required\"}"); free(va); free(vb); return false; }
+    int a1=0,a2=0,a3=0, b1=0,b2=0,b3=0;
+    sscanf(va, "%d.%d.%d", &a1, &a2, &a3);
+    sscanf(vb, "%d.%d.%d", &b1, &b2, &b3);
+    int cmp = (a1!=b1) ? (a1>b1?1:-1) : (a2!=b2) ? (a2>b2?1:-1) : (a3!=b3) ? (a3>b3?1:-1) : 0;
+    snprintf(result, rlen, "{\"result\":%d,\"version_a\":\"%s\",\"version_b\":\"%s\",\"comparison\":\"%s\"}",
+        cmp, va, vb, cmp<0?"less":cmp>0?"greater":"equal");
+    free(va); free(vb);
+    return true;
+}
+
+/* ═══ CRON PARSE ═══ */
+static bool tool_cron_parse(const char *input, char *result, size_t rlen) {
+    char *expr = json_get_str(input, "expression");
+    if (!expr) { snprintf(result, rlen, "{\"error\":\"expression required\"}"); return false; }
+    /* Parse 5-field cron: min hour dom mon dow */
+    char min[32]="*", hour[32]="*", dom[32]="*", mon[32]="*", dow[32]="*";
+    int n = sscanf(expr, "%31s %31s %31s %31s %31s", min, hour, dom, mon, dow);
+    const char *mons[] = {"Jan","Feb","Mar","Apr","May","Jun","Jul","Aug","Sep","Oct","Nov","Dec"};
+    const char *days[] = {"Sun","Mon","Tue","Wed","Thu","Fri","Sat"};
+    jbuf_t b; jbuf_init(&b, 512);
+    jbuf_appendf(&b, "{\"fields\":%d,\"minute\":\"%s\",\"hour\":\"%s\",\"day_of_month\":\"%s\",\"month\":\"%s\",\"day_of_week\":\"%s\"",
+        n, min, hour, dom, mon, dow);
+    /* Human description */
+    jbuf_append(&b, ",\"description\":\"");
+    if (strcmp(min,"*")==0 && strcmp(hour,"*")==0) jbuf_append(&b, "every minute");
+    else if (strcmp(min,"0")==0 && strcmp(hour,"*")==0) jbuf_append(&b, "every hour");
+    else { jbuf_appendf(&b, "at %s:%s", hour, min); }
+    if (strcmp(dom,"*")!=0) jbuf_appendf(&b, " on day %s", dom);
+    if (strcmp(mon,"*")!=0) {
+        int mi = atoi(mon)-1;
+        if (mi>=0 && mi<12) jbuf_appendf(&b, " in %s", mons[mi]);
+        else jbuf_appendf(&b, " in month %s", mon);
+    }
+    if (strcmp(dow,"*")!=0) {
+        int di = atoi(dow);
+        if (di>=0 && di<7) jbuf_appendf(&b, " on %s", days[di]);
+        else jbuf_appendf(&b, " on weekday %s", dow);
+    }
+    jbuf_append(&b, "\"}");
+    snprintf(result, rlen, "%s", b.data ? b.data : "{}");
+    jbuf_free(&b); free(expr);
+    return true;
+}
+
+/* ═══ TEMPLATE RENDER ═══ */
+static bool tool_template_render(const char *input, char *result, size_t rlen) {
+    char *tmpl = json_get_str(input, "template");
+    char *vars = json_get_str(input, "variables");
+    if (!tmpl) { snprintf(result, rlen, "{\"error\":\"template required\"}"); free(vars); return false; }
+    jbuf_t b; jbuf_init(&b, strlen(tmpl) * 2 + 256);
+    const char *p = tmpl;
+    while (*p) {
+        if (p[0] == '{' && p[1] == '{') {
+            const char *end = strstr(p+2, "}}");
+            if (!end) { jbuf_append_char(&b, *p++); continue; }
+            size_t klen = (size_t)(end - (p+2));
+            char key[256] = {0};
+            if (klen < sizeof(key)) { strncpy(key, p+2, klen); key[klen] = 0; }
+            /* Trim whitespace */
+            char *ks = key; while (*ks == ' ') ks++;
+            char *ke = ks + strlen(ks)-1; while (ke > ks && *ke == ' ') *ke-- = 0;
+            /* Look up in vars JSON */
+            char *val = vars ? json_get_str(vars, ks) : NULL;
+            if (val) { jbuf_append_json_str(&b, val); free(val); }
+            else jbuf_appendf(&b, "{{%s}}", ks);
+            p = end + 2;
+        } else {
+            jbuf_append_char(&b, *p++);
+        }
+    }
+    snprintf(result, rlen, "%s", b.data ? b.data : "");
+    jbuf_free(&b); free(tmpl); free(vars);
+    return true;
+}
+
+/* ═══ TEXT DIFF ═══ */
+static bool tool_text_diff(const char *input, char *result, size_t rlen) {
+    char *a = json_get_str(input, "text_a");
+    char *b_text = json_get_str(input, "text_b");
+    if (!a || !b_text) {
+        snprintf(result, rlen, "{\"error\":\"text_a and text_b required\"}");
+        free(a); free(b_text); return false;
+    }
+    /* Write to temp files and diff */
+    char fa[] = "/tmp/dsco_diff_a_XXXXXX", fb[] = "/tmp/dsco_diff_b_XXXXXX";
+    int fda = mkstemp(fa), fdb = mkstemp(fb);
+    if (fda < 0 || fdb < 0) {
+        snprintf(result, rlen, "{\"error\":\"failed to create temp files\"}");
+        if (fda>=0) close(fda); if (fdb>=0) close(fdb);
+        free(a); free(b_text); return false;
+    }
+    write(fda, a, strlen(a)); close(fda);
+    write(fdb, b_text, strlen(b_text)); close(fdb);
+    char cmd[512];
+    snprintf(cmd, sizeof(cmd), "diff -u %s %s 2>/dev/null; true", fa, fb);
+    run_opts_t opts = RUN_OPTS_DEFAULT; opts.stream_to_tty = false; opts.wall_timeout_s = 10;
+    char diff_out[65536] = {0};
+    run_cmd_ex(cmd, diff_out, sizeof(diff_out), &opts);
+    unlink(fa); unlink(fb);
+    jbuf_t buf; jbuf_init(&buf, strlen(diff_out) + 64);
+    jbuf_append(&buf, "{\"diff\":\"");
+    jbuf_append_json_str(&buf, diff_out);
+    jbuf_append(&buf, "\"}");
+    snprintf(result, rlen, "%s", buf.data ? buf.data : "{}");
+    jbuf_free(&buf); free(a); free(b_text);
+    return true;
+}
+
+/* ═══ PROCESS TREE ═══ */
+static bool tool_process_tree(const char *input, char *result, size_t rlen) {
+    char *filter = json_get_str(input, "filter");
+    char cmd[512];
+    if (filter && *filter) {
+        char *esc = shell_escape(filter);
+        snprintf(cmd, sizeof(cmd), "ps -eo pid,ppid,user,pcpu,pmem,comm | head -1; ps -eo pid,ppid,user,pcpu,pmem,comm | grep -i %s 2>/dev/null | head -40", esc);
+        free(esc);
+    } else {
+        snprintf(cmd, sizeof(cmd), "ps -eo pid,ppid,user,pcpu,pmem,comm | head -50");
+    }
+    run_opts_t opts = RUN_OPTS_DEFAULT; opts.stream_to_tty = false; opts.wall_timeout_s = 10;
+    run_cmd_ex(cmd, result, rlen, &opts);
+    free(filter);
+    return true;
+}
+
+/* ═══ SYSTEM PROFILER ═══ */
+static bool tool_system_profiler(const char *input, char *result, size_t rlen) {
+    char *section = json_get_str(input, "section");
+    jbuf_t b; jbuf_init(&b, 8192);
+    char buf[4096];
+    run_opts_t opts = RUN_OPTS_DEFAULT; opts.stream_to_tty = false; opts.wall_timeout_s = 15;
+    bool do_all = !section || !*section || strcmp(section,"all")==0;
+    if (do_all || strcmp(section,"cpu")==0) {
+        run_cmd_ex("sysctl -n machdep.cpu.brand_string hw.ncpu hw.memsize 2>/dev/null || lscpu 2>/dev/null | head -20", buf, sizeof(buf), &opts);
+        jbuf_append(&b, "=== CPU/Memory ===\n"); jbuf_append(&b, buf);
+    }
+    if (do_all || strcmp(section,"disk")==0) {
+        run_cmd_ex("df -h 2>/dev/null | head -20", buf, sizeof(buf), &opts);
+        jbuf_append(&b, "\n=== Disk Usage ===\n"); jbuf_append(&b, buf);
+    }
+    if (do_all || strcmp(section,"network")==0) {
+        run_cmd_ex("ifconfig 2>/dev/null | grep -A1 'inet ' | head -20 || ip addr 2>/dev/null | grep inet | head -20", buf, sizeof(buf), &opts);
+        jbuf_append(&b, "\n=== Network ===\n"); jbuf_append(&b, buf);
+    }
+    if (do_all || strcmp(section,"load")==0) {
+        run_cmd_ex("uptime && vm_stat 2>/dev/null | head -10 || free -h 2>/dev/null", buf, sizeof(buf), &opts);
+        jbuf_append(&b, "\n=== Load ===\n"); jbuf_append(&b, buf);
+    }
+    snprintf(result, rlen, "%s", b.data ? b.data : "no data");
+    jbuf_free(&b); free(section);
+    return true;
+}
+
+/* ═══ STRING OPS ═══ */
+static bool tool_string_ops(const char *input, char *result, size_t rlen) {
+    char *op  = json_get_str(input, "op");
+    char *text = json_get_str(input, "text");
+    if (!op || !text) { snprintf(result, rlen, "{\"error\":\"op and text required\"}"); free(op); free(text); return false; }
+    jbuf_t b; jbuf_init(&b, strlen(text)+256);
+    if (strcmp(op,"upper")==0) {
+        for (char *p = text; *p; p++) jbuf_append_char(&b, (char)toupper((unsigned char)*p));
+    } else if (strcmp(op,"lower")==0) {
+        for (char *p = text; *p; p++) jbuf_append_char(&b, (char)tolower((unsigned char)*p));
+    } else if (strcmp(op,"trim")==0) {
+        char *s = text; while (*s == ' '||*s=='\t'||*s=='\n'||*s=='\r') s++;
+        char *e = s + strlen(s)-1; while (e > s && (*e==' '||*e=='\t'||*e=='\n'||*e=='\r')) e--;
+        jbuf_append_len(&b, s, (size_t)(e-s+1));
+    } else if (strcmp(op,"reverse")==0) {
+        size_t l = strlen(text);
+        for (size_t i = l; i > 0; i--) jbuf_append_char(&b, text[i-1]);
+    } else if (strcmp(op,"length")==0) {
+        snprintf(result, rlen, "{\"length\":%zu}", strlen(text));
+        jbuf_free(&b); free(op); free(text); return true;
+    } else if (strcmp(op,"base64_encode")==0) {
+        static const char b64c[] = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+        const unsigned char *s = (const unsigned char *)text; size_t l = strlen(text);
+        for (size_t i = 0; i < l; i+=3) {
+            unsigned v = (unsigned)s[i]<<16 | (i+1<l?(unsigned)s[i+1]:0)<<8 | (i+2<l?(unsigned)s[i+2]:0);
+            jbuf_append_char(&b, b64c[(v>>18)&63]); jbuf_append_char(&b, b64c[(v>>12)&63]);
+            jbuf_append_char(&b, i+1<l?b64c[(v>>6)&63]:'=');
+            jbuf_append_char(&b, i+2<l?b64c[v&63]:'=');
+        }
+    } else if (strcmp(op,"word_count")==0) {
+        int words=0; bool inw=false;
+        for (char *p=text; *p; p++) { if (*p==' '||*p=='\t'||*p=='\n') inw=false; else if(!inw){words++;inw=true;} }
+        snprintf(result, rlen, "{\"word_count\":%d}", words);
+        jbuf_free(&b); free(op); free(text); return true;
+    } else {
+        snprintf(result, rlen, "{\"error\":\"unknown op: %s\"}", op);
+        jbuf_free(&b); free(op); free(text); return false;
+    }
+    jbuf_append(&b, "\0");
+    snprintf(result, rlen, "{\"result\":\"%s\"}", b.data ? b.data : "");
+    jbuf_free(&b); free(op); free(text);
+    return true;
+}
+
+/* ═══ XML EXTRACT ═══ */
+static bool tool_xml_extract(const char *input, char *result, size_t rlen) {
+    char *text = json_get_str(input, "text");
+    char *file = json_get_str(input, "file");
+    char *tag  = json_get_str(input, "tag");
+    char *attr_name = json_get_str(input, "attribute");
+    char *data = NULL;
+    if (file) {
+        FILE *f = fopen(file, "r");
+        if (!f) { snprintf(result, rlen, "{\"error\":\"cannot open %s\"}", file); free(text); free(file); free(tag); free(attr_name); return false; }
+        fseek(f, 0, SEEK_END); long sz = ftell(f); fseek(f, 0, SEEK_SET);
+        if (sz > 2*1024*1024) sz = 2*1024*1024;
+        data = safe_malloc((size_t)sz + 1);
+        size_t n = fread(data, 1, (size_t)sz, f); data[n] = 0; fclose(f);
+    } else if (text) {
+        data = safe_strdup(text);
+    } else {
+        snprintf(result, rlen, "{\"error\":\"text or file required\"}");
+        free(tag); free(attr_name); return false;
+    }
+    if (!tag || !*tag) {
+        snprintf(result, rlen, "{\"error\":\"tag required\"}");
+        free(data); free(text); free(file); free(tag); free(attr_name); return false;
+    }
+    jbuf_t b; jbuf_init(&b, 1024);
+    jbuf_append(&b, "{\"matches\":[");
+    char open_tag[256], close_tag[256];
+    snprintf(open_tag, sizeof(open_tag), "<%s", tag);
+    snprintf(close_tag, sizeof(close_tag), "</%s>", tag);
+    char *p = data; int count = 0;
+    while ((p = strstr(p, open_tag)) != NULL) {
+        /* Verify it's actually the tag (not a prefix) */
+        char next = p[strlen(open_tag)];
+        if (next != '>' && next != ' ' && next != '\t' && next != '\n' && next != '/') { p++; continue; }
+        char *tag_end = strchr(p, '>');
+        if (!tag_end) break;
+        if (attr_name && *attr_name) {
+            /* Extract attribute value */
+            char attr_search[270]; snprintf(attr_search, sizeof(attr_search), "%s=\"", attr_name);
+            char *apos = strstr(p, attr_search);
+            if (apos && apos < tag_end) {
+                apos += strlen(attr_search);
+                char *aend = strchr(apos, '"');
+                if (aend && aend <= tag_end) {
+                    if (count > 0) jbuf_append(&b, ",");
+                    jbuf_append(&b, "\""); jbuf_append_len(&b, apos, (size_t)(aend-apos)); jbuf_append(&b, "\"");
+                    count++;
+                }
+            }
+        } else {
+            /* Extract inner text */
+            char *content_start = tag_end + 1;
+            char *content_end = strstr(content_start, close_tag);
+            if (!content_end) { p = tag_end; continue; }
+            if (count > 0) jbuf_append(&b, ",");
+            jbuf_append(&b, "\"");
+            jbuf_append_len(&b, content_start, (size_t)(content_end - content_start));
+            jbuf_append(&b, "\"");
+            count++;
+            p = content_end + strlen(close_tag);
+            continue;
+        }
+        p = tag_end;
+    }
+    jbuf_appendf(&b, "],\"count\":%d}", count);
+    snprintf(result, rlen, "%s", b.data ? b.data : "{}");
+    jbuf_free(&b); free(data); free(text); free(file); free(tag); free(attr_name);
+    return true;
+}
+
 static const tool_def_t s_tools[] = {
     /* ── File Tools ──────────────────────────────────────────────────────── */
     {
@@ -10070,6 +10508,72 @@ static const tool_def_t s_tools[] = {
         .description = "Geocode an address or place name to coordinates using Mapbox. Requires MAPBOX_API_KEY.",
         .input_schema_json = "{\"type\":\"object\",\"properties\":{\"query\":{\"type\":\"string\",\"description\":\"Place name or address\"}},\"required\":[\"query\"]}",
         .execute = tool_mapbox_geocode
+    },
+    {
+        .name = "csv_parse",
+        .description = "Parse CSV text or file. Returns JSON array of rows. Supports column extraction, custom delimiters, header detection.",
+        .input_schema_json = "{\"type\":\"object\",\"properties\":{\"text\":{\"type\":\"string\",\"description\":\"CSV text\"},\"file\":{\"type\":\"string\",\"description\":\"CSV file path\"},\"column\":{\"type\":\"integer\",\"description\":\"Extract specific column (0-based)\"},\"delimiter\":{\"type\":\"string\",\"description\":\"Delimiter (default comma)\"},\"headers\":{\"type\":\"boolean\",\"description\":\"First row is headers (default true)\"}}}",
+        .execute = tool_csv_parse
+    },
+    {
+        .name = "regex_match",
+        .description = "Match a regex pattern against text. Returns all matches. Supports extended POSIX regex.",
+        .input_schema_json = "{\"type\":\"object\",\"properties\":{\"text\":{\"type\":\"string\",\"description\":\"Input text\"},\"pattern\":{\"type\":\"string\",\"description\":\"POSIX extended regex pattern\"},\"global\":{\"type\":\"boolean\",\"description\":\"Return all matches (default false)\"}},\"required\":[\"text\",\"pattern\"]}",
+        .execute = tool_regex_match
+    },
+    {
+        .name = "url_parse",
+        .description = "Parse a URL into scheme, host, port, path, query, fragment components.",
+        .input_schema_json = "{\"type\":\"object\",\"properties\":{\"url\":{\"type\":\"string\",\"description\":\"URL to parse\"}},\"required\":[\"url\"]}",
+        .execute = tool_url_parse
+    },
+    {
+        .name = "semver_compare",
+        .description = "Compare two semantic versions (e.g. 1.2.3 vs 2.0.0). Returns -1, 0, or 1.",
+        .input_schema_json = "{\"type\":\"object\",\"properties\":{\"version_a\":{\"type\":\"string\",\"description\":\"First version\"},\"version_b\":{\"type\":\"string\",\"description\":\"Second version\"}},\"required\":[\"version_a\",\"version_b\"]}",
+        .execute = tool_semver
+    },
+    {
+        .name = "cron_parse",
+        .description = "Parse a cron expression (5-field) and return structured fields with a human-readable description.",
+        .input_schema_json = "{\"type\":\"object\",\"properties\":{\"expression\":{\"type\":\"string\",\"description\":\"Cron expression e.g. '0 9 * * 1'\"}},\"required\":[\"expression\"]}",
+        .execute = tool_cron_parse
+    },
+    {
+        .name = "template_render",
+        .description = "Render a Mustache-style template with {{variable}} substitution from a JSON variables object.",
+        .input_schema_json = "{\"type\":\"object\",\"properties\":{\"template\":{\"type\":\"string\",\"description\":\"Template with {{var}} placeholders\"},\"variables\":{\"type\":\"string\",\"description\":\"JSON object of variable values\"}},\"required\":[\"template\"]}",
+        .execute = tool_template_render
+    },
+    {
+        .name = "text_diff",
+        .description = "Produce a unified diff between two text strings.",
+        .input_schema_json = "{\"type\":\"object\",\"properties\":{\"text_a\":{\"type\":\"string\",\"description\":\"First text\"},\"text_b\":{\"type\":\"string\",\"description\":\"Second text\"}},\"required\":[\"text_a\",\"text_b\"]}",
+        .execute = tool_text_diff
+    },
+    {
+        .name = "process_tree",
+        .description = "Show process list with PID, PPID, user, CPU%, MEM%, command. Optionally filter by name.",
+        .input_schema_json = "{\"type\":\"object\",\"properties\":{\"filter\":{\"type\":\"string\",\"description\":\"Optional process name filter\"}}}",
+        .execute = tool_process_tree
+    },
+    {
+        .name = "system_profiler",
+        .description = "System profiling: CPU, memory, disk, network, load. Specify section (cpu/disk/network/load/all).",
+        .input_schema_json = "{\"type\":\"object\",\"properties\":{\"section\":{\"type\":\"string\",\"description\":\"Section: cpu, disk, network, load, or all (default)\"}}}",
+        .execute = tool_system_profiler
+    },
+    {
+        .name = "string_ops",
+        .description = "String operations: upper, lower, trim, reverse, length, base64_encode, word_count.",
+        .input_schema_json = "{\"type\":\"object\",\"properties\":{\"op\":{\"type\":\"string\",\"description\":\"Operation: upper|lower|trim|reverse|length|base64_encode|word_count\"},\"text\":{\"type\":\"string\",\"description\":\"Input text\"}},\"required\":[\"op\",\"text\"]}",
+        .execute = tool_string_ops
+    },
+    {
+        .name = "xml_extract",
+        .description = "Extract content or attributes from XML/HTML tags. Lightweight tag-based extraction without a full parser.",
+        .input_schema_json = "{\"type\":\"object\",\"properties\":{\"text\":{\"type\":\"string\",\"description\":\"XML/HTML text\"},\"file\":{\"type\":\"string\",\"description\":\"XML/HTML file path\"},\"tag\":{\"type\":\"string\",\"description\":\"Tag name to extract\"},\"attribute\":{\"type\":\"string\",\"description\":\"Attribute name to extract (omit for inner text)\"}},\"required\":[\"tag\"]}",
+        .execute = tool_xml_extract
     },
 };
 
