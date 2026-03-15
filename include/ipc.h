@@ -123,6 +123,10 @@ bool ipc_get_agent(const char *agent_id, ipc_agent_info_t *out);
 /* Check if an agent is still alive (heartbeat recent enough) */
 bool ipc_agent_alive(const char *agent_id);
 
+/* Mark agents as 'dead' if they haven't heartbeated in stale_s seconds.
+ * Returns number of agents reaped. */
+int ipc_reap_dead_agents(double stale_s);
+
 /* ── Messaging ─────────────────────────────────────────────────────────── */
 
 /* Send a message to a specific agent (or broadcast if to_agent=NULL) */
@@ -159,6 +163,10 @@ int ipc_task_list(const char *assigned_to, ipc_task_t *out, int max);
 
 /* Get count of pending (unassigned) tasks */
 int ipc_task_pending_count(void);
+
+/* Requeue tasks stuck in assigned/running state beyond timeout_s seconds.
+ * Returns number of tasks requeued back to pending. */
+int ipc_task_requeue_stale(double timeout_s);
 
 /* ── Scratchpad (Shared Key-Value Store) ───────────────────────────────── */
 
