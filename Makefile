@@ -21,8 +21,8 @@ DEBUG_TARGET = $(TARGET)-debug
 
 SRC_NAMES = main.c agent.c llm.c tools.c json_util.c ast.c swarm.c tui.c \
 	md.c baseline.c setup.c crypto.c eval.c pipeline.c plugin.c \
-	semantic.c ipc.c mcp.c provider.c integrations.c error.c trace.c \
-	output_guard.c
+	semantic.c ipc.c mcp.c provider.c integrations.c error.c trace.c task_profile.c \
+	output_guard.c topology.c workspace.c plan.c router.c
 TEST_SRC_NAMES = test.c
 
 SRCS = $(addprefix $(SRC_DIR)/, $(SRC_NAMES))
