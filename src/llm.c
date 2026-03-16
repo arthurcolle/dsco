@@ -679,6 +679,44 @@ void conv_add_tool_result(conversation_t *c, const char *tool_id,
     mc->is_error = is_error;
 }
 
+void conv_ensure_tool_results(conversation_t *c) {
+    /* Scan for tool_use blocks in assistant messages that have no matching
+       tool_result in the subsequent user message.  Insert synthetic error
+       results for any orphans.  This prevents HTTP 400 from the API. */
+    for (int i = 0; i < c->count; i++) {
+        message_t *m = &c->msgs[i];
+        if (m->role != ROLE_ASSISTANT) continue;
+
+        /* Collect tool_use ids from this assistant message */
+        for (int j = 0; j < m->content_count; j++) {
+            msg_content_t *mc = &m->content[j];
+            if (!mc->type || strcmp(mc->type, "tool_use") != 0 || !mc->tool_id)
+                continue;
+
+            /* Search subsequent user messages for a matching tool_result */
+            bool found = false;
+            for (int k = i + 1; k < c->count && !found; k++) {
+                message_t *um = &c->msgs[k];
+                if (um->role != ROLE_USER) break; /* stop at next assistant msg */
+                for (int l = 0; l < um->content_count; l++) {
+                    if (um->content[l].type &&
+                        strcmp(um->content[l].type, "tool_result") == 0 &&
+                        um->content[l].tool_id &&
+                        strcmp(um->content[l].tool_id, mc->tool_id) == 0) {
+                        found = true;
+                        break;
+                    }
+                }
+            }
+
+            if (!found) {
+                conv_add_tool_result(c, mc->tool_id,
+                                     "tool result missing (session interrupted)", true);
+            }
+        }
+    }
+}
+
 void conv_add_assistant_raw(conversation_t *c, parsed_response_t *resp) {
     message_t *m = NULL;
     for (int i = 0; i < resp->count; i++) {
@@ -1088,6 +1126,8 @@ static void append_tools_json_all(jbuf_t *b, session_state_t *session) {
 
 
 static void build_messages_json(jbuf_t *b, conversation_t *c, session_state_t *session) {
+    /* Ensure every tool_use has a matching tool_result before serialization */
+    conv_ensure_tool_results(c);
     jbuf_append(b, ",\"messages\":[");
     int msg_written = 0;
     int last_written_role = -1;
