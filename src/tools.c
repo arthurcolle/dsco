@@ -37,6 +37,7 @@
 #include <stdint.h>
 #include <ctype.h>
 #include <math.h>
+#include <curl/curl.h>
 #include <regex.h>
 
 extern volatile int g_interrupted;
@@ -5856,6 +5857,233 @@ static bool tool_swarm_collect(const char *input, char *result, size_t rlen) {
 }
 
 /* ═══════════════════════════════════════════════════════════════════════════
+ * OPENROUTER LIVE MODEL REGISTRY — query & dynamic selection
+ * ═══════════════════════════════════════════════════════════════════════════ */
+
+static size_t jbuf_curl_write_cb(void *ptr, size_t size, size_t nmemb, void *userdata) {
+    size_t total = size * nmemb;
+    jbuf_t *b = (jbuf_t *)userdata;
+    size_t need = b->len + total + 1;
+    if (need > b->cap) {
+        size_t newcap = b->cap * 2;
+        if (newcap < need) newcap = need;
+        b->data = realloc(b->data, newcap);
+        b->cap = newcap;
+    }
+    memcpy(b->data + b->len, ptr, total);
+    b->len += total;
+    b->data[b->len] = '\0';
+    return total;
+}
+
+/* Fetch and filter OpenRouter's /api/v1/models endpoint.
+ * Supports filtering by: capability (chat/image/code), min context length,
+ * max price, and text search. Returns up to `limit` models sorted by price. */
+static bool tool_openrouter_models(const char *input, char *result, size_t rlen) {
+    const char *or_key = getenv("OPENROUTER_API_KEY");
+    if (!or_key || !or_key[0]) {
+        snprintf(result, rlen, "{\"error\":\"OPENROUTER_API_KEY not set\"}");
+        return false;
+    }
+
+    /* Parse filter params */
+    char *search = json_get_str(input, "search");
+    int min_ctx = json_get_int(input, "min_context", 0);
+    double max_price = json_get_double(input, "max_price_per_million", 0);
+    int limit = json_get_int(input, "limit", 20);
+    bool free_only = json_get_bool(input, "free_only", false);
+    bool chat_only = json_get_bool(input, "chat_only", true);
+    if (limit <= 0) limit = 20;
+    if (limit > 100) limit = 100;
+
+    /* Fetch models list via curl */
+    CURL *curl = curl_easy_init();
+    if (!curl) {
+        snprintf(result, rlen, "{\"error\":\"curl init failed\"}");
+        free(search);
+        return false;
+    }
+
+    jbuf_t resp;
+    jbuf_init(&resp, 64 * 1024);
+
+    struct curl_slist *hdrs = NULL;
+    char auth[512];
+    snprintf(auth, sizeof(auth), "Authorization: Bearer %s", or_key);
+    hdrs = curl_slist_append(hdrs, auth);
+
+    curl_easy_setopt(curl, CURLOPT_URL, "https://openrouter.ai/api/v1/models");
+    curl_easy_setopt(curl, CURLOPT_HTTPHEADER, hdrs);
+    curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, (curl_write_callback)jbuf_curl_write_cb);
+    curl_easy_setopt(curl, CURLOPT_WRITEDATA, &resp);
+    curl_easy_setopt(curl, CURLOPT_CONNECTTIMEOUT, 10L);
+    curl_easy_setopt(curl, CURLOPT_TIMEOUT, 30L);
+
+    CURLcode res = curl_easy_perform(curl);
+    long http_code = 0;
+    curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, &http_code);
+    curl_slist_free_all(hdrs);
+    curl_easy_cleanup(curl);
+
+    if (res != CURLE_OK || http_code != 200) {
+        snprintf(result, rlen, "{\"error\":\"HTTP %d: %s\"}",
+                 (int)http_code, curl_easy_strerror(res));
+        jbuf_free(&resp);
+        free(search);
+        return false;
+    }
+
+    /* Parse the "data" array from response */
+    char *data_arr = json_get_raw(resp.data, "data");
+    jbuf_free(&resp);
+
+    if (!data_arr) {
+        snprintf(result, rlen, "{\"error\":\"no data array in response\"}");
+        free(search);
+        return false;
+    }
+
+    /* Build filtered result — iterate JSON array elements */
+    jbuf_t out;
+    jbuf_init(&out, 8192);
+    jbuf_append(&out, "{\"models\":[");
+
+    int count = 0;
+    int total_scanned = 0;
+    const char *p = data_arr;
+
+    /* Skip opening '[' */
+    while (*p && *p != '{') p++;
+
+    while (*p == '{' && count < limit) {
+        /* Find matching closing brace (simple depth tracking) */
+        int depth = 0;
+        const char *start = p;
+        do {
+            if (*p == '{') depth++;
+            else if (*p == '}') depth--;
+            p++;
+        } while (*p && depth > 0);
+
+        /* Extract this model object */
+        size_t obj_len = (size_t)(p - start);
+        char *obj = safe_malloc(obj_len + 1);
+        memcpy(obj, start, obj_len);
+        obj[obj_len] = '\0';
+        total_scanned++;
+
+        /* Apply filters */
+        bool pass = true;
+
+        /* Context length filter */
+        if (min_ctx > 0) {
+            int ctx = json_get_int(obj, "context_length", 0);
+            if (ctx < min_ctx) pass = false;
+        }
+
+        /* Price filter */
+        if (pass && (max_price > 0 || free_only)) {
+            char *pricing = json_get_raw(obj, "pricing");
+            if (pricing) {
+                char *prompt_price = json_get_str(pricing, "prompt");
+                double pp = prompt_price ? atof(prompt_price) : 0;
+                free(prompt_price);
+                if (free_only && pp > 0) pass = false;
+                if (max_price > 0 && pp * 1000000.0 > max_price) pass = false;
+                free(pricing);
+            }
+        }
+
+        /* Chat capability filter */
+        if (pass && chat_only) {
+            char *arch = json_get_raw(obj, "architecture");
+            if (arch) {
+                char *modality = json_get_str(arch, "modality");
+                if (modality && !strstr(modality, "text")) pass = false;
+                free(modality);
+                free(arch);
+            }
+        }
+
+        /* Text search filter (case-insensitive via tolower) */
+        if (pass && search && search[0]) {
+            char *id = json_get_str(obj, "id");
+            char *name_str = json_get_str(obj, "name");
+            bool found = false;
+            /* Simple case-insensitive substring: lowercase both and strstr */
+            char sl[128];
+            size_t slen = strlen(search);
+            if (slen >= sizeof(sl)) slen = sizeof(sl) - 1;
+            for (size_t si = 0; si < slen; si++) sl[si] = (char)tolower((unsigned char)search[si]);
+            sl[slen] = '\0';
+            if (id) {
+                char buf[256];
+                size_t ilen = strlen(id);
+                if (ilen >= sizeof(buf)) ilen = sizeof(buf) - 1;
+                for (size_t si = 0; si < ilen; si++) buf[si] = (char)tolower((unsigned char)id[si]);
+                buf[ilen] = '\0';
+                if (strstr(buf, sl)) found = true;
+            }
+            if (!found && name_str) {
+                char buf[256];
+                size_t nlen = strlen(name_str);
+                if (nlen >= sizeof(buf)) nlen = sizeof(buf) - 1;
+                for (size_t si = 0; si < nlen; si++) buf[si] = (char)tolower((unsigned char)name_str[si]);
+                buf[nlen] = '\0';
+                if (strstr(buf, sl)) found = true;
+            }
+            if (!found) pass = false;
+            free(id);
+            free(name_str);
+        }
+
+        if (pass) {
+            /* Extract compact model info */
+            char *id = json_get_str(obj, "id");
+            char *name = json_get_str(obj, "name");
+            int ctx = json_get_int(obj, "context_length", 0);
+            char *pricing = json_get_raw(obj, "pricing");
+            char *prompt_p = pricing ? json_get_str(pricing, "prompt") : NULL;
+            char *comp_p = pricing ? json_get_str(pricing, "completion") : NULL;
+            char *top_prov = json_get_raw(obj, "top_provider");
+            int max_comp = top_prov ? json_get_int(top_prov, "max_completion_tokens", 0) : 0;
+
+            if (count > 0) jbuf_append(&out, ",");
+            jbuf_append(&out, "{\"id\":");
+            jbuf_append_json_str(&out, id ? id : "");
+            jbuf_append(&out, ",\"name\":");
+            jbuf_append_json_str(&out, name ? name : "");
+            jbuf_appendf(&out, ",\"context\":%d,\"max_output\":%d", ctx, max_comp);
+            jbuf_appendf(&out, ",\"price_in\":%s,\"price_out\":%s",
+                         prompt_p ? prompt_p : "\"0\"",
+                         comp_p ? comp_p : "\"0\"");
+            jbuf_append(&out, "}");
+            count++;
+
+            free(id); free(name); free(pricing);
+            free(prompt_p); free(comp_p); free(top_prov);
+        }
+
+        free(obj);
+
+        /* Skip comma/whitespace between objects */
+        while (*p && *p != '{') p++;
+    }
+
+    jbuf_appendf(&out, "],\"count\":%d,\"total_scanned\":%d}", count, total_scanned);
+    free(data_arr);
+    free(search);
+
+    int written = (int)out.len < (int)rlen - 1 ? (int)out.len : (int)rlen - 1;
+    memcpy(result, out.data, written);
+    result[written] = '\0';
+    jbuf_free(&out);
+
+    fprintf(stderr, "  \033[2m%d models (scanned %d)\033[0m\n", count, total_scanned);
+    return true;
+}
+
+/* ═══════════════════════════════════════════════════════════════════════════
  * EXTERNAL EXECUTOR TOOLS — Claude Code / Codex CLI integration
  * ═══════════════════════════════════════════════════════════════════════════ */
 
@@ -6012,6 +6240,80 @@ static bool tool_spawn_executor(const char *input, char *result, size_t rlen) {
             id, TUI_DIM, task, TUI_RESET);
 
     free(task); free(model); free(exec_name);
+    return true;
+}
+
+/* spawn_provider — spawn a dsco sub-agent forced to a specific native API provider.
+ * This is the dynamic decoupling primitive: parent on Anthropic can spawn children
+ * on OpenAI, Groq, DeepSeek, etc. Each child is a full dsco instance routed through
+ * that provider's API. */
+static bool tool_spawn_provider(const char *input, char *result, size_t rlen) {
+    ensure_swarm();
+
+    int depth = current_swarm_depth();
+    if (depth >= SWARM_MAX_DEPTH) {
+        snprintf(result, rlen, "{\"error\":\"max swarm depth %d reached\"}", SWARM_MAX_DEPTH);
+        return false;
+    }
+
+    char *task = json_get_str(input, "task");
+    char *model = json_get_str(input, "model");
+    char *provider = json_get_str(input, "provider");
+    double budget = json_get_double(input, "budget", 0.0);
+
+    if (!task || !provider) {
+        snprintf(result, rlen, "{\"error\":\"task and provider are required\"}");
+        free(task); free(model); free(provider);
+        return false;
+    }
+
+    /* Validate provider has an API key */
+    const char *pkey = provider_resolve_api_key(provider);
+    if (!pkey || !pkey[0]) {
+        snprintf(result, rlen,
+                 "{\"error\":\"no API key for provider '%s' — set the env var\"}", provider);
+        free(task); free(model); free(provider);
+        return false;
+    }
+
+    /* Budget check */
+    if (g_swarm.swarm_budget_usd > 0) {
+        double remaining = swarm_budget_remaining(&g_swarm);
+        double est = swarm_estimate_task_cost(&g_swarm, model ? model : g_swarm.default_model);
+        if (est > remaining) {
+            snprintf(result, rlen,
+                     "{\"error\":\"insufficient budget: est $%.4f > remaining $%.4f\"}",
+                     est, remaining);
+            free(task); free(model); free(provider);
+            return false;
+        }
+    }
+
+    int id = swarm_spawn_provider(&g_swarm, -1, task, model, provider);
+    if (id < 0) {
+        snprintf(result, rlen, "{\"error\":\"spawn failed for provider '%s'\"}", provider);
+        free(task); free(model); free(provider);
+        return false;
+    }
+
+    swarm_child_t *c = swarm_get(&g_swarm, id);
+    if (budget > 0) c->budget_usd = budget;
+    c->est_cost_usd = swarm_estimate_task_cost(&g_swarm,
+        model ? model : g_swarm.default_model);
+
+    snprintf(result, rlen,
+             "{\"agent_id\":%d,\"pid\":%d,\"provider\":\"%s\",\"model\":\"%s\","
+             "\"est_cost_usd\":%.6f,\"status\":\"running\","
+             "\"hint\":\"Use agent_status to monitor\"}",
+             id, (int)c->pid, provider, c->model, c->est_cost_usd);
+
+    fprintf(stderr, "  %s⚡%s spawned %s%s%s→%s%s%s agent #%d: %s%.60s%s\n",
+            TUI_BCYAN, TUI_RESET,
+            TUI_BOLD, "dsco", TUI_RESET,
+            TUI_BGREEN, provider, TUI_RESET,
+            id, TUI_DIM, task, TUI_RESET);
+
+    free(task); free(model); free(provider);
     return true;
 }
 
@@ -11238,10 +11540,22 @@ static const tool_def_t s_tools[] = {
         .execute = tool_executor_status
     },
     {
+        .name = "openrouter_models",
+        .description = "Query OpenRouter's live model registry. Returns available models with pricing, context length, and capabilities. Use to dynamically discover and select models instead of hard-coding. Supports filtering by text search, min context, max price, free-only, and chat-only.",
+        .input_schema_json = "{\"type\":\"object\",\"properties\":{\"search\":{\"type\":\"string\",\"description\":\"Filter by model ID or name (case-insensitive)\"},\"min_context\":{\"type\":\"integer\",\"description\":\"Minimum context length\"},\"max_price_per_million\":{\"type\":\"number\",\"description\":\"Max input price per million tokens\"},\"limit\":{\"type\":\"integer\",\"description\":\"Max results (default 20, max 100)\"},\"free_only\":{\"type\":\"boolean\",\"description\":\"Only free models\"},\"chat_only\":{\"type\":\"boolean\",\"description\":\"Only text/chat models (default true)\"}}}",
+        .execute = tool_openrouter_models
+    },
+    {
         .name = "spawn_executor",
         .description = "Spawn an agent using a specific executor backend: 'dsco' (default), 'claude' (Claude Code CLI in print mode), or 'codex' (OpenAI Codex CLI exec mode). Each executor uses its own model and API access. Great for cross-model verification, competitive evaluation, or leveraging different strengths.",
         .input_schema_json = "{\"type\":\"object\",\"properties\":{\"task\":{\"type\":\"string\",\"description\":\"Task prompt\"},\"executor\":{\"type\":\"string\",\"description\":\"Executor: dsco, claude, or codex\"},\"model\":{\"type\":\"string\",\"description\":\"Model override\"},\"budget\":{\"type\":\"number\",\"description\":\"Max budget in USD for this agent (0=unlimited)\"}},\"required\":[\"task\",\"executor\"]}",
         .execute = tool_spawn_executor
+    },
+    {
+        .name = "spawn_provider",
+        .description = "Spawn a dsco sub-agent forced to a specific native API provider (e.g. openai, groq, deepseek, mistral, openrouter, xai, together, perplexity, cerebras, cohere). The child runs completely decoupled from the parent's provider — an Anthropic parent can spawn OpenAI children and vice versa. Use this for cross-provider comparison, latency optimization, or accessing provider-specific models.",
+        .input_schema_json = "{\"type\":\"object\",\"properties\":{\"task\":{\"type\":\"string\",\"description\":\"Task prompt\"},\"provider\":{\"type\":\"string\",\"description\":\"Native provider: anthropic, openai, groq, deepseek, mistral, openrouter, xai, together, perplexity, cerebras, cohere\"},\"model\":{\"type\":\"string\",\"description\":\"Model for this provider\"},\"budget\":{\"type\":\"number\",\"description\":\"Max budget USD (0=unlimited)\"}},\"required\":[\"task\",\"provider\"]}",
+        .execute = tool_spawn_provider
     },
     {
         .name = "create_executor_swarm",
@@ -11713,6 +12027,13 @@ static const tool_def_t s_tools[] = {
         .input_schema_json = "{\"type\":\"object\",\"properties\":{\"repo\":{\"type\":\"string\",\"description\":\"Repository (owner/name)\"},\"action\":{\"type\":\"string\",\"enum\":[\"list_runs\",\"list_workflows\"],\"description\":\"Action (default: list_runs)\"}},\"required\":[\"repo\"]}",
         .execute = tool_github_actions
     },
+    /* Polymarket Prediction Markets (public, no auth) */
+    { .name = "polymarket_markets", .description = "List/filter Polymarket prediction markets. Returns question, outcomes, volume, liquidity. No auth.", .input_schema_json = "{\"type\":\"object\",\"properties\":{\"tag\":{\"type\":\"string\",\"description\":\"Filter by tag (politics, sports, crypto)\"},\"active\":{\"type\":\"string\",\"description\":\"true/false\"},\"limit\":{\"type\":\"integer\",\"description\":\"Max results 1-100\"},\"offset\":{\"type\":\"integer\",\"description\":\"Pagination offset\"}}}", .execute = tool_polymarket_markets },
+    { .name = "polymarket_events", .description = "Get Polymarket events (grouped markets). No auth.", .input_schema_json = "{\"type\":\"object\",\"properties\":{\"id\":{\"type\":\"string\",\"description\":\"Event ID\"},\"slug\":{\"type\":\"string\",\"description\":\"Event slug\"},\"limit\":{\"type\":\"integer\",\"description\":\"Max results\"}}}", .execute = tool_polymarket_events },
+    { .name = "polymarket_prices", .description = "Get midpoint prices for a Polymarket token. No auth.", .input_schema_json = "{\"type\":\"object\",\"properties\":{\"token_id\":{\"type\":\"string\",\"description\":\"Token ID\"},\"condition_id\":{\"type\":\"string\",\"description\":\"Condition ID\"}}}", .execute = tool_polymarket_prices },
+    { .name = "polymarket_book", .description = "Get order book for a Polymarket token. No auth.", .input_schema_json = "{\"type\":\"object\",\"properties\":{\"token_id\":{\"type\":\"string\",\"description\":\"Token ID\"}},\"required\":[\"token_id\"]}", .execute = tool_polymarket_book },
+    { .name = "polymarket_trades", .description = "Get recent Polymarket trades. Filter by condition or wallet. No auth.", .input_schema_json = "{\"type\":\"object\",\"properties\":{\"condition_id\":{\"type\":\"string\",\"description\":\"Condition ID\"},\"maker\":{\"type\":\"string\",\"description\":\"Wallet address\"},\"limit\":{\"type\":\"integer\",\"description\":\"Max trades 1-500\"}}}", .execute = tool_polymarket_trades },
+    { .name = "polymarket_search", .description = "Search Polymarket by keyword. No auth.", .input_schema_json = "{\"type\":\"object\",\"properties\":{\"query\":{\"type\":\"string\",\"description\":\"Search query\"},\"limit\":{\"type\":\"integer\",\"description\":\"Max results 1-50\"}},\"required\":[\"query\"]}", .execute = tool_polymarket_search },
     {
         .name = "mapbox_geocode",
         .description = "Geocode an address or place name to coordinates using Mapbox. Requires MAPBOX_API_KEY.",
@@ -12373,7 +12694,7 @@ bool tools_is_allowed_for_tier(const char *name, const char *tier,
             "websocket_test",
             /* orchestration/control-plane mutation */
             "spawn_agent", "agent_kill", "create_swarm",
-            "spawn_executor", "create_executor_swarm", "swarm_budget",
+            "spawn_executor", "spawn_provider", "create_executor_swarm", "swarm_budget",
             "ipc_send",
             "ipc_recv", "ipc_scratch_put", "ipc_task_submit",
             "ipc_set_role", "env_set", "plugin_load", "plugin_reload",
@@ -12642,6 +12963,7 @@ static const tool_timeout_cfg_t s_timeout_overrides[] = {
     { "create_swarm",   300 },
     { "swarm_collect", 3660 },
     { "spawn_executor",         300 },
+    { "spawn_provider",         300 },
     { "create_executor_swarm",  300 },
     { "executor_status",         30 },
     { "swarm_budget",            30 },

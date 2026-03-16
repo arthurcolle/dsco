@@ -251,6 +251,124 @@ int swarm_spawn_in_group(swarm_t *s, int group_id, const char *task, const char 
     return id;
 }
 
+/* ── Provider-decoupled spawn ──────────────────────────────────────────
+ * Spawns a dsco sub-agent forced to a specific native provider.
+ * The child gets `--exec <provider> -m <model>` so it uses that
+ * provider's API directly, completely independent of the parent. */
+
+int swarm_spawn_provider(swarm_t *s, int group_id, const char *task,
+                          const char *model, const char *provider) {
+    if (!provider || !provider[0])
+        return swarm_spawn_in_group(s, group_id, task, model);
+
+    if (s->child_count >= SWARM_MAX_CHILDREN) return -1;
+
+    int stdout_pipe[2], stderr_pipe[2];
+    if (pipe(stdout_pipe) < 0 || pipe(stderr_pipe) < 0) return -1;
+
+    pid_t pid = fork();
+    if (pid < 0) {
+        close(stdout_pipe[0]); close(stdout_pipe[1]);
+        close(stderr_pipe[0]); close(stderr_pipe[1]);
+        return -1;
+    }
+
+    int id = s->child_count;
+    const char *cur_depth_env = getenv("DSCO_SWARM_DEPTH");
+    int depth = cur_depth_env ? atoi(cur_depth_env) + 1 : 1;
+
+    if (pid == 0) {
+        /* ── Child ── */
+        close(stdout_pipe[0]);
+        close(stderr_pipe[0]);
+        dup2(stdout_pipe[1], STDOUT_FILENO);
+        dup2(stdout_pipe[1], STDERR_FILENO);
+        close(stdout_pipe[1]);
+        close(stderr_pipe[1]);
+        setpgid(0, 0);
+
+        const char *m = model ? model : s->default_model;
+        const char *bin = s->dsco_path;
+
+        setenv("DSCO_SUBAGENT", "1", 1);
+        char depth_str[16];
+        snprintf(depth_str, sizeof(depth_str), "%d", depth);
+        setenv("DSCO_SWARM_DEPTH", depth_str, 1);
+
+        const char *parent_instance = getenv("DSCO_INSTANCE_ID");
+        if (parent_instance && parent_instance[0])
+            setenv("DSCO_PARENT_INSTANCE_ID", parent_instance, 1);
+
+        const char *ipc_db = getenv("DSCO_IPC_DB");
+        if (ipc_db && ipc_db[0]) {
+            setenv("DSCO_IPC_DB", ipc_db, 1);
+        } else {
+            char ipc_path[512];
+            snprintf(ipc_path, sizeof(ipc_path), "/tmp/dsco_ipc_%s.db",
+                     parent_instance ? parent_instance : "orphan");
+            setenv("DSCO_IPC_DB", ipc_path, 1);
+        }
+
+        if (s->swarm_budget_usd > 0) {
+            double remaining = swarm_budget_remaining(s);
+            int n_pending = 0;
+            for (int ci = 0; ci < s->child_count; ci++)
+                if (s->children[ci].status == SWARM_RUNNING) n_pending++;
+            double child_share = remaining / (n_pending + 1);
+            if (child_share > 0) {
+                char cb[32];
+                snprintf(cb, sizeof(cb), "%.4f", child_share);
+                setenv("DSCO_CHILD_BUDGET", cb, 1);
+            }
+        }
+
+        /* Key: --exec <provider> forces the child to use that provider's API */
+        execl(bin, bin, "--exec", provider, "-m", m, task, NULL);
+        fprintf(stdout, "swarm: exec failed for '%s --exec %s': %s\n",
+                bin, provider, strerror(errno));
+        _exit(127);
+    }
+
+    /* ── Parent ── */
+    close(stdout_pipe[1]);
+    close(stderr_pipe[0]);
+    close(stderr_pipe[1]);
+    fcntl(stdout_pipe[0], F_SETFL, O_NONBLOCK);
+
+    swarm_child_t *c = &s->children[id];
+    memset(c, 0, sizeof(*c));
+    c->id = id;
+    c->pid = pid;
+    c->pipe_fd = stdout_pipe[0];
+    c->err_fd = -1;
+    c->status = SWARM_RUNNING;
+    c->group_id = group_id;
+    c->start_time = now_sec();
+    c->depth = depth;
+    c->executor = EXECUTOR_DSCO;
+    snprintf(c->provider, sizeof(c->provider), "%s", provider);
+    snprintf(c->task, SWARM_LABEL_LEN, "%s", task);
+    if (model) snprintf(c->model, sizeof(c->model), "%s", model);
+
+    c->output_cap = 4096;
+    c->output = safe_malloc(c->output_cap);
+    c->output[0] = '\0';
+    c->output_len = 0;
+    c->stream_buf = safe_malloc(4096);
+    c->stream_buf[0] = '\0';
+    c->stream_buf_len = 0;
+
+    s->child_count++;
+
+    if (group_id >= 0 && group_id < s->group_count) {
+        swarm_group_t *g = &s->groups[group_id];
+        if (g->child_count < SWARM_MAX_CHILDREN)
+            g->child_ids[g->child_count++] = id;
+    }
+
+    return id;
+}
+
 /* ── Groups ───────────────────────────────────────────────────────────── */
 
 int swarm_group_create(swarm_t *s, const char *name) {
