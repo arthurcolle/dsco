@@ -20,6 +20,8 @@
 #include <signal.h>
 #include <fcntl.h>
 #include <unistd.h>
+#include <sys/wait.h>
+#include <sys/time.h>
 
 static md_renderer_t s_oneshot_md;
 
@@ -63,6 +65,135 @@ static void main_atexit_handler(void) {
     ipc_shutdown();
 }
 
+/* ── Executor registry ─────────────────────────────────────────────── */
+
+/* External CLI executors (claude, codex) */
+typedef struct {
+    const char *name;          /* "claude", "codex" */
+    const char *bin;           /* binary name for PATH lookup */
+    const char *oneshot_cmd;   /* subcommand for oneshot, NULL if none */
+    const char *model_flag;    /* flag name for model, NULL = no model support */
+    const char *print_flag;    /* flag to enable print/oneshot mode, NULL if none */
+    const char *desc;          /* human label */
+} exec_reg_t;
+
+static const exec_reg_t EXEC_REGISTRY[] = {
+    { "claude", "claude", NULL,   "--model", "-p",   "Claude Code (Anthropic)" },
+    { "codex",  "codex",  "exec", "-m",      NULL,   "Codex CLI (OpenAI)"      },
+    { NULL, NULL, NULL, NULL, NULL, NULL }
+};
+
+/* Native API providers (these use dsco's built-in streaming) */
+typedef struct {
+    const char *name;
+    const char *desc;
+    const char *env_key;
+    const char *example_model;
+} native_provider_t;
+
+static const native_provider_t NATIVE_PROVIDERS[] = {
+    { "anthropic",  "Anthropic Claude API",      "ANTHROPIC_API_KEY",   "claude-opus-4-6"          },
+    { "openai",     "OpenAI API",                "OPENAI_API_KEY",      "gpt-5.4"                  },
+    { "openrouter", "OpenRouter (multi-model)",   "OPENROUTER_API_KEY", "anthropic/claude-opus-4-6" },
+    { "groq",       "Groq (fast inference)",     "GROQ_API_KEY",        "llama-3.3-70b-versatile"  },
+    { "deepseek",   "DeepSeek API",              "DEEPSEEK_API_KEY",    "deepseek-chat"            },
+    { "mistral",    "Mistral AI API",            "MISTRAL_API_KEY",     "mistral-large-latest"     },
+    { "xai",        "xAI Grok API",              "XAI_API_KEY",         "grok-4-1-fast-reasoning"  },
+    { "together",   "Together AI",               "TOGETHER_API_KEY",    "meta-llama/Llama-4-Maverick-17B-128E-Instruct-FP8" },
+    { "perplexity", "Perplexity AI",             "PERPLEXITY_API_KEY",  "sonar-pro"                },
+    { "cerebras",   "Cerebras (fast inference)",  "CEREBRAS_API_KEY",   "qwen-3-235b-a22b-instruct-2507" },
+    { "cohere",     "Cohere API",                "COHERE_API_KEY",      "command-a-03-2025"        },
+    { NULL, NULL, NULL, NULL }
+};
+
+static const exec_reg_t *exec_find(const char *name) {
+    for (int i = 0; EXEC_REGISTRY[i].name; i++) {
+        if (strcmp(EXEC_REGISTRY[i].name, name) == 0)
+            return &EXEC_REGISTRY[i];
+    }
+    return NULL;
+}
+
+static const native_provider_t *native_find(const char *name) {
+    for (int i = 0; NATIVE_PROVIDERS[i].name; i++) {
+        if (strcmp(NATIVE_PROVIDERS[i].name, name) == 0)
+            return &NATIVE_PROVIDERS[i];
+    }
+    return NULL;
+}
+
+static bool exec_bin_available(const char *bin) {
+    char cmd[256];
+    snprintf(cmd, sizeof(cmd), "command -v %s >/dev/null 2>&1", bin);
+    return system(cmd) == 0;
+}
+
+static void exec_list(void) {
+    fprintf(stderr, "\n  \033[1mExternal CLIs\033[0m\n");
+    fprintf(stderr, "  %-12s %-28s %s\n", "NAME", "DESCRIPTION", "STATUS");
+    fprintf(stderr, "  %-12s %-28s %s\n", "────", "───────────", "──────");
+    for (int i = 0; EXEC_REGISTRY[i].name; i++) {
+        const exec_reg_t *e = &EXEC_REGISTRY[i];
+        bool avail = exec_bin_available(e->bin);
+        fprintf(stderr, "  %-12s %-28s %s%s%s\n",
+                e->name, e->desc,
+                avail ? "\033[32m" : "\033[31m",
+                avail ? "ready" : "not found",
+                "\033[0m");
+    }
+    fprintf(stderr, "\n  \033[1mNative API Providers\033[0m\n");
+    fprintf(stderr, "  %-12s %-28s %-14s %s\n", "NAME", "DESCRIPTION", "STATUS", "EXAMPLE");
+    fprintf(stderr, "  %-12s %-28s %-14s %s\n", "────", "───────────", "──────", "───────");
+    for (int i = 0; NATIVE_PROVIDERS[i].name; i++) {
+        const native_provider_t *np = &NATIVE_PROVIDERS[i];
+        const char *key = getenv(np->env_key);
+        bool has_key = key && key[0];
+        fprintf(stderr, "  %-12s %-28s %s%-14s%s %s\n",
+                np->name, np->desc,
+                has_key ? "\033[32m" : "\033[2m",
+                has_key ? "key set" : "no key",
+                "\033[0m",
+                np->example_model);
+    }
+    fprintf(stderr, "\n");
+}
+
+/* Build argv and exec. Never returns on success. */
+static void exec_dispatch(const exec_reg_t *e, const char *prompt,
+                          const char *model_override, char **extra, int nextra) {
+    const char *av[64];
+    int ac = 0;
+
+    av[ac++] = e->bin;
+    if (prompt && e->oneshot_cmd)
+        av[ac++] = e->oneshot_cmd;
+    else if (!prompt && e->oneshot_cmd)
+        { /* interactive codex — no subcmd */ }
+
+    if (prompt && e->print_flag)
+        av[ac++] = e->print_flag;
+
+    if (model_override && e->model_flag) {
+        av[ac++] = e->model_flag;
+        av[ac++] = model_override;
+    }
+
+    /* passthrough flags (from -- separator) */
+    for (int i = 0; i < nextra && ac < 60; i++)
+        av[ac++] = extra[i];
+
+    if (prompt)
+        av[ac++] = prompt;
+
+    av[ac] = NULL;
+    execvp(e->bin, (char *const *)av);
+    /* only reached on failure */
+    perror(e->bin);
+}
+
+/* Global provider override — set by -e <native_provider> */
+static const char *g_provider_override = NULL;
+
 static void usage(const char *prog) {
     fprintf(stderr,
         "dsco v%s — thin agentic CLI (streaming + prompt caching)\n"
@@ -84,6 +215,8 @@ static void usage(const char *prog) {
         "  --topology NAME        Run/select an agent topology\n"
         "  --topology-auto        Auto-pick a topology for the task\n"
         "  --topology-list        List available topologies\n"
+        "  -e, --exec BACKEND    Execute via external CLI (claude, codex, list, auto)\n"
+        "  --                    Pass remaining args to executor (after -e)\n"
         "  --version              Print version and build info\n"
         "  -h          Show this help\n"
         "\n"
@@ -96,7 +229,10 @@ static void usage(const char *prog) {
         "  DSCO_MODEL          Default model override\n"
         "  DSCO_PROFILE        Setup profile name\n"
         "  DSCO_ENV_FILE       Override setup env file path\n"
-        "  DSCO_BASELINE_DB    Override sqlite baseline path\n",
+        "  DSCO_BASELINE_DB    Override sqlite baseline path\n"
+        "  DSCO_EXEC           Default executor (claude, codex, auto)\n"
+        "  DSCO_BUDGET         Session cost budget in dollars (0=unlimited)\n"
+        "  DSCO_DAILY_BUDGET   Daily cost budget in dollars (0=unlimited)\n",
     DSCO_VERSION, prog, DEFAULT_MODEL, prog);
 }
 
@@ -172,7 +308,20 @@ static void oneshot_tool_cb(const char *name, const char *id, void *ctx) {
 int main(int argc, char **argv) {
     (void)atexit(main_atexit_handler);
     init_trace_runtime();
-    (void)output_guard_init();
+
+    /* Skip output guard when we're just exec'ing an external CLI —
+       it redirects stdout through a pipe which breaks child processes. */
+    bool skip_og = false;
+    for (int i = 1; i < argc; i++) {
+        if (strcmp(argv[i], "-e") == 0 || strcmp(argv[i], "--exec") == 0) {
+            skip_og = true; break;
+        }
+    }
+    if (!skip_og) {
+        const char *env_exec = getenv("DSCO_EXEC");
+        if (env_exec && env_exec[0]) skip_og = true;
+    }
+    if (!skip_og) (void)output_guard_init();
     TRACE_INFO("main start");
 
     const char *cli_profile = NULL;
@@ -225,6 +374,10 @@ int main(int argc, char **argv) {
     const char *topology_name = NULL;
     bool topology_auto = false;
     bool topology_list_mode = false;
+    const char *exec_backend = NULL;  /* "claude", "codex", "auto", "list" */
+    char **exec_extra = NULL;         /* passthrough args after -- */
+    int exec_nextra = 0;
+    bool user_set_model = false;
 
     for (int i = 1; i < argc; i++) {
         if (strcmp(argv[i], "-h") == 0 || strcmp(argv[i], "--help") == 0) {
@@ -236,8 +389,15 @@ int main(int argc, char **argv) {
             free(oneshot_prompt);
             return 0;
         }
+        if (strcmp(argv[i], "--") == 0) {
+            /* Everything after -- is passthrough to the executor */
+            exec_extra = argv + i + 1;
+            exec_nextra = argc - i - 1;
+            break;
+        }
         if (strcmp(argv[i], "-m") == 0 && i + 1 < argc) {
             model = argv[++i];
+            user_set_model = true;
         } else if (strcmp(argv[i], "-k") == 0 && i + 1 < argc) {
             api_key = argv[++i];
         } else if (strcmp(argv[i], "--profile") == 0 && i + 1 < argc) {
@@ -271,17 +431,38 @@ int main(int argc, char **argv) {
             topology_auto = true;
         } else if (strcmp(argv[i], "--topology-list") == 0) {
             topology_list_mode = true;
+        } else if ((strcmp(argv[i], "--exec") == 0 || strcmp(argv[i], "-e") == 0) && i + 1 < argc) {
+            exec_backend = argv[++i];
         } else {
             size_t total = 0;
-            for (int j = i; j < argc; j++) total += strlen(argv[j]) + 1;
+            for (int j = i; j < argc; j++) {
+                if (strcmp(argv[j], "--") == 0) break;
+                total += strlen(argv[j]) + 1;
+            }
             oneshot_prompt = safe_malloc(total + 1);
             oneshot_prompt[0] = '\0';
             for (int j = i; j < argc; j++) {
+                if (strcmp(argv[j], "--") == 0) break;
                 if (j > i) strcat(oneshot_prompt, " ");
                 strcat(oneshot_prompt, argv[j]);
             }
+            /* find -- after prompt if we haven't already */
+            for (int j = i; j < argc; j++) {
+                if (strcmp(argv[j], "--") == 0) {
+                    exec_extra = argv + j + 1;
+                    exec_nextra = argc - j - 1;
+                    break;
+                }
+            }
             break;
         }
+    }
+
+    /* DSCO_EXEC env var as default */
+    if (!exec_backend) {
+        const char *env_exec = getenv("DSCO_EXEC");
+        if (env_exec && env_exec[0])
+            exec_backend = env_exec;
     }
 
     {
@@ -364,14 +545,92 @@ int main(int argc, char **argv) {
         return rc == 0 ? 0 : 1;
     }
 
-    if (!api_key || api_key[0] == '\0') {
-        const char *provider = provider_detect(model, NULL);
-        api_key = provider_resolve_api_key(provider);
+    curl_global_init(CURL_GLOBAL_DEFAULT);
+
+    /* --exec: dispatch to external CLI or force native provider */
+    if (exec_backend && exec_backend[0]) {
+        if (strcmp(exec_backend, "list") == 0) {
+            exec_list();
+            free(oneshot_prompt);
+            return 0;
+        }
+
+        /* Check if it's a native provider name */
+        const native_provider_t *np = native_find(exec_backend);
+        if (np) {
+            /* Force this provider — resolve its key, set override, fall through */
+            const char *pkey = getenv(np->env_key);
+            if (!pkey || !pkey[0]) {
+                fprintf(stderr, "error: %s requires %s to be set\n",
+                        np->name, np->env_key);
+                free(oneshot_prompt);
+                return 1;
+            }
+            api_key = pkey;
+            g_provider_override = np->name;
+            /* If user didn't pick a model, suggest one for this provider */
+            if (!user_set_model && np->example_model) {
+                model = np->example_model;
+                fprintf(stderr, "  %s%s → %s%s\n", "\033[2m", np->name, model, "\033[0m");
+            }
+            /* Fall through to normal dsco oneshot/interactive path */
+            goto native_path;
+        }
+
+        /* "auto" — pick first available external CLI */
+        const exec_reg_t *ereg = NULL;
+        if (strcmp(exec_backend, "auto") == 0) {
+            for (int i = 0; EXEC_REGISTRY[i].name; i++) {
+                if (exec_bin_available(EXEC_REGISTRY[i].bin)) {
+                    ereg = &EXEC_REGISTRY[i];
+                    break;
+                }
+            }
+            if (!ereg) {
+                fprintf(stderr, "error: no executor found in PATH (install claude or codex)\n");
+                free(oneshot_prompt);
+                return 1;
+            }
+            fprintf(stderr, "  auto-selected: %s\n", ereg->name);
+        } else {
+            ereg = exec_find(exec_backend);
+            if (!ereg) {
+                fprintf(stderr, "error: unknown executor '%s'\n", exec_backend);
+                fprintf(stderr, "  external CLIs: ");
+                for (int i = 0; EXEC_REGISTRY[i].name; i++)
+                    fprintf(stderr, "%s%s", i ? ", " : "", EXEC_REGISTRY[i].name);
+                fprintf(stderr, "\n  native providers: ");
+                for (int i = 0; NATIVE_PROVIDERS[i].name; i++)
+                    fprintf(stderr, "%s%s", i ? ", " : "", NATIVE_PROVIDERS[i].name);
+                fprintf(stderr, "\n  special: auto, list\n");
+                free(oneshot_prompt);
+                return 1;
+            }
+        }
+
+        /* exec replaces the process — never returns on success */
+        exec_dispatch(ereg, oneshot_prompt,
+                      user_set_model ? model : NULL,
+                      exec_extra, exec_nextra);
+        /* only reached on exec failure */
+        free(oneshot_prompt);
+        return 1;
     }
 
+native_path:
+
+    /* Resolve API key for the active provider */
     if (!api_key || api_key[0] == '\0') {
-        const char *provider = provider_detect(model, NULL);
-        fprintf(stderr, "error: API key not set for provider '%s'\n", provider);
+        const char *prov = g_provider_override
+            ? g_provider_override
+            : provider_detect(model, NULL);
+        api_key = provider_resolve_api_key(prov);
+    }
+    if (!api_key || api_key[0] == '\0') {
+        const char *prov = g_provider_override
+            ? g_provider_override
+            : provider_detect(model, NULL);
+        fprintf(stderr, "error: API key not set for provider '%s'\n", prov);
         fprintf(stderr, "  use -k KEY or export the provider-specific env var\n");
         free(oneshot_prompt);
         return 1;
@@ -380,13 +639,6 @@ int main(int argc, char **argv) {
     if (!baseline_start(model, oneshot_prompt ? "oneshot" : "interactive")) {
         fprintf(stderr, "warning: baseline disabled (sqlite unavailable)\n");
     }
-    if (loaded_env_count > 0) {
-        char msg[128];
-        snprintf(msg, sizeof(msg), "loaded %d key(s) from setup env", loaded_env_count);
-        baseline_log("setup", "keys_loaded", msg, NULL);
-    }
-
-    curl_global_init(CURL_GLOBAL_DEFAULT);
 
     if (oneshot_prompt) {
         tools_init();
@@ -406,8 +658,13 @@ int main(int argc, char **argv) {
         baseline_log("user", "oneshot_prompt", oneshot_prompt, NULL);
         session_state_t oneshot_session;
         session_state_init(&oneshot_session, model);
-        const char *oneshot_provider_name = provider_detect(oneshot_session.model, api_key);
+        const char *oneshot_provider_name = g_provider_override
+            ? g_provider_override
+            : provider_detect(oneshot_session.model, api_key);
         provider_t *oneshot_provider = provider_create(oneshot_provider_name);
+        /* Resolve the correct API key for this provider (e.g. OPENROUTER_API_KEY) */
+        const char *oneshot_key = provider_resolve_api_key(oneshot_provider_name);
+        if (!oneshot_key || !oneshot_key[0]) oneshot_key = api_key;
 
         int turns = 0;
         while (turns < dsco_max_agent_turns()) {
@@ -424,10 +681,10 @@ int main(int argc, char **argv) {
             }
 
             stream_result_t sr = oneshot_provider
-                ? oneshot_provider->stream(oneshot_provider, api_key, req,
+                ? oneshot_provider->stream(oneshot_provider, oneshot_key, req,
                                            oneshot_text_cb, oneshot_tool_cb,
                                            NULL, NULL)
-                : llm_stream(api_key, req,
+                : llm_stream(oneshot_key, req,
                              oneshot_text_cb,
                              oneshot_tool_cb,
                              NULL, NULL);
@@ -525,10 +782,10 @@ int main(int argc, char **argv) {
                     if (!req2) { task_ok = false; break; }
 
                     stream_result_t sr2 = oneshot_provider
-                        ? oneshot_provider->stream(oneshot_provider, api_key, req2,
+                        ? oneshot_provider->stream(oneshot_provider, oneshot_key, req2,
                                                    oneshot_text_cb, oneshot_tool_cb,
                                                    NULL, NULL)
-                        : llm_stream(api_key, req2,
+                        : llm_stream(oneshot_key, req2,
                                      oneshot_text_cb,
                                      oneshot_tool_cb,
                                      NULL, NULL);
@@ -593,7 +850,7 @@ int main(int argc, char **argv) {
         conv_free(&conv);
         free(oneshot_prompt);
     } else {
-        agent_run(api_key, model, topology_name, topology_auto);
+        agent_run(api_key, model, topology_name, topology_auto, g_provider_override);
     }
 
     curl_global_cleanup();

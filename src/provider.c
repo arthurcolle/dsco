@@ -446,8 +446,6 @@ static stream_result_t openai_stream(provider_t *p, const char *api_key,
     CURL *curl = curl_easy_init();
     if (!curl) { result.ok = false; return result; }
 
-    fprintf(stderr, "DEBUG openai_stream: api_key=%s url=%s\n",
-            api_key ? (strlen(api_key) > 8 ? api_key : "(short)") : "(null)", od->api_url);
     struct curl_slist *hdrs = p->build_headers
         ? p->build_headers(p, api_key)
         : openai_build_headers(p, api_key);
@@ -646,11 +644,16 @@ const char *provider_detect(const char *model, const char *api_key) {
         /* OpenRouter auto-router */
         if (strncmp(model, "openrouter/", 11) == 0 || strcmp(model, "auto") == 0)
             return "openrouter";
-        /* Anthropic */
+        /* Any org/model ID with a slash routes to OpenRouter FIRST —
+         * this must come before keyword checks (e.g. "openai/gpt-5.4"
+         * contains "gpt" but must go through OpenRouter, not native OpenAI). */
+        if (strstr(model, "/"))
+            return "openrouter";
+        /* Anthropic — bare model IDs only (no slash) */
         if (strstr(model, "claude") || strstr(model, "opus") ||
             strstr(model, "sonnet") || strstr(model, "haiku"))
             return "anthropic";
-        /* OpenAI */
+        /* OpenAI — bare model IDs only */
         if (strstr(model, "gpt") || strncmp(model, "o1", 2) == 0 ||
             strncmp(model, "o3", 2) == 0 || strncmp(model, "o4", 2) == 0 ||
             strstr(model, "codex-spark") || strstr(model, "chatgpt"))
@@ -684,31 +687,7 @@ const char *provider_detect(const char *model, const char *api_key) {
         /* Cerebras */
         if (strstr(model, "cerebras"))
             return "cerebras";
-        /* OpenRouter model ID patterns: any org/ prefix routes to OR */
-        if (strstr(model, "x-ai/") || strstr(model, "moonshotai/") ||
-            strstr(model, "z-ai/") || strstr(model, "google/") ||
-            strstr(model, "anthropic/") || strstr(model, "openai/") ||
-            strstr(model, "meta-llama/") || strstr(model, "mistralai/") ||
-            strstr(model, "deepseek/") || strstr(model, "qwen/") ||
-            strstr(model, "bytedance-seed/") || strstr(model, "amazon/") ||
-            strstr(model, "minimax/") || strstr(model, "writer/") ||
-            strstr(model, "nvidia/") || strstr(model, "cohere/") ||
-            strstr(model, "nousresearch/") || strstr(model, "stepfun/") ||
-            strstr(model, "inception/") || strstr(model, "baidu/") ||
-            strstr(model, "arcee-ai/") || strstr(model, "xiaomi/") ||
-            strstr(model, "aion-labs/") || strstr(model, "kwaipilot/") ||
-            strstr(model, "liquid/") || strstr(model, "allenai/") ||
-            strstr(model, "nex-agi/") || strstr(model, "essentialai/") ||
-            strstr(model, "upstage/") || strstr(model, "morph/") ||
-            strstr(model, "alibaba/") || strstr(model, "relace/") ||
-            strstr(model, "meituan/") || strstr(model, "ibm-granite/"))
-            return "openrouter";
-        /* HF-style org/model IDs — prefer OpenRouter if key is present */
-        if (strstr(model, "/")) {
-            const char *or_key = getenv("OPENROUTER_API_KEY");
-            if (or_key && or_key[0]) return "openrouter";
-            return "together";
-        }
+        /* Any remaining slash-based model IDs already caught above */
     }
 
     /* Check API key patterns */
