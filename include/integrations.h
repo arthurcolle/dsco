@@ -185,4 +185,12 @@ bool tool_supabase_query(const char *input, char *result, size_t rlen);
 /* ── ML Inference ──────────────────────────────────────────────────────── */
 bool tool_huggingface(const char *input, char *result, size_t rlen);
 
+/* ── Prediction Markets (Polymarket) — public, no auth ─────────────────── */
+bool tool_polymarket_markets(const char *input, char *result, size_t rlen);
+bool tool_polymarket_events(const char *input, char *result, size_t rlen);
+bool tool_polymarket_prices(const char *input, char *result, size_t rlen);
+bool tool_polymarket_book(const char *input, char *result, size_t rlen);
+bool tool_polymarket_trades(const char *input, char *result, size_t rlen);
+bool tool_polymarket_search(const char *input, char *result, size_t rlen);
+
 #endif
