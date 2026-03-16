@@ -75,79 +75,203 @@ static struct curl_slist *openrouter_build_headers(provider_t *p, const char *ap
     return hdrs;
 }
 
-/* Builds an OpenAI-compat request then optionally injects OpenRouter-specific
- * fields controlled via env vars:
- *   DSCO_OR_TRANSFORMS      — e.g. "middle-out"  → "transforms":["<value>"]
- *   DSCO_OR_ROUTE           — e.g. "fallback"    → "route":"<value>"
- *   DSCO_OR_PROVIDER_ORDER  — comma-sep list     → "provider":{"order":[...]}
- *   DSCO_OR_REQUIRE_PARAMS  — "1" or "true"      → "provider":{"require_parameters":true}
+/* Helper: append a comma-separated env var as a JSON string array */
+static void or_append_csv_array(jbuf_t *b, const char *csv) {
+    jbuf_append(b, "[");
+    const char *cur = csv;
+    bool first = true;
+    while (*cur) {
+        const char *end = strchr(cur, ',');
+        if (!end) end = cur + strlen(cur);
+        size_t n = (size_t)(end - cur);
+        char name[128];
+        if (n >= sizeof(name)) n = sizeof(name) - 1;
+        memcpy(name, cur, n);
+        name[n] = '\0';
+        char *s = name;
+        while (*s == ' ') s++;
+        char *e2 = s + strlen(s) - 1;
+        while (e2 > s && *e2 == ' ') *e2-- = '\0';
+        if (s[0]) {
+            if (!first) jbuf_append(b, ",");
+            jbuf_append_json_str(b, s);
+            first = false;
+        }
+        cur = *end ? end + 1 : end;
+    }
+    jbuf_append(b, "]");
+}
+
+static bool or_env_bool(const char *val) {
+    return val && (val[0] == '1' || strcasecmp(val, "true") == 0);
+}
+
+/* Builds an OpenAI-compat request then injects OpenRouter-specific fields.
+ *
+ * Env vars (all optional):
+ *   DSCO_OR_TRANSFORMS        — e.g. "middle-out"
+ *   DSCO_OR_ROUTE             — e.g. "fallback"
+ *   DSCO_OR_PROVIDER_ORDER    — comma-sep provider slugs
+ *   DSCO_OR_PROVIDER_ONLY     — comma-sep allowlist
+ *   DSCO_OR_PROVIDER_IGNORE   — comma-sep blocklist
+ *   DSCO_OR_REQUIRE_PARAMS    — "1"/"true"
+ *   DSCO_OR_ALLOW_FALLBACKS   — "0"/"false" to disable (default: true)
+ *   DSCO_OR_DATA_COLLECTION   — "deny" to disable
+ *   DSCO_OR_ZDR               — "1"/"true" for zero data retention
+ *   DSCO_OR_QUANTIZATIONS     — comma-sep: int4,int8,fp6,fp8,fp16,bf16,fp32
+ *   DSCO_OR_SORT              — "price", "throughput", or "latency"
+ *   DSCO_OR_MAX_PRICE_INPUT   — max $/token for input (e.g. "0.00001")
+ *   DSCO_OR_MAX_PRICE_OUTPUT  — max $/token for output
+ *   DSCO_OR_FALLBACK_MODELS   — comma-sep model IDs for automatic failover
+ *   DSCO_OR_REASONING_EFFORT  — "low", "medium", "high" for reasoning models
+ *   DSCO_OR_DEBUG              — "1"/"true" to echo upstream request body
  */
 static char *openrouter_build_request(provider_t *p, conversation_t *conv,
                                        session_state_t *session, int max_tokens) {
     char *base = openai_build_request(p, conv, session, max_tokens);
     if (!base) return NULL;
 
-    const char *transforms  = getenv("DSCO_OR_TRANSFORMS");
-    const char *route       = getenv("DSCO_OR_ROUTE");
-    const char *prov_order  = getenv("DSCO_OR_PROVIDER_ORDER");
-    const char *req_params  = getenv("DSCO_OR_REQUIRE_PARAMS");
+    /* Gather all env config */
+    const char *transforms      = getenv("DSCO_OR_TRANSFORMS");
+    const char *route           = getenv("DSCO_OR_ROUTE");
+    const char *prov_order      = getenv("DSCO_OR_PROVIDER_ORDER");
+    const char *prov_only       = getenv("DSCO_OR_PROVIDER_ONLY");
+    const char *prov_ignore     = getenv("DSCO_OR_PROVIDER_IGNORE");
+    const char *req_params      = getenv("DSCO_OR_REQUIRE_PARAMS");
+    const char *allow_fb        = getenv("DSCO_OR_ALLOW_FALLBACKS");
+    const char *data_collect    = getenv("DSCO_OR_DATA_COLLECTION");
+    const char *zdr             = getenv("DSCO_OR_ZDR");
+    const char *quantizations   = getenv("DSCO_OR_QUANTIZATIONS");
+    const char *sort_by         = getenv("DSCO_OR_SORT");
+    const char *max_price_in    = getenv("DSCO_OR_MAX_PRICE_INPUT");
+    const char *max_price_out   = getenv("DSCO_OR_MAX_PRICE_OUTPUT");
+    const char *fallback_models = getenv("DSCO_OR_FALLBACK_MODELS");
+    const char *reasoning       = getenv("DSCO_OR_REASONING_EFFORT");
+    const char *debug_mode      = getenv("DSCO_OR_DEBUG");
 
-    if (!transforms && !route && !prov_order && !req_params) return base;
+    bool has_provider = prov_order || prov_only || prov_ignore || req_params ||
+                        (allow_fb && !or_env_bool(allow_fb)) ||
+                        data_collect || zdr || quantizations || sort_by ||
+                        max_price_in || max_price_out;
+    bool has_extras = transforms || route || has_provider || fallback_models ||
+                      reasoning || debug_mode;
 
-    /* Strip trailing '}' */
+    if (!has_extras) return base;
+
+    /* Strip trailing '}' to append fields */
     size_t len = strlen(base);
     if (len == 0 || base[len - 1] != '}') return base;
     base[len - 1] = '\0';
 
     jbuf_t b;
-    jbuf_init(&b, len + 512);
+    jbuf_init(&b, len + 1024);
     jbuf_append(&b, base);
     free(base);
 
+    /* transforms: ["middle-out"] */
     if (transforms) {
-        jbuf_append(&b, ",\"transforms\":[");
-        jbuf_append_json_str(&b, transforms);
-        jbuf_append(&b, "]");
+        jbuf_append(&b, ",\"transforms\":");
+        or_append_csv_array(&b, transforms);
     }
+
+    /* route: "fallback" */
     if (route) {
         jbuf_append(&b, ",\"route\":");
         jbuf_append_json_str(&b, route);
     }
-    if (prov_order || req_params) {
-        jbuf_append(&b, ",\"provider\":{");
-        bool wrote = false;
-        if (prov_order) {
-            jbuf_append(&b, "\"order\":[");
-            const char *cur = prov_order;
-            bool first = true;
-            while (*cur) {
-                const char *end = strchr(cur, ',');
-                if (!end) end = cur + strlen(cur);
-                size_t n = (size_t)(end - cur);
-                char name[128];
-                if (n >= sizeof(name)) n = sizeof(name) - 1;
-                memcpy(name, cur, n);
-                name[n] = '\0';
-                /* trim leading/trailing spaces */
-                char *s = name;
-                while (*s == ' ') s++;
-                char *e = s + strlen(s) - 1;
-                while (e > s && *e == ' ') *e-- = '\0';
-                if (!first) jbuf_append(&b, ",");
-                jbuf_append_json_str(&b, s);
-                first = false;
-                cur = *end ? end + 1 : end;
-            }
-            jbuf_append(&b, "]");
-            wrote = true;
-        }
-        if (req_params && (req_params[0] == '1' ||
-                           strcasecmp(req_params, "true") == 0)) {
-            if (wrote) jbuf_append(&b, ",");
-            jbuf_append(&b, "\"require_parameters\":true");
-        }
+
+    /* models: ["model/a", "model/b"] — automatic failover */
+    if (fallback_models) {
+        jbuf_append(&b, ",\"models\":");
+        or_append_csv_array(&b, fallback_models);
+    }
+
+    /* reasoning: {"effort": "high"} */
+    if (reasoning) {
+        jbuf_append(&b, ",\"reasoning\":{\"effort\":");
+        jbuf_append_json_str(&b, reasoning);
         jbuf_append(&b, "}");
     }
+
+    /* debug: {"echo_upstream_body": true} */
+    if (debug_mode && or_env_bool(debug_mode)) {
+        jbuf_append(&b, ",\"debug\":{\"echo_upstream_body\":true}");
+    }
+
+    /* provider: { ... } */
+    if (has_provider) {
+        jbuf_append(&b, ",\"provider\":{");
+        bool wrote = false;
+
+        if (prov_order) {
+            jbuf_append(&b, "\"order\":");
+            or_append_csv_array(&b, prov_order);
+            wrote = true;
+        }
+        if (prov_only) {
+            if (wrote) jbuf_append(&b, ",");
+            jbuf_append(&b, "\"only\":");
+            or_append_csv_array(&b, prov_only);
+            wrote = true;
+        }
+        if (prov_ignore) {
+            if (wrote) jbuf_append(&b, ",");
+            jbuf_append(&b, "\"ignore\":");
+            or_append_csv_array(&b, prov_ignore);
+            wrote = true;
+        }
+        if (req_params && or_env_bool(req_params)) {
+            if (wrote) jbuf_append(&b, ",");
+            jbuf_append(&b, "\"require_parameters\":true");
+            wrote = true;
+        }
+        if (allow_fb && !or_env_bool(allow_fb)) {
+            if (wrote) jbuf_append(&b, ",");
+            jbuf_append(&b, "\"allow_fallbacks\":false");
+            wrote = true;
+        }
+        if (data_collect) {
+            if (wrote) jbuf_append(&b, ",");
+            jbuf_append(&b, "\"data_collection\":");
+            jbuf_append_json_str(&b, data_collect);
+            wrote = true;
+        }
+        if (zdr && or_env_bool(zdr)) {
+            if (wrote) jbuf_append(&b, ",");
+            jbuf_append(&b, "\"zdr\":true");
+            wrote = true;
+        }
+        if (quantizations) {
+            if (wrote) jbuf_append(&b, ",");
+            jbuf_append(&b, "\"quantizations\":");
+            or_append_csv_array(&b, quantizations);
+            wrote = true;
+        }
+        if (sort_by) {
+            if (wrote) jbuf_append(&b, ",");
+            jbuf_append(&b, "\"sort\":");
+            jbuf_append_json_str(&b, sort_by);
+            wrote = true;
+        }
+        if (max_price_in || max_price_out) {
+            if (wrote) jbuf_append(&b, ",");
+            jbuf_append(&b, "\"max_price\":{");
+            bool mp_wrote = false;
+            if (max_price_in) {
+                jbuf_appendf(&b, "\"input\":%s", max_price_in);
+                mp_wrote = true;
+            }
+            if (max_price_out) {
+                if (mp_wrote) jbuf_append(&b, ",");
+                jbuf_appendf(&b, "\"output\":%s", max_price_out);
+            }
+            jbuf_append(&b, "}");
+            wrote = true;
+        }
+        (void)wrote;
+        jbuf_append(&b, "}");
+    }
+
     jbuf_append(&b, "}");
     return b.data;
 }
@@ -314,6 +438,13 @@ typedef struct {
     usage_t         usage;
     char           *stop_reason;
     bool            got_error;
+    char           *error_msg;
+    /* OpenRouter-specific */
+    char           *generation_id; /* x-generation-id from response */
+    char           *actual_model;  /* model actually used (may differ from requested) */
+    double          cost_usd;      /* total cost from usage.cost */
+    int             cached_tokens; /* input_tokens_details.cached_tokens */
+    int             reasoning_tokens; /* output_tokens_details.reasoning_tokens */
     /* Result building */
     content_block_t blocks[MAX_CONTENT_BLOCKS];
     int             block_count;
@@ -324,33 +455,90 @@ static void oai_handle_sse_line(oai_sse_state_t *s, const char *line) {
     const char *data = line + 6;
     if (strcmp(data, "[DONE]") == 0) return;
 
-    /* Parse the SSE chunk */
-    char *choices_raw = json_get_raw(data, "choices");
-    if (!choices_raw) {
-        /* Check for usage in final message */
-        char *usage_raw = json_get_raw(data, "usage");
-        if (usage_raw) {
-            s->usage.input_tokens = json_get_int(usage_raw, "prompt_tokens", 0);
-            s->usage.output_tokens = json_get_int(usage_raw, "completion_tokens", 0);
-            free(usage_raw);
+    /* Check for top-level error object (OpenRouter sends errors mid-stream) */
+    char *err_raw = json_get_raw(data, "error");
+    if (err_raw) {
+        char *err_msg = json_get_str(err_raw, "message");
+        int err_code = json_get_int(err_raw, "code", 0);
+        if (err_msg) {
+            s->got_error = true;
+            free(s->error_msg);
+            s->error_msg = err_msg;
+            fprintf(stderr, "  \033[31mAPI error %d: %s\033[0m\n", err_code, err_msg);
         }
+        free(err_raw);
         return;
+    }
+
+    /* Extract model actually used (first chunk usually has it) */
+    if (!s->actual_model) {
+        char *model = json_get_str(data, "model");
+        if (model) s->actual_model = model;
+    }
+
+    /* Extract generation ID */
+    if (!s->generation_id) {
+        char *gid = json_get_str(data, "id");
+        if (gid) s->generation_id = gid;
+    }
+
+    /* Parse usage (may appear in any chunk, usually the last) */
+    char *usage_raw = json_get_raw(data, "usage");
+    if (usage_raw) {
+        s->usage.input_tokens = json_get_int(usage_raw, "prompt_tokens", s->usage.input_tokens);
+        s->usage.output_tokens = json_get_int(usage_raw, "completion_tokens", s->usage.output_tokens);
+
+        /* Cost tracking (OpenRouter includes cost in usage) */
+        char *cost_str = json_get_str(usage_raw, "cost");
+        if (cost_str) {
+            s->cost_usd = atof(cost_str);
+            free(cost_str);
+        }
+
+        /* Token detail breakdowns */
+        char *in_detail = json_get_raw(usage_raw, "input_tokens_details");
+        if (in_detail) {
+            s->cached_tokens = json_get_int(in_detail, "cached_tokens", 0);
+            free(in_detail);
+        }
+        char *out_detail = json_get_raw(usage_raw, "output_tokens_details");
+        if (out_detail) {
+            s->reasoning_tokens = json_get_int(out_detail, "reasoning_tokens", 0);
+            free(out_detail);
+        }
+        free(usage_raw);
+    }
+
+    /* Parse choices array */
+    char *choices_raw = json_get_raw(data, "choices");
+    if (!choices_raw) return;
+
+    /* Check finish_reason (including mid-stream errors and content filters) */
+    char *fr = json_get_str(choices_raw, "finish_reason");
+    if (fr) {
+        free(s->stop_reason);
+        if (strcmp(fr, "stop") == 0)
+            s->stop_reason = safe_strdup("end_turn");
+        else if (strcmp(fr, "tool_calls") == 0)
+            s->stop_reason = safe_strdup("tool_use");
+        else if (strcmp(fr, "length") == 0)
+            s->stop_reason = safe_strdup("max_tokens");
+        else if (strcmp(fr, "error") == 0) {
+            s->stop_reason = safe_strdup("error");
+            s->got_error = true;
+        } else if (strcmp(fr, "content_filter") == 0) {
+            s->stop_reason = safe_strdup("content_filter");
+            fprintf(stderr, "  \033[33mContent filter triggered\033[0m\n");
+        } else {
+            s->stop_reason = fr;
+            fr = NULL; /* transferred ownership */
+        }
+        free(fr);
     }
 
     /* Extract delta from first choice */
     char *delta_raw = json_get_raw(choices_raw, "delta");
     if (!delta_raw) {
-        /* Try finish_reason */
-        char *fr = json_get_str(choices_raw, "finish_reason");
-        if (fr) {
-            free(s->stop_reason);
-            if (strcmp(fr, "stop") == 0)
-                s->stop_reason = safe_strdup("end_turn");
-            else if (strcmp(fr, "tool_calls") == 0)
-                s->stop_reason = safe_strdup("tool_use");
-            else
-                s->stop_reason = fr;
-        }
         free(choices_raw);
         return;
     }
@@ -366,7 +554,6 @@ static void oai_handle_sse_line(oai_sse_state_t *s, const char *line) {
     /* Tool calls delta */
     char *tool_calls_raw = json_get_raw(delta_raw, "tool_calls");
     if (tool_calls_raw) {
-        /* Each chunk has index, function.name (first chunk), function.arguments (subsequent) */
         int idx = json_get_int(tool_calls_raw, "index", 0);
         char *fn_raw = json_get_raw(tool_calls_raw, "function");
         if (fn_raw) {
@@ -375,7 +562,6 @@ static void oai_handle_sse_line(oai_sse_state_t *s, const char *line) {
             char *tid = json_get_str(tool_calls_raw, "id");
 
             if (fname) {
-                /* New tool call starting */
                 /* Finalize previous tool if any */
                 if (s->tool_name && s->tool_index >= 0) {
                     int bi = s->block_count++;
@@ -396,8 +582,6 @@ static void oai_handle_sse_line(oai_sse_state_t *s, const char *line) {
                 jbuf_reset(&s->tool_args);
 
                 if (s->tool_cb) s->tool_cb(fname, s->tool_id, s->cb_ctx);
-
-                if (tid && tid != s->tool_id) { /* already assigned */ }
             } else {
                 free(tid);
             }
@@ -512,17 +696,42 @@ static stream_result_t openai_stream(provider_t *p, const char *api_key,
                state.block_count * sizeof(content_block_t));
         result.parsed.stop_reason = state.stop_reason;
         result.usage = state.usage;
+
+        /* Log model/cost info when available (OpenRouter provides these) */
+        if (state.actual_model || state.cost_usd > 0) {
+            fprintf(stderr, "  \033[2m");
+            if (state.actual_model)
+                fprintf(stderr, "model=%s ", state.actual_model);
+            if (state.cost_usd > 0)
+                fprintf(stderr, "$%.6f ", state.cost_usd);
+            if (state.cached_tokens > 0)
+                fprintf(stderr, "cached=%d ", state.cached_tokens);
+            if (state.reasoning_tokens > 0)
+                fprintf(stderr, "reasoning=%d ", state.reasoning_tokens);
+            if (state.generation_id)
+                fprintf(stderr, "gen=%s", state.generation_id);
+            fprintf(stderr, "\033[0m\n");
+        }
+
+        /* Handle mid-stream errors that arrived on HTTP 200 */
+        if (state.got_error) {
+            result.ok = false;
+            if (state.error_msg)
+                fprintf(stderr, "dsco: stream error: %s\n", state.error_msg);
+        }
     } else {
         result.ok = false;
         if (res != CURLE_OK) {
             fprintf(stderr, "dsco: curl error: %s (HTTP %d, url: %s)\n",
                     curl_easy_strerror(res), (int)http_code, od->api_url);
+        } else if (state.got_error && state.error_msg) {
+            fprintf(stderr, "dsco: HTTP %d: %s\n", (int)http_code, state.error_msg);
         } else if (state.line_buf.len > 0) {
-            fprintf(stderr, "dsco: OpenAI HTTP %d: %.*s\n",
+            fprintf(stderr, "dsco: HTTP %d: %.*s\n",
                     (int)http_code, (int)(state.line_buf.len < 500 ? state.line_buf.len : 500),
                     state.line_buf.data);
         } else {
-            fprintf(stderr, "dsco: OpenAI request failed HTTP %d (no body, url: %s)\n",
+            fprintf(stderr, "dsco: request failed HTTP %d (url: %s)\n",
                     (int)http_code, od->api_url);
         }
         free(state.stop_reason);
@@ -530,6 +739,10 @@ static stream_result_t openai_stream(provider_t *p, const char *api_key,
         free(state.tool_id);
     }
 
+    /* Cleanup OpenRouter-specific state */
+    free(state.error_msg);
+    free(state.actual_model);
+    free(state.generation_id);
     jbuf_free(&state.line_buf);
     jbuf_free(&state.text_accum);
     jbuf_free(&state.tool_args);
