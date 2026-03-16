@@ -19,6 +19,8 @@
 #include "topology.h"
 #include "router.h"
 #include "swarm.h"
+#include "arena_alloc.h"
+#include "vm.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -3450,6 +3452,7 @@ void agent_run(const char *api_key, const char *model,
         int total_tools_used = 0;
         int pause_turn_streak = 0;
         tools_context_turn_begin();
+        arena_scratch_reset();  /* §2: reset per-turn scratch arena */
 
         /* Per-prompt trace ID */
         char trace_id[37];

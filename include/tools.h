@@ -5,6 +5,7 @@
 #include <stddef.h>
 #include <pthread.h>
 #include "swarm.h"
+#include "vm.h"
 
 /* Tool definition */
 typedef struct {
@@ -30,6 +31,10 @@ bool             tools_execute_for_tier(const char *name, const char *input_json
                                         char *result, size_t result_len);
 bool             tools_is_allowed_for_tier(const char *name, const char *tier,
                                            char *reason, size_t reason_len);
+
+/* ── VM dispatch registration (§3: bytecode VM) ───────────────────────── */
+
+void             tools_register_vm_dispatch(vm_t *vm);
 
 /* ── Tool hash map for O(1) lookup ─────────────────────────────────────── */
 
