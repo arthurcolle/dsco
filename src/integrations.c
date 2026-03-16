@@ -1673,3 +1673,203 @@ bool tool_mapbox_geocode(const char *input, char *result, size_t rlen) {
     result[0] = '\0'; truncate_response(resp.data ? resp.data : "{}", result, rlen, 32);
     free(resp.data); return true;
 }
+
+/* ══════════════════════════════════════════════════════════════════════════
+ *  POLYMARKET — Prediction market data (public, no auth required)
+ *
+ *  APIs:
+ *    Gamma:  https://gamma-api.polymarket.com   (markets, events, metadata)
+ *    CLOB:   https://clob.polymarket.com        (order book, prices, trades)
+ *    Data:   https://data-api.polymarket.com    (activity, leaderboard)
+ * ══════════════════════════════════════════════════════════════════════════ */
+
+/* Search/list Polymarket markets with optional filters */
+bool tool_polymarket_markets(const char *input, char *result, size_t rlen) {
+    char *tag = json_get_str(input, "tag");
+    char *active = json_get_str(input, "active");
+    char *closed = json_get_str(input, "closed");
+    int limit = json_get_int(input, "limit", 10);
+    int offset = json_get_int(input, "offset", 0);
+    if (limit > 100) limit = 100;
+
+    jbuf_t url;
+    jbuf_init(&url, 512);
+    jbuf_appendf(&url, "https://gamma-api.polymarket.com/markets?limit=%d&offset=%d",
+                 limit, offset);
+    if (active && active[0])
+        jbuf_appendf(&url, "&active=%s", active);
+    if (closed && closed[0])
+        jbuf_appendf(&url, "&closed=%s", closed);
+    if (tag && tag[0]) {
+        CURL *c = curl_easy_init();
+        char *enc = curl_easy_escape(c, tag, 0);
+        jbuf_appendf(&url, "&tag=%s", enc);
+        curl_free(enc); curl_easy_cleanup(c);
+    }
+    free(tag); free(active); free(closed);
+
+    http_buf_t resp = {0};
+    long status = http_get_authed(url.data, NULL, &resp);
+    jbuf_free(&url);
+    if (status != 200) {
+        snprintf(result, rlen, "Polymarket Gamma API error (HTTP %ld)", status);
+        free(resp.data); return false;
+    }
+    result[0] = '\0';
+    truncate_response(resp.data ? resp.data : "[]", result, rlen, 32);
+    free(resp.data); return true;
+}
+
+/* Get Polymarket events (grouped markets) */
+bool tool_polymarket_events(const char *input, char *result, size_t rlen) {
+    char *slug = json_get_str(input, "slug");
+    char *id = json_get_str(input, "id");
+    int limit = json_get_int(input, "limit", 10);
+
+    jbuf_t url;
+    jbuf_init(&url, 512);
+    if (id && id[0]) {
+        jbuf_appendf(&url, "https://gamma-api.polymarket.com/events/%s", id);
+    } else if (slug && slug[0]) {
+        CURL *c = curl_easy_init();
+        char *enc = curl_easy_escape(c, slug, 0);
+        jbuf_appendf(&url, "https://gamma-api.polymarket.com/events?slug=%s", enc);
+        curl_free(enc); curl_easy_cleanup(c);
+    } else {
+        jbuf_appendf(&url, "https://gamma-api.polymarket.com/events?limit=%d&active=true", limit);
+    }
+    free(slug); free(id);
+
+    http_buf_t resp = {0};
+    long status = http_get_authed(url.data, NULL, &resp);
+    jbuf_free(&url);
+    if (status != 200) {
+        snprintf(result, rlen, "Polymarket events error (HTTP %ld)", status);
+        free(resp.data); return false;
+    }
+    result[0] = '\0';
+    truncate_response(resp.data ? resp.data : "[]", result, rlen, 32);
+    free(resp.data); return true;
+}
+
+/* Get current prices/midpoints for a Polymarket token */
+bool tool_polymarket_prices(const char *input, char *result, size_t rlen) {
+    char *token_id = json_get_str(input, "token_id");
+    char *condition_id = json_get_str(input, "condition_id");
+
+    if ((!token_id || !token_id[0]) && (!condition_id || !condition_id[0])) {
+        free(token_id); free(condition_id);
+        snprintf(result, rlen, "missing: token_id or condition_id (get from polymarket_markets)");
+        return false;
+    }
+
+    jbuf_t url;
+    jbuf_init(&url, 512);
+    if (token_id && token_id[0]) {
+        jbuf_appendf(&url, "https://clob.polymarket.com/midpoint?token_id=%s", token_id);
+    } else {
+        jbuf_appendf(&url, "https://clob.polymarket.com/midpoints?condition_id=%s", condition_id);
+    }
+    free(token_id); free(condition_id);
+
+    http_buf_t resp = {0};
+    long status = http_get_authed(url.data, NULL, &resp);
+    jbuf_free(&url);
+    if (status != 200) {
+        snprintf(result, rlen, "Polymarket CLOB price error (HTTP %ld)", status);
+        free(resp.data); return false;
+    }
+    result[0] = '\0';
+    truncate_response(resp.data ? resp.data : "{}", result, rlen, 32);
+    free(resp.data); return true;
+}
+
+/* Get order book depth for a Polymarket token */
+bool tool_polymarket_book(const char *input, char *result, size_t rlen) {
+    char *token_id = json_get_str(input, "token_id");
+    if (!token_id || !token_id[0]) {
+        free(token_id);
+        snprintf(result, rlen, "missing: token_id");
+        return false;
+    }
+
+    char url[1024];
+    snprintf(url, sizeof(url),
+             "https://clob.polymarket.com/book?token_id=%s", token_id);
+    free(token_id);
+
+    http_buf_t resp = {0};
+    long status = http_get_authed(url, NULL, &resp);
+    if (status != 200) {
+        snprintf(result, rlen, "Polymarket order book error (HTTP %ld)", status);
+        free(resp.data); return false;
+    }
+    result[0] = '\0';
+    truncate_response(resp.data ? resp.data : "{}", result, rlen, 32);
+    free(resp.data); return true;
+}
+
+/* Get recent trades for a Polymarket market */
+bool tool_polymarket_trades(const char *input, char *result, size_t rlen) {
+    char *condition_id = json_get_str(input, "condition_id");
+    char *maker = json_get_str(input, "maker");
+    int limit = json_get_int(input, "limit", 20);
+    if (limit > 500) limit = 500;
+
+    jbuf_t url;
+    jbuf_init(&url, 512);
+    if (condition_id && condition_id[0]) {
+        jbuf_appendf(&url,
+            "https://data-api.polymarket.com/trades?condition_id=%s&limit=%d",
+            condition_id, limit);
+    } else if (maker && maker[0]) {
+        jbuf_appendf(&url,
+            "https://data-api.polymarket.com/trades?maker=%s&limit=%d",
+            maker, limit);
+    } else {
+        jbuf_appendf(&url,
+            "https://data-api.polymarket.com/trades?limit=%d", limit);
+    }
+    free(condition_id); free(maker);
+
+    http_buf_t resp = {0};
+    long status = http_get_authed(url.data, NULL, &resp);
+    jbuf_free(&url);
+    if (status != 200) {
+        snprintf(result, rlen, "Polymarket trades error (HTTP %ld)", status);
+        free(resp.data); return false;
+    }
+    result[0] = '\0';
+    truncate_response(resp.data ? resp.data : "[]", result, rlen, 32);
+    free(resp.data); return true;
+}
+
+/* Search Polymarket markets by keyword */
+bool tool_polymarket_search(const char *input, char *result, size_t rlen) {
+    char *query = json_get_str(input, "query");
+    if (!query || !query[0]) {
+        free(query);
+        snprintf(result, rlen, "missing: query");
+        return false;
+    }
+    int limit = json_get_int(input, "limit", 10);
+    if (limit > 50) limit = 50;
+
+    CURL *c = curl_easy_init();
+    char *enc = curl_easy_escape(c, query, 0);
+    char url[2048];
+    snprintf(url, sizeof(url),
+             "https://gamma-api.polymarket.com/markets?_q=%s&limit=%d&active=true",
+             enc, limit);
+    curl_free(enc); curl_easy_cleanup(c); free(query);
+
+    http_buf_t resp = {0};
+    long status = http_get_authed(url, NULL, &resp);
+    if (status != 200) {
+        snprintf(result, rlen, "Polymarket search error (HTTP %ld)", status);
+        free(resp.data); return false;
+    }
+    result[0] = '\0';
+    truncate_response(resp.data ? resp.data : "[]", result, rlen, 32);
+    free(resp.data); return true;
+}

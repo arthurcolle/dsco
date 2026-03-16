@@ -509,12 +509,17 @@ static void oai_handle_sse_line(oai_sse_state_t *s, const char *line) {
         free(usage_raw);
     }
 
-    /* Parse choices array */
+    /* Parse choices array — extract the first element (an object) */
     char *choices_raw = json_get_raw(data, "choices");
     if (!choices_raw) return;
+    /* choices_raw is "[{...}]" — skip into the first element object */
+    const char *first_choice = choices_raw;
+    while (*first_choice && (*first_choice == '[' || *first_choice == ' ' ||
+           *first_choice == '\n' || *first_choice == '\r' || *first_choice == '\t'))
+        first_choice++;
 
     /* Check finish_reason (including mid-stream errors and content filters) */
-    char *fr = json_get_str(choices_raw, "finish_reason");
+    char *fr = json_get_str(first_choice, "finish_reason");
     if (fr) {
         free(s->stop_reason);
         if (strcmp(fr, "stop") == 0)
@@ -537,7 +542,7 @@ static void oai_handle_sse_line(oai_sse_state_t *s, const char *line) {
     }
 
     /* Extract delta from first choice */
-    char *delta_raw = json_get_raw(choices_raw, "delta");
+    char *delta_raw = json_get_raw(first_choice, "delta");
     if (!delta_raw) {
         free(choices_raw);
         return;
