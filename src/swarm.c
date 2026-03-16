@@ -3,6 +3,7 @@
 #include "router.h"
 #include "json_util.h"
 #include "tui.h"
+#include "scheduler.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>

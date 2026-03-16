@@ -163,4 +163,14 @@ const char *pheromone_agg_name(pheromone_aggregation_t a);
 /* Format a status summary as JSON. */
 int pheromone_status_json(const pheromone_field_t *f, char *buf, size_t len);
 
+/* ── §6: Event Loop Integration ───────────────────────────────────── */
+
+typedef struct ev_loop ev_loop_t;
+
+/* Attach pheromone field to an event loop for automatic periodic decay.
+   interval_ms = how often to run pheromone_tick (default: 5000ms). */
+void pheromone_attach_event_loop(pheromone_field_t *f, ev_loop_t *loop,
+                                  int interval_ms);
+void pheromone_detach_event_loop(void);
+
 #endif
