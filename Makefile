@@ -23,7 +23,8 @@ SRC_NAMES = main.c agent.c llm.c tools.c json_util.c ast.c swarm.c tui.c \
 	md.c baseline.c setup.c crypto.c eval.c pipeline.c plugin.c \
 	semantic.c ipc.c mcp.c provider.c integrations.c error.c trace.c task_profile.c \
 	output_guard.c topology.c workspace.c plan.c router.c \
-	pheromone.c ooda.c killswitch.c governance.c memory_tier.c talons.c
+	pheromone.c ooda.c killswitch.c governance.c memory_tier.c talons.c \
+	arena_alloc.c event_loop.c vm.c scheduler.c vfs.c
 TEST_SRC_NAMES = test.c
 
 SRCS = $(addprefix $(SRC_DIR)/, $(SRC_NAMES))

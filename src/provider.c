@@ -282,10 +282,26 @@ typedef struct {
     char api_url[512];
 } openai_data_t;
 
-static void openai_append_message_content(jbuf_t *b, message_t *m) {
-    jbuf_append(b, "[");
+/* Check if a message has any tool_use content blocks */
+static bool msg_has_tool_use(message_t *m) {
+    for (int j = 0; j < m->content_count; j++) {
+        if (m->content[j].type && strcmp(m->content[j].type, "tool_use") == 0)
+            return true;
+    }
+    return false;
+}
 
-    bool wrote_any = false;
+/* Check if a message has any tool_result content blocks */
+static bool msg_has_tool_result(message_t *m) {
+    for (int j = 0; j < m->content_count; j++) {
+        if (m->content[j].type && strcmp(m->content[j].type, "tool_result") == 0)
+            return true;
+    }
+    return false;
+}
+
+/* Emit text+image content array (skipping tool_use and tool_result blocks) */
+static void openai_append_text_content(jbuf_t *b, message_t *m) {
     jbuf_t text;
     jbuf_init(&text, 1024);
 
@@ -294,47 +310,141 @@ static void openai_append_message_content(jbuf_t *b, message_t *m) {
         if (mc->type && strcmp(mc->type, "text") == 0 && mc->text) {
             if (text.len > 0) jbuf_append(&text, "\n");
             jbuf_append(&text, mc->text);
-        } else if (mc->type && strcmp(mc->type, "tool_result") == 0 && mc->text) {
-            if (text.len > 0) jbuf_append(&text, "\n");
-            jbuf_append(&text, "[tool_result] ");
-            jbuf_append(&text, mc->text);
         }
     }
 
     if (text.len > 0) {
-        jbuf_append(b, "{\"type\":\"text\",\"text\":");
         jbuf_append_json_str(b, text.data);
-        jbuf_append(b, "}");
-        wrote_any = true;
+    } else {
+        jbuf_append(b, "\"\"");
+    }
+    jbuf_free(&text);
+}
+
+/* Emit an assistant message with tool_calls in OpenAI format */
+static void openai_append_assistant_msg(jbuf_t *b, message_t *m) {
+    jbuf_append(b, ",{\"role\":\"assistant\"");
+
+    /* Collect text content */
+    jbuf_t text;
+    jbuf_init(&text, 1024);
+    for (int j = 0; j < m->content_count; j++) {
+        msg_content_t *mc = &m->content[j];
+        if (mc->type && strcmp(mc->type, "text") == 0 && mc->text) {
+            if (text.len > 0) jbuf_append(&text, "\n");
+            jbuf_append(&text, mc->text);
+        }
+    }
+    if (text.len > 0) {
+        jbuf_append(b, ",\"content\":");
+        jbuf_append_json_str(b, text.data);
     }
     jbuf_free(&text);
 
+    /* Emit tool_calls array for tool_use blocks */
+    if (msg_has_tool_use(m)) {
+        jbuf_append(b, ",\"tool_calls\":[");
+        bool first_tool = true;
+        for (int j = 0; j < m->content_count; j++) {
+            msg_content_t *mc = &m->content[j];
+            if (!mc->type || strcmp(mc->type, "tool_use") != 0) continue;
+            if (!first_tool) jbuf_append(b, ",");
+            first_tool = false;
+            jbuf_append(b, "{\"id\":");
+            jbuf_append_json_str(b, mc->tool_id ? mc->tool_id : "call_0");
+            jbuf_append(b, ",\"type\":\"function\",\"function\":{\"name\":");
+            jbuf_append_json_str(b, mc->tool_name ? mc->tool_name : "unknown");
+            jbuf_append(b, ",\"arguments\":");
+            /* OpenAI/OpenRouter require arguments as a JSON *string*, not object */
+            jbuf_append_json_str(b, mc->tool_input ? mc->tool_input : "{}");
+            jbuf_append(b, "}}");
+        }
+        jbuf_append(b, "]");
+    }
+
+    jbuf_append(b, "}");
+}
+
+/* Emit tool_result blocks as separate {"role":"tool"} messages (OpenAI format) */
+static void openai_append_tool_results(jbuf_t *b, message_t *m) {
     for (int j = 0; j < m->content_count; j++) {
         msg_content_t *mc = &m->content[j];
-        if (!mc->type || strcmp(mc->type, "image") != 0) continue;
+        if (!mc->type || strcmp(mc->type, "tool_result") != 0) continue;
+        jbuf_append(b, ",{\"role\":\"tool\",\"tool_call_id\":");
+        jbuf_append_json_str(b, mc->tool_id ? mc->tool_id : "call_0");
+        jbuf_append(b, ",\"content\":");
+        jbuf_append_json_str(b, mc->text ? mc->text : "");
+        jbuf_append(b, "}");
+    }
+}
 
-        if (wrote_any) jbuf_append(b, ",");
-        jbuf_append(b, "{\"type\":\"image_url\",\"image_url\":{\"url\":");
-        if (mc->image_url) {
-            jbuf_append_json_str(b, mc->image_url);
-        } else {
-            const char *media_type = mc->image_media_type ? mc->image_media_type : "image/png";
-            const char *data = mc->image_data ? mc->image_data : "";
-            jbuf_append(b, "\"data:");
-            jbuf_append(b, media_type);
-            jbuf_append(b, ";base64,");
-            jbuf_append(b, data);
-            jbuf_append(b, "\"");
+/* Emit a regular user message (text + images, no tool_results) */
+static void openai_append_user_msg(jbuf_t *b, message_t *m) {
+    jbuf_append(b, ",{\"role\":\"user\",\"content\":");
+
+    /* Check if we have images */
+    bool has_images = false;
+    for (int j = 0; j < m->content_count; j++) {
+        if (m->content[j].type && strcmp(m->content[j].type, "image") == 0) {
+            has_images = true;
+            break;
         }
-        jbuf_append(b, "}}");
-        wrote_any = true;
     }
 
-    if (!wrote_any) {
-        jbuf_append(b, "{\"type\":\"text\",\"text\":\"\"}");
+    if (!has_images) {
+        /* Simple string content */
+        openai_append_text_content(b, m);
+    } else {
+        /* Array content with text + images */
+        jbuf_append(b, "[");
+        bool wrote_any = false;
+
+        /* Text block */
+        jbuf_t text;
+        jbuf_init(&text, 1024);
+        for (int j = 0; j < m->content_count; j++) {
+            msg_content_t *mc = &m->content[j];
+            if (mc->type && strcmp(mc->type, "text") == 0 && mc->text) {
+                if (text.len > 0) jbuf_append(&text, "\n");
+                jbuf_append(&text, mc->text);
+            }
+        }
+        if (text.len > 0) {
+            jbuf_append(b, "{\"type\":\"text\",\"text\":");
+            jbuf_append_json_str(b, text.data);
+            jbuf_append(b, "}");
+            wrote_any = true;
+        }
+        jbuf_free(&text);
+
+        /* Image blocks */
+        for (int j = 0; j < m->content_count; j++) {
+            msg_content_t *mc = &m->content[j];
+            if (!mc->type || strcmp(mc->type, "image") != 0) continue;
+            if (wrote_any) jbuf_append(b, ",");
+            jbuf_append(b, "{\"type\":\"image_url\",\"image_url\":{\"url\":");
+            if (mc->image_url) {
+                jbuf_append_json_str(b, mc->image_url);
+            } else {
+                const char *media_type = mc->image_media_type ? mc->image_media_type : "image/png";
+                const char *data = mc->image_data ? mc->image_data : "";
+                jbuf_append(b, "\"data:");
+                jbuf_append(b, media_type);
+                jbuf_append(b, ";base64,");
+                jbuf_append(b, data);
+                jbuf_append(b, "\"");
+            }
+            jbuf_append(b, "}}");
+            wrote_any = true;
+        }
+
+        if (!wrote_any) {
+            jbuf_append(b, "{\"type\":\"text\",\"text\":\"\"}");
+        }
+        jbuf_append(b, "]");
     }
 
-    jbuf_append(b, "]");
+    jbuf_append(b, "}");
 }
 
 static char *openai_build_request(provider_t *p, conversation_t *conv,
@@ -367,14 +477,37 @@ static char *openai_build_request(provider_t *p, conversation_t *conv,
     }
     jbuf_append(&b, "}");
 
-    /* Conversation messages */
+    /* Conversation messages — convert Anthropic format to OpenAI format:
+     *   - assistant + tool_use  → {"role":"assistant","tool_calls":[...]}
+     *   - user + tool_result    → {"role":"tool","tool_call_id":"...","content":"..."}
+     *                             followed by any remaining user text as {"role":"user",...}
+     *   - plain user/assistant  → {"role":"user/assistant","content":"..."}
+     */
     for (int i = 0; i < conv->count; i++) {
         message_t *m = &conv->msgs[i];
-        jbuf_append(&b, ",{\"role\":");
-        jbuf_append_json_str(&b, m->role == ROLE_USER ? "user" : "assistant");
-        jbuf_append(&b, ",\"content\":");
-        openai_append_message_content(&b, m);
-        jbuf_append(&b, "}");
+
+        if (m->role == ROLE_ASSISTANT) {
+            openai_append_assistant_msg(&b, m);
+        } else {
+            /* User message: emit tool_results first, then remaining user content */
+            if (msg_has_tool_result(m)) {
+                openai_append_tool_results(&b, m);
+                /* If there's also text content beyond tool results, emit a user msg */
+                bool has_text = false;
+                for (int j = 0; j < m->content_count; j++) {
+                    msg_content_t *mc = &m->content[j];
+                    if (mc->type && strcmp(mc->type, "text") == 0 && mc->text && mc->text[0]) {
+                        has_text = true;
+                        break;
+                    }
+                }
+                if (has_text) {
+                    openai_append_user_msg(&b, m);
+                }
+            } else {
+                openai_append_user_msg(&b, m);
+            }
+        }
     }
     jbuf_append(&b, "]");
 
@@ -556,15 +689,22 @@ static void oai_handle_sse_line(oai_sse_state_t *s, const char *line) {
     }
     free(content);
 
-    /* Tool calls delta */
+    /* Tool calls delta — tool_calls is an array: [{index, id, function:{name,arguments}}]
+     * We need to skip into the first element since json_get_* only works on objects. */
     char *tool_calls_raw = json_get_raw(delta_raw, "tool_calls");
     if (tool_calls_raw) {
-        int idx = json_get_int(tool_calls_raw, "index", 0);
-        char *fn_raw = json_get_raw(tool_calls_raw, "function");
+        /* Skip into first array element: "[{...}]" → "{...}" */
+        const char *tc_elem = tool_calls_raw;
+        while (*tc_elem && (*tc_elem == '[' || *tc_elem == ' ' ||
+               *tc_elem == '\n' || *tc_elem == '\r' || *tc_elem == '\t'))
+            tc_elem++;
+
+        int idx = json_get_int(tc_elem, "index", 0);
+        char *fn_raw = json_get_raw(tc_elem, "function");
         if (fn_raw) {
             char *fname = json_get_str(fn_raw, "name");
             char *fargs = json_get_str(fn_raw, "arguments");
-            char *tid = json_get_str(tool_calls_raw, "id");
+            char *tid = json_get_str(tc_elem, "id");
 
             if (fname) {
                 /* Finalize previous tool if any */

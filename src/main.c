@@ -13,6 +13,12 @@
 #include "workspace.h"
 #include "trace.h"
 #include "output_guard.h"
+#include "router.h"
+#include "arena_alloc.h"
+#include "event_loop.h"
+#include "vm.h"
+#include "scheduler.h"
+#include "vfs.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -84,26 +90,49 @@ static const exec_reg_t EXEC_REGISTRY[] = {
 };
 
 /* Native API providers (these use dsco's built-in streaming) */
+
+/* Capability flags */
+#define CAP_TOOLS       (1 << 0)   /* function/tool calling */
+#define CAP_MULTITURN   (1 << 1)   /* multi-turn conversation */
+#define CAP_STREAMING   (1 << 2)   /* SSE streaming */
+#define CAP_VISION      (1 << 3)   /* image input */
+#define CAP_THINKING    (1 << 4)   /* extended thinking / reasoning */
+#define CAP_JSON        (1 << 5)   /* structured JSON output */
+#define CAP_CACHE       (1 << 6)   /* prompt caching */
+
 typedef struct {
     const char *name;
     const char *desc;
     const char *env_key;
     const char *example_model;
+    int         caps;              /* CAP_* bitmask */
+    int         tier;              /* 1-4 capability tier */
 } native_provider_t;
 
 static const native_provider_t NATIVE_PROVIDERS[] = {
-    { "anthropic",  "Anthropic Claude API",      "ANTHROPIC_API_KEY",   "claude-opus-4-6"          },
-    { "openai",     "OpenAI API",                "OPENAI_API_KEY",      "gpt-5.4"                  },
-    { "openrouter", "OpenRouter (multi-model)",   "OPENROUTER_API_KEY", "anthropic/claude-opus-4-6" },
-    { "groq",       "Groq (fast inference)",     "GROQ_API_KEY",        "llama-3.3-70b-versatile"  },
-    { "deepseek",   "DeepSeek API",              "DEEPSEEK_API_KEY",    "deepseek-chat"            },
-    { "mistral",    "Mistral AI API",            "MISTRAL_API_KEY",     "mistral-large-latest"     },
-    { "xai",        "xAI Grok API",              "XAI_API_KEY",         "grok-4-1-fast-reasoning"  },
-    { "together",   "Together AI",               "TOGETHER_API_KEY",    "meta-llama/Llama-4-Maverick-17B-128E-Instruct-FP8" },
-    { "perplexity", "Perplexity AI",             "PERPLEXITY_API_KEY",  "sonar-pro"                },
-    { "cerebras",   "Cerebras (fast inference)",  "CEREBRAS_API_KEY",   "qwen-3-235b-a22b-instruct-2507" },
-    { "cohere",     "Cohere API",                "COHERE_API_KEY",      "command-a-03-2025"        },
-    { NULL, NULL, NULL, NULL }
+    { "anthropic",  "Anthropic Claude API",      "ANTHROPIC_API_KEY",   "claude-opus-4-6",
+      CAP_TOOLS|CAP_MULTITURN|CAP_STREAMING|CAP_VISION|CAP_THINKING|CAP_JSON|CAP_CACHE, 4 },
+    { "openai",     "OpenAI API",                "OPENAI_API_KEY",      "gpt-4.1",
+      CAP_TOOLS|CAP_MULTITURN|CAP_STREAMING|CAP_VISION|CAP_JSON, 3 },
+    { "openrouter", "OpenRouter (multi-model)",   "OPENROUTER_API_KEY", "anthropic/claude-opus-4-6",
+      CAP_TOOLS|CAP_MULTITURN|CAP_STREAMING|CAP_VISION|CAP_JSON, 4 },
+    { "groq",       "Groq (fast inference)",     "GROQ_API_KEY",        "llama-3.3-70b-versatile",
+      CAP_TOOLS|CAP_MULTITURN|CAP_STREAMING|CAP_JSON, 2 },
+    { "deepseek",   "DeepSeek API",              "DEEPSEEK_API_KEY",    "deepseek-chat",
+      CAP_TOOLS|CAP_MULTITURN|CAP_STREAMING|CAP_THINKING|CAP_JSON, 3 },
+    { "mistral",    "Mistral AI API",            "MISTRAL_API_KEY",     "mistral-large-latest",
+      CAP_TOOLS|CAP_MULTITURN|CAP_STREAMING|CAP_JSON, 3 },
+    { "xai",        "xAI Grok API",              "XAI_API_KEY",         "grok-3-beta",
+      CAP_TOOLS|CAP_MULTITURN|CAP_STREAMING|CAP_VISION|CAP_JSON, 3 },
+    { "together",   "Together AI",               "TOGETHER_API_KEY",    "meta-llama/Llama-4-Maverick-17B-128E-Instruct-FP8",
+      CAP_TOOLS|CAP_MULTITURN|CAP_STREAMING, 2 },
+    { "perplexity", "Perplexity AI",             "PERPLEXITY_API_KEY",  "sonar-pro",
+      CAP_MULTITURN|CAP_STREAMING, 2 },
+    { "cerebras",   "Cerebras (fast inference)",  "CEREBRAS_API_KEY",   "qwen-3-235b-a22b-instruct-2507",
+      CAP_TOOLS|CAP_MULTITURN|CAP_STREAMING, 2 },
+    { "cohere",     "Cohere API",                "COHERE_API_KEY",      "command-a-03-2025",
+      CAP_TOOLS|CAP_MULTITURN|CAP_STREAMING|CAP_JSON, 3 },
+    { NULL, NULL, NULL, NULL, 0, 0 }
 };
 
 static const exec_reg_t *exec_find(const char *name) {
@@ -142,20 +171,39 @@ static void exec_list(void) {
                 "\033[0m");
     }
     fprintf(stderr, "\n  \033[1mNative API Providers\033[0m\n");
-    fprintf(stderr, "  %-12s %-28s %-14s %s\n", "NAME", "DESCRIPTION", "STATUS", "EXAMPLE");
-    fprintf(stderr, "  %-12s %-28s %-14s %s\n", "────", "───────────", "──────", "───────");
+    fprintf(stderr, "  %-12s %-24s %-10s %-18s %s\n",
+            "NAME", "DESCRIPTION", "STATUS", "CAPABILITIES", "DEFAULT MODEL");
+    fprintf(stderr, "  %-12s %-24s %-10s %-18s %s\n",
+            "────", "───────────", "──────", "────────────", "─────────────");
     for (int i = 0; NATIVE_PROVIDERS[i].name; i++) {
         const native_provider_t *np = &NATIVE_PROVIDERS[i];
         const char *key = getenv(np->env_key);
         bool has_key = key && key[0];
-        fprintf(stderr, "  %-12s %-28s %s%-14s%s %s\n",
+
+        /* Build capability string */
+        char caps[64] = "";
+        int clen = 0;
+        if (np->caps & CAP_TOOLS)    clen += snprintf(caps+clen, sizeof(caps)-clen, "T");
+        if (np->caps & CAP_MULTITURN)clen += snprintf(caps+clen, sizeof(caps)-clen, "M");
+        if (np->caps & CAP_STREAMING)clen += snprintf(caps+clen, sizeof(caps)-clen, "S");
+        if (np->caps & CAP_VISION)   clen += snprintf(caps+clen, sizeof(caps)-clen, "V");
+        if (np->caps & CAP_THINKING) clen += snprintf(caps+clen, sizeof(caps)-clen, "R");
+        if (np->caps & CAP_JSON)     clen += snprintf(caps+clen, sizeof(caps)-clen, "J");
+        if (np->caps & CAP_CACHE)    clen += snprintf(caps+clen, sizeof(caps)-clen, "C");
+        (void)clen;
+
+        fprintf(stderr, "  %-12s %-24s %s%-10s%s %-18s %s\n",
                 np->name, np->desc,
                 has_key ? "\033[32m" : "\033[2m",
-                has_key ? "key set" : "no key",
+                has_key ? "ready" : "no key",
                 "\033[0m",
+                caps,
                 np->example_model);
     }
-    fprintf(stderr, "\n");
+    fprintf(stderr, "\n  %sCapabilities: T=tools M=multi-turn S=streaming V=vision R=reasoning J=json C=cache%s\n",
+            "\033[2m", "\033[0m");
+    fprintf(stderr, "  %sSpecial: auto, smart, list, bench%s\n\n",
+            "\033[2m", "\033[0m");
 }
 
 /* Build argv and exec. Never returns on success. */
@@ -555,6 +603,177 @@ int main(int argc, char **argv) {
             return 0;
         }
 
+        /* "smart" — use router to pick best provider+model for the task */
+        if (strcmp(exec_backend, "smart") == 0) {
+            if (!oneshot_prompt) {
+                fprintf(stderr, "error: smart mode requires a prompt\n");
+                return 1;
+            }
+            task_complexity_t tc = router_classify_task(oneshot_prompt, 0, 0, 0);
+            int min_tier_needed = tc == TASK_EXPERT ? 4 : tc == TASK_COMPLEX ? 3 :
+                                  tc == TASK_MEDIUM ? 2 : 1;
+
+            /* Find the best available native provider that meets the tier+caps */
+            const native_provider_t *best = NULL;
+            for (int i = 0; NATIVE_PROVIDERS[i].name; i++) {
+                const native_provider_t *c = &NATIVE_PROVIDERS[i];
+                const char *key = getenv(c->env_key);
+                if (!key || !key[0]) continue;
+                if (c->tier < min_tier_needed) continue;
+                /* Prefer tool-capable for anything above simple */
+                if (tc >= TASK_MEDIUM && !(c->caps & CAP_TOOLS)) continue;
+                /* Pick highest tier, then prefer thinking capability */
+                if (!best || c->tier > best->tier ||
+                    (c->tier == best->tier && (c->caps & CAP_THINKING) && !(best->caps & CAP_THINKING)))
+                    best = c;
+            }
+
+            if (!best) {
+                /* Fall back to any available provider */
+                for (int i = 0; NATIVE_PROVIDERS[i].name; i++) {
+                    const char *key = getenv(NATIVE_PROVIDERS[i].env_key);
+                    if (key && key[0]) { best = &NATIVE_PROVIDERS[i]; break; }
+                }
+            }
+
+            if (!best) {
+                fprintf(stderr, "error: no provider with API key available\n");
+                free(oneshot_prompt);
+                return 1;
+            }
+
+            api_key = getenv(best->env_key);
+            g_provider_override = best->name;
+            if (!user_set_model) model = best->example_model;
+            fprintf(stderr, "  \033[2m[smart] task=%s tier=%d → %s (%s)\033[0m\n",
+                    task_complexity_name(tc), min_tier_needed,
+                    best->name, model);
+            goto native_path;
+        }
+
+        /* "bench" — benchmark all available providers */
+        if (strcmp(exec_backend, "bench") == 0) {
+            const char *bench_prompt = oneshot_prompt
+                ? oneshot_prompt
+                : "What is the factorial of 7? Reply with just the number.";
+            fprintf(stderr, "\n  \033[1mProvider Benchmark\033[0m\n");
+            fprintf(stderr, "  prompt: \"%s\"\n\n", bench_prompt);
+            fprintf(stderr, "  %-12s %-28s %7s  %5s  %s\n",
+                    "PROVIDER", "MODEL", "TIME", "OK", "RESPONSE");
+            fprintf(stderr, "  %-12s %-28s %7s  %5s  %s\n",
+                    "────────", "─────", "────", "──", "────────");
+
+            for (int i = 0; NATIVE_PROVIDERS[i].name; i++) {
+                const native_provider_t *np2 = &NATIVE_PROVIDERS[i];
+                const char *bkey = getenv(np2->env_key);
+                if (!bkey || !bkey[0]) {
+                    fprintf(stderr, "  %-12s %-28s %7s  %5s  %s\n",
+                            np2->name, np2->example_model, "-", "-", "no key");
+                    continue;
+                }
+
+                /* Build a minimal oneshot request and stream it */
+                session_state_t bsess;
+                session_state_init(&bsess, np2->example_model);
+                provider_t *bprov = provider_create(np2->name);
+                conversation_t bconv;
+                conv_init(&bconv);
+                conv_add_user_text(&bconv, bench_prompt);
+
+                char *breq = bprov->build_request(bprov, &bconv, &bsess, 256);
+                struct timeval bt0, bt1;
+                gettimeofday(&bt0, NULL);
+
+                /* Capture text into buffer */
+                char bench_text[512] = "";
+                int bench_text_len = 0;
+
+                /* Inline text callback */
+                struct { char *buf; int *len; int cap; } bctx = { bench_text, &bench_text_len, 500 };
+                stream_result_t bsr = {0};
+
+                if (breq) {
+                    bsr = bprov->stream(bprov, bkey, breq,
+                                        NULL, NULL, NULL, NULL);
+                    free(breq);
+                }
+
+                gettimeofday(&bt1, NULL);
+                double belapsed = (bt1.tv_sec - bt0.tv_sec) + (bt1.tv_usec - bt0.tv_usec) / 1e6;
+
+                /* Extract text from response */
+                if (bsr.ok) {
+                    for (int bi = 0; bi < bsr.parsed.count; bi++) {
+                        if (bsr.parsed.blocks[bi].text) {
+                            snprintf(bench_text, sizeof(bench_text), "%s",
+                                     bsr.parsed.blocks[bi].text);
+                            break;
+                        }
+                    }
+                }
+
+                /* Truncate response for display */
+                for (int j = 0; bench_text[j]; j++) {
+                    if (bench_text[j] == '\n') bench_text[j] = ' ';
+                }
+                if (strlen(bench_text) > 50) {
+                    bench_text[47] = '.';
+                    bench_text[48] = '.';
+                    bench_text[49] = '.';
+                    bench_text[50] = '\0';
+                }
+
+                fprintf(stderr, "  %-12s %-28s %6.1fs  %s%-5s%s  %s\n",
+                        np2->name, np2->example_model,
+                        belapsed,
+                        bsr.ok ? "\033[32m" : "\033[31m",
+                        bsr.ok ? "ok" : "FAIL",
+                        "\033[0m",
+                        bsr.ok ? bench_text : "request failed");
+
+                json_free_response(&bsr.parsed);
+                conv_free(&bconv);
+                provider_free(bprov);
+            }
+
+            /* Also benchmark external CLIs */
+            for (int i = 0; EXEC_REGISTRY[i].name; i++) {
+                if (!exec_bin_available(EXEC_REGISTRY[i].bin)) {
+                    fprintf(stderr, "  %-12s %-28s %7s  %5s  %s\n",
+                            EXEC_REGISTRY[i].name, EXEC_REGISTRY[i].bin,
+                            "-", "-", "not in PATH");
+                    continue;
+                }
+                struct timeval ct0, ct1;
+                gettimeofday(&ct0, NULL);
+                pid_t cpid = fork();
+                if (cpid == 0) {
+                    /* Redirect stdout to /dev/null for timing only */
+                    int devnull = open("/dev/null", O_WRONLY);
+                    if (devnull >= 0) { dup2(devnull, STDOUT_FILENO); close(devnull); }
+                    dup2(STDOUT_FILENO, STDERR_FILENO);
+                    exec_dispatch(&EXEC_REGISTRY[i], bench_prompt, NULL, NULL, 0);
+                    _exit(127);
+                }
+                int cstatus = 0;
+                waitpid(cpid, &cstatus, 0);
+                gettimeofday(&ct1, NULL);
+                double celapsed = (ct1.tv_sec - ct0.tv_sec) + (ct1.tv_usec - ct0.tv_usec) / 1e6;
+                bool cok = WIFEXITED(cstatus) && WEXITSTATUS(cstatus) == 0;
+                fprintf(stderr, "  %-12s %-28s %6.1fs  %s%-5s%s  %s\n",
+                        EXEC_REGISTRY[i].name, EXEC_REGISTRY[i].desc,
+                        celapsed,
+                        cok ? "\033[32m" : "\033[31m",
+                        cok ? "ok" : "FAIL",
+                        "\033[0m",
+                        cok ? "(cli)" : "exec failed");
+            }
+
+            fprintf(stderr, "\n");
+            free(oneshot_prompt);
+            return 0;
+        }
+
         /* Check if it's a native provider name */
         const native_provider_t *np = native_find(exec_backend);
         if (np) {
@@ -602,7 +821,7 @@ int main(int argc, char **argv) {
                 fprintf(stderr, "\n  native providers: ");
                 for (int i = 0; NATIVE_PROVIDERS[i].name; i++)
                     fprintf(stderr, "%s%s", i ? ", " : "", NATIVE_PROVIDERS[i].name);
-                fprintf(stderr, "\n  special: auto, list\n");
+                fprintf(stderr, "\n  special: auto, smart, list, bench\n");
                 free(oneshot_prompt);
                 return 1;
             }
