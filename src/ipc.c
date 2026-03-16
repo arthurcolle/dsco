@@ -5,7 +5,10 @@
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
+#include <sys/stat.h>
 #include <sys/time.h>
+#include <sys/types.h>
+#include <ctype.h>
 #include <errno.h>
 
 /* ═══════════════════════════════════════════════════════════════════════════
@@ -27,19 +30,92 @@ static double now_ts(void) {
 
 /* Generate a short unique agent ID: "a-<pid>-<random>" */
 static void gen_agent_id(char *buf, size_t len) {
-    unsigned int r = 0;
+    unsigned char r[8] = {0};
     FILE *f = fopen("/dev/urandom", "rb");
     if (f) {
-        if (fread(&r, sizeof(r), 1, f) != 1) {
-            /* Fallback: use time-based entropy */
-            r = (unsigned int)(now_ts() * 1000) ^ (unsigned int)getpid();
+        if (fread(r, 1, sizeof(r), f) != sizeof(r)) {
+            unsigned int fallback = (unsigned int)(now_ts() * 1000000) ^ (unsigned int)getpid();
+            for (size_t i = 0; i < sizeof(r); i++) {
+                r[i] = (unsigned char)((fallback >> ((i % sizeof(fallback)) * 8)) & 0xFF);
+            }
         }
         fclose(f);
     } else {
-        /* /dev/urandom unavailable — use time + pid as fallback */
-        r = (unsigned int)(now_ts() * 1000) ^ (unsigned int)getpid();
+        unsigned int fallback = (unsigned int)(now_ts() * 1000000) ^ (unsigned int)getpid();
+        for (size_t i = 0; i < sizeof(r); i++) {
+            r[i] = (unsigned char)((fallback >> ((i % sizeof(fallback)) * 8)) & 0xFF);
+        }
     }
-    snprintf(buf, len, "a-%d-%04x", getpid(), r & 0xFFFF);
+    char hex[sizeof(r) * 2 + 1];
+    for (size_t i = 0; i < sizeof(r); i++) {
+        snprintf(hex + (i * 2), sizeof(hex) - (i * 2), "%02x", r[i]);
+    }
+    snprintf(buf, len, "a-%d-%s", getpid(), hex);
+}
+
+static bool ipc_agent_id_is_valid(const char *id) {
+    if (!id || !id[0]) return false;
+    size_t n = strlen(id);
+    if (n >= IPC_MAX_AGENT_ID) return false;
+    for (const unsigned char *p = (const unsigned char *)id; *p; p++) {
+        if (isalnum(*p) || *p == '-' || *p == '_' || *p == '.' || *p == ':')
+            continue;
+        return false;
+    }
+    return true;
+}
+
+static bool ipc_mkdir_p(const char *path) {
+    if (!path || !path[0]) return false;
+
+    char tmp[4096];
+    size_t n = strlen(path);
+    if (n >= sizeof(tmp)) return false;
+    memcpy(tmp, path, n + 1);
+
+    for (char *p = tmp + 1; *p; p++) {
+        if (*p != '/') continue;
+        *p = '\0';
+        if (tmp[0] != '\0' && mkdir(tmp, 0700) != 0 && errno != EEXIST) return false;
+        *p = '/';
+    }
+    if (mkdir(tmp, 0700) != 0 && errno != EEXIST) return false;
+    return true;
+}
+
+static bool ipc_ensure_parent_dir(const char *path) {
+    if (!path || !path[0]) return false;
+
+    char tmp[4096];
+    size_t n = strlen(path);
+    if (n >= sizeof(tmp)) return false;
+    memcpy(tmp, path, n + 1);
+
+    char *slash = strrchr(tmp, '/');
+    if (!slash) return true;
+    *slash = '\0';
+    if (tmp[0] == '\0') return true;
+    return ipc_mkdir_p(tmp);
+}
+
+static void ipc_default_db_path(char *buf, size_t len) {
+    const char *home = getenv("HOME");
+    if (home && home[0]) {
+        snprintf(buf, len, "%s/.dsco/ipc/dsco_ipc_%d_%d.db",
+                 home, (int)geteuid(), (int)getppid());
+        return;
+    }
+    snprintf(buf, len, "/tmp/dsco_ipc_%d_%d.db", (int)geteuid(), (int)getppid());
+}
+
+static bool ipc_db_path_is_safe(const char *path) {
+    struct stat st;
+    if (lstat(path, &st) != 0) {
+        return errno == ENOENT;
+    }
+    if (S_ISLNK(st.st_mode) || !S_ISREG(st.st_mode)) return false;
+    if (st.st_uid != geteuid()) return false;
+    return true;
 }
 
 /* ═══════════════════════════════════════════════════════════════════════════
@@ -106,22 +182,33 @@ bool ipc_init(const char *db_path, const char *agent_id) {
         if (env && env[0]) {
             snprintf(g_ipc.db_path, sizeof(g_ipc.db_path), "%s", env);
         } else {
-            snprintf(g_ipc.db_path, sizeof(g_ipc.db_path),
-                     "/tmp/dsco_ipc_%d.db", getppid());
+            ipc_default_db_path(g_ipc.db_path, sizeof(g_ipc.db_path));
         }
+    }
+    if (!ipc_ensure_parent_dir(g_ipc.db_path)) {
+        fprintf(stderr, "ipc: failed to create parent directory for %s: %s\n",
+                g_ipc.db_path, strerror(errno));
+        return false;
+    }
+    if (!ipc_db_path_is_safe(g_ipc.db_path)) {
+        fprintf(stderr, "ipc: refusing unsafe db path %s\n", g_ipc.db_path);
+        return false;
     }
 
     /* Determine agent ID */
-    if (agent_id && agent_id[0]) {
+    if (agent_id && agent_id[0] && ipc_agent_id_is_valid(agent_id)) {
         snprintf(g_ipc.self_id, sizeof(g_ipc.self_id), "%s", agent_id);
     } else {
         gen_agent_id(g_ipc.self_id, sizeof(g_ipc.self_id));
     }
 
     /* Open SQLite in WAL mode for concurrent access */
-    int rc = sqlite3_open(g_ipc.db_path, &g_ipc.db);
+    int rc = sqlite3_open_v2(g_ipc.db_path, &g_ipc.db,
+                             SQLITE_OPEN_READWRITE | SQLITE_OPEN_CREATE, NULL);
     if (rc != SQLITE_OK) {
         fprintf(stderr, "ipc: sqlite open failed: %s\n", sqlite3_errmsg(g_ipc.db));
+        sqlite3_close(g_ipc.db);
+        g_ipc.db = NULL;
         return false;
     }
 
@@ -224,10 +311,20 @@ bool ipc_register(const char *parent_id, int depth, const char *role,
                   const char *toolkit) {
     if (!g_ipc.ready) return false;
 
+    const char *safe_parent = (parent_id && ipc_agent_id_is_valid(parent_id)) ? parent_id : "";
     const char *sql =
-        "INSERT OR REPLACE INTO agents (id, parent_id, pid, depth, status, role, "
-        "toolkit, started_at, last_heartbeat) "
-        "VALUES (?, ?, ?, ?, 'idle', ?, ?, ?, ?)";
+        "INSERT INTO agents (id, parent_id, pid, depth, status, role, toolkit, started_at, last_heartbeat) "
+        "VALUES (?, ?, ?, ?, 'idle', ?, ?, ?, ?) "
+        "ON CONFLICT(id) DO UPDATE SET "
+        "parent_id=excluded.parent_id, "
+        "pid=excluded.pid, "
+        "depth=excluded.depth, "
+        "status='idle', "
+        "role=excluded.role, "
+        "toolkit=excluded.toolkit, "
+        "started_at=excluded.started_at, "
+        "last_heartbeat=excluded.last_heartbeat "
+        "WHERE agents.pid = excluded.pid";
 
     sqlite3_stmt *stmt;
     if (sqlite3_prepare_v2(g_ipc.db, sql, -1, &stmt, NULL) != SQLITE_OK)
@@ -235,7 +332,7 @@ bool ipc_register(const char *parent_id, int depth, const char *role,
 
     double now = now_ts();
     sqlite3_bind_text(stmt, 1, g_ipc.self_id, -1, SQLITE_STATIC);
-    sqlite3_bind_text(stmt, 2, parent_id ? parent_id : "", -1, SQLITE_STATIC);
+    sqlite3_bind_text(stmt, 2, safe_parent, -1, SQLITE_STATIC);
     sqlite3_bind_int(stmt, 3, getpid());
     sqlite3_bind_int(stmt, 4, depth);
     sqlite3_bind_text(stmt, 5, role ? role : "", -1, SQLITE_STATIC);
@@ -243,7 +340,7 @@ bool ipc_register(const char *parent_id, int depth, const char *role,
     sqlite3_bind_double(stmt, 7, now);
     sqlite3_bind_double(stmt, 8, now);
 
-    bool ok = sqlite3_step(stmt) == SQLITE_DONE;
+    bool ok = sqlite3_step(stmt) == SQLITE_DONE && sqlite3_changes(g_ipc.db) > 0;
     sqlite3_finalize(stmt);
     return ok;
 }
