@@ -12636,11 +12636,176 @@ int tools_builtin_count(void) {
 
 #include "semantic.h"
 
-/* Lazily-built semantic index over all tool schemas */
+/* ── Jina v4 embeddings: static vectors + runtime query embedding ───── */
+#include "tool_embeddings.h"
+
+/* Static embeddings loaded from .bin file (1024d × 364 tools) */
+static float *g_emb_vectors = NULL;  /* flat array: [TOOL_EMB_COUNT * TOOL_EMB_DIM] */
+static int    g_emb_count = 0;
+static int    g_emb_dim = 0;
+
+static void ensure_embeddings_loaded(void) {
+    if (g_emb_vectors) return;
+
+    /* Find the .bin file relative to the dsco binary */
+    const char *paths[] = {
+        "include/tool_embeddings.bin",
+        "../include/tool_embeddings.bin",
+        NULL
+    };
+    /* Also try relative to dsco binary location */
+    char binrel[1024] = {0};
+    {
+        char self[512] = {0};
+#ifdef __APPLE__
+        uint32_t sz = sizeof(self);
+        _NSGetExecutablePath(self, &sz);
+#else
+        readlink("/proc/self/exe", self, sizeof(self)-1);
+#endif
+        if (self[0]) {
+            char *sl = strrchr(self, '/');
+            if (sl) {
+                *sl = '\0';
+                snprintf(binrel, sizeof(binrel), "%s/../include/tool_embeddings.bin", self);
+            }
+        }
+    }
+
+    FILE *fp = NULL;
+    for (int i = 0; paths[i]; i++) {
+        fp = fopen(paths[i], "rb");
+        if (fp) break;
+    }
+    if (!fp && binrel[0]) fp = fopen(binrel, "rb");
+    if (!fp) {
+        fprintf(stderr, "  \033[33mno tool_embeddings.bin found\033[0m\n");
+        return;
+    }
+
+    uint32_t header[2];
+    if (fread(header, sizeof(uint32_t), 2, fp) != 2) { fclose(fp); return; }
+    g_emb_count = (int)header[0];
+    g_emb_dim = (int)header[1];
+
+    size_t total_floats = (size_t)g_emb_count * g_emb_dim;
+    g_emb_vectors = safe_malloc(total_floats * sizeof(float));
+    size_t read_n = fread(g_emb_vectors, sizeof(float), total_floats, fp);
+    fclose(fp);
+
+    if ((int)read_n != (int)total_floats) {
+        free(g_emb_vectors); g_emb_vectors = NULL;
+        g_emb_count = 0;
+        fprintf(stderr, "  \033[31mtool_embeddings.bin truncated\033[0m\n");
+        return;
+    }
+
+    fprintf(stderr, "  \033[2memb: %d tools × %dd loaded\033[0m\n", g_emb_count, g_emb_dim);
+}
+
+/* Embed a query via Jina v4. Returns malloc'd float[g_emb_dim] or NULL. */
+static float *embed_query_jina(const char *text) {
+    const char *api_key = getenv("JINA_API_KEY");
+    if (!api_key || !api_key[0]) return NULL;
+
+    CURL *curl = curl_easy_init();
+    if (!curl) return NULL;
+
+    jbuf_t req;
+    jbuf_init(&req, 512);
+    jbuf_appendf(&req, "{\"model\":\"jina-embeddings-v4\",\"task\":\"retrieval.query\","
+                 "\"dimensions\":%d,\"embedding_type\":\"float\",\"input\":[", g_emb_dim);
+    jbuf_append_json_str(&req, text);
+    jbuf_append(&req, "]}");
+
+    jbuf_t resp;
+    jbuf_init(&resp, 8192);
+
+    struct curl_slist *hdrs = NULL;
+    char auth[256];
+    snprintf(auth, sizeof(auth), "Authorization: Bearer %s", api_key);
+    hdrs = curl_slist_append(hdrs, auth);
+    hdrs = curl_slist_append(hdrs, "Content-Type: application/json");
+    hdrs = curl_slist_append(hdrs, "Accept: application/json");
+    hdrs = curl_slist_append(hdrs, "User-Agent: dsco/0.9.0");
+
+    curl_easy_setopt(curl, CURLOPT_URL, "https://api.jina.ai/v1/embeddings");
+    curl_easy_setopt(curl, CURLOPT_HTTPHEADER, hdrs);
+    curl_easy_setopt(curl, CURLOPT_POSTFIELDS, req.data);
+    curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, jbuf_curl_write_cb);
+    curl_easy_setopt(curl, CURLOPT_WRITEDATA, &resp);
+    curl_easy_setopt(curl, CURLOPT_CONNECTTIMEOUT, 3L);
+    curl_easy_setopt(curl, CURLOPT_TIMEOUT, 8L);
+
+    CURLcode res = curl_easy_perform(curl);
+    long http_code = 0;
+    curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, &http_code);
+    curl_slist_free_all(hdrs);
+    curl_easy_cleanup(curl);
+    jbuf_free(&req);
+
+    if (res != CURLE_OK || http_code != 200) {
+        jbuf_free(&resp);
+        return NULL;
+    }
+
+    /* Parse: data[0].embedding = [f, f, f, ...] */
+    float *vec = safe_malloc(g_emb_dim * sizeof(float));
+    char *data_arr = json_get_raw(resp.data, "data");
+    if (!data_arr) { jbuf_free(&resp); free(vec); return NULL; }
+
+    char *emb_str = json_get_raw(data_arr, "embedding");
+    free(data_arr);
+    if (!emb_str) { jbuf_free(&resp); free(vec); return NULL; }
+
+    const char *p = emb_str;
+    while (*p && *p != '[') p++;
+    if (*p == '[') p++;
+    for (int i = 0; i < g_emb_dim && *p; i++) {
+        while (*p && (*p == ' ' || *p == ',' || *p == '\n')) p++;
+        if (*p == ']') break;
+        vec[i] = (float)strtod(p, (char **)&p);
+    }
+    free(emb_str);
+    jbuf_free(&resp);
+    return vec;
+}
+
+/* Cosine similarity — float vectors */
+static float cosine_sim_f(const float *a, const float *b, int dim) {
+    float dot = 0, na = 0, nb = 0;
+    for (int i = 0; i < dim; i++) {
+        dot += a[i] * b[i];
+        na += a[i] * a[i];
+        nb += b[i] * b[i];
+    }
+    float denom = sqrtf(na) * sqrtf(nb);
+    return denom > 1e-8f ? dot / denom : 0.0f;
+}
+
+/* TF-IDF fallback index */
 static tfidf_index_t g_tool_index;
 static bool g_tool_index_built = false;
 
-/* Core tools always included regardless of retrieval score */
+/* ── Tool group clusters ─────────────────────────────────────────────── */
+
+/* Each tool is assigned to exactly one group. Groups map to query categories.
+ * At query time: classify query → load matching groups → evict the rest. */
+
+#define TOOL_GROUP_COUNT  (QCAT_COUNT + 4)  /* query categories + extra groups */
+#define MAX_GROUP_TOOLS   80
+
+typedef struct {
+    const char *name;
+    int         tool_indices[MAX_GROUP_TOOLS];
+    int         count;
+} tool_group_t;
+
+static tool_group_t g_tool_groups[TOOL_GROUP_COUNT];
+static int g_tool_group_count = 0;
+static bool g_groups_built = false;
+
+/* Core tools always included regardless of context — these are the universal primitives */
 static const char *CORE_TOOLS[] = {
     "read_file", "write_file", "edit_file", "append_file", "list_directory",
     "find_files", "grep_files", "bash", "run_command", "python",
@@ -12657,6 +12822,101 @@ static bool is_core_tool(const char *name) {
     return false;
 }
 
+/* Assign a tool to a group based on its name prefix and description keywords */
+static query_category_t classify_tool(const char *name, const char *desc) {
+    /* Name-prefix rules (fast path) */
+    if (strncmp(name, "git_", 4) == 0 || strncmp(name, "github_", 7) == 0) return QCAT_GIT;
+    if (strncmp(name, "av_", 3) == 0 || strncmp(name, "market_", 7) == 0 ||
+        strncmp(name, "fred_", 5) == 0 || strncmp(name, "stripe", 6) == 0)
+        return QCAT_NETWORK; /* financial/API tools */
+    if (strncmp(name, "ipc_", 4) == 0 || strstr(name, "swarm") ||
+        strstr(name, "spawn") || strstr(name, "agent") ||
+        strstr(name, "topology") || strstr(name, "ooda") ||
+        strstr(name, "pheromone") || strstr(name, "talons") ||
+        strstr(name, "governance") || strstr(name, "killswitch"))
+        return QCAT_SWARM;
+    if (strstr(name, "hash") || strstr(name, "hmac") || strstr(name, "sha") ||
+        strstr(name, "hkdf") || strstr(name, "jwt") || strstr(name, "base64") ||
+        strstr(name, "uuid") || strstr(name, "random") || strstr(name, "secret") ||
+        strstr(name, "cert") || strstr(name, "token_audit"))
+        return QCAT_CRYPTO;
+    if (strstr(name, "http") || strstr(name, "curl") || strstr(name, "url") ||
+        strstr(name, "dns") || strstr(name, "ping") || strstr(name, "port") ||
+        strstr(name, "websocket") || strstr(name, "web_") || strstr(name, "download") ||
+        strstr(name, "upload") || strstr(name, "weather") || strstr(name, "whois") ||
+        strstr(name, "brave") || strstr(name, "tavily") || strstr(name, "serpapi") ||
+        strstr(name, "jina") || strstr(name, "firecrawl") || strstr(name, "browser"))
+        return QCAT_NETWORK;
+    if (strstr(name, "inspect") || strstr(name, "call_graph") || strstr(name, "dependency") ||
+        strstr(name, "code_") || strstr(name, "compile") || strstr(name, "self_inspect"))
+        return QCAT_AST;
+    if (strncmp(name, "docker", 6) == 0 || strncmp(name, "npm", 3) == 0 ||
+        strncmp(name, "node", 4) == 0 || strncmp(name, "pip", 3) == 0 ||
+        strncmp(name, "pkg", 3) == 0 || strstr(name, "sandbox") ||
+        strstr(name, "crontab") || strstr(name, "process") || strstr(name, "sysinfo"))
+        return QCAT_SHELL;
+    if (strstr(name, "csv") || strstr(name, "xml") || strstr(name, "json") ||
+        strstr(name, "jq") || strstr(name, "awk") || strstr(name, "sed") ||
+        strstr(name, "sort") || strstr(name, "regex") || strstr(name, "template") ||
+        strstr(name, "diff") || strstr(name, "wc") || strstr(name, "head") ||
+        strstr(name, "tail"))
+        return QCAT_PIPELINE;
+    if (strstr(name, "calc") || strstr(name, "eval") || strstr(name, "factorial") ||
+        strstr(name, "semver") || strstr(name, "cron_parse"))
+        return QCAT_MATH;
+    if (strstr(name, "file") || strstr(name, "dir") || strstr(name, "mkdir") ||
+        strstr(name, "chmod") || strstr(name, "symlink") || strstr(name, "xattr") ||
+        strstr(name, "tar") || strstr(name, "zip") || strstr(name, "disk") ||
+        strstr(name, "tree") || strstr(name, "page_file") || strstr(name, "view_"))
+        return QCAT_FILE_IO;
+    /* Fallback: use description keywords */
+    if (desc) {
+        if (strstr(desc, "network") || strstr(desc, "HTTP") || strstr(desc, "API"))
+            return QCAT_NETWORK;
+        if (strstr(desc, "encrypt") || strstr(desc, "hash") || strstr(desc, "crypto"))
+            return QCAT_CRYPTO;
+    }
+    return QCAT_GENERAL;
+}
+
+/* Build groups lazily */
+static void ensure_tool_groups(void) {
+    if (g_groups_built) return;
+
+    int total;
+    const tool_def_t *tools = tools_get_all(&total);
+    int capped = total < SEM_MAX_DOCS ? total : SEM_MAX_DOCS;
+
+    /* Initialize groups — one per query category */
+    for (int c = 0; c < QCAT_COUNT; c++) {
+        g_tool_groups[c].name = sem_category_name((query_category_t)c);
+        g_tool_groups[c].count = 0;
+    }
+    g_tool_group_count = QCAT_COUNT;
+
+    /* Assign each tool to a group */
+    int group_counts[QCAT_COUNT];
+    memset(group_counts, 0, sizeof(group_counts));
+
+    for (int i = 0; i < capped; i++) {
+        if (is_core_tool(tools[i].name)) continue; /* core tools handled separately */
+        query_category_t cat = classify_tool(tools[i].name, tools[i].description);
+        tool_group_t *g = &g_tool_groups[cat];
+        if (g->count < MAX_GROUP_TOOLS) {
+            g->tool_indices[g->count++] = i;
+            group_counts[cat]++;
+        }
+    }
+
+    g_groups_built = true;
+    fprintf(stderr, "  \033[2mtool groups:");
+    for (int c = 0; c < QCAT_COUNT; c++) {
+        if (g_tool_groups[c].count > 0)
+            fprintf(stderr, " %s=%d", g_tool_groups[c].name, g_tool_groups[c].count);
+    }
+    fprintf(stderr, "\033[0m\n");
+}
+
 /* Build the semantic index lazily on first retrieval call */
 static void ensure_tool_index(void) {
     if (g_tool_index_built) return;
@@ -12665,7 +12925,6 @@ static void ensure_tool_index(void) {
     const tool_def_t *tools = tools_get_all(&total);
     if (total == 0) return;
 
-    /* Cap to SEM_MAX_DOCS */
     int n = total < SEM_MAX_DOCS ? total : SEM_MAX_DOCS;
     const char **names = safe_malloc(n * sizeof(char *));
     const char **descs = safe_malloc(n * sizeof(char *));
@@ -12679,7 +12938,7 @@ static void ensure_tool_index(void) {
     free(descs);
 
     g_tool_index_built = true;
-    fprintf(stderr, "  \033[2mtool index: %d tools indexed, %d vocab terms\033[0m\n",
+    fprintf(stderr, "  \033[2mtool index: %d tools, %d vocab\033[0m\n",
             n, g_tool_index.vocab_count);
 }
 
@@ -12688,12 +12947,14 @@ int tools_retrieve(const char *context, int *out_indices, int max_tools) {
     const tool_def_t *tools = tools_get_all(&total);
     if (total == 0 || max_tools <= 0) return 0;
 
+    int capped = total < SEM_MAX_DOCS ? total : SEM_MAX_DOCS;
+
     /* Phase 1: always include core tools */
     int n = 0;
     bool included[SEM_MAX_DOCS];
     memset(included, 0, sizeof(included));
 
-    for (int i = 0; i < total && i < SEM_MAX_DOCS; i++) {
+    for (int i = 0; i < capped; i++) {
         if (is_core_tool(tools[i].name)) {
             out_indices[n++] = i;
             included[i] = true;
@@ -12701,27 +12962,65 @@ int tools_retrieve(const char *context, int *out_indices, int max_tools) {
         }
     }
 
-    /* If no context, return just core tools */
     if (!context || !context[0]) return n;
 
-    /* Phase 2: semantic retrieval via BM25 + cosine similarity */
-    ensure_tool_index();
+    /* Phase 2: Jina v4 embedding retrieval (primary path) */
+    ensure_embeddings_loaded();
 
-    int capped = total < SEM_MAX_DOCS ? total : SEM_MAX_DOCS;
-    tool_score_t *ranked = safe_malloc(capped * sizeof(tool_score_t));
-    int ranked_count = sem_tools_rank(&g_tool_index, context, ranked,
-                                       capped, capped);
+    bool used_embeddings = false;
+    if (g_emb_vectors && g_emb_count > 0) {
+        float *qvec = embed_query_jina(context);
+        if (qvec) {
+            /* Score all tools by cosine similarity to query */
+            typedef struct { int idx; float sim; } escore_t;
+            escore_t *scores = safe_malloc(g_emb_count * sizeof(escore_t));
+            for (int i = 0; i < g_emb_count && i < capped; i++) {
+                scores[i].idx = i;
+                scores[i].sim = cosine_sim_f(qvec, &g_emb_vectors[i * g_emb_dim], g_emb_dim);
+            }
+            free(qvec);
 
-    /* Phase 3: fill remaining slots with highest-scoring non-core tools */
-    for (int i = 0; i < ranked_count && n < max_tools; i++) {
-        int idx = ranked[i].tool_index;
-        if (idx >= 0 && idx < capped && !included[idx] && ranked[i].score > 0.01) {
-            out_indices[n++] = idx;
-            included[idx] = true;
+            /* Sort descending by similarity */
+            for (int i = 0; i < g_emb_count - 1; i++) {
+                for (int j = i + 1; j < g_emb_count; j++) {
+                    if (scores[j].sim > scores[i].sim) {
+                        escore_t tmp = scores[i];
+                        scores[i] = scores[j];
+                        scores[j] = tmp;
+                    }
+                }
+                if (i >= max_tools) break; /* only need top max_tools */
+            }
+
+            /* Add top-scoring tools that aren't already included */
+            float threshold = 0.15f; /* min cosine similarity to include */
+            for (int i = 0; i < g_emb_count && n < max_tools; i++) {
+                int idx = scores[i].idx;
+                if (idx >= 0 && idx < capped && !included[idx] && scores[i].sim > threshold) {
+                    out_indices[n++] = idx;
+                    included[idx] = true;
+                }
+            }
+            free(scores);
+            used_embeddings = true;
         }
     }
 
-    free(ranked);
+    /* Phase 3: TF-IDF/BM25 fallback (if embeddings unavailable or sparse results) */
+    if (!used_embeddings || n < max_tools / 2) {
+        ensure_tool_index();
+        tool_score_t *ranked = safe_malloc(capped * sizeof(tool_score_t));
+        int ranked_count = sem_tools_rank(&g_tool_index, context, ranked, capped, capped);
+        for (int i = 0; i < ranked_count && n < max_tools; i++) {
+            int idx = ranked[i].tool_index;
+            if (idx >= 0 && idx < capped && !included[idx] && ranked[i].score > 0.05) {
+                out_indices[n++] = idx;
+                included[idx] = true;
+            }
+        }
+        free(ranked);
+    }
+
     return n;
 }
 
