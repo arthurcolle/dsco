@@ -1,8 +1,14 @@
 #include "pheromone.h"
+#include "event_loop.h"
 #include <math.h>
 #include <stdio.h>
 #include <string.h>
 #include <sys/time.h>
+
+/* §6: Event loop integration — register a periodic timer for pheromone decay */
+static ev_loop_t  *g_phero_ev_loop = NULL;
+static pheromone_field_t *g_phero_timer_field = NULL;
+static int         g_phero_timer_id = -1;
 
 /* ═══════════════════════════════════════════════════════════════════════════
  * Pheromone Coordination System — Implementation
@@ -322,4 +328,35 @@ int pheromone_status_json(const pheromone_field_t *f, char *buf, size_t len) {
     }
     n += snprintf(buf + n, len - n, "}}");
     return n;
+}
+
+/* ── §6: Event Loop Timer Integration ──────────────────────────────── */
+
+static void pheromone_timer_cb(int timer_id, void *ctx) {
+    (void)timer_id; (void)ctx;
+    if (g_phero_timer_field && g_phero_timer_field->initialized) {
+        pheromone_tick(g_phero_timer_field);
+    }
+}
+
+void pheromone_attach_event_loop(pheromone_field_t *f, ev_loop_t *loop,
+                                  int interval_ms) {
+    if (!f || !loop) return;
+    /* Cancel existing timer if any */
+    if (g_phero_timer_id >= 0 && g_phero_ev_loop) {
+        ev_timer_cancel(g_phero_ev_loop, g_phero_timer_id);
+    }
+    g_phero_ev_loop = loop;
+    g_phero_timer_field = f;
+    g_phero_timer_id = ev_timer_repeat(loop, interval_ms > 0 ? interval_ms : 5000,
+                                        pheromone_timer_cb, NULL);
+}
+
+void pheromone_detach_event_loop(void) {
+    if (g_phero_timer_id >= 0 && g_phero_ev_loop) {
+        ev_timer_cancel(g_phero_ev_loop, g_phero_timer_id);
+        g_phero_timer_id = -1;
+    }
+    g_phero_ev_loop = NULL;
+    g_phero_timer_field = NULL;
 }
