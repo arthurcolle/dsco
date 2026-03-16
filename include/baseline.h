@@ -64,4 +64,9 @@ void trace_query_recent(int limit);
 /* Print timing waterfall for a specific trace */
 void trace_print_waterfall(const char *trace_id);
 
+/* §8: VFS bridge — mirror events to unified persistence layer */
+struct vfs_db;
+typedef struct vfs_db vfs_db_t;
+void baseline_set_vfs(vfs_db_t *vfs);
+
 #endif

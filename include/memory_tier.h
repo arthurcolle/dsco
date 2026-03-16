@@ -168,4 +168,18 @@ double memory_tier_halflife(memory_tier_t t);
 double memory_calc_strength(memory_tier_t tier, double created_at,
                             double now);
 
+/* ── §8: VFS Persistence ──────────────────────────────────────────── */
+
+struct vfs_db;
+typedef struct vfs_db vfs_db_t;
+
+/* Connect memory system to VFS for semantic memory persistence */
+void memory_store_set_vfs(vfs_db_t *vfs);
+
+/* Persist all semantic-tier memories to VFS */
+void memory_persist_semantic(memory_store_t *m);
+
+/* Restore semantic memories from VFS. Returns count restored. */
+int  memory_restore_semantic(memory_store_t *m);
+
 #endif

@@ -1,7 +1,11 @@
 #include "baseline.h"
 #include "json_util.h"
+#include "vfs.h"
 
 #include <sqlite3.h>
+
+/* §8: VFS bridge — mirror baseline events to the unified VFS event log */
+static vfs_db_t *g_baseline_vfs = NULL;
 
 #include <arpa/inet.h>
 #include <ctype.h>
@@ -288,7 +292,17 @@ bool baseline_log(const char *category, const char *title,
 
     bool ok = (sqlite3_step(st) == SQLITE_DONE);
     sqlite3_finalize(st);
+
+    /* §8: Mirror to VFS event log for unified persistence */
+    if (g_baseline_vfs) {
+        vfs_log_event(g_baseline_vfs, category, title, detail);
+    }
+
     return ok;
+}
+
+void baseline_set_vfs(vfs_db_t *vfs) {
+    g_baseline_vfs = vfs;
 }
 
 /* ── Cost estimation for common models ───────────────────────────────── */
