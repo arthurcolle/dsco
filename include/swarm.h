@@ -76,6 +76,7 @@ typedef struct {
 
     /* Executor */
     executor_type_t executor;          /* which backend spawned this child */
+    char           provider[32];       /* native provider name (e.g. "openai", "groq") */
 
     /* Group membership */
     int            group_id;       /* -1 if ungrouped */
@@ -120,6 +121,12 @@ void swarm_destroy(swarm_t *s);
 /* ── Spawn sub-dsco ───────────────────────────────────────────────────── */
 int  swarm_spawn(swarm_t *s, const char *task, const char *model);
 int  swarm_spawn_in_group(swarm_t *s, int group_id, const char *task, const char *model);
+
+/* Spawn a sub-dsco forced to a specific native provider (e.g. "openai", "groq").
+ * The child process gets --exec <provider> -m <model> so it routes through
+ * that provider's API directly, completely decoupled from the parent's provider. */
+int  swarm_spawn_provider(swarm_t *s, int group_id, const char *task,
+                           const char *model, const char *provider);
 
 /* ── External executor spawn ─────────────────────────────────────────── */
 int  swarm_spawn_executor(swarm_t *s, int group_id, const char *task,
