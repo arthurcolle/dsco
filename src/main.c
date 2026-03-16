@@ -32,7 +32,7 @@
 static md_renderer_t s_oneshot_md;
 
 /* ── Post-LLM Virtual OS subsystems ────────────────────────────────── */
-static vm_t         g_vm;          /* §3: bytecode dispatch VM */
+vm_t                g_vm;          /* §3: bytecode dispatch VM (extern'd by tools.c) */
 static scheduler_t  g_scheduler;   /* §1/§7: cooperative task scheduler */
 static ev_loop_t   *g_ev_loop;     /* §6: event loop */
 static vfs_db_t    *g_vfs;         /* §8: embedded persistence */
