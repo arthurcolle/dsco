@@ -1,8 +1,12 @@
 #include "memory_tier.h"
+#include "vfs.h"
 #include <math.h>
 #include <stdio.h>
 #include <string.h>
 #include <sys/time.h>
+
+/* §8: VFS persistence handle — set by memory_store_set_vfs() */
+static vfs_db_t *g_mem_vfs = NULL;
 
 /* ═══════════════════════════════════════════════════════════════════════════
  * Three-Tier Agent Memory System — Implementation
@@ -388,4 +392,47 @@ int memory_tier_to_json(const memory_store_t *m, memory_tier_t tier,
     }
     n += snprintf(buf + n, len - n, "]}");
     return n;
+}
+
+/* ── §8: VFS Persistence for Semantic Memories ─────────────────────── */
+
+void memory_store_set_vfs(vfs_db_t *vfs) {
+    g_mem_vfs = vfs;
+}
+
+void memory_persist_semantic(memory_store_t *m) {
+    if (!m || !m->initialized || !g_mem_vfs) return;
+    for (int i = 0; i < MEMTIER_MAX_ENTRIES; i++) {
+        memory_entry_t *e = &m->entries[i];
+        if (!e->active || e->tier != MEM_SEMANTIC) continue;
+        char val[2048];
+        snprintf(val, sizeof(val),
+            "{\"value\":\"%.*s\",\"importance\":%.2f,"
+            "\"access_count\":%d,\"pinned\":%s}",
+            (int)(strlen(e->value) > 1500 ? 1500 : strlen(e->value)),
+            e->value, e->importance, e->access_count,
+            e->pinned ? "true" : "false");
+        vfs_kv_put_str(g_mem_vfs, "semantic_memory", e->key, val);
+    }
+}
+
+int memory_restore_semantic(memory_store_t *m) {
+    if (!m || !m->initialized || !g_mem_vfs) return 0;
+    int count = 0;
+    char **keys = vfs_kv_keys(g_mem_vfs, "semantic_memory", &count);
+    if (!keys || count == 0) return 0;
+
+    int restored = 0;
+    for (int i = 0; i < count; i++) {
+        if (find_by_key(m, keys[i])) { free(keys[i]); continue; }
+        char *val = vfs_kv_get_str(g_mem_vfs, "semantic_memory", keys[i]);
+        if (val) {
+            memory_store(m, MEM_SEMANTIC, keys[i], val, 0.8);
+            restored++;
+            free(val);
+        }
+        free(keys[i]);
+    }
+    free(keys);
+    return restored;
 }

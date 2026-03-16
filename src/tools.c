@@ -15,6 +15,7 @@
 #include "trace.h"
 #include "provider.h"
 #include "topology.h"
+#include "task_profile.h"
 #include "workspace.h"
 #include "governance.h"
 #include "memory_tier.h"
@@ -4854,6 +4855,149 @@ static bool tool_agent_wait(const char *input, char *result, size_t rlen) {
     }
 }
 
+/* agent_race — spawn N agents with the same task on different providers/models,
+ * return the FIRST one to complete successfully, kill the rest.
+ * This is the fundamental speed primitive: race models and take the fastest. */
+static bool tool_agent_race(const char *input, char *result, size_t rlen) {
+    ensure_swarm();
+
+    char *task = json_get_str(input, "task");
+    if (!task) {
+        snprintf(result, rlen, "{\"error\":\"task is required\"}");
+        return false;
+    }
+
+    int timeout = json_get_int(input, "timeout", 60);
+    timeout = clamp_timeout_seconds(timeout, 60, 5, 300);
+
+    /* Parse contestants array: [{provider, model}] or ["model1", "model2"] */
+    char *contestants_raw = json_get_raw(input, "contestants");
+    if (!contestants_raw) {
+        snprintf(result, rlen, "{\"error\":\"contestants array required\"}");
+        free(task);
+        return false;
+    }
+
+    /* Spawn all contestants */
+    int ids[SWARM_MAX_CHILDREN];
+    char *models[SWARM_MAX_CHILDREN];
+    char *providers[SWARM_MAX_CHILDREN];
+    int n = 0;
+
+    /* Parse each contestant — either a string (model via openrouter) or {provider, model} */
+    const char *p = contestants_raw;
+    while (*p && *p != '[') p++;
+    if (*p == '[') p++;
+
+    while (*p && n < SWARM_MAX_CHILDREN) {
+        while (*p && (*p == ' ' || *p == '\n' || *p == ',')) p++;
+        if (*p == ']' || !*p) break;
+
+        if (*p == '{') {
+            /* Object: {provider, model} */
+            int depth = 0;
+            const char *start = p;
+            do { if (*p == '{') depth++; else if (*p == '}') depth--; p++; } while (*p && depth > 0);
+            size_t olen = (size_t)(p - start);
+            char *obj = safe_malloc(olen + 1);
+            memcpy(obj, start, olen);
+            obj[olen] = '\0';
+
+            providers[n] = json_get_str(obj, "provider");
+            models[n] = json_get_str(obj, "model");
+            if (!providers[n]) providers[n] = safe_strdup("openrouter");
+            free(obj);
+        } else if (*p == '"') {
+            /* String: just a model name, use openrouter */
+            p++;
+            const char *start = p;
+            while (*p && *p != '"') p++;
+            size_t slen = (size_t)(p - start);
+            models[n] = safe_malloc(slen + 1);
+            memcpy(models[n], start, slen);
+            models[n][slen] = '\0';
+            providers[n] = safe_strdup("openrouter");
+            if (*p == '"') p++;
+        } else {
+            p++;
+            continue;
+        }
+
+        /* Spawn this contestant */
+        int cid = swarm_spawn_provider(&g_swarm, -1, task, models[n], providers[n]);
+        if (cid >= 0) {
+            ids[n] = cid;
+            n++;
+            fprintf(stderr, "  \033[2m🏁 racer #%d: %s/%s\033[0m\n",
+                    n, providers[n-1], models[n-1] ? models[n-1] : "default");
+        }
+    }
+    free(contestants_raw);
+
+    if (n == 0) {
+        snprintf(result, rlen, "{\"error\":\"no contestants spawned\"}");
+        free(task);
+        return false;
+    }
+
+    fprintf(stderr, "  \033[1m🏁 Racing %d models...\033[0m\n", n);
+
+    /* Wait for first completion */
+    int winner_id = swarm_wait_any(&g_swarm, timeout * 1000);
+
+    if (winner_id < 0) {
+        /* Timeout — kill all */
+        for (int i = 0; i < n; i++) swarm_kill(&g_swarm, ids[i]);
+        snprintf(result, rlen, "{\"error\":\"race timed out after %ds, all %d killed\"}", timeout, n);
+        free(task);
+        for (int i = 0; i < n; i++) { free(models[i]); free(providers[i]); }
+        return false;
+    }
+
+    /* We have a winner — kill all losers */
+    swarm_child_t *winner = swarm_get(&g_swarm, winner_id);
+    int killed = 0;
+    for (int i = 0; i < n; i++) {
+        if (ids[i] != winner_id) {
+            swarm_kill(&g_swarm, ids[i]);
+            killed++;
+        }
+    }
+
+    /* Find which contestant index won */
+    int winner_idx = -1;
+    for (int i = 0; i < n; i++) if (ids[i] == winner_id) { winner_idx = i; break; }
+
+    double elapsed = winner->end_time - winner->start_time;
+
+    fprintf(stderr, "  \033[1;32m🏆 Winner: %s/%s in %.1fs (killed %d losers)\033[0m\n",
+            providers[winner_idx], models[winner_idx] ? models[winner_idx] : "default", elapsed, killed);
+
+    /* Build result with winner output */
+    jbuf_t b;
+    jbuf_init(&b, 4096);
+    jbuf_append(&b, "{\"winner\":{\"agent_id\":");
+    jbuf_append_int(&b, winner_id);
+    jbuf_append(&b, ",\"provider\":");
+    jbuf_append_json_str(&b, providers[winner_idx]);
+    jbuf_append(&b, ",\"model\":");
+    jbuf_append_json_str(&b, models[winner_idx] ? models[winner_idx] : "");
+    jbuf_appendf(&b, ",\"elapsed_sec\":%.3f", elapsed);
+    jbuf_appendf(&b, ",\"status\":\"%s\"", swarm_status_str(winner->status));
+    jbuf_append(&b, ",\"output\":");
+    jbuf_append_json_str(&b, winner->output ? winner->output : "");
+    jbuf_appendf(&b, "},\"total_contestants\":%d,\"killed\":%d}", n, killed);
+
+    int written = (int)b.len < (int)rlen - 1 ? (int)b.len : (int)rlen - 1;
+    memcpy(result, b.data, written);
+    result[written] = '\0';
+    jbuf_free(&b);
+
+    free(task);
+    for (int i = 0; i < n; i++) { free(models[i]); free(providers[i]); }
+    return winner->status == SWARM_DONE;
+}
+
 static bool tool_agent_kill(const char *input, char *result, size_t rlen) {
     ensure_swarm();
     int id = json_get_int(input, "id", -1);
@@ -5505,6 +5649,54 @@ static bool tool_topology_run(const char *input, char *result, size_t rlen) {
     free(topology);
     jbuf_free(&b);
     return ok;
+}
+
+/* task_profile — Analyze a task string and recommend the best topology.
+ * Exposes the Phase 1 dynamic topology selection engine as a tool. */
+static bool tool_task_profile(const char *input, char *result, size_t rlen) {
+    char *task = json_get_str(input, "task");
+    if (!task || !task[0]) {
+        snprintf(result, rlen, "{\"error\":\"task string is required\"}");
+        free(task);
+        return false;
+    }
+
+    bool explain = json_get_bool(input, "explain", false);
+
+    task_profile_t *tp = task_profile(task, NULL);
+    if (!tp) {
+        snprintf(result, rlen, "{\"error\":\"profiling failed\"}");
+        free(task);
+        return false;
+    }
+
+    if (explain) {
+        char explain_buf[2048];
+        task_profile_explain(tp, explain_buf, sizeof(explain_buf));
+
+        /* Wrap explanation + JSON into a combined result */
+        jbuf_t b;
+        jbuf_init(&b, 4096);
+        jbuf_append(&b, "{\"explanation\":");
+        jbuf_append_json_str(&b, explain_buf);
+        jbuf_append(&b, ",\"profile\":");
+
+        char json_buf[2048];
+        task_profile_json(tp, json_buf, sizeof(json_buf));
+        jbuf_append(&b, json_buf);
+
+        jbuf_append(&b, "}");
+        int written = (int)b.len < (int)rlen - 1 ? (int)b.len : (int)rlen - 1;
+        memcpy(result, b.data, written);
+        result[written] = '\0';
+        jbuf_free(&b);
+    } else {
+        task_profile_json(tp, result, rlen);
+    }
+
+    task_profile_free(tp);
+    free(task);
+    return true;
 }
 
 static bool tool_create_swarm(const char *input, char *result, size_t rlen) {
@@ -11537,6 +11729,12 @@ static const tool_def_t s_tools[] = {
         .execute = tool_agent_wait
     },
     {
+        .name = "agent_race",
+        .description = "Race multiple models/providers on the same task — first to finish wins, losers are killed. Uses completion queue for O(1) winner detection. Pass contestants as [{provider, model}] objects or [\"model\"] strings (default provider: openrouter). Returns winner's output, elapsed time, and provider info.",
+        .input_schema_json = "{\"type\":\"object\",\"properties\":{\"task\":{\"type\":\"string\",\"description\":\"The task all contestants will attempt\"},\"contestants\":{\"type\":\"array\",\"description\":\"Array of {provider,model} objects or model ID strings\",\"items\":{\"oneOf\":[{\"type\":\"string\"},{\"type\":\"object\",\"properties\":{\"provider\":{\"type\":\"string\"},\"model\":{\"type\":\"string\"}}}]}},\"timeout\":{\"type\":\"integer\",\"description\":\"Max seconds (default 60)\"}},\"required\":[\"task\",\"contestants\"]}",
+        .execute = tool_agent_race
+    },
+    {
         .name = "agent_kill",
         .description = "Kill a running sub-agent by ID.",
         .input_schema_json = "{\"type\":\"object\",\"properties\":{\"id\":{\"type\":\"integer\",\"description\":\"Agent ID to kill\"}},\"required\":[\"id\"]}",
@@ -11553,6 +11751,12 @@ static const tool_def_t s_tools[] = {
         .description = "Execute a task through the topology runtime using a named topology or dynamic auto-selection. Use dry_run to preview the chosen execution graph without spending API calls.",
         .input_schema_json = "{\"type\":\"object\",\"properties\":{\"task\":{\"type\":\"string\",\"description\":\"Task to execute through the topology runtime\"},\"topology\":{\"type\":\"string\",\"description\":\"Optional explicit topology name\"},\"topology_id\":{\"type\":\"integer\",\"description\":\"Optional explicit topology ID\"},\"auto\":{\"type\":\"boolean\",\"description\":\"Auto-select a topology when true (default if topology omitted)\"},\"dry_run\":{\"type\":\"boolean\",\"description\":\"Preview the plan without executing it\"}},\"required\":[\"task\"]}",
         .execute = tool_topology_run
+    },
+    {
+        .name = "task_profile",
+        .description = "Analyze a task string and recommend the best topology for it. Returns parallelism, convergence, complexity, and latency scores, detected patterns, and ranked topology suggestions with fit scores. Use explain:true for a human-readable explanation.",
+        .input_schema_json = "{\"type\":\"object\",\"properties\":{\"task\":{\"type\":\"string\",\"description\":\"The task to profile for topology selection\"},\"explain\":{\"type\":\"boolean\",\"description\":\"Include human-readable explanation (default false)\"}},\"required\":[\"task\"]}",
+        .execute = tool_task_profile
     },
     {
         .name = "create_swarm",
@@ -12797,7 +13001,36 @@ static bool tools_execute_internal(const char *name, const char *input_json,
                 (int)(input_json ? (strlen(input_json) < 512 ? strlen(input_json) : 512) : 0),
                 input_json ? input_json : "");
 
-    /* O(1) hash map lookup */
+    /* §3: Try VM computed-goto dispatch first (FNV-1a hash, O(1)).
+       This is the hot path — bypasses the chained hash map entirely
+       for builtin tools via the pre-built dispatch table. */
+    extern vm_t g_vm;
+    if (g_vm.dispatch_len > 0) {
+        uint32_t h = 2166136261u;
+        for (const char *p = name; *p; p++) { h ^= (uint8_t)*p; h *= 16777619u; }
+        uint32_t bucket = h & 511;
+        for (int probe = 0; probe < 512; probe++) {
+            int di = g_vm.hash_buckets[bucket];
+            if (di < 0) break;
+            if (g_vm.dispatch[di].hash == h &&
+                strcmp(g_vm.dispatch[di].name, name) == 0) {
+                struct timeval t0, t1;
+                gettimeofday(&t0, NULL);
+                bool ok = g_vm.dispatch[di].func(input_json, result, result_len);
+                gettimeofday(&t1, NULL);
+                long elapsed_us = (t1.tv_sec - t0.tv_sec) * 1000000L + (t1.tv_usec - t0.tv_usec);
+                sanitize_tool_result_inplace(result);
+                g_vm.dispatches++;
+                g_vm.cache_hits++;
+                TRACE_INFO("tool_result name=%s ok=%d elapsed_us=%ld (vm_dispatch)", name, ok, elapsed_us);
+                ctx_maybe_offload_tool_result(name, input_json, ok, result, result_len);
+                return ok;
+            }
+            bucket = (bucket + 1) & 511;
+        }
+    }
+
+    /* Fallback: O(1) chained hash map lookup (for plugins, MCP, late-registered) */
     int idx = tool_map_lookup(&g_tool_map, name);
 
     if (idx >= 0 && idx < s_tool_count) {
@@ -13021,6 +13254,7 @@ static const tool_timeout_cfg_t s_timeout_overrides[] = {
     { "compile",         60 },
     { "spawn_agent",    300 },
     { "agent_wait",    3660 },
+    { "agent_race",     300 },
     { "create_swarm",   300 },
     { "swarm_collect", 3660 },
     { "spawn_executor",         300 },
