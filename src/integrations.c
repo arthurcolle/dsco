@@ -1694,7 +1694,7 @@ bool tool_polymarket_markets(const char *input, char *result, size_t rlen) {
 
     jbuf_t url;
     jbuf_init(&url, 512);
-    jbuf_appendf(&url, "https://gamma-api.polymarket.com/markets?limit=%d&offset=%d",
+    jbuf_appendf(&url, "https://gamma-api.polymarket.com/markets?limit=%d&offset=%d&order=volume24hr&ascending=false",
                  limit, offset);
     if (active && active[0])
         jbuf_appendf(&url, "&active=%s", active);
