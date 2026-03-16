@@ -18,11 +18,63 @@
 #ifdef __APPLE__
 #include <mach-o/dyld.h>
 #include <libgen.h>
+#include <sys/event.h>  /* kqueue */
 #endif
 
 /* ── Forward declarations ─────────────────────────────────────────────── */
 
 static void parse_child_cost_report(swarm_child_t *c);
+
+/* ── Bitset helpers ───────────────────────────────────────────────────── */
+
+static inline void bitset_set(swarm_bitset_t *bs, int i) {
+    if (i < 0 || i >= 64) return;
+    if (!(bs->bits & (1ULL << i))) { bs->bits |= (1ULL << i); bs->count++; }
+}
+
+static inline void bitset_clear(swarm_bitset_t *bs, int i) {
+    if (i < 0 || i >= 64) return;
+    if (bs->bits & (1ULL << i)) { bs->bits &= ~(1ULL << i); bs->count--; }
+}
+
+static inline bool bitset_test(const swarm_bitset_t *bs, int i) {
+    return i >= 0 && i < 64 && (bs->bits & (1ULL << i));
+}
+
+/* ── Completion queue (ring buffer) ───────────────────────────────────── */
+
+static void cq_push(swarm_completion_q_t *q, int id) {
+    if (q->count >= SWARM_MAX_CHILDREN) return; /* full — should never happen */
+    q->ids[q->tail] = id;
+    q->tail = (q->tail + 1) % SWARM_MAX_CHILDREN;
+    q->count++;
+}
+
+static int cq_pop(swarm_completion_q_t *q) {
+    if (q->count <= 0) return -1;
+    int id = q->ids[q->head];
+    q->head = (q->head + 1) % SWARM_MAX_CHILDREN;
+    q->count--;
+    return id;
+}
+
+/* ── kqueue helpers ───────────────────────────────────────────────────── */
+
+#ifdef __APPLE__
+static void kq_register_fd(int kq, int fd, int child_id) {
+    if (kq < 0 || fd < 0) return;
+    struct kevent ev;
+    EV_SET(&ev, fd, EVFILT_READ, EV_ADD | EV_ENABLE, 0, 0, (void *)(intptr_t)child_id);
+    kevent(kq, &ev, 1, NULL, 0, NULL);
+}
+
+static void kq_unregister_fd(int kq, int fd) {
+    if (kq < 0 || fd < 0) return;
+    struct kevent ev;
+    EV_SET(&ev, fd, EVFILT_READ, EV_DELETE, 0, 0, NULL);
+    kevent(kq, &ev, 1, NULL, 0, NULL);
+}
+#endif
 
 /* ── Time helper ──────────────────────────────────────────────────────── */
 
@@ -77,6 +129,16 @@ void swarm_init(swarm_t *s, const char *api_key, const char *model) {
             }
         }
     }
+
+    /* Initialize fast-path structures */
+    memset(&s->done_q, 0, sizeof(s->done_q));
+    memset(&s->active, 0, sizeof(s->active));
+    s->first_completion_time = 0;
+#ifdef __APPLE__
+    s->kq_fd = kqueue();
+#else
+    s->kq_fd = -1;
+#endif
 }
 
 void swarm_destroy(swarm_t *s) {
@@ -111,6 +173,35 @@ void swarm_destroy(swarm_t *s) {
     }
     free((void *)s->dsco_path);
     s->dsco_path = NULL;
+#ifdef __APPLE__
+    if (s->kq_fd >= 0) { close(s->kq_fd); s->kq_fd = -1; }
+#endif
+}
+
+/* ── Post-spawn hook: register child with kqueue + bitset ─────────────── */
+
+static void post_spawn_register(swarm_t *s, int child_id) {
+    bitset_set(&s->active, child_id);
+#ifdef __APPLE__
+    swarm_child_t *c = &s->children[child_id];
+    kq_register_fd(s->kq_fd, c->pipe_fd, child_id);
+    if (c->err_fd >= 0)
+        kq_register_fd(s->kq_fd, c->err_fd, child_id);
+#endif
+}
+
+/* ── Post-completion hook: update bitset, push to completion queue ────── */
+
+static void post_complete(swarm_t *s, int child_id) {
+    bitset_clear(&s->active, child_id);
+    cq_push(&s->done_q, child_id);
+    if (s->first_completion_time == 0)
+        s->first_completion_time = now_sec();
+#ifdef __APPLE__
+    swarm_child_t *c = &s->children[child_id];
+    kq_unregister_fd(s->kq_fd, c->pipe_fd);
+    kq_unregister_fd(s->kq_fd, c->err_fd);
+#endif
 }
 
 /* ── Spawn ────────────────────────────────────────────────────────────── */
@@ -239,6 +330,7 @@ int swarm_spawn_in_group(swarm_t *s, int group_id, const char *task, const char 
     c->stream_buf_len = 0;
 
     s->child_count++;
+    post_spawn_register(s, id);
 
     /* Add to group if specified */
     if (group_id >= 0 && group_id < s->group_count) {
@@ -461,7 +553,7 @@ double swarm_child_elapsed_sec(const swarm_child_t *c) {
 /* ── Read from child fd, append to output ─────────────────────────────── */
 
 static void child_read(swarm_child_t *c, int fd, swarm_stream_cb cb, void *ctx) {
-    char buf[4096];
+    char buf[SWARM_READ_BUF];  /* 64KB — 16x previous */
     ssize_t n;
     int chunks = 0;
     const int max_chunks_per_poll = 64;
@@ -544,13 +636,15 @@ int swarm_poll_stream(swarm_t *s, int timeout_ms, swarm_stream_cb cb, void *ctx)
         }
     }
 
-    /* Check for completed children */
-    for (int i = 0; i < s->child_count; i++) {
-        swarm_child_t *c = &s->children[i];
-        if (c->status != SWARM_RUNNING && c->status != SWARM_STREAMING) continue;
+    /* Check for completed children — use bitset for O(1) skip of inactive */
+    unsigned long long active_bits = s->active.bits;
+    while (active_bits) {
+        int i = __builtin_ctzll(active_bits);  /* find lowest set bit */
+        active_bits &= active_bits - 1;        /* clear it */
 
-        int status;
-        pid_t result = waitpid(c->pid, &status, WNOHANG);
+        swarm_child_t *c = &s->children[i];
+        int wstatus;
+        pid_t result = waitpid(c->pid, &wstatus, WNOHANG);
         if (result > 0) {
             /* Drain remaining output */
             if (c->pipe_fd >= 0) child_read(c, c->pipe_fd, cb, ctx);
@@ -560,8 +654,8 @@ int swarm_poll_stream(swarm_t *s, int timeout_ms, swarm_stream_cb cb, void *ctx)
             close(c->err_fd); c->err_fd = -1;
 
             c->end_time = now_sec();
-            if (WIFEXITED(status)) {
-                c->exit_code = WEXITSTATUS(status);
+            if (WIFEXITED(wstatus)) {
+                c->exit_code = WEXITSTATUS(wstatus);
                 c->status = (c->exit_code == 0) ? SWARM_DONE : SWARM_ERROR;
             } else {
                 c->status = SWARM_KILLED;
@@ -572,6 +666,9 @@ int swarm_poll_stream(swarm_t *s, int timeout_ms, swarm_stream_cb cb, void *ctx)
             if (c->executor != EXECUTOR_DSCO) {
                 parse_child_cost_report(c);
             }
+
+            /* Push to completion queue + clear active bit */
+            post_complete(s, i);
         }
     }
 
@@ -579,6 +676,60 @@ int swarm_poll_stream(swarm_t *s, int timeout_ms, swarm_stream_cb cb, void *ctx)
     swarm_enforce_budgets(s);
 
     return events;
+}
+
+/* ── Fast completion primitives ───────────────────────────────────────── */
+
+int swarm_completion_pop(swarm_t *s) {
+    return cq_pop(&s->done_q);
+}
+
+int swarm_completion_pending(swarm_t *s) {
+    return s->done_q.count;
+}
+
+int swarm_wait_any(swarm_t *s, int timeout_ms) {
+    /* Check if something already completed */
+    if (s->done_q.count > 0)
+        return cq_pop(&s->done_q);
+
+    /* Poll until something completes */
+    double deadline = now_sec() + timeout_ms / 1000.0;
+    while (s->active.count > 0) {
+        int remaining_ms = (int)((deadline - now_sec()) * 1000);
+        if (remaining_ms <= 0 && timeout_ms >= 0) break;
+        if (remaining_ms < 0) remaining_ms = 0;
+
+        swarm_poll_stream(s, remaining_ms < 50 ? remaining_ms : 50, s->stream_cb, s->stream_ctx);
+
+        if (s->done_q.count > 0)
+            return cq_pop(&s->done_q);
+    }
+    return -1;
+}
+
+int swarm_wait_n(swarm_t *s, int n, int *out_ids, int timeout_ms) {
+    int collected = 0;
+    double deadline = now_sec() + timeout_ms / 1000.0;
+
+    while (collected < n && s->active.count > 0) {
+        /* Drain already-queued completions first */
+        while (collected < n && s->done_q.count > 0) {
+            out_ids[collected++] = cq_pop(&s->done_q);
+        }
+        if (collected >= n) break;
+
+        int remaining_ms = (int)((deadline - now_sec()) * 1000);
+        if (remaining_ms <= 0 && timeout_ms >= 0) break;
+
+        swarm_poll_stream(s, remaining_ms < 50 ? remaining_ms : 50, s->stream_cb, s->stream_ctx);
+    }
+
+    /* Drain any last completions */
+    while (collected < n && s->done_q.count > 0)
+        out_ids[collected++] = cq_pop(&s->done_q);
+
+    return collected;
 }
 
 /* ── Status ───────────────────────────────────────────────────────────── */
@@ -828,6 +979,7 @@ int swarm_spawn_executor(swarm_t *s, int group_id, const char *task,
     c->stream_buf_len = 0;
 
     s->child_count++;
+    post_spawn_register(s, id);
 
     if (group_id >= 0 && group_id < s->group_count) {
         swarm_group_t *g = &s->groups[group_id];
