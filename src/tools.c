@@ -44,6 +44,9 @@
 
 extern volatile int g_interrupted;
 
+/* ── Agent self-exit flag (set by self_exit tool) ─────────────────────── */
+volatile int g_agent_exit_requested = 0;
+
 /* ── Global swarm instance (shared across tool calls) ─────────────────── */
 static swarm_t g_swarm = {0};
 static bool    g_swarm_inited = false;
@@ -10919,6 +10922,15 @@ static bool tool_wings_talons_status(const char *input, char *result, size_t rle
     return true;
 }
 
+/* ── Agent self-exit tool ──────────────────────────────────────────── */
+
+static bool tool_self_exit(const char *input, char *result, size_t rlen) {
+    (void)input;
+    g_agent_exit_requested = 1;
+    snprintf(result, rlen, "{\"status\":\"exit_scheduled\",\"message\":\"Process will terminate after this turn completes.\"}");
+    return true;
+}
+
 /* ── §1-§8: Post-LLM Virtual OS subsystem tools ───────────────────── */
 
 #include "arena_alloc.h"
@@ -12280,6 +12292,21 @@ static const tool_def_t s_tools[] = {
     { .name = "polymarket_book", .description = "Get order book for a Polymarket token. No auth.", .input_schema_json = "{\"type\":\"object\",\"properties\":{\"token_id\":{\"type\":\"string\",\"description\":\"Token ID\"}},\"required\":[\"token_id\"]}", .execute = tool_polymarket_book },
     { .name = "polymarket_trades", .description = "Get recent Polymarket trades. Filter by condition or wallet. No auth.", .input_schema_json = "{\"type\":\"object\",\"properties\":{\"condition_id\":{\"type\":\"string\",\"description\":\"Condition ID\"},\"maker\":{\"type\":\"string\",\"description\":\"Wallet address\"},\"limit\":{\"type\":\"integer\",\"description\":\"Max trades 1-500\"}}}", .execute = tool_polymarket_trades },
     { .name = "polymarket_search", .description = "Search Polymarket by keyword. No auth.", .input_schema_json = "{\"type\":\"object\",\"properties\":{\"query\":{\"type\":\"string\",\"description\":\"Search query\"},\"limit\":{\"type\":\"integer\",\"description\":\"Max results 1-50\"}},\"required\":[\"query\"]}", .execute = tool_polymarket_search },
+    /* ── Kalshi Prediction Market Exchange (public read, no auth) ─────── */
+    { .name = "kalshi_events", .description = "List Kalshi prediction market events with nested markets. Filter by status (open/closed/settled) or series. No auth for read.", .input_schema_json = "{\"type\":\"object\",\"properties\":{\"status\":{\"type\":\"string\",\"enum\":[\"open\",\"closed\",\"settled\"],\"description\":\"Filter by status\"},\"series_ticker\":{\"type\":\"string\",\"description\":\"Filter by series ticker\"},\"limit\":{\"type\":\"integer\",\"description\":\"Max results (1-200, default 10)\"}}}", .execute = tool_kalshi_events },
+    { .name = "kalshi_markets", .description = "Get Kalshi market(s). By ticker for specific market, or list with filters. Returns title, yes/no prices, volume, close time. No auth.", .input_schema_json = "{\"type\":\"object\",\"properties\":{\"ticker\":{\"type\":\"string\",\"description\":\"Market ticker (e.g. KXBTC-26MAR)\"},\"event_ticker\":{\"type\":\"string\",\"description\":\"Filter by event ticker\"},\"status\":{\"type\":\"string\",\"enum\":[\"open\",\"closed\",\"settled\"]},\"limit\":{\"type\":\"integer\",\"description\":\"Max results (default 10)\"}}}", .execute = tool_kalshi_markets },
+    { .name = "kalshi_orderbook", .description = "Get Kalshi order book for a market. Shows yes/no bid depth. No auth.", .input_schema_json = "{\"type\":\"object\",\"properties\":{\"ticker\":{\"type\":\"string\",\"description\":\"Market ticker\"},\"depth\":{\"type\":\"integer\",\"description\":\"Book depth (default 5)\"}},\"required\":[\"ticker\"]}", .execute = tool_kalshi_orderbook },
+    { .name = "kalshi_trades", .description = "Get recent Kalshi trades. Filter by market ticker. No auth.", .input_schema_json = "{\"type\":\"object\",\"properties\":{\"ticker\":{\"type\":\"string\",\"description\":\"Market ticker to filter\"},\"limit\":{\"type\":\"integer\",\"description\":\"Max trades (1-1000, default 20)\"}}}", .execute = tool_kalshi_trades },
+    { .name = "kalshi_series", .description = "Get Kalshi series template info (recurring market blueprints). No auth.", .input_schema_json = "{\"type\":\"object\",\"properties\":{\"ticker\":{\"type\":\"string\",\"description\":\"Series ticker (e.g. KXBTC, KXFED)\"}},\"required\":[\"ticker\"]}", .execute = tool_kalshi_series },
+    { .name = "kalshi_search", .description = "Search Kalshi open events. Returns events with nested markets, odds, volume. No auth.", .input_schema_json = "{\"type\":\"object\",\"properties\":{\"query\":{\"type\":\"string\",\"description\":\"Search term\"},\"limit\":{\"type\":\"integer\",\"description\":\"Max events (1-200, default 20)\"}},\"required\":[\"query\"]}", .execute = tool_kalshi_search },
+    { .name = "kalshi_candlesticks", .description = "Get Kalshi price history candles for a market. Intervals: 1 (1min), 60 (1hr), 1440 (1day). No auth.", .input_schema_json = "{\"type\":\"object\",\"properties\":{\"ticker\":{\"type\":\"string\",\"description\":\"Market ticker\"},\"interval\":{\"type\":\"string\",\"description\":\"Period: 1, 60, or 1440 minutes\"}},\"required\":[\"ticker\"]}", .execute = tool_kalshi_candlesticks },
+    /* ── Cross-Platform Prediction Intelligence ─────────────────────────── */
+    { .name = "prediction_scan", .description = "Scan BOTH Polymarket AND Kalshi simultaneously for a topic. Returns merged results from both platforms for comparison and arbitrage detection.", .input_schema_json = "{\"type\":\"object\",\"properties\":{\"query\":{\"type\":\"string\",\"description\":\"Topic to scan (e.g. Fed rate, election, Bitcoin)\"},\"limit\":{\"type\":\"integer\",\"description\":\"Max per platform (default 5)\"}},\"required\":[\"query\"]}", .execute = tool_prediction_scan },
+    { .name = "prediction_snapshot", .description = "Real-time dashboard of top prediction markets across Polymarket + Kalshi by volume. Shows odds, volume, liquidity across both platforms.", .input_schema_json = "{\"type\":\"object\",\"properties\":{\"limit\":{\"type\":\"integer\",\"description\":\"Markets per platform (default 5)\"},\"category\":{\"type\":\"string\",\"description\":\"Filter category (politics, sports, crypto, entertainment)\"}}}", .execute = tool_prediction_snapshot },
+    { .name = "prediction_arb", .description = "Cross-platform arbitrage detector. Fetches Polymarket + Kalshi markets for a topic, returns both datasets with arb detection rules. Identifies within-market (YES+NO<$1), cross-platform, and combinatorial arbitrage. No auth.", .input_schema_json = "{\"type\":\"object\",\"properties\":{\"topic\":{\"type\":\"string\",\"description\":\"Market topic (bitcoin, election, Fed rate, sports)\"},\"limit\":{\"type\":\"integer\",\"description\":\"Markets per platform to scan (default 10)\"}}}", .execute = tool_prediction_arb },
+    { .name = "polymarket_whale_trades", .description = "Detect whale trades on Polymarket. Large transactions above threshold with trader wallet, market, price, size. No auth.", .input_schema_json = "{\"type\":\"object\",\"properties\":{\"min_size_usd\":{\"type\":\"number\",\"description\":\"Min trade size in USD (default 10000)\"},\"condition_id\":{\"type\":\"string\",\"description\":\"Filter to specific market\"},\"limit\":{\"type\":\"integer\",\"description\":\"Max trades to scan (default 50)\"}}}", .execute = tool_polymarket_whale_trades },
+    { .name = "polymarket_leaderboard", .description = "Top Polymarket traders by profit. Shows wallet, PnL, volume, win rate. No auth.", .input_schema_json = "{\"type\":\"object\",\"properties\":{\"limit\":{\"type\":\"integer\",\"description\":\"Number of traders (default 10)\"}}}", .execute = tool_polymarket_leaderboard },
+    { .name = "polymarket_history", .description = "Price history for a Polymarket token. Returns time-series of YES/NO prices. No auth.", .input_schema_json = "{\"type\":\"object\",\"properties\":{\"token_id\":{\"type\":\"string\",\"description\":\"Token ID\"},\"condition_id\":{\"type\":\"string\",\"description\":\"Condition ID\"},\"interval\":{\"type\":\"string\",\"description\":\"all, 1d, 1w, 1m\"},\"fidelity\":{\"type\":\"string\",\"description\":\"Minutes between data points\"}}}", .execute = tool_polymarket_history },
     {
         .name = "mapbox_geocode",
         .description = "Geocode an address or place name to coordinates using Mapbox. Requires MAPBOX_API_KEY.",
@@ -12543,6 +12570,13 @@ static const tool_def_t s_tools[] = {
         .execute = tool_wings_talons_status
     },
 
+    /* ── Process lifecycle ─────────────────────────────────────────────── */
+    {
+        .name = "self_exit",
+        .description = "Terminate the dsco agent process. Call this when the user asks to quit, exit, end the session, or says goodbye. The process will cleanly shut down after delivering your final message.",
+        .input_schema_json = "{\"type\":\"object\",\"properties\":{\"reason\":{\"type\":\"string\",\"description\":\"Brief reason for exit (e.g. user requested, task complete)\"}}}",
+        .execute = tool_self_exit
+    },
     /* ── §1-§8: Post-LLM Virtual OS subsystem status ──────────────────── */
     {
         .name = "vos_status",
@@ -12596,6 +12630,114 @@ const tool_def_t *tools_get_all(int *count) {
 
 int tools_builtin_count(void) {
     return s_tool_count;
+}
+
+/* ── Tool retrieval: BM25 + TF-IDF semantic index ──────────────────── */
+
+#include "semantic.h"
+
+/* Lazily-built semantic index over all tool schemas */
+static tfidf_index_t g_tool_index;
+static bool g_tool_index_built = false;
+
+/* Core tools always included regardless of retrieval score */
+static const char *CORE_TOOLS[] = {
+    "read_file", "write_file", "edit_file", "append_file", "list_directory",
+    "find_files", "grep_files", "bash", "run_command", "python",
+    "spawn_agent", "agent_wait", "agent_output", "agent_status", "agent_kill",
+    "agent_race", "spawn_provider", "spawn_executor", "create_swarm",
+    "swarm_status", "swarm_collect", "openrouter_models", "executor_status",
+    "context_get", "context_search", "context_pack", "soul_read",
+    NULL
+};
+
+static bool is_core_tool(const char *name) {
+    for (int i = 0; CORE_TOOLS[i]; i++)
+        if (strcmp(name, CORE_TOOLS[i]) == 0) return true;
+    return false;
+}
+
+/* Build the semantic index lazily on first retrieval call */
+static void ensure_tool_index(void) {
+    if (g_tool_index_built) return;
+
+    int total;
+    const tool_def_t *tools = tools_get_all(&total);
+    if (total == 0) return;
+
+    /* Cap to SEM_MAX_DOCS */
+    int n = total < SEM_MAX_DOCS ? total : SEM_MAX_DOCS;
+    const char **names = safe_malloc(n * sizeof(char *));
+    const char **descs = safe_malloc(n * sizeof(char *));
+    for (int i = 0; i < n; i++) {
+        names[i] = tools[i].name;
+        descs[i] = tools[i].description;
+    }
+
+    sem_tools_index_build(&g_tool_index, names, descs, n);
+    free(names);
+    free(descs);
+
+    g_tool_index_built = true;
+    fprintf(stderr, "  \033[2mtool index: %d tools indexed, %d vocab terms\033[0m\n",
+            n, g_tool_index.vocab_count);
+}
+
+int tools_retrieve(const char *context, int *out_indices, int max_tools) {
+    int total;
+    const tool_def_t *tools = tools_get_all(&total);
+    if (total == 0 || max_tools <= 0) return 0;
+
+    /* Phase 1: always include core tools */
+    int n = 0;
+    bool included[SEM_MAX_DOCS];
+    memset(included, 0, sizeof(included));
+
+    for (int i = 0; i < total && i < SEM_MAX_DOCS; i++) {
+        if (is_core_tool(tools[i].name)) {
+            out_indices[n++] = i;
+            included[i] = true;
+            if (n >= max_tools) return n;
+        }
+    }
+
+    /* If no context, return just core tools */
+    if (!context || !context[0]) return n;
+
+    /* Phase 2: semantic retrieval via BM25 + cosine similarity */
+    ensure_tool_index();
+
+    int capped = total < SEM_MAX_DOCS ? total : SEM_MAX_DOCS;
+    tool_score_t *ranked = safe_malloc(capped * sizeof(tool_score_t));
+    int ranked_count = sem_tools_rank(&g_tool_index, context, ranked,
+                                       capped, capped);
+
+    /* Phase 3: fill remaining slots with highest-scoring non-core tools */
+    for (int i = 0; i < ranked_count && n < max_tools; i++) {
+        int idx = ranked[i].tool_index;
+        if (idx >= 0 && idx < capped && !included[idx] && ranked[i].score > 0.01) {
+            out_indices[n++] = idx;
+            included[idx] = true;
+        }
+    }
+
+    free(ranked);
+    return n;
+}
+
+const tool_def_t **tools_get_filtered(const char *context, int max_tools, int *out_count) {
+    int indices[SEM_MAX_DOCS];
+    int n = tools_retrieve(context, indices, max_tools > SEM_MAX_DOCS ? SEM_MAX_DOCS : max_tools);
+
+    int total;
+    const tool_def_t *all = tools_get_all(&total);
+
+    const tool_def_t **result = safe_malloc(n * sizeof(tool_def_t *));
+    for (int i = 0; i < n; i++) {
+        result[i] = &all[indices[i]];
+    }
+    *out_count = n;
+    return result;
 }
 
 /* ── Tool hash map for O(1) lookup ─────────────────────────────────────── */

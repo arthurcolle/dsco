@@ -511,35 +511,52 @@ static char *openai_build_request(provider_t *p, conversation_t *conv,
     }
     jbuf_append(&b, "]");
 
-    /* Tools — convert to OpenAI format.
-     * Cap at DSCO_OR_MAX_TOOLS (default 64) for OpenRouter models to avoid
-     * exceeding provider tool limits. Set to 0 to disable tools entirely. */
-    int tool_count;
-    const tool_def_t *tools = tools_get_all(&tool_count);
+    /* Tools — context-aware retrieval + OpenAI format conversion.
+     * Instead of sending all 340+ tools, retrieve only those relevant to
+     * the conversation context. Core tools always included. */
     int max_tools_send = 128;
     const char *mt_env = getenv("DSCO_OR_MAX_TOOLS");
     if (mt_env && mt_env[0]) {
         max_tools_send = atoi(mt_env);
         if (max_tools_send < 0) max_tools_send = 0;
     } else {
-        /* Auto-detect: if model has org/ prefix (OpenRouter), cap at 64 */
-        const char *m = session ? session->model : "";
-        if (strstr(m, "/")) max_tools_send = 64;
+        const char *m2 = session ? session->model : "";
+        if (strstr(m2, "/")) max_tools_send = 48; /* OpenRouter: tighter cap */
     }
-    if (tool_count > 0 && max_tools_send > 0) {
-        jbuf_append(&b, ",\"tools\":[");
-        int send = tool_count < max_tools_send ? tool_count : max_tools_send;
-        for (int i = 0; i < send; i++) {
-            if (i > 0) jbuf_append(&b, ",");
-            jbuf_append(&b, "{\"type\":\"function\",\"function\":{\"name\":");
-            jbuf_append_json_str(&b, tools[i].name);
-            jbuf_append(&b, ",\"description\":");
-            jbuf_append_json_str(&b, tools[i].description);
-            jbuf_append(&b, ",\"parameters\":");
-            jbuf_append(&b, tools[i].input_schema_json);
-            jbuf_append(&b, "}}");
+
+    if (max_tools_send > 0) {
+        /* Extract last user message as retrieval context */
+        const char *ctx = NULL;
+        for (int i = conv->count - 1; i >= 0; i--) {
+            if (conv->msgs[i].role == ROLE_USER) {
+                for (int j = 0; j < conv->msgs[i].content_count; j++) {
+                    if (conv->msgs[i].content[j].text) {
+                        ctx = conv->msgs[i].content[j].text;
+                        break;
+                    }
+                }
+                break;
+            }
         }
-        jbuf_append(&b, "]");
+
+        int filtered_count = 0;
+        const tool_def_t **filtered = tools_get_filtered(ctx, max_tools_send, &filtered_count);
+
+        if (filtered_count > 0) {
+            jbuf_append(&b, ",\"tools\":[");
+            for (int i = 0; i < filtered_count; i++) {
+                if (i > 0) jbuf_append(&b, ",");
+                jbuf_append(&b, "{\"type\":\"function\",\"function\":{\"name\":");
+                jbuf_append_json_str(&b, filtered[i]->name);
+                jbuf_append(&b, ",\"description\":");
+                jbuf_append_json_str(&b, filtered[i]->description);
+                jbuf_append(&b, ",\"parameters\":");
+                jbuf_append(&b, filtered[i]->input_schema_json);
+                jbuf_append(&b, "}}");
+            }
+            jbuf_append(&b, "]");
+        }
+        free((void *)filtered);
     }
 
     jbuf_append(&b, "}");
