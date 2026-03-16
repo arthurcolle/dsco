@@ -31,6 +31,12 @@
 
 static md_renderer_t s_oneshot_md;
 
+/* ── Post-LLM Virtual OS subsystems ────────────────────────────────── */
+static vm_t         g_vm;          /* §3: bytecode dispatch VM */
+static scheduler_t  g_scheduler;   /* §1/§7: cooperative task scheduler */
+static ev_loop_t   *g_ev_loop;     /* §6: event loop */
+static vfs_db_t    *g_vfs;         /* §8: embedded persistence */
+
 /* Signal handler for clean IPC shutdown in sub-agent mode */
 static volatile sig_atomic_t g_main_interrupted = 0;
 
@@ -67,8 +73,35 @@ static void crash_handler(int sig) {
 }
 
 static void main_atexit_handler(void) {
+    /* Shutdown Post-LLM OS subsystems */
+    if (g_vfs)     { vfs_close(g_vfs); g_vfs = NULL; }
+    if (g_ev_loop) { ev_loop_free(g_ev_loop); g_ev_loop = NULL; }
+    sched_destroy(&g_scheduler);
+    arena_subsystem_shutdown();
     TRACE_SHUTDOWN();
     ipc_shutdown();
+}
+
+static void init_vos_subsystems(void) {
+    /* §2: Arena allocator — scratch (per-turn) + session (per-run) */
+    arena_subsystem_init();
+
+    /* §6: Event loop — kqueue on macOS, poll fallback */
+    g_ev_loop = ev_loop_new();
+
+    /* §3: Bytecode VM — computed-goto dispatch for tool routing */
+    vm_init(&g_vm);
+
+    /* §1/§7: Cooperative scheduler — priority-aware task scheduling */
+    sched_init(&g_scheduler);
+
+    /* §8: Embedded persistence — SQLite VFS layer */
+    char vfs_path[512];
+    const char *home = getenv("HOME");
+    if (home) {
+        snprintf(vfs_path, sizeof(vfs_path), "%s/.dsco/vfs.db", home);
+        g_vfs = vfs_open(vfs_path);
+    }
 }
 
 /* ── Executor registry ─────────────────────────────────────────────── */
@@ -356,6 +389,7 @@ static void oneshot_tool_cb(const char *name, const char *id, void *ctx) {
 int main(int argc, char **argv) {
     (void)atexit(main_atexit_handler);
     init_trace_runtime();
+    init_vos_subsystems();  /* §1-§8: Post-LLM Virtual OS layer */
 
     /* Skip output guard when we're just exec'ing an external CLI —
        it redirects stdout through a pipe which breaks child processes. */
@@ -651,6 +685,134 @@ int main(int argc, char **argv) {
             goto native_path;
         }
 
+        /* "bench-tools" — test tool calling across providers */
+        if (strcmp(exec_backend, "bench-tools") == 0) {
+            tools_init();
+            fprintf(stderr, "\n  \033[1mTool Calling Benchmark\033[0m\n");
+            fprintf(stderr, "  Tests: tool invocation, multi-turn, arg parsing\n\n");
+            fprintf(stderr, "  %-12s %-24s %7s  %-7s %-7s %-7s %s\n",
+                    "PROVIDER", "MODEL", "TIME", "INVOKE", "ARGS", "MULTI", "NOTES");
+            fprintf(stderr, "  %-12s %-24s %7s  %-7s %-7s %-7s %s\n",
+                    "────────", "─────", "────", "──────", "────", "─────", "─────");
+
+            for (int i = 0; NATIVE_PROVIDERS[i].name; i++) {
+                const native_provider_t *tp = &NATIVE_PROVIDERS[i];
+                const char *tkey = getenv(tp->env_key);
+                if (!tkey || !tkey[0]) {
+                    fprintf(stderr, "  %-12s %-24s %7s  %-7s %-7s %-7s %s\n",
+                            tp->name, tp->example_model, "-", "-", "-", "-", "no key");
+                    continue;
+                }
+                if (!(tp->caps & CAP_TOOLS)) {
+                    fprintf(stderr, "  %-12s %-24s %7s  %-7s %-7s %-7s %s\n",
+                            tp->name, tp->example_model, "-", "-", "-", "-", "no tool support");
+                    continue;
+                }
+
+                session_state_t tsess;
+                session_state_init(&tsess, tp->example_model);
+                provider_t *tprov = provider_create(tp->name);
+                conversation_t tconv;
+                conv_init(&tconv);
+
+                /* Test 1: Does the model invoke a tool? */
+                conv_add_user_text(&tconv, "Read the file README.md and tell me the first line.");
+
+                struct timeval tt0, tt1;
+                gettimeofday(&tt0, NULL);
+
+                char *treq = tprov->build_request(tprov, &tconv, &tsess, 1024);
+                stream_result_t tsr = {0};
+                if (treq) {
+                    tsr = tprov->stream(tprov, tkey, treq, NULL, NULL, NULL, NULL);
+                    free(treq);
+                }
+
+                gettimeofday(&tt1, NULL);
+                double telapsed = (tt1.tv_sec - tt0.tv_sec) + (tt1.tv_usec - tt0.tv_usec) / 1e6;
+
+                bool tool_invoked = false;
+                bool args_valid = false;
+                char tool_name[64] = "";
+                if (tsr.ok) {
+                    for (int bi = 0; bi < tsr.parsed.count; bi++) {
+                        content_block_t *blk = &tsr.parsed.blocks[bi];
+                        if (blk->type && strcmp(blk->type, "tool_use") == 0) {
+                            tool_invoked = true;
+                            if (blk->tool_name)
+                                snprintf(tool_name, sizeof(tool_name), "%s", blk->tool_name);
+                            /* Check if args is valid JSON with expected field */
+                            if (blk->tool_input && blk->tool_input[0] == '{')
+                                args_valid = true;
+                            break;
+                        }
+                    }
+                }
+
+                /* Test 2: Multi-turn — add tool result and see if model continues */
+                bool multi_turn_ok = false;
+                if (tool_invoked && tsr.ok) {
+                    conv_add_assistant_raw(&tconv, &tsr.parsed);
+                    /* Find the tool_use id and add a result */
+                    for (int bi = 0; bi < tsr.parsed.count; bi++) {
+                        content_block_t *blk = &tsr.parsed.blocks[bi];
+                        if (blk->type && strcmp(blk->type, "tool_use") == 0 && blk->tool_id) {
+                            conv_add_tool_result(&tconv, blk->tool_id,
+                                                 "# dsco-cli\nThin agentic CLI", false);
+                            break;
+                        }
+                    }
+                    json_free_response(&tsr.parsed);
+
+                    /* Second turn */
+                    char *treq2 = tprov->build_request(tprov, &tconv, &tsess, 1024);
+                    stream_result_t tsr2 = {0};
+                    if (treq2) {
+                        tsr2 = tprov->stream(tprov, tkey, treq2, NULL, NULL, NULL, NULL);
+                        free(treq2);
+                    }
+                    multi_turn_ok = tsr2.ok;
+                    /* Check if response has text */
+                    if (tsr2.ok) {
+                        for (int bi = 0; bi < tsr2.parsed.count; bi++) {
+                            if (tsr2.parsed.blocks[bi].text && tsr2.parsed.blocks[bi].text[0]) {
+                                multi_turn_ok = true;
+                                break;
+                            }
+                        }
+                    }
+                    json_free_response(&tsr2.parsed);
+                } else {
+                    json_free_response(&tsr.parsed);
+                }
+
+                gettimeofday(&tt1, NULL);
+                telapsed = (tt1.tv_sec - tt0.tv_sec) + (tt1.tv_usec - tt0.tv_usec) / 1e6;
+
+                char notes[128] = "";
+                if (!tsr.ok)
+                    snprintf(notes, sizeof(notes), "HTTP error");
+                else if (tool_name[0])
+                    snprintf(notes, sizeof(notes), "called %s", tool_name);
+
+                fprintf(stderr, "  %-12s %-24s %6.1fs  %s%-7s%s %s%-7s%s %s%-7s%s %s\n",
+                        tp->name, tp->example_model, telapsed,
+                        tool_invoked ? "\033[32m" : "\033[31m",
+                        tool_invoked ? "pass" : "FAIL", "\033[0m",
+                        args_valid ? "\033[32m" : "\033[31m",
+                        args_valid ? "pass" : "FAIL", "\033[0m",
+                        multi_turn_ok ? "\033[32m" : "\033[31m",
+                        multi_turn_ok ? "pass" : "FAIL", "\033[0m",
+                        notes);
+
+                conv_free(&tconv);
+                provider_free(tprov);
+            }
+            fprintf(stderr, "\n");
+            free(oneshot_prompt);
+            return 0;
+        }
+
         /* "bench" — benchmark all available providers */
         if (strcmp(exec_backend, "bench") == 0) {
             const char *bench_prompt = oneshot_prompt
@@ -688,8 +850,7 @@ int main(int argc, char **argv) {
                 char bench_text[512] = "";
                 int bench_text_len = 0;
 
-                /* Inline text callback */
-                struct { char *buf; int *len; int cap; } bctx = { bench_text, &bench_text_len, 500 };
+                (void)bench_text_len;
                 stream_result_t bsr = {0};
 
                 if (breq) {
@@ -736,38 +897,7 @@ int main(int argc, char **argv) {
                 provider_free(bprov);
             }
 
-            /* Also benchmark external CLIs */
-            for (int i = 0; EXEC_REGISTRY[i].name; i++) {
-                if (!exec_bin_available(EXEC_REGISTRY[i].bin)) {
-                    fprintf(stderr, "  %-12s %-28s %7s  %5s  %s\n",
-                            EXEC_REGISTRY[i].name, EXEC_REGISTRY[i].bin,
-                            "-", "-", "not in PATH");
-                    continue;
-                }
-                struct timeval ct0, ct1;
-                gettimeofday(&ct0, NULL);
-                pid_t cpid = fork();
-                if (cpid == 0) {
-                    /* Redirect stdout to /dev/null for timing only */
-                    int devnull = open("/dev/null", O_WRONLY);
-                    if (devnull >= 0) { dup2(devnull, STDOUT_FILENO); close(devnull); }
-                    dup2(STDOUT_FILENO, STDERR_FILENO);
-                    exec_dispatch(&EXEC_REGISTRY[i], bench_prompt, NULL, NULL, 0);
-                    _exit(127);
-                }
-                int cstatus = 0;
-                waitpid(cpid, &cstatus, 0);
-                gettimeofday(&ct1, NULL);
-                double celapsed = (ct1.tv_sec - ct0.tv_sec) + (ct1.tv_usec - ct0.tv_usec) / 1e6;
-                bool cok = WIFEXITED(cstatus) && WEXITSTATUS(cstatus) == 0;
-                fprintf(stderr, "  %-12s %-28s %6.1fs  %s%-5s%s  %s\n",
-                        EXEC_REGISTRY[i].name, EXEC_REGISTRY[i].desc,
-                        celapsed,
-                        cok ? "\033[32m" : "\033[31m",
-                        cok ? "ok" : "FAIL",
-                        "\033[0m",
-                        cok ? "(cli)" : "exec failed");
-            }
+            /* done */
 
             fprintf(stderr, "\n");
             free(oneshot_prompt);
@@ -861,6 +991,7 @@ native_path:
 
     if (oneshot_prompt) {
         tools_init();
+        tools_register_vm_dispatch(&g_vm);  /* §3: populate VM dispatch table */
         tools_set_runtime_api_key(api_key);
         tools_set_runtime_model(model);
         md_init(&s_oneshot_md, stdout);

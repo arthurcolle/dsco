@@ -7,12 +7,13 @@
 
 /* ── Sub-dsco process handle ──────────────────────────────────────────── */
 
-#define SWARM_MAX_CHILDREN  64  /* doubled: dynamic topologies need 33+ concurrent agents (coordinator + 8 leads × 4 workers) */
-#define SWARM_MAX_GROUPS    16  /* doubled: concurrent topology phases (recon + analysis + synthesis) consume groups fast */
-#define SWARM_MAX_OUTPUT    (512 * 1024) /* doubled: dynamic topology agents produce richer synthesis/code outputs */
+#define SWARM_MAX_CHILDREN  64
+#define SWARM_MAX_GROUPS    16
+#define SWARM_MAX_OUTPUT    (512 * 1024)
 #define SWARM_LABEL_LEN     128
 #define SWARM_GROUP_NAME_LEN 64
-#define SWARM_MAX_DEPTH     6   /* increased: topology_runner layer + conditional branching adds 2 depth levels vs flat 4 */
+#define SWARM_MAX_DEPTH     6
+#define SWARM_READ_BUF      (64 * 1024) /* 64KB read buffer (was 4KB) */
 
 typedef enum {
     SWARM_PENDING,
@@ -91,6 +92,22 @@ typedef struct {
     bool  active;
 } swarm_group_t;
 
+/* ── Completion queue — O(1) push/pop for finished children ───────────── */
+
+typedef struct {
+    int   ids[SWARM_MAX_CHILDREN]; /* ring buffer of completed child IDs */
+    int   head;                    /* read pointer  */
+    int   tail;                    /* write pointer */
+    int   count;                   /* number queued */
+} swarm_completion_q_t;
+
+/* ── Active bitset — O(1) membership test, fast iteration ────────────── */
+
+typedef struct {
+    unsigned long long bits;       /* 64-bit bitset — 1 bit per child */
+    int count;                     /* popcount cache */
+} swarm_bitset_t;
+
 typedef struct {
     swarm_child_t  children[SWARM_MAX_CHILDREN];
     int            child_count;
@@ -112,6 +129,12 @@ typedef struct {
 
     /* External executor registry */
     executor_registry_t executors;
+
+    /* ── Fast-path data structures ────────────────────────────────────── */
+    swarm_completion_q_t done_q;   /* O(1) completion notifications          */
+    swarm_bitset_t       active;   /* bitset of running/streaming children   */
+    int                  kq_fd;    /* kqueue fd (-1 if unavailable)          */
+    double               first_completion_time; /* timestamp of first child done */
 } swarm_t;
 
 /* ── Lifecycle ────────────────────────────────────────────────────────── */
@@ -152,6 +175,22 @@ int  swarm_poll(swarm_t *s, int timeout_ms);
 
 /* Poll and invoke stream callback for each chunk received */
 int  swarm_poll_stream(swarm_t *s, int timeout_ms, swarm_stream_cb cb, void *ctx);
+
+/* ── Fast completion primitives ──────────────────────────────────────── */
+
+/* Wait for ANY child to complete. Returns its ID, or -1 on timeout.
+ * Use this for race patterns (first-to-finish wins). */
+int  swarm_wait_any(swarm_t *s, int timeout_ms);
+
+/* Wait for the FIRST N children to complete. Fills `out_ids` with their IDs.
+ * Returns how many completed within timeout. Use for quorum patterns. */
+int  swarm_wait_n(swarm_t *s, int n, int *out_ids, int timeout_ms);
+
+/* Pop next completed child from the completion queue. Returns -1 if empty. */
+int  swarm_completion_pop(swarm_t *s);
+
+/* Number of completions queued but not yet consumed. */
+int  swarm_completion_pending(swarm_t *s);
 
 /* ── Status & results ─────────────────────────────────────────────────── */
 swarm_child_t  *swarm_get(swarm_t *s, int child_id);
