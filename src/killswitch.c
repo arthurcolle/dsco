@@ -68,6 +68,8 @@ int killswitch_trigger(killswitch_registry_t *r, kill_level_t level,
                        kill_trigger_t trigger, int principal_tier,
                        double timeout, bool cascade) {
     if (!r || !r->initialized) return -1;
+    if (level < 0 || level >= KILL_LEVEL_COUNT) return -1;
+    if (trigger < 0 || trigger > KILL_TRIGGER_HEARTBEAT) return -1;
     if (r->active_count >= KILLSWITCH_MAX_ACTIVE) return -1;
 
     /* Authorization check */

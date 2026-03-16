@@ -409,6 +409,96 @@ static void shell_quote(jbuf_t *b, const char *s) {
     jbuf_append_char(b, '\'');
 }
 
+static bool mkdir_p_local(const char *path, mode_t mode) {
+    if (!path || !path[0]) return false;
+
+    char tmp[4096];
+    size_t n = strlen(path);
+    if (n >= sizeof(tmp)) return false;
+    memcpy(tmp, path, n + 1);
+
+    for (char *p = tmp + 1; *p; p++) {
+        if (*p != '/') continue;
+        *p = '\0';
+        if (tmp[0] != '\0' && mkdir(tmp, mode) != 0 && errno != EEXIST) {
+            return false;
+        }
+        *p = '/';
+    }
+
+    if (mkdir(tmp, mode) != 0 && errno != EEXIST) return false;
+    return true;
+}
+
+static bool ensure_parent_dir_local(const char *path) {
+    if (!path || !path[0]) return false;
+
+    char tmp[4096];
+    size_t n = strlen(path);
+    if (n >= sizeof(tmp)) return false;
+    memcpy(tmp, path, n + 1);
+
+    char *slash = strrchr(tmp, '/');
+    if (!slash) return true;
+    *slash = '\0';
+    if (tmp[0] == '\0') return true;
+    return mkdir_p_local(tmp, 0755);
+}
+
+static bool shell_fragment_has_forbidden_chars(const char *s) {
+    if (!s) return false;
+    for (const unsigned char *p = (const unsigned char *)s; *p; p++) {
+        switch (*p) {
+            case ';':
+            case '&':
+            case '|':
+            case '<':
+            case '>':
+            case '`':
+            case '$':
+            case '\\':
+            case '\'':
+            case '"':
+            case '\n':
+            case '\r':
+                return true;
+            default:
+                break;
+        }
+    }
+    return false;
+}
+
+static bool chmod_mode_is_safe(const char *mode) {
+    if (!mode || !mode[0]) return false;
+    for (const unsigned char *p = (const unsigned char *)mode; *p; p++) {
+        if ((*p >= '0' && *p <= '7') ||
+            strchr("rwxXstugo=,+-", (int)*p) != NULL) {
+            continue;
+        }
+        return false;
+    }
+    return true;
+}
+
+static bool http_method_is_safe(const char *method) {
+    if (!method || !method[0]) return false;
+    for (const unsigned char *p = (const unsigned char *)method; *p; p++) {
+        if (!isalpha(*p)) return false;
+    }
+    return true;
+}
+
+static bool ssh_target_atom_is_safe(const char *s) {
+    if (!s || !s[0]) return false;
+    for (const unsigned char *p = (const unsigned char *)s; *p; p++) {
+        if (isalnum(*p) || *p == '.' || *p == '-' || *p == '_' || *p == ':')
+            continue;
+        return false;
+    }
+    return true;
+}
+
 /* ═══════════════════════════════════════════════════════════════════════════
  * RETRIEVAL CONTEXT STORE (for large tool outputs)
  * ═══════════════════════════════════════════════════════════════════════════ */
@@ -1254,14 +1344,12 @@ static bool tool_write_file(const char *input, char *result, size_t rlen) {
         free(path); free(content);
         return false;
     }
-    char *pathcopy = strdup(path);
-    char *dir = dirname(pathcopy);
-    if (dir && strlen(dir) > 0 && strcmp(dir, ".") != 0) {
-        char mkdir_cmd[4096];
-        snprintf(mkdir_cmd, sizeof(mkdir_cmd), "mkdir -p '%s'", dir);
-        system(mkdir_cmd);
+    if (!ensure_parent_dir_local(path)) {
+        snprintf(result, rlen, "error: cannot create parent directories for %s: %s",
+                 path, strerror(errno));
+        free(path); free(content);
+        return false;
     }
-    free(pathcopy);
 
     FILE *f = fopen(path, "w");
     if (!f) {
@@ -1840,10 +1928,15 @@ static bool tool_find_files(const char *input, char *result, size_t rlen) {
     char *path = json_get_str(input, "path");
     if (!pattern) { snprintf(result, rlen, "error: pattern required"); free(path); return false; }
 
-    char cmd[4096];
-    snprintf(cmd, sizeof(cmd), "find '%s' -name '%s' -type f 2>/dev/null | head -100",
-             path ? path : ".", pattern);
-    run_cmd(cmd, result, rlen);
+    jbuf_t cmd;
+    jbuf_init(&cmd, 256 + strlen(pattern) + (path ? strlen(path) : 1));
+    jbuf_append(&cmd, "find ");
+    shell_quote(&cmd, path ? path : ".");
+    jbuf_append(&cmd, " -name ");
+    shell_quote(&cmd, pattern);
+    jbuf_append(&cmd, " -type f 2>/dev/null | head -100");
+    run_cmd(cmd.data, result, rlen);
+    jbuf_free(&cmd);
     free(pattern); free(path);
     return true;
 }
@@ -1853,10 +1946,15 @@ static bool tool_grep(const char *input, char *result, size_t rlen) {
     char *path = json_get_str(input, "path");
     if (!pattern) { snprintf(result, rlen, "error: pattern required"); free(path); return false; }
 
-    char cmd[4096];
-    snprintf(cmd, sizeof(cmd), "grep -rn '%s' '%s' 2>/dev/null | head -100",
-             pattern, path ? path : ".");
-    run_cmd(cmd, result, rlen);
+    jbuf_t cmd;
+    jbuf_init(&cmd, 256 + strlen(pattern) + (path ? strlen(path) : 1));
+    jbuf_append(&cmd, "grep -rn -- ");
+    shell_quote(&cmd, pattern);
+    jbuf_append(&cmd, " ");
+    shell_quote(&cmd, path ? path : ".");
+    jbuf_append(&cmd, " 2>/dev/null | head -100");
+    run_cmd(cmd.data, result, rlen);
+    jbuf_free(&cmd);
     free(pattern); free(path);
     return true;
 }
@@ -1887,6 +1985,11 @@ static bool tool_append_file(const char *input, char *result, size_t rlen) {
         snprintf(result, rlen, "error: path and content required");
         free(path); free(content); return false;
     }
+    if (!ensure_parent_dir_local(path)) {
+        snprintf(result, rlen, "error: cannot create parent directories for %s: %s",
+                 path, strerror(errno));
+        free(path); free(content); return false;
+    }
     FILE *f = fopen(path, "a");
     if (!f) {
         snprintf(result, rlen, "error: cannot open %s: %s", path, strerror(errno));
@@ -1909,9 +2012,14 @@ static bool tool_move_file(const char *input, char *result, size_t rlen) {
     }
     if (rename(src, dst) != 0) {
         /* Try mv for cross-device */
-        char cmd[8192];
-        snprintf(cmd, sizeof(cmd), "mv '%s' '%s'", src, dst);
-        int status = run_cmd(cmd, result, rlen);
+        jbuf_t cmd;
+        jbuf_init(&cmd, 64 + strlen(src) + strlen(dst));
+        jbuf_append(&cmd, "mv ");
+        shell_quote(&cmd, src);
+        jbuf_append(&cmd, " ");
+        shell_quote(&cmd, dst);
+        int status = run_cmd(cmd.data, result, rlen);
+        jbuf_free(&cmd);
         if (status == 0) snprintf(result, rlen, "moved %s -> %s", src, dst);
         free(src); free(dst);
         return (status == 0);
@@ -1929,9 +2037,14 @@ static bool tool_copy_file(const char *input, char *result, size_t rlen) {
         snprintf(result, rlen, "error: source and destination required");
         free(src); free(dst); return false;
     }
-    char cmd[8192];
-    snprintf(cmd, sizeof(cmd), "cp -r '%s' '%s'", src, dst);
-    int status = run_cmd(cmd, result, rlen);
+    jbuf_t cmd;
+    jbuf_init(&cmd, 64 + strlen(src) + strlen(dst));
+    jbuf_append(&cmd, "cp -r ");
+    shell_quote(&cmd, src);
+    jbuf_append(&cmd, " ");
+    shell_quote(&cmd, dst);
+    int status = run_cmd(cmd.data, result, rlen);
+    jbuf_free(&cmd);
     if (status == 0 && strlen(result) == 0)
         snprintf(result, rlen, "copied %s -> %s", src, dst);
     free(src); free(dst);
@@ -1944,12 +2057,12 @@ static bool tool_delete_file(const char *input, char *result, size_t rlen) {
     bool recursive = json_get_bool(input, "recursive", false);
     if (!path) { snprintf(result, rlen, "error: path required"); return false; }
 
-    char cmd[4096];
-    if (recursive)
-        snprintf(cmd, sizeof(cmd), "rm -rf '%s'", path);
-    else
-        snprintf(cmd, sizeof(cmd), "rm -f '%s'", path);
-    int status = run_cmd(cmd, result, rlen);
+    jbuf_t cmd;
+    jbuf_init(&cmd, 64 + strlen(path));
+    jbuf_append(&cmd, recursive ? "rm -rf " : "rm -f ");
+    shell_quote(&cmd, path);
+    int status = run_cmd(cmd.data, result, rlen);
+    jbuf_free(&cmd);
     if (status == 0) snprintf(result, rlen, "deleted %s", path);
     free(path);
     return (status == 0);
@@ -1959,12 +2072,11 @@ static bool tool_delete_file(const char *input, char *result, size_t rlen) {
 static bool tool_mkdir(const char *input, char *result, size_t rlen) {
     char *path = json_get_str(input, "path");
     if (!path) { snprintf(result, rlen, "error: path required"); return false; }
-    char cmd[4096];
-    snprintf(cmd, sizeof(cmd), "mkdir -p '%s'", path);
-    int status = run_cmd(cmd, result, rlen);
-    if (status == 0) snprintf(result, rlen, "created directory %s", path);
+    bool ok = mkdir_p_local(path, 0755);
+    if (ok) snprintf(result, rlen, "created directory %s", path);
+    else snprintf(result, rlen, "error: mkdir %s: %s", path, strerror(errno));
     free(path);
-    return (status == 0);
+    return ok;
 }
 
 /* ── chmod ────────────────────────────────────────────────────────────── */
@@ -1975,9 +2087,18 @@ static bool tool_chmod(const char *input, char *result, size_t rlen) {
         snprintf(result, rlen, "error: path and mode required");
         free(path); free(mode); return false;
     }
-    char cmd[4096];
-    snprintf(cmd, sizeof(cmd), "chmod %s '%s'", mode, path);
-    int status = run_cmd(cmd, result, rlen);
+    if (!chmod_mode_is_safe(mode)) {
+        snprintf(result, rlen, "error: unsafe chmod mode");
+        free(path); free(mode); return false;
+    }
+    jbuf_t cmd;
+    jbuf_init(&cmd, 64 + strlen(path) + strlen(mode));
+    jbuf_append(&cmd, "chmod ");
+    shell_quote(&cmd, mode);
+    jbuf_append(&cmd, " ");
+    shell_quote(&cmd, path);
+    int status = run_cmd(cmd.data, result, rlen);
+    jbuf_free(&cmd);
     if (status == 0) snprintf(result, rlen, "chmod %s %s", mode, path);
     free(path); free(mode);
     return (status == 0);
@@ -2057,15 +2178,24 @@ static bool tool_compile(const char *input, char *result, size_t rlen) {
     if (!source) { snprintf(result, rlen, "error: source required"); free(output); free(flags); return false; }
     if (!output) output = safe_strdup("a.out");
 
-    char cmd[8192];
-    int n = snprintf(cmd, sizeof(cmd), "cc -Wall -Wextra %s -o '%s' '%s'",
-             flags ? flags : "", output, source);
-    if (n >= (int)sizeof(cmd)) {
-        snprintf(result, rlen, "error: compile command too long (truncated)");
+    if (flags && flags[0] && shell_fragment_has_forbidden_chars(flags)) {
+        snprintf(result, rlen, "error: unsafe compile flags");
         free(source); free(output); free(flags);
         return false;
     }
-    int status = run_cmd(cmd, result, rlen);
+    jbuf_t cmd;
+    jbuf_init(&cmd, 128 + strlen(source) + strlen(output) + (flags ? strlen(flags) : 0));
+    jbuf_append(&cmd, "cc -Wall -Wextra");
+    if (flags && flags[0]) {
+        jbuf_append(&cmd, " ");
+        jbuf_append(&cmd, flags);
+    }
+    jbuf_append(&cmd, " -o ");
+    shell_quote(&cmd, output);
+    jbuf_append(&cmd, " ");
+    shell_quote(&cmd, source);
+    int status = run_cmd(cmd.data, result, rlen);
+    jbuf_free(&cmd);
     if (status == 0 && strlen(result) == 0) {
         snprintf(result, rlen, "compiled %s -> %s (success)", source, output);
     }
@@ -2414,9 +2544,14 @@ static bool tool_sed(const char *input, char *result, size_t rlen) {
         snprintf(result, rlen, "error: expression and file required");
         free(pattern); free(file); return false;
     }
-    char cmd[8192];
-    snprintf(cmd, sizeof(cmd), "sed '%s' '%s'", pattern, file);
-    run_cmd(cmd, result, rlen);
+    jbuf_t cmd;
+    jbuf_init(&cmd, 64 + strlen(pattern) + strlen(file));
+    jbuf_append(&cmd, "sed ");
+    shell_quote(&cmd, pattern);
+    jbuf_append(&cmd, " ");
+    shell_quote(&cmd, file);
+    run_cmd(cmd.data, result, rlen);
+    jbuf_free(&cmd);
     free(pattern); free(file);
     return true;
 }
@@ -2428,12 +2563,19 @@ static bool tool_awk(const char *input, char *result, size_t rlen) {
         snprintf(result, rlen, "error: program required");
         free(file); return false;
     }
-    char cmd[8192];
-    if (file)
-        snprintf(cmd, sizeof(cmd), "awk '%s' '%s'", program, file);
-    else
-        snprintf(cmd, sizeof(cmd), "echo '' | awk '%s'", program);
-    run_cmd(cmd, result, rlen);
+    jbuf_t cmd;
+    jbuf_init(&cmd, 64 + strlen(program) + (file ? strlen(file) : 0));
+    if (file) {
+        jbuf_append(&cmd, "awk ");
+        shell_quote(&cmd, program);
+        jbuf_append(&cmd, " ");
+        shell_quote(&cmd, file);
+    } else {
+        jbuf_append(&cmd, "printf '' | awk ");
+        shell_quote(&cmd, program);
+    }
+    run_cmd(cmd.data, result, rlen);
+    jbuf_free(&cmd);
     free(program); free(file);
     return true;
 }
@@ -2443,14 +2585,23 @@ static bool tool_sort_uniq(const char *input, char *result, size_t rlen) {
     bool unique = json_get_bool(input, "unique", false);
     bool count = json_get_bool(input, "count", false);
     if (!file) { snprintf(result, rlen, "error: file required"); return false; }
-    char cmd[4096];
-    if (count)
-        snprintf(cmd, sizeof(cmd), "sort '%s' | uniq -c | sort -rn | head -50", file);
-    else if (unique)
-        snprintf(cmd, sizeof(cmd), "sort -u '%s' | head -200", file);
-    else
-        snprintf(cmd, sizeof(cmd), "sort '%s' | head -200", file);
-    run_cmd(cmd, result, rlen);
+    jbuf_t cmd;
+    jbuf_init(&cmd, 64 + strlen(file));
+    if (count) {
+        jbuf_append(&cmd, "sort ");
+        shell_quote(&cmd, file);
+        jbuf_append(&cmd, " | uniq -c | sort -rn | head -50");
+    } else if (unique) {
+        jbuf_append(&cmd, "sort -u ");
+        shell_quote(&cmd, file);
+        jbuf_append(&cmd, " | head -200");
+    } else {
+        jbuf_append(&cmd, "sort ");
+        shell_quote(&cmd, file);
+        jbuf_append(&cmd, " | head -200");
+    }
+    run_cmd(cmd.data, result, rlen);
+    jbuf_free(&cmd);
     free(file);
     return true;
 }
@@ -2462,9 +2613,14 @@ static bool tool_diff(const char *input, char *result, size_t rlen) {
         snprintf(result, rlen, "error: file1 and file2 required");
         free(file1); free(file2); return false;
     }
-    char cmd[8192];
-    snprintf(cmd, sizeof(cmd), "diff -u '%s' '%s'", file1, file2);
-    run_cmd(cmd, result, rlen);
+    jbuf_t cmd;
+    jbuf_init(&cmd, 64 + strlen(file1) + strlen(file2));
+    jbuf_append(&cmd, "diff -u ");
+    shell_quote(&cmd, file1);
+    jbuf_append(&cmd, " ");
+    shell_quote(&cmd, file2);
+    run_cmd(cmd.data, result, rlen);
+    jbuf_free(&cmd);
     free(file1); free(file2);
     return true;
 }
@@ -2486,9 +2642,14 @@ static bool tool_patch(const char *input, char *result, size_t rlen) {
     write(fd, patch_content, strlen(patch_content));
     close(fd);
 
-    char cmd[8192];
-    snprintf(cmd, sizeof(cmd), "patch '%s' < '%s'", file, tmpfile);
-    int status = run_cmd(cmd, result, rlen);
+    jbuf_t cmd;
+    jbuf_init(&cmd, 64 + strlen(file) + strlen(tmpfile));
+    jbuf_append(&cmd, "patch ");
+    shell_quote(&cmd, file);
+    jbuf_append(&cmd, " -i ");
+    shell_quote(&cmd, tmpfile);
+    int status = run_cmd(cmd.data, result, rlen);
+    jbuf_free(&cmd);
     unlink(tmpfile);
     free(file); free(patch_content);
     return (status == 0);
@@ -2502,15 +2663,27 @@ static bool tool_jq(const char *input, char *result, size_t rlen) {
         snprintf(result, rlen, "error: filter required");
         free(json_input); free(file); return false;
     }
-    char cmd[8192];
     if (file) {
-        snprintf(cmd, sizeof(cmd), "jq '%s' '%s'", filter, file);
+        jbuf_t cmd;
+        jbuf_init(&cmd, 64 + strlen(filter) + strlen(file));
+        jbuf_append(&cmd, "jq ");
+        shell_quote(&cmd, filter);
+        jbuf_append(&cmd, " ");
+        shell_quote(&cmd, file);
+        run_cmd(cmd.data, result, rlen);
+        jbuf_free(&cmd);
     } else if (json_input) {
         char tmpfile[] = "/tmp/dsco_jq_XXXXXX";
         int fd = mkstemp(tmpfile);
         if (fd >= 0) { write(fd, json_input, strlen(json_input)); close(fd); }
-        snprintf(cmd, sizeof(cmd), "jq '%s' '%s'", filter, tmpfile);
-        run_cmd(cmd, result, rlen);
+        jbuf_t cmd;
+        jbuf_init(&cmd, 64 + strlen(filter) + strlen(tmpfile));
+        jbuf_append(&cmd, "jq ");
+        shell_quote(&cmd, filter);
+        jbuf_append(&cmd, " ");
+        shell_quote(&cmd, tmpfile);
+        run_cmd(cmd.data, result, rlen);
+        jbuf_free(&cmd);
         unlink(tmpfile);
         free(filter); free(json_input); free(file);
         return true;
@@ -2518,7 +2691,6 @@ static bool tool_jq(const char *input, char *result, size_t rlen) {
         snprintf(result, rlen, "error: input or file required");
         free(filter); free(json_input); free(file); return false;
     }
-    run_cmd(cmd, result, rlen);
     free(filter); free(json_input); free(file);
     return true;
 }
@@ -2662,13 +2834,18 @@ static bool tool_http_request(const char *input, char *result, size_t rlen) {
         return false;
     }
     if (!method) method = safe_strdup("GET");
+    if (!http_method_is_safe(method)) {
+        snprintf(result, rlen, "error: unsafe http method");
+        free(url); free(method); free(headers_str); free(body);
+        return false;
+    }
 
     jbuf_t cmd;
     jbuf_init(&cmd, 4096);
     jbuf_append(&cmd, "curl -sS");
     if (include_headers) jbuf_append(&cmd, " -i");
     jbuf_append(&cmd, " -X ");
-    jbuf_append(&cmd, method);
+    shell_quote(&cmd, method);
     jbuf_append(&cmd, " --max-time ");
     char timeout_str[16]; snprintf(timeout_str, sizeof(timeout_str), "%d", timeout);
     jbuf_append(&cmd, timeout_str);
@@ -2677,9 +2854,8 @@ static bool tool_http_request(const char *input, char *result, size_t rlen) {
         char *hcopy = safe_strdup(headers_str);
         char *hdr = strtok(hcopy, "\n");
         while (hdr) {
-            jbuf_append(&cmd, " -H '");
-            jbuf_append(&cmd, hdr);
-            jbuf_append(&cmd, "'");
+            jbuf_append(&cmd, " -H ");
+            shell_quote(&cmd, hdr);
             hdr = strtok(NULL, "\n");
         }
         free(hcopy);
@@ -2692,14 +2868,13 @@ static bool tool_http_request(const char *input, char *result, size_t rlen) {
         if (fd >= 0) {
             write(fd, body, strlen(body));
             close(fd);
-            jbuf_append(&cmd, " -d @");
-            jbuf_append(&cmd, body_tmpfile);
+            jbuf_append(&cmd, " --data-binary @");
+            shell_quote(&cmd, body_tmpfile);
         }
     }
 
-    jbuf_append(&cmd, " '");
-    jbuf_append(&cmd, url);
-    jbuf_append(&cmd, "'");
+    jbuf_append(&cmd, " ");
+    shell_quote(&cmd, url);
 
     int status = run_cmd(cmd.data, result, rlen);
     if (body_tmpfile[0]) unlink(body_tmpfile);
@@ -4046,16 +4221,24 @@ static bool tool_json_api(const char *input, char *result, size_t rlen) {
         free(method); free(body); free(auth); return false;
     }
     if (!method) method = safe_strdup("GET");
+    if (!http_method_is_safe(method)) {
+        snprintf(result, rlen, "error: unsafe http method");
+        free(url); free(method); free(body); free(auth); return false;
+    }
 
     jbuf_t cmd;
     jbuf_init(&cmd, 4096);
     jbuf_append(&cmd, "curl -sS -X ");
-    jbuf_append(&cmd, method);
+    shell_quote(&cmd, method);
     jbuf_append(&cmd, " -H 'Content-Type: application/json' -H 'Accept: application/json'");
     if (auth) {
-        jbuf_append(&cmd, " -H 'Authorization: ");
-        jbuf_append(&cmd, auth);
-        jbuf_append(&cmd, "'");
+        jbuf_t auth_hdr;
+        jbuf_init(&auth_hdr, strlen(auth) + 32);
+        jbuf_append(&auth_hdr, "Authorization: ");
+        jbuf_append(&auth_hdr, auth);
+        jbuf_append(&cmd, " -H ");
+        shell_quote(&cmd, auth_hdr.data ? auth_hdr.data : "Authorization:");
+        jbuf_free(&auth_hdr);
     }
     char json_tmpfile[32] = "";
     if (body) {
@@ -4064,13 +4247,12 @@ static bool tool_json_api(const char *input, char *result, size_t rlen) {
         if (fd >= 0) {
             write(fd, body, strlen(body));
             close(fd);
-            jbuf_append(&cmd, " -d @");
-            jbuf_append(&cmd, json_tmpfile);
+            jbuf_append(&cmd, " --data-binary @");
+            shell_quote(&cmd, json_tmpfile);
         }
     }
-    jbuf_append(&cmd, " '");
-    jbuf_append(&cmd, url);
-    jbuf_append(&cmd, "'");
+    jbuf_append(&cmd, " ");
+    shell_quote(&cmd, url);
 
     run_cmd(cmd.data, result, rlen);
     if (json_tmpfile[0]) unlink(json_tmpfile);
@@ -4134,6 +4316,10 @@ static bool tool_ssh_command(const char *input, char *result, size_t rlen) {
     char *key = json_get_str(input, "key");
     if (!host || !command) {
         snprintf(result, rlen, "error: host and command required");
+        free(host); free(command); free(user); free(key); return false;
+    }
+    if (!ssh_target_atom_is_safe(host) || (user && user[0] && !ssh_target_atom_is_safe(user))) {
+        snprintf(result, rlen, "error: unsafe ssh host/user");
         free(host); free(command); free(user); free(key); return false;
     }
     jbuf_t cmd;
@@ -8927,9 +9113,12 @@ static bool tool_plugin_list(const char *input, char *result, size_t rlen) {
     return true;
 }
 
+static void tool_map_rebuild(void);  /* forward decl */
+
 static bool tool_plugin_reload(const char *input, char *result, size_t rlen) {
     (void)input;
     plugin_reload(&g_plugins);
+    tool_map_rebuild();
     snprintf(result, rlen, "Plugins reloaded. %d plugins loaded, %d extra tools.",
              g_plugins.count, g_plugins.extra_tool_count);
     return true;
@@ -8942,11 +9131,12 @@ static bool tool_plugin_load_file(const char *input, char *result, size_t rlen) 
         return false;
     }
     bool ok = plugin_load(&g_plugins, path);
-    if (ok)
+    if (ok) {
+        tool_map_rebuild();
         snprintf(result, rlen, "Plugin loaded: %s (%d tools)",
                  g_plugins.plugins[g_plugins.count - 1].name,
                  g_plugins.plugins[g_plugins.count - 1].tool_count);
-    else
+    } else
         snprintf(result, rlen, "error: failed to load plugin from %s", path);
     free(path);
     return ok;
@@ -11810,7 +12000,6 @@ void tools_init(void) {
     ipc_register(parent, depth, getenv("DSCO_SUBAGENT") ? "worker" : "root", "*");
 
     /* Build hash map for O(1) tool lookup */
-    extern void tool_map_rebuild(void);  /* defined below */
     tool_map_rebuild();
 }
 
@@ -11851,6 +12040,7 @@ void tool_map_free(tool_map_t *m) {
 }
 
 void tool_map_insert(tool_map_t *m, const char *name, int index) {
+    if (tool_map_lookup(m, name) >= 0) return;
     unsigned h = tool_name_hash(name) % TOOL_MAP_BUCKETS;
     tool_map_entry_t *e = malloc(sizeof(tool_map_entry_t));
     if (!e) return;

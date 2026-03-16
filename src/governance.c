@@ -137,6 +137,48 @@ static agent_envelope_t *find_agent(governance_engine_t *g, const char *agent_id
     return NULL;
 }
 
+static bool action_contains_any(const char *action, const char *const *terms) {
+    if (!action || !terms) return false;
+    for (int i = 0; terms[i]; i++) {
+        if (strstr(action, terms[i])) return true;
+    }
+    return false;
+}
+
+static bool hardcoded_rule_blocks_action(const char *rule, const char *action) {
+    static const char *const kill_terms[] = {
+        "override_killswitch", "bypass_killswitch", "ignore_killswitch", "disable_killswitch", NULL
+    };
+    static const char *const budget_terms[] = {
+        "exceed_budget", "budget_overdraft", "spend_unbounded", NULL
+    };
+    static const char *const capability_terms[] = {
+        "claim_higher_tier", "fake_capability", "misrepresent_capability", NULL
+    };
+    static const char *const audit_terms[] = {
+        "suppress_audit", "falsify_audit", "disable_audit", NULL
+    };
+    static const char *const bounded_terms[] = {
+        "action_outside_bounds", "invalid_action_mode", NULL
+    };
+    static const char *const spawn_terms[] = {
+        "spawn_beyond_limit", "spawn_depth_exceeded", "spawn_count_exceeded", NULL
+    };
+    static const char *const auth_terms[] = {
+        "unauthorized_resource", "unauthorized_access", NULL
+    };
+
+    if (!rule || !action) return false;
+    if (strstr(rule, "kill switch")) return action_contains_any(action, kill_terms);
+    if (strstr(rule, "resource budget")) return action_contains_any(action, budget_terms);
+    if (strstr(rule, "capability tier")) return action_contains_any(action, capability_terms);
+    if (strstr(rule, "audit log")) return action_contains_any(action, audit_terms);
+    if (strstr(rule, "bounded action space")) return action_contains_any(action, bounded_terms);
+    if (strstr(rule, "Spawn agents")) return action_contains_any(action, spawn_terms);
+    if (strstr(rule, "Access resources")) return action_contains_any(action, auth_terms);
+    return false;
+}
+
 bool governance_register_agent(governance_engine_t *g, const char *agent_id,
                                principal_tier_t tier, double gsu_budget) {
     if (!g || !g->initialized || !agent_id) return false;
@@ -192,16 +234,8 @@ bool governance_check_hardcoded(const governance_engine_t *g,
 
     for (int i = 0; i < g->hardcoded_count; i++) {
         if (!g->hardcoded[i].active) continue;
-        if (g->hardcoded[i].type == HARDCODED_MUST_NEVER) {
-            /* Check if action matches a "must never" rule.
-               Simple substring match for now; in production this would
-               use a semantic matcher. */
-            if (strstr(action, "override_killswitch") ||
-                strstr(action, "falsify_audit") ||
-                strstr(action, "exceed_budget") ||
-                strstr(action, "bypass_safety")) {
-                return false;
-            }
+        if (hardcoded_rule_blocks_action(g->hardcoded[i].rule, action)) {
+            return false;
         }
     }
     return true;
@@ -322,6 +356,11 @@ bool governance_authorize(governance_engine_t *g, const char *agent_id,
     /* 3. Agent envelope check */
     const agent_envelope_t *a = governance_get_agent(g, agent_id);
     principal_tier_t tier = a ? a->tier : PRINCIPAL_TIER_3;
+    if (!a && gsu_cost > 0) {
+        audit_record(g, agent_id, action, gsu_cost, false, false, tier);
+        g->total_denials++;
+        return false;
+    }
 
     /* 4. Budget check */
     if (a && gsu_cost > 0) {
@@ -347,6 +386,7 @@ bool governance_can_do(const governance_engine_t *g, const char *agent_id,
     if (!governance_check_hardcoded(g, action)) return false;
 
     const agent_envelope_t *a = governance_get_agent(g, agent_id);
+    if (!a && gsu_cost > 0) return false;
     if (a && gsu_cost > 0) {
         double remaining = a->budget.allocated - a->budget.consumed - a->budget.reserved;
         if (gsu_cost > remaining) return false;

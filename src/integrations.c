@@ -11,6 +11,7 @@
 #include "integrations.h"
 #include "json_util.h"
 #include "config.h"
+#include <ctype.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -36,6 +37,98 @@ static size_t http_write_cb(void *ptr, size_t size, size_t nmemb, void *userdata
     b->len += total;
     b->data[b->len] = '\0';
     return total;
+}
+
+static bool host_has_only_safe_chars(const char *s) {
+    if (!s || !s[0]) return false;
+    for (const unsigned char *p = (const unsigned char *)s; *p; p++) {
+        if (isalnum(*p) || *p == '.' || *p == '-' || *p == ':') continue;
+        return false;
+    }
+    return true;
+}
+
+static bool identifier_token_is_safe(const char *s) {
+    if (!s || !s[0] || strstr(s, "..")) return false;
+    for (const unsigned char *p = (const unsigned char *)s; *p; p++) {
+        if (isalnum(*p) || *p == '.' || *p == '_' || *p == '-') continue;
+        return false;
+    }
+    return true;
+}
+
+static bool slash_identifier_is_safe(const char *s) {
+    if (!s || !s[0] || strstr(s, "..")) return false;
+
+    const char *seg = s;
+    for (const char *p = s; ; p++) {
+        if (*p == '/' || *p == '\0') {
+            char part[256];
+            size_t len = (size_t)(p - seg);
+            if (len == 0 || len >= sizeof(part)) return false;
+            memcpy(part, seg, len);
+            part[len] = '\0';
+            if (!identifier_token_is_safe(part)) return false;
+            if (*p == '\0') break;
+            seg = p + 1;
+        } else if (!(isalnum((unsigned char)*p) || *p == '.' || *p == '_' || *p == '-')) {
+            return false;
+        }
+    }
+    return true;
+}
+
+static bool github_repo_is_safe(const char *repo) {
+    if (!repo || !repo[0]) return false;
+    const char *slash = strchr(repo, '/');
+    if (!slash || slash == repo || slash[1] == '\0' || strchr(slash + 1, '/')) {
+        return false;
+    }
+    return slash_identifier_is_safe(repo);
+}
+
+static bool hf_model_id_is_safe(const char *model) {
+    return slash_identifier_is_safe(model);
+}
+
+static bool external_http_url_is_public(const char *url) {
+    if (!url) return false;
+    const char *scheme = NULL;
+    if (strncmp(url, "http://", 7) == 0) scheme = url + 7;
+    else if (strncmp(url, "https://", 8) == 0) scheme = url + 8;
+    else return false;
+
+    char host[256];
+    size_t host_len = 0;
+    if (*scheme == '[') {
+        scheme++;
+        const char *end = strchr(scheme, ']');
+        if (!end) return false;
+        host_len = (size_t)(end - scheme);
+    } else {
+        const char *end = scheme;
+        while (*end && *end != '/' && *end != ':' && *end != '?' && *end != '#') end++;
+        host_len = (size_t)(end - scheme);
+    }
+    if (host_len == 0 || host_len >= sizeof(host)) return false;
+    memcpy(host, scheme, host_len);
+    host[host_len] = '\0';
+    for (size_t i = 0; host[i]; i++) host[i] = (char)tolower((unsigned char)host[i]);
+
+    if (strcmp(host, "localhost") == 0 || strcmp(host, "::1") == 0 ||
+        strcmp(host, "[::1]") == 0) {
+        return false;
+    }
+    if (strncmp(host, "127.", 4) == 0 || strncmp(host, "10.", 3) == 0 ||
+        strncmp(host, "192.168.", 8) == 0 || strncmp(host, "169.254.", 8) == 0 ||
+        strncmp(host, "0.", 2) == 0) {
+        return false;
+    }
+    if (strncmp(host, "172.", 4) == 0) {
+        int second = atoi(host + 4);
+        if (second >= 16 && second <= 31) return false;
+    }
+    return true;
 }
 
 /* Perform an HTTP request with JSON body and custom headers.
@@ -269,12 +362,14 @@ static bool github_api(const char *path, const char *method, const char *body,
                          char *result, size_t rlen) {
     const char *token;
     if (!require_key("GITHUB_TOKEN", "GitHub", result, rlen, &token)) return false;
+    if (!path || path[0] != '/' || strncmp(path, "http://", 7) == 0 ||
+        strncmp(path, "https://", 8) == 0) {
+        snprintf(result, rlen, "GitHub API path must start with '/'");
+        return false;
+    }
 
     char url[2048];
-    if (strncmp(path, "http", 4) == 0)
-        snprintf(url, sizeof(url), "%s", path);
-    else
-        snprintf(url, sizeof(url), "https://api.github.com%s", path);
+    snprintf(url, sizeof(url), "https://api.github.com%s", path);
 
     char auth[512];
     snprintf(auth, sizeof(auth), "Authorization: Bearer %s", token);
@@ -350,6 +445,11 @@ bool tool_github_issue(const char *input, char *result, size_t rlen) {
         snprintf(result, rlen, "missing required parameter: repo (e.g. owner/name)");
         return false;
     }
+    if (!github_repo_is_safe(repo)) {
+        free(repo);
+        snprintf(result, rlen, "invalid repo format");
+        return false;
+    }
 
     char path[512];
     if (number > 0)
@@ -367,6 +467,11 @@ bool tool_github_pr(const char *input, char *result, size_t rlen) {
     if (!repo || !repo[0]) {
         free(repo);
         snprintf(result, rlen, "missing required parameter: repo");
+        return false;
+    }
+    if (!github_repo_is_safe(repo)) {
+        free(repo);
+        snprintf(result, rlen, "invalid repo format");
         return false;
     }
 
@@ -480,18 +585,20 @@ static bool av_query(const char *function, const char *params,
     if (!require_key("ALPHA_VANTAGE_API_KEY", "Alpha Vantage", result, rlen, &api_key))
         return false;
 
-    char url[2048];
-    if (params && params[0])
-        snprintf(url, sizeof(url),
-                 "https://www.alphavantage.co/query?function=%s&%s&apikey=%s",
-                 function, params, api_key);
-    else
-        snprintf(url, sizeof(url),
-                 "https://www.alphavantage.co/query?function=%s&apikey=%s",
-                 function, api_key);
+    jbuf_t url;
+    jbuf_init(&url, 256 + strlen(function) + (params ? strlen(params) : 0) + strlen(api_key));
+    jbuf_append(&url, "https://www.alphavantage.co/query?function=");
+    jbuf_append(&url, function);
+    if (params && params[0]) {
+        jbuf_append(&url, "&");
+        jbuf_append(&url, params);
+    }
+    jbuf_append(&url, "&apikey=");
+    jbuf_append(&url, api_key);
 
     http_buf_t resp = {0};
-    long status = http_get_authed(url, NULL, &resp);
+    long status = http_get_authed(url.data, NULL, &resp);
+    jbuf_free(&url);
 
     if (status != 200) {
         snprintf(result, rlen, "Alpha Vantage error (HTTP %ld)", status);
@@ -602,18 +709,37 @@ static bool av_generic(const char *av_func, const char *input,
         free(v);
     }
 
-    char params[4096] = "";
-    int off = 0;
+    CURL *curl = curl_easy_init();
+    if (!curl) {
+        snprintf(result, rlen, "curl init failed");
+        return false;
+    }
+    jbuf_t params;
+    jbuf_init(&params, 512);
     for (int i = 0; av_param_names[i]; i++) {
         char *val = json_val_str(input, av_param_names[i]);
         if (val && val[0]) {
-            off += snprintf(params + off, (int)sizeof(params) - off,
-                            "%s%s=%s", off ? "&" : "", av_param_names[i], val);
+            char *enc = curl_easy_escape(curl, val, 0);
+            if (!enc) {
+                free(val);
+                jbuf_free(&params);
+                curl_easy_cleanup(curl);
+                snprintf(result, rlen, "failed to encode parameter: %s", av_param_names[i]);
+                return false;
+            }
+            if (params.len > 0) jbuf_append(&params, "&");
+            jbuf_append(&params, av_param_names[i]);
+            jbuf_append(&params, "=");
+            jbuf_append(&params, enc);
+            curl_free(enc);
         }
         free(val);
     }
 
-    return av_query(av_func, off ? params : NULL, result, rlen);
+    bool ok = av_query(av_func, params.len > 0 ? params.data : NULL, result, rlen);
+    jbuf_free(&params);
+    curl_easy_cleanup(curl);
+    return ok;
 }
 
 /* ── Macro-generated tool wrappers ────────────────────────────────────── */
@@ -794,12 +920,31 @@ bool tool_fred_series(const char *input, char *result, size_t rlen) {
 
     int limit = json_get_int(input, "limit", 30);
     char *sort = json_get_str(input, "sort_order");
+    const char *sort_order = (sort && strcmp(sort, "asc") == 0) ? "asc" : "desc";
+
+    CURL *curl = curl_easy_init();
+    if (!curl) {
+        free(series_id);
+        free(sort);
+        snprintf(result, rlen, "curl init failed");
+        return false;
+    }
+    char *enc_series = curl_easy_escape(curl, series_id, 0);
+    if (!enc_series) {
+        curl_easy_cleanup(curl);
+        free(series_id);
+        free(sort);
+        snprintf(result, rlen, "failed to encode series_id");
+        return false;
+    }
 
     char url[2048];
     snprintf(url, sizeof(url),
              "https://api.stlouisfed.org/fred/series/observations"
              "?series_id=%s&api_key=%s&file_type=json&limit=%d&sort_order=%s",
-             series_id, api_key, limit, sort ? sort : "desc");
+             enc_series, api_key, limit, sort_order);
+    curl_free(enc_series);
+    curl_easy_cleanup(curl);
 
     free(series_id);
     free(sort);
@@ -1072,9 +1217,16 @@ bool tool_jina_read(const char *input, char *result, size_t rlen) {
         snprintf(result, rlen, "missing required parameter: url");
         return false;
     }
+    if (!external_http_url_is_public(url_str)) {
+        free(url_str);
+        snprintf(result, rlen, "url must be a public http(s) target");
+        return false;
+    }
 
-    char jina_url[2048];
-    snprintf(jina_url, sizeof(jina_url), "https://r.jina.ai/%s", url_str);
+    jbuf_t jina_url;
+    jbuf_init(&jina_url, 64 + strlen(url_str));
+    jbuf_append(&jina_url, "https://r.jina.ai/");
+    jbuf_append(&jina_url, url_str);
     free(url_str);
 
     const char *jina_key = getenv("JINA_API_KEY");
@@ -1083,7 +1235,8 @@ bool tool_jina_read(const char *input, char *result, size_t rlen) {
         snprintf(auth, sizeof(auth), "Authorization: Bearer %s", jina_key);
 
     http_buf_t resp = {0};
-    long status = http_get_authed(jina_url, auth[0] ? auth : NULL, &resp);
+    long status = http_get_authed(jina_url.data, auth[0] ? auth : NULL, &resp);
+    jbuf_free(&jina_url);
 
     if (status != 200) {
         snprintf(result, rlen, "Jina Reader error (HTTP %ld)", status);
@@ -1324,6 +1477,11 @@ bool tool_pinecone_query(const char *input, char *result, size_t rlen) {
     char *host = json_get_str(input, "host");
     int top_k = json_get_int(input, "top_k", 5);
     if (!host || !host[0]) { free(host); snprintf(result, rlen, "missing: host (Pinecone index URL)"); return false; }
+    if (!host_has_only_safe_chars(host)) {
+        free(host);
+        snprintf(result, rlen, "invalid Pinecone host");
+        return false;
+    }
 
     char url[2048]; snprintf(url, sizeof(url), "https://%s/query", host);
     jbuf_t body; jbuf_init(&body, 256);
@@ -1381,28 +1539,48 @@ bool tool_supabase_query(const char *input, char *result, size_t rlen) {
     char *table = json_get_str(input, "table");
     char *select = json_get_str(input, "select");
     if (!table || !table[0]) { free(table); free(select); snprintf(result, rlen, "missing: table"); return false; }
+    if (!identifier_token_is_safe(table)) {
+        free(table); free(select);
+        snprintf(result, rlen, "invalid table name");
+        return false;
+    }
 
+    CURL *curl = curl_easy_init();
+    if (!curl) {
+        free(table); free(select);
+        snprintf(result, rlen, "curl init failed");
+        return false;
+    }
+    char *enc_select = curl_easy_escape(curl, (select && select[0]) ? select : "*", 0);
+    if (!enc_select) {
+        curl_easy_cleanup(curl);
+        free(table); free(select);
+        snprintf(result, rlen, "failed to encode select");
+        return false;
+    }
     char url[2048];
-    snprintf(url, sizeof(url), "%s/rest/v1/%s?select=%s", supabase_url, table, (select && select[0]) ? select : "*");
+    snprintf(url, sizeof(url), "%s/rest/v1/%s?select=%s", supabase_url, table, enc_select);
+    curl_free(enc_select);
+    curl_easy_cleanup(curl);
     char auth[512]; snprintf(auth, sizeof(auth), "Authorization: Bearer %s", api_key);
     char apikey_hdr[512]; snprintf(apikey_hdr, sizeof(apikey_hdr), "apikey: %s", api_key);
 
-    CURL *curl = curl_easy_init();
+    CURL *curl2 = curl_easy_init();
     http_buf_t resp = {0};
     resp.data = malloc(8192); resp.len = 0; resp.cap = 8192; resp.data[0] = '\0';
     struct curl_slist *hdrs = NULL;
     hdrs = curl_slist_append(hdrs, "Accept: application/json");
     hdrs = curl_slist_append(hdrs, auth);
     hdrs = curl_slist_append(hdrs, apikey_hdr);
-    curl_easy_setopt(curl, CURLOPT_URL, url);
-    curl_easy_setopt(curl, CURLOPT_HTTPHEADER, hdrs);
-    curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, http_write_cb);
-    curl_easy_setopt(curl, CURLOPT_WRITEDATA, &resp);
-    curl_easy_setopt(curl, CURLOPT_TIMEOUT, 30L);
-    CURLcode res = curl_easy_perform(curl);
+    curl_easy_setopt(curl2, CURLOPT_URL, url);
+    curl_easy_setopt(curl2, CURLOPT_HTTPHEADER, hdrs);
+    curl_easy_setopt(curl2, CURLOPT_WRITEFUNCTION, http_write_cb);
+    curl_easy_setopt(curl2, CURLOPT_WRITEDATA, &resp);
+    curl_easy_setopt(curl2, CURLOPT_TIMEOUT, 30L);
+    CURLcode res = curl_easy_perform(curl2);
     long status = 0;
-    if (res == CURLE_OK) curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, &status);
-    curl_slist_free_all(hdrs); curl_easy_cleanup(curl);
+    if (res == CURLE_OK) curl_easy_getinfo(curl2, CURLINFO_RESPONSE_CODE, &status);
+    curl_slist_free_all(hdrs); curl_easy_cleanup(curl2);
     free(table); free(select);
 
     if (status != 200) { snprintf(result, rlen, "Supabase error (HTTP %ld)", status); free(resp.data); return false; }
@@ -1421,6 +1599,11 @@ bool tool_huggingface(const char *input, char *result, size_t rlen) {
     char *model = json_get_str(input, "model");
     char *text = json_get_str(input, "text");
     if (!model || !model[0] || !text || !text[0]) { free(model); free(text); snprintf(result, rlen, "missing: model, text"); return false; }
+    if (!hf_model_id_is_safe(model)) {
+        free(model); free(text);
+        snprintf(result, rlen, "invalid model id");
+        return false;
+    }
 
     char url[512]; snprintf(url, sizeof(url), "https://api-inference.huggingface.co/models/%s", model);
     jbuf_t body; jbuf_init(&body, 256);
@@ -1445,6 +1628,11 @@ bool tool_github_actions(const char *input, char *result, size_t rlen) {
     char *repo = json_get_str(input, "repo");
     char *action = json_get_str(input, "action");
     if (!repo || !repo[0]) { free(repo); free(action); snprintf(result, rlen, "missing: repo"); return false; }
+    if (!github_repo_is_safe(repo)) {
+        free(repo); free(action);
+        snprintf(result, rlen, "invalid repo format");
+        return false;
+    }
     const char *act = (action && action[0]) ? action : "list_runs";
 
     char url[512];
