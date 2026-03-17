@@ -14,6 +14,19 @@ void baseline_stop(void);
 bool baseline_log(const char *category, const char *title,
                   const char *detail, const char *metadata_json);
 
+/* Record a timeline event with token usage and cost attribution. */
+bool baseline_log_usage(const char *category, const char *title,
+                        const char *detail, const char *metadata_json,
+                        int input_tokens, int output_tokens,
+                        int cache_read_tokens, int cache_write_tokens);
+
+/* Credit report: aggregate token/cost for instance tree rooted at given id.
+   Pass NULL to use current instance. Returns malloc'd JSON string. Caller frees. */
+char *baseline_credit_report(const char *root_instance_id);
+
+/* Query total est_cost_usd for all events logged today (UTC). */
+double baseline_daily_cost(void);
+
 /* Current instance id and SQLite file path. Empty string if not started. */
 const char *baseline_instance_id(void);
 const char *baseline_db_path(void);
@@ -50,5 +63,10 @@ void trace_query_recent(int limit);
 
 /* Print timing waterfall for a specific trace */
 void trace_print_waterfall(const char *trace_id);
+
+/* §8: VFS bridge — mirror events to unified persistence layer */
+struct vfs_db;
+typedef struct vfs_db vfs_db_t;
+void baseline_set_vfs(vfs_db_t *vfs);
 
 #endif

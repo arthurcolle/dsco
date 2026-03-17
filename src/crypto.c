@@ -347,7 +347,7 @@ size_t base64_decode(const char *src, size_t src_len, uint8_t *dst, size_t dst_l
 }
 
 size_t base64url_encode(const uint8_t *src, size_t src_len, char *dst, size_t dst_len) {
-    return b64_encode_internal(src, src_len, dst, dst_len, B64URL_TABLE, false);
+    return b64_encode_internal(src, src_len, dst, dst_len, B64URL_TABLE, true);
 }
 
 size_t base64url_decode(const char *src, size_t src_len, uint8_t *dst, size_t dst_len) {
