@@ -5,6 +5,7 @@
 #include <stddef.h>
 #include <pthread.h>
 #include "swarm.h"
+#include "vm.h"
 
 /* Tool definition */
 typedef struct {
@@ -30,6 +31,10 @@ bool             tools_execute_for_tier(const char *name, const char *input_json
                                         char *result, size_t result_len);
 bool             tools_is_allowed_for_tier(const char *name, const char *tier,
                                            char *reason, size_t reason_len);
+
+/* ── VM dispatch registration (§3: bytecode VM) ───────────────────────── */
+
+void             tools_register_vm_dispatch(vm_t *vm);
 
 /* ── Tool hash map for O(1) lookup ─────────────────────────────────────── */
 
@@ -134,5 +139,18 @@ int tool_timeout_for(const char *name);
 /* JSON schema validation before tool dispatch */
 bool tools_validate_input(const char *name, const char *input_json,
                           char *error_buf, size_t error_len);
+
+/* ── Tool retrieval: context-aware subset selection ─────────────────── */
+
+/* Score and select tools relevant to the conversation context.
+ * Returns indices into s_tools[] array sorted by relevance.
+ * `context` is the last user message or task description.
+ * `max_tools` caps the output. Always includes core tools.
+ * Returns number of tools selected. */
+int tools_retrieve(const char *context, int *out_indices, int max_tools);
+
+/* Get a filtered subset of tools based on context. Returns a malloc'd
+ * array of tool_def_t pointers. Caller frees the array (not the tools). */
+const tool_def_t **tools_get_filtered(const char *context, int max_tools, int *out_count);
 
 #endif
