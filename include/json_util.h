@@ -88,6 +88,7 @@ char *json_get_str(const char *json, const char *key);
 char *json_get_raw(const char *json, const char *key);
 int   json_get_int(const char *json, const char *key, int def);
 bool  json_get_bool(const char *json, const char *key, bool def);
+double json_get_double(const char *json, const char *key, double def);
 
 /* JSON array iteration helpers */
 typedef void (*json_array_cb)(const char *element_start, void *ctx);

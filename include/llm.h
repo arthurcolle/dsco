@@ -153,6 +153,7 @@ void  conv_add_user_document(conversation_t *c, const char *media_type,
                               const char *text);
 
 void  conv_pop_last(conversation_t *c);
+void  conv_ensure_tool_results(conversation_t *c);
 void  conv_trim_old_results(conversation_t *c, int keep_recent, int max_chars);
 
 bool  conv_save(conversation_t *c, const char *path);
