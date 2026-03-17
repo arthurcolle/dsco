@@ -188,9 +188,64 @@ bool tool_huggingface(const char *input, char *result, size_t rlen);
 /* ── Prediction Markets (Polymarket) — public, no auth ─────────────────── */
 bool tool_polymarket_markets(const char *input, char *result, size_t rlen);
 bool tool_polymarket_events(const char *input, char *result, size_t rlen);
+bool tool_polymarket_categories(const char *input, char *result, size_t rlen);
 bool tool_polymarket_prices(const char *input, char *result, size_t rlen);
 bool tool_polymarket_book(const char *input, char *result, size_t rlen);
 bool tool_polymarket_trades(const char *input, char *result, size_t rlen);
 bool tool_polymarket_search(const char *input, char *result, size_t rlen);
+
+/* ── Prediction Markets (Kalshi) — public read, auth for trading ───────── */
+bool tool_kalshi_events(const char *input, char *result, size_t rlen);
+bool tool_kalshi_markets(const char *input, char *result, size_t rlen);
+bool tool_kalshi_orderbook(const char *input, char *result, size_t rlen);
+bool tool_kalshi_trades(const char *input, char *result, size_t rlen);
+bool tool_kalshi_series(const char *input, char *result, size_t rlen);
+bool tool_kalshi_search(const char *input, char *result, size_t rlen);
+bool tool_kalshi_candlesticks(const char *input, char *result, size_t rlen);
+bool tool_kalshi_weather(const char *input, char *result, size_t rlen);
+bool tool_kalshi_market_snapshot(const char *input, char *result, size_t rlen);
+bool tool_kalshi_event_detail(const char *input, char *result, size_t rlen);
+bool tool_kalshi_daily_markets(const char *input, char *result, size_t rlen);
+bool tool_cross_platform_delta(const char *input, char *result, size_t rlen);
+bool tool_market_movers(const char *input, char *result, size_t rlen);
+bool tool_market_cache_refresh(const char *input, char *result, size_t rlen);
+bool tool_market_cache_query(const char *input, char *result, size_t rlen);
+bool tool_kalshi_historical_markets(const char *input, char *result, size_t rlen);
+bool tool_kalshi_historical_trades(const char *input, char *result, size_t rlen);
+bool tool_kalshi_historical_cutoff(const char *input, char *result, size_t rlen);
+bool tool_polymarket_resolved(const char *input, char *result, size_t rlen);
+bool tool_polymarket_resolved_events(const char *input, char *result, size_t rlen);
+bool tool_historical_cross_platform(const char *input, char *result, size_t rlen);
+bool tool_systematic_ingest_polymarket(const char *input, char *result, size_t rlen);
+bool tool_systematic_ingest_kalshi(const char *input, char *result, size_t rlen);
+bool tool_systematic_analytics(const char *input, char *result, size_t rlen);
+bool tool_systematic_signals(const char *input, char *result, size_t rlen);
+
+/* ── Systematic Strategy Engines ───────────────────────────────────────── */
+bool tool_strat_completeness(const char *input, char *result, size_t rlen);
+bool tool_strat_binary_fade(const char *input, char *result, size_t rlen);
+bool tool_strat_stale_snipe(const char *input, char *result, size_t rlen);
+bool tool_strat_kelly(const char *input, char *result, size_t rlen);
+bool tool_strat_spread_scan(const char *input, char *result, size_t rlen);
+
+/* ── Knowledge Base (PDF indexing + semantic search) ───────────────────── */
+bool tool_kb_ingest(const char *input, char *result, size_t rlen);
+bool tool_kb_search(const char *input, char *result, size_t rlen);
+bool tool_kb_list(const char *input, char *result, size_t rlen);
+bool tool_kb_get(const char *input, char *result, size_t rlen);
+bool tool_kb_delete(const char *input, char *result, size_t rlen);
+bool tool_arxiv_search(const char *input, char *result, size_t rlen);
+bool tool_arxiv_ingest(const char *input, char *result, size_t rlen);
+bool tool_kb_deep_search(const char *input, char *result, size_t rlen);
+
+/* ── Cross-Platform Prediction Intelligence ────────────────────────────── */
+bool tool_prediction_scan(const char *input, char *result, size_t rlen);
+bool tool_prediction_weather(const char *input, char *result, size_t rlen);
+bool tool_prediction_snapshot(const char *input, char *result, size_t rlen);
+bool tool_prediction_arb(const char *input, char *result, size_t rlen);
+bool tool_prediction_semantic_match(const char *input, char *result, size_t rlen);
+bool tool_polymarket_whale_trades(const char *input, char *result, size_t rlen);
+bool tool_polymarket_leaderboard(const char *input, char *result, size_t rlen);
+bool tool_polymarket_history(const char *input, char *result, size_t rlen);
 
 #endif

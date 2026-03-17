@@ -44,6 +44,7 @@
 #endif
 
 volatile int g_interrupted = 0;
+extern volatile int g_agent_exit_requested;
 
 /* Escape key state machine — first ESC pauses, second ESC cancels */
 typedef enum { ESC_RUNNING = 0, ESC_PAUSED = 1 } escape_state_t;
@@ -134,11 +135,11 @@ static bool rate_limiter_acquire(rate_limiter_t *rl) {
 
 /* ── Cost budget ───────────────────────────────────────────────────────── */
 
-static double g_cost_budget = 0.0;      /* 0 = unlimited */
-static double g_daily_budget = 0.0;     /* 0 = unlimited */
+static double g_cost_budget = 5.0;      /* default $5/session */
+static double g_daily_budget = 50.0;    /* default $50/day */
 
-/* Opt-in only. Set DSCO_BUDGET and/or DSCO_DAILY_BUDGET to enable.
-   Swarm children inherit a hard cap from parent via DSCO_CHILD_BUDGET. */
+/* Budgets default to $5/session and $50/day. Override with env vars.
+   Set to 0 to disable. Swarm children inherit DSCO_CHILD_BUDGET. */
 static void init_cost_budgets(void) {
     const char *sb = getenv("DSCO_BUDGET");
     if (sb && sb[0]) g_cost_budget = atof(sb);
@@ -1048,6 +1049,8 @@ static const slash_command_t s_slash_commands[] = {
     {"/flame",        "show tool flame timeline"},
     {"quit",          "exit dsco"},
     {"exit",          "exit dsco"},
+    {"/exit",         "exit dsco"},
+    {"/quit",         "exit dsco"},
     {NULL, NULL}
 };
 
@@ -1258,9 +1261,14 @@ static bool show_pause_menu(int cur_turn, int max_turns, double elapsed_sec) {
         tcsetattr(STDIN_FILENO, TCSANOW, &tio_raw);
     }
 
-    int max_t = max_turns > 0 ? max_turns : 1;
-    fprintf(stderr, "\n  %s⏸  paused%s  (turn %d/%d · %.0fs elapsed)\n",
-            TUI_YELLOW, TUI_RESET, cur_turn, max_t, elapsed_sec);
+    if (max_turns >= 999999) {
+        fprintf(stderr, "\n  %s⏸  paused%s  (turn %d/∞ · %.0fs elapsed)\n",
+                TUI_YELLOW, TUI_RESET, cur_turn, elapsed_sec);
+    } else {
+        int max_t = max_turns > 0 ? max_turns : 1;
+        fprintf(stderr, "\n  %s⏸  paused%s  (turn %d/%d · %.0fs elapsed)\n",
+                TUI_YELLOW, TUI_RESET, cur_turn, max_t, elapsed_sec);
+    }
     fprintf(stderr, "  %s[R]%s Resume  %s[C]%s Cancel  "
                     "%s(Esc again = cancel)%s  ▸ ",
             TUI_BOLD, TUI_RESET, TUI_BOLD, TUI_RESET, TUI_DIM, TUI_RESET);
@@ -1868,7 +1876,8 @@ void agent_run(const char *api_key, const char *model,
             }
         }
 
-        if (strcmp(input_buf, "quit") == 0 || strcmp(input_buf, "exit") == 0) break;
+        if (strcmp(input_buf, "quit") == 0 || strcmp(input_buf, "exit") == 0 ||
+            strcmp(input_buf, "/exit") == 0 || strcmp(input_buf, "/quit") == 0) break;
 
         /* ── Slash commands ────────────────────────────────────────────── */
 
@@ -3151,11 +3160,20 @@ void agent_run(const char *api_key, const char *model,
                 dash_total_tools += tool_metrics.entries[ti].calls;
 
             /* Session stats */
+            int max_t = dsco_max_agent_turns();
             fprintf(stderr, "  %s┌─ Session ───────────────────────────────────┐%s\n", TUI_DIM, TUI_RESET);
-            fprintf(stderr, "  %s│%s  Turns: %s%-6d%s  Tools: %s%-6d%s  Msgs: %s%-4d%s  %s│%s\n",
-                    TUI_DIM, TUI_RESET, TUI_BWHITE, session.turn_count, TUI_RESET,
-                    TUI_BWHITE, dash_total_tools, TUI_RESET,
-                    TUI_BWHITE, conv.count, TUI_RESET, TUI_DIM, TUI_RESET);
+            if (max_t >= 999999) {
+                fprintf(stderr, "  %s│%s  Turns: %s%-4d%s %s(∞)%s  Tools: %s%-4d%s  Msgs: %s%-4d%s  %s│%s\n",
+                        TUI_DIM, TUI_RESET, TUI_BWHITE, session.turn_count, TUI_RESET,
+                        TUI_DIM, TUI_RESET,
+                        TUI_BWHITE, dash_total_tools, TUI_RESET,
+                        TUI_BWHITE, conv.count, TUI_RESET, TUI_DIM, TUI_RESET);
+            } else {
+                fprintf(stderr, "  %s│%s  Turns: %s%d/%d%s  Tools: %s%-4d%s  Msgs: %s%-4d%s  %s│%s\n",
+                        TUI_DIM, TUI_RESET, TUI_BWHITE, session.turn_count, max_t, TUI_RESET,
+                        TUI_BWHITE, dash_total_tools, TUI_RESET,
+                        TUI_BWHITE, conv.count, TUI_RESET, TUI_DIM, TUI_RESET);
+            }
             fprintf(stderr, "  %s│%s  Model: %s%-20s%s  Trust: %s%-8s%s %s│%s\n",
                     TUI_DIM, TUI_RESET, TUI_BCYAN, mi ? mi->alias : session.model, TUI_RESET,
                     TUI_BYELLOW, session_trust_tier_to_string(session.trust_tier), TUI_RESET,
@@ -3473,9 +3491,9 @@ resume_turn_loop:
             s_in_text_block = false;
             md_reset(&s_md);
 
-            if (conv.count > 20) {
+            if (conv.count > 10) {
                 int before = conv.count;
-                conv_trim_old_results(&conv, 10, 512);
+                conv_trim_old_results(&conv, 6, 256);
                 /* F17: Auto-compact notification */
                 if (conv.count < before)
                     tui_compact_flash(before, conv.count);
@@ -3509,10 +3527,25 @@ resume_turn_loop:
                 int est_tokens = (int)(payload_chars / 4);
                 int ctx_limit = session.context_window > 0 ? session.context_window : CONTEXT_WINDOW_TOKENS;
                 if (est_tokens > (int)(ctx_limit * TOKEN_BUDGET_COMPACT)) {
-                    fprintf(stderr, "  \033[33m%s context pressure: ~%dk/%dk tokens (%.0f%%) — consider /compact\033[0m\n",
+                    /* Auto-compact instead of just warning (CMV research:
+                       39% savings on tool-heavy sessions, breaks even in
+                       10 turns even with cache invalidation) */
+                    conv_trim_old_results(&conv, 6, 128);
+                    free(req);
+                    req = g_provider
+                        ? g_provider->build_request(g_provider, &conv, &session, MAX_TOKENS)
+                        : llm_build_request_ex(&conv, &session, MAX_TOKENS);
+                    if (!req) {
+                        tui_error("failed to rebuild request after auto-compact");
+                        break;
+                    }
+                    size_t new_chars = strlen(req);
+                    int new_tokens = (int)(new_chars / 4);
+                    fprintf(stderr, "  \033[33m%s auto-compact: %dk→%dk tokens (%.0f%%→%.0f%%)\033[0m\n",
                             tui_glyph()->warn,
-                            est_tokens / 1000, ctx_limit / 1000,
-                            100.0 * est_tokens / ctx_limit);
+                            est_tokens / 1000, new_tokens / 1000,
+                            100.0 * est_tokens / ctx_limit,
+                            100.0 * new_tokens / ctx_limit);
                 }
             }
 
@@ -4235,6 +4268,8 @@ resume_turn_loop:
                 tui_warning("provider returned pause_turn repeatedly; ending turn");
                 done = true;
             }
+            /* Agent invoked self_exit tool — finish this turn then terminate */
+            if (g_agent_exit_requested) done = true;
             /* F34: Notification bell when multi-turn response completes */
             if (done && turns > 1) {
                 tui_notify("dsco", "response complete");
@@ -4322,6 +4357,9 @@ resume_turn_loop:
            bottom panel, causing input to appear in the middle. */
         fprintf(stderr, "\n");
         fflush(stderr);
+
+        /* Agent self-exit: break outer REPL loop after delivering final message */
+        if (g_agent_exit_requested) break;
 
         /* Periodic auto-save every 5 turns */
         if (session.turn_count % 5 == 0 && conv.count > 0) {
