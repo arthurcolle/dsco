@@ -1,6 +1,7 @@
 #include "tools.h"
 #include "error.h"
 #include "integrations.h"
+#include "trading.h"
 #include "json_util.h"
 #include "config.h"
 #include "ast.h"
@@ -15,7 +16,12 @@
 #include "trace.h"
 #include "provider.h"
 #include "topology.h"
+#include "task_profile.h"
 #include "workspace.h"
+#include "governance.h"
+#include "memory_tier.h"
+#include "talons.h"
+#include "vm.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -34,9 +40,13 @@
 #include <stdint.h>
 #include <ctype.h>
 #include <math.h>
+#include <curl/curl.h>
 #include <regex.h>
 
 extern volatile int g_interrupted;
+
+/* ── Agent self-exit flag (set by self_exit tool) ─────────────────────── */
+volatile int g_agent_exit_requested = 0;
 
 /* ── Global swarm instance (shared across tool calls) ─────────────────── */
 static swarm_t g_swarm = {0};
@@ -128,6 +138,46 @@ static bool require_regular_file(const char *path, char *result, size_t rlen) {
     return true;
 }
 
+/* Default swarm stream callback — streams child tokens to stderr in real-time.
+ * This is used by swarm_wait_any (agent_race), agent_wait, etc. so
+ * the user sees tokens from sub-agents as they arrive, not just at the end. */
+static void default_swarm_stream_cb(int child_id, const char *data, size_t len, void *ctx) {
+    (void)ctx;
+    if (!data || len == 0) return;
+
+    /* Buffer partial lines per child — use the child's stream_buf */
+    swarm_child_t *c = swarm_get(&g_swarm, child_id);
+    if (!c) return;
+
+    for (size_t i = 0; i < len; i++) {
+        unsigned char ch = (unsigned char)data[i];
+        if (ch == '\r') continue;
+
+        if (ch == '\n') {
+            /* Flush line */
+            if (c->stream_buf_len > 0) {
+                int display_len = (int)(c->stream_buf_len > 160 ? 160 : c->stream_buf_len);
+                fprintf(stderr, "  \033[2m│\033[0m \033[36m[agent %d]\033[0m %.*s%s\n",
+                        child_id, display_len, c->stream_buf,
+                        c->stream_buf_len > 160 ? "..." : "");
+                c->stream_buf_len = 0;
+                c->stream_buf[0] = '\0';
+            }
+            continue;
+        }
+
+        if (c->stream_buf_len >= 4095) {
+            int display_len = (int)(c->stream_buf_len > 160 ? 160 : c->stream_buf_len);
+            fprintf(stderr, "  \033[2m│\033[0m \033[36m[agent %d]\033[0m %.*s...\n",
+                    child_id, display_len, c->stream_buf);
+            c->stream_buf_len = 0;
+        }
+
+        c->stream_buf[c->stream_buf_len++] = (char)ch;
+        c->stream_buf[c->stream_buf_len] = '\0';
+    }
+}
+
 static void ensure_swarm(void) {
     if (!g_swarm_inited) {
         const char *model = tools_runtime_model();
@@ -137,6 +187,10 @@ static void ensure_swarm(void) {
             key = provider_resolve_api_key(provider);
         }
         swarm_init(&g_swarm, key, model);
+        swarm_detect_executors(&g_swarm);
+        /* Wire up default streaming so all poll paths emit tokens live */
+        g_swarm.stream_cb = default_swarm_stream_cb;
+        g_swarm.stream_ctx = NULL;
         g_swarm_inited = true;
     }
 }
@@ -403,6 +457,96 @@ static void shell_quote(jbuf_t *b, const char *s) {
         }
     }
     jbuf_append_char(b, '\'');
+}
+
+static bool mkdir_p_local(const char *path, mode_t mode) {
+    if (!path || !path[0]) return false;
+
+    char tmp[4096];
+    size_t n = strlen(path);
+    if (n >= sizeof(tmp)) return false;
+    memcpy(tmp, path, n + 1);
+
+    for (char *p = tmp + 1; *p; p++) {
+        if (*p != '/') continue;
+        *p = '\0';
+        if (tmp[0] != '\0' && mkdir(tmp, mode) != 0 && errno != EEXIST) {
+            return false;
+        }
+        *p = '/';
+    }
+
+    if (mkdir(tmp, mode) != 0 && errno != EEXIST) return false;
+    return true;
+}
+
+static bool ensure_parent_dir_local(const char *path) {
+    if (!path || !path[0]) return false;
+
+    char tmp[4096];
+    size_t n = strlen(path);
+    if (n >= sizeof(tmp)) return false;
+    memcpy(tmp, path, n + 1);
+
+    char *slash = strrchr(tmp, '/');
+    if (!slash) return true;
+    *slash = '\0';
+    if (tmp[0] == '\0') return true;
+    return mkdir_p_local(tmp, 0755);
+}
+
+static bool shell_fragment_has_forbidden_chars(const char *s) {
+    if (!s) return false;
+    for (const unsigned char *p = (const unsigned char *)s; *p; p++) {
+        switch (*p) {
+            case ';':
+            case '&':
+            case '|':
+            case '<':
+            case '>':
+            case '`':
+            case '$':
+            case '\\':
+            case '\'':
+            case '"':
+            case '\n':
+            case '\r':
+                return true;
+            default:
+                break;
+        }
+    }
+    return false;
+}
+
+static bool chmod_mode_is_safe(const char *mode) {
+    if (!mode || !mode[0]) return false;
+    for (const unsigned char *p = (const unsigned char *)mode; *p; p++) {
+        if ((*p >= '0' && *p <= '7') ||
+            strchr("rwxXstugo=,+-", (int)*p) != NULL) {
+            continue;
+        }
+        return false;
+    }
+    return true;
+}
+
+static bool http_method_is_safe(const char *method) {
+    if (!method || !method[0]) return false;
+    for (const unsigned char *p = (const unsigned char *)method; *p; p++) {
+        if (!isalpha(*p)) return false;
+    }
+    return true;
+}
+
+static bool ssh_target_atom_is_safe(const char *s) {
+    if (!s || !s[0]) return false;
+    for (const unsigned char *p = (const unsigned char *)s; *p; p++) {
+        if (isalnum(*p) || *p == '.' || *p == '-' || *p == '_' || *p == ':')
+            continue;
+        return false;
+    }
+    return true;
 }
 
 /* ═══════════════════════════════════════════════════════════════════════════
@@ -920,7 +1064,7 @@ static void ctx_rewrite_result_as_reference(const char *tool_name,
              "chunk_id_range: %d-%d\n"
              "bytes_indexed: %zu\n"
              "preview: %s\n"
-             "next: use context_search with a focused query, then context_get with chunk_id",
+             "next: use context_search with a focused query, then context_get_batch with chunk_ids array for efficient retrieval",
              tool_name ? tool_name : "unknown",
              info ? info->chunks_added : 0,
              info ? info->first_chunk_id : -1,
@@ -1250,14 +1394,12 @@ static bool tool_write_file(const char *input, char *result, size_t rlen) {
         free(path); free(content);
         return false;
     }
-    char *pathcopy = strdup(path);
-    char *dir = dirname(pathcopy);
-    if (dir && strlen(dir) > 0 && strcmp(dir, ".") != 0) {
-        char mkdir_cmd[4096];
-        snprintf(mkdir_cmd, sizeof(mkdir_cmd), "mkdir -p '%s'", dir);
-        system(mkdir_cmd);
+    if (!ensure_parent_dir_local(path)) {
+        snprintf(result, rlen, "error: cannot create parent directories for %s: %s",
+                 path, strerror(errno));
+        free(path); free(content);
+        return false;
     }
-    free(pathcopy);
 
     FILE *f = fopen(path, "w");
     if (!f) {
@@ -1836,10 +1978,15 @@ static bool tool_find_files(const char *input, char *result, size_t rlen) {
     char *path = json_get_str(input, "path");
     if (!pattern) { snprintf(result, rlen, "error: pattern required"); free(path); return false; }
 
-    char cmd[4096];
-    snprintf(cmd, sizeof(cmd), "find '%s' -name '%s' -type f 2>/dev/null | head -100",
-             path ? path : ".", pattern);
-    run_cmd(cmd, result, rlen);
+    jbuf_t cmd;
+    jbuf_init(&cmd, 256 + strlen(pattern) + (path ? strlen(path) : 1));
+    jbuf_append(&cmd, "find ");
+    shell_quote(&cmd, path ? path : ".");
+    jbuf_append(&cmd, " -name ");
+    shell_quote(&cmd, pattern);
+    jbuf_append(&cmd, " -type f 2>/dev/null | head -100");
+    run_cmd(cmd.data, result, rlen);
+    jbuf_free(&cmd);
     free(pattern); free(path);
     return true;
 }
@@ -1849,10 +1996,15 @@ static bool tool_grep(const char *input, char *result, size_t rlen) {
     char *path = json_get_str(input, "path");
     if (!pattern) { snprintf(result, rlen, "error: pattern required"); free(path); return false; }
 
-    char cmd[4096];
-    snprintf(cmd, sizeof(cmd), "grep -rn '%s' '%s' 2>/dev/null | head -100",
-             pattern, path ? path : ".");
-    run_cmd(cmd, result, rlen);
+    jbuf_t cmd;
+    jbuf_init(&cmd, 256 + strlen(pattern) + (path ? strlen(path) : 1));
+    jbuf_append(&cmd, "grep -rn -- ");
+    shell_quote(&cmd, pattern);
+    jbuf_append(&cmd, " ");
+    shell_quote(&cmd, path ? path : ".");
+    jbuf_append(&cmd, " 2>/dev/null | head -100");
+    run_cmd(cmd.data, result, rlen);
+    jbuf_free(&cmd);
     free(pattern); free(path);
     return true;
 }
@@ -1883,6 +2035,11 @@ static bool tool_append_file(const char *input, char *result, size_t rlen) {
         snprintf(result, rlen, "error: path and content required");
         free(path); free(content); return false;
     }
+    if (!ensure_parent_dir_local(path)) {
+        snprintf(result, rlen, "error: cannot create parent directories for %s: %s",
+                 path, strerror(errno));
+        free(path); free(content); return false;
+    }
     FILE *f = fopen(path, "a");
     if (!f) {
         snprintf(result, rlen, "error: cannot open %s: %s", path, strerror(errno));
@@ -1905,9 +2062,14 @@ static bool tool_move_file(const char *input, char *result, size_t rlen) {
     }
     if (rename(src, dst) != 0) {
         /* Try mv for cross-device */
-        char cmd[8192];
-        snprintf(cmd, sizeof(cmd), "mv '%s' '%s'", src, dst);
-        int status = run_cmd(cmd, result, rlen);
+        jbuf_t cmd;
+        jbuf_init(&cmd, 64 + strlen(src) + strlen(dst));
+        jbuf_append(&cmd, "mv ");
+        shell_quote(&cmd, src);
+        jbuf_append(&cmd, " ");
+        shell_quote(&cmd, dst);
+        int status = run_cmd(cmd.data, result, rlen);
+        jbuf_free(&cmd);
         if (status == 0) snprintf(result, rlen, "moved %s -> %s", src, dst);
         free(src); free(dst);
         return (status == 0);
@@ -1925,9 +2087,14 @@ static bool tool_copy_file(const char *input, char *result, size_t rlen) {
         snprintf(result, rlen, "error: source and destination required");
         free(src); free(dst); return false;
     }
-    char cmd[8192];
-    snprintf(cmd, sizeof(cmd), "cp -r '%s' '%s'", src, dst);
-    int status = run_cmd(cmd, result, rlen);
+    jbuf_t cmd;
+    jbuf_init(&cmd, 64 + strlen(src) + strlen(dst));
+    jbuf_append(&cmd, "cp -r ");
+    shell_quote(&cmd, src);
+    jbuf_append(&cmd, " ");
+    shell_quote(&cmd, dst);
+    int status = run_cmd(cmd.data, result, rlen);
+    jbuf_free(&cmd);
     if (status == 0 && strlen(result) == 0)
         snprintf(result, rlen, "copied %s -> %s", src, dst);
     free(src); free(dst);
@@ -1940,12 +2107,12 @@ static bool tool_delete_file(const char *input, char *result, size_t rlen) {
     bool recursive = json_get_bool(input, "recursive", false);
     if (!path) { snprintf(result, rlen, "error: path required"); return false; }
 
-    char cmd[4096];
-    if (recursive)
-        snprintf(cmd, sizeof(cmd), "rm -rf '%s'", path);
-    else
-        snprintf(cmd, sizeof(cmd), "rm -f '%s'", path);
-    int status = run_cmd(cmd, result, rlen);
+    jbuf_t cmd;
+    jbuf_init(&cmd, 64 + strlen(path));
+    jbuf_append(&cmd, recursive ? "rm -rf " : "rm -f ");
+    shell_quote(&cmd, path);
+    int status = run_cmd(cmd.data, result, rlen);
+    jbuf_free(&cmd);
     if (status == 0) snprintf(result, rlen, "deleted %s", path);
     free(path);
     return (status == 0);
@@ -1955,12 +2122,11 @@ static bool tool_delete_file(const char *input, char *result, size_t rlen) {
 static bool tool_mkdir(const char *input, char *result, size_t rlen) {
     char *path = json_get_str(input, "path");
     if (!path) { snprintf(result, rlen, "error: path required"); return false; }
-    char cmd[4096];
-    snprintf(cmd, sizeof(cmd), "mkdir -p '%s'", path);
-    int status = run_cmd(cmd, result, rlen);
-    if (status == 0) snprintf(result, rlen, "created directory %s", path);
+    bool ok = mkdir_p_local(path, 0755);
+    if (ok) snprintf(result, rlen, "created directory %s", path);
+    else snprintf(result, rlen, "error: mkdir %s: %s", path, strerror(errno));
     free(path);
-    return (status == 0);
+    return ok;
 }
 
 /* ── chmod ────────────────────────────────────────────────────────────── */
@@ -1971,9 +2137,18 @@ static bool tool_chmod(const char *input, char *result, size_t rlen) {
         snprintf(result, rlen, "error: path and mode required");
         free(path); free(mode); return false;
     }
-    char cmd[4096];
-    snprintf(cmd, sizeof(cmd), "chmod %s '%s'", mode, path);
-    int status = run_cmd(cmd, result, rlen);
+    if (!chmod_mode_is_safe(mode)) {
+        snprintf(result, rlen, "error: unsafe chmod mode");
+        free(path); free(mode); return false;
+    }
+    jbuf_t cmd;
+    jbuf_init(&cmd, 64 + strlen(path) + strlen(mode));
+    jbuf_append(&cmd, "chmod ");
+    shell_quote(&cmd, mode);
+    jbuf_append(&cmd, " ");
+    shell_quote(&cmd, path);
+    int status = run_cmd(cmd.data, result, rlen);
+    jbuf_free(&cmd);
     if (status == 0) snprintf(result, rlen, "chmod %s %s", mode, path);
     free(path); free(mode);
     return (status == 0);
@@ -2053,15 +2228,24 @@ static bool tool_compile(const char *input, char *result, size_t rlen) {
     if (!source) { snprintf(result, rlen, "error: source required"); free(output); free(flags); return false; }
     if (!output) output = safe_strdup("a.out");
 
-    char cmd[8192];
-    int n = snprintf(cmd, sizeof(cmd), "cc -Wall -Wextra %s -o '%s' '%s'",
-             flags ? flags : "", output, source);
-    if (n >= (int)sizeof(cmd)) {
-        snprintf(result, rlen, "error: compile command too long (truncated)");
+    if (flags && flags[0] && shell_fragment_has_forbidden_chars(flags)) {
+        snprintf(result, rlen, "error: unsafe compile flags");
         free(source); free(output); free(flags);
         return false;
     }
-    int status = run_cmd(cmd, result, rlen);
+    jbuf_t cmd;
+    jbuf_init(&cmd, 128 + strlen(source) + strlen(output) + (flags ? strlen(flags) : 0));
+    jbuf_append(&cmd, "cc -Wall -Wextra");
+    if (flags && flags[0]) {
+        jbuf_append(&cmd, " ");
+        jbuf_append(&cmd, flags);
+    }
+    jbuf_append(&cmd, " -o ");
+    shell_quote(&cmd, output);
+    jbuf_append(&cmd, " ");
+    shell_quote(&cmd, source);
+    int status = run_cmd(cmd.data, result, rlen);
+    jbuf_free(&cmd);
     if (status == 0 && strlen(result) == 0) {
         snprintf(result, rlen, "compiled %s -> %s (success)", source, output);
     }
@@ -2410,9 +2594,14 @@ static bool tool_sed(const char *input, char *result, size_t rlen) {
         snprintf(result, rlen, "error: expression and file required");
         free(pattern); free(file); return false;
     }
-    char cmd[8192];
-    snprintf(cmd, sizeof(cmd), "sed '%s' '%s'", pattern, file);
-    run_cmd(cmd, result, rlen);
+    jbuf_t cmd;
+    jbuf_init(&cmd, 64 + strlen(pattern) + strlen(file));
+    jbuf_append(&cmd, "sed ");
+    shell_quote(&cmd, pattern);
+    jbuf_append(&cmd, " ");
+    shell_quote(&cmd, file);
+    run_cmd(cmd.data, result, rlen);
+    jbuf_free(&cmd);
     free(pattern); free(file);
     return true;
 }
@@ -2424,12 +2613,19 @@ static bool tool_awk(const char *input, char *result, size_t rlen) {
         snprintf(result, rlen, "error: program required");
         free(file); return false;
     }
-    char cmd[8192];
-    if (file)
-        snprintf(cmd, sizeof(cmd), "awk '%s' '%s'", program, file);
-    else
-        snprintf(cmd, sizeof(cmd), "echo '' | awk '%s'", program);
-    run_cmd(cmd, result, rlen);
+    jbuf_t cmd;
+    jbuf_init(&cmd, 64 + strlen(program) + (file ? strlen(file) : 0));
+    if (file) {
+        jbuf_append(&cmd, "awk ");
+        shell_quote(&cmd, program);
+        jbuf_append(&cmd, " ");
+        shell_quote(&cmd, file);
+    } else {
+        jbuf_append(&cmd, "printf '' | awk ");
+        shell_quote(&cmd, program);
+    }
+    run_cmd(cmd.data, result, rlen);
+    jbuf_free(&cmd);
     free(program); free(file);
     return true;
 }
@@ -2439,14 +2635,23 @@ static bool tool_sort_uniq(const char *input, char *result, size_t rlen) {
     bool unique = json_get_bool(input, "unique", false);
     bool count = json_get_bool(input, "count", false);
     if (!file) { snprintf(result, rlen, "error: file required"); return false; }
-    char cmd[4096];
-    if (count)
-        snprintf(cmd, sizeof(cmd), "sort '%s' | uniq -c | sort -rn | head -50", file);
-    else if (unique)
-        snprintf(cmd, sizeof(cmd), "sort -u '%s' | head -200", file);
-    else
-        snprintf(cmd, sizeof(cmd), "sort '%s' | head -200", file);
-    run_cmd(cmd, result, rlen);
+    jbuf_t cmd;
+    jbuf_init(&cmd, 64 + strlen(file));
+    if (count) {
+        jbuf_append(&cmd, "sort ");
+        shell_quote(&cmd, file);
+        jbuf_append(&cmd, " | uniq -c | sort -rn | head -50");
+    } else if (unique) {
+        jbuf_append(&cmd, "sort -u ");
+        shell_quote(&cmd, file);
+        jbuf_append(&cmd, " | head -200");
+    } else {
+        jbuf_append(&cmd, "sort ");
+        shell_quote(&cmd, file);
+        jbuf_append(&cmd, " | head -200");
+    }
+    run_cmd(cmd.data, result, rlen);
+    jbuf_free(&cmd);
     free(file);
     return true;
 }
@@ -2458,9 +2663,14 @@ static bool tool_diff(const char *input, char *result, size_t rlen) {
         snprintf(result, rlen, "error: file1 and file2 required");
         free(file1); free(file2); return false;
     }
-    char cmd[8192];
-    snprintf(cmd, sizeof(cmd), "diff -u '%s' '%s'", file1, file2);
-    run_cmd(cmd, result, rlen);
+    jbuf_t cmd;
+    jbuf_init(&cmd, 64 + strlen(file1) + strlen(file2));
+    jbuf_append(&cmd, "diff -u ");
+    shell_quote(&cmd, file1);
+    jbuf_append(&cmd, " ");
+    shell_quote(&cmd, file2);
+    run_cmd(cmd.data, result, rlen);
+    jbuf_free(&cmd);
     free(file1); free(file2);
     return true;
 }
@@ -2482,9 +2692,14 @@ static bool tool_patch(const char *input, char *result, size_t rlen) {
     write(fd, patch_content, strlen(patch_content));
     close(fd);
 
-    char cmd[8192];
-    snprintf(cmd, sizeof(cmd), "patch '%s' < '%s'", file, tmpfile);
-    int status = run_cmd(cmd, result, rlen);
+    jbuf_t cmd;
+    jbuf_init(&cmd, 64 + strlen(file) + strlen(tmpfile));
+    jbuf_append(&cmd, "patch ");
+    shell_quote(&cmd, file);
+    jbuf_append(&cmd, " -i ");
+    shell_quote(&cmd, tmpfile);
+    int status = run_cmd(cmd.data, result, rlen);
+    jbuf_free(&cmd);
     unlink(tmpfile);
     free(file); free(patch_content);
     return (status == 0);
@@ -2498,15 +2713,27 @@ static bool tool_jq(const char *input, char *result, size_t rlen) {
         snprintf(result, rlen, "error: filter required");
         free(json_input); free(file); return false;
     }
-    char cmd[8192];
     if (file) {
-        snprintf(cmd, sizeof(cmd), "jq '%s' '%s'", filter, file);
+        jbuf_t cmd;
+        jbuf_init(&cmd, 64 + strlen(filter) + strlen(file));
+        jbuf_append(&cmd, "jq ");
+        shell_quote(&cmd, filter);
+        jbuf_append(&cmd, " ");
+        shell_quote(&cmd, file);
+        run_cmd(cmd.data, result, rlen);
+        jbuf_free(&cmd);
     } else if (json_input) {
         char tmpfile[] = "/tmp/dsco_jq_XXXXXX";
         int fd = mkstemp(tmpfile);
         if (fd >= 0) { write(fd, json_input, strlen(json_input)); close(fd); }
-        snprintf(cmd, sizeof(cmd), "jq '%s' '%s'", filter, tmpfile);
-        run_cmd(cmd, result, rlen);
+        jbuf_t cmd;
+        jbuf_init(&cmd, 64 + strlen(filter) + strlen(tmpfile));
+        jbuf_append(&cmd, "jq ");
+        shell_quote(&cmd, filter);
+        jbuf_append(&cmd, " ");
+        shell_quote(&cmd, tmpfile);
+        run_cmd(cmd.data, result, rlen);
+        jbuf_free(&cmd);
         unlink(tmpfile);
         free(filter); free(json_input); free(file);
         return true;
@@ -2514,7 +2741,6 @@ static bool tool_jq(const char *input, char *result, size_t rlen) {
         snprintf(result, rlen, "error: input or file required");
         free(filter); free(json_input); free(file); return false;
     }
-    run_cmd(cmd, result, rlen);
     free(filter); free(json_input); free(file);
     return true;
 }
@@ -2658,13 +2884,18 @@ static bool tool_http_request(const char *input, char *result, size_t rlen) {
         return false;
     }
     if (!method) method = safe_strdup("GET");
+    if (!http_method_is_safe(method)) {
+        snprintf(result, rlen, "error: unsafe http method");
+        free(url); free(method); free(headers_str); free(body);
+        return false;
+    }
 
     jbuf_t cmd;
     jbuf_init(&cmd, 4096);
     jbuf_append(&cmd, "curl -sS");
     if (include_headers) jbuf_append(&cmd, " -i");
     jbuf_append(&cmd, " -X ");
-    jbuf_append(&cmd, method);
+    shell_quote(&cmd, method);
     jbuf_append(&cmd, " --max-time ");
     char timeout_str[16]; snprintf(timeout_str, sizeof(timeout_str), "%d", timeout);
     jbuf_append(&cmd, timeout_str);
@@ -2673,9 +2904,8 @@ static bool tool_http_request(const char *input, char *result, size_t rlen) {
         char *hcopy = safe_strdup(headers_str);
         char *hdr = strtok(hcopy, "\n");
         while (hdr) {
-            jbuf_append(&cmd, " -H '");
-            jbuf_append(&cmd, hdr);
-            jbuf_append(&cmd, "'");
+            jbuf_append(&cmd, " -H ");
+            shell_quote(&cmd, hdr);
             hdr = strtok(NULL, "\n");
         }
         free(hcopy);
@@ -2688,14 +2918,13 @@ static bool tool_http_request(const char *input, char *result, size_t rlen) {
         if (fd >= 0) {
             write(fd, body, strlen(body));
             close(fd);
-            jbuf_append(&cmd, " -d @");
-            jbuf_append(&cmd, body_tmpfile);
+            jbuf_append(&cmd, " --data-binary @");
+            shell_quote(&cmd, body_tmpfile);
         }
     }
 
-    jbuf_append(&cmd, " '");
-    jbuf_append(&cmd, url);
-    jbuf_append(&cmd, "'");
+    jbuf_append(&cmd, " ");
+    shell_quote(&cmd, url);
 
     int status = run_cmd(cmd.data, result, rlen);
     if (body_tmpfile[0]) unlink(body_tmpfile);
@@ -4042,16 +4271,24 @@ static bool tool_json_api(const char *input, char *result, size_t rlen) {
         free(method); free(body); free(auth); return false;
     }
     if (!method) method = safe_strdup("GET");
+    if (!http_method_is_safe(method)) {
+        snprintf(result, rlen, "error: unsafe http method");
+        free(url); free(method); free(body); free(auth); return false;
+    }
 
     jbuf_t cmd;
     jbuf_init(&cmd, 4096);
     jbuf_append(&cmd, "curl -sS -X ");
-    jbuf_append(&cmd, method);
+    shell_quote(&cmd, method);
     jbuf_append(&cmd, " -H 'Content-Type: application/json' -H 'Accept: application/json'");
     if (auth) {
-        jbuf_append(&cmd, " -H 'Authorization: ");
-        jbuf_append(&cmd, auth);
-        jbuf_append(&cmd, "'");
+        jbuf_t auth_hdr;
+        jbuf_init(&auth_hdr, strlen(auth) + 32);
+        jbuf_append(&auth_hdr, "Authorization: ");
+        jbuf_append(&auth_hdr, auth);
+        jbuf_append(&cmd, " -H ");
+        shell_quote(&cmd, auth_hdr.data ? auth_hdr.data : "Authorization:");
+        jbuf_free(&auth_hdr);
     }
     char json_tmpfile[32] = "";
     if (body) {
@@ -4060,13 +4297,12 @@ static bool tool_json_api(const char *input, char *result, size_t rlen) {
         if (fd >= 0) {
             write(fd, body, strlen(body));
             close(fd);
-            jbuf_append(&cmd, " -d @");
-            jbuf_append(&cmd, json_tmpfile);
+            jbuf_append(&cmd, " --data-binary @");
+            shell_quote(&cmd, json_tmpfile);
         }
     }
-    jbuf_append(&cmd, " '");
-    jbuf_append(&cmd, url);
-    jbuf_append(&cmd, "'");
+    jbuf_append(&cmd, " ");
+    shell_quote(&cmd, url);
 
     run_cmd(cmd.data, result, rlen);
     if (json_tmpfile[0]) unlink(json_tmpfile);
@@ -4130,6 +4366,10 @@ static bool tool_ssh_command(const char *input, char *result, size_t rlen) {
     char *key = json_get_str(input, "key");
     if (!host || !command) {
         snprintf(result, rlen, "error: host and command required");
+        free(host); free(command); free(user); free(key); return false;
+    }
+    if (!ssh_target_atom_is_safe(host) || (user && user[0] && !ssh_target_atom_is_safe(user))) {
+        snprintf(result, rlen, "error: unsafe ssh host/user");
         free(host); free(command); free(user); free(key); return false;
     }
     jbuf_t cmd;
@@ -4606,8 +4846,8 @@ static bool tool_agent_output(const char *input, char *result, size_t rlen) {
         return false;
     }
 
-    /* Poll for latest data */
-    swarm_poll(&g_swarm, 100);
+    /* Poll for latest data with live streaming */
+    swarm_poll_stream(&g_swarm, 100, default_swarm_stream_cb, NULL);
 
     swarm_child_output(&g_swarm, id, result, rlen);
     return true;
@@ -4630,9 +4870,9 @@ static bool tool_agent_wait(const char *input, char *result, size_t rlen) {
         deadline = tv.tv_sec + tv.tv_usec / 1e6 + timeout;
     }
 
-    /* Poll loop with streaming output */
+    /* Poll loop with live streaming */
     while (1) {
-        swarm_poll(&g_swarm, 500);
+        swarm_poll_stream(&g_swarm, 500, default_swarm_stream_cb, NULL);
 
         struct timeval now_tv;
         gettimeofday(&now_tv, NULL);
@@ -4660,6 +4900,176 @@ static bool tool_agent_wait(const char *input, char *result, size_t rlen) {
             }
         }
     }
+}
+
+/* agent_race — spawn N agents with the same task on different providers/models,
+ * return the FIRST one to complete successfully, kill the rest.
+ * This is the fundamental speed primitive: race models and take the fastest. */
+static bool tool_agent_race(const char *input, char *result, size_t rlen) {
+    ensure_swarm();
+
+    char *task = json_get_str(input, "task");
+    if (!task) {
+        snprintf(result, rlen, "{\"error\":\"task is required\"}");
+        return false;
+    }
+
+    int timeout = json_get_int(input, "timeout", 60);
+    timeout = clamp_timeout_seconds(timeout, 60, 5, 300);
+
+    /* Parse contestants array: [{provider, model}] or ["model1", "model2"] */
+    char *contestants_raw = json_get_raw(input, "contestants");
+    if (!contestants_raw) {
+        snprintf(result, rlen, "{\"error\":\"contestants array required\"}");
+        free(task);
+        return false;
+    }
+
+    /* Spawn all contestants */
+    int ids[SWARM_MAX_CHILDREN];
+    char *models[SWARM_MAX_CHILDREN];
+    char *providers[SWARM_MAX_CHILDREN];
+    int n = 0;
+
+    /* Parse each contestant — either a string (model via openrouter) or {provider, model} */
+    const char *p = contestants_raw;
+    while (*p && *p != '[') p++;
+    if (*p == '[') p++;
+
+    while (*p && n < SWARM_MAX_CHILDREN) {
+        while (*p && (*p == ' ' || *p == '\n' || *p == ',')) p++;
+        if (*p == ']' || !*p) break;
+
+        if (*p == '{') {
+            /* Object: {provider, model} */
+            int depth = 0;
+            const char *start = p;
+            do { if (*p == '{') depth++; else if (*p == '}') depth--; p++; } while (*p && depth > 0);
+            size_t olen = (size_t)(p - start);
+            char *obj = safe_malloc(olen + 1);
+            memcpy(obj, start, olen);
+            obj[olen] = '\0';
+
+            providers[n] = json_get_str(obj, "provider");
+            models[n] = json_get_str(obj, "model");
+            if (!providers[n]) providers[n] = safe_strdup("openrouter");
+            free(obj);
+        } else if (*p == '"') {
+            /* String: just a model name, use openrouter */
+            p++;
+            const char *start = p;
+            while (*p && *p != '"') p++;
+            size_t slen = (size_t)(p - start);
+            models[n] = safe_malloc(slen + 1);
+            memcpy(models[n], start, slen);
+            models[n][slen] = '\0';
+            providers[n] = safe_strdup("openrouter");
+            if (*p == '"') p++;
+        } else {
+            p++;
+            continue;
+        }
+
+        /* Spawn this contestant */
+        int cid = swarm_spawn_provider(&g_swarm, -1, task, models[n], providers[n]);
+        if (cid >= 0) {
+            ids[n] = cid;
+            n++;
+            fprintf(stderr, "  \033[2m🏁 racer #%d: %s/%s\033[0m\n",
+                    n, providers[n-1], models[n-1] ? models[n-1] : "default");
+        }
+    }
+    free(contestants_raw);
+
+    if (n == 0) {
+        snprintf(result, rlen, "{\"error\":\"no contestants spawned\"}");
+        free(task);
+        return false;
+    }
+
+    fprintf(stderr, "  \033[1m🏁 Racing %d models...\033[0m\n", n);
+
+    /* Wait for first SUCCESSFUL completion — skip errors */
+    int winner_id = -1;
+    int errors = 0;
+    double deadline = (double)timeout;
+    double race_start = 0;
+    { struct timeval tv; gettimeofday(&tv, NULL); race_start = tv.tv_sec + tv.tv_usec / 1e6; }
+
+    while (winner_id < 0) {
+        struct timeval now_tv;
+        gettimeofday(&now_tv, NULL);
+        double elapsed = (now_tv.tv_sec + now_tv.tv_usec / 1e6) - race_start;
+        int remaining = (int)((deadline - elapsed) * 1000);
+        if (remaining <= 0) break;
+
+        int cid = swarm_wait_any(&g_swarm, remaining);
+        if (cid < 0) break; /* timeout */
+
+        swarm_child_t *c = swarm_get(&g_swarm, cid);
+        if (c && c->status == SWARM_DONE) {
+            winner_id = cid;
+        } else {
+            /* Error — log and keep waiting for others */
+            errors++;
+            fprintf(stderr, "  \033[33m✗ racer %d errored (%s)\033[0m\n",
+                    cid, c ? (c->output ? c->output : "unknown") : "null");
+            if (errors >= n) break; /* all errored */
+        }
+    }
+
+    if (winner_id < 0) {
+        /* Timeout or all errored — kill all */
+        for (int i = 0; i < n; i++) swarm_kill(&g_swarm, ids[i]);
+        snprintf(result, rlen, "{\"error\":\"race: %s after %ds (%d errors, %d contestants)\"}",
+                 errors >= n ? "all contestants errored" : "timed out", timeout, errors, n);
+        free(task);
+        for (int i = 0; i < n; i++) { free(models[i]); free(providers[i]); }
+        return false;
+    }
+
+    /* We have a winner — kill all losers */
+    swarm_child_t *winner = swarm_get(&g_swarm, winner_id);
+    int killed = 0;
+    for (int i = 0; i < n; i++) {
+        if (ids[i] != winner_id) {
+            swarm_kill(&g_swarm, ids[i]);
+            killed++;
+        }
+    }
+
+    /* Find which contestant index won */
+    int winner_idx = -1;
+    for (int i = 0; i < n; i++) if (ids[i] == winner_id) { winner_idx = i; break; }
+
+    double elapsed = winner->end_time - winner->start_time;
+
+    fprintf(stderr, "  \033[1;32m🏆 Winner: %s/%s in %.1fs (killed %d losers)\033[0m\n",
+            providers[winner_idx], models[winner_idx] ? models[winner_idx] : "default", elapsed, killed);
+
+    /* Build result with winner output */
+    jbuf_t b;
+    jbuf_init(&b, 4096);
+    jbuf_append(&b, "{\"winner\":{\"agent_id\":");
+    jbuf_append_int(&b, winner_id);
+    jbuf_append(&b, ",\"provider\":");
+    jbuf_append_json_str(&b, providers[winner_idx]);
+    jbuf_append(&b, ",\"model\":");
+    jbuf_append_json_str(&b, models[winner_idx] ? models[winner_idx] : "");
+    jbuf_appendf(&b, ",\"elapsed_sec\":%.3f", elapsed);
+    jbuf_appendf(&b, ",\"status\":\"%s\"", swarm_status_str(winner->status));
+    jbuf_append(&b, ",\"output\":");
+    jbuf_append_json_str(&b, winner->output ? winner->output : "");
+    jbuf_appendf(&b, "},\"total_contestants\":%d,\"killed\":%d}", n, killed);
+
+    int written = (int)b.len < (int)rlen - 1 ? (int)b.len : (int)rlen - 1;
+    memcpy(result, b.data, written);
+    result[written] = '\0';
+    jbuf_free(&b);
+
+    free(task);
+    for (int i = 0; i < n; i++) { free(models[i]); free(providers[i]); }
+    return winner->status == SWARM_DONE;
 }
 
 static bool tool_agent_kill(const char *input, char *result, size_t rlen) {
@@ -5315,6 +5725,54 @@ static bool tool_topology_run(const char *input, char *result, size_t rlen) {
     return ok;
 }
 
+/* task_profile — Analyze a task string and recommend the best topology.
+ * Exposes the Phase 1 dynamic topology selection engine as a tool. */
+static bool tool_task_profile(const char *input, char *result, size_t rlen) {
+    char *task = json_get_str(input, "task");
+    if (!task || !task[0]) {
+        snprintf(result, rlen, "{\"error\":\"task string is required\"}");
+        free(task);
+        return false;
+    }
+
+    bool explain = json_get_bool(input, "explain", false);
+
+    task_profile_t *tp = task_profile(task, NULL);
+    if (!tp) {
+        snprintf(result, rlen, "{\"error\":\"profiling failed\"}");
+        free(task);
+        return false;
+    }
+
+    if (explain) {
+        char explain_buf[2048];
+        task_profile_explain(tp, explain_buf, sizeof(explain_buf));
+
+        /* Wrap explanation + JSON into a combined result */
+        jbuf_t b;
+        jbuf_init(&b, 4096);
+        jbuf_append(&b, "{\"explanation\":");
+        jbuf_append_json_str(&b, explain_buf);
+        jbuf_append(&b, ",\"profile\":");
+
+        char json_buf[2048];
+        task_profile_json(tp, json_buf, sizeof(json_buf));
+        jbuf_append(&b, json_buf);
+
+        jbuf_append(&b, "}");
+        int written = (int)b.len < (int)rlen - 1 ? (int)b.len : (int)rlen - 1;
+        memcpy(result, b.data, written);
+        result[written] = '\0';
+        jbuf_free(&b);
+    } else {
+        task_profile_json(tp, result, rlen);
+    }
+
+    task_profile_free(tp);
+    free(task);
+    return true;
+}
+
 static bool tool_create_swarm(const char *input, char *result, size_t rlen) {
     ensure_swarm();
 
@@ -5662,6 +6120,618 @@ static bool tool_swarm_collect(const char *input, char *result, size_t rlen) {
         tui_swarm_cost(entries, ec, total_cost);
     }
 
+    return true;
+}
+
+/* ═══════════════════════════════════════════════════════════════════════════
+ * OPENROUTER LIVE MODEL REGISTRY — query & dynamic selection
+ * ═══════════════════════════════════════════════════════════════════════════ */
+
+static size_t jbuf_curl_write_cb(void *ptr, size_t size, size_t nmemb, void *userdata) {
+    size_t total = size * nmemb;
+    jbuf_t *b = (jbuf_t *)userdata;
+    size_t need = b->len + total + 1;
+    if (need > b->cap) {
+        size_t newcap = b->cap * 2;
+        if (newcap < need) newcap = need;
+        b->data = realloc(b->data, newcap);
+        b->cap = newcap;
+    }
+    memcpy(b->data + b->len, ptr, total);
+    b->len += total;
+    b->data[b->len] = '\0';
+    return total;
+}
+
+/* Fetch and filter OpenRouter's /api/v1/models endpoint.
+ * Supports filtering by: capability (chat/image/code), min context length,
+ * max price, and text search. Returns up to `limit` models sorted by price. */
+static bool tool_openrouter_models(const char *input, char *result, size_t rlen) {
+    const char *or_key = getenv("OPENROUTER_API_KEY");
+    if (!or_key || !or_key[0]) {
+        snprintf(result, rlen, "{\"error\":\"OPENROUTER_API_KEY not set\"}");
+        return false;
+    }
+
+    /* Parse filter params */
+    char *search = json_get_str(input, "search");
+    int min_ctx = json_get_int(input, "min_context", 0);
+    double max_price = json_get_double(input, "max_price_per_million", 0);
+    int limit = json_get_int(input, "limit", 20);
+    bool free_only = json_get_bool(input, "free_only", false);
+    bool chat_only = json_get_bool(input, "chat_only", true);
+    if (limit <= 0) limit = 20;
+    if (limit > 100) limit = 100;
+
+    /* Fetch models list via curl */
+    CURL *curl = curl_easy_init();
+    if (!curl) {
+        snprintf(result, rlen, "{\"error\":\"curl init failed\"}");
+        free(search);
+        return false;
+    }
+
+    jbuf_t resp;
+    jbuf_init(&resp, 64 * 1024);
+
+    struct curl_slist *hdrs = NULL;
+    char auth[512];
+    snprintf(auth, sizeof(auth), "Authorization: Bearer %s", or_key);
+    hdrs = curl_slist_append(hdrs, auth);
+
+    curl_easy_setopt(curl, CURLOPT_URL, "https://openrouter.ai/api/v1/models");
+    curl_easy_setopt(curl, CURLOPT_HTTPHEADER, hdrs);
+    curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, (curl_write_callback)jbuf_curl_write_cb);
+    curl_easy_setopt(curl, CURLOPT_WRITEDATA, &resp);
+    curl_easy_setopt(curl, CURLOPT_CONNECTTIMEOUT, 10L);
+    curl_easy_setopt(curl, CURLOPT_TIMEOUT, 30L);
+
+    CURLcode res = curl_easy_perform(curl);
+    long http_code = 0;
+    curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, &http_code);
+    curl_slist_free_all(hdrs);
+    curl_easy_cleanup(curl);
+
+    if (res != CURLE_OK || http_code != 200) {
+        snprintf(result, rlen, "{\"error\":\"HTTP %d: %s\"}",
+                 (int)http_code, curl_easy_strerror(res));
+        jbuf_free(&resp);
+        free(search);
+        return false;
+    }
+
+    /* Parse the "data" array from response */
+    char *data_arr = json_get_raw(resp.data, "data");
+    jbuf_free(&resp);
+
+    if (!data_arr) {
+        snprintf(result, rlen, "{\"error\":\"no data array in response\"}");
+        free(search);
+        return false;
+    }
+
+    /* Build filtered result — iterate JSON array elements */
+    jbuf_t out;
+    jbuf_init(&out, 8192);
+    jbuf_append(&out, "{\"models\":[");
+
+    int count = 0;
+    int total_scanned = 0;
+    const char *p = data_arr;
+
+    /* Skip opening '[' */
+    while (*p && *p != '{') p++;
+
+    while (*p == '{' && count < limit) {
+        /* Find matching closing brace (simple depth tracking) */
+        int depth = 0;
+        const char *start = p;
+        do {
+            if (*p == '{') depth++;
+            else if (*p == '}') depth--;
+            p++;
+        } while (*p && depth > 0);
+
+        /* Extract this model object */
+        size_t obj_len = (size_t)(p - start);
+        char *obj = safe_malloc(obj_len + 1);
+        memcpy(obj, start, obj_len);
+        obj[obj_len] = '\0';
+        total_scanned++;
+
+        /* Apply filters */
+        bool pass = true;
+
+        /* Context length filter */
+        if (min_ctx > 0) {
+            int ctx = json_get_int(obj, "context_length", 0);
+            if (ctx < min_ctx) pass = false;
+        }
+
+        /* Price filter */
+        if (pass && (max_price > 0 || free_only)) {
+            char *pricing = json_get_raw(obj, "pricing");
+            if (pricing) {
+                char *prompt_price = json_get_str(pricing, "prompt");
+                double pp = prompt_price ? atof(prompt_price) : 0;
+                free(prompt_price);
+                if (free_only && pp > 0) pass = false;
+                if (max_price > 0 && pp * 1000000.0 > max_price) pass = false;
+                free(pricing);
+            }
+        }
+
+        /* Chat capability filter */
+        if (pass && chat_only) {
+            char *arch = json_get_raw(obj, "architecture");
+            if (arch) {
+                char *modality = json_get_str(arch, "modality");
+                if (modality && !strstr(modality, "text")) pass = false;
+                free(modality);
+                free(arch);
+            }
+        }
+
+        /* Text search filter (case-insensitive via tolower) */
+        if (pass && search && search[0]) {
+            char *id = json_get_str(obj, "id");
+            char *name_str = json_get_str(obj, "name");
+            bool found = false;
+            /* Simple case-insensitive substring: lowercase both and strstr */
+            char sl[128];
+            size_t slen = strlen(search);
+            if (slen >= sizeof(sl)) slen = sizeof(sl) - 1;
+            for (size_t si = 0; si < slen; si++) sl[si] = (char)tolower((unsigned char)search[si]);
+            sl[slen] = '\0';
+            if (id) {
+                char buf[256];
+                size_t ilen = strlen(id);
+                if (ilen >= sizeof(buf)) ilen = sizeof(buf) - 1;
+                for (size_t si = 0; si < ilen; si++) buf[si] = (char)tolower((unsigned char)id[si]);
+                buf[ilen] = '\0';
+                if (strstr(buf, sl)) found = true;
+            }
+            if (!found && name_str) {
+                char buf[256];
+                size_t nlen = strlen(name_str);
+                if (nlen >= sizeof(buf)) nlen = sizeof(buf) - 1;
+                for (size_t si = 0; si < nlen; si++) buf[si] = (char)tolower((unsigned char)name_str[si]);
+                buf[nlen] = '\0';
+                if (strstr(buf, sl)) found = true;
+            }
+            if (!found) pass = false;
+            free(id);
+            free(name_str);
+        }
+
+        if (pass) {
+            /* Extract compact model info */
+            char *id = json_get_str(obj, "id");
+            char *name = json_get_str(obj, "name");
+            int ctx = json_get_int(obj, "context_length", 0);
+            char *pricing = json_get_raw(obj, "pricing");
+            char *prompt_p = pricing ? json_get_str(pricing, "prompt") : NULL;
+            char *comp_p = pricing ? json_get_str(pricing, "completion") : NULL;
+            char *top_prov = json_get_raw(obj, "top_provider");
+            int max_comp = top_prov ? json_get_int(top_prov, "max_completion_tokens", 0) : 0;
+
+            if (count > 0) jbuf_append(&out, ",");
+            jbuf_append(&out, "{\"id\":");
+            jbuf_append_json_str(&out, id ? id : "");
+            jbuf_append(&out, ",\"name\":");
+            jbuf_append_json_str(&out, name ? name : "");
+            jbuf_appendf(&out, ",\"context\":%d,\"max_output\":%d", ctx, max_comp);
+            jbuf_appendf(&out, ",\"price_in\":%s,\"price_out\":%s",
+                         prompt_p ? prompt_p : "\"0\"",
+                         comp_p ? comp_p : "\"0\"");
+            jbuf_append(&out, "}");
+            count++;
+
+            free(id); free(name); free(pricing);
+            free(prompt_p); free(comp_p); free(top_prov);
+        }
+
+        free(obj);
+
+        /* Skip comma/whitespace between objects */
+        while (*p && *p != '{') p++;
+    }
+
+    jbuf_appendf(&out, "],\"count\":%d,\"total_scanned\":%d}", count, total_scanned);
+    free(data_arr);
+    free(search);
+
+    int written = (int)out.len < (int)rlen - 1 ? (int)out.len : (int)rlen - 1;
+    memcpy(result, out.data, written);
+    result[written] = '\0';
+    jbuf_free(&out);
+
+    fprintf(stderr, "  \033[2m%d models (scanned %d)\033[0m\n", count, total_scanned);
+    return true;
+}
+
+/* ═══════════════════════════════════════════════════════════════════════════
+ * EXTERNAL EXECUTOR TOOLS — Claude Code / Codex CLI integration
+ * ═══════════════════════════════════════════════════════════════════════════ */
+
+static executor_type_t parse_executor_type(const char *name) {
+    if (!name || !name[0] || strcmp(name, "dsco") == 0 || strcmp(name, "auto") == 0)
+        return EXECUTOR_DSCO;
+    if (strcmp(name, "claude") == 0) return EXECUTOR_CLAUDE;
+    if (strcmp(name, "codex") == 0)  return EXECUTOR_CODEX;
+    return EXECUTOR_DSCO;
+}
+
+static bool tool_executor_status(const char *input, char *result, size_t rlen) {
+    (void)input;
+    ensure_swarm();
+    executor_registry_t *e = &g_swarm.executors;
+
+    jbuf_t b;
+    jbuf_init(&b, 1024);
+    jbuf_append(&b, "{\"executors\":{");
+    jbuf_append(&b, "\"dsco\":{\"available\":true,\"path\":");
+    jbuf_append_json_str(&b, g_swarm.dsco_path ? g_swarm.dsco_path : "dsco");
+    jbuf_append(&b, "}");
+
+    jbuf_appendf(&b, ",\"claude\":{\"available\":%s", e->claude_available ? "true" : "false");
+    if (e->claude_available) {
+        jbuf_append(&b, ",\"path\":");
+        jbuf_append_json_str(&b, e->claude_path);
+        jbuf_append(&b, ",\"model\":");
+        jbuf_append_json_str(&b, e->claude_model);
+    }
+    jbuf_append(&b, "}");
+
+    jbuf_appendf(&b, ",\"codex\":{\"available\":%s", e->codex_available ? "true" : "false");
+    if (e->codex_available) {
+        jbuf_append(&b, ",\"path\":");
+        jbuf_append_json_str(&b, e->codex_path);
+        jbuf_append(&b, ",\"model\":");
+        jbuf_append_json_str(&b, e->codex_model);
+    }
+    jbuf_append(&b, "}");
+
+    /* Budget info */
+    if (g_swarm.swarm_budget_usd > 0) {
+        char bud[32], spent[32];
+        snprintf(bud, sizeof(bud), "%.6f", g_swarm.swarm_budget_usd);
+        snprintf(spent, sizeof(spent), "%.6f", g_swarm.spent_usd);
+        jbuf_appendf(&b, "},\"budget\":{\"total_usd\":%s,\"spent_usd\":%s,"
+                     "\"remaining_usd\":%.6f}",
+                     bud, spent, swarm_budget_remaining(&g_swarm));
+    } else {
+        jbuf_append(&b, "},\"budget\":\"unlimited\"");
+    }
+    jbuf_append(&b, "}");
+
+    int written = (int)b.len < (int)rlen - 1 ? (int)b.len : (int)rlen - 1;
+    memcpy(result, b.data, written);
+    result[written] = '\0';
+    jbuf_free(&b);
+
+    /* TUI feedback */
+    fprintf(stderr, "  %s🔌%s executors: dsco=%s✓%s",
+            TUI_BMAGENTA, TUI_RESET, TUI_GREEN, TUI_RESET);
+    if (e->claude_available)
+        fprintf(stderr, " claude=%s✓%s(%s)", TUI_GREEN, TUI_RESET, e->claude_model);
+    else
+        fprintf(stderr, " claude=%s✗%s", TUI_RED, TUI_RESET);
+    if (e->codex_available)
+        fprintf(stderr, " codex=%s✓%s(%s)", TUI_GREEN, TUI_RESET, e->codex_model);
+    else
+        fprintf(stderr, " codex=%s✗%s", TUI_RED, TUI_RESET);
+    fprintf(stderr, "\n");
+
+    return true;
+}
+
+static bool tool_spawn_executor(const char *input, char *result, size_t rlen) {
+    ensure_swarm();
+
+    int depth = current_swarm_depth();
+    if (depth >= SWARM_MAX_DEPTH) {
+        snprintf(result, rlen,
+                 "{\"error\":\"max swarm depth %d reached\"}",
+                 SWARM_MAX_DEPTH);
+        return false;
+    }
+
+    char *task = json_get_str(input, "task");
+    char *model = json_get_str(input, "model");
+    char *exec_name = json_get_str(input, "executor");
+    double budget = json_get_double(input, "budget", 0.0);
+
+    if (!task) {
+        snprintf(result, rlen, "error: task required");
+        free(model); free(exec_name);
+        return false;
+    }
+
+    executor_type_t exec_type = parse_executor_type(exec_name);
+
+    /* Validate executor availability */
+    if (exec_type == EXECUTOR_CLAUDE && !g_swarm.executors.claude_available) {
+        snprintf(result, rlen, "{\"error\":\"claude CLI not available — "
+                 "install Claude Code and set ANTHROPIC_API_KEY\"}");
+        free(task); free(model); free(exec_name);
+        return false;
+    }
+    if (exec_type == EXECUTOR_CODEX && !g_swarm.executors.codex_available) {
+        snprintf(result, rlen, "{\"error\":\"codex CLI not available — "
+                 "install OpenAI Codex and authenticate with `codex auth`\"}");
+        free(task); free(model); free(exec_name);
+        return false;
+    }
+
+    /* Budget check before spawn */
+    if (g_swarm.swarm_budget_usd > 0) {
+        double remaining = swarm_budget_remaining(&g_swarm);
+        double est = swarm_estimate_task_cost(&g_swarm, model ? model : g_swarm.default_model);
+        if (est > remaining) {
+            snprintf(result, rlen,
+                     "{\"error\":\"insufficient swarm budget: estimated $%.4f > remaining $%.4f\"}",
+                     est, remaining);
+            free(task); free(model); free(exec_name);
+            return false;
+        }
+    }
+
+    int id = swarm_spawn_executor(&g_swarm, -1, task, model, exec_type);
+    if (id < 0) {
+        snprintf(result, rlen, "{\"error\":\"failed to spawn %s executor\"}",
+                 executor_type_name(exec_type));
+        free(task); free(model); free(exec_name);
+        return false;
+    }
+
+    /* Set per-child budget if specified */
+    swarm_child_t *c = swarm_get(&g_swarm, id);
+    if (budget > 0) c->budget_usd = budget;
+
+    /* Pre-estimate cost */
+    c->est_cost_usd = swarm_estimate_task_cost(&g_swarm,
+        model ? model : (exec_type == EXECUTOR_CLAUDE ? g_swarm.executors.claude_model
+                                                       : g_swarm.executors.codex_model));
+
+    snprintf(result, rlen,
+             "{\"agent_id\":%d,\"pid\":%d,\"executor\":\"%s\",\"model\":\"%s\","
+             "\"est_cost_usd\":%.6f,\"status\":\"running\","
+             "\"hint\":\"Use agent_status to monitor\"}",
+             id, (int)c->pid, executor_type_name(exec_type), c->model,
+             c->est_cost_usd);
+
+    fprintf(stderr, "  %s⚡%s spawned %s%s%s agent #%d: %s%.60s%s\n",
+            TUI_BCYAN, TUI_RESET,
+            TUI_BOLD, executor_type_name(exec_type), TUI_RESET,
+            id, TUI_DIM, task, TUI_RESET);
+
+    free(task); free(model); free(exec_name);
+    return true;
+}
+
+/* spawn_provider — spawn a dsco sub-agent forced to a specific native API provider.
+ * This is the dynamic decoupling primitive: parent on Anthropic can spawn children
+ * on OpenAI, Groq, DeepSeek, etc. Each child is a full dsco instance routed through
+ * that provider's API. */
+static bool tool_spawn_provider(const char *input, char *result, size_t rlen) {
+    ensure_swarm();
+
+    int depth = current_swarm_depth();
+    if (depth >= SWARM_MAX_DEPTH) {
+        snprintf(result, rlen, "{\"error\":\"max swarm depth %d reached\"}", SWARM_MAX_DEPTH);
+        return false;
+    }
+
+    char *task = json_get_str(input, "task");
+    char *model = json_get_str(input, "model");
+    char *provider = json_get_str(input, "provider");
+    double budget = json_get_double(input, "budget", 0.0);
+
+    if (!task || !provider) {
+        snprintf(result, rlen, "{\"error\":\"task and provider are required\"}");
+        free(task); free(model); free(provider);
+        return false;
+    }
+
+    /* Validate provider has an API key */
+    const char *pkey = provider_resolve_api_key(provider);
+    if (!pkey || !pkey[0]) {
+        snprintf(result, rlen,
+                 "{\"error\":\"no API key for provider '%s' — set the env var\"}", provider);
+        free(task); free(model); free(provider);
+        return false;
+    }
+
+    /* Budget check */
+    if (g_swarm.swarm_budget_usd > 0) {
+        double remaining = swarm_budget_remaining(&g_swarm);
+        double est = swarm_estimate_task_cost(&g_swarm, model ? model : g_swarm.default_model);
+        if (est > remaining) {
+            snprintf(result, rlen,
+                     "{\"error\":\"insufficient budget: est $%.4f > remaining $%.4f\"}",
+                     est, remaining);
+            free(task); free(model); free(provider);
+            return false;
+        }
+    }
+
+    int id = swarm_spawn_provider(&g_swarm, -1, task, model, provider);
+    if (id < 0) {
+        snprintf(result, rlen, "{\"error\":\"spawn failed for provider '%s'\"}", provider);
+        free(task); free(model); free(provider);
+        return false;
+    }
+
+    swarm_child_t *c = swarm_get(&g_swarm, id);
+    if (budget > 0) c->budget_usd = budget;
+    c->est_cost_usd = swarm_estimate_task_cost(&g_swarm,
+        model ? model : g_swarm.default_model);
+
+    snprintf(result, rlen,
+             "{\"agent_id\":%d,\"pid\":%d,\"provider\":\"%s\",\"model\":\"%s\","
+             "\"est_cost_usd\":%.6f,\"status\":\"running\","
+             "\"hint\":\"Use agent_status to monitor\"}",
+             id, (int)c->pid, provider, c->model, c->est_cost_usd);
+
+    fprintf(stderr, "  %s⚡%s spawned %s%s%s→%s%s%s agent #%d: %s%.60s%s\n",
+            TUI_BCYAN, TUI_RESET,
+            TUI_BOLD, "dsco", TUI_RESET,
+            TUI_BGREEN, provider, TUI_RESET,
+            id, TUI_DIM, task, TUI_RESET);
+
+    free(task); free(model); free(provider);
+    return true;
+}
+
+static bool tool_create_executor_swarm(const char *input, char *result, size_t rlen) {
+    ensure_swarm();
+
+    int depth = current_swarm_depth();
+    if (depth >= SWARM_MAX_DEPTH) {
+        snprintf(result, rlen, "{\"error\":\"max swarm depth reached\"}");
+        return false;
+    }
+
+    char *name = json_get_str(input, "name");
+    char *default_executor = json_get_str(input, "executor");
+    char *default_model = json_get_str(input, "model");
+    double total_budget = json_get_double(input, "budget", 0.0);
+
+    if (!name) {
+        snprintf(result, rlen, "error: name required");
+        free(default_executor); free(default_model);
+        return false;
+    }
+
+    int gid = swarm_group_create(&g_swarm, name);
+    if (gid < 0) {
+        snprintf(result, rlen, "{\"error\":\"max groups reached\"}");
+        free(name); free(default_executor); free(default_model);
+        return false;
+    }
+
+    /* Parse tasks array — each task can specify its own executor and model */
+    char *tasks_raw = json_get_raw(input, "tasks");
+    if (!tasks_raw || *tasks_raw != '[') {
+        snprintf(result, rlen, "error: tasks array required");
+        free(name); free(default_executor); free(default_model); free(tasks_raw);
+        return false;
+    }
+
+    /* Simple JSON array parsing — tasks can be strings or objects */
+    swarm_task_parse_ctx_t parse_ctx;
+    memset(&parse_ctx, 0, sizeof(parse_ctx));
+    json_array_foreach(input, "tasks", parse_swarm_task_element, &parse_ctx);
+
+    if (parse_ctx.parse_error || parse_ctx.count == 0) {
+        for (int i = 0; i < parse_ctx.count; i++) {
+            free(parse_ctx.specs[i].task);
+            free(parse_ctx.specs[i].model);
+        }
+        free(tasks_raw); free(name); free(default_executor); free(default_model);
+        snprintf(result, rlen, "error: malformed or empty tasks array");
+        return false;
+    }
+
+    /* Compute per-child budget partition */
+    double per_child_budget = 0;
+    if (total_budget > 0) {
+        per_child_budget = total_budget / (double)parse_ctx.count;
+    }
+
+    int spawned = 0;
+    for (int i = 0; i < parse_ctx.count; i++) {
+        const char *task_model = (parse_ctx.specs[i].model && parse_ctx.specs[i].model[0])
+            ? parse_ctx.specs[i].model : default_model;
+
+        /* Check if task object has an executor field (stored in model as "exec:name" hack) */
+        executor_type_t exec_type = parse_executor_type(default_executor);
+
+        /* Try to extract executor from the task spec — check for "executor" key in the raw JSON */
+        /* For now use the default executor */
+
+        int cid = swarm_spawn_executor(&g_swarm, gid, parse_ctx.specs[i].task,
+                                        task_model, exec_type);
+        if (cid >= 0) {
+            swarm_child_t *c = swarm_get(&g_swarm, cid);
+            if (per_child_budget > 0) c->budget_usd = per_child_budget;
+            c->est_cost_usd = swarm_estimate_task_cost(&g_swarm,
+                task_model ? task_model : g_swarm.default_model);
+            spawned++;
+        }
+    }
+
+    /* TUI feedback */
+    fprintf(stderr, "\n  %s⚡%s Swarm %s\"%s\"%s (%s): %d agents\n",
+            TUI_BYELLOW, TUI_RESET, TUI_BOLD, name, TUI_RESET,
+            executor_type_name(parse_executor_type(default_executor)), spawned);
+    for (int i = 0; i < parse_ctx.count; i++) {
+        fprintf(stderr, "    %s◉%s %s%.60s%s\n",
+                TUI_BCYAN, TUI_RESET, TUI_DIM, parse_ctx.specs[i].task, TUI_RESET);
+    }
+    if (total_budget > 0) {
+        fprintf(stderr, "    %s$%s budget: $%.4f total ($%.4f/agent)\n",
+                TUI_BYELLOW, TUI_RESET, total_budget, per_child_budget);
+    }
+    fprintf(stderr, "\n");
+
+    /* Build result */
+    jbuf_t b;
+    jbuf_init(&b, 1024);
+    jbuf_append(&b, "{\"group_id\":");
+    jbuf_append_int(&b, gid);
+    jbuf_append(&b, ",\"name\":");
+    jbuf_append_json_str(&b, name);
+    jbuf_append(&b, ",\"executor\":");
+    jbuf_append_json_str(&b, executor_type_name(parse_executor_type(default_executor)));
+    jbuf_append(&b, ",\"agents_spawned\":");
+    jbuf_append_int(&b, spawned);
+    if (total_budget > 0) {
+        char bud[32];
+        snprintf(bud, sizeof(bud), "%.6f", total_budget);
+        jbuf_append(&b, ",\"budget_usd\":");
+        jbuf_append(&b, bud);
+    }
+    jbuf_append(&b, ",\"agent_ids\":[");
+    swarm_group_t *g = &g_swarm.groups[gid];
+    for (int i = 0; i < g->child_count; i++) {
+        if (i > 0) jbuf_append(&b, ",");
+        jbuf_append_int(&b, g->child_ids[i]);
+    }
+    jbuf_append(&b, "]}");
+
+    int written = (int)b.len < (int)rlen - 1 ? (int)b.len : (int)rlen - 1;
+    memcpy(result, b.data, written);
+    result[written] = '\0';
+    jbuf_free(&b);
+
+    for (int i = 0; i < parse_ctx.count; i++) {
+        free(parse_ctx.specs[i].task);
+        free(parse_ctx.specs[i].model);
+    }
+    free(tasks_raw); free(name); free(default_executor); free(default_model);
+    return true;
+}
+
+static bool tool_swarm_budget(const char *input, char *result, size_t rlen) {
+    ensure_swarm();
+    double budget = json_get_double(input, "budget_usd", -1.0);
+    if (budget >= 0) {
+        swarm_set_budget(&g_swarm, budget);
+        snprintf(result, rlen,
+                 "{\"budget_usd\":%.6f,\"remaining_usd\":%.6f,\"status\":\"set\"}",
+                 budget, swarm_budget_remaining(&g_swarm));
+        fprintf(stderr, "  %s💰%s swarm budget set: $%.4f\n",
+                TUI_BYELLOW, TUI_RESET, budget);
+    } else {
+        double remaining = swarm_budget_remaining(&g_swarm);
+        snprintf(result, rlen,
+                 "{\"budget_usd\":%.6f,\"spent_usd\":%.6f,\"remaining_usd\":%.6f,"
+                 "\"children\":%d,\"active\":%d}",
+                 g_swarm.swarm_budget_usd, g_swarm.spent_usd, remaining,
+                 g_swarm.child_count, swarm_active_count(&g_swarm));
+    }
     return true;
 }
 
@@ -6240,6 +7310,79 @@ static bool tool_context_get(const char *input, char *result, size_t rlen) {
         snprintf(result + off, rlen - off, "\n\n... truncated (%zu/%zu chars shown)",
                  copy_len, c->text_len);
     }
+    return true;
+}
+
+/* ── context_get_batch: fetch multiple chunks in one call ─────────── */
+static bool tool_context_get_batch(const char *input, char *result, size_t rlen) {
+    /* Parse chunk_ids array from JSON: {"chunk_ids":[1,2,3]} */
+    const char *arr = strstr(input, "\"chunk_ids\"");
+    if (!arr) {
+        snprintf(result, rlen, "error: chunk_ids array required");
+        return false;
+    }
+    const char *bracket = strchr(arr, '[');
+    if (!bracket) {
+        snprintf(result, rlen, "error: chunk_ids must be a JSON array");
+        return false;
+    }
+
+    int ids[64];
+    int id_count = 0;
+    const char *p = bracket + 1;
+    while (*p && *p != ']' && id_count < 64) {
+        while (*p == ' ' || *p == ',') p++;
+        if (*p == ']') break;
+        ids[id_count++] = atoi(p);
+        while (*p && *p != ',' && *p != ']') p++;
+    }
+    if (id_count == 0) {
+        snprintf(result, rlen, "error: chunk_ids array is empty");
+        return false;
+    }
+
+    int max_chars_each = json_get_int(input, "max_chars_each", 2000);
+    if (max_chars_each < 200) max_chars_each = 200;
+    if (max_chars_each > 8000) max_chars_each = 8000;
+
+    size_t off = 0;
+    int found = 0, missing = 0;
+    for (int i = 0; i < id_count && off + 128 < rlen; i++) {
+        int idx = ctx_find_index_by_id(ids[i]);
+        if (idx < 0) {
+            missing++;
+            continue;
+        }
+        ctx_chunk_t *c = &g_ctx.chunks[idx];
+        size_t copy_len = c->text_len;
+        if (copy_len > (size_t)max_chars_each) copy_len = (size_t)max_chars_each;
+
+        int n = snprintf(result + off, rlen - off,
+                         "%s[chunk_id=%d tool=%s bytes=%zu]\n",
+                         found > 0 ? "\n---\n" : "", c->id, c->tool, c->text_len);
+        if (n > 0 && (size_t)n < rlen - off) off += (size_t)n;
+
+        if (off + copy_len + 64 < rlen) {
+            memcpy(result + off, c->text, copy_len);
+            off += copy_len;
+            result[off] = '\0';
+            if (copy_len < c->text_len) {
+                n = snprintf(result + off, rlen - off,
+                             "\n(truncated %zu/%zu)", copy_len, c->text_len);
+                if (n > 0 && (size_t)n < rlen - off) off += (size_t)n;
+            }
+        }
+        found++;
+    }
+    if (found == 0) {
+        snprintf(result, rlen, "error: none of %d chunk_ids found (likely evicted)", id_count);
+        return false;
+    }
+    int n = snprintf(result + off, rlen - off,
+                     "\n\n--- batch: %d/%d chunks returned, %d missing ---",
+                     found, id_count, missing);
+    if (n > 0 && (size_t)n < rlen - off) off += (size_t)n;
+    result[off] = '\0';
     return true;
 }
 
@@ -8612,9 +9755,12 @@ static bool tool_plugin_list(const char *input, char *result, size_t rlen) {
     return true;
 }
 
+static void tool_map_rebuild(void);  /* forward decl */
+
 static bool tool_plugin_reload(const char *input, char *result, size_t rlen) {
     (void)input;
     plugin_reload(&g_plugins);
+    tool_map_rebuild();
     snprintf(result, rlen, "Plugins reloaded. %d plugins loaded, %d extra tools.",
              g_plugins.count, g_plugins.extra_tool_count);
     return true;
@@ -8627,11 +9773,12 @@ static bool tool_plugin_load_file(const char *input, char *result, size_t rlen) 
         return false;
     }
     bool ok = plugin_load(&g_plugins, path);
-    if (ok)
+    if (ok) {
+        tool_map_rebuild();
         snprintf(result, rlen, "Plugin loaded: %s (%d tools)",
                  g_plugins.plugins[g_plugins.count - 1].name,
                  g_plugins.plugins[g_plugins.count - 1].tool_count);
-    else
+    } else
         snprintf(result, rlen, "error: failed to load plugin from %s", path);
     free(path);
     return ok;
@@ -9241,6 +10388,822 @@ static bool tool_xml_extract(const char *input, char *result, size_t rlen) {
     return true;
 }
 
+/* ═══════════════════════════════════════════════════════════════════════════
+ * Wings + Talons Tool Implementations
+ * ═══════════════════════════════════════════════════════════════════════════ */
+
+/* Global governance engine — singleton for this process */
+static governance_engine_t g_governance;  /* immune system */
+static memory_store_t g_memory;           /* wings: cognitive memory */
+static talons_engine_t g_talons;          /* talons: competitive execution */
+static bool g_wt_initialized = false;
+
+static void ensure_wt_init(void) {
+    if (!g_wt_initialized) {
+        governance_init(&g_governance);
+        memory_store_init(&g_memory);
+        talons_init(&g_talons);
+        /* Register self as agent */
+        const char *self_id = getenv("DSCO_AGENT_ID");
+        if (!self_id) self_id = "root";
+        governance_register_agent(&g_governance, self_id, PRINCIPAL_TIER_2, 10000);
+        g_wt_initialized = true;
+    }
+}
+
+/* ── Pheromone Tools ──────────────────────────────────────────────────── */
+
+static bool tool_pheromone_deposit(const char *input, char *result, size_t rlen) {
+    ensure_wt_init();
+    char *type_s = json_get_str(input,"type");
+    char *region = json_get_str(input,"region");
+    char *source = json_get_str(input,"source");
+    char *meta = json_get_str(input,"meta");
+    double concentration = json_get_double(input, "concentration", 0);
+    if (concentration <= 0) concentration = 0.5;
+
+    pheromone_type_t type = PHERO_PROGRESS;
+    if (type_s) {
+        if (strcasecmp(type_s, "attraction") == 0) type = PHERO_ATTRACTION;
+        else if (strcasecmp(type_s, "warning") == 0) type = PHERO_WARNING;
+        else if (strcasecmp(type_s, "success") == 0) type = PHERO_SUCCESS;
+        else if (strcasecmp(type_s, "help_needed") == 0) type = PHERO_HELP_NEEDED;
+        else if (strcasecmp(type_s, "capacity") == 0) type = PHERO_CAPACITY;
+    }
+
+    int id = pheromone_deposit(&g_governance.pheromones, type, concentration,
+                                region ? region : "global",
+                                source ? source : "agent", meta);
+    snprintf(result, rlen,
+             "{\"ok\":true,\"signal_id\":%d,\"type\":\"%s\",\"concentration\":%.3f,\"region\":\"%s\"}",
+             id, pheromone_type_name(type), concentration, region ? region : "global");
+    free(type_s); free(region); free(source); free(meta);
+    return true;
+}
+
+static bool tool_pheromone_sense(const char *input, char *result, size_t rlen) {
+    ensure_wt_init();
+    char *type_s = json_get_str(input,"type");
+    char *region = json_get_str(input,"region");
+
+    if (!type_s) {
+        /* Sense all types */
+        pheromone_gradient_t grads[PHERO_TYPE_COUNT];
+        int n = pheromone_sense_all(&g_governance.pheromones,
+                                     region ? region : "global",
+                                     PHERO_AGG_SUM, grads, PHERO_TYPE_COUNT);
+        jbuf_t b = {0};
+        jbuf_appendf(&b, "{\"region\":\"%s\",\"gradients\":[", region ? region : "global");
+        for (int i = 0; i < n; i++) {
+            jbuf_appendf(&b, "%s{\"type\":\"%s\",\"concentration\":%.4f,\"signals\":%d}",
+                         i ? "," : "", pheromone_type_name(grads[i].type),
+                         grads[i].concentration, grads[i].signal_count);
+        }
+        jbuf_appendf(&b, "]}");
+        snprintf(result, rlen, "%s", b.data ? b.data : "{}");
+        jbuf_free(&b);
+    } else {
+        pheromone_type_t type = PHERO_PROGRESS;
+        if (strcasecmp(type_s, "attraction") == 0) type = PHERO_ATTRACTION;
+        else if (strcasecmp(type_s, "warning") == 0) type = PHERO_WARNING;
+        else if (strcasecmp(type_s, "success") == 0) type = PHERO_SUCCESS;
+        else if (strcasecmp(type_s, "help_needed") == 0) type = PHERO_HELP_NEEDED;
+        else if (strcasecmp(type_s, "capacity") == 0) type = PHERO_CAPACITY;
+
+        pheromone_gradient_t g;
+        pheromone_gradient(&g_governance.pheromones, type,
+                           region ? region : "global", PHERO_AGG_SUM, &g);
+        snprintf(result, rlen,
+                 "{\"type\":\"%s\",\"concentration\":%.4f,\"signals\":%d,"
+                 "\"strongest_source\":\"%s\",\"strongest_age\":%.1f}",
+                 pheromone_type_name(type), g.concentration, g.signal_count,
+                 g.strongest_source, g.strongest_age);
+    }
+    free(type_s); free(region);
+    return true;
+}
+
+static bool tool_pheromone_status(const char *input, char *result, size_t rlen) {
+    (void)input;
+    ensure_wt_init();
+    pheromone_status_json(&g_governance.pheromones, result, rlen);
+    return true;
+}
+
+/* ── OODA Tools ───────────────────────────────────────────────────────── */
+
+static bool tool_ooda_begin(const char *input, char *result, size_t rlen) {
+    (void)input;
+    ensure_wt_init();
+    int id = ooda_begin(&g_governance.ooda);
+    snprintf(result, rlen, "{\"ok\":true,\"cycle_id\":%d,\"phase\":\"observe\"}", id);
+    return true;
+}
+
+static bool tool_ooda_observe(const char *input, char *result, size_t rlen) {
+    ensure_wt_init();
+    char *content = json_get_str(input,"observation");
+    char *source = json_get_str(input,"source");
+    double confidence = json_get_double(input, "confidence", 0);
+    if (confidence <= 0) confidence = 0.7;
+
+    bool ok = ooda_observe(&g_governance.ooda, content ? content : "",
+                           source ? source : "tool", confidence);
+    snprintf(result, rlen, "{\"ok\":%s,\"observations\":%d}",
+             ok ? "true" : "false", g_governance.ooda.current.observation_count);
+    free(content); free(source);
+    return true;
+}
+
+static bool tool_ooda_orient(const char *input, char *result, size_t rlen) {
+    ensure_wt_init();
+    char *factor = json_get_str(input,"factor");
+    double weight = json_get_double(input, "weight", 0);
+    if (weight <= 0) weight = 0.5;
+    bool constraint = json_get_bool(input, "constraint", false);
+
+    bool ok = ooda_orient_add(&g_governance.ooda, factor ? factor : "",
+                               weight, constraint);
+
+    /* Also set context if provided */
+    double budget = json_get_double(input, "budget", 0);
+    int tier = (int)json_get_double(input, "tier", 0);
+    bool safety = json_get_bool(input, "safety_critical", false);
+    if (budget > 0 || tier > 0 || safety)
+        ooda_orient_context(&g_governance.ooda, budget, tier, safety);
+
+    snprintf(result, rlen, "{\"ok\":%s,\"factors\":%d,\"phase\":\"%s\"}",
+             ok ? "true" : "false", g_governance.ooda.current.factor_count,
+             ooda_phase_name(g_governance.ooda.current.phase));
+    free(factor);
+    return true;
+}
+
+static bool tool_ooda_decide(const char *input, char *result, size_t rlen) {
+    (void)input;
+    ensure_wt_init();
+    ooda_action_t action = ooda_decide(&g_governance.ooda);
+    const ooda_decision_t *d = ooda_current_decision(&g_governance.ooda);
+    if (d) {
+        snprintf(result, rlen,
+                 "{\"action\":\"%s\",\"confidence\":%.3f,"
+                 "\"capability\":\"%s\",\"reason\":\"%s\","
+                 "\"requires_confirmation\":%s}",
+                 ooda_action_name(action), d->confidence,
+                 ooda_capability_name(d->capability), d->reason,
+                 d->requires_confirmation ? "true" : "false");
+    } else {
+        snprintf(result, rlen, "{\"action\":\"%s\",\"error\":\"no decision\"}", ooda_action_name(action));
+    }
+    return true;
+}
+
+static bool tool_ooda_complete(const char *input, char *result, size_t rlen) {
+    ensure_wt_init();
+    bool success = json_get_bool(input, "success", false);
+    char *res = json_get_str(input,"result");
+
+    ooda_act_result(&g_governance.ooda, success, res ? res : "");
+    bool ok = ooda_complete(&g_governance.ooda);
+    snprintf(result, rlen,
+             "{\"ok\":%s,\"total_cycles\":%d,\"success_rate\":%.2f}",
+             ok ? "true" : "false", g_governance.ooda.total_cycles,
+             ooda_success_rate(&g_governance.ooda, 10));
+    free(res);
+    return true;
+}
+
+static bool tool_ooda_status(const char *input, char *result, size_t rlen) {
+    (void)input;
+    ensure_wt_init();
+    ooda_to_json(&g_governance.ooda, result, rlen);
+    return true;
+}
+
+/* ── Kill Switch Tools ────────────────────────────────────────────────── */
+
+static bool tool_killswitch_trigger(const char *input, char *result, size_t rlen) {
+    ensure_wt_init();
+    char *level_s = json_get_str(input,"level");
+    char *target = json_get_str(input,"target");
+    char *reason = json_get_str(input,"reason");
+    double timeout = json_get_double(input, "timeout", 0);
+    bool cascade = json_get_bool(input, "cascade", false);
+
+    kill_level_t level = KILL_AGENT;
+    if (level_s) {
+        if (strcasecmp(level_s, "workflow") == 0) level = KILL_WORKFLOW;
+        else if (strcasecmp(level_s, "service") == 0) level = KILL_SERVICE;
+        else if (strcasecmp(level_s, "pheromone") == 0) level = KILL_PHEROMONE;
+        else if (strcasecmp(level_s, "system") == 0) level = KILL_SYSTEM;
+    }
+
+    int id = killswitch_trigger(&g_governance.killswitches, level,
+                                 target ? target : "*",
+                                 reason ? reason : "manual trigger",
+                                 KILL_TRIGGER_MANUAL, 1, timeout, cascade);
+    snprintf(result, rlen,
+             "{\"ok\":%s,\"kill_id\":%d,\"level\":\"%s\",\"target\":\"%s\"}",
+             id >= 0 ? "true" : "false", id,
+             killswitch_level_name(level), target ? target : "*");
+    free(level_s); free(target); free(reason);
+    return true;
+}
+
+static bool tool_killswitch_resolve(const char *input, char *result, size_t rlen) {
+    ensure_wt_init();
+    int kill_id = (int)json_get_double(input, "kill_id", 0);
+    bool ok = killswitch_resolve(&g_governance.killswitches, kill_id, 1);
+    snprintf(result, rlen, "{\"ok\":%s,\"kill_id\":%d}", ok ? "true" : "false", kill_id);
+    return true;
+}
+
+static bool tool_killswitch_status(const char *input, char *result, size_t rlen) {
+    (void)input;
+    ensure_wt_init();
+    killswitch_status_json(&g_governance.killswitches, result, rlen);
+    return true;
+}
+
+/* ── Governance Tools ─────────────────────────────────────────────────── */
+
+static bool tool_governance_status(const char *input, char *result, size_t rlen) {
+    (void)input;
+    ensure_wt_init();
+    governance_status_json(&g_governance, result, rlen);
+    return true;
+}
+
+static bool tool_governance_authorize(const char *input, char *result, size_t rlen) {
+    ensure_wt_init();
+    char *agent_id = json_get_str(input,"agent_id");
+    char *action = json_get_str(input,"action");
+    double gsu_cost = json_get_double(input, "gsu_cost", 0);
+
+    bool ok = governance_authorize(&g_governance,
+                                    agent_id ? agent_id : "root",
+                                    action ? action : "unknown", gsu_cost);
+    snprintf(result, rlen,
+             "{\"authorized\":%s,\"agent\":\"%s\",\"action\":\"%s\",\"gsu_cost\":%.2f}",
+             ok ? "true" : "false", agent_id ? agent_id : "root",
+             action ? action : "unknown", gsu_cost);
+    free(agent_id); free(action);
+    return true;
+}
+
+static bool tool_governance_checkpoint(const char *input, char *result, size_t rlen) {
+    ensure_wt_init();
+    char *agent_id = json_get_str(input,"agent_id");
+    char *action = json_get_str(input,"action");
+    double gsu_cost = json_get_double(input, "gsu_cost", 0);
+    char *context = json_get_str(input,"context");
+
+    bool ok = governance_checkpoint(&g_governance,
+                                     agent_id ? agent_id : "root",
+                                     action ? action : "unknown",
+                                     gsu_cost, context);
+    double remaining = governance_remaining_gsu(&g_governance,
+                                                 agent_id ? agent_id : "root");
+    snprintf(result, rlen,
+             "{\"permitted\":%s,\"agent\":\"%s\",\"action\":\"%s\","
+             "\"gsu_charged\":%.2f,\"gsu_remaining\":%.2f}",
+             ok ? "true" : "false", agent_id ? agent_id : "root",
+             action ? action : "unknown", gsu_cost, remaining);
+    free(agent_id); free(action); free(context);
+    return true;
+}
+
+static bool tool_governance_budget(const char *input, char *result, size_t rlen) {
+    ensure_wt_init();
+    char *agent_id = json_get_str(input,"agent_id");
+    const char *aid = agent_id ? agent_id : "root";
+
+    const agent_envelope_t *a = governance_get_agent(&g_governance, aid);
+    if (a) {
+        snprintf(result, rlen,
+                 "{\"agent\":\"%s\",\"tier\":\"%s\","
+                 "\"allocated\":%.2f,\"consumed\":%.2f,\"remaining\":%.2f,"
+                 "\"capability\":\"%s\",\"can_spawn\":%s,\"can_kill\":%s}",
+                 aid, governance_tier_name(a->tier),
+                 a->budget.allocated, a->budget.consumed,
+                 a->budget.allocated - a->budget.consumed - a->budget.reserved,
+                 ooda_capability_name(a->capability),
+                 a->can_spawn ? "true" : "false",
+                 a->can_kill ? "true" : "false");
+    } else {
+        snprintf(result, rlen, "{\"error\":\"agent not found\",\"agent\":\"%s\"}", aid);
+    }
+    free(agent_id);
+    return true;
+}
+
+static bool tool_governance_audit(const char *input, char *result, size_t rlen) {
+    ensure_wt_init();
+    int last_n = (int)json_get_double(input, "last_n", 0);
+    if (last_n <= 0) last_n = 20;
+    governance_audit_json(&g_governance, result, rlen, last_n);
+    return true;
+}
+
+static bool tool_governance_param(const char *input, char *result, size_t rlen) {
+    ensure_wt_init();
+    char *name = json_get_str(input,"name");
+    double value = json_get_double(input, "value", 0);
+
+    if (!name) {
+        /* List all params */
+        jbuf_t b = {0};
+        jbuf_appendf(&b, "{\"params\":[");
+        for (int i = 0; i < g_governance.softcoded_count; i++) {
+            jbuf_appendf(&b, "%s{\"name\":\"%s\",\"value\":%.4f,\"min\":%.4f,"
+                         "\"max\":%.4f,\"default\":%.4f}",
+                         i ? "," : "",
+                         g_governance.softcoded[i].name,
+                         g_governance.softcoded[i].value,
+                         g_governance.softcoded[i].min_value,
+                         g_governance.softcoded[i].max_value,
+                         g_governance.softcoded[i].default_value);
+        }
+        jbuf_appendf(&b, "]}");
+        snprintf(result, rlen, "%s", b.data ? b.data : "{}");
+        jbuf_free(&b);
+    } else if (value != 0) {
+        bool ok = governance_set_param(&g_governance, name, value, 1);
+        snprintf(result, rlen, "{\"ok\":%s,\"name\":\"%s\",\"value\":%.4f}",
+                 ok ? "true" : "false", name, governance_get_param(&g_governance, name));
+    } else {
+        double v = governance_get_param(&g_governance, name);
+        snprintf(result, rlen, "{\"name\":\"%s\",\"value\":%.4f}", name, v);
+    }
+    free(name);
+    return true;
+}
+
+/* ── Memory Tier Tools ────────────────────────────────────────────────── */
+
+static bool tool_memory_store(const char *input, char *result, size_t rlen) {
+    ensure_wt_init();
+    char *key = json_get_str(input,"key");
+    char *value = json_get_str(input,"value");
+    char *tier_s = json_get_str(input,"tier");
+    double importance = json_get_double(input, "importance", 0);
+    if (importance <= 0) importance = 0.5;
+
+    if (!key || !value) {
+        snprintf(result, rlen, "{\"error\":\"key and value required\"}");
+        free(key); free(value); free(tier_s);
+        return false;
+    }
+
+    memory_tier_t tier = MEM_WORKING;
+    if (tier_s) {
+        if (strcasecmp(tier_s, "episodic") == 0) tier = MEM_EPISODIC;
+        else if (strcasecmp(tier_s, "semantic") == 0) tier = MEM_SEMANTIC;
+    }
+
+    int id = memory_store(&g_memory, tier, key, value, importance);
+    snprintf(result, rlen,
+             "{\"ok\":true,\"id\":%d,\"key\":\"%s\",\"tier\":\"%s\","
+             "\"importance\":%.2f,\"halflife\":%.0f}",
+             id, key, memory_tier_name(tier), importance,
+             memory_tier_halflife(tier));
+    free(key); free(value); free(tier_s);
+    return true;
+}
+
+static bool tool_memory_recall(const char *input, char *result, size_t rlen) {
+    ensure_wt_init();
+    char *key = json_get_str(input,"key");
+    char *query = json_get_str(input,"query");
+    char *tag = json_get_str(input,"tag");
+
+    if (key) {
+        const memory_entry_t *e = memory_recall(&g_memory, key);
+        if (e) {
+            snprintf(result, rlen,
+                     "{\"found\":true,\"key\":\"%s\",\"value\":\"%.*s\","
+                     "\"tier\":\"%s\",\"strength\":%.4f,\"importance\":%.2f,"
+                     "\"accesses\":%d,\"pinned\":%s}",
+                     e->key, (int)(rlen > 512 ? rlen - 512 : 256), e->value,
+                     memory_tier_name(e->tier), e->strength, e->importance,
+                     e->access_count, e->pinned ? "true" : "false");
+        } else {
+            snprintf(result, rlen, "{\"found\":false,\"key\":\"%s\"}", key);
+        }
+    } else if (query) {
+        const memory_entry_t *hits[16];
+        int n = memory_search(&g_memory, query, hits, 16);
+        jbuf_t b = {0};
+        jbuf_appendf(&b, "{\"results\":[");
+        for (int i = 0; i < n; i++) {
+            jbuf_appendf(&b, "%s{\"key\":\"%s\",\"tier\":\"%s\","
+                         "\"strength\":%.4f,\"importance\":%.2f}",
+                         i ? "," : "", hits[i]->key,
+                         memory_tier_name(hits[i]->tier),
+                         hits[i]->strength, hits[i]->importance);
+        }
+        jbuf_appendf(&b, "],\"count\":%d}", n);
+        snprintf(result, rlen, "%s", b.data ? b.data : "{}");
+        jbuf_free(&b);
+    } else if (tag) {
+        const memory_entry_t *hits[16];
+        int n = memory_recall_by_tag(&g_memory, tag, hits, 16);
+        jbuf_t b = {0};
+        jbuf_appendf(&b, "{\"tag\":\"%s\",\"results\":[", tag);
+        for (int i = 0; i < n; i++) {
+            jbuf_appendf(&b, "%s{\"key\":\"%s\",\"tier\":\"%s\"}",
+                         i ? "," : "", hits[i]->key,
+                         memory_tier_name(hits[i]->tier));
+        }
+        jbuf_appendf(&b, "],\"count\":%d}", n);
+        snprintf(result, rlen, "%s", b.data ? b.data : "{}");
+        jbuf_free(&b);
+    } else {
+        snprintf(result, rlen, "{\"error\":\"provide key, query, or tag\"}");
+    }
+    free(key); free(query); free(tag);
+    return true;
+}
+
+static bool tool_memory_promote(const char *input, char *result, size_t rlen) {
+    ensure_wt_init();
+    char *key = json_get_str(input,"key");
+    if (!key) {
+        snprintf(result, rlen, "{\"error\":\"key required\"}");
+        return false;
+    }
+    bool ok = memory_promote(&g_memory, key);
+    if (ok) {
+        const memory_entry_t *e = memory_recall(&g_memory, key);
+        snprintf(result, rlen, "{\"ok\":true,\"key\":\"%s\",\"new_tier\":\"%s\"}",
+                 key, e ? memory_tier_name(e->tier) : "unknown");
+    } else {
+        snprintf(result, rlen, "{\"ok\":false,\"key\":\"%s\",\"reason\":\"not found or already semantic\"}", key);
+    }
+    free(key);
+    return true;
+}
+
+static bool tool_memory_forget(const char *input, char *result, size_t rlen) {
+    ensure_wt_init();
+    char *key = json_get_str(input,"key");
+    if (!key) {
+        snprintf(result, rlen, "{\"error\":\"key required\"}");
+        return false;
+    }
+    bool ok = memory_forget(&g_memory, key);
+    snprintf(result, rlen, "{\"ok\":%s,\"key\":\"%s\"}", ok ? "true" : "false", key);
+    free(key);
+    return true;
+}
+
+static bool tool_memory_status(const char *input, char *result, size_t rlen) {
+    (void)input;
+    ensure_wt_init();
+    memory_status_json(&g_memory, result, rlen);
+    return true;
+}
+
+/* ── Talons Tools (Competitive Execution) ─────────────────────────────── */
+
+static bool tool_talons_goal_create(const char *input, char *result, size_t rlen) {
+    ensure_wt_init();
+    char *desc = json_get_str(input, "description");
+    char *grip_s = json_get_str(input, "grip");
+    char *strategy_s = json_get_str(input, "strategy");
+    double priority = json_get_double(input, "priority", 0);
+    double deadline = json_get_double(input, "deadline", 0);
+    if (priority <= 0) priority = 0.5;
+
+    grip_strength_t grip = GRIP_HOLDING;
+    if (grip_s) {
+        if (strcasecmp(grip_s, "tentative") == 0) grip = GRIP_TENTATIVE;
+        else if (strcasecmp(grip_s, "locked") == 0) grip = GRIP_LOCKED;
+        else if (strcasecmp(grip_s, "death_grip") == 0) grip = GRIP_DEATH_GRIP;
+    }
+
+    strategy_type_t strategy = STRATEGY_DIRECT;
+    if (strategy_s) {
+        if (strcasecmp(strategy_s, "flanking") == 0) strategy = STRATEGY_FLANKING;
+        else if (strcasecmp(strategy_s, "tournament") == 0) strategy = STRATEGY_TOURNAMENT;
+        else if (strcasecmp(strategy_s, "escalation") == 0) strategy = STRATEGY_ESCALATION;
+        else if (strcasecmp(strategy_s, "divide") == 0) strategy = STRATEGY_DIVIDE;
+        else if (strcasecmp(strategy_s, "ambush") == 0) strategy = STRATEGY_AMBUSH;
+    }
+
+    int id = talons_goal_create(&g_talons, desc, priority, grip, strategy, deadline);
+    snprintf(result, rlen,
+             "{\"ok\":true,\"goal_id\":%d,\"description\":\"%.*s\","
+             "\"grip\":\"%s\",\"strategy\":\"%s\",\"priority\":%.2f,"
+             "\"max_attempts\":%d}",
+             id, 80, desc ? desc : "",
+             talons_grip_name(grip), talons_strategy_name(strategy),
+             priority, grip == GRIP_TENTATIVE ? 1 : grip == GRIP_HOLDING ? 3 : grip == GRIP_LOCKED ? 7 : 20);
+    free(desc); free(grip_s); free(strategy_s);
+    return true;
+}
+
+static bool tool_talons_goal_advance(const char *input, char *result, size_t rlen) {
+    ensure_wt_init();
+    int goal_id = (int)json_get_double(input, "goal_id", 0);
+    char *action = json_get_str(input, "action");
+    char *res_text = json_get_str(input, "result");
+    double cost = json_get_double(input, "cost", 0);
+    double confidence = json_get_double(input, "confidence", 0);
+
+    bool ok = false;
+    const char *new_state = "unknown";
+
+    if (!action) {
+        snprintf(result, rlen, "{\"error\":\"action required: stalk|strike|grip|capture|escaped|abandon\"}");
+        free(action); free(res_text);
+        return false;
+    }
+
+    if (strcasecmp(action, "stalk") == 0) {
+        ok = talons_goal_stalk(&g_talons, goal_id);
+        new_state = "stalking";
+    } else if (strcasecmp(action, "strike") == 0) {
+        ok = talons_goal_strike(&g_talons, goal_id);
+        new_state = "striking";
+    } else if (strcasecmp(action, "grip") == 0) {
+        ok = talons_goal_grip(&g_talons, goal_id);
+        new_state = "gripping";
+    } else if (strcasecmp(action, "capture") == 0) {
+        ok = talons_goal_capture(&g_talons, goal_id, res_text, cost);
+        new_state = "captured";
+    } else if (strcasecmp(action, "escaped") == 0) {
+        bool retrying = talons_goal_escaped(&g_talons, goal_id, res_text, cost);
+        new_state = retrying ? "stalking (retry)" : "escaped";
+        ok = true;
+    } else if (strcasecmp(action, "abandon") == 0) {
+        ok = talons_goal_abandon(&g_talons, goal_id, res_text);
+        new_state = "abandoned";
+    }
+
+    if (confidence > 0) talons_goal_update_confidence(&g_talons, goal_id, confidence);
+
+    const goal_t *g = talons_goal_get(&g_talons, goal_id);
+    snprintf(result, rlen,
+             "{\"ok\":%s,\"goal_id\":%d,\"new_state\":\"%s\","
+             "\"attempts\":%d,\"confidence\":%.3f}",
+             ok ? "true" : "false", goal_id, new_state,
+             g ? g->attempts : 0, g ? g->confidence : 0);
+    free(action); free(res_text);
+    return true;
+}
+
+static bool tool_talons_tournament(const char *input, char *result, size_t rlen) {
+    ensure_wt_init();
+    char *action = json_get_str(input, "action");
+    char *objective = json_get_str(input, "objective");
+    int tid = (int)json_get_double(input, "tournament_id", 0);
+    int cid = (int)json_get_double(input, "competitor_id", 0);
+    char *label = json_get_str(input, "label");
+    double score = json_get_double(input, "score", 0);
+    double cost = json_get_double(input, "cost", 0);
+    char *res_text = json_get_str(input, "result");
+
+    if (!action) {
+        snprintf(result, rlen, "{\"error\":\"action required: begin|add|result|decide\"}");
+        goto done;
+    }
+
+    if (strcasecmp(action, "begin") == 0) {
+        double wq = json_get_double(input, "weight_quality", 0);
+        double ws = json_get_double(input, "weight_speed", 0);
+        double wc = json_get_double(input, "weight_cost", 0);
+        double deadline = json_get_double(input, "deadline", 0);
+        int id = talons_tournament_begin(&g_talons, objective, deadline,
+                                          wq > 0 ? wq : 0.5,
+                                          ws > 0 ? ws : 0.3,
+                                          wc > 0 ? wc : 0.2);
+        snprintf(result, rlen, "{\"ok\":true,\"tournament_id\":%d,\"objective\":\"%.*s\"}",
+                 id, 80, objective ? objective : "");
+    } else if (strcasecmp(action, "add") == 0) {
+        char *strat_s = json_get_str(input, "strategy");
+        strategy_type_t strat = STRATEGY_DIRECT;
+        if (strat_s && strcasecmp(strat_s, "flanking") == 0) strat = STRATEGY_FLANKING;
+        int id = talons_tournament_add(&g_talons, tid, label, strat);
+        snprintf(result, rlen, "{\"ok\":%s,\"competitor_id\":%d}", id >= 0 ? "true" : "false", id);
+        free(strat_s);
+    } else if (strcasecmp(action, "result") == 0) {
+        bool ok = talons_tournament_result(&g_talons, tid, cid, score, cost, res_text);
+        const tournament_t *tr = talons_tournament_get(&g_talons, tid);
+        snprintf(result, rlen,
+                 "{\"ok\":%s,\"decided\":%s,\"winner\":%d}",
+                 ok ? "true" : "false",
+                 (tr && tr->decided) ? "true" : "false",
+                 tr ? tr->winner_id : -1);
+    } else if (strcasecmp(action, "decide") == 0) {
+        int winner = talons_tournament_decide(&g_talons, tid);
+        snprintf(result, rlen, "{\"winner_id\":%d}", winner);
+    } else {
+        snprintf(result, rlen, "{\"error\":\"unknown action: %s\"}", action);
+    }
+
+done:
+    free(action); free(objective); free(label); free(res_text);
+    return true;
+}
+
+static bool tool_talons_recommend(const char *input, char *result, size_t rlen) {
+    ensure_wt_init();
+    double time_pressure = json_get_double(input, "time_pressure", 0);
+    double budget = json_get_double(input, "resource_budget", 0);
+    double complexity = json_get_double(input, "complexity", 0);
+    if (time_pressure <= 0) time_pressure = 0.5;
+    if (budget <= 0) budget = 0.5;
+    if (complexity <= 0) complexity = 0.5;
+
+    strategy_type_t rec = talons_recommend_strategy(&g_talons, time_pressure, budget, complexity);
+    snprintf(result, rlen,
+             "{\"recommended\":\"%s\",\"context\":{\"time_pressure\":%.2f,"
+             "\"resource_budget\":%.2f,\"complexity\":%.2f},"
+             "\"best_overall\":\"%s\",\"win_rate\":%.3f}",
+             talons_strategy_name(rec), time_pressure, budget, complexity,
+             talons_strategy_name(talons_best_strategy(&g_talons)),
+             talons_win_rate(&g_talons, 20));
+    return true;
+}
+
+static bool tool_talons_status(const char *input, char *result, size_t rlen) {
+    (void)input;
+    ensure_wt_init();
+    talons_status_json(&g_talons, result, rlen);
+    return true;
+}
+
+/* ── Wings+Talons+Immune unified meta tool ────────────────────────────── */
+
+static bool tool_wings_talons_status(const char *input, char *result, size_t rlen) {
+    (void)input;
+    ensure_wt_init();
+    governance_tick(&g_governance);
+    memory_tick(&g_memory);
+
+    jbuf_t b = {0};
+    jbuf_appendf(&b, "{\"version\":\"v0.9.0\",\"wings\":{\"pheromones\":");
+
+    char pbuf[4096];
+    pheromone_status_json(&g_governance.pheromones, pbuf, sizeof(pbuf));
+    jbuf_appendf(&b, "%s,\"memory\":", pbuf);
+
+    char mbuf[4096];
+    memory_status_json(&g_memory, mbuf, sizeof(mbuf));
+    jbuf_appendf(&b, "%s},\"talons\":", mbuf);
+
+    char tbuf[4096];
+    talons_status_json(&g_talons, tbuf, sizeof(tbuf));
+    jbuf_appendf(&b, "%s,\"immune_system\":", tbuf);
+
+    char ibuf[8192];
+    governance_status_json(&g_governance, ibuf, sizeof(ibuf));
+    jbuf_appendf(&b, "%s}", ibuf);
+
+    snprintf(result, rlen, "%s", b.data ? b.data : "{}");
+    jbuf_free(&b);
+    return true;
+}
+
+/* ── Agent self-exit tool ──────────────────────────────────────────── */
+
+static bool tool_self_exit(const char *input, char *result, size_t rlen) {
+    (void)input;
+    g_agent_exit_requested = 1;
+    snprintf(result, rlen, "{\"status\":\"exit_scheduled\",\"message\":\"Process will terminate after this turn completes.\"}");
+    return true;
+}
+
+/* ── Discover tools (meta-tool for lazy loading) ───────────────────── */
+
+static bool tool_discover_tools(const char *input, char *result, size_t rlen) {
+    /* Parse optional category filter */
+    char category[64] = "";
+    if (input) {
+        const char *c = strstr(input, "\"category\"");
+        if (c) {
+            c = strchr(c + 10, '"');
+            if (c) {
+                c++;
+                const char *end = strchr(c, '"');
+                if (end && (size_t)(end - c) < sizeof(category)) {
+                    memcpy(category, c, end - c);
+                    category[end - c] = '\0';
+                }
+            }
+        }
+    }
+
+    int total;
+    const tool_def_t *tools = tools_get_all(&total);
+
+    /* Build JSON array of tool summaries grouped by category */
+    int off = 0;
+    off += snprintf(result + off, rlen - off,
+        "{\"total_tools\":%d,\"note\":\"Call any tool by name — it will be available on the next turn.\",\"tools\":[", total);
+
+    /* Group names for display */
+    const char *group_names[] = {
+        "file_io", "git", "network", "shell", "code", "crypto",
+        "swarm", "ast", "pipeline", "math", "search", "general",
+        "finance", "prediction", "memory"
+    };
+    int group_count = 15;
+
+    /* Simple categorization: list tools by group */
+    for (int g = 0; g < group_count && (size_t)off < rlen - 100; g++) {
+        /* Filter by category if specified */
+        if (category[0] && strcasecmp(category, group_names[g]) != 0) continue;
+
+        if (off > 80) off += snprintf(result + off, rlen - off, ",");
+        off += snprintf(result + off, rlen - off, "{\"category\":\"%s\",\"tools\":[", group_names[g]);
+
+        bool first = true;
+        for (int i = 0; i < total && (size_t)off < rlen - 200; i++) {
+            int gid = -1;
+            const char *n = tools[i].name;
+            /* Quick group assignment matching assign_group() */
+            if (strncmp(n, "git_", 4) == 0 || strncmp(n, "github_", 7) == 0) gid = 1;
+            else if (strncmp(n, "av_", 3) == 0 || strncmp(n, "fred_", 5) == 0 ||
+                     strstr(n, "market") || strstr(n, "stripe")) gid = 12;
+            else if (strstr(n, "polymarket") || strstr(n, "kalshi") || strstr(n, "prediction")) gid = 13;
+            else if (strncmp(n, "ipc_", 4) == 0 || strstr(n, "swarm") || strstr(n, "spawn") ||
+                     strstr(n, "agent") || strstr(n, "topology") || strstr(n, "ooda") ||
+                     strstr(n, "pheromone") || strstr(n, "talons") || strstr(n, "governance") ||
+                     strstr(n, "killswitch") || strstr(n, "executor") || strstr(n, "openrouter")) gid = 6;
+            else if (strstr(n, "memory_") || strstr(n, "soul_")) gid = 14;
+            else if (strstr(n, "hash") || strstr(n, "hmac") || strstr(n, "jwt") ||
+                     strstr(n, "uuid") || strstr(n, "random") || strstr(n, "cert")) gid = 5;
+            else if (strstr(n, "http") || strstr(n, "curl") || strstr(n, "dns") ||
+                     strstr(n, "ping") || strstr(n, "web") || strstr(n, "jina") ||
+                     strstr(n, "slack") || strstr(n, "discord") || strstr(n, "notion") ||
+                     strstr(n, "weather") || strstr(n, "firecrawl") || strstr(n, "serpapi") ||
+                     strstr(n, "browser")) gid = 2;
+            else if (strncmp(n, "read_", 5) == 0 || strncmp(n, "write_", 6) == 0 ||
+                     strncmp(n, "edit_", 5) == 0 || strstr(n, "file") || strstr(n, "dir") ||
+                     strstr(n, "tree") || strstr(n, "symlink") || strstr(n, "chmod") ||
+                     strstr(n, "mkdir") || strstr(n, "copy") || strstr(n, "move") ||
+                     strstr(n, "delete") || strstr(n, "append")) gid = 0;
+            else if (strstr(n, "bash") || strstr(n, "run_") || strstr(n, "compile") ||
+                     strstr(n, "sandbox")) gid = 3;
+            else if (strstr(n, "code_") || strstr(n, "ast_") || strstr(n, "grep") ||
+                     strstr(n, "find") || strstr(n, "search")) gid = 4;
+            else gid = 11; /* general */
+
+            if (gid != g) continue;
+            if (!first) off += snprintf(result + off, rlen - off, ",");
+            first = false;
+            off += snprintf(result + off, rlen - off, "\"%s\"", n);
+        }
+        off += snprintf(result + off, rlen - off, "]}");
+    }
+
+    off += snprintf(result + off, rlen - off, "]}");
+    return true;
+}
+
+/* ── §1-§8: Post-LLM Virtual OS subsystem tools ───────────────────── */
+
+#include "arena_alloc.h"
+#include "event_loop.h"
+#include "scheduler.h"
+#include "vfs.h"
+
+static bool tool_vos_status(const char *input_json, char *result, size_t rlen) {
+    (void)input_json;
+    arena_stats_t as = arena_get_stats();
+    jbuf_t b;
+    jbuf_init(&b, 2048);
+    jbuf_append(&b, "{\"subsystems\":{");
+    jbuf_appendf(&b, "\"arena\":{\"scratch_allocated\":%zu,\"session_allocated\":%zu,"
+                      "\"scratch_resets\":%zu,\"temp_scopes\":%zu},",
+                 as.scratch_bytes_allocated, as.session_bytes_allocated,
+                 as.scratch_resets, as.temp_scopes);
+    jbuf_append(&b, "\"event_loop\":{\"status\":\"initialized\"},");
+    jbuf_append(&b, "\"vm\":{\"status\":\"initialized\"},");
+    jbuf_append(&b, "\"scheduler\":{\"status\":\"initialized\"},");
+    jbuf_append(&b, "\"vfs\":{\"status\":\"initialized\"}");
+    jbuf_append(&b, "},\"reading_list_coverage\":{");
+    jbuf_append(&b, "\"s1_coroutines\":\"active\",");
+    jbuf_append(&b, "\"s2_arena_allocator\":\"active\",");
+    jbuf_append(&b, "\"s3_bytecode_vm\":\"active\",");
+    jbuf_append(&b, "\"s4_ast_introspection\":\"active\",");
+    jbuf_append(&b, "\"s6_event_loop\":\"active\",");
+    jbuf_append(&b, "\"s7_scheduler\":\"active\",");
+    jbuf_append(&b, "\"s8_persistence\":\"active\",");
+    jbuf_append(&b, "\"s9_crypto\":\"active\",");
+    jbuf_append(&b, "\"s10_llm_inference\":\"api_only\",");
+    jbuf_append(&b, "\"s11_metaprogramming\":\"partial\",");
+    jbuf_append(&b, "\"s12_zero_dep\":\"vendor_libs\",");
+    jbuf_append(&b, "\"s13_parsers\":\"active\",");
+    jbuf_append(&b, "\"s14_tui\":\"active\"");
+    jbuf_append(&b, "}}");
+    snprintf(result, rlen, "%s", b.data ? b.data : "{}");
+    jbuf_free(&b);
+    return true;
+}
+
 static const tool_def_t s_tools[] = {
     /* ── File Tools ──────────────────────────────────────────────────────── */
     {
@@ -9418,6 +11381,12 @@ static const tool_def_t s_tools[] = {
         .description = "Fetch full text of a previously indexed retrieval chunk by chunk_id.",
         .input_schema_json = "{\"type\":\"object\",\"properties\":{\"chunk_id\":{\"type\":\"integer\",\"description\":\"Chunk ID from context_search\"},\"max_chars\":{\"type\":\"integer\",\"description\":\"Max chars to return (default 4000, max 24000)\"}},\"required\":[\"chunk_id\"]}",
         .execute = tool_context_get
+    },
+    {
+        .name = "context_get_batch",
+        .description = "Fetch multiple context chunks in a single call. Much more efficient than multiple context_get calls.",
+        .input_schema_json = "{\"type\":\"object\",\"properties\":{\"chunk_ids\":{\"type\":\"array\",\"items\":{\"type\":\"integer\"},\"description\":\"Array of chunk IDs to fetch\"},\"max_chars_each\":{\"type\":\"integer\",\"description\":\"Max chars per chunk (default 2000, max 8000)\"}},\"required\":[\"chunk_ids\"]}",
+        .execute = tool_context_get_batch
     },
     {
         .name = "context_stats",
@@ -10010,6 +11979,12 @@ static const tool_def_t s_tools[] = {
         .execute = tool_agent_wait
     },
     {
+        .name = "agent_race",
+        .description = "Race multiple models/providers on the same task — first to finish wins, losers are killed. Uses completion queue for O(1) winner detection. Pass contestants as [{provider, model}] objects or [\"model\"] strings (default provider: openrouter). Returns winner's output, elapsed time, and provider info.",
+        .input_schema_json = "{\"type\":\"object\",\"properties\":{\"task\":{\"type\":\"string\",\"description\":\"The task all contestants will attempt\"},\"contestants\":{\"type\":\"array\",\"description\":\"Array of {provider,model} objects or model ID strings\",\"items\":{\"oneOf\":[{\"type\":\"string\"},{\"type\":\"object\",\"properties\":{\"provider\":{\"type\":\"string\"},\"model\":{\"type\":\"string\"}}}]}},\"timeout\":{\"type\":\"integer\",\"description\":\"Max seconds (default 60)\"}},\"required\":[\"task\",\"contestants\"]}",
+        .execute = tool_agent_race
+    },
+    {
         .name = "agent_kill",
         .description = "Kill a running sub-agent by ID.",
         .input_schema_json = "{\"type\":\"object\",\"properties\":{\"id\":{\"type\":\"integer\",\"description\":\"Agent ID to kill\"}},\"required\":[\"id\"]}",
@@ -10028,6 +12003,12 @@ static const tool_def_t s_tools[] = {
         .execute = tool_topology_run
     },
     {
+        .name = "task_profile",
+        .description = "Analyze a task string and recommend the best topology for it. Returns parallelism, convergence, complexity, and latency scores, detected patterns, and ranked topology suggestions with fit scores. Use explain:true for a human-readable explanation.",
+        .input_schema_json = "{\"type\":\"object\",\"properties\":{\"task\":{\"type\":\"string\",\"description\":\"The task to profile for topology selection\"},\"explain\":{\"type\":\"boolean\",\"description\":\"Include human-readable explanation (default false)\"}},\"required\":[\"task\"]}",
+        .execute = tool_task_profile
+    },
+    {
         .name = "create_swarm",
         .description = "Create a named flat group of sub-agents and dispatch multiple tasks to them simultaneously. Tasks may be strings or objects with per-agent model overrides. For graph-structured orchestration, use topology_run.",
         .input_schema_json = "{\"type\":\"object\",\"properties\":{\"name\":{\"type\":\"string\",\"description\":\"Swarm group name\"},\"tasks\":{\"type\":\"array\",\"description\":\"Array of task prompts or objects like {task,model}\",\"items\":{\"oneOf\":[{\"type\":\"string\"},{\"type\":\"object\",\"properties\":{\"task\":{\"type\":\"string\"},\"model\":{\"type\":\"string\"}},\"required\":[\"task\"]}]}},\"model\":{\"type\":\"string\",\"description\":\"Default model for all agents in this swarm\"}},\"required\":[\"name\",\"tasks\"]}",
@@ -10044,6 +12025,45 @@ static const tool_def_t s_tools[] = {
         .description = "Wait for all agents in a swarm to complete and collect their outputs. Returns all results aggregated.",
         .input_schema_json = "{\"type\":\"object\",\"properties\":{\"group_id\":{\"type\":\"integer\",\"description\":\"Swarm group ID\"},\"timeout\":{\"type\":\"integer\",\"description\":\"Max seconds to wait (default 300)\"}},\"required\":[\"group_id\"]}",
         .execute = tool_swarm_collect
+    },
+    /* ═══════════════════════════════════════════════════════════════════════
+     * EXTERNAL EXECUTOR TOOLS — Claude Code / Codex CLI as sub-executors
+     * ═══════════════════════════════════════════════════════════════════════ */
+    {
+        .name = "executor_status",
+        .description = "Check which external executor backends are available (dsco, Claude Code CLI, OpenAI Codex CLI). Shows authentication status, resolved paths, and budget info.",
+        .input_schema_json = "{\"type\":\"object\",\"properties\":{}}",
+        .execute = tool_executor_status
+    },
+    {
+        .name = "openrouter_models",
+        .description = "Query OpenRouter's live model registry. Returns available models with pricing, context length, and capabilities. Use to dynamically discover and select models instead of hard-coding. Supports filtering by text search, min context, max price, free-only, and chat-only.",
+        .input_schema_json = "{\"type\":\"object\",\"properties\":{\"search\":{\"type\":\"string\",\"description\":\"Filter by model ID or name (case-insensitive)\"},\"min_context\":{\"type\":\"integer\",\"description\":\"Minimum context length\"},\"max_price_per_million\":{\"type\":\"number\",\"description\":\"Max input price per million tokens\"},\"limit\":{\"type\":\"integer\",\"description\":\"Max results (default 20, max 100)\"},\"free_only\":{\"type\":\"boolean\",\"description\":\"Only free models\"},\"chat_only\":{\"type\":\"boolean\",\"description\":\"Only text/chat models (default true)\"}}}",
+        .execute = tool_openrouter_models
+    },
+    {
+        .name = "spawn_executor",
+        .description = "Spawn an agent using a specific executor backend: 'dsco' (default), 'claude' (Claude Code CLI in print mode), or 'codex' (OpenAI Codex CLI exec mode). Each executor uses its own model and API access. Great for cross-model verification, competitive evaluation, or leveraging different strengths.",
+        .input_schema_json = "{\"type\":\"object\",\"properties\":{\"task\":{\"type\":\"string\",\"description\":\"Task prompt\"},\"executor\":{\"type\":\"string\",\"description\":\"Executor: dsco, claude, or codex\"},\"model\":{\"type\":\"string\",\"description\":\"Model override\"},\"budget\":{\"type\":\"number\",\"description\":\"Max budget in USD for this agent (0=unlimited)\"}},\"required\":[\"task\",\"executor\"]}",
+        .execute = tool_spawn_executor
+    },
+    {
+        .name = "spawn_provider",
+        .description = "Spawn a dsco sub-agent forced to a specific native API provider (e.g. openai, groq, deepseek, mistral, openrouter, xai, together, perplexity, cerebras, cohere). The child runs completely decoupled from the parent's provider — an Anthropic parent can spawn OpenAI children and vice versa. Use this for cross-provider comparison, latency optimization, or accessing provider-specific models.",
+        .input_schema_json = "{\"type\":\"object\",\"properties\":{\"task\":{\"type\":\"string\",\"description\":\"Task prompt\"},\"provider\":{\"type\":\"string\",\"description\":\"Native provider: anthropic, openai, groq, deepseek, mistral, openrouter, xai, together, perplexity, cerebras, cohere\"},\"model\":{\"type\":\"string\",\"description\":\"Model for this provider\"},\"budget\":{\"type\":\"number\",\"description\":\"Max budget USD (0=unlimited)\"}},\"required\":[\"task\",\"provider\"]}",
+        .execute = tool_spawn_provider
+    },
+    {
+        .name = "create_executor_swarm",
+        .description = "Create a swarm that runs on a specific executor backend (dsco/claude/codex). All agents use the same executor. Supports per-agent budget partitioning. Use this to run parallel tasks through Claude Code or Codex CLI.",
+        .input_schema_json = "{\"type\":\"object\",\"properties\":{\"name\":{\"type\":\"string\",\"description\":\"Swarm group name\"},\"executor\":{\"type\":\"string\",\"description\":\"Executor: dsco, claude, or codex\"},\"tasks\":{\"type\":\"array\",\"description\":\"Task prompts or {task,model} objects\",\"items\":{\"oneOf\":[{\"type\":\"string\"},{\"type\":\"object\",\"properties\":{\"task\":{\"type\":\"string\"},\"model\":{\"type\":\"string\"}},\"required\":[\"task\"]}]}},\"model\":{\"type\":\"string\",\"description\":\"Default model\"},\"budget\":{\"type\":\"number\",\"description\":\"Total budget in USD (split across agents)\"}},\"required\":[\"name\",\"executor\",\"tasks\"]}",
+        .execute = tool_create_executor_swarm
+    },
+    {
+        .name = "swarm_budget",
+        .description = "Set or query the global swarm budget. When set, agents that exceed their budget are auto-killed. Pass budget_usd to set, omit to query.",
+        .input_schema_json = "{\"type\":\"object\",\"properties\":{\"budget_usd\":{\"type\":\"number\",\"description\":\"Total swarm budget in USD (0=unlimited)\"}}}",
+        .execute = tool_swarm_budget
     },
     /* ═══════════════════════════════════════════════════════════════════════
      * IPC — INTER-AGENT COMMUNICATION TOOLS
@@ -10503,6 +12523,106 @@ static const tool_def_t s_tools[] = {
         .input_schema_json = "{\"type\":\"object\",\"properties\":{\"repo\":{\"type\":\"string\",\"description\":\"Repository (owner/name)\"},\"action\":{\"type\":\"string\",\"enum\":[\"list_runs\",\"list_workflows\"],\"description\":\"Action (default: list_runs)\"}},\"required\":[\"repo\"]}",
         .execute = tool_github_actions
     },
+    /* ── Knowledge Base (PDF ingestion + semantic search) ────────────────── */
+    { .name = "kb_ingest", .description = "Ingest a PDF or text into the knowledge base. Extracts text, splits into pages, stores in SQLite with dedup. Supports local files, URLs, or raw text.", .input_schema_json = "{\"type\":\"object\",\"properties\":{\"path\":{\"type\":\"string\",\"description\":\"Local path to PDF/text file\"},\"url\":{\"type\":\"string\",\"description\":\"URL to download PDF from\"},\"title\":{\"type\":\"string\",\"description\":\"Document title (auto-detected if omitted)\"},\"text\":{\"type\":\"string\",\"description\":\"Direct text to ingest (skip file processing)\"}}}", .execute = tool_kb_ingest },
+    { .name = "kb_search", .description = "Semantic search across all indexed documents using BM25 ranking. Returns relevant pages with snippets, scores, and source info.", .input_schema_json = "{\"type\":\"object\",\"properties\":{\"query\":{\"type\":\"string\",\"description\":\"Search query\"},\"limit\":{\"type\":\"integer\",\"description\":\"Max results (default 5)\"}},\"required\":[\"query\"]}", .execute = tool_kb_search },
+    { .name = "kb_list", .description = "List all documents in the knowledge base with page counts, word counts, and dates.", .input_schema_json = "{\"type\":\"object\",\"properties\":{}}", .execute = tool_kb_list },
+    { .name = "kb_get", .description = "Get content from a specific document or page in the knowledge base.", .input_schema_json = "{\"type\":\"object\",\"properties\":{\"doc_id\":{\"type\":\"integer\",\"description\":\"Document ID\"},\"page\":{\"type\":\"integer\",\"description\":\"Page number (omit for all pages)\"}},\"required\":[\"doc_id\"]}", .execute = tool_kb_get },
+    { .name = "kb_delete", .description = "Delete a document from the knowledge base.", .input_schema_json = "{\"type\":\"object\",\"properties\":{\"doc_id\":{\"type\":\"integer\",\"description\":\"Document ID to delete\"}},\"required\":[\"doc_id\"]}", .execute = tool_kb_delete },
+    { .name = "arxiv_search", .description = "Search arXiv for research papers. Returns titles, abstracts, authors, IDs. No auth needed. Use arxiv_ingest to add results to the knowledge base.", .input_schema_json = "{\"type\":\"object\",\"properties\":{\"query\":{\"type\":\"string\",\"description\":\"Search query (e.g. 'multi-agent reinforcement learning')\"},\"limit\":{\"type\":\"integer\",\"description\":\"Max results (1-50, default 10)\"}},\"required\":[\"query\"]}", .execute = tool_arxiv_search },
+    { .name = "arxiv_ingest", .description = "Download an arXiv paper by ID and ingest it into the knowledge base. Extracts text, splits into pages, indexes for search.", .input_schema_json = "{\"type\":\"object\",\"properties\":{\"arxiv_id\":{\"type\":\"string\",\"description\":\"arXiv paper ID (e.g. '2305.10601' or '2401.18059')\"},\"title\":{\"type\":\"string\",\"description\":\"Paper title (auto-detected if omitted)\"}},\"required\":[\"arxiv_id\"]}", .execute = tool_arxiv_ingest },
+    { .name = "kb_deep_search", .description = "Hierarchical 3-level retrieval across the knowledge base. Level 1: document keyword match (coarse). Level 2: page-level FTS5 BM25 with snippets. Level 3: chunk-level (256-word passages with overlap) FTS5 BM25 for precise passage extraction. Searches 380+ documents, 10K+ pages, 28K+ chunks.", .input_schema_json = "{\"type\":\"object\",\"properties\":{\"query\":{\"type\":\"string\",\"description\":\"Search query\"},\"limit\":{\"type\":\"integer\",\"description\":\"Results per level (default 5)\"},\"depth\":{\"type\":\"integer\",\"description\":\"1=docs only, 2=docs+pages, 3=docs+pages+chunks (default 3)\"}},\"required\":[\"query\"]}", .execute = tool_kb_deep_search },
+    /* ── Systematic Strategy Engines ─────────────────────────────────── */
+    { .name = "strat_completeness", .description = "COMPLETENESS ARBITRAGE SCANNER: Checks if all mutually-exclusive outcomes in bracket markets sum to < $1.00. If so, buying one of each is riskless profit. Scans Kalshi BTC/ETH/SPY brackets + Polymarket multi-outcome events.", .input_schema_json = "{\"type\":\"object\",\"properties\":{\"series\":{\"type\":\"string\",\"description\":\"Kalshi series ticker to scan (default: KXBTC). Try: KXBTC, KXETH, KXSPY, KXFED\"}}}", .execute = tool_strat_completeness },
+    { .name = "strat_binary_fade", .description = "BINARY FADE STRATEGY: Exploits LLM acquiescence bias (Schoenegger et al. 2024). LLMs over-predict YES on binary questions → crypto 5m/15m markets are biased. Fade YES >60%%, buy YES <40%%. Returns current crypto binaries with fade signals.", .input_schema_json = "{\"type\":\"object\",\"properties\":{\"high_threshold\":{\"type\":\"number\",\"description\":\"Sell YES above this (default 0.60)\"},\"low_threshold\":{\"type\":\"number\",\"description\":\"Buy YES below this (default 0.40)\"},\"limit\":{\"type\":\"integer\",\"description\":\"Markets to scan (default 20)\"}}}", .execute = tool_strat_binary_fade },
+    { .name = "strat_stale_snipe", .description = "STALE ORDER SNIPER: Near-expiry CLOB markets have stale limit orders from inactive market makers. Compares resting order prices to real-time reference price. Academic basis: Chen & Pennock LMSR convergence vs CLOB lag.", .input_schema_json = "{\"type\":\"object\",\"properties\":{\"series\":{\"type\":\"string\",\"description\":\"Kalshi series (default: KXBTC). Try: KXBTC, KXETH, KXSPY\"},\"limit\":{\"type\":\"integer\",\"description\":\"Events to scan (default 10)\"}}}", .execute = tool_strat_stale_snipe },
+    { .name = "strat_kelly", .description = "KELLY CRITERION CALCULATOR: Given true probability and market price, computes optimal bet size. Returns full/half/quarter/confidence-adjusted Kelly, contract count, max loss, max win. Use after identifying an edge with other strat_ tools.", .input_schema_json = "{\"type\":\"object\",\"properties\":{\"true_prob\":{\"type\":\"number\",\"description\":\"Your estimated true probability (0-1)\"},\"market_price\":{\"type\":\"number\",\"description\":\"Current market YES price (0-1)\"},\"bankroll\":{\"type\":\"number\",\"description\":\"Total bankroll in USD (default 1000)\"},\"confidence\":{\"type\":\"number\",\"description\":\"Confidence in your estimate 0-1 (default 0.5, scales Kelly down)\"},\"side\":{\"type\":\"string\",\"description\":\"Force YES or NO side\"}},\"required\":[\"true_prob\",\"market_price\"]}", .execute = tool_strat_kelly },
+    { .name = "strat_spread_scan", .description = "SPREAD SCANNER: Finds markets with widest bid-ask spreads for market-making opportunities. Wide spread = place limit orders on both sides to earn the spread. Returns markets from both Polymarket and Kalshi.", .input_schema_json = "{\"type\":\"object\",\"properties\":{\"limit\":{\"type\":\"integer\",\"description\":\"Markets to scan per platform (default 20)\"},\"category\":{\"type\":\"string\",\"description\":\"Filter: politics, sports, crypto, entertainment\"}}}", .execute = tool_strat_spread_scan },
+    /* Polymarket Prediction Markets (public, no auth) */
+    { .name = "polymarket_markets", .description = "List/filter Polymarket prediction markets. Returns question, outcomes, volume, liquidity. No auth.", .input_schema_json = "{\"type\":\"object\",\"properties\":{\"tag\":{\"type\":\"string\",\"description\":\"Filter by tag (politics, sports, crypto)\"},\"active\":{\"type\":\"string\",\"description\":\"true/false\"},\"limit\":{\"type\":\"integer\",\"description\":\"Max results 1-100\"},\"offset\":{\"type\":\"integer\",\"description\":\"Pagination offset\"}}}", .execute = tool_polymarket_markets },
+    { .name = "polymarket_events", .description = "Browse Polymarket events by category/tag. Tags: Geopolitics, Iran, Ukraine, Crypto, Politics, Sports, Oil, Israel, Gaza, Elections, Culture, Weather, NBA, Soccer, Trump. No auth.", .input_schema_json = "{\"type\":\"object\",\"properties\":{\"id\":{\"type\":\"string\",\"description\":\"Event ID\"},\"slug\":{\"type\":\"string\",\"description\":\"Event slug\"},\"tag\":{\"type\":\"string\",\"description\":\"Category tag (Geopolitics, Iran, Crypto, Politics, Sports, Oil, Ukraine, Elections, Culture, Weather, etc)\"},\"limit\":{\"type\":\"integer\",\"description\":\"Max results 1-100 (default 20)\"},\"offset\":{\"type\":\"integer\",\"description\":\"Pagination offset\"}}}", .execute = tool_polymarket_events },
+    { .name = "polymarket_categories", .description = "List all Polymarket market categories/tags with event counts. Shows what topics are available for browsing.", .input_schema_json = "{\"type\":\"object\",\"properties\":{}}", .execute = tool_polymarket_categories },
+    { .name = "polymarket_prices", .description = "Get midpoint prices for a Polymarket token. No auth.", .input_schema_json = "{\"type\":\"object\",\"properties\":{\"token_id\":{\"type\":\"string\",\"description\":\"Token ID\"},\"condition_id\":{\"type\":\"string\",\"description\":\"Condition ID\"}}}", .execute = tool_polymarket_prices },
+    { .name = "polymarket_book", .description = "Get order book for a Polymarket token. No auth.", .input_schema_json = "{\"type\":\"object\",\"properties\":{\"token_id\":{\"type\":\"string\",\"description\":\"Token ID\"}},\"required\":[\"token_id\"]}", .execute = tool_polymarket_book },
+    { .name = "polymarket_trades", .description = "Get recent Polymarket trades. Filter by condition or wallet. No auth.", .input_schema_json = "{\"type\":\"object\",\"properties\":{\"condition_id\":{\"type\":\"string\",\"description\":\"Condition ID\"},\"maker\":{\"type\":\"string\",\"description\":\"Wallet address\"},\"limit\":{\"type\":\"integer\",\"description\":\"Max trades 1-500\"}}}", .execute = tool_polymarket_trades },
+    { .name = "polymarket_search", .description = "Search Polymarket by keyword. No auth.", .input_schema_json = "{\"type\":\"object\",\"properties\":{\"query\":{\"type\":\"string\",\"description\":\"Search query\"},\"limit\":{\"type\":\"integer\",\"description\":\"Max results 1-50\"}},\"required\":[\"query\"]}", .execute = tool_polymarket_search },
+    /* ── Kalshi Prediction Market Exchange (public read, no auth) ─────── */
+    { .name = "kalshi_events", .description = "List Kalshi prediction market events with nested markets. Filter by status (open/closed/settled) or series. No auth for read.", .input_schema_json = "{\"type\":\"object\",\"properties\":{\"status\":{\"type\":\"string\",\"enum\":[\"open\",\"closed\",\"settled\"],\"description\":\"Filter by status\"},\"series_ticker\":{\"type\":\"string\",\"description\":\"Filter by series ticker\"},\"limit\":{\"type\":\"integer\",\"description\":\"Max results (1-200, default 10)\"}}}", .execute = tool_kalshi_events },
+    { .name = "kalshi_markets", .description = "Get Kalshi market(s). By ticker for specific market, or list with filters. Returns title, yes/no prices, volume, close time. No auth.", .input_schema_json = "{\"type\":\"object\",\"properties\":{\"ticker\":{\"type\":\"string\",\"description\":\"Market ticker (e.g. KXBTC-26MAR)\"},\"event_ticker\":{\"type\":\"string\",\"description\":\"Filter by event ticker\"},\"status\":{\"type\":\"string\",\"enum\":[\"open\",\"closed\",\"settled\"]},\"limit\":{\"type\":\"integer\",\"description\":\"Max results (default 10)\"}}}", .execute = tool_kalshi_markets },
+    { .name = "kalshi_orderbook", .description = "Get Kalshi order book for a market. Shows yes/no bid depth. No auth.", .input_schema_json = "{\"type\":\"object\",\"properties\":{\"ticker\":{\"type\":\"string\",\"description\":\"Market ticker\"},\"depth\":{\"type\":\"integer\",\"description\":\"Book depth (default 5)\"}},\"required\":[\"ticker\"]}", .execute = tool_kalshi_orderbook },
+    { .name = "kalshi_trades", .description = "Get recent Kalshi trades. Filter by market ticker. No auth.", .input_schema_json = "{\"type\":\"object\",\"properties\":{\"ticker\":{\"type\":\"string\",\"description\":\"Market ticker to filter\"},\"limit\":{\"type\":\"integer\",\"description\":\"Max trades (1-1000, default 20)\"}}}", .execute = tool_kalshi_trades },
+    { .name = "kalshi_series", .description = "Get Kalshi series template info (recurring market blueprints). No auth.", .input_schema_json = "{\"type\":\"object\",\"properties\":{\"ticker\":{\"type\":\"string\",\"description\":\"Series ticker (e.g. KXBTC, KXFED)\"}},\"required\":[\"ticker\"]}", .execute = tool_kalshi_series },
+    { .name = "kalshi_search", .description = "Search Kalshi open events with client-side keyword filtering. Returns only matching events. Supports series_ticker for direct API filter (KXTEMP, KXBTC, KXFED). No auth.", .input_schema_json = "{\"type\":\"object\",\"properties\":{\"query\":{\"type\":\"string\",\"description\":\"Search term (matched case-insensitive against event title/category)\"},\"limit\":{\"type\":\"integer\",\"description\":\"Max matched events (1-200, default 20)\"},\"series_ticker\":{\"type\":\"string\",\"description\":\"Series filter (KXTEMP=temp, KXRAIN=rain, KXSNOW=snow, KXBTC=bitcoin, KXFED=fed)\"}},\"required\":[\"query\"]}", .execute = tool_kalshi_search },
+    { .name = "kalshi_candlesticks", .description = "Get Kalshi price history candles for a market. Intervals: 1 (1min), 60 (1hr), 1440 (1day). No auth.", .input_schema_json = "{\"type\":\"object\",\"properties\":{\"ticker\":{\"type\":\"string\",\"description\":\"Market ticker\"},\"interval\":{\"type\":\"string\",\"description\":\"Period: 1, 60, or 1440 minutes\"}},\"required\":[\"ticker\"]}", .execute = tool_kalshi_candlesticks },
+    { .name = "kalshi_weather", .description = "All Kalshi weather prediction markets: temperature highs/lows, rainfall, snowfall, hurricanes. Aggregates from series KXTEMP, KXRAIN, KXSNOW, KXHURR, KXHIGH, KXLOW + keyword scan. Filter by city. No auth.", .input_schema_json = "{\"type\":\"object\",\"properties\":{\"city\":{\"type\":\"string\",\"description\":\"City name filter (e.g. New York, Chicago, Miami)\"},\"limit\":{\"type\":\"integer\",\"description\":\"Max results (default 30)\"}}}", .execute = tool_kalshi_weather },
+    { .name = "kalshi_market_snapshot", .description = "Deep dive on a single Kalshi market: full details + orderbook (depth 10) + recent 20 trades + hourly candlesticks in one call.", .input_schema_json = "{\"type\":\"object\",\"properties\":{\"ticker\":{\"type\":\"string\",\"description\":\"Market ticker (e.g. KXBTC-26MAR14)\"}},\"required\":[\"ticker\"]}", .execute = tool_kalshi_market_snapshot },
+    { .name = "kalshi_event_detail", .description = "Get a specific Kalshi event with ALL its nested markets. Use for multi-outcome events (e.g. Fed rate decisions, elections with multiple candidates).", .input_schema_json = "{\"type\":\"object\",\"properties\":{\"event_ticker\":{\"type\":\"string\",\"description\":\"Event ticker (e.g. KXFED-26MAR, KXNEWPOPE)\"}},\"required\":[\"event_ticker\"]}", .execute = tool_kalshi_event_detail },
+    { .name = "kalshi_daily_markets", .description = "List Kalshi markets sorted by close time (nearest first). Filter by series for daily/weekly resolvers (e.g. KXBTC for Bitcoin, KXSPY for S&P). For systematic daily trading.", .input_schema_json = "{\"type\":\"object\",\"properties\":{\"series_ticker\":{\"type\":\"string\",\"description\":\"Series ticker filter (e.g. KXBTC, KXSPY, KXETH, KXFED)\"},\"limit\":{\"type\":\"integer\",\"description\":\"Max results 1-200 (default 50)\"}}}", .execute = tool_kalshi_daily_markets },
+    { .name = "cross_platform_delta", .description = "World 1 → World 2 mapper. Fetches Polymarket + Kalshi markets for a topic and computes price deltas. Positive delta = Polymarket prices higher. Spreads > 3c are actionable arbs.", .input_schema_json = "{\"type\":\"object\",\"properties\":{\"topic\":{\"type\":\"string\",\"description\":\"Topic to match across platforms (e.g. Iran, Bitcoin, Fed, oil)\"},\"limit\":{\"type\":\"integer\",\"description\":\"Markets per platform (default 20)\"}},\"required\":[\"topic\"]}", .execute = tool_cross_platform_delta },
+    { .name = "market_movers", .description = "What's moving RIGHT NOW across both Polymarket and Kalshi. Returns top markets by 24h volume from Polymarket + active markets from key Kalshi series (BTC, SPY, ETH, Fed, CPI, GDP, oil, weather). One call, both platforms.", .input_schema_json = "{\"type\":\"object\",\"properties\":{\"limit\":{\"type\":\"integer\",\"description\":\"Max Polymarket results (default 15)\"}}}", .execute = tool_market_movers },
+    { .name = "market_cache_refresh", .description = "Bulk-fetch and cache ALL active markets from Polymarket + Kalshi into local SQLite. Saves ~100 Polymarket markets + ~200 Kalshi daily resolvers. Use before running compound queries to avoid per-call API costs.", .input_schema_json = "{\"type\":\"object\",\"properties\":{}}", .execute = tool_market_cache_refresh },
+    { .name = "market_cache_query", .description = "Query locally cached market data. No API calls. Keys: pm:markets:top100, pm:events:top100, ka:events:open100, ka:markets:daily200. List all keys with no args.", .input_schema_json = "{\"type\":\"object\",\"properties\":{\"key\":{\"type\":\"string\",\"description\":\"Cache key to retrieve\"},\"platform\":{\"type\":\"string\",\"description\":\"Filter keys by platform (polymarket/kalshi)\"},\"ttl\":{\"type\":\"integer\",\"description\":\"Max age in seconds (default 300)\"}}}", .execute = tool_market_cache_query },
+    /* ── Historical / Resolved Markets (backtesting) ───────────────────── */
+    { .name = "kalshi_historical_markets", .description = "Kalshi settled markets with resolution outcomes. Fields: result (yes/no), settlement_value_dollars, settlement_ts, volume_fp. For backtesting systematic strategies. Cursor-paginated.", .input_schema_json = "{\"type\":\"object\",\"properties\":{\"series_ticker\":{\"type\":\"string\",\"description\":\"Filter by series (KXBTC, KXSPY, KXFED, KXCPI, etc)\"},\"limit\":{\"type\":\"integer\",\"description\":\"Max results 1-200 (default 50)\"},\"cursor\":{\"type\":\"string\",\"description\":\"Pagination cursor from previous response\"}}}", .execute = tool_kalshi_historical_markets },
+    { .name = "kalshi_historical_trades", .description = "Kalshi historical trade execution data. Fields: yes_price_dollars, no_price_dollars, taker_side, count_fp, created_time. For reconstructing price history and market microstructure.", .input_schema_json = "{\"type\":\"object\",\"properties\":{\"ticker\":{\"type\":\"string\",\"description\":\"Filter by market ticker\"},\"limit\":{\"type\":\"integer\",\"description\":\"Max results 1-1000 (default 100)\"},\"cursor\":{\"type\":\"string\",\"description\":\"Pagination cursor\"}}}", .execute = tool_kalshi_historical_trades },
+    { .name = "kalshi_historical_cutoff", .description = "Get Kalshi historical data cutoff timestamps. Shows boundary between live and historical API endpoints.", .input_schema_json = "{\"type\":\"object\",\"properties\":{}}", .execute = tool_kalshi_historical_cutoff },
+    { .name = "polymarket_resolved", .description = "Polymarket resolved markets from CLOB API. 4.5 years of history (Oct 2021+). Each market has tokens[].winner flag for ground truth. 1000 markets per page.", .input_schema_json = "{\"type\":\"object\",\"properties\":{\"limit\":{\"type\":\"integer\",\"description\":\"Max results 1-1000 (default 100)\"},\"offset\":{\"type\":\"integer\",\"description\":\"Pagination offset\"}}}", .execute = tool_polymarket_resolved },
+    { .name = "polymarket_resolved_events", .description = "Polymarket resolved events sorted by volume. Includes 2024 Presidential Election ($3.7B), Super Bowl, NBA Finals, etc. Each event has nested markets with outcomes.", .input_schema_json = "{\"type\":\"object\",\"properties\":{\"limit\":{\"type\":\"integer\",\"description\":\"Max results 1-100 (default 20)\"},\"offset\":{\"type\":\"integer\",\"description\":\"Pagination offset\"}}}", .execute = tool_polymarket_resolved_events },
+    { .name = "historical_cross_platform", .description = "Resolved markets from BOTH platforms for a topic. Use for backtesting cross-platform strategies — see how similar events resolved on Kalshi vs Polymarket. Includes analysis guide for interpreting outcomes.", .input_schema_json = "{\"type\":\"object\",\"properties\":{\"topic\":{\"type\":\"string\",\"description\":\"Topic to search (e.g. bitcoin, election, Fed, Iran). Empty = top by volume\"},\"limit\":{\"type\":\"integer\",\"description\":\"Max per platform (default 20)\"}}}", .execute = tool_historical_cross_platform },
+    /* ── Systematic Trading Engine ─────────────────────────────────────── */
+    { .name = "systematic_ingest_polymarket", .description = "Ingest Polymarket resolved markets into local SQLite for systematic analysis. Fetches 1000 markets/page. Categories auto-classified: sports, crypto, macro, politics, geopolitics, weather.", .input_schema_json = "{\"type\":\"object\",\"properties\":{\"pages\":{\"type\":\"integer\",\"description\":\"Pages to fetch (1000 markets each, default 5, max 50)\"}}}", .execute = tool_systematic_ingest_polymarket },
+    { .name = "systematic_ingest_kalshi", .description = "Ingest Kalshi historical settled markets into local SQLite. Auto-extracts series, category, settlement values. Cursor-paginated.", .input_schema_json = "{\"type\":\"object\",\"properties\":{\"pages\":{\"type\":\"integer\",\"description\":\"Pages to fetch (200 markets each, default 10, max 20)\"}}}", .execute = tool_systematic_ingest_kalshi },
+    { .name = "systematic_analytics", .description = "Compute base rates, category breakdowns, series statistics from ingested historical data. Shows yes_rate by category, Kalshi series performance, date ranges. Foundation for signal generation.", .input_schema_json = "{\"type\":\"object\",\"properties\":{\"category\":{\"type\":\"string\",\"description\":\"Filter to specific category (sports_nba, crypto_btc, macro_fed, etc)\"},\"platform\":{\"type\":\"string\",\"description\":\"Filter by platform\"}}}", .execute = tool_systematic_analytics },
+    { .name = "systematic_signals", .description = "Generate trading signals from historical base rates + live market data. Strategies: mean_reversion (price vs base rate), cross_platform_arb (price spread), calendar_spread (term structure), momentum (24h change). Requires ingested data.", .input_schema_json = "{\"type\":\"object\",\"properties\":{}}", .execute = tool_systematic_signals },
+    /* ── Cross-Platform Prediction Intelligence ─────────────────────────── */
+    { .name = "prediction_scan", .description = "Scan BOTH Polymarket AND Kalshi simultaneously for a topic. Returns keyword-filtered results from both platforms. Kalshi results are client-side filtered by the query keyword.", .input_schema_json = "{\"type\":\"object\",\"properties\":{\"query\":{\"type\":\"string\",\"description\":\"Topic to scan (e.g. Fed rate, election, Bitcoin, weather)\"},\"limit\":{\"type\":\"integer\",\"description\":\"Max per platform (default 5)\"}},\"required\":[\"query\"]}", .execute = tool_prediction_scan },
+    { .name = "prediction_weather", .description = "Weather prediction markets from BOTH Polymarket AND Kalshi. Aggregates temperature, rainfall, snowfall, hurricane markets. Filter by city. Use for weather arb hunting.", .input_schema_json = "{\"type\":\"object\",\"properties\":{\"city\":{\"type\":\"string\",\"description\":\"City filter (e.g. New York, Chicago, Miami)\"},\"limit\":{\"type\":\"integer\",\"description\":\"Max per platform (default 20)\"}},\"required\":[]}", .execute = tool_prediction_weather },
+    { .name = "prediction_snapshot", .description = "Real-time dashboard of top prediction markets across Polymarket + Kalshi by volume. Shows odds, volume, liquidity across both platforms.", .input_schema_json = "{\"type\":\"object\",\"properties\":{\"limit\":{\"type\":\"integer\",\"description\":\"Markets per platform (default 5)\"},\"category\":{\"type\":\"string\",\"description\":\"Filter category (politics, sports, crypto, entertainment)\"}}}", .execute = tool_prediction_snapshot },
+    { .name = "prediction_arb", .description = "Cross-platform arbitrage detector. Fetches Polymarket + Kalshi markets for a topic, returns both datasets with arb detection rules. Identifies within-market (YES+NO<$1), cross-platform, and combinatorial arbitrage. No auth.", .input_schema_json = "{\"type\":\"object\",\"properties\":{\"topic\":{\"type\":\"string\",\"description\":\"Market topic (bitcoin, election, Fed rate, sports)\"},\"limit\":{\"type\":\"integer\",\"description\":\"Markets per platform to scan (default 10)\"}}}", .execute = tool_prediction_arb },
+    { .name = "prediction_semantic_match", .description = "SEMANTIC market matcher: uses TF-IDF cosine similarity to find markets across Polymarket and Kalshi that describe the SAME underlying event in different language. Extracts numerical entities (prices, dates, thresholds) for strike-level comparison. Detects arbs that ticker-matching misses.", .input_schema_json = "{\"type\":\"object\",\"properties\":{\"topic\":{\"type\":\"string\",\"description\":\"Topic to scan (leave empty for top markets)\"},\"threshold\":{\"type\":\"number\",\"description\":\"Min similarity score 0-1 (default 0.3, lower=more matches)\"},\"limit\":{\"type\":\"integer\",\"description\":\"Markets per platform to index (default 15)\"}}}", .execute = tool_prediction_semantic_match },
+    { .name = "polymarket_whale_trades", .description = "Detect whale trades on Polymarket. Large transactions above threshold with trader wallet, market, price, size. No auth.", .input_schema_json = "{\"type\":\"object\",\"properties\":{\"min_size_usd\":{\"type\":\"number\",\"description\":\"Min trade size in USD (default 10000)\"},\"condition_id\":{\"type\":\"string\",\"description\":\"Filter to specific market\"},\"limit\":{\"type\":\"integer\",\"description\":\"Max trades to scan (default 50)\"}}}", .execute = tool_polymarket_whale_trades },
+    { .name = "polymarket_leaderboard", .description = "Top Polymarket traders by profit. Shows wallet, PnL, volume, win rate. No auth.", .input_schema_json = "{\"type\":\"object\",\"properties\":{\"limit\":{\"type\":\"integer\",\"description\":\"Number of traders (default 10)\"}}}", .execute = tool_polymarket_leaderboard },
+    { .name = "polymarket_history", .description = "Price history for a Polymarket token. Returns time-series of YES/NO prices. No auth.", .input_schema_json = "{\"type\":\"object\",\"properties\":{\"token_id\":{\"type\":\"string\",\"description\":\"Token ID\"},\"condition_id\":{\"type\":\"string\",\"description\":\"Condition ID\"},\"interval\":{\"type\":\"string\",\"description\":\"all, 1d, 1w, 1m\"},\"fidelity\":{\"type\":\"string\",\"description\":\"Minutes between data points\"}}}", .execute = tool_polymarket_history },
+
+    /* ══════════════════════════════════════════════════════════════════════
+     *  AUTHENTICATED TRADING — Kalshi + Polymarket
+     * ══════════════════════════════════════════════════════════════════════ */
+
+    /* ── Kalshi Authenticated Trading ────────────────────────────────────── */
+    { .name = "kalshi_balance", .description = "Get Kalshi account balance and portfolio value in USD. Requires KALSHI_API_KEY + KALSHI_RSA_PRIVATE_KEY_PATH.", .input_schema_json = "{\"type\":\"object\",\"properties\":{}}", .execute = tool_kalshi_balance },
+    { .name = "kalshi_positions", .description = "Get current Kalshi positions. Filter by ticker or event. Requires auth.", .input_schema_json = "{\"type\":\"object\",\"properties\":{\"ticker\":{\"type\":\"string\",\"description\":\"Filter by market ticker\"},\"event_ticker\":{\"type\":\"string\",\"description\":\"Filter by event ticker\"},\"limit\":{\"type\":\"integer\",\"description\":\"Max positions (default 100)\"}}}", .execute = tool_kalshi_positions },
+    { .name = "kalshi_portfolio", .description = "Full Kalshi portfolio: balance + all positions in one call. Requires auth.", .input_schema_json = "{\"type\":\"object\",\"properties\":{}}", .execute = tool_kalshi_portfolio },
+    { .name = "kalshi_fills", .description = "Get Kalshi trade fills (executed matches). Filter by ticker, order ID, time range. Requires auth.", .input_schema_json = "{\"type\":\"object\",\"properties\":{\"ticker\":{\"type\":\"string\",\"description\":\"Filter by market ticker\"},\"order_id\":{\"type\":\"string\",\"description\":\"Filter by order ID\"},\"limit\":{\"type\":\"integer\",\"description\":\"Max fills (default 100)\"}}}", .execute = tool_kalshi_fills },
+    { .name = "kalshi_create_order", .description = "Place an order on Kalshi. Requires auth. dry_run=true by default (set DSCO_TRADING_DRY_RUN=0 for live). Prices in cents (1-99).", .input_schema_json = "{\"type\":\"object\",\"properties\":{\"ticker\":{\"type\":\"string\",\"description\":\"Market ticker (required)\"},\"action\":{\"type\":\"string\",\"description\":\"buy or sell (required)\"},\"side\":{\"type\":\"string\",\"description\":\"yes or no (required)\"},\"count\":{\"type\":\"integer\",\"description\":\"Number of contracts (required)\"},\"type\":{\"type\":\"string\",\"description\":\"limit or market (default: limit)\"},\"yes_price\":{\"type\":\"integer\",\"description\":\"Price in cents 1-99 (required for limit orders)\"},\"time_in_force\":{\"type\":\"string\",\"description\":\"good_till_canceled, fill_or_kill, immediate_or_cancel\"}},\"required\":[\"ticker\",\"action\",\"side\",\"count\"]}", .execute = tool_kalshi_create_order },
+    { .name = "kalshi_batch_create_orders", .description = "Place up to 20 orders on Kalshi in one request. Requires auth.", .input_schema_json = "{\"type\":\"object\",\"properties\":{\"orders\":{\"type\":\"string\",\"description\":\"JSON array of order objects, each with ticker/action/side/count/yes_price\"}},\"required\":[\"orders\"]}", .execute = tool_kalshi_batch_create_orders },
+    { .name = "kalshi_cancel_order", .description = "Cancel a Kalshi order by ID. Requires auth.", .input_schema_json = "{\"type\":\"object\",\"properties\":{\"order_id\":{\"type\":\"string\",\"description\":\"Order ID to cancel\"}},\"required\":[\"order_id\"]}", .execute = tool_kalshi_cancel_order },
+    { .name = "kalshi_cancel_all", .description = "Cancel all open Kalshi orders. Requires auth.", .input_schema_json = "{\"type\":\"object\",\"properties\":{}}", .execute = tool_kalshi_cancel_all },
+    { .name = "kalshi_amend_order", .description = "Amend a Kalshi order (change count or price). Requires auth.", .input_schema_json = "{\"type\":\"object\",\"properties\":{\"order_id\":{\"type\":\"string\",\"description\":\"Order ID to amend\"},\"count\":{\"type\":\"integer\",\"description\":\"New contract count\"},\"price\":{\"type\":\"integer\",\"description\":\"New price in cents 1-99\"}},\"required\":[\"order_id\"]}", .execute = tool_kalshi_amend_order },
+    { .name = "kalshi_open_orders", .description = "List all open (resting) Kalshi orders. Requires auth.", .input_schema_json = "{\"type\":\"object\",\"properties\":{\"ticker\":{\"type\":\"string\",\"description\":\"Filter by market ticker\"},\"limit\":{\"type\":\"integer\",\"description\":\"Max orders (default 100)\"}}}", .execute = tool_kalshi_open_orders },
+
+    /* ── Polymarket Authenticated Trading ─────────────────────────────────── */
+    { .name = "polymarket_balance_auth", .description = "Get Polymarket USDC balance and token allowances. Requires POLYMARKET_API_KEY + POLYMARKET_API_SECRET + POLYMARKET_PASSPHRASE.", .input_schema_json = "{\"type\":\"object\",\"properties\":{}}", .execute = tool_polymarket_balance },
+    { .name = "polymarket_positions_auth", .description = "Get current Polymarket positions for your wallet.", .input_schema_json = "{\"type\":\"object\",\"properties\":{\"limit\":{\"type\":\"integer\",\"description\":\"Max positions (default 50)\"}}}", .execute = tool_polymarket_positions },
+    { .name = "polymarket_open_orders_auth", .description = "List open Polymarket orders. Requires auth.", .input_schema_json = "{\"type\":\"object\",\"properties\":{\"market\":{\"type\":\"string\",\"description\":\"Filter by condition ID\"},\"asset_id\":{\"type\":\"string\",\"description\":\"Filter by token ID\"}}}", .execute = tool_polymarket_open_orders },
+    { .name = "polymarket_api_keys_auth", .description = "List Polymarket CLOB API keys. Requires auth.", .input_schema_json = "{\"type\":\"object\",\"properties\":{}}", .execute = tool_polymarket_api_keys },
+    { .name = "polymarket_derive_api_key", .description = "Derive/create Polymarket CLOB API credentials from wallet. Requires POLYMARKET_PRIVATE_KEY.", .input_schema_json = "{\"type\":\"object\",\"properties\":{}}", .execute = tool_polymarket_derive_api_key },
+    { .name = "polymarket_create_order", .description = "Place an order on Polymarket CLOB. Requires auth + private key for signing. dry_run=true by default.", .input_schema_json = "{\"type\":\"object\",\"properties\":{\"token_id\":{\"type\":\"string\",\"description\":\"Outcome token ID (required)\"},\"side\":{\"type\":\"string\",\"description\":\"buy or sell (required)\"},\"price\":{\"type\":\"number\",\"description\":\"Price 0.01-0.99 (required)\"},\"size\":{\"type\":\"number\",\"description\":\"Amount in USDC (required)\"},\"order_type\":{\"type\":\"string\",\"description\":\"GTC, FOK, GTD, FAK (default: GTC)\"}},\"required\":[\"token_id\",\"side\",\"price\",\"size\"]}", .execute = tool_polymarket_create_order },
+    { .name = "polymarket_cancel_order_auth", .description = "Cancel a Polymarket order by ID. Requires auth.", .input_schema_json = "{\"type\":\"object\",\"properties\":{\"order_id\":{\"type\":\"string\",\"description\":\"Order ID to cancel\"}},\"required\":[\"order_id\"]}", .execute = tool_polymarket_cancel_order },
+    { .name = "polymarket_cancel_all_auth", .description = "Cancel all open Polymarket orders. Requires auth.", .input_schema_json = "{\"type\":\"object\",\"properties\":{}}", .execute = tool_polymarket_cancel_all },
+
+    /* ── Polymarket Relayer (gasless transactions) ─────────────────────────── */
+    { .name = "polymarket_relayer_deploy", .description = "Deploy a Safe or Proxy wallet via Polymarket relayer (gasless). Requires POLYMARKET_RELAYER_API_KEY or POLY_BUILDER_API_KEY.", .input_schema_json = "{\"type\":\"object\",\"properties\":{}}", .execute = tool_polymarket_relayer_deploy },
+    { .name = "polymarket_relayer_approve", .description = "Approve token spending via Polymarket relayer (gasless). Approves USDC for CTF exchange by default.", .input_schema_json = "{\"type\":\"object\",\"properties\":{\"token\":{\"type\":\"string\",\"description\":\"Token contract address (default: USDC)\"},\"spender\":{\"type\":\"string\",\"description\":\"Spender address (default: CTF exchange)\"}}}", .execute = tool_polymarket_relayer_approve },
+    { .name = "polymarket_relayer_execute", .description = "Execute arbitrary transaction via Polymarket relayer (gasless). Polymarket pays gas.", .input_schema_json = "{\"type\":\"object\",\"properties\":{\"to\":{\"type\":\"string\",\"description\":\"Target contract address\"},\"data\":{\"type\":\"string\",\"description\":\"Hex-encoded calldata\"},\"value\":{\"type\":\"string\",\"description\":\"POL to send (usually 0)\"},\"description\":{\"type\":\"string\",\"description\":\"Human-readable tx description\"}},\"required\":[\"to\",\"data\"]}", .execute = tool_polymarket_relayer_execute },
+    { .name = "polymarket_relayer_status", .description = "Check status of a relayer transaction (NEW/EXECUTED/MINED/CONFIRMED/FAILED).", .input_schema_json = "{\"type\":\"object\",\"properties\":{\"tx_id\":{\"type\":\"string\",\"description\":\"Relayer transaction ID\"}},\"required\":[\"tx_id\"]}", .execute = tool_polymarket_relayer_status },
+
+    /* ── Cross-Platform Arbitrage & Portfolio ──────────────────────────────── */
+    { .name = "arb_execute", .description = "Execute a cross-platform arbitrage trade. Places matching orders on both Kalshi and Polymarket simultaneously. dry_run=true by default.", .input_schema_json = "{\"type\":\"object\",\"properties\":{\"kalshi_ticker\":{\"type\":\"string\",\"description\":\"Kalshi market ticker\"},\"kalshi_side\":{\"type\":\"string\",\"description\":\"yes or no\"},\"kalshi_price\":{\"type\":\"integer\",\"description\":\"Kalshi price in cents 1-99\"},\"kalshi_count\":{\"type\":\"integer\",\"description\":\"Kalshi contract count\"},\"poly_token_id\":{\"type\":\"string\",\"description\":\"Polymarket token ID\"},\"poly_side\":{\"type\":\"string\",\"description\":\"buy or sell\"},\"poly_price\":{\"type\":\"number\",\"description\":\"Polymarket price 0.01-0.99\"},\"poly_size\":{\"type\":\"number\",\"description\":\"Polymarket USDC amount\"}},\"required\":[\"kalshi_ticker\",\"kalshi_side\",\"kalshi_price\",\"kalshi_count\",\"poly_token_id\",\"poly_side\",\"poly_price\",\"poly_size\"]}", .execute = tool_arb_execute },
+    { .name = "arb_monitor", .description = "Monitor cross-platform arbitrage opportunities. Scans Polymarket + Kalshi for price divergences above min spread threshold.", .input_schema_json = "{\"type\":\"object\",\"properties\":{\"topic\":{\"type\":\"string\",\"description\":\"Topic to scan (default: top markets)\"},\"limit\":{\"type\":\"integer\",\"description\":\"Markets per platform (default 10)\"},\"min_spread\":{\"type\":\"number\",\"description\":\"Min spread to report (default: from risk config)\"}}}", .execute = tool_arb_monitor },
+    { .name = "portfolio_cross", .description = "Unified portfolio view across Kalshi + Polymarket. Shows balance, positions, and total exposure on both platforms.", .input_schema_json = "{\"type\":\"object\",\"properties\":{}}", .execute = tool_portfolio_cross },
+    { .name = "risk_check", .description = "Pre-flight risk check for a proposed trade. Returns pass/fail with reason.", .input_schema_json = "{\"type\":\"object\",\"properties\":{\"platform\":{\"type\":\"string\",\"description\":\"kalshi or polymarket\"},\"amount_usd\":{\"type\":\"number\",\"description\":\"Order size in USD\"}},\"required\":[\"platform\",\"amount_usd\"]}", .execute = tool_risk_check },
+    { .name = "risk_configure", .description = "View or update trading risk limits. All fields optional — only updates provided values.", .input_schema_json = "{\"type\":\"object\",\"properties\":{\"max_order_usd\":{\"type\":\"number\",\"description\":\"Max single order USD\"},\"max_position_usd\":{\"type\":\"number\",\"description\":\"Max single position USD\"},\"max_total_exposure_usd\":{\"type\":\"number\",\"description\":\"Max total exposure USD\"},\"min_arb_spread\":{\"type\":\"number\",\"description\":\"Min arb spread (e.g. 0.03)\"},\"max_open_orders\":{\"type\":\"integer\",\"description\":\"Max concurrent orders\"},\"dry_run\":{\"type\":\"boolean\",\"description\":\"true=simulate, false=live trading\"}}}", .execute = tool_risk_configure },
+
     {
         .name = "mapbox_geocode",
         .description = "Geocode an address or place name to coordinates using Mapbox. Requires MAPBOX_API_KEY.",
@@ -10575,6 +12695,219 @@ static const tool_def_t s_tools[] = {
         .input_schema_json = "{\"type\":\"object\",\"properties\":{\"text\":{\"type\":\"string\",\"description\":\"XML/HTML text\"},\"file\":{\"type\":\"string\",\"description\":\"XML/HTML file path\"},\"tag\":{\"type\":\"string\",\"description\":\"Tag name to extract\"},\"attribute\":{\"type\":\"string\",\"description\":\"Attribute name to extract (omit for inner text)\"}},\"required\":[\"tag\"]}",
         .execute = tool_xml_extract
     },
+
+    /* ═══ Wings + Talons ═══════════════════════════════════════════════════ */
+
+    /* ── Pheromone Coordination (Wings) ────────────────────────────────── */
+    {
+        .name = "pheromone_deposit",
+        .description = "Deposit a pheromone signal for stigmergic coordination. Types: PROGRESS, ATTRACTION, WARNING, SUCCESS, HELP_NEEDED, CAPACITY. Signals decay exponentially (~69s half-life).",
+        .input_schema_json = "{\"type\":\"object\",\"properties\":{\"type\":{\"type\":\"string\",\"description\":\"Signal type: progress|attraction|warning|success|help_needed|capacity\"},\"concentration\":{\"type\":\"number\",\"description\":\"Signal strength 0.0-1.0 (default 0.5)\"},\"region\":{\"type\":\"string\",\"description\":\"Spatial tag for the signal (default: global)\"},\"source\":{\"type\":\"string\",\"description\":\"Emitting agent ID\"},\"meta\":{\"type\":\"string\",\"description\":\"JSON metadata\"}},\"required\":[]}",
+        .execute = tool_pheromone_deposit
+    },
+    {
+        .name = "pheromone_sense",
+        .description = "Read pheromone concentration gradients. Sense all types in a region, or a specific type. Returns aggregated concentration and signal count.",
+        .input_schema_json = "{\"type\":\"object\",\"properties\":{\"type\":{\"type\":\"string\",\"description\":\"Signal type to sense (omit for all)\"},\"region\":{\"type\":\"string\",\"description\":\"Region to sense (default: global)\"}},\"required\":[]}",
+        .execute = tool_pheromone_sense
+    },
+    {
+        .name = "pheromone_status",
+        .description = "Get pheromone field statistics: active signals, deposits, reads, per-type counts.",
+        .input_schema_json = "{\"type\":\"object\",\"properties\":{},\"required\":[]}",
+        .execute = tool_pheromone_status
+    },
+
+    /* ── OODA Discipline (Talons) ─────────────────────────────────────── */
+    {
+        .name = "ooda_begin",
+        .description = "Start a new OODA cycle (Observe->Orient->Decide->Act). Returns cycle ID. Call before significant decisions.",
+        .input_schema_json = "{\"type\":\"object\",\"properties\":{},\"required\":[]}",
+        .execute = tool_ooda_begin
+    },
+    {
+        .name = "ooda_observe",
+        .description = "Add an observation to the current OODA cycle. Gather information without bias.",
+        .input_schema_json = "{\"type\":\"object\",\"properties\":{\"observation\":{\"type\":\"string\",\"description\":\"What was observed\"},\"source\":{\"type\":\"string\",\"description\":\"Observation source\"},\"confidence\":{\"type\":\"number\",\"description\":\"Confidence 0.0-1.0\"}},\"required\":[\"observation\"]}",
+        .execute = tool_ooda_observe
+    },
+    {
+        .name = "ooda_orient",
+        .description = "Add orientation factors: constraints, budget, safety context. Sets the decision-making context.",
+        .input_schema_json = "{\"type\":\"object\",\"properties\":{\"factor\":{\"type\":\"string\",\"description\":\"Orientation factor\"},\"weight\":{\"type\":\"number\",\"description\":\"Factor importance 0.0-1.0\"},\"constraint\":{\"type\":\"boolean\",\"description\":\"Is this a hard constraint?\"},\"budget\":{\"type\":\"number\",\"description\":\"GSU budget remaining\"},\"tier\":{\"type\":\"integer\",\"description\":\"Principal tier 0-3\"},\"safety_critical\":{\"type\":\"boolean\",\"description\":\"Is action safety-critical?\"}},\"required\":[\"factor\"]}",
+        .execute = tool_ooda_orient
+    },
+    {
+        .name = "ooda_decide",
+        .description = "Compute OODA decision. Returns action (EXECUTE/DELEGATE/WAIT/REST/ESCALATE) based on confidence thresholds.",
+        .input_schema_json = "{\"type\":\"object\",\"properties\":{},\"required\":[]}",
+        .execute = tool_ooda_decide
+    },
+    {
+        .name = "ooda_complete",
+        .description = "Complete OODA cycle with action result. Archives to history for learning.",
+        .input_schema_json = "{\"type\":\"object\",\"properties\":{\"success\":{\"type\":\"boolean\",\"description\":\"Did the action succeed?\"},\"result\":{\"type\":\"string\",\"description\":\"Action result description\"}},\"required\":[\"success\"]}",
+        .execute = tool_ooda_complete
+    },
+    {
+        .name = "ooda_status",
+        .description = "Get OODA engine status: total cycles, action distribution, success rate, thresholds.",
+        .input_schema_json = "{\"type\":\"object\",\"properties\":{},\"required\":[]}",
+        .execute = tool_ooda_status
+    },
+
+    /* ── Kill Switches (Talons) ───────────────────────────────────────── */
+    {
+        .name = "killswitch_trigger",
+        .description = "Trigger a kill switch. 5 levels: agent, workflow, service, pheromone, system. Emergency shutdown mechanism.",
+        .input_schema_json = "{\"type\":\"object\",\"properties\":{\"level\":{\"type\":\"string\",\"description\":\"Kill level: agent|workflow|service|pheromone|system\"},\"target\":{\"type\":\"string\",\"description\":\"Target to kill (agent_id, workflow_name, etc.)\"},\"reason\":{\"type\":\"string\",\"description\":\"Why the kill switch was triggered\"},\"timeout\":{\"type\":\"number\",\"description\":\"Auto-resolve after seconds (0=never)\"},\"cascade\":{\"type\":\"boolean\",\"description\":\"Trigger downstream kills\"}},\"required\":[\"level\",\"target\",\"reason\"]}",
+        .execute = tool_killswitch_trigger
+    },
+    {
+        .name = "killswitch_resolve",
+        .description = "Resolve (lift) a kill switch by ID.",
+        .input_schema_json = "{\"type\":\"object\",\"properties\":{\"kill_id\":{\"type\":\"integer\",\"description\":\"Kill switch ID to resolve\"}},\"required\":[\"kill_id\"]}",
+        .execute = tool_killswitch_resolve
+    },
+    {
+        .name = "killswitch_status",
+        .description = "Get kill switch registry status: active kills, system halt state, per-level counts.",
+        .input_schema_json = "{\"type\":\"object\",\"properties\":{},\"required\":[]}",
+        .execute = tool_killswitch_status
+    },
+
+    /* ── Governance (Talons master) ───────────────────────────────────── */
+    {
+        .name = "governance_status",
+        .description = "Get full governance engine status including pheromones, OODA, kill switches, agents, budgets.",
+        .input_schema_json = "{\"type\":\"object\",\"properties\":{},\"required\":[]}",
+        .execute = tool_governance_status
+    },
+    {
+        .name = "governance_authorize",
+        .description = "Check if an action is authorized (hardcoded rules, budget, kill switches). Records to audit trail.",
+        .input_schema_json = "{\"type\":\"object\",\"properties\":{\"agent_id\":{\"type\":\"string\",\"description\":\"Agent requesting authorization\"},\"action\":{\"type\":\"string\",\"description\":\"Action to authorize\"},\"gsu_cost\":{\"type\":\"number\",\"description\":\"GSU cost of the action\"}},\"required\":[\"action\"]}",
+        .execute = tool_governance_authorize
+    },
+    {
+        .name = "governance_checkpoint",
+        .description = "Full governance gate: hardcoded check -> budget check -> kill switch check -> authorize -> audit -> pheromone emit. Call before significant actions.",
+        .input_schema_json = "{\"type\":\"object\",\"properties\":{\"agent_id\":{\"type\":\"string\",\"description\":\"Agent ID\"},\"action\":{\"type\":\"string\",\"description\":\"Action description\"},\"gsu_cost\":{\"type\":\"number\",\"description\":\"GSU cost\"},\"context\":{\"type\":\"string\",\"description\":\"Additional context\"}},\"required\":[\"action\"]}",
+        .execute = tool_governance_checkpoint
+    },
+    {
+        .name = "governance_budget",
+        .description = "Get agent budget details: allocated, consumed, remaining GSU, capability tier, permissions.",
+        .input_schema_json = "{\"type\":\"object\",\"properties\":{\"agent_id\":{\"type\":\"string\",\"description\":\"Agent to query (default: root)\"}},\"required\":[]}",
+        .execute = tool_governance_budget
+    },
+    {
+        .name = "governance_audit",
+        .description = "Get audit trail of governance decisions (authorizations and denials).",
+        .input_schema_json = "{\"type\":\"object\",\"properties\":{\"last_n\":{\"type\":\"integer\",\"description\":\"Number of recent entries (default 20)\"}},\"required\":[]}",
+        .execute = tool_governance_audit
+    },
+    {
+        .name = "governance_param",
+        .description = "Get or set softcoded governance parameters (pheromone decay, OODA thresholds, agent limits, etc.).",
+        .input_schema_json = "{\"type\":\"object\",\"properties\":{\"name\":{\"type\":\"string\",\"description\":\"Parameter name (omit to list all)\"},\"value\":{\"type\":\"number\",\"description\":\"New value (omit to read)\"}},\"required\":[]}",
+        .execute = tool_governance_param
+    },
+
+    /* ── Three-Tier Memory (Wings) ────────────────────────────────────── */
+    {
+        .name = "memory_store",
+        .description = "Store a memory. Tiers: working (60s decay), episodic (1h decay), semantic (permanent). Auto-consolidation promotes important/frequent memories upward.",
+        .input_schema_json = "{\"type\":\"object\",\"properties\":{\"key\":{\"type\":\"string\",\"description\":\"Memory key\"},\"value\":{\"type\":\"string\",\"description\":\"Memory content\"},\"tier\":{\"type\":\"string\",\"description\":\"Tier: working|episodic|semantic (default: working)\"},\"importance\":{\"type\":\"number\",\"description\":\"Importance 0.0-1.0 (default 0.5)\"}},\"required\":[\"key\",\"value\"]}",
+        .execute = tool_memory_store
+    },
+    {
+        .name = "memory_recall",
+        .description = "Recall memories by key, search query, or tag. Updates access count (aids consolidation).",
+        .input_schema_json = "{\"type\":\"object\",\"properties\":{\"key\":{\"type\":\"string\",\"description\":\"Exact key to recall\"},\"query\":{\"type\":\"string\",\"description\":\"Substring search in keys and values\"},\"tag\":{\"type\":\"string\",\"description\":\"Tag to search\"}},\"required\":[]}",
+        .execute = tool_memory_recall
+    },
+    {
+        .name = "memory_promote",
+        .description = "Manually promote a memory to the next tier (working->episodic->semantic).",
+        .input_schema_json = "{\"type\":\"object\",\"properties\":{\"key\":{\"type\":\"string\",\"description\":\"Memory key to promote\"}},\"required\":[\"key\"]}",
+        .execute = tool_memory_promote
+    },
+    {
+        .name = "memory_forget",
+        .description = "Delete a memory by key.",
+        .input_schema_json = "{\"type\":\"object\",\"properties\":{\"key\":{\"type\":\"string\",\"description\":\"Memory key to forget\"}},\"required\":[\"key\"]}",
+        .execute = tool_memory_forget
+    },
+    {
+        .name = "memory_status",
+        .description = "Get memory system status: per-tier counts, promotions, evictions, consolidations.",
+        .input_schema_json = "{\"type\":\"object\",\"properties\":{},\"required\":[]}",
+        .execute = tool_memory_status
+    },
+
+    /* ── Talons: Competitive Execution ───────────────────────────────── */
+    {
+        .name = "talons_goal",
+        .description = "Create a goal for competitive pursuit. Set grip strength (tentative/holding/locked/death_grip) and strategy (direct/flanking/tournament/escalation/divide/ambush). Grip determines retry persistence.",
+        .input_schema_json = "{\"type\":\"object\",\"properties\":{\"description\":{\"type\":\"string\",\"description\":\"What to capture/achieve\"},\"priority\":{\"type\":\"number\",\"description\":\"Priority 0.0-1.0\"},\"grip\":{\"type\":\"string\",\"description\":\"Grip strength: tentative|holding|locked|death_grip\"},\"strategy\":{\"type\":\"string\",\"description\":\"Strategy: direct|flanking|tournament|escalation|divide|ambush\"},\"deadline\":{\"type\":\"number\",\"description\":\"Deadline as epoch timestamp (0=none)\"}},\"required\":[\"description\"]}",
+        .execute = tool_talons_goal_create
+    },
+    {
+        .name = "talons_advance",
+        .description = "Advance a goal through hunt states: stalk (plan) -> strike (execute) -> grip (close to done) -> capture (win) or escaped (fail, may auto-retry based on grip strength) or abandon.",
+        .input_schema_json = "{\"type\":\"object\",\"properties\":{\"goal_id\":{\"type\":\"integer\",\"description\":\"Goal ID\"},\"action\":{\"type\":\"string\",\"description\":\"stalk|strike|grip|capture|escaped|abandon\"},\"result\":{\"type\":\"string\",\"description\":\"Result description\"},\"cost\":{\"type\":\"number\",\"description\":\"Resource cost\"},\"confidence\":{\"type\":\"number\",\"description\":\"Updated confidence 0.0-1.0\"}},\"required\":[\"goal_id\",\"action\"]}",
+        .execute = tool_talons_goal_advance
+    },
+    {
+        .name = "talons_tournament",
+        .description = "Race N strategies for an objective. Actions: begin (start tournament), add (add competitor), result (record outcome), decide (pick winner). Scored by quality/speed/cost weights.",
+        .input_schema_json = "{\"type\":\"object\",\"properties\":{\"action\":{\"type\":\"string\",\"description\":\"begin|add|result|decide\"},\"tournament_id\":{\"type\":\"integer\",\"description\":\"Tournament ID\"},\"objective\":{\"type\":\"string\",\"description\":\"What to achieve (for begin)\"},\"label\":{\"type\":\"string\",\"description\":\"Competitor label (for add)\"},\"strategy\":{\"type\":\"string\",\"description\":\"Competitor strategy (for add)\"},\"competitor_id\":{\"type\":\"integer\",\"description\":\"Competitor ID (for result)\"},\"score\":{\"type\":\"number\",\"description\":\"Quality score 0-1 (for result)\"},\"cost\":{\"type\":\"number\",\"description\":\"Resource cost (for result)\"},\"result\":{\"type\":\"string\",\"description\":\"Result text (for result)\"},\"weight_quality\":{\"type\":\"number\"},\"weight_speed\":{\"type\":\"number\"},\"weight_cost\":{\"type\":\"number\"},\"deadline\":{\"type\":\"number\"}},\"required\":[\"action\"]}",
+        .execute = tool_talons_tournament
+    },
+    {
+        .name = "talons_recommend",
+        .description = "Get strategy recommendation based on learned win/loss history and current context (time pressure, resources, complexity).",
+        .input_schema_json = "{\"type\":\"object\",\"properties\":{\"time_pressure\":{\"type\":\"number\",\"description\":\"0.0 (relaxed) to 1.0 (urgent)\"},\"resource_budget\":{\"type\":\"number\",\"description\":\"0.0 (scarce) to 1.0 (abundant)\"},\"complexity\":{\"type\":\"number\",\"description\":\"0.0 (simple) to 1.0 (complex)\"}},\"required\":[]}",
+        .execute = tool_talons_recommend
+    },
+    {
+        .name = "talons_status",
+        .description = "Get Talons engine stats: win rate, active goals, strategy success rates, hunt history.",
+        .input_schema_json = "{\"type\":\"object\",\"properties\":{},\"required\":[]}",
+        .execute = tool_talons_status
+    },
+
+    /* ── Wings+Talons+Immune System unified status ────────────────────── */
+    {
+        .name = "wings_talons_status",
+        .description = "Get unified system status: Wings (pheromones, memory), Talons (goals, tournaments, win rate), Immune System (governance, kill switches, OODA, budgets).",
+        .input_schema_json = "{\"type\":\"object\",\"properties\":{},\"required\":[]}",
+        .execute = tool_wings_talons_status
+    },
+
+    /* ── Process lifecycle ─────────────────────────────────────────────── */
+    {
+        .name = "self_exit",
+        .description = "Terminate the dsco agent process. Call this when the user asks to quit, exit, end the session, or says goodbye. The process will cleanly shut down after delivering your final message.",
+        .input_schema_json = "{\"type\":\"object\",\"properties\":{\"reason\":{\"type\":\"string\",\"description\":\"Brief reason for exit (e.g. user requested, task complete)\"}}}",
+        .execute = tool_self_exit
+    },
+
+    /* ── Tool discovery (lazy loading) ────────────────────────────────── */
+    {
+        .name = "discover_tools",
+        .description = "List all available tools organized by category. Use this when you need a tool that isn't in your current tool list. Call with optional category filter (file_io, git, network, shell, code, crypto, swarm, ast, pipeline, math, search, general, finance, prediction, memory). After discovering a tool name, you can call it directly on the next turn.",
+        .input_schema_json = "{\"type\":\"object\",\"properties\":{\"category\":{\"type\":\"string\",\"description\":\"Optional: filter to a specific category\"}}}",
+        .execute = tool_discover_tools
+    },
+    /* ── §1-§8: Post-LLM Virtual OS subsystem status ──────────────────── */
+    {
+        .name = "vos_status",
+        .description = "Get Virtual OS subsystem status: arena allocator (§2), event loop (§6), bytecode VM (§3), cooperative scheduler (§1/§7), VFS persistence (§8), and reading list coverage map.",
+        .input_schema_json = "{\"type\":\"object\",\"properties\":{},\"required\":[]}",
+        .execute = tool_vos_status
+    },
 };
 
 static const int s_tool_count = sizeof(s_tools) / sizeof(s_tools[0]);
@@ -10600,8 +12933,18 @@ void tools_init(void) {
     ipc_register(parent, depth, getenv("DSCO_SUBAGENT") ? "worker" : "root", "*");
 
     /* Build hash map for O(1) tool lookup */
-    extern void tool_map_rebuild(void);  /* defined below */
     tool_map_rebuild();
+}
+
+void tools_register_vm_dispatch(vm_t *vm) {
+    /* §3: Populate bytecode VM dispatch table from tool registry.
+       This enables computed-goto O(1) tool dispatch via FNV-1a hashing. */
+    for (int i = 0; i < s_tool_count; i++) {
+        if (s_tools[i].name && s_tools[i].execute) {
+            vm_register_tool(vm, s_tools[i].name, s_tools[i].execute, i);
+        }
+    }
+    vm_build_dispatch_index(vm);
 }
 
 const tool_def_t *tools_get_all(int *count) {
@@ -10611,6 +12954,512 @@ const tool_def_t *tools_get_all(int *count) {
 
 int tools_builtin_count(void) {
     return s_tool_count;
+}
+
+/* ── Tool retrieval: BM25 + TF-IDF semantic index ──────────────────── */
+
+#include "semantic.h"
+
+/* ── Jina v4 embeddings: static vectors + runtime query embedding ───── */
+#include "tool_embeddings.h"
+
+/* Static embeddings loaded from .bin file (1024d × 364 tools) */
+static float *g_emb_vectors = NULL;  /* flat array: [TOOL_EMB_COUNT * TOOL_EMB_DIM] */
+static int    g_emb_count = 0;
+static int    g_emb_dim = 0;
+
+static void ensure_embeddings_loaded(void) {
+    if (g_emb_vectors) return;
+
+    /* Find the .bin file relative to the dsco binary */
+    const char *paths[] = {
+        "include/tool_embeddings.bin",
+        "../include/tool_embeddings.bin",
+        NULL
+    };
+    /* Also try relative to dsco binary location */
+    char binrel[1024] = {0};
+    {
+        char self[512] = {0};
+#ifdef __APPLE__
+        uint32_t sz = sizeof(self);
+        _NSGetExecutablePath(self, &sz);
+#else
+        readlink("/proc/self/exe", self, sizeof(self)-1);
+#endif
+        if (self[0]) {
+            char *sl = strrchr(self, '/');
+            if (sl) {
+                *sl = '\0';
+                snprintf(binrel, sizeof(binrel), "%s/../include/tool_embeddings.bin", self);
+            }
+        }
+    }
+
+    FILE *fp = NULL;
+    for (int i = 0; paths[i]; i++) {
+        fp = fopen(paths[i], "rb");
+        if (fp) break;
+    }
+    if (!fp && binrel[0]) fp = fopen(binrel, "rb");
+    if (!fp) {
+        fprintf(stderr, "  \033[33mno tool_embeddings.bin found\033[0m\n");
+        return;
+    }
+
+    uint32_t header[2];
+    if (fread(header, sizeof(uint32_t), 2, fp) != 2) { fclose(fp); return; }
+    g_emb_count = (int)header[0];
+    g_emb_dim = (int)header[1];
+    if (g_emb_dim > 1024) g_emb_dim = 1024; /* clamp to centroid array size */
+
+    size_t total_floats = (size_t)g_emb_count * g_emb_dim;
+    g_emb_vectors = safe_malloc(total_floats * sizeof(float));
+    size_t read_n = fread(g_emb_vectors, sizeof(float), total_floats, fp);
+    fclose(fp);
+
+    if ((int)read_n != (int)total_floats) {
+        free(g_emb_vectors); g_emb_vectors = NULL;
+        g_emb_count = 0;
+        fprintf(stderr, "  \033[31mtool_embeddings.bin truncated\033[0m\n");
+        return;
+    }
+
+    fprintf(stderr, "  \033[2memb: %d tools × %dd loaded\033[0m\n", g_emb_count, g_emb_dim);
+}
+
+/* Embed a query via Jina v4. Returns malloc'd float[g_emb_dim] or NULL. */
+static float *embed_query_jina(const char *text) {
+    const char *api_key = getenv("JINA_API_KEY");
+    if (!api_key || !api_key[0]) return NULL;
+
+    CURL *curl = curl_easy_init();
+    if (!curl) return NULL;
+
+    jbuf_t req;
+    jbuf_init(&req, 512);
+    jbuf_appendf(&req, "{\"model\":\"jina-embeddings-v4\",\"task\":\"retrieval.query\","
+                 "\"dimensions\":%d,\"embedding_type\":\"float\",\"input\":[", g_emb_dim);
+    jbuf_append_json_str(&req, text);
+    jbuf_append(&req, "]}");
+
+    jbuf_t resp;
+    jbuf_init(&resp, 8192);
+
+    struct curl_slist *hdrs = NULL;
+    char auth[256];
+    snprintf(auth, sizeof(auth), "Authorization: Bearer %s", api_key);
+    hdrs = curl_slist_append(hdrs, auth);
+    hdrs = curl_slist_append(hdrs, "Content-Type: application/json");
+    hdrs = curl_slist_append(hdrs, "Accept: application/json");
+    hdrs = curl_slist_append(hdrs, "User-Agent: dsco/0.9.0");
+
+    curl_easy_setopt(curl, CURLOPT_URL, "https://api.jina.ai/v1/embeddings");
+    curl_easy_setopt(curl, CURLOPT_HTTPHEADER, hdrs);
+    curl_easy_setopt(curl, CURLOPT_POSTFIELDS, req.data);
+    curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, jbuf_curl_write_cb);
+    curl_easy_setopt(curl, CURLOPT_WRITEDATA, &resp);
+    curl_easy_setopt(curl, CURLOPT_CONNECTTIMEOUT, 3L);
+    curl_easy_setopt(curl, CURLOPT_TIMEOUT, 8L);
+
+    CURLcode res = curl_easy_perform(curl);
+    long http_code = 0;
+    curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, &http_code);
+    curl_slist_free_all(hdrs);
+    curl_easy_cleanup(curl);
+    jbuf_free(&req);
+
+    if (res != CURLE_OK || http_code != 200 || !resp.data || !resp.data[0]) {
+        jbuf_free(&resp);
+        return NULL;
+    }
+
+    /* Parse: data[0].embedding = [f, f, f, ...] */
+    float *vec = safe_malloc(g_emb_dim * sizeof(float));
+    memset(vec, 0, g_emb_dim * sizeof(float));
+    char *data_arr = json_get_raw(resp.data, "data");
+    if (!data_arr) { jbuf_free(&resp); free(vec); return NULL; }
+
+    char *emb_str = json_get_raw(data_arr, "embedding");
+    free(data_arr);
+    if (!emb_str) { jbuf_free(&resp); free(vec); return NULL; }
+
+    const char *p = emb_str;
+    while (*p && *p != '[') p++;
+    if (*p == '[') p++;
+    for (int i = 0; i < g_emb_dim && *p; i++) {
+        while (*p && (*p == ' ' || *p == ',' || *p == '\n')) p++;
+        if (*p == ']') break;
+        vec[i] = (float)strtod(p, (char **)&p);
+    }
+    free(emb_str);
+    jbuf_free(&resp);
+    return vec;
+}
+
+/* Cosine similarity — float vectors */
+static float cosine_sim_f(const float *a, const float *b, int dim) {
+    float dot = 0, na = 0, nb = 0;
+    for (int i = 0; i < dim; i++) {
+        dot += a[i] * b[i];
+        na += a[i] * a[i];
+        nb += b[i] * b[i];
+    }
+    float denom = sqrtf(na) * sqrtf(nb);
+    return denom > 1e-8f ? dot / denom : 0.0f;
+}
+
+/* ═══════════════════════════════════════════════════════════════════════════
+ * HIERARCHICAL TOOL RETRIEVAL WITH SLOT ALLOCATION
+ *
+ * Architecture (scales to 10K+ tools with constant query cost):
+ *
+ *   Level 0: SLOT TABLE — fixed budget (e.g. 48 slots), LRU hot cache
+ *   Level 1: GROUP CENTROIDS — K clusters, cosine sim vs K centroids O(K)
+ *   Level 2: INTRA-GROUP RANK — only search top 3 groups O(k) where k~50
+ *   Level 3: EMBEDDING REFINE — Jina query vec for precision within winners
+ *
+ * At 10K tools with 20 groups of ~500 each:
+ *   Old: O(10000) cosine sims per query
+ *   New: O(20) centroid sims + O(1500) intra-group sims = 15x faster
+ * ═══════════════════════════════════════════════════════════════════════════ */
+
+/* ── Cluster / Group definitions ──────────────────────────────────────── */
+
+#define MAX_GROUPS        32
+#define MAX_GROUP_TOOLS  512   /* up to 512 tools per group — scales to 10K+ total */
+#define HOT_CACHE_SIZE    16   /* LRU: recently-used tools get priority slots */
+
+typedef struct {
+    const char *name;
+    int         tool_indices[MAX_GROUP_TOOLS];
+    int         count;
+    float       centroid[1024]; /* mean embedding of all tools in group */
+    bool        has_centroid;
+} tool_group_t;
+
+static tool_group_t g_tool_groups[MAX_GROUPS];
+static int g_group_count = 0;
+static bool g_groups_built = false;
+
+/* ── Hot cache: LRU of recently-executed tools ────────────────────────── */
+
+static int  g_hot_cache[HOT_CACHE_SIZE];
+static int  g_hot_count = 0;
+
+void tools_mark_hot(int tool_idx) {
+    /* Move to front of LRU */
+    for (int i = 0; i < g_hot_count; i++) {
+        if (g_hot_cache[i] == tool_idx) {
+            /* Shift left */
+            for (int j = i; j > 0; j--) g_hot_cache[j] = g_hot_cache[j-1];
+            g_hot_cache[0] = tool_idx;
+            return;
+        }
+    }
+    /* Not in cache — insert at front, evict oldest */
+    if (g_hot_count < HOT_CACHE_SIZE) g_hot_count++;
+    for (int j = g_hot_count - 1; j > 0; j--) g_hot_cache[j] = g_hot_cache[j-1];
+    g_hot_cache[0] = tool_idx;
+}
+
+/* ── Core tool set ────────────────────────────────────────────────────── */
+
+static const char *CORE_TOOLS[] = {
+    "read_file", "write_file", "edit_file", "append_file", "list_directory",
+    "find_files", "grep_files", "bash", "run_command", "python",
+    "spawn_agent", "agent_wait", "agent_output", "agent_status", "agent_kill",
+    "agent_race", "spawn_provider", "spawn_executor", "create_swarm",
+    "swarm_status", "swarm_collect", "openrouter_models", "executor_status",
+    "context_get", "context_get_batch", "context_search", "context_pack", "soul_read",
+    "discover_tools", "self_exit",
+    NULL
+};
+
+static bool is_core_tool(const char *name) {
+    for (int i = 0; CORE_TOOLS[i]; i++)
+        if (strcmp(name, CORE_TOOLS[i]) == 0) return true;
+    return false;
+}
+
+/* ── Group assignment (rule-based, fast) ──────────────────────────────── */
+
+static int assign_group(const char *name, const char *desc) {
+    /* Returns group index. Groups are: file_io=0, git=1, network=2, shell=3,
+       code=4, crypto=5, swarm=6, ast=7, pipeline=8, math=9, search=10, general=11,
+       market=12, prediction=13, memory=14 */
+    if (strncmp(name, "git_", 4) == 0 || strncmp(name, "github_", 7) == 0) return 1;
+    if (strncmp(name, "av_", 3) == 0 || strncmp(name, "fred_", 5) == 0 ||
+        strstr(name, "market") || strstr(name, "stripe")) return 12;
+    if (strstr(name, "polymarket") || strstr(name, "kalshi") || strstr(name, "prediction")) return 13;
+    if (strncmp(name, "ipc_", 4) == 0 || strstr(name, "swarm") || strstr(name, "spawn") ||
+        strstr(name, "agent") || strstr(name, "topology") || strstr(name, "ooda") ||
+        strstr(name, "pheromone") || strstr(name, "talons") || strstr(name, "governance") ||
+        strstr(name, "killswitch") || strstr(name, "executor") || strstr(name, "openrouter")) return 6;
+    if (strstr(name, "memory_") || strstr(name, "soul_")) return 14;
+    if (strstr(name, "hash") || strstr(name, "hmac") || strstr(name, "hkdf") ||
+        strstr(name, "jwt") || strstr(name, "uuid") || strstr(name, "random") ||
+        strstr(name, "secret") || strstr(name, "cert") || strstr(name, "token_audit")) return 5;
+    if (strstr(name, "http") || strstr(name, "curl") || strstr(name, "url") ||
+        strstr(name, "dns") || strstr(name, "ping") || strstr(name, "port") ||
+        strstr(name, "websocket") || strstr(name, "web_") || strstr(name, "download") ||
+        strstr(name, "upload") || strstr(name, "weather") || strstr(name, "whois") ||
+        strstr(name, "brave") || strstr(name, "tavily") || strstr(name, "serpapi") ||
+        strstr(name, "jina") || strstr(name, "firecrawl") || strstr(name, "browser") ||
+        strstr(name, "slack") || strstr(name, "notion") || strstr(name, "discord") ||
+        strstr(name, "twilio") || strstr(name, "elevenlabs") || strstr(name, "pinecone") ||
+        strstr(name, "supabase") || strstr(name, "huggingface")) return 2;
+    if (strstr(name, "inspect") || strstr(name, "call_graph") || strstr(name, "dependency") ||
+        strstr(name, "code_") || strstr(name, "compile") || strstr(name, "self_inspect")) return 7;
+    if (strncmp(name, "docker", 6) == 0 || strncmp(name, "npm", 3) == 0 ||
+        strncmp(name, "node", 4) == 0 || strncmp(name, "pip", 3) == 0 ||
+        strncmp(name, "pkg", 3) == 0 || strstr(name, "sandbox") ||
+        strstr(name, "crontab") || strstr(name, "process") || strstr(name, "sysinfo") ||
+        strstr(name, "system_profiler")) return 3;
+    if (strstr(name, "csv") || strstr(name, "xml") || strstr(name, "jq") ||
+        strstr(name, "awk") || strstr(name, "sed") || strstr(name, "sort_") ||
+        strstr(name, "regex") || strstr(name, "template") || strstr(name, "text_diff") ||
+        strstr(name, "string_")) return 8;
+    if (strstr(name, "calc") || strstr(name, "eval") || strstr(name, "factorial") ||
+        strstr(name, "semver") || strstr(name, "cron_parse")) return 9;
+    if (strstr(name, "file") || strstr(name, "dir") || strstr(name, "mkdir") ||
+        strstr(name, "chmod") || strstr(name, "symlink") || strstr(name, "xattr") ||
+        strstr(name, "tar") || strstr(name, "zip") || strstr(name, "disk") ||
+        strstr(name, "tree") || strstr(name, "page_") || strstr(name, "view_")) return 0;
+    if (desc) {
+        if (strstr(desc, "HTTP") || strstr(desc, "API") || strstr(desc, "endpoint")) return 2;
+        if (strstr(desc, "encrypt") || strstr(desc, "hash")) return 5;
+    }
+    return 11; /* general */
+}
+
+static const char *GROUP_NAMES[] = {
+    "file_io", "git", "network", "shell", "code", "crypto",
+    "swarm", "ast", "pipeline", "math", "search", "general",
+    "market", "prediction", "memory", NULL
+};
+
+/* ── Build groups + centroids lazily ──────────────────────────────────── */
+
+static void ensure_groups(void) {
+    if (g_groups_built) return;
+
+    int total;
+    const tool_def_t *tools = tools_get_all(&total);
+
+    /* Initialize groups */
+    int max_gid = 0;
+    for (int i = 0; GROUP_NAMES[i]; i++) max_gid = i + 1;
+    g_group_count = max_gid;
+    for (int g = 0; g < g_group_count; g++) {
+        g_tool_groups[g].name = GROUP_NAMES[g];
+        g_tool_groups[g].count = 0;
+        g_tool_groups[g].has_centroid = false;
+        memset(g_tool_groups[g].centroid, 0, sizeof(float) * (g_emb_dim > 0 ? g_emb_dim : 1024));
+    }
+
+    /* Assign tools to groups */
+    for (int i = 0; i < total; i++) {
+        if (is_core_tool(tools[i].name)) continue;
+        int gid = assign_group(tools[i].name, tools[i].description);
+        if (gid < 0 || gid >= g_group_count) gid = 11;
+        tool_group_t *g = &g_tool_groups[gid];
+        if (g->count < MAX_GROUP_TOOLS)
+            g->tool_indices[g->count++] = i;
+    }
+
+    /* Compute centroids from embeddings (mean of member vectors) */
+    if (g_emb_vectors && g_emb_dim > 0) {
+        for (int gid = 0; gid < g_group_count; gid++) {
+            tool_group_t *g = &g_tool_groups[gid];
+            if (g->count == 0) continue;
+            float *c = g->centroid;
+            memset(c, 0, g_emb_dim * sizeof(float));
+            int valid = 0;
+            for (int j = 0; j < g->count; j++) {
+                int ti = g->tool_indices[j];
+                if (ti < g_emb_count) {
+                    float *v = &g_emb_vectors[ti * g_emb_dim];
+                    for (int d = 0; d < g_emb_dim; d++) c[d] += v[d];
+                    valid++;
+                }
+            }
+            if (valid > 0) {
+                float inv = 1.0f / valid;
+                for (int d = 0; d < g_emb_dim; d++) c[d] *= inv;
+                g->has_centroid = true;
+            }
+        }
+    }
+
+    g_groups_built = true;
+    fprintf(stderr, "  \033[2mgroups:");
+    for (int g = 0; g < g_group_count; g++)
+        if (g_tool_groups[g].count > 0)
+            fprintf(stderr, " %s=%d", g_tool_groups[g].name, g_tool_groups[g].count);
+    fprintf(stderr, "\033[0m\n");
+}
+
+/* TF-IDF fallback */
+static tfidf_index_t g_tool_index;
+static bool g_tool_index_built = false;
+
+static void ensure_tool_index(void) {
+    if (g_tool_index_built) return;
+    int total;
+    const tool_def_t *tools = tools_get_all(&total);
+    if (total == 0) return;
+    int n = total < SEM_MAX_DOCS ? total : SEM_MAX_DOCS;
+    const char **names = safe_malloc(n * sizeof(char *));
+    const char **descs = safe_malloc(n * sizeof(char *));
+    for (int i = 0; i < n; i++) { names[i] = tools[i].name; descs[i] = tools[i].description; }
+    sem_tools_index_build(&g_tool_index, names, descs, n);
+    free(names); free(descs);
+    g_tool_index_built = true;
+}
+
+/* ── Hierarchical retrieval ───────────────────────────────────────────── */
+
+typedef struct { int idx; float score; } hrt_score_t;
+
+static int hrt_cmp(const void *a, const void *b) {
+    float sa = ((const hrt_score_t *)b)->score - ((const hrt_score_t *)a)->score;
+    return sa > 0 ? 1 : sa < 0 ? -1 : 0;
+}
+
+int tools_retrieve(const char *context, int *out_indices, int max_tools) {
+    int total;
+    const tool_def_t *tools = tools_get_all(&total);
+    if (total == 0 || max_tools <= 0) return 0;
+
+    int n = 0;
+    /* Heap-allocate included[] — scales to 10K+ tools without stack overflow */
+    bool *included = safe_malloc(total * sizeof(bool));
+    memset(included, 0, total * sizeof(bool));
+
+    /* ── Slot 0: Core tools (always loaded, ~27 tools) ────────────────── */
+    for (int i = 0; i < total; i++) {
+        if (is_core_tool(tools[i].name)) {
+            out_indices[n++] = i;
+            included[i] = true;
+            if (n >= max_tools) { free(included); return n; }
+        }
+    }
+
+    /* ── Slot 1: Hot cache (recently used tools, LRU) ─────────────────── */
+    for (int h = 0; h < g_hot_count && n < max_tools; h++) {
+        int hi = g_hot_cache[h];
+        if (hi >= 0 && hi < total && !included[hi]) {
+            out_indices[n++] = hi;
+            included[hi] = true;
+        }
+    }
+
+    if (!context || !context[0]) { free(included); return n; }
+
+    /* ── Level 1: Centroid ranking (O(K) where K=15 groups) ───────────── */
+    ensure_embeddings_loaded();
+    ensure_groups();
+
+    float *qvec = NULL;
+    int top_groups[MAX_GROUPS];
+    int n_top_groups = 0;
+
+    if (g_emb_vectors && g_emb_dim > 0) {
+        qvec = embed_query_jina(context);
+    }
+
+    if (qvec) {
+        /* Score each group centroid against query — O(K) not O(N) */
+        hrt_score_t gscore[MAX_GROUPS];
+        for (int g = 0; g < g_group_count; g++) {
+            gscore[g].idx = g;
+            gscore[g].score = g_tool_groups[g].has_centroid
+                ? cosine_sim_f(qvec, g_tool_groups[g].centroid, g_emb_dim)
+                : 0.0f;
+        }
+        qsort(gscore, g_group_count, sizeof(hrt_score_t), hrt_cmp);
+
+        /* Take top 3 groups (or more if budget allows) */
+        for (int i = 0; i < g_group_count && n_top_groups < 3; i++) {
+            if (gscore[i].score > 0.05f) {
+                top_groups[n_top_groups++] = gscore[i].idx;
+            }
+        }
+        /* Always include general group if we have room */
+        bool has_general = false;
+        for (int i = 0; i < n_top_groups; i++) if (top_groups[i] == 11) has_general = true;
+        if (!has_general && n_top_groups < 5) top_groups[n_top_groups++] = 11;
+
+        /* ── Level 2: Intra-group embedding rank (O(k) per group) ─────── */
+        int max_cand = 0;
+        for (int gi = 0; gi < n_top_groups; gi++)
+            max_cand += g_tool_groups[top_groups[gi]].count;
+        hrt_score_t *candidates = safe_malloc(max_cand * sizeof(hrt_score_t));
+        int n_cand = 0;
+
+        for (int gi = 0; gi < n_top_groups; gi++) {
+            tool_group_t *g = &g_tool_groups[top_groups[gi]];
+            for (int j = 0; j < g->count; j++) {
+                int ti = g->tool_indices[j];
+                if (ti < 0 || ti >= total || included[ti] || ti >= g_emb_count) continue;
+                candidates[n_cand].idx = ti;
+                candidates[n_cand].score = cosine_sim_f(qvec, &g_emb_vectors[ti * g_emb_dim], g_emb_dim);
+                n_cand++;
+            }
+        }
+
+        qsort(candidates, n_cand, sizeof(hrt_score_t), hrt_cmp);
+
+        /* Fill remaining slots */
+        float threshold = 0.12f;
+        for (int i = 0; i < n_cand && n < max_tools; i++) {
+            int idx = candidates[i].idx;
+            if (candidates[i].score > threshold && idx >= 0 && idx < total && !included[idx]) {
+                out_indices[n++] = idx;
+                included[idx] = true;
+            }
+        }
+
+        free(candidates);
+        free(qvec);
+    }
+
+    /* ── Level 3: TF-IDF fallback (no Jina key, or sparse results) ────── */
+    if (n < max_tools / 2) {
+        ensure_tool_index();
+        int capped = total < SEM_MAX_DOCS ? total : SEM_MAX_DOCS;
+        tool_score_t *ranked = safe_malloc(capped * sizeof(tool_score_t));
+        int ranked_count = sem_tools_rank(&g_tool_index, context, ranked, capped, capped);
+        for (int i = 0; i < ranked_count && n < max_tools; i++) {
+            int idx = ranked[i].tool_index;
+            if (idx >= 0 && idx < total && !included[idx] && ranked[i].score > 0.05) {
+                out_indices[n++] = idx;
+                included[idx] = true;
+            }
+        }
+        free(ranked);
+    }
+
+    free(included);
+    return n;
+}
+
+const tool_def_t **tools_get_filtered(const char *context, int max_tools, int *out_count) {
+    int cap = max_tools > 0 ? max_tools : 128;
+    int *indices = safe_malloc(cap * sizeof(int));
+    int n = tools_retrieve(context, indices, cap);
+
+    int total;
+    const tool_def_t *all = tools_get_all(&total);
+
+    const tool_def_t **result = safe_malloc((n > 0 ? n : 1) * sizeof(tool_def_t *));
+    for (int i = 0; i < n; i++) {
+        result[i] = &all[indices[i]];
+    }
+    free(indices);
+    *out_count = n;
+    return result;
 }
 
 /* ── Tool hash map for O(1) lookup ─────────────────────────────────────── */
@@ -10641,6 +13490,7 @@ void tool_map_free(tool_map_t *m) {
 }
 
 void tool_map_insert(tool_map_t *m, const char *name, int index) {
+    if (tool_map_lookup(m, name) >= 0) return;
     unsigned h = tool_name_hash(name) % TOOL_MAP_BUCKETS;
     tool_map_entry_t *e = malloc(sizeof(tool_map_entry_t));
     if (!e) return;
@@ -10972,7 +13822,9 @@ bool tools_is_allowed_for_tier(const char *name, const char *tier,
             "http_request", "json_api", "curl_raw", "port_scan",
             "websocket_test",
             /* orchestration/control-plane mutation */
-            "spawn_agent", "agent_kill", "create_swarm", "ipc_send",
+            "spawn_agent", "agent_kill", "create_swarm",
+            "spawn_executor", "spawn_provider", "create_executor_swarm", "swarm_budget",
+            "ipc_send",
             "ipc_recv", "ipc_scratch_put", "ipc_task_submit",
             "ipc_set_role", "env_set", "plugin_load", "plugin_reload",
             NULL
@@ -11013,11 +13865,44 @@ static bool tools_execute_internal(const char *name, const char *input_json,
                 (int)(input_json ? (strlen(input_json) < 512 ? strlen(input_json) : 512) : 0),
                 input_json ? input_json : "");
 
-    /* O(1) hash map lookup */
+    /* §3: Try VM computed-goto dispatch first (FNV-1a hash, O(1)).
+       This is the hot path — bypasses the chained hash map entirely
+       for builtin tools via the pre-built dispatch table. */
+    extern vm_t g_vm;
+    if (g_vm.dispatch_len > 0) {
+        uint32_t h = 2166136261u;
+        for (const char *p = name; *p; p++) { h ^= (uint8_t)*p; h *= 16777619u; }
+        uint32_t bucket = h & 511;
+        for (int probe = 0; probe < 512; probe++) {
+            int di = g_vm.hash_buckets[bucket];
+            if (di < 0) break;
+            if (g_vm.dispatch[di].hash == h &&
+                strcmp(g_vm.dispatch[di].name, name) == 0) {
+                /* Mark hot for tool filtering (O(1) hash map lookup) */
+                int hot_idx = tool_map_lookup(&g_tool_map, name);
+                if (hot_idx >= 0) tools_mark_hot(hot_idx);
+                struct timeval t0, t1;
+                gettimeofday(&t0, NULL);
+                bool ok = g_vm.dispatch[di].func(input_json, result, result_len);
+                gettimeofday(&t1, NULL);
+                long elapsed_us = (t1.tv_sec - t0.tv_sec) * 1000000L + (t1.tv_usec - t0.tv_usec);
+                sanitize_tool_result_inplace(result);
+                g_vm.dispatches++;
+                g_vm.cache_hits++;
+                TRACE_INFO("tool_result name=%s ok=%d elapsed_us=%ld (vm_dispatch)", name, ok, elapsed_us);
+                ctx_maybe_offload_tool_result(name, input_json, ok, result, result_len);
+                return ok;
+            }
+            bucket = (bucket + 1) & 511;
+        }
+    }
+
+    /* Fallback: O(1) chained hash map lookup (for plugins, MCP, late-registered) */
     int idx = tool_map_lookup(&g_tool_map, name);
 
     if (idx >= 0 && idx < s_tool_count) {
         /* Builtin tool */
+        tools_mark_hot(idx);
         struct timeval t0, t1;
         gettimeofday(&t0, NULL);
         bool ok = s_tools[idx].execute(input_json, result, result_len);
@@ -11237,8 +14122,14 @@ static const tool_timeout_cfg_t s_timeout_overrides[] = {
     { "compile",         60 },
     { "spawn_agent",    300 },
     { "agent_wait",    3660 },
+    { "agent_race",     300 },
     { "create_swarm",   300 },
     { "swarm_collect", 3660 },
+    { "spawn_executor",         300 },
+    { "spawn_provider",         300 },
+    { "create_executor_swarm",  300 },
+    { "executor_status",         30 },
+    { "swarm_budget",            30 },
     { "http_request",    60 },
     { "curl",            60 },
     { "market_quote",    30 },

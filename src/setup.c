@@ -74,6 +74,15 @@ static const char *k_known_env_keys[] = {
     "OPENWEATHERMAP_API_KEY",
     "ALPHA_VANTAGE_API_KEY",
     "FRED_API_KEY",
+    /* Trading / Prediction Markets */
+    "KALSHI_API_KEY",
+    "KALSHI_RSA_PRIVATE_KEY_PATH",
+    "POLYMARKET_ADDRESS",
+    "POLYMARKET_API_KEY",
+    "POLYMARKET_API_SECRET",
+    "POLYMARKET_PASSPHRASE",
+    "POLYMARKET_PRIVATE_KEY",
+    "POLYMARKET_RELAYER_API_KEY",
     "DSCO_MODEL",
     "DSCO_BASELINE_DB",
     "DSCO_TIMELINE_PORT",
@@ -301,6 +310,59 @@ static bool ensure_parent_dir(const char *file_path) {
     return mkdir_p(tmp);
 }
 
+static char *decode_quoted_env_value(const char *src) {
+    if (!src) return strdup("");
+    size_t n = strlen(src);
+    char *out = malloc(n + 1);
+    if (!out) return NULL;
+
+    size_t j = 0;
+    for (size_t i = 0; i < n; i++) {
+        if (src[i] == '\\' && i + 1 < n) {
+            i++;
+            switch (src[i]) {
+                case 'n': out[j++] = '\n'; break;
+                case 'r': out[j++] = '\r'; break;
+                case 't': out[j++] = '\t'; break;
+                case '\\': out[j++] = '\\'; break;
+                case '"': out[j++] = '"'; break;
+                default: out[j++] = src[i]; break;
+            }
+        } else {
+            out[j++] = src[i];
+        }
+    }
+    out[j] = '\0';
+    return out;
+}
+
+static bool write_quoted_env_value(FILE *f, const char *value) {
+    if (fputc('"', f) == EOF) return false;
+    for (const unsigned char *p = (const unsigned char *)(value ? value : ""); *p; p++) {
+        switch (*p) {
+            case '\n':
+                if (fputs("\\n", f) == EOF) return false;
+                break;
+            case '\r':
+                if (fputs("\\r", f) == EOF) return false;
+                break;
+            case '\t':
+                if (fputs("\\t", f) == EOF) return false;
+                break;
+            case '\\':
+                if (fputs("\\\\", f) == EOF) return false;
+                break;
+            case '"':
+                if (fputs("\\\"", f) == EOF) return false;
+                break;
+            default:
+                if (fputc(*p, f) == EOF) return false;
+                break;
+        }
+    }
+    return fputc('"', f) != EOF;
+}
+
 static bool is_valid_profile_name(const char *s) {
     if (!s || !*s) return false;
     for (const char *p = s; *p; p++) {
@@ -372,8 +434,16 @@ static bool load_kv_file(const char *path, kv_list_t *out) {
             val[--vlen] = '\0';
         }
 
-        if ((val[0] == '"' && vlen >= 2 && val[vlen - 1] == '"') ||
-            (val[0] == '\'' && vlen >= 2 && val[vlen - 1] == '\'')) {
+        char *decoded = NULL;
+        if (val[0] == '"' && vlen >= 2 && val[vlen - 1] == '"') {
+            val[vlen - 1] = '\0';
+            decoded = decode_quoted_env_value(val + 1);
+            if (!decoded) {
+                fclose(f);
+                return false;
+            }
+            val = decoded;
+        } else if (val[0] == '\'' && vlen >= 2 && val[vlen - 1] == '\'') {
             val[vlen - 1] = '\0';
             val++;
         }
@@ -381,9 +451,11 @@ static bool load_kv_file(const char *path, kv_list_t *out) {
         if (!is_valid_env_name(key)) continue;
         bool updated = false;
         if (!kv_list_set(out, key, val, &updated)) {
+            free(decoded);
             fclose(f);
             return false;
         }
+        free(decoded);
     }
 
     fclose(f);
@@ -393,29 +465,56 @@ static bool load_kv_file(const char *path, kv_list_t *out) {
 static bool write_kv_file(const char *path, kv_list_t *l) {
     if (!ensure_parent_dir(path)) return false;
 
+    struct stat st;
+    if (lstat(path, &st) == 0) {
+        if (S_ISLNK(st.st_mode) || !S_ISREG(st.st_mode)) return false;
+    } else if (errno != ENOENT) {
+        return false;
+    }
+
     qsort(l->items, (size_t)l->count, sizeof(l->items[0]), cmp_kv_by_key);
 
     char tmp_path[PATH_MAX];
-    snprintf(tmp_path, sizeof(tmp_path), "%s.tmp.%d", path, (int)getpid());
+    snprintf(tmp_path, sizeof(tmp_path), "%s.tmp.XXXXXX", path);
 
-    FILE *f = fopen(tmp_path, "w");
-    if (!f) return false;
+    int fd = mkstemp(tmp_path);
+    if (fd < 0) return false;
+    if (fchmod(fd, 0600) != 0) {
+        close(fd);
+        unlink(tmp_path);
+        return false;
+    }
+
+    FILE *f = fdopen(fd, "w");
+    if (!f) {
+        close(fd);
+        unlink(tmp_path);
+        return false;
+    }
 
     time_t now = time(NULL);
-    fprintf(f, "# dsco setup env file\n");
-    fprintf(f, "# generated at %ld\n", (long)now);
-    fprintf(f, "# DO NOT commit this file; it contains secrets.\n\n");
+    if (fprintf(f, "# dsco setup env file\n") < 0 ||
+        fprintf(f, "# generated at %ld\n", (long)now) < 0 ||
+        fprintf(f, "# DO NOT commit this file; it contains secrets.\n\n") < 0) {
+        fclose(f);
+        unlink(tmp_path);
+        return false;
+    }
 
     for (int i = 0; i < l->count; i++) {
-        fprintf(f, "%s=%s\n", l->items[i].key, l->items[i].value);
+        if (fprintf(f, "%s=", l->items[i].key) < 0 ||
+            !write_quoted_env_value(f, l->items[i].value) ||
+            fputc('\n', f) == EOF) {
+            fclose(f);
+            unlink(tmp_path);
+            return false;
+        }
     }
 
     if (fclose(f) != 0) {
         unlink(tmp_path);
         return false;
     }
-
-    chmod(tmp_path, 0600);
 
     if (rename(tmp_path, path) != 0) {
         unlink(tmp_path);
@@ -448,11 +547,11 @@ static bool process_env_candidate(kv_list_t *l, const char *key, const char *val
     return true;
 }
 
-int dsco_setup_load_saved_env(void) {
+static int load_env_from_path(const char *path) {
     kv_list_t l;
     kv_list_init(&l);
 
-    if (!load_kv_file(resolve_env_path(), &l)) {
+    if (!load_kv_file(path, &l)) {
         kv_list_free(&l);
         return 0;
     }
@@ -466,6 +565,32 @@ int dsco_setup_load_saved_env(void) {
     }
 
     kv_list_free(&l);
+    return loaded;
+}
+
+int dsco_setup_load_saved_env(void) {
+    /* 1. Load from ~/.dsco/env (or profile-specific path) */
+    int loaded = load_env_from_path(resolve_env_path());
+
+    /* 2. Also load from .env in the current working directory.
+     *    Keys already set by ~/.dsco/env (or the real environment)
+     *    are NOT overwritten — first writer wins. */
+    char cwd_env[PATH_MAX];
+    if (getcwd(cwd_env, sizeof(cwd_env) - 8)) {
+        strcat(cwd_env, "/.env");
+        /* Only load if it's a different file than the profile env */
+        char resolved_profile[PATH_MAX] = {0};
+        char resolved_cwd[PATH_MAX] = {0};
+        const char *profile_path = resolve_env_path();
+        if (realpath(profile_path, resolved_profile) &&
+            realpath(cwd_env, resolved_cwd) &&
+            strcmp(resolved_profile, resolved_cwd) == 0) {
+            /* Same file — skip */
+        } else {
+            loaded += load_env_from_path(cwd_env);
+        }
+    }
+
     return loaded;
 }
 

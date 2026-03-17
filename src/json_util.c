@@ -352,6 +352,14 @@ bool json_get_bool(const char *json, const char *key, bool def) {
     return v;
 }
 
+double json_get_double(const char *json, const char *key, double def) {
+    char *raw = json_get_raw(json, key);
+    if (!raw) return def;
+    double v = strtod(raw, NULL);
+    free(raw);
+    return v;
+}
+
 int json_array_foreach(const char *json, const char *key, json_array_cb cb, void *ctx) {
     const char *p = skip_ws(json);
     if (*p != '{') return 0;

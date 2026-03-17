@@ -7,12 +7,13 @@
 
 /* ── Sub-dsco process handle ──────────────────────────────────────────── */
 
-#define SWARM_MAX_CHILDREN  64  /* doubled: dynamic topologies need 33+ concurrent agents (coordinator + 8 leads × 4 workers) */
-#define SWARM_MAX_GROUPS    16  /* doubled: concurrent topology phases (recon + analysis + synthesis) consume groups fast */
-#define SWARM_MAX_OUTPUT    (512 * 1024) /* doubled: dynamic topology agents produce richer synthesis/code outputs */
+#define SWARM_MAX_CHILDREN  64
+#define SWARM_MAX_GROUPS    16
+#define SWARM_MAX_OUTPUT    (512 * 1024)
 #define SWARM_LABEL_LEN     128
 #define SWARM_GROUP_NAME_LEN 64
-#define SWARM_MAX_DEPTH     6   /* increased: topology_runner layer + conditional branching adds 2 depth levels vs flat 4 */
+#define SWARM_MAX_DEPTH     6
+#define SWARM_READ_BUF      (64 * 1024) /* 64KB read buffer (was 4KB) */
 
 typedef enum {
     SWARM_PENDING,
@@ -22,6 +23,24 @@ typedef enum {
     SWARM_ERROR,
     SWARM_KILLED,
 } swarm_status_t;
+
+/* ── Executor backends ────────────────────────────────────────────────── */
+
+typedef enum {
+    EXECUTOR_DSCO   = 0,  /* default: fork dsco binary                  */
+    EXECUTOR_CLAUDE = 1,  /* Claude Code CLI: claude -p --output-format json */
+    EXECUTOR_CODEX  = 2,  /* OpenAI Codex CLI: codex exec --json        */
+} executor_type_t;
+
+/* Executor availability (detected at init) */
+typedef struct {
+    bool     claude_available;   /* claude CLI found and authenticated     */
+    bool     codex_available;    /* codex CLI found and authenticated      */
+    char     claude_path[512];   /* resolved path to claude binary         */
+    char     codex_path[512];    /* resolved path to codex binary          */
+    char     claude_model[128];  /* default claude model (from --version)  */
+    char     codex_model[128];   /* default codex model (from config)      */
+} executor_registry_t;
 
 typedef void (*swarm_stream_cb)(int child_id, const char *data, size_t len, void *ctx);
 
@@ -51,8 +70,14 @@ typedef struct {
 
     /* Cost tracking */
     double         est_cost_usd;
+    double         budget_usd;         /* allocated budget partition (0 = unlimited) */
     int            est_input_tokens;
     int            est_output_tokens;
+    double         reported_cost_usd;  /* actual cost parsed from executor output  */
+
+    /* Executor */
+    executor_type_t executor;          /* which backend spawned this child */
+    char           provider[32];       /* native provider name (e.g. "openai", "groq") */
 
     /* Group membership */
     int            group_id;       /* -1 if ungrouped */
@@ -66,6 +91,22 @@ typedef struct {
     char  coordinator_task[SWARM_LABEL_LEN];
     bool  active;
 } swarm_group_t;
+
+/* ── Completion queue — O(1) push/pop for finished children ───────────── */
+
+typedef struct {
+    int   ids[SWARM_MAX_CHILDREN]; /* ring buffer of completed child IDs */
+    int   head;                    /* read pointer  */
+    int   tail;                    /* write pointer */
+    int   count;                   /* number queued */
+} swarm_completion_q_t;
+
+/* ── Active bitset — O(1) membership test, fast iteration ────────────── */
+
+typedef struct {
+    unsigned long long bits;       /* 64-bit bitset — 1 bit per child */
+    int count;                     /* popcount cache */
+} swarm_bitset_t;
 
 typedef struct {
     swarm_child_t  children[SWARM_MAX_CHILDREN];
@@ -81,6 +122,19 @@ typedef struct {
     const char    *api_key;
     const char    *default_model;
     const char    *dsco_path;     /* path to dsco binary */
+
+    /* Budget system */
+    double         swarm_budget_usd;  /* total budget for all swarm ops (0=unlimited) */
+    double         spent_usd;         /* accumulated spend across all children */
+
+    /* External executor registry */
+    executor_registry_t executors;
+
+    /* ── Fast-path data structures ────────────────────────────────────── */
+    swarm_completion_q_t done_q;   /* O(1) completion notifications          */
+    swarm_bitset_t       active;   /* bitset of running/streaming children   */
+    int                  kq_fd;    /* kqueue fd (-1 if unavailable)          */
+    double               first_completion_time; /* timestamp of first child done */
 } swarm_t;
 
 /* ── Lifecycle ────────────────────────────────────────────────────────── */
@@ -90,6 +144,24 @@ void swarm_destroy(swarm_t *s);
 /* ── Spawn sub-dsco ───────────────────────────────────────────────────── */
 int  swarm_spawn(swarm_t *s, const char *task, const char *model);
 int  swarm_spawn_in_group(swarm_t *s, int group_id, const char *task, const char *model);
+
+/* Spawn a sub-dsco forced to a specific native provider (e.g. "openai", "groq").
+ * The child process gets --exec <provider> -m <model> so it routes through
+ * that provider's API directly, completely decoupled from the parent's provider. */
+int  swarm_spawn_provider(swarm_t *s, int group_id, const char *task,
+                           const char *model, const char *provider);
+
+/* ── External executor spawn ─────────────────────────────────────────── */
+int  swarm_spawn_executor(swarm_t *s, int group_id, const char *task,
+                           const char *model, executor_type_t executor);
+void swarm_detect_executors(swarm_t *s);
+const char *executor_type_name(executor_type_t t);
+
+/* ── Budget partitioning ─────────────────────────────────────────────── */
+void swarm_set_budget(swarm_t *s, double budget_usd);
+double swarm_budget_remaining(swarm_t *s);
+double swarm_estimate_task_cost(swarm_t *s, const char *model);
+void swarm_enforce_budgets(swarm_t *s);  /* kill over-budget children */
 
 /* ── Groups ───────────────────────────────────────────────────────────── */
 int  swarm_group_create(swarm_t *s, const char *name);
@@ -103,6 +175,22 @@ int  swarm_poll(swarm_t *s, int timeout_ms);
 
 /* Poll and invoke stream callback for each chunk received */
 int  swarm_poll_stream(swarm_t *s, int timeout_ms, swarm_stream_cb cb, void *ctx);
+
+/* ── Fast completion primitives ──────────────────────────────────────── */
+
+/* Wait for ANY child to complete. Returns its ID, or -1 on timeout.
+ * Use this for race patterns (first-to-finish wins). */
+int  swarm_wait_any(swarm_t *s, int timeout_ms);
+
+/* Wait for the FIRST N children to complete. Fills `out_ids` with their IDs.
+ * Returns how many completed within timeout. Use for quorum patterns. */
+int  swarm_wait_n(swarm_t *s, int n, int *out_ids, int timeout_ms);
+
+/* Pop next completed child from the completion queue. Returns -1 if empty. */
+int  swarm_completion_pop(swarm_t *s);
+
+/* Number of completions queued but not yet consumed. */
+int  swarm_completion_pending(swarm_t *s);
 
 /* ── Status & results ─────────────────────────────────────────────────── */
 swarm_child_t  *swarm_get(swarm_t *s, int child_id);

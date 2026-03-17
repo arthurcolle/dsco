@@ -373,10 +373,27 @@ void conv_trim_old_results(conversation_t *c, int keep_recent, int max_chars) {
             if (mc->type && strcmp(mc->type, "tool_result") == 0 && mc->text) {
                 int len = (int)strlen(mc->text);
                 if (len > max_chars) {
-                    char *trimmed = safe_malloc(max_chars + 64);
-                    snprintf(trimmed, max_chars + 64,
-                             "[truncated %d→%d chars] %.*s",
-                             len, max_chars, max_chars, mc->text);
+                    /* Breadcrumb preservation: keep first line (file path,
+                       URL, chunk_id, tool name) before truncating body.
+                       Research (Factory.ai 2026) shows losing breadcrumbs
+                       forces agents to re-fetch, wasting more tokens. */
+                    const char *first_nl = strchr(mc->text, '\n');
+                    int first_line_len = first_nl
+                        ? (int)(first_nl - mc->text)
+                        : (len < 120 ? len : 120);
+                    if (first_line_len > 200) first_line_len = 200;
+
+                    int body_budget = max_chars - first_line_len - 40;
+                    if (body_budget < 80) body_budget = 80;
+
+                    size_t alloc = (size_t)(first_line_len + body_budget + 128);
+                    char *trimmed = safe_malloc(alloc);
+                    snprintf(trimmed, alloc,
+                             "%.*s\n[trimmed %d→%d chars] %.*s",
+                             first_line_len, mc->text,
+                             len, (int)(first_line_len + body_budget),
+                             body_budget,
+                             mc->text + (first_nl ? first_line_len + 1 : 0));
                     free(mc->text);
                     mc->text = trimmed;
                 }
@@ -677,6 +694,44 @@ void conv_add_tool_result(conversation_t *c, const char *tool_id,
     mc->text = safe_strdup(result ? result : "");
     dsco_strip_terminal_controls_inplace(mc->text);
     mc->is_error = is_error;
+}
+
+void conv_ensure_tool_results(conversation_t *c) {
+    /* Scan for tool_use blocks in assistant messages that have no matching
+       tool_result in the subsequent user message.  Insert synthetic error
+       results for any orphans.  This prevents HTTP 400 from the API. */
+    for (int i = 0; i < c->count; i++) {
+        message_t *m = &c->msgs[i];
+        if (m->role != ROLE_ASSISTANT) continue;
+
+        /* Collect tool_use ids from this assistant message */
+        for (int j = 0; j < m->content_count; j++) {
+            msg_content_t *mc = &m->content[j];
+            if (!mc->type || strcmp(mc->type, "tool_use") != 0 || !mc->tool_id)
+                continue;
+
+            /* Search subsequent user messages for a matching tool_result */
+            bool found = false;
+            for (int k = i + 1; k < c->count && !found; k++) {
+                message_t *um = &c->msgs[k];
+                if (um->role != ROLE_USER) break; /* stop at next assistant msg */
+                for (int l = 0; l < um->content_count; l++) {
+                    if (um->content[l].type &&
+                        strcmp(um->content[l].type, "tool_result") == 0 &&
+                        um->content[l].tool_id &&
+                        strcmp(um->content[l].tool_id, mc->tool_id) == 0) {
+                        found = true;
+                        break;
+                    }
+                }
+            }
+
+            if (!found) {
+                conv_add_tool_result(c, mc->tool_id,
+                                     "tool result missing (session interrupted)", true);
+            }
+        }
+    }
 }
 
 void conv_add_assistant_raw(conversation_t *c, parsed_response_t *resp) {
@@ -1043,24 +1098,55 @@ static void append_content_block(jbuf_t *b, msg_content_t *mc) {
     }
 }
 
-/* Append ALL tools — the model decides what to call */
-static void append_tools_json_all(jbuf_t *b, session_state_t *session) {
-    int count;
-    const tool_def_t *tools = tools_get_all(&count);
+/* Default max tools sent per Anthropic request (override: DSCO_MAX_TOOLS) */
+#define ANTHROPIC_DEFAULT_MAX_TOOLS 80
+
+/* Append filtered tools — context-aware subset to save tokens/money */
+static void append_tools_json_filtered(jbuf_t *b, session_state_t *session,
+                                        conversation_t *conv) {
+    int max_tools = ANTHROPIC_DEFAULT_MAX_TOOLS;
+    const char *mt_env = getenv("DSCO_MAX_TOOLS");
+    if (mt_env && mt_env[0]) {
+        int v = atoi(mt_env);
+        if (v > 0) max_tools = v;
+    }
+
+    /* Extract last user message as retrieval context */
+    const char *ctx = NULL;
+    if (conv) {
+        for (int i = conv->count - 1; i >= 0; i--) {
+            if (conv->msgs[i].role == ROLE_USER) {
+                for (int j = 0; j < conv->msgs[i].content_count; j++) {
+                    if (conv->msgs[i].content[j].text) {
+                        ctx = conv->msgs[i].content[j].text;
+                        break;
+                    }
+                }
+                break;
+            }
+        }
+    }
+
+    int filtered_count = 0;
+    const tool_def_t **filtered = tools_get_filtered(ctx, max_tools, &filtered_count);
+
     jbuf_append(b, ",\"tools\":[");
-    for (int i = 0; i < count; i++) {
+    bool has_server_tools = session && (session->web_search || session->code_execution);
+    for (int i = 0; i < filtered_count; i++) {
         if (i > 0) jbuf_append(b, ",");
         jbuf_append(b, "{\"name\":");
-        jbuf_append_json_str(b, tools[i].name);
+        jbuf_append_json_str(b, filtered[i]->name);
         jbuf_append(b, ",\"description\":");
-        jbuf_append_json_str(b, tools[i].description);
+        jbuf_append_json_str(b, filtered[i]->description);
         jbuf_append(b, ",\"input_schema\":");
-        jbuf_append(b, tools[i].input_schema_json);
-        if (i == count - 1 && !(session && (session->web_search || session->code_execution))) {
+        jbuf_append(b, filtered[i]->input_schema_json);
+        if (i == filtered_count - 1 && !has_server_tools && g_external_tool_count == 0) {
             jbuf_append(b, ",\"cache_control\":{\"type\":\"ephemeral\"}");
         }
         jbuf_append(b, "}");
     }
+    free((void *)filtered);
+
     /* External tools (MCP, etc.) */
     for (int i = 0; i < g_external_tool_count; i++) {
         jbuf_append(b, ",{\"name\":");
@@ -1069,6 +1155,9 @@ static void append_tools_json_all(jbuf_t *b, session_state_t *session) {
         jbuf_append_json_str(b, g_external_tools[i].description);
         jbuf_append(b, ",\"input_schema\":");
         jbuf_append(b, g_external_tools[i].input_schema_json);
+        if (i == g_external_tool_count - 1 && !has_server_tools) {
+            jbuf_append(b, ",\"cache_control\":{\"type\":\"ephemeral\"}");
+        }
         jbuf_append(b, "}");
     }
     /* Server-side tools */
@@ -1088,6 +1177,8 @@ static void append_tools_json_all(jbuf_t *b, session_state_t *session) {
 
 
 static void build_messages_json(jbuf_t *b, conversation_t *c, session_state_t *session) {
+    /* Ensure every tool_use has a matching tool_result before serialization */
+    conv_ensure_tool_results(c);
     jbuf_append(b, ",\"messages\":[");
     int msg_written = 0;
     int last_written_role = -1;
@@ -1167,7 +1258,7 @@ char *llm_build_request(conversation_t *c, const char *model, int max_tokens) {
         jbuf_append(&b, ",\"thinking\":{\"type\":\"adaptive\"}");
     }
 
-    append_tools_json_all(&b, NULL);
+    append_tools_json_filtered(&b, NULL, c);
     build_messages_json(&b, c, NULL);
     jbuf_append(&b, "}");
 
@@ -1251,7 +1342,7 @@ char *llm_build_request_ex(conversation_t *c, session_state_t *session, int max_
         jbuf_append(&b, "]");
     }
 
-    append_tools_json_all(&b, session);
+    append_tools_json_filtered(&b, session, c);
 
     /* Tool choice control */
     if (session->tool_choice[0]) {

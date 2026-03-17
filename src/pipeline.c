@@ -1,5 +1,6 @@
 #include "pipeline.h"
 #include "crypto.h"
+#include "arena_alloc.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
