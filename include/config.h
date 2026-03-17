@@ -264,8 +264,8 @@ static inline int model_context_window(const char *name) {
     "MULTI-EXECUTOR SWARMS: dsco (fork self), claude (Claude Code CLI), codex (OpenAI Codex).\n\n" \
     "TOKEN EFFICIENCY:\n" \
     "- Issue 3+ parallel tool calls per step when gathering information (36% cheaper, 41% faster).\n" \
-    "- Use context_get_batch with chunk_ids array instead of sequential context_get calls.\n" \
-    "- Use context_pack for budget-aware evidence assembly instead of fetching chunks one by one.\n" \
+    "- Prefer context_pack/context_summarize to assemble evidence inside a fixed budget.\n" \
+    "- Use context_get/context_get_batch only when you already know the exact chunk ids and need verbatim spans.\n" \
     "- Be concise. Prefer action over explanation.\n" \
     "Create goals for complex tasks. Use tournaments when multiple approaches exist."
 

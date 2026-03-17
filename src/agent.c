@@ -3820,7 +3820,8 @@ resume_turn_loop:
                                                        trust_reason, sizeof(trust_reason))) {
                             print_tool_result(blk->tool_name, false, trust_reason);
                             baseline_log("security", "tool_blocked", trust_reason, NULL);
-                            conv_add_tool_result(&conv, blk->tool_id, trust_reason, true);
+                            conv_add_tool_result_named(&conv, blk->tool_id, blk->tool_name,
+                                                       trust_reason, true);
                             break;
                         }
 
@@ -3829,7 +3830,8 @@ resume_turn_loop:
                         if (!tools_validate_input(blk->tool_name, blk->tool_input,
                                                    val_err, sizeof(val_err))) {
                             fprintf(stderr, "  \033[31m\xe2\x9c\x98 %s\033[0m\n", val_err);
-                            conv_add_tool_result(&conv, blk->tool_id, val_err, true);
+                            conv_add_tool_result_named(&conv, blk->tool_id, blk->tool_name,
+                                                       val_err, true);
                             break;
                         }
 
@@ -3981,7 +3983,8 @@ resume_turn_loop:
                             trace_span_end(tool_span, was_timeout ? "timeout" : (ok ? "ok" : "error"), NULL);
                         }
                         /* Spinner printed result for non-cached; cache-hit printed inline above */
-                        conv_add_tool_result(&conv, blk->tool_id, tool_result, !ok);
+                        conv_add_tool_result_named(&conv, blk->tool_id, blk->tool_name,
+                                                   tool_result, !ok);
                         free(tool_result);
                     }
                 }
@@ -4030,7 +4033,8 @@ resume_turn_loop:
                             tui_batch_spinner_complete(&batch_spinner, batch_idx, false,
                                                       trust_reason, 0.0);
                             baseline_log("security", "tool_blocked", trust_reason, NULL);
-                            conv_add_tool_result(&conv, blk->tool_id, trust_reason, true);
+                            conv_add_tool_result_named(&conv, blk->tool_id, blk->tool_name,
+                                                       trust_reason, true);
                             batch_idx++;
                             continue;
                         }
@@ -4041,7 +4045,8 @@ resume_turn_loop:
                                                    val_err, sizeof(val_err))) {
                             tui_batch_spinner_complete(&batch_spinner, batch_idx, false,
                                                       val_err, 0.0);
-                            conv_add_tool_result(&conv, blk->tool_id, val_err, true);
+                            conv_add_tool_result_named(&conv, blk->tool_id, blk->tool_name,
+                                                       val_err, true);
                             batch_idx++;
                             continue;
                         }
@@ -4121,7 +4126,8 @@ resume_turn_loop:
                             trace_span_end(tool_span, was_timeout ? "timeout" : (ok ? "ok" : "error"), NULL);
                         }
 
-                        conv_add_tool_result(&conv, blk->tool_id, tool_result, !ok);
+                        conv_add_tool_result_named(&conv, blk->tool_id, blk->tool_name,
+                                                   tool_result, !ok);
                         free(tool_result);
                         batch_idx++;
                     }
@@ -4132,8 +4138,8 @@ resume_turn_loop:
                    The API requires every tool_use to have a matching tool_result. */
                 for (int ri = batch_idx; ri < batch_n; ri++) {
                     content_block_t *blk = &sr.parsed.blocks[batch_indices[ri]];
-                    conv_add_tool_result(&conv, blk->tool_id,
-                                         "tool execution interrupted by user", true);
+                    conv_add_tool_result_named(&conv, blk->tool_id, blk->tool_name,
+                                               "tool execution interrupted by user", true);
                     tui_batch_spinner_complete(&batch_spinner, ri, false,
                                               "interrupted", 0.0);
                 }
@@ -4155,6 +4161,17 @@ resume_turn_loop:
                                  sr.usage.input_tokens, sr.usage.output_tokens, tc2);
                     }
                     tui_batch_summary(&batch_spinner, batch_cost_suffix);
+                }
+            }
+
+            if (needs_followup_turn && tool_count_this_turn > 0 &&
+                g_provider && strcmp(g_provider->name, "anthropic") == 0) {
+                const model_info_t *mi = model_lookup(session.model);
+                if (mi && mi->supports_thinking &&
+                    conv_compact_recent_tool_turn(&conv, 768)) {
+                    fprintf(stderr,
+                            "  %sreplay compacted recent thinking/tool turn for Anthropic%s\n",
+                            TUI_DIM, TUI_RESET);
                 }
             }
 

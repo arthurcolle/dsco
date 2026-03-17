@@ -508,6 +508,56 @@ int main(int argc, char **argv) {
             free(oneshot_prompt);
             return 0;
         }
+        if (strcmp(argv[i], "--tools-json") == 0) {
+            tools_init();
+            int count = 0;
+            const tool_def_t *tools = tools_get_all(&count);
+            printf("[");
+            for (int j = 0; j < count; j++) {
+                const tool_def_t *t = &tools[j];
+                if (!t->name) continue;
+                if (j > 0) printf(",");
+                /* description needs JSON string escaping */
+                printf("{\"name\":\"%s\",\"description\":\"", t->name);
+                const char *d = t->description ? t->description : "";
+                for (; *d; d++) {
+                    if (*d == '"')       printf("\\\"");
+                    else if (*d == '\\') printf("\\\\");
+                    else if (*d == '\n') printf("\\n");
+                    else if (*d == '\r') printf("\\r");
+                    else if (*d == '\t') printf("\\t");
+                    else                 putchar(*d);
+                }
+                printf("\",\"input_schema\":%s}",
+                       (t->input_schema_json && t->input_schema_json[0])
+                           ? t->input_schema_json
+                           : "{\"type\":\"object\",\"properties\":{}}");
+            }
+            printf("]\n");
+            free(oneshot_prompt);
+            return 0;
+        }
+        if (strcmp(argv[i], "--tool-exec") == 0 && i + 2 < argc) {
+            /* --tool-exec <name> <json>  — execute a single tool and print result */
+            const char *tname  = argv[++i];
+            const char *tjson  = argv[++i];
+            tools_init();
+            char result[256 * 1024] = {0};
+            bool ok = tools_execute(tname, tjson, result, sizeof(result));
+            /* Always emit valid JSON: {"ok":bool,"result":"..."} */
+            printf("{\"ok\":%s,\"result\":\"", ok ? "true" : "false");
+            for (const char *p = result; *p; p++) {
+                if (*p == '"')       printf("\\\"");
+                else if (*p == '\\') printf("\\\\");
+                else if (*p == '\n') printf("\\n");
+                else if (*p == '\r') printf("\\r");
+                else if (*p == '\t') printf("\\t");
+                else                 putchar(*p);
+            }
+            printf("\"}\n");
+            free(oneshot_prompt);
+            return ok ? 0 : 1;
+        }
         if (strcmp(argv[i], "--") == 0) {
             /* Everything after -- is passthrough to the executor */
             exec_extra = argv + i + 1;
@@ -853,8 +903,8 @@ int main(int argc, char **argv) {
                     for (int bi = 0; bi < tsr.parsed.count; bi++) {
                         content_block_t *blk = &tsr.parsed.blocks[bi];
                         if (blk->type && strcmp(blk->type, "tool_use") == 0 && blk->tool_id) {
-                            conv_add_tool_result(&tconv, blk->tool_id,
-                                                 "# dsco-cli\nThin agentic CLI", false);
+                            conv_add_tool_result_named(&tconv, blk->tool_id, blk->tool_name,
+                                                       "# dsco-cli\nThin agentic CLI", false);
                             break;
                         }
                     }
@@ -1170,7 +1220,7 @@ native_path:
                     } else {
                         baseline_log("security", "tool_blocked", tr, NULL);
                     }
-                    conv_add_tool_result(&conv, blk->tool_id, tr, !ok);
+                    conv_add_tool_result_named(&conv, blk->tool_id, blk->tool_name, tr, !ok);
                     baseline_log(ok ? "tool_result" : "tool_error",
                                  blk->tool_name ? blk->tool_name : "tool",
                                  tr, NULL);
@@ -1264,7 +1314,7 @@ native_path:
                             } else {
                                 baseline_log("security", "tool_blocked", tr, NULL);
                             }
-                            conv_add_tool_result(&conv, blk->tool_id, tr, !ok);
+                            conv_add_tool_result_named(&conv, blk->tool_id, blk->tool_name, tr, !ok);
                             free(tr);
                         }
                     }
