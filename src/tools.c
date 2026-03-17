@@ -1064,7 +1064,7 @@ static void ctx_rewrite_result_as_reference(const char *tool_name,
              "chunk_id_range: %d-%d\n"
              "bytes_indexed: %zu\n"
              "preview: %s\n"
-             "next: use context_search with a focused query, then context_get_batch with chunk_ids array for efficient retrieval",
+             "next: use context_pack or context_summarize with a focused query first; use context_get/context_get_batch only for exact chunk ids and verbatim spans",
              tool_name ? tool_name : "unknown",
              info ? info->chunks_added : 0,
              info ? info->first_chunk_id : -1,
@@ -1243,7 +1243,7 @@ static bool ctx_search_render(const char *query,
     }
 
     snprintf(result + off, rlen - off,
-             "next: context_get {\"chunk_id\":<id>,\"max_chars\":4000}");
+             "next: prefer context_pack with the same query/filter before calling context_get on individual chunk_ids");
     return true;
 }
 
@@ -7248,7 +7248,7 @@ static bool tool_context_search(const char *input, char *result, size_t rlen) {
                 off += (size_t)n;
             }
             snprintf(result + off, rlen - off,
-                     "next: context_get {\"chunk_id\":<id>,\"max_chars\":4000}");
+                     "next: prefer context_pack with the same query/filter before calling context_get on individual chunk_ids");
         }
     }
     free(query);
@@ -7533,7 +7533,7 @@ static bool tool_context_summarize(const char *input, char *result, size_t rlen)
     }
 
     snprintf(result + off, rlen - off,
-             "\nUse context_get on chunk ids above for verbatim details.");
+             "\nUse context_get only if you need verbatim details from the cited chunk ids.");
     free(query);
     free(tool_filter);
     free(facet);
@@ -7702,7 +7702,7 @@ static bool tool_context_pack(const char *input, char *result, size_t rlen) {
 
     snprintf(result + off, rlen - off,
              "\npack_summary packed_chunks=%d packed_chars=%zu budget_chars=%d\n"
-             "next: context_get on cited chunks for verbatim spans",
+             "next: answer from this packed evidence; call context_get only for verbatim spans you still need",
              packed, used, max_total);
     free(query);
     free(tool_filter);
@@ -7813,7 +7813,7 @@ static bool tool_context_fuse(const char *input, char *result, size_t rlen) {
         off += (size_t)n;
     }
     snprintf(result + off, rlen - off,
-             "\nnext: context_pack or context_get on chunk ids above");
+             "\nnext: context_pack on the fused hits above; use context_get only for specific verbatim spans");
     free(query);
     free(tool_filter);
     free(facet);
@@ -9154,7 +9154,7 @@ static bool tool_browser_extract(const char *input, char *result, size_t rlen) {
             off += (size_t)n;
         }
         snprintf(result + off, rlen - off,
-                 "next: context_get {\"chunk_id\":<id>,\"max_chars\":4000}");
+                 "next: prefer context_pack with the same query/filter before calling context_get on individual chunk_ids");
     }
     free(query);
     free(facet);
@@ -11372,19 +11372,19 @@ static const tool_def_t s_tools[] = {
     /* ── Retrieval Context ───────────────────────────────────────────────── */
     {
         .name = "context_search",
-        .description = "Search the chunked retrieval context (dense+lexical reranking) with optional source/facet metadata filters.",
+        .description = "Search the chunked retrieval context (dense+lexical reranking). Prefer following with context_pack/context_summarize; use context_get only for exact chunk ids.",
         .input_schema_json = "{\"type\":\"object\",\"properties\":{\"query\":{\"type\":\"string\",\"description\":\"Focused retrieval query\"},\"tool\":{\"type\":\"string\",\"description\":\"Optional tool-name filter\"},\"source_id\":{\"type\":\"integer\",\"description\":\"Optional source/snapshot id\"},\"facet\":{\"type\":\"string\",\"description\":\"Optional facet filter (raw|visual|outline|...)\"},\"top_k\":{\"type\":\"integer\",\"description\":\"How many hits to return (default 5, max 12)\"}},\"required\":[\"query\"]}",
         .execute = tool_context_search
     },
     {
         .name = "context_get",
-        .description = "Fetch full text of a previously indexed retrieval chunk by chunk_id.",
+        .description = "Fetch raw text for one previously indexed chunk when you already know the exact chunk_id and need verbatim detail.",
         .input_schema_json = "{\"type\":\"object\",\"properties\":{\"chunk_id\":{\"type\":\"integer\",\"description\":\"Chunk ID from context_search\"},\"max_chars\":{\"type\":\"integer\",\"description\":\"Max chars to return (default 4000, max 24000)\"}},\"required\":[\"chunk_id\"]}",
         .execute = tool_context_get
     },
     {
         .name = "context_get_batch",
-        .description = "Fetch multiple context chunks in a single call. Much more efficient than multiple context_get calls.",
+        .description = "Fetch raw text for specific chunk_ids when you already know the exact ids and need verbatim spans. Not the default tool for synthesis.",
         .input_schema_json = "{\"type\":\"object\",\"properties\":{\"chunk_ids\":{\"type\":\"array\",\"items\":{\"type\":\"integer\"},\"description\":\"Array of chunk IDs to fetch\"},\"max_chars_each\":{\"type\":\"integer\",\"description\":\"Max chars per chunk (default 2000, max 8000)\"}},\"required\":[\"chunk_ids\"]}",
         .execute = tool_context_get_batch
     },
@@ -11396,13 +11396,13 @@ static const tool_def_t s_tools[] = {
     },
     {
         .name = "context_summarize",
-        .description = "Build a compact evidence summary from retrieval hits for a query (with chunk citations).",
+        .description = "Build a compact evidence summary from retrieval hits for a query (with chunk citations). Preferred over raw chunk fetches.",
         .input_schema_json = "{\"type\":\"object\",\"properties\":{\"query\":{\"type\":\"string\",\"description\":\"Summary query\"},\"tool\":{\"type\":\"string\",\"description\":\"Optional tool filter\"},\"source_id\":{\"type\":\"integer\",\"description\":\"Optional source/snapshot id\"},\"facet\":{\"type\":\"string\",\"description\":\"Optional facet filter\"},\"top_k\":{\"type\":\"integer\",\"description\":\"Top chunks to summarize (default 4)\"},\"max_chars_per_chunk\":{\"type\":\"integer\",\"description\":\"Preview size per chunk\"}},\"required\":[\"query\"]}",
         .execute = tool_context_summarize
     },
     {
         .name = "context_pack",
-        .description = "Pack retrieval evidence into a strict character/token budget with chunk citations.",
+        .description = "Pack retrieval evidence into a strict character/token budget with chunk citations. Preferred retrieval assembly tool.",
         .input_schema_json = "{\"type\":\"object\",\"properties\":{\"query\":{\"type\":\"string\",\"description\":\"Packing query\"},\"tool\":{\"type\":\"string\",\"description\":\"Optional tool filter\"},\"source_id\":{\"type\":\"integer\",\"description\":\"Optional source/snapshot id\"},\"facet\":{\"type\":\"string\",\"description\":\"Optional facet filter\"},\"top_k\":{\"type\":\"integer\",\"description\":\"Candidate hits before packing\"},\"max_chars_total\":{\"type\":\"integer\",\"description\":\"Total packed char budget\"},\"max_chars_per_chunk\":{\"type\":\"integer\",\"description\":\"Per-chunk cap\"}},\"required\":[\"query\"]}",
         .execute = tool_context_pack
     },
@@ -13171,7 +13171,7 @@ static const char *CORE_TOOLS[] = {
     "spawn_agent", "agent_wait", "agent_output", "agent_status", "agent_kill",
     "agent_race", "spawn_provider", "spawn_executor", "create_swarm",
     "swarm_status", "swarm_collect", "openrouter_models", "executor_status",
-    "context_get", "context_get_batch", "context_search", "context_pack", "soul_read",
+    "context_get", "context_search", "context_pack", "soul_read",
     "discover_tools", "self_exit",
     NULL
 };

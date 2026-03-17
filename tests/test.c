@@ -10,6 +10,7 @@
 #include "eval.h"
 #include "tools.h"
 #include "plugin.h"
+#include "provider.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -21,6 +22,7 @@
 
 /* Provide g_interrupted that agent.c normally defines */
 volatile int g_interrupted = 0;
+vm_t g_vm = {0};
 
 static int tests_run = 0;
 static int tests_passed = 0;
@@ -44,6 +46,29 @@ static int tests_failed = 0;
 #define ASSERT(cond, msg) do { \
     if (!(cond)) { FAIL(msg); return; } \
 } while(0)
+
+static char *test_external_tool_stub(const char *name, const char *input_json, void *ctx) {
+    (void)name;
+    (void)input_json;
+    (void)ctx;
+    return safe_strdup("{\"ok\":true}");
+}
+
+static void test_capture_env(const char *name, char *buf, size_t buf_len, bool *had_value) {
+    const char *value = getenv(name);
+    if (value) {
+        if (buf && buf_len > 0) snprintf(buf, buf_len, "%s", value);
+        if (had_value) *had_value = true;
+    } else {
+        if (buf && buf_len > 0) buf[0] = '\0';
+        if (had_value) *had_value = false;
+    }
+}
+
+static void test_restore_env(const char *name, const char *saved, bool had_value) {
+    if (had_value) setenv(name, saved ? saved : "", 1);
+    else unsetenv(name);
+}
 
 /* ── JSON tests ────────────────────────────────────────────────────────── */
 
@@ -299,6 +324,405 @@ static void test_build_request_ex_effort(void) {
     ASSERT(strstr(req, "\"low\"") != NULL, "should contain effort value");
 
     free(req);
+    conv_free(&conv);
+    PASS();
+}
+
+static void test_openrouter_request_includes_external_tools_and_tool_choice(void) {
+    TEST("openrouter request includes external tools + tool_choice");
+    tools_init();
+    conversation_t conv;
+    conv_init(&conv);
+    conv_add_user_text(&conv, "use tools");
+
+    tools_register_external("test_openrouter_ext_tool",
+                            "External tool for provider request tests",
+                            "{\"type\":\"object\",\"properties\":{\"q\":{\"type\":\"string\"}}}",
+                            test_external_tool_stub, NULL);
+
+    session_state_t session;
+    session_state_init(&session, "moonshotai/kimi-k2.5");
+    snprintf(session.tool_choice, sizeof(session.tool_choice), "%s", "any");
+
+    provider_t *p = provider_create("openrouter");
+    ASSERT(p != NULL, "provider should be created");
+
+    char *req = p->build_request(p, &conv, &session, 1024);
+    ASSERT(req != NULL, "request should not be NULL");
+    ASSERT(strstr(req, "\"name\":\"test_openrouter_ext_tool\"") != NULL,
+           "should include external tool");
+    ASSERT(strstr(req, "\"tool_choice\":\"required\"") != NULL,
+           "should map any -> required");
+    ASSERT(strstr(req, "\"thinking\":{\"type\":\"disabled\"}") != NULL,
+           "kimi openrouter request should disable thinking for tool mode");
+
+    free(req);
+    provider_free(p);
+    conv_free(&conv);
+    PASS();
+}
+
+static void test_openrouter_request_named_tool_choice(void) {
+    TEST("openrouter request named tool_choice");
+    tools_init();
+    conversation_t conv;
+    conv_init(&conv);
+    conv_add_user_text(&conv, "call a tool");
+
+    session_state_t session;
+    session_state_init(&session, "moonshotai/kimi-k2.5");
+    snprintf(session.tool_choice, sizeof(session.tool_choice),
+             "%s", "tool:test_openrouter_ext_tool");
+
+    provider_t *p = provider_create("openrouter");
+    ASSERT(p != NULL, "provider should be created");
+
+    char *req = p->build_request(p, &conv, &session, 1024);
+    ASSERT(req != NULL, "request should not be NULL");
+    ASSERT(strstr(req, "\"tool_choice\":{\"type\":\"function\",\"function\":{\"name\":\"test_openrouter_ext_tool\"}}") != NULL,
+           "should encode named tool choice in OpenAI format");
+
+    free(req);
+    provider_free(p);
+    conv_free(&conv);
+    PASS();
+}
+
+static void test_openai_request_defaults_auto_tool_choice(void) {
+    TEST("openai request defaults to auto tool_choice");
+    tools_init();
+    conversation_t conv;
+    conv_init(&conv);
+    conv_add_user_text(&conv, "use a tool if needed");
+
+    tools_register_external("test_openai_auto_tool",
+                            "External tool for OpenAI auto tool_choice tests",
+                            "{\"type\":\"object\",\"properties\":{\"x\":{\"type\":\"string\"}}}",
+                            test_external_tool_stub, NULL);
+
+    session_state_t session;
+    session_state_init(&session, "gpt-4o");
+
+    provider_t *p = provider_create("openai");
+    ASSERT(p != NULL, "provider should be created");
+
+    char *req = p->build_request(p, &conv, &session, 1024);
+    ASSERT(req != NULL, "request should not be NULL");
+    ASSERT(strstr(req, "\"tool_choice\":\"auto\"") != NULL,
+           "OpenAI requests should default to auto tool_choice when tools are present");
+    ASSERT(strstr(req, "\"name\":\"test_openai_auto_tool\"") != NULL,
+           "request should include registered external tool");
+    ASSERT(strstr(req, "\"thinking\":{\"type\":\"disabled\"}") == NULL,
+           "native OpenAI requests should not inject Kimi thinking controls");
+
+    free(req);
+    provider_free(p);
+    conv_free(&conv);
+    PASS();
+}
+
+static void test_openrouter_request_tool_choice_none(void) {
+    TEST("openrouter request tool_choice none");
+    tools_init();
+    conversation_t conv;
+    conv_init(&conv);
+    conv_add_user_text(&conv, "do not use tools");
+
+    session_state_t session;
+    session_state_init(&session, "moonshotai/kimi-k2.5");
+    snprintf(session.tool_choice, sizeof(session.tool_choice), "%s", "none");
+
+    provider_t *p = provider_create("openrouter");
+    ASSERT(p != NULL, "provider should be created");
+
+    char *req = p->build_request(p, &conv, &session, 1024);
+    ASSERT(req != NULL, "request should not be NULL");
+    ASSERT(strstr(req, "\"tool_choice\":\"none\"") != NULL,
+           "none should serialize as OpenAI-compatible tool_choice none");
+
+    free(req);
+    provider_free(p);
+    conv_free(&conv);
+    PASS();
+}
+
+static void test_openrouter_request_external_tools_when_builtin_budget_zero(void) {
+    TEST("openrouter request keeps external tools at max_tools=0");
+    tools_init();
+    conversation_t conv;
+    conv_init(&conv);
+    conv_add_user_text(&conv, "use external tool only");
+
+    tools_register_external("test_openrouter_budget0_tool",
+                            "External tool that must survive zero builtin budget",
+                            "{\"type\":\"object\",\"properties\":{\"y\":{\"type\":\"string\"}}}",
+                            test_external_tool_stub, NULL);
+
+    char saved_env[64];
+    bool had_env = false;
+    test_capture_env("DSCO_OR_MAX_TOOLS", saved_env, sizeof(saved_env), &had_env);
+    setenv("DSCO_OR_MAX_TOOLS", "0", 1);
+
+    session_state_t session;
+    session_state_init(&session, "moonshotai/kimi-k2.5");
+
+    provider_t *p = provider_create("openrouter");
+    ASSERT(p != NULL, "provider should be created");
+
+    char *req = p->build_request(p, &conv, &session, 1024);
+    ASSERT(req != NULL, "request should not be NULL");
+    ASSERT(strstr(req, "\"name\":\"test_openrouter_budget0_tool\"") != NULL,
+           "external tool should still be present when builtin budget is zero");
+    ASSERT(strstr(req, "\"tool_choice\":\"auto\"") != NULL,
+           "tool_choice should still default to auto when external tools exist");
+
+    free(req);
+    provider_free(p);
+    conv_free(&conv);
+    test_restore_env("DSCO_OR_MAX_TOOLS", saved_env, had_env);
+    PASS();
+}
+
+static void test_openrouter_request_skips_disable_for_thinking_model(void) {
+    TEST("openrouter kimi-thinking leaves thinking enabled");
+    tools_init();
+    conversation_t conv;
+    conv_init(&conv);
+    conv_add_user_text(&conv, "use tools");
+
+    session_state_t session;
+    session_state_init(&session, "moonshotai/kimi-k2-thinking");
+
+    provider_t *p = provider_create("openrouter");
+    ASSERT(p != NULL, "provider should be created");
+
+    char *req = p->build_request(p, &conv, &session, 1024);
+    ASSERT(req != NULL, "request should not be NULL");
+    ASSERT(strstr(req, "\"thinking\":{\"type\":\"disabled\"}") == NULL,
+           "thinking variants should not be force-disabled");
+
+    free(req);
+    provider_free(p);
+    conv_free(&conv);
+    PASS();
+}
+
+static void test_openrouter_request_skips_disable_when_budget_set(void) {
+    TEST("openrouter kimi budget skips thinking disable");
+    tools_init();
+    conversation_t conv;
+    conv_init(&conv);
+    conv_add_user_text(&conv, "use tools");
+
+    session_state_t session;
+    session_state_init(&session, "moonshotai/kimi-k2.5");
+    session.thinking_budget = 2048;
+
+    provider_t *p = provider_create("openrouter");
+    ASSERT(p != NULL, "provider should be created");
+
+    char *req = p->build_request(p, &conv, &session, 1024);
+    ASSERT(req != NULL, "request should not be NULL");
+    ASSERT(strstr(req, "\"thinking\":{\"type\":\"disabled\"}") == NULL,
+           "explicit thinking budget should suppress Kimi disable shim");
+
+    free(req);
+    provider_free(p);
+    conv_free(&conv);
+    PASS();
+}
+
+static void test_openrouter_request_reasoning_env_blocks_disable(void) {
+    TEST("openrouter reasoning env blocks thinking disable");
+    tools_init();
+    conversation_t conv;
+    conv_init(&conv);
+    conv_add_user_text(&conv, "reason carefully with tools");
+
+    char saved_env[64];
+    bool had_env = false;
+    test_capture_env("DSCO_OR_REASONING_EFFORT", saved_env, sizeof(saved_env), &had_env);
+    setenv("DSCO_OR_REASONING_EFFORT", "high", 1);
+
+    session_state_t session;
+    session_state_init(&session, "moonshotai/kimi-k2.5");
+
+    provider_t *p = provider_create("openrouter");
+    ASSERT(p != NULL, "provider should be created");
+
+    char *req = p->build_request(p, &conv, &session, 1024);
+    ASSERT(req != NULL, "request should not be NULL");
+    ASSERT(strstr(req, "\"reasoning\":{\"effort\":\"high\"}") != NULL,
+           "reasoning effort should be serialized");
+    ASSERT(strstr(req, "\"thinking\":{\"type\":\"disabled\"}") == NULL,
+           "explicit reasoning effort should prevent the disable-thinking shim");
+
+    free(req);
+    provider_free(p);
+    conv_free(&conv);
+    test_restore_env("DSCO_OR_REASONING_EFFORT", saved_env, had_env);
+    PASS();
+}
+
+static void test_conv_compact_recent_tool_turn(void) {
+    TEST("conv_compact_recent_tool_turn");
+    conversation_t conv;
+    conv_init(&conv);
+    conv_add_user_text(&conv, "sqrt 7");
+    conv_add_assistant_tool_use(&conv, "toolu_calc", "eval", "{\"expr\":\"sqrt(7)\"}");
+    conv_add_tool_result_named(&conv, "toolu_calc", "eval", "2.64575131", false);
+
+    ASSERT(conv_compact_recent_tool_turn(&conv, 256), "compaction should succeed");
+    ASSERT(conv.count == 3, "conversation should keep same message count");
+    ASSERT(conv.msgs[1].content_count == 1, "assistant should be compacted to one block");
+    ASSERT(strcmp(conv.msgs[1].content[0].type, "text") == 0,
+           "assistant tool turn should become text");
+    ASSERT(strstr(conv.msgs[1].content[0].text, "Used tools: eval") != NULL,
+           "assistant summary should mention tool");
+    ASSERT(conv.msgs[2].content_count == 1, "user result should be compacted to one block");
+    ASSERT(strcmp(conv.msgs[2].content[0].type, "text") == 0,
+           "tool result should become text");
+    ASSERT(strstr(conv.msgs[2].content[0].text, "Tool result (eval):") != NULL,
+           "user summary should mention tool result");
+
+    session_state_t session;
+    session_state_init(&session, "sonnet");
+    char *req = llm_build_request_ex(&conv, &session, 1024);
+    ASSERT(req != NULL, "request should build");
+    ASSERT(strstr(req, "\"type\":\"tool_use\"") == NULL,
+           "compacted replay should not include tool_use blocks");
+    ASSERT(strstr(req, "\"type\":\"tool_result\"") == NULL,
+           "compacted replay should not include tool_result blocks");
+    ASSERT(strstr(req, "Tool result (eval):\\n2.64575131") != NULL,
+           "replay should preserve compacted result text");
+
+    free(req);
+    conv_free(&conv);
+    PASS();
+}
+
+static void test_conv_compact_recent_tool_turn_with_assistant_text(void) {
+    TEST("conv_compact tool turn preserves assistant text");
+    conversation_t conv;
+    conv_init(&conv);
+    conv_add_user_text(&conv, "sqrt 7");
+
+    content_block_t blocks[2] = {0};
+    blocks[0].type = safe_strdup("text");
+    blocks[0].text = safe_strdup("I will compute that.");
+    blocks[1].type = safe_strdup("tool_use");
+    blocks[1].tool_name = safe_strdup("eval");
+    blocks[1].tool_id = safe_strdup("toolu_eval_text");
+    blocks[1].tool_input = safe_strdup("{\"expr\":\"sqrt(7)\"}");
+    parsed_response_t resp = { .blocks = blocks, .count = 2, .stop_reason = NULL };
+    conv_add_assistant_raw(&conv, &resp);
+
+    for (int i = 0; i < 2; i++) {
+        free(blocks[i].type);
+        free(blocks[i].text);
+        free(blocks[i].tool_name);
+        free(blocks[i].tool_id);
+        free(blocks[i].tool_input);
+    }
+
+    conv_add_tool_result_named(&conv, "toolu_eval_text", "eval", "2.64575131", false);
+
+    ASSERT(conv_compact_recent_tool_turn(&conv, 256), "compaction should succeed");
+    ASSERT(strstr(conv.msgs[1].content[0].text, "I will compute that.") != NULL,
+           "assistant summary should preserve assistant text");
+    ASSERT(strstr(conv.msgs[1].content[0].text, "Used tools: eval") != NULL,
+           "assistant summary should still mention tool");
+
+    conv_free(&conv);
+    PASS();
+}
+
+static void test_conv_compact_recent_tool_turn_missing_result(void) {
+    TEST("conv_compact tool turn requires tool_result");
+    conversation_t conv;
+    conv_init(&conv);
+    conv_add_user_text(&conv, "sqrt 7");
+    conv_add_assistant_tool_use(&conv, "toolu_missing", "eval", "{\"expr\":\"sqrt(7)\"}");
+
+    ASSERT(!conv_compact_recent_tool_turn(&conv, 256),
+           "compaction should fail without a matching tool_result");
+    ASSERT(strcmp(conv.msgs[1].content[0].type, "tool_use") == 0,
+           "conversation should remain unchanged on failure");
+
+    conv_free(&conv);
+    PASS();
+}
+
+static void test_conv_compact_recent_tool_turn_trims_long_result(void) {
+    TEST("conv_compact tool turn trims long result");
+    conversation_t conv;
+    conv_init(&conv);
+    conv_add_user_text(&conv, "read large output");
+    conv_add_assistant_tool_use(&conv, "toolu_long", "bash", "{\"cmd\":\"printf x\"}");
+
+    char long_result[1600];
+    memset(long_result, 'x', sizeof(long_result) - 1);
+    long_result[sizeof(long_result) - 1] = '\0';
+    conv_add_tool_result_named(&conv, "toolu_long", "bash", long_result, false);
+
+    ASSERT(conv_compact_recent_tool_turn(&conv, 180), "compaction should succeed");
+    ASSERT(strstr(conv.msgs[2].content[0].text, "[trimmed ") != NULL,
+           "long result should be trimmed in compacted replay");
+
+    conv_free(&conv);
+    PASS();
+}
+
+static void test_conv_compact_recent_tool_turn_preserves_context_batch_preview(void) {
+    TEST("conv_compact tool turn keeps context batch breadcrumbs");
+    conversation_t conv;
+    conv_init(&conv);
+    conv_add_user_text(&conv, "fetch context batch");
+    conv_add_assistant_tool_use(&conv, "toolu_ctx_batch", "context_get_batch", "{\"query\":\"alpha\"}");
+
+    char body1[700];
+    char body2[700];
+    memset(body1, 'A', sizeof(body1) - 1);
+    memset(body2, 'B', sizeof(body2) - 1);
+    body1[sizeof(body1) - 1] = '\0';
+    body2[sizeof(body2) - 1] = '\0';
+
+    char batch[2200];
+    snprintf(batch, sizeof(batch),
+             "[chunk_id=11 tool=context_get_batch bytes=680]\n%s\n---\n"
+             "[chunk_id=22 tool=context_get_batch bytes=680]\n%s\n\n"
+             "--- batch: 2/2 chunks returned, 0 missing ---",
+             body1, body2);
+    conv_add_tool_result_named(&conv, "toolu_ctx_batch", "context_get_batch", batch, false);
+
+    ASSERT(conv_compact_recent_tool_turn(&conv, 120), "compaction should succeed");
+    ASSERT(strstr(conv.msgs[2].content[0].text, "[chunk_id=11") != NULL,
+           "compacted replay should keep first chunk breadcrumb");
+    ASSERT(strstr(conv.msgs[2].content[0].text, "[chunk_id=22") != NULL,
+           "compacted replay should keep second chunk breadcrumb");
+    ASSERT(strstr(conv.msgs[2].content[0].text, "[trimmed ") != NULL,
+           "compacted replay should mark the trimmed preview");
+
+    conv_free(&conv);
+    PASS();
+}
+
+static void test_conv_add_tool_result_named_reuses_user_message(void) {
+    TEST("conv_add_tool_result_named reuses user message");
+    conversation_t conv;
+    conv_init(&conv);
+    conv_add_user_text(&conv, "run tools");
+    conv_add_assistant_tool_use(&conv, "toolu_1", "eval", "{\"expr\":\"1+1\"}");
+    conv_add_tool_result_named(&conv, "toolu_1", "eval", "2", false);
+    conv_add_tool_result_named(&conv, "toolu_2", "bash", "ok", false);
+
+    ASSERT(conv.count == 3, "two tool results should share one user message");
+    ASSERT(conv.msgs[2].content_count == 2, "user tool-result message should contain both results");
+    ASSERT(strcmp(conv.msgs[2].content[0].tool_name, "eval") == 0,
+           "first tool name should be retained");
+    ASSERT(strcmp(conv.msgs[2].content[1].tool_name, "bash") == 0,
+           "second tool name should be retained");
+
     conv_free(&conv);
     PASS();
 }
@@ -2483,6 +2907,38 @@ static void test_conv_trim_old_results(void) {
     conv_trim_old_results(&conv, 5, 1000);
     /* After trim, should still have recent messages */
     ASSERT(conv.count <= 20, "count not increased");
+    conv_free(&conv);
+    PASS();
+}
+
+static void test_conv_trim_preserves_context_batch_breadcrumbs(void) {
+    TEST("conv_trim preserves context_get_batch breadcrumbs");
+    conversation_t conv;
+    conv_init(&conv);
+    conv_add_user_text(&conv, "query");
+    conv_add_assistant_text(&conv, "tool call");
+
+    char body1[700];
+    char body2[700];
+    memset(body1, 'A', sizeof(body1) - 1);
+    memset(body2, 'B', sizeof(body2) - 1);
+    body1[sizeof(body1) - 1] = '\0';
+    body2[sizeof(body2) - 1] = '\0';
+
+    char batch[2200];
+    snprintf(batch, sizeof(batch),
+             "[chunk_id=11 tool=market_movers bytes=680]\n%s\n---\n"
+             "[chunk_id=22 tool=market_movers bytes=680]\n%s\n\n"
+             "--- batch: 2/2 chunks returned, 0 missing ---",
+             body1, body2);
+    conv_add_tool_result_named(&conv, "toolu_ctx", "context_get_batch", batch, false);
+    conv_add_assistant_text(&conv, "follow-up");
+    conv_add_user_text(&conv, "continue");
+
+    conv_trim_old_results(&conv, 2, 120);
+    ASSERT(strstr(conv.msgs[2].content[0].text, "[chunk_id=11") != NULL, "keeps first chunk id");
+    ASSERT(strstr(conv.msgs[2].content[0].text, "[chunk_id=22") != NULL, "keeps second chunk id");
+    ASSERT(strstr(conv.msgs[2].content[0].text, "trimmed") != NULL, "marks compaction");
     conv_free(&conv);
     PASS();
 }
@@ -5541,6 +5997,20 @@ int main(void) {
     /* Request builder */
     test_build_request_valid_json();
     test_build_request_ex_effort();
+    test_openrouter_request_includes_external_tools_and_tool_choice();
+    test_openrouter_request_named_tool_choice();
+    test_openai_request_defaults_auto_tool_choice();
+    test_openrouter_request_tool_choice_none();
+    test_openrouter_request_external_tools_when_builtin_budget_zero();
+    test_openrouter_request_skips_disable_for_thinking_model();
+    test_openrouter_request_skips_disable_when_budget_set();
+    test_openrouter_request_reasoning_env_blocks_disable();
+    test_conv_compact_recent_tool_turn();
+    test_conv_compact_recent_tool_turn_with_assistant_text();
+    test_conv_compact_recent_tool_turn_missing_result();
+    test_conv_compact_recent_tool_turn_trims_long_result();
+    test_conv_compact_recent_tool_turn_preserves_context_batch_preview();
+    test_conv_add_tool_result_named_reuses_user_message();
     test_build_request_web_search_result_shape();
     test_build_request_web_search_result_recover_from_text();
     test_build_request_server_result_missing_tool_id();
@@ -5713,6 +6183,7 @@ int main(void) {
     test_conv_add_tool_use_and_result();
     test_conv_save_load_ex();
     test_conv_trim_old_results();
+    test_conv_trim_preserves_context_batch_breadcrumbs();
 
     /* Session trust tier */
     test_session_trust_tier_to_string();
