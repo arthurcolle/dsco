@@ -40,3 +40,9 @@ venv/
 notes/
 prompt*.txt
 trading_mind.txt
+
+# Secrets / credentials
+.env
+.env.local
+keys/
+*.pem

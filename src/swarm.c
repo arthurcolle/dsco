@@ -452,6 +452,7 @@ int swarm_spawn_provider(swarm_t *s, int group_id, const char *task,
     c->stream_buf_len = 0;
 
     s->child_count++;
+    post_spawn_register(s, id);
 
     if (group_id >= 0 && group_id < s->group_count) {
         swarm_group_t *g = &s->groups[group_id];

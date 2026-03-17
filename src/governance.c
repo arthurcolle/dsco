@@ -70,7 +70,7 @@ static const struct {
     { "ooda.max_cycle_ms",       "Max OODA cycle duration (ms)",       30000, 1000,  300000,1 },
     { "agent.max_depth",         "Max swarm nesting depth",            6,     1,     12,    0 },
     { "agent.max_children",      "Max concurrent sub-agents",          64,    1,     256,   0 },
-    { "agent.max_turns",         "Max turns per conversation",         50,    1,     500,   1 },
+    { "agent.max_turns",         "Max turns per conversation",         999999, 1,    999999, 1 },
     { "budget.default_gsu",      "Default GSU allocation per agent",   1000,  10,    100000,0 },
     { "budget.rate_limit",       "Max GSU per second",                 100,   1,     10000, 1 },
     { "memory.working_halflife", "Working memory half-life (seconds)", 60,    10,    600,   1 },

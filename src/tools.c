@@ -1,6 +1,7 @@
 #include "tools.h"
 #include "error.h"
 #include "integrations.h"
+#include "trading.h"
 #include "json_util.h"
 #include "config.h"
 #include "ast.h"
@@ -137,6 +138,46 @@ static bool require_regular_file(const char *path, char *result, size_t rlen) {
     return true;
 }
 
+/* Default swarm stream callback — streams child tokens to stderr in real-time.
+ * This is used by swarm_wait_any (agent_race), agent_wait, etc. so
+ * the user sees tokens from sub-agents as they arrive, not just at the end. */
+static void default_swarm_stream_cb(int child_id, const char *data, size_t len, void *ctx) {
+    (void)ctx;
+    if (!data || len == 0) return;
+
+    /* Buffer partial lines per child — use the child's stream_buf */
+    swarm_child_t *c = swarm_get(&g_swarm, child_id);
+    if (!c) return;
+
+    for (size_t i = 0; i < len; i++) {
+        unsigned char ch = (unsigned char)data[i];
+        if (ch == '\r') continue;
+
+        if (ch == '\n') {
+            /* Flush line */
+            if (c->stream_buf_len > 0) {
+                int display_len = (int)(c->stream_buf_len > 160 ? 160 : c->stream_buf_len);
+                fprintf(stderr, "  \033[2m│\033[0m \033[36m[agent %d]\033[0m %.*s%s\n",
+                        child_id, display_len, c->stream_buf,
+                        c->stream_buf_len > 160 ? "..." : "");
+                c->stream_buf_len = 0;
+                c->stream_buf[0] = '\0';
+            }
+            continue;
+        }
+
+        if (c->stream_buf_len >= 4095) {
+            int display_len = (int)(c->stream_buf_len > 160 ? 160 : c->stream_buf_len);
+            fprintf(stderr, "  \033[2m│\033[0m \033[36m[agent %d]\033[0m %.*s...\n",
+                    child_id, display_len, c->stream_buf);
+            c->stream_buf_len = 0;
+        }
+
+        c->stream_buf[c->stream_buf_len++] = (char)ch;
+        c->stream_buf[c->stream_buf_len] = '\0';
+    }
+}
+
 static void ensure_swarm(void) {
     if (!g_swarm_inited) {
         const char *model = tools_runtime_model();
@@ -147,6 +188,9 @@ static void ensure_swarm(void) {
         }
         swarm_init(&g_swarm, key, model);
         swarm_detect_executors(&g_swarm);
+        /* Wire up default streaming so all poll paths emit tokens live */
+        g_swarm.stream_cb = default_swarm_stream_cb;
+        g_swarm.stream_ctx = NULL;
         g_swarm_inited = true;
     }
 }
@@ -1020,7 +1064,7 @@ static void ctx_rewrite_result_as_reference(const char *tool_name,
              "chunk_id_range: %d-%d\n"
              "bytes_indexed: %zu\n"
              "preview: %s\n"
-             "next: use context_search with a focused query, then context_get with chunk_id",
+             "next: use context_search with a focused query, then context_get_batch with chunk_ids array for efficient retrieval",
              tool_name ? tool_name : "unknown",
              info ? info->chunks_added : 0,
              info ? info->first_chunk_id : -1,
@@ -4802,8 +4846,8 @@ static bool tool_agent_output(const char *input, char *result, size_t rlen) {
         return false;
     }
 
-    /* Poll for latest data */
-    swarm_poll(&g_swarm, 100);
+    /* Poll for latest data with live streaming */
+    swarm_poll_stream(&g_swarm, 100, default_swarm_stream_cb, NULL);
 
     swarm_child_output(&g_swarm, id, result, rlen);
     return true;
@@ -4826,9 +4870,9 @@ static bool tool_agent_wait(const char *input, char *result, size_t rlen) {
         deadline = tv.tv_sec + tv.tv_usec / 1e6 + timeout;
     }
 
-    /* Poll loop with streaming output */
+    /* Poll loop with live streaming */
     while (1) {
-        swarm_poll(&g_swarm, 500);
+        swarm_poll_stream(&g_swarm, 500, default_swarm_stream_cb, NULL);
 
         struct timeval now_tv;
         gettimeofday(&now_tv, NULL);
@@ -4945,13 +4989,40 @@ static bool tool_agent_race(const char *input, char *result, size_t rlen) {
 
     fprintf(stderr, "  \033[1m🏁 Racing %d models...\033[0m\n", n);
 
-    /* Wait for first completion */
-    int winner_id = swarm_wait_any(&g_swarm, timeout * 1000);
+    /* Wait for first SUCCESSFUL completion — skip errors */
+    int winner_id = -1;
+    int errors = 0;
+    double deadline = (double)timeout;
+    double race_start = 0;
+    { struct timeval tv; gettimeofday(&tv, NULL); race_start = tv.tv_sec + tv.tv_usec / 1e6; }
+
+    while (winner_id < 0) {
+        struct timeval now_tv;
+        gettimeofday(&now_tv, NULL);
+        double elapsed = (now_tv.tv_sec + now_tv.tv_usec / 1e6) - race_start;
+        int remaining = (int)((deadline - elapsed) * 1000);
+        if (remaining <= 0) break;
+
+        int cid = swarm_wait_any(&g_swarm, remaining);
+        if (cid < 0) break; /* timeout */
+
+        swarm_child_t *c = swarm_get(&g_swarm, cid);
+        if (c && c->status == SWARM_DONE) {
+            winner_id = cid;
+        } else {
+            /* Error — log and keep waiting for others */
+            errors++;
+            fprintf(stderr, "  \033[33m✗ racer %d errored (%s)\033[0m\n",
+                    cid, c ? (c->output ? c->output : "unknown") : "null");
+            if (errors >= n) break; /* all errored */
+        }
+    }
 
     if (winner_id < 0) {
-        /* Timeout — kill all */
+        /* Timeout or all errored — kill all */
         for (int i = 0; i < n; i++) swarm_kill(&g_swarm, ids[i]);
-        snprintf(result, rlen, "{\"error\":\"race timed out after %ds, all %d killed\"}", timeout, n);
+        snprintf(result, rlen, "{\"error\":\"race: %s after %ds (%d errors, %d contestants)\"}",
+                 errors >= n ? "all contestants errored" : "timed out", timeout, errors, n);
         free(task);
         for (int i = 0; i < n; i++) { free(models[i]); free(providers[i]); }
         return false;
@@ -7239,6 +7310,79 @@ static bool tool_context_get(const char *input, char *result, size_t rlen) {
         snprintf(result + off, rlen - off, "\n\n... truncated (%zu/%zu chars shown)",
                  copy_len, c->text_len);
     }
+    return true;
+}
+
+/* ── context_get_batch: fetch multiple chunks in one call ─────────── */
+static bool tool_context_get_batch(const char *input, char *result, size_t rlen) {
+    /* Parse chunk_ids array from JSON: {"chunk_ids":[1,2,3]} */
+    const char *arr = strstr(input, "\"chunk_ids\"");
+    if (!arr) {
+        snprintf(result, rlen, "error: chunk_ids array required");
+        return false;
+    }
+    const char *bracket = strchr(arr, '[');
+    if (!bracket) {
+        snprintf(result, rlen, "error: chunk_ids must be a JSON array");
+        return false;
+    }
+
+    int ids[64];
+    int id_count = 0;
+    const char *p = bracket + 1;
+    while (*p && *p != ']' && id_count < 64) {
+        while (*p == ' ' || *p == ',') p++;
+        if (*p == ']') break;
+        ids[id_count++] = atoi(p);
+        while (*p && *p != ',' && *p != ']') p++;
+    }
+    if (id_count == 0) {
+        snprintf(result, rlen, "error: chunk_ids array is empty");
+        return false;
+    }
+
+    int max_chars_each = json_get_int(input, "max_chars_each", 2000);
+    if (max_chars_each < 200) max_chars_each = 200;
+    if (max_chars_each > 8000) max_chars_each = 8000;
+
+    size_t off = 0;
+    int found = 0, missing = 0;
+    for (int i = 0; i < id_count && off + 128 < rlen; i++) {
+        int idx = ctx_find_index_by_id(ids[i]);
+        if (idx < 0) {
+            missing++;
+            continue;
+        }
+        ctx_chunk_t *c = &g_ctx.chunks[idx];
+        size_t copy_len = c->text_len;
+        if (copy_len > (size_t)max_chars_each) copy_len = (size_t)max_chars_each;
+
+        int n = snprintf(result + off, rlen - off,
+                         "%s[chunk_id=%d tool=%s bytes=%zu]\n",
+                         found > 0 ? "\n---\n" : "", c->id, c->tool, c->text_len);
+        if (n > 0 && (size_t)n < rlen - off) off += (size_t)n;
+
+        if (off + copy_len + 64 < rlen) {
+            memcpy(result + off, c->text, copy_len);
+            off += copy_len;
+            result[off] = '\0';
+            if (copy_len < c->text_len) {
+                n = snprintf(result + off, rlen - off,
+                             "\n(truncated %zu/%zu)", copy_len, c->text_len);
+                if (n > 0 && (size_t)n < rlen - off) off += (size_t)n;
+            }
+        }
+        found++;
+    }
+    if (found == 0) {
+        snprintf(result, rlen, "error: none of %d chunk_ids found (likely evicted)", id_count);
+        return false;
+    }
+    int n = snprintf(result + off, rlen - off,
+                     "\n\n--- batch: %d/%d chunks returned, %d missing ---",
+                     found, id_count, missing);
+    if (n > 0 && (size_t)n < rlen - off) off += (size_t)n;
+    result[off] = '\0';
     return true;
 }
 
@@ -10931,6 +11075,94 @@ static bool tool_self_exit(const char *input, char *result, size_t rlen) {
     return true;
 }
 
+/* ── Discover tools (meta-tool for lazy loading) ───────────────────── */
+
+static bool tool_discover_tools(const char *input, char *result, size_t rlen) {
+    /* Parse optional category filter */
+    char category[64] = "";
+    if (input) {
+        const char *c = strstr(input, "\"category\"");
+        if (c) {
+            c = strchr(c + 10, '"');
+            if (c) {
+                c++;
+                const char *end = strchr(c, '"');
+                if (end && (size_t)(end - c) < sizeof(category)) {
+                    memcpy(category, c, end - c);
+                    category[end - c] = '\0';
+                }
+            }
+        }
+    }
+
+    int total;
+    const tool_def_t *tools = tools_get_all(&total);
+
+    /* Build JSON array of tool summaries grouped by category */
+    int off = 0;
+    off += snprintf(result + off, rlen - off,
+        "{\"total_tools\":%d,\"note\":\"Call any tool by name — it will be available on the next turn.\",\"tools\":[", total);
+
+    /* Group names for display */
+    const char *group_names[] = {
+        "file_io", "git", "network", "shell", "code", "crypto",
+        "swarm", "ast", "pipeline", "math", "search", "general",
+        "finance", "prediction", "memory"
+    };
+    int group_count = 15;
+
+    /* Simple categorization: list tools by group */
+    for (int g = 0; g < group_count && (size_t)off < rlen - 100; g++) {
+        /* Filter by category if specified */
+        if (category[0] && strcasecmp(category, group_names[g]) != 0) continue;
+
+        if (off > 80) off += snprintf(result + off, rlen - off, ",");
+        off += snprintf(result + off, rlen - off, "{\"category\":\"%s\",\"tools\":[", group_names[g]);
+
+        bool first = true;
+        for (int i = 0; i < total && (size_t)off < rlen - 200; i++) {
+            int gid = -1;
+            const char *n = tools[i].name;
+            /* Quick group assignment matching assign_group() */
+            if (strncmp(n, "git_", 4) == 0 || strncmp(n, "github_", 7) == 0) gid = 1;
+            else if (strncmp(n, "av_", 3) == 0 || strncmp(n, "fred_", 5) == 0 ||
+                     strstr(n, "market") || strstr(n, "stripe")) gid = 12;
+            else if (strstr(n, "polymarket") || strstr(n, "kalshi") || strstr(n, "prediction")) gid = 13;
+            else if (strncmp(n, "ipc_", 4) == 0 || strstr(n, "swarm") || strstr(n, "spawn") ||
+                     strstr(n, "agent") || strstr(n, "topology") || strstr(n, "ooda") ||
+                     strstr(n, "pheromone") || strstr(n, "talons") || strstr(n, "governance") ||
+                     strstr(n, "killswitch") || strstr(n, "executor") || strstr(n, "openrouter")) gid = 6;
+            else if (strstr(n, "memory_") || strstr(n, "soul_")) gid = 14;
+            else if (strstr(n, "hash") || strstr(n, "hmac") || strstr(n, "jwt") ||
+                     strstr(n, "uuid") || strstr(n, "random") || strstr(n, "cert")) gid = 5;
+            else if (strstr(n, "http") || strstr(n, "curl") || strstr(n, "dns") ||
+                     strstr(n, "ping") || strstr(n, "web") || strstr(n, "jina") ||
+                     strstr(n, "slack") || strstr(n, "discord") || strstr(n, "notion") ||
+                     strstr(n, "weather") || strstr(n, "firecrawl") || strstr(n, "serpapi") ||
+                     strstr(n, "browser")) gid = 2;
+            else if (strncmp(n, "read_", 5) == 0 || strncmp(n, "write_", 6) == 0 ||
+                     strncmp(n, "edit_", 5) == 0 || strstr(n, "file") || strstr(n, "dir") ||
+                     strstr(n, "tree") || strstr(n, "symlink") || strstr(n, "chmod") ||
+                     strstr(n, "mkdir") || strstr(n, "copy") || strstr(n, "move") ||
+                     strstr(n, "delete") || strstr(n, "append")) gid = 0;
+            else if (strstr(n, "bash") || strstr(n, "run_") || strstr(n, "compile") ||
+                     strstr(n, "sandbox")) gid = 3;
+            else if (strstr(n, "code_") || strstr(n, "ast_") || strstr(n, "grep") ||
+                     strstr(n, "find") || strstr(n, "search")) gid = 4;
+            else gid = 11; /* general */
+
+            if (gid != g) continue;
+            if (!first) off += snprintf(result + off, rlen - off, ",");
+            first = false;
+            off += snprintf(result + off, rlen - off, "\"%s\"", n);
+        }
+        off += snprintf(result + off, rlen - off, "]}");
+    }
+
+    off += snprintf(result + off, rlen - off, "]}");
+    return true;
+}
+
 /* ── §1-§8: Post-LLM Virtual OS subsystem tools ───────────────────── */
 
 #include "arena_alloc.h"
@@ -11149,6 +11381,12 @@ static const tool_def_t s_tools[] = {
         .description = "Fetch full text of a previously indexed retrieval chunk by chunk_id.",
         .input_schema_json = "{\"type\":\"object\",\"properties\":{\"chunk_id\":{\"type\":\"integer\",\"description\":\"Chunk ID from context_search\"},\"max_chars\":{\"type\":\"integer\",\"description\":\"Max chars to return (default 4000, max 24000)\"}},\"required\":[\"chunk_id\"]}",
         .execute = tool_context_get
+    },
+    {
+        .name = "context_get_batch",
+        .description = "Fetch multiple context chunks in a single call. Much more efficient than multiple context_get calls.",
+        .input_schema_json = "{\"type\":\"object\",\"properties\":{\"chunk_ids\":{\"type\":\"array\",\"items\":{\"type\":\"integer\"},\"description\":\"Array of chunk IDs to fetch\"},\"max_chars_each\":{\"type\":\"integer\",\"description\":\"Max chars per chunk (default 2000, max 8000)\"}},\"required\":[\"chunk_ids\"]}",
+        .execute = tool_context_get_batch
     },
     {
         .name = "context_stats",
@@ -12285,9 +12523,25 @@ static const tool_def_t s_tools[] = {
         .input_schema_json = "{\"type\":\"object\",\"properties\":{\"repo\":{\"type\":\"string\",\"description\":\"Repository (owner/name)\"},\"action\":{\"type\":\"string\",\"enum\":[\"list_runs\",\"list_workflows\"],\"description\":\"Action (default: list_runs)\"}},\"required\":[\"repo\"]}",
         .execute = tool_github_actions
     },
+    /* ── Knowledge Base (PDF ingestion + semantic search) ────────────────── */
+    { .name = "kb_ingest", .description = "Ingest a PDF or text into the knowledge base. Extracts text, splits into pages, stores in SQLite with dedup. Supports local files, URLs, or raw text.", .input_schema_json = "{\"type\":\"object\",\"properties\":{\"path\":{\"type\":\"string\",\"description\":\"Local path to PDF/text file\"},\"url\":{\"type\":\"string\",\"description\":\"URL to download PDF from\"},\"title\":{\"type\":\"string\",\"description\":\"Document title (auto-detected if omitted)\"},\"text\":{\"type\":\"string\",\"description\":\"Direct text to ingest (skip file processing)\"}}}", .execute = tool_kb_ingest },
+    { .name = "kb_search", .description = "Semantic search across all indexed documents using BM25 ranking. Returns relevant pages with snippets, scores, and source info.", .input_schema_json = "{\"type\":\"object\",\"properties\":{\"query\":{\"type\":\"string\",\"description\":\"Search query\"},\"limit\":{\"type\":\"integer\",\"description\":\"Max results (default 5)\"}},\"required\":[\"query\"]}", .execute = tool_kb_search },
+    { .name = "kb_list", .description = "List all documents in the knowledge base with page counts, word counts, and dates.", .input_schema_json = "{\"type\":\"object\",\"properties\":{}}", .execute = tool_kb_list },
+    { .name = "kb_get", .description = "Get content from a specific document or page in the knowledge base.", .input_schema_json = "{\"type\":\"object\",\"properties\":{\"doc_id\":{\"type\":\"integer\",\"description\":\"Document ID\"},\"page\":{\"type\":\"integer\",\"description\":\"Page number (omit for all pages)\"}},\"required\":[\"doc_id\"]}", .execute = tool_kb_get },
+    { .name = "kb_delete", .description = "Delete a document from the knowledge base.", .input_schema_json = "{\"type\":\"object\",\"properties\":{\"doc_id\":{\"type\":\"integer\",\"description\":\"Document ID to delete\"}},\"required\":[\"doc_id\"]}", .execute = tool_kb_delete },
+    { .name = "arxiv_search", .description = "Search arXiv for research papers. Returns titles, abstracts, authors, IDs. No auth needed. Use arxiv_ingest to add results to the knowledge base.", .input_schema_json = "{\"type\":\"object\",\"properties\":{\"query\":{\"type\":\"string\",\"description\":\"Search query (e.g. 'multi-agent reinforcement learning')\"},\"limit\":{\"type\":\"integer\",\"description\":\"Max results (1-50, default 10)\"}},\"required\":[\"query\"]}", .execute = tool_arxiv_search },
+    { .name = "arxiv_ingest", .description = "Download an arXiv paper by ID and ingest it into the knowledge base. Extracts text, splits into pages, indexes for search.", .input_schema_json = "{\"type\":\"object\",\"properties\":{\"arxiv_id\":{\"type\":\"string\",\"description\":\"arXiv paper ID (e.g. '2305.10601' or '2401.18059')\"},\"title\":{\"type\":\"string\",\"description\":\"Paper title (auto-detected if omitted)\"}},\"required\":[\"arxiv_id\"]}", .execute = tool_arxiv_ingest },
+    { .name = "kb_deep_search", .description = "Hierarchical 3-level retrieval across the knowledge base. Level 1: document keyword match (coarse). Level 2: page-level FTS5 BM25 with snippets. Level 3: chunk-level (256-word passages with overlap) FTS5 BM25 for precise passage extraction. Searches 380+ documents, 10K+ pages, 28K+ chunks.", .input_schema_json = "{\"type\":\"object\",\"properties\":{\"query\":{\"type\":\"string\",\"description\":\"Search query\"},\"limit\":{\"type\":\"integer\",\"description\":\"Results per level (default 5)\"},\"depth\":{\"type\":\"integer\",\"description\":\"1=docs only, 2=docs+pages, 3=docs+pages+chunks (default 3)\"}},\"required\":[\"query\"]}", .execute = tool_kb_deep_search },
+    /* ── Systematic Strategy Engines ─────────────────────────────────── */
+    { .name = "strat_completeness", .description = "COMPLETENESS ARBITRAGE SCANNER: Checks if all mutually-exclusive outcomes in bracket markets sum to < $1.00. If so, buying one of each is riskless profit. Scans Kalshi BTC/ETH/SPY brackets + Polymarket multi-outcome events.", .input_schema_json = "{\"type\":\"object\",\"properties\":{\"series\":{\"type\":\"string\",\"description\":\"Kalshi series ticker to scan (default: KXBTC). Try: KXBTC, KXETH, KXSPY, KXFED\"}}}", .execute = tool_strat_completeness },
+    { .name = "strat_binary_fade", .description = "BINARY FADE STRATEGY: Exploits LLM acquiescence bias (Schoenegger et al. 2024). LLMs over-predict YES on binary questions → crypto 5m/15m markets are biased. Fade YES >60%%, buy YES <40%%. Returns current crypto binaries with fade signals.", .input_schema_json = "{\"type\":\"object\",\"properties\":{\"high_threshold\":{\"type\":\"number\",\"description\":\"Sell YES above this (default 0.60)\"},\"low_threshold\":{\"type\":\"number\",\"description\":\"Buy YES below this (default 0.40)\"},\"limit\":{\"type\":\"integer\",\"description\":\"Markets to scan (default 20)\"}}}", .execute = tool_strat_binary_fade },
+    { .name = "strat_stale_snipe", .description = "STALE ORDER SNIPER: Near-expiry CLOB markets have stale limit orders from inactive market makers. Compares resting order prices to real-time reference price. Academic basis: Chen & Pennock LMSR convergence vs CLOB lag.", .input_schema_json = "{\"type\":\"object\",\"properties\":{\"series\":{\"type\":\"string\",\"description\":\"Kalshi series (default: KXBTC). Try: KXBTC, KXETH, KXSPY\"},\"limit\":{\"type\":\"integer\",\"description\":\"Events to scan (default 10)\"}}}", .execute = tool_strat_stale_snipe },
+    { .name = "strat_kelly", .description = "KELLY CRITERION CALCULATOR: Given true probability and market price, computes optimal bet size. Returns full/half/quarter/confidence-adjusted Kelly, contract count, max loss, max win. Use after identifying an edge with other strat_ tools.", .input_schema_json = "{\"type\":\"object\",\"properties\":{\"true_prob\":{\"type\":\"number\",\"description\":\"Your estimated true probability (0-1)\"},\"market_price\":{\"type\":\"number\",\"description\":\"Current market YES price (0-1)\"},\"bankroll\":{\"type\":\"number\",\"description\":\"Total bankroll in USD (default 1000)\"},\"confidence\":{\"type\":\"number\",\"description\":\"Confidence in your estimate 0-1 (default 0.5, scales Kelly down)\"},\"side\":{\"type\":\"string\",\"description\":\"Force YES or NO side\"}},\"required\":[\"true_prob\",\"market_price\"]}", .execute = tool_strat_kelly },
+    { .name = "strat_spread_scan", .description = "SPREAD SCANNER: Finds markets with widest bid-ask spreads for market-making opportunities. Wide spread = place limit orders on both sides to earn the spread. Returns markets from both Polymarket and Kalshi.", .input_schema_json = "{\"type\":\"object\",\"properties\":{\"limit\":{\"type\":\"integer\",\"description\":\"Markets to scan per platform (default 20)\"},\"category\":{\"type\":\"string\",\"description\":\"Filter: politics, sports, crypto, entertainment\"}}}", .execute = tool_strat_spread_scan },
     /* Polymarket Prediction Markets (public, no auth) */
     { .name = "polymarket_markets", .description = "List/filter Polymarket prediction markets. Returns question, outcomes, volume, liquidity. No auth.", .input_schema_json = "{\"type\":\"object\",\"properties\":{\"tag\":{\"type\":\"string\",\"description\":\"Filter by tag (politics, sports, crypto)\"},\"active\":{\"type\":\"string\",\"description\":\"true/false\"},\"limit\":{\"type\":\"integer\",\"description\":\"Max results 1-100\"},\"offset\":{\"type\":\"integer\",\"description\":\"Pagination offset\"}}}", .execute = tool_polymarket_markets },
-    { .name = "polymarket_events", .description = "Get Polymarket events (grouped markets). No auth.", .input_schema_json = "{\"type\":\"object\",\"properties\":{\"id\":{\"type\":\"string\",\"description\":\"Event ID\"},\"slug\":{\"type\":\"string\",\"description\":\"Event slug\"},\"limit\":{\"type\":\"integer\",\"description\":\"Max results\"}}}", .execute = tool_polymarket_events },
+    { .name = "polymarket_events", .description = "Browse Polymarket events by category/tag. Tags: Geopolitics, Iran, Ukraine, Crypto, Politics, Sports, Oil, Israel, Gaza, Elections, Culture, Weather, NBA, Soccer, Trump. No auth.", .input_schema_json = "{\"type\":\"object\",\"properties\":{\"id\":{\"type\":\"string\",\"description\":\"Event ID\"},\"slug\":{\"type\":\"string\",\"description\":\"Event slug\"},\"tag\":{\"type\":\"string\",\"description\":\"Category tag (Geopolitics, Iran, Crypto, Politics, Sports, Oil, Ukraine, Elections, Culture, Weather, etc)\"},\"limit\":{\"type\":\"integer\",\"description\":\"Max results 1-100 (default 20)\"},\"offset\":{\"type\":\"integer\",\"description\":\"Pagination offset\"}}}", .execute = tool_polymarket_events },
+    { .name = "polymarket_categories", .description = "List all Polymarket market categories/tags with event counts. Shows what topics are available for browsing.", .input_schema_json = "{\"type\":\"object\",\"properties\":{}}", .execute = tool_polymarket_categories },
     { .name = "polymarket_prices", .description = "Get midpoint prices for a Polymarket token. No auth.", .input_schema_json = "{\"type\":\"object\",\"properties\":{\"token_id\":{\"type\":\"string\",\"description\":\"Token ID\"},\"condition_id\":{\"type\":\"string\",\"description\":\"Condition ID\"}}}", .execute = tool_polymarket_prices },
     { .name = "polymarket_book", .description = "Get order book for a Polymarket token. No auth.", .input_schema_json = "{\"type\":\"object\",\"properties\":{\"token_id\":{\"type\":\"string\",\"description\":\"Token ID\"}},\"required\":[\"token_id\"]}", .execute = tool_polymarket_book },
     { .name = "polymarket_trades", .description = "Get recent Polymarket trades. Filter by condition or wallet. No auth.", .input_schema_json = "{\"type\":\"object\",\"properties\":{\"condition_id\":{\"type\":\"string\",\"description\":\"Condition ID\"},\"maker\":{\"type\":\"string\",\"description\":\"Wallet address\"},\"limit\":{\"type\":\"integer\",\"description\":\"Max trades 1-500\"}}}", .execute = tool_polymarket_trades },
@@ -12298,15 +12552,77 @@ static const tool_def_t s_tools[] = {
     { .name = "kalshi_orderbook", .description = "Get Kalshi order book for a market. Shows yes/no bid depth. No auth.", .input_schema_json = "{\"type\":\"object\",\"properties\":{\"ticker\":{\"type\":\"string\",\"description\":\"Market ticker\"},\"depth\":{\"type\":\"integer\",\"description\":\"Book depth (default 5)\"}},\"required\":[\"ticker\"]}", .execute = tool_kalshi_orderbook },
     { .name = "kalshi_trades", .description = "Get recent Kalshi trades. Filter by market ticker. No auth.", .input_schema_json = "{\"type\":\"object\",\"properties\":{\"ticker\":{\"type\":\"string\",\"description\":\"Market ticker to filter\"},\"limit\":{\"type\":\"integer\",\"description\":\"Max trades (1-1000, default 20)\"}}}", .execute = tool_kalshi_trades },
     { .name = "kalshi_series", .description = "Get Kalshi series template info (recurring market blueprints). No auth.", .input_schema_json = "{\"type\":\"object\",\"properties\":{\"ticker\":{\"type\":\"string\",\"description\":\"Series ticker (e.g. KXBTC, KXFED)\"}},\"required\":[\"ticker\"]}", .execute = tool_kalshi_series },
-    { .name = "kalshi_search", .description = "Search Kalshi open events. Returns events with nested markets, odds, volume. No auth.", .input_schema_json = "{\"type\":\"object\",\"properties\":{\"query\":{\"type\":\"string\",\"description\":\"Search term\"},\"limit\":{\"type\":\"integer\",\"description\":\"Max events (1-200, default 20)\"}},\"required\":[\"query\"]}", .execute = tool_kalshi_search },
+    { .name = "kalshi_search", .description = "Search Kalshi open events with client-side keyword filtering. Returns only matching events. Supports series_ticker for direct API filter (KXTEMP, KXBTC, KXFED). No auth.", .input_schema_json = "{\"type\":\"object\",\"properties\":{\"query\":{\"type\":\"string\",\"description\":\"Search term (matched case-insensitive against event title/category)\"},\"limit\":{\"type\":\"integer\",\"description\":\"Max matched events (1-200, default 20)\"},\"series_ticker\":{\"type\":\"string\",\"description\":\"Series filter (KXTEMP=temp, KXRAIN=rain, KXSNOW=snow, KXBTC=bitcoin, KXFED=fed)\"}},\"required\":[\"query\"]}", .execute = tool_kalshi_search },
     { .name = "kalshi_candlesticks", .description = "Get Kalshi price history candles for a market. Intervals: 1 (1min), 60 (1hr), 1440 (1day). No auth.", .input_schema_json = "{\"type\":\"object\",\"properties\":{\"ticker\":{\"type\":\"string\",\"description\":\"Market ticker\"},\"interval\":{\"type\":\"string\",\"description\":\"Period: 1, 60, or 1440 minutes\"}},\"required\":[\"ticker\"]}", .execute = tool_kalshi_candlesticks },
+    { .name = "kalshi_weather", .description = "All Kalshi weather prediction markets: temperature highs/lows, rainfall, snowfall, hurricanes. Aggregates from series KXTEMP, KXRAIN, KXSNOW, KXHURR, KXHIGH, KXLOW + keyword scan. Filter by city. No auth.", .input_schema_json = "{\"type\":\"object\",\"properties\":{\"city\":{\"type\":\"string\",\"description\":\"City name filter (e.g. New York, Chicago, Miami)\"},\"limit\":{\"type\":\"integer\",\"description\":\"Max results (default 30)\"}}}", .execute = tool_kalshi_weather },
+    { .name = "kalshi_market_snapshot", .description = "Deep dive on a single Kalshi market: full details + orderbook (depth 10) + recent 20 trades + hourly candlesticks in one call.", .input_schema_json = "{\"type\":\"object\",\"properties\":{\"ticker\":{\"type\":\"string\",\"description\":\"Market ticker (e.g. KXBTC-26MAR14)\"}},\"required\":[\"ticker\"]}", .execute = tool_kalshi_market_snapshot },
+    { .name = "kalshi_event_detail", .description = "Get a specific Kalshi event with ALL its nested markets. Use for multi-outcome events (e.g. Fed rate decisions, elections with multiple candidates).", .input_schema_json = "{\"type\":\"object\",\"properties\":{\"event_ticker\":{\"type\":\"string\",\"description\":\"Event ticker (e.g. KXFED-26MAR, KXNEWPOPE)\"}},\"required\":[\"event_ticker\"]}", .execute = tool_kalshi_event_detail },
+    { .name = "kalshi_daily_markets", .description = "List Kalshi markets sorted by close time (nearest first). Filter by series for daily/weekly resolvers (e.g. KXBTC for Bitcoin, KXSPY for S&P). For systematic daily trading.", .input_schema_json = "{\"type\":\"object\",\"properties\":{\"series_ticker\":{\"type\":\"string\",\"description\":\"Series ticker filter (e.g. KXBTC, KXSPY, KXETH, KXFED)\"},\"limit\":{\"type\":\"integer\",\"description\":\"Max results 1-200 (default 50)\"}}}", .execute = tool_kalshi_daily_markets },
+    { .name = "cross_platform_delta", .description = "World 1 → World 2 mapper. Fetches Polymarket + Kalshi markets for a topic and computes price deltas. Positive delta = Polymarket prices higher. Spreads > 3c are actionable arbs.", .input_schema_json = "{\"type\":\"object\",\"properties\":{\"topic\":{\"type\":\"string\",\"description\":\"Topic to match across platforms (e.g. Iran, Bitcoin, Fed, oil)\"},\"limit\":{\"type\":\"integer\",\"description\":\"Markets per platform (default 20)\"}},\"required\":[\"topic\"]}", .execute = tool_cross_platform_delta },
+    { .name = "market_movers", .description = "What's moving RIGHT NOW across both Polymarket and Kalshi. Returns top markets by 24h volume from Polymarket + active markets from key Kalshi series (BTC, SPY, ETH, Fed, CPI, GDP, oil, weather). One call, both platforms.", .input_schema_json = "{\"type\":\"object\",\"properties\":{\"limit\":{\"type\":\"integer\",\"description\":\"Max Polymarket results (default 15)\"}}}", .execute = tool_market_movers },
+    { .name = "market_cache_refresh", .description = "Bulk-fetch and cache ALL active markets from Polymarket + Kalshi into local SQLite. Saves ~100 Polymarket markets + ~200 Kalshi daily resolvers. Use before running compound queries to avoid per-call API costs.", .input_schema_json = "{\"type\":\"object\",\"properties\":{}}", .execute = tool_market_cache_refresh },
+    { .name = "market_cache_query", .description = "Query locally cached market data. No API calls. Keys: pm:markets:top100, pm:events:top100, ka:events:open100, ka:markets:daily200. List all keys with no args.", .input_schema_json = "{\"type\":\"object\",\"properties\":{\"key\":{\"type\":\"string\",\"description\":\"Cache key to retrieve\"},\"platform\":{\"type\":\"string\",\"description\":\"Filter keys by platform (polymarket/kalshi)\"},\"ttl\":{\"type\":\"integer\",\"description\":\"Max age in seconds (default 300)\"}}}", .execute = tool_market_cache_query },
+    /* ── Historical / Resolved Markets (backtesting) ───────────────────── */
+    { .name = "kalshi_historical_markets", .description = "Kalshi settled markets with resolution outcomes. Fields: result (yes/no), settlement_value_dollars, settlement_ts, volume_fp. For backtesting systematic strategies. Cursor-paginated.", .input_schema_json = "{\"type\":\"object\",\"properties\":{\"series_ticker\":{\"type\":\"string\",\"description\":\"Filter by series (KXBTC, KXSPY, KXFED, KXCPI, etc)\"},\"limit\":{\"type\":\"integer\",\"description\":\"Max results 1-200 (default 50)\"},\"cursor\":{\"type\":\"string\",\"description\":\"Pagination cursor from previous response\"}}}", .execute = tool_kalshi_historical_markets },
+    { .name = "kalshi_historical_trades", .description = "Kalshi historical trade execution data. Fields: yes_price_dollars, no_price_dollars, taker_side, count_fp, created_time. For reconstructing price history and market microstructure.", .input_schema_json = "{\"type\":\"object\",\"properties\":{\"ticker\":{\"type\":\"string\",\"description\":\"Filter by market ticker\"},\"limit\":{\"type\":\"integer\",\"description\":\"Max results 1-1000 (default 100)\"},\"cursor\":{\"type\":\"string\",\"description\":\"Pagination cursor\"}}}", .execute = tool_kalshi_historical_trades },
+    { .name = "kalshi_historical_cutoff", .description = "Get Kalshi historical data cutoff timestamps. Shows boundary between live and historical API endpoints.", .input_schema_json = "{\"type\":\"object\",\"properties\":{}}", .execute = tool_kalshi_historical_cutoff },
+    { .name = "polymarket_resolved", .description = "Polymarket resolved markets from CLOB API. 4.5 years of history (Oct 2021+). Each market has tokens[].winner flag for ground truth. 1000 markets per page.", .input_schema_json = "{\"type\":\"object\",\"properties\":{\"limit\":{\"type\":\"integer\",\"description\":\"Max results 1-1000 (default 100)\"},\"offset\":{\"type\":\"integer\",\"description\":\"Pagination offset\"}}}", .execute = tool_polymarket_resolved },
+    { .name = "polymarket_resolved_events", .description = "Polymarket resolved events sorted by volume. Includes 2024 Presidential Election ($3.7B), Super Bowl, NBA Finals, etc. Each event has nested markets with outcomes.", .input_schema_json = "{\"type\":\"object\",\"properties\":{\"limit\":{\"type\":\"integer\",\"description\":\"Max results 1-100 (default 20)\"},\"offset\":{\"type\":\"integer\",\"description\":\"Pagination offset\"}}}", .execute = tool_polymarket_resolved_events },
+    { .name = "historical_cross_platform", .description = "Resolved markets from BOTH platforms for a topic. Use for backtesting cross-platform strategies — see how similar events resolved on Kalshi vs Polymarket. Includes analysis guide for interpreting outcomes.", .input_schema_json = "{\"type\":\"object\",\"properties\":{\"topic\":{\"type\":\"string\",\"description\":\"Topic to search (e.g. bitcoin, election, Fed, Iran). Empty = top by volume\"},\"limit\":{\"type\":\"integer\",\"description\":\"Max per platform (default 20)\"}}}", .execute = tool_historical_cross_platform },
+    /* ── Systematic Trading Engine ─────────────────────────────────────── */
+    { .name = "systematic_ingest_polymarket", .description = "Ingest Polymarket resolved markets into local SQLite for systematic analysis. Fetches 1000 markets/page. Categories auto-classified: sports, crypto, macro, politics, geopolitics, weather.", .input_schema_json = "{\"type\":\"object\",\"properties\":{\"pages\":{\"type\":\"integer\",\"description\":\"Pages to fetch (1000 markets each, default 5, max 50)\"}}}", .execute = tool_systematic_ingest_polymarket },
+    { .name = "systematic_ingest_kalshi", .description = "Ingest Kalshi historical settled markets into local SQLite. Auto-extracts series, category, settlement values. Cursor-paginated.", .input_schema_json = "{\"type\":\"object\",\"properties\":{\"pages\":{\"type\":\"integer\",\"description\":\"Pages to fetch (200 markets each, default 10, max 20)\"}}}", .execute = tool_systematic_ingest_kalshi },
+    { .name = "systematic_analytics", .description = "Compute base rates, category breakdowns, series statistics from ingested historical data. Shows yes_rate by category, Kalshi series performance, date ranges. Foundation for signal generation.", .input_schema_json = "{\"type\":\"object\",\"properties\":{\"category\":{\"type\":\"string\",\"description\":\"Filter to specific category (sports_nba, crypto_btc, macro_fed, etc)\"},\"platform\":{\"type\":\"string\",\"description\":\"Filter by platform\"}}}", .execute = tool_systematic_analytics },
+    { .name = "systematic_signals", .description = "Generate trading signals from historical base rates + live market data. Strategies: mean_reversion (price vs base rate), cross_platform_arb (price spread), calendar_spread (term structure), momentum (24h change). Requires ingested data.", .input_schema_json = "{\"type\":\"object\",\"properties\":{}}", .execute = tool_systematic_signals },
     /* ── Cross-Platform Prediction Intelligence ─────────────────────────── */
-    { .name = "prediction_scan", .description = "Scan BOTH Polymarket AND Kalshi simultaneously for a topic. Returns merged results from both platforms for comparison and arbitrage detection.", .input_schema_json = "{\"type\":\"object\",\"properties\":{\"query\":{\"type\":\"string\",\"description\":\"Topic to scan (e.g. Fed rate, election, Bitcoin)\"},\"limit\":{\"type\":\"integer\",\"description\":\"Max per platform (default 5)\"}},\"required\":[\"query\"]}", .execute = tool_prediction_scan },
+    { .name = "prediction_scan", .description = "Scan BOTH Polymarket AND Kalshi simultaneously for a topic. Returns keyword-filtered results from both platforms. Kalshi results are client-side filtered by the query keyword.", .input_schema_json = "{\"type\":\"object\",\"properties\":{\"query\":{\"type\":\"string\",\"description\":\"Topic to scan (e.g. Fed rate, election, Bitcoin, weather)\"},\"limit\":{\"type\":\"integer\",\"description\":\"Max per platform (default 5)\"}},\"required\":[\"query\"]}", .execute = tool_prediction_scan },
+    { .name = "prediction_weather", .description = "Weather prediction markets from BOTH Polymarket AND Kalshi. Aggregates temperature, rainfall, snowfall, hurricane markets. Filter by city. Use for weather arb hunting.", .input_schema_json = "{\"type\":\"object\",\"properties\":{\"city\":{\"type\":\"string\",\"description\":\"City filter (e.g. New York, Chicago, Miami)\"},\"limit\":{\"type\":\"integer\",\"description\":\"Max per platform (default 20)\"}},\"required\":[]}", .execute = tool_prediction_weather },
     { .name = "prediction_snapshot", .description = "Real-time dashboard of top prediction markets across Polymarket + Kalshi by volume. Shows odds, volume, liquidity across both platforms.", .input_schema_json = "{\"type\":\"object\",\"properties\":{\"limit\":{\"type\":\"integer\",\"description\":\"Markets per platform (default 5)\"},\"category\":{\"type\":\"string\",\"description\":\"Filter category (politics, sports, crypto, entertainment)\"}}}", .execute = tool_prediction_snapshot },
     { .name = "prediction_arb", .description = "Cross-platform arbitrage detector. Fetches Polymarket + Kalshi markets for a topic, returns both datasets with arb detection rules. Identifies within-market (YES+NO<$1), cross-platform, and combinatorial arbitrage. No auth.", .input_schema_json = "{\"type\":\"object\",\"properties\":{\"topic\":{\"type\":\"string\",\"description\":\"Market topic (bitcoin, election, Fed rate, sports)\"},\"limit\":{\"type\":\"integer\",\"description\":\"Markets per platform to scan (default 10)\"}}}", .execute = tool_prediction_arb },
+    { .name = "prediction_semantic_match", .description = "SEMANTIC market matcher: uses TF-IDF cosine similarity to find markets across Polymarket and Kalshi that describe the SAME underlying event in different language. Extracts numerical entities (prices, dates, thresholds) for strike-level comparison. Detects arbs that ticker-matching misses.", .input_schema_json = "{\"type\":\"object\",\"properties\":{\"topic\":{\"type\":\"string\",\"description\":\"Topic to scan (leave empty for top markets)\"},\"threshold\":{\"type\":\"number\",\"description\":\"Min similarity score 0-1 (default 0.3, lower=more matches)\"},\"limit\":{\"type\":\"integer\",\"description\":\"Markets per platform to index (default 15)\"}}}", .execute = tool_prediction_semantic_match },
     { .name = "polymarket_whale_trades", .description = "Detect whale trades on Polymarket. Large transactions above threshold with trader wallet, market, price, size. No auth.", .input_schema_json = "{\"type\":\"object\",\"properties\":{\"min_size_usd\":{\"type\":\"number\",\"description\":\"Min trade size in USD (default 10000)\"},\"condition_id\":{\"type\":\"string\",\"description\":\"Filter to specific market\"},\"limit\":{\"type\":\"integer\",\"description\":\"Max trades to scan (default 50)\"}}}", .execute = tool_polymarket_whale_trades },
     { .name = "polymarket_leaderboard", .description = "Top Polymarket traders by profit. Shows wallet, PnL, volume, win rate. No auth.", .input_schema_json = "{\"type\":\"object\",\"properties\":{\"limit\":{\"type\":\"integer\",\"description\":\"Number of traders (default 10)\"}}}", .execute = tool_polymarket_leaderboard },
     { .name = "polymarket_history", .description = "Price history for a Polymarket token. Returns time-series of YES/NO prices. No auth.", .input_schema_json = "{\"type\":\"object\",\"properties\":{\"token_id\":{\"type\":\"string\",\"description\":\"Token ID\"},\"condition_id\":{\"type\":\"string\",\"description\":\"Condition ID\"},\"interval\":{\"type\":\"string\",\"description\":\"all, 1d, 1w, 1m\"},\"fidelity\":{\"type\":\"string\",\"description\":\"Minutes between data points\"}}}", .execute = tool_polymarket_history },
+
+    /* ══════════════════════════════════════════════════════════════════════
+     *  AUTHENTICATED TRADING — Kalshi + Polymarket
+     * ══════════════════════════════════════════════════════════════════════ */
+
+    /* ── Kalshi Authenticated Trading ────────────────────────────────────── */
+    { .name = "kalshi_balance", .description = "Get Kalshi account balance and portfolio value in USD. Requires KALSHI_API_KEY + KALSHI_RSA_PRIVATE_KEY_PATH.", .input_schema_json = "{\"type\":\"object\",\"properties\":{}}", .execute = tool_kalshi_balance },
+    { .name = "kalshi_positions", .description = "Get current Kalshi positions. Filter by ticker or event. Requires auth.", .input_schema_json = "{\"type\":\"object\",\"properties\":{\"ticker\":{\"type\":\"string\",\"description\":\"Filter by market ticker\"},\"event_ticker\":{\"type\":\"string\",\"description\":\"Filter by event ticker\"},\"limit\":{\"type\":\"integer\",\"description\":\"Max positions (default 100)\"}}}", .execute = tool_kalshi_positions },
+    { .name = "kalshi_portfolio", .description = "Full Kalshi portfolio: balance + all positions in one call. Requires auth.", .input_schema_json = "{\"type\":\"object\",\"properties\":{}}", .execute = tool_kalshi_portfolio },
+    { .name = "kalshi_fills", .description = "Get Kalshi trade fills (executed matches). Filter by ticker, order ID, time range. Requires auth.", .input_schema_json = "{\"type\":\"object\",\"properties\":{\"ticker\":{\"type\":\"string\",\"description\":\"Filter by market ticker\"},\"order_id\":{\"type\":\"string\",\"description\":\"Filter by order ID\"},\"limit\":{\"type\":\"integer\",\"description\":\"Max fills (default 100)\"}}}", .execute = tool_kalshi_fills },
+    { .name = "kalshi_create_order", .description = "Place an order on Kalshi. Requires auth. dry_run=true by default (set DSCO_TRADING_DRY_RUN=0 for live). Prices in cents (1-99).", .input_schema_json = "{\"type\":\"object\",\"properties\":{\"ticker\":{\"type\":\"string\",\"description\":\"Market ticker (required)\"},\"action\":{\"type\":\"string\",\"description\":\"buy or sell (required)\"},\"side\":{\"type\":\"string\",\"description\":\"yes or no (required)\"},\"count\":{\"type\":\"integer\",\"description\":\"Number of contracts (required)\"},\"type\":{\"type\":\"string\",\"description\":\"limit or market (default: limit)\"},\"yes_price\":{\"type\":\"integer\",\"description\":\"Price in cents 1-99 (required for limit orders)\"},\"time_in_force\":{\"type\":\"string\",\"description\":\"good_till_canceled, fill_or_kill, immediate_or_cancel\"}},\"required\":[\"ticker\",\"action\",\"side\",\"count\"]}", .execute = tool_kalshi_create_order },
+    { .name = "kalshi_batch_create_orders", .description = "Place up to 20 orders on Kalshi in one request. Requires auth.", .input_schema_json = "{\"type\":\"object\",\"properties\":{\"orders\":{\"type\":\"string\",\"description\":\"JSON array of order objects, each with ticker/action/side/count/yes_price\"}},\"required\":[\"orders\"]}", .execute = tool_kalshi_batch_create_orders },
+    { .name = "kalshi_cancel_order", .description = "Cancel a Kalshi order by ID. Requires auth.", .input_schema_json = "{\"type\":\"object\",\"properties\":{\"order_id\":{\"type\":\"string\",\"description\":\"Order ID to cancel\"}},\"required\":[\"order_id\"]}", .execute = tool_kalshi_cancel_order },
+    { .name = "kalshi_cancel_all", .description = "Cancel all open Kalshi orders. Requires auth.", .input_schema_json = "{\"type\":\"object\",\"properties\":{}}", .execute = tool_kalshi_cancel_all },
+    { .name = "kalshi_amend_order", .description = "Amend a Kalshi order (change count or price). Requires auth.", .input_schema_json = "{\"type\":\"object\",\"properties\":{\"order_id\":{\"type\":\"string\",\"description\":\"Order ID to amend\"},\"count\":{\"type\":\"integer\",\"description\":\"New contract count\"},\"price\":{\"type\":\"integer\",\"description\":\"New price in cents 1-99\"}},\"required\":[\"order_id\"]}", .execute = tool_kalshi_amend_order },
+    { .name = "kalshi_open_orders", .description = "List all open (resting) Kalshi orders. Requires auth.", .input_schema_json = "{\"type\":\"object\",\"properties\":{\"ticker\":{\"type\":\"string\",\"description\":\"Filter by market ticker\"},\"limit\":{\"type\":\"integer\",\"description\":\"Max orders (default 100)\"}}}", .execute = tool_kalshi_open_orders },
+
+    /* ── Polymarket Authenticated Trading ─────────────────────────────────── */
+    { .name = "polymarket_balance_auth", .description = "Get Polymarket USDC balance and token allowances. Requires POLYMARKET_API_KEY + POLYMARKET_API_SECRET + POLYMARKET_PASSPHRASE.", .input_schema_json = "{\"type\":\"object\",\"properties\":{}}", .execute = tool_polymarket_balance },
+    { .name = "polymarket_positions_auth", .description = "Get current Polymarket positions for your wallet.", .input_schema_json = "{\"type\":\"object\",\"properties\":{\"limit\":{\"type\":\"integer\",\"description\":\"Max positions (default 50)\"}}}", .execute = tool_polymarket_positions },
+    { .name = "polymarket_open_orders_auth", .description = "List open Polymarket orders. Requires auth.", .input_schema_json = "{\"type\":\"object\",\"properties\":{\"market\":{\"type\":\"string\",\"description\":\"Filter by condition ID\"},\"asset_id\":{\"type\":\"string\",\"description\":\"Filter by token ID\"}}}", .execute = tool_polymarket_open_orders },
+    { .name = "polymarket_api_keys_auth", .description = "List Polymarket CLOB API keys. Requires auth.", .input_schema_json = "{\"type\":\"object\",\"properties\":{}}", .execute = tool_polymarket_api_keys },
+    { .name = "polymarket_derive_api_key", .description = "Derive/create Polymarket CLOB API credentials from wallet. Requires POLYMARKET_PRIVATE_KEY.", .input_schema_json = "{\"type\":\"object\",\"properties\":{}}", .execute = tool_polymarket_derive_api_key },
+    { .name = "polymarket_create_order", .description = "Place an order on Polymarket CLOB. Requires auth + private key for signing. dry_run=true by default.", .input_schema_json = "{\"type\":\"object\",\"properties\":{\"token_id\":{\"type\":\"string\",\"description\":\"Outcome token ID (required)\"},\"side\":{\"type\":\"string\",\"description\":\"buy or sell (required)\"},\"price\":{\"type\":\"number\",\"description\":\"Price 0.01-0.99 (required)\"},\"size\":{\"type\":\"number\",\"description\":\"Amount in USDC (required)\"},\"order_type\":{\"type\":\"string\",\"description\":\"GTC, FOK, GTD, FAK (default: GTC)\"}},\"required\":[\"token_id\",\"side\",\"price\",\"size\"]}", .execute = tool_polymarket_create_order },
+    { .name = "polymarket_cancel_order_auth", .description = "Cancel a Polymarket order by ID. Requires auth.", .input_schema_json = "{\"type\":\"object\",\"properties\":{\"order_id\":{\"type\":\"string\",\"description\":\"Order ID to cancel\"}},\"required\":[\"order_id\"]}", .execute = tool_polymarket_cancel_order },
+    { .name = "polymarket_cancel_all_auth", .description = "Cancel all open Polymarket orders. Requires auth.", .input_schema_json = "{\"type\":\"object\",\"properties\":{}}", .execute = tool_polymarket_cancel_all },
+
+    /* ── Polymarket Relayer (gasless transactions) ─────────────────────────── */
+    { .name = "polymarket_relayer_deploy", .description = "Deploy a Safe or Proxy wallet via Polymarket relayer (gasless). Requires POLYMARKET_RELAYER_API_KEY or POLY_BUILDER_API_KEY.", .input_schema_json = "{\"type\":\"object\",\"properties\":{}}", .execute = tool_polymarket_relayer_deploy },
+    { .name = "polymarket_relayer_approve", .description = "Approve token spending via Polymarket relayer (gasless). Approves USDC for CTF exchange by default.", .input_schema_json = "{\"type\":\"object\",\"properties\":{\"token\":{\"type\":\"string\",\"description\":\"Token contract address (default: USDC)\"},\"spender\":{\"type\":\"string\",\"description\":\"Spender address (default: CTF exchange)\"}}}", .execute = tool_polymarket_relayer_approve },
+    { .name = "polymarket_relayer_execute", .description = "Execute arbitrary transaction via Polymarket relayer (gasless). Polymarket pays gas.", .input_schema_json = "{\"type\":\"object\",\"properties\":{\"to\":{\"type\":\"string\",\"description\":\"Target contract address\"},\"data\":{\"type\":\"string\",\"description\":\"Hex-encoded calldata\"},\"value\":{\"type\":\"string\",\"description\":\"POL to send (usually 0)\"},\"description\":{\"type\":\"string\",\"description\":\"Human-readable tx description\"}},\"required\":[\"to\",\"data\"]}", .execute = tool_polymarket_relayer_execute },
+    { .name = "polymarket_relayer_status", .description = "Check status of a relayer transaction (NEW/EXECUTED/MINED/CONFIRMED/FAILED).", .input_schema_json = "{\"type\":\"object\",\"properties\":{\"tx_id\":{\"type\":\"string\",\"description\":\"Relayer transaction ID\"}},\"required\":[\"tx_id\"]}", .execute = tool_polymarket_relayer_status },
+
+    /* ── Cross-Platform Arbitrage & Portfolio ──────────────────────────────── */
+    { .name = "arb_execute", .description = "Execute a cross-platform arbitrage trade. Places matching orders on both Kalshi and Polymarket simultaneously. dry_run=true by default.", .input_schema_json = "{\"type\":\"object\",\"properties\":{\"kalshi_ticker\":{\"type\":\"string\",\"description\":\"Kalshi market ticker\"},\"kalshi_side\":{\"type\":\"string\",\"description\":\"yes or no\"},\"kalshi_price\":{\"type\":\"integer\",\"description\":\"Kalshi price in cents 1-99\"},\"kalshi_count\":{\"type\":\"integer\",\"description\":\"Kalshi contract count\"},\"poly_token_id\":{\"type\":\"string\",\"description\":\"Polymarket token ID\"},\"poly_side\":{\"type\":\"string\",\"description\":\"buy or sell\"},\"poly_price\":{\"type\":\"number\",\"description\":\"Polymarket price 0.01-0.99\"},\"poly_size\":{\"type\":\"number\",\"description\":\"Polymarket USDC amount\"}},\"required\":[\"kalshi_ticker\",\"kalshi_side\",\"kalshi_price\",\"kalshi_count\",\"poly_token_id\",\"poly_side\",\"poly_price\",\"poly_size\"]}", .execute = tool_arb_execute },
+    { .name = "arb_monitor", .description = "Monitor cross-platform arbitrage opportunities. Scans Polymarket + Kalshi for price divergences above min spread threshold.", .input_schema_json = "{\"type\":\"object\",\"properties\":{\"topic\":{\"type\":\"string\",\"description\":\"Topic to scan (default: top markets)\"},\"limit\":{\"type\":\"integer\",\"description\":\"Markets per platform (default 10)\"},\"min_spread\":{\"type\":\"number\",\"description\":\"Min spread to report (default: from risk config)\"}}}", .execute = tool_arb_monitor },
+    { .name = "portfolio_cross", .description = "Unified portfolio view across Kalshi + Polymarket. Shows balance, positions, and total exposure on both platforms.", .input_schema_json = "{\"type\":\"object\",\"properties\":{}}", .execute = tool_portfolio_cross },
+    { .name = "risk_check", .description = "Pre-flight risk check for a proposed trade. Returns pass/fail with reason.", .input_schema_json = "{\"type\":\"object\",\"properties\":{\"platform\":{\"type\":\"string\",\"description\":\"kalshi or polymarket\"},\"amount_usd\":{\"type\":\"number\",\"description\":\"Order size in USD\"}},\"required\":[\"platform\",\"amount_usd\"]}", .execute = tool_risk_check },
+    { .name = "risk_configure", .description = "View or update trading risk limits. All fields optional — only updates provided values.", .input_schema_json = "{\"type\":\"object\",\"properties\":{\"max_order_usd\":{\"type\":\"number\",\"description\":\"Max single order USD\"},\"max_position_usd\":{\"type\":\"number\",\"description\":\"Max single position USD\"},\"max_total_exposure_usd\":{\"type\":\"number\",\"description\":\"Max total exposure USD\"},\"min_arb_spread\":{\"type\":\"number\",\"description\":\"Min arb spread (e.g. 0.03)\"},\"max_open_orders\":{\"type\":\"integer\",\"description\":\"Max concurrent orders\"},\"dry_run\":{\"type\":\"boolean\",\"description\":\"true=simulate, false=live trading\"}}}", .execute = tool_risk_configure },
+
     {
         .name = "mapbox_geocode",
         .description = "Geocode an address or place name to coordinates using Mapbox. Requires MAPBOX_API_KEY.",
@@ -12577,6 +12893,14 @@ static const tool_def_t s_tools[] = {
         .input_schema_json = "{\"type\":\"object\",\"properties\":{\"reason\":{\"type\":\"string\",\"description\":\"Brief reason for exit (e.g. user requested, task complete)\"}}}",
         .execute = tool_self_exit
     },
+
+    /* ── Tool discovery (lazy loading) ────────────────────────────────── */
+    {
+        .name = "discover_tools",
+        .description = "List all available tools organized by category. Use this when you need a tool that isn't in your current tool list. Call with optional category filter (file_io, git, network, shell, code, crypto, swarm, ast, pipeline, math, search, general, finance, prediction, memory). After discovering a tool name, you can call it directly on the next turn.",
+        .input_schema_json = "{\"type\":\"object\",\"properties\":{\"category\":{\"type\":\"string\",\"description\":\"Optional: filter to a specific category\"}}}",
+        .execute = tool_discover_tools
+    },
     /* ── §1-§8: Post-LLM Virtual OS subsystem status ──────────────────── */
     {
         .name = "vos_status",
@@ -12687,6 +13011,7 @@ static void ensure_embeddings_loaded(void) {
     if (fread(header, sizeof(uint32_t), 2, fp) != 2) { fclose(fp); return; }
     g_emb_count = (int)header[0];
     g_emb_dim = (int)header[1];
+    if (g_emb_dim > 1024) g_emb_dim = 1024; /* clamp to centroid array size */
 
     size_t total_floats = (size_t)g_emb_count * g_emb_dim;
     g_emb_vectors = safe_malloc(total_floats * sizeof(float));
@@ -12744,13 +13069,14 @@ static float *embed_query_jina(const char *text) {
     curl_easy_cleanup(curl);
     jbuf_free(&req);
 
-    if (res != CURLE_OK || http_code != 200) {
+    if (res != CURLE_OK || http_code != 200 || !resp.data || !resp.data[0]) {
         jbuf_free(&resp);
         return NULL;
     }
 
     /* Parse: data[0].embedding = [f, f, f, ...] */
     float *vec = safe_malloc(g_emb_dim * sizeof(float));
+    memset(vec, 0, g_emb_dim * sizeof(float));
     char *data_arr = json_get_raw(resp.data, "data");
     if (!data_arr) { jbuf_free(&resp); free(vec); return NULL; }
 
@@ -12845,7 +13171,8 @@ static const char *CORE_TOOLS[] = {
     "spawn_agent", "agent_wait", "agent_output", "agent_status", "agent_kill",
     "agent_race", "spawn_provider", "spawn_executor", "create_swarm",
     "swarm_status", "swarm_collect", "openrouter_models", "executor_status",
-    "context_get", "context_search", "context_pack", "soul_read",
+    "context_get", "context_get_batch", "context_search", "context_pack", "soul_read",
+    "discover_tools", "self_exit",
     NULL
 };
 
@@ -13006,15 +13333,16 @@ int tools_retrieve(const char *context, int *out_indices, int max_tools) {
     if (total == 0 || max_tools <= 0) return 0;
 
     int n = 0;
-    bool included[SEM_MAX_DOCS > 10240 ? SEM_MAX_DOCS : 10240];
-    memset(included, 0, sizeof(bool) * (total < 10240 ? total : 10240));
+    /* Heap-allocate included[] — scales to 10K+ tools without stack overflow */
+    bool *included = safe_malloc(total * sizeof(bool));
+    memset(included, 0, total * sizeof(bool));
 
     /* ── Slot 0: Core tools (always loaded, ~27 tools) ────────────────── */
     for (int i = 0; i < total; i++) {
         if (is_core_tool(tools[i].name)) {
             out_indices[n++] = i;
             included[i] = true;
-            if (n >= max_tools) return n;
+            if (n >= max_tools) { free(included); return n; }
         }
     }
 
@@ -13027,7 +13355,7 @@ int tools_retrieve(const char *context, int *out_indices, int max_tools) {
         }
     }
 
-    if (!context || !context[0]) return n;
+    if (!context || !context[0]) { free(included); return n; }
 
     /* ── Level 1: Centroid ranking (O(K) where K=15 groups) ───────────── */
     ensure_embeddings_loaded();
@@ -13064,32 +13392,36 @@ int tools_retrieve(const char *context, int *out_indices, int max_tools) {
         if (!has_general && n_top_groups < 5) top_groups[n_top_groups++] = 11;
 
         /* ── Level 2: Intra-group embedding rank (O(k) per group) ─────── */
-        hrt_score_t candidates[MAX_GROUP_TOOLS * 4]; /* pool from top groups */
+        int max_cand = 0;
+        for (int gi = 0; gi < n_top_groups; gi++)
+            max_cand += g_tool_groups[top_groups[gi]].count;
+        hrt_score_t *candidates = safe_malloc(max_cand * sizeof(hrt_score_t));
         int n_cand = 0;
 
         for (int gi = 0; gi < n_top_groups; gi++) {
             tool_group_t *g = &g_tool_groups[top_groups[gi]];
-            for (int j = 0; j < g->count && n_cand < (int)(sizeof(candidates)/sizeof(candidates[0])); j++) {
+            for (int j = 0; j < g->count; j++) {
                 int ti = g->tool_indices[j];
-                if (included[ti] || ti >= g_emb_count) continue;
+                if (ti < 0 || ti >= total || included[ti] || ti >= g_emb_count) continue;
                 candidates[n_cand].idx = ti;
                 candidates[n_cand].score = cosine_sim_f(qvec, &g_emb_vectors[ti * g_emb_dim], g_emb_dim);
                 n_cand++;
             }
         }
 
-        /* Sort candidates by score */
         qsort(candidates, n_cand, sizeof(hrt_score_t), hrt_cmp);
 
         /* Fill remaining slots */
         float threshold = 0.12f;
         for (int i = 0; i < n_cand && n < max_tools; i++) {
-            if (candidates[i].score > threshold && !included[candidates[i].idx]) {
-                out_indices[n++] = candidates[i].idx;
-                included[candidates[i].idx] = true;
+            int idx = candidates[i].idx;
+            if (candidates[i].score > threshold && idx >= 0 && idx < total && !included[idx]) {
+                out_indices[n++] = idx;
+                included[idx] = true;
             }
         }
 
+        free(candidates);
         free(qvec);
     }
 
@@ -13109,20 +13441,23 @@ int tools_retrieve(const char *context, int *out_indices, int max_tools) {
         free(ranked);
     }
 
+    free(included);
     return n;
 }
 
 const tool_def_t **tools_get_filtered(const char *context, int max_tools, int *out_count) {
-    int indices[SEM_MAX_DOCS];
-    int n = tools_retrieve(context, indices, max_tools > SEM_MAX_DOCS ? SEM_MAX_DOCS : max_tools);
+    int cap = max_tools > 0 ? max_tools : 128;
+    int *indices = safe_malloc(cap * sizeof(int));
+    int n = tools_retrieve(context, indices, cap);
 
     int total;
     const tool_def_t *all = tools_get_all(&total);
 
-    const tool_def_t **result = safe_malloc(n * sizeof(tool_def_t *));
+    const tool_def_t **result = safe_malloc((n > 0 ? n : 1) * sizeof(tool_def_t *));
     for (int i = 0; i < n; i++) {
         result[i] = &all[indices[i]];
     }
+    free(indices);
     *out_count = n;
     return result;
 }
@@ -13543,6 +13878,9 @@ static bool tools_execute_internal(const char *name, const char *input_json,
             if (di < 0) break;
             if (g_vm.dispatch[di].hash == h &&
                 strcmp(g_vm.dispatch[di].name, name) == 0) {
+                /* Mark hot for tool filtering (O(1) hash map lookup) */
+                int hot_idx = tool_map_lookup(&g_tool_map, name);
+                if (hot_idx >= 0) tools_mark_hot(hot_idx);
                 struct timeval t0, t1;
                 gettimeofday(&t0, NULL);
                 bool ok = g_vm.dispatch[di].func(input_json, result, result_len);
@@ -13564,6 +13902,7 @@ static bool tools_execute_internal(const char *name, const char *input_json,
 
     if (idx >= 0 && idx < s_tool_count) {
         /* Builtin tool */
+        tools_mark_hot(idx);
         struct timeval t0, t1;
         gettimeofday(&t0, NULL);
         bool ok = s_tools[idx].execute(input_json, result, result_len);
