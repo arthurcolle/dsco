@@ -197,7 +197,11 @@ def resolve_model(name: str) -> str:
 
 # ── Tool Definitions ─────────────────────────────────────────────────────────
 
-TOOLS_ANTHROPIC = [
+# Native Python implementations for the 6 core tools (used as fast path).
+# All other tools are proxied through the dsco binary via --tool-exec.
+_NATIVE_TOOLS = {"bash", "read_file", "write_file", "edit_file", "glob", "grep"}
+
+_TOOLS_ANTHROPIC_FALLBACK = [
     {
         "name": "bash",
         "description": "Execute a shell command. Returns stdout+stderr.",
@@ -275,18 +279,60 @@ TOOLS_ANTHROPIC = [
     },
 ]
 
-# OpenAI-compatible format (function calling)
-TOOLS_OPENAI = [
-    {
-        "type": "function",
-        "function": {
-            "name": t["name"],
-            "description": t["description"],
-            "parameters": t["input_schema"],
-        },
-    }
-    for t in TOOLS_ANTHROPIC
-]
+TOOLS_ANTHROPIC: list[dict] = []
+
+
+def load_tool_registry():
+    """Load all tool definitions from `dsco --tools-json`. Falls back to 6 built-ins."""
+    global TOOLS_ANTHROPIC
+    if DSCO_BIN.exists():
+        try:
+            result = subprocess.run(
+                [str(DSCO_BIN), "--tools-json"],
+                capture_output=True, text=True, timeout=10,
+            )
+            if result.returncode == 0 and result.stdout.strip():
+                raw = json.loads(result.stdout)
+                TOOLS_ANTHROPIC = [
+                    {
+                        "name": t["name"],
+                        "description": t.get("description", ""),
+                        "input_schema": t.get("input_schema",
+                                              {"type": "object", "properties": {}}),
+                    }
+                    for t in raw
+                    if t.get("name")
+                ]
+                log.info(f"Loaded {len(TOOLS_ANTHROPIC)} tools from dsco binary")
+                return
+        except Exception as e:
+            log.warning(f"Could not load tools from dsco: {e}")
+
+    TOOLS_ANTHROPIC = _TOOLS_ANTHROPIC_FALLBACK
+    log.info(f"Using {len(TOOLS_ANTHROPIC)} fallback tools")
+
+
+# OpenAI-compatible format (function calling) — rebuilt after load_tool_registry()
+def _build_tools_openai() -> list[dict]:
+    return [
+        {
+            "type": "function",
+            "function": {
+                "name": t["name"],
+                "description": t["description"],
+                "parameters": t["input_schema"],
+            },
+        }
+        for t in TOOLS_ANTHROPIC
+    ]
+
+
+def get_tools_openai() -> list[dict]:
+    return _build_tools_openai()
+
+
+# Kept for backwards compat — will be populated after load_tool_registry() in main()
+TOOLS_OPENAI: list[dict] = []
 
 # ── Tool Execution ───────────────────────────────────────────────────────────
 
@@ -402,7 +448,38 @@ async def tool_grep(pattern: str, path: Optional[str] = None, include: Optional[
         return f"[error: {e}]"
 
 
+async def tool_dsco_exec(name: str, input_data: dict) -> str:
+    """Proxy any tool through `dsco --tool-exec <name> <json>`."""
+    if not DSCO_BIN.exists():
+        return f"[dsco binary not found — cannot execute tool: {name}]"
+    input_json = json.dumps(input_data)
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            str(DSCO_BIN), "--tool-exec", name, input_json,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+            cwd=str(WORK_DIR),
+            env={**os.environ},
+        )
+        stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=60)
+        out = stdout.decode("utf-8", errors="replace").strip()
+        if not out:
+            err = stderr.decode("utf-8", errors="replace").strip()
+            return f"[tool {name} produced no output{': ' + err if err else ''}]"
+        # dsco emits {"ok":bool,"result":"..."} — unwrap it
+        try:
+            payload = json.loads(out)
+            return payload.get("result", out)
+        except json.JSONDecodeError:
+            return out
+    except asyncio.TimeoutError:
+        return f"[tool {name} timed out after 60s]"
+    except Exception as e:
+        return f"[error executing tool {name}: {e}]"
+
+
 async def execute_tool(name: str, input_data: dict) -> str:
+    # Fast path: native Python implementations for core tools
     if name == "bash":
         return await tool_bash(input_data["command"], input_data.get("timeout", 120))
     elif name == "read_file":
@@ -415,7 +492,8 @@ async def execute_tool(name: str, input_data: dict) -> str:
         return tool_glob(input_data["pattern"], input_data.get("path"))
     elif name == "grep":
         return await tool_grep(input_data["pattern"], input_data.get("path"), input_data.get("include"))
-    return f"[unknown tool: {name}]"
+    # Proxy all other tools through the dsco binary
+    return await tool_dsco_exec(name, input_data)
 
 
 # ── Session ──────────────────────────────────────────────────────────────────
@@ -452,7 +530,7 @@ async def agent_loop_anthropic(ws: WebSocket, session: Session):
             "model": session.model,
             "max_tokens": MAX_TOKENS,
             "messages": session.messages,
-            "tools": TOOLS_ANTHROPIC,
+            "tools": TOOLS_ANTHROPIC,  # dynamically loaded at startup
             "system": session.system_prompt(),
             "stream": True,
         }
@@ -656,7 +734,7 @@ async def agent_loop_openai(ws: WebSocket, session: Session):
             stream = await client.chat.completions.create(
                 model=model_id,
                 messages=oai_msgs,
-                tools=TOOLS_OPENAI,
+                tools=get_tools_openai(),
                 max_tokens=MAX_TOKENS,
                 stream=True,
             )
@@ -1462,8 +1540,11 @@ def main():
 
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(name)s %(levelname)s %(message)s")
 
-    # Load model registry
+    # Load model and tool registries from dsco binary
     load_model_registry()
+    load_tool_registry()
+    global TOOLS_OPENAI
+    TOOLS_OPENAI = get_tools_openai()
 
     port = args.port
     url = f"http://{args.host}:{port}"
