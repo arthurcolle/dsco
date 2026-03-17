@@ -19,6 +19,8 @@
 #include "vm.h"
 #include "scheduler.h"
 #include "vfs.h"
+#include "memory_tier.h"
+#include "pheromone.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -28,6 +30,11 @@
 #include <unistd.h>
 #include <sys/wait.h>
 #include <sys/time.h>
+#include <libgen.h>
+#include <limits.h>
+#ifdef __APPLE__
+#include <mach-o/dyld.h>
+#endif
 
 static md_renderer_t s_oneshot_md;
 
@@ -101,6 +108,14 @@ static void init_vos_subsystems(void) {
     if (home) {
         snprintf(vfs_path, sizeof(vfs_path), "%s/.dsco/vfs.db", home);
         g_vfs = vfs_open(vfs_path);
+    }
+
+    /* Cross-module wiring: connect subsystems to each other */
+    if (g_vfs) {
+        /* §8→baseline: mirror baseline events to VFS event log */
+        baseline_set_vfs(g_vfs);
+        /* §8→memory: persist semantic memories to VFS */
+        memory_store_set_vfs(g_vfs);
     }
 }
 
@@ -296,6 +311,7 @@ static void usage(const char *prog) {
         "  --topology NAME        Run/select an agent topology\n"
         "  --topology-auto        Auto-pick a topology for the task\n"
         "  --topology-list        List available topologies\n"
+        "  --ui [PORT]            Launch web UI (default port: 3141)\n"
         "  -e, --exec BACKEND    Execute via external CLI (claude, codex, list, auto)\n"
         "  --                    Pass remaining args to executor (after -e)\n"
         "  --version              Print version and build info\n"
@@ -460,6 +476,8 @@ int main(int argc, char **argv) {
     char **exec_extra = NULL;         /* passthrough args after -- */
     int exec_nextra = 0;
     bool user_set_model = false;
+    bool ui_mode = false;
+    int ui_port = 3141;
 
     for (int i = 1; i < argc; i++) {
         if (strcmp(argv[i], "-h") == 0 || strcmp(argv[i], "--help") == 0) {
@@ -468,6 +486,25 @@ int main(int argc, char **argv) {
         }
         if (strcmp(argv[i], "--version") == 0 || strcmp(argv[i], "-v") == 0) {
             printf("dsco v%s (built %s, %s)\n", DSCO_VERSION, BUILD_DATE, GIT_HASH);
+            free(oneshot_prompt);
+            return 0;
+        }
+        if (strcmp(argv[i], "--models-json") == 0) {
+            printf("[");
+            for (int j = 0; MODEL_REGISTRY[j].alias; j++) {
+                const model_info_t *m = &MODEL_REGISTRY[j];
+                if (j > 0) printf(",");
+                printf("{\"alias\":\"%s\",\"model_id\":\"%s\","
+                       "\"context_window\":%d,\"max_output\":%d,"
+                       "\"input_price\":%.2f,\"output_price\":%.2f,"
+                       "\"cache_read_price\":%.2f,\"cache_write_price\":%.2f,"
+                       "\"supports_thinking\":%d}",
+                       m->alias, m->model_id, m->context_window, m->max_output,
+                       m->input_price, m->output_price,
+                       m->cache_read_price, m->cache_write_price,
+                       m->supports_thinking);
+            }
+            printf("]\n");
             free(oneshot_prompt);
             return 0;
         }
@@ -513,6 +550,13 @@ int main(int argc, char **argv) {
             topology_auto = true;
         } else if (strcmp(argv[i], "--topology-list") == 0) {
             topology_list_mode = true;
+        } else if (strcmp(argv[i], "--ui") == 0) {
+            ui_mode = true;
+            /* Optional port: --ui 8080 */
+            if (i + 1 < argc && argv[i+1][0] != '-') {
+                int p = atoi(argv[i+1]);
+                if (p > 0 && p <= 65535) { ui_port = p; i++; }
+            }
         } else if ((strcmp(argv[i], "--exec") == 0 || strcmp(argv[i], "-e") == 0) && i + 1 < argc) {
             exec_backend = argv[++i];
         } else {
@@ -609,6 +653,58 @@ int main(int argc, char **argv) {
         }
         free(oneshot_prompt);
         return 0;
+    }
+
+    if (ui_mode) {
+        /* Launch the FastAPI web UI server */
+        char server_path[PATH_MAX];
+        /* Try: <binary_dir>/../web/server.py, then ./web/server.py */
+        char exe_path[PATH_MAX];
+        bool found_server = false;
+#ifdef __APPLE__
+        uint32_t exe_size = sizeof(exe_path);
+        if (_NSGetExecutablePath(exe_path, &exe_size) == 0) {
+#elif defined(__linux__)
+        if (readlink("/proc/self/exe", exe_path, sizeof(exe_path) - 1) > 0) {
+#else
+        if (0) {
+#endif
+            char *resolved = realpath(exe_path, NULL);
+            if (resolved) {
+                char *dir = dirname(resolved);
+                snprintf(server_path, sizeof(server_path), "%s/../web/server.py", dir);
+                char *sp = realpath(server_path, NULL);
+                if (sp) { strncpy(server_path, sp, sizeof(server_path) - 1); free(sp); found_server = true; }
+                free(resolved);
+            }
+        }
+        if (!found_server) {
+            snprintf(server_path, sizeof(server_path), "%s/web/server.py", getenv("PWD") ? getenv("PWD") : ".");
+        }
+
+        char port_str[16], cwd_str[PATH_MAX];
+        snprintf(port_str, sizeof(port_str), "%d", ui_port);
+        if (!getcwd(cwd_str, sizeof(cwd_str))) strncpy(cwd_str, ".", sizeof(cwd_str));
+
+        fprintf(stderr,
+            "\033[36m"
+            "  dsco --ui launching web server...\n"
+            "  server: %s\n"
+            "  port:   %s\n"
+            "  dir:    %s\n"
+            "\033[0m\n", server_path, port_str, cwd_str);
+
+        free(oneshot_prompt);
+        execlp("python3", "python3", server_path,
+               "--port", port_str,
+               "--dir", cwd_str,
+               "--model", model,
+               "--open",
+               (char *)NULL);
+        /* Only reached on exec failure */
+        perror("failed to launch web UI (is python3 + fastapi installed?)");
+        fprintf(stderr, "  install deps: pip install -r web/requirements.txt\n");
+        return 1;
     }
 
     if (timeline_server_mode) {
@@ -1017,6 +1113,7 @@ native_path:
         if (!oneshot_key || !oneshot_key[0]) oneshot_key = api_key;
 
         int turns = 0;
+        bool oneshot_had_error = false;
         while (turns < dsco_max_agent_turns()) {
             turns++;
             md_reset(&s_oneshot_md);
@@ -1027,6 +1124,7 @@ native_path:
             if (!req) {
                 fprintf(stderr, "error: failed to build request\n");
                 baseline_log("error", "request_build_failed", NULL, NULL);
+                oneshot_had_error = true;
                 break;
             }
 
@@ -1047,6 +1145,7 @@ native_path:
                 baseline_log("error", "stream_failed", err, NULL);
                 json_free_response(&sr.parsed);
                 if (turns == 1) conv_pop_last(&conv);
+                oneshot_had_error = true;
                 break;
             }
 
@@ -1199,6 +1298,7 @@ native_path:
         provider_free(oneshot_provider);
         conv_free(&conv);
         free(oneshot_prompt);
+        if (oneshot_had_error) return 1;
     } else {
         agent_run(api_key, model, topology_name, topology_auto, g_provider_override);
     }

@@ -37,14 +37,16 @@
 #define MAX_FILE_PAGE_SIZE  4096
 #define MAX_EXEC_OUTPUT     (64 * 1024)
 
-/* Agent loop */
-#define MAX_AGENT_TURNS     50
+/* Agent loop — 40 turns default balances utility vs cost.
+   Research (W&D 2026): most tasks complete in <20 turns;
+   >40 indicates runaway loops or redundant retrieval. */
+#define MAX_AGENT_TURNS     40
 /* Override at runtime via DSCO_MAX_AGENT_TURNS */
 static inline int dsco_max_agent_turns(void) {
     const char *e = getenv("DSCO_MAX_AGENT_TURNS");
     if (e && e[0]) {
         int v = atoi(e);
-        if (v >= 1 && v <= 500) return v;
+        if (v >= 1 && v <= 999999) return v;
     }
     return MAX_AGENT_TURNS;
 }
@@ -260,7 +262,11 @@ static inline int model_context_window(const char *name) {
     "TOOLS (200+): File I/O, git, network, shell, crypto, pipeline engine, " \
     "math evaluator, AST introspection, plugins, market data, soul evolution.\n" \
     "MULTI-EXECUTOR SWARMS: dsco (fork self), claude (Claude Code CLI), codex (OpenAI Codex).\n\n" \
-    "Be concise. Prefer action over explanation. Use parallel tool calls aggressively. " \
+    "TOKEN EFFICIENCY:\n" \
+    "- Issue 3+ parallel tool calls per step when gathering information (36% cheaper, 41% faster).\n" \
+    "- Use context_get_batch with chunk_ids array instead of sequential context_get calls.\n" \
+    "- Use context_pack for budget-aware evidence assembly instead of fetching chunks one by one.\n" \
+    "- Be concise. Prefer action over explanation.\n" \
     "Create goals for complex tasks. Use tournaments when multiple approaches exist."
 
 /* ── TUI Feature Flags ─────────────────────────────────────────────────── */

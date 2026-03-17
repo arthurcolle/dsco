@@ -74,6 +74,15 @@ static const char *k_known_env_keys[] = {
     "OPENWEATHERMAP_API_KEY",
     "ALPHA_VANTAGE_API_KEY",
     "FRED_API_KEY",
+    /* Trading / Prediction Markets */
+    "KALSHI_API_KEY",
+    "KALSHI_RSA_PRIVATE_KEY_PATH",
+    "POLYMARKET_ADDRESS",
+    "POLYMARKET_API_KEY",
+    "POLYMARKET_API_SECRET",
+    "POLYMARKET_PASSPHRASE",
+    "POLYMARKET_PRIVATE_KEY",
+    "POLYMARKET_RELAYER_API_KEY",
     "DSCO_MODEL",
     "DSCO_BASELINE_DB",
     "DSCO_TIMELINE_PORT",
@@ -538,11 +547,11 @@ static bool process_env_candidate(kv_list_t *l, const char *key, const char *val
     return true;
 }
 
-int dsco_setup_load_saved_env(void) {
+static int load_env_from_path(const char *path) {
     kv_list_t l;
     kv_list_init(&l);
 
-    if (!load_kv_file(resolve_env_path(), &l)) {
+    if (!load_kv_file(path, &l)) {
         kv_list_free(&l);
         return 0;
     }
@@ -556,6 +565,32 @@ int dsco_setup_load_saved_env(void) {
     }
 
     kv_list_free(&l);
+    return loaded;
+}
+
+int dsco_setup_load_saved_env(void) {
+    /* 1. Load from ~/.dsco/env (or profile-specific path) */
+    int loaded = load_env_from_path(resolve_env_path());
+
+    /* 2. Also load from .env in the current working directory.
+     *    Keys already set by ~/.dsco/env (or the real environment)
+     *    are NOT overwritten — first writer wins. */
+    char cwd_env[PATH_MAX];
+    if (getcwd(cwd_env, sizeof(cwd_env) - 8)) {
+        strcat(cwd_env, "/.env");
+        /* Only load if it's a different file than the profile env */
+        char resolved_profile[PATH_MAX] = {0};
+        char resolved_cwd[PATH_MAX] = {0};
+        const char *profile_path = resolve_env_path();
+        if (realpath(profile_path, resolved_profile) &&
+            realpath(cwd_env, resolved_cwd) &&
+            strcmp(resolved_profile, resolved_cwd) == 0) {
+            /* Same file — skip */
+        } else {
+            loaded += load_env_from_path(cwd_env);
+        }
+    }
+
     return loaded;
 }
 
