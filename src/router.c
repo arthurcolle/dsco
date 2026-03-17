@@ -210,32 +210,92 @@ task_complexity_t router_classify_task(const char *user_msg,
  */
 int model_tier(const char *model_id) {
     if (!model_id) return 1;
-    /* Expert tier */
-    if (strstr(model_id, "opus"))           return 4;
-    if (strstr(model_id, "o1"))             return 4;
-    if (strstr(model_id, "deepseek-reasoner")) return 4;
-    if (strstr(model_id, "o3"))             return 4;
-    /* Complex tier */
-    if (strstr(model_id, "sonnet"))         return 3;
-    if (strstr(model_id, "gpt-4o")
-        && !strstr(model_id, "mini"))       return 3;
-    if (strstr(model_id, "mistral-large")) return 3;
-    if (strstr(model_id, "llama-3.3-70b")) return 3;
-    if (strstr(model_id, "deepseek-chat")) return 3;
-    if (strstr(model_id, "grok"))          return 3;
-    if (strstr(model_id, "command-r"))     return 3;
-    if (strstr(model_id, "sonar-pro"))     return 3;
-    /* Medium tier */
-    if (strstr(model_id, "gpt-4o-mini"))  return 2;
-    if (strstr(model_id, "mistral-small")) return 2;
-    if (strstr(model_id, "mixtral"))       return 2;
-    if (strstr(model_id, "Qwen"))          return 2;
-    if (strstr(model_id, "llama3.1-70b")) return 2;  /* cerebras */
-    if (strstr(model_id, "sonar"))        return 2;
-    /* Simple tier */
-    if (strstr(model_id, "haiku"))         return 1;
-    if (strstr(model_id, "llama-3.1-8b")) return 1;
-    if (strstr(model_id, "mistral-s"))    return 1;
+
+    /* ── Expert tier (4) — frontier reasoning, $10+/M output ─────────── */
+    if (strstr(model_id, "opus"))              return 4;
+    if (strstr(model_id, "gpt-5.4-pro"))      return 4;
+    if (strstr(model_id, "gpt-5.4"))          return 4;
+    if (strstr(model_id, "gpt-5.3"))          return 4;
+    if (strstr(model_id, "gpt-5.2-pro"))      return 4;
+    if (strstr(model_id, "gpt-5-pro"))        return 4;
+    if (strstr(model_id, "o1-pro"))           return 4;
+    if (strstr(model_id, "o3-pro"))           return 4;
+    if (strstr(model_id, "grok-4.20"))        return 4;
+    if (strstr(model_id, "kimi-k2.5"))        return 4;
+    if (strstr(model_id, "qwen3-max-thinking")) return 4;
+    if (strstr(model_id, "gemini-3.1-pro"))   return 4;
+    if (strstr(model_id, "gemini-3-pro"))     return 4;
+    if (strstr(model_id, "nova-premier"))     return 4;
+    if (strstr(model_id, "deepseek-r1"))      return 4;
+    if (strstr(model_id, "glm-5"))            return 4;
+
+    /* ── Complex tier (3) — strong general, $1–10/M output ───────────── */
+    if (strstr(model_id, "sonnet"))            return 3;
+    if (strstr(model_id, "gpt-5.2"))          return 3;  /* non-pro 5.2 */
+    if (strstr(model_id, "gpt-5.1"))          return 3;
+    if (strstr(model_id, "gpt-5") && !strstr(model_id, "mini") && !strstr(model_id, "nano"))
+                                               return 3;
+    if (strstr(model_id, "gpt-4.1") && !strstr(model_id, "mini") && !strstr(model_id, "nano"))
+                                               return 3;
+    if (strstr(model_id, "gpt-4o") && !strstr(model_id, "mini"))
+                                               return 3;
+    if (strstr(model_id, "o4-mini"))          return 3;
+    if (strstr(model_id, "o3"))               return 3;
+    if (strstr(model_id, "o1"))               return 3;
+    if (strstr(model_id, "gemini-2.5-pro"))   return 3;
+    if (strstr(model_id, "mistral-large"))    return 3;
+    if (strstr(model_id, "devstral"))         return 3;
+    if (strstr(model_id, "deepseek-v3"))      return 3;
+    if (strstr(model_id, "deepseek-chat"))    return 3;
+    if (strstr(model_id, "glm-4.7"))         return 3;
+    if (strstr(model_id, "kimi-k2"))          return 3;
+    if (strstr(model_id, "qwen3.5-397b"))    return 3;
+    if (strstr(model_id, "qwen3.5-122b"))    return 3;
+    if (strstr(model_id, "qwen3.5-plus"))    return 3;
+    if (strstr(model_id, "llama-4"))          return 3;
+    if (strstr(model_id, "llama-3.3-70b"))   return 3;
+    if (strstr(model_id, "hermes-4"))        return 3;
+    if (strstr(model_id, "command-a"))        return 3;
+    if (strstr(model_id, "command-r"))        return 3;
+    if (strstr(model_id, "sonar-pro"))        return 3;
+    if (strstr(model_id, "palmyra"))          return 3;
+    if (strstr(model_id, "seed-2.0"))        return 3;
+    if (strstr(model_id, "maestro"))          return 3;
+    if (strstr(model_id, "ernie-4.5"))       return 3;
+    if (strstr(model_id, "aion-2"))           return 3;
+    if (strstr(model_id, "mercury"))          return 3;
+
+    /* ── Medium tier (2) — good utility, <$1/M output ────────────────── */
+    if (strstr(model_id, "gpt-5-mini"))       return 2;
+    if (strstr(model_id, "gpt-4.1-mini"))    return 2;
+    if (strstr(model_id, "gpt-4o-mini"))     return 2;
+    if (strstr(model_id, "mistral-medium"))  return 2;
+    if (strstr(model_id, "mistral-small"))   return 2;
+    if (strstr(model_id, "codestral"))        return 2;
+    if (strstr(model_id, "gemini-2.5-flash")) return 2;
+    if (strstr(model_id, "gemini-3-flash"))  return 2;
+    if (strstr(model_id, "gemini-3.1-flash")) return 2;
+    if (strstr(model_id, "qwen3.5"))         return 2;
+    if (strstr(model_id, "qwen3-coder"))     return 2;
+    if (strstr(model_id, "minimax"))          return 2;
+    if (strstr(model_id, "step-3.5"))        return 2;
+    if (strstr(model_id, "seed-1.6"))        return 2;
+    if (strstr(model_id, "nova-2"))           return 2;
+    if (strstr(model_id, "mimo"))             return 2;
+    if (strstr(model_id, "kat-coder"))        return 2;
+    if (strstr(model_id, "sonar"))            return 2;
+
+    /* ── Simple tier (1) — fast/cheap, <$0.5/M output ────────────────── */
+    if (strstr(model_id, "haiku"))             return 1;
+    if (strstr(model_id, "gpt-5-nano"))       return 1;
+    if (strstr(model_id, "gpt-4.1-nano"))    return 1;
+    if (strstr(model_id, "gpt-oss"))          return 1;
+    if (strstr(model_id, "llama-3.1-8b"))    return 1;
+    if (strstr(model_id, "ministral"))        return 1;
+    if (strstr(model_id, "glm-4.7-flash"))   return 1;
+    if (strstr(model_id, "nemotron-nano"))    return 1;
+    if (strstr(model_id, "seed-2.0-mini"))   return 1;
+
     return 2;   /* default: medium */
 }
 

@@ -19,6 +19,8 @@
 #include "topology.h"
 #include "router.h"
 #include "swarm.h"
+#include "arena_alloc.h"
+#include "vm.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -31,6 +33,7 @@
 #include <strings.h>
 #include <pthread.h>
 #include <sys/time.h>
+#include <sys/wait.h>
 #include <termios.h>
 #include "crypto.h"
 #include "output_guard.h"
@@ -41,6 +44,7 @@
 #endif
 
 volatile int g_interrupted = 0;
+extern volatile int g_agent_exit_requested;
 
 /* Escape key state machine — first ESC pauses, second ESC cancels */
 typedef enum { ESC_RUNNING = 0, ESC_PAUSED = 1 } escape_state_t;
@@ -131,7 +135,25 @@ static bool rate_limiter_acquire(rate_limiter_t *rl) {
 
 /* ── Cost budget ───────────────────────────────────────────────────────── */
 
-static double g_cost_budget = 0.0;  /* 0 = unlimited */
+static double g_cost_budget = 5.0;      /* default $5/session */
+static double g_daily_budget = 50.0;    /* default $50/day */
+
+/* Budgets default to $5/session and $50/day. Override with env vars.
+   Set to 0 to disable. Swarm children inherit DSCO_CHILD_BUDGET. */
+static void init_cost_budgets(void) {
+    const char *sb = getenv("DSCO_BUDGET");
+    if (sb && sb[0]) g_cost_budget = atof(sb);
+
+    const char *db = getenv("DSCO_DAILY_BUDGET");
+    if (db && db[0]) g_daily_budget = atof(db);
+
+    const char *child_budget = getenv("DSCO_CHILD_BUDGET");
+    if (child_budget && child_budget[0]) {
+        double cb = atof(child_budget);
+        if (cb > 0 && (g_cost_budget <= 0 || cb < g_cost_budget))
+            g_cost_budget = cb;
+    }
+}
 
 static double session_cost(session_state_t *session) {
     const model_info_t *mi = model_lookup(session->model);
@@ -143,11 +165,31 @@ static double session_cost(session_state_t *session) {
 }
 
 static bool check_cost_budget(session_state_t *session) {
-    if (g_cost_budget <= 0) return true;
     double cost = session_cost(session);
+
+    /* Daily budget (cross-session, from baseline DB) */
+    if (g_daily_budget > 0) {
+        double daily = baseline_daily_cost() + cost;
+        if (daily >= g_daily_budget) {
+            fprintf(stderr, "  %s%sdaily budget exceeded: $%.2f / $%.2f%s\n",
+                    TUI_BOLD, TUI_RED, daily, g_daily_budget, TUI_RESET);
+            fprintf(stderr, "  %soverride: export DSCO_DAILY_BUDGET=<amount> or DSCO_DAILY_BUDGET=0%s\n",
+                    TUI_DIM, TUI_RESET);
+            return false;
+        }
+        if (daily >= g_daily_budget * 0.8) {
+            fprintf(stderr, "  %sdaily spend: $%.2f / $%.2f (%.0f%%)%s\n",
+                    TUI_YELLOW, daily, g_daily_budget, 100.0 * daily / g_daily_budget, TUI_RESET);
+        }
+    }
+
+    /* Session budget */
+    if (g_cost_budget <= 0) return true;
     if (cost >= g_cost_budget) {
-        fprintf(stderr, "  %s%scost budget exceeded: $%.4f / $%.4f%s\n",
+        fprintf(stderr, "  %s%ssession budget exceeded: $%.4f / $%.4f%s\n",
                 TUI_BOLD, TUI_RED, cost, g_cost_budget, TUI_RESET);
+        fprintf(stderr, "  %soverride: /budget <amount> or export DSCO_BUDGET=<amount>%s\n",
+                TUI_DIM, TUI_RESET);
         return false;
     }
     if (cost >= g_cost_budget * 0.9) {
@@ -160,11 +202,14 @@ static bool check_cost_budget(session_state_t *session) {
 /* ── Provider management ───────────────────────────────────────────────── */
 
 static provider_t *g_provider = NULL;
+static const char *g_provider_override_name = NULL;
 
 static void ensure_provider(session_state_t *session, const char *api_key) {
-    const char *pname = provider_detect(session->model, api_key);
+    const char *pname = g_provider_override_name
+        ? g_provider_override_name
+        : provider_detect(session->model, api_key);
     /* If the detected provider's native key is missing, fall back to OpenRouter */
-    if (strcmp(pname, "anthropic") != 0) {
+    if (!g_provider_override_name && strcmp(pname, "anthropic") != 0) {
         const char *native_key = provider_resolve_api_key(pname);
         if (!native_key || !native_key[0]) {
             const char *or_key = getenv("OPENROUTER_API_KEY");
@@ -954,6 +999,9 @@ static const slash_command_t s_slash_commands[] = {
     {"/prefill",      "set prefill text for the next response"},
     {"/json",         "set JSON mode for next response"},
     {"/budget",       "set session cost budget"},
+    {"/exec",         "run prompt via external CLI (claude, codex, list)"},
+    {"/claude",       "shorthand for /exec claude <prompt>"},
+    {"/codex",        "shorthand for /exec codex <prompt>"},
     {"/trust",        "set trust tier"},
     {"/web",          "toggle web search"},
     {"/code",         "toggle code execution"},
@@ -1001,6 +1049,8 @@ static const slash_command_t s_slash_commands[] = {
     {"/flame",        "show tool flame timeline"},
     {"quit",          "exit dsco"},
     {"exit",          "exit dsco"},
+    {"/exit",         "exit dsco"},
+    {"/quit",         "exit dsco"},
     {NULL, NULL}
 };
 
@@ -1211,9 +1261,14 @@ static bool show_pause_menu(int cur_turn, int max_turns, double elapsed_sec) {
         tcsetattr(STDIN_FILENO, TCSANOW, &tio_raw);
     }
 
-    int max_t = max_turns > 0 ? max_turns : 1;
-    fprintf(stderr, "\n  %s⏸  paused%s  (turn %d/%d · %.0fs elapsed)\n",
-            TUI_YELLOW, TUI_RESET, cur_turn, max_t, elapsed_sec);
+    if (max_turns >= 999999) {
+        fprintf(stderr, "\n  %s⏸  paused%s  (turn %d/∞ · %.0fs elapsed)\n",
+                TUI_YELLOW, TUI_RESET, cur_turn, elapsed_sec);
+    } else {
+        int max_t = max_turns > 0 ? max_turns : 1;
+        fprintf(stderr, "\n  %s⏸  paused%s  (turn %d/%d · %.0fs elapsed)\n",
+                TUI_YELLOW, TUI_RESET, cur_turn, max_t, elapsed_sec);
+    }
     fprintf(stderr, "  %s[R]%s Resume  %s[C]%s Cancel  "
                     "%s(Esc again = cancel)%s  ▸ ",
             TUI_BOLD, TUI_RESET, TUI_BOLD, TUI_RESET, TUI_DIM, TUI_RESET);
@@ -1565,7 +1620,9 @@ static char *read_input_line_prompt(char *buf, size_t buf_sz, const char *prompt
 /* ── Main agent loop ───────────────────────────────────────────────────── */
 
 void agent_run(const char *api_key, const char *model,
-               const char *topology_name, bool topology_auto) {
+               const char *topology_name, bool topology_auto,
+               const char *provider_override) {
+    g_provider_override_name = provider_override;
     /* Register terminal reset FIRST — ensures scroll region, bracketed paste,
        and SGR attrs are cleaned up on ANY exit path through exit(). */
     atexit(terminal_reset_atexit);
@@ -1680,6 +1737,9 @@ void agent_run(const char *api_key, const char *model,
         }
     }
 
+    /* Initialize cost budgets from env vars */
+    init_cost_budgets();
+
     /* Welcome banner */
     tui_welcome(session.model, tool_count, DSCO_VERSION);
 
@@ -1733,6 +1793,17 @@ void agent_run(const char *api_key, const char *model,
     sigemptyset(&sa_winch.sa_mask);
     sa_winch.sa_flags = SA_RESTART;
     sigaction(SIGWINCH, &sa_winch, NULL);
+
+    /* Always show today's spend — awareness, not enforcement */
+    {
+        double daily = baseline_daily_cost();
+        fprintf(stderr, "  %stoday:%s $%.2f", TUI_DIM, TUI_RESET, daily);
+        if (g_cost_budget > 0)
+            fprintf(stderr, " · session cap $%.2f", g_cost_budget);
+        if (g_daily_budget > 0)
+            fprintf(stderr, " · daily cap $%.2f", g_daily_budget);
+        fprintf(stderr, "\n");
+    }
 
     fprintf(stderr, "  %stype your request, or 'quit' to exit%s %s\n\n", TUI_DIM, TUI_RESET, tui_glyph()->sparkle);
 
@@ -1805,7 +1876,8 @@ void agent_run(const char *api_key, const char *model,
             }
         }
 
-        if (strcmp(input_buf, "quit") == 0 || strcmp(input_buf, "exit") == 0) break;
+        if (strcmp(input_buf, "quit") == 0 || strcmp(input_buf, "exit") == 0 ||
+            strcmp(input_buf, "/exit") == 0 || strcmp(input_buf, "/quit") == 0) break;
 
         /* ── Slash commands ────────────────────────────────────────────── */
 
@@ -2453,6 +2525,9 @@ void agent_run(const char *api_key, const char *model,
             fprintf(stderr, "  %s/web%s        toggle web search\n", TUI_CYAN, TUI_RESET);
             fprintf(stderr, "  %s/code%s       toggle code execution\n", TUI_CYAN, TUI_RESET);
             fprintf(stderr, "  %s/budget [$]%s  set cost budget\n", TUI_CYAN, TUI_RESET);
+            fprintf(stderr, "  %s/exec <backend> <prompt>%s  run via external CLI\n", TUI_CYAN, TUI_RESET);
+            fprintf(stderr, "  %s/claude <prompt>%s  shorthand: /exec claude\n", TUI_CYAN, TUI_RESET);
+            fprintf(stderr, "  %s/codex <prompt>%s   shorthand: /exec codex\n", TUI_CYAN, TUI_RESET);
             fprintf(stderr, "  %s/thinking [auto|>=1024]%s set thinking budget (in tokens)\n", TUI_CYAN, TUI_RESET);
             fprintf(stderr, "  %s/trust [tier]%s set trust tier (trusted/standard/untrusted)\n", TUI_CYAN, TUI_RESET);
             fprintf(stderr, "  %s/topology%s   list/show/use/run topologies\n", TUI_CYAN, TUI_RESET);
@@ -2576,28 +2651,184 @@ void agent_run(const char *api_key, const char *model,
             while (*arg == ' ') arg++;
             if (*arg == '\0') {
                 double cost = session_cost(&session);
-                if (g_cost_budget > 0) {
-                    fprintf(stderr, "  %scost:%s $%.4f / $%.4f (%.0f%%)\n", TUI_DIM, TUI_RESET,
-                            cost, g_cost_budget, 100.0 * cost / g_cost_budget);
-                } else {
-                    fprintf(stderr, "  %scost:%s $%.4f (no budget set)\n", TUI_DIM, TUI_RESET, cost);
-                }
-                fprintf(stderr, "  %susage: /budget <dollars> or /budget off%s\n", TUI_DIM, TUI_RESET);
+                double daily = baseline_daily_cost() + cost;
+                fprintf(stderr, "  %ssession:%s $%.4f", TUI_DIM, TUI_RESET, cost);
+                if (g_cost_budget > 0)
+                    fprintf(stderr, " / $%.2f (%.0f%%)", g_cost_budget, 100.0 * cost / g_cost_budget);
+                else
+                    fprintf(stderr, " (no session limit)");
+                fprintf(stderr, "\n");
+                fprintf(stderr, "  %sdaily:%s   $%.2f", TUI_DIM, TUI_RESET, daily);
+                if (g_daily_budget > 0)
+                    fprintf(stderr, " / $%.2f (%.0f%%)", g_daily_budget, 100.0 * daily / g_daily_budget);
+                else
+                    fprintf(stderr, " (no daily limit)");
+                fprintf(stderr, "\n");
+                fprintf(stderr, "  %susage: /budget <dollars> | /budget daily <dollars> | /budget off%s\n",
+                        TUI_DIM, TUI_RESET);
             } else if (strcmp(arg, "off") == 0 || strcmp(arg, "none") == 0) {
                 g_cost_budget = 0;
-                tui_success("cost budget disabled");
+                g_daily_budget = 0;
+                tui_success("all cost budgets disabled");
+            } else if (strncmp(arg, "daily ", 6) == 0) {
+                double db = atof(arg + 6);
+                if (db > 0) {
+                    g_daily_budget = db;
+                    char msg[128];
+                    snprintf(msg, sizeof(msg), "daily budget set to $%.2f", db);
+                    tui_success(msg);
+                } else if (strcmp(arg + 6, "off") == 0) {
+                    g_daily_budget = 0;
+                    tui_success("daily budget disabled");
+                } else {
+                    tui_error("daily budget must be a positive number");
+                }
             } else {
                 double budget = atof(arg);
                 if (budget > 0) {
                     g_cost_budget = budget;
                     char msg[128];
-                    snprintf(msg, sizeof(msg), "cost budget set to $%.2f", budget);
+                    snprintf(msg, sizeof(msg), "session budget set to $%.2f", budget);
                     tui_success(msg);
                 } else {
                     tui_error("budget must be a positive number");
                 }
             }
             baseline_log("command", "/budget", NULL, NULL);
+            continue;
+        }
+        /* /exec <backend> <prompt>, /claude <prompt>, /codex <prompt> */
+        if (strncmp(input_buf, "/exec", 5) == 0 ||
+            strncmp(input_buf, "/claude", 7) == 0 ||
+            strncmp(input_buf, "/codex", 6) == 0) {
+
+            const char *backend_name = NULL;
+            const char *prompt = NULL;
+
+            if (strncmp(input_buf, "/claude", 7) == 0) {
+                backend_name = "claude";
+                prompt = input_buf + 7;
+            } else if (strncmp(input_buf, "/codex", 6) == 0) {
+                backend_name = "codex";
+                prompt = input_buf + 6;
+            } else {
+                /* /exec <backend> [prompt] */
+                const char *rest = input_buf + 5;
+                while (*rest == ' ') rest++;
+                if (!rest[0] || strcmp(rest, "list") == 0) {
+                    /* /exec or /exec list — show available backends */
+                    fprintf(stderr, "\n  %sExternal CLIs%s\n", TUI_BOLD, TUI_RESET);
+                    const char *backends[] = {"claude", "codex", NULL};
+                    const char *bins[]     = {"claude", "codex", NULL};
+                    const char *descs[]    = {"Claude Code (Anthropic)", "Codex CLI (OpenAI)", NULL};
+                    for (int bi = 0; backends[bi]; bi++) {
+                        char check[256];
+                        snprintf(check, sizeof(check), "command -v %s >/dev/null 2>&1", bins[bi]);
+                        bool avail = (system(check) == 0);
+                        fprintf(stderr, "  %-12s %-28s %s%s%s\n",
+                                backends[bi], descs[bi],
+                                avail ? TUI_GREEN : "\033[31m",
+                                avail ? "ready" : "not found",
+                                TUI_RESET);
+                    }
+                    fprintf(stderr, "\n  %sNative API Providers%s (use with -e from CLI)\n", TUI_BOLD, TUI_RESET);
+                    struct { const char *name; const char *desc; const char *env; } nprovs[] = {
+                        {"anthropic",  "Anthropic Claude",   "ANTHROPIC_API_KEY"},
+                        {"openai",     "OpenAI",             "OPENAI_API_KEY"},
+                        {"openrouter", "OpenRouter",         "OPENROUTER_API_KEY"},
+                        {"groq",       "Groq",               "GROQ_API_KEY"},
+                        {"deepseek",   "DeepSeek",           "DEEPSEEK_API_KEY"},
+                        {"xai",        "xAI Grok",           "XAI_API_KEY"},
+                        {"mistral",    "Mistral AI",         "MISTRAL_API_KEY"},
+                        {"together",   "Together AI",        "TOGETHER_API_KEY"},
+                        {"perplexity", "Perplexity",         "PERPLEXITY_API_KEY"},
+                        {"cerebras",   "Cerebras",           "CEREBRAS_API_KEY"},
+                        {"cohere",     "Cohere",             "COHERE_API_KEY"},
+                        {NULL, NULL, NULL}
+                    };
+                    for (int ni = 0; nprovs[ni].name; ni++) {
+                        const char *k = getenv(nprovs[ni].env);
+                        bool has = k && k[0];
+                        fprintf(stderr, "  %-12s %-28s %s%s%s\n",
+                                nprovs[ni].name, nprovs[ni].desc,
+                                has ? TUI_GREEN : TUI_DIM,
+                                has ? "key set" : "no key",
+                                TUI_RESET);
+                    }
+                    fprintf(stderr, "\n  %susage: /exec <backend> <prompt>%s\n", TUI_DIM, TUI_RESET);
+                    fprintf(stderr, "  %s       /claude <prompt>   /codex <prompt>%s\n\n", TUI_DIM, TUI_RESET);
+                    continue;
+                }
+                /* parse backend name */
+                const char *space = strchr(rest, ' ');
+                if (space) {
+                    char bname[32];
+                    size_t blen = (size_t)(space - rest);
+                    if (blen >= sizeof(bname)) blen = sizeof(bname) - 1;
+                    memcpy(bname, rest, blen);
+                    bname[blen] = '\0';
+                    backend_name = (strcmp(bname, "claude") == 0) ? "claude" :
+                                   (strcmp(bname, "codex") == 0)  ? "codex"  : NULL;
+                    if (!backend_name) {
+                        char msg[128];
+                        snprintf(msg, sizeof(msg), "unknown executor '%s' (use: claude, codex)", bname);
+                        tui_error(msg);
+                        continue;
+                    }
+                    prompt = space;
+                } else {
+                    /* /exec <backend> with no prompt — show usage */
+                    backend_name = rest;
+                    fprintf(stderr, "  %susage: /exec %s <prompt>%s\n", TUI_DIM, rest, TUI_RESET);
+                    continue;
+                }
+            }
+
+            while (prompt && *prompt == ' ') prompt++;
+            if (!prompt || !prompt[0]) {
+                fprintf(stderr, "  %susage: /%s <prompt>%s\n", TUI_DIM, backend_name, TUI_RESET);
+                continue;
+            }
+
+            bool is_claude = (strcmp(backend_name, "claude") == 0);
+
+            /* Show what we're doing */
+            fprintf(stderr, "\n  %s%s %s %s%s\n", TUI_DIM,
+                    tui_glyph()->arrow_right, backend_name,
+                    is_claude ? "claude -p" : "codex exec",
+                    TUI_RESET);
+
+            struct timeval t0, t1;
+            gettimeofday(&t0, NULL);
+
+            pid_t pid = fork();
+            if (pid == 0) {
+                /* Child — inherit terminal directly */
+                if (is_claude) {
+                    execlp("claude", "claude", "-p", prompt, (char *)NULL);
+                } else {
+                    execlp("codex", "codex", "exec", prompt, (char *)NULL);
+                }
+                _exit(127);
+            } else if (pid > 0) {
+                int status = 0;
+                waitpid(pid, &status, 0);
+                gettimeofday(&t1, NULL);
+                double elapsed = (t1.tv_sec - t0.tv_sec) + (t1.tv_usec - t0.tv_usec) / 1e6;
+
+                if (WIFEXITED(status) && WEXITSTATUS(status) != 0) {
+                    char msg[128];
+                    snprintf(msg, sizeof(msg), "%s exited with status %d (%.1fs)",
+                             backend_name, WEXITSTATUS(status), elapsed);
+                    tui_warning(msg);
+                } else {
+                    fprintf(stderr, "\n  %s%s done (%.1fs)%s\n",
+                            TUI_DIM, backend_name, elapsed, TUI_RESET);
+                }
+            } else {
+                tui_error("fork failed");
+            }
+            baseline_log("command", "/exec", backend_name, prompt);
             continue;
         }
         if (strncmp(input_buf, "/trust", 6) == 0) {
@@ -2929,11 +3160,20 @@ void agent_run(const char *api_key, const char *model,
                 dash_total_tools += tool_metrics.entries[ti].calls;
 
             /* Session stats */
+            int max_t = dsco_max_agent_turns();
             fprintf(stderr, "  %s┌─ Session ───────────────────────────────────┐%s\n", TUI_DIM, TUI_RESET);
-            fprintf(stderr, "  %s│%s  Turns: %s%-6d%s  Tools: %s%-6d%s  Msgs: %s%-4d%s  %s│%s\n",
-                    TUI_DIM, TUI_RESET, TUI_BWHITE, session.turn_count, TUI_RESET,
-                    TUI_BWHITE, dash_total_tools, TUI_RESET,
-                    TUI_BWHITE, conv.count, TUI_RESET, TUI_DIM, TUI_RESET);
+            if (max_t >= 999999) {
+                fprintf(stderr, "  %s│%s  Turns: %s%-4d%s %s(∞)%s  Tools: %s%-4d%s  Msgs: %s%-4d%s  %s│%s\n",
+                        TUI_DIM, TUI_RESET, TUI_BWHITE, session.turn_count, TUI_RESET,
+                        TUI_DIM, TUI_RESET,
+                        TUI_BWHITE, dash_total_tools, TUI_RESET,
+                        TUI_BWHITE, conv.count, TUI_RESET, TUI_DIM, TUI_RESET);
+            } else {
+                fprintf(stderr, "  %s│%s  Turns: %s%d/%d%s  Tools: %s%-4d%s  Msgs: %s%-4d%s  %s│%s\n",
+                        TUI_DIM, TUI_RESET, TUI_BWHITE, session.turn_count, max_t, TUI_RESET,
+                        TUI_BWHITE, dash_total_tools, TUI_RESET,
+                        TUI_BWHITE, conv.count, TUI_RESET, TUI_DIM, TUI_RESET);
+            }
             fprintf(stderr, "  %s│%s  Model: %s%-20s%s  Trust: %s%-8s%s %s│%s\n",
                     TUI_DIM, TUI_RESET, TUI_BCYAN, mi ? mi->alias : session.model, TUI_RESET,
                     TUI_BYELLOW, session_trust_tier_to_string(session.trust_tier), TUI_RESET,
@@ -3230,6 +3470,7 @@ void agent_run(const char *api_key, const char *model,
         int total_tools_used = 0;
         int pause_turn_streak = 0;
         tools_context_turn_begin();
+        arena_scratch_reset();  /* §2: reset per-turn scratch arena */
 
         /* Per-prompt trace ID */
         char trace_id[37];
@@ -3250,9 +3491,9 @@ resume_turn_loop:
             s_in_text_block = false;
             md_reset(&s_md);
 
-            if (conv.count > 20) {
+            if (conv.count > 10) {
                 int before = conv.count;
-                conv_trim_old_results(&conv, 10, 512);
+                conv_trim_old_results(&conv, 6, 256);
                 /* F17: Auto-compact notification */
                 if (conv.count < before)
                     tui_compact_flash(before, conv.count);
@@ -3286,10 +3527,25 @@ resume_turn_loop:
                 int est_tokens = (int)(payload_chars / 4);
                 int ctx_limit = session.context_window > 0 ? session.context_window : CONTEXT_WINDOW_TOKENS;
                 if (est_tokens > (int)(ctx_limit * TOKEN_BUDGET_COMPACT)) {
-                    fprintf(stderr, "  \033[33m%s context pressure: ~%dk/%dk tokens (%.0f%%) — consider /compact\033[0m\n",
+                    /* Auto-compact instead of just warning (CMV research:
+                       39% savings on tool-heavy sessions, breaks even in
+                       10 turns even with cache invalidation) */
+                    conv_trim_old_results(&conv, 6, 128);
+                    free(req);
+                    req = g_provider
+                        ? g_provider->build_request(g_provider, &conv, &session, MAX_TOKENS)
+                        : llm_build_request_ex(&conv, &session, MAX_TOKENS);
+                    if (!req) {
+                        tui_error("failed to rebuild request after auto-compact");
+                        break;
+                    }
+                    size_t new_chars = strlen(req);
+                    int new_tokens = (int)(new_chars / 4);
+                    fprintf(stderr, "  \033[33m%s auto-compact: %dk→%dk tokens (%.0f%%→%.0f%%)\033[0m\n",
                             tui_glyph()->warn,
-                            est_tokens / 1000, ctx_limit / 1000,
-                            100.0 * est_tokens / ctx_limit);
+                            est_tokens / 1000, new_tokens / 1000,
+                            100.0 * est_tokens / ctx_limit,
+                            100.0 * new_tokens / ctx_limit);
                 }
             }
 
@@ -3871,6 +4127,17 @@ resume_turn_loop:
                     }
                 }
 
+                /* Fill in tool_results for any unprocessed tool_use blocks
+                   (e.g., loop exited early due to Ctrl-C interrupt).
+                   The API requires every tool_use to have a matching tool_result. */
+                for (int ri = batch_idx; ri < batch_n; ri++) {
+                    content_block_t *blk = &sr.parsed.blocks[batch_indices[ri]];
+                    conv_add_tool_result(&conv, blk->tool_id,
+                                         "tool execution interrupted by user", true);
+                    tui_batch_spinner_complete(&batch_spinner, ri, false,
+                                              "interrupted", 0.0);
+                }
+
                 /* Stop batch spinner — final state is already rendered */
                 tui_batch_spinner_stop(&batch_spinner);
 
@@ -4001,15 +4268,21 @@ resume_turn_loop:
                 tui_warning("provider returned pause_turn repeatedly; ending turn");
                 done = true;
             }
+            /* Agent invoked self_exit tool — finish this turn then terminate */
+            if (g_agent_exit_requested) done = true;
             /* F34: Notification bell when multi-turn response completes */
             if (done && turns > 1) {
                 tui_notify("dsco", "response complete");
             }
 
-            baseline_log("turn",
+            baseline_log_usage("turn",
                          done ? "turn_done" : "turn_continue",
                          sr.parsed.stop_reason ? sr.parsed.stop_reason : "",
-                         NULL);
+                         NULL,
+                         sr.usage.input_tokens,
+                         sr.usage.output_tokens,
+                         sr.usage.cache_read_input_tokens,
+                         sr.usage.cache_creation_input_tokens);
 
             /* IPC: heartbeat + inject pending messages */
             ipc_heartbeat();
@@ -4084,6 +4357,9 @@ resume_turn_loop:
            bottom panel, causing input to appear in the middle. */
         fprintf(stderr, "\n");
         fflush(stderr);
+
+        /* Agent self-exit: break outer REPL loop after delivering final message */
+        if (g_agent_exit_requested) break;
 
         /* Periodic auto-save every 5 turns */
         if (session.turn_count % 5 == 0 && conv.count > 0) {

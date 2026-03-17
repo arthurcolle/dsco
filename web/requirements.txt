@@ -1,0 +1,6 @@
+fastapi>=0.110.0
+uvicorn[standard]>=0.27.0
+anthropic>=0.49.0
+openai>=1.50.0
+websockets>=12.0
+aiortc>=1.9.0

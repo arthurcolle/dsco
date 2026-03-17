@@ -5,6 +5,8 @@ dsco
 dsco-debug
 dsco-asan
 dsco-ubsan
+dsco-codex
+dsco_asan
 test_runner
 asan-test_runner
 ubsan-test_runner
@@ -19,7 +21,9 @@ ubsan-test_runner
 
 # Runtime data
 baseline.db
+error
 .dsco/
+.workspace/
 
 # Python
 __pycache__/
@@ -32,5 +36,13 @@ venv/
 .vscode/
 .idea/
 
-# Private notes
+# Private notes / scratch
 notes/
+prompt*.txt
+trading_mind.txt
+
+# Secrets / credentials
+.env
+.env.local
+keys/
+*.pem
