@@ -142,6 +142,9 @@ void  conv_add_user_text(conversation_t *c, const char *text);
 void  conv_add_assistant_text(conversation_t *c, const char *text);
 void  conv_add_assistant_tool_use(conversation_t *c, const char *tool_id,
                                    const char *tool_name, const char *tool_input);
+void  conv_add_tool_result_named(conversation_t *c, const char *tool_id,
+                                 const char *tool_name,
+                                 const char *result, bool is_error);
 void  conv_add_tool_result(conversation_t *c, const char *tool_id,
                            const char *result, bool is_error);
 void  conv_add_assistant_raw(conversation_t *c, parsed_response_t *resp);
@@ -155,6 +158,7 @@ void  conv_add_user_document(conversation_t *c, const char *media_type,
 void  conv_pop_last(conversation_t *c);
 void  conv_ensure_tool_results(conversation_t *c);
 void  conv_trim_old_results(conversation_t *c, int keep_recent, int max_chars);
+bool  conv_compact_recent_tool_turn(conversation_t *c, int max_chars);
 
 bool  conv_save(conversation_t *c, const char *path);
 bool  conv_load(conversation_t *c, const char *path);

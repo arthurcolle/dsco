@@ -22,6 +22,7 @@
 static char *openai_build_request(provider_t *p, conversation_t *conv,
                                    session_state_t *session, int max_tokens);
 static struct curl_slist *openai_build_headers(provider_t *p, const char *api_key);
+static bool openrouter_should_disable_thinking(session_state_t *session);
 
 /* ── Anthropic Provider ────────────────────────────────────────────────── */
 
@@ -148,13 +149,14 @@ static char *openrouter_build_request(provider_t *p, conversation_t *conv,
     const char *fallback_models = getenv("DSCO_OR_FALLBACK_MODELS");
     const char *reasoning       = getenv("DSCO_OR_REASONING_EFFORT");
     const char *debug_mode      = getenv("DSCO_OR_DEBUG");
+    bool disable_thinking       = openrouter_should_disable_thinking(session);
 
     bool has_provider = prov_order || prov_only || prov_ignore || req_params ||
                         (allow_fb && !or_env_bool(allow_fb)) ||
                         data_collect || zdr || quantizations || sort_by ||
                         max_price_in || max_price_out;
     bool has_extras = transforms || route || has_provider || fallback_models ||
-                      reasoning || debug_mode;
+                      reasoning || debug_mode || disable_thinking;
 
     if (!has_extras) return base;
 
@@ -191,6 +193,12 @@ static char *openrouter_build_request(provider_t *p, conversation_t *conv,
         jbuf_append(&b, ",\"reasoning\":{\"effort\":");
         jbuf_append_json_str(&b, reasoning);
         jbuf_append(&b, "}");
+    }
+
+    /* Kimi/OpenRouter tool calls are more reliable with non-thinking mode
+       unless the user explicitly opts into a fixed thinking budget. */
+    if (disable_thinking) {
+        jbuf_append(&b, ",\"thinking\":{\"type\":\"disabled\"}");
     }
 
     /* debug: {"echo_upstream_body": true} */
@@ -296,6 +304,108 @@ static bool msg_has_tool_result(message_t *m) {
     for (int j = 0; j < m->content_count; j++) {
         if (m->content[j].type && strcmp(m->content[j].type, "tool_result") == 0)
             return true;
+    }
+    return false;
+}
+
+static const char *openai_last_user_context(conversation_t *conv) {
+    if (!conv) return NULL;
+    for (int i = conv->count - 1; i >= 0; i--) {
+        if (conv->msgs[i].role != ROLE_USER) continue;
+        for (int j = 0; j < conv->msgs[i].content_count; j++) {
+            if (conv->msgs[i].content[j].text) {
+                return conv->msgs[i].content[j].text;
+            }
+        }
+    }
+    return NULL;
+}
+
+static void openai_append_function_tool(jbuf_t *b, const char *name,
+                                        const char *description,
+                                        const char *schema_json) {
+    jbuf_append(b, "{\"type\":\"function\",\"function\":{\"name\":");
+    jbuf_append_json_str(b, name ? name : "");
+    jbuf_append(b, ",\"description\":");
+    jbuf_append_json_str(b, description ? description : "");
+    jbuf_append(b, ",\"parameters\":");
+    jbuf_append(b, schema_json ? schema_json : "{}");
+    jbuf_append(b, "}}");
+}
+
+static bool openai_append_tools_json(jbuf_t *b, conversation_t *conv,
+                                     session_state_t *session) {
+    int max_tools_send = 128;
+    const char *mt_env = getenv("DSCO_OR_MAX_TOOLS");
+    if (mt_env && mt_env[0]) {
+        max_tools_send = atoi(mt_env);
+        if (max_tools_send < 0) max_tools_send = 0;
+    } else {
+        const char *model = session ? session->model : "";
+        if (model && strstr(model, "/")) max_tools_send = 48; /* OpenRouter: tighter cap */
+    }
+
+    int filtered_count = 0;
+    const tool_def_t **filtered = NULL;
+    if (max_tools_send > 0) {
+        filtered = tools_get_filtered(openai_last_user_context(conv),
+                                      max_tools_send, &filtered_count);
+    }
+
+    if (filtered_count <= 0 && g_external_tool_count <= 0) {
+        free((void *)filtered);
+        return false;
+    }
+
+    jbuf_append(b, ",\"tools\":[");
+    bool wrote_any = false;
+    for (int i = 0; i < filtered_count; i++) {
+        if (wrote_any) jbuf_append(b, ",");
+        openai_append_function_tool(b, filtered[i]->name,
+                                    filtered[i]->description,
+                                    filtered[i]->input_schema_json);
+        wrote_any = true;
+    }
+    free((void *)filtered);
+
+    for (int i = 0; i < g_external_tool_count; i++) {
+        if (wrote_any) jbuf_append(b, ",");
+        openai_append_function_tool(b, g_external_tools[i].name,
+                                    g_external_tools[i].description,
+                                    g_external_tools[i].input_schema_json);
+        wrote_any = true;
+    }
+    jbuf_append(b, "]");
+    return wrote_any;
+}
+
+static void openai_append_tool_choice_json(jbuf_t *b, session_state_t *session,
+                                           bool has_tools) {
+    if (!has_tools) return;
+
+    const char *choice = (session && session->tool_choice[0])
+        ? session->tool_choice
+        : "auto";
+
+    if (strcmp(choice, "auto") == 0) {
+        jbuf_append(b, ",\"tool_choice\":\"auto\"");
+    } else if (strcmp(choice, "any") == 0) {
+        jbuf_append(b, ",\"tool_choice\":\"required\"");
+    } else if (strcmp(choice, "none") == 0) {
+        jbuf_append(b, ",\"tool_choice\":\"none\"");
+    } else if (strncmp(choice, "tool:", 5) == 0) {
+        jbuf_append(b, ",\"tool_choice\":{\"type\":\"function\",\"function\":{\"name\":");
+        jbuf_append_json_str(b, choice + 5);
+        jbuf_append(b, "}}");
+    }
+}
+
+static bool openrouter_should_disable_thinking(session_state_t *session) {
+    if (!session || !session->model[0]) return false;
+    if (session->thinking_budget > 0) return false;
+    if (getenv("DSCO_OR_REASONING_EFFORT")) return false;
+    if (strstr(session->model, "kimi") && !strstr(session->model, "thinking")) {
+        return true;
     }
     return false;
 }
@@ -511,53 +621,8 @@ static char *openai_build_request(provider_t *p, conversation_t *conv,
     }
     jbuf_append(&b, "]");
 
-    /* Tools — context-aware retrieval + OpenAI format conversion.
-     * Instead of sending all 340+ tools, retrieve only those relevant to
-     * the conversation context. Core tools always included. */
-    int max_tools_send = 128;
-    const char *mt_env = getenv("DSCO_OR_MAX_TOOLS");
-    if (mt_env && mt_env[0]) {
-        max_tools_send = atoi(mt_env);
-        if (max_tools_send < 0) max_tools_send = 0;
-    } else {
-        const char *m2 = session ? session->model : "";
-        if (strstr(m2, "/")) max_tools_send = 48; /* OpenRouter: tighter cap */
-    }
-
-    if (max_tools_send > 0) {
-        /* Extract last user message as retrieval context */
-        const char *ctx = NULL;
-        for (int i = conv->count - 1; i >= 0; i--) {
-            if (conv->msgs[i].role == ROLE_USER) {
-                for (int j = 0; j < conv->msgs[i].content_count; j++) {
-                    if (conv->msgs[i].content[j].text) {
-                        ctx = conv->msgs[i].content[j].text;
-                        break;
-                    }
-                }
-                break;
-            }
-        }
-
-        int filtered_count = 0;
-        const tool_def_t **filtered = tools_get_filtered(ctx, max_tools_send, &filtered_count);
-
-        if (filtered_count > 0) {
-            jbuf_append(&b, ",\"tools\":[");
-            for (int i = 0; i < filtered_count; i++) {
-                if (i > 0) jbuf_append(&b, ",");
-                jbuf_append(&b, "{\"type\":\"function\",\"function\":{\"name\":");
-                jbuf_append_json_str(&b, filtered[i]->name);
-                jbuf_append(&b, ",\"description\":");
-                jbuf_append_json_str(&b, filtered[i]->description);
-                jbuf_append(&b, ",\"parameters\":");
-                jbuf_append(&b, filtered[i]->input_schema_json);
-                jbuf_append(&b, "}}");
-            }
-            jbuf_append(&b, "]");
-        }
-        free((void *)filtered);
-    }
+    bool has_tools = openai_append_tools_json(&b, conv, session);
+    openai_append_tool_choice_json(&b, session, has_tools);
 
     jbuf_append(&b, "}");
     return b.data;
@@ -576,12 +641,17 @@ static struct curl_slist *openai_build_headers(provider_t *p, const char *api_ke
 /* ── OpenAI SSE streaming state ─────────────────────────────────────── */
 
 typedef struct {
+    bool   used;
+    bool   announced;
+    int    index;
+    char  *tool_name;
+    char  *tool_id;
+    jbuf_t tool_args;
+} oai_tool_call_state_t;
+
+typedef struct {
     jbuf_t          line_buf;
     jbuf_t          text_accum;
-    jbuf_t          tool_args;     /* accumulates tool call arguments */
-    char           *tool_name;
-    char           *tool_id;
-    int             tool_index;    /* current tool_call index */
     stream_text_cb  text_cb;
     stream_tool_start_cb tool_cb;
     void           *cb_ctx;
@@ -595,10 +665,108 @@ typedef struct {
     double          cost_usd;      /* total cost from usage.cost */
     int             cached_tokens; /* input_tokens_details.cached_tokens */
     int             reasoning_tokens; /* output_tokens_details.reasoning_tokens */
+    oai_tool_call_state_t tool_calls[MAX_CONTENT_BLOCKS];
+    int             tool_slots_used;
     /* Result building */
     content_block_t blocks[MAX_CONTENT_BLOCKS];
     int             block_count;
 } oai_sse_state_t;
+
+static oai_tool_call_state_t *oai_tool_state_find_by_id(oai_sse_state_t *s, const char *tool_id) {
+    if (!tool_id || !tool_id[0]) return NULL;
+    for (int i = 0; i < s->tool_slots_used; i++) {
+        oai_tool_call_state_t *slot = &s->tool_calls[i];
+        if (slot->used && slot->tool_id && strcmp(slot->tool_id, tool_id) == 0) {
+            return slot;
+        }
+    }
+    return NULL;
+}
+
+static oai_tool_call_state_t *oai_tool_state_for(oai_sse_state_t *s, int index,
+                                                 const char *tool_id) {
+    oai_tool_call_state_t *slot = NULL;
+
+    if (index >= 0 && index < MAX_CONTENT_BLOCKS) {
+        slot = &s->tool_calls[index];
+        if (!slot->used) {
+            memset(slot, 0, sizeof(*slot));
+            slot->used = true;
+            slot->index = index;
+            jbuf_init(&slot->tool_args, 256);
+            if (index + 1 > s->tool_slots_used) s->tool_slots_used = index + 1;
+        }
+        return slot;
+    }
+
+    slot = oai_tool_state_find_by_id(s, tool_id);
+    if (slot) return slot;
+
+    if (s->tool_slots_used >= MAX_CONTENT_BLOCKS) return NULL;
+    slot = &s->tool_calls[s->tool_slots_used];
+    memset(slot, 0, sizeof(*slot));
+    slot->used = true;
+    slot->index = s->tool_slots_used;
+    jbuf_init(&slot->tool_args, 256);
+    s->tool_slots_used++;
+    return slot;
+}
+
+static const char *oai_tool_state_id(oai_tool_call_state_t *slot) {
+    static char fallback[32];
+    if (slot && slot->tool_id && slot->tool_id[0]) return slot->tool_id;
+    snprintf(fallback, sizeof(fallback), "call_%d", slot ? slot->index : 0);
+    return fallback;
+}
+
+typedef struct {
+    oai_sse_state_t *state;
+} oai_tool_delta_ctx_t;
+
+static void oai_handle_tool_call_delta(const char *tc_elem, void *ctx) {
+    oai_tool_delta_ctx_t *tool_ctx = (oai_tool_delta_ctx_t *)ctx;
+    oai_sse_state_t *s = tool_ctx->state;
+
+    char *idx_raw = json_get_raw(tc_elem, "index");
+    int idx = idx_raw ? atoi(idx_raw) : -1;
+    free(idx_raw);
+
+    char *tid = json_get_str(tc_elem, "id");
+    oai_tool_call_state_t *slot = oai_tool_state_for(s, idx, tid);
+    if (!slot) {
+        free(tid);
+        return;
+    }
+    if (tid && (!slot->tool_id || !slot->tool_id[0])) {
+        slot->tool_id = tid;
+        tid = NULL;
+    }
+    free(tid);
+
+    char *fn_raw = json_get_raw(tc_elem, "function");
+    if (!fn_raw) return;
+
+    char *fname = json_get_str(fn_raw, "name");
+    if (fname && (!slot->tool_name || !slot->tool_name[0])) {
+        slot->tool_name = fname;
+        fname = NULL;
+    }
+    free(fname);
+
+    char *fargs = json_get_str(fn_raw, "arguments");
+    if (fargs && fargs[0]) {
+        jbuf_append(&slot->tool_args, fargs);
+    }
+    free(fargs);
+    free(fn_raw);
+
+    if (slot->tool_name && !slot->announced) {
+        slot->announced = true;
+        if (s->tool_cb) {
+            s->tool_cb(slot->tool_name, oai_tool_state_id(slot), s->cb_ctx);
+        }
+    }
+}
 
 static void oai_handle_sse_line(oai_sse_state_t *s, const char *line) {
     if (strncmp(line, "data: ", 6) != 0) return;
@@ -706,54 +874,18 @@ static void oai_handle_sse_line(oai_sse_state_t *s, const char *line) {
     }
     free(content);
 
-    /* Tool calls delta — tool_calls is an array: [{index, id, function:{name,arguments}}]
-     * We need to skip into the first element since json_get_* only works on objects. */
+    /* Tool calls delta — accumulate every streamed call by index/id. */
     char *tool_calls_raw = json_get_raw(delta_raw, "tool_calls");
     if (tool_calls_raw) {
-        /* Skip into first array element: "[{...}]" → "{...}" */
-        const char *tc_elem = tool_calls_raw;
-        while (*tc_elem && (*tc_elem == '[' || *tc_elem == ' ' ||
-               *tc_elem == '\n' || *tc_elem == '\r' || *tc_elem == '\t'))
-            tc_elem++;
-
-        int idx = json_get_int(tc_elem, "index", 0);
-        char *fn_raw = json_get_raw(tc_elem, "function");
-        if (fn_raw) {
-            char *fname = json_get_str(fn_raw, "name");
-            char *fargs = json_get_str(fn_raw, "arguments");
-            char *tid = json_get_str(tc_elem, "id");
-
-            if (fname) {
-                /* Finalize previous tool if any */
-                if (s->tool_name && s->tool_index >= 0) {
-                    int bi = s->block_count++;
-                    if (bi < MAX_CONTENT_BLOCKS) {
-                        s->blocks[bi].type = safe_strdup("tool_use");
-                        s->blocks[bi].tool_name = s->tool_name;
-                        s->blocks[bi].tool_id = s->tool_id;
-                        s->blocks[bi].tool_input = safe_strdup(
-                            s->tool_args.data ? s->tool_args.data : "{}");
-                    }
-                    s->tool_name = NULL;
-                    s->tool_id = NULL;
-                }
-
-                s->tool_name = fname;
-                s->tool_id = tid ? tid : safe_strdup("call_0");
-                s->tool_index = idx;
-                jbuf_reset(&s->tool_args);
-
-                if (s->tool_cb) s->tool_cb(fname, s->tool_id, s->cb_ctx);
-            } else {
-                free(tid);
-            }
-
-            if (fargs) {
-                jbuf_append(&s->tool_args, fargs);
-                free(fargs);
-            }
-            free(fn_raw);
-        }
+        oai_tool_delta_ctx_t tool_ctx = { .state = s };
+        jbuf_t wrapped;
+        jbuf_init(&wrapped, strlen(tool_calls_raw) + 32);
+        jbuf_append(&wrapped, "{\"tool_calls\":");
+        jbuf_append(&wrapped, tool_calls_raw);
+        jbuf_append(&wrapped, "}");
+        json_array_foreach(wrapped.data, "tool_calls",
+                           oai_handle_tool_call_delta, &tool_ctx);
+        jbuf_free(&wrapped);
         free(tool_calls_raw);
     }
 
@@ -800,11 +932,9 @@ static stream_result_t openai_stream(provider_t *p, const char *api_key,
     oai_sse_state_t state = {0};
     jbuf_init(&state.line_buf, 4096);
     jbuf_init(&state.text_accum, 4096);
-    jbuf_init(&state.tool_args, 1024);
     state.text_cb = text_cb;
     state.tool_cb = tool_cb;
     state.cb_ctx = cb_ctx;
-    state.tool_index = -1;
 
     curl_easy_setopt(curl, CURLOPT_URL, od->api_url);
     curl_easy_setopt(curl, CURLOPT_HTTPHEADER, hdrs);
@@ -827,18 +957,20 @@ static stream_result_t openai_stream(provider_t *p, const char *api_key,
     if (res == CURLE_OK && http_code == 200) {
         result.ok = true;
 
-        /* Finalize any pending tool call */
-        if (state.tool_name && state.tool_index >= 0) {
+        /* Finalize every accumulated tool call in index order. */
+        for (int i = 0; i < state.tool_slots_used; i++) {
+            oai_tool_call_state_t *slot = &state.tool_calls[i];
+            if (!slot->used || !slot->tool_name) continue;
             int bi = state.block_count++;
             if (bi < MAX_CONTENT_BLOCKS) {
                 state.blocks[bi].type = safe_strdup("tool_use");
-                state.blocks[bi].tool_name = state.tool_name;
-                state.blocks[bi].tool_id = state.tool_id;
+                state.blocks[bi].tool_name = safe_strdup(slot->tool_name);
+                state.blocks[bi].tool_id = safe_strdup(oai_tool_state_id(slot));
                 state.blocks[bi].tool_input = safe_strdup(
-                    state.tool_args.data ? state.tool_args.data : "{}");
+                    (slot->tool_args.data && slot->tool_args.data[0])
+                        ? slot->tool_args.data
+                        : "{}");
             }
-            state.tool_name = NULL;
-            state.tool_id = NULL;
         }
 
         /* Add text block if we accumulated text */
@@ -897,17 +1029,19 @@ static stream_result_t openai_stream(provider_t *p, const char *api_key,
                     (int)http_code, od->api_url);
         }
         free(state.stop_reason);
-        free(state.tool_name);
-        free(state.tool_id);
     }
 
     /* Cleanup OpenRouter-specific state */
     free(state.error_msg);
     free(state.actual_model);
     free(state.generation_id);
+    for (int i = 0; i < state.tool_slots_used; i++) {
+        free(state.tool_calls[i].tool_name);
+        free(state.tool_calls[i].tool_id);
+        jbuf_free(&state.tool_calls[i].tool_args);
+    }
     jbuf_free(&state.line_buf);
     jbuf_free(&state.text_accum);
-    jbuf_free(&state.tool_args);
 
     return result;
 }
