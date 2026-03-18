@@ -5,6 +5,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <stddef.h>
+#include <ctype.h>
 
 #define DSCO_VERSION "0.9.0"
 
@@ -23,6 +24,16 @@
 #define MAX_MSG_CONTENT     (64 * 1024)
 #define MAX_MESSAGES        128
 #define MAX_TOOLS           512
+
+/* Tool register file: hard cap on tools per API request.
+ * Like CPU registers — 64 slots, tools evicted/loaded dynamically.
+ * Budget-adaptive: full=64, mid=48, low=32, critical=16 */
+#define TOOL_REGISTER_CAP       64
+#define TOOL_REG_ALWAYS         16   /* R0-R15:  hardwired core, never evicted */
+#define TOOL_REG_WARM           16   /* R16-R31: default core, evictable */
+#define TOOL_REG_WORKING        24   /* R32-R55: quorum-scored, turn-volatile */
+#define TOOL_REG_DISCOVERY       8   /* R56-R63: progressive schema, ephemeral */
+#define QUORUM_MIN_SIGNALS       2   /* min independent signals to load a tool */
 #define MAX_INPUT_LINE      65536
 
 /* API defaults */
@@ -95,6 +106,8 @@ static const model_info_t MODEL_REGISTRY[] = {
     /* ── OpenAI — GPT-5.x family (2026 frontier) ────────────────────── */
     { "gpt54-pro",    "openai/gpt-5.4-pro",          1050000, 32768, 30.0, 180.0,  0, 0, 1 },
     { "gpt54",        "openai/gpt-5.4",              1050000, 32768,  2.50, 15.0,  0, 0, 1 },
+    { "gpt54-mini",   "openai/gpt-5.4-mini",           400000, 32768,  0.75,  4.50, 0, 0, 0 },
+    { "gpt54-nano",   "openai/gpt-5.4-nano",           400000, 32768,  0.20,  1.25, 0, 0, 0 },
     { "gpt53-codex",  "openai/gpt-5.3-codex",         400000, 32768,  1.75, 14.0,  0, 0, 1 },
     { "gpt53",        "openai/gpt-5.3-chat",           128000, 32768,  1.75, 14.0,  0, 0, 1 },
     { "gpt52-pro",    "openai/gpt-5.2-pro",            400000, 32768, 21.0, 168.0,  0, 0, 1 },
@@ -159,6 +172,7 @@ static const model_info_t MODEL_REGISTRY[] = {
     { "llama33-70b",  "meta-llama/llama-3.3-70b-instruct", 131072, 32768, 0.10, 0.32, 0, 0, 0 },
     /* ── Mistral (2025/2026) ─────────────────────────────────────────── */
     { "mistral-l3",   "mistralai/mistral-large-2512",   262144, 32768,  0.50,  1.50, 0, 0, 0 },
+    { "mixtral",      "mistralai/mixtral-8x7b-instruct-v0.1", 32768, 32768, 0.0, 0.0, 0, 0, 0 },
     { "devstral",     "mistralai/devstral-2512",         262144, 32768,  0.40,  2.00, 0, 0, 0 },
     { "mistral-med",  "mistralai/mistral-medium-3.1",    131072, 32768,  0.40,  2.00, 0, 0, 0 },
     { "mistral-s32",  "mistralai/mistral-small-3.2-24b-instruct", 131072, 32768, 0.06, 0.18, 0, 0, 0 },
@@ -202,10 +216,42 @@ static const model_info_t MODEL_REGISTRY[] = {
     { NULL, NULL, 0, 0, 0, 0, 0, 0, 0 }
 };
 
+static inline void model_normalize_key(const char *src, char *dst, size_t dst_len) {
+    if (!dst || dst_len == 0) return;
+    dst[0] = '\0';
+    if (!src || !*src) return;
+
+    const char *p = src;
+    const char *slash = strchr(src, '/');
+    if (slash && slash[1] != '\0') p = slash + 1;
+
+    size_t out = 0;
+    for (; *p && out + 1 < dst_len; p++) {
+        unsigned char c = (unsigned char)*p;
+        if (!isalnum(c)) continue;
+        dst[out++] = (char)tolower(c);
+    }
+    dst[out] = '\0';
+}
+
 static inline const model_info_t *model_lookup(const char *name) {
+    if (!name || !*name) return NULL;
+
+    char want_norm[256];
+    model_normalize_key(name, want_norm, sizeof(want_norm));
+
     for (int i = 0; MODEL_REGISTRY[i].alias; i++) {
         if (strcmp(name, MODEL_REGISTRY[i].alias) == 0 ||
             strcmp(name, MODEL_REGISTRY[i].model_id) == 0)
+            return &MODEL_REGISTRY[i];
+
+        if (want_norm[0] == '\0') continue;
+
+        char alias_norm[256];
+        char model_norm[256];
+        model_normalize_key(MODEL_REGISTRY[i].alias, alias_norm, sizeof(alias_norm));
+        model_normalize_key(MODEL_REGISTRY[i].model_id, model_norm, sizeof(model_norm));
+        if (strcmp(want_norm, alias_norm) == 0 || strcmp(want_norm, model_norm) == 0)
             return &MODEL_REGISTRY[i];
     }
     return NULL;
