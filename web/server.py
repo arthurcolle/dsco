@@ -513,6 +513,11 @@ class Session:
         return SYSTEM_PROMPT.format(work_dir=WORK_DIR)
 
 
+def assistant_content_for_replay(content_blocks: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Keep UI-only thinking blocks out of follow-up Anthropic requests."""
+    return [block for block in content_blocks if block.get("type") != "thinking"]
+
+
 # ── Agent Loop: Anthropic Provider ───────────────────────────────────────────
 
 async def agent_loop_anthropic(ws: WebSocket, session: Session):
@@ -627,7 +632,9 @@ async def agent_loop_anthropic(ws: WebSocket, session: Session):
         session.total_input += input_tokens
         session.total_output += output_tokens
         session.total_cache_read += cache_read
-        session.messages.append({"role": "assistant", "content": content_blocks})
+        replay_blocks = assistant_content_for_replay(content_blocks)
+        if replay_blocks:
+            session.messages.append({"role": "assistant", "content": replay_blocks})
 
         # Estimate context usage
         est_ctx = session.total_input + session.total_output
@@ -644,7 +651,7 @@ async def agent_loop_anthropic(ws: WebSocket, session: Session):
         if session.cancelled:
             break
 
-        tool_uses = [b for b in content_blocks if b["type"] == "tool_use"]
+        tool_uses = [b for b in replay_blocks if b["type"] == "tool_use"]
         if not tool_uses:
             break
 
@@ -951,7 +958,7 @@ _risk = {
     "max_order_usd": float(os.getenv("DSCO_TRADING_MAX_ORDER", "100")),
     "min_arb_spread": float(os.getenv("DSCO_TRADING_MIN_ARB_SPREAD", "0.03")),
     "max_open_orders": int(os.getenv("DSCO_TRADING_MAX_OPEN_ORDERS", "20")),
-    "dry_run": os.getenv("DSCO_TRADING_DRY_RUN", "1") != "0",
+    "dry_run": os.getenv("DSCO_TRADING_DRY_RUN", "true").lower() not in ("0", "false", "off", "no"),
 }
 
 

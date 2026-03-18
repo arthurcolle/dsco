@@ -15,6 +15,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <strings.h>
 #include <unistd.h>
 #include <time.h>
 #include <sys/time.h>
@@ -939,7 +940,7 @@ static void risk_init(void) {
     g_risk = risk_limits_default();
     const char *e;
     if ((e = getenv("DSCO_TRADING_DRY_RUN")))
-        g_risk.dry_run = (strcmp(e, "0") != 0);
+        g_risk.dry_run = !(strcmp(e, "0") == 0 || strcasecmp(e, "false") == 0 || strcasecmp(e, "off") == 0 || strcasecmp(e, "no") == 0);
     if ((e = getenv("DSCO_TRADING_MAX_ORDER")))
         g_risk.max_order_usd = atof(e);
     if ((e = getenv("DSCO_TRADING_MAX_EXPOSURE")))

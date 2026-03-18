@@ -35,6 +35,7 @@
 #include <sys/time.h>
 #include <sys/wait.h>
 #include <termios.h>
+#include <time.h>
 #include "crypto.h"
 #include "output_guard.h"
 
@@ -135,7 +136,7 @@ static bool rate_limiter_acquire(rate_limiter_t *rl) {
 
 /* ── Cost budget ───────────────────────────────────────────────────────── */
 
-static double g_cost_budget = 5.0;      /* default $5/session */
+double g_cost_budget = 5.0;             /* default $5/session (non-static: llm.c budget pressure) */
 static double g_daily_budget = 50.0;    /* default $50/day */
 
 /* Budgets default to $5/session and $50/day. Override with env vars.
@@ -417,6 +418,120 @@ static char *load_and_encode_image(const char *path, const char *media_type,
     free(raw);
 
     return b64;
+}
+
+static void format_mode_string(mode_t mode, char out[11]) {
+    out[0] = S_ISDIR(mode) ? 'd'
+           : S_ISLNK(mode) ? 'l'
+           : S_ISCHR(mode) ? 'c'
+           : S_ISBLK(mode) ? 'b'
+           : S_ISFIFO(mode) ? 'p'
+           : S_ISSOCK(mode) ? 's'
+           : '-';
+    out[1] = (mode & S_IRUSR) ? 'r' : '-';
+    out[2] = (mode & S_IWUSR) ? 'w' : '-';
+    out[3] = (mode & S_IXUSR) ? 'x' : '-';
+    out[4] = (mode & S_IRGRP) ? 'r' : '-';
+    out[5] = (mode & S_IWGRP) ? 'w' : '-';
+    out[6] = (mode & S_IXGRP) ? 'x' : '-';
+    out[7] = (mode & S_IROTH) ? 'r' : '-';
+    out[8] = (mode & S_IWOTH) ? 'w' : '-';
+    out[9] = (mode & S_IXOTH) ? 'x' : '-';
+    out[10] = '\0';
+}
+
+static int dirlist_filter(const struct dirent *ent) {
+    if (!ent) return 0;
+    return strcmp(ent->d_name, ".") != 0 && strcmp(ent->d_name, "..") != 0;
+}
+
+static bool expand_home_path(const char *input, char *out, size_t out_sz) {
+    if (!input || !out || out_sz == 0) return false;
+    if (input[0] == '~' && (input[1] == '/' || input[1] == '\0')) {
+        const char *home = getenv("HOME");
+        if (home && home[0]) {
+            int n = snprintf(out, out_sz, "%s%s", home, input + 1);
+            return n >= 0 && (size_t)n < out_sz;
+        }
+    }
+    int n = snprintf(out, out_sz, "%s", input);
+    return n >= 0 && (size_t)n < out_sz;
+}
+
+static bool append_directory_listing(jbuf_t *out, const char *dir_path) {
+    if (!out || !dir_path || !dir_path[0]) return false;
+
+    struct dirent **ents = NULL;
+    int n = scandir(dir_path, &ents, dirlist_filter, alphasort);
+    if (n < 0) return false;
+
+    jbuf_appendf(out, "[directory: %s]\n", dir_path);
+    if (n == 0) {
+        jbuf_append(out, "(empty)\n");
+        free(ents);
+        return true;
+    }
+
+    const int max_entries = 200;
+    int emitted = 0;
+    for (int i = 0; i < n; i++) {
+        if (emitted >= max_entries) {
+            jbuf_appendf(out, "[truncated after %d entries]\n", emitted);
+            break;
+        }
+
+        struct dirent *ent = ents[i];
+        size_t need = strlen(dir_path) + strlen(ent->d_name) + 2;
+        char *full_path = safe_malloc(need);
+        snprintf(full_path, need, "%s/%s", dir_path, ent->d_name);
+
+        struct stat st;
+        if (lstat(full_path, &st) != 0) {
+            free(full_path);
+            continue;
+        }
+
+        char mode_buf[11];
+        format_mode_string(st.st_mode, mode_buf);
+
+        char time_buf[32] = "";
+        struct tm tm_buf;
+        if (localtime_r(&st.st_mtime, &tm_buf)) {
+            strftime(time_buf, sizeof(time_buf), "%Y-%m-%d %H:%M", &tm_buf);
+        }
+
+        jbuf_appendf(out, "%s %3lu %8lld %s %s",
+                     mode_buf,
+                     (unsigned long)st.st_nlink,
+                     (long long)st.st_size,
+                     time_buf[0] ? time_buf : "----",
+                     ent->d_name);
+
+        if (S_ISLNK(st.st_mode)) {
+            char link_target[1024];
+            ssize_t link_len = readlink(full_path, link_target, sizeof(link_target) - 1);
+            if (link_len >= 0) {
+                link_target[link_len] = '\0';
+                dsco_strip_terminal_controls_inplace(link_target);
+                jbuf_appendf(out, " -> %s", link_target);
+            }
+        }
+
+        jbuf_append(out, "\n");
+        emitted++;
+        free(full_path);
+
+        if (out->len > (size_t)(MAX_INPUT_LINE - 4096)) {
+            jbuf_appendf(out, "[truncated after %d entries]\n", emitted);
+            break;
+        }
+    }
+
+    for (int i = 0; i < n; i++) {
+        free(ents[i]);
+    }
+    free(ents);
+    return true;
 }
 
 static int process_dragged_images(char *input_buf, conversation_t *conv) {
@@ -994,6 +1109,11 @@ static const slash_command_t s_slash_commands[] = {
     {"/context",      "show context usage"},
     {"/effort",       "set effort: low/medium/high"},
     {"/compact",      "trim conversation history"},
+    {"/undo",         "remove last exchange from conversation"},
+    {"/retry",        "re-run last user message (optionally with new model)"},
+    {"/diff",         "show git diff (--staged for index)"},
+    {"/note",         "add an annotation to the conversation context"},
+    {"/add-dir",      "inject a directory listing into context"},
     {"/version",      "show version/build information"},
     {"/force",        "control next tool choice"},
     {"/prefill",      "set prefill text for the next response"},
@@ -1047,6 +1167,12 @@ static const slash_command_t s_slash_commands[] = {
     {"/dashboard",    "show rich session dashboard"},
     {"/top",          "show tool leaderboard"},
     {"/flame",        "show tool flame timeline"},
+    {"/branch",       "save conversation as a named branch checkpoint"},
+    {"/pin",          "set persistent context injected at every turn"},
+    {"/unpin",        "clear pinned context"},
+    {"/git",          "run a git command and display output"},
+    {"/ask",          "one-shot query to a specific model without switching"},
+    {"/alias",        "define or list command shortcuts"},
     {"quit",          "exit dsco"},
     {"exit",          "exit dsco"},
     {"/exit",         "exit dsco"},
@@ -1063,15 +1189,58 @@ static const char *command_description(const char *command) {
     return "";
 }
 
+/* Helper: build a completed "/<cmd> <arg>" string */
+static char *make_arg_completion(const char *prefix, const char *arg) {
+    size_t n = strlen(prefix) + 1 + strlen(arg) + 1;
+    char *r = malloc(n);
+    if (!r) return NULL;
+    snprintf(r, n, "%s %s", prefix, arg);
+    return r;
+}
+
 static char *command_generator(const char *text, int state) {
-    static int idx, len;
-    static int model_idx;
-    static int mode;
+    /* mode: 0=slash commands, 1=/model, 2=/effort, 3=/trust,
+             4=/exec, 5=/temp, 6=/thinking, 7=/route */
+    static int idx, len, model_idx, arg_idx, mode;
+
+    static const char *effort_args[]   = {"low", "medium", "high", NULL};
+    static const char *trust_args[]    = {"trusted", "standard", "untrusted", NULL};
+    static const char *exec_args[]     = {"claude", "codex", "list", NULL};
+    static const char *route_args[]    = {"status", "policy", "budget", "history",
+                                           "recommend", "lock", "unlock", NULL};
+
     if (!state) {
-        idx = 0;
-        model_idx = 0;
+        idx = 0; model_idx = 0; arg_idx = 0;
         len = (int)strlen(text);
-        mode = (strncmp(text, "/model ", 7) == 0) ? 1 : 0;
+        if      (strncmp(text, "/model ",    7) == 0) mode = 1;
+        else if (strncmp(text, "/effort ",   8) == 0) mode = 2;
+        else if (strncmp(text, "/trust ",    7) == 0) mode = 3;
+        else if (strncmp(text, "/exec ",     6) == 0) mode = 4;
+        else if (strncmp(text, "/temp ",     6) == 0) mode = 5;
+        else if (strncmp(text, "/thinking ", 10) == 0) mode = 6;
+        else if (strncmp(text, "/route ",    7) == 0) mode = 7;
+        else mode = 0;
+    }
+
+    /* Argument-completion modes */
+    const char **arg_table = NULL;
+    const char *arg_prefix = NULL;
+    int prefix_len = 0;
+    if (mode == 2) { arg_table = effort_args;  arg_prefix = "/effort";  prefix_len = 8; }
+    if (mode == 3) { arg_table = trust_args;   arg_prefix = "/trust";   prefix_len = 7; }
+    if (mode == 4) { arg_table = exec_args;    arg_prefix = "/exec";    prefix_len = 6; }
+    if (mode == 7) { arg_table = route_args;   arg_prefix = "/route";   prefix_len = 7; }
+
+    if (arg_table) {
+        const char *partial = text + prefix_len;
+        while (*partial == ' ') partial++;
+        int p_len = (int)strlen(partial);
+        while (arg_table[arg_idx]) {
+            const char *a = arg_table[arg_idx++];
+            if (strncmp(a, partial, (size_t)p_len) == 0)
+                return make_arg_completion(arg_prefix, a);
+        }
+        return NULL;
     }
 
     if (mode == 1) {
@@ -1081,16 +1250,14 @@ static char *command_generator(const char *text, int state) {
         while (MODEL_REGISTRY[model_idx].alias) {
             const char *alias = MODEL_REGISTRY[model_idx].alias;
             model_idx++;
-            if (strncmp(alias, partial, (size_t)p_len) == 0) {
-                size_t need = strlen("/model ") + strlen(alias) + 1;
-                char *r = malloc(need + 1);
-                if (!r) return NULL;
-                snprintf(r, need + 1, "/model %s", alias);
-                return r;
-            }
+            if (strncmp(alias, partial, (size_t)p_len) == 0)
+                return make_arg_completion("/model", alias);
         }
         return NULL;
     }
+
+    /* modes 5, 6: no fixed arg list — fall through to no completion */
+    if (mode == 5 || mode == 6) return NULL;
 
     while (s_slash_commands[idx].command) {
         const char *cmd = s_slash_commands[idx++].command;
@@ -1136,6 +1303,13 @@ static char **command_completion(const char *text, int start, int end) {
     (void)start; (void)end;
     rl_attempted_completion_over = 1;
     return rl_completion_matches(text, command_generator);
+}
+
+static int dsco_clear_screen(int count, int key) {
+    (void)count; (void)key;
+    fprintf(rl_outstream, "\033[2J\033[H");
+    rl_forced_update_display();
+    return 0;
 }
 #endif
 
@@ -1591,7 +1765,12 @@ static char *read_input_line_prompt(char *buf, size_t buf_sz, const char *prompt
 #ifdef HAVE_READLINE
     char *line = readline(p);
     if (!line) return NULL;
-    if (line[0]) add_history(line);
+    if (line[0]) {
+        /* Skip duplicate consecutive entries */
+        HIST_ENTRY *prev = history_get(where_history());
+        if (!prev || strcmp(prev->line, line) != 0)
+            add_history(line);
+    }
     snprintf(buf, buf_sz, "%s", line);
     free(line);
     return buf;
@@ -1648,6 +1827,8 @@ void agent_run(const char *api_key, const char *model,
     sigaction(SIGHUP, &sa_term, NULL);
 
     tools_init();
+    tools_hint_init();
+    tools_cooc_load();
     dsco_locks_init(&g_locks);
     md_init(&s_md, stderr);
 
@@ -1689,7 +1870,18 @@ void agent_run(const char *api_key, const char *model,
     rl_attempted_completion_function = command_completion;
     rl_completion_display_matches_hook = (VFunction *)command_completion_display;
     rl_bind_key('/', slash_completion_key);
+    rl_bind_key('\f', dsco_clear_screen);  /* Ctrl+L clears screen */
     rl_basic_word_break_characters = " \t\n";
+    /* Load persisted history */
+    {
+        const char *home = getenv("HOME");
+        if (home) {
+            char hist_path[560];
+            snprintf(hist_path, sizeof(hist_path), "%s/.dsco/history", home);
+            read_history(hist_path);
+        }
+    }
+    stifle_history(1000);
 #endif
 
     conversation_t conv;
@@ -1715,10 +1907,17 @@ void agent_run(const char *api_key, const char *model,
     ensure_provider(&session, api_key);
     tools_set_runtime_api_key(api_key);
     tools_set_runtime_model(session.model);
+    tools_set_context_window(session.context_window);
 
     char input_buf[MAX_INPUT_LINE];
+    char last_user_input[MAX_INPUT_LINE] = {0}; /* for /retry */
     int last_input_tokens = 0;
     int consecutive_tool_failures = 0;  /* for router failure escalation */
+
+    /* Command aliases: /alias <name> <expansion> */
+#define MAX_ALIASES 32
+    struct { char name[64]; char expansion[MAX_INPUT_LINE]; } aliases[MAX_ALIASES];
+    int alias_count = 0;
 
     int tool_count;
     tools_get_all(&tool_count);
@@ -1879,6 +2078,22 @@ void agent_run(const char *api_key, const char *model,
         if (strcmp(input_buf, "quit") == 0 || strcmp(input_buf, "exit") == 0 ||
             strcmp(input_buf, "/exit") == 0 || strcmp(input_buf, "/quit") == 0) break;
 
+        /* ── Alias expansion ───────────────────────────────────────────── */
+        {
+            for (int ai = 0; ai < alias_count; ai++) {
+                size_t nlen = strlen(aliases[ai].name);
+                if (strncmp(input_buf, aliases[ai].name, nlen) == 0 &&
+                    (input_buf[nlen] == '\0' || input_buf[nlen] == ' ')) {
+                    char tail[MAX_INPUT_LINE] = {0};
+                    if (input_buf[nlen] == ' ')
+                        snprintf(tail, sizeof(tail), " %s", input_buf + nlen + 1);
+                    snprintf(input_buf, sizeof(input_buf), "%s%s",
+                             aliases[ai].expansion, tail);
+                    break;
+                }
+            }
+        }
+
         /* ── Slash commands ────────────────────────────────────────────── */
 
         if (strcmp(input_buf, "/clear") == 0) {
@@ -1907,6 +2122,7 @@ void agent_run(const char *api_key, const char *model,
                 const char *resolved = model_resolve_alias(arg);
                 snprintf(session.model, sizeof(session.model), "%s", resolved);
                 session.context_window = model_context_window(resolved);
+                tools_set_context_window(session.context_window);
                 session.model_locked = true;  /* user explicitly chose; block auto-switching */
                 tools_set_runtime_model(session.model);
                 const model_info_t *mi = model_lookup(resolved);
@@ -2016,6 +2232,284 @@ void agent_run(const char *api_key, const char *model,
             snprintf(msg, sizeof(msg), "conversation compacted (%d messages remain)", conv.count);
             tui_success(msg);
             baseline_log("command", "/compact", NULL, NULL);
+            continue;
+        }
+        if (strcmp(input_buf, "/undo") == 0) {
+            if (!conv_pop_last_turn(&conv)) {
+                tui_warning("nothing to undo");
+            } else {
+                if (session.turn_count > 0) session.turn_count--;
+                char msg[64];
+                snprintf(msg, sizeof(msg), "last turn removed (%d messages remain)", conv.count);
+                tui_success(msg);
+                last_user_input[0] = '\0';
+            }
+            continue;
+        }
+        if (strncmp(input_buf, "/retry", 6) == 0) {
+            const char *arg = input_buf + 6;
+            while (*arg == ' ') arg++;
+            if (!last_user_input[0]) {
+                tui_warning("no previous message to retry");
+                continue;
+            }
+            /* Optionally switch model first */
+            if (*arg) {
+                const char *resolved = model_resolve_alias(arg);
+                snprintf(session.model, sizeof(session.model), "%s", resolved);
+                session.context_window = model_context_window(resolved);
+                ensure_provider(&session, api_key);
+                char msmsg[128];
+                snprintf(msmsg, sizeof(msmsg), "model → %s", resolved);
+                tui_success(msmsg);
+            }
+            if (conv_pop_last_turn(&conv) && session.turn_count > 0) {
+                session.turn_count--;
+            }
+            snprintf(input_buf, sizeof(input_buf), "%s", last_user_input);
+            /* Fall through by NOT continuing — let input_buf reach the LLM dispatch */
+            goto send_to_llm;
+        }
+        if (strncmp(input_buf, "/diff", 5) == 0) {
+            const char *arg = input_buf + 5;
+            while (*arg == ' ') arg++;
+            bool staged = (strcmp(arg, "--staged") == 0 || strcmp(arg, "--cached") == 0);
+            const char *cmd = staged ? "git diff --staged 2>&1" : "git diff 2>&1";
+            FILE *fp = popen(cmd, "r");
+            if (!fp) {
+                tui_error("git diff failed");
+            } else {
+                char line[512];
+                int lines = 0;
+                fprintf(stderr, "\n");
+                while (fgets(line, sizeof(line), fp)) {
+                    fprintf(stderr, "%s", line);
+                    lines++;
+                }
+                pclose(fp);
+                if (lines == 0)
+                    fprintf(stderr, "  %s(no changes)%s\n", TUI_DIM, TUI_RESET);
+                fprintf(stderr, "\n");
+            }
+            continue;
+        }
+        if (strncmp(input_buf, "/note", 5) == 0) {
+            const char *arg = input_buf + 5;
+            while (*arg == ' ') arg++;
+            if (!*arg) {
+                fprintf(stderr, "  %susage: /note <text>%s\n", TUI_DIM, TUI_RESET);
+            } else {
+                char note_buf[MAX_INPUT_LINE];
+                snprintf(note_buf, sizeof(note_buf), "[note] %s", arg);
+                conv_add_user_text(&conv, note_buf);
+                tui_success("note added to context");
+            }
+            continue;
+        }
+        if (strncmp(input_buf, "/add-dir", 8) == 0) {
+            const char *arg = input_buf + 8;
+            while (*arg == ' ') arg++;
+            if (!*arg) arg = ".";
+            char dir_path[4096];
+            if (!expand_home_path(arg, dir_path, sizeof(dir_path))) {
+                tui_error("directory path too long");
+            } else {
+                jbuf_t ctx;
+                jbuf_init(&ctx, 4096);
+                if (!append_directory_listing(&ctx, dir_path)) {
+                    int err = errno;
+                    char msg[256];
+                    snprintf(msg, sizeof(msg), "directory listing failed: %s", strerror(err));
+                    tui_error(msg);
+                } else {
+                    conv_add_user_text(&conv, ctx.data ? ctx.data : "");
+                    char msg[128];
+                    snprintf(msg, sizeof(msg), "directory '%s' added to context", dir_path);
+                    tui_success(msg);
+                }
+                jbuf_free(&ctx);
+            }
+            continue;
+        }
+        if (strncmp(input_buf, "/branch", 7) == 0) {
+            const char *arg = input_buf + 7;
+            while (*arg == ' ') arg++;
+            const char *bname = (*arg) ? arg : "default";
+            char safe[64] = {0};
+            int si = 0;
+            for (const char *c = bname; *c && si < 63; c++) {
+                safe[si++] = (isalnum((unsigned char)*c) || *c == '-' || *c == '_') ? *c : '_';
+            }
+            const char *bhome = getenv("HOME");
+            if (!bhome) bhome = "/tmp";
+            char bpath[600];
+            snprintf(bpath, sizeof(bpath), "%s/.dsco/sessions/_branch_%s.json", bhome, safe);
+            if (conv_save(&conv, bpath)) {
+                char msg[256];
+                snprintf(msg, sizeof(msg), "branch '%s' saved (%d messages)", safe, conv.count);
+                tui_success(msg);
+            } else {
+                tui_error("branch save failed");
+            }
+            continue;
+        }
+        if (strncmp(input_buf, "/pin", 4) == 0 && (input_buf[4] == '\0' || input_buf[4] == ' ')) {
+            const char *arg = input_buf + 4;
+            while (*arg == ' ') arg++;
+            if (*arg == '\0') {
+                if (session.pin_text[0]) {
+                    fprintf(stderr, "  %spinned:%s %s\n", TUI_DIM, TUI_RESET, session.pin_text);
+                    fprintf(stderr, "  %suse /unpin to clear%s\n", TUI_DIM, TUI_RESET);
+                } else {
+                    fprintf(stderr, "  %s(no pin set)%s\n", TUI_DIM, TUI_RESET);
+                }
+            } else {
+                snprintf(session.pin_text, sizeof(session.pin_text), "%s", arg);
+                tui_success("pinned context set (injected at conversation start)");
+            }
+            continue;
+        }
+        if (strcmp(input_buf, "/unpin") == 0) {
+            session.pin_text[0] = '\0';
+            tui_success("pinned context cleared");
+            continue;
+        }
+        if (strncmp(input_buf, "/git", 4) == 0 && (input_buf[4] == '\0' || input_buf[4] == ' ')) {
+            const char *arg = input_buf + 4;
+            while (*arg == ' ') arg++;
+            if (!*arg) {
+                fprintf(stderr, "  %susage: /git <git-args>%s\n", TUI_DIM, TUI_RESET);
+            } else {
+                char gitcmd[1024];
+                snprintf(gitcmd, sizeof(gitcmd), "git %s 2>&1", arg);
+                FILE *gitfp = popen(gitcmd, "r");
+                if (!gitfp) {
+                    tui_error("popen failed");
+                } else {
+                    char gline[512];
+                    fprintf(stderr, "\n");
+                    bool gany = false;
+                    while (fgets(gline, sizeof(gline), gitfp)) { fprintf(stderr, "%s", gline); gany = true; }
+                    pclose(gitfp);
+                    if (!gany) fprintf(stderr, "  %s(no output)%s\n", TUI_DIM, TUI_RESET);
+                    fprintf(stderr, "\n");
+                }
+            }
+            continue;
+        }
+        if (strncmp(input_buf, "/ask", 4) == 0 && input_buf[4] == ' ') {
+            const char *arg = input_buf + 5;
+            while (*arg == ' ') arg++;
+            const char *aq = strchr(arg, ' ');
+            if (!aq || !aq[1]) {
+                fprintf(stderr, "  %susage: /ask <model> <question>%s\n", TUI_DIM, TUI_RESET);
+            } else {
+                char ask_model[128];
+                size_t amlen = (size_t)(aq - arg);
+                if (amlen >= sizeof(ask_model)) amlen = sizeof(ask_model) - 1;
+                memcpy(ask_model, arg, amlen);
+                ask_model[amlen] = '\0';
+                const char *question = aq + 1;
+                while (*question == ' ') question++;
+                const char *resolved = model_resolve_alias(ask_model);
+                swarm_t *sw = tools_swarm_instance();
+                const char *exe = (sw && sw->dsco_path && sw->dsco_path[0])
+                    ? sw->dsco_path
+                    : "dsco";
+                char qexe[4096];
+                char qmodel[256];
+                char qquestion[(MAX_INPUT_LINE * 2) + 8];
+                if (!shell_quote_single(exe, qexe, sizeof(qexe)) ||
+                    !shell_quote_single(resolved, qmodel, sizeof(qmodel)) ||
+                    !shell_quote_single(question, qquestion, sizeof(qquestion))) {
+                    tui_error("ask command too long");
+                } else {
+                    jbuf_t acmd;
+                    jbuf_init(&acmd, strlen(qexe) + strlen(qmodel) + strlen(qquestion) + 32);
+                    jbuf_append(&acmd, qexe);
+                    jbuf_append(&acmd, " -m ");
+                    jbuf_append(&acmd, qmodel);
+                    jbuf_append(&acmd, " ");
+                    jbuf_append(&acmd, qquestion);
+                    jbuf_append(&acmd, " 2>&1");
+                    FILE *afp = popen(acmd.data, "r");
+                    jbuf_free(&acmd);
+                    if (!afp) {
+                        tui_error("popen failed");
+                    } else {
+                        fprintf(stderr, "\n  %s[%s]%s ", TUI_BCYAN, resolved, TUI_RESET);
+                        char aline[512];
+                        bool aany = false;
+                        while (fgets(aline, sizeof(aline), afp)) { fprintf(stderr, "%s", aline); aany = true; }
+                        pclose(afp);
+                        if (!aany) fprintf(stderr, "(no response)\n");
+                        fprintf(stderr, "\n");
+                    }
+                }
+            }
+            continue;
+        }
+        if (strncmp(input_buf, "/alias", 6) == 0) {
+            const char *arg = input_buf + 6;
+            while (*arg == ' ') arg++;
+            if (*arg == '\0') {
+                if (alias_count == 0) {
+                    fprintf(stderr, "  %s(no aliases defined)%s\n", TUI_DIM, TUI_RESET);
+                } else {
+                    for (int ai = 0; ai < alias_count; ai++) {
+                        fprintf(stderr, "  %s%-20s%s -> %s\n", TUI_BCYAN,
+                                aliases[ai].name, TUI_RESET, aliases[ai].expansion);
+                    }
+                }
+            } else {
+                const char *asp = strchr(arg, ' ');
+                if (!asp) {
+                    bool afound = false;
+                    for (int ai = 0; ai < alias_count; ai++) {
+                        if (strcmp(aliases[ai].name, arg) == 0) {
+                            memmove(&aliases[ai], &aliases[ai+1],
+                                    (size_t)(alias_count - ai - 1) * sizeof(aliases[0]));
+                            alias_count--;
+                            tui_success("alias removed");
+                            afound = true;
+                            break;
+                        }
+                    }
+                    if (!afound) tui_warning("alias not found");
+                } else {
+                    char aname[64];
+                    size_t alen = (size_t)(asp - arg);
+                    if (alen >= sizeof(aname)) alen = sizeof(aname) - 1;
+                    memcpy(aname, arg, alen);
+                    aname[alen] = '\0';
+                    const char *expansion = asp + 1;
+                    while (*expansion == ' ') expansion++;
+                    bool aupdated = false;
+                    for (int ai = 0; ai < alias_count; ai++) {
+                        if (strcmp(aliases[ai].name, aname) == 0) {
+                            snprintf(aliases[ai].expansion, sizeof(aliases[0].expansion),
+                                     "%s", expansion);
+                            tui_success("alias updated");
+                            aupdated = true;
+                            break;
+                        }
+                    }
+                    if (!aupdated) {
+                        if (alias_count >= MAX_ALIASES) {
+                            tui_error("alias table full");
+                        } else {
+                            snprintf(aliases[alias_count].name, sizeof(aliases[0].name),
+                                     "%s", aname);
+                            snprintf(aliases[alias_count].expansion,
+                                     sizeof(aliases[0].expansion), "%s", expansion);
+                            alias_count++;
+                            char amsg[128];
+                            snprintf(amsg, sizeof(amsg), "alias '%s' -> '%s'", aname, expansion);
+                            tui_success(amsg);
+                        }
+                    }
+                }
+            }
             continue;
         }
         if (strcmp(input_buf, "/version") == 0) {
@@ -2507,6 +3001,11 @@ void agent_run(const char *api_key, const char *model,
             fprintf(stderr, "  %s/cost%s        show session cost\n", TUI_CYAN, TUI_RESET);
             fprintf(stderr, "  %s/context%s     show token usage\n", TUI_CYAN, TUI_RESET);
             fprintf(stderr, "  %s/compact%s     trim conversation history\n", TUI_CYAN, TUI_RESET);
+            fprintf(stderr, "  %s/undo%s        remove last exchange\n", TUI_CYAN, TUI_RESET);
+            fprintf(stderr, "  %s/retry [model]%s re-run last message\n", TUI_CYAN, TUI_RESET);
+            fprintf(stderr, "  %s/diff [--staged]%s show git diff\n", TUI_CYAN, TUI_RESET);
+            fprintf(stderr, "  %s/note <text>%s add annotation to context\n", TUI_CYAN, TUI_RESET);
+            fprintf(stderr, "  %s/add-dir [path]%s inject directory listing into context\n", TUI_CYAN, TUI_RESET);
             fprintf(stderr, "  %s/save [name]%s save session\n", TUI_CYAN, TUI_RESET);
             fprintf(stderr, "  %s/load [name]%s load session\n", TUI_CYAN, TUI_RESET);
             fprintf(stderr, "  %s/sessions%s   list saved sessions\n", TUI_CYAN, TUI_RESET);
@@ -3379,6 +3878,7 @@ void agent_run(const char *api_key, const char *model,
             continue;
         }
 
+send_to_llm:
         if ((session.active_topology[0] || session.topology_auto) &&
             run_topology_prompt(&session, api_key, &conv, input_buf, &last_input_tokens)) {
             continue;
@@ -3457,13 +3957,27 @@ void agent_run(const char *api_key, const char *model,
             }
         }
 
+        /* Inject pinned context as first user message if set */
+        if (session.pin_text[0] && conv.count == 0) {
+            char pinbuf[1200];
+            snprintf(pinbuf, sizeof(pinbuf), "[pinned] %s", session.pin_text);
+            conv_add_user_text(&conv, pinbuf);
+            conv_add_assistant_text(&conv, "Understood, I'll keep that context in mind.");
+        }
+
         /* Check for dragged image file paths in the input */
         if (!has_url_image) {
             int n_images = process_dragged_images(input_buf, &conv);
             if (n_images == 0) {
+                snprintf(last_user_input, sizeof(last_user_input), "%s", input_buf);
                 conv_add_user_text(&conv, input_buf);
             }
+        } else {
+            snprintf(last_user_input, sizeof(last_user_input), "%s", input_buf);
         }
+
+        /* Extract tool hints from user input */
+        tools_hint_add_user(input_buf);
 
         int turns = 0;
         int total_input = 0, total_output = 0, total_cache_read = 0;
@@ -3490,6 +4004,45 @@ resume_turn_loop:
             turns++;
             s_in_text_block = false;
             md_reset(&s_md);
+
+            /* Decay tool hints each turn */
+            tools_hint_decay();
+
+            /* Co-occurrence temporal decay: every 10 turns, multiply all
+             * counters by 0.95 to forget stale tool co-occurrence patterns.
+             * Prevents ancient patterns from dominating predictions. */
+            if (turns % 10 == 0 && turns > 0)
+                tools_cooc_decay(0.95f);
+
+            /* Update budget ratio for adaptive tool paging */
+            {
+                double cost = session_cost(&session);
+                if (g_cost_budget > 0)
+                    session.tool_budget_ratio = (float)(1.0 - cost / g_cost_budget);
+                else
+                    session.tool_budget_ratio = 1.0f;
+                if (session.tool_budget_ratio < 0.0f) session.tool_budget_ratio = 0.0f;
+            }
+
+            /* API quorum gate: cheap model pre-filters tool groups (opt-in).
+             * Fires every 3 turns to amortize gate cost. Injects HINT_PLAN
+             * hints that bias the register-file tool selection. */
+            if (turns % 3 == 1) {
+                const char *last_user_msg = NULL;
+                for (int ci = conv.count - 1; ci >= 0; ci--) {
+                    if (conv.msgs[ci].role == ROLE_USER) {
+                        for (int cj = 0; cj < conv.msgs[ci].content_count; cj++) {
+                            if (conv.msgs[ci].content[cj].text) {
+                                last_user_msg = conv.msgs[ci].content[cj].text;
+                                goto found_user_msg;
+                            }
+                        }
+                    }
+                }
+                found_user_msg:
+                if (last_user_msg)
+                    tool_quorum_gate_api(last_user_msg, api_key);
+            }
 
             if (conv.count > 10) {
                 int before = conv.count;
@@ -3705,6 +4258,20 @@ resume_turn_loop:
                     fprintf(stderr, "%s  [ttft:%.0fms total:%.0fms %.0f tok/s]%s\n",
                             TUI_DIM, sr.telemetry.ttft_ms, sr.telemetry.total_ms,
                             sr.telemetry.tokens_per_sec, TUI_RESET);
+                /* Paging telemetry: log tier sizes and retrieval stats */
+                if (g_page_telemetry.retrieval_ms > 0) {
+                    fprintf(stderr, "%s  [paging: P%d W%d D%d hints:%d cooc:%d emb:%d %.1fms -%dtok]%s\n",
+                            TUI_DIM,
+                            g_page_telemetry.pinned_count,
+                            g_page_telemetry.working_count,
+                            g_page_telemetry.discovery_count,
+                            g_page_telemetry.hint_count,
+                            g_page_telemetry.cooc_predictions,
+                            g_page_telemetry.centroid_matches,
+                            g_page_telemetry.retrieval_ms,
+                            g_page_telemetry.schema_tokens_saved,
+                            TUI_RESET);
+                }
                 /* F40: Save latency breakdown for /perf */
                 s_last_latency.dns_ms = sr.telemetry.latency.dns_ms;
                 s_last_latency.connect_ms = sr.telemetry.latency.connect_ms;
@@ -4147,6 +4714,18 @@ resume_turn_loop:
                 /* Stop batch spinner — final state is already rendered */
                 tui_batch_spinner_stop(&batch_spinner);
 
+                /* Update co-occurrence matrix with tools executed this turn */
+                {
+                    const char *cooc_names[TUI_BATCH_MAX];
+                    for (int ci = 0; ci < batch_n; ci++)
+                        cooc_names[ci] = batch_names[ci];
+                    if (batch_n >= 2)
+                        tools_cooc_update(cooc_names, batch_n);
+                    /* Inject co-occurrence predictions as HINT_TOOL hints
+                     * for proactive tool loading next turn */
+                    tools_cooc_inject_hints(cooc_names, batch_n);
+                }
+
                 /* Batch aggregate summary */
                 if (batch_n >= 2) {
                     const model_info_t *mi = model_lookup(session.model);
@@ -4396,9 +4975,21 @@ resume_turn_loop:
     g_autosave_session = NULL;
     autosave(&conv, &session);
     conv_free(&conv);
+#ifdef HAVE_READLINE
+    {
+        const char *home = getenv("HOME");
+        if (home) {
+            char hist_path[560];
+            snprintf(hist_path, sizeof(hist_path), "%s/.dsco/history", home);
+            write_history(hist_path);
+        }
+    }
+#endif
     mcp_shutdown(&g_mcp);
     provider_free(g_provider);
     g_provider = NULL;
+    tools_cooc_persist();
+    tools_cooc_free();
     tool_map_free(&g_tool_map);
     tool_cache_free(&tool_cache);
     dsco_locks_destroy(&g_locks);
