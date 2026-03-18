@@ -45,6 +45,12 @@
 
 extern volatile int g_interrupted;
 
+static double now_ms(void) {
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return ts.tv_sec * 1000.0 + ts.tv_nsec / 1e6;
+}
+
 /* ── Agent self-exit flag (set by self_exit tool) ─────────────────────── */
 volatile int g_agent_exit_requested = 0;
 
@@ -110,6 +116,18 @@ const char *tools_runtime_api_key(void) {
 
 const char *tools_runtime_model(void) {
     return g_runtime_model[0] ? g_runtime_model : DEFAULT_MODEL;
+}
+
+/* ── Virtual context window: context-aware offload + register pressure ── */
+
+static int g_ctx_window_tokens = 0;  /* 0 = unknown/unset */
+
+void tools_set_context_window(int tokens) {
+    g_ctx_window_tokens = tokens > 0 ? tokens : 0;
+}
+
+int tools_context_window(void) {
+    return g_ctx_window_tokens;
 }
 
 static double now_sec_helper(void) {
@@ -563,7 +581,7 @@ static bool ssh_target_atom_is_safe(const char *s) {
 #define CTX_SEARCH_DEFAULT_K      5
 #define CTX_SEARCH_MAX_K          12
 #define CTX_SEARCH_CANDIDATES     40
-#define CTX_RESULT_OFFLOAD_BYTES  4096
+#define CTX_RESULT_OFFLOAD_BYTES  16384
 #define CTX_TURN_PIN_IDS_MAX      2048
 
 typedef struct {
@@ -1037,10 +1055,23 @@ static bool ctx_is_internal_tool(const char *name) {
 
 static int ctx_offload_threshold_bytes(void) {
     const char *env = getenv("DSCO_CONTEXT_OFFLOAD_BYTES");
-    int n = env ? atoi(env) : CTX_RESULT_OFFLOAD_BYTES;
-    if (n < 1024) n = 1024;
-    if (n > 32768) n = 32768;
-    return n;
+    if (env && env[0]) {
+        int n = atoi(env);
+        if (n < 4096) n = 4096;
+        if (n > 131072) n = 131072;
+        return n;
+    }
+    /* Context-aware: 5% of context window in bytes (~4 bytes/token).
+     * 200K ctx → 40KB, 1M ctx → 200KB (capped 128KB).
+     * Most tool results should NOT be offloaded — the chunk store's
+     * hash-histogram retrieval is too lossy for structured data. */
+    if (g_ctx_window_tokens > 0) {
+        int threshold = (g_ctx_window_tokens * 4) / 20;  /* 5% */
+        if (threshold < 16384) threshold = 16384;
+        if (threshold > 131072) threshold = 131072;
+        return threshold;
+    }
+    return CTX_RESULT_OFFLOAD_BYTES;
 }
 
 static bool ctx_should_offload_result(const char *tool_name, const char *result, bool ok) {
@@ -1055,22 +1086,77 @@ static void ctx_rewrite_result_as_reference(const char *tool_name,
                                             char *result,
                                             size_t result_len,
                                             const ctx_ingest_info_t *info) {
-    char preview[340];
-    ctx_preview(original_result, 260, preview, sizeof(preview));
-    snprintf(result, result_len,
-             "large tool output offloaded for retrieval\n"
-             "tool: %s\n"
-             "stored_chunks: %d\n"
-             "chunk_id_range: %d-%d\n"
-             "bytes_indexed: %zu\n"
-             "preview: %s\n"
-             "next: use context_pack or context_summarize with a focused query first; use context_get/context_get_batch only for exact chunk ids and verbatim spans",
-             tool_name ? tool_name : "unknown",
-             info ? info->chunks_added : 0,
-             info ? info->first_chunk_id : -1,
-             info ? info->last_chunk_id : -1,
-             info ? info->bytes_added : 0,
-             preview[0] ? preview : "(empty)");
+    int nchunks = info ? info->chunks_added : 0;
+    int first   = info ? info->first_chunk_id : -1;
+    int last    = info ? info->last_chunk_id : -1;
+    size_t orig_len = original_result ? strlen(original_result) : 0;
+
+    /* Inline as much of the original result as possible.
+     * Reserve space for header (~200 bytes) + footer (~200 bytes).
+     * The rest of the result buffer is for actual content. */
+    size_t header_reserve = 256;
+    size_t footer_reserve = 256;
+    size_t inline_budget = 0;
+    if (result_len > header_reserve + footer_reserve + 512) {
+        inline_budget = result_len - header_reserve - footer_reserve;
+    }
+    /* Cap inline to ~60% of original to leave room for the model to work */
+    if (inline_budget > orig_len * 6 / 10) {
+        inline_budget = orig_len * 6 / 10;
+    }
+    /* But always inline at least 4KB if the buffer allows */
+    if (inline_budget < 4096 && result_len > header_reserve + footer_reserve + 4096) {
+        inline_budget = 4096;
+    }
+
+    /* Build chunk_ids array for batch retrieval */
+    char ids_buf[512];
+    ids_buf[0] = '\0';
+    if (nchunks > 0 && nchunks <= 64) {
+        size_t off = 0;
+        off += (size_t)snprintf(ids_buf + off, sizeof(ids_buf) - off, "[");
+        for (int i = first; i <= last && off + 16 < sizeof(ids_buf); i++) {
+            if (i > first) off += (size_t)snprintf(ids_buf + off, sizeof(ids_buf) - off, ",");
+            off += (size_t)snprintf(ids_buf + off, sizeof(ids_buf) - off, "%d", i);
+        }
+        snprintf(ids_buf + off, sizeof(ids_buf) - off, "]");
+    }
+
+    /* Write header */
+    size_t off = 0;
+    int n = snprintf(result + off, result_len - off,
+                     "[offloaded %zu bytes → %d chunks, tool=%s]\n",
+                     orig_len, nchunks,
+                     tool_name ? tool_name : "unknown");
+    if (n > 0 && (size_t)n < result_len - off) off += (size_t)n;
+
+    /* Inline truncated content - the actual data, not a preview */
+    if (inline_budget > 0 && original_result && orig_len > 0) {
+        size_t copy = inline_budget;
+        if (copy > orig_len) copy = orig_len;
+        /* Try to break at a clean line boundary */
+        if (copy < orig_len) {
+            size_t scan = copy;
+            while (scan > copy * 3 / 4) {
+                if (original_result[scan] == '\n') { copy = scan + 1; break; }
+                scan--;
+            }
+        }
+        if (off + copy + 1 < result_len) {
+            memcpy(result + off, original_result, copy);
+            off += copy;
+            result[off] = '\0';
+        }
+    }
+
+    /* Footer with retrieval instructions */
+    if (orig_len > inline_budget) {
+        snprintf(result + off, result_len - off,
+                 "\n[truncated — %zu/%zu bytes shown. "
+                 "Remaining in chunks %s. "
+                 "Use context_get_batch to retrieve.]",
+                 inline_budget, orig_len, ids_buf);
+    }
 }
 
 static void ctx_maybe_offload_tool_result(const char *tool_name,
@@ -1243,7 +1329,7 @@ static bool ctx_search_render(const char *query,
     }
 
     snprintf(result + off, rlen - off,
-             "next: prefer context_pack with the same query/filter before calling context_get on individual chunk_ids");
+             "use context_get_batch with chunk_ids to retrieve multiple chunks in one call");
     return true;
 }
 
@@ -2749,36 +2835,139 @@ static bool tool_jq(const char *input, char *result, size_t rlen) {
  * ENCODING & HASHING TOOLS
  * ═══════════════════════════════════════════════════════════════════════════ */
 
+static bool read_entire_file_bytes(const char *path, uint8_t **out_buf,
+                                   size_t *out_len, char *result, size_t rlen) {
+    if (!path || !out_buf || !out_len) return false;
+    *out_buf = NULL;
+    *out_len = 0;
+
+    if (!require_regular_file(path, result, rlen)) return false;
+
+    FILE *f = fopen(path, "rb");
+    if (!f) {
+        snprintf(result, rlen, "error: cannot open %s: %s", path, strerror(errno));
+        return false;
+    }
+
+    if (fseek(f, 0, SEEK_END) != 0) {
+        snprintf(result, rlen, "error: cannot seek %s: %s", path, strerror(errno));
+        fclose(f);
+        return false;
+    }
+    long fsize = ftell(f);
+    if (fsize < 0) {
+        snprintf(result, rlen, "error: cannot size %s: %s", path, strerror(errno));
+        fclose(f);
+        return false;
+    }
+    if (fseek(f, 0, SEEK_SET) != 0) {
+        snprintf(result, rlen, "error: cannot rewind %s: %s", path, strerror(errno));
+        fclose(f);
+        return false;
+    }
+
+    size_t alloc = (size_t)fsize + 1;
+    uint8_t *buf = malloc(alloc);
+    if (!buf) {
+        snprintf(result, rlen, "error: out of memory");
+        fclose(f);
+        return false;
+    }
+
+    size_t nread = fread(buf, 1, (size_t)fsize, f);
+    if (nread < (size_t)fsize && ferror(f)) {
+        snprintf(result, rlen, "error: cannot read %s: %s", path, strerror(errno));
+        free(buf);
+        fclose(f);
+        return false;
+    }
+    buf[nread] = '\0';
+    fclose(f);
+
+    *out_buf = buf;
+    *out_len = nread;
+    return true;
+}
+
+static bool base64_encode_result(const uint8_t *src, size_t src_len, bool url_safe,
+                                 char *result, size_t rlen) {
+    size_t needed = ((src_len + 2) / 3) * 4 + 1;
+    if (needed > rlen) {
+        snprintf(result, rlen, "error: result too large");
+        return false;
+    }
+
+    size_t out = url_safe
+        ? base64url_encode(src, src_len, result, rlen)
+        : base64_encode(src, src_len, result, rlen);
+    if (out + 1 > rlen) {
+        snprintf(result, rlen, "error: result too large");
+        return false;
+    }
+    result[out] = '\0';
+    return true;
+}
+
+static bool base64_decode_result(const char *text, bool url_safe,
+                                 char *result, size_t rlen) {
+    if (!text) {
+        snprintf(result, rlen, "error: input required");
+        return false;
+    }
+
+    size_t src_len = strlen(text);
+    uint8_t *decoded = malloc(src_len + 1);
+    if (!decoded) {
+        snprintf(result, rlen, "error: out of memory");
+        return false;
+    }
+
+    size_t out = url_safe
+        ? base64url_decode(text, src_len, decoded, src_len + 1)
+        : base64_decode(text, src_len, decoded, src_len + 1);
+    if (out + 1 > rlen) {
+        free(decoded);
+        snprintf(result, rlen, "error: result too large");
+        return false;
+    }
+
+    memcpy(result, decoded, out);
+    result[out] = '\0';
+    free(decoded);
+    return true;
+}
+
 static bool tool_base64(const char *input, char *result, size_t rlen) {
     char *data = json_get_str(input, "data");
+    if (!data) data = json_get_str(input, "text");
+    if (!data) data = json_get_str(input, "input");
     char *file = json_get_str(input, "file");
     bool decode = json_get_bool(input, "decode", false);
-    char cmd[8192];
 
     if (file) {
-        if (decode)
-            snprintf(cmd, sizeof(cmd), "base64 -d < '%s'", file);
-        else
-            snprintf(cmd, sizeof(cmd), "base64 < '%s'", file);
-    } else if (data) {
-        char tmpfile[] = "/tmp/dsco_b64_XXXXXX";
-        int fd = mkstemp(tmpfile);
-        if (fd >= 0) { write(fd, data, strlen(data)); close(fd); }
-        if (decode)
-            snprintf(cmd, sizeof(cmd), "base64 -d < '%s'", tmpfile);
-        else
-            snprintf(cmd, sizeof(cmd), "base64 < '%s'", tmpfile);
-        run_cmd(cmd, result, rlen);
-        unlink(tmpfile);
+        uint8_t *buf = NULL;
+        size_t len = 0;
+        if (!read_entire_file_bytes(file, &buf, &len, result, rlen)) {
+            free(data); free(file);
+            return false;
+        }
+
+        bool ok = decode
+            ? base64_decode_result((const char *)buf, false, result, rlen)
+            : base64_encode_result(buf, len, false, result, rlen);
+        free(buf);
         free(data); free(file);
-        return true;
+        return ok;
+    } else if (data) {
+        bool ok = decode
+            ? base64_decode_result(data, false, result, rlen)
+            : base64_encode_result((const uint8_t *)data, strlen(data), false, result, rlen);
+        free(data); free(file);
+        return ok;
     } else {
         snprintf(result, rlen, "error: data or file required");
         free(data); free(file); return false;
     }
-    run_cmd(cmd, result, rlen);
-    free(data); free(file);
-    return true;
 }
 
 static bool tool_hash(const char *input, char *result, size_t rlen) {
@@ -7027,6 +7216,8 @@ static bool tool_random_bytes(const char *input, char *result, size_t rlen) {
 
 static bool tool_base64_tool(const char *input, char *result, size_t rlen) {
     char *text = json_get_str(input, "input");
+    if (!text) text = json_get_str(input, "text");
+    if (!text) text = json_get_str(input, "data");
     char *action = json_get_str(input, "action");
     bool url_safe = json_get_bool(input, "url_safe", false);
 
@@ -7037,22 +7228,15 @@ static bool tool_base64_tool(const char *input, char *result, size_t rlen) {
     }
 
     if (action && strcmp(action, "decode") == 0) {
-        uint8_t *decoded = malloc(strlen(text) + 4);
-        size_t len;
-        if (url_safe)
-            len = base64url_decode(text, strlen(text), decoded, strlen(text) + 4);
-        else
-            len = base64_decode(text, strlen(text), decoded, strlen(text) + 4);
-        if (len < rlen) {
-            memcpy(result, decoded, len);
-            result[len] = '\0';
+        if (!base64_decode_result(text, url_safe, result, rlen)) {
+            free(text); free(action);
+            return false;
         }
-        free(decoded);
     } else {
-        if (url_safe)
-            base64url_encode((const uint8_t *)text, strlen(text), result, rlen);
-        else
-            base64_encode((const uint8_t *)text, strlen(text), result, rlen);
+        if (!base64_encode_result((const uint8_t *)text, strlen(text), url_safe, result, rlen)) {
+            free(text); free(action);
+            return false;
+        }
     }
     free(text); free(action);
     return true;
@@ -7248,7 +7432,7 @@ static bool tool_context_search(const char *input, char *result, size_t rlen) {
                 off += (size_t)n;
             }
             snprintf(result + off, rlen - off,
-                     "next: prefer context_pack with the same query/filter before calling context_get on individual chunk_ids");
+                     "use context_get_batch to retrieve multiple chunks in one call");
         }
     }
     free(query);
@@ -7625,8 +7809,21 @@ static bool tool_context_pack(const char *input, char *result, size_t rlen) {
     char *facet = json_get_str(input, "facet");
     int source_id = json_get_int(input, "source_id", -1);
     int top_k = json_get_int(input, "top_k", 8);
-    int max_total = json_get_int(input, "max_chars_total", 2200);
-    int max_per = json_get_int(input, "max_chars_per_chunk", 420);
+    /* Scale pack budget with context window: use ~3% of context as chars.
+     * 200K tokens → ~24K chars budget; 1M tokens → ~120K, capped at 48K.
+     * Fallback: 8000 chars total, 1600 per chunk. */
+    int default_total = 8000;
+    int default_per   = 1600;
+    if (g_ctx_window_tokens > 0) {
+        default_total = g_ctx_window_tokens * 4 / 35;  /* ~3% of ctx bytes */
+        if (default_total < 4000)  default_total = 4000;
+        if (default_total > 48000) default_total = 48000;
+        default_per = default_total / 5;
+        if (default_per < 800)  default_per = 800;
+        if (default_per > 8000) default_per = 8000;
+    }
+    int max_total = json_get_int(input, "max_chars_total", default_total);
+    int max_per = json_get_int(input, "max_chars_per_chunk", default_per);
 
     if (!query || !*query) {
         snprintf(result, rlen, "error: query required");
@@ -7685,7 +7882,7 @@ static bool tool_context_pack(const char *input, char *result, size_t rlen) {
         int take = max_per < remain ? max_per : remain;
         if (take <= 0) break;
 
-        char preview[4200];
+        char preview[8200];
         size_t pcap = sizeof(preview);
         if ((size_t)take + 8 < pcap) pcap = (size_t)take + 8;
         ctx_preview(c->text, (size_t)take, preview, pcap);
@@ -7702,7 +7899,7 @@ static bool tool_context_pack(const char *input, char *result, size_t rlen) {
 
     snprintf(result + off, rlen - off,
              "\npack_summary packed_chunks=%d packed_chars=%zu budget_chars=%d\n"
-             "next: answer from this packed evidence; call context_get only for verbatim spans you still need",
+             "answer from this evidence. Do not call context_get individually.",
              packed, used, max_total);
     free(query);
     free(tool_filter);
@@ -13163,23 +13360,46 @@ void tools_mark_hot(int tool_idx) {
     g_hot_cache[0] = tool_idx;
 }
 
-/* ── Core tool set ────────────────────────────────────────────────────── */
+/* ── Core tool set: register-file model ─────────────────────────────────
+ * ALWAYS (R0-R15): Hardwired registers, never evicted. Minimum viable set
+ *                  for file I/O, search, execution, and context management.
+ * WARM (R16-R31):  Default-loaded but evictable under budget pressure.
+ *                  Swarm/agent orchestration, secondary I/O, soul access.
+ * Together they define "core" for backward compat, but the register file
+ * can shrink the warm bank under cost pressure. */
 
-static const char *CORE_TOOLS[] = {
-    "read_file", "write_file", "edit_file", "append_file", "list_directory",
-    "find_files", "grep_files", "bash", "run_command", "python",
-    "spawn_agent", "agent_wait", "agent_output", "agent_status", "agent_kill",
-    "agent_race", "spawn_provider", "spawn_executor", "create_swarm",
-    "swarm_status", "swarm_collect", "openrouter_models", "executor_status",
-    "context_get", "context_search", "context_pack", "soul_read",
+static const char *CORE_ALWAYS[] = {
+    "read_file", "write_file", "edit_file", "list_directory",
+    "find_files", "grep_files", "bash", "python",
+    "context_pack", "context_search", "context_get",
     "discover_tools", "self_exit",
-    NULL
+    NULL  /* 13 tools → fits in R0-R15 with room for hint-pins */
 };
 
-static bool is_core_tool(const char *name) {
-    for (int i = 0; CORE_TOOLS[i]; i++)
-        if (strcmp(name, CORE_TOOLS[i]) == 0) return true;
+static const char *CORE_WARM[] = {
+    "append_file", "run_command",
+    "spawn_agent", "agent_wait", "agent_output", "agent_status",
+    "agent_kill", "agent_race",
+    "spawn_provider", "spawn_executor", "create_swarm",
+    "swarm_status", "swarm_collect", "openrouter_models",
+    "executor_status", "soul_read",
+    NULL  /* 16 tools → fills R16-R31 when budget allows */
+};
+
+static bool is_core_always(const char *name) {
+    for (int i = 0; CORE_ALWAYS[i]; i++)
+        if (strcmp(name, CORE_ALWAYS[i]) == 0) return true;
     return false;
+}
+
+static bool is_core_warm(const char *name) {
+    for (int i = 0; CORE_WARM[i]; i++)
+        if (strcmp(name, CORE_WARM[i]) == 0) return true;
+    return false;
+}
+
+static bool is_core_tool(const char *name) {
+    return is_core_always(name) || is_core_warm(name);
 }
 
 /* ── Group assignment (rule-based, fast) ──────────────────────────────── */
@@ -13460,6 +13680,876 @@ const tool_def_t **tools_get_filtered(const char *context, int max_tools, int *o
     free(indices);
     *out_count = n;
     return result;
+}
+
+/* ═══════════════════════════════════════════════════════════════════════════
+ * DYNAMIC TOOL PAGING — Hints, Co-occurrence, Tiered Retrieval
+ *
+ * Three-tier architecture for cache-aware tool serialization:
+ *   Tier 0 (Pinned):    Core + hint-pinned. Stable across turns → cached.
+ *   Tier 1 (Working):   Hot LRU + cooc-predicted + centroid-matched. Slow-evolving.
+ *   Tier 2 (Discovery): Fresh TF-IDF matches. Volatile each turn.
+ *
+ * Cache breakpoint between Tier 1 and Tier 2 ensures the stable prefix
+ * (70+ tools) gets prompt-cached while the volatile tail (≤10 tools) is cheap.
+ *
+ * Research basis:
+ *   - Pichay 2026: demand paging → 37% token reduction
+ *   - W&D 2026: parallel tool calls → 36% cost, 41% latency
+ *   - Lost-in-Middle: position-aware ordering → 20% accuracy
+ *   - Prompt Caching study: stable prefix → 78% cost reduction
+ *   - BAVT 2026: budget-adaptive exploitation as resources deplete
+ * ═══════════════════════════════════════════════════════════════════════════ */
+
+/* ── Hint accumulator ─────────────────────────────────────────────────── */
+
+static tool_hint_t g_hints[MAX_HINTS];
+static int g_hint_count = 0;
+static int g_hint_turn = 0;
+
+void tools_hint_init(void) {
+    memset(g_hints, 0, sizeof(g_hints));
+    g_hint_count = 0;
+    g_hint_turn = 0;
+}
+
+/* LCFU eviction score: lower = more evictable.
+ * LCFU = log(freq+1) * weight * source_priority / age
+ * Captures: how often reinforced, current weight, source importance, staleness */
+static float hint_lcfu_score(const tool_hint_t *h) {
+    int age = g_hint_turn - h->turn_created;
+    if (age < 1) age = 1;
+    /* Source priority: USER > PLAN > SWARM > CONV > TOOL */
+    static const float src_pri[] = {
+        [HINT_USER]  = 2.0f,
+        [HINT_CONV]  = 0.8f,
+        [HINT_PLAN]  = 1.5f,
+        [HINT_TOOL]  = 0.6f,
+        [HINT_SWARM] = 1.2f,
+    };
+    float pri = (h->source <= HINT_SWARM) ? src_pri[h->source] : 1.0f;
+    return logf((float)(h->group_count + h->tool_count + 1)) * h->weight * pri / (float)age;
+}
+
+void tools_hint_add(const tool_hint_t *h) {
+    /* Check for merge: if same domain exists, reinforce instead of adding */
+    for (int i = 0; i < g_hint_count; i++) {
+        if (h->domain[0] && g_hints[i].domain[0] &&
+            strcasecmp(g_hints[i].domain, h->domain) == 0) {
+            /* Reinforce: boost weight, merge groups */
+            g_hints[i].weight = fminf(g_hints[i].weight + h->weight * 0.5f, 2.0f);
+            for (int gi = 0; gi < h->group_count; gi++) {
+                bool dup = false;
+                for (int j = 0; j < g_hints[i].group_count; j++)
+                    if (g_hints[i].groups[j] == h->groups[gi]) { dup = true; break; }
+                if (!dup && g_hints[i].group_count < HINT_MAX_GROUPS)
+                    g_hints[i].groups[g_hints[i].group_count++] = h->groups[gi];
+            }
+            for (int ti = 0; ti < h->tool_count; ti++) {
+                bool dup = false;
+                for (int j = 0; j < g_hints[i].tool_count; j++)
+                    if (strcmp(g_hints[i].tools[j], h->tools[ti]) == 0) { dup = true; break; }
+                if (!dup && g_hints[i].tool_count < HINT_MAX_TOOLS)
+                    snprintf(g_hints[i].tools[g_hints[i].tool_count++], 64, "%s", h->tools[ti]);
+            }
+            return;
+        }
+    }
+
+    if (g_hint_count >= MAX_HINTS) {
+        /* LCFU eviction: evict hint with lowest composite score */
+        int min_i = 0;
+        float min_score = hint_lcfu_score(&g_hints[0]);
+        for (int i = 1; i < g_hint_count; i++) {
+            float s = hint_lcfu_score(&g_hints[i]);
+            if (s < min_score) { min_score = s; min_i = i; }
+        }
+        /* Only evict if new hint scores higher */
+        if (hint_lcfu_score(h) > min_score)
+            g_hints[min_i] = *h;
+        return;
+    }
+    g_hints[g_hint_count++] = *h;
+}
+
+void tools_hint_decay(void) {
+    g_hint_turn++;
+    int alive = 0;
+    for (int i = 0; i < g_hint_count; i++) {
+        int age = g_hint_turn - g_hints[i].turn_created;
+        if (g_hints[i].ttl_turns > 0 && age >= g_hints[i].ttl_turns) continue;
+        /* Momentum decay: high-weight hints (reinforced) decay slower.
+         * Base rate 0.85, but hints >1.0 weight use 0.92 (stickier). */
+        float decay = (g_hints[i].weight > 1.0f) ? 0.92f : 0.85f;
+        /* Source-dependent: USER hints are stickier than auto-generated */
+        if (g_hints[i].source == HINT_USER) decay = 0.95f;
+        g_hints[i].weight *= decay;
+        if (g_hints[i].weight < 0.05f) continue;
+        if (alive != i) g_hints[alive] = g_hints[i];
+        alive++;
+    }
+    g_hint_count = alive;
+}
+
+void tools_hint_clear(void) { g_hint_count = 0; }
+int  tools_hint_count(void)  { return g_hint_count; }
+
+/* Group name → index lookup for hint matching (used by /hint command) */
+static int group_name_to_idx(const char *name) __attribute__((unused));
+static int group_name_to_idx(const char *name) {
+    for (int i = 0; GROUP_NAMES[i]; i++)
+        if (strcasecmp(name, GROUP_NAMES[i]) == 0) return i;
+    return -1;
+}
+
+void tools_hint_add_user(const char *input) {
+    if (!input || !input[0]) return;
+
+    tool_hint_t h = {0};
+    h.weight = 0.8f;
+    h.ttl_turns = HINT_DEFAULT_TTL;
+    h.source = HINT_CONV;
+    h.turn_created = g_hint_turn;
+
+    static const struct { const char *kw; int group; } KW_MAP[] = {
+        {"trading", 12}, {"trade", 12}, {"stock", 12}, {"kalshi", 13},
+        {"polymarket", 13}, {"predict", 13}, {"bet", 13}, {"wager", 13},
+        {"alpha vantage", 12}, {"financial", 12}, {"portfolio", 12},
+        {"kubernetes", 3}, {"k8s", 3}, {"docker", 3}, {"container", 3},
+        {"deploy", 3}, {"terraform", 3},
+        {"encrypt", 5}, {"decrypt", 5}, {"signing", 5}, {"certificate", 5},
+        {"hash", 5}, {"jwt", 5},
+        {"github", 1}, {"pull request", 1}, {"commit", 1}, {"merge", 1},
+        {"branch", 1}, {"rebase", 1},
+        {"swarm", 6}, {"agent", 6}, {"topology", 6}, {"spawn", 6},
+        {"memory", 14}, {"soul", 14}, {"remember", 14},
+        {"scrape", 2}, {"crawl", 2}, {"api", 2}, {"webhook", 2},
+        {"slack", 2}, {"discord", 2}, {"notion", 2},
+        {NULL, 0}
+    };
+
+    bool found = false;
+    for (int k = 0; KW_MAP[k].kw; k++) {
+        const char *kw = KW_MAP[k].kw;
+        size_t kwlen = strlen(kw);
+        for (const char *p = input; *p; p++) {
+            if (strncasecmp(p, kw, kwlen) == 0) {
+                /* Word boundary check */
+                if (p > input && ((unsigned char)p[-1] >= 'a' && (unsigned char)p[-1] <= 'z'))
+                    continue;
+                char after = p[kwlen];
+                if ((unsigned char)after >= 'a' && (unsigned char)after <= 'z')
+                    continue;
+                int gid = KW_MAP[k].group;
+                bool dup = false;
+                for (int i = 0; i < h.group_count; i++)
+                    if (h.groups[i] == gid) { dup = true; break; }
+                if (!dup && h.group_count < HINT_MAX_GROUPS) {
+                    h.groups[h.group_count++] = gid;
+                    found = true;
+                }
+                if (!h.domain[0])
+                    snprintf(h.domain, sizeof(h.domain), "%s", kw);
+                break;
+            }
+        }
+    }
+
+    /* Also check group names directly */
+    for (int g = 0; GROUP_NAMES[g]; g++) {
+        const char *gn = GROUP_NAMES[g];
+        size_t gnlen = strlen(gn);
+        for (const char *p = input; *p; p++) {
+            if (strncasecmp(p, gn, gnlen) == 0) {
+                bool dup = false;
+                for (int i = 0; i < h.group_count; i++)
+                    if (h.groups[i] == g) { dup = true; break; }
+                if (!dup && h.group_count < HINT_MAX_GROUPS) {
+                    h.groups[h.group_count++] = g;
+                    found = true;
+                }
+                break;
+            }
+        }
+    }
+
+    if (found) tools_hint_add(&h);
+}
+
+/* ── Co-occurrence matrix ─────────────────────────────────────────────── */
+
+#define COOC_MAX_TOOLS 512
+#define COOC_MAGIC     0x434F4F43u  /* "COOC" */
+#define COOC_VERSION   1
+
+typedef struct {
+    uint16_t matrix[COOC_MAX_TOOLS][COOC_MAX_TOOLS];
+    char     names[COOC_MAX_TOOLS][64];
+    int      name_count;
+} tool_cooc_internal_t;
+
+static tool_cooc_internal_t *g_cooc = NULL;
+
+void tools_cooc_init(void) {
+    if (g_cooc) return;
+    g_cooc = safe_malloc(sizeof(tool_cooc_internal_t));
+    memset(g_cooc, 0, sizeof(tool_cooc_internal_t));
+}
+
+void tools_cooc_free(void) {
+    free(g_cooc);
+    g_cooc = NULL;
+}
+
+static int cooc_name_idx(const char *name) {
+    if (!g_cooc) return -1;
+    for (int i = 0; i < g_cooc->name_count; i++)
+        if (strcmp(g_cooc->names[i], name) == 0) return i;
+    if (g_cooc->name_count >= COOC_MAX_TOOLS) return -1;
+    int idx = g_cooc->name_count++;
+    snprintf(g_cooc->names[idx], 64, "%s", name);
+    return idx;
+}
+
+void tools_cooc_update(const char **tool_names, int n) {
+    if (!g_cooc || n <= 1) return;
+    int indices[64];
+    int valid = 0;
+    for (int i = 0; i < n && valid < 64; i++) {
+        int idx = cooc_name_idx(tool_names[i]);
+        if (idx >= 0) indices[valid++] = idx;
+    }
+    for (int i = 0; i < valid; i++)
+        for (int j = 0; j < valid; j++) {
+            if (i == j) continue;
+            if (g_cooc->matrix[indices[i]][indices[j]] < UINT16_MAX)
+                g_cooc->matrix[indices[i]][indices[j]]++;
+        }
+}
+
+/* Predict top-K successor tools from co-occurrence row.
+ * Returns count of predicted s_tools[] indices written to out. */
+static int cooc_predict_internal(const char *tool_name, int *out_tool_indices, int max) {
+    if (!g_cooc || max <= 0) return 0;
+    int ri = -1;
+    for (int i = 0; i < g_cooc->name_count; i++)
+        if (strcmp(g_cooc->names[i], tool_name) == 0) { ri = i; break; }
+    if (ri < 0) return 0;
+
+    /* Find top-K by count in this row */
+    typedef struct { int ci; uint16_t count; } cpair_t;
+    cpair_t top[16];
+    int nt = 0;
+    int cap = max < 16 ? max : 16;
+
+    for (int j = 0; j < g_cooc->name_count; j++) {
+        uint16_t c = g_cooc->matrix[ri][j];
+        if (c == 0) continue;
+        if (nt < cap) {
+            top[nt].ci = j;
+            top[nt].count = c;
+            nt++;
+        } else {
+            int mi = 0;
+            for (int k = 1; k < nt; k++)
+                if (top[k].count < top[mi].count) mi = k;
+            if (c > top[mi].count) {
+                top[mi].ci = j;
+                top[mi].count = c;
+            }
+        }
+    }
+
+    /* Map cooc names back to s_tools[] indices */
+    int result = 0;
+    for (int i = 0; i < nt; i++) {
+        int ti = tool_map_lookup(&g_tool_map, g_cooc->names[top[i].ci]);
+        if (ti >= 0) out_tool_indices[result++] = ti;
+    }
+    return result;
+}
+
+void tools_cooc_persist(void) {
+    if (!g_cooc || g_cooc->name_count == 0) return;
+    char path[256];
+    const char *home = getenv("HOME");
+    if (!home) return;
+    snprintf(path, sizeof(path), "%s/.dsco/tool_cooc.bin", home);
+
+    FILE *f = fopen(path, "wb");
+    if (!f) return;
+
+    uint32_t magic = COOC_MAGIC;
+    uint32_t version = COOC_VERSION;
+    uint32_t nc = (uint32_t)g_cooc->name_count;
+
+    fwrite(&magic, 4, 1, f);
+    fwrite(&version, 4, 1, f);
+    fwrite(&nc, 4, 1, f);
+    fwrite(g_cooc->names, 64, nc, f);
+    for (uint32_t i = 0; i < nc; i++)
+        fwrite(g_cooc->matrix[i], 2, nc, f);
+    fclose(f);
+}
+
+void tools_cooc_load(void) {
+    tools_cooc_init();
+    char path[256];
+    const char *home = getenv("HOME");
+    if (!home) return;
+    snprintf(path, sizeof(path), "%s/.dsco/tool_cooc.bin", home);
+
+    FILE *f = fopen(path, "rb");
+    if (!f) return;
+
+    uint32_t magic, version, nc;
+    if (fread(&magic, 4, 1, f) != 1 || magic != COOC_MAGIC) { fclose(f); return; }
+    if (fread(&version, 4, 1, f) != 1 || version != COOC_VERSION) { fclose(f); return; }
+    if (fread(&nc, 4, 1, f) != 1 || nc > COOC_MAX_TOOLS) { fclose(f); return; }
+
+    if (fread(g_cooc->names, 64, nc, f) != nc) { fclose(f); return; }
+    g_cooc->name_count = (int)nc;
+    for (uint32_t i = 0; i < nc; i++) {
+        if (fread(g_cooc->matrix[i], 2, nc, f) != nc) break;
+    }
+    fclose(f);
+    fprintf(stderr, "  \033[2mcooc: loaded %d tool pairs\033[0m\n", (int)nc);
+}
+
+/* ── Tiered retrieval: register-file model with multi-signal quorum ──── */
+
+quorum_telemetry_t g_quorum_telemetry = {0};
+
+tool_page_result_t tools_get_paged(const char *context, int max_tools,
+                                    float budget_ratio) {
+    tool_page_result_t r = {0};
+    double t0 = now_ms();
+    int cooc_added = 0, centroid_added = 0;
+    int total;
+    const tool_def_t *tools = tools_get_all(&total);
+    if (total == 0 || max_tools <= 0) return r;
+
+    /* Hard cap: register file is 64 slots max, period. */
+    if (max_tools > TOOL_REGISTER_CAP) max_tools = TOOL_REGISTER_CAP;
+
+    /* Virtual context pressure: if the context window is known, penalize
+     * the budget ratio when context is filling up. Each tool schema costs
+     * ~200 tokens; at 64 tools that's ~12,800 tokens (6.4% of 200k).
+     * When context is >70% full, tool schemas are competing with actual
+     * conversation — tighten the register file proportionally.
+     * This is the unified "page allocator" — cost AND context pressure
+     * both drive the same eviction curve. */
+    float effective_ratio = budget_ratio;
+    if (g_ctx_window_tokens > 0) {
+        /* Estimate context usage from page telemetry or session state.
+         * We don't have direct access to session here, so use a heuristic:
+         * each tool at ~200 tokens, and the context window is known. */
+        float tool_schema_fraction = (max_tools * 200.0f) / g_ctx_window_tokens;
+        /* If tools alone would eat >10% of context, start tightening */
+        if (tool_schema_fraction > 0.10f) {
+            float pressure = (tool_schema_fraction - 0.10f) / 0.10f;
+            if (pressure > 1.0f) pressure = 1.0f;
+            effective_ratio *= (1.0f - pressure * 0.5f);  /* up to 50% penalty */
+        }
+    }
+
+    /* Register-file slot allocation:
+     * R0-R15:  ALWAYS core (hardwired, never evicted)
+     * R16-R31: WARM core (evictable under budget pressure)
+     * R32-R55: WORKING (quorum-scored, turn-volatile)
+     * R56-R63: DISCOVERY (progressive schema, ephemeral)
+     *
+     * Budget-adaptive shrinking (uses effective_ratio = cost + context pressure):
+     *   Full   (>0.4):   16 + 16 + 24 + 8 = 64
+     *   Mid  (0.15-0.4): 16 + 12 + 16 + 4 = 48
+     *   Low  (0.05-0.15):16 +  8 +  8 + 0 = 32
+     *   Critical (<0.05): 16 +  0 +  0 + 0 = 16 */
+    int always_budget = TOOL_REG_ALWAYS;
+    int warm_budget, working_budget, discovery_budget;
+
+    if (always_budget > max_tools) always_budget = max_tools;
+
+    if (effective_ratio < 0.05f) {
+        /* Critical: ALWAYS core only */
+        warm_budget = 0;
+        working_budget = 0;
+        discovery_budget = 0;
+    } else if (effective_ratio < 0.15f) {
+        /* Low: minimal warm + working, no discovery */
+        warm_budget = 8;
+        working_budget = 8;
+        discovery_budget = 0;
+    } else if (effective_ratio < 0.4f) {
+        /* Mid: reduced warm + working, minimal discovery */
+        warm_budget = 12;
+        working_budget = 16;
+        discovery_budget = 4;
+    } else {
+        /* Full: all register banks active */
+        warm_budget = TOOL_REG_WARM;
+        working_budget = TOOL_REG_WORKING;
+        discovery_budget = TOOL_REG_DISCOVERY;
+    }
+
+    /* Clamp total to max_tools — shrink discovery first, then working, then warm */
+    int total_budget = always_budget + warm_budget + working_budget + discovery_budget;
+    if (total_budget > max_tools) {
+        int excess = total_budget - max_tools;
+        int d_cut = excess < discovery_budget ? excess : discovery_budget;
+        discovery_budget -= d_cut; excess -= d_cut;
+        int w_cut = excess < working_budget ? excess : working_budget;
+        working_budget -= w_cut; excess -= w_cut;
+        if (excess > 0) warm_budget -= excess;
+    }
+    if (warm_budget < 0) warm_budget = 0;
+    if (working_budget < 0) working_budget = 0;
+    if (discovery_budget < 0) discovery_budget = 0;
+
+    int pinned_budget = always_budget + warm_budget;
+
+    bool *included = safe_malloc(total * sizeof(bool));
+    memset(included, 0, total * sizeof(bool));
+
+    /* Multi-signal quorum: track how many independent scoring methods
+     * recommend each tool. Tools need >= QUORUM_MIN_SIGNALS to enter
+     * the working set. This prevents speculative single-signal tools
+     * from wasting register slots. */
+    int *tool_signals = safe_malloc(total * sizeof(int));
+    memset(tool_signals, 0, total * sizeof(int));
+
+    /* ── Tier 0: Pinned (ALWAYS core + WARM core + hint-pinned) ────────── */
+    int *pidx = safe_malloc((pinned_budget + 1) * sizeof(int));
+    int pn = 0;
+
+    /* R0-R15: ALWAYS core — hardwired, never evicted */
+    for (int i = 0; i < total && pn < always_budget; i++) {
+        if (is_core_always(tools[i].name)) {
+            pidx[pn++] = i;
+            included[i] = true;
+        }
+    }
+
+    /* R16-R31: WARM core — evictable under budget pressure */
+    for (int i = 0; i < total && pn < always_budget + warm_budget; i++) {
+        if (is_core_warm(tools[i].name) && !included[i]) {
+            pidx[pn++] = i;
+            included[i] = true;
+        }
+    }
+
+    /* Hint-pinned: specific tools named in active hints */
+    for (int hi = 0; hi < g_hint_count && pn < pinned_budget; hi++) {
+        for (int t = 0; t < g_hints[hi].tool_count && pn < pinned_budget; t++) {
+            int idx = tool_map_lookup(&g_tool_map, g_hints[hi].tools[t]);
+            if (idx >= 0 && idx < total && !included[idx]) {
+                pidx[pn++] = idx;
+                included[idx] = true;
+            }
+        }
+    }
+
+    /* ── Tier 1: Working set with multi-signal quorum ──────────────────── *
+     * Four independent signals vote on each candidate:
+     *   1. Hot cache (recency — tool was recently executed)
+     *   2. Co-occurrence (usage pattern — frequently follows current tools)
+     *   3. Embedding similarity (semantic match to conversation context)
+     *   4. Hint-group membership (user/plan/conversation intent)
+     *
+     * Hot cache tools are auto-admitted (they were literally just used).
+     * All other candidates need >= QUORUM_MIN_SIGNALS to enter. */
+    int *widx = safe_malloc((working_budget + 1) * sizeof(int));
+    int wn = 0;
+    int hot_admitted = 0;
+    double q0 = now_ms();
+
+    /* Signal 1: Hot cache — auto-admit (recently executed = always relevant) */
+    for (int h = 0; h < g_hot_count && wn < working_budget; h++) {
+        int hi = g_hot_cache[h];
+        if (hi >= 0 && hi < total && !included[hi]) {
+            tool_signals[hi] += 10; /* sentinel: hot cache bypasses quorum */
+            widx[wn++] = hi;
+            included[hi] = true;
+            hot_admitted++;
+        }
+    }
+
+    /* Signal 2: Co-occurrence predictions — count signal, tentatively add */
+    if (g_cooc) {
+        for (int h = 0; h < g_hot_count; h++) {
+            int hi = g_hot_cache[h];
+            if (hi < 0 || hi >= total) continue;
+            int predicted[8];
+            int np = cooc_predict_internal(tools[hi].name, predicted, 8);
+            for (int p = 0; p < np; p++) {
+                int ti = predicted[p];
+                if (ti >= 0 && ti < total) {
+                    tool_signals[ti]++;  /* count cooc signal regardless */
+                    if (!included[ti] && wn < working_budget) {
+                        widx[wn++] = ti;
+                        included[ti] = true;
+                        cooc_added++;
+                    }
+                }
+            }
+        }
+    }
+
+    /* Signal 3: Embedding/centroid or TF-IDF — count signal, tentatively add */
+    if (context && context[0]) {
+        ensure_embeddings_loaded();
+        ensure_groups();
+
+        float *qvec = NULL;
+        if (g_emb_vectors && g_emb_dim > 0)
+            qvec = embed_query_jina(context);
+
+        if (qvec) {
+            hrt_score_t gscore[MAX_GROUPS];
+            for (int g = 0; g < g_group_count; g++) {
+                gscore[g].idx = g;
+                gscore[g].score = g_tool_groups[g].has_centroid
+                    ? cosine_sim_f(qvec, g_tool_groups[g].centroid, g_emb_dim)
+                    : 0.0f;
+                /* Hint boost: active hints bias group scores */
+                for (int hi = 0; hi < g_hint_count; hi++)
+                    for (int gi = 0; gi < g_hints[hi].group_count; gi++)
+                        if (g_hints[hi].groups[gi] == g)
+                            gscore[g].score += g_hints[hi].weight * 0.5f;
+            }
+            qsort(gscore, g_group_count, sizeof(hrt_score_t), hrt_cmp);
+
+            int top_groups[MAX_GROUPS];
+            int n_top = 0;
+            for (int i = 0; i < g_group_count && n_top < 5; i++)
+                if (gscore[i].score > 0.05f)
+                    top_groups[n_top++] = gscore[i].idx;
+            /* Always include general group */
+            bool has_gen = false;
+            for (int i = 0; i < n_top; i++) if (top_groups[i] == 11) has_gen = true;
+            if (!has_gen && n_top < 6) top_groups[n_top++] = 11;
+
+            /* Intra-group embedding rank */
+            int max_cand = 0;
+            for (int gi = 0; gi < n_top; gi++)
+                max_cand += g_tool_groups[top_groups[gi]].count;
+            hrt_score_t *cands = safe_malloc((max_cand + 1) * sizeof(hrt_score_t));
+            int nc = 0;
+
+            for (int gi = 0; gi < n_top; gi++) {
+                tool_group_t *grp = &g_tool_groups[top_groups[gi]];
+                for (int j = 0; j < grp->count; j++) {
+                    int ti = grp->tool_indices[j];
+                    if (ti < 0 || ti >= total || ti >= g_emb_count) continue;
+                    float sim = cosine_sim_f(qvec, &g_emb_vectors[ti * g_emb_dim], g_emb_dim);
+                    if (sim > 0.12f) {
+                        tool_signals[ti]++;  /* count embed signal regardless of inclusion */
+                        cands[nc].idx = ti;
+                        cands[nc].score = sim;
+                        nc++;
+                    }
+                }
+            }
+            qsort(cands, nc, sizeof(hrt_score_t), hrt_cmp);
+
+            for (int i = 0; i < nc && wn < working_budget; i++) {
+                if (!included[cands[i].idx]) {
+                    widx[wn++] = cands[i].idx;
+                    included[cands[i].idx] = true;
+                    centroid_added++;
+                }
+            }
+
+            free(cands);
+            free(qvec);
+        } else {
+            /* No Jina key — TF-IDF fallback for working set */
+            ensure_tool_index();
+            int capped = total < SEM_MAX_DOCS ? total : SEM_MAX_DOCS;
+            tool_score_t *ranked = safe_malloc(capped * sizeof(tool_score_t));
+            int ranked_count = sem_tools_rank(&g_tool_index, context, ranked, capped, capped);
+            for (int i = 0; i < ranked_count; i++) {
+                int idx = ranked[i].tool_index;
+                if (idx >= 0 && idx < total && ranked[i].score > 0.05) {
+                    tool_signals[idx]++;  /* count TF-IDF signal regardless */
+                    if (!included[idx] && wn < working_budget) {
+                        widx[wn++] = idx;
+                        included[idx] = true;
+                    }
+                }
+            }
+            free(ranked);
+        }
+    }
+
+    /* Signal 4: Hint-group membership — add signal for tools whose group
+     * matches an active hint (user intent, plan, conversation context) */
+    for (int i = 0; i < wn; i++) {
+        int ti = widx[i];
+        int grp = assign_group(tools[ti].name, tools[ti].description);
+        for (int hi = 0; hi < g_hint_count; hi++) {
+            for (int gi = 0; gi < g_hints[hi].group_count; gi++) {
+                if (g_hints[hi].groups[gi] == grp) {
+                    tool_signals[ti]++;
+                    goto hint_counted;
+                }
+            }
+        }
+        hint_counted:;
+    }
+
+    /* ── Quorum eviction: remove tools with < QUORUM_MIN_SIGNALS ──────── *
+     * Hot cache tools are exempt (sentinel value >= 10).
+     * This is the key cost control: a tool recommended by ONLY one method
+     * (e.g. only TF-IDF, or only co-occurrence) gets evicted. Tools need
+     * agreement from multiple independent signals to justify a register slot. */
+    int quorum_vetoed = 0;
+    {
+        int new_wn = 0;
+        for (int i = 0; i < wn; i++) {
+            int ti = widx[i];
+            if (tool_signals[ti] >= 10 ||  /* hot cache: always keep */
+                tool_signals[ti] >= QUORUM_MIN_SIGNALS) {
+                widx[new_wn++] = widx[i];
+            } else {
+                included[ti] = false;  /* un-include: available for discovery */
+                quorum_vetoed++;
+            }
+        }
+        wn = new_wn;
+    }
+
+    double quorum_ms = now_ms() - q0;
+
+    /* Record quorum telemetry */
+    g_quorum_telemetry.candidates_scored = hot_admitted + cooc_added + centroid_added;
+    g_quorum_telemetry.quorum_admitted = wn;
+    g_quorum_telemetry.quorum_vetoed = quorum_vetoed;
+    g_quorum_telemetry.signal_hot = hot_admitted;
+    g_quorum_telemetry.signal_cooc = cooc_added;
+    g_quorum_telemetry.signal_embed = centroid_added;
+    g_quorum_telemetry.signal_hint = g_hint_count;
+    g_quorum_telemetry.quorum_ms = quorum_ms;
+
+    free(tool_signals);
+
+    /* ── Tier 2: Discovery (volatile TF-IDF matches, progressive schema) ─ */
+    int *didx = safe_malloc((discovery_budget + 1) * sizeof(int));
+    int dn = 0;
+
+    if (discovery_budget > 0 && context && context[0]) {
+        ensure_tool_index();
+        int capped = total < SEM_MAX_DOCS ? total : SEM_MAX_DOCS;
+        tool_score_t *ranked = safe_malloc(capped * sizeof(tool_score_t));
+        int ranked_count = sem_tools_rank(&g_tool_index, context, ranked, capped, capped);
+        for (int i = 0; i < ranked_count && dn < discovery_budget; i++) {
+            int idx = ranked[i].tool_index;
+            if (idx >= 0 && idx < total && !included[idx] && ranked[i].score > 0.05) {
+                didx[dn++] = idx;
+                included[idx] = true;
+            }
+        }
+        free(ranked);
+    }
+
+    free(included);
+
+    /* Build result — position-aware: most relevant first/last,
+     * least relevant in middle (Lost-in-Middle mitigation) */
+    r.pinned = safe_malloc((pn > 0 ? pn : 1) * sizeof(tool_def_t *));
+    r.pinned_count = pn;
+    for (int i = 0; i < pn; i++) r.pinned[i] = &tools[pidx[i]];
+
+    r.working = safe_malloc((wn > 0 ? wn : 1) * sizeof(tool_def_t *));
+    r.working_count = wn;
+    for (int i = 0; i < wn; i++) r.working[i] = &tools[widx[i]];
+
+    r.discovery = safe_malloc((dn > 0 ? dn : 1) * sizeof(tool_def_t *));
+    r.discovery_count = dn;
+    for (int i = 0; i < dn; i++) r.discovery[i] = &tools[didx[i]];
+
+    free(pidx);
+    free(widx);
+    free(didx);
+
+    /* Record paging telemetry */
+    g_page_telemetry.pinned_count = r.pinned_count;
+    g_page_telemetry.working_count = r.working_count;
+    g_page_telemetry.discovery_count = r.discovery_count;
+    g_page_telemetry.hint_count = g_hint_count;
+    g_page_telemetry.cooc_predictions = cooc_added;
+    g_page_telemetry.centroid_matches = centroid_added;
+    g_page_telemetry.budget_ratio = budget_ratio;
+    g_page_telemetry.retrieval_ms = now_ms() - t0;
+    /* Token savings: progressive schema (~200/tool) + quorum eviction (~200/tool) */
+    g_page_telemetry.schema_tokens_saved =
+        r.discovery_count * 200 + quorum_vetoed * 200;
+
+    return r;
+}
+
+void tool_page_result_free(tool_page_result_t *r) {
+    free((void *)r->pinned);
+    free((void *)r->working);
+    free((void *)r->discovery);
+    memset(r, 0, sizeof(*r));
+}
+
+/* ── Per-turn paging telemetry ─────────────────────────────────────────── */
+
+page_telemetry_t g_page_telemetry = {0};
+
+/* ── API quorum gate (opt-in: DSCO_QUORUM_GATE=1) ─────────────────────── *
+ * Fires a synchronous request to a cheap model (haiku) asking which tool
+ * groups are relevant for the current context. Results injected as
+ * HINT_PLAN hints, which boost those groups in the next tools_get_paged()
+ * call. Cost: ~$0.0004/call at haiku pricing. Saves $0.05-0.15/turn on
+ * the main model by reducing tools loaded. */
+
+/* GROUP_NAMES[] already defined above in ensure_groups() */
+
+static size_t quorum_write_cb(void *ptr, size_t size, size_t nmemb, void *userdata) {
+    jbuf_t *b = (jbuf_t *)userdata;
+    size_t n = size * nmemb;
+    jbuf_append_len(b, (const char *)ptr, n);
+    return n;
+}
+
+void tool_quorum_gate_api(const char *context, const char *api_key) {
+    if (!context || !context[0] || !api_key || !api_key[0]) return;
+    const char *enabled = getenv("DSCO_QUORUM_GATE");
+    if (!enabled || enabled[0] != '1') return;
+
+    double t0 = now_ms();
+
+    /* Build a minimal prompt: just group names, ask for relevant ones */
+    jbuf_t req;
+    jbuf_init(&req, 2048);
+    jbuf_append(&req, "{\"model\":\"claude-haiku-4-5-20251001\",\"max_tokens\":256,\"messages\":[{\"role\":\"user\",\"content\":");
+    char prompt[2048];
+    snprintf(prompt, sizeof(prompt),
+        "Given this task context, return ONLY a JSON array of relevant tool group names. "
+        "Available groups: file_io, git, network, shell, code, crypto, swarm, ast, "
+        "pipeline, math, search, general, market, prediction, memory.\\n\\n"
+        "Context: %.1024s\\n\\nReturn ONLY the JSON array, e.g. [\\\"file_io\\\",\\\"git\\\"]",
+        context);
+    jbuf_append_json_str(&req, prompt);
+    jbuf_append(&req, "}]}");
+
+    /* Fire synchronous request to haiku */
+    CURL *curl = curl_easy_init();
+    if (!curl) { jbuf_free(&req); return; }
+
+    jbuf_t resp;
+    jbuf_init(&resp, 4096);
+
+    struct curl_slist *hdrs = NULL;
+    char auth[512];
+    snprintf(auth, sizeof(auth), "x-api-key: %s", api_key);
+    hdrs = curl_slist_append(hdrs, auth);
+    hdrs = curl_slist_append(hdrs, "Content-Type: application/json");
+    hdrs = curl_slist_append(hdrs, "anthropic-version: 2023-06-01");
+
+    curl_easy_setopt(curl, CURLOPT_URL, API_URL_ANTHROPIC);
+    curl_easy_setopt(curl, CURLOPT_HTTPHEADER, hdrs);
+    curl_easy_setopt(curl, CURLOPT_POSTFIELDS, req.data);
+    curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, quorum_write_cb);
+    curl_easy_setopt(curl, CURLOPT_WRITEDATA, &resp);
+    curl_easy_setopt(curl, CURLOPT_CONNECTTIMEOUT, 2L);  /* fast or nothing */
+    curl_easy_setopt(curl, CURLOPT_TIMEOUT, 5L);
+
+    CURLcode res = curl_easy_perform(curl);
+    long http_code = 0;
+    curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, &http_code);
+    curl_slist_free_all(hdrs);
+    curl_easy_cleanup(curl);
+    jbuf_free(&req);
+
+    if (res != CURLE_OK || http_code != 200 || !resp.data) {
+        jbuf_free(&resp);
+        return;
+    }
+
+    /* Parse response: find the text content, extract group names */
+    const char *text = strstr(resp.data, "\"text\":\"");
+    if (!text) { jbuf_free(&resp); return; }
+    text += 8;
+
+    /* Inject matching groups as HINT_PLAN hints */
+    tool_hint_t h = {0};
+    snprintf(h.domain, sizeof(h.domain), "quorum_gate");
+    h.weight = 0.6f;
+    h.ttl_turns = 3;
+    h.source = HINT_PLAN;
+    h.turn_created = g_hint_turn;
+
+    for (int g = 0; GROUP_NAMES[g]; g++) {
+        if (strstr(text, GROUP_NAMES[g])) {
+            if (h.group_count < HINT_MAX_GROUPS)
+                h.groups[h.group_count++] = g;
+        }
+    }
+
+    if (h.group_count > 0) {
+        tools_hint_add(&h);
+        double gate_ms = now_ms() - t0;
+        fprintf(stderr, "  \033[2mquorum gate: %d groups selected in %.0fms\033[0m\n",
+                h.group_count, gate_ms);
+    }
+
+    jbuf_free(&resp);
+}
+
+/* ── Co-occurrence → Hint bridge ───────────────────────────────────────── */
+
+void tools_cooc_inject_hints(const char **tool_names, int n) {
+    if (!g_cooc || n < 1) return;
+
+    /* For each tool just executed, predict top-3 successors */
+    for (int i = 0; i < n; i++) {
+        int predicted[3];
+        int np = cooc_predict_internal(tool_names[i], predicted, 3);
+        if (np == 0) continue;
+
+        /* Build a HINT_TOOL hint with predicted tool names */
+        int total;
+        const tool_def_t *all = tools_get_all(&total);
+
+        tool_hint_t h = {0};
+        snprintf(h.domain, sizeof(h.domain), "cooc:%s", tool_names[i]);
+        h.weight = 0.4f; /* Lower than user/conv hints — speculative */
+        h.ttl_turns = 3;  /* Short-lived: only relevant for next few turns */
+        h.source = HINT_TOOL;
+        h.turn_created = g_hint_turn;
+
+        for (int j = 0; j < np && h.tool_count < HINT_MAX_TOOLS; j++) {
+            if (predicted[j] >= 0 && predicted[j] < total)
+                snprintf(h.tools[h.tool_count++], 64, "%s", all[predicted[j]].name);
+        }
+
+        if (h.tool_count > 0) tools_hint_add(&h);
+    }
+}
+
+/* ── Co-occurrence temporal decay ──────────────────────────────────────── */
+
+void tools_cooc_decay(float factor) {
+    if (!g_cooc || factor <= 0.0f || factor >= 1.0f) return;
+    for (int i = 0; i < g_cooc->name_count; i++) {
+        for (int j = 0; j < g_cooc->name_count; j++) {
+            uint16_t v = g_cooc->matrix[i][j];
+            g_cooc->matrix[i][j] = (uint16_t)(v * factor);
+        }
+    }
+}
+
+/* ── Progressive schema check ──────────────────────────────────────────── */
+
+bool tool_is_progressive_schema(const tool_def_t *t, const tool_page_result_t *r) {
+    /* Only Tier 2 (discovery) tools get compact schema */
+    if (!t || !r) return false;
+    for (int i = 0; i < r->discovery_count; i++)
+        if (r->discovery[i] == t) return true;
+    return false;
 }
 
 /* ── Tool hash map for O(1) lookup ─────────────────────────────────────── */

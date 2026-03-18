@@ -74,6 +74,7 @@ void session_state_init(session_state_t *s, const char *model) {
     s->thinking_budget = 0;
     s->active_topology[0] = '\0';
     s->topology_auto = false;
+    s->tool_budget_ratio = 1.0f;
 }
 
 /* ── Per-tool metrics ──────────────────────────────────────────────────── */
@@ -344,6 +345,7 @@ static int tool_result_trim_budget(const msg_content_t *mc, int max_chars);
 static char *trim_context_get_batch_result(const char *text, int max_chars);
 static bool message_has_tool_use_local(const message_t *m);
 static bool message_has_tool_result_local(const message_t *m);
+static bool message_is_tool_result_only(const message_t *m);
 static int message_sendable_count(const message_t *m);
 
 void conv_pop_last(conversation_t *c) {
@@ -432,6 +434,36 @@ static bool message_has_tool_result_local(const message_t *m) {
             return true;
     }
     return false;
+}
+
+static bool message_is_tool_result_only(const message_t *m) {
+    if (!m || m->role != ROLE_USER || m->content_count <= 0) return false;
+
+    bool saw_tool_result = false;
+    for (int j = 0; j < m->content_count; j++) {
+        const msg_content_t *mc = &m->content[j];
+        if (!mc->type || strcmp(mc->type, "tool_result") != 0) return false;
+        saw_tool_result = true;
+    }
+    return saw_tool_result;
+}
+
+bool conv_pop_last_turn(conversation_t *c) {
+    if (!c || c->count <= 0) return false;
+
+    bool popped = false;
+    while (c->count > 0) {
+        message_t *m = &c->msgs[c->count - 1];
+        if (m->role == ROLE_ASSISTANT || message_is_tool_result_only(m)) {
+            conv_pop_last(c);
+            popped = true;
+            continue;
+        }
+        conv_pop_last(c);
+        popped = true;
+        break;
+    }
+    return popped;
 }
 
 static void msg_clear_content(message_t *m) {
@@ -611,6 +643,16 @@ bool conv_save_ex(conversation_t *c, const session_state_t *session, const char 
         }
         jbuf_append(&sb, ",\"topology_auto\":");
         jbuf_append(&sb, session->topology_auto ? "true" : "false");
+        if (session->turn_count > 0) {
+            jbuf_appendf(&sb, ",\"turn_count\":%d", session->turn_count);
+        }
+        if (fabs(session->tool_budget_ratio - 1.0f) > 0.0001f) {
+            jbuf_appendf(&sb, ",\"tool_budget_ratio\":%.6f", session->tool_budget_ratio);
+        }
+        if (session->pin_text[0]) {
+            jbuf_append(&sb, ",\"pin_text\":");
+            jbuf_append_json_str(&sb, session->pin_text);
+        }
         jbuf_append(&sb, "},");
         fwrite(sb.data, 1, sb.len, f);
         jbuf_free(&sb);
@@ -698,6 +740,17 @@ bool conv_load_ex(conversation_t *c, session_state_t *session, const char *path)
                 free(topology);
             }
             session->topology_auto = json_get_bool(session_raw, "topology_auto", false);
+            int saved_turn_count = json_get_int(session_raw, "turn_count", session->turn_count);
+            if (saved_turn_count >= 0) session->turn_count = saved_turn_count;
+            double saved_budget_ratio = json_get_double(session_raw, "tool_budget_ratio",
+                                                        session->tool_budget_ratio);
+            if (saved_budget_ratio >= 0.0 && saved_budget_ratio <= 1.0)
+                session->tool_budget_ratio = (float)saved_budget_ratio;
+            char *pin_text = json_get_str(session_raw, "pin_text");
+            if (pin_text) {
+                snprintf(session->pin_text, sizeof(session->pin_text), "%s", pin_text);
+                free(pin_text);
+            }
             free(session_raw);
         }
     }
@@ -709,11 +762,17 @@ bool conv_load_ex(conversation_t *c, session_state_t *session, const char *path)
     /* Simple JSON parser: find each message object.
        We look for {"role":"...", "content":[...]} patterns.
        For robustness we parse role and content blocks manually. */
-    const char *p = data;
+    char *messages_raw = json_get_raw(data, "messages");
+    if (!messages_raw) { free(data); return false; }
+    const char *p = messages_raw;
 
-    /* Skip to first '[' of messages array */
-    p = strchr(p, '[');
-    if (!p) { free(data); return false; }
+    while (*p && isspace((unsigned char)*p))
+        p++;
+    if (*p != '[') {
+        free(messages_raw);
+        free(data);
+        return false;
+    }
     p++; /* skip '[' */
 
     /* Skip a quoted JSON string, honoring escapes and never stepping
@@ -828,6 +887,7 @@ bool conv_load_ex(conversation_t *c, session_state_t *session, const char *path)
 
     #undef SKIP_JSON_STRING
 
+    free(messages_raw);
     free(data);
     return true;
 }
@@ -1373,10 +1433,30 @@ static void append_content_block(jbuf_t *b, msg_content_t *mc) {
     }
 }
 
-/* Default max tools sent per Anthropic request (override: DSCO_MAX_TOOLS) */
-#define ANTHROPIC_DEFAULT_MAX_TOOLS 80
+/* Default max tools sent per Anthropic request (override: DSCO_MAX_TOOLS).
+ * Capped at 64 like a register file — tools evicted/loaded dynamically. */
+#define ANTHROPIC_DEFAULT_MAX_TOOLS 64
 
-/* Append filtered tools — context-aware subset to save tokens/money */
+/* Append a single tool definition to the JSON buffer */
+static void append_one_tool(jbuf_t *b, const tool_def_t *t, bool cache_mark) {
+    jbuf_append(b, "{\"name\":");
+    jbuf_append_json_str(b, t->name);
+    jbuf_append(b, ",\"description\":");
+    jbuf_append_json_str(b, t->description);
+    jbuf_append(b, ",\"input_schema\":");
+    jbuf_append(b, t->input_schema_json);
+    if (cache_mark)
+        jbuf_append(b, ",\"cache_control\":{\"type\":\"ephemeral\"}");
+    jbuf_append(b, "}");
+}
+
+/* Append filtered tools — tiered, cache-aware serialization.
+ *
+ * Layout:  [Tier 0: pinned] [Tier 1: working] [cache break] [Tier 2: discovery]
+ *
+ * Tier 0+1 are stable across turns → prompt-cached (78% savings).
+ * Tier 2 is volatile each turn → cheap to recompute.
+ * Cache breakpoint (ephemeral marker) goes on the last Tier 1 tool. */
 static void append_tools_json_filtered(jbuf_t *b, session_state_t *session,
                                         conversation_t *conv) {
     int max_tools = ANTHROPIC_DEFAULT_MAX_TOOLS;
@@ -1386,45 +1466,98 @@ static void append_tools_json_filtered(jbuf_t *b, session_state_t *session,
         if (v > 0) max_tools = v;
     }
 
-    /* Extract last user message as retrieval context */
+    /* Rolling context window: concatenate last 3 user messages for richer
+     * retrieval signal. More context → better embedding/TF-IDF scores.
+     * Single-message retrieval misses multi-turn intent (e.g. user says
+     * "now deploy it" after discussing Kubernetes for 3 turns). */
+    char ctx_buf[4096] = "";
     const char *ctx = NULL;
     if (conv) {
-        for (int i = conv->count - 1; i >= 0; i--) {
+        int found = 0;
+        int pos = 0;
+        for (int i = conv->count - 1; i >= 0 && found < 3; i--) {
             if (conv->msgs[i].role == ROLE_USER) {
                 for (int j = 0; j < conv->msgs[i].content_count; j++) {
                     if (conv->msgs[i].content[j].text) {
-                        ctx = conv->msgs[i].content[j].text;
+                        int len = (int)strlen(conv->msgs[i].content[j].text);
+                        int avail = (int)sizeof(ctx_buf) - pos - 2;
+                        if (avail <= 0) break;
+                        if (pos > 0) ctx_buf[pos++] = ' ';
+                        int copy = len < avail ? len : avail;
+                        memcpy(ctx_buf + pos, conv->msgs[i].content[j].text, copy);
+                        pos += copy;
+                        ctx_buf[pos] = '\0';
+                        found++;
                         break;
                     }
                 }
-                break;
             }
         }
+        if (pos > 0) ctx = ctx_buf;
     }
 
-    int filtered_count = 0;
-    const tool_def_t **filtered = tools_get_filtered(ctx, max_tools, &filtered_count);
+    float budget_ratio = session ? session->tool_budget_ratio : 1.0f;
+    tool_page_result_t paged = tools_get_paged(ctx, max_tools, budget_ratio);
+
+    bool has_server_tools = session && (session->web_search || session->code_execution);
+    bool has_after_working = (paged.discovery_count > 0 ||
+                              g_external_tool_count > 0 || has_server_tools);
+    bool has_after_discovery = (g_external_tool_count > 0 || has_server_tools);
 
     jbuf_append(b, ",\"tools\":[");
-    bool has_server_tools = session && (session->web_search || session->code_execution);
-    for (int i = 0; i < filtered_count; i++) {
-        if (i > 0) jbuf_append(b, ",");
-        jbuf_append(b, "{\"name\":");
-        jbuf_append_json_str(b, filtered[i]->name);
-        jbuf_append(b, ",\"description\":");
-        jbuf_append_json_str(b, filtered[i]->description);
-        jbuf_append(b, ",\"input_schema\":");
-        jbuf_append(b, filtered[i]->input_schema_json);
-        if (i == filtered_count - 1 && !has_server_tools && g_external_tool_count == 0) {
-            jbuf_append(b, ",\"cache_control\":{\"type\":\"ephemeral\"}");
-        }
-        jbuf_append(b, "}");
+    int written = 0;
+
+    /* Tier 0: Pinned — stable core tools (first position = high attention) */
+    for (int i = 0; i < paged.pinned_count; i++) {
+        if (written > 0) jbuf_append(b, ",");
+        bool mark = (i == paged.pinned_count - 1) &&
+                    (paged.working_count == 0) && !has_after_working;
+        append_one_tool(b, paged.pinned[i], mark);
+        written++;
     }
-    free((void *)filtered);
+
+    /* Tier 1: Working set — slow-evolving (hot + cooc + centroid) */
+    for (int i = 0; i < paged.working_count; i++) {
+        if (written > 0) jbuf_append(b, ",");
+        /* Cache breakpoint: mark last working-set tool if volatile content follows */
+        bool mark = (i == paged.working_count - 1) &&
+                    (has_after_working
+                         ? true  /* cache break before volatile tier */
+                         : true  /* end of tools → final ephemeral */);
+        append_one_tool(b, paged.working[i], mark);
+        written++;
+    }
+
+    /* Tier 2: Discovery — progressive schema (name + description only).
+     * Full input_schema omitted to save ~200 tokens/tool. The model can
+     * still call these tools — if it does, the next turn includes the full
+     * schema via HINT_TOOL co-occurrence injection into Tier 0/1.
+     * This implements the "lazy loading" pattern from OpenMCP (2026). */
+    for (int i = 0; i < paged.discovery_count; i++) {
+        if (written > 0) jbuf_append(b, ",");
+        bool mark = (i == paged.discovery_count - 1) && !has_after_discovery;
+        /* Progressive: omit input_schema, provide minimal stub */
+        jbuf_append(b, "{\"name\":");
+        jbuf_append_json_str(b, paged.discovery[i]->name);
+        jbuf_append(b, ",\"description\":");
+        /* Append description with a hint that schema can be discovered */
+        char desc_buf[2048];
+        snprintf(desc_buf, sizeof(desc_buf), "%s [Use discover_tools to see full schema]",
+                 paged.discovery[i]->description);
+        jbuf_append_json_str(b, desc_buf);
+        jbuf_append(b, ",\"input_schema\":{\"type\":\"object\",\"properties\":{}}");
+        if (mark)
+            jbuf_append(b, ",\"cache_control\":{\"type\":\"ephemeral\"}");
+        jbuf_append(b, "}");
+        written++;
+    }
+
+    tool_page_result_free(&paged);
 
     /* External tools (MCP, etc.) */
     for (int i = 0; i < g_external_tool_count; i++) {
-        jbuf_append(b, ",{\"name\":");
+        if (written > 0) jbuf_append(b, ",");
+        jbuf_append(b, "{\"name\":");
         jbuf_append_json_str(b, g_external_tools[i].name);
         jbuf_append(b, ",\"description\":");
         jbuf_append_json_str(b, g_external_tools[i].description);
@@ -1434,13 +1567,17 @@ static void append_tools_json_filtered(jbuf_t *b, session_state_t *session,
             jbuf_append(b, ",\"cache_control\":{\"type\":\"ephemeral\"}");
         }
         jbuf_append(b, "}");
+        written++;
     }
+
     /* Server-side tools */
     if (session && session->web_search) {
-        jbuf_append(b, ",{\"type\":\"web_search_20250305\",\"name\":\"web_search\",\"max_uses\":5}");
+        if (written > 0) jbuf_append(b, ",");
+        jbuf_append(b, "{\"type\":\"web_search_20250305\",\"name\":\"web_search\",\"max_uses\":5}");
     }
     if (session && session->code_execution) {
-        jbuf_append(b, ",{\"type\":\"code_execution_20250522\",\"name\":\"code_execution\"");
+        if (written > 0) jbuf_append(b, ",");
+        jbuf_append(b, "{\"type\":\"code_execution_20250522\",\"name\":\"code_execution\"");
         if (session->container_id[0]) {
             jbuf_append(b, ",\"container_id\":");
             jbuf_append_json_str(b, session->container_id);
@@ -1493,6 +1630,49 @@ static void build_messages_json(jbuf_t *b, conversation_t *c, session_state_t *s
             msg_written++;
         }
         last_written_role = role;
+    }
+
+    /* Budget-adaptive pressure (BAVT 2026): as budget depletes,
+       nudge the model toward exploitation over exploration.
+       Injected as trailing user context to avoid breaking cache prefix. */
+    if (session && session->total_input_tokens > 0) {
+        const model_info_t *bmi = model_lookup(session->model);
+        if (bmi) {
+            double cost = session->total_input_tokens  * bmi->input_price / 1e6
+                        + session->total_output_tokens * bmi->output_price / 1e6
+                        + session->total_cache_read_tokens * bmi->cache_read_price / 1e6;
+            extern double g_cost_budget;
+            if (g_cost_budget > 0 && cost > g_cost_budget * 0.6) {
+                double pct = 100.0 * cost / g_cost_budget;
+                char pressure[256];
+                if (pct >= 85.0)
+                    snprintf(pressure, sizeof(pressure),
+                             "[Budget: %.0f%% used ($%.2f/$%.2f). "
+                             "Synthesize your answer now from gathered evidence. "
+                             "Do not make additional tool calls unless critical.]",
+                             pct, cost, g_cost_budget);
+                else
+                    snprintf(pressure, sizeof(pressure),
+                             "[Budget: %.0f%% used ($%.2f/$%.2f). "
+                             "Prefer concise tool calls. Batch with context_get_batch.]",
+                             pct, cost, g_cost_budget);
+
+                /* Append as trailing user message if last was assistant,
+                   or merge into last user message */
+                if (last_written_role == ROLE_USER && b->len >= 2 &&
+                    b->data[b->len-1] == '}' && b->data[b->len-2] == ']') {
+                    b->len -= 2;
+                    b->data[b->len] = '\0';
+                    jbuf_append(b, ",{\"type\":\"text\",\"text\":");
+                    jbuf_append_json_str(b, pressure);
+                    jbuf_append(b, "}]}");
+                } else {
+                    jbuf_append(b, ",{\"role\":\"user\",\"content\":[{\"type\":\"text\",\"text\":");
+                    jbuf_append_json_str(b, pressure);
+                    jbuf_append(b, "}]}");
+                }
+            }
+        }
     }
 
     /* Response prefilling */
@@ -1552,14 +1732,33 @@ char *llm_build_request_ex(conversation_t *c, session_state_t *session, int max_
     jbuf_append_int(&b, max_tokens);
     jbuf_append(&b, ",\"stream\":true");
 
-    /* System prompt with cache breakpoint */
+    /* System prompt — cache-aware ordering (Anthropic prompt caching
+       requires static prefix before dynamic content for cache hits).
+       Order: SYSTEM_PROMPT (static, cached) → workspace/skill (dynamic) */
     const char *custom = llm_get_custom_system_prompt();
     char *active_skill_prompt = NULL;
+    bool has_dynamic = (custom != NULL) || session->active_skill[0];
+
     jbuf_append(&b, ",\"system\":[");
+
+    /* Block 1: Static system prompt — cached prefix (78% savings per
+       Prompt Caching Study 2026: static prefix → cache break → dynamic) */
+    jbuf_append(&b, "{\"type\":\"text\",\"text\":");
+    jbuf_append_json_str(&b, SYSTEM_PROMPT);
+    if (!has_dynamic) {
+        /* No dynamic content follows — cache the static prompt */
+        jbuf_append(&b, ",\"cache_control\":{\"type\":\"ephemeral\"}}");
+    } else {
+        /* Dynamic content follows — still cache the static prefix */
+        jbuf_append(&b, ",\"cache_control\":{\"type\":\"ephemeral\"}},");
+    }
+
+    /* Block 2+: Dynamic content (workspace prompt, skills) — after cache break */
     if (custom) {
         jbuf_append(&b, "{\"type\":\"text\",\"text\":");
         jbuf_append_json_str(&b, custom);
-        jbuf_append(&b, "},");
+        jbuf_append(&b, "}");
+        if (session->active_skill[0]) jbuf_append(&b, ",");
     }
     if (session->active_skill[0]) {
         const char *skill = dsco_workspace_skill_prompt(session->active_skill);
@@ -1570,12 +1769,10 @@ char *llm_build_request_ex(conversation_t *c, session_state_t *session, int max_
                      session->active_skill, skill);
             jbuf_append(&b, "{\"type\":\"text\",\"text\":");
             jbuf_append_json_str(&b, active_skill_prompt);
-            jbuf_append(&b, "},");
+            jbuf_append(&b, "}");
         }
     }
-    jbuf_append(&b, "{\"type\":\"text\",\"text\":");
-    jbuf_append_json_str(&b, SYSTEM_PROMPT);
-    jbuf_append(&b, ",\"cache_control\":{\"type\":\"ephemeral\"}}]");
+    jbuf_append(&b, "]");
 
     /* Sampling parameters */
     if (session->temperature >= 0) {
