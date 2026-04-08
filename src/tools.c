@@ -1,4 +1,5 @@
 #include "tools.h"
+#include "vfs.h"
 #include "error.h"
 #include "integrations.h"
 #include "trading.h"
@@ -40,8 +41,14 @@
 #include <stdint.h>
 #include <ctype.h>
 #include <math.h>
+#include <limits.h>
+#include <pwd.h>
 #include <curl/curl.h>
 #include <regex.h>
+
+#ifdef __APPLE__
+#include <mach-o/dyld.h>
+#endif
 
 extern volatile int g_interrupted;
 
@@ -53,6 +60,22 @@ static double now_ms(void) {
 
 /* ── Agent self-exit flag (set by self_exit tool) ─────────────────────── */
 volatile int g_agent_exit_requested = 0;
+
+/* ── §8: VFS-backed tool result cache for deterministic tools ──────────── */
+static vfs_db_t *g_tools_vfs = NULL;
+
+void tools_set_vfs(vfs_db_t *vfs) { g_tools_vfs = vfs; }
+
+static bool tool_is_cacheable(const char *name) {
+    static const char *cacheable[] = {
+        "sha256", "md5", "base64_encode", "base64_decode",
+        "hmac_sha256", "hex_encode", "hex_decode", "eval",
+        "hkdf_sha256", NULL
+    };
+    for (int i = 0; cacheable[i]; i++)
+        if (strcmp(name, cacheable[i]) == 0) return true;
+    return false;
+}
 
 /* ── Global swarm instance (shared across tool calls) ─────────────────── */
 static swarm_t g_swarm = {0};
@@ -121,9 +144,16 @@ const char *tools_runtime_model(void) {
 /* ── Virtual context window: context-aware offload + register pressure ── */
 
 static int g_ctx_window_tokens = 0;  /* 0 = unknown/unset */
+static int g_ctx_used_input_tokens = 0;
+static int g_ctx_used_output_tokens = 0;
 
 void tools_set_context_window(int tokens) {
     g_ctx_window_tokens = tokens > 0 ? tokens : 0;
+}
+
+void tools_set_context_usage(int input_tokens, int output_tokens) {
+    g_ctx_used_input_tokens = input_tokens;
+    g_ctx_used_output_tokens = output_tokens;
 }
 
 int tools_context_window(void) {
@@ -661,10 +691,10 @@ static void ctx_build_embedding(const char *text,
                                 uint64_t bits[CTX_EMBED_WORDS],
                                 float *norm_out) {
     memset(vec, 0, sizeof(float) * CTX_EMBED_DIM);
-    memset(bits, 0, sizeof(uint64_t) * CTX_EMBED_WORDS);
+    if (bits) memset(bits, 0, sizeof(uint64_t) * CTX_EMBED_WORDS);
 
     if (!text || !*text) {
-        *norm_out = 0.0f;
+        if (norm_out) *norm_out = 0.0f;
         return;
     }
 
@@ -682,7 +712,7 @@ static void ctx_build_embedding(const char *text,
                 uint32_t h = ctx_hash_token(tok, tlen);
                 int b = (int)(h % CTX_EMBED_DIM);
                 vec[b] += 1.0f;
-                bits[b / 64] |= (1ULL << (b % 64));
+                if (bits) bits[b / 64] |= (1ULL << (b % 64));
             }
             tlen = 0;
             if (c == '\0') break;
@@ -1061,13 +1091,17 @@ static int ctx_offload_threshold_bytes(void) {
         if (n > 131072) n = 131072;
         return n;
     }
-    /* Context-aware: 5% of context window in bytes (~4 bytes/token).
-     * 200K ctx → 40KB, 1M ctx → 200KB (capped 128KB).
-     * Most tool results should NOT be offloaded — the chunk store's
-     * hash-histogram retrieval is too lossy for structured data. */
+    /* Models with ≥200K context: disable chunk-store offloading entirely.
+     * The hash-histogram "embeddings" can't distinguish structured JSON
+     * (same field names everywhere), causing 7-12 turn retrieval loops.
+     * Instead, results are persisted to VFS and truncated inline. */
+    if (g_ctx_window_tokens >= 200000) {
+        return MAX_TOOL_RESULT;  /* 128KB — offloading never fires */
+    }
+    /* Smaller models: 10% of context window, floor 32KB */
     if (g_ctx_window_tokens > 0) {
-        int threshold = (g_ctx_window_tokens * 4) / 20;  /* 5% */
-        if (threshold < 16384) threshold = 16384;
+        int threshold = (g_ctx_window_tokens * 4) / 10;  /* 10% */
+        if (threshold < 32768) threshold = 32768;
         if (threshold > 131072) threshold = 131072;
         return threshold;
     }
@@ -1181,6 +1215,237 @@ static void ctx_maybe_offload_tool_result(const char *tool_name,
         g_ctx_reference_bytes += strlen(result);
     }
     free(copy);
+}
+
+/* ── Phase 1d: JSON structure-aware inline truncation ────────────────── */
+
+static int ctx_inline_budget(void) {
+    /* Budget = 20% of *remaining* context bytes, floor 4KB, cap MAX_TOOL_RESULT */
+    if (g_ctx_window_tokens > 0 && g_ctx_used_input_tokens > 0) {
+        int remaining = g_ctx_window_tokens - g_ctx_used_input_tokens;
+        if (remaining < 1000) remaining = 1000;
+        int budget = (remaining * 4) / 5;  /* 20% of remaining bytes */
+        if (budget < 4096) budget = 4096;
+        if (budget > (int)MAX_TOOL_RESULT) budget = (int)MAX_TOOL_RESULT;
+        return budget;
+    }
+    /* Fallback: 32KB default */
+    return 32768;
+}
+
+/* Extract JSON structural skeleton: keys + types + first 2 array elements */
+static size_t ctx_truncate_json(const char *json, size_t json_len,
+                                char *out, size_t out_len) {
+    if (!json || json_len == 0 || !out || out_len < 128) return 0;
+
+    size_t budget = out_len - 64;  /* reserve for footer */
+    size_t wr = 0;
+    int depth = 0;
+    int array_elem_count[32] = {0};  /* track per nesting level */
+    bool in_string = false;
+    bool skip_value = false;
+    int skip_depth = 0;
+
+    for (size_t i = 0; i < json_len && wr < budget; i++) {
+        char c = json[i];
+
+        /* Handle string literals */
+        if (in_string) {
+            if (c == '\\' && i + 1 < json_len) {
+                if (!skip_value) {
+                    if (wr + 2 < budget) { out[wr++] = c; out[wr++] = json[i+1]; }
+                }
+                i++;
+                continue;
+            }
+            if (c == '"') {
+                in_string = false;
+                if (!skip_value && wr < budget) out[wr++] = c;
+            } else {
+                if (!skip_value && wr < budget) out[wr++] = c;
+            }
+            continue;
+        }
+
+        if (c == '"') {
+            in_string = true;
+            if (!skip_value && wr < budget) out[wr++] = c;
+            continue;
+        }
+
+        /* Track array element counts for truncation */
+        if (c == '[') {
+            depth++;
+            if (depth < 32) array_elem_count[depth] = 0;
+            if (!skip_value && wr < budget) out[wr++] = c;
+            continue;
+        }
+        if (c == '{') {
+            depth++;
+            if (!skip_value && wr < budget) out[wr++] = c;
+            continue;
+        }
+        if (c == ']' || c == '}') {
+            if (skip_value && depth <= skip_depth) {
+                skip_value = false;
+            }
+            depth--;
+            if (!skip_value && wr < budget) out[wr++] = c;
+            continue;
+        }
+        if (c == ',') {
+            /* Check if we're in an array and past 2 elements */
+            if (depth > 0 && depth < 32) {
+                array_elem_count[depth]++;
+                if (array_elem_count[depth] >= 2) {
+                    /* Skip remaining array elements */
+                    if (!skip_value && wr + 16 < budget) {
+                        wr += (size_t)snprintf(out + wr, budget - wr, ",\"...\"]");
+                        /* Skip until matching close bracket */
+                        int skip = 1;
+                        for (size_t j = i + 1; j < json_len && skip > 0; j++) {
+                            if (json[j] == '[' || json[j] == '{') skip++;
+                            else if (json[j] == ']' || json[j] == '}') {
+                                skip--;
+                                if (skip == 0) { i = j; break; }
+                            } else if (json[j] == '"') {
+                                for (j++; j < json_len && json[j] != '"'; j++) {
+                                    if (json[j] == '\\') j++;
+                                }
+                            }
+                        }
+                        depth--;
+                        continue;
+                    }
+                }
+            }
+            if (!skip_value && wr < budget) out[wr++] = c;
+            continue;
+        }
+
+        if (!skip_value && wr < budget) out[wr++] = c;
+    }
+    out[wr] = '\0';
+    return wr;
+}
+
+/* Generic truncation: first 40% + truncation marker + last 20% */
+static size_t ctx_truncate_generic(const char *text, size_t text_len,
+                                   const char *vfs_key,
+                                   char *out, size_t out_len) {
+    if (!text || text_len == 0 || !out || out_len < 128) return 0;
+
+    size_t budget = out_len - 128;  /* reserve for marker */
+    size_t head = budget * 2 / 5;   /* 40% */
+    size_t tail = budget / 5;       /* 20% */
+
+    if (head + tail >= text_len) {
+        /* Fits entirely */
+        size_t n = text_len < budget ? text_len : budget;
+        memcpy(out, text, n);
+        out[n] = '\0';
+        return n;
+    }
+
+    /* Try to break head at a newline */
+    size_t head_actual = head;
+    for (size_t s = head; s > head * 3 / 4; s--) {
+        if (text[s] == '\n') { head_actual = s + 1; break; }
+    }
+
+    memcpy(out, text, head_actual);
+    size_t wr = head_actual;
+
+    wr += (size_t)snprintf(out + wr, out_len - wr,
+                           "\n[... %zu bytes truncated", text_len - head_actual - tail);
+    if (vfs_key && vfs_key[0]) {
+        wr += (size_t)snprintf(out + wr, out_len - wr, " | key=%s for full result", vfs_key);
+    }
+    wr += (size_t)snprintf(out + wr, out_len - wr, " ...]\n");
+
+    /* Tail */
+    size_t tail_start = text_len - tail;
+    size_t tail_actual = text_len - tail_start;
+    if (wr + tail_actual < out_len) {
+        memcpy(out + wr, text + tail_start, tail_actual);
+        wr += tail_actual;
+    }
+    out[wr] = '\0';
+    return wr;
+}
+
+/* ── Phase 2b: VFS-backed persist and truncate ───────────────────────── */
+
+static void ctx_persist_and_truncate(const char *tool_name,
+                                     const char *input_json,
+                                     bool ok,
+                                     char *result,
+                                     size_t result_len) {
+    if (!ok || !tool_name || !result) return;
+    if (ctx_is_internal_tool(tool_name)) return;
+    if (strncmp(result, "error:", 6) == 0) return;
+
+    size_t rlen = strlen(result);
+    if (rlen < 4096) return;  /* don't bother for small results */
+
+    /* Build VFS key: {tool}:{sha256(input)[:16]} */
+    char vfs_key[128];
+    vfs_key[0] = '\0';
+    if (g_tools_vfs && input_json) {
+        char hash[65];
+        sha256_hex((const uint8_t *)input_json, strlen(input_json), hash);
+        snprintf(vfs_key, sizeof(vfs_key), "%s:%.16s", tool_name, hash);
+
+        /* Persist full result to VFS (TTL: 1 hour) */
+        vfs_result_put(g_tools_vfs, tool_name, hash, result, 3600);
+    }
+
+    /* Decide inline budget */
+    int budget = ctx_inline_budget();
+    if ((int)rlen <= budget) return;  /* fits inline, no truncation needed */
+
+    /* Detect JSON and use structure-aware truncation */
+    char *truncated = malloc(budget + 256);
+    if (!truncated) return;
+
+    /* Always preserve the first line (breadcrumb) */
+    const char *first_nl = strchr(result, '\n');
+    size_t first_line = first_nl ? (size_t)(first_nl - result + 1) : 0;
+    size_t wr = 0;
+    if (first_line > 0 && first_line < 256) {
+        memcpy(truncated, result, first_line);
+        wr = first_line;
+    }
+
+    /* Check if result looks like JSON */
+    const char *body = result + first_line;
+    size_t body_len = rlen - first_line;
+    bool is_json = false;
+    for (size_t i = 0; i < body_len && i < 64; i++) {
+        if (body[i] == '{' || body[i] == '[') { is_json = true; break; }
+        if (!isspace((unsigned char)body[i])) break;
+    }
+
+    if (is_json) {
+        wr += ctx_truncate_json(body, body_len, truncated + wr, (size_t)budget - wr);
+    } else {
+        wr += ctx_truncate_generic(body, body_len, vfs_key, truncated + wr, (size_t)budget - wr);
+    }
+
+    /* Add VFS key footer */
+    if (vfs_key[0]) {
+        snprintf(truncated + wr, (size_t)budget + 256 - wr,
+                 "\n[truncated %zu→%zu bytes | key=%s for full result]",
+                 rlen, wr, vfs_key);
+    } else {
+        snprintf(truncated + wr, (size_t)budget + 256 - wr,
+                 "\n[truncated %zu→%zu bytes]",
+                 rlen, wr);
+    }
+
+    /* Replace result */
+    snprintf(result, result_len, "%s", truncated);
+    free(truncated);
 }
 
 static int ctx_rank_hits(const char *query,
@@ -1472,8 +1737,51 @@ static int ctx_rank_hits_ladder(const char *query,
  * FILE TOOLS
  * ═══════════════════════════════════════════════════════════════════════════ */
 
+/* Expand leading ~ / ~user in a user-supplied path. Takes ownership of `raw`
+ * (frees it and returns a newly allocated replacement when expansion occurs)
+ * so call sites stay one line:  path = path_normalize(path);
+ * Returns `raw` unchanged if it does not start with ~ or if HOME/passwd lookup
+ * fails. Returns NULL iff `raw` is NULL. Safe to chain directly on
+ * json_get_str(). */
+static char *path_normalize(char *raw) {
+    if (!raw || raw[0] != '~') return raw;
+
+    const char *home = NULL;
+    const char *rest = NULL;
+    char user[128];
+
+    if (raw[1] == '\0' || raw[1] == '/') {
+        home = getenv("HOME");
+        if (!home || !home[0]) {
+            struct passwd *pw = getpwuid(getuid());
+            if (pw) home = pw->pw_dir;
+        }
+        rest = raw + 1;
+    } else {
+        /* ~user or ~user/rest */
+        const char *slash = strchr(raw + 1, '/');
+        size_t ulen = slash ? (size_t)(slash - (raw + 1)) : strlen(raw + 1);
+        if (ulen == 0 || ulen >= sizeof(user)) return raw;
+        memcpy(user, raw + 1, ulen);
+        user[ulen] = '\0';
+        struct passwd *pw = getpwnam(user);
+        if (!pw || !pw->pw_dir) return raw;
+        home = pw->pw_dir;
+        rest = slash ? slash : "";
+    }
+
+    if (!home || !home[0]) return raw;
+
+    size_t need = strlen(home) + strlen(rest) + 1;
+    char *out = malloc(need);
+    if (!out) return raw;
+    snprintf(out, need, "%s%s", home, rest);
+    free(raw);
+    return out;
+}
+
 static bool tool_write_file(const char *input, char *result, size_t rlen) {
-    char *path = json_get_str(input, "path");
+    char *path = path_normalize(json_get_str(input, "path"));
     char *content = json_get_str(input, "content");
     if (!path || !content) {
         snprintf(result, rlen, "error: path and content required");
@@ -1840,7 +2148,7 @@ static bool tool_soul_replace(const char *input, char *result, size_t rlen) {
 }
 
 static bool tool_read_file(const char *input, char *result, size_t rlen) {
-    char *path = json_get_str(input, "path");
+    char *path = path_normalize(json_get_str(input, "path"));
     if (!path) { snprintf(result, rlen, "error: path required"); return false; }
     if (!require_regular_file(path, result, rlen)) {
         free(path);
@@ -1887,7 +2195,7 @@ static bool tool_read_file(const char *input, char *result, size_t rlen) {
 }
 
 static bool tool_page_file(const char *input, char *result, size_t rlen) {
-    char *path = json_get_str(input, "path");
+    char *path = path_normalize(json_get_str(input, "path"));
     if (!path) { snprintf(result, rlen, "error: path required"); return false; }
     if (!require_regular_file(path, result, rlen)) {
         free(path);
@@ -1942,7 +2250,7 @@ static bool tool_page_file(const char *input, char *result, size_t rlen) {
 }
 
 static bool tool_edit_file(const char *input, char *result, size_t rlen) {
-    char *path = json_get_str(input, "path");
+    char *path = path_normalize(json_get_str(input, "path"));
     char *old_str = json_get_str(input, "old_string");
     char *new_str = json_get_str(input, "new_string");
 
@@ -2026,7 +2334,7 @@ static bool tool_edit_file(const char *input, char *result, size_t rlen) {
 }
 
 static bool tool_list_dir(const char *input, char *result, size_t rlen) {
-    char *path = json_get_str(input, "path");
+    char *path = path_normalize(json_get_str(input, "path"));
     if (!path) path = strdup(".");
 
     DIR *d = opendir(path);
@@ -2061,7 +2369,7 @@ static bool tool_list_dir(const char *input, char *result, size_t rlen) {
 
 static bool tool_find_files(const char *input, char *result, size_t rlen) {
     char *pattern = json_get_str(input, "pattern");
-    char *path = json_get_str(input, "path");
+    char *path = path_normalize(json_get_str(input, "path"));
     if (!pattern) { snprintf(result, rlen, "error: pattern required"); free(path); return false; }
 
     jbuf_t cmd;
@@ -2079,7 +2387,7 @@ static bool tool_find_files(const char *input, char *result, size_t rlen) {
 
 static bool tool_grep(const char *input, char *result, size_t rlen) {
     char *pattern = json_get_str(input, "pattern");
-    char *path = json_get_str(input, "path");
+    char *path = path_normalize(json_get_str(input, "path"));
     if (!pattern) { snprintf(result, rlen, "error: pattern required"); free(path); return false; }
 
     jbuf_t cmd;
@@ -2096,7 +2404,7 @@ static bool tool_grep(const char *input, char *result, size_t rlen) {
 }
 
 static bool tool_file_info(const char *input, char *result, size_t rlen) {
-    char *path = json_get_str(input, "path");
+    char *path = path_normalize(json_get_str(input, "path"));
     if (!path) { snprintf(result, rlen, "error: path required"); return false; }
 
     struct stat st;
@@ -2115,7 +2423,7 @@ static bool tool_file_info(const char *input, char *result, size_t rlen) {
 
 /* ── append_file: Append content to a file ────────────────────────────── */
 static bool tool_append_file(const char *input, char *result, size_t rlen) {
-    char *path = json_get_str(input, "path");
+    char *path = path_normalize(json_get_str(input, "path"));
     char *content = json_get_str(input, "content");
     if (!path || !content) {
         snprintf(result, rlen, "error: path and content required");
@@ -2140,8 +2448,8 @@ static bool tool_append_file(const char *input, char *result, size_t rlen) {
 
 /* ── move_file ────────────────────────────────────────────────────────── */
 static bool tool_move_file(const char *input, char *result, size_t rlen) {
-    char *src = json_get_str(input, "source");
-    char *dst = json_get_str(input, "destination");
+    char *src = path_normalize(json_get_str(input, "source"));
+    char *dst = path_normalize(json_get_str(input, "destination"));
     if (!src || !dst) {
         snprintf(result, rlen, "error: source and destination required");
         free(src); free(dst); return false;
@@ -2167,8 +2475,8 @@ static bool tool_move_file(const char *input, char *result, size_t rlen) {
 
 /* ── copy_file ────────────────────────────────────────────────────────── */
 static bool tool_copy_file(const char *input, char *result, size_t rlen) {
-    char *src = json_get_str(input, "source");
-    char *dst = json_get_str(input, "destination");
+    char *src = path_normalize(json_get_str(input, "source"));
+    char *dst = path_normalize(json_get_str(input, "destination"));
     if (!src || !dst) {
         snprintf(result, rlen, "error: source and destination required");
         free(src); free(dst); return false;
@@ -2189,7 +2497,7 @@ static bool tool_copy_file(const char *input, char *result, size_t rlen) {
 
 /* ── delete_file ──────────────────────────────────────────────────────── */
 static bool tool_delete_file(const char *input, char *result, size_t rlen) {
-    char *path = json_get_str(input, "path");
+    char *path = path_normalize(json_get_str(input, "path"));
     bool recursive = json_get_bool(input, "recursive", false);
     if (!path) { snprintf(result, rlen, "error: path required"); return false; }
 
@@ -2206,7 +2514,7 @@ static bool tool_delete_file(const char *input, char *result, size_t rlen) {
 
 /* ── mkdir ────────────────────────────────────────────────────────────── */
 static bool tool_mkdir(const char *input, char *result, size_t rlen) {
-    char *path = json_get_str(input, "path");
+    char *path = path_normalize(json_get_str(input, "path"));
     if (!path) { snprintf(result, rlen, "error: path required"); return false; }
     bool ok = mkdir_p_local(path, 0755);
     if (ok) snprintf(result, rlen, "created directory %s", path);
@@ -2217,7 +2525,7 @@ static bool tool_mkdir(const char *input, char *result, size_t rlen) {
 
 /* ── chmod ────────────────────────────────────────────────────────────── */
 static bool tool_chmod(const char *input, char *result, size_t rlen) {
-    char *path = json_get_str(input, "path");
+    char *path = path_normalize(json_get_str(input, "path"));
     char *mode = json_get_str(input, "mode");
     if (!path || !mode) {
         snprintf(result, rlen, "error: path and mode required");
@@ -2242,7 +2550,7 @@ static bool tool_chmod(const char *input, char *result, size_t rlen) {
 
 /* ── tree: Directory tree ─────────────────────────────────────────────── */
 static bool tool_tree(const char *input, char *result, size_t rlen) {
-    char *path = json_get_str(input, "path");
+    char *path = path_normalize(json_get_str(input, "path"));
     int depth = json_get_int(input, "max_depth", 3);
     char cmd[4096];
     snprintf(cmd, sizeof(cmd), "find '%s' -maxdepth %d -print 2>/dev/null | head -200 | sort",
@@ -2254,7 +2562,7 @@ static bool tool_tree(const char *input, char *result, size_t rlen) {
 
 /* ── wc: Word/line count ──────────────────────────────────────────────── */
 static bool tool_wc(const char *input, char *result, size_t rlen) {
-    char *path = json_get_str(input, "path");
+    char *path = path_normalize(json_get_str(input, "path"));
     if (!path) { snprintf(result, rlen, "error: path required"); return false; }
     char cmd[4096];
     snprintf(cmd, sizeof(cmd), "wc -l -w -c '%s'", path);
@@ -2265,7 +2573,7 @@ static bool tool_wc(const char *input, char *result, size_t rlen) {
 
 /* ── head/tail ────────────────────────────────────────────────────────── */
 static bool tool_head(const char *input, char *result, size_t rlen) {
-    char *path = json_get_str(input, "path");
+    char *path = path_normalize(json_get_str(input, "path"));
     int lines = json_get_int(input, "lines", 20);
     if (!path) { snprintf(result, rlen, "error: path required"); return false; }
     char cmd[4096];
@@ -2276,7 +2584,7 @@ static bool tool_head(const char *input, char *result, size_t rlen) {
 }
 
 static bool tool_tail(const char *input, char *result, size_t rlen) {
-    char *path = json_get_str(input, "path");
+    char *path = path_normalize(json_get_str(input, "path"));
     int lines = json_get_int(input, "lines", 20);
     if (!path) { snprintf(result, rlen, "error: path required"); return false; }
     char cmd[4096];
@@ -2288,8 +2596,8 @@ static bool tool_tail(const char *input, char *result, size_t rlen) {
 
 /* ── symlink ──────────────────────────────────────────────────────────── */
 static bool tool_symlink(const char *input, char *result, size_t rlen) {
-    char *target = json_get_str(input, "target");
-    char *link_path = json_get_str(input, "link_path");
+    char *target = path_normalize(json_get_str(input, "target"));
+    char *link_path = path_normalize(json_get_str(input, "link_path"));
     if (!target || !link_path) {
         snprintf(result, rlen, "error: target and link_path required");
         free(target); free(link_path); return false;
@@ -2308,8 +2616,8 @@ static bool tool_symlink(const char *input, char *result, size_t rlen) {
  * ═══════════════════════════════════════════════════════════════════════════ */
 
 static bool tool_compile(const char *input, char *result, size_t rlen) {
-    char *source = json_get_str(input, "source");
-    char *output = json_get_str(input, "output");
+    char *source = path_normalize(json_get_str(input, "source"));
+    char *output = path_normalize(json_get_str(input, "output"));
     char *flags = json_get_str(input, "flags");
     if (!source) { snprintf(result, rlen, "error: source required"); free(output); free(flags); return false; }
     if (!output) output = safe_strdup("a.out");
@@ -2395,7 +2703,7 @@ static bool tool_bash(const char *input, char *result, size_t rlen) {
     int timeout = json_get_int(input, "timeout", 120);
     if (timeout <= 0) timeout = 120;
     if (timeout > 600) timeout = 600;
-    char *cwd = json_get_str(input, "cwd");
+    char *cwd = path_normalize(json_get_str(input, "cwd"));
 
     run_opts_t opts = RUN_OPTS_DEFAULT;
     opts.wall_timeout_s = timeout;
@@ -2535,7 +2843,7 @@ static bool tool_git_stash(const char *input, char *result, size_t rlen) {
 
 static bool tool_git_clone(const char *input, char *result, size_t rlen) {
     char *url = json_get_str(input, "url");
-    char *dir = json_get_str(input, "directory");
+    char *dir = path_normalize(json_get_str(input, "directory"));
     if (!url) { snprintf(result, rlen, "error: url required"); free(dir); return false; }
     char cmd[8192];
     if (dir)
@@ -2633,7 +2941,7 @@ static bool tool_sysinfo(const char *input, char *result, size_t rlen) {
 }
 
 static bool tool_disk_usage(const char *input, char *result, size_t rlen) {
-    char *path = json_get_str(input, "path");
+    char *path = path_normalize(json_get_str(input, "path"));
     char cmd[4096];
     snprintf(cmd, sizeof(cmd), "du -sh '%s' 2>/dev/null && echo '---' && df -h '%s'",
              path ? path : ".", path ? path : ".");
@@ -2653,7 +2961,7 @@ static bool tool_which(const char *input, char *result, size_t rlen) {
 }
 
 static bool tool_cwd(const char *input, char *result, size_t rlen) {
-    char *path = json_get_str(input, "path");
+    char *path = path_normalize(json_get_str(input, "path"));
     if (path) {
         if (chdir(path) != 0) {
             snprintf(result, rlen, "error: chdir %s: %s", path, strerror(errno));
@@ -2675,7 +2983,7 @@ static bool tool_cwd(const char *input, char *result, size_t rlen) {
 
 static bool tool_sed(const char *input, char *result, size_t rlen) {
     char *pattern = json_get_str(input, "expression");
-    char *file = json_get_str(input, "file");
+    char *file = path_normalize(json_get_str(input, "file"));
     if (!pattern || !file) {
         snprintf(result, rlen, "error: expression and file required");
         free(pattern); free(file); return false;
@@ -2694,7 +3002,7 @@ static bool tool_sed(const char *input, char *result, size_t rlen) {
 
 static bool tool_awk(const char *input, char *result, size_t rlen) {
     char *program = json_get_str(input, "program");
-    char *file = json_get_str(input, "file");
+    char *file = path_normalize(json_get_str(input, "file"));
     if (!program) {
         snprintf(result, rlen, "error: program required");
         free(file); return false;
@@ -2717,7 +3025,7 @@ static bool tool_awk(const char *input, char *result, size_t rlen) {
 }
 
 static bool tool_sort_uniq(const char *input, char *result, size_t rlen) {
-    char *file = json_get_str(input, "file");
+    char *file = path_normalize(json_get_str(input, "file"));
     bool unique = json_get_bool(input, "unique", false);
     bool count = json_get_bool(input, "count", false);
     if (!file) { snprintf(result, rlen, "error: file required"); return false; }
@@ -2762,7 +3070,7 @@ static bool tool_diff(const char *input, char *result, size_t rlen) {
 }
 
 static bool tool_patch(const char *input, char *result, size_t rlen) {
-    char *file = json_get_str(input, "file");
+    char *file = path_normalize(json_get_str(input, "file"));
     char *patch_content = json_get_str(input, "patch");
     if (!file || !patch_content) {
         snprintf(result, rlen, "error: file and patch required");
@@ -2794,7 +3102,7 @@ static bool tool_patch(const char *input, char *result, size_t rlen) {
 static bool tool_jq(const char *input, char *result, size_t rlen) {
     char *filter = json_get_str(input, "filter");
     char *json_input = json_get_str(input, "input");
-    char *file = json_get_str(input, "file");
+    char *file = path_normalize(json_get_str(input, "file"));
     if (!filter) {
         snprintf(result, rlen, "error: filter required");
         free(json_input); free(file); return false;
@@ -2941,7 +3249,7 @@ static bool tool_base64(const char *input, char *result, size_t rlen) {
     char *data = json_get_str(input, "data");
     if (!data) data = json_get_str(input, "text");
     if (!data) data = json_get_str(input, "input");
-    char *file = json_get_str(input, "file");
+    char *file = path_normalize(json_get_str(input, "file"));
     bool decode = json_get_bool(input, "decode", false);
 
     if (file) {
@@ -2971,7 +3279,7 @@ static bool tool_base64(const char *input, char *result, size_t rlen) {
 }
 
 static bool tool_hash(const char *input, char *result, size_t rlen) {
-    char *file = json_get_str(input, "file");
+    char *file = path_normalize(json_get_str(input, "file"));
     char *data = json_get_str(input, "data");
     char *algo = json_get_str(input, "algorithm");
     if (!algo) algo = strdup("sha256");
@@ -3127,7 +3435,7 @@ static bool tool_http_request(const char *input, char *result, size_t rlen) {
 
 static bool tool_download(const char *input, char *result, size_t rlen) {
     char *url = json_get_str(input, "url");
-    char *output = json_get_str(input, "output");
+    char *output = path_normalize(json_get_str(input, "output"));
     if (!url || !output) {
         snprintf(result, rlen, "error: url and output required");
         free(url); free(output); return false;
@@ -3153,7 +3461,7 @@ static bool tool_download(const char *input, char *result, size_t rlen) {
 
 static bool tool_upload(const char *input, char *result, size_t rlen) {
     char *url = json_get_str(input, "url");
-    char *file = json_get_str(input, "file");
+    char *file = path_normalize(json_get_str(input, "file"));
     char *field = json_get_str(input, "field_name");
     if (!url || !file) {
         snprintf(result, rlen, "error: url and file required");
@@ -4415,7 +4723,7 @@ static bool tool_web_extract(const char *input, char *result, size_t rlen) {
 /* ── Screenshot (macOS) ────────────────────────────────────────────────── */
 
 static bool tool_screenshot(const char *input, char *result, size_t rlen) {
-    char *output_path = json_get_str(input, "path");
+    char *output_path = path_normalize(json_get_str(input, "path"));
     bool full_screen = json_get_bool(input, "full_screen", true);
     int delay = json_get_int(input, "delay", 0);
 
@@ -4584,9 +4892,11 @@ static bool tool_ssh_command(const char *input, char *result, size_t rlen) {
 }
 
 static bool tool_scp(const char *input, char *result, size_t rlen) {
-    char *source = json_get_str(input, "source");
-    char *destination = json_get_str(input, "destination");
-    char *key = json_get_str(input, "key");
+    /* path_normalize only expands a leading ~ so remote scp endpoints like
+     * user@host:~/file (which do not start with ~) are passed through untouched. */
+    char *source = path_normalize(json_get_str(input, "source"));
+    char *destination = path_normalize(json_get_str(input, "destination"));
+    char *key = path_normalize(json_get_str(input, "key"));
     if (!source || !destination) {
         snprintf(result, rlen, "error: source and destination required");
         free(source); free(destination); free(key); return false;
@@ -4660,7 +4970,7 @@ static bool tool_psql(const char *input, char *result, size_t rlen) {
 
 static bool tool_python(const char *input, char *result, size_t rlen) {
     char *code = json_get_str(input, "code");
-    char *file = json_get_str(input, "file");
+    char *file = path_normalize(json_get_str(input, "file"));
     if (!code && !file) {
         snprintf(result, rlen, "error: code or file required");
         return false;
@@ -4689,7 +4999,7 @@ static bool tool_python(const char *input, char *result, size_t rlen) {
 
 static bool tool_node(const char *input, char *result, size_t rlen) {
     char *code = json_get_str(input, "code");
-    char *file = json_get_str(input, "file");
+    char *file = path_normalize(json_get_str(input, "file"));
     if (!code && !file) {
         snprintf(result, rlen, "error: code or file required");
         return false;
@@ -4835,7 +5145,7 @@ static bool tool_crontab(const char *input, char *result, size_t rlen) {
  * ═══════════════════════════════════════════════════════════════════════════ */
 
 static bool tool_xattr(const char *input, char *result, size_t rlen) {
-    char *path = json_get_str(input, "path");
+    char *path = path_normalize(json_get_str(input, "path"));
     char *action = json_get_str(input, "action");
     if (!path) { snprintf(result, rlen, "error: path required"); free(action); return false; }
     char cmd[4096];
@@ -4853,7 +5163,7 @@ static bool tool_xattr(const char *input, char *result, size_t rlen) {
  * ═══════════════════════════════════════════════════════════════════════════ */
 
 static bool tool_self_inspect(const char *input, char *result, size_t rlen) {
-    char *dir = json_get_str(input, "project_dir");
+    char *dir = path_normalize(json_get_str(input, "project_dir"));
     if (!dir) {
         /* Default: find our own source directory */
         char cwd[4096];
@@ -4878,7 +5188,7 @@ static bool tool_self_inspect(const char *input, char *result, size_t rlen) {
 }
 
 static bool tool_inspect_file(const char *input, char *result, size_t rlen) {
-    char *path = json_get_str(input, "path");
+    char *path = path_normalize(json_get_str(input, "path"));
     if (!path) {
         snprintf(result, rlen, "error: path required");
         return false;
@@ -4899,7 +5209,7 @@ static bool tool_inspect_file(const char *input, char *result, size_t rlen) {
 
 static bool tool_call_graph(const char *input, char *result, size_t rlen) {
     char *func = json_get_str(input, "function");
-    char *dir = json_get_str(input, "project_dir");
+    char *dir = path_normalize(json_get_str(input, "project_dir"));
     if (!func) {
         snprintf(result, rlen, "error: function name required");
         free(dir);
@@ -4920,7 +5230,7 @@ static bool tool_call_graph(const char *input, char *result, size_t rlen) {
 }
 
 static bool tool_dependency_graph(const char *input, char *result, size_t rlen) {
-    char *dir = json_get_str(input, "project_dir");
+    char *dir = path_normalize(json_get_str(input, "project_dir"));
     if (!dir) {
         char cwd[4096];
         if (getcwd(cwd, sizeof(cwd))) dir = strdup(cwd);
@@ -6642,7 +6952,7 @@ static bool tool_spawn_executor(const char *input, char *result, size_t rlen) {
     /* Validate executor availability */
     if (exec_type == EXECUTOR_CLAUDE && !g_swarm.executors.claude_available) {
         snprintf(result, rlen, "{\"error\":\"claude CLI not available — "
-                 "install Claude Code and set ANTHROPIC_API_KEY\"}");
+                 "install Claude Code and sign in, or set ANTHROPIC_API_KEY\"}");
         free(task); free(model); free(exec_name);
         return false;
     }
@@ -7088,7 +7398,7 @@ static bool tool_ipc_set_role(const char *input, char *result, size_t rlen) {
 
 static bool tool_sha256(const char *input, char *result, size_t rlen) {
     char *text = json_get_str(input, "text");
-    char *file = json_get_str(input, "file");
+    char *file = path_normalize(json_get_str(input, "file"));
     char hex[65];
 
     if (file) {
@@ -7126,7 +7436,7 @@ static bool tool_sha256(const char *input, char *result, size_t rlen) {
 
 static bool tool_md5(const char *input, char *result, size_t rlen) {
     char *text = json_get_str(input, "text");
-    char *file = json_get_str(input, "file");
+    char *file = path_normalize(json_get_str(input, "file"));
     char hex[33];
 
     if (file) {
@@ -7303,7 +7613,7 @@ static bool tool_hkdf(const char *input, char *result, size_t rlen) {
 
 static bool tool_pipeline(const char *input, char *result, size_t rlen) {
     char *text = json_get_str(input, "input");
-    char *file = json_get_str(input, "file");
+    char *file = path_normalize(json_get_str(input, "file"));
     char *spec = json_get_str(input, "spec");
 
     if (!spec) {
@@ -7800,6 +8110,99 @@ static bool tool_token_audit(const char *input, char *result, size_t rlen) {
              saved_tokens,
              g_ctx.count,
              g_ctx.total_bytes);
+    return true;
+}
+
+/* ── Phase 2c: VFS-backed context_recall tool ────────────────────────── */
+
+static bool tool_context_recall(const char *input, char *result, size_t rlen) {
+    char *key = json_get_str(input, "key");
+    int list_mode = json_get_int(input, "list", 0);
+
+    if (list_mode) {
+        /* List available persisted results */
+        if (!g_tools_vfs) {
+            snprintf(result, rlen, "error: VFS not initialized");
+            free(key);
+            return false;
+        }
+        int count = 0;
+        char **keys = vfs_result_list(g_tools_vfs, &count);
+        if (!keys || count == 0) {
+            snprintf(result, rlen, "no persisted tool results available");
+            free(key);
+            free(keys);
+            return true;
+        }
+        size_t off = 0;
+        int n = snprintf(result, rlen, "persisted_results count=%d\n", count);
+        if (n > 0 && (size_t)n < rlen) off = (size_t)n;
+        for (int i = 0; i < count && off + 64 < rlen; i++) {
+            n = snprintf(result + off, rlen - off, "  %s\n", keys[i]);
+            if (n > 0 && (size_t)n < rlen - off) off += (size_t)n;
+            free(keys[i]);
+        }
+        free(keys);
+        free(key);
+        return true;
+    }
+
+    if (!key || !*key) {
+        /* "No args = list keys" — auto-list when called without key */
+        free(key);
+        key = NULL;
+        if (!g_tools_vfs) {
+            snprintf(result, rlen, "no persisted results (VFS not initialized)");
+            return true;
+        }
+        int count = 0;
+        char **keys = vfs_result_list(g_tools_vfs, &count);
+        if (!keys || count == 0) {
+            snprintf(result, rlen, "no persisted tool results available");
+            free(keys);
+            return true;
+        }
+        size_t off = 0;
+        int n = snprintf(result, rlen, "persisted_results count=%d\n", count);
+        if (n > 0 && (size_t)n < rlen) off = (size_t)n;
+        for (int i = 0; i < count && off + 64 < rlen; i++) {
+            n = snprintf(result + off, rlen - off, "  %s\n", keys[i]);
+            if (n > 0 && (size_t)n < rlen - off) off += (size_t)n;
+            free(keys[i]);
+        }
+        free(keys);
+        return true;
+    }
+
+    if (!g_tools_vfs) {
+        snprintf(result, rlen, "error: VFS not initialized");
+        free(key);
+        return false;
+    }
+
+    char *full_result = vfs_result_get(g_tools_vfs, key);
+    if (!full_result) {
+        snprintf(result, rlen, "error: key '%s' not found or expired", key);
+        free(key);
+        return false;
+    }
+
+    size_t full_len = strlen(full_result);
+    if (full_len + 64 < rlen) {
+        snprintf(result, rlen, "[key=%s len=%zu]\n%s", key, full_len, full_result);
+    } else {
+        /* Truncate if even the full result is huge for the buffer */
+        snprintf(result, rlen, "[key=%s len=%zu (buffer-truncated to %zu)]\n",
+                 key, full_len, rlen - 128);
+        size_t off = strlen(result);
+        size_t copy = rlen - off - 1;
+        if (copy > full_len) copy = full_len;
+        memcpy(result + off, full_result, copy);
+        result[off + copy] = '\0';
+    }
+
+    free(full_result);
+    free(key);
     return true;
 }
 
@@ -9257,6 +9660,20 @@ static bool tool_browser_snapshot(const char *input, char *result, size_t rlen) 
              "snapshot_id=%d\nfacet=outline\nurl=%s\ntitle=%s\n\n%s",
              snap->id, url, title[0] ? title : "(none)", outline.data ? outline.data : "");
 
+    /* Persist to VFS instead of chunk store */
+    char vfs_key_raw[128] = "", vfs_key_vis[128] = "", vfs_key_out[128] = "";
+    if (g_tools_vfs) {
+        char url_hash[65];
+        sha256_hex((const uint8_t *)url, strlen(url), url_hash);
+        snprintf(vfs_key_raw, sizeof(vfs_key_raw), "browser_raw:%.16s", url_hash);
+        snprintf(vfs_key_vis, sizeof(vfs_key_vis), "browser_vis:%.16s", url_hash);
+        snprintf(vfs_key_out, sizeof(vfs_key_out), "browser_out:%.16s", url_hash);
+        vfs_result_put(g_tools_vfs, "browser_snapshot", url_hash, raw_doc, 7200);
+        vfs_result_put(g_tools_vfs, "browser_snapshot", url_hash, visual_doc, 7200);
+        vfs_result_put(g_tools_vfs, "browser_snapshot", url_hash, outline_doc, 7200);
+    }
+
+    /* Also ingest into chunk store for legacy browser_extract compatibility */
     ctx_ingest_info_t info_raw;
     ctx_ingest_info_t info_visual;
     ctx_ingest_info_t info_outline;
@@ -9271,6 +9688,7 @@ static bool tool_browser_snapshot(const char *input, char *result, size_t rlen) 
              "snapshot_id=%d\n"
              "title=%s\n"
              "fetch_meta=%s\n"
+             "vfs_keys: raw=%s visual=%s outline=%s\n"
              "indexed:\n"
              "  raw: chunks=%d range=%d-%d bytes=%zu\n"
              "  visual: chunks=%d range=%d-%d bytes=%zu\n"
@@ -9278,17 +9696,18 @@ static bool tool_browser_snapshot(const char *input, char *result, size_t rlen) 
              "visual_preview=%s\n"
              "next:\n"
              "  browser_viewport {\"snapshot_id\":%d,\"offset\":1,\"lines\":30}\n"
-             "  browser_extract {\"query\":\"...\",\"source_id\":%d,\"facet\":\"visual\",\"top_k\":5}\n"
-             "  context_pack {\"query\":\"...\",\"tool\":\"browser_snapshot\",\"source_id\":%d,\"facet\":\"visual\"}",
+             "  context_recall {\"key\":\"%s\"}\n"
+             "  browser_extract {\"query\":\"...\",\"source_id\":%d,\"facet\":\"visual\",\"top_k\":5}",
              url,
              snap->id,
              title[0] ? title : "(none)",
              fetch_meta[0] ? fetch_meta : "unknown",
+             vfs_key_raw, vfs_key_vis, vfs_key_out,
              info_raw.chunks_added, info_raw.first_chunk_id, info_raw.last_chunk_id, info_raw.bytes_added,
              info_visual.chunks_added, info_visual.first_chunk_id, info_visual.last_chunk_id, info_visual.bytes_added,
              info_outline.chunks_added, info_outline.first_chunk_id, info_outline.last_chunk_id, info_outline.bytes_added,
              preview[0] ? preview : "(empty)",
-             snap->id, snap->id, snap->id);
+             snap->id, vfs_key_vis, snap->id);
 
     free(raw_doc);
     free(visual_doc);
@@ -9517,13 +9936,23 @@ static bool tool_research_probe(const char *input, char *result, size_t rlen) {
         return false;
     }
 
+    /* Persist to VFS */
+    char vfs_key_probe[128] = "";
+    if (g_tools_vfs) {
+        char url_hash[65];
+        sha256_hex((const uint8_t *)url, strlen(url), url_hash);
+        snprintf(vfs_key_probe, sizeof(vfs_key_probe), "research_probe:%.16s", url_hash);
+        vfs_result_put(g_tools_vfs, "research_probe", url_hash, html, 3600);
+    }
+
     ctx_ingest_info_t info;
     ctx_ingest_text("research_probe", html, &info);
 
     size_t off = 0;
     int n = snprintf(result + off, rlen - off,
-                     "research_probe url=%s fetch_meta=%s stored_chunks=%d chunk_id_range=%d-%d bytes_indexed=%zu\n",
+                     "research_probe url=%s fetch_meta=%s vfs_key=%s stored_chunks=%d chunk_id_range=%d-%d bytes_indexed=%zu\n",
                      url, fetch_meta[0] ? fetch_meta : "unknown",
+                     vfs_key_probe[0] ? vfs_key_probe : "none",
                      info.chunks_added, info.first_chunk_id, info.last_chunk_id, info.bytes_added);
     if (n < 0) n = 0;
     if ((size_t)n < rlen - off) off += (size_t)n;
@@ -9585,7 +10014,7 @@ static bool file_has_binary_nul(const char *buf, size_t len) {
 }
 
 static bool tool_code_index(const char *input, char *result, size_t rlen) {
-    char *path = json_get_str(input, "path");
+    char *path = path_normalize(json_get_str(input, "path"));
     int max_files = json_get_int(input, "max_files", 200);
     int max_chars = json_get_int(input, "max_chars_per_file", 6000);
     if (!path) path = strdup(".");
@@ -9830,7 +10259,7 @@ static bool line_has_secret_pattern(const char *line) {
 
 static bool tool_secret_scan(const char *input, char *result, size_t rlen) {
     char *text = json_get_str(input, "text");
-    char *file = json_get_str(input, "file");
+    char *file = path_normalize(json_get_str(input, "file"));
     char *owned = NULL;
     const char *scan = text;
 
@@ -9953,6 +10382,7 @@ static bool tool_plugin_list(const char *input, char *result, size_t rlen) {
 }
 
 static void tool_map_rebuild(void);  /* forward decl */
+static int build_compact_params(const char *schema, char *out, size_t outlen);  /* forward decl */
 
 static bool tool_plugin_reload(const char *input, char *result, size_t rlen) {
     (void)input;
@@ -9964,7 +10394,7 @@ static bool tool_plugin_reload(const char *input, char *result, size_t rlen) {
 }
 
 static bool tool_plugin_load_file(const char *input, char *result, size_t rlen) {
-    char *path = json_get_str(input, "path");
+    char *path = path_normalize(json_get_str(input, "path"));
     if (!path) {
         snprintf(result, rlen, "error: path required");
         return false;
@@ -9982,8 +10412,8 @@ static bool tool_plugin_load_file(const char *input, char *result, size_t rlen) 
 }
 
 static bool tool_plugin_validate(const char *input, char *result, size_t rlen) {
-    char *manifest_path = json_get_str(input, "manifest_path");
-    char *lock_path = json_get_str(input, "lock_path");
+    char *manifest_path = path_normalize(json_get_str(input, "manifest_path"));
+    char *lock_path = path_normalize(json_get_str(input, "lock_path"));
     bool ok = plugin_validate_manifest_and_lock(manifest_path, lock_path, result, rlen);
     free(manifest_path);
     free(lock_path);
@@ -9993,7 +10423,7 @@ static bool tool_plugin_validate(const char *input, char *result, size_t rlen) {
 /* ── View Image (base64 encode for vision) ─────────────────────────────── */
 
 static bool tool_view_image(const char *input, char *result, size_t rlen) {
-    char *path = json_get_str(input, "path");
+    char *path = path_normalize(json_get_str(input, "path"));
     if (!path) { snprintf(result, rlen, "error: path required"); return false; }
 
     FILE *f = fopen(path, "rb");
@@ -10055,7 +10485,7 @@ static bool tool_view_image(const char *input, char *result, size_t rlen) {
 /* ── View PDF (base64 encode for document analysis) ────────────────────── */
 
 static bool tool_view_pdf(const char *input, char *result, size_t rlen) {
-    char *path = json_get_str(input, "path");
+    char *path = path_normalize(json_get_str(input, "path"));
     if (!path) { snprintf(result, rlen, "error: path required"); return false; }
 
     FILE *f = fopen(path, "rb");
@@ -10152,7 +10582,7 @@ static bool tool_view_pdf(const char *input, char *result, size_t rlen) {
 /* ═══ CSV PARSE ═══ */
 static bool tool_csv_parse(const char *input, char *result, size_t rlen) {
     char *text = json_get_str(input, "text");
-    char *file = json_get_str(input, "file");
+    char *file = path_normalize(json_get_str(input, "file"));
     int column = json_get_int(input, "column", -1);
     char *delimiter_str = json_get_str(input, "delimiter");
     char delim = (delimiter_str && delimiter_str[0]) ? delimiter_str[0] : ',';
@@ -10518,7 +10948,7 @@ static bool tool_string_ops(const char *input, char *result, size_t rlen) {
 /* ═══ XML EXTRACT ═══ */
 static bool tool_xml_extract(const char *input, char *result, size_t rlen) {
     char *text = json_get_str(input, "text");
-    char *file = json_get_str(input, "file");
+    char *file = path_normalize(json_get_str(input, "file"));
     char *tag  = json_get_str(input, "tag");
     char *attr_name = json_get_str(input, "attribute");
     char *data = NULL;
@@ -11263,6 +11693,1012 @@ static bool tool_wings_talons_status(const char *input, char *result, size_t rle
     return true;
 }
 
+/* ── Legion: Angel/Demon agent system ─────────────────────────────── */
+
+#include "legion.h"
+
+static bool tool_legion_status(const char *input, char *result, size_t rlen) {
+    (void)input;
+    legion_init();
+    int total = 0;
+    legion_registry(&total);
+    int angels = legion_angel_count();
+    int demons = legion_demon_count();
+
+    int off = 0;
+    off += snprintf(result + off, rlen - off,
+        "{\"total\":%d,\"angels\":%d,\"demons\":%d,\"roles\":%d,\"variants_by_role\":[",
+        total, angels, demons, LEGION_ROLE_COUNT);
+
+    for (int r = 0; r < LEGION_ROLE_COUNT && (size_t)off < rlen - 100; r++) {
+        if (r > 0) off += snprintf(result + off, rlen - off, ",");
+        off += snprintf(result + off, rlen - off,
+            "{\"role\":\"%s\",\"count\":%d}",
+            legion_role_name((legion_role_t)r), legion_count_by_role((legion_role_t)r));
+    }
+    off += snprintf(result + off, rlen - off, "]}");
+    return true;
+}
+
+static bool tool_legion_spawn(const char *input, char *result, size_t rlen) {
+    if (!input) { snprintf(result, rlen, "{\"error\":\"missing input\"}"); return false; }
+
+    /* Parse task and class/role/variant_id */
+    char task[2048] = "";
+    char class_str[16] = "auto";
+    char role_str[32] = "";
+    char variant_name[64] = "";
+    int variant_id = -1;
+
+    /* Extract fields */
+    const char *t = strstr(input, "\"task\"");
+    if (t) {
+        t = strchr(t + 6, '"'); if (t) { t++;
+        const char *te = strchr(t, '"');
+        if (te && (size_t)(te - t) < sizeof(task)) { memcpy(task, t, te - t); task[te - t] = '\0'; }
+        }
+    }
+    const char *c = strstr(input, "\"class\"");
+    if (c) {
+        c = strchr(c + 7, '"'); if (c) { c++;
+        const char *ce = strchr(c, '"');
+        if (ce && (size_t)(ce - c) < sizeof(class_str)) { memcpy(class_str, c, ce - c); class_str[ce - c] = '\0'; }
+        }
+    }
+    const char *r = strstr(input, "\"role\"");
+    if (r) {
+        r = strchr(r + 6, '"'); if (r) { r++;
+        const char *re = strchr(r, '"');
+        if (re && (size_t)(re - r) < sizeof(role_str)) { memcpy(role_str, r, re - r); role_str[re - r] = '\0'; }
+        }
+    }
+    const char *vn = strstr(input, "\"variant\"");
+    if (vn) {
+        vn = strchr(vn + 9, '"'); if (vn) { vn++;
+        const char *ve = strchr(vn, '"');
+        if (ve && (size_t)(ve - vn) < sizeof(variant_name)) { memcpy(variant_name, vn, ve - vn); variant_name[ve - vn] = '\0'; }
+        }
+    }
+    const char *vi = strstr(input, "\"variant_id\"");
+    if (vi) {
+        vi = strchr(vi + 12, ':');
+        if (vi) variant_id = atoi(vi + 1);
+    }
+
+    if (!task[0]) { snprintf(result, rlen, "{\"error\":\"task is required\"}"); return false; }
+
+    const legion_variant_t *v = NULL;
+
+    /* Resolution order: variant_id → variant name → auto-select by class+role */
+    if (variant_id >= 0) {
+        v = legion_get(variant_id);
+    } else if (variant_name[0]) {
+        v = legion_find(variant_name);
+    } else {
+        agent_class_t cls = AGENT_CLASS_ANGEL;
+        if (strcmp(class_str, "demon") == 0) cls = AGENT_CLASS_DEMON;
+        v = legion_auto_select(task, cls);
+    }
+
+    if (!v) {
+        snprintf(result, rlen, "{\"error\":\"no matching legion variant found\"}");
+        return false;
+    }
+
+    int agent_id = legion_spawn(v->id, task);
+    if (agent_id < 0) {
+        snprintf(result, rlen, "{\"error\":\"spawn failed\"}");
+        return false;
+    }
+
+    int off = 0;
+    off += snprintf(result + off, rlen - off, "{\"agent_id\":%d,", agent_id);
+    off += snprintf(result + off, rlen - off, "\"variant\":");
+    off += legion_variant_json(v, result + off, rlen - off);
+    off += snprintf(result + off, rlen - off, "}");
+    return true;
+}
+
+static bool tool_legion_find(const char *input, char *result, size_t rlen) {
+    if (!input) { snprintf(result, rlen, "{\"error\":\"missing input\"}"); return false; }
+
+    char class_str[16] = "";
+    char role_str[32] = "";
+    int limit = 10;
+
+    const char *c = strstr(input, "\"class\"");
+    if (c) { c = strchr(c+7,'"'); if(c){c++; const char *e=strchr(c,'"'); if(e&&(size_t)(e-c)<sizeof(class_str)){memcpy(class_str,c,e-c);class_str[e-c]='\0';}}}
+    const char *r = strstr(input, "\"role\"");
+    if (r) { r = strchr(r+6,'"'); if(r){r++; const char *e=strchr(r,'"'); if(e&&(size_t)(e-r)<sizeof(role_str)){memcpy(role_str,r,e-r);role_str[e-r]='\0';}}}
+    const char *l = strstr(input, "\"limit\"");
+    if (l) { l = strchr(l+7,':'); if(l) limit = atoi(l+1); }
+    if (limit < 1) limit = 1;
+    if (limit > 50) limit = 50;
+
+    legion_init();
+    int off = 0;
+    off += snprintf(result + off, rlen - off, "{\"variants\":[");
+
+    int found = 0;
+    int total = 0;
+    const legion_variant_t *all = legion_registry(&total);
+
+    for (int i = 0; i < total && found < limit; i++) {
+        const legion_variant_t *v = &all[i];
+        /* Filter by class */
+        if (class_str[0]) {
+            if (strcmp(class_str, "angel") == 0 && v->cls != AGENT_CLASS_ANGEL) continue;
+            if (strcmp(class_str, "demon") == 0 && v->cls != AGENT_CLASS_DEMON) continue;
+        }
+        /* Filter by role */
+        if (role_str[0] && strcmp(role_str, legion_role_name(v->role)) != 0) continue;
+
+        if (found > 0) off += snprintf(result + off, rlen - off, ",");
+        off += legion_variant_json(v, result + off, rlen - off);
+        found++;
+    }
+
+    off += snprintf(result + off, rlen - off, "],\"found\":%d,\"total\":%d}", found, total);
+    return true;
+}
+
+/* ═══════════════════════════════════════════════════════════════════════════
+ * ACE PLAYBOOK: Agentic Context Engineering (Zhang et al. 2026)
+ *
+ * Evolving playbook of itemized bullets with:
+ *   - Unique IDs (pb-NNNNN)
+ *   - Helpful/harmful/neutral counters for adaptive scoring
+ *   - Section-based organization (strategies, mistakes, patterns, etc.)
+ *   - Incremental delta updates (never monolithic rewrite)
+ *   - Grow-and-refine GC with semantic deduplication
+ *
+ * Prevents context collapse by accumulating structured knowledge that
+ * persists across turns and can be searched/pruned independently of
+ * the conversation history.
+ * ═══════════════════════════════════════════════════════════════════════════ */
+
+#define PB_MAX_BULLETS       512
+#define PB_MAX_CONTENT       2048
+#define PB_MAX_SECTION       48
+#define PB_MAX_TAGS          4
+#define PB_TAG_LEN           32
+#define PB_DEDUP_THRESHOLD   0.85f  /* cosine similarity for dedup */
+
+typedef struct {
+    int   id;
+    char  section[PB_MAX_SECTION];      /* strategies, common_mistakes, api_schemas, etc. */
+    char  content[PB_MAX_CONTENT];
+    char  tags[PB_MAX_TAGS][PB_TAG_LEN];
+    int   tag_count;
+    int   helpful;
+    int   harmful;
+    int   neutral;
+    int   created_turn;
+    int   last_accessed_turn;
+    float embed[CTX_EMBED_DIM];
+    float embed_norm;
+    uint64_t content_hash;
+} pb_bullet_t;
+
+typedef struct {
+    pb_bullet_t bullets[PB_MAX_BULLETS];
+    int   count;
+    int   next_id;
+    int   current_turn;
+} pb_store_t;
+
+static pb_store_t g_playbook = {0};
+
+/* ACE bullet score: helpful - 2*harmful, with recency boost */
+static float pb_score(const pb_bullet_t *b) {
+    float base = (float)b->helpful - 2.0f * (float)b->harmful;
+    int age = g_playbook.current_turn - b->last_accessed_turn;
+    if (age < 1) age = 1;
+    float recency = 1.0f / (1.0f + 0.1f * (float)age);
+    return base * recency;
+}
+
+/* ── context_status: full context window self-awareness ───────────── */
+
+static bool tool_context_status(const char *input, char *result, size_t rlen) {
+    (void)input;
+    int off = 0;
+    int window = g_ctx_window_tokens > 0 ? g_ctx_window_tokens : 200000;
+    int used = g_ctx_used_input_tokens + g_ctx_used_output_tokens;
+    int remaining = window - used;
+    float pct = 100.0f * (float)used / (float)window;
+
+    off += snprintf(result + off, rlen - off,
+        "{\"context_window\":{\"total_tokens\":%d,\"used_tokens\":%d,"
+        "\"remaining_tokens\":%d,\"usage_pct\":%.1f,"
+        "\"input_tokens\":%d,\"output_tokens\":%d},",
+        window, used, remaining, pct,
+        g_ctx_used_input_tokens, g_ctx_used_output_tokens);
+
+    /* Tool schema overhead estimate: ~200 tokens per active tool */
+    int tool_count;
+    tools_get_all(&tool_count);
+    int active_estimate = TOOL_REGISTER_CAP < tool_count ? TOOL_REGISTER_CAP : tool_count;
+    int schema_tokens = active_estimate * 200;
+
+    off += snprintf(result + off, rlen - off,
+        "\"tool_overhead\":{\"active_tools\":%d,\"est_schema_tokens\":%d},",
+        active_estimate, schema_tokens);
+
+    /* Playbook stats */
+    int pb_helpful = 0, pb_harmful = 0;
+    size_t pb_bytes = 0;
+    for (int i = 0; i < g_playbook.count; i++) {
+        pb_helpful += g_playbook.bullets[i].helpful;
+        pb_harmful += g_playbook.bullets[i].harmful;
+        pb_bytes += strlen(g_playbook.bullets[i].content);
+    }
+    int pb_est_tokens = (int)(pb_bytes / 4);  /* ~4 chars per token */
+
+    off += snprintf(result + off, rlen - off,
+        "\"playbook\":{\"bullets\":%d,\"helpful_total\":%d,\"harmful_total\":%d,"
+        "\"est_tokens\":%d},",
+        g_playbook.count, pb_helpful, pb_harmful, pb_est_tokens);
+
+    /* Context store stats */
+    off += snprintf(result + off, rlen - off,
+        "\"context_store\":{\"chunks\":%d,\"bytes\":%zu,"
+        "\"offloaded_events\":%zu,\"offloaded_bytes\":%zu},",
+        g_ctx.count, g_ctx.total_bytes,
+        g_ctx_offload_events, g_ctx_offloaded_bytes);
+
+    /* Recommendations */
+    off += snprintf(result + off, rlen - off, "\"recommendations\":[");
+    bool first = true;
+    if (pct > 85.0f) {
+        off += snprintf(result + off, rlen - off,
+            "\"CRITICAL: context >85%% full — use context_compact or playbook_gc\"");
+        first = false;
+    } else if (pct > 70.0f) {
+        off += snprintf(result + off, rlen - off,
+            "\"WARNING: context >70%% — consider compacting old tool results\"");
+        first = false;
+    }
+    if (g_playbook.count > 0) {
+        int harmful_bullets = 0;
+        for (int i = 0; i < g_playbook.count; i++)
+            if (g_playbook.bullets[i].harmful > g_playbook.bullets[i].helpful)
+                harmful_bullets++;
+        if (harmful_bullets > 0) {
+            if (!first) off += snprintf(result + off, rlen - off, ",");
+            off += snprintf(result + off, rlen - off,
+                "\"%d playbook bullets have more harmful than helpful tags — consider playbook_gc\"",
+                harmful_bullets);
+        }
+    }
+    off += snprintf(result + off, rlen - off, "]}");
+    return true;
+}
+
+/* ── playbook_read: list all bullets with scores ─────────────────── */
+
+static bool tool_playbook_read(const char *input, char *result, size_t rlen) {
+    /* Optional section filter */
+    char section_filter[PB_MAX_SECTION] = "";
+    if (input) {
+        const char *s = strstr(input, "\"section\"");
+        if (s) {
+            s = strchr(s + 9, '"'); if (s) { s++;
+            const char *e = strchr(s, '"');
+            if (e && (size_t)(e - s) < sizeof(section_filter)) {
+                memcpy(section_filter, s, e - s);
+                section_filter[e - s] = '\0';
+            }}
+        }
+    }
+
+    int off = 0;
+    off += snprintf(result + off, rlen - off,
+        "{\"total_bullets\":%d,\"current_turn\":%d,\"bullets\":[",
+        g_playbook.count, g_playbook.current_turn);
+
+    bool first = true;
+    for (int i = 0; i < g_playbook.count && (size_t)off < rlen - 512; i++) {
+        pb_bullet_t *b = &g_playbook.bullets[i];
+        if (section_filter[0] && strcasecmp(section_filter, b->section) != 0) continue;
+
+        b->last_accessed_turn = g_playbook.current_turn;
+        if (!first) off += snprintf(result + off, rlen - off, ",");
+        first = false;
+
+        off += snprintf(result + off, rlen - off,
+            "{\"id\":\"pb-%05d\",\"section\":\"%s\","
+            "\"helpful\":%d,\"harmful\":%d,\"neutral\":%d,"
+            "\"score\":%.2f,\"content\":",
+            b->id, b->section, b->helpful, b->harmful, b->neutral,
+            pb_score(b));
+
+        /* JSON-escape content */
+        off += snprintf(result + off, rlen - off, "\"");
+        for (int j = 0; b->content[j] && (size_t)off < rlen - 64; j++) {
+            char c = b->content[j];
+            if (c == '"') { result[off++] = '\\'; result[off++] = '"'; }
+            else if (c == '\\') { result[off++] = '\\'; result[off++] = '\\'; }
+            else if (c == '\n') { result[off++] = '\\'; result[off++] = 'n'; }
+            else if (c == '\t') { result[off++] = '\\'; result[off++] = 't'; }
+            else result[off++] = c;
+        }
+        off += snprintf(result + off, rlen - off, "\"}");
+    }
+    off += snprintf(result + off, rlen - off, "]}");
+    return true;
+}
+
+/* ── playbook_add: incremental delta update ──────────────────────── */
+
+static bool tool_playbook_add(const char *input, char *result, size_t rlen) {
+    if (!input) {
+        snprintf(result, rlen, "{\"error\":\"input required\"}");
+        return false;
+    }
+
+    char section[PB_MAX_SECTION] = "strategies";
+    char content[PB_MAX_CONTENT] = "";
+    char tags[PB_MAX_TAGS][PB_TAG_LEN] = {{""}};
+    int tag_count = 0;
+
+    /* Parse section */
+    const char *s = strstr(input, "\"section\"");
+    if (s) {
+        s = strchr(s + 9, '"'); if (s) { s++;
+        const char *e = strchr(s, '"');
+        if (e && (size_t)(e - s) < sizeof(section)) {
+            memcpy(section, s, e - s);
+            section[e - s] = '\0';
+        }}
+    }
+
+    /* Parse content */
+    s = strstr(input, "\"content\"");
+    if (s) {
+        s = strchr(s + 9, '"'); if (s) { s++;
+        int ci = 0;
+        while (*s && ci < PB_MAX_CONTENT - 1) {
+            if (*s == '\\' && *(s+1)) {
+                s++;
+                if (*s == 'n') content[ci++] = '\n';
+                else if (*s == 't') content[ci++] = '\t';
+                else if (*s == '"') content[ci++] = '"';
+                else if (*s == '\\') content[ci++] = '\\';
+                else content[ci++] = *s;
+            } else if (*s == '"') break;
+            else content[ci++] = *s;
+            s++;
+        }
+        content[ci] = '\0';
+        }
+    }
+
+    /* Parse tags array */
+    s = strstr(input, "\"tags\"");
+    if (s) {
+        s = strchr(s, '[');
+        if (s) {
+            s++;
+            while (*s && *s != ']' && tag_count < PB_MAX_TAGS) {
+                const char *q1 = strchr(s, '"');
+                if (!q1 || *q1 == ']') break;
+                q1++;
+                const char *q2 = strchr(q1, '"');
+                if (!q2) break;
+                size_t len = q2 - q1;
+                if (len < PB_TAG_LEN) {
+                    memcpy(tags[tag_count], q1, len);
+                    tags[tag_count][len] = '\0';
+                    tag_count++;
+                }
+                s = q2 + 1;
+            }
+        }
+    }
+
+    if (!content[0]) {
+        snprintf(result, rlen, "{\"error\":\"content is required\"}");
+        return false;
+    }
+
+    /* Check for near-duplicate by content hash */
+    uint64_t hash = ctx_hash_bytes(content, strlen(content));
+    for (int i = 0; i < g_playbook.count; i++) {
+        if (g_playbook.bullets[i].content_hash == hash) {
+            /* Exact duplicate — reinforce instead of adding */
+            g_playbook.bullets[i].helpful++;
+            g_playbook.bullets[i].last_accessed_turn = g_playbook.current_turn;
+            snprintf(result, rlen,
+                "{\"action\":\"reinforced\",\"id\":\"pb-%05d\",\"helpful\":%d,"
+                "\"note\":\"Duplicate content — reinforced existing bullet instead of adding.\"}",
+                g_playbook.bullets[i].id, g_playbook.bullets[i].helpful);
+            return true;
+        }
+    }
+
+    if (g_playbook.count >= PB_MAX_BULLETS) {
+        /* Evict lowest-scoring bullet */
+        int min_i = 0;
+        float min_s = pb_score(&g_playbook.bullets[0]);
+        for (int i = 1; i < g_playbook.count; i++) {
+            float sc = pb_score(&g_playbook.bullets[i]);
+            if (sc < min_s) { min_s = sc; min_i = i; }
+        }
+        if (min_i < g_playbook.count - 1)
+            memmove(&g_playbook.bullets[min_i], &g_playbook.bullets[min_i + 1],
+                     (size_t)(g_playbook.count - min_i - 1) * sizeof(pb_bullet_t));
+        g_playbook.count--;
+    }
+
+    pb_bullet_t *b = &g_playbook.bullets[g_playbook.count];
+    memset(b, 0, sizeof(*b));
+    b->id = ++g_playbook.next_id;
+    snprintf(b->section, sizeof(b->section), "%s", section);
+    snprintf(b->content, sizeof(b->content), "%s", content);
+    for (int i = 0; i < tag_count; i++)
+        snprintf(b->tags[i], PB_TAG_LEN, "%s", tags[i]);
+    b->tag_count = tag_count;
+    b->helpful = 0;
+    b->harmful = 0;
+    b->neutral = 0;
+    b->created_turn = g_playbook.current_turn;
+    b->last_accessed_turn = g_playbook.current_turn;
+    b->content_hash = hash;
+    /* Compute embedding for dedup/search */
+    ctx_build_embedding(content, b->embed, NULL, &b->embed_norm);
+    g_playbook.count++;
+
+    snprintf(result, rlen,
+        "{\"action\":\"added\",\"id\":\"pb-%05d\",\"section\":\"%s\","
+        "\"total_bullets\":%d}",
+        b->id, b->section, g_playbook.count);
+    return true;
+}
+
+/* ── playbook_tag: mark bullet as helpful/harmful/neutral ────────── */
+
+static bool tool_playbook_tag(const char *input, char *result, size_t rlen) {
+    if (!input) {
+        snprintf(result, rlen, "{\"error\":\"input required\"}");
+        return false;
+    }
+
+    /* Parse bullet_id (number after "pb-") */
+    int target_id = -1;
+    const char *s = strstr(input, "\"bullet_id\"");
+    if (s) {
+        s = strchr(s + 11, '"');
+        if (s) {
+            s++;
+            /* Skip "pb-" prefix if present */
+            if (strncmp(s, "pb-", 3) == 0) s += 3;
+            target_id = atoi(s);
+        }
+    }
+
+    /* Parse tag */
+    char tag[32] = "";
+    s = strstr(input, "\"tag\"");
+    if (s) {
+        s = strchr(s + 4, '"'); if (s) { s++;
+        const char *e = strchr(s, '"');
+        if (e && (size_t)(e - s) < sizeof(tag)) {
+            memcpy(tag, s, e - s);
+            tag[e - s] = '\0';
+        }}
+    }
+
+    if (target_id < 0 || !tag[0]) {
+        snprintf(result, rlen, "{\"error\":\"bullet_id and tag required\"}");
+        return false;
+    }
+
+    for (int i = 0; i < g_playbook.count; i++) {
+        if (g_playbook.bullets[i].id == target_id) {
+            pb_bullet_t *b = &g_playbook.bullets[i];
+            if (strcasecmp(tag, "helpful") == 0) b->helpful++;
+            else if (strcasecmp(tag, "harmful") == 0) b->harmful++;
+            else b->neutral++;
+            b->last_accessed_turn = g_playbook.current_turn;
+
+            snprintf(result, rlen,
+                "{\"id\":\"pb-%05d\",\"helpful\":%d,\"harmful\":%d,"
+                "\"neutral\":%d,\"score\":%.2f}",
+                b->id, b->helpful, b->harmful, b->neutral, pb_score(b));
+            return true;
+        }
+    }
+
+    snprintf(result, rlen, "{\"error\":\"bullet pb-%05d not found\"}", target_id);
+    return false;
+}
+
+/* ── playbook_remove: delete a bullet by ID ──────────────────────── */
+
+static bool tool_playbook_remove(const char *input, char *result, size_t rlen) {
+    if (!input) {
+        snprintf(result, rlen, "{\"error\":\"input required\"}");
+        return false;
+    }
+
+    int target_id = -1;
+    const char *s = strstr(input, "\"bullet_id\"");
+    if (s) {
+        s = strchr(s + 11, '"');
+        if (s) {
+            s++;
+            if (strncmp(s, "pb-", 3) == 0) s += 3;
+            target_id = atoi(s);
+        }
+    }
+
+    if (target_id < 0) {
+        snprintf(result, rlen, "{\"error\":\"bullet_id required\"}");
+        return false;
+    }
+
+    for (int i = 0; i < g_playbook.count; i++) {
+        if (g_playbook.bullets[i].id == target_id) {
+            if (i < g_playbook.count - 1)
+                memmove(&g_playbook.bullets[i], &g_playbook.bullets[i + 1],
+                         (size_t)(g_playbook.count - i - 1) * sizeof(pb_bullet_t));
+            g_playbook.count--;
+            snprintf(result, rlen,
+                "{\"removed\":\"pb-%05d\",\"remaining\":%d}", target_id, g_playbook.count);
+            return true;
+        }
+    }
+
+    snprintf(result, rlen, "{\"error\":\"bullet pb-%05d not found\"}", target_id);
+    return false;
+}
+
+/* ── playbook_search: semantic search over bullets ───────────────── */
+
+static bool tool_playbook_search(const char *input, char *result, size_t rlen) {
+    if (!input) {
+        snprintf(result, rlen, "{\"error\":\"query required\"}");
+        return false;
+    }
+
+    char query[1024] = "";
+    int top_k = 5;
+    const char *s = strstr(input, "\"query\"");
+    if (s) {
+        s = strchr(s + 7, '"'); if (s) { s++;
+        int qi = 0;
+        while (*s && *s != '"' && qi < 1023) {
+            if (*s == '\\' && *(s+1)) { s++; query[qi++] = *s; }
+            else query[qi++] = *s;
+            s++;
+        }
+        query[qi] = '\0';
+        }
+    }
+    s = strstr(input, "\"top_k\"");
+    if (s) {
+        s += 7;
+        while (*s && (*s < '0' || *s > '9')) s++;
+        top_k = atoi(s);
+        if (top_k < 1) top_k = 1;
+        if (top_k > 20) top_k = 20;
+    }
+
+    if (!query[0]) {
+        snprintf(result, rlen, "{\"error\":\"query is required\"}");
+        return false;
+    }
+
+    /* Build query embedding */
+    float qembed[CTX_EMBED_DIM];
+    float qnorm;
+    ctx_build_embedding(query, qembed, NULL, &qnorm);
+
+    /* Score all bullets */
+    typedef struct { int idx; float score; } hit_t;
+    hit_t *hits = safe_malloc(g_playbook.count * sizeof(hit_t));
+    int nhits = 0;
+
+    for (int i = 0; i < g_playbook.count; i++) {
+        pb_bullet_t *b = &g_playbook.bullets[i];
+        float cosine = ctx_cosine(qembed, qnorm, b->embed, b->embed_norm);
+        /* Blend semantic similarity with bullet quality score */
+        float quality = pb_score(b);
+        float final = cosine * 0.7f + (quality > 0 ? 0.3f : 0.0f);
+        hits[nhits].idx = i;
+        hits[nhits].score = final;
+        nhits++;
+    }
+
+    /* Sort descending */
+    for (int i = 0; i < nhits - 1; i++)
+        for (int j = i + 1; j < nhits; j++)
+            if (hits[j].score > hits[i].score) {
+                hit_t tmp = hits[i]; hits[i] = hits[j]; hits[j] = tmp;
+            }
+
+    int show = nhits < top_k ? nhits : top_k;
+    int off = 0;
+    off += snprintf(result + off, rlen - off,
+        "{\"query\":\"%s\",\"hits\":%d,\"bullets\":[", query, show);
+
+    for (int i = 0; i < show && (size_t)off < rlen - 512; i++) {
+        pb_bullet_t *b = &g_playbook.bullets[hits[i].idx];
+        b->last_accessed_turn = g_playbook.current_turn;
+        if (i > 0) off += snprintf(result + off, rlen - off, ",");
+
+        off += snprintf(result + off, rlen - off,
+            "{\"id\":\"pb-%05d\",\"section\":\"%s\","
+            "\"score\":%.3f,\"helpful\":%d,\"harmful\":%d,\"content\":",
+            b->id, b->section, hits[i].score, b->helpful, b->harmful);
+
+        off += snprintf(result + off, rlen - off, "\"");
+        for (int j = 0; b->content[j] && (size_t)off < rlen - 64; j++) {
+            char c = b->content[j];
+            if (c == '"') { result[off++] = '\\'; result[off++] = '"'; }
+            else if (c == '\\') { result[off++] = '\\'; result[off++] = '\\'; }
+            else if (c == '\n') { result[off++] = '\\'; result[off++] = 'n'; }
+            else result[off++] = c;
+        }
+        off += snprintf(result + off, rlen - off, "\"}");
+    }
+    off += snprintf(result + off, rlen - off, "]}");
+    free(hits);
+    return true;
+}
+
+/* ── playbook_gc: grow-and-refine — dedup + prune low scorers ────── */
+
+static bool tool_playbook_gc(const char *input, char *result, size_t rlen) {
+    int max_bullets = PB_MAX_BULLETS;
+    float prune_threshold = -1.0f;  /* remove bullets scoring below this */
+
+    if (input) {
+        const char *s = strstr(input, "\"max_bullets\"");
+        if (s) {
+            s += 13;
+            while (*s && (*s < '0' || *s > '9') && *s != '-') s++;
+            max_bullets = atoi(s);
+            if (max_bullets < 10) max_bullets = 10;
+        }
+        s = strstr(input, "\"prune_below\"");
+        if (s) {
+            s += 13;
+            while (*s && *s != '-' && *s != '.' && (*s < '0' || *s > '9')) s++;
+            prune_threshold = (float)atof(s);
+        }
+    }
+
+    int deduped = 0, pruned = 0;
+
+    /* Pass 1: Semantic deduplication — merge near-duplicates */
+    for (int i = 0; i < g_playbook.count; i++) {
+        for (int j = i + 1; j < g_playbook.count; j++) {
+            float sim = ctx_cosine(g_playbook.bullets[i].embed,
+                                    g_playbook.bullets[i].embed_norm,
+                                    g_playbook.bullets[j].embed,
+                                    g_playbook.bullets[j].embed_norm);
+            if (sim >= PB_DEDUP_THRESHOLD) {
+                /* Merge: keep higher-scoring bullet, absorb counters */
+                float si = pb_score(&g_playbook.bullets[i]);
+                float sj = pb_score(&g_playbook.bullets[j]);
+                int keep, drop;
+                if (si >= sj) { keep = i; drop = j; }
+                else           { keep = j; drop = i; }
+                g_playbook.bullets[keep].helpful += g_playbook.bullets[drop].helpful;
+                g_playbook.bullets[keep].harmful += g_playbook.bullets[drop].harmful;
+                g_playbook.bullets[keep].neutral += g_playbook.bullets[drop].neutral;
+                /* Remove dropped bullet */
+                if (drop < g_playbook.count - 1)
+                    memmove(&g_playbook.bullets[drop], &g_playbook.bullets[drop + 1],
+                             (size_t)(g_playbook.count - drop - 1) * sizeof(pb_bullet_t));
+                g_playbook.count--;
+                deduped++;
+                if (drop == i) {
+                    /* We dropped i (kept j which shifted down) — restart outer */
+                    i--;
+                    break;
+                }
+                /* We dropped j — re-check this j position */
+                j--;
+            }
+        }
+    }
+
+    /* Pass 2: Prune low-scoring bullets (iterate backward for safe removal) */
+    for (int i = g_playbook.count - 1; i >= 0; i--) {
+        float sc = pb_score(&g_playbook.bullets[i]);
+        bool should_prune = (sc < prune_threshold) ||
+                            (g_playbook.count > max_bullets && sc <= 0.0f);
+        if (!should_prune) continue;
+        if (i < g_playbook.count - 1)
+            memmove(&g_playbook.bullets[i], &g_playbook.bullets[i + 1],
+                     (size_t)(g_playbook.count - i - 1) * sizeof(pb_bullet_t));
+        g_playbook.count--;
+        pruned++;
+    }
+
+    snprintf(result, rlen,
+        "{\"deduped\":%d,\"pruned\":%d,\"remaining\":%d,"
+        "\"dedup_threshold\":%.2f,\"prune_threshold\":%.2f}",
+        deduped, pruned, g_playbook.count,
+        PB_DEDUP_THRESHOLD, prune_threshold);
+    return true;
+}
+
+/* ── scratchpad: KV working memory (separate from conversation) ──── */
+
+#define SP_MAX_ENTRIES   64
+#define SP_KEY_LEN       128
+#define SP_VALUE_LEN     8192
+
+typedef struct {
+    char key[SP_KEY_LEN];
+    char value[SP_VALUE_LEN];
+    int  turn_written;
+} sp_entry_t;
+
+static sp_entry_t g_scratchpad[SP_MAX_ENTRIES];
+static int g_sp_count = 0;
+
+static bool tool_scratchpad(const char *input, char *result, size_t rlen) {
+    if (!input) {
+        snprintf(result, rlen, "{\"error\":\"input required\"}");
+        return false;
+    }
+
+    /* Parse operation: get, set, delete, list, clear */
+    char op[16] = "get";
+    char key[SP_KEY_LEN] = "";
+    char value[SP_VALUE_LEN] = "";
+
+    const char *s = strstr(input, "\"op\"");
+    if (!s) s = strstr(input, "\"operation\"");
+    if (s) {
+        s = strchr(s, ':');
+        if (s) {
+            s = strchr(s, '"'); if (s) { s++;
+            const char *e = strchr(s, '"');
+            if (e && (size_t)(e - s) < sizeof(op)) {
+                memcpy(op, s, e - s);
+                op[e - s] = '\0';
+            }}
+        }
+    }
+
+    s = strstr(input, "\"key\"");
+    if (s) {
+        s = strchr(s + 5, '"'); if (s) { s++;
+        const char *e = strchr(s, '"');
+        if (e && (size_t)(e - s) < SP_KEY_LEN) {
+            memcpy(key, s, e - s);
+            key[e - s] = '\0';
+        }}
+    }
+
+    s = strstr(input, "\"value\"");
+    if (s) {
+        s = strchr(s + 7, '"'); if (s) { s++;
+        int vi = 0;
+        while (*s && vi < SP_VALUE_LEN - 1) {
+            if (*s == '\\' && *(s+1)) {
+                s++;
+                if (*s == 'n') value[vi++] = '\n';
+                else if (*s == 't') value[vi++] = '\t';
+                else if (*s == '"') value[vi++] = '"';
+                else if (*s == '\\') value[vi++] = '\\';
+                else value[vi++] = *s;
+            } else if (*s == '"') break;
+            else value[vi++] = *s;
+            s++;
+        }
+        value[vi] = '\0';
+        }
+    }
+
+    if (strcasecmp(op, "set") == 0 || strcasecmp(op, "write") == 0) {
+        if (!key[0] || !value[0]) {
+            snprintf(result, rlen, "{\"error\":\"key and value required for set\"}");
+            return false;
+        }
+        /* Update existing or add new */
+        for (int i = 0; i < g_sp_count; i++) {
+            if (strcmp(g_scratchpad[i].key, key) == 0) {
+                snprintf(g_scratchpad[i].value, SP_VALUE_LEN, "%s", value);
+                g_scratchpad[i].turn_written = g_playbook.current_turn;
+                snprintf(result, rlen, "{\"op\":\"updated\",\"key\":\"%s\"}", key);
+                return true;
+            }
+        }
+        if (g_sp_count >= SP_MAX_ENTRIES) {
+            snprintf(result, rlen, "{\"error\":\"scratchpad full (max %d entries)\"}", SP_MAX_ENTRIES);
+            return false;
+        }
+        sp_entry_t *e = &g_scratchpad[g_sp_count++];
+        snprintf(e->key, SP_KEY_LEN, "%s", key);
+        snprintf(e->value, SP_VALUE_LEN, "%s", value);
+        e->turn_written = g_playbook.current_turn;
+        snprintf(result, rlen, "{\"op\":\"created\",\"key\":\"%s\",\"entries\":%d}", key, g_sp_count);
+        return true;
+
+    } else if (strcasecmp(op, "get") == 0 || strcasecmp(op, "read") == 0) {
+        if (!key[0]) {
+            snprintf(result, rlen, "{\"error\":\"key required for get\"}");
+            return false;
+        }
+        for (int i = 0; i < g_sp_count; i++) {
+            if (strcmp(g_scratchpad[i].key, key) == 0) {
+                int off = 0;
+                off += snprintf(result + off, rlen - off,
+                    "{\"key\":\"%s\",\"turn_written\":%d,\"value\":\"",
+                    key, g_scratchpad[i].turn_written);
+                for (int j = 0; g_scratchpad[i].value[j] && (size_t)off < rlen - 16; j++) {
+                    char c = g_scratchpad[i].value[j];
+                    if (c == '"') { result[off++] = '\\'; result[off++] = '"'; }
+                    else if (c == '\\') { result[off++] = '\\'; result[off++] = '\\'; }
+                    else if (c == '\n') { result[off++] = '\\'; result[off++] = 'n'; }
+                    else result[off++] = c;
+                }
+                off += snprintf(result + off, rlen - off, "\"}");
+                return true;
+            }
+        }
+        snprintf(result, rlen, "{\"error\":\"key '%s' not found\"}", key);
+        return false;
+
+    } else if (strcasecmp(op, "delete") == 0 || strcasecmp(op, "del") == 0) {
+        for (int i = 0; i < g_sp_count; i++) {
+            if (strcmp(g_scratchpad[i].key, key) == 0) {
+                if (i < g_sp_count - 1)
+                    memmove(&g_scratchpad[i], &g_scratchpad[i + 1],
+                             (size_t)(g_sp_count - i - 1) * sizeof(sp_entry_t));
+                g_sp_count--;
+                snprintf(result, rlen, "{\"op\":\"deleted\",\"key\":\"%s\",\"remaining\":%d}", key, g_sp_count);
+                return true;
+            }
+        }
+        snprintf(result, rlen, "{\"error\":\"key '%s' not found\"}", key);
+        return false;
+
+    } else if (strcasecmp(op, "list") == 0 || strcasecmp(op, "keys") == 0) {
+        int off = 0;
+        off += snprintf(result + off, rlen - off, "{\"entries\":%d,\"keys\":[", g_sp_count);
+        for (int i = 0; i < g_sp_count && (size_t)off < rlen - 128; i++) {
+            if (i > 0) off += snprintf(result + off, rlen - off, ",");
+            off += snprintf(result + off, rlen - off,
+                "{\"key\":\"%s\",\"turn\":%d,\"len\":%zu}",
+                g_scratchpad[i].key, g_scratchpad[i].turn_written,
+                strlen(g_scratchpad[i].value));
+        }
+        off += snprintf(result + off, rlen - off, "]}");
+        return true;
+
+    } else if (strcasecmp(op, "clear") == 0) {
+        int cleared = g_sp_count;
+        g_sp_count = 0;
+        snprintf(result, rlen, "{\"op\":\"cleared\",\"removed\":%d}", cleared);
+        return true;
+    }
+
+    snprintf(result, rlen, "{\"error\":\"unknown op '%s' — use get/set/delete/list/clear\"}", op);
+    return false;
+}
+
+/* ── context_compact: trigger conversation history compression ───── */
+
+/* Forward: conv_compact_recent_tool_turn / conv_trim_old_results defined in llm.c */
+extern bool conv_compact_recent_tool_turn(conversation_t *c, int max_chars);
+extern void conv_trim_old_results(conversation_t *c, int keep_recent, int max_chars);
+
+/* We need access to the active conversation — set by agent loop */
+static conversation_t *g_active_conv = NULL;
+
+void tools_set_active_conversation(void *c) {
+    g_active_conv = (conversation_t *)c;
+}
+
+void tools_playbook_advance_turn(void) {
+    g_playbook.current_turn++;
+}
+
+static bool tool_context_compact(const char *input, char *result, size_t rlen) {
+    int keep_recent = 6;   /* keep last N messages uncompacted */
+    int max_chars = 800;    /* truncate old tool results to this */
+    int aggressive = 0;
+
+    if (input) {
+        const char *s = strstr(input, "\"keep_recent\"");
+        if (s) {
+            s += 13;
+            while (*s && (*s < '0' || *s > '9')) s++;
+            keep_recent = atoi(s);
+            if (keep_recent < 2) keep_recent = 2;
+        }
+        s = strstr(input, "\"max_result_chars\"");
+        if (s) {
+            s += 18;
+            while (*s && (*s < '0' || *s > '9')) s++;
+            max_chars = atoi(s);
+            if (max_chars < 100) max_chars = 100;
+        }
+        s = strstr(input, "\"aggressive\"");
+        if (s) aggressive = 1;
+    }
+
+    if (!g_active_conv) {
+        snprintf(result, rlen,
+            "{\"error\":\"no active conversation — context_compact only works during agent loop\"}");
+        return false;
+    }
+
+    int before_count = g_active_conv->count;
+
+    /* Step 1: Trim old tool results */
+    conv_trim_old_results(g_active_conv, keep_recent, max_chars);
+
+    /* Step 2: Compact recent tool turns if aggressive */
+    int compacted = 0;
+    if (aggressive) {
+        while (conv_compact_recent_tool_turn(g_active_conv, max_chars)) {
+            compacted++;
+            if (compacted > 10) break;  /* safety cap */
+        }
+    }
+
+    int after_count = g_active_conv->count;
+
+    snprintf(result, rlen,
+        "{\"messages_before\":%d,\"messages_after\":%d,"
+        "\"tool_turns_compacted\":%d,\"keep_recent\":%d,"
+        "\"max_result_chars\":%d}",
+        before_count, after_count, compacted, keep_recent, max_chars);
+    return true;
+}
+
+/* ── playbook_inject: inject playbook into system context ────────── */
+
+static bool tool_playbook_inject(const char *input, char *result, size_t rlen) {
+    (void)input;
+    /* Build a compact playbook string from all bullets, organized by section */
+    char sections[16][PB_MAX_SECTION];
+    int section_count = 0;
+
+    /* Collect unique sections */
+    for (int i = 0; i < g_playbook.count; i++) {
+        bool found = false;
+        for (int j = 0; j < section_count; j++)
+            if (strcmp(sections[j], g_playbook.bullets[i].section) == 0) { found = true; break; }
+        if (!found && section_count < 16)
+            snprintf(sections[section_count++], PB_MAX_SECTION, "%s", g_playbook.bullets[i].section);
+    }
+
+    int off = 0;
+    off += snprintf(result + off, rlen - off, "{\"injected_sections\":%d,\"playbook\":\"", section_count);
+
+    for (int s = 0; s < section_count && (size_t)off < rlen - 256; s++) {
+        off += snprintf(result + off, rlen - off, "## %s\\n", sections[s]);
+        for (int i = 0; i < g_playbook.count && (size_t)off < rlen - 256; i++) {
+            if (strcmp(g_playbook.bullets[i].section, sections[s]) != 0) continue;
+            float sc = pb_score(&g_playbook.bullets[i]);
+            if (sc < -1.0f) continue;  /* skip heavily penalized */
+
+            off += snprintf(result + off, rlen - off, "- [pb-%05d] ", g_playbook.bullets[i].id);
+            /* Escape content inline */
+            for (int j = 0; g_playbook.bullets[i].content[j] && (size_t)off < rlen - 64; j++) {
+                char c = g_playbook.bullets[i].content[j];
+                if (c == '"') { result[off++] = '\\'; result[off++] = '"'; }
+                else if (c == '\\') { result[off++] = '\\'; result[off++] = '\\'; }
+                else if (c == '\n') { result[off++] = '\\'; result[off++] = 'n'; }
+                else result[off++] = c;
+            }
+            off += snprintf(result + off, rlen - off, "\\n");
+        }
+    }
+    off += snprintf(result + off, rlen - off, "\"}");
+    return true;
+}
+
 /* ── Agent self-exit tool ──────────────────────────────────────────── */
 
 static bool tool_self_exit(const char *input, char *result, size_t rlen) {
@@ -11273,6 +12709,9 @@ static bool tool_self_exit(const char *input, char *result, size_t rlen) {
 }
 
 /* ── Discover tools (meta-tool for lazy loading) ───────────────────── */
+
+/* Forward declaration — defined after assign_group() below */
+static int build_compact_params(const char *schema, char *out, size_t outlen);
 
 static bool tool_discover_tools(const char *input, char *result, size_t rlen) {
     /* Parse optional category filter */
@@ -11298,7 +12737,7 @@ static bool tool_discover_tools(const char *input, char *result, size_t rlen) {
     /* Build JSON array of tool summaries grouped by category */
     int off = 0;
     off += snprintf(result + off, rlen - off,
-        "{\"total_tools\":%d,\"note\":\"Call any tool by name — it will be available on the next turn.\",\"tools\":[", total);
+        "{\"total_tools\":%d,\"note\":\"Use load_tools to activate any tool listed here. Pass tool names or a category.\",\"tools\":[", total);
 
     /* Group names for display */
     const char *group_names[] = {
@@ -11351,12 +12790,188 @@ static bool tool_discover_tools(const char *input, char *result, size_t rlen) {
             if (gid != g) continue;
             if (!first) off += snprintf(result + off, rlen - off, ",");
             first = false;
-            off += snprintf(result + off, rlen - off, "\"%s\"", n);
+            /* Include compact signature: name(params) — description */
+            char params[256];
+            build_compact_params(tools[i].input_schema_json, params, sizeof(params));
+            const char *d = tools[i].description;
+            size_t dlen = strlen(d);
+            if (dlen > 60)
+                off += snprintf(result + off, rlen - off,
+                    "\"%s%s — %.57s...\"", n, params, d);
+            else
+                off += snprintf(result + off, rlen - off,
+                    "\"%s%s — %s\"", n, params, d);
         }
         off += snprintf(result + off, rlen - off, "]}");
     }
 
     off += snprintf(result + off, rlen - off, "]}");
+    return true;
+}
+
+/* ── Load tools (dynamic tool activation via hint-pinning) ─────────── */
+
+/* Forward declarations — defined later in this file */
+static int assign_group(const char *name, const char *desc);
+void tools_mark_hot(int tool_idx);
+
+static bool tool_load_tools(const char *input, char *result, size_t rlen) {
+    int total;
+    const tool_def_t *tools = tools_get_all(&total);
+
+    /* Parse "tools" array: ["tool_a","tool_b",...] */
+    char names[32][64];
+    int name_count = 0;
+
+    /* Also support "category" for bulk loading */
+    char category[64] = "";
+
+    if (input) {
+        /* Parse category */
+        const char *cc = strstr(input, "\"category\"");
+        if (cc) {
+            cc = strchr(cc + 10, '"');
+            if (cc) {
+                cc++;
+                const char *end = strchr(cc, '"');
+                if (end && (size_t)(end - cc) < sizeof(category)) {
+                    memcpy(category, cc, end - cc);
+                    category[end - cc] = '\0';
+                }
+            }
+        }
+
+        /* Parse tools array */
+        const char *arr = strstr(input, "\"tools\"");
+        if (arr) {
+            arr = strchr(arr, '[');
+            if (arr) {
+                arr++;
+                while (*arr && *arr != ']' && name_count < 32) {
+                    const char *q1 = strchr(arr, '"');
+                    if (!q1 || *q1 == ']') break;
+                    q1++;
+                    const char *q2 = strchr(q1, '"');
+                    if (!q2) break;
+                    size_t len = q2 - q1;
+                    if (len < 64) {
+                        memcpy(names[name_count], q1, len);
+                        names[name_count][len] = '\0';
+                        name_count++;
+                    }
+                    arr = q2 + 1;
+                }
+            }
+        }
+    }
+
+    /* If category given, resolve all tools in that category */
+    if (category[0] && name_count == 0) {
+        const char *group_names[] = {
+            "file_io", "git", "network", "shell", "code", "crypto",
+            "swarm", "ast", "pipeline", "math", "search", "general",
+            "finance", "prediction", "memory"
+        };
+        int target_group = -1;
+        for (int g = 0; g < 15; g++) {
+            if (strcasecmp(category, group_names[g]) == 0) {
+                target_group = g;
+                break;
+            }
+        }
+        if (target_group >= 0) {
+            for (int i = 0; i < total && name_count < 32; i++) {
+                int gid = assign_group(tools[i].name, tools[i].description);
+                if (gid == target_group) {
+                    snprintf(names[name_count], 64, "%s", tools[i].name);
+                    name_count++;
+                }
+            }
+        }
+    }
+
+    if (name_count == 0) {
+        snprintf(result, rlen,
+            "{\"error\":\"No tools specified. Provide \\\"tools\\\":[\\\"name1\\\",\\\"name2\\\",...] "
+            "or \\\"category\\\":\\\"file_io\\\" to load a group.\"}");
+        return false;
+    }
+
+    /* Hint-pin each requested tool */
+    int loaded = 0;
+    int not_found = 0;
+    char not_found_names[512] = "";
+    int nf_off = 0;
+
+    /* Build a single hint with all requested tools (up to HINT_MAX_TOOLS per hint) */
+    for (int batch = 0; batch < name_count; batch += HINT_MAX_TOOLS) {
+        tool_hint_t hint = {0};
+        snprintf(hint.domain, sizeof(hint.domain), "load_tools_%d", batch);
+        hint.weight = 1.5f;
+        hint.ttl_turns = 20;  /* persist for 20 turns */
+        hint.source = HINT_USER;
+        hint.turn_created = 0;  /* will be set by hint_add */
+
+        int this_batch = name_count - batch;
+        if (this_batch > HINT_MAX_TOOLS) this_batch = HINT_MAX_TOOLS;
+
+        for (int i = 0; i < this_batch; i++) {
+            int idx = tool_map_lookup(&g_tool_map, names[batch + i]);
+            if (idx >= 0 && idx < total) {
+                snprintf(hint.tools[hint.tool_count], 64, "%s", names[batch + i]);
+                hint.tool_count++;
+                /* Also mark in hot cache so it auto-admits to working set */
+                tools_mark_hot(idx);
+                loaded++;
+            } else {
+                if (nf_off > 0)
+                    nf_off += snprintf(not_found_names + nf_off,
+                                       sizeof(not_found_names) - nf_off, ",");
+                nf_off += snprintf(not_found_names + nf_off,
+                                   sizeof(not_found_names) - nf_off,
+                                   "\"%s\"", names[batch + i]);
+                not_found++;
+            }
+        }
+
+        if (hint.tool_count > 0)
+            tools_hint_add(&hint);
+    }
+
+    /* Build result: include full schemas for loaded tools so the LLM can use them immediately */
+    int off = 0;
+    off += snprintf(result + off, rlen - off,
+        "{\"loaded\":%d,\"not_found\":%d", loaded, not_found);
+    if (not_found > 0)
+        off += snprintf(result + off, rlen - off,
+            ",\"unknown_tools\":[%s]", not_found_names);
+
+    off += snprintf(result + off, rlen - off, ",\"tools\":[");
+    bool first = true;
+    for (int i = 0; i < name_count && (size_t)off < rlen - 512; i++) {
+        int idx = tool_map_lookup(&g_tool_map, names[i]);
+        if (idx < 0 || idx >= total) continue;
+        if (!first) off += snprintf(result + off, rlen - off, ",");
+        first = false;
+        /* Return name + description + full input_schema so the model knows the params */
+        off += snprintf(result + off, rlen - off,
+            "{\"name\":\"%s\",\"description\":", tools[idx].name);
+        /* JSON-escape description */
+        off += snprintf(result + off, rlen - off, "\"");
+        const char *d = tools[idx].description;
+        for (size_t j = 0; d[j] && (size_t)off < rlen - 100; j++) {
+            if (d[j] == '"') { result[off++] = '\\'; result[off++] = '"'; }
+            else if (d[j] == '\\') { result[off++] = '\\'; result[off++] = '\\'; }
+            else if (d[j] == '\n') { result[off++] = '\\'; result[off++] = 'n'; }
+            else result[off++] = d[j];
+        }
+        off += snprintf(result + off, rlen - off, "\",\"input_schema\":%s}",
+                        tools[idx].input_schema_json);
+    }
+    off += snprintf(result + off, rlen - off,
+        "],\"note\":\"These tools are now pinned in your tool list for the next 20 turns. "
+        "You can call them directly.\"}");
+
     return true;
 }
 
@@ -11401,1717 +13016,559 @@ static bool tool_vos_status(const char *input_json, char *result, size_t rlen) {
     return true;
 }
 
+
+/* ══════════════════════════════════════════════════════════════════════════
+ *  CONSOLIDATED DISPATCHERS — system-level tool groups
+ * ══════════════════════════════════════════════════════════════════════════ */
+
+/* Forward-declare integrations.c dispatchers */
+extern bool tool_alpha_vantage(const char *input, char *result, size_t rlen);
+extern bool tool_kalshi(const char *input, char *result, size_t rlen);
+extern bool tool_polymarket(const char *input, char *result, size_t rlen);
+extern bool tool_synoptic(const char *input, char *result, size_t rlen);
+extern bool tool_nws(const char *input, char *result, size_t rlen);
+extern bool tool_contract_ingest(const char *input, char *result, size_t rlen);
+extern bool tool_contract_search(const char *input, char *result, size_t rlen);
+extern bool tool_contract_lookup(const char *input, char *result, size_t rlen);
+extern bool tool_contract_ingest_all(const char *input, char *result, size_t rlen);
+extern bool tool_contract_new_issues(const char *input, char *result, size_t rlen);
+extern bool tool_contract_landscape(const char *input, char *result, size_t rlen);
+
+static bool tool_context_dispatch(const char *input, char *result, size_t rlen) {
+    char *action = json_get_str(input, "action");
+    if (!action || !action[0]) { free(action); snprintf(result, rlen, "missing: action (recall, search, get, batch_get, stats, summarize, pack, fuse, pin, gc)"); return false; }
+    bool ok = false;
+    if      (strcmp(action, "recall") == 0)    ok = tool_context_recall(input, result, rlen);
+    else if (strcmp(action, "search") == 0)    ok = tool_context_search(input, result, rlen);
+    else if (strcmp(action, "get") == 0)       ok = tool_context_get(input, result, rlen);
+    else if (strcmp(action, "batch_get") == 0) ok = tool_context_get_batch(input, result, rlen);
+    else if (strcmp(action, "stats") == 0)     ok = tool_context_stats(input, result, rlen);
+    else if (strcmp(action, "summarize") == 0) ok = tool_context_summarize(input, result, rlen);
+    else if (strcmp(action, "pack") == 0)      ok = tool_context_pack(input, result, rlen);
+    else if (strcmp(action, "fuse") == 0)      ok = tool_context_fuse(input, result, rlen);
+    else if (strcmp(action, "pin") == 0)       ok = tool_context_pin(input, result, rlen);
+    else if (strcmp(action, "gc") == 0)        ok = tool_context_gc(input, result, rlen);
+    else snprintf(result, rlen, "unknown context action: %s", action);
+    free(action); return ok;
+}
+
+static bool tool_playbook_dispatch(const char *input, char *result, size_t rlen) {
+    char *action = json_get_str(input, "action");
+    if (!action || !action[0]) { free(action); snprintf(result, rlen, "missing: action (read, add, tag, remove, search, gc, inject)"); return false; }
+    bool ok = false;
+    if      (strcmp(action, "read") == 0)   ok = tool_playbook_read(input, result, rlen);
+    else if (strcmp(action, "add") == 0)    ok = tool_playbook_add(input, result, rlen);
+    else if (strcmp(action, "tag") == 0)    ok = tool_playbook_tag(input, result, rlen);
+    else if (strcmp(action, "remove") == 0) ok = tool_playbook_remove(input, result, rlen);
+    else if (strcmp(action, "search") == 0) ok = tool_playbook_search(input, result, rlen);
+    else if (strcmp(action, "gc") == 0)     ok = tool_playbook_gc(input, result, rlen);
+    else if (strcmp(action, "inject") == 0) ok = tool_playbook_inject(input, result, rlen);
+    else snprintf(result, rlen, "unknown playbook action: %s", action);
+    free(action); return ok;
+}
+
+static bool tool_browser_dispatch(const char *input, char *result, size_t rlen) {
+    char *action = json_get_str(input, "action");
+    if (!action || !action[0]) { free(action); snprintf(result, rlen, "missing: action (snapshot, extract, viewport, outline)"); return false; }
+    bool ok = false;
+    if      (strcmp(action, "snapshot") == 0) ok = tool_browser_snapshot(input, result, rlen);
+    else if (strcmp(action, "extract") == 0)  ok = tool_browser_extract(input, result, rlen);
+    else if (strcmp(action, "viewport") == 0) ok = tool_browser_viewport(input, result, rlen);
+    else if (strcmp(action, "outline") == 0)  ok = tool_browser_outline(input, result, rlen);
+    else snprintf(result, rlen, "unknown browser action: %s", action);
+    free(action); return ok;
+}
+
+static bool tool_workflow_dispatch(const char *input, char *result, size_t rlen) {
+    char *action = json_get_str(input, "action");
+    if (!action || !action[0]) { free(action); snprintf(result, rlen, "missing: action (plan, status, checkpoint, resume)"); return false; }
+    bool ok = false;
+    if      (strcmp(action, "plan") == 0)       ok = tool_workflow_plan(input, result, rlen);
+    else if (strcmp(action, "status") == 0)     ok = tool_workflow_status(input, result, rlen);
+    else if (strcmp(action, "checkpoint") == 0) ok = tool_workflow_checkpoint(input, result, rlen);
+    else if (strcmp(action, "resume") == 0)     ok = tool_workflow_resume(input, result, rlen);
+    else snprintf(result, rlen, "unknown workflow action: %s", action);
+    free(action); return ok;
+}
+
+static bool tool_git_dispatch(const char *input, char *result, size_t rlen) {
+    char *action = json_get_str(input, "action");
+    if (!action || !action[0]) { free(action); snprintf(result, rlen, "missing: action (status, diff, log, commit, add, branch, stash, clone, push, pull)"); return false; }
+    bool ok = false;
+    if      (strcmp(action, "status") == 0) ok = tool_git_status(input, result, rlen);
+    else if (strcmp(action, "diff") == 0)   ok = tool_git_diff(input, result, rlen);
+    else if (strcmp(action, "log") == 0)    ok = tool_git_log(input, result, rlen);
+    else if (strcmp(action, "commit") == 0) ok = tool_git_commit(input, result, rlen);
+    else if (strcmp(action, "add") == 0)    ok = tool_git_add(input, result, rlen);
+    else if (strcmp(action, "branch") == 0) ok = tool_git_branch(input, result, rlen);
+    else if (strcmp(action, "stash") == 0)  ok = tool_git_stash(input, result, rlen);
+    else if (strcmp(action, "clone") == 0)  ok = tool_git_clone(input, result, rlen);
+    else if (strcmp(action, "push") == 0)   ok = tool_git_push(input, result, rlen);
+    else if (strcmp(action, "pull") == 0)   ok = tool_git_pull(input, result, rlen);
+    else snprintf(result, rlen, "unknown git action: %s", action);
+    free(action); return ok;
+}
+
+static bool tool_ipc_dispatch(const char *input, char *result, size_t rlen) {
+    char *action = json_get_str(input, "action");
+    if (!action || !action[0]) { free(action); snprintf(result, rlen, "missing: action (send, recv, agents, scratch_put, scratch_get, task_submit, task_list, set_role)"); return false; }
+    bool ok = false;
+    if      (strcmp(action, "send") == 0)        ok = tool_ipc_send(input, result, rlen);
+    else if (strcmp(action, "recv") == 0)        ok = tool_ipc_recv(input, result, rlen);
+    else if (strcmp(action, "agents") == 0)      ok = tool_ipc_agents(input, result, rlen);
+    else if (strcmp(action, "scratch_put") == 0) ok = tool_ipc_scratch_put(input, result, rlen);
+    else if (strcmp(action, "scratch_get") == 0) ok = tool_ipc_scratch_get(input, result, rlen);
+    else if (strcmp(action, "task_submit") == 0) ok = tool_ipc_task_submit(input, result, rlen);
+    else if (strcmp(action, "task_list") == 0)   ok = tool_ipc_task_list(input, result, rlen);
+    else if (strcmp(action, "set_role") == 0)    ok = tool_ipc_set_role(input, result, rlen);
+    else snprintf(result, rlen, "unknown ipc action: %s", action);
+    free(action); return ok;
+}
+
+static bool tool_agent_dispatch(const char *input, char *result, size_t rlen) {
+    char *action = json_get_str(input, "action");
+    if (!action || !action[0]) { free(action); snprintf(result, rlen, "missing: action (spawn, status, output, wait, race, kill)"); return false; }
+    bool ok = false;
+    if      (strcmp(action, "spawn") == 0)  ok = tool_spawn_agent(input, result, rlen);
+    else if (strcmp(action, "status") == 0) ok = tool_agent_status(input, result, rlen);
+    else if (strcmp(action, "output") == 0) ok = tool_agent_output(input, result, rlen);
+    else if (strcmp(action, "wait") == 0)   ok = tool_agent_wait(input, result, rlen);
+    else if (strcmp(action, "race") == 0)   ok = tool_agent_race(input, result, rlen);
+    else if (strcmp(action, "kill") == 0)   ok = tool_agent_kill(input, result, rlen);
+    else snprintf(result, rlen, "unknown agent action: %s", action);
+    free(action); return ok;
+}
+
+static bool tool_swarm_dispatch(const char *input, char *result, size_t rlen) {
+    char *action = json_get_str(input, "action");
+    if (!action || !action[0]) { free(action); snprintf(result, rlen, "missing: action (create, status, collect, budget, spawn_executor, spawn_provider, create_executor_swarm, executor_status, topology_list, topology_run)"); return false; }
+    bool ok = false;
+    if      (strcmp(action, "create") == 0)               ok = tool_create_swarm(input, result, rlen);
+    else if (strcmp(action, "status") == 0)               ok = tool_swarm_status(input, result, rlen);
+    else if (strcmp(action, "collect") == 0)              ok = tool_swarm_collect(input, result, rlen);
+    else if (strcmp(action, "budget") == 0)               ok = tool_swarm_budget(input, result, rlen);
+    else if (strcmp(action, "spawn_executor") == 0)       ok = tool_spawn_executor(input, result, rlen);
+    else if (strcmp(action, "spawn_provider") == 0)       ok = tool_spawn_provider(input, result, rlen);
+    else if (strcmp(action, "create_executor_swarm") == 0) ok = tool_create_executor_swarm(input, result, rlen);
+    else if (strcmp(action, "executor_status") == 0)      ok = tool_executor_status(input, result, rlen);
+    else if (strcmp(action, "topology_list") == 0)        ok = tool_topology_list(input, result, rlen);
+    else if (strcmp(action, "topology_run") == 0)         ok = tool_topology_run(input, result, rlen);
+    else if (strcmp(action, "task_profile") == 0)         ok = tool_task_profile(input, result, rlen);
+    else snprintf(result, rlen, "unknown swarm action: %s", action);
+    free(action); return ok;
+}
+
+static bool tool_pheromone_dispatch(const char *input, char *result, size_t rlen) {
+    char *action = json_get_str(input, "action");
+    if (!action || !action[0]) { free(action); snprintf(result, rlen, "missing: action (deposit, sense, status)"); return false; }
+    bool ok = false;
+    if      (strcmp(action, "deposit") == 0) ok = tool_pheromone_deposit(input, result, rlen);
+    else if (strcmp(action, "sense") == 0)   ok = tool_pheromone_sense(input, result, rlen);
+    else if (strcmp(action, "status") == 0)  ok = tool_pheromone_status(input, result, rlen);
+    else snprintf(result, rlen, "unknown pheromone action: %s", action);
+    free(action); return ok;
+}
+
+static bool tool_ooda_dispatch(const char *input, char *result, size_t rlen) {
+    char *action = json_get_str(input, "action");
+    if (!action || !action[0]) { free(action); snprintf(result, rlen, "missing: action (begin, observe, orient, decide, complete, status)"); return false; }
+    bool ok = false;
+    if      (strcmp(action, "begin") == 0)    ok = tool_ooda_begin(input, result, rlen);
+    else if (strcmp(action, "observe") == 0)  ok = tool_ooda_observe(input, result, rlen);
+    else if (strcmp(action, "orient") == 0)   ok = tool_ooda_orient(input, result, rlen);
+    else if (strcmp(action, "decide") == 0)   ok = tool_ooda_decide(input, result, rlen);
+    else if (strcmp(action, "complete") == 0) ok = tool_ooda_complete(input, result, rlen);
+    else if (strcmp(action, "status") == 0)   ok = tool_ooda_status(input, result, rlen);
+    else snprintf(result, rlen, "unknown ooda action: %s", action);
+    free(action); return ok;
+}
+
+static bool tool_killswitch_dispatch(const char *input, char *result, size_t rlen) {
+    char *action = json_get_str(input, "action");
+    if (!action || !action[0]) { free(action); snprintf(result, rlen, "missing: action (trigger, resolve, status)"); return false; }
+    bool ok = false;
+    if      (strcmp(action, "trigger") == 0) ok = tool_killswitch_trigger(input, result, rlen);
+    else if (strcmp(action, "resolve") == 0) ok = tool_killswitch_resolve(input, result, rlen);
+    else if (strcmp(action, "status") == 0)  ok = tool_killswitch_status(input, result, rlen);
+    else snprintf(result, rlen, "unknown killswitch action: %s", action);
+    free(action); return ok;
+}
+
+static bool tool_governance_dispatch(const char *input, char *result, size_t rlen) {
+    char *action = json_get_str(input, "action");
+    if (!action || !action[0]) { free(action); snprintf(result, rlen, "missing: action (status, authorize, checkpoint, budget, audit, param)"); return false; }
+    bool ok = false;
+    if      (strcmp(action, "status") == 0)     ok = tool_governance_status(input, result, rlen);
+    else if (strcmp(action, "authorize") == 0)  ok = tool_governance_authorize(input, result, rlen);
+    else if (strcmp(action, "checkpoint") == 0) ok = tool_governance_checkpoint(input, result, rlen);
+    else if (strcmp(action, "budget") == 0)     ok = tool_governance_budget(input, result, rlen);
+    else if (strcmp(action, "audit") == 0)      ok = tool_governance_audit(input, result, rlen);
+    else if (strcmp(action, "param") == 0)      ok = tool_governance_param(input, result, rlen);
+    else snprintf(result, rlen, "unknown governance action: %s", action);
+    free(action); return ok;
+}
+
+static bool tool_memory_dispatch(const char *input, char *result, size_t rlen) {
+    char *action = json_get_str(input, "action");
+    if (!action || !action[0]) { free(action); snprintf(result, rlen, "missing: action (store, recall, promote, forget, status)"); return false; }
+    bool ok = false;
+    if      (strcmp(action, "store") == 0)   ok = tool_memory_store(input, result, rlen);
+    else if (strcmp(action, "recall") == 0)  ok = tool_memory_recall(input, result, rlen);
+    else if (strcmp(action, "promote") == 0) ok = tool_memory_promote(input, result, rlen);
+    else if (strcmp(action, "forget") == 0)  ok = tool_memory_forget(input, result, rlen);
+    else if (strcmp(action, "status") == 0)  ok = tool_memory_status(input, result, rlen);
+    else snprintf(result, rlen, "unknown memory action: %s", action);
+    free(action); return ok;
+}
+
+static bool tool_talons_dispatch(const char *input, char *result, size_t rlen) {
+    char *action = json_get_str(input, "action");
+    if (!action || !action[0]) { free(action); snprintf(result, rlen, "missing: action (goal, advance, tournament, recommend, status)"); return false; }
+    bool ok = false;
+    if      (strcmp(action, "goal") == 0)       ok = tool_talons_goal_create(input, result, rlen);
+    else if (strcmp(action, "advance") == 0)    ok = tool_talons_goal_advance(input, result, rlen);
+    else if (strcmp(action, "tournament") == 0) ok = tool_talons_tournament(input, result, rlen);
+    else if (strcmp(action, "recommend") == 0)  ok = tool_talons_recommend(input, result, rlen);
+    else if (strcmp(action, "status") == 0)     ok = tool_talons_status(input, result, rlen);
+    else snprintf(result, rlen, "unknown talons action: %s", action);
+    free(action); return ok;
+}
+
+static bool tool_legion_dispatch(const char *input, char *result, size_t rlen) {
+    char *action = json_get_str(input, "action");
+    if (!action || !action[0]) { free(action); snprintf(result, rlen, "missing: action (spawn, status, find)"); return false; }
+    bool ok = false;
+    if      (strcmp(action, "spawn") == 0)  ok = tool_legion_spawn(input, result, rlen);
+    else if (strcmp(action, "status") == 0) ok = tool_legion_status(input, result, rlen);
+    else if (strcmp(action, "find") == 0)   ok = tool_legion_find(input, result, rlen);
+    else snprintf(result, rlen, "unknown legion action: %s", action);
+    free(action); return ok;
+}
+
+static bool tool_kb_dispatch(const char *input, char *result, size_t rlen) {
+    char *action = json_get_str(input, "action");
+    if (!action || !action[0]) { free(action); snprintf(result, rlen, "missing: action (ingest, search, deep_search, list, get, delete, arxiv_search, arxiv_ingest)"); return false; }
+    bool ok = false;
+    if      (strcmp(action, "ingest") == 0)       ok = tool_kb_ingest(input, result, rlen);
+    else if (strcmp(action, "search") == 0)       ok = tool_kb_search(input, result, rlen);
+    else if (strcmp(action, "deep_search") == 0)  ok = tool_kb_deep_search(input, result, rlen);
+    else if (strcmp(action, "list") == 0)         ok = tool_kb_list(input, result, rlen);
+    else if (strcmp(action, "get") == 0)          ok = tool_kb_get(input, result, rlen);
+    else if (strcmp(action, "delete") == 0)       ok = tool_kb_delete(input, result, rlen);
+    else if (strcmp(action, "arxiv_search") == 0) ok = tool_arxiv_search(input, result, rlen);
+    else if (strcmp(action, "arxiv_ingest") == 0) ok = tool_arxiv_ingest(input, result, rlen);
+    else snprintf(result, rlen, "unknown kb action: %s", action);
+    free(action); return ok;
+}
+
+static bool tool_network_dispatch(const char *input, char *result, size_t rlen) {
+    char *action = json_get_str(input, "action");
+    if (!action || !action[0]) { free(action); snprintf(result, rlen, "missing: action (dns, ping, port_check, port_scan, netstat, cert, traceroute, whois, interfaces, websocket)"); return false; }
+    bool ok = false;
+    if      (strcmp(action, "dns") == 0)        ok = tool_dns_lookup(input, result, rlen);
+    else if (strcmp(action, "ping") == 0)       ok = tool_ping(input, result, rlen);
+    else if (strcmp(action, "port_check") == 0) ok = tool_port_check(input, result, rlen);
+    else if (strcmp(action, "port_scan") == 0)  ok = tool_port_scan(input, result, rlen);
+    else if (strcmp(action, "netstat") == 0)    ok = tool_netstat(input, result, rlen);
+    else if (strcmp(action, "cert") == 0)       ok = tool_cert_info(input, result, rlen);
+    else if (strcmp(action, "traceroute") == 0) ok = tool_traceroute(input, result, rlen);
+    else if (strcmp(action, "whois") == 0)      ok = tool_whois(input, result, rlen);
+    else if (strcmp(action, "interfaces") == 0) ok = tool_net_interfaces(input, result, rlen);
+    else if (strcmp(action, "websocket") == 0)  { snprintf(result, rlen, "websocket test: use curl_raw"); ok = true; }
+    else snprintf(result, rlen, "unknown network action: %s", action);
+    free(action); return ok;
+}
+
+static bool tool_prediction_dispatch(const char *input, char *result, size_t rlen) {
+    char *action = json_get_str(input, "action");
+    if (!action || !action[0]) { free(action); snprintf(result, rlen, "missing: action (scan, weather, snapshot, arb, semantic_match, cross_delta, movers, cache_refresh, cache_query, historical)"); return false; }
+    bool ok = false;
+    if      (strcmp(action, "scan") == 0)           ok = tool_prediction_scan(input, result, rlen);
+    else if (strcmp(action, "weather") == 0)        ok = tool_prediction_weather(input, result, rlen);
+    else if (strcmp(action, "snapshot") == 0)       ok = tool_prediction_snapshot(input, result, rlen);
+    else if (strcmp(action, "arb") == 0)            ok = tool_prediction_arb(input, result, rlen);
+    else if (strcmp(action, "semantic_match") == 0) ok = tool_prediction_semantic_match(input, result, rlen);
+    else if (strcmp(action, "cross_delta") == 0)    ok = tool_cross_platform_delta(input, result, rlen);
+    else if (strcmp(action, "movers") == 0)         ok = tool_market_movers(input, result, rlen);
+    else if (strcmp(action, "cache_refresh") == 0)  ok = tool_market_cache_refresh(input, result, rlen);
+    else if (strcmp(action, "cache_query") == 0)    ok = tool_market_cache_query(input, result, rlen);
+    else if (strcmp(action, "historical") == 0)     ok = tool_historical_cross_platform(input, result, rlen);
+    else snprintf(result, rlen, "unknown prediction action: %s", action);
+    free(action); return ok;
+}
+
+static bool tool_strategy_dispatch(const char *input, char *result, size_t rlen) {
+    char *action = json_get_str(input, "action");
+    if (!action || !action[0]) { free(action); snprintf(result, rlen, "missing: action (completeness, binary_fade, stale_snipe, kelly, spread_scan)"); return false; }
+    bool ok = false;
+    if      (strcmp(action, "completeness") == 0) ok = tool_strat_completeness(input, result, rlen);
+    else if (strcmp(action, "binary_fade") == 0)  ok = tool_strat_binary_fade(input, result, rlen);
+    else if (strcmp(action, "stale_snipe") == 0)  ok = tool_strat_stale_snipe(input, result, rlen);
+    else if (strcmp(action, "kelly") == 0)        ok = tool_strat_kelly(input, result, rlen);
+    else if (strcmp(action, "spread_scan") == 0)  ok = tool_strat_spread_scan(input, result, rlen);
+    else snprintf(result, rlen, "unknown strategy action: %s", action);
+    free(action); return ok;
+}
+
+static bool tool_systematic_dispatch(const char *input, char *result, size_t rlen) {
+    char *action = json_get_str(input, "action");
+    if (!action || !action[0]) { free(action); snprintf(result, rlen, "missing: action (ingest_polymarket, ingest_kalshi, analytics, signals)"); return false; }
+    bool ok = false;
+    if      (strcmp(action, "ingest_polymarket") == 0) ok = tool_systematic_ingest_polymarket(input, result, rlen);
+    else if (strcmp(action, "ingest_kalshi") == 0)     ok = tool_systematic_ingest_kalshi(input, result, rlen);
+    else if (strcmp(action, "analytics") == 0)         ok = tool_systematic_analytics(input, result, rlen);
+    else if (strcmp(action, "signals") == 0)           ok = tool_systematic_signals(input, result, rlen);
+    else snprintf(result, rlen, "unknown systematic action: %s", action);
+    free(action); return ok;
+}
+
+static bool tool_trading_dispatch(const char *input, char *result, size_t rlen) {
+    char *action = json_get_str(input, "action");
+    if (!action || !action[0]) { free(action); snprintf(result, rlen, "missing: action (arb_execute, arb_monitor, portfolio, risk_check, risk_configure)"); return false; }
+    bool ok = false;
+    if      (strcmp(action, "arb_execute") == 0)    ok = tool_arb_execute(input, result, rlen);
+    else if (strcmp(action, "arb_monitor") == 0)    ok = tool_arb_monitor(input, result, rlen);
+    else if (strcmp(action, "portfolio") == 0)      ok = tool_portfolio_cross(input, result, rlen);
+    else if (strcmp(action, "risk_check") == 0)     ok = tool_risk_check(input, result, rlen);
+    else if (strcmp(action, "risk_configure") == 0) ok = tool_risk_configure(input, result, rlen);
+    else snprintf(result, rlen, "unknown trading action: %s", action);
+    free(action); return ok;
+}
+
+/* ── Unified schema constants for consolidated tools ── */
+
+#define S_ACTION "{\"type\":\"object\",\"properties\":{\"action\":{\"type\":\"string\",\"description\":\"Action to perform\"}},\"required\":[\"action\"]}"
+
 static const tool_def_t s_tools[] = {
-    /* ── File Tools ──────────────────────────────────────────────────────── */
-    {
-        .name = "write_file",
-        .description = "Create or overwrite a file with the given content. Creates parent directories automatically.",
-        .input_schema_json = "{\"type\":\"object\",\"properties\":{\"path\":{\"type\":\"string\",\"description\":\"File path to write\"},\"content\":{\"type\":\"string\",\"description\":\"File content\"}},\"required\":[\"path\",\"content\"]}",
-        .execute = tool_write_file
-    },
-    {
-        .name = "read_file",
-        .description = "Read a file with line numbers. Use offset/limit for large files.",
-        .input_schema_json = "{\"type\":\"object\",\"properties\":{\"path\":{\"type\":\"string\",\"description\":\"File path\"},\"offset\":{\"type\":\"integer\",\"description\":\"Start at this line number (1-based)\"},\"limit\":{\"type\":\"integer\",\"description\":\"Max lines to read (0=all)\"}},\"required\":[\"path\"]}",
-        .execute = tool_read_file
-    },
-    {
-        .name = "soul_read",
-        .description = "Read the workspace SOUL.md personality file.",
-        .input_schema_json = S_NONE,
-        .execute = tool_soul_read
-    },
-    {
-        .name = "page_file",
-        .description = "Page through a file. Returns one page at a time with line numbers and page info.",
-        .input_schema_json = "{\"type\":\"object\",\"properties\":{\"path\":{\"type\":\"string\",\"description\":\"File path\"},\"page\":{\"type\":\"integer\",\"description\":\"Page number (1-based, default 1)\"},\"page_size\":{\"type\":\"integer\",\"description\":\"Lines per page (default 50, max 200)\"}},\"required\":[\"path\"]}",
-        .execute = tool_page_file
-    },
-    {
-        .name = "edit_file",
-        .description = "Edit a file by replacing old_string with new_string. The old_string must uniquely match unless replace_all is true.",
-        .input_schema_json = "{\"type\":\"object\",\"properties\":{\"path\":{\"type\":\"string\",\"description\":\"File path\"},\"old_string\":{\"type\":\"string\",\"description\":\"Exact text to find\"},\"new_string\":{\"type\":\"string\",\"description\":\"Replacement text\"},\"replace_all\":{\"type\":\"boolean\",\"description\":\"Replace all occurrences (default false)\"}},\"required\":[\"path\",\"old_string\",\"new_string\"]}",
-        .execute = tool_edit_file
-    },
-    {
-        .name = "append_file",
-        .description = "Append content to the end of a file.",
-        .input_schema_json = "{\"type\":\"object\",\"properties\":{\"path\":{\"type\":\"string\",\"description\":\"File path\"},\"content\":{\"type\":\"string\",\"description\":\"Content to append\"}},\"required\":[\"path\",\"content\"]}",
-        .execute = tool_append_file
-    },
-    {
-        .name = "soul_append",
-        .description = "Append content to the workspace SOUL.md personality file.",
-        .input_schema_json = "{\"type\":\"object\",\"properties\":{\"content\":{\"type\":\"string\",\"description\":\"Text to append to SOUL.md\"}},\"required\":[\"content\"]}",
-        .execute = tool_soul_append
-    },
-    {
-        .name = "soul_write",
-        .description = "Overwrite the workspace SOUL.md personality file.",
-        .input_schema_json = "{\"type\":\"object\",\"properties\":{\"content\":{\"type\":\"string\",\"description\":\"New complete SOUL.md content\"}},\"required\":[\"content\"]}",
-        .execute = tool_soul_write
-    },
-    {
-        .name = "soul_replace",
-        .description = "Replace text in SOUL.md by exact match; by default, the match must be unique.",
-        .input_schema_json = "{\"type\":\"object\",\"properties\":{\"old_string\":{\"type\":\"string\",\"description\":\"Exact text to replace\"},\"new_string\":{\"type\":\"string\",\"description\":\"Replacement text\"},\"replace_all\":{\"type\":\"boolean\",\"description\":\"Replace all occurrences when true\"}},\"required\":[\"old_string\",\"new_string\"]}",
-        .execute = tool_soul_replace
-    },
-    {
-        .name = "list_directory",
-        .description = "List files and subdirectories in a directory.",
-        .input_schema_json = "{\"type\":\"object\",\"properties\":{\"path\":{\"type\":\"string\",\"description\":\"Directory path (default: current directory)\"}}}",
-        .execute = tool_list_dir
-    },
-    {
-        .name = "find_files",
-        .description = "Recursively find files matching a name pattern (glob).",
-        .input_schema_json = "{\"type\":\"object\",\"properties\":{\"pattern\":{\"type\":\"string\",\"description\":\"Filename glob pattern (e.g. *.c)\"},\"path\":{\"type\":\"string\",\"description\":\"Root directory (default: .)\"}},\"required\":[\"pattern\"]}",
-        .execute = tool_find_files
-    },
-    {
-        .name = "grep_files",
-        .description = "Search for a pattern in file contents recursively.",
-        .input_schema_json = "{\"type\":\"object\",\"properties\":{\"pattern\":{\"type\":\"string\",\"description\":\"Search pattern (regex)\"},\"path\":{\"type\":\"string\",\"description\":\"Root directory (default: .)\"}},\"required\":[\"pattern\"]}",
-        .execute = tool_grep
-    },
-    {
-        .name = "file_info",
-        .description = "Get file metadata (size, type, permissions).",
-        .input_schema_json = "{\"type\":\"object\",\"properties\":{\"path\":{\"type\":\"string\",\"description\":\"File path\"}},\"required\":[\"path\"]}",
-        .execute = tool_file_info
-    },
-    {
-        .name = "move_file",
-        .description = "Move or rename a file or directory.",
-        .input_schema_json = "{\"type\":\"object\",\"properties\":{\"source\":{\"type\":\"string\",\"description\":\"Source path\"},\"destination\":{\"type\":\"string\",\"description\":\"Destination path\"}},\"required\":[\"source\",\"destination\"]}",
-        .execute = tool_move_file
-    },
-    {
-        .name = "copy_file",
-        .description = "Copy a file or directory (recursive).",
-        .input_schema_json = "{\"type\":\"object\",\"properties\":{\"source\":{\"type\":\"string\",\"description\":\"Source path\"},\"destination\":{\"type\":\"string\",\"description\":\"Destination path\"}},\"required\":[\"source\",\"destination\"]}",
-        .execute = tool_copy_file
-    },
-    {
-        .name = "delete_file",
-        .description = "Delete a file or directory.",
-        .input_schema_json = "{\"type\":\"object\",\"properties\":{\"path\":{\"type\":\"string\",\"description\":\"Path to delete\"},\"recursive\":{\"type\":\"boolean\",\"description\":\"Delete directories recursively (default false)\"}},\"required\":[\"path\"]}",
-        .execute = tool_delete_file
-    },
-    {
-        .name = "mkdir",
-        .description = "Create a directory (and parents).",
-        .input_schema_json = "{\"type\":\"object\",\"properties\":{\"path\":{\"type\":\"string\",\"description\":\"Directory path\"}},\"required\":[\"path\"]}",
-        .execute = tool_mkdir
-    },
-    {
-        .name = "chmod",
-        .description = "Change file permissions.",
-        .input_schema_json = "{\"type\":\"object\",\"properties\":{\"path\":{\"type\":\"string\",\"description\":\"File path\"},\"mode\":{\"type\":\"string\",\"description\":\"Permission mode (e.g. 755, +x, u+rw)\"}},\"required\":[\"path\",\"mode\"]}",
-        .execute = tool_chmod
-    },
-    {
-        .name = "tree",
-        .description = "Show directory tree structure.",
-        .input_schema_json = "{\"type\":\"object\",\"properties\":{\"path\":{\"type\":\"string\",\"description\":\"Root path (default .)\"},\"max_depth\":{\"type\":\"integer\",\"description\":\"Max depth (default 3)\"}}}",
-        .execute = tool_tree
-    },
-    {
-        .name = "wc",
-        .description = "Count lines, words, and bytes in a file.",
-        .input_schema_json = "{\"type\":\"object\",\"properties\":{\"path\":{\"type\":\"string\",\"description\":\"File path\"}},\"required\":[\"path\"]}",
-        .execute = tool_wc
-    },
-    {
-        .name = "head",
-        .description = "Show the first N lines of a file.",
-        .input_schema_json = "{\"type\":\"object\",\"properties\":{\"path\":{\"type\":\"string\",\"description\":\"File path\"},\"lines\":{\"type\":\"integer\",\"description\":\"Number of lines (default 20)\"}},\"required\":[\"path\"]}",
-        .execute = tool_head
-    },
-    {
-        .name = "tail",
-        .description = "Show the last N lines of a file.",
-        .input_schema_json = "{\"type\":\"object\",\"properties\":{\"path\":{\"type\":\"string\",\"description\":\"File path\"},\"lines\":{\"type\":\"integer\",\"description\":\"Number of lines (default 20)\"}},\"required\":[\"path\"]}",
-        .execute = tool_tail
-    },
-    {
-        .name = "symlink",
-        .description = "Create a symbolic link.",
-        .input_schema_json = "{\"type\":\"object\",\"properties\":{\"target\":{\"type\":\"string\",\"description\":\"Target path\"},\"link_path\":{\"type\":\"string\",\"description\":\"Link path\"}},\"required\":[\"target\",\"link_path\"]}",
-        .execute = tool_symlink
-    },
-    /* ── Compile & Run ───────────────────────────────────────────────────── */
-    {
-        .name = "compile",
-        .description = "Compile a C source file. Uses cc (system compiler).",
-        .input_schema_json = "{\"type\":\"object\",\"properties\":{\"source\":{\"type\":\"string\",\"description\":\"Source file path\"},\"output\":{\"type\":\"string\",\"description\":\"Output binary name (default: a.out)\"},\"flags\":{\"type\":\"string\",\"description\":\"Additional compiler flags (e.g. -lm -lpthread)\"}},\"required\":[\"source\"]}",
-        .execute = tool_compile
-    },
-    {
-        .name = "bash",
-        .description = "Execute a bash command and return stdout+stderr. Supports multi-line scripts, pipes, redirections. Preferred for all shell operations.",
-        .input_schema_json = "{\"type\":\"object\",\"properties\":{\"command\":{\"type\":\"string\",\"description\":\"Bash command or script to run. Supports pipes, redirections, multi-line.\"},\"cwd\":{\"type\":\"string\",\"description\":\"Working directory (optional)\"},\"timeout\":{\"type\":\"integer\",\"description\":\"Timeout in seconds (default 120, max 600)\"}},\"required\":[\"command\"]}",
-        .execute = tool_bash
-    },
-    {
-        .name = "run_command",
-        .description = "Execute a shell command and return stdout+stderr. Use for running compiled programs, scripts, or any system command.",
-        .input_schema_json = "{\"type\":\"object\",\"properties\":{\"command\":{\"type\":\"string\",\"description\":\"Shell command to run\"},\"timeout\":{\"type\":\"integer\",\"description\":\"Timeout in seconds (default 30)\"}},\"required\":[\"command\"]}",
-        .execute = tool_run_command
-    },
-    {
-        .name = "run_background",
-        .description = "Run a command in the background. Returns the PID.",
-        .input_schema_json = "{\"type\":\"object\",\"properties\":{\"command\":{\"type\":\"string\",\"description\":\"Command to run in background\"}},\"required\":[\"command\"]}",
-        .execute = tool_run_background
-    },
-    /* ── Retrieval Context ───────────────────────────────────────────────── */
-    {
-        .name = "context_search",
-        .description = "Search the chunked retrieval context (dense+lexical reranking). Prefer following with context_pack/context_summarize; use context_get only for exact chunk ids.",
-        .input_schema_json = "{\"type\":\"object\",\"properties\":{\"query\":{\"type\":\"string\",\"description\":\"Focused retrieval query\"},\"tool\":{\"type\":\"string\",\"description\":\"Optional tool-name filter\"},\"source_id\":{\"type\":\"integer\",\"description\":\"Optional source/snapshot id\"},\"facet\":{\"type\":\"string\",\"description\":\"Optional facet filter (raw|visual|outline|...)\"},\"top_k\":{\"type\":\"integer\",\"description\":\"How many hits to return (default 5, max 12)\"}},\"required\":[\"query\"]}",
-        .execute = tool_context_search
-    },
-    {
-        .name = "context_get",
-        .description = "Fetch raw text for one previously indexed chunk when you already know the exact chunk_id and need verbatim detail.",
-        .input_schema_json = "{\"type\":\"object\",\"properties\":{\"chunk_id\":{\"type\":\"integer\",\"description\":\"Chunk ID from context_search\"},\"max_chars\":{\"type\":\"integer\",\"description\":\"Max chars to return (default 4000, max 24000)\"}},\"required\":[\"chunk_id\"]}",
-        .execute = tool_context_get
-    },
-    {
-        .name = "context_get_batch",
-        .description = "Fetch raw text for specific chunk_ids when you already know the exact ids and need verbatim spans. Not the default tool for synthesis.",
-        .input_schema_json = "{\"type\":\"object\",\"properties\":{\"chunk_ids\":{\"type\":\"array\",\"items\":{\"type\":\"integer\"},\"description\":\"Array of chunk IDs to fetch\"},\"max_chars_each\":{\"type\":\"integer\",\"description\":\"Max chars per chunk (default 2000, max 8000)\"}},\"required\":[\"chunk_ids\"]}",
-        .execute = tool_context_get_batch
-    },
-    {
-        .name = "context_stats",
-        .description = "Show retrieval context store stats and chunk counts by source tool.",
-        .input_schema_json = "{\"type\":\"object\",\"properties\":{}}",
-        .execute = tool_context_stats
-    },
-    {
-        .name = "context_summarize",
-        .description = "Build a compact evidence summary from retrieval hits for a query (with chunk citations). Preferred over raw chunk fetches.",
-        .input_schema_json = "{\"type\":\"object\",\"properties\":{\"query\":{\"type\":\"string\",\"description\":\"Summary query\"},\"tool\":{\"type\":\"string\",\"description\":\"Optional tool filter\"},\"source_id\":{\"type\":\"integer\",\"description\":\"Optional source/snapshot id\"},\"facet\":{\"type\":\"string\",\"description\":\"Optional facet filter\"},\"top_k\":{\"type\":\"integer\",\"description\":\"Top chunks to summarize (default 4)\"},\"max_chars_per_chunk\":{\"type\":\"integer\",\"description\":\"Preview size per chunk\"}},\"required\":[\"query\"]}",
-        .execute = tool_context_summarize
-    },
-    {
-        .name = "context_pack",
-        .description = "Pack retrieval evidence into a strict character/token budget with chunk citations. Preferred retrieval assembly tool.",
-        .input_schema_json = "{\"type\":\"object\",\"properties\":{\"query\":{\"type\":\"string\",\"description\":\"Packing query\"},\"tool\":{\"type\":\"string\",\"description\":\"Optional tool filter\"},\"source_id\":{\"type\":\"integer\",\"description\":\"Optional source/snapshot id\"},\"facet\":{\"type\":\"string\",\"description\":\"Optional facet filter\"},\"top_k\":{\"type\":\"integer\",\"description\":\"Candidate hits before packing\"},\"max_chars_total\":{\"type\":\"integer\",\"description\":\"Total packed char budget\"},\"max_chars_per_chunk\":{\"type\":\"integer\",\"description\":\"Per-chunk cap\"}},\"required\":[\"query\"]}",
-        .execute = tool_context_pack
-    },
-    {
-        .name = "context_fuse",
-        .description = "Fuse multiple retrieval queries via reciprocal-rank fusion (RRF) before packing/get.",
-        .input_schema_json = "{\"type\":\"object\",\"properties\":{\"query\":{\"type\":\"string\",\"description\":\"Single fallback query\"},\"queries\":{\"type\":\"array\",\"items\":{\"type\":\"string\"},\"description\":\"Multiple focused queries\"},\"tool\":{\"type\":\"string\",\"description\":\"Optional tool filter\"},\"source_id\":{\"type\":\"integer\",\"description\":\"Optional source/snapshot id\"},\"facet\":{\"type\":\"string\",\"description\":\"Optional facet filter\"},\"top_k_each\":{\"type\":\"integer\",\"description\":\"Hits per query\"},\"final_k\":{\"type\":\"integer\",\"description\":\"Final fused hit count\"}}}",
-        .execute = tool_context_fuse
-    },
-    {
-        .name = "context_pin",
-        .description = "Pin or unpin a context chunk to protect it from context_gc pruning.",
-        .input_schema_json = "{\"type\":\"object\",\"properties\":{\"chunk_id\":{\"type\":\"integer\",\"description\":\"Chunk ID\"},\"pin\":{\"type\":\"boolean\",\"description\":\"true to pin, false to unpin (default true)\"}},\"required\":[\"chunk_id\"]}",
-        .execute = tool_context_pin
-    },
-    {
-        .name = "context_gc",
-        .description = "Garbage-collect retrieval context by max_chunks/max_bytes while preserving pinned and recent chunks.",
-        .input_schema_json = "{\"type\":\"object\",\"properties\":{\"max_chunks\":{\"type\":\"integer\",\"description\":\"Target max chunks\"},\"max_bytes\":{\"type\":\"integer\",\"description\":\"Target max bytes\"},\"keep_recent\":{\"type\":\"integer\",\"description\":\"Always keep newest N chunks\"}}}",
-        .execute = tool_context_gc
-    },
-    {
-        .name = "token_audit",
-        .description = "Report token-efficiency metrics from large-result offloading and retrieval context.",
-        .input_schema_json = "{\"type\":\"object\",\"properties\":{}}",
-        .execute = tool_token_audit
-    },
-    /* ── Browser-Grade Perception (foundation slice) ────────────────────── */
-    {
-        .name = "browser_snapshot",
-        .description = "Fetch and index a browser-grade snapshot with adaptive multi-pass fallbacks: raw HTML + visual text + DOM outline.",
-        .input_schema_json = "{\"type\":\"object\",\"properties\":{\"url\":{\"type\":\"string\",\"description\":\"Page URL\"},\"timeout\":{\"type\":\"integer\",\"description\":\"HTTP timeout seconds (default 30)\"},\"max_passes\":{\"type\":\"integer\",\"description\":\"Override adaptive fetch passes (1-8)\"},\"max_chars\":{\"type\":\"integer\",\"description\":\"Max response chars to ingest\"}},\"required\":[\"url\"]}",
-        .execute = tool_browser_snapshot
-    },
-    {
-        .name = "browser_extract",
-        .description = "Query indexed browser snapshots with optional snapshot_id/facet filters (visual facet default).",
-        .input_schema_json = "{\"type\":\"object\",\"properties\":{\"query\":{\"type\":\"string\",\"description\":\"Extraction query\"},\"source_id\":{\"type\":\"integer\",\"description\":\"Snapshot id filter\"},\"facet\":{\"type\":\"string\",\"description\":\"Facet filter (raw|visual|outline)\"},\"top_k\":{\"type\":\"integer\",\"description\":\"Number of hits (default 5)\"}},\"required\":[\"query\"]}",
-        .execute = tool_browser_extract
-    },
-    {
-        .name = "browser_viewport",
-        .description = "Scroll a visual snapshot like a browser viewport (line offset + window size).",
-        .input_schema_json = "{\"type\":\"object\",\"properties\":{\"snapshot_id\":{\"type\":\"integer\",\"description\":\"Snapshot id from browser_snapshot\"},\"offset\":{\"type\":\"integer\",\"description\":\"1-based start line\"},\"lines\":{\"type\":\"integer\",\"description\":\"Lines per viewport\"},\"numbered\":{\"type\":\"boolean\",\"description\":\"Include line numbers (default true)\"}},\"required\":[\"snapshot_id\"]}",
-        .execute = tool_browser_viewport
-    },
-    {
-        .name = "browser_outline",
-        .description = "Return the structural DOM outline (headings + key links + layout stats) for a snapshot.",
-        .input_schema_json = "{\"type\":\"object\",\"properties\":{\"snapshot_id\":{\"type\":\"integer\",\"description\":\"Snapshot id\"},\"max_chars\":{\"type\":\"integer\",\"description\":\"Max chars to return\"}},\"required\":[\"snapshot_id\"]}",
-        .execute = tool_browser_outline
-    },
-    /* ── Workflow Graph Toolkit ──────────────────────────────────────────── */
-    {
-        .name = "workflow_plan",
-        .description = "Create a workflow plan with newline/semicolon-separated steps.",
-        .input_schema_json = "{\"type\":\"object\",\"properties\":{\"name\":{\"type\":\"string\",\"description\":\"Workflow name\"},\"steps\":{\"type\":\"string\",\"description\":\"Step list (newline or semicolon separated)\"}},\"required\":[\"steps\"]}",
-        .execute = tool_workflow_plan
-    },
-    {
-        .name = "workflow_status",
-        .description = "Show workflow status (one workflow by id, or all).",
-        .input_schema_json = "{\"type\":\"object\",\"properties\":{\"id\":{\"type\":\"integer\",\"description\":\"Workflow ID (omit to list all)\"}}}",
-        .execute = tool_workflow_status
-    },
-    {
-        .name = "workflow_checkpoint",
-        .description = "Update a workflow step status with an optional note.",
-        .input_schema_json = "{\"type\":\"object\",\"properties\":{\"id\":{\"type\":\"integer\",\"description\":\"Workflow ID\"},\"step\":{\"type\":\"integer\",\"description\":\"Step number (1-based)\"},\"status\":{\"type\":\"string\",\"description\":\"pending|in_progress|done|blocked\"},\"note\":{\"type\":\"string\",\"description\":\"Optional step note\"}},\"required\":[\"id\",\"step\",\"status\"]}",
-        .execute = tool_workflow_checkpoint
-    },
-    {
-        .name = "workflow_resume",
-        .description = "Return the next actionable workflow step.",
-        .input_schema_json = "{\"type\":\"object\",\"properties\":{\"id\":{\"type\":\"integer\",\"description\":\"Workflow ID\"}},\"required\":[\"id\"]}",
-        .execute = tool_workflow_resume
-    },
-    /* ── Research Toolkit ────────────────────────────────────────────────── */
-    {
-        .name = "research_probe",
-        .description = "Fetch and index a source, then optionally run focused retrieval against that source.",
-        .input_schema_json = "{\"type\":\"object\",\"properties\":{\"url\":{\"type\":\"string\",\"description\":\"Source URL\"},\"query\":{\"type\":\"string\",\"description\":\"Optional focused question\"},\"top_k\":{\"type\":\"integer\",\"description\":\"Hit count for query (default 4)\"},\"timeout\":{\"type\":\"integer\",\"description\":\"HTTP timeout\"},\"max_passes\":{\"type\":\"integer\",\"description\":\"Override adaptive fetch passes (1-8)\"}},\"required\":[\"url\"]}",
-        .execute = tool_research_probe
-    },
-    {
-        .name = "research_compare",
-        .description = "Compare two passages and report lexical overlap metrics.",
-        .input_schema_json = "{\"type\":\"object\",\"properties\":{\"text_a\":{\"type\":\"string\",\"description\":\"Passage A\"},\"text_b\":{\"type\":\"string\",\"description\":\"Passage B\"}},\"required\":[\"text_a\",\"text_b\"]}",
-        .execute = tool_research_compare
-    },
-    /* ── Code Intelligence Toolkit ───────────────────────────────────────── */
-    {
-        .name = "code_index",
-        .description = "Index repository files into retrieval context for semantic code search.",
-        .input_schema_json = "{\"type\":\"object\",\"properties\":{\"path\":{\"type\":\"string\",\"description\":\"Project path (default .)\"},\"max_files\":{\"type\":\"integer\",\"description\":\"Max files to index\"},\"max_chars_per_file\":{\"type\":\"integer\",\"description\":\"Max chars read per file\"}}}",
-        .execute = tool_code_index
-    },
-    {
-        .name = "code_search",
-        .description = "Search indexed code chunks using retrieval + reranking.",
-        .input_schema_json = "{\"type\":\"object\",\"properties\":{\"query\":{\"type\":\"string\",\"description\":\"Code query\"},\"top_k\":{\"type\":\"integer\",\"description\":\"Number of hits\"}},\"required\":[\"query\"]}",
-        .execute = tool_code_search
-    },
-    /* ── Sandbox + Policy Toolkit ───────────────────────────────────────── */
-    {
-        .name = "sandbox_run",
-        .description = "Run a command in a constrained environment with explicit filesystem/network policy.",
-        .input_schema_json = "{\"type\":\"object\",\"properties\":{\"command\":{\"type\":\"string\",\"description\":\"Command to execute\"},\"image\":{\"type\":\"string\",\"description\":\"Optional docker image\"},\"timeout\":{\"type\":\"integer\",\"description\":\"Timeout seconds (default 60)\"},\"network\":{\"type\":\"boolean\",\"description\":\"Allow network egress (default false)\"},\"filesystem\":{\"type\":\"string\",\"description\":\"workspace_rw or workspace_ro (default workspace_rw)\"}},\"required\":[\"command\"]}",
-        .execute = tool_sandbox_run
-    },
-    {
-        .name = "privacy_filter",
-        .description = "Redact common PII patterns (email and phone-like tokens) from text.",
-        .input_schema_json = "{\"type\":\"object\",\"properties\":{\"text\":{\"type\":\"string\",\"description\":\"Input text\"}},\"required\":[\"text\"]}",
-        .execute = tool_privacy_filter
-    },
-    {
-        .name = "secret_scan",
-        .description = "Scan text or file content for common secret/key leakage patterns.",
-        .input_schema_json = "{\"type\":\"object\",\"properties\":{\"text\":{\"type\":\"string\",\"description\":\"Text to scan\"},\"file\":{\"type\":\"string\",\"description\":\"File path to scan\"}}}",
-        .execute = tool_secret_scan
-    },
-    {
-        .name = "risk_gate",
-        .description = "Score action/content risk and return allow/review/deny decision.",
-        .input_schema_json = "{\"type\":\"object\",\"properties\":{\"action\":{\"type\":\"string\",\"description\":\"Planned action\"},\"content\":{\"type\":\"string\",\"description\":\"Optional payload/context\"}},\"required\":[\"action\"]}",
-        .execute = tool_risk_gate
-    },
-    /* ── Git ─────────────────────────────────────────────────────────────── */
-    {
-        .name = "git_status",
-        .description = "Show git status (short format with branch info).",
-        .input_schema_json = "{\"type\":\"object\",\"properties\":{}}",
-        .execute = tool_git_status
-    },
-    {
-        .name = "git_diff",
-        .description = "Show git diff. Pass args like '--staged' or 'HEAD~1'.",
-        .input_schema_json = "{\"type\":\"object\",\"properties\":{\"args\":{\"type\":\"string\",\"description\":\"Additional git diff arguments\"}}}",
-        .execute = tool_git_diff
-    },
-    {
-        .name = "git_log",
-        .description = "Show recent git commits (oneline format).",
-        .input_schema_json = "{\"type\":\"object\",\"properties\":{\"count\":{\"type\":\"integer\",\"description\":\"Number of commits to show (default 10)\"}}}",
-        .execute = tool_git_log
-    },
-    {
-        .name = "git_commit",
-        .description = "Create a git commit with a message.",
-        .input_schema_json = "{\"type\":\"object\",\"properties\":{\"message\":{\"type\":\"string\",\"description\":\"Commit message\"},\"all\":{\"type\":\"boolean\",\"description\":\"Stage all modified files (-a)\"}},\"required\":[\"message\"]}",
-        .execute = tool_git_commit
-    },
-    {
-        .name = "git_add",
-        .description = "Stage files for git commit.",
-        .input_schema_json = "{\"type\":\"object\",\"properties\":{\"files\":{\"type\":\"string\",\"description\":\"Files to add (space-separated, or . for all)\"}},\"required\":[\"files\"]}",
-        .execute = tool_git_add
-    },
-    {
-        .name = "git_branch",
-        .description = "List, create, or switch git branches.",
-        .input_schema_json = "{\"type\":\"object\",\"properties\":{\"name\":{\"type\":\"string\",\"description\":\"Branch name (omit to list all)\"},\"create\":{\"type\":\"boolean\",\"description\":\"Create and switch to new branch\"}}}",
-        .execute = tool_git_branch
-    },
-    {
-        .name = "git_stash",
-        .description = "Git stash operations: push, pop, list, drop.",
-        .input_schema_json = "{\"type\":\"object\",\"properties\":{\"action\":{\"type\":\"string\",\"description\":\"Action: push (default), pop, list, drop\"}}}",
-        .execute = tool_git_stash
-    },
-    {
-        .name = "git_clone",
-        .description = "Clone a git repository.",
-        .input_schema_json = "{\"type\":\"object\",\"properties\":{\"url\":{\"type\":\"string\",\"description\":\"Repository URL\"},\"directory\":{\"type\":\"string\",\"description\":\"Target directory\"}},\"required\":[\"url\"]}",
-        .execute = tool_git_clone
-    },
-    {
-        .name = "git_push",
-        .description = "Push commits to remote.",
-        .input_schema_json = "{\"type\":\"object\",\"properties\":{\"remote\":{\"type\":\"string\",\"description\":\"Remote name (default origin)\"},\"branch\":{\"type\":\"string\",\"description\":\"Branch name\"}}}",
-        .execute = tool_git_push
-    },
-    {
-        .name = "git_pull",
-        .description = "Pull changes from remote.",
-        .input_schema_json = "{\"type\":\"object\",\"properties\":{\"remote\":{\"type\":\"string\",\"description\":\"Remote name\"},\"branch\":{\"type\":\"string\",\"description\":\"Branch name\"}}}",
-        .execute = tool_git_pull
-    },
-    /* ── Process & System ────────────────────────────────────────────────── */
-    {
-        .name = "ps",
-        .description = "List running processes. Optionally filter by name.",
-        .input_schema_json = "{\"type\":\"object\",\"properties\":{\"filter\":{\"type\":\"string\",\"description\":\"Process name filter\"}}}",
-        .execute = tool_ps
-    },
-    {
-        .name = "kill_process",
-        .description = "Send a signal to a process.",
-        .input_schema_json = "{\"type\":\"object\",\"properties\":{\"pid\":{\"type\":\"integer\",\"description\":\"Process ID\"},\"signal\":{\"type\":\"integer\",\"description\":\"Signal number (default 15/SIGTERM)\"}},\"required\":[\"pid\"]}",
-        .execute = tool_kill_process
-    },
-    {
-        .name = "env_get",
-        .description = "Get environment variable(s). Without name, lists all.",
-        .input_schema_json = "{\"type\":\"object\",\"properties\":{\"name\":{\"type\":\"string\",\"description\":\"Variable name (omit to list all)\"}}}",
-        .execute = tool_env_get
-    },
-    {
-        .name = "env_set",
-        .description = "Set an environment variable for this session.",
-        .input_schema_json = "{\"type\":\"object\",\"properties\":{\"name\":{\"type\":\"string\",\"description\":\"Variable name\"},\"value\":{\"type\":\"string\",\"description\":\"Variable value\"}},\"required\":[\"name\",\"value\"]}",
-        .execute = tool_env_set
-    },
-    {
-        .name = "sysinfo",
-        .description = "Show system information (OS, disk, uptime).",
-        .input_schema_json = "{\"type\":\"object\",\"properties\":{}}",
-        .execute = tool_sysinfo
-    },
-    {
-        .name = "disk_usage",
-        .description = "Show disk usage for a path.",
-        .input_schema_json = "{\"type\":\"object\",\"properties\":{\"path\":{\"type\":\"string\",\"description\":\"Path to check (default .)\"}}}",
-        .execute = tool_disk_usage
-    },
-    {
-        .name = "which",
-        .description = "Find a command's location and version.",
-        .input_schema_json = "{\"type\":\"object\",\"properties\":{\"name\":{\"type\":\"string\",\"description\":\"Command name\"}},\"required\":[\"name\"]}",
-        .execute = tool_which
-    },
-    {
-        .name = "cwd",
-        .description = "Get or change the current working directory.",
-        .input_schema_json = "{\"type\":\"object\",\"properties\":{\"path\":{\"type\":\"string\",\"description\":\"Directory to change to (omit to just print cwd)\"}}}",
-        .execute = tool_cwd
-    },
-    /* ── Text Processing ─────────────────────────────────────────────────── */
-    {
-        .name = "sed",
-        .description = "Run a sed expression on a file.",
-        .input_schema_json = "{\"type\":\"object\",\"properties\":{\"expression\":{\"type\":\"string\",\"description\":\"Sed expression (e.g. s/old/new/g)\"},\"file\":{\"type\":\"string\",\"description\":\"Input file\"}},\"required\":[\"expression\",\"file\"]}",
-        .execute = tool_sed
-    },
-    {
-        .name = "awk",
-        .description = "Run an awk program on a file.",
-        .input_schema_json = "{\"type\":\"object\",\"properties\":{\"program\":{\"type\":\"string\",\"description\":\"Awk program\"},\"file\":{\"type\":\"string\",\"description\":\"Input file\"}},\"required\":[\"program\"]}",
-        .execute = tool_awk
-    },
-    {
-        .name = "sort_uniq",
-        .description = "Sort a file, optionally unique or with counts.",
-        .input_schema_json = "{\"type\":\"object\",\"properties\":{\"file\":{\"type\":\"string\",\"description\":\"Input file\"},\"unique\":{\"type\":\"boolean\",\"description\":\"Remove duplicates\"},\"count\":{\"type\":\"boolean\",\"description\":\"Count occurrences\"}},\"required\":[\"file\"]}",
-        .execute = tool_sort_uniq
-    },
-    {
-        .name = "diff",
-        .description = "Show unified diff between two files.",
-        .input_schema_json = "{\"type\":\"object\",\"properties\":{\"file1\":{\"type\":\"string\",\"description\":\"First file\"},\"file2\":{\"type\":\"string\",\"description\":\"Second file\"}},\"required\":[\"file1\",\"file2\"]}",
-        .execute = tool_diff
-    },
-    {
-        .name = "patch",
-        .description = "Apply a unified diff patch to a file.",
-        .input_schema_json = "{\"type\":\"object\",\"properties\":{\"file\":{\"type\":\"string\",\"description\":\"File to patch\"},\"patch\":{\"type\":\"string\",\"description\":\"Patch content (unified diff)\"}},\"required\":[\"file\",\"patch\"]}",
-        .execute = tool_patch
-    },
-    {
-        .name = "jq",
-        .description = "Process JSON with jq. Provide input as string or file.",
-        .input_schema_json = "{\"type\":\"object\",\"properties\":{\"filter\":{\"type\":\"string\",\"description\":\"jq filter expression\"},\"input\":{\"type\":\"string\",\"description\":\"JSON string input\"},\"file\":{\"type\":\"string\",\"description\":\"JSON file path\"}},\"required\":[\"filter\"]}",
-        .execute = tool_jq
-    },
-    /* ── Encoding & Hashing ──────────────────────────────────────────────── */
-    {
-        .name = "base64",
-        .description = "Base64 encode or decode data or a file.",
-        .input_schema_json = "{\"type\":\"object\",\"properties\":{\"data\":{\"type\":\"string\",\"description\":\"String to encode/decode\"},\"file\":{\"type\":\"string\",\"description\":\"File to encode/decode\"},\"decode\":{\"type\":\"boolean\",\"description\":\"Decode instead of encode\"}}}",
-        .execute = tool_base64
-    },
-    {
-        .name = "web_extract",
-        .description = "Fetch a URL and extract readable text content, stripping HTML tags. Much more token-efficient than raw HTTP. Good for reading articles, docs, search results.",
-        .input_schema_json = "{\"type\":\"object\",\"properties\":{\"url\":{\"type\":\"string\",\"description\":\"URL to fetch and extract text from\"},\"max_chars\":{\"type\":\"integer\",\"description\":\"Maximum characters to return (default 8000)\"}},\"required\":[\"url\"]}",
-        .execute = tool_web_extract
-    },
-    {
-        .name = "screenshot",
-        .description = "Take a screenshot on macOS. Saves as PNG. Use full_screen=false for interactive region selection.",
-        .input_schema_json = "{\"type\":\"object\",\"properties\":{\"path\":{\"type\":\"string\",\"description\":\"Output file path (default /tmp/dsco_screenshot.png)\"},\"full_screen\":{\"type\":\"boolean\",\"description\":\"Capture full screen (default true)\"},\"delay\":{\"type\":\"integer\",\"description\":\"Delay in seconds before capture\"}}}",
-        .execute = tool_screenshot
-    },
-    {
-        .name = "hash",
-        .description = "Compute hash (md5, sha1, sha256) of data or file.",
-        .input_schema_json = "{\"type\":\"object\",\"properties\":{\"file\":{\"type\":\"string\",\"description\":\"File to hash\"},\"data\":{\"type\":\"string\",\"description\":\"String to hash\"},\"algorithm\":{\"type\":\"string\",\"description\":\"Hash algorithm: md5, sha1, sha256 (default)\"}}}",
-        .execute = tool_hash
-    },
-    /* ── Archives ────────────────────────────────────────────────────────── */
-    {
-        .name = "tar",
-        .description = "Create, extract, or list tar.gz archives.",
-        .input_schema_json = "{\"type\":\"object\",\"properties\":{\"action\":{\"type\":\"string\",\"description\":\"create, extract, or list\"},\"archive\":{\"type\":\"string\",\"description\":\"Archive file path\"},\"files\":{\"type\":\"string\",\"description\":\"Files to include (for create)\"}},\"required\":[\"action\",\"archive\"]}",
-        .execute = tool_tar
-    },
-    {
-        .name = "zip",
-        .description = "Create, extract, or list zip archives.",
-        .input_schema_json = "{\"type\":\"object\",\"properties\":{\"action\":{\"type\":\"string\",\"description\":\"create, extract, or list\"},\"archive\":{\"type\":\"string\",\"description\":\"Archive file path\"},\"files\":{\"type\":\"string\",\"description\":\"Files to include (for create)\"}},\"required\":[\"action\",\"archive\"]}",
-        .execute = tool_zip
-    },
-    /* ── Network / Curl ──────────────────────────────────────────────────── */
-    {
-        .name = "http_request",
-        .description = "Make an HTTP request. Supports GET, POST, PUT, DELETE, PATCH with custom headers and body.",
-        .input_schema_json = "{\"type\":\"object\",\"properties\":{\"url\":{\"type\":\"string\",\"description\":\"Request URL\"},\"method\":{\"type\":\"string\",\"description\":\"HTTP method (default GET)\"},\"headers\":{\"type\":\"string\",\"description\":\"Headers, one per line\"},\"body\":{\"type\":\"string\",\"description\":\"Request body\"},\"include_headers\":{\"type\":\"boolean\",\"description\":\"Include response headers\"},\"timeout\":{\"type\":\"integer\",\"description\":\"Timeout in seconds (default 30)\"}},\"required\":[\"url\"]}",
-        .execute = tool_http_request
-    },
-    {
-        .name = "json_api",
-        .description = "Call a JSON API with Content-Type and Accept set to application/json.",
-        .input_schema_json = "{\"type\":\"object\",\"properties\":{\"url\":{\"type\":\"string\",\"description\":\"API URL\"},\"method\":{\"type\":\"string\",\"description\":\"HTTP method (default GET)\"},\"body\":{\"type\":\"string\",\"description\":\"JSON request body\"},\"auth_header\":{\"type\":\"string\",\"description\":\"Authorization header value\"}},\"required\":[\"url\"]}",
-        .execute = tool_json_api
-    },
-    {
-        .name = "market_quote",
-        .description = "Fetch market quotes with Yahoo+Stooq fallback, richer analytics, staleness checks, and optional JSON output.",
-        .input_schema_json = "{\"type\":\"object\",\"properties\":{\"symbol\":{\"type\":\"string\",\"description\":\"Single ticker symbol (e.g. TSLA, AAPL, BTC-USD, EURUSD=X)\"},\"ticker\":{\"type\":\"string\",\"description\":\"Alias for symbol\"},\"symbols\":{\"type\":\"array\",\"items\":{\"type\":\"string\"},\"description\":\"Batch symbols as JSON array. Tool also accepts comma-separated string for compatibility.\"},\"timeout\":{\"type\":\"integer\",\"description\":\"HTTP timeout in seconds (default 12)\"},\"stale_after_sec\":{\"type\":\"integer\",\"description\":\"Mark quote stale if older than this many seconds (default 172800)\"},\"source_preference\":{\"type\":\"string\",\"description\":\"auto (default), yahoo, stooq, yahoo_only, or stooq_only\"},\"format\":{\"type\":\"string\",\"description\":\"Output format: text (default) or json\"}}}",
-        .execute = tool_market_quote
-    },
-    {
-        .name = "download_file",
-        .description = "Download a URL to a local file. Follows redirects.",
-        .input_schema_json = "{\"type\":\"object\",\"properties\":{\"url\":{\"type\":\"string\",\"description\":\"URL to download\"},\"output\":{\"type\":\"string\",\"description\":\"Local file path\"}},\"required\":[\"url\",\"output\"]}",
-        .execute = tool_download
-    },
-    {
-        .name = "upload_file",
-        .description = "Upload a file to a URL via multipart POST.",
-        .input_schema_json = "{\"type\":\"object\",\"properties\":{\"url\":{\"type\":\"string\",\"description\":\"Upload URL\"},\"file\":{\"type\":\"string\",\"description\":\"Local file path\"},\"field_name\":{\"type\":\"string\",\"description\":\"Form field name (default: file)\"}},\"required\":[\"url\",\"file\"]}",
-        .execute = tool_upload
-    },
-    {
-        .name = "curl_raw",
-        .description = "Run curl with arbitrary arguments.",
-        .input_schema_json = "{\"type\":\"object\",\"properties\":{\"args\":{\"type\":\"string\",\"description\":\"Raw curl arguments\"}},\"required\":[\"args\"]}",
-        .execute = tool_curl_raw
-    },
-    {
-        .name = "http_headers",
-        .description = "Fetch only HTTP response headers for a URL.",
-        .input_schema_json = "{\"type\":\"object\",\"properties\":{\"url\":{\"type\":\"string\",\"description\":\"URL to probe\"}},\"required\":[\"url\"]}",
-        .execute = tool_http_headers
-    },
-    {
-        .name = "dns_lookup",
-        .description = "Resolve a hostname to IP addresses.",
-        .input_schema_json = "{\"type\":\"object\",\"properties\":{\"hostname\":{\"type\":\"string\",\"description\":\"Hostname to resolve\"}},\"required\":[\"hostname\"]}",
-        .execute = tool_dns_lookup
-    },
-    {
-        .name = "ping",
-        .description = "Ping a host to check connectivity and latency.",
-        .input_schema_json = "{\"type\":\"object\",\"properties\":{\"host\":{\"type\":\"string\",\"description\":\"Host to ping\"},\"count\":{\"type\":\"integer\",\"description\":\"Number of pings (default 4, max 20)\"}},\"required\":[\"host\"]}",
-        .execute = tool_ping
-    },
-    {
-        .name = "port_check",
-        .description = "Check if a TCP port is open on a host.",
-        .input_schema_json = "{\"type\":\"object\",\"properties\":{\"host\":{\"type\":\"string\",\"description\":\"Target host\"},\"port\":{\"type\":\"integer\",\"description\":\"TCP port number\"}},\"required\":[\"host\",\"port\"]}",
-        .execute = tool_port_check
-    },
-    {
-        .name = "port_scan",
-        .description = "Scan common ports on a host (or specify custom ports).",
-        .input_schema_json = "{\"type\":\"object\",\"properties\":{\"host\":{\"type\":\"string\",\"description\":\"Target host\"},\"ports\":{\"type\":\"string\",\"description\":\"Space-separated port list (default: common ports)\"}},\"required\":[\"host\"]}",
-        .execute = tool_port_scan
-    },
-    {
-        .name = "netstat",
-        .description = "Show active network connections and listening ports.",
-        .input_schema_json = "{\"type\":\"object\",\"properties\":{}}",
-        .execute = tool_netstat
-    },
-    {
-        .name = "cert_info",
-        .description = "Show TLS certificate information for a host.",
-        .input_schema_json = "{\"type\":\"object\",\"properties\":{\"host\":{\"type\":\"string\",\"description\":\"Hostname\"},\"port\":{\"type\":\"integer\",\"description\":\"Port (default 443)\"}},\"required\":[\"host\"]}",
-        .execute = tool_cert_info
-    },
-    {
-        .name = "traceroute",
-        .description = "Trace the network route to a host.",
-        .input_schema_json = "{\"type\":\"object\",\"properties\":{\"host\":{\"type\":\"string\",\"description\":\"Target host\"}},\"required\":[\"host\"]}",
-        .execute = tool_traceroute
-    },
-    {
-        .name = "whois_lookup",
-        .description = "Look up WHOIS information for a domain.",
-        .input_schema_json = "{\"type\":\"object\",\"properties\":{\"domain\":{\"type\":\"string\",\"description\":\"Domain name\"}},\"required\":[\"domain\"]}",
-        .execute = tool_whois
-    },
-    {
-        .name = "net_interfaces",
-        .description = "Show network interfaces and their IP addresses.",
-        .input_schema_json = "{\"type\":\"object\",\"properties\":{}}",
-        .execute = tool_net_interfaces
-    },
-    {
-        .name = "websocket_test",
-        .description = "Test a WebSocket connection.",
-        .input_schema_json = "{\"type\":\"object\",\"properties\":{\"url\":{\"type\":\"string\",\"description\":\"WebSocket URL\"},\"message\":{\"type\":\"string\",\"description\":\"Message to send\"}},\"required\":[\"url\"]}",
-        .execute = tool_ws_test
-    },
-    /* ── Docker ──────────────────────────────────────────────────────────── */
-    {
-        .name = "docker",
-        .description = "Run a docker command (e.g. ps, images, run, build, exec).",
-        .input_schema_json = "{\"type\":\"object\",\"properties\":{\"command\":{\"type\":\"string\",\"description\":\"Docker subcommand and args (e.g. 'ps -a', 'run -d nginx')\"}},\"required\":[\"command\"]}",
-        .execute = tool_docker
-    },
-    {
-        .name = "docker_compose",
-        .description = "Run docker compose commands.",
-        .input_schema_json = "{\"type\":\"object\",\"properties\":{\"command\":{\"type\":\"string\",\"description\":\"Compose subcommand (e.g. 'up -d', 'down', 'logs')\"}},\"required\":[\"command\"]}",
-        .execute = tool_docker_compose
-    },
-    /* ── SSH / Remote ────────────────────────────────────────────────────── */
-    {
-        .name = "ssh_command",
-        .description = "Execute a command on a remote host via SSH.",
-        .input_schema_json = "{\"type\":\"object\",\"properties\":{\"host\":{\"type\":\"string\",\"description\":\"Remote host\"},\"command\":{\"type\":\"string\",\"description\":\"Command to run\"},\"user\":{\"type\":\"string\",\"description\":\"SSH user\"},\"key\":{\"type\":\"string\",\"description\":\"Path to SSH key\"}},\"required\":[\"host\",\"command\"]}",
-        .execute = tool_ssh_command
-    },
-    {
-        .name = "scp",
-        .description = "Copy files over SSH (local->remote or remote->local).",
-        .input_schema_json = "{\"type\":\"object\",\"properties\":{\"source\":{\"type\":\"string\",\"description\":\"Source path (user@host:path or local path)\"},\"destination\":{\"type\":\"string\",\"description\":\"Destination path\"},\"key\":{\"type\":\"string\",\"description\":\"SSH key path\"}},\"required\":[\"source\",\"destination\"]}",
-        .execute = tool_scp
-    },
-    /* ── Database ────────────────────────────────────────────────────────── */
-    {
-        .name = "sqlite",
-        .description = "Execute a SQL query against a SQLite database.",
-        .input_schema_json = "{\"type\":\"object\",\"properties\":{\"database\":{\"type\":\"string\",\"description\":\"Database file path\"},\"query\":{\"type\":\"string\",\"description\":\"SQL query\"}},\"required\":[\"database\",\"query\"]}",
-        .execute = tool_sqlite
-    },
-    {
-        .name = "psql",
-        .description = "Execute a SQL query against PostgreSQL.",
-        .input_schema_json = "{\"type\":\"object\",\"properties\":{\"connection\":{\"type\":\"string\",\"description\":\"Connection string (e.g. postgresql://user:pass@host/db)\"},\"query\":{\"type\":\"string\",\"description\":\"SQL query\"}},\"required\":[\"query\"]}",
-        .execute = tool_psql
-    },
-    /* ── Scripting ───────────────────────────────────────────────────────── */
-    {
-        .name = "python",
-        .description = "Execute Python code (inline or from file).",
-        .input_schema_json = "{\"type\":\"object\",\"properties\":{\"code\":{\"type\":\"string\",\"description\":\"Python code to execute\"},\"file\":{\"type\":\"string\",\"description\":\"Python file to run\"}}}",
-        .execute = tool_python
-    },
-    {
-        .name = "node",
-        .description = "Execute JavaScript/Node.js code (inline or from file).",
-        .input_schema_json = "{\"type\":\"object\",\"properties\":{\"code\":{\"type\":\"string\",\"description\":\"JavaScript code to execute\"},\"file\":{\"type\":\"string\",\"description\":\"JS file to run\"}}}",
-        .execute = tool_node
-    },
-    /* ── Date/Time & Math ────────────────────────────────────────────────── */
-    {
-        .name = "date",
-        .description = "Get current date/time, optionally in a specific timezone or format.",
-        .input_schema_json = "{\"type\":\"object\",\"properties\":{\"format\":{\"type\":\"string\",\"description\":\"Date format string (strftime)\"},\"timezone\":{\"type\":\"string\",\"description\":\"Timezone (e.g. America/New_York, UTC)\"}}}",
-        .execute = tool_date
-    },
-    {
-        .name = "calc",
-        .description = "Evaluate a mathematical expression using bc or python.",
-        .input_schema_json = "{\"type\":\"object\",\"properties\":{\"expression\":{\"type\":\"string\",\"description\":\"Math expression (e.g. '2^32', 'sqrt(144)', '3.14*2')\"}},\"required\":[\"expression\"]}",
-        .execute = tool_calc
-    },
-    /* ── Clipboard ───────────────────────────────────────────────────────── */
-    {
-        .name = "clipboard",
-        .description = "Read from or write to the system clipboard.",
-        .input_schema_json = "{\"type\":\"object\",\"properties\":{\"action\":{\"type\":\"string\",\"description\":\"read or write (default read)\"},\"content\":{\"type\":\"string\",\"description\":\"Content to copy (for write)\"}}}",
-        .execute = tool_clipboard
-    },
-    /* ── Package Management ──────────────────────────────────────────────── */
-    {
-        .name = "pkg",
-        .description = "Run a package manager command (auto-detects brew/apt/yum).",
-        .input_schema_json = "{\"type\":\"object\",\"properties\":{\"manager\":{\"type\":\"string\",\"description\":\"Package manager (brew, apt, yum, etc.)\"},\"command\":{\"type\":\"string\",\"description\":\"Package command (e.g. 'install jq', 'list')\"}},\"required\":[\"command\"]}",
-        .execute = tool_pkg
-    },
-    {
-        .name = "pip",
-        .description = "Run pip3 commands (install, list, freeze, etc.).",
-        .input_schema_json = "{\"type\":\"object\",\"properties\":{\"command\":{\"type\":\"string\",\"description\":\"pip command (e.g. 'install requests', 'list')\"}},\"required\":[\"command\"]}",
-        .execute = tool_pip
-    },
-    {
-        .name = "npm",
-        .description = "Run npm commands (install, list, init, etc.).",
-        .input_schema_json = "{\"type\":\"object\",\"properties\":{\"command\":{\"type\":\"string\",\"description\":\"npm command (e.g. 'install express', 'list')\"}},\"required\":[\"command\"]}",
-        .execute = tool_npm
-    },
-    /* ── Scheduling ──────────────────────────────────────────────────────── */
-    {
-        .name = "crontab",
-        .description = "List or add crontab entries.",
-        .input_schema_json = "{\"type\":\"object\",\"properties\":{\"action\":{\"type\":\"string\",\"description\":\"list or add\"},\"entry\":{\"type\":\"string\",\"description\":\"Cron entry to add (e.g. '0 * * * * /path/to/script')\"}}}",
-        .execute = tool_crontab
-    },
-    /* ── macOS Extended Attributes ────────────────────────────────────────── */
-    {
-        .name = "xattr",
-        .description = "List or clear extended attributes on a file (macOS).",
-        .input_schema_json = "{\"type\":\"object\",\"properties\":{\"path\":{\"type\":\"string\",\"description\":\"File path\"},\"action\":{\"type\":\"string\",\"description\":\"list (default) or clear\"}},\"required\":[\"path\"]}",
-        .execute = tool_xattr
-    },
-    /* ═══════════════════════════════════════════════════════════════════════
-     * AST SELF-INTROSPECTION TOOLS
-     * ═══════════════════════════════════════════════════════════════════════ */
-    {
-        .name = "self_inspect",
-        .description = "Introspect dsco's own source code. Returns AST-level analysis: files, functions, structs, tools, line counts, complexity scores, and dependency graph. Use this to understand dsco's architecture before modifying it.",
-        .input_schema_json = "{\"type\":\"object\",\"properties\":{\"project_dir\":{\"type\":\"string\",\"description\":\"Project directory (default: directory containing dsco binary)\"}}}",
-        .execute = tool_self_inspect
-    },
-    {
-        .name = "inspect_file",
-        .description = "Deep AST analysis of a single C/H file. Returns every function (with params, return type, complexity, line range), every struct/typedef/enum, includes, defines. Use for targeted code understanding.",
-        .input_schema_json = "{\"type\":\"object\",\"properties\":{\"path\":{\"type\":\"string\",\"description\":\"Path to .c or .h file\"}},\"required\":[\"path\"]}",
-        .execute = tool_inspect_file
-    },
-    {
-        .name = "call_graph",
-        .description = "Show what functions a given function calls (from body analysis). Useful for understanding control flow and planning refactors.",
-        .input_schema_json = "{\"type\":\"object\",\"properties\":{\"function\":{\"type\":\"string\",\"description\":\"Function name to analyze\"},\"project_dir\":{\"type\":\"string\",\"description\":\"Project directory\"}},\"required\":[\"function\"]}",
-        .execute = tool_call_graph
-    },
-    {
-        .name = "dependency_graph",
-        .description = "Show the include dependency graph between source files. Returns which files depend on which headers.",
-        .input_schema_json = "{\"type\":\"object\",\"properties\":{\"project_dir\":{\"type\":\"string\",\"description\":\"Project directory\"}}}",
-        .execute = tool_dependency_graph
-    },
-    /* ═══════════════════════════════════════════════════════════════════════
-     * SUB-AGENT SWARM TOOLS
-     * ═══════════════════════════════════════════════════════════════════════ */
-    {
-        .name = "spawn_agent",
-        .description = "Spawn a sub-dsco agent to work on a task autonomously. The agent runs as a separate process with its own conversation with Claude. Returns immediately with an agent ID — use agent_status/agent_output to monitor. Great for parallelizing: spawn multiple agents for different subtasks.",
-        .input_schema_json = "{\"type\":\"object\",\"properties\":{\"task\":{\"type\":\"string\",\"description\":\"The task/prompt for the sub-agent (be specific and self-contained)\"},\"model\":{\"type\":\"string\",\"description\":\"Model override for this agent\"}},\"required\":[\"task\"]}",
-        .execute = tool_spawn_agent
-    },
-    {
-        .name = "agent_status",
-        .description = "Check status of all spawned sub-agents. Shows running/done/error state, elapsed time, output size. Use to monitor progress of spawned agents.",
-        .input_schema_json = "{\"type\":\"object\",\"properties\":{}}",
-        .execute = tool_agent_status
-    },
-    {
-        .name = "agent_output",
-        .description = "Get the accumulated output from a specific sub-agent. Polls for latest data. Returns the agent's streamed stdout including Claude's responses and tool usage.",
-        .input_schema_json = "{\"type\":\"object\",\"properties\":{\"id\":{\"type\":\"integer\",\"description\":\"Agent ID (from spawn_agent)\"}},\"required\":[\"id\"]}",
-        .execute = tool_agent_output
-    },
-    {
-        .name = "agent_wait",
-        .description = "Wait for a specific agent or all agents to complete. Streams status updates while waiting. Returns final output when done.",
-        .input_schema_json = "{\"type\":\"object\",\"properties\":{\"id\":{\"type\":\"integer\",\"description\":\"Agent ID to wait for (-1 or omit for all)\"},\"timeout\":{\"type\":\"integer\",\"description\":\"Max seconds to wait (default 120)\"}}}",
-        .execute = tool_agent_wait
-    },
-    {
-        .name = "agent_race",
-        .description = "Race multiple models/providers on the same task — first to finish wins, losers are killed. Uses completion queue for O(1) winner detection. Pass contestants as [{provider, model}] objects or [\"model\"] strings (default provider: openrouter). Returns winner's output, elapsed time, and provider info.",
-        .input_schema_json = "{\"type\":\"object\",\"properties\":{\"task\":{\"type\":\"string\",\"description\":\"The task all contestants will attempt\"},\"contestants\":{\"type\":\"array\",\"description\":\"Array of {provider,model} objects or model ID strings\",\"items\":{\"oneOf\":[{\"type\":\"string\"},{\"type\":\"object\",\"properties\":{\"provider\":{\"type\":\"string\"},\"model\":{\"type\":\"string\"}}}]}},\"timeout\":{\"type\":\"integer\",\"description\":\"Max seconds (default 60)\"}},\"required\":[\"task\",\"contestants\"]}",
-        .execute = tool_agent_race
-    },
-    {
-        .name = "agent_kill",
-        .description = "Kill a running sub-agent by ID.",
-        .input_schema_json = "{\"type\":\"object\",\"properties\":{\"id\":{\"type\":\"integer\",\"description\":\"Agent ID to kill\"}},\"required\":[\"id\"]}",
-        .execute = tool_agent_kill
-    },
-    {
-        .name = "topology_list",
-        .description = "List advanced swarm topologies or inspect one topology in detail. Use this to discover chain, fanout, hierarchy, mesh, feedback, competitive, and domain orchestration graphs.",
-        .input_schema_json = "{\"type\":\"object\",\"properties\":{\"name\":{\"type\":\"string\",\"description\":\"Optional topology name to inspect\"},\"topology_id\":{\"type\":\"integer\",\"description\":\"Optional topology ID to inspect\"},\"query\":{\"type\":\"string\",\"description\":\"Substring/contains search against topology name and description\"},\"category\":{\"type\":\"string\",\"description\":\"Filter by category: chain|fanout|hierarchy|mesh|specialist|feedback|competitive|domain\"},\"strategy\":{\"type\":\"string\",\"description\":\"Filter by strategy: linear|parallel_stages|full_parallel|iterative|tournament|consensus\"},\"runnable_only\":{\"type\":\"boolean\",\"description\":\"Only include runnable topologies\"},\"min_agents\":{\"type\":\"integer\",\"description\":\"Minimum total agents in topology\"},\"max_agents\":{\"type\":\"integer\",\"description\":\"Maximum total agents in topology\"},\"offset\":{\"type\":\"integer\",\"description\":\"Pagination offset\"},\"limit\":{\"type\":\"integer\",\"description\":\"Pagination limit\"},\"sort_by\":{\"type\":\"string\",\"description\":\"Sort key: id|name|category|strategy|node_count|edge_count|total_agents|max_iterations|latency_mult|est_cost_1k\"},\"order\":{\"type\":\"string\",\"description\":\"asc|desc\"},\"details\":{\"type\":\"boolean\",\"description\":\"Include node list and ASCII diagram\"}}}",
-        .execute = tool_topology_list
-    },
-    {
-        .name = "topology_run",
-        .description = "Execute a task through the topology runtime using a named topology or dynamic auto-selection. Use dry_run to preview the chosen execution graph without spending API calls.",
-        .input_schema_json = "{\"type\":\"object\",\"properties\":{\"task\":{\"type\":\"string\",\"description\":\"Task to execute through the topology runtime\"},\"topology\":{\"type\":\"string\",\"description\":\"Optional explicit topology name\"},\"topology_id\":{\"type\":\"integer\",\"description\":\"Optional explicit topology ID\"},\"auto\":{\"type\":\"boolean\",\"description\":\"Auto-select a topology when true (default if topology omitted)\"},\"dry_run\":{\"type\":\"boolean\",\"description\":\"Preview the plan without executing it\"}},\"required\":[\"task\"]}",
-        .execute = tool_topology_run
-    },
-    {
-        .name = "task_profile",
-        .description = "Analyze a task string and recommend the best topology for it. Returns parallelism, convergence, complexity, and latency scores, detected patterns, and ranked topology suggestions with fit scores. Use explain:true for a human-readable explanation.",
-        .input_schema_json = "{\"type\":\"object\",\"properties\":{\"task\":{\"type\":\"string\",\"description\":\"The task to profile for topology selection\"},\"explain\":{\"type\":\"boolean\",\"description\":\"Include human-readable explanation (default false)\"}},\"required\":[\"task\"]}",
-        .execute = tool_task_profile
-    },
-    {
-        .name = "create_swarm",
-        .description = "Create a named flat group of sub-agents and dispatch multiple tasks to them simultaneously. Tasks may be strings or objects with per-agent model overrides. For graph-structured orchestration, use topology_run.",
-        .input_schema_json = "{\"type\":\"object\",\"properties\":{\"name\":{\"type\":\"string\",\"description\":\"Swarm group name\"},\"tasks\":{\"type\":\"array\",\"description\":\"Array of task prompts or objects like {task,model}\",\"items\":{\"oneOf\":[{\"type\":\"string\"},{\"type\":\"object\",\"properties\":{\"task\":{\"type\":\"string\"},\"model\":{\"type\":\"string\"}},\"required\":[\"task\"]}]}},\"model\":{\"type\":\"string\",\"description\":\"Default model for all agents in this swarm\"}},\"required\":[\"name\",\"tasks\"]}",
-        .execute = tool_create_swarm
-    },
-    {
-        .name = "swarm_status",
-        .description = "Check status of a swarm group. Shows each agent's status and output preview.",
-        .input_schema_json = "{\"type\":\"object\",\"properties\":{\"group_id\":{\"type\":\"integer\",\"description\":\"Swarm group ID (from create_swarm)\"}},\"required\":[\"group_id\"]}",
-        .execute = tool_swarm_status
-    },
-    {
-        .name = "swarm_collect",
-        .description = "Wait for all agents in a swarm to complete and collect their outputs. Returns all results aggregated.",
-        .input_schema_json = "{\"type\":\"object\",\"properties\":{\"group_id\":{\"type\":\"integer\",\"description\":\"Swarm group ID\"},\"timeout\":{\"type\":\"integer\",\"description\":\"Max seconds to wait (default 300)\"}},\"required\":[\"group_id\"]}",
-        .execute = tool_swarm_collect
-    },
-    /* ═══════════════════════════════════════════════════════════════════════
-     * EXTERNAL EXECUTOR TOOLS — Claude Code / Codex CLI as sub-executors
-     * ═══════════════════════════════════════════════════════════════════════ */
-    {
-        .name = "executor_status",
-        .description = "Check which external executor backends are available (dsco, Claude Code CLI, OpenAI Codex CLI). Shows authentication status, resolved paths, and budget info.",
-        .input_schema_json = "{\"type\":\"object\",\"properties\":{}}",
-        .execute = tool_executor_status
-    },
-    {
-        .name = "openrouter_models",
-        .description = "Query OpenRouter's live model registry. Returns available models with pricing, context length, and capabilities. Use to dynamically discover and select models instead of hard-coding. Supports filtering by text search, min context, max price, free-only, and chat-only.",
-        .input_schema_json = "{\"type\":\"object\",\"properties\":{\"search\":{\"type\":\"string\",\"description\":\"Filter by model ID or name (case-insensitive)\"},\"min_context\":{\"type\":\"integer\",\"description\":\"Minimum context length\"},\"max_price_per_million\":{\"type\":\"number\",\"description\":\"Max input price per million tokens\"},\"limit\":{\"type\":\"integer\",\"description\":\"Max results (default 20, max 100)\"},\"free_only\":{\"type\":\"boolean\",\"description\":\"Only free models\"},\"chat_only\":{\"type\":\"boolean\",\"description\":\"Only text/chat models (default true)\"}}}",
-        .execute = tool_openrouter_models
-    },
-    {
-        .name = "spawn_executor",
-        .description = "Spawn an agent using a specific executor backend: 'dsco' (default), 'claude' (Claude Code CLI in print mode), or 'codex' (OpenAI Codex CLI exec mode). Each executor uses its own model and API access. Great for cross-model verification, competitive evaluation, or leveraging different strengths.",
-        .input_schema_json = "{\"type\":\"object\",\"properties\":{\"task\":{\"type\":\"string\",\"description\":\"Task prompt\"},\"executor\":{\"type\":\"string\",\"description\":\"Executor: dsco, claude, or codex\"},\"model\":{\"type\":\"string\",\"description\":\"Model override\"},\"budget\":{\"type\":\"number\",\"description\":\"Max budget in USD for this agent (0=unlimited)\"}},\"required\":[\"task\",\"executor\"]}",
-        .execute = tool_spawn_executor
-    },
-    {
-        .name = "spawn_provider",
-        .description = "Spawn a dsco sub-agent forced to a specific native API provider (e.g. openai, groq, deepseek, mistral, openrouter, xai, together, perplexity, cerebras, cohere). The child runs completely decoupled from the parent's provider — an Anthropic parent can spawn OpenAI children and vice versa. Use this for cross-provider comparison, latency optimization, or accessing provider-specific models.",
-        .input_schema_json = "{\"type\":\"object\",\"properties\":{\"task\":{\"type\":\"string\",\"description\":\"Task prompt\"},\"provider\":{\"type\":\"string\",\"description\":\"Native provider: anthropic, openai, groq, deepseek, mistral, openrouter, xai, together, perplexity, cerebras, cohere\"},\"model\":{\"type\":\"string\",\"description\":\"Model for this provider\"},\"budget\":{\"type\":\"number\",\"description\":\"Max budget USD (0=unlimited)\"}},\"required\":[\"task\",\"provider\"]}",
-        .execute = tool_spawn_provider
-    },
-    {
-        .name = "create_executor_swarm",
-        .description = "Create a swarm that runs on a specific executor backend (dsco/claude/codex). All agents use the same executor. Supports per-agent budget partitioning. Use this to run parallel tasks through Claude Code or Codex CLI.",
-        .input_schema_json = "{\"type\":\"object\",\"properties\":{\"name\":{\"type\":\"string\",\"description\":\"Swarm group name\"},\"executor\":{\"type\":\"string\",\"description\":\"Executor: dsco, claude, or codex\"},\"tasks\":{\"type\":\"array\",\"description\":\"Task prompts or {task,model} objects\",\"items\":{\"oneOf\":[{\"type\":\"string\"},{\"type\":\"object\",\"properties\":{\"task\":{\"type\":\"string\"},\"model\":{\"type\":\"string\"}},\"required\":[\"task\"]}]}},\"model\":{\"type\":\"string\",\"description\":\"Default model\"},\"budget\":{\"type\":\"number\",\"description\":\"Total budget in USD (split across agents)\"}},\"required\":[\"name\",\"executor\",\"tasks\"]}",
-        .execute = tool_create_executor_swarm
-    },
-    {
-        .name = "swarm_budget",
-        .description = "Set or query the global swarm budget. When set, agents that exceed their budget are auto-killed. Pass budget_usd to set, omit to query.",
-        .input_schema_json = "{\"type\":\"object\",\"properties\":{\"budget_usd\":{\"type\":\"number\",\"description\":\"Total swarm budget in USD (0=unlimited)\"}}}",
-        .execute = tool_swarm_budget
-    },
-    /* ═══════════════════════════════════════════════════════════════════════
-     * IPC — INTER-AGENT COMMUNICATION TOOLS
-     * ═══════════════════════════════════════════════════════════════════════ */
-    {
-        .name = "ipc_send",
-        .description = "Send a message to another agent (point-to-point or broadcast). For inter-agent coordination, task delegation, and status sharing.",
-        .input_schema_json = "{\"type\":\"object\",\"properties\":{\"to\":{\"type\":\"string\",\"description\":\"Target agent ID (omit for broadcast)\"},\"topic\":{\"type\":\"string\",\"description\":\"Message topic/channel\"},\"body\":{\"type\":\"string\",\"description\":\"Message content\"}},\"required\":[\"body\"]}",
-        .execute = tool_ipc_send
-    },
-    {
-        .name = "ipc_recv",
-        .description = "Read unread messages from other agents. Returns messages addressed to this agent plus broadcasts.",
-        .input_schema_json = "{\"type\":\"object\",\"properties\":{\"topic\":{\"type\":\"string\",\"description\":\"Filter by topic (optional)\"}}}",
-        .execute = tool_ipc_recv
-    },
-    {
-        .name = "ipc_agents",
-        .description = "List all agents in the hierarchy with their status, role, depth, and liveness. Shows the full agent tree.",
-        .input_schema_json = "{\"type\":\"object\",\"properties\":{}}",
-        .execute = tool_ipc_agents
-    },
-    {
-        .name = "ipc_scratch_put",
-        .description = "Write a key-value pair to the shared scratchpad. All agents in the hierarchy can read/write this shared state.",
-        .input_schema_json = "{\"type\":\"object\",\"properties\":{\"key\":{\"type\":\"string\",\"description\":\"Key name\"},\"value\":{\"type\":\"string\",\"description\":\"Value to store\"}},\"required\":[\"key\",\"value\"]}",
-        .execute = tool_ipc_scratch_put
-    },
-    {
-        .name = "ipc_scratch_get",
-        .description = "Read a value from the shared scratchpad by key. Returns the value and which agent wrote it.",
-        .input_schema_json = "{\"type\":\"object\",\"properties\":{\"key\":{\"type\":\"string\",\"description\":\"Key to read\"}},\"required\":[\"key\"]}",
-        .execute = tool_ipc_scratch_get
-    },
-    {
-        .name = "ipc_task_submit",
-        .description = "Submit a task to the shared task queue. Any idle agent can claim and execute it. Use for work distribution.",
-        .input_schema_json = "{\"type\":\"object\",\"properties\":{\"description\":{\"type\":\"string\",\"description\":\"Task description\"},\"priority\":{\"type\":\"integer\",\"description\":\"Priority (higher=more urgent, default 0)\"},\"parent_task_id\":{\"type\":\"integer\",\"description\":\"Parent task ID for sub-tasks\"}},\"required\":[\"description\"]}",
-        .execute = tool_ipc_task_submit
-    },
-    {
-        .name = "ipc_task_list",
-        .description = "List tasks in the shared queue with status, priority, and results. Filter by assigned agent optionally.",
-        .input_schema_json = "{\"type\":\"object\",\"properties\":{\"assigned_to\":{\"type\":\"string\",\"description\":\"Filter by agent ID (optional)\"}}}",
-        .execute = tool_ipc_task_list
-    },
-    {
-        .name = "ipc_set_role",
-        .description = "Set this agent's role/specialization (e.g., 'researcher', 'coder', 'reviewer'). Visible to other agents.",
-        .input_schema_json = "{\"type\":\"object\",\"properties\":{\"role\":{\"type\":\"string\",\"description\":\"Role name\"}},\"required\":[\"role\"]}",
-        .execute = tool_ipc_set_role
-    },
-    /* ═══════════════════════════════════════════════════════════════════════
-     * CRYPTOGRAPHIC TOOLS
-     * ═══════════════════════════════════════════════════════════════════════ */
-    {
-        .name = "sha256",
-        .description = "Compute SHA-256 hash of text or file. Pure C implementation — no external dependencies.",
-        .input_schema_json = "{\"type\":\"object\",\"properties\":{\"text\":{\"type\":\"string\",\"description\":\"Text to hash\"},\"file\":{\"type\":\"string\",\"description\":\"File path to hash\"}}}",
-        .execute = tool_sha256
-    },
-    {
-        .name = "md5",
-        .description = "Compute MD5 hash of text or file.",
-        .input_schema_json = "{\"type\":\"object\",\"properties\":{\"text\":{\"type\":\"string\",\"description\":\"Text to hash\"},\"file\":{\"type\":\"string\",\"description\":\"File path to hash\"}}}",
-        .execute = tool_md5
-    },
-    {
-        .name = "hmac",
-        .description = "Compute HMAC-SHA256 of a message with a given key.",
-        .input_schema_json = "{\"type\":\"object\",\"properties\":{\"key\":{\"type\":\"string\",\"description\":\"HMAC key\"},\"message\":{\"type\":\"string\",\"description\":\"Message to authenticate\"}},\"required\":[\"key\",\"message\"]}",
-        .execute = tool_hmac
-    },
-    {
-        .name = "uuid",
-        .description = "Generate a UUID v4 (cryptographically random).",
-        .input_schema_json = "{\"type\":\"object\",\"properties\":{\"count\":{\"type\":\"integer\",\"description\":\"Number of UUIDs to generate (default 1)\"}}}",
-        .execute = tool_uuid
-    },
-    {
-        .name = "random_bytes",
-        .description = "Generate cryptographically random bytes (hex-encoded).",
-        .input_schema_json = "{\"type\":\"object\",\"properties\":{\"bytes\":{\"type\":\"integer\",\"description\":\"Number of random bytes (default 32)\"},\"format\":{\"type\":\"string\",\"description\":\"Output format: hex (default), base64\"}}}",
-        .execute = tool_random_bytes
-    },
-    {
-        .name = "base64_tool",
-        .description = "Base64 encode or decode text.",
-        .input_schema_json = "{\"type\":\"object\",\"properties\":{\"input\":{\"type\":\"string\",\"description\":\"Input text\"},\"action\":{\"type\":\"string\",\"description\":\"encode (default) or decode\"},\"url_safe\":{\"type\":\"boolean\",\"description\":\"Use URL-safe base64 (default false)\"}},\"required\":[\"input\"]}",
-        .execute = tool_base64_tool
-    },
-    {
-        .name = "jwt_decode",
-        .description = "Decode a JWT token (header + payload, no signature verification).",
-        .input_schema_json = "{\"type\":\"object\",\"properties\":{\"token\":{\"type\":\"string\",\"description\":\"JWT token string\"}},\"required\":[\"token\"]}",
-        .execute = tool_jwt_decode
-    },
-    {
-        .name = "hkdf",
-        .description = "Derive keys using HKDF-SHA256 (RFC 5869).",
-        .input_schema_json = "{\"type\":\"object\",\"properties\":{\"ikm\":{\"type\":\"string\",\"description\":\"Input key material (hex)\"},\"salt\":{\"type\":\"string\",\"description\":\"Salt (hex, optional)\"},\"info\":{\"type\":\"string\",\"description\":\"Context info string\"},\"length\":{\"type\":\"integer\",\"description\":\"Output key length in bytes (default 32)\"}},\"required\":[\"ikm\"]}",
-        .execute = tool_hkdf
-    },
-    /* ═══════════════════════════════════════════════════════════════════════
-     * PIPELINE TOOLS — Coroutine-powered data pipelines
-     * ═══════════════════════════════════════════════════════════════════════ */
-    {
-        .name = "pipeline",
-        .description = "Run a streaming data pipeline on text. Chains transform stages using coroutines. "
-                       "Spec format: 'stage:arg|stage:arg|...' "
-                       "Available stages: filter/grep, filter_v, map/sed, sort, sort_n, sort_r, "
-                       "uniq, uniq_c, head:N, tail:N, reverse, count, trim, upper, lower, "
-                       "prefix:str, suffix:str, number/nl, join:sep, split:delim, cut:delim:N, "
-                       "regex:pattern, replace:old/new, take_while, drop_while, flatten, "
-                       "compact/blank_remove, length, hash/sha256, jq/json_extract:key, "
-                       "csv_column:N, stats. "
-                       "Example: 'filter:error|sort|uniq|head:20'",
-        .input_schema_json = "{\"type\":\"object\",\"properties\":{\"input\":{\"type\":\"string\",\"description\":\"Input text (multi-line)\"},\"spec\":{\"type\":\"string\",\"description\":\"Pipeline spec (stage:arg|stage:arg|...)\"},\"file\":{\"type\":\"string\",\"description\":\"Read input from file instead\"}},\"required\":[\"spec\"]}",
-        .execute = tool_pipeline
-    },
-    /* ═══════════════════════════════════════════════════════════════════════
-     * EXPRESSION EVALUATOR — Recursive descent math engine
-     * ═══════════════════════════════════════════════════════════════════════ */
-    {
-        .name = "eval",
-        .description = "Evaluate mathematical expressions. Supports: arithmetic (+,-,*,/,%,^/**), "
-                       "comparison (==,!=,<,>,<=,>=), bitwise (&,|,~,<<,>>), ternary (?:), "
-                       "variables (x=42; x*2), functions (sqrt, sin, cos, tan, log, ln, exp, "
-                       "abs, ceil, floor, round, min, max, gcd, lcm, fib, factorial, pow, "
-                       "deg, rad, hex, oct, bin), constants (pi, e, tau, phi), "
-                       "hex/oct/bin literals (0xFF, 0o77, 0b1010), factorial (5!). "
-                       "Multiple expressions separated by semicolons.",
-        .input_schema_json = "{\"type\":\"object\",\"properties\":{\"expression\":{\"type\":\"string\",\"description\":\"Math expression(s) to evaluate (semicolon-separated)\"}},\"required\":[\"expression\"]}",
-        .execute = tool_eval
-    },
-    {
-        .name = "big_factorial",
-        .description = "Compute exact factorial of large numbers using arbitrary-precision arithmetic. "
-                       "Returns all digits (e.g. 100! has 158 digits).",
-        .input_schema_json = "{\"type\":\"object\",\"properties\":{\"n\":{\"type\":\"integer\",\"description\":\"Number to compute factorial of\"}},\"required\":[\"n\"]}",
-        .execute = tool_big_factorial
-    },
-    /* ═══════════════════════════════════════════════════════════════════════
-     * PLUGIN SYSTEM — Dynamic tool loading
-     * ═══════════════════════════════════════════════════════════════════════ */
-    {
-        .name = "plugin_list",
-        .description = "List loaded plugins from ~/.dsco/plugins/. Shows plugin names, versions, "
-                       "tool counts, and build instructions.",
-        .input_schema_json = "{\"type\":\"object\",\"properties\":{}}",
-        .execute = tool_plugin_list
-    },
-    {
-        .name = "plugin_reload",
-        .description = "Hot-reload all plugins from ~/.dsco/plugins/.",
-        .input_schema_json = "{\"type\":\"object\",\"properties\":{}}",
-        .execute = tool_plugin_reload
-    },
-    {
-        .name = "plugin_load",
-        .description = "Load a specific plugin from a file path.",
-        .input_schema_json = "{\"type\":\"object\",\"properties\":{\"path\":{\"type\":\"string\",\"description\":\"Path to .dylib/.so plugin file\"}},\"required\":[\"path\"]}",
-        .execute = tool_plugin_load_file
-    },
-    {
-        .name = "plugin_validate",
-        .description = "Validate plugin-manifest.json and plugins.lock schema/syntax and pin consistency.",
-        .input_schema_json = "{\"type\":\"object\",\"properties\":{\"manifest_path\":{\"type\":\"string\",\"description\":\"Path to plugin-manifest.json\"},\"lock_path\":{\"type\":\"string\",\"description\":\"Path to plugins.lock\"}}}",
-        .execute = tool_plugin_validate
-    },
-    /* ═══════════════════════════════════════════════════════════════════════
-     * VISION — Image/document viewing
-     * ═══════════════════════════════════════════════════════════════════════ */
-    {
-        .name = "view_image",
-        .description = "Read and encode an image file for vision analysis. Supports PNG, JPEG, GIF, WebP. The image will be included in the next API call for Claude to analyze.",
-        .input_schema_json = "{\"type\":\"object\",\"properties\":{\"path\":{\"type\":\"string\",\"description\":\"Path to image file\"}},\"required\":[\"path\"]}",
-        .execute = tool_view_image
-    },
-    {
-        .name = "view_pdf",
-        .description = "Read and encode a PDF file for analysis. The PDF will be included in the next API call for Claude to read and analyze.",
-        .input_schema_json = "{\"type\":\"object\",\"properties\":{\"path\":{\"type\":\"string\",\"description\":\"Path to PDF file\"}},\"required\":[\"path\"]}",
-        .execute = tool_view_pdf
-    },
-    /* ── External Service Integrations ─────────────────────────────────── */
-    {
-        .name = "tavily_search",
-        .description = "Search the web using Tavily API with AI-generated answers and source attribution. Returns relevant results with snippets. Requires TAVILY_API_KEY.",
-        .input_schema_json = "{\"type\":\"object\",\"properties\":{\"query\":{\"type\":\"string\",\"description\":\"Search query\"},\"max_results\":{\"type\":\"integer\",\"description\":\"Max results (default 5)\"},\"include_answer\":{\"type\":\"boolean\",\"description\":\"Include AI answer (default true)\"},\"search_depth\":{\"type\":\"string\",\"enum\":[\"basic\",\"advanced\"],\"description\":\"Search depth\"}},\"required\":[\"query\"]}",
-        .execute = tool_tavily_search
-    },
-    {
-        .name = "brave_search",
-        .description = "Search the web using Brave Search API. Privacy-focused, returns web results with titles, URLs, and snippets. Requires BRAVE_API_KEY.",
-        .input_schema_json = "{\"type\":\"object\",\"properties\":{\"query\":{\"type\":\"string\",\"description\":\"Search query\"},\"count\":{\"type\":\"integer\",\"description\":\"Number of results (default 5)\"}},\"required\":[\"query\"]}",
-        .execute = tool_brave_search
-    },
-    {
-        .name = "github_search",
-        .description = "Search GitHub repositories, code, issues, or users. Requires GITHUB_TOKEN.",
-        .input_schema_json = "{\"type\":\"object\",\"properties\":{\"query\":{\"type\":\"string\",\"description\":\"Search query (supports GitHub search syntax)\"},\"type\":{\"type\":\"string\",\"enum\":[\"repositories\",\"code\",\"issues\",\"users\"],\"description\":\"Search type (default: repositories)\"}},\"required\":[\"query\"]}",
-        .execute = tool_github_search
-    },
-    {
-        .name = "github_issue",
-        .description = "Get GitHub issues for a repository. Without number, lists open issues. With number, gets specific issue details. Requires GITHUB_TOKEN.",
-        .input_schema_json = "{\"type\":\"object\",\"properties\":{\"repo\":{\"type\":\"string\",\"description\":\"Repository (owner/name)\"},\"number\":{\"type\":\"integer\",\"description\":\"Issue number (optional, lists all if omitted)\"}},\"required\":[\"repo\"]}",
-        .execute = tool_github_issue
-    },
-    {
-        .name = "github_pr",
-        .description = "Get GitHub pull requests for a repository. Without number, lists open PRs. With number, gets specific PR details. Requires GITHUB_TOKEN.",
-        .input_schema_json = "{\"type\":\"object\",\"properties\":{\"repo\":{\"type\":\"string\",\"description\":\"Repository (owner/name)\"},\"number\":{\"type\":\"integer\",\"description\":\"PR number (optional)\"}},\"required\":[\"repo\"]}",
-        .execute = tool_github_pr
-    },
-    {
-        .name = "github_repo",
-        .description = "Get GitHub repository information including stars, forks, language, description. Requires GITHUB_TOKEN.",
-        .input_schema_json = "{\"type\":\"object\",\"properties\":{\"repo\":{\"type\":\"string\",\"description\":\"Repository (owner/name)\"}},\"required\":[\"repo\"]}",
-        .execute = tool_github_repo
-    },
-    {
-        .name = "github_create_issue",
-        .description = "Create a new GitHub issue. Requires GITHUB_TOKEN with repo write access.",
-        .input_schema_json = "{\"type\":\"object\",\"properties\":{\"repo\":{\"type\":\"string\",\"description\":\"Repository (owner/name)\"},\"title\":{\"type\":\"string\",\"description\":\"Issue title\"},\"body\":{\"type\":\"string\",\"description\":\"Issue body (markdown)\"}},\"required\":[\"repo\",\"title\"]}",
-        .execute = tool_github_create_issue
-    },
-    /* ── Alpha Vantage: Core Stock Time Series (7+2) ────────────────────── */
-    { .name = "av_intraday", .description = "Intraday OHLCV time series (1min-60min) for any equity. 20+ years history.", .input_schema_json = S_INTRA, .execute = tool_av_time_series_intraday },
-    { .name = "av_daily", .description = "Daily OHLCV time series for any equity. 20+ years history.", .input_schema_json = S_SYM_OUT, .execute = tool_av_time_series_daily },
-    { .name = "av_daily_adjusted", .description = "Daily adjusted OHLCV (split/dividend adjusted) for any equity.", .input_schema_json = S_SYM_OUT, .execute = tool_av_time_series_daily_adj },
-    { .name = "av_weekly", .description = "Weekly OHLCV time series for any equity. 20+ years.", .input_schema_json = S_SYM, .execute = tool_av_time_series_weekly },
-    { .name = "av_weekly_adjusted", .description = "Weekly adjusted OHLCV (split/dividend adjusted).", .input_schema_json = S_SYM, .execute = tool_av_time_series_weekly_adj },
-    { .name = "av_monthly", .description = "Monthly OHLCV time series for any equity. 20+ years.", .input_schema_json = S_SYM, .execute = tool_av_time_series_monthly },
-    { .name = "av_monthly_adjusted", .description = "Monthly adjusted OHLCV (split/dividend adjusted).", .input_schema_json = S_SYM, .execute = tool_av_time_series_monthly_adj },
-    { .name = "av_quote", .description = "Latest real-time price, volume, change, change% for a ticker.", .input_schema_json = S_SYM, .execute = tool_av_quote },
-    { .name = "av_bulk_quotes", .description = "Bulk real-time quotes for up to 100 US symbols in one call.", .input_schema_json = S_BULK, .execute = tool_av_bulk_quotes },
-    /* ── Alpha Vantage: Search & Market Status ────────────────────────── */
-    { .name = "av_search", .description = "Search for ticker symbols by name/keyword. Returns symbol, name, type, region.", .input_schema_json = S_KWD, .execute = tool_av_search },
-    { .name = "av_market_status", .description = "Current open/closed status of major global exchanges.", .input_schema_json = S_NONE, .execute = tool_av_market_status },
-    /* ── Alpha Vantage: Options ───────────────────────────────────────── */
-    { .name = "av_realtime_options", .description = "Real-time US options chains sorted by expiration & strike. Full market coverage.", .input_schema_json = S_OPTS, .execute = tool_av_realtime_options },
-    { .name = "av_historical_options", .description = "Historical options chain for a symbol on a specific date. 15+ years. Includes Greeks & IV.", .input_schema_json = S_OPTSH, .execute = tool_av_historical_options },
-    /* ── Alpha Vantage: News & Sentiment ──────────────────────────────── */
-    { .name = "av_news", .description = "Live & historical market news with sentiment scores. Covers stocks, crypto, forex, and topics.", .input_schema_json = S_NEWS, .execute = tool_av_news },
-    /* ── Alpha Vantage: Company Fundamentals ──────────────────────────── */
-    { .name = "av_overview", .description = "Company overview: sector, market cap, PE, EPS, dividend yield, 52-week range, description.", .input_schema_json = S_SYM, .execute = tool_av_overview },
-    { .name = "av_etf", .description = "ETF profile: net assets, expense ratio, holdings, sector allocation.", .input_schema_json = S_SYM, .execute = tool_av_etf },
-    { .name = "av_income", .description = "Income statement (annual+quarterly): revenue, gross profit, operating income, net income, EBITDA.", .input_schema_json = S_SYM, .execute = tool_av_income },
-    { .name = "av_balance", .description = "Balance sheet (annual+quarterly): assets, liabilities, equity, cash, debt.", .input_schema_json = S_SYM, .execute = tool_av_balance },
-    { .name = "av_cashflow", .description = "Cash flow statement (annual+quarterly): operating, investing, financing, FCF, capex.", .input_schema_json = S_SYM, .execute = tool_av_cashflow },
-    { .name = "av_earnings", .description = "Earnings (annual+quarterly): reported EPS, estimated EPS, surprise, surprise%.", .input_schema_json = S_SYM, .execute = tool_av_earnings },
-    { .name = "av_earnings_estimates", .description = "Analyst EPS & revenue estimates with revision history and analyst count.", .input_schema_json = S_SYM, .execute = tool_av_earnings_estimates },
-    { .name = "av_dividends", .description = "Historical and declared future dividend distributions.", .input_schema_json = S_SYM, .execute = tool_av_dividends },
-    { .name = "av_splits", .description = "Historical stock split events.", .input_schema_json = S_SYM, .execute = tool_av_splits },
-    { .name = "av_insider", .description = "Insider transactions: buys/sells by founders, executives, board members.", .input_schema_json = S_SYM, .execute = tool_av_insider },
-    { .name = "av_institutional", .description = "Institutional ownership and holdings (13F filings).", .input_schema_json = S_SYM, .execute = tool_av_institutional },
-    /* ── Alpha Vantage: Earnings Call Transcript ──────────────────────── */
-    { .name = "av_transcript", .description = "Earnings call transcript for a company in a specific quarter. 15+ years. LLM sentiment signals.", .input_schema_json = S_TRANS, .execute = tool_av_transcript },
-    /* ── Alpha Vantage: Corporate Events & Calendar ───────────────────── */
-    { .name = "av_movers", .description = "Top 20 gainers, losers, and most actively traded US tickers.", .input_schema_json = S_NONE, .execute = tool_av_movers },
-    { .name = "av_listing_status", .description = "Active or delisted US stocks and ETFs. Asset lifecycle & survivorship.", .input_schema_json = S_LIST, .execute = tool_av_listing_status },
-    { .name = "av_earnings_calendar", .description = "Upcoming company earnings in next 3/6/12 months.", .input_schema_json = S_ECAL, .execute = tool_av_earnings_calendar },
-    { .name = "av_ipo_calendar", .description = "Upcoming IPOs expected in next 3 months.", .input_schema_json = S_NONE, .execute = tool_av_ipo_calendar },
-    /* ── Alpha Vantage: Advanced Analytics ─────────────────────────────── */
-    { .name = "av_analytics_fixed", .description = "Advanced analytics over fixed window: return, variance, auto-correlation, etc.", .input_schema_json = S_AFIXED, .execute = tool_av_analytics_fixed },
-    { .name = "av_analytics_sliding", .description = "Moving analytics over sliding windows: rolling variance, correlation, etc.", .input_schema_json = S_ASLIDE, .execute = tool_av_analytics_sliding },
-    /* ── Alpha Vantage: Forex ──────────────────────────────────────────── */
-    { .name = "av_forex", .description = "Real-time forex exchange rate for any currency pair (physical or digital).", .input_schema_json = S_FX, .execute = tool_av_forex },
-    { .name = "av_fx_intraday", .description = "Intraday FX OHLC (1min-60min) for a currency pair.", .input_schema_json = S_FXI, .execute = tool_av_fx_intraday },
-    { .name = "av_fx_daily", .description = "Daily FX OHLC for a currency pair. 20+ years.", .input_schema_json = S_FXP, .execute = tool_av_fx_daily },
-    { .name = "av_fx_weekly", .description = "Weekly FX OHLC for a currency pair.", .input_schema_json = S_FXP, .execute = tool_av_fx_weekly },
-    { .name = "av_fx_monthly", .description = "Monthly FX OHLC for a currency pair.", .input_schema_json = S_FXP, .execute = tool_av_fx_monthly },
-    /* ── Alpha Vantage: Crypto ─────────────────────────────────────────── */
-    { .name = "av_crypto", .description = "Daily crypto OHLCV (e.g. BTC, ETH, SOL) in USD or other market.", .input_schema_json = S_CRYPTO, .execute = tool_av_crypto },
-    { .name = "av_crypto_intraday", .description = "Intraday crypto OHLCV (1min-60min), real-time.", .input_schema_json = S_CRYI, .execute = tool_av_crypto_intraday },
-    { .name = "av_crypto_weekly", .description = "Weekly crypto OHLCV in USD and market currency.", .input_schema_json = S_CRYPTO, .execute = tool_av_crypto_weekly },
-    { .name = "av_crypto_monthly", .description = "Monthly crypto OHLCV in USD and market currency.", .input_schema_json = S_CRYPTO, .execute = tool_av_crypto_monthly },
-    /* ── Alpha Vantage: Commodities ────────────────────────────────────── */
-    { .name = "av_wti", .description = "WTI crude oil prices (daily/weekly/monthly).", .input_schema_json = S_INTV, .execute = tool_av_wti },
-    { .name = "av_brent", .description = "Brent crude oil prices (daily/weekly/monthly).", .input_schema_json = S_INTV, .execute = tool_av_brent },
-    { .name = "av_natural_gas", .description = "Henry Hub natural gas spot prices.", .input_schema_json = S_INTV, .execute = tool_av_natural_gas },
-    { .name = "av_copper", .description = "Global copper prices (monthly/quarterly/annual).", .input_schema_json = S_INTV, .execute = tool_av_copper },
-    { .name = "av_aluminum", .description = "Global aluminum prices (monthly/quarterly/annual).", .input_schema_json = S_INTV, .execute = tool_av_aluminum },
-    { .name = "av_wheat", .description = "Global wheat prices (monthly/quarterly/annual).", .input_schema_json = S_INTV, .execute = tool_av_wheat },
-    { .name = "av_corn", .description = "Global corn prices (monthly/quarterly/annual).", .input_schema_json = S_INTV, .execute = tool_av_corn },
-    { .name = "av_cotton", .description = "Global cotton prices (monthly/quarterly/annual).", .input_schema_json = S_INTV, .execute = tool_av_cotton },
-    { .name = "av_sugar", .description = "Global sugar prices (monthly/quarterly/annual).", .input_schema_json = S_INTV, .execute = tool_av_sugar },
-    { .name = "av_coffee", .description = "Global coffee prices (monthly/quarterly/annual).", .input_schema_json = S_INTV, .execute = tool_av_coffee },
-    { .name = "av_all_commodities", .description = "Global commodity price index (monthly/quarterly/annual).", .input_schema_json = S_INTV, .execute = tool_av_all_commodities },
-    /* ── Alpha Vantage: Precious Metals ────────────────────────────────── */
-    { .name = "av_gold_spot", .description = "Live spot price of gold (XAU) or silver (XAG).", .input_schema_json = S_GOLD, .execute = tool_av_gold_spot },
-    { .name = "av_gold_history", .description = "Historical gold/silver prices (daily/weekly/monthly).", .input_schema_json = S_GOLDH, .execute = tool_av_gold_history },
-    /* ── Alpha Vantage: Economic Indicators ────────────────────────────── */
-    { .name = "av_real_gdp", .description = "US Real GDP (annual/quarterly).", .input_schema_json = S_ECON, .execute = tool_av_real_gdp },
-    { .name = "av_real_gdp_per_capita", .description = "US Real GDP per capita (quarterly).", .input_schema_json = S_ECON, .execute = tool_av_real_gdp_per_capita },
-    { .name = "av_treasury_yield", .description = "US treasury yield (3mo/2yr/5yr/7yr/10yr/30yr) daily/weekly/monthly.", .input_schema_json = S_TREAS, .execute = tool_av_treasury_yield },
-    { .name = "av_federal_funds_rate", .description = "Federal funds rate (interest rate) daily/weekly/monthly.", .input_schema_json = S_ECON, .execute = tool_av_federal_funds_rate },
-    { .name = "av_cpi", .description = "Consumer Price Index (CPI) monthly/semiannual.", .input_schema_json = S_ECON, .execute = tool_av_cpi },
-    { .name = "av_inflation", .description = "Annual inflation rates (consumer prices) US.", .input_schema_json = S_NONE, .execute = tool_av_inflation },
-    { .name = "av_retail_sales", .description = "Monthly advance retail sales data.", .input_schema_json = S_NONE, .execute = tool_av_retail_sales },
-    { .name = "av_durables", .description = "Monthly manufacturers' new orders of durable goods.", .input_schema_json = S_NONE, .execute = tool_av_durables },
-    { .name = "av_unemployment", .description = "Monthly US unemployment rate.", .input_schema_json = S_NONE, .execute = tool_av_unemployment },
-    { .name = "av_nonfarm_payroll", .description = "Monthly total nonfarm payroll (jobs added/lost).", .input_schema_json = S_NONE, .execute = tool_av_nonfarm_payroll },
-    /* ── Alpha Vantage: Technical Indicators — Moving Averages ─────────── */
-    { .name = "av_sma", .description = "Simple Moving Average (SMA).", .input_schema_json = S_IND, .execute = tool_av_sma },
-    { .name = "av_ema", .description = "Exponential Moving Average (EMA).", .input_schema_json = S_IND, .execute = tool_av_ema },
-    { .name = "av_wma", .description = "Weighted Moving Average (WMA).", .input_schema_json = S_IND, .execute = tool_av_wma },
-    { .name = "av_dema", .description = "Double Exponential Moving Average (DEMA).", .input_schema_json = S_IND, .execute = tool_av_dema },
-    { .name = "av_tema", .description = "Triple Exponential Moving Average (TEMA).", .input_schema_json = S_IND, .execute = tool_av_tema },
-    { .name = "av_trima", .description = "Triangular Moving Average (TRIMA).", .input_schema_json = S_IND, .execute = tool_av_trima },
-    { .name = "av_kama", .description = "Kaufman Adaptive Moving Average (KAMA).", .input_schema_json = S_IND, .execute = tool_av_kama },
-    { .name = "av_mama", .description = "MESA Adaptive Moving Average (MAMA).", .input_schema_json = S_IND_MAMA, .execute = tool_av_mama },
-    { .name = "av_vwap", .description = "Volume Weighted Average Price (VWAP) — intraday only.", .input_schema_json = S_IND, .execute = tool_av_vwap },
-    { .name = "av_t3", .description = "Triple Exponential Moving Average T3.", .input_schema_json = S_IND, .execute = tool_av_t3 },
-    /* ── Alpha Vantage: Technical Indicators — Oscillators ─────────────── */
-    { .name = "av_macd", .description = "Moving Average Convergence/Divergence (MACD).", .input_schema_json = S_IND_MACD, .execute = tool_av_macd },
-    { .name = "av_macdext", .description = "MACD with controllable moving average type.", .input_schema_json = S_IND_MACDEXT, .execute = tool_av_macdext },
-    { .name = "av_stoch", .description = "Stochastic Oscillator (STOCH).", .input_schema_json = S_IND_STOCH, .execute = tool_av_stoch },
-    { .name = "av_stochf", .description = "Stochastic Fast (STOCHF).", .input_schema_json = S_IND_STOCHF, .execute = tool_av_stochf },
-    { .name = "av_rsi", .description = "Relative Strength Index (RSI).", .input_schema_json = S_IND, .execute = tool_av_rsi },
-    { .name = "av_stochrsi", .description = "Stochastic RSI (STOCHRSI).", .input_schema_json = S_IND, .execute = tool_av_stochrsi },
-    { .name = "av_willr", .description = "Williams' %R (WILLR).", .input_schema_json = S_IND, .execute = tool_av_willr },
-    { .name = "av_adx", .description = "Average Directional Index (ADX).", .input_schema_json = S_IND, .execute = tool_av_adx },
-    { .name = "av_adxr", .description = "Average Directional Index Rating (ADXR).", .input_schema_json = S_IND, .execute = tool_av_adxr },
-    { .name = "av_apo", .description = "Absolute Price Oscillator (APO).", .input_schema_json = S_IND, .execute = tool_av_apo },
-    { .name = "av_ppo", .description = "Percentage Price Oscillator (PPO).", .input_schema_json = S_IND, .execute = tool_av_ppo },
-    { .name = "av_mom", .description = "Momentum (MOM).", .input_schema_json = S_IND, .execute = tool_av_mom },
-    { .name = "av_bop", .description = "Balance of Power (BOP).", .input_schema_json = S_IND, .execute = tool_av_bop },
-    { .name = "av_cci", .description = "Commodity Channel Index (CCI).", .input_schema_json = S_IND, .execute = tool_av_cci },
-    { .name = "av_cmo", .description = "Chande Momentum Oscillator (CMO).", .input_schema_json = S_IND, .execute = tool_av_cmo },
-    { .name = "av_roc", .description = "Rate of Change (ROC).", .input_schema_json = S_IND, .execute = tool_av_roc },
-    { .name = "av_rocr", .description = "Rate of Change Ratio (ROCR).", .input_schema_json = S_IND, .execute = tool_av_rocr },
-    { .name = "av_aroon", .description = "Aroon indicator (AROON).", .input_schema_json = S_IND, .execute = tool_av_aroon },
-    { .name = "av_aroonosc", .description = "Aroon Oscillator (AROONOSC).", .input_schema_json = S_IND, .execute = tool_av_aroonosc },
-    { .name = "av_mfi", .description = "Money Flow Index (MFI).", .input_schema_json = S_IND, .execute = tool_av_mfi },
-    { .name = "av_trix", .description = "Triple smooth EMA rate of change (TRIX).", .input_schema_json = S_IND, .execute = tool_av_trix_ind },
-    { .name = "av_ultosc", .description = "Ultimate Oscillator (ULTOSC).", .input_schema_json = S_IND_ULTOSC, .execute = tool_av_ultosc },
-    { .name = "av_dx", .description = "Directional Movement Index (DX).", .input_schema_json = S_IND, .execute = tool_av_dx },
-    { .name = "av_minus_di", .description = "Minus Directional Indicator (-DI).", .input_schema_json = S_IND, .execute = tool_av_minus_di },
-    { .name = "av_plus_di", .description = "Plus Directional Indicator (+DI).", .input_schema_json = S_IND, .execute = tool_av_plus_di },
-    { .name = "av_minus_dm", .description = "Minus Directional Movement (-DM).", .input_schema_json = S_IND, .execute = tool_av_minus_dm },
-    { .name = "av_plus_dm", .description = "Plus Directional Movement (+DM).", .input_schema_json = S_IND, .execute = tool_av_plus_dm },
-    /* ── Alpha Vantage: Technical Indicators — Bands/Range ─────────────── */
-    { .name = "av_bbands", .description = "Bollinger Bands (BBANDS).", .input_schema_json = S_IND_BB, .execute = tool_av_bbands },
-    { .name = "av_midpoint", .description = "Midpoint (highest+lowest)/2.", .input_schema_json = S_IND, .execute = tool_av_midpoint },
-    { .name = "av_midprice", .description = "Midpoint Price (highest high+lowest low)/2.", .input_schema_json = S_IND, .execute = tool_av_midprice },
-    { .name = "av_sar", .description = "Parabolic SAR.", .input_schema_json = S_IND_SAR, .execute = tool_av_sar },
-    { .name = "av_trange", .description = "True Range (TRANGE).", .input_schema_json = S_IND, .execute = tool_av_trange },
-    { .name = "av_atr", .description = "Average True Range (ATR).", .input_schema_json = S_IND, .execute = tool_av_atr },
-    { .name = "av_natr", .description = "Normalized Average True Range (NATR).", .input_schema_json = S_IND, .execute = tool_av_natr },
-    /* ── Alpha Vantage: Technical Indicators — Volume ──────────────────── */
-    { .name = "av_ad", .description = "Chaikin A/D Line.", .input_schema_json = S_IND, .execute = tool_av_ad_line },
-    { .name = "av_adosc", .description = "Chaikin A/D Oscillator.", .input_schema_json = S_IND_ADOSC, .execute = tool_av_adosc },
-    { .name = "av_obv", .description = "On Balance Volume (OBV).", .input_schema_json = S_IND, .execute = tool_av_obv },
-    /* ── Alpha Vantage: Technical Indicators — Hilbert Transform ───────── */
-    { .name = "av_ht_trendline", .description = "Hilbert Transform Instantaneous Trendline.", .input_schema_json = S_IND, .execute = tool_av_ht_trendline },
-    { .name = "av_ht_sine", .description = "Hilbert Transform Sine Wave.", .input_schema_json = S_IND, .execute = tool_av_ht_sine },
-    { .name = "av_ht_trendmode", .description = "Hilbert Transform Trend vs Cycle Mode.", .input_schema_json = S_IND, .execute = tool_av_ht_trendmode },
-    { .name = "av_ht_dcperiod", .description = "Hilbert Transform Dominant Cycle Period.", .input_schema_json = S_IND, .execute = tool_av_ht_dcperiod },
-    { .name = "av_ht_dcphase", .description = "Hilbert Transform Dominant Cycle Phase.", .input_schema_json = S_IND, .execute = tool_av_ht_dcphase },
-    { .name = "av_ht_phasor", .description = "Hilbert Transform Phasor Components.", .input_schema_json = S_IND, .execute = tool_av_ht_phasor },
-    {
-        .name = "fred_series",
-        .description = "Get economic data from FRED (Federal Reserve). Series IDs: GDP, UNRATE (unemployment), CPIAUCSL (CPI), DFF (fed funds rate), T10Y2Y (yield curve), VIXCLS (VIX), DGS10 (10yr treasury), MORTGAGE30US. Requires FRED_API_KEY.",
-        .input_schema_json = "{\"type\":\"object\",\"properties\":{\"series_id\":{\"type\":\"string\",\"description\":\"FRED series ID (e.g. GDP, UNRATE, CPIAUCSL)\"},\"limit\":{\"type\":\"integer\",\"description\":\"Number of observations (default 30)\"},\"sort_order\":{\"type\":\"string\",\"enum\":[\"asc\",\"desc\"],\"description\":\"Sort order (default desc = most recent first)\"}},\"required\":[\"series_id\"]}",
-        .execute = tool_fred_series
-    },
-    {
-        .name = "slack_post",
-        .description = "Post a message to a Slack channel. Requires SLACK_BOT_TOKEN with chat:write scope.",
-        .input_schema_json = "{\"type\":\"object\",\"properties\":{\"channel\":{\"type\":\"string\",\"description\":\"Channel ID or name (e.g. #general, C1234567890)\"},\"text\":{\"type\":\"string\",\"description\":\"Message text (supports Slack markdown)\"}},\"required\":[\"channel\",\"text\"]}",
-        .execute = tool_slack_post
-    },
-    {
-        .name = "notion_search",
-        .description = "Search across all Notion pages and databases accessible to the integration. Requires NOTION_API_KEY.",
-        .input_schema_json = "{\"type\":\"object\",\"properties\":{\"query\":{\"type\":\"string\",\"description\":\"Search query (optional, empty returns recent pages)\"}}}",
-        .execute = tool_notion_search
-    },
-    {
-        .name = "notion_page",
-        .description = "Read the content blocks of a Notion page by its ID. Requires NOTION_API_KEY.",
-        .input_schema_json = "{\"type\":\"object\",\"properties\":{\"page_id\":{\"type\":\"string\",\"description\":\"Notion page or block ID (UUID format)\"}},\"required\":[\"page_id\"]}",
-        .execute = tool_notion_page
-    },
-    {
-        .name = "weather",
-        .description = "Get current weather for any location worldwide. Returns temperature, conditions, humidity, wind. Requires OPENWEATHERMAP_API_KEY.",
-        .input_schema_json = "{\"type\":\"object\",\"properties\":{\"location\":{\"type\":\"string\",\"description\":\"City name, optionally with country code (e.g. 'London,UK', 'New York')\"},\"units\":{\"type\":\"string\",\"enum\":[\"metric\",\"imperial\",\"standard\"],\"description\":\"Units (default: metric)\"}},\"required\":[\"location\"]}",
-        .execute = tool_weather
-    },
-    {
-        .name = "firecrawl",
-        .description = "Scrape a web page and extract structured content as markdown. Better than raw HTTP for complex pages with JS rendering. Requires FIRECRAWL_API_KEY.",
-        .input_schema_json = "{\"type\":\"object\",\"properties\":{\"url\":{\"type\":\"string\",\"description\":\"URL to scrape\"},\"formats\":{\"type\":\"string\",\"description\":\"Output format: markdown (default), html, rawHtml, links, screenshot\"}},\"required\":[\"url\"]}",
-        .execute = tool_firecrawl
-    },
-    {
-        .name = "jina_read",
-        .description = "Extract readable content from any URL using Jina AI Reader. Returns clean markdown text, stripping navigation and ads. Optionally uses JINA_API_KEY for higher limits.",
-        .input_schema_json = "{\"type\":\"object\",\"properties\":{\"url\":{\"type\":\"string\",\"description\":\"URL to read\"}},\"required\":[\"url\"]}",
-        .execute = tool_jina_read
-    },
-    {
-        .name = "serpapi",
-        .description = "Search Google via SerpAPI. Returns organic results with titles, snippets, links. Requires SERPAPI_API_KEY.",
-        .input_schema_json = "{\"type\":\"object\",\"properties\":{\"query\":{\"type\":\"string\",\"description\":\"Search query\"}},\"required\":[\"query\"]}",
-        .execute = tool_serpapi
-    },
-    {
-        .name = "discord_post",
-        .description = "Post a message to Discord via webhook URL or bot token. For webhooks, provide webhook_url. For bot mode, provide channel_id and set DISCORD_TOKEN.",
-        .input_schema_json = "{\"type\":\"object\",\"properties\":{\"text\":{\"type\":\"string\",\"description\":\"Message content\"},\"webhook_url\":{\"type\":\"string\",\"description\":\"Discord webhook URL (easiest method)\"},\"channel_id\":{\"type\":\"string\",\"description\":\"Channel ID for bot mode\"}},\"required\":[\"text\"]}",
-        .execute = tool_discord_post
-    },
-    {
-        .name = "twilio_sms",
-        .description = "Send an SMS via Twilio. Requires TWILIO_AUTH_TOKEN, TWILIO_ACCOUNT_SID, TWILIO_FROM_NUMBER.",
-        .input_schema_json = "{\"type\":\"object\",\"properties\":{\"to\":{\"type\":\"string\",\"description\":\"Recipient phone number (+1xxxyyyzzzz)\"},\"body\":{\"type\":\"string\",\"description\":\"SMS message text\"}},\"required\":[\"to\",\"body\"]}",
-        .execute = tool_twilio_sms
-    },
-    {
-        .name = "elevenlabs_tts",
-        .description = "Convert text to speech audio using ElevenLabs. Saves MP3 file. Requires ELEVENLABS_API_KEY.",
-        .input_schema_json = "{\"type\":\"object\",\"properties\":{\"text\":{\"type\":\"string\",\"description\":\"Text to speak\"},\"voice_id\":{\"type\":\"string\",\"description\":\"Voice ID (default: Rachel)\"},\"output\":{\"type\":\"string\",\"description\":\"Output file path (default: /tmp/dsco_tts.mp3)\"}},\"required\":[\"text\"]}",
-        .execute = tool_elevenlabs_tts
-    },
-    {
-        .name = "pinecone_query",
-        .description = "Query a Pinecone vector database index. Returns top-k nearest neighbors with metadata. Requires PINECONE_API_KEY.",
-        .input_schema_json = "{\"type\":\"object\",\"properties\":{\"host\":{\"type\":\"string\",\"description\":\"Pinecone index host (e.g. my-index-abc123.svc.pinecone.io)\"},\"top_k\":{\"type\":\"integer\",\"description\":\"Number of results (default 5)\"}},\"required\":[\"host\"]}",
-        .execute = tool_pinecone_query
-    },
-    {
-        .name = "stripe",
-        .description = "Access Stripe payment data — charges, customers, balance, invoices. Requires STRIPE_API_KEY.",
-        .input_schema_json = "{\"type\":\"object\",\"properties\":{\"action\":{\"type\":\"string\",\"enum\":[\"list_charges\",\"list_customers\",\"get_balance\",\"list_invoices\"],\"description\":\"Action to perform\"}},\"required\":[\"action\"]}",
-        .execute = tool_stripe
-    },
-    {
-        .name = "supabase_query",
-        .description = "Query a Supabase table using PostgREST. Requires SUPABASE_API_KEY and SUPABASE_URL.",
-        .input_schema_json = "{\"type\":\"object\",\"properties\":{\"table\":{\"type\":\"string\",\"description\":\"Table name\"},\"select\":{\"type\":\"string\",\"description\":\"Columns to select (default: *)\"},\"filter\":{\"type\":\"string\",\"description\":\"PostgREST filter (e.g. name=eq.John)\"}},\"required\":[\"table\"]}",
-        .execute = tool_supabase_query
-    },
-    {
-        .name = "huggingface",
-        .description = "Run inference on a Hugging Face model. Supports text classification, generation, NER, summarization. Requires HF_TOKEN.",
-        .input_schema_json = "{\"type\":\"object\",\"properties\":{\"model\":{\"type\":\"string\",\"description\":\"Model ID (e.g. facebook/bart-large-mnli, gpt2, dslim/bert-base-NER)\"},\"text\":{\"type\":\"string\",\"description\":\"Input text\"}},\"required\":[\"model\",\"text\"]}",
-        .execute = tool_huggingface
-    },
-    {
-        .name = "github_actions",
-        .description = "View GitHub Actions workflow runs and workflows for a repository. Requires GITHUB_TOKEN.",
-        .input_schema_json = "{\"type\":\"object\",\"properties\":{\"repo\":{\"type\":\"string\",\"description\":\"Repository (owner/name)\"},\"action\":{\"type\":\"string\",\"enum\":[\"list_runs\",\"list_workflows\"],\"description\":\"Action (default: list_runs)\"}},\"required\":[\"repo\"]}",
-        .execute = tool_github_actions
-    },
-    /* ── Knowledge Base (PDF ingestion + semantic search) ────────────────── */
-    { .name = "kb_ingest", .description = "Ingest a PDF or text into the knowledge base. Extracts text, splits into pages, stores in SQLite with dedup. Supports local files, URLs, or raw text.", .input_schema_json = "{\"type\":\"object\",\"properties\":{\"path\":{\"type\":\"string\",\"description\":\"Local path to PDF/text file\"},\"url\":{\"type\":\"string\",\"description\":\"URL to download PDF from\"},\"title\":{\"type\":\"string\",\"description\":\"Document title (auto-detected if omitted)\"},\"text\":{\"type\":\"string\",\"description\":\"Direct text to ingest (skip file processing)\"}}}", .execute = tool_kb_ingest },
-    { .name = "kb_search", .description = "Semantic search across all indexed documents using BM25 ranking. Returns relevant pages with snippets, scores, and source info.", .input_schema_json = "{\"type\":\"object\",\"properties\":{\"query\":{\"type\":\"string\",\"description\":\"Search query\"},\"limit\":{\"type\":\"integer\",\"description\":\"Max results (default 5)\"}},\"required\":[\"query\"]}", .execute = tool_kb_search },
-    { .name = "kb_list", .description = "List all documents in the knowledge base with page counts, word counts, and dates.", .input_schema_json = "{\"type\":\"object\",\"properties\":{}}", .execute = tool_kb_list },
-    { .name = "kb_get", .description = "Get content from a specific document or page in the knowledge base.", .input_schema_json = "{\"type\":\"object\",\"properties\":{\"doc_id\":{\"type\":\"integer\",\"description\":\"Document ID\"},\"page\":{\"type\":\"integer\",\"description\":\"Page number (omit for all pages)\"}},\"required\":[\"doc_id\"]}", .execute = tool_kb_get },
-    { .name = "kb_delete", .description = "Delete a document from the knowledge base.", .input_schema_json = "{\"type\":\"object\",\"properties\":{\"doc_id\":{\"type\":\"integer\",\"description\":\"Document ID to delete\"}},\"required\":[\"doc_id\"]}", .execute = tool_kb_delete },
-    { .name = "arxiv_search", .description = "Search arXiv for research papers. Returns titles, abstracts, authors, IDs. No auth needed. Use arxiv_ingest to add results to the knowledge base.", .input_schema_json = "{\"type\":\"object\",\"properties\":{\"query\":{\"type\":\"string\",\"description\":\"Search query (e.g. 'multi-agent reinforcement learning')\"},\"limit\":{\"type\":\"integer\",\"description\":\"Max results (1-50, default 10)\"}},\"required\":[\"query\"]}", .execute = tool_arxiv_search },
-    { .name = "arxiv_ingest", .description = "Download an arXiv paper by ID and ingest it into the knowledge base. Extracts text, splits into pages, indexes for search.", .input_schema_json = "{\"type\":\"object\",\"properties\":{\"arxiv_id\":{\"type\":\"string\",\"description\":\"arXiv paper ID (e.g. '2305.10601' or '2401.18059')\"},\"title\":{\"type\":\"string\",\"description\":\"Paper title (auto-detected if omitted)\"}},\"required\":[\"arxiv_id\"]}", .execute = tool_arxiv_ingest },
-    { .name = "kb_deep_search", .description = "Hierarchical 3-level retrieval across the knowledge base. Level 1: document keyword match (coarse). Level 2: page-level FTS5 BM25 with snippets. Level 3: chunk-level (256-word passages with overlap) FTS5 BM25 for precise passage extraction. Searches 380+ documents, 10K+ pages, 28K+ chunks.", .input_schema_json = "{\"type\":\"object\",\"properties\":{\"query\":{\"type\":\"string\",\"description\":\"Search query\"},\"limit\":{\"type\":\"integer\",\"description\":\"Results per level (default 5)\"},\"depth\":{\"type\":\"integer\",\"description\":\"1=docs only, 2=docs+pages, 3=docs+pages+chunks (default 3)\"}},\"required\":[\"query\"]}", .execute = tool_kb_deep_search },
-    /* ── Systematic Strategy Engines ─────────────────────────────────── */
-    { .name = "strat_completeness", .description = "COMPLETENESS ARBITRAGE SCANNER: Checks if all mutually-exclusive outcomes in bracket markets sum to < $1.00. If so, buying one of each is riskless profit. Scans Kalshi BTC/ETH/SPY brackets + Polymarket multi-outcome events.", .input_schema_json = "{\"type\":\"object\",\"properties\":{\"series\":{\"type\":\"string\",\"description\":\"Kalshi series ticker to scan (default: KXBTC). Try: KXBTC, KXETH, KXSPY, KXFED\"}}}", .execute = tool_strat_completeness },
-    { .name = "strat_binary_fade", .description = "BINARY FADE STRATEGY: Exploits LLM acquiescence bias (Schoenegger et al. 2024). LLMs over-predict YES on binary questions → crypto 5m/15m markets are biased. Fade YES >60%%, buy YES <40%%. Returns current crypto binaries with fade signals.", .input_schema_json = "{\"type\":\"object\",\"properties\":{\"high_threshold\":{\"type\":\"number\",\"description\":\"Sell YES above this (default 0.60)\"},\"low_threshold\":{\"type\":\"number\",\"description\":\"Buy YES below this (default 0.40)\"},\"limit\":{\"type\":\"integer\",\"description\":\"Markets to scan (default 20)\"}}}", .execute = tool_strat_binary_fade },
-    { .name = "strat_stale_snipe", .description = "STALE ORDER SNIPER: Near-expiry CLOB markets have stale limit orders from inactive market makers. Compares resting order prices to real-time reference price. Academic basis: Chen & Pennock LMSR convergence vs CLOB lag.", .input_schema_json = "{\"type\":\"object\",\"properties\":{\"series\":{\"type\":\"string\",\"description\":\"Kalshi series (default: KXBTC). Try: KXBTC, KXETH, KXSPY\"},\"limit\":{\"type\":\"integer\",\"description\":\"Events to scan (default 10)\"}}}", .execute = tool_strat_stale_snipe },
-    { .name = "strat_kelly", .description = "KELLY CRITERION CALCULATOR: Given true probability and market price, computes optimal bet size. Returns full/half/quarter/confidence-adjusted Kelly, contract count, max loss, max win. Use after identifying an edge with other strat_ tools.", .input_schema_json = "{\"type\":\"object\",\"properties\":{\"true_prob\":{\"type\":\"number\",\"description\":\"Your estimated true probability (0-1)\"},\"market_price\":{\"type\":\"number\",\"description\":\"Current market YES price (0-1)\"},\"bankroll\":{\"type\":\"number\",\"description\":\"Total bankroll in USD (default 1000)\"},\"confidence\":{\"type\":\"number\",\"description\":\"Confidence in your estimate 0-1 (default 0.5, scales Kelly down)\"},\"side\":{\"type\":\"string\",\"description\":\"Force YES or NO side\"}},\"required\":[\"true_prob\",\"market_price\"]}", .execute = tool_strat_kelly },
-    { .name = "strat_spread_scan", .description = "SPREAD SCANNER: Finds markets with widest bid-ask spreads for market-making opportunities. Wide spread = place limit orders on both sides to earn the spread. Returns markets from both Polymarket and Kalshi.", .input_schema_json = "{\"type\":\"object\",\"properties\":{\"limit\":{\"type\":\"integer\",\"description\":\"Markets to scan per platform (default 20)\"},\"category\":{\"type\":\"string\",\"description\":\"Filter: politics, sports, crypto, entertainment\"}}}", .execute = tool_strat_spread_scan },
-    /* Polymarket Prediction Markets (public, no auth) */
-    { .name = "polymarket_markets", .description = "List/filter Polymarket prediction markets. Returns question, outcomes, volume, liquidity. No auth.", .input_schema_json = "{\"type\":\"object\",\"properties\":{\"tag\":{\"type\":\"string\",\"description\":\"Filter by tag (politics, sports, crypto)\"},\"active\":{\"type\":\"string\",\"description\":\"true/false\"},\"limit\":{\"type\":\"integer\",\"description\":\"Max results 1-100\"},\"offset\":{\"type\":\"integer\",\"description\":\"Pagination offset\"}}}", .execute = tool_polymarket_markets },
-    { .name = "polymarket_events", .description = "Browse Polymarket events by category/tag. Tags: Geopolitics, Iran, Ukraine, Crypto, Politics, Sports, Oil, Israel, Gaza, Elections, Culture, Weather, NBA, Soccer, Trump. No auth.", .input_schema_json = "{\"type\":\"object\",\"properties\":{\"id\":{\"type\":\"string\",\"description\":\"Event ID\"},\"slug\":{\"type\":\"string\",\"description\":\"Event slug\"},\"tag\":{\"type\":\"string\",\"description\":\"Category tag (Geopolitics, Iran, Crypto, Politics, Sports, Oil, Ukraine, Elections, Culture, Weather, etc)\"},\"limit\":{\"type\":\"integer\",\"description\":\"Max results 1-100 (default 20)\"},\"offset\":{\"type\":\"integer\",\"description\":\"Pagination offset\"}}}", .execute = tool_polymarket_events },
-    { .name = "polymarket_categories", .description = "List all Polymarket market categories/tags with event counts. Shows what topics are available for browsing.", .input_schema_json = "{\"type\":\"object\",\"properties\":{}}", .execute = tool_polymarket_categories },
-    { .name = "polymarket_prices", .description = "Get midpoint prices for a Polymarket token. No auth.", .input_schema_json = "{\"type\":\"object\",\"properties\":{\"token_id\":{\"type\":\"string\",\"description\":\"Token ID\"},\"condition_id\":{\"type\":\"string\",\"description\":\"Condition ID\"}}}", .execute = tool_polymarket_prices },
-    { .name = "polymarket_book", .description = "Get order book for a Polymarket token. No auth.", .input_schema_json = "{\"type\":\"object\",\"properties\":{\"token_id\":{\"type\":\"string\",\"description\":\"Token ID\"}},\"required\":[\"token_id\"]}", .execute = tool_polymarket_book },
-    { .name = "polymarket_trades", .description = "Get recent Polymarket trades. Filter by condition or wallet. No auth.", .input_schema_json = "{\"type\":\"object\",\"properties\":{\"condition_id\":{\"type\":\"string\",\"description\":\"Condition ID\"},\"maker\":{\"type\":\"string\",\"description\":\"Wallet address\"},\"limit\":{\"type\":\"integer\",\"description\":\"Max trades 1-500\"}}}", .execute = tool_polymarket_trades },
-    { .name = "polymarket_search", .description = "Search Polymarket by keyword. No auth.", .input_schema_json = "{\"type\":\"object\",\"properties\":{\"query\":{\"type\":\"string\",\"description\":\"Search query\"},\"limit\":{\"type\":\"integer\",\"description\":\"Max results 1-50\"}},\"required\":[\"query\"]}", .execute = tool_polymarket_search },
-    /* ── Kalshi Prediction Market Exchange (public read, no auth) ─────── */
-    { .name = "kalshi_events", .description = "List Kalshi prediction market events with nested markets. Filter by status (open/closed/settled) or series. No auth for read.", .input_schema_json = "{\"type\":\"object\",\"properties\":{\"status\":{\"type\":\"string\",\"enum\":[\"open\",\"closed\",\"settled\"],\"description\":\"Filter by status\"},\"series_ticker\":{\"type\":\"string\",\"description\":\"Filter by series ticker\"},\"limit\":{\"type\":\"integer\",\"description\":\"Max results (1-200, default 10)\"}}}", .execute = tool_kalshi_events },
-    { .name = "kalshi_markets", .description = "Get Kalshi market(s). By ticker for specific market, or list with filters. Returns title, yes/no prices, volume, close time. No auth.", .input_schema_json = "{\"type\":\"object\",\"properties\":{\"ticker\":{\"type\":\"string\",\"description\":\"Market ticker (e.g. KXBTC-26MAR)\"},\"event_ticker\":{\"type\":\"string\",\"description\":\"Filter by event ticker\"},\"status\":{\"type\":\"string\",\"enum\":[\"open\",\"closed\",\"settled\"]},\"limit\":{\"type\":\"integer\",\"description\":\"Max results (default 10)\"}}}", .execute = tool_kalshi_markets },
-    { .name = "kalshi_orderbook", .description = "Get Kalshi order book for a market. Shows yes/no bid depth. No auth.", .input_schema_json = "{\"type\":\"object\",\"properties\":{\"ticker\":{\"type\":\"string\",\"description\":\"Market ticker\"},\"depth\":{\"type\":\"integer\",\"description\":\"Book depth (default 5)\"}},\"required\":[\"ticker\"]}", .execute = tool_kalshi_orderbook },
-    { .name = "kalshi_trades", .description = "Get recent Kalshi trades. Filter by market ticker. No auth.", .input_schema_json = "{\"type\":\"object\",\"properties\":{\"ticker\":{\"type\":\"string\",\"description\":\"Market ticker to filter\"},\"limit\":{\"type\":\"integer\",\"description\":\"Max trades (1-1000, default 20)\"}}}", .execute = tool_kalshi_trades },
-    { .name = "kalshi_series", .description = "Get Kalshi series template info (recurring market blueprints). No auth.", .input_schema_json = "{\"type\":\"object\",\"properties\":{\"ticker\":{\"type\":\"string\",\"description\":\"Series ticker (e.g. KXBTC, KXFED)\"}},\"required\":[\"ticker\"]}", .execute = tool_kalshi_series },
-    { .name = "kalshi_search", .description = "Search Kalshi open events with client-side keyword filtering. Returns only matching events. Supports series_ticker for direct API filter (KXTEMP, KXBTC, KXFED). No auth.", .input_schema_json = "{\"type\":\"object\",\"properties\":{\"query\":{\"type\":\"string\",\"description\":\"Search term (matched case-insensitive against event title/category)\"},\"limit\":{\"type\":\"integer\",\"description\":\"Max matched events (1-200, default 20)\"},\"series_ticker\":{\"type\":\"string\",\"description\":\"Series filter (KXTEMP=temp, KXRAIN=rain, KXSNOW=snow, KXBTC=bitcoin, KXFED=fed)\"}},\"required\":[\"query\"]}", .execute = tool_kalshi_search },
-    { .name = "kalshi_candlesticks", .description = "Get Kalshi price history candles for a market. Intervals: 1 (1min), 60 (1hr), 1440 (1day). No auth.", .input_schema_json = "{\"type\":\"object\",\"properties\":{\"ticker\":{\"type\":\"string\",\"description\":\"Market ticker\"},\"interval\":{\"type\":\"string\",\"description\":\"Period: 1, 60, or 1440 minutes\"}},\"required\":[\"ticker\"]}", .execute = tool_kalshi_candlesticks },
-    { .name = "kalshi_weather", .description = "All Kalshi weather prediction markets: temperature highs/lows, rainfall, snowfall, hurricanes. Aggregates from series KXTEMP, KXRAIN, KXSNOW, KXHURR, KXHIGH, KXLOW + keyword scan. Filter by city. No auth.", .input_schema_json = "{\"type\":\"object\",\"properties\":{\"city\":{\"type\":\"string\",\"description\":\"City name filter (e.g. New York, Chicago, Miami)\"},\"limit\":{\"type\":\"integer\",\"description\":\"Max results (default 30)\"}}}", .execute = tool_kalshi_weather },
-    { .name = "kalshi_market_snapshot", .description = "Deep dive on a single Kalshi market: full details + orderbook (depth 10) + recent 20 trades + hourly candlesticks in one call.", .input_schema_json = "{\"type\":\"object\",\"properties\":{\"ticker\":{\"type\":\"string\",\"description\":\"Market ticker (e.g. KXBTC-26MAR14)\"}},\"required\":[\"ticker\"]}", .execute = tool_kalshi_market_snapshot },
-    { .name = "kalshi_event_detail", .description = "Get a specific Kalshi event with ALL its nested markets. Use for multi-outcome events (e.g. Fed rate decisions, elections with multiple candidates).", .input_schema_json = "{\"type\":\"object\",\"properties\":{\"event_ticker\":{\"type\":\"string\",\"description\":\"Event ticker (e.g. KXFED-26MAR, KXNEWPOPE)\"}},\"required\":[\"event_ticker\"]}", .execute = tool_kalshi_event_detail },
-    { .name = "kalshi_daily_markets", .description = "List Kalshi markets sorted by close time (nearest first). Filter by series for daily/weekly resolvers (e.g. KXBTC for Bitcoin, KXSPY for S&P). For systematic daily trading.", .input_schema_json = "{\"type\":\"object\",\"properties\":{\"series_ticker\":{\"type\":\"string\",\"description\":\"Series ticker filter (e.g. KXBTC, KXSPY, KXETH, KXFED)\"},\"limit\":{\"type\":\"integer\",\"description\":\"Max results 1-200 (default 50)\"}}}", .execute = tool_kalshi_daily_markets },
-    { .name = "cross_platform_delta", .description = "World 1 → World 2 mapper. Fetches Polymarket + Kalshi markets for a topic and computes price deltas. Positive delta = Polymarket prices higher. Spreads > 3c are actionable arbs.", .input_schema_json = "{\"type\":\"object\",\"properties\":{\"topic\":{\"type\":\"string\",\"description\":\"Topic to match across platforms (e.g. Iran, Bitcoin, Fed, oil)\"},\"limit\":{\"type\":\"integer\",\"description\":\"Markets per platform (default 20)\"}},\"required\":[\"topic\"]}", .execute = tool_cross_platform_delta },
-    { .name = "market_movers", .description = "What's moving RIGHT NOW across both Polymarket and Kalshi. Returns top markets by 24h volume from Polymarket + active markets from key Kalshi series (BTC, SPY, ETH, Fed, CPI, GDP, oil, weather). One call, both platforms.", .input_schema_json = "{\"type\":\"object\",\"properties\":{\"limit\":{\"type\":\"integer\",\"description\":\"Max Polymarket results (default 15)\"}}}", .execute = tool_market_movers },
-    { .name = "market_cache_refresh", .description = "Bulk-fetch and cache ALL active markets from Polymarket + Kalshi into local SQLite. Saves ~100 Polymarket markets + ~200 Kalshi daily resolvers. Use before running compound queries to avoid per-call API costs.", .input_schema_json = "{\"type\":\"object\",\"properties\":{}}", .execute = tool_market_cache_refresh },
-    { .name = "market_cache_query", .description = "Query locally cached market data. No API calls. Keys: pm:markets:top100, pm:events:top100, ka:events:open100, ka:markets:daily200. List all keys with no args.", .input_schema_json = "{\"type\":\"object\",\"properties\":{\"key\":{\"type\":\"string\",\"description\":\"Cache key to retrieve\"},\"platform\":{\"type\":\"string\",\"description\":\"Filter keys by platform (polymarket/kalshi)\"},\"ttl\":{\"type\":\"integer\",\"description\":\"Max age in seconds (default 300)\"}}}", .execute = tool_market_cache_query },
-    /* ── Historical / Resolved Markets (backtesting) ───────────────────── */
-    { .name = "kalshi_historical_markets", .description = "Kalshi settled markets with resolution outcomes. Fields: result (yes/no), settlement_value_dollars, settlement_ts, volume_fp. For backtesting systematic strategies. Cursor-paginated.", .input_schema_json = "{\"type\":\"object\",\"properties\":{\"series_ticker\":{\"type\":\"string\",\"description\":\"Filter by series (KXBTC, KXSPY, KXFED, KXCPI, etc)\"},\"limit\":{\"type\":\"integer\",\"description\":\"Max results 1-200 (default 50)\"},\"cursor\":{\"type\":\"string\",\"description\":\"Pagination cursor from previous response\"}}}", .execute = tool_kalshi_historical_markets },
-    { .name = "kalshi_historical_trades", .description = "Kalshi historical trade execution data. Fields: yes_price_dollars, no_price_dollars, taker_side, count_fp, created_time. For reconstructing price history and market microstructure.", .input_schema_json = "{\"type\":\"object\",\"properties\":{\"ticker\":{\"type\":\"string\",\"description\":\"Filter by market ticker\"},\"limit\":{\"type\":\"integer\",\"description\":\"Max results 1-1000 (default 100)\"},\"cursor\":{\"type\":\"string\",\"description\":\"Pagination cursor\"}}}", .execute = tool_kalshi_historical_trades },
-    { .name = "kalshi_historical_cutoff", .description = "Get Kalshi historical data cutoff timestamps. Shows boundary between live and historical API endpoints.", .input_schema_json = "{\"type\":\"object\",\"properties\":{}}", .execute = tool_kalshi_historical_cutoff },
-    { .name = "polymarket_resolved", .description = "Polymarket resolved markets from CLOB API. 4.5 years of history (Oct 2021+). Each market has tokens[].winner flag for ground truth. 1000 markets per page.", .input_schema_json = "{\"type\":\"object\",\"properties\":{\"limit\":{\"type\":\"integer\",\"description\":\"Max results 1-1000 (default 100)\"},\"offset\":{\"type\":\"integer\",\"description\":\"Pagination offset\"}}}", .execute = tool_polymarket_resolved },
-    { .name = "polymarket_resolved_events", .description = "Polymarket resolved events sorted by volume. Includes 2024 Presidential Election ($3.7B), Super Bowl, NBA Finals, etc. Each event has nested markets with outcomes.", .input_schema_json = "{\"type\":\"object\",\"properties\":{\"limit\":{\"type\":\"integer\",\"description\":\"Max results 1-100 (default 20)\"},\"offset\":{\"type\":\"integer\",\"description\":\"Pagination offset\"}}}", .execute = tool_polymarket_resolved_events },
-    { .name = "historical_cross_platform", .description = "Resolved markets from BOTH platforms for a topic. Use for backtesting cross-platform strategies — see how similar events resolved on Kalshi vs Polymarket. Includes analysis guide for interpreting outcomes.", .input_schema_json = "{\"type\":\"object\",\"properties\":{\"topic\":{\"type\":\"string\",\"description\":\"Topic to search (e.g. bitcoin, election, Fed, Iran). Empty = top by volume\"},\"limit\":{\"type\":\"integer\",\"description\":\"Max per platform (default 20)\"}}}", .execute = tool_historical_cross_platform },
-    /* ── Systematic Trading Engine ─────────────────────────────────────── */
-    { .name = "systematic_ingest_polymarket", .description = "Ingest Polymarket resolved markets into local SQLite for systematic analysis. Fetches 1000 markets/page. Categories auto-classified: sports, crypto, macro, politics, geopolitics, weather.", .input_schema_json = "{\"type\":\"object\",\"properties\":{\"pages\":{\"type\":\"integer\",\"description\":\"Pages to fetch (1000 markets each, default 5, max 50)\"}}}", .execute = tool_systematic_ingest_polymarket },
-    { .name = "systematic_ingest_kalshi", .description = "Ingest Kalshi historical settled markets into local SQLite. Auto-extracts series, category, settlement values. Cursor-paginated.", .input_schema_json = "{\"type\":\"object\",\"properties\":{\"pages\":{\"type\":\"integer\",\"description\":\"Pages to fetch (200 markets each, default 10, max 20)\"}}}", .execute = tool_systematic_ingest_kalshi },
-    { .name = "systematic_analytics", .description = "Compute base rates, category breakdowns, series statistics from ingested historical data. Shows yes_rate by category, Kalshi series performance, date ranges. Foundation for signal generation.", .input_schema_json = "{\"type\":\"object\",\"properties\":{\"category\":{\"type\":\"string\",\"description\":\"Filter to specific category (sports_nba, crypto_btc, macro_fed, etc)\"},\"platform\":{\"type\":\"string\",\"description\":\"Filter by platform\"}}}", .execute = tool_systematic_analytics },
-    { .name = "systematic_signals", .description = "Generate trading signals from historical base rates + live market data. Strategies: mean_reversion (price vs base rate), cross_platform_arb (price spread), calendar_spread (term structure), momentum (24h change). Requires ingested data.", .input_schema_json = "{\"type\":\"object\",\"properties\":{}}", .execute = tool_systematic_signals },
-    /* ── Cross-Platform Prediction Intelligence ─────────────────────────── */
-    { .name = "prediction_scan", .description = "Scan BOTH Polymarket AND Kalshi simultaneously for a topic. Returns keyword-filtered results from both platforms. Kalshi results are client-side filtered by the query keyword.", .input_schema_json = "{\"type\":\"object\",\"properties\":{\"query\":{\"type\":\"string\",\"description\":\"Topic to scan (e.g. Fed rate, election, Bitcoin, weather)\"},\"limit\":{\"type\":\"integer\",\"description\":\"Max per platform (default 5)\"}},\"required\":[\"query\"]}", .execute = tool_prediction_scan },
-    { .name = "prediction_weather", .description = "Weather prediction markets from BOTH Polymarket AND Kalshi. Aggregates temperature, rainfall, snowfall, hurricane markets. Filter by city. Use for weather arb hunting.", .input_schema_json = "{\"type\":\"object\",\"properties\":{\"city\":{\"type\":\"string\",\"description\":\"City filter (e.g. New York, Chicago, Miami)\"},\"limit\":{\"type\":\"integer\",\"description\":\"Max per platform (default 20)\"}},\"required\":[]}", .execute = tool_prediction_weather },
-    { .name = "prediction_snapshot", .description = "Real-time dashboard of top prediction markets across Polymarket + Kalshi by volume. Shows odds, volume, liquidity across both platforms.", .input_schema_json = "{\"type\":\"object\",\"properties\":{\"limit\":{\"type\":\"integer\",\"description\":\"Markets per platform (default 5)\"},\"category\":{\"type\":\"string\",\"description\":\"Filter category (politics, sports, crypto, entertainment)\"}}}", .execute = tool_prediction_snapshot },
-    { .name = "prediction_arb", .description = "Cross-platform arbitrage detector. Fetches Polymarket + Kalshi markets for a topic, returns both datasets with arb detection rules. Identifies within-market (YES+NO<$1), cross-platform, and combinatorial arbitrage. No auth.", .input_schema_json = "{\"type\":\"object\",\"properties\":{\"topic\":{\"type\":\"string\",\"description\":\"Market topic (bitcoin, election, Fed rate, sports)\"},\"limit\":{\"type\":\"integer\",\"description\":\"Markets per platform to scan (default 10)\"}}}", .execute = tool_prediction_arb },
-    { .name = "prediction_semantic_match", .description = "SEMANTIC market matcher: uses TF-IDF cosine similarity to find markets across Polymarket and Kalshi that describe the SAME underlying event in different language. Extracts numerical entities (prices, dates, thresholds) for strike-level comparison. Detects arbs that ticker-matching misses.", .input_schema_json = "{\"type\":\"object\",\"properties\":{\"topic\":{\"type\":\"string\",\"description\":\"Topic to scan (leave empty for top markets)\"},\"threshold\":{\"type\":\"number\",\"description\":\"Min similarity score 0-1 (default 0.3, lower=more matches)\"},\"limit\":{\"type\":\"integer\",\"description\":\"Markets per platform to index (default 15)\"}}}", .execute = tool_prediction_semantic_match },
-    { .name = "polymarket_whale_trades", .description = "Detect whale trades on Polymarket. Large transactions above threshold with trader wallet, market, price, size. No auth.", .input_schema_json = "{\"type\":\"object\",\"properties\":{\"min_size_usd\":{\"type\":\"number\",\"description\":\"Min trade size in USD (default 10000)\"},\"condition_id\":{\"type\":\"string\",\"description\":\"Filter to specific market\"},\"limit\":{\"type\":\"integer\",\"description\":\"Max trades to scan (default 50)\"}}}", .execute = tool_polymarket_whale_trades },
-    { .name = "polymarket_leaderboard", .description = "Top Polymarket traders by profit. Shows wallet, PnL, volume, win rate. No auth.", .input_schema_json = "{\"type\":\"object\",\"properties\":{\"limit\":{\"type\":\"integer\",\"description\":\"Number of traders (default 10)\"}}}", .execute = tool_polymarket_leaderboard },
-    { .name = "polymarket_history", .description = "Price history for a Polymarket token. Returns time-series of YES/NO prices. No auth.", .input_schema_json = "{\"type\":\"object\",\"properties\":{\"token_id\":{\"type\":\"string\",\"description\":\"Token ID\"},\"condition_id\":{\"type\":\"string\",\"description\":\"Condition ID\"},\"interval\":{\"type\":\"string\",\"description\":\"all, 1d, 1w, 1m\"},\"fidelity\":{\"type\":\"string\",\"description\":\"Minutes between data points\"}}}", .execute = tool_polymarket_history },
+    /* ══════════════════════════════════════════════════════════════════════
+     *  CORE FILE TOOLS (13)
+     * ══════════════════════════════════════════════════════════════════════ */
+    { .name = "write_file", .description = "Create or overwrite a file. Creates parent dirs.", .input_schema_json = "{\"type\":\"object\",\"properties\":{\"path\":{\"type\":\"string\"},\"content\":{\"type\":\"string\"}},\"required\":[\"path\",\"content\"]}", .execute = tool_write_file, .core = true },
+    { .name = "read_file", .description = "Read file with line numbers. Use offset/limit for large files.", .input_schema_json = "{\"type\":\"object\",\"properties\":{\"path\":{\"type\":\"string\"},\"offset\":{\"type\":\"integer\",\"description\":\"Start line (1-based)\"},\"limit\":{\"type\":\"integer\",\"description\":\"Max lines\"}},\"required\":[\"path\"]}", .execute = tool_read_file, .core = true, .is_read_only = true, .is_concurrent = true },
+    { .name = "page_file", .description = "Page through a large file.", .input_schema_json = "{\"type\":\"object\",\"properties\":{\"path\":{\"type\":\"string\"},\"page\":{\"type\":\"integer\"},\"page_size\":{\"type\":\"integer\"}},\"required\":[\"path\"]}", .execute = tool_page_file, .is_read_only = true, .is_concurrent = true },
+    { .name = "edit_file", .description = "Edit file by replacing old_string with new_string.", .input_schema_json = "{\"type\":\"object\",\"properties\":{\"path\":{\"type\":\"string\"},\"old_string\":{\"type\":\"string\"},\"new_string\":{\"type\":\"string\"},\"replace_all\":{\"type\":\"boolean\"}},\"required\":[\"path\",\"old_string\",\"new_string\"]}", .execute = tool_edit_file, .core = true },
+    { .name = "append_file", .description = "Append content to end of file.", .input_schema_json = "{\"type\":\"object\",\"properties\":{\"path\":{\"type\":\"string\"},\"content\":{\"type\":\"string\"}},\"required\":[\"path\",\"content\"]}", .execute = tool_append_file },
+    { .name = "list_directory", .description = "List directory contents with file info.", .input_schema_json = "{\"type\":\"object\",\"properties\":{\"path\":{\"type\":\"string\"},\"recursive\":{\"type\":\"boolean\"}},\"required\":[\"path\"]}", .execute = tool_list_dir, .core = true, .is_read_only = true, .is_concurrent = true },
+    { .name = "find_files", .description = "Find files by name pattern (glob).", .input_schema_json = "{\"type\":\"object\",\"properties\":{\"pattern\":{\"type\":\"string\"},\"path\":{\"type\":\"string\"}},\"required\":[\"pattern\"]}", .execute = tool_find_files, .core = true, .is_read_only = true, .is_concurrent = true },
+    { .name = "grep_files", .description = "Search file contents with regex.", .input_schema_json = "{\"type\":\"object\",\"properties\":{\"pattern\":{\"type\":\"string\"},\"path\":{\"type\":\"string\"},\"include\":{\"type\":\"string\"}},\"required\":[\"pattern\"]}", .execute = tool_grep, .core = true, .is_read_only = true, .is_concurrent = true },
+    { .name = "file_info", .description = "Get file metadata (size, permissions, timestamps).", .input_schema_json = "{\"type\":\"object\",\"properties\":{\"path\":{\"type\":\"string\"}},\"required\":[\"path\"]}", .execute = tool_file_info, .is_read_only = true, .is_concurrent = true },
+    { .name = "move_file", .description = "Move or rename a file/directory.", .input_schema_json = "{\"type\":\"object\",\"properties\":{\"source\":{\"type\":\"string\"},\"dest\":{\"type\":\"string\"}},\"required\":[\"source\",\"dest\"]}", .execute = tool_move_file },
+    { .name = "copy_file", .description = "Copy a file or directory.", .input_schema_json = "{\"type\":\"object\",\"properties\":{\"source\":{\"type\":\"string\"},\"dest\":{\"type\":\"string\"}},\"required\":[\"source\",\"dest\"]}", .execute = tool_copy_file },
+    { .name = "delete_file", .description = "Delete a file or empty directory.", .input_schema_json = "{\"type\":\"object\",\"properties\":{\"path\":{\"type\":\"string\"}},\"required\":[\"path\"]}", .execute = tool_delete_file },
+    { .name = "mkdir", .description = "Create directory (with parents).", .input_schema_json = "{\"type\":\"object\",\"properties\":{\"path\":{\"type\":\"string\"}},\"required\":[\"path\"]}", .execute = tool_mkdir },
 
     /* ══════════════════════════════════════════════════════════════════════
-     *  AUTHENTICATED TRADING — Kalshi + Polymarket
+     *  EXECUTION (3)
      * ══════════════════════════════════════════════════════════════════════ */
+    { .name = "compile", .description = "Compile source code.", .input_schema_json = "{\"type\":\"object\",\"properties\":{\"command\":{\"type\":\"string\",\"description\":\"Build command\"}}}", .execute = tool_compile },
+    { .name = "bash", .description = "Run a shell command.", .input_schema_json = "{\"type\":\"object\",\"properties\":{\"command\":{\"type\":\"string\"},\"timeout\":{\"type\":\"integer\",\"description\":\"Timeout in seconds\"}},\"required\":[\"command\"]}", .execute = tool_bash, .core = true },
+    { .name = "python", .description = "Run Python code.", .input_schema_json = "{\"type\":\"object\",\"properties\":{\"code\":{\"type\":\"string\"},\"args\":{\"type\":\"string\"}},\"required\":[\"code\"]}", .execute = tool_python, .core = true },
 
-    /* ── Kalshi Authenticated Trading ────────────────────────────────────── */
-    { .name = "kalshi_balance", .description = "Get Kalshi account balance and portfolio value in USD. Requires KALSHI_API_KEY + KALSHI_RSA_PRIVATE_KEY_PATH.", .input_schema_json = "{\"type\":\"object\",\"properties\":{}}", .execute = tool_kalshi_balance },
-    { .name = "kalshi_positions", .description = "Get current Kalshi positions. Filter by ticker or event. Requires auth.", .input_schema_json = "{\"type\":\"object\",\"properties\":{\"ticker\":{\"type\":\"string\",\"description\":\"Filter by market ticker\"},\"event_ticker\":{\"type\":\"string\",\"description\":\"Filter by event ticker\"},\"limit\":{\"type\":\"integer\",\"description\":\"Max positions (default 100)\"}}}", .execute = tool_kalshi_positions },
-    { .name = "kalshi_portfolio", .description = "Full Kalshi portfolio: balance + all positions in one call. Requires auth.", .input_schema_json = "{\"type\":\"object\",\"properties\":{}}", .execute = tool_kalshi_portfolio },
-    { .name = "kalshi_fills", .description = "Get Kalshi trade fills (executed matches). Filter by ticker, order ID, time range. Requires auth.", .input_schema_json = "{\"type\":\"object\",\"properties\":{\"ticker\":{\"type\":\"string\",\"description\":\"Filter by market ticker\"},\"order_id\":{\"type\":\"string\",\"description\":\"Filter by order ID\"},\"limit\":{\"type\":\"integer\",\"description\":\"Max fills (default 100)\"}}}", .execute = tool_kalshi_fills },
-    { .name = "kalshi_create_order", .description = "Place an order on Kalshi. Requires auth. dry_run=true by default (set DSCO_TRADING_DRY_RUN=0 for live). Prices in cents (1-99).", .input_schema_json = "{\"type\":\"object\",\"properties\":{\"ticker\":{\"type\":\"string\",\"description\":\"Market ticker (required)\"},\"action\":{\"type\":\"string\",\"description\":\"buy or sell (required)\"},\"side\":{\"type\":\"string\",\"description\":\"yes or no (required)\"},\"count\":{\"type\":\"integer\",\"description\":\"Number of contracts (required)\"},\"type\":{\"type\":\"string\",\"description\":\"limit or market (default: limit)\"},\"yes_price\":{\"type\":\"integer\",\"description\":\"Price in cents 1-99 (required for limit orders)\"},\"time_in_force\":{\"type\":\"string\",\"description\":\"good_till_canceled, fill_or_kill, immediate_or_cancel\"}},\"required\":[\"ticker\",\"action\",\"side\",\"count\"]}", .execute = tool_kalshi_create_order },
-    { .name = "kalshi_batch_create_orders", .description = "Place up to 20 orders on Kalshi in one request. Requires auth.", .input_schema_json = "{\"type\":\"object\",\"properties\":{\"orders\":{\"type\":\"string\",\"description\":\"JSON array of order objects, each with ticker/action/side/count/yes_price\"}},\"required\":[\"orders\"]}", .execute = tool_kalshi_batch_create_orders },
-    { .name = "kalshi_cancel_order", .description = "Cancel a Kalshi order by ID. Requires auth.", .input_schema_json = "{\"type\":\"object\",\"properties\":{\"order_id\":{\"type\":\"string\",\"description\":\"Order ID to cancel\"}},\"required\":[\"order_id\"]}", .execute = tool_kalshi_cancel_order },
-    { .name = "kalshi_cancel_all", .description = "Cancel all open Kalshi orders. Requires auth.", .input_schema_json = "{\"type\":\"object\",\"properties\":{}}", .execute = tool_kalshi_cancel_all },
-    { .name = "kalshi_amend_order", .description = "Amend a Kalshi order (change count or price). Requires auth.", .input_schema_json = "{\"type\":\"object\",\"properties\":{\"order_id\":{\"type\":\"string\",\"description\":\"Order ID to amend\"},\"count\":{\"type\":\"integer\",\"description\":\"New contract count\"},\"price\":{\"type\":\"integer\",\"description\":\"New price in cents 1-99\"}},\"required\":[\"order_id\"]}", .execute = tool_kalshi_amend_order },
-    { .name = "kalshi_open_orders", .description = "List all open (resting) Kalshi orders. Requires auth.", .input_schema_json = "{\"type\":\"object\",\"properties\":{\"ticker\":{\"type\":\"string\",\"description\":\"Filter by market ticker\"},\"limit\":{\"type\":\"integer\",\"description\":\"Max orders (default 100)\"}}}", .execute = tool_kalshi_open_orders },
+    /* ══════════════════════════════════════════════════════════════════════
+     *  CONTEXT & RETRIEVAL (4)
+     * ══════════════════════════════════════════════════════════════════════ */
+    { .name = "context_recall", .description = "Retrieve persisted tool results. No args = list available keys.", .input_schema_json = "{\"type\":\"object\",\"properties\":{\"key\":{\"type\":\"string\",\"description\":\"Result key (e.g. python:a3f2...) from [key=...] footer\"},\"list\":{\"type\":\"boolean\",\"description\":\"List all available keys\"}}}", .execute = tool_context_recall, .is_read_only = true, .is_concurrent = true },
+    { .name = "token_audit", .description = "Audit token usage across conversation.", .input_schema_json = "{\"type\":\"object\",\"properties\":{}}", .execute = tool_token_audit, .is_read_only = true, .is_concurrent = true },
+    { .name = "context_status", .description = "Context window self-awareness: tokens, schema overhead, recommendations.", .input_schema_json = "{\"type\":\"object\",\"properties\":{}}", .execute = tool_context_status, .core = true, .is_read_only = true, .is_concurrent = true },
+    { .name = "context_compact", .description = "Compress old conversation history to reclaim tokens.", .input_schema_json = "{\"type\":\"object\",\"properties\":{\"aggressive\":{\"type\":\"boolean\"}}}", .execute = tool_context_compact, .core = true },
 
-    /* ── Polymarket Authenticated Trading ─────────────────────────────────── */
-    { .name = "polymarket_balance_auth", .description = "Get Polymarket USDC balance and token allowances. Requires POLYMARKET_API_KEY + POLYMARKET_API_SECRET + POLYMARKET_PASSPHRASE.", .input_schema_json = "{\"type\":\"object\",\"properties\":{}}", .execute = tool_polymarket_balance },
-    { .name = "polymarket_positions_auth", .description = "Get current Polymarket positions for your wallet.", .input_schema_json = "{\"type\":\"object\",\"properties\":{\"limit\":{\"type\":\"integer\",\"description\":\"Max positions (default 50)\"}}}", .execute = tool_polymarket_positions },
-    { .name = "polymarket_open_orders_auth", .description = "List open Polymarket orders. Requires auth.", .input_schema_json = "{\"type\":\"object\",\"properties\":{\"market\":{\"type\":\"string\",\"description\":\"Filter by condition ID\"},\"asset_id\":{\"type\":\"string\",\"description\":\"Filter by token ID\"}}}", .execute = tool_polymarket_open_orders },
-    { .name = "polymarket_api_keys_auth", .description = "List Polymarket CLOB API keys. Requires auth.", .input_schema_json = "{\"type\":\"object\",\"properties\":{}}", .execute = tool_polymarket_api_keys },
-    { .name = "polymarket_derive_api_key", .description = "Derive/create Polymarket CLOB API credentials from wallet. Requires POLYMARKET_PRIVATE_KEY.", .input_schema_json = "{\"type\":\"object\",\"properties\":{}}", .execute = tool_polymarket_derive_api_key },
-    { .name = "polymarket_create_order", .description = "Place an order on Polymarket CLOB. Requires auth + private key for signing. dry_run=true by default.", .input_schema_json = "{\"type\":\"object\",\"properties\":{\"token_id\":{\"type\":\"string\",\"description\":\"Outcome token ID (required)\"},\"side\":{\"type\":\"string\",\"description\":\"buy or sell (required)\"},\"price\":{\"type\":\"number\",\"description\":\"Price 0.01-0.99 (required)\"},\"size\":{\"type\":\"number\",\"description\":\"Amount in USDC (required)\"},\"order_type\":{\"type\":\"string\",\"description\":\"GTC, FOK, GTD, FAK (default: GTC)\"}},\"required\":[\"token_id\",\"side\",\"price\",\"size\"]}", .execute = tool_polymarket_create_order },
-    { .name = "polymarket_cancel_order_auth", .description = "Cancel a Polymarket order by ID. Requires auth.", .input_schema_json = "{\"type\":\"object\",\"properties\":{\"order_id\":{\"type\":\"string\",\"description\":\"Order ID to cancel\"}},\"required\":[\"order_id\"]}", .execute = tool_polymarket_cancel_order },
-    { .name = "polymarket_cancel_all_auth", .description = "Cancel all open Polymarket orders. Requires auth.", .input_schema_json = "{\"type\":\"object\",\"properties\":{}}", .execute = tool_polymarket_cancel_all },
+    /* ══════════════════════════════════════════════════════════════════════
+     *  BROWSER & PERCEPTION (1)
+     * ══════════════════════════════════════════════════════════════════════ */
+    { .name = "browser", .description = "Browser operations: snapshot, extract, viewport, outline.", .input_schema_json = "{\"type\":\"object\",\"properties\":{\"action\":{\"type\":\"string\",\"description\":\"snapshot|extract|viewport|outline\"},\"url\":{\"type\":\"string\"},\"selector\":{\"type\":\"string\"}},\"required\":[\"action\"]}", .execute = tool_browser_dispatch, .is_read_only = true, .is_concurrent = true },
 
-    /* ── Polymarket Relayer (gasless transactions) ─────────────────────────── */
-    { .name = "polymarket_relayer_deploy", .description = "Deploy a Safe or Proxy wallet via Polymarket relayer (gasless). Requires POLYMARKET_RELAYER_API_KEY or POLY_BUILDER_API_KEY.", .input_schema_json = "{\"type\":\"object\",\"properties\":{}}", .execute = tool_polymarket_relayer_deploy },
-    { .name = "polymarket_relayer_approve", .description = "Approve token spending via Polymarket relayer (gasless). Approves USDC for CTF exchange by default.", .input_schema_json = "{\"type\":\"object\",\"properties\":{\"token\":{\"type\":\"string\",\"description\":\"Token contract address (default: USDC)\"},\"spender\":{\"type\":\"string\",\"description\":\"Spender address (default: CTF exchange)\"}}}", .execute = tool_polymarket_relayer_approve },
-    { .name = "polymarket_relayer_execute", .description = "Execute arbitrary transaction via Polymarket relayer (gasless). Polymarket pays gas.", .input_schema_json = "{\"type\":\"object\",\"properties\":{\"to\":{\"type\":\"string\",\"description\":\"Target contract address\"},\"data\":{\"type\":\"string\",\"description\":\"Hex-encoded calldata\"},\"value\":{\"type\":\"string\",\"description\":\"POL to send (usually 0)\"},\"description\":{\"type\":\"string\",\"description\":\"Human-readable tx description\"}},\"required\":[\"to\",\"data\"]}", .execute = tool_polymarket_relayer_execute },
-    { .name = "polymarket_relayer_status", .description = "Check status of a relayer transaction (NEW/EXECUTED/MINED/CONFIRMED/FAILED).", .input_schema_json = "{\"type\":\"object\",\"properties\":{\"tx_id\":{\"type\":\"string\",\"description\":\"Relayer transaction ID\"}},\"required\":[\"tx_id\"]}", .execute = tool_polymarket_relayer_status },
+    /* ══════════════════════════════════════════════════════════════════════
+     *  WORKFLOW & RESEARCH (3)
+     * ══════════════════════════════════════════════════════════════════════ */
+    { .name = "workflow", .description = "Workflow management: plan, status, checkpoint, resume.", .input_schema_json = "{\"type\":\"object\",\"properties\":{\"action\":{\"type\":\"string\",\"description\":\"plan|status|checkpoint|resume\"},\"plan\":{\"type\":\"string\"},\"step\":{\"type\":\"string\"}},\"required\":[\"action\"]}", .execute = tool_workflow_dispatch },
+    { .name = "research_probe", .description = "Deep research probe on a topic.", .input_schema_json = "{\"type\":\"object\",\"properties\":{\"query\":{\"type\":\"string\"}},\"required\":[\"query\"]}", .execute = tool_research_probe, .is_read_only = true, .is_concurrent = true },
+    { .name = "code_search", .description = "Search codebase by symbol or pattern.", .input_schema_json = "{\"type\":\"object\",\"properties\":{\"query\":{\"type\":\"string\"},\"path\":{\"type\":\"string\"}},\"required\":[\"query\"]}", .execute = tool_code_search, .is_read_only = true, .is_concurrent = true },
 
-    /* ── Cross-Platform Arbitrage & Portfolio ──────────────────────────────── */
-    { .name = "arb_execute", .description = "Execute a cross-platform arbitrage trade. Places matching orders on both Kalshi and Polymarket simultaneously. dry_run=true by default.", .input_schema_json = "{\"type\":\"object\",\"properties\":{\"kalshi_ticker\":{\"type\":\"string\",\"description\":\"Kalshi market ticker\"},\"kalshi_side\":{\"type\":\"string\",\"description\":\"yes or no\"},\"kalshi_price\":{\"type\":\"integer\",\"description\":\"Kalshi price in cents 1-99\"},\"kalshi_count\":{\"type\":\"integer\",\"description\":\"Kalshi contract count\"},\"poly_token_id\":{\"type\":\"string\",\"description\":\"Polymarket token ID\"},\"poly_side\":{\"type\":\"string\",\"description\":\"buy or sell\"},\"poly_price\":{\"type\":\"number\",\"description\":\"Polymarket price 0.01-0.99\"},\"poly_size\":{\"type\":\"number\",\"description\":\"Polymarket USDC amount\"}},\"required\":[\"kalshi_ticker\",\"kalshi_side\",\"kalshi_price\",\"kalshi_count\",\"poly_token_id\",\"poly_side\",\"poly_price\",\"poly_size\"]}", .execute = tool_arb_execute },
-    { .name = "arb_monitor", .description = "Monitor cross-platform arbitrage opportunities. Scans Polymarket + Kalshi for price divergences above min spread threshold.", .input_schema_json = "{\"type\":\"object\",\"properties\":{\"topic\":{\"type\":\"string\",\"description\":\"Topic to scan (default: top markets)\"},\"limit\":{\"type\":\"integer\",\"description\":\"Markets per platform (default 10)\"},\"min_spread\":{\"type\":\"number\",\"description\":\"Min spread to report (default: from risk config)\"}}}", .execute = tool_arb_monitor },
-    { .name = "portfolio_cross", .description = "Unified portfolio view across Kalshi + Polymarket. Shows balance, positions, and total exposure on both platforms.", .input_schema_json = "{\"type\":\"object\",\"properties\":{}}", .execute = tool_portfolio_cross },
-    { .name = "risk_check", .description = "Pre-flight risk check for a proposed trade. Returns pass/fail with reason.", .input_schema_json = "{\"type\":\"object\",\"properties\":{\"platform\":{\"type\":\"string\",\"description\":\"kalshi or polymarket\"},\"amount_usd\":{\"type\":\"number\",\"description\":\"Order size in USD\"}},\"required\":[\"platform\",\"amount_usd\"]}", .execute = tool_risk_check },
-    { .name = "risk_configure", .description = "View or update trading risk limits. All fields optional — only updates provided values.", .input_schema_json = "{\"type\":\"object\",\"properties\":{\"max_order_usd\":{\"type\":\"number\",\"description\":\"Max single order USD\"},\"max_position_usd\":{\"type\":\"number\",\"description\":\"Max single position USD\"},\"max_total_exposure_usd\":{\"type\":\"number\",\"description\":\"Max total exposure USD\"},\"min_arb_spread\":{\"type\":\"number\",\"description\":\"Min arb spread (e.g. 0.03)\"},\"max_open_orders\":{\"type\":\"integer\",\"description\":\"Max concurrent orders\"},\"dry_run\":{\"type\":\"boolean\",\"description\":\"true=simulate, false=live trading\"}}}", .execute = tool_risk_configure },
+    /* ══════════════════════════════════════════════════════════════════════
+     *  GIT (1)
+     * ══════════════════════════════════════════════════════════════════════ */
+    { .name = "git", .description = "Git operations: status, diff, log, commit, add, branch, stash, clone, push, pull.", .input_schema_json = "{\"type\":\"object\",\"properties\":{\"action\":{\"type\":\"string\",\"description\":\"status|diff|log|commit|add|branch|stash|clone|push|pull\"},\"args\":{\"type\":\"string\",\"description\":\"Arguments (files, message, etc)\"},\"message\":{\"type\":\"string\"},\"path\":{\"type\":\"string\"}},\"required\":[\"action\"]}", .execute = tool_git_dispatch, .core = true },
 
-    {
-        .name = "mapbox_geocode",
-        .description = "Geocode an address or place name to coordinates using Mapbox. Requires MAPBOX_API_KEY.",
-        .input_schema_json = "{\"type\":\"object\",\"properties\":{\"query\":{\"type\":\"string\",\"description\":\"Place name or address\"}},\"required\":[\"query\"]}",
-        .execute = tool_mapbox_geocode
-    },
-    {
-        .name = "csv_parse",
-        .description = "Parse CSV text or file. Returns JSON array of rows. Supports column extraction, custom delimiters, header detection.",
-        .input_schema_json = "{\"type\":\"object\",\"properties\":{\"text\":{\"type\":\"string\",\"description\":\"CSV text\"},\"file\":{\"type\":\"string\",\"description\":\"CSV file path\"},\"column\":{\"type\":\"integer\",\"description\":\"Extract specific column (0-based)\"},\"delimiter\":{\"type\":\"string\",\"description\":\"Delimiter (default comma)\"},\"headers\":{\"type\":\"boolean\",\"description\":\"First row is headers (default true)\"}}}",
-        .execute = tool_csv_parse
-    },
-    {
-        .name = "regex_match",
-        .description = "Match a regex pattern against text. Returns all matches. Supports extended POSIX regex.",
-        .input_schema_json = "{\"type\":\"object\",\"properties\":{\"text\":{\"type\":\"string\",\"description\":\"Input text\"},\"pattern\":{\"type\":\"string\",\"description\":\"POSIX extended regex pattern\"},\"global\":{\"type\":\"boolean\",\"description\":\"Return all matches (default false)\"}},\"required\":[\"text\",\"pattern\"]}",
-        .execute = tool_regex_match
-    },
-    {
-        .name = "url_parse",
-        .description = "Parse a URL into scheme, host, port, path, query, fragment components.",
-        .input_schema_json = "{\"type\":\"object\",\"properties\":{\"url\":{\"type\":\"string\",\"description\":\"URL to parse\"}},\"required\":[\"url\"]}",
-        .execute = tool_url_parse
-    },
-    {
-        .name = "semver_compare",
-        .description = "Compare two semantic versions (e.g. 1.2.3 vs 2.0.0). Returns -1, 0, or 1.",
-        .input_schema_json = "{\"type\":\"object\",\"properties\":{\"version_a\":{\"type\":\"string\",\"description\":\"First version\"},\"version_b\":{\"type\":\"string\",\"description\":\"Second version\"}},\"required\":[\"version_a\",\"version_b\"]}",
-        .execute = tool_semver
-    },
-    {
-        .name = "cron_parse",
-        .description = "Parse a cron expression (5-field) and return structured fields with a human-readable description.",
-        .input_schema_json = "{\"type\":\"object\",\"properties\":{\"expression\":{\"type\":\"string\",\"description\":\"Cron expression e.g. '0 9 * * 1'\"}},\"required\":[\"expression\"]}",
-        .execute = tool_cron_parse
-    },
-    {
-        .name = "template_render",
-        .description = "Render a Mustache-style template with {{variable}} substitution from a JSON variables object.",
-        .input_schema_json = "{\"type\":\"object\",\"properties\":{\"template\":{\"type\":\"string\",\"description\":\"Template with {{var}} placeholders\"},\"variables\":{\"type\":\"string\",\"description\":\"JSON object of variable values\"}},\"required\":[\"template\"]}",
-        .execute = tool_template_render
-    },
-    {
-        .name = "text_diff",
-        .description = "Produce a unified diff between two text strings.",
-        .input_schema_json = "{\"type\":\"object\",\"properties\":{\"text_a\":{\"type\":\"string\",\"description\":\"First text\"},\"text_b\":{\"type\":\"string\",\"description\":\"Second text\"}},\"required\":[\"text_a\",\"text_b\"]}",
-        .execute = tool_text_diff
-    },
-    {
-        .name = "process_tree",
-        .description = "Show process list with PID, PPID, user, CPU%, MEM%, command. Optionally filter by name.",
-        .input_schema_json = "{\"type\":\"object\",\"properties\":{\"filter\":{\"type\":\"string\",\"description\":\"Optional process name filter\"}}}",
-        .execute = tool_process_tree
-    },
-    {
-        .name = "system_profiler",
-        .description = "System profiling: CPU, memory, disk, network, load. Specify section (cpu/disk/network/load/all).",
-        .input_schema_json = "{\"type\":\"object\",\"properties\":{\"section\":{\"type\":\"string\",\"description\":\"Section: cpu, disk, network, load, or all (default)\"}}}",
-        .execute = tool_system_profiler
-    },
-    {
-        .name = "string_ops",
-        .description = "String operations: upper, lower, trim, reverse, length, base64_encode, word_count.",
-        .input_schema_json = "{\"type\":\"object\",\"properties\":{\"op\":{\"type\":\"string\",\"description\":\"Operation: upper|lower|trim|reverse|length|base64_encode|word_count\"},\"text\":{\"type\":\"string\",\"description\":\"Input text\"}},\"required\":[\"op\",\"text\"]}",
-        .execute = tool_string_ops
-    },
-    {
-        .name = "xml_extract",
-        .description = "Extract content or attributes from XML/HTML tags. Lightweight tag-based extraction without a full parser.",
-        .input_schema_json = "{\"type\":\"object\",\"properties\":{\"text\":{\"type\":\"string\",\"description\":\"XML/HTML text\"},\"file\":{\"type\":\"string\",\"description\":\"XML/HTML file path\"},\"tag\":{\"type\":\"string\",\"description\":\"Tag name to extract\"},\"attribute\":{\"type\":\"string\",\"description\":\"Attribute name to extract (omit for inner text)\"}},\"required\":[\"tag\"]}",
-        .execute = tool_xml_extract
-    },
+    /* ══════════════════════════════════════════════════════════════════════
+     *  SYSTEM & PROCESS (4)
+     * ══════════════════════════════════════════════════════════════════════ */
+    { .name = "ps", .description = "List running processes.", .input_schema_json = "{\"type\":\"object\",\"properties\":{}}", .execute = tool_ps, .is_read_only = true, .is_concurrent = true },
+    { .name = "env_get", .description = "Get environment variable.", .input_schema_json = "{\"type\":\"object\",\"properties\":{\"name\":{\"type\":\"string\"}},\"required\":[\"name\"]}", .execute = tool_env_get, .is_read_only = true, .is_concurrent = true },
+    { .name = "sysinfo", .description = "System info: CPU, memory, OS.", .input_schema_json = "{\"type\":\"object\",\"properties\":{}}", .execute = tool_sysinfo, .is_read_only = true, .is_concurrent = true },
+    { .name = "disk_usage", .description = "Disk usage for a path.", .input_schema_json = "{\"type\":\"object\",\"properties\":{\"path\":{\"type\":\"string\"}},\"required\":[\"path\"]}", .execute = tool_disk_usage, .is_read_only = true, .is_concurrent = true },
 
-    /* ═══ Wings + Talons ═══════════════════════════════════════════════════ */
+    /* ══════════════════════════════════════════════════════════════════════
+     *  TEXT & DATA PROCESSING (2)
+     * ══════════════════════════════════════════════════════════════════════ */
+    { .name = "jq", .description = "Process JSON with jq expressions.", .input_schema_json = "{\"type\":\"object\",\"properties\":{\"filter\":{\"type\":\"string\"},\"input\":{\"type\":\"string\"}},\"required\":[\"filter\"]}", .execute = tool_jq, .core = true, .is_read_only = true, .is_concurrent = true },
+    { .name = "diff", .description = "Compare two files or strings.", .input_schema_json = "{\"type\":\"object\",\"properties\":{\"file1\":{\"type\":\"string\"},\"file2\":{\"type\":\"string\"},\"text1\":{\"type\":\"string\"},\"text2\":{\"type\":\"string\"}}}", .execute = tool_diff, .is_read_only = true, .is_concurrent = true },
 
-    /* ── Pheromone Coordination (Wings) ────────────────────────────────── */
-    {
-        .name = "pheromone_deposit",
-        .description = "Deposit a pheromone signal for stigmergic coordination. Types: PROGRESS, ATTRACTION, WARNING, SUCCESS, HELP_NEEDED, CAPACITY. Signals decay exponentially (~69s half-life).",
-        .input_schema_json = "{\"type\":\"object\",\"properties\":{\"type\":{\"type\":\"string\",\"description\":\"Signal type: progress|attraction|warning|success|help_needed|capacity\"},\"concentration\":{\"type\":\"number\",\"description\":\"Signal strength 0.0-1.0 (default 0.5)\"},\"region\":{\"type\":\"string\",\"description\":\"Spatial tag for the signal (default: global)\"},\"source\":{\"type\":\"string\",\"description\":\"Emitting agent ID\"},\"meta\":{\"type\":\"string\",\"description\":\"JSON metadata\"}},\"required\":[]}",
-        .execute = tool_pheromone_deposit
-    },
-    {
-        .name = "pheromone_sense",
-        .description = "Read pheromone concentration gradients. Sense all types in a region, or a specific type. Returns aggregated concentration and signal count.",
-        .input_schema_json = "{\"type\":\"object\",\"properties\":{\"type\":{\"type\":\"string\",\"description\":\"Signal type to sense (omit for all)\"},\"region\":{\"type\":\"string\",\"description\":\"Region to sense (default: global)\"}},\"required\":[]}",
-        .execute = tool_pheromone_sense
-    },
-    {
-        .name = "pheromone_status",
-        .description = "Get pheromone field statistics: active signals, deposits, reads, per-type counts.",
-        .input_schema_json = "{\"type\":\"object\",\"properties\":{},\"required\":[]}",
-        .execute = tool_pheromone_status
-    },
+    /* ══════════════════════════════════════════════════════════════════════
+     *  NETWORK & HTTP (4)
+     * ══════════════════════════════════════════════════════════════════════ */
+    { .name = "http_request", .description = "Make HTTP requests (GET/POST/PUT/DELETE).", .input_schema_json = "{\"type\":\"object\",\"properties\":{\"url\":{\"type\":\"string\"},\"method\":{\"type\":\"string\"},\"headers\":{\"type\":\"string\"},\"body\":{\"type\":\"string\"}},\"required\":[\"url\"]}", .execute = tool_http_request, .core = true, .is_read_only = true, .is_concurrent = true },
+    { .name = "download_file", .description = "Download a file from URL.", .input_schema_json = "{\"type\":\"object\",\"properties\":{\"url\":{\"type\":\"string\"},\"path\":{\"type\":\"string\"}},\"required\":[\"url\",\"path\"]}", .execute = tool_download },
+    { .name = "curl_raw", .description = "Raw curl command execution.", .input_schema_json = "{\"type\":\"object\",\"properties\":{\"args\":{\"type\":\"string\"}},\"required\":[\"args\"]}", .execute = tool_curl_raw },
+    { .name = "network", .description = "Network diagnostics: dns, ping, port_check, port_scan, netstat, cert, traceroute, whois, interfaces, websocket.", .input_schema_json = "{\"type\":\"object\",\"properties\":{\"action\":{\"type\":\"string\",\"description\":\"dns|ping|port_check|port_scan|netstat|cert|traceroute|whois|interfaces|websocket\"},\"host\":{\"type\":\"string\"},\"port\":{\"type\":\"integer\"}},\"required\":[\"action\"]}", .execute = tool_network_dispatch, .is_read_only = true, .is_concurrent = true },
 
-    /* ── OODA Discipline (Talons) ─────────────────────────────────────── */
-    {
-        .name = "ooda_begin",
-        .description = "Start a new OODA cycle (Observe->Orient->Decide->Act). Returns cycle ID. Call before significant decisions.",
-        .input_schema_json = "{\"type\":\"object\",\"properties\":{},\"required\":[]}",
-        .execute = tool_ooda_begin
-    },
-    {
-        .name = "ooda_observe",
-        .description = "Add an observation to the current OODA cycle. Gather information without bias.",
-        .input_schema_json = "{\"type\":\"object\",\"properties\":{\"observation\":{\"type\":\"string\",\"description\":\"What was observed\"},\"source\":{\"type\":\"string\",\"description\":\"Observation source\"},\"confidence\":{\"type\":\"number\",\"description\":\"Confidence 0.0-1.0\"}},\"required\":[\"observation\"]}",
-        .execute = tool_ooda_observe
-    },
-    {
-        .name = "ooda_orient",
-        .description = "Add orientation factors: constraints, budget, safety context. Sets the decision-making context.",
-        .input_schema_json = "{\"type\":\"object\",\"properties\":{\"factor\":{\"type\":\"string\",\"description\":\"Orientation factor\"},\"weight\":{\"type\":\"number\",\"description\":\"Factor importance 0.0-1.0\"},\"constraint\":{\"type\":\"boolean\",\"description\":\"Is this a hard constraint?\"},\"budget\":{\"type\":\"number\",\"description\":\"GSU budget remaining\"},\"tier\":{\"type\":\"integer\",\"description\":\"Principal tier 0-3\"},\"safety_critical\":{\"type\":\"boolean\",\"description\":\"Is action safety-critical?\"}},\"required\":[\"factor\"]}",
-        .execute = tool_ooda_orient
-    },
-    {
-        .name = "ooda_decide",
-        .description = "Compute OODA decision. Returns action (EXECUTE/DELEGATE/WAIT/REST/ESCALATE) based on confidence thresholds.",
-        .input_schema_json = "{\"type\":\"object\",\"properties\":{},\"required\":[]}",
-        .execute = tool_ooda_decide
-    },
-    {
-        .name = "ooda_complete",
-        .description = "Complete OODA cycle with action result. Archives to history for learning.",
-        .input_schema_json = "{\"type\":\"object\",\"properties\":{\"success\":{\"type\":\"boolean\",\"description\":\"Did the action succeed?\"},\"result\":{\"type\":\"string\",\"description\":\"Action result description\"}},\"required\":[\"success\"]}",
-        .execute = tool_ooda_complete
-    },
-    {
-        .name = "ooda_status",
-        .description = "Get OODA engine status: total cycles, action distribution, success rate, thresholds.",
-        .input_schema_json = "{\"type\":\"object\",\"properties\":{},\"required\":[]}",
-        .execute = tool_ooda_status
-    },
+    /* ══════════════════════════════════════════════════════════════════════
+     *  INFRASTRUCTURE (5)
+     * ══════════════════════════════════════════════════════════════════════ */
+    { .name = "docker", .description = "Docker operations.", .input_schema_json = "{\"type\":\"object\",\"properties\":{\"command\":{\"type\":\"string\"}},\"required\":[\"command\"]}", .execute = tool_docker },
+    { .name = "ssh_command", .description = "Run command on remote host via SSH.", .input_schema_json = "{\"type\":\"object\",\"properties\":{\"host\":{\"type\":\"string\"},\"command\":{\"type\":\"string\"}},\"required\":[\"host\",\"command\"]}", .execute = tool_ssh_command },
+    { .name = "sqlite", .description = "Execute SQLite queries.", .input_schema_json = "{\"type\":\"object\",\"properties\":{\"db\":{\"type\":\"string\"},\"query\":{\"type\":\"string\"}},\"required\":[\"db\",\"query\"]}", .execute = tool_sqlite },
+    { .name = "date", .description = "Get current date/time or parse dates.", .input_schema_json = "{\"type\":\"object\",\"properties\":{\"format\":{\"type\":\"string\"},\"input\":{\"type\":\"string\"}}}", .execute = tool_date, .is_read_only = true, .is_concurrent = true },
+    { .name = "calc", .description = "Evaluate math expressions.", .input_schema_json = "{\"type\":\"object\",\"properties\":{\"expr\":{\"type\":\"string\"}},\"required\":[\"expr\"]}", .execute = tool_calc, .is_read_only = true, .is_concurrent = true },
 
-    /* ── Kill Switches (Talons) ───────────────────────────────────────── */
-    {
-        .name = "killswitch_trigger",
-        .description = "Trigger a kill switch. 5 levels: agent, workflow, service, pheromone, system. Emergency shutdown mechanism.",
-        .input_schema_json = "{\"type\":\"object\",\"properties\":{\"level\":{\"type\":\"string\",\"description\":\"Kill level: agent|workflow|service|pheromone|system\"},\"target\":{\"type\":\"string\",\"description\":\"Target to kill (agent_id, workflow_name, etc.)\"},\"reason\":{\"type\":\"string\",\"description\":\"Why the kill switch was triggered\"},\"timeout\":{\"type\":\"number\",\"description\":\"Auto-resolve after seconds (0=never)\"},\"cascade\":{\"type\":\"boolean\",\"description\":\"Trigger downstream kills\"}},\"required\":[\"level\",\"target\",\"reason\"]}",
-        .execute = tool_killswitch_trigger
-    },
-    {
-        .name = "killswitch_resolve",
-        .description = "Resolve (lift) a kill switch by ID.",
-        .input_schema_json = "{\"type\":\"object\",\"properties\":{\"kill_id\":{\"type\":\"integer\",\"description\":\"Kill switch ID to resolve\"}},\"required\":[\"kill_id\"]}",
-        .execute = tool_killswitch_resolve
-    },
-    {
-        .name = "killswitch_status",
-        .description = "Get kill switch registry status: active kills, system halt state, per-level counts.",
-        .input_schema_json = "{\"type\":\"object\",\"properties\":{},\"required\":[]}",
-        .execute = tool_killswitch_status
-    },
+    /* ══════════════════════════════════════════════════════════════════════
+     *  SEARCH & EXTERNAL (4)
+     * ══════════════════════════════════════════════════════════════════════ */
+    { .name = "tavily_search", .description = "Web search via Tavily.", .input_schema_json = "{\"type\":\"object\",\"properties\":{\"query\":{\"type\":\"string\"}},\"required\":[\"query\"]}", .execute = tool_tavily_search, .is_read_only = true, .is_concurrent = true },
+    { .name = "jina_search", .description = "AI-powered web search via Jina AI. Returns structured results with titles, URLs, and descriptions.", .input_schema_json = "{\"type\":\"object\",\"properties\":{\"query\":{\"type\":\"string\"},\"num\":{\"type\":\"integer\",\"description\":\"Number of results (1-10, default 5)\"}},\"required\":[\"query\"]}", .execute = tool_jina_search, .is_read_only = true, .is_concurrent = true },
+    { .name = "jina_embed", .description = "Compute embeddings via Jina v4 API. Returns 1024d float vectors for semantic similarity.", .input_schema_json = "{\"type\":\"object\",\"properties\":{\"text\":{\"type\":\"string\"},\"task\":{\"type\":\"string\",\"description\":\"retrieval.passage|retrieval.query|classification|separation\"},\"dimensions\":{\"type\":\"integer\",\"description\":\"64-1024 (default 1024)\"}},\"required\":[\"text\"]}", .execute = tool_jina_embed, .is_read_only = true, .is_concurrent = true },
+    { .name = "parallel_search", .description = "Fan out web search to multiple providers (Jina, Tavily, Brave) concurrently. Returns merged results from all available providers.", .input_schema_json = "{\"type\":\"object\",\"properties\":{\"query\":{\"type\":\"string\"},\"num\":{\"type\":\"integer\",\"description\":\"Results per provider (1-10, default 5)\"}},\"required\":[\"query\"]}", .execute = tool_parallel_search, .core = true, .is_read_only = true, .is_concurrent = true },
+    { .name = "weather", .description = "Get weather data for a location.", .input_schema_json = "{\"type\":\"object\",\"properties\":{\"location\":{\"type\":\"string\"}},\"required\":[\"location\"]}", .execute = tool_weather, .is_read_only = true, .is_concurrent = true },
+    { .name = "slack_post", .description = "Post message to Slack.", .input_schema_json = "{\"type\":\"object\",\"properties\":{\"channel\":{\"type\":\"string\"},\"text\":{\"type\":\"string\"}},\"required\":[\"channel\",\"text\"]}", .execute = tool_slack_post },
+    { .name = "github_search", .description = "Search GitHub repos, code, issues.", .input_schema_json = "{\"type\":\"object\",\"properties\":{\"query\":{\"type\":\"string\"},\"type\":{\"type\":\"string\",\"description\":\"repos|code|issues\"}},\"required\":[\"query\"]}", .execute = tool_github_search, .is_read_only = true, .is_concurrent = true },
 
-    /* ── Governance (Talons master) ───────────────────────────────────── */
-    {
-        .name = "governance_status",
-        .description = "Get full governance engine status including pheromones, OODA, kill switches, agents, budgets.",
-        .input_schema_json = "{\"type\":\"object\",\"properties\":{},\"required\":[]}",
-        .execute = tool_governance_status
-    },
-    {
-        .name = "governance_authorize",
-        .description = "Check if an action is authorized (hardcoded rules, budget, kill switches). Records to audit trail.",
-        .input_schema_json = "{\"type\":\"object\",\"properties\":{\"agent_id\":{\"type\":\"string\",\"description\":\"Agent requesting authorization\"},\"action\":{\"type\":\"string\",\"description\":\"Action to authorize\"},\"gsu_cost\":{\"type\":\"number\",\"description\":\"GSU cost of the action\"}},\"required\":[\"action\"]}",
-        .execute = tool_governance_authorize
-    },
-    {
-        .name = "governance_checkpoint",
-        .description = "Full governance gate: hardcoded check -> budget check -> kill switch check -> authorize -> audit -> pheromone emit. Call before significant actions.",
-        .input_schema_json = "{\"type\":\"object\",\"properties\":{\"agent_id\":{\"type\":\"string\",\"description\":\"Agent ID\"},\"action\":{\"type\":\"string\",\"description\":\"Action description\"},\"gsu_cost\":{\"type\":\"number\",\"description\":\"GSU cost\"},\"context\":{\"type\":\"string\",\"description\":\"Additional context\"}},\"required\":[\"action\"]}",
-        .execute = tool_governance_checkpoint
-    },
-    {
-        .name = "governance_budget",
-        .description = "Get agent budget details: allocated, consumed, remaining GSU, capability tier, permissions.",
-        .input_schema_json = "{\"type\":\"object\",\"properties\":{\"agent_id\":{\"type\":\"string\",\"description\":\"Agent to query (default: root)\"}},\"required\":[]}",
-        .execute = tool_governance_budget
-    },
-    {
-        .name = "governance_audit",
-        .description = "Get audit trail of governance decisions (authorizations and denials).",
-        .input_schema_json = "{\"type\":\"object\",\"properties\":{\"last_n\":{\"type\":\"integer\",\"description\":\"Number of recent entries (default 20)\"}},\"required\":[]}",
-        .execute = tool_governance_audit
-    },
-    {
-        .name = "governance_param",
-        .description = "Get or set softcoded governance parameters (pheromone decay, OODA thresholds, agent limits, etc.).",
-        .input_schema_json = "{\"type\":\"object\",\"properties\":{\"name\":{\"type\":\"string\",\"description\":\"Parameter name (omit to list all)\"},\"value\":{\"type\":\"number\",\"description\":\"New value (omit to read)\"}},\"required\":[]}",
-        .execute = tool_governance_param
-    },
+    /* ══════════════════════════════════════════════════════════════════════
+     *  KNOWLEDGE BASE (1)
+     * ══════════════════════════════════════════════════════════════════════ */
+    { .name = "knowledge_base", .description = "KB operations: ingest, search, deep_search, list, get, delete, arxiv_search, arxiv_ingest.", .input_schema_json = "{\"type\":\"object\",\"properties\":{\"action\":{\"type\":\"string\",\"description\":\"ingest|search|deep_search|list|get|delete|arxiv_search|arxiv_ingest\"},\"query\":{\"type\":\"string\"},\"path\":{\"type\":\"string\"},\"doc_id\":{\"type\":\"integer\"},\"arxiv_id\":{\"type\":\"string\"},\"limit\":{\"type\":\"integer\"}},\"required\":[\"action\"]}", .execute = tool_kb_dispatch },  /* mixed: search=RO, ingest/delete=write */
 
-    /* ── Three-Tier Memory (Wings) ────────────────────────────────────── */
-    {
-        .name = "memory_store",
-        .description = "Store a memory. Tiers: working (60s decay), episodic (1h decay), semantic (permanent). Auto-consolidation promotes important/frequent memories upward.",
-        .input_schema_json = "{\"type\":\"object\",\"properties\":{\"key\":{\"type\":\"string\",\"description\":\"Memory key\"},\"value\":{\"type\":\"string\",\"description\":\"Memory content\"},\"tier\":{\"type\":\"string\",\"description\":\"Tier: working|episodic|semantic (default: working)\"},\"importance\":{\"type\":\"number\",\"description\":\"Importance 0.0-1.0 (default 0.5)\"}},\"required\":[\"key\",\"value\"]}",
-        .execute = tool_memory_store
-    },
-    {
-        .name = "memory_recall",
-        .description = "Recall memories by key, search query, or tag. Updates access count (aids consolidation).",
-        .input_schema_json = "{\"type\":\"object\",\"properties\":{\"key\":{\"type\":\"string\",\"description\":\"Exact key to recall\"},\"query\":{\"type\":\"string\",\"description\":\"Substring search in keys and values\"},\"tag\":{\"type\":\"string\",\"description\":\"Tag to search\"}},\"required\":[]}",
-        .execute = tool_memory_recall
-    },
-    {
-        .name = "memory_promote",
-        .description = "Manually promote a memory to the next tier (working->episodic->semantic).",
-        .input_schema_json = "{\"type\":\"object\",\"properties\":{\"key\":{\"type\":\"string\",\"description\":\"Memory key to promote\"}},\"required\":[\"key\"]}",
-        .execute = tool_memory_promote
-    },
-    {
-        .name = "memory_forget",
-        .description = "Delete a memory by key.",
-        .input_schema_json = "{\"type\":\"object\",\"properties\":{\"key\":{\"type\":\"string\",\"description\":\"Memory key to forget\"}},\"required\":[\"key\"]}",
-        .execute = tool_memory_forget
-    },
-    {
-        .name = "memory_status",
-        .description = "Get memory system status: per-tier counts, promotions, evictions, consolidations.",
-        .input_schema_json = "{\"type\":\"object\",\"properties\":{},\"required\":[]}",
-        .execute = tool_memory_status
-    },
+    /* ══════════════════════════════════════════════════════════════════════
+     *  ALPHA VANTAGE — UNIFIED (1)
+     * ══════════════════════════════════════════════════════════════════════ */
+    { .name = "alpha_vantage", .description = "Alpha Vantage financial data API. Supports 100+ functions: time series (TIME_SERIES_DAILY, TIME_SERIES_INTRADAY), technical indicators (SMA, EMA, RSI, MACD, BBANDS, STOCH, ADX, CCI, OBV, ATR, VWAP), fundamentals (OVERVIEW, INCOME_STATEMENT, BALANCE_SHEET, EARNINGS), macro (CPI, REAL_GDP, UNEMPLOYMENT, TREASURY_YIELD), commodities (WTI, BRENT, NATURAL_GAS, GOLD_SILVER_SPOT), forex (CURRENCY_EXCHANGE_RATE, FX_DAILY), crypto (DIGITAL_CURRENCY_DAILY), options (REALTIME_OPTIONS), news (NEWS_SENTIMENT).", .input_schema_json = "{\"type\":\"object\",\"properties\":{\"function\":{\"type\":\"string\",\"description\":\"AV API function name\"},\"symbol\":{\"type\":\"string\",\"description\":\"Ticker symbol\"},\"interval\":{\"type\":\"string\",\"description\":\"1min|5min|15min|30min|60min|daily|weekly|monthly\"},\"time_period\":{\"type\":\"string\",\"description\":\"Data points (e.g. 14, 200)\"},\"series_type\":{\"type\":\"string\",\"description\":\"close|open|high|low\"},\"outputsize\":{\"type\":\"string\",\"description\":\"compact|full\"},\"from_currency\":{\"type\":\"string\"},\"to_currency\":{\"type\":\"string\"},\"from_symbol\":{\"type\":\"string\"},\"to_symbol\":{\"type\":\"string\"},\"market\":{\"type\":\"string\"},\"maturity\":{\"type\":\"string\"},\"keywords\":{\"type\":\"string\"},\"tickers\":{\"type\":\"string\"},\"quarter\":{\"type\":\"string\"}},\"required\":[\"function\"]}", .execute = tool_alpha_vantage, .is_read_only = true, .is_concurrent = true },
 
-    /* ── Talons: Competitive Execution ───────────────────────────────── */
-    {
-        .name = "talons_goal",
-        .description = "Create a goal for competitive pursuit. Set grip strength (tentative/holding/locked/death_grip) and strategy (direct/flanking/tournament/escalation/divide/ambush). Grip determines retry persistence.",
-        .input_schema_json = "{\"type\":\"object\",\"properties\":{\"description\":{\"type\":\"string\",\"description\":\"What to capture/achieve\"},\"priority\":{\"type\":\"number\",\"description\":\"Priority 0.0-1.0\"},\"grip\":{\"type\":\"string\",\"description\":\"Grip strength: tentative|holding|locked|death_grip\"},\"strategy\":{\"type\":\"string\",\"description\":\"Strategy: direct|flanking|tournament|escalation|divide|ambush\"},\"deadline\":{\"type\":\"number\",\"description\":\"Deadline as epoch timestamp (0=none)\"}},\"required\":[\"description\"]}",
-        .execute = tool_talons_goal_create
-    },
-    {
-        .name = "talons_advance",
-        .description = "Advance a goal through hunt states: stalk (plan) -> strike (execute) -> grip (close to done) -> capture (win) or escaped (fail, may auto-retry based on grip strength) or abandon.",
-        .input_schema_json = "{\"type\":\"object\",\"properties\":{\"goal_id\":{\"type\":\"integer\",\"description\":\"Goal ID\"},\"action\":{\"type\":\"string\",\"description\":\"stalk|strike|grip|capture|escaped|abandon\"},\"result\":{\"type\":\"string\",\"description\":\"Result description\"},\"cost\":{\"type\":\"number\",\"description\":\"Resource cost\"},\"confidence\":{\"type\":\"number\",\"description\":\"Updated confidence 0.0-1.0\"}},\"required\":[\"goal_id\",\"action\"]}",
-        .execute = tool_talons_goal_advance
-    },
-    {
-        .name = "talons_tournament",
-        .description = "Race N strategies for an objective. Actions: begin (start tournament), add (add competitor), result (record outcome), decide (pick winner). Scored by quality/speed/cost weights.",
-        .input_schema_json = "{\"type\":\"object\",\"properties\":{\"action\":{\"type\":\"string\",\"description\":\"begin|add|result|decide\"},\"tournament_id\":{\"type\":\"integer\",\"description\":\"Tournament ID\"},\"objective\":{\"type\":\"string\",\"description\":\"What to achieve (for begin)\"},\"label\":{\"type\":\"string\",\"description\":\"Competitor label (for add)\"},\"strategy\":{\"type\":\"string\",\"description\":\"Competitor strategy (for add)\"},\"competitor_id\":{\"type\":\"integer\",\"description\":\"Competitor ID (for result)\"},\"score\":{\"type\":\"number\",\"description\":\"Quality score 0-1 (for result)\"},\"cost\":{\"type\":\"number\",\"description\":\"Resource cost (for result)\"},\"result\":{\"type\":\"string\",\"description\":\"Result text (for result)\"},\"weight_quality\":{\"type\":\"number\"},\"weight_speed\":{\"type\":\"number\"},\"weight_cost\":{\"type\":\"number\"},\"deadline\":{\"type\":\"number\"}},\"required\":[\"action\"]}",
-        .execute = tool_talons_tournament
-    },
-    {
-        .name = "talons_recommend",
-        .description = "Get strategy recommendation based on learned win/loss history and current context (time pressure, resources, complexity).",
-        .input_schema_json = "{\"type\":\"object\",\"properties\":{\"time_pressure\":{\"type\":\"number\",\"description\":\"0.0 (relaxed) to 1.0 (urgent)\"},\"resource_budget\":{\"type\":\"number\",\"description\":\"0.0 (scarce) to 1.0 (abundant)\"},\"complexity\":{\"type\":\"number\",\"description\":\"0.0 (simple) to 1.0 (complex)\"}},\"required\":[]}",
-        .execute = tool_talons_recommend
-    },
-    {
-        .name = "talons_status",
-        .description = "Get Talons engine stats: win rate, active goals, strategy success rates, hunt history.",
-        .input_schema_json = "{\"type\":\"object\",\"properties\":{},\"required\":[]}",
-        .execute = tool_talons_status
-    },
+    /* ══════════════════════════════════════════════════════════════════════
+     *  KALSHI — UNIFIED (1)
+     * ══════════════════════════════════════════════════════════════════════ */
+    { .name = "kalshi", .description = "Kalshi prediction market. Actions: markets, events, search, orderbook, trades, series, candlesticks, weather, snapshot, event_detail, daily (read); positions, balance, portfolio, fills, open_orders (account); create_order, batch_create, cancel_order, cancel_all, amend_order (trade); historical_markets, historical_trades, historical_cutoff (history).", .input_schema_json = "{\"type\":\"object\",\"properties\":{\"action\":{\"type\":\"string\",\"description\":\"Action to perform\"},\"ticker\":{\"type\":\"string\"},\"event_ticker\":{\"type\":\"string\"},\"query\":{\"type\":\"string\"},\"series_ticker\":{\"type\":\"string\"},\"status\":{\"type\":\"string\"},\"side\":{\"type\":\"string\",\"description\":\"yes|no\"},\"yes_price\":{\"type\":\"integer\",\"description\":\"Price in cents 1-99\"},\"count\":{\"type\":\"integer\"},\"limit\":{\"type\":\"integer\"},\"city\":{\"type\":\"string\"},\"depth\":{\"type\":\"integer\"},\"order_id\":{\"type\":\"string\"}},\"required\":[\"action\"]}", .execute = tool_kalshi },
 
-    /* ── Wings+Talons+Immune System unified status ────────────────────── */
-    {
-        .name = "wings_talons_status",
-        .description = "Get unified system status: Wings (pheromones, memory), Talons (goals, tournaments, win rate), Immune System (governance, kill switches, OODA, budgets).",
-        .input_schema_json = "{\"type\":\"object\",\"properties\":{},\"required\":[]}",
-        .execute = tool_wings_talons_status
-    },
+    /* ══════════════════════════════════════════════════════════════════════
+     *  POLYMARKET — UNIFIED (1)
+     * ══════════════════════════════════════════════════════════════════════ */
+    { .name = "polymarket", .description = "Polymarket prediction market. Actions: markets, events, categories, prices, book, trades, search, resolved, resolved_events, whale_trades, leaderboard, history (read); balance, positions, open_orders, api_keys, derive_api_key (account); create_order, cancel_order, cancel_all (trade); relayer_deploy, relayer_approve, relayer_execute, relayer_status (relayer).", .input_schema_json = "{\"type\":\"object\",\"properties\":{\"action\":{\"type\":\"string\",\"description\":\"Action to perform\"},\"query\":{\"type\":\"string\"},\"tag\":{\"type\":\"string\"},\"token_id\":{\"type\":\"string\"},\"condition_id\":{\"type\":\"string\"},\"side\":{\"type\":\"string\",\"description\":\"buy|sell\"},\"price\":{\"type\":\"number\",\"description\":\"0.01-0.99\"},\"size\":{\"type\":\"number\"},\"order_id\":{\"type\":\"string\"},\"limit\":{\"type\":\"integer\"},\"offset\":{\"type\":\"integer\"}},\"required\":[\"action\"]}", .execute = tool_polymarket },
 
-    /* ── Process lifecycle ─────────────────────────────────────────────── */
-    {
-        .name = "self_exit",
-        .description = "Terminate the dsco agent process. Call this when the user asks to quit, exit, end the session, or says goodbye. The process will cleanly shut down after delivering your final message.",
-        .input_schema_json = "{\"type\":\"object\",\"properties\":{\"reason\":{\"type\":\"string\",\"description\":\"Brief reason for exit (e.g. user requested, task complete)\"}}}",
-        .execute = tool_self_exit
-    },
+    /* ══════════════════════════════════════════════════════════════════════
+     *  WEATHER DATA — Synoptic (ASOS/METAR) + NWS (forecasts/alerts)
+     * ══════════════════════════════════════════════════════════════════════ */
+    { .name = "synoptic", .description = "Synoptic Data real-time weather station observations (ASOS/METAR). Actions: latest (current obs), timeseries (historical), nearesttime, metadata, precip, kalshi_stations (all 29 Kalshi cities). Requires SYNOPTIC_API_TOKEN.", .input_schema_json = "{\"type\":\"object\",\"properties\":{\"action\":{\"type\":\"string\",\"description\":\"latest|timeseries|nearesttime|metadata|precip|kalshi_stations\"},\"stid\":{\"type\":\"string\",\"description\":\"Station IDs comma-separated (KORD,KLAX)\"},\"vars\":{\"type\":\"string\",\"description\":\"Variables: air_temp,wind_speed,relative_humidity,precip_accum,dew_point_temperature\"},\"start\":{\"type\":\"string\",\"description\":\"Start time YYYYmmddHHMM\"},\"end\":{\"type\":\"string\",\"description\":\"End time YYYYmmddHHMM\"},\"recent\":{\"type\":\"integer\",\"description\":\"Minutes of recent data\"},\"within\":{\"type\":\"integer\",\"description\":\"Minutes window (default 60)\"},\"state\":{\"type\":\"string\",\"description\":\"US state abbreviation\"},\"attime\":{\"type\":\"string\",\"description\":\"Target time for nearesttime (YYYYmmddHHMM)\"}},\"required\":[\"action\"]}", .execute = tool_synoptic, .is_read_only = true, .is_concurrent = true },
+    { .name = "nws", .description = "NWS API: forecast (lat/lon), hourly, station_obs (METAR station), alerts (by state), stations (near lat/lon), discussion (NWS office AFD). Free, no auth.", .input_schema_json = "{\"type\":\"object\",\"properties\":{\"action\":{\"type\":\"string\",\"description\":\"forecast|hourly|station_obs|alerts|stations|discussion\"},\"lat\":{\"type\":\"string\"},\"lon\":{\"type\":\"string\"},\"stid\":{\"type\":\"string\",\"description\":\"Station ID (e.g. KORD)\"},\"state\":{\"type\":\"string\",\"description\":\"State abbrev for alerts\"},\"office\":{\"type\":\"string\",\"description\":\"NWS office for discussion (OKX,LOT,FWD,LAX,MFL)\"},\"severity\":{\"type\":\"string\",\"description\":\"Alert severity filter\"}},\"required\":[\"action\"]}", .execute = tool_nws, .is_read_only = true, .is_concurrent = true },
 
-    /* ── Tool discovery (lazy loading) ────────────────────────────────── */
-    {
-        .name = "discover_tools",
-        .description = "List all available tools organized by category. Use this when you need a tool that isn't in your current tool list. Call with optional category filter (file_io, git, network, shell, code, crypto, swarm, ast, pipeline, math, search, general, finance, prediction, memory). After discovering a tool name, you can call it directly on the next turn.",
-        .input_schema_json = "{\"type\":\"object\",\"properties\":{\"category\":{\"type\":\"string\",\"description\":\"Optional: filter to a specific category\"}}}",
-        .execute = tool_discover_tools
-    },
-    /* ── §1-§8: Post-LLM Virtual OS subsystem status ──────────────────── */
-    {
-        .name = "vos_status",
-        .description = "Get Virtual OS subsystem status: arena allocator (§2), event loop (§6), bytecode VM (§3), cooperative scheduler (§1/§7), VFS persistence (§8), and reading list coverage map.",
-        .input_schema_json = "{\"type\":\"object\",\"properties\":{},\"required\":[]}",
-        .execute = tool_vos_status
-    },
+    /* ══════════════════════════════════════════════════════════════════════
+     *  PREDICTION & CROSS-PLATFORM (3)
+     * ══════════════════════════════════════════════════════════════════════ */
+    { .name = "prediction", .description = "Cross-platform prediction market ops: scan, weather, snapshot, arb, semantic_match, cross_delta, movers, cache_refresh, cache_query, historical.", .input_schema_json = "{\"type\":\"object\",\"properties\":{\"action\":{\"type\":\"string\"},\"query\":{\"type\":\"string\"},\"topic\":{\"type\":\"string\"},\"city\":{\"type\":\"string\"},\"limit\":{\"type\":\"integer\"},\"category\":{\"type\":\"string\"}},\"required\":[\"action\"]}", .execute = tool_prediction_dispatch, .is_read_only = true, .is_concurrent = true },
+    { .name = "strategy", .description = "Trading strategies: completeness, binary_fade, stale_snipe, kelly, spread_scan.", .input_schema_json = "{\"type\":\"object\",\"properties\":{\"action\":{\"type\":\"string\"},\"series\":{\"type\":\"string\"},\"true_prob\":{\"type\":\"number\"},\"market_price\":{\"type\":\"number\"},\"bankroll\":{\"type\":\"number\"},\"limit\":{\"type\":\"integer\"}},\"required\":[\"action\"]}", .execute = tool_strategy_dispatch, .is_read_only = true, .is_concurrent = true },
+    { .name = "systematic", .description = "Systematic trading: ingest_polymarket, ingest_kalshi, analytics, signals.", .input_schema_json = "{\"type\":\"object\",\"properties\":{\"action\":{\"type\":\"string\"},\"category\":{\"type\":\"string\"},\"platform\":{\"type\":\"string\"},\"pages\":{\"type\":\"integer\"}},\"required\":[\"action\"]}", .execute = tool_systematic_dispatch },  /* mixed: ingest=write */
+
+    /* ══════════════════════════════════════════════════════════════════════
+     *  TRADING OPERATIONS (1)
+     * ══════════════════════════════════════════════════════════════════════ */
+    { .name = "trading", .description = "Trading ops: arb_execute, arb_monitor, portfolio, risk_check, risk_configure.", .input_schema_json = "{\"type\":\"object\",\"properties\":{\"action\":{\"type\":\"string\"},\"platform\":{\"type\":\"string\"},\"amount_usd\":{\"type\":\"number\"},\"topic\":{\"type\":\"string\"},\"kalshi_ticker\":{\"type\":\"string\"},\"poly_token_id\":{\"type\":\"string\"}},\"required\":[\"action\"]}", .execute = tool_trading_dispatch },
+
+    /* ══════════════════════════════════════════════════════════════════════
+     *  CONTRACT METADATA — ingest, search, lookup (3)
+     * ══════════════════════════════════════════════════════════════════════ */
+    { .name = "contract_ingest", .description = "Bulk-fetch all open Kalshi events+markets into contracts.db. Persists title, settlement_date, strike, underlying, YES/NO meanings, prices. Run before searching.", .input_schema_json = "{\"type\":\"object\",\"properties\":{\"limit\":{\"type\":\"integer\",\"description\":\"Max events to fetch (default 200)\"},\"series_ticker\":{\"type\":\"string\",\"description\":\"Filter by series (KXBTC, KXFED, KXTEMP, etc)\"},\"status\":{\"type\":\"string\",\"description\":\"open|closed|settled\"}}}", .execute = tool_contract_ingest },
+    { .name = "contract_search", .description = "Semantic search over persisted contracts. Natural language queries: 'Bitcoin above 90000', 'Fed rate cut March', 'Chicago temperature'. Uses FTS5 full-text search.", .input_schema_json = "{\"type\":\"object\",\"properties\":{\"query\":{\"type\":\"string\",\"description\":\"Natural language search\"},\"date\":{\"type\":\"string\",\"description\":\"Filter by settlement date YYYY-MM-DD\"},\"underlying\":{\"type\":\"string\",\"description\":\"Filter by asset: BTC, ETH, SPY, TEMP, FED_RATE, CPI, OIL, KORD, etc\"},\"limit\":{\"type\":\"integer\",\"description\":\"Max results (default 20)\"}},\"required\":[\"query\"]}", .execute = tool_contract_search, .is_read_only = true, .is_concurrent = true },
+    { .name = "contract_lookup", .description = "Get full contract context for a ticker or all markets in an event. Returns title, YES/NO meanings, settlement_date, strike, underlying, close_time, prices.", .input_schema_json = "{\"type\":\"object\",\"properties\":{\"ticker\":{\"type\":\"string\",\"description\":\"Market ticker for single contract\"},\"event_ticker\":{\"type\":\"string\",\"description\":\"Event ticker for full bracket view\"}}}", .execute = tool_contract_lookup, .is_read_only = true, .is_concurrent = true },
+    { .name = "contract_ingest_all", .description = "Exhaustive historical ingestion: fetch ALL settled Kalshi markets via cursor pagination into contracts.db. Can take minutes for full history. Use max_pages to control depth.", .input_schema_json = "{\"type\":\"object\",\"properties\":{\"max_pages\":{\"type\":\"integer\",\"description\":\"Max pages to fetch, 200 markets/page (default 500)\"},\"series_ticker\":{\"type\":\"string\",\"description\":\"Filter by series\"}}}", .execute = tool_contract_ingest_all },
+    { .name = "contract_new_issues", .description = "Detect NEW contracts not yet in contracts.db. Fetches current open events, diffs against stored contracts, returns only new issues. Run periodically (e.g. every hour) to catch new market listings.", .input_schema_json = "{\"type\":\"object\",\"properties\":{\"limit\":{\"type\":\"integer\",\"description\":\"Max events to scan (default 200)\"},\"series_ticker\":{\"type\":\"string\",\"description\":\"Filter by series\"}}}", .execute = tool_contract_new_issues, .is_read_only = true, .is_concurrent = true },
+    { .name = "contract_landscape", .description = "Contract database summary: total/open/settled counts, breakdown by underlying asset, settlement date distribution, newest contracts.", .input_schema_json = "{\"type\":\"object\",\"properties\":{}}", .execute = tool_contract_landscape, .is_read_only = true, .is_concurrent = true },
+
+    /* ══════════════════════════════════════════════════════════════════════
+     *  AGENT & SWARM (2)
+     * ══════════════════════════════════════════════════════════════════════ */
+    { .name = "agent", .description = "Agent management: spawn, status, output, wait, race, kill.", .input_schema_json = "{\"type\":\"object\",\"properties\":{\"action\":{\"type\":\"string\",\"description\":\"spawn|status|output|wait|race|kill\"},\"task\":{\"type\":\"string\",\"description\":\"Task for action=spawn or race\"},\"model\":{\"type\":\"string\",\"description\":\"Model override for spawned agent\"},\"id\":{\"type\":\"integer\",\"description\":\"Agent ID for output|wait|kill\"},\"timeout\":{\"type\":\"integer\",\"description\":\"Seconds for wait or race timeout\"},\"contestants\":{\"type\":\"array\",\"description\":\"For action=race: array of model strings or {provider,model} objects\"}},\"required\":[\"action\"]}", .execute = tool_agent_dispatch },
+    { .name = "swarm", .description = "Swarm orchestration: create, status, collect, budget, spawn_executor, spawn_provider, create_executor_swarm, executor_status, topology_list, topology_run, task_profile.", .input_schema_json = "{\"type\":\"object\",\"properties\":{\"action\":{\"type\":\"string\",\"description\":\"create|status|collect|budget|spawn_executor|spawn_provider|create_executor_swarm|executor_status|topology_list|topology_run|task_profile\"},\"name\":{\"type\":\"string\",\"description\":\"Swarm/group name for create actions\"},\"group_id\":{\"type\":\"integer\",\"description\":\"Group ID for status|collect\"},\"task\":{\"type\":\"string\",\"description\":\"Single task for spawn_executor|spawn_provider\"},\"tasks\":{\"type\":\"array\",\"description\":\"Task array for create/create_executor_swarm\"},\"model\":{\"type\":\"string\",\"description\":\"Model override for spawned children or topology\"},\"provider\":{\"type\":\"string\",\"description\":\"Native provider name for spawn_provider\"},\"executor\":{\"type\":\"string\",\"description\":\"dsco|claude|codex for executor-based actions\"},\"budget\":{\"type\":\"number\",\"description\":\"Budget for create/spawn actions\"},\"budget_usd\":{\"type\":\"number\",\"description\":\"Budget for action=budget\"},\"timeout\":{\"type\":\"integer\",\"description\":\"Seconds for collect\"},\"topology\":{\"type\":\"string\",\"description\":\"Topology name for topology_run\"}},\"required\":[\"action\"]}", .execute = tool_swarm_dispatch },
+
+    /* ══════════════════════════════════════════════════════════════════════
+     *  IPC (1)
+     * ══════════════════════════════════════════════════════════════════════ */
+    { .name = "ipc", .description = "Inter-process communication: send, recv, agents, scratch_put, scratch_get, task_submit, task_list, set_role.", .input_schema_json = "{\"type\":\"object\",\"properties\":{\"action\":{\"type\":\"string\"},\"to\":{\"type\":\"string\"},\"message\":{\"type\":\"string\"},\"key\":{\"type\":\"string\"},\"value\":{\"type\":\"string\"}},\"required\":[\"action\"]}", .execute = tool_ipc_dispatch },
+
+    /* ══════════════════════════════════════════════════════════════════════
+     *  WINGS + TALONS + IMMUNE (7)
+     * ══════════════════════════════════════════════════════════════════════ */
+    { .name = "pheromone", .description = "Pheromone coordination (Wings): deposit, sense, status.", .input_schema_json = "{\"type\":\"object\",\"properties\":{\"action\":{\"type\":\"string\",\"description\":\"deposit|sense|status\"},\"trail\":{\"type\":\"string\"},\"strength\":{\"type\":\"number\"}},\"required\":[\"action\"]}", .execute = tool_pheromone_dispatch },
+    { .name = "ooda", .description = "OODA loop discipline (Talons): begin, observe, orient, decide, complete, status.", .input_schema_json = "{\"type\":\"object\",\"properties\":{\"action\":{\"type\":\"string\",\"description\":\"begin|observe|orient|decide|complete|status\"},\"observation\":{\"type\":\"string\"},\"decision\":{\"type\":\"string\"},\"goal\":{\"type\":\"string\"}},\"required\":[\"action\"]}", .execute = tool_ooda_dispatch },
+    { .name = "killswitch", .description = "Kill switch control: trigger, resolve, status.", .input_schema_json = "{\"type\":\"object\",\"properties\":{\"action\":{\"type\":\"string\",\"description\":\"trigger|resolve|status\"},\"reason\":{\"type\":\"string\"}},\"required\":[\"action\"]}", .execute = tool_killswitch_dispatch },
+    { .name = "governance", .description = "Governance controls: status, authorize, checkpoint, budget, audit, param.", .input_schema_json = "{\"type\":\"object\",\"properties\":{\"action\":{\"type\":\"string\",\"description\":\"status|authorize|checkpoint|budget|audit|param\"},\"operation\":{\"type\":\"string\"},\"amount\":{\"type\":\"number\"},\"param\":{\"type\":\"string\"},\"value\":{\"type\":\"string\"}},\"required\":[\"action\"]}", .execute = tool_governance_dispatch },
+    { .name = "memory_tier", .description = "Three-tier memory: store, recall, promote, forget, status.", .input_schema_json = "{\"type\":\"object\",\"properties\":{\"action\":{\"type\":\"string\",\"description\":\"store|recall|promote|forget|status\"},\"key\":{\"type\":\"string\"},\"value\":{\"type\":\"string\"},\"query\":{\"type\":\"string\"}},\"required\":[\"action\"]}", .execute = tool_memory_dispatch },
+    { .name = "talons", .description = "Competitive execution (Talons): goal, advance, tournament, recommend, status.", .input_schema_json = "{\"type\":\"object\",\"properties\":{\"action\":{\"type\":\"string\",\"description\":\"goal|advance|tournament|recommend|status\"},\"goal\":{\"type\":\"string\"},\"step\":{\"type\":\"string\"}},\"required\":[\"action\"]}", .execute = tool_talons_dispatch },
+    { .name = "wings_talons_status", .description = "Unified Wings+Talons+Immune system status.", .input_schema_json = "{\"type\":\"object\",\"properties\":{}}", .execute = tool_wings_talons_status, .is_read_only = true, .is_concurrent = true },
+
+    /* ══════════════════════════════════════════════════════════════════════
+     *  PLAYBOOK & META (6)
+     * ══════════════════════════════════════════════════════════════════════ */
+    { .name = "playbook", .description = "ACE playbook: read, add, tag, remove, search, gc, inject.", .input_schema_json = "{\"type\":\"object\",\"properties\":{\"action\":{\"type\":\"string\",\"description\":\"read|add|tag|remove|search|gc|inject\"},\"text\":{\"type\":\"string\"},\"section\":{\"type\":\"string\"},\"id\":{\"type\":\"integer\"},\"query\":{\"type\":\"string\"},\"tag\":{\"type\":\"string\"}},\"required\":[\"action\"]}", .execute = tool_playbook_dispatch },
+    { .name = "scratchpad", .description = "Read/write scratchpad for temporary data.", .input_schema_json = "{\"type\":\"object\",\"properties\":{\"action\":{\"type\":\"string\",\"description\":\"read|write|clear\"},\"content\":{\"type\":\"string\"}}}", .execute = tool_scratchpad, .core = true },  /* mixed: read=RO, write/clear=write */
+    { .name = "self_exit", .description = "Gracefully exit the agent loop.", .input_schema_json = "{\"type\":\"object\",\"properties\":{\"reason\":{\"type\":\"string\"}}}", .execute = tool_self_exit, .core = true },
+    { .name = "discover_tools", .description = "List available tools by category or search.", .input_schema_json = "{\"type\":\"object\",\"properties\":{\"category\":{\"type\":\"string\"},\"query\":{\"type\":\"string\"}}}", .execute = tool_discover_tools, .core = true, .is_read_only = true, .is_concurrent = true },
+    { .name = "load_tools", .description = "Dynamically load tools into the active register file.", .input_schema_json = "{\"type\":\"object\",\"properties\":{\"names\":{\"type\":\"string\",\"description\":\"Comma-separated tool names to load\"}},\"required\":[\"names\"]}", .execute = tool_load_tools, .core = true },
+    { .name = "legion", .description = "Legion agent system: spawn, status, find.", .input_schema_json = "{\"type\":\"object\",\"properties\":{\"action\":{\"type\":\"string\",\"description\":\"spawn|status|find\"},\"class\":{\"type\":\"string\"},\"role\":{\"type\":\"string\"}},\"required\":[\"action\"]}", .execute = tool_legion_dispatch },
+
+    /* ══════════════════════════════════════════════════════════════════════
+     *  VOS & PIPELINE (2)
+     * ══════════════════════════════════════════════════════════════════════ */
+    { .name = "vos_status", .description = "Virtual OS subsystem status.", .input_schema_json = "{\"type\":\"object\",\"properties\":{}}", .execute = tool_vos_status, .is_read_only = true, .is_concurrent = true },
+    { .name = "pipeline", .description = "Pipeline execution and chaining.", .input_schema_json = "{\"type\":\"object\",\"properties\":{\"steps\":{\"type\":\"string\",\"description\":\"Pipeline steps as JSON array\"}},\"required\":[\"steps\"]}", .execute = tool_pipeline },
+
+    /* ══════════════════════════════════════════════════════════════════════
+     *  CRYPTO & UTILITY
+     * ══════════════════════════════════════════════════════════════════════ */
+    { .name = "sha256", .description = "Compute SHA-256 hash of text.", .input_schema_json = "{\"type\":\"object\",\"properties\":{\"text\":{\"type\":\"string\"}},\"required\":[\"text\"]}", .execute = tool_sha256, .is_read_only = true, .is_concurrent = true },
+    { .name = "md5", .description = "Compute MD5 hash of text.", .input_schema_json = "{\"type\":\"object\",\"properties\":{\"text\":{\"type\":\"string\"}},\"required\":[\"text\"]}", .execute = tool_md5, .is_read_only = true, .is_concurrent = true },
+    { .name = "hmac", .description = "Compute HMAC-SHA256.", .input_schema_json = "{\"type\":\"object\",\"properties\":{\"key\":{\"type\":\"string\"},\"message\":{\"type\":\"string\"}},\"required\":[\"key\",\"message\"]}", .execute = tool_hmac, .is_read_only = true, .is_concurrent = true },
+    { .name = "uuid", .description = "Generate a UUID v4.", .input_schema_json = "{\"type\":\"object\",\"properties\":{}}", .execute = tool_uuid, .is_read_only = true, .is_concurrent = true },
+    { .name = "random_bytes", .description = "Generate random bytes (hex).", .input_schema_json = "{\"type\":\"object\",\"properties\":{\"count\":{\"type\":\"integer\"}},\"required\":[\"count\"]}", .execute = tool_random_bytes, .is_read_only = true, .is_concurrent = true },
+    { .name = "base64_tool", .description = "Base64 encode/decode.", .input_schema_json = "{\"type\":\"object\",\"properties\":{\"text\":{\"type\":\"string\"},\"input\":{\"type\":\"string\"},\"action\":{\"type\":\"string\",\"description\":\"encode|decode\"}},\"required\":[\"action\"]}", .execute = tool_base64_tool, .is_read_only = true, .is_concurrent = true },
+    { .name = "base64", .description = "Base64 encode/decode (legacy).", .input_schema_json = "{\"type\":\"object\",\"properties\":{\"data\":{\"type\":\"string\"}},\"required\":[\"data\"]}", .execute = tool_base64, .is_read_only = true, .is_concurrent = true },
+    { .name = "eval", .description = "Evaluate a math expression.", .input_schema_json = "{\"type\":\"object\",\"properties\":{\"expression\":{\"type\":\"string\"}},\"required\":[\"expression\"]}", .execute = tool_eval, .is_read_only = true, .is_concurrent = true },
+    { .name = "cwd", .description = "Get current working directory.", .input_schema_json = "{\"type\":\"object\",\"properties\":{}}", .execute = tool_cwd, .is_read_only = true, .is_concurrent = true },
+
+    /* ══════════════════════════════════════════════════════════════════════
+     *  EXECUTION ALIASES & SANDBOX
+     * ══════════════════════════════════════════════════════════════════════ */
+    { .name = "run_command", .description = "Run a shell command.", .input_schema_json = "{\"type\":\"object\",\"properties\":{\"command\":{\"type\":\"string\"},\"timeout\":{\"type\":\"integer\"}},\"required\":[\"command\"]}", .execute = tool_run_command },
+    { .name = "sandbox_run", .description = "Run command in sandboxed container.", .input_schema_json = "{\"type\":\"object\",\"properties\":{\"command\":{\"type\":\"string\"},\"image\":{\"type\":\"string\"},\"timeout\":{\"type\":\"integer\"},\"network\":{\"type\":\"boolean\"},\"filesystem\":{\"type\":\"string\"}},\"required\":[\"command\"]}", .execute = tool_sandbox_run },
+    { .name = "agent_wait", .description = "Wait for agent(s) to complete.", .input_schema_json = "{\"type\":\"object\",\"properties\":{\"id\":{\"type\":\"integer\"},\"timeout\":{\"type\":\"integer\"}}}", .execute = tool_agent_wait },
+
+    /* ══════════════════════════════════════════════════════════════════════
+     *  PLAYBOOK SHORTCUTS (WARM tier)
+     * ══════════════════════════════════════════════════════════════════════ */
+    { .name = "playbook_add", .description = "Add entry to ACE playbook.", .input_schema_json = "{\"type\":\"object\",\"properties\":{\"text\":{\"type\":\"string\"},\"section\":{\"type\":\"string\"},\"tag\":{\"type\":\"string\"}},\"required\":[\"text\"]}", .execute = tool_playbook_add },
+    { .name = "playbook_search", .description = "Search ACE playbook.", .input_schema_json = "{\"type\":\"object\",\"properties\":{\"query\":{\"type\":\"string\"}},\"required\":[\"query\"]}", .execute = tool_playbook_search, .is_read_only = true, .is_concurrent = true },
+
+    /* ══════════════════════════════════════════════════════════════════════
+     *  DATA PARSING & COMPARISON
+     * ══════════════════════════════════════════════════════════════════════ */
+    { .name = "semver_compare", .description = "Compare two semantic versions.", .input_schema_json = "{\"type\":\"object\",\"properties\":{\"version_a\":{\"type\":\"string\"},\"version_b\":{\"type\":\"string\"}},\"required\":[\"version_a\",\"version_b\"]}", .execute = tool_semver, .is_read_only = true, .is_concurrent = true },
+    { .name = "cron_parse", .description = "Parse a cron expression.", .input_schema_json = "{\"type\":\"object\",\"properties\":{\"expression\":{\"type\":\"string\"}},\"required\":[\"expression\"]}", .execute = tool_cron_parse, .is_read_only = true, .is_concurrent = true },
+    { .name = "url_parse", .description = "Parse a URL into components.", .input_schema_json = "{\"type\":\"object\",\"properties\":{\"url\":{\"type\":\"string\"}},\"required\":[\"url\"]}", .execute = tool_url_parse, .is_read_only = true, .is_concurrent = true },
 };
+
 
 static const int s_tool_count = sizeof(s_tools) / sizeof(s_tools[0]);
 
 /* Forward declarations for hash map */
 static unsigned tool_name_hash(const char *s);
 static void tool_map_rebuild(void);
+
+/* ── Agent profile tool filter ──────────────────────────────────────── */
+
+static tool_profile_filter_fn_t g_profile_filter = NULL;
+
+void tools_set_profile_filter(tool_profile_filter_fn_t fn) {
+    g_profile_filter = fn;
+}
+
+void tools_clear_profile_filter(void) {
+    g_profile_filter = NULL;
+}
 
 void tools_init(void) {
     plugin_init(&g_plugins);
@@ -13153,6 +13610,13 @@ int tools_builtin_count(void) {
     return s_tool_count;
 }
 
+int tools_get_core_count(void) {
+    int n = 0;
+    for (int i = 0; i < s_tool_count; i++)
+        if (s_tools[i].core) n++;
+    return n;
+}
+
 /* ── Tool retrieval: BM25 + TF-IDF semantic index ──────────────────── */
 
 #include "semantic.h"
@@ -13165,40 +13629,100 @@ static float *g_emb_vectors = NULL;  /* flat array: [TOOL_EMB_COUNT * TOOL_EMB_D
 static int    g_emb_count = 0;
 static int    g_emb_dim = 0;
 
-static void ensure_embeddings_loaded(void) {
-    if (g_emb_vectors) return;
+static void tool_embeddings_expand_path(char *out, size_t out_len, const char *path) {
+    if (!out || out_len == 0) return;
+    out[0] = '\0';
+    if (!path || !path[0]) return;
 
-    /* Find the .bin file relative to the dsco binary */
-    const char *paths[] = {
-        "include/tool_embeddings.bin",
-        "../include/tool_embeddings.bin",
-        NULL
-    };
-    /* Also try relative to dsco binary location */
-    char binrel[1024] = {0};
-    {
-        char self[512] = {0};
-#ifdef __APPLE__
-        uint32_t sz = sizeof(self);
-        _NSGetExecutablePath(self, &sz);
-#else
-        readlink("/proc/self/exe", self, sizeof(self)-1);
-#endif
-        if (self[0]) {
-            char *sl = strrchr(self, '/');
-            if (sl) {
-                *sl = '\0';
-                snprintf(binrel, sizeof(binrel), "%s/../include/tool_embeddings.bin", self);
-            }
+    if (path[0] == '~' && path[1] == '/') {
+        const char *home = getenv("HOME");
+        if (home && home[0]) {
+            snprintf(out, out_len, "%s/%s", home, path + 2);
+            return;
         }
     }
 
+    snprintf(out, out_len, "%s", path);
+}
+
+static bool tool_embeddings_try_open(FILE **out_fp, char *loaded_path, size_t loaded_len,
+                                     const char *path) {
+    if (!out_fp || !path || !path[0]) return false;
+
+    FILE *fp = fopen(path, "rb");
+    if (!fp) return false;
+
+    *out_fp = fp;
+    if (loaded_path && loaded_len > 0)
+        snprintf(loaded_path, loaded_len, "%s", path);
+    return true;
+}
+
+static void ensure_embeddings_loaded(void) {
+    if (g_emb_vectors) return;
+
     FILE *fp = NULL;
-    for (int i = 0; paths[i]; i++) {
-        fp = fopen(paths[i], "rb");
-        if (fp) break;
+    char loaded_path[PATH_MAX] = {0};
+
+    const char *override = getenv("DSCO_TOOL_EMBEDDINGS_FILE");
+    if (override && override[0]) {
+        char expanded[PATH_MAX];
+        tool_embeddings_expand_path(expanded, sizeof(expanded), override);
+        tool_embeddings_try_open(&fp, loaded_path, sizeof(loaded_path), expanded);
     }
-    if (!fp && binrel[0]) fp = fopen(binrel, "rb");
+
+    char exe_dir[PATH_MAX] = {0};
+    {
+        char self[PATH_MAX] = {0};
+#ifdef __APPLE__
+        uint32_t sz = sizeof(self);
+        if (_NSGetExecutablePath(self, &sz) != 0)
+            self[0] = '\0';
+#else
+        ssize_t got = readlink("/proc/self/exe", self, sizeof(self) - 1);
+        if (got >= 0) self[got] = '\0';
+#endif
+        if (self[0]) {
+            char *sl = strrchr(self, '/');
+            if (sl) *sl = '\0';
+            snprintf(exe_dir, sizeof(exe_dir), "%s", self);
+        }
+    }
+
+    if (!fp) {
+        const char *cwd_paths[] = {
+            "include/tool_embeddings.bin",
+            "../include/tool_embeddings.bin",
+            NULL
+        };
+        for (int i = 0; cwd_paths[i] && !fp; i++)
+            tool_embeddings_try_open(&fp, loaded_path, sizeof(loaded_path), cwd_paths[i]);
+    }
+
+    if (!fp && exe_dir[0]) {
+        char candidate[PATH_MAX];
+        const char *suffixes[] = {
+            "include/tool_embeddings.bin",
+            "../include/tool_embeddings.bin",
+            "../share/dsco/tool_embeddings.bin",
+            "tool_embeddings.bin",
+            NULL
+        };
+        for (int i = 0; suffixes[i] && !fp; i++) {
+            snprintf(candidate, sizeof(candidate), "%s/%s", exe_dir, suffixes[i]);
+            tool_embeddings_try_open(&fp, loaded_path, sizeof(loaded_path), candidate);
+        }
+    }
+
+    if (!fp) {
+        const char *home = getenv("HOME");
+        if (home && home[0]) {
+            char candidate[PATH_MAX];
+            snprintf(candidate, sizeof(candidate), "%s/.dsco/tool_embeddings.bin", home);
+            tool_embeddings_try_open(&fp, loaded_path, sizeof(loaded_path), candidate);
+        }
+    }
+
     if (!fp) {
         fprintf(stderr, "  \033[33mno tool_embeddings.bin found\033[0m\n");
         return;
@@ -13223,6 +13747,8 @@ static void ensure_embeddings_loaded(void) {
     }
 
     fprintf(stderr, "  \033[2memb: %d tools × %dd loaded\033[0m\n", g_emb_count, g_emb_dim);
+    if (provider_debug_auth_enabled() && loaded_path[0])
+        fprintf(stderr, "  \033[2m[emb] path=%s\033[0m\n", loaded_path);
 }
 
 /* Embed a query via Jina v4. Returns malloc'd float[g_emb_dim] or NULL. */
@@ -13306,6 +13832,32 @@ static float cosine_sim_f(const float *a, const float *b, int dim) {
     return denom > 1e-8f ? dot / denom : 0.0f;
 }
 
+/* ── Public embedding wrapper (used by memory_tier, agent) ────────────── */
+
+float *tools_embed_text(const char *text, int *out_dim) {
+    ensure_embeddings_loaded();
+    if (out_dim) *out_dim = g_emb_dim > 0 ? g_emb_dim : 1024;
+    return embed_query_jina(text);
+}
+
+/* ── Agent context for context-aware tool selection ──────────────────── */
+
+static char g_agent_ctx_results[2048] = "";
+static char g_agent_ctx_memory[2048] = "";
+
+void tools_set_agent_context(const char *recent_results,
+                             const char *working_memory_summary) {
+    if (recent_results)
+        snprintf(g_agent_ctx_results, sizeof(g_agent_ctx_results), "%s", recent_results);
+    else
+        g_agent_ctx_results[0] = '\0';
+
+    if (working_memory_summary)
+        snprintf(g_agent_ctx_memory, sizeof(g_agent_ctx_memory), "%s", working_memory_summary);
+    else
+        g_agent_ctx_memory[0] = '\0';
+}
+
 /* ═══════════════════════════════════════════════════════════════════════════
  * HIERARCHICAL TOOL RETRIEVAL WITH SLOT ALLOCATION
  *
@@ -13369,21 +13921,16 @@ void tools_mark_hot(int tool_idx) {
  * can shrink the warm bank under cost pressure. */
 
 static const char *CORE_ALWAYS[] = {
-    "read_file", "write_file", "edit_file", "list_directory",
-    "find_files", "grep_files", "bash", "python",
-    "context_pack", "context_search", "context_get",
-    "discover_tools", "self_exit",
-    NULL  /* 13 tools → fits in R0-R15 with room for hint-pins */
+    "bash", "python",
+    "discover_tools", "load_tools", "self_exit",
+    NULL  /* 5 tools → minimal core: execution + dynamic loading */
 };
 
 static const char *CORE_WARM[] = {
-    "append_file", "run_command",
-    "spawn_agent", "agent_wait", "agent_output", "agent_status",
-    "agent_kill", "agent_race",
-    "spawn_provider", "spawn_executor", "create_swarm",
-    "swarm_status", "swarm_collect", "openrouter_models",
-    "executor_status", "soul_read",
-    NULL  /* 16 tools → fills R16-R31 when budget allows */
+    "read_file", "write_file", "edit_file", "list_directory",
+    "find_files", "grep_files", "run_command",
+    "context_status", "scratchpad", "playbook_add", "playbook_search",
+    NULL  /* 11 tools → fills R5-R15 when budget allows */
 };
 
 static bool is_core_always(const char *name) {
@@ -13458,6 +14005,147 @@ static const char *GROUP_NAMES[] = {
     "swarm", "ast", "pipeline", "math", "search", "general",
     "market", "prediction", "memory", NULL
 };
+
+/* ── Compact parameter extraction from JSON schema ──────────────────── */
+
+/* Parse a tool's input_schema_json and build a compact params string.
+ * Input:  {"type":"object","properties":{"a":{"type":"string"},"b":...},"required":["a"]}
+ * Output: "(a*, b)" where * marks required params.
+ * Returns number of chars written. */
+static int build_compact_params(const char *schema, char *out, size_t outlen) {
+    if (!schema || !out || outlen < 3) { if (out) out[0] = 0; return 0; }
+
+    /* 1. Extract required field names */
+    char req[16][64];
+    int nreq = 0;
+    const char *rp = strstr(schema, "\"required\":[");
+    if (rp) {
+        rp += 12;
+        while (*rp && *rp != ']' && nreq < 16) {
+            if (*rp == '"') {
+                rp++;
+                const char *e = strchr(rp, '"');
+                if (!e || (e - rp) >= 64) break;
+                memcpy(req[nreq], rp, (size_t)(e - rp));
+                req[nreq][e - rp] = '\0';
+                nreq++;
+                rp = e + 1;
+            } else rp++;
+        }
+    }
+
+    /* 2. Find properties object */
+    const char *pp = strstr(schema, "\"properties\":{");
+    if (!pp) { out[0] = '('; out[1] = ')'; out[2] = '\0'; return 2; }
+    pp += 14;
+
+    /* 3. Extract property names at depth 0 inside properties */
+    char names[20][64];
+    int nprop = 0;
+    int depth = 0;
+    const char *p = pp;
+
+    while (*p && nprop < 20) {
+        if (*p == '{') { depth++; p++; continue; }
+        if (*p == '}') {
+            if (depth == 0) break;
+            depth--; p++; continue;
+        }
+        if (depth == 0 && *p == '"') {
+            p++;
+            const char *e = strchr(p, '"');
+            if (!e || (e - p) >= 64) break;
+            memcpy(names[nprop], p, (size_t)(e - p));
+            names[nprop][e - p] = '\0';
+            nprop++;
+            p = e + 1;
+            while (*p && *p != ':') p++;
+            if (*p == ':') p++;
+            continue;
+        }
+        p++;
+    }
+
+    /* 4. Build output string */
+    int pos = 0;
+    pos += snprintf(out + pos, outlen - (size_t)pos, "(");
+    for (int i = 0; i < nprop && (size_t)pos < outlen - 10; i++) {
+        if (i > 0) pos += snprintf(out + pos, outlen - (size_t)pos, ", ");
+        bool is_req = false;
+        for (int j = 0; j < nreq; j++) {
+            if (strcmp(names[i], req[j]) == 0) { is_req = true; break; }
+        }
+        pos += snprintf(out + pos, outlen - (size_t)pos, "%s%s",
+                        names[i], is_req ? "*" : "");
+    }
+    pos += snprintf(out + pos, outlen - (size_t)pos, ")");
+    return pos;
+}
+
+/* Build a compact text catalog of all tools for the system prompt.
+ * Format: one line per tool with signature and short description.
+ * Returns a malloc'd string. Caller frees. */
+char *tools_build_compact_catalog(void) {
+    int total;
+    const tool_def_t *tools = tools_get_all(&total);
+    int core_n = tools_get_core_count();
+
+    /* Two-section catalog: CORE (always pageable) + LOADABLE (via load_tools).
+     * Only tool names — full schemas loaded dynamically.
+     * Saves ~15KB vs old per-tool signature+description catalog. */
+    size_t buflen = (size_t)total * 40 + 4096;
+    char *buf = safe_malloc(buflen);
+    int pos = 0;
+
+    pos += snprintf(buf + pos, buflen - (size_t)pos,
+        "\nTOOLS: %d core + %d loadable (use discover_tools/load_tools for extended)\n",
+        core_n, total - core_n);
+
+    /* Core tools: listed by name */
+    pos += snprintf(buf + pos, buflen - (size_t)pos, "CORE: ");
+    int first = 1;
+    for (int i = 0; i < total && (size_t)pos < buflen - 64; i++) {
+        if (!tools[i].core) continue;
+        if (!first) pos += snprintf(buf + pos, buflen - (size_t)pos, ", ");
+        pos += snprintf(buf + pos, buflen - (size_t)pos, "%s", tools[i].name);
+        first = 0;
+    }
+    pos += snprintf(buf + pos, buflen - (size_t)pos, "\n");
+
+    /* Loadable tools: grouped by category */
+    static const char *headers[] = {
+        "file_io", "git", "network", "shell", "code", "crypto",
+        "swarm", "ast", "pipeline", "math", "search", "general",
+        "finance", "prediction", "memory"
+    };
+
+    pos += snprintf(buf + pos, buflen - (size_t)pos, "LOADABLE: ");
+    first = 1;
+    for (int g = 0; g < 15; g++) {
+        for (int i = 0; i < total && (size_t)pos < buflen - 64; i++) {
+            if (tools[i].core) continue;
+            int ig = assign_group(tools[i].name, tools[i].description);
+            if (ig != g) continue;
+            if (!first) pos += snprintf(buf + pos, buflen - (size_t)pos, ", ");
+            pos += snprintf(buf + pos, buflen - (size_t)pos, "%s", tools[i].name);
+            first = 0;
+        }
+    }
+    (void)headers; /* suppress unused warning */
+    pos += snprintf(buf + pos, buflen - (size_t)pos, "\n");
+
+    /* External tools summary */
+    if (g_external_tool_count > 0) {
+        pos += snprintf(buf + pos, buflen - (size_t)pos, "EXTERNAL: ");
+        for (int i = 0; i < g_external_tool_count && (size_t)pos < buflen - 64; i++) {
+            if (i > 0) pos += snprintf(buf + pos, buflen - (size_t)pos, ", ");
+            pos += snprintf(buf + pos, buflen - (size_t)pos, "%s", g_external_tools[i].name);
+        }
+        pos += snprintf(buf + pos, buflen - (size_t)pos, "\n");
+    }
+
+    return buf;
+}
 
 /* ── Build groups + centroids lazily ──────────────────────────────────── */
 
@@ -14032,6 +14720,11 @@ tool_page_result_t tools_get_paged(const char *context, int max_tools,
     /* Hard cap: register file is 64 slots max, period. */
     if (max_tools > TOOL_REGISTER_CAP) max_tools = TOOL_REGISTER_CAP;
 
+    /* --cheap mode: force critical budget → only ALWAYS core (5 tools) */
+    if (g_cheap_mode) {
+        budget_ratio = 0.0f;
+    }
+
     /* Virtual context pressure: if the context window is known, penalize
      * the budget ratio when context is filling up. Each tool schema costs
      * ~200 tokens; at 64 tools that's ~12,800 tokens (6.4% of 200k).
@@ -14054,36 +14747,36 @@ tool_page_result_t tools_get_paged(const char *context, int max_tools,
     }
 
     /* Register-file slot allocation:
-     * R0-R15:  ALWAYS core (hardwired, never evicted)
-     * R16-R31: WARM core (evictable under budget pressure)
-     * R32-R55: WORKING (quorum-scored, turn-volatile)
-     * R56-R63: DISCOVERY (progressive schema, ephemeral)
+     * R0-R4:   ALWAYS core (bash, python, discover, load, exit)
+     * R5-R15:  WARM core (file I/O, evictable under budget pressure)
+     * R16-R27: WORKING (quorum-scored / hint-pinned, turn-volatile)
+     * R28-R31: DISCOVERY (progressive schema, ephemeral)
      *
      * Budget-adaptive shrinking (uses effective_ratio = cost + context pressure):
-     *   Full   (>0.4):   16 + 16 + 24 + 8 = 64
-     *   Mid  (0.15-0.4): 16 + 12 + 16 + 4 = 48
-     *   Low  (0.05-0.15):16 +  8 +  8 + 0 = 32
-     *   Critical (<0.05): 16 +  0 +  0 + 0 = 16 */
+     *   Full   (>0.4):    5 + 11 + 12 + 4 = 32
+     *   Mid  (0.15-0.4):  5 +  8 +  8 + 3 = 24
+     *   Low  (0.05-0.15): 5 +  4 +  4 + 0 = 13 (~16 with hint-pins)
+     *   Critical (<0.05):  5 +  0 +  0 + 0 =  5 */
     int always_budget = TOOL_REG_ALWAYS;
     int warm_budget, working_budget, discovery_budget;
 
     if (always_budget > max_tools) always_budget = max_tools;
 
     if (effective_ratio < 0.05f) {
-        /* Critical: ALWAYS core only */
+        /* Critical: ALWAYS core only (bash + python + meta) */
         warm_budget = 0;
         working_budget = 0;
         discovery_budget = 0;
     } else if (effective_ratio < 0.15f) {
-        /* Low: minimal warm + working, no discovery */
-        warm_budget = 8;
-        working_budget = 8;
+        /* Low: some file I/O + small working set */
+        warm_budget = 4;
+        working_budget = 4;
         discovery_budget = 0;
     } else if (effective_ratio < 0.4f) {
-        /* Mid: reduced warm + working, minimal discovery */
-        warm_budget = 12;
-        working_budget = 16;
-        discovery_budget = 4;
+        /* Mid: most warm + working, small discovery */
+        warm_budget = 8;
+        working_budget = 8;
+        discovery_budget = 3;
     } else {
         /* Full: all register banks active */
         warm_budget = TOOL_REG_WARM;
@@ -14105,7 +14798,11 @@ tool_page_result_t tools_get_paged(const char *context, int max_tools,
     if (working_budget < 0) working_budget = 0;
     if (discovery_budget < 0) discovery_budget = 0;
 
-    int pinned_budget = always_budget + warm_budget;
+    /* Reserve extra pinned slots for hint-pinned tools (steal from working) */
+    int hint_extra = (g_hint_count > 0 && working_budget > 0) ? 2 : 0;
+    if (hint_extra > working_budget) hint_extra = working_budget;
+    working_budget -= hint_extra;
+    int pinned_budget = always_budget + warm_budget + hint_extra;
 
     bool *included = safe_malloc(total * sizeof(bool));
     memset(included, 0, total * sizeof(bool));
@@ -14173,7 +14870,8 @@ tool_page_result_t tools_get_paged(const char *context, int max_tools,
         }
     }
 
-    /* Signal 2: Co-occurrence predictions — count signal, tentatively add */
+    /* Signal 2: Co-occurrence predictions — count signal, tentatively add.
+     * Only consider core tools (non-core need explicit load_tools). */
     if (g_cooc) {
         for (int h = 0; h < g_hot_count; h++) {
             int hi = g_hot_cache[h];
@@ -14182,8 +14880,8 @@ tool_page_result_t tools_get_paged(const char *context, int max_tools,
             int np = cooc_predict_internal(tools[hi].name, predicted, 8);
             for (int p = 0; p < np; p++) {
                 int ti = predicted[p];
-                if (ti >= 0 && ti < total) {
-                    tool_signals[ti]++;  /* count cooc signal regardless */
+                if (ti >= 0 && ti < total && tools[ti].core) {
+                    tool_signals[ti]++;
                     if (!included[ti] && wn < working_budget) {
                         widx[wn++] = ti;
                         included[ti] = true;
@@ -14240,9 +14938,10 @@ tool_page_result_t tools_get_paged(const char *context, int max_tools,
                 for (int j = 0; j < grp->count; j++) {
                     int ti = grp->tool_indices[j];
                     if (ti < 0 || ti >= total || ti >= g_emb_count) continue;
+                    if (!tools[ti].core) continue; /* only core tools for embedding paging */
                     float sim = cosine_sim_f(qvec, &g_emb_vectors[ti * g_emb_dim], g_emb_dim);
                     if (sim > 0.12f) {
-                        tool_signals[ti]++;  /* count embed signal regardless of inclusion */
+                        tool_signals[ti]++;
                         cands[nc].idx = ti;
                         cands[nc].score = sim;
                         nc++;
@@ -14269,8 +14968,8 @@ tool_page_result_t tools_get_paged(const char *context, int max_tools,
             int ranked_count = sem_tools_rank(&g_tool_index, context, ranked, capped, capped);
             for (int i = 0; i < ranked_count; i++) {
                 int idx = ranked[i].tool_index;
-                if (idx >= 0 && idx < total && ranked[i].score > 0.05) {
-                    tool_signals[idx]++;  /* count TF-IDF signal regardless */
+                if (idx >= 0 && idx < total && ranked[i].score > 0.05 && tools[idx].core) {
+                    tool_signals[idx]++;
                     if (!included[idx] && wn < working_budget) {
                         widx[wn++] = idx;
                         included[idx] = true;
@@ -14343,7 +15042,7 @@ tool_page_result_t tools_get_paged(const char *context, int max_tools,
         int ranked_count = sem_tools_rank(&g_tool_index, context, ranked, capped, capped);
         for (int i = 0; i < ranked_count && dn < discovery_budget; i++) {
             int idx = ranked[i].tool_index;
-            if (idx >= 0 && idx < total && !included[idx] && ranked[i].score > 0.05) {
+            if (idx >= 0 && idx < total && !included[idx] && ranked[i].score > 0.05 && tools[idx].core) {
                 didx[dn++] = idx;
                 included[idx] = true;
             }
@@ -14354,18 +15053,28 @@ tool_page_result_t tools_get_paged(const char *context, int max_tools,
     free(included);
 
     /* Build result — position-aware: most relevant first/last,
-     * least relevant in middle (Lost-in-Middle mitigation) */
+     * least relevant in middle (Lost-in-Middle mitigation).
+     * Apply agent profile filter if active. */
     r.pinned = safe_malloc((pn > 0 ? pn : 1) * sizeof(tool_def_t *));
-    r.pinned_count = pn;
-    for (int i = 0; i < pn; i++) r.pinned[i] = &tools[pidx[i]];
+    r.pinned_count = 0;
+    for (int i = 0; i < pn; i++) {
+        if (!g_profile_filter || g_profile_filter(tools[pidx[i]].name, NULL))
+            r.pinned[r.pinned_count++] = &tools[pidx[i]];
+    }
 
     r.working = safe_malloc((wn > 0 ? wn : 1) * sizeof(tool_def_t *));
-    r.working_count = wn;
-    for (int i = 0; i < wn; i++) r.working[i] = &tools[widx[i]];
+    r.working_count = 0;
+    for (int i = 0; i < wn; i++) {
+        if (!g_profile_filter || g_profile_filter(tools[widx[i]].name, NULL))
+            r.working[r.working_count++] = &tools[widx[i]];
+    }
 
     r.discovery = safe_malloc((dn > 0 ? dn : 1) * sizeof(tool_def_t *));
-    r.discovery_count = dn;
-    for (int i = 0; i < dn; i++) r.discovery[i] = &tools[didx[i]];
+    r.discovery_count = 0;
+    for (int i = 0; i < dn; i++) {
+        if (!g_profile_filter || g_profile_filter(tools[didx[i]].name, NULL))
+            r.discovery[r.discovery_count++] = &tools[didx[i]];
+    }
 
     free(pidx);
     free(widx);
@@ -14955,6 +15664,21 @@ static bool tools_execute_internal(const char *name, const char *input_json,
                 (int)(input_json ? (strlen(input_json) < 512 ? strlen(input_json) : 512) : 0),
                 input_json ? input_json : "");
 
+    /* §8: VFS tool result cache for deterministic tools */
+    if (g_tools_vfs && name && input_json && tool_is_cacheable(name)) {
+        char hash[65];
+        sha256_hex((const uint8_t *)input_json, strlen(input_json), hash);
+        pthread_mutex_lock(&g_locks.cache_lock);
+        char *cached = vfs_cache_get(g_tools_vfs, name, hash);
+        pthread_mutex_unlock(&g_locks.cache_lock);
+        if (cached) {
+            snprintf(result, result_len, "%s", cached);
+            free(cached);
+            TRACE_INFO("tool_cache_hit name=%s", name);
+            return true;
+        }
+    }
+
     /* §3: Try VM computed-goto dispatch first (FNV-1a hash, O(1)).
        This is the hot path — bypasses the chained hash map entirely
        for builtin tools via the pre-built dispatch table. */
@@ -14980,7 +15704,15 @@ static bool tools_execute_internal(const char *name, const char *input_json,
                 g_vm.dispatches++;
                 g_vm.cache_hits++;
                 TRACE_INFO("tool_result name=%s ok=%d elapsed_us=%ld (vm_dispatch)", name, ok, elapsed_us);
-                ctx_maybe_offload_tool_result(name, input_json, ok, result, result_len);
+                ctx_persist_and_truncate(name, input_json, ok, result, result_len);
+                /* §8: store deterministic result in VFS cache */
+                if (ok && g_tools_vfs && input_json && tool_is_cacheable(name)) {
+                    char ch[65];
+                    sha256_hex((const uint8_t *)input_json, strlen(input_json), ch);
+                    pthread_mutex_lock(&g_locks.cache_lock);
+                    vfs_cache_put(g_tools_vfs, name, ch, result, 86400);
+                    pthread_mutex_unlock(&g_locks.cache_lock);
+                }
                 return ok;
             }
             bucket = (bucket + 1) & 511;
@@ -15000,7 +15732,15 @@ static bool tools_execute_internal(const char *name, const char *input_json,
         long elapsed_us = (t1.tv_sec - t0.tv_sec) * 1000000L + (t1.tv_usec - t0.tv_usec);
         sanitize_tool_result_inplace(result);
         TRACE_INFO("tool_result name=%s ok=%d elapsed_us=%ld", name, ok, elapsed_us);
-        ctx_maybe_offload_tool_result(name, input_json, ok, result, result_len);
+        ctx_persist_and_truncate(name, input_json, ok, result, result_len);
+        /* §8: store deterministic result in VFS cache */
+        if (ok && g_tools_vfs && input_json && tool_is_cacheable(name)) {
+            char ch[65];
+            sha256_hex((const uint8_t *)input_json, strlen(input_json), ch);
+            pthread_mutex_lock(&g_locks.cache_lock);
+            vfs_cache_put(g_tools_vfs, name, ch, result, 86400);
+            pthread_mutex_unlock(&g_locks.cache_lock);
+        }
         return ok;
     }
 
@@ -15015,7 +15755,7 @@ static bool tools_execute_internal(const char *name, const char *input_json,
             long elapsed_us = (t1.tv_sec - t0.tv_sec) * 1000000L + (t1.tv_usec - t0.tv_usec);
             sanitize_tool_result_inplace(result);
             TRACE_INFO("tool_result name=%s source=plugin ok=%d elapsed_us=%ld", name, ok, elapsed_us);
-            ctx_maybe_offload_tool_result(name, input_json, ok, result, result_len);
+            ctx_persist_and_truncate(name, input_json, ok, result, result_len);
             return ok;
         }
     }
@@ -15055,7 +15795,15 @@ static bool tools_execute_internal(const char *name, const char *input_json,
             long elapsed_us = (t1.tv_sec - t0.tv_sec) * 1000000L + (t1.tv_usec - t0.tv_usec);
             sanitize_tool_result_inplace(result);
             TRACE_INFO("tool_result name=%s ok=%d elapsed_us=%ld (fallback)", name, ok, elapsed_us);
-            ctx_maybe_offload_tool_result(name, input_json, ok, result, result_len);
+            ctx_persist_and_truncate(name, input_json, ok, result, result_len);
+            /* §8: store deterministic result in VFS cache */
+            if (ok && g_tools_vfs && input_json && tool_is_cacheable(name)) {
+                char ch[65];
+                sha256_hex((const uint8_t *)input_json, strlen(input_json), ch);
+                pthread_mutex_lock(&g_locks.cache_lock);
+                vfs_cache_put(g_tools_vfs, name, ch, result, 86400);
+                pthread_mutex_unlock(&g_locks.cache_lock);
+            }
             return ok;
         }
     }
@@ -15064,7 +15812,7 @@ static bool tools_execute_internal(const char *name, const char *input_json,
             bool ok = g_plugins.extra_tools[i].execute(input_json, result, result_len);
             sanitize_tool_result_inplace(result);
             TRACE_INFO("tool_result name=%s source=plugin ok=%d (fallback)", name, ok);
-            ctx_maybe_offload_tool_result(name, input_json, ok, result, result_len);
+            ctx_persist_and_truncate(name, input_json, ok, result, result_len);
             return ok;
         }
     }
