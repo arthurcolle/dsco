@@ -1304,15 +1304,15 @@ static void oneshot_tool_cb(const char *name, const char *id, void *ctx) {
 int main(int argc, char **argv) {
     tamper_init();          /* must be first: deny ptrace, hash code, watch binary */
     sealed_store_init();    /* encrypted secret store; wiper registered with tamper */
-    env_guard_init();       /* strip LD_PRELOAD / DYLD_INSERT_LIBRARIES, audit dylibs */
-    {
+    {   /* audit log must be open before env_guard so its events are captured */
         char alog_path[4096];
         const char *h = getenv("HOME");
         if (!h) h = "/tmp";
         snprintf(alog_path, sizeof(alog_path), "%s/.dsco/audit.log", h);
         audit_log_global_init(alog_path);
-        audit_log("startup", "dsco init");
     }
+    env_guard_init();       /* strip LD_PRELOAD / DYLD_INSERT_LIBRARIES, audit dylibs */
+    audit_log("startup", "dsco init");
     heartbeat_start();      /* background keepalive ping + optional phone-home */
     (void)atexit(main_atexit_handler);
     init_trace_runtime();
