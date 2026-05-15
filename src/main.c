@@ -28,6 +28,12 @@
 #include "governance.h"
 #include "killswitch.h"
 #include "talons.h"
+#include "tamper.h"
+#include "sealed_store.h"
+#include "audit_log.h"
+#include "watchdog.h"
+#include "env_guard.h"
+#include "heartbeat.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -38,6 +44,7 @@
 #include <signal.h>
 #include <fcntl.h>
 #include <poll.h>
+#include <termios.h>
 #include <unistd.h>
 #include <sys/wait.h>
 #include <sys/time.h>
@@ -549,6 +556,40 @@ static void smoke_extract_detail(const char *raw, char *detail, size_t detail_le
         snprintf(detail, detail_len, "output empty");
 }
 
+static void smoke_extract_success_detail(const smoke_case_t *sc,
+                                         const char *raw,
+                                         char *detail,
+                                         size_t detail_len) {
+    if (!detail || detail_len == 0) return;
+    detail[0] = '\0';
+
+    if (raw && raw[0]) {
+        const char *auth = strstr(raw, "[auth]");
+        if (auth) {
+            const char *line_end = strchr(auth, '\n');
+            char line[256];
+            size_t n = line_end ? (size_t)(line_end - auth) : strlen(auth);
+            if (n >= sizeof(line)) n = sizeof(line) - 1;
+            memcpy(line, auth, n);
+            line[n] = '\0';
+            smoke_sanitize_text(line, detail, detail_len);
+            if (detail[0]) return;
+        }
+    }
+
+    if (sc && sc->kind == SMOKE_EXECUTOR) {
+        snprintf(detail, detail_len, "completed");
+        return;
+    }
+
+    if (raw && strstr(raw, "DSCOSMOKEOK")) {
+        snprintf(detail, detail_len, "completed");
+        return;
+    }
+
+    smoke_extract_detail(raw, detail, detail_len);
+}
+
 static bool smoke_case_ready(const smoke_case_t *sc, char *reason, size_t reason_len) {
     if (!reason || reason_len == 0) return false;
     reason[0] = '\0';
@@ -637,8 +678,10 @@ static smoke_result_t smoke_run_case(const char *self_path, const smoke_case_t *
         setenv("DSCO_MAX_AGENT_TURNS", "1", 1);
         setenv("DSCO_DISABLE_DEFAULT_FALLBACKS", "1", 1);
         setenv("DSCO_OR_MAX_TOOLS", "0", 1);
+        setenv("DSCO_OR_DISABLE_TOOLS", "1", 1);
         setenv("DSCO_DEBUG_AUTH", "1", 1);
-        setenv("DSCO_TRACE", "error", 1);
+        setenv("DSCO_TRACE", "0", 1);
+        unsetenv("DSCO_TRACE_STDERR");
         execvp(self_path, (char *const *)argv_exec);
         perror(self_path);
         _exit(127);
@@ -699,7 +742,10 @@ static smoke_result_t smoke_run_case(const char *self_path, const smoke_case_t *
         result.exit_code = 128 + WTERMSIG(status);
 
     result.ok = (result.exit_code == 0 && strstr(raw, "DSCOSMOKEOK") != NULL);
-    smoke_extract_detail(raw, result.detail, sizeof(result.detail));
+    if (result.ok)
+        smoke_extract_success_detail(sc, raw, result.detail, sizeof(result.detail));
+    else
+        smoke_extract_detail(raw, result.detail, sizeof(result.detail));
     return result;
 }
 
@@ -721,18 +767,37 @@ static int run_provider_smoke(const char *self_path, bool full) {
         { "Cohere",           SMOKE_NATIVE,     "cohere",     "command-a-03-2025",           true  },
         { "Perplexity",       SMOKE_NATIVE,     "perplexity", "sonar-pro",                   true  },
         { "OR Anthropic",     SMOKE_OPENROUTER, NULL,         "anthropic/claude-sonnet-4.6", true  },
+        { "OR Anthropic Opus",SMOKE_OPENROUTER, NULL,         "anthropic/claude-opus-4.6",   true  },
         { "OR OpenAI",        SMOKE_OPENROUTER, NULL,         "openai/gpt-5.4",              true  },
+        { "OR OpenAI o4",     SMOKE_OPENROUTER, NULL,         "openai/o4-mini",              true  },
+        { "OR OpenAI OSS",    SMOKE_OPENROUTER, NULL,         "openai/gpt-oss-120b",         true  },
         { "OR xAI",           SMOKE_OPENROUTER, NULL,         "x-ai/grok-4.20-beta",         true  },
         { "OR Google",        SMOKE_OPENROUTER, NULL,         "google/gemini-2.5-pro",       true  },
+        { "OR Google Flash",  SMOKE_OPENROUTER, NULL,         "google/gemini-2.5-flash",     true  },
+        { "OR Google 3 Pro",  SMOKE_OPENROUTER, NULL,         "google/gemini-3.1-pro-preview", true },
         { "OR DeepSeek",      SMOKE_OPENROUTER, NULL,         "deepseek/deepseek-chat",      true  },
         { "OR Moonshot",      SMOKE_OPENROUTER, NULL,         "moonshotai/kimi-k2.5",        true  },
+        { "OR Moonshot Think",SMOKE_OPENROUTER, NULL,         "moonshotai/kimi-k2-thinking", true  },
         { "OR Qwen",          SMOKE_OPENROUTER, NULL,         "qwen/qwen3.5-plus-02-15",     true  },
+        { "OR Qwen Coder",    SMOKE_OPENROUTER, NULL,         "qwen/qwen3-coder-next",       true  },
         { "OR Mistral",       SMOKE_OPENROUTER, NULL,         "mistralai/mistral-large-2512", true },
+        { "OR Codestral",     SMOKE_OPENROUTER, NULL,         "mistralai/codestral-2508",    true  },
         { "OR Cohere",        SMOKE_OPENROUTER, NULL,         "cohere/command-a",            true  },
         { "OR GLM",           SMOKE_OPENROUTER, NULL,         "z-ai/glm-5",                  true  },
         { "OR Llama",         SMOKE_OPENROUTER, NULL,         "meta-llama/llama-4-maverick", true  },
         { "OR MiniMax",       SMOKE_OPENROUTER, NULL,         "minimax/minimax-m2.5",        true  },
         { "OR Nova",          SMOKE_OPENROUTER, NULL,         "amazon/nova-premier-v1",      true  },
+        { "OR Writer",        SMOKE_OPENROUTER, NULL,         "writer/palmyra-x5",           true  },
+        { "OR NVIDIA",        SMOKE_OPENROUTER, NULL,         "nvidia/nemotron-3-super-120b-a12b:free", true },
+        { "OR Hermes",        SMOKE_OPENROUTER, NULL,         "nousresearch/hermes-4-405b",  true  },
+        { "OR StepFun",       SMOKE_OPENROUTER, NULL,         "stepfun/step-3.5-flash",      true  },
+        { "OR Mercury",       SMOKE_OPENROUTER, NULL,         "inception/mercury-2",         true  },
+        { "OR ERNIE",         SMOKE_OPENROUTER, NULL,         "baidu/ernie-4.5-21b-a3b",     true  },
+        { "OR Arcee",         SMOKE_OPENROUTER, NULL,         "arcee-ai/trinity-large-preview:free", true },
+        { "OR Xiaomi",        SMOKE_OPENROUTER, NULL,         "xiaomi/mimo-v2-flash",        true  },
+        { "OR Aion",          SMOKE_OPENROUTER, NULL,         "aion-labs/aion-2.0",          true  },
+        { "OR KwaiPilot",     SMOKE_OPENROUTER, NULL,         "kwaipilot/kat-coder-pro-v2",  true  },
+        { "OR Seed",          SMOKE_OPENROUTER, NULL,         "bytedance-seed/seed-2.0-lite", true },
         { NULL, 0, NULL, NULL, false }
     };
 
@@ -815,16 +880,297 @@ static void exec_dispatch(const exec_reg_t *e, const char *prompt,
 /* Global provider override — set by -e <native_provider> */
 static const char *g_provider_override = NULL;
 
+/* ── Account info helpers ──────────────────────────────────────────── */
+
+/* Extract a JSON string value from raw JSON text without a full parser.
+ * Finds "key":"value" and copies value into buf.  Returns true on success. */
+static bool acct_json_str(const char *json, const char *key,
+                           char *buf, size_t buf_len) {
+    if (!json || !key || !buf || buf_len == 0) return false;
+    char search[128];
+    snprintf(search, sizeof(search), "\"%s\"", key);
+    const char *p = strstr(json, search);
+    if (!p) return false;
+    p += strlen(search);
+    while (*p == ' ' || *p == ':') p++;
+    if (*p == '"') p++;
+    size_t n = 0;
+    while (*p && *p != '"' && *p != ',' && *p != '}' && *p != '\n' && n < buf_len - 1)
+        buf[n++] = *p++;
+    buf[n] = '\0';
+    return n > 0;
+}
+
+static void show_claude_account_info(void) {
+    char sub[128] = "", tier[128] = "";
+    if (provider_claude_code_get_account_info(sub, sizeof(sub), tier, sizeof(tier))) {
+        if (sub[0])  fprintf(stderr, "  \033[2mplan: %s\033[0m\n", sub);
+        if (tier[0]) fprintf(stderr, "  \033[2mtier: %s\033[0m\n", tier);
+    }
+}
+
+static void show_codex_account_info(void) {
+    const char *home = getenv("HOME");
+    if (!home) return;
+    char auth_path[512];
+    snprintf(auth_path, sizeof(auth_path), "%s/.codex/auth.json", home);
+    FILE *f = fopen(auth_path, "r");
+    if (!f) return;
+    char *buf = malloc(32768);
+    if (!buf) { fclose(f); return; }
+    size_t n = fread(buf, 1, 32767, f);
+    fclose(f);
+    if (!n) { free(buf); return; }
+    buf[n] = '\0';
+
+    char mode[64] = "";
+    acct_json_str(buf, "auth_mode", mode, sizeof(mode));
+    if (mode[0]) {
+        /* humanise: "chatgpt" → "ChatGPT subscription", "api_key" → "API key" */
+        const char *label = strcmp(mode, "chatgpt") == 0 ? "ChatGPT subscription"
+                          : strcmp(mode, "api_key") == 0 ? "API key"
+                          : mode;
+        fprintf(stderr, "  \033[2mplan: %s\033[0m\n", label);
+    }
+
+    char refresh[64] = "";
+    acct_json_str(buf, "last_refresh", refresh, sizeof(refresh));
+    if (refresh[0]) {
+        /* trim to date portion: 2026-05-13T23:34:54.073420Z → 2026-05-13 */
+        char *t = strchr(refresh, 'T');
+        if (t) *t = '\0';
+        fprintf(stderr, "  \033[2mlast refresh: %s\033[0m\n", refresh);
+    }
+
+    free(buf);
+}
+
+static int run_status_flow(void) {
+    const char *active_exec  = getenv("DSCO_EXEC");
+    const char *active_model = getenv("DSCO_MODEL");
+    bool claude_auth = main_claude_exec_ready();
+    bool codex_auth  = main_codex_exec_ready();
+
+    fprintf(stderr, "\n  \033[1mdsco status\033[0m\n\n");
+
+    if (active_exec && active_exec[0]) {
+        fprintf(stderr, "  active backend : \033[1m%s\033[0m", active_exec);
+        if (active_model && active_model[0])
+            fprintf(stderr, "  (%s)", active_model);
+        fprintf(stderr, "\n\n");
+    } else {
+        fprintf(stderr, "  active backend : not set  —  run \033[1mdsco login\033[0m\n\n");
+    }
+
+    fprintf(stderr, "  \033[1mClaude Code (Anthropic)\033[0m\n");
+    if (claude_auth) {
+        const char *src = provider_claude_code_oauth_source();
+        fprintf(stderr, "  \033[32m● authenticated\033[0m via %s\n", src);
+        show_claude_account_info();
+    } else {
+        fprintf(stderr, "  \033[2m○ not authenticated\033[0m\n");
+    }
+
+    fprintf(stderr, "\n  \033[1mChatGPT Codex (OpenAI)\033[0m\n");
+    if (codex_auth) {
+        fprintf(stderr, "  \033[32m● authenticated\033[0m via ~/.codex/auth.json\n");
+        show_codex_account_info();
+    } else {
+        fprintf(stderr, "  \033[2m○ not authenticated\033[0m\n");
+    }
+
+    fprintf(stderr, "\n  env file: %s\n\n", dsco_setup_env_path());
+    return 0;
+}
+
+/* ── Login flow ────────────────────────────────────────────────────── */
+
+static void login_read_key_noecho(char *buf, size_t buf_len) {
+    struct termios old, raw;
+    bool term_ok = tcgetattr(STDIN_FILENO, &old) == 0;
+    if (term_ok) {
+        raw = old;
+        raw.c_lflag &= ~(tcflag_t)ECHO;
+        tcsetattr(STDIN_FILENO, TCSANOW, &raw);
+    }
+    if (fgets(buf, (int)buf_len, stdin)) {
+        size_t n = strlen(buf);
+        while (n > 0 && (buf[n-1] == '\n' || buf[n-1] == '\r')) buf[--n] = '\0';
+    } else {
+        buf[0] = '\0';
+    }
+    if (term_ok) {
+        tcsetattr(STDIN_FILENO, TCSANOW, &old);
+        fprintf(stderr, "\n");
+    }
+}
+
+static char *login_trim(char *s) {
+    if (!s) return s;
+    while (*s == ' ' || *s == '\t') s++;
+    size_t n = strlen(s);
+    while (n > 0 && (s[n-1] == '\n' || s[n-1] == '\r' || s[n-1] == ' ')) s[--n] = '\0';
+    return s;
+}
+
+static int run_login_flow(void) {
+    bool claude_bin  = exec_bin_available("claude");
+    bool codex_bin   = exec_bin_available("codex");
+    bool claude_auth = main_claude_exec_ready();
+    bool codex_auth  = main_codex_exec_ready();
+
+    fprintf(stderr, "\n  \033[1mdsco login\033[0m — connect your AI backend\n\n");
+    fprintf(stderr, "  %-3s %-33s %-22s %s\n", " ", "BACKEND", "MODEL", "STATUS");
+    fprintf(stderr, "  %-3s %-33s %-22s %s\n", " ", "───────", "─────", "──────");
+
+    const char *claude_status_col = claude_auth ? "\033[32m" : (claude_bin ? "\033[33m" : "\033[2m");
+    const char *claude_status     = claude_auth ? "● ready"  : (claude_bin ? "○ not authenticated" : "○ claude not installed");
+    const char *codex_status_col  = codex_auth  ? "\033[32m" : (codex_bin  ? "\033[33m" : "\033[2m");
+    const char *codex_status      = codex_auth  ? "● ready"  : (codex_bin  ? "○ not authenticated" : "○ codex not installed");
+
+    fprintf(stderr, "  \033[1m[1]\033[0m %-33s %-22s %s%s\033[0m\n",
+            "Claude Code  (Anthropic)", "claude-sonnet-4-6",
+            claude_status_col, claude_status);
+    fprintf(stderr, "  \033[1m[2]\033[0m %-33s %-22s %s%s\033[0m\n",
+            "ChatGPT Codex  (OpenAI)", "auto (gpt-5.5)",
+            codex_status_col, codex_status);
+
+    fprintf(stderr, "\n  \033[2m[q] quit\033[0m\n\n> ");
+    fflush(stderr);
+
+    char line[128];
+    if (!fgets(line, sizeof(line), stdin)) { fprintf(stderr, "\n"); return 0; }
+    char top = line[0];
+
+    if (top == 'q' || top == 'Q' || top == '\n' || top == '\r') {
+        fprintf(stderr, "\n");
+        return 0;
+    }
+
+    int pidx = -1;
+    if (top == '1') pidx = 0;
+    else if (top == '2') pidx = 1;
+    else { fprintf(stderr, "\n  Unknown choice.\n\n"); return 1; }
+
+    const char *pname   = pidx == 0 ? "claude"                 : "codex";
+    const char *plabel  = pidx == 0 ? "Claude Code (Anthropic)": "ChatGPT Codex (OpenAI)";
+    const char *pmodel  = pidx == 0 ? "claude-sonnet-4-6"      : "";
+    const char *penvkey = pidx == 0 ? "ANTHROPIC_API_KEY"      : "OPENAI_API_KEY";
+    bool pbin   = pidx == 0 ? claude_bin  : codex_bin;
+    bool pready = pidx == 0 ? claude_auth : codex_auth;
+
+    fprintf(stderr, "\n  \033[1m%s\033[0m\n\n", plabel);
+
+    if (pready) {
+        if (pidx == 0) {
+            const char *src = provider_claude_code_oauth_source();
+            fprintf(stderr, "  \033[32m● Already authenticated\033[0m");
+            if (src && src[0] && strcmp(src, "missing") != 0 && strcmp(src, "disabled") != 0)
+                fprintf(stderr, " (via %s)", src);
+            fprintf(stderr, "\n");
+            show_claude_account_info();
+            fprintf(stderr, "\n");
+        } else {
+            fprintf(stderr, "  \033[32m● Already authenticated\033[0m (via ~/.codex/auth.json)\n");
+            show_codex_account_info();
+            fprintf(stderr, "\n");
+        }
+        fprintf(stderr, "  Set as active backend? [Y/n] ");
+        fflush(stderr);
+        if (!fgets(line, sizeof(line), stdin)) { fprintf(stderr, "\n"); return 0; }
+        if (line[0] == 'n' || line[0] == 'N') {
+            fprintf(stderr, "\n  No changes made.\n\n");
+            return 0;
+        }
+        goto save_active;
+    }
+
+    fprintf(stderr, "  \033[33m○ Not authenticated\033[0m\n\n");
+
+    if (pbin) {
+        const char *lcmd = pidx == 0 ? "claude auth login" : "codex login";
+        fprintf(stderr, "  \033[1m[a]\033[0m Run `%s`  (recommended)\n", lcmd);
+    }
+    fprintf(stderr, "  \033[1m[k]\033[0m Enter %s manually\n", penvkey);
+    fprintf(stderr, "  \033[2m[c]\033[0m Cancel\n\n> ");
+    fflush(stderr);
+
+    if (!fgets(line, sizeof(line), stdin)) { fprintf(stderr, "\n"); return 0; }
+    char achoice = line[0];
+
+    if (achoice == 'c' || achoice == 'C') {
+        fprintf(stderr, "\n  Cancelled.\n\n");
+        return 0;
+    }
+
+    if (pbin && (achoice == 'a' || achoice == 'A')) {
+        const char *lcmd = pidx == 0 ? "claude auth login" : "codex login";
+        fprintf(stderr, "\n  Running: %s\n\n", lcmd);
+        fflush(stderr);
+        int rc = system(lcmd);
+        bool now_ready = pidx == 0 ? main_claude_exec_ready() : main_codex_exec_ready();
+        if (rc != 0 || !now_ready) {
+            fprintf(stderr, "\n  \033[33mWarning: login may not have completed.\033[0m\n");
+            if (!now_ready && !pbin) {
+                fprintf(stderr, "  Try entering the API key manually instead.\n\n");
+                return 1;
+            }
+            if (!now_ready) {
+                /* Offer key entry as fallback */
+                fprintf(stderr, "\n  Enter %s (or press Enter to cancel): ", penvkey);
+                fflush(stderr);
+                char key_buf[512] = {0};
+                login_read_key_noecho(key_buf, sizeof(key_buf));
+                char *trimmed = login_trim(key_buf);
+                if (!trimmed[0]) { fprintf(stderr, "  No key entered.\n\n"); return 1; }
+                setenv(penvkey, trimmed, 1);
+                dsco_setup_set_key(penvkey, trimmed);
+                fprintf(stderr, "  \033[32m● Key saved.\033[0m\n\n");
+            }
+        } else {
+            fprintf(stderr, "\n  \033[32m● Authentication successful!\033[0m\n\n");
+        }
+    } else {
+        /* Manual key entry (also handles 'k' and unknown choice fallback) */
+        fprintf(stderr, "\n  Enter %s: ", penvkey);
+        fflush(stderr);
+        char key_buf[512] = {0};
+        login_read_key_noecho(key_buf, sizeof(key_buf));
+        char *trimmed = login_trim(key_buf);
+        if (!trimmed[0]) { fprintf(stderr, "  No key entered. Exiting.\n\n"); return 1; }
+        setenv(penvkey, trimmed, 1);
+        dsco_setup_set_key(penvkey, trimmed);
+        fprintf(stderr, "  \033[32m● Key saved.\033[0m\n\n");
+    }
+
+save_active:
+    setenv("DSCO_EXEC",  pname,  1);
+    setenv("DSCO_MODEL", pmodel, 1);
+    dsco_setup_set_key("DSCO_EXEC",  pname);
+    dsco_setup_set_key("DSCO_MODEL", pmodel);
+
+    const char *pdisplay = (pmodel && pmodel[0]) ? pmodel : "auto";
+    fprintf(stderr,
+            "  \033[32m✓\033[0m Active backend: \033[1m%s\033[0m (%s)\n"
+            "  Saved to %s\n\n"
+            "  Run \033[1mdsco -i\033[0m to start chatting.\n\n",
+            plabel, pdisplay, dsco_setup_env_path());
+    return 0;
+}
+
 static void usage(const char *prog) {
     fprintf(stderr,
         "dsco v%s — thin agentic CLI (streaming + prompt caching)\n"
         "\n"
         "Usage: %s [options] [prompt]\n"
+        "       %s login          Choose Claude Code or ChatGPT Codex backend\n"
+        "       %s status         Show auth state and account info for all backends\n"
         "\n"
         "Options:\n"
         "  -m MODEL    Model name (default: %s)\n"
         "  -k KEY      API key (default: provider env for selected model)\n"
         "  --profile NAME         Setup profile (default: default)\n"
+        "  --login                Interactive backend login (Claude Code / Codex)\n"
         "  --setup                Save detected API keys/tokens into dsco env file\n"
         "  --setup-force          Overwrite existing saved values from current env\n"
         "  --setup-report         Show masked setup/config status\n"
@@ -860,7 +1206,7 @@ static void usage(const char *prog) {
         "  DSCO_EXEC           Default executor (claude, codex, auto)\n"
         "  DSCO_BUDGET         Session cost budget in dollars (0=unlimited)\n"
         "  DSCO_DAILY_BUDGET   Daily cost budget in dollars (0=unlimited)\n",
-    DSCO_VERSION, prog, DEFAULT_MODEL, prog, prog, prog);
+    DSCO_VERSION, prog, prog, prog, DEFAULT_MODEL, prog, prog, prog);
 }
 
 static void print_topology_list(void) {
@@ -956,6 +1302,18 @@ static void oneshot_tool_cb(const char *name, const char *id, void *ctx) {
 }
 
 int main(int argc, char **argv) {
+    tamper_init();          /* must be first: deny ptrace, hash code, watch binary */
+    sealed_store_init();    /* encrypted secret store; wiper registered with tamper */
+    env_guard_init();       /* strip LD_PRELOAD / DYLD_INSERT_LIBRARIES, audit dylibs */
+    {
+        char alog_path[4096];
+        const char *h = getenv("HOME");
+        if (!h) h = "/tmp";
+        snprintf(alog_path, sizeof(alog_path), "%s/.dsco/audit.log", h);
+        audit_log_global_init(alog_path);
+        audit_log("startup", "dsco init");
+    }
+    heartbeat_start();      /* background keepalive ping + optional phone-home */
     (void)atexit(main_atexit_handler);
     init_trace_runtime();
     init_vos_subsystems();  /* §1-§8: Post-LLM Virtual OS layer */
@@ -1023,15 +1381,28 @@ int main(int argc, char **argv) {
         }
     }
 
+    /* Detect `login` / `status` subcommands early (before bootstrap) */
+    bool arg_login  = false;
+    bool arg_status = false;
+    if (argc >= 2 && strcmp(argv[1], "login") == 0)  arg_login  = true;
+    if (argc >= 2 && strcmp(argv[1], "status") == 0) arg_status = true;
+    for (int i = 1; i < argc && !arg_login && !arg_status; i++) {
+        if (strcmp(argv[i], "--login") == 0)  { arg_login  = true; break; }
+        if (strcmp(argv[i], "--status") == 0) { arg_status = true; break; }
+    }
+
     int loaded_env_count = dsco_setup_load_saved_env();
     char bootstrap_msg[512];
-    if (!arg_requests_setup && !arg_skip_bootstrap) {
+    if (!arg_requests_setup && !arg_skip_bootstrap && !arg_login && !arg_status) {
         int bootstrap_state = dsco_setup_bootstrap_from_env(bootstrap_msg, sizeof(bootstrap_msg));
         if (bootstrap_state > 0) {
             fprintf(stderr, "%s\n", bootstrap_msg);
             loaded_env_count += dsco_setup_load_saved_env();
         }
     }
+
+    if (arg_login)  return run_login_flow();
+    if (arg_status) return run_status_flow();
 
     const char *api_key = NULL;
     const char *model = getenv("DSCO_MODEL");
