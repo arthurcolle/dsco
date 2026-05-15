@@ -27,7 +27,7 @@ SRC_NAMES = main.c agent.c llm.c tools.c json_util.c ast.c swarm.c tui.c \
 	pheromone.c ooda.c killswitch.c governance.c memory_tier.c talons.c \
 	arena_alloc.c event_loop.c vm.c scheduler.c vfs.c trading.c legion.c \
 	agent_profile.c orchestrator.c vecstore.c tamper.c sealed_store.c \
-	watchdog.c audit_log.c heartbeat.c env_guard.c \
+	watchdog.c audit_log.c heartbeat.c env_guard.c peer_bootstrap.c \
 	$(OPTIONAL_SRCS)
 TEST_SRC_NAMES = test.c
 
