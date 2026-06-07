@@ -2,6 +2,10 @@ CC ?= cc
 GIT_HASH := $(shell git rev-parse --short HEAD 2>/dev/null || echo "unknown")
 BUILD_DATE := $(shell date -u +%Y-%m-%dT%H:%M:%SZ)
 UNAME_S := $(shell uname -s)
+CC_IS_CLANG := $(shell $(CC) --version 2>/dev/null | grep -qi clang && echo yes)
+ifeq ($(CC_IS_CLANG),yes)
+C2Y_WARNING_FLAGS := -Wno-deprecated-octal-literals
+endif
 
 # Directories
 SRC_DIR = src
@@ -9,8 +13,9 @@ INC_DIR = include
 TEST_DIR = tests
 BUILD_DIR ?= build
 
-BASE_CFLAGS = -Wall -Wextra -O2 -std=c2y -D_POSIX_C_SOURCE=200809L \
+BASE_CFLAGS = -Wall -Wextra -O3 -std=c2y $(C2Y_WARNING_FLAGS) -D_POSIX_C_SOURCE=200809L \
 	-I$(INC_DIR) \
+	-march=native -mtune=native -funroll-loops -fvisibility=hidden \
 	-DBUILD_DATE='"$(BUILD_DATE)"' -DGIT_HASH='"$(GIT_HASH)"'
 CFLAGS ?= $(BASE_CFLAGS)
 TEST_CFLAGS ?= $(BASE_CFLAGS) -O0 -g -fno-omit-frame-pointer -fno-inline
@@ -27,7 +32,10 @@ SRC_NAMES = main.c agent.c llm.c tools.c json_util.c ast.c swarm.c tui.c \
 	pheromone.c ooda.c killswitch.c governance.c memory_tier.c talons.c \
 	arena_alloc.c event_loop.c vm.c scheduler.c vfs.c trading.c legion.c \
 	agent_profile.c orchestrator.c vecstore.c tamper.c sealed_store.c \
-	watchdog.c audit_log.c heartbeat.c env_guard.c peer_bootstrap.c \
+	se_store.c watchdog.c audit_log.c heartbeat.c env_guard.c peer_bootstrap.c presence.c \
+	project.c project_mux.c project_grid.c \
+	dsco_accel.c dsco_mlx.c dsco_pool.c \
+	fingerprint.c trust.c toolmgmt.c \
 	$(OPTIONAL_SRCS)
 TEST_SRC_NAMES = test.c
 
@@ -64,6 +72,21 @@ COVERAGE_LDFLAGS = --coverage
 ASAN_RUNTIME_OPTIONS = detect_leaks=1
 ifeq ($(UNAME_S),Darwin)
 ASAN_RUNTIME_OPTIONS = detect_leaks=0
+# Secure Enclave + PAC + Touch ID + presence detection
+BASE_CFLAGS += -DHAVE_SECURE_ENCLAVE -DHAVE_TOUCHID -mbranch-protection=standard
+LDLIBS      += -framework Security -framework CoreFoundation -framework IOKit \
+               -framework CoreGraphics -framework LocalAuthentication \
+               -framework Foundation -framework Metal -framework MetalKit \
+               -framework Accelerate
+
+# Objective-C sources (Touch ID + Metal vecstore)
+OBJC_NAMES  = touchid.m vecstore_metal.m
+OBJC_SRCS   = $(addprefix $(SRC_DIR)/, $(OBJC_NAMES))
+OBJC_OBJS   = $(OBJC_NAMES:%.m=$(OBJ_DIR)/%.o)
+OBJS       += $(OBJC_OBJS)
+DEBUG_OBJS += $(OBJC_NAMES:%.m=$(DEBUG_OBJ_DIR)/%.o)
+ASAN_OBJS  += $(OBJC_NAMES:%.m=$(ASAN_OBJ_DIR)/%.o)
+UBSAN_OBJS += $(OBJC_NAMES:%.m=$(UBSAN_OBJ_DIR)/%.o)
 endif
 
 PREFIX ?= /opt/homebrew
@@ -78,6 +101,14 @@ LDLIBS += -lreadline
 endif
 
 # ── Optional libraries ────────────────────────────────────────────────────
+
+# hiredis (Redis fast-path IPC)
+HIREDIS_CFLAGS := $(shell pkg-config --cflags hiredis 2>/dev/null)
+HIREDIS_LIBS   := $(shell pkg-config --libs   hiredis 2>/dev/null)
+ifneq ($(HIREDIS_CFLAGS),)
+BASE_CFLAGS += $(HIREDIS_CFLAGS) -DHAVE_REDIS
+LDLIBS      += $(HIREDIS_LIBS)
+endif
 
 # GNU Scientific Library
 GSL_CFLAGS := $(shell pkg-config --cflags gsl 2>/dev/null)
@@ -128,7 +159,7 @@ debug: $(DEBUG_TARGET)
 dev: $(DEBUG_TARGET)
 
 dsc: dsc.c
-	$(CC) -O2 -std=c2y -D_POSIX_C_SOURCE=200809L -o $@ $< -lcurl -lreadline
+	$(CC) -O2 -std=c2y $(C2Y_WARNING_FLAGS) -D_POSIX_C_SOURCE=200809L -o $@ $< -lcurl -lreadline
 
 $(DEBUG_TARGET): $(DEBUG_OBJS)
 	$(CC) $(DEBUG_CFLAGS) -o $@ $^ $(LDFLAGS) $(LDLIBS)
@@ -144,14 +175,27 @@ dsco-new: $(TARGET)
 $(OBJ_DIR)/%.o: $(SRC_DIR)/%.c | $(OBJ_DIR)
 	$(CC) $(CFLAGS) -c -o $@ $<
 
+# Objective-C sources (macOS only)
+$(OBJ_DIR)/%.o: $(SRC_DIR)/%.m | $(OBJ_DIR)
+	$(CC) $(CFLAGS) -fobjc-arc -x objective-c -c -o $@ $<
+
 $(DEBUG_OBJ_DIR)/%.o: $(SRC_DIR)/%.c | $(DEBUG_OBJ_DIR)
 	$(CC) $(DEBUG_CFLAGS) -c -o $@ $<
+
+$(DEBUG_OBJ_DIR)/%.o: $(SRC_DIR)/%.m | $(DEBUG_OBJ_DIR)
+	$(CC) $(DEBUG_CFLAGS) -fobjc-arc -x objective-c -c -o $@ $<
 
 $(ASAN_OBJ_DIR)/%.o: $(SRC_DIR)/%.c | $(ASAN_OBJ_DIR)
 	$(CC) $(ASAN_CFLAGS) -c -o $@ $<
 
+$(ASAN_OBJ_DIR)/%.o: $(SRC_DIR)/%.m | $(ASAN_OBJ_DIR)
+	$(CC) $(ASAN_CFLAGS) -fobjc-arc -x objective-c -c -o $@ $<
+
 $(UBSAN_OBJ_DIR)/%.o: $(SRC_DIR)/%.c | $(UBSAN_OBJ_DIR)
 	$(CC) $(UBSAN_CFLAGS) -c -o $@ $<
+
+$(UBSAN_OBJ_DIR)/%.o: $(SRC_DIR)/%.m | $(UBSAN_OBJ_DIR)
+	$(CC) $(UBSAN_CFLAGS) -fobjc-arc -x objective-c -c -o $@ $<
 
 # Test compilation rules — test sources from tests/, lib sources from src/
 $(TEST_OBJ_DIR)/test.o: $(TEST_DIR)/test.c | $(TEST_OBJ_DIR)
@@ -160,11 +204,17 @@ $(TEST_OBJ_DIR)/test.o: $(TEST_DIR)/test.c | $(TEST_OBJ_DIR)
 $(TEST_OBJ_DIR)/%.o: $(SRC_DIR)/%.c | $(TEST_OBJ_DIR)
 	$(CC) $(TEST_CFLAGS) -c -o $@ $<
 
+$(TEST_OBJ_DIR)/%.o: $(SRC_DIR)/%.m | $(TEST_OBJ_DIR)
+	$(CC) $(TEST_CFLAGS) -fobjc-arc -x objective-c -c -o $@ $<
+
 $(TEST_COVERAGE_OBJ_DIR)/test.o: $(TEST_DIR)/test.c | $(TEST_COVERAGE_OBJ_DIR)
 	$(CC) $(COVERAGE_CFLAGS) -c -o $@ $<
 
 $(TEST_COVERAGE_OBJ_DIR)/%.o: $(SRC_DIR)/%.c | $(TEST_COVERAGE_OBJ_DIR)
 	$(CC) $(COVERAGE_CFLAGS) -c -o $@ $<
+
+$(TEST_COVERAGE_OBJ_DIR)/%.o: $(SRC_DIR)/%.m | $(TEST_COVERAGE_OBJ_DIR)
+	$(CC) $(COVERAGE_CFLAGS) -fobjc-arc -x objective-c -c -o $@ $<
 
 $(ASAN_TEST_OBJ_DIR)/test.o: $(TEST_DIR)/test.c | $(ASAN_TEST_OBJ_DIR)
 	$(CC) $(ASAN_CFLAGS) -c -o $@ $<
@@ -172,11 +222,17 @@ $(ASAN_TEST_OBJ_DIR)/test.o: $(TEST_DIR)/test.c | $(ASAN_TEST_OBJ_DIR)
 $(ASAN_TEST_OBJ_DIR)/%.o: $(SRC_DIR)/%.c | $(ASAN_TEST_OBJ_DIR)
 	$(CC) $(ASAN_CFLAGS) -c -o $@ $<
 
+$(ASAN_TEST_OBJ_DIR)/%.o: $(SRC_DIR)/%.m | $(ASAN_TEST_OBJ_DIR)
+	$(CC) $(ASAN_CFLAGS) -fobjc-arc -x objective-c -c -o $@ $<
+
 $(UBSAN_TEST_OBJ_DIR)/test.o: $(TEST_DIR)/test.c | $(UBSAN_TEST_OBJ_DIR)
 	$(CC) $(UBSAN_CFLAGS) -c -o $@ $<
 
 $(UBSAN_TEST_OBJ_DIR)/%.o: $(SRC_DIR)/%.c | $(UBSAN_TEST_OBJ_DIR)
 	$(CC) $(UBSAN_CFLAGS) -c -o $@ $<
+
+$(UBSAN_TEST_OBJ_DIR)/%.o: $(SRC_DIR)/%.m | $(UBSAN_TEST_OBJ_DIR)
+	$(CC) $(UBSAN_CFLAGS) -fobjc-arc -x objective-c -c -o $@ $<
 
 $(OBJ_DIR) $(DEBUG_OBJ_DIR) $(TEST_OBJ_DIR) $(TEST_COVERAGE_OBJ_DIR) $(ASAN_OBJ_DIR) $(UBSAN_OBJ_DIR) $(ASAN_TEST_OBJ_DIR) $(UBSAN_TEST_OBJ_DIR):
 	mkdir -p $@
