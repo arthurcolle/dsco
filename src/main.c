@@ -30,10 +30,21 @@
 #include "talons.h"
 #include "tamper.h"
 #include "sealed_store.h"
+#include "se_store.h"
 #include "audit_log.h"
 #include "watchdog.h"
 #include "env_guard.h"
 #include "heartbeat.h"
+#include "presence.h"
+#include "touchid.h"
+#include "project.h"
+#include "project_mux.h"
+#include "dsco_accel.h"
+#include "dsco_mlx.h"
+#include "dsco_pool.h"
+#include "fingerprint.h"
+#include "trust.h"
+#include "toolmgmt.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -44,6 +55,9 @@
 #include <signal.h>
 #include <fcntl.h>
 #include <poll.h>
+#include <pthread.h>
+#include <errno.h>
+#include <time.h>
 #include <termios.h>
 #include <unistd.h>
 #include <sys/wait.h>
@@ -467,6 +481,100 @@ static double main_now_sec(void) {
 static bool main_env_truthy(const char *value) {
     return value && (value[0] == '1' || strcasecmp(value, "true") == 0 ||
                      strcasecmp(value, "yes") == 0);
+}
+
+typedef struct {
+    pthread_mutex_t lock;
+    pthread_cond_t done_cv;
+    bool done;
+    bool ok;
+    uint8_t key[32];
+} secure_store_init_state_t;
+
+static void main_zero32(uint8_t key[32]) {
+    volatile uint8_t *z = key;
+    for (int i = 0; i < 32; i++) z[i] = 0;
+}
+
+static int secure_store_timeout_ms(void) {
+    const char *env = getenv("DSCO_SECURE_STORE_TIMEOUT_MS");
+    if (!env || !env[0]) return 20000;
+    char *end = NULL;
+    long ms = strtol(env, &end, 10);
+    if (!end || *end != '\0' || ms < 1000 || ms > 120000) return 20000;
+    return (int)ms;
+}
+
+static void secure_store_deadline(struct timespec *ts, int timeout_ms) {
+    clock_gettime(CLOCK_REALTIME, ts);
+    ts->tv_sec += timeout_ms / 1000;
+    ts->tv_nsec += (long)(timeout_ms % 1000) * 1000000L;
+    if (ts->tv_nsec >= 1000000000L) {
+        ts->tv_sec++;
+        ts->tv_nsec -= 1000000000L;
+    }
+}
+
+static void *secure_store_init_worker(void *arg) {
+    secure_store_init_state_t *st = arg;
+    uint8_t key[32] = {0};
+    bool ok = se_store_init(key);
+
+    pthread_mutex_lock(&st->lock);
+    st->ok = ok;
+    if (ok) memcpy(st->key, key, sizeof(st->key));
+    st->done = true;
+    pthread_cond_signal(&st->done_cv);
+    pthread_mutex_unlock(&st->lock);
+
+    main_zero32(key);
+    return NULL;
+}
+
+static bool init_secure_store_required(uint8_t out_key[32], int *timed_out) {
+    if (timed_out) *timed_out = 0;
+    if (!out_key) return false;
+    memset(out_key, 0, 32);
+
+    secure_store_init_state_t *st = calloc(1, sizeof(*st));
+    if (!st) return false;
+    pthread_mutex_init(&st->lock, NULL);
+    pthread_cond_init(&st->done_cv, NULL);
+
+    pthread_t tid;
+    if (pthread_create(&tid, NULL, secure_store_init_worker, st) != 0) {
+        pthread_cond_destroy(&st->done_cv);
+        pthread_mutex_destroy(&st->lock);
+        free(st);
+        return false;
+    }
+
+    struct timespec deadline;
+    secure_store_deadline(&deadline, secure_store_timeout_ms());
+
+    pthread_mutex_lock(&st->lock);
+    while (!st->done) {
+        int rc = pthread_cond_timedwait(&st->done_cv, &st->lock, &deadline);
+        if (rc == ETIMEDOUT && !st->done) {
+            if (timed_out) *timed_out = 1;
+            pthread_mutex_unlock(&st->lock);
+            pthread_detach(tid);
+            /* Intentionally leak st on timeout: the blocked Security.framework
+             * call may still complete while the process is exiting. */
+            return false;
+        }
+    }
+
+    bool ok = st->ok;
+    if (ok) memcpy(out_key, st->key, 32);
+    main_zero32(st->key);
+    pthread_mutex_unlock(&st->lock);
+
+    pthread_join(tid, NULL);
+    pthread_cond_destroy(&st->done_cv);
+    pthread_mutex_destroy(&st->lock);
+    free(st);
+    return ok;
 }
 
 static void smoke_sanitize_text(const char *src, char *dst, size_t dst_len) {
@@ -1302,18 +1410,119 @@ static void oneshot_tool_cb(const char *name, const char *id, void *ctx) {
 }
 
 int main(int argc, char **argv) {
+    /* `dsco tools …` drives the external Tool Management API. Dispatch first so
+     * its own -h/subcommands aren't swallowed by the global flag loop below; it
+     * manages its own config + auth and never touches the keychain. */
+    if (argc >= 2 && strcmp(argv[1], "tools") == 0)
+        return toolmgmt_cli(argc, argv);
+
+    /* Trivial info flags must short-circuit BEFORE any keychain / secure-store
+     * touch. Otherwise wrappers (web server, scripts) calling `dsco --version`
+     * trigger a macOS keychain prompt for every invocation. */
+    for (int i = 1; i < argc; i++) {
+        if (strcmp(argv[i], "--version") == 0 || strcmp(argv[i], "-v") == 0) {
+            printf("dsco v%s (built %s, %s)\n", DSCO_VERSION, BUILD_DATE, GIT_HASH);
+            return 0;
+        }
+        if (strcmp(argv[i], "-h") == 0 || strcmp(argv[i], "--help") == 0) {
+            usage(argv[0]);
+            return 0;
+        }
+    }
+
+    /* Mux-spawned worker children inherit ANTHROPIC_API_KEY and all needed
+     * secrets via env from the parent. They MUST NOT re-prompt the keychain
+     * (one prompt per worker is unacceptable UX). Detect worker mode before
+     * any keychain access. */
+    bool is_worker = (getenv("DSCO_WORKER") != NULL);
+    if (!is_worker) {
+        for (int i = 1; i < argc; i++) {
+            if (strcmp(argv[i], "--worker") == 0) { is_worker = true; break; }
+        }
+    }
+
     tamper_init();          /* must be first: deny ptrace, hash code, watch binary */
-    sealed_store_init();    /* encrypted secret store; wiper registered with tamper */
-    {   /* audit log must be open before env_guard so its events are captured */
+    {   /* audit log opens here so every subsequent init step is captured */
         char alog_path[4096];
         const char *h = getenv("HOME");
         if (!h) h = "/tmp";
         snprintf(alog_path, sizeof(alog_path), "%s/.dsco/audit.log", h);
         audit_log_global_init(alog_path);
     }
+    if (!is_worker) {
+        /* Secure store is fail-closed. It must complete before env secrets are
+         * loaded into sealed_store, but it must not make startup hang forever
+         * inside macOS Security.framework. */
+        uint8_t se_key[32] = {0};
+        int timed_out = 0;
+        bool show_secure_wait = isatty(STDERR_FILENO);
+        if (show_secure_wait) {
+            fprintf(stderr, "dsco: initializing secure store...\n");
+            fflush(stderr);
+        }
+        if (!init_secure_store_required(se_key, &timed_out)) {
+            audit_log("se_store", timed_out
+                      ? "secure store init timed out"
+                      : "secure store init failed");
+            fprintf(stderr,
+                    "error: secure store initialization %s; refusing to start\n"
+                    "  unlock the login keychain/Secure Enclave and retry\n"
+                    "  set DSCO_SECURE_STORE_AUTH_UI=1 if macOS should show an auth prompt\n"
+                    "  set DSCO_SECURE_STORE_TIMEOUT_MS=<ms> to allow more time\n",
+                    timed_out ? "timed out" : "failed");
+            main_zero32(se_key);
+            return 1;
+        }
+        sealed_store_set_master_key(se_key);
+        main_zero32(se_key);
+    }
+    tamper_register_wiper((tamper_wiper_fn)se_store_wipe, NULL);
+    if (!is_worker) sealed_store_init();    /* encrypted secret store; wiper registered with tamper */
     env_guard_init();       /* strip LD_PRELOAD / DYLD_INSERT_LIBRARIES, audit dylibs */
-    audit_log("startup", "dsco init");
-    heartbeat_start();      /* background keepalive ping + optional phone-home */
+    audit_log("startup", is_worker ? "dsco worker init" : "dsco init");
+    if (!is_worker) heartbeat_start();      /* background keepalive ping + optional phone-home */
+
+    /* Native acceleration + parallelism. MLX is dlopen'd best-effort; if
+     * absent the accel layer falls back to Accelerate.framework / NEON. */
+    dsco_mlx_init();
+    dsco_accel_init();
+    dsco_pool_global_init(0);
+
+    /* Native context fingerprint + trust telemetry. Async — never blocks
+     * startup. Opt-out: DSCO_TRUST_OPT_OUT=1 */
+    dsco_fingerprint_refresh();
+    if (!is_worker) {
+        dsco_trust_config_t tcfg;
+        dsco_trust_default_config(&tcfg);
+        if (!tcfg.opt_out && dsco_trust_init(&tcfg) == 0) {
+            dsco_trust_emit_attest();   /* fingerprint goes to trust endpoint */
+        }
+    }
+
+    if (getenv("DSCO_ACCEL_BANNER")) {
+        const dsco_accel_info_t *ai = dsco_accel_info();
+        const dsco_fingerprint_t *fp = dsco_fingerprint_get();
+        char fpline[256];
+        if (fp) dsco_fingerprint_summary(fp, fpline, sizeof(fpline));
+        if (ai) fprintf(stderr, "%s%s%s\n  host: %s\n  trust: %s\n",
+                        ai->banner,
+                        dsco_mlx_library_path() ? " | mlx=" : "",
+                        dsco_mlx_library_path() ? dsco_mlx_library_path() : "",
+                        fpline,
+                        dsco_trust_is_active() ? dsco_trust_endpoint() : "off");
+    }
+
+    /* Auto-lock: engage when idle threshold reached; Touch ID to unlock */
+    if (isatty(STDIN_FILENO)) {
+        extern void tui_lock_engage(void);
+        const char *idle_s_str = getenv("DSCO_IDLE_LOCK_S");
+        int idle_s = idle_s_str ? atoi(idle_s_str) : 300; /* default 5 min */
+        if (idle_s > 0) {
+            presence_init(idle_s, (presence_lock_fn)tui_lock_engage, NULL);
+            presence_start();
+        }
+    }
+
     (void)atexit(main_atexit_handler);
     init_trace_runtime();
     init_vos_subsystems();  /* §1-§8: Post-LLM Virtual OS layer */
@@ -1340,21 +1549,6 @@ int main(int argc, char **argv) {
             return 1;
         }
     }
-
-    /* Skip output guard when we're just exec'ing an external CLI —
-       it redirects stdout through a pipe which breaks child processes. */
-    bool skip_og = false;
-    for (int i = 1; i < argc; i++) {
-        if (strcmp(argv[i], "-e") == 0 || strcmp(argv[i], "--exec") == 0) {
-            skip_og = true; break;
-        }
-    }
-    if (!skip_og) {
-        const char *env_exec = getenv("DSCO_EXEC");
-        if (env_exec && env_exec[0]) skip_og = true;
-    }
-    if (!skip_og) (void)output_guard_init();
-    TRACE_INFO("main start");
 
     const char *cli_profile = NULL;
     for (int i = 1; i < argc; i++) {
@@ -1429,6 +1623,8 @@ int main(int argc, char **argv) {
     int ui_port = 3141;
     bool orchestrate_mode = false;
     bool interactive_mode = false;
+    bool mux_mode = false;
+    const char *mux_initial_root = NULL;
     const char *worker_model = NULL;
 
     for (int i = 1; i < argc; i++) {
@@ -1567,6 +1763,16 @@ int main(int argc, char **argv) {
             g_cheap_mode = 1;
         } else if (strcmp(argv[i], "--orchestrate") == 0 || strcmp(argv[i], "-O") == 0) {
             orchestrate_mode = true;
+        } else if (strcmp(argv[i], "--mux") == 0 || strcmp(argv[i], "mux") == 0) {
+            mux_mode = true;
+            if (i + 1 < argc && argv[i + 1][0] != '-') {
+                mux_initial_root = argv[++i];
+            }
+        } else if (strcmp(argv[i], "--worker") == 0) {
+            /* Spawned by the mux. The project id arg (next token) is informational
+             * — env DSCO_PROJECT_ID is already set, and cwd was set by the parent. */
+            interactive_mode = true;
+            if (i + 1 < argc && argv[i + 1][0] != '-') i++;
         } else if (strcmp(argv[i], "--interactive") == 0 || strcmp(argv[i], "-i") == 0) {
             interactive_mode = true;
         } else if ((strcmp(argv[i], "-M") == 0 || strcmp(argv[i], "--worker-model") == 0) && i + 1 < argc) {
@@ -1601,7 +1807,7 @@ int main(int argc, char **argv) {
     }
 
     /* DSCO_EXEC env var as default */
-    if (!exec_backend) {
+    if (!exec_backend && !interactive_mode) {
         const char *env_exec = getenv("DSCO_EXEC");
         if (env_exec && env_exec[0])
             exec_backend = env_exec;
@@ -1613,6 +1819,15 @@ int main(int argc, char **argv) {
         if (env_cheap && (env_cheap[0] == '1' || env_cheap[0] == 't' || env_cheap[0] == 'T'))
             g_cheap_mode = 1;
     }
+
+    /* Output guard redirects stdout/stderr through helper threads. That is fine
+     * for native execution, but it breaks external CLI exec because execvp()
+     * replaces those helper threads. Decide after saved env has loaded so a
+     * persisted DSCO_EXEC=claude/codex is honored. */
+    if (!interactive_mode && !(exec_backend && exec_backend[0])) {
+        (void)output_guard_init();
+    }
+    TRACE_INFO("main start");
 
     bool allows_no_prompt =
         interactive_mode ||
@@ -2354,6 +2569,13 @@ native_path:
         conv_free(&conv);
         free(oneshot_prompt);
         if (oneshot_had_error) return 1;
+    } else if (mux_mode) {
+        const char *root = mux_initial_root;
+        char cwd_buf[PATH_MAX];
+        if (!root) {
+            if (getcwd(cwd_buf, sizeof(cwd_buf))) root = cwd_buf;
+        }
+        dsco_mux_run(api_key, root);
     } else if (orchestrate_mode) {
         agent_run_orchestrated(api_key, model, worker_model, g_provider_override);
     } else {
