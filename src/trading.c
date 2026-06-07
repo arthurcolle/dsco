@@ -15,6 +15,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <strings.h>
 #include <unistd.h>
 #include <time.h>
 #include <sys/time.h>
@@ -939,7 +940,7 @@ static void risk_init(void) {
     g_risk = risk_limits_default();
     const char *e;
     if ((e = getenv("DSCO_TRADING_DRY_RUN")))
-        g_risk.dry_run = (strcmp(e, "0") != 0);
+        g_risk.dry_run = !(strcmp(e, "0") == 0 || strcasecmp(e, "false") == 0 || strcasecmp(e, "off") == 0 || strcasecmp(e, "no") == 0);
     if ((e = getenv("DSCO_TRADING_MAX_ORDER")))
         g_risk.max_order_usd = atof(e);
     if ((e = getenv("DSCO_TRADING_MAX_EXPOSURE")))
@@ -1705,10 +1706,13 @@ bool tool_polymarket_balance(const char *input, char *result, size_t rlen) {
 
 bool tool_polymarket_positions(const char *input, char *result, size_t rlen) {
     (void)input;
-    const char *addr = getenv("POLYMARKET_ADDRESS");
+    /* Prefer proxy address (where positions live) over signer address */
+    const char *addr = getenv("POLYMARKET_PROXY_ADDRESS");
+    if (!addr || !addr[0])
+        addr = getenv("POLYMARKET_ADDRESS");
     if (!addr || !addr[0]) {
         snprintf(result, rlen,
-                 "Polymarket wallet address not set. Run: export POLYMARKET_ADDRESS=0x...");
+                 "Polymarket wallet address not set. Run: export POLYMARKET_PROXY_ADDRESS=0x...");
         return false;
     }
 
@@ -3089,7 +3093,10 @@ bool tool_portfolio_cross(const char *input, char *result, size_t rlen) {
 
     /* Polymarket section */
     jbuf_append(&jb, ",");
-    const char *p_addr = getenv("POLYMARKET_ADDRESS");
+    /* Prefer proxy address for positions (where funds/positions live) */
+    const char *p_addr = getenv("POLYMARKET_PROXY_ADDRESS");
+    if (!p_addr || !p_addr[0])
+        p_addr = getenv("POLYMARKET_ADDRESS");
     const char *p_key = getenv("POLYMARKET_API_KEY");
     const char *p_secret = getenv("POLYMARKET_API_SECRET");
     const char *p_pass = getenv("POLYMARKET_PASSPHRASE");
