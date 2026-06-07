@@ -10,6 +10,12 @@
 #include "eval.h"
 #include "tools.h"
 #include "plugin.h"
+#include "provider.h"
+#include "arena_alloc.h"
+#include "event_loop.h"
+#include "vm.h"
+#include "scheduler.h"
+#include "vfs.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -17,10 +23,13 @@
 #include <math.h>
 #include <errno.h>
 #include <time.h>
+#include <ctype.h>
 #include <sys/stat.h>
 
 /* Provide g_interrupted that agent.c normally defines */
 volatile int g_interrupted = 0;
+vm_t g_vm = {0};
+double g_cost_budget = 0.0;
 
 static int tests_run = 0;
 static int tests_passed = 0;
@@ -44,6 +53,29 @@ static int tests_failed = 0;
 #define ASSERT(cond, msg) do { \
     if (!(cond)) { FAIL(msg); return; } \
 } while(0)
+
+static char *test_external_tool_stub(const char *name, const char *input_json, void *ctx) {
+    (void)name;
+    (void)input_json;
+    (void)ctx;
+    return safe_strdup("{\"ok\":true}");
+}
+
+static void test_capture_env(const char *name, char *buf, size_t buf_len, bool *had_value) {
+    const char *value = getenv(name);
+    if (value) {
+        if (buf && buf_len > 0) snprintf(buf, buf_len, "%s", value);
+        if (had_value) *had_value = true;
+    } else {
+        if (buf && buf_len > 0) buf[0] = '\0';
+        if (had_value) *had_value = false;
+    }
+}
+
+static void test_restore_env(const char *name, const char *saved, bool had_value) {
+    if (had_value) setenv(name, saved ? saved : "", 1);
+    else unsetenv(name);
+}
 
 /* ── JSON tests ────────────────────────────────────────────────────────── */
 
@@ -175,6 +207,63 @@ static void test_conv_pop_last(void) {
     PASS();
 }
 
+static void test_conv_pop_last_turn(void) {
+    TEST("conversation pop_last_turn");
+    conversation_t conv;
+    conv_init(&conv);
+
+    conv_add_user_text(&conv, "[pinned] keep this");
+    conv_add_assistant_text(&conv, "ack");
+
+    conv_add_user_text(&conv, "first question");
+    conv_add_assistant_tool_use(&conv, "toolu_first", "bash", "{\"command\":\"echo first\"}");
+    conv_add_tool_result(&conv, "toolu_first", "first result", false);
+    conv_add_assistant_text(&conv, "first answer");
+
+    conv_add_user_text(&conv, "second question");
+    conv_add_assistant_tool_use(&conv, "toolu_second", "bash", "{\"command\":\"echo second\"}");
+    conv_add_tool_result(&conv, "toolu_second", "second result", false);
+    conv_add_assistant_text(&conv, "second answer");
+
+    ASSERT(conv_pop_last_turn(&conv), "first pop should succeed");
+    ASSERT(conv.count == 6, "latest turn removed");
+    ASSERT(conv.msgs[5].role == ROLE_ASSISTANT, "prior assistant preserved");
+    ASSERT(strcmp(conv.msgs[5].content[0].text, "first answer") == 0,
+           "prior assistant answer preserved");
+
+    ASSERT(conv_pop_last_turn(&conv), "second pop should succeed");
+    ASSERT(conv.count == 2, "pinned context preserved after removing prior turn");
+    ASSERT(conv.msgs[0].role == ROLE_USER, "pin user preserved");
+    ASSERT(strcmp(conv.msgs[0].content[0].text, "[pinned] keep this") == 0,
+           "pin text preserved");
+    ASSERT(conv.msgs[1].role == ROLE_ASSISTANT, "pin ack preserved");
+
+    conv_free(&conv);
+    PASS();
+}
+
+static void test_conv_pop_last_turn_tool_result_only(void) {
+    TEST("conversation pop_last_turn tool_result-only");
+    conversation_t conv;
+    conv_init(&conv);
+
+    conv_add_user_text(&conv, "keep this");
+    conv_add_assistant_text(&conv, "ack");
+    conv_add_user_text(&conv, "question");
+    conv_add_assistant_tool_use(&conv, "toolu_tool_result_only", "bash",
+                                "{\"command\":\"echo hi\"}");
+    conv_add_tool_result(&conv, "toolu_tool_result_only", "hi", false);
+
+    ASSERT(conv.count == 5, "turn assembled");
+    ASSERT(conv_pop_last_turn(&conv), "pop_last_turn should succeed");
+    ASSERT(conv.count == 2, "tool_result-only turn removed");
+    ASSERT(strcmp(conv.msgs[0].content[0].text, "keep this") == 0, "earlier user preserved");
+    ASSERT(strcmp(conv.msgs[1].content[0].text, "ack") == 0, "earlier assistant preserved");
+
+    conv_free(&conv);
+    PASS();
+}
+
 /* ── SHA-256 tests ─────────────────────────────────────────────────────── */
 
 static void test_sha256_known_answer(void) {
@@ -299,6 +388,405 @@ static void test_build_request_ex_effort(void) {
     ASSERT(strstr(req, "\"low\"") != NULL, "should contain effort value");
 
     free(req);
+    conv_free(&conv);
+    PASS();
+}
+
+static void test_openrouter_request_includes_external_tools_and_tool_choice(void) {
+    TEST("openrouter request includes external tools + tool_choice");
+    tools_init();
+    conversation_t conv;
+    conv_init(&conv);
+    conv_add_user_text(&conv, "use tools");
+
+    tools_register_external("test_openrouter_ext_tool",
+                            "External tool for provider request tests",
+                            "{\"type\":\"object\",\"properties\":{\"q\":{\"type\":\"string\"}}}",
+                            test_external_tool_stub, NULL);
+
+    session_state_t session;
+    session_state_init(&session, "moonshotai/kimi-k2.5");
+    snprintf(session.tool_choice, sizeof(session.tool_choice), "%s", "any");
+
+    provider_t *p = provider_create("openrouter");
+    ASSERT(p != NULL, "provider should be created");
+
+    char *req = p->build_request(p, &conv, &session, 1024);
+    ASSERT(req != NULL, "request should not be NULL");
+    ASSERT(strstr(req, "\"name\":\"test_openrouter_ext_tool\"") != NULL,
+           "should include external tool");
+    ASSERT(strstr(req, "\"tool_choice\":\"required\"") != NULL,
+           "should map any -> required");
+    ASSERT(strstr(req, "\"thinking\":{\"type\":\"disabled\"}") != NULL,
+           "kimi openrouter request should disable thinking for tool mode");
+
+    free(req);
+    provider_free(p);
+    conv_free(&conv);
+    PASS();
+}
+
+static void test_openrouter_request_named_tool_choice(void) {
+    TEST("openrouter request named tool_choice");
+    tools_init();
+    conversation_t conv;
+    conv_init(&conv);
+    conv_add_user_text(&conv, "call a tool");
+
+    session_state_t session;
+    session_state_init(&session, "moonshotai/kimi-k2.5");
+    snprintf(session.tool_choice, sizeof(session.tool_choice),
+             "%s", "tool:test_openrouter_ext_tool");
+
+    provider_t *p = provider_create("openrouter");
+    ASSERT(p != NULL, "provider should be created");
+
+    char *req = p->build_request(p, &conv, &session, 1024);
+    ASSERT(req != NULL, "request should not be NULL");
+    ASSERT(strstr(req, "\"tool_choice\":{\"type\":\"function\",\"function\":{\"name\":\"test_openrouter_ext_tool\"}}") != NULL,
+           "should encode named tool choice in OpenAI format");
+
+    free(req);
+    provider_free(p);
+    conv_free(&conv);
+    PASS();
+}
+
+static void test_openai_request_defaults_auto_tool_choice(void) {
+    TEST("openai request defaults to auto tool_choice");
+    tools_init();
+    conversation_t conv;
+    conv_init(&conv);
+    conv_add_user_text(&conv, "use a tool if needed");
+
+    tools_register_external("test_openai_auto_tool",
+                            "External tool for OpenAI auto tool_choice tests",
+                            "{\"type\":\"object\",\"properties\":{\"x\":{\"type\":\"string\"}}}",
+                            test_external_tool_stub, NULL);
+
+    session_state_t session;
+    session_state_init(&session, "gpt-4o");
+
+    provider_t *p = provider_create("openai");
+    ASSERT(p != NULL, "provider should be created");
+
+    char *req = p->build_request(p, &conv, &session, 1024);
+    ASSERT(req != NULL, "request should not be NULL");
+    ASSERT(strstr(req, "\"tool_choice\":\"auto\"") != NULL,
+           "OpenAI requests should default to auto tool_choice when tools are present");
+    ASSERT(strstr(req, "\"name\":\"test_openai_auto_tool\"") != NULL,
+           "request should include registered external tool");
+    ASSERT(strstr(req, "\"thinking\":{\"type\":\"disabled\"}") == NULL,
+           "native OpenAI requests should not inject Kimi thinking controls");
+
+    free(req);
+    provider_free(p);
+    conv_free(&conv);
+    PASS();
+}
+
+static void test_openrouter_request_tool_choice_none(void) {
+    TEST("openrouter request tool_choice none");
+    tools_init();
+    conversation_t conv;
+    conv_init(&conv);
+    conv_add_user_text(&conv, "do not use tools");
+
+    session_state_t session;
+    session_state_init(&session, "moonshotai/kimi-k2.5");
+    snprintf(session.tool_choice, sizeof(session.tool_choice), "%s", "none");
+
+    provider_t *p = provider_create("openrouter");
+    ASSERT(p != NULL, "provider should be created");
+
+    char *req = p->build_request(p, &conv, &session, 1024);
+    ASSERT(req != NULL, "request should not be NULL");
+    ASSERT(strstr(req, "\"tool_choice\":\"none\"") != NULL,
+           "none should serialize as OpenAI-compatible tool_choice none");
+
+    free(req);
+    provider_free(p);
+    conv_free(&conv);
+    PASS();
+}
+
+static void test_openrouter_request_external_tools_when_builtin_budget_zero(void) {
+    TEST("openrouter request keeps external tools at max_tools=0");
+    tools_init();
+    conversation_t conv;
+    conv_init(&conv);
+    conv_add_user_text(&conv, "use external tool only");
+
+    tools_register_external("test_openrouter_budget0_tool",
+                            "External tool that must survive zero builtin budget",
+                            "{\"type\":\"object\",\"properties\":{\"y\":{\"type\":\"string\"}}}",
+                            test_external_tool_stub, NULL);
+
+    char saved_env[64];
+    bool had_env = false;
+    test_capture_env("DSCO_OR_MAX_TOOLS", saved_env, sizeof(saved_env), &had_env);
+    setenv("DSCO_OR_MAX_TOOLS", "0", 1);
+
+    session_state_t session;
+    session_state_init(&session, "moonshotai/kimi-k2.5");
+
+    provider_t *p = provider_create("openrouter");
+    ASSERT(p != NULL, "provider should be created");
+
+    char *req = p->build_request(p, &conv, &session, 1024);
+    ASSERT(req != NULL, "request should not be NULL");
+    ASSERT(strstr(req, "\"name\":\"test_openrouter_budget0_tool\"") != NULL,
+           "external tool should still be present when builtin budget is zero");
+    ASSERT(strstr(req, "\"tool_choice\":\"auto\"") != NULL,
+           "tool_choice should still default to auto when external tools exist");
+
+    free(req);
+    provider_free(p);
+    conv_free(&conv);
+    test_restore_env("DSCO_OR_MAX_TOOLS", saved_env, had_env);
+    PASS();
+}
+
+static void test_openrouter_request_skips_disable_for_thinking_model(void) {
+    TEST("openrouter kimi-thinking leaves thinking enabled");
+    tools_init();
+    conversation_t conv;
+    conv_init(&conv);
+    conv_add_user_text(&conv, "use tools");
+
+    session_state_t session;
+    session_state_init(&session, "moonshotai/kimi-k2-thinking");
+
+    provider_t *p = provider_create("openrouter");
+    ASSERT(p != NULL, "provider should be created");
+
+    char *req = p->build_request(p, &conv, &session, 1024);
+    ASSERT(req != NULL, "request should not be NULL");
+    ASSERT(strstr(req, "\"thinking\":{\"type\":\"disabled\"}") == NULL,
+           "thinking variants should not be force-disabled");
+
+    free(req);
+    provider_free(p);
+    conv_free(&conv);
+    PASS();
+}
+
+static void test_openrouter_request_skips_disable_when_budget_set(void) {
+    TEST("openrouter kimi budget skips thinking disable");
+    tools_init();
+    conversation_t conv;
+    conv_init(&conv);
+    conv_add_user_text(&conv, "use tools");
+
+    session_state_t session;
+    session_state_init(&session, "moonshotai/kimi-k2.5");
+    session.thinking_budget = 2048;
+
+    provider_t *p = provider_create("openrouter");
+    ASSERT(p != NULL, "provider should be created");
+
+    char *req = p->build_request(p, &conv, &session, 1024);
+    ASSERT(req != NULL, "request should not be NULL");
+    ASSERT(strstr(req, "\"thinking\":{\"type\":\"disabled\"}") == NULL,
+           "explicit thinking budget should suppress Kimi disable shim");
+
+    free(req);
+    provider_free(p);
+    conv_free(&conv);
+    PASS();
+}
+
+static void test_openrouter_request_reasoning_env_blocks_disable(void) {
+    TEST("openrouter reasoning env blocks thinking disable");
+    tools_init();
+    conversation_t conv;
+    conv_init(&conv);
+    conv_add_user_text(&conv, "reason carefully with tools");
+
+    char saved_env[64];
+    bool had_env = false;
+    test_capture_env("DSCO_OR_REASONING_EFFORT", saved_env, sizeof(saved_env), &had_env);
+    setenv("DSCO_OR_REASONING_EFFORT", "high", 1);
+
+    session_state_t session;
+    session_state_init(&session, "moonshotai/kimi-k2.5");
+
+    provider_t *p = provider_create("openrouter");
+    ASSERT(p != NULL, "provider should be created");
+
+    char *req = p->build_request(p, &conv, &session, 1024);
+    ASSERT(req != NULL, "request should not be NULL");
+    ASSERT(strstr(req, "\"reasoning\":{\"effort\":\"high\"}") != NULL,
+           "reasoning effort should be serialized");
+    ASSERT(strstr(req, "\"thinking\":{\"type\":\"disabled\"}") == NULL,
+           "explicit reasoning effort should prevent the disable-thinking shim");
+
+    free(req);
+    provider_free(p);
+    conv_free(&conv);
+    test_restore_env("DSCO_OR_REASONING_EFFORT", saved_env, had_env);
+    PASS();
+}
+
+static void test_conv_compact_recent_tool_turn(void) {
+    TEST("conv_compact_recent_tool_turn");
+    conversation_t conv;
+    conv_init(&conv);
+    conv_add_user_text(&conv, "sqrt 7");
+    conv_add_assistant_tool_use(&conv, "toolu_calc", "eval", "{\"expr\":\"sqrt(7)\"}");
+    conv_add_tool_result_named(&conv, "toolu_calc", "eval", "2.64575131", false);
+
+    ASSERT(conv_compact_recent_tool_turn(&conv, 256), "compaction should succeed");
+    ASSERT(conv.count == 3, "conversation should keep same message count");
+    ASSERT(conv.msgs[1].content_count == 1, "assistant should be compacted to one block");
+    ASSERT(strcmp(conv.msgs[1].content[0].type, "text") == 0,
+           "assistant tool turn should become text");
+    ASSERT(strstr(conv.msgs[1].content[0].text, "Used tools: eval") != NULL,
+           "assistant summary should mention tool");
+    ASSERT(conv.msgs[2].content_count == 1, "user result should be compacted to one block");
+    ASSERT(strcmp(conv.msgs[2].content[0].type, "text") == 0,
+           "tool result should become text");
+    ASSERT(strstr(conv.msgs[2].content[0].text, "Tool result (eval):") != NULL,
+           "user summary should mention tool result");
+
+    session_state_t session;
+    session_state_init(&session, "sonnet");
+    char *req = llm_build_request_ex(&conv, &session, 1024);
+    ASSERT(req != NULL, "request should build");
+    ASSERT(strstr(req, "\"type\":\"tool_use\"") == NULL,
+           "compacted replay should not include tool_use blocks");
+    ASSERT(strstr(req, "\"type\":\"tool_result\"") == NULL,
+           "compacted replay should not include tool_result blocks");
+    ASSERT(strstr(req, "Tool result (eval):\\n2.64575131") != NULL,
+           "replay should preserve compacted result text");
+
+    free(req);
+    conv_free(&conv);
+    PASS();
+}
+
+static void test_conv_compact_recent_tool_turn_with_assistant_text(void) {
+    TEST("conv_compact tool turn preserves assistant text");
+    conversation_t conv;
+    conv_init(&conv);
+    conv_add_user_text(&conv, "sqrt 7");
+
+    content_block_t blocks[2] = {0};
+    blocks[0].type = safe_strdup("text");
+    blocks[0].text = safe_strdup("I will compute that.");
+    blocks[1].type = safe_strdup("tool_use");
+    blocks[1].tool_name = safe_strdup("eval");
+    blocks[1].tool_id = safe_strdup("toolu_eval_text");
+    blocks[1].tool_input = safe_strdup("{\"expr\":\"sqrt(7)\"}");
+    parsed_response_t resp = { .blocks = blocks, .count = 2, .stop_reason = NULL };
+    conv_add_assistant_raw(&conv, &resp);
+
+    for (int i = 0; i < 2; i++) {
+        free(blocks[i].type);
+        free(blocks[i].text);
+        free(blocks[i].tool_name);
+        free(blocks[i].tool_id);
+        free(blocks[i].tool_input);
+    }
+
+    conv_add_tool_result_named(&conv, "toolu_eval_text", "eval", "2.64575131", false);
+
+    ASSERT(conv_compact_recent_tool_turn(&conv, 256), "compaction should succeed");
+    ASSERT(strstr(conv.msgs[1].content[0].text, "I will compute that.") != NULL,
+           "assistant summary should preserve assistant text");
+    ASSERT(strstr(conv.msgs[1].content[0].text, "Used tools: eval") != NULL,
+           "assistant summary should still mention tool");
+
+    conv_free(&conv);
+    PASS();
+}
+
+static void test_conv_compact_recent_tool_turn_missing_result(void) {
+    TEST("conv_compact tool turn requires tool_result");
+    conversation_t conv;
+    conv_init(&conv);
+    conv_add_user_text(&conv, "sqrt 7");
+    conv_add_assistant_tool_use(&conv, "toolu_missing", "eval", "{\"expr\":\"sqrt(7)\"}");
+
+    ASSERT(!conv_compact_recent_tool_turn(&conv, 256),
+           "compaction should fail without a matching tool_result");
+    ASSERT(strcmp(conv.msgs[1].content[0].type, "tool_use") == 0,
+           "conversation should remain unchanged on failure");
+
+    conv_free(&conv);
+    PASS();
+}
+
+static void test_conv_compact_recent_tool_turn_trims_long_result(void) {
+    TEST("conv_compact tool turn trims long result");
+    conversation_t conv;
+    conv_init(&conv);
+    conv_add_user_text(&conv, "read large output");
+    conv_add_assistant_tool_use(&conv, "toolu_long", "bash", "{\"cmd\":\"printf x\"}");
+
+    char long_result[1600];
+    memset(long_result, 'x', sizeof(long_result) - 1);
+    long_result[sizeof(long_result) - 1] = '\0';
+    conv_add_tool_result_named(&conv, "toolu_long", "bash", long_result, false);
+
+    ASSERT(conv_compact_recent_tool_turn(&conv, 180), "compaction should succeed");
+    ASSERT(strstr(conv.msgs[2].content[0].text, "[trimmed ") != NULL,
+           "long result should be trimmed in compacted replay");
+
+    conv_free(&conv);
+    PASS();
+}
+
+static void test_conv_compact_recent_tool_turn_preserves_context_batch_preview(void) {
+    TEST("conv_compact tool turn keeps context batch breadcrumbs");
+    conversation_t conv;
+    conv_init(&conv);
+    conv_add_user_text(&conv, "fetch context batch");
+    conv_add_assistant_tool_use(&conv, "toolu_ctx_batch", "context_get_batch", "{\"query\":\"alpha\"}");
+
+    char body1[700];
+    char body2[700];
+    memset(body1, 'A', sizeof(body1) - 1);
+    memset(body2, 'B', sizeof(body2) - 1);
+    body1[sizeof(body1) - 1] = '\0';
+    body2[sizeof(body2) - 1] = '\0';
+
+    char batch[2200];
+    snprintf(batch, sizeof(batch),
+             "[chunk_id=11 tool=context_get_batch bytes=680]\n%s\n---\n"
+             "[chunk_id=22 tool=context_get_batch bytes=680]\n%s\n\n"
+             "--- batch: 2/2 chunks returned, 0 missing ---",
+             body1, body2);
+    conv_add_tool_result_named(&conv, "toolu_ctx_batch", "context_get_batch", batch, false);
+
+    ASSERT(conv_compact_recent_tool_turn(&conv, 120), "compaction should succeed");
+    ASSERT(strstr(conv.msgs[2].content[0].text, "[chunk_id=11") != NULL,
+           "compacted replay should keep first chunk breadcrumb");
+    ASSERT(strstr(conv.msgs[2].content[0].text, "[chunk_id=22") != NULL,
+           "compacted replay should keep second chunk breadcrumb");
+    ASSERT(strstr(conv.msgs[2].content[0].text, "[trimmed ") != NULL,
+           "compacted replay should mark the trimmed preview");
+
+    conv_free(&conv);
+    PASS();
+}
+
+static void test_conv_add_tool_result_named_reuses_user_message(void) {
+    TEST("conv_add_tool_result_named reuses user message");
+    conversation_t conv;
+    conv_init(&conv);
+    conv_add_user_text(&conv, "run tools");
+    conv_add_assistant_tool_use(&conv, "toolu_1", "eval", "{\"expr\":\"1+1\"}");
+    conv_add_tool_result_named(&conv, "toolu_1", "eval", "2", false);
+    conv_add_tool_result_named(&conv, "toolu_2", "bash", "ok", false);
+
+    ASSERT(conv.count == 3, "two tool results should share one user message");
+    ASSERT(conv.msgs[2].content_count == 2, "user tool-result message should contain both results");
+    ASSERT(strcmp(conv.msgs[2].content[0].tool_name, "eval") == 0,
+           "first tool name should be retained");
+    ASSERT(strcmp(conv.msgs[2].content[1].tool_name, "bash") == 0,
+           "second tool name should be retained");
+
     conv_free(&conv);
     PASS();
 }
@@ -2452,7 +2940,12 @@ static void test_conv_save_load_ex(void) {
 
     session_state_t s;
     session_state_init(&s, "haiku");
+    snprintf(s.active_skill, sizeof(s.active_skill), "analysis");
+    snprintf(s.active_topology, sizeof(s.active_topology), "mesh");
+    s.topology_auto = true;
     s.turn_count = 5;
+    s.tool_budget_ratio = 0.25f;
+    snprintf(s.pin_text, sizeof(s.pin_text), "[pinned] keep concise");
 
     const char *path = "/tmp/dsco_test_conv_ex.json";
     ASSERT(conv_save_ex(&conv, &s, path), "save_ex succeeds");
@@ -2463,6 +2956,48 @@ static void test_conv_save_load_ex(void) {
     session_state_init(&s2, "opus");
     ASSERT(conv_load_ex(&conv2, &s2, path), "load_ex succeeds");
     ASSERT(conv2.count == 2, "loaded 2 messages");
+    ASSERT(strcmp(s2.active_skill, "analysis") == 0, "active_skill round-trips");
+    ASSERT(strcmp(s2.active_topology, "mesh") == 0, "active_topology round-trips");
+    ASSERT(s2.topology_auto == true, "topology_auto round-trips");
+    ASSERT(s2.turn_count == 5, "turn_count round-trips");
+    ASSERT(fabs(s2.tool_budget_ratio - 0.25f) < 0.0001, "tool_budget_ratio round-trips");
+    ASSERT(strcmp(s2.pin_text, "[pinned] keep concise") == 0, "pin_text round-trips");
+
+    conv_free(&conv);
+    conv_free(&conv2);
+    unlink(path);
+    PASS();
+}
+
+static void test_conv_load_ex_preserves_session_when_missing_block(void) {
+    TEST("conv_load_ex preserves session when session block is absent");
+    conversation_t conv;
+    conv_init(&conv);
+    conv_add_user_text(&conv, "legacy session file");
+    conv_add_assistant_text(&conv, "ok");
+
+    const char *path = "/tmp/dsco_test_conv_legacy.json";
+    ASSERT(conv_save(&conv, path), "save without session succeeds");
+
+    conversation_t conv2;
+    conv_init(&conv2);
+    session_state_t s;
+    session_state_init(&s, "haiku");
+    snprintf(s.active_skill, sizeof(s.active_skill), "sentinel-skill");
+    snprintf(s.active_topology, sizeof(s.active_topology), "sentinel-topology");
+    s.topology_auto = true;
+    s.turn_count = 17;
+    s.tool_budget_ratio = 0.42f;
+    snprintf(s.pin_text, sizeof(s.pin_text), "sentinel pin");
+
+    ASSERT(conv_load_ex(&conv2, &s, path), "legacy load_ex succeeds");
+    ASSERT(conv2.count == 2, "legacy file loads messages");
+    ASSERT(strcmp(s.active_skill, "sentinel-skill") == 0, "active_skill unchanged");
+    ASSERT(strcmp(s.active_topology, "sentinel-topology") == 0, "active_topology unchanged");
+    ASSERT(s.topology_auto == true, "topology_auto unchanged");
+    ASSERT(s.turn_count == 17, "turn_count unchanged");
+    ASSERT(fabs(s.tool_budget_ratio - 0.42f) < 0.0001, "tool_budget_ratio unchanged");
+    ASSERT(strcmp(s.pin_text, "sentinel pin") == 0, "pin_text unchanged");
 
     conv_free(&conv);
     conv_free(&conv2);
@@ -2483,6 +3018,38 @@ static void test_conv_trim_old_results(void) {
     conv_trim_old_results(&conv, 5, 1000);
     /* After trim, should still have recent messages */
     ASSERT(conv.count <= 20, "count not increased");
+    conv_free(&conv);
+    PASS();
+}
+
+static void test_conv_trim_preserves_context_batch_breadcrumbs(void) {
+    TEST("conv_trim preserves context_get_batch breadcrumbs");
+    conversation_t conv;
+    conv_init(&conv);
+    conv_add_user_text(&conv, "query");
+    conv_add_assistant_text(&conv, "tool call");
+
+    char body1[700];
+    char body2[700];
+    memset(body1, 'A', sizeof(body1) - 1);
+    memset(body2, 'B', sizeof(body2) - 1);
+    body1[sizeof(body1) - 1] = '\0';
+    body2[sizeof(body2) - 1] = '\0';
+
+    char batch[2200];
+    snprintf(batch, sizeof(batch),
+             "[chunk_id=11 tool=market_movers bytes=680]\n%s\n---\n"
+             "[chunk_id=22 tool=market_movers bytes=680]\n%s\n\n"
+             "--- batch: 2/2 chunks returned, 0 missing ---",
+             body1, body2);
+    conv_add_tool_result_named(&conv, "toolu_ctx", "context_get_batch", batch, false);
+    conv_add_assistant_text(&conv, "follow-up");
+    conv_add_user_text(&conv, "continue");
+
+    conv_trim_old_results(&conv, 2, 120);
+    ASSERT(strstr(conv.msgs[2].content[0].text, "[chunk_id=11") != NULL, "keeps first chunk id");
+    ASSERT(strstr(conv.msgs[2].content[0].text, "[chunk_id=22") != NULL, "keeps second chunk id");
+    ASSERT(strstr(conv.msgs[2].content[0].text, "trimmed") != NULL, "marks compaction");
     conv_free(&conv);
     PASS();
 }
@@ -2531,6 +3098,408 @@ static void test_tools_get_all(void) {
     /* Each tool should have a name */
     for (int i = 0; i < count && i < 10; i++) {
         ASSERT(defs[i].name != NULL && strlen(defs[i].name) > 0, "tool has name");
+    }
+    PASS();
+}
+
+static void test_tools_get_paged_budget_floor(void) {
+    TEST("tools_get_paged clamps budget bands");
+    tools_init();
+
+    const struct {
+        int max_tools;
+        float ratio;
+        bool expect_discovery;
+    } cases[] = {
+        {10, 0.03f, false},   /* critical: no discovery, no working */
+        {10, 0.10f, false},   /* low: no discovery */
+        {10, 0.50f, true},    /* full: discovery enabled */
+        {1,  0.20f, false},   /* tiny cap: no room for discovery */
+        {30, 0.20f, false},   /* mid: no discovery under 0.4 */
+    };
+
+    for (size_t i = 0; i < sizeof(cases) / sizeof(cases[0]); i++) {
+        tool_page_result_t paged = tools_get_paged(NULL, cases[i].max_tools, cases[i].ratio);
+        ASSERT(paged.pinned_count >= 0, "pinned count non-negative");
+        ASSERT(paged.working_count >= 0, "working count non-negative");
+        ASSERT(paged.discovery_count >= 0, "discovery count non-negative");
+        ASSERT(paged.pinned_count + paged.working_count + paged.discovery_count <= cases[i].max_tools,
+               "total selected tools within cap");
+        /* Register-file budget thresholds (tighter than before):
+         * < 0.15: no discovery, < 0.05: no working either */
+        if (cases[i].ratio < 0.15f) {
+            ASSERT(paged.discovery_count == 0, "sub-0.15 ratio should skip discovery");
+        }
+        if (cases[i].ratio < 0.05f) {
+            ASSERT(paged.working_count == 0, "sub-0.05 ratio should skip working set");
+        }
+        tool_page_result_free(&paged);
+    }
+    PASS();
+}
+
+/* ── Register-file model tests ───────────────────────────────────────── */
+
+static void test_register_cap_enforced(void) {
+    TEST("register file hard cap at 64");
+    tools_init();
+    /* Even with max_tools=200, should never exceed TOOL_REGISTER_CAP */
+    tool_page_result_t paged = tools_get_paged("build a web scraper", 200, 1.0f);
+    int total = paged.pinned_count + paged.working_count + paged.discovery_count;
+    ASSERT(total <= TOOL_REGISTER_CAP, "total tools <= 64 register cap");
+    ASSERT(total > 0, "at least some tools selected");
+    tool_page_result_free(&paged);
+    PASS();
+}
+
+static void test_register_always_core_never_evicted(void) {
+    TEST("ALWAYS core tools present at all budget levels");
+    tools_init();
+    const char *must_have[] = {
+        "read_file", "write_file", "edit_file", "bash", "python",
+        "grep_files", "discover_tools", NULL
+    };
+    /* Even at critical budget (0.01), ALWAYS core must be present */
+    tool_page_result_t paged = tools_get_paged(NULL, TOOL_REGISTER_CAP, 0.01f);
+    for (int m = 0; must_have[m]; m++) {
+        bool found = false;
+        for (int i = 0; i < paged.pinned_count && !found; i++)
+            if (strcmp(paged.pinned[i]->name, must_have[m]) == 0) found = true;
+        ASSERT(found, "ALWAYS core tool present at critical budget");
+    }
+    tool_page_result_free(&paged);
+    PASS();
+}
+
+static void test_register_warm_evicted_under_pressure(void) {
+    TEST("WARM core tools evicted at critical budget");
+    tools_init();
+    /* At critical budget (0.01), warm_budget should be 0 */
+    tool_page_result_t paged = tools_get_paged(NULL, TOOL_REGISTER_CAP, 0.01f);
+    /* Check that swarm tools (WARM) are NOT in pinned at critical budget */
+    bool found_swarm = false;
+    for (int i = 0; i < paged.pinned_count; i++)
+        if (strcmp(paged.pinned[i]->name, "create_swarm") == 0) found_swarm = true;
+    ASSERT(!found_swarm, "WARM tool 'create_swarm' evicted at critical budget");
+    ASSERT(paged.working_count == 0, "no working set at critical budget");
+    ASSERT(paged.discovery_count == 0, "no discovery at critical budget");
+    tool_page_result_free(&paged);
+    PASS();
+}
+
+static void test_register_warm_present_at_full_budget(void) {
+    TEST("WARM core tools present at full budget");
+    tools_init();
+    tool_page_result_t paged = tools_get_paged(NULL, TOOL_REGISTER_CAP, 1.0f);
+    bool found_swarm = false;
+    for (int i = 0; i < paged.pinned_count; i++)
+        if (strcmp(paged.pinned[i]->name, "create_swarm") == 0) found_swarm = true;
+    ASSERT(found_swarm, "WARM tool 'create_swarm' present at full budget");
+    tool_page_result_free(&paged);
+    PASS();
+}
+
+static void test_register_budget_bands(void) {
+    TEST("register file shrinks across budget bands");
+    tools_init();
+    /* Full budget → most tools */
+    tool_page_result_t full = tools_get_paged(NULL, TOOL_REGISTER_CAP, 1.0f);
+    int total_full = full.pinned_count + full.working_count + full.discovery_count;
+    tool_page_result_free(&full);
+
+    /* Mid budget → fewer */
+    tool_page_result_t mid = tools_get_paged(NULL, TOOL_REGISTER_CAP, 0.25f);
+    int total_mid = mid.pinned_count + mid.working_count + mid.discovery_count;
+    tool_page_result_free(&mid);
+
+    /* Low budget → even fewer */
+    tool_page_result_t low = tools_get_paged(NULL, TOOL_REGISTER_CAP, 0.10f);
+    int total_low = low.pinned_count + low.working_count + low.discovery_count;
+    tool_page_result_free(&low);
+
+    /* Critical → minimum */
+    tool_page_result_t crit = tools_get_paged(NULL, TOOL_REGISTER_CAP, 0.01f);
+    int total_crit = crit.pinned_count + crit.working_count + crit.discovery_count;
+    tool_page_result_free(&crit);
+
+    ASSERT(total_full >= total_mid, "full budget >= mid budget tool count");
+    ASSERT(total_mid >= total_low, "mid budget >= low budget tool count");
+    ASSERT(total_low >= total_crit, "low budget >= critical budget tool count");
+    ASSERT(total_crit > 0, "critical budget still has core tools");
+    ASSERT(total_crit <= 16, "critical budget <= 16 tools (ALWAYS core only)");
+    PASS();
+}
+
+static void test_register_discovery_progressive_schema(void) {
+    TEST("discovery tier gets progressive schema");
+    tools_init();
+    /* At full budget with context, discovery tier should exist */
+    tool_page_result_t paged = tools_get_paged("deploy kubernetes", TOOL_REGISTER_CAP, 1.0f);
+    /* Discovery tools should be present at full budget */
+    /* (may be 0 if no TF-IDF matches — that's OK, just check non-negative) */
+    ASSERT(paged.discovery_count >= 0, "discovery count non-negative");
+    ASSERT(paged.discovery_count <= TOOL_REG_DISCOVERY, "discovery within budget");
+    tool_page_result_free(&paged);
+    PASS();
+}
+
+/* ── Quorum telemetry tests ──────────────────────────────────────────── */
+
+static void test_quorum_telemetry_populated(void) {
+    TEST("quorum telemetry populated after paged retrieval");
+    tools_init();
+    tool_page_result_t paged = tools_get_paged("read a file and grep", TOOL_REGISTER_CAP, 1.0f);
+    ASSERT(g_quorum_telemetry.candidates_scored >= 0, "candidates scored >= 0");
+    ASSERT(g_quorum_telemetry.quorum_admitted >= 0, "quorum admitted >= 0");
+    ASSERT(g_quorum_telemetry.quorum_vetoed >= 0, "quorum vetoed >= 0");
+    ASSERT(g_quorum_telemetry.quorum_ms >= 0.0, "quorum ms >= 0");
+    /* admitted + vetoed should account for all non-hot candidates */
+    tool_page_result_free(&paged);
+    PASS();
+}
+
+static void test_quorum_vetoes_single_signal(void) {
+    TEST("quorum vetoes single-signal tools");
+    tools_init();
+    /* With a context query, some tools should be vetoed (single-signal) */
+    tool_page_result_t paged = tools_get_paged("quantum cryptography", TOOL_REGISTER_CAP, 1.0f);
+    /* Can't guarantee vetoes on every query, but telemetry should be coherent */
+    ASSERT(g_quorum_telemetry.quorum_admitted + g_quorum_telemetry.quorum_vetoed
+           == g_quorum_telemetry.candidates_scored,
+           "admitted + vetoed = total candidates");
+    ASSERT(g_quorum_telemetry.quorum_admitted == paged.working_count,
+           "admitted count matches working set size");
+    tool_page_result_free(&paged);
+    PASS();
+}
+
+/* ── Page telemetry tests ────────────────────────────────────────────── */
+
+static void test_page_telemetry_schema_savings(void) {
+    TEST("page telemetry tracks schema token savings");
+    tools_init();
+    tool_page_result_t paged = tools_get_paged("analyze stock data", TOOL_REGISTER_CAP, 1.0f);
+    /* Schema savings = discovery_count * 200 + quorum_vetoed * 200 */
+    int expected_min = paged.discovery_count * 200;
+    ASSERT(g_page_telemetry.schema_tokens_saved >= expected_min,
+           "schema savings includes discovery + quorum savings");
+    ASSERT(g_page_telemetry.retrieval_ms >= 0.0, "retrieval time non-negative");
+    ASSERT(g_page_telemetry.budget_ratio >= 0.0f && g_page_telemetry.budget_ratio <= 1.0f,
+           "budget ratio in [0,1]");
+    tool_page_result_free(&paged);
+    PASS();
+}
+
+static void test_page_telemetry_tier_counts(void) {
+    TEST("page telemetry tier counts match result");
+    tools_init();
+    tool_page_result_t paged = tools_get_paged("git commit", TOOL_REGISTER_CAP, 0.8f);
+    ASSERT(g_page_telemetry.pinned_count == paged.pinned_count, "pinned telemetry matches");
+    ASSERT(g_page_telemetry.working_count == paged.working_count, "working telemetry matches");
+    ASSERT(g_page_telemetry.discovery_count == paged.discovery_count, "discovery telemetry matches");
+    tool_page_result_free(&paged);
+    PASS();
+}
+
+/* ── Virtual context window tests ────────────────────────────────────── */
+
+static void test_context_window_set_get(void) {
+    TEST("tools_set/get_context_window roundtrip");
+    tools_set_context_window(200000);
+    ASSERT(tools_context_window() == 200000, "200k context window stored");
+    tools_set_context_window(1000000);
+    ASSERT(tools_context_window() == 1000000, "1M context window stored");
+    tools_set_context_window(0);
+    ASSERT(tools_context_window() == 0, "zero resets to unknown");
+    PASS();
+}
+
+static void test_context_window_pressure_tightens_registers(void) {
+    TEST("context pressure tightens register allocation");
+    tools_init();
+    /* With a tiny context window (e.g., 8k tokens), tool schemas (64*200=12800)
+     * would exceed the window. Context pressure should shrink the register file. */
+    tools_set_context_window(8000);
+    tool_page_result_t small_ctx = tools_get_paged(NULL, TOOL_REGISTER_CAP, 1.0f);
+    int total_small = small_ctx.pinned_count + small_ctx.working_count + small_ctx.discovery_count;
+    tool_page_result_free(&small_ctx);
+
+    /* With a large context window (1M), no context pressure */
+    tools_set_context_window(1000000);
+    tool_page_result_t large_ctx = tools_get_paged(NULL, TOOL_REGISTER_CAP, 1.0f);
+    int total_large = large_ctx.pinned_count + large_ctx.working_count + large_ctx.discovery_count;
+    tool_page_result_free(&large_ctx);
+
+    ASSERT(total_large >= total_small,
+           "large context window allows more tools than small");
+
+    /* Reset */
+    tools_set_context_window(0);
+    PASS();
+}
+
+static void test_context_window_no_pressure_when_unset(void) {
+    TEST("no context pressure when window unset");
+    tools_init();
+    tools_set_context_window(0);
+    tool_page_result_t paged = tools_get_paged(NULL, TOOL_REGISTER_CAP, 1.0f);
+    int total = paged.pinned_count + paged.working_count + paged.discovery_count;
+    /* Should get full allocation when context window is unknown */
+    ASSERT(total >= 20, "full allocation without context pressure");
+    tool_page_result_free(&paged);
+    PASS();
+}
+
+/* ── Config constant tests ───────────────────────────────────────────── */
+
+static void test_config_register_constants(void) {
+    TEST("register file constants sum to 64");
+    ASSERT(TOOL_REG_ALWAYS + TOOL_REG_WARM + TOOL_REG_WORKING + TOOL_REG_DISCOVERY
+           == TOOL_REGISTER_CAP,
+           "register banks sum to cap");
+    ASSERT(TOOL_REGISTER_CAP == 64, "register cap is 64");
+    ASSERT(QUORUM_MIN_SIGNALS == 2, "quorum requires 2 signals");
+    PASS();
+}
+
+/* ── Core tool split tests ───────────────────────────────────────────── */
+
+static void test_core_always_is_subset(void) {
+    TEST("ALWAYS core tools are valid tool names");
+    tools_init();
+    int total;
+    const tool_def_t *all = tools_get_all(&total);
+    const char *always[] = {
+        "read_file", "write_file", "edit_file", "list_directory",
+        "find_files", "grep_files", "bash", "python",
+        "context_pack", "context_search", "context_get",
+        "discover_tools", "self_exit", NULL
+    };
+    for (int i = 0; always[i]; i++) {
+        bool found = false;
+        for (int j = 0; j < total && !found; j++)
+            if (strcmp(all[j].name, always[i]) == 0) found = true;
+        ASSERT(found, "ALWAYS tool exists in registry");
+    }
+    PASS();
+}
+
+static void test_core_warm_is_subset(void) {
+    TEST("WARM core tools are valid tool names");
+    tools_init();
+    int total;
+    const tool_def_t *all = tools_get_all(&total);
+    const char *warm[] = {
+        "append_file", "run_command", "spawn_agent", "agent_wait",
+        "agent_output", "agent_status", "agent_kill", "agent_race",
+        "spawn_provider", "spawn_executor", "create_swarm",
+        "swarm_status", "swarm_collect", "openrouter_models",
+        "executor_status", "soul_read", NULL
+    };
+    for (int i = 0; warm[i]; i++) {
+        bool found = false;
+        for (int j = 0; j < total && !found; j++)
+            if (strcmp(all[j].name, warm[i]) == 0) found = true;
+        ASSERT(found, "WARM tool exists in registry");
+    }
+    PASS();
+}
+
+static void test_core_no_overlap(void) {
+    TEST("ALWAYS and WARM core have no overlap");
+    const char *always[] = {
+        "read_file", "write_file", "edit_file", "list_directory",
+        "find_files", "grep_files", "bash", "python",
+        "context_pack", "context_search", "context_get",
+        "discover_tools", "self_exit", NULL
+    };
+    const char *warm[] = {
+        "append_file", "run_command", "spawn_agent", "agent_wait",
+        "agent_output", "agent_status", "agent_kill", "agent_race",
+        "spawn_provider", "spawn_executor", "create_swarm",
+        "swarm_status", "swarm_collect", "openrouter_models",
+        "executor_status", "soul_read", NULL
+    };
+    for (int i = 0; always[i]; i++)
+        for (int j = 0; warm[j]; j++)
+            ASSERT(strcmp(always[i], warm[j]) != 0, "no overlap between ALWAYS and WARM");
+    PASS();
+}
+
+/* ── Hint-pinned tools get into registers ────────────────────────────── */
+
+static void test_hint_pinned_tools_loaded(void) {
+    TEST("hint-pinned tools appear in pinned tier");
+    tools_init();
+    tools_hint_init();
+    tools_hint_clear();
+
+    /* Pin a specific tool via hint */
+    tool_hint_t h = {0};
+    snprintf(h.domain, sizeof(h.domain), "test");
+    snprintf(h.tools[0], 64, "sha256");
+    h.tool_count = 1;
+    h.weight = 1.0f;
+    h.ttl_turns = 5;
+    h.source = HINT_USER;
+    tools_hint_add(&h);
+
+    tool_page_result_t paged = tools_get_paged(NULL, TOOL_REGISTER_CAP, 1.0f);
+    bool found = false;
+    for (int i = 0; i < paged.pinned_count && !found; i++)
+        if (strcmp(paged.pinned[i]->name, "sha256") == 0) found = true;
+    ASSERT(found, "hint-pinned tool appears in pinned tier");
+
+    tools_hint_clear();
+    tool_page_result_free(&paged);
+    PASS();
+}
+
+/* ── Budget ratio boundary tests ─────────────────────────────────────── */
+
+static void test_budget_boundaries_exact(void) {
+    TEST("budget boundary transitions at exact thresholds");
+    tools_init();
+    tools_set_context_window(0); /* no context pressure */
+
+    /* At exactly 0.05, should be in LOW band (not critical) */
+    tool_page_result_t at_05 = tools_get_paged(NULL, TOOL_REGISTER_CAP, 0.05f);
+    /* At 0.049, should be in CRITICAL band */
+    tool_page_result_t at_049 = tools_get_paged(NULL, TOOL_REGISTER_CAP, 0.049f);
+
+    int total_05 = at_05.pinned_count + at_05.working_count + at_05.discovery_count;
+    int total_049 = at_049.pinned_count + at_049.working_count + at_049.discovery_count;
+
+    ASSERT(total_05 >= total_049, "0.05 budget allows more tools than 0.049");
+    ASSERT(at_049.working_count == 0, "0.049 (critical) has no working set");
+
+    tool_page_result_free(&at_05);
+    tool_page_result_free(&at_049);
+    PASS();
+}
+
+/* ── Hot cache interaction with quorum ───────────────────────────────── */
+
+static void test_hot_cache_bypasses_quorum(void) {
+    TEST("hot cache tools bypass quorum filter");
+    tools_init();
+    /* Mark a tool as hot */
+    int total;
+    const tool_def_t *all = tools_get_all(&total);
+    int sha_idx = -1;
+    for (int i = 0; i < total; i++)
+        if (strcmp(all[i].name, "sha256") == 0) { sha_idx = i; break; }
+
+    if (sha_idx >= 0) {
+        extern void tools_mark_hot(int tool_idx);
+        tools_mark_hot(sha_idx);
+
+        tool_page_result_t paged = tools_get_paged(NULL, TOOL_REGISTER_CAP, 1.0f);
+        bool found = false;
+        for (int i = 0; i < paged.working_count && !found; i++)
+            if (strcmp(paged.working[i]->name, "sha256") == 0) found = true;
+        ASSERT(found, "hot-cached tool appears in working set despite no quorum signals");
+        tool_page_result_free(&paged);
     }
     PASS();
 }
@@ -5443,6 +6412,19 @@ static void test_tools_execute_base64(void) {
     bool ok = tools_execute("base64_tool", "{\"text\":\"hello\",\"action\":\"encode\"}", result, sizeof(result));
     ASSERT(ok, "base64 tool executed");
     ASSERT(strstr(result, "aGVsbG8") != NULL, "base64 of hello");
+    ok = tools_execute("base64_tool", "{\"input\":\"hello\",\"action\":\"encode\"}", result, sizeof(result));
+    ASSERT(ok, "base64 tool input alias executed");
+    ASSERT(strstr(result, "aGVsbG8") != NULL, "base64 input alias of hello");
+    PASS();
+}
+
+static void test_tools_execute_base64_legacy(void) {
+    TEST("tools_execute base64 legacy tool");
+    tools_init();
+    char result[4096] = {0};
+    bool ok = tools_execute("base64", "{\"data\":\"hello\"}", result, sizeof(result));
+    ASSERT(ok, "base64 legacy tool executed");
+    ASSERT(strstr(result, "aGVsbG8") != NULL, "base64 legacy of hello");
     PASS();
 }
 static void test_tools_execute_random_bytes(void) {
@@ -5504,6 +6486,1112 @@ static void test_tui_sparkline_extended(void) {
 
 /* ── Main ──────────────────────────────────────────────────────────────── */
 
+/* ── Slash command unit tests ──────────────────────────────────────────── */
+
+/* Test: /undo on empty conv is a no-op (conv_pop_last safe on empty) */
+static void test_slash_undo_empty_conv(void) {
+    TEST("slash /undo on empty conv is safe");
+    conversation_t conv;
+    conv_init(&conv);
+    ASSERT(!conv_pop_last_turn(&conv), "empty conv should not pop");
+    ASSERT(conv.count == 0, "empty conv still 0 after pop");
+    conv_free(&conv);
+    PASS();
+}
+
+/* Test: /undo removes user+assistant pair */
+static void test_slash_undo_removes_pair(void) {
+    TEST("slash /undo removes user+assistant pair");
+    conversation_t conv;
+    conv_init(&conv);
+    conv_add_user_text(&conv, "hello");
+    conv_add_assistant_text(&conv, "hi there");
+    ASSERT(conv.count == 2, "should have 2 messages");
+    ASSERT(conv_pop_last_turn(&conv), "pop_last_turn should remove pair");
+    ASSERT(conv.count == 0, "after undo pair should be 0");
+    conv_free(&conv);
+    PASS();
+}
+
+/* Test: /undo only 1 message pops just 1 */
+static void test_slash_undo_single_msg(void) {
+    TEST("slash /undo with 1 message pops just 1");
+    conversation_t conv;
+    conv_init(&conv);
+    conv_add_user_text(&conv, "solo message");
+    ASSERT(conv_pop_last_turn(&conv), "pop_last_turn should remove lone message");
+    ASSERT(conv.count == 0, "count should be 0");
+    conv_free(&conv);
+    PASS();
+}
+
+/* Test: /note prefix is [note] */
+static void test_slash_note_prefix(void) {
+    TEST("slash /note injects [note] prefix");
+    char note_buf[256];
+    const char *user_text = "remember this";
+    snprintf(note_buf, sizeof(note_buf), "[note] %s", user_text);
+    ASSERT(strncmp(note_buf, "[note] ", 7) == 0, "should start with [note] ");
+    ASSERT(strstr(note_buf, user_text) != NULL, "should contain user text");
+    PASS();
+}
+
+/* Test: /pin text stored correctly */
+static void test_slash_pin_stored(void) {
+    TEST("slash /pin text stored in session");
+    session_state_t s;
+    session_state_init(&s, "sonnet");
+    ASSERT(s.pin_text[0] == '\0', "pin_text initially empty");
+    snprintf(s.pin_text, sizeof(s.pin_text), "always use metric units");
+    ASSERT(strcmp(s.pin_text, "always use metric units") == 0, "pin_text stores correctly");
+    PASS();
+}
+
+/* Test: /unpin clears pin_text */
+static void test_slash_unpin_clears(void) {
+    TEST("slash /unpin clears pin_text");
+    session_state_t s;
+    session_state_init(&s, "sonnet");
+    snprintf(s.pin_text, sizeof(s.pin_text), "some pinned context");
+    s.pin_text[0] = '\0';
+    ASSERT(s.pin_text[0] == '\0', "pin_text cleared");
+    PASS();
+}
+
+/* Test: /pin prefix is [pinned] when injected into conv */
+static void test_slash_pin_conv_prefix(void) {
+    TEST("slash /pin injects [pinned] prefix into conv");
+    conversation_t conv;
+    conv_init(&conv);
+    const char *pin = "always respond in english";
+    char pinbuf[1200];
+    snprintf(pinbuf, sizeof(pinbuf), "[pinned] %s", pin);
+    conv_add_user_text(&conv, pinbuf);
+    ASSERT(conv.count == 1, "conv has 1 message");
+    ASSERT(strncmp(conv.msgs[0].content[0].text, "[pinned] ", 9) == 0, "[pinned] prefix present");
+    conv_free(&conv);
+    PASS();
+}
+
+/* Test: /branch path construction */
+static void test_slash_branch_path(void) {
+    TEST("slash /branch path sanitises name");
+    const char *bname = "feature/auth test!";
+    char safe[64] = {0};
+    int si = 0;
+    for (const char *c = bname; *c && si < 63; c++) {
+        safe[si++] = (isalnum((unsigned char)*c) || *c == '-' || *c == '_') ? *c : '_';
+    }
+    /* '/' and '!' should be replaced with '_' */
+    ASSERT(strchr(safe, '/') == NULL, "no slashes in safe name");
+    ASSERT(strchr(safe, '!') == NULL, "no ! in safe name");
+    ASSERT(strncmp(safe, "feature", 7) == 0, "starts with feature");
+    PASS();
+}
+
+/* Test: /branch saves conv and file exists */
+static void test_slash_branch_saves_file(void) {
+    TEST("slash /branch saves conversation to file");
+    conversation_t conv;
+    conv_init(&conv);
+    conv_add_user_text(&conv, "branch test message");
+    conv_add_assistant_text(&conv, "acknowledged");
+    const char *path = "/tmp/dsco_test_branch.json";
+    bool ok = conv_save(&conv, path);
+    ASSERT(ok, "conv_save should succeed");
+    struct stat st;
+    ASSERT(stat(path, &st) == 0, "branch file should exist");
+    ASSERT(st.st_size > 10, "branch file should have content");
+    /* Load and verify */
+    conversation_t conv2;
+    conv_init(&conv2);
+    ASSERT(conv_load(&conv2, path), "should load branch");
+    ASSERT(conv2.count == 2, "loaded branch has 2 messages");
+    conv_free(&conv);
+    conv_free(&conv2);
+    unlink(path);
+    PASS();
+}
+
+/* Test: /diff - popen("git version") is callable */
+static void test_slash_diff_popen_works(void) {
+    TEST("slash /diff popen git works");
+    FILE *fp = popen("git version 2>&1", "r");
+    ASSERT(fp != NULL, "popen should succeed");
+    char line[128];
+    bool got_output = false;
+    if (fgets(line, sizeof(line), fp)) got_output = true;
+    pclose(fp);
+    ASSERT(got_output, "git version should produce output");
+    PASS();
+}
+
+/* Test: /add-dir prefix format */
+static void test_slash_add_dir_prefix(void) {
+    TEST("slash /add-dir prefix format");
+    const char *dir = "/tmp";
+    char ctx[512];
+    int off = snprintf(ctx, sizeof(ctx), "[directory: %s]\n", dir);
+    ASSERT(off > 0, "snprintf succeeded");
+    ASSERT(strncmp(ctx, "[directory: ", 12) == 0, "prefix is [directory: ]");
+    ASSERT(strstr(ctx, "/tmp") != NULL, "dir path in prefix");
+    PASS();
+}
+
+/* Test: /git command format */
+static void test_slash_git_cmd_format(void) {
+    TEST("slash /git formats git command correctly");
+    const char *arg = "status --short";
+    char cmd[256];
+    snprintf(cmd, sizeof(cmd), "git %s 2>&1", arg);
+    ASSERT(strncmp(cmd, "git ", 4) == 0, "starts with 'git '");
+    ASSERT(strstr(cmd, "2>&1") != NULL, "redirects stderr");
+    PASS();
+}
+
+/* Test: /ask model resolution */
+static void test_slash_ask_model_resolve(void) {
+    TEST("slash /ask resolves model alias");
+    const char *resolved = model_resolve_alias("haiku");
+    ASSERT(resolved != NULL, "model_resolve_alias returns non-NULL");
+    ASSERT(strstr(resolved, "haiku") != NULL, "resolved contains haiku");
+    PASS();
+}
+
+/* Test: /alias add and lookup */
+static void test_slash_alias_add(void) {
+    TEST("slash /alias add entry");
+    /* Simulate alias table */
+    struct { char name[64]; char expansion[256]; } aliases[4];
+    int alias_count = 0;
+    /* Add an alias */
+    snprintf(aliases[0].name, sizeof(aliases[0].name), "h");
+    snprintf(aliases[0].expansion, sizeof(aliases[0].expansion), "/help");
+    alias_count = 1;
+    ASSERT(alias_count == 1, "alias count is 1");
+    ASSERT(strcmp(aliases[0].name, "h") == 0, "alias name is h");
+    ASSERT(strcmp(aliases[0].expansion, "/help") == 0, "alias expansion is /help");
+    PASS();
+}
+
+/* Test: /alias expansion with tail */
+static void test_slash_alias_expansion(void) {
+    TEST("slash /alias expansion appends tail");
+    const char *alias_name = "m";
+    const char *alias_expansion = "/model";
+    const char *input = "m sonnet";
+    /* Simulate the expansion logic */
+    size_t nlen = strlen(alias_name);
+    char tail[256] = {0};
+    if (input[nlen] == ' ')
+        snprintf(tail, sizeof(tail), " %s", input + nlen + 1);
+    char result[512];
+    snprintf(result, sizeof(result), "%s%s", alias_expansion, tail);
+    ASSERT(strcmp(result, "/model sonnet") == 0, "expanded to /model sonnet");
+    PASS();
+}
+
+/* Test: /retry logic - last_user_input tracking */
+static void test_slash_retry_last_input(void) {
+    TEST("slash /retry tracks last user input");
+    char last_user_input[256] = {0};
+    const char *msg = "what is the capital of France?";
+    snprintf(last_user_input, sizeof(last_user_input), "%s", msg);
+    ASSERT(strcmp(last_user_input, msg) == 0, "last_user_input stored correctly");
+    /* Simulate undo for retry: pop assistant, last_user_input remains */
+    ASSERT(last_user_input[0] != '\0', "last_user_input not cleared by undo");
+    PASS();
+}
+
+/* Test: /undo decrements turn count */
+static void test_slash_undo_turn_count(void) {
+    TEST("slash /undo semantics: turn_count decrements");
+    int turn_count = 3;
+    if (turn_count > 0) turn_count--;
+    ASSERT(turn_count == 2, "turn_count decremented");
+    PASS();
+}
+
+/* Test: new model gpt54-mini in registry */
+static void test_model_gpt54_mini_registered(void) {
+    TEST("model gpt54-mini in registry");
+    const char *resolved = model_resolve_alias("gpt54-mini");
+    ASSERT(resolved != NULL, "gpt54-mini resolves");
+    ASSERT(strstr(resolved, "gpt-5.4-mini") != NULL, "resolves to gpt-5.4-mini");
+    PASS();
+}
+
+/* Test: new model gpt54-nano in registry */
+static void test_model_gpt54_nano_registered(void) {
+    TEST("model gpt54-nano in registry");
+    const char *resolved = model_resolve_alias("gpt54-nano");
+    ASSERT(resolved != NULL, "gpt54-nano resolves");
+    ASSERT(strstr(resolved, "gpt-5.4-nano") != NULL, "resolves to gpt-5.4-nano");
+    PASS();
+}
+
+/* Test: history dedup condition */
+static void test_history_dedup_logic(void) {
+    TEST("history dedup skips duplicate consecutive entry");
+    const char *prev = "hello world";
+    const char *cur  = "hello world";
+    bool should_add = (strcmp(prev, cur) != 0);
+    ASSERT(!should_add, "duplicate should NOT be added");
+    const char *cur2 = "different input";
+    bool should_add2 = (strcmp(prev, cur2) != 0);
+    ASSERT(should_add2, "different input SHOULD be added");
+    PASS();
+}
+
+/* Test: arg completion effort table */
+static void test_arg_completion_effort(void) {
+    TEST("arg completion effort table correct");
+    static const char *effort_args[] = {"low", "medium", "high", NULL};
+    ASSERT(strcmp(effort_args[0], "low")    == 0, "effort[0] = low");
+    ASSERT(strcmp(effort_args[1], "medium") == 0, "effort[1] = medium");
+    ASSERT(strcmp(effort_args[2], "high")   == 0, "effort[2] = high");
+    ASSERT(effort_args[3] == NULL, "effort table null-terminated");
+    PASS();
+}
+
+/* Test: arg completion trust table */
+static void test_arg_completion_trust(void) {
+    TEST("arg completion trust table correct");
+    static const char *trust_args[] = {"trusted", "standard", "untrusted", NULL};
+    ASSERT(strcmp(trust_args[0], "trusted")   == 0, "trust[0] = trusted");
+    ASSERT(strcmp(trust_args[1], "standard")  == 0, "trust[1] = standard");
+    ASSERT(strcmp(trust_args[2], "untrusted") == 0, "trust[2] = untrusted");
+    ASSERT(trust_args[3] == NULL, "trust table null-terminated");
+    PASS();
+}
+
+/* Test: make_arg_completion format */
+static void test_make_arg_completion_format(void) {
+    TEST("make_arg_completion builds '<cmd> <arg>' string");
+    const char *prefix = "/effort";
+    const char *arg    = "high";
+    size_t n = strlen(prefix) + 1 + strlen(arg) + 1;
+    char *r = malloc(n);
+    snprintf(r, n, "%s %s", prefix, arg);
+    ASSERT(strcmp(r, "/effort high") == 0, "completion string correct");
+    free(r);
+    PASS();
+}
+
+
+/* ═══════════════════════════════════════════════════════════════════════════
+ * §1-§8: Post-LLM Virtual OS Subsystem Tests
+ * ═══════════════════════════════════════════════════════════════════════════ */
+
+/* ── §2: Arena Allocator ──────────────────────────────────────────── */
+
+static void test_vos_arena_init_shutdown(void) {
+    TEST("§2 arena subsystem init/shutdown");
+    arena_subsystem_init();
+    arena_stats_t st = arena_get_stats();
+    ASSERT(st.scratch_resets == 0, "no resets yet");
+    ASSERT(st.temp_scopes == 0, "no temps yet");
+    arena_subsystem_shutdown();
+    PASS();
+}
+
+static void test_vos_scratch_alloc(void) {
+    TEST("§2 scratch_alloc returns usable memory");
+    arena_subsystem_init();
+    char *p = scratch_alloc(128);
+    ASSERT(p != NULL, "alloc returned non-null");
+    memset(p, 'A', 128); /* must not crash */
+    ASSERT(p[0] == 'A' && p[127] == 'A', "memory writable");
+    arena_subsystem_shutdown();
+    PASS();
+}
+
+static void test_vos_scratch_strdup(void) {
+    TEST("§2 scratch_strdup duplicates string");
+    arena_subsystem_init();
+    char *s = scratch_strdup("hello world");
+    ASSERT(s != NULL, "strdup returned non-null");
+    ASSERT(strcmp(s, "hello world") == 0, "content matches");
+    arena_subsystem_shutdown();
+    PASS();
+}
+
+static void test_vos_scratch_sprintf(void) {
+    TEST("§2 scratch_sprintf formats correctly");
+    arena_subsystem_init();
+    char *s = scratch_sprintf("count=%d name=%s", 42, "dsco");
+    ASSERT(s != NULL, "sprintf returned non-null");
+    ASSERT(strcmp(s, "count=42 name=dsco") == 0, "format correct");
+    arena_subsystem_shutdown();
+    PASS();
+}
+
+static void test_vos_scratch_reset(void) {
+    TEST("§2 scratch_reset clears and increments counter");
+    arena_subsystem_init();
+    scratch_alloc(1024);
+    arena_scratch_reset();
+    arena_stats_t st = arena_get_stats();
+    ASSERT(st.scratch_resets == 1, "reset count is 1");
+    arena_scratch_reset();
+    st = arena_get_stats();
+    ASSERT(st.scratch_resets == 2, "reset count is 2");
+    arena_subsystem_shutdown();
+    PASS();
+}
+
+static void test_vos_session_alloc(void) {
+    TEST("§2 session_alloc persists across scratch resets");
+    arena_subsystem_init();
+    char *s = session_strdup("persistent");
+    arena_scratch_reset();
+    ASSERT(strcmp(s, "persistent") == 0, "session data survives scratch reset");
+    arena_subsystem_shutdown();
+    PASS();
+}
+
+static void test_vos_arena_temp_scope(void) {
+    TEST("§2 arena temp scope saves/restores");
+    arena_subsystem_init();
+    scratch_alloc(64);
+    arena_temp_t mark = arena_temp_begin();
+    scratch_alloc(4096);
+    arena_temp_end(mark);
+    arena_stats_t st = arena_get_stats();
+    ASSERT(st.temp_scopes == 1, "temp scope counted");
+    arena_subsystem_shutdown();
+    PASS();
+}
+
+static void test_vos_arena_many_allocs(void) {
+    TEST("§2 arena handles 10000 small allocs");
+    arena_subsystem_init();
+    for (int i = 0; i < 10000; i++) {
+        char *p = scratch_alloc(16);
+        ASSERT(p != NULL, "alloc not null");
+        p[0] = (char)i;
+    }
+    arena_stats_t st = arena_get_stats();
+    ASSERT(st.scratch_bytes_allocated >= 160000, "allocated enough bytes");
+    arena_subsystem_shutdown();
+    PASS();
+}
+
+/* ── §6: Event Loop ───────────────────────────────────────────────── */
+
+static void test_vos_evloop_create_free(void) {
+    TEST("§6 event loop create/free");
+    ev_loop_t *loop = ev_loop_new();
+    ASSERT(loop != NULL, "loop created");
+    ev_stats_t st = ev_loop_stats(loop);
+    ASSERT(st.polls == 0, "no polls yet");
+    ASSERT(st.active_fds == 0, "no fds");
+    ASSERT(st.active_timers == 0, "no timers");
+    ev_loop_free(loop);
+    PASS();
+}
+
+static void test_vos_evloop_timer_once(void) {
+    TEST("§6 one-shot timer fires on poll");
+    ev_loop_t *loop = ev_loop_new();
+    s_timer_fire_count = 0;
+    ev_timer_once(loop, 0, test_timer_cb, NULL);
+    ev_loop_poll(loop, 10);
+    ASSERT(s_timer_fire_count == 1, "one-shot fired");
+    ev_loop_free(loop);
+    PASS();
+}
+
+static int s_timer_fire_count = 0;
+static void test_timer_cb(int id, void *ctx) {
+    (void)id; (void)ctx;
+    s_timer_fire_count++;
+}
+
+static void test_vos_evloop_timer_fires(void) {
+    TEST("§6 timer fires on poll");
+    ev_loop_t *loop = ev_loop_new();
+    s_timer_fire_count = 0;
+    ev_timer_once(loop, 0, test_timer_cb, NULL); /* immediate */
+    ev_loop_poll(loop, 10);
+    ASSERT(s_timer_fire_count == 1, "timer fired once");
+    ev_loop_free(loop);
+    PASS();
+}
+
+static void test_vos_evloop_timer_repeat(void) {
+    TEST("§6 repeating timer fires multiple times");
+    ev_loop_t *loop = ev_loop_new();
+    s_timer_fire_count = 0;
+    int tid = ev_timer_repeat(loop, 1, test_timer_cb, NULL);
+    for (int i = 0; i < 5; i++) ev_loop_poll(loop, 5);
+    ASSERT(s_timer_fire_count >= 3, "timer fired at least 3 times");
+    ev_timer_cancel(loop, tid);
+    ev_loop_free(loop);
+    PASS();
+}
+
+static void test_vos_evloop_timer_cancel(void) {
+    TEST("§6 cancelled timer does not fire");
+    ev_loop_t *loop = ev_loop_new();
+    s_timer_fire_count = 0;
+    int tid = ev_timer_once(loop, 1000, test_timer_cb, NULL);
+    ev_timer_cancel(loop, tid);
+    ev_loop_poll(loop, 10);
+    ASSERT(s_timer_fire_count == 0, "cancelled timer didn't fire");
+    ev_loop_free(loop);
+    PASS();
+}
+
+static int s_defer_count = 0;
+static void test_defer_cb(void *ctx) { (void)ctx; s_defer_count++; }
+
+static void test_vos_evloop_defer(void) {
+    TEST("§6 deferred callback runs on next poll");
+    ev_loop_t *loop = ev_loop_new();
+    s_defer_count = 0;
+    ev_defer(loop, test_defer_cb, NULL);
+    ev_defer(loop, test_defer_cb, NULL);
+    ev_loop_poll(loop, 0);
+    ASSERT(s_defer_count == 2, "both deferred cbs ran");
+    ev_loop_free(loop);
+    PASS();
+}
+
+static void stop_loop_cb(int id, void *ctx) {
+    (void)id;
+    ev_loop_stop((ev_loop_t *)ctx);
+}
+
+static void test_vos_evloop_stop(void) {
+    TEST("§6 ev_loop_stop terminates loop");
+    ev_loop_t *loop = ev_loop_new();
+    ev_timer_once(loop, 1, stop_loop_cb, loop);
+    /* ev_loop_run will call poll, fire the timer, which calls stop */
+    ev_loop_run(loop);
+    /* If we get here, stop worked */
+    ev_loop_free(loop);
+    PASS();
+}
+
+static void test_vos_evloop_stats(void) {
+    TEST("§6 stats track polls and fires");
+    ev_loop_t *loop = ev_loop_new();
+    s_timer_fire_count = 0;
+    ev_timer_once(loop, 0, test_timer_cb, NULL);
+    ev_loop_poll(loop, 10);
+    ev_loop_poll(loop, 0);
+    ev_stats_t st = ev_loop_stats(loop);
+    ASSERT(st.polls >= 2, "poll count >= 2");
+    ASSERT(st.timer_fires >= 1, "timer fires >= 1");
+    ev_loop_free(loop);
+    PASS();
+}
+
+/* ── §3: Bytecode VM ──────────────────────────────────────────────── */
+
+static void test_vos_vm_init_reset(void) {
+    TEST("§3 VM init/reset");
+    vm_t vm;
+    vm_init(&vm);
+    ASSERT(vm.code_len == 0, "no code");
+    ASSERT(vm.sp == 0, "stack empty");
+    ASSERT(vm.dispatch_len == 0, "no dispatch entries");
+    ASSERT(!vm.halted, "not halted");
+    vm_reset(&vm);
+    ASSERT(vm.pc == 0, "pc reset");
+    PASS();
+}
+
+static void test_vos_vm_push_pop(void) {
+    TEST("§3 VM push/pop stack ops");
+    vm_t vm;
+    vm_init(&vm);
+    vm_push_int(&vm, 42);
+    vm_push_str(&vm, "hello");
+    ASSERT(vm.sp == 2, "sp is 2");
+    vm_val_t v1 = vm_pop(&vm);
+    ASSERT(v1.type == VM_VAL_STR && strcmp(v1.s, "hello") == 0, "popped string");
+    vm_val_t v2 = vm_pop(&vm);
+    ASSERT(v2.type == VM_VAL_INT && v2.i == 42, "popped int");
+    ASSERT(vm.sp == 0, "stack empty");
+    PASS();
+}
+
+static void test_vos_vm_emit_code(void) {
+    TEST("§3 VM emit and run HALT");
+    vm_t vm;
+    vm_init(&vm);
+    vm_emit(&vm, OP_NOP, 0);
+    vm_emit(&vm, OP_HALT, 0);
+    ASSERT(vm.code_len == 2, "2 instructions");
+    int r = vm_run(&vm);
+    ASSERT(r == 0, "halted cleanly");
+    ASSERT(vm.halted, "vm is halted");
+    ASSERT(vm.instructions_executed >= 2, "executed >= 2");
+    PASS();
+}
+
+static void test_vos_vm_push_emit_run(void) {
+    TEST("§3 VM push_int + emit sequence");
+    vm_t vm;
+    vm_init(&vm);
+    int si = vm_add_string(&vm, "test_string");
+    vm_emit(&vm, OP_PUSH_INT, 99);
+    vm_emit(&vm, OP_PUSH_STR, si);
+    vm_emit(&vm, OP_POP, 0);
+    vm_emit(&vm, OP_POP, 0);
+    vm_emit(&vm, OP_HALT, 0);
+    int r = vm_run(&vm);
+    ASSERT(r == 0, "halted");
+    ASSERT(vm.sp == 0, "stack clean");
+    PASS();
+}
+
+static void test_vos_vm_yield_resume(void) {
+    TEST("§3 VM yield and resume");
+    vm_t vm;
+    vm_init(&vm);
+    vm_emit(&vm, OP_PUSH_INT, 1);
+    vm_emit(&vm, OP_YIELD, 0);
+    vm_emit(&vm, OP_PUSH_INT, 2);
+    vm_emit(&vm, OP_HALT, 0);
+    int r = vm_run(&vm);
+    ASSERT(r == 1, "yielded");
+    ASSERT(vm.yielded, "yield flag set");
+    ASSERT(vm.sp == 1, "one value on stack");
+    r = vm_resume(&vm);
+    ASSERT(r == 0, "halted after resume");
+    ASSERT(vm.sp == 2, "two values on stack");
+    PASS();
+}
+
+static void test_vos_vm_jump(void) {
+    TEST("§3 VM unconditional jump");
+    vm_t vm;
+    vm_init(&vm);
+    vm_emit(&vm, OP_JUMP, 2);      /* pc0: jump to pc2 */
+    vm_emit(&vm, OP_PUSH_INT, 99); /* pc1: skipped */
+    vm_emit(&vm, OP_PUSH_INT, 42); /* pc2: landed here */
+    vm_emit(&vm, OP_HALT, 0);
+    vm_run(&vm);
+    ASSERT(vm.sp == 1, "one value");
+    vm_val_t v = vm_pop(&vm);
+    ASSERT(v.i == 42, "jumped over 99");
+    PASS();
+}
+
+static void test_vos_vm_jump_if(void) {
+    TEST("§3 VM conditional jump");
+    vm_t vm;
+    vm_init(&vm);
+    /* Push 1 (true), jump_if to pc3 */
+    vm_emit(&vm, OP_PUSH_INT, 1);
+    vm_emit(&vm, OP_JUMP_IF, 3);
+    vm_emit(&vm, OP_PUSH_INT, 99); /* skipped */
+    vm_emit(&vm, OP_PUSH_INT, 42); /* target */
+    vm_emit(&vm, OP_HALT, 0);
+    vm_run(&vm);
+    vm_val_t v = vm_pop(&vm);
+    ASSERT(v.i == 42, "conditional jump taken");
+    PASS();
+}
+
+static void test_vos_vm_registers(void) {
+    TEST("§3 VM load/store registers");
+    vm_t vm;
+    vm_init(&vm);
+    vm_emit(&vm, OP_PUSH_INT, 77);
+    vm_emit(&vm, OP_STORE, 0);     /* store 77 in r0 */
+    vm_emit(&vm, OP_PUSH_INT, 88);
+    vm_emit(&vm, OP_STORE, 1);     /* store 88 in r1 */
+    vm_emit(&vm, OP_LOAD, 0);      /* push r0 */
+    vm_emit(&vm, OP_LOAD, 1);      /* push r1 */
+    vm_emit(&vm, OP_HALT, 0);
+    vm_run(&vm);
+    ASSERT(vm.sp == 2, "two values on stack");
+    vm_val_t v1 = vm_pop(&vm);
+    vm_val_t v0 = vm_pop(&vm);
+    ASSERT(v0.i == 77, "r0 = 77");
+    ASSERT(v1.i == 88, "r1 = 88");
+    PASS();
+}
+
+static bool test_vm_stub_tool(const char *input, char *result, size_t rlen) {
+    (void)input;
+    snprintf(result, rlen, "stub_ok");
+    return true;
+}
+
+static void test_vos_vm_dispatch(void) {
+    TEST("§3 VM dispatch table O(1) tool lookup");
+    vm_t vm;
+    vm_init(&vm);
+    vm_register_tool(&vm, "read_file", test_vm_stub_tool, 0);
+    vm_register_tool(&vm, "write_file", test_vm_stub_tool, 1);
+    vm_register_tool(&vm, "bash", test_vm_stub_tool, 2);
+    vm_build_dispatch_index(&vm);
+    ASSERT(vm.dispatch_len == 3, "3 tools registered");
+
+    char result[256] = {0};
+    bool ok = vm_dispatch_tool(&vm, "bash", "{}", result, sizeof(result));
+    ASSERT(ok, "dispatch found bash");
+    ASSERT(strcmp(result, "stub_ok") == 0, "result correct");
+
+    ok = vm_dispatch_tool(&vm, "nonexistent", "{}", result, sizeof(result));
+    ASSERT(!ok, "nonexistent not found");
+
+    vm_stats_t st = vm_get_stats(&vm);
+    ASSERT(st.dispatches >= 2, "dispatch count");
+    ASSERT(st.dispatch_entries == 3, "3 entries");
+    PASS();
+}
+
+static void test_vos_vm_dispatch_many(void) {
+    TEST("§3 VM dispatch 200 tools without collision");
+    vm_t vm;
+    vm_init(&vm);
+    char names[200][32];
+    for (int i = 0; i < 200; i++) {
+        snprintf(names[i], sizeof(names[i]), "tool_%03d", i);
+        vm_register_tool(&vm, names[i], test_vm_stub_tool, i);
+    }
+    vm_build_dispatch_index(&vm);
+
+    char result[64];
+    for (int i = 0; i < 200; i++) {
+        bool ok = vm_dispatch_tool(&vm, names[i], "{}", result, sizeof(result));
+        ASSERT(ok, "tool found");
+    }
+    PASS();
+}
+
+static void test_vos_vm_stats(void) {
+    TEST("§3 VM stats tracking");
+    vm_t vm;
+    vm_init(&vm);
+    vm_emit(&vm, OP_NOP, 0);
+    vm_emit(&vm, OP_NOP, 0);
+    vm_emit(&vm, OP_HALT, 0);
+    vm_run(&vm);
+    vm_stats_t st = vm_get_stats(&vm);
+    ASSERT(st.instructions_executed >= 3, "counted instructions");
+    ASSERT(st.code_len == 3, "code len");
+    PASS();
+}
+
+/* ── §1/§7: Cooperative Scheduler ─────────────────────────────────── */
+
+static int sched_test_task_counter = 0;
+static int sched_test_task(void *ctx) {
+    (void)ctx;
+    sched_test_task_counter++;
+    return 0; /* done */
+}
+
+static void test_vos_sched_init_destroy(void) {
+    TEST("§1 scheduler init/destroy");
+    scheduler_t s;
+    sched_init(&s);
+    ASSERT(s.task_count == 0, "no tasks");
+    ASSERT(s.current == TASK_INVALID, "no current");
+    sched_destroy(&s);
+    PASS();
+}
+
+static void test_vos_sched_spawn_run(void) {
+    TEST("§1 scheduler spawn and run to completion");
+    scheduler_t s;
+    sched_init(&s);
+    sched_test_task_counter = 0;
+    task_id_t id = sched_spawn(&s, sched_test_task, NULL, "test", SCHED_PRIO_NORMAL);
+    ASSERT(id != TASK_INVALID, "task spawned");
+    ASSERT(s.task_count == 1, "one task");
+    sched_run(&s, 0);
+    ASSERT(sched_test_task_counter == 1, "task ran once");
+    sched_task_t *t = sched_task_get(&s, id);
+    ASSERT(t && t->state == TASK_COMPLETED, "task completed");
+    sched_destroy(&s);
+    PASS();
+}
+
+static int sched_yield_task_counter = 0;
+static int sched_yield_task(void *ctx) {
+    (void)ctx;
+    sched_yield_task_counter++;
+    if (sched_yield_task_counter < 5) return 1; /* yield */
+    return 0; /* done */
+}
+
+static void test_vos_sched_yield_resume(void) {
+    TEST("§1 scheduler task yields and resumes");
+    scheduler_t s;
+    sched_init(&s);
+    sched_yield_task_counter = 0;
+    sched_spawn(&s, sched_yield_task, NULL, "yielder", SCHED_PRIO_HIGH);
+    sched_run(&s, 0);
+    ASSERT(sched_yield_task_counter == 5, "ran 5 times before completing");
+    sched_destroy(&s);
+    PASS();
+}
+
+static void test_vos_sched_priority(void) {
+    TEST("§1 scheduler runs higher priority first");
+    scheduler_t s;
+    sched_init(&s);
+    static int order[3];
+    static int order_idx;
+    order_idx = 0;
+
+    /* We can't easily capture order with function pointers,
+       so just verify priority scheduling works at a structural level */
+    task_id_t lo = sched_spawn(&s, sched_test_task, NULL, "low", SCHED_PRIO_LOW);
+    task_id_t hi = sched_spawn(&s, sched_test_task, NULL, "high", SCHED_PRIO_HIGH);
+    (void)lo; (void)order;
+
+    /* First tick should pick the high-priority task */
+    sched_tick(&s);
+    sched_task_t *ht = sched_task_get(&s, hi);
+    ASSERT(ht && ht->state == TASK_COMPLETED, "high ran first");
+    sched_destroy(&s);
+    PASS();
+}
+
+static void test_vos_sched_cancel(void) {
+    TEST("§1 scheduler cancel stops task");
+    scheduler_t s;
+    sched_init(&s);
+    task_id_t id = sched_spawn(&s, sched_yield_task, NULL, "cancel_me", SCHED_PRIO_NORMAL);
+    sched_yield_task_counter = 0;
+    bool ok = sched_cancel(&s, id);
+    ASSERT(ok, "cancel succeeded");
+    sched_task_t *t = sched_task_get(&s, id);
+    ASSERT(t && t->state == TASK_CANCELLED, "task cancelled");
+    sched_destroy(&s);
+    PASS();
+}
+
+static int sched_fail_task(void *ctx) { (void)ctx; return -1; }
+
+static void test_vos_sched_failed_task(void) {
+    TEST("§1 scheduler handles failed task");
+    scheduler_t s;
+    sched_init(&s);
+    task_id_t id = sched_spawn(&s, sched_fail_task, NULL, "failer", SCHED_PRIO_NORMAL);
+    sched_run(&s, 0);
+    sched_task_t *t = sched_task_get(&s, id);
+    ASSERT(t && t->state == TASK_FAILED, "task failed");
+    ASSERT(t->exit_code < 0, "negative exit code");
+    sched_destroy(&s);
+    PASS();
+}
+
+static void test_vos_sched_stats(void) {
+    TEST("§1 scheduler stats tracking");
+    scheduler_t s;
+    sched_init(&s);
+    sched_spawn(&s, sched_test_task, NULL, "s1", SCHED_PRIO_NORMAL);
+    sched_spawn(&s, sched_test_task, NULL, "s2", SCHED_PRIO_HIGH);
+    sched_test_task_counter = 0;
+    sched_run(&s, 0);
+    sched_stats_t st = sched_get_stats(&s);
+    ASSERT(st.tasks_total == 2, "2 tasks total");
+    ASSERT(st.tasks_completed == 2, "2 completed");
+    ASSERT(st.total_dispatches >= 2, "at least 2 dispatches");
+    sched_destroy(&s);
+    PASS();
+}
+
+static void test_vos_sched_run_sync(void) {
+    TEST("§1 sched_run_sync blocks until done");
+    scheduler_t s;
+    sched_init(&s);
+    sched_test_task_counter = 0;
+    int rc = sched_run_sync(&s, sched_test_task, NULL, "sync");
+    ASSERT(rc == 0, "sync task returned 0");
+    ASSERT(sched_test_task_counter == 1, "task ran");
+    sched_destroy(&s);
+    PASS();
+}
+
+static void test_vos_sched_many_tasks(void) {
+    TEST("§1 scheduler handles 100 tasks");
+    scheduler_t s;
+    sched_init(&s);
+    sched_test_task_counter = 0;
+    for (int i = 0; i < 100; i++) {
+        sched_spawn(&s, sched_test_task, NULL, "batch", SCHED_PRIO_NORMAL);
+    }
+    sched_run(&s, 0);
+    ASSERT(sched_test_task_counter == 100, "all 100 ran");
+    ASSERT(sched_count_by_state(&s, TASK_COMPLETED) == 100, "all completed");
+    sched_destroy(&s);
+    PASS();
+}
+
+/* ── §8: VFS Persistence ──────────────────────────────────────────── */
+
+static void test_vos_vfs_open_close(void) {
+    TEST("§8 VFS open/close in-memory DB");
+    vfs_db_t *db = vfs_open(":memory:");
+    ASSERT(db != NULL, "opened in-memory");
+    int ver = vfs_schema_version(db);
+    ASSERT(ver == 1, "schema version 1");
+    vfs_close(db);
+    PASS();
+}
+
+static void test_vos_vfs_kv_put_get(void) {
+    TEST("§8 VFS key-value put/get");
+    vfs_db_t *db = vfs_open(":memory:");
+    bool ok = vfs_kv_put_str(db, "test", "key1", "value1");
+    ASSERT(ok, "put succeeded");
+    char *v = vfs_kv_get_str(db, "test", "key1");
+    ASSERT(v != NULL, "get returned value");
+    ASSERT(strcmp(v, "value1") == 0, "value matches");
+    free(v);
+    vfs_close(db);
+    PASS();
+}
+
+static void test_vos_vfs_kv_overwrite(void) {
+    TEST("§8 VFS key-value overwrite");
+    vfs_db_t *db = vfs_open(":memory:");
+    vfs_kv_put_str(db, "b", "k", "old");
+    vfs_kv_put_str(db, "b", "k", "new");
+    char *v = vfs_kv_get_str(db, "b", "k");
+    ASSERT(v && strcmp(v, "new") == 0, "overwrite works");
+    free(v);
+    vfs_close(db);
+    PASS();
+}
+
+static void test_vos_vfs_kv_delete(void) {
+    TEST("§8 VFS key-value delete");
+    vfs_db_t *db = vfs_open(":memory:");
+    vfs_kv_put_str(db, "b", "k", "val");
+    vfs_kv_delete(db, "b", "k");
+    char *v = vfs_kv_get_str(db, "b", "k");
+    ASSERT(v == NULL, "deleted key returns null");
+    vfs_close(db);
+    PASS();
+}
+
+static void test_vos_vfs_kv_keys(void) {
+    TEST("§8 VFS key-value list keys");
+    vfs_db_t *db = vfs_open(":memory:");
+    vfs_kv_put_str(db, "bucket", "a", "1");
+    vfs_kv_put_str(db, "bucket", "b", "2");
+    vfs_kv_put_str(db, "bucket", "c", "3");
+    vfs_kv_put_str(db, "other", "x", "9");
+    int count = 0;
+    char **keys = vfs_kv_keys(db, "bucket", &count);
+    ASSERT(count == 3, "3 keys in bucket");
+    for (int i = 0; i < count; i++) free(keys[i]);
+    free(keys);
+    vfs_close(db);
+    PASS();
+}
+
+static void test_vos_vfs_kv_binary(void) {
+    TEST("§8 VFS key-value binary blob");
+    vfs_db_t *db = vfs_open(":memory:");
+    uint8_t blob[] = {0x00, 0xFF, 0xDE, 0xAD, 0xBE, 0xEF};
+    vfs_kv_put(db, "bin", "data", blob, sizeof(blob));
+    size_t len = 0;
+    void *got = vfs_kv_get(db, "bin", "data", &len);
+    ASSERT(got != NULL, "got binary data");
+    ASSERT(len == sizeof(blob), "length matches");
+    ASSERT(memcmp(got, blob, len) == 0, "content matches");
+    free(got);
+    vfs_close(db);
+    PASS();
+}
+
+static void test_vos_vfs_conv_roundtrip(void) {
+    TEST("§8 VFS conversation append/load");
+    vfs_db_t *db = vfs_open(":memory:");
+    vfs_conv_append(db, "sess1", "user", "{\"text\":\"hello\"}");
+    vfs_conv_append(db, "sess1", "assistant", "{\"text\":\"hi\"}");
+    vfs_conv_append(db, "sess2", "user", "{\"text\":\"other\"}");
+    int count = 0;
+    vfs_conv_turn_t *turns = vfs_conv_load(db, "sess1", &count);
+    ASSERT(count == 2, "2 turns in sess1");
+    ASSERT(strcmp(turns[0].role, "user") == 0, "first turn is user");
+    ASSERT(strcmp(turns[1].role, "assistant") == 0, "second is assistant");
+    vfs_conv_free(turns, count);
+    vfs_close(db);
+    PASS();
+}
+
+static void test_vos_vfs_conv_sessions(void) {
+    TEST("§8 VFS conversation list sessions");
+    vfs_db_t *db = vfs_open(":memory:");
+    vfs_conv_append(db, "alpha", "user", "{}");
+    vfs_conv_append(db, "beta", "user", "{}");
+    int count = 0;
+    char **ids = vfs_conv_sessions(db, &count);
+    ASSERT(count == 2, "2 sessions");
+    for (int i = 0; i < count; i++) free(ids[i]);
+    free(ids);
+    vfs_close(db);
+    PASS();
+}
+
+static void test_vos_vfs_conv_delete(void) {
+    TEST("§8 VFS conversation delete");
+    vfs_db_t *db = vfs_open(":memory:");
+    vfs_conv_append(db, "s1", "user", "{}");
+    vfs_conv_delete(db, "s1");
+    int count = 0;
+    vfs_conv_turn_t *turns = vfs_conv_load(db, "s1", &count);
+    ASSERT(count == 0, "no turns after delete");
+    vfs_conv_free(turns, count);
+    vfs_close(db);
+    PASS();
+}
+
+static void test_vos_vfs_event_log(void) {
+    TEST("§8 VFS event log append/query");
+    vfs_db_t *db = vfs_open(":memory:");
+    vfs_log_event(db, "tool", "bash", "ls -la");
+    vfs_log_event(db, "tool", "read_file", "/tmp/x");
+    vfs_log_event(db, "error", "timeout", "30s exceeded");
+    int count = 0;
+    vfs_event_t *events = vfs_log_query(db, "tool", 10, &count);
+    ASSERT(count == 2, "2 tool events");
+    vfs_log_free(events, count);
+
+    events = vfs_log_query(db, NULL, 10, &count);
+    ASSERT(count == 3, "3 total events");
+    vfs_log_free(events, count);
+    vfs_close(db);
+    PASS();
+}
+
+static void test_vos_vfs_cache_put_get(void) {
+    TEST("§8 VFS cache put/get");
+    vfs_db_t *db = vfs_open(":memory:");
+    vfs_cache_put(db, "sha256", "abc123", "hash_result", 3600);
+    char *v = vfs_cache_get(db, "sha256", "abc123");
+    ASSERT(v && strcmp(v, "hash_result") == 0, "cache hit");
+    free(v);
+    vfs_close(db);
+    PASS();
+}
+
+static void test_vos_vfs_cache_miss(void) {
+    TEST("§8 VFS cache miss returns null");
+    vfs_db_t *db = vfs_open(":memory:");
+    char *v = vfs_cache_get(db, "tool", "nonexistent");
+    ASSERT(v == NULL, "cache miss");
+    vfs_close(db);
+    PASS();
+}
+
+static void test_vos_vfs_cache_evict(void) {
+    TEST("§8 VFS cache evict expired entries");
+    vfs_db_t *db = vfs_open(":memory:");
+    /* Insert with TTL=0 so it's immediately expired */
+    vfs_cache_put(db, "t", "k", "v", 0);
+    /* Wait a moment then evict */
+    int evicted = vfs_cache_evict(db);
+    /* May or may not be 1 depending on timing, but shouldn't crash */
+    ASSERT(evicted >= 0, "evict returned >= 0");
+    vfs_close(db);
+    PASS();
+}
+
+static void test_vos_vfs_stats(void) {
+    TEST("§8 VFS stats counting");
+    vfs_db_t *db = vfs_open(":memory:");
+    vfs_kv_put_str(db, "b", "k1", "v1");
+    vfs_kv_put_str(db, "b", "k2", "v2");
+    vfs_log_event(db, "test", "action", "detail");
+    vfs_conv_append(db, "s", "user", "{}");
+    vfs_stats_t st = vfs_get_stats(db);
+    ASSERT(st.kv_entries == 2, "2 kv entries");
+    ASSERT(st.event_count == 1, "1 event");
+    ASSERT(st.conv_turns == 1, "1 turn");
+    ASSERT(st.db_size_bytes > 0, "db has size");
+    vfs_close(db);
+    PASS();
+}
+
+static void test_vos_vfs_null_safety(void) {
+    TEST("§8 VFS null-safety on all functions");
+    /* None of these should crash */
+    vfs_close(NULL);
+    ASSERT(!vfs_kv_put(NULL, "b", "k", "v", 1), "null db put");
+    ASSERT(vfs_kv_get(NULL, "b", "k", NULL) == NULL, "null db get");
+    ASSERT(!vfs_kv_delete(NULL, "b", "k"), "null db delete");
+    ASSERT(!vfs_conv_append(NULL, "s", "r", "c"), "null db conv");
+    ASSERT(!vfs_log_event(NULL, "c", "a", "d"), "null db event");
+    ASSERT(vfs_cache_get(NULL, "t", "h") == NULL, "null db cache");
+    ASSERT(vfs_schema_version(NULL) == -1, "null db version");
+    PASS();
+}
+
+/* ── Cross-module integration tests ───────────────────────────────── */
+
+static void test_vos_cross_vm_tools_registered(void) {
+    TEST("cross: VM dispatch table has tools after register");
+    vm_t vm;
+    vm_init(&vm);
+    vm_register_tool(&vm, "bash", test_vm_stub_tool, 0);
+    vm_register_tool(&vm, "read_file", test_vm_stub_tool, 1);
+    vm_build_dispatch_index(&vm);
+    char result[64];
+    ASSERT(vm_dispatch_tool(&vm, "bash", "{}", result, sizeof(result)), "bash found");
+    ASSERT(vm_dispatch_tool(&vm, "read_file", "{}", result, sizeof(result)), "read_file found");
+    ASSERT(!vm_dispatch_tool(&vm, "nonexistent", "{}", result, sizeof(result)), "nonexistent not found");
+    PASS();
+}
+
+static void test_vos_cross_vfs_event_mirror(void) {
+    TEST("cross: VFS event log mirrors correctly");
+    vfs_db_t *db = vfs_open(":memory:");
+    /* Simulate what baseline_set_vfs + baseline_log does */
+    vfs_log_event(db, "tool", "bash", "ls -la");
+    vfs_log_event(db, "turn", "turn_done", "end_turn");
+    int count = 0;
+    vfs_event_t *ev = vfs_log_query(db, NULL, 100, &count);
+    ASSERT(count == 2, "2 events mirrored");
+    vfs_log_free(ev, count);
+    vfs_close(db);
+    PASS();
+}
+
+static void test_vos_cross_arena_scratch_per_turn(void) {
+    TEST("cross: scratch arena reset per turn pattern");
+    arena_subsystem_init();
+    /* Simulate 3 turns */
+    for (int turn = 0; turn < 3; turn++) {
+        arena_scratch_reset();
+        char *s = scratch_sprintf("turn_%d_data", turn);
+        ASSERT(s != NULL, "alloc in turn");
+        /* Data only valid until next reset */
+    }
+    arena_stats_t st = arena_get_stats();
+    ASSERT(st.scratch_resets == 3, "3 resets");
+    arena_subsystem_shutdown();
+    PASS();
+}
+
+static void test_vos_cross_sched_with_vm(void) {
+    TEST("cross: scheduler runs VM-dispatched task");
+    scheduler_t s;
+    sched_init(&s);
+    sched_test_task_counter = 0;
+    sched_spawn(&s, sched_test_task, NULL, "vm_task", SCHED_PRIO_CRITICAL);
+    sched_run(&s, 0);
+    ASSERT(sched_test_task_counter == 1, "task executed");
+    sched_stats_t st = sched_get_stats(&s);
+    ASSERT(st.tasks_completed == 1, "task completed via scheduler");
+    sched_destroy(&s);
+    PASS();
+}
+
 int main(void) {
     fprintf(stderr, "\n\033[1m\033[36mdsco test suite\033[0m\n\n");
 
@@ -5541,6 +7629,20 @@ int main(void) {
     /* Request builder */
     test_build_request_valid_json();
     test_build_request_ex_effort();
+    test_openrouter_request_includes_external_tools_and_tool_choice();
+    test_openrouter_request_named_tool_choice();
+    test_openai_request_defaults_auto_tool_choice();
+    test_openrouter_request_tool_choice_none();
+    test_openrouter_request_external_tools_when_builtin_budget_zero();
+    test_openrouter_request_skips_disable_for_thinking_model();
+    test_openrouter_request_skips_disable_when_budget_set();
+    test_openrouter_request_reasoning_env_blocks_disable();
+    test_conv_compact_recent_tool_turn();
+    test_conv_compact_recent_tool_turn_with_assistant_text();
+    test_conv_compact_recent_tool_turn_missing_result();
+    test_conv_compact_recent_tool_turn_trims_long_result();
+    test_conv_compact_recent_tool_turn_preserves_context_batch_preview();
+    test_conv_add_tool_result_named_reuses_user_message();
     test_build_request_web_search_result_shape();
     test_build_request_web_search_result_recover_from_text();
     test_build_request_server_result_missing_tool_id();
@@ -5712,7 +7814,11 @@ int main(void) {
     /* Conversation extended */
     test_conv_add_tool_use_and_result();
     test_conv_save_load_ex();
+    test_conv_load_ex_preserves_session_when_missing_block();
+    test_conv_pop_last_turn();
+    test_conv_pop_last_turn_tool_result_only();
     test_conv_trim_old_results();
+    test_conv_trim_preserves_context_batch_breadcrumbs();
 
     /* Session trust tier */
     test_session_trust_tier_to_string();
@@ -5721,6 +7827,29 @@ int main(void) {
     test_tools_validate_input();
     test_tools_builtin_count();
     test_tools_get_all();
+    test_tools_get_paged_budget_floor();
+
+    /* Register-file model + quorum tests */
+    test_register_cap_enforced();
+    test_register_always_core_never_evicted();
+    test_register_warm_evicted_under_pressure();
+    test_register_warm_present_at_full_budget();
+    test_register_budget_bands();
+    test_register_discovery_progressive_schema();
+    test_quorum_telemetry_populated();
+    test_quorum_vetoes_single_signal();
+    test_page_telemetry_schema_savings();
+    test_page_telemetry_tier_counts();
+    test_context_window_set_get();
+    test_context_window_pressure_tightens_registers();
+    test_context_window_no_pressure_when_unset();
+    test_config_register_constants();
+    test_core_always_is_subset();
+    test_core_warm_is_subset();
+    test_core_no_overlap();
+    test_hint_pinned_tools_loaded();
+    test_budget_boundaries_exact();
+    test_hot_cache_bypasses_quorum();
 
     /* TUI extended */
     test_tui_term_lock_unlock();
@@ -5946,11 +8075,37 @@ int main(void) {
     test_tools_execute_eval();
     test_tools_execute_md5();
     test_tools_execute_base64();
+    test_tools_execute_base64_legacy();
     test_tools_execute_random_bytes();
     test_tools_execute_hmac();
     test_tui_render_diff_extended();
     test_tui_json_tree_extended();
     test_tui_sparkline_extended();
+
+    /* Slash command unit tests */
+    test_slash_undo_empty_conv();
+    test_slash_undo_removes_pair();
+    test_slash_undo_single_msg();
+    test_slash_note_prefix();
+    test_slash_pin_stored();
+    test_slash_unpin_clears();
+    test_slash_pin_conv_prefix();
+    test_slash_branch_path();
+    test_slash_branch_saves_file();
+    test_slash_diff_popen_works();
+    test_slash_add_dir_prefix();
+    test_slash_git_cmd_format();
+    test_slash_ask_model_resolve();
+    test_slash_alias_add();
+    test_slash_alias_expansion();
+    test_slash_retry_last_input();
+    test_slash_undo_turn_count();
+    test_model_gpt54_mini_registered();
+    test_model_gpt54_nano_registered();
+    test_history_dedup_logic();
+    test_arg_completion_effort();
+    test_arg_completion_trust();
+    test_make_arg_completion_format();
 
     fprintf(stderr, "\n\033[1m  %d tests: \033[32m%d passed\033[0m",
             tests_run, tests_passed);

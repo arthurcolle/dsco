@@ -49,6 +49,18 @@
 #define TUI_FG256(n)  "\033[38;5;" #n "m"
 #define TUI_BG256(n)  "\033[48;5;" #n "m"
 
+/* ── Activity indicator (Claude Code aesthetic) ───────────────────────── */
+/* ⏺  U+23FA — the primary action bullet */
+#define TUI_RECORD        "\xe2\x8f\xba"
+/* ⎿  U+23BF — indent/result line leader */
+#define TUI_INDENT_LEAD   "\xe2\x8e\xbf"
+/* 256-color orange (approx #FF5F00) */
+#define TUI_ORANGE        "\033[38;5;202m"
+/* Truecolor orange used for the record glyph */
+#define TUI_ORANGE_RGB    "\033[38;2;255;95;0m"
+/* Middle dot separator · */
+#define TUI_SEP           "\xc2\xb7"
+
 /* ── Box styles ───────────────────────────────────────────────────────── */
 typedef enum {
     BOX_ROUND,      /* ╭─╮│╰─╯ */
@@ -162,7 +174,7 @@ void tui_warning(const char *text);
 void tui_error(const char *text);
 
 /* ── Welcome banner ───────────────────────────────────────────────────── */
-void tui_welcome(const char *model, int tool_count, const char *version);
+void tui_welcome(const char *model, int core_count, int total_count, const char *version);
 
 /* ── Streaming block wrappers ─────────────────────────────────────────── */
 void tui_stream_start(void);
@@ -421,13 +433,16 @@ typedef struct {
     bool     enabled;
     bool     visible;
     bool     show_clock;
+    bool     panel_active;  /* true while tui_composer_read is actively reading
+                             * keystrokes — drives dual-state caret color */
     char     model[64];
     int      input_tokens;
     int      output_tokens;
     double   cost;
     int      turn;
     int      tools_used;
-    int      panel_rows;    /* total bottom panel rows: input + sep + status (default 3) */
+    int      panel_rows;    /* total bottom panel rows: top rule + 2 notif rows
+                             * + input + bottom rule + hint + status (default 7) */
 } tui_status_bar_t;
 
 void tui_status_bar_init(tui_status_bar_t *sb, const char *model);
@@ -438,9 +453,65 @@ void tui_status_bar_disable(tui_status_bar_t *sb);
 void tui_status_bar_render(tui_status_bar_t *sb);
 
 /* ── Input Panel (persistent bottom panel) ────────────────────────────── */
+/* The persistent bottom pane has 7 reserved rows:
+ *   row N-6 : top horizontal rule ────────
+ *   row N-5 : notification row 1 (middle whitespace / realtime notifications)
+ *   row N-4 : notification row 2 (middle whitespace / realtime notifications)
+ *   row N-3 : "❯ " + current input (dual-state caret: colored=active, grey=idle)
+ *   row N-2 : bottom horizontal rule ────────
+ *   row N-1 : dim hint line  "↵ send · ⌥↵ newline · esc interrupt · /help"
+ *   row N   : powerline status bar (drawn by tui_status_bar_render)
+ *
+ * When the user enters multi-line input (Alt/Opt+Enter), the composer
+ * scrolls internally so the cursor line stays visible.
+ *
+ * The two notification rows are whitespace when idle and can be written to
+ * via tui_panel_notify(). Entries auto-expire after TUI_PANEL_NOTIFY_TTL_S.
+ */
+#define TUI_COMPOSER_PANEL_ROWS   7
+#define TUI_COMPOSER_BUF_CAP      16384
+#define TUI_PANEL_NOTIFY_SLOTS    2
+#define TUI_PANEL_NOTIFY_TTL_S    8.0
+
+/* Severity levels for panel notifications. Drives the color. */
+typedef enum {
+    TUI_PANEL_NOTE_INFO,     /* dim cyan */
+    TUI_PANEL_NOTE_OK,       /* green */
+    TUI_PANEL_NOTE_WARN,     /* yellow */
+    TUI_PANEL_NOTE_ERROR,    /* red */
+    TUI_PANEL_NOTE_ACTIVITY, /* bright pink, for realtime activity */
+} tui_panel_note_level_t;
+
+/* Push a notification into the middle whitespace of the input panel.
+ * Entries live in a fixed-size ring; newest wins. Safe to call from any
+ * thread. text is copied. Auto-expires after TUI_PANEL_NOTIFY_TTL_S seconds.
+ * Triggers a repaint of the notification rows.
+ */
+void tui_panel_notify(tui_status_bar_t *sb, tui_panel_note_level_t level,
+                      const char *text);
+
+/* Clear all panel notifications. */
+void tui_panel_notify_clear(tui_status_bar_t *sb);
+
+/* Set the panel_active flag (controls caret color: colored vs grey). */
+void tui_panel_set_active(tui_status_bar_t *sb, bool active);
+
 void tui_input_panel_render(tui_status_bar_t *sb, const char *prompt_hint);
 void tui_input_panel_clear(tui_status_bar_t *sb);
 void tui_bottom_panel_refresh(tui_status_bar_t *sb, const char *prompt_hint);
+
+/* Persistent multi-line input box. Draws a 5-row box above the status bar
+ * and reads input with raw termios. Supports:
+ *   • multi-line editing (Alt+Enter / Opt+Enter / Ctrl+J = newline)
+ *   • plain Enter submits
+ *   • backspace, left/right/home/end, up/down history
+ *   • Ctrl+A/E/U/W, Ctrl+C cancels, Ctrl+D on empty returns NULL
+ *   • bracketed paste (multi-line paste preserved)
+ * Returns `out` on success, NULL on EOF/quit.
+ * `prompt` is drawn on the first input row before the text; pass NULL for "❯ ".
+ */
+char *tui_composer_read(tui_status_bar_t *sb, const char *prompt,
+                        char *out, size_t out_sz);
 
 /* ── Swarm UI ─────────────────────────────────────────────────────────── */
 typedef struct {
@@ -1130,5 +1201,372 @@ void tui_stream_heartbeat_start(tui_stream_heartbeat_t *hb);
 void tui_stream_heartbeat_poke(tui_stream_heartbeat_t *hb, const char *phase);
 void tui_stream_heartbeat_recv(tui_stream_heartbeat_t *hb, size_t bytes);
 void tui_stream_heartbeat_stop(tui_stream_heartbeat_t *hb);
+
+/* ══════════════════════════════════════════════════════════════════════════
+ * SUBSTRUCTURAL IMPROVEMENTS — Output Serialization & Coordination
+ *
+ * Problem: 807+ unprotected stderr writes across 4+ threads (agent main,
+ * heartbeat, ESC poller, md_feed) with no single coordination point.
+ *
+ * Solution: A serialized output queue that all writers enqueue into,
+ * flushed by a single render thread on a 16ms tick (like Claude Code's
+ * throttled pipeline). Also wires the existing FSM, Event Bus, and
+ * Render Context into the actual streaming pipeline.
+ * ══════════════════════════════════════════════════════════════════════════ */
+
+/* ── Serialized Output Queue ─────────────────────────────────────────── */
+/* All terminal writes go through this queue. A single render thread
+ * drains it on a 16ms tick, preventing race conditions between
+ * heartbeat, markdown streaming, spinners, and the agent loop.
+ *
+ * Inspired by Claude Code's "throttled render" pattern:
+ * leading: true (react immediately), trailing: true (coalesce). */
+
+#define TUI_OUTQ_SIZE        4096  /* ring buffer entries */
+#define TUI_OUTQ_MSG_MAX     2048  /* max bytes per queued message */
+#define TUI_OUTQ_TICK_MS     16    /* render tick interval (~60 fps) */
+
+typedef enum {
+    TUI_OUT_TEXT,          /* raw text to stderr */
+    TUI_OUT_CLEAR_LINE,    /* \r\033[K */
+    TUI_OUT_CURSOR_MOVE,   /* ESC[row;colH */
+    TUI_OUT_STYLE,         /* ESC[...m */
+    TUI_OUT_TITLE,         /* OSC 2 title */
+    TUI_OUT_BELL,          /* \a */
+    TUI_OUT_FLUSH,         /* force immediate flush */
+} tui_out_type_t;
+
+typedef struct {
+    tui_out_type_t type;
+    int            priority;     /* higher = rendered first within tick */
+    int            len;
+    char           data[TUI_OUTQ_MSG_MAX];
+} tui_out_entry_t;
+
+typedef struct {
+    tui_out_entry_t *ring;         /* ring buffer */
+    int              head;         /* write position */
+    int              tail;         /* read position */
+    int              capacity;
+    int              count;        /* current entries */
+    int              dropped;      /* overflow drops (diagnostic) */
+
+    pthread_mutex_t  mutex;
+    pthread_cond_t   cond;         /* signal render thread */
+    pthread_t        render_thread;
+    volatile bool    running;
+
+    FILE            *out;          /* output target (stderr) */
+
+    /* Statistics */
+    int              total_writes;
+    int              total_flushes;
+    double           total_flush_ms;
+    double           max_flush_ms;
+} tui_output_queue_t;
+
+/* Initialize the output queue and start the render thread */
+void tui_outq_init(tui_output_queue_t *q, FILE *out);
+
+/* Stop the render thread and destroy the queue */
+void tui_outq_destroy(tui_output_queue_t *q);
+
+/* Enqueue output (thread-safe, non-blocking). All TUI writes should
+ * go through this instead of direct fprintf(stderr, ...). */
+void tui_outq_write(tui_output_queue_t *q, const char *text);
+void tui_outq_writef(tui_output_queue_t *q, const char *fmt, ...)
+    __attribute__((format(printf, 2, 3)));
+
+/* Enqueue with priority (higher = rendered first in batch) */
+void tui_outq_write_pri(tui_output_queue_t *q, int priority, const char *text);
+
+/* Enqueue a clear-line operation */
+void tui_outq_clear_line(tui_output_queue_t *q);
+
+/* Force immediate flush (bypass tick coalescing) */
+void tui_outq_flush_sync(tui_output_queue_t *q);
+
+/* Get queue statistics */
+void tui_outq_stats(const tui_output_queue_t *q,
+                     int *total_writes, int *total_flushes,
+                     int *dropped, double *avg_flush_ms);
+
+/* Global output queue (initialized in agent_run, available everywhere) */
+extern tui_output_queue_t *g_outq;
+
+/* ── Streaming FSM Wiring ────────────────────────────────────────────── */
+/* Pre-built FSM for the streaming pipeline. Replaces the ad-hoc
+ * boolean flags (s_in_thinking_block, s_in_text_block, etc.) with
+ * proper state transitions and callbacks. */
+
+/* FSM event IDs for streaming */
+#define TUI_FSM_EVT_STREAM_START    1
+#define TUI_FSM_EVT_THINKING_START  2
+#define TUI_FSM_EVT_THINKING_END    3
+#define TUI_FSM_EVT_TEXT_START      4
+#define TUI_FSM_EVT_TOOL_START      5
+#define TUI_FSM_EVT_TOOL_COMPLETE   6
+#define TUI_FSM_EVT_STREAM_END      7
+#define TUI_FSM_EVT_ERROR           8
+#define TUI_FSM_EVT_INTERRUPT       9
+#define TUI_FSM_EVT_RESUME          10
+
+/* State indices — match tui_streaming_fsm_create() order */
+#define TUI_STREAM_ST_IDLE          0
+#define TUI_STREAM_ST_THINKING      1
+#define TUI_STREAM_ST_TEXT          2
+#define TUI_STREAM_ST_TOOL_PENDING  3
+#define TUI_STREAM_ST_TOOL_RUNNING  4
+#define TUI_STREAM_ST_TOOL_COMPLETE 5
+#define TUI_STREAM_ST_DONE          6
+#define TUI_STREAM_ST_ERROR         7
+
+/* Create a pre-wired streaming FSM with all states and transitions.
+ * ctx is passed to all callbacks (typically agent's callback context). */
+void tui_streaming_fsm_create(tui_fsm_t *fsm, void *ctx);
+
+/* ── Animation Clock ─────────────────────────────────────────────────── */
+/* Global demand-driven animation clock. Only ticks when subscribers
+ * exist. All animated components (spinners, shimmer, heartbeat)
+ * synchronize through this clock. Inspired by Claude Code's global
+ * shared clock pattern.
+ *
+ * The clock is demand-driven: starts when first subscriber registers,
+ * stops when last subscriber unregisters. This means zero CPU overhead
+ * when no animations are active. */
+
+#define TUI_ANIM_MAX_SUBS 16
+
+typedef void (*tui_anim_cb)(double elapsed_ms, void *ctx);
+
+typedef struct {
+    tui_anim_cb  callback;
+    void        *ctx;
+    bool         active;
+    bool         keep_alive;  /* false = pause when offscreen */
+} tui_anim_sub_t;
+
+typedef struct {
+    pthread_t        thread;
+    pthread_mutex_t  mutex;
+    volatile bool    running;
+
+    tui_anim_sub_t   subs[TUI_ANIM_MAX_SUBS];
+    int              sub_count;
+    int              active_count;   /* subs with keep_alive=true */
+
+    double           start_time;     /* epoch of clock start */
+    double           tick_time;      /* current synchronized tick time */
+    int              interval_ms;    /* tick interval (default 16ms) */
+
+    /* Diagnostics */
+    int              total_ticks;
+    double           max_tick_ms;
+} tui_anim_clock_t;
+
+void tui_anim_clock_init(tui_anim_clock_t *clk, int interval_ms);
+void tui_anim_clock_destroy(tui_anim_clock_t *clk);
+
+/* Subscribe a callback. Returns subscriber ID. */
+int  tui_anim_subscribe(tui_anim_clock_t *clk, tui_anim_cb callback,
+                          void *ctx, bool keep_alive);
+void tui_anim_unsubscribe(tui_anim_clock_t *clk, int sub_id);
+
+/* Pause/resume a subscriber (e.g., when offscreen) */
+void tui_anim_set_active(tui_anim_clock_t *clk, int sub_id, bool active);
+
+/* Global animation clock */
+extern tui_anim_clock_t *g_anim_clock;
+
+/* ══════════════════════════════════════════════════════════════════════════
+ * Claude Code-inspired UI systems — implemented in pure C / ANSI escapes
+ * ══════════════════════════════════════════════════════════════════════════ */
+
+/* ── Screen Buffer with Damage Tracking ──────────────────────────────── */
+/* Avoids full redraws. Only writes cells that changed since last frame.
+ * Inspired by Claude Code's output.ts screen buffer system. */
+
+#define SCRBUF_MAX_WIDTH   512
+#define SCRBUF_MAX_HEIGHT  128
+
+typedef struct {
+    char     ch[8];       /* UTF-8 character (up to 4 bytes + null) */
+    int      style_id;    /* interned style index (0 = default) */
+    unsigned char width;  /* display width: 1 = narrow, 2 = wide, 0 = continuation */
+} tui_cell_t;
+
+typedef struct {
+    tui_cell_t *cells;        /* current frame: width × height */
+    tui_cell_t *prev;         /* previous frame for diff */
+    bool       *dirty;        /* per-cell dirty flags */
+    int         width;
+    int         height;
+    int         cursor_x;     /* logical cursor position */
+    int         cursor_y;
+    FILE       *out;
+} tui_screenbuf_t;
+
+void tui_screenbuf_init(tui_screenbuf_t *sb, int width, int height, FILE *out);
+void tui_screenbuf_free(tui_screenbuf_t *sb);
+void tui_screenbuf_resize(tui_screenbuf_t *sb, int width, int height);
+void tui_screenbuf_clear(tui_screenbuf_t *sb);
+void tui_screenbuf_put(tui_screenbuf_t *sb, int x, int y,
+                        const char *ch, int style_id, int char_width);
+void tui_screenbuf_write(tui_screenbuf_t *sb, int x, int y,
+                          const char *text, int style_id);
+void tui_screenbuf_flush(tui_screenbuf_t *sb);  /* diff & output only changed cells */
+
+/* Style intern table: maps style_id ↔ ANSI sequence */
+#define TUI_MAX_STYLES 64
+
+typedef struct {
+    char ansi[64];   /* full ANSI SGR sequence */
+    int  len;
+} tui_style_entry_t;
+
+int  tui_style_intern(const char *ansi_seq); /* returns style_id */
+const char *tui_style_get(int style_id);     /* returns ANSI sequence */
+
+/* ── OSC 8 Hyperlinks ────────────────────────────────────────────────── */
+/* Clickable file paths and URLs in terminals that support OSC 8.
+ * Falls back to plain text in unsupported terminals. */
+
+bool tui_supports_hyperlinks(void);
+
+/* Write a clickable hyperlink to FILE */
+void tui_hyperlink(FILE *out, const char *url, const char *display_text);
+
+/* Format a file:// URI from a local path */
+void tui_file_link(FILE *out, const char *path, const char *display);
+
+/* Format a clickable file path with line number */
+void tui_file_line_link(FILE *out, const char *path, int line,
+                         const char *display);
+
+/* ── Wide Character Width Detection ──────────────────────────────────── */
+/* Handles emoji, CJK, combining marks, and other multi-width characters.
+ * Inspired by Claude Code's grapheme cluster detection. */
+
+/* Returns display width of a Unicode codepoint (0, 1, or 2) */
+int  tui_char_width(unsigned int codepoint);
+
+/* Returns display width of a UTF-8 string */
+int  tui_str_display_width(const char *s);
+
+/* Decode one UTF-8 codepoint from string. Returns bytes consumed. */
+int  tui_utf8_decode(const char *s, unsigned int *codepoint);
+
+/* Truncate UTF-8 string to fit within max_width display columns.
+ * Writes to dst. Returns actual display width used. */
+int  tui_utf8_truncate(const char *src, char *dst, size_t dst_len,
+                        int max_width);
+
+/* ── Terminal Title (OSC 0/2) ────────────────────────────────────────── */
+
+void tui_set_title(const char *title);
+void tui_set_title_fmt(const char *fmt, ...);
+void tui_reset_title(void);
+
+/* ── Shimmer / Gradient Animation ────────────────────────────────────── */
+/* Animated gradient text for thinking state, similar to Claude Code's
+ * shimmer effect using block characters and color interpolation. */
+
+typedef struct {
+    pthread_t       thread;
+    pthread_mutex_t mutex;
+    volatile bool   running;
+    const char     *label;
+    double          start_time;
+    int             hue_offset;  /* current hue offset for animation */
+    tui_rgb_t       color_a;     /* gradient start */
+    tui_rgb_t       color_b;     /* gradient end */
+} tui_shimmer_t;
+
+void tui_shimmer_start(tui_shimmer_t *sh, const char *label,
+                        tui_rgb_t color_a, tui_rgb_t color_b);
+void tui_shimmer_stop(tui_shimmer_t *sh);
+
+/* One-shot shimmer text (non-animated) */
+void tui_shimmer_text(FILE *out, const char *text,
+                       tui_rgb_t color_a, tui_rgb_t color_b);
+
+/* ── Permission Prompt Dialog ────────────────────────────────────────── */
+/* Styled interactive Y/N dialog with box drawing, similar to Claude Code's
+ * tool permission UI. Pure ANSI — no ncurses. */
+
+typedef enum {
+    TUI_PERM_ALLOW,
+    TUI_PERM_DENY,
+    TUI_PERM_ALWAYS,
+    TUI_PERM_CANCEL,
+} tui_perm_result_t;
+
+/* Show a permission prompt and wait for user input.
+ * Returns the user's choice. */
+tui_perm_result_t tui_permission_prompt(const char *tool_name,
+                                         const char *description,
+                                         const char *detail);
+
+/* Lightweight yes/no prompt with styled box */
+bool tui_confirm(const char *question);
+
+/* ── Structured Diff Display ─────────────────────────────────────────── */
+/* Proper unified diff renderer with line numbers, context lines,
+ * and side-by-side support. Inspired by Claude Code's StructuredDiff. */
+
+typedef struct {
+    char   type;         /* ' ' = context, '+' = add, '-' = remove, '@' = hunk header */
+    int    old_line;     /* original line number (-1 if added) */
+    int    new_line;     /* new line number (-1 if removed) */
+    char  *text;         /* line content (no newline) */
+} tui_diff_line_t;
+
+typedef struct {
+    tui_diff_line_t *lines;
+    int              count;
+    int              cap;
+    char             old_file[256];
+    char             new_file[256];
+} tui_diff_t;
+
+void tui_diff_init(tui_diff_t *d);
+void tui_diff_free(tui_diff_t *d);
+bool tui_diff_parse(tui_diff_t *d, const char *unified_diff);
+void tui_diff_render(const tui_diff_t *d, FILE *out, int context_lines);
+void tui_diff_render_inline(const tui_diff_t *d, FILE *out); /* word-level changes */
+
+/* ── Full-Screen Pager ───────────────────────────────────────────────── */
+/* Interactive pager with search, line numbers, and scrolling.
+ * Replaces basic scroller with Claude Code-like screen management. */
+
+typedef struct {
+    const char **lines;
+    int          line_count;
+    int          offset;         /* first visible line */
+    int          page_size;      /* terminal height - chrome */
+    int          term_width;
+    bool         show_line_numbers;
+    bool         wrap_lines;
+    char         search[128];    /* active search query */
+    int          search_hit;     /* current match line (-1 = none) */
+    const char  *title;
+} tui_pager_t;
+
+void tui_pager_init(tui_pager_t *p, const char **lines, int count,
+                     const char *title);
+void tui_pager_run(tui_pager_t *p);  /* blocks until user quits */
+
+/* ── Inline Code Block ───────────────────────────────────────────────── */
+/* Renders a code block with border, language tag, and line numbers.
+ * Similar to Claude Code's fenced code block component. */
+
+void tui_code_block(FILE *out, const char *code, const char *language,
+                     int start_line, bool show_line_numbers);
+
+/* ── Breadcrumb Path Display ─────────────────────────────────────────── */
+/* Renders file paths with directory separators styled, truncated to fit.
+ * Clickable via OSC 8 if supported. */
+
+void tui_breadcrumb(FILE *out, const char *path, int max_width);
 
 #endif

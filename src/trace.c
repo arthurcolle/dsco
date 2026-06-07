@@ -68,6 +68,44 @@ static const char *basename_only(const char *path) {
     return p ? p + 1 : path;
 }
 
+static bool mkdir_p_trace(const char *path) {
+    if (!path || !*path) return false;
+
+    char tmp[512];
+    size_t n = strlen(path);
+    if (n >= sizeof(tmp)) return false;
+    memcpy(tmp, path, n + 1);
+
+    for (char *p = tmp + 1; *p; p++) {
+        if (*p != '/') continue;
+        *p = '\0';
+        if (tmp[0] != '\0' && mkdir(tmp, 0755) != 0 && errno != EEXIST) {
+            return false;
+        }
+        *p = '/';
+    }
+
+    if (mkdir(tmp, 0755) != 0 && errno != EEXIST) return false;
+    return true;
+}
+
+static FILE *open_trace_default(const char *home, char *path, size_t path_len) {
+    FILE *fp = NULL;
+
+    if (home && home[0]) {
+        char dir[512];
+        snprintf(dir, sizeof(dir), "%s/.dsco/debug", home);
+        mkdir_p_trace(dir);
+        snprintf(path, path_len, "%s/trace-%d.jsonl", dir, (int)getpid());
+        fp = fopen(path, "a");
+        if (fp) return fp;
+    }
+
+    snprintf(path, path_len, "/tmp/dsco-trace-%d.jsonl", (int)getpid());
+    fp = fopen(path, "a");
+    return fp;
+}
+
 /* ── Public API ───────────────────────────────────────────────────────── */
 
 void trace_init(void) {
@@ -98,12 +136,8 @@ void trace_init(void) {
         strcmp(env, "debug") == 0 || strcmp(env, "info") == 0) {
         /* Default path: ~/.dsco/debug/trace-<pid>.jsonl */
         const char *home = getenv("HOME");
-        if (!home) home = "/tmp";
-        char dir[512], path[600];
-        snprintf(dir, sizeof(dir), "%s/.dsco/debug", home);
-        mkdir(dir, 0755);  /* ignore error if exists */
-        snprintf(path, sizeof(path), "%s/trace-%d.jsonl", dir, (int)getpid());
-        s_trace_fp = fopen(path, "a");
+        char path[600];
+        s_trace_fp = open_trace_default(home, path, sizeof(path));
         if (!s_trace_fp) {
             fprintf(stderr, "dsco: trace: cannot open %s: %s\n", path, strerror(errno));
             s_min_level = TRACE_LVL_OFF;
