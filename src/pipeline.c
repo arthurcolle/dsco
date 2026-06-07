@@ -416,20 +416,54 @@ static void apply_stage(char ***lines, int *count, pipe_stage_t *stage) {
     case PIPE_REGEX: {
         regex_t re;
         if (regcomp(&re, stage->arg, REG_EXTENDED) != 0) break;
-        char **out = malloc(n * sizeof(char *));
+        int cap = n > 0 ? n : 1;
+        char **out = malloc((size_t)cap * sizeof(char *));
+        if (!out) {
+            regfree(&re);
+            break;
+        }
         int on = 0;
+        bool alloc_failed = false;
         for (int i = 0; i < n; i++) {
-            regmatch_t match;
-            if (regexec(&re, in[i], 1, &match, 0) == 0) {
+            const char *cursor = in[i];
+            while (cursor && *cursor) {
+                regmatch_t match;
+                if (regexec(&re, cursor, 1, &match, 0) != 0) break;
+
                 size_t mlen = (size_t)(match.rm_eo - match.rm_so);
+                if (on >= cap) {
+                    cap *= 2;
+                    char **grown = realloc(out, (size_t)cap * sizeof(char *));
+                    if (!grown) {
+                        alloc_failed = true;
+                        break;
+                    }
+                    out = grown;
+                }
+                if (alloc_failed) break;
                 char *m = malloc(mlen + 1);
-                memcpy(m, in[i] + match.rm_so, mlen);
+                if (!m) {
+                    alloc_failed = true;
+                    break;
+                }
+                memcpy(m, cursor + match.rm_so, mlen);
                 m[mlen] = '\0';
                 out[on++] = m;
+
+                size_t advance = (size_t)match.rm_eo;
+                if (advance == 0) advance = 1;
+                cursor += advance;
             }
+            if (alloc_failed) break;
         }
         regfree(&re);
         free_lines(in, n);
+        if (alloc_failed) {
+            free_lines(out, on);
+            *lines = NULL;
+            *count = 0;
+            break;
+        }
         *lines = out; *count = on;
         break;
     }

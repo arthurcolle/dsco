@@ -5,8 +5,9 @@
 #include <stdlib.h>
 #include <string.h>
 #include <stddef.h>
+#include <ctype.h>
 
-#define DSCO_VERSION "0.9.0"
+#define DSCO_VERSION "1.0.0"
 
 /* Build info — set via Makefile CFLAGS */
 #ifndef BUILD_DATE
@@ -23,15 +24,32 @@
 #define MAX_MSG_CONTENT     (64 * 1024)
 #define MAX_MESSAGES        128
 #define MAX_TOOLS           512
+
+/* Tool register file: hard cap on tools per API request.
+ * Like CPU registers — 32 slots max, tools evicted/loaded dynamically.
+ * bash+python always core; everything else loaded via load_tools/hints.
+ * Budget-adaptive: full=32, mid=24, low=13, critical=5 */
+#define TOOL_REGISTER_CAP       32
+#define TOOL_REG_ALWAYS          5   /* R0-R4:   bash,python,discover,load,exit */
+#define TOOL_REG_WARM           11   /* R5-R15:  file I/O + run_command, evictable */
+#define TOOL_REG_WORKING        12   /* R16-R27: quorum-scored, turn-volatile */
+#define TOOL_REG_DISCOVERY       4   /* R28-R31: progressive schema, ephemeral */
+#define QUORUM_MIN_SIGNALS       2   /* min independent signals to load a tool */
 #define MAX_INPUT_LINE      65536
 
+/* --cheap mode: send only ALWAYS-core tools (5) + skip compact catalog.
+ * Cuts first-prompt cost from ~$0.40 to ~$0.05 by evicting all tools
+ * except discover_tools/load_tools (which let the model page them in). */
+extern int g_cheap_mode;
+
 /* API defaults */
-#define DEFAULT_MODEL       "claude-opus-4-6"
+#define DEFAULT_MODEL       "z-ai/glm-5.1"
 #define API_URL_ANTHROPIC   "https://api.anthropic.com/v1/messages"
 #define API_URL_COUNT_TOKENS "https://api.anthropic.com/v1/messages/count_tokens"
 #define ANTHROPIC_VERSION   "2023-06-01"
 #define ANTHROPIC_BETAS     "interleaved-thinking-2025-05-14,code-execution-2025-05-22,advanced-tool-use-2025-11-20"
 #define MAX_TOKENS          16384
+#define TOOLMGMT_API_URL_DEFAULT "https://tools.distributed.systems"
 
 /* Tool limits */
 #define MAX_FILE_PAGE_SIZE  4096
@@ -52,9 +70,18 @@ static inline int dsco_max_agent_turns(void) {
 }
 
 /* Context window / token budget */
-#define CONTEXT_WINDOW_TOKENS  200000  /* claude-opus-4-6 */
+#define CONTEXT_WINDOW_TOKENS  2000000  /* x-ai/grok-4.20-beta */
 #define TOKEN_BUDGET_WARN      0.85    /* warn at 85% usage */
 #define TOKEN_BUDGET_COMPACT   0.80    /* auto-compact at 80% */
+
+/* Output-aware context management (inspired by Claude Code):
+ * Effective window = context_window - max_output_reserve
+ * Compact threshold = effective_window - buffer_tokens
+ * This prevents compacting too late when output reservation is large. */
+#define AUTOCOMPACT_BUFFER_TOKENS  13000  /* safety margin below effective window */
+#define SNIP_KEEP_HEAD             3      /* rounds to preserve at start */
+#define SNIP_KEEP_TAIL             6      /* rounds to preserve at end */
+#define COMPACT_CIRCUIT_BREAKER    3      /* max consecutive compact failures */
 
 /* Session storage */
 #define DSCO_SESSION_DIR     "~/.dsco/sessions"
@@ -84,10 +111,12 @@ typedef struct {
 
 static const model_info_t MODEL_REGISTRY[] = {
     /* ── Anthropic (native API) ──────────────────────────────────────────── */
-    { "opus",         "claude-opus-4-6",             200000, 32000,  15.0,  75.0,  1.50, 18.75, 1 },
+    { "opus",         "claude-opus-4-7",             200000, 32000,  15.0,  75.0,  1.50, 18.75, 1 },
+    { "opus46",       "claude-opus-4-6",             200000, 32000,  15.0,  75.0,  1.50, 18.75, 1 },
     { "sonnet",       "claude-sonnet-4-6",           200000, 16000,   3.0,  15.0,  0.30,  3.75, 1 },
     { "haiku",        "claude-haiku-4-5-20251001",   200000,  8192,   0.80,  4.0,  0.08,  1.00, 0 },
     /* ── Anthropic (OpenRouter IDs — for cross-provider routing) ─────── */
+    { "or-opus47",    "anthropic/claude-opus-4.7",    1000000, 32000, 15.0,  75.0,  0, 0, 1 },
     { "or-opus46",    "anthropic/claude-opus-4.6",    1000000, 32000,  5.0,  25.0,  0, 0, 1 },
     { "or-sonnet46",  "anthropic/claude-sonnet-4.6",  1000000, 16000,  3.0,  15.0,  0, 0, 1 },
     { "or-opus45",    "anthropic/claude-opus-4.5",     200000, 32000,  5.0,  25.0,  0, 0, 1 },
@@ -95,13 +124,18 @@ static const model_info_t MODEL_REGISTRY[] = {
     /* ── OpenAI — GPT-5.x family (2026 frontier) ────────────────────── */
     { "gpt54-pro",    "openai/gpt-5.4-pro",          1050000, 32768, 30.0, 180.0,  0, 0, 1 },
     { "gpt54",        "openai/gpt-5.4",              1050000, 32768,  2.50, 15.0,  0, 0, 1 },
-    { "gpt53-codex",  "openai/gpt-5.3-codex",         400000, 32768,  1.75, 14.0,  0, 0, 1 },
-    { "gpt53",        "openai/gpt-5.3-chat",           128000, 32768,  1.75, 14.0,  0, 0, 1 },
-    { "gpt52-pro",    "openai/gpt-5.2-pro",            400000, 32768, 21.0, 168.0,  0, 0, 1 },
-    { "gpt52",        "openai/gpt-5.2",                400000, 32768,  1.75, 14.0,  0, 0, 1 },
-    { "gpt52-codex",  "openai/gpt-5.2-codex",          400000, 32768,  1.75, 14.0,  0, 0, 1 },
-    { "gpt51",        "openai/gpt-5.1",                400000, 32768,  1.25, 10.0,  0, 0, 1 },
-    { "gpt51-codex",  "openai/gpt-5.1-codex",          400000, 32768,  1.25, 10.0,  0, 0, 1 },
+    { "gpt54-mini",   "openai/gpt-5.4-mini",           400000, 32768,  0.75,  4.50, 0, 0, 0 },
+    { "gpt54-nano",   "openai/gpt-5.4-nano",           400000, 32768,  0.20,  1.25, 0, 0, 0 },
+    { "gpt55-pro",    "openai/gpt-5.5-pro",            400000, 32768,  6.0,  24.0,  0, 0, 1 },
+    { "gpt55",        "openai/gpt-5.5",                400000, 32768,  1.75, 14.0,  0, 0, 1 },
+    { "gpt53-codex",      "openai/gpt-5.3-codex",           400000, 32768,  1.75, 14.0,  0, 0, 1 },
+    { "gpt52-pro",        "openai/gpt-5.2-pro",              400000, 32768, 21.0, 168.0,  0, 0, 1 },
+    { "gpt52",            "openai/gpt-5.2",                  400000, 32768,  1.75, 14.0,  0, 0, 1 },
+    { "gpt52-codex",      "openai/gpt-5.2-codex",            400000, 32768,  1.75, 14.0,  0, 0, 1 },
+    { "gpt51",            "openai/gpt-5.1",                  400000, 32768,  1.25, 10.0,  0, 0, 1 },
+    { "gpt51-codex",      "openai/gpt-5.1-codex",            400000, 32768,  1.25, 10.0,  0, 0, 1 },
+    { "gpt51-codex-mini", "openai/gpt-5.1-codex-mini",       400000, 32768,  0.50,  4.0,  0, 0, 0 },
+    { "gpt51-codex-max",  "openai/gpt-5.1-codex-max",        400000, 32768,  3.0,  24.0,  0, 0, 1 },
     { "gpt5",         "openai/gpt-5",                   400000, 32768,  1.25, 10.0,  0, 0, 1 },
     { "gpt5-pro",     "openai/gpt-5-pro",               400000, 32768, 15.0, 120.0,  0, 0, 1 },
     { "gpt5-codex",   "openai/gpt-5-codex",             400000, 32768,  1.25, 10.0,  0, 0, 1 },
@@ -129,14 +163,26 @@ static const model_info_t MODEL_REGISTRY[] = {
     { "gem3-flash",   "google/gemini-3-flash-preview", 1048576, 32768,  0.50,  3.0,  0, 0, 0 },
     { "gem25-pro",    "google/gemini-2.5-pro",         1048576, 32768,  1.25, 10.0,  0, 0, 1 },
     { "gem25-flash",  "google/gemini-2.5-flash",       1048576, 32768,  0.30,  2.50, 0, 0, 0 },
-    /* ── xAI Grok ────────────────────────────────────────────────────── */
+    /* ── xAI Grok (via OpenRouter) ───────────────────────────────────── */
     { "grok4",        "x-ai/grok-4.20-beta",           2000000, 32768,  2.0,   6.0,  0, 0, 1 },
     { "grok4-ma",     "x-ai/grok-4.20-multi-agent-beta", 2000000, 32768, 2.0,  6.0,  0, 0, 1 },
-    /* ── Moonshot Kimi ───────────────────────────────────────────────── */
+    /* ── xAI Grok (native api.x.ai) ──────────────────────────────────── */
+    { "grok-4-fast",  "grok-4-fast",                    2000000, 32768,  0.20,  0.50, 0, 0, 1 },
+    { "grok-4",       "grok-4",                          256000, 32768,  3.00, 15.00, 0, 0, 1 },
+    { "grok-3",       "grok-3",                          131072, 32768,  3.00, 15.00, 0, 0, 0 },
+    { "grok-3-mini",  "grok-3-mini",                     131072, 32768,  0.30,  0.50, 0, 0, 1 },
+    { "grok-code",    "grok-code-fast-1",                262144, 32768,  0.20,  1.50, 0, 0, 0 },
+    /* ── Moonshot Kimi (via OpenRouter) ──────────────────────────────── */
     { "kimi",         "moonshotai/kimi-k2.5",           262144, 16384,  0.45,  2.20, 0, 0, 1 },
     { "kimi-k2",      "moonshotai/kimi-k2",             131000, 16384,  0.55,  2.20, 0, 0, 0 },
     { "kimi-think",   "moonshotai/kimi-k2-thinking",    131072, 16384,  0.47,  2.00, 0, 0, 1 },
+    /* ── Moonshot Kimi (native platform.moonshot.ai) ─────────────────── */
+    { "mk25",         "kimi-k2.5",                      262144, 32768,  0.60,  3.00, 0.10, 0, 1 },
+    { "mk2t",         "kimi-k2-turbo-preview",          262144, 32768,  0.60,  3.00, 0.10, 0, 0 },
+    { "mk2-think",    "kimi-k2-thinking",               262144, 32768,  0.60,  3.00, 0.10, 0, 1 },
+    { "mk2-think-tb", "kimi-k2-thinking-turbo",         262144, 32768,  0.60,  3.00, 0.10, 0, 1 },
     /* ── Zhipu GLM ───────────────────────────────────────────────────── */
+    { "glm51",        "z-ai/glm-5.1",                  202752, 65536,  0.72,  2.30, 0, 0, 1 },
     { "glm5",         "z-ai/glm-5",                    202752, 65536,  0.72,  2.30, 0, 0, 1 },
     { "glm5-turbo",   "z-ai/glm-5-turbo",              202752, 65536,  0.96,  3.20, 0, 0, 1 },
     { "glm47",        "z-ai/glm-4.7",                  202752, 65536,  0.38,  1.98, 0, 0, 1 },
@@ -159,6 +205,7 @@ static const model_info_t MODEL_REGISTRY[] = {
     { "llama33-70b",  "meta-llama/llama-3.3-70b-instruct", 131072, 32768, 0.10, 0.32, 0, 0, 0 },
     /* ── Mistral (2025/2026) ─────────────────────────────────────────── */
     { "mistral-l3",   "mistralai/mistral-large-2512",   262144, 32768,  0.50,  1.50, 0, 0, 0 },
+    { "mixtral",      "mistralai/mixtral-8x7b-instruct-v0.1", 32768, 32768, 0.0, 0.0, 0, 0, 0 },
     { "devstral",     "mistralai/devstral-2512",         262144, 32768,  0.40,  2.00, 0, 0, 0 },
     { "mistral-med",  "mistralai/mistral-medium-3.1",    131072, 32768,  0.40,  2.00, 0, 0, 0 },
     { "mistral-s32",  "mistralai/mistral-small-3.2-24b-instruct", 131072, 32768, 0.06, 0.18, 0, 0, 0 },
@@ -202,10 +249,48 @@ static const model_info_t MODEL_REGISTRY[] = {
     { NULL, NULL, 0, 0, 0, 0, 0, 0, 0 }
 };
 
+static inline void model_normalize_key(const char *src, char *dst, size_t dst_len) {
+    if (!dst || dst_len == 0) return;
+    dst[0] = '\0';
+    if (!src || !*src) return;
+
+    const char *p = src;
+    const char *slash = strchr(src, '/');
+    if (slash && slash[1] != '\0') p = slash + 1;
+
+    size_t out = 0;
+    for (; *p && out + 1 < dst_len; p++) {
+        unsigned char c = (unsigned char)*p;
+        if (!isalnum(c)) continue;
+        dst[out++] = (char)tolower(c);
+    }
+    dst[out] = '\0';
+}
+
 static inline const model_info_t *model_lookup(const char *name) {
+    if (!name || !*name) return NULL;
+
+    /* Pass 1: exact match against alias or model_id for any entry. An exact
+     * hit must always beat a fuzzy normalized hit, otherwise an early-listed
+     * entry whose model_id normalizes the same as a later entry's alias
+     * (e.g. "moonshotai/kimi-k2.5" vs native "kimi-k2.5") wins incorrectly. */
     for (int i = 0; MODEL_REGISTRY[i].alias; i++) {
         if (strcmp(name, MODEL_REGISTRY[i].alias) == 0 ||
             strcmp(name, MODEL_REGISTRY[i].model_id) == 0)
+            return &MODEL_REGISTRY[i];
+    }
+
+    /* Pass 2: normalized (case/punctuation-insensitive) match. */
+    char want_norm[256];
+    model_normalize_key(name, want_norm, sizeof(want_norm));
+    if (want_norm[0] == '\0') return NULL;
+
+    for (int i = 0; MODEL_REGISTRY[i].alias; i++) {
+        char alias_norm[256];
+        char model_norm[256];
+        model_normalize_key(MODEL_REGISTRY[i].alias, alias_norm, sizeof(alias_norm));
+        model_normalize_key(MODEL_REGISTRY[i].model_id, model_norm, sizeof(model_norm));
+        if (strcmp(want_norm, alias_norm) == 0 || strcmp(want_norm, model_norm) == 0)
             return &MODEL_REGISTRY[i];
     }
     return NULL;
@@ -259,15 +344,39 @@ static inline int model_context_window(const char *name) {
     "- PRINCIPAL TIERS: Tier 0 (Founder) > Tier 1 (Operator) > Tier 2 (Agent) > Tier 3 (User).\n" \
     "- HARDCODED BEHAVIORS: Non-bypassable rules (must-always/must-never).\n" \
     "- GOVERNANCE CHECKPOINT: hardcoded -> budget -> killswitch -> authorize -> audit.\n\n" \
-    "TOOLS (200+): File I/O, git, network, shell, crypto, pipeline engine, " \
-    "math evaluator, AST introspection, plugins, market data, soul evolution.\n" \
+    "TOOLS: 364+ tools across file I/O, git, network, shell, crypto, pipeline, " \
+    "math, AST, plugins, market data, prediction markets, soul evolution.\n" \
+    "The TOOL CATALOG below lists every tool with its signature (param* = required).\n" \
+    "Call any tool directly — the catalog has all the parameter info you need.\n" \
     "MULTI-EXECUTOR SWARMS: dsco (fork self), claude (Claude Code CLI), codex (OpenAI Codex).\n\n" \
     "TOKEN EFFICIENCY:\n" \
     "- Issue 3+ parallel tool calls per step when gathering information (36% cheaper, 41% faster).\n" \
-    "- Use context_get_batch with chunk_ids array instead of sequential context_get calls.\n" \
-    "- Use context_pack for budget-aware evidence assembly instead of fetching chunks one by one.\n" \
+    "- For external parallelism, you may use bash to launch local dsc or dsco worker processes when swarm/executor tools are not the best fit.\n" \
+    "- Large tool results are truncated inline. Full results persist in VFS — use context_recall to retrieve.\n" \
+    "- Do not use context_search/context_get/context_pack — they are deprecated.\n" \
     "- Be concise. Prefer action over explanation.\n" \
     "Create goals for complex tasks. Use tournaments when multiple approaches exist."
+
+/* Cheap-mode system prompt: minimal, no catalog reference, teaches discover/load */
+#define SYSTEM_PROMPT_CHEAP \
+    "You are dsco, an agentic CLI with 364+ tools.\n" \
+    "You are running in CHEAP MODE — only 5 core tools are loaded to minimize cost.\n\n" \
+    "YOUR ACTIVE TOOLS:\n" \
+    "  bash          — run shell commands\n" \
+    "  python        — execute Python code\n" \
+    "  discover_tools — browse all 364+ tools by category\n" \
+    "  load_tools    — page in tools you need (they become callable immediately)\n" \
+    "  self_exit     — end session\n\n" \
+    "WORKFLOW: For any task beyond bash/python, call discover_tools to find " \
+    "relevant tools, then load_tools to activate them. Loaded tools persist " \
+    "for the session. Categories: file_io, git, network, shell, code, crypto, " \
+    "swarm, ast, pipeline, math, search, general, finance, prediction, memory.\n\n" \
+    "EFFICIENCY:\n" \
+    "- Only load tools you actually need — each adds ~200 tokens per turn.\n" \
+    "- Prefer bash/python for simple tasks over loading specialized tools.\n" \
+    "- Issue parallel tool calls when gathering information.\n" \
+    "- For external parallelism, bash may launch local dsc or dsco workers when that is simpler than loading swarm tools.\n" \
+    "- Be concise. Prefer action over explanation."
 
 /* ── TUI Feature Flags ─────────────────────────────────────────────────── */
 

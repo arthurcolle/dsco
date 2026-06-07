@@ -1,0 +1,4 @@
+# Vendor directory — API specs and reference implementations
+# These are downloaded copies for development reference, not shipped artifacts
+*
+!.gitignore
