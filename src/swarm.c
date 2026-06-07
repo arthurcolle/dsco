@@ -243,7 +243,21 @@ int swarm_spawn_in_group(swarm_t *s, int group_id, const char *task, const char 
         /* New process group for clean kill */
         setpgid(0, 0);
 
+        /* Validate model against registry — LLMs sometimes hallucinate
+           model names (e.g. "claude-3-5-sonnet-20241022" which is gone).
+           Fall back to parent's model if the requested one is unknown. */
         const char *m = model ? model : s->default_model;
+        if (m && m[0]) {
+            const char *resolved = model_resolve_alias(m);
+            if (resolved == m && !model_lookup(m)) {
+                fprintf(stdout, "swarm: unknown model '%s', falling back to '%s'\n",
+                        m, s->default_model);
+                m = s->default_model;
+            } else {
+                m = resolved;
+            }
+        }
+        if (!m || !m[0]) m = s->default_model;
         const char *bin = s->dsco_path;
 
         /* Ensure child inherits API key */
