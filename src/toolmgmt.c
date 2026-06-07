@@ -434,6 +434,96 @@ static int tm_cli_list(int argc, char **argv) {
     return 0;
 }
 
+/* discover/search returns {"results":[{"tool_id","tool":{name,description,…}}]} */
+static void tm_search_cb(const char *el, void *ctx) {
+    (void)ctx;
+    char *tid = json_get_str(el, "tool_id");
+    char *tool = json_get_raw(el, "tool");
+    char *name = tool ? json_get_str(tool, "name") : NULL;
+    char *desc = tool ? json_get_str(tool, "description") : NULL;
+    const char *label = (name && name[0]) ? name : (tid ? tid : "?");
+    if (desc && desc[0]) {
+        char shortd[80];
+        snprintf(shortd, sizeof(shortd), "%s", desc);
+        printf("  %-32s %s\n", label, shortd);
+    } else {
+        printf("  %s\n", label);
+    }
+    free(tid); free(tool); free(name); free(desc);
+}
+
+static int tm_cli_search(int argc, char **argv) {
+    /* argv: "<query>" [--limit N] [--backend B] */
+    const char *query = NULL, *backend = NULL;
+    int limit = 10;
+    for (int i = 0; i < argc; i++) {
+        if (strcmp(argv[i], "--limit") == 0 && i + 1 < argc) limit = atoi(argv[++i]);
+        else if (strcmp(argv[i], "--backend") == 0 && i + 1 < argc) backend = argv[++i];
+        else if (!query) query = argv[i];
+    }
+    if (!query) { fprintf(stderr, "usage: dsco tools search \"<query>\" [--limit N] [--backend B]\n"); return 2; }
+
+    char *eq = curl_easy_escape(NULL, query, 0);
+    char path[512];
+    if (backend) {
+        char *eb = curl_easy_escape(NULL, backend, 0);
+        snprintf(path, sizeof(path), "/api/v1/discover/search?query=%s&limit=%d&backend=%s",
+                 eq ? eq : query, limit, eb ? eb : backend);
+        if (eb) curl_free(eb);
+    } else {
+        snprintf(path, sizeof(path), "/api/v1/discover/search?query=%s&limit=%d",
+                 eq ? eq : query, limit);
+    }
+    if (eq) curl_free(eq);
+
+    char *body = NULL;
+    long st = toolmgmt_request("GET", path, NULL, &body);
+    if (st < 200 || st >= 300) {
+        fprintf(stderr, "tools search: HTTP %ld from %s\n", st, toolmgmt_base_url());
+        if (body && body[0]) fprintf(stderr, "  %s\n", body);
+        free(body);
+        return 1;
+    }
+    int c = json_array_foreach(body, "results", tm_search_cb, NULL);
+    printf("\n%d matches for \"%s\"\n", c, query);
+    free(body);
+    return 0;
+}
+
+/* Finds one tool by name in the full catalog and prints its raw JSON. The
+ * single-tool GET endpoint is unreliable server-side, so we filter the list
+ * client-side instead. */
+typedef struct { const char *want; char *found; } tm_find_ctx_t;
+
+static void tm_find_cb(const char *el, void *ctx) {
+    tm_find_ctx_t *fc = (tm_find_ctx_t *)ctx;
+    if (fc->found) return;
+    char *name = json_get_str(el, "name");
+    if (name && fc->want && strcmp(name, fc->want) == 0)
+        fc->found = safe_strdup(el);
+    free(name);
+}
+
+static int tm_cli_get(int argc, char **argv) {
+    if (argc < 1) { fprintf(stderr, "usage: dsco tools get <tool>\n"); return 2; }
+    const char *want = argv[0];
+    char *body = toolmgmt_list_tools(1000);
+    if (!body) { fprintf(stderr, "tools get: catalog fetch from %s failed\n", toolmgmt_base_url()); return 1; }
+    size_t n = strlen(body);
+    char *wrapped = malloc(n + 32);
+    tm_find_ctx_t fc = { want, NULL };
+    if (wrapped) {
+        snprintf(wrapped, n + 32, "{\"__tm_items__\":%s}", body);
+        json_array_foreach(wrapped, "__tm_items__", tm_find_cb, &fc);
+        free(wrapped);
+    }
+    free(body);
+    if (!fc.found) { fprintf(stderr, "tools get: no tool named '%s'\n", want); return 1; }
+    printf("%s\n", fc.found);
+    free(fc.found);
+    return 0;
+}
+
 static int tm_cli_run(int argc, char **argv) {
     /* argv: <tool> [k=v ...] [--timeout-ms N] */
     if (argc < 1) { fprintf(stderr, "usage: dsco tools run <tool> [k=v ...]\n"); return 2; }
@@ -520,6 +610,8 @@ static void tm_cli_usage(void) {
         "usage: dsco tools <command> [args]\n\n"
         "commands:\n"
         "  list [--limit N]                 list remote tools\n"
+        "  search \"<query>\" [--limit N]     semantic tool discovery\n"
+        "  get <tool>                       show one tool's schema\n"
         "  run <tool> [k=v ...]             execute one tool\n"
         "  batch <tool> [k=v] [-- ...]      execute many tools in parallel\n"
         "  plan \"<query>\" [--intent X]      recommend a tool pipeline\n"
@@ -544,6 +636,8 @@ int toolmgmt_cli(int argc, char **argv) {
 
     if (rn == 0 || strcmp(rest[0], "list") == 0)
         return tm_cli_list(rn > 0 ? rn - 1 : 0, rest + (rn > 0 ? 1 : 0));
+    if (strcmp(rest[0], "search") == 0) return tm_cli_search(rn - 1, rest + 1);
+    if (strcmp(rest[0], "get") == 0)    return tm_cli_get(rn - 1, rest + 1);
     if (strcmp(rest[0], "run") == 0)   return tm_cli_run(rn - 1, rest + 1);
     if (strcmp(rest[0], "batch") == 0) return tm_cli_batch(rn - 1, rest + 1);
     if (strcmp(rest[0], "plan") == 0 || strcmp(rest[0], "recommend") == 0)
