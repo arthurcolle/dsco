@@ -10,6 +10,8 @@
 #include <string.h>
 #include <ctype.h>
 #include <pthread.h>
+#include <time.h>
+#include <stdbool.h>
 #include <curl/curl.h>
 
 /* ── Configuration ─────────────────────────────────────────────────────── */
@@ -48,6 +50,13 @@ static long tm_timeout_secs(void) {
     return 60;
 }
 
+/* Number of automatic retries on transport error / 429 / 5xx (default 2). */
+static int tm_max_retries(void) {
+    const char *e = getenv("TOOLS_API_RETRIES");
+    if (e && e[0]) { int v = atoi(e); if (v >= 0) return v; }
+    return 2;
+}
+
 /* curl_global_init is not thread-safe; do it exactly once before any worker
  * thread spins up its own easy handle. */
 static pthread_once_t s_curl_once = PTHREAD_ONCE_INIT;
@@ -73,8 +82,8 @@ static size_t tm_write_cb(void *ptr, size_t size, size_t nmemb, void *ud) {
     return total;
 }
 
-long toolmgmt_request(const char *method, const char *path,
-                      const char *body, char **out) {
+static long tm_request_once(const char *method, const char *path,
+                            const char *body, char **out) {
     if (out) *out = NULL;
     pthread_once(&s_curl_once, tm_curl_global_init);
 
@@ -104,6 +113,9 @@ long toolmgmt_request(const char *method, const char *path,
         hdrs = curl_slist_append(hdrs, auth);
     }
 
+    if (getenv("TOOLS_API_DEBUG"))
+        fprintf(stderr, "[tm] %s %s body=%s\n", method, url, body ? body : "(none)");
+
     curl_easy_setopt(c, CURLOPT_URL, url);
     curl_easy_setopt(c, CURLOPT_HTTPHEADER, hdrs);
     if (strcmp(method, "POST") == 0) {
@@ -131,27 +143,52 @@ long toolmgmt_request(const char *method, const char *path,
     return code;
 }
 
+/* Retrying wrapper: transport errors, 429, and 5xx are retried with
+ * exponential backoff + jitter (bounded by TOOLS_API_RETRIES). GET and POST
+ * are both retried — the API's mutating calls accept idempotency keys, and the
+ * read-only ones are naturally safe. */
+long toolmgmt_request(const char *method, const char *path,
+                      const char *body, char **out) {
+    int retries = tm_max_retries();
+    long code = -1;
+    char *resp = NULL;
+    for (int attempt = 0; ; attempt++) {
+        free(resp); resp = NULL;
+        code = tm_request_once(method, path, body, &resp);
+        bool retryable = (code < 0 || code == 429 || (code >= 500 && code < 600));
+        if (!retryable || attempt >= retries) break;
+        /* backoff: 200ms, 400ms, 800ms … plus up to 100ms jitter */
+        long base_ms = 200L << attempt;
+        long jitter = (long)(rand() % 100);
+        struct timespec ts = { (base_ms + jitter) / 1000,
+                               ((base_ms + jitter) % 1000) * 1000000L };
+        nanosleep(&ts, NULL);
+    }
+    if (out) *out = resp; else free(resp);
+    return code;
+}
+
 /* ── High-level operations ─────────────────────────────────────────────── */
 
 /* Execute one tool; always returns the response body (even on error) so the
  * caller can inspect it, and reports the HTTP status via *status. */
 static char *tm_exec(const char *tool, const char *args_json,
                      int timeout_ms, long *status) {
+    (void)timeout_ms;  /* per-tool execute has no timeout field; honored via HTTP timeout */
     jbuf_t b;
     jbuf_init(&b, 512);
-    jbuf_append(&b, "{\"tool_name\":");
-    jbuf_append_json_str(&b, tool);
-    jbuf_append(&b, ",\"arguments\":");
+    jbuf_append(&b, "{\"inputs\":");
     jbuf_append(&b, (args_json && args_json[0]) ? args_json : "{}");
-    jbuf_append(&b, ",\"stream\":false");
-    if (timeout_ms > 0) {
-        jbuf_append(&b, ",\"timeout_ms\":");
-        jbuf_append_int(&b, timeout_ms);
-    }
     jbuf_append(&b, "}");
 
+    /* /api/v1/tools/{tool}/execute is the synchronous per-tool path. */
+    char *esc = curl_easy_escape(NULL, tool, 0);
+    char path[256];
+    snprintf(path, sizeof(path), "/api/v1/tools/%s/execute", esc ? esc : tool);
+    if (esc) curl_free(esc);
+
     char *out = NULL;
-    long st = toolmgmt_request("POST", "/api/v1/execute", b.data, &out);
+    long st = toolmgmt_request("POST", path, b.data, &out);
     jbuf_free(&b);
     if (status) *status = st;
     return out;
@@ -546,6 +583,109 @@ static int tm_cli_run(int argc, char **argv) {
     return (st >= 200 && st < 300) ? 0 : 1;
 }
 
+/* Build an inputs object like kv_to_json, but substitute placeholders that
+ * reference earlier step outputs:
+ *   {{prev}}   → the immediately-preceding step's output (raw JSON)
+ *   {{stepN}}  → step N's output (1-based)
+ * A placeholder is only honored as a whole value (val == "{{...}}"); the
+ * substituted text is the raw output JSON so types (number/string/array) are
+ * preserved. Missing references emit null. */
+static void kv_to_json_chain(jbuf_t *b, char **pairs, int n,
+                             char **outputs, int ndone) {
+    jbuf_append(b, "{");
+    int emitted = 0;
+    for (int i = 0; i < n; i++) {
+        char *eq = strchr(pairs[i], '=');
+        if (!eq) continue;
+        *eq = '\0';
+        const char *key = pairs[i];
+        const char *val = eq + 1;
+        if (emitted) jbuf_append(b, ",");
+        jbuf_append_json_str(b, key);
+        jbuf_append(b, ":");
+
+        const char *subst = NULL;
+        if (strcmp(val, "{{prev}}") == 0) {
+            subst = (ndone > 0 && outputs[ndone - 1]) ? outputs[ndone - 1] : "null";
+        } else if (strncmp(val, "{{step", 6) == 0) {
+            int k = atoi(val + 6);  /* 1-based */
+            subst = (k >= 1 && k <= ndone && outputs[k - 1]) ? outputs[k - 1] : "null";
+        }
+        if (subst) jbuf_append(b, subst);
+        else if (is_json_scalar(val)) jbuf_append(b, val);
+        else jbuf_append_json_str(b, val);
+
+        *eq = '=';
+        emitted++;
+    }
+    jbuf_append(b, "}");
+}
+
+static int tm_cli_chain(int argc, char **argv) {
+    /* argv: <tool> k=v ... -- <tool> k=v ... -- ...   (sequential, outputs
+     * thread forward via {{prev}} / {{stepN}} placeholders). */
+    if (argc < 1) {
+        fprintf(stderr, "usage: dsco tools chain <tool> [k=v ...] [-- <tool> [k=v ...]] ...\n"
+                        "  reference earlier results with {{prev}} or {{stepN}}\n");
+        return 2;
+    }
+
+    /* Pre-split into steps (tool + its k=v args). */
+    const char *tools[64];
+    char **kvs[64];
+    int kvns[64];
+    int nsteps = 0;
+    char *kvbuf[1024];
+    int kvbuf_n = 0;
+    int i = 0;
+    while (i < argc && nsteps < 64) {
+        tools[nsteps] = argv[i++];
+        kvs[nsteps] = &kvbuf[kvbuf_n];
+        int cnt = 0;
+        while (i < argc && strcmp(argv[i], "--") != 0) {
+            if (kvbuf_n < 1024) { kvbuf[kvbuf_n++] = argv[i]; cnt++; }
+            i++;
+        }
+        if (i < argc && strcmp(argv[i], "--") == 0) i++;
+        kvns[nsteps] = cnt;
+        nsteps++;
+    }
+
+    char *outputs[64] = {0};   /* raw `output` JSON per completed step */
+    int rc = 0;
+    int done = 0;
+    for (int s = 0; s < nsteps; s++) {
+        jbuf_t args;
+        jbuf_init(&args, 256);
+        kv_to_json_chain(&args, kvs[s], kvns[s], outputs, done);
+        long st = -1;
+        char *resp = tm_exec(tools[s], args.data, 0, &st);
+        jbuf_free(&args);
+
+        char *status = resp ? json_get_str(resp, "status") : NULL;
+        char *out_raw = resp ? json_get_raw(resp, "output") : NULL;
+        bool ok = (st >= 200 && st < 300) &&
+                  (!status || strcmp(status, "success") == 0);
+
+        printf("=== [step %d] %s  (HTTP %ld%s%s) ===\n", s + 1, tools[s], st,
+               status ? " " : "", status ? status : "");
+        if (resp) printf("%s\n", resp);
+
+        outputs[done++] = out_raw ? out_raw : safe_strdup("null");
+        free(status);
+        free(resp);
+
+        if (!ok) {
+            fprintf(stderr, "chain: step %d (%s) failed; stopping\n", s + 1, tools[s]);
+            rc = 1;
+            break;
+        }
+    }
+
+    for (int k = 0; k < done; k++) free(outputs[k]);
+    return rc;
+}
+
 static int tm_cli_batch(int argc, char **argv) {
     /* argv: <tool> k=v ... -- <tool> k=v ... -- ...   (client-side parallel) */
     if (argc < 1) {
@@ -614,6 +754,8 @@ static void tm_cli_usage(void) {
         "  get <tool>                       show one tool's schema\n"
         "  run <tool> [k=v ...]             execute one tool\n"
         "  batch <tool> [k=v] [-- ...]      execute many tools in parallel\n"
+        "  chain <tool> [k=v] [-- ...]      execute in sequence; thread outputs\n"
+        "                                   via {{prev}} / {{stepN}} placeholders\n"
         "  plan \"<query>\" [--intent X]      recommend a tool pipeline\n"
         "  register                         register remote tools as dsco tools\n\n"
         "config (env, overridable by --tm-url / --tm-token):\n"
@@ -640,6 +782,7 @@ int toolmgmt_cli(int argc, char **argv) {
     if (strcmp(rest[0], "get") == 0)    return tm_cli_get(rn - 1, rest + 1);
     if (strcmp(rest[0], "run") == 0)   return tm_cli_run(rn - 1, rest + 1);
     if (strcmp(rest[0], "batch") == 0) return tm_cli_batch(rn - 1, rest + 1);
+    if (strcmp(rest[0], "chain") == 0) return tm_cli_chain(rn - 1, rest + 1);
     if (strcmp(rest[0], "plan") == 0 || strcmp(rest[0], "recommend") == 0)
         return tm_cli_plan(rn - 1, rest + 1);
     if (strcmp(rest[0], "register") == 0) {
