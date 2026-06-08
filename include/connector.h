@@ -25,6 +25,19 @@ typedef enum {
     CONN_CAP_ACTUATE   = 1u << 5,  /* actuation / output (robotics, haptic)  */
 } conn_cap_t;
 
+/* OSI layer(s) a kind operates at — the seam is not application-bound. A kind
+ * advertises every layer it spans so callers can reason about reach (raw
+ * frames at L2, packets at L3/L4, sessions at L5, encoded payloads at L7). */
+typedef enum {
+    OSI_L1_PHYSICAL     = 1u << 0,
+    OSI_L2_DATALINK     = 1u << 1,
+    OSI_L3_NETWORK      = 1u << 2,
+    OSI_L4_TRANSPORT    = 1u << 3,
+    OSI_L5_SESSION      = 1u << 4,
+    OSI_L6_PRESENTATION = 1u << 5,
+    OSI_L7_APPLICATION  = 1u << 6,
+} conn_osi_t;
+
 /* Result of an invocation. status: 0 ok, <0 transport, >0 domain/HTTP code. */
 typedef struct {
     long   status;
@@ -43,6 +56,7 @@ typedef struct {
     const char *kind;          /* "tool", "chain", "credit", "robot", "neuro" */
     const char *description;
     unsigned    capabilities;  /* conn_cap_t bitmask */
+    unsigned    osi_layers;    /* conn_osi_t bitmask — layers this kind spans */
 
     /* Parse config JSON (may be NULL/empty for defaults); return a private
      * handle or NULL on failure (write reason into err). */
@@ -58,6 +72,11 @@ typedef struct {
 
     /* Capability/manifest doc as malloc'd JSON (caller frees), or NULL. */
     char *(*describe)(void *self);
+
+    /* JSON-Schema for a method's params object, malloc'd (caller frees), or
+     * NULL when the type contract is unknown. Enables boundary validation so
+     * type errors are caught at the seam, not deep inside a backend. */
+    char *(*schema)(void *self, const char *method);
 
     /* Release the handle. */
     void  (*close)(void *self);
@@ -83,6 +102,19 @@ void  connector_stream(connector_t *c, const char *method,
 char *connector_describe(connector_t *c);                /* malloc'd, caller frees */
 unsigned connector_capabilities(const connector_t *c);
 void  connector_close(connector_t *c);
+
+/* JSON-Schema for a method's params, malloc'd (caller frees), or NULL. */
+char *connector_schema(connector_t *c, const char *method);
+
+/* Validate params against the method's schema: 1 ok, 0 invalid (reason in err),
+ * -1 when no schema is available. Used at the seam to reject type errors before
+ * a backend ever sees them. */
+int connector_validate(connector_t *c, const char *method,
+                       const char *params_json, char *err, size_t errlen);
+
+/* When enabled, connector_invoke validates params before dispatch and fails
+ * fast on a type/required-field violation instead of calling the backend. */
+void connector_set_validate(int on);
 
 /* CLI entry for `dsco connect …`: kinds, describe <kind>, <kind> <method> k=v…
  * Returns a process exit code. */
