@@ -45,6 +45,7 @@
 #include "fingerprint.h"
 #include "trust.h"
 #include "toolmgmt.h"
+#include "connector.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -1415,6 +1416,12 @@ int main(int argc, char **argv) {
      * manages its own config + auth and never touches the keychain. */
     if (argc >= 2 && strcmp(argv[1], "tools") == 0)
         return toolmgmt_cli(argc, argv);
+
+    /* `dsco connect …` drives the future-proof baseline connector: a single
+     * seam every external system plugs into (tools today; chains, credit,
+     * robotics, neural/haptic next). Dispatched first for the same reasons. */
+    if (argc >= 2 && strcmp(argv[1], "connect") == 0)
+        return connector_cli(argc, argv);
 
     /* Trivial info flags must short-circuit BEFORE any keychain / secure-store
      * touch. Otherwise wrappers (web server, scripts) calling `dsco --version`
