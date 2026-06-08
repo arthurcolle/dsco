@@ -1,0 +1,115 @@
+{
+  "template": "mortgage_desk_daily",
+  "desc": "Agency MBS / mortgage trading desk — one trading day as a multi-agent flow. Each agent is a persona whose decision threads into the next; every decision is committed to a tamper-evident hash-chained ledger (the desk's immutable audit trail).",
+  "ledger": "mortgage_desk.chain.jsonl",
+
+  "agents": [
+    {
+      "name": "Michael Leister",
+      "firm": "Goldman Sachs",
+      "role": "MBS Desk Head / Senior Trader",
+      "trajectory": ["set_levels"],
+      "owns": "morning markup — coupon stack, TBA levels, desk axe, risk envelope"
+    },
+    {
+      "name": "Hemanth Nagaraj",
+      "firm": "Goldman Sachs",
+      "role": "Mortgage Strat / Trader",
+      "trajectory": ["price_pool"],
+      "owns": "spec-pool pricing — OAS, hedge ratio, fair value vs the desk levels"
+    },
+    {
+      "name": "Tyler Wick",
+      "firm": "Jefferies",
+      "role": "Counterparty Sales-Trader",
+      "trajectory": ["rfq"],
+      "owns": "client/street RFQ — bid-wanted into the desk's quoted pool"
+    },
+    {
+      "name": "Arthur Colle",
+      "firm": "Goldman Sachs",
+      "role": "Execution / Quant",
+      "trajectory": ["execute_hedge"],
+      "owns": "execution — TBA roll hedge, fill the RFQ, book and record the trade"
+    }
+  ],
+
+  "steps": [
+    {
+      "agent": "Michael Leister",
+      "kind": "agent",
+      "config": {"name": "Michael Leister", "firm": "Goldman Sachs", "role": "MBS Desk Head / Senior Trader"},
+      "method": "set_levels",
+      "params": {
+        "session": "2026-06-08",
+        "coupon": 5.5,
+        "tba_px": "99-16",
+        "axe": "better seller 30y UMBS 5.5",
+        "risk_limit_usd": 50000000
+      }
+    },
+    {
+      "kind": "chain",
+      "config": {"path": "mortgage_desk.chain.jsonl"},
+      "method": "append",
+      "params": {"data": "{{step1}}"}
+    },
+    {
+      "agent": "Hemanth Nagaraj",
+      "kind": "agent",
+      "config": {"name": "Hemanth Nagaraj", "firm": "Goldman Sachs", "role": "Mortgage Strat / Trader"},
+      "method": "price_pool",
+      "params": {
+        "pool": "FN CK1234",
+        "oas_bp": 24,
+        "hedge_ratio": 0.92,
+        "fair_px": "100-02",
+        "upstream_levels": "{{step1:decision}}"
+      }
+    },
+    {
+      "kind": "chain",
+      "config": {"path": "mortgage_desk.chain.jsonl"},
+      "method": "append",
+      "params": {"data": "{{step3}}"}
+    },
+    {
+      "agent": "Tyler Wick",
+      "kind": "agent",
+      "config": {"name": "Tyler Wick", "firm": "Jefferies", "role": "Counterparty Sales-Trader"},
+      "method": "rfq",
+      "params": {
+        "side": "bid_wanted",
+        "cusip": "31418XYZ7",
+        "size_mm": 25,
+        "vs_pricing": "{{step3:decision}}"
+      }
+    },
+    {
+      "kind": "chain",
+      "config": {"path": "mortgage_desk.chain.jsonl"},
+      "method": "append",
+      "params": {"data": "{{step5}}"}
+    },
+    {
+      "agent": "Arthur Colle",
+      "kind": "agent",
+      "config": {"name": "Arthur Colle", "firm": "Goldman Sachs", "role": "Execution / Quant"},
+      "method": "execute_hedge",
+      "params": {
+        "instrument": "TBA UMBS 5.5 Jul",
+        "action": "sell",
+        "notional_mm": 23,
+        "booked": true,
+        "hedge_from": "{{step3:decision}}",
+        "fill_rfq": "{{step5:decision}}"
+      }
+    },
+    {
+      "kind": "chain",
+      "config": {"path": "mortgage_desk.chain.jsonl"},
+      "method": "append",
+      "params": {"data": "{{step7}}"}
+    }
+  ]
+}

@@ -46,3 +46,8 @@ trading_mind.txt
 .env.local
 keys/
 *.pem
+
+# CMO/EDGAR ingest caches and DB (large, regenerable)
+data/cmo/
+data/edgar/
+data/ginnie/
