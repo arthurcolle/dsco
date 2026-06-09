@@ -409,19 +409,27 @@ def roster_all_parallel(conn, workers, only_bd=True):
     return grand
 
 
-def roster_loop(conn, workers, idle_passes=3, idle_sleep=45):
+def roster_loop(conn, workers, until_crd=0, idle_passes=3, idle_sleep=45):
     """Drain every firm to rostered=1, re-querying each pass so firms the
-    discovery crawl adds mid-run get picked up too. Exits after `idle_passes`
-    consecutive passes find nothing left (crawl finished + all rostered)."""
+    discovery crawl adds mid-run get picked up too. While the crawl is still
+    walking (firm_walk progress < until_crd) an empty pass just waits — the
+    idle-exit only counts once discovery has reached its target."""
     total, idle = 0, 0
     while True:
         remaining = conn.execute(
             "SELECT COUNT(*) FROM bc_firm WHERE rostered=0").fetchone()[0]
         if remaining == 0:
-            idle += 1
-            print(f"  nothing to roster (idle {idle}/{idle_passes})", flush=True)
-            if idle >= idle_passes:
-                break
+            row = conn.execute(
+                "SELECT last_crd FROM bc_progress WHERE kind='firm_walk'").fetchone()
+            crawl_done = bool(row and row[0] and row[0] >= until_crd)
+            if crawl_done:
+                idle += 1
+                print(f"  nothing left, crawl done (idle {idle}/{idle_passes})", flush=True)
+                if idle >= idle_passes:
+                    break
+            else:
+                at = row[0] if row else 0
+                print(f"  caught up; waiting on crawl (at CRD {at}/{until_crd})", flush=True)
             time.sleep(idle_sleep)
             continue
         idle = 0
@@ -525,7 +533,7 @@ def main():
             n = roster_all(conn, args.sleep)
         print(f"stored {n} broker rows")
     elif args.roster_loop:
-        n = roster_loop(conn, max(args.workers, 2))
+        n = roster_loop(conn, max(args.workers, 2), until_crd=args.hi)
         print(f"roster-loop done; stored {n} broker rows")
     elif args.detail is not None:
         d = fetch_detail(conn, args.detail)
