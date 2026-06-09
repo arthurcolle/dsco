@@ -5,7 +5,7 @@ Each filing is a directory on EDGAR; index.json lists its documents. We pick the
 documents worth parsing (ABS-EE asset XML, 424B prospectus HTML) and cache them
 locally so the parsers run offline and idempotently.
 """
-import os, sqlite3
+import os, re, sqlite3
 import requests
 
 UA = "dsco-research arthurcolle@gmail.com"
@@ -83,6 +83,51 @@ def prospectus_html(cik, acc):
         return None
     name = max(htms, key=lambda x: x[1])[0]
     return fetch_doc(cik, acc, name)
+
+
+_HDR_CACHE = {}
+
+
+def issuing_entity(cik, acc):
+    """The issuing-entity conformed name (carries the deal series), from the SEC
+    submission header. The full-index name is often the depositor; this is the
+    actual trust, e.g. 'World Omni Auto Receivables Trust 2022-A'."""
+    key = (cik, acc)
+    if key in _HDR_CACHE:
+        return _HDR_CACHE[key]
+    u = f"https://www.sec.gov/Archives/edgar/data/{cik}/{_accnd(acc)}/{acc}-index-headers.html"
+    try:
+        txt = re.sub(r"<[^>]+>", " ", session().get(u, timeout=60).text)
+    except Exception:
+        _HDR_CACHE[key] = None
+        return None
+    # A filing carries several FILER blocks (depositor LLC, issuing trust, ...).
+    # The issuing entity is the one bearing the deal series (e.g. '2025-P4',
+    # '2022-A'), usually a later block. Prefer a series-bearing name; among those
+    # prefer one that says TRUST; otherwise fall back to the first conformed name.
+    names = [n.strip() for n in
+             re.findall(r"COMPANY CONFORMED NAME:\s*([^\n\r]+)", txt)]
+    if not names:
+        _HDR_CACHE[key] = None
+        return None
+    series = re.compile(r"\b\d{4}-[A-Z0-9]+\b")
+    serial = [n for n in names if series.search(n)]
+    pool = serial or names
+    trust = [n for n in pool if "TRUST" in n.upper()]
+    name = (trust or pool)[0]
+    _HDR_CACHE[key] = name
+    return name
+
+
+def deal_key(name):
+    """Normalize an issuing-entity name to a stable join key shared across the
+    collateral (ABS-EE) and bond (424B5) filings of the same deal."""
+    if not name:
+        return None
+    k = name.upper()
+    k = re.sub(r"[.,]", "", k)
+    k = re.sub(r"\s+", " ", k).strip()
+    return k
 
 
 def ensure_db(db_path):
