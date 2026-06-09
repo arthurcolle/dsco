@@ -20,7 +20,9 @@ CREATE TABLE IF NOT EXISTS collateral_pool (
     pct_new      REAL,            -- balance share of new vehicles
     pct_delinq   REAL,            -- balance share 30+ days delinquent
     top_state    TEXT,
-    top_state_pct REAL
+    top_state_pct REAL,
+    wa_ltv       REAL,            -- weighted loan-to-value (RMBS/CMBS)
+    wa_dscr      REAL             -- weighted debt-service-coverage (CMBS)
 );
 
 -- Loan-level rows (optional; large). One obligor loan per row.
