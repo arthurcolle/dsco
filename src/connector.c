@@ -7,6 +7,7 @@
 #include "connector.h"
 #include "toolmgmt.h"
 #include "json_util.h"
+#include "crypto.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -21,6 +22,7 @@
 #include <fcntl.h>
 #include <termios.h>
 #include <errno.h>
+#include <sqlite3.h>
 
 /* ── Shared helpers ───────────────────────────────────────────────────── */
 static long conn_now_ms(void) {
@@ -607,14 +609,18 @@ static char *flow_pass(const char *spec, const char *seed, int *rc, char *errbuf
         char *kind   = json_get_str(elem, "kind");
         char *method = json_get_str(elem, "method");
         char *praw   = json_get_raw(elem, "params");
+        char *craw   = json_get_raw(elem, "config");
         char *params = conn_subst(praw ? praw : "{}", outputs, nout, seed);
-        free(praw); free(elem);
+        /* Per-step config (also feedback-substituted) lets a step be a nested
+         * flow, a chain ledger, or any configured kind — not just default-open. */
+        char *config = craw ? conn_subst(craw, outputs, nout, seed) : NULL;
+        free(praw); free(craw); free(elem);
 
         char oerr[256];
-        connector_t *c = connector_open(kind ? kind : "", NULL, oerr, sizeof(oerr));
+        connector_t *c = connector_open(kind ? kind : "", config, oerr, sizeof(oerr));
         if (!c) {
             snprintf(errbuf, errlen, "%s", oerr);
-            *rc = 1; free(kind); free(method); free(params); break;
+            *rc = 1; free(kind); free(method); free(params); free(config); break;
         }
         conn_result_t res;
         connector_invoke(c, method, params, &res);
@@ -622,7 +628,7 @@ static char *flow_pass(const char *spec, const char *seed, int *rc, char *errbuf
         if (trace)
             fprintf(stderr, "[flow] iter %d step %d %s/%s status=%ld\n",
                     iter, nout + 1, kind ? kind : "?", method ? method : "?", res.status);
-        free(kind); free(method); free(params);
+        free(kind); free(method); free(params); free(config);
 
         if (res.status < 0) {
             snprintf(errbuf, errlen, "%s", res.error[0] ? res.error : "step transport error");
@@ -976,6 +982,471 @@ static const connector_vtable_t SERIAL_VT = {
     .close        = serial_close,
 };
 
+/* ── Built-in adapter: "agent" (persona seam) ─────────────────────────────
+ * A named actor in a multi-agent workflow. Today it is a deterministic
+ * decision function — it composes a role-tagged decision object from the
+ * action (method) and the threaded params — and is the exact seam where an
+ * LLM-, model- or human-backed agent plugs in later without touching callers.
+ * Threading the whole body via {{stepN}} hands one agent's decision to the
+ * next, so a `flow` of agents is a desk and a flow-of-flows is a firm.
+ *   config:  {"name":"…","role":"…","firm":"…"}
+ *   invoke:  method=<action>, params=<decision payload>
+ *     -> {"agent","role","firm","action","decision":<params>} */
+typedef struct { char *name, *role, *firm; } agent_conn_t;
+
+static void *agent_open(const char *config_json, char *err, size_t errlen) {
+    (void)err; (void)errlen;
+    agent_conn_t *a = safe_malloc(sizeof(*a));
+    int have = config_json && config_json[0];
+    a->name = have ? json_get_str(config_json, "name") : NULL;
+    a->role = have ? json_get_str(config_json, "role") : NULL;
+    a->firm = have ? json_get_str(config_json, "firm") : NULL;
+    if (!a->name) a->name = safe_strdup("agent");
+    if (!a->role) a->role = safe_strdup("");
+    if (!a->firm) a->firm = safe_strdup("");
+    return a;
+}
+
+static void agent_invoke(void *self, const char *method,
+                         const char *params, conn_result_t *out) {
+    agent_conn_t *a = self;
+    jbuf_t b; jbuf_init(&b, 256);
+    jbuf_append(&b, "{\"agent\":");   jbuf_append_json_str(&b, a->name);
+    jbuf_append(&b, ",\"role\":");    jbuf_append_json_str(&b, a->role);
+    jbuf_append(&b, ",\"firm\":");    jbuf_append_json_str(&b, a->firm);
+    jbuf_append(&b, ",\"action\":");  jbuf_append_json_str(&b, method ? method : "");
+    jbuf_append(&b, ",\"decision\":");
+    jbuf_append(&b, (params && params[0]) ? params : "{}");
+    jbuf_append(&b, "}");
+    if (out) { out->status = 0; out->body = b.data; } else jbuf_free(&b);
+}
+
+static char *agent_describe(void *self) {
+    agent_conn_t *a = self;
+    jbuf_t b; jbuf_init(&b, 160);
+    jbuf_append(&b, "{\"kind\":\"agent\",\"name\":"); jbuf_append_json_str(&b, a->name);
+    jbuf_append(&b, ",\"role\":"); jbuf_append_json_str(&b, a->role);
+    jbuf_append(&b, ",\"firm\":"); jbuf_append_json_str(&b, a->firm);
+    jbuf_append(&b, "}");
+    return b.data;
+}
+
+static void agent_close(void *self) {
+    agent_conn_t *a = self;
+    if (a) { free(a->name); free(a->role); free(a->firm); free(a); }
+}
+
+static const connector_vtable_t AGENT_VT = {
+    .kind         = "agent",
+    .description  = "Agent persona seam — composes a role-tagged decision (LLM-backed later)",
+    .capabilities = CONN_CAP_INVOKE,
+    .osi_layers   = OSI_L7_APPLICATION,
+    .open         = agent_open,
+    .invoke       = agent_invoke,
+    .stream       = NULL,
+    .describe     = agent_describe,
+    .schema       = NULL,
+    .close        = agent_close,
+};
+
+/* ── Built-in adapter: "chain" (hash-chained append-only ledger) ──────────
+ * The concrete embodiment of CONN_CAP_TX: the seam every future blockchain,
+ * credit/settlement rail or signed-event log plugs into. Records are linked
+ * by sha256(prev_hash || data), so any tampering breaks `verify`. File-backed
+ * for durability; methods: append/head/get/verify.
+ *   config:  {"path":"<ledger file>"}        (default ".dsco_chain.log")
+ *   append:  {"data": <any json>} -> {"index","prev","hash"}
+ *   head:    {} -> {"index","hash"}            (index -1 when empty)
+ *   get:     {"index": N} -> the record line
+ *   verify:  {} -> {"ok":true,"length":N} | {"ok":false,"broken":i} */
+typedef struct { char *path; long count; char last[65]; } chain_conn_t;
+
+static const char CHAIN_ZERO[65] =
+    "0000000000000000000000000000000000000000000000000000000000000000";
+
+/* Minify JSON: drop insignificant whitespace outside strings so every ledger
+ * record occupies exactly one physical line (the storage format is line-
+ * delimited). Caller frees. */
+static char *chain_compact(const char *s) {
+    if (!s) return safe_strdup("null");
+    jbuf_t b; jbuf_init(&b, strlen(s) + 1);
+    bool instr = false;
+    for (const char *p = s; *p; p++) {
+        if (instr) {
+            jbuf_append_char(&b, *p);
+            if (*p == '\\' && p[1]) { jbuf_append_char(&b, p[1]); p++; }
+            else if (*p == '"') instr = false;
+            continue;
+        }
+        if (*p == '"') { instr = true; jbuf_append_char(&b, *p); continue; }
+        if (*p == ' ' || *p == '\t' || *p == '\n' || *p == '\r') continue;
+        jbuf_append_char(&b, *p);
+    }
+    return b.data;
+}
+
+/* Recompute a record's hash from its predecessor and data slice. */
+static void chain_hash(const char *prev, const char *data, char out[65]) {
+    jbuf_t b; jbuf_init(&b, (prev ? 64 : 0) + (data ? strlen(data) : 0) + 8);
+    jbuf_append(&b, prev ? prev : CHAIN_ZERO);
+    jbuf_append(&b, "\n");
+    jbuf_append(&b, data ? data : "null");
+    sha256_hex((const uint8_t *)b.data, b.data ? strlen(b.data) : 0, out);
+    jbuf_free(&b);
+}
+
+/* Scan the ledger to recover count + last hash (also the verify workhorse).
+ * When verify!=0, returns 1 if intact else 0 and writes the first bad index
+ * to *broken; otherwise always returns 1. */
+static int chain_scan(const char *path, long *count, char last[65],
+                      int verify, long *broken) {
+    *count = 0;
+    snprintf(last, 65, "%s", CHAIN_ZERO);
+    FILE *f = fopen(path, "r");
+    if (!f) return 1;                       /* absent ledger == empty, intact */
+    char *line = NULL; size_t cap = 0; ssize_t n;
+    char prev[65]; snprintf(prev, sizeof(prev), "%s", CHAIN_ZERO);
+    long idx = 0; int ok = 1;
+    while ((n = getline(&line, &cap, f)) > 0) {
+        if (n && line[n - 1] == '\n') line[n - 1] = '\0';
+        if (!line[0]) continue;
+        char *data = json_get_raw(line, "data");
+        char *hash = json_get_str(line, "hash");
+        char *rprev = json_get_str(line, "prev");
+        if (verify) {
+            char calc[65]; chain_hash(prev, data, calc);
+            if (!hash || strcmp(hash, calc) != 0 ||
+                !rprev || strcmp(rprev, prev) != 0) {
+                ok = 0; if (broken) *broken = idx;
+                free(data); free(hash); free(rprev);
+                break;
+            }
+        }
+        if (hash) snprintf(prev, sizeof(prev), "%s", hash);
+        free(data); free(hash); free(rprev);
+        idx++;
+    }
+    free(line);
+    fclose(f);
+    if (ok) { *count = idx; snprintf(last, 65, "%s", prev); }
+    return ok;
+}
+
+static void *chain_open(const char *config_json, char *err, size_t errlen) {
+    (void)err; (void)errlen;
+    chain_conn_t *cc = safe_malloc(sizeof(*cc));
+    char *p = (config_json && config_json[0]) ? json_get_str(config_json, "path") : NULL;
+    cc->path = p ? p : safe_strdup(".dsco_chain.log");
+    chain_scan(cc->path, &cc->count, cc->last, 0, NULL);
+    return cc;
+}
+
+static void chain_invoke(void *self, const char *method,
+                         const char *params, conn_result_t *out) {
+    chain_conn_t *cc = self;
+    const char *m = method ? method : "head";
+
+    if (strcmp(m, "append") == 0) {
+        char *raw = params ? json_get_raw(params, "data") : NULL;
+        if (!raw) {
+            if (out) { out->status = 1;
+                snprintf(out->error, sizeof(out->error), "append: 'data' required"); }
+            return;
+        }
+        char *data = chain_compact(raw);   /* one record == one physical line */
+        free(raw);
+        char hash[65]; chain_hash(cc->last, data, hash);
+        FILE *f = fopen(cc->path, "a");
+        if (!f) {
+            if (out) { out->status = -1;
+                snprintf(out->error, sizeof(out->error), "open %s: %s",
+                         cc->path, strerror(errno)); }
+            free(data); return;
+        }
+        fprintf(f, "{\"index\":%ld,\"prev\":\"%s\",\"data\":%s,\"hash\":\"%s\"}\n",
+                cc->count, cc->last, data, hash);
+        fclose(f);
+        jbuf_t b; jbuf_init(&b, 160);
+        jbuf_append(&b, "{\"index\":"); jbuf_append_int(&b, cc->count);
+        jbuf_append(&b, ",\"prev\":\""); jbuf_append(&b, cc->last);
+        jbuf_append(&b, "\",\"hash\":\""); jbuf_append(&b, hash);
+        jbuf_append(&b, "\"}");
+        cc->count++;
+        snprintf(cc->last, sizeof(cc->last), "%s", hash);
+        free(data);
+        if (out) { out->status = 0; out->body = b.data; } else jbuf_free(&b);
+        return;
+    }
+
+    if (strcmp(m, "head") == 0) {
+        jbuf_t b; jbuf_init(&b, 96);
+        jbuf_append(&b, "{\"index\":"); jbuf_append_int(&b, cc->count - 1);
+        jbuf_append(&b, ",\"hash\":\"");
+        jbuf_append(&b, cc->count > 0 ? cc->last : CHAIN_ZERO);
+        jbuf_append(&b, "\"}");
+        if (out) { out->status = 0; out->body = b.data; } else jbuf_free(&b);
+        return;
+    }
+
+    if (strcmp(m, "verify") == 0) {
+        long broken = -1, count = 0; char last[65];
+        int ok = chain_scan(cc->path, &count, last, 1, &broken);
+        jbuf_t b; jbuf_init(&b, 64);
+        if (ok) { jbuf_append(&b, "{\"ok\":true,\"length\":");
+                  jbuf_append_int(&b, count); jbuf_append(&b, "}"); }
+        else    { jbuf_append(&b, "{\"ok\":false,\"broken\":");
+                  jbuf_append_int(&b, broken); jbuf_append(&b, "}"); }
+        if (out) { out->status = ok ? 0 : 1; out->body = b.data; } else jbuf_free(&b);
+        return;
+    }
+
+    if (strcmp(m, "get") == 0) {
+        long want = params ? json_get_int(params, "index", -1) : -1;
+        FILE *f = fopen(cc->path, "r");
+        if (!f) { if (out) { out->status = 1;
+            snprintf(out->error, sizeof(out->error), "get: empty ledger"); } return; }
+        char *line = NULL; size_t cap = 0; ssize_t n; long i = 0; char *hit = NULL;
+        while ((n = getline(&line, &cap, f)) > 0) {
+            if (n && line[n - 1] == '\n') line[n - 1] = '\0';
+            if (!line[0]) continue;
+            if (i == want) { hit = safe_strdup(line); break; }
+            i++;
+        }
+        free(line); fclose(f);
+        if (out) {
+            if (hit) { out->status = 0; out->body = hit; }
+            else { out->status = 1;
+                snprintf(out->error, sizeof(out->error), "get: no index %ld", want); }
+        } else free(hit);
+        return;
+    }
+
+    if (out) { out->status = 1;
+        snprintf(out->error, sizeof(out->error), "chain: unknown method '%s'", m); }
+}
+
+static char *chain_describe(void *self) {
+    chain_conn_t *cc = self;
+    jbuf_t b; jbuf_init(&b, 160);
+    jbuf_append(&b, "{\"kind\":\"chain\",\"path\":");
+    jbuf_append_json_str(&b, cc->path);
+    jbuf_append(&b, ",\"length\":"); jbuf_append_int(&b, cc->count);
+    jbuf_append(&b, ",\"head\":\""); jbuf_append(&b, cc->count > 0 ? cc->last : CHAIN_ZERO);
+    jbuf_append(&b, "\",\"methods\":[\"append\",\"head\",\"get\",\"verify\"]}");
+    return b.data;
+}
+
+static char *chain_schema(void *self, const char *method) {
+    (void)self;
+    if (!method) return NULL;
+    if (strcmp(method, "append") == 0)
+        return safe_strdup("{\"type\":\"object\",\"required\":[\"data\"],"
+                           "\"properties\":{\"data\":{}}}");
+    if (strcmp(method, "get") == 0)
+        return safe_strdup("{\"type\":\"object\",\"required\":[\"index\"],"
+                           "\"properties\":{\"index\":{\"type\":\"integer\"}}}");
+    return NULL;
+}
+
+static void chain_close(void *self) {
+    chain_conn_t *cc = self;
+    if (cc) { free(cc->path); free(cc); }
+}
+
+static const connector_vtable_t CHAIN_VT = {
+    .kind         = "chain",
+    .description  = "Hash-chained append-only ledger — transactional seam (CONN_CAP_TX)",
+    .capabilities = CONN_CAP_INVOKE | CONN_CAP_TX,
+    .osi_layers   = OSI_L7_APPLICATION,
+    .open         = chain_open,
+    .invoke       = chain_invoke,
+    .stream       = NULL,
+    .describe     = chain_describe,
+    .schema       = chain_schema,
+    .close        = chain_close,
+};
+
+/* ── Built-in adapter: "sqlite" (read-only relational query seam) ─────────
+ * Lets a flow persona pull live deal economics out of a SQLite database (the
+ * collateral/deal book at data/cmo/cmo.db) and thread the rows into the next
+ * step — e.g. a trader persona prices the pool the query returned, then the
+ * decision is committed to the chain ledger. Opened READONLY: a query connector
+ * is a read seam, not a mutation path, so the agent can never corrupt the book.
+ *   config:  {"path":"<db file>"}             (default "data/cmo/cmo.db")
+ *   query:   {"sql":"SELECT …","limit":N} -> {"columns":[…],"rows":[[…]],
+ *                                              "count":N,"truncated":bool}
+ *   tables:  {} -> {"tables":[{"name","type"}]}  (tables + views) */
+typedef struct { sqlite3 *db; char *path; } sqlite_conn_t;
+
+/* Only statements that read are accepted; the handle is READONLY too, so this
+ * is a guardrail for clearer errors rather than the sole defense. */
+static bool sqlite_is_read_only(const char *sql) {
+    while (*sql && isspace((unsigned char)*sql)) sql++;
+    return strncasecmp(sql, "SELECT", 6) == 0 || strncasecmp(sql, "WITH", 4) == 0 ||
+           strncasecmp(sql, "PRAGMA", 6) == 0 || strncasecmp(sql, "EXPLAIN", 7) == 0;
+}
+
+/* Emit one column's value as JSON, typed from SQLite's dynamic column type. */
+static void sqlite_emit_value(jbuf_t *b, sqlite3_stmt *st, int col) {
+    switch (sqlite3_column_type(st, col)) {
+    case SQLITE_INTEGER:
+        jbuf_appendf(b, "%lld", (long long)sqlite3_column_int64(st, col));
+        break;
+    case SQLITE_FLOAT:
+        jbuf_appendf(b, "%.10g", sqlite3_column_double(st, col));
+        break;
+    case SQLITE_NULL:
+        jbuf_append(b, "null");
+        break;
+    default: {
+        const char *t = (const char *)sqlite3_column_text(st, col);
+        jbuf_append_json_str(b, t ? t : "");
+    }
+    }
+}
+
+static void *sqlite_open(const char *config_json, char *err, size_t errlen) {
+    char *p = (config_json && config_json[0]) ? json_get_str(config_json, "path") : NULL;
+    const char *path = p ? p : "data/cmo/cmo.db";
+    sqlite3 *db = NULL;
+    int rc = sqlite3_open_v2(path, &db, SQLITE_OPEN_READONLY, NULL);
+    if (rc != SQLITE_OK) {
+        snprintf(err, errlen, "open %s: %s", path, db ? sqlite3_errmsg(db) : "out of memory");
+        if (db) sqlite3_close(db);
+        free(p);
+        return NULL;
+    }
+    sqlite_conn_t *sc = safe_malloc(sizeof(*sc));
+    sc->db = db;
+    sc->path = p ? p : safe_strdup(path);
+    return sc;
+}
+
+static void sqlite_invoke(void *self, const char *method,
+                          const char *params, conn_result_t *out) {
+    sqlite_conn_t *sc = self;
+    const char *m = method ? method : "query";
+
+    if (strcmp(m, "tables") == 0) {
+        sqlite3_stmt *st = NULL;
+        const char *q = "SELECT name,type FROM sqlite_master "
+                        "WHERE type IN ('table','view') ORDER BY name";
+        if (sqlite3_prepare_v2(sc->db, q, -1, &st, NULL) != SQLITE_OK) {
+            if (out) { out->status = 1;
+                snprintf(out->error, sizeof(out->error), "tables: %s",
+                         sqlite3_errmsg(sc->db)); }
+            return;
+        }
+        jbuf_t b; jbuf_init(&b, 256);
+        jbuf_append(&b, "{\"tables\":[");
+        long n = 0;
+        while (sqlite3_step(st) == SQLITE_ROW) {
+            if (n++) jbuf_append(&b, ",");
+            jbuf_append(&b, "{\"name\":");
+            jbuf_append_json_str(&b, (const char *)sqlite3_column_text(st, 0));
+            jbuf_append(&b, ",\"type\":");
+            jbuf_append_json_str(&b, (const char *)sqlite3_column_text(st, 1));
+            jbuf_append(&b, "}");
+        }
+        sqlite3_finalize(st);
+        jbuf_append(&b, "]}");
+        if (out) { out->status = 0; out->body = b.data; } else jbuf_free(&b);
+        return;
+    }
+
+    if (strcmp(m, "query") == 0) {
+        char *sql = params ? json_get_str(params, "sql") : NULL;
+        if (!sql) {
+            if (out) { out->status = 1;
+                snprintf(out->error, sizeof(out->error), "query: 'sql' required"); }
+            return;
+        }
+        if (!sqlite_is_read_only(sql)) {
+            if (out) { out->status = 1;
+                snprintf(out->error, sizeof(out->error),
+                         "query: only SELECT/WITH/PRAGMA/EXPLAIN allowed"); }
+            free(sql);
+            return;
+        }
+        long limit = params ? json_get_int(params, "limit", 1000) : 1000;
+        sqlite3_stmt *st = NULL;
+        if (sqlite3_prepare_v2(sc->db, sql, -1, &st, NULL) != SQLITE_OK) {
+            if (out) { out->status = 1;
+                snprintf(out->error, sizeof(out->error), "query: %s",
+                         sqlite3_errmsg(sc->db)); }
+            free(sql);
+            return;
+        }
+        free(sql);
+        int ncol = sqlite3_column_count(st);
+        jbuf_t b; jbuf_init(&b, 512);
+        jbuf_append(&b, "{\"columns\":[");
+        for (int i = 0; i < ncol; i++) {
+            if (i) jbuf_append(&b, ",");
+            jbuf_append_json_str(&b, sqlite3_column_name(st, i));
+        }
+        jbuf_append(&b, "],\"rows\":[");
+        long n = 0; int truncated = 0;
+        for (;;) {
+            int rc = sqlite3_step(st);
+            if (rc != SQLITE_ROW) break;
+            if (n >= limit) { truncated = 1; break; }
+            if (n) jbuf_append(&b, ",");
+            jbuf_append(&b, "[");
+            for (int i = 0; i < ncol; i++) {
+                if (i) jbuf_append(&b, ",");
+                sqlite_emit_value(&b, st, i);
+            }
+            jbuf_append(&b, "]");
+            n++;
+        }
+        sqlite3_finalize(st);
+        jbuf_appendf(&b, "],\"count\":%ld,\"truncated\":%s}",
+                     n, truncated ? "true" : "false");
+        if (out) { out->status = 0; out->body = b.data; } else jbuf_free(&b);
+        return;
+    }
+
+    if (out) { out->status = 1;
+        snprintf(out->error, sizeof(out->error), "sqlite: unknown method '%s'", m); }
+}
+
+static char *sqlite_describe(void *self) {
+    sqlite_conn_t *sc = self;
+    jbuf_t b; jbuf_init(&b, 160);
+    jbuf_append(&b, "{\"kind\":\"sqlite\",\"path\":");
+    jbuf_append_json_str(&b, sc->path);
+    jbuf_append(&b, ",\"readonly\":true,\"methods\":[\"query\",\"tables\"]}");
+    return b.data;
+}
+
+static char *sqlite_schema(void *self, const char *method) {
+    (void)self;
+    if (method && strcmp(method, "query") == 0)
+        return safe_strdup("{\"type\":\"object\",\"required\":[\"sql\"],"
+                           "\"properties\":{\"sql\":{\"type\":\"string\"},"
+                           "\"limit\":{\"type\":\"integer\"}}}");
+    return NULL;
+}
+
+static void sqlite_close(void *self) {
+    sqlite_conn_t *sc = self;
+    if (sc) { if (sc->db) sqlite3_close(sc->db); free(sc->path); free(sc); }
+}
+
+static const connector_vtable_t SQLITE_VT = {
+    .kind         = "sqlite",
+    .description  = "Read-only SQLite query seam — deal/collateral book access for personas",
+    .capabilities = CONN_CAP_INVOKE,
+    .osi_layers   = OSI_L7_APPLICATION,
+    .open         = sqlite_open,
+    .invoke       = sqlite_invoke,
+    .stream       = NULL,
+    .describe     = sqlite_describe,
+    .schema       = sqlite_schema,
+    .close        = sqlite_close,
+};
+
 void connector_register_builtins(void) {
     static int done = 0;
     if (done) return;
@@ -985,6 +1456,9 @@ void connector_register_builtins(void) {
     connector_register(&FLOW_VT);
     connector_register(&NET_VT);
     connector_register(&SERIAL_VT);
+    connector_register(&CHAIN_VT);
+    connector_register(&AGENT_VT);
+    connector_register(&SQLITE_VT);
 }
 
 /* ── CLI ──────────────────────────────────────────────────────────────── */
@@ -1182,7 +1656,7 @@ static void conn_cli_usage(void) {
 "  {{prev}} {{stepN}} {{seed}} {{prev:key}}   prior result, or a field of it\n"
 "\n"
 "options:\n"
-"  --config '<json>'   config object passed to open()\n"
+"  --config '<json>'   config object passed to open() (or @path to load a file)\n"
 "  --require <caps>    fail unless the kind advertises these (invoke,stream,tx,…)\n"
 "  --validate          type-check params against the method schema at the seam\n"
 "  --seed '<json>'     loop: seed body for iteration 1's {{prev}}/{{seed}}\n"
@@ -1195,6 +1669,21 @@ static void conn_cli_usage(void) {
 "\n"
 "The connector is the future-proof baseline seam: every external system\n"
 "(tools today; chains, credit, robotics, neural/haptic next) is one kind.\n");
+}
+
+/* Slurp a whole file into a malloc'd NUL-terminated buffer (caller frees). */
+static char *conn_read_file(const char *path) {
+    FILE *f = fopen(path, "rb");
+    if (!f) return NULL;
+    fseek(f, 0, SEEK_END);
+    long sz = ftell(f);
+    if (sz < 0) { fclose(f); return NULL; }
+    fseek(f, 0, SEEK_SET);
+    char *buf = safe_malloc((size_t)sz + 1);
+    size_t got = fread(buf, 1, (size_t)sz, f);
+    fclose(f);
+    buf[got] = '\0';
+    return buf;
 }
 
 static int conn_cli_kinds(void) {
@@ -1233,6 +1722,13 @@ int connector_cli(int argc, char **argv) {
     if (nrest == 0 || strcmp(rest[0], "-h") == 0 || strcmp(rest[0], "--help") == 0) {
         conn_cli_usage();
         return nrest == 0 ? 1 : 0;
+    }
+
+    /* --config @path loads the spec from a file (templates live on disk). */
+    if (config && config[0] == '@') {
+        char *loaded = conn_read_file(config + 1);
+        if (!loaded) { fprintf(stderr, "config: cannot read file '%s'\n", config + 1); return 1; }
+        config = loaded;   /* leaked intentionally; process is one-shot */
     }
 
     if (strcmp(rest[0], "kinds") == 0) return conn_cli_kinds();

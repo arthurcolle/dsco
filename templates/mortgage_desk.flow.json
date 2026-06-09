@@ -1,6 +1,6 @@
 {
   "template": "mortgage_desk_daily",
-  "desc": "Agency MBS / mortgage trading desk — one trading day as a multi-agent flow. Each agent is a persona whose decision threads into the next; every decision is committed to a tamper-evident hash-chained ledger (the desk's immutable audit trail).",
+  "desc": "Agency MBS / mortgage trading desk — one trading day as a multi-agent flow. The desk first pulls its live collateral book from the deal database (sqlite seam), then each agent is a persona whose decision threads into the next; every decision is committed to a tamper-evident hash-chained ledger (the desk's immutable audit trail).",
   "ledger": "mortgage_desk.chain.jsonl",
 
   "agents": [
@@ -36,6 +36,15 @@
 
   "steps": [
     {
+      "kind": "sqlite",
+      "config": {"path": "data/cmo/cmo.db"},
+      "method": "query",
+      "params": {
+        "sql": "SELECT deal_name,asset_type,n_loans,ROUND(cur_balance/1e6,1) bal_mm,ROUND(wac*100,2) wac,ROUND(wam) wam,wa_fico,ROUND(wa_dscr,2) dscr,top_state FROM collateral_pool ORDER BY cur_balance DESC LIMIT 5",
+        "limit": 5
+      }
+    },
+    {
       "agent": "Michael Leister",
       "kind": "agent",
       "config": {"name": "Michael Leister", "firm": "Goldman Sachs", "role": "MBS Desk Head / Senior Trader"},
@@ -45,14 +54,15 @@
         "coupon": 5.5,
         "tba_px": "99-16",
         "axe": "better seller 30y UMBS 5.5",
-        "risk_limit_usd": 50000000
+        "risk_limit_usd": 50000000,
+        "book": "{{step1}}"
       }
     },
     {
       "kind": "chain",
       "config": {"path": "mortgage_desk.chain.jsonl"},
       "method": "append",
-      "params": {"data": "{{step1}}"}
+      "params": {"data": "{{step2}}"}
     },
     {
       "agent": "Hemanth Nagaraj",
@@ -64,14 +74,14 @@
         "oas_bp": 24,
         "hedge_ratio": 0.92,
         "fair_px": "100-02",
-        "upstream_levels": "{{step1:decision}}"
+        "upstream_levels": "{{step2:decision}}"
       }
     },
     {
       "kind": "chain",
       "config": {"path": "mortgage_desk.chain.jsonl"},
       "method": "append",
-      "params": {"data": "{{step3}}"}
+      "params": {"data": "{{step4}}"}
     },
     {
       "agent": "Tyler Wick",
@@ -82,14 +92,14 @@
         "side": "bid_wanted",
         "cusip": "31418XYZ7",
         "size_mm": 25,
-        "vs_pricing": "{{step3:decision}}"
+        "vs_pricing": "{{step4:decision}}"
       }
     },
     {
       "kind": "chain",
       "config": {"path": "mortgage_desk.chain.jsonl"},
       "method": "append",
-      "params": {"data": "{{step5}}"}
+      "params": {"data": "{{step6}}"}
     },
     {
       "agent": "Arthur Colle",
@@ -101,15 +111,15 @@
         "action": "sell",
         "notional_mm": 23,
         "booked": true,
-        "hedge_from": "{{step3:decision}}",
-        "fill_rfq": "{{step5:decision}}"
+        "hedge_from": "{{step4:decision}}",
+        "fill_rfq": "{{step6:decision}}"
       }
     },
     {
       "kind": "chain",
       "config": {"path": "mortgage_desk.chain.jsonl"},
       "method": "append",
-      "params": {"data": "{{step7}}"}
+      "params": {"data": "{{step8}}"}
     }
   ]
 }
