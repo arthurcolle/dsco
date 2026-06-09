@@ -41,6 +41,30 @@ def session():
     return _session
 
 
+# Name search returns a best fuzzy match, which for big banks is often the wrong
+# legal entity (a holding co, a fund, a foreign sub). Pin the flagship US
+# broker-dealer CRD for each underwriter so rosters hit the real trading entity.
+PINS = {
+    "J.P. Morgan": 79,            # J.P. MORGAN SECURITIES LLC (not Prime Inc.)
+    "Morgan Stanley": 8209,       # MORGAN STANLEY & CO. LLC (not the holdco)
+    "Deutsche Bank": 2525,        # DEUTSCHE BANK SECURITIES INC. (not M&A Inc.)
+    "UBS": 7654,                  # UBS SECURITIES LLC (not OConnor fund)
+    "Nomura": 4297,               # NOMURA SECURITIES INTERNATIONAL, INC.
+    "Cantor Fitzgerald": 134,     # CANTOR FITZGERALD & CO. (not the G.P.)
+    "SMBC Nikko": 28602,          # SMBC NIKKO SECURITIES AMERICA (not Canada)
+    "Wells Fargo Securities": 7665,  # WELLS FARGO SECURITIES, LLC (active BD)
+}
+
+# Prop / HFT / quant trading firms — registered broker-dealer CRDs (real).
+PROP_FIRMS = {
+    "Jump Trading": 106124, "Jane Street Capital": 103790,
+    "Jane Street Markets": 104485, "DRW Securities": 45908,
+    "Renaissance Technologies": 106661, "Citadel Securities": 116797,
+    "Optiver US": 128030, "IMC": 106089, "Susquehanna (SIG)": 35874,
+    "Flow Traders US": 150780, "XTX Markets": 289846, "Akuna Securities": 159041,
+}
+
+
 def ensure_bc(conn):
     here = os.path.dirname(os.path.abspath(__file__))
     with open(os.path.join(here, "brokercheck.sql")) as f:
@@ -185,13 +209,33 @@ def resolve_underwriters(conn):
         "SELECT DISTINCT name FROM underwriter ORDER BY name")]
     n = 0
     for name in names:
-        f = firm_search(name)
+        if name in PINS:
+            f = firm_by_crd(PINS[name])         # authoritative pinned entity
+        else:
+            f = firm_search(name)
         if f:
             save_firm(conn, f, "underwriter")
             n += 1
-            print(f"  {name:<28} -> CRD {f['crd']}  {f['name']}")
+            tag = " (pinned)" if name in PINS else ""
+            print(f"  {name:<28} -> CRD {f['crd']}  {f['name']}{tag}")
         else:
             print(f"  {name:<28} -> (no match)")
+        time.sleep(0.2)
+    conn.commit()
+    return n
+
+
+def seed_prop_firms(conn):
+    """Add the prop/HFT/quant trading firms by pinned BD CRD."""
+    n = 0
+    for name, crd in PROP_FIRMS.items():
+        f = firm_by_crd(crd)
+        if f:
+            save_firm(conn, f, "search")
+            n += 1
+            print(f"  {name:<26} -> CRD {crd}  {f['name']}")
+        else:
+            print(f"  {name:<26} -> CRD {crd}  (not found)")
         time.sleep(0.2)
     conn.commit()
     return n
@@ -298,6 +342,7 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--db", default="data/cmo/cmo.db")
     ap.add_argument("--resolve-underwriters", action="store_true")
+    ap.add_argument("--seed-prop", action="store_true")
     ap.add_argument("--firm", type=int, metavar="CRD")
     ap.add_argument("--firm-name", metavar="NAME")
     ap.add_argument("--crawl-firms", action="store_true")
@@ -310,12 +355,17 @@ def main():
     ap.add_argument("--sleep", type=float, default=0.15)
     args = ap.parse_args()
 
-    conn = sqlite3.connect(args.db)
+    conn = sqlite3.connect(args.db, timeout=60)
+    conn.execute("PRAGMA journal_mode=WAL")
+    conn.execute("PRAGMA busy_timeout=60000")
     ensure_bc(conn)
 
     if args.resolve_underwriters:
         n = resolve_underwriters(conn)
         print(f"resolved {n} firms")
+    elif args.seed_prop:
+        n = seed_prop_firms(conn)
+        print(f"seeded {n} prop firms")
     elif args.firm is not None:
         f = firm_by_crd(args.firm)
         if not f:
