@@ -25,20 +25,22 @@ Usage:
     python3 -m cmo.brokercheck --detail 6356563
     python3 -m cmo.brokercheck --stats
 """
-import argparse, json, os, sqlite3, time
+import argparse, json, os, sqlite3, threading, time
+from concurrent.futures import ThreadPoolExecutor
 import requests
 
 UA = "dsco-research arthurcolle@gmail.com"
 BASE = "https://api.brokercheck.finra.org"
-_session = None
+_local = threading.local()
 
 
 def session():
-    global _session
-    if _session is None:
-        _session = requests.Session()
-        _session.headers.update({"User-Agent": UA})
-    return _session
+    s = getattr(_local, "session", None)
+    if s is None:
+        s = requests.Session()
+        s.headers.update({"User-Agent": UA})
+        _local.session = s
+    return s
 
 
 # Name search returns a best fuzzy match, which for big banks is often the wrong
@@ -267,6 +269,40 @@ def crawl_firms(conn, lo, hi, sleep):
     return found
 
 
+def crawl_firms_parallel(conn, lo, hi, workers):
+    """Walk the firm CRD space with a thread pool: workers fetch concurrently,
+    the main thread is the only DB writer. Resumable via bc_progress."""
+    row = conn.execute("SELECT last_crd FROM bc_progress WHERE kind='firm_walk'").fetchone()
+    if row and row[0] and row[0] >= lo:
+        lo = row[0] + 1
+        print(f"resuming firm walk at CRD {lo}")
+    found = 0
+    crds = range(lo, hi + 1)
+    with ThreadPoolExecutor(max_workers=workers) as ex:
+        last = lo
+        for crd, f in zip(crds, ex.map(firm_by_crd, crds, chunksize=64)):
+            last = crd
+            if f:
+                save_firm(conn, f, "crawl")
+                found += 1
+                if found % 100 == 0:
+                    print(f"  ...{found} firms (at CRD {crd})", flush=True)
+            if crd % 500 == 0:
+                conn.execute(
+                    """INSERT INTO bc_progress(kind,last_crd,ts)
+                       VALUES('firm_walk',?,datetime('now'))
+                       ON CONFLICT(kind) DO UPDATE SET last_crd=excluded.last_crd,
+                         ts=excluded.ts""", (crd,))
+                conn.commit()
+        conn.execute(
+            """INSERT INTO bc_progress(kind,last_crd,ts)
+               VALUES('firm_walk',?,datetime('now'))
+               ON CONFLICT(kind) DO UPDATE SET last_crd=excluded.last_crd,
+                 ts=excluded.ts""", (last,))
+        conn.commit()
+    return found
+
+
 def roster_firm(conn, firm_crd, sleep, page=100):
     """Enumerate one firm's active individuals and record their current reg."""
     fname_row = conn.execute("SELECT name FROM bc_firm WHERE crd=?", (firm_crd,)).fetchone()
@@ -305,6 +341,46 @@ def roster_all(conn, sleep, only_bd=True):
         n, total = roster_firm(conn, crd, sleep)
         grand += n
         print(f"  CRD {crd:<8} {name or '?':<40} {n}/{total}")
+    return grand
+
+
+def _fetch_full_roster(firm_crd, page=100):
+    """Worker: pull every active individual for a firm (all pages). No DB."""
+    start, total, rows = 0, None, []
+    while True:
+        t, page_rows = firm_roster(firm_crd, start, page)
+        if total is None:
+            total = t
+        if not page_rows:
+            break
+        rows.extend(page_rows)
+        start += len(page_rows)
+        if start >= (total or 0):
+            break
+    return firm_crd, (total or 0), rows
+
+
+def roster_all_parallel(conn, workers, only_bd=True):
+    """Roster every not-yet-rostered firm; workers fetch rosters concurrently,
+    the main thread writes."""
+    q = "SELECT crd,name FROM bc_firm WHERE rostered=0"
+    if only_bd:
+        q += " AND (bd_scope='ACTIVE' OR bd_scope IS NULL)"
+    firms = conn.execute(q).fetchall()
+    names = {crd: name for crd, name in firms}
+    print(f"rostering {len(firms)} firms with {workers} workers", flush=True)
+    grand = 0
+    with ThreadPoolExecutor(max_workers=workers) as ex:
+        for firm_crd, total, rows in ex.map(_fetch_full_roster, list(names)):
+            fname = names.get(firm_crd)
+            for b in rows:
+                save_broker(conn, b)
+                save_reg(conn, b["crd"], firm_crd, fname, None, None, 1)
+            conn.execute("UPDATE bc_firm SET roster_total=?, rostered=1 WHERE crd=?",
+                         (total, firm_crd))
+            conn.commit()
+            grand += len(rows)
+            print(f"  CRD {firm_crd:<8} {fname or '?':<40} {len(rows)}/{total}", flush=True)
     return grand
 
 
@@ -353,6 +429,7 @@ def main():
     ap.add_argument("--detail", type=int, metavar="CRD")
     ap.add_argument("--stats", action="store_true")
     ap.add_argument("--sleep", type=float, default=0.15)
+    ap.add_argument("--workers", type=int, default=1)
     args = ap.parse_args()
 
     conn = sqlite3.connect(args.db, timeout=60)
@@ -381,7 +458,10 @@ def main():
             save_firm(conn, f, "search"); conn.commit()
             print(json.dumps(f, indent=2))
     elif args.crawl_firms:
-        n = crawl_firms(conn, args.lo, args.hi, args.sleep)
+        if args.workers > 1:
+            n = crawl_firms_parallel(conn, args.lo, args.hi, args.workers)
+        else:
+            n = crawl_firms(conn, args.lo, args.hi, args.sleep)
         print(f"found {n} firms in CRD [{args.lo},{args.hi}]")
     elif args.roster is not None:
         if not conn.execute("SELECT 1 FROM bc_firm WHERE crd=?", (args.roster,)).fetchone():
@@ -391,7 +471,10 @@ def main():
         n, total = roster_firm(conn, args.roster, args.sleep)
         print(f"stored {n}/{total} brokers for firm CRD {args.roster}")
     elif args.roster_all:
-        n = roster_all(conn, args.sleep)
+        if args.workers > 1:
+            n = roster_all_parallel(conn, args.workers)
+        else:
+            n = roster_all(conn, args.sleep)
         print(f"stored {n} broker rows")
     elif args.detail is not None:
         d = fetch_detail(conn, args.detail)
