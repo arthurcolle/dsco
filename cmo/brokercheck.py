@@ -67,6 +67,21 @@ PROP_FIRMS = {
 }
 
 
+def _commit_retry(conn, tries=10):
+    """Commit, retrying through transient WAL writer-lock contention so a roster
+    can coexist with the discovery crawl writing the same DB."""
+    for i in range(tries):
+        try:
+            conn.commit()
+            return
+        except sqlite3.OperationalError as e:
+            if "locked" in str(e) or "busy" in str(e):
+                time.sleep(0.5 * (i + 1))
+                continue
+            raise
+    conn.commit()
+
+
 def ensure_bc(conn):
     here = os.path.dirname(os.path.abspath(__file__))
     with open(os.path.join(here, "brokercheck.sql")) as f:
@@ -373,12 +388,22 @@ def roster_all_parallel(conn, workers, only_bd=True):
     with ThreadPoolExecutor(max_workers=workers) as ex:
         for firm_crd, total, rows in ex.map(_fetch_full_roster, list(names)):
             fname = names.get(firm_crd)
-            for b in rows:
-                save_broker(conn, b)
-                save_reg(conn, b["crd"], firm_crd, fname, None, None, 1)
-            conn.execute("UPDATE bc_firm SET roster_total=?, rostered=1 WHERE crd=?",
-                         (total, firm_crd))
-            conn.commit()
+            for attempt in range(12):
+                try:
+                    for b in rows:
+                        save_broker(conn, b)
+                        save_reg(conn, b["crd"], firm_crd, fname, None, None, 1)
+                    conn.execute(
+                        "UPDATE bc_firm SET roster_total=?, rostered=1 WHERE crd=?",
+                        (total, firm_crd))
+                    _commit_retry(conn)
+                    break
+                except sqlite3.OperationalError as e:
+                    if "locked" in str(e) or "busy" in str(e):
+                        conn.rollback()
+                        time.sleep(0.5 * (attempt + 1))
+                        continue
+                    raise
             grand += len(rows)
             print(f"  CRD {firm_crd:<8} {fname or '?':<40} {len(rows)}/{total}", flush=True)
     return grand
@@ -434,7 +459,7 @@ def main():
 
     conn = sqlite3.connect(args.db, timeout=60)
     conn.execute("PRAGMA journal_mode=WAL")
-    conn.execute("PRAGMA busy_timeout=60000")
+    conn.execute("PRAGMA busy_timeout=120000")
     ensure_bc(conn)
 
     if args.resolve_underwriters:
