@@ -73,3 +73,16 @@ CREATE TABLE IF NOT EXISTS underwriter (
     PRIMARY KEY (accession, name)
 );
 CREATE INDEX IF NOT EXISTS idx_uw_name ON underwriter(name);
+
+-- Deal identity: maps each filing (accession) to its canonical issuing entity.
+-- The collateral (ABS-EE) and bond (424B5) filings of the same deal share a
+-- deal_key, derived from the issuing-entity conformed name in the SEC header.
+-- This is the join that turns scattered filings into one deal book.
+CREATE TABLE IF NOT EXISTS deal_identity (
+    accession      TEXT PRIMARY KEY,
+    cik            INTEGER,
+    issuing_entity TEXT,          -- e.g. 'Carvana Auto Receivables Trust 2025-P4'
+    deal_key       TEXT,          -- normalized join key (upper, no punct)
+    form           TEXT           -- ABS-EE | 424B5 (origin of this accession)
+);
+CREATE INDEX IF NOT EXISTS idx_ident_key ON deal_identity(deal_key);
