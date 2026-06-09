@@ -409,6 +409,27 @@ def roster_all_parallel(conn, workers, only_bd=True):
     return grand
 
 
+def roster_loop(conn, workers, idle_passes=3, idle_sleep=45):
+    """Drain every firm to rostered=1, re-querying each pass so firms the
+    discovery crawl adds mid-run get picked up too. Exits after `idle_passes`
+    consecutive passes find nothing left (crawl finished + all rostered)."""
+    total, idle = 0, 0
+    while True:
+        remaining = conn.execute(
+            "SELECT COUNT(*) FROM bc_firm WHERE rostered=0").fetchone()[0]
+        if remaining == 0:
+            idle += 1
+            print(f"  nothing to roster (idle {idle}/{idle_passes})", flush=True)
+            if idle >= idle_passes:
+                break
+            time.sleep(idle_sleep)
+            continue
+        idle = 0
+        print(f"== roster pass: {remaining} firms unrostered ==", flush=True)
+        total += roster_all_parallel(conn, workers, only_bd=False)
+    return total
+
+
 def fetch_detail(conn, broker_crd):
     """Pull and store a broker's full registration history."""
     d = broker_detail(broker_crd)
@@ -451,6 +472,8 @@ def main():
     ap.add_argument("--to", dest="hi", type=int, default=350000)
     ap.add_argument("--roster", type=int, metavar="CRD")
     ap.add_argument("--roster-all", action="store_true")
+    ap.add_argument("--roster-loop", action="store_true",
+                    help="drain all firms to rostered, re-querying each pass")
     ap.add_argument("--detail", type=int, metavar="CRD")
     ap.add_argument("--stats", action="store_true")
     ap.add_argument("--sleep", type=float, default=0.15)
@@ -501,6 +524,9 @@ def main():
         else:
             n = roster_all(conn, args.sleep)
         print(f"stored {n} broker rows")
+    elif args.roster_loop:
+        n = roster_loop(conn, max(args.workers, 2))
+        print(f"roster-loop done; stored {n} broker rows")
     elif args.detail is not None:
         d = fetch_detail(conn, args.detail)
         print(json.dumps(d, indent=2) if d else "no record")
