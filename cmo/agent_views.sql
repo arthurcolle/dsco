@@ -25,6 +25,32 @@ SELECT
         / d.deal_total, 4)                                 AS credit_support
 FROM tranche t JOIN deal d ON d.accession = t.accession;
 
+-- Correct subordination by credit class, not cover order. tranche_stack above
+-- ranks by rowid, which conflates time-tranching (A-1..A-4 are pari passu in
+-- loss, sequential only in time) with credit-tranching (A < B < C in loss). Real
+-- credit support sits at the letter boundary: a class's cushion is everything in
+-- a more-junior letter group. All A-* therefore share one credit-support number.
+DROP VIEW IF EXISTS tranche_subordination;
+CREATE VIEW tranche_subordination AS
+WITH t AS (
+    SELECT accession, class_name, orig_balance, coupon, coupon_type,
+           UPPER(SUBSTR(class_name, 1, 1)) AS grp
+    FROM tranche
+),
+d AS (SELECT accession, SUM(orig_balance) AS total FROM tranche GROUP BY accession)
+SELECT
+    t.accession,
+    t.class_name,
+    t.grp                                                  AS credit_class,
+    t.orig_balance,
+    t.coupon,
+    t.coupon_type,
+    ROUND(t.orig_balance / d.total, 4)                     AS pct_of_deal,
+    ROUND(COALESCE((SELECT SUM(x.orig_balance) FROM t x
+                    WHERE x.accession = t.accession AND x.grp > t.grp), 0)
+          / d.total, 4)                                    AS credit_support
+FROM t JOIN d ON d.accession = t.accession;
+
 -- Underwriter league table: deal count + notional placed, split lead/co-manager.
 DROP VIEW IF EXISTS underwriter_league;
 CREATE VIEW underwriter_league AS
