@@ -82,10 +82,29 @@ def _commit_retry(conn, tries=10):
     conn.commit()
 
 
+_BROKER_COLS = [
+    ("ia_scope", "TEXT"), ("other_names", "TEXT"), ("days_in_industry", "TEXT"),
+    ("exams", "TEXT"), ("exam_count", "INTEGER"), ("registered_states", "TEXT"),
+    ("registered_sros", "TEXT"), ("disclosure_flag", "TEXT"),
+    ("num_disclosures", "INTEGER"), ("cur_firm_crd", "INTEGER"),
+    ("cur_firm_name", "TEXT"), ("cur_city", "TEXT"), ("cur_state", "TEXT"),
+]
+
+
 def ensure_bc(conn):
     here = os.path.dirname(os.path.abspath(__file__))
     with open(os.path.join(here, "brokercheck.sql")) as f:
         conn.executescript(f.read())
+    # The live DB predates the detail columns; CREATE TABLE IF NOT EXISTS won't
+    # add them, so backfill any missing column.
+    have = {r[1] for r in conn.execute("PRAGMA table_info(bc_broker)")}
+    for col, typ in _BROKER_COLS:
+        if col not in have:
+            conn.execute(f"ALTER TABLE bc_broker ADD COLUMN {col} {typ}")
+    have_reg = {r[1] for r in conn.execute("PRAGMA table_info(bc_registration)")}
+    for col in ("city", "state"):
+        if col not in have_reg:
+            conn.execute(f"ALTER TABLE bc_registration ADD COLUMN {col} TEXT")
     conn.commit()
 
 
@@ -159,8 +178,28 @@ def firm_roster(firm_crd, start, nrows):
     return total, out
 
 
+def _branch(e):
+    """First branch office (city, state) for an employment, if any."""
+    locs = e.get("branchOfficeLocations") or []
+    if locs:
+        b = locs[0]
+        return b.get("city"), b.get("state")
+    return None, None
+
+
+def _exam_cats(src):
+    cats = []
+    for key in ("stateExamCategory", "principalExamCategory", "productExamCategory"):
+        for x in src.get(key) or []:
+            c = x.get("examCategory")
+            if c:
+                cats.append(c)
+    return cats
+
+
 def broker_detail(crd):
-    """Full record for one individual: basics + current/previous employments."""
+    """Full individual record: identity, scopes, exams, states, SROs,
+    disclosures, and the complete BD + IA employment history."""
     j = _get(f"{BASE}/search/individual/{crd}",
              {"query": "*", "hl": "true", "nrows": 1, "wt": "json"})
     hits = (j or {}).get("hits") or {}
@@ -169,18 +208,40 @@ def broker_detail(crd):
     src = json.loads(hits["hits"][0]["_source"]["content"])
     bi = src.get("basicInformation", {})
     regs = []
-    for e in src.get("currentEmployments", []) or []:
+    cur_firm_crd = cur_firm_name = cur_city = cur_state = None
+    for e in (src.get("currentEmployments") or []) + (src.get("currentIAEmployments") or []):
+        city, state = _branch(e)
         regs.append((e.get("firmId"), e.get("firmName"),
-                     e.get("registrationBeginDate"), None, 1))
-    for e in src.get("previousEmployments", []) or []:
+                     e.get("registrationBeginDate"), None, 1, city, state))
+        if cur_firm_crd is None:
+            cur_firm_crd, cur_firm_name = e.get("firmId"), e.get("firmName")
+            cur_city, cur_state = city, state
+    for e in (src.get("previousEmployments") or []) + (src.get("previousIAEmployments") or []):
+        city, state = _branch(e)
         regs.append((e.get("firmId"), e.get("firmName"),
                      e.get("registrationBeginDate"),
-                     e.get("registrationEndDate"), 0))
+                     e.get("registrationEndDate"), 0, city, state))
+    states = [s.get("state") if isinstance(s, dict) else s
+              for s in (src.get("registeredStates") or [])]
+    sros = [s.get("sro") if isinstance(s, dict) else s
+            for s in (src.get("registeredSROs") or [])]
+    discs = src.get("disclosures") or []
+    exams = _exam_cats(src)
     return {"crd": bi.get("individualId") or crd,
             "first_name": bi.get("firstName"),
             "middle_name": bi.get("middleName"),
             "last_name": bi.get("lastName"),
-            "scope": bi.get("bcScope"), "regs": regs}
+            "scope": bi.get("bcScope"), "ia_scope": bi.get("iaScope"),
+            "other_names": ";".join([n for n in (bi.get("otherNames") or []) if n]),
+            "days_in_industry": bi.get("daysInIndustryCalculatedDate"),
+            "exams": ";".join(c for c in exams if c), "exam_count": len(exams),
+            "registered_states": ";".join(s for s in states if s),
+            "registered_sros": ";".join(s for s in sros if s),
+            "disclosure_flag": src.get("disclosureFlag"),
+            "num_disclosures": len(discs),
+            "cur_firm_crd": cur_firm_crd, "cur_firm_name": cur_firm_name,
+            "cur_city": cur_city, "cur_state": cur_state,
+            "regs": regs, "disclosures": discs}
 
 
 # ---- persistence ----------------------------------------------------------
@@ -210,12 +271,45 @@ def save_broker(conn, b):
          b.get("last_name"), b.get("scope")))
 
 
-def save_reg(conn, broker_crd, firm_crd, firm_name, begin, end, current):
+def save_broker_detail(conn, b):
+    """Persist the full detail record (identity + scopes + exams + disclosures)."""
+    conn.execute(
+        """INSERT INTO bc_broker
+             (crd,first_name,middle_name,last_name,scope,ia_scope,other_names,
+              days_in_industry,exams,exam_count,registered_states,registered_sros,
+              disclosure_flag,num_disclosures,cur_firm_crd,cur_firm_name,
+              cur_city,cur_state,detailed)
+           VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,1)
+           ON CONFLICT(crd) DO UPDATE SET
+             first_name=excluded.first_name, middle_name=excluded.middle_name,
+             last_name=excluded.last_name, scope=excluded.scope,
+             ia_scope=excluded.ia_scope, other_names=excluded.other_names,
+             days_in_industry=excluded.days_in_industry, exams=excluded.exams,
+             exam_count=excluded.exam_count,
+             registered_states=excluded.registered_states,
+             registered_sros=excluded.registered_sros,
+             disclosure_flag=excluded.disclosure_flag,
+             num_disclosures=excluded.num_disclosures,
+             cur_firm_crd=excluded.cur_firm_crd,
+             cur_firm_name=excluded.cur_firm_name, cur_city=excluded.cur_city,
+             cur_state=excluded.cur_state, detailed=1""",
+        (b["crd"], b.get("first_name"), b.get("middle_name"), b.get("last_name"),
+         b.get("scope"), b.get("ia_scope"), b.get("other_names"),
+         b.get("days_in_industry"), b.get("exams"), b.get("exam_count"),
+         b.get("registered_states"), b.get("registered_sros"),
+         b.get("disclosure_flag"), b.get("num_disclosures"),
+         b.get("cur_firm_crd"), b.get("cur_firm_name"),
+         b.get("cur_city"), b.get("cur_state")))
+
+
+def save_reg(conn, broker_crd, firm_crd, firm_name, begin, end, current,
+             city=None, state=None):
     conn.execute(
         """INSERT OR REPLACE INTO bc_registration
-             (broker_crd,firm_crd,firm_name,begin_date,end_date,current)
-           VALUES(?,?,?,?,?,?)""",
-        (broker_crd, firm_crd or 0, firm_name, begin or "", end, current))
+             (broker_crd,firm_crd,firm_name,begin_date,end_date,current,city,state)
+           VALUES(?,?,?,?,?,?,?,?)""",
+        (broker_crd, firm_crd or 0, firm_name, begin or "", end, current,
+         city, state))
 
 
 # ---- crawls ---------------------------------------------------------------
@@ -438,17 +532,59 @@ def roster_loop(conn, workers, until_crd=0, idle_passes=3, idle_sleep=45):
     return total
 
 
+def _store_detail(conn, d):
+    save_broker_detail(conn, d)
+    for firm_crd, firm_name, begin, end, current, city, state in d["regs"]:
+        save_reg(conn, d["crd"], firm_crd, firm_name, begin, end, current,
+                 city, state)
+    if d.get("disclosures"):
+        conn.execute("DELETE FROM bc_disclosure WHERE broker_crd=?", (d["crd"],))
+        for dc in d["disclosures"]:
+            conn.execute(
+                """INSERT INTO bc_disclosure(broker_crd,type,event_date,resolution,detail)
+                   VALUES(?,?,?,?,?)""",
+                (d["crd"], dc.get("disclosureType"), dc.get("eventDate"),
+                 dc.get("disclosureResolution"), json.dumps(dc)))
+
+
 def fetch_detail(conn, broker_crd):
-    """Pull and store a broker's full registration history."""
+    """Pull and store one broker's full detail record."""
     d = broker_detail(broker_crd)
     if not d:
         return None
-    save_broker(conn, d)
-    for firm_crd, firm_name, begin, end, current in d["regs"]:
-        save_reg(conn, d["crd"], firm_crd, firm_name, begin, end, current)
-    conn.execute("UPDATE bc_broker SET detailed=1 WHERE crd=?", (broker_crd,))
+    _store_detail(conn, d)
     conn.commit()
     return d
+
+
+def detail_all(conn, workers, limit=None):
+    """Pull the full detail record for every broker not yet detailed. Workers
+    fetch concurrently; the main thread writes. Resumable via bc_broker.detailed."""
+    q = "SELECT crd FROM bc_broker WHERE detailed=0 OR detailed IS NULL"
+    if limit:
+        q += f" LIMIT {int(limit)}"
+    crds = [r[0] for r in conn.execute(q)]
+    print(f"detailing {len(crds)} brokers with {workers} workers", flush=True)
+    done = 0
+    with ThreadPoolExecutor(max_workers=workers) as ex:
+        for d in ex.map(broker_detail, crds):
+            if not d:
+                continue
+            for attempt in range(12):
+                try:
+                    _store_detail(conn, d)
+                    _commit_retry(conn)
+                    break
+                except sqlite3.OperationalError as e:
+                    if "locked" in str(e) or "busy" in str(e):
+                        conn.rollback()
+                        time.sleep(0.5 * (attempt + 1))
+                        continue
+                    raise
+            done += 1
+            if done % 500 == 0:
+                print(f"  ...detailed {done}/{len(crds)}", flush=True)
+    return done
 
 
 def stats(conn):
@@ -483,6 +619,9 @@ def main():
     ap.add_argument("--roster-loop", action="store_true",
                     help="drain all firms to rostered, re-querying each pass")
     ap.add_argument("--detail", type=int, metavar="CRD")
+    ap.add_argument("--detail-all", action="store_true",
+                    help="pull full detail for every not-yet-detailed broker")
+    ap.add_argument("--limit", type=int, default=None)
     ap.add_argument("--stats", action="store_true")
     ap.add_argument("--sleep", type=float, default=0.15)
     ap.add_argument("--workers", type=int, default=1)
@@ -538,6 +677,9 @@ def main():
     elif args.detail is not None:
         d = fetch_detail(conn, args.detail)
         print(json.dumps(d, indent=2) if d else "no record")
+    elif args.detail_all:
+        n = detail_all(conn, max(args.workers, 2), args.limit)
+        print(f"detailed {n} brokers")
     elif args.stats:
         stats(conn)
     else:
