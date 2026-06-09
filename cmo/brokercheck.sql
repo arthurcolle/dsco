@@ -19,17 +19,42 @@ CREATE TABLE IF NOT EXISTS bc_firm (
 );
 CREATE INDEX IF NOT EXISTS idx_bc_firm_name ON bc_firm(name);
 
--- Registered individuals, keyed by FINRA individual CRD.
+-- Registered individuals, keyed by FINRA individual CRD. The detail-* columns
+-- are filled by the per-broker detail crawl (BrokerCheck individual record).
 CREATE TABLE IF NOT EXISTS bc_broker (
     crd          INTEGER PRIMARY KEY,   -- FINRA individual CRD
     first_name   TEXT,
     middle_name  TEXT,
     last_name    TEXT,
-    scope        TEXT,                  -- Active | InActive
-    detailed     INTEGER DEFAULT 0,     -- 1 once full registration history pulled
+    scope        TEXT,                  -- Active | InActive (broker-dealer scope)
+    ia_scope     TEXT,                  -- adviser scope
+    other_names  TEXT,                  -- aliases / former names, ; joined
+    days_in_industry TEXT,              -- daysInIndustryCalculatedDate
+    exams        TEXT,                  -- exam categories passed (SIE, Series 7..)
+    exam_count   INTEGER,
+    registered_states TEXT,             -- US state codes licensed in, ; joined
+    registered_sros   TEXT,             -- FINRA, NYSE, ... ; joined
+    disclosure_flag   TEXT,             -- Y | N
+    num_disclosures   INTEGER,
+    cur_firm_crd   INTEGER,             -- current primary employment
+    cur_firm_name  TEXT,
+    cur_city       TEXT,
+    cur_state      TEXT,
+    detailed     INTEGER DEFAULT 0,     -- 1 once full detail record pulled
     ts           TEXT DEFAULT (datetime('now'))
 );
 CREATE INDEX IF NOT EXISTS idx_bc_broker_last ON bc_broker(last_name);
+
+-- Reportable events on a broker's record (regulatory actions, customer
+-- disputes, criminal, financial). Public BrokerCheck disclosures.
+CREATE TABLE IF NOT EXISTS bc_disclosure (
+    broker_crd INTEGER NOT NULL,
+    type       TEXT,
+    event_date TEXT,
+    resolution TEXT,
+    detail     TEXT                     -- raw JSON of the disclosure record
+);
+CREATE INDEX IF NOT EXISTS idx_bc_disc_broker ON bc_disclosure(broker_crd);
 
 -- Employment / registration edges: which broker was at which firm and when.
 -- One row per (broker, firm, begin) so re-registrations are kept distinct.
@@ -40,6 +65,8 @@ CREATE TABLE IF NOT EXISTS bc_registration (
     begin_date TEXT,
     end_date   TEXT,                    -- NULL while current
     current    INTEGER DEFAULT 0,
+    city       TEXT,
+    state      TEXT,
     PRIMARY KEY (broker_crd, firm_crd, begin_date)
 );
 CREATE INDEX IF NOT EXISTS idx_bc_reg_firm   ON bc_registration(firm_crd);
