@@ -74,6 +74,18 @@ CREATE TABLE IF NOT EXISTS underwriter (
 );
 CREATE INDEX IF NOT EXISTS idx_uw_name ON underwriter(name);
 
+-- Credit enhancement summary per deal (the loss-absorbing structure beneath the
+-- bonds): reserve account size and which enhancement forms the deal uses.
+CREATE TABLE IF NOT EXISTS deal_enhancement (
+    accession         TEXT PRIMARY KEY,
+    deal_total        REAL,          -- sum of offered tranche balances
+    reserve_amount    REAL,          -- initial reserve-account deposit ($)
+    reserve_pct       REAL,          -- reserve as a share of the bond stack
+    has_oc            INTEGER,       -- overcollateralization present
+    has_subordination INTEGER,       -- subordinated classes present
+    has_reserve       INTEGER        -- reserve account present
+);
+
 -- Deal identity: maps each filing (accession) to its canonical issuing entity.
 -- The collateral (ABS-EE) and bond (424B5) filings of the same deal share a
 -- deal_key, derived from the issuing-entity conformed name in the SEC header.

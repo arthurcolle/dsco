@@ -43,38 +43,79 @@ UNDERWRITERS = [
     (r"cantor", "Cantor Fitzgerald"),
 ]
 
-# Tranche on the cover: "Class A-1 4.082% Asset Backed Notes $290,670,000"
+# Cover formats vary by shelf. Two orderings appear:
+#  class-first + coupon: "Class A-1 4.082% Asset Backed Notes $290,670,000"
 TR_CPN_FIRST = re.compile(
     r"Class\s+([A-Z0-9][A-Z0-9\-]*)\s+([\d.]+)\s*%\s+[A-Za-z\- ]*?Notes\s+\$\s*([\d,]+)")
-# Fallback: "Class A-1 ... $290,670,000 ... 4.082%" (balance before coupon)
+#  balance-first, coupon set later: "$225,500,000 Class A-1 Asset-Backed Notes"
+TR_BAL_COVER = re.compile(
+    r"\$\s*([\d,]+)\s+Class\s+([A-Z0-9][A-Z0-9\-]*)\b[^$]{0,60}?Asset[- ]Backed\s+Notes",
+    re.I)
+# Last resort: "Class A-1 ... $290,670,000 ... 4.082%" (balance then coupon nearby)
 TR_BAL_FIRST = re.compile(
     r"Class\s+([A-Z0-9][A-Z0-9\-]*)\b[^$%]{0,40}\$\s*([\d,]+)[^%]{0,40}?([\d.]+)\s*%")
+# Coupon set in the rate table anywhere in the doc: "Class A-1 5.369% Fixed"
+CPN_BY_CLASS = re.compile(
+    r"Class\s+([A-Z0-9][A-Z0-9\-]*)\s+([\d.]+)\s*%\s+Fixed", re.I)
+# "a reserve account with an initial deposit/balance of $3,026,385.22"
+RESERVE_AMT = re.compile(
+    r"reserve account with an initial (?:deposit|balance) of \$\s*([\d,]+(?:\.\d+)?)",
+    re.I)
 
 
 def _plain(html):
     t = re.sub(r"<[^>]+>", " ", html)
-    t = re.sub(r"&#160;|&nbsp;|&amp;|&#8203;", " ", t)
+    t = re.sub(r"&[#a-zA-Z0-9]+;", " ", t)   # drop all HTML entities
     return re.sub(r"[ \t\r\n]+", " ", t)
 
 
 def parse_tranches(text):
-    """Return [(class_name, coupon, orig_balance, coupon_type)] from the cover."""
-    out, seen = [], set()
-    head = text[:6000]   # the offered-notes block is on the cover
+    """Return [(class_name, coupon, orig_balance, coupon_type)] in cover order.
+
+    The cover always lists the offered classes and their balances; coupons may be
+    on the cover or set in a later rate table. We take the stack+balances from the
+    cover and back-fill coupons from anywhere in the doc."""
+    head = text[:6000]                 # the offered-notes block is on the cover
+    stack = {}                         # class -> [coupon, balance, type]
     for m in TR_CPN_FIRST.finditer(head):
-        cls, cpn, bal = m.group(1), float(m.group(2)), float(m.group(3).replace(",", ""))
-        if cls in seen:
-            continue
-        seen.add(cls)
-        out.append((cls, cpn, bal, "FIXED"))
-    if not out:
+        cls = m.group(1).upper()
+        stack.setdefault(cls, [float(m.group(2)),
+                               float(m.group(3).replace(",", "")), "FIXED"])
+    for m in TR_BAL_COVER.finditer(head):
+        cls = m.group(2).upper()
+        if cls not in stack:
+            stack[cls] = [None, float(m.group(1).replace(",", "")), None]
+    if not stack:
         for m in TR_BAL_FIRST.finditer(head):
-            cls, bal, cpn = m.group(1), float(m.group(2).replace(",", "")), float(m.group(3))
-            if cls in seen:
-                continue
-            seen.add(cls)
-            out.append((cls, cpn, bal, "FIXED"))
-    return out
+            cls = m.group(1).upper()
+            stack.setdefault(cls, [float(m.group(3)),
+                                   float(m.group(2).replace(",", "")), "FIXED"])
+    # back-fill coupons from the rate table for classes the cover left blank
+    coupons = {}
+    for m in CPN_BY_CLASS.finditer(text):
+        coupons.setdefault(m.group(1).upper(), float(m.group(2)))
+    for cls, v in stack.items():
+        if v[0] is None and cls in coupons:
+            v[0], v[2] = coupons[cls], "FIXED"
+    return [(cls, v[0], v[1], v[2] or ("FIXED" if v[0] else "FLOAT"))
+            for cls, v in stack.items()]
+
+
+def parse_enhancement(text, deal_total):
+    """Extract the credit-enhancement summary: reserve account size and which
+    enhancement forms the deal uses (reserve / OC / subordination)."""
+    low = text.lower()
+    m = RESERVE_AMT.search(text)
+    reserve = float(m.group(1).replace(",", "")) if m else None
+    reserve_pct = (round(reserve / deal_total, 6)
+                   if reserve and deal_total else None)
+    return {
+        "reserve_amount": reserve,
+        "reserve_pct": reserve_pct,
+        "has_oc": int("overcollateralization" in low),
+        "has_subordination": int("subordination" in low),
+        "has_reserve": int("reserve account" in low),
+    }
 
 
 def parse_underwriters(text):
@@ -101,23 +142,37 @@ def ingest_one(conn, cik, acc, deal_name):
     text = _plain(open(path, encoding="latin-1", errors="replace").read())
     tr = parse_tranches(text)
     uw = parse_underwriters(text)
+    total = sum(b for _c, _cp, b, _t in tr)
+    enh = parse_enhancement(text, total)
     cur = conn.cursor()
     cur.executemany(
         """INSERT INTO tranche(accession,cik,deal_name,class_name,orig_balance,
              coupon,coupon_type)
            VALUES(?,?,?,?,?,?,?)
            ON CONFLICT(accession,class_name) DO UPDATE SET
-             orig_balance=excluded.orig_balance, coupon=excluded.coupon""",
+             orig_balance=excluded.orig_balance, coupon=excluded.coupon,
+             coupon_type=excluded.coupon_type""",
         [(acc, cik, deal_name, c, bal, cpn, ct) for c, cpn, bal, ct in tr])
     cur.executemany(
         """INSERT INTO underwriter(accession,name,role) VALUES(?,?,?)
            ON CONFLICT(accession,name) DO UPDATE SET role=excluded.role""",
         [(acc, n, r) for n, r in uw])
+    cur.execute(
+        """INSERT INTO deal_enhancement(accession,deal_total,reserve_amount,
+             reserve_pct,has_oc,has_subordination,has_reserve)
+           VALUES(?,?,?,?,?,?,?)
+           ON CONFLICT(accession) DO UPDATE SET
+             deal_total=excluded.deal_total, reserve_amount=excluded.reserve_amount,
+             reserve_pct=excluded.reserve_pct, has_oc=excluded.has_oc,
+             has_subordination=excluded.has_subordination,
+             has_reserve=excluded.has_reserve""",
+        (acc, total, enh["reserve_amount"], enh["reserve_pct"], enh["has_oc"],
+         enh["has_subordination"], enh["has_reserve"]))
     conn.commit()
-    total = sum(b for _c, _cp, b, _t in tr)
+    res = f" reserve={enh['reserve_pct']*100:.2f}%" if enh["reserve_pct"] else ""
     print(f"  {deal_name}: {len(tr)} tranches ${total/1e6:.0f}M, "
           f"{len(uw)} underwriters [{', '.join(n for n, _ in uw[:4])}"
-          f"{'...' if len(uw) > 4 else ''}]", file=sys.stderr)
+          f"{'...' if len(uw) > 4 else ''}]{res}", file=sys.stderr)
     return tr, uw
 
 
