@@ -31,6 +31,7 @@ import requests
 
 UA = "dsco-research arthurcolle@gmail.com"
 BASE = "https://api.brokercheck.finra.org"
+IA_BASE = "https://api.adviserinfo.sec.gov"
 _local = threading.local()
 
 
@@ -214,14 +215,39 @@ def _exam_cats(src):
 
 
 def broker_detail(crd):
-    """Full individual record: identity, scopes, exams, states, SROs,
-    disclosures, and the complete BD + IA employment history."""
+    """Full individual record from FINRA BrokerCheck: identity, scopes, exams,
+    states, SROs, disclosures, and the complete BD + IA employment history."""
     j = _get(f"{BASE}/search/individual/{crd}",
              {"query": "*", "hl": "true", "nrows": 1, "wt": "json"})
     hits = (j or {}).get("hits") or {}
     if not hits.get("total"):
         return None
-    src = json.loads(hits["hits"][0]["_source"]["content"])
+    return _parse_individual(
+        json.loads(hits["hits"][0]["_source"]["content"]), crd)
+
+
+def ia_detail(crd):
+    """Same individual record from SEC IAPD (adviserinfo). Same CRD space and
+    content schema as BrokerCheck, but covers investment-adviser-only people
+    (RIA reps never FINRA-registered) that BrokerCheck returns nothing for."""
+    j = _get(f"{IA_BASE}/search/individual/{crd}",
+             {"query": "*", "hl": "true", "nrows": 1, "wt": "json"})
+    hits = (j or {}).get("hits") or {}
+    if not hits.get("total"):
+        return None
+    src = hits["hits"][0]["_source"]
+    content = src.get("iacontent") or src.get("content")
+    if not content:
+        return None
+    return _parse_individual(json.loads(content), crd)
+
+
+def individual_detail(crd):
+    """BrokerCheck first, IAPD fallback — one call covers both registries."""
+    return broker_detail(crd) or ia_detail(crd)
+
+
+def _parse_individual(src, crd):
     bi = src.get("basicInformation", {})
     regs = []
     cur_firm_crd = cur_firm_name = cur_city = cur_state = None
@@ -461,7 +487,7 @@ def crawl_individuals_parallel(conn, lo, hi, workers):
         for base in range(lo, hi + 1, WINDOW):
             crds = range(base, min(base + WINDOW, hi + 1))
             last = base
-            for crd, d in zip(crds, ex.map(broker_detail, crds, chunksize=32)):
+            for crd, d in zip(crds, ex.map(individual_detail, crds, chunksize=32)):
                 last = crd
                 if not d:
                     continue
