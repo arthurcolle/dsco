@@ -72,6 +72,20 @@ CREATE TABLE IF NOT EXISTS bc_registration (
 CREATE INDEX IF NOT EXISTS idx_bc_reg_firm   ON bc_registration(firm_crd);
 CREATE INDEX IF NOT EXISTS idx_bc_reg_broker ON bc_registration(broker_crd);
 
+-- Per-person products / specialties: every qualification exam a broker holds,
+-- with the full exam name and scope (IA = investment adviser, BC = broker-dealer)
+-- so people are cross-referenceable by what they're actually qualified to do.
+CREATE TABLE IF NOT EXISTS bc_exam (
+    broker_crd    INTEGER NOT NULL,
+    exam_category TEXT,                 -- e.g. "Series 65", "SIE"
+    exam_name     TEXT,                 -- full title (the specialty/product)
+    exam_scope    TEXT,                 -- IA | BC
+    taken_date    TEXT,
+    PRIMARY KEY (broker_crd, exam_category)
+);
+CREATE INDEX IF NOT EXISTS idx_exam_cat  ON bc_exam(exam_category);
+CREATE INDEX IF NOT EXISTS idx_exam_name ON bc_exam(exam_name);
+
 -- Resume markers for the integer CRD walk (so a crawl is restartable).
 CREATE TABLE IF NOT EXISTS bc_progress (
     kind     TEXT PRIMARY KEY,          -- e.g. 'firm_walk'

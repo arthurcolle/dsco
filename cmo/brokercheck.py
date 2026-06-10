@@ -105,6 +105,17 @@ def ensure_bc(conn):
     for col in ("city", "state"):
         if col not in have_reg:
             conn.execute(f"ALTER TABLE bc_registration ADD COLUMN {col} TEXT")
+    # Per-person products/specialties (exam name/scope/date) for cross-referencing.
+    conn.execute("""CREATE TABLE IF NOT EXISTS bc_exam (
+        broker_crd    INTEGER,
+        exam_category TEXT,
+        exam_name     TEXT,
+        exam_scope    TEXT,
+        taken_date    TEXT,
+        PRIMARY KEY(broker_crd, exam_category)
+    )""")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_exam_cat ON bc_exam(exam_category)")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_exam_name ON bc_exam(exam_name)")
     conn.commit()
 
 
@@ -139,7 +150,7 @@ def firm_by_crd(crd):
         return {"crd": b.get("firmId") or crd, "name": b.get("firmName"),
                 "other_names": ";".join(b.get("firmOtherNames") or []),
                 "sec_number": b.get("firmSecNumber") or b.get("firmBdSecNumber"),
-                "bd_scope": b.get("bdScope"), "ia_scope": b.get("iaScope"),
+                "bd_scope": b.get("bcScope"), "ia_scope": b.get("iaScope"),
                 "branches": b.get("firmBranchOfficeCount")}
     return {"crd": src.get("firm_source_id") or crd, "name": src.get("firm_name"),
             "other_names": ";".join(src.get("firm_other_names") or []),
@@ -188,13 +199,18 @@ def _branch(e):
 
 
 def _exam_cats(src):
-    cats = []
+    """Return the rich per-exam records (products/specialties) a person holds.
+    Each: (category, name, scope, taken_date). De-duped by category."""
+    seen, out = set(), []
     for key in ("stateExamCategory", "principalExamCategory", "productExamCategory"):
         for x in src.get(key) or []:
             c = x.get("examCategory")
-            if c:
-                cats.append(c)
-    return cats
+            if not c or c in seen:
+                continue
+            seen.add(c)
+            out.append((c, x.get("examName"), x.get("examScope"),
+                        x.get("examTakenDate")))
+    return out
 
 
 def broker_detail(crd):
@@ -227,6 +243,7 @@ def broker_detail(crd):
             for s in (src.get("registeredSROs") or [])]
     discs = src.get("disclosures") or []
     exams = _exam_cats(src)
+    exam_codes = [e[0] for e in exams]
     return {"crd": bi.get("individualId") or crd,
             "first_name": bi.get("firstName"),
             "middle_name": bi.get("middleName"),
@@ -234,7 +251,8 @@ def broker_detail(crd):
             "scope": bi.get("bcScope"), "ia_scope": bi.get("iaScope"),
             "other_names": ";".join([n for n in (bi.get("otherNames") or []) if n]),
             "days_in_industry": bi.get("daysInIndustryCalculatedDate"),
-            "exams": ";".join(c for c in exams if c), "exam_count": len(exams),
+            "exams": ";".join(c for c in exam_codes if c),
+            "exam_count": len(exam_codes), "exam_cats": exams,
             "registered_states": ";".join(s for s in states if s),
             "registered_sros": ";".join(s for s in sros if s),
             "disclosure_flag": src.get("disclosureFlag"),
@@ -412,6 +430,58 @@ def crawl_firms_parallel(conn, lo, hi, workers):
     return found
 
 
+def crawl_individuals_parallel(conn, lo, hi, workers):
+    """Walk the INDIVIDUAL CRD integer space directly — the definitive 'all
+    brokers' crawl. Unlike rostering (active individuals at active firms only),
+    this resolves every CRD via the individual-detail endpoint, so it captures
+    inactive/former reps and people whose only registrations were at now-defunct
+    firms. Each hit is stored with full detail (identity, scopes, exams,
+    registration history, disclosures). Resumable via bc_progress 'indiv_walk'."""
+    row = conn.execute(
+        "SELECT last_crd FROM bc_progress WHERE kind='indiv_walk'").fetchone()
+    if row and row[0] and row[0] >= lo:
+        lo = row[0] + 1
+        print(f"resuming individual walk at CRD {lo}", flush=True)
+    found = 0
+
+    def _mark(crd):
+        conn.execute(
+            """INSERT INTO bc_progress(kind,last_crd,ts)
+               VALUES('indiv_walk',?,datetime('now'))
+               ON CONFLICT(kind) DO UPDATE SET last_crd=excluded.last_crd,
+                 ts=excluded.ts""", (crd,))
+        conn.commit()
+
+    # Process in bounded windows: ThreadPoolExecutor.map eagerly submits its
+    # whole input, so mapping all 7.5M CRDs at once builds millions of futures
+    # and never yields. A window keeps the in-flight set small and lets progress
+    # (and resumability) advance steadily.
+    WINDOW = 20000
+    with ThreadPoolExecutor(max_workers=workers) as ex:
+        for base in range(lo, hi + 1, WINDOW):
+            crds = range(base, min(base + WINDOW, hi + 1))
+            last = base
+            for crd, d in zip(crds, ex.map(broker_detail, crds, chunksize=32)):
+                last = crd
+                if not d:
+                    continue
+                for attempt in range(12):
+                    try:
+                        _store_detail(conn, d)
+                        _commit_retry(conn)
+                        break
+                    except sqlite3.OperationalError as e:
+                        if "locked" in str(e) or "busy" in str(e):
+                            conn.rollback(); time.sleep(0.5 * (attempt + 1)); continue
+                        raise
+                found += 1
+                if found % 200 == 0:
+                    print(f"  ...{found} individuals (at CRD {crd})", flush=True)
+            _mark(last)
+            print(f"  window done @ CRD {last}  (found {found} so far)", flush=True)
+    return found
+
+
 def roster_firm(conn, firm_crd, sleep, page=100):
     """Enumerate one firm's active individuals and record their current reg."""
     fname_row = conn.execute("SELECT name FROM bc_firm WHERE crd=?", (firm_crd,)).fetchone()
@@ -442,7 +512,7 @@ def roster_all(conn, sleep, only_bd=True):
     """Pull rosters for every stored firm not yet rostered."""
     q = "SELECT crd,name FROM bc_firm WHERE rostered=0"
     if only_bd:
-        q += " AND (bd_scope='ACTIVE' OR bd_scope IS NULL)"
+        q += " AND bd_scope='ACTIVE'"
     firms = conn.execute(q).fetchall()
     print(f"rostering {len(firms)} firms")
     grand = 0
@@ -474,7 +544,7 @@ def roster_all_parallel(conn, workers, only_bd=True):
     the main thread writes."""
     q = "SELECT crd,name FROM bc_firm WHERE rostered=0"
     if only_bd:
-        q += " AND (bd_scope='ACTIVE' OR bd_scope IS NULL)"
+        q += " AND bd_scope='ACTIVE'"
     firms = conn.execute(q).fetchall()
     names = {crd: name for crd, name in firms}
     print(f"rostering {len(firms)} firms with {workers} workers", flush=True)
@@ -511,7 +581,8 @@ def roster_loop(conn, workers, until_crd=0, idle_passes=3, idle_sleep=45):
     total, idle = 0, 0
     while True:
         remaining = conn.execute(
-            "SELECT COUNT(*) FROM bc_firm WHERE rostered=0").fetchone()[0]
+            "SELECT COUNT(*) FROM bc_firm WHERE rostered=0 AND bd_scope='ACTIVE'"
+        ).fetchone()[0]
         if remaining == 0:
             row = conn.execute(
                 "SELECT last_crd FROM bc_progress WHERE kind='firm_walk'").fetchone()
@@ -528,7 +599,7 @@ def roster_loop(conn, workers, until_crd=0, idle_passes=3, idle_sleep=45):
             continue
         idle = 0
         print(f"== roster pass: {remaining} firms unrostered ==", flush=True)
-        total += roster_all_parallel(conn, workers, only_bd=False)
+        total += roster_all_parallel(conn, workers, only_bd=True)
     return total
 
 
@@ -545,6 +616,13 @@ def _store_detail(conn, d):
                    VALUES(?,?,?,?,?)""",
                 (d["crd"], dc.get("disclosureType"), dc.get("eventDate"),
                  dc.get("disclosureResolution"), json.dumps(dc)))
+    if d.get("exam_cats"):
+        conn.execute("DELETE FROM bc_exam WHERE broker_crd=?", (d["crd"],))
+        for cat, name, scope, taken in d["exam_cats"]:
+            conn.execute(
+                """INSERT OR REPLACE INTO bc_exam(broker_crd,exam_category,
+                       exam_name,exam_scope,taken_date) VALUES(?,?,?,?,?)""",
+                (d["crd"], cat, name, scope, taken))
 
 
 def fetch_detail(conn, broker_crd):
@@ -587,6 +665,59 @@ def detail_all(conn, workers, limit=None):
     return done
 
 
+def backfill_scope(conn, workers, only_missing=True):
+    """Re-fetch bd_scope (FINRA bcScope) for stored firms. The earlier parser
+    read the wrong key (bdScope) so every firm landed with NULL bd_scope; this
+    repopulates ACTIVE/INACTIVE so the roster filter and phantom purge work."""
+    q = "SELECT crd FROM bc_firm"
+    if only_missing:
+        q += " WHERE bd_scope IS NULL OR bd_scope=''"
+    crds = [r[0] for r in conn.execute(q)]
+    print(f"backfilling scope for {len(crds)} firms with {workers} workers",
+          flush=True)
+    done = 0
+    with ThreadPoolExecutor(max_workers=workers) as ex:
+        for f in ex.map(firm_by_crd, crds):
+            if not f:
+                continue
+            for attempt in range(12):
+                try:
+                    conn.execute(
+                        "UPDATE bc_firm SET bd_scope=?, ia_scope=? WHERE crd=?",
+                        (f.get("bd_scope"), f.get("ia_scope"), f["crd"]))
+                    _commit_retry(conn)
+                    break
+                except sqlite3.OperationalError as e:
+                    if "locked" in str(e) or "busy" in str(e):
+                        conn.rollback(); time.sleep(0.5 * (attempt + 1)); continue
+                    raise
+            done += 1
+            if done % 500 == 0:
+                print(f"  ...scoped {done}/{len(crds)}", flush=True)
+    return done
+
+
+def purge_phantoms(conn):
+    """Delete phantom roster edges. FINRA's &firm= filter silently returns a
+    slice of the global active population for terminated/expelled firm CRDs, so
+    rostering a defunct firm wrote a current=1, blank-begin_date edge for each.
+    Real edges come from broker detail (populated begin_date). We drop only the
+    roster-origin edges (begin_date='') that point at non-ACTIVE firms; detail
+    history and edges to live firms are kept."""
+    n = conn.execute(
+        """DELETE FROM bc_registration
+           WHERE begin_date=''
+             AND firm_crd IN (SELECT crd FROM bc_firm
+                              WHERE bd_scope IS NOT NULL AND bd_scope!='ACTIVE')"""
+    ).rowcount
+    conn.execute(
+        """UPDATE bc_firm SET roster_total=0
+           WHERE bd_scope IS NOT NULL AND bd_scope!='ACTIVE'""")
+    _commit_retry(conn)
+    print(f"purged {n} phantom registration edges")
+    return n
+
+
 def stats(conn):
     f = conn.execute("SELECT COUNT(*) FROM bc_firm").fetchone()[0]
     fr = conn.execute("SELECT COUNT(*) FROM bc_firm WHERE rostered=1").fetchone()[0]
@@ -612,6 +743,9 @@ def main():
     ap.add_argument("--firm", type=int, metavar="CRD")
     ap.add_argument("--firm-name", metavar="NAME")
     ap.add_argument("--crawl-firms", action="store_true")
+    ap.add_argument("--crawl-individuals", action="store_true",
+                    help="walk the individual CRD space for every registered "
+                         "human (defaults --to 7500000)")
     ap.add_argument("--from", dest="lo", type=int, default=1)
     ap.add_argument("--to", dest="hi", type=int, default=350000)
     ap.add_argument("--roster", type=int, metavar="CRD")
@@ -622,6 +756,12 @@ def main():
     ap.add_argument("--detail-all", action="store_true",
                     help="pull full detail for every not-yet-detailed broker")
     ap.add_argument("--limit", type=int, default=None)
+    ap.add_argument("--backfill-scope", action="store_true",
+                    help="re-fetch bd_scope (bcScope) for firms missing it")
+    ap.add_argument("--rescope-all", action="store_true",
+                    help="re-fetch bd_scope for every firm, not just missing")
+    ap.add_argument("--purge-phantoms", action="store_true",
+                    help="delete phantom roster edges to non-active firms")
     ap.add_argument("--stats", action="store_true")
     ap.add_argument("--sleep", type=float, default=0.15)
     ap.add_argument("--workers", type=int, default=1)
@@ -658,6 +798,10 @@ def main():
         else:
             n = crawl_firms(conn, args.lo, args.hi, args.sleep)
         print(f"found {n} firms in CRD [{args.lo},{args.hi}]")
+    elif args.crawl_individuals:
+        hi = 7500000 if args.hi == 350000 else args.hi
+        n = crawl_individuals_parallel(conn, args.lo, hi, max(args.workers, 2))
+        print(f"found {n} individuals in CRD [{args.lo},{hi}]")
     elif args.roster is not None:
         if not conn.execute("SELECT 1 FROM bc_firm WHERE crd=?", (args.roster,)).fetchone():
             f = firm_by_crd(args.roster)
@@ -680,6 +824,12 @@ def main():
     elif args.detail_all:
         n = detail_all(conn, max(args.workers, 2), args.limit)
         print(f"detailed {n} brokers")
+    elif args.backfill_scope or args.rescope_all:
+        n = backfill_scope(conn, max(args.workers, 2),
+                           only_missing=not args.rescope_all)
+        print(f"scoped {n} firms")
+    elif args.purge_phantoms:
+        purge_phantoms(conn)
     elif args.stats:
         stats(conn)
     else:
