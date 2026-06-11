@@ -28,6 +28,8 @@ from collections import defaultdict
 
 HN_DB = os.path.expanduser(
     "~/Dsco/dsco-trajectory-management/data/jobs.db")
+NPI_DB = "data/people/npi.db"
+ARXIV_DB = "data/people/arxiv.db"
 
 _STATES = {
     "alabama": "AL", "alaska": "AK", "arizona": "AZ", "arkansas": "AR",
@@ -165,6 +167,33 @@ def find(conn, idx, name):
         print(f"  {u} ({src}): {nm} — {loc or '?'}  {title or ''}")
         if sk:
             print(f"    skills: {sk[:90]}")
+    if os.path.exists(NPI_DB):
+        nc = sqlite3.connect(f"file:{NPI_DB}?mode=ro", uri=True, timeout=60)
+        print(f"== NPI shard (healthcare): {k[0]} {k[1]} ==")
+        for npi, fn, ln, cred, city, st, tax in nc.execute(
+                """SELECT p.npi,p.first_name,p.last_name,p.credential,p.city,
+                          p.state, COALESCE(n.classification||
+                          CASE WHEN n.specialization!='' THEN ' / '||
+                          n.specialization ELSE '' END, p.primary_taxonomy)
+                   FROM npi_person p LEFT JOIN nucc_code n
+                     ON n.code=p.primary_taxonomy
+                   WHERE lower(p.first_name)=? AND lower(p.last_name)=?
+                   LIMIT 10""", k):
+            print(f"  NPI {npi}: {fn} {ln} {cred or ''} — "
+                  f"{city or '?'}, {st or '?'}  [{tax or '?'}]")
+        nc.close()
+    if os.path.exists(ARXIV_DB):
+        ac = sqlite3.connect(f"file:{ARXIV_DB}?mode=ro", uri=True, timeout=60)
+        print(f"== arXiv shard (researchers): {k[0]} {k[1]} ==")
+        for ln, fn, n, aff in ac.execute(
+                """SELECT keyname, forenames, COUNT(*),
+                          MAX(COALESCE(affiliation,''))
+                   FROM ax_paper_author
+                   WHERE lower(keyname)=? AND lower(forenames) LIKE ?
+                   GROUP BY keyname, forenames ORDER BY COUNT(*) DESC
+                   LIMIT 10""", (k[1], k[0] + "%")):
+            print(f"  {fn} {ln}: {n} papers  {('— ' + aff) if aff else ''}")
+        ac.close()
 
 
 def stats(conn, idx, n_hn):
@@ -175,6 +204,20 @@ def stats(conn, idx, n_hn):
         "SELECT COUNT(DISTINCT broker_crd) FROM bc_exam").fetchone()[0]
     print(f"FINRA shard : {nb} brokers ({nd} detailed, {nx} with specialty rows)")
     print(f"HN shard    : {n_hn} named people across {len(idx)} name keys")
+    if os.path.exists(NPI_DB):
+        nc = sqlite3.connect(f"file:{NPI_DB}?mode=ro", uri=True, timeout=60)
+        print(f"NPI shard   : "
+              f"{nc.execute('SELECT COUNT(*) FROM npi_person').fetchone()[0]}"
+              f" healthcare providers")
+        nc.close()
+    if os.path.exists(ARXIV_DB):
+        ac = sqlite3.connect(f"file:{ARXIV_DB}?mode=ro", uri=True, timeout=60)
+        np_, na = (ac.execute("SELECT COUNT(*) FROM ax_paper").fetchone()[0],
+                   ac.execute("SELECT COUNT(DISTINCT keyname||'|'||"
+                              "COALESCE(forenames,'')) FROM ax_paper_author")
+                   .fetchone()[0])
+        print(f"arXiv shard : {np_} papers, {na} distinct author names")
+        ac.close()
 
 
 def main():
