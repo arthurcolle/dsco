@@ -43,7 +43,7 @@
 extern int g_cheap_mode;
 
 /* API defaults */
-#define DEFAULT_MODEL       "z-ai/glm-5.1"
+#define DEFAULT_MODEL       "z-ai/glm-5.2"
 #define API_URL_ANTHROPIC   "https://api.anthropic.com/v1/messages"
 #define API_URL_COUNT_TOKENS "https://api.anthropic.com/v1/messages/count_tokens"
 #define ANTHROPIC_VERSION   "2023-06-01"
@@ -182,6 +182,7 @@ static const model_info_t MODEL_REGISTRY[] = {
     { "mk2-think",    "kimi-k2-thinking",               262144, 32768,  0.60,  3.00, 0.10, 0, 1 },
     { "mk2-think-tb", "kimi-k2-thinking-turbo",         262144, 32768,  0.60,  3.00, 0.10, 0, 1 },
     /* ── Zhipu GLM ───────────────────────────────────────────────────── */
+    { "glm52",        "z-ai/glm-5.2",                  1048576, 262144, 1.40,  4.40, 0, 0, 1 },
     { "glm51",        "z-ai/glm-5.1",                  202752, 65536,  0.72,  2.30, 0, 0, 1 },
     { "glm5",         "z-ai/glm-5",                    202752, 65536,  0.72,  2.30, 0, 0, 1 },
     { "glm5-turbo",   "z-ai/glm-5-turbo",              202752, 65536,  0.96,  3.20, 0, 0, 1 },
