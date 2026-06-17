@@ -16,6 +16,7 @@ BUILD_DIR ?= build
 BASE_CFLAGS = -Wall -Wextra -O3 -std=c2y $(C2Y_WARNING_FLAGS) -D_POSIX_C_SOURCE=200809L \
 	-I$(INC_DIR) \
 	-march=native -mtune=native -funroll-loops -fvisibility=hidden \
+	-MMD -MP \
 	-DBUILD_DATE='"$(BUILD_DATE)"' -DGIT_HASH='"$(GIT_HASH)"'
 CFLAGS ?= $(BASE_CFLAGS)
 TEST_CFLAGS ?= $(BASE_CFLAGS) -O0 -g -fno-omit-frame-pointer -fno-inline
@@ -236,6 +237,13 @@ $(UBSAN_TEST_OBJ_DIR)/%.o: $(SRC_DIR)/%.m | $(UBSAN_TEST_OBJ_DIR)
 
 $(OBJ_DIR) $(DEBUG_OBJ_DIR) $(TEST_OBJ_DIR) $(TEST_COVERAGE_OBJ_DIR) $(ASAN_OBJ_DIR) $(UBSAN_OBJ_DIR) $(ASAN_TEST_OBJ_DIR) $(UBSAN_TEST_OBJ_DIR):
 	mkdir -p $@
+
+# Header dependency tracking: -MMD -MP (in BASE_CFLAGS) emits a .d file next to
+# each .o listing the headers it included. Including them here makes any object
+# rebuild when a header it uses changes — e.g. editing include/config.h now
+# correctly recompiles every .o that includes it, instead of silently shipping
+# a stale binary.
+-include $(wildcard $(BUILD_DIR)/*/*.d)
 
 test: test_runner
 	./test_runner
