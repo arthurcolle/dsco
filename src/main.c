@@ -10,6 +10,7 @@
 #include "baseline.h"
 #include "setup.h"
 #include "provider.h"
+#include "openrouter_cache.h"
 #include "topology.h"
 #include "workspace.h"
 #include "trace.h"
@@ -46,6 +47,7 @@
 #include "trust.h"
 #include "toolmgmt.h"
 #include "connector.h"
+#include "startup.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -74,11 +76,82 @@ static md_renderer_t s_oneshot_md;
 /* --cheap mode: only ALWAYS-core tools (5) + no compact catalog */
 int g_cheap_mode = 0;
 
+/* Opt-in startup timing. Enable with DSCO_PERF=1. */
+static bool   g_perf_enabled = false;
+static bool   g_perf_json = false;
+static double g_perf_t0_ms = 0.0;
+static double g_perf_last_ms = 0.0;
+static dsco_profile_t g_perf_profile = DSCO_PROFILE_FULL;
+static dsco_caps_t g_perf_caps = 0;
+
+static double perf_now_ms(void) {
+    struct timeval tv;
+    gettimeofday(&tv, NULL);
+    return (double)tv.tv_sec * 1000.0 + (double)tv.tv_usec / 1000.0;
+}
+
+static bool perf_env_enabled(const char *v) {
+    return v && (v[0] == '1' || strcasecmp(v, "true") == 0 ||
+                 strcasecmp(v, "yes") == 0 || strcasecmp(v, "trace") == 0 ||
+                 strcasecmp(v, "json") == 0 || strcasecmp(v, "jsonl") == 0);
+}
+
+static void perf_init(void) {
+    const char *perf = getenv("DSCO_PERF");
+    g_perf_json = perf && (strcasecmp(perf, "json") == 0 ||
+                           strcasecmp(perf, "jsonl") == 0);
+    g_perf_enabled = perf_env_enabled(perf);
+    if (!g_perf_enabled) return;
+    g_perf_t0_ms = perf_now_ms();
+    g_perf_last_ms = g_perf_t0_ms;
+    if (g_perf_json) {
+        fprintf(stderr,
+                "{\"type\":\"startup\",\"event\":\"begin\",\"total_ms\":0.000}\n");
+    } else {
+        fprintf(stderr, "perf startup begin\n");
+    }
+}
+
+static void perf_set_startup_context(dsco_profile_t profile, dsco_caps_t caps) {
+    g_perf_profile = profile;
+    g_perf_caps = caps;
+}
+
+static void perf_mark(const char *label) {
+    if (!g_perf_enabled) return;
+    double now = perf_now_ms();
+    if (g_perf_json) {
+        char caps[192];
+        fprintf(stderr,
+                "{\"type\":\"startup\",\"event\":\"mark\",\"label\":\"%s\","
+                "\"delta_ms\":%.3f,\"total_ms\":%.3f,"
+                "\"profile\":\"%s\",\"caps\":\"%s\"}\n",
+                label ? label : "mark",
+                now - g_perf_last_ms,
+                now - g_perf_t0_ms,
+                dsco_profile_name(g_perf_profile),
+                dsco_caps_to_string(g_perf_caps, caps, sizeof(caps)));
+    } else {
+        fprintf(stderr, "perf %-28s +%7.2f ms total=%7.2f ms\n",
+                label ? label : "mark", now - g_perf_last_ms, now - g_perf_t0_ms);
+    }
+    g_perf_last_ms = now;
+}
+
+static void perf_finish(const char *label) {
+    perf_mark(label ? label : "finish");
+}
+
 /* ── Post-LLM Virtual OS subsystems ────────────────────────────────── */
 vm_t                g_vm;          /* §3: bytecode dispatch VM (extern'd by tools.c) */
 static scheduler_t  g_scheduler;   /* §1/§7: cooperative task scheduler */
 static ev_loop_t   *g_ev_loop;     /* §6: event loop */
 static vfs_db_t    *g_vfs;         /* §8: embedded persistence */
+static bool         g_scheduler_ready = false;
+static bool         g_arena_ready = false;
+static bool         g_trace_ready = false;
+static bool         g_ipc_ready = false;
+static bool         g_startup_initialized = false;
 
 /* Signal handler for clean IPC shutdown in sub-agent mode */
 static volatile sig_atomic_t g_main_interrupted = 0;
@@ -90,12 +163,16 @@ static void init_trace_runtime(void) {
     }
 #endif
     TRACE_INIT();
+    g_trace_ready = true;
 }
 
 static void main_sigterm_handler(int sig) {
     (void)sig;
     g_main_interrupted = 1;
 }
+
+static void main_zero32(uint8_t key[32]);
+static bool init_secure_store_required(uint8_t out_key[32], int *timed_out);
 
 /* Crash handler — save diagnostic info before dying */
 static void crash_handler(int sig) {
@@ -119,10 +196,22 @@ static void main_atexit_handler(void) {
     /* Shutdown Post-LLM OS subsystems */
     if (g_vfs)     { vfs_close(g_vfs); g_vfs = NULL; }
     if (g_ev_loop) { ev_loop_free(g_ev_loop); g_ev_loop = NULL; }
-    sched_destroy(&g_scheduler);
-    arena_subsystem_shutdown();
-    TRACE_SHUTDOWN();
-    ipc_shutdown();
+    if (g_scheduler_ready) {
+        sched_destroy(&g_scheduler);
+        g_scheduler_ready = false;
+    }
+    if (g_arena_ready) {
+        arena_subsystem_shutdown();
+        g_arena_ready = false;
+    }
+    if (g_trace_ready) {
+        TRACE_SHUTDOWN();
+        g_trace_ready = false;
+    }
+    if (g_ipc_ready) {
+        ipc_shutdown();
+        g_ipc_ready = false;
+    }
 }
 
 static void init_vos_subsystems(void) {
@@ -147,6 +236,7 @@ static void init_vos_subsystems(void) {
 
     /* §2: Arena allocator — scratch (per-turn) + session (per-run) */
     arena_subsystem_init();
+    g_arena_ready = true;
 
     /* §6: Event loop — kqueue on macOS, poll fallback */
     g_ev_loop = ev_loop_new();
@@ -156,6 +246,7 @@ static void init_vos_subsystems(void) {
 
     /* §1/§7: Cooperative scheduler — priority-aware task scheduling */
     sched_init(&g_scheduler);
+    g_scheduler_ready = true;
 
     /* §8: Embedded persistence — SQLite VFS layer */
     char vfs_path[512];
@@ -189,6 +280,252 @@ static void init_vos_subsystems(void) {
 
     /* §6→IPC: non-blocking heartbeat via event loop timer */
     ipc_set_event_loop(g_ev_loop);
+}
+
+static bool main_argv_has(int argc, char **argv, const char *flag) {
+    for (int i = 1; i < argc; i++) {
+        if (strcmp(argv[i], flag) == 0) return true;
+    }
+    return false;
+}
+
+static bool main_argv_has_value(int argc, char **argv, const char *flag,
+                                const char **out_value) {
+    for (int i = 1; i + 1 < argc; i++) {
+        if (strcmp(argv[i], flag) == 0) {
+            if (out_value) *out_value = argv[i + 1];
+            return true;
+        }
+    }
+    return false;
+}
+
+static dsco_profile_t main_runtime_profile(int argc, char **argv) {
+    dsco_profile_t profile = DSCO_PROFILE_FULL;
+
+    const char *base = argv && argv[0] ? strrchr(argv[0], '/') : NULL;
+    base = base ? base + 1 : (argv && argv[0] ? argv[0] : "");
+    if (strcmp(base, "dsco-lite") == 0)
+        profile = DSCO_PROFILE_LITE;
+
+    dsco_profile_t parsed;
+    const char *env_profile = getenv("DSCO_PROFILE");
+    if (dsco_profile_parse(env_profile, &parsed))
+        profile = parsed;
+
+    const char *cli_profile = NULL;
+    if (main_argv_has_value(argc, argv, "--profile", &cli_profile) &&
+        dsco_profile_parse(cli_profile, &parsed)) {
+        profile = parsed;
+    }
+
+    if (getenv("DSCO_WORKER") ||
+        main_argv_has(argc, argv, "--worker") ||
+        main_argv_has(argc, argv, "--worker-lite")) {
+        profile = DSCO_PROFILE_WORKER;
+    }
+
+    return profile;
+}
+
+static dsco_caps_t main_plan_startup_caps(int argc, char **argv,
+                                          dsco_profile_t profile) {
+    if (profile == DSCO_PROFILE_FULL)
+        return DSCO_CAP_FULL;
+
+    dsco_caps_t caps = DSCO_CAP_TRACE;
+    if (profile == DSCO_PROFILE_WORKER)
+        caps |= DSCO_CAP_PROVIDER | DSCO_CAP_TOOLS;
+
+    bool has_prompt = false;
+    for (int i = 1; i < argc; i++) {
+        if (strcmp(argv[i], "--") == 0) break;
+        if (strcmp(argv[i], "--tool-exec") == 0) {
+            caps |= DSCO_CAP_TOOLS;
+            if (i + 2 < argc) i += 2;
+            continue;
+        }
+        if (strcmp(argv[i], "--tools-json") == 0) {
+            caps |= DSCO_CAP_TOOLS;
+            continue;
+        }
+        if (strcmp(argv[i], "--models-json") == 0 ||
+            strcmp(argv[i], "--version") == 0 ||
+            strcmp(argv[i], "-v") == 0 ||
+            strcmp(argv[i], "--help") == 0 ||
+            strcmp(argv[i], "-h") == 0) {
+            continue;
+        }
+        if (argv[i][0] != '-') {
+            if (i == 1 && (strcmp(argv[i], "login") == 0 ||
+                           strcmp(argv[i], "status") == 0 ||
+                           strcmp(argv[i], "tools") == 0 ||
+                           strcmp(argv[i], "connect") == 0 ||
+                           strcmp(argv[i], "mux") == 0)) {
+                continue;
+            }
+            has_prompt = true;
+            break;
+        }
+        if ((strcmp(argv[i], "-m") == 0 ||
+             strcmp(argv[i], "-k") == 0 ||
+             strcmp(argv[i], "-M") == 0 ||
+             strcmp(argv[i], "--worker-model") == 0 ||
+             strcmp(argv[i], "--exec") == 0 ||
+             strcmp(argv[i], "-e") == 0 ||
+             strcmp(argv[i], "--provider") == 0 ||
+             strcmp(argv[i], "--profile") == 0 ||
+             strcmp(argv[i], "--timeline-port") == 0 ||
+             strcmp(argv[i], "--timeline-instance") == 0 ||
+             strcmp(argv[i], "--topology") == 0) && i + 1 < argc) {
+            i++;
+        }
+    }
+
+    if (has_prompt ||
+        main_argv_has(argc, argv, "-i") ||
+        main_argv_has(argc, argv, "--interactive") ||
+        main_argv_has(argc, argv, "-e") ||
+        main_argv_has(argc, argv, "--exec") ||
+        main_argv_has(argc, argv, "--provider")) {
+        caps |= DSCO_CAP_PROVIDER | DSCO_CAP_TOOLS;
+    }
+
+    if (main_argv_has(argc, argv, "-i") ||
+        main_argv_has(argc, argv, "--interactive") ||
+        main_argv_has(argc, argv, "--ui")) {
+        caps |= DSCO_CAP_TUI;
+    }
+
+    if (main_argv_has(argc, argv, "--orchestrate") ||
+        main_argv_has(argc, argv, "-O") ||
+        main_argv_has(argc, argv, "--mux") ||
+        main_argv_has(argc, argv, "mux") ||
+        main_argv_has(argc, argv, "--topology") ||
+        main_argv_has(argc, argv, "--topology-auto") ||
+        main_argv_has(argc, argv, "--timeline-server")) {
+        caps |= DSCO_CAP_PROVIDER | DSCO_CAP_TOOLS | DSCO_CAP_VOS |
+                DSCO_CAP_IPC | DSCO_CAP_MEMORY;
+    }
+
+    return caps;
+}
+
+void dsco_startup_init(dsco_profile_t profile, dsco_caps_t caps) {
+    if (g_startup_initialized) return;
+    if (profile == DSCO_PROFILE_FULL)
+        caps = DSCO_CAP_FULL;
+    if (profile == DSCO_PROFILE_WORKER)
+        caps &= ~(DSCO_CAP_SECURITY | DSCO_CAP_TRUST);
+    perf_set_startup_context(profile, caps);
+
+    bool is_worker = profile == DSCO_PROFILE_WORKER;
+
+    if (caps & DSCO_CAP_SECURITY) {
+        tamper_init();          /* must be first: deny ptrace, hash code, watch binary */
+        perf_mark("tamper");
+        {   /* audit log opens here so every subsequent init step is captured */
+            char alog_path[4096];
+            const char *h = getenv("HOME");
+            if (!h) h = "/tmp";
+            snprintf(alog_path, sizeof(alog_path), "%s/.dsco/audit.log", h);
+            audit_log_global_init(alog_path);
+        }
+        perf_mark("audit");
+        if (!is_worker) {
+            uint8_t se_key[32] = {0};
+            int timed_out = 0;
+            bool show_secure_wait = isatty(STDERR_FILENO);
+            if (show_secure_wait) {
+                fprintf(stderr, "dsco: initializing secure store...\n");
+                fflush(stderr);
+            }
+            if (!init_secure_store_required(se_key, &timed_out)) {
+                audit_log("se_store", timed_out
+                          ? "secure store init timed out"
+                          : "secure store init failed");
+                fprintf(stderr,
+                        "error: secure store initialization %s; refusing to start\n"
+                        "  unlock the login keychain/Secure Enclave and retry\n"
+                        "  set DSCO_SECURE_STORE_AUTH_UI=1 if macOS should show an auth prompt\n"
+                        "  set DSCO_SECURE_STORE_TIMEOUT_MS=<ms> to allow more time\n",
+                        timed_out ? "timed out" : "failed");
+                main_zero32(se_key);
+                exit(1);
+            }
+            sealed_store_set_master_key(se_key);
+            main_zero32(se_key);
+            perf_mark("secure_store");
+        }
+        tamper_register_wiper((tamper_wiper_fn)se_store_wipe, NULL);
+        if (!is_worker) sealed_store_init();
+        perf_mark("sealed_store");
+        env_guard_init();
+        audit_log("startup", is_worker ? "dsco worker init" : "dsco init");
+        if (!is_worker) heartbeat_start();
+        perf_mark("env_heartbeat");
+    }
+
+    if (caps & DSCO_CAP_ACCEL) {
+        dsco_mlx_init();
+        dsco_accel_init();
+        dsco_pool_global_init(0);
+        perf_mark("accel_pool");
+    }
+
+    if ((caps & DSCO_CAP_TRUST) || (caps & DSCO_CAP_ACCEL)) {
+        dsco_fingerprint_refresh();
+        if ((caps & DSCO_CAP_TRUST) && !is_worker) {
+            dsco_trust_config_t tcfg;
+            dsco_trust_default_config(&tcfg);
+            if (!tcfg.opt_out && dsco_trust_init(&tcfg) == 0) {
+                dsco_trust_emit_attest();
+            }
+        }
+        perf_mark("fingerprint_trust");
+    }
+
+    if ((caps & DSCO_CAP_ACCEL) && getenv("DSCO_ACCEL_BANNER")) {
+        const dsco_accel_info_t *ai = dsco_accel_info();
+        const dsco_fingerprint_t *fp = dsco_fingerprint_get();
+        char fpline[256];
+        if (fp) dsco_fingerprint_summary(fp, fpline, sizeof(fpline));
+        if (ai) fprintf(stderr, "%s%s%s\n  host: %s\n  trust: %s\n",
+                        ai->banner,
+                        dsco_mlx_library_path() ? " | mlx=" : "",
+                        dsco_mlx_library_path() ? dsco_mlx_library_path() : "",
+                        fpline,
+                        dsco_trust_is_active() ? dsco_trust_endpoint() : "off");
+    }
+
+    if ((caps & DSCO_CAP_TUI) && isatty(STDIN_FILENO)) {
+        extern void tui_lock_engage(void);
+        const char *idle_s_str = getenv("DSCO_IDLE_LOCK_S");
+        int idle_s = idle_s_str ? atoi(idle_s_str) : 300;
+        if (idle_s > 0) {
+            presence_init(idle_s, (presence_lock_fn)tui_lock_engage, NULL);
+            presence_start();
+        }
+        perf_mark("presence");
+    }
+
+    (void)atexit(main_atexit_handler);
+
+    if (caps & DSCO_CAP_TRACE) {
+        init_trace_runtime();
+        perf_mark("trace");
+    }
+
+    if (caps & DSCO_CAP_VOS) {
+        init_vos_subsystems();
+        perf_mark("vos");
+    } else if (caps & DSCO_CAP_TOOLS) {
+        vm_init(&g_vm);
+        perf_mark("vm");
+    }
+
+    g_startup_initialized = true;
+    perf_mark("startup ready");
 }
 
 /* ── Executor registry ─────────────────────────────────────────────── */
@@ -1278,7 +1615,7 @@ static void usage(const char *prog) {
         "Options:\n"
         "  -m MODEL    Model name (default: %s)\n"
         "  -k KEY      API key (default: provider env for selected model)\n"
-        "  --profile NAME         Setup profile (default: default)\n"
+        "  --profile full|lite|worker  Runtime startup profile (default: full)\n"
         "  --login                Interactive backend login (Claude Code / Codex)\n"
         "  --setup                Save detected API keys/tokens into dsco env file\n"
         "  --setup-force          Overwrite existing saved values from current env\n"
@@ -1309,7 +1646,7 @@ static void usage(const char *prog) {
         "  ANTHROPIC_API_KEY   Anthropic API key (Claude Code OAuth is auto-detected when available)\n"
         "  OPENROUTER_API_KEY  OpenRouter API key for namespaced org/model IDs\n"
         "  DSCO_MODEL          Default model override\n"
-        "  DSCO_PROFILE        Setup profile name\n"
+        "  DSCO_PROFILE        Runtime startup profile when full/lite/worker\n"
         "  DSCO_ENV_FILE       Override setup env file path\n"
         "  DSCO_BASELINE_DB    Override sqlite baseline path\n"
         "  DSCO_EXEC           Default executor (claude, codex, auto)\n"
@@ -1410,7 +1747,155 @@ static void oneshot_tool_cb(const char *name, const char *id, void *ctx) {
     baseline_log("tool", name, "tool_use started", NULL);
 }
 
+static void json_print_escaped(FILE *out, const char *s) {
+    if (!out) out = stdout;
+    if (!s) return;
+    for (const char *p = s; *p; p++) {
+        if (*p == '"')       fputs("\\\"", out);
+        else if (*p == '\\') fputs("\\\\", out);
+        else if (*p == '\n') fputs("\\n", out);
+        else if (*p == '\r') fputs("\\r", out);
+        else if (*p == '\t') fputs("\\t", out);
+        else                 fputc(*p, out);
+    }
+}
+
+static void print_models_json(void) {
+    printf("[");
+    for (int j = 0; MODEL_REGISTRY[j].alias; j++) {
+        const model_info_t *m = &MODEL_REGISTRY[j];
+        if (j > 0) printf(",");
+        printf("{\"alias\":\"%s\",\"model_id\":\"%s\","
+               "\"context_window\":%d,\"max_output\":%d,"
+               "\"input_price\":%.2f,\"output_price\":%.2f,"
+               "\"cache_read_price\":%.2f,\"cache_write_price\":%.2f,"
+               "\"supports_thinking\":%d}",
+               m->alias, m->model_id, m->context_window, m->max_output,
+               m->input_price, m->output_price,
+               m->cache_read_price, m->cache_write_price,
+               m->supports_thinking);
+    }
+    printf("]\n");
+}
+
+static void print_tools_json_fast(dsco_profile_t profile) {
+    if (profile == DSCO_PROFILE_LITE || profile == DSCO_PROFILE_WORKER)
+        tools_init_profile(TOOLS_CORE);
+    else
+        tools_init_local_only();
+    int count = 0;
+    const tool_def_t *tools = tools_get_all(&count);
+    printf("[");
+    int emitted = 0;
+    for (int j = 0; j < count; j++) {
+        const tool_def_t *t = &tools[j];
+        if (!t->name) continue;
+        if (!tools_profile_allows_index(j)) continue;
+        if (emitted++ > 0) printf(",");
+        printf("{\"name\":\"%s\",\"description\":\"", t->name);
+        json_print_escaped(stdout, t->description ? t->description : "");
+        printf("\",\"input_schema\":%s}",
+               (t->input_schema_json && t->input_schema_json[0])
+                   ? t->input_schema_json
+                   : "{\"type\":\"object\",\"properties\":{}}");
+    }
+    printf("]\n");
+}
+
+static bool main_json_string_needs_escape(const char *s) {
+    if (!s) return false;
+    for (const unsigned char *p = (const unsigned char *)s; *p; p++) {
+        if (*p < 0x20 || *p == '"' || *p == '\\') return true;
+    }
+    return false;
+}
+
+static void main_print_tool_exec_json(bool ok, const char *result) {
+    const char *prefix = ok ? "{\"ok\":true,\"result\":\""
+                            : "{\"ok\":false,\"result\":\"";
+    if (!main_json_string_needs_escape(result)) {
+        (void)write(STDOUT_FILENO, prefix, strlen(prefix));
+        if (result) (void)write(STDOUT_FILENO, result, strlen(result));
+        (void)write(STDOUT_FILENO, "\"}\n", 3);
+        return;
+    }
+
+    fputs(prefix, stdout);
+    json_print_escaped(stdout, result ? result : "");
+    fputs("\"}\n", stdout);
+}
+
+static int run_tool_exec_fast(dsco_profile_t profile,
+                              const char *name,
+                              const char *input_json) {
+    if ((profile == DSCO_PROFILE_LITE || profile == DSCO_PROFILE_WORKER) &&
+        name && strcmp(name, "cwd") == 0 &&
+        (!input_json || !strstr(input_json, "path"))) {
+        char cwd[PATH_MAX];
+        if (!getcwd(cwd, sizeof(cwd))) {
+            main_print_tool_exec_json(false, strerror(errno));
+            return 1;
+        }
+        main_print_tool_exec_json(true, cwd);
+        return 0;
+    }
+
+    if (profile == DSCO_PROFILE_LITE || profile == DSCO_PROFILE_WORKER)
+        tools_init_profile(TOOLS_CORE);
+    else
+        tools_init_local_only();
+    char result[256 * 1024] = {0};
+    bool ok = tools_execute(name, input_json, result, sizeof(result));
+    printf("{\"ok\":%s,\"result\":\"", ok ? "true" : "false");
+    json_print_escaped(stdout, result);
+    printf("\"}\n");
+    return ok ? 0 : 1;
+}
+
+static void main_tools_init_for_runtime(dsco_profile_t profile) {
+    if (profile == DSCO_PROFILE_LITE || profile == DSCO_PROFILE_WORKER)
+        tools_init_profile(TOOLS_CORE);
+    else
+        tools_init();
+}
+
+/* Return -1 when not handled, otherwise the process exit code. */
+static int maybe_run_early_fast_path(int argc, char **argv,
+                                     dsco_profile_t profile) {
+    for (int i = 1; i < argc; i++) {
+        if (strcmp(argv[i], "--models-json") == 0) {
+            perf_mark("fast models-json");
+            print_models_json();
+            perf_finish("fast exit");
+            return 0;
+        }
+        if (strcmp(argv[i], "--tools-json") == 0) {
+            perf_mark("fast tools-json begin");
+            print_tools_json_fast(profile);
+            perf_finish("fast exit");
+            return 0;
+        }
+        if (strcmp(argv[i], "--tool-exec") == 0) {
+            if (i + 2 >= argc) {
+                fprintf(stderr, "error: --tool-exec requires <name> <json>\n");
+                perf_finish("fast error");
+                return 1;
+            }
+            perf_mark("fast tool-exec begin");
+            int rc = run_tool_exec_fast(profile, argv[i + 1], argv[i + 2]);
+            perf_finish("fast exit");
+            return rc;
+        }
+    }
+    return -1;
+}
+
 int main(int argc, char **argv) {
+    perf_init();
+    dsco_profile_t runtime_profile = main_runtime_profile(argc, argv);
+    dsco_caps_t startup_caps = main_plan_startup_caps(argc, argv, runtime_profile);
+    perf_set_startup_context(runtime_profile, startup_caps);
+
     /* `dsco tools …` drives the external Tool Management API. Dispatch first so
      * its own -h/subcommands aren't swallowed by the global flag loop below; it
      * manages its own config + auth and never touches the keychain. */
@@ -1429,110 +1914,19 @@ int main(int argc, char **argv) {
     for (int i = 1; i < argc; i++) {
         if (strcmp(argv[i], "--version") == 0 || strcmp(argv[i], "-v") == 0) {
             printf("dsco v%s (built %s, %s)\n", DSCO_VERSION, BUILD_DATE, GIT_HASH);
+            perf_finish("version exit");
             return 0;
         }
         if (strcmp(argv[i], "-h") == 0 || strcmp(argv[i], "--help") == 0) {
             usage(argv[0]);
+            perf_finish("help exit");
             return 0;
         }
     }
 
-    /* Mux-spawned worker children inherit ANTHROPIC_API_KEY and all needed
-     * secrets via env from the parent. They MUST NOT re-prompt the keychain
-     * (one prompt per worker is unacceptable UX). Detect worker mode before
-     * any keychain access. */
-    bool is_worker = (getenv("DSCO_WORKER") != NULL);
-    if (!is_worker) {
-        for (int i = 1; i < argc; i++) {
-            if (strcmp(argv[i], "--worker") == 0) { is_worker = true; break; }
-        }
-    }
-
-    tamper_init();          /* must be first: deny ptrace, hash code, watch binary */
-    {   /* audit log opens here so every subsequent init step is captured */
-        char alog_path[4096];
-        const char *h = getenv("HOME");
-        if (!h) h = "/tmp";
-        snprintf(alog_path, sizeof(alog_path), "%s/.dsco/audit.log", h);
-        audit_log_global_init(alog_path);
-    }
-    if (!is_worker) {
-        /* Secure store is fail-closed. It must complete before env secrets are
-         * loaded into sealed_store, but it must not make startup hang forever
-         * inside macOS Security.framework. */
-        uint8_t se_key[32] = {0};
-        int timed_out = 0;
-        bool show_secure_wait = isatty(STDERR_FILENO);
-        if (show_secure_wait) {
-            fprintf(stderr, "dsco: initializing secure store...\n");
-            fflush(stderr);
-        }
-        if (!init_secure_store_required(se_key, &timed_out)) {
-            audit_log("se_store", timed_out
-                      ? "secure store init timed out"
-                      : "secure store init failed");
-            fprintf(stderr,
-                    "error: secure store initialization %s; refusing to start\n"
-                    "  unlock the login keychain/Secure Enclave and retry\n"
-                    "  set DSCO_SECURE_STORE_AUTH_UI=1 if macOS should show an auth prompt\n"
-                    "  set DSCO_SECURE_STORE_TIMEOUT_MS=<ms> to allow more time\n",
-                    timed_out ? "timed out" : "failed");
-            main_zero32(se_key);
-            return 1;
-        }
-        sealed_store_set_master_key(se_key);
-        main_zero32(se_key);
-    }
-    tamper_register_wiper((tamper_wiper_fn)se_store_wipe, NULL);
-    if (!is_worker) sealed_store_init();    /* encrypted secret store; wiper registered with tamper */
-    env_guard_init();       /* strip LD_PRELOAD / DYLD_INSERT_LIBRARIES, audit dylibs */
-    audit_log("startup", is_worker ? "dsco worker init" : "dsco init");
-    if (!is_worker) heartbeat_start();      /* background keepalive ping + optional phone-home */
-
-    /* Native acceleration + parallelism. MLX is dlopen'd best-effort; if
-     * absent the accel layer falls back to Accelerate.framework / NEON. */
-    dsco_mlx_init();
-    dsco_accel_init();
-    dsco_pool_global_init(0);
-
-    /* Native context fingerprint + trust telemetry. Async — never blocks
-     * startup. Opt-out: DSCO_TRUST_OPT_OUT=1 */
-    dsco_fingerprint_refresh();
-    if (!is_worker) {
-        dsco_trust_config_t tcfg;
-        dsco_trust_default_config(&tcfg);
-        if (!tcfg.opt_out && dsco_trust_init(&tcfg) == 0) {
-            dsco_trust_emit_attest();   /* fingerprint goes to trust endpoint */
-        }
-    }
-
-    if (getenv("DSCO_ACCEL_BANNER")) {
-        const dsco_accel_info_t *ai = dsco_accel_info();
-        const dsco_fingerprint_t *fp = dsco_fingerprint_get();
-        char fpline[256];
-        if (fp) dsco_fingerprint_summary(fp, fpline, sizeof(fpline));
-        if (ai) fprintf(stderr, "%s%s%s\n  host: %s\n  trust: %s\n",
-                        ai->banner,
-                        dsco_mlx_library_path() ? " | mlx=" : "",
-                        dsco_mlx_library_path() ? dsco_mlx_library_path() : "",
-                        fpline,
-                        dsco_trust_is_active() ? dsco_trust_endpoint() : "off");
-    }
-
-    /* Auto-lock: engage when idle threshold reached; Touch ID to unlock */
-    if (isatty(STDIN_FILENO)) {
-        extern void tui_lock_engage(void);
-        const char *idle_s_str = getenv("DSCO_IDLE_LOCK_S");
-        int idle_s = idle_s_str ? atoi(idle_s_str) : 300; /* default 5 min */
-        if (idle_s > 0) {
-            presence_init(idle_s, (presence_lock_fn)tui_lock_engage, NULL);
-            presence_start();
-        }
-    }
-
-    (void)atexit(main_atexit_handler);
-    init_trace_runtime();
-    init_vos_subsystems();  /* §1-§8: Post-LLM Virtual OS layer */
+    int fast_rc = maybe_run_early_fast_path(argc, argv, runtime_profile);
+    if (fast_rc >= 0) return fast_rc;
+    dsco_startup_init(runtime_profile, startup_caps);
 
     /* Bare `dsco` in a TTY drops into the interactive REPL.
      * Non-TTY (pipe/redirect) keeps the old behavior of printing usage + error,
@@ -1564,7 +1958,9 @@ int main(int argc, char **argv) {
             break;
         }
     }
-    if (cli_profile && cli_profile[0]) {
+    dsco_profile_t ignored_runtime_profile;
+    if (cli_profile && cli_profile[0] &&
+        !dsco_profile_parse(cli_profile, &ignored_runtime_profile)) {
         setenv("DSCO_PROFILE", cli_profile, 1);
     }
 
@@ -1664,7 +2060,7 @@ int main(int argc, char **argv) {
             return 0;
         }
         if (strcmp(argv[i], "--tools-json") == 0) {
-            tools_init();
+            main_tools_init_for_runtime(runtime_profile);
             int count = 0;
             const tool_def_t *tools = tools_get_all(&count);
             printf("[");
@@ -1696,7 +2092,7 @@ int main(int argc, char **argv) {
             /* --tool-exec <name> <json>  — execute a single tool and print result */
             const char *tname  = argv[++i];
             const char *tjson  = argv[++i];
-            tools_init();
+            main_tools_init_for_runtime(runtime_profile);
             char result[256 * 1024] = {0};
             bool ok = tools_execute(tname, tjson, result, sizeof(result));
             /* Always emit valid JSON: {"ok":bool,"result":"..."} */
@@ -1775,7 +2171,8 @@ int main(int argc, char **argv) {
             if (i + 1 < argc && argv[i + 1][0] != '-') {
                 mux_initial_root = argv[++i];
             }
-        } else if (strcmp(argv[i], "--worker") == 0) {
+        } else if (strcmp(argv[i], "--worker") == 0 ||
+                   strcmp(argv[i], "--worker-lite") == 0) {
             /* Spawned by the mux. The project id arg (next token) is informational
              * — env DSCO_PROJECT_ID is already set, and cwd was set by the parent. */
             interactive_mode = true;
@@ -1988,6 +2385,11 @@ int main(int argc, char **argv) {
 
     curl_global_init(CURL_GLOBAL_DEFAULT);
 
+    /* Kick off the background OpenRouter catalog refresh: loads the on-disk
+     * cache immediately, then refreshes from the live /models endpoint when
+     * stale, so any real slug resolves with current context/pricing. */
+    openrouter_cache_init();
+
     /* --exec: dispatch to external CLI or force native provider */
     if (exec_backend && exec_backend[0]) {
         if (strcmp(exec_backend, "list") == 0) {
@@ -2032,7 +2434,7 @@ int main(int argc, char **argv) {
 
         /* "bench-tools" — test tool calling across providers */
         if (strcmp(exec_backend, "bench-tools") == 0) {
-            tools_init();
+            main_tools_init_for_runtime(runtime_profile);
             fprintf(stderr, "\n  \033[1mTool Calling Benchmark\033[0m\n");
             fprintf(stderr, "  Tests: tool invocation, multi-turn, arg parsing\n\n");
             fprintf(stderr, "  %-12s %-24s %7s  %-7s %-7s %-7s %s\n",
@@ -2057,6 +2459,7 @@ int main(int argc, char **argv) {
                 session_state_t tsess;
                 session_state_init(&tsess, tp->example_model);
                 provider_t *tprov = provider_create(tp->name);
+                provider_prepare(tprov);
                 conversation_t tconv;
                 conv_init(&tconv);
 
@@ -2069,7 +2472,8 @@ int main(int argc, char **argv) {
                 char *treq = tprov->build_request(tprov, &tconv, &tsess, 1024, tkey);
                 stream_result_t tsr = {0};
                 if (treq) {
-                    tsr = tprov->stream(tprov, tkey, treq, NULL, NULL, NULL, NULL);
+                    tsr = provider_stream_reuse(tprov, tkey, treq,
+                                                NULL, NULL, NULL, NULL);
                     free(treq);
                 }
 
@@ -2113,7 +2517,8 @@ int main(int argc, char **argv) {
                     char *treq2 = tprov->build_request(tprov, &tconv, &tsess, 1024, tkey);
                     stream_result_t tsr2 = {0};
                     if (treq2) {
-                        tsr2 = tprov->stream(tprov, tkey, treq2, NULL, NULL, NULL, NULL);
+                        tsr2 = provider_stream_reuse(tprov, tkey, treq2,
+                                                     NULL, NULL, NULL, NULL);
                         free(treq2);
                     }
                     multi_turn_ok = tsr2.ok;
@@ -2183,6 +2588,7 @@ int main(int argc, char **argv) {
                 session_state_t bsess;
                 session_state_init(&bsess, np2->example_model);
                 provider_t *bprov = provider_create(np2->name);
+                provider_prepare(bprov);
                 conversation_t bconv;
                 conv_init(&bconv);
                 conv_add_user_text(&bconv, bench_prompt);
@@ -2199,8 +2605,8 @@ int main(int argc, char **argv) {
                 stream_result_t bsr = {0};
 
                 if (breq) {
-                    bsr = bprov->stream(bprov, bkey, breq,
-                                        NULL, NULL, NULL, NULL);
+                    bsr = provider_stream_reuse(bprov, bkey, breq,
+                                                NULL, NULL, NULL, NULL);
                     free(breq);
                 }
 
@@ -2359,7 +2765,7 @@ native_path:
     }
 
     if (oneshot_prompt) {
-        tools_init();
+        main_tools_init_for_runtime(runtime_profile);
         tools_register_vm_dispatch(&g_vm);  /* §3: populate VM dispatch table */
         tools_set_runtime_api_key(api_key);
         tools_set_runtime_model(model);
@@ -2380,6 +2786,7 @@ native_path:
         const char *oneshot_provider_name =
             provider_route_for_model(oneshot_session.model, api_key, g_provider_override);
         provider_t *oneshot_provider = provider_create(oneshot_provider_name);
+        provider_prepare(oneshot_provider);
         /* Resolve the correct API key for this provider (e.g. OPENROUTER_API_KEY) */
         const char *oneshot_key =
             provider_resolve_request_api_key(oneshot_provider_name, api_key);
@@ -2387,7 +2794,9 @@ native_path:
 
         int turns = 0;
         bool oneshot_had_error = false;
-        while (turns < dsco_max_agent_turns()) {
+        tools_loop_control_reset();
+        int oneshot_base_turn_limit = dsco_max_agent_turns();
+        while (turns < tools_loop_control_effective_max_turns(oneshot_base_turn_limit)) {
             turns++;
             md_reset(&s_oneshot_md);
 
@@ -2404,9 +2813,9 @@ native_path:
             }
 
             stream_result_t sr = oneshot_provider
-                ? oneshot_provider->stream(oneshot_provider, oneshot_key, req,
-                                           oneshot_text_cb, oneshot_tool_cb,
-                                           NULL, NULL)
+                ? provider_stream_reuse(oneshot_provider, oneshot_key, req,
+                                        oneshot_text_cb, oneshot_tool_cb,
+                                        NULL, NULL)
                 : llm_stream(oneshot_key, req,
                              oneshot_text_cb,
                              oneshot_tool_cb,
@@ -2457,6 +2866,24 @@ native_path:
                         (sr.parsed.stop_reason &&
                          strcmp(sr.parsed.stop_reason, "end_turn") == 0);
 
+            loop_control_decision_t loop_decision;
+            tools_loop_control_decide(turns, done, has_tool_use,
+                                      &loop_decision);
+            if (loop_decision.force_continue && loop_decision.prompt[0]) {
+                conv_add_user_text(&conv, loop_decision.prompt);
+                done = false;
+                fprintf(stderr, "  \033[2mloop construct: %s\033[0m\n",
+                        loop_decision.reason[0] ? loop_decision.reason
+                                                 : "continuing");
+                baseline_log("agent", "loop_construct_continue",
+                             loop_decision.reason, NULL);
+            }
+            if (loop_decision.force_done) {
+                done = true;
+                baseline_log("agent", "loop_construct_done",
+                             loop_decision.reason, NULL);
+            }
+
             baseline_log("turn",
                          done ? "turn_done" : "turn_continue",
                          sr.parsed.stop_reason ? sr.parsed.stop_reason : "",
@@ -2497,7 +2924,10 @@ native_path:
 
                 int t2 = 0;
                 bool task_ok = true;
-                while (t2 < dsco_max_agent_turns() && !g_main_interrupted) {
+                tools_loop_control_reset();
+                int task_base_turn_limit = dsco_max_agent_turns();
+                while (t2 < tools_loop_control_effective_max_turns(task_base_turn_limit) &&
+                       !g_main_interrupted) {
                     t2++;
                     md_reset(&s_oneshot_md);
                     char *req2 = oneshot_provider
@@ -2508,9 +2938,9 @@ native_path:
                     if (!req2) { task_ok = false; break; }
 
                     stream_result_t sr2 = oneshot_provider
-                        ? oneshot_provider->stream(oneshot_provider, oneshot_key, req2,
-                                                   oneshot_text_cb, oneshot_tool_cb,
-                                                   NULL, NULL)
+                        ? provider_stream_reuse(oneshot_provider, oneshot_key, req2,
+                                                oneshot_text_cb, oneshot_tool_cb,
+                                                NULL, NULL)
                         : llm_stream(oneshot_key, req2,
                                      oneshot_text_cb,
                                      oneshot_tool_cb,
@@ -2548,6 +2978,19 @@ native_path:
 
                     bool d2 = !has_tu || (sr2.parsed.stop_reason &&
                               strcmp(sr2.parsed.stop_reason, "end_turn") == 0);
+                    loop_control_decision_t loop_decision2;
+                    tools_loop_control_decide(t2, d2, has_tu, &loop_decision2);
+                    if (loop_decision2.force_continue && loop_decision2.prompt[0]) {
+                        conv_add_user_text(&conv, loop_decision2.prompt);
+                        d2 = false;
+                        baseline_log("agent", "loop_construct_continue",
+                                     loop_decision2.reason, NULL);
+                    }
+                    if (loop_decision2.force_done) {
+                        d2 = true;
+                        baseline_log("agent", "loop_construct_done",
+                                     loop_decision2.reason, NULL);
+                    }
                     json_free_response(&sr2.parsed);
                     ipc_heartbeat();
                     if (d2) break;

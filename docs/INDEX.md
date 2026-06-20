@@ -16,6 +16,8 @@ This documentation set is intended as a full-codebase reference for `dsco-cli`, 
 - [C Module Reference](C_MODULE_REFERENCE.md)
 - [API Reference](API_REFERENCE.md)
 - [Built-in Tool Catalog](TOOL_CATALOG.md)
+- [MetaConstruct DSL](META_CONSTRUCT_DSL.md)
+- [Claude Code Pure Adapter Map](CLAUDE_CODE_PURE_ADAPTER_MAP.md)
 - [Python & Web Asset Reference](PYTHON_AND_WEB_REFERENCE.md)
 - [Operations, Config, Storage, and Troubleshooting](OPERATIONS.md)
 - [Plugin Manifest + Lockfile Spec](PLUGIN_MANIFEST_LOCK_SPEC.md)
