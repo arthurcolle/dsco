@@ -24,11 +24,12 @@ LDFLAGS ?=
 LDLIBS ?= -lcurl -lsqlite3 -ldl -lm
 
 TARGET = dsco
+LITE_TARGET = dsco-lite
 DEBUG_TARGET = $(TARGET)-debug
 
 SRC_NAMES = main.c agent.c llm.c tools.c json_util.c ast.c swarm.c tui.c \
 	md.c baseline.c setup.c crypto.c eval.c pipeline.c plugin.c \
-	semantic.c ipc.c mcp.c provider.c integrations.c error.c trace.c task_profile.c \
+			semantic.c ipc.c mcp.c mcp_names.c provider_profiles.c provider.c integrations.c error.c trace.c task_profile.c \
 	output_guard.c topology.c workspace.c plan.c router.c \
 	pheromone.c ooda.c killswitch.c governance.c memory_tier.c talons.c \
 	arena_alloc.c event_loop.c vm.c scheduler.c vfs.c trading.c legion.c \
@@ -36,7 +37,8 @@ SRC_NAMES = main.c agent.c llm.c tools.c json_util.c ast.c swarm.c tui.c \
 	se_store.c watchdog.c audit_log.c heartbeat.c env_guard.c peer_bootstrap.c presence.c \
 	project.c project_mux.c project_grid.c \
 	dsco_accel.c dsco_mlx.c dsco_pool.c \
-	fingerprint.c trust.c toolmgmt.c connector.c \
+	fingerprint.c trust.c toolmgmt.c connector.c openrouter_cache.c \
+	startup.c \
 	$(OPTIONAL_SRCS)
 TEST_SRC_NAMES = test.c
 
@@ -68,6 +70,8 @@ ASAN_LDFLAGS = -fsanitize=address
 UBSAN_CFLAGS = $(BASE_CFLAGS) -O0 -g -fno-omit-frame-pointer -fno-inline -fsanitize=undefined -fno-sanitize-recover=all
 UBSAN_LDFLAGS = -fsanitize=undefined -fno-sanitize-recover=all
 DEBUG_CFLAGS = $(BASE_CFLAGS) -O0 -g -fno-omit-frame-pointer -fno-inline -DDSCO_DEV_BINARY
+LITE_CFLAGS ?= -Oz -std=c2y $(C2Y_WARNING_FLAGS) -D_POSIX_C_SOURCE=200809L \
+	-I$(INC_DIR) -DBUILD_DATE='"$(BUILD_DATE)"' -DGIT_HASH='"$(GIT_HASH)"'
 COVERAGE_CFLAGS = $(BASE_CFLAGS) -O0 -g -fno-omit-frame-pointer -fno-inline --coverage
 COVERAGE_LDFLAGS = --coverage
 ASAN_RUNTIME_OPTIONS = detect_leaks=1
@@ -155,7 +159,7 @@ OPTIONAL_SRCS += net_server.c
 endif
 endif
 
-all: $(TARGET) dsc dsco-new
+all: $(TARGET) dsc dsco-new $(LITE_TARGET)
 debug: $(DEBUG_TARGET)
 dev: $(DEBUG_TARGET)
 
@@ -171,6 +175,10 @@ $(TARGET): $(OBJS)
 # dsco-new is a twin of dsco — same code, same composer, distinct name.
 dsco-new: $(TARGET)
 	cp -f $(TARGET) $@
+
+$(LITE_TARGET): $(SRC_DIR)/lite_main.c $(INC_DIR)/config.h
+	$(CC) $(LITE_CFLAGS) -o $@ $<
+	-strip -x $@ 2>/dev/null || true
 
 # Source compilation rules
 $(OBJ_DIR)/%.o: $(SRC_DIR)/%.c | $(OBJ_DIR)
@@ -318,25 +326,65 @@ docs-check:
 	./scripts/gen_api_reference.sh --check
 	./scripts/gen_tool_catalog.sh --check
 
+bench-startup: $(TARGET) dsc
+	@echo "== dsco metadata startup =="
+	@/usr/bin/time -p sh -c './$(TARGET) --version >/dev/null 2>&1'
+	@/usr/bin/time -p sh -c './$(TARGET) --help >/dev/null 2>&1'
+	@/usr/bin/time -p sh -c './$(TARGET) --models-json >/dev/null 2>&1'
+	@echo "== dsc metadata startup =="
+	@/usr/bin/time -p sh -c './dsc --help >/dev/null 2>&1'
+
+bench-tool: $(TARGET)
+	@echo "== dsco direct local tool execution =="
+	@/usr/bin/time -p sh -c './$(TARGET) --tool-exec cwd "{}" >/dev/null 2>&1'
+	@DSCO_PERF=1 ./$(TARGET) --tool-exec cwd '{}' >/dev/null
+
+bench-agent-loop: $(TARGET)
+	@echo "== dsco provider benchmark =="
+	@DSCO_CHEAP=1 DSCO_PERF=1 ./$(TARGET) -C -e bench "$${DSCO_BENCH_PROMPT:-Reply with exactly DSCOPERFOK}"
+
+bench-local: bench-startup bench-tool
+
+bench-sota: $(TARGET) $(LITE_TARGET)
+	@python3 scripts/bench_sota.py
+
+bench-ttft: $(TARGET)
+	@if [ "$${DSCO_RUN_NETWORK_BENCH}" = "1" ]; then \
+		DSCO_PERF=json ./$(TARGET) --profile lite -C -e bench "$${DSCO_BENCH_PROMPT:-Reply with exactly DSCOTTFTOK}"; \
+	else \
+		printf '{"bench":"ttft","status":"skipped","reason":"set DSCO_RUN_NETWORK_BENCH=1"}\n'; \
+	fi
+
+bench-worker: $(LITE_TARGET)
+	@printf '{"bench":"worker","case":"worker-lite-version","phase":"start"}\n'
+	@DSCO_WORKER=1 ./$(LITE_TARGET) --version >/dev/null
+	@printf '{"bench":"worker","case":"worker-lite-version","status":"ok"}\n'
+
+bench-size: $(TARGET) $(LITE_TARGET)
+	@printf '{"bench":"size","binary":"%s","bytes":%s}\n' "$(TARGET)" "$$(wc -c < ./$(TARGET))"
+	@printf '{"bench":"size","binary":"%s","bytes":%s}\n' "$(LITE_TARGET)" "$$(wc -c < ./$(LITE_TARGET))"
+
 lint: format-check docs-check check-version
 
 clean:
-	rm -rf $(BUILD_DIR) $(TARGET) $(DEBUG_TARGET) dsc test_runner coverage_runner $(TARGET)-asan $(TARGET)-ubsan asan-test_runner ubsan-test_runner
+	rm -rf $(BUILD_DIR) $(TARGET) $(LITE_TARGET) $(DEBUG_TARGET) dsc test_runner coverage_runner $(TARGET)-asan $(TARGET)-ubsan asan-test_runner ubsan-test_runner
 
-install: $(TARGET) dsc
+install: $(TARGET) $(LITE_TARGET) dsc
 	install -d $(PREFIX)/bin
 	install -d $(DSCO_SHARE_DIR)
 	install -m 755 $(TARGET) $(PREFIX)/bin/
+	install -m 755 $(LITE_TARGET) $(PREFIX)/bin/
 	install -m 755 dsc $(PREFIX)/bin/
 	test -f dsco-new && install -m 755 dsco-new $(PREFIX)/bin/ || true
 	install -m 644 $(INC_DIR)/tool_embeddings.bin $(DSCO_SHARE_DIR)/
 	install -d $(DSCO_DIR)/sessions $(DSCO_DIR)/plugins $(DSCO_DIR)/debug
-	@echo "installed dsco, dsc, dsco-new to $(PREFIX)/bin/"
+	@echo "installed dsco, dsco-lite, dsc, dsco-new to $(PREFIX)/bin/"
 	@echo "installed tool_embeddings.bin to $(DSCO_SHARE_DIR)/"
 	@echo "created $(DSCO_DIR)/{sessions,plugins,debug}"
 
 uninstall:
 	rm -f $(PREFIX)/bin/$(TARGET)
+	rm -f $(PREFIX)/bin/$(LITE_TARGET)
 	rm -f $(PREFIX)/bin/dsc
 	rm -f $(PREFIX)/bin/dsco-new
 	rm -f $(DSCO_SHARE_DIR)/tool_embeddings.bin
@@ -351,4 +399,5 @@ ui: $(TARGET) ui-deps
 .PHONY: all debug dev clean install uninstall test coverage docs docs-check \
 	asan ubsan asan-test ubsan-test format format-check \
 	lint clang-tidy cppcheck static-analysis check-version \
-	ui ui-deps
+	ui ui-deps bench-startup bench-tool bench-agent-loop bench-local \
+	bench-sota bench-ttft bench-worker bench-size
