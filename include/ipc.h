@@ -4,6 +4,9 @@
 #include <stdbool.h>
 #include <stddef.h>
 
+/* Forward-declare event loop handle (avoid pulling in event_loop.h) */
+typedef struct ev_loop ev_loop_t;
+
 /* ═══════════════════════════════════════════════════════════════════════════
  * Inter-Agent Communication Layer
  *
@@ -101,6 +104,11 @@ const char *ipc_self_id(void);
 
 /* Get the IPC database path (for passing to children) */
 const char *ipc_db_path(void);
+
+/* Attach an event loop for non-blocking heartbeat polling.
+   Registers a repeating timer that fires ipc_heartbeat() every
+   IPC_HEARTBEAT_SEC seconds. Pass NULL to detach. */
+void ipc_set_event_loop(ev_loop_t *loop);
 
 /* ── Agent Registry ────────────────────────────────────────────────────── */
 

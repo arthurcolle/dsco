@@ -274,4 +274,13 @@ const char *talons_goal_state_name(goal_state_t s);
 const char *talons_strategy_name(strategy_type_t s);
 const char *talons_grip_name(grip_strength_t g);
 
+/* ── VFS Persistence ──────────────────────────────────────────────────── */
+
+struct vfs_db;
+typedef struct vfs_db vfs_db_t;
+
+void talons_set_vfs(vfs_db_t *vfs);
+void talons_persist_strategy_history(void);
+void talons_restore_strategy_history(talons_engine_t *t);
+
 #endif

@@ -64,6 +64,7 @@ typedef struct {
     int            access_count;
     bool           pinned;         /* exempt from decay */
     bool           active;
+    bool           has_embedding;  /* true if embedding cached in vecstore */
 } memory_entry_t;
 
 /* ── Memory Store ─────────────────────────────────────────────────────── */
@@ -181,5 +182,21 @@ void memory_persist_semantic(memory_store_t *m);
 
 /* Restore semantic memories from VFS. Returns count restored. */
 int  memory_restore_semantic(memory_store_t *m);
+
+/* ── §9: Embedding-backed Semantic Search ────────────────────────── */
+
+struct vecstore;
+
+/* Connect memory system to a vecstore for embedding storage */
+void memory_store_set_vecstore(struct vecstore *vs);
+
+/* Search by semantic similarity (falls back to substring if no embeddings).
+   Returns count of matching entries written to out[]. */
+int  memory_search_semantic(memory_store_t *m, const char *query,
+                            const memory_entry_t **out, int max);
+
+/* Attach a pre-computed embedding to a memory entry. */
+bool memory_entry_set_embedding(memory_store_t *m, const char *key,
+                                const float *vec, int dim);
 
 #endif

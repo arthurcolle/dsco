@@ -436,39 +436,35 @@ typedef struct {
     bool     panel_active;  /* true while tui_composer_read is actively reading
                              * keystrokes — drives dual-state caret color */
     char     model[64];
+    char     slot_name[64]; /* active workspace slot, empty = default */
     int      input_tokens;
     int      output_tokens;
     double   cost;
     int      turn;
     int      tools_used;
-    int      panel_rows;    /* total bottom panel rows: top rule + 2 notif rows
-                             * + input + bottom rule + hint + status (default 7) */
+    int      panel_rows;    /* bottom panel rows: top rule + input + status (3) */
 } tui_status_bar_t;
 
 void tui_status_bar_init(tui_status_bar_t *sb, const char *model);
+void tui_status_bar_set_model(tui_status_bar_t *sb, const char *model, const char *slot_name);
 void tui_status_bar_update(tui_status_bar_t *sb, int in_tok, int out_tok,
                            double cost, int turn, int tools);
 void tui_status_bar_enable(tui_status_bar_t *sb);
 void tui_status_bar_disable(tui_status_bar_t *sb);
 void tui_status_bar_render(tui_status_bar_t *sb);
 
-/* ── Input Panel (persistent bottom panel) ────────────────────────────── */
-/* The persistent bottom pane has 7 reserved rows:
- *   row N-6 : top horizontal rule ────────
- *   row N-5 : notification row 1 (middle whitespace / realtime notifications)
- *   row N-4 : notification row 2 (middle whitespace / realtime notifications)
- *   row N-3 : "❯ " + current input (dual-state caret: colored=active, grey=idle)
- *   row N-2 : bottom horizontal rule ────────
- *   row N-1 : dim hint line  "↵ send · ⌥↵ newline · esc interrupt · /help"
+/* ── Input Panel (ephemeral bottom panel) ─────────────────────────────── */
+/* The bottom panel is 3 rows, painted only when reading user input:
+ *   row N-2 : top horizontal rule with model badge ─[ model ]──────
+ *   row N-1 : "❯ " + current input
  *   row N   : powerline status bar (drawn by tui_status_bar_render)
  *
- * When the user enters multi-line input (Alt/Opt+Enter), the composer
- * scrolls internally so the cursor line stays visible.
- *
- * The two notification rows are whitespace when idle and can be written to
- * via tui_panel_notify(). Entries auto-expire after TUI_PANEL_NOTIFY_TTL_S.
+ * When the user submits, the panel is erased and the input is echoed into
+ * scrollback, so the agent's response streams freely through the terminal.
+ * The panel re-renders before the next read. No DECSTBM scroll region:
+ * text rendering uses the whole terminal during streaming.
  */
-#define TUI_COMPOSER_PANEL_ROWS   7
+#define TUI_COMPOSER_PANEL_ROWS   3
 #define TUI_COMPOSER_BUF_CAP      16384
 #define TUI_PANEL_NOTIFY_SLOTS    2
 #define TUI_PANEL_NOTIFY_TTL_S    8.0
@@ -499,6 +495,13 @@ void tui_panel_set_active(tui_status_bar_t *sb, bool active);
 void tui_input_panel_render(tui_status_bar_t *sb, const char *prompt_hint);
 void tui_input_panel_clear(tui_status_bar_t *sb);
 void tui_bottom_panel_refresh(tui_status_bar_t *sb, const char *prompt_hint);
+
+/* Push cursor down with newlines until it sits just above the input panel
+ * area (row `rows - 3`). No-op if cursor already at/past that row. Queries
+ * cursor row via DSR (ESC[6n); briefly enters raw mode if stdin is a tty.
+ * Call once after the startup banner + notes finish printing so the bottom
+ * panel sits flush against them on tall terminals. */
+void tui_pad_to_panel_anchor(void);
 
 /* Persistent multi-line input box. Draws a 5-row box above the status bar
  * and reads input with raw termios. Supports:
@@ -604,17 +607,21 @@ void tui_notify(const char *title, const char *body);
 /* ── F2: Typing Cadence ───────────────────────────────────────────────── */
 #define TUI_CADENCE_BUF_SIZE 4096
 
+typedef void (*tui_cadence_flush_cb)(const char *buf, int len, void *ctx);
+
 typedef struct {
     char   buf[TUI_CADENCE_BUF_SIZE];
     int    len;
     double last_flush;     /* timestamp of last flush */
     double interval;       /* flush interval in seconds (default 0.016) */
-    void  *md_renderer;    /* md_renderer_t* to feed into */
+    tui_cadence_flush_cb flush_cb;
+    void  *flush_ctx;
 } tui_cadence_t;
 
-void tui_cadence_init(tui_cadence_t *c, void *md_renderer);
+void tui_cadence_init(tui_cadence_t *c, tui_cadence_flush_cb cb, void *ctx);
 void tui_cadence_feed(tui_cadence_t *c, const char *text);
-void tui_cadence_flush(tui_cadence_t *c);
+void tui_cadence_flush(tui_cadence_t *c);  /* throttled — holds trailing partial UTF-8 */
+void tui_cadence_drain(tui_cadence_t *c);  /* unconditional — emits all buffered bytes */
 
 /* ── F4: Collapsible Thinking ─────────────────────────────────────────── */
 #define TUI_THINKING_SUMMARY_MAX 120
@@ -704,6 +711,70 @@ void tui_tool_cost(const char *name, int in_tok, int out_tok, const char *model)
 typedef enum {
     TUI_CHART_BAR,
     TUI_CHART_HBAR,
+    TUI_CHART_VBAR,
+    TUI_CHART_SPARK,
+    TUI_CHART_HEAT,
+    /* 60 additional chart type identifiers */
+    TUI_CHART_HBAR_THIN,
+    TUI_CHART_HBAR_BLOCK,
+    TUI_CHART_HBAR_SHADE,
+    TUI_CHART_HBAR_DOT,
+    TUI_CHART_HBAR_TICK,
+    TUI_CHART_HBAR_STEP,
+    TUI_CHART_HBAR_STACKED,
+    TUI_CHART_HBAR_NEGPOS,
+    TUI_CHART_HBAR_DELTA,
+    TUI_CHART_HBAR_CANDLE,
+    TUI_CHART_HBAR_RANGE,
+    TUI_CHART_HBAR_MEDIAN,
+    TUI_CHART_HBAR_PCTL,
+    TUI_CHART_HBAR_LOG,
+    TUI_CHART_HBAR_SQRT,
+    TUI_CHART_VBAR_THIN,
+    TUI_CHART_VBAR_BLOCK,
+    TUI_CHART_VBAR_SHADE,
+    TUI_CHART_VBAR_DOT,
+    TUI_CHART_VBAR_TICK,
+    TUI_CHART_VBAR_STEP,
+    TUI_CHART_VBAR_STACKED,
+    TUI_CHART_VBAR_NEGPOS,
+    TUI_CHART_VBAR_DELTA,
+    TUI_CHART_VBAR_CANDLE,
+    TUI_CHART_VBAR_RANGE,
+    TUI_CHART_VBAR_MEDIAN,
+    TUI_CHART_VBAR_PCTL,
+    TUI_CHART_VBAR_LOG,
+    TUI_CHART_VBAR_SQRT,
+    TUI_CHART_SPARK_THIN,
+    TUI_CHART_SPARK_DOT,
+    TUI_CHART_SPARK_BLOCK,
+    TUI_CHART_SPARK_SHADE,
+    TUI_CHART_SPARK_STEP,
+    TUI_CHART_SPARK_WAVE,
+    TUI_CHART_SPARK_DENSE,
+    TUI_CHART_SPARK_SMOOTH,
+    TUI_CHART_SPARK_DELTA,
+    TUI_CHART_SPARK_RANGE,
+    TUI_CHART_SPARK_MEDIAN,
+    TUI_CHART_SPARK_PCTL,
+    TUI_CHART_SPARK_LOG,
+    TUI_CHART_SPARK_SQRT,
+    TUI_CHART_SPARK_ZIGZAG,
+    TUI_CHART_HEAT_BLOCK,
+    TUI_CHART_HEAT_DOT,
+    TUI_CHART_HEAT_SHADE,
+    TUI_CHART_HEAT_BWR,
+    TUI_CHART_HEAT_GYR,
+    TUI_CHART_HEAT_VIRIDIS,
+    TUI_CHART_HEAT_MAGMA,
+    TUI_CHART_HEAT_PLASMA,
+    TUI_CHART_HEAT_COOLWARM,
+    TUI_CHART_HEAT_BINARY,
+    TUI_CHART_HEAT_STEPS,
+    TUI_CHART_HEAT_DENSE,
+    TUI_CHART_HEAT_RANGE,
+    TUI_CHART_HEAT_LOG,
+    TUI_CHART_HEAT_SQRT,
 } tui_chart_type_t;
 
 void tui_chart(tui_chart_type_t type, const char **labels, const double *values,

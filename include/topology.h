@@ -212,4 +212,28 @@ bool topology_run(const topology_t *t,
                   char *result, size_t rlen,
                   topology_run_stats_t *stats);
 
+/* ── Cooperative scheduler integration ─────────────────────────────── */
+
+struct scheduler_t;   /* forward declaration (full def in scheduler.h) */
+
+/* Wire the cooperative scheduler into topology execution.
+ * When set, topology_run_scheduled uses it for parallel node dispatch. */
+void topology_set_scheduler(struct scheduler_t *sched);
+
+/* Scheduler-driven topology execution — fan-out nodes run as concurrent
+ * scheduler tasks.  Falls back to topology_run when no scheduler is set. */
+bool topology_run_scheduled(const topology_t *t,
+                            const char *api_key,
+                            const char *coordinator_model,
+                            const char *task,
+                            char *result, size_t rlen,
+                            topology_run_stats_t *stats);
+
+bool topology_plan_run_scheduled(const topology_plan_t *plan,
+                                  const char *api_key,
+                                  const char *coordinator_model,
+                                  const char *task,
+                                  char *result, size_t rlen,
+                                  topology_run_stats_t *stats);
+
 #endif
