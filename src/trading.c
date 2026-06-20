@@ -22,6 +22,18 @@
 #include <ctype.h>
 #include <math.h>
 #include <curl/curl.h>
+#include <sqlite3.h>
+
+/* POSIX-missing: case-insensitive substring search */
+static const char *ci_strstr(const char *haystack, const char *needle) {
+    if (!needle[0]) return haystack;
+    size_t nlen = strlen(needle);
+    for (; *haystack; haystack++) {
+        if (strncasecmp(haystack, needle, nlen) == 0) return haystack;
+    }
+    return NULL;
+}
+#define strcasestr ci_strstr
 
 /* ══════════════════════════════════════════════════════════════════════════
  *  SECTION 1: HTTP HELPERS
@@ -976,6 +988,819 @@ static bool risk_preflight(double order_usd, char *reason, size_t reason_len) {
     return true;
 }
 
+/* ── Rate limiter: max N orders per minute ──────────────────────────── */
+
+#define RATE_LIMIT_WINDOW_SEC  60
+#define RATE_LIMIT_MAX_ORDERS  10   /* max 10 order submissions per minute */
+
+static struct {
+    time_t timestamps[64];
+    int    count;
+    bool   initialized;
+} g_order_rate = {0};
+
+static bool rate_limit_check(char *reason, size_t reason_len) {
+    time_t now = time(NULL);
+
+    /* Expire old entries */
+    int valid = 0;
+    for (int i = 0; i < g_order_rate.count; i++) {
+        if (now - g_order_rate.timestamps[i] < RATE_LIMIT_WINDOW_SEC) {
+            g_order_rate.timestamps[valid++] = g_order_rate.timestamps[i];
+        }
+    }
+    g_order_rate.count = valid;
+
+    if (valid >= RATE_LIMIT_MAX_ORDERS) {
+        time_t oldest = g_order_rate.timestamps[0];
+        int wait = RATE_LIMIT_WINDOW_SEC - (int)(now - oldest);
+        snprintf(reason, reason_len,
+                 "rate limit: %d orders in last %d seconds (max %d/min). "
+                 "Wait %d seconds.",
+                 valid, RATE_LIMIT_WINDOW_SEC, RATE_LIMIT_MAX_ORDERS, wait > 0 ? wait : 1);
+        return false;
+    }
+
+    /* Record this submission */
+    if (g_order_rate.count < 64)
+        g_order_rate.timestamps[g_order_rate.count++] = now;
+
+    return true;
+}
+
+/* ── Open orders enforcement ────────────────────────────────────────── */
+
+static bool check_open_order_count(char *reason, size_t reason_len) {
+    risk_init();
+    if (g_risk.max_open_orders <= 0) return true;
+
+    http_buf_t resp = {0};
+    long code = kalshi_authed_get("/portfolio/orders?status=resting", &resp);
+    if (code != 200 || !resp.data) {
+        free(resp.data);
+        /* Can't verify — allow but warn */
+        return true;
+    }
+
+    /* Count orders in response - look for "orders" array size */
+    int open_count = 0;
+    const char *p = resp.data;
+    /* Simple count: find each "ticker" key in orders array */
+    while ((p = strstr(p, "\"ticker\"")) != NULL) {
+        open_count++;
+        p++;
+    }
+
+    free(resp.data);
+
+    if (open_count >= g_risk.max_open_orders) {
+        snprintf(reason, reason_len,
+                 "max_open_orders limit reached: %d open orders (limit %d). "
+                 "Cancel existing orders first.",
+                 open_count, g_risk.max_open_orders);
+        return false;
+    }
+
+    return true;
+}
+
+/* ══════════════════════════════════════════════════════════════════════════
+ *  SESSION TRADE TRACKER — cumulative spend + per-ticker position caps
+ *
+ *  Prevents runaway trading by tracking:
+ *    1. Total USD committed this session (hard cap)
+ *    2. Total contracts per ticker (position concentration cap)
+ *    3. Same-day settlement blocking (weather/daily markets)
+ * ══════════════════════════════════════════════════════════════════════════ */
+
+/* ── Spend caps: prevent runaway accumulation ──
+ * SESSION_MAX_USD:   hard cap on total USD committed per dsco session.
+ *                    Resets when the process restarts.
+ * DAILY_MAX_USD:     hard cap on total USD committed per calendar day (UTC).
+ *                    Resets at midnight UTC.
+ * MAX_USD_PER_EVENT: max total USD exposure on any single event/ticker.
+ *                    Allows upsizing but prevents overconcentration.
+ *                    For multi-day markets (>24h out), this is doubled.
+ * All overridable via env vars. */
+#define SESSION_MAX_USD         50.0   /* max total USD per session           */
+#define DAILY_MAX_USD          200.0   /* max total USD per calendar day      */
+#define MAX_USD_PER_EVENT       20.0   /* max USD exposure per event ticker   */
+#define MAX_USD_PER_EVENT_MULTI 40.0   /* max USD for markets >24h out        */
+
+static struct {
+    double session_usd;                /* cumulative USD this session */
+    double daily_usd;                  /* cumulative USD today */
+    int    daily_date;                 /* yyyymmdd of daily_usd */
+    double ticker_usd[256];            /* USD exposure per ticker */
+    int    ticker_contracts[256];      /* contract count per ticker */
+    double ticker_avg_price[256];      /* weighted avg price (cents) per ticker */
+    char   ticker_names[256][64];      /* corresponding ticker names */
+    int    ticker_count;
+} g_session_trades = {0};
+
+/* Look up existing USD exposure on this ticker */
+static double session_ticker_usd(const char *ticker) {
+    for (int i = 0; i < g_session_trades.ticker_count; i++) {
+        if (strcmp(g_session_trades.ticker_names[i], ticker) == 0)
+            return g_session_trades.ticker_usd[i];
+    }
+    return 0.0;
+}
+
+/* Look up average entry price (cents) for this ticker. Returns 0 if none. */
+static double session_ticker_avg_price(const char *ticker) {
+    for (int i = 0; i < g_session_trades.ticker_count; i++) {
+        if (strcmp(g_session_trades.ticker_names[i], ticker) == 0)
+            return g_session_trades.ticker_avg_price[i];
+    }
+    return 0.0;
+}
+
+/* price_cents: price per contract in cents (Kalshi) or cents-equiv (Poly).
+ * Pass 0 if unknown — avg price tracking degrades gracefully. */
+static void session_ticker_add(const char *ticker, int count, double usd) {
+    /* Update daily tracker */
+    time_t now = time(NULL);
+    struct tm utc; gmtime_r(&now, &utc);
+    int today = (utc.tm_year + 1900) * 10000 + (utc.tm_mon + 1) * 100 + utc.tm_mday;
+    if (g_session_trades.daily_date != today) {
+        g_session_trades.daily_usd = 0;
+        g_session_trades.daily_date = today;
+    }
+    g_session_trades.session_usd += usd;
+    g_session_trades.daily_usd += usd;
+
+    /* Compute effective price per contract in cents */
+    double price_cents = (count > 0) ? (usd * 100.0 / (double)count) : 0;
+
+    /* Update per-ticker tracking */
+    for (int i = 0; i < g_session_trades.ticker_count; i++) {
+        if (strcmp(g_session_trades.ticker_names[i], ticker) == 0) {
+            /* Update weighted average price */
+            int old_ct = g_session_trades.ticker_contracts[i];
+            double old_avg = g_session_trades.ticker_avg_price[i];
+            int new_total = old_ct + count;
+            if (new_total > 0)
+                g_session_trades.ticker_avg_price[i] =
+                    (old_avg * old_ct + price_cents * count) / new_total;
+            g_session_trades.ticker_usd[i] += usd;
+            g_session_trades.ticker_contracts[i] = new_total;
+            return;
+        }
+    }
+    if (g_session_trades.ticker_count < 256) {
+        int idx = g_session_trades.ticker_count++;
+        snprintf(g_session_trades.ticker_names[idx],
+                 sizeof(g_session_trades.ticker_names[idx]), "%s", ticker);
+        g_session_trades.ticker_usd[idx] = usd;
+        g_session_trades.ticker_contracts[idx] = count;
+        g_session_trades.ticker_avg_price[idx] = price_cents;
+    }
+}
+
+/* Check session + daily + per-event USD limits before order.
+ *
+ * seconds_remaining: time until market close (0 = unknown → multi-day).
+ * order_price_cents: price per contract in cents for THIS order.
+ *
+ * AVERAGING DOWN: If this order's price is below the existing average
+ * entry, the per-event cap expands. The multiplier is:
+ *   cap_mult = avg_entry / new_price  (clamped to 3x max)
+ *
+ * Example: avg entry at 10¢, averaging down at 2¢ →
+ *   cap_mult = 10/2 = 5x → clamped to 3x → event cap goes $20 → $60.
+ *   You're buying at 1/5 the original price, so 3x the USD buys
+ *   15x the contracts. Risk per dollar of upside is much better.
+ *
+ * This prevents the degenerate case (buying at same price repeatedly)
+ * while allowing systematic scale-in at better prices. */
+static bool session_preflight(const char *ticker, int count, double order_usd,
+                               long seconds_remaining, double order_price_cents,
+                               char *reason, size_t reason_len) {
+    /* Daily date rollover */
+    time_t now = time(NULL);
+    struct tm utc; gmtime_r(&now, &utc);
+    int today = (utc.tm_year + 1900) * 10000 + (utc.tm_mon + 1) * 100 + utc.tm_mday;
+    if (g_session_trades.daily_date != today) {
+        g_session_trades.daily_usd = 0;
+        g_session_trades.daily_date = today;
+    }
+
+    double env_session = SESSION_MAX_USD;
+    double env_daily = DAILY_MAX_USD;
+    double env_per_event = MAX_USD_PER_EVENT;
+    double env_per_event_multi = MAX_USD_PER_EVENT_MULTI;
+    const char *e;
+    if ((e = getenv("DSCO_TRADING_SESSION_MAX")))  env_session = atof(e);
+    if ((e = getenv("DSCO_TRADING_DAILY_MAX")))    env_daily = atof(e);
+    if ((e = getenv("DSCO_TRADING_MAX_PER_EVENT"))) {
+        env_per_event = atof(e);
+        env_per_event_multi = env_per_event * 2.0;
+    }
+
+    /* 1. Session cap */
+    if (g_session_trades.session_usd + order_usd > env_session) {
+        snprintf(reason, reason_len,
+                 "session spend cap: $%.2f + $%.2f > $%.2f limit. "
+                 "Restart session or set DSCO_TRADING_SESSION_MAX.",
+                 g_session_trades.session_usd, order_usd, env_session);
+        return false;
+    }
+
+    /* 2. Daily cap */
+    if (g_session_trades.daily_usd + order_usd > env_daily) {
+        snprintf(reason, reason_len,
+                 "daily spend cap: $%.2f + $%.2f > $%.2f limit today.",
+                 g_session_trades.daily_usd, order_usd, env_daily);
+        return false;
+    }
+
+    /* 3. Per-event USD cap with averaging-down expansion */
+    bool is_multi_day = (seconds_remaining == 0 || seconds_remaining > 86400);
+    double base_cap = is_multi_day ? env_per_event_multi : env_per_event;
+    double existing_usd = session_ticker_usd(ticker);
+
+    /* Compute averaging-down multiplier */
+    double cap_mult = 1.0;
+    if (existing_usd > 0 && order_price_cents > 0) {
+        double avg_entry = session_ticker_avg_price(ticker);
+        if (avg_entry > 0 && order_price_cents < avg_entry) {
+            /* Price dropped — reward with expanded cap */
+            cap_mult = avg_entry / order_price_cents;
+            if (cap_mult > 3.0) cap_mult = 3.0; /* hard clamp at 3x */
+        }
+    }
+    double event_cap = base_cap * cap_mult;
+
+    if (existing_usd + order_usd > event_cap) {
+        snprintf(reason, reason_len,
+                 "per-event cap: $%.2f + $%.2f > $%.2f on %s "
+                 "(%s, avg-down %.1fx). "
+                 "Override with DSCO_TRADING_MAX_PER_EVENT.",
+                 existing_usd, order_usd, event_cap, ticker,
+                 is_multi_day ? "multi-day" : "same-day", cap_mult);
+        return false;
+    }
+
+    (void)count;
+    return true;
+}
+
+/* Check existing Kalshi positions to enforce max_position_usd from risk limits.
+ * This is a cross-session check — queries the actual API portfolio. */
+static bool position_preflight(const char *ticker, int new_count,
+                                char *reason, size_t reason_len) {
+    risk_init();
+    if (g_risk.max_position_usd <= 0) return true;
+
+    http_buf_t resp = {0};
+    long code = kalshi_authed_get("/portfolio/positions", &resp);
+    if (code != 200 || !resp.data) {
+        free(resp.data);
+        return true; /* can't verify — session tracker still enforces */
+    }
+
+    /* Sum existing USD value on this ticker's event */
+    double existing_value = 0;
+    const char *p = resp.data;
+    /* Extract the event prefix from ticker (e.g. KXHIGHTATL from KXHIGHTATL-26MAR22-B81) */
+    char event_prefix[32] = {0};
+    {
+        const char *dash = strchr(ticker, '-');
+        size_t plen = dash ? (size_t)(dash - ticker) : strlen(ticker);
+        if (plen >= sizeof(event_prefix)) plen = sizeof(event_prefix) - 1;
+        memcpy(event_prefix, ticker, plen);
+    }
+
+    while ((p = strstr(p, "\"market_value\"")) != NULL) {
+        /* Walk back to find the ticker for this position */
+        const char *chunk_start = p - 500 > resp.data ? p - 500 : resp.data;
+        const char *tk = strstr(chunk_start, "\"ticker\"");
+        if (tk && tk < p) {
+            const char *q = strchr(tk + 8, '"');
+            if (q) {
+                q++;
+                /* Check if same event prefix */
+                if (strncmp(q, event_prefix, strlen(event_prefix)) == 0) {
+                    const char *colon = strchr(p, ':');
+                    if (colon) existing_value += atof(colon + 1) / 100.0; /* cents to USD */
+                }
+            }
+        }
+        p++;
+    }
+    free(resp.data);
+
+    if (existing_value > g_risk.max_position_usd) {
+        snprintf(reason, reason_len,
+                 "position limit: $%.2f existing on %s event (max $%.2f). "
+                 "Set DSCO_TRADING_MAX_POSITION to override.",
+                 existing_value, event_prefix, g_risk.max_position_usd);
+        return false;
+    }
+
+    (void)new_count;
+    return true;
+}
+
+/* ══════════════════════════════════════════════════════════════════════════
+ *  CONTRACT METADATA STORE — persist and interpret market contracts
+ *
+ *  Every order submission MUST go through contract_context() which:
+ *  1. Fetches full market metadata from Kalshi API
+ *  2. Persists to SQLite (~/.dsco/contracts.db)
+ *  3. Returns structured context: title, description, close_time,
+ *     settlement date, resolution source, and whether the contract
+ *     resolves TODAY vs some other date
+ *  4. Computes max_contracts based on portfolio % cap
+ * ══════════════════════════════════════════════════════════════════════════ */
+
+#define MAX_CONTRACTS_PER_ORDER 5
+#define MAX_PORTFOLIO_FRACTION  0.05  /* 5% of portfolio per order */
+#define MARKET_MIN_REMAINING_SECONDS 1800  /* 30 minutes before close */
+
+static sqlite3 *contract_db(void) {
+    static sqlite3 *db = NULL;
+    if (db) return db;
+
+    char path[512];
+    const char *home = getenv("HOME");
+    snprintf(path, sizeof(path), "%s/.dsco/contracts.db", home ? home : "/tmp");
+
+    if (sqlite3_open(path, &db) != SQLITE_OK) { db = NULL; return NULL; }
+
+    const char *schema =
+        "CREATE TABLE IF NOT EXISTS contracts ("
+        "  ticker TEXT PRIMARY KEY,"
+        "  event_ticker TEXT,"
+        "  title TEXT,"
+        "  subtitle TEXT,"
+        "  yes_sub_title TEXT,"
+        "  no_sub_title TEXT,"
+        "  category TEXT,"
+        "  status TEXT,"
+        "  close_time TEXT,"
+        "  expiration_time TEXT,"
+        "  settlement_date TEXT,"
+        "  resolution_source TEXT,"
+        "  strike TEXT,"        /* extracted threshold: "80", "90000", "25" */
+        "  underlying TEXT,"    /* extracted asset: "TEMP", "BTC", "FED_RATE", "KORD" */
+        "  yes_price INTEGER,"
+        "  no_price INTEGER,"
+        "  volume INTEGER,"
+        "  open_interest INTEGER,"
+        "  raw_json TEXT,"
+        "  fetched_at TEXT DEFAULT (datetime('now'))"
+        ");"
+        "CREATE INDEX IF NOT EXISTS idx_contracts_event ON contracts(event_ticker);"
+        "CREATE INDEX IF NOT EXISTS idx_contracts_date ON contracts(settlement_date);"
+        "CREATE INDEX IF NOT EXISTS idx_contracts_underlying ON contracts(underlying);"
+        "CREATE INDEX IF NOT EXISTS idx_contracts_status ON contracts(status);"
+        /* FTS5 virtual table for semantic search over contract titles */
+        "CREATE VIRTUAL TABLE IF NOT EXISTS contracts_fts USING fts5("
+        "  title, subtitle, yes_sub_title, no_sub_title, category, underlying,"
+        "  content='contracts', content_rowid='rowid'"
+        ");"
+        /* Triggers to keep FTS in sync */
+        "CREATE TRIGGER IF NOT EXISTS contracts_ai AFTER INSERT ON contracts BEGIN "
+        "  INSERT INTO contracts_fts(rowid,title,subtitle,yes_sub_title,no_sub_title,category,underlying) "
+        "  VALUES(new.rowid,new.title,new.subtitle,new.yes_sub_title,new.no_sub_title,new.category,new.underlying); "
+        "END;"
+        "CREATE TRIGGER IF NOT EXISTS contracts_ad AFTER DELETE ON contracts BEGIN "
+        "  INSERT INTO contracts_fts(contracts_fts,rowid,title,subtitle,yes_sub_title,no_sub_title,category,underlying) "
+        "  VALUES('delete',old.rowid,old.title,old.subtitle,old.yes_sub_title,old.no_sub_title,old.category,old.underlying); "
+        "END;";
+
+    char *err = NULL;
+    sqlite3_exec(db, schema, NULL, NULL, &err);
+    sqlite3_free(err);
+    return db;
+}
+
+/* ── Granular contract metadata extraction ──────────────────────────── */
+
+static int month_from_name(const char *s) {
+    static const char *m[] = {"jan","feb","mar","apr","may","jun","jul","aug","sep","oct","nov","dec"};
+    char low[4] = {0};
+    for (int i = 0; i < 3 && s[i]; i++) low[i] = tolower((unsigned char)s[i]);
+    for (int i = 0; i < 12; i++) if (strncmp(low, m[i], 3) == 0) return i + 1;
+    return 0;
+}
+
+/* Extract settlement date from close_time AND title.
+ * Handles ISO 8601, "March 22", "Mar 22, 2026", "3/22/2026" */
+static void extract_settlement_date(const char *close_time, const char *title,
+                                     char *date_out, size_t date_len) {
+    date_out[0] = '\0';
+    if (close_time && strlen(close_time) >= 10)
+        snprintf(date_out, date_len, "%.10s", close_time);
+
+    if (!title || !title[0]) return;
+    time_t now = time(NULL);
+    struct tm utc; gmtime_r(&now, &utc);
+    int cur_year = utc.tm_year + 1900;
+
+    for (const char *p = title; *p; p++) {
+        if (!isalpha((unsigned char)*p)) continue;
+        int mo = month_from_name(p);
+        if (mo <= 0) continue;
+        const char *after = p;
+        while (isalpha((unsigned char)*after)) after++;
+        while (*after == ' ' || *after == '.') after++;
+        if (!isdigit((unsigned char)*after)) continue;
+        int day = atoi(after);
+        if (day < 1 || day > 31) continue;
+        while (isdigit((unsigned char)*after)) after++;
+        while (*after == ',' || *after == ' ' || *after == '/') after++;
+        int year = cur_year;
+        if (isdigit((unsigned char)*after)) { int y = atoi(after); if (y >= 2024 && y <= 2030) year = y; }
+        char td[16]; snprintf(td, sizeof(td), "%04d-%02d-%02d", year, mo, day);
+        if (date_out[0] == '\0') snprintf(date_out, date_len, "%s", td);
+        return;
+    }
+}
+
+/* Extract strike/threshold and underlying from contract title.
+ * "exceed 80°F" → strike="80", underlying="TEMP"
+ * "above $90,000" → strike="90000", underlying="BTC" */
+static void extract_strike_info(const char *title,
+                                 char *strike_out, size_t strike_len,
+                                 char *underlying_out, size_t underlying_len) {
+    if (strike_out) strike_out[0] = '\0';
+    if (underlying_out) underlying_out[0] = '\0';
+    if (!title) return;
+
+    static const char *kw[] = {
+        "exceed","above","below","at or above","at or below","between",
+        "over","under","reach","close above","close below",
+        "higher than","lower than","greater than","less than", NULL
+    };
+    const char *best = NULL;
+    for (int i = 0; kw[i]; i++) {
+        const char *f = strcasestr(title, kw[i]);
+        if (f && (!best || f < best)) best = f;
+    }
+    if (best && strike_out) {
+        const char *p = best;
+        while (*p && !isdigit((unsigned char)*p) && *p != '$' && *p != '-') p++;
+        if (*p == '$') p++;
+        char num[64] = {0}; int ni = 0;
+        while (*p && (isdigit((unsigned char)*p) || *p == ',' || *p == '.') && ni < 62) {
+            if (*p != ',') num[ni++] = *p;
+            p++;
+        }
+        if (ni > 0) snprintf(strike_out, strike_len, "%s", num);
+    }
+
+    if (!underlying_out) return;
+    static const struct { const char *pat; const char *asset; } a[] = {
+        {"Bitcoin","BTC"},{"BTC","BTC"},{"Ethereum","ETH"},{"ETH","ETH"},
+        {"S&P 500","SPY"},{"S&P","SPY"},{"SPY","SPY"},{"Nasdaq","QQQ"},
+        {"temperature","TEMP"},{"high temp","TEMP_HIGH"},{"low temp","TEMP_LOW"},
+        {"rainfall","RAIN"},{"snowfall","SNOW"},{"hurricane","HURRICANE"},
+        {"Fed","FED_RATE"},{"FOMC","FED_RATE"},{"interest rate","FED_RATE"},
+        {"CPI","CPI"},{"inflation","CPI"},{"GDP","GDP"},
+        {"oil","OIL"},{"crude","OIL"},{"WTI","OIL"},
+        {"unemployment","UNEMP"},{"nonfarm","NFP"},{"payroll","NFP"},
+        {NULL,NULL}
+    };
+    for (int i = 0; a[i].pat; i++) {
+        if (strcasestr(title, a[i].pat)) { snprintf(underlying_out, underlying_len, "%s", a[i].asset); return; }
+    }
+    for (const char *k = title; *k; k++) {
+        if (*k == 'K' && (k == title || !isalpha((unsigned char)*(k-1))) &&
+            isupper((unsigned char)k[1]) && isupper((unsigned char)k[2]) &&
+            isupper((unsigned char)k[3]) && !isalpha((unsigned char)k[4])) {
+            snprintf(underlying_out, underlying_len, "%.4s", k);
+            return;
+        }
+    }
+}
+
+/* Persist market metadata to SQLite */
+static void contract_store(const char *ticker, const char *api_json) {
+    sqlite3 *db = contract_db();
+    if (!db || !api_json) return;
+
+    char *title = json_get_str(api_json, "title");
+    char *subtitle = json_get_str(api_json, "subtitle");
+    char *yes_sub = json_get_str(api_json, "yes_sub_title");
+    char *no_sub = json_get_str(api_json, "no_sub_title");
+    char *category = json_get_str(api_json, "category");
+    char *status = json_get_str(api_json, "status");
+    char *close_time = json_get_str(api_json, "close_time");
+    char *exp_time = json_get_str(api_json, "expiration_time");
+    char *event_ticker = json_get_str(api_json, "event_ticker");
+    char *res_source = json_get_str(api_json, "settlement_source_url");
+    int yes_price = json_get_int(api_json, "yes_ask", 0);
+    int no_price = json_get_int(api_json, "no_ask", 0);
+    int volume = json_get_int(api_json, "volume", 0);
+    int oi = json_get_int(api_json, "open_interest", 0);
+
+    char settlement_date[16] = {0};
+    extract_settlement_date(close_time, title, settlement_date, sizeof(settlement_date));
+
+    char strike[64] = {0}, underlying[32] = {0};
+    extract_strike_info(title, strike, sizeof(strike), underlying, sizeof(underlying));
+
+    const char *sql =
+        "INSERT OR REPLACE INTO contracts "
+        "(ticker,event_ticker,title,subtitle,yes_sub_title,no_sub_title,"
+        "category,status,close_time,expiration_time,settlement_date,"
+        "resolution_source,strike,underlying,yes_price,no_price,volume,open_interest,raw_json) "
+        "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)";
+
+    sqlite3_stmt *stmt = NULL;
+    if (sqlite3_prepare_v2(db, sql, -1, &stmt, NULL) == SQLITE_OK) {
+        sqlite3_bind_text(stmt, 1, ticker, -1, SQLITE_TRANSIENT);
+        sqlite3_bind_text(stmt, 2, event_ticker ? event_ticker : "", -1, SQLITE_TRANSIENT);
+        sqlite3_bind_text(stmt, 3, title ? title : "", -1, SQLITE_TRANSIENT);
+        sqlite3_bind_text(stmt, 4, subtitle ? subtitle : "", -1, SQLITE_TRANSIENT);
+        sqlite3_bind_text(stmt, 5, yes_sub ? yes_sub : "", -1, SQLITE_TRANSIENT);
+        sqlite3_bind_text(stmt, 6, no_sub ? no_sub : "", -1, SQLITE_TRANSIENT);
+        sqlite3_bind_text(stmt, 7, category ? category : "", -1, SQLITE_TRANSIENT);
+        sqlite3_bind_text(stmt, 8, status ? status : "", -1, SQLITE_TRANSIENT);
+        sqlite3_bind_text(stmt, 9, close_time ? close_time : "", -1, SQLITE_TRANSIENT);
+        sqlite3_bind_text(stmt, 10, exp_time ? exp_time : "", -1, SQLITE_TRANSIENT);
+        sqlite3_bind_text(stmt, 11, settlement_date, -1, SQLITE_TRANSIENT);
+        sqlite3_bind_text(stmt, 12, res_source ? res_source : "", -1, SQLITE_TRANSIENT);
+        sqlite3_bind_text(stmt, 13, strike, -1, SQLITE_TRANSIENT);
+        sqlite3_bind_text(stmt, 14, underlying, -1, SQLITE_TRANSIENT);
+        sqlite3_bind_int(stmt, 15, yes_price);
+        sqlite3_bind_int(stmt, 16, no_price);
+        sqlite3_bind_int(stmt, 17, volume);
+        sqlite3_bind_int(stmt, 18, oi);
+        sqlite3_bind_text(stmt, 19, api_json, -1, SQLITE_TRANSIENT);
+        sqlite3_step(stmt);
+        sqlite3_finalize(stmt);
+    }
+
+    free(title); free(subtitle); free(yes_sub); free(no_sub);
+    free(category); free(status); free(close_time); free(exp_time);
+    free(event_ticker); free(res_source);
+}
+
+/* Full contract context — returns structured info for decision-making.
+ * This is what the LLM MUST see before making a YES/NO decision. */
+typedef struct {
+    char ticker[64];
+    char title[512];
+    char yes_sub_title[256];
+    char no_sub_title[256];
+    char close_time[64];
+    char settlement_date[16];    /* YYYY-MM-DD */
+    char today_date[16];         /* YYYY-MM-DD */
+    bool resolves_today;         /* settlement_date == today */
+    bool is_open;
+    long seconds_remaining;
+    int  yes_price;              /* current ask in cents */
+    int  no_price;
+    int  max_contracts;          /* computed: min(MAX_CONTRACTS_PER_ORDER, 5% of portfolio) */
+    char raw_json[8192];         /* full API response for the contract */
+} contract_context_t;
+
+static bool contract_get_context(const char *ticker, contract_context_t *ctx,
+                                  char *error, size_t error_len) {
+    memset(ctx, 0, sizeof(*ctx));
+    snprintf(ctx->ticker, sizeof(ctx->ticker), "%s", ticker);
+
+    /* Get today's date in UTC */
+    time_t now = time(NULL);
+    struct tm utc;
+    gmtime_r(&now, &utc);
+    snprintf(ctx->today_date, sizeof(ctx->today_date), "%04d-%02d-%02d",
+             utc.tm_year + 1900, utc.tm_mon + 1, utc.tm_mday);
+
+    /* Fetch market from Kalshi API */
+    char path[256];
+    snprintf(path, sizeof(path), "/markets/%s", ticker);
+    http_buf_t resp = {0};
+    long code = kalshi_authed_get(path, &resp);
+
+    if (code != 200 || !resp.data) {
+        snprintf(error, error_len, "cannot fetch market %s (HTTP %ld)", ticker, code);
+        free(resp.data);
+        return false;
+    }
+
+    /* Store to SQLite */
+    contract_store(ticker, resp.data);
+
+    /* Copy raw JSON (truncated) */
+    snprintf(ctx->raw_json, sizeof(ctx->raw_json), "%s", resp.data);
+
+    /* Extract fields */
+    char *title = json_get_str(resp.data, "title");
+    char *yes_sub = json_get_str(resp.data, "yes_sub_title");
+    char *no_sub = json_get_str(resp.data, "no_sub_title");
+    char *status = json_get_str(resp.data, "status");
+    char *close_time = json_get_str(resp.data, "close_time");
+
+    if (title) snprintf(ctx->title, sizeof(ctx->title), "%s", title);
+    if (yes_sub) snprintf(ctx->yes_sub_title, sizeof(ctx->yes_sub_title), "%s", yes_sub);
+    if (no_sub) snprintf(ctx->no_sub_title, sizeof(ctx->no_sub_title), "%s", no_sub);
+    if (close_time) snprintf(ctx->close_time, sizeof(ctx->close_time), "%s", close_time);
+
+    ctx->yes_price = json_get_int(resp.data, "yes_ask", 0);
+    ctx->no_price = json_get_int(resp.data, "no_ask", 0);
+
+    ctx->is_open = (status && (strcmp(status, "open") == 0 || strcmp(status, "active") == 0));
+
+    /* Extract settlement date */
+    extract_settlement_date(close_time, title, ctx->settlement_date, sizeof(ctx->settlement_date));
+
+    /* Check if resolves today */
+    ctx->resolves_today = (ctx->settlement_date[0] &&
+                           strcmp(ctx->settlement_date, ctx->today_date) == 0);
+
+    /* Compute seconds remaining */
+    if (close_time && close_time[0]) {
+        struct tm tm_close = {0};
+        if (strptime(close_time, "%Y-%m-%dT%H:%M:%S", &tm_close)) {
+            char *old_tz = getenv("TZ");
+            setenv("TZ", "UTC", 1); tzset();
+            time_t close_epoch = mktime(&tm_close);
+            if (old_tz) setenv("TZ", old_tz, 1); else unsetenv("TZ"); tzset();
+            ctx->seconds_remaining = (long)(close_epoch - now);
+        }
+    }
+
+    /* Compute max contracts: min(hard cap, 5% of portfolio / price) */
+    ctx->max_contracts = MAX_CONTRACTS_PER_ORDER; /* default hard cap */
+
+    /* Try to get portfolio balance for % cap */
+    http_buf_t bal_resp = {0};
+    long bal_code = kalshi_authed_get("/portfolio/balance", &bal_resp);
+    if (bal_code == 200 && bal_resp.data) {
+        double balance = json_get_double(bal_resp.data, "balance", 0.0);
+        if (balance <= 0) balance = json_get_double(bal_resp.data, "available_balance", 0.0);
+        /* Kalshi returns balance in cents */
+        double balance_usd = balance / 100.0;
+        if (balance_usd > 0 && ctx->yes_price > 0) {
+            int pct_cap = (int)(balance_usd * MAX_PORTFOLIO_FRACTION /
+                               ((double)ctx->yes_price / 100.0));
+            if (pct_cap < 1) pct_cap = 1;
+            if (pct_cap < ctx->max_contracts)
+                ctx->max_contracts = pct_cap;
+        }
+    }
+    free(bal_resp.data);
+
+    /* Validation */
+    if (!ctx->is_open) {
+        snprintf(error, error_len,
+                 "market %s is not open (status=%s). Title: %s",
+                 ticker, status ? status : "unknown", ctx->title);
+        free(title); free(yes_sub); free(no_sub); free(status); free(close_time);
+        free(resp.data);
+        return false;
+    }
+    if (ctx->seconds_remaining < MARKET_MIN_REMAINING_SECONDS) {
+        snprintf(error, error_len,
+                 "market %s closes in %ld seconds (%ld min). "
+                 "Minimum %d seconds required. Title: %s",
+                 ticker, ctx->seconds_remaining, ctx->seconds_remaining / 60,
+                 MARKET_MIN_REMAINING_SECONDS, ctx->title);
+        free(title); free(yes_sub); free(no_sub); free(status); free(close_time);
+        free(resp.data);
+        return false;
+    }
+
+    /* Same-day weather market check: if the market is a temperature market
+       resolving today, warn in the context (but don't block — session_preflight
+       handles USD caps). The agent should check weather obs before trading. */
+    if (ctx->resolves_today && ctx->seconds_remaining < 6 * 3600) {
+        /* Append warning to title so the model sees it */
+        size_t tlen = strlen(ctx->title);
+        snprintf(ctx->title + tlen, sizeof(ctx->title) - tlen,
+                 " [CAUTION: resolves in %ldh%02ldm — verify current conditions before trading]",
+                 ctx->seconds_remaining / 3600,
+                 (ctx->seconds_remaining % 3600) / 60);
+    }
+
+    free(title); free(yes_sub); free(no_sub); free(status); free(close_time);
+    free(resp.data);
+    return true;
+}
+
+/* Format contract context as JSON for the agent to read */
+static void contract_context_to_json(const contract_context_t *ctx, char *out, size_t out_len) {
+    snprintf(out, out_len,
+        "{\"CONTRACT_CONTEXT\":{"
+        "\"ticker\":\"%s\","
+        "\"title\":\"%s\","
+        "\"yes_means\":\"%s\","
+        "\"no_means\":\"%s\","
+        "\"settlement_date\":\"%s\","
+        "\"today\":\"%s\","
+        "\"resolves_today\":%s,"
+        "\"close_time\":\"%s\","
+        "\"seconds_remaining\":%ld,"
+        "\"minutes_remaining\":%ld,"
+        "\"yes_price_cents\":%d,"
+        "\"no_price_cents\":%d,"
+        "\"max_contracts_allowed\":%d,"
+        "\"IMPORTANT\":\"You MUST verify: (1) settlement_date matches your intended date, "
+        "(2) the title describes the exact outcome you want to bet on, "
+        "(3) count does not exceed max_contracts_allowed\"}}",
+        ctx->ticker, ctx->title,
+        ctx->yes_sub_title[0] ? ctx->yes_sub_title : "(see title)",
+        ctx->no_sub_title[0] ? ctx->no_sub_title : "(see title)",
+        ctx->settlement_date, ctx->today_date,
+        ctx->resolves_today ? "true" : "false",
+        ctx->close_time, ctx->seconds_remaining, ctx->seconds_remaining / 60,
+        ctx->yes_price, ctx->no_price, ctx->max_contracts);
+}
+
+/* ── Market validation gate (legacy — used by batch_order_cb) ────────── */
+
+static bool kalshi_validate_market(const char *ticker, char *reason, size_t reason_len,
+                                    char *title_out, size_t title_len) {
+    if (!ticker || !ticker[0]) {
+        snprintf(reason, reason_len, "empty ticker");
+        return false;
+    }
+
+    /* Fetch market details from Kalshi */
+    char path[512];
+    snprintf(path, sizeof(path), "/markets/%s", ticker);
+
+    http_buf_t resp = {0};
+    long code = kalshi_authed_get(path, &resp);
+
+    if (code != 200 || !resp.data) {
+        snprintf(reason, reason_len,
+                 "cannot fetch market %s (HTTP %ld) — verify ticker exists", ticker, code);
+        free(resp.data);
+        return false;
+    }
+
+    /* Extract market status */
+    char *status = json_get_str(resp.data, "status");
+    if (!status) status = json_get_str(resp.data, "market.status");
+    if (!status) status = json_get_str(resp.data, "result");
+
+    if (status && strcmp(status, "open") != 0 && strcmp(status, "active") != 0) {
+        snprintf(reason, reason_len,
+                 "market %s is '%s' — cannot trade non-open markets", ticker, status);
+        free(status); free(resp.data);
+        return false;
+    }
+    free(status);
+
+    /* Extract close_time and check remaining time */
+    char *close_time = json_get_str(resp.data, "close_time");
+    if (!close_time) close_time = json_get_str(resp.data, "market.close_time");
+    if (!close_time) close_time = json_get_str(resp.data, "expiration_time");
+
+    if (close_time && close_time[0]) {
+        /* Parse ISO 8601 close_time */
+        struct tm tm_close = {0};
+        if (strptime(close_time, "%Y-%m-%dT%H:%M:%S", &tm_close)) {
+            /* Use mktime (local) then adjust — or setenv TZ trick */
+            char *old_tz = getenv("TZ");
+            setenv("TZ", "UTC", 1); tzset();
+            time_t close_epoch = mktime(&tm_close);
+            if (old_tz) setenv("TZ", old_tz, 1); else unsetenv("TZ"); tzset();
+            time_t now = time(NULL);
+            long remaining = (long)(close_epoch - now);
+
+            if (remaining < 0) {
+                snprintf(reason, reason_len,
+                         "market %s ALREADY CLOSED (close_time=%s, %ld seconds ago)",
+                         ticker, close_time, -remaining);
+                free(close_time); free(resp.data);
+                return false;
+            }
+            if (remaining < MARKET_MIN_REMAINING_SECONDS) {
+                snprintf(reason, reason_len,
+                         "market %s closes in %ld seconds (%ld min) — minimum %d seconds required. "
+                         "close_time=%s",
+                         ticker, remaining, remaining / 60, MARKET_MIN_REMAINING_SECONDS, close_time);
+                free(close_time); free(resp.data);
+                return false;
+            }
+        }
+    }
+    free(close_time);
+
+    /* Extract and return title for the caller to verify */
+    if (title_out && title_len > 0) {
+        char *title = json_get_str(resp.data, "title");
+        if (!title) title = json_get_str(resp.data, "market.title");
+        if (!title) title = json_get_str(resp.data, "yes_sub_title");
+        if (title) {
+            snprintf(title_out, title_len, "%s", title);
+            free(title);
+        } else {
+            title_out[0] = '\0';
+        }
+    }
+
+    free(resp.data);
+    return true;
+}
+
 /* ══════════════════════════════════════════════════════════════════════════
  *  SECTION 9: KALSHI TRADING TOOLS
  * ══════════════════════════════════════════════════════════════════════════ */
@@ -1209,36 +2034,96 @@ bool tool_kalshi_create_order(const char *input, char *result, size_t rlen) {
         return false;
     }
 
+    /* ── RATE LIMIT GATE ── */
+    char rate_reason[256] = {0};
+    if (!rate_limit_check(rate_reason, sizeof(rate_reason))) {
+        snprintf(result, rlen, "{\"error\":\"rate_limited\",\"reason\":\"%s\"}", rate_reason);
+        free(ticker); free(action); free(side); free(type_str);
+        return false;
+    }
+
+    /* ── OPEN ORDERS GATE ── */
+    char open_reason[256] = {0};
+    if (!check_open_order_count(open_reason, sizeof(open_reason))) {
+        snprintf(result, rlen, "{\"error\":\"max_open_orders\",\"reason\":\"%s\"}", open_reason);
+        free(ticker); free(action); free(side); free(type_str);
+        return false;
+    }
+
+    /* ── CONTRACT CONTEXT GATE ── */
+    /* Fetch full contract metadata, persist, validate, compute sizing */
+    contract_context_t cctx;
+    char ctx_error[512] = {0};
+    if (!contract_get_context(ticker, &cctx, ctx_error, sizeof(ctx_error))) {
+        snprintf(result, rlen,
+                 "{\"error\":\"contract_validation_failed\","
+                 "\"ticker\":\"%s\",\"reason\":\"%s\"}",
+                 ticker, ctx_error);
+        free(ticker); free(action); free(side); free(type_str);
+        return false;
+    }
+
+    /* ── SESSION + POSITION CAP (now with seconds_remaining from context) ── */
+    {
+        char sess_reason[256] = {0};
+        if (!session_preflight(ticker, count, order_usd, cctx.seconds_remaining,
+                                price_est, sess_reason, sizeof(sess_reason))) {
+            snprintf(result, rlen, "{\"error\":\"session_cap\",\"reason\":\"%s\"}", sess_reason);
+            free(ticker); free(action); free(side); free(type_str);
+            return false;
+        }
+        char pos_reason[256] = {0};
+        if (!position_preflight(ticker, count, pos_reason, sizeof(pos_reason))) {
+            snprintf(result, rlen, "{\"error\":\"position_cap\",\"reason\":\"%s\"}", pos_reason);
+            free(ticker); free(action); free(side); free(type_str);
+            return false;
+        }
+    }
+
+    /* ── CONTRACT-AWARE POSITION SIZING ── */
+    if (count > cctx.max_contracts) {
+        snprintf(result, rlen,
+                 "{\"error\":\"position_size_exceeded\","
+                 "\"requested\":%d,\"max_allowed\":%d,"
+                 "\"reason\":\"max %d contracts (hard cap %d, portfolio 5%% cap)\","
+                 "\"title\":\"%s\"}",
+                 count, cctx.max_contracts, cctx.max_contracts,
+                 MAX_CONTRACTS_PER_ORDER, cctx.title);
+        free(ticker); free(action); free(side); free(type_str);
+        return false;
+    }
+
     /* Generate client_order_id */
     char client_oid[37];
     uuid_v4(client_oid);
 
-    /* Dry run check */
+    /* Dry run check — include full contract context */
     if (g_risk.dry_run) {
+        char ctx_json[4096];
+        contract_context_to_json(&cctx, ctx_json, sizeof(ctx_json));
         snprintf(result, rlen,
                  "{\"dry_run\":true,\"platform\":\"kalshi\","
                  "\"ticker\":\"%s\",\"action\":\"%s\",\"side\":\"%s\","
-                 "\"count\":%d,\"type\":\"%s\""
-                 "%s%s"
-                 ",\"client_order_id\":\"%s\""
-                 ",\"estimated_usd\":%.2f}",
+                 "\"count\":%d,\"type\":\"%s\"%s"
+                 ",\"client_order_id\":\"%s\",\"estimated_usd\":%.2f,"
+                 "\"contract\":%s}",
                  ticker, action, side, count,
                  is_limit ? "limit" : "market",
-                 is_limit ? ",\"yes_price\":" : "",
                  is_limit ? "" : "",
-                 client_oid, order_usd);
-        /* Patch in the yes_price if limit */
+                 client_oid, order_usd,
+                 ctx_json);
         if (is_limit) {
-            char tmp[32];
-            snprintf(tmp, sizeof(tmp), "%d", yes_price);
-            /* Re-format cleanly */
             snprintf(result, rlen,
                      "{\"dry_run\":true,\"platform\":\"kalshi\","
                      "\"ticker\":\"%s\",\"action\":\"%s\",\"side\":\"%s\","
                      "\"count\":%d,\"type\":\"limit\",\"yes_price\":%d,"
-                     "\"client_order_id\":\"%s\",\"estimated_usd\":%.2f}",
-                     ticker, action, side, count, yes_price, client_oid, order_usd);
+                     "\"client_order_id\":\"%s\",\"estimated_usd\":%.2f,"
+                     "\"contract\":%s}",
+                     ticker, action, side, count, yes_price,
+                     client_oid, order_usd, ctx_json);
         }
+        /* Track dry-run trades in session too (caps still apply) */
+        session_ticker_add(ticker, count, order_usd);
         free(ticker); free(action); free(side); free(type_str);
         return true;
     }
@@ -1277,6 +2162,9 @@ bool tool_kalshi_create_order(const char *input, char *result, size_t rlen) {
         return false;
     }
 
+    /* ── RECORD SUCCESSFUL TRADE IN SESSION TRACKER ── */
+    session_ticker_add(ticker, count, order_usd);
+
     result[0] = '\0';
     trading_truncate(resp.data, result, rlen, 16);
     free(resp.data);
@@ -1312,9 +2200,33 @@ static void batch_order_cb(const char *element_start, void *ctx) {
         return;
     }
 
+    /* ── MARKET VALIDATION GATE (per order in batch) ── */
+    char market_reason[512] = {0};
+    char market_title[256] = {0};
+    if (!kalshi_validate_market(ticker, market_reason, sizeof(market_reason),
+                                 market_title, sizeof(market_title))) {
+        bc->error = true;
+        snprintf(bc->error_msg, sizeof(bc->error_msg),
+                 "batch order %d (%s) rejected: %s", bc->count, ticker, market_reason);
+        free(ticker); free(action); free(side);
+        return;
+    }
+
+    /* ── PER-ORDER RISK CHECK ── */
     char *type_str = json_get_str(element_start, "type");
     int yes_price = json_get_int(element_start, "yes_price", 0);
     bool is_limit = (type_str && strcmp(type_str, "limit") == 0);
+
+    double price_est = is_limit ? (double)yes_price : 50.0;
+    double order_usd = price_est * (double)count / 100.0;
+    char risk_reason[256] = {0};
+    if (!risk_preflight(order_usd, risk_reason, sizeof(risk_reason))) {
+        bc->error = true;
+        snprintf(bc->error_msg, sizeof(bc->error_msg),
+                 "batch order %d (%s) risk failed: %s", bc->count, ticker, risk_reason);
+        free(ticker); free(action); free(side); free(type_str);
+        return;
+    }
 
     char client_oid[37];
     uuid_v4(client_oid);
@@ -1562,6 +2474,8 @@ bool tool_kalshi_amend_order(const char *input, char *result, size_t rlen) {
     if (!kalshi_require_auth(result, rlen, &api_key, &key_path))
         return false;
 
+    risk_init();
+
     char *order_id = json_get_str(input, "order_id");
     if (!order_id || !order_id[0]) {
         snprintf(result, rlen, "missing required parameter: order_id");
@@ -1576,6 +2490,48 @@ bool tool_kalshi_amend_order(const char *input, char *result, size_t rlen) {
         snprintf(result, rlen, "must specify at least one of: count, price");
         free(order_id);
         return false;
+    }
+
+    /* ── Bounds validation ── */
+    if (price >= 0 && (price < 1 || price > 99)) {
+        snprintf(result, rlen, "price must be 1-99 cents");
+        free(order_id);
+        return false;
+    }
+    if (count >= 0 && count > 1000) {
+        snprintf(result, rlen, "count %d exceeds max 1000 contracts per order", count);
+        free(order_id);
+        return false;
+    }
+
+    /* ── Risk check on amended values ── */
+    if (count > 0) {
+        double price_est = (price > 0) ? (double)price : 50.0;
+        double order_usd = price_est * (double)count / 100.0;
+        char risk_reason[256] = {0};
+        if (!risk_preflight(order_usd, risk_reason, sizeof(risk_reason))) {
+            snprintf(result, rlen,
+                     "{\"error\":\"risk_check_failed\",\"reason\":\"%s\",\"order_id\":\"%s\"}",
+                     risk_reason, order_id);
+            free(order_id);
+            return false;
+        }
+    }
+
+    /* ── Dry run gate ── */
+    if (g_risk.dry_run) {
+        snprintf(result, rlen,
+                 "{\"dry_run\":true,\"amend\":{\"order_id\":\"%s\"%s%s}}",
+                 order_id,
+                 count >= 0 ? ",\"count\":" : "",
+                 count >= 0 ? "" : "");
+        if (count >= 0 || price >= 0) {
+            snprintf(result, rlen,
+                     "{\"dry_run\":true,\"amend\":{\"order_id\":\"%s\",\"count\":%d,\"price\":%d}}",
+                     order_id, count, price);
+        }
+        free(order_id);
+        return true;
     }
 
     /* Build amend body */
@@ -2093,6 +3049,18 @@ bool tool_polymarket_create_order(const char *input, char *result, size_t rlen) 
     /* Normalize side */
     bool is_buy = (strcmp(side_str, "buy") == 0 || strcmp(side_str, "BUY") == 0);
     int side_val = is_buy ? 0 : 1;
+
+    /* Session + per-token spend cap */
+    {
+        char sr[256] = {0};
+        int ec = price > 0 ? (int)(size / price) : (int)size;
+        if (!session_preflight(token_id, ec, size, 0, price * 100.0,
+                                sr, sizeof(sr))) {
+            snprintf(result, rlen, "{\"error\":\"session_cap\",\"reason\":\"%s\"}", sr);
+            free(token_id); free(side_str); free(order_type);
+            return false;
+        }
+    }
 
     /* Risk check */
     char risk_reason[256] = {0};
@@ -3238,5 +4206,569 @@ bool tool_risk_configure(const char *input, char *result, size_t rlen) {
 
     snprintf(result, rlen, "%s", jb.data);
     jbuf_free(&jb);
+    return true;
+}
+
+/* ══════════════════════════════════════════════════════════════════════════
+ *  BULK CONTRACT INGESTION + SEMANTIC SEARCH
+ * ══════════════════════════════════════════════════════════════════════════ */
+
+bool tool_contract_ingest(const char *input, char *result, size_t rlen) {
+    const char *api_key, *key_path;
+    if (!kalshi_require_auth(result, rlen, &api_key, &key_path))
+        return false;
+
+    int limit = json_get_int(input, "limit", 200);
+    if (limit > 1000) limit = 1000;
+    char *series = json_get_str(input, "series_ticker");
+    char *status_f = json_get_str(input, "status");
+
+    jbuf_t fpath;
+    jbuf_init(&fpath, 256);
+    jbuf_appendf(&fpath, "/events?limit=%d&status=%s&with_nested_markets=true",
+                 limit, (status_f && status_f[0]) ? status_f : "open");
+    if (series && series[0]) jbuf_appendf(&fpath, "&series_ticker=%s", series);
+
+    http_buf_t resp = {0};
+    long code = kalshi_authed_get(fpath.data, &resp);
+    jbuf_free(&fpath);
+    free(series); free(status_f);
+
+    if (code != 200 || !resp.data) {
+        snprintf(result, rlen, "Kalshi events fetch failed (HTTP %ld)", code);
+        free(resp.data);
+        return false;
+    }
+
+    int event_count = 0, market_count = 0;
+    sqlite3 *db = contract_db();
+    if (db) sqlite3_exec(db, "BEGIN TRANSACTION", NULL, NULL, NULL);
+
+    /* Scan for market tickers (contain dashes) and store each market object */
+    const char *p = resp.data;
+    while ((p = strstr(p, "\"ticker\"")) != NULL) {
+        const char *q = p + 8;
+        while (*q && *q != '"') q++;
+        if (!*q) break;
+        q++;
+        const char *end = strchr(q, '"');
+        if (!end || end - q >= 64) { p = q; continue; }
+
+        char tick[64] = {0};
+        snprintf(tick, sizeof(tick), "%.*s", (int)(end - q), q);
+
+        if (strchr(tick, '-') != NULL) {
+            /* Find enclosing JSON object */
+            const char *obj_start = p;
+            int depth = 0;
+            while (obj_start > resp.data) {
+                obj_start--;
+                if (*obj_start == '}') depth++;
+                if (*obj_start == '{') { if (depth == 0) break; depth--; }
+            }
+            const char *obj_end = end;
+            depth = 0;
+            while (*obj_end) {
+                if (*obj_end == '{') depth++;
+                if (*obj_end == '}') { depth--; if (depth < 0) { obj_end++; break; } }
+                obj_end++;
+            }
+            size_t obj_len = (size_t)(obj_end - obj_start);
+            if (obj_len < 16384) {
+                char *mj = malloc(obj_len + 1);
+                if (mj) { memcpy(mj, obj_start, obj_len); mj[obj_len] = '\0'; contract_store(tick, mj); free(mj); market_count++; }
+            }
+        } else { event_count++; }
+        p = end + 1;
+    }
+
+    if (db) sqlite3_exec(db, "COMMIT", NULL, NULL, NULL);
+    free(resp.data);
+
+    int total = 0;
+    sqlite3_stmt *stmt = NULL;
+    if (db && sqlite3_prepare_v2(db, "SELECT COUNT(*) FROM contracts", -1, &stmt, NULL) == SQLITE_OK) {
+        if (sqlite3_step(stmt) == SQLITE_ROW) total = sqlite3_column_int(stmt, 0);
+        sqlite3_finalize(stmt);
+    }
+
+    snprintf(result, rlen, "{\"ingested\":{\"events\":%d,\"markets\":%d},\"total_in_db\":%d}", event_count, market_count, total);
+    return true;
+}
+
+bool tool_contract_search(const char *input, char *result, size_t rlen) {
+    sqlite3 *db = contract_db();
+    if (!db) { snprintf(result, rlen, "contracts.db unavailable"); return false; }
+
+    char *query = json_get_str(input, "query");
+    if (!query || !query[0]) {
+        free(query);
+        snprintf(result, rlen, "missing: query (e.g. 'Bitcoin above 90000', 'Fed rate March', 'KORD temperature')");
+        return false;
+    }
+    char *date_filter = json_get_str(input, "date");
+    char *underlying_filter = json_get_str(input, "underlying");
+    int limit = json_get_int(input, "limit", 20);
+    if (limit > 100) limit = 100;
+
+    /* Try FTS5 first, fall back to LIKE */
+    const char *fts_sql =
+        "SELECT c.ticker, c.title, c.yes_sub_title, c.no_sub_title, "
+        "c.settlement_date, c.close_time, c.yes_price, c.no_price, "
+        "c.strike, c.underlying, c.status, c.volume "
+        "FROM contracts_fts f JOIN contracts c ON f.rowid = c.rowid "
+        "WHERE contracts_fts MATCH ? AND c.status IN ('open','active') "
+        "ORDER BY rank LIMIT ?";
+
+    sqlite3_stmt *stmt = NULL;
+    int rc = sqlite3_prepare_v2(db, fts_sql, -1, &stmt, NULL);
+    if (rc != SQLITE_OK) {
+        /* FTS not ready — LIKE fallback */
+        const char *like_sql =
+            "SELECT ticker, title, yes_sub_title, no_sub_title, "
+            "settlement_date, close_time, yes_price, no_price, "
+            "strike, underlying, status, volume "
+            "FROM contracts WHERE (title LIKE ? OR underlying LIKE ?) "
+            "AND status IN ('open','active') ORDER BY volume DESC LIMIT ?";
+        rc = sqlite3_prepare_v2(db, like_sql, -1, &stmt, NULL);
+        if (rc != SQLITE_OK) {
+            snprintf(result, rlen, "search failed: %s", sqlite3_errmsg(db));
+            free(query); free(date_filter); free(underlying_filter);
+            return false;
+        }
+        char like_q[256]; snprintf(like_q, sizeof(like_q), "%%%s%%", query);
+        sqlite3_bind_text(stmt, 1, like_q, -1, SQLITE_TRANSIENT);
+        sqlite3_bind_text(stmt, 2, like_q, -1, SQLITE_TRANSIENT);
+        sqlite3_bind_int(stmt, 3, limit);
+    } else {
+        sqlite3_bind_text(stmt, 1, query, -1, SQLITE_TRANSIENT);
+        sqlite3_bind_int(stmt, 2, limit);
+    }
+
+    jbuf_t out;
+    jbuf_init(&out, 4096);
+    jbuf_appendf(&out, "{\"query\":\"%s\",\"results\":[", query);
+    int count = 0;
+    while (sqlite3_step(stmt) == SQLITE_ROW) {
+        if (count > 0) jbuf_append(&out, ",");
+        const char *t = (const char *)sqlite3_column_text(stmt, 0);
+        const char *title = (const char *)sqlite3_column_text(stmt, 1);
+        const char *ys = (const char *)sqlite3_column_text(stmt, 2);
+        const char *ns = (const char *)sqlite3_column_text(stmt, 3);
+        const char *sd = (const char *)sqlite3_column_text(stmt, 4);
+        int yp = sqlite3_column_int(stmt, 6);
+        int np = sqlite3_column_int(stmt, 7);
+        const char *st = (const char *)sqlite3_column_text(stmt, 8);
+        const char *un = (const char *)sqlite3_column_text(stmt, 9);
+        int vol = sqlite3_column_int(stmt, 11);
+        jbuf_appendf(&out,
+            "{\"ticker\":\"%s\",\"title\":\"%s\",\"yes\":\"%s\",\"no\":\"%s\","
+            "\"date\":\"%s\",\"yes_c\":%d,\"no_c\":%d,"
+            "\"strike\":\"%s\",\"underlying\":\"%s\",\"vol\":%d}",
+            t?t:"", title?title:"", ys?ys:"", ns?ns:"",
+            sd?sd:"", yp, np, st?st:"", un?un:"", vol);
+        count++;
+    }
+    sqlite3_finalize(stmt);
+    jbuf_appendf(&out, "],\"count\":%d}", count);
+    snprintf(result, rlen, "%s", out.data ? out.data : "{}");
+    jbuf_free(&out);
+    free(query); free(date_filter); free(underlying_filter);
+    return true;
+}
+
+bool tool_contract_lookup(const char *input, char *result, size_t rlen) {
+    const char *api_key, *key_path;
+    if (!kalshi_require_auth(result, rlen, &api_key, &key_path))
+        return false;
+
+    char *ticker = json_get_str(input, "ticker");
+    char *event_ticker = json_get_str(input, "event_ticker");
+
+    if ((!ticker || !ticker[0]) && (!event_ticker || !event_ticker[0])) {
+        free(ticker); free(event_ticker);
+        snprintf(result, rlen, "missing: ticker or event_ticker");
+        return false;
+    }
+
+    if (event_ticker && event_ticker[0]) {
+        /* Fetch ALL markets for this event — full bracket view */
+        char epath[256];
+        snprintf(epath, sizeof(epath), "/events/%s", event_ticker);
+        http_buf_t resp = {0};
+        long code = kalshi_authed_get(epath, &resp);
+        if (code != 200 || !resp.data) {
+            snprintf(result, rlen, "event %s not found (HTTP %ld)", event_ticker, code);
+            free(resp.data); free(ticker); free(event_ticker);
+            return false;
+        }
+        /* Store each nested market */
+        const char *p = resp.data;
+        while ((p = strstr(p, "\"ticker\"")) != NULL) {
+            const char *q = p + 9;
+            while (*q && *q != '"') q++;
+            if (!*q) break; q++;
+            const char *end = strchr(q, '"');
+            if (!end) break;
+            char t[64] = {0};
+            snprintf(t, sizeof(t), "%.*s", (int)(end - q), q);
+            if (strchr(t, '-')) contract_store(t, resp.data);
+            p = end + 1;
+        }
+        result[0] = '\0';
+        snprintf(result, rlen, "%.8000s", resp.data);
+        free(resp.data); free(ticker); free(event_ticker);
+        return true;
+    }
+
+    /* Single ticker — full contract context */
+    contract_context_t ctx;
+    char error[512] = {0};
+    (void)contract_get_context(ticker, &ctx, error, sizeof(error));
+    char ctx_json[4096];
+    contract_context_to_json(&ctx, ctx_json, sizeof(ctx_json));
+    snprintf(result, rlen, "%s", ctx_json);
+    free(ticker); free(event_ticker);
+    return true;
+}
+
+/* ── Exhaustive historical contract ingestion ────────────────────────── */
+/* Fetches ALL settled Kalshi markets via cursor pagination.
+ * Uses public /historical/markets endpoint (no auth needed).
+ * Stores every contract ever traded into contracts.db. */
+
+/* Forward-declare the public kalshi_get from integrations.c */
+extern long kalshi_get_public(const char *path, http_buf_t *out);
+
+bool tool_contract_ingest_all(const char *input, char *result, size_t rlen) {
+    int max_pages = json_get_int(input, "max_pages", 500);
+    if (max_pages > 5000) max_pages = 5000;
+    char *series = json_get_str(input, "series_ticker");
+
+    sqlite3 *db = contract_db();
+    if (!db) { free(series); snprintf(result, rlen, "contracts.db unavailable"); return false; }
+
+    sqlite3_exec(db, "BEGIN TRANSACTION", NULL, NULL, NULL);
+
+    int total_markets = 0, pages_fetched = 0;
+    char cursor_buf[256] = {0};
+
+    for (int page = 0; page < max_pages; page++) {
+        jbuf_t path;
+        jbuf_init(&path, 512);
+        jbuf_appendf(&path, "/historical/markets?limit=200");
+        if (series && series[0])
+            jbuf_appendf(&path, "&series_ticker=%s", series);
+        if (cursor_buf[0])
+            jbuf_appendf(&path, "&cursor=%s", cursor_buf);
+
+        http_buf_t resp = {0};
+        /* Use public endpoint — doesn't need auth */
+        char url[2048];
+        snprintf(url, sizeof(url), "https://api.elections.kalshi.com/trade-api/v2%s", path.data);
+        jbuf_free(&path);
+
+        long code = trading_http_request("GET", url, NULL, NULL, 0, &resp);
+        if (code != 200 || !resp.data) { free(resp.data); break; }
+
+        /* Parse each market object and store */
+        const char *p = resp.data;
+        while ((p = strstr(p, "\"ticker\":\"")) != NULL) {
+            p += 10;
+            const char *end = strchr(p, '"');
+            if (!end || end - p >= 64) break;
+
+            char tick[64] = {0};
+            snprintf(tick, sizeof(tick), "%.*s", (int)(end - p), p);
+
+            /* Find enclosing { } */
+            const char *obj_start = p - 10;
+            int depth = 0;
+            while (obj_start > resp.data) {
+                obj_start--;
+                if (*obj_start == '}') depth++;
+                if (*obj_start == '{') { if (depth == 0) break; depth--; }
+            }
+            const char *obj_end = end;
+            depth = 0;
+            while (*obj_end) {
+                if (*obj_end == '{') depth++;
+                if (*obj_end == '}') { depth--; if (depth < 0) { obj_end++; break; } }
+                obj_end++;
+            }
+            size_t obj_len = (size_t)(obj_end - obj_start);
+            if (obj_len > 0 && obj_len < 16384) {
+                char *mj = malloc(obj_len + 1);
+                if (mj) {
+                    memcpy(mj, obj_start, obj_len);
+                    mj[obj_len] = '\0';
+                    contract_store(tick, mj);
+                    free(mj);
+                    total_markets++;
+                }
+            }
+            p = end + 1;
+        }
+
+        /* Extract cursor for next page */
+        cursor_buf[0] = '\0';
+        const char *nc = strstr(resp.data, "\"cursor\":\"");
+        if (nc) {
+            nc += 10;
+            const char *nce = strchr(nc, '"');
+            if (nce && (size_t)(nce - nc) < 250) {
+                memcpy(cursor_buf, nc, (size_t)(nce - nc));
+                cursor_buf[nce - nc] = '\0';
+            }
+        }
+        free(resp.data);
+        pages_fetched = page + 1;
+
+        /* Commit every 50 pages to avoid huge transactions */
+        if (page > 0 && page % 50 == 0) {
+            sqlite3_exec(db, "COMMIT", NULL, NULL, NULL);
+            sqlite3_exec(db, "BEGIN TRANSACTION", NULL, NULL, NULL);
+        }
+
+        if (!cursor_buf[0]) break; /* no more pages */
+    }
+
+    sqlite3_exec(db, "COMMIT", NULL, NULL, NULL);
+    free(series);
+
+    /* Get total count */
+    int total_in_db = 0;
+    sqlite3_stmt *stmt = NULL;
+    if (sqlite3_prepare_v2(db, "SELECT COUNT(*) FROM contracts", -1, &stmt, NULL) == SQLITE_OK) {
+        if (sqlite3_step(stmt) == SQLITE_ROW) total_in_db = sqlite3_column_int(stmt, 0);
+        sqlite3_finalize(stmt);
+    }
+
+    /* Get category breakdown */
+    int open_count = 0, settled_count = 0;
+    if (sqlite3_prepare_v2(db, "SELECT COUNT(*) FROM contracts WHERE status='open' OR status='active'", -1, &stmt, NULL) == SQLITE_OK) {
+        if (sqlite3_step(stmt) == SQLITE_ROW) open_count = sqlite3_column_int(stmt, 0);
+        sqlite3_finalize(stmt);
+    }
+    settled_count = total_in_db - open_count;
+
+    snprintf(result, rlen,
+             "{\"ingested\":%d,\"pages\":%d,\"cursor_exhausted\":%s,"
+             "\"total_in_db\":%d,\"open\":%d,\"settled\":%d}",
+             total_markets, pages_fetched,
+             cursor_buf[0] ? "false" : "true",
+             total_in_db, open_count, settled_count);
+    return true;
+}
+
+/* ── New-issue contract monitor ─────────────────────────────────────── */
+/* Fetches current open events, diffs against contracts.db,
+ * returns only contracts NOT already in the database (new issues). */
+
+bool tool_contract_new_issues(const char *input, char *result, size_t rlen) {
+    const char *api_key, *key_path;
+    if (!kalshi_require_auth(result, rlen, &api_key, &key_path))
+        return false;
+
+    int limit = json_get_int(input, "limit", 200);
+    if (limit > 1000) limit = 1000;
+    char *series = json_get_str(input, "series_ticker");
+
+    /* Fetch current open events with nested markets */
+    jbuf_t fpath;
+    jbuf_init(&fpath, 256);
+    jbuf_appendf(&fpath, "/events?limit=%d&status=open&with_nested_markets=true", limit);
+    if (series && series[0]) jbuf_appendf(&fpath, "&series_ticker=%s", series);
+
+    http_buf_t resp = {0};
+    long code = kalshi_authed_get(fpath.data, &resp);
+    jbuf_free(&fpath);
+    free(series);
+
+    if (code != 200 || !resp.data) {
+        snprintf(result, rlen, "Kalshi events fetch failed (HTTP %ld)", code);
+        free(resp.data);
+        return false;
+    }
+
+    sqlite3 *db = contract_db();
+    if (!db) { free(resp.data); snprintf(result, rlen, "contracts.db unavailable"); return false; }
+
+    /* Scan for market tickers, check which are NOT in contracts.db */
+    jbuf_t out;
+    jbuf_init(&out, 8192);
+    jbuf_append(&out, "{\"new_issues\":[");
+
+    int new_count = 0, existing_count = 0;
+    const char *p = resp.data;
+
+    while ((p = strstr(p, "\"ticker\":\"")) != NULL) {
+        p += 10;
+        const char *end = strchr(p, '"');
+        if (!end || end - p >= 64) break;
+
+        char tick[64] = {0};
+        snprintf(tick, sizeof(tick), "%.*s", (int)(end - p), p);
+
+        /* Only process market tickers (contain dashes) */
+        if (!strchr(tick, '-')) { p = end + 1; continue; }
+
+        /* Check if already in DB */
+        sqlite3_stmt *stmt = NULL;
+        bool exists = false;
+        if (sqlite3_prepare_v2(db, "SELECT 1 FROM contracts WHERE ticker=?", -1, &stmt, NULL) == SQLITE_OK) {
+            sqlite3_bind_text(stmt, 1, tick, -1, SQLITE_TRANSIENT);
+            exists = (sqlite3_step(stmt) == SQLITE_ROW);
+            sqlite3_finalize(stmt);
+        }
+
+        if (exists) {
+            existing_count++;
+        } else {
+            /* NEW CONTRACT — extract its object and store */
+            const char *obj_start = p - 10;
+            int depth = 0;
+            while (obj_start > resp.data) {
+                obj_start--;
+                if (*obj_start == '}') depth++;
+                if (*obj_start == '{') { if (depth == 0) break; depth--; }
+            }
+            const char *obj_end = end;
+            depth = 0;
+            while (*obj_end) {
+                if (*obj_end == '{') depth++;
+                if (*obj_end == '}') { depth--; if (depth < 0) { obj_end++; break; } }
+                obj_end++;
+            }
+            size_t obj_len = (size_t)(obj_end - obj_start);
+            if (obj_len > 0 && obj_len < 16384) {
+                char *mj = malloc(obj_len + 1);
+                if (mj) {
+                    memcpy(mj, obj_start, obj_len);
+                    mj[obj_len] = '\0';
+                    contract_store(tick, mj);
+
+                    /* Add to output */
+                    if (new_count > 0) jbuf_append(&out, ",");
+                    char *title = json_get_str(mj, "title");
+                    char *close_t = json_get_str(mj, "close_time");
+                    char settle[16] = {0};
+                    extract_settlement_date(close_t, title, settle, sizeof(settle));
+                    char strike[64] = {0}, underlying[32] = {0};
+                    extract_strike_info(title, strike, sizeof(strike), underlying, sizeof(underlying));
+
+                    jbuf_appendf(&out,
+                        "{\"ticker\":\"%s\",\"title\":\"%s\","
+                        "\"settlement\":\"%s\",\"strike\":\"%s\","
+                        "\"underlying\":\"%s\",\"close\":\"%s\"}",
+                        tick, title ? title : "",
+                        settle, strike, underlying,
+                        close_t ? close_t : "");
+
+                    free(title); free(close_t);
+                    free(mj);
+                    new_count++;
+                }
+            }
+        }
+        p = end + 1;
+    }
+
+    jbuf_appendf(&out, "],\"new\":%d,\"existing\":%d}", new_count, existing_count);
+    free(resp.data);
+
+    result[0] = '\0';
+    snprintf(result, rlen, "%s", out.data ? out.data : "{}");
+    jbuf_free(&out);
+    return true;
+}
+
+/* ── Contract landscape summary ──────────────────────────────────────── */
+/* Returns aggregate stats from contracts.db: counts by underlying,
+ * settlement date distribution, open vs settled. */
+
+bool tool_contract_landscape(const char *input, char *result, size_t rlen) {
+    (void)input;
+    sqlite3 *db = contract_db();
+    if (!db) { snprintf(result, rlen, "contracts.db unavailable"); return false; }
+
+    jbuf_t out;
+    jbuf_init(&out, 4096);
+    jbuf_append(&out, "{");
+
+    /* Total counts */
+    sqlite3_stmt *stmt = NULL;
+    int total = 0, open = 0;
+    if (sqlite3_prepare_v2(db, "SELECT COUNT(*) FROM contracts", -1, &stmt, NULL) == SQLITE_OK) {
+        if (sqlite3_step(stmt) == SQLITE_ROW) total = sqlite3_column_int(stmt, 0);
+        sqlite3_finalize(stmt);
+    }
+    if (sqlite3_prepare_v2(db, "SELECT COUNT(*) FROM contracts WHERE status IN ('open','active')", -1, &stmt, NULL) == SQLITE_OK) {
+        if (sqlite3_step(stmt) == SQLITE_ROW) open = sqlite3_column_int(stmt, 0);
+        sqlite3_finalize(stmt);
+    }
+    jbuf_appendf(&out, "\"total\":%d,\"open\":%d,\"settled\":%d", total, open, total - open);
+
+    /* By underlying */
+    jbuf_append(&out, ",\"by_underlying\":{");
+    if (sqlite3_prepare_v2(db,
+            "SELECT underlying, COUNT(*) as cnt FROM contracts "
+            "WHERE underlying != '' GROUP BY underlying ORDER BY cnt DESC LIMIT 30",
+            -1, &stmt, NULL) == SQLITE_OK) {
+        int first = 1;
+        while (sqlite3_step(stmt) == SQLITE_ROW) {
+            const char *u = (const char *)sqlite3_column_text(stmt, 0);
+            int c = sqlite3_column_int(stmt, 1);
+            if (!first) jbuf_append(&out, ",");
+            jbuf_appendf(&out, "\"%s\":%d", u ? u : "?", c);
+            first = 0;
+        }
+        sqlite3_finalize(stmt);
+    }
+    jbuf_append(&out, "}");
+
+    /* Settlement dates for open contracts */
+    jbuf_append(&out, ",\"open_by_date\":{");
+    if (sqlite3_prepare_v2(db,
+            "SELECT settlement_date, COUNT(*) as cnt FROM contracts "
+            "WHERE status IN ('open','active') AND settlement_date != '' "
+            "GROUP BY settlement_date ORDER BY settlement_date LIMIT 30",
+            -1, &stmt, NULL) == SQLITE_OK) {
+        int first = 1;
+        while (sqlite3_step(stmt) == SQLITE_ROW) {
+            const char *d = (const char *)sqlite3_column_text(stmt, 0);
+            int c = sqlite3_column_int(stmt, 1);
+            if (!first) jbuf_append(&out, ",");
+            jbuf_appendf(&out, "\"%s\":%d", d ? d : "?", c);
+            first = 0;
+        }
+        sqlite3_finalize(stmt);
+    }
+    jbuf_append(&out, "}");
+
+    /* Most recent 10 new contracts (by fetched_at) */
+    jbuf_append(&out, ",\"newest\":[");
+    if (sqlite3_prepare_v2(db,
+            "SELECT ticker, title, settlement_date, underlying, strike, status "
+            "FROM contracts ORDER BY fetched_at DESC LIMIT 10",
+            -1, &stmt, NULL) == SQLITE_OK) {
+        int first = 1;
+        while (sqlite3_step(stmt) == SQLITE_ROW) {
+            if (!first) jbuf_append(&out, ",");
+            const char *t = (const char *)sqlite3_column_text(stmt, 0);
+            const char *ti = (const char *)sqlite3_column_text(stmt, 1);
+            const char *sd = (const char *)sqlite3_column_text(stmt, 2);
+            const char *un = (const char *)sqlite3_column_text(stmt, 3);
+            const char *st = (const char *)sqlite3_column_text(stmt, 4);
+            jbuf_appendf(&out, "{\"ticker\":\"%s\",\"title\":\"%.80s\",\"date\":\"%s\",\"underlying\":\"%s\",\"strike\":\"%s\"}",
+                t?t:"", ti?ti:"", sd?sd:"", un?un:"", st?st:"");
+            first = 0;
+        }
+        sqlite3_finalize(stmt);
+    }
+    jbuf_append(&out, "]}");
+
+    snprintf(result, rlen, "%s", out.data ? out.data : "{}");
+    jbuf_free(&out);
     return true;
 }

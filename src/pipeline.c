@@ -19,19 +19,22 @@
 /* ── Helpers ──────────────────────────────────────────────────────────── */
 
 static char **split_lines(const char *input, int *count) {
-    int cap = 256;
-    char **lines = malloc(cap * sizeof(char *));
+    /* Count lines first, then allocate exact size from arena */
+    int cap = 0;
+    for (const char *s = input; *s; ) {
+        const char *nl = strchr(s, '\n');
+        cap++;
+        s = nl ? nl + 1 : s + strlen(s);
+    }
+    if (cap > PIPE_MAX_LINES) cap = PIPE_MAX_LINES;
+    char **lines = scratch_alloc((size_t)(cap + 1) * sizeof(char *));
     int n = 0;
 
     const char *p = input;
-    while (*p) {
+    while (*p && n < cap) {
         const char *nl = strchr(p, '\n');
         size_t len = nl ? (size_t)(nl - p) : strlen(p);
-        if (n >= cap) {
-            cap *= 2;
-            lines = realloc(lines, cap * sizeof(char *));
-        }
-        lines[n] = malloc(len + 1);
+        lines[n] = scratch_alloc(len + 1);
         memcpy(lines[n], p, len);
         lines[n][len] = '\0';
         n++;
@@ -42,8 +45,8 @@ static char **split_lines(const char *input, int *count) {
 }
 
 static void free_lines(char **lines, int count) {
-    for (int i = 0; i < count; i++) free(lines[i]);
-    free(lines);
+    /* No-op: all line memory is arena-backed (scratch arena) */
+    (void)lines; (void)count;
 }
 
 static char *join_lines(char **lines, int count, const char *sep) {
@@ -53,7 +56,7 @@ static char *join_lines(char **lines, int count, const char *sep) {
         total += strlen(lines[i]) + sep_len;
     total += 1;
 
-    char *result = malloc(total);
+    char *result = scratch_alloc(total);
     result[0] = '\0';
     size_t pos = 0;
     for (int i = 0; i < count; i++) {
@@ -103,20 +106,20 @@ static bool simple_match(const char *line, const char *pattern) {
 
 pipeline_t *pipeline_create(const char *input) {
     if (!input) return NULL;
-    pipeline_t *p = calloc(1, sizeof(pipeline_t));
+    pipeline_t *p = scratch_alloc(sizeof(pipeline_t));
     if (!p) return NULL;
-    p->input = strdup(input);
-    if (!p->input) { free(p); return NULL; }
+    memset(p, 0, sizeof(pipeline_t));
+    p->input = scratch_strdup(input);
+    if (!p->input) return NULL;
     p->lines = split_lines(input, &p->line_count);
     p->line_cap = p->line_count;
     return p;
 }
 
 void pipeline_free(pipeline_t *p) {
-    if (!p) return;
-    free_lines(p->lines, p->line_count);
-    free(p->input);
-    free(p);
+    /* No-op: pipeline memory is arena-backed (scratch arena).
+     * Reclaimed automatically on arena_scratch_reset(). */
+    (void)p;
 }
 
 void pipeline_add_stage(pipeline_t *p, pipe_stage_type_t type,
@@ -152,11 +155,11 @@ static void apply_stage(char ***lines, int *count, pipe_stage_t *stage) {
     switch (stage->type) {
 
     case PIPE_FILTER: {
-        char **out = malloc(n * sizeof(char *));
+        char **out = scratch_alloc(n * sizeof(char *));
         int on = 0;
         for (int i = 0; i < n; i++) {
             if (simple_match(in[i], stage->arg))
-                out[on++] = strdup(in[i]);
+                out[on++] = scratch_strdup(in[i]);
         }
         free_lines(in, n);
         *lines = out; *count = on;
@@ -164,11 +167,11 @@ static void apply_stage(char ***lines, int *count, pipe_stage_t *stage) {
     }
 
     case PIPE_FILTER_V: {
-        char **out = malloc(n * sizeof(char *));
+        char **out = scratch_alloc(n * sizeof(char *));
         int on = 0;
         for (int i = 0; i < n; i++) {
             if (!simple_match(in[i], stage->arg))
-                out[on++] = strdup(in[i]);
+                out[on++] = scratch_strdup(in[i]);
         }
         free_lines(in, n);
         *lines = out; *count = on;
@@ -196,12 +199,11 @@ static void apply_stage(char ***lines, int *count, pipe_stage_t *stage) {
                 size_t post_off = (size_t)match.rm_eo;
                 size_t rep_len = strlen(replacement);
                 size_t post_len = strlen(in[i]) - post_off;
-                char *new_line = malloc(pre_len + rep_len + post_len + 1);
+                char *new_line = scratch_alloc(pre_len + rep_len + post_len + 1);
                 memcpy(new_line, in[i], pre_len);
                 memcpy(new_line + pre_len, replacement, rep_len);
                 memcpy(new_line + pre_len + rep_len, in[i] + post_off, post_len);
                 new_line[pre_len + rep_len + post_len] = '\0';
-                free(in[i]);
                 in[i] = new_line;
             }
         }
@@ -224,12 +226,12 @@ static void apply_stage(char ***lines, int *count, pipe_stage_t *stage) {
 
     case PIPE_UNIQ: {
         if (n <= 1) break;
-        char **out = malloc(n * sizeof(char *));
+        char **out = scratch_alloc(n * sizeof(char *));
         int on = 0;
-        out[on++] = strdup(in[0]);
+        out[on++] = scratch_strdup(in[0]);
         for (int i = 1; i < n; i++) {
             if (strcmp(in[i], in[i-1]) != 0)
-                out[on++] = strdup(in[i]);
+                out[on++] = scratch_strdup(in[i]);
         }
         free_lines(in, n);
         *lines = out; *count = on;
@@ -238,7 +240,7 @@ static void apply_stage(char ***lines, int *count, pipe_stage_t *stage) {
 
     case PIPE_UNIQ_C: {
         if (n == 0) break;
-        char **out = malloc(n * sizeof(char *));
+        char **out = scratch_alloc(n * sizeof(char *));
         int on = 0;
         int cnt = 1;
         for (int i = 1; i <= n; i++) {
@@ -247,7 +249,7 @@ static void apply_stage(char ***lines, int *count, pipe_stage_t *stage) {
             } else {
                 char buf[PIPE_MAX_LINE_LEN + 16];
                 snprintf(buf, sizeof(buf), "%7d %s", cnt, in[i-1]);
-                out[on++] = strdup(buf);
+                out[on++] = scratch_strdup(buf);
                 cnt = 1;
             }
         }
@@ -259,7 +261,7 @@ static void apply_stage(char ***lines, int *count, pipe_stage_t *stage) {
     case PIPE_HEAD: {
         int limit = stage->int_arg > 0 ? stage->int_arg : 10;
         if (limit >= n) break;
-        for (int i = limit; i < n; i++) free(in[i]);
+        /* Arena-backed: no need to free trailing lines */
         *count = limit;
         break;
     }
@@ -268,8 +270,8 @@ static void apply_stage(char ***lines, int *count, pipe_stage_t *stage) {
         int limit = stage->int_arg > 0 ? stage->int_arg : 10;
         if (limit >= n) break;
         int start = n - limit;
-        char **out = malloc(limit * sizeof(char *));
-        for (int i = 0; i < limit; i++) out[i] = strdup(in[start + i]);
+        char **out = scratch_alloc(limit * sizeof(char *));
+        for (int i = 0; i < limit; i++) out[i] = scratch_strdup(in[start + i]);
         free_lines(in, n);
         *lines = out; *count = limit;
         break;
@@ -288,8 +290,8 @@ static void apply_stage(char ***lines, int *count, pipe_stage_t *stage) {
         char buf[32];
         snprintf(buf, sizeof(buf), "%d", n);
         free_lines(in, n);
-        *lines = malloc(sizeof(char *));
-        (*lines)[0] = strdup(buf);
+        *lines = scratch_alloc(sizeof(char *));
+        (*lines)[0] = scratch_strdup(buf);
         *count = 1;
         break;
     }
@@ -301,10 +303,9 @@ static void apply_stage(char ***lines, int *count, pipe_stage_t *stage) {
             char *end = s + strlen(s);
             while (end > s && isspace((unsigned char)end[-1])) end--;
             size_t len = (size_t)(end - s);
-            char *trimmed = malloc(len + 1);
+            char *trimmed = scratch_alloc(len + 1);
             memcpy(trimmed, s, len);
             trimmed[len] = '\0';
-            free(in[i]);
             in[i] = trimmed;
         }
         break;
@@ -324,11 +325,10 @@ static void apply_stage(char ***lines, int *count, pipe_stage_t *stage) {
         for (int i = 0; i < n; i++) {
             size_t plen = strlen(stage->arg);
             size_t llen = strlen(in[i]);
-            char *new_line = malloc(plen + llen + 1);
+            char *new_line = scratch_alloc(plen + llen + 1);
             memcpy(new_line, stage->arg, plen);
             memcpy(new_line + plen, in[i], llen);
             new_line[plen + llen] = '\0';
-            free(in[i]);
             in[i] = new_line;
         }
         break;
@@ -338,11 +338,10 @@ static void apply_stage(char ***lines, int *count, pipe_stage_t *stage) {
         for (int i = 0; i < n; i++) {
             size_t llen = strlen(in[i]);
             size_t slen = strlen(stage->arg);
-            char *new_line = malloc(llen + slen + 1);
+            char *new_line = scratch_alloc(llen + slen + 1);
             memcpy(new_line, in[i], llen);
             memcpy(new_line + llen, stage->arg, slen);
             new_line[llen + slen] = '\0';
-            free(in[i]);
             in[i] = new_line;
         }
         break;
@@ -352,8 +351,7 @@ static void apply_stage(char ***lines, int *count, pipe_stage_t *stage) {
         for (int i = 0; i < n; i++) {
             char buf[PIPE_MAX_LINE_LEN + 16];
             snprintf(buf, sizeof(buf), "%4d  %s", i + 1, in[i]);
-            free(in[i]);
-            in[i] = strdup(buf);
+            in[i] = scratch_strdup(buf);
         }
         break;
     }
@@ -362,7 +360,7 @@ static void apply_stage(char ***lines, int *count, pipe_stage_t *stage) {
         const char *sep = stage->arg[0] ? stage->arg : " ";
         char *joined = join_lines(in, n, sep);
         free_lines(in, n);
-        *lines = malloc(sizeof(char *));
+        *lines = scratch_alloc(sizeof(char *));
         (*lines)[0] = joined;
         *count = 1;
         break;
@@ -370,12 +368,13 @@ static void apply_stage(char ***lines, int *count, pipe_stage_t *stage) {
 
     case PIPE_SPLIT: {
         char delim = stage->arg[0] ? stage->arg[0] : ',';
-        char **out = malloc(n * 16 * sizeof(char *));
+        char **out = scratch_alloc(n * 16 * sizeof(char *));
         int on = 0;
         for (int i = 0; i < n; i++) {
-            char *tok = strtok(strdup(in[i]), (char[]){delim, '\0'});
+            char *copy = scratch_strdup(in[i]);
+            char *tok = strtok(copy, (char[]){delim, '\0'});
             while (tok) {
-                out[on++] = strdup(tok);
+                out[on++] = scratch_strdup(tok);
                 tok = strtok(NULL, (char[]){delim, '\0'});
             }
         }
@@ -396,7 +395,7 @@ static void apply_stage(char ***lines, int *count, pipe_stage_t *stage) {
         }
 
         for (int i = 0; i < n; i++) {
-            char *copy = strdup(in[i]);
+            char *copy = scratch_strdup(in[i]);
             char delim_str[2] = {delim, '\0'};
             char *tok = strtok(copy, delim_str);
             int f = 0;
@@ -406,9 +405,7 @@ static void apply_stage(char ***lines, int *count, pipe_stage_t *stage) {
                 f++;
                 tok = strtok(NULL, delim_str);
             }
-            free(in[i]);
-            in[i] = strdup(found ? found : "");
-            free(copy);
+            in[i] = scratch_strdup(found ? found : "");
         }
         break;
     }
@@ -416,36 +413,22 @@ static void apply_stage(char ***lines, int *count, pipe_stage_t *stage) {
     case PIPE_REGEX: {
         regex_t re;
         if (regcomp(&re, stage->arg, REG_EXTENDED) != 0) break;
-        int cap = n > 0 ? n : 1;
-        char **out = malloc((size_t)cap * sizeof(char *));
+        int regex_cap = n > 0 ? n * 4 : 256; /* estimate 4x matches per line */
+        if (regex_cap > PIPE_MAX_LINES) regex_cap = PIPE_MAX_LINES;
+        char **out = scratch_alloc((size_t)regex_cap * sizeof(char *));
         if (!out) {
             regfree(&re);
             break;
         }
         int on = 0;
-        bool alloc_failed = false;
         for (int i = 0; i < n; i++) {
             const char *cursor = in[i];
-            while (cursor && *cursor) {
+            while (cursor && *cursor && on < regex_cap) {
                 regmatch_t match;
                 if (regexec(&re, cursor, 1, &match, 0) != 0) break;
 
                 size_t mlen = (size_t)(match.rm_eo - match.rm_so);
-                if (on >= cap) {
-                    cap *= 2;
-                    char **grown = realloc(out, (size_t)cap * sizeof(char *));
-                    if (!grown) {
-                        alloc_failed = true;
-                        break;
-                    }
-                    out = grown;
-                }
-                if (alloc_failed) break;
-                char *m = malloc(mlen + 1);
-                if (!m) {
-                    alloc_failed = true;
-                    break;
-                }
+                char *m = scratch_alloc(mlen + 1);
                 memcpy(m, cursor + match.rm_so, mlen);
                 m[mlen] = '\0';
                 out[on++] = m;
@@ -454,16 +437,9 @@ static void apply_stage(char ***lines, int *count, pipe_stage_t *stage) {
                 if (advance == 0) advance = 1;
                 cursor += advance;
             }
-            if (alloc_failed) break;
         }
         regfree(&re);
         free_lines(in, n);
-        if (alloc_failed) {
-            free_lines(out, on);
-            *lines = NULL;
-            *count = 0;
-            break;
-        }
         *lines = out; *count = on;
         break;
     }
@@ -482,11 +458,10 @@ static void apply_stage(char ***lines, int *count, pipe_stage_t *stage) {
             if (pos) {
                 size_t pre = (size_t)(pos - in[i]);
                 size_t post = strlen(pos + old_len);
-                char *new_line = malloc(pre + new_len + post + 1);
+                char *new_line = scratch_alloc(pre + new_len + post + 1);
                 memcpy(new_line, in[i], pre);
                 memcpy(new_line + pre, new_str, new_len);
                 memcpy(new_line + pre + new_len, pos + old_len, post + 1);
-                free(in[i]);
                 in[i] = new_line;
             }
         }
@@ -497,7 +472,7 @@ static void apply_stage(char ***lines, int *count, pipe_stage_t *stage) {
     case PIPE_TAKE_WHILE: {
         int end = 0;
         while (end < n && simple_match(in[end], stage->arg)) end++;
-        for (int i = end; i < n; i++) free(in[i]);
+        /* Arena-backed: no need to free trailing lines */
         *count = end;
         break;
     }
@@ -505,10 +480,11 @@ static void apply_stage(char ***lines, int *count, pipe_stage_t *stage) {
     case PIPE_DROP_WHILE: {
         int start = 0;
         while (start < n && simple_match(in[start], stage->arg)) start++;
-        char **out = malloc((n - start) * sizeof(char *));
-        for (int i = start; i < n; i++) out[i - start] = strdup(in[i]);
+        int remain = n - start;
+        char **out = scratch_alloc(remain * sizeof(char *));
+        for (int i = start; i < n; i++) out[i - start] = scratch_strdup(in[i]);
         free_lines(in, n);
-        *lines = out; *count = n - start;
+        *lines = out; *count = remain;
         break;
     }
 
@@ -517,20 +493,18 @@ static void apply_stage(char ***lines, int *count, pipe_stage_t *stage) {
             char *s = in[i];
             while (*s && isspace((unsigned char)*s)) s++;
             if (s != in[i]) {
-                char *trimmed = strdup(s);
-                free(in[i]);
-                in[i] = trimmed;
+                in[i] = scratch_strdup(s);
             }
         }
         break;
 
     case PIPE_BLANK_REMOVE: {
-        char **out = malloc(n * sizeof(char *));
+        char **out = scratch_alloc(n * sizeof(char *));
         int on = 0;
         for (int i = 0; i < n; i++) {
             char *s = in[i];
             while (*s && isspace((unsigned char)*s)) s++;
-            if (*s) out[on++] = strdup(in[i]);
+            if (*s) out[on++] = scratch_strdup(in[i]);
         }
         free_lines(in, n);
         *lines = out; *count = on;
@@ -541,8 +515,7 @@ static void apply_stage(char ***lines, int *count, pipe_stage_t *stage) {
         for (int i = 0; i < n; i++) {
             char buf[32];
             snprintf(buf, sizeof(buf), "%zu", strlen(in[i]));
-            free(in[i]);
-            in[i] = strdup(buf);
+            in[i] = scratch_strdup(buf);
         }
         break;
 
@@ -550,8 +523,7 @@ static void apply_stage(char ***lines, int *count, pipe_stage_t *stage) {
         for (int i = 0; i < n; i++) {
             char hex[65];
             sha256_hex((const uint8_t *)in[i], strlen(in[i]), hex);
-            free(in[i]);
-            in[i] = strdup(hex);
+            in[i] = scratch_strdup(hex);
         }
         break;
 
@@ -569,10 +541,9 @@ static void apply_stage(char ***lines, int *count, pipe_stage_t *stage) {
                     char *end = strchr(pos, '"');
                     if (end) {
                         size_t vlen = (size_t)(end - pos);
-                        char *val = malloc(vlen + 1);
+                        char *val = scratch_alloc(vlen + 1);
                         memcpy(val, pos, vlen);
                         val[vlen] = '\0';
-                        free(in[i]);
                         in[i] = val;
                         continue;
                     }
@@ -581,14 +552,12 @@ static void apply_stage(char ***lines, int *count, pipe_stage_t *stage) {
                 char *end = pos;
                 while (*end && *end != ',' && *end != '}' && *end != ' ') end++;
                 size_t vlen = (size_t)(end - pos);
-                char *val = malloc(vlen + 1);
+                char *val = scratch_alloc(vlen + 1);
                 memcpy(val, pos, vlen);
                 val[vlen] = '\0';
-                free(in[i]);
                 in[i] = val;
             } else {
-                free(in[i]);
-                in[i] = strdup("");
+                in[i] = scratch_strdup("");
             }
         }
         break;
@@ -597,7 +566,7 @@ static void apply_stage(char ***lines, int *count, pipe_stage_t *stage) {
     case PIPE_CSV_COLUMN: {
         int col = stage->int_arg;
         for (int i = 0; i < n; i++) {
-            char *copy = strdup(in[i]);
+            char *copy = scratch_strdup(in[i]);
             char *tok = strtok(copy, ",");
             int c = 0;
             char *found = NULL;
@@ -608,9 +577,7 @@ static void apply_stage(char ***lines, int *count, pipe_stage_t *stage) {
                 c++;
                 tok = strtok(NULL, ",");
             }
-            free(in[i]);
-            in[i] = strdup(found ? found : "");
-            free(copy);
+            in[i] = scratch_strdup(found ? found : "");
         }
         break;
     }
@@ -642,8 +609,7 @@ static void apply_stage(char ***lines, int *count, pipe_stage_t *stage) {
             int j = rand() % (i + 1);
             char *tmp = (*lines)[i]; (*lines)[i] = (*lines)[j]; (*lines)[j] = tmp;
         }
-        /* Keep last n lines */
-        for (int i = 0; i < *count - n; i++) free((*lines)[i]);
+        /* Keep last n lines — arena handles deallocation of discarded */
         memmove(*lines, *lines + (*count - n), n * sizeof(char*));
         *count = n;
         break;
@@ -651,19 +617,19 @@ static void apply_stage(char ***lines, int *count, pipe_stage_t *stage) {
     case PIPE_FREQ: {
         /* Sort, count unique, sort by count descending */
         qsort(*lines, *count, sizeof(char*), cmp_str);
-        char **out = NULL; int oc = 0;
+        /* Max unique entries <= total lines; allocate upfront */
+        char **out = scratch_alloc(*count * sizeof(char*));
+        int oc = 0;
         int i = 0;
         while (i < *count) {
             int j = i + 1;
             while (j < *count && strcmp((*lines)[i], (*lines)[j]) == 0) j++;
             char buf[PIPE_MAX_LINE_LEN];
             snprintf(buf, sizeof(buf), "%7d %s", j - i, (*lines)[i]);
-            out = realloc(out, (oc + 1) * sizeof(char*));
-            out[oc++] = strdup(buf);
+            out[oc++] = scratch_strdup(buf);
             i = j;
         }
-        for (int k = 0; k < *count; k++) free((*lines)[k]);
-        free(*lines);
+        free_lines(*lines, *count);
         *lines = out; *count = oc;
         /* Sort by count descending */
         qsort(*lines, *count, sizeof(char*), cmp_str_r);
@@ -672,22 +638,24 @@ static void apply_stage(char ***lines, int *count, pipe_stage_t *stage) {
     case PIPE_HISTOGRAM: {
         /* Count frequencies then show bars */
         qsort(*lines, *count, sizeof(char*), cmp_str);
-        char **out = NULL; int oc = 0;
         int max_freq = 0;
         /* First pass: find max frequency */
         int i = 0;
         typedef struct { char *key; int count; } hentry_t;
-        hentry_t *entries = NULL; int ne = 0;
+        /* Max unique entries <= total lines; allocate upfront */
+        hentry_t *entries = scratch_alloc(*count * sizeof(hentry_t));
+        int ne = 0;
         while (i < *count) {
             int j = i + 1;
             while (j < *count && strcmp((*lines)[i], (*lines)[j]) == 0) j++;
             int freq = j - i;
             if (freq > max_freq) max_freq = freq;
-            entries = realloc(entries, (ne + 1) * sizeof(hentry_t));
             entries[ne].key = (*lines)[i]; entries[ne].count = freq;
             ne++; i = j;
         }
         /* Build histogram bars */
+        char **out = scratch_alloc(ne * sizeof(char*));
+        int oc = 0;
         int bar_max = 40;
         for (int k = 0; k < ne; k++) {
             int bar_len = max_freq > 0 ? (entries[k].count * bar_max / max_freq) : 0;
@@ -695,12 +663,9 @@ static void apply_stage(char ***lines, int *count, pipe_stage_t *stage) {
             char bar[64]; for (int b = 0; b < bar_len && b < 63; b++) bar[b] = '#'; bar[bar_len < 63 ? bar_len : 63] = '\0';
             char buf[PIPE_MAX_LINE_LEN];
             snprintf(buf, sizeof(buf), "%7d %s %s", entries[k].count, bar, entries[k].key);
-            out = realloc(out, (oc + 1) * sizeof(char*));
-            out[oc++] = strdup(buf);
+            out[oc++] = scratch_strdup(buf);
         }
-        free(entries);
-        for (int k = 0; k < *count; k++) free((*lines)[k]);
-        free(*lines);
+        free_lines(*lines, *count);
         *lines = out; *count = oc;
         break;
     }
@@ -715,16 +680,17 @@ char *pipeline_execute(pipeline_t *p) {
     int count = p->line_count;
 
     /* Detach lines from pipeline (stages will manage memory) */
-    char **work = malloc(count * sizeof(char *));
-    for (int i = 0; i < count; i++) work[i] = strdup(lines[i]);
+    char **work = scratch_alloc(count * sizeof(char *));
+    for (int i = 0; i < count; i++) work[i] = scratch_strdup(lines[i]);
 
     for (int s = 0; s < p->stage_count; s++) {
         apply_stage(&work, &count, &p->stages[s]);
     }
 
-    char *result = join_lines(work, count, "\n");
+    char *arena_result = join_lines(work, count, "\n");
     free_lines(work, count);
-    return result;
+    /* Return a malloc'd copy — callers expect to free() the result */
+    return arena_result ? strdup(arena_result) : NULL;
 }
 
 /* ── Parse pipeline spec ─────────────────────────────────────────────── */
@@ -790,7 +756,7 @@ pipeline_t *pipeline_parse(const char *input, const char *spec) {
     if (!p) return NULL;
 
     /* Parse spec: "stage:arg|stage:arg|..." */
-    char *spec_copy = strdup(spec);
+    char *spec_copy = scratch_strdup(spec);
     if (!spec_copy) { pipeline_free(p); return NULL; }
     char *save = NULL;
     char *token = strtok_r(spec_copy, "|", &save);
@@ -826,7 +792,7 @@ pipeline_t *pipeline_parse(const char *input, const char *spec) {
         token = strtok_r(NULL, "|", &save);
     }
 
-    free(spec_copy);
+    /* spec_copy is arena-backed, no free needed */
     return p;
 }
 

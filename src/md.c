@@ -4,6 +4,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <strings.h>
 #include <ctype.h>
 #include <sys/ioctl.h>
 #include <unistd.h>
@@ -35,20 +36,55 @@ static bool is_blank_line(const char *line) {
     return true;
 }
 
-/* Count visible characters (skip ANSI escapes + UTF-8 continuation) */
+/* Count visible terminal cells (ANSI-aware, wide-char aware). */
 static int vis_len(const char *s) {
-    int len = 0;
-    bool in_esc = false;
-    for (const char *p = s; *p; p++) {
-        if (*p == '\033') { in_esc = true; continue; }
-        if (in_esc) {
-            if ((*p >= 'A' && *p <= 'Z') || (*p >= 'a' && *p <= 'z')) in_esc = false;
-            continue;
-        }
-        if (((unsigned char)*p & 0xC0) == 0x80) continue;
-        len++;
+    return tui_str_display_width(s);
+}
+
+static void fput_safe_byte(FILE *out, unsigned char ch) {
+    if (ch == '\t') {
+        fputc('\t', out);
+        return;
     }
-    return len;
+    if (ch < 0x20 || ch == 0x7F) {
+        fprintf(out, "\\x%02X", ch);
+        return;
+    }
+    fputc((char)ch, out);
+}
+
+static void fput_safe_span(FILE *out, const char *s, size_t n) {
+    for (size_t i = 0; i < n; i++) fput_safe_byte(out, (unsigned char)s[i]);
+}
+
+static void fputs_safe(FILE *out, const char *s) {
+    if (!s) return;
+    fput_safe_span(out, s, strlen(s));
+}
+
+static bool parse_fence_line(const char *line, char *fchar, int *flen, const char **after) {
+    if (!line || (*line != '`' && *line != '~')) return false;
+    char ch = *line;
+    int n = 0;
+    while (line[n] == ch) n++;
+    if (n < 3) return false;
+    if (fchar) *fchar = ch;
+    if (flen) *flen = n;
+    if (after) *after = line + n;
+    return true;
+}
+
+static bool is_fence_closer(const char *line, char open_ch, int open_len) {
+    char ch = '\0';
+    int n = 0;
+    const char *after = NULL;
+    if (!parse_fence_line(line, &ch, &n, &after)) return false;
+    if (ch != open_ch || n < open_len) return false;
+    while (*after) {
+        if (*after != ' ' && *after != '\t') return false;
+        after++;
+    }
+    return true;
 }
 
 /* ── LaTeX Symbol Table ───────────────────────────────────────────────── */
@@ -409,6 +445,25 @@ static const emoji_entry_t EMOJI_TABLE[] = {
     {NULL, NULL}
 };
 
+/* CommonMark: underscore emphasis requires flanking delimiters.
+ * Opening _ must NOT be preceded by alphanumeric (left-flanking).
+ * Closing _ must NOT be followed by alphanumeric (right-flanking).
+ * This prevents intra-word underscores (e.g. LIVE_TRADING_SYSTEM) from
+ * being swallowed as emphasis markers. */
+static bool underscore_can_open(const char *text, const char *pos) {
+    if (pos > text) {
+        unsigned char prev = (unsigned char)*(pos - 1);
+        if (isalnum(prev)) return false;
+    }
+    return true;
+}
+
+static bool underscore_can_close(const char *pos, int marker_len) {
+    unsigned char next = (unsigned char)pos[marker_len];
+    if (isalnum(next)) return false;
+    return true;
+}
+
 static void render_inline(FILE *out, const char *text) {
     const char *p = text;
     while (*p) {
@@ -446,7 +501,7 @@ static void render_inline(FILE *out, const char *text) {
                         cs++; clen -= 2;
                     }
                     fprintf(out, "%s%s", TUI_BG256(236), TUI_BCYAN);
-                    fwrite(cs, 1, clen, out);
+                    fput_safe_span(out, cs, (size_t)clen);
                     fprintf(out, "%s", TUI_RESET);
                     p = end + ticks;
                     code_found = true;
@@ -463,11 +518,13 @@ static void render_inline(FILE *out, const char *text) {
 
         /* Bold + Italic: ***...*** or ___...___ */
         if ((p[0] == '*' && p[1] == '*' && p[2] == '*') ||
-            (p[0] == '_' && p[1] == '_' && p[2] == '_')) {
+            (p[0] == '_' && p[1] == '_' && p[2] == '_' &&
+             underscore_can_open(text, p))) {
             char marker = p[0];
             const char *end = p + 3;
             while (*end) {
-                if (end[0] == marker && end[1] == marker && end[2] == marker) break;
+                if (end[0] == marker && end[1] == marker && end[2] == marker &&
+                    (marker == '*' || underscore_can_close(end, 3))) break;
                 end++;
             }
             if (*end) {
@@ -487,11 +544,13 @@ static void render_inline(FILE *out, const char *text) {
 
         /* Bold: **...** or __...__ */
         if ((p[0] == '*' && p[1] == '*' && p[2] != '*') ||
-            (p[0] == '_' && p[1] == '_' && p[2] != '_')) {
+            (p[0] == '_' && p[1] == '_' && p[2] != '_' &&
+             underscore_can_open(text, p))) {
             char marker = p[0];
             const char *end = p + 2;
             while (*end) {
-                if (end[0] == marker && end[1] == marker) break;
+                if (end[0] == marker && end[1] == marker &&
+                    (marker == '*' || underscore_can_close(end, 2))) break;
                 end++;
             }
             if (*end) {
@@ -509,11 +568,14 @@ static void render_inline(FILE *out, const char *text) {
         }
 
         /* Italic: *...* or _..._ (single) */
-        if ((*p == '*' || *p == '_') && p[1] != *p && p[1] != ' ') {
+        if ((*p == '*' || (*p == '_' && underscore_can_open(text, p))) &&
+            p[1] != *p && p[1] != ' ') {
             char marker = *p;
             const char *end = p + 1;
             while (*end && *end != '\n') {
-                if (*end == marker && (end == p + 1 || *(end-1) != ' ')) break;
+                if (*end == marker &&
+                    (end == p + 1 || *(end-1) != ' ') &&
+                    (marker == '*' || underscore_can_close(end, 1))) break;
                 end++;
             }
             if (*end == marker && end > p + 1) {
@@ -679,7 +741,7 @@ static void render_inline(FILE *out, const char *text) {
                 const char *close = strstr(p + 6, "</code>");
                 if (close) {
                     fprintf(out, "%s%s", TUI_BG256(236), TUI_BCYAN);
-                    fwrite(p + 6, 1, close - p - 6, out);
+                    fput_safe_span(out, p + 6, (size_t)(close - p - 6));
                     fprintf(out, "%s", TUI_RESET);
                     p = close + 7;
                     continue;
@@ -1061,8 +1123,7 @@ static void render_inline(FILE *out, const char *text) {
             }
         }
 
-        /* Hard line break: two trailing spaces (already trimmed, so check original) */
-        /* This is handled at line level instead */
+        /* Hard line break: handled at line level. */
 
         fputc(*p, out);
         p++;
@@ -1236,8 +1297,33 @@ static int md_rendered_width(const char *text) {
     return vis_len(buf);
 }
 
+/* Returns true if a cell value looks like a "total" row (bold markdown or total keyword) */
+static bool cell_is_total(const char *cell) {
+    if (!cell) return false;
+    if (strncmp(cell, "**", 2) == 0) return true;
+    if (strncasecmp(cell, "Total", 5) == 0) return true;
+    if (strncasecmp(cell, "Grand Total", 11) == 0) return true;
+    if (strncasecmp(cell, "Subtotal", 8) == 0) return true;
+    if (strncasecmp(cell, "Net", 3) == 0) return true;
+    if (strncasecmp(cell, "Sum", 3) == 0) return true;
+    return false;
+}
+
 static void render_table(FILE *out, md_renderer_t *r) {
     if (r->table_rows == 0) return;
+
+    /* Single-row table whose content is a total/summary: render as compact bold line,
+       not a full table box (avoids the "loss entry" look when preceded by a <hr>) */
+    if (r->table_rows == 1 && cell_is_total(r->table_cells[0][0])) {
+        fprintf(out, "  %s%s", TUI_BOLD, TUI_BWHITE);
+        for (int c = 0; c < r->table_cols; c++) {
+            const char *cell = r->table_cells[0][c] ? r->table_cells[0][c] : "";
+            if (c > 0) fprintf(out, "   ");
+            render_inline(out, cell);
+        }
+        fprintf(out, "%s\n", TUI_RESET);
+        return;
+    }
 
     /* Calculate column widths based on rendered visible length */
     int col_w[MD_TABLE_MAXCOL] = {0};
@@ -1264,6 +1350,16 @@ static void render_table(FILE *out, md_renderer_t *r) {
     fprintf(out, "%s\n", TUI_RESET);
 
     for (int row = 0; row < r->table_rows; row++) {
+        /* Draw separator before a non-header total row */
+        if (row > 0 && cell_is_total(r->table_cells[row][0])) {
+            fprintf(out, "  %s├", TUI_DIM);
+            for (int c = 0; c < r->table_cols; c++) {
+                for (int i = 0; i < col_w[c] + 2; i++) fprintf(out, "─");
+                fprintf(out, "%s", c < r->table_cols - 1 ? "┼" : "┤");
+            }
+            fprintf(out, "%s\n", TUI_RESET);
+        }
+
         /* Render row */
         fprintf(out, "  %s│%s", TUI_DIM, TUI_RESET);
         for (int c = 0; c < r->table_cols; c++) {
@@ -1271,17 +1367,32 @@ static void render_table(FILE *out, md_renderer_t *r) {
                                ? r->table_cells[row][c] : "";
             int cw = md_rendered_width(cell);
             int pad = col_w[c] - cw;
+            int left_pad = 0;
+            int right_pad = pad;
+            if (r->table_align[c] == MD_ALIGN_RIGHT) {
+                left_pad = pad;
+                right_pad = 0;
+            } else if (r->table_align[c] == MD_ALIGN_CENTER) {
+                left_pad = pad / 2;
+                right_pad = pad - left_pad;
+            }
 
             fprintf(out, " ");
+            for (int i = 0; i < left_pad; i++) fputc(' ', out);
             if (row == 0) {
                 /* Header row: bold + colored */
                 fprintf(out, "%s%s", TUI_BOLD, TUI_BCYAN);
                 render_inline(out, cell);
                 fprintf(out, "%s", TUI_RESET);
+            } else if (cell_is_total(r->table_cells[row][0])) {
+                /* Total row: bold white */
+                fprintf(out, "%s%s", TUI_BOLD, TUI_BWHITE);
+                render_inline(out, cell);
+                fprintf(out, "%s", TUI_RESET);
             } else {
                 render_inline(out, cell);
             }
-            for (int i = 0; i < pad; i++) fputc(' ', out);
+            for (int i = 0; i < right_pad; i++) fputc(' ', out);
             fprintf(out, " %s│%s", TUI_DIM, TUI_RESET);
         }
         fprintf(out, "\n");
@@ -1346,31 +1457,48 @@ static void render_code_line(FILE *out, const char *line, const char *lang) {
                      is_json || is_yaml || is_md;
 
     if (!highlight) {
-        fputs(line, out);
+        fputs_safe(out, line);
         return;
     }
 
     const char *p = line;
     while (*p) {
+        unsigned char uc = (unsigned char)*p;
+        if ((uc < 0x20 && uc != '\t') || uc == 0x7F) {
+            fput_safe_byte(out, uc);
+            p++;
+            continue;
+        }
+
         /* Comments */
         if ((is_c || is_js || is_rust || is_go || is_java || is_css) && p[0] == '/' && p[1] == '/') {
-            fprintf(out, "%s%s%s", TUI_DIM, p, TUI_RESET);
+            fprintf(out, "%s", TUI_DIM);
+            fputs_safe(out, p);
+            fprintf(out, "%s", TUI_RESET);
             return;
         }
         if (is_c && p[0] == '/' && p[1] == '*') {
-            fprintf(out, "%s%s%s", TUI_DIM, p, TUI_RESET);
+            fprintf(out, "%s", TUI_DIM);
+            fputs_safe(out, p);
+            fprintf(out, "%s", TUI_RESET);
             return;
         }
         if ((is_py || is_sh || is_rb || is_yaml) && *p == '#') {
-            fprintf(out, "%s%s%s", TUI_DIM, p, TUI_RESET);
+            fprintf(out, "%s", TUI_DIM);
+            fputs_safe(out, p);
+            fprintf(out, "%s", TUI_RESET);
             return;
         }
         if (is_sql && *p == '-' && p[1] == '-') {
-            fprintf(out, "%s%s%s", TUI_DIM, p, TUI_RESET);
+            fprintf(out, "%s", TUI_DIM);
+            fputs_safe(out, p);
+            fprintf(out, "%s", TUI_RESET);
             return;
         }
         if (is_html && p[0] == '<' && p[1] == '!' && p[2] == '-' && p[3] == '-') {
-            fprintf(out, "%s%s%s", TUI_DIM, p, TUI_RESET);
+            fprintf(out, "%s", TUI_DIM);
+            fputs_safe(out, p);
+            fprintf(out, "%s", TUI_RESET);
             return;
         }
 
@@ -1384,7 +1512,7 @@ static void render_code_line(FILE *out, const char *line, const char *lang) {
                     fprintf(out, "%s\\%c%s", TUI_BYELLOW, p[1], TUI_GREEN);
                     p += 2;
                 } else {
-                    fputc(*p, out);
+                    fput_safe_byte(out, (unsigned char)*p);
                     p++;
                 }
             }
@@ -1456,7 +1584,7 @@ static void render_code_line(FILE *out, const char *line, const char *lang) {
                     fprintf(out, "%s\\%c%s", TUI_BYELLOW, p[1], TUI_GREEN);
                     p += 2;
                 } else {
-                    fputc(*p, out);
+                    fput_safe_byte(out, (unsigned char)*p);
                     p++;
                 }
             }
@@ -1619,21 +1747,45 @@ static void render_code_line(FILE *out, const char *line, const char *lang) {
             continue;
         }
 
-        fputc(*p, out);
+        fput_safe_byte(out, (unsigned char)*p);
         p++;
     }
 }
 
-static void render_code_block(FILE *out, const char *code, const char *lang, int tw) {
+static int count_code_lines(const char *code) {
+    if (!code || !*code) return 0;
+    int n = 0;
+    const char *p = code;
+    while (*p) {
+        n++;
+        const char *nl = strchr(p, '\n');
+        if (!nl) break;
+        p = nl + 1;
+    }
+    return n;
+}
+
+static int int_width(int n) {
+    int w = 1;
+    while (n >= 10) { n /= 10; w++; }
+    return w;
+}
+
+static void render_code_block(FILE *out, const char *code, const char *lang, int tw, bool truncated) {
     if (tw <= 0) tw = term_width();
     int box_w = tw - 4;
     if (box_w < 20) box_w = 20;
+    int total_lines = count_code_lines(code);
+    int lineno_w = int_width(total_lines > 0 ? total_lines : 1);
+    if (lineno_w < 3) lineno_w = 3;
 
     /* Language label */
     fprintf(out, "  %s╭─", TUI_DIM);
     if (lang && lang[0]) {
-        fprintf(out, " %s%s%s%s ", TUI_RESET, TUI_BCYAN, lang, TUI_DIM);
-        int lw = (int)strlen(lang) + 2;
+        fprintf(out, " %s%s", TUI_RESET, TUI_BCYAN);
+        fputs_safe(out, lang);
+        fprintf(out, "%s ", TUI_DIM);
+        int lw = tui_str_display_width(lang) + 2;
         for (int i = 0; i < box_w - 3 - lw; i++) fprintf(out, "─");
     } else {
         for (int i = 0; i < box_w - 2; i++) fprintf(out, "─");
@@ -1643,38 +1795,59 @@ static void render_code_block(FILE *out, const char *code, const char *lang, int
     /* Code lines */
     int lineno = 1;
     const char *p = code;
+    bool fallback_trunc = false;
     while (*p) {
         const char *nl = strchr(p, '\n');
         int len = nl ? (int)(nl - p) : (int)strlen(p);
 
-        char line[MD_LINE_MAX];
-        if (len >= (int)sizeof(line)) len = (int)sizeof(line) - 1;
-        memcpy(line, p, len);
-        line[len] = '\0';
+        char stack_line[MD_LINE_MAX];
+        char *line = stack_line;
+        int copy_len = len;
+        bool heap_line = false;
+        if (len >= (int)sizeof(stack_line)) {
+            line = malloc((size_t)len + 1);
+            if (line) {
+                heap_line = true;
+            } else {
+                copy_len = (int)sizeof(stack_line) - 1;
+                fallback_trunc = true;
+                line = stack_line;
+            }
+        }
+        memcpy(line, p, (size_t)copy_len);
+        line[copy_len] = '\0';
 
         /* Line with gutter */
-        fprintf(out, "  %s│%s %s%3d%s %s│%s ",
+        fprintf(out, "  %s│%s %s%*d%s %s│%s ",
                 TUI_DIM, TUI_RESET,
-                TUI_FG256(240), lineno, TUI_RESET,
+                TUI_FG256(240), lineno_w, lineno, TUI_RESET,
                 TUI_DIM, TUI_RESET);
 
         /* F38: Diff-aware code blocks — color +/- lines */
         if (g_tui_features && g_tui_features->diff_code_blocks &&
-            (line[0] == '+' || line[0] == '-' || (line[0] == '@' && len > 1 && line[1] == '@'))) {
+            (line[0] == '+' || line[0] == '-' || (line[0] == '@' && copy_len > 1 && line[1] == '@'))) {
             if (line[0] == '+')
-                fprintf(out, "%s%s%s", TUI_GREEN, line, TUI_RESET);
+                fprintf(out, "%s", TUI_GREEN);
             else if (line[0] == '-')
-                fprintf(out, "%s%s%s", TUI_RED, line, TUI_RESET);
+                fprintf(out, "%s", TUI_RED);
             else
-                fprintf(out, "%s%s%s%s", TUI_BOLD, TUI_CYAN, line, TUI_RESET);
+                fprintf(out, "%s%s", TUI_BOLD, TUI_CYAN);
+            fputs_safe(out, line);
+            fprintf(out, "%s", TUI_RESET);
         } else {
             render_code_line(out, line, lang);
         }
         fprintf(out, "\n");
+        if (heap_line) free(line);
 
         lineno++;
         p = nl ? nl + 1 : p + len;
         if (!nl) break;
+    }
+
+    if (truncated || fallback_trunc) {
+        fprintf(out, "  %s│%s %s[code block truncated]%s\n",
+                TUI_DIM, TUI_RESET, TUI_DIM, TUI_RESET);
     }
 
     /* Bottom border */
@@ -1690,10 +1863,9 @@ static void render_line(md_renderer_t *r, char *line) {
     int tw = r->term_width;
     if (tw <= 0) tw = term_width();
 
-    /* Strip trailing whitespace but preserve the string */
+    /* Strip only line endings; preserve trailing spaces/tabs in content. */
     int len = (int)strlen(line);
-    while (len > 0 && (line[len-1] == '\n' || line[len-1] == '\r' ||
-                       line[len-1] == ' ' || line[len-1] == '\t'))
+    while (len > 0 && (line[len-1] == '\n' || line[len-1] == '\r'))
         line[--len] = '\0';
 
     /* Suppress accidental adjacent duplicate long lines in normal prose.
@@ -1712,48 +1884,55 @@ static void render_line(md_renderer_t *r, char *line) {
         r->last_para_line_valid = true;
     }
 
-    /* ── Code fence start ── */
-    if ((line[0] == '`' && line[1] == '`' && line[2] == '`') ||
-        (line[0] == '~' && line[1] == '~' && line[2] == '~')) {
-        if (r->state == MD_STATE_NORMAL) {
-            r->state = MD_STATE_CODE_BLOCK;
-            r->code_fence[0] = line[0];
-            r->code_fence[1] = line[1];
-            r->code_fence[2] = line[2];
-            r->code_fence[3] = '\0';
-            r->code_fence_len = 3;
-            /* Parse language */
-            const char *lang = line + 3;
-            while (*lang == ' ') lang++;
-            int llen = (int)strlen(lang);
-            if (llen >= (int)sizeof(r->code_lang)) llen = (int)sizeof(r->code_lang) - 1;
-            memcpy(r->code_lang, lang, llen);
-            r->code_lang[llen] = '\0';
-            /* Trim trailing whitespace from lang */
-            char *le = r->code_lang + strlen(r->code_lang);
-            while (le > r->code_lang && (*(le-1) == ' ' || *(le-1) == '\t' || *(le-1) == '\n'))
-                *--le = '\0';
-            r->code_len = 0;
-            r->code_buf[0] = '\0';
-            return;
-        }
-        if (r->state == MD_STATE_CODE_BLOCK) {
-            /* End of code block */
-            render_code_block(out, r->code_buf, r->code_lang, tw);
-            r->state = MD_STATE_NORMAL;
-            r->code_len = 0;
-            return;
+    /* ── Code fence start/end ── */
+    {
+        char fence_ch = '\0';
+        int fence_len = 0;
+        const char *fence_after = NULL;
+        if (parse_fence_line(line, &fence_ch, &fence_len, &fence_after)) {
+            if (r->state == MD_STATE_NORMAL) {
+                r->state = MD_STATE_CODE_BLOCK;
+                r->code_fence[0] = fence_ch;
+                r->code_fence[1] = '\0';
+                r->code_fence_len = fence_len;
+                /* Parse language */
+                const char *lang = fence_after;
+                while (*lang == ' ') lang++;
+                int llen = (int)strlen(lang);
+                if (llen >= (int)sizeof(r->code_lang)) llen = (int)sizeof(r->code_lang) - 1;
+                memcpy(r->code_lang, lang, (size_t)llen);
+                r->code_lang[llen] = '\0';
+                /* Trim trailing whitespace from lang */
+                char *le = r->code_lang + strlen(r->code_lang);
+                while (le > r->code_lang && (*(le-1) == ' ' || *(le-1) == '\t' || *(le-1) == '\n'))
+                    *--le = '\0';
+                r->code_len = 0;
+                r->code_truncated = false;
+                r->code_buf[0] = '\0';
+                return;
+            }
+            if (r->state == MD_STATE_CODE_BLOCK &&
+                is_fence_closer(line, r->code_fence[0], r->code_fence_len)) {
+                /* End of code block */
+                render_code_block(out, r->code_buf, r->code_lang, tw, r->code_truncated);
+                r->state = MD_STATE_NORMAL;
+                r->code_len = 0;
+                r->code_truncated = false;
+                return;
+            }
         }
     }
 
-    /* Inside code block: accumulate */
     if (r->state == MD_STATE_CODE_BLOCK) {
-        int ll = (int)strlen(line);
+        /* Inside code block: accumulate */
+        int ll = len;
         if (r->code_len + ll + 2 < MD_BUF_MAX) {
-            memcpy(r->code_buf + r->code_len, line, ll);
+            memcpy(r->code_buf + r->code_len, line, (size_t)ll);
             r->code_len += ll;
             r->code_buf[r->code_len++] = '\n';
             r->code_buf[r->code_len] = '\0';
+        } else {
+            r->code_truncated = true;
         }
         return;
     }
@@ -2202,7 +2381,9 @@ static void render_line(md_renderer_t *r, char *line) {
     /* ── Indented code (4 spaces or tab, not in a list) ── */
     if (!r->in_list && (str_starts(line, "    ") || line[0] == '\t')) {
         const char *code = (line[0] == '\t') ? line + 1 : line + 4;
-        fprintf(out, "  %s%s %s %s\n", TUI_BG256(236), TUI_FG256(252), code, TUI_RESET);
+        fprintf(out, "  %s%s ", TUI_BG256(236), TUI_FG256(252));
+        fputs_safe(out, code);
+        fprintf(out, " %s\n", TUI_RESET);
         return;
     }
 
@@ -2252,7 +2433,6 @@ static void render_line(md_renderer_t *r, char *line) {
 /* ── Public API ───────────────────────────────────────────────────────── */
 
 void md_init(md_renderer_t *r, FILE *out) {
-    if (r->line_overflow) free(r->line_overflow);
     memset(r, 0, sizeof(*r));
     r->out = out;
     r->term_width = term_width();
@@ -2337,6 +2517,10 @@ void md_feed(md_renderer_t *r, const char *text, size_t len) {
             }
             render_line(r, full_line);
             if (heap_line) free(full_line);
+            if (r->line_input_truncated) {
+                fprintf(r->out, "  %s[line truncated due memory limits]%s\n", TUI_DIM, TUI_RESET);
+                r->line_input_truncated = false;
+            }
 
             r->line_len = 0;
             r->line_overflow_len = 0;
@@ -2363,6 +2547,7 @@ void md_feed(md_renderer_t *r, const char *text, size_t len) {
                     r->line_overflow[r->line_overflow_len++] = ch;
                 } else {
                     stored = false;
+                    r->line_input_truncated = true;
                 }
             }
             if (stored && emit_partial) {
@@ -2403,6 +2588,10 @@ void md_flush(md_renderer_t *r) {
         }
         render_line(r, full_line);
         if (heap_line) free(full_line);
+        if (r->line_input_truncated) {
+            fprintf(r->out, "  %s[line truncated due memory limits]%s\n", TUI_DIM, TUI_RESET);
+            r->line_input_truncated = false;
+        }
         r->line_len = 0;
         r->line_overflow_len = 0;
         r->partial_echo_pos = 0;
@@ -2419,9 +2608,10 @@ void md_flush(md_renderer_t *r) {
     if (r->state == MD_STATE_TABLE) flush_table_or_fallback(r->out, r);
 
     /* Flush pending code block (unclosed) */
-    if (r->state == MD_STATE_CODE_BLOCK && r->code_len > 0) {
-        render_code_block(r->out, r->code_buf, r->code_lang, r->term_width);
+    if (r->state == MD_STATE_CODE_BLOCK && (r->code_len > 0 || r->code_truncated)) {
+        render_code_block(r->out, r->code_buf, r->code_lang, r->term_width, r->code_truncated);
         r->code_len = 0;
+        r->code_truncated = false;
         r->state = MD_STATE_NORMAL;
     }
 

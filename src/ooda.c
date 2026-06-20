@@ -1,4 +1,5 @@
 #include "ooda.h"
+#include "scheduler.h"
 #include <math.h>
 #include <stdio.h>
 #include <string.h>
@@ -11,6 +12,14 @@
  * Decide → Act. The OODA engine enforces structured decision-making
  * and maintains a history for learning.
  * ═══════════════════════════════════════════════════════════════════════════ */
+
+/* ── Scheduler integration (§1/§7) ───────────────────────────────────── */
+
+static scheduler_t *g_ooda_sched = NULL;
+
+void ooda_set_scheduler(scheduler_t *sched) {
+    g_ooda_sched = sched;
+}
 
 static double now_sec(void) {
     struct timeval tv;
@@ -339,4 +348,115 @@ int ooda_to_json(const ooda_engine_t *e, char *buf, size_t len) {
     n += ooda_cycle_to_json(&e->current, buf + n, len - n);
     n += snprintf(buf + n, len - n, "}");
     return n;
+}
+
+/* ═══════════════════════════════════════════════════════════════════════════
+ * Scheduler Task Adapters (§1/§7)
+ *
+ * Each OODA phase is modeled as a cooperative scheduler task.
+ * ooda_run_scheduled() chains them sequentially using sched_wait_task,
+ * allowing the scheduler to interleave other work between phases.
+ * ═══════════════════════════════════════════════════════════════════════════ */
+
+/* Context passed to each phase task */
+typedef struct {
+    ooda_engine_t *engine;
+    ooda_action_t  decided_action;  /* set by decide task */
+    int            cycle_id;
+} ooda_sched_ctx_t;
+
+static int ooda_observe_task(void *ctx) {
+    ooda_sched_ctx_t *sc = (ooda_sched_ctx_t *)ctx;
+    if (!sc || !sc->engine) return -1;
+
+    ooda_engine_t *e = sc->engine;
+    /* The cycle should already be in OBSERVE phase from ooda_begin().
+       If observations were pre-loaded before scheduling, this is a no-op
+       transition; otherwise callers added observations before spawning. */
+    if (e->current.phase != OODA_PHASE_OBSERVE) return -1;
+
+    /* Advance to orient phase when observe completes */
+    e->current.phase = OODA_PHASE_ORIENT;
+    e->current.phase_started_at = now_sec();
+    return 0;
+}
+
+static int ooda_orient_task(void *ctx) {
+    ooda_sched_ctx_t *sc = (ooda_sched_ctx_t *)ctx;
+    if (!sc || !sc->engine) return -1;
+
+    ooda_engine_t *e = sc->engine;
+    if (e->current.phase != OODA_PHASE_ORIENT) return -1;
+
+    /* Orientation factors should already be loaded; advance to decide */
+    e->current.phase = OODA_PHASE_DECIDE;
+    e->current.phase_started_at = now_sec();
+    return 0;
+}
+
+static int ooda_decide_task(void *ctx) {
+    ooda_sched_ctx_t *sc = (ooda_sched_ctx_t *)ctx;
+    if (!sc || !sc->engine) return -1;
+
+    /* ooda_decide auto-advances to ACT and returns the chosen action */
+    sc->decided_action = ooda_decide(sc->engine);
+    return 0;
+}
+
+static int ooda_act_task(void *ctx) {
+    ooda_sched_ctx_t *sc = (ooda_sched_ctx_t *)ctx;
+    if (!sc || !sc->engine) return -1;
+
+    ooda_engine_t *e = sc->engine;
+    if (e->current.phase != OODA_PHASE_ACT) return -1;
+
+    /* Record that the action phase ran; actual execution is up to the caller.
+       Mark success=true as default; callers can override via ooda_act_result. */
+    ooda_act_result(e, true, "scheduled execution");
+    ooda_complete(e);
+    return 0;
+}
+
+int ooda_run_scheduled(ooda_cycle_t *cycle, scheduler_t *sched) {
+    if (!cycle || !sched) return -1;
+
+    /* Use the cycle's engine — the cycle is always &engine->current,
+       so we recover the engine by container-of arithmetic. */
+    ooda_engine_t *engine = (ooda_engine_t *)((char *)cycle -
+                             offsetof(ooda_engine_t, current));
+
+    static ooda_sched_ctx_t sctx;  /* static — lives beyond sched_run */
+    sctx.engine = engine;
+    sctx.decided_action = OODA_ACTION_ESCALATE;
+    sctx.cycle_id = cycle->id;
+
+    /* Spawn each phase as a high-priority task, chained sequentially */
+    task_id_t t_observe = sched_spawn(sched, ooda_observe_task, &sctx,
+                                       "ooda:observe", SCHED_PRIO_HIGH);
+    task_id_t t_orient  = sched_spawn(sched, ooda_orient_task, &sctx,
+                                       "ooda:orient", SCHED_PRIO_HIGH);
+    task_id_t t_decide  = sched_spawn(sched, ooda_decide_task, &sctx,
+                                       "ooda:decide", SCHED_PRIO_HIGH);
+    task_id_t t_act     = sched_spawn(sched, ooda_act_task, &sctx,
+                                       "ooda:act", SCHED_PRIO_HIGH);
+
+    if (t_observe == TASK_INVALID || t_orient == TASK_INVALID ||
+        t_decide == TASK_INVALID  || t_act == TASK_INVALID) {
+        return -1;
+    }
+
+    /* Chain: orient waits for observe, decide waits for orient, act waits for decide */
+    sched_task_t *orient_task = sched_task_get(sched, t_orient);
+    if (orient_task) { orient_task->wait_task = t_observe; orient_task->state = TASK_WAITING_TASK; }
+
+    sched_task_t *decide_task = sched_task_get(sched, t_decide);
+    if (decide_task) { decide_task->wait_task = t_orient; decide_task->state = TASK_WAITING_TASK; }
+
+    sched_task_t *act_task_p = sched_task_get(sched, t_act);
+    if (act_task_p) { act_task_p->wait_task = t_decide; act_task_p->state = TASK_WAITING_TASK; }
+
+    /* Run scheduler until all four tasks complete */
+    sched_run(sched, 10);
+
+    return (int)sctx.decided_action;
 }
