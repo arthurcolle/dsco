@@ -1,7 +1,12 @@
 import copy
+import tempfile
 import unittest
+from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
+from pathlib import Path
+
+from fastapi.testclient import TestClient
 
 from web import server
 
@@ -72,6 +77,61 @@ class DummyWebSocket:
 
 
 class WebServerTests(unittest.IsolatedAsyncioTestCase):
+    def setUp(self):
+        server._endpoint_metrics.clear()
+
+    def test_normalize_user_content_accepts_mixed_text_and_images(self):
+        normalized = server.normalize_user_content([
+            {"type": "text", "text": "Inspect this"},
+            {"type": "image", "media_type": "image/png", "data": "aGVsbG8="},
+        ])
+
+        self.assertEqual(
+            normalized,
+            [
+                {"type": "text", "text": "Inspect this"},
+                {
+                    "type": "image",
+                    "source": {
+                        "type": "base64",
+                        "media_type": "image/png",
+                        "data": "aGVsbG8=",
+                    },
+                },
+            ],
+        )
+
+    def test_to_openai_messages_converts_user_images(self):
+        session = server.Session("gpt-4o")
+        messages = [
+            {
+                "role": "user",
+                "content": [
+                    {"type": "text", "text": "What changed here?"},
+                    {
+                        "type": "image",
+                        "source": {
+                            "type": "base64",
+                            "media_type": "image/png",
+                            "data": "aGVsbG8=",
+                        },
+                    },
+                ],
+            }
+        ]
+
+        converted = server.to_openai_messages(session, messages)
+
+        self.assertEqual(converted[0]["role"], "system")
+        self.assertEqual(converted[1]["role"], "user")
+        self.assertEqual(
+            converted[1]["content"],
+            [
+                {"type": "text", "text": "What changed here?"},
+                {"type": "image_url", "image_url": {"url": "data:image/png;base64,aGVsbG8="}},
+            ],
+        )
+
     def test_assistant_content_for_replay_drops_thinking(self):
         blocks = [
             {"type": "thinking", "thinking": "hidden", "signature": "sig"},
@@ -133,6 +193,123 @@ class WebServerTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertTrue(any(event["type"] == "thinking_start" for event in ws.events))
         self.assertTrue(any(event["type"] == "thinking_end" for event in ws.events))
+
+    def test_dashboard_meta_exposes_limits_and_runbooks(self):
+        client = TestClient(server.app)
+
+        resp = client.get("/api/dashboard/meta")
+
+        self.assertEqual(resp.status_code, 200)
+        data = resp.json()
+        self.assertIn("limits", data)
+        self.assertIn("runbooks", data)
+        self.assertGreaterEqual(data["limits"]["list"], 1)
+        self.assertGreaterEqual(len(data["runbooks"]), 1)
+
+    def test_weather_dashboard_enriches_freshness_and_lineage(self):
+        client = TestClient(server.app)
+        now = datetime.now(timezone.utc)
+
+        class FakeRT:
+            KALSHI_CITIES = {
+                "nyc": ("New York City", "KNYC", "KLGA", 40.7, -73.9, "KXHIGHNY", "KXLOWNY", "NYC", "OKX"),
+            }
+
+            @staticmethod
+            def dashboard(verbose=False):
+                return [{
+                    "ck": "nyc",
+                    "stats": {
+                        "current": 72.0,
+                        "obs_max": 80.0,
+                        "current_time": now - timedelta(minutes=45),
+                        "trend_3h": 1.5,
+                    },
+                    "models": {"hrrr": 79.0, "nam": 78.0, "gfs": 77.0},
+                    "est_high": 79.0,
+                    "sigma": 4.0,
+                }]
+
+        with patch.object(server, "_lazy_import_weather", return_value=(SimpleNamespace(), SimpleNamespace(), FakeRT)):
+            resp = client.get("/api/weather/dashboard?limit=1")
+
+        self.assertEqual(resp.status_code, 200)
+        data = resp.json()
+        self.assertEqual(data["count"], 1)
+        city = data["cities"][0]
+        self.assertEqual(city["current_f"], 72.0)
+        self.assertEqual(city["obs_max_f"], 80.0)
+        self.assertEqual(city["freshness"]["status"], "fresh")
+        self.assertIn("source_lineage", city)
+        self.assertEqual(city["source_lineage"]["settlement_station"], "KNYC")
+
+    def test_weather_dashboard_export_csv(self):
+        client = TestClient(server.app)
+
+        class FakeRT:
+            KALSHI_CITIES = {
+                "nyc": ("New York City", "KNYC", "KLGA", 40.7, -73.9, "KXHIGHNY", "KXLOWNY", "NYC", "OKX"),
+            }
+
+            @staticmethod
+            def dashboard(verbose=False):
+                return [{
+                    "ck": "nyc",
+                    "stats": {"current": 71.0, "obs_max": 79.0, "current_time": datetime.now(timezone.utc)},
+                    "models": {"hrrr": 78.0},
+                    "est_high": 78.0,
+                    "sigma": 4.0,
+                }]
+
+        with patch.object(server, "_lazy_import_weather", return_value=(SimpleNamespace(), SimpleNamespace(), FakeRT)):
+            resp = client.get("/api/weather/dashboard/export?format=csv")
+
+        self.assertEqual(resp.status_code, 200)
+        self.assertIn("text/csv", resp.headers["content-type"])
+        self.assertIn("settlement_station", resp.text)
+        self.assertIn("nyc", resp.text)
+
+    def test_trading_status_includes_market_state(self):
+        client = TestClient(server.app)
+
+        resp = client.get("/api/trading/status")
+
+        self.assertEqual(resp.status_code, 200)
+        data = resp.json()
+        self.assertIn("market_state", data)
+        self.assertIn("no_market_data", data["market_state"])
+
+    def test_files_endpoint_applies_limit_and_offset(self):
+        client = TestClient(server.app)
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = server.WORK_DIR
+            try:
+                tmp_root = Path(tmpdir).resolve()
+                server.WORK_DIR = tmp_root
+                (tmp_root / "a.txt").write_text("a")
+                (tmp_root / "b.txt").write_text("b")
+                (tmp_root / "c.txt").write_text("c")
+                resp = client.get("/api/files?path=.&limit=2&offset=1")
+            finally:
+                server.WORK_DIR = root
+
+        self.assertEqual(resp.status_code, 200)
+        data = resp.json()
+        self.assertEqual(data["limit"], 2)
+        self.assertEqual(data["offset"], 1)
+        self.assertLessEqual(len(data["entries"]), 2)
+
+    def test_metrics_endpoint_tracks_requests(self):
+        client = TestClient(server.app)
+
+        client.get("/health")
+        resp = client.get("/api/metrics")
+
+        self.assertEqual(resp.status_code, 200)
+        data = resp.json()
+        self.assertIn("/health", data["endpoints"])
+        self.assertGreaterEqual(data["endpoints"]["/health"]["calls"], 1)
 
 
 if __name__ == "__main__":

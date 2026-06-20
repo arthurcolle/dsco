@@ -1,7 +1,11 @@
 #include "governance.h"
+#include "vfs.h"
 #include <stdio.h>
 #include <string.h>
 #include <sys/time.h>
+
+/* §8: VFS persistence handle — set by governance_set_vfs() */
+static vfs_db_t *g_gov_vfs = NULL;
 
 #ifndef MAX_TOOLS_PER_TURN
 #define MAX_TOOLS_PER_TURN 128
@@ -19,6 +23,10 @@ static double now_sec(void) {
     struct timeval tv;
     gettimeofday(&tv, NULL);
     return tv.tv_sec + tv.tv_usec / 1e6;
+}
+
+void governance_set_vfs(vfs_db_t *vfs) {
+    g_gov_vfs = vfs;
 }
 
 /* ── Name Tables ──────────────────────────────────────────────────────── */
@@ -327,6 +335,18 @@ static void audit_record(governance_engine_t *g, const char *agent_id,
     e->authorized = authorized;
     e->hardcoded_blocked = hardcoded_blocked;
     e->timestamp = now_sec();
+
+    /* §8: Persist audit entry to VFS event log */
+    if (g_gov_vfs) {
+        char detail[512];
+        snprintf(detail, sizeof(detail),
+                 "{\"id\":%d,\"agent\":\"%s\",\"tier\":\"%s\","
+                 "\"gsu\":%.2f,\"authorized\":%s,\"hardcoded_blocked\":%s}",
+                 e->id, e->agent_id, governance_tier_name(e->tier),
+                 e->gsu_cost, e->authorized ? "true" : "false",
+                 e->hardcoded_blocked ? "true" : "false");
+        vfs_log_event(g_gov_vfs, "governance", action ? action : "", detail);
+    }
 }
 
 bool governance_authorize(governance_engine_t *g, const char *agent_id,

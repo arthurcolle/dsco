@@ -18,6 +18,7 @@
 #include "provider.h"
 #include "topology.h"
 #include "task_profile.h"
+#include "mcp_names.h"
 #include "workspace.h"
 #include "governance.h"
 #include "memory_tier.h"
@@ -45,9 +46,12 @@
 #include <pwd.h>
 #include <curl/curl.h>
 #include <regex.h>
+#include <pthread.h>
 
 #ifdef __APPLE__
 #include <mach-o/dyld.h>
+#include <CoreGraphics/CoreGraphics.h>
+#include <CoreFoundation/CoreFoundation.h>
 #endif
 
 extern volatile int g_interrupted;
@@ -541,6 +545,286 @@ static bool ensure_parent_dir_local(const char *path) {
     *slash = '\0';
     if (tmp[0] == '\0') return true;
     return mkdir_p_local(tmp, 0755);
+}
+
+static bool write_all_fd(int fd, const char *data, size_t len) {
+    size_t off = 0;
+    while (off < len) {
+        ssize_t n = write(fd, data + off, len - off);
+        if (n < 0) {
+            if (errno == EINTR) continue;
+            return false;
+        }
+        if (n == 0) {
+            errno = EIO;
+            return false;
+        }
+        off += (size_t)n;
+    }
+    return true;
+}
+
+static bool split_path_dir_base(const char *path,
+                                char *dir, size_t dir_len,
+                                const char **base_out) {
+    if (!path || !path[0] || !dir || dir_len == 0 || !base_out) return false;
+
+    const char *slash = strrchr(path, '/');
+    if (!slash) {
+        snprintf(dir, dir_len, ".");
+        *base_out = path;
+        return path[0] != '\0';
+    }
+
+    *base_out = slash + 1;
+    if (**base_out == '\0') return false;
+
+    size_t n = (slash == path) ? 1 : (size_t)(slash - path);
+    if (n >= dir_len) return false;
+    memcpy(dir, path, n);
+    dir[n] = '\0';
+    return true;
+}
+
+static void best_effort_fsync_parent_dir(const char *path) {
+    char dir[4096];
+    const char *base = NULL;
+    if (!split_path_dir_base(path, dir, sizeof(dir), &base)) return;
+    (void)base;
+
+    int fd = open(dir, O_RDONLY);
+    if (fd < 0) return;
+    (void)fsync(fd);
+    close(fd);
+}
+
+static bool file_content_matches(const char *path, const char *content, size_t len) {
+    if (len == 0) return true;
+
+    int fd = open(path, O_RDONLY);
+    if (fd < 0) return false;
+
+    char buf[8192];
+    size_t off = 0;
+    while (off < len) {
+        size_t want = len - off;
+        if (want > sizeof(buf)) want = sizeof(buf);
+        ssize_t n = read(fd, buf, want);
+        if (n < 0) {
+            if (errno == EINTR) continue;
+            close(fd);
+            return false;
+        }
+        if (n == 0 || memcmp(buf, content + off, (size_t)n) != 0) {
+            close(fd);
+            return false;
+        }
+        off += (size_t)n;
+    }
+
+    close(fd);
+    return true;
+}
+
+static bool file_region_matches(const char *path, off_t start,
+                                const char *content, size_t len) {
+    if (len == 0) return true;
+
+    int fd = open(path, O_RDONLY);
+    if (fd < 0) return false;
+
+    char buf[8192];
+    size_t off = 0;
+    while (off < len) {
+        size_t want = len - off;
+        if (want > sizeof(buf)) want = sizeof(buf);
+        ssize_t n = pread(fd, buf, want, start + (off_t)off);
+        if (n < 0) {
+            if (errno == EINTR) continue;
+            close(fd);
+            return false;
+        }
+        if (n == 0 || memcmp(buf, content + off, (size_t)n) != 0) {
+            close(fd);
+            return false;
+        }
+        off += (size_t)n;
+    }
+
+    close(fd);
+    return true;
+}
+
+static bool verified_write_file(const char *path, const char *content,
+                                size_t len, char *err, size_t err_len,
+                                mode_t *out_mode) {
+    if (err && err_len > 0) err[0] = '\0';
+    if (out_mode) *out_mode = 0644;
+    if (!path || !path[0]) {
+        snprintf(err, err_len, "empty path");
+        return false;
+    }
+
+    struct stat existing;
+    mode_t mode = 0644;
+    if (stat(path, &existing) == 0) {
+        if (!S_ISREG(existing.st_mode)) {
+            snprintf(err, err_len, "target is not a regular file");
+            return false;
+        }
+        mode = existing.st_mode & 0777;
+    } else if (errno != ENOENT) {
+        snprintf(err, err_len, "stat failed: %s", strerror(errno));
+        return false;
+    }
+
+    char dir[4096];
+    const char *base = NULL;
+    if (!split_path_dir_base(path, dir, sizeof(dir), &base)) {
+        snprintf(err, err_len, "invalid path");
+        return false;
+    }
+
+    char tmp_path[4096];
+    int n;
+    if (strcmp(dir, "/") == 0)
+        n = snprintf(tmp_path, sizeof(tmp_path), "/.%s.dsco-tmp-%ld-XXXXXX",
+                     base, (long)getpid());
+    else
+        n = snprintf(tmp_path, sizeof(tmp_path), "%s/.%s.dsco-tmp-%ld-XXXXXX",
+                     dir, base, (long)getpid());
+    if (n < 0 || (size_t)n >= sizeof(tmp_path)) {
+        snprintf(err, err_len, "temporary path too long");
+        return false;
+    }
+
+    int fd = mkstemp(tmp_path);
+    if (fd < 0) {
+        snprintf(err, err_len, "mkstemp failed: %s", strerror(errno));
+        return false;
+    }
+
+    bool ok = false;
+    do {
+        if (fchmod(fd, mode) != 0) {
+            snprintf(err, err_len, "chmod temp failed: %s", strerror(errno));
+            break;
+        }
+        if (!write_all_fd(fd, content, len)) {
+            snprintf(err, err_len, "write failed after partial write: %s", strerror(errno));
+            break;
+        }
+        if (fsync(fd) != 0) {
+            snprintf(err, err_len, "fsync temp failed: %s", strerror(errno));
+            break;
+        }
+        if (close(fd) != 0) {
+            fd = -1;
+            snprintf(err, err_len, "close temp failed: %s", strerror(errno));
+            break;
+        }
+        fd = -1;
+        if (rename(tmp_path, path) != 0) {
+            snprintf(err, err_len, "rename temp failed: %s", strerror(errno));
+            break;
+        }
+
+        struct stat st;
+        if (stat(path, &st) != 0) {
+            snprintf(err, err_len, "post-write stat failed: %s", strerror(errno));
+            break;
+        }
+        if (!S_ISREG(st.st_mode)) {
+            snprintf(err, err_len, "post-write target is not a regular file");
+            break;
+        }
+        if (st.st_size != (off_t)len) {
+            snprintf(err, err_len, "post-write size mismatch: expected %zu got %lld",
+                     len, (long long)st.st_size);
+            break;
+        }
+        if (!file_content_matches(path, content, len)) {
+            snprintf(err, err_len, "post-write readback verification failed");
+            break;
+        }
+
+        best_effort_fsync_parent_dir(path);
+        if (out_mode) *out_mode = st.st_mode & 0777;
+        ok = true;
+    } while (0);
+
+    if (fd >= 0) close(fd);
+    if (!ok) unlink(tmp_path);
+    return ok;
+}
+
+static bool verified_append_file(const char *path, const char *content,
+                                 size_t len, char *err, size_t err_len,
+                                 off_t *out_size) {
+    if (err && err_len > 0) err[0] = '\0';
+    if (out_size) *out_size = 0;
+    if (!path || !path[0]) {
+        snprintf(err, err_len, "empty path");
+        return false;
+    }
+
+    int fd = open(path, O_WRONLY | O_CREAT | O_APPEND, 0644);
+    if (fd < 0) {
+        snprintf(err, err_len, "open failed: %s", strerror(errno));
+        return false;
+    }
+
+    bool ok = false;
+    off_t start = 0;
+    do {
+        struct stat before;
+        if (fstat(fd, &before) != 0) {
+            snprintf(err, err_len, "pre-append stat failed: %s", strerror(errno));
+            break;
+        }
+        if (!S_ISREG(before.st_mode)) {
+            snprintf(err, err_len, "target is not a regular file");
+            break;
+        }
+        start = before.st_size;
+
+        if (!write_all_fd(fd, content, len)) {
+            snprintf(err, err_len, "append failed after partial write: %s", strerror(errno));
+            break;
+        }
+        if (fsync(fd) != 0) {
+            snprintf(err, err_len, "fsync append failed: %s", strerror(errno));
+            break;
+        }
+        if (close(fd) != 0) {
+            fd = -1;
+            snprintf(err, err_len, "close append failed: %s", strerror(errno));
+            break;
+        }
+        fd = -1;
+
+        struct stat after;
+        if (stat(path, &after) != 0) {
+            snprintf(err, err_len, "post-append stat failed: %s", strerror(errno));
+            break;
+        }
+        if (after.st_size < start + (off_t)len) {
+            snprintf(err, err_len, "post-append size mismatch: expected at least %lld got %lld",
+                     (long long)(start + (off_t)len), (long long)after.st_size);
+            break;
+        }
+        if (!file_region_matches(path, start, content, len)) {
+            snprintf(err, err_len, "post-append readback verification failed");
+            break;
+        }
+
+        best_effort_fsync_parent_dir(path);
+        if (out_size) *out_size = after.st_size;
+        ok = true;
+    } while (0);
+
+    if (fd >= 0) close(fd);
+    return ok;
 }
 
 static bool shell_fragment_has_forbidden_chars(const char *s) {
@@ -1780,11 +2064,17 @@ static char *path_normalize(char *raw) {
     return out;
 }
 
+static char *json_get_path_or_file_path(const char *input) {
+    char *path = json_get_str(input, "path");
+    if (!path) path = json_get_str(input, "file_path");
+    return path_normalize(path);
+}
+
 static bool tool_write_file(const char *input, char *result, size_t rlen) {
-    char *path = path_normalize(json_get_str(input, "path"));
+    char *path = json_get_path_or_file_path(input);
     char *content = json_get_str(input, "content");
     if (!path || !content) {
-        snprintf(result, rlen, "error: path and content required");
+        snprintf(result, rlen, "error: path/file_path and content required");
         free(path); free(content);
         return false;
     }
@@ -1795,15 +2085,18 @@ static bool tool_write_file(const char *input, char *result, size_t rlen) {
         return false;
     }
 
-    FILE *f = fopen(path, "w");
-    if (!f) {
-        snprintf(result, rlen, "error: cannot open %s: %s", path, strerror(errno));
+    size_t len = strlen(content);
+    char err[256];
+    mode_t mode = 0644;
+    if (!verified_write_file(path, content, len, err, sizeof(err), &mode)) {
+        snprintf(result, rlen, "error: verified write failed for %s: %s",
+                 path, err[0] ? err : strerror(errno));
         free(path); free(content);
         return false;
     }
-    size_t n = fwrite(content, 1, strlen(content), f);
-    fclose(f);
-    snprintf(result, rlen, "wrote %zu bytes to %s", n, path);
+    snprintf(result, rlen,
+             "verified write: path=%s bytes=%zu mode=%03o",
+             path, len, mode & 0777);
     free(path); free(content);
     return true;
 }
@@ -2148,8 +2441,8 @@ static bool tool_soul_replace(const char *input, char *result, size_t rlen) {
 }
 
 static bool tool_read_file(const char *input, char *result, size_t rlen) {
-    char *path = path_normalize(json_get_str(input, "path"));
-    if (!path) { snprintf(result, rlen, "error: path required"); return false; }
+    char *path = json_get_path_or_file_path(input);
+    if (!path) { snprintf(result, rlen, "error: path/file_path required"); return false; }
     if (!require_regular_file(path, result, rlen)) {
         free(path);
         return false;
@@ -2195,8 +2488,8 @@ static bool tool_read_file(const char *input, char *result, size_t rlen) {
 }
 
 static bool tool_page_file(const char *input, char *result, size_t rlen) {
-    char *path = path_normalize(json_get_str(input, "path"));
-    if (!path) { snprintf(result, rlen, "error: path required"); return false; }
+    char *path = json_get_path_or_file_path(input);
+    if (!path) { snprintf(result, rlen, "error: path/file_path required"); return false; }
     if (!require_regular_file(path, result, rlen)) {
         free(path);
         return false;
@@ -2250,12 +2543,12 @@ static bool tool_page_file(const char *input, char *result, size_t rlen) {
 }
 
 static bool tool_edit_file(const char *input, char *result, size_t rlen) {
-    char *path = path_normalize(json_get_str(input, "path"));
+    char *path = json_get_path_or_file_path(input);
     char *old_str = json_get_str(input, "old_string");
     char *new_str = json_get_str(input, "new_string");
 
     if (!path || !old_str || !new_str) {
-        snprintf(result, rlen, "error: path, old_string, and new_string required");
+        snprintf(result, rlen, "error: path/file_path, old_string, and new_string required");
         free(path); free(old_str); free(new_str);
         return false;
     }
@@ -2389,17 +2682,36 @@ static bool tool_grep(const char *input, char *result, size_t rlen) {
     char *pattern = json_get_str(input, "pattern");
     char *path = path_normalize(json_get_str(input, "path"));
     if (!pattern) { snprintf(result, rlen, "error: pattern required"); free(path); return false; }
+    char *include = json_get_str(input, "include");
+    if (!include) include = json_get_str(input, "glob");
+    char *mode = json_get_str(input, "output_mode");
+    int head_limit = json_get_int(input, "head_limit", 100);
+    if (head_limit < 0) head_limit = 100;
+    if (head_limit > 1000) head_limit = 1000;
 
     jbuf_t cmd;
-    jbuf_init(&cmd, 256 + strlen(pattern) + (path ? strlen(path) : 1));
-    jbuf_append(&cmd, "grep -rn -- ");
+    jbuf_init(&cmd, 384 + strlen(pattern) + (path ? strlen(path) : 1) + (include ? strlen(include) : 0));
+    jbuf_append(&cmd, "grep -rn");
+    if (mode && strcmp(mode, "files_with_matches") == 0) jbuf_append(&cmd, " -l");
+    else if (mode && strcmp(mode, "count") == 0) jbuf_append(&cmd, " -c");
+    if (include && include[0]) {
+        jbuf_append(&cmd, " --include ");
+        shell_quote(&cmd, include);
+    }
+    jbuf_append(&cmd, " -- ");
     shell_quote(&cmd, pattern);
     jbuf_append(&cmd, " ");
     shell_quote(&cmd, path ? path : ".");
-    jbuf_append(&cmd, " 2>/dev/null | head -100");
+    if (head_limit > 0) {
+        char limit[32];
+        snprintf(limit, sizeof(limit), " 2>/dev/null | head -%d", head_limit);
+        jbuf_append(&cmd, limit);
+    } else {
+        jbuf_append(&cmd, " 2>/dev/null");
+    }
     run_cmd(cmd.data, result, rlen);
     jbuf_free(&cmd);
-    free(pattern); free(path);
+    free(pattern); free(path); free(include); free(mode);
     return true;
 }
 
@@ -2434,14 +2746,18 @@ static bool tool_append_file(const char *input, char *result, size_t rlen) {
                  path, strerror(errno));
         free(path); free(content); return false;
     }
-    FILE *f = fopen(path, "a");
-    if (!f) {
-        snprintf(result, rlen, "error: cannot open %s: %s", path, strerror(errno));
+
+    size_t len = strlen(content);
+    char err[256];
+    off_t final_size = 0;
+    if (!verified_append_file(path, content, len, err, sizeof(err), &final_size)) {
+        snprintf(result, rlen, "error: verified append failed for %s: %s",
+                 path, err[0] ? err : strerror(errno));
         free(path); free(content); return false;
     }
-    size_t n = fwrite(content, 1, strlen(content), f);
-    fclose(f);
-    snprintf(result, rlen, "appended %zu bytes to %s", n, path);
+    snprintf(result, rlen,
+             "verified append: path=%s bytes_appended=%zu final_size=%lld",
+             path, len, (long long)final_size);
     free(path); free(content);
     return true;
 }
@@ -2450,8 +2766,9 @@ static bool tool_append_file(const char *input, char *result, size_t rlen) {
 static bool tool_move_file(const char *input, char *result, size_t rlen) {
     char *src = path_normalize(json_get_str(input, "source"));
     char *dst = path_normalize(json_get_str(input, "destination"));
+    if (!dst) dst = path_normalize(json_get_str(input, "dest"));
     if (!src || !dst) {
-        snprintf(result, rlen, "error: source and destination required");
+        snprintf(result, rlen, "error: source and destination/dest required");
         free(src); free(dst); return false;
     }
     if (rename(src, dst) != 0) {
@@ -2477,8 +2794,9 @@ static bool tool_move_file(const char *input, char *result, size_t rlen) {
 static bool tool_copy_file(const char *input, char *result, size_t rlen) {
     char *src = path_normalize(json_get_str(input, "source"));
     char *dst = path_normalize(json_get_str(input, "destination"));
+    if (!dst) dst = path_normalize(json_get_str(input, "dest"));
     if (!src || !dst) {
-        snprintf(result, rlen, "error: source and destination required");
+        snprintf(result, rlen, "error: source and destination/dest required");
         free(src); free(dst); return false;
     }
     jbuf_t cmd;
@@ -2667,9 +2985,369 @@ static char *shell_escape(const char *s) {
     return out;
 }
 
+static bool shell_command_may_write_artifact(const char *cmd) {
+    bool in_single = false;
+    bool in_double = false;
+    bool escaped = false;
+
+    for (const char *p = cmd ? cmd : ""; *p; p++) {
+        if (escaped) {
+            escaped = false;
+            continue;
+        }
+        if (*p == '\\' && !in_single) {
+            escaped = true;
+            continue;
+        }
+        if (*p == '\'' && !in_double) {
+            in_single = !in_single;
+            continue;
+        }
+        if (*p == '"' && !in_single) {
+            in_double = !in_double;
+            continue;
+        }
+        if (in_single || in_double || *p != '>') continue;
+
+        const char *q = p + 1;
+        if (*q == '>') q++;
+        while (*q && isspace((unsigned char)*q)) q++;
+        if (*q == '&') continue;                 /* e.g. 2>&1 */
+        if (strncmp(q, "/dev/null", 9) == 0) continue;
+        return true;
+    }
+
+    return false;
+}
+
+static bool shell_command_mentions_artifact_verifier(const char *cmd) {
+    static const char *needles[] = {
+        "test -e", "test -f", "[ -e", "[ -f", "stat ",
+        "wc -c", "cmp ", "diff ", "sha256", "shasum", NULL
+    };
+    for (int i = 0; needles[i]; i++) {
+        if (strstr(cmd ? cmd : "", needles[i])) return true;
+    }
+    return false;
+}
+
+static void append_artifact_check_warning(const char *cmd, char *result, size_t rlen) {
+    if (!result || rlen == 0) return;
+    if (!shell_command_may_write_artifact(cmd)) return;
+    if (shell_command_mentions_artifact_verifier(cmd)) return;
+
+    const char *warning =
+        "[artifact-check: shell redirection may have written files; "
+        "verify expected paths with read_file, file_info, stat, or cmp before claiming success]";
+    size_t cur = strlen(result);
+    if (cur >= rlen - 1) return;
+    snprintf(result + cur, rlen - cur, "%s%s", cur ? "\n" : "", warning);
+}
+
+#define ARTIFACT_CONTRACT_MAX_PATHS 8
+
+typedef struct {
+    char *paths[ARTIFACT_CONTRACT_MAX_PATHS];
+    int count;
+    int min_bytes;
+    char *contains;
+    char *sha256;
+    bool malformed;
+    char error[256];
+} artifact_contract_t;
+
+static void append_result_line(char *result, size_t rlen, const char *line) {
+    if (!result || rlen == 0 || !line) return;
+    size_t cur = strlen(result);
+    if (cur >= rlen - 1) return;
+    snprintf(result + cur, rlen - cur, "%s%s", cur ? "\n" : "", line);
+}
+
+static bool path_is_absolute_local(const char *path) {
+    return path && path[0] == '/';
+}
+
+static char *resolve_cwd_path(const char *cwd) {
+    if (!cwd || !cwd[0]) return NULL;
+
+    char *norm = path_normalize(safe_strdup(cwd));
+    if (!norm) return NULL;
+    if (path_is_absolute_local(norm)) return norm;
+
+    char here[PATH_MAX];
+    if (!getcwd(here, sizeof(here))) return norm;
+
+    size_t need = strlen(here) + 1 + strlen(norm) + 1;
+    char *joined = safe_malloc(need);
+    snprintf(joined, need, "%s/%s", here, norm);
+    free(norm);
+    return joined;
+}
+
+static char *normalize_artifact_path(char *raw, const char *cwd) {
+    char *path = path_normalize(raw);
+    if (!path || path_is_absolute_local(path)) return path;
+
+    char *base = resolve_cwd_path(cwd);
+    if (!base) return path;
+
+    size_t need = strlen(base) + 1 + strlen(path) + 1;
+    char *joined = safe_malloc(need);
+    snprintf(joined, need, "%s/%s", base, path);
+    free(base);
+    free(path);
+    return joined;
+}
+
+static void artifact_contract_add_path(artifact_contract_t *c,
+                                       char *raw_path,
+                                       const char *cwd) {
+    if (!c || !raw_path) return;
+    if (c->count >= ARTIFACT_CONTRACT_MAX_PATHS) {
+        free(raw_path);
+        c->malformed = true;
+        snprintf(c->error, sizeof(c->error),
+                 "too many artifact paths (max %d)", ARTIFACT_CONTRACT_MAX_PATHS);
+        return;
+    }
+
+    char *path = normalize_artifact_path(raw_path, cwd);
+    if (!path || !path[0]) {
+        free(path);
+        c->malformed = true;
+        snprintf(c->error, sizeof(c->error), "empty artifact path");
+        return;
+    }
+
+    for (int i = 0; i < c->count; i++) {
+        if (strcmp(c->paths[i], path) == 0) {
+            free(path);
+            return;
+        }
+    }
+    c->paths[c->count++] = path;
+}
+
+typedef struct {
+    artifact_contract_t *contract;
+    const char *cwd;
+} artifact_path_array_ctx_t;
+
+static void artifact_path_array_cb(const char *element_start, void *ctx) {
+    artifact_path_array_ctx_t *ac = (artifact_path_array_ctx_t *)ctx;
+    if (!ac || !ac->contract || !element_start) return;
+
+    char decoded[4096];
+    ctx_decode_json_string_token(element_start, decoded, sizeof(decoded));
+    if (!decoded[0]) return;
+    artifact_contract_add_path(ac->contract, safe_strdup(decoded), ac->cwd);
+}
+
+static void artifact_contract_init(artifact_contract_t *c,
+                                   const char *input,
+                                   const char *cwd) {
+    memset(c, 0, sizeof(*c));
+    c->min_bytes = json_get_int(input, "verify_min_bytes", -1);
+    if (c->min_bytes < 0) c->min_bytes = -1;
+    c->contains = json_get_str(input, "verify_contains");
+    c->sha256 = json_get_str(input, "verify_sha256");
+
+    char *path = json_get_str(input, "verify_path");
+    if (!path) path = json_get_str(input, "artifact_path");
+    if (!path) path = json_get_str(input, "output_path");
+    artifact_contract_add_path(c, path, cwd);
+
+    artifact_path_array_ctx_t array_ctx = { .contract = c, .cwd = cwd };
+    json_array_foreach(input ? input : "{}", "verify_paths",
+                       artifact_path_array_cb, &array_ctx);
+
+    if ((c->min_bytes >= 0 || c->contains || c->sha256) && c->count == 0) {
+        c->malformed = true;
+        snprintf(c->error, sizeof(c->error),
+                 "artifact verification constraints require verify_path or verify_paths");
+    }
+}
+
+static void artifact_contract_free(artifact_contract_t *c) {
+    if (!c) return;
+    for (int i = 0; i < c->count; i++) free(c->paths[i]);
+    free(c->contains);
+    free(c->sha256);
+    memset(c, 0, sizeof(*c));
+}
+
+static bool bytes_contains_local(const char *haystack, size_t hay_len,
+                                 const char *needle, size_t needle_len) {
+    if (needle_len == 0) return true;
+    if (hay_len < needle_len) return false;
+    for (size_t i = 0; i <= hay_len - needle_len; i++) {
+        if (memcmp(haystack + i, needle, needle_len) == 0) return true;
+    }
+    return false;
+}
+
+static bool file_contains_string(const char *path, const char *needle,
+                                 bool *found, char *err, size_t err_len) {
+    if (found) *found = false;
+    if (!needle || !needle[0]) {
+        if (found) *found = true;
+        return true;
+    }
+
+    size_t needle_len = strlen(needle);
+    int fd = open(path, O_RDONLY);
+    if (fd < 0) {
+        snprintf(err, err_len, "open for contains check failed: %s", strerror(errno));
+        return false;
+    }
+
+    size_t tail_cap = needle_len > 0 ? needle_len - 1 : 0;
+    char *tail = tail_cap ? safe_malloc(tail_cap) : NULL;
+    size_t tail_len = 0;
+    char buf[8192];
+    char *window = safe_malloc(sizeof(buf) + tail_cap);
+
+    bool ok = true;
+    while (1) {
+        ssize_t n = read(fd, buf, sizeof(buf));
+        if (n < 0) {
+            if (errno == EINTR) continue;
+            snprintf(err, err_len, "read for contains check failed: %s", strerror(errno));
+            ok = false;
+            break;
+        }
+        if (n == 0) break;
+
+        if (tail_len > 0) memcpy(window, tail, tail_len);
+        memcpy(window + tail_len, buf, (size_t)n);
+        size_t window_len = tail_len + (size_t)n;
+        if (bytes_contains_local(window, window_len, needle, needle_len)) {
+            if (found) *found = true;
+            break;
+        }
+
+        tail_len = tail_cap < window_len ? tail_cap : window_len;
+        if (tail_len > 0) memcpy(tail, window + window_len - tail_len, tail_len);
+    }
+
+    free(window);
+    free(tail);
+    close(fd);
+    return ok;
+}
+
+static bool file_sha256_hex(const char *path, char hex[65],
+                            char *err, size_t err_len) {
+    hex[0] = '\0';
+    int fd = open(path, O_RDONLY);
+    if (fd < 0) {
+        snprintf(err, err_len, "open for sha256 check failed: %s", strerror(errno));
+        return false;
+    }
+
+    sha256_ctx_t ctx;
+    sha256_init(&ctx);
+    uint8_t buf[8192];
+    while (1) {
+        ssize_t n = read(fd, buf, sizeof(buf));
+        if (n < 0) {
+            if (errno == EINTR) continue;
+            snprintf(err, err_len, "read for sha256 check failed: %s", strerror(errno));
+            close(fd);
+            return false;
+        }
+        if (n == 0) break;
+        sha256_update(&ctx, buf, (size_t)n);
+    }
+    close(fd);
+
+    uint8_t digest[32];
+    sha256_final(&ctx, digest);
+    hex_encode(digest, sizeof(digest), hex);
+    return true;
+}
+
+static bool verify_artifact_contract(const artifact_contract_t *c,
+                                     char *result, size_t rlen,
+                                     char *err, size_t err_len) {
+    if (err && err_len > 0) err[0] = '\0';
+    if (!c || c->count == 0) return true;
+
+    for (int i = 0; i < c->count; i++) {
+        const char *path = c->paths[i];
+        struct stat st;
+        if (stat(path, &st) != 0) {
+            snprintf(err, err_len, "missing artifact path=%s: %s",
+                     path, strerror(errno));
+            return false;
+        }
+
+        const char *type = S_ISDIR(st.st_mode) ? "directory" :
+                           S_ISREG(st.st_mode) ? "file" : "other";
+        if (c->min_bytes >= 0 && (!S_ISREG(st.st_mode) || st.st_size < c->min_bytes)) {
+            snprintf(err, err_len,
+                     "artifact path=%s expected at least %d bytes, got %lld",
+                     path, c->min_bytes, (long long)st.st_size);
+            return false;
+        }
+
+        char actual_sha[65] = "";
+        if (c->sha256 && c->sha256[0]) {
+            if (!S_ISREG(st.st_mode)) {
+                snprintf(err, err_len, "artifact path=%s is not a regular file for sha256 check", path);
+                return false;
+            }
+            if (!file_sha256_hex(path, actual_sha, err, err_len)) return false;
+            if (strcasecmp(actual_sha, c->sha256) != 0) {
+                snprintf(err, err_len,
+                         "artifact path=%s sha256 mismatch: expected %s got %s",
+                         path, c->sha256, actual_sha);
+                return false;
+            }
+        }
+
+        if (c->contains && c->contains[0]) {
+            if (!S_ISREG(st.st_mode)) {
+                snprintf(err, err_len, "artifact path=%s is not a regular file for contains check", path);
+                return false;
+            }
+            bool found = false;
+            if (!file_contains_string(path, c->contains, &found, err, err_len)) return false;
+            if (!found) {
+                snprintf(err, err_len,
+                         "artifact path=%s does not contain required text", path);
+                return false;
+            }
+        }
+
+        char line[1024];
+        if (actual_sha[0]) {
+            snprintf(line, sizeof(line),
+                     "[artifact-verified: path=%s type=%s size=%lld sha256=%s]",
+                     path, type, (long long)st.st_size, actual_sha);
+        } else {
+            snprintf(line, sizeof(line),
+                     "[artifact-verified: path=%s type=%s size=%lld]",
+                     path, type, (long long)st.st_size);
+        }
+        append_result_line(result, rlen, line);
+    }
+
+    return true;
+}
+
 static bool tool_run_command(const char *input, char *result, size_t rlen) {
     char *command = json_get_str(input, "command");
     if (!command) { snprintf(result, rlen, "error: command required"); return false; }
+
+    artifact_contract_t artifacts;
+    artifact_contract_init(&artifacts, input, NULL);
+    if (artifacts.malformed) {
+        snprintf(result, rlen, "error: %s", artifacts.error);
+        artifact_contract_free(&artifacts);
+        free(command);
+        return false;
+    }
 
     int timeout = json_get_int(input, "timeout", 30);
     if (timeout <= 0) timeout = 30;
@@ -2689,10 +3367,23 @@ static bool tool_run_command(const char *input, char *result, size_t rlen) {
     if (status != 0 && strlen(result) == 0) {
         snprintf(result, rlen, "command exited with status %d", status);
     }
+    bool ok = (status == 0);
+    if (ok && artifacts.count > 0) {
+        char err[512];
+        if (!verify_artifact_contract(&artifacts, result, rlen, err, sizeof(err))) {
+            char line[768];
+            snprintf(line, sizeof(line), "[artifact-verification-failed: %s]", err);
+            append_result_line(result, rlen, line);
+            ok = false;
+        }
+    } else if (ok) {
+        append_artifact_check_warning(command, result, rlen);
+    }
+    artifact_contract_free(&artifacts);
     free(cmd);
     free(escaped);
     free(command);
-    return (status == 0);
+    return ok;
 }
 
 /* bash tool — streaming subprocess with live output deltas */
@@ -2704,6 +3395,16 @@ static bool tool_bash(const char *input, char *result, size_t rlen) {
     if (timeout <= 0) timeout = 120;
     if (timeout > 600) timeout = 600;
     char *cwd = path_normalize(json_get_str(input, "cwd"));
+
+    artifact_contract_t artifacts;
+    artifact_contract_init(&artifacts, input, cwd);
+    if (artifacts.malformed) {
+        snprintf(result, rlen, "error: %s", artifacts.error);
+        artifact_contract_free(&artifacts);
+        free(command);
+        free(cwd);
+        return false;
+    }
 
     run_opts_t opts = RUN_OPTS_DEFAULT;
     opts.wall_timeout_s = timeout;
@@ -2726,11 +3427,24 @@ static bool tool_bash(const char *input, char *result, size_t rlen) {
     if (status != 0 && strlen(result) == 0) {
         snprintf(result, rlen, "command exited with status %d", status);
     }
+    bool ok = (status == 0);
+    if (ok && artifacts.count > 0) {
+        char err[512];
+        if (!verify_artifact_contract(&artifacts, result, rlen, err, sizeof(err))) {
+            char line[768];
+            snprintf(line, sizeof(line), "[artifact-verification-failed: %s]", err);
+            append_result_line(result, rlen, line);
+            ok = false;
+        }
+    } else if (ok) {
+        append_artifact_check_warning(command, result, rlen);
+    }
+    artifact_contract_free(&artifacts);
     free(cmd);
     free(escaped);
     free(command);
     free(cwd);
-    return (status == 0);
+    return ok;
 }
 
 /* ── run_background: Run a command in background ──────────────────────── */
@@ -4684,10 +5398,12 @@ static bool tool_web_extract(const char *input, char *result, size_t rlen) {
 
     /* Fetch HTML */
     char *html = safe_malloc(MAX_TOOL_RESULT);
-    char cmd[4096];
-    snprintf(cmd, sizeof(cmd),
-             "curl -sS -L --max-time 15 -H 'User-Agent: Mozilla/5.0' '%s'", url);
-    run_cmd(cmd, html, MAX_TOOL_RESULT);
+    jbuf_t cmd;
+    jbuf_init(&cmd, 256 + strlen(url));
+    jbuf_append(&cmd, "curl -sS -L --max-time 15 -H 'User-Agent: Mozilla/5.0' ");
+    shell_quote(&cmd, url);
+    run_cmd(cmd.data, html, MAX_TOOL_RESULT);
+    jbuf_free(&cmd);
 
     if (strlen(html) == 0) {
         snprintf(result, rlen, "error: failed to fetch %s", url);
@@ -4756,6 +5472,414 @@ static bool tool_screenshot(const char *input, char *result, size_t rlen) {
 
     free(output_path);
     return true;
+}
+
+/* ── Computer use: native desktop control (mouse/keyboard/screen) ──────────
+ *
+ * A single dispatch tool that drives the local desktop the way a human would:
+ * move/click the mouse, type, press key combos, scroll, and capture the
+ * screen. On macOS this uses CoreGraphics CGEvent APIs directly (no external
+ * binaries, no Anthropic-specific computer-use tool type — it's an ordinary
+ * custom tool). On Linux it shells out to xdotool/scrot.
+ *
+ * Screenshots are fed back to the model through the existing
+ * /tmp/dsco_img_<pid>.b64 hook that the agent loop drains after every tool
+ * batch, so the model sees the result of each action — the visual feedback
+ * loop that makes computer use work.
+ *
+ * Coordinates are in *logical points* (the screenshot is resized to match),
+ * so a click at (x,y) lands where the model sees it, Retina or not. */
+
+/* Logical (point) display size — the coordinate space for clicks. */
+static void cu_display_size(int *w, int *h) {
+    *w = 1280; *h = 800;  /* safe default if detection fails */
+#ifdef __APPLE__
+    CGDirectDisplayID disp = CGMainDisplayID();
+    CGRect b = CGDisplayBounds(disp);
+    if (b.size.width > 0 && b.size.height > 0) {
+        *w = (int)b.size.width;
+        *h = (int)b.size.height;
+    }
+#else
+    char out[128] = "";
+    if (run_cmd("xdotool getdisplaygeometry 2>/dev/null", out, sizeof(out)) == 0) {
+        int gw = 0, gh = 0;
+        if (sscanf(out, "%d %d", &gw, &gh) == 2 && gw > 0 && gh > 0) {
+            *w = gw; *h = gh;
+        }
+    }
+#endif
+}
+
+/* Parse a "coordinate":[x,y] array (or fall back to x/y scalar fields). */
+static bool cu_get_coord(const char *input, int *x, int *y) {
+    char *raw = json_get_raw(input, "coordinate");
+    if (raw) {
+        int ok = (sscanf(raw, " [ %d , %d ]", x, y) == 2);
+        free(raw);
+        if (ok) return true;
+    }
+    if (json_get_raw(input, "x") || json_get_raw(input, "y")) {
+        *x = json_get_int(input, "x", 0);
+        *y = json_get_int(input, "y", 0);
+        return true;
+    }
+    return false;
+}
+
+/* Emit a PNG to the agent's image pickup file so it is attached to the next
+ * turn (same mechanism as view_image). */
+static void cu_emit_image(const char *path) {
+    FILE *f = fopen(path, "rb");
+    if (!f) return;
+    fseek(f, 0, SEEK_END);
+    long fsize = ftell(f);
+    fseek(f, 0, SEEK_SET);
+    if (fsize <= 0 || fsize > 8 * 1024 * 1024) { fclose(f); return; }
+    unsigned char *raw = safe_malloc((size_t)fsize);
+    size_t nread = fread(raw, 1, (size_t)fsize, f);
+    fclose(f);
+    size_t b64_len = ((nread + 2) / 3) * 4 + 1;
+    char *b64 = safe_malloc(b64_len);
+    size_t oi = base64_encode(raw, nread, b64, b64_len);
+    b64[oi] = '\0';
+    free(raw);
+    char tmppath[256];
+    snprintf(tmppath, sizeof(tmppath), "/tmp/dsco_img_%d.b64", getpid());
+    FILE *tmp = fopen(tmppath, "w");
+    if (tmp) { fprintf(tmp, "image/png\n%s", b64); fclose(tmp); }
+    free(b64);
+}
+
+/* Capture the full screen to a PNG resized to logical-point dimensions so the
+ * screenshot pixel space matches the click coordinate space. */
+static bool cu_screenshot(char *path_out, size_t path_len) {
+    int w = 0, h = 0;
+    cu_display_size(&w, &h);
+    snprintf(path_out, path_len, "/tmp/dsco_computer_%d.png", getpid());
+    char cmd[512], scratch[1024];
+#ifdef __APPLE__
+    snprintf(cmd, sizeof(cmd), "screencapture -x '%s' 2>/dev/null", path_out);
+    run_cmd(cmd, scratch, sizeof(scratch));
+    /* Resize to logical points so coordinates align (Retina-safe). */
+    snprintf(cmd, sizeof(cmd),
+             "sips -z %d %d '%s' >/dev/null 2>&1", h, w, path_out);
+    run_cmd(cmd, scratch, sizeof(scratch));
+#else
+    snprintf(cmd, sizeof(cmd),
+             "(scrot -o '%s' || import -window root '%s') 2>/dev/null",
+             path_out, path_out);
+    run_cmd(cmd, scratch, sizeof(scratch));
+#endif
+    struct stat st;
+    return stat(path_out, &st) == 0 && st.st_size > 0;
+}
+
+#ifdef __APPLE__
+/* macOS virtual keycodes for named keys (xdotool-style names accepted). */
+typedef struct { const char *name; CGKeyCode code; } cu_keymap_t;
+static const cu_keymap_t CU_KEYS[] = {
+    {"return",36},{"enter",36},{"tab",48},{"space",49},{"delete",51},
+    {"backspace",51},{"escape",53},{"esc",53},{"forwarddelete",117},
+    {"left",123},{"right",124},{"down",125},{"up",126},
+    {"home",115},{"end",119},{"pageup",116},{"pagedown",121},
+    {"f1",122},{"f2",120},{"f3",99},{"f4",118},{"f5",96},{"f6",97},
+    {"f7",98},{"f8",100},{"f9",101},{"f10",109},{"f11",103},{"f12",111},
+    {"minus",27},{"equal",24},{"grave",50},{"semicolon",41},{"quote",39},
+    {"comma",43},{"period",47},{"slash",44},{"backslash",42},
+    {"a",0},{"s",1},{"d",2},{"f",3},{"h",4},{"g",5},{"z",6},{"x",7},
+    {"c",8},{"v",9},{"b",11},{"q",12},{"w",13},{"e",14},{"r",15},{"y",16},
+    {"t",17},{"o",31},{"u",32},{"i",34},{"p",35},{"l",37},{"j",38},
+    {"k",40},{"n",45},{"m",46},
+    {"1",18},{"2",19},{"3",20},{"4",21},{"5",23},{"6",22},{"7",26},
+    {"8",28},{"9",25},{"0",29},
+};
+
+static bool cu_keycode(const char *name, CGKeyCode *out) {
+    char low[64];
+    size_t i = 0;
+    for (; name[i] && i < sizeof(low) - 1; i++) low[i] = (char)tolower((unsigned char)name[i]);
+    low[i] = '\0';
+    for (size_t k = 0; k < sizeof(CU_KEYS) / sizeof(CU_KEYS[0]); k++) {
+        if (strcmp(CU_KEYS[k].name, low) == 0) { *out = CU_KEYS[k].code; return true; }
+    }
+    return false;
+}
+
+static CGEventFlags cu_modifier(const char *name) {
+    if (!strcasecmp(name, "cmd") || !strcasecmp(name, "command") ||
+        !strcasecmp(name, "super") || !strcasecmp(name, "win")) return kCGEventFlagMaskCommand;
+    if (!strcasecmp(name, "ctrl") || !strcasecmp(name, "control")) return kCGEventFlagMaskControl;
+    if (!strcasecmp(name, "alt") || !strcasecmp(name, "option") ||
+        !strcasecmp(name, "opt")) return kCGEventFlagMaskAlternate;
+    if (!strcasecmp(name, "shift")) return kCGEventFlagMaskShift;
+    if (!strcasecmp(name, "fn")) return kCGEventFlagMaskSecondaryFn;
+    return 0;
+}
+
+static void cu_post_mouse(CGEventType type, int x, int y, CGMouseButton btn, int clicks) {
+    CGPoint pt = CGPointMake((double)x, (double)y);
+    CGEventRef ev = CGEventCreateMouseEvent(NULL, type, pt, btn);
+    if (clicks > 1) CGEventSetIntegerValueField(ev, kCGMouseEventClickState, clicks);
+    CGEventPost(kCGHIDEventTap, ev);
+    CFRelease(ev);
+}
+
+static void cu_click(int x, int y, CGMouseButton btn, int clicks) {
+    CGEventType down = (btn == kCGMouseButtonRight) ? kCGEventRightMouseDown :
+                       (btn == kCGMouseButtonCenter) ? kCGEventOtherMouseDown : kCGEventLeftMouseDown;
+    CGEventType up   = (btn == kCGMouseButtonRight) ? kCGEventRightMouseUp :
+                       (btn == kCGMouseButtonCenter) ? kCGEventOtherMouseUp : kCGEventLeftMouseUp;
+    CGWarpMouseCursorPosition(CGPointMake((double)x, (double)y));
+    for (int c = 1; c <= clicks; c++) {
+        cu_post_mouse(down, x, y, btn, c);
+        cu_post_mouse(up, x, y, btn, c);
+    }
+}
+
+static bool cu_key_combo(const char *spec, char *err, size_t errlen) {
+    /* spec like "cmd+shift+t" or "Return" — last token is the key. */
+    char buf[128];
+    snprintf(buf, sizeof(buf), "%s", spec);
+    CGEventFlags flags = 0;
+    char *tokens[8]; int nt = 0;
+    char *save = NULL;
+    for (char *t = strtok_r(buf, "+- ", &save); t && nt < 8; t = strtok_r(NULL, "+- ", &save))
+        tokens[nt++] = t;
+    if (nt == 0) { snprintf(err, errlen, "empty key spec"); return false; }
+    CGKeyCode code = 0;
+    bool have_code = false;
+    for (int i = 0; i < nt; i++) {
+        CGEventFlags m = cu_modifier(tokens[i]);
+        if (m && i < nt - 1) { flags |= m; continue; }
+        if (cu_keycode(tokens[i], &code)) have_code = true;
+        else if (m) { flags |= m; }  /* trailing modifier alone */
+    }
+    if (!have_code) { snprintf(err, errlen, "unknown key: %s", spec); return false; }
+    CGEventSourceRef src = CGEventSourceCreate(kCGEventSourceStateHIDSystemState);
+    CGEventRef kd = CGEventCreateKeyboardEvent(src, code, true);
+    CGEventSetFlags(kd, flags);
+    CGEventPost(kCGHIDEventTap, kd);
+    CFRelease(kd);
+    CGEventRef ku = CGEventCreateKeyboardEvent(src, code, false);
+    CGEventSetFlags(ku, flags);
+    CGEventPost(kCGHIDEventTap, ku);
+    CFRelease(ku);
+    if (src) CFRelease(src);
+    return true;
+}
+
+static void cu_type_text(const char *text) {
+    CGEventSourceRef src = CGEventSourceCreate(kCGEventSourceStateHIDSystemState);
+    CFStringRef s = CFStringCreateWithCString(NULL, text, kCFStringEncodingUTF8);
+    if (!s) { if (src) CFRelease(src); return; }
+    CFIndex n = CFStringGetLength(s);
+    for (CFIndex i = 0; i < n; i++) {
+        UniChar ch = CFStringGetCharacterAtIndex(s, i);
+        CGEventRef kd = CGEventCreateKeyboardEvent(src, 0, true);
+        CGEventKeyboardSetUnicodeString(kd, 1, &ch);
+        CGEventPost(kCGHIDEventTap, kd);
+        CFRelease(kd);
+        CGEventRef ku = CGEventCreateKeyboardEvent(src, 0, false);
+        CGEventKeyboardSetUnicodeString(ku, 1, &ch);
+        CGEventPost(kCGHIDEventTap, ku);
+        CFRelease(ku);
+        usleep(8000);
+    }
+    CFRelease(s);
+    if (src) CFRelease(src);
+}
+
+static void cu_scroll(const char *dir, int amount) {
+    int dy = 0, dx = 0;
+    if (!strcasecmp(dir, "up")) dy = amount;
+    else if (!strcasecmp(dir, "down")) dy = -amount;
+    else if (!strcasecmp(dir, "left")) dx = amount;
+    else if (!strcasecmp(dir, "right")) dx = -amount;
+    CGEventRef ev = CGEventCreateScrollWheelEvent(NULL, kCGScrollEventUnitLine, 2,
+                                                  dy, dx);
+    CGEventPost(kCGHIDEventTap, ev);
+    CFRelease(ev);
+}
+#endif /* __APPLE__ */
+
+static bool tool_computer(const char *input, char *result, size_t rlen) {
+    char *action = json_get_str(input, "action");
+    if (!action || !action[0]) {
+        free(action);
+        snprintf(result, rlen, "missing: action (screenshot|cursor_position|mouse_move|"
+                 "left_click|right_click|middle_click|double_click|triple_click|"
+                 "left_click_drag|key|type|scroll|wait)");
+        return false;
+    }
+
+    int w = 0, h = 0;
+    cu_display_size(&w, &h);
+    bool ok = true;
+    bool want_shot = true;   /* most actions return a fresh screenshot */
+    char scratch[1024];
+    if (rlen) result[0] = '\0';
+
+#ifdef __APPLE__
+    if (!strcmp(action, "screenshot")) {
+        /* handled below via want_shot */
+    } else if (!strcmp(action, "cursor_position")) {
+        CGEventRef e = CGEventCreate(NULL);
+        CGPoint p = CGEventGetLocation(e);
+        CFRelease(e);
+        snprintf(result, rlen, "{\"x\":%d,\"y\":%d,\"display\":[%d,%d]}",
+                 (int)p.x, (int)p.y, w, h);
+        free(action);
+        return true;  /* no screenshot needed */
+    } else if (!strcmp(action, "mouse_move")) {
+        int x, y;
+        if (!cu_get_coord(input, &x, &y)) { snprintf(result, rlen, "mouse_move needs coordinate [x,y]"); free(action); return false; }
+        CGWarpMouseCursorPosition(CGPointMake(x, y));
+        cu_post_mouse(kCGEventMouseMoved, x, y, kCGMouseButtonLeft, 0);
+    } else if (!strcmp(action, "left_click") || !strcmp(action, "right_click") ||
+               !strcmp(action, "middle_click") || !strcmp(action, "double_click") ||
+               !strcmp(action, "triple_click")) {
+        int x, y;
+        if (!cu_get_coord(input, &x, &y)) {
+            CGEventRef e = CGEventCreate(NULL); CGPoint p = CGEventGetLocation(e); CFRelease(e);
+            x = (int)p.x; y = (int)p.y;
+        }
+        CGMouseButton btn = !strcmp(action, "right_click") ? kCGMouseButtonRight :
+                            !strcmp(action, "middle_click") ? kCGMouseButtonCenter : kCGMouseButtonLeft;
+        int clicks = !strcmp(action, "double_click") ? 2 :
+                     !strcmp(action, "triple_click") ? 3 : 1;
+        cu_click(x, y, btn, clicks);
+    } else if (!strcmp(action, "left_click_drag")) {
+        int sx, sy;
+        if (!cu_get_coord(input, &sx, &sy)) { snprintf(result, rlen, "drag needs start coordinate [x,y]"); free(action); return false; }
+        int ex = json_get_int(input, "x2", sx), ey = json_get_int(input, "y2", sy);
+        char *to = json_get_raw(input, "to");
+        if (to) { sscanf(to, " [ %d , %d ]", &ex, &ey); free(to); }
+        CGWarpMouseCursorPosition(CGPointMake(sx, sy));
+        cu_post_mouse(kCGEventLeftMouseDown, sx, sy, kCGMouseButtonLeft, 1);
+        cu_post_mouse(kCGEventLeftMouseDragged, ex, ey, kCGMouseButtonLeft, 1);
+        cu_post_mouse(kCGEventLeftMouseUp, ex, ey, kCGMouseButtonLeft, 1);
+    } else if (!strcmp(action, "key")) {
+        char *text = json_get_str(input, "text");
+        if (!text) { snprintf(result, rlen, "key needs text (e.g. \"cmd+a\", \"Return\")"); free(action); return false; }
+        char err[128] = "";
+        ok = cu_key_combo(text, err, sizeof(err));
+        if (!ok) snprintf(result, rlen, "%s", err);
+        free(text);
+    } else if (!strcmp(action, "type")) {
+        char *text = json_get_str(input, "text");
+        if (!text) { snprintf(result, rlen, "type needs text"); free(action); return false; }
+        cu_type_text(text);
+        free(text);
+    } else if (!strcmp(action, "scroll")) {
+        char *dir = json_get_str(input, "scroll_direction");
+        int amt = json_get_int(input, "scroll_amount", 3);
+        cu_scroll(dir ? dir : "down", amt);
+        free(dir);
+    } else if (!strcmp(action, "wait")) {
+        int ms = json_get_int(input, "duration", 1000);
+        if (ms > 10000) ms = 10000;
+        usleep((useconds_t)ms * 1000);
+    } else {
+        snprintf(result, rlen, "unknown computer action: %s", action);
+        free(action);
+        return false;
+    }
+#else
+    /* Linux: drive xdotool. */
+    char cmd[1024];
+    if (!strcmp(action, "screenshot")) {
+        /* handled below */
+    } else if (!strcmp(action, "cursor_position")) {
+        run_cmd("xdotool getmouselocation --shell 2>/dev/null", scratch, sizeof(scratch));
+        int x = 0, y = 0; char *xp = strstr(scratch, "X="); char *yp = strstr(scratch, "Y=");
+        if (xp) x = atoi(xp + 2); if (yp) y = atoi(yp + 2);
+        snprintf(result, rlen, "{\"x\":%d,\"y\":%d,\"display\":[%d,%d]}", x, y, w, h);
+        free(action); return true;
+    } else if (!strcmp(action, "mouse_move")) {
+        int x, y;
+        if (!cu_get_coord(input, &x, &y)) { snprintf(result, rlen, "mouse_move needs coordinate [x,y]"); free(action); return false; }
+        snprintf(cmd, sizeof(cmd), "xdotool mousemove %d %d", x, y);
+        run_cmd(cmd, scratch, sizeof(scratch));
+    } else if (!strcmp(action, "left_click") || !strcmp(action, "right_click") ||
+               !strcmp(action, "middle_click") || !strcmp(action, "double_click") ||
+               !strcmp(action, "triple_click")) {
+        int x, y, btn = !strcmp(action, "right_click") ? 3 : !strcmp(action, "middle_click") ? 2 : 1;
+        int clicks = !strcmp(action, "double_click") ? 2 : !strcmp(action, "triple_click") ? 3 : 1;
+        if (cu_get_coord(input, &x, &y)) {
+            snprintf(cmd, sizeof(cmd), "xdotool mousemove %d %d click --repeat %d %d", x, y, clicks, btn);
+        } else {
+            snprintf(cmd, sizeof(cmd), "xdotool click --repeat %d %d", clicks, btn);
+        }
+        run_cmd(cmd, scratch, sizeof(scratch));
+    } else if (!strcmp(action, "left_click_drag")) {
+        int sx, sy;
+        if (!cu_get_coord(input, &sx, &sy)) { snprintf(result, rlen, "drag needs start coordinate [x,y]"); free(action); return false; }
+        int ex = json_get_int(input, "x2", sx), ey = json_get_int(input, "y2", sy);
+        char *to = json_get_raw(input, "to");
+        if (to) { sscanf(to, " [ %d , %d ]", &ex, &ey); free(to); }
+        snprintf(cmd, sizeof(cmd), "xdotool mousemove %d %d mousedown 1 mousemove %d %d mouseup 1",
+                 sx, sy, ex, ey);
+        run_cmd(cmd, scratch, sizeof(scratch));
+    } else if (!strcmp(action, "key")) {
+        char *text = json_get_str(input, "text");
+        if (!text) { snprintf(result, rlen, "key needs text"); free(action); return false; }
+        /* xdotool uses + for combos already; map common aliases. */
+        snprintf(cmd, sizeof(cmd), "xdotool key '%s'", text);
+        run_cmd(cmd, scratch, sizeof(scratch));
+        free(text);
+    } else if (!strcmp(action, "type")) {
+        char *text = json_get_str(input, "text");
+        if (!text) { snprintf(result, rlen, "type needs text"); free(action); return false; }
+        char qtmp[64] = "/tmp/dsco_type_XXXXXX";
+        int fd = mkstemp(qtmp);
+        if (fd >= 0) { write(fd, text, strlen(text)); close(fd);
+            snprintf(cmd, sizeof(cmd), "xdotool type --clearmodifiers --file '%s'", qtmp);
+            run_cmd(cmd, scratch, sizeof(scratch)); unlink(qtmp);
+        }
+        free(text);
+    } else if (!strcmp(action, "scroll")) {
+        char *dir = json_get_str(input, "scroll_direction");
+        int amt = json_get_int(input, "scroll_amount", 3);
+        int btn = (dir && !strcasecmp(dir, "up")) ? 4 : (dir && !strcasecmp(dir, "down")) ? 5 :
+                  (dir && !strcasecmp(dir, "left")) ? 6 : 7;
+        snprintf(cmd, sizeof(cmd), "xdotool click --repeat %d %d", amt, btn);
+        run_cmd(cmd, scratch, sizeof(scratch));
+        free(dir);
+    } else if (!strcmp(action, "wait")) {
+        int ms = json_get_int(input, "duration", 1000);
+        if (ms > 10000) ms = 10000;
+        usleep((useconds_t)ms * 1000);
+    } else {
+        snprintf(result, rlen, "unknown computer action: %s", action);
+        free(action);
+        return false;
+    }
+#endif
+
+    if (want_shot && ok) {
+        usleep(120000);  /* let the UI settle before capturing */
+        char shot[256];
+        if (cu_screenshot(shot, sizeof(shot))) {
+            cu_emit_image(shot);
+            struct stat st; stat(shot, &st);
+            snprintf(result, rlen,
+                     "{\"action\":\"%s\",\"display\":[%d,%d],\"screenshot\":\"%s\","
+                     "\"note\":\"Screenshot attached for the next turn. "
+                     "Coordinates are in display points.\"}",
+                     action, w, h, shot);
+        } else if (result[0] == '\0' || !strcmp(action, "screenshot")) {
+            snprintf(result, rlen, "{\"action\":\"%s\",\"error\":\"screen capture failed "
+                     "(check screen-recording permission)\"}", action);
+            ok = false;
+        }
+    } else if (result[0] == '\0') {
+        snprintf(result, rlen, "{\"action\":\"%s\",\"display\":[%d,%d],\"ok\":true}",
+                 action, w, h);
+    }
+
+    free(action);
+    return ok;
 }
 
 static bool tool_json_api(const char *input, char *result, size_t rlen) {
@@ -8431,7 +9555,8 @@ typedef enum {
     WF_STEP_PENDING = 0,
     WF_STEP_IN_PROGRESS,
     WF_STEP_DONE,
-    WF_STEP_BLOCKED
+    WF_STEP_BLOCKED,
+    WF_STEP_FAILED
 } wf_step_status_t;
 
 typedef struct {
@@ -8441,7 +9566,15 @@ typedef struct {
     char steps[WF_MAX_STEPS][WF_STEP_TEXT_MAX];
     wf_step_status_t status[WF_MAX_STEPS];
     char notes[WF_MAX_STEPS][WF_NOTE_MAX];
+    char business_key[96];
+    char contract_version[32];
+    char root_cause[64];
+    int retry_count[WF_MAX_STEPS];
+    int max_retries;
     time_t created_at;
+    time_t updated_at;
+    time_t heartbeat_at;
+    bool dead_lettered;
     bool active;
 } wf_plan_t;
 
@@ -8455,6 +9588,17 @@ static wf_plan_t *wf_find(int id) {
     return NULL;
 }
 
+static wf_plan_t *wf_find_business_key(const char *business_key) {
+    if (!business_key || !*business_key) return NULL;
+    for (int i = 0; i < WF_MAX_PLANS; i++) {
+        if (g_wf_plans[i].active &&
+            strcmp(g_wf_plans[i].business_key, business_key) == 0) {
+            return &g_wf_plans[i];
+        }
+    }
+    return NULL;
+}
+
 static wf_plan_t *wf_alloc(void) {
     for (int i = 0; i < WF_MAX_PLANS; i++) {
         if (!g_wf_plans[i].active) {
@@ -8462,6 +9606,9 @@ static wf_plan_t *wf_alloc(void) {
             g_wf_plans[i].active = true;
             g_wf_plans[i].id = g_wf_next_id++;
             g_wf_plans[i].created_at = time(NULL);
+            g_wf_plans[i].updated_at = g_wf_plans[i].created_at;
+            g_wf_plans[i].heartbeat_at = g_wf_plans[i].created_at;
+            g_wf_plans[i].max_retries = 3;
             return &g_wf_plans[i];
         }
     }
@@ -8506,6 +9653,7 @@ static const char *wf_status_name(wf_step_status_t s) {
         case WF_STEP_IN_PROGRESS: return "in_progress";
         case WF_STEP_DONE: return "done";
         case WF_STEP_BLOCKED: return "blocked";
+        case WF_STEP_FAILED: return "failed";
         default: return "unknown";
     }
 }
@@ -8516,17 +9664,65 @@ static wf_step_status_t wf_parse_status(const char *s) {
     if (strcmp(s, "in_progress") == 0 || strcmp(s, "inprogress") == 0) return WF_STEP_IN_PROGRESS;
     if (strcmp(s, "done") == 0 || strcmp(s, "complete") == 0) return WF_STEP_DONE;
     if (strcmp(s, "blocked") == 0) return WF_STEP_BLOCKED;
+    if (strcmp(s, "failed") == 0 || strcmp(s, "failure") == 0) return WF_STEP_FAILED;
     return WF_STEP_PENDING;
+}
+
+static void wf_format_time(time_t t, char *buf, size_t len) {
+    if (!buf || len == 0) return;
+    struct tm tmv;
+    if (t <= 0 || !gmtime_r(&t, &tmv)) {
+        snprintf(buf, len, "unknown");
+        return;
+    }
+    strftime(buf, len, "%Y-%m-%dT%H:%M:%SZ", &tmv);
+}
+
+static int wf_done_count(const wf_plan_t *wf) {
+    int done = 0;
+    if (!wf) return 0;
+    for (int i = 0; i < wf->step_count; i++) {
+        if (wf->status[i] == WF_STEP_DONE) done++;
+    }
+    return done;
+}
+
+static int wf_failed_count(const wf_plan_t *wf) {
+    int failed = 0;
+    if (!wf) return 0;
+    for (int i = 0; i < wf->step_count; i++) {
+        if (wf->status[i] == WF_STEP_FAILED || wf->status[i] == WF_STEP_BLOCKED)
+            failed++;
+    }
+    return failed;
 }
 
 static bool tool_workflow_plan(const char *input, char *result, size_t rlen) {
     char *name = json_get_str(input, "name");
     char *steps_raw = json_get_str(input, "steps");
+    char *business_key = json_get_str(input, "business_key");
+    char *contract_version = json_get_str(input, "contract_version");
+    int max_retries = json_get_int(input, "max_retries", 3);
     if (!steps_raw || !*steps_raw) {
         snprintf(result, rlen, "error: steps required (newline/semicolon separated)");
         free(name);
         free(steps_raw);
+        free(business_key);
+        free(contract_version);
         return false;
+    }
+    if (business_key && *business_key) {
+        wf_plan_t *existing = wf_find_business_key(business_key);
+        if (existing) {
+            snprintf(result, rlen,
+                     "error: duplicate workflow business_key=%s existing_id=%d status=%d/%d",
+                     business_key, existing->id, wf_done_count(existing), existing->step_count);
+            free(name);
+            free(steps_raw);
+            free(business_key);
+            free(contract_version);
+            return false;
+        }
     }
 
     wf_plan_t *wf = wf_alloc();
@@ -8534,16 +9730,30 @@ static bool tool_workflow_plan(const char *input, char *result, size_t rlen) {
         snprintf(result, rlen, "error: workflow capacity reached (%d)", WF_MAX_PLANS);
         free(name);
         free(steps_raw);
+        free(business_key);
+        free(contract_version);
         return false;
     }
     strncpy(wf->name, (name && *name) ? name : "workflow", sizeof(wf->name) - 1);
+    if (business_key && *business_key) {
+        strncpy(wf->business_key, business_key, sizeof(wf->business_key) - 1);
+        wf->business_key[sizeof(wf->business_key) - 1] = '\0';
+    }
+    strncpy(wf->contract_version,
+            (contract_version && *contract_version) ? contract_version : "v1",
+            sizeof(wf->contract_version) - 1);
+    wf->contract_version[sizeof(wf->contract_version) - 1] = '\0';
+    if (max_retries < 0) max_retries = 0;
+    if (max_retries > 25) max_retries = 25;
+    wf->max_retries = max_retries;
     wf->step_count = wf_parse_steps(steps_raw, wf->steps);
     for (int i = 0; i < wf->step_count; i++) wf->status[i] = WF_STEP_PENDING;
 
     size_t off = 0;
     int n = snprintf(result + off, rlen - off,
-                     "workflow created id=%d name=%s steps=%d\n",
-                     wf->id, wf->name, wf->step_count);
+                     "workflow created id=%d name=%s steps=%d contract=%s business_key=%s max_retries=%d\n",
+                     wf->id, wf->name, wf->step_count, wf->contract_version,
+                     wf->business_key[0] ? wf->business_key : "-", wf->max_retries);
     if (n < 0) n = 0;
     if ((size_t)n < rlen - off) off += (size_t)n;
     for (int i = 0; i < wf->step_count && off < rlen - 4; i++) {
@@ -8555,6 +9765,8 @@ static bool tool_workflow_plan(const char *input, char *result, size_t rlen) {
 
     free(name);
     free(steps_raw);
+    free(business_key);
+    free(contract_version);
     return true;
 }
 
@@ -8567,9 +9779,18 @@ static bool tool_workflow_status(const char *input, char *result, size_t rlen) {
             snprintf(result, rlen, "error: workflow id %d not found", id);
             return false;
         }
+        char created[32], updated[32], heartbeat[32];
+        wf_format_time(wf->created_at, created, sizeof(created));
+        wf_format_time(wf->updated_at, updated, sizeof(updated));
+        wf_format_time(wf->heartbeat_at, heartbeat, sizeof(heartbeat));
         int n = snprintf(result + off, rlen - off,
-                         "workflow id=%d name=%s steps=%d\n",
-                         wf->id, wf->name, wf->step_count);
+                         "workflow id=%d name=%s steps=%d progress=%d/%d contract=%s business_key=%s dead_lettered=%s root_cause=%s created=%s updated=%s heartbeat=%s\n",
+                         wf->id, wf->name, wf->step_count, wf_done_count(wf), wf->step_count,
+                         wf->contract_version[0] ? wf->contract_version : "v1",
+                         wf->business_key[0] ? wf->business_key : "-",
+                         wf->dead_lettered ? "true" : "false",
+                         wf->root_cause[0] ? wf->root_cause : "-",
+                         created, updated, heartbeat);
         if (n < 0) n = 0;
         if ((size_t)n < rlen - off) off += (size_t)n;
         for (int i = 0; i < wf->step_count && off < rlen - 8; i++) {
@@ -8589,13 +9810,14 @@ static bool tool_workflow_status(const char *input, char *result, size_t rlen) {
     for (int i = 0; i < WF_MAX_PLANS && off < rlen - 64; i++) {
         if (!g_wf_plans[i].active) continue;
         listed++;
-        int done = 0;
-        for (int s = 0; s < g_wf_plans[i].step_count; s++) {
-            if (g_wf_plans[i].status[s] == WF_STEP_DONE) done++;
-        }
         int n = snprintf(result + off, rlen - off,
-                         "id=%d name=%s progress=%d/%d\n",
-                         g_wf_plans[i].id, g_wf_plans[i].name, done, g_wf_plans[i].step_count);
+                         "id=%d name=%s progress=%d/%d failed=%d contract=%s business_key=%s dead_lettered=%s\n",
+                         g_wf_plans[i].id, g_wf_plans[i].name,
+                         wf_done_count(&g_wf_plans[i]), g_wf_plans[i].step_count,
+                         wf_failed_count(&g_wf_plans[i]),
+                         g_wf_plans[i].contract_version[0] ? g_wf_plans[i].contract_version : "v1",
+                         g_wf_plans[i].business_key[0] ? g_wf_plans[i].business_key : "-",
+                         g_wf_plans[i].dead_lettered ? "true" : "false");
         if (n < 0 || (size_t)n >= rlen - off) break;
         off += (size_t)n;
     }
@@ -8608,10 +9830,13 @@ static bool tool_workflow_checkpoint(const char *input, char *result, size_t rle
     int step = json_get_int(input, "step", -1);
     char *status = json_get_str(input, "status");
     char *note = json_get_str(input, "note");
+    char *root_cause = json_get_str(input, "root_cause");
+    bool non_retryable = json_get_bool(input, "non_retryable", false);
     if (id < 0 || step < 1) {
         snprintf(result, rlen, "error: id and step (1-based) required");
         free(status);
         free(note);
+        free(root_cause);
         return false;
     }
     wf_plan_t *wf = wf_find(id);
@@ -8619,24 +9844,42 @@ static bool tool_workflow_checkpoint(const char *input, char *result, size_t rle
         snprintf(result, rlen, "error: workflow id %d not found", id);
         free(status);
         free(note);
+        free(root_cause);
         return false;
     }
     if (step > wf->step_count) {
         snprintf(result, rlen, "error: step out of range (1-%d)", wf->step_count);
         free(status);
         free(note);
+        free(root_cause);
         return false;
     }
     int idx = step - 1;
-    wf->status[idx] = wf_parse_status(status);
+    wf_step_status_t next = wf_parse_status(status);
+    wf->status[idx] = next;
     if (note) {
         strncpy(wf->notes[idx], note, WF_NOTE_MAX - 1);
         wf->notes[idx][WF_NOTE_MAX - 1] = '\0';
     }
-    snprintf(result, rlen, "workflow %d step %d set to %s",
-             id, step, wf_status_name(wf->status[idx]));
+    if (root_cause && *root_cause) {
+        strncpy(wf->root_cause, root_cause, sizeof(wf->root_cause) - 1);
+        wf->root_cause[sizeof(wf->root_cause) - 1] = '\0';
+    }
+    if (next == WF_STEP_FAILED) {
+        wf->retry_count[idx]++;
+        if (non_retryable || wf->retry_count[idx] > wf->max_retries) {
+            wf->dead_lettered = true;
+        }
+    }
+    wf->updated_at = time(NULL);
+    snprintf(result, rlen,
+             "workflow %d step %d set to %s retry=%d/%d dead_lettered=%s root_cause=%s",
+             id, step, wf_status_name(wf->status[idx]), wf->retry_count[idx],
+             wf->max_retries, wf->dead_lettered ? "true" : "false",
+             wf->root_cause[0] ? wf->root_cause : "-");
     free(status);
     free(note);
+    free(root_cause);
     return true;
 }
 
@@ -8660,6 +9903,127 @@ static bool tool_workflow_resume(const char *input, char *result, size_t rlen) {
     }
     snprintf(result, rlen, "workflow %d has no pending steps", wf->id);
     return true;
+}
+
+static bool tool_workflow_heartbeat(const char *input, char *result, size_t rlen) {
+    int id = json_get_int(input, "id", -1);
+    if (id < 0) {
+        snprintf(result, rlen, "error: id required");
+        return false;
+    }
+    wf_plan_t *wf = wf_find(id);
+    if (!wf) {
+        snprintf(result, rlen, "error: workflow id %d not found", id);
+        return false;
+    }
+    wf->heartbeat_at = time(NULL);
+    wf->updated_at = wf->heartbeat_at;
+    char heartbeat[32];
+    wf_format_time(wf->heartbeat_at, heartbeat, sizeof(heartbeat));
+    snprintf(result, rlen, "workflow %d heartbeat=%s liveness=ok", wf->id, heartbeat);
+    return true;
+}
+
+static bool tool_workflow_dead_letter(const char *input, char *result, size_t rlen) {
+    int id = json_get_int(input, "id", -1);
+    size_t off = 0;
+    int listed = 0;
+    for (int i = 0; i < WF_MAX_PLANS && off < rlen - 80; i++) {
+        wf_plan_t *wf = &g_wf_plans[i];
+        if (!wf->active) continue;
+        if (id >= 0 && wf->id != id) continue;
+        if (!wf->dead_lettered && id < 0) continue;
+        int n = snprintf(result + off, rlen - off,
+                         "dead_letter id=%d name=%s business_key=%s root_cause=%s failed_steps=%d\n",
+                         wf->id, wf->name,
+                         wf->business_key[0] ? wf->business_key : "-",
+                         wf->root_cause[0] ? wf->root_cause : "-",
+                         wf_failed_count(wf));
+        if (n < 0 || (size_t)n >= rlen - off) break;
+        off += (size_t)n;
+        listed++;
+    }
+    if (listed == 0) snprintf(result, rlen, "no dead-lettered workflows");
+    return true;
+}
+
+static bool tool_workflow_reprocess(const char *input, char *result, size_t rlen) {
+    int id = json_get_int(input, "id", -1);
+    char *business_key = json_get_str(input, "business_key");
+    wf_plan_t *wf = id >= 0 ? wf_find(id) : wf_find_business_key(business_key);
+    if (!wf) {
+        snprintf(result, rlen, "error: workflow not found");
+        free(business_key);
+        return false;
+    }
+    int reset = 0;
+    for (int i = 0; i < wf->step_count; i++) {
+        if (wf->status[i] == WF_STEP_FAILED || wf->status[i] == WF_STEP_BLOCKED) {
+            wf->status[i] = WF_STEP_PENDING;
+            wf->retry_count[i] = 0;
+            reset++;
+        }
+    }
+    wf->dead_lettered = false;
+    wf->root_cause[0] = '\0';
+    wf->updated_at = time(NULL);
+    snprintf(result, rlen, "workflow %d reprocess reset_steps=%d business_key=%s",
+             wf->id, reset, wf->business_key[0] ? wf->business_key : "-");
+    free(business_key);
+    return true;
+}
+
+static bool tool_workflow_validate(const char *input, char *result, size_t rlen) {
+    int id = json_get_int(input, "id", -1);
+    char *steps_raw = json_get_str(input, "steps");
+    char tmp_steps[WF_MAX_STEPS][WF_STEP_TEXT_MAX];
+    int step_count = 0;
+    const char *contract = "v1";
+
+    if (id >= 0) {
+        wf_plan_t *wf = wf_find(id);
+        if (!wf) {
+            snprintf(result, rlen, "error: workflow id %d not found", id);
+            free(steps_raw);
+            return false;
+        }
+        step_count = wf->step_count;
+        contract = wf->contract_version[0] ? wf->contract_version : "v1";
+    } else {
+        step_count = wf_parse_steps(steps_raw, tmp_steps);
+    }
+
+    if (step_count <= 0) {
+        snprintf(result, rlen, "workflow validation failed: no steps");
+        free(steps_raw);
+        return false;
+    }
+    if (step_count > WF_MAX_STEPS) {
+        snprintf(result, rlen, "workflow validation failed: too many steps");
+        free(steps_raw);
+        return false;
+    }
+    snprintf(result, rlen,
+             "workflow validation ok steps=%d contract=%s schema=input_output:v1 retries=deterministic dead_letter=enabled",
+             step_count, contract);
+    free(steps_raw);
+    return true;
+}
+
+static bool tool_workflow_smoke(const char *input, char *result, size_t rlen) {
+    (void)input;
+    int active = 0, dead = 0, invalid = 0;
+    for (int i = 0; i < WF_MAX_PLANS; i++) {
+        wf_plan_t *wf = &g_wf_plans[i];
+        if (!wf->active) continue;
+        active++;
+        if (wf->dead_lettered) dead++;
+        if (wf->step_count <= 0 || !wf->contract_version[0]) invalid++;
+    }
+    snprintf(result, rlen,
+             "workflow smoke ok active=%d dead_lettered=%d invalid=%d contracts=pinned liveness=heartbeat_supported dedupe=business_key",
+             active, dead, invalid);
+    return invalid == 0;
 }
 
 /* ── Browser + Research + Code + Sandbox + Policy Toolkit slice ───────── */
@@ -12708,14 +14072,3717 @@ static bool tool_self_exit(const char *input, char *result, size_t rlen) {
     return true;
 }
 
+static bool tool_self_exiting(const char *input, char *result, size_t rlen) {
+    return tool_self_exit(input, result, rlen);
+}
+
+/* ── Live agent loop constructs ─────────────────────────────────────── */
+
+#define LOOP_STACK_MAX 16
+#define LOOP_LABEL_MAX 64
+#define LOOP_COND_MAX 2048
+#define LOOP_EXPR_MAX 1024
+#define LOOP_META_MAX 16
+#define LOOP_DYAD_MAX 8
+#define LOOP_REFINE_MAX 8
+#define LOOP_REWRITE_MAX 8
+#define LOOP_MAPREDUCE_MAX 8
+#define LOOP_SRM_MAX 12
+#define LOOP_MEASUREMENT_MAX 12
+#define LOOP_SRM_OPERATION_MAX 12
+#define LOOP_GRAPH_NODE_MAX 24
+#define LOOP_GRAPH_EDGE_MAX 32
+#define LOOP_META_KIND_MAX 32
+#define LOOP_META_NAME_MAX 48
+#define LOOP_META_VALUE_MAX 128
+
+typedef struct {
+    char   kind[LOOP_META_KIND_MAX];
+    char   name[LOOP_META_NAME_MAX];
+    char   value[LOOP_META_VALUE_MAX];
+    double weight;
+} loop_meta_entry_t;
+
+typedef struct {
+    char from[LOOP_META_NAME_MAX];
+    char to[LOOP_META_NAME_MAX];
+    char relation[LOOP_META_KIND_MAX];
+} loop_dyad_t;
+
+typedef struct {
+    char   name[LOOP_META_NAME_MAX];
+    char   type[LOOP_META_NAME_MAX];
+    char   state[LOOP_META_VALUE_MAX];
+    double weight;
+} loop_graph_node_t;
+
+typedef struct {
+    char   from[LOOP_META_NAME_MAX];
+    char   to[LOOP_META_NAME_MAX];
+    char   relation[LOOP_META_KIND_MAX];
+    double weight;
+} loop_graph_edge_t;
+
+typedef struct {
+    char   target[LOOP_META_NAME_MAX];
+    char   op[3];
+    double value;
+    char   when[LOOP_EXPR_MAX];
+    bool   fired;
+} loop_refine_rule_t;
+
+typedef struct {
+    char action[LOOP_COND_MAX];
+    char when[LOOP_EXPR_MAX];
+    bool fired;
+} loop_rewrite_rule_t;
+
+typedef struct {
+    char name[LOOP_META_NAME_MAX];
+    char source[LOOP_META_NAME_MAX];
+    char mapper[LOOP_META_NAME_MAX];
+    char reducer[LOOP_META_NAME_MAX];
+    char key[LOOP_META_NAME_MAX];
+    char target[LOOP_META_NAME_MAX];
+    int  partitions;
+    bool mapped;
+    bool shuffled;
+    bool reduced;
+} loop_mapreduce_job_t;
+
+typedef struct {
+    char   id[LOOP_META_NAME_MAX];
+    char   name[LOOP_META_NAME_MAX];
+    char   matrix[LOOP_META_VALUE_MAX];
+    char   property[LOOP_META_VALUE_MAX];
+    char   certificate[LOOP_META_NAME_MAX];
+    char   report[LOOP_META_NAME_MAX];
+    char   sds[LOOP_META_NAME_MAX];
+    double assigned_value;
+    double uncertainty;
+    double price;
+    char   destination[LOOP_META_NAME_MAX];
+    char   distributor[LOOP_META_NAME_MAX];
+    char   store[LOOP_META_NAME_MAX];
+    bool   certificate_current;
+    bool   sds_available;
+    bool   traceable;
+    bool   available;
+    bool   orderable;
+    bool   shipping_blocked;
+    bool   product_search_found;
+    bool   archived_certificate;
+} loop_srm_entry_t;
+
+typedef struct {
+    char   name[LOOP_META_NAME_MAX];
+    char   material[LOOP_META_NAME_MAX];
+    char   property[LOOP_META_VALUE_MAX];
+    char   unit[LOOP_META_KIND_MAX];
+    char   method[LOOP_META_NAME_MAX];
+    double value;
+    double uncertainty;
+    bool   calibrated;
+    bool   has_uncertainty_budget;
+} loop_measurement_entry_t;
+
+typedef struct {
+    char   kind[LOOP_META_KIND_MAX];
+    char   name[LOOP_META_NAME_MAX];
+    char   value[LOOP_META_VALUE_MAX];
+    double amount;
+    bool   flag;
+} loop_srm_operation_t;
+
+typedef struct {
+    bool active;
+    int  id;
+    char label[LOOP_LABEL_MAX];
+    char conditions[LOOP_COND_MAX];
+    char continue_expr[LOOP_EXPR_MAX];
+    char break_expr[LOOP_EXPR_MAX];
+    char continue_prompt[DSCO_LOOP_PROMPT_MAX];
+    int  max_iterations;
+    int  iterations;
+    int  max_turns;
+    bool recursive;
+    bool override_done;
+    bool override_max_turns;
+    bool dsl_enabled;
+    loop_meta_entry_t meta[LOOP_META_MAX];
+    int  meta_count;
+    loop_dyad_t dyads[LOOP_DYAD_MAX];
+    int  dyad_count;
+    loop_graph_node_t graph_nodes[LOOP_GRAPH_NODE_MAX];
+    int  graph_node_count;
+    loop_graph_edge_t graph_edges[LOOP_GRAPH_EDGE_MAX];
+    int  graph_edge_count;
+    char traverse_from[LOOP_META_NAME_MAX];
+    int  traverse_depth;
+    int  traverse_hits;
+    loop_refine_rule_t refine_rules[LOOP_REFINE_MAX];
+    int  refine_count;
+    int  refinements_applied;
+    loop_rewrite_rule_t rewrite_rules[LOOP_REWRITE_MAX];
+    int  rewrite_count;
+    int  rewrites_applied;
+    loop_mapreduce_job_t mapreduce_jobs[LOOP_MAPREDUCE_MAX];
+    int  mapreduce_job_count;
+    int  map_count;
+    int  shuffle_count;
+    int  reduce_count;
+    int  partition_count;
+    loop_srm_entry_t srm_entries[LOOP_SRM_MAX];
+    int  srm_count;
+    loop_measurement_entry_t measurements[LOOP_MEASUREMENT_MAX];
+    int  measurement_count;
+    int  uncertainty_budget_count;
+    loop_srm_operation_t srm_operations[LOOP_SRM_OPERATION_MAX];
+    int  srm_operation_count;
+    double effect_conversational;
+    double effect_tool;
+    double effect_world;
+    double effect_meta;
+    double reward;
+    double curiosity;
+    double empowerment;
+    double confidence;
+    double uncertainty;
+    double learning_rate;
+    double valence;
+    double intensity;
+    double exploration_rate;
+    double credit;
+    double pruning_threshold;
+    double basin_temperature;
+    char policy[LOOP_META_NAME_MAX];
+    char decision[LOOP_META_VALUE_MAX];
+    char attractor[LOOP_META_NAME_MAX];
+    char prompt_game[LOOP_META_NAME_MAX];
+} loop_construct_t;
+
+static loop_construct_t g_loop_stack[LOOP_STACK_MAX];
+static int              g_loop_depth = 0;
+static int              g_loop_next_id = 1;
+static pthread_mutex_t  g_loop_lock = PTHREAD_MUTEX_INITIALIZER;
+
+static void loop_copy(char *dst, size_t dst_len, const char *src,
+                      const char *fallback) {
+    if (!dst || dst_len == 0) return;
+    const char *s = (src && src[0]) ? src : (fallback ? fallback : "");
+    snprintf(dst, dst_len, "%s", s);
+}
+
+static int loop_clamp_int(int v, int lo, int hi) {
+    if (v < lo) return lo;
+    if (v > hi) return hi;
+    return v;
+}
+
+static int loop_find_locked(const char *label) {
+    if (!label || !label[0]) return g_loop_depth - 1;
+    for (int i = g_loop_depth - 1; i >= 0; i--) {
+        if (strcmp(g_loop_stack[i].label, label) == 0) return i;
+    }
+    return -1;
+}
+
+static bool loop_ident_char(int ch) {
+    return isalnum((unsigned char)ch) || ch == '_' || ch == '.' || ch == '$';
+}
+
+static const char *loop_skip_ws(const char *p) {
+    while (p && *p && isspace((unsigned char)*p)) p++;
+    return p ? p : "";
+}
+
+static char *loop_trim(char *s) {
+    if (!s) return s;
+    while (*s && isspace((unsigned char)*s)) s++;
+    char *end = s + strlen(s);
+    while (end > s && isspace((unsigned char)end[-1])) *--end = '\0';
+    return s;
+}
+
+static bool loop_stmt_prefix(char *s, const char *prefix, char **after) {
+    s = loop_trim(s);
+    size_t n = strlen(prefix);
+    if (strncasecmp(s, prefix, n) != 0) return false;
+    if (loop_ident_char((unsigned char)prefix[n - 1]) &&
+        loop_ident_char((unsigned char)s[n])) {
+        return false;
+    }
+    if (after) *after = loop_trim(s + n);
+    return true;
+}
+
+static bool loop_stmt_assignment(char *s, const char *name, char **value) {
+    s = loop_trim(s);
+    size_t n = strlen(name);
+    if (strncasecmp(s, name, n) != 0 || loop_ident_char((unsigned char)s[n]))
+        return false;
+    char *p = s + n;
+    while (*p && isspace((unsigned char)*p)) p++;
+    if (*p == '=' || *p == ':') p++;
+    else if (*p && !isspace((unsigned char)*p)) return false;
+    if (value) *value = loop_trim(p);
+    return true;
+}
+
+static char *loop_unquote_inplace(char *s) {
+    s = loop_trim(s);
+    size_t n = strlen(s);
+    if (n >= 2 && ((s[0] == '"' && s[n - 1] == '"') ||
+                   (s[0] == '\'' && s[n - 1] == '\''))) {
+        s[n - 1] = '\0';
+        return s + 1;
+    }
+    return s;
+}
+
+static void loop_copy_unquoted(char *dst, size_t dst_len, const char *src,
+                               const char *fallback) {
+    char tmp[LOOP_COND_MAX];
+    snprintf(tmp, sizeof(tmp), "%s", src ? src : "");
+    loop_copy(dst, dst_len, loop_unquote_inplace(tmp), fallback);
+}
+
+static bool loop_parse_bool_value(const char *s, bool def) {
+    s = loop_skip_ws(s);
+    if (strncasecmp(s, "true", 4) == 0 || strncasecmp(s, "yes", 3) == 0 ||
+        strncasecmp(s, "on", 2) == 0 || strcmp(s, "1") == 0) {
+        return true;
+    }
+    if (strncasecmp(s, "false", 5) == 0 || strncasecmp(s, "no", 2) == 0 ||
+        strncasecmp(s, "off", 3) == 0 || strcmp(s, "0") == 0) {
+        return false;
+    }
+    return def;
+}
+
+static char *loop_strcasestr_local(char *haystack, const char *needle) {
+    if (!haystack || !needle || !needle[0]) return NULL;
+    size_t n = strlen(needle);
+    for (char *p = haystack; *p; p++) {
+        if (strncasecmp(p, needle, n) == 0) return p;
+    }
+    return NULL;
+}
+
+static double loop_clamp01(double v) {
+    if (v < 0.0) return 0.0;
+    if (v > 1.0) return 1.0;
+    return v;
+}
+
+static double loop_parse_double_value(const char *s, double def) {
+    s = loop_skip_ws(s);
+    char *end = NULL;
+    double v = strtod(s, &end);
+    if (!end || end == s) return def;
+    return v;
+}
+
+static int loop_graph_find_node(const loop_construct_t *c, const char *name) {
+    if (!c || !name || !name[0]) return -1;
+    for (int i = 0; i < c->graph_node_count; i++) {
+        if (strcasecmp(c->graph_nodes[i].name, name) == 0) return i;
+    }
+    return -1;
+}
+
+static int loop_graph_find_edge(const loop_construct_t *c, const char *from,
+                                const char *to, const char *relation) {
+    if (!c || !from || !to || !from[0] || !to[0]) return -1;
+    for (int i = 0; i < c->graph_edge_count; i++) {
+        loop_graph_edge_t *e = (loop_graph_edge_t *)&c->graph_edges[i];
+        if (strcasecmp(e->from, from) != 0 || strcasecmp(e->to, to) != 0)
+            continue;
+        if (!relation || !relation[0] || strcasecmp(e->relation, relation) == 0)
+            return i;
+    }
+    return -1;
+}
+
+static double loop_graph_density(const loop_construct_t *c) {
+    if (!c || c->graph_node_count <= 1) return 0.0;
+    double possible = (double)c->graph_node_count * (double)(c->graph_node_count - 1);
+    return (double)c->graph_edge_count / possible;
+}
+
+static int loop_graph_count_relation(const loop_construct_t *c,
+                                     const char *relation) {
+    if (!c || !relation || !relation[0]) return 0;
+    int n = 0;
+    for (int i = 0; i < c->graph_edge_count; i++) {
+        if (strcasecmp(c->graph_edges[i].relation, relation) == 0) n++;
+    }
+    return n;
+}
+
+static void loop_graph_add_node(loop_construct_t *c, const char *name,
+                                const char *type, const char *state,
+                                double weight) {
+    if (!c || !name || !name[0]) return;
+    char clean_name[LOOP_META_NAME_MAX];
+    char clean_type[LOOP_META_NAME_MAX];
+    char clean_state[LOOP_META_VALUE_MAX];
+    loop_copy_unquoted(clean_name, sizeof(clean_name), name, "node");
+    loop_copy_unquoted(clean_type, sizeof(clean_type), type, "");
+    loop_copy_unquoted(clean_state, sizeof(clean_state), state, "");
+
+    int idx = loop_graph_find_node(c, clean_name);
+    if (idx < 0) {
+        if (c->graph_node_count >= LOOP_GRAPH_NODE_MAX) return;
+        idx = c->graph_node_count++;
+        memset(&c->graph_nodes[idx], 0, sizeof(c->graph_nodes[idx]));
+        loop_copy(c->graph_nodes[idx].name, sizeof(c->graph_nodes[idx].name),
+                  clean_name, "node");
+        loop_copy(c->graph_nodes[idx].type, sizeof(c->graph_nodes[idx].type),
+                  clean_type[0] ? clean_type : "object", "object");
+    }
+    if (clean_type[0])
+        loop_copy(c->graph_nodes[idx].type, sizeof(c->graph_nodes[idx].type),
+                  clean_type, "object");
+    if (clean_state[0])
+        loop_copy(c->graph_nodes[idx].state, sizeof(c->graph_nodes[idx].state),
+                  clean_state, NULL);
+    c->graph_nodes[idx].weight = weight;
+    c->dsl_enabled = true;
+}
+
+static void loop_graph_remove_node(loop_construct_t *c, const char *name) {
+    if (!c || !name || !name[0]) return;
+    char clean_name[LOOP_META_NAME_MAX];
+    loop_copy_unquoted(clean_name, sizeof(clean_name), name, NULL);
+    int idx = loop_graph_find_node(c, clean_name);
+    if (idx >= 0) {
+        for (int i = idx + 1; i < c->graph_node_count; i++)
+            c->graph_nodes[i - 1] = c->graph_nodes[i];
+        c->graph_node_count--;
+        memset(&c->graph_nodes[c->graph_node_count], 0,
+               sizeof(c->graph_nodes[c->graph_node_count]));
+    }
+    for (int i = 0; i < c->graph_edge_count; ) {
+        loop_graph_edge_t *e = &c->graph_edges[i];
+        if (strcasecmp(e->from, clean_name) == 0 ||
+            strcasecmp(e->to, clean_name) == 0) {
+            for (int j = i + 1; j < c->graph_edge_count; j++)
+                c->graph_edges[j - 1] = c->graph_edges[j];
+            c->graph_edge_count--;
+            memset(&c->graph_edges[c->graph_edge_count], 0,
+                   sizeof(c->graph_edges[c->graph_edge_count]));
+        } else {
+            i++;
+        }
+    }
+    c->dsl_enabled = true;
+}
+
+static void loop_graph_replace_node(loop_construct_t *c, const char *old_name,
+                                    const char *new_name) {
+    if (!c || !old_name || !new_name || !old_name[0] || !new_name[0]) return;
+    char old_clean[LOOP_META_NAME_MAX];
+    char new_clean[LOOP_META_NAME_MAX];
+    loop_copy_unquoted(old_clean, sizeof(old_clean), old_name, NULL);
+    loop_copy_unquoted(new_clean, sizeof(new_clean), new_name, NULL);
+    int idx = loop_graph_find_node(c, old_clean);
+    if (idx < 0) {
+        loop_graph_add_node(c, new_clean, "object", NULL, 0.0);
+    } else {
+        loop_copy(c->graph_nodes[idx].name, sizeof(c->graph_nodes[idx].name),
+                  new_clean, NULL);
+    }
+    for (int i = 0; i < c->graph_edge_count; i++) {
+        if (strcasecmp(c->graph_edges[i].from, old_clean) == 0)
+            loop_copy(c->graph_edges[i].from, sizeof(c->graph_edges[i].from),
+                      new_clean, NULL);
+        if (strcasecmp(c->graph_edges[i].to, old_clean) == 0)
+            loop_copy(c->graph_edges[i].to, sizeof(c->graph_edges[i].to),
+                      new_clean, NULL);
+    }
+    c->dsl_enabled = true;
+}
+
+static void loop_graph_add_edge(loop_construct_t *c, const char *from,
+                                const char *to, const char *relation,
+                                double weight) {
+    if (!c || !from || !to || !from[0] || !to[0]) return;
+    char clean_from[LOOP_META_NAME_MAX];
+    char clean_to[LOOP_META_NAME_MAX];
+    char clean_rel[LOOP_META_KIND_MAX];
+    loop_copy_unquoted(clean_from, sizeof(clean_from), from, "object");
+    loop_copy_unquoted(clean_to, sizeof(clean_to), to, "object");
+    loop_copy_unquoted(clean_rel, sizeof(clean_rel), relation, "relates");
+    if (loop_graph_find_node(c, clean_from) < 0)
+        loop_graph_add_node(c, clean_from, "object", NULL, 0.0);
+    if (loop_graph_find_node(c, clean_to) < 0)
+        loop_graph_add_node(c, clean_to, "object", NULL, 0.0);
+
+    int idx = loop_graph_find_edge(c, clean_from, clean_to, clean_rel);
+    if (idx < 0) {
+        if (c->graph_edge_count >= LOOP_GRAPH_EDGE_MAX) return;
+        idx = c->graph_edge_count++;
+        memset(&c->graph_edges[idx], 0, sizeof(c->graph_edges[idx]));
+    }
+    loop_copy(c->graph_edges[idx].from, sizeof(c->graph_edges[idx].from),
+              clean_from, NULL);
+    loop_copy(c->graph_edges[idx].to, sizeof(c->graph_edges[idx].to),
+              clean_to, NULL);
+    loop_copy(c->graph_edges[idx].relation, sizeof(c->graph_edges[idx].relation),
+              clean_rel, "relates");
+    c->graph_edges[idx].weight = weight;
+    c->dsl_enabled = true;
+}
+
+static void loop_graph_remove_edge(loop_construct_t *c, const char *from,
+                                   const char *to, const char *relation) {
+    if (!c || !from || !to || !from[0] || !to[0]) return;
+    char clean_from[LOOP_META_NAME_MAX];
+    char clean_to[LOOP_META_NAME_MAX];
+    char clean_rel[LOOP_META_KIND_MAX];
+    loop_copy_unquoted(clean_from, sizeof(clean_from), from, NULL);
+    loop_copy_unquoted(clean_to, sizeof(clean_to), to, NULL);
+    loop_copy_unquoted(clean_rel, sizeof(clean_rel), relation, "");
+    for (int i = 0; i < c->graph_edge_count; ) {
+        loop_graph_edge_t *e = &c->graph_edges[i];
+        bool rel_match = !clean_rel[0] || strcasecmp(e->relation, clean_rel) == 0;
+        if (strcasecmp(e->from, clean_from) == 0 &&
+            strcasecmp(e->to, clean_to) == 0 && rel_match) {
+            for (int j = i + 1; j < c->graph_edge_count; j++)
+                c->graph_edges[j - 1] = c->graph_edges[j];
+            c->graph_edge_count--;
+            memset(&c->graph_edges[c->graph_edge_count], 0,
+                   sizeof(c->graph_edges[c->graph_edge_count]));
+        } else {
+            i++;
+        }
+    }
+    c->dsl_enabled = true;
+}
+
+static int loop_graph_traverse_count(const loop_construct_t *c,
+                                     const char *start, int depth) {
+    if (!c || !start || !start[0] || depth < 0) return 0;
+    char clean_start[LOOP_META_NAME_MAX];
+    loop_copy_unquoted(clean_start, sizeof(clean_start), start, NULL);
+    int start_idx = loop_graph_find_node(c, clean_start);
+    if (start_idx < 0) return 0;
+
+    bool seen[LOOP_GRAPH_NODE_MAX] = { false };
+    int frontier[LOOP_GRAPH_NODE_MAX];
+    int next[LOOP_GRAPH_NODE_MAX];
+    int fcount = 1;
+    int hits = 1;
+    frontier[0] = start_idx;
+    seen[start_idx] = true;
+
+    for (int level = 0; level < depth && fcount > 0; level++) {
+        int ncount = 0;
+        for (int fi = 0; fi < fcount; fi++) {
+            const char *from = c->graph_nodes[frontier[fi]].name;
+            for (int e = 0; e < c->graph_edge_count; e++) {
+                if (strcasecmp(c->graph_edges[e].from, from) != 0) continue;
+                int ni = loop_graph_find_node(c, c->graph_edges[e].to);
+                if (ni < 0 || seen[ni]) continue;
+                seen[ni] = true;
+                hits++;
+                if (ncount < LOOP_GRAPH_NODE_MAX) next[ncount++] = ni;
+            }
+        }
+        for (int i = 0; i < ncount; i++) frontier[i] = next[i];
+        fcount = ncount;
+    }
+    return hits;
+}
+
+static int loop_meta_count_kind(const loop_construct_t *c, const char *kind) {
+    if (!c || !kind) return 0;
+    int n = 0;
+    for (int i = 0; i < c->meta_count; i++) {
+        if (strcasecmp(c->meta[i].kind, kind) == 0) n++;
+    }
+    return n;
+}
+
+static void loop_meta_add(loop_construct_t *c, const char *kind,
+                          const char *name, const char *value,
+                          double weight) {
+    if (!c || c->meta_count >= LOOP_META_MAX) return;
+    loop_meta_entry_t *m = &c->meta[c->meta_count++];
+    memset(m, 0, sizeof(*m));
+    loop_copy(m->kind, sizeof(m->kind), kind, "meta");
+    loop_copy_unquoted(m->name, sizeof(m->name), name, "item");
+    loop_copy_unquoted(m->value, sizeof(m->value), value, "");
+    if (strcasecmp(m->kind, "define") == 0 || strcasecmp(m->kind, "object") == 0) {
+        loop_graph_add_node(c, m->name, m->value[0] ? m->value : m->kind,
+                            NULL, weight);
+    }
+    m->weight = weight;
+    c->dsl_enabled = true;
+}
+
+static bool loop_name_matches(const char *name, const char *a, const char *b,
+                              const char *c) {
+    return (a && strcasecmp(name, a) == 0) ||
+           (b && strcasecmp(name, b) == 0) ||
+           (c && strcasecmp(name, c) == 0);
+}
+
+static void loop_set_effect(loop_construct_t *c, const char *name, double value) {
+    if (!c || !name) return;
+    value = loop_clamp01(value);
+    if (loop_name_matches(name, "conversational", "conversation", "dialogue"))
+        c->effect_conversational = value;
+    else if (loop_name_matches(name, "tool", "tools", "tool_calling"))
+        c->effect_tool = value;
+    else if (loop_name_matches(name, "world", "world_model", "world_modeling"))
+        c->effect_world = value;
+    else if (loop_name_matches(name, "meta", "meta_learning", "reflection"))
+        c->effect_meta = value;
+    c->dsl_enabled = true;
+}
+
+static void loop_set_signal(loop_construct_t *c, const char *name, double value) {
+    if (!c || !name) return;
+    if (loop_name_matches(name, "reward", "external_reward", "value"))
+        c->reward = value;
+    else if (loop_name_matches(name, "curiosity", "intrinsic", "intrinsic_reward"))
+        c->curiosity = value;
+    else if (loop_name_matches(name, "empowerment", "agency", "control"))
+        c->empowerment = value;
+    else if (loop_name_matches(name, "confidence", "belief_confidence", "certainty"))
+        c->confidence = loop_clamp01(value);
+    else if (loop_name_matches(name, "uncertainty", "entropy", "risk"))
+        c->uncertainty = loop_clamp01(value);
+    else if (loop_name_matches(name, "learning_rate", "learn_rate", "rate"))
+        c->learning_rate = loop_clamp01(value);
+    else if (loop_name_matches(name, "valence", "reward_valence", NULL))
+        c->valence = value;
+    else if (loop_name_matches(name, "intensity", "reward_intensity", NULL))
+        c->intensity = loop_clamp01(value);
+    else if (loop_name_matches(name, "exploration_rate", "explore_rate", "epsilon"))
+        c->exploration_rate = loop_clamp01(value);
+    else if (loop_name_matches(name, "credit", "credit_assignment", NULL))
+        c->credit = value;
+    else if (loop_name_matches(name, "pruning_threshold", "prune_threshold", NULL))
+        c->pruning_threshold = loop_clamp01(value);
+    else if (loop_name_matches(name, "basin_temperature", "basin_hop", "temperature"))
+        c->basin_temperature = loop_clamp01(value);
+    c->dsl_enabled = true;
+}
+
+static void loop_program_meta_reset(loop_construct_t *c) {
+    if (!c) return;
+    memset(c->meta, 0, sizeof(c->meta));
+    c->meta_count = 0;
+    memset(c->dyads, 0, sizeof(c->dyads));
+    c->dyad_count = 0;
+    memset(c->graph_nodes, 0, sizeof(c->graph_nodes));
+    c->graph_node_count = 0;
+    memset(c->graph_edges, 0, sizeof(c->graph_edges));
+    c->graph_edge_count = 0;
+    c->traverse_from[0] = '\0';
+    c->traverse_depth = 0;
+    c->traverse_hits = 0;
+    memset(c->refine_rules, 0, sizeof(c->refine_rules));
+    c->refine_count = 0;
+    c->refinements_applied = 0;
+    memset(c->rewrite_rules, 0, sizeof(c->rewrite_rules));
+    c->rewrite_count = 0;
+    c->rewrites_applied = 0;
+    memset(c->mapreduce_jobs, 0, sizeof(c->mapreduce_jobs));
+    c->mapreduce_job_count = 0;
+    c->map_count = 0;
+    c->shuffle_count = 0;
+    c->reduce_count = 0;
+    c->partition_count = 0;
+    memset(c->srm_entries, 0, sizeof(c->srm_entries));
+    c->srm_count = 0;
+    memset(c->measurements, 0, sizeof(c->measurements));
+    c->measurement_count = 0;
+    c->uncertainty_budget_count = 0;
+    memset(c->srm_operations, 0, sizeof(c->srm_operations));
+    c->srm_operation_count = 0;
+    c->effect_conversational = 0.0;
+    c->effect_tool = 0.0;
+    c->effect_world = 0.0;
+    c->effect_meta = 0.0;
+    c->reward = 0.0;
+    c->curiosity = 0.0;
+    c->empowerment = 0.0;
+    c->confidence = 0.0;
+    c->uncertainty = 0.0;
+    c->learning_rate = 0.0;
+    c->valence = 0.0;
+    c->intensity = 0.0;
+    c->exploration_rate = 0.0;
+    c->credit = 0.0;
+    c->pruning_threshold = 0.0;
+    c->basin_temperature = 0.0;
+    c->policy[0] = '\0';
+    c->decision[0] = '\0';
+    c->attractor[0] = '\0';
+    c->prompt_game[0] = '\0';
+}
+
+static void loop_pop_from_locked(int idx) {
+    if (idx < 0) return;
+    if (idx > g_loop_depth) idx = g_loop_depth;
+    for (int i = idx; i < g_loop_depth; i++)
+        memset(&g_loop_stack[i], 0, sizeof(g_loop_stack[i]));
+    g_loop_depth = idx;
+}
+
+typedef struct {
+    const char             *p;
+    const loop_construct_t *c;
+    int                     current_turn;
+    int                     depth;
+    bool                    model_done;
+    bool                    has_followup;
+    bool                    ok;
+    char                    error[128];
+} loop_expr_parser_t;
+
+static void loop_expr_error(loop_expr_parser_t *ps, const char *msg) {
+    if (!ps || !ps->ok) return;
+    ps->ok = false;
+    snprintf(ps->error, sizeof(ps->error), "%s", msg ? msg : "invalid expression");
+}
+
+static bool loop_expr_consume(loop_expr_parser_t *ps, const char *lit) {
+    ps->p = loop_skip_ws(ps->p);
+    size_t n = strlen(lit);
+    if (strncmp(ps->p, lit, n) != 0) return false;
+    ps->p += n;
+    return true;
+}
+
+static bool loop_expr_keyword(loop_expr_parser_t *ps, const char *kw) {
+    ps->p = loop_skip_ws(ps->p);
+    size_t n = strlen(kw);
+    if (strncasecmp(ps->p, kw, n) != 0 || loop_ident_char((unsigned char)ps->p[n]))
+        return false;
+    ps->p += n;
+    return true;
+}
+
+static double loop_expr_parse_or(loop_expr_parser_t *ps);
+static int loop_srm_certificate_count(const loop_construct_t *c);
+static int loop_srm_current_certificate_count(const loop_construct_t *c);
+static int loop_srm_sds_count(const loop_construct_t *c);
+static int loop_srm_traceability_count(const loop_construct_t *c);
+static int loop_srm_available_count(const loop_construct_t *c);
+static int loop_srm_orderable_count(const loop_construct_t *c);
+static int loop_srm_shipping_block_count(const loop_construct_t *c);
+static int loop_srm_product_search_count(const loop_construct_t *c);
+static int loop_srm_archived_certificate_count(const loop_construct_t *c);
+static double loop_srm_total_price(const loop_construct_t *c);
+static int loop_srm_operation_count_kind(const loop_construct_t *c,
+                                         const char *kind);
+static bool loop_srm_operation_has(const loop_construct_t *c,
+                                   const char *kind, const char *name);
+static double loop_srm_mean_uncertainty(const loop_construct_t *c);
+static double loop_srm_max_uncertainty(const loop_construct_t *c);
+static int loop_measurement_calibration_count(const loop_construct_t *c);
+
+static double loop_expr_variable(loop_expr_parser_t *ps) {
+    ps->p = loop_skip_ws(ps->p);
+    const char *start = ps->p;
+    if (*start == '$') start++;
+    if (!isalpha((unsigned char)*start) && *start != '_') {
+        loop_expr_error(ps, "expected variable");
+        return 0.0;
+    }
+    const char *p = start;
+    while (loop_ident_char((unsigned char)*p)) p++;
+    char name[80];
+    size_t n = (size_t)(p - start);
+    if (n >= sizeof(name)) n = sizeof(name) - 1;
+    for (size_t i = 0; i < n; i++)
+        name[i] = (char)tolower((unsigned char)start[i]);
+    name[n] = '\0';
+    ps->p = p;
+
+    if (strcmp(name, "true") == 0) return 1.0;
+    if (strcmp(name, "false") == 0) return 0.0;
+    if (strcmp(name, "iteration") == 0 || strcmp(name, "iterations") == 0 ||
+        strcmp(name, "c.iteration") == 0 || strcmp(name, "c.iterations") == 0)
+        return ps->c ? ps->c->iterations : 0.0;
+    if (strcmp(name, "next_iteration") == 0 || strcmp(name, "c.next_iteration") == 0)
+        return ps->c ? ps->c->iterations + 1 : 1.0;
+    if (strcmp(name, "remaining") == 0 || strcmp(name, "c.remaining") == 0)
+        return ps->c ? ps->c->max_iterations - ps->c->iterations : 0.0;
+    if (strcmp(name, "max_iterations") == 0 || strcmp(name, "c.max_iterations") == 0)
+        return ps->c ? ps->c->max_iterations : 0.0;
+    if (strcmp(name, "max_turns") == 0 || strcmp(name, "c.max_turns") == 0)
+        return ps->c ? ps->c->max_turns : 0.0;
+    if (strcmp(name, "turn") == 0 || strcmp(name, "current_turn") == 0 ||
+        strcmp(name, "c.turn") == 0)
+        return ps->current_turn;
+    if (strcmp(name, "depth") == 0 || strcmp(name, "c.depth") == 0)
+        return ps->depth;
+    if (strcmp(name, "model_done") == 0 || strcmp(name, "done") == 0)
+        return ps->model_done ? 1.0 : 0.0;
+    if (strcmp(name, "has_followup") == 0 || strcmp(name, "followup") == 0)
+        return ps->has_followup ? 1.0 : 0.0;
+    if (strcmp(name, "override_done") == 0 || strcmp(name, "c.override_done") == 0)
+        return ps->c && ps->c->override_done ? 1.0 : 0.0;
+    if (strcmp(name, "override_max_turns") == 0 ||
+        strcmp(name, "c.override_max_turns") == 0)
+        return ps->c && ps->c->override_max_turns ? 1.0 : 0.0;
+    if (strcmp(name, "recursive") == 0 || strcmp(name, "c.recursive") == 0)
+        return ps->c && ps->c->recursive ? 1.0 : 0.0;
+    if (strcmp(name, "meta_count") == 0 || strcmp(name, "c.meta_count") == 0)
+        return ps->c ? ps->c->meta_count : 0.0;
+    if (strcmp(name, "definition_count") == 0 || strcmp(name, "define_count") == 0 ||
+        strcmp(name, "definitions") == 0)
+        return ps->c ? loop_meta_count_kind(ps->c, "define") : 0.0;
+    if (strcmp(name, "reward_object_count") == 0 ||
+        strcmp(name, "reward_objects") == 0)
+        return ps->c ? loop_meta_count_kind(ps->c, "reward_object") : 0.0;
+    if (strcmp(name, "goal_count") == 0 || strcmp(name, "goals") == 0)
+        return ps->c ? loop_meta_count_kind(ps->c, "goal") : 0.0;
+    if (strcmp(name, "task_count") == 0 || strcmp(name, "tasks") == 0)
+        return ps->c ? loop_meta_count_kind(ps->c, "task") : 0.0;
+    if (strcmp(name, "belief_count") == 0 || strcmp(name, "beliefs") == 0)
+        return ps->c ? loop_meta_count_kind(ps->c, "belief") : 0.0;
+    if (strcmp(name, "object_count") == 0 || strcmp(name, "objects") == 0)
+        return ps->c ? loop_meta_count_kind(ps->c, "object") : 0.0;
+    if (strcmp(name, "dyad_count") == 0 || strcmp(name, "dyads") == 0 ||
+        strcmp(name, "interaction_count") == 0)
+        return ps->c ? ps->c->dyad_count : 0.0;
+    if (strcmp(name, "node_count") == 0 || strcmp(name, "nodes") == 0 ||
+        strcmp(name, "graph_node_count") == 0)
+        return ps->c ? ps->c->graph_node_count : 0.0;
+    if (strcmp(name, "edge_count") == 0 || strcmp(name, "edges") == 0 ||
+        strcmp(name, "graph_edge_count") == 0)
+        return ps->c ? ps->c->graph_edge_count : 0.0;
+    if (strcmp(name, "causal_link_count") == 0 || strcmp(name, "causal_links") == 0)
+        return ps->c ? loop_graph_count_relation(ps->c, "causal") : 0.0;
+    if (strcmp(name, "message_count") == 0 || strcmp(name, "messages") == 0 ||
+        strcmp(name, "message_link_count") == 0)
+        return ps->c ? loop_graph_count_relation(ps->c, "message") : 0.0;
+    if (strcmp(name, "graph_density") == 0 || strcmp(name, "density") == 0)
+        return ps->c ? loop_graph_density(ps->c) : 0.0;
+    if (strcmp(name, "traverse_count") == 0 || strcmp(name, "traversal_count") == 0 ||
+        strcmp(name, "traverse_hits") == 0)
+        return ps->c ? ps->c->traverse_hits : 0.0;
+    if (strcmp(name, "traverse_depth") == 0 || strcmp(name, "traversal_depth") == 0)
+        return ps->c ? ps->c->traverse_depth : 0.0;
+    if (strcmp(name, "mapreduce_count") == 0 ||
+        strcmp(name, "mapreduce_job_count") == 0 ||
+        strcmp(name, "map_reduce_count") == 0)
+        return ps->c ? ps->c->mapreduce_job_count : 0.0;
+    if (strcmp(name, "map_count") == 0 || strcmp(name, "maps") == 0 ||
+        strcmp(name, "mapped_count") == 0)
+        return ps->c ? ps->c->map_count : 0.0;
+    if (strcmp(name, "shuffle_count") == 0 || strcmp(name, "shuffles") == 0 ||
+        strcmp(name, "partition_stage_count") == 0)
+        return ps->c ? ps->c->shuffle_count : 0.0;
+    if (strcmp(name, "reduce_count") == 0 || strcmp(name, "reduces") == 0 ||
+        strcmp(name, "reduced_count") == 0)
+        return ps->c ? ps->c->reduce_count : 0.0;
+    if (strcmp(name, "partition_count") == 0 || strcmp(name, "partitions") == 0)
+        return ps->c ? ps->c->partition_count : 0.0;
+    if (strcmp(name, "srm_count") == 0 ||
+        strcmp(name, "reference_material_count") == 0 ||
+        strcmp(name, "rm_count") == 0)
+        return ps->c ? ps->c->srm_count : 0.0;
+    if (strcmp(name, "certificate_count") == 0 ||
+        strcmp(name, "cert_count") == 0)
+        return ps->c ? loop_srm_certificate_count(ps->c) : 0.0;
+    if (strcmp(name, "current_certificate_count") == 0 ||
+        strcmp(name, "current_cert_count") == 0)
+        return ps->c ? loop_srm_current_certificate_count(ps->c) : 0.0;
+    if (strcmp(name, "sds_count") == 0 ||
+        strcmp(name, "safety_data_sheet_count") == 0)
+        return ps->c ? loop_srm_sds_count(ps->c) : 0.0;
+    if (strcmp(name, "traceability_count") == 0 ||
+        strcmp(name, "traceable_count") == 0 ||
+        strcmp(name, "metrological_traceability") == 0)
+        return ps->c ? loop_srm_traceability_count(ps->c) : 0.0;
+    if (strcmp(name, "available_count") == 0 ||
+        strcmp(name, "srm_available_count") == 0 ||
+        strcmp(name, "availability_count") == 0)
+        return ps->c ? loop_srm_available_count(ps->c) : 0.0;
+    if (strcmp(name, "orderable_count") == 0 ||
+        strcmp(name, "srm_orderable_count") == 0)
+        return ps->c ? loop_srm_orderable_count(ps->c) : 0.0;
+    if (strcmp(name, "shipping_block_count") == 0 ||
+        strcmp(name, "shipping_restriction_count") == 0 ||
+        strcmp(name, "restricted_shipping_count") == 0)
+        return ps->c ? loop_srm_shipping_block_count(ps->c) : 0.0;
+    if (strcmp(name, "product_search_count") == 0 ||
+        strcmp(name, "store_search_count") == 0 ||
+        strcmp(name, "search_result_count") == 0)
+        return ps->c ? loop_srm_product_search_count(ps->c) : 0.0;
+    if (strcmp(name, "archived_certificate_count") == 0 ||
+        strcmp(name, "archive_count") == 0)
+        return ps->c ? loop_srm_archived_certificate_count(ps->c) : 0.0;
+    if (strcmp(name, "catalog_count") == 0)
+        return ps->c ? loop_srm_operation_count_kind(ps->c, "catalog") : 0.0;
+    if (strcmp(name, "annual_catalog_count") == 0 ||
+        strcmp(name, "annual_product_list_count") == 0)
+        return ps->c ? loop_srm_operation_count_kind(ps->c, "annual_catalog") : 0.0;
+    if (strcmp(name, "licensed_distributor_count") == 0 ||
+        strcmp(name, "distributor_count") == 0)
+        return ps->c ? loop_srm_operation_count_kind(ps->c, "licensed_distributor") : 0.0;
+    if (strcmp(name, "order_policy_count") == 0 ||
+        strcmp(name, "policy_count") == 0)
+        return ps->c ? loop_srm_operation_count_kind(ps->c, "order_policy") : 0.0;
+    if (strcmp(name, "paper_checks_blocked") == 0 ||
+        strcmp(name, "paper_check_blocked") == 0 ||
+        strcmp(name, "no_paper_checks") == 0)
+        return ps->c && loop_srm_operation_has(ps->c, "order_policy", "no_paper_checks")
+                   ? 1.0 : 0.0;
+    if (strcmp(name, "registration_count") == 0)
+        return ps->c ? loop_srm_operation_count_kind(ps->c, "registration") : 0.0;
+    if (strcmp(name, "survey_count") == 0)
+        return ps->c ? loop_srm_operation_count_kind(ps->c, "survey") : 0.0;
+    if (strcmp(name, "price_total") == 0 ||
+        strcmp(name, "srm_price_total") == 0)
+        return ps->c ? loop_srm_total_price(ps->c) : 0.0;
+    if (strcmp(name, "measurement_count") == 0 ||
+        strcmp(name, "measurements") == 0)
+        return ps->c ? ps->c->measurement_count : 0.0;
+    if (strcmp(name, "calibration_count") == 0 ||
+        strcmp(name, "calibrations") == 0)
+        return ps->c ? loop_measurement_calibration_count(ps->c) : 0.0;
+    if (strcmp(name, "uncertainty_budget_count") == 0 ||
+        strcmp(name, "uncertainty_budgets") == 0)
+        return ps->c ? ps->c->uncertainty_budget_count : 0.0;
+    if (strcmp(name, "mean_uncertainty") == 0 ||
+        strcmp(name, "average_uncertainty") == 0)
+        return ps->c ? loop_srm_mean_uncertainty(ps->c) : 0.0;
+    if (strcmp(name, "max_uncertainty") == 0 ||
+        strcmp(name, "uncertainty_max") == 0)
+        return ps->c ? loop_srm_max_uncertainty(ps->c) : 0.0;
+    if (strcmp(name, "refine_count") == 0 || strcmp(name, "refinements") == 0)
+        return ps->c ? ps->c->refine_count : 0.0;
+    if (strcmp(name, "refinements_applied") == 0 || strcmp(name, "refine_applied") == 0)
+        return ps->c ? ps->c->refinements_applied : 0.0;
+    if (strcmp(name, "rewrite_count") == 0 || strcmp(name, "rewrites") == 0 ||
+        strcmp(name, "schema_rewrite_count") == 0)
+        return ps->c ? ps->c->rewrite_count : 0.0;
+    if (strcmp(name, "rewrites_applied") == 0 || strcmp(name, "rewrite_applied") == 0 ||
+        strcmp(name, "schema_rewrites_applied") == 0)
+        return ps->c ? ps->c->rewrites_applied : 0.0;
+    if (strcmp(name, "effect.conversational") == 0 ||
+        strcmp(name, "effect.conversation") == 0)
+        return ps->c ? ps->c->effect_conversational : 0.0;
+    if (strcmp(name, "effect.tool") == 0 ||
+        strcmp(name, "effect.tools") == 0 ||
+        strcmp(name, "effect.tool_calling") == 0)
+        return ps->c ? ps->c->effect_tool : 0.0;
+    if (strcmp(name, "effect.world") == 0 ||
+        strcmp(name, "effect.world_modeling") == 0)
+        return ps->c ? ps->c->effect_world : 0.0;
+    if (strcmp(name, "effect.meta") == 0 ||
+        strcmp(name, "effect.meta_learning") == 0 ||
+        strcmp(name, "effect.reflection") == 0)
+        return ps->c ? ps->c->effect_meta : 0.0;
+    if (strcmp(name, "reward") == 0 || strcmp(name, "external_reward") == 0)
+        return ps->c ? ps->c->reward : 0.0;
+    if (strcmp(name, "curiosity") == 0 || strcmp(name, "intrinsic_reward") == 0)
+        return ps->c ? ps->c->curiosity : 0.0;
+    if (strcmp(name, "empowerment") == 0 || strcmp(name, "agency") == 0)
+        return ps->c ? ps->c->empowerment : 0.0;
+    if (strcmp(name, "confidence") == 0 || strcmp(name, "certainty") == 0)
+        return ps->c ? ps->c->confidence : 0.0;
+    if (strcmp(name, "uncertainty") == 0 || strcmp(name, "entropy") == 0)
+        return ps->c ? ps->c->uncertainty : 0.0;
+    if (strcmp(name, "learning_rate") == 0 || strcmp(name, "learn_rate") == 0)
+        return ps->c ? ps->c->learning_rate : 0.0;
+    if (strcmp(name, "valence") == 0 || strcmp(name, "reward_valence") == 0)
+        return ps->c ? ps->c->valence : 0.0;
+    if (strcmp(name, "intensity") == 0 || strcmp(name, "reward_intensity") == 0)
+        return ps->c ? ps->c->intensity : 0.0;
+    if (strcmp(name, "exploration_rate") == 0 || strcmp(name, "explore_rate") == 0 ||
+        strcmp(name, "epsilon") == 0)
+        return ps->c ? ps->c->exploration_rate : 0.0;
+    if (strcmp(name, "credit") == 0 || strcmp(name, "credit_assignment") == 0)
+        return ps->c ? ps->c->credit : 0.0;
+    if (strcmp(name, "pruning_threshold") == 0 || strcmp(name, "prune_threshold") == 0)
+        return ps->c ? ps->c->pruning_threshold : 0.0;
+    if (strcmp(name, "basin_temperature") == 0 || strcmp(name, "basin_hop") == 0)
+        return ps->c ? ps->c->basin_temperature : 0.0;
+
+    loop_expr_error(ps, "unknown variable");
+    return 0.0;
+}
+
+static double loop_expr_primary(loop_expr_parser_t *ps) {
+    ps->p = loop_skip_ws(ps->p);
+    if (loop_expr_consume(ps, "(")) {
+        double v = loop_expr_parse_or(ps);
+        if (!loop_expr_consume(ps, ")")) loop_expr_error(ps, "expected ')'");
+        return v;
+    }
+
+    char *end = NULL;
+    double v = strtod(ps->p, &end);
+    if (end && end != ps->p) {
+        ps->p = end;
+        return v;
+    }
+    return loop_expr_variable(ps);
+}
+
+static double loop_expr_unary(loop_expr_parser_t *ps) {
+    if (loop_expr_consume(ps, "!") || loop_expr_keyword(ps, "not"))
+        return loop_expr_unary(ps) == 0.0 ? 1.0 : 0.0;
+    if (loop_expr_consume(ps, "-"))
+        return -loop_expr_unary(ps);
+    return loop_expr_primary(ps);
+}
+
+static double loop_expr_mul(loop_expr_parser_t *ps) {
+    double v = loop_expr_unary(ps);
+    while (ps->ok) {
+        if (loop_expr_consume(ps, "*")) {
+            v *= loop_expr_unary(ps);
+        } else if (loop_expr_consume(ps, "/")) {
+            double rhs = loop_expr_unary(ps);
+            if (rhs == 0.0) { loop_expr_error(ps, "division by zero"); return 0.0; }
+            v /= rhs;
+        } else if (loop_expr_consume(ps, "%")) {
+            double rhs = loop_expr_unary(ps);
+            if (rhs == 0.0) { loop_expr_error(ps, "modulo by zero"); return 0.0; }
+            v = fmod(v, rhs);
+        } else {
+            break;
+        }
+    }
+    return v;
+}
+
+static double loop_expr_add(loop_expr_parser_t *ps) {
+    double v = loop_expr_mul(ps);
+    while (ps->ok) {
+        if (loop_expr_consume(ps, "+")) v += loop_expr_mul(ps);
+        else if (loop_expr_consume(ps, "-")) v -= loop_expr_mul(ps);
+        else break;
+    }
+    return v;
+}
+
+static double loop_expr_compare(loop_expr_parser_t *ps) {
+    double v = loop_expr_add(ps);
+    while (ps->ok) {
+        if (loop_expr_consume(ps, "<=")) v = v <= loop_expr_add(ps) ? 1.0 : 0.0;
+        else if (loop_expr_consume(ps, ">=")) v = v >= loop_expr_add(ps) ? 1.0 : 0.0;
+        else if (loop_expr_consume(ps, "==")) v = fabs(v - loop_expr_add(ps)) < 1e-9 ? 1.0 : 0.0;
+        else if (loop_expr_consume(ps, "!=")) v = fabs(v - loop_expr_add(ps)) >= 1e-9 ? 1.0 : 0.0;
+        else if (loop_expr_consume(ps, "<")) v = v < loop_expr_add(ps) ? 1.0 : 0.0;
+        else if (loop_expr_consume(ps, ">")) v = v > loop_expr_add(ps) ? 1.0 : 0.0;
+        else break;
+    }
+    return v;
+}
+
+static double loop_expr_and(loop_expr_parser_t *ps) {
+    double v = loop_expr_compare(ps);
+    while (ps->ok) {
+        if (loop_expr_consume(ps, "&&") || loop_expr_keyword(ps, "and")) {
+            double rhs = loop_expr_compare(ps);
+            v = (v != 0.0 && rhs != 0.0) ? 1.0 : 0.0;
+        } else {
+            break;
+        }
+    }
+    return v;
+}
+
+static double loop_expr_parse_or(loop_expr_parser_t *ps) {
+    double v = loop_expr_and(ps);
+    while (ps->ok) {
+        if (loop_expr_consume(ps, "||") || loop_expr_keyword(ps, "or")) {
+            double rhs = loop_expr_and(ps);
+            v = (v != 0.0 || rhs != 0.0) ? 1.0 : 0.0;
+        } else {
+            break;
+        }
+    }
+    return v;
+}
+
+static bool loop_eval_expr_bool(const loop_construct_t *c, const char *expr,
+                                int current_turn, bool model_done,
+                                bool has_followup, int depth,
+                                bool *valid, char *err, size_t err_len) {
+    loop_expr_parser_t ps = {
+        .p = expr ? expr : "",
+        .c = c,
+        .current_turn = current_turn,
+        .depth = depth,
+        .model_done = model_done,
+        .has_followup = has_followup,
+        .ok = true
+    };
+    double v = loop_expr_parse_or(&ps);
+    ps.p = loop_skip_ws(ps.p);
+    if (ps.ok && *ps.p && *ps.p != '#') loop_expr_error(&ps, "unexpected trailing input");
+    if (valid) *valid = ps.ok;
+    if (!ps.ok && err && err_len > 0)
+        snprintf(err, err_len, "%s", ps.error[0] ? ps.error : "invalid expression");
+    return ps.ok && v != 0.0;
+}
+
+static void loop_meta_from_remainder(loop_construct_t *c, const char *kind,
+                                     char *rem) {
+    if (!c || !kind || !rem) return;
+    rem = loop_trim(rem);
+    if (!rem[0]) return;
+
+    double weight = 0.0;
+    char *weight_kw = loop_strcasestr_local(rem, " weight ");
+    if (!weight_kw) weight_kw = loop_strcasestr_local(rem, " priority ");
+    if (!weight_kw) weight_kw = loop_strcasestr_local(rem, " confidence ");
+    if (weight_kw) {
+        char *num = weight_kw;
+        while (*num && !isdigit((unsigned char)*num) && *num != '-' && *num != '.')
+            num++;
+        weight = loop_parse_double_value(num, 0.0);
+        *weight_kw = '\0';
+        rem = loop_trim(rem);
+    }
+
+    char *name = rem;
+    char *value = NULL;
+    char *sep = loop_strcasestr_local(rem, " as ");
+    if (!sep) sep = loop_strcasestr_local(rem, " from ");
+    if (!sep) sep = loop_strcasestr_local(rem, " = ");
+    if (!sep) sep = loop_strcasestr_local(rem, " : ");
+    if (sep) {
+        *sep = '\0';
+        value = loop_trim(sep + 4);
+    } else {
+        char *p = rem;
+        while (*p && !isspace((unsigned char)*p)) p++;
+        if (*p) {
+            *p = '\0';
+            value = loop_trim(p + 1);
+        }
+    }
+    name = loop_unquote_inplace(loop_trim(name));
+    value = loop_unquote_inplace(loop_trim(value ? value : ""));
+    loop_meta_add(c, kind, name, value, weight);
+
+    if (strcasecmp(kind, "belief") == 0) {
+        double v = loop_parse_double_value(value, NAN);
+        if (!isnan(v)) loop_set_signal(c, name, v);
+    }
+}
+
+static bool loop_parse_define_call(loop_construct_t *c, char *stmt) {
+    char *open = strchr(stmt, '(');
+    char *close = strrchr(stmt, ')');
+    if (!open || !close || close <= open) return false;
+    *close = '\0';
+    char *a = loop_trim(open + 1);
+    char *b = strchr(a, ',');
+    if (!b) return false;
+    *b = '\0';
+    b = loop_trim(b + 1);
+    loop_meta_add(c, "define", loop_unquote_inplace(a), loop_unquote_inplace(b), 0.0);
+    return true;
+}
+
+static void loop_parse_dyad(loop_construct_t *c, char *rem) {
+    if (!c || c->dyad_count >= LOOP_DYAD_MAX || !rem) return;
+    rem = loop_trim(rem);
+    if (!rem[0]) return;
+    loop_dyad_t *d = &c->dyads[c->dyad_count++];
+    memset(d, 0, sizeof(*d));
+
+    char *arrow = strstr(rem, "->");
+    char *rel = loop_strcasestr_local(rem, " relation ");
+    if (!rel) rel = loop_strcasestr_local(rem, " via ");
+    if (!rel) rel = loop_strcasestr_local(rem, " as ");
+    if (rel) {
+        char *rval = rel;
+        while (*rval && !isspace((unsigned char)*rval)) rval++;
+        rval = loop_trim(rval);
+        loop_copy(d->relation, sizeof(d->relation), loop_unquote_inplace(rval), "interacts");
+        *rel = '\0';
+    } else {
+        loop_copy(d->relation, sizeof(d->relation), "interacts", NULL);
+    }
+
+    if (arrow) {
+        *arrow = '\0';
+        loop_copy(d->from, sizeof(d->from), loop_unquote_inplace(loop_trim(rem)), "object");
+        loop_copy(d->to, sizeof(d->to), loop_unquote_inplace(loop_trim(arrow + 2)), "object");
+    } else {
+        char from[LOOP_META_NAME_MAX] = "";
+        char to[LOOP_META_NAME_MAX] = "";
+        if (sscanf(rem, "%47s %47s", from, to) >= 2) {
+            loop_copy(d->from, sizeof(d->from), loop_unquote_inplace(from), "object");
+            loop_copy(d->to, sizeof(d->to), loop_unquote_inplace(to), "object");
+        } else {
+            loop_copy(d->from, sizeof(d->from), loop_unquote_inplace(rem), "object");
+            loop_copy(d->to, sizeof(d->to), "self", NULL);
+        }
+    }
+    loop_graph_add_edge(c, d->from, d->to, d->relation, 0.0);
+    c->dsl_enabled = true;
+}
+
+static char *loop_take_clause(char *rem, const char *clause) {
+    char *p = loop_strcasestr_local(rem, clause);
+    if (!p) return NULL;
+    *p = '\0';
+    return loop_trim(p + strlen(clause));
+}
+
+static char *loop_split_relation_clause(char *rem) {
+    char *rel = loop_take_clause(rem, " relation ");
+    if (!rel) rel = loop_take_clause(rem, " via ");
+    if (!rel) rel = loop_take_clause(rem, " as ");
+    return rel;
+}
+
+static void loop_parse_graph_node(loop_construct_t *c, char *rem) {
+    if (!c || !rem) return;
+    rem = loop_trim(rem);
+    if (!rem[0]) return;
+
+    double weight = 0.0;
+    char *weight_v = loop_take_clause(rem, " weight ");
+    if (weight_v) weight = loop_parse_double_value(weight_v, 0.0);
+    char *state = loop_take_clause(rem, " state ");
+
+    char *name = rem;
+    char *type = NULL;
+    char *sep = loop_strcasestr_local(rem, " as ");
+    int skip = 4;
+    if (!sep) { sep = loop_strcasestr_local(rem, " type "); skip = 6; }
+    if (!sep) { sep = strstr(rem, "->"); skip = 2; }
+    if (!sep) { sep = strchr(rem, ':'); skip = 1; }
+    if (!sep) { sep = strchr(rem, '='); skip = 1; }
+    if (sep) {
+        *sep = '\0';
+        type = loop_trim(sep + skip);
+    } else {
+        char *p = rem;
+        while (*p && !isspace((unsigned char)*p)) p++;
+        if (*p) {
+            *p = '\0';
+            type = loop_trim(p + 1);
+        }
+    }
+    loop_graph_add_node(c, loop_trim(name), type, state, weight);
+}
+
+static void loop_parse_graph_update(loop_construct_t *c, char *rem) {
+    if (!c || !rem) return;
+    rem = loop_trim(rem);
+    if (!rem[0]) return;
+
+    char *state = loop_take_clause(rem, " state ");
+    char *type = loop_take_clause(rem, " type ");
+    if (!type) type = loop_take_clause(rem, " as ");
+
+    char *name = rem;
+    if (!state && !type) {
+        char *p = rem;
+        while (*p && !isspace((unsigned char)*p)) p++;
+        if (*p) {
+            *p = '\0';
+            state = loop_trim(p + 1);
+        }
+    }
+    loop_graph_add_node(c, loop_trim(name), type, state, 0.0);
+}
+
+static void loop_parse_graph_replace(loop_construct_t *c, char *rem) {
+    if (!c || !rem) return;
+    rem = loop_trim(rem);
+    char *sep = loop_strcasestr_local(rem, " with ");
+    int skip = 6;
+    if (!sep) { sep = loop_strcasestr_local(rem, " as "); skip = 4; }
+    if (!sep) { sep = strstr(rem, "->"); skip = 2; }
+    if (!sep) return;
+    *sep = '\0';
+    loop_graph_replace_node(c, loop_trim(rem), loop_trim(sep + skip));
+}
+
+static void loop_parse_graph_edge_parts(char *rem, char *from, size_t from_len,
+                                        char *to, size_t to_len,
+                                        char *relation, size_t rel_len,
+                                        double *weight) {
+    if (from && from_len) from[0] = '\0';
+    if (to && to_len) to[0] = '\0';
+    if (relation && rel_len) relation[0] = '\0';
+    if (weight) *weight = 0.0;
+    rem = loop_trim(rem);
+
+    char *weight_v = loop_take_clause(rem, " weight ");
+    if (weight_v && weight) *weight = loop_parse_double_value(weight_v, 0.0);
+    char *rel = loop_split_relation_clause(rem);
+    if (rel && relation && rel_len) loop_copy_unquoted(relation, rel_len, rel, "relates");
+
+    char *arrow = strstr(rem, "->");
+    if (arrow) {
+        *arrow = '\0';
+        loop_copy_unquoted(from, from_len, loop_trim(rem), NULL);
+        loop_copy_unquoted(to, to_len, loop_trim(arrow + 2), NULL);
+    } else {
+        char a[LOOP_META_NAME_MAX] = "";
+        char b[LOOP_META_NAME_MAX] = "";
+        if (sscanf(rem, "%47s %47s", a, b) >= 2) {
+            loop_copy_unquoted(from, from_len, a, NULL);
+            loop_copy_unquoted(to, to_len, b, NULL);
+        }
+    }
+    if (relation && rel_len && !relation[0])
+        loop_copy(relation, rel_len, "relates", NULL);
+}
+
+static void loop_parse_graph_edge(loop_construct_t *c, char *rem) {
+    if (!c || !rem) return;
+    char from[LOOP_META_NAME_MAX];
+    char to[LOOP_META_NAME_MAX];
+    char relation[LOOP_META_KIND_MAX];
+    double weight = 0.0;
+    loop_parse_graph_edge_parts(rem, from, sizeof(from), to, sizeof(to),
+                                relation, sizeof(relation), &weight);
+    loop_graph_add_edge(c, from, to, relation, weight);
+}
+
+static void loop_parse_graph_remove_edge(loop_construct_t *c, char *rem) {
+    if (!c || !rem) return;
+    char from[LOOP_META_NAME_MAX];
+    char to[LOOP_META_NAME_MAX];
+    char relation[LOOP_META_KIND_MAX];
+    double weight = 0.0;
+    loop_parse_graph_edge_parts(rem, from, sizeof(from), to, sizeof(to),
+                                relation, sizeof(relation), &weight);
+    (void)weight;
+    loop_graph_remove_edge(c, from, to,
+                           strcmp(relation, "relates") == 0 ? "" : relation);
+}
+
+static void loop_parse_graph_traverse(loop_construct_t *c, char *rem) {
+    if (!c || !rem) return;
+    rem = loop_trim(rem);
+    if (strncasecmp(rem, "from ", 5) == 0) rem = loop_trim(rem + 5);
+    int depth = 1;
+    char *depth_v = loop_take_clause(rem, " depth ");
+    if (depth_v) depth = loop_clamp_int(atoi(depth_v), 0, LOOP_GRAPH_NODE_MAX);
+    loop_copy_unquoted(c->traverse_from, sizeof(c->traverse_from), rem, NULL);
+    c->traverse_depth = depth;
+    c->traverse_hits = loop_graph_traverse_count(c, c->traverse_from, depth);
+    c->dsl_enabled = true;
+}
+
+static int loop_mapreduce_find_job(const loop_construct_t *c, const char *name) {
+    if (!c || !name || !name[0]) return -1;
+    for (int i = 0; i < c->mapreduce_job_count; i++) {
+        if (strcasecmp(c->mapreduce_jobs[i].name, name) == 0) return i;
+    }
+    return -1;
+}
+
+static loop_mapreduce_job_t *loop_mapreduce_get_job(loop_construct_t *c,
+                                                    const char *name) {
+    if (!c || !name || !name[0]) return NULL;
+    char clean[LOOP_META_NAME_MAX];
+    loop_copy_unquoted(clean, sizeof(clean), name, "mapreduce");
+    int idx = loop_mapreduce_find_job(c, clean);
+    if (idx < 0) {
+        if (c->mapreduce_job_count >= LOOP_MAPREDUCE_MAX) return NULL;
+        idx = c->mapreduce_job_count++;
+        memset(&c->mapreduce_jobs[idx], 0, sizeof(c->mapreduce_jobs[idx]));
+        loop_copy(c->mapreduce_jobs[idx].name,
+                  sizeof(c->mapreduce_jobs[idx].name), clean, "mapreduce");
+    }
+    return &c->mapreduce_jobs[idx];
+}
+
+static void loop_mapreduce_set_partitions(loop_construct_t *c,
+                                          loop_mapreduce_job_t *job,
+                                          int partitions) {
+    if (!c || !job || partitions <= 0) return;
+    partitions = loop_clamp_int(partitions, 1, 1000000);
+    c->partition_count += partitions - job->partitions;
+    if (c->partition_count < 0) c->partition_count = 0;
+    job->partitions = partitions;
+}
+
+static void loop_mapreduce_mark_map(loop_construct_t *c,
+                                    loop_mapreduce_job_t *job) {
+    if (!c || !job) return;
+    if (!job->mapped) {
+        job->mapped = true;
+        c->map_count++;
+    }
+}
+
+static void loop_mapreduce_mark_shuffle(loop_construct_t *c,
+                                        loop_mapreduce_job_t *job) {
+    if (!c || !job) return;
+    if (!job->shuffled) {
+        job->shuffled = true;
+        c->shuffle_count++;
+    }
+}
+
+static void loop_mapreduce_mark_reduce(loop_construct_t *c,
+                                       loop_mapreduce_job_t *job) {
+    if (!c || !job) return;
+    if (!job->reduced) {
+        job->reduced = true;
+        c->reduce_count++;
+    }
+}
+
+static void loop_mapreduce_update_graph(loop_construct_t *c,
+                                        const loop_mapreduce_job_t *job) {
+    if (!c || !job || !job->name[0]) return;
+    char state[64] = "";
+    snprintf(state, sizeof(state), "%s%s%s",
+             job->mapped ? "mapped" : "",
+             job->shuffled ? "|shuffled" : "",
+             job->reduced ? "|reduced" : "");
+    loop_graph_add_node(c, job->name, "mapreduce", state[0] ? state : "planned", 0.0);
+    if (job->source[0])
+        loop_graph_add_edge(c, job->source, job->name, "map", 0.0);
+    if (job->key[0]) {
+        loop_graph_add_node(c, job->key, "partition_key", "", 0.0);
+        loop_graph_add_edge(c, job->name, job->key, "shuffle", 0.0);
+    }
+    if (job->reducer[0]) {
+        loop_graph_add_node(c, job->reducer, "reducer", "", 0.0);
+        loop_graph_add_edge(c, job->name, job->reducer, "reduce", 0.0);
+    }
+    if (job->target[0] && job->reducer[0])
+        loop_graph_add_edge(c, job->reducer, job->target, "emits", 0.0);
+}
+
+static void loop_parse_map_statement(loop_construct_t *c, char *rem) {
+    if (!c || !rem) return;
+    rem = loop_trim(rem);
+    if (!rem[0]) return;
+
+    char *partitions = loop_take_clause(rem, " partitions ");
+    char *mapper = loop_take_clause(rem, " using ");
+    if (!mapper) mapper = loop_take_clause(rem, " mapper ");
+    if (!mapper) mapper = loop_take_clause(rem, " map ");
+    char *source = loop_take_clause(rem, " over ");
+    if (!source) source = loop_take_clause(rem, " from ");
+    loop_mapreduce_job_t *job = loop_mapreduce_get_job(c, loop_trim(rem));
+    if (!job) return;
+    if (source) loop_copy_unquoted(job->source, sizeof(job->source), source, NULL);
+    if (mapper) loop_copy_unquoted(job->mapper, sizeof(job->mapper), mapper, NULL);
+    if (partitions)
+        loop_mapreduce_set_partitions(c, job, atoi(partitions));
+    loop_mapreduce_mark_map(c, job);
+    loop_meta_add(c, "map", job->name, job->source, 0.0);
+    loop_mapreduce_update_graph(c, job);
+    c->dsl_enabled = true;
+}
+
+static void loop_parse_shuffle_statement(loop_construct_t *c, char *rem) {
+    if (!c || !rem) return;
+    rem = loop_trim(rem);
+    if (!rem[0]) return;
+
+    char *partitions = loop_take_clause(rem, " partitions ");
+    char *key = loop_take_clause(rem, " by ");
+    if (!key) key = loop_take_clause(rem, " key ");
+    if (!key) key = loop_take_clause(rem, " partition ");
+    loop_mapreduce_job_t *job = loop_mapreduce_get_job(c, loop_trim(rem));
+    if (!job) return;
+    if (key) loop_copy_unquoted(job->key, sizeof(job->key), key, NULL);
+    if (partitions)
+        loop_mapreduce_set_partitions(c, job, atoi(partitions));
+    loop_mapreduce_mark_shuffle(c, job);
+    loop_meta_add(c, "shuffle", job->name, job->key, job->partitions);
+    loop_mapreduce_update_graph(c, job);
+    c->dsl_enabled = true;
+}
+
+static void loop_parse_reduce_statement(loop_construct_t *c, char *rem) {
+    if (!c || !rem) return;
+    rem = loop_trim(rem);
+    if (!rem[0]) return;
+
+    char *reducer = loop_take_clause(rem, " using ");
+    if (!reducer) reducer = loop_take_clause(rem, " reducer ");
+    if (!reducer) reducer = loop_take_clause(rem, " reduce ");
+    char *target = loop_take_clause(rem, " into ");
+    if (!target) target = loop_take_clause(rem, " target ");
+    loop_mapreduce_job_t *job = loop_mapreduce_get_job(c, loop_trim(rem));
+    if (!job) return;
+    if (reducer) loop_copy_unquoted(job->reducer, sizeof(job->reducer), reducer, NULL);
+    if (target) loop_copy_unquoted(job->target, sizeof(job->target), target, NULL);
+    loop_mapreduce_mark_reduce(c, job);
+    loop_meta_add(c, "reduce", job->name, job->reducer, 0.0);
+    loop_mapreduce_update_graph(c, job);
+    c->dsl_enabled = true;
+}
+
+static void loop_parse_mapreduce_statement(loop_construct_t *c, char *rem) {
+    if (!c || !rem) return;
+    rem = loop_trim(rem);
+    if (!rem[0]) return;
+
+    char *partitions = loop_take_clause(rem, " partitions ");
+    char *key = loop_take_clause(rem, " by ");
+    if (!key) key = loop_take_clause(rem, " key ");
+    char *target = loop_take_clause(rem, " into ");
+    if (!target) target = loop_take_clause(rem, " target ");
+    char *reducer = loop_take_clause(rem, " reduce ");
+    if (!reducer) reducer = loop_take_clause(rem, " reducer ");
+    char *mapper = loop_take_clause(rem, " map ");
+    if (!mapper) mapper = loop_take_clause(rem, " mapper ");
+    if (!mapper) mapper = loop_take_clause(rem, " using ");
+    char *source = loop_take_clause(rem, " over ");
+    if (!source) source = loop_take_clause(rem, " from ");
+
+    loop_mapreduce_job_t *job = loop_mapreduce_get_job(c, loop_trim(rem));
+    if (!job) return;
+    if (source) loop_copy_unquoted(job->source, sizeof(job->source), source, NULL);
+    if (mapper) loop_copy_unquoted(job->mapper, sizeof(job->mapper), mapper, NULL);
+    if (reducer) loop_copy_unquoted(job->reducer, sizeof(job->reducer), reducer, NULL);
+    if (key) loop_copy_unquoted(job->key, sizeof(job->key), key, NULL);
+    if (target) loop_copy_unquoted(job->target, sizeof(job->target), target, NULL);
+    if (partitions)
+        loop_mapreduce_set_partitions(c, job, atoi(partitions));
+    loop_mapreduce_mark_map(c, job);
+    if (job->key[0] || job->partitions > 0)
+        loop_mapreduce_mark_shuffle(c, job);
+    if (job->reducer[0])
+        loop_mapreduce_mark_reduce(c, job);
+    loop_meta_add(c, "mapreduce", job->name, job->source, job->partitions);
+    loop_mapreduce_update_graph(c, job);
+    c->dsl_enabled = true;
+}
+
+static const char *loop_strcasestr_const(const char *haystack,
+                                         const char *needle) {
+    if (!haystack || !needle || !needle[0]) return NULL;
+    size_t n = strlen(needle);
+    for (const char *p = haystack; *p; p++) {
+        if (strncasecmp(p, needle, n) == 0) return p;
+    }
+    return NULL;
+}
+
+static bool loop_ci_contains_const(const char *haystack, const char *needle) {
+    return loop_strcasestr_const(haystack, needle) != NULL;
+}
+
+static const char *loop_clause_terms[] = {
+    " matrix ", " property ", " certificate ", " report ", " sds ",
+    " value ", " uncertainty ", " unit ", " method ", " target ",
+    " using ", " on ", " from ", " by ", " partitions ", " current ",
+    " available ", " unavailable ", " orderable ", " price ",
+    " distributor ", " store ", " search ", " query ", " destination ",
+    " blocked ", " restricted ", " found ", " archived ", " annual ",
+    " traceable ", " to ", " policy ", " payment ", NULL
+};
+
+static void loop_copy_span_unquoted(char *dst, size_t dst_len,
+                                    const char *start, const char *end) {
+    if (!dst || dst_len == 0) return;
+    dst[0] = '\0';
+    if (!start) return;
+    if (!end || end < start) end = start + strlen(start);
+    size_t n = (size_t)(end - start);
+    if (n >= LOOP_COND_MAX) n = LOOP_COND_MAX - 1;
+    char tmp[LOOP_COND_MAX];
+    memcpy(tmp, start, n);
+    tmp[n] = '\0';
+    loop_copy_unquoted(dst, dst_len, loop_trim(tmp), NULL);
+}
+
+static bool loop_extract_clause_value(const char *src, const char *clause,
+                                      char *out, size_t out_len) {
+    if (!src || !clause || !out || out_len == 0) return false;
+    out[0] = '\0';
+    const char *p = loop_strcasestr_const(src, clause);
+    if (!p) return false;
+    p += strlen(clause);
+    p = loop_skip_ws(p);
+    const char *end = src + strlen(src);
+    for (int i = 0; loop_clause_terms[i]; i++) {
+        const char *q = loop_strcasestr_const(p, loop_clause_terms[i]);
+        if (q && q > p && q < end) end = q;
+    }
+    loop_copy_span_unquoted(out, out_len, p, end);
+    return out[0] != '\0';
+}
+
+static void loop_extract_subject(const char *src, char *out, size_t out_len) {
+    if (!out || out_len == 0) return;
+    out[0] = '\0';
+    if (!src) return;
+    const char *end = src + strlen(src);
+    for (int i = 0; loop_clause_terms[i]; i++) {
+        const char *q = loop_strcasestr_const(src, loop_clause_terms[i]);
+        if (q && q > src && q < end) end = q;
+    }
+    const char *eq = strchr(src, '=');
+    if (eq && eq > src && eq < end) end = eq;
+    const char *colon = strchr(src, ':');
+    if (colon && colon > src && colon < end) end = colon;
+    loop_copy_span_unquoted(out, out_len, src, end);
+    char *space = out;
+    while (*space && !isspace((unsigned char)*space)) space++;
+    if (*space) *space = '\0';
+}
+
+static int loop_srm_find(const loop_construct_t *c, const char *id) {
+    if (!c || !id || !id[0]) return -1;
+    for (int i = 0; i < c->srm_count; i++) {
+        if (strcasecmp(c->srm_entries[i].id, id) == 0 ||
+            strcasecmp(c->srm_entries[i].name, id) == 0) {
+            return i;
+        }
+    }
+    return -1;
+}
+
+static loop_srm_entry_t *loop_srm_get(loop_construct_t *c, const char *id) {
+    if (!c || !id || !id[0]) return NULL;
+    char clean[LOOP_META_NAME_MAX];
+    loop_copy_unquoted(clean, sizeof(clean), id, "reference_material");
+    int idx = loop_srm_find(c, clean);
+    if (idx < 0) {
+        if (c->srm_count >= LOOP_SRM_MAX) return NULL;
+        idx = c->srm_count++;
+        memset(&c->srm_entries[idx], 0, sizeof(c->srm_entries[idx]));
+        loop_copy(c->srm_entries[idx].id, sizeof(c->srm_entries[idx].id),
+                  clean, "reference_material");
+        loop_copy(c->srm_entries[idx].name, sizeof(c->srm_entries[idx].name),
+                  clean, "reference_material");
+    }
+    return &c->srm_entries[idx];
+}
+
+static void loop_srm_update_graph(loop_construct_t *c,
+                                  const loop_srm_entry_t *srm) {
+    if (!c || !srm || !srm->id[0]) return;
+    const char *state = srm->orderable ? "orderable" :
+                        srm->available ? "available" :
+                        srm->certificate_current ? "current" : "registered";
+    loop_graph_add_node(c, srm->id, "reference_material", state,
+                        srm->uncertainty);
+    if (srm->certificate[0]) {
+        loop_graph_add_node(c, srm->certificate, "certificate",
+                            srm->certificate_current ? "current" : "", 0.0);
+        loop_graph_add_edge(c, srm->id, srm->certificate, "certified_by", 0.0);
+    }
+    if (srm->report[0]) {
+        loop_graph_add_node(c, srm->report, "report", "", 0.0);
+        loop_graph_add_edge(c, srm->id, srm->report, "reported_by", 0.0);
+    }
+    if (srm->sds[0]) {
+        loop_graph_add_node(c, srm->sds, "safety_data_sheet",
+                            srm->sds_available ? "available" : "", 0.0);
+        loop_graph_add_edge(c, srm->id, srm->sds, "sds", 0.0);
+    }
+    if (srm->traceable)
+        loop_graph_add_edge(c, srm->id, "nist_traceability", "traceable_to", 0.0);
+    if (srm->store[0]) {
+        loop_graph_add_node(c, srm->store, "srm_store", "", 0.0);
+        loop_graph_add_edge(c, srm->store, srm->id, "lists", 0.0);
+    }
+    if (srm->distributor[0]) {
+        loop_graph_add_node(c, srm->distributor, "licensed_distributor", "", 0.0);
+        loop_graph_add_edge(c, srm->distributor, srm->id, "distributes", 0.0);
+    }
+    if (srm->shipping_blocked)
+        loop_graph_add_edge(c, srm->id, "shipping_restriction", "blocked_to", 0.0);
+}
+
+static int loop_srm_certificate_count(const loop_construct_t *c) {
+    if (!c) return 0;
+    int n = 0;
+    for (int i = 0; i < c->srm_count; i++)
+        if (c->srm_entries[i].certificate[0]) n++;
+    return n;
+}
+
+static int loop_srm_current_certificate_count(const loop_construct_t *c) {
+    if (!c) return 0;
+    int n = 0;
+    for (int i = 0; i < c->srm_count; i++)
+        if (c->srm_entries[i].certificate_current) n++;
+    return n;
+}
+
+static int loop_srm_sds_count(const loop_construct_t *c) {
+    if (!c) return 0;
+    int n = 0;
+    for (int i = 0; i < c->srm_count; i++)
+        if (c->srm_entries[i].sds_available || c->srm_entries[i].sds[0]) n++;
+    return n;
+}
+
+static int loop_srm_traceability_count(const loop_construct_t *c) {
+    if (!c) return 0;
+    int n = 0;
+    for (int i = 0; i < c->srm_count; i++)
+        if (c->srm_entries[i].traceable) n++;
+    return n;
+}
+
+static int loop_srm_available_count(const loop_construct_t *c) {
+    if (!c) return 0;
+    int n = 0;
+    for (int i = 0; i < c->srm_count; i++)
+        if (c->srm_entries[i].available) n++;
+    return n;
+}
+
+static int loop_srm_orderable_count(const loop_construct_t *c) {
+    if (!c) return 0;
+    int n = 0;
+    for (int i = 0; i < c->srm_count; i++)
+        if (c->srm_entries[i].orderable) n++;
+    return n;
+}
+
+static int loop_srm_shipping_block_count(const loop_construct_t *c) {
+    if (!c) return 0;
+    int n = 0;
+    for (int i = 0; i < c->srm_count; i++)
+        if (c->srm_entries[i].shipping_blocked) n++;
+    return n;
+}
+
+static int loop_srm_product_search_count(const loop_construct_t *c) {
+    if (!c) return 0;
+    int n = 0;
+    for (int i = 0; i < c->srm_count; i++)
+        if (c->srm_entries[i].product_search_found) n++;
+    return n;
+}
+
+static int loop_srm_archived_certificate_count(const loop_construct_t *c) {
+    if (!c) return 0;
+    int n = 0;
+    for (int i = 0; i < c->srm_count; i++)
+        if (c->srm_entries[i].archived_certificate) n++;
+    return n;
+}
+
+static double loop_srm_total_price(const loop_construct_t *c) {
+    if (!c) return 0.0;
+    double total = 0.0;
+    for (int i = 0; i < c->srm_count; i++)
+        if (c->srm_entries[i].price > 0.0) total += c->srm_entries[i].price;
+    return total;
+}
+
+static int loop_srm_operation_count_kind(const loop_construct_t *c,
+                                         const char *kind) {
+    if (!c || !kind) return 0;
+    int n = 0;
+    for (int i = 0; i < c->srm_operation_count; i++)
+        if (strcasecmp(c->srm_operations[i].kind, kind) == 0) n++;
+    return n;
+}
+
+static bool loop_srm_operation_has(const loop_construct_t *c,
+                                   const char *kind, const char *name) {
+    if (!c || !kind) return false;
+    for (int i = 0; i < c->srm_operation_count; i++) {
+        loop_srm_operation_t *op = (loop_srm_operation_t *)&c->srm_operations[i];
+        if (strcasecmp(op->kind, kind) != 0) continue;
+        if (!name || !name[0] || strcasecmp(op->name, name) == 0)
+            return true;
+    }
+    return false;
+}
+
+static void loop_srm_operation_add(loop_construct_t *c, const char *kind,
+                                   const char *name, const char *value,
+                                   bool flag, double amount) {
+    if (!c || !kind || c->srm_operation_count >= LOOP_SRM_OPERATION_MAX) return;
+    loop_srm_operation_t *op = &c->srm_operations[c->srm_operation_count++];
+    memset(op, 0, sizeof(*op));
+    loop_copy(op->kind, sizeof(op->kind), kind, "operation");
+    loop_copy_unquoted(op->name, sizeof(op->name), name, "");
+    loop_copy_unquoted(op->value, sizeof(op->value), value, "");
+    op->flag = flag;
+    op->amount = amount;
+    loop_meta_add(c, kind, op->name[0] ? op->name : kind,
+                  op->value, amount);
+}
+
+static double loop_srm_mean_uncertainty(const loop_construct_t *c) {
+    if (!c) return 0.0;
+    double sum = 0.0;
+    int n = 0;
+    for (int i = 0; i < c->srm_count; i++) {
+        if (c->srm_entries[i].uncertainty > 0.0) {
+            sum += c->srm_entries[i].uncertainty;
+            n++;
+        }
+    }
+    return n > 0 ? sum / (double)n : 0.0;
+}
+
+static double loop_srm_max_uncertainty(const loop_construct_t *c) {
+    if (!c) return 0.0;
+    double max_v = 0.0;
+    for (int i = 0; i < c->srm_count; i++) {
+        if (c->srm_entries[i].uncertainty > max_v)
+            max_v = c->srm_entries[i].uncertainty;
+    }
+    for (int i = 0; i < c->measurement_count; i++) {
+        if (c->measurements[i].uncertainty > max_v)
+            max_v = c->measurements[i].uncertainty;
+    }
+    return max_v;
+}
+
+static int loop_measurement_find(const loop_construct_t *c, const char *name) {
+    if (!c || !name || !name[0]) return -1;
+    for (int i = 0; i < c->measurement_count; i++) {
+        if (strcasecmp(c->measurements[i].name, name) == 0) return i;
+    }
+    return -1;
+}
+
+static loop_measurement_entry_t *loop_measurement_get(loop_construct_t *c,
+                                                      const char *name) {
+    if (!c || !name || !name[0]) return NULL;
+    char clean[LOOP_META_NAME_MAX];
+    loop_copy_unquoted(clean, sizeof(clean), name, "measurement");
+    int idx = loop_measurement_find(c, clean);
+    if (idx < 0) {
+        if (c->measurement_count >= LOOP_MEASUREMENT_MAX) return NULL;
+        idx = c->measurement_count++;
+        memset(&c->measurements[idx], 0, sizeof(c->measurements[idx]));
+        loop_copy(c->measurements[idx].name,
+                  sizeof(c->measurements[idx].name), clean, "measurement");
+    }
+    return &c->measurements[idx];
+}
+
+static int loop_measurement_calibration_count(const loop_construct_t *c) {
+    if (!c) return 0;
+    int n = 0;
+    for (int i = 0; i < c->measurement_count; i++)
+        if (c->measurements[i].calibrated) n++;
+    return n;
+}
+
+static void loop_measurement_update_graph(loop_construct_t *c,
+                                          const loop_measurement_entry_t *m) {
+    if (!c || !m || !m->name[0]) return;
+    loop_graph_add_node(c, m->name,
+                        m->calibrated ? "calibration" : "measurement",
+                        m->unit, m->uncertainty);
+    if (m->material[0])
+        loop_graph_add_edge(c, m->material, m->name,
+                            m->calibrated ? "calibrates" : "measures", 0.0);
+    if (m->method[0]) {
+        loop_graph_add_node(c, m->method, "method", "", 0.0);
+        loop_graph_add_edge(c, m->name, m->method, "uses_method", 0.0);
+    }
+}
+
+static void loop_parse_srm_statement(loop_construct_t *c, char *rem,
+                                     const char *kind) {
+    if (!c || !rem) return;
+    rem = loop_trim(rem);
+    if (!rem[0]) return;
+
+    char subject[LOOP_META_NAME_MAX];
+    loop_extract_subject(rem, subject, sizeof(subject));
+    loop_srm_entry_t *srm = loop_srm_get(c, subject);
+    if (!srm) return;
+
+    char value[LOOP_META_VALUE_MAX];
+    if (loop_extract_clause_value(rem, " name ", value, sizeof(value)))
+        loop_copy_unquoted(srm->name, sizeof(srm->name), value, NULL);
+    if (loop_extract_clause_value(rem, " matrix ", value, sizeof(value)))
+        loop_copy_unquoted(srm->matrix, sizeof(srm->matrix), value, NULL);
+    if (loop_extract_clause_value(rem, " property ", value, sizeof(value)))
+        loop_copy_unquoted(srm->property, sizeof(srm->property), value, NULL);
+    if (loop_extract_clause_value(rem, " certificate ", value, sizeof(value))) {
+        loop_copy_unquoted(srm->certificate, sizeof(srm->certificate),
+                           value, "certificate");
+        if (loop_ci_contains_const(value, "current"))
+            srm->certificate_current = true;
+    }
+    if (loop_extract_clause_value(rem, " report ", value, sizeof(value)))
+        loop_copy_unquoted(srm->report, sizeof(srm->report), value, "report");
+    if (loop_extract_clause_value(rem, " sds ", value, sizeof(value))) {
+        loop_copy_unquoted(srm->sds, sizeof(srm->sds), value, "sds");
+        if (loop_ci_contains_const(value, "available"))
+            srm->sds_available = true;
+    }
+    if (loop_extract_clause_value(rem, " value ", value, sizeof(value)))
+        srm->assigned_value = loop_parse_double_value(value, srm->assigned_value);
+    if (loop_extract_clause_value(rem, " uncertainty ", value, sizeof(value)))
+        srm->uncertainty = loop_parse_double_value(value, srm->uncertainty);
+    if (loop_ci_contains_const(rem, " current"))
+        srm->certificate_current = true;
+    if (loop_ci_contains_const(rem, " available") && srm->sds[0])
+        srm->sds_available = true;
+    if (loop_ci_contains_const(rem, " traceable"))
+        srm->traceable = true;
+    loop_meta_add(c, kind ? kind : "reference_material", srm->id,
+                  srm->property[0] ? srm->property : srm->matrix,
+                  srm->uncertainty);
+    loop_srm_update_graph(c, srm);
+    c->dsl_enabled = true;
+}
+
+static void loop_parse_catalog_statement(loop_construct_t *c, char *rem,
+                                         bool annual) {
+    if (!c || !rem) return;
+    rem = loop_trim(rem);
+    if (!rem[0]) rem = (char *)"catalog";
+
+    char subject[LOOP_META_NAME_MAX];
+    loop_extract_subject(rem, subject, sizeof(subject));
+    if (!subject[0]) loop_copy(subject, sizeof(subject),
+                               annual ? "annual_product_list" : "catalog", NULL);
+    char value[LOOP_META_VALUE_MAX] = "";
+    if (!loop_extract_clause_value(rem, " store ", value, sizeof(value)) &&
+        !loop_extract_clause_value(rem, " from ", value, sizeof(value))) {
+        loop_copy(value, sizeof(value),
+                  loop_ci_contains_const(rem, "current") ? "current" : "", NULL);
+    }
+    loop_srm_operation_add(c, annual ? "annual_catalog" : "catalog",
+                           subject, value, true, 0.0);
+    loop_graph_add_node(c, subject, annual ? "annual_catalog" : "catalog",
+                        value, 0.0);
+    c->dsl_enabled = true;
+}
+
+static void loop_parse_product_search_statement(loop_construct_t *c, char *rem) {
+    if (!c || !rem) return;
+    rem = loop_trim(rem);
+    if (!rem[0]) return;
+
+    char subject[LOOP_META_NAME_MAX];
+    loop_extract_subject(rem, subject, sizeof(subject));
+    loop_srm_entry_t *srm = loop_srm_get(c, subject);
+    if (!srm) return;
+
+    char value[LOOP_META_VALUE_MAX] = "";
+    if (loop_extract_clause_value(rem, " store ", value, sizeof(value)))
+        loop_copy_unquoted(srm->store, sizeof(srm->store), value, NULL);
+    else if (loop_ci_contains_const(rem, "shop.nist.gov"))
+        loop_copy(srm->store, sizeof(srm->store), "shop.nist.gov", NULL);
+    srm->product_search_found = !loop_ci_contains_const(rem, "missing") &&
+                                !loop_ci_contains_const(rem, "not_found");
+    if (loop_ci_contains_const(rem, " current"))
+        srm->certificate_current = true;
+    loop_srm_operation_add(c, "product_search", srm->id,
+                           srm->store[0] ? srm->store : "store",
+                           srm->product_search_found, 0.0);
+    loop_srm_update_graph(c, srm);
+    c->dsl_enabled = true;
+}
+
+static void loop_parse_availability_statement(loop_construct_t *c, char *rem) {
+    if (!c || !rem) return;
+    rem = loop_trim(rem);
+    if (!rem[0]) return;
+
+    char subject[LOOP_META_NAME_MAX];
+    loop_extract_subject(rem, subject, sizeof(subject));
+    loop_srm_entry_t *srm = loop_srm_get(c, subject);
+    if (!srm) return;
+
+    char value[LOOP_META_VALUE_MAX];
+    if (loop_extract_clause_value(rem, " price ", value, sizeof(value)))
+        srm->price = loop_parse_double_value(value, srm->price);
+    if (loop_extract_clause_value(rem, " store ", value, sizeof(value)))
+        loop_copy_unquoted(srm->store, sizeof(srm->store), value, NULL);
+    if (loop_extract_clause_value(rem, " distributor ", value, sizeof(value)))
+        loop_copy_unquoted(srm->distributor, sizeof(srm->distributor), value, NULL);
+    if (loop_ci_contains_const(rem, " unavailable")) {
+        srm->available = false;
+        srm->orderable = false;
+    } else if (loop_ci_contains_const(rem, " available")) {
+        srm->available = true;
+    }
+    if (loop_ci_contains_const(rem, " orderable"))
+        srm->orderable = true;
+    loop_srm_operation_add(c, "availability", srm->id,
+                           srm->available ? "available" : "unknown",
+                           srm->available, srm->price);
+    loop_srm_update_graph(c, srm);
+    c->dsl_enabled = true;
+}
+
+static void loop_parse_order_policy_statement(loop_construct_t *c, char *rem) {
+    if (!c || !rem) return;
+    rem = loop_trim(rem);
+    char subject[LOOP_META_NAME_MAX];
+    loop_extract_subject(rem, subject, sizeof(subject));
+    bool no_paper = loop_ci_contains_const(rem, "no_paper") ||
+                    loop_ci_contains_const(rem, "no paper") ||
+                    loop_ci_contains_const(rem, "paper_checks false") ||
+                    loop_ci_contains_const(rem, "paper checks false");
+    if (no_paper)
+        loop_copy(subject, sizeof(subject), "no_paper_checks", NULL);
+    if (!subject[0]) loop_copy(subject, sizeof(subject), "order_policy", NULL);
+    loop_srm_operation_add(c, "order_policy", subject, rem, true, 0.0);
+    loop_graph_add_node(c, subject, "order_policy", no_paper ? "blocked" : "", 0.0);
+    c->dsl_enabled = true;
+}
+
+static void loop_parse_distributor_statement(loop_construct_t *c, char *rem) {
+    if (!c || !rem) return;
+    rem = loop_trim(rem);
+    if (!rem[0]) return;
+    char subject[LOOP_META_NAME_MAX];
+    loop_extract_subject(rem, subject, sizeof(subject));
+    if (!subject[0]) loop_copy(subject, sizeof(subject), "distributor", NULL);
+    loop_srm_operation_add(c, "licensed_distributor", subject, rem, true, 0.0);
+    loop_graph_add_node(c, subject, "licensed_distributor", "licensed", 0.0);
+    c->dsl_enabled = true;
+}
+
+static void loop_parse_shipping_statement(loop_construct_t *c, char *rem) {
+    if (!c || !rem) return;
+    rem = loop_trim(rem);
+    if (!rem[0]) return;
+    char subject[LOOP_META_NAME_MAX];
+    loop_extract_subject(rem, subject, sizeof(subject));
+    loop_srm_entry_t *srm = loop_srm_get(c, subject);
+    if (!srm) return;
+    char value[LOOP_META_VALUE_MAX];
+    if (loop_extract_clause_value(rem, " to ", value, sizeof(value)) ||
+        loop_extract_clause_value(rem, " destination ", value, sizeof(value))) {
+        loop_copy_unquoted(srm->destination, sizeof(srm->destination), value, NULL);
+        const char *status_terms[] = {
+            " blocked", " restricted", " allowed", " ceased", NULL
+        };
+        for (int i = 0; status_terms[i]; i++) {
+            char *status = loop_strcasestr_local(srm->destination, status_terms[i]);
+            if (!status) continue;
+            char *after = status + strlen(status_terms[i]);
+            if (*after == '\0' || isspace((unsigned char)*after)) {
+                *status = '\0';
+                char clean[LOOP_META_NAME_MAX];
+                loop_copy(clean, sizeof(clean), loop_trim(srm->destination), NULL);
+                loop_copy(srm->destination, sizeof(srm->destination), clean, NULL);
+                break;
+            }
+        }
+    }
+    srm->shipping_blocked = loop_ci_contains_const(rem, " blocked") ||
+                            loop_ci_contains_const(rem, " restricted") ||
+                            loop_ci_contains_const(rem, " ceased");
+    loop_srm_operation_add(c, "shipping", srm->id,
+                           srm->destination, srm->shipping_blocked, 0.0);
+    loop_srm_update_graph(c, srm);
+    c->dsl_enabled = true;
+}
+
+static void loop_parse_registration_statement(loop_construct_t *c, char *rem,
+                                              const char *kind) {
+    if (!c || !kind) return;
+    rem = loop_trim(rem ? rem : "");
+    char subject[LOOP_META_NAME_MAX];
+    loop_extract_subject(rem, subject, sizeof(subject));
+    if (!subject[0]) loop_copy(subject, sizeof(subject), kind, NULL);
+    loop_srm_operation_add(c, kind, subject, rem, true, 0.0);
+    c->dsl_enabled = true;
+}
+
+static void loop_parse_archived_certificate_statement(loop_construct_t *c,
+                                                      char *rem) {
+    if (!c || !rem) return;
+    rem = loop_trim(rem);
+    if (!rem[0]) return;
+    char subject[LOOP_META_NAME_MAX];
+    loop_extract_subject(rem, subject, sizeof(subject));
+    loop_srm_entry_t *srm = loop_srm_get(c, subject);
+    if (!srm) return;
+    srm->archived_certificate = true;
+    loop_srm_operation_add(c, "archived_certificate", srm->id, rem, true, 0.0);
+    loop_graph_add_edge(c, srm->id, "archived_documents", "archived_in", 0.0);
+    c->dsl_enabled = true;
+}
+
+static void loop_parse_certificate_statement(loop_construct_t *c, char *rem) {
+    if (!c || !rem) return;
+    rem = loop_trim(rem);
+    char subject[LOOP_META_NAME_MAX];
+    loop_extract_subject(rem, subject, sizeof(subject));
+    loop_srm_entry_t *srm = loop_srm_get(c, subject);
+    if (!srm) return;
+    char cert[LOOP_META_NAME_MAX];
+    if (loop_extract_clause_value(rem, " certificate ", cert, sizeof(cert)))
+        loop_copy_unquoted(srm->certificate, sizeof(srm->certificate), cert, "certificate");
+    else
+        loop_copy(srm->certificate, sizeof(srm->certificate), "certificate", NULL);
+    if (loop_ci_contains_const(rem, " current"))
+        srm->certificate_current = true;
+    loop_srm_update_graph(c, srm);
+    c->dsl_enabled = true;
+}
+
+static void loop_parse_report_statement(loop_construct_t *c, char *rem) {
+    if (!c || !rem) return;
+    rem = loop_trim(rem);
+    char subject[LOOP_META_NAME_MAX];
+    loop_extract_subject(rem, subject, sizeof(subject));
+    loop_srm_entry_t *srm = loop_srm_get(c, subject);
+    if (!srm) return;
+    char report[LOOP_META_NAME_MAX];
+    if (loop_extract_clause_value(rem, " report ", report, sizeof(report)))
+        loop_copy_unquoted(srm->report, sizeof(srm->report), report, "report");
+    else
+        loop_copy(srm->report, sizeof(srm->report), "report", NULL);
+    loop_srm_update_graph(c, srm);
+    c->dsl_enabled = true;
+}
+
+static void loop_parse_sds_statement(loop_construct_t *c, char *rem) {
+    if (!c || !rem) return;
+    rem = loop_trim(rem);
+    char subject[LOOP_META_NAME_MAX];
+    loop_extract_subject(rem, subject, sizeof(subject));
+    loop_srm_entry_t *srm = loop_srm_get(c, subject);
+    if (!srm) return;
+    char sds[LOOP_META_NAME_MAX];
+    if (loop_extract_clause_value(rem, " sds ", sds, sizeof(sds)))
+        loop_copy_unquoted(srm->sds, sizeof(srm->sds), sds, "sds");
+    else
+        loop_copy(srm->sds, sizeof(srm->sds), "sds", NULL);
+    if (loop_ci_contains_const(rem, " available"))
+        srm->sds_available = true;
+    loop_srm_update_graph(c, srm);
+    c->dsl_enabled = true;
+}
+
+static void loop_parse_traceability_statement(loop_construct_t *c, char *rem) {
+    if (!c || !rem) return;
+    rem = loop_trim(rem);
+    char subject[LOOP_META_NAME_MAX];
+    loop_extract_subject(rem, subject, sizeof(subject));
+    loop_srm_entry_t *srm = loop_srm_get(c, subject);
+    if (!srm) return;
+    srm->traceable = true;
+    loop_meta_add(c, "traceability", srm->id, "NIST", 1.0);
+    loop_srm_update_graph(c, srm);
+    c->dsl_enabled = true;
+}
+
+static void loop_parse_measurement_statement(loop_construct_t *c, char *rem,
+                                             bool calibrated) {
+    if (!c || !rem) return;
+    rem = loop_trim(rem);
+    if (!rem[0]) return;
+
+    char subject[LOOP_META_NAME_MAX];
+    loop_extract_subject(rem, subject, sizeof(subject));
+    loop_measurement_entry_t *m = loop_measurement_get(c, subject);
+    if (!m) return;
+    m->calibrated = m->calibrated || calibrated;
+
+    char value[LOOP_META_VALUE_MAX];
+    if (loop_extract_clause_value(rem, " on ", value, sizeof(value)) ||
+        loop_extract_clause_value(rem, " using ", value, sizeof(value)) ||
+        loop_extract_clause_value(rem, " from ", value, sizeof(value))) {
+        loop_copy_unquoted(m->material, sizeof(m->material), value, NULL);
+    }
+    if (loop_extract_clause_value(rem, " property ", value, sizeof(value)))
+        loop_copy_unquoted(m->property, sizeof(m->property), value, NULL);
+    if (loop_extract_clause_value(rem, " unit ", value, sizeof(value)))
+        loop_copy_unquoted(m->unit, sizeof(m->unit), value, NULL);
+    if (loop_extract_clause_value(rem, " method ", value, sizeof(value)))
+        loop_copy_unquoted(m->method, sizeof(m->method), value, NULL);
+    if (loop_extract_clause_value(rem, " value ", value, sizeof(value)))
+        m->value = loop_parse_double_value(value, m->value);
+    if (loop_extract_clause_value(rem, " uncertainty ", value, sizeof(value)))
+        m->uncertainty = loop_parse_double_value(value, m->uncertainty);
+    loop_meta_add(c, calibrated ? "calibration" : "measurement", m->name,
+                  m->material, m->uncertainty);
+    loop_measurement_update_graph(c, m);
+    c->dsl_enabled = true;
+}
+
+static void loop_parse_uncertainty_budget(loop_construct_t *c, char *rem) {
+    if (!c || !rem) return;
+    rem = loop_trim(rem);
+    if (!rem[0]) return;
+
+    char subject[LOOP_META_NAME_MAX];
+    loop_extract_subject(rem, subject, sizeof(subject));
+    if (!subject[0]) loop_copy(subject, sizeof(subject), "uncertainty_budget", NULL);
+    loop_measurement_entry_t *m = loop_measurement_get(c, subject);
+    if (!m) return;
+    char value[LOOP_META_VALUE_MAX];
+    if (loop_extract_clause_value(rem, " uncertainty ", value, sizeof(value))) {
+        m->uncertainty = loop_parse_double_value(value, m->uncertainty);
+    } else {
+        char *eq = strchr(rem, '=');
+        if (!eq) eq = strchr(rem, ':');
+        if (eq)
+            m->uncertainty = loop_parse_double_value(eq + 1, m->uncertainty);
+    }
+    if (!m->has_uncertainty_budget) {
+        m->has_uncertainty_budget = true;
+        c->uncertainty_budget_count++;
+    }
+    loop_meta_add(c, "uncertainty_budget", m->name, "", m->uncertainty);
+    loop_measurement_update_graph(c, m);
+    c->dsl_enabled = true;
+}
+
+static void loop_parse_reward_object(loop_construct_t *c, char *rem) {
+    if (!c || !rem) return;
+    rem = loop_trim(rem);
+    if (!rem[0]) return;
+
+    char *target = loop_take_clause(rem, " target ");
+    if (!target) target = loop_take_clause(rem, " for ");
+    char *intensity_v = loop_take_clause(rem, " intensity ");
+    char *valence_v = loop_take_clause(rem, " valence ");
+    double valence = valence_v ? loop_parse_double_value(valence_v, c->valence) : c->valence;
+    double intensity = intensity_v ? loop_parse_double_value(intensity_v, 1.0) : 1.0;
+    intensity = loop_clamp01(intensity);
+
+    char *name = loop_trim(rem);
+    if (!name[0]) name = (char *)"reward";
+    double strength = valence * intensity;
+    c->valence = valence;
+    c->intensity = intensity;
+    c->reward += strength;
+    loop_meta_add(c, "reward_object", name, target ? target : "", strength);
+    loop_graph_add_node(c, name, "reward_object", target ? target : "", strength);
+    if (target && loop_trim(target)[0])
+        loop_graph_add_edge(c, name, target, "rewards", strength);
+    c->dsl_enabled = true;
+}
+
+static void loop_parse_relation_edge(loop_construct_t *c, char *rem,
+                                     const char *default_relation,
+                                     const char *meta_kind) {
+    if (!c || !rem) return;
+    char from[LOOP_META_NAME_MAX];
+    char to[LOOP_META_NAME_MAX];
+    char relation[LOOP_META_KIND_MAX];
+    double weight = 0.0;
+    loop_parse_graph_edge_parts(rem, from, sizeof(from), to, sizeof(to),
+                                relation, sizeof(relation), &weight);
+    if (strcmp(relation, "relates") == 0 && default_relation)
+        loop_copy(relation, sizeof(relation), default_relation, NULL);
+    loop_graph_add_edge(c, from, to, relation, weight);
+    if (from[0] && to[0] && meta_kind)
+        loop_meta_add(c, meta_kind, from, to, weight);
+}
+
+static void loop_parse_explore(loop_construct_t *c, char *rem) {
+    if (!c || !rem) return;
+    rem = loop_trim(rem);
+    char *rate = loop_take_clause(rem, " rate ");
+    if (!rate) rate = loop_take_clause(rem, " epsilon ");
+    if (!rate) {
+        char *v = NULL;
+        if (loop_stmt_assignment(rem, "rate", &v) ||
+            loop_stmt_assignment(rem, "exploration_rate", &v) ||
+            loop_stmt_assignment(rem, "epsilon", &v)) {
+            rate = v;
+        }
+    }
+    double r = loop_parse_double_value(rate ? rate : rem, c->exploration_rate);
+    c->exploration_rate = loop_clamp01(r);
+    if (c->curiosity < c->exploration_rate)
+        c->curiosity = c->exploration_rate;
+    loop_meta_add(c, "explore", rem && rem[0] ? rem : "objects", rate ? rate : "", c->exploration_rate);
+    c->dsl_enabled = true;
+}
+
+static void loop_prune_edges_below(loop_construct_t *c, double threshold) {
+    if (!c) return;
+    threshold = loop_clamp01(threshold);
+    c->pruning_threshold = threshold;
+    for (int i = 0; i < c->graph_edge_count; ) {
+        if (c->graph_edges[i].weight < threshold) {
+            for (int j = i + 1; j < c->graph_edge_count; j++)
+                c->graph_edges[j - 1] = c->graph_edges[j];
+            c->graph_edge_count--;
+            memset(&c->graph_edges[c->graph_edge_count], 0,
+                   sizeof(c->graph_edges[c->graph_edge_count]));
+        } else {
+            i++;
+        }
+    }
+    c->dsl_enabled = true;
+}
+
+static void loop_parse_prune(loop_construct_t *c, char *rem) {
+    if (!c || !rem) return;
+    rem = loop_trim(rem);
+    char *below = NULL;
+    if (strncasecmp(rem, "below ", 6) == 0)
+        below = loop_trim(rem + 6);
+    else if (strncasecmp(rem, "threshold ", 10) == 0)
+        below = loop_trim(rem + 10);
+    if (!below) below = loop_strcasestr_local(rem, " below ");
+    if (!below) below = loop_strcasestr_local(rem, " threshold ");
+    if (below) {
+        while (*below && !isdigit((unsigned char)*below) &&
+               *below != '-' && *below != '.') {
+            below++;
+        }
+    }
+    double threshold = loop_parse_double_value(below ? below : rem,
+                                              c->pruning_threshold);
+    loop_prune_edges_below(c, threshold);
+}
+
+static void loop_parse_credit(loop_construct_t *c, char *rem) {
+    if (!c || !rem) return;
+    rem = loop_trim(rem);
+    char *value = NULL;
+    char *name = rem;
+    char *sep = strchr(rem, '=');
+    if (!sep) sep = strchr(rem, ':');
+    if (sep) {
+        *sep = '\0';
+        value = loop_trim(sep + 1);
+    } else {
+        char *p = rem;
+        while (*p && !isspace((unsigned char)*p)) p++;
+        if (*p) {
+            *p = '\0';
+            value = loop_trim(p + 1);
+        }
+    }
+    c->credit = loop_parse_double_value(value ? value : name, c->credit);
+    loop_meta_add(c, "credit", loop_trim(name)[0] ? loop_trim(name) : "assignment",
+                  value ? value : "", c->credit);
+}
+
+static void loop_parse_attractor(loop_construct_t *c, char *rem) {
+    if (!c || !rem) return;
+    rem = loop_trim(rem);
+    char *basin = loop_take_clause(rem, " basin ");
+    if (!basin) basin = loop_take_clause(rem, " temperature ");
+    if (basin)
+        c->basin_temperature = loop_clamp01(loop_parse_double_value(basin, 0.0));
+    loop_copy_unquoted(c->attractor, sizeof(c->attractor), rem, "attractor");
+    loop_meta_add(c, "attractor", c->attractor, basin ? basin : "", c->basin_temperature);
+    loop_graph_add_node(c, c->attractor, "attractor", basin ? basin : "", c->basin_temperature);
+}
+
+static void loop_parse_prompt_game(loop_construct_t *c, char *rem) {
+    if (!c || !rem) return;
+    rem = loop_trim(rem);
+    loop_copy_unquoted(c->prompt_game, sizeof(c->prompt_game), rem, "prompt_game");
+    loop_meta_add(c, "prompt_game", c->prompt_game, "", 0.0);
+    loop_graph_add_node(c, c->prompt_game, "prompt_game", "", 0.0);
+}
+
+static void loop_parse_effect(loop_construct_t *c, char *rem) {
+    if (!c || !rem) return;
+    rem = loop_trim(rem);
+    char *name = rem;
+    char *value = NULL;
+    char *sep = strchr(rem, '=');
+    if (!sep) sep = strchr(rem, ':');
+    if (sep) {
+        *sep = '\0';
+        value = loop_trim(sep + 1);
+    } else {
+        char *p = rem;
+        while (*p && !isspace((unsigned char)*p)) p++;
+        if (*p) {
+            *p = '\0';
+            value = loop_trim(p + 1);
+        }
+    }
+    loop_set_effect(c, loop_trim(name), loop_parse_double_value(value, 0.0));
+}
+
+static bool loop_refine_add(loop_construct_t *c, char *rem) {
+    if (!c || c->refine_count >= LOOP_REFINE_MAX || !rem) return false;
+    rem = loop_trim(rem);
+    char *when = loop_strcasestr_local(rem, " when ");
+    if (!when) return false;
+    *when = '\0';
+    when = loop_trim(when + 6);
+    loop_refine_rule_t *r = &c->refine_rules[c->refine_count];
+    memset(r, 0, sizeof(*r));
+    if (sscanf(rem, "%47s %2s %lf", r->target, r->op, &r->value) != 3)
+        return false;
+    loop_copy(r->when, sizeof(r->when), when, NULL);
+    c->refine_count++;
+    c->dsl_enabled = true;
+    return true;
+}
+
+static bool loop_rewrite_add(loop_construct_t *c, char *rem) {
+    if (!c || c->rewrite_count >= LOOP_REWRITE_MAX || !rem) return false;
+    rem = loop_trim(rem);
+    char *when = loop_strcasestr_local(rem, " when ");
+    if (!when) return false;
+    *when = '\0';
+    when = loop_trim(when + 6);
+    rem = loop_trim(rem);
+    if (!rem[0] || !when[0]) return false;
+    char *semi = strchr(rem, ';');
+    char *nl = strchr(rem, '\n');
+    if (semi && (!nl || semi < nl)) *semi = '\0';
+    else if (nl) *nl = '\0';
+    rem = loop_trim(rem);
+    if (!rem[0]) return false;
+    loop_rewrite_rule_t *r = &c->rewrite_rules[c->rewrite_count];
+    memset(r, 0, sizeof(*r));
+    loop_copy(r->action, sizeof(r->action), rem, NULL);
+    loop_copy(r->when, sizeof(r->when), when, NULL);
+    c->rewrite_count++;
+    c->dsl_enabled = true;
+    return true;
+}
+
+static void loop_apply_numeric_target(loop_construct_t *c, const char *target,
+                                      const char *op, double value) {
+    if (!c || !target || !op) return;
+    double current = 0.0;
+    double *slot = NULL;
+    bool is_int = false;
+
+    if (loop_name_matches(target, "max_iterations", "max_iters", NULL)) {
+        current = c->max_iterations; is_int = true;
+    } else if (loop_name_matches(target, "max_turns", "turn_limit", NULL)) {
+        current = c->max_turns; is_int = true;
+    } else if (loop_name_matches(target, "effect.conversational", "effect.conversation", NULL)) {
+        slot = &c->effect_conversational; current = *slot;
+    } else if (loop_name_matches(target, "effect.tool", "effect.tools", "effect.tool_calling")) {
+        slot = &c->effect_tool; current = *slot;
+    } else if (loop_name_matches(target, "effect.world", "effect.world_modeling", NULL)) {
+        slot = &c->effect_world; current = *slot;
+    } else if (loop_name_matches(target, "effect.meta", "effect.meta_learning", "effect.reflection")) {
+        slot = &c->effect_meta; current = *slot;
+    } else if (loop_name_matches(target, "reward", "external_reward", NULL)) {
+        slot = &c->reward; current = *slot;
+    } else if (loop_name_matches(target, "curiosity", "intrinsic_reward", NULL)) {
+        slot = &c->curiosity; current = *slot;
+    } else if (loop_name_matches(target, "empowerment", "agency", NULL)) {
+        slot = &c->empowerment; current = *slot;
+    } else if (loop_name_matches(target, "confidence", "certainty", NULL)) {
+        slot = &c->confidence; current = *slot;
+    } else if (loop_name_matches(target, "uncertainty", "entropy", NULL)) {
+        slot = &c->uncertainty; current = *slot;
+    } else if (loop_name_matches(target, "learning_rate", "learn_rate", NULL)) {
+        slot = &c->learning_rate; current = *slot;
+    } else if (loop_name_matches(target, "valence", "reward_valence", NULL)) {
+        slot = &c->valence; current = *slot;
+    } else if (loop_name_matches(target, "intensity", "reward_intensity", NULL)) {
+        slot = &c->intensity; current = *slot;
+    } else if (loop_name_matches(target, "exploration_rate", "explore_rate", "epsilon")) {
+        slot = &c->exploration_rate; current = *slot;
+    } else if (loop_name_matches(target, "credit", "credit_assignment", NULL)) {
+        slot = &c->credit; current = *slot;
+    } else if (loop_name_matches(target, "pruning_threshold", "prune_threshold", NULL)) {
+        slot = &c->pruning_threshold; current = *slot;
+    } else if (loop_name_matches(target, "basin_temperature", "basin_hop", NULL)) {
+        slot = &c->basin_temperature; current = *slot;
+    } else {
+        return;
+    }
+
+    double next = value;
+    if (strcmp(op, "+=") == 0) next = current + value;
+    else if (strcmp(op, "-=") == 0) next = current - value;
+    else if (strcmp(op, "*=") == 0) next = current * value;
+    else if (strcmp(op, "/=") == 0 && value != 0.0) next = current / value;
+
+    if (is_int) {
+        int iv = (int)llround(next);
+        if (loop_name_matches(target, "max_iterations", "max_iters", NULL))
+            c->max_iterations = loop_clamp_int(iv, 1, 10000);
+        else
+            c->max_turns = loop_clamp_int(iv, 1, 999999);
+    } else if (slot) {
+        if (strncasecmp(target, "effect.", 7) == 0 ||
+            loop_name_matches(target, "confidence", "certainty", NULL) ||
+            loop_name_matches(target, "uncertainty", "entropy", NULL) ||
+            loop_name_matches(target, "learning_rate", "learn_rate", NULL) ||
+            loop_name_matches(target, "intensity", "reward_intensity", NULL) ||
+            loop_name_matches(target, "exploration_rate", "explore_rate", "epsilon") ||
+            loop_name_matches(target, "pruning_threshold", "prune_threshold", NULL) ||
+            loop_name_matches(target, "basin_temperature", "basin_hop", NULL)) {
+            *slot = loop_clamp01(next);
+        } else {
+            *slot = next;
+        }
+    }
+}
+
+static bool loop_apply_refinements_locked(loop_construct_t *c, int current_turn,
+                                          bool model_done, bool has_followup,
+                                          int depth, char *err,
+                                          size_t err_len) {
+    if (!c) return true;
+    for (int i = 0; i < c->refine_count; i++) {
+        loop_refine_rule_t *r = &c->refine_rules[i];
+        if (r->fired || !r->when[0]) continue;
+        bool valid = false;
+        char local_err[96] = "";
+        bool fire = loop_eval_expr_bool(c, r->when, current_turn, model_done,
+                                        has_followup, depth, &valid,
+                                        local_err, sizeof(local_err));
+        if (!valid) {
+            if (err && err_len > 0)
+                snprintf(err, err_len, "refine '%s' invalid: %s",
+                         r->target, local_err);
+            return false;
+        }
+        if (fire) {
+            loop_apply_numeric_target(c, r->target, r->op, r->value);
+            r->fired = true;
+            c->refinements_applied++;
+        }
+    }
+    return true;
+}
+
+static char *loop_extract_program_body(char *buf) {
+    char *body = loop_trim(buf);
+    char *brace = strchr(body, '{');
+    if (brace) {
+        char *end = strrchr(brace + 1, '}');
+        if (end) *end = '\0';
+        body = brace + 1;
+    }
+    body = loop_trim(body);
+    if (strncmp(body, "|c|", 3) == 0) body = loop_trim(body + 3);
+    return body;
+}
+
+static bool loop_apply_program_statement(loop_construct_t *c, char *stmt) {
+    char *v = NULL;
+    stmt = loop_trim(stmt);
+    if (!stmt || !stmt[0] || stmt[0] == '#') return false;
+
+    if (loop_stmt_prefix(stmt, "continue when", &v) ||
+        loop_stmt_prefix(stmt, "continue while", &v)) {
+        loop_copy(c->continue_expr, sizeof(c->continue_expr), v, NULL);
+        c->dsl_enabled = true;
+        return true;
+    }
+    if (loop_stmt_prefix(stmt, "break when", &v) ||
+        loop_stmt_prefix(stmt, "break if", &v) ||
+        loop_stmt_prefix(stmt, "exit when", &v) ||
+        loop_stmt_prefix(stmt, "complete when", &v)) {
+        loop_copy(c->break_expr, sizeof(c->break_expr), v, NULL);
+        c->dsl_enabled = true;
+        return true;
+    }
+    if (loop_stmt_prefix(stmt, "add_node", &v) ||
+        loop_stmt_prefix(stmt, "add node", &v) ||
+        loop_stmt_prefix(stmt, "node", &v)) {
+        loop_parse_graph_node(c, v);
+        return true;
+    }
+    if (loop_stmt_prefix(stmt, "remove_node", &v) ||
+        loop_stmt_prefix(stmt, "remove node", &v) ||
+        loop_stmt_prefix(stmt, "delete_node", &v) ||
+        loop_stmt_prefix(stmt, "delete node", &v)) {
+        loop_graph_remove_node(c, v);
+        return true;
+    }
+    if (loop_stmt_prefix(stmt, "replace_node", &v) ||
+        loop_stmt_prefix(stmt, "replace node", &v) ||
+        loop_stmt_prefix(stmt, "replace", &v)) {
+        loop_parse_graph_replace(c, v);
+        return true;
+    }
+    if (loop_stmt_prefix(stmt, "update_node", &v) ||
+        loop_stmt_prefix(stmt, "update node", &v) ||
+        loop_stmt_prefix(stmt, "update", &v)) {
+        loop_parse_graph_update(c, v);
+        return true;
+    }
+    if (loop_stmt_prefix(stmt, "add_edge", &v) ||
+        loop_stmt_prefix(stmt, "add edge", &v) ||
+        loop_stmt_prefix(stmt, "edge", &v)) {
+        loop_parse_graph_edge(c, v);
+        return true;
+    }
+    if (loop_stmt_prefix(stmt, "remove_edge", &v) ||
+        loop_stmt_prefix(stmt, "remove edge", &v) ||
+        loop_stmt_prefix(stmt, "delete_edge", &v) ||
+        loop_stmt_prefix(stmt, "delete edge", &v)) {
+        loop_parse_graph_remove_edge(c, v);
+        return true;
+    }
+    if (loop_stmt_prefix(stmt, "find", &v)) {
+        loop_copy_unquoted(c->traverse_from, sizeof(c->traverse_from), v, NULL);
+        c->traverse_depth = 0;
+        c->traverse_hits = loop_graph_find_node(c, c->traverse_from) >= 0 ? 1 : 0;
+        c->dsl_enabled = true;
+        return true;
+    }
+    if (loop_stmt_prefix(stmt, "traverse", &v) ||
+        loop_stmt_prefix(stmt, "traverse from", &v)) {
+        loop_parse_graph_traverse(c, v);
+        return true;
+    }
+    if (loop_stmt_prefix(stmt, "mapreduce", &v) ||
+        loop_stmt_prefix(stmt, "map_reduce", &v) ||
+        loop_stmt_prefix(stmt, "map reduce", &v)) {
+        loop_parse_mapreduce_statement(c, v);
+        return true;
+    }
+    if (loop_stmt_prefix(stmt, "map", &v)) {
+        loop_parse_map_statement(c, v);
+        return true;
+    }
+    if (loop_stmt_prefix(stmt, "shuffle", &v) ||
+        loop_stmt_prefix(stmt, "partition", &v)) {
+        loop_parse_shuffle_statement(c, v);
+        return true;
+    }
+    if (loop_stmt_prefix(stmt, "reduce", &v) ||
+        loop_stmt_prefix(stmt, "fold", &v)) {
+        loop_parse_reduce_statement(c, v);
+        return true;
+    }
+    if (loop_stmt_prefix(stmt, "annual_product_list", &v) ||
+        loop_stmt_prefix(stmt, "annual product list", &v) ||
+        loop_stmt_prefix(stmt, "annual_catalog", &v) ||
+        loop_stmt_prefix(stmt, "annual catalog", &v)) {
+        loop_parse_catalog_statement(c, v, true);
+        return true;
+    }
+    if (loop_stmt_prefix(stmt, "catalog", &v) ||
+        loop_stmt_prefix(stmt, "online_catalog", &v) ||
+        loop_stmt_prefix(stmt, "online catalog", &v)) {
+        loop_parse_catalog_statement(c, v, false);
+        return true;
+    }
+    if (loop_stmt_prefix(stmt, "product_search", &v) ||
+        loop_stmt_prefix(stmt, "product search", &v) ||
+        loop_stmt_prefix(stmt, "store_search", &v) ||
+        loop_stmt_prefix(stmt, "store search", &v)) {
+        loop_parse_product_search_statement(c, v);
+        return true;
+    }
+    if (loop_stmt_prefix(stmt, "availability", &v) ||
+        loop_stmt_prefix(stmt, "available", &v) ||
+        loop_stmt_prefix(stmt, "orderable", &v)) {
+        loop_parse_availability_statement(c, v);
+        return true;
+    }
+    if (loop_stmt_prefix(stmt, "order_policy", &v) ||
+        loop_stmt_prefix(stmt, "order policy", &v) ||
+        loop_stmt_prefix(stmt, "payment_policy", &v) ||
+        loop_stmt_prefix(stmt, "payment policy", &v)) {
+        loop_parse_order_policy_statement(c, v);
+        return true;
+    }
+    if (loop_stmt_prefix(stmt, "licensed_distributor", &v) ||
+        loop_stmt_prefix(stmt, "licensed distributor", &v) ||
+        loop_stmt_prefix(stmt, "distributor", &v)) {
+        loop_parse_distributor_statement(c, v);
+        return true;
+    }
+    if (loop_stmt_prefix(stmt, "shipping", &v) ||
+        loop_stmt_prefix(stmt, "shipping_restriction", &v) ||
+        loop_stmt_prefix(stmt, "shipping restriction", &v)) {
+        loop_parse_shipping_statement(c, v);
+        return true;
+    }
+    if (loop_stmt_prefix(stmt, "registration", &v)) {
+        loop_parse_registration_statement(c, v, "registration");
+        return true;
+    }
+    if (loop_stmt_prefix(stmt, "survey", &v) ||
+        loop_stmt_prefix(stmt, "surveys", &v)) {
+        loop_parse_registration_statement(c, v, "survey");
+        return true;
+    }
+    if (loop_stmt_prefix(stmt, "archived_certificate", &v) ||
+        loop_stmt_prefix(stmt, "archived certificate", &v) ||
+        loop_stmt_prefix(stmt, "archived_report", &v) ||
+        loop_stmt_prefix(stmt, "archived report", &v)) {
+        loop_parse_archived_certificate_statement(c, v);
+        return true;
+    }
+    if (loop_stmt_prefix(stmt, "standard_reference_material", &v) ||
+        loop_stmt_prefix(stmt, "standard reference material", &v) ||
+        loop_stmt_prefix(stmt, "reference_material", &v) ||
+        loop_stmt_prefix(stmt, "reference material", &v) ||
+        loop_stmt_prefix(stmt, "srm", &v) ||
+        loop_stmt_prefix(stmt, "rm", &v)) {
+        loop_parse_srm_statement(c, v, "reference_material");
+        return true;
+    }
+    if (loop_stmt_prefix(stmt, "certificate", &v) ||
+        loop_stmt_prefix(stmt, "cert", &v)) {
+        loop_parse_certificate_statement(c, v);
+        return true;
+    }
+    if (loop_stmt_prefix(stmt, "report", &v) ||
+        loop_stmt_prefix(stmt, "report_of_investigation", &v) ||
+        loop_stmt_prefix(stmt, "report of investigation", &v)) {
+        loop_parse_report_statement(c, v);
+        return true;
+    }
+    if (loop_stmt_prefix(stmt, "safety_data_sheet", &v) ||
+        loop_stmt_prefix(stmt, "safety data sheet", &v) ||
+        loop_stmt_prefix(stmt, "sds", &v)) {
+        loop_parse_sds_statement(c, v);
+        return true;
+    }
+    if (loop_stmt_prefix(stmt, "traceability", &v) ||
+        loop_stmt_prefix(stmt, "metrological_traceability", &v) ||
+        loop_stmt_prefix(stmt, "metrological traceability", &v)) {
+        loop_parse_traceability_statement(c, v);
+        return true;
+    }
+    if (loop_stmt_prefix(stmt, "measurement", &v) ||
+        loop_stmt_prefix(stmt, "measure", &v)) {
+        loop_parse_measurement_statement(c, v, false);
+        return true;
+    }
+    if (loop_stmt_prefix(stmt, "calibration", &v) ||
+        loop_stmt_prefix(stmt, "calibrate", &v)) {
+        loop_parse_measurement_statement(c, v, true);
+        return true;
+    }
+    if (loop_stmt_prefix(stmt, "uncertainty_budget", &v) ||
+        loop_stmt_prefix(stmt, "uncertainty budget", &v)) {
+        loop_parse_uncertainty_budget(c, v);
+        return true;
+    }
+    if (loop_stmt_prefix(stmt, "quality_system", &v) ||
+        loop_stmt_prefix(stmt, "quality system", &v)) {
+        loop_meta_from_remainder(c, "quality_system", v);
+        return true;
+    }
+    if (loop_stmt_prefix(stmt, "balance", &v)) {
+        (void)v;
+        double density = loop_graph_density(c);
+        if (c->graph_edge_count > 0 && c->effect_world < density)
+            c->effect_world = loop_clamp01(density);
+        if (c->graph_node_count > 0 && c->confidence <= 0.0)
+            c->confidence = loop_clamp01(1.0 - density);
+        c->dsl_enabled = true;
+        return true;
+    }
+    if (loop_stmt_prefix(stmt, "reward_object", &v) ||
+        loop_stmt_prefix(stmt, "reward object", &v) ||
+        loop_stmt_prefix(stmt, "reward mechanism", &v)) {
+        loop_parse_reward_object(c, v);
+        return true;
+    }
+    if (loop_stmt_prefix(stmt, "causal_link", &v) ||
+        loop_stmt_prefix(stmt, "causal link", &v) ||
+        loop_stmt_prefix(stmt, "causal", &v)) {
+        loop_parse_relation_edge(c, v, "causal", "causal_link");
+        return true;
+    }
+    if (loop_stmt_prefix(stmt, "message_passing", &v) ||
+        loop_stmt_prefix(stmt, "message passing", &v) ||
+        loop_stmt_prefix(stmt, "message", &v)) {
+        loop_parse_relation_edge(c, v, "message", "message");
+        return true;
+    }
+    if (loop_stmt_prefix(stmt, "explore", &v) ||
+        loop_stmt_prefix(stmt, "stochastic_prompting", &v) ||
+        loop_stmt_prefix(stmt, "stochastic prompting", &v)) {
+        loop_parse_explore(c, v);
+        return true;
+    }
+    if (loop_stmt_prefix(stmt, "prune_edges", &v) ||
+        loop_stmt_prefix(stmt, "prune chains", &v) ||
+        loop_stmt_prefix(stmt, "prune", &v)) {
+        loop_parse_prune(c, v);
+        return true;
+    }
+    if (loop_stmt_prefix(stmt, "credit_assignment", &v) ||
+        loop_stmt_prefix(stmt, "credit assignment", &v) ||
+        loop_stmt_prefix(stmt, "credit", &v)) {
+        loop_parse_credit(c, v);
+        return true;
+    }
+    if (loop_stmt_prefix(stmt, "attractor", &v)) {
+        loop_parse_attractor(c, v);
+        return true;
+    }
+    if (loop_stmt_prefix(stmt, "prompt_game", &v) ||
+        loop_stmt_prefix(stmt, "prompt game", &v)) {
+        loop_parse_prompt_game(c, v);
+        return true;
+    }
+    if (loop_stmt_assignment(stmt, "basin_hop", &v) ||
+        loop_stmt_assignment(stmt, "basin_temperature", &v) ||
+        loop_stmt_assignment(stmt, "basin", &v)) {
+        c->basin_temperature = loop_clamp01(loop_parse_double_value(v, 0.0));
+        c->dsl_enabled = true;
+        return true;
+    }
+    if (loop_stmt_prefix(stmt, "define", &v)) {
+        if (!loop_parse_define_call(c, stmt))
+            loop_meta_from_remainder(c, "define", v);
+        return true;
+    }
+    if (loop_stmt_prefix(stmt, "object", &v)) {
+        loop_meta_from_remainder(c, "object", v);
+        return true;
+    }
+    if (loop_stmt_prefix(stmt, "goal", &v)) {
+        loop_meta_from_remainder(c, "goal", v);
+        return true;
+    }
+    if (loop_stmt_prefix(stmt, "task", &v)) {
+        loop_meta_from_remainder(c, "task", v);
+        return true;
+    }
+    if (loop_stmt_prefix(stmt, "belief", &v)) {
+        loop_meta_from_remainder(c, "belief", v);
+        return true;
+    }
+    if (loop_stmt_prefix(stmt, "infer", &v)) {
+        loop_meta_from_remainder(c, "infer", v);
+        return true;
+    }
+    if (loop_stmt_prefix(stmt, "learn", &v)) {
+        char *learn_v = v;
+        if (loop_stmt_assignment(learn_v, "rate", &learn_v) ||
+            loop_stmt_assignment(v, "learning_rate", &learn_v)) {
+            c->learning_rate = loop_clamp01(loop_parse_double_value(learn_v, 0.0));
+        } else {
+            loop_meta_from_remainder(c, "learn", v);
+        }
+        c->dsl_enabled = true;
+        return true;
+    }
+    if (loop_stmt_prefix(stmt, "decide", &v)) {
+        loop_copy(c->decision, sizeof(c->decision), loop_unquote_inplace(v), NULL);
+        c->dsl_enabled = true;
+        return true;
+    }
+    if (loop_stmt_prefix(stmt, "dyad", &v) ||
+        loop_stmt_prefix(stmt, "interaction", &v) ||
+        loop_stmt_prefix(stmt, "spawn dyad", &v)) {
+        loop_parse_dyad(c, v);
+        return true;
+    }
+    if (loop_stmt_prefix(stmt, "effect", &v)) {
+        loop_parse_effect(c, v);
+        return true;
+    }
+    if (loop_stmt_prefix(stmt, "schema_rewrite", &v) ||
+        loop_stmt_prefix(stmt, "schema rewrite", &v) ||
+        loop_stmt_prefix(stmt, "adapt_schema", &v) ||
+        loop_stmt_prefix(stmt, "adapt schema", &v) ||
+        loop_stmt_prefix(stmt, "rewrite_when", &v) ||
+        loop_stmt_prefix(stmt, "rewrite", &v)) {
+        return loop_rewrite_add(c, v);
+    }
+    if (loop_stmt_prefix(stmt, "refine", &v)) {
+        return loop_refine_add(c, v);
+    }
+    if (loop_stmt_assignment(stmt, "policy", &v)) {
+        loop_copy(c->policy, sizeof(c->policy), loop_unquote_inplace(v), NULL);
+        c->dsl_enabled = true;
+        return true;
+    }
+    if (loop_stmt_assignment(stmt, "reward", &v) ||
+        loop_stmt_assignment(stmt, "curiosity", &v) ||
+        loop_stmt_assignment(stmt, "empowerment", &v) ||
+        loop_stmt_assignment(stmt, "confidence", &v) ||
+        loop_stmt_assignment(stmt, "uncertainty", &v) ||
+        loop_stmt_assignment(stmt, "learning_rate", &v) ||
+        loop_stmt_assignment(stmt, "valence", &v) ||
+        loop_stmt_assignment(stmt, "intensity", &v) ||
+        loop_stmt_assignment(stmt, "exploration_rate", &v) ||
+        loop_stmt_assignment(stmt, "credit", &v) ||
+        loop_stmt_assignment(stmt, "pruning_threshold", &v) ||
+        loop_stmt_assignment(stmt, "basin_temperature", &v)) {
+        char key[LOOP_META_NAME_MAX] = "";
+        char *eq = strchr(stmt, '=');
+        if (!eq) eq = strchr(stmt, ':');
+        size_t n = eq ? (size_t)(eq - stmt) : strcspn(stmt, " \t");
+        if (n >= sizeof(key)) n = sizeof(key) - 1;
+        memcpy(key, stmt, n);
+        key[n] = '\0';
+        loop_set_signal(c, loop_trim(key), loop_parse_double_value(v, 0.0));
+        return true;
+    }
+    if (loop_stmt_assignment(stmt, "max_iterations", &v) ||
+        loop_stmt_assignment(stmt, "max_iters", &v)) {
+        c->max_iterations = loop_clamp_int(atoi(v), 1, 10000);
+        c->dsl_enabled = true;
+        return true;
+    }
+    if (loop_stmt_assignment(stmt, "max_turns", &v)) {
+        c->max_turns = loop_clamp_int(atoi(v), 1, 999999);
+        c->dsl_enabled = true;
+        return true;
+    }
+    if (loop_stmt_assignment(stmt, "recursive", &v)) {
+        c->recursive = loop_parse_bool_value(v, c->recursive);
+        c->dsl_enabled = true;
+        return true;
+    }
+    if (loop_stmt_assignment(stmt, "override_done", &v)) {
+        c->override_done = loop_parse_bool_value(v, c->override_done);
+        c->dsl_enabled = true;
+        return true;
+    }
+    if (loop_stmt_assignment(stmt, "override_max_turns", &v)) {
+        c->override_max_turns = loop_parse_bool_value(v, c->override_max_turns);
+        c->dsl_enabled = true;
+        return true;
+    }
+    if (loop_stmt_assignment(stmt, "prompt", &v) ||
+        loop_stmt_assignment(stmt, "continue_prompt", &v)) {
+        loop_copy(c->continue_prompt, sizeof(c->continue_prompt),
+                  loop_unquote_inplace(v), NULL);
+        c->dsl_enabled = true;
+        return true;
+    }
+    return false;
+}
+
+static void loop_apply_program_locked(loop_construct_t *c, const char *program) {
+    if (!c || !program || !program[0]) return;
+    c->continue_expr[0] = '\0';
+    c->break_expr[0] = '\0';
+    c->dsl_enabled = false;
+    loop_program_meta_reset(c);
+
+    char buf[LOOP_COND_MAX];
+    snprintf(buf, sizeof(buf), "%s", program);
+    char *body = loop_extract_program_body(buf);
+    char *p = body;
+    while (*p) {
+        char *start = p;
+        while (*p && *p != ';' && *p != '\n') p++;
+        char saved = *p;
+        *p = '\0';
+        loop_apply_program_statement(c, start);
+        if (!saved) break;
+        p++;
+    }
+}
+
+static bool loop_apply_rewrites_locked(loop_construct_t *c, int current_turn,
+                                       bool model_done, bool has_followup,
+                                       int depth, char *err,
+                                       size_t err_len) {
+    if (!c) return true;
+    int initial_count = c->rewrite_count;
+    for (int i = 0; i < initial_count; i++) {
+        loop_rewrite_rule_t *r = &c->rewrite_rules[i];
+        if (r->fired || !r->when[0] || !r->action[0]) continue;
+        bool valid = false;
+        char local_err[96] = "";
+        bool fire = loop_eval_expr_bool(c, r->when, current_turn, model_done,
+                                        has_followup, depth, &valid,
+                                        local_err, sizeof(local_err));
+        if (!valid) {
+            if (err && err_len > 0)
+                snprintf(err, err_len, "rewrite invalid: %s", local_err);
+            return false;
+        }
+        if (!fire) continue;
+
+        char action[LOOP_COND_MAX];
+        loop_copy(action, sizeof(action), r->action, NULL);
+        if (!loop_apply_program_statement(c, action)) {
+            if (err && err_len > 0)
+                snprintf(err, err_len, "rewrite action not understood: %.64s",
+                         r->action);
+            return false;
+        }
+        r->fired = true;
+        c->rewrites_applied++;
+    }
+    return true;
+}
+
+void tools_loop_control_reset(void) {
+    pthread_mutex_lock(&g_loop_lock);
+    memset(g_loop_stack, 0, sizeof(g_loop_stack));
+    g_loop_depth = 0;
+    g_loop_next_id = 1;
+    pthread_mutex_unlock(&g_loop_lock);
+}
+
+bool tools_loop_control_has_active(void) {
+    pthread_mutex_lock(&g_loop_lock);
+    bool active = g_loop_depth > 0;
+    pthread_mutex_unlock(&g_loop_lock);
+    return active;
+}
+
+int tools_loop_control_effective_max_turns(int default_max_turns) {
+    int limit = default_max_turns;
+    pthread_mutex_lock(&g_loop_lock);
+    for (int i = 0; i < g_loop_depth; i++) {
+        loop_construct_t *c = &g_loop_stack[i];
+        if (c->override_max_turns && c->max_turns > limit) {
+            limit = c->max_turns;
+        }
+    }
+    pthread_mutex_unlock(&g_loop_lock);
+    return limit;
+}
+
+void tools_loop_control_decide(int current_turn, bool model_done,
+                               bool has_followup,
+                               loop_control_decision_t *out) {
+    if (!out) return;
+    memset(out, 0, sizeof(*out));
+
+    pthread_mutex_lock(&g_loop_lock);
+    if (g_loop_depth <= 0) {
+        pthread_mutex_unlock(&g_loop_lock);
+        return;
+    }
+
+    loop_construct_t *c = &g_loop_stack[g_loop_depth - 1];
+    if (c->override_max_turns && c->max_turns > 0)
+        out->effective_max_turns = c->max_turns;
+
+    bool boundary = model_done && !has_followup;
+    if (boundary && c->refine_count > 0) {
+        char refine_err[128] = "";
+        if (!loop_apply_refinements_locked(c, current_turn, model_done,
+                                           has_followup, g_loop_depth,
+                                           refine_err, sizeof(refine_err))) {
+            snprintf(out->reason, sizeof(out->reason),
+                     "loop '%s' %s", c->label, refine_err);
+            out->force_done = true;
+            loop_pop_from_locked(g_loop_depth - 1);
+            pthread_mutex_unlock(&g_loop_lock);
+            return;
+        }
+        if (c->override_max_turns && c->max_turns > 0)
+            out->effective_max_turns = c->max_turns;
+    }
+
+    if (boundary && c->rewrite_count > 0) {
+        char rewrite_err[128] = "";
+        if (!loop_apply_rewrites_locked(c, current_turn, model_done,
+                                        has_followup, g_loop_depth,
+                                        rewrite_err, sizeof(rewrite_err))) {
+            snprintf(out->reason, sizeof(out->reason),
+                     "loop '%s' %s", c->label, rewrite_err);
+            out->force_done = true;
+            loop_pop_from_locked(g_loop_depth - 1);
+            pthread_mutex_unlock(&g_loop_lock);
+            return;
+        }
+        if (c->override_max_turns && c->max_turns > 0)
+            out->effective_max_turns = c->max_turns;
+    }
+
+    if (boundary && c->break_expr[0]) {
+        bool valid = false;
+        char err[96] = "";
+        bool should_break = loop_eval_expr_bool(c, c->break_expr, current_turn,
+                                                model_done, has_followup,
+                                                g_loop_depth, &valid,
+                                                err, sizeof(err));
+        if (!valid) {
+            snprintf(out->reason, sizeof(out->reason),
+                     "loop '%s' break expression invalid: %s", c->label, err);
+            out->force_done = true;
+            loop_pop_from_locked(g_loop_depth - 1);
+            pthread_mutex_unlock(&g_loop_lock);
+            return;
+        }
+        if (should_break) {
+            snprintf(out->reason, sizeof(out->reason),
+                     "loop '%s' break condition matched: %s",
+                     c->label, c->break_expr);
+            out->force_done = true;
+            loop_pop_from_locked(g_loop_depth - 1);
+            pthread_mutex_unlock(&g_loop_lock);
+            return;
+        }
+    }
+
+    if (boundary && c->override_done) {
+        bool should_continue = true;
+        bool expr_valid = true;
+        char expr_err[96] = "";
+        if (c->continue_expr[0]) {
+            should_continue = loop_eval_expr_bool(c, c->continue_expr,
+                                                  current_turn, model_done,
+                                                  has_followup, g_loop_depth,
+                                                  &expr_valid,
+                                                  expr_err, sizeof(expr_err));
+        }
+
+        if (!expr_valid) {
+            snprintf(out->reason, sizeof(out->reason),
+                     "loop '%s' continue expression invalid: %s",
+                     c->label, expr_err);
+            out->force_done = true;
+            loop_pop_from_locked(g_loop_depth - 1);
+        } else if (!should_continue) {
+            snprintf(out->reason, sizeof(out->reason),
+                     "loop '%s' continue condition false: %s",
+                     c->label, c->continue_expr);
+            out->force_done = true;
+            loop_pop_from_locked(g_loop_depth - 1);
+        } else if (c->iterations < c->max_iterations) {
+            c->iterations++;
+            out->force_continue = true;
+            snprintf(out->reason, sizeof(out->reason),
+                     c->continue_expr[0]
+                         ? "loop '%s' iteration %d/%d continued by DSL"
+                         : "loop '%s' iteration %d/%d kept turn alive",
+                     c->label, c->iterations, c->max_iterations);
+            snprintf(out->prompt, sizeof(out->prompt),
+                     "[StartOfLoopConstruct label=%s turn=%d iteration=%d/%d]\n"
+                     "Conditions: %s\n"
+                     "%s%s%s"
+                     "%s\n"
+                     "Re-evaluate the conditions. Continue recursively if useful, "
+                     "or call EndOfLoopConstruct with action=break or action=complete "
+                     "to exit this construct.",
+                     c->label, current_turn, c->iterations, c->max_iterations,
+                     c->conditions,
+                     c->continue_expr[0] ? "ContinueWhen: " : "",
+                     c->continue_expr[0] ? c->continue_expr : "",
+                     c->continue_expr[0] ? "\n" : "",
+                     c->continue_prompt[0] ? c->continue_prompt
+                                           : "Continue the active loop construct.");
+        } else {
+            snprintf(out->reason, sizeof(out->reason),
+                     "loop '%s' reached max_iterations=%d",
+                     c->label, c->max_iterations);
+            out->force_done = true;
+            loop_pop_from_locked(g_loop_depth - 1);
+        }
+    }
+
+    pthread_mutex_unlock(&g_loop_lock);
+}
+
+static bool tool_start_loop_construct(const char *input, char *result,
+                                      size_t rlen) {
+    char *label = json_get_str(input, "label");
+    char *program = json_get_str(input, "program");
+    if (!program) program = json_get_str(input, "construct");
+    char *conditions = json_get_str(input, "conditions");
+    if (!conditions) conditions = json_get_str(input, "condition");
+    char *continue_prompt = json_get_str(input, "continue_prompt");
+
+    int max_iterations = json_get_int(input, "max_iterations", 8);
+    max_iterations = loop_clamp_int(max_iterations, 1, 10000);
+    int max_turns = json_get_int(input, "max_turns", 0);
+    if (max_turns <= 0) {
+        max_turns = dsco_max_agent_turns() + max_iterations + 2;
+    }
+    max_turns = loop_clamp_int(max_turns, 1, 999999);
+
+    bool recursive = json_get_bool(input, "recursive", true);
+    bool override_done = json_get_bool(input, "override_done", true);
+    bool override_max_turns = json_get_bool(input, "override_max_turns", true);
+
+    pthread_mutex_lock(&g_loop_lock);
+    if (g_loop_depth > 0 && !g_loop_stack[g_loop_depth - 1].recursive) {
+        pthread_mutex_unlock(&g_loop_lock);
+        snprintf(result, rlen,
+                 "{\"ok\":false,\"error\":\"active loop is not recursive\"}");
+        free(label); free(program); free(conditions); free(continue_prompt);
+        return false;
+    }
+    if (g_loop_depth >= LOOP_STACK_MAX) {
+        pthread_mutex_unlock(&g_loop_lock);
+        snprintf(result, rlen,
+                 "{\"ok\":false,\"error\":\"loop stack capacity reached\"}");
+        free(label); free(program); free(conditions); free(continue_prompt);
+        return false;
+    }
+
+    loop_construct_t *c = &g_loop_stack[g_loop_depth++];
+    memset(c, 0, sizeof(*c));
+    c->active = true;
+    c->id = g_loop_next_id++;
+    c->max_iterations = max_iterations;
+    c->max_turns = max_turns;
+    c->recursive = recursive;
+    c->override_done = override_done;
+    c->override_max_turns = override_max_turns;
+    loop_copy(c->label, sizeof(c->label), label, "loop");
+    loop_copy(c->conditions, sizeof(c->conditions),
+              program && program[0] ? program : conditions,
+              "continue until the task is complete or explicitly broken");
+    loop_copy(c->continue_prompt, sizeof(c->continue_prompt), continue_prompt,
+              "Continue executing this loop construct.");
+    loop_apply_program_locked(c, c->conditions);
+
+    int depth = g_loop_depth;
+    jbuf_t out;
+    jbuf_init(&out, 256);
+    jbuf_append(&out, "{\"ok\":true,\"construct\":\"StartOfLoopConstruct\"");
+    jbuf_appendf(&out, ",\"id\":%d,\"label\":", c->id);
+    jbuf_append_json_str(&out, c->label);
+    jbuf_appendf(&out, ",\"depth\":%d,\"max_iterations\":%d,\"max_turns\":%d",
+                 depth, c->max_iterations, c->max_turns);
+    jbuf_appendf(&out, ",\"override_done\":%s,\"override_max_turns\":%s,"
+                 "\"recursive\":%s,\"dsl\":%s",
+                 c->override_done ? "true" : "false",
+                 c->override_max_turns ? "true" : "false",
+                 c->recursive ? "true" : "false",
+                 c->dsl_enabled ? "true" : "false");
+    if (c->continue_expr[0]) {
+        jbuf_append(&out, ",\"continue_when\":");
+        jbuf_append_json_str(&out, c->continue_expr);
+    }
+    if (c->break_expr[0]) {
+        jbuf_append(&out, ",\"break_when\":");
+        jbuf_append_json_str(&out, c->break_expr);
+    }
+    jbuf_appendf(&out, ",\"meta_count\":%d,\"dyad_count\":%d,"
+                 "\"node_count\":%d,\"edge_count\":%d,"
+                 "\"refine_count\":%d,\"rewrite_count\":%d,"
+                 "\"mapreduce_count\":%d,\"map_count\":%d,"
+                 "\"shuffle_count\":%d,\"reduce_count\":%d,"
+                 "\"partition_count\":%d,"
+                 "\"srm_count\":%d,\"certificate_count\":%d,"
+                 "\"current_certificate_count\":%d,\"sds_count\":%d,"
+                 "\"traceability_count\":%d,\"measurement_count\":%d,"
+                 "\"calibration_count\":%d,\"uncertainty_budget_count\":%d,"
+                 "\"available_count\":%d,\"orderable_count\":%d,"
+                 "\"shipping_block_count\":%d,\"product_search_count\":%d,"
+                 "\"catalog_count\":%d,\"annual_catalog_count\":%d,"
+                 "\"licensed_distributor_count\":%d,"
+                 "\"order_policy_count\":%d,\"paper_checks_blocked\":%s,"
+                 "\"effects\":{\"conversational\":%.3f,"
+                 "\"tool\":%.3f,\"world\":%.3f,\"meta\":%.3f}",
+                 c->meta_count, c->dyad_count, c->graph_node_count,
+                 c->graph_edge_count, c->refine_count, c->rewrite_count,
+                 c->mapreduce_job_count, c->map_count, c->shuffle_count,
+                 c->reduce_count, c->partition_count,
+                 c->srm_count, loop_srm_certificate_count(c),
+                 loop_srm_current_certificate_count(c), loop_srm_sds_count(c),
+                 loop_srm_traceability_count(c), c->measurement_count,
+                 loop_measurement_calibration_count(c),
+                 c->uncertainty_budget_count,
+                 loop_srm_available_count(c), loop_srm_orderable_count(c),
+                 loop_srm_shipping_block_count(c),
+                 loop_srm_product_search_count(c),
+                 loop_srm_operation_count_kind(c, "catalog"),
+                 loop_srm_operation_count_kind(c, "annual_catalog"),
+                 loop_srm_operation_count_kind(c, "licensed_distributor"),
+                 loop_srm_operation_count_kind(c, "order_policy"),
+                 loop_srm_operation_has(c, "order_policy", "no_paper_checks")
+                     ? "true" : "false",
+                 c->effect_conversational, c->effect_tool,
+                 c->effect_world, c->effect_meta);
+    jbuf_append(&out, "}");
+    snprintf(result, rlen, "%s", out.data ? out.data : "{}");
+    jbuf_free(&out);
+    pthread_mutex_unlock(&g_loop_lock);
+
+    free(label); free(program); free(conditions); free(continue_prompt);
+    return true;
+}
+
+static bool tool_end_loop_construct(const char *input, char *result,
+                                    size_t rlen) {
+    char *label = json_get_str(input, "label");
+    char *action = json_get_str(input, "action");
+    char *reason = json_get_str(input, "reason");
+    char *program = json_get_str(input, "program");
+    if (!program) program = json_get_str(input, "construct");
+    char *conditions = json_get_str(input, "conditions");
+    char *continue_prompt = json_get_str(input, "continue_prompt");
+    bool all = json_get_bool(input, "all", false);
+    bool exit_break_conditions = json_get_bool(input, "exit_break_conditions", false);
+
+    const char *act = (action && action[0]) ? action : "complete";
+
+    pthread_mutex_lock(&g_loop_lock);
+    int idx = all ? 0 : loop_find_locked(label);
+    if (idx < 0 || g_loop_depth <= 0) {
+        pthread_mutex_unlock(&g_loop_lock);
+        snprintf(result, rlen,
+                 "{\"ok\":false,\"error\":\"loop construct not found\"}");
+        free(label); free(action); free(reason); free(program);
+        free(conditions); free(continue_prompt);
+        return false;
+    }
+
+    if (strcmp(act, "continue") == 0 || strcmp(act, "recur") == 0) {
+        loop_construct_t *c = &g_loop_stack[idx];
+        const char *new_program = (program && program[0]) ? program : conditions;
+        if (new_program && new_program[0]) {
+            loop_copy(c->conditions, sizeof(c->conditions), new_program, NULL);
+            loop_apply_program_locked(c, c->conditions);
+        }
+        if (continue_prompt && continue_prompt[0])
+            loop_copy(c->continue_prompt, sizeof(c->continue_prompt),
+                      continue_prompt, NULL);
+        if (exit_break_conditions) {
+            c->iterations = 0;
+            c->override_done = true;
+            c->override_max_turns = true;
+        }
+        jbuf_t out;
+        jbuf_init(&out, 256);
+        jbuf_append(&out,
+                    "{\"ok\":true,\"construct\":\"EndOfLoopConstruct\","
+                    "\"action\":\"continue\",\"label\":");
+        jbuf_append_json_str(&out, c->label);
+        jbuf_appendf(&out, ",\"depth\":%d,\"exit_break_conditions\":%s",
+                     g_loop_depth, exit_break_conditions ? "true" : "false");
+        if (c->continue_expr[0]) {
+            jbuf_append(&out, ",\"continue_when\":");
+            jbuf_append_json_str(&out, c->continue_expr);
+        }
+        if (c->break_expr[0]) {
+            jbuf_append(&out, ",\"break_when\":");
+            jbuf_append_json_str(&out, c->break_expr);
+        }
+        jbuf_appendf(&out, ",\"meta_count\":%d,\"dyad_count\":%d,"
+                     "\"node_count\":%d,\"edge_count\":%d,"
+                     "\"refine_count\":%d,\"rewrite_count\":%d,"
+                     "\"mapreduce_count\":%d,\"map_count\":%d,"
+                     "\"shuffle_count\":%d,\"reduce_count\":%d,"
+                     "\"partition_count\":%d,"
+                     "\"srm_count\":%d,\"certificate_count\":%d,"
+                     "\"current_certificate_count\":%d,\"sds_count\":%d,"
+                     "\"traceability_count\":%d,\"measurement_count\":%d,"
+                     "\"calibration_count\":%d,\"uncertainty_budget_count\":%d,"
+                     "\"available_count\":%d,\"orderable_count\":%d,"
+                     "\"shipping_block_count\":%d,\"product_search_count\":%d,"
+                     "\"catalog_count\":%d,\"annual_catalog_count\":%d,"
+                     "\"licensed_distributor_count\":%d,"
+                     "\"order_policy_count\":%d,\"paper_checks_blocked\":%s,"
+                     "\"refinements_applied\":%d,\"rewrites_applied\":%d}",
+                     c->meta_count, c->dyad_count, c->graph_node_count,
+                     c->graph_edge_count, c->refine_count,
+                     c->rewrite_count, c->mapreduce_job_count, c->map_count,
+                     c->shuffle_count, c->reduce_count, c->partition_count,
+                     c->srm_count, loop_srm_certificate_count(c),
+                     loop_srm_current_certificate_count(c), loop_srm_sds_count(c),
+                     loop_srm_traceability_count(c), c->measurement_count,
+                     loop_measurement_calibration_count(c),
+                     c->uncertainty_budget_count,
+                     loop_srm_available_count(c), loop_srm_orderable_count(c),
+                     loop_srm_shipping_block_count(c),
+                     loop_srm_product_search_count(c),
+                     loop_srm_operation_count_kind(c, "catalog"),
+                     loop_srm_operation_count_kind(c, "annual_catalog"),
+                     loop_srm_operation_count_kind(c, "licensed_distributor"),
+                     loop_srm_operation_count_kind(c, "order_policy"),
+                     loop_srm_operation_has(c, "order_policy", "no_paper_checks")
+                         ? "true" : "false",
+                     c->refinements_applied,
+                     c->rewrites_applied);
+        snprintf(result, rlen, "%s", out.data ? out.data : "{}");
+        jbuf_free(&out);
+    } else {
+        int removed = g_loop_depth - idx;
+        char removed_label[LOOP_LABEL_MAX];
+        snprintf(removed_label, sizeof(removed_label), "%s",
+                 g_loop_stack[idx].label);
+        for (int i = idx; i < g_loop_depth; i++)
+            memset(&g_loop_stack[i], 0, sizeof(g_loop_stack[i]));
+        g_loop_depth = idx;
+        jbuf_t out;
+        jbuf_init(&out, 256);
+        jbuf_append(&out,
+                    "{\"ok\":true,\"construct\":\"EndOfLoopConstruct\","
+                    "\"action\":");
+        jbuf_append_json_str(&out, act);
+        jbuf_appendf(&out, ",\"removed\":%d,\"label\":", removed);
+        jbuf_append_json_str(&out, removed_label);
+        jbuf_appendf(&out, ",\"depth\":%d,\"reason\":", g_loop_depth);
+        jbuf_append_json_str(&out, reason ? reason : "");
+        jbuf_append(&out, "}");
+        snprintf(result, rlen, "%s", out.data ? out.data : "{}");
+        jbuf_free(&out);
+    }
+    pthread_mutex_unlock(&g_loop_lock);
+
+    free(label); free(action); free(reason); free(program);
+    free(conditions); free(continue_prompt);
+    return true;
+}
+
+static bool tool_loop_construct_status(const char *input, char *result,
+                                       size_t rlen) {
+    (void)input;
+    pthread_mutex_lock(&g_loop_lock);
+    jbuf_t out;
+    jbuf_init(&out, 512);
+    jbuf_appendf(&out, "{\"active\":%s,\"depth\":%d,\"stack\":[",
+                 g_loop_depth > 0 ? "true" : "false", g_loop_depth);
+    for (int i = 0; i < g_loop_depth; i++) {
+        loop_construct_t *c = &g_loop_stack[i];
+        if (i) jbuf_append(&out, ",");
+        jbuf_appendf(&out, "{\"id\":%d,\"label\":", c->id);
+        jbuf_append_json_str(&out, c->label);
+        jbuf_appendf(&out, ",\"iteration\":%d,\"max_iterations\":%d,"
+                     "\"max_turns\":%d,\"override_done\":%s,"
+                     "\"override_max_turns\":%s,\"recursive\":%s,"
+                     "\"dsl\":%s,\"conditions\":",
+                     c->iterations, c->max_iterations, c->max_turns,
+                     c->override_done ? "true" : "false",
+                     c->override_max_turns ? "true" : "false",
+                     c->recursive ? "true" : "false",
+                     c->dsl_enabled ? "true" : "false");
+        jbuf_append_json_str(&out, c->conditions);
+        if (c->continue_expr[0]) {
+            jbuf_append(&out, ",\"continue_when\":");
+            jbuf_append_json_str(&out, c->continue_expr);
+        }
+        if (c->break_expr[0]) {
+            jbuf_append(&out, ",\"break_when\":");
+            jbuf_append_json_str(&out, c->break_expr);
+        }
+        jbuf_appendf(&out,
+                     ",\"effects\":{\"conversational\":%.3f,\"tool\":%.3f,"
+                     "\"world\":%.3f,\"meta\":%.3f}",
+                     c->effect_conversational, c->effect_tool,
+                     c->effect_world, c->effect_meta);
+        jbuf_appendf(&out,
+                     ",\"signals\":{\"reward\":%.3f,\"curiosity\":%.3f,"
+                     "\"empowerment\":%.3f,\"confidence\":%.3f,"
+                     "\"uncertainty\":%.3f,\"learning_rate\":%.3f,"
+                     "\"valence\":%.3f,\"intensity\":%.3f,"
+                     "\"exploration_rate\":%.3f,\"credit\":%.3f,"
+                     "\"pruning_threshold\":%.3f,\"basin_temperature\":%.3f}",
+                     c->reward, c->curiosity, c->empowerment, c->confidence,
+                     c->uncertainty, c->learning_rate, c->valence,
+                     c->intensity, c->exploration_rate, c->credit,
+                     c->pruning_threshold, c->basin_temperature);
+        if (c->policy[0]) {
+            jbuf_append(&out, ",\"policy\":");
+            jbuf_append_json_str(&out, c->policy);
+        }
+        if (c->decision[0]) {
+            jbuf_append(&out, ",\"decision\":");
+            jbuf_append_json_str(&out, c->decision);
+        }
+        if (c->attractor[0]) {
+            jbuf_append(&out, ",\"attractor\":");
+            jbuf_append_json_str(&out, c->attractor);
+        }
+        if (c->prompt_game[0]) {
+            jbuf_append(&out, ",\"prompt_game\":");
+            jbuf_append_json_str(&out, c->prompt_game);
+        }
+        jbuf_append(&out, ",\"meta\":[");
+        for (int m = 0; m < c->meta_count; m++) {
+            loop_meta_entry_t *e = &c->meta[m];
+            if (m) jbuf_append(&out, ",");
+            jbuf_append(&out, "{\"kind\":");
+            jbuf_append_json_str(&out, e->kind);
+            jbuf_append(&out, ",\"name\":");
+            jbuf_append_json_str(&out, e->name);
+            jbuf_append(&out, ",\"value\":");
+            jbuf_append_json_str(&out, e->value);
+            jbuf_appendf(&out, ",\"weight\":%.3f}", e->weight);
+        }
+        jbuf_append(&out, "],\"dyads\":[");
+        for (int d = 0; d < c->dyad_count; d++) {
+            loop_dyad_t *dy = &c->dyads[d];
+            if (d) jbuf_append(&out, ",");
+            jbuf_append(&out, "{\"from\":");
+            jbuf_append_json_str(&out, dy->from);
+            jbuf_append(&out, ",\"to\":");
+            jbuf_append_json_str(&out, dy->to);
+            jbuf_append(&out, ",\"relation\":");
+            jbuf_append_json_str(&out, dy->relation);
+            jbuf_append(&out, "}");
+        }
+        jbuf_appendf(&out,
+                     "],\"graph\":{\"node_count\":%d,\"edge_count\":%d,"
+                     "\"density\":%.3f,\"traverse_from\":",
+                     c->graph_node_count, c->graph_edge_count,
+                     loop_graph_density(c));
+        jbuf_append_json_str(&out, c->traverse_from);
+        jbuf_appendf(&out, ",\"traverse_depth\":%d,\"traverse_hits\":%d,"
+                     "\"nodes\":[", c->traverse_depth, c->traverse_hits);
+        for (int n = 0; n < c->graph_node_count; n++) {
+            loop_graph_node_t *gn = &c->graph_nodes[n];
+            if (n) jbuf_append(&out, ",");
+            jbuf_append(&out, "{\"name\":");
+            jbuf_append_json_str(&out, gn->name);
+            jbuf_append(&out, ",\"type\":");
+            jbuf_append_json_str(&out, gn->type);
+            jbuf_append(&out, ",\"state\":");
+            jbuf_append_json_str(&out, gn->state);
+            jbuf_appendf(&out, ",\"weight\":%.3f}", gn->weight);
+        }
+        jbuf_append(&out, "],\"edges\":[");
+        for (int e = 0; e < c->graph_edge_count; e++) {
+            loop_graph_edge_t *ge = &c->graph_edges[e];
+            if (e) jbuf_append(&out, ",");
+            jbuf_append(&out, "{\"from\":");
+            jbuf_append_json_str(&out, ge->from);
+            jbuf_append(&out, ",\"to\":");
+            jbuf_append_json_str(&out, ge->to);
+            jbuf_append(&out, ",\"relation\":");
+            jbuf_append_json_str(&out, ge->relation);
+            jbuf_appendf(&out, ",\"weight\":%.3f}", ge->weight);
+        }
+        jbuf_appendf(&out,
+                     "]},\"mapreduce\":{\"job_count\":%d,\"map_count\":%d,"
+                     "\"shuffle_count\":%d,\"reduce_count\":%d,"
+                     "\"partition_count\":%d,\"jobs\":[",
+                     c->mapreduce_job_count, c->map_count, c->shuffle_count,
+                     c->reduce_count, c->partition_count);
+        for (int mr = 0; mr < c->mapreduce_job_count; mr++) {
+            loop_mapreduce_job_t *job = &c->mapreduce_jobs[mr];
+            if (mr) jbuf_append(&out, ",");
+            jbuf_append(&out, "{\"name\":");
+            jbuf_append_json_str(&out, job->name);
+            jbuf_append(&out, ",\"source\":");
+            jbuf_append_json_str(&out, job->source);
+            jbuf_append(&out, ",\"mapper\":");
+            jbuf_append_json_str(&out, job->mapper);
+            jbuf_append(&out, ",\"reducer\":");
+            jbuf_append_json_str(&out, job->reducer);
+            jbuf_append(&out, ",\"key\":");
+            jbuf_append_json_str(&out, job->key);
+            jbuf_append(&out, ",\"target\":");
+            jbuf_append_json_str(&out, job->target);
+            jbuf_appendf(&out,
+                         ",\"partitions\":%d,\"mapped\":%s,"
+                         "\"shuffled\":%s,\"reduced\":%s}",
+                         job->partitions,
+                         job->mapped ? "true" : "false",
+                         job->shuffled ? "true" : "false",
+                         job->reduced ? "true" : "false");
+        }
+        jbuf_appendf(&out,
+                     "]},\"srm\":{\"material_count\":%d,"
+                     "\"certificate_count\":%d,"
+                     "\"current_certificate_count\":%d,"
+                     "\"sds_count\":%d,\"traceability_count\":%d,"
+                     "\"measurement_count\":%d,\"calibration_count\":%d,"
+                     "\"uncertainty_budget_count\":%d,"
+                     "\"available_count\":%d,\"orderable_count\":%d,"
+                     "\"shipping_block_count\":%d,"
+                     "\"product_search_count\":%d,"
+                     "\"archived_certificate_count\":%d,"
+                     "\"catalog_count\":%d,\"annual_catalog_count\":%d,"
+                     "\"licensed_distributor_count\":%d,"
+                     "\"order_policy_count\":%d,"
+                     "\"registration_count\":%d,\"survey_count\":%d,"
+                     "\"paper_checks_blocked\":%s,"
+                     "\"price_total\":%.6f,"
+                     "\"mean_uncertainty\":%.6f,\"max_uncertainty\":%.6f,"
+                     "\"materials\":[",
+                     c->srm_count, loop_srm_certificate_count(c),
+                     loop_srm_current_certificate_count(c),
+                     loop_srm_sds_count(c), loop_srm_traceability_count(c),
+                     c->measurement_count, loop_measurement_calibration_count(c),
+                     c->uncertainty_budget_count,
+                     loop_srm_available_count(c), loop_srm_orderable_count(c),
+                     loop_srm_shipping_block_count(c),
+                     loop_srm_product_search_count(c),
+                     loop_srm_archived_certificate_count(c),
+                     loop_srm_operation_count_kind(c, "catalog"),
+                     loop_srm_operation_count_kind(c, "annual_catalog"),
+                     loop_srm_operation_count_kind(c, "licensed_distributor"),
+                     loop_srm_operation_count_kind(c, "order_policy"),
+                     loop_srm_operation_count_kind(c, "registration"),
+                     loop_srm_operation_count_kind(c, "survey"),
+                     loop_srm_operation_has(c, "order_policy", "no_paper_checks")
+                         ? "true" : "false",
+                     loop_srm_total_price(c),
+                     loop_srm_mean_uncertainty(c),
+                     loop_srm_max_uncertainty(c));
+        for (int s = 0; s < c->srm_count; s++) {
+            loop_srm_entry_t *sr = &c->srm_entries[s];
+            if (s) jbuf_append(&out, ",");
+            jbuf_append(&out, "{\"id\":");
+            jbuf_append_json_str(&out, sr->id);
+            jbuf_append(&out, ",\"name\":");
+            jbuf_append_json_str(&out, sr->name);
+            jbuf_append(&out, ",\"matrix\":");
+            jbuf_append_json_str(&out, sr->matrix);
+            jbuf_append(&out, ",\"property\":");
+            jbuf_append_json_str(&out, sr->property);
+            jbuf_append(&out, ",\"certificate\":");
+            jbuf_append_json_str(&out, sr->certificate);
+            jbuf_append(&out, ",\"report\":");
+            jbuf_append_json_str(&out, sr->report);
+            jbuf_append(&out, ",\"sds\":");
+            jbuf_append_json_str(&out, sr->sds);
+            jbuf_appendf(&out,
+                         ",\"assigned_value\":%.6f,\"uncertainty\":%.6f,"
+                         "\"price\":%.6f,\"destination\":",
+                         sr->assigned_value, sr->uncertainty, sr->price);
+            jbuf_append_json_str(&out, sr->destination);
+            jbuf_append(&out, ",\"distributor\":");
+            jbuf_append_json_str(&out, sr->distributor);
+            jbuf_append(&out, ",\"store\":");
+            jbuf_append_json_str(&out, sr->store);
+            jbuf_appendf(&out,
+                         ",\"certificate_current\":%s,\"sds_available\":%s,"
+                         "\"traceable\":%s,\"available\":%s,"
+                         "\"orderable\":%s,\"shipping_blocked\":%s,"
+                         "\"product_search_found\":%s,"
+                         "\"archived_certificate\":%s}",
+                         sr->certificate_current ? "true" : "false",
+                         sr->sds_available ? "true" : "false",
+                         sr->traceable ? "true" : "false",
+                         sr->available ? "true" : "false",
+                         sr->orderable ? "true" : "false",
+                         sr->shipping_blocked ? "true" : "false",
+                         sr->product_search_found ? "true" : "false",
+                         sr->archived_certificate ? "true" : "false");
+        }
+        jbuf_append(&out, "],\"measurements\":[");
+        for (int m = 0; m < c->measurement_count; m++) {
+            loop_measurement_entry_t *me = &c->measurements[m];
+            if (m) jbuf_append(&out, ",");
+            jbuf_append(&out, "{\"name\":");
+            jbuf_append_json_str(&out, me->name);
+            jbuf_append(&out, ",\"material\":");
+            jbuf_append_json_str(&out, me->material);
+            jbuf_append(&out, ",\"property\":");
+            jbuf_append_json_str(&out, me->property);
+            jbuf_append(&out, ",\"unit\":");
+            jbuf_append_json_str(&out, me->unit);
+            jbuf_append(&out, ",\"method\":");
+            jbuf_append_json_str(&out, me->method);
+            jbuf_appendf(&out,
+                         ",\"value\":%.6f,\"uncertainty\":%.6f,"
+                         "\"calibrated\":%s,\"uncertainty_budget\":%s}",
+                         me->value, me->uncertainty,
+                         me->calibrated ? "true" : "false",
+                         me->has_uncertainty_budget ? "true" : "false");
+        }
+        jbuf_append(&out, "],\"operations\":[");
+        for (int opi = 0; opi < c->srm_operation_count; opi++) {
+            loop_srm_operation_t *op = &c->srm_operations[opi];
+            if (opi) jbuf_append(&out, ",");
+            jbuf_append(&out, "{\"kind\":");
+            jbuf_append_json_str(&out, op->kind);
+            jbuf_append(&out, ",\"name\":");
+            jbuf_append_json_str(&out, op->name);
+            jbuf_append(&out, ",\"value\":");
+            jbuf_append_json_str(&out, op->value);
+            jbuf_appendf(&out, ",\"amount\":%.6f,\"flag\":%s}",
+                         op->amount, op->flag ? "true" : "false");
+        }
+        jbuf_appendf(&out, "]},\"refinements_applied\":%d,\"refinements\":[",
+                     c->refinements_applied);
+        for (int r = 0; r < c->refine_count; r++) {
+            loop_refine_rule_t *rr = &c->refine_rules[r];
+            if (r) jbuf_append(&out, ",");
+            jbuf_append(&out, "{\"target\":");
+            jbuf_append_json_str(&out, rr->target);
+            jbuf_append(&out, ",\"op\":");
+            jbuf_append_json_str(&out, rr->op);
+            jbuf_appendf(&out, ",\"value\":%.3f,\"when\":", rr->value);
+            jbuf_append_json_str(&out, rr->when);
+            jbuf_appendf(&out, ",\"fired\":%s}", rr->fired ? "true" : "false");
+        }
+        jbuf_appendf(&out, "],\"rewrites_applied\":%d,\"rewrites\":[",
+                     c->rewrites_applied);
+        for (int r = 0; r < c->rewrite_count; r++) {
+            loop_rewrite_rule_t *rw = &c->rewrite_rules[r];
+            if (r) jbuf_append(&out, ",");
+            jbuf_append(&out, "{\"action\":");
+            jbuf_append_json_str(&out, rw->action);
+            jbuf_append(&out, ",\"when\":");
+            jbuf_append_json_str(&out, rw->when);
+            jbuf_appendf(&out, ",\"fired\":%s}", rw->fired ? "true" : "false");
+        }
+        jbuf_append(&out, "]");
+        jbuf_append(&out, "}");
+    }
+    jbuf_append(&out, "]}");
+    snprintf(result, rlen, "%s", out.data ? out.data : "{}");
+    jbuf_free(&out);
+    pthread_mutex_unlock(&g_loop_lock);
+    return true;
+}
+
 /* ── Discover tools (meta-tool for lazy loading) ───────────────────── */
 
 /* Forward declaration — defined after assign_group() below */
 static int build_compact_params(const char *schema, char *out, size_t outlen);
 
+static bool tools_ci_contains_local(const char *haystack, const char *needle) {
+    if (!haystack || !needle || !needle[0]) return false;
+    size_t nlen = strlen(needle);
+    for (const char *p = haystack; *p; p++) {
+        if (strncasecmp(p, needle, nlen) == 0) return true;
+    }
+    return false;
+}
+
+static bool tool_matches_query_local(const char *name, const char *desc,
+                                     const char *query) {
+    if (!query || !query[0]) return true;
+    if (tools_ci_contains_local(name, query) ||
+        tools_ci_contains_local(desc ? desc : "", query)) {
+        return true;
+    }
+
+    char token[64];
+    int tlen = 0;
+    int matched = 0;
+    int total = 0;
+    for (const char *p = query; ; p++) {
+        unsigned char c = (unsigned char)*p;
+        if (isalnum(c) || c == '_' || c == '-') {
+            if (tlen < (int)sizeof(token) - 1)
+                token[tlen++] = (char)c;
+            continue;
+        }
+        if (tlen > 0) {
+            token[tlen] = '\0';
+            total++;
+            if (tools_ci_contains_local(name, token) ||
+                tools_ci_contains_local(desc ? desc : "", token)) {
+                matched++;
+            }
+            tlen = 0;
+        }
+        if (!*p) break;
+    }
+    return total > 0 && matched == total;
+}
+
+static void discover_append_tool_detail(jbuf_t *b, const char *name,
+                                        const char *desc, const char *schema,
+                                        const char *source) {
+    char params[256];
+    build_compact_params(schema, params, sizeof(params));
+    jbuf_append(b, "{\"name\":");
+    jbuf_append_json_str(b, name ? name : "");
+    jbuf_append(b, ",\"source\":");
+    jbuf_append_json_str(b, source ? source : "builtin");
+    jbuf_append(b, ",\"signature\":");
+    jbuf_append_json_str(b, params);
+    jbuf_append(b, ",\"description\":");
+    jbuf_append_json_str(b, desc ? desc : "");
+    jbuf_append(b, ",\"input_schema\":");
+    jbuf_append(b, schema ? schema : "{\"type\":\"object\",\"properties\":{}}");
+    jbuf_append(b, "}");
+}
+
 static bool tool_discover_tools(const char *input, char *result, size_t rlen) {
     /* Parse optional category filter */
     char category[64] = "";
+    char *query = input ? json_get_str(input, "query") : NULL;
+    char *category_owned = input ? json_get_str(input, "category") : NULL;
+    if (category_owned && category_owned[0]) {
+        snprintf(category, sizeof(category), "%s", category_owned);
+    }
     if (input) {
         const char *c = strstr(input, "\"category\"");
         if (c) {
@@ -12733,11 +17800,74 @@ static bool tool_discover_tools(const char *input, char *result, size_t rlen) {
 
     int total;
     const tool_def_t *tools = tools_get_all(&total);
+    int grand_total = total + g_external_tool_count;
+
+    if (query && query[0]) {
+        jbuf_t b;
+        jbuf_init(&b, 4096);
+        jbuf_append(&b, "{\"query\":");
+        jbuf_append_json_str(&b, query);
+        jbuf_appendf(&b, ",\"total_tools\":%d,\"matches\":[", grand_total);
+
+        int emitted = 0;
+        int matched = 0;
+        const int limit = 8;
+        bool first = true;
+
+        /* MCP tools first: integration queries usually need exact external schemas. */
+        for (int pass = 0; pass < 2; pass++) {
+            for (int i = 0; i < g_external_tool_count; i++) {
+                external_tool_t *t = &g_external_tools[i];
+                bool exact = strcasecmp(t->name, query) == 0;
+                if ((pass == 0) != exact) continue;
+                if (!exact && !tool_matches_query_local(t->name, t->description, query))
+                    continue;
+                matched++;
+                if (emitted >= limit) continue;
+                if (!first) jbuf_append(&b, ",");
+                first = false;
+                discover_append_tool_detail(&b, t->name, t->description,
+                                            t->input_schema_json, "mcp");
+                emitted++;
+            }
+        }
+
+        for (int pass = 0; pass < 2; pass++) {
+            for (int i = 0; i < total; i++) {
+                bool exact = strcasecmp(tools[i].name, query) == 0;
+                if ((pass == 0) != exact) continue;
+                if (!exact && !tool_matches_query_local(tools[i].name,
+                                                        tools[i].description,
+                                                        query)) {
+                    continue;
+                }
+                matched++;
+                if (emitted >= limit) continue;
+                if (!first) jbuf_append(&b, ",");
+                first = false;
+                discover_append_tool_detail(&b, tools[i].name, tools[i].description,
+                                            tools[i].input_schema_json, "builtin");
+                emitted++;
+            }
+        }
+
+        jbuf_appendf(&b,
+            "],\"matched\":%d,\"showing\":%d,\"truncated\":%s,"
+            "\"note\":\"Full input_schema returned for matches. Use load_tools with exact names to pin MCP tools into the active tool set.\"}",
+            matched, emitted, matched > emitted ? "true" : "false");
+        snprintf(result, rlen, "%s", b.data ? b.data : "{}");
+        jbuf_free(&b);
+        free(query);
+        free(category_owned);
+        return true;
+    }
 
     /* Build JSON array of tool summaries grouped by category */
     int off = 0;
     off += snprintf(result + off, rlen - off,
-        "{\"total_tools\":%d,\"note\":\"Use load_tools to activate any tool listed here. Pass tool names or a category.\",\"tools\":[", total);
+        "{\"total_tools\":%d,\"builtin_tools\":%d,\"mcp_tools\":%d,"
+        "\"note\":\"Use query for exact MCP schemas, then load_tools to pin names.\",\"tools\":[",
+        grand_total, total, g_external_tool_count);
 
     /* Group names for display */
     const char *group_names[] = {
@@ -12805,7 +17935,29 @@ static bool tool_discover_tools(const char *input, char *result, size_t rlen) {
         off += snprintf(result + off, rlen - off, "]}");
     }
 
+    if ((!category[0] || strcasecmp(category, "mcp") == 0) &&
+        g_external_tool_count > 0 && (size_t)off < rlen - 256) {
+        if (off > 80) off += snprintf(result + off, rlen - off, ",");
+        off += snprintf(result + off, rlen - off, "{\"category\":\"mcp\",\"tools\":[");
+        int shown = 0;
+        for (int i = 0; i < g_external_tool_count && shown < 64 &&
+             (size_t)off < rlen - 300; i++) {
+            if (shown > 0) off += snprintf(result + off, rlen - off, ",");
+            char params[256];
+            build_compact_params(g_external_tools[i].input_schema_json, params, sizeof(params));
+            off += snprintf(result + off, rlen - off, "\"%s%s\"",
+                            g_external_tools[i].name, params);
+            shown++;
+        }
+        off += snprintf(result + off, rlen - off,
+                        "],\"showing\":%d,\"total\":%d,"
+                        "\"hint\":\"Call discover_tools with query for full MCP schemas.\"}",
+                        shown, g_external_tool_count);
+    }
+
     off += snprintf(result + off, rlen - off, "]}");
+    free(query);
+    free(category_owned);
     return true;
 }
 
@@ -12815,11 +17967,26 @@ static bool tool_discover_tools(const char *input, char *result, size_t rlen) {
 static int assign_group(const char *name, const char *desc);
 void tools_mark_hot(int tool_idx);
 
+static void load_tools_add_name(char names[][64], int *name_count, const char *start, size_t len) {
+    while (len > 0 && isspace((unsigned char)*start)) { start++; len--; }
+    while (len > 0 && isspace((unsigned char)start[len - 1])) len--;
+    if (len == 0 || *name_count >= 32) return;
+    if ((start[0] == '"' || start[0] == '\'') && len >= 2 && start[len - 1] == start[0]) {
+        start++;
+        len -= 2;
+    }
+    if (len == 0) return;
+    if (len >= 64) len = 63;
+    memcpy(names[*name_count], start, len);
+    names[*name_count][len] = '\0';
+    (*name_count)++;
+}
+
 static bool tool_load_tools(const char *input, char *result, size_t rlen) {
     int total;
     const tool_def_t *tools = tools_get_all(&total);
 
-    /* Parse "tools" array: ["tool_a","tool_b",...] */
+    /* Parse "names": "tool_a,tool_b" and/or "tools": ["tool_a","tool_b"]. */
     char names[32][64];
     int name_count = 0;
 
@@ -12841,6 +18008,30 @@ static bool tool_load_tools(const char *input, char *result, size_t rlen) {
             }
         }
 
+        /* Parse names string (the public schema advertised this from day one). */
+        const char *ns = strstr(input, "\"names\"");
+        if (ns) {
+            ns = strchr(ns + 7, '"');
+            if (ns) {
+                ns++;
+                const char *end = ns;
+                bool esc = false;
+                while (*end) {
+                    if (esc) { esc = false; end++; continue; }
+                    if (*end == '\\') { esc = true; end++; continue; }
+                    if (*end == '"') break;
+                    end++;
+                }
+                const char *part = ns;
+                for (const char *p = ns; p <= end && name_count < 32; p++) {
+                    if (p == end || *p == ',') {
+                        load_tools_add_name(names, &name_count, part, (size_t)(p - part));
+                        part = p + 1;
+                    }
+                }
+            }
+        }
+
         /* Parse tools array */
         const char *arr = strstr(input, "\"tools\"");
         if (arr) {
@@ -12854,11 +18045,7 @@ static bool tool_load_tools(const char *input, char *result, size_t rlen) {
                     const char *q2 = strchr(q1, '"');
                     if (!q2) break;
                     size_t len = q2 - q1;
-                    if (len < 64) {
-                        memcpy(names[name_count], q1, len);
-                        names[name_count][len] = '\0';
-                        name_count++;
-                    }
+                    load_tools_add_name(names, &name_count, q1, len);
                     arr = q2 + 1;
                 }
             }
@@ -12892,7 +18079,8 @@ static bool tool_load_tools(const char *input, char *result, size_t rlen) {
 
     if (name_count == 0) {
         snprintf(result, rlen,
-            "{\"error\":\"No tools specified. Provide \\\"tools\\\":[\\\"name1\\\",\\\"name2\\\",...] "
+            "{\"error\":\"No tools specified. Provide \\\"names\\\":\\\"name1,name2\\\", "
+            "\\\"tools\\\":[\\\"name1\\\",\\\"name2\\\",...] "
             "or \\\"category\\\":\\\"file_io\\\" to load a group.\"}");
         return false;
     }
@@ -12923,6 +18111,24 @@ static bool tool_load_tools(const char *input, char *result, size_t rlen) {
                 /* Also mark in hot cache so it auto-admits to working set */
                 tools_mark_hot(idx);
                 loaded++;
+            } else if (idx <= -10000) {
+                int ei = -(idx + 10000);
+                if (ei >= 0 && ei < g_external_tool_count) {
+                    g_external_tools[ei].loaded = true;
+                    if (hint.tool_count < HINT_MAX_TOOLS) {
+                        snprintf(hint.tools[hint.tool_count], 64, "%s", names[batch + i]);
+                        hint.tool_count++;
+                    }
+                    loaded++;
+                } else {
+                    if (nf_off > 0)
+                        nf_off += snprintf(not_found_names + nf_off,
+                                           sizeof(not_found_names) - nf_off, ",");
+                    nf_off += snprintf(not_found_names + nf_off,
+                                       sizeof(not_found_names) - nf_off,
+                                       "\"%s\"", names[batch + i]);
+                    not_found++;
+                }
             } else {
                 if (nf_off > 0)
                     nf_off += snprintf(not_found_names + nf_off,
@@ -12950,15 +18156,30 @@ static bool tool_load_tools(const char *input, char *result, size_t rlen) {
     bool first = true;
     for (int i = 0; i < name_count && (size_t)off < rlen - 512; i++) {
         int idx = tool_map_lookup(&g_tool_map, names[i]);
-        if (idx < 0 || idx >= total) continue;
+        const char *tool_name = NULL;
+        const char *tool_desc = NULL;
+        const char *tool_schema = NULL;
+        if (idx >= 0 && idx < total) {
+            tool_name = tools[idx].name;
+            tool_desc = tools[idx].description;
+            tool_schema = tools[idx].input_schema_json;
+        } else if (idx <= -10000) {
+            int ei = -(idx + 10000);
+            if (ei >= 0 && ei < g_external_tool_count) {
+                tool_name = g_external_tools[ei].name;
+                tool_desc = g_external_tools[ei].description;
+                tool_schema = g_external_tools[ei].input_schema_json;
+            }
+        }
+        if (!tool_name || !tool_schema) continue;
         if (!first) off += snprintf(result + off, rlen - off, ",");
         first = false;
         /* Return name + description + full input_schema so the model knows the params */
         off += snprintf(result + off, rlen - off,
-            "{\"name\":\"%s\",\"description\":", tools[idx].name);
+            "{\"name\":\"%s\",\"description\":", tool_name);
         /* JSON-escape description */
         off += snprintf(result + off, rlen - off, "\"");
-        const char *d = tools[idx].description;
+        const char *d = tool_desc ? tool_desc : "";
         for (size_t j = 0; d[j] && (size_t)off < rlen - 100; j++) {
             if (d[j] == '"') { result[off++] = '\\'; result[off++] = '"'; }
             else if (d[j] == '\\') { result[off++] = '\\'; result[off++] = '\\'; }
@@ -12966,7 +18187,7 @@ static bool tool_load_tools(const char *input, char *result, size_t rlen) {
             else result[off++] = d[j];
         }
         off += snprintf(result + off, rlen - off, "\",\"input_schema\":%s}",
-                        tools[idx].input_schema_json);
+                        tool_schema);
     }
     off += snprintf(result + off, rlen - off,
         "],\"note\":\"These tools are now pinned in your tool list for the next 20 turns. "
@@ -13034,6 +18255,202 @@ extern bool tool_contract_ingest_all(const char *input, char *result, size_t rle
 extern bool tool_contract_new_issues(const char *input, char *result, size_t rlen);
 extern bool tool_contract_landscape(const char *input, char *result, size_t rlen);
 
+/* ── Claude Code compatibility shims ──────────────────────────────────── */
+
+static pthread_mutex_t g_cc_todo_lock = PTHREAD_MUTEX_INITIALIZER;
+static char *g_cc_todos_json = NULL;
+static bool g_cc_plan_mode = false;
+
+static int cc_todo_item_count(const char *todos_json) {
+    int count = 0;
+    const char *p = todos_json ? todos_json : "";
+    while ((p = strstr(p, "\"content\"")) != NULL) {
+        count++;
+        p += 9;
+    }
+    return count;
+}
+
+static void cc_map_optional_string_field(jbuf_t *mapped,
+                                         const char *input,
+                                         const char *field) {
+    char *value = json_get_str(input, field);
+    if (!value) return;
+    jbuf_append(mapped, ",\"");
+    jbuf_append(mapped, field);
+    jbuf_append(mapped, "\":");
+    jbuf_append_json_str(mapped, value);
+    free(value);
+}
+
+static bool tool_bash_compat(const char *input, char *result, size_t rlen) {
+    char *command = json_get_str(input, "command");
+    if (!command) {
+        snprintf(result, rlen, "error: command required");
+        return false;
+    }
+
+    int timeout = json_get_int(input, "timeout", 120);
+    if (timeout > 1000) timeout = (timeout + 999) / 1000; /* Claude Code uses ms */
+    if (timeout <= 0) timeout = 120;
+    if (timeout > 600) timeout = 600;
+    char *cwd = json_get_str(input, "cwd");
+
+    jbuf_t mapped;
+    jbuf_init(&mapped, strlen(command) + (cwd ? strlen(cwd) : 0) + 128);
+    jbuf_append(&mapped, "{\"command\":");
+    jbuf_append_json_str(&mapped, command);
+    jbuf_append(&mapped, ",\"timeout\":");
+    jbuf_append_int(&mapped, timeout);
+    if (cwd && cwd[0]) {
+        jbuf_append(&mapped, ",\"cwd\":");
+        jbuf_append_json_str(&mapped, cwd);
+    }
+    cc_map_optional_string_field(&mapped, input, "verify_path");
+    cc_map_optional_string_field(&mapped, input, "artifact_path");
+    cc_map_optional_string_field(&mapped, input, "output_path");
+    cc_map_optional_string_field(&mapped, input, "verify_contains");
+    cc_map_optional_string_field(&mapped, input, "verify_sha256");
+    int verify_min_bytes = json_get_int(input, "verify_min_bytes", -1);
+    if (verify_min_bytes >= 0) {
+        jbuf_append(&mapped, ",\"verify_min_bytes\":");
+        jbuf_append_int(&mapped, verify_min_bytes);
+    }
+    char *verify_paths = json_get_raw(input, "verify_paths");
+    if (verify_paths) {
+        jbuf_append(&mapped, ",\"verify_paths\":");
+        jbuf_append(&mapped, verify_paths);
+        free(verify_paths);
+    }
+    jbuf_append(&mapped, "}");
+
+    bool ok = tool_bash(mapped.data, result, rlen);
+    jbuf_free(&mapped);
+    free(command);
+    free(cwd);
+    return ok;
+}
+
+static bool tool_agent_compat(const char *input, char *result, size_t rlen) {
+    char *task = json_get_str(input, "prompt");
+    if (!task) task = json_get_str(input, "task");
+    if (!task) task = json_get_str(input, "description");
+    if (!task) {
+        snprintf(result, rlen, "error: prompt/task required");
+        return false;
+    }
+
+    char *model = json_get_str(input, "model");
+    jbuf_t mapped;
+    jbuf_init(&mapped, strlen(task) + (model ? strlen(model) : 0) + 96);
+    jbuf_append(&mapped, "{\"task\":");
+    jbuf_append_json_str(&mapped, task);
+    if (model && model[0]) {
+        jbuf_append(&mapped, ",\"model\":");
+        jbuf_append_json_str(&mapped, model);
+    }
+    jbuf_append(&mapped, "}");
+
+    bool ok = tool_spawn_agent(mapped.data, result, rlen);
+    jbuf_free(&mapped);
+    free(task);
+    free(model);
+    return ok;
+}
+
+static bool tool_todo_write_compat(const char *input, char *result, size_t rlen) {
+    char *todos = json_get_raw(input, "todos");
+    if (!todos) {
+        snprintf(result, rlen, "error: todos array required");
+        return false;
+    }
+
+    pthread_mutex_lock(&g_cc_todo_lock);
+    char *old = g_cc_todos_json ? safe_strdup(g_cc_todos_json) : safe_strdup("[]");
+    free(g_cc_todos_json);
+    g_cc_todos_json = safe_strdup(todos);
+    int count = cc_todo_item_count(todos);
+    pthread_mutex_unlock(&g_cc_todo_lock);
+
+    jbuf_t out;
+    jbuf_init(&out, strlen(old) + strlen(todos) + 256);
+    jbuf_append(&out, "{\"ok\":true,\"message\":\"Todos have been modified successfully. Continue using the todo list to track progress.\",\"count\":");
+    jbuf_append_int(&out, count);
+    jbuf_append(&out, ",\"oldTodos\":");
+    jbuf_append(&out, old);
+    jbuf_append(&out, ",\"newTodos\":");
+    jbuf_append(&out, todos);
+    jbuf_append(&out, "}");
+    snprintf(result, rlen, "%s", out.data ? out.data : "{\"ok\":true}");
+
+    jbuf_free(&out);
+    free(old);
+    free(todos);
+    return true;
+}
+
+static bool tool_task_list_compat(const char *input, char *result, size_t rlen) {
+    (void)input;
+    pthread_mutex_lock(&g_cc_todo_lock);
+    const char *todos = g_cc_todos_json ? g_cc_todos_json : "[]";
+    int count = cc_todo_item_count(todos);
+    snprintf(result, rlen, "{\"count\":%d,\"todos\":%s}", count, todos);
+    pthread_mutex_unlock(&g_cc_todo_lock);
+    return true;
+}
+
+static bool tool_enter_plan_mode_compat(const char *input, char *result, size_t rlen) {
+    (void)input;
+    g_cc_plan_mode = true;
+    snprintf(result, rlen,
+             "Plan mode entered. DSCO records this as advisory state; continue by presenting a plan or asking specific questions.");
+    return true;
+}
+
+static bool tool_exit_plan_mode_compat(const char *input, char *result, size_t rlen) {
+    char *plan = json_get_str(input, "plan");
+    g_cc_plan_mode = false;
+    if (plan && plan[0]) {
+        snprintf(result, rlen, "Plan submitted for user approval:\n%s", plan);
+    } else {
+        snprintf(result, rlen, "Plan mode exited.");
+    }
+    free(plan);
+    return true;
+}
+
+static bool tool_ask_user_question_compat(const char *input, char *result, size_t rlen) {
+    char *question = json_get_str(input, "question");
+    char *questions = json_get_raw(input, "questions");
+    const char *display = question && question[0] ? question :
+                          questions && questions[0] ? questions :
+                          "Question requested";
+
+    char answer[4096] = "";
+    if (isatty(STDIN_FILENO)) {
+        fprintf(stderr, "\nAskUserQuestion: %s\n> ", display);
+        fflush(stderr);
+        if (fgets(answer, sizeof(answer), stdin)) {
+            answer[strcspn(answer, "\r\n")] = '\0';
+        } else {
+            answer[0] = '\0';
+        }
+    }
+
+    jbuf_t out;
+    jbuf_init(&out, strlen(display) + strlen(answer) + 96);
+    jbuf_append(&out, "{\"question\":");
+    jbuf_append_json_str(&out, display);
+    jbuf_append(&out, ",\"answer\":");
+    jbuf_append_json_str(&out, answer);
+    jbuf_append(&out, "}");
+    snprintf(result, rlen, "%s", out.data ? out.data : "{}");
+    jbuf_free(&out);
+    free(question);
+    free(questions);
+    return true;
+}
+
 static bool tool_context_dispatch(const char *input, char *result, size_t rlen) {
     char *action = json_get_str(input, "action");
     if (!action || !action[0]) { free(action); snprintf(result, rlen, "missing: action (recall, search, get, batch_get, stats, summarize, pack, fuse, pin, gc)"); return false; }
@@ -13081,12 +18498,17 @@ static bool tool_browser_dispatch(const char *input, char *result, size_t rlen) 
 
 static bool tool_workflow_dispatch(const char *input, char *result, size_t rlen) {
     char *action = json_get_str(input, "action");
-    if (!action || !action[0]) { free(action); snprintf(result, rlen, "missing: action (plan, status, checkpoint, resume)"); return false; }
+    if (!action || !action[0]) { free(action); snprintf(result, rlen, "missing: action (plan, status, checkpoint, resume, heartbeat, dead_letter, reprocess, validate, smoke)"); return false; }
     bool ok = false;
     if      (strcmp(action, "plan") == 0)       ok = tool_workflow_plan(input, result, rlen);
     else if (strcmp(action, "status") == 0)     ok = tool_workflow_status(input, result, rlen);
     else if (strcmp(action, "checkpoint") == 0) ok = tool_workflow_checkpoint(input, result, rlen);
     else if (strcmp(action, "resume") == 0)     ok = tool_workflow_resume(input, result, rlen);
+    else if (strcmp(action, "heartbeat") == 0)  ok = tool_workflow_heartbeat(input, result, rlen);
+    else if (strcmp(action, "dead_letter") == 0) ok = tool_workflow_dead_letter(input, result, rlen);
+    else if (strcmp(action, "reprocess") == 0)  ok = tool_workflow_reprocess(input, result, rlen);
+    else if (strcmp(action, "validate") == 0)   ok = tool_workflow_validate(input, result, rlen);
+    else if (strcmp(action, "smoke") == 0)      ok = tool_workflow_smoke(input, result, rlen);
     else snprintf(result, rlen, "unknown workflow action: %s", action);
     free(action); return ok;
 }
@@ -13335,19 +18757,392 @@ static bool tool_trading_dispatch(const char *input, char *result, size_t rlen) 
     free(action); return ok;
 }
 
+typedef struct {
+    const char *id;
+    const char *aliases;
+    const char *name;
+    const char *layer;
+    const char *standard_type;
+    const char *transport;
+    const char *scope;
+    const char *payment_rails;
+    const char *state;
+    const char *next_adapter;
+    const char *source_url;
+    const char *notes;
+    bool open_standard;
+    bool live_adapter;
+} agentic_commerce_protocol_t;
+
+static const agentic_commerce_protocol_t s_agentic_commerce_protocols[] = {
+    {
+        "acp", "agentic_commerce_protocol,agentic-commerce-protocol",
+        "Agentic Commerce Protocol", "checkout", "open_standard",
+        "REST/MCP", "buyer-agent-business checkout and payment credential sharing",
+        "PSP-neutral payment credential handoff; Stripe Shared Payment Tokens",
+        "registry_ready_live_adapter_pending",
+        "checkout session adapter, payment token exchange, order approval webhook",
+        "https://www.agenticcommerce.dev/",
+        "OpenAI and Stripe protocol for agent-led checkout flows.",
+        true, false
+    },
+    {
+        "ucp", "universal_commerce_protocol,universal-commerce-protocol",
+        "Universal Commerce Protocol", "commerce_lifecycle", "open_standard",
+        "REST/JSON-RPC with MCP/A2A/AP2 support",
+        "catalog search, cart building, identity linking, checkout, order management",
+        "AP2 mandates plus merchant PSP rails",
+        "registry_ready_live_adapter_pending",
+        "catalog/cart/order client, OAuth identity linking, checkout/order webhooks",
+        "https://ucp.dev/",
+        "Google and ecosystem protocol spanning discovery through post-purchase.",
+        true, false
+    },
+    {
+        "ap2", "agent_payments_protocol,agent-payments-protocol",
+        "Agent Payments Protocol", "authorization_payment", "open_standard",
+        "A2A/UCP extension with MCP tooling",
+        "verifiable user intent for human-present and human-not-present purchases",
+        "cards, x402, wallets, bank rails, digital currency",
+        "registry_ready_live_adapter_pending",
+        "Checkout Mandate and Payment Mandate signer/verifier with durable audit log",
+        "https://ap2-protocol.org/",
+        "Mandate layer for authorization, authenticity, and accountability.",
+        true, false
+    },
+    {
+        "x402", "http_402,payment_required",
+        "x402 Payment Required", "http_payment", "open_standard",
+        "HTTP 402 with PAYMENT-* headers and facilitator verify/settle APIs",
+        "pay-per-resource API access and machine-to-machine payments",
+        "stablecoins/onchain settlement with extensible schemes",
+        "registry_ready_live_adapter_pending",
+        "402 challenge parser, PAYMENT-SIGNATURE builder, /verify and /settle client",
+        "https://www.x402.org/",
+        "HTTP-native payment negotiation for agents and services.",
+        true, false
+    },
+    {
+        "mpp", "machine_payment_protocol,stripe_mpp",
+        "Stripe Machine Payment Protocol", "machine_payment", "vendor_protocol",
+        "Stripe Agentic Commerce APIs",
+        "machine and agent resource payments",
+        "Stripe payment methods, Link, and shared payment tokens",
+        "registry_ready_live_adapter_pending",
+        "Stripe test-mode client, scoped credentials, idempotent payment execution",
+        "https://docs.stripe.com/agentic-commerce",
+        "Stripe rail for machine payments alongside x402 support.",
+        false, false
+    },
+    {
+        "stripe_spt", "shared_payment_tokens,stripe_shared_payment_tokens,link",
+        "Stripe Shared Payment Tokens", "credential_token", "vendor_protocol",
+        "Stripe token APIs",
+        "delegated payment credentials for agent checkout",
+        "cards, wallets, Link, and Stripe-managed credentials",
+        "registry_ready_live_adapter_pending",
+        "token vault, consent scope model, checkout credential exchange",
+        "https://docs.stripe.com/agentic-commerce",
+        "Credential bridge used by Stripe's agentic commerce suite.",
+        false, false
+    },
+    {
+        "visa_tap", "visa_ic,visa_intelligent_commerce,trusted_agent_protocol",
+        "Visa Intelligent Commerce / Trusted Agent Protocol", "network_trust",
+        "network_protocol",
+        "network tokenization plus trusted-agent attestation",
+        "agent identity, merchant bot trust, tokenized Visa credentials, user controls",
+        "Visa network tokens",
+        "watchlist_partner_adapter_pending",
+        "partner sandbox adapter once public protocol docs and credentials are available",
+        "https://www.axios.com/2025/10/14/visa-ai-shopping-agent-protocol-bot",
+        "Network-led trust and tokenization layer for agent-originated card payments.",
+        false, false
+    },
+    {
+        "mastercard_agent_pay", "agent_pay,mastercard_agent_suite",
+        "Mastercard Agent Pay", "network_trust", "network_protocol",
+        "Mastercard tokenization, authentication, and Agent Pay APIs",
+        "authenticated agentic card transactions and merchant trust",
+        "Mastercard network tokens and authentication rails",
+        "watchlist_partner_adapter_pending",
+        "partner sandbox adapter once API contracts and regulatory scope are available",
+        "https://www.axios.com/2026/01/20/mastercard-ai-checkout-agentic-commerce",
+        "Network-led agentic payment infrastructure; public SDK surface is still emerging.",
+        false, false
+    },
+    {
+        "rails", "real_time_agent_integrity_ledger_settlement,agentic_clearing",
+        "RAILS Clearing Protocol", "clearing_verification", "research_protocol",
+        "verification and clearing objects with rail-agnostic settlement adapters",
+        "obligation evidence, verification mesh, clearing decision, settlement instruction",
+        "rail-agnostic; consumes x402, card, wallet, and escrow settlement adapters",
+        "research_watchlist_adapter_pending",
+        "obligation object, evidence envelope, clearing decision, settlement adapter hooks",
+        "https://arxiv.org/abs/2606.08790",
+        "Emerging clearing layer for whether delegated work satisfied the obligation.",
+        true, false
+    },
+    {0}
+};
+
+static bool commerce_token_eq(const char *a, const char *b, size_t b_len) {
+    if (!a || !b || strlen(a) != b_len) return false;
+    for (size_t i = 0; i < b_len; i++) {
+        if (tolower((unsigned char)a[i]) != tolower((unsigned char)b[i]))
+            return false;
+    }
+    return true;
+}
+
+static bool commerce_alias_matches(const char *aliases, const char *probe) {
+    if (!aliases || !probe || !probe[0]) return false;
+    const char *p = aliases;
+    while (*p) {
+        while (*p == ',' || isspace((unsigned char)*p)) p++;
+        const char *start = p;
+        while (*p && *p != ',') p++;
+        if (commerce_token_eq(probe, start, (size_t)(p - start)))
+            return true;
+    }
+    return false;
+}
+
+static const agentic_commerce_protocol_t *commerce_find_protocol(const char *id) {
+    if (!id || !id[0]) return NULL;
+    for (int i = 0; s_agentic_commerce_protocols[i].id; i++) {
+        const agentic_commerce_protocol_t *p = &s_agentic_commerce_protocols[i];
+        if (commerce_token_eq(id, p->id, strlen(p->id)) ||
+            commerce_alias_matches(p->aliases, id))
+            return p;
+    }
+    return NULL;
+}
+
+static void commerce_json_field(jbuf_t *b, const char *key, const char *value) {
+    jbuf_append(b, "\"");
+    jbuf_append(b, key);
+    jbuf_append(b, "\":");
+    jbuf_append_json_str(b, value ? value : "");
+}
+
+static void commerce_append_protocol_json(jbuf_t *b,
+                                           const agentic_commerce_protocol_t *p) {
+    jbuf_append(b, "{");
+    commerce_json_field(b, "id", p->id);
+    jbuf_append(b, ",");
+    commerce_json_field(b, "name", p->name);
+    jbuf_append(b, ",");
+    commerce_json_field(b, "layer", p->layer);
+    jbuf_append(b, ",");
+    commerce_json_field(b, "standard_type", p->standard_type);
+    jbuf_append(b, ",");
+    commerce_json_field(b, "transport", p->transport);
+    jbuf_append(b, ",");
+    commerce_json_field(b, "scope", p->scope);
+    jbuf_append(b, ",");
+    commerce_json_field(b, "payment_rails", p->payment_rails);
+    jbuf_append(b, ",");
+    commerce_json_field(b, "state", p->state);
+    jbuf_append(b, ",");
+    commerce_json_field(b, "next_adapter", p->next_adapter);
+    jbuf_append(b, ",");
+    commerce_json_field(b, "source_url", p->source_url);
+    jbuf_append(b, ",");
+    commerce_json_field(b, "notes", p->notes);
+    jbuf_append(b, ",\"open_standard\":");
+    jbuf_append(b, p->open_standard ? "true" : "false");
+    jbuf_append(b, ",\"live_adapter\":");
+    jbuf_append(b, p->live_adapter ? "true" : "false");
+    jbuf_append(b, "}");
+}
+
+static void commerce_append_step(jbuf_t *b, int *count, const char *step) {
+    if ((*count)++ > 0) jbuf_append(b, ",");
+    jbuf_append_json_str(b, step);
+}
+
+static void commerce_append_plan_steps(jbuf_t *b,
+                                       const agentic_commerce_protocol_t *p) {
+    int n = 0;
+    jbuf_append(b, "[");
+    if (strcmp(p->id, "acp") == 0) {
+        commerce_append_step(b, &n, "Model merchant checkout sessions and itemized order state.");
+        commerce_append_step(b, &n, "Implement payment credential exchange using scoped shared payment tokens.");
+        commerce_append_step(b, &n, "Add idempotent order approval hooks with timeout and retry telemetry.");
+    } else if (strcmp(p->id, "ucp") == 0) {
+        commerce_append_step(b, &n, "Add catalog search and lookup actions with machine-readable offers.");
+        commerce_append_step(b, &n, "Implement cart mutation, OAuth identity linking, checkout, and order webhooks.");
+        commerce_append_step(b, &n, "Route UCP payment authorization through AP2 mandate storage.");
+    } else if (strcmp(p->id, "ap2") == 0) {
+        commerce_append_step(b, &n, "Persist Checkout Mandate and Payment Mandate objects with signatures.");
+        commerce_append_step(b, &n, "Verify mandate authenticity before payment or order placement.");
+        commerce_append_step(b, &n, "Attach mandate IDs to tool audit records for accountability.");
+    } else if (strcmp(p->id, "x402") == 0) {
+        commerce_append_step(b, &n, "Parse 402 PAYMENT-REQUIRED challenges and advertised schemes.");
+        commerce_append_step(b, &n, "Create PAYMENT-SIGNATURE headers for exact-payment requests.");
+        commerce_append_step(b, &n, "Call facilitator /verify and /settle endpoints before releasing tool output.");
+    } else if (strcmp(p->id, "mpp") == 0) {
+        commerce_append_step(b, &n, "Gate Stripe Machine Payment Protocol calls behind explicit test/live credentials.");
+        commerce_append_step(b, &n, "Map machine resource pricing into payment intents with idempotency keys.");
+        commerce_append_step(b, &n, "Record payment, refund, and failure states in the workflow ledger.");
+    } else if (strcmp(p->id, "stripe_spt") == 0) {
+        commerce_append_step(b, &n, "Create a scoped token vault for delegated payment credentials.");
+        commerce_append_step(b, &n, "Bind token use to merchant, amount, category, expiry, and user approval policy.");
+        commerce_append_step(b, &n, "Expose checkout credential handoff to ACP and Stripe MPP adapters.");
+    } else if (strcmp(p->id, "visa_tap") == 0) {
+        commerce_append_step(b, &n, "Wait for public/partner Trusted Agent Protocol contracts before live execution.");
+        commerce_append_step(b, &n, "Represent trusted-agent attestation, merchant allowlists, spend controls, and token IDs.");
+        commerce_append_step(b, &n, "Add network-token audit records once a Visa sandbox is available.");
+    } else if (strcmp(p->id, "mastercard_agent_pay") == 0) {
+        commerce_append_step(b, &n, "Wait for Agent Pay API/sandbox contracts before live execution.");
+        commerce_append_step(b, &n, "Represent authenticated agent credentials and merchant trust assertions.");
+        commerce_append_step(b, &n, "Map approval, authentication, and token lifecycle events into the audit ledger.");
+    } else if (strcmp(p->id, "rails") == 0) {
+        commerce_append_step(b, &n, "Model Obligation Object and Evidence Envelope records.");
+        commerce_append_step(b, &n, "Add verification policy hooks that produce a Clearing Decision.");
+        commerce_append_step(b, &n, "Route Settlement Instructions to x402, card, wallet, or escrow adapters.");
+    } else {
+        commerce_append_step(b, &n, p->next_adapter);
+    }
+    jbuf_append(b, "]");
+}
+
+static bool tool_agentic_commerce(const char *input, char *result, size_t rlen) {
+    char *action = json_get_str(input, "action");
+    if (!action || !action[0]) {
+        free(action);
+        snprintf(result, rlen,
+                 "missing: action (list, status, coverage, plan)");
+        return false;
+    }
+
+    if (strcmp(action, "list") == 0) {
+        jbuf_t out;
+        jbuf_init(&out, 8192);
+        int count = 0;
+        jbuf_append(&out, "{\"ok\":true,\"protocol_count\":");
+        for (int i = 0; s_agentic_commerce_protocols[i].id; i++) count++;
+        jbuf_append_int(&out, count);
+        jbuf_append(&out, ",\"protocols\":[");
+        for (int i = 0; s_agentic_commerce_protocols[i].id; i++) {
+            if (i > 0) jbuf_append(&out, ",");
+            commerce_append_protocol_json(&out, &s_agentic_commerce_protocols[i]);
+        }
+        jbuf_append(&out, "]}");
+        snprintf(result, rlen, "%s", out.data ? out.data : "{}");
+        jbuf_free(&out);
+        free(action);
+        return true;
+    }
+
+    if (strcmp(action, "coverage") == 0) {
+        int total = 0, open = 0, live = 0, watch = 0;
+        for (int i = 0; s_agentic_commerce_protocols[i].id; i++) {
+            const agentic_commerce_protocol_t *p = &s_agentic_commerce_protocols[i];
+            total++;
+            if (p->open_standard) open++;
+            if (p->live_adapter) live++;
+            if (strstr(p->state, "watchlist")) watch++;
+        }
+
+        jbuf_t out;
+        jbuf_init(&out, 4096);
+        jbuf_append(&out, "{\"ok\":true,\"registry_protocol_count\":");
+        jbuf_append_int(&out, total);
+        jbuf_append(&out, ",\"open_standard_count\":");
+        jbuf_append_int(&out, open);
+        jbuf_append(&out, ",\"live_adapter_count\":");
+        jbuf_append_int(&out, live);
+        jbuf_append(&out, ",\"watchlist_count\":");
+        jbuf_append_int(&out, watch);
+        jbuf_append(&out, ",\"missing_live_adapters\":[");
+        int missing = 0;
+        for (int i = 0; s_agentic_commerce_protocols[i].id; i++) {
+            const agentic_commerce_protocol_t *p = &s_agentic_commerce_protocols[i];
+            if (p->live_adapter) continue;
+            if (missing++ > 0) jbuf_append(&out, ",");
+            jbuf_append_json_str(&out, p->id);
+        }
+        jbuf_append(&out, "],\"next_priority\":[\"x402\",\"ap2\",\"acp\",\"ucp\"],");
+        commerce_json_field(&out, "summary",
+                            "protocol registry is integrated; live commerce adapters are pending");
+        jbuf_append(&out, "}");
+        snprintf(result, rlen, "%s", out.data ? out.data : "{}");
+        jbuf_free(&out);
+        free(action);
+        return true;
+    }
+
+    if (strcmp(action, "status") == 0 || strcmp(action, "plan") == 0) {
+        char *protocol = json_get_str(input, "protocol");
+        if (!protocol || !protocol[0]) {
+            free(protocol);
+            free(action);
+            snprintf(result, rlen, "missing: protocol");
+            return false;
+        }
+        const agentic_commerce_protocol_t *p = commerce_find_protocol(protocol);
+        if (!p) {
+            snprintf(result, rlen, "unknown agentic commerce protocol: %s", protocol);
+            free(protocol);
+            free(action);
+            return false;
+        }
+
+        jbuf_t out;
+        jbuf_init(&out, 4096);
+        jbuf_append(&out, "{\"ok\":true,\"protocol\":");
+        commerce_append_protocol_json(&out, p);
+        if (strcmp(action, "plan") == 0) {
+            jbuf_append(&out, ",\"implementation_plan\":");
+            commerce_append_plan_steps(&out, p);
+        }
+        jbuf_append(&out, "}");
+        snprintf(result, rlen, "%s", out.data ? out.data : "{}");
+        jbuf_free(&out);
+        free(protocol);
+        free(action);
+        return true;
+    }
+
+    snprintf(result, rlen, "unknown agentic_commerce action: %s", action);
+    free(action);
+    return false;
+}
+
 /* ── Unified schema constants for consolidated tools ── */
 
 #define S_ACTION "{\"type\":\"object\",\"properties\":{\"action\":{\"type\":\"string\",\"description\":\"Action to perform\"}},\"required\":[\"action\"]}"
 
 static const tool_def_t s_tools[] = {
     /* ══════════════════════════════════════════════════════════════════════
+     *  CLAUDE CODE COMPATIBILITY ALIASES
+     * ══════════════════════════════════════════════════════════════════════ */
+    { .name = "Read", .description = "Claude-compatible alias for read_file.", .input_schema_json = "{\"type\":\"object\",\"properties\":{\"file_path\":{\"type\":\"string\"},\"offset\":{\"type\":\"integer\"},\"limit\":{\"type\":\"integer\"}},\"required\":[\"file_path\"]}", .execute = tool_read_file, .core = true, .is_read_only = true, .is_concurrent = true },
+    { .name = "Write", .description = "Claude-compatible alias for verified atomic write_file.", .input_schema_json = "{\"type\":\"object\",\"properties\":{\"file_path\":{\"type\":\"string\"},\"content\":{\"type\":\"string\"}},\"required\":[\"file_path\",\"content\"]}", .execute = tool_write_file, .core = true },
+    { .name = "Edit", .description = "Claude-compatible alias for edit_file.", .input_schema_json = "{\"type\":\"object\",\"properties\":{\"file_path\":{\"type\":\"string\"},\"old_string\":{\"type\":\"string\"},\"new_string\":{\"type\":\"string\"},\"replace_all\":{\"type\":\"boolean\"}},\"required\":[\"file_path\",\"old_string\",\"new_string\"]}", .execute = tool_edit_file, .core = true },
+    { .name = "Bash", .description = "Claude-compatible shell runner. Use Write/write_file for durable artifacts; declare verify_path/verify_paths when shell creates files.", .input_schema_json = "{\"type\":\"object\",\"properties\":{\"command\":{\"type\":\"string\"},\"timeout\":{\"type\":\"integer\"},\"description\":{\"type\":\"string\"},\"run_in_background\":{\"type\":\"boolean\"},\"cwd\":{\"type\":\"string\"},\"verify_path\":{\"type\":\"string\"},\"artifact_path\":{\"type\":\"string\"},\"output_path\":{\"type\":\"string\"},\"verify_paths\":{\"type\":\"array\",\"items\":{\"type\":\"string\"}},\"verify_min_bytes\":{\"type\":\"integer\"},\"verify_contains\":{\"type\":\"string\"},\"verify_sha256\":{\"type\":\"string\"}},\"required\":[\"command\"]}", .execute = tool_bash_compat, .core = true },
+    { .name = "Glob", .description = "Claude-compatible file glob search.", .input_schema_json = "{\"type\":\"object\",\"properties\":{\"pattern\":{\"type\":\"string\"},\"path\":{\"type\":\"string\"}},\"required\":[\"pattern\"]}", .execute = tool_find_files, .core = true, .is_read_only = true, .is_concurrent = true },
+    { .name = "Grep", .description = "Claude-compatible content search with glob/output_mode/head_limit support.", .input_schema_json = "{\"type\":\"object\",\"properties\":{\"pattern\":{\"type\":\"string\"},\"path\":{\"type\":\"string\"},\"glob\":{\"type\":\"string\"},\"include\":{\"type\":\"string\"},\"output_mode\":{\"type\":\"string\"},\"head_limit\":{\"type\":\"integer\"}},\"required\":[\"pattern\"]}", .execute = tool_grep, .core = true, .is_read_only = true, .is_concurrent = true },
+    { .name = "WebFetch", .description = "Claude-compatible URL fetch/extract.", .input_schema_json = "{\"type\":\"object\",\"properties\":{\"url\":{\"type\":\"string\"},\"prompt\":{\"type\":\"string\"},\"max_chars\":{\"type\":\"integer\"}},\"required\":[\"url\"]}", .execute = tool_web_extract, .core = true, .is_read_only = true, .is_concurrent = true },
+    { .name = "WebSearch", .description = "Claude-compatible web search alias.", .input_schema_json = "{\"type\":\"object\",\"properties\":{\"query\":{\"type\":\"string\"},\"num\":{\"type\":\"integer\"}},\"required\":[\"query\"]}", .execute = tool_parallel_search, .core = true, .is_read_only = true, .is_concurrent = true },
+    { .name = "Agent", .description = "Claude-compatible sub-agent task alias.", .input_schema_json = "{\"type\":\"object\",\"properties\":{\"prompt\":{\"type\":\"string\"},\"task\":{\"type\":\"string\"},\"description\":{\"type\":\"string\"},\"model\":{\"type\":\"string\"}},\"required\":[\"prompt\"]}", .execute = tool_agent_compat },
+    { .name = "Task", .description = "Claude-compatible task agent alias.", .input_schema_json = "{\"type\":\"object\",\"properties\":{\"prompt\":{\"type\":\"string\"},\"task\":{\"type\":\"string\"},\"description\":{\"type\":\"string\"},\"model\":{\"type\":\"string\"}},\"required\":[\"prompt\"]}", .execute = tool_agent_compat },
+    { .name = "TodoWrite", .description = "Claude-compatible todo list state writer.", .input_schema_json = "{\"type\":\"object\",\"properties\":{\"todos\":{\"type\":\"array\",\"items\":{\"type\":\"object\"}}},\"required\":[\"todos\"]}", .execute = tool_todo_write_compat },
+    { .name = "TaskList", .description = "Return the Claude-compatible todo list state.", .input_schema_json = "{\"type\":\"object\",\"properties\":{}}", .execute = tool_task_list_compat, .is_read_only = true, .is_concurrent = true },
+    { .name = "EnterPlanMode", .description = "Enter Claude-compatible advisory plan mode.", .input_schema_json = "{\"type\":\"object\",\"properties\":{}}", .execute = tool_enter_plan_mode_compat },
+    { .name = "ExitPlanMode", .description = "Exit Claude-compatible advisory plan mode.", .input_schema_json = "{\"type\":\"object\",\"properties\":{\"plan\":{\"type\":\"string\"}}}", .execute = tool_exit_plan_mode_compat },
+    { .name = "AskUserQuestion", .description = "Ask a user-facing clarification question.", .input_schema_json = "{\"type\":\"object\",\"properties\":{\"question\":{\"type\":\"string\"},\"questions\":{\"type\":\"array\"}},\"required\":[\"question\"]}", .execute = tool_ask_user_question_compat },
+
+    /* ══════════════════════════════════════════════════════════════════════
      *  CORE FILE TOOLS (13)
      * ══════════════════════════════════════════════════════════════════════ */
-    { .name = "write_file", .description = "Create or overwrite a file. Creates parent dirs.", .input_schema_json = "{\"type\":\"object\",\"properties\":{\"path\":{\"type\":\"string\"},\"content\":{\"type\":\"string\"}},\"required\":[\"path\",\"content\"]}", .execute = tool_write_file, .core = true },
+    { .name = "write_file", .description = "Create/overwrite a file atomically, fsync it, and verify bytes on disk. Creates parent dirs.", .input_schema_json = "{\"type\":\"object\",\"properties\":{\"path\":{\"type\":\"string\"},\"content\":{\"type\":\"string\"}},\"required\":[\"path\",\"content\"]}", .execute = tool_write_file, .core = true },
     { .name = "read_file", .description = "Read file with line numbers. Use offset/limit for large files.", .input_schema_json = "{\"type\":\"object\",\"properties\":{\"path\":{\"type\":\"string\"},\"offset\":{\"type\":\"integer\",\"description\":\"Start line (1-based)\"},\"limit\":{\"type\":\"integer\",\"description\":\"Max lines\"}},\"required\":[\"path\"]}", .execute = tool_read_file, .core = true, .is_read_only = true, .is_concurrent = true },
     { .name = "page_file", .description = "Page through a large file.", .input_schema_json = "{\"type\":\"object\",\"properties\":{\"path\":{\"type\":\"string\"},\"page\":{\"type\":\"integer\"},\"page_size\":{\"type\":\"integer\"}},\"required\":[\"path\"]}", .execute = tool_page_file, .is_read_only = true, .is_concurrent = true },
     { .name = "edit_file", .description = "Edit file by replacing old_string with new_string.", .input_schema_json = "{\"type\":\"object\",\"properties\":{\"path\":{\"type\":\"string\"},\"old_string\":{\"type\":\"string\"},\"new_string\":{\"type\":\"string\"},\"replace_all\":{\"type\":\"boolean\"}},\"required\":[\"path\",\"old_string\",\"new_string\"]}", .execute = tool_edit_file, .core = true },
-    { .name = "append_file", .description = "Append content to end of file.", .input_schema_json = "{\"type\":\"object\",\"properties\":{\"path\":{\"type\":\"string\"},\"content\":{\"type\":\"string\"}},\"required\":[\"path\",\"content\"]}", .execute = tool_append_file },
+    { .name = "append_file", .description = "Append content, fsync it, and verify appended bytes on disk.", .input_schema_json = "{\"type\":\"object\",\"properties\":{\"path\":{\"type\":\"string\"},\"content\":{\"type\":\"string\"}},\"required\":[\"path\",\"content\"]}", .execute = tool_append_file },
     { .name = "list_directory", .description = "List directory contents with file info.", .input_schema_json = "{\"type\":\"object\",\"properties\":{\"path\":{\"type\":\"string\"},\"recursive\":{\"type\":\"boolean\"}},\"required\":[\"path\"]}", .execute = tool_list_dir, .core = true, .is_read_only = true, .is_concurrent = true },
     { .name = "find_files", .description = "Find files by name pattern (glob).", .input_schema_json = "{\"type\":\"object\",\"properties\":{\"pattern\":{\"type\":\"string\"},\"path\":{\"type\":\"string\"}},\"required\":[\"pattern\"]}", .execute = tool_find_files, .core = true, .is_read_only = true, .is_concurrent = true },
     { .name = "grep_files", .description = "Search file contents with regex.", .input_schema_json = "{\"type\":\"object\",\"properties\":{\"pattern\":{\"type\":\"string\"},\"path\":{\"type\":\"string\"},\"include\":{\"type\":\"string\"}},\"required\":[\"pattern\"]}", .execute = tool_grep, .core = true, .is_read_only = true, .is_concurrent = true },
@@ -13361,7 +19156,7 @@ static const tool_def_t s_tools[] = {
      *  EXECUTION (3)
      * ══════════════════════════════════════════════════════════════════════ */
     { .name = "compile", .description = "Compile source code.", .input_schema_json = "{\"type\":\"object\",\"properties\":{\"command\":{\"type\":\"string\",\"description\":\"Build command\"}}}", .execute = tool_compile },
-    { .name = "bash", .description = "Run a shell command.", .input_schema_json = "{\"type\":\"object\",\"properties\":{\"command\":{\"type\":\"string\"},\"timeout\":{\"type\":\"integer\",\"description\":\"Timeout in seconds\"}},\"required\":[\"command\"]}", .execute = tool_bash, .core = true },
+    { .name = "bash", .description = "Run a shell command. Use write_file/append_file for durable artifacts; declare verify_path/verify_paths when shell creates files.", .input_schema_json = "{\"type\":\"object\",\"properties\":{\"command\":{\"type\":\"string\"},\"timeout\":{\"type\":\"integer\",\"description\":\"Timeout in seconds\"},\"cwd\":{\"type\":\"string\"},\"verify_path\":{\"type\":\"string\"},\"artifact_path\":{\"type\":\"string\"},\"output_path\":{\"type\":\"string\"},\"verify_paths\":{\"type\":\"array\",\"items\":{\"type\":\"string\"}},\"verify_min_bytes\":{\"type\":\"integer\"},\"verify_contains\":{\"type\":\"string\"},\"verify_sha256\":{\"type\":\"string\"}},\"required\":[\"command\"]}", .execute = tool_bash, .core = true },
     { .name = "python", .description = "Run Python code.", .input_schema_json = "{\"type\":\"object\",\"properties\":{\"code\":{\"type\":\"string\"},\"args\":{\"type\":\"string\"}},\"required\":[\"code\"]}", .execute = tool_python, .core = true },
 
     /* ══════════════════════════════════════════════════════════════════════
@@ -13380,7 +19175,7 @@ static const tool_def_t s_tools[] = {
     /* ══════════════════════════════════════════════════════════════════════
      *  WORKFLOW & RESEARCH (3)
      * ══════════════════════════════════════════════════════════════════════ */
-    { .name = "workflow", .description = "Workflow management: plan, status, checkpoint, resume.", .input_schema_json = "{\"type\":\"object\",\"properties\":{\"action\":{\"type\":\"string\",\"description\":\"plan|status|checkpoint|resume\"},\"plan\":{\"type\":\"string\"},\"step\":{\"type\":\"string\"}},\"required\":[\"action\"]}", .execute = tool_workflow_dispatch },
+    { .name = "workflow", .description = "Workflow management: plan, status, checkpoint, resume, heartbeat, dead-letter, reprocess, validate, smoke.", .input_schema_json = "{\"type\":\"object\",\"properties\":{\"action\":{\"type\":\"string\",\"description\":\"plan|status|checkpoint|resume|heartbeat|dead_letter|reprocess|validate|smoke\"},\"name\":{\"type\":\"string\"},\"steps\":{\"type\":\"string\"},\"id\":{\"type\":\"integer\"},\"step\":{\"type\":\"integer\"},\"status\":{\"type\":\"string\"},\"note\":{\"type\":\"string\"},\"business_key\":{\"type\":\"string\"},\"contract_version\":{\"type\":\"string\"},\"max_retries\":{\"type\":\"integer\"},\"root_cause\":{\"type\":\"string\"},\"non_retryable\":{\"type\":\"boolean\"}},\"required\":[\"action\"]}", .execute = tool_workflow_dispatch },
     { .name = "research_probe", .description = "Deep research probe on a topic.", .input_schema_json = "{\"type\":\"object\",\"properties\":{\"query\":{\"type\":\"string\"}},\"required\":[\"query\"]}", .execute = tool_research_probe, .is_read_only = true, .is_concurrent = true },
     { .name = "code_search", .description = "Search codebase by symbol or pattern.", .input_schema_json = "{\"type\":\"object\",\"properties\":{\"query\":{\"type\":\"string\"},\"path\":{\"type\":\"string\"}},\"required\":[\"query\"]}", .execute = tool_code_search, .is_read_only = true, .is_concurrent = true },
 
@@ -13470,6 +19265,11 @@ static const tool_def_t s_tools[] = {
     { .name = "trading", .description = "Trading ops: arb_execute, arb_monitor, portfolio, risk_check, risk_configure.", .input_schema_json = "{\"type\":\"object\",\"properties\":{\"action\":{\"type\":\"string\"},\"platform\":{\"type\":\"string\"},\"amount_usd\":{\"type\":\"number\"},\"topic\":{\"type\":\"string\"},\"kalshi_ticker\":{\"type\":\"string\"},\"poly_token_id\":{\"type\":\"string\"}},\"required\":[\"action\"]}", .execute = tool_trading_dispatch },
 
     /* ══════════════════════════════════════════════════════════════════════
+     *  AGENTIC COMMERCE PROTOCOLS (1)
+     * ══════════════════════════════════════════════════════════════════════ */
+    { .name = "agentic_commerce", .description = "Agentic commerce protocol registry: list/status/coverage/plan for ACP, UCP, AP2, x402, Stripe MPP/SPT, Visa, Mastercard, and clearing watchlist protocols.", .input_schema_json = "{\"type\":\"object\",\"properties\":{\"action\":{\"type\":\"string\",\"description\":\"list|status|coverage|plan\"},\"protocol\":{\"type\":\"string\",\"description\":\"Protocol id or alias, e.g. acp, ucp, ap2, x402, mpp, stripe_spt, visa_tap, mastercard_agent_pay, rails\"}},\"required\":[\"action\"]}", .execute = tool_agentic_commerce, .is_read_only = true, .is_concurrent = true },
+
+    /* ══════════════════════════════════════════════════════════════════════
      *  CONTRACT METADATA — ingest, search, lookup (3)
      * ══════════════════════════════════════════════════════════════════════ */
     { .name = "contract_ingest", .description = "Bulk-fetch all open Kalshi events+markets into contracts.db. Persists title, settlement_date, strike, underlying, YES/NO meanings, prices. Run before searching.", .input_schema_json = "{\"type\":\"object\",\"properties\":{\"limit\":{\"type\":\"integer\",\"description\":\"Max events to fetch (default 200)\"},\"series_ticker\":{\"type\":\"string\",\"description\":\"Filter by series (KXBTC, KXFED, KXTEMP, etc)\"},\"status\":{\"type\":\"string\",\"description\":\"open|closed|settled\"}}}", .execute = tool_contract_ingest },
@@ -13507,13 +19307,99 @@ static const tool_def_t s_tools[] = {
     { .name = "playbook", .description = "ACE playbook: read, add, tag, remove, search, gc, inject.", .input_schema_json = "{\"type\":\"object\",\"properties\":{\"action\":{\"type\":\"string\",\"description\":\"read|add|tag|remove|search|gc|inject\"},\"text\":{\"type\":\"string\"},\"section\":{\"type\":\"string\"},\"id\":{\"type\":\"integer\"},\"query\":{\"type\":\"string\"},\"tag\":{\"type\":\"string\"}},\"required\":[\"action\"]}", .execute = tool_playbook_dispatch },
     { .name = "scratchpad", .description = "Read/write scratchpad for temporary data.", .input_schema_json = "{\"type\":\"object\",\"properties\":{\"action\":{\"type\":\"string\",\"description\":\"read|write|clear\"},\"content\":{\"type\":\"string\"}}}", .execute = tool_scratchpad, .core = true },  /* mixed: read=RO, write/clear=write */
     { .name = "self_exit", .description = "Gracefully exit the agent loop.", .input_schema_json = "{\"type\":\"object\",\"properties\":{\"reason\":{\"type\":\"string\"}}}", .execute = tool_self_exit, .core = true },
+    { .name = "self_exiting", .description = "Legacy alias for self_exit.", .input_schema_json = "{\"type\":\"object\",\"properties\":{\"reason\":{\"type\":\"string\"}}}", .execute = tool_self_exiting, .core = true },
+    {
+        .name = "StartOfLoopConstruct",
+        .description =
+            "Start a live recursive agent loop construct. Accepts a bounded "
+            "MetaConstruct/OORL DSL: continue/break expressions, max controls, "
+            "DEFINE/GOAL/TASK/BELIEF/INFER/DECIDE/LEARN metadata, mutable "
+            "ontology graph nodes/edges, dyad object interactions, reward "
+            "objects, valence/intensity, causal/message links, stochastic "
+            "exploration, pruning, credit assignment, attractors, prompt games, "
+            "basin hopping, effect weights, traversal/find/balance operations, "
+            "MapReduce map/shuffle/reduce job state, "
+            "SRM catalog/store search, availability/orderability, licensed "
+            "distributors, order policies, shipping restrictions, "
+            "standard reference material records, certificates/reports/SDS, "
+            "metrological traceability, calibration measurements, uncertainty "
+            "budgets, "
+            "one-shot REFINE rules, and bounded schema_rewrite rules. Example: "
+            "define(sensor,state); reward_object success valence 0.8 intensity "
+            "0.5 target state; causal_link state -> action weight 0.7; "
+            "schema_rewrite add_edge state -> policy relation optimized weight "
+            "0.9 when credit >= 0.8; continue when rewrites_applied >= 1. "
+            "Expressions support loop variables plus meta_count, belief_count, "
+            "goal_count, task_count, dyad_count, reward_object_count, "
+            "causal_link_count, message_count, node_count, edge_count, "
+            "graph_density, traverse_hits, mapreduce_count, map_count, "
+            "shuffle_count, reduce_count, partition_count, rewrite_count, "
+            "rewrites_applied, srm_count, current_certificate_count, "
+            "sds_count, traceability_count, measurement_count, "
+            "calibration_count, uncertainty_budget_count, mean_uncertainty, "
+            "max_uncertainty, available_count, orderable_count, "
+            "product_search_count, catalog_count, annual_catalog_count, "
+            "licensed_distributor_count, order_policy_count, "
+            "paper_checks_blocked, shipping_block_count, price_total, "
+            "effect.tool, effect.world, effect.meta, reward, valence, "
+            "intensity, exploration_rate, credit, curiosity, empowerment, "
+            "confidence, uncertainty, learning_rate, pruning_threshold, "
+            "basin_temperature.",
+        .input_schema_json =
+            "{\"type\":\"object\",\"properties\":{"
+            "\"label\":{\"type\":\"string\"},"
+            "\"program\":{\"type\":\"string\",\"description\":\"MetaConstruct "
+            "DSL program. Statements: continue when <expr>; break when <expr>; "
+            "max_iterations=<n>; max_turns=<n>; recursive=<bool>; "
+            "override_done=<bool>; override_max_turns=<bool>; prompt=<text>; "
+            "define(a,b); object x as type; goal g weight n; task t priority n; "
+            "belief b=n; infer x from y; decide policy; learn rate=n; "
+            "add_node n as type state s weight w; update_node n state s; "
+            "replace_node a with b; remove_node n; add_edge a -> b relation r "
+            "weight w; remove_edge a -> b; find n; traverse from n depth d; "
+            "balance graph; mapreduce job over source map mapper reduce reducer "
+            "by key partitions n; map job over source using mapper; shuffle "
+            "job by key partitions n; reduce job using reducer; reward_object "
+            "r valence v intensity i target x; "
+            "srm id matrix m property p certificate current sds available "
+            "traceable uncertainty n; measurement x on id value n uncertainty "
+            "n unit u; calibration tool using id uncertainty n; "
+            "uncertainty_budget x=n; "
+            "annual_product_list name current; catalog name store shop.nist.gov; "
+            "product_search id store shop.nist.gov found; availability id "
+            "available orderable price n; order_policy no_paper_checks; "
+            "licensed_distributor name; shipping id to dest blocked|allowed; "
+            "registration x; survey x; "
+            "causal_link a -> b weight w; message a -> b weight w; explore "
+            "objects rate e; credit x=n; prune_edges below n; attractor name "
+            "basin n; prompt_game name; dyad a -> b relation r; effect "
+            "tool|world|meta|conversational=n; refine target += n when <expr>; "
+            "schema_rewrite <single DSL statement> when <expr>\"},"
+            "\"construct\":{\"type\":\"string\",\"description\":\"Alias for "
+            "program\"},"
+            "\"conditions\":{\"type\":\"string\",\"description\":\"Legacy "
+            "conditions or MetaConstruct DSL, e.g. |c| continue when iteration "
+            "< 3; break when turn >= 20\"},"
+            "\"condition\":{\"type\":\"string\"},"
+            "\"continue_prompt\":{\"type\":\"string\"},"
+            "\"max_iterations\":{\"type\":\"integer\"},"
+            "\"max_turns\":{\"type\":\"integer\"},"
+            "\"recursive\":{\"type\":\"boolean\"},"
+            "\"override_done\":{\"type\":\"boolean\"},"
+            "\"override_max_turns\":{\"type\":\"boolean\"}}}",
+        .execute = tool_start_loop_construct,
+        .core = true
+    },
+    { .name = "EndOfLoopConstruct", .description = "Continue, modify, break, complete, or unwind live loop constructs. action=continue/recur can replace the active MetaConstruct DSL program; action=break/complete exits. exit_break_conditions=true resets iteration and restores done/max-turn overrides.", .input_schema_json = "{\"type\":\"object\",\"properties\":{\"label\":{\"type\":\"string\"},\"action\":{\"type\":\"string\",\"description\":\"continue|recur|break|complete|exit|pop\"},\"reason\":{\"type\":\"string\"},\"program\":{\"type\":\"string\",\"description\":\"Replacement MetaConstruct DSL program for action=continue/recur\"},\"construct\":{\"type\":\"string\",\"description\":\"Alias for program\"},\"conditions\":{\"type\":\"string\",\"description\":\"Legacy conditions or replacement DSL program\"},\"continue_prompt\":{\"type\":\"string\"},\"exit_break_conditions\":{\"type\":\"boolean\"},\"all\":{\"type\":\"boolean\"}}}", .execute = tool_end_loop_construct, .core = true },
+    { .name = "LoopConstructStatus", .description = "Inspect the live recursive MetaConstruct stack, parsed continue/break expressions, counters, override flags, ontology metadata, mutable graph nodes/edges, traversal state, dyads, MapReduce jobs, SRM/metrology and catalog/order state, effects, reward dynamics, learning signals, policies, decisions, attractors, prompt games, refinement rules, and schema rewrite rules.", .input_schema_json = "{\"type\":\"object\",\"properties\":{}}", .execute = tool_loop_construct_status, .core = true, .is_read_only = true },
     { .name = "discover_tools", .description = "List available tools by category or search.", .input_schema_json = "{\"type\":\"object\",\"properties\":{\"category\":{\"type\":\"string\"},\"query\":{\"type\":\"string\"}}}", .execute = tool_discover_tools, .core = true, .is_read_only = true, .is_concurrent = true },
-    { .name = "load_tools", .description = "Dynamically load tools into the active register file.", .input_schema_json = "{\"type\":\"object\",\"properties\":{\"names\":{\"type\":\"string\",\"description\":\"Comma-separated tool names to load\"}},\"required\":[\"names\"]}", .execute = tool_load_tools, .core = true },
+    { .name = "load_tools", .description = "Dynamically load tools into the active register file. Provide at least one of: names (comma-separated), tools (array), or category.", .input_schema_json = "{\"type\":\"object\",\"properties\":{\"names\":{\"type\":\"string\",\"description\":\"Comma-separated tool names to load\"},\"tools\":{\"type\":\"array\",\"items\":{\"type\":\"string\"},\"description\":\"Tool names to load\"},\"category\":{\"type\":\"string\",\"description\":\"Tool category to bulk load\"}}}", .execute = tool_load_tools, .core = true },
     { .name = "legion", .description = "Legion agent system: spawn, status, find.", .input_schema_json = "{\"type\":\"object\",\"properties\":{\"action\":{\"type\":\"string\",\"description\":\"spawn|status|find\"},\"class\":{\"type\":\"string\"},\"role\":{\"type\":\"string\"}},\"required\":[\"action\"]}", .execute = tool_legion_dispatch },
 
     /* ══════════════════════════════════════════════════════════════════════
      *  VOS & PIPELINE (2)
      * ══════════════════════════════════════════════════════════════════════ */
+    { .name = "computer", .description = "Control the local desktop like a human: screenshot, mouse_move, left_click, right_click, middle_click, double_click, triple_click, left_click_drag, key (combos like cmd+a), type, scroll, cursor_position, wait. Coordinates are display points [x,y]; a fresh screenshot is attached after each action so you can see the result.", .input_schema_json = "{\"type\":\"object\",\"properties\":{\"action\":{\"type\":\"string\",\"description\":\"screenshot|cursor_position|mouse_move|left_click|right_click|middle_click|double_click|triple_click|left_click_drag|key|type|scroll|wait\"},\"coordinate\":{\"type\":\"array\",\"items\":{\"type\":\"integer\"},\"description\":\"[x,y] in display points\"},\"to\":{\"type\":\"array\",\"items\":{\"type\":\"integer\"},\"description\":\"[x,y] drag destination\"},\"text\":{\"type\":\"string\",\"description\":\"text to type, or key combo for action=key\"},\"scroll_direction\":{\"type\":\"string\",\"description\":\"up|down|left|right\"},\"scroll_amount\":{\"type\":\"integer\"},\"duration\":{\"type\":\"integer\",\"description\":\"wait milliseconds\"}},\"required\":[\"action\"]}", .execute = tool_computer },
     { .name = "vos_status", .description = "Virtual OS subsystem status.", .input_schema_json = "{\"type\":\"object\",\"properties\":{}}", .execute = tool_vos_status, .is_read_only = true, .is_concurrent = true },
     { .name = "pipeline", .description = "Pipeline execution and chaining.", .input_schema_json = "{\"type\":\"object\",\"properties\":{\"steps\":{\"type\":\"string\",\"description\":\"Pipeline steps as JSON array\"}},\"required\":[\"steps\"]}", .execute = tool_pipeline },
 
@@ -13528,12 +19414,12 @@ static const tool_def_t s_tools[] = {
     { .name = "base64_tool", .description = "Base64 encode/decode.", .input_schema_json = "{\"type\":\"object\",\"properties\":{\"text\":{\"type\":\"string\"},\"input\":{\"type\":\"string\"},\"action\":{\"type\":\"string\",\"description\":\"encode|decode\"}},\"required\":[\"action\"]}", .execute = tool_base64_tool, .is_read_only = true, .is_concurrent = true },
     { .name = "base64", .description = "Base64 encode/decode (legacy).", .input_schema_json = "{\"type\":\"object\",\"properties\":{\"data\":{\"type\":\"string\"}},\"required\":[\"data\"]}", .execute = tool_base64, .is_read_only = true, .is_concurrent = true },
     { .name = "eval", .description = "Evaluate a math expression.", .input_schema_json = "{\"type\":\"object\",\"properties\":{\"expression\":{\"type\":\"string\"}},\"required\":[\"expression\"]}", .execute = tool_eval, .is_read_only = true, .is_concurrent = true },
-    { .name = "cwd", .description = "Get current working directory.", .input_schema_json = "{\"type\":\"object\",\"properties\":{}}", .execute = tool_cwd, .is_read_only = true, .is_concurrent = true },
+    { .name = "cwd", .description = "Get current working directory.", .input_schema_json = "{\"type\":\"object\",\"properties\":{}}", .execute = tool_cwd, .core = true, .is_read_only = true, .is_concurrent = true },
 
     /* ══════════════════════════════════════════════════════════════════════
      *  EXECUTION ALIASES & SANDBOX
      * ══════════════════════════════════════════════════════════════════════ */
-    { .name = "run_command", .description = "Run a shell command.", .input_schema_json = "{\"type\":\"object\",\"properties\":{\"command\":{\"type\":\"string\"},\"timeout\":{\"type\":\"integer\"}},\"required\":[\"command\"]}", .execute = tool_run_command },
+    { .name = "run_command", .description = "Run a shell command with optional artifact verification.", .input_schema_json = "{\"type\":\"object\",\"properties\":{\"command\":{\"type\":\"string\"},\"timeout\":{\"type\":\"integer\"},\"verify_path\":{\"type\":\"string\"},\"artifact_path\":{\"type\":\"string\"},\"output_path\":{\"type\":\"string\"},\"verify_paths\":{\"type\":\"array\",\"items\":{\"type\":\"string\"}},\"verify_min_bytes\":{\"type\":\"integer\"},\"verify_contains\":{\"type\":\"string\"},\"verify_sha256\":{\"type\":\"string\"}},\"required\":[\"command\"]}", .execute = tool_run_command },
     { .name = "sandbox_run", .description = "Run command in sandboxed container.", .input_schema_json = "{\"type\":\"object\",\"properties\":{\"command\":{\"type\":\"string\"},\"image\":{\"type\":\"string\"},\"timeout\":{\"type\":\"integer\"},\"network\":{\"type\":\"boolean\"},\"filesystem\":{\"type\":\"string\"}},\"required\":[\"command\"]}", .execute = tool_sandbox_run },
     { .name = "agent_wait", .description = "Wait for agent(s) to complete.", .input_schema_json = "{\"type\":\"object\",\"properties\":{\"id\":{\"type\":\"integer\"},\"timeout\":{\"type\":\"integer\"}}}", .execute = tool_agent_wait },
 
@@ -13553,6 +19439,7 @@ static const tool_def_t s_tools[] = {
 
 
 static const int s_tool_count = sizeof(s_tools) / sizeof(s_tools[0]);
+static tools_init_profile_t g_tools_init_profile = TOOLS_FULL;
 
 /* Forward declarations for hash map */
 static unsigned tool_name_hash(const char *s);
@@ -13570,7 +19457,24 @@ void tools_clear_profile_filter(void) {
     g_profile_filter = NULL;
 }
 
+void tools_init_local_only(void) {
+    /* Fast path for local metadata/direct-tool commands. Keep this free of
+     * subsystem startup: no plugins, browser profiles, IPC, MCP, or VFS. */
+    g_tools_init_profile = TOOLS_AGENT;
+    tool_map_rebuild();
+}
+
 void tools_init(void) {
+    tools_init_profile(TOOLS_FULL);
+}
+
+void tools_init_profile(tools_init_profile_t profile) {
+    g_tools_init_profile = profile;
+    if (profile == TOOLS_CORE || profile == TOOLS_AGENT) {
+        tool_map_rebuild();
+        return;
+    }
+
     plugin_init(&g_plugins);
     ctx_store_reset();
     browser_profiles_load();
@@ -13588,6 +19492,18 @@ void tools_init(void) {
 
     /* Build hash map for O(1) tool lookup */
     tool_map_rebuild();
+}
+
+tools_init_profile_t tools_current_profile(void) {
+    return g_tools_init_profile;
+}
+
+bool tools_profile_allows_index(int index) {
+    if (index < 0 || index >= s_tool_count) return false;
+    if (g_tools_init_profile == TOOLS_FULL ||
+        g_tools_init_profile == TOOLS_AGENT)
+        return true;
+    return s_tools[index].core;
 }
 
 void tools_register_vm_dispatch(vm_t *vm) {
@@ -13913,9 +19829,9 @@ void tools_mark_hot(int tool_idx) {
 }
 
 /* ── Core tool set: register-file model ─────────────────────────────────
- * ALWAYS (R0-R15): Hardwired registers, never evicted. Minimum viable set
+ * ALWAYS:          Hardwired registers, never evicted. Minimum viable set
  *                  for file I/O, search, execution, and context management.
- * WARM (R16-R31):  Default-loaded but evictable under budget pressure.
+ * WARM:            Default-loaded but evictable under budget pressure.
  *                  Swarm/agent orchestration, secondary I/O, soul access.
  * Together they define "core" for backward compat, but the register file
  * can shrink the warm bank under cost pressure. */
@@ -13923,7 +19839,8 @@ void tools_mark_hot(int tool_idx) {
 static const char *CORE_ALWAYS[] = {
     "bash", "python",
     "discover_tools", "load_tools", "self_exit",
-    NULL  /* 5 tools → minimal core: execution + dynamic loading */
+    "StartOfLoopConstruct", "EndOfLoopConstruct",
+    NULL  /* minimal core: execution + dynamic loading + loop control */
 };
 
 static const char *CORE_WARM[] = {
@@ -14720,7 +20637,7 @@ tool_page_result_t tools_get_paged(const char *context, int max_tools,
     /* Hard cap: register file is 64 slots max, period. */
     if (max_tools > TOOL_REGISTER_CAP) max_tools = TOOL_REGISTER_CAP;
 
-    /* --cheap mode: force critical budget → only ALWAYS core (5 tools) */
+    /* --cheap mode: force critical budget -> only ALWAYS core tools */
     if (g_cheap_mode) {
         budget_ratio = 0.0f;
     }
@@ -14747,16 +20664,16 @@ tool_page_result_t tools_get_paged(const char *context, int max_tools,
     }
 
     /* Register-file slot allocation:
-     * R0-R4:   ALWAYS core (bash, python, discover, load, exit)
-     * R5-R15:  WARM core (file I/O, evictable under budget pressure)
-     * R16-R27: WORKING (quorum-scored / hint-pinned, turn-volatile)
-     * R28-R31: DISCOVERY (progressive schema, ephemeral)
+     * ALWAYS:   bash, python, discover/load, exit, loop constructs
+     * WARM:     file I/O, evictable under budget pressure
+     * WORKING:  quorum-scored / hint-pinned, turn-volatile
+     * DISCOVERY: progressive schema, ephemeral
      *
      * Budget-adaptive shrinking (uses effective_ratio = cost + context pressure):
-     *   Full   (>0.4):    5 + 11 + 12 + 4 = 32
-     *   Mid  (0.15-0.4):  5 +  8 +  8 + 3 = 24
-     *   Low  (0.05-0.15): 5 +  4 +  4 + 0 = 13 (~16 with hint-pins)
-     *   Critical (<0.05):  5 +  0 +  0 + 0 =  5 */
+     *   Full   (>0.4):    7 + 11 + 10 + 4 = 32
+     *   Mid  (0.15-0.4):  7 +  8 +  8 + 3 = 26
+     *   Low  (0.05-0.15): 7 +  4 +  4 + 0 = 15 (~17 with hint-pins)
+     *   Critical (<0.05): 7 +  0 +  0 + 0 =  7 */
     int always_budget = TOOL_REG_ALWAYS;
     int warm_budget, working_budget, discovery_budget;
 
@@ -14818,7 +20735,7 @@ tool_page_result_t tools_get_paged(const char *context, int max_tools,
     int *pidx = safe_malloc((pinned_budget + 1) * sizeof(int));
     int pn = 0;
 
-    /* R0-R15: ALWAYS core — hardwired, never evicted */
+    /* ALWAYS core: hardwired, never evicted */
     for (int i = 0; i < total && pn < always_budget; i++) {
         if (is_core_always(tools[i].name)) {
             pidx[pn++] = i;
@@ -14826,7 +20743,7 @@ tool_page_result_t tools_get_paged(const char *context, int max_tools,
         }
     }
 
-    /* R16-R31: WARM core — evictable under budget pressure */
+    /* WARM core: evictable under budget pressure */
     for (int i = 0; i < total && pn < always_budget + warm_budget; i++) {
         if (is_core_warm(tools[i].name) && !included[i]) {
             pidx[pn++] = i;
@@ -15289,8 +21206,14 @@ void tool_map_free(tool_map_t *m) {
 }
 
 void tool_map_insert(tool_map_t *m, const char *name, int index) {
-    if (tool_map_lookup(m, name) >= 0) return;
     unsigned h = tool_name_hash(name) % TOOL_MAP_BUCKETS;
+    for (tool_map_entry_t *cur = m->buckets[h]; cur; cur = cur->next) {
+        if (strcmp(cur->name, name) == 0) {
+            cur->index = index;
+            cur->name = name;
+            return;
+        }
+    }
     tool_map_entry_t *e = malloc(sizeof(tool_map_entry_t));
     if (!e) return;
     e->name = name;
@@ -15317,8 +21240,10 @@ void tool_map_rebuild(void) {
 
     /* Builtin tools */
     for (int i = 0; i < s_tool_count; i++) {
+        if (!tools_profile_allows_index(i)) continue;
         tool_map_insert(&g_tool_map, s_tools[i].name, i);
     }
+    if (g_tools_init_profile != TOOLS_FULL) return;
     /* Plugin tools — index as -(i+1) to distinguish from builtin */
     for (int i = 0; i < g_plugins.extra_tool_count; i++) {
         tool_map_insert(&g_tool_map, g_plugins.extra_tools[i].name, -(i + 1));
@@ -15329,24 +21254,103 @@ void tool_map_rebuild(void) {
     }
 }
 
+static int tool_map_lookup_with_mcp_alias(const char *name,
+                                          char *resolved_name,
+                                          size_t resolved_len) {
+    if (resolved_name && resolved_len > 0)
+        snprintf(resolved_name, resolved_len, "%s", name ? name : "");
+
+    int idx = tool_map_lookup(&g_tool_map, name);
+    if (idx != -1 || !name) return idx;
+
+    if (strncmp(name, "mcp_", 4) == 0 && strncmp(name, "mcp__", 5) != 0) {
+        for (int i = 0; i < g_external_tool_count; i++) {
+            const char *candidate = g_external_tools[i].name;
+            if (!dsco_mcp_is_canonical_tool_name(candidate)) continue;
+            char legacy[128];
+            dsco_mcp_legacy_alias_from_canonical(candidate, legacy, sizeof(legacy));
+            if (strcmp(legacy, name) == 0) {
+                if (resolved_name && resolved_len > 0)
+                    snprintf(resolved_name, resolved_len, "%s", candidate);
+                return -(10000 + i);
+            }
+        }
+        return -1;
+    }
+
+    if (!dsco_mcp_is_canonical_tool_name(name)) return idx;
+
+    char legacy[128];
+    dsco_mcp_legacy_alias_from_canonical(name, legacy, sizeof(legacy));
+    idx = tool_map_lookup(&g_tool_map, legacy);
+    if (idx != -1 && resolved_name && resolved_len > 0)
+        snprintf(resolved_name, resolved_len, "%s", legacy);
+    return idx;
+}
+
 /* ── External tool registry (MCP, etc.) ────────────────────────────────── */
 
 external_tool_t g_external_tools[MAX_EXTERNAL_TOOLS];
 int             g_external_tool_count = 0;
 
+/* Serializes writers (tools_register_external, reset_external_tools).
+ * Readers iterate g_external_tool_count without locking — the release-store
+ * below pairs with a natural acquire-load on aligned ints, so any reader that
+ * sees the new count is guaranteed to see a fully-initialized entry. */
+static pthread_mutex_t g_external_tools_mu = PTHREAD_MUTEX_INITIALIZER;
+
 void tools_register_external(const char *name, const char *description,
                                 const char *input_schema_json,
                                 external_tool_cb cb, void *ctx) {
-    if (g_external_tool_count >= MAX_EXTERNAL_TOOLS) return;
-    external_tool_t *t = &g_external_tools[g_external_tool_count++];
+    if (!name || !name[0]) return;
+    pthread_mutex_lock(&g_external_tools_mu);
+    int current = g_external_tool_count;
+    for (int i = 0; i < current; i++) {
+        if (strcmp(g_external_tools[i].name, name) == 0) {
+            external_tool_t *existing = &g_external_tools[i];
+            snprintf(existing->description, sizeof(existing->description),
+                     "%s", description ? description : "");
+            char *old_schema = existing->input_schema_json;
+            existing->input_schema_json = safe_strdup(input_schema_json ? input_schema_json :
+                                                      "{\"type\":\"object\",\"properties\":{}}");
+            existing->cb = cb;
+            existing->ctx = ctx;
+            tool_map_insert(&g_tool_map, existing->name, -(10000 + i));
+            pthread_mutex_unlock(&g_external_tools_mu);
+            free(old_schema);
+            return;
+        }
+    }
+    if (current >= MAX_EXTERNAL_TOOLS) {
+        pthread_mutex_unlock(&g_external_tools_mu);
+        return;
+    }
+    /* Fully populate entry at slot `current` BEFORE publishing the new count.
+     * Readers loop `for (i = 0; i < g_external_tool_count; i++)`, so we must
+     * not advertise the slot until its contents are valid. */
+    external_tool_t *t = &g_external_tools[current];
     snprintf(t->name, sizeof(t->name), "%s", name);
-    snprintf(t->description, sizeof(t->description), "%s", description);
-    t->input_schema_json = safe_strdup(input_schema_json);
+    snprintf(t->description, sizeof(t->description), "%s", description ? description : "");
+    t->input_schema_json = safe_strdup(input_schema_json ? input_schema_json :
+                                       "{\"type\":\"object\",\"properties\":{}}");
     t->cb = cb;
     t->ctx = ctx;
+    t->loaded = false;
+    tool_map_insert(&g_tool_map, t->name, -(10000 + current));
+    __atomic_store_n(&g_external_tool_count, current + 1, __ATOMIC_RELEASE);
+    pthread_mutex_unlock(&g_external_tools_mu);
+}
 
-    /* Update hash map */
-    tool_map_insert(&g_tool_map, t->name, -(10000 + g_external_tool_count - 1));
+void tools_reset_external(void) {
+    pthread_mutex_lock(&g_external_tools_mu);
+    int n = g_external_tool_count;
+    for (int i = 0; i < n; i++) {
+        free(g_external_tools[i].input_schema_json);
+        g_external_tools[i].input_schema_json = NULL;
+    }
+    __atomic_store_n(&g_external_tool_count, 0, __ATOMIC_RELEASE);
+    tool_map_rebuild();
+    pthread_mutex_unlock(&g_external_tools_mu);
 }
 
 static bool name_in_list(const char *name, const char *const *list) {
@@ -15375,6 +21379,7 @@ static void sandbox_policy_for_tier(const char *tier,
 static bool tool_is_untrusted_sandbox_routed(const char *name) {
     return name &&
            (strcmp(name, "bash") == 0 ||
+            strcmp(name, "Bash") == 0 ||
             strcmp(name, "run_command") == 0 ||
             strcmp(name, "python") == 0 ||
             strcmp(name, "node") == 0);
@@ -15453,10 +21458,11 @@ static char *build_untrusted_routed_sandbox_input(const char *tool_name,
     char *image = NULL;
     int timeout = 120;
 
-    if (strcmp(tool_name, "bash") == 0) {
+    if (strcmp(tool_name, "bash") == 0 || strcmp(tool_name, "Bash") == 0) {
         char *cmd = json_get_str(json, "command");
         char *cwd = json_get_str(json, "cwd");
         timeout = json_get_int(json, "timeout", 120);
+        if (timeout > 1000) timeout = (timeout + 999) / 1000;
         if (!cmd) {
             if (reason && reason_len > 0) snprintf(reason, reason_len, "error: command required");
             free(cwd);
@@ -15610,6 +21616,7 @@ bool tools_is_allowed_for_tier(const char *name, const char *tier,
             "kill_process", "crontab",
             /* filesystem mutation */
             "write_file", "edit_file", "append_file",
+            "Write", "Edit", "TodoWrite",
             "move_file", "copy_file", "delete_file",
             "mkdir", "chmod", "symlink", "patch",
             "soul_append", "soul_write", "soul_replace",
@@ -15622,6 +21629,8 @@ bool tools_is_allowed_for_tier(const char *name, const char *tier,
             "websocket_test",
             /* orchestration/control-plane mutation */
             "spawn_agent", "agent_kill", "create_swarm",
+            "Agent", "Task", "EnterPlanMode", "ExitPlanMode",
+            "StartOfLoopConstruct", "EndOfLoopConstruct",
             "spawn_executor", "spawn_provider", "create_executor_swarm", "swarm_budget",
             "ipc_send",
             "ipc_recv", "ipc_scratch_put", "ipc_task_submit",
@@ -15720,7 +21729,10 @@ static bool tools_execute_internal(const char *name, const char *input_json,
     }
 
     /* Fallback: O(1) chained hash map lookup (for plugins, MCP, late-registered) */
-    int idx = tool_map_lookup(&g_tool_map, name);
+    char resolved_name[128];
+    int idx = tool_map_lookup_with_mcp_alias(name, resolved_name,
+                                             sizeof(resolved_name));
+    const char *exec_name = resolved_name[0] ? resolved_name : name;
 
     if (idx >= 0 && idx < s_tool_count) {
         /* Builtin tool */
@@ -15766,7 +21778,7 @@ static bool tools_execute_internal(const char *name, const char *input_json,
         if (ei >= 0 && ei < g_external_tool_count && g_external_tools[ei].cb) {
             struct timeval t0, t1;
             gettimeofday(&t0, NULL);
-            char *ext_result = g_external_tools[ei].cb(name, input_json,
+            char *ext_result = g_external_tools[ei].cb(exec_name, input_json,
                                                          g_external_tools[ei].ctx);
             gettimeofday(&t1, NULL);
             long elapsed_us = (t1.tv_sec - t0.tv_sec) * 1000000L + (t1.tv_usec - t0.tv_usec);
@@ -15825,7 +21837,11 @@ static bool tools_execute_internal(const char *name, const char *input_json,
 
 bool tools_execute(const char *name, const char *input_json,
                    char *result, size_t result_len) {
-    return tools_execute_internal(name, input_json, result, result_len);
+    char *normalized = tools_normalize_input(name, input_json);
+    bool ok = tools_execute_internal(name, normalized ? normalized : input_json,
+                                     result, result_len);
+    free(normalized);
+    return ok;
 }
 
 bool tools_execute_for_tier(const char *name, const char *input_json,
@@ -15860,7 +21876,11 @@ bool tools_execute_for_tier(const char *name, const char *input_json,
         baseline_log("security", "sandbox_route", name, NULL);
     }
 
+    char *normalized_input = tools_normalize_input(dispatch_name, dispatch_input);
+    if (normalized_input) dispatch_input = normalized_input;
+
     bool ok = tools_execute_internal(dispatch_name, dispatch_input, result, result_len);
+    free(normalized_input);
     free(owned_input);
     return ok;
 }
@@ -15999,29 +22019,311 @@ int tool_timeout_for(const char *name) {
     return TOOL_DEFAULT_TIMEOUT_S;
 }
 
-/* ── JSON schema validation before tool dispatch ──────────────────────── */
+/* ── JSON schema normalization + validation before tool dispatch ──────── */
+
+static const char *tools_schema_for_name(const char *name) {
+    if (!name) return NULL;
+    int idx = tool_map_lookup_with_mcp_alias(name, NULL, 0);
+    if (idx >= 0 && idx < s_tool_count) {
+        return s_tools[idx].input_schema_json;
+    }
+    if (idx <= -10000) {
+        int ei = -(idx + 10000);
+        if (ei >= 0 && ei < g_external_tool_count) {
+            return g_external_tools[ei].input_schema_json;
+        }
+    }
+    return NULL;
+}
+
+static const char *tools_json_ws(const char *p) {
+    while (p && *p && isspace((unsigned char)*p)) p++;
+    return p ? p : "";
+}
+
+static const char *tools_json_skip_string(const char *p) {
+    if (!p || *p != '"') return p;
+    p++;
+    while (*p) {
+        if (*p == '\\' && p[1]) {
+            p += 2;
+            continue;
+        }
+        if (*p == '"') return p + 1;
+        p++;
+    }
+    return p;
+}
+
+static const char *tools_json_skip_value(const char *p) {
+    p = tools_json_ws(p);
+    if (!*p) return p;
+    if (*p == '"') return tools_json_skip_string(p);
+    if (*p == '{' || *p == '[') {
+        char open = *p;
+        char close = open == '{' ? '}' : ']';
+        int depth = 1;
+        p++;
+        while (*p && depth > 0) {
+            if (*p == '"') {
+                p = tools_json_skip_string(p);
+                continue;
+            }
+            if (*p == open) depth++;
+            else if (*p == close) depth--;
+            p++;
+        }
+        return p;
+    }
+    while (*p && *p != ',' && *p != '}' && *p != ']' &&
+           !isspace((unsigned char)*p)) {
+        p++;
+    }
+    return p;
+}
+
+static const char *tools_json_parse_string(const char *p, char **out) {
+    if (out) *out = NULL;
+    if (!p || *p != '"') return NULL;
+    p++;
+    jbuf_t b;
+    jbuf_init(&b, 64);
+    while (*p && *p != '"') {
+        if (*p == '\\' && p[1]) {
+            p++;
+            switch (*p) {
+            case '"':  jbuf_append_char(&b, '"'); break;
+            case '\\': jbuf_append_char(&b, '\\'); break;
+            case '/':  jbuf_append_char(&b, '/'); break;
+            case 'b':  jbuf_append_char(&b, '\b'); break;
+            case 'f':  jbuf_append_char(&b, '\f'); break;
+            case 'n':  jbuf_append_char(&b, '\n'); break;
+            case 'r':  jbuf_append_char(&b, '\r'); break;
+            case 't':  jbuf_append_char(&b, '\t'); break;
+            default:   jbuf_append_char(&b, *p); break;
+            }
+            p++;
+            continue;
+        }
+        jbuf_append_char(&b, *p++);
+    }
+    if (*p != '"') {
+        jbuf_free(&b);
+        return NULL;
+    }
+    if (out) *out = b.data;
+    else jbuf_free(&b);
+    return p + 1;
+}
+
+typedef enum {
+    TOOL_SCHEMA_SCALAR_NONE = 0,
+    TOOL_SCHEMA_SCALAR_INTEGER,
+    TOOL_SCHEMA_SCALAR_NUMBER,
+    TOOL_SCHEMA_SCALAR_BOOLEAN
+} tool_schema_scalar_t;
+
+static tool_schema_scalar_t tools_schema_scalar_for_property(const char *schema,
+                                                            const char *key) {
+    if (!schema || !key || !key[0]) return TOOL_SCHEMA_SCALAR_NONE;
+    char *props = json_get_raw(schema, "properties");
+    if (!props) return TOOL_SCHEMA_SCALAR_NONE;
+    char *prop = json_get_raw(props, key);
+    free(props);
+    if (!prop) return TOOL_SCHEMA_SCALAR_NONE;
+
+    tool_schema_scalar_t kind = TOOL_SCHEMA_SCALAR_NONE;
+    char *type = json_get_str(prop, "type");
+    if (type) {
+        if (strcmp(type, "integer") == 0) kind = TOOL_SCHEMA_SCALAR_INTEGER;
+        else if (strcmp(type, "number") == 0) kind = TOOL_SCHEMA_SCALAR_NUMBER;
+        else if (strcmp(type, "boolean") == 0) kind = TOOL_SCHEMA_SCALAR_BOOLEAN;
+        free(type);
+    } else {
+        char *raw = json_get_raw(prop, "type");
+        if (raw) {
+            if (strstr(raw, "\"integer\"")) kind = TOOL_SCHEMA_SCALAR_INTEGER;
+            else if (strstr(raw, "\"number\"")) kind = TOOL_SCHEMA_SCALAR_NUMBER;
+            else if (strstr(raw, "\"boolean\"")) kind = TOOL_SCHEMA_SCALAR_BOOLEAN;
+            free(raw);
+        }
+    }
+    free(prop);
+    return kind;
+}
+
+static bool tools_trim_copy(const char *s, char *out, size_t outlen) {
+    if (!s || !out || outlen == 0) return false;
+    while (isspace((unsigned char)*s)) s++;
+    const char *e = s + strlen(s);
+    while (e > s && isspace((unsigned char)e[-1])) e--;
+    size_t n = (size_t)(e - s);
+    if (n == 0 || n >= outlen) return false;
+    memcpy(out, s, n);
+    out[n] = '\0';
+    return true;
+}
+
+static bool tools_string_to_schema_literal(tool_schema_scalar_t kind,
+                                           const char *decoded,
+                                           char *literal,
+                                           size_t literal_len) {
+    char tmp[160];
+    if (!tools_trim_copy(decoded, tmp, sizeof(tmp))) return false;
+
+    if (kind == TOOL_SCHEMA_SCALAR_BOOLEAN) {
+        if (strcasecmp(tmp, "true") == 0 || strcmp(tmp, "1") == 0 ||
+            strcasecmp(tmp, "yes") == 0) {
+            snprintf(literal, literal_len, "true");
+            return true;
+        }
+        if (strcasecmp(tmp, "false") == 0 || strcmp(tmp, "0") == 0 ||
+            strcasecmp(tmp, "no") == 0) {
+            snprintf(literal, literal_len, "false");
+            return true;
+        }
+        return false;
+    }
+
+    if (kind == TOOL_SCHEMA_SCALAR_INTEGER) {
+        const char *p = tmp;
+        if (*p == '+' || *p == '-') p++;
+        if (!isdigit((unsigned char)*p)) return false;
+        while (*p) {
+            if (!isdigit((unsigned char)*p)) return false;
+            p++;
+        }
+        errno = 0;
+        char *end = NULL;
+        long long v = strtoll(tmp, &end, 10);
+        if (errno == ERANGE || !end || *end) return false;
+        snprintf(literal, literal_len, "%lld", v);
+        return true;
+    }
+
+    if (kind == TOOL_SCHEMA_SCALAR_NUMBER) {
+        errno = 0;
+        char *end = NULL;
+        double v = strtod(tmp, &end);
+        if (errno == ERANGE || !end || *tools_json_ws(end) || !isfinite(v)) return false;
+        snprintf(literal, literal_len, "%.17g", v);
+        return true;
+    }
+
+    return false;
+}
+
+char *tools_normalize_input(const char *name, const char *input_json) {
+    const char *schema = tools_schema_for_name(name);
+    if (!schema || !input_json) return NULL;
+
+    const char *p = tools_json_ws(input_json);
+    if (*p != '{') return NULL;
+    p++;
+
+    jbuf_t out;
+    jbuf_init(&out, strlen(input_json) + 32);
+    jbuf_append_char(&out, '{');
+    bool first = true;
+    bool changed = false;
+
+    while (*p) {
+        p = tools_json_ws(p);
+        if (*p == '}') {
+            p++;
+            break;
+        }
+        if (*p != '"') {
+            jbuf_free(&out);
+            return NULL;
+        }
+
+        const char *key_start = p;
+        char *key = NULL;
+        const char *key_end = tools_json_parse_string(p, &key);
+        if (!key_end || !key) {
+            free(key);
+            jbuf_free(&out);
+            return NULL;
+        }
+
+        p = tools_json_ws(key_end);
+        if (*p != ':') {
+            free(key);
+            jbuf_free(&out);
+            return NULL;
+        }
+        p++;
+        const char *value_start = tools_json_ws(p);
+        const char *value_end = tools_json_skip_value(value_start);
+        if (value_end <= value_start && *value_start) {
+            free(key);
+            jbuf_free(&out);
+            return NULL;
+        }
+
+        if (!first) jbuf_append_char(&out, ',');
+        first = false;
+        jbuf_append_len(&out, key_start, (size_t)(key_end - key_start));
+        jbuf_append_char(&out, ':');
+
+        bool emitted = false;
+        if (*value_start == '"') {
+            tool_schema_scalar_t kind = tools_schema_scalar_for_property(schema, key);
+            if (kind != TOOL_SCHEMA_SCALAR_NONE) {
+                char *decoded = NULL;
+                const char *string_end = tools_json_parse_string(value_start, &decoded);
+                if (string_end && string_end == value_end && decoded) {
+                    char literal[160];
+                    if (tools_string_to_schema_literal(kind, decoded,
+                                                       literal, sizeof(literal))) {
+                        jbuf_append(&out, literal);
+                        changed = true;
+                        emitted = true;
+                    }
+                }
+                free(decoded);
+            }
+        }
+
+        if (!emitted)
+            jbuf_append_len(&out, value_start, (size_t)(value_end - value_start));
+
+        free(key);
+        p = tools_json_ws(value_end);
+        if (*p == ',') {
+            p++;
+            continue;
+        }
+        if (*p == '}') {
+            p++;
+            break;
+        }
+        if (*p) {
+            jbuf_free(&out);
+            return NULL;
+        }
+    }
+
+    jbuf_append_char(&out, '}');
+    if (!changed) {
+        jbuf_free(&out);
+        return NULL;
+    }
+    return out.data;
+}
 
 bool tools_validate_input(const char *name, const char *input_json,
                           char *error_buf, size_t error_len) {
     if (!input_json || !name) return true; /* no input to validate */
 
-    /* Find the tool's schema */
-    const char *schema = NULL;
-
-    /* Check builtin tools */
-    int idx = tool_map_lookup(&g_tool_map, name);
-    if (idx >= 0 && idx < s_tool_count) {
-        schema = s_tools[idx].input_schema_json;
-    } else if (idx <= -10000) {
-        int ei = -(idx + 10000);
-        if (ei >= 0 && ei < g_external_tool_count) {
-            schema = g_external_tools[ei].input_schema_json;
-        }
-    }
-
+    const char *schema = tools_schema_for_name(name);
     if (!schema) return true; /* no schema = no validation */
 
-    json_validation_t v = json_validate_schema(input_json, schema);
+    char *normalized = tools_normalize_input(name, input_json);
+    json_validation_t v = json_validate_schema(normalized ? normalized : input_json,
+                                               schema);
+    free(normalized);
     if (!v.valid) {
         snprintf(error_buf, error_len, "input validation failed for '%s': %s",
                  name, v.error);

@@ -992,7 +992,10 @@ static const connector_vtable_t SERIAL_VT = {
  *   config:  {"name":"…","role":"…","firm":"…"}
  *   invoke:  method=<action>, params=<decision payload>
  *     -> {"agent","role","firm","action","decision":<params>} */
-typedef struct { char *name, *role, *firm; } agent_conn_t;
+/* crd/individual are the human-backed seam: when a persona is grounded to a
+ * real FINRA-registered individual (config {"crd":…,"individual":"…"}), every
+ * trajectory decision it emits carries that verifiable individualId. */
+typedef struct { char *name, *role, *firm, *crd, *individual; } agent_conn_t;
 
 static void *agent_open(const char *config_json, char *err, size_t errlen) {
     (void)err; (void)errlen;
@@ -1001,6 +1004,8 @@ static void *agent_open(const char *config_json, char *err, size_t errlen) {
     a->name = have ? json_get_str(config_json, "name") : NULL;
     a->role = have ? json_get_str(config_json, "role") : NULL;
     a->firm = have ? json_get_str(config_json, "firm") : NULL;
+    a->crd        = have ? json_get_str(config_json, "crd") : NULL;
+    a->individual = have ? json_get_str(config_json, "individual") : NULL;
     if (!a->name) a->name = safe_strdup("agent");
     if (!a->role) a->role = safe_strdup("");
     if (!a->firm) a->firm = safe_strdup("");
@@ -1014,6 +1019,12 @@ static void agent_invoke(void *self, const char *method,
     jbuf_append(&b, "{\"agent\":");   jbuf_append_json_str(&b, a->name);
     jbuf_append(&b, ",\"role\":");    jbuf_append_json_str(&b, a->role);
     jbuf_append(&b, ",\"firm\":");    jbuf_append_json_str(&b, a->firm);
+    if (a->crd && a->crd[0]) {
+        jbuf_append(&b, ",\"crd\":");        jbuf_append_json_str(&b, a->crd);
+    }
+    if (a->individual && a->individual[0]) {
+        jbuf_append(&b, ",\"individual\":"); jbuf_append_json_str(&b, a->individual);
+    }
     jbuf_append(&b, ",\"action\":");  jbuf_append_json_str(&b, method ? method : "");
     jbuf_append(&b, ",\"decision\":");
     jbuf_append(&b, (params && params[0]) ? params : "{}");
@@ -1027,13 +1038,20 @@ static char *agent_describe(void *self) {
     jbuf_append(&b, "{\"kind\":\"agent\",\"name\":"); jbuf_append_json_str(&b, a->name);
     jbuf_append(&b, ",\"role\":"); jbuf_append_json_str(&b, a->role);
     jbuf_append(&b, ",\"firm\":"); jbuf_append_json_str(&b, a->firm);
+    if (a->crd && a->crd[0]) {
+        jbuf_append(&b, ",\"crd\":"); jbuf_append_json_str(&b, a->crd);
+    }
+    if (a->individual && a->individual[0]) {
+        jbuf_append(&b, ",\"individual\":"); jbuf_append_json_str(&b, a->individual);
+    }
     jbuf_append(&b, "}");
     return b.data;
 }
 
 static void agent_close(void *self) {
     agent_conn_t *a = self;
-    if (a) { free(a->name); free(a->role); free(a->firm); free(a); }
+    if (a) { free(a->name); free(a->role); free(a->firm);
+             free(a->crd); free(a->individual); free(a); }
 }
 
 static const connector_vtable_t AGENT_VT = {
