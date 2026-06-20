@@ -299,6 +299,9 @@ static const char *TOOL_EMB_NAMES[] = {
     "weather",
     "firecrawl",
     "jina_read",
+    "jina_search",
+    "jina_embed",
+    "parallel_search",
     "serpapi",
     "discord_post",
     "twilio_sms",
@@ -369,6 +372,7 @@ static const char *TOOL_EMB_NAMES[] = {
     "talons_status",
     "wings_talons_status",
     "self_exit",
+    "self_exiting",
     "vos_status",
     NULL
 };
