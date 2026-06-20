@@ -155,6 +155,7 @@ int  swarm_spawn_provider(swarm_t *s, int group_id, const char *task,
 int  swarm_spawn_executor(swarm_t *s, int group_id, const char *task,
                            const char *model, executor_type_t executor);
 void swarm_detect_executors(swarm_t *s);
+void swarm_prepare_executor_env(swarm_t *s, executor_type_t executor);
 const char *executor_type_name(executor_type_t t);
 
 /* ── Budget partitioning ─────────────────────────────────────────────── */

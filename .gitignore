@@ -51,3 +51,38 @@ keys/
 data/cmo/
 data/edgar/
 data/ginnie/
+
+# Agent harness / local state
+.claude/
+.arthur/
+
+# Build outputs (single-file + variant binaries)
+dsc
+dsco-lite
+dsco-new
+ipc_experiment
+
+# Backups / scratch copies
+*.bak
+*.new
+response.json
+
+# Large data / generated corpora (relocated out of repo)
+data/
+books/
+climate_data/
+papers/
+hermes-agent/
+claude-code-source-analysis/
+video_data/
+video_chroma/
+artifacts/
+lib/
+
+# Agent run reports / doc dumps
+MISSION_*
+WORKER*_*
+DEEP_REVIEW_IMPROVEMENTS.md
+DOCS_MANIFEST.md
+RAPID_INTEGRATION_PLAN.md
+CLAUDE_CODE_AUTH_QUICK_REFERENCE.md

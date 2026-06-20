@@ -145,4 +145,15 @@ const char *killswitch_level_name(kill_level_t l);
 const char *killswitch_state_name(kill_state_t s);
 const char *killswitch_trigger_name(kill_trigger_t t);
 
+/* ── §8: VFS Persistence ──────────────────────────────────────────── */
+
+struct vfs_db;
+typedef struct vfs_db vfs_db_t;
+
+/* Connect kill switch registry to VFS for state persistence */
+void killswitch_set_vfs(vfs_db_t *vfs);
+
+/* Restore persisted kill switch state from VFS on startup. Returns count restored. */
+int killswitch_restore_from_vfs(killswitch_registry_t *r);
+
 #endif

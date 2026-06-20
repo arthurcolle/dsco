@@ -67,7 +67,7 @@ typedef struct sched_task {
     int              budget;
 } sched_task_t;
 
-typedef struct {
+typedef struct scheduler_t {
     sched_task_t tasks[SCHED_MAX_TASKS];
     int          task_count;
     task_id_t    next_id;

@@ -80,6 +80,7 @@ WEB_DIR = Path(__file__).parent
 STATIC_DIR = WEB_DIR / "static"
 DSCO_BIN = WEB_DIR.parent / "dsco"
 WORK_DIR = Path(os.getenv("DSCO_WORK_DIR", str(Path.cwd())))
+DSCO_VERSION_CACHE: str = "unknown"
 
 DEFAULT_MODEL = os.getenv("DSCO_MODEL", "claude-sonnet-4-6")
 DEFAULT_PORT = int(os.getenv("DSCO_UI_PORT", "3141"))
@@ -2226,9 +2227,7 @@ async def websocket_endpoint(ws: WebSocket):
         "work_dir": str(WORK_DIR),
         "webrtc": HAS_WEBRTC,
         "model_count": len(MODEL_REGISTRY),
-        "dsco_version": subprocess.run(
-            [str(DSCO_BIN), "--version"], capture_output=True, text=True, timeout=2
-        ).stdout.strip() if DSCO_BIN.exists() else "unknown",
+        "dsco_version": DSCO_VERSION_CACHE,
     })
 
     try:
@@ -2671,8 +2670,15 @@ def main():
     # Load model and tool registries from dsco binary
     load_model_registry()
     load_tool_registry()
-    global TOOLS_OPENAI
+    global TOOLS_OPENAI, DSCO_VERSION_CACHE
     TOOLS_OPENAI = get_tools_openai()
+    if DSCO_BIN.exists():
+        try:
+            DSCO_VERSION_CACHE = subprocess.run(
+                [str(DSCO_BIN), "--version"], capture_output=True, text=True, timeout=5
+            ).stdout.strip() or "unknown"
+        except (subprocess.TimeoutExpired, OSError):
+            DSCO_VERSION_CACHE = "unknown"
 
     port = args.port
     url = f"http://{args.host}:{port}"
