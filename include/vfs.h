@@ -86,4 +86,13 @@ typedef struct {
 
 vfs_stats_t vfs_get_stats(vfs_db_t *db);
 
+/* ── Tool result persistence (Phase 2: context packing overhaul) ───── */
+
+bool      vfs_result_put(vfs_db_t *db, const char *tool_name,
+                         const char *input_hash, const char *result,
+                         int ttl_seconds);
+char     *vfs_result_get(vfs_db_t *db, const char *key);
+int       vfs_result_evict(vfs_db_t *db);
+char    **vfs_result_list(vfs_db_t *db, int *out_count);
+
 #endif /* DSCO_VFS_H */

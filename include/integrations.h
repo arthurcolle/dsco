@@ -9,6 +9,9 @@ bool tool_tavily_search(const char *input, char *result, size_t rlen);
 bool tool_brave_search(const char *input, char *result, size_t rlen);
 bool tool_serpapi(const char *input, char *result, size_t rlen);
 bool tool_jina_read(const char *input, char *result, size_t rlen);
+bool tool_jina_search(const char *input, char *result, size_t rlen);
+bool tool_jina_embed(const char *input, char *result, size_t rlen);
+bool tool_parallel_search(const char *input, char *result, size_t rlen);
 
 /* ── GitHub ────────────────────────────────────────────────────────────── */
 bool tool_github_search(const char *input, char *result, size_t rlen);

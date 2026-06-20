@@ -70,7 +70,8 @@ def _fetch(params, tries=8):
             time.sleep(5 * (i + 1))
             continue
         if r.status_code == 200:
-            return r.text
+            # OAI XML is UTF-8; don't let requests guess latin-1 from headers
+            return r.content.decode("utf-8", "replace")
         if r.status_code == 503:           # arXiv flow control
             m = re.search(r"\d+", r.headers.get("Retry-After", ""))
             time.sleep(min(int(m.group()) if m else 20, 300))

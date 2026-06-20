@@ -12,7 +12,7 @@
  * Supported features:
  *   CommonMark:
  *     ATX headers (#..######), setext headers (=== / ---), thematic breaks
- *     Paragraphs, hard line breaks (trailing \\, trailing 2+ spaces)
+ *     Paragraphs, hard line breaks (trailing \\)
  *     Indented code blocks (4 spaces / tab)
  *     Fenced code blocks (``` / ~~~) with language + syntax highlighting
  *     Blockquotes (> nested >> nested), lazy continuation
@@ -108,6 +108,7 @@ typedef struct {
     char code_lang[64];
     char code_buf[MD_BUF_MAX];
     int  code_len;
+    bool code_truncated;    /* true when code block exceeded MD_BUF_MAX */
     char code_fence[8];   /* ``` or ~~~ */
     int  code_fence_len;
 
@@ -156,6 +157,7 @@ typedef struct {
 
     /* Streaming partial-line echo */
     int  partial_echo_pos;       /* how many buffered chars were partially echoed */
+    bool line_input_truncated;   /* line overflow dropped bytes due allocation failure */
 
     /* Feature hooks (set by agent.c) */
     int  paragraph_char_count;   /* F6: paragraph fade-in char counter */
