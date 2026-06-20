@@ -10,4 +10,11 @@ void agent_run(const char *api_key, const char *model,
                const char *topology_name, bool topology_auto,
                const char *provider_override);
 
+/* Orchestrator mode: Haiku routes to domain-filtered workers + topologies.
+ * See include/orchestrator.h for full documentation. */
+void agent_run_orchestrated(const char *api_key,
+                             const char *chat_model,
+                             const char *worker_model,
+                             const char *provider_override);
+
 #endif

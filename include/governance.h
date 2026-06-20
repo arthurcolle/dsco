@@ -240,4 +240,12 @@ int governance_audit_json(const governance_engine_t *g, char *buf, size_t len,
 
 const char *governance_tier_name(principal_tier_t t);
 
+/* ── §8: VFS Persistence ──────────────────────────────────────────── */
+
+struct vfs_db;
+typedef struct vfs_db vfs_db_t;
+
+/* Connect governance audit trail to VFS for persistent event logging */
+void governance_set_vfs(vfs_db_t *vfs);
+
 #endif

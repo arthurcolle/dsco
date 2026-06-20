@@ -25,4 +25,8 @@ int dsco_setup_report(char *out, size_t out_len);
 /* Current resolved path to the setup env file. */
 const char *dsco_setup_env_path(void);
 
+/* Set a single key in the saved env file (creates file if absent).
+ * Also updates the current process environment. Returns true on success. */
+bool dsco_setup_set_key(const char *key, const char *value);
+
 #endif

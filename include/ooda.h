@@ -213,4 +213,15 @@ const char *ooda_phase_name(ooda_phase_t p);
 const char *ooda_action_name(ooda_action_t a);
 const char *ooda_capability_name(capability_tier_t t);
 
+/* ── Scheduler Integration (§1/§7) ───────────────────────────────────── */
+
+struct scheduler_t;  /* forward declare — see scheduler.h */
+
+/* Set the cooperative scheduler used by OODA subsystem */
+void ooda_set_scheduler(struct scheduler_t *sched);
+
+/* Run a full OODA cycle as chained scheduler tasks (observe→orient→decide→act).
+   Each phase is spawned at SCHED_PRIO_HIGH and sequenced via sched_wait_task. */
+int ooda_run_scheduled(ooda_cycle_t *cycle, struct scheduler_t *sched);
+
 #endif

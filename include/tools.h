@@ -13,9 +13,27 @@ typedef struct {
     const char *description;
     const char *input_schema_json;
     bool (*execute)(const char *input_json, char *result, size_t result_len);
+    bool core;           /* true = always pageable; false = only via load_tools */
+    bool is_read_only;   /* true = no side effects (safe for streaming exec) */
+    bool is_concurrent;  /* true = no shared state (safe for parallel exec) */
 } tool_def_t;
 
+typedef enum {
+    TOOLS_CORE = 0,
+    TOOLS_AGENT,
+    TOOLS_FULL,
+} tools_init_profile_t;
+
+void             tools_init_profile(tools_init_profile_t profile);
 void             tools_init(void);
+/* Local-only fast init for metadata and direct tool execution paths.
+ * Skips plugin, browser profile, IPC, MCP, VFS, and daemon-facing setup. */
+void             tools_init_local_only(void);
+tools_init_profile_t tools_current_profile(void);
+bool             tools_profile_allows_index(int index);
+/* §8: VFS-backed tool result cache for deterministic tools */
+struct vfs_db;
+void             tools_set_vfs(struct vfs_db *vfs);
 void             tools_set_runtime_api_key(const char *api_key);
 void             tools_set_runtime_model(const char *model);
 const char      *tools_runtime_api_key(void);
@@ -24,9 +42,12 @@ const char      *tools_runtime_model(void);
  * is computed as a ratio of available context, not a fixed byte count. */
 void             tools_set_context_window(int tokens);
 int              tools_context_window(void);
+/* Pass current token usage so inline budget is based on remaining context */
+void             tools_set_context_usage(int input_tokens, int output_tokens);
 void             tools_context_turn_begin(void);
 swarm_t         *tools_swarm_instance(void);
 const tool_def_t *tools_get_all(int *count);
+int              tools_get_core_count(void);   /* only .core=true tools */
 int              tools_builtin_count(void);
 bool             tools_execute(const char *name, const char *input_json,
                                char *result, size_t result_len);
@@ -35,6 +56,27 @@ bool             tools_execute_for_tier(const char *name, const char *input_json
                                         char *result, size_t result_len);
 bool             tools_is_allowed_for_tier(const char *name, const char *tier,
                                            char *reason, size_t reason_len);
+char            *tools_normalize_input(const char *name, const char *input_json);
+
+/* ── Live agent loop constructs ──────────────────────────────────────── */
+
+#define DSCO_LOOP_PROMPT_MAX 1024
+#define DSCO_LOOP_REASON_MAX 256
+
+typedef struct {
+    bool force_continue;      /* inject prompt and keep the agent turn alive */
+    bool force_done;          /* explicit construct break/complete */
+    int  effective_max_turns; /* max-turn override; 0 means unchanged */
+    char prompt[DSCO_LOOP_PROMPT_MAX];
+    char reason[DSCO_LOOP_REASON_MAX];
+} loop_control_decision_t;
+
+void tools_loop_control_reset(void);
+bool tools_loop_control_has_active(void);
+int  tools_loop_control_effective_max_turns(int default_max_turns);
+void tools_loop_control_decide(int current_turn, bool model_done,
+                               bool has_followup,
+                               loop_control_decision_t *out);
 
 /* ── VM dispatch registration (§3: bytecode VM) ───────────────────────── */
 
@@ -73,8 +115,9 @@ typedef char *(*external_tool_cb)(const char *name, const char *input_json, void
 void  tools_register_external(const char *name, const char *description,
                                 const char *input_schema_json,
                                 external_tool_cb cb, void *ctx);
+void  tools_reset_external(void);
 
-#define MAX_EXTERNAL_TOOLS 128
+#define MAX_EXTERNAL_TOOLS 1024
 
 typedef struct {
     char   name[128];
@@ -82,6 +125,7 @@ typedef struct {
     char  *input_schema_json;
     external_tool_cb cb;
     void  *ctx;
+    bool   loaded;
 } external_tool_t;
 
 extern external_tool_t g_external_tools[];
@@ -264,10 +308,44 @@ extern quorum_telemetry_t g_quorum_telemetry;
  * API request. Results injected as HINT_PLAN hints. */
 void tool_quorum_gate_api(const char *context, const char *api_key);
 
+/* ── Compact tool catalog for system prompt ─────────────────────────── */
+
+/* Build a compact text catalog of all tools with signatures.
+ * Returns a malloc'd string (caller frees). Thread-safe after tools_init(). */
+char *tools_build_compact_catalog(void);
+
 /* ── Progressive schema: name+description only (no input_schema) ───── */
 
 /* Returns true if this tool should use compact schema (Tier 2 discovery).
  * Compact = name + description only, saving ~200 tokens per tool. */
 bool tool_is_progressive_schema(const tool_def_t *t, const tool_page_result_t *r);
+
+/* ── ACE Playbook + Context Management ──────────────────────────────── */
+
+/* Wire the active conversation for context_compact (takes void* to avoid llm.h dep) */
+void tools_set_active_conversation(void *conv);
+
+/* Advance the playbook turn counter (call once per agent turn) */
+void tools_playbook_advance_turn(void);
+
+/* ── Agent profile tool filter ───────────────────────────────────────── */
+
+/* Callback: returns true if tool_name is allowed by the active agent profile.
+ * group_hint may be NULL. Set to NULL to disable filtering. */
+typedef bool (*tool_profile_filter_fn_t)(const char *tool_name, const char *group_hint);
+
+void tools_set_profile_filter(tool_profile_filter_fn_t fn);
+void tools_clear_profile_filter(void);
+
+/* ── Embedding API ─────────────────────────────────────────────────── */
+
+/* Embed text via Jina v4 API. Returns malloc'd float[*out_dim] or NULL.
+ * Caller frees. Returns NULL if JINA_API_KEY is not set. */
+float *tools_embed_text(const char *text, int *out_dim);
+
+/* Set agent context for context-aware tool retrieval.
+ * Both params may be NULL to clear. Strings are copied internally. */
+void tools_set_agent_context(const char *recent_results,
+                             const char *working_memory_summary);
 
 #endif
