@@ -1,4 +1,5 @@
 #include "setup.h"
+#include "provider.h"
 
 #include <ctype.h>
 #include <errno.h>
@@ -41,15 +42,25 @@ static const char *k_known_env_keys[] = {
     "GROQ_API_KEY",
     "DEEPSEEK_API_KEY",
     "MISTRAL_API_KEY",
+    "MOONSHOT_API_KEY",
     "COHERE_API_KEY",
     "XAI_API_KEY",
     "CEREBRAS_API_KEY",
+    "AI21_API_KEY",
+    "DEEPINFRA_API_KEY",
+    "FIREWORKS_API_KEY",
     "GOOGLE_API_KEY",
     "GOOGLE_AI_API_KEY",
+    "GOOGLE_AI_STUDIO_API_KEY",
+    "GOOGLE_VERTEX_API_KEY",
     "GEMINI_API_KEY",
     "AZURE_OPENAI_API_KEY",
     "PERPLEXITY_API_KEY",
+    "MINIMAX_API_KEY",
+    "NOVITA_API_KEY",
     "REPLICATE_API_TOKEN",
+    "SAMBANOVA_API_KEY",
+    "SILICONFLOW_API_KEY",
     "HF_TOKEN",
     "GITHUB_TOKEN",
     "AWS_ACCESS_KEY_ID",
@@ -84,6 +95,7 @@ static const char *k_known_env_keys[] = {
     "POLYMARKET_PRIVATE_KEY",
     "POLYMARKET_RELAYER_API_KEY",
     "DSCO_MODEL",
+    "DSCO_EXEC",
     "DSCO_BASELINE_DB",
     "DSCO_TIMELINE_PORT",
     NULL
@@ -100,10 +112,13 @@ static const alias_map_t k_aliases[] = {
     { "JINA_API_KEY", { "JINA_AUTH_TOKEN", NULL } },
     { "PARALLEL_API_KEY", { "PARALLEL_AUTH_TOKEN", "PARALLEL_TOKEN", NULL } },
     { "GITHUB_TOKEN", { "GH_TOKEN", NULL } },
-    { "GOOGLE_API_KEY", { "GEMINI_API_KEY", "GOOGLE_AI_API_KEY", NULL } },
+    { "GOOGLE_API_KEY", { "GEMINI_API_KEY", "GOOGLE_AI_API_KEY",
+                          "GOOGLE_AI_STUDIO_API_KEY", "GOOGLE_VERTEX_API_KEY", NULL } },
     { "HF_TOKEN", { "HUGGINGFACE_TOKEN", NULL } },
     { "OPENROUTER_API_KEY", { "OPEN_ROUTER_API_KEY", NULL } },
     { "TOGETHER_API_KEY", { "TOGETHER_TOKEN", NULL } },
+    { "XAI_API_KEY", { "GROK_API_KEY", "X_AI_API_KEY", NULL } },
+    { "MOONSHOT_API_KEY", { "KIMI_API_KEY", "MOONSHOTAI_API_KEY", NULL } },
     { NULL, { NULL } }
 };
 
@@ -168,6 +183,14 @@ static bool is_valid_env_name(const char *name) {
         if (!(isalnum((unsigned char)*p) || *p == '_')) return false;
     }
     return true;
+}
+
+static bool is_known_env_key(const char *name) {
+    if (!name || !name[0]) return false;
+    for (int i = 0; k_known_env_keys[i]; i++) {
+        if (strcmp(k_known_env_keys[i], name) == 0) return true;
+    }
+    return canonical_from_alias(name) != NULL;
 }
 
 static char *trim_in_place(char *s) {
@@ -762,6 +785,24 @@ int dsco_setup_report(char *out, size_t out_len) {
     sbuf_appendf(out, out_len, &pos, "profile: %s\n", dsco_setup_profile_name());
     sbuf_appendf(out, out_len, &pos, "env file: %s (%s)\n",
                  path, has_saved_file ? "present" : "missing");
+    {
+        const char *anthropic_key = provider_resolve_api_key("anthropic");
+        const char *anthropic_mode = provider_auth_mode("anthropic", anthropic_key);
+        const char *oauth_source = provider_claude_code_oauth_source();
+        if (strcmp(anthropic_mode, "claude-code-oauth") == 0) {
+            sbuf_appendf(out, out_len, &pos,
+                         "anthropic auth default: %s via %s\n",
+                         anthropic_mode, oauth_source);
+        } else if (strcmp(oauth_source, "disabled") == 0) {
+            sbuf_appendf(out, out_len, &pos,
+                         "anthropic auth default: %s (Claude Code discovery disabled)\n",
+                         anthropic_mode);
+        } else {
+            sbuf_appendf(out, out_len, &pos,
+                         "anthropic auth default: %s\n",
+                         anthropic_mode);
+        }
+    }
 
     int available = 0;
     int missing = 0;
@@ -805,21 +846,92 @@ int dsco_setup_report(char *out, size_t out_len) {
         }
     }
 
+    kv_list_t extras;
+    kv_list_init(&extras);
+    for (int i = 0; i < saved.count; i++) {
+        if (is_known_env_key(saved.items[i].key)) continue;
+        if (!should_capture_generic_key(saved.items[i].key)) continue;
+        bool was_update = false;
+        (void)kv_list_set(&extras, saved.items[i].key, "", &was_update);
+    }
+    for (char **e = environ; e && *e; e++) {
+        const char *pair = *e;
+        const char *eq = strchr(pair, '=');
+        if (!eq) continue;
+        size_t klen = (size_t)(eq - pair);
+        if (klen == 0 || klen >= 256) continue;
+
+        char key[256];
+        memcpy(key, pair, klen);
+        key[klen] = '\0';
+
+        if (is_known_env_key(key)) continue;
+        if (!should_capture_generic_key(key)) continue;
+        if (!is_valid_env_name(key)) continue;
+        bool was_update = false;
+        (void)kv_list_set(&extras, key, "", &was_update);
+    }
+    if (extras.count > 0) {
+        qsort(extras.items, (size_t)extras.count, sizeof(extras.items[0]), cmp_kv_by_key);
+        sbuf_appendf(out, out_len, &pos, "\nadditional detected keys:\n");
+        for (int i = 0; i < extras.count; i++) {
+            const char *name = extras.items[i].key;
+            const char *runtime = getenv(name);
+            int saved_idx = kv_list_find(&saved, name);
+            const char *saved_val = (saved_idx >= 0) ? saved.items[saved_idx].value : NULL;
+            char masked[128];
+            mask_value((runtime && runtime[0]) ? runtime : saved_val, masked, sizeof(masked));
+
+            const char *source = "missing";
+            if (runtime && runtime[0]) {
+                if (saved_val && strcmp(runtime, saved_val) == 0) source = "saved+runtime";
+                else source = "runtime";
+            } else if (saved_val && saved_val[0]) {
+                source = "saved";
+            }
+
+            sbuf_appendf(out, out_len, &pos, "  %-28s : %-14s %s\n",
+                         name, source, masked);
+        }
+    }
+
     int extra_saved = 0;
     for (int i = 0; i < saved.count; i++) {
-        bool known = false;
-        for (int j = 0; k_known_env_keys[j]; j++) {
-            if (strcmp(saved.items[i].key, k_known_env_keys[j]) == 0) {
-                known = true;
-                break;
-            }
-        }
-        if (!known) extra_saved++;
+        if (!is_known_env_key(saved.items[i].key)) extra_saved++;
     }
 
     sbuf_appendf(out, out_len, &pos, "\nsummary: available=%d missing=%d extra_saved=%d\n",
                  available, missing, extra_saved);
 
+    kv_list_free(&extras);
     kv_list_free(&saved);
     return (int)pos;
+}
+
+bool dsco_setup_set_key(const char *key, const char *value) {
+    if (!key || !key[0] || !is_valid_env_name(key)) return false;
+    if (!value) value = "";
+
+    const char *path = resolve_env_path();
+    kv_list_t l;
+    kv_list_init(&l);
+
+    if (access(path, F_OK) == 0) {
+        if (!load_kv_file(path, &l)) {
+            kv_list_free(&l);
+            return false;
+        }
+    }
+
+    bool was_update = false;
+    if (!kv_list_set(&l, key, value, &was_update)) {
+        kv_list_free(&l);
+        return false;
+    }
+
+    bool ok = write_kv_file(path, &l);
+    kv_list_free(&l);
+
+    if (ok) setenv(key, value, 1);
+    return ok;
 }

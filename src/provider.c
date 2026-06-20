@@ -11,25 +11,100 @@
 
 #include "provider.h"
 #include "config.h"
+#include "crypto.h"
 #include "tools.h"
+#include "sealed_store.h"
+#include "provider_profiles.h"
 #include <stdlib.h>
 #include <string.h>
 #include <strings.h>
 #include <stdio.h>
+#include <ctype.h>
+#include <sys/time.h>
+#include <sys/stat.h>
+#include <fcntl.h>
+#include <pwd.h>
+#include <unistd.h>
 #include <curl/curl.h>
+
+#ifdef HAVE_LIBSODIUM
+#  include <sodium.h>
+#endif
 
 /* Forward declarations */
 static char *openai_build_request(provider_t *p, conversation_t *conv,
-                                   session_state_t *session, int max_tokens);
+                                   session_state_t *session, int max_tokens,
+                                   const char *credential);
 static struct curl_slist *openai_build_headers(provider_t *p, const char *api_key);
 static bool openrouter_should_disable_thinking(session_state_t *session);
+static bool moonshot_should_disable_thinking(session_state_t *session);
+static char *xai_build_request(provider_t *p, conversation_t *conv,
+                                session_state_t *session, int max_tokens,
+                                const char *credential);
+
+static char *unsupported_build_request(provider_t *p, conversation_t *conv,
+                                       session_state_t *session, int max_tokens,
+                                       const char *credential) {
+    (void)conv;
+    (void)session;
+    (void)max_tokens;
+    (void)credential;
+    const char *name = p && p->name ? p->name : "unknown";
+    const char *mode = p && p->data ? (const char *)p->data : "unknown";
+    jbuf_t b;
+    jbuf_init(&b, 256);
+    jbuf_append(&b, "{\"error\":\"provider transport not implemented\",");
+    jbuf_append(&b, "\"provider\":");
+    jbuf_append_json_str(&b, name);
+    jbuf_append(&b, ",\"transport\":");
+    jbuf_append_json_str(&b, mode);
+    jbuf_append(&b, "}");
+    return b.data;
+}
+
+static struct curl_slist *unsupported_build_headers(provider_t *p, const char *api_key) {
+    (void)p;
+    (void)api_key;
+    return NULL;
+}
+
+static stream_result_t unsupported_stream(provider_t *p, const char *api_key,
+                                          const char *request_json,
+                                          stream_text_cb text_cb,
+                                          stream_tool_start_cb tool_cb,
+                                          stream_thinking_cb thinking_cb,
+                                          void *cb_ctx) {
+    (void)api_key;
+    (void)request_json;
+    (void)tool_cb;
+    (void)thinking_cb;
+    stream_result_t result = {0};
+    result.ok = false;
+    result.http_status = 501;
+    result.parsed.stop_reason = safe_strdup("unsupported_provider");
+    result.parsed.blocks = safe_malloc(sizeof(content_block_t));
+    memset(result.parsed.blocks, 0, sizeof(content_block_t));
+    result.parsed.count = 1;
+    result.parsed.blocks[0].type = safe_strdup("text");
+
+    const char *name = p && p->name ? p->name : "unknown";
+    const char *mode = p && p->data ? (const char *)p->data : "unknown";
+    char msg[512];
+    snprintf(msg, sizeof(msg),
+             "Provider '%s' is known, but DSCO has no '%s' transport adapter yet.",
+             name, mode);
+    result.parsed.blocks[0].text = safe_strdup(msg);
+    if (text_cb) text_cb(msg, cb_ctx);
+    return result;
+}
 
 /* ── Anthropic Provider ────────────────────────────────────────────────── */
 
 static char *anthropic_build_request(provider_t *p, conversation_t *conv,
-                                      session_state_t *session, int max_tokens) {
+                                      session_state_t *session, int max_tokens,
+                                      const char *credential) {
     (void)p;
-    return llm_build_request_ex(conv, session, max_tokens);
+    return llm_build_request_ex_for_credential(conv, session, max_tokens, credential);
 }
 
 static struct curl_slist *anthropic_build_headers(provider_t *p, const char *api_key) {
@@ -38,13 +113,20 @@ static struct curl_slist *anthropic_build_headers(provider_t *p, const char *api
     hdrs = curl_slist_append(hdrs, "Content-Type: application/json");
     hdrs = curl_slist_append(hdrs, "Accept: text/event-stream");
     char auth[512];
-    snprintf(auth, sizeof(auth), "x-api-key: %s", api_key);
+    if (llm_anthropic_uses_claude_code_auth(api_key))
+        snprintf(auth, sizeof(auth), "Authorization: Bearer %s", api_key);
+    else
+        snprintf(auth, sizeof(auth), "x-api-key: %s", api_key);
     hdrs = curl_slist_append(hdrs, auth);
     char ver[128];
     snprintf(ver, sizeof(ver), "anthropic-version: %s", ANTHROPIC_VERSION);
     hdrs = curl_slist_append(hdrs, ver);
     char beta[256];
-    snprintf(beta, sizeof(beta), "anthropic-beta: %s", ANTHROPIC_BETAS);
+    if (llm_anthropic_uses_claude_code_auth(api_key))
+        snprintf(beta, sizeof(beta), "anthropic-beta: oauth-2025-04-20,%s",
+                 ANTHROPIC_BETAS);
+    else
+        snprintf(beta, sizeof(beta), "anthropic-beta: %s", ANTHROPIC_BETAS);
     hdrs = curl_slist_append(hdrs, beta);
     hdrs = curl_slist_append(hdrs, "Expect:");
     return hdrs;
@@ -107,6 +189,898 @@ static bool or_env_bool(const char *val) {
     return val && (val[0] == '1' || strcasecmp(val, "true") == 0);
 }
 
+static bool provider_env_truthy(const char *val) {
+    return val && (val[0] == '1' || strcasecmp(val, "true") == 0 ||
+                   strcasecmp(val, "yes") == 0);
+}
+
+static double provider_now_sec(void) {
+    struct timeval tv;
+    gettimeofday(&tv, NULL);
+    return (double)tv.tv_sec + (double)tv.tv_usec / 1000000.0;
+}
+
+bool provider_debug_auth_enabled(void) {
+    return provider_env_truthy(getenv("DSCO_DEBUG_AUTH"));
+}
+
+const char *provider_auth_mode(const char *provider_name, const char *resolved_key) {
+    if (!resolved_key || !resolved_key[0]) return "missing";
+    if (provider_name && strcmp(provider_name, "anthropic") == 0) {
+        return llm_anthropic_uses_claude_code_auth(resolved_key)
+            ? "claude-code-oauth"
+            : "anthropic-api-key";
+    }
+    if (provider_name && strcmp(provider_name, "openrouter") == 0)
+        return "openrouter-api-key";
+    if (provider_name && strcmp(provider_name, "openai") == 0)
+        return "openai-api-key";
+    return "api-key";
+}
+
+void provider_debug_log_request(const char *provider_name, const char *model,
+                                const char *resolved_key) {
+    if (!provider_debug_auth_enabled()) return;
+    fprintf(stderr, "  [auth] provider=%s model=%s auth=%s\n",
+            provider_name && provider_name[0] ? provider_name : "(none)",
+            model && model[0] ? model : "(none)",
+            provider_auth_mode(provider_name, resolved_key));
+}
+
+static void provider_expand_path(char *out, size_t out_len, const char *path) {
+    if (!out || out_len == 0) return;
+    out[0] = '\0';
+    if (!path || !path[0]) return;
+
+    if (path[0] == '~' && path[1] == '/') {
+        const char *home = getenv("HOME");
+        if (!home || !home[0]) return;
+        snprintf(out, out_len, "%s/%s", home, path + 2);
+        return;
+    }
+
+    snprintf(out, out_len, "%s", path);
+}
+
+static char *provider_read_text_file(const char *path) {
+    if (!path || !path[0]) return NULL;
+    FILE *fp = fopen(path, "rb");
+    if (!fp) return NULL;
+    if (fseek(fp, 0, SEEK_END) != 0) {
+        fclose(fp);
+        return NULL;
+    }
+    long size = ftell(fp);
+    if (size < 0) {
+        fclose(fp);
+        return NULL;
+    }
+    rewind(fp);
+
+    char *data = safe_malloc((size_t)size + 1);
+    size_t got = fread(data, 1, (size_t)size, fp);
+    fclose(fp);
+    data[got] = '\0';
+    return data;
+}
+
+static void provider_build_claude_code_service_name(char *out, size_t out_len) {
+    const char *override = getenv("DSCO_CLAUDE_CODE_KEYCHAIN_SERVICE");
+    if (override && override[0]) {
+        snprintf(out, out_len, "%s", override);
+        return;
+    }
+
+    const char *oauth_suffix = "";
+    if (getenv("CLAUDE_CODE_CUSTOM_OAUTH_URL")) {
+        oauth_suffix = "-custom-oauth";
+    } else if (getenv("USER_TYPE") &&
+               strcmp(getenv("USER_TYPE"), "ant") == 0 &&
+               provider_env_truthy(getenv("USE_LOCAL_OAUTH"))) {
+        oauth_suffix = "-local-oauth";
+    } else if (getenv("USER_TYPE") &&
+               strcmp(getenv("USER_TYPE"), "ant") == 0 &&
+               provider_env_truthy(getenv("USE_STAGING_OAUTH"))) {
+        oauth_suffix = "-staging-oauth";
+    }
+
+    char dir_suffix[16] = "";
+    const char *config_dir = getenv("CLAUDE_CONFIG_DIR");
+    if (config_dir && config_dir[0]) {
+        char dir_hash[65];
+        sha256_hex((const uint8_t *)config_dir, strlen(config_dir), dir_hash);
+        snprintf(dir_suffix, sizeof(dir_suffix), "-%.8s", dir_hash);
+    }
+
+    snprintf(out, out_len, "Claude Code%s-credentials%s", oauth_suffix, dir_suffix);
+}
+
+#define CLAUDE_CODE_OAUTH_TOKEN_URL        "https://platform.claude.com/v1/oauth/token"
+#define CLAUDE_CODE_OAUTH_CLIENT_ID        "9d1c250a-e61b-44d9-88ed-5944d1962f5e"
+#define CLAUDE_CODE_OAUTH_SCOPES           "user:profile user:inference user:sessions:claude_code user:mcp_servers user:file_upload"
+#define CLAUDE_CODE_OAUTH_EXPIRY_BUFFER_MS (5LL * 60LL * 1000LL)
+
+typedef enum {
+    CLAUDE_CODE_OAUTH_SOURCE_MISSING = 0,
+    CLAUDE_CODE_OAUTH_SOURCE_ENV,
+    CLAUDE_CODE_OAUTH_SOURCE_KEYCHAIN,
+    CLAUDE_CODE_OAUTH_SOURCE_FILE,
+} claude_code_oauth_source_t;
+
+typedef struct {
+    claude_code_oauth_source_t source;
+    char access_token[4096];
+    char refresh_token[4096];
+    long long expires_at_ms;
+    char credentials_path[1024];
+    char keychain_service[128];
+    char keychain_account[128];
+    char *storage_json;
+    char *oauth_json;
+} claude_code_oauth_bundle_t;
+
+static void provider_claude_code_oauth_bundle_init(claude_code_oauth_bundle_t *bundle) {
+    memset(bundle, 0, sizeof(*bundle));
+}
+
+static void provider_claude_code_oauth_bundle_free(claude_code_oauth_bundle_t *bundle) {
+    if (!bundle) return;
+    free(bundle->storage_json);
+    free(bundle->oauth_json);
+    bundle->storage_json = NULL;
+    bundle->oauth_json = NULL;
+}
+
+static const char *provider_claude_code_oauth_source_name(claude_code_oauth_source_t source) {
+    switch (source) {
+        case CLAUDE_CODE_OAUTH_SOURCE_ENV: return "env";
+        case CLAUDE_CODE_OAUTH_SOURCE_KEYCHAIN: return "macos-keychain";
+        case CLAUDE_CODE_OAUTH_SOURCE_FILE: return "credentials-file";
+        default: return "missing";
+    }
+}
+
+static long long provider_now_ms(void) {
+    struct timeval tv;
+    gettimeofday(&tv, NULL);
+    return (long long)tv.tv_sec * 1000LL + (long long)tv.tv_usec / 1000LL;
+}
+
+static bool provider_claude_code_oauth_expired(long long expires_at_ms) {
+    if (expires_at_ms <= 0) return false;
+    return provider_now_ms() + CLAUDE_CODE_OAUTH_EXPIRY_BUFFER_MS >= expires_at_ms;
+}
+
+static void provider_get_username(char *out, size_t out_len) {
+    if (!out || out_len == 0) return;
+    out[0] = '\0';
+
+    const char *user = getenv("USER");
+    if (user && user[0]) {
+        snprintf(out, out_len, "%s", user);
+        return;
+    }
+
+    struct passwd *pw = getpwuid(getuid());
+    if (pw && pw->pw_name && pw->pw_name[0]) {
+        snprintf(out, out_len, "%s", pw->pw_name);
+        return;
+    }
+
+    snprintf(out, out_len, "claude-code-user");
+}
+
+static void provider_build_claude_code_credentials_path(char *out, size_t out_len) {
+    const char *override_path = getenv("DSCO_CLAUDE_CODE_CREDENTIALS_FILE");
+    if (override_path && override_path[0]) {
+        provider_expand_path(out, out_len, override_path);
+        return;
+    }
+
+    const char *config_dir = getenv("CLAUDE_CONFIG_DIR");
+    if (config_dir && config_dir[0]) {
+        snprintf(out, out_len, "%s/.credentials.json", config_dir);
+        return;
+    }
+
+    provider_expand_path(out, out_len, "~/.claude/.credentials.json");
+}
+
+/* ── dsco-owned encrypted cache for the Claude Code OAuth bundle ───────────
+ *
+ * Touching Claude Code's keychain entry via the `security` CLI pops a system
+ * password prompt on every dsco invocation unless the user has clicked "Always
+ * Allow". To make dsco a practical tool we cache the bundle once, encrypted
+ * with the sealed_store master key (which dsco already loads at startup), and
+ * read from there on subsequent runs. Cache is invalidated when expired so
+ * Claude Code remains the source of truth for refreshes.
+ *
+ * Disabled by setting DSCO_DISABLE_CLAUDE_CODE_LOCAL_CACHE=1.
+ * Override path with DSCO_CLAUDE_CODE_LOCAL_CACHE.
+ * ────────────────────────────────────────────────────────────────────────── */
+
+#define DSCO_CC_CACHE_MAGIC "DSCC1"
+#define DSCO_CC_CACHE_MAGIC_LEN 5
+
+static void provider_build_dsco_cc_cache_path(char *out, size_t out_len) {
+    const char *override = getenv("DSCO_CLAUDE_CODE_LOCAL_CACHE");
+    if (override && override[0]) {
+        provider_expand_path(out, out_len, override);
+        return;
+    }
+    const char *home = getenv("HOME");
+    if (!home || !home[0]) home = "/tmp";
+    snprintf(out, out_len, "%s/.dsco/cc-oauth.bin", home);
+}
+
+static bool provider_save_claude_code_bundle_local_cache(const char *storage_json) {
+#ifdef HAVE_LIBSODIUM
+    if (!storage_json || !storage_json[0]) return false;
+    if (provider_env_truthy(getenv("DSCO_DISABLE_CLAUDE_CODE_LOCAL_CACHE"))) return false;
+
+    uint8_t key[32];
+    if (!sealed_store_master_key_copy(key)) return false;
+
+    size_t json_len = strlen(storage_json);
+    size_t cipher_len = crypto_secretbox_MACBYTES + json_len;
+    uint8_t *cipher = malloc(cipher_len);
+    if (!cipher) { sodium_memzero(key, sizeof(key)); return false; }
+
+    uint8_t nonce[crypto_secretbox_NONCEBYTES];
+    randombytes_buf(nonce, sizeof(nonce));
+
+    if (crypto_secretbox_easy(cipher, (const uint8_t *)storage_json, json_len,
+                              nonce, key) != 0) {
+        sodium_memzero(key, sizeof(key));
+        free(cipher);
+        return false;
+    }
+    sodium_memzero(key, sizeof(key));
+
+    char path[1024];
+    provider_build_dsco_cc_cache_path(path, sizeof(path));
+
+    char dir[1024];
+    snprintf(dir, sizeof(dir), "%s", path);
+    char *slash = strrchr(dir, '/');
+    if (slash) {
+        *slash = '\0';
+        (void)mkdir(dir, 0700);
+    }
+
+    char tmp_path[1100];
+    snprintf(tmp_path, sizeof(tmp_path), "%s.tmp.XXXXXX", path);
+    int fd = mkstemp(tmp_path);
+    if (fd < 0) { free(cipher); return false; }
+    (void)fchmod(fd, 0600);
+
+    bool ok = (write(fd, DSCO_CC_CACHE_MAGIC, DSCO_CC_CACHE_MAGIC_LEN) == DSCO_CC_CACHE_MAGIC_LEN) &&
+              (write(fd, nonce, sizeof(nonce)) == (ssize_t)sizeof(nonce)) &&
+              (write(fd, cipher, cipher_len) == (ssize_t)cipher_len);
+    close(fd);
+    free(cipher);
+
+    if (!ok || rename(tmp_path, path) != 0) {
+        unlink(tmp_path);
+        return false;
+    }
+    return true;
+#else
+    (void)storage_json;
+    return false;
+#endif
+}
+
+static char *provider_load_claude_code_bundle_local_cache(void) {
+#ifdef HAVE_LIBSODIUM
+    if (provider_env_truthy(getenv("DSCO_DISABLE_CLAUDE_CODE_LOCAL_CACHE"))) return NULL;
+
+    char path[1024];
+    provider_build_dsco_cc_cache_path(path, sizeof(path));
+
+    FILE *fp = fopen(path, "rb");
+    if (!fp) return NULL;
+
+    if (fseek(fp, 0, SEEK_END) != 0) { fclose(fp); return NULL; }
+    long size = ftell(fp);
+    rewind(fp);
+
+    long min_size = (long)DSCO_CC_CACHE_MAGIC_LEN +
+                    (long)crypto_secretbox_NONCEBYTES +
+                    (long)crypto_secretbox_MACBYTES;
+    if (size <= min_size || size > (long)(1024 * 1024)) {
+        fclose(fp);
+        return NULL;
+    }
+
+    uint8_t magic[DSCO_CC_CACHE_MAGIC_LEN];
+    uint8_t nonce[crypto_secretbox_NONCEBYTES];
+    if (fread(magic, 1, sizeof(magic), fp) != sizeof(magic) ||
+        memcmp(magic, DSCO_CC_CACHE_MAGIC, DSCO_CC_CACHE_MAGIC_LEN) != 0 ||
+        fread(nonce, 1, sizeof(nonce), fp) != sizeof(nonce)) {
+        fclose(fp);
+        return NULL;
+    }
+
+    size_t cipher_len = (size_t)size - sizeof(magic) - sizeof(nonce);
+    uint8_t *cipher = malloc(cipher_len);
+    if (!cipher) { fclose(fp); return NULL; }
+    if (fread(cipher, 1, cipher_len, fp) != cipher_len) {
+        free(cipher);
+        fclose(fp);
+        return NULL;
+    }
+    fclose(fp);
+
+    uint8_t key[32];
+    if (!sealed_store_master_key_copy(key)) {
+        free(cipher);
+        return NULL;
+    }
+
+    size_t plain_len = cipher_len - crypto_secretbox_MACBYTES;
+    char *plain = malloc(plain_len + 1);
+    if (!plain) {
+        sodium_memzero(key, sizeof(key));
+        free(cipher);
+        return NULL;
+    }
+
+    int rc = crypto_secretbox_open_easy((uint8_t *)plain, cipher, cipher_len,
+                                        nonce, key);
+    sodium_memzero(key, sizeof(key));
+    free(cipher);
+
+    if (rc != 0) {
+        free(plain);
+        unlink(path); /* corrupt or master key rotated — drop it */
+        return NULL;
+    }
+    plain[plain_len] = '\0';
+    return plain;
+#else
+    return NULL;
+#endif
+}
+
+static void provider_invalidate_claude_code_local_cache(void) {
+    char path[1024];
+    provider_build_dsco_cc_cache_path(path, sizeof(path));
+    (void)unlink(path);
+}
+
+static char *provider_shell_quote(const char *s) {
+    jbuf_t b;
+    jbuf_init(&b, (s ? strlen(s) : 0) + 8);
+    jbuf_append_char(&b, '\'');
+    if (s) {
+        for (const char *p = s; *p; p++) {
+            if (*p == '\'') jbuf_append(&b, "'\"'\"'");
+            else jbuf_append_char(&b, *p);
+        }
+    }
+    jbuf_append_char(&b, '\'');
+    return b.data;
+}
+
+static bool provider_extract_claude_code_oauth_bundle(const char *json,
+                                                      claude_code_oauth_bundle_t *bundle) {
+    if (!json || !bundle) return false;
+
+    char *oauth = json_get_raw(json, "claudeAiOauth");
+    if (!oauth) return false;
+
+    char *access = json_get_str(oauth, "accessToken");
+    if (!access || !access[0]) {
+        free(access);
+        free(oauth);
+        return false;
+    }
+
+    char *refresh = json_get_str(oauth, "refreshToken");
+    char *expires_raw = json_get_raw(oauth, "expiresAt");
+
+    snprintf(bundle->access_token, sizeof(bundle->access_token), "%s", access);
+    if (refresh && refresh[0])
+        snprintf(bundle->refresh_token, sizeof(bundle->refresh_token), "%s", refresh);
+    bundle->expires_at_ms = expires_raw ? atoll(expires_raw) : 0;
+    bundle->oauth_json = oauth;
+    bundle->storage_json = safe_strdup(json);
+
+    free(access);
+    free(refresh);
+    free(expires_raw);
+    return true;
+}
+
+static bool provider_command_read_all(const char *cmd, char *out, size_t out_len) {
+    if (!cmd || !out || out_len == 0) return false;
+    out[0] = '\0';
+
+    FILE *fp = popen(cmd, "r");
+    if (!fp) return false;
+    size_t got = fread(out, 1, out_len - 1, fp);
+    out[got] = '\0';
+    int rc = pclose(fp);
+    return rc == 0 && got > 0;
+}
+
+static bool provider_load_claude_code_bundle_from_keychain(claude_code_oauth_bundle_t *bundle) {
+#ifdef __APPLE__
+    char service[128];
+    char account[128];
+    provider_build_claude_code_service_name(service, sizeof(service));
+    provider_get_username(account, sizeof(account));
+
+    char *q_service = provider_shell_quote(service);
+    char *q_account = provider_shell_quote(account);
+    bool ok = false;
+    char json[8192];
+
+    if (q_service && q_account) {
+        char cmd[512];
+        snprintf(cmd, sizeof(cmd),
+                 "security find-generic-password -a %s -s %s -w 2>/dev/null",
+                 q_account, q_service);
+        if (provider_command_read_all(cmd, json, sizeof(json)) &&
+            provider_extract_claude_code_oauth_bundle(json, bundle)) {
+            bundle->source = CLAUDE_CODE_OAUTH_SOURCE_KEYCHAIN;
+            snprintf(bundle->keychain_service, sizeof(bundle->keychain_service), "%s", service);
+            snprintf(bundle->keychain_account, sizeof(bundle->keychain_account), "%s", account);
+            ok = true;
+        }
+    }
+
+    if (!ok && q_service) {
+        char cmd[384];
+        snprintf(cmd, sizeof(cmd),
+                 "security find-generic-password -s %s -w 2>/dev/null", q_service);
+        if (provider_command_read_all(cmd, json, sizeof(json)) &&
+            provider_extract_claude_code_oauth_bundle(json, bundle)) {
+            bundle->source = CLAUDE_CODE_OAUTH_SOURCE_KEYCHAIN;
+            snprintf(bundle->keychain_service, sizeof(bundle->keychain_service), "%s", service);
+            snprintf(bundle->keychain_account, sizeof(bundle->keychain_account), "%s", account);
+            ok = true;
+        }
+    }
+
+    free(q_service);
+    free(q_account);
+    return ok;
+#else
+    (void)bundle;
+    return false;
+#endif
+}
+
+static bool provider_load_claude_code_bundle_from_file(claude_code_oauth_bundle_t *bundle) {
+    char creds_path[1024];
+    provider_build_claude_code_credentials_path(creds_path, sizeof(creds_path));
+
+    char *json = provider_read_text_file(creds_path);
+    if (!json) return false;
+
+    bool ok = provider_extract_claude_code_oauth_bundle(json, bundle);
+    free(json);
+    if (!ok) return false;
+
+    bundle->source = CLAUDE_CODE_OAUTH_SOURCE_FILE;
+    snprintf(bundle->credentials_path, sizeof(bundle->credentials_path), "%s", creds_path);
+    return true;
+}
+
+static bool provider_load_claude_code_oauth_bundle(claude_code_oauth_bundle_t *bundle) {
+    provider_claude_code_oauth_bundle_init(bundle);
+
+    const char *env = getenv("DSCO_CLAUDE_CODE_OAUTH_TOKEN");
+    if (env && env[0]) {
+        bundle->source = CLAUDE_CODE_OAUTH_SOURCE_ENV;
+        snprintf(bundle->access_token, sizeof(bundle->access_token), "%s", env);
+        return true;
+    }
+
+    env = getenv("CLAUDE_CODE_OAUTH_TOKEN");
+    if (env && env[0]) {
+        bundle->source = CLAUDE_CODE_OAUTH_SOURCE_ENV;
+        snprintf(bundle->access_token, sizeof(bundle->access_token), "%s", env);
+        return true;
+    }
+
+    if (provider_env_truthy(getenv("DSCO_DISABLE_CLAUDE_CODE_OAUTH_DISCOVERY")))
+        return false;
+
+    /* Try dsco-owned local cache first — avoids prompting for the Claude Code
+     * keychain entry on every run. Cache is invalidated when expired so
+     * Claude Code's keychain remains the authority for refreshes. */
+    {
+        char *cached_json = provider_load_claude_code_bundle_local_cache();
+        if (cached_json) {
+            if (provider_extract_claude_code_oauth_bundle(cached_json, bundle) &&
+                bundle->access_token[0] &&
+                !provider_claude_code_oauth_expired(bundle->expires_at_ms)) {
+                /* mark as keychain-sourced so a future refresh persists back
+                 * to Claude Code's authoritative store */
+                bundle->source = CLAUDE_CODE_OAUTH_SOURCE_KEYCHAIN;
+                provider_build_claude_code_service_name(bundle->keychain_service,
+                                                        sizeof(bundle->keychain_service));
+                provider_get_username(bundle->keychain_account,
+                                      sizeof(bundle->keychain_account));
+                free(cached_json);
+                return true;
+            }
+            /* extracted but stale, or extract failed — drop and re-read source */
+            provider_claude_code_oauth_bundle_free(bundle);
+            provider_claude_code_oauth_bundle_init(bundle);
+            provider_invalidate_claude_code_local_cache();
+            free(cached_json);
+        }
+    }
+
+    if (provider_load_claude_code_bundle_from_keychain(bundle)) {
+        if (bundle->storage_json)
+            (void)provider_save_claude_code_bundle_local_cache(bundle->storage_json);
+        return true;
+    }
+    if (provider_load_claude_code_bundle_from_file(bundle)) {
+        if (bundle->storage_json)
+            (void)provider_save_claude_code_bundle_local_cache(bundle->storage_json);
+        return true;
+    }
+    provider_claude_code_oauth_bundle_free(bundle);
+    return false;
+}
+
+static size_t provider_http_write_cb(char *ptr, size_t size, size_t nmemb, void *userdata) {
+    jbuf_t *buf = (jbuf_t *)userdata;
+    size_t n = size * nmemb;
+    jbuf_append_len(buf, ptr, n);
+    return n;
+}
+
+static char *provider_default_scope_json_array(void) {
+    jbuf_t b;
+    jbuf_init(&b, 256);
+    const char *scopes[] = {
+        "user:profile",
+        "user:inference",
+        "user:sessions:claude_code",
+        "user:mcp_servers",
+        "user:file_upload",
+        NULL
+    };
+    jbuf_append_char(&b, '[');
+    for (int i = 0; scopes[i]; i++) {
+        if (i) jbuf_append_char(&b, ',');
+        jbuf_append_json_str(&b, scopes[i]);
+    }
+    jbuf_append_char(&b, ']');
+    return b.data;
+}
+
+static char *provider_build_refreshed_oauth_json(const claude_code_oauth_bundle_t *bundle,
+                                                 const char *scope_string) {
+    char *scopes_raw = bundle->oauth_json ? json_get_raw(bundle->oauth_json, "scopes") : NULL;
+    char *subscription_type =
+        bundle->oauth_json ? json_get_str(bundle->oauth_json, "subscriptionType") : NULL;
+    char *rate_limit_tier =
+        bundle->oauth_json ? json_get_str(bundle->oauth_json, "rateLimitTier") : NULL;
+    char *default_scopes = NULL;
+
+    jbuf_t out;
+    jbuf_init(&out, 512);
+    jbuf_append_char(&out, '{');
+    jbuf_append_json_str(&out, "accessToken");
+    jbuf_append_char(&out, ':');
+    jbuf_append_json_str(&out, bundle->access_token);
+    jbuf_append_char(&out, ',');
+    jbuf_append_json_str(&out, "refreshToken");
+    jbuf_append_char(&out, ':');
+    jbuf_append_json_str(&out, bundle->refresh_token);
+    jbuf_append_char(&out, ',');
+    jbuf_append_json_str(&out, "expiresAt");
+    jbuf_appendf(&out, ":%lld", bundle->expires_at_ms);
+    jbuf_append_char(&out, ',');
+    jbuf_append_json_str(&out, "scopes");
+    jbuf_append_char(&out, ':');
+    if (scope_string && scope_string[0]) {
+        jbuf_append_char(&out, '[');
+        const char *cur = scope_string;
+        bool first = true;
+        while (*cur) {
+            while (*cur == ' ') cur++;
+            if (!*cur) break;
+            const char *end = strchr(cur, ' ');
+            if (!end) end = cur + strlen(cur);
+            if (!first) jbuf_append_char(&out, ',');
+            char scope[128];
+            size_t n = (size_t)(end - cur);
+            if (n >= sizeof(scope)) n = sizeof(scope) - 1;
+            memcpy(scope, cur, n);
+            scope[n] = '\0';
+            jbuf_append_json_str(&out, scope);
+            first = false;
+            cur = end;
+        }
+        jbuf_append_char(&out, ']');
+    } else if (scopes_raw && scopes_raw[0]) {
+        jbuf_append(&out, scopes_raw);
+    } else {
+        default_scopes = provider_default_scope_json_array();
+        jbuf_append(&out, default_scopes);
+    }
+    if (subscription_type && subscription_type[0]) {
+        jbuf_append_char(&out, ',');
+        jbuf_append_json_str(&out, "subscriptionType");
+        jbuf_append_char(&out, ':');
+        jbuf_append_json_str(&out, subscription_type);
+    }
+    if (rate_limit_tier && rate_limit_tier[0]) {
+        jbuf_append_char(&out, ',');
+        jbuf_append_json_str(&out, "rateLimitTier");
+        jbuf_append_char(&out, ':');
+        jbuf_append_json_str(&out, rate_limit_tier);
+    }
+    jbuf_append_char(&out, '}');
+
+    free(scopes_raw);
+    free(subscription_type);
+    free(rate_limit_tier);
+    free(default_scopes);
+    return out.data;
+}
+
+static bool provider_find_json_value_span(const char *json, const char *key,
+                                          const char **out_start, const char **out_end) {
+    if (!json || !key || !out_start || !out_end) return false;
+
+    char needle[128];
+    snprintf(needle, sizeof(needle), "\"%s\"", key);
+    const char *p = strstr(json, needle);
+    if (!p) return false;
+
+    p += strlen(needle);
+    while (*p && isspace((unsigned char)*p)) p++;
+    if (*p != ':') return false;
+    p++;
+    while (*p && isspace((unsigned char)*p)) p++;
+    if (*p != '{') return false;
+
+    const char *start = p;
+    int depth = 0;
+    bool in_string = false;
+    bool escaped = false;
+    for (; *p; p++) {
+        char ch = *p;
+        if (in_string) {
+            if (escaped) escaped = false;
+            else if (ch == '\\') escaped = true;
+            else if (ch == '"') in_string = false;
+            continue;
+        }
+        if (ch == '"') {
+            in_string = true;
+            continue;
+        }
+        if (ch == '{') depth++;
+        else if (ch == '}') {
+            depth--;
+            if (depth == 0) {
+                *out_start = start;
+                *out_end = p + 1;
+                return true;
+            }
+        }
+    }
+
+    return false;
+}
+
+static char *provider_replace_claude_code_oauth_json(const claude_code_oauth_bundle_t *bundle,
+                                                     const char *new_oauth_json) {
+    if (!new_oauth_json) return NULL;
+    if (!bundle->storage_json || !bundle->storage_json[0] ||
+        !strchr(bundle->storage_json, '{')) {
+        jbuf_t out;
+        jbuf_init(&out, 256);
+        jbuf_append(&out, "{\"claudeAiOauth\":");
+        jbuf_append(&out, new_oauth_json);
+        jbuf_append_char(&out, '}');
+        return out.data;
+    }
+
+    const char *value_start = NULL;
+    const char *value_end = NULL;
+    if (!provider_find_json_value_span(bundle->storage_json, "claudeAiOauth",
+                                       &value_start, &value_end)) {
+        jbuf_t out;
+        jbuf_init(&out, strlen(bundle->storage_json) + strlen(new_oauth_json) + 32);
+        size_t len = strlen(bundle->storage_json);
+        if (len > 0 && bundle->storage_json[len - 1] == '}') {
+            jbuf_append_len(&out, bundle->storage_json, len - 1);
+            if (len > 2) jbuf_append_char(&out, ',');
+            jbuf_append_json_str(&out, "claudeAiOauth");
+            jbuf_append_char(&out, ':');
+            jbuf_append(&out, new_oauth_json);
+            jbuf_append_char(&out, '}');
+            return out.data;
+        }
+        jbuf_free(&out);
+        return safe_strdup(bundle->storage_json);
+    }
+
+    size_t prefix_len = (size_t)(value_start - bundle->storage_json);
+    size_t suffix_len = strlen(value_end);
+    char *out = safe_malloc(prefix_len + strlen(new_oauth_json) + suffix_len + 1);
+    memcpy(out, bundle->storage_json, prefix_len);
+    strcpy(out + prefix_len, new_oauth_json);
+    strcpy(out + prefix_len + strlen(new_oauth_json), value_end);
+    return out;
+}
+
+static bool provider_write_claude_code_bundle_file(const char *path, const char *json) {
+    if (!path || !path[0] || !json) return false;
+    FILE *fp = fopen(path, "wb");
+    if (!fp) return false;
+    size_t len = strlen(json);
+    bool ok = fwrite(json, 1, len, fp) == len;
+    fclose(fp);
+    return ok;
+}
+
+static bool provider_write_claude_code_bundle_keychain(const claude_code_oauth_bundle_t *bundle,
+                                                       const char *json) {
+#ifdef __APPLE__
+    if (!bundle || !json || !bundle->keychain_service[0]) return false;
+    char *q_service = provider_shell_quote(bundle->keychain_service);
+    char *q_account = provider_shell_quote(bundle->keychain_account[0]
+                                           ? bundle->keychain_account
+                                           : "claude-code-user");
+    char *q_json = provider_shell_quote(json);
+    bool ok = false;
+    if (q_service && q_account && q_json) {
+        jbuf_t cmd;
+        jbuf_init(&cmd, strlen(json) + 256);
+        jbuf_append(&cmd, "security add-generic-password -U -a ");
+        jbuf_append(&cmd, q_account);
+        jbuf_append(&cmd, " -s ");
+        jbuf_append(&cmd, q_service);
+        jbuf_append(&cmd, " -w ");
+        jbuf_append(&cmd, q_json);
+        jbuf_append(&cmd, " >/dev/null 2>&1");
+        ok = system(cmd.data) == 0;
+        jbuf_free(&cmd);
+    }
+    free(q_service);
+    free(q_account);
+    free(q_json);
+    return ok;
+#else
+    (void)bundle;
+    (void)json;
+    return false;
+#endif
+}
+
+static bool provider_persist_claude_code_bundle(const claude_code_oauth_bundle_t *bundle,
+                                                const char *scope_string) {
+    if (!bundle || bundle->source == CLAUDE_CODE_OAUTH_SOURCE_ENV) return true;
+
+    char *oauth_json = provider_build_refreshed_oauth_json(bundle, scope_string);
+    char *storage_json = provider_replace_claude_code_oauth_json(bundle, oauth_json);
+    free(oauth_json);
+    if (!storage_json) return false;
+
+    bool ok = false;
+    if (bundle->source == CLAUDE_CODE_OAUTH_SOURCE_KEYCHAIN) {
+        ok = provider_write_claude_code_bundle_keychain(bundle, storage_json);
+    } else if (bundle->source == CLAUDE_CODE_OAUTH_SOURCE_FILE) {
+        ok = provider_write_claude_code_bundle_file(bundle->credentials_path, storage_json);
+    }
+
+    /* Always refresh the local cache with the new bundle so subsequent dsco
+     * invocations pick up the refreshed access_token without touching the
+     * authoritative store again. */
+    (void)provider_save_claude_code_bundle_local_cache(storage_json);
+
+    free(storage_json);
+    return ok;
+}
+
+static bool provider_refresh_claude_code_oauth_bundle(claude_code_oauth_bundle_t *bundle) {
+    if (!bundle || !bundle->refresh_token[0]) return false;
+
+    const char *token_url = getenv("DSCO_CLAUDE_CODE_OAUTH_TOKEN_URL");
+    if (!token_url || !token_url[0]) token_url = CLAUDE_CODE_OAUTH_TOKEN_URL;
+    const char *client_id = getenv("DSCO_CLAUDE_CODE_OAUTH_CLIENT_ID");
+    if (!client_id || !client_id[0]) client_id = CLAUDE_CODE_OAUTH_CLIENT_ID;
+    const char *scopes = getenv("DSCO_CLAUDE_CODE_OAUTH_SCOPES");
+    if (!scopes || !scopes[0]) scopes = CLAUDE_CODE_OAUTH_SCOPES;
+
+    curl_global_init(CURL_GLOBAL_DEFAULT);
+    CURL *curl = curl_easy_init();
+    if (!curl) return false;
+
+    jbuf_t req;
+    jbuf_init(&req, 512);
+    jbuf_append(&req, "{\"grant_type\":\"refresh_token\",\"refresh_token\":");
+    jbuf_append_json_str(&req, bundle->refresh_token);
+    jbuf_append(&req, ",\"client_id\":");
+    jbuf_append_json_str(&req, client_id);
+    jbuf_append(&req, ",\"scope\":");
+    jbuf_append_json_str(&req, scopes);
+    jbuf_append_char(&req, '}');
+
+    jbuf_t resp;
+    jbuf_init(&resp, 1024);
+    struct curl_slist *hdrs = NULL;
+    hdrs = curl_slist_append(hdrs, "Content-Type: application/json");
+    curl_easy_setopt(curl, CURLOPT_URL, token_url);
+    curl_easy_setopt(curl, CURLOPT_HTTPHEADER, hdrs);
+    curl_easy_setopt(curl, CURLOPT_POSTFIELDS, req.data);
+    curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, provider_http_write_cb);
+    curl_easy_setopt(curl, CURLOPT_WRITEDATA, &resp);
+    curl_easy_setopt(curl, CURLOPT_CONNECTTIMEOUT, 15L);
+    curl_easy_setopt(curl, CURLOPT_TIMEOUT, 30L);
+    curl_easy_setopt(curl, CURLOPT_HTTP_VERSION, CURL_HTTP_VERSION_2TLS);
+
+    CURLcode res = curl_easy_perform(curl);
+    long http_code = 0;
+    curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, &http_code);
+
+    curl_slist_free_all(hdrs);
+    curl_easy_cleanup(curl);
+    jbuf_free(&req);
+
+    if (res != CURLE_OK || http_code != 200) {
+        jbuf_free(&resp);
+        return false;
+    }
+
+    char *access_token = json_get_str(resp.data, "access_token");
+    char *refresh_token = json_get_str(resp.data, "refresh_token");
+    char *scope_string = json_get_str(resp.data, "scope");
+    int expires_in = json_get_int(resp.data, "expires_in", -1);
+
+    bool ok = access_token && access_token[0] && expires_in > 0;
+    if (ok) {
+        snprintf(bundle->access_token, sizeof(bundle->access_token), "%s", access_token);
+        if (refresh_token && refresh_token[0])
+            snprintf(bundle->refresh_token, sizeof(bundle->refresh_token), "%s", refresh_token);
+        bundle->expires_at_ms = provider_now_ms() + (long long)expires_in * 1000LL;
+        (void)provider_persist_claude_code_bundle(bundle, scope_string);
+    }
+
+    free(access_token);
+    free(refresh_token);
+    free(scope_string);
+    jbuf_free(&resp);
+    return ok;
+}
+
+static const char *provider_resolve_claude_code_oauth_token(bool allow_refresh) {
+    static char token[4096];
+    token[0] = '\0';
+
+    claude_code_oauth_bundle_t bundle;
+    if (!provider_load_claude_code_oauth_bundle(&bundle)) return NULL;
+
+    if (allow_refresh &&
+        bundle.source != CLAUDE_CODE_OAUTH_SOURCE_ENV &&
+        bundle.refresh_token[0] &&
+        provider_claude_code_oauth_expired(bundle.expires_at_ms)) {
+        (void)provider_refresh_claude_code_oauth_bundle(&bundle);
+    }
+
+    if (!bundle.access_token[0]) {
+        provider_claude_code_oauth_bundle_free(&bundle);
+        return NULL;
+    }
+
+    snprintf(token, sizeof(token), "%s", bundle.access_token);
+    provider_claude_code_oauth_bundle_free(&bundle);
+    return token;
+}
+
 /* Builds an OpenAI-compat request then injects OpenRouter-specific fields.
  *
  * Env vars (all optional):
@@ -128,8 +1102,9 @@ static bool or_env_bool(const char *val) {
  *   DSCO_OR_DEBUG              — "1"/"true" to echo upstream request body
  */
 static char *openrouter_build_request(provider_t *p, conversation_t *conv,
-                                       session_state_t *session, int max_tokens) {
-    char *base = openai_build_request(p, conv, session, max_tokens);
+                                       session_state_t *session, int max_tokens,
+                                       const char *credential) {
+    char *base = openai_build_request(p, conv, session, max_tokens, credential);
     if (!base) return NULL;
 
     /* Gather all env config */
@@ -284,10 +1259,150 @@ static char *openrouter_build_request(provider_t *p, conversation_t *conv,
     return b.data;
 }
 
+/* ── Moonshot (native Kimi API) ────────────────────────────────────────── */
+
+/* Native Moonshot routing. Speaks the OpenAI Chat Completions dialect, but
+ * adds Anthropic-style {"thinking": {"type": "enabled"|"disabled"}} so we
+ * can toggle Kimi K2.5 reasoning. Per the Kimi K2.5 docs, when thinking is
+ * enabled, several sampling knobs (temperature/top_p/n/penalties) must be
+ * left at their server-side defaults — we never send those today, so we're
+ * already compliant. */
+static char *moonshot_build_request(provider_t *p, conversation_t *conv,
+                                     session_state_t *session, int max_tokens,
+                                     const char *credential) {
+    char *base = openai_build_request(p, conv, session, max_tokens, credential);
+    if (!base) return NULL;
+
+    bool disable_thinking = moonshot_should_disable_thinking(session);
+    if (!disable_thinking) return base;
+
+    size_t len = strlen(base);
+    if (len == 0 || base[len - 1] != '}') return base;
+    base[len - 1] = '\0';
+
+    jbuf_t b;
+    jbuf_init(&b, len + 64);
+    jbuf_append(&b, base);
+    free(base);
+    jbuf_append(&b, ",\"thinking\":{\"type\":\"disabled\"}}");
+    return b.data;
+}
+
+/* ── xAI (native api.x.ai) ─────────────────────────────────────────────
+ *
+ * xAI speaks the OpenAI Chat Completions dialect and adds two extras:
+ *   - reasoning_effort: "low"|"high" for grok-3-mini and grok-4 family
+ *   - search_parameters: { mode, sources[], from_date, to_date, ... }
+ *     for Live Search (live web/news/x search)
+ *
+ * Env vars (all optional):
+ *   DSCO_XAI_REASONING_EFFORT  — "low" | "high"
+ *   DSCO_XAI_SEARCH_MODE       — "off" (default) | "auto" | "on"
+ *   DSCO_XAI_SEARCH_SOURCES    — comma-sep: web,news,x,rss
+ *   DSCO_XAI_SEARCH_FROM_DATE  — ISO date YYYY-MM-DD
+ *   DSCO_XAI_SEARCH_TO_DATE    — ISO date YYYY-MM-DD
+ *   DSCO_XAI_SEARCH_MAX_RESULTS — int
+ *   DSCO_XAI_RETURN_CITATIONS  — "1"/"true" to request citations array
+ */
+static bool xai_supports_reasoning(const char *model) {
+    if (!model || !model[0]) return false;
+    if (strstr(model, "grok-3-mini")) return true;
+    if (strstr(model, "grok-4")) return true;
+    return false;
+}
+
+static char *xai_build_request(provider_t *p, conversation_t *conv,
+                                session_state_t *session, int max_tokens,
+                                const char *credential) {
+    char *base = openai_build_request(p, conv, session, max_tokens, credential);
+    if (!base) return NULL;
+
+    const char *reasoning   = getenv("DSCO_XAI_REASONING_EFFORT");
+    const char *search_mode = getenv("DSCO_XAI_SEARCH_MODE");
+    const char *src         = getenv("DSCO_XAI_SEARCH_SOURCES");
+    const char *from_date   = getenv("DSCO_XAI_SEARCH_FROM_DATE");
+    const char *to_date     = getenv("DSCO_XAI_SEARCH_TO_DATE");
+    const char *max_results = getenv("DSCO_XAI_SEARCH_MAX_RESULTS");
+    const char *return_cite = getenv("DSCO_XAI_RETURN_CITATIONS");
+
+    bool want_reasoning = reasoning && reasoning[0] &&
+        xai_supports_reasoning(session ? session->model : NULL);
+    bool want_search = search_mode && search_mode[0] &&
+                       strcasecmp(search_mode, "off") != 0;
+
+    if (!want_reasoning && !want_search) return base;
+
+    size_t len = strlen(base);
+    if (len == 0 || base[len - 1] != '}') return base;
+    base[len - 1] = '\0';
+
+    jbuf_t b;
+    jbuf_init(&b, len + 512);
+    jbuf_append(&b, base);
+    free(base);
+
+    if (want_reasoning) {
+        jbuf_append(&b, ",\"reasoning_effort\":");
+        jbuf_append_json_str(&b, reasoning);
+    }
+
+    if (want_search) {
+        jbuf_append(&b, ",\"search_parameters\":{\"mode\":");
+        jbuf_append_json_str(&b, search_mode);
+        if (src && src[0]) {
+            jbuf_append(&b, ",\"sources\":[");
+            const char *cur = src;
+            bool first = true;
+            while (*cur) {
+                const char *end = strchr(cur, ',');
+                if (!end) end = cur + strlen(cur);
+                size_t n = (size_t)(end - cur);
+                char name[64];
+                if (n >= sizeof(name)) n = sizeof(name) - 1;
+                memcpy(name, cur, n);
+                name[n] = '\0';
+                char *s = name;
+                while (*s == ' ') s++;
+                char *e2 = s + strlen(s) - 1;
+                while (e2 > s && *e2 == ' ') *e2-- = '\0';
+                if (s[0]) {
+                    if (!first) jbuf_append(&b, ",");
+                    jbuf_append(&b, "{\"type\":");
+                    jbuf_append_json_str(&b, s);
+                    jbuf_append(&b, "}");
+                    first = false;
+                }
+                cur = *end ? end + 1 : end;
+            }
+            jbuf_append(&b, "]");
+        }
+        if (from_date && from_date[0]) {
+            jbuf_append(&b, ",\"from_date\":");
+            jbuf_append_json_str(&b, from_date);
+        }
+        if (to_date && to_date[0]) {
+            jbuf_append(&b, ",\"to_date\":");
+            jbuf_append_json_str(&b, to_date);
+        }
+        if (max_results && max_results[0]) {
+            jbuf_appendf(&b, ",\"max_search_results\":%s", max_results);
+        }
+        if (return_cite && or_env_bool(return_cite)) {
+            jbuf_append(&b, ",\"return_citations\":true");
+        }
+        jbuf_append(&b, "}");
+    }
+
+    jbuf_append(&b, "}");
+    return b.data;
+}
+
 /* ── OpenAI-compatible Provider ────────────────────────────────────────── */
 
 typedef struct {
     char api_url[512];
+    CURL *curl;
+    bool prepared;
 } openai_data_t;
 
 /* Check if a message has any tool_use content blocks */
@@ -335,6 +1450,13 @@ static void openai_append_function_tool(jbuf_t *b, const char *name,
 
 static bool openai_append_tools_json(jbuf_t *b, conversation_t *conv,
                                      session_state_t *session) {
+    const char *disable_tools = getenv("DSCO_OR_DISABLE_TOOLS");
+    if (disable_tools && disable_tools[0] &&
+        strcmp(disable_tools, "0") != 0 &&
+        strcasecmp(disable_tools, "false") != 0) {
+        return false;
+    }
+
     int max_tools_send = 128;
     const char *mt_env = getenv("DSCO_OR_MAX_TOOLS");
     if (mt_env && mt_env[0]) {
@@ -368,12 +1490,23 @@ static bool openai_append_tools_json(jbuf_t *b, conversation_t *conv,
     }
     free((void *)filtered);
 
-    for (int i = 0; i < g_external_tool_count; i++) {
-        if (wrote_any) jbuf_append(b, ",");
-        openai_append_function_tool(b, g_external_tools[i].name,
-                                    g_external_tools[i].description,
-                                    g_external_tools[i].input_schema_json);
-        wrote_any = true;
+    int loaded_ext_count = 0;
+    for (int i = 0; i < g_external_tool_count; i++)
+        if (g_external_tools[i].loaded) loaded_ext_count++;
+    int ext_budget = loaded_ext_count > 0 ? loaded_ext_count : 16;
+    if (ext_budget > 32) ext_budget = 32;
+    int ext_written = 0;
+    for (int pass = 0; pass < 2 && ext_written < ext_budget; pass++) {
+        bool want_loaded = (pass == 0);
+        for (int i = 0; i < g_external_tool_count && ext_written < ext_budget; i++) {
+            if ((bool)g_external_tools[i].loaded != want_loaded) continue;
+            if (wrote_any) jbuf_append(b, ",");
+            openai_append_function_tool(b, g_external_tools[i].name,
+                                        g_external_tools[i].description,
+                                        g_external_tools[i].input_schema_json);
+            wrote_any = true;
+            ext_written++;
+        }
     }
     jbuf_append(b, "]");
     return wrote_any;
@@ -408,6 +1541,21 @@ static bool openrouter_should_disable_thinking(session_state_t *session) {
         return true;
     }
     return false;
+}
+
+/* Native Moonshot routing: kimi-k2.5 is multimodal and defaults to thinking
+ * enabled. Tool-calling reliability improves substantially with thinking
+ * disabled unless the user explicitly opts in via thinking_budget or picks
+ * a *-thinking model. */
+static bool moonshot_should_disable_thinking(session_state_t *session) {
+    if (!session || !session->model[0]) return false;
+    if (session->thinking_budget > 0) return false;
+    const char *force = getenv("DSCO_MOONSHOT_THINKING");
+    if (force && (force[0] == '1' || strcasecmp(force, "true") == 0 ||
+                  strcasecmp(force, "enabled") == 0))
+        return false;
+    if (strstr(session->model, "thinking")) return false;
+    return true;
 }
 
 /* Emit text+image content array (skipping tool_use and tool_result blocks) */
@@ -527,21 +1675,28 @@ static void openai_append_user_msg(jbuf_t *b, message_t *m) {
         }
         jbuf_free(&text);
 
-        /* Image blocks */
+        /* Image blocks — skip any image with neither URL nor real base64.
+         * Emitting an empty data-url breaks every provider downstream and
+         * kills the fallback chain (grok-4-fast, gemini, gpt-5.4 all reject
+         * "data:image/png;base64,"). Silently drop; the text block above
+         * already carries the user's prose and any other image blocks in
+         * this same turn will still serialize. */
         for (int j = 0; j < m->content_count; j++) {
             msg_content_t *mc = &m->content[j];
             if (!mc->type || strcmp(mc->type, "image") != 0) continue;
+            bool has_url  = (mc->image_url && mc->image_url[0]);
+            bool has_data = (mc->image_data && mc->image_data[0]);
+            if (!has_url && !has_data) continue;
             if (wrote_any) jbuf_append(b, ",");
             jbuf_append(b, "{\"type\":\"image_url\",\"image_url\":{\"url\":");
-            if (mc->image_url) {
+            if (has_url) {
                 jbuf_append_json_str(b, mc->image_url);
             } else {
                 const char *media_type = mc->image_media_type ? mc->image_media_type : "image/png";
-                const char *data = mc->image_data ? mc->image_data : "";
                 jbuf_append(b, "\"data:");
                 jbuf_append(b, media_type);
                 jbuf_append(b, ";base64,");
-                jbuf_append(b, data);
+                jbuf_append(b, mc->image_data);
                 jbuf_append(b, "\"");
             }
             jbuf_append(b, "}}");
@@ -558,9 +1713,11 @@ static void openai_append_user_msg(jbuf_t *b, message_t *m) {
 }
 
 static char *openai_build_request(provider_t *p, conversation_t *conv,
-                                    session_state_t *session, int max_tokens) {
+                                    session_state_t *session, int max_tokens,
+                                    const char *credential) {
     openai_data_t *od = (openai_data_t *)p->data;
     (void)od;
+    (void)credential;
 
     jbuf_t b;
     jbuf_init(&b, 8192);
@@ -647,17 +1804,22 @@ typedef struct {
     char  *tool_name;
     char  *tool_id;
     jbuf_t tool_args;
+    /* How much of tool_args has been streamed to the user (for live arg rendering) */
+    size_t streamed_prefix;
 } oai_tool_call_state_t;
 
 typedef struct {
     jbuf_t          line_buf;
     jbuf_t          text_accum;
+    jbuf_t          reasoning_accum;
     stream_text_cb  text_cb;
     stream_tool_start_cb tool_cb;
+    stream_thinking_cb thinking_cb;
     void           *cb_ctx;
     usage_t         usage;
     char           *stop_reason;
     bool            got_error;
+    bool            credit_too_low;    /* 402 / "credit balance too low" / insufficient funds */
     char           *error_msg;
     /* OpenRouter-specific */
     char           *generation_id; /* x-generation-id from response */
@@ -670,7 +1832,42 @@ typedef struct {
     /* Result building */
     content_block_t blocks[MAX_CONTENT_BLOCKS];
     int             block_count;
+    double          telemetry_start;
+    double          telemetry_first_delta;
+    double          telemetry_first_tool;
+    bool            telemetry_got_first;
 } oai_sse_state_t;
+
+/* Classify an error body/message as a credit/billing failure so the caller
+ * can either fall back or show an actionable message instead of a raw 400.
+ * Exported via provider.h so both the OpenAI-compat and Anthropic streaming
+ * paths can share the same detection. */
+bool provider_msg_is_credit_too_low(const char *msg) {
+    if (!msg || !msg[0]) return false;
+    /* case-insensitive substring match against known phrases */
+    static const char *needles[] = {
+        "credit balance is too low",
+        "credit balance too low",
+        "insufficient_quota",
+        "insufficient funds",
+        "insufficient credit",
+        "billing_hard_limit_reached",
+        "exceeded your current quota",
+        "payment required",
+        "quota_exceeded",
+        "billing not active",
+        "requires a paid plan",
+        NULL,
+    };
+    for (int i = 0; needles[i]; i++) {
+        const char *n = needles[i];
+        size_t nlen = strlen(n);
+        for (const char *p = msg; *p; p++) {
+            if (strncasecmp(p, n, nlen) == 0) return true;
+        }
+    }
+    return false;
+}
 
 static oai_tool_call_state_t *oai_tool_state_find_by_id(oai_sse_state_t *s, const char *tool_id) {
     if (!tool_id || !tool_id[0]) return NULL;
@@ -762,9 +1959,45 @@ static void oai_handle_tool_call_delta(const char *tc_elem, void *ctx) {
 
     if (slot->tool_name && !slot->announced) {
         slot->announced = true;
+        if (s->telemetry_first_tool <= 0.0)
+            s->telemetry_first_tool = provider_now_sec();
+        if (!s->telemetry_got_first) {
+            s->telemetry_got_first = true;
+            s->telemetry_first_delta = s->telemetry_first_tool;
+        }
         if (s->tool_cb) {
             s->tool_cb(slot->tool_name, oai_tool_state_id(slot), s->cb_ctx);
         }
+    }
+
+    /* Stream newly-arrived argument bytes as dim text so the user sees
+     * tool inputs populate in real time instead of appearing all at once
+     * at the end of the turn. We route through text_cb because that is
+     * the only always-wired sink on the OpenAI-compat path. The bytes
+     * are visually distinguished with a leading "  ⋯ " marker on the
+     * first chunk; subsequent chunks just append. */
+    if (s->text_cb && slot->tool_args.data &&
+        slot->tool_args.len > slot->streamed_prefix) {
+        size_t start = slot->streamed_prefix;
+        size_t avail = slot->tool_args.len - start;
+        /* Cap single-delta size so a giant argument string does not starve
+         * the heartbeat and so we don't flood the terminal on one packet. */
+        if (avail > 256) avail = 256;
+        char chunk[320];
+        size_t pos = 0;
+        if (start == 0) {
+            const char *prefix = "\033[2m ⋯ \033[0m";
+            size_t plen = strlen(prefix);
+            if (plen < sizeof(chunk)) {
+                memcpy(chunk, prefix, plen);
+                pos = plen;
+            }
+        }
+        if (pos + avail >= sizeof(chunk)) avail = sizeof(chunk) - pos - 1;
+        memcpy(chunk + pos, slot->tool_args.data + start, avail);
+        chunk[pos + avail] = '\0';
+        s->text_cb(chunk, s->cb_ctx);
+        slot->streamed_prefix = start + avail;
     }
 }
 
@@ -782,6 +2015,8 @@ static void oai_handle_sse_line(oai_sse_state_t *s, const char *line) {
             s->got_error = true;
             free(s->error_msg);
             s->error_msg = err_msg;
+            if (err_code == 402 || provider_msg_is_credit_too_low(err_msg))
+                s->credit_too_low = true;
             fprintf(stderr, "  \033[31mAPI error %d: %s\033[0m\n", err_code, err_msg);
         }
         free(err_raw);
@@ -869,10 +2104,64 @@ static void oai_handle_sse_line(oai_sse_state_t *s, const char *line) {
     /* Content delta — streaming text */
     char *content = json_get_str(delta_raw, "content");
     if (content && content[0]) {
+        if (!s->telemetry_got_first) {
+            s->telemetry_got_first = true;
+            s->telemetry_first_delta = provider_now_sec();
+        }
         jbuf_append(&s->text_accum, content);
         if (s->text_cb) s->text_cb(content, s->cb_ctx);
     }
     free(content);
+
+    /* Reasoning delta — streaming "thinking"/chain-of-thought output.
+     *
+     * Different providers emit this under different keys:
+     *   - xAI (grok-3-mini, grok-4):       delta.reasoning_content
+     *   - OpenRouter reasoning models:     delta.reasoning    (string)
+     *                                  or  delta.reasoning    (object with .content)
+     *   - Deepseek reasoner:               delta.reasoning_content
+     *   - Moonshot thinking:               delta.reasoning_content
+     *
+     * We parse both, accumulate them into reasoning_accum, and route them
+     * through thinking_cb when the caller supplied one. If no thinking_cb
+     * is wired, we surface the reasoning as dim text via text_cb so the
+     * user still sees *something* during the pre-output thinking phase,
+     * instead of a long silent pause. This is intentional "show the
+     * thinking even if we throw most of it away" behavior.
+     */
+    {
+        char *reasoning = json_get_str(delta_raw, "reasoning_content");
+        if (!reasoning || !reasoning[0]) {
+            free(reasoning);
+            reasoning = json_get_str(delta_raw, "reasoning");
+        }
+        if (!reasoning || !reasoning[0]) {
+            /* OpenRouter sometimes sends delta.reasoning as an object:
+             * {"reasoning":{"content":"..."}}. Handle that shape too. */
+            free(reasoning);
+            reasoning = NULL;
+            char *rraw = json_get_raw(delta_raw, "reasoning");
+            if (rraw) {
+                reasoning = json_get_str(rraw, "content");
+                free(rraw);
+            }
+        }
+        if (reasoning && reasoning[0]) {
+            jbuf_append(&s->reasoning_accum, reasoning);
+            if (s->thinking_cb) {
+                s->thinking_cb(reasoning, s->cb_ctx);
+            } else if (s->text_cb) {
+                /* Fallback visualization: wrap in dim ANSI so markdown
+                 * doesn't try to format it and it visually separates from
+                 * final text. */
+                char wrapped[1024];
+                int n = snprintf(wrapped, sizeof(wrapped),
+                                 "\033[2m%.960s\033[0m", reasoning);
+                if (n > 0) s->text_cb(wrapped, s->cb_ctx);
+            }
+        }
+        free(reasoning);
+    }
 
     /* Tool calls delta — accumulate every streamed call by index/id. */
     char *tool_calls_raw = json_get_raw(delta_raw, "tool_calls");
@@ -917,12 +2206,13 @@ static stream_result_t openai_stream(provider_t *p, const char *api_key,
                                        stream_tool_start_cb tool_cb,
                                        stream_thinking_cb thinking_cb,
                                        void *cb_ctx) {
-    (void)thinking_cb;
     openai_data_t *od = (openai_data_t *)p->data;
     stream_result_t result = {0};
 
-    CURL *curl = curl_easy_init();
+    CURL *curl = od && od->curl ? od->curl : curl_easy_init();
     if (!curl) { result.ok = false; return result; }
+    bool owned_curl = !(od && od->curl);
+    curl_easy_reset(curl);
 
     struct curl_slist *hdrs = p->build_headers
         ? p->build_headers(p, api_key)
@@ -932,9 +2222,12 @@ static stream_result_t openai_stream(provider_t *p, const char *api_key,
     oai_sse_state_t state = {0};
     jbuf_init(&state.line_buf, 4096);
     jbuf_init(&state.text_accum, 4096);
+    jbuf_init(&state.reasoning_accum, 1024);
     state.text_cb = text_cb;
     state.tool_cb = tool_cb;
+    state.thinking_cb = thinking_cb;
     state.cb_ctx = cb_ctx;
+    state.telemetry_start = provider_now_sec();
 
     curl_easy_setopt(curl, CURLOPT_URL, od->api_url);
     curl_easy_setopt(curl, CURLOPT_HTTPHEADER, hdrs);
@@ -948,9 +2241,23 @@ static stream_result_t openai_stream(provider_t *p, const char *api_key,
     CURLcode res = curl_easy_perform(curl);
     long http_code = 0;
     curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, &http_code);
+    {
+        double dns = 0.0, conn = 0.0, tls = 0.0, ttfb = 0.0, total = 0.0;
+        curl_easy_getinfo(curl, CURLINFO_NAMELOOKUP_TIME, &dns);
+        curl_easy_getinfo(curl, CURLINFO_CONNECT_TIME, &conn);
+        curl_easy_getinfo(curl, CURLINFO_APPCONNECT_TIME, &tls);
+        curl_easy_getinfo(curl, CURLINFO_STARTTRANSFER_TIME, &ttfb);
+        curl_easy_getinfo(curl, CURLINFO_TOTAL_TIME, &total);
+        result.telemetry.latency.dns_ms = dns * 1000.0;
+        result.telemetry.latency.connect_ms = conn * 1000.0;
+        result.telemetry.latency.tls_ms = tls * 1000.0;
+        result.telemetry.latency.ttfb_ms = ttfb * 1000.0;
+        result.telemetry.latency.total_ms = total * 1000.0;
+    }
 
     curl_slist_free_all(hdrs);
-    curl_easy_cleanup(curl);
+    if (owned_curl)
+        curl_easy_cleanup(curl);
 
     result.http_status = (int)http_code;
 
@@ -1015,9 +2322,36 @@ static stream_result_t openai_stream(provider_t *p, const char *api_key,
         }
     } else {
         result.ok = false;
+        /* Extract a parseable error body from the last partial line (HTTP
+         * errors arrive as a JSON blob, not as SSE). This lets us surface
+         * a structured, actionable message to the agent layer — critical
+         * for the credit-too-low fallback path. */
+        if (state.line_buf.len > 0 && !state.error_msg) {
+            char *err_obj = json_get_raw(state.line_buf.data, "error");
+            if (err_obj) {
+                char *msg = json_get_str(err_obj, "message");
+                if (msg) {
+                    state.got_error = true;
+                    state.error_msg = msg;
+                    if (provider_msg_is_credit_too_low(msg) || http_code == 402)
+                        state.credit_too_low = true;
+                }
+                free(err_obj);
+            }
+        }
+        if (http_code == 402) state.credit_too_low = true;
+
         if (res != CURLE_OK) {
             fprintf(stderr, "dsco: curl error: %s (HTTP %d, url: %s)\n",
                     curl_easy_strerror(res), (int)http_code, od->api_url);
+        } else if (state.credit_too_low) {
+            fprintf(stderr,
+                "  \033[31m✗ %s credit/billing error (HTTP %d):\033[0m %s\n"
+                "  \033[2mhint: switch provider with /model, e.g.\033[0m "
+                "\033[36m/model x-ai/grok-4.20-beta\033[0m \033[2m(needs OPENROUTER_API_KEY)\033[0m\n",
+                p->name ? p->name : "provider",
+                (int)http_code,
+                state.error_msg ? state.error_msg : "(no message)");
         } else if (state.got_error && state.error_msg) {
             fprintf(stderr, "dsco: HTTP %d: %s\n", (int)http_code, state.error_msg);
         } else if (state.line_buf.len > 0) {
@@ -1031,6 +2365,29 @@ static stream_result_t openai_stream(provider_t *p, const char *api_key,
         free(state.stop_reason);
     }
 
+    /* Propagate credit flag to the agent via a sentinel in stop_reason
+     * so the caller can detect it without changing the stream_result_t
+     * shape (which would ripple through llm.c and swarm.c). */
+    if (state.credit_too_low) {
+        free(result.parsed.stop_reason);
+        result.parsed.stop_reason = safe_strdup("credit_too_low");
+    }
+
+    double telemetry_end = provider_now_sec();
+    result.telemetry.total_ms = (telemetry_end - state.telemetry_start) * 1000.0;
+    if (state.telemetry_got_first)
+        result.telemetry.ttft_ms =
+            (state.telemetry_first_delta - state.telemetry_start) * 1000.0;
+    if (state.telemetry_first_tool > 0.0)
+        result.telemetry.ttft_tool_ms =
+            (state.telemetry_first_tool - state.telemetry_start) * 1000.0;
+    if (result.telemetry.total_ms > 0.0 && result.usage.output_tokens > 0)
+        result.telemetry.tokens_per_sec =
+            result.usage.output_tokens / (result.telemetry.total_ms / 1000.0);
+    result.telemetry.thinking_tokens = state.reasoning_accum.len > 0
+        ? (int)(state.reasoning_accum.len / 4)
+        : state.reasoning_tokens;
+
     /* Cleanup OpenRouter-specific state */
     free(state.error_msg);
     free(state.actual_model);
@@ -1042,6 +2399,7 @@ static stream_result_t openai_stream(provider_t *p, const char *api_key,
     }
     jbuf_free(&state.line_buf);
     jbuf_free(&state.text_accum);
+    jbuf_free(&state.reasoning_accum);
 
     return result;
 }
@@ -1057,6 +2415,8 @@ typedef struct {
 
 static const provider_endpoint_t PROVIDER_ENDPOINTS[] = {
     { "openai",     "https://api.openai.com/v1",               "OPENAI_API_KEY",     "Bearer" },
+    { "google",     "https://generativelanguage.googleapis.com/v1beta/openai",
+                                                            "GOOGLE_API_KEY",     "Bearer" },
     { "groq",       "https://api.groq.com/openai/v1",          "GROQ_API_KEY",       "Bearer" },
     { "deepseek",   "https://api.deepseek.com/v1",             "DEEPSEEK_API_KEY",   "Bearer" },
     { "together",   "https://api.together.xyz/v1",             "TOGETHER_API_KEY",   "Bearer" },
@@ -1066,15 +2426,131 @@ static const provider_endpoint_t PROVIDER_ENDPOINTS[] = {
     { "cerebras",   "https://api.cerebras.ai/v1",              "CEREBRAS_API_KEY",   "Bearer" },
     { "xai",        "https://api.x.ai/v1",                     "XAI_API_KEY",        "Bearer" },
     { "cohere",     "https://api.cohere.com/v2",               "COHERE_API_KEY",     "Bearer" },
+    { "moonshot",   "https://api.moonshot.ai/v1",              "MOONSHOT_API_KEY",   "Bearer" },
+    { "alibaba",    "https://dashscope-intl.aliyuncs.com/compatible-mode/v1",
+                                                            "DASHSCOPE_API_KEY",  "Bearer" },
+    { "alibaba-coding-plan", "https://coding-intl.dashscope.aliyuncs.com/v1",
+                                                            "ALIBABA_CODING_PLAN_API_KEY", "Bearer" },
+    { "arcee",      "https://api.arcee.ai/api/v1",             "ARCEEAI_API_KEY",    "Bearer" },
+    { "gmi",        "https://api.gmi-serving.com/v1",          "GMI_API_KEY",        "Bearer" },
+    { "huggingface","https://router.huggingface.co/v1",        "HF_TOKEN",           "Bearer" },
+    { "kilocode",   "https://api.kilo.ai/api/gateway",         "KILOCODE_API_KEY",   "Bearer" },
+    { "nous",       "https://inference.nousresearch.com/v1",   "NOUS_API_KEY",       "Bearer" },
+    { "novita",     "https://api.novita.ai/openai/v1",         "NOVITA_API_KEY",     "Bearer" },
+    { "nvidia",     "https://integrate.api.nvidia.com/v1",     "NVIDIA_API_KEY",     "Bearer" },
+    { "ollama-cloud","https://ollama.com/v1",                  "OLLAMA_API_KEY",     "Bearer" },
+    { "opencode-zen","https://opencode.ai/zen/v1",             "OPENCODE_ZEN_API_KEY","Bearer" },
+    { "opencode-go","https://opencode.ai/zen/go/v1",           "OPENCODE_GO_API_KEY","Bearer" },
+    { "qwen-oauth", "https://portal.qwen.ai/v1",               "QWEN_API_KEY",       "Bearer" },
+    { "stepfun",    "https://api.stepfun.ai/step_plan/v1",     "STEPFUN_API_KEY",    "Bearer" },
+    { "xiaomi",     "https://api.xiaomimimo.com/v1",           "XIAOMI_API_KEY",     "Bearer" },
+    { "zai",        "https://api.z.ai/api/paas/v4",            "GLM_API_KEY",        "Bearer" },
+    /* ── Local inference (OpenAI-compatible, no auth required) ─────────── */
+    { "mlx",        "http://localhost:8181/v1",                "MLX_API_KEY",        "Bearer" },
+    { "ollama",     "http://localhost:11434/v1",               "OLLAMA_API_KEY",     "Bearer" },
+    { "lmstudio",   "http://localhost:1234/v1",                "LMSTUDIO_API_KEY",   "Bearer" },
+    { "local",      "http://localhost:8181/v1",                "LOCAL_API_KEY",      "Bearer" },
     { NULL, NULL, NULL, NULL }
 };
 
 static const provider_endpoint_t *find_endpoint(const char *name) {
+    name = provider_profile_canonical_name(name);
     for (int i = 0; PROVIDER_ENDPOINTS[i].name; i++) {
         if (strcmp(name, PROVIDER_ENDPOINTS[i].name) == 0)
             return &PROVIDER_ENDPOINTS[i];
     }
     return NULL;
+}
+
+typedef struct {
+    const char *provider_name;
+    const char *aliases[8];
+} provider_env_alias_t;
+
+static const provider_env_alias_t PROVIDER_ENV_ALIASES[] = {
+    { "anthropic", { "CLAUDE_API_KEY", NULL } },
+    { "openai",    { "OPENAI_KEY", "CHATGPT_API_KEY", NULL } },
+    { "openrouter",{ "OPEN_ROUTER_API_KEY", NULL } },
+    { "together",  { "TOGETHER_TOKEN", NULL } },
+    { "xai",       { "GROK_API_KEY", "X_AI_API_KEY", NULL } },
+    { "moonshot",  { "KIMI_API_KEY", "MOONSHOTAI_API_KEY", NULL } },
+    { "google",    { "GEMINI_API_KEY", "GOOGLE_AI_API_KEY",
+                     "GOOGLE_AI_STUDIO_API_KEY", "GOOGLE_VERTEX_API_KEY", NULL } },
+    { NULL, { NULL } }
+};
+
+static void provider_build_env_name(const char *provider_name, const char *suffix,
+                                    char *out, size_t out_len) {
+    if (!out || out_len == 0) return;
+    out[0] = '\0';
+    if (!provider_name || !provider_name[0] || !suffix || !suffix[0]) return;
+
+    size_t pos = 0;
+    for (const char *p = provider_name; *p && pos + 1 < out_len; p++) {
+        unsigned char ch = (unsigned char)*p;
+        if (isalnum(ch)) {
+            out[pos++] = (char)toupper(ch);
+        } else {
+            out[pos++] = '_';
+        }
+    }
+    out[pos] = '\0';
+    strncat(out, suffix, out_len - strlen(out) - 1);
+}
+
+static const char *provider_getenv_nonempty(const char *name) {
+    if (!name || !name[0]) return NULL;
+    const char *value = getenv(name);
+    return (value && value[0]) ? value : NULL;
+}
+
+static const char *provider_resolve_alias_env_key(const char *provider_name) {
+    if (!provider_name || !provider_name[0]) return NULL;
+    for (int i = 0; PROVIDER_ENV_ALIASES[i].provider_name; i++) {
+        if (strcmp(PROVIDER_ENV_ALIASES[i].provider_name, provider_name) != 0)
+            continue;
+        for (int j = 0; PROVIDER_ENV_ALIASES[i].aliases[j]; j++) {
+            const char *value = provider_getenv_nonempty(PROVIDER_ENV_ALIASES[i].aliases[j]);
+            if (value) return value;
+        }
+        break;
+    }
+    return NULL;
+}
+
+static const char *provider_resolve_dynamic_env_key(const char *provider_name) {
+    if (!provider_name || !provider_name[0]) return NULL;
+    char env_name[128];
+    const char *suffixes[] = {
+        "_API_KEY",
+        "_ACCESS_TOKEN",
+        "_AUTH_TOKEN",
+        "_TOKEN",
+        NULL
+    };
+    for (int i = 0; suffixes[i]; i++) {
+        provider_build_env_name(provider_name, suffixes[i], env_name, sizeof(env_name));
+        const char *value = provider_getenv_nonempty(env_name);
+        if (value) return value;
+    }
+    return NULL;
+}
+
+bool provider_has_custom_api_base(const char *provider_name) {
+    char env_name[128];
+    provider_build_env_name(provider_name, "_API_BASE", env_name, sizeof(env_name));
+    if (provider_getenv_nonempty(env_name)) return true;
+    provider_build_env_name(provider_name, "_BASE_URL", env_name, sizeof(env_name));
+    if (provider_getenv_nonempty(env_name)) return true;
+
+    const char *canonical = provider_profile_canonical_name(provider_name);
+    if (canonical && provider_name && strcmp(canonical, provider_name) != 0) {
+        provider_build_env_name(canonical, "_API_BASE", env_name, sizeof(env_name));
+        if (provider_getenv_nonempty(env_name)) return true;
+        provider_build_env_name(canonical, "_BASE_URL", env_name, sizeof(env_name));
+        if (provider_getenv_nonempty(env_name)) return true;
+    }
+    return false;
 }
 
 /* ── Provider factory ──────────────────────────────────────────────────── */
@@ -1085,13 +2561,16 @@ static provider_t *create_openai_compat(const char *name, const char *base_url,
     memset(p, 0, sizeof(*p));
     p->name = name;
     openai_data_t *od = safe_malloc(sizeof(openai_data_t));
+    memset(od, 0, sizeof(*od));
 
     /* Check for env override */
     char env_base[128];
-    snprintf(env_base, sizeof(env_base), "%s_API_BASE", name);
-    /* Convert to uppercase */
-    for (char *c = env_base; *c; c++) if (*c >= 'a' && *c <= 'z') *c -= 32;
+    provider_build_env_name(name, "_API_BASE", env_base, sizeof(env_base));
     const char *custom_base = getenv(env_base);
+    if (!custom_base || !custom_base[0]) {
+        provider_build_env_name(name, "_BASE_URL", env_base, sizeof(env_base));
+        custom_base = getenv(env_base);
+    }
     if (!custom_base) custom_base = base_url;
 
     snprintf(od->api_url, sizeof(od->api_url), "%s/chat/completions", custom_base);
@@ -1104,7 +2583,23 @@ static provider_t *create_openai_compat(const char *name, const char *base_url,
     return p;
 }
 
+static provider_t *create_unsupported_provider(const provider_profile_t *profile) {
+    provider_t *p = safe_malloc(sizeof(provider_t));
+    memset(p, 0, sizeof(*p));
+    p->name = profile && profile->name ? profile->name : "unknown";
+    p->api_url = profile && profile->base_url ? profile->base_url : "";
+    p->data = safe_strdup(provider_transport_kind_name(
+        profile ? profile->transport : PROVIDER_TRANSPORT_NONE));
+    p->build_request = unsupported_build_request;
+    p->build_headers = unsupported_build_headers;
+    p->stream = unsupported_stream;
+    return p;
+}
+
 provider_t *provider_create(const char *name) {
+    if (!name || !name[0]) name = "anthropic";
+    const provider_profile_t *profile = provider_profile_find(name);
+    name = provider_profile_canonical_name(name);
     if (strcmp(name, "anthropic") == 0 || strcmp(name, "claude") == 0) {
         provider_t *p = safe_malloc(sizeof(provider_t));
         memset(p, 0, sizeof(*p));
@@ -1125,11 +2620,40 @@ provider_t *provider_create(const char *name) {
         return p;
     }
 
+    /* Moonshot needs the OpenAI dialect plus the Kimi-native thinking
+     * toggle, so it gets its own request builder. */
+    if (strcmp(name, "moonshot") == 0) {
+        const provider_endpoint_t *ep = find_endpoint("moonshot");
+        provider_t *p = create_openai_compat(ep->name, ep->base_url, ep->env_key);
+        p->build_request = moonshot_build_request;
+        return p;
+    }
+
+    /* xAI native: OpenAI dialect + reasoning_effort and Live Search. */
+    if (strcmp(name, "xai") == 0 || strcmp(name, "grok") == 0) {
+        const provider_endpoint_t *ep = find_endpoint("xai");
+        provider_t *p = create_openai_compat(ep->name, ep->base_url, ep->env_key);
+        p->build_request = xai_build_request;
+        return p;
+    }
+
     /* All other providers use OpenAI-compatible API */
     const provider_endpoint_t *ep = find_endpoint(name);
     if (ep) {
         return create_openai_compat(ep->name, ep->base_url, ep->env_key);
     }
+
+    if (profile && profile->transport == PROVIDER_TRANSPORT_OPENAI_CHAT) {
+        const char *base = profile->transport_base_url;
+        if ((base && base[0]) || provider_has_custom_api_base(profile->name)) {
+            if (!base || !base[0]) base = "https://api.openai.com/v1";
+            return create_openai_compat(profile->name, base,
+                                        provider_profile_primary_env_var(profile));
+        }
+    }
+
+    if (profile)
+        return create_unsupported_provider(profile);
 
     /* Fallback: treat as OpenAI-compatible with custom base */
     return create_openai_compat(name, "https://api.openai.com/v1", "OPENAI_API_KEY");
@@ -1137,11 +2661,333 @@ provider_t *provider_create(const char *name) {
 
 void provider_free(provider_t *p) {
     if (!p) return;
+    provider_reset_connection(p);
     free(p->data);
     free(p);
 }
 
+bool provider_prepare(provider_t *p) {
+    if (!p) return false;
+    if (p->data && p->stream == openai_stream) {
+        openai_data_t *od = (openai_data_t *)p->data;
+        if (!od->curl) {
+            od->curl = curl_easy_init();
+            if (!od->curl) return false;
+        }
+        od->prepared = true;
+        return true;
+    }
+    return true;
+}
+
+stream_result_t provider_stream_reuse(provider_t *p, const char *api_key,
+                                      const char *request_json,
+                                      stream_text_cb text_cb,
+                                      stream_tool_start_cb tool_cb,
+                                      stream_thinking_cb thinking_cb,
+                                      void *cb_ctx) {
+    stream_result_t result = {0};
+    if (!p || !p->stream) return result;
+    if (p->data && p->stream == openai_stream) {
+        (void)provider_prepare(p);
+    }
+    return p->stream(p, api_key, request_json, text_cb, tool_cb, thinking_cb, cb_ctx);
+}
+
+void provider_reset_connection(provider_t *p) {
+    if (!p || !p->data) return;
+    if (p->stream == openai_stream) {
+        openai_data_t *od = (openai_data_t *)p->data;
+        if (od->curl) {
+            curl_easy_cleanup(od->curl);
+            od->curl = NULL;
+        }
+        od->prepared = false;
+    }
+}
+
 /* ── Provider detection from model name ────────────────────────────────── */
+
+static bool provider_model_has_prefix(const char *model, const char *prefix) {
+    return model && prefix && strncmp(model, prefix, strlen(prefix)) == 0;
+}
+
+static const char *provider_model_family_from_namespaced(const char *model) {
+    if (!model) return NULL;
+    if (provider_model_has_prefix(model, "anthropic/")) return "anthropic";
+    if (provider_model_has_prefix(model, "openai/")) return "openai";
+    if (provider_model_has_prefix(model, "x-ai/")) return "xai";
+    if (provider_model_has_prefix(model, "google/")) return "google";
+    if (provider_model_has_prefix(model, "deepseek/")) return "deepseek";
+    if (provider_model_has_prefix(model, "qwen/")) return "qwen";
+    if (provider_model_has_prefix(model, "mistralai/")) return "mistral";
+    if (provider_model_has_prefix(model, "moonshotai/")) return "moonshot";
+    if (provider_model_has_prefix(model, "cohere/")) return "cohere";
+    if (provider_model_has_prefix(model, "minimax/")) return "minimax";
+    if (provider_model_has_prefix(model, "z-ai/")) return "zai";
+    if (provider_model_has_prefix(model, "meta-llama/")) return "meta";
+    if (provider_model_has_prefix(model, "amazon/")) return "amazon";
+    if (provider_model_has_prefix(model, "perplexity/")) return "perplexity";
+    return NULL;
+}
+
+const char *provider_model_family(const char *model) {
+    if (!model || !model[0]) return "anthropic";
+
+    if (provider_model_has_prefix(model, "openrouter:"))
+        model += 11;
+    if (provider_model_has_prefix(model, "openrouter/"))
+        return "openrouter";
+
+    const char *namespaced = provider_model_family_from_namespaced(model);
+    if (namespaced) return namespaced;
+
+    if (strstr(model, "claude") || strstr(model, "opus") ||
+        strstr(model, "sonnet") || strstr(model, "haiku"))
+        return "anthropic";
+    if (strstr(model, "gpt") || strncmp(model, "o1", 2) == 0 ||
+        strncmp(model, "o3", 2) == 0 || strncmp(model, "o4", 2) == 0 ||
+        strstr(model, "codex") || strstr(model, "chatgpt"))
+        return "openai";
+    if (strstr(model, "grok") || strstr(model, "Grok"))
+        return "xai";
+    if (strstr(model, "gemini") || strstr(model, "Gemini") ||
+        strstr(model, "gem25") || strstr(model, "gem3"))
+        return "google";
+    if (strstr(model, "deepseek"))
+        return "deepseek";
+    if (strstr(model, "Qwen") || strstr(model, "qwen"))
+        return "qwen";
+    if (strstr(model, "mistral") || strstr(model, "codestral") ||
+        strstr(model, "pixtral") || strstr(model, "mixtral"))
+        return "mistral";
+    if (strstr(model, "kimi") || strstr(model, "moonshot"))
+        return "moonshot";
+    if (strstr(model, "command"))
+        return "cohere";
+    if (strstr(model, "sonar") || strstr(model, "pplx"))
+        return "perplexity";
+    if (strstr(model, "glm"))
+        return "zai";
+    if (strstr(model, "llama"))
+        return "meta";
+    if (strstr(model, "nova"))
+        return "amazon";
+    if (strstr(model, "minimax"))
+        return "minimax";
+
+    return "other";
+}
+
+static bool provider_model_is_code_oriented(const char *model) {
+    if (!model || !model[0]) return false;
+    return strstr(model, "codex") || strstr(model, "code");
+}
+
+static const char *provider_xai_primary_model(bool prefer_code) {
+    if (provider_has_usable_key("xai", NULL))
+        return prefer_code ? "grok-code-fast-1" : "grok-4-fast";
+    if (provider_has_usable_key("openrouter", NULL))
+        return "x-ai/grok-4.20-beta";
+    return NULL;
+}
+
+static const char *provider_openai_primary_model(bool prefer_code) {
+    if (provider_has_usable_key("openrouter", NULL))
+        return prefer_code ? "openai/gpt-5.3-codex" : "openai/gpt-5.4";
+    if (provider_has_usable_key("openai", NULL))
+        return "gpt-4.1";
+    return NULL;
+}
+
+static const char *provider_family_primary_model(const char *family, bool prefer_code) {
+    if (!family || !family[0]) return NULL;
+
+    if (strcmp(family, "xai") == 0)
+        return provider_xai_primary_model(prefer_code);
+    if (strcmp(family, "openai") == 0)
+        return provider_openai_primary_model(prefer_code);
+    if (strcmp(family, "anthropic") == 0) {
+        if (provider_has_usable_key("anthropic", NULL)) return "claude-sonnet-4-6";
+        if (provider_has_usable_key("openrouter", NULL)) return "anthropic/claude-sonnet-4.6";
+        return NULL;
+    }
+    if (strcmp(family, "google") == 0) {
+        if (provider_has_usable_key("google", NULL)) return "gemini-2.5-pro";
+        if (provider_has_usable_key("openrouter", NULL)) return "google/gemini-2.5-pro";
+        return NULL;
+    }
+    if (strcmp(family, "deepseek") == 0) {
+        if (provider_has_usable_key("openrouter", NULL)) return "deepseek/deepseek-chat";
+        if (provider_has_usable_key("deepseek", NULL)) return "deepseek-chat";
+        return NULL;
+    }
+    if (strcmp(family, "qwen") == 0) {
+        if (provider_has_usable_key("openrouter", NULL)) return "qwen/qwen3.5-plus-02-15";
+        return NULL;
+    }
+    if (strcmp(family, "mistral") == 0) {
+        if (provider_has_usable_key("mistral", NULL)) return "mistral-large-latest";
+        if (provider_has_usable_key("openrouter", NULL)) return "mistralai/mistral-large-2512";
+        return NULL;
+    }
+    if (strcmp(family, "moonshot") == 0) {
+        if (provider_has_usable_key("moonshot", NULL)) return "kimi-k2.5";
+        if (provider_has_usable_key("openrouter", NULL)) return "moonshotai/kimi-k2.5";
+        return NULL;
+    }
+    if (strcmp(family, "cohere") == 0) {
+        if (provider_has_usable_key("cohere", NULL)) return "command-a-03-2025";
+        if (provider_has_usable_key("openrouter", NULL)) return "cohere/command-a";
+        return NULL;
+    }
+    if (strcmp(family, "perplexity") == 0) {
+        if (provider_has_usable_key("perplexity", NULL)) return "sonar-pro";
+        return NULL;
+    }
+    if (strcmp(family, "zai") == 0) {
+        if (provider_has_usable_key("openrouter", NULL)) return "z-ai/glm-5.2";
+        return NULL;
+    }
+    if (strcmp(family, "meta") == 0) {
+        if (provider_has_usable_key("openrouter", NULL)) return "meta-llama/llama-4-maverick";
+        return NULL;
+    }
+    if (strcmp(family, "minimax") == 0) {
+        if (provider_has_usable_key("openrouter", NULL)) return "minimax/minimax-m2.5";
+        return NULL;
+    }
+    if (strcmp(family, "amazon") == 0) {
+        if (provider_has_usable_key("openrouter", NULL)) return "amazon/nova-premier-v1";
+        return NULL;
+    }
+
+    return NULL;
+}
+
+static void provider_append_unique_model(char out_models[][128], int *count,
+                                         int max_models, const char *current_model,
+                                         const char *candidate) {
+    if (!out_models || !count || max_models <= 0 || !candidate || !candidate[0]) return;
+    if (*count >= max_models) return;
+
+    const char *resolved_candidate = model_resolve_alias(candidate);
+    const char *resolved_current = current_model ? model_resolve_alias(current_model) : NULL;
+
+    if (resolved_current && strcmp(resolved_candidate, resolved_current) == 0)
+        return;
+
+    for (int i = 0; i < *count; i++) {
+        if (strcmp(out_models[i], resolved_candidate) == 0)
+            return;
+    }
+
+    snprintf(out_models[*count], 128, "%s", resolved_candidate);
+    (*count)++;
+}
+
+int provider_build_default_fallback_models(const char *model,
+                                           char out_models[][128],
+                                           int max_models) {
+    if (!out_models || max_models <= 0) return 0;
+    for (int i = 0; i < max_models; i++) out_models[i][0] = '\0';
+
+    const char *resolved_model = model_resolve_alias(model ? model : DEFAULT_MODEL);
+    const char *family = provider_model_family(resolved_model);
+    bool prefer_code = provider_model_is_code_oriented(resolved_model);
+    int count = 0;
+
+    if (strcmp(family, "anthropic") == 0) {
+        provider_append_unique_model(out_models, &count, max_models, resolved_model,
+                                     provider_family_primary_model("anthropic", false));
+        provider_append_unique_model(out_models, &count, max_models, resolved_model,
+                                     provider_xai_primary_model(prefer_code));
+        provider_append_unique_model(out_models, &count, max_models, resolved_model,
+                                     provider_openai_primary_model(prefer_code));
+        provider_append_unique_model(out_models, &count, max_models, resolved_model,
+                                     provider_family_primary_model("google", false));
+        provider_append_unique_model(out_models, &count, max_models, resolved_model,
+                                     provider_family_primary_model("deepseek", false));
+        return count;
+    }
+
+    if (strcmp(family, "openai") == 0) {
+        provider_append_unique_model(out_models, &count, max_models, resolved_model,
+                                     provider_openai_primary_model(prefer_code));
+        provider_append_unique_model(out_models, &count, max_models, resolved_model,
+                                     provider_xai_primary_model(true));
+        provider_append_unique_model(out_models, &count, max_models, resolved_model,
+                                     provider_family_primary_model("anthropic", false));
+        provider_append_unique_model(out_models, &count, max_models, resolved_model,
+                                     provider_family_primary_model("google", false));
+        provider_append_unique_model(out_models, &count, max_models, resolved_model,
+                                     provider_family_primary_model("deepseek", false));
+        return count;
+    }
+
+    if (strcmp(family, "xai") == 0) {
+        provider_append_unique_model(out_models, &count, max_models, resolved_model,
+                                     provider_xai_primary_model(prefer_code));
+        provider_append_unique_model(out_models, &count, max_models, resolved_model,
+                                     provider_family_primary_model("anthropic", false));
+        provider_append_unique_model(out_models, &count, max_models, resolved_model,
+                                     provider_openai_primary_model(prefer_code));
+        provider_append_unique_model(out_models, &count, max_models, resolved_model,
+                                     provider_family_primary_model("google", false));
+        provider_append_unique_model(out_models, &count, max_models, resolved_model,
+                                     provider_family_primary_model("deepseek", false));
+        return count;
+    }
+
+    provider_append_unique_model(out_models, &count, max_models, resolved_model,
+                                 provider_xai_primary_model(prefer_code));
+    provider_append_unique_model(out_models, &count, max_models, resolved_model,
+                                 provider_family_primary_model("anthropic", false));
+    provider_append_unique_model(out_models, &count, max_models, resolved_model,
+                                 provider_openai_primary_model(prefer_code));
+    provider_append_unique_model(out_models, &count, max_models, resolved_model,
+                                 provider_family_primary_model("google", false));
+    provider_append_unique_model(out_models, &count, max_models, resolved_model,
+                                 provider_family_primary_model("deepseek", false));
+    provider_append_unique_model(out_models, &count, max_models, resolved_model,
+                                 provider_family_primary_model("qwen", false));
+    return count;
+}
+
+const char *provider_select_default_primary_model(bool prefer_code) {
+    const char *candidate = NULL;
+
+    if (!prefer_code) {
+        candidate = provider_xai_primary_model(false);
+        if (candidate) return candidate;
+    } else {
+        candidate = provider_openai_primary_model(true);
+        if (candidate) return candidate;
+    }
+
+    candidate = provider_family_primary_model("anthropic", false);
+    if (candidate) return candidate;
+
+    candidate = provider_xai_primary_model(prefer_code);
+    if (candidate) return candidate;
+
+    candidate = provider_openai_primary_model(prefer_code);
+    if (candidate) return candidate;
+
+    candidate = provider_family_primary_model("google", false);
+    if (candidate) return candidate;
+
+    candidate = provider_family_primary_model("deepseek", false);
+    if (candidate) return candidate;
+
+    candidate = provider_family_primary_model("mistral", false);
+    if (candidate) return candidate;
+
+    candidate = provider_family_primary_model("moonshot", false);
+    if (candidate) return candidate;
+
+    return DEFAULT_MODEL;
+}
 
 const char *provider_detect(const char *model, const char *api_key) {
     if (!model && !api_key) return "anthropic";
@@ -1162,6 +3008,16 @@ const char *provider_detect(const char *model, const char *api_key) {
         if (strstr(model, "claude") || strstr(model, "opus") ||
             strstr(model, "sonnet") || strstr(model, "haiku"))
             return "anthropic";
+        /* Cerebras provider-prefixed models should beat generic family matches */
+        if (strstr(model, "cerebras"))
+            return "cerebras";
+        /* Moonshot native — bare kimi-* / moonshot-* IDs (anything with a
+         * slash already routed to OpenRouter above). */
+        if (strstr(model, "kimi") || strstr(model, "moonshot"))
+            return "moonshot";
+        /* Google Gemini native — bare gemini-* IDs only */
+        if (strstr(model, "gemini") || strstr(model, "Gemini"))
+            return "google";
         /* OpenAI — bare model IDs only */
         if (strstr(model, "gpt") || strncmp(model, "o1", 2) == 0 ||
             strncmp(model, "o3", 2) == 0 || strncmp(model, "o4", 2) == 0 ||
@@ -1182,20 +3038,19 @@ const char *provider_detect(const char *model, const char *api_key) {
             return "mistral";
         /* Together native */
         if (!strstr(model, "/") &&
-            (strstr(model, "Qwen") || strstr(model, "together")))
+            (strstr(model, "Qwen") || strstr(model, "qwen") ||
+             strstr(model, "together")))
             return "together";
         /* Cohere */
         if (strstr(model, "command"))
             return "cohere";
-        /* xAI — native only for bare "grok" IDs, x-ai/ prefix goes to OpenRouter */
-        if (strstr(model, "grok") && !strstr(model, "/"))
+        /* xAI — native only for bare "grok" IDs, x-ai/ prefix goes to OpenRouter.
+         * Covers grok-4, grok-4-fast, grok-3, grok-3-mini, grok-code-fast-1. */
+        if ((strstr(model, "grok") || strstr(model, "Grok")) && !strstr(model, "/"))
             return "xai";
         /* Perplexity */
         if (strstr(model, "sonar") || strstr(model, "pplx"))
             return "perplexity";
-        /* Cerebras */
-        if (strstr(model, "cerebras"))
-            return "cerebras";
         /* Any remaining slash-based model IDs already caught above */
     }
 
@@ -1205,6 +3060,7 @@ const char *provider_detect(const char *model, const char *api_key) {
         if (strncmp(api_key, "gsk_", 4) == 0) return "groq";
         if (strncmp(api_key, "sk-or-", 6) == 0) return "openrouter";
         if (strncmp(api_key, "pplx-", 5) == 0) return "perplexity";
+        if (strncmp(api_key, "xai-", 4) == 0) return "xai";
         if (strncmp(api_key, "sk-", 3) == 0) return "openai";
     }
 
@@ -1213,12 +3069,186 @@ const char *provider_detect(const char *model, const char *api_key) {
 
 /* ── Resolve API key for a provider ────────────────────────────────────── */
 
+static const char *provider_resolve_profile_env_key(const provider_profile_t *profile) {
+    if (!profile) return NULL;
+    for (int i = 0; i < PROVIDER_PROFILE_MAX_ENV_VARS && profile->env_vars[i]; i++) {
+        const char *key = provider_getenv_nonempty(profile->env_vars[i]);
+        if (key) return key;
+    }
+    return NULL;
+}
+
 const char *provider_resolve_api_key(const char *provider_name) {
-    if (strcmp(provider_name, "anthropic") == 0)
-        return getenv("ANTHROPIC_API_KEY");
+    if (!provider_name || !provider_name[0]) return NULL;
+    const provider_profile_t *profile = provider_profile_find(provider_name);
+    provider_name = provider_profile_canonical_name(provider_name);
+
+    if (strcmp(provider_name, "anthropic") == 0) {
+        const char *oauth = provider_resolve_claude_code_oauth_token(false);
+        if (oauth && oauth[0]) return oauth;
+        const char *key = provider_resolve_profile_env_key(profile);
+        if (key && key[0]) return key;
+        return provider_resolve_alias_env_key("anthropic");
+    }
 
     const provider_endpoint_t *ep = find_endpoint(provider_name);
-    if (ep) return getenv(ep->env_key);
+    if (ep) {
+        const char *key = provider_getenv_nonempty(ep->env_key);
+        if (key) return key;
+        key = provider_resolve_profile_env_key(profile);
+        if (key) return key;
+        key = provider_resolve_alias_env_key(provider_name);
+        if (key) return key;
+        return provider_resolve_dynamic_env_key(provider_name);
+    }
 
-    return getenv("OPENAI_API_KEY");
+    const char *key = provider_resolve_profile_env_key(profile);
+    if (key) return key;
+    return provider_resolve_dynamic_env_key(provider_name);
+}
+
+static bool provider_key_matches(const char *provider_name, const char *fallback_api_key) {
+    if (!provider_name || !provider_name[0] || !fallback_api_key || !fallback_api_key[0])
+        return false;
+    provider_name = provider_profile_canonical_name(provider_name);
+    return strcmp(provider_detect(NULL, fallback_api_key), provider_name) == 0;
+}
+
+bool provider_has_usable_key(const char *provider_name, const char *fallback_api_key) {
+    if (!provider_name || !provider_name[0]) return false;
+    provider_name = provider_profile_canonical_name(provider_name);
+
+    const char *native_key = provider_resolve_api_key(provider_name);
+    if (native_key && native_key[0]) return true;
+
+    return provider_key_matches(provider_name, fallback_api_key);
+}
+
+const char *provider_route_for_model(const char *model,
+                                     const char *fallback_api_key,
+                                     const char *provider_override) {
+    if (provider_override && provider_override[0])
+        return provider_profile_canonical_name(provider_override);
+
+    const char *provider_name = provider_detect(model, fallback_api_key);
+    if (provider_has_usable_key(provider_name, fallback_api_key))
+        return provider_name;
+
+    if (strcmp(provider_name, "openrouter") != 0 &&
+        provider_has_usable_key("openrouter", fallback_api_key))
+        return "openrouter";
+
+    return provider_name;
+}
+
+const char *provider_resolve_request_api_key(const char *provider_name,
+                                             const char *fallback_api_key) {
+    if (!provider_name || !provider_name[0]) return fallback_api_key;
+    provider_name = provider_profile_canonical_name(provider_name);
+
+    if (strcmp(provider_name, "anthropic") == 0) {
+        const char *oauth = provider_resolve_claude_code_oauth_token(true);
+        if (oauth && oauth[0]) return oauth;
+    }
+
+    const char *native_key = provider_resolve_api_key(provider_name);
+    if (provider_key_matches(provider_name, fallback_api_key))
+        return fallback_api_key;
+
+    if (native_key && native_key[0]) return native_key;
+
+    return NULL;
+}
+
+const char *provider_claude_code_oauth_source(void) {
+    const char *env = getenv("DSCO_CLAUDE_CODE_OAUTH_TOKEN");
+    if (env && env[0]) return "env";
+    env = getenv("CLAUDE_CODE_OAUTH_TOKEN");
+    if (env && env[0]) return "env";
+
+    if (provider_env_truthy(getenv("DSCO_DISABLE_CLAUDE_CODE_OAUTH_DISCOVERY")))
+        return "disabled";
+
+    claude_code_oauth_bundle_t bundle;
+    if (!provider_load_claude_code_oauth_bundle(&bundle)) return "missing";
+
+    const char *source = provider_claude_code_oauth_source_name(bundle.source);
+    provider_claude_code_oauth_bundle_free(&bundle);
+    return source;
+}
+
+bool provider_claude_code_get_account_info(char *subscription_type_out, size_t st_len,
+                                           char *rate_limit_tier_out,   size_t rl_len) {
+    if (subscription_type_out && st_len) subscription_type_out[0] = '\0';
+    if (rate_limit_tier_out   && rl_len) rate_limit_tier_out[0]   = '\0';
+
+    claude_code_oauth_bundle_t bundle;
+    if (!provider_load_claude_code_oauth_bundle(&bundle)) return false;
+
+    bool found = false;
+    if (bundle.oauth_json) {
+        if (subscription_type_out && st_len) {
+            char *v = json_get_str(bundle.oauth_json, "subscriptionType");
+            if (v && v[0]) { snprintf(subscription_type_out, st_len, "%s", v); found = true; }
+            free(v);
+        }
+        if (rate_limit_tier_out && rl_len) {
+            char *v = json_get_str(bundle.oauth_json, "rateLimitTier");
+            if (v && v[0]) { snprintf(rate_limit_tier_out, rl_len, "%s", v); found = true; }
+            free(v);
+        }
+    }
+    provider_claude_code_oauth_bundle_free(&bundle);
+    return found;
+}
+
+void provider_export_child_process_credentials_for_provider(const char *provider_name,
+                                                            const char *resolved_key) {
+    if (!resolved_key || !resolved_key[0]) return;
+    if (!provider_name || !provider_name[0])
+        provider_name = provider_detect(NULL, resolved_key);
+    const provider_profile_t *profile = provider_profile_find(provider_name);
+    provider_name = provider_profile_canonical_name(provider_name);
+
+    if (strcmp(provider_name, "anthropic") == 0) {
+        if (llm_anthropic_uses_claude_code_auth(resolved_key)) {
+            unsetenv("ANTHROPIC_API_KEY");
+            setenv("DSCO_CLAUDE_CODE_OAUTH_TOKEN", resolved_key, 1);
+            setenv("CLAUDE_CODE_OAUTH_TOKEN", resolved_key, 1);
+        } else {
+            setenv("ANTHROPIC_API_KEY", resolved_key, 1);
+            unsetenv("DSCO_CLAUDE_CODE_OAUTH_TOKEN");
+            unsetenv("CLAUDE_CODE_OAUTH_TOKEN");
+        }
+        return;
+    }
+
+    const provider_endpoint_t *ep = find_endpoint(provider_name);
+    if (ep && ep->env_key && ep->env_key[0])
+        setenv(ep->env_key, resolved_key, 1);
+    else {
+        const char *env_key = provider_profile_primary_env_var(profile);
+        if (env_key && env_key[0])
+            setenv(env_key, resolved_key, 1);
+    }
+}
+
+void provider_export_child_process_credentials(const char *model,
+                                               const char *resolved_key) {
+    const char *provider_name = NULL;
+    if (resolved_key && resolved_key[0])
+        provider_name = provider_detect(NULL, resolved_key);
+    if ((!provider_name || !provider_name[0]) && model && model[0])
+        provider_name = provider_detect(model, NULL);
+    provider_export_child_process_credentials_for_provider(provider_name, resolved_key);
+}
+
+bool provider_model_is_routable(const char *model,
+                                const char *fallback_api_key,
+                                const char *provider_override,
+                                const char **out_provider_name) {
+    const char *provider_name =
+        provider_route_for_model(model, fallback_api_key, provider_override);
+    if (out_provider_name) *out_provider_name = provider_name;
+    return provider_has_usable_key(provider_name, fallback_api_key);
 }

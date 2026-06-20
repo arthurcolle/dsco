@@ -5476,6 +5476,7 @@ send_to_llm:
         uint32_t last_fail_hash = 0;
         int consecutive_cached_fails = 0;
         tools_context_turn_begin();
+        tools_loop_control_reset();
         tools_set_active_conversation(&conv);
         tools_playbook_advance_turn();
         arena_scratch_reset();  /* §2: reset per-turn scratch arena */
@@ -5492,9 +5493,12 @@ send_to_llm:
         terminal_input_echo_suspend();
         esc_poller_start();
         g_turn_start_time = now_ms();
+        bool prompt_done = false;
+        int base_turn_limit = dsco_max_agent_turns();
 
 resume_turn_loop:
-        while (turns < dsco_max_agent_turns() && !g_interrupted) {
+        while (turns < tools_loop_control_effective_max_turns(base_turn_limit) &&
+               !g_interrupted) {
             turns++;
             md_reset(&s_md);
 
@@ -5620,10 +5624,13 @@ resume_turn_loop:
                 break;
             }
 
-            /* Pre-flight context check: output-aware tiered compaction */
+            /* Pre-flight context check: output-aware tiered compaction.
+             * Estimate from the conversation model (rough(conv) + API-measured
+             * overhead), NOT strlen(req)/4 — the serialized request inlines
+             * base64 image data, which is ~200x larger than its true token
+             * cost and was triggering phantom every-turn compaction loops. */
             {
-                size_t payload_chars = req ? strlen(req) : 0;
-                int est_tokens = (int)(payload_chars / 4);
+                int est_tokens = conv_token_estimate(&conv, &session);
                 int eff_window = effective_context_window(&session);
                 int thresh = auto_compact_threshold(&session);
                 if (est_tokens > thresh) {
@@ -5658,8 +5665,7 @@ resume_turn_loop:
                         tui_error("failed to rebuild request after auto-compact");
                         break;
                     }
-                    size_t new_chars = strlen(req);
-                    int new_tokens = (int)(new_chars / 4);
+                    int new_tokens = conv_token_estimate(&conv, &session);
                     if (g_outq) {
                         tui_outq_writef(g_outq,
                             "  \033[33m%s auto-compact (tier %d): %dk→%dk tokens (%.0f%%→%.0f%% of %dk effective)\033[0m\n",
@@ -6717,6 +6723,29 @@ resume_turn_loop:
             /* Agent invoked self_exit tool — finish this turn then terminate */
             if (g_agent_exit_requested) done = true;
 
+            if (!g_agent_exit_requested && !g_interrupted) {
+                loop_control_decision_t loop_decision;
+                tools_loop_control_decide(turns, done, needs_followup_turn,
+                                          &loop_decision);
+                if (loop_decision.force_continue && loop_decision.prompt[0]) {
+                    conv_add_user_text(&conv, loop_decision.prompt);
+                    done = false;
+                    pause_turn_streak = 0;
+                    fprintf(stderr, "  %sloop construct: %s%s\n",
+                            TUI_DIM,
+                            loop_decision.reason[0] ? loop_decision.reason
+                                                     : "continuing",
+                            TUI_RESET);
+                    baseline_log("agent", "loop_construct_continue",
+                                 loop_decision.reason, NULL);
+                }
+                if (loop_decision.force_done) {
+                    done = true;
+                    baseline_log("agent", "loop_construct_done",
+                                 loop_decision.reason, NULL);
+                }
+            }
+
             /* Phase 6: Classify turn transition for telemetry */
             turn_transition_t transition;
             if (g_agent_exit_requested)
@@ -6788,7 +6817,10 @@ resume_turn_loop:
 
             json_free_response(&sr.parsed);
             arena_reset(&turn_arena);
-            if (done) break;
+            if (done) {
+                prompt_done = true;
+                break;
+            }
         }
 
         /* §9: Persist semantic memories at end of agent response */
@@ -6819,9 +6851,10 @@ resume_turn_loop:
             fprintf(stderr, "\n");
             tui_warning("interrupted (press Ctrl+C again to force quit)");
         }
-        if (turns >= dsco_max_agent_turns()) {
+        int final_turn_limit = tools_loop_control_effective_max_turns(base_turn_limit);
+        if (!prompt_done && turns >= final_turn_limit) {
             char msg[64];
-            snprintf(msg, sizeof(msg), "max turns reached (%d)", dsco_max_agent_turns());
+            snprintf(msg, sizeof(msg), "max turns reached (%d)", final_turn_limit);
             tui_warning(msg);
         }
         if (turns > 1) {

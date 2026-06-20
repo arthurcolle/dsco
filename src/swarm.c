@@ -1,6 +1,8 @@
 #include "swarm.h"
 #include "config.h"
+#include "provider.h"
 #include "router.h"
+#include "llm.h"
 #include "json_util.h"
 #include "tui.h"
 #include "scheduler.h"
@@ -25,6 +27,16 @@
 /* ── Forward declarations ─────────────────────────────────────────────── */
 
 static void parse_child_cost_report(swarm_child_t *c);
+
+static void swarm_export_child_credential(const char *model,
+                                          const char *credential) {
+    provider_export_child_process_credentials(model, credential);
+}
+
+static void swarm_export_child_credential_for_provider(const char *provider,
+                                                       const char *credential) {
+    provider_export_child_process_credentials_for_provider(provider, credential);
+}
 
 /* ── Bitset helpers ───────────────────────────────────────────────────── */
 
@@ -144,15 +156,18 @@ void swarm_init(swarm_t *s, const char *api_key, const char *model) {
 
 void swarm_destroy(swarm_t *s) {
     /* Kill all running children — SIGTERM first, then SIGKILL after grace period */
+    bool signaled = false;
     for (int i = 0; i < s->child_count; i++) {
         swarm_child_t *c = &s->children[i];
         if (c->status == SWARM_RUNNING || c->status == SWARM_STREAMING) {
             kill(-c->pid, SIGTERM);  /* kill process group */
+            signaled = true;
         }
     }
 
-    /* Brief grace period for orderly shutdown */
-    usleep(200000);  /* 200ms */
+    /* Brief grace period only when a child was asked to stop. Completed
+     * swarms/topology stages should not pay a fixed 200ms teardown tax. */
+    if (signaled) usleep(200000);
 
     /* Force-kill any still running, then blocking reap to avoid zombies */
     for (int i = 0; i < s->child_count; i++) {
@@ -214,13 +229,12 @@ int swarm_spawn(swarm_t *s, const char *task, const char *model) {
 int swarm_spawn_in_group(swarm_t *s, int group_id, const char *task, const char *model) {
     if (s->child_count >= SWARM_MAX_CHILDREN) return -1;
 
-    int stdout_pipe[2], stderr_pipe[2];
-    if (pipe(stdout_pipe) < 0 || pipe(stderr_pipe) < 0) return -1;
+    int stdout_pipe[2];
+    if (pipe(stdout_pipe) < 0) return -1;
 
     pid_t pid = fork();
     if (pid < 0) {
         close(stdout_pipe[0]); close(stdout_pipe[1]);
-        close(stderr_pipe[0]); close(stderr_pipe[1]);
         return -1;
     }
 
@@ -233,12 +247,10 @@ int swarm_spawn_in_group(swarm_t *s, int group_id, const char *task, const char 
     if (pid == 0) {
         /* ── Child process ── */
         close(stdout_pipe[0]);
-        close(stderr_pipe[0]);
 
         dup2(stdout_pipe[1], STDOUT_FILENO);
         dup2(stdout_pipe[1], STDERR_FILENO);  /* merge stderr into stdout */
         close(stdout_pipe[1]);
-        close(stderr_pipe[1]);
 
         /* New process group for clean kill */
         setpgid(0, 0);
@@ -260,10 +272,8 @@ int swarm_spawn_in_group(swarm_t *s, int group_id, const char *task, const char 
         if (!m || !m[0]) m = s->default_model;
         const char *bin = s->dsco_path;
 
-        /* Ensure child inherits API key */
-        if (s->api_key && s->api_key[0]) {
-            setenv("ANTHROPIC_API_KEY", s->api_key, 1);
-        }
+        /* Ensure child inherits the exact credential/auth mode the parent resolved. */
+        swarm_export_child_credential(m, s->api_key);
 
         /* Pass parent instance for lineage tracking */
         const char *parent_instance = getenv("DSCO_INSTANCE_ID");
@@ -306,7 +316,9 @@ int swarm_spawn_in_group(swarm_t *s, int group_id, const char *task, const char 
         }
 
         /* Use execl with absolute path (not execlp which searches PATH) */
-        execl(bin, bin, "-m", m, task, NULL);
+        setenv("DSCO_PROFILE", "worker", 1);
+        setenv("DSCO_WORKER", "1", 1);
+        execl(bin, bin, "--profile", "worker", "-m", m, task, NULL);
 
         /* If exec fails, write a clear error */
         fprintf(stdout, "swarm: exec failed for '%s': %s\n", bin, strerror(errno));
@@ -315,8 +327,6 @@ int swarm_spawn_in_group(swarm_t *s, int group_id, const char *task, const char 
 
     /* ── Parent ── */
     close(stdout_pipe[1]);
-    close(stderr_pipe[0]);  /* stderr merged into stdout in child */
-    close(stderr_pipe[1]);
 
     /* Make pipe non-blocking */
     fcntl(stdout_pipe[0], F_SETFL, O_NONBLOCK);
@@ -370,13 +380,12 @@ int swarm_spawn_provider(swarm_t *s, int group_id, const char *task,
 
     if (s->child_count >= SWARM_MAX_CHILDREN) return -1;
 
-    int stdout_pipe[2], stderr_pipe[2];
-    if (pipe(stdout_pipe) < 0 || pipe(stderr_pipe) < 0) return -1;
+    int stdout_pipe[2];
+    if (pipe(stdout_pipe) < 0) return -1;
 
     pid_t pid = fork();
     if (pid < 0) {
         close(stdout_pipe[0]); close(stdout_pipe[1]);
-        close(stderr_pipe[0]); close(stderr_pipe[1]);
         return -1;
     }
 
@@ -387,11 +396,9 @@ int swarm_spawn_provider(swarm_t *s, int group_id, const char *task,
     if (pid == 0) {
         /* ── Child ── */
         close(stdout_pipe[0]);
-        close(stderr_pipe[0]);
         dup2(stdout_pipe[1], STDOUT_FILENO);
         dup2(stdout_pipe[1], STDERR_FILENO);
         close(stdout_pipe[1]);
-        close(stderr_pipe[1]);
         setpgid(0, 0);
 
         const char *m = model ? model : s->default_model;
@@ -429,8 +436,20 @@ int swarm_spawn_provider(swarm_t *s, int group_id, const char *task,
             }
         }
 
+        /* Preserve the parent's resolved auth mode when pinning a provider. */
+        const char *resolved_credential = NULL;
+        if (s->api_key && s->api_key[0] &&
+            strcmp(provider_detect(NULL, s->api_key), provider) == 0) {
+            resolved_credential = s->api_key;
+        } else {
+            resolved_credential = provider_resolve_request_api_key(provider, s->api_key);
+        }
+        swarm_export_child_credential_for_provider(provider, resolved_credential);
+
         /* Key: --exec <provider> forces the child to use that provider's API */
-        execl(bin, bin, "--exec", provider, "-m", m, task, NULL);
+        setenv("DSCO_PROFILE", "worker", 1);
+        setenv("DSCO_WORKER", "1", 1);
+        execl(bin, bin, "--profile", "worker", "--exec", provider, "-m", m, task, NULL);
         fprintf(stdout, "swarm: exec failed for '%s --exec %s': %s\n",
                 bin, provider, strerror(errno));
         _exit(127);
@@ -438,8 +457,6 @@ int swarm_spawn_provider(swarm_t *s, int group_id, const char *task,
 
     /* ── Parent ── */
     close(stdout_pipe[1]);
-    close(stderr_pipe[0]);
-    close(stderr_pipe[1]);
     fcntl(stdout_pipe[0], F_SETFL, O_NONBLOCK);
 
     swarm_child_t *c = &s->children[id];
@@ -638,17 +655,18 @@ int swarm_poll_stream(swarm_t *s, int timeout_ms, swarm_stream_cb cb, void *ctx)
         }
     }
 
-    if (nfds == 0) return 0;
-
-    int ret = poll(fds, nfds, timeout_ms);
-    if (ret <= 0) return ret;
-
     int events = 0;
-    for (int i = 0; i < nfds; i++) {
-        if (fds[i].revents & (POLLIN | POLLHUP)) {
-            swarm_child_t *c = &s->children[fd_map[i]];
-            child_read(c, fds[i].fd, cb, ctx);
-            events++;
+    if (nfds > 0) {
+        int ret = poll(fds, nfds, timeout_ms);
+        if (ret < 0) return ret;
+        if (ret > 0) {
+            for (int i = 0; i < nfds; i++) {
+                if (fds[i].revents & (POLLIN | POLLHUP)) {
+                    swarm_child_t *c = &s->children[fd_map[i]];
+                    child_read(c, fds[i].fd, cb, ctx);
+                    events++;
+                }
+            }
         }
     }
 
@@ -781,7 +799,7 @@ bool swarm_kill(swarm_t *s, int child_id) {
     swarm_child_t *c = swarm_get(s, child_id);
     if (!c) return false;
     if (c->status != SWARM_RUNNING && c->status != SWARM_STREAMING) return false;
-    kill(c->pid, SIGTERM);
+    kill(-c->pid, SIGTERM);
     c->status = SWARM_KILLED;
     c->end_time = now_sec();
     return true;
@@ -849,8 +867,8 @@ static bool detect_binary(const char *name, char *out_path, size_t out_len) {
 }
 
 static bool check_claude_auth(void) {
-    /* Check if ANTHROPIC_API_KEY is set — that's enough for -p mode */
-    const char *key = getenv("ANTHROPIC_API_KEY");
+    /* Claude executor is usable with either Anthropic API key or Claude Code OAuth. */
+    const char *key = provider_resolve_request_api_key("anthropic", NULL);
     return (key && key[0]);
 }
 
@@ -882,6 +900,27 @@ void swarm_detect_executors(swarm_t *s) {
             snprintf(e->codex_model, sizeof(e->codex_model), "gpt-5.3-codex-spark");
         }
     }
+}
+
+void swarm_prepare_executor_env(swarm_t *s, executor_type_t executor) {
+    if (!s || executor != EXECUTOR_CLAUDE) return;
+
+    /* Claude Code prefers ANTHROPIC_API_KEY over the logged-in subscription
+       path. When dsco already resolved an OAuth/subscription credential,
+       scrub the API-key overrides before exec so the Claude CLI stays on the
+       user's Claude Code account instead of a low-balance API key. */
+    const char *resolved = provider_resolve_request_api_key("anthropic", s->api_key);
+    if (!resolved || !resolved[0] ||
+        !llm_anthropic_uses_claude_code_auth(resolved)) {
+        return;
+    }
+
+    unsetenv("ANTHROPIC_API_KEY");
+    unsetenv("ANTHROPIC_AUTH_TOKEN");
+    unsetenv("ANTHROPIC_BASE_URL");
+    unsetenv("ANTHROPIC_MODEL");
+    setenv("DSCO_CLAUDE_CODE_OAUTH_TOKEN", resolved, 1);
+    setenv("CLAUDE_CODE_OAUTH_TOKEN", resolved, 1);
 }
 
 /* ── External executor spawn ─────────────────────────────────────────── */
@@ -957,6 +996,8 @@ int swarm_spawn_executor(swarm_t *s, int group_id, const char *task,
         /* Propagate working directory */
         char cwd[2048];
         if (getcwd(cwd, sizeof(cwd))) chdir(cwd);
+
+        swarm_prepare_executor_env(s, executor);
 
         execv(bin, (char *const *)argv);
         fprintf(stdout, "swarm: exec failed for '%s': %s\n", bin, strerror(errno));
