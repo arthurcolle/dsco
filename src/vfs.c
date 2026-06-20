@@ -24,6 +24,10 @@ struct vfs_db {
     sqlite3_stmt *cache_put;
     sqlite3_stmt *cache_get;
     sqlite3_stmt *cache_evict;
+    sqlite3_stmt *result_put;
+    sqlite3_stmt *result_get;
+    sqlite3_stmt *result_evict;
+    sqlite3_stmt *result_list;
 
     /* Stats */
     int64_t cache_hits;
@@ -64,6 +68,18 @@ static const char *SCHEMA_SQL =
     "  created_at INTEGER DEFAULT (strftime('%s','now')),"
     "  PRIMARY KEY (tool_name, input_hash)"
     ");"
+    "CREATE TABLE IF NOT EXISTS tool_results ("
+    "  key TEXT PRIMARY KEY,"
+    "  tool_name TEXT NOT NULL,"
+    "  input_hash TEXT NOT NULL,"
+    "  result TEXT,"
+    "  result_len INTEGER,"
+    "  created_at INTEGER DEFAULT (strftime('%s','now')),"
+    "  expires_at INTEGER,"
+    "  access_count INTEGER DEFAULT 0,"
+    "  session_id TEXT"
+    ");"
+    "CREATE INDEX IF NOT EXISTS idx_tool_results_expires ON tool_results(expires_at);"
     "CREATE TABLE IF NOT EXISTS schema_version (version INTEGER);"
     "INSERT OR IGNORE INTO schema_version VALUES (1);";
 
@@ -83,6 +99,10 @@ static void finalize_all(vfs_db_t *db) {
     if (db->cache_put)     sqlite3_finalize(db->cache_put);
     if (db->cache_get)     sqlite3_finalize(db->cache_get);
     if (db->cache_evict)   sqlite3_finalize(db->cache_evict);
+    if (db->result_put)    sqlite3_finalize(db->result_put);
+    if (db->result_get)    sqlite3_finalize(db->result_get);
+    if (db->result_evict)  sqlite3_finalize(db->result_evict);
+    if (db->result_list)   sqlite3_finalize(db->result_list);
 }
 
 /* ── Lifecycle ─────────────────────────────────────────────────────── */
@@ -163,6 +183,37 @@ vfs_db_t *vfs_open(const char *path) {
     sqlite3_prepare_v2(vdb->db,
         "DELETE FROM cache WHERE expires_at <= strftime('%s','now')",
         -1, &vdb->cache_evict, NULL);
+
+    /* tool_results table (may not exist in old DBs) */
+    sqlite3_exec(vdb->db,
+        "CREATE TABLE IF NOT EXISTS tool_results ("
+        "  key TEXT PRIMARY KEY,"
+        "  tool_name TEXT NOT NULL,"
+        "  input_hash TEXT NOT NULL,"
+        "  result TEXT,"
+        "  result_len INTEGER,"
+        "  created_at INTEGER DEFAULT (strftime('%s','now')),"
+        "  expires_at INTEGER,"
+        "  access_count INTEGER DEFAULT 0,"
+        "  session_id TEXT"
+        ");"
+        "CREATE INDEX IF NOT EXISTS idx_tool_results_expires ON tool_results(expires_at);",
+        NULL, NULL, NULL);
+    sqlite3_prepare_v2(vdb->db,
+        "INSERT OR REPLACE INTO tool_results (key, tool_name, input_hash, result, result_len, expires_at) "
+        "VALUES (?, ?, ?, ?, ?, strftime('%s','now') + ?)",
+        -1, &vdb->result_put, NULL);
+    sqlite3_prepare_v2(vdb->db,
+        "SELECT result FROM tool_results WHERE key=? "
+        "AND (expires_at IS NULL OR expires_at > strftime('%s','now'))",
+        -1, &vdb->result_get, NULL);
+    sqlite3_prepare_v2(vdb->db,
+        "DELETE FROM tool_results WHERE expires_at IS NOT NULL AND expires_at <= strftime('%s','now')",
+        -1, &vdb->result_evict, NULL);
+    sqlite3_prepare_v2(vdb->db,
+        "SELECT key FROM tool_results WHERE expires_at IS NULL OR expires_at > strftime('%s','now') "
+        "ORDER BY created_at DESC",
+        -1, &vdb->result_list, NULL);
 
     return vdb;
 }
@@ -443,6 +494,88 @@ int vfs_cache_evict(vfs_db_t *db) {
     sqlite3_reset(db->cache_evict);
     sqlite3_step(db->cache_evict);
     return sqlite3_changes(db->db);
+}
+
+/* ── Tool result persistence ──────────────────────────────────────── */
+
+bool vfs_result_put(vfs_db_t *db, const char *tool_name,
+                    const char *input_hash, const char *result,
+                    int ttl_seconds) {
+    if (!db || !db->result_put || !tool_name || !input_hash || !result)
+        return false;
+
+    /* Build key: tool:hash[:16] */
+    char key[128];
+    snprintf(key, sizeof(key), "%s:%.16s", tool_name, input_hash);
+
+    sqlite3_reset(db->result_put);
+    sqlite3_bind_text(db->result_put, 1, key, -1, SQLITE_TRANSIENT);
+    sqlite3_bind_text(db->result_put, 2, tool_name, -1, SQLITE_TRANSIENT);
+    sqlite3_bind_text(db->result_put, 3, input_hash, -1, SQLITE_TRANSIENT);
+    sqlite3_bind_text(db->result_put, 4, result, -1, SQLITE_TRANSIENT);
+    sqlite3_bind_int(db->result_put, 5, (int)strlen(result));
+    sqlite3_bind_int(db->result_put, 6, ttl_seconds);
+    return sqlite3_step(db->result_put) == SQLITE_DONE;
+}
+
+char *vfs_result_get(vfs_db_t *db, const char *key) {
+    if (!db || !db->result_get || !key) return NULL;
+
+    /* Bump access_count */
+    sqlite3_stmt *bump = NULL;
+    sqlite3_prepare_v2(db->db,
+        "UPDATE tool_results SET access_count = access_count + 1 WHERE key=?",
+        -1, &bump, NULL);
+    if (bump) {
+        sqlite3_bind_text(bump, 1, key, -1, SQLITE_TRANSIENT);
+        sqlite3_step(bump);
+        sqlite3_finalize(bump);
+    }
+
+    sqlite3_reset(db->result_get);
+    sqlite3_bind_text(db->result_get, 1, key, -1, SQLITE_TRANSIENT);
+
+    char *result = NULL;
+    if (sqlite3_step(db->result_get) == SQLITE_ROW) {
+        const char *txt = (const char *)sqlite3_column_text(db->result_get, 0);
+        if (txt) result = strdup(txt);
+    }
+    sqlite3_reset(db->result_get);
+    return result;
+}
+
+int vfs_result_evict(vfs_db_t *db) {
+    if (!db || !db->result_evict) return 0;
+    sqlite3_reset(db->result_evict);
+    sqlite3_step(db->result_evict);
+    return sqlite3_changes(db->db);
+}
+
+char **vfs_result_list(vfs_db_t *db, int *out_count) {
+    if (out_count) *out_count = 0;
+    if (!db || !db->result_list) return NULL;
+
+    sqlite3_reset(db->result_list);
+
+    int cap = 64;
+    int count = 0;
+    char **keys = malloc((size_t)cap * sizeof(char *));
+    if (!keys) return NULL;
+
+    while (sqlite3_step(db->result_list) == SQLITE_ROW) {
+        if (count >= cap) {
+            cap *= 2;
+            char **tmp = realloc(keys, (size_t)cap * sizeof(char *));
+            if (!tmp) break;
+            keys = tmp;
+        }
+        const char *k = (const char *)sqlite3_column_text(db->result_list, 0);
+        keys[count++] = k ? strdup(k) : strdup("");
+    }
+    sqlite3_reset(db->result_list);
+
+    if (out_count) *out_count = count;
+    return keys;
 }
 
 /* ── Schema version ────────────────────────────────────────────────── */

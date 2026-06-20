@@ -43,6 +43,35 @@ Symptoms:
 - `/mcp` shows disconnected servers
 - expected MCP tools missing from `/tools`
 
+Config sources, loaded in this order:
+
+- `~/.dsco/mcp.json`
+- `~/.dsco/config.json`
+- `./.mcp.json`
+- `./.dsco/mcp.json`
+- `./.dsco/config.json`
+- Claude configs: `~/.claude.json`, `~/.claude/settings*.json`, Claude Desktop config
+- Codex configs: `~/.codex/config.toml`, `./.codex/config.toml`
+
+DSCO JSON config accepts `servers`, `mcpServers`, or `mcp_servers`:
+
+```json
+{
+  "servers": {
+    "my-server": {
+      "command": "/path/to/mcp-server",
+      "args": ["--flag"],
+      "env": {"KEY": "value"},
+      "cwd": "/optional/workdir"
+    },
+    "remote-http": {
+      "url": "https://example.com/mcp",
+      "headers": {"Authorization": "Bearer ..."}
+    }
+  }
+}
+```
+
 Steps:
 
 1. Validate config:
@@ -51,11 +80,12 @@ Steps:
 cat ~/.dsco/mcp.json
 ```
 
-2. Verify each server command is executable.
+2. Verify each stdio server command is executable.
 3. Run `/mcp reload`.
-4. Inspect server stderr in terminal logs.
-5. Check environment variables required by server.
-6. Confirm tool schemas are returned by MCP initialize/list tools flow.
+4. Inspect server stderr in `~/.dsco/debug/mcp-<server>.err`.
+5. Check environment variables or HTTP headers required by the server.
+6. If startup is slow, set `DSCO_MCP_TIMEOUT_MS=2000` temporarily.
+7. Confirm tool schemas are returned by MCP initialize/list tools flow.
 
 ## 3. Provider/API Outage or Stream Errors
 

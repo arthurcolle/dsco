@@ -20,6 +20,9 @@
 #include <stdlib.h>
 #include <string.h>
 #include <curl/curl.h>
+#include <poll.h>
+#include <sys/wait.h>
+#include <signal.h>
 
 /* ── Shared HTTP helper ────────────────────────────────────────────────── */
 
@@ -535,54 +538,6 @@ bool tool_github_create_issue(const char *input, char *result, size_t rlen) {
     return ok;
 }
 
-/* ══════════════════════════════════════════════════════════════════════════
- *  ALPHA VANTAGE — Financial time series
- * ══════════════════════════════════════════════════════════════════════════ */
-
-bool tool_alpha_vantage(const char *input, char *result, size_t rlen) {
-    const char *api_key;
-    if (!require_key("ALPHA_VANTAGE_API_KEY", "Alpha Vantage", result, rlen, &api_key))
-        return false;
-
-    char *symbol = json_get_str(input, "symbol");
-    char *function = json_get_str(input, "function");
-    char *interval = json_get_str(input, "interval");
-
-    if (!symbol || !symbol[0]) {
-        free(symbol); free(function); free(interval);
-        snprintf(result, rlen, "missing required parameter: symbol");
-        return false;
-    }
-
-    const char *fn = function ? function : "TIME_SERIES_DAILY";
-
-    char url[2048];
-    if (interval && interval[0])
-        snprintf(url, sizeof(url),
-                 "https://www.alphavantage.co/query?function=%s&symbol=%s&interval=%s&apikey=%s",
-                 fn, symbol, interval, api_key);
-    else
-        snprintf(url, sizeof(url),
-                 "https://www.alphavantage.co/query?function=%s&symbol=%s&apikey=%s",
-                 fn, symbol, api_key);
-
-    free(symbol); free(function); free(interval);
-
-    http_buf_t resp = {0};
-    long status = http_get_authed(url, NULL, &resp);
-
-    if (status != 200) {
-        snprintf(result, rlen, "Alpha Vantage error (HTTP %ld)", status);
-        free(resp.data);
-        return false;
-    }
-
-    result[0] = '\0';
-    truncate_response(resp.data ? resp.data : "{}", result, rlen, 32);
-    free(resp.data);
-    return true;
-}
-
 /* ── AV helper: generic query with extra params ────────────────────────── */
 
 static bool av_query(const char *function, const char *params,
@@ -633,49 +588,7 @@ static bool av_query(const char *function, const char *params,
  *  Alpha Vantage — Generic Table-Driven Dispatch (covers 100+ AV endpoints)
  * ═══════════════════════════════════════════════════════════════════════════ */
 
-/* Extract any JSON value (string, number, bool) as a malloc'd C string */
-static char *json_val_str(const char *json, const char *key) {
-    if (!json || !key) return NULL;
-    char needle[128];
-    snprintf(needle, sizeof(needle), "\"%s\"", key);
-    const char *p = json;
-    while ((p = strstr(p, needle)) != NULL) {
-        /* Ensure the char before the quote isn't alphanumeric (partial key match) */
-        if (p > json && p[-1] != '{' && p[-1] != ',' && p[-1] != ' '
-            && p[-1] != '\n' && p[-1] != '\t') { p++; continue; }
-        p += strlen(needle);
-        while (*p == ' ' || *p == '\t' || *p == '\n' || *p == '\r') p++;
-        if (*p != ':') continue;
-        p++;
-        while (*p == ' ' || *p == '\t' || *p == '\n' || *p == '\r') p++;
-        if (*p == '"') {
-            p++;
-            const char *end = p;
-            while (*end && *end != '"') { if (*end == '\\') end++; end++; }
-            size_t len = (size_t)(end - p);
-            char *r = malloc(len + 1);
-            if (!r) return NULL;
-            memcpy(r, p, len);
-            r[len] = '\0';
-            return r;
-        } else if (*p == 't') { return strdup("true");
-        } else if (*p == 'f') { return strdup("false");
-        } else if (*p == 'n') { return NULL; /* null */
-        } else if (*p == '-' || (*p >= '0' && *p <= '9')) {
-            const char *s = p;
-            while (*p == '-' || *p == '.' || *p == 'e' || *p == 'E'
-                   || *p == '+' || (*p >= '0' && *p <= '9')) p++;
-            size_t len = (size_t)(p - s);
-            char *r = malloc(len + 1);
-            if (!r) return NULL;
-            memcpy(r, s, len);
-            r[len] = '\0';
-            return r;
-        }
-        break;
-    }
-    return NULL;
-}
+/* json_get_str is provided by json_util.h */
 
 /* All known AV query parameter names */
 static const char *av_param_names[] = {
@@ -697,7 +610,7 @@ static bool av_generic(const char *av_func, const char *input,
                        const char *req1, const char *req2,
                        char *result, size_t rlen) {
     if (req1) {
-        char *v = json_val_str(input, req1);
+        char *v = json_get_str(input, req1);
         if (!v || !v[0]) {
             free(v);
             snprintf(result, rlen, "missing required parameter: %s", req1);
@@ -706,7 +619,7 @@ static bool av_generic(const char *av_func, const char *input,
         free(v);
     }
     if (req2) {
-        char *v = json_val_str(input, req2);
+        char *v = json_get_str(input, req2);
         if (!v || !v[0]) {
             free(v);
             snprintf(result, rlen, "missing required parameter: %s", req2);
@@ -723,7 +636,7 @@ static bool av_generic(const char *av_func, const char *input,
     jbuf_t params;
     jbuf_init(&params, 512);
     for (int i = 0; av_param_names[i]; i++) {
-        char *val = json_val_str(input, av_param_names[i]);
+        char *val = json_get_str(input, av_param_names[i]);
         if (val && val[0]) {
             char *enc = curl_easy_escape(curl, val, 0);
             if (!enc) {
@@ -1253,6 +1166,275 @@ bool tool_jina_read(const char *input, char *result, size_t rlen) {
     result[0] = '\0';
     truncate_response(resp.data ? resp.data : "", result, rlen, 32);
     free(resp.data);
+    return true;
+}
+
+/* ══════════════════════════════════════════════════════════════════════════
+ *  JINA SEARCH — AI-powered web search via s.jina.ai
+ * ══════════════════════════════════════════════════════════════════════════ */
+
+bool tool_jina_search(const char *input, char *result, size_t rlen) {
+    char *query = json_get_str(input, "query");
+    if (!query || !query[0]) {
+        free(query);
+        snprintf(result, rlen, "missing required parameter: query");
+        return false;
+    }
+
+    int num = json_get_int(input, "num", 5);
+    if (num < 1) num = 1;
+    if (num > 10) num = 10;
+
+    const char *jina_key = getenv("JINA_API_KEY");
+    if (!jina_key || !jina_key[0]) {
+        free(query);
+        snprintf(result, rlen, "JINA_API_KEY not set");
+        return false;
+    }
+
+    /* Build request body */
+    jbuf_t body;
+    jbuf_init(&body, 512);
+    jbuf_append(&body, "{\"q\":");
+    jbuf_append_json_str(&body, query);
+    jbuf_appendf(&body, ",\"num\":%d}", num);
+    free(query);
+
+    /* POST to s.jina.ai */
+    CURL *curl = curl_easy_init();
+    if (!curl) { jbuf_free(&body); snprintf(result, rlen, "curl init failed"); return false; }
+
+    struct curl_slist *hdrs = NULL;
+    char auth[512];
+    snprintf(auth, sizeof(auth), "Authorization: Bearer %s", jina_key);
+    hdrs = curl_slist_append(hdrs, auth);
+    hdrs = curl_slist_append(hdrs, "Content-Type: application/json");
+    hdrs = curl_slist_append(hdrs, "Accept: application/json");
+
+    http_buf_t resp = {0};
+    curl_easy_setopt(curl, CURLOPT_URL, "https://s.jina.ai/");
+    curl_easy_setopt(curl, CURLOPT_HTTPHEADER, hdrs);
+    curl_easy_setopt(curl, CURLOPT_POSTFIELDS, body.data);
+    curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, http_write_cb);
+    curl_easy_setopt(curl, CURLOPT_WRITEDATA, &resp);
+    curl_easy_setopt(curl, CURLOPT_CONNECTTIMEOUT, 5L);
+    curl_easy_setopt(curl, CURLOPT_TIMEOUT, 15L);
+
+    CURLcode res = curl_easy_perform(curl);
+    long http_code = 0;
+    curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, &http_code);
+    curl_slist_free_all(hdrs);
+    curl_easy_cleanup(curl);
+    jbuf_free(&body);
+
+    if (res != CURLE_OK || http_code != 200) {
+        snprintf(result, rlen, "Jina Search error (HTTP %ld)", http_code);
+        free(resp.data);
+        return false;
+    }
+
+    result[0] = '\0';
+    truncate_response(resp.data ? resp.data : "{}", result, rlen, 32);
+    free(resp.data);
+    return true;
+}
+
+/* ══════════════════════════════════════════════════════════════════════════
+ *  JINA EMBED — Compute embeddings via Jina v4 API
+ * ══════════════════════════════════════════════════════════════════════════ */
+
+bool tool_jina_embed(const char *input, char *result, size_t rlen) {
+    char *text = json_get_str(input, "text");
+    if (!text || !text[0]) {
+        free(text);
+        snprintf(result, rlen, "missing required parameter: text");
+        return false;
+    }
+
+    char *task = json_get_str(input, "task");
+    if (!task || !task[0]) {
+        free(task);
+        task = strdup("retrieval.passage");
+    }
+
+    int dim = json_get_int(input, "dimensions", 1024);
+    if (dim < 64) dim = 64;
+    if (dim > 1024) dim = 1024;
+
+    const char *jina_key = getenv("JINA_API_KEY");
+    if (!jina_key || !jina_key[0]) {
+        free(text); free(task);
+        snprintf(result, rlen, "JINA_API_KEY not set");
+        return false;
+    }
+
+    /* Build request */
+    jbuf_t body;
+    jbuf_init(&body, 512 + strlen(text));
+    jbuf_append(&body, "{\"model\":\"jina-embeddings-v4\",\"task\":");
+    jbuf_append_json_str(&body, task);
+    jbuf_appendf(&body, ",\"dimensions\":%d,\"embedding_type\":\"float\",\"input\":[", dim);
+    jbuf_append_json_str(&body, text);
+    jbuf_append(&body, "]}");
+    free(text);
+    free(task);
+
+    CURL *curl = curl_easy_init();
+    if (!curl) { jbuf_free(&body); snprintf(result, rlen, "curl init failed"); return false; }
+
+    struct curl_slist *hdrs = NULL;
+    char auth[512];
+    snprintf(auth, sizeof(auth), "Authorization: Bearer %s", jina_key);
+    hdrs = curl_slist_append(hdrs, auth);
+    hdrs = curl_slist_append(hdrs, "Content-Type: application/json");
+    hdrs = curl_slist_append(hdrs, "Accept: application/json");
+
+    http_buf_t resp = {0};
+    curl_easy_setopt(curl, CURLOPT_URL, "https://api.jina.ai/v1/embeddings");
+    curl_easy_setopt(curl, CURLOPT_HTTPHEADER, hdrs);
+    curl_easy_setopt(curl, CURLOPT_POSTFIELDS, body.data);
+    curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, http_write_cb);
+    curl_easy_setopt(curl, CURLOPT_WRITEDATA, &resp);
+    curl_easy_setopt(curl, CURLOPT_CONNECTTIMEOUT, 5L);
+    curl_easy_setopt(curl, CURLOPT_TIMEOUT, 15L);
+
+    CURLcode res = curl_easy_perform(curl);
+    long http_code = 0;
+    curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, &http_code);
+    curl_slist_free_all(hdrs);
+    curl_easy_cleanup(curl);
+    jbuf_free(&body);
+
+    if (res != CURLE_OK || http_code != 200) {
+        snprintf(result, rlen, "Jina Embed error (HTTP %ld): %s",
+                 http_code, resp.data ? resp.data : "no response");
+        free(resp.data);
+        return false;
+    }
+
+    /* Return the full response — contains data[0].embedding array */
+    result[0] = '\0';
+    truncate_response(resp.data ? resp.data : "{}", result, rlen, 32);
+    free(resp.data);
+    return true;
+}
+
+/* ══════════════════════════════════════════════════════════════════════════
+ *  PARALLEL SEARCH — Fan out to multiple search providers concurrently
+ * ══════════════════════════════════════════════════════════════════════════ */
+
+bool tool_parallel_search(const char *input, char *result, size_t rlen) {
+    char *query = json_get_str(input, "query");
+    if (!query || !query[0]) {
+        free(query);
+        snprintf(result, rlen, "missing required parameter: query");
+        return false;
+    }
+
+    int num = json_get_int(input, "num", 5);
+    if (num < 1) num = 1;
+    if (num > 10) num = 10;
+
+    /* We'll run up to 3 search providers in parallel using fork+pipe */
+    typedef struct { int fd; pid_t pid; const char *name; } search_child_t;
+    search_child_t children[3];
+    int nchildren = 0;
+
+    /* Build search input JSON once */
+    jbuf_t search_input;
+    jbuf_init(&search_input, 256);
+    jbuf_append(&search_input, "{\"query\":");
+    jbuf_append_json_str(&search_input, query);
+    jbuf_appendf(&search_input, ",\"num\":%d}", num);
+
+    /* Determine which providers are available */
+    const char *jina_key = getenv("JINA_API_KEY");
+    const char *tavily_key = getenv("TAVILY_API_KEY");
+    const char *brave_key = getenv("BRAVE_API_KEY");
+
+    typedef bool (*search_fn)(const char *, char *, size_t);
+    struct { search_fn fn; const char *name; bool avail; } providers[] = {
+        { tool_jina_search,   "jina",   jina_key && jina_key[0] },
+        { tool_tavily_search, "tavily", tavily_key && tavily_key[0] },
+        { tool_brave_search,  "brave",  brave_key && brave_key[0] },
+    };
+
+    for (int i = 0; i < 3; i++) {
+        if (!providers[i].avail) continue;
+
+        int pipefd[2];
+        if (pipe(pipefd) < 0) continue;
+
+        pid_t pid = fork();
+        if (pid < 0) { close(pipefd[0]); close(pipefd[1]); continue; }
+
+        if (pid == 0) {
+            /* Child: run search, write result to pipe, exit */
+            close(pipefd[0]);
+            char child_result[65536];
+            child_result[0] = '\0';
+            bool ok = providers[i].fn(search_input.data, child_result, sizeof(child_result));
+            (void)ok;
+            size_t wlen = strlen(child_result);
+            ssize_t w = write(pipefd[1], child_result, wlen);
+            (void)w;
+            close(pipefd[1]);
+            _exit(0);
+        }
+
+        /* Parent */
+        close(pipefd[1]);
+        children[nchildren].fd = pipefd[0];
+        children[nchildren].pid = pid;
+        children[nchildren].name = providers[i].name;
+        nchildren++;
+    }
+
+    free(query);
+
+    if (nchildren == 0) {
+        jbuf_free(&search_input);
+        snprintf(result, rlen, "no search providers available (set JINA_API_KEY, TAVILY_API_KEY, or BRAVE_API_KEY)");
+        return false;
+    }
+
+    /* Collect results with timeout */
+    jbuf_t merged;
+    jbuf_init(&merged, 8192);
+    jbuf_append(&merged, "{\"results\":{");
+
+    for (int i = 0; i < nchildren; i++) {
+        /* Read with poll timeout */
+        struct pollfd pfd = { .fd = children[i].fd, .events = POLLIN };
+        char buf[65536];
+        int total_read = 0;
+
+        int timeout_ms = 12000; /* 12s total timeout */
+        while (poll(&pfd, 1, timeout_ms) > 0 && total_read < (int)sizeof(buf) - 1) {
+            ssize_t n = read(children[i].fd, buf + total_read, sizeof(buf) - 1 - total_read);
+            if (n <= 0) break;
+            total_read += n;
+            timeout_ms = 2000; /* subsequent reads: 2s */
+        }
+        buf[total_read] = '\0';
+        close(children[i].fd);
+        waitpid(children[i].pid, NULL, 0);
+
+        if (i > 0) jbuf_append(&merged, ",");
+        jbuf_appendf(&merged, "\"%s\":", children[i].name);
+        if (total_read > 0) {
+            jbuf_append(&merged, buf);
+        } else {
+            jbuf_append(&merged, "null");
+        }
+    }
+
+    jbuf_append(&merged, "}}");
+    jbuf_free(&search_input);
+
+    result[0] = '\0';
+    truncate_response(merged.data ? merged.data : "{}", result, rlen, 32);
+    jbuf_free(&merged);
     return true;
 }
 
@@ -5502,4 +5684,498 @@ bool tool_prediction_semantic_match(const char *input, char *result, size_t rlen
     truncate_response(out.data ? out.data : "{}", result, rlen, 64);
     jbuf_free(&out);
     return true;
+}
+
+/* Forward declarations for trading.c functions */
+extern bool tool_kalshi_positions(const char *input, char *result, size_t rlen);
+extern bool tool_kalshi_balance(const char *input, char *result, size_t rlen);
+extern bool tool_kalshi_portfolio(const char *input, char *result, size_t rlen);
+extern bool tool_kalshi_fills(const char *input, char *result, size_t rlen);
+extern bool tool_kalshi_open_orders(const char *input, char *result, size_t rlen);
+extern bool tool_kalshi_create_order(const char *input, char *result, size_t rlen);
+extern bool tool_kalshi_batch_create_orders(const char *input, char *result, size_t rlen);
+extern bool tool_kalshi_cancel_order(const char *input, char *result, size_t rlen);
+extern bool tool_kalshi_cancel_all(const char *input, char *result, size_t rlen);
+extern bool tool_kalshi_amend_order(const char *input, char *result, size_t rlen);
+extern bool tool_polymarket_balance(const char *input, char *result, size_t rlen);
+extern bool tool_polymarket_positions(const char *input, char *result, size_t rlen);
+extern bool tool_polymarket_open_orders(const char *input, char *result, size_t rlen);
+extern bool tool_polymarket_create_order(const char *input, char *result, size_t rlen);
+extern bool tool_polymarket_cancel_order(const char *input, char *result, size_t rlen);
+extern bool tool_polymarket_cancel_all(const char *input, char *result, size_t rlen);
+extern bool tool_polymarket_relayer_deploy(const char *input, char *result, size_t rlen);
+extern bool tool_polymarket_relayer_approve(const char *input, char *result, size_t rlen);
+extern bool tool_polymarket_relayer_execute(const char *input, char *result, size_t rlen);
+extern bool tool_polymarket_relayer_status(const char *input, char *result, size_t rlen);
+extern bool tool_polymarket_api_keys(const char *input, char *result, size_t rlen);
+extern bool tool_polymarket_derive_api_key(const char *input, char *result, size_t rlen);
+
+/* ══════════════════════════════════════════════════════════════════════════
+ *  SYNOPTIC DATA — Real-time ASOS/METAR station observations
+ *  Enterprise Weather API: https://api.synopticdata.com/v2/
+ * ══════════════════════════════════════════════════════════════════════════ */
+
+bool tool_synoptic(const char *input, char *result, size_t rlen) {
+    const char *api_token;
+    if (!require_key("SYNOPTIC_API_TOKEN", "Synoptic Data", result, rlen, &api_token))
+        return false;
+
+    char *action = json_get_str(input, "action");
+    if (!action || !action[0]) {
+        free(action);
+        snprintf(result, rlen,
+            "missing: action\n"
+            "latest — Current observations for stations\n"
+            "timeseries — Historical time series (start/end or recent)\n"
+            "nearesttime — Observation nearest to a timestamp\n"
+            "metadata — Station metadata (location, networks, sensors)\n"
+            "precip — Derived precipitation data\n"
+            "kalshi_stations — All 29 Kalshi weather stations current data");
+        return false;
+    }
+
+    /* Station IDs for Kalshi weather markets */
+    static const char *KALSHI_STATIONS =
+        "KATL,KAUS,KBKF,KBNA,KBOS,KCLT,KDAL,KDCA,KDEN,KDFW,"
+        "KDTW,KHOU,KJAX,KLAS,KLAX,KLGA,KMDW,KMIA,KMSP,KMSY,"
+        "KNYC,KOKC,KORD,KPHL,KPHX,KSAT,KSEA,KSFO,KTPA";
+
+    jbuf_t url;
+    jbuf_init(&url, 1024);
+
+    if (strcmp(action, "kalshi_stations") == 0) {
+        /* Convenience: all 29 Kalshi stations, latest air_temp in Fahrenheit */
+        jbuf_appendf(&url,
+            "https://api.synopticdata.com/v2/stations/latest"
+            "?token=%s&stid=%s&vars=air_temp,air_temp_high_6_hour,air_temp_low_6_hour,"
+            "wind_speed,relative_humidity,precip_accum,dew_point_temperature"
+            "&units=temp|F,speed|mph,precip|in&within=60&complete=1",
+            api_token, KALSHI_STATIONS);
+
+    } else if (strcmp(action, "latest") == 0) {
+        char *stid = json_get_str(input, "stid");
+        char *vars = json_get_str(input, "vars");
+        char *state = json_get_str(input, "state");
+        char *radius = json_get_str(input, "radius");
+        int within = json_get_int(input, "within", 60);
+
+        jbuf_appendf(&url,
+            "https://api.synopticdata.com/v2/stations/latest?token=%s&within=%d"
+            "&units=temp|F,speed|mph,precip|in",
+            api_token, within);
+        if (stid && stid[0]) jbuf_appendf(&url, "&stid=%s", stid);
+        if (vars && vars[0]) jbuf_appendf(&url, "&vars=%s", vars);
+        if (state && state[0]) jbuf_appendf(&url, "&state=%s", state);
+        if (radius && radius[0]) jbuf_appendf(&url, "&radius=%s", radius);
+        if (!stid && !state && !radius)
+            jbuf_appendf(&url, "&stid=%s", KALSHI_STATIONS);
+
+        free(stid); free(vars); free(state); free(radius);
+
+    } else if (strcmp(action, "timeseries") == 0) {
+        char *stid = json_get_str(input, "stid");
+        char *vars = json_get_str(input, "vars");
+        char *start = json_get_str(input, "start");
+        char *end_t = json_get_str(input, "end");
+        int recent = json_get_int(input, "recent", 0);
+
+        if (!stid || !stid[0]) {
+            free(stid); free(vars); free(start); free(end_t); free(action);
+            jbuf_free(&url);
+            snprintf(result, rlen, "timeseries requires stid (station ID, e.g. KORD, KLAX)");
+            return false;
+        }
+
+        jbuf_appendf(&url,
+            "https://api.synopticdata.com/v2/stations/timeseries?token=%s&stid=%s"
+            "&units=temp|F,speed|mph,precip|in",
+            api_token, stid);
+        if (vars && vars[0]) jbuf_appendf(&url, "&vars=%s", vars);
+        if (recent > 0) {
+            jbuf_appendf(&url, "&recent=%d", recent);
+        } else if (start && start[0]) {
+            jbuf_appendf(&url, "&start=%s", start);
+            if (end_t && end_t[0]) jbuf_appendf(&url, "&end=%s", end_t);
+        } else {
+            jbuf_appendf(&url, "&recent=1440"); /* default: last 24h */
+        }
+
+        free(stid); free(vars); free(start); free(end_t);
+
+    } else if (strcmp(action, "nearesttime") == 0) {
+        char *stid = json_get_str(input, "stid");
+        char *attime = json_get_str(input, "attime");
+        char *vars = json_get_str(input, "vars");
+        int within_min = json_get_int(input, "within", 60);
+
+        if (!stid || !stid[0] || !attime || !attime[0]) {
+            free(stid); free(attime); free(vars); free(action);
+            jbuf_free(&url);
+            snprintf(result, rlen, "nearesttime requires stid and attime (YYYYmmddHHMM)");
+            return false;
+        }
+
+        jbuf_appendf(&url,
+            "https://api.synopticdata.com/v2/stations/nearesttime?token=%s&stid=%s"
+            "&attime=%s&within=%d&units=temp|F,speed|mph,precip|in",
+            api_token, stid, attime, within_min);
+        if (vars && vars[0]) jbuf_appendf(&url, "&vars=%s", vars);
+
+        free(stid); free(attime); free(vars);
+
+    } else if (strcmp(action, "metadata") == 0) {
+        char *stid = json_get_str(input, "stid");
+        char *state = json_get_str(input, "state");
+        char *network = json_get_str(input, "network");
+
+        jbuf_appendf(&url,
+            "https://api.synopticdata.com/v2/stations/metadata?token=%s&complete=1",
+            api_token);
+        if (stid && stid[0]) jbuf_appendf(&url, "&stid=%s", stid);
+        else if (state && state[0]) jbuf_appendf(&url, "&state=%s", state);
+        else if (network && network[0]) jbuf_appendf(&url, "&network=%s", network);
+        else jbuf_appendf(&url, "&stid=%s", KALSHI_STATIONS);
+
+        free(stid); free(state); free(network);
+
+    } else if (strcmp(action, "precip") == 0) {
+        char *stid = json_get_str(input, "stid");
+        char *start = json_get_str(input, "start");
+        char *end_t = json_get_str(input, "end");
+        int recent = json_get_int(input, "recent", 0);
+
+        if (!stid || !stid[0]) {
+            free(stid); free(start); free(end_t); free(action);
+            jbuf_free(&url);
+            snprintf(result, rlen, "precip requires stid");
+            return false;
+        }
+
+        jbuf_appendf(&url,
+            "https://api.synopticdata.com/v2/stations/precipitation?token=%s&stid=%s"
+            "&units=precip|in",
+            api_token, stid);
+        if (recent > 0) jbuf_appendf(&url, "&recent=%d", recent);
+        else if (start && start[0]) {
+            jbuf_appendf(&url, "&start=%s", start);
+            if (end_t && end_t[0]) jbuf_appendf(&url, "&end=%s", end_t);
+        } else {
+            jbuf_appendf(&url, "&recent=1440");
+        }
+
+        free(stid); free(start); free(end_t);
+
+    } else {
+        free(action);
+        jbuf_free(&url);
+        snprintf(result, rlen, "unknown synoptic action: %s", action);
+        return false;
+    }
+
+    free(action);
+
+    http_buf_t resp = {0};
+    long status = http_get_authed(url.data, NULL, &resp);
+    jbuf_free(&url);
+
+    if (status != 200) {
+        snprintf(result, rlen, "Synoptic API error (HTTP %ld): %.500s",
+                 status, resp.data ? resp.data : "");
+        free(resp.data);
+        return false;
+    }
+
+    /* Check for API error response */
+    if (resp.data) {
+        int code = json_get_int(resp.data, "SUMMARY.RESPONSE_CODE", 1);
+        if (code != 1) {
+            char *msg = json_get_str(resp.data, "SUMMARY.RESPONSE_MESSAGE");
+            snprintf(result, rlen, "Synoptic error %d: %s", code, msg ? msg : "unknown");
+            free(msg); free(resp.data);
+            return false;
+        }
+    }
+
+    result[0] = '\0';
+    truncate_response(resp.data ? resp.data : "{}", result, rlen, 64);
+    free(resp.data);
+    return true;
+}
+
+/* ══════════════════════════════════════════════════════════════════════════
+ *  NWS — National Weather Service API (free, no auth, User-Agent only)
+ *  https://api.weather.gov
+ * ══════════════════════════════════════════════════════════════════════════ */
+
+bool tool_nws(const char *input, char *result, size_t rlen) {
+    char *action = json_get_str(input, "action");
+    if (!action || !action[0]) {
+        free(action);
+        snprintf(result, rlen,
+            "missing: action\n"
+            "forecast — Get forecast for lat/lon\n"
+            "hourly — Hourly forecast for lat/lon\n"
+            "station_obs — Latest observation from a station (e.g. KORD)\n"
+            "alerts — Active weather alerts by state\n"
+            "stations — List stations near lat/lon\n"
+            "discussion — Area forecast discussion from NWS office");
+        return false;
+    }
+
+    jbuf_t url;
+    jbuf_init(&url, 512);
+    const char *ua = "User-Agent: (dsco-cli, agent@distributed.systems)";
+    const char *accept = "Accept: application/geo+json";
+
+    if (strcmp(action, "station_obs") == 0) {
+        char *stid = json_get_str(input, "stid");
+        if (!stid || !stid[0]) {
+            free(stid); free(action); jbuf_free(&url);
+            snprintf(result, rlen, "station_obs requires stid (e.g. KORD, KLAX, KJFK)");
+            return false;
+        }
+        jbuf_appendf(&url, "https://api.weather.gov/stations/%s/observations/latest", stid);
+        free(stid);
+
+    } else if (strcmp(action, "forecast") == 0 || strcmp(action, "hourly") == 0) {
+        char *lat = json_get_str(input, "lat");
+        char *lon = json_get_str(input, "lon");
+        if (!lat || !lat[0] || !lon || !lon[0]) {
+            free(lat); free(lon); free(action); jbuf_free(&url);
+            snprintf(result, rlen, "forecast/hourly requires lat and lon");
+            return false;
+        }
+        /* Step 1: resolve lat/lon to grid point */
+        char points_url[256];
+        snprintf(points_url, sizeof(points_url),
+                 "https://api.weather.gov/points/%s,%s", lat, lon);
+
+        const char *hdrs[] = { ua, accept };
+        http_buf_t pts = {0};
+        long st = http_get_authed(points_url, ua, &pts);
+        if (st != 200 || !pts.data) {
+            free(lat); free(lon); free(action); jbuf_free(&url);
+            snprintf(result, rlen, "NWS points lookup failed (HTTP %ld)", st);
+            free(pts.data);
+            return false;
+        }
+
+        /* Extract forecast URL from response */
+        const char *key = (strcmp(action, "hourly") == 0) ? "forecastHourly" : "forecast";
+        char *forecast_url = json_get_str(pts.data, key);
+        if (!forecast_url && pts.data) {
+            /* Try nested under properties */
+            char nested_key[64];
+            snprintf(nested_key, sizeof(nested_key), "properties.%s", key);
+            forecast_url = json_get_str(pts.data, nested_key);
+        }
+        free(pts.data);
+        free(lat); free(lon);
+
+        if (!forecast_url || !forecast_url[0]) {
+            free(forecast_url); free(action); jbuf_free(&url);
+            snprintf(result, rlen, "could not resolve forecast URL from NWS points API");
+            return false;
+        }
+        jbuf_append(&url, forecast_url);
+        free(forecast_url);
+
+    } else if (strcmp(action, "alerts") == 0) {
+        char *state = json_get_str(input, "state");
+        char *area = json_get_str(input, "area");
+        char *event = json_get_str(input, "event");
+        char *severity = json_get_str(input, "severity");
+
+        jbuf_append(&url, "https://api.weather.gov/alerts/active?status=actual");
+        if (state && state[0]) jbuf_appendf(&url, "&area=%s", state);
+        else if (area && area[0]) jbuf_appendf(&url, "&area=%s", area);
+        if (event && event[0]) {
+            CURL *c = curl_easy_init();
+            char *enc = curl_easy_escape(c, event, 0);
+            jbuf_appendf(&url, "&event=%s", enc);
+            curl_free(enc); curl_easy_cleanup(c);
+        }
+        if (severity && severity[0]) jbuf_appendf(&url, "&severity=%s", severity);
+        free(state); free(area); free(event); free(severity);
+
+    } else if (strcmp(action, "stations") == 0) {
+        char *lat = json_get_str(input, "lat");
+        char *lon = json_get_str(input, "lon");
+        char *state = json_get_str(input, "state");
+        int limit = json_get_int(input, "limit", 20);
+
+        if (lat && lat[0] && lon && lon[0]) {
+            /* Resolve to grid first, then get stations */
+            char points_url[256];
+            snprintf(points_url, sizeof(points_url),
+                     "https://api.weather.gov/points/%s,%s", lat, lon);
+            http_buf_t pts = {0};
+            long st = http_get_authed(points_url, ua, &pts);
+            if (st == 200 && pts.data) {
+                char *obs_url = json_get_str(pts.data, "properties.observationStations");
+                if (obs_url) {
+                    jbuf_append(&url, obs_url);
+                    free(obs_url);
+                }
+            }
+            free(pts.data);
+        }
+        if (url.len == 0) {
+            if (state && state[0])
+                jbuf_appendf(&url, "https://api.weather.gov/stations?state=%s&limit=%d", state, limit);
+            else
+                jbuf_appendf(&url, "https://api.weather.gov/stations?limit=%d", limit);
+        }
+        free(lat); free(lon); free(state);
+
+    } else if (strcmp(action, "discussion") == 0) {
+        char *office = json_get_str(input, "office");
+        if (!office || !office[0]) {
+            free(office); free(action); jbuf_free(&url);
+            snprintf(result, rlen,
+                "discussion requires office (NWS office ID). Common: "
+                "OKX (NYC), LOT (Chicago), FWD (Dallas), LAX (LA), MFL (Miami), "
+                "PHI (Philly), BOS (Boston), SEW (Seattle), SFO (SF), PSR (Phoenix)");
+            return false;
+        }
+        jbuf_appendf(&url,
+            "https://api.weather.gov/products/types/AFD/locations/%s", office);
+        free(office);
+
+    } else {
+        free(action); jbuf_free(&url);
+        snprintf(result, rlen, "unknown nws action: %s", action);
+        return false;
+    }
+
+    free(action);
+
+    /* Make request with User-Agent header */
+    http_buf_t resp = {0};
+    long status = http_get_authed(url.data, ua, &resp);
+    jbuf_free(&url);
+
+    if (status != 200) {
+        snprintf(result, rlen, "NWS API error (HTTP %ld): %.500s",
+                 status, resp.data ? resp.data : "");
+        free(resp.data);
+        return false;
+    }
+
+    result[0] = '\0';
+    truncate_response(resp.data ? resp.data : "{}", result, rlen, 64);
+    free(resp.data);
+    return true;
+}
+
+/* ══════════════════════════════════════════════════════════════════════════
+ *  CONSOLIDATED DISPATCHERS — reduce 180+ tools to 3
+ * ══════════════════════════════════════════════════════════════════════════ */
+
+bool tool_alpha_vantage(const char *input, char *result, size_t rlen) {
+    char *func = json_get_str(input, "function");
+    if (!func || !func[0]) {
+        free(func);
+        snprintf(result, rlen,
+            "missing required: function\n"
+            "Market: TIME_SERIES_DAILY, TIME_SERIES_INTRADAY, GLOBAL_QUOTE, REALTIME_BULK_QUOTES, SYMBOL_SEARCH, MARKET_STATUS\n"
+            "Technical: SMA, EMA, RSI, MACD, BBANDS, STOCH, STOCHF, STOCHRSI, ADX, ADXR, CCI, ATR, NATR, OBV, AD, ADOSC, VWAP, SAR, AROON, AROONOSC, MFI, WILLR, APO, PPO, ROC, ROCR, BOP, MOM, CMO, TRIX, DX, MINUS_DI, PLUS_DI, ULTOSC, MIDPOINT, MIDPRICE, TRANGE, WMA, DEMA, TEMA, TRIMA, KAMA, MAMA, T3, MACDEXT, HT_TRENDLINE, HT_SINE, HT_TRENDMODE, HT_DCPERIOD, HT_DCPHASE, HT_PHASOR\n"
+            "Fundamental: OVERVIEW, ETF_PROFILE, INCOME_STATEMENT, BALANCE_SHEET, CASH_FLOW, EARNINGS, EARNINGS_ESTIMATES, DIVIDENDS, SPLITS, INSIDER_TRANSACTIONS, INSTITUTIONAL_HOLDINGS, EARNINGS_CALL_TRANSCRIPT\n"
+            "Macro: REAL_GDP, REAL_GDP_PER_CAPITA, CPI, INFLATION, UNEMPLOYMENT, TREASURY_YIELD, FEDERAL_FUNDS_RATE, RETAIL_SALES, DURABLES, NONFARM_PAYROLL\n"
+            "Commodities: WTI, BRENT, NATURAL_GAS, COPPER, ALUMINUM, WHEAT, CORN, COTTON, SUGAR, COFFEE, ALL_COMMODITIES, GOLD_SILVER_SPOT, GOLD_SILVER_HISTORY\n"
+            "Forex: CURRENCY_EXCHANGE_RATE, FX_INTRADAY, FX_DAILY, FX_WEEKLY, FX_MONTHLY\n"
+            "Crypto: DIGITAL_CURRENCY_DAILY, CRYPTO_INTRADAY, DIGITAL_CURRENCY_WEEKLY, DIGITAL_CURRENCY_MONTHLY\n"
+            "Options: REALTIME_OPTIONS, HISTORICAL_OPTIONS\n"
+            "News: NEWS_SENTIMENT\n"
+            "Calendar: TOP_GAINERS_LOSERS, LISTING_STATUS, EARNINGS_CALENDAR, IPO_CALENDAR\n"
+            "Analytics: ANALYTICS_FIXED_WINDOW, ANALYTICS_SLIDING_WINDOW");
+        return false;
+    }
+    bool ok = av_generic(func, input, NULL, NULL, result, rlen);
+    free(func);
+    return ok;
+}
+
+bool tool_kalshi(const char *input, char *result, size_t rlen) {
+    char *action = json_get_str(input, "action");
+    if (!action || !action[0]) {
+        free(action);
+        snprintf(result, rlen,
+            "missing: action\n"
+            "Read: markets, events, search, orderbook, trades, series, candlesticks, weather, snapshot, event_detail, daily\n"
+            "Account: positions, balance, portfolio, fills, open_orders\n"
+            "Trade: create_order, batch_create, cancel_order, cancel_all, amend_order\n"
+            "History: historical_markets, historical_trades, historical_cutoff");
+        return false;
+    }
+    bool ok = false;
+    if      (strcmp(action, "markets") == 0)            ok = tool_kalshi_markets(input, result, rlen);
+    else if (strcmp(action, "events") == 0)             ok = tool_kalshi_events(input, result, rlen);
+    else if (strcmp(action, "search") == 0)             ok = tool_kalshi_search(input, result, rlen);
+    else if (strcmp(action, "orderbook") == 0)          ok = tool_kalshi_orderbook(input, result, rlen);
+    else if (strcmp(action, "trades") == 0)             ok = tool_kalshi_trades(input, result, rlen);
+    else if (strcmp(action, "series") == 0)             ok = tool_kalshi_series(input, result, rlen);
+    else if (strcmp(action, "candlesticks") == 0)       ok = tool_kalshi_candlesticks(input, result, rlen);
+    else if (strcmp(action, "weather") == 0)            ok = tool_kalshi_weather(input, result, rlen);
+    else if (strcmp(action, "snapshot") == 0)           ok = tool_kalshi_market_snapshot(input, result, rlen);
+    else if (strcmp(action, "event_detail") == 0)       ok = tool_kalshi_event_detail(input, result, rlen);
+    else if (strcmp(action, "daily") == 0)              ok = tool_kalshi_daily_markets(input, result, rlen);
+    else if (strcmp(action, "positions") == 0)          ok = tool_kalshi_positions(input, result, rlen);
+    else if (strcmp(action, "balance") == 0)            ok = tool_kalshi_balance(input, result, rlen);
+    else if (strcmp(action, "portfolio") == 0)          ok = tool_kalshi_portfolio(input, result, rlen);
+    else if (strcmp(action, "fills") == 0)              ok = tool_kalshi_fills(input, result, rlen);
+    else if (strcmp(action, "open_orders") == 0)        ok = tool_kalshi_open_orders(input, result, rlen);
+    else if (strcmp(action, "create_order") == 0)       ok = tool_kalshi_create_order(input, result, rlen);
+    else if (strcmp(action, "batch_create") == 0)       ok = tool_kalshi_batch_create_orders(input, result, rlen);
+    else if (strcmp(action, "cancel_order") == 0)       ok = tool_kalshi_cancel_order(input, result, rlen);
+    else if (strcmp(action, "cancel_all") == 0)         ok = tool_kalshi_cancel_all(input, result, rlen);
+    else if (strcmp(action, "amend_order") == 0)        ok = tool_kalshi_amend_order(input, result, rlen);
+    else if (strcmp(action, "historical_markets") == 0) ok = tool_kalshi_historical_markets(input, result, rlen);
+    else if (strcmp(action, "historical_trades") == 0)  ok = tool_kalshi_historical_trades(input, result, rlen);
+    else if (strcmp(action, "historical_cutoff") == 0)  ok = tool_kalshi_historical_cutoff(input, result, rlen);
+    else snprintf(result, rlen, "unknown kalshi action: %s", action);
+    free(action);
+    return ok;
+}
+
+bool tool_polymarket(const char *input, char *result, size_t rlen) {
+    char *action = json_get_str(input, "action");
+    if (!action || !action[0]) {
+        free(action);
+        snprintf(result, rlen,
+            "missing: action\n"
+            "Read: markets, events, categories, prices, book, trades, search, resolved, resolved_events, whale_trades, leaderboard, history\n"
+            "Account: balance, positions, open_orders, api_keys, derive_api_key\n"
+            "Trade: create_order, cancel_order, cancel_all\n"
+            "Relayer: relayer_deploy, relayer_approve, relayer_execute, relayer_status");
+        return false;
+    }
+    bool ok = false;
+    if      (strcmp(action, "markets") == 0)          ok = tool_polymarket_markets(input, result, rlen);
+    else if (strcmp(action, "events") == 0)           ok = tool_polymarket_events(input, result, rlen);
+    else if (strcmp(action, "categories") == 0)       ok = tool_polymarket_categories(input, result, rlen);
+    else if (strcmp(action, "prices") == 0)           ok = tool_polymarket_prices(input, result, rlen);
+    else if (strcmp(action, "book") == 0)             ok = tool_polymarket_book(input, result, rlen);
+    else if (strcmp(action, "trades") == 0)           ok = tool_polymarket_trades(input, result, rlen);
+    else if (strcmp(action, "search") == 0)           ok = tool_polymarket_search(input, result, rlen);
+    else if (strcmp(action, "resolved") == 0)         ok = tool_polymarket_resolved(input, result, rlen);
+    else if (strcmp(action, "resolved_events") == 0)  ok = tool_polymarket_resolved_events(input, result, rlen);
+    else if (strcmp(action, "whale_trades") == 0)     ok = tool_polymarket_whale_trades(input, result, rlen);
+    else if (strcmp(action, "leaderboard") == 0)      ok = tool_polymarket_leaderboard(input, result, rlen);
+    else if (strcmp(action, "history") == 0)          ok = tool_polymarket_history(input, result, rlen);
+    else if (strcmp(action, "balance") == 0)          ok = tool_polymarket_balance(input, result, rlen);
+    else if (strcmp(action, "positions") == 0)        ok = tool_polymarket_positions(input, result, rlen);
+    else if (strcmp(action, "open_orders") == 0)      ok = tool_polymarket_open_orders(input, result, rlen);
+    else if (strcmp(action, "create_order") == 0)     ok = tool_polymarket_create_order(input, result, rlen);
+    else if (strcmp(action, "cancel_order") == 0)     ok = tool_polymarket_cancel_order(input, result, rlen);
+    else if (strcmp(action, "cancel_all") == 0)       ok = tool_polymarket_cancel_all(input, result, rlen);
+    else if (strcmp(action, "relayer_deploy") == 0)   ok = tool_polymarket_relayer_deploy(input, result, rlen);
+    else if (strcmp(action, "relayer_approve") == 0)  ok = tool_polymarket_relayer_approve(input, result, rlen);
+    else if (strcmp(action, "relayer_execute") == 0)  ok = tool_polymarket_relayer_execute(input, result, rlen);
+    else if (strcmp(action, "relayer_status") == 0)   ok = tool_polymarket_relayer_status(input, result, rlen);
+    else if (strcmp(action, "api_keys") == 0)         ok = tool_polymarket_api_keys(input, result, rlen);
+    else if (strcmp(action, "derive_api_key") == 0)   ok = tool_polymarket_derive_api_key(input, result, rlen);
+    else snprintf(result, rlen, "unknown polymarket action: %s", action);
+    free(action);
+    return ok;
 }

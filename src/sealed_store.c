@@ -91,6 +91,23 @@ static void load_from_env(void) {
     }
 }
 
+/* ── SE master key storage (mlock'd, zeroed on wipe) ───────────────────── */
+
+static uint8_t s_master_key[32];   /* set by sealed_store_set_master_key */
+static int     s_has_master = 0;
+
+void sealed_store_set_master_key(const uint8_t key[32]) {
+    memcpy(s_master_key, key, 32);
+    (void)mlock(s_master_key, sizeof(s_master_key));
+    s_has_master = 1;
+}
+
+bool sealed_store_master_key_copy(uint8_t out[32]) {
+    if (!s_has_master || !out) return false;
+    memcpy(out, s_master_key, 32);
+    return true;
+}
+
 /* ── public API ─────────────────────────────────────────────────────────── */
 
 void sealed_store_init(void) {
