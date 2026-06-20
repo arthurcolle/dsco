@@ -30,9 +30,9 @@
  * bash+python always core; everything else loaded via load_tools/hints.
  * Budget-adaptive: full=32, mid=24, low=13, critical=5 */
 #define TOOL_REGISTER_CAP       32
-#define TOOL_REG_ALWAYS          5   /* R0-R4:   bash,python,discover,load,exit */
-#define TOOL_REG_WARM           11   /* R5-R15:  file I/O + run_command, evictable */
-#define TOOL_REG_WORKING        12   /* R16-R27: quorum-scored, turn-volatile */
+#define TOOL_REG_ALWAYS          7   /* R0-R6:   bash,python,discover,load,exit,loop */
+#define TOOL_REG_WARM           11   /* file I/O + run_command, evictable */
+#define TOOL_REG_WORKING        10   /* quorum-scored, turn-volatile */
 #define TOOL_REG_DISCOVERY       4   /* R28-R31: progressive schema, ephemeral */
 #define QUORUM_MIN_SIGNALS       2   /* min independent signals to load a tool */
 #define MAX_INPUT_LINE      65536
@@ -43,7 +43,7 @@
 extern int g_cheap_mode;
 
 /* API defaults */
-#define DEFAULT_MODEL       "z-ai/glm-5.2"
+#define DEFAULT_MODEL       "moonshotai/kimi-k2.7-code"
 #define API_URL_ANTHROPIC   "https://api.anthropic.com/v1/messages"
 #define API_URL_COUNT_TOKENS "https://api.anthropic.com/v1/messages/count_tokens"
 #define ANTHROPIC_VERSION   "2023-06-01"
@@ -109,6 +109,12 @@ typedef struct {
     int         supports_thinking; /* 1 = adaptive thinking */
 } model_info_t;
 
+/* Runtime OpenRouter catalog (openrouter_cache.c). Returns a pointer to a
+ * process-lifetime-stable model_info_t for any slug present in the cached
+ * OpenRouter /models response, or NULL if absent / not yet loaded. Lets
+ * model_lookup() resolve any real slug — no hardcoded alias required. */
+const model_info_t *openrouter_cache_lookup(const char *slug);
+
 static const model_info_t MODEL_REGISTRY[] = {
     /* ── Anthropic (native API) ──────────────────────────────────────────── */
     { "opus",         "claude-opus-4-7",             200000, 32000,  15.0,  75.0,  1.50, 18.75, 1 },
@@ -173,6 +179,11 @@ static const model_info_t MODEL_REGISTRY[] = {
     { "grok-3-mini",  "grok-3-mini",                     131072, 32768,  0.30,  0.50, 0, 0, 1 },
     { "grok-code",    "grok-code-fast-1",                262144, 32768,  0.20,  1.50, 0, 0, 0 },
     /* ── Moonshot Kimi (via OpenRouter) ──────────────────────────────── */
+    /* Raw OpenRouter slugs only — alias == model_id so `-m <slug>` is the
+     * canonical, lookup-able name. The OpenRouter catalog is refreshed at
+     * runtime (see openrouter_cache.h), so any slug not listed here still
+     * resolves with real context/pricing once the background fetch lands. */
+    { "moonshotai/kimi-k2.7-code", "moonshotai/kimi-k2.7-code", 262144, 16384, 0.74, 3.50, 0.15, 0, 1 },
     { "kimi",         "moonshotai/kimi-k2.5",           262144, 16384,  0.45,  2.20, 0, 0, 1 },
     { "kimi-k2",      "moonshotai/kimi-k2",             131000, 16384,  0.55,  2.20, 0, 0, 0 },
     { "kimi-think",   "moonshotai/kimi-k2-thinking",    131072, 16384,  0.47,  2.00, 0, 0, 1 },
@@ -294,7 +305,10 @@ static inline const model_info_t *model_lookup(const char *name) {
         if (strcmp(want_norm, alias_norm) == 0 || strcmp(want_norm, model_norm) == 0)
             return &MODEL_REGISTRY[i];
     }
-    return NULL;
+
+    /* Pass 3: runtime OpenRouter catalog — any real slug resolves with live
+     * context/pricing once the background fetch has populated the cache. */
+    return openrouter_cache_lookup(name);
 }
 
 static inline const char *model_resolve_alias(const char *name) {
@@ -354,6 +368,7 @@ static inline int model_context_window(const char *name) {
     "- Issue 3+ parallel tool calls per step when gathering information (36% cheaper, 41% faster).\n" \
     "- For external parallelism, you may use bash to launch local dsc or dsco worker processes when swarm/executor tools are not the best fit.\n" \
     "- Large tool results are truncated inline. Full results persist in VFS — use context_recall to retrieve.\n" \
+    "- Durable artifacts require proof: prefer write_file/append_file; if bash creates files, declare verify_path/verify_paths with optional size/content/hash checks.\n" \
     "- Do not use context_search/context_get/context_pack — they are deprecated.\n" \
     "- Be concise. Prefer action over explanation.\n" \
     "Create goals for complex tasks. Use tournaments when multiple approaches exist."
@@ -375,6 +390,7 @@ static inline int model_context_window(const char *name) {
     "EFFICIENCY:\n" \
     "- Only load tools you actually need — each adds ~200 tokens per turn.\n" \
     "- Prefer bash/python for simple tasks over loading specialized tools.\n" \
+    "- Durable artifacts require proof: prefer write_file/append_file; if bash creates files, declare verify_path/verify_paths with optional size/content/hash checks.\n" \
     "- Issue parallel tool calls when gathering information.\n" \
     "- For external parallelism, bash may launch local dsc or dsco workers when that is simpler than loading swarm tools.\n" \
     "- Be concise. Prefer action over explanation."

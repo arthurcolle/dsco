@@ -3,6 +3,7 @@
 
 #include <stdbool.h>
 #include <stddef.h>
+#include <string.h>
 #include "json_util.h"
 
 typedef enum { ROLE_USER, ROLE_ASSISTANT } msg_role_t;
@@ -107,6 +108,17 @@ typedef struct {
     int    total_cache_read_tokens;
     int    total_cache_write_tokens;
     int    turn_count;
+    /* Most recent API response's input usage (single turn, not cumulative).
+     * Used by conv_token_estimate to calibrate the rough estimate against
+     * what the API actually counted. */
+    int    last_input_tokens;
+    /* Tokens consumed by things that don't live in `conv` (system prompt,
+     * tool schemas, cached prefix). Derived after each API response as
+     * last_input_tokens - rough_conv_estimate, and added back into
+     * conv_token_estimate so threshold checks see the true context size
+     * while pre/post compaction deltas still reflect real conversation
+     * shrinkage. */
+    int    non_conv_overhead_tokens;
     /* Compaction */
     bool   compact_enabled;
     /* Tool choice: "" = auto, "any" = any, "tool:name" = force specific */
@@ -134,6 +146,13 @@ typedef struct {
     float  tool_budget_ratio;  /* 0.0–1.0, 1.0 = full budget, updated each turn */
     /* Pinned context: injected as first user turn every request */
     char   pin_text[1024];
+    /* Output token auto-escalation (Phase 4: Claude Code methodology) */
+    int    max_output_override;      /* 0 = use default, >0 = escalated limit */
+    int    max_output_recovery_count; /* recovery attempts after escalation */
+    /* Memory context injection (Phase 3: Claude Code methodology) */
+    char   memory_context[4096];     /* recalled memories, injected into system prompt */
+    /* Workspace slot */
+    char   slot_name[64];            /* active named slot, empty = default */
 } session_state_t;
 
 void  session_state_init(session_state_t *s, const char *model);
@@ -165,6 +184,140 @@ void  conv_ensure_tool_results(conversation_t *c);
 void  conv_trim_old_results(conversation_t *c, int keep_recent, int max_chars);
 bool  conv_compact_recent_tool_turn(conversation_t *c, int max_chars);
 
+/* ── Multi-tier compaction (inspired by Claude Code) ─────────────────── */
+
+typedef enum {
+    COMPACT_MICRO,      /* per-result truncation (existing behavior) */
+    COMPACT_SNIP,       /* drop middle API rounds, keep head+tail */
+    COMPACT_SESSION,    /* LLM-generated summary of dropped turns */
+    COMPACT_FULL,       /* aggressive LLM rewrite + post-compact restore */
+} compact_tier_t;
+
+typedef struct {
+    compact_tier_t tier;
+    int max_result_chars;         /* micro: per-result char cap */
+    int snip_keep_head;           /* snip: messages to keep at start */
+    int snip_keep_tail;           /* snip: messages to keep at end */
+    int session_min_tokens;       /* session: minimum tokens before trigger */
+    int session_max_tokens;       /* session: target token count after compact */
+    int full_restore_files;       /* full: max files to re-inject */
+    int full_restore_budget;      /* full: token budget for restoration */
+    int consecutive_failures;     /* circuit breaker counter */
+    int max_failures;             /* circuit breaker limit */
+} compact_config_t;
+
+typedef struct {
+    int pre_token_count;
+    int post_token_count;
+    compact_tier_t tier_used;
+    double duration_ms;
+    int messages_removed;
+    int messages_kept;
+} compact_result_t;
+
+/* Default configuration */
+void compact_config_init(compact_config_t *cfg);
+
+/* ── API round grouping ──────────────────────────────────────────────── */
+
+#define MAX_API_ROUNDS 256
+
+typedef struct {
+    int start_idx;        /* first message index in this round */
+    int end_idx;          /* last message index (inclusive) */
+    int token_estimate;   /* rough token estimate for this round */
+    bool has_tool_use;    /* whether this round included tool use */
+    double timestamp;     /* when this round was created */
+} api_round_t;
+
+/* Build a round index from conversation. Returns number of rounds. */
+int  conv_build_rounds(conversation_t *c, api_round_t *rounds, int max_rounds);
+
+/* Drop N oldest rounds while maintaining valid message structure. */
+void conv_drop_rounds(conversation_t *c, api_round_t *rounds,
+                      int n_drop, int total_rounds);
+
+/* ── Token estimation (no API call) ──────────────────────────────────── */
+
+/* Fast local estimate: ~4 chars per token, no network round-trip */
+static inline int rough_token_estimate(const char *text) {
+    return text ? ((int)strlen(text) + 3) / 4 : 0;
+}
+
+/* Per-image token cost. The API does NOT bill base64 byte length — it
+ * downscales any image so the long edge is <=1568px and tokenizes at
+ * ~(w*h)/750, which caps a full-screen capture near ~1.6k tokens. Counting
+ * base64 length (e.g. strlen/6) overcounts a 1080p screenshot by ~200x and
+ * was driving phantom "342% of context" auto-compact loops in computer-use. */
+#define IMAGE_TOKEN_ESTIMATE  1600
+
+/* Rough estimate of just the conversation's content (no system prompt,
+ * no tool schemas, no cache prefix). Use this to calibrate the
+ * non_conv_overhead after an API response reports its true input count. */
+int  conv_rough_estimate(conversation_t *c);
+
+/* Estimate total context usage = rough(conv) + non_conv overhead.
+ * Reflects what the next API request will roughly look like. */
+int  conv_token_estimate(conversation_t *c, session_state_t *s);
+
+/* Output-aware effective context window (subtracts max_output reservation) */
+int  effective_context_window(session_state_t *s);
+
+/* Auto-compact threshold (effective window minus safety buffer) */
+int  auto_compact_threshold(session_state_t *s);
+
+/* ── Post-compact file restoration ───────────────────────────────────── */
+
+#define POST_COMPACT_MAX_FILES       5
+#define POST_COMPACT_TOKEN_BUDGET    50000
+#define POST_COMPACT_PER_FILE_CAP    5000
+
+typedef struct {
+    char  path[512];
+    char *content;          /* truncated to per-file cap */
+    int   tokens;
+    double last_read_time;
+} restored_file_t;
+
+typedef struct {
+    restored_file_t files[POST_COMPACT_MAX_FILES + 3]; /* +3 headroom */
+    int count;
+    int total_tokens;
+} post_compact_restore_t;
+
+void  post_compact_restore_init(post_compact_restore_t *r);
+void  post_compact_restore_free(post_compact_restore_t *r);
+void  post_compact_restore_track(post_compact_restore_t *r,
+                                  const char *path, const char *content);
+void  post_compact_restore_inject(post_compact_restore_t *r,
+                                   conversation_t *c);
+
+/* ── Image/binary stripping ──────────────────────────────────────────── */
+
+/* Strip image_data and doc_data from messages older than keep_recent */
+void  conv_strip_binaries(conversation_t *c, int keep_recent);
+
+/* ── Tiered auto-compact pipeline ────────────────────────────────────── */
+
+/* Run the full tiered compaction pipeline. Tries micro → snip → session.
+ * Returns result with tier_used and token counts. */
+compact_result_t conv_auto_compact(conversation_t *c, session_state_t *s,
+                                    compact_config_t *cfg);
+
+/* ── Deferred tool schemas ───────────────────────────────────────────── */
+
+typedef struct {
+    const char *name;
+    const char *one_line_desc;
+    const char *group;
+    bool schema_loaded;
+} deferred_tool_t;
+
+/* Build a compact "menu" of deferred (non-paged) tools.
+ * Returns malloc'd string listing name + one-liner only. Caller frees. */
+char *tools_build_deferred_catalog(const char **paged_names, int paged_count,
+                                    int *out_deferred_count);
+
 bool  conv_save(conversation_t *c, const char *path);
 bool  conv_load(conversation_t *c, const char *path);
 bool  conv_save_ex(conversation_t *c, const session_state_t *session, const char *path);
@@ -172,10 +325,17 @@ bool  conv_load_ex(conversation_t *c, session_state_t *session, const char *path
 
 char *llm_build_request(conversation_t *c, const char *model, int max_tokens);
 char *llm_build_request_ex(conversation_t *c, session_state_t *session, int max_tokens);
+char *llm_build_request_for_credential(conversation_t *c, const char *model,
+                                       int max_tokens, const char *credential);
+char *llm_build_request_ex_for_credential(conversation_t *c,
+                                          session_state_t *session,
+                                          int max_tokens,
+                                          const char *credential);
 
 int   llm_count_tokens(const char *api_key, const char *request_json);
 const char *llm_get_custom_system_prompt(void);
 void  llm_debug_save_request(const char *request_json, int http_status);
+bool  llm_anthropic_uses_claude_code_auth(const char *credential);
 
 stream_result_t llm_stream(const char *api_key, const char *request_json,
                            stream_text_cb text_cb,
