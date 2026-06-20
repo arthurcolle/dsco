@@ -1,9 +1,21 @@
 #include "semantic.h"
+#include "vfs.h"
 #include <stdlib.h>
 #include <string.h>
 #include <stdio.h>
 #include <ctype.h>
 #include <math.h>
+#include <time.h>
+
+/* ═══════════════════════════════════════════════════════════════════════════
+ * VFS CACHE — persist TF-IDF index metadata and log semantic queries
+ * ═══════════════════════════════════════════════════════════════════════════ */
+
+static vfs_db_t *g_sem_vfs = NULL;
+
+void semantic_set_vfs(vfs_db_t *vfs) {
+    g_sem_vfs = vfs;
+}
 
 /* ═══════════════════════════════════════════════════════════════════════════
  * STOP WORDS — filtered during tokenization
@@ -327,6 +339,16 @@ void sem_tools_index_build(tfidf_index_t *idx,
         sem_tfidf_add_doc(idx, combined);
     }
     sem_tfidf_finalize(idx);
+
+    /* Cache index metadata in VFS for diagnostics and warm-start */
+    if (g_sem_vfs) {
+        vfs_kv_put_str(g_sem_vfs, "semantic", "index_version", "v1");
+        char meta[256];
+        snprintf(meta, sizeof(meta), "{\"tool_count\":%d,\"vocab_count\":%d,\"built_at\":%ld}",
+                 tool_count, idx->vocab_count, (long)time(NULL));
+        vfs_kv_put_str(g_sem_vfs, "semantic", "index_meta", meta);
+        vfs_log_event(g_sem_vfs, "semantic", "index_build", meta);
+    }
 }
 
 static int tool_score_cmp(const void *a, const void *b) {
@@ -339,6 +361,11 @@ static int tool_score_cmp(const void *a, const void *b) {
 
 int sem_tools_rank(tfidf_index_t *idx, const char *query,
                    tool_score_t *results, int max_results, int tool_count) {
+    /* Log semantic query to VFS for observability */
+    if (g_sem_vfs && query) {
+        vfs_log_event(g_sem_vfs, "semantic", "query", query);
+    }
+
     /* Get BM25 scores */
     bm25_result_t bm25_results[SEM_MAX_DOCS];
     int bm25_count = sem_bm25_rank(idx, query, bm25_results, tool_count);

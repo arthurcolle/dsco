@@ -1,7 +1,12 @@
 #include "killswitch.h"
+#include "vfs.h"
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 #include <sys/time.h>
+
+/* §8: VFS persistence handle — set by killswitch_set_vfs() */
+static vfs_db_t *g_ks_vfs = NULL;
 
 /* ═══════════════════════════════════════════════════════════════════════════
  * Kill Switch Hierarchy — Implementation
@@ -61,6 +66,39 @@ void killswitch_init(killswitch_registry_t *r) {
     r->initialized = true;
 }
 
+void killswitch_set_vfs(vfs_db_t *vfs) {
+    g_ks_vfs = vfs;
+}
+
+int killswitch_restore_from_vfs(killswitch_registry_t *r) {
+    if (!r || !r->initialized || !g_ks_vfs) return 0;
+    int key_count = 0;
+    char **keys = vfs_kv_keys(g_ks_vfs, "killswitch", &key_count);
+    if (!keys || key_count <= 0) return 0;
+
+    int restored = 0;
+    for (int i = 0; i < key_count; i++) {
+        char *val = vfs_kv_get_str(g_ks_vfs, "killswitch", keys[i]);
+        if (val && strcmp(val, "active") == 0) {
+            /* Re-trigger as a safety kill at tier 0 with no timeout */
+            kill_level_t level = KILL_AGENT; /* default */
+            if (strcmp(keys[i], "system") == 0)      level = KILL_SYSTEM;
+            else if (strcmp(keys[i], "workflow") == 0) level = KILL_WORKFLOW;
+            else if (strcmp(keys[i], "service") == 0)  level = KILL_SERVICE;
+            else if (strcmp(keys[i], "pheromone") == 0) level = KILL_PHEROMONE;
+
+            int kid = killswitch_trigger(r, level, keys[i],
+                                          "restored from VFS persistence",
+                                          KILL_TRIGGER_SAFETY, 0, 0, false);
+            if (kid >= 0) restored++;
+            free(val);
+        }
+        free(keys[i]);
+    }
+    free(keys);
+    return restored;
+}
+
 /* ── Trigger ──────────────────────────────────────────────────────────── */
 
 int killswitch_trigger(killswitch_registry_t *r, kill_level_t level,
@@ -99,6 +137,12 @@ int killswitch_trigger(killswitch_registry_t *r, kill_level_t level,
         r->system_halted = true;
     }
 
+    /* §8: Persist activated kill switch to VFS */
+    if (g_ks_vfs) {
+        const char *level_name = killswitch_level_name(level);
+        vfs_kv_put_str(g_ks_vfs, "killswitch", level_name, "active");
+    }
+
     return e->id;
 }
 
@@ -116,6 +160,7 @@ bool killswitch_resolve(killswitch_registry_t *r, int kill_id,
 
             e->state = KILL_STATE_RESOLVED;
             e->resolved_at = now_sec();
+            kill_level_t resolved_level = e->level;
 
             /* Archive to history */
             if (r->history_count < KILLSWITCH_MAX_HISTORY) {
@@ -128,7 +173,7 @@ bool killswitch_resolve(killswitch_registry_t *r, int kill_id,
             r->active_count--;
 
             /* Check if system halt can be lifted */
-            if (e->level == KILL_SYSTEM) {
+            if (resolved_level == KILL_SYSTEM) {
                 bool still_halted = false;
                 for (int j = 0; j < r->active_count; j++) {
                     if (r->active[j].level == KILL_SYSTEM &&
@@ -139,6 +184,13 @@ bool killswitch_resolve(killswitch_registry_t *r, int kill_id,
                 }
                 r->system_halted = still_halted;
             }
+
+            /* §8: Remove resolved kill switch from VFS */
+            if (g_ks_vfs) {
+                const char *level_name = killswitch_level_name(resolved_level);
+                vfs_kv_delete(g_ks_vfs, "killswitch", level_name);
+            }
+
             return true;
         }
     }

@@ -1,4 +1,6 @@
 #include "memory_tier.h"
+#include "vecstore.h"
+#include "tools.h"
 #include "vfs.h"
 #include <math.h>
 #include <stdio.h>
@@ -8,6 +10,9 @@
 
 /* §8: VFS persistence handle — set by memory_store_set_vfs() */
 static vfs_db_t *g_mem_vfs = NULL;
+
+/* §9: Vecstore handle for embedding-backed search — set by memory_store_set_vecstore() */
+static vecstore_t *g_mem_vecstore = NULL;
 
 /* ═══════════════════════════════════════════════════════════════════════════
  * Three-Tier Agent Memory System — Implementation
@@ -145,6 +150,18 @@ int memory_store_tagged(memory_store_t *m, memory_tier_t tier,
     m->count++;
     m->tier_count[tier]++;
     m->total_stores++;
+
+    /* Auto-embed for episodic/semantic tiers if vecstore is wired up */
+    if (g_mem_vecstore && tier != MEM_WORKING && value[0]) {
+        int dim = 0;
+        float *vec = tools_embed_text(value, &dim);
+        if (vec && dim > 0) {
+            vecstore_insert(g_mem_vecstore, key, vec, dim, NULL);
+            e->has_embedding = true;
+            free(vec);
+        }
+    }
+
     return e->id;
 }
 
@@ -436,4 +453,62 @@ int memory_restore_semantic(memory_store_t *m) {
     }
     free(keys);
     return restored;
+}
+
+/* ── §9: Embedding-backed Semantic Search ──────────────────────────── */
+
+void memory_store_set_vecstore(struct vecstore *vs) {
+    g_mem_vecstore = (vecstore_t *)vs;
+}
+
+bool memory_entry_set_embedding(memory_store_t *m, const char *key,
+                                const float *vec, int dim) {
+    if (!m || !key || !vec || dim <= 0 || !g_mem_vecstore) return false;
+    memory_entry_t *e = find_by_key(m, key);
+    if (!e) return false;
+
+    if (vecstore_insert(g_mem_vecstore, key, vec, dim, NULL)) {
+        e->has_embedding = true;
+        return true;
+    }
+    return false;
+}
+
+int memory_search_semantic(memory_store_t *m, const char *query,
+                           const memory_entry_t **out, int max) {
+    if (!m || !m->initialized || !query || !out || max <= 0) return 0;
+
+    /* Try embedding-based search first */
+    if (g_mem_vecstore && vecstore_count(g_mem_vecstore) > 0) {
+        int dim = 0;
+        float *qvec = tools_embed_text(query, &dim);
+        if (qvec && dim > 0) {
+            vecstore_result_t *results = calloc((size_t)max, sizeof(vecstore_result_t));
+            if (results) {
+                int found = vecstore_query(g_mem_vecstore, qvec, dim, results, max);
+                int count = 0;
+
+                for (int i = 0; i < found && count < max; i++) {
+                    memory_entry_t *e = find_by_key(m, results[i].id);
+                    if (e && e->active) {
+                        e->last_accessed = now_sec();
+                        e->access_count++;
+                        e->strength = memory_calc_strength(e->tier, e->created_at, now_sec());
+                        out[count++] = e;
+                    }
+                }
+
+                vecstore_result_free(results, found);
+                free(results);
+                free(qvec);
+
+                if (count > 0) return count;
+                /* Fall through to substring if no semantic matches */
+            }
+            free(qvec);
+        }
+    }
+
+    /* Fallback: substring search */
+    return memory_search(m, query, out, max);
 }
