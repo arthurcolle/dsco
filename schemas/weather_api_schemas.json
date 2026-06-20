@@ -1,0 +1,17 @@
+{
+  "bufkit.parsed_forecast": {
+    "description": "Parsed BUFKIT surface forecast rows used by NWP ingest.",
+    "required_paths": ["valid_utc", "fhr", "t2m_f"],
+    "optional_paths": ["td2m_f", "wspd_kt", "wdir", "cape", "cin", "pwat_mm"]
+  },
+  "nws.observations": {
+    "description": "NWS station observations GeoJSON response.",
+    "required_paths": ["features"],
+    "optional_paths": ["@context", "type", "title"]
+  },
+  "nws.observations.feature": {
+    "description": "Single NWS observation feature.",
+    "required_paths": ["properties.timestamp", "properties.temperature.value"],
+    "optional_paths": ["properties.dewpoint.value", "properties.windDirection.value", "properties.windSpeed.value"]
+  }
+}
