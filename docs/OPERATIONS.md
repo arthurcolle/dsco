@@ -32,9 +32,16 @@ make install PREFIX=/usr/local
 make uninstall PREFIX=/usr/local
 ```
 
+`make install` also installs `tool_embeddings.bin` to `PREFIX/share/dsco/`.
+At runtime `dsco` searches, in order:
+- `DSCO_TOOL_EMBEDDINGS_FILE`
+- repo-local paths such as `include/tool_embeddings.bin`
+- paths relative to the executable, including `../share/dsco/tool_embeddings.bin`
+- `~/.dsco/tool_embeddings.bin`
+
 ## Runtime Modes
 
-- Interactive mode: `./dsco`
+- Bare invocation: `./dsco` prints help and exits nonzero
 - One-shot mode: `./dsco "...prompt..."`
 - Setup mode:
   - `./dsco --setup`
@@ -88,6 +95,18 @@ From `agent.c`, key commands include:
 - `DSCO_MODEL`
 - `DSCO_PROFILE`
 - `DSCO_ENV_FILE`
+
+### Claude Code Subscription Auth
+
+- `DSCO_CLAUDE_CODE_OAUTH_TOKEN`
+- `CLAUDE_CODE_OAUTH_TOKEN`
+- `DSCO_CLAUDE_CODE_CREDENTIALS_FILE`
+- `CLAUDE_CONFIG_DIR`
+- `DSCO_CLAUDE_CODE_KEYCHAIN_SERVICE`
+- `DSCO_CLAUDE_CODE_VERSION`
+- `DSCO_CLAUDE_CODE_ENTRYPOINT`
+- `DSCO_DISABLE_CLAUDE_CODE_OAUTH_DISCOVERY`
+- `DSCO_DEBUG_AUTH`
 
 ### Storage and Telemetry
 
@@ -174,11 +193,58 @@ Script-specific caches:
 - `gpt-`, `o1`, `o3`-style + `sk-` keys -> `openai` family
 - Other supported endpoints are treated as OpenAI-compatible base URLs
 
+For Claude models, provider selection prefers Anthropic when either of these are available:
+
+- `ANTHROPIC_API_KEY`
+- Claude Code OAuth credentials discovered from env, Claude Code Keychain, or Claude Code credentials files
+
+If both Anthropic auth modes are available, `dsco` prefers Claude Code OAuth over an ambient `ANTHROPIC_API_KEY`. Use `-k` to force a specific key for a request, or set `DSCO_DISABLE_CLAUDE_CODE_OAUTH_DISCOVERY=1` to force API-key-only Anthropic behavior. Only when Anthropic credentials are unavailable does routing fall back to OpenRouter.
+
+### Claude Code Subscription Mode
+
+When an Anthropic request uses Claude Code subscription credentials, `dsco` does all of the following automatically:
+
+- Sends `Authorization: Bearer <Claude Code access token>` instead of `x-api-key`
+- Adds the Claude Code OAuth beta header
+- Inserts the `x-anthropic-billing-header` system block as the first system entry
+- Computes the billing header from the first user message and Claude Code version
+
+Discovery order:
+
+1. `DSCO_CLAUDE_CODE_OAUTH_TOKEN`
+2. `CLAUDE_CODE_OAUTH_TOKEN`
+3. macOS Keychain entry for Claude Code credentials
+4. `DSCO_CLAUDE_CODE_CREDENTIALS_FILE`
+5. `CLAUDE_CONFIG_DIR/.credentials.json`
+6. `~/.claude/.credentials.json`
+
+For debugging provider/auth selection:
+
+```bash
+DSCO_DEBUG_AUTH=1 ./dsco -m claude-sonnet-4-6 "say hi"
+```
+
+Expected Anthropic subscription path:
+
+```text
+[auth] provider=anthropic model=claude-sonnet-4-6 auth=claude-code-oauth
+```
+
 ## Troubleshooting
 
-### `ANTHROPIC_API_KEY not set`
+### Anthropic credentials missing
 
-- Export the key or use `--setup` to persist credentials.
+- Export `ANTHROPIC_API_KEY`, or sign into Claude Code and let `dsco` discover the Claude Code OAuth token.
+- Use `DSCO_DEBUG_AUTH=1` to confirm whether requests are using `anthropic` or falling back to another provider.
+- If Claude Code discovery should be disabled for testing, set `DSCO_DISABLE_CLAUDE_CODE_OAUTH_DISCOVERY=1`.
+
+### Claude models unexpectedly use OpenRouter
+
+- Unset `OPENROUTER_API_KEY` while testing Anthropic routing.
+- Run with `DSCO_DEBUG_AUTH=1` and confirm:
+  - `provider=anthropic`
+  - `auth=claude-code-oauth` or `auth=anthropic-api-key`
+- If you see `provider=openrouter`, Anthropic credentials were not available for that process.
 
 ### Tools timing out
 
