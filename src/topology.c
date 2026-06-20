@@ -2,6 +2,7 @@
 #include "config.h"
 #include "json_util.h"
 #include "provider.h"
+#include "scheduler.h"
 #include "swarm.h"
 #include "tui.h"
 #include "task_profile.h"
@@ -17,6 +18,13 @@
 
 static topology_t g_topologies[TOPOLOGY_COUNT];
 static bool g_topologies_inited = false;
+
+/* ── Cooperative scheduler integration ──────────────────────────────── */
+static scheduler_t *g_topo_sched = NULL;
+
+void topology_set_scheduler(scheduler_t *sched) {
+    g_topo_sched = sched;
+}
 
 static bool strcasestr_simple(const char *haystack, const char *needle);
 static void build_dynamic_plan(const topology_task_profile_t *profile,
@@ -701,34 +709,154 @@ static const char *edge_type_label(edge_type_t type) {
     return "->";
 }
 
+/* ── Tree-form topology rendering ─────────────────────────────────── */
+
+/* Compute topological depth (longest path from a root) for each node.
+ * Nodes at the same depth form a "stage" and render on the same row. */
+static void topo_compute_depth(const topology_t *t, int *depth) {
+    for (int i = 0; i < t->node_count; i++) depth[i] = -1;
+
+    /* Find roots: nodes with no non-feedback incoming edges */
+    bool changed = true;
+    for (int i = 0; i < t->node_count; i++) {
+        bool has_incoming = false;
+        for (int e = 0; e < t->edge_count; e++) {
+            if (t->edges[e].to == i && t->edges[e].type != EDGE_FEEDBACK) {
+                has_incoming = true;
+                break;
+            }
+        }
+        if (!has_incoming) depth[i] = 0;
+    }
+
+    /* BFS-like propagation: depth[child] = max(depth[parent] + 1) */
+    while (changed) {
+        changed = false;
+        for (int e = 0; e < t->edge_count; e++) {
+            if (t->edges[e].type == EDGE_FEEDBACK) continue;
+            int from = t->edges[e].from;
+            int to   = t->edges[e].to;
+            if (depth[from] < 0) continue;
+            int d = depth[from] + 1;
+            if (d > depth[to]) {
+                depth[to] = d;
+                changed = true;
+            }
+        }
+    }
+    /* Unreachable nodes get depth 0 */
+    for (int i = 0; i < t->node_count; i++)
+        if (depth[i] < 0) depth[i] = 0;
+}
+
+/* Render a node label: [H:tag] or [S:tag x3] */
+static int render_node_label(const topo_node_t *n, char *out, size_t len) {
+    if (n->replicas > 1)
+        return snprintf(out, len, "[%s:%s x%d]", tier_label(n->tier), n->tag, n->replicas);
+    return snprintf(out, len, "[%s:%s]", tier_label(n->tier), n->tag);
+}
+
+/* Edge glyph for vertical connectors */
+static const char *edge_glyph(edge_type_t type) {
+    switch (type) {
+    case EDGE_SEQUENCE:    return "|";
+    case EDGE_FANOUT:      return "|";
+    case EDGE_FANIN:       return "|";
+    case EDGE_FEEDBACK:    return "~";
+    case EDGE_CONDITIONAL: return "?";
+    case EDGE_COMPETE:     return "!";
+    }
+    return "|";
+}
+
 int topology_render_ascii(const topology_t *t, char *buf, size_t buflen) {
     if (!buf || buflen == 0) return -1;
     buf[0] = '\0';
-    if (!t) return -1;
+    if (!t || t->node_count == 0) return -1;
+
+    int depth[TOPO_MAX_NODES];
+    topo_compute_depth(t, depth);
+
+    /* Find max depth */
+    int max_depth = 0;
+    for (int i = 0; i < t->node_count; i++)
+        if (depth[i] > max_depth) max_depth = depth[i];
 
     jbuf_t b;
-    jbuf_init(&b, 1024);
-    jbuf_append(&b, "Topology ");
-    jbuf_append(&b, t->name);
-    jbuf_append(&b, " [");
-    jbuf_append_int(&b, t->id);
-    jbuf_append(&b, "]\n");
-    jbuf_append(&b, t->description);
-    jbuf_append(&b, "\n\nNodes:\n");
-    for (int i = 0; i < t->node_count; i++) {
-        const topo_node_t *n = &t->nodes[i];
-        char line[256];
-        snprintf(line, sizeof(line), "  [%d] %s(%s/%s x%d)\n",
-                 n->id, tier_label(n->tier), n->tag,
-                 node_role_label(n->role), n->replicas);
-        jbuf_append(&b, line);
+    jbuf_init(&b, 2048);
+
+    /* Header */
+    jbuf_appendf(&b, "%s  [%s/%d agents/%.1fx]\n",
+                 t->name, topo_category_label(t->category),
+                 t->total_agents, t->est_latency_mult);
+
+    /* Render stage by stage (depth 0, 1, 2, ...) */
+    for (int d = 0; d <= max_depth; d++) {
+
+        /* Collect nodes at this depth */
+        int stage_nodes[TOPO_MAX_NODES];
+        int stage_count = 0;
+        for (int i = 0; i < t->node_count; i++)
+            if (depth[i] == d)
+                stage_nodes[stage_count++] = i;
+
+        if (stage_count == 0) continue;
+
+        /* Render connector lines from previous stage */
+        if (d > 0) {
+            /* Determine the edge type(s) connecting to this stage */
+            edge_type_t predominant = EDGE_SEQUENCE;
+            for (int e = 0; e < t->edge_count; e++) {
+                if (t->edges[e].type == EDGE_FEEDBACK) continue;
+                if (depth[t->edges[e].to] == d && depth[t->edges[e].from] == d - 1) {
+                    predominant = t->edges[e].type;
+                    break;
+                }
+            }
+            const char *glyph = edge_glyph(predominant);
+
+            if (stage_count == 1) {
+                /* Single child: vertical line */
+                jbuf_appendf(&b, "    %s\n", glyph);
+                jbuf_appendf(&b, "    v\n");
+            } else {
+                /* Multiple children: fan-out tree branches */
+                jbuf_append(&b, "   ");
+                for (int i = 0; i < stage_count; i++) {
+                    if (i == 0)             jbuf_append(&b, " /");
+                    else if (i == stage_count - 1) jbuf_appendf(&b, "%s\\", glyph);
+                    else                    jbuf_appendf(&b, "%s", glyph);
+                    if (i < stage_count - 1) jbuf_append(&b, "---");
+                }
+                jbuf_append(&b, "\n");
+            }
+        }
+
+        /* Render the node labels for this stage */
+        if (stage_count == 1) {
+            char label[80];
+            render_node_label(&t->nodes[stage_nodes[0]], label, sizeof(label));
+            jbuf_appendf(&b, "  %s\n", label);
+        } else {
+            /* Multiple nodes side by side */
+            jbuf_append(&b, "  ");
+            for (int i = 0; i < stage_count; i++) {
+                char label[80];
+                render_node_label(&t->nodes[stage_nodes[i]], label, sizeof(label));
+                if (i > 0) jbuf_append(&b, "  ");
+                jbuf_append(&b, label);
+            }
+            jbuf_append(&b, "\n");
+        }
     }
-    jbuf_append(&b, "Edges:\n");
-    for (int i = 0; i < t->edge_count; i++) {
-        char line[128];
-        snprintf(line, sizeof(line), "  [%d] %s [%d]\n", t->edges[i].from,
-                 edge_type_label(t->edges[i].type), t->edges[i].to);
-        jbuf_append(&b, line);
+
+    /* Render feedback loops at the bottom */
+    for (int e = 0; e < t->edge_count; e++) {
+        if (t->edges[e].type == EDGE_FEEDBACK) {
+            jbuf_appendf(&b, "    ~> feedback: %s -> %s\n",
+                         t->nodes[t->edges[e].from].tag,
+                         t->nodes[t->edges[e].to].tag);
+        }
     }
 
     int written = (int)(b.len < buflen - 1 ? b.len : buflen - 1);
@@ -1627,4 +1755,299 @@ bool topology_run(const topology_t *t,
     fprintf(stderr, "  %s└─%s topology \"%s\" %s\n",
             ok ? TUI_GREEN : TUI_BRED, TUI_RESET, t->name, ok ? "complete" : "failed");
     return ok;
+}
+
+/* ── Scheduler-integrated topology execution ────────────────────────── */
+
+typedef struct {
+    topology_plan_t          *plan;
+    int                       node_idx;
+    const char               *api_key;
+    const char               *model;
+    const char               *task;
+    char                    **current_outputs;
+    char                    **prev_outputs;
+    int                       iteration;
+    topology_run_stats_t     *stats;
+    char                     *output;
+    size_t                    output_len;
+    bool                      success;
+} topo_task_ctx_t;
+
+/*
+ * Task adapter: executes a single topology node through run_stage.
+ * Wraps the existing run_stage logic for a single-node ready set so
+ * the scheduler can drive each node independently.
+ * Returns 0 on completion (success or failure captured in ctx->success).
+ */
+static int topo_node_task(void *ctx) {
+    topo_task_ctx_t *tc = ctx;
+    const topology_t *t = &tc->plan->topology;
+    int ready[1] = { tc->node_idx };
+
+    tc->success = run_stage(t, ready, 1,
+                            tc->api_key, tc->model,
+                            tc->task,
+                            tc->current_outputs,
+                            tc->prev_outputs,
+                            tc->iteration,
+                            tc->stats);
+
+    /* Capture the output for the caller */
+    if (tc->success && tc->current_outputs[tc->node_idx]) {
+        size_t len = strlen(tc->current_outputs[tc->node_idx]);
+        if (len > tc->output_len - 1) len = tc->output_len - 1;
+        if (tc->output) {
+            memcpy(tc->output, tc->current_outputs[tc->node_idx], len);
+            tc->output[len] = '\0';
+        }
+    }
+
+    return 0; /* 0 = completed to the scheduler */
+}
+
+/*
+ * run_stage_scheduled — scheduler-driven version of a stage.
+ * When the scheduler is available, each ready node is spawned as an
+ * independent scheduler task so they interleave cooperatively.
+ * Falls back to the original run_stage when no scheduler is set.
+ */
+static bool run_stage_scheduled(const topology_t *t,
+                                const int ready_nodes[], int ready_count,
+                                const char *api_key,
+                                const char *coordinator_model,
+                                const char *task,
+                                char *current_outputs[],
+                                char *prev_outputs[],
+                                int iteration,
+                                topology_run_stats_t *stats,
+                                topology_plan_t *plan) {
+    /* If only one ready node or no scheduler, use the original path */
+    if (!g_topo_sched || ready_count <= 1) {
+        return run_stage(t, ready_nodes, ready_count, api_key,
+                         coordinator_model, task, current_outputs,
+                         prev_outputs, iteration, stats);
+    }
+
+    /* Spawn each ready node as a scheduler task */
+    topo_task_ctx_t ctxs[TOPO_MAX_NODES];
+    task_id_t       ids[TOPO_MAX_NODES];
+    char            labels[TOPO_MAX_NODES][64];
+    memset(ctxs, 0, sizeof(ctxs));
+
+    for (int i = 0; i < ready_count; i++) {
+        topo_task_ctx_t *tc = &ctxs[i];
+        tc->plan            = plan;
+        tc->node_idx        = ready_nodes[i];
+        tc->api_key         = api_key;
+        tc->model           = coordinator_model;
+        tc->task            = task;
+        tc->current_outputs = current_outputs;
+        tc->prev_outputs    = prev_outputs;
+        tc->iteration       = iteration;
+        tc->stats           = stats;
+        tc->output          = NULL;
+        tc->output_len      = 0;
+        tc->success         = false;
+
+        snprintf(labels[i], sizeof(labels[i]), "topo:%s/%s",
+                 t->name, t->nodes[ready_nodes[i]].tag);
+
+        ids[i] = sched_spawn(g_topo_sched, topo_node_task, tc,
+                              labels[i], SCHED_PRIO_NORMAL);
+        if (ids[i] == TASK_INVALID) {
+            /* Could not spawn — cancel previously spawned and fall back */
+            for (int j = 0; j < i; j++) sched_cancel(g_topo_sched, ids[j]);
+            return run_stage(t, ready_nodes, ready_count, api_key,
+                             coordinator_model, task, current_outputs,
+                             prev_outputs, iteration, stats);
+        }
+    }
+
+    /* Drive the scheduler until all our tasks finish */
+    bool all_done = false;
+    while (!all_done) {
+        sched_tick(g_topo_sched);
+        all_done = true;
+        for (int i = 0; i < ready_count; i++) {
+            sched_task_t *st = sched_task_get(g_topo_sched, ids[i]);
+            if (!st) continue;
+            if (st->state != TASK_COMPLETED && st->state != TASK_FAILED &&
+                st->state != TASK_CANCELLED) {
+                all_done = false;
+                break;
+            }
+        }
+    }
+
+    /* Check results */
+    for (int i = 0; i < ready_count; i++) {
+        if (!ctxs[i].success) return false;
+    }
+    return true;
+}
+
+/*
+ * topology_run_scheduled — public entry point that uses the cooperative
+ * scheduler for parallel node execution when available.
+ *
+ * Mirrors topology_run but replaces run_stage calls with
+ * run_stage_scheduled so fan-out nodes execute as concurrent
+ * scheduler tasks.
+ */
+bool topology_run_scheduled(const topology_t *t,
+                            const char *api_key,
+                            const char *coordinator_model,
+                            const char *task,
+                            char *result, size_t rlen,
+                            topology_run_stats_t *stats) {
+    if (!result || rlen == 0) return false;
+    result[0] = '\0';
+    if (stats) memset(stats, 0, sizeof(*stats));
+    if (!t || !topology_is_runnable(t) || !task || !task[0]) {
+        snprintf(result, rlen, "error: invalid topology run request");
+        return false;
+    }
+
+    /* If no scheduler is set, delegate to the original path */
+    if (!g_topo_sched) {
+        return topology_run(t, api_key, coordinator_model, task, result, rlen, stats);
+    }
+
+    /* Build a mutable plan wrapper so the task adapter can reference it */
+    topology_plan_t plan;
+    memset(&plan, 0, sizeof(plan));
+    plan.topology = *t;
+
+    char *prev_outputs[TOPO_MAX_NODES] = {0};
+    char *current_outputs[TOPO_MAX_NODES] = {0};
+    int max_iterations = (t->strategy == EXEC_ITERATIVE && t->max_iterations > 1)
+        ? t->max_iterations : 1;
+    bool ok = true;
+
+    fprintf(stderr, "  %s⚡%s topology \"%s\" — %d nodes (scheduled)\n",
+            TUI_BYELLOW, TUI_RESET, t->name, t->node_count);
+
+    for (int iteration = 0; iteration < max_iterations && ok; iteration++) {
+        bool completed[TOPO_MAX_NODES] = {0};
+        bool activated[TOPO_MAX_NODES] = {0};
+        int completed_count = 0;
+
+        for (int i = 0; i < t->node_count; i++) {
+            activated[i] = !has_incoming_type(t, i, EDGE_CONDITIONAL);
+            free(current_outputs[i]);
+            current_outputs[i] = NULL;
+        }
+
+        fprintf(stderr, "  %s├─%s iteration %d/%d\n",
+                TUI_DIM, TUI_RESET, iteration + 1, max_iterations);
+
+        while (completed_count < t->node_count) {
+            int ready[TOPO_MAX_NODES];
+            int ready_count = 0;
+
+            for (int n = 0; n < t->node_count; n++) {
+                if (completed[n] || !activated[n]) continue;
+                bool deps_met = true;
+                for (int e = 0; e < t->edge_count; e++) {
+                    if (t->edges[e].to != n || t->edges[e].type == EDGE_FEEDBACK) continue;
+                    if (!completed[t->edges[e].from]) {
+                        deps_met = false;
+                        break;
+                    }
+                }
+                if (deps_met) ready[ready_count++] = n;
+            }
+
+            if (ready_count == 0) break;
+
+            fprintf(stderr, "  %s│%s stage [sched]:", TUI_DIM, TUI_RESET);
+            for (int i = 0; i < ready_count; i++) {
+                fprintf(stderr, " %s%s%s", TUI_CYAN, t->nodes[ready[i]].tag, TUI_RESET);
+            }
+            fprintf(stderr, "\n");
+
+            ok = run_stage_scheduled(t, ready, ready_count, api_key,
+                                     coordinator_model, task,
+                                     current_outputs, prev_outputs,
+                                     iteration, stats, &plan);
+            if (!ok) break;
+
+            for (int i = 0; i < ready_count; i++) {
+                int node_id = ready[i];
+                completed[node_id] = true;
+                completed_count++;
+
+                int chosen = choose_conditional_target(t, node_id, current_outputs[node_id]);
+                for (int e = 0; e < t->edge_count; e++) {
+                    if (t->edges[e].from != node_id || t->edges[e].type != EDGE_CONDITIONAL) continue;
+                    activated[t->edges[e].to] = (t->edges[e].to == chosen);
+                }
+            }
+        }
+
+        if (stats) stats->iterations = iteration + 1;
+
+        if (iteration + 1 < max_iterations && has_feedback_edges(t)) {
+            bool approved = false;
+            for (int i = 0; i < t->node_count; i++) {
+                if (current_outputs[i] && output_approved(current_outputs[i])) {
+                    approved = true;
+                    break;
+                }
+            }
+            if (approved) break;
+        }
+
+        for (int i = 0; i < t->node_count; i++) {
+            free(prev_outputs[i]);
+            prev_outputs[i] = current_outputs[i] ? safe_strdup(current_outputs[i]) : NULL;
+        }
+    }
+
+    if (ok) {
+        jbuf_t out;
+        jbuf_init(&out, 8192);
+        int sinks = 0;
+        for (int i = 0; i < t->node_count; i++) {
+            if (!node_is_sink(t, i) || !current_outputs[i]) continue;
+            if (sinks++ > 0) jbuf_append(&out, "\n\n");
+            if (sinks > 1) {
+                jbuf_append(&out, "[");
+                jbuf_append(&out, t->nodes[i].tag);
+                jbuf_append(&out, "]\n");
+            }
+            jbuf_append(&out, current_outputs[i]);
+        }
+        if (sinks == 0) {
+            jbuf_append(&out, "topology finished without sink output");
+        }
+        int written = (int)(out.len < rlen - 1 ? out.len : rlen - 1);
+        memcpy(result, out.data, (size_t)written);
+        result[written] = '\0';
+        if (stats) stats->est_cost_usd = topology_estimate_cost(t, (int)strlen(task) / 4, (int)strlen(result) / 4);
+        jbuf_free(&out);
+    } else {
+        snprintf(result, rlen, "error: topology execution failed");
+    }
+
+    for (int i = 0; i < t->node_count; i++) {
+        free(prev_outputs[i]);
+        free(current_outputs[i]);
+    }
+
+    fprintf(stderr, "  %s└─%s topology \"%s\" %s\n",
+            ok ? TUI_GREEN : TUI_BRED, TUI_RESET, t->name, ok ? "complete" : "failed");
+    return ok;
+}
+
+bool topology_plan_run_scheduled(const topology_plan_t *plan,
+                                  const char *api_key,
+                                  const char *coordinator_model,
+                                  const char *task,
+                                  char *result, size_t rlen,
+                                  topology_run_stats_t *stats) {
+    if (!plan) return false;
+    return topology_run_scheduled(&plan->topology, api_key, coordinator_model,
+                                   task, result, rlen, stats);
 }

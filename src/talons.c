@@ -1,8 +1,14 @@
 #include "talons.h"
+#include "vfs.h"
 #include <math.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 #include <sys/time.h>
+
+static vfs_db_t *g_talons_vfs = NULL;
+static const talons_engine_t *s_last_engine = NULL;
+static void persist_strategy_from(const talons_engine_t *t, int si);
 
 /* ═══════════════════════════════════════════════════════════════════════════
  * Talons — Competitive Execution Engine
@@ -78,6 +84,7 @@ static goal_t *find_goal(talons_engine_t *t, int goal_id) {
 }
 
 static void record_hunt(talons_engine_t *t, const goal_t *g, bool won) {
+    s_last_engine = t;
     if (t->history_count >= TALONS_MAX_HISTORY) {
         /* Shift out oldest half */
         int half = TALONS_MAX_HISTORY / 2;
@@ -115,6 +122,11 @@ static void record_hunt(talons_engine_t *t, const goal_t *g, bool won) {
         t->losses++;
     }
     t->win_rate = t->total_hunts > 0 ? (double)t->wins / t->total_hunts : 0;
+
+    /* Persist updated strategy stats to VFS */
+    if (g_talons_vfs && si >= 0 && si < 6) {
+        persist_strategy_from(t, si);
+    }
 }
 
 static void recount_active(talons_engine_t *t) {
@@ -412,6 +424,12 @@ int talons_tournament_decide(talons_engine_t *t, int tournament_id) {
     tr->decided_at = now_sec();
     tr->active = false;
 
+    /* Log tournament result to VFS events */
+    if (g_talons_vfs && best_id >= 0) {
+        vfs_log_event(g_talons_vfs, "tournament",
+                      tr->objective, tr->competitors[best_id].label);
+    }
+
     return best_id;
 }
 
@@ -519,6 +537,49 @@ strategy_type_t talons_best_strategy(const talons_engine_t *t) {
         if (rate > best) { best = rate; best_idx = i; }
     }
     return (strategy_type_t)best_idx;
+}
+
+/* ── VFS Persistence ──────────────────────────────────────────────────── */
+
+void talons_set_vfs(vfs_db_t *vfs) {
+    g_talons_vfs = vfs;
+}
+
+/* Internal: persist strategy stats given engine pointer */
+static void persist_strategy_from(const talons_engine_t *t, int si) {
+    if (!g_talons_vfs || !t || si < 0 || si >= 6) return;
+    const char *name = talons_strategy_name((strategy_type_t)si);
+    double rate = t->strategy_success[si] / (double)t->strategy_attempts[si];
+    char json[256];
+    snprintf(json, sizeof(json),
+             "{\"wins\":%.0f,\"attempts\":%d,\"rate\":%.4f}",
+             t->strategy_success[si], t->strategy_attempts[si], rate);
+    vfs_kv_put_str(g_talons_vfs, "talons_strategy", name, json);
+}
+
+void talons_persist_strategy_history(void) {
+    if (!g_talons_vfs || !s_last_engine) return;
+    for (int i = 0; i < 6; i++)
+        persist_strategy_from(s_last_engine, i);
+}
+
+void talons_restore_strategy_history(talons_engine_t *t) {
+    if (!g_talons_vfs || !t) return;
+    for (int i = 0; i < 6; i++) {
+        const char *name = talons_strategy_name((strategy_type_t)i);
+        char *json = vfs_kv_get_str(g_talons_vfs, "talons_strategy", name);
+        if (!json) continue;
+        /* Parse wins and attempts from JSON */
+        double wins = 0;
+        int attempts = 0;
+        if (sscanf(json, "{\"wins\":%lf,\"attempts\":%d", &wins, &attempts) == 2) {
+            if (attempts > 0) {
+                t->strategy_success[i] = wins;
+                t->strategy_attempts[i] = attempts;
+            }
+        }
+        free(json);
+    }
 }
 
 /* ── Serialization ────────────────────────────────────────────────────── */
