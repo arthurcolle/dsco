@@ -21,6 +21,8 @@
  * ─────────────────────────────────────────────────────────────────────── */
 
 #include <stddef.h>
+#include <stdbool.h>
+#include <stdint.h>
 
 /* Maximum length of a secret key name (e.g. "ANTHROPIC_API_KEY") */
 #define SEALED_KEY_MAX  64
@@ -32,6 +34,15 @@
 /* Initialise the store and register the wiper with tamper.c.
  * Loads existing secrets from environment variables into the store. */
 void sealed_store_init(void);
+
+/* Supply a 32-byte hardware-derived master key (from se_store on macOS SE).
+ * Must be called before sealed_store_init() if SE is available.
+ * The key is copied into mlock'd memory; caller should zero their copy. */
+void sealed_store_set_master_key(const uint8_t key[32]);
+
+/* Copy the master key into the caller's buffer. Returns false if no master
+ * key has been registered yet. Caller MUST zero the buffer after use. */
+bool sealed_store_master_key_copy(uint8_t out[32]);
 
 /* Store or overwrite a secret.  val_len == 0 means strlen(val).
  * Returns 0 on success, -1 on overflow. */

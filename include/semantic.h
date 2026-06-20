@@ -3,6 +3,7 @@
 
 #include <stdbool.h>
 #include <stddef.h>
+#include "vfs.h"
 
 /* ── Tokenizer ─────────────────────────────────────────────────────────── */
 
@@ -111,6 +112,11 @@ int sem_classify(const char *query, classification_t *results, int max_results);
 
 /* Get category name string */
 const char *sem_category_name(query_category_t cat);
+
+/* ── VFS Cache Integration ─────────────────────────────────────────────── */
+
+/* Attach VFS handle to cache TF-IDF index metadata and log queries */
+void semantic_set_vfs(vfs_db_t *vfs);
 
 /* ── Context Relevance Scoring ─────────────────────────────────────────── */
 
