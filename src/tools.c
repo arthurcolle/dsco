@@ -7321,11 +7321,137 @@ static bool tool_topology_run(const char *input, char *result, size_t rlen) {
         return false;
     }
 
+    /* ── Present topology options as dialog before execution ─────────── */
+    plan_options_t *dial_opts = NULL;
+    bool user_picked = false;
+    bool skip_run = false;
+
+    /* Check plan_cache first for a fast path */
+    plan_cache_result_t cache_hit;
+    bool from_cache = plan_cache_lookup(task, &cache_hit);
+    if (from_cache) {
+        /* Silently prefer cache if hit similarity > 0.90 */
+        if (cache_hit.similarity >= 0.90f && !explicit_topology) {
+            const topology_t *cached_t = topology_find(cache_hit.topology_name);
+            if (cached_t) {
+                plan.topology = *cached_t;
+                snprintf(plan.rationale, sizeof(plan.rationale),
+                         "cache hit (sim=%.0f%%, %d prior hits): %s",
+                         cache_hit.similarity * 100.0f,
+                         cache_hit.hits_before,
+                         cache_hit.topology_name);
+            }
+        }
+    }
+
+    /* If not explicitly named, offer AskUserQuestion dialog when TTY available */
+    if (!explicit_topology && isatty(STDIN_FILENO)) {
+        dial_opts = plan_analyze(task, 0);
+        if (dial_opts && dial_opts->count >= 2) {
+            tui_ask_question_t aq;
+            memset(&aq, 0, sizeof(aq));
+            snprintf(aq.id,       sizeof(aq.id),       "topology");
+            snprintf(aq.header,   sizeof(aq.header),   "Topology");
+            snprintf(aq.question, sizeof(aq.question),
+                     "How should dsco run this task?");
+            aq.allow_custom = false;
+            aq.allow_chat   = true;
+
+            /* Build option list: recommended (label CACHE if from cache) */
+            int n_opts = 0;
+            /* First option: current auto-selected plan */
+            if (n_opts < TUI_ASK_MAX_OPTIONS) {
+                tui_ask_option_t *o = &aq.options[n_opts++];
+                snprintf(o->value,       sizeof(o->value), "%s", plan.topology.name);
+                snprintf(o->label,       sizeof(o->label), "%s%s",
+                         plan.topology.name,
+                         from_cache && cache_hit.similarity >= 0.90f ? " ✦ cached" : " ✦ auto");
+                snprintf(o->description, sizeof(o->description),
+                         "%s  agents=%d  est=$%.4f%s",
+                         plan.topology.description,
+                         plan.topology.total_agents,
+                         topology_estimate_cost(&plan.topology, 700, 600),
+                         from_cache ? "  (cache hit)" : "");
+            }
+            /* Then top alternatives from plan_analyze */
+            for (int oi = 0; oi < dial_opts->count && n_opts < TUI_ASK_MAX_OPTIONS; oi++) {
+                const plan_option_t *po = &dial_opts->options[oi];
+                if (!po->topology_name) continue;
+                if (strcmp(po->topology_name, plan.topology.name) == 0) continue;
+                const topology_t *at = topology_find(po->topology_name);
+                if (!at) continue;
+                tui_ask_option_t *o = &aq.options[n_opts++];
+                snprintf(o->value,       sizeof(o->value), "%s", po->topology_name);
+                snprintf(o->label,       sizeof(o->label), "%s  fit=%.0f%%  $%.4f",
+                         po->topology_name, po->fit_score * 100.0, po->est_cost_usd);
+                snprintf(o->description, sizeof(o->description), "%s  agents=%d  %s",
+                         at->description, at->total_agents,
+                         po->cost_source == COST_SOURCE_LEARNED ? "★ learned cost" : "");
+                if (n_opts >= 6) break;
+            }
+            aq.n_options = n_opts;
+
+            char chat_buf[512] = {0};
+            tui_ask_status_t status = tui_ask_questions(&aq, 1,
+                from_cache
+                  ? "dsco matched a prior successful run. Pick a topology or run with the cached choice."
+                  : "dsco profiled this task. Pick a topology — or let it auto-run.",
+                chat_buf, sizeof(chat_buf));
+
+            if (status == TUI_ASK_CANCEL) {
+                skip_run = true;
+            } else if (status == TUI_ASK_SUBMIT && aq.answered) {
+                /* Find which option was selected */
+                for (int oi = 0; oi < aq.n_options; oi++) {
+                    if (aq.selected[oi]) {
+                        const topology_t *chosen = topology_find(aq.options[oi].value);
+                        if (chosen) {
+                            plan.topology  = *chosen;
+                            plan.is_dynamic = false;
+                            snprintf(plan.rationale, sizeof(plan.rationale),
+                                     "user selected: %s", chosen->name);
+                            user_picked = true;
+                        }
+                        break;
+                    }
+                }
+            }
+            /* TUI_ASK_CHAT: proceed with auto-selected topology */
+        }
+        plan_options_free(dial_opts);
+        dial_opts = NULL;
+    }
+
+    if (skip_run) {
+        snprintf(result, rlen, "{\"ok\":false,\"cancelled\":true,\"reason\":\"user cancelled\"}");
+        free(task); free(topology);
+        jbuf_free(&b);
+        return false;
+    }
+
+    /* ── Execute ──────────────────────────────────────────────────────── */
     char *topo_result = safe_malloc(MAX_TOOL_RESULT);
     topo_result[0] = '\0';
     topology_run_stats_t stats;
+    struct timespec t_start, t_end;
+    clock_gettime(CLOCK_MONOTONIC, &t_start);
     bool ok = topology_plan_run(&plan, api_key, tools_runtime_model(),
                                 task, topo_result, MAX_TOOL_RESULT, &stats);
+    clock_gettime(CLOCK_MONOTONIC, &t_end);
+    double wall_s = (t_end.tv_sec - t_start.tv_sec)
+                  + (t_end.tv_nsec - t_start.tv_nsec) / 1e9;
+
+    /* ── Post-run: teach cost model + cache + compute delta ───────────── */
+    if (ok && stats.est_cost_usd > 0) {
+        int total_toks = (int)(strlen(task)/4 + strlen(topo_result)/4);
+        cost_model_learn(plan.topology.name, total_toks, stats.est_cost_usd, wall_s);
+        plan_cache_store(task, plan.topology.name, plan.rationale, 0.88f);
+    }
+    /* baseline estimate for delta */
+    double baseline_cost = topology_estimate_cost(
+        topology_find("triage") ? topology_find("triage") : &plan.topology, 700, 600);
+    double delta_cost = stats.est_cost_usd > 0
+        ? stats.est_cost_usd - baseline_cost : 0.0;
 
     jbuf_append(&b, ok ? "true" : "false");
     jbuf_append(&b, ",\"dry_run\":false,\"topology\":");
