@@ -272,8 +272,38 @@ int swarm_spawn_in_group(swarm_t *s, int group_id, const char *task, const char 
         if (!m || !m[0]) m = s->default_model;
         const char *bin = s->dsco_path;
 
-        /* Ensure child inherits the exact credential/auth mode the parent resolved. */
+        /* Ensure child inherits the exact credential/auth mode the parent resolved.
+         * Also resolve credentials for the child's model/provider — if the child
+         * uses a different provider (e.g. openrouter), export that provider's key too. */
         swarm_export_child_credential(m, s->api_key);
+
+        /* ── If the child's model routes to a different provider than the parent,
+         * make sure that provider's key is also exported.  This handles the case
+         * where the parent runs on Anthropic but the child model is on OpenRouter. */
+        {
+            const char *child_provider = provider_detect(m, s->api_key);
+            const char *parent_provider = provider_detect(s->default_model, s->api_key);
+            if (child_provider && parent_provider &&
+                strcmp(child_provider, parent_provider) != 0) {
+                const char *child_key = provider_resolve_api_key(child_provider);
+                if (child_key && child_key[0]) {
+                    swarm_export_child_credential_for_provider(child_provider, child_key);
+                } else {
+                    /* No key for the child's provider — fall back to parent's model
+                     * so the child can actually run instead of dying on credential error. */
+                    fprintf(stdout, "swarm: no credentials for provider '%s' (model '%s'), "
+                            "falling back to parent model '%s'\n",
+                            child_provider, m, s->default_model);
+                    m = s->default_model;
+                }
+            }
+        }
+
+        /* ── Clear DSCO_EXEC so the child uses native dsco routing, not an
+         * external CLI executor.  The parent may have DSCO_EXEC=claude or
+         * DSCO_EXEC=codex set in its profile env; that must NOT leak into
+         * sub-agent children — they are always native dsco processes. */
+        unsetenv("DSCO_EXEC");
 
         /* Pass parent instance for lineage tracking */
         const char *parent_instance = getenv("DSCO_INSTANCE_ID");
@@ -403,6 +433,9 @@ int swarm_spawn_provider(swarm_t *s, int group_id, const char *task,
 
         const char *m = model ? model : s->default_model;
         const char *bin = s->dsco_path;
+
+        /* Clear DSCO_EXEC — child is a native dsco process, not an external CLI */
+        unsetenv("DSCO_EXEC");
 
         setenv("DSCO_SUBAGENT", "1", 1);
         char depth_str[16];

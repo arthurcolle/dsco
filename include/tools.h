@@ -58,6 +58,13 @@ bool             tools_is_allowed_for_tier(const char *name, const char *tier,
                                            char *reason, size_t reason_len);
 char            *tools_normalize_input(const char *name, const char *input_json);
 
+/* Run the interactive AskUserQuestion dialog from a JSON spec. Shared by the
+ * AskUserQuestion tool and the /dialog chat command so both paths use one
+ * engine + serializer. `result` receives the JSON answer object
+ * ({status, answers:[...]}). Returns true on success. */
+bool             dsco_run_ask_dialog(const char *spec_json,
+                                     char *result, size_t result_len);
+
 /* ── Live agent loop constructs ──────────────────────────────────────── */
 
 #define DSCO_LOOP_PROMPT_MAX 1024

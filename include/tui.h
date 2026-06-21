@@ -85,6 +85,7 @@ void tui_cursor_hide(void);
 void tui_cursor_show(void);
 void tui_cursor_move(int row, int col);
 void tui_clear_screen(void);
+void tui_screen_reset_full(void);  /* full reset + scrollback wipe for clean first paint */
 void tui_clear_line(void);
 void tui_save_cursor(void);
 void tui_restore_cursor(void);
@@ -539,9 +540,48 @@ extern tui_features_t *g_tui_features;
 /* ── F11: Retry Pulse ─────────────────────────────────────────────────── */
 void tui_retry_pulse(const char *label, int attempt, int max, double wait_sec);
 
+/* ── Subpixel rendering primitives ────────────────────────────────────────
+ * Terminals can pack several "pixels" into one character cell. We use the
+ * densest forms available so graphs/bars read at sub-cell resolution:
+ *   • eighth blocks  ▏▎▍▌▋▊▉█ / ▁▂▃▄▅▆▇█ — 8 levels per cell (1 axis)
+ *   • Braille        U+2800–U+28FF        — 2×4 = 8 dots per cell (both axes)
+ * Braille is the maximum-density mono surface and is the default for line
+ * graphs; callers degrade to eighth blocks on ASCII-only terminals. */
+
+/* Append the eighth-block bar of `frac` (0..1) over `cells` columns to a FILE,
+ * resolving the partial leading edge to 1/8 of a cell. `empty_glyph` fills the
+ * remainder (e.g. "░" or " "). Returns the column count (== cells). */
+int  tui_subpixel_hbar(FILE *out, double frac, int cells,
+                        const char *fill_color, const char *empty_glyph,
+                        const char *empty_color);
+
+/* Braille framebuffer: a (px_w × px_h) dot grid backed by
+ * ceil(px_w/2) × ceil(px_h/4) character cells. Each set dot lights one of the
+ * 8 sub-cell positions. The origin (0,0) is top-left. */
+typedef struct {
+    unsigned char *cells;   /* w_cells * h_cells braille bitmasks */
+    int w_cells, h_cells;
+    int px_w, px_h;
+} tui_braille_t;
+
+void tui_braille_init(tui_braille_t *b, int px_w, int px_h);
+void tui_braille_free(tui_braille_t *b);
+void tui_braille_clear(tui_braille_t *b);
+void tui_braille_set(tui_braille_t *b, int x, int y);     /* light dot (x,y) */
+void tui_braille_line(tui_braille_t *b, int x0, int y0, int x1, int y1);
+/* Plot `n` values as a connected line auto-scaled to fill the canvas. */
+void tui_braille_plot(tui_braille_t *b, const double *values, int n);
+/* Print the canvas to `out`, one terminal row per cell-row, in `color`. */
+void tui_braille_render(const tui_braille_t *b, FILE *out, const char *color);
+
 /* ── F12: Result Sparkline ────────────────────────────────────────────── */
 void tui_sparkline(const double *values, int count, const char *color);
 bool tui_try_sparkline(const char *text);
+/* Maximal-subpixel sparkline: a `rows`-tall Braille line plot (8*rows
+ * vertical dots, 2 samples per column). Falls back to tui_sparkline on
+ * ASCII-only terminals. rows<=0 defaults to 1. */
+void tui_sparkline_braille(const double *values, int count, int rows,
+                           const char *color);
 
 /* ── F14: Cached Badge ────────────────────────────────────────────────── */
 void tui_cached_badge(const char *tool_name);
@@ -1581,6 +1621,71 @@ tui_perm_result_t tui_permission_prompt(const char *tool_name,
 /* Lightweight yes/no prompt with styled box */
 bool tui_confirm(const char *question);
 
+/* ── Dynamic Question Dialog (AskUserQuestion) ───────────────────────── */
+/* Multi-question modal that collects structured answers from the user.
+ * Renders a tab strip across questions (with completion checkboxes), per-
+ * question option lists with descriptions, a free-text "Type something"
+ * escape hatch, a "Chat about this" deferral, and a final review/submit
+ * screen. Pure ANSI, full-screen modal — modeled on Claude Code's
+ * AskUserQuestion UI. The model invokes it dynamically when a user response
+ * merits structured clarification. */
+
+#define TUI_ASK_MAX_QUESTIONS 16
+#define TUI_ASK_MAX_OPTIONS   16
+#define TUI_ASK_MAX_GATEVALS  8
+
+typedef struct {
+    char value[128];        /* machine value returned (defaults to label) */
+    char label[256];        /* option display text */
+    char description[512];  /* sub-line description (may be empty) */
+} tui_ask_option_t;
+
+typedef struct {
+    char id[48];            /* stable id used by branching gates */
+    char question[1024];    /* full question text */
+    char header[32];        /* short tab label */
+    bool multi_select;      /* allow toggling multiple options */
+    bool allow_custom;      /* offer "Type something" free-text */
+    bool allow_chat;        /* offer "Chat about this" deferral */
+    tui_ask_option_t options[TUI_ASK_MAX_OPTIONS];
+    int  n_options;
+
+    /* ── branching gate: show this question only if question index `gate_q`
+     *    resolved to one of gate_vals[]. gate_q < 0 ⇒ always shown. ── */
+    int  gate_q;
+    char gate_vals[TUI_ASK_MAX_GATEVALS][128];
+    int  n_gate_vals;
+
+    /* ── filled in by tui_ask_questions() ── */
+    bool selected[TUI_ASK_MAX_OPTIONS]; /* which options the user chose */
+    char custom[1024];      /* free-text answer if "Type something" used */
+    bool answered;
+} tui_ask_question_t;
+
+typedef enum {
+    TUI_ASK_SUBMIT,   /* user confirmed answers */
+    TUI_ASK_CANCEL,   /* user pressed Esc / chose Cancel */
+    TUI_ASK_CHAT,     /* user chose "Chat about this" — defer to conversation */
+} tui_ask_status_t;
+
+/* Show the dialog and collect answers. Mutates qs[] in place with the user's
+ * selections. Branching is evaluated live: questions whose gate is unmet are
+ * hidden and skipped during navigation. On TUI_ASK_CHAT, chat_out receives the
+ * free-form note (or the active question text). Requires an interactive TTY.
+ * `intro` (optional) is shown above the tab strip. */
+tui_ask_status_t tui_ask_questions(tui_ask_question_t *qs, int n_questions,
+                                   const char *intro,
+                                   char *chat_out, size_t chat_len);
+
+/* Resolve the chosen machine value(s) of a question into `out` (comma-joined
+ * for multi-select; the custom text if free-text was used). Returns out. */
+const char *tui_ask_answer_value(const tui_ask_question_t *q,
+                                 char *out, size_t out_len);
+
+/* Live branching predicate: is question index `qi` currently visible given the
+ * answers in qs[]? Exposed so callers can serialize only-visible answers. */
+bool tui_ask_question_visible(const tui_ask_question_t *qs, int n, int qi);
+
 /* ── Structured Diff Display ─────────────────────────────────────────── */
 /* Proper unified diff renderer with line numbers, context lines,
  * and side-by-side support. Inspired by Claude Code's StructuredDiff. */
@@ -1639,5 +1744,98 @@ void tui_code_block(FILE *out, const char *code, const char *language,
  * Clickable via OSC 8 if supported. */
 
 void tui_breadcrumb(FILE *out, const char *path, int max_width);
+
+/* ── Interactive Hierarchical Menu ───────────────────────────────────────
+ * Arrow-navigable menu with section groups, status badges, expandable
+ * submenus, sub-detail lines, and a viewport that scrolls when the content
+ * exceeds the terminal height. Pure ANSI / raw-termios — no ncurses.
+ * Models the Claude Code `/mcp` picker: grouped servers, ✓/✗/○ status,
+ * a `›` expand caret, indented children, and a navigation hint footer.
+ *
+ *   tui_menu_t m;
+ *   tui_menu_init(&m, "Manage MCP servers", "16 servers");
+ *   tui_menu_item_t *grp = tui_menu_add_group(&m, "Local MCPs (project)");
+ *   tui_menu_item_t *srv = tui_menu_add_child(grp, "dsco-jina-mcp", ID_JINA);
+ *   tui_menu_set_badge(srv, TUI_MENU_BADGE_FAIL, "failed");
+ *   tui_menu_item_t *sub = tui_menu_add_submenu(grp, "cloudmail-mcp", ID_MAIL);
+ *   tui_menu_set_badge(sub, TUI_MENU_BADGE_OK, "connected");
+ *   tui_menu_set_detail(sub, "132 tools");
+ *   tui_menu_add_child(sub, "Restart server", ID_MAIL_RESTART);
+ *   int chosen = tui_menu_run(&m);   // returns item id, or TUI_MENU_CANCELLED
+ *   tui_menu_free(&m);
+ */
+
+#define TUI_MENU_MAX_NODES   64    /* items per level (top-level or children) */
+#define TUI_MENU_CANCELLED   (-1)  /* tui_menu_run return when user aborts */
+
+typedef enum {
+    TUI_MENU_ITEM,        /* selectable leaf — Enter returns its id */
+    TUI_MENU_SUBMENU,     /* expandable parent — Enter/→ toggles children */
+    TUI_MENU_GROUP,       /* bold section header — not selectable */
+    TUI_MENU_SEPARATOR,   /* blank spacer row */
+    TUI_MENU_ACTION,      /* leaf rendered with an → arrow (e.g. "Show more") */
+} tui_menu_kind_t;
+
+typedef enum {
+    TUI_MENU_BADGE_NONE,
+    TUI_MENU_BADGE_OK,        /* ✓ blue  — connected/ready */
+    TUI_MENU_BADGE_FAIL,      /* ✗ red   — failed */
+    TUI_MENU_BADGE_WARN,      /* ⚠ yellow */
+    TUI_MENU_BADGE_DISABLED,  /* ○ grey  — disabled/hidden */
+    TUI_MENU_BADGE_ACTIVE,    /* ● green — running/selected */
+} tui_menu_badge_t;
+
+typedef struct tui_menu_item {
+    char  label[128];
+    char  detail[128];        /* trailing dim text, e.g. "132 tools" */
+    char  hint[192];          /* dim sub-line under the item (optional) */
+    char  badge_text[32];     /* word after the badge glyph (optional) */
+    tui_menu_kind_t  kind;
+    tui_menu_badge_t badge;
+    int   id;                 /* value returned by tui_menu_run on select */
+    void *user;               /* opaque caller pointer */
+    bool  expanded;           /* submenu open? */
+    bool  disabled;           /* dimmed, non-selectable */
+    struct tui_menu_item *children;   /* malloc'd, cap TUI_MENU_MAX_NODES */
+    int   child_count;
+} tui_menu_item_t;
+
+typedef struct {
+    char  title[128];
+    char  subtitle[128];      /* e.g. "16 servers" */
+    tui_menu_item_t *items;   /* malloc'd top-level array */
+    int   item_count;
+    const char *accent;       /* selection accent color (NULL = cyan) */
+    int   max_visible;        /* viewport rows (0 = auto from terminal) */
+    int   selected;           /* index into the flattened selectable rows */
+} tui_menu_t;
+
+void tui_menu_init(tui_menu_t *m, const char *title, const char *subtitle);
+void tui_menu_free(tui_menu_t *m);
+
+/* Builders. Each returns a stable pointer to the new node (children arrays
+ * are never realloc'd), so captured pointers remain valid until tui_menu_free.
+ * `parent` is a group/submenu obtained from a prior call; pass the menu's
+ * top level via the tui_menu_add_* (no-parent) variants. Return NULL if the
+ * level is already at TUI_MENU_MAX_NODES. */
+tui_menu_item_t *tui_menu_add_group(tui_menu_t *m, const char *label);
+tui_menu_item_t *tui_menu_add_item(tui_menu_t *m, const char *label, int id);
+tui_menu_item_t *tui_menu_add_separator(tui_menu_t *m);
+tui_menu_item_t *tui_menu_add_child(tui_menu_item_t *parent, const char *label, int id);
+tui_menu_item_t *tui_menu_add_submenu(tui_menu_item_t *parent, const char *label, int id);
+tui_menu_item_t *tui_menu_add_action(tui_menu_item_t *parent, const char *label, int id);
+
+/* Decorators — operate on a node returned by a builder. */
+void tui_menu_set_badge(tui_menu_item_t *it, tui_menu_badge_t badge, const char *text);
+void tui_menu_set_detail(tui_menu_item_t *it, const char *detail);
+void tui_menu_set_hint(tui_menu_item_t *it, const char *hint);
+void tui_menu_set_disabled(tui_menu_item_t *it, bool disabled);
+void tui_menu_set_expanded(tui_menu_item_t *it, bool expanded);
+
+/* Run the interactive loop. Renders inline (no alternate screen), redraws in
+ * place on each key, and erases itself on exit. Returns the chosen item's id,
+ * or TUI_MENU_CANCELLED on Esc/q. Stores the resolved item pointer in *out_item
+ * (may be NULL). Submenus toggle on Enter/→/←; leaves confirm on Enter. */
+int tui_menu_run(tui_menu_t *m, tui_menu_item_t **out_item);
 
 #endif

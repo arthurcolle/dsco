@@ -43,7 +43,7 @@
 extern int g_cheap_mode;
 
 /* API defaults */
-#define DEFAULT_MODEL       "moonshotai/kimi-k2.7-code"
+#define DEFAULT_MODEL       "z-ai/glm-5.2"
 #define API_URL_ANTHROPIC   "https://api.anthropic.com/v1/messages"
 #define API_URL_COUNT_TOKENS "https://api.anthropic.com/v1/messages/count_tokens"
 #define ANTHROPIC_VERSION   "2023-06-01"
@@ -239,6 +239,7 @@ static const model_info_t MODEL_REGISTRY[] = {
     /* ── NousResearch ────────────────────────────────────────────────── */
     { "hermes4",      "nousresearch/hermes-4-405b",      131072, 32768,  1.00,  3.00, 0, 0, 0 },
     /* ── StepFun ─────────────────────────────────────────────────────── */
+    { "step37-flash", "stepfun/step-3.7-flash",          256000, 32768,  0.10,  0.30, 0, 0, 1 },
     { "step35",       "stepfun/step-3.5-flash",          256000, 32768,  0.10,  0.30, 0, 0, 0 },
     /* ── Inception Mercury ───────────────────────────────────────────── */
     { "mercury",      "inception/mercury-2",             128000, 32768,  0.25,  0.75, 0, 0, 0 },

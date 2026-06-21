@@ -4,6 +4,7 @@
 #include "agent.h"
 #include "llm.h"
 #include "tools.h"
+#include "self_improve.h"
 #include "error.h"
 #include "config.h"
 #include "json_util.h"
@@ -64,6 +65,12 @@ static pthread_t     g_esc_poller_tid;
 static double g_turn_start_time = 0.0;
 
 static md_renderer_t s_md;
+
+/* Set by on_stream_text the first time visible answer text streams in this
+ * turn. Lets the agent loop detect a turn that produced a text block but
+ * never streamed it live (e.g. reasoning-only turns promoted to text in the
+ * provider) so it can render the answer instead of dropping it. */
+static bool s_turn_streamed_text = false;
 
 /* Stream heartbeat global — shared with llm.c write callback */
 extern tui_stream_heartbeat_t *g_stream_heartbeat;
@@ -438,8 +445,9 @@ static bool check_cost_budget(session_state_t *session) {
         if (daily >= g_daily_budget) {
             fprintf(stderr, "  %s%sdaily budget exceeded: $%.2f / $%.2f%s\n",
                     TUI_BOLD, TUI_RED, daily, g_daily_budget, TUI_RESET);
-            fprintf(stderr, "  %soverride: export DSCO_DAILY_BUDGET=<amount> or DSCO_DAILY_BUDGET=0%s\n",
-                    TUI_DIM, TUI_RESET);
+            fprintf(stderr, "  %sraise it: /budget %.0f  (lifts the daily cap too) · "
+                            "/budget daily <amount> · /budget off%s\n",
+                    TUI_DIM, daily + 10, TUI_RESET);
             return false;
         }
         if (daily >= g_daily_budget * 0.8) {
@@ -1807,6 +1815,7 @@ static const slash_command_t s_slash_commands[] = {
     {"/retry",        "re-run last user message (optionally with new model)"},
     {"/diff",         "show git diff (--staged for index)"},
     {"/note",         "add an annotation to the conversation context"},
+    {"/dialog",       "open an interactive question dialog; answers feed the next turn"},
     {"/add-dir",      "inject a directory listing into context"},
     {"/version",      "show version/build information"},
     {"/force",        "control next tool choice"},
@@ -1900,6 +1909,115 @@ static char *make_arg_completion(const char *prefix, const char *arg) {
     if (!r) return NULL;
     snprintf(r, n, "%s %s", prefix, arg);
     return r;
+}
+
+/* ── /dialog: chat-flow front-end for the AskUserQuestion engine ──────────
+ * Composes the same dialog used by the AskUserQuestion tool. Accepts either a
+ * raw JSON spec (starts with '{') or a terse shorthand:
+ *     Question text? | opt1 | opt2 [ ;; Next question? | a | b ]
+ * Questions are split on ";;", options on "|". */
+
+static void dlg_trim(char *s) {
+    if (!s) return;
+    char *p = s;
+    while (*p == ' ' || *p == '\t') p++;
+    if (p != s) memmove(s, p, strlen(p) + 1);
+    size_t n = strlen(s);
+    while (n > 0 && (s[n-1] == ' ' || s[n-1] == '\t' || s[n-1] == '\n' || s[n-1] == '\r'))
+        s[--n] = '\0';
+}
+
+static char *dialog_shorthand_to_json(const char *sh) {
+    jbuf_t b; jbuf_init(&b, 512);
+    jbuf_append(&b, "{\"questions\":[");
+    char *work = safe_strdup(sh ? sh : "");
+    int qn = 0;
+    char *seg = work;
+    while (seg && *seg) {
+        char *next = strstr(seg, ";;");
+        if (next) *next = '\0';
+        char *q = seg;
+        dlg_trim(q);
+        if (*q) {
+            char *bar = strchr(q, '|');
+            char qtext[1024];
+            if (bar) {
+                size_t L = (size_t)(bar - q);
+                if (L >= sizeof qtext) L = sizeof qtext - 1;
+                memcpy(qtext, q, L); qtext[L] = '\0';
+            } else {
+                snprintf(qtext, sizeof qtext, "%s", q);
+            }
+            dlg_trim(qtext);
+            if (qn) jbuf_append(&b, ",");
+            char idbuf[16]; snprintf(idbuf, sizeof idbuf, "q%d", qn + 1);
+            char hdr[32];   snprintf(hdr, sizeof hdr, "%.14s", qtext[0] ? qtext : idbuf);
+            jbuf_append(&b, "{\"id\":");      jbuf_append_json_str(&b, idbuf);
+            jbuf_append(&b, ",\"header\":");  jbuf_append_json_str(&b, hdr);
+            jbuf_append(&b, ",\"question\":");jbuf_append_json_str(&b, qtext);
+            jbuf_append(&b, ",\"options\":[");
+            int on = 0;
+            char *optseg = bar ? bar + 1 : NULL;
+            while (optseg && *optseg) {
+                char *ob = strchr(optseg, '|');
+                if (ob) *ob = '\0';
+                char opt[256]; snprintf(opt, sizeof opt, "%s", optseg);
+                dlg_trim(opt);
+                if (opt[0]) {
+                    if (on) jbuf_append(&b, ",");
+                    jbuf_append(&b, "{\"label\":");
+                    jbuf_append_json_str(&b, opt);
+                    jbuf_append(&b, "}");
+                    on++;
+                }
+                optseg = ob ? ob + 1 : NULL;
+            }
+            jbuf_append(&b, "]}");
+            qn++;
+        }
+        seg = next ? next + 2 : NULL;
+    }
+    jbuf_append(&b, "]}");
+    free(work);
+    char *r = safe_strdup(b.data ? b.data : "{}");
+    jbuf_free(&b);
+    return r;
+}
+
+static void dialog_answers_fmt_cb(const char *el, void *ctx) {
+    jbuf_t *b = (jbuf_t *)ctx;
+    char *hdr = json_get_str(el, "header");
+    char *q   = json_get_str(el, "question");
+    char *val = json_get_str(el, "value");
+    bool answered = json_get_bool(el, "answered", false);
+    if (answered && val && val[0])
+        jbuf_appendf(b, "\n- %s: %s",
+                     (hdr && hdr[0]) ? hdr : (q ? q : "?"), val);
+    free(hdr); free(q); free(val);
+}
+
+/* Render the dialog result JSON into a human-readable turn message. Returns
+ * false if the user cancelled (nothing to inject). */
+static bool dialog_answers_to_text(const char *res, char *out, size_t out_len) {
+    char *status = json_get_str(res, "status");
+    bool cancelled = status && strcmp(status, "cancel") == 0;
+    bool is_chat   = status && strcmp(status, "chat") == 0;
+    if (cancelled) { free(status); return false; }
+
+    jbuf_t b; jbuf_init(&b, 256);
+    if (is_chat) {
+        char *chat = json_get_str(res, "chat");
+        jbuf_appendf(&b, "Let's talk through this%s%s",
+                     (chat && chat[0]) ? ": " : ".", (chat && chat[0]) ? chat : "");
+        free(chat);
+    } else {
+        jbuf_append(&b, "Here are my answers:");
+        json_array_foreach(res, "answers", dialog_answers_fmt_cb, &b);
+    }
+    snprintf(out, out_len, "%s", b.data ? b.data : "");
+    jbuf_free(&b);
+    free(status);
+    return true;
 }
 
 static char *command_generator(const char *text, int state) {
@@ -2283,6 +2401,8 @@ static void on_stream_text(const char *text, void *ctx) {
         tui_fsm_send(&s_streaming_fsm, TUI_FSM_EVT_THINKING_END);
     if (s_streaming_fsm.current != TUI_STREAM_ST_TEXT)
         tui_fsm_send(&s_streaming_fsm, TUI_FSM_EVT_TEXT_START);
+
+    s_turn_streamed_text = true;
 
     /* F2: Typing cadence — buffer and flush at steady rate */
     tui_term_lock();
@@ -3262,6 +3382,39 @@ void agent_run(const char *api_key, const char *model,
                 tui_success("note added to context");
             }
             continue;
+        }
+        if (strncmp(input_buf, "/dialog", 7) == 0 &&
+            (input_buf[7] == '\0' || input_buf[7] == ' ')) {
+            const char *arg = input_buf + 7;
+            while (*arg == ' ') arg++;
+            if (!*arg) {
+                fprintf(stderr,
+                        "  %susage: /dialog <json-spec>  OR  "
+                        "/dialog Question? | opt1 | opt2 [ ;; Q2? | a | b ]%s\n",
+                        TUI_DIM, TUI_RESET);
+                continue;
+            }
+            char *spec = (arg[0] == '{') ? safe_strdup(arg)
+                                         : dialog_shorthand_to_json(arg);
+            char *dres = malloc(MAX_INPUT_LINE);
+            bool ok = dres && dsco_run_ask_dialog(spec, dres, MAX_INPUT_LINE);
+            free(spec);
+            if (!ok) {
+                tui_error("dialog unavailable (needs an interactive terminal)");
+                free(dres);
+                continue;
+            }
+            /* Render answers and fall through so they become this turn's input;
+             * cancel just returns to the prompt. */
+            char summary[MAX_INPUT_LINE];
+            bool proceed = dialog_answers_to_text(dres, summary, sizeof summary);
+            free(dres);
+            if (!proceed) {
+                fprintf(stderr, "  %sdialog cancelled%s\n", TUI_DIM, TUI_RESET);
+                continue;
+            }
+            snprintf(input_buf, MAX_INPUT_LINE, "%s", summary);
+            /* no continue — input_buf is now the user message for the turn */
         }
         if (strncmp(input_buf, "/add-dir", 8) == 0) {
             const char *arg = input_buf + 8;
@@ -4661,8 +4814,26 @@ agents_done:
                 double budget = atof(arg);
                 if (budget > 0) {
                     g_cost_budget = budget;
-                    char msg[128];
-                    snprintf(msg, sizeof(msg), "session budget set to $%.2f", budget);
+                    char msg[160];
+                    /* The daily cap is a separate, cross-session gate. A bare
+                     * `/budget <n>` that leaves the daily cap below the new
+                     * session budget would still block mid-session — which is
+                     * exactly the surprise users hit. Lift the daily cap so the
+                     * session budget is actually spendable today. Use
+                     * already-spent + budget so `n` means "n more dollars". */
+                    if (g_daily_budget > 0) {
+                        double needed = baseline_daily_cost() + budget;
+                        if (g_daily_budget < needed) {
+                            g_daily_budget = needed;
+                            snprintf(msg, sizeof(msg),
+                                     "session budget $%.2f · daily cap raised to $%.2f",
+                                     budget, g_daily_budget);
+                        } else {
+                            snprintf(msg, sizeof(msg), "session budget set to $%.2f", budget);
+                        }
+                    } else {
+                        snprintf(msg, sizeof(msg), "session budget set to $%.2f", budget);
+                    }
                     tui_success(msg);
                 } else {
                     tui_error("budget must be a positive number");
@@ -5502,6 +5673,27 @@ resume_turn_loop:
             turns++;
             md_reset(&s_md);
 
+            /* Self-improvement: close out the turn that just finished (recording
+             * its cost/token/context deltas) and reset per-turn counters for the
+             * new one. The just-completed turn's tool calls were recorded inline. */
+            {
+                static double si_prev_cost = 0.0;
+                static int    si_prev_in = 0, si_prev_out = 0;
+                if (turns > 1) {
+                    double c   = session_cost(&session);
+                    int    in  = session.total_input_tokens;
+                    int    out = session.total_output_tokens;
+                    int    eff = effective_context_window(&session);
+                    int    ctx_pct = eff > 0 ? (int)(100.0 * (in + out) / eff) : 0;
+                    double budget_pct = g_cost_budget > 0 ? 100.0 * c / g_cost_budget : 0.0;
+                    SI_RECORD_TURN(turns - 1, c - si_prev_cost,
+                                   in - si_prev_in, out - si_prev_out,
+                                   ctx_pct, budget_pct);
+                    si_prev_cost = c; si_prev_in = in; si_prev_out = out;
+                }
+                SI_TURN_RESET();
+            }
+
             /* Decay tool hints each turn */
             tools_hint_decay();
 
@@ -5601,7 +5793,7 @@ resume_turn_loop:
 
             /* Cost budget check */
             if (!check_cost_budget(&session)) {
-                tui_error("cost budget exceeded — use /budget to increase or reset");
+                tui_error("cost budget exceeded — /budget <n> raises both caps, or /budget off");
                 break;
             }
 
@@ -5697,6 +5889,7 @@ resume_turn_loop:
 
             /* FSM: mark stream start */
             tui_fsm_send(&s_streaming_fsm, TUI_FSM_EVT_STREAM_START);
+            s_turn_streamed_text = false;
 
             /* Update terminal title with turn info */
             tui_set_title_fmt("dsco · %s · turn %d", session.model, turns);
@@ -5842,6 +6035,29 @@ resume_turn_loop:
                 content_block_t *tb = &sr.parsed.blocks[ti];
                 if (tb->type && strcmp(tb->type, "tool_use") == 0)
                     tool_count_this_turn++;
+            }
+
+            /* Surface answer text that arrived but was never streamed live.
+             * Happens when the provider promoted a reasoning-only turn to a
+             * text block (empty delta.content + non-empty delta.reasoning):
+             * on_stream_text never fired, so the FSM went thinking→done and
+             * printed nothing. Render the block here so the turn isn't silent. */
+            if (tool_count_this_turn == 0 && !s_turn_streamed_text) {
+                for (int ti = 0; ti < sr.parsed.count; ti++) {
+                    content_block_t *tb = &sr.parsed.blocks[ti];
+                    if (tb->type && strcmp(tb->type, "text") == 0
+                        && tb->text && tb->text[0]) {
+                        tui_term_lock();
+                        print_role_header("assistant", true, NULL);
+                        fputs("  ", stderr);
+                        md_feed_str(&s_md, tb->text);
+                        md_flush(&s_md);
+                        fprintf(stderr, "\n");
+                        fflush(stderr);
+                        tui_term_unlock();
+                        break;
+                    }
+                }
             }
 
             /* Only print usage/telemetry for non-tool turns (tool turns fold it inline) */
@@ -6188,6 +6404,8 @@ resume_turn_loop:
                                 if (m) ((tool_metric_t *)m)->timeouts++;
                             }
                             pthread_mutex_unlock(&g_locks.metrics_lock);
+                            SI_RECORD_TOOL(blk->tool_name, ok && !was_timeout, elapsed,
+                                           (int)(strlen(tool_result) / 4));
 
                             /* Cache result (under lock) — don't cache timeouts */
                             if (!was_timeout) {
@@ -6436,6 +6654,8 @@ resume_turn_loop:
                         if (m) ((tool_metric_t *)m)->timeouts++;
                     }
                     pthread_mutex_unlock(&g_locks.metrics_lock);
+                    SI_RECORD_TOOL(blk->tool_name, ok && !was_timeout, elapsed,
+                                   (int)(strlen(tool_result) / 4));
 
                     if (!was_timeout) {
                         pthread_mutex_lock(&g_locks.cache_lock);
@@ -6487,6 +6707,9 @@ resume_turn_loop:
                         if (m) ((tool_metric_t *)m)->timeouts++;
                     }
                     pthread_mutex_unlock(&g_locks.metrics_lock);
+                    /* Post-join aggregation loop — single-threaded, safe to record. */
+                    SI_RECORD_TOOL(s->tool_name, s->ok && !s->was_timeout, s->elapsed_ms,
+                                   (int)(strlen(s->result) / 4));
 
                     if (!s->was_timeout) {
                         pthread_mutex_lock(&g_locks.cache_lock);
@@ -6571,16 +6794,17 @@ resume_turn_loop:
                 needs_followup_turn = false;
             }
 
-            if (needs_followup_turn && tool_count_this_turn > 0 &&
-                g_provider && strcmp(g_provider->name, "anthropic") == 0) {
-                const model_info_t *mi = model_lookup(session.model);
-                if (mi && mi->supports_thinking &&
-                    conv_compact_recent_tool_turn(&conv, 768)) {
-                    fprintf(stderr,
-                            "  %sreplay compacted recent thinking/tool turn for Anthropic%s\n",
-                            TUI_DIM, TUI_RESET);
-                }
-            }
+            /* NOTE: we deliberately do NOT compact the most-recent tool turn
+             * here. Doing so rewrites the tool_result the model is about to
+             * read for the first time down to a tiny preview, so the model
+             * never sees tool output larger than the cap and spins re-reading
+             * it (a 4.8 KB file read truncated to ~728 chars → endless retry
+             * loop). Anthropic accepts a tool_use/tool_result continuation
+             * with extended thinking enabled and no replayed thinking block,
+             * so the flatten-to-text workaround is unnecessary. Genuine
+             * context pressure is handled by conv_auto_compact (which trims
+             * OLD results) and by ctx_persist_and_truncate (which caps huge
+             * outputs at creation time and stashes the full text in the VFS). */
 
             /* F10: Render tool dependency graph (compact, 1 line) */
             tui_dag_render(&s_dag);

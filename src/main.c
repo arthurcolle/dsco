@@ -4,6 +4,7 @@
 #include "tui.h"
 #include "llm.h"
 #include "tools.h"
+#include "self_improve.h"
 #include "json_util.h"
 #include "ipc.h"
 #include "md.h"
@@ -193,6 +194,13 @@ static void crash_handler(int sig) {
 }
 
 static void main_atexit_handler(void) {
+    /* Persist self-improvement learnings (strategy weights, session stats)
+     * for the next run. Guarded by initialized so non-agent fast paths skip. */
+    if (g_self_improve.initialized) {
+        self_improve_consolidate(&g_self_improve);
+        self_improve_save_history(&g_self_improve);
+    }
+
     /* Shutdown Post-LLM OS subsystems */
     if (g_vfs)     { vfs_close(g_vfs); g_vfs = NULL; }
     if (g_ev_loop) { ev_loop_free(g_ev_loop); g_ev_loop = NULL; }
@@ -420,6 +428,10 @@ void dsco_startup_init(dsco_profile_t profile, dsco_caps_t caps) {
     perf_set_startup_context(profile, caps);
 
     bool is_worker = profile == DSCO_PROFILE_WORKER;
+
+    /* Clean first paint: wipe whatever the previous program left on the
+     * terminal so the startup banner doesn't bleed through a stale screen. */
+    if (!is_worker) tui_screen_reset_full();
 
     if (caps & DSCO_CAP_SECURITY) {
         tamper_init();          /* must be first: deny ptrace, hash code, watch binary */
@@ -661,12 +673,25 @@ static bool prompt_looks_code_task(const char *prompt) {
 
 static bool model_supports_executor(const char *model, const char *executor_name) {
     if (!model || !model[0] || !executor_name || !executor_name[0]) return true;
-    const char *family = provider_model_family(model);
+    const char *resolved = model_resolve_alias(model);
+    const char *family = provider_model_family(resolved);
     if (strcmp(executor_name, "claude") == 0)
         return strcmp(family, "anthropic") == 0;
     if (strcmp(executor_name, "codex") == 0)
         return strcmp(family, "openai") == 0;
     return false;
+}
+
+static void print_executor_model_mismatch(const exec_reg_t *e, const char *model) {
+    const char *resolved = model_resolve_alias(model);
+    const char *family = provider_model_family(resolved);
+    const char *provider = provider_detect(resolved, NULL);
+    fprintf(stderr, "error: executor '%s' cannot run model '%s' (family: %s)\n",
+            e && e->name ? e->name : "unknown",
+            resolved && resolved[0] ? resolved : "(none)",
+            family && family[0] ? family : "unknown");
+    fprintf(stderr, "  use --provider %s or --exec auto for this model\n",
+            provider && provider[0] ? provider : "openrouter");
 }
 
 static const exec_reg_t *select_auto_executor(const char *model,
@@ -1857,6 +1882,12 @@ static void main_tools_init_for_runtime(dsco_profile_t profile) {
         tools_init_profile(TOOLS_CORE);
     else
         tools_init();
+
+    /* Self-improvement meta-loop: observe tool/turn performance and carry
+     * learnings across sessions. init() must precede any record call; the
+     * record hooks in agent.c early-return until this runs. */
+    self_improve_init(&g_self_improve);
+    self_improve_load_history(&g_self_improve);
 }
 
 /* Return -1 when not handled, otherwise the process exit code. */
@@ -2002,8 +2033,9 @@ int main(int argc, char **argv) {
     if (arg_status) return run_status_flow();
 
     const char *api_key = NULL;
-    const char *model = getenv("DSCO_MODEL");
-    if (!model) model = DEFAULT_MODEL;
+    const char *env_model = getenv("DSCO_MODEL");
+    bool model_from_env = env_model && env_model[0];
+    const char *model = model_from_env ? env_model : DEFAULT_MODEL;
     char *oneshot_prompt = NULL;
     bool timeline_server_mode = false;
     bool setup_mode = false;
@@ -2019,6 +2051,7 @@ int main(int argc, char **argv) {
     const char *topology_show_name = NULL;
     bool topology_show_mode = false;
     const char *exec_backend = NULL;  /* "claude", "codex", "auto", "list" */
+    bool exec_backend_from_env = false;
     char **exec_extra = NULL;         /* passthrough args after -- */
     int exec_nextra = 0;
     bool user_set_model = false;
@@ -2213,8 +2246,21 @@ int main(int argc, char **argv) {
     /* DSCO_EXEC env var as default */
     if (!exec_backend && !interactive_mode) {
         const char *env_exec = getenv("DSCO_EXEC");
-        if (env_exec && env_exec[0])
+        if (env_exec && env_exec[0]) {
             exec_backend = env_exec;
+            exec_backend_from_env = true;
+        }
+    }
+
+    if (exec_backend_from_env && (user_set_model || model_from_env)) {
+        const exec_reg_t *env_exec = exec_find(exec_backend);
+        if (env_exec && !model_supports_executor(model, env_exec->name)) {
+            fprintf(stderr,
+                    "  \033[2mignoring DSCO_EXEC=%s for model %s; using native routing\033[0m\n",
+                    exec_backend, model_resolve_alias(model));
+            exec_backend = NULL;
+            exec_backend_from_env = false;
+        }
     }
 
     /* DSCO_CHEAP env var: "1" or "true" enables cheap mode */
@@ -2732,6 +2778,12 @@ int main(int argc, char **argv) {
         }
 
         /* exec replaces the process — never returns on success */
+        if ((user_set_model || model_from_env) &&
+            !model_supports_executor(model, ereg->name)) {
+            print_executor_model_mismatch(ereg, model);
+            free(oneshot_prompt);
+            return 1;
+        }
         exec_dispatch(ereg, oneshot_prompt,
                       user_set_model ? normalize_model_for_executor(ereg, model) : NULL,
                       exec_extra, exec_nextra, api_key);

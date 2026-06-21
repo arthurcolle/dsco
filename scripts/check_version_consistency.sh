@@ -4,8 +4,9 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT"
 
-if [[ ! -f config.h ]]; then
-  echo "error: config.h not found" >&2
+CONFIG_H="include/config.h"
+if [[ ! -f "$CONFIG_H" ]]; then
+  echo "error: $CONFIG_H not found" >&2
   exit 1
 fi
 
@@ -14,7 +15,7 @@ if [[ ! -f CHANGELOG.md ]]; then
   exit 1
 fi
 
-DSCO_VERSION="$(sed -nE 's/^#define[[:space:]]+DSCO_VERSION[[:space:]]+"([^"]+)".*/\1/p' config.h | head -n1)"
+DSCO_VERSION="$(sed -nE 's/^#define[[:space:]]+DSCO_VERSION[[:space:]]+"([^"]+)".*/\1/p' "$CONFIG_H" | head -n1)"
 if [[ -z "$DSCO_VERSION" ]]; then
   echo "error: unable to parse DSCO_VERSION from config.h" >&2
   exit 1

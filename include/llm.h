@@ -182,7 +182,7 @@ void  conv_pop_last(conversation_t *c);
 bool  conv_pop_last_turn(conversation_t *c);
 void  conv_ensure_tool_results(conversation_t *c);
 void  conv_trim_old_results(conversation_t *c, int keep_recent, int max_chars);
-bool  conv_compact_recent_tool_turn(conversation_t *c, int max_chars);
+bool  conv_compact_recent_tool_turn(conversation_t *c, int max_chars, int protect_tail);
 
 /* ── Multi-tier compaction (inspired by Claude Code) ─────────────────── */
 

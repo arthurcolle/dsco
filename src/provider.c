@@ -2289,6 +2289,20 @@ static stream_result_t openai_stream(provider_t *p, const char *api_key,
             }
         }
 
+        /* Reasoning-only turn fallback. Some upstreams (notably OpenRouter
+         * routing kimi-k2.x to certain providers) fold the *entire* answer
+         * into delta.reasoning with an empty delta.content. That leaves us
+         * with no text block and no tool_use — the turn renders nothing,
+         * the reasoning is thrown away, and an empty assistant message gets
+         * appended to the conversation (which can later 400 on resend).
+         * Promote the accumulated reasoning to a text block so the answer is
+         * preserved in conv and can be surfaced to the user. */
+        if (state.block_count == 0 && state.reasoning_accum.len > 0) {
+            int bi = state.block_count++;
+            state.blocks[bi].type = safe_strdup("text");
+            state.blocks[bi].text = safe_strdup(state.reasoning_accum.data);
+        }
+
         /* Build result */
         result.parsed.count = state.block_count;
         result.parsed.blocks = safe_malloc(
@@ -2501,7 +2515,14 @@ static void provider_build_env_name(const char *provider_name, const char *suffi
 static const char *provider_getenv_nonempty(const char *name) {
     if (!name || !name[0]) return NULL;
     const char *value = getenv(name);
-    return (value && value[0]) ? value : NULL;
+    if (value && value[0]) return value;
+    /* When libsodium is built in, sealed_store_init() interns allowlisted
+     * provider keys (e.g. OPENROUTER_API_KEY) and zeroes the environment copy.
+     * Fall back to the sealed store so those keys are still discoverable here.
+     * sealed_store_peek() returns a pointer stable for the entry's lifetime,
+     * matching getenv()'s stability contract that callers rely on. */
+    const char *sealed = sealed_store_peek(name);
+    return (sealed && sealed[0]) ? sealed : NULL;
 }
 
 static const char *provider_resolve_alias_env_key(const char *provider_name) {
