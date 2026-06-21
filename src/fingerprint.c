@@ -71,8 +71,11 @@ static bool sysctl_str(const char *name, char *out, size_t cap) {
 /* IOPlatformUUID — stable per-machine; treat as sensitive. */
 static void darwin_platform_uuid(char *out, size_t cap) {
     out[0] = '\0';
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wdeprecated-declarations"
     io_registry_entry_t entry = IORegistryEntryFromPath(kIOMasterPortDefault,
                                 "IOService:/");
+#pragma clang diagnostic pop
     if (entry == MACH_PORT_NULL) return;
     CFStringRef key = CFSTR("IOPlatformUUID");
     CFTypeRef v = IORegistryEntryCreateCFProperty(entry, key, kCFAllocatorDefault, 0);
