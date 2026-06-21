@@ -16,6 +16,7 @@
 #include "router.h"
 #include "setup.h"
 #include "swarm.h"
+#include "task_profile.h"
 #include "arena_alloc.h"
 #include "event_loop.h"
 #include "vm.h"
@@ -1616,7 +1617,7 @@ static void test_conv_compact_recent_tool_turn(void) {
     conv_add_assistant_tool_use(&conv, "toolu_calc", "eval", "{\"expr\":\"sqrt(7)\"}");
     conv_add_tool_result_named(&conv, "toolu_calc", "eval", "2.64575131", false);
 
-    ASSERT(conv_compact_recent_tool_turn(&conv, 256), "compaction should succeed");
+    ASSERT(conv_compact_recent_tool_turn(&conv, 256, 0), "compaction should succeed");
     ASSERT(conv.count == 3, "conversation should keep same message count");
     ASSERT(conv.msgs[1].content_count == 1, "assistant should be compacted to one block");
     ASSERT(strcmp(conv.msgs[1].content[0].type, "text") == 0,
@@ -1671,7 +1672,7 @@ static void test_conv_compact_recent_tool_turn_with_assistant_text(void) {
 
     conv_add_tool_result_named(&conv, "toolu_eval_text", "eval", "2.64575131", false);
 
-    ASSERT(conv_compact_recent_tool_turn(&conv, 256), "compaction should succeed");
+    ASSERT(conv_compact_recent_tool_turn(&conv, 256, 0), "compaction should succeed");
     ASSERT(strstr(conv.msgs[1].content[0].text, "I will compute that.") != NULL,
            "assistant summary should preserve assistant text");
     ASSERT(strstr(conv.msgs[1].content[0].text, "Used tools: eval") != NULL,
@@ -1688,7 +1689,7 @@ static void test_conv_compact_recent_tool_turn_missing_result(void) {
     conv_add_user_text(&conv, "sqrt 7");
     conv_add_assistant_tool_use(&conv, "toolu_missing", "eval", "{\"expr\":\"sqrt(7)\"}");
 
-    ASSERT(!conv_compact_recent_tool_turn(&conv, 256),
+    ASSERT(!conv_compact_recent_tool_turn(&conv, 256, 0),
            "compaction should fail without a matching tool_result");
     ASSERT(strcmp(conv.msgs[1].content[0].type, "tool_use") == 0,
            "conversation should remain unchanged on failure");
@@ -1709,7 +1710,7 @@ static void test_conv_compact_recent_tool_turn_trims_long_result(void) {
     long_result[sizeof(long_result) - 1] = '\0';
     conv_add_tool_result_named(&conv, "toolu_long", "bash", long_result, false);
 
-    ASSERT(conv_compact_recent_tool_turn(&conv, 180), "compaction should succeed");
+    ASSERT(conv_compact_recent_tool_turn(&conv, 180, 0), "compaction should succeed");
     ASSERT(strstr(conv.msgs[2].content[0].text, "[trimmed ") != NULL,
            "long result should be trimmed in compacted replay");
 
@@ -1739,13 +1740,44 @@ static void test_conv_compact_recent_tool_turn_preserves_context_batch_preview(v
              body1, body2);
     conv_add_tool_result_named(&conv, "toolu_ctx_batch", "context_get_batch", batch, false);
 
-    ASSERT(conv_compact_recent_tool_turn(&conv, 120), "compaction should succeed");
+    ASSERT(conv_compact_recent_tool_turn(&conv, 120, 0), "compaction should succeed");
     ASSERT(strstr(conv.msgs[2].content[0].text, "[chunk_id=11") != NULL,
            "compacted replay should keep first chunk breadcrumb");
     ASSERT(strstr(conv.msgs[2].content[0].text, "[chunk_id=22") != NULL,
            "compacted replay should keep second chunk breadcrumb");
     ASSERT(strstr(conv.msgs[2].content[0].text, "[trimmed ") != NULL,
            "compacted replay should mark the trimmed preview");
+
+    conv_free(&conv);
+    PASS();
+}
+
+static void test_conv_compact_recent_tool_turn_protects_live_turn(void) {
+    TEST("conv_compact tool turn protects the live turn");
+    /* Regression: collapsing the most-recent tool turn to a "Used tools: …"
+     * stub + tiny preview starved the model (it re-read the same file
+     * endlessly — the ~728-char truncation loop) and yielded a tool-less
+     * assistant turn, which the agent loop reads as "no tool_use → done" and
+     * ends mid-task. With a positive protected window the live turn must be
+     * left fully intact. */
+    conversation_t conv;
+    conv_init(&conv);
+    conv_add_user_text(&conv, "write six files");
+    conv_add_assistant_tool_use(&conv, "toolu_w1", "write_file",
+                                "{\"path\":\"a.py\",\"content\":\"x\"}");
+    conv_add_tool_result_named(&conv, "toolu_w1", "write_file",
+                               "verified write: path=a.py bytes=1", false);
+
+    ASSERT(!conv_compact_recent_tool_turn(&conv, 256, 4),
+           "live tool turn must not be compacted");
+    ASSERT(conv.count == 3, "conversation must be unchanged");
+    ASSERT(strcmp(conv.msgs[1].content[0].type, "tool_use") == 0,
+           "assistant tool_use must be preserved intact");
+    ASSERT(conv.msgs[1].content[0].tool_name &&
+           strcmp(conv.msgs[1].content[0].tool_name, "write_file") == 0,
+           "tool name must be preserved");
+    ASSERT(strcmp(conv.msgs[2].content[0].type, "tool_result") == 0,
+           "tool_result must be preserved intact");
 
     conv_free(&conv);
     PASS();
@@ -6217,6 +6249,61 @@ static void test_tools_get_paged_budget_floor(void) {
 
 /* ── Register-file model tests ───────────────────────────────────────── */
 
+static void test_ask_dialog_answer_value(void) {
+    TEST("ask dialog: answer value (single/multi/custom)");
+    tui_ask_question_t q;
+    memset(&q, 0, sizeof q);
+    q.gate_q = -1;
+    q.n_options = 3;
+    snprintf(q.options[0].value, sizeof q.options[0].value, "pu239");
+    snprintf(q.options[1].value, sizeof q.options[1].value, "am241");
+    snprintf(q.options[2].value, sizeof q.options[2].value, "mixed");
+    char buf[256];
+
+    /* single */
+    q.selected[1] = true;
+    ASSERT(strcmp(tui_ask_answer_value(&q, buf, sizeof buf), "am241") == 0,
+           "single select value");
+
+    /* multi */
+    q.selected[2] = true; /* now 1 and 2 */
+    tui_ask_answer_value(&q, buf, sizeof buf);
+    ASSERT(strcmp(buf, "am241, mixed") == 0, "multi select comma-joined");
+
+    /* custom overrides selections */
+    snprintf(q.custom, sizeof q.custom, "americium 243");
+    ASSERT(strcmp(tui_ask_answer_value(&q, buf, sizeof buf), "americium 243") == 0,
+           "custom overrides");
+    PASS();
+}
+
+static void test_ask_dialog_branching(void) {
+    TEST("ask dialog: conditional branching (show_if)");
+    tui_ask_question_t qs[2];
+    memset(qs, 0, sizeof qs);
+    /* q0: source (always visible) */
+    qs[0].gate_q = -1;
+    qs[0].n_options = 2;
+    snprintf(qs[0].options[0].value, sizeof qs[0].options[0].value, "pu239");
+    snprintf(qs[0].options[1].value, sizeof qs[0].options[1].value, "mixed");
+    /* q1: ratio, gated on q0 == mixed */
+    qs[1].gate_q = 0;
+    qs[1].n_gate_vals = 1;
+    snprintf(qs[1].gate_vals[0], sizeof qs[1].gate_vals[0], "mixed");
+
+    ASSERT(tui_ask_question_visible(qs, 2, 0), "gating question always visible");
+    ASSERT(!tui_ask_question_visible(qs, 2, 1), "gated hidden before answer");
+
+    /* answer source = pu239 → ratio stays hidden */
+    qs[0].selected[0] = true; qs[0].answered = true;
+    ASSERT(!tui_ask_question_visible(qs, 2, 1), "gated hidden when value mismatches");
+
+    /* answer source = mixed → ratio becomes visible */
+    qs[0].selected[0] = false; qs[0].selected[1] = true;
+    ASSERT(tui_ask_question_visible(qs, 2, 1), "gated visible when value matches");
+    PASS();
+}
+
 static void test_register_cap_enforced(void) {
     TEST("register file hard cap at 64");
     tools_init();
@@ -10007,6 +10094,98 @@ static void test_sem_classify_categories(void) {
     PASS();
 }
 
+/* ── Task profile: semantic topology selection ───────────────────────── */
+
+static void test_task_profile_default_triage(void) {
+    TEST("task_profile default triage");
+    task_profile_t *tp = task_profile(NULL, NULL);
+    ASSERT(tp != NULL, "profile should allocate for NULL task");
+    ASSERT(tp->pattern_count == 0, "NULL task should have no patterns");
+    ASSERT(tp->keyword_match_count == 0, "NULL task should have no keyword matches");
+    ASSERT(tp->suggestion_count > 0, "default profile should suggest a topology");
+
+    const topology_t *best = task_profile_best_topology(tp);
+    ASSERT(best != NULL, "default profile should have a best topology");
+    ASSERT(strcmp(best->name, "triage") == 0, "default profile should pick triage");
+    ASSERT(task_profile_best_topology(NULL) == NULL, "NULL profile has no best topology");
+
+    task_profile_free(tp);
+    PASS();
+}
+
+static void test_task_profile_ranks_full_registry(void) {
+    TEST("task_profile ranks full topology registry");
+    task_profile_t *tp = task_profile(
+        "review and audit code, validate implementation and check security",
+        NULL);
+    ASSERT(tp != NULL, "profile should allocate");
+    ASSERT(tp->pattern_count >= 2, "review/code task should detect multiple patterns");
+    ASSERT(tp->keyword_match_count >= tp->pattern_count,
+           "keyword match count should include all detected patterns");
+    ASSERT(tp->suggestion_count == 15, "ranking should fill public suggestion list");
+
+    const topology_t *best = task_profile_best_topology(tp);
+    ASSERT(best != NULL, "best topology should exist");
+    ASSERT(strcmp(best->name, "code_review") == 0,
+           "code review task should prefer code_review domain topology");
+
+    task_profile_free(tp);
+    PASS();
+}
+
+static void test_task_profile_json_escaping_and_truncation(void) {
+    TEST("task_profile_json escaping/truncation");
+    task_profile_t *tp = task_profile("review \"quoted\"\ncode now", NULL);
+    ASSERT(tp != NULL, "profile should allocate");
+
+    char json[4096];
+    int written = task_profile_json(tp, json, sizeof(json));
+    ASSERT(written > 0, "json serialization should succeed");
+    ASSERT(strstr(json, "\\\"quoted\\\"") != NULL, "quotes should be JSON escaped");
+    ASSERT(strstr(json, "\\n") != NULL, "newlines should be JSON escaped");
+    ASSERT(strstr(json, "\"keyword_match_count\"") != NULL,
+           "json should include keyword match count");
+    ASSERT(strstr(json, "\"reason\"") != NULL, "json suggestions should include reason");
+
+    char small[16];
+    memset(small, 'x', sizeof(small));
+    written = task_profile_json(tp, small, sizeof(small));
+    ASSERT(written == (int)sizeof(small) - 1,
+           "small buffer should report copied JSON length");
+    ASSERT(small[sizeof(small) - 1] == '\0', "small buffer should be null-terminated");
+
+    char explain[24];
+    memset(explain, 'x', sizeof(explain));
+    written = task_profile_explain(tp, explain, sizeof(explain));
+    ASSERT(written == (int)sizeof(explain) - 1,
+           "small explain buffer should report copied length");
+    ASSERT(explain[sizeof(explain) - 1] == '\0',
+           "small explain buffer should be null-terminated");
+
+    ASSERT(task_profile_json(NULL, json, sizeof(json)) == -1,
+           "NULL profile json should fail");
+    ASSERT(task_profile_explain(NULL, explain, sizeof(explain)) == -1,
+           "NULL profile explain should fail");
+
+    task_profile_free(tp);
+    PASS();
+}
+
+static void test_task_profile_word_boundaries(void) {
+    TEST("task_profile word boundaries");
+    task_profile_t *tp = task_profile("android orion snow", NULL);
+    ASSERT(tp != NULL, "profile should allocate");
+    ASSERT(tp->clause_count == 1, "and/or prefixes should not count as clauses");
+    ASSERT(tp->latency_score == 0.0, "now inside snow should not imply urgency");
+
+    const topology_t *best = task_profile_best_topology(tp);
+    ASSERT(best != NULL, "generic task should have a best topology");
+    ASSERT(strcmp(best->name, "triage") == 0, "generic task should remain triage");
+
+    task_profile_free(tp);
+    PASS();
+}
+
 /* ── Trace: log and log_kv ───────────────────────────────────────────── */
 
 static void test_trace_log_functions(void) {
@@ -12709,6 +12888,7 @@ int main(void) {
     test_conv_compact_recent_tool_turn_missing_result();
     test_conv_compact_recent_tool_turn_trims_long_result();
     test_conv_compact_recent_tool_turn_preserves_context_batch_preview();
+    test_conv_compact_recent_tool_turn_protects_live_turn();
     test_conv_add_tool_result_named_reuses_user_message();
     test_build_request_web_search_result_shape();
     test_build_request_web_search_result_recover_from_text();
@@ -12958,6 +13138,10 @@ int main(void) {
     test_tools_get_all();
     test_agent_and_swarm_tool_schemas_expose_spawn_fields();
     test_tools_get_paged_budget_floor();
+
+    /* Dynamic AskUserQuestion dialog logic */
+    test_ask_dialog_answer_value();
+    test_ask_dialog_branching();
 
     /* Register-file model + quorum tests */
     test_register_cap_enforced();
@@ -13214,6 +13398,10 @@ int main(void) {
     test_sem_tools_index_and_rank();
     test_sem_score_messages();
     test_sem_classify_categories();
+    test_task_profile_default_triage();
+    test_task_profile_ranks_full_registry();
+    test_task_profile_json_escaping_and_truncation();
+    test_task_profile_word_boundaries();
     test_trace_log_functions();
     test_tui_table_lifecycle();
     test_tool_timeout_specific_tools();

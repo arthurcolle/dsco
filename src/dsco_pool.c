@@ -201,6 +201,29 @@ static void apply_iter_run(void *p) {
     free(a);
 }
 
+typedef struct {
+    dsco_pool_iter_fn fn;
+    void             *ctx;
+    size_t            i;
+    atomic_size_t    *remaining;
+    pthread_mutex_t  *mu;
+    pthread_cond_t   *cv;
+} apply_counted_t;
+
+/* Portable replacement for the GNU statement-expression + nested-function
+ * pattern (clang rejects nested functions). Runs one iteration, then
+ * decrements the shared counter and wakes the waiter on the last item. */
+static void apply_counted_run(void *p) {
+    apply_counted_t *cc = (apply_counted_t *)p;
+    cc->fn(cc->i, cc->ctx);
+    if (atomic_fetch_sub(cc->remaining, 1) == 1) {
+        pthread_mutex_lock(cc->mu);
+        pthread_cond_signal(cc->cv);
+        pthread_mutex_unlock(cc->mu);
+    }
+    free(cc);
+}
+
 void dsco_pool_apply(size_t n, void *ctx, dsco_pool_iter_fn fn) {
     if (!fn || n == 0) return;
     dsco_pool_global_init(0);
@@ -208,25 +231,12 @@ void dsco_pool_apply(size_t n, void *ctx, dsco_pool_iter_fn fn) {
     atomic_size_t remaining; atomic_init(&remaining, n);
     pthread_mutex_t mu = PTHREAD_MUTEX_INITIALIZER;
     pthread_cond_t  cv = PTHREAD_COND_INITIALIZER;
-    struct ctx_pack { dsco_pool_iter_fn fn; void *ctx; size_t i;
-                       atomic_size_t *remaining; pthread_mutex_t *mu;
-                       pthread_cond_t *cv; };
     for (size_t i = 0; i < n; i++) {
-        struct ctx_pack *c = (struct ctx_pack *)calloc(1, sizeof(*c));
+        apply_counted_t *c = (apply_counted_t *)calloc(1, sizeof(*c));
+        if (!c) continue;
         c->fn = fn; c->ctx = ctx; c->i = i;
         c->remaining = &remaining; c->mu = &mu; c->cv = &cv;
-        work_item_t it = { (dsco_pool_work_fn)(void*)({
-            void __apply(void *p){
-                struct ctx_pack *cc = (struct ctx_pack *)p;
-                cc->fn(cc->i, cc->ctx);
-                if (atomic_fetch_sub(cc->remaining, 1) == 1) {
-                    pthread_mutex_lock(cc->mu);
-                    pthread_cond_signal(cc->cv);
-                    pthread_mutex_unlock(cc->mu);
-                }
-                free(cc);
-            } __apply;
-        }), c, NULL };
+        work_item_t it = { apply_counted_run, c, NULL };
         enqueue(it);
     }
     pthread_mutex_lock(&mu);
