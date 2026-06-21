@@ -24,6 +24,7 @@
 #include "task_profile.h"
 #include "plan_optimizer.h"
 #include "plan_cache.h"
+#include "plan.h"
 #include "cost_model.h"
 #include "mcp_names.h"
 #include "workspace.h"
@@ -7660,6 +7661,79 @@ static bool tool_topology_solve(const char *input, char *result, size_t rlen) {
     }
 }
 
+
+
+/* atom_wire — wire upstream atom output to downstream atom input */
+static bool tool_atom_wire(const char *input, char *result, size_t rlen) {
+    int  src = json_get_int(input, "src_atom_id", 0);
+    int  dst = json_get_int(input, "dst_atom_id", 0);
+    char *key = json_get_str(input, "key");   /* optional */
+    if (src <= 0 || dst <= 0) {
+        free(key);
+        snprintf(result, rlen, "{\"error\":\"src_atom_id and dst_atom_id required\"}");
+        return false;
+    }
+    bool ok = atom_wire(src, dst, key);
+    free(key);
+    snprintf(result, rlen, "{\"ok\":%s,\"src\":%d,\"dst\":%d}",
+             ok ? "true" : "false", src, dst);
+    return ok;
+}
+
+/* atom_unwire — remove a wiring edge */
+static bool tool_atom_unwire(const char *input, char *result, size_t rlen) {
+    int src = json_get_int(input, "src_atom_id", 0);
+    int dst = json_get_int(input, "dst_atom_id", 0);
+    if (src <= 0 || dst <= 0) {
+        snprintf(result, rlen, "{\"error\":\"src_atom_id and dst_atom_id required\"}");
+        return false;
+    }
+    bool ok = atom_unwire(src, dst);
+    snprintf(result, rlen, "{\"ok\":%s}", ok ? "true" : "false");
+    return ok;
+}
+
+/* atom_resolve — show resolved wired inputs for an atom */
+static bool tool_atom_resolve(const char *input, char *result, size_t rlen) {
+    int atom_id = json_get_int(input, "atom_id", 0);
+    if (atom_id <= 0) {
+        snprintf(result, rlen, "{\"error\":\"atom_id required\"}");
+        return false;
+    }
+    char *resolved = atom_resolve_inputs(atom_id);
+    if (!resolved) {
+        snprintf(result, rlen, "{\"resolved\":null,\"note\":\"no wired inputs\"}");
+        return true;
+    }
+    snprintf(result, rlen, "{\"resolved\":%s}", resolved);
+    free(resolved);
+    return true;
+}
+
+/* cost_model_predict_full — point estimate + CI */
+static bool tool_cost_model_predict(const char *input, char *result, size_t rlen) {
+    char *topo    = json_get_str(input, "topology");
+    int   in_tok  = json_get_int(input, "input_tokens",  700);
+    int   out_tok = json_get_int(input, "output_tokens", 600);
+    if (!topo || !topo[0]) {
+        free(topo);
+        snprintf(result, rlen, "{\"error\":\"topology required\"}");
+        return false;
+    }
+    cost_prediction_t pred = {0};
+    bool ok = cost_model_predict_full(topo, in_tok, out_tok, &pred);
+    free(topo);
+    if (!ok) {
+        snprintf(result, rlen, "{\"ok\":false,\"note\":\"no learned data for topology\"}");
+        return false;
+    }
+    snprintf(result, rlen,
+        "{\"ok\":true,\"cost_usd\":%.6f,\"cost_lo\":%.6f,\"cost_hi\":%.6f,"
+        "\"latency_s\":%.2f,\"confidence\":%.2f,\"observations\":%d}",
+        pred.cost_usd, pred.cost_lo, pred.cost_hi,
+        pred.latency_s, pred.confidence, pred.observations);
+    return true;
+}
 
 /* plan_analyze — Priority 1: show ranked topology options with cost/latency before execution */
 static bool tool_plan_analyze(const char *input, char *result, size_t rlen) {
@@ -19557,6 +19631,10 @@ static bool tool_swarm_dispatch(const char *input, char *result, size_t rlen) {
     else if (strcmp(action, "plan_cache_stats") == 0)     ok = tool_plan_cache_stats(input, result, rlen);
     else if (strcmp(action, "plan_cache_lookup") == 0)    ok = tool_plan_cache_lookup(input, result, rlen);
     else if (strcmp(action, "cost_model_stats") == 0)     ok = tool_cost_model_stats(input, result, rlen);
+    else if (strcmp(action, "cost_model_predict") == 0)   ok = tool_cost_model_predict(input, result, rlen);
+    else if (strcmp(action, "atom_wire") == 0)            ok = tool_atom_wire(input, result, rlen);
+    else if (strcmp(action, "atom_unwire") == 0)          ok = tool_atom_unwire(input, result, rlen);
+    else if (strcmp(action, "atom_resolve") == 0)         ok = tool_atom_resolve(input, result, rlen);
     else snprintf(result, rlen, "unknown swarm action: %s", action);
     free(action); return ok;
 }
