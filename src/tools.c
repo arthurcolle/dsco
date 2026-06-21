@@ -7474,7 +7474,17 @@ static bool tool_topology_run(const char *input, char *result, size_t rlen) {
     }
     jbuf_append(&b, ",\"final_node_tag\":");
     jbuf_append_json_str(&b, stats.final_node_tag);
-    jbuf_append(&b, "},\"result\":");
+    jbuf_append(&b, "},\"delta_vs_triage_usd\":");
+    {
+        char num[64];
+        snprintf(num, sizeof(num), "%.4f", delta_cost);
+        jbuf_append(&b, num);
+    }
+    jbuf_append(&b, ",\"user_picked\":");
+    jbuf_append(&b, user_picked ? "true" : "false");
+    jbuf_append(&b, ",\"from_cache\":");
+    jbuf_append(&b, from_cache ? "true" : "false");
+    jbuf_append(&b, ",\"result\":");
     jbuf_append_json_str(&b, topo_result);
     jbuf_append(&b, "}");
 
