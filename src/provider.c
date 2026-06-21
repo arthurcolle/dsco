@@ -2145,11 +2145,34 @@ static void oai_handle_sse_line(oai_sse_state_t *s, const char *line) {
             free(cost_str);
         }
 
-        /* Token detail breakdowns */
+        /* Token detail breakdowns — three possible locations depending on provider:
+         *
+         *  1. input_tokens_details.cached_tokens
+         *     → OpenAI, xAI/Grok, Groq, Gemini via google endpoint, OpenRouter OR-normalised
+         *  2. prompt_tokens_details.cached_tokens
+         *     → Some OpenRouter backends normalise here instead of input_tokens_details
+         *  3. prompt_cache_hit_tokens  (top-level in usage{})
+         *     → DeepSeek direct, Moonshot/Kimi direct, Alibaba/DashScope direct
+         *
+         * We read all three and take the first non-zero value so no provider is missed.
+         * Already-set values from earlier chunks are preserved (take max). */
         char *in_detail = json_get_raw(usage_raw, "input_tokens_details");
         if (in_detail) {
-            s->cached_tokens = json_get_int(in_detail, "cached_tokens", 0);
+            int v = json_get_int(in_detail, "cached_tokens", 0);
+            if (v > s->cached_tokens) s->cached_tokens = v;
             free(in_detail);
+        }
+        /* OpenRouter normalisation alias */
+        char *pt_detail = json_get_raw(usage_raw, "prompt_tokens_details");
+        if (pt_detail) {
+            int v = json_get_int(pt_detail, "cached_tokens", 0);
+            if (v > s->cached_tokens) s->cached_tokens = v;
+            free(pt_detail);
+        }
+        /* DeepSeek / Moonshot / Alibaba top-level cache hit field */
+        {
+            int v = json_get_int(usage_raw, "prompt_cache_hit_tokens", 0);
+            if (v > s->cached_tokens) s->cached_tokens = v;
         }
         char *out_detail = json_get_raw(usage_raw, "output_tokens_details");
         if (out_detail) {
