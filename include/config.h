@@ -55,11 +55,15 @@ extern int g_cheap_mode;
 #define MAX_FILE_PAGE_SIZE  4096
 #define MAX_EXEC_OUTPUT     (64 * 1024)
 
-/* Agent loop — 40 turns default balances utility vs cost.
-   Research (W&D 2026): most tasks complete in <20 turns;
-   >40 indicates runaway loops or redundant retrieval. */
+/* Agent loop — agentic by default: the loop runs until the goal is met or a
+   *real* stop condition trips (cost budget, context exhaustion, user interrupt,
+   or a runaway no-progress signal). It is NOT capped by an arbitrary turn count.
+
+   MAX_AGENT_TURNS is therefore a *checkpoint cadence*, not a wall: every this
+   many turns the loop surfaces a visible "still working" checkpoint so the user
+   can see the agent is converging (and interrupt if not). Override the cadence
+   via DSCO_MAX_AGENT_TURNS. */
 #define MAX_AGENT_TURNS     40
-/* Override at runtime via DSCO_MAX_AGENT_TURNS */
 static inline int dsco_max_agent_turns(void) {
     const char *e = getenv("DSCO_MAX_AGENT_TURNS");
     if (e && e[0]) {
@@ -67,6 +71,20 @@ static inline int dsco_max_agent_turns(void) {
         if (v >= 1 && v <= 999999) return v;
     }
     return MAX_AGENT_TURNS;
+}
+
+/* Absolute runaway backstop. The loop never relies on this in normal operation
+   — cost/context/interrupt stop it first — but a literal infinite no-progress
+   loop must terminate. Set far above any real task. Override via
+   DSCO_HARD_TURN_CEILING. */
+#define HARD_TURN_CEILING   100000
+static inline int dsco_hard_turn_ceiling(void) {
+    const char *e = getenv("DSCO_HARD_TURN_CEILING");
+    if (e && e[0]) {
+        int v = atoi(e);
+        if (v >= 1) return v;
+    }
+    return HARD_TURN_CEILING;
 }
 
 /* Context window / token budget */
@@ -179,15 +197,21 @@ static const model_info_t MODEL_REGISTRY[] = {
     { "grok-3-mini",  "grok-3-mini",                     131072, 32768,  0.30,  0.50, 0, 0, 1 },
     { "grok-code",    "grok-code-fast-1",                262144, 32768,  0.20,  1.50, 0, 0, 0 },
     /* ── Moonshot Kimi (via OpenRouter) ──────────────────────────────── */
-    /* Raw OpenRouter slugs only — alias == model_id so `-m <slug>` is the
-     * canonical, lookup-able name. The OpenRouter catalog is refreshed at
-     * runtime (see openrouter_cache.h), so any slug not listed here still
-     * resolves with real context/pricing once the background fetch lands. */
+    /* Raw OpenRouter slugs come first so exact slug lookup returns the
+     * canonical row. Short aliases below resolve to the same model IDs. The
+     * OpenRouter catalog is refreshed at runtime (see openrouter_cache.h), so
+     * any slug not listed here still resolves with real context/pricing once
+     * the background fetch lands. */
     { "moonshotai/kimi-k2.7-code", "moonshotai/kimi-k2.7-code", 262144, 16384, 0.74, 3.50, 0.15, 0, 1 },
-    { "kimi",         "moonshotai/kimi-k2.5",           262144, 16384,  0.45,  2.20, 0, 0, 1 },
+    { "kimi",         "moonshotai/kimi-k2.7-code",     262144, 16384,  0.74,  3.50, 0.15, 0, 1 },
+    { "kimi-code",    "moonshotai/kimi-k2.7-code",     262144, 16384,  0.74,  3.50, 0.15, 0, 1 },
+    { "or-kimi-code", "moonshotai/kimi-k2.7-code",     262144, 16384,  0.74,  3.50, 0.15, 0, 1 },
+    { "kimi-k25",     "moonshotai/kimi-k2.5",           262144, 16384,  0.45,  2.20, 0, 0, 1 },
     { "kimi-k2",      "moonshotai/kimi-k2",             131000, 16384,  0.55,  2.20, 0, 0, 0 },
     { "kimi-think",   "moonshotai/kimi-k2-thinking",    131072, 16384,  0.47,  2.00, 0, 0, 1 },
     /* ── Moonshot Kimi (native platform.moonshot.ai) ─────────────────── */
+    { "kimi-k2.7-code", "kimi-k2.7-code",              262144, 32768,  0.60,  3.00, 0.10, 0, 1 },
+    { "mk27-code",    "kimi-k2.7-code",                262144, 32768,  0.60,  3.00, 0.10, 0, 1 },
     { "mk25",         "kimi-k2.5",                      262144, 32768,  0.60,  3.00, 0.10, 0, 1 },
     { "mk2t",         "kimi-k2-turbo-preview",          262144, 32768,  0.60,  3.00, 0.10, 0, 0 },
     { "mk2-think",    "kimi-k2-thinking",               262144, 32768,  0.60,  3.00, 0.10, 0, 1 },

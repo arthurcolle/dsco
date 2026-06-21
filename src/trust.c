@@ -77,12 +77,12 @@ static int mkdir_p(const char *path) {
 }
 
 static int64_t now_unix(void) { return (int64_t)time(NULL); }
-static int64_t now_ms(void) {
+static __attribute__((unused)) int64_t now_ms(void) {
     struct timespec ts; clock_gettime(CLOCK_MONOTONIC, &ts);
     return (int64_t)ts.tv_sec * 1000 + ts.tv_nsec / 1000000;
 }
 
-static void stats_update_err(const char *msg) {
+static __attribute__((unused)) void stats_update_err(const char *msg) {
     pthread_mutex_lock(&g.stats_mu);
     snprintf(g.stats.last_error, sizeof(g.stats.last_error), "%s", msg ? msg : "");
     pthread_mutex_unlock(&g.stats_mu);
