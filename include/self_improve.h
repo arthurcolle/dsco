@@ -263,3 +263,31 @@ extern self_improve_t g_self_improve;
     self_improve_turn_reset(&g_self_improve)
 
 #endif /* DSCO_SELF_IMPROVE_H */
+
+/* ── Goal / swarm / strategy hooks (new) ─────────────────────────────── */
+
+void self_improve_record_goal_state(self_improve_t *si,
+                                    const char *goal_id,
+                                    int state,   /* 0=nascent,1=stalking,2=striking,3=gripping,4=captured,5=escaped */
+                                    int grip_strength,
+                                    double elapsed_s);
+
+void self_improve_record_swarm_outcome(self_improve_t *si,
+                                       const char *topology,
+                                       int agents,
+                                       bool success,
+                                       double quality,
+                                       double elapsed_s);
+
+void self_improve_record_strategy_result(self_improve_t *si,
+                                         const char *strategy,
+                                         const char *goal_type,
+                                         bool success,
+                                         int grip_escalations,
+                                         double elapsed_s);
+
+void self_improve_record_tournament_result(self_improve_t *si,
+                                           const char *winner_strategy,
+                                           int competitors,
+                                           double margin,
+                                           double elapsed_s);
