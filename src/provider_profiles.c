@@ -57,7 +57,7 @@ static const provider_profile_t PROVIDER_PROFILES[] = {
         .transport_base_url = "https://openrouter.ai/api/v1",
         .env_vars = { "OPENROUTER_API_KEY", "OPEN_ROUTER_API_KEY" },
         .aliases = { "or" },
-        .default_model = "anthropic/claude-sonnet-4.6",
+        .default_model = "z-ai/glm-5.2",
         .caps = CAP_OPENAI_COMPAT_VISION,
     },
     {
@@ -193,7 +193,7 @@ static const provider_profile_t PROVIDER_PROFILES[] = {
         .transport_base_url = "https://api.moonshot.ai/v1",
         .env_vars = { "MOONSHOT_API_KEY", "KIMI_API_KEY", "KIMI_CODING_API_KEY" },
         .aliases = { "kimi", "kimi-coding", "kimi-for-coding" },
-        .default_model = "kimi-k2.5",
+        .default_model = "kimi-k2.7-code",
         .caps = CAP_OPENAI_COMPAT_VISION | PROVIDER_CAP_REASONING,
     },
     {

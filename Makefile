@@ -38,7 +38,7 @@ SRC_NAMES = main.c agent.c llm.c tools.c json_util.c ast.c swarm.c tui.c \
 	project.c project_mux.c project_grid.c \
 	dsco_accel.c dsco_mlx.c dsco_pool.c \
 	fingerprint.c trust.c toolmgmt.c connector.c openrouter_cache.c \
-	startup.c plot.c self_improve.c \
+	startup.c plot.c self_improve.c pets.c img_util.c \
 	$(OPTIONAL_SRCS)
 TEST_SRC_NAMES = test.c
 
@@ -154,10 +154,20 @@ endif
 OPTIONAL_SRCS =
 ifneq ($(SODIUM_CFLAGS),)
 OPTIONAL_SRCS += mesh.c
+OPTIONAL_SRCS += net_tool.c
+OPTIONAL_SRCS += plan_optimizer.c
+OPTIONAL_SRCS += cost_model.c
+OPTIONAL_SRCS += plan_cache.c
+OPTIONAL_SRCS += dsco_dht.c
+OPTIONAL_SRCS += dht_impl.c
 ifneq ($(MBEDTLS_PREFIX),)
 OPTIONAL_SRCS += net_server.c
 endif
 endif
+
+# Optional pkg-config libs such as GSL may include -lm. Keep one libm at the
+# end of the link line so clang does not emit duplicate-library notices.
+LDLIBS := $(filter-out -lm,$(LDLIBS)) -lm
 
 all: $(TARGET) dsc dsco-new $(LITE_TARGET)
 debug: $(DEBUG_TARGET)
