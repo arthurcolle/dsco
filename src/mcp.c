@@ -14,6 +14,7 @@
 #include <fcntl.h>
 #include <poll.h>
 #include <sys/time.h>
+#include <pthread.h>
 #include <curl/curl.h>
 
 /* When set, suppress connection/discovery progress lines. The TUI calls this
@@ -700,8 +701,50 @@ static void uniquify_server_name(mcp_registry_t *reg, mcp_server_t *srv) {
     }
 }
 
+/* ── Parallel connect ──────────────────────────────────────────────────────
+ * Connecting MCP servers serially means one slow or dead endpoint (a stopped
+ * local daemon, a cold-starting `uv run`/`npx`, an unreachable Modal URL)
+ * blocks every server queued behind it for the full per-RPC timeout. With ~30
+ * servers configured that serialises into minutes of "connecting…", so the
+ * status line shows only the first one or two that happened to be fast.
+ *
+ * Instead we split init into two phases: parse all config files into a pending
+ * list (single-threaded, cheap), then connect every server concurrently from a
+ * bounded worker pool. Live servers register their tools within one RPC
+ * timeout regardless of how many dead ones sit alongside them. */
+
+typedef struct {
+    mcp_server_t *items;
+    int           count;
+    int           cap;
+} pending_list_t;
+
+/* Non-NULL only between mcp_init's parse and connect phases; start_configured_server
+ * collects into it instead of connecting inline. mcp_init never runs concurrently
+ * with itself (the /mcp reload path joins the bg loader first), so a file-static
+ * is safe. */
+static pending_list_t *g_collect = NULL;
+
+static bool pending_has_dup(const pending_list_t *pl, const mcp_server_t *srv) {
+    for (int i = 0; i < pl->count; i++)
+        if (same_server_config(&pl->items[i], srv)) return true;
+    return false;
+}
+
+static void pending_uniquify(const pending_list_t *pl, mcp_server_t *srv) {
+    char base[128];
+    copy_str(base, sizeof(base), srv->name);
+    for (int suffix = 2; suffix < 100; suffix++) {
+        bool found = false;
+        for (int i = 0; i < pl->count; i++) {
+            if (strcmp(pl->items[i].name, srv->name) == 0) { found = true; break; }
+        }
+        if (!found) return;
+        snprintf(srv->name, sizeof(srv->name), "%s_%d", base, suffix);
+    }
+}
+
 static void start_configured_server(mcp_registry_t *reg, const mcp_server_t *cfg) {
-    if (reg->server_count >= MCP_MAX_SERVERS) return;
     if (!cfg->command[0] && !cfg->url[0]) return;
 
     mcp_server_t srv = *cfg;
@@ -716,6 +759,26 @@ static void start_configured_server(mcp_registry_t *reg, const mcp_server_t *cfg
         if (!srv.command[0]) copy_str(srv.command, sizeof(srv.command), srv.url);
     }
 
+    /* Collection phase: stash for the parallel connect pool and return. */
+    if (g_collect) {
+        pending_list_t *pl = g_collect;
+        if (pl->count >= MCP_MAX_SERVERS) return;
+        if (pending_has_dup(pl, &srv)) return;
+        pending_uniquify(pl, &srv);
+        if (pl->count >= pl->cap) {
+            int ncap = pl->cap ? pl->cap * 2 : 16;
+            if (ncap > MCP_MAX_SERVERS) ncap = MCP_MAX_SERVERS;
+            mcp_server_t *grown = realloc(pl->items, (size_t)ncap * sizeof(*grown));
+            if (!grown) return;
+            pl->items = grown;
+            pl->cap = ncap;
+        }
+        pl->items[pl->count++] = srv;
+        return;
+    }
+
+    /* Inline (serial) fallback — used if collection is not active. */
+    if (reg->server_count >= MCP_MAX_SERVERS) return;
     reg->configured_count++;
     if (duplicate_exact(reg, &srv)) return;
     uniquify_server_name(reg, &srv);
@@ -744,6 +807,105 @@ static void start_configured_server(mcp_registry_t *reg, const mcp_server_t *cfg
         stop_server(&reg->servers[idx]);
         memset(&reg->servers[idx], 0, sizeof(reg->servers[idx]));
     }
+}
+
+#define MCP_CONNECT_WORKERS 12
+
+typedef struct {
+    mcp_registry_t *reg;
+    pending_list_t *pending;
+    int             next;        /* atomic cursor into pending->items */
+    pthread_mutex_t spawn_lock;  /* serialises fork()+exec setup only */
+    pthread_mutex_t merge_lock;  /* guards registry mutation + tool discovery */
+} connect_pool_t;
+
+static void *mcp_connect_worker(void *arg) {
+    connect_pool_t *p = arg;
+    for (;;) {
+        int i = __atomic_fetch_add(&p->next, 1, __ATOMIC_RELAXED);
+        if (i >= p->pending->count) break;
+
+        mcp_server_t srv = p->pending->items[i];
+        srv.stdin_fd = -1;
+        srv.stdout_fd = -1;
+        srv.pid = 0;
+        srv.initialized = false;
+        srv.rpc_id = 1;
+
+        const char *endpoint = srv.transport == MCP_TRANSPORT_HTTP ? srv.url : srv.command;
+        MCP_LOG("  \033[2mmcp: connecting %s (%s)\033[0m\n", srv.name, endpoint);
+
+        /* Slow work — process spawn + the initialize handshake / network
+         * roundtrip — runs without the merge lock so dead servers don't stall
+         * live ones. fork()+exec is serialised on its own lock to avoid the
+         * concurrent-fork-from-threads malloc-lock hazard; it is fast. */
+        bool ok;
+        if (srv.transport == MCP_TRANSPORT_HTTP) {
+            ok = initialize_server(&srv);
+        } else {
+            pthread_mutex_lock(&p->spawn_lock);
+            bool spawned = spawn_server(&srv);
+            pthread_mutex_unlock(&p->spawn_lock);
+            ok = spawned && initialize_server(&srv);
+        }
+
+        pthread_mutex_lock(&p->merge_lock);
+        mcp_registry_t *reg = p->reg;
+        reg->configured_count++;
+        if (ok && reg->server_count < MCP_MAX_SERVERS) {
+            int idx = reg->server_count;
+            reg->servers[idx] = srv;
+            reg->server_count++;   /* publish slot before discovery uses it */
+            int n = discover_tools(reg, idx);
+            MCP_LOG("  \033[2mmcp: %s: %d tools discovered\033[0m\n",
+                    reg->servers[idx].name, n);
+        } else {
+            if (!ok)
+                MCP_LOG("  \033[31mmcp: failed to connect %s\033[0m\n", srv.name);
+            reg->failed_count++;
+            stop_server(&srv);   /* failed, or connected with no slot left */
+        }
+        pthread_mutex_unlock(&p->merge_lock);
+    }
+    return NULL;
+}
+
+static void mcp_curl_global_init_once(void) {
+    curl_global_init(CURL_GLOBAL_DEFAULT);
+}
+
+static void mcp_connect_all(mcp_registry_t *reg, pending_list_t *pending) {
+    if (pending->count <= 0) return;
+
+    /* Ensure libcurl's global state is initialised once before any worker calls
+     * curl_easy_init concurrently (the implicit lazy init is not thread-safe). */
+    static pthread_once_t curl_once = PTHREAD_ONCE_INIT;
+    pthread_once(&curl_once, mcp_curl_global_init_once);
+
+    connect_pool_t pool;
+    pool.reg = reg;
+    pool.pending = pending;
+    pool.next = 0;
+    pthread_mutex_init(&pool.spawn_lock, NULL);
+    pthread_mutex_init(&pool.merge_lock, NULL);
+
+    int nthreads = pending->count < MCP_CONNECT_WORKERS
+                 ? pending->count : MCP_CONNECT_WORKERS;
+    pthread_t threads[MCP_CONNECT_WORKERS];
+    int started = 0;
+    for (int i = 0; i < nthreads; i++) {
+        if (pthread_create(&threads[i], NULL, mcp_connect_worker, &pool) == 0)
+            started++;
+    }
+    if (started == 0) {
+        /* Could not spawn any worker — connect on the calling thread. */
+        mcp_connect_worker(&pool);
+    } else {
+        for (int i = 0; i < started; i++) pthread_join(threads[i], NULL);
+    }
+
+    pthread_mutex_destroy(&pool.spawn_lock);
+    pthread_mutex_destroy(&pool.merge_lock);
 }
 
 static void parse_server_common(mcp_registry_t *reg, const char *raw_name,
@@ -1133,6 +1295,11 @@ int mcp_init(mcp_registry_t *reg) {
 
     char path[1024];
 
+    /* Phase 1: parse every config file into a pending list (cheap, serial).
+     * start_configured_server appends here instead of connecting inline. */
+    pending_list_t collect = {0};
+    g_collect = &collect;
+
     snprintf(path, sizeof(path), "%s/.dsco/mcp.json", home);
     load_json_config(reg, path, "dsco:mcp", true, true);
     snprintf(path, sizeof(path), "%s/.dsco/config.json", home);
@@ -1157,6 +1324,12 @@ int mcp_init(mcp_registry_t *reg) {
     snprintf(path, sizeof(path), "%s/.codex/config.toml", home);
     load_toml_config(reg, path, "codex:global");
     load_toml_config(reg, ".codex/config.toml", "project:codex");
+
+    /* Phase 2: connect every collected server concurrently so one slow or dead
+     * endpoint can't stall the rest behind a per-RPC timeout. */
+    g_collect = NULL;
+    mcp_connect_all(reg, &collect);
+    free(collect.items);
 
     reg->loaded = true;
     return reg->tool_count;

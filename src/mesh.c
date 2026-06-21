@@ -174,7 +174,7 @@ static void *conn_reader(void *arg) {
     memcpy(c->peer_pubkey, peer_hs + 4, MESH_PUBKEY_LEN);
 
     /* Compute shared key once — used for all messages on this connection */
-    crypto_box_beforenm(c->shared_key, c->peer_pubkey, n->seckey);
+    (void)crypto_box_beforenm(c->shared_key, c->peer_pubkey, n->seckey);
     c->authed = true;
 
     if (on_con) {
@@ -183,6 +183,48 @@ static void *conn_reader(void *arg) {
         snprintf(info.addr, sizeof(info.addr), "%s", c->addr);
         info.outbound = c->outbound;
         on_con(&info, con_ctx);
+    }
+
+    /* ── Gossip: send our known peers to the newly connected node ─────── */
+    if (n->conn_count > 1) {
+        mesh_peer_info_t peers[MESH_MAX_PEERS];
+        int npc = mesh_node_peers(n, peers, MESH_MAX_PEERS);
+        if (npc > 0) {
+            size_t peer_entry_len = 48; /* host(40) + port(2) + pad(6) */
+            size_t gossip_sz = 2 + (size_t)npc * peer_entry_len;
+            if (gossip_sz <= MESH_MAX_PAYLOAD) {
+                uint8_t *gossip = calloc(1, gossip_sz);
+                if (gossip) {
+                    gossip[0] = (uint8_t)(npc >> 8);
+                    gossip[1] = (uint8_t)(npc & 0xFF);
+                    int written = 0;
+                    for (int i = 0; i < npc && written < npc; i++) {
+                        /* Skip the peer we're talking to */
+                        if (memcmp(peers[i].pubkey, c->peer_pubkey, MESH_PUBKEY_LEN) == 0)
+                            continue;
+                        uint8_t *entry = gossip + 2 + (size_t)written * peer_entry_len;
+                        memset(entry, 0, peer_entry_len);
+                        /* Extract host from addr (strip port if present) */
+                        char host[41] = {0};
+                        snprintf(host, sizeof(host), "%s", peers[i].addr);
+                        char *colon = strrchr(host, ':');
+                        if (colon) *colon = '\0';
+                        if (host[0] == '\0') continue;
+                        memcpy(entry, host, strnlen(host, 40));
+                        /* Use the mesh port (we don't track per-peer; use our own) */
+                        uint16_t port = n->port;
+                        entry[40] = (uint8_t)(port >> 8);
+                        entry[41] = (uint8_t)(port & 0xFF);
+                        written++;
+                    }
+                    /* Update count to actually-written entries */
+                    gossip[0] = (uint8_t)(written >> 8);
+                    gossip[1] = (uint8_t)(written & 0xFF);
+                    conn_send_enc(c, WIRE_PEERS, gossip, gossip_sz);
+                    free(gossip);
+                }
+            }
+        }
     }
 
     /* ── Message loop ────────────────────────────────────────────────── */
@@ -231,7 +273,26 @@ static void *conn_reader(void *arg) {
         case WIRE_PONG:
             break;
         case WIRE_PEERS: {
-            /* Gossip: [count:2][host:40 port:2 padding:6 each] — TODO expand */
+            /* Gossip protocol: [count:2][host:40 port:2 padding:6 each]
+             * Parse advertised peers and dial any we don't already know. */
+            if (pay_len >= 2 && c->node) {
+                uint16_t pcount = (uint16_t)((pay[0] << 8) | pay[1]);
+                const size_t peer_entry_len = 48; /* host(40) + port(2) + pad(6) */
+                size_t offset = 2;
+                for (uint16_t i = 0; i < pcount && offset + peer_entry_len <= pay_len; i++) {
+                    char host[41];
+                    memcpy(host, pay + offset, 40);
+                    host[40] = '\0';
+                    /* Trim trailing NULs / whitespace */
+                    size_t hlen = strnlen(host, 40);
+                    host[hlen] = '\0';
+                    uint16_t port = (uint16_t)((pay[offset + 40] << 8) | pay[offset + 41]);
+                    offset += peer_entry_len;
+                    if (host[0] == '\0' || port == 0) continue;
+                    /* Attempt connection if not already connected */
+                    mesh_node_connect(c->node, host, port);
+                }
+            }
             break;
         }
         }

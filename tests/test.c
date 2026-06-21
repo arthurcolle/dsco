@@ -3,6 +3,12 @@
  * Or:    make test
  */
 
+/* Stubs for globals defined in main.c (excluded from test build) */
+#include "mesh.h"
+#include "net_server.h"
+mesh_node_t      *g_mesh_node  = NULL;
+dsco_net_server_t *g_net_server = NULL;
+
 #include "json_util.h"
 #include "llm.h"
 #include "config.h"
@@ -2013,6 +2019,11 @@ static void test_conversation_growth_unbounded(void) {
 
 static void test_session_state_init(void) {
     TEST("session_state_init");
+    char saved_trust[64];
+    bool had_trust = false;
+    test_capture_env("DSCO_TRUST_TIER", saved_trust, sizeof(saved_trust), &had_trust);
+    unsetenv("DSCO_TRUST_TIER");
+
     session_state_t s;
     session_state_init(&s, "sonnet");
     ASSERT(strcmp(s.model, "claude-sonnet-4-6") == 0, "model should be resolved");
@@ -2021,6 +2032,29 @@ static void test_session_state_init(void) {
     ASSERT(s.trust_tier == DSCO_TRUST_STANDARD, "trust tier should default to standard");
     ASSERT(s.web_search == true, "web_search should default true");
     ASSERT(s.code_execution == true, "code_execution should default true");
+    test_restore_env("DSCO_TRUST_TIER", saved_trust, had_trust);
+    PASS();
+}
+
+static void test_session_state_init_inherits_trust_tier_env(void) {
+    TEST("session_state_init inherits DSCO_TRUST_TIER");
+    char saved_trust[64];
+    bool had_trust = false;
+    test_capture_env("DSCO_TRUST_TIER", saved_trust, sizeof(saved_trust), &had_trust);
+
+    setenv("DSCO_TRUST_TIER", "trusted", 1);
+    session_state_t s;
+    session_state_init(&s, "sonnet");
+    ASSERT(s.trust_tier == DSCO_TRUST_TRUSTED,
+           "trusted env tier should be inherited by sessions/subagents");
+
+    setenv("DSCO_TRUST_TIER", "not-a-tier", 1);
+    session_state_t s2;
+    session_state_init(&s2, "sonnet");
+    ASSERT(s2.trust_tier == DSCO_TRUST_STANDARD,
+           "invalid env tier should fail closed to standard");
+
+    test_restore_env("DSCO_TRUST_TIER", saved_trust, had_trust);
     PASS();
 }
 
@@ -7146,6 +7180,11 @@ static void test_model_resolve_alias_extended(void) {
     TEST("model_resolve_alias resolves known aliases");
     ASSERT(strcmp(model_resolve_alias("opus"), "claude-opus-4-7") == 0, "opus alias");
     ASSERT(strcmp(model_resolve_alias("sonnet"), "claude-sonnet-4-6") == 0, "sonnet alias");
+    ASSERT(strcmp(model_resolve_alias("glm52"), "z-ai/glm-5.2") == 0, "glm52 alias");
+    ASSERT(strcmp(model_resolve_alias("kimi"), "moonshotai/kimi-k2.7-code") == 0,
+           "kimi alias should resolve to K2.7 Code on OpenRouter");
+    ASSERT(strcmp(model_resolve_alias("kimi-k2.7-code"), "kimi-k2.7-code") == 0,
+           "native Kimi K2.7 Code should resolve to itself");
     /* Unknown name returns itself */
     ASSERT(strcmp(model_resolve_alias("unknown-model-xyz"), "unknown-model-xyz") == 0,
            "unknown alias returns self");
@@ -7170,6 +7209,32 @@ static void test_switch_reason_names(void) {
     ASSERT(switch_reason_name(SWITCH_REASON_COST_BUDGET) != NULL, "COST has name");
     ASSERT(switch_reason_name(SWITCH_REASON_FAILURE) != NULL, "FAILURE has name");
     ASSERT(switch_reason_name(SWITCH_REASON_CONTEXT_LIMIT) != NULL, "CONTEXT has name");
+    PASS();
+}
+
+static void test_provider_msg_is_context_overflow(void) {
+    TEST("provider_msg_is_context_overflow classifies prompt-too-long");
+    /* Anthropic */
+    ASSERT(provider_msg_is_context_overflow(
+               "prompt is too long: 219763 tokens > 200000 maximum"),
+           "anthropic prompt-too-long detected");
+    /* OpenAI */
+    ASSERT(provider_msg_is_context_overflow(
+               "This model's maximum context length is 128000 tokens, however "
+               "you requested 130000 tokens"),
+           "openai maximum-context-length detected");
+    ASSERT(provider_msg_is_context_overflow("context_length_exceeded"),
+           "openai error code detected");
+    /* Must NOT fire on unrelated errors — reactive compaction would be futile */
+    ASSERT(!provider_msg_is_context_overflow("credit balance is too low"),
+           "billing error is not an overflow");
+    ASSERT(!provider_msg_is_context_overflow("rate limit exceeded"),
+           "rate limit is not an overflow");
+    ASSERT(!provider_msg_is_context_overflow("invalid api key"),
+           "auth error is not an overflow");
+    ASSERT(!provider_msg_is_context_overflow(NULL) &&
+           !provider_msg_is_context_overflow(""),
+           "null/empty are not overflows");
     PASS();
 }
 
@@ -7438,28 +7503,62 @@ static void test_provider_resolve_api_key_supports_generic_providers(void) {
     PASS();
 }
 
-static void test_provider_select_default_primary_model_prefers_grok(void) {
-    TEST("provider_select_default_primary_model prefers Grok");
+static void test_provider_select_default_primary_model_prefers_glm_kimi(void) {
+    TEST("provider_select_default_primary_model prefers GLM/Kimi defaults");
     char saved_xai[256], saved_or[256], saved_anth[256], saved_openai[256];
+    char saved_glm[256], saved_zai[256], saved_z_ai[256];
+    char saved_moonshot[256], saved_kimi[256], saved_kimi_coding[256];
     bool had_xai = false, had_or = false, had_anth = false, had_openai = false;
+    bool had_glm = false, had_zai = false, had_z_ai = false;
+    bool had_moonshot = false, had_kimi = false, had_kimi_coding = false;
     test_capture_env("XAI_API_KEY", saved_xai, sizeof(saved_xai), &had_xai);
     test_capture_env("OPENROUTER_API_KEY", saved_or, sizeof(saved_or), &had_or);
     test_capture_env("ANTHROPIC_API_KEY", saved_anth, sizeof(saved_anth), &had_anth);
     test_capture_env("OPENAI_API_KEY", saved_openai, sizeof(saved_openai), &had_openai);
+    test_capture_env("GLM_API_KEY", saved_glm, sizeof(saved_glm), &had_glm);
+    test_capture_env("ZAI_API_KEY", saved_zai, sizeof(saved_zai), &had_zai);
+    test_capture_env("Z_AI_API_KEY", saved_z_ai, sizeof(saved_z_ai), &had_z_ai);
+    test_capture_env("MOONSHOT_API_KEY", saved_moonshot, sizeof(saved_moonshot), &had_moonshot);
+    test_capture_env("KIMI_API_KEY", saved_kimi, sizeof(saved_kimi), &had_kimi);
+    test_capture_env("KIMI_CODING_API_KEY", saved_kimi_coding, sizeof(saved_kimi_coding), &had_kimi_coding);
 
+    unsetenv("GLM_API_KEY");
+    unsetenv("ZAI_API_KEY");
+    unsetenv("Z_AI_API_KEY");
+    unsetenv("MOONSHOT_API_KEY");
+    unsetenv("KIMI_API_KEY");
+    unsetenv("KIMI_CODING_API_KEY");
     setenv("XAI_API_KEY", "xai-test-key", 1);
     setenv("OPENROUTER_API_KEY", "sk-or-router", 1);
     setenv("ANTHROPIC_API_KEY", "sk-ant-native", 1);
     setenv("OPENAI_API_KEY", "sk-openai-native", 1);
 
     const char *selected = provider_select_default_primary_model(false);
-    ASSERT(selected && strcmp(selected, "grok-4-fast") == 0,
-           "general default should prefer native Grok when available");
+    ASSERT(selected && strcmp(selected, "z-ai/glm-5.2") == 0,
+           "general default should prefer GLM over Grok/Anthropic");
+    selected = provider_select_default_primary_model(true);
+    ASSERT(selected && strcmp(selected, "moonshotai/kimi-k2.7-code") == 0,
+           "code default should prefer Kimi K2.7 Code over Sonnet");
+
+    setenv("GLM_API_KEY", "glm-native", 1);
+    setenv("MOONSHOT_API_KEY", "moonshot-native", 1);
+    selected = provider_select_default_primary_model(false);
+    ASSERT(selected && strcmp(selected, "glm-5.2") == 0,
+           "native GLM key should use native glm-5.2 default");
+    selected = provider_select_default_primary_model(true);
+    ASSERT(selected && strcmp(selected, "kimi-k2.7-code") == 0,
+           "native Moonshot key should use native Kimi K2.7 Code default");
 
     test_restore_env("XAI_API_KEY", saved_xai, had_xai);
     test_restore_env("OPENROUTER_API_KEY", saved_or, had_or);
     test_restore_env("ANTHROPIC_API_KEY", saved_anth, had_anth);
     test_restore_env("OPENAI_API_KEY", saved_openai, had_openai);
+    test_restore_env("GLM_API_KEY", saved_glm, had_glm);
+    test_restore_env("ZAI_API_KEY", saved_zai, had_zai);
+    test_restore_env("Z_AI_API_KEY", saved_z_ai, had_z_ai);
+    test_restore_env("MOONSHOT_API_KEY", saved_moonshot, had_moonshot);
+    test_restore_env("KIMI_API_KEY", saved_kimi, had_kimi);
+    test_restore_env("KIMI_CODING_API_KEY", saved_kimi_coding, had_kimi_coding);
     PASS();
 }
 
@@ -9999,6 +10098,11 @@ static void test_md5_hex_known(void) {
 
 static void test_session_state_defaults(void) {
     TEST("session_state_init defaults");
+    char saved_trust[64];
+    bool had_trust = false;
+    test_capture_env("DSCO_TRUST_TIER", saved_trust, sizeof(saved_trust), &had_trust);
+    unsetenv("DSCO_TRUST_TIER");
+
     session_state_t s;
     session_state_init(&s, "opus");
     ASSERT(strcmp(s.effort, "medium") == 0 || strcmp(s.effort, "high") == 0 ||
@@ -10007,6 +10111,7 @@ static void test_session_state_defaults(void) {
     ASSERT(s.total_input_tokens == 0, "no tokens yet");
     ASSERT(s.turn_count == 0, "no turns yet");
     ASSERT(s.temperature == -1.0 || s.temperature >= 0, "temperature initialized");
+    test_restore_env("DSCO_TRUST_TIER", saved_trust, had_trust);
     PASS();
 }
 
@@ -12898,6 +13003,7 @@ int main(void) {
 
     /* Session state */
     test_session_state_init();
+    test_session_state_init_inherits_trust_tier_env();
     test_session_trust_tier_parse();
 
     /* Conversation growth behavior */
@@ -13210,6 +13316,7 @@ int main(void) {
     test_model_resolve_alias_extended();
     test_model_context_window_lookup();
     test_switch_reason_names();
+    test_provider_msg_is_context_overflow();
     test_provider_detect_matrix();
     test_provider_detect_prefers_openrouter_for_namespaced_models();
     test_provider_model_family_detects_underlying_family();
@@ -13220,7 +13327,7 @@ int main(void) {
     test_provider_custom_base_uses_profile_canonical_name();
     test_provider_resolve_api_key_supports_aliases();
     test_provider_resolve_api_key_supports_generic_providers();
-    test_provider_select_default_primary_model_prefers_grok();
+    test_provider_select_default_primary_model_prefers_glm_kimi();
     test_provider_build_default_fallback_models_cross_lab();
     test_provider_route_uses_session_key_when_native_env_missing();
     test_provider_route_uses_claude_code_oauth_when_env_key_missing();
