@@ -966,3 +966,112 @@ bool tool_self_assess(const char *input_json, char *result, size_t result_len) {
 
     return true;
 }
+
+/* ═══════════════════════════════════════════════════════════════════════════
+ * Extended hooks: goals, swarms, strategies, tournaments
+ * ═══════════════════════════════════════════════════════════════════════════ */
+
+void self_improve_record_goal_state(self_improve_t *si,
+                                    const char *goal_id,
+                                    int state,
+                                    int grip_strength,
+                                    double elapsed_s) {
+    if (!si || !si->initialized || !goal_id) return;
+
+    if (state == 5) { /* ESCAPED */
+        for (int i = 0; i < si->pattern_count; i++) {
+            if (si->patterns[i].type == SI_PATTERN_FAILING_TOOL &&
+                strstr(si->patterns[i].description, "goal")) {
+                si->patterns[i].occurrences++;
+                si->patterns[i].last_seen = si_now();
+                return;
+            }
+        }
+        if (si->pattern_count < SI_MAX_PATTERNS) {
+            si_pattern_t *p = &si->patterns[si->pattern_count++];
+            p->type = SI_PATTERN_FAILING_TOOL;
+            snprintf(p->description, sizeof(p->description),
+                     "Goal %s escaped after %.1fs (grip=%d)",
+                     goal_id, elapsed_s, grip_strength);
+            p->severity = 0.6;
+            p->occurrences = 1;
+            p->first_seen = p->last_seen = si_now();
+        }
+    }
+
+    if (state == 4 && grip_strength >= 7) { /* CAPTURED with strong grip */
+        si->improvements_applied++;
+    }
+}
+
+void self_improve_record_swarm_outcome(self_improve_t *si,
+                                       const char *topology,
+                                       int agents,
+                                       bool success,
+                                       double quality,
+                                       double elapsed_s) {
+    if (!si || !si->initialized || !topology) return;
+
+    if (success && quality > 0.85) {
+        for (int i = 0; i < si->pattern_count; i++) {
+            if (si->patterns[i].type == SI_PATTERN_SUCCESSFUL_STRATEGY &&
+                strstr(si->patterns[i].description, topology)) {
+                si->patterns[i].occurrences++;
+                si->patterns[i].last_seen = si_now();
+                return;
+            }
+        }
+        if (si->pattern_count < SI_MAX_PATTERNS) {
+            si_pattern_t *p = &si->patterns[si->pattern_count++];
+            p->type = SI_PATTERN_SUCCESSFUL_STRATEGY;
+            snprintf(p->description, sizeof(p->description),
+                     "Swarm %s (%d agents) succeeded quality=%.2f in %.1fs",
+                     topology, agents, quality, elapsed_s);
+            p->severity = quality;
+            p->occurrences = 1;
+            p->first_seen = p->last_seen = si_now();
+        }
+    }
+}
+
+void self_improve_record_strategy_result(self_improve_t *si,
+                                         const char *strategy,
+                                         const char *goal_type,
+                                         bool success,
+                                         int grip_escalations,
+                                         double elapsed_s) {
+    if (!si || !si->initialized || !strategy) return;
+
+    if (success && grip_escalations <= 1) {
+        si->improvements_applied++;
+    }
+}
+
+void self_improve_record_tournament_result(self_improve_t *si,
+                                           const char *winner_strategy,
+                                           int competitors,
+                                           double margin,
+                                           double elapsed_s) {
+    if (!si || !si->initialized || !winner_strategy) return;
+
+    if (margin > 0.15) {
+        for (int i = 0; i < si->pattern_count; i++) {
+            if (si->patterns[i].type == SI_PATTERN_SUCCESSFUL_STRATEGY &&
+                strstr(si->patterns[i].description, winner_strategy)) {
+                si->patterns[i].occurrences++;
+                si->patterns[i].last_seen = si_now();
+                return;
+            }
+        }
+        if (si->pattern_count < SI_MAX_PATTERNS) {
+            si_pattern_t *p = &si->patterns[si->pattern_count++];
+            p->type = SI_PATTERN_SUCCESSFUL_STRATEGY;
+            snprintf(p->description, sizeof(p->description),
+                     "Tournament winner: %s (beat %d others, margin=%.2f)",
+                     winner_strategy, competitors, margin);
+            p->severity = 0.9;
+            p->occurrences = 1;
+            p->first_seen = p->last_seen = si_now();
+        }
+    }
+}
