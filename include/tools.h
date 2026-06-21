@@ -47,6 +47,7 @@ void             tools_set_context_usage(int input_tokens, int output_tokens);
 void             tools_context_turn_begin(void);
 swarm_t         *tools_swarm_instance(void);
 const tool_def_t *tools_get_all(int *count);
+bool tools_invoke_by_name(const char *name, const char *input, char *result, size_t rlen);
 int              tools_get_core_count(void);   /* only .core=true tools */
 int              tools_builtin_count(void);
 bool             tools_execute(const char *name, const char *input_json,

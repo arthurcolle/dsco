@@ -12,8 +12,8 @@
 
 /* ── Default models ─────────────────────────────────────────────────── */
 
-#define ORCH_CHAT_MODEL_DEFAULT   "claude-haiku-4-5-20251001"
-#define ORCH_WORKER_MODEL_DEFAULT "claude-sonnet-4-6"
+#define ORCH_CHAT_MODEL_DEFAULT   "z-ai/glm-5.2"
+#define ORCH_WORKER_MODEL_DEFAULT "kimi-k2.7-code"
 
 /* Max LLM turns per worker task before forcing stop */
 #define ORCH_WORKER_MAX_TURNS 24
@@ -537,7 +537,7 @@ static char *list_domains_cb(const char *name, const char *input_json, void *ctx
     jbuf_appendf(&b,
         "\n## Models\n\n"
         "  Default worker: %s\n"
-        "  Override per-call: haiku (fast, $0.005/1K) | sonnet (balanced, $0.018/1K) | opus (max, $0.09/1K)\n"
+        "  Override per-call: glm (general) | kimi/code (worker) | full model ID\n"
         "\n## Always Available\n\n"
         "  Pinned in all domains: bash, read_file, discover_tools, context_recall\n",
         g_worker_model);
@@ -559,8 +559,11 @@ static orch_domain_t domain_from_str(const char *s) {
 
 static const char *resolve_model_alias(const char *alias) {
     if (!alias || !alias[0]) return g_worker_model;
-    if (strcmp(alias, "haiku")  == 0) return "claude-haiku-4-5-20251001";
-    if (strcmp(alias, "sonnet") == 0) return "claude-sonnet-4-6";
+    if (strcmp(alias, "glm")    == 0) return provider_select_default_primary_model(false);
+    if (strcmp(alias, "kimi")   == 0) return provider_select_default_primary_model(true);
+    if (strcmp(alias, "code")   == 0) return provider_select_default_primary_model(true);
+    if (strcmp(alias, "haiku")  == 0) return provider_select_default_primary_model(false);
+    if (strcmp(alias, "sonnet") == 0) return provider_select_default_primary_model(true);
     if (strcmp(alias, "opus")   == 0) return "claude-opus-4-6";
     return alias; /* pass through full model IDs */
 }
@@ -702,8 +705,7 @@ static const char s_dispatch_schema[] =
       "},"
       "\"model\":{"
         "\"type\":\"string\","
-        "\"description\":\"Worker model: haiku (fast/$0.005), sonnet (default/$0.018), opus (complex/$0.09)\","
-        "\"enum\":[\"haiku\",\"sonnet\",\"opus\"]"
+        "\"description\":\"Worker model alias or full model ID. Default is kimi-k2.7-code; use glm for GLM or kimi/code for Kimi K2.7 Code.\""
       "}"
     "},"
     "\"required\":[\"domain\",\"task\"]"
@@ -761,7 +763,7 @@ void agent_run_orchestrated(const char *api_key,
                              const char *provider_override) {
     /* Apply defaults */
     if (!chat_model || !chat_model[0])
-        chat_model = ORCH_CHAT_MODEL_DEFAULT;
+        chat_model = provider_select_default_primary_model(false);
 
     /* Worker model: arg > env > default */
     const char *env_worker = getenv("DSCO_WORKER_MODEL");
@@ -769,7 +771,9 @@ void agent_run_orchestrated(const char *api_key,
         snprintf(g_worker_model, sizeof(g_worker_model), "%s", worker_model);
     else if (env_worker && env_worker[0])
         snprintf(g_worker_model, sizeof(g_worker_model), "%s", env_worker);
-    /* else keeps ORCH_WORKER_MODEL_DEFAULT from static initializer */
+    else
+        snprintf(g_worker_model, sizeof(g_worker_model), "%s",
+                 provider_select_default_primary_model(true));
 
     fprintf(stderr,
         "\n  \033[1;36morchestrator mode\033[0m\n"
