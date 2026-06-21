@@ -3,12 +3,6 @@
  * Or:    make test
  */
 
-/* Stubs for globals defined in main.c (excluded from test build) */
-#include "mesh.h"
-#include "net_server.h"
-mesh_node_t      *g_mesh_node  = NULL;
-dsco_net_server_t *g_net_server = NULL;
-
 #include "json_util.h"
 #include "llm.h"
 #include "config.h"

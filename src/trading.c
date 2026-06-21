@@ -2850,7 +2850,7 @@ static void env_file_set(const char *env_path, const char *key, const char *valu
             /* Match uncommented KEY= lines */
             if (strncmp(buf, key, key_len) == 0 && buf[key_len] == '=') {
                 char *newline = malloc(key_len + strlen(value) + 3);
-                sprintf(newline, "%s=%s\n", key, value);
+                snprintf(newline, key_len + strlen(value) + 3, "%s=%s\n", key, value);
                 lines[nlines++] = newline;
                 found = true;
             } else {
@@ -2862,7 +2862,7 @@ static void env_file_set(const char *env_path, const char *key, const char *valu
 
     if (!found) {
         char *newline = malloc(key_len + strlen(value) + 3);
-        sprintf(newline, "%s=%s\n", key, value);
+        snprintf(newline, key_len + strlen(value) + 3, "%s=%s\n", key, value);
         lines[nlines++] = newline;
     }
 
@@ -3547,8 +3547,9 @@ bool tool_polymarket_relayer_execute(const char *input, char *result, size_t rle
     const char *val = (value && value[0]) ? value : "0";
     const char *dsc = (desc && desc[0]) ? desc : "dsco relayer tx";
 
-    char *body = malloc(strlen(data) + 1024);
-    sprintf(body,
+    size_t body_sz = strlen(data) + 1024;
+    char *body = malloc(body_sz);
+    snprintf(body, body_sz,
             "{\"transactions\":[{\"to\":\"%s\",\"data\":\"%s\",\"value\":\"%s\"}],"
             "\"description\":\"%s\"}",
             to, data, val, dsc);

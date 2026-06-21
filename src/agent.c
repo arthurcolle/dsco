@@ -23,6 +23,7 @@
 #include "topology.h"
 #include "router.h"
 #include "swarm.h"
+#include "pets.h"
 #include "arena_alloc.h"
 #include "vm.h"
 #include <stdio.h>
