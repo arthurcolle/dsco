@@ -1438,14 +1438,18 @@ static const char *openai_last_user_context(conversation_t *conv) {
 
 static void openai_append_function_tool(jbuf_t *b, const char *name,
                                         const char *description,
-                                        const char *schema_json) {
+                                        const char *schema_json,
+                                        bool cache_mark) {
     jbuf_append(b, "{\"type\":\"function\",\"function\":{\"name\":");
     jbuf_append_json_str(b, name ? name : "");
     jbuf_append(b, ",\"description\":");
     jbuf_append_json_str(b, description ? description : "");
     jbuf_append(b, ",\"parameters\":");
     jbuf_append(b, schema_json ? schema_json : "{}");
-    jbuf_append(b, "}}");
+    /* cache_control goes at the tool wrapper level, outside function{} */
+    if (cache_mark)
+        jbuf_append(b, "},\"cache_control\":{\"type\":\"ephemeral\"}}");    else
+        jbuf_append(b, "}}");
 }
 
 static bool openai_append_tools_json(jbuf_t *b, conversation_t *conv,
@@ -1479,14 +1483,33 @@ static bool openai_append_tools_json(jbuf_t *b, conversation_t *conv,
         return false;
     }
 
+    /* Gate cache markers: only Anthropic claude-* models via OpenRouter
+     * understand cache_control in the OpenAI wire format. */
+    bool want_cache = provider_model_supports_cache_control(
+        session ? session->model : NULL);
+
+    /* Pre-count total tools to identify the last one for cache marking. */
+    int loaded_ext_pre = 0;
+    for (int i = 0; i < g_external_tool_count; i++)
+        if (g_external_tools[i].loaded) loaded_ext_pre++;
+    int ext_budget_pre = loaded_ext_pre > 0 ? loaded_ext_pre : 16;
+    if (ext_budget_pre > 32) ext_budget_pre = 32;
+    int ext_total_pre = ext_budget_pre < g_external_tool_count
+                        ? ext_budget_pre : g_external_tool_count;
+    int total_tools = filtered_count + ext_total_pre;
+
     jbuf_append(b, ",\"tools\":[");
     bool wrote_any = false;
+    int emitted = 0;
     for (int i = 0; i < filtered_count; i++) {
         if (wrote_any) jbuf_append(b, ",");
+        bool is_last = want_cache && (emitted == total_tools - 1);
         openai_append_function_tool(b, filtered[i]->name,
                                     filtered[i]->description,
-                                    filtered[i]->input_schema_json);
+                                    filtered[i]->input_schema_json,
+                                    is_last);
         wrote_any = true;
+        emitted++;
     }
     free((void *)filtered);
 
@@ -1501,11 +1524,14 @@ static bool openai_append_tools_json(jbuf_t *b, conversation_t *conv,
         for (int i = 0; i < g_external_tool_count && ext_written < ext_budget; i++) {
             if ((bool)g_external_tools[i].loaded != want_loaded) continue;
             if (wrote_any) jbuf_append(b, ",");
+            bool is_last = want_cache && (emitted == total_tools - 1);
             openai_append_function_tool(b, g_external_tools[i].name,
                                         g_external_tools[i].description,
-                                        g_external_tools[i].input_schema_json);
+                                        g_external_tools[i].input_schema_json,
+                                        is_last);
             wrote_any = true;
             ext_written++;
+            emitted++;
         }
     }
     jbuf_append(b, "]");
@@ -1712,6 +1738,22 @@ static void openai_append_user_msg(jbuf_t *b, message_t *m) {
     jbuf_append(b, "}");
 }
 
+/* OpenRouter forwards Anthropic-style `cache_control` breakpoints to Claude
+ * models. In an OpenAI-format request a breakpoint on the SYSTEM message caches
+ * the entire static prefix — in Anthropic's canonical order (tools → system →
+ * messages) the system block sits after the tools, so caching up to it covers
+ * both. Only Claude models honor the marker; other providers reached through
+ * this same OpenAI-compat path (xAI, DeepSeek, Mistral, Moonshot, Gemini) would
+ * ignore or reject it, so gate strictly on the model id. Override with
+ * DSCO_OR_CACHE=0 to disable, or =1 to force on for any model. */
+bool provider_model_supports_cache_control(const char *model) {
+    const char *force = getenv("DSCO_OR_CACHE");
+    if (force && force[0] == '0') return false;
+    if (force && force[0] == '1') return true;
+    if (!model) return false;
+    return strstr(model, "claude") != NULL || strstr(model, "anthropic/") != NULL;
+}
+
 static char *openai_build_request(provider_t *p, conversation_t *conv,
                                     session_state_t *session, int max_tokens,
                                     const char *credential) {
@@ -1728,20 +1770,29 @@ static char *openai_build_request(provider_t *p, conversation_t *conv,
     jbuf_append_int(&b, max_tokens);
     jbuf_append(&b, ",\"stream\":true");
 
-    /* System message */
+    /* System message. Build the text once, then emit either as a plain string
+     * (default) or as a single-block array carrying a cache_control breakpoint
+     * (Claude via OpenRouter) so the static tools+system prefix gets cached. */
+    bool cache_ctrl = provider_model_supports_cache_control(session ? session->model
+                                                                    : NULL);
     const char *custom = llm_get_custom_system_prompt();
-    jbuf_append(&b, ",\"messages\":[{\"role\":\"system\",\"content\":");
+    jbuf_t sys;
+    jbuf_init(&sys, 4096);
     if (custom) {
-        jbuf_t sys;
-        jbuf_init(&sys, 4096);
         jbuf_append(&sys, custom);
         jbuf_append(&sys, "\n\n");
-        jbuf_append(&sys, SYSTEM_PROMPT);
-        jbuf_append_json_str(&b, sys.data);
-        jbuf_free(&sys);
-    } else {
-        jbuf_append_json_str(&b, SYSTEM_PROMPT);
     }
+    jbuf_append(&sys, SYSTEM_PROMPT);
+
+    jbuf_append(&b, ",\"messages\":[{\"role\":\"system\",\"content\":");
+    if (cache_ctrl) {
+        jbuf_append(&b, "[{\"type\":\"text\",\"text\":");
+        jbuf_append_json_str(&b, sys.data ? sys.data : SYSTEM_PROMPT);
+        jbuf_append(&b, ",\"cache_control\":{\"type\":\"ephemeral\"}}]");
+    } else {
+        jbuf_append_json_str(&b, sys.data ? sys.data : SYSTEM_PROMPT);
+    }
+    jbuf_free(&sys);
     jbuf_append(&b, "}");
 
     /* Conversation messages — convert Anthropic format to OpenAI format:
