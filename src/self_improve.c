@@ -13,6 +13,7 @@
  */
 
 #include "self_improve.h"
+#include "cost_model.h"
 #include "baseline.h"
 #include "json_util.h"
 #include <stdio.h>
@@ -1011,6 +1012,15 @@ void self_improve_record_swarm_outcome(self_improve_t *si,
                                        double quality,
                                        double elapsed_s) {
     if (!si || !si->initialized || !topology) return;
+
+    /* Feed actual performance data into the learned cost model (Priority 3).
+     * We don't know exact token count here, so use a heuristic:
+     * agents × 800 tokens/agent as a proxy for total tokens. */
+    if (elapsed_s > 0) {
+        int est_tokens = agents * 800;
+        /* cost_usd unknown at this call site — pass 0.0 to update latency only */
+        cost_model_learn(topology, est_tokens, 0.0, elapsed_s);
+    }
 
     if (success && quality > 0.85) {
         for (int i = 0; i < si->pattern_count; i++) {
