@@ -1448,7 +1448,8 @@ static void openai_append_function_tool(jbuf_t *b, const char *name,
     jbuf_append(b, schema_json ? schema_json : "{}");
     /* cache_control goes at the tool wrapper level, outside function{} */
     if (cache_mark)
-        jbuf_append(b, "},\"cache_control\":{\"type\":\"ephemeral\"}}");    else
+        jbuf_append(b, "},\"cache_control\":{\"type\":\"ephemeral\"}}");
+    else
         jbuf_append(b, "}}");
 }
 
@@ -1751,7 +1752,14 @@ bool provider_model_supports_cache_control(const char *model) {
     if (force && force[0] == '0') return false;
     if (force && force[0] == '1') return true;
     if (!model) return false;
-    return strstr(model, "claude") != NULL || strstr(model, "anthropic/") != NULL;
+    /* Anthropic claude-* (direct or namespaced via OpenRouter) */
+    if (strstr(model, "claude") || strstr(model, "anthropic/")) return true;
+    /* Alibaba Qwen via OpenRouter — uses identical cache_control:{type:ephemeral}
+     * syntax. Supported: qwen3-max, qwen-plus, qwen3-coder-plus/flash, etc.
+     * Snapshot endpoints (qwen3.5-plus-02-15 etc) do NOT support it, but OR
+     * silently ignores cache_control on unsupported models so it's safe to send. */
+    if (strstr(model, "qwen/") || strstr(model, "qwen3") || strstr(model, "qwen-")) return true;
+    return false;
 }
 
 static char *openai_build_request(provider_t *p, conversation_t *conv,
@@ -1832,6 +1840,14 @@ static char *openai_build_request(provider_t *p, conversation_t *conv,
     bool has_tools = openai_append_tools_json(&b, conv, session);
     openai_append_tool_choice_json(&b, session, has_tools);
 
+    /* Top-level automatic cache_control for Anthropic/Qwen via OpenRouter.
+     * In "automatic" mode OR/Anthropic caches everything up to the last
+     * cacheable block, advancing the breakpoint each turn — covers growing
+     * conversation history without per-block markers. OR routes only to
+     * Anthropic direct when this field is present (Bedrock/Vertex excluded). */
+    if (provider_model_supports_cache_control(session ? session->model : NULL))
+        jbuf_append(&b, ",\"cache_control\":{\"type\":\"ephemeral\"}");
+
     jbuf_append(&b, "}");
     return b.data;
 }
@@ -1908,6 +1924,36 @@ bool provider_msg_is_credit_too_low(const char *msg) {
         "quota_exceeded",
         "billing not active",
         "requires a paid plan",
+        NULL,
+    };
+    for (int i = 0; needles[i]; i++) {
+        const char *n = needles[i];
+        size_t nlen = strlen(n);
+        for (const char *p = msg; *p; p++) {
+            if (strncasecmp(p, n, nlen) == 0) return true;
+        }
+    }
+    return false;
+}
+
+bool provider_msg_is_context_overflow(const char *msg) {
+    if (!msg || !msg[0]) return false;
+    /* case-insensitive substring match against cross-provider phrases for a
+     * prompt/context-length rejection. Kept specific to avoid false positives
+     * on unrelated "too long" errors (e.g. path length). */
+    static const char *needles[] = {
+        "prompt is too long",
+        "prompt is too large",
+        "input is too long",
+        "input is too large",
+        "context length",
+        "context_length",
+        "context_length_exceeded",
+        "maximum context",
+        "context window",
+        "too many tokens",
+        "exceeds the maximum",
+        "reduce the length",
         NULL,
     };
     for (int i = 0; needles[i]; i++) {
@@ -2362,6 +2408,12 @@ static stream_result_t openai_stream(provider_t *p, const char *api_key,
                state.block_count * sizeof(content_block_t));
         result.parsed.stop_reason = state.stop_reason;
         result.usage = state.usage;
+        /* BUG2 fix: OpenAI/xAI/DeepSeek/Gemini report cached tokens in
+         * state.cached_tokens (input_tokens_details.cached_tokens), not in
+         * cache_read_input_tokens. Merge into the canonical field so session
+         * cost accounting, turn budget, and UI stats all see the savings. */
+        if (state.cached_tokens > 0 && result.usage.cache_read_input_tokens == 0)
+            result.usage.cache_read_input_tokens = state.cached_tokens;
 
         /* Log model/cost info when available (OpenRouter provides these) */
         if (state.actual_model || state.cost_usd > 0) {
