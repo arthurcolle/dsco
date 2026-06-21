@@ -20,6 +20,21 @@ BASE_CFLAGS = -Wall -Wextra -O3 -std=c2y $(C2Y_WARNING_FLAGS) -D_POSIX_C_SOURCE=
 	-DBUILD_DATE='"$(BUILD_DATE)"' -DGIT_HASH='"$(GIT_HASH)"'
 CFLAGS ?= $(BASE_CFLAGS)
 TEST_CFLAGS ?= $(BASE_CFLAGS) -O0 -g -fno-omit-frame-pointer -fno-inline
+# Release link-time optimizations:
+#  -dead_strip          : drop unreferenced functions/data (smaller binary, better I-cache)
+#  -dead_strip_dylibs   : drop dylibs no symbol references (gsl, gslcblas, libuv were
+#                         linked-but-unused, eagerly loaded at launch; removing them
+#                         cut `dsco --version` startup ~1.4ms / 1.35x — measured M4 Max).
+# Applied only to the release $(TARGET) link; test/asan/ubsan keep full symbols.
+RELEASE_LDFLAGS ?= -Wl,-dead_strip -Wl,-dead_strip_dylibs
+# Opt-in ThinLTO: `make LTO=1`. Cross-module inlining boosts long-running
+# throughput (agent loops, JSON, pipelines). Does NOT help the dyld-bound
+# startup path and ~8x the link time, so it is off by default. (M4 Max:
+# verified clean ThinLTO build, 81 objs in 1.5s compile + 2.5s LTO link.)
+ifeq ($(LTO),1)
+BASE_CFLAGS += -flto=thin
+RELEASE_LDFLAGS += -flto=thin
+endif
 LDFLAGS ?=
 LDLIBS ?= -lcurl -lsqlite3 -ldl -lm
 
@@ -106,13 +121,31 @@ LDLIBS += -lreadline
 endif
 
 # ── Optional libraries ────────────────────────────────────────────────────
+#
+# STATIC_DEPS (default 1): link small homebrew deps (hiredis, mbedtls) from
+# their .a archives instead of .dylib. These dylibs live OUTSIDE the dyld
+# shared cache, so each one costs a stat + mmap + codesign check at every
+# process launch. Static-linking + -dead_strip removes that launch cost and
+# strips unused code. Measured on M4 Max: dynamic homebrew deps cost ~1.9ms of
+# a 5.7ms `dsco --version`; static hiredis+mbedtls cut startup to ~3.3ms (1.7x
+# total with -dead_strip_dylibs). Set STATIC_DEPS=0 to force dylibs.
+STATIC_DEPS ?= 1
 
 # hiredis (Redis fast-path IPC)
 HIREDIS_CFLAGS := $(shell pkg-config --cflags hiredis 2>/dev/null)
 HIREDIS_LIBS   := $(shell pkg-config --libs   hiredis 2>/dev/null)
+HIREDIS_A      := $(shell pkg-config --variable=libdir hiredis 2>/dev/null)/libhiredis.a
 ifneq ($(HIREDIS_CFLAGS),)
 BASE_CFLAGS += $(HIREDIS_CFLAGS) -DHAVE_REDIS
+ifeq ($(STATIC_DEPS),1)
+ifneq ($(wildcard $(HIREDIS_A)),)
+LDLIBS      += $(HIREDIS_A)
+else
 LDLIBS      += $(HIREDIS_LIBS)
+endif
+else
+LDLIBS      += $(HIREDIS_LIBS)
+endif
 endif
 
 # GNU Scientific Library
@@ -147,7 +180,15 @@ MBEDTLS_PREFIX := $(shell \
   fi)
 ifneq ($(MBEDTLS_PREFIX),)
 BASE_CFLAGS += -I$(MBEDTLS_PREFIX)/include -DHAVE_MBEDTLS
+ifeq ($(STATIC_DEPS),1)
+ifneq ($(wildcard $(MBEDTLS_PREFIX)/lib/libmbedtls.a),)
+LDLIBS      += $(MBEDTLS_PREFIX)/lib/libmbedtls.a $(MBEDTLS_PREFIX)/lib/libmbedx509.a $(MBEDTLS_PREFIX)/lib/libmbedcrypto.a
+else
 LDLIBS      += -L$(MBEDTLS_PREFIX)/lib -lmbedtls -lmbedx509 -lmbedcrypto
+endif
+else
+LDLIBS      += -L$(MBEDTLS_PREFIX)/lib -lmbedtls -lmbedx509 -lmbedcrypto
+endif
 endif
 
 # Conditionally add mesh + net_server when libsodium is available
@@ -180,7 +221,7 @@ $(DEBUG_TARGET): $(DEBUG_OBJS)
 	$(CC) $(DEBUG_CFLAGS) -o $@ $^ $(LDFLAGS) $(LDLIBS)
 
 $(TARGET): $(OBJS)
-	$(CC) $(CFLAGS) -o $@ $^ $(LDFLAGS) $(LDLIBS)
+	$(CC) $(CFLAGS) -o $@ $^ $(LDFLAGS) $(RELEASE_LDFLAGS) $(LDLIBS)
 
 # dsco-new is a twin of dsco — same code, same composer, distinct name.
 dsco-new: $(TARGET)
