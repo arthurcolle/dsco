@@ -3178,6 +3178,7 @@ bool tool_polymarket_categories(const char *input, char *result, size_t rlen) {
     /* Count tags by scanning the response */
     typedef struct { char name[64]; int count; } tag_entry_t;
     tag_entry_t tags[256];
+    memset(tags, 0, sizeof(tags));
     int ntags = 0;
 
     const char *p = resp.data;
