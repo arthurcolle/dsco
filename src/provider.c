@@ -2979,8 +2979,13 @@ static const char *provider_family_primary_model(const char *family, bool prefer
         return NULL;
     }
     if (strcmp(family, "moonshot") == 0) {
-        if (provider_has_usable_key("moonshot", NULL)) return "kimi-k2.5";
-        if (provider_has_usable_key("openrouter", NULL)) return "moonshotai/kimi-k2.5";
+        if (prefer_code) {
+            if (provider_has_usable_key("moonshot", NULL)) return "kimi-k2.7-code";
+            if (provider_has_usable_key("openrouter", NULL)) return "moonshotai/kimi-k2.7-code";
+            return NULL;
+        }
+        if (provider_has_usable_key("moonshot", NULL)) return "kimi-k2.7";
+        if (provider_has_usable_key("openrouter", NULL)) return "moonshotai/kimi-k2.7";
         return NULL;
     }
     if (strcmp(family, "cohere") == 0) {
@@ -2993,6 +2998,8 @@ static const char *provider_family_primary_model(const char *family, bool prefer
         return NULL;
     }
     if (strcmp(family, "zai") == 0) {
+        if (provider_has_usable_key("zai", NULL) ||
+            provider_has_usable_key("glm", NULL)) return "glm-5.2";
         if (provider_has_usable_key("openrouter", NULL)) return "z-ai/glm-5.2";
         return NULL;
     }
@@ -3104,6 +3111,16 @@ int provider_build_default_fallback_models(const char *model,
 const char *provider_select_default_primary_model(bool prefer_code) {
     const char *candidate = NULL;
 
+    if (prefer_code) {
+        /* Code mode: prefer Kimi K2.7 Code via OpenRouter */
+        candidate = provider_family_primary_model("moonshot", true);
+        if (candidate) return candidate;
+    } else {
+        /* General mode: prefer GLM (Z.AI) via OpenRouter for cost/quality */
+        candidate = provider_family_primary_model("zai", false);
+        if (candidate) return candidate;
+    }
+
     if (!prefer_code) {
         candidate = provider_xai_primary_model(false);
         if (candidate) return candidate;
@@ -3130,8 +3147,10 @@ const char *provider_select_default_primary_model(bool prefer_code) {
     candidate = provider_family_primary_model("mistral", false);
     if (candidate) return candidate;
 
-    candidate = provider_family_primary_model("moonshot", false);
-    if (candidate) return candidate;
+    if (!prefer_code) {
+        candidate = provider_family_primary_model("moonshot", false);
+        if (candidate) return candidate;
+    }
 
     return DEFAULT_MODEL;
 }

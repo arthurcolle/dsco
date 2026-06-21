@@ -20,7 +20,7 @@
 
 #define CACHE_MAX     256
 #define NGRAM_N       3
-#define HIT_THRESHOLD 0.85f
+#define HIT_THRESHOLD 0.72f
 
 typedef struct {
     char     fingerprint[64];        /* hex of task 3-gram set hash */

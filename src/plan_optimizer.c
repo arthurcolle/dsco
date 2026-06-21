@@ -33,38 +33,60 @@
 /* ── Internal: score a single topology against a task profile ─────────── */
 
 static double score_topology(const topology_t *t, const task_profile_t *tp) {
-    double score = 0.5; /* base */
-
-    /* Parallelism alignment */
-    if (tp->parallelism_score > 0.6) {
-        if (t->category == CAT_FANOUT || t->category == CAT_MESH)  score += 0.25;
-        if (t->strategy == EXEC_FULL_PARALLEL)                      score += 0.10;
-    } else {
-        if (t->category == CAT_CHAIN || t->category == CAT_SPECIALIST) score += 0.20;
+    /* First check if task_profile already has an opinion on this topology name */
+    for (int si = 0; si < tp->suggestion_count; si++) {
+        if (tp->suggestions[si].topo &&
+            strcmp(tp->suggestions[si].topo->name, t->name) == 0) {
+            return tp->suggestions[si].fit_score;
+        }
     }
 
-    /* Convergence / review alignment */
-    if (tp->convergence_score > 0.5) {
-        if (t->category == CAT_FEEDBACK || t->category == CAT_COMPETITIVE) score += 0.20;
-        if (t->strategy == EXEC_ITERATIVE || t->strategy == EXEC_CONSENSUS) score += 0.10;
+    /* Fall back to signal-driven scoring when not in suggestions */
+    double score = 0.40; /* lower base to give signals more room */
+
+    double par = tp->parallelism_score;
+    double con = tp->convergence_score;
+    double cmp = tp->complexity_score;
+    double lat = tp->latency_score;
+
+    /* Parallelism */
+    if (par > 0.55) {
+        if (t->category == CAT_FANOUT)                              score += par * 0.40;
+        else if (t->category == CAT_MESH)                           score += par * 0.30;
+        else if (t->strategy == EXEC_FULL_PARALLEL)                 score += par * 0.20;
+        else if (t->category == CAT_CHAIN)                          score -= par * 0.15;
+    } else if (par < 0.30) {
+        if (t->category == CAT_CHAIN || t->category == CAT_SPECIALIST) score += 0.22;
+        if (t->category == CAT_FANOUT)                              score -= 0.10;
     }
 
-    /* Complexity alignment */
-    if (tp->complexity_score > 0.7) {
-        if (t->category == CAT_HIERARCHY) score += 0.15;
-        if (t->total_agents > 6)          score += 0.10;
-    } else if (tp->complexity_score < 0.3) {
-        if (t->total_agents <= 3)         score += 0.15;
+    /* Convergence / iteration */
+    if (con > 0.45) {
+        if (t->category == CAT_FEEDBACK)                            score += con * 0.35;
+        else if (t->category == CAT_COMPETITIVE)                    score += con * 0.25;
+        else if (t->strategy == EXEC_ITERATIVE)                     score += con * 0.20;
+        else if (t->strategy == EXEC_CONSENSUS)                     score += con * 0.15;
     }
 
-    /* Latency sensitivity */
-    if (tp->latency_score > 0.5) {
-        score -= t->est_latency_mult * 0.08;
+    /* Complexity */
+    if (cmp > 0.60) {
+        if (t->category == CAT_HIERARCHY)                           score += cmp * 0.25;
+        if (t->total_agents > 6)                                    score += 0.08;
+    } else if (cmp < 0.30) {
+        if (t->total_agents <= 3)                                   score += 0.18;
+        if (t->total_agents > 8)                                    score -= 0.12;
     }
 
-    /* Cap */
+    /* Latency penalty on slow topologies */
+    if (lat > 0.45) {
+        score -= t->est_latency_mult * 0.10;
+    }
+
+    /* Domain bonus */
+    if (t->category == CAT_DOMAIN)                                  score += 0.05;
+
     if (score > 1.0) score = 1.0;
-    if (score < 0.0) score = 0.0;
+    if (score < 0.05) score = 0.05;
     return score;
 }
 
