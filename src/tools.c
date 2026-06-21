@@ -1,5 +1,6 @@
 #include "tools.h"
 #include "vfs.h"
+#include "self_improve.h"
 #include "error.h"
 #include "integrations.h"
 #include "trading.h"
@@ -13952,7 +13953,7 @@ static bool tool_scratchpad(const char *input, char *result, size_t rlen) {
 /* ── context_compact: trigger conversation history compression ───── */
 
 /* Forward: conv_compact_recent_tool_turn / conv_trim_old_results defined in llm.c */
-extern bool conv_compact_recent_tool_turn(conversation_t *c, int max_chars);
+extern bool conv_compact_recent_tool_turn(conversation_t *c, int max_chars, int protect_tail);
 extern void conv_trim_old_results(conversation_t *c, int keep_recent, int max_chars);
 
 /* We need access to the active conversation — set by agent loop */
@@ -13964,6 +13965,19 @@ void tools_set_active_conversation(void *c) {
 
 void tools_playbook_advance_turn(void) {
     g_playbook.current_turn++;
+}
+
+/* ── plot: render data as Unicode charts (inline / tool result / artifact) ── */
+#include "plot.h"
+static bool tool_plot(const char *input, char *result, size_t rlen) {
+    if (!input || !input[0]) {
+        snprintf(result, rlen,
+            "{\"error\":\"plot needs JSON: {\\\"type\\\":\\\"line|bar|column|area|"
+            "scatter|hist|heatmap|box|candlestick|gauge|sparkline\\\",\\\"data\\\":[...]}\"}");
+        return false;
+    }
+    int n = plot_dispatch(input, result, rlen);
+    return n > 0;
 }
 
 static bool tool_context_compact(const char *input, char *result, size_t rlen) {
@@ -14004,7 +14018,7 @@ static bool tool_context_compact(const char *input, char *result, size_t rlen) {
     /* Step 2: Compact recent tool turns if aggressive */
     int compacted = 0;
     if (aggressive) {
-        while (conv_compact_recent_tool_turn(g_active_conv, max_chars)) {
+        while (conv_compact_recent_tool_turn(g_active_conv, max_chars, keep_recent)) {
             compacted++;
             if (compacted > 10) break;  /* safety cap */
         }
@@ -18419,35 +18433,314 @@ static bool tool_exit_plan_mode_compat(const char *input, char *result, size_t r
     return true;
 }
 
-static bool tool_ask_user_question_compat(const char *input, char *result, size_t rlen) {
-    char *question = json_get_str(input, "question");
-    char *questions = json_get_raw(input, "questions");
-    const char *display = question && question[0] ? question :
-                          questions && questions[0] ? questions :
-                          "Question requested";
+/* ── AskUserQuestion: dynamic dialog engine ──────────────────────────────
+ *
+ * Renders a full interactive multi-question modal (see tui_ask_questions):
+ *   - tab strip with per-question completion checkboxes
+ *   - per-question option lists with descriptions
+ *   - computed options (options_cmd runs a shell command at build time)
+ *   - conditional branching (show_if gates a question on another's answer)
+ *   - "Type something" free-text + "Chat about this" escape on every question
+ *   - a review/submit screen
+ *
+ * Hybrid drive model: a single call carries a rich spec; passing the same
+ * session_id on a later call REOPENS the session, preserving prior answers by
+ * id and appending any new (model-generated) follow-up questions.
+ * ──────────────────────────────────────────────────────────────────────── */
 
-    char answer[4096] = "";
-    if (isatty(STDIN_FILENO)) {
-        fprintf(stderr, "\nAskUserQuestion: %s\n> ", display);
-        fflush(stderr);
-        if (fgets(answer, sizeof(answer), stdin)) {
-            answer[strcspn(answer, "\r\n")] = '\0';
-        } else {
-            answer[0] = '\0';
+typedef struct {
+    char id[64];
+    bool active;
+    tui_ask_question_t q[TUI_ASK_MAX_QUESTIONS];
+    int  n;
+} ask_session_t;
+
+static ask_session_t s_ask_sessions[8];
+
+static ask_session_t *ask_session_find(const char *id) {
+    if (!id || !id[0]) return NULL;
+    for (int i = 0; i < (int)(sizeof s_ask_sessions / sizeof s_ask_sessions[0]); i++)
+        if (s_ask_sessions[i].active && strcmp(s_ask_sessions[i].id, id) == 0)
+            return &s_ask_sessions[i];
+    return NULL;
+}
+
+static ask_session_t *ask_session_alloc(const char *id) {
+    int n = (int)(sizeof s_ask_sessions / sizeof s_ask_sessions[0]);
+    for (int i = 0; i < n; i++)
+        if (!s_ask_sessions[i].active) {
+            memset(&s_ask_sessions[i], 0, sizeof(ask_session_t));
+            s_ask_sessions[i].active = true;
+            snprintf(s_ask_sessions[i].id, sizeof s_ask_sessions[i].id, "%s", id ? id : "");
+            return &s_ask_sessions[i];
         }
+    /* pool full — evict slot 0 */
+    memset(&s_ask_sessions[0], 0, sizeof(ask_session_t));
+    s_ask_sessions[0].active = true;
+    snprintf(s_ask_sessions[0].id, sizeof s_ask_sessions[0].id, "%s", id ? id : "");
+    return &s_ask_sessions[0];
+}
+
+/* options: array of objects {value?,label,description?} or bare strings */
+static void ask_option_cb(const char *el, void *ctx) {
+    tui_ask_question_t *q = (tui_ask_question_t *)ctx;
+    if (!el || q->n_options >= TUI_ASK_MAX_OPTIONS) return;
+    tui_ask_option_t *o = &q->options[q->n_options];
+    while (*el && isspace((unsigned char)*el)) el++;
+    if (*el == '"') {
+        ctx_decode_json_string_token(el, o->label, sizeof o->label);
+        if (!o->label[0]) return;
+        snprintf(o->value, sizeof o->value, "%s", o->label);
+        q->n_options++;
+        return;
+    }
+    char *label = json_get_str(el, "label");
+    char *value = json_get_str(el, "value");
+    char *desc  = json_get_str(el, "description");
+    if (label && label[0]) {
+        snprintf(o->label, sizeof o->label, "%s", label);
+        snprintf(o->value, sizeof o->value, "%s",
+                 (value && value[0]) ? value : label);
+        if (desc) snprintf(o->description, sizeof o->description, "%s", desc);
+        q->n_options++;
+    }
+    free(label); free(value); free(desc);
+}
+
+/* show_if "in": [ "...", ... ] — bare string values */
+static void ask_gateval_cb(const char *el, void *ctx) {
+    tui_ask_question_t *q = (tui_ask_question_t *)ctx;
+    if (!el || q->n_gate_vals >= TUI_ASK_MAX_GATEVALS) return;
+    char buf[128];
+    ctx_decode_json_string_token(el, buf, sizeof buf);
+    if (buf[0]) snprintf(q->gate_vals[q->n_gate_vals++], 128, "%s", buf);
+}
+
+/* Fill options from the line-oriented output of a shell command. */
+static void ask_fill_computed_options(tui_ask_question_t *q, const char *cmd) {
+    FILE *fp = popen(cmd, "r");
+    if (!fp) return;
+    char line[512];
+    while (q->n_options < TUI_ASK_MAX_OPTIONS && fgets(line, sizeof line, fp)) {
+        line[strcspn(line, "\r\n")] = '\0';
+        if (!line[0]) continue;
+        tui_ask_option_t *o = &q->options[q->n_options++];
+        snprintf(o->value, sizeof o->value, "%s", line);
+        snprintf(o->label, sizeof o->label, "%s", line);
+    }
+    pclose(fp);
+}
+
+typedef struct {
+    ask_session_t *s;
+    char gate_id[TUI_ASK_MAX_QUESTIONS][64];
+} ask_parse_ctx_t;
+
+static void ask_question_cb(const char *el, void *ctx) {
+    ask_parse_ctx_t *pc = (ask_parse_ctx_t *)ctx;
+    ask_session_t *s = pc->s;
+    if (!el || s->n >= TUI_ASK_MAX_QUESTIONS) return;
+    int idx = s->n;
+    tui_ask_question_t *q = &s->q[idx];
+    memset(q, 0, sizeof(*q));
+    q->gate_q = -1;
+
+    char *id       = json_get_str(el, "id");
+    char *header   = json_get_str(el, "header");
+    char *question = json_get_str(el, "question");
+    q->multi_select = json_get_bool(el, "multiSelect",
+                          json_get_bool(el, "multi_select", false));
+    q->allow_custom = json_get_bool(el, "allow_custom",
+                          json_get_bool(el, "allowCustom", true));
+    q->allow_chat   = json_get_bool(el, "allow_chat",
+                          json_get_bool(el, "allowChat", true));
+    if (id)       snprintf(q->id, sizeof q->id, "%s", id);
+    if (header)   snprintf(q->header, sizeof q->header, "%s", header);
+    else if (id)  snprintf(q->header, sizeof q->header, "%s", id);
+    if (question) snprintf(q->question, sizeof q->question, "%s", question);
+    free(id); free(header); free(question);
+
+    json_array_foreach(el, "options", ask_option_cb, q);
+
+    char *ocmd = json_get_str(el, "options_cmd");
+    if (!ocmd) ocmd = json_get_str(el, "optionsCmd");
+    if (ocmd && ocmd[0]) ask_fill_computed_options(q, ocmd);
+    free(ocmd);
+
+    char *showif = json_get_raw(el, "show_if");
+    if (!showif) showif = json_get_raw(el, "showIf");
+    if (showif && showif[0] && showif[0] == '{') {
+        char *gq = json_get_str(showif, "q");
+        if (!gq) gq = json_get_str(showif, "question");
+        if (gq) snprintf(pc->gate_id[idx], 64, "%s", gq);
+        free(gq);
+        char *eq = json_get_str(showif, "equals");
+        if (eq && eq[0] && q->n_gate_vals < TUI_ASK_MAX_GATEVALS)
+            snprintf(q->gate_vals[q->n_gate_vals++], 128, "%s", eq);
+        free(eq);
+        json_array_foreach(showif, "in", ask_gateval_cb, q);
+    }
+    free(showif);
+
+    s->n++;
+}
+
+/* Copy prior answer state from an old question with the same id (reopen). */
+static void ask_merge_prior(tui_ask_question_t *dst, const ask_session_t *old) {
+    if (!dst->id[0]) return;
+    for (int i = 0; i < old->n; i++) {
+        if (strcmp(old->q[i].id, dst->id) != 0) continue;
+        const tui_ask_question_t *src = &old->q[i];
+        dst->answered = src->answered;
+        snprintf(dst->custom, sizeof dst->custom, "%s", src->custom);
+        /* re-map selections by option value so reordered options still match */
+        for (int a = 0; a < dst->n_options; a++) {
+            for (int b = 0; b < src->n_options; b++) {
+                if (src->selected[b] &&
+                    strcmp(src->options[b].value, dst->options[a].value) == 0) {
+                    dst->selected[a] = true;
+                    break;
+                }
+            }
+        }
+        return;
+    }
+}
+
+bool dsco_run_ask_dialog(const char *input, char *result, size_t rlen) {
+    if (!input) input = "{}";
+    char *session_id = json_get_str(input, "session_id");
+    if (!session_id) session_id = json_get_str(input, "sessionId");
+    char *intro = json_get_str(input, "intro");
+
+    /* Parse incoming spec into a temp session. */
+    ask_session_t incoming;
+    memset(&incoming, 0, sizeof incoming);
+    ask_parse_ctx_t pc;
+    memset(&pc, 0, sizeof pc);
+    pc.s = &incoming;
+
+    char *questions = json_get_raw(input, "questions");
+    if (questions && questions[0] == '[') {
+        json_array_foreach(input, "questions", ask_question_cb, &pc);
+    }
+    /* Fallback: a bare "question" string becomes one free-text question. */
+    if (incoming.n == 0) {
+        char *q1 = json_get_str(input, "question");
+        tui_ask_question_t *q = &incoming.q[0];
+        memset(q, 0, sizeof(*q));
+        q->gate_q = -1;
+        q->allow_custom = true;
+        q->allow_chat = true;
+        snprintf(q->id, sizeof q->id, "q1");
+        snprintf(q->header, sizeof q->header, "Question");
+        snprintf(q->question, sizeof q->question, "%s",
+                 (q1 && q1[0]) ? q1 : "Please provide input");
+        incoming.n = 1;
+        free(q1);
     }
 
-    jbuf_t out;
-    jbuf_init(&out, strlen(display) + strlen(answer) + 96);
-    jbuf_append(&out, "{\"question\":");
-    jbuf_append_json_str(&out, display);
-    jbuf_append(&out, ",\"answer\":");
-    jbuf_append_json_str(&out, answer);
-    jbuf_append(&out, "}");
+    /* Resolve branching gates (id → index). */
+    for (int i = 0; i < incoming.n; i++) {
+        if (!pc.gate_id[i][0]) continue;
+        for (int j = 0; j < incoming.n; j++)
+            if (incoming.q[j].id[0] && strcmp(incoming.q[j].id, pc.gate_id[i]) == 0) {
+                incoming.q[i].gate_q = j;
+                break;
+            }
+    }
+
+    /* Reopen: merge prior answers by id, then persist merged spec. */
+    ask_session_t *sess = ask_session_find(session_id);
+    if (sess) {
+        for (int i = 0; i < incoming.n; i++)
+            ask_merge_prior(&incoming.q[i], sess);
+    } else if (session_id && session_id[0]) {
+        sess = ask_session_alloc(session_id);
+    }
+
+    /* Non-interactive: degrade gracefully — emit the spec so the model can
+     * fall back to asking in plain text. */
+    if (!isatty(STDIN_FILENO) || !isatty(STDERR_FILENO)) {
+        jbuf_t out; jbuf_init(&out, 256);
+        jbuf_append(&out, "{\"status\":\"no_tty\",\"questions\":[");
+        for (int i = 0; i < incoming.n; i++) {
+            if (i) jbuf_append(&out, ",");
+            jbuf_append(&out, "{\"id\":");
+            jbuf_append_json_str(&out, incoming.q[i].id);
+            jbuf_append(&out, ",\"question\":");
+            jbuf_append_json_str(&out, incoming.q[i].question);
+            jbuf_append(&out, "}");
+        }
+        jbuf_append(&out, "]}");
+        snprintf(result, rlen, "%s", out.data ? out.data : "{}");
+        jbuf_free(&out);
+        if (sess) { memcpy(sess->q, incoming.q, sizeof incoming.q); sess->n = incoming.n; }
+        free(session_id); free(intro); free(questions);
+        return true;
+    }
+
+    char chat[1280] = "";
+    tui_ask_status_t st = tui_ask_questions(incoming.q, incoming.n,
+                                            intro, chat, sizeof chat);
+
+    /* Persist merged + answered state back into the session for reopen. */
+    if (sess) { memcpy(sess->q, incoming.q, sizeof incoming.q); sess->n = incoming.n; }
+
+    const char *status_str = st == TUI_ASK_SUBMIT ? "submit" :
+                             st == TUI_ASK_CHAT   ? "chat"   : "cancel";
+
+    jbuf_t out; jbuf_init(&out, 512);
+    jbuf_append(&out, "{\"status\":");
+    jbuf_append_json_str(&out, status_str);
+    if (session_id && session_id[0]) {
+        jbuf_append(&out, ",\"session_id\":");
+        jbuf_append_json_str(&out, session_id);
+    }
+    if (st == TUI_ASK_CHAT && chat[0]) {
+        jbuf_append(&out, ",\"chat\":");
+        jbuf_append_json_str(&out, chat);
+    }
+    jbuf_append(&out, ",\"answers\":[");
+    bool first = true;
+    char val[1280];
+    for (int i = 0; i < incoming.n; i++) {
+        if (!tui_ask_question_visible(incoming.q, incoming.n, i)) continue;
+        tui_ask_question_t *q = &incoming.q[i];
+        if (!first) jbuf_append(&out, ",");
+        first = false;
+        jbuf_append(&out, "{\"id\":");
+        jbuf_append_json_str(&out, q->id);
+        jbuf_append(&out, ",\"header\":");
+        jbuf_append_json_str(&out, q->header);
+        jbuf_append(&out, ",\"question\":");
+        jbuf_append_json_str(&out, q->question);
+        jbuf_append(&out, ",\"answered\":");
+        jbuf_append(&out, q->answered ? "true" : "false");
+        tui_ask_answer_value(q, val, sizeof val);
+        jbuf_append(&out, ",\"value\":");
+        jbuf_append_json_str(&out, val);
+        if (q->custom[0]) {
+            jbuf_append(&out, ",\"custom\":");
+            jbuf_append_json_str(&out, q->custom);
+        }
+        jbuf_append(&out, ",\"selected\":[");
+        bool sf = true;
+        for (int o = 0; o < q->n_options; o++) {
+            if (!q->selected[o]) continue;
+            if (!sf) jbuf_append(&out, ",");
+            sf = false;
+            jbuf_append_json_str(&out, q->options[o].value[0]
+                                       ? q->options[o].value
+                                       : q->options[o].label);
+        }
+        jbuf_append(&out, "]}");
+    }
+    jbuf_append(&out, "]}");
     snprintf(result, rlen, "%s", out.data ? out.data : "{}");
     jbuf_free(&out);
-    free(question);
-    free(questions);
+
+    free(session_id); free(intro); free(questions);
     return true;
 }
 
@@ -19133,7 +19426,7 @@ static const tool_def_t s_tools[] = {
     { .name = "TaskList", .description = "Return the Claude-compatible todo list state.", .input_schema_json = "{\"type\":\"object\",\"properties\":{}}", .execute = tool_task_list_compat, .is_read_only = true, .is_concurrent = true },
     { .name = "EnterPlanMode", .description = "Enter Claude-compatible advisory plan mode.", .input_schema_json = "{\"type\":\"object\",\"properties\":{}}", .execute = tool_enter_plan_mode_compat },
     { .name = "ExitPlanMode", .description = "Exit Claude-compatible advisory plan mode.", .input_schema_json = "{\"type\":\"object\",\"properties\":{\"plan\":{\"type\":\"string\"}}}", .execute = tool_exit_plan_mode_compat },
-    { .name = "AskUserQuestion", .description = "Ask a user-facing clarification question.", .input_schema_json = "{\"type\":\"object\",\"properties\":{\"question\":{\"type\":\"string\"},\"questions\":{\"type\":\"array\"}},\"required\":[\"question\"]}", .execute = tool_ask_user_question_compat },
+    { .name = "AskUserQuestion", .description = "Show an interactive multi-question dialog to collect structured input from the user. Use when a response merits clarification. Supports option lists with descriptions, conditional branching (show_if), computed options (options_cmd), free-text + 'chat about this' escape hatches, and reopen-by-id to append follow-up questions while preserving prior answers. Returns {status:submit|cancel|chat|no_tty, answers:[{id,header,value,selected[],custom,answered}]}.", .input_schema_json = "{\"type\":\"object\",\"properties\":{\"session_id\":{\"type\":\"string\",\"description\":\"Reuse to reopen a prior dialog and append follow-ups; prior answers persist by question id.\"},\"intro\":{\"type\":\"string\"},\"question\":{\"type\":\"string\",\"description\":\"Shorthand for a single free-text question.\"},\"questions\":{\"type\":\"array\",\"items\":{\"type\":\"object\",\"properties\":{\"id\":{\"type\":\"string\"},\"header\":{\"type\":\"string\",\"description\":\"Short tab label.\"},\"question\":{\"type\":\"string\"},\"multiSelect\":{\"type\":\"boolean\"},\"allow_custom\":{\"type\":\"boolean\",\"description\":\"Offer 'Type something' free-text (default true).\"},\"allow_chat\":{\"type\":\"boolean\",\"description\":\"Offer 'Chat about this' deferral (default true).\"},\"options\":{\"type\":\"array\",\"items\":{\"type\":\"object\",\"properties\":{\"value\":{\"type\":\"string\"},\"label\":{\"type\":\"string\"},\"description\":{\"type\":\"string\"}}}},\"options_cmd\":{\"type\":\"string\",\"description\":\"Shell command whose output lines become options.\"},\"show_if\":{\"type\":\"object\",\"description\":\"Branch: show only if question {q} answered {equals} or value in {in:[...]}.\",\"properties\":{\"q\":{\"type\":\"string\"},\"equals\":{\"type\":\"string\"},\"in\":{\"type\":\"array\"}}}},\"required\":[\"question\"]}}}}", .execute = dsco_run_ask_dialog },
 
     /* ══════════════════════════════════════════════════════════════════════
      *  CORE FILE TOOLS (13)
@@ -19166,6 +19459,7 @@ static const tool_def_t s_tools[] = {
     { .name = "token_audit", .description = "Audit token usage across conversation.", .input_schema_json = "{\"type\":\"object\",\"properties\":{}}", .execute = tool_token_audit, .is_read_only = true, .is_concurrent = true },
     { .name = "context_status", .description = "Context window self-awareness: tokens, schema overhead, recommendations.", .input_schema_json = "{\"type\":\"object\",\"properties\":{}}", .execute = tool_context_status, .core = true, .is_read_only = true, .is_concurrent = true },
     { .name = "context_compact", .description = "Compress old conversation history to reclaim tokens.", .input_schema_json = "{\"type\":\"object\",\"properties\":{\"aggressive\":{\"type\":\"boolean\"}}}", .execute = tool_context_compact, .core = true },
+    { .name = "plot", .description = "Render data as a Unicode chart (returns ANSI/Unicode art). Types: line, bar, column, area, scatter, hist, heatmap, box, candlestick, gauge, sparkline, pie, waterfall, bullet, lollipop, slope, ecdf, calendar, ridgeline, violin, bignum. Uses subpixel Braille (2x4 dots/cell) for line/scatter/area/ridgeline, eighth-block bars, and 256-color heatmaps/calendars. Inline-printable and usable as a display artifact.", .input_schema_json = "{\"type\":\"object\",\"properties\":{\"type\":{\"type\":\"string\",\"description\":\"line|bar|column|area|scatter|hist|heatmap|box|candlestick|gauge|sparkline|pie|waterfall|bullet|lollipop|slope|ecdf|calendar|ridgeline|violin|bignum\"},\"series\":{\"type\":\"array\",\"items\":{\"type\":\"array\",\"items\":{\"type\":\"number\"}},\"description\":\"ridgeline: array of series\"},\"left\":{\"type\":\"array\",\"items\":{\"type\":\"number\"}},\"right\":{\"type\":\"array\",\"items\":{\"type\":\"number\"}},\"ranges\":{\"type\":\"array\",\"items\":{\"type\":\"number\"}},\"target\":{\"type\":\"number\"},\"data\":{\"type\":\"array\",\"items\":{\"type\":\"number\"},\"description\":\"primary series\"},\"x\":{\"type\":\"array\",\"items\":{\"type\":\"number\"}},\"labels\":{\"type\":\"array\",\"items\":{\"type\":\"string\"}},\"open\":{\"type\":\"array\",\"items\":{\"type\":\"number\"}},\"high\":{\"type\":\"array\",\"items\":{\"type\":\"number\"}},\"low\":{\"type\":\"array\",\"items\":{\"type\":\"number\"}},\"close\":{\"type\":\"array\",\"items\":{\"type\":\"number\"}},\"title\":{\"type\":\"string\"},\"width\":{\"type\":\"integer\"},\"height\":{\"type\":\"integer\"},\"bins\":{\"type\":\"integer\"},\"rows\":{\"type\":\"integer\"},\"cols\":{\"type\":\"integer\"},\"value\":{\"type\":\"number\"},\"min\":{\"type\":\"number\"},\"max\":{\"type\":\"number\"},\"color\":{\"type\":\"boolean\"},\"axes\":{\"type\":\"boolean\"}},\"required\":[\"type\",\"data\"]}", .execute = tool_plot, .is_read_only = true, .is_concurrent = true },
 
     /* ══════════════════════════════════════════════════════════════════════
      *  BROWSER & PERCEPTION (1)
@@ -19308,6 +19602,8 @@ static const tool_def_t s_tools[] = {
     { .name = "scratchpad", .description = "Read/write scratchpad for temporary data.", .input_schema_json = "{\"type\":\"object\",\"properties\":{\"action\":{\"type\":\"string\",\"description\":\"read|write|clear\"},\"content\":{\"type\":\"string\"}}}", .execute = tool_scratchpad, .core = true },  /* mixed: read=RO, write/clear=write */
     { .name = "self_exit", .description = "Gracefully exit the agent loop.", .input_schema_json = "{\"type\":\"object\",\"properties\":{\"reason\":{\"type\":\"string\"}}}", .execute = tool_self_exit, .core = true },
     { .name = "self_exiting", .description = "Legacy alias for self_exit.", .input_schema_json = "{\"type\":\"object\",\"properties\":{\"reason\":{\"type\":\"string\"}}}", .execute = tool_self_exiting, .core = true },
+    { .name = "self_improve", .description = "Run the self-improvement loop: summary, consolidate, acknowledge suggestions, load/save history. Actions: summary|consolidate|acknowledge|history|save.", .input_schema_json = "{\"type\":\"object\",\"properties\":{\"action\":{\"type\":\"string\",\"description\":\"summary|consolidate|acknowledge|history|save\"},\"suggestion_id\":{\"type\":\"integer\",\"description\":\"1-based suggestion ID for acknowledge\"}},\"required\":[\"action\"]}", .execute = tool_self_improve, .is_read_only = true, .is_concurrent = false },
+    { .name = "self_assess", .description = "Quick self-evaluation of current session performance. Returns efficiency score, top issues, and recommendations. No input required.", .input_schema_json = "{\"type\":\"object\",\"properties\":{}}", .execute = tool_self_assess, .is_read_only = true, .is_concurrent = true },
     {
         .name = "StartOfLoopConstruct",
         .description =

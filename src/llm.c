@@ -553,8 +553,14 @@ static char *tool_result_compact_preview(const msg_content_t *mc, int max_chars)
     return trimmed;
 }
 
-bool conv_compact_recent_tool_turn(conversation_t *c, int max_chars) {
+bool conv_compact_recent_tool_turn(conversation_t *c, int max_chars,
+                                   int protect_tail) {
     if (!c || c->count <= 0) return false;
+
+    /* A negative window means "use a safe default"; an explicit 0 opts out of
+     * protection entirely (used by mechanics unit tests). Production callers
+     * pass a positive window so the live tool turn is never collapsible. */
+    if (protect_tail < 0) protect_tail = 4;
 
     int assistant_idx = -1;
     for (int i = c->count - 1; i >= 0; i--) {
@@ -579,6 +585,17 @@ bool conv_compact_recent_tool_turn(conversation_t *c, int max_chars) {
         if (message_sendable_count(m) > 0) break;
     }
     if (result_idx < 0) return false;
+
+    /* Invariant: never compact a tool turn inside the protected trailing
+     * window. The most-recent tool turn is the one the model is about to read
+     * for the first time; rewriting it to a "Used tools: …" stub + a tiny
+     * preview both starves the model (it re-reads the same file endlessly —
+     * the ~728-char read truncation loop) and frequently yields a degenerate
+     * tool-less assistant turn, which the agent loop reads as "no tool_use →
+     * done" and ends mid-task. The agent loop already avoids this for its own
+     * calls; enforcing it here closes the model-invoked context_compact and
+     * any auto-replay path too. Old turns (outside the window) stay eligible. */
+    if (result_idx >= c->count - protect_tail) return false;
 
     message_t *assistant = &c->msgs[assistant_idx];
     message_t *user = &c->msgs[result_idx];

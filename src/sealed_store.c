@@ -183,6 +183,17 @@ void sealed_store_wipe_all(void) {
     pthread_mutex_unlock(&s_lock);
 }
 
+const char *sealed_store_peek(const char *key) {
+    if (!key) return NULL;
+    pthread_mutex_lock(&s_lock);
+    sealed_entry_t *e = find(key);
+    /* The entry's val buffer lives in the static s_entries array and is never
+     * relocated, so the pointer stays valid until the entry is wiped. */
+    const char *p = (e && e->live) ? e->val : NULL;
+    pthread_mutex_unlock(&s_lock);
+    return p;
+}
+
 const char *sealed_getenv(const char *key) {
     static _Thread_local char tls_buf[SEALED_VAL_MAX];
     if (sealed_store_get(key, tls_buf, sizeof(tls_buf)) >= 0 && tls_buf[0])
