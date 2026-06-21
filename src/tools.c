@@ -7559,6 +7559,8 @@ static bool tool_topology_solve(const char *input, char *result, size_t rlen) {
             tr[0] = '\0';
             topology_run_stats_t st;
             bool ok = topology_run(t, api_key, anchor, task, tr, MAX_TOOL_RESULT, &st);
+            self_improve_record_swarm_outcome(&g_self_improve, t->name, 8,
+                                              ok && st.est_cost_usd >= 0, 0.8, 0);
             char hdr[128];
             snprintf(hdr, sizeof(hdr),
                      "\n\n===== topology \"%s\" [%s] (%s) =====\n",
@@ -13557,6 +13559,7 @@ static bool tool_talons_goal_advance(const char *input, char *result, size_t rle
     } else if (strcasecmp(action, "capture") == 0) {
         ok = talons_goal_capture(&g_talons, goal_id, res_text, cost);
         new_state = "captured";
+        self_improve_record_goal_state(&g_self_improve, "talons", 4 /*captured*/, 0, 0);
     } else if (strcasecmp(action, "escaped") == 0) {
         bool retrying = talons_goal_escaped(&g_talons, goal_id, res_text, cost);
         new_state = retrying ? "stalking (retry)" : "escaped";
