@@ -3,6 +3,7 @@
 #include <math.h>
 #include <stdio.h>
 #include <string.h>
+#include <stdlib.h>
 #include <sys/time.h>
 
 /* §6: Event loop integration — register a periodic timer for pheromone decay */
@@ -302,10 +303,136 @@ int pheromone_to_json(const pheromone_field_t *f, char *buf, size_t len) {
 }
 
 bool pheromone_from_json(pheromone_field_t *f, const char *json) {
-    (void)f; (void)json;
-    /* Minimal stub — full JSON parsing deferred to tools.c integration */
-    return false;
+    if (!f || !json || !f->initialized) return false;
+
+    /*
+     * Parse the array produced by pheromone_to_json:
+     *   {"signals":[{"id":N,"type":"T","concentration":C,
+     *                "region":"R","source":"S","age":A,
+     *                "decay":"D","lambda":L}, ...]}
+     *
+     * Each surviving signal is re-deposited with its stored concentration
+     * and a deposit_time adjusted so its age is preserved relative to now.
+     * Uses simple substring extraction — no external JSON library.
+     */
+
+    const char *arr = strstr(json, "\"signals\":[");
+    if (!arr) return false;
+    arr = strchr(arr, '[');
+    if (!arr) return false;
+    arr++;
+
+    int loaded = 0;
+    double now = now_sec();
+
+    static const char *s_decay_names[] = {
+        "EXPONENTIAL","LINEAR","STEP","LOGARITHMIC","SIGMOID", NULL
+    };
+
+    while (*arr && *arr != ']') {
+        /* advance to next { */
+        while (*arr && *arr != '{') arr++;
+        if (*arr != '{') break;
+
+        /* find matching } */
+        const char *obj_end = arr + 1;
+        int depth = 1;
+        while (*obj_end && depth > 0) {
+            if      (*obj_end == '{') depth++;
+            else if (*obj_end == '}') depth--;
+            obj_end++;
+        }
+
+        /* --- field extraction helpers (operate within [arr, obj_end)) --- */
+#define PFJ_STR(key, dst, dsz) do {                                     \
+    const char *_pk = strstr(arr, "\"" key "\":\"");                    \
+    if (_pk && _pk < obj_end) {                                         \
+        _pk += (int)sizeof("\"" key "\":\"") - 1;                       \
+        const char *_pe = memchr(_pk, '"', (size_t)(obj_end - _pk));   \
+        if (_pe) {                                                       \
+            size_t _n = (size_t)(_pe - _pk);                            \
+            if (_n >= (dsz)) _n = (dsz) - 1;                           \
+            memcpy((dst), _pk, _n);                                     \
+            ((char*)(dst))[_n] = '\0';                                  \
+        }                                                                \
+    }                                                                    \
+} while(0)
+
+#define PFJ_DBL(key, dst) do {                                          \
+    const char *_pk = strstr(arr, "\"" key "\":");                      \
+    if (_pk && _pk < obj_end) {                                         \
+        _pk += (int)sizeof("\"" key "\":") - 1;                         \
+        while (*_pk == ' ') _pk++;                                      \
+        (dst) = strtod(_pk, NULL);                                      \
+    }                                                                    \
+} while(0)
+
+        char   type_str[32]                        = "PROGRESS";
+        char   region_str[PHEROMONE_MAX_REGION_LEN] = "";
+        char   source_str[PHEROMONE_MAX_SOURCE_LEN] = "";
+        char   decay_str[32]                        = "EXPONENTIAL";
+        double concentration = 0.0, age_s = 0.0;
+        double lambda = PHEROMONE_DEFAULT_LAMBDA;
+
+        PFJ_STR("type",   type_str,   sizeof(type_str));
+        PFJ_STR("region", region_str, sizeof(region_str));
+        PFJ_STR("source", source_str, sizeof(source_str));
+        PFJ_STR("decay",  decay_str,  sizeof(decay_str));
+        PFJ_DBL("concentration", concentration);
+        PFJ_DBL("age",           age_s);
+        PFJ_DBL("lambda",        lambda);
+
+#undef PFJ_STR
+#undef PFJ_DBL
+
+        /* resolve type enum */
+        pheromone_type_t ptype = PHERO_PROGRESS;
+        for (int ti = 0; ti < PHERO_TYPE_COUNT; ti++) {
+            if (strcmp(TYPE_NAMES[ti], type_str) == 0) {
+                ptype = (pheromone_type_t)ti;
+                break;
+            }
+        }
+
+        /* resolve decay enum */
+        pheromone_decay_t pdecay = PHERO_DECAY_EXPONENTIAL;
+        for (int di = 0; s_decay_names[di]; di++) {
+            if (strcmp(s_decay_names[di], decay_str) == 0) {
+                pdecay = (pheromone_decay_t)di;
+                break;
+            }
+        }
+
+        /* only restore signals that are still alive */
+        if (concentration >= PHEROMONE_CLEANUP_THRESHOLD && region_str[0]) {
+            double synthetic_deposit = now - age_s;
+
+            for (int si = 0; si < PHEROMONE_MAX_SIGNALS; si++) {
+                if (f->signals[si].active) continue;
+                pheromone_signal_t *s = &f->signals[si];
+                memset(s, 0, sizeof(*s));
+                s->id            = ++f->next_id;
+                s->type          = ptype;
+                s->concentration = concentration;
+                s->initial       = concentration;
+                s->deposit_time  = synthetic_deposit;
+                s->decay_fn      = pdecay;
+                s->lambda        = (lambda > 0.0) ? lambda : PHEROMONE_DEFAULT_LAMBDA;
+                s->active        = true;
+                strncpy(s->region, region_str, PHEROMONE_MAX_REGION_LEN - 1);
+                strncpy(s->source, source_str, PHEROMONE_MAX_SOURCE_LEN - 1);
+                f->count++;
+                loaded++;
+                break;
+            }
+        }
+
+        arr = obj_end;
+    }
+
+    return loaded > 0;
 }
+
 
 int pheromone_status_json(const pheromone_field_t *f, char *buf, size_t len) {
     if (!f || !buf) return 0;

@@ -27,11 +27,21 @@
 typedef struct {
     char   name[48];               /* topology name */
     double cost_per_1k_ema;        /* EMA of cost / 1K tokens */
+    double cost_per_1k_var;        /* EMA of variance for CI computation */
     double latency_ema;            /* EMA of latency (seconds) */
     int    observations;
     double last_actual_cost;
     time_t last_updated;
 } cost_entry_t;
+
+/* Adaptive EMA alpha: high early (fast learning), stabilises after 10 obs */
+static double adaptive_alpha(int observations) {
+    if (observations <= 0)  return 1.0;
+    if (observations <= 3)  return 0.60;
+    if (observations <= 7)  return 0.35;
+    if (observations <= 15) return 0.20;
+    return 0.10;                        /* stable long-run */
+}
 
 static cost_entry_t s_entries[MAX_ENTRIES];
 static int          s_count    = 0;
@@ -174,15 +184,19 @@ void cost_model_learn(const char *topology_name,
     if (!e) { pthread_mutex_unlock(&s_mu); return; }
 
     if (e->observations == 0) {
-        /* First observation — seed directly */
+        /* First observation — seed directly, zero variance */
         e->cost_per_1k_ema = new_per_1k;
+        e->cost_per_1k_var = 0.0;
         e->latency_ema     = actual_latency_s;
     } else {
-        /* EMA update */
-        e->cost_per_1k_ema = EMA_ALPHA * new_per_1k
-                           + (1.0 - EMA_ALPHA) * e->cost_per_1k_ema;
-        e->latency_ema     = EMA_ALPHA * actual_latency_s
-                           + (1.0 - EMA_ALPHA) * e->latency_ema;
+        /* Adaptive EMA: converges fast early, stabilises after 10 obs */
+        double alpha = adaptive_alpha(e->observations);
+        double delta = new_per_1k - e->cost_per_1k_ema;
+        e->cost_per_1k_ema += alpha * delta;
+        /* Welford-style EMA variance */
+        e->cost_per_1k_var  = (1.0 - alpha) * (e->cost_per_1k_var + alpha * delta * delta);
+        e->latency_ema      = alpha * actual_latency_s
+                            + (1.0 - alpha) * e->latency_ema;
     }
 
     e->last_actual_cost = actual_cost_usd;
@@ -247,14 +261,63 @@ int cost_model_stats_json(char *buf, size_t buflen) {
     for (int i = 0; i < s_count && rem > 8; i++) {
         const cost_entry_t *e = &s_entries[i];
         n = snprintf(p, rem,
-            "%s{\"name\":\"%s\",\"cost_per_1k\":%.6f,\"lat_s\":%.2f,\"obs\":%d}",
-            i ? "," : "", e->name, e->cost_per_1k_ema, e->latency_ema, e->observations);
+            "%s{\"name\":\"%s\",\"cost_per_1k\":%.6f,\"cost_stddev\":%.6f,\"lat_s\":%.2f,\"obs\":%d}",
+            i ? "," : "", e->name, e->cost_per_1k_ema, sqrt(e->cost_per_1k_var), e->latency_ema, e->observations);
         p += n; rem -= (size_t)n;
     }
     snprintf(p, rem, "]}");
 
     pthread_mutex_unlock(&s_mu);
     return (int)(buflen - rem);
+}
+
+
+/* cost_model_predict_full — point estimate + 80% confidence interval.
+ *
+ * CI uses ±1.28σ (80%) around the EMA mean.  For early observations
+ * (< 5) the interval is widened by an uncertainty multiplier so callers
+ * can signal "we're not sure yet."
+ */
+bool cost_model_predict_full(const char *topology_name,
+                             int input_tokens, int output_tokens,
+                             cost_prediction_t *out) {
+    if (!topology_name || !out) return false;
+
+    pthread_mutex_lock(&s_mu);
+    load_locked();
+
+    bool found = false;
+    for (int i = 0; i < s_count; i++) {
+        cost_entry_t *e = &s_entries[i];
+        if (strcmp(e->name, topology_name) != 0) continue;
+        if (e->observations < 1) break;
+
+        double units   = (input_tokens + output_tokens) / 1000.0;
+        if (units < 1.0) units = 1.0;
+
+        double mean    = e->cost_per_1k_ema * units;
+        double stddev  = sqrt(e->cost_per_1k_var) * units;
+
+        /* Widen CI if few observations */
+        double k = 1.28;   /* 80% CI */
+        if (e->observations < 5) k *= (1.0 + (5.0 - e->observations) * 0.30);
+
+        out->cost_usd    = mean;
+        out->cost_lo     = mean - k * stddev;
+        if (out->cost_lo < 0.0) out->cost_lo = 0.0;
+        out->cost_hi     = mean + k * stddev;
+        out->latency_s   = (e->observations >= 2) ? e->latency_ema : -1.0;
+        out->confidence  = (e->observations >= 10) ? 0.90
+                         : (e->observations >= 5)  ? 0.70
+                         : (e->observations >= 2)  ? 0.50
+                         :                           0.20;
+        out->observations = e->observations;
+        found = true;
+        break;
+    }
+
+    pthread_mutex_unlock(&s_mu);
+    return found;
 }
 
 void cost_model_flush(void) {

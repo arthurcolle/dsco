@@ -55,6 +55,7 @@ void plan_engine_init(void) {
             free(s_atoms[i].prompt);
             free(s_atoms[i].response);
             free(s_atoms[i].condition);
+            free(s_atoms[i].wired_input);
         }
     }
     for (int i = 0; i < DIALOG_MAX; i++) {
@@ -103,8 +104,11 @@ static atom_t *atom_alloc(void) {
     for (int i = 0; i < ATOM_MAX; i++) {
         if (!s_atoms[i].active) {
             memset(&s_atoms[i], 0, sizeof(s_atoms[i]));
-            s_atoms[i].active = true;
-            s_atoms[i].id     = s_next_atom_id++;
+            s_atoms[i].active           = true;
+            s_atoms[i].id               = s_next_atom_id++;
+            s_atoms[i].input_from_count = 0;
+            s_atoms[i].output_to_count  = 0;
+            s_atoms[i].wired_input      = NULL;
             return &s_atoms[i];
         }
     }
@@ -567,12 +571,183 @@ bool atom_set_result(int atom_id, const char *result) {
 
 /* ── atom_run ────────────────────────────────────────────────────────────── */
 
+
+/* ══════════════════════════════════════════════════════════════════════════
+ * Stateful Atom Wiring (Priority 2)
+ * ══════════════════════════════════════════════════════════════════════════ */
+
+bool atom_wire(int src_atom_id, int dst_atom_id, const char *key) {
+    atom_t *src = atom_get(src_atom_id);
+    atom_t *dst = atom_get(dst_atom_id);
+    if (!src || !dst) return false;
+    if (src == dst)  return false;
+
+    /* Register input_from on dst */
+    if (dst->input_from_count >= ATOM_MAX_DEPS) return false;
+    for (int i = 0; i < dst->input_from_count; i++) {
+        if (dst->input_from_ids[i] == src_atom_id) return true; /* already wired */
+    }
+    dst->input_from_ids[dst->input_from_count] = src_atom_id;
+    if (key && *key) {
+        strncpy(dst->input_keys[dst->input_from_count], key, 63);
+        dst->input_keys[dst->input_from_count][63] = '\0';
+    } else {
+        dst->input_keys[dst->input_from_count][0] = '\0';
+    }
+    dst->input_from_count++;
+
+    /* Register output_to on src */
+    if (src->output_to_count < ATOM_MAX_DEPS) {
+        bool already = false;
+        for (int i = 0; i < src->output_to_count; i++) {
+            if (src->output_to_ids[i] == dst_atom_id) { already = true; break; }
+        }
+        if (!already)
+            src->output_to_ids[src->output_to_count++] = dst_atom_id;
+    }
+    return true;
+}
+
+bool atom_unwire(int src_atom_id, int dst_atom_id) {
+    atom_t *src = atom_get(src_atom_id);
+    atom_t *dst = atom_get(dst_atom_id);
+    if (!src || !dst) return false;
+
+    /* Remove from dst->input_from_ids */
+    for (int i = 0; i < dst->input_from_count; i++) {
+        if (dst->input_from_ids[i] == src_atom_id) {
+            memmove(&dst->input_from_ids[i], &dst->input_from_ids[i+1],
+                    (size_t)(dst->input_from_count - i - 1) * sizeof(int));
+            memmove(&dst->input_keys[i], &dst->input_keys[i+1],
+                    (size_t)(dst->input_from_count - i - 1) * sizeof(dst->input_keys[0]));
+            dst->input_from_count--;
+            break;
+        }
+    }
+
+    /* Remove from src->output_to_ids */
+    for (int i = 0; i < src->output_to_count; i++) {
+        if (src->output_to_ids[i] == dst_atom_id) {
+            memmove(&src->output_to_ids[i], &src->output_to_ids[i+1],
+                    (size_t)(src->output_to_count - i - 1) * sizeof(int));
+            src->output_to_count--;
+            break;
+        }
+    }
+    return true;
+}
+
+/* Build a JSON object merging all upstream atom results.
+ * For each upstream: if key is set, extract {"key": value};
+ * otherwise include the full result string under "atom_<id>". */
+char *atom_resolve_inputs(int atom_id) {
+    atom_t *dst = atom_get(atom_id);
+    if (!dst || dst->input_from_count == 0) return NULL;
+
+    /* Rough size estimate: 64 bytes overhead + 2048 per upstream */
+    size_t cap = 64 + (size_t)dst->input_from_count * 2048;
+    char *buf = malloc(cap);
+    if (!buf) return NULL;
+
+    size_t pos = 0;
+    buf[pos++] = '{';
+
+    for (int i = 0; i < dst->input_from_count; i++) {
+        atom_t *up = atom_get(dst->input_from_ids[i]);
+        const char *data = (up && up->result) ? up->result : "null";
+        const char *key  = dst->input_keys[i];
+
+        if (i > 0 && pos < cap - 1) buf[pos++] = ',';
+
+        char field_name[80];
+        if (key && *key) {
+            snprintf(field_name, sizeof(field_name), "%s", key);
+        } else {
+            snprintf(field_name, sizeof(field_name), "atom_%d", dst->input_from_ids[i]);
+        }
+
+        /* If key extraction requested and data looks like JSON object, try to extract */
+        if (key && *key && data[0] == '{') {
+            /* Look for "key": in the JSON (simple scan) */
+            char search[80];
+            snprintf(search, sizeof(search), "\"%s\":", key);
+            const char *found = strstr(data, search);
+            if (found) {
+                found += strlen(search);
+                /* Skip whitespace */
+                while (*found == ' ' || *found == '\t') found++;
+                /* Copy until matching delimiter */
+                int wrote = snprintf(buf + pos, cap - pos,
+                    "\"%s\":", field_name);
+                pos += (size_t)wrote;
+                /* Copy value as-is until next comma or } at depth 0 */
+                int depth = 0;
+                bool in_str = false;
+                while (*found && pos < cap - 2) {
+                    char c = *found;
+                    if (!in_str) {
+                        if (c == '{' || c == '[') depth++;
+                        else if (c == '}' || c == ']') {
+                            if (depth == 0) break;
+                            depth--;
+                        } else if (c == ',' && depth == 0) break;
+                    }
+                    if (c == '"'  && (found == data || *(found-1) != '\\')) in_str = !in_str;
+                    buf[pos++] = c;
+                    found++;
+                }
+                continue;
+            }
+        }
+
+        /* Default: embed full result as string */
+        int wrote = snprintf(buf + pos, cap - pos, "\"%s\":", field_name);
+        pos += (size_t)wrote;
+        /* Emit data: if it looks like JSON, embed directly; else as string */
+        if (data[0] == '{' || data[0] == '[' || data[0] == '"'
+            || strcmp(data, "null") == 0) {
+            size_t dlen = strlen(data);
+            if (pos + dlen < cap - 2) {
+                memcpy(buf + pos, data, dlen);
+                pos += dlen;
+            }
+        } else {
+            /* Encode as JSON string */
+            buf[pos++] = '"';
+            for (const char *p = data; *p && pos < cap - 4; p++) {
+                if (*p == '"'  || *p == '\\') buf[pos++] = '\\';
+                buf[pos++] = *p;
+            }
+            buf[pos++] = '"';
+        }
+    }
+
+    if (pos < cap - 1) buf[pos++] = '}';
+    buf[pos] = '\0';
+    return buf;
+}
+
 bool atom_run(int atom_id, char *result_buf, size_t rlen) {
     atom_t *a = atom_find(atom_id);
     if (!a || !result_buf || rlen == 0) return false;
 
     result_buf[0] = '\0';
     a->status     = PLAN_IN_PROGRESS;
+
+    /* Resolve wired inputs before execution (Priority 2: Stateful Atoms).
+     * If upstream atoms are wired in, prepend their results as input. */
+    if (a->input_from_count > 0) {
+        char *upstream = atom_resolve_inputs(atom_id);
+        if (upstream) {
+            free(a->wired_input);
+            a->wired_input = upstream;
+            /* Use upstream JSON as input if no explicit input_json set */
+            if (!a->input_json || !a->input_json[0]) {
+                free(a->input_json);
+                a->input_json = strdup(upstream);
+            }
+        }
+    }
 
     bool ok = false;
 
