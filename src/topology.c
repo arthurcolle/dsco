@@ -648,6 +648,15 @@ const topology_t *topology_auto_select(const char *task) {
     topology_registry_init();
     if (!task || !task[0]) return topology_find("triage");
 
+    /* Phase 1: scored semantic profiling via task_profile() */
+    task_profile_t *tp = task_profile(task, NULL);
+    if (tp) {
+        const topology_t *best = task_profile_best_topology(tp);
+        task_profile_free(tp);
+        if (best) return best;
+    }
+
+    /* Fallback: enum-based keyword matching */
     topology_task_profile_t profile;
     if (!topology_profile_task(task, &profile)) return topology_find("triage");
 

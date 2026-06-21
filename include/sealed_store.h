@@ -63,4 +63,10 @@ void sealed_store_wipe_all(void);
  * Returns static pointer valid until next wipe — do NOT free. */
 const char *sealed_getenv(const char *key);
 
+/* Return a direct, stable pointer to the interned value for *key, or NULL if
+ * not present.  Unlike sealed_getenv(), this does NOT fall back to getenv() or
+ * intern anything, and the returned pointer is stable for the lifetime of the
+ * entry (until wiped) rather than rotating per-call.  Do NOT free or modify. */
+const char *sealed_store_peek(const char *key);
+
 #endif /* DSCO_SEALED_STORE_H */

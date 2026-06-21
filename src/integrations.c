@@ -1022,6 +1022,10 @@ bool tool_weather(const char *input, char *result, size_t rlen) {
 
     char *units = json_get_str(input, "units");
     const char *u = (units && units[0]) ? units : "metric";
+    /* Unit-aware labels: metric=°C/m·s⁻¹, imperial=°F/mph, standard=K/m·s⁻¹ */
+    const char *tsym = (strcmp(u, "imperial") == 0) ? "°F"
+                     : (strcmp(u, "standard") == 0) ? "K" : "°C";
+    const char *wsym = (strcmp(u, "imperial") == 0) ? "mph" : "m/s";
 
     CURL *curl = curl_easy_init();
     char *enc = curl_easy_escape(curl, location, 0);
@@ -1045,28 +1049,69 @@ bool tool_weather(const char *input, char *result, size_t rlen) {
 
     /* Format a readable response */
     if (resp.data) {
-        char *name = json_get_str(resp.data, "name");
-        char *main = json_get_raw(resp.data, "main");
+        char *name    = json_get_str(resp.data, "name");
+        char *main    = json_get_raw(resp.data, "main");
         char *weather = json_get_raw(resp.data, "weather");
-        char *wind = json_get_raw(resp.data, "wind");
+        char *wind    = json_get_raw(resp.data, "wind");
+        char *clouds  = json_get_raw(resp.data, "clouds");
+        char *sys     = json_get_raw(resp.data, "sys");
 
-        double temp = main ? json_get_int(main, "temp", 0) : 0;
-        double feels = main ? json_get_int(main, "feels_like", 0) : 0;
-        int humidity = main ? json_get_int(main, "humidity", 0) : 0;
-        double wind_speed = wind ? json_get_int(wind, "speed", 0) : 0;
-        char *desc = weather ? json_get_str(weather, "description") : NULL;
+        double temp     = main ? json_get_double(main, "temp", 0)       : 0;
+        double feels    = main ? json_get_double(main, "feels_like", 0) : 0;
+        double tmin     = main ? json_get_double(main, "temp_min", 0)   : 0;
+        double tmax     = main ? json_get_double(main, "temp_max", 0)   : 0;
+        int humidity    = main ? json_get_int(main, "humidity", 0)      : 0;
+        int pressure    = main ? json_get_int(main, "pressure", 0)      : 0;
+        double wind_spd = wind ? json_get_double(wind, "speed", 0)      : 0;
+        int wind_deg    = wind ? json_get_int(wind, "deg", -1)          : -1;
+        double gust     = wind ? json_get_double(wind, "gust", 0)       : 0;
+        int cloud_pct   = clouds ? json_get_int(clouds, "all", -1)      : -1;
+        char *country   = sys ? json_get_str(sys, "country") : NULL;
 
-        snprintf(result, rlen,
-                 "%s: %.1f°C (feels like %.1f°C)\n"
-                 "Conditions: %s\n"
-                 "Humidity: %d%%\n"
-                 "Wind: %.1f m/s",
+        /* weather is a JSON array [{...}] — drill into the first element so
+         * the "main"/"description" keys resolve (json_get_str needs a '{'). */
+        char *desc = NULL, *cond = NULL;
+        if (weather) {
+            const char *w0 = strchr(weather, '{');
+            if (w0) {
+                desc = json_get_str(w0, "description");
+                cond = json_get_str(w0, "main");
+            }
+        }
+
+        /* 16-point compass from wind bearing for human-readable direction */
+        static const char *compass[16] = {
+            "N","NNE","NE","ENE","E","ESE","SE","SSE",
+            "S","SSW","SW","WSW","W","WNW","NW","NNW" };
+        const char *dir = (wind_deg >= 0)
+            ? compass[(((wind_deg % 360) * 4 + 45) / 90) % 16] : NULL;
+
+        int n = snprintf(result, rlen,
+                 "%s%s%s: %.1f%s (feels like %.1f%s)\n"
+                 "Conditions: %s%s%s%s\n"
+                 "Range: %.1f%s – %.1f%s\n"
+                 "Humidity: %d%%   Pressure: %d hPa",
                  name ? name : "Unknown",
-                 temp, feels,
-                 desc ? desc : "unknown",
-                 humidity, wind_speed);
+                 country ? ", " : "", country ? country : "",
+                 temp, tsym, feels, tsym,
+                 cond ? cond : "Unknown",
+                 desc ? " (" : "", desc ? desc : "", desc ? ")" : "",
+                 tmin, tsym, tmax, tsym,
+                 humidity, pressure);
 
-        free(name); free(main); free(weather); free(wind); free(desc);
+        if (n > 0 && (size_t)n < rlen && cloud_pct >= 0)
+            n += snprintf(result + n, rlen - (size_t)n,
+                          "   Cloud cover: %d%%", cloud_pct);
+
+        if (n > 0 && (size_t)n < rlen) {
+            n += snprintf(result + n, rlen - (size_t)n, "\nWind: %.1f %s", wind_spd, wsym);
+            if (dir) n += snprintf(result + n, rlen - (size_t)n, " from %s (%d°)", dir, wind_deg);
+            if (gust > 0 && (size_t)n < rlen)
+                snprintf(result + n, rlen - (size_t)n, ", gusting %.1f %s", gust, wsym);
+        }
+
+        free(name); free(main); free(weather); free(wind); free(clouds);
+        free(sys); free(country); free(desc); free(cond);
     }
     free(resp.data);
     return true;
@@ -5925,7 +5970,6 @@ bool tool_nws(const char *input, char *result, size_t rlen) {
     jbuf_t url;
     jbuf_init(&url, 512);
     const char *ua = "User-Agent: (dsco-cli, agent@distributed.systems)";
-    const char *accept = "Accept: application/geo+json";
 
     if (strcmp(action, "station_obs") == 0) {
         char *stid = json_get_str(input, "stid");
@@ -5950,7 +5994,6 @@ bool tool_nws(const char *input, char *result, size_t rlen) {
         snprintf(points_url, sizeof(points_url),
                  "https://api.weather.gov/points/%s,%s", lat, lon);
 
-        const char *hdrs[] = { ua, accept };
         http_buf_t pts = {0};
         long st = http_get_authed(points_url, ua, &pts);
         if (st != 200 || !pts.data) {
@@ -5960,16 +6003,14 @@ bool tool_nws(const char *input, char *result, size_t rlen) {
             return false;
         }
 
-        /* Extract forecast URL from response */
+        /* Extract forecast URL from response (nested under properties) */
         const char *key = (strcmp(action, "hourly") == 0) ? "forecastHourly" : "forecast";
-        char *forecast_url = json_get_str(pts.data, key);
-        if (!forecast_url && pts.data) {
-            /* Try nested under properties */
-            char nested_key[64];
-            snprintf(nested_key, sizeof(nested_key), "properties.%s", key);
-            forecast_url = json_get_str(pts.data, nested_key);
+        char *props = json_get_raw(pts.data, "properties");
+        char *forecast_url = NULL;
+        if (props && props[0]) {
+            forecast_url = json_get_str(props, key);
         }
-        free(pts.data);
+        free(props); free(pts.data);
         free(lat); free(lon);
 
         if (!forecast_url || !forecast_url[0]) {
@@ -6012,11 +6053,15 @@ bool tool_nws(const char *input, char *result, size_t rlen) {
             http_buf_t pts = {0};
             long st = http_get_authed(points_url, ua, &pts);
             if (st == 200 && pts.data) {
-                char *obs_url = json_get_str(pts.data, "properties.observationStations");
-                if (obs_url) {
-                    jbuf_append(&url, obs_url);
-                    free(obs_url);
+                char *props = json_get_raw(pts.data, "properties");
+                if (props && props[0]) {
+                    char *obs_url = json_get_str(props, "observationStations");
+                    if (obs_url) {
+                        jbuf_append(&url, obs_url);
+                        free(obs_url);
+                    }
                 }
+                free(props);
             }
             free(pts.data);
         }

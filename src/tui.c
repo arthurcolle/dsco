@@ -2,6 +2,7 @@
 #include "config.h"
 #include "presence.h"
 #include "touchid.h"
+#include "dist_logo.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -72,6 +73,19 @@ void tui_cursor_show(void)    { fprintf(stderr, "\033[?25h"); }
 void tui_cursor_move(int r, int c) { fprintf(stderr, "\033[%d;%dH", r, c); }
 void tui_clear_screen(void)   { fprintf(stderr, "\033[2J\033[H"); }
 void tui_clear_line(void)     { fprintf(stderr, "\033[2K\r"); }
+
+/* Full reset for a clean first paint: reset SGR, show cursor, clear the
+ * visible screen *and* the scrollback buffer (\033[3J), then home. This wipes
+ * any content left by the previous program so the banner doesn't bleed
+ * through a stale screen. No-op when stderr isn't a tty, or when the caller
+ * sets DSCO_NO_CLEAR=1 (useful when piping/embedding). */
+void tui_screen_reset_full(void) {
+    if (!isatty(STDERR_FILENO)) return;
+    const char *no_clear = getenv("DSCO_NO_CLEAR");
+    if (no_clear && no_clear[0] == '1') return;
+    fputs("\033[0m\033[?25h\033[3J\033[2J\033[H", stderr);
+    fflush(stderr);
+}
 void tui_save_cursor(void)    { fprintf(stderr, "\033[s"); }
 void tui_restore_cursor(void) { fprintf(stderr, "\033[u"); }
 
@@ -234,14 +248,14 @@ void tui_progress(const char *label, double pct, int width,
 
     const char *fc = fill_color ? fill_color : TUI_GREEN;
     const char *ec = empty_color ? empty_color : TUI_DIM;
+    (void)filled; (void)empty;
 
     tui_clear_line();
     if (label) fprintf(stderr, "  %s ", label);
-    fprintf(stderr, "%s", fc);
-    for (int i = 0; i < filled; i++) fprintf(stderr, "█");
-    fprintf(stderr, "%s", ec);
-    for (int i = 0; i < empty; i++) fprintf(stderr, "░");
-    fprintf(stderr, "%s %3.0f%%\n", TUI_RESET, pct * 100);
+    /* Subpixel: resolve the leading edge to 1/8 of a cell instead of snapping
+     * to whole cells — 8× the effective length resolution. */
+    tui_subpixel_hbar(stderr, pct, bar_width, fc, "░", ec);
+    fprintf(stderr, " %3.0f%%\n", pct * 100);
 }
 
 /* ── Table ────────────────────────────────────────────────────────────── */
@@ -1659,6 +1673,219 @@ void tui_batch_summary(const tui_batch_spinner_t *bs, const char *cost_suffix) {
 }
 
 /* ══════════════════════════════════════════════════════════════════════════
+ * BRAILLE WORDMARK
+ *
+ * Renders the real "Distributed" brand wordmark — sampled from the source PNG
+ * into a 1bpp master bitmap (include/dist_logo.h) — using Unicode Braille
+ * glyphs. Each cell packs a 2×4 grid of dots, so one character cell carries
+ * EIGHT sub-pixels: roughly 4× the density of half-blocks. The master is
+ * box-downsampled to whatever width the terminal allows, then coloured with a
+ * chrome/iridescent hue gradient and a sheen highlight that sweeps across on
+ * reveal. Below it we print a letter-spaced "S Y S T E M S" subtitle.
+ * ══════════════════════════════════════════════════════════════════════════ */
+
+#define BRL_MAXW  256        /* max sub-pixel width we render (128 cells) */
+#define BRL_MAXH  64         /* max sub-pixel height (16 cells)           */
+
+static inline int dist_logo_bit(int x, int y) {
+    /* dist_logo.h now ships an 8-bit grayscale master (DIST_LOGO_GRAY) instead
+     * of a packed 1-bit bitmap; threshold it to preserve the on/off contract. */
+    return DIST_LOGO_GRAY[y * DIST_LOGO_W + x] > 127;
+}
+
+static tui_rgb_t brl_lerp_white(tui_rgb_t c, float f) {
+    if (f < 0.0f) f = 0.0f;
+    if (f > 1.0f) f = 1.0f;
+    tui_rgb_t o;
+    o.r = (unsigned char)(c.r + (255 - c.r) * f);
+    o.g = (unsigned char)(c.g + (255 - c.g) * f);
+    o.b = (unsigned char)(c.b + (255 - c.b) * f);
+    return o;
+}
+
+static void brl_set_fg(tui_rgb_t c) {
+    if (tui_supports_truecolor())
+        fprintf(stderr, "\033[38;2;%d;%d;%dm", c.r, c.g, c.b);
+    else
+        fprintf(stderr, "\033[38;5;%dm", rgb_to_256(c));
+}
+
+/* Splash palettes — full-bright letter colour for horizontal position nx (0..1)
+ * and vertical ny (0..1). Selected via DSCO_SPLASH={iris,chrome,neon,gold,fire,
+ * rainbow,ice}. `iris` (vivid violet→magenta→peach) is the default. */
+enum { PAL_IRIS, PAL_CHROME, PAL_NEON, PAL_GOLD, PAL_FIRE, PAL_RAINBOW, PAL_ICE,
+       PAL_INDUSTRIAL, PAL_STEEL, PAL_MONO };
+
+static int splash_palette_id(void) {
+    const char *e = getenv("DSCO_SPLASH");
+    if (!e || !*e)                     return PAL_INDUSTRIAL;
+    if (!strcasecmp(e, "iris"))        return PAL_IRIS;
+    if (!strcasecmp(e, "chrome"))      return PAL_CHROME;
+    if (!strcasecmp(e, "neon"))        return PAL_NEON;
+    if (!strcasecmp(e, "gold"))        return PAL_GOLD;
+    if (!strcasecmp(e, "fire"))        return PAL_FIRE;
+    if (!strcasecmp(e, "rainbow"))     return PAL_RAINBOW;
+    if (!strcasecmp(e, "ice"))         return PAL_ICE;
+    if (!strcasecmp(e, "industrial"))  return PAL_INDUSTRIAL;
+    if (!strcasecmp(e, "steel"))       return PAL_STEEL;
+    if (!strcasecmp(e, "mono"))        return PAL_MONO;
+    return PAL_INDUSTRIAL;
+}
+
+static tui_rgb_t splash_palette(int pal, float nx, float ny) {
+    float hue, sat = 0.85f, val = 1.0f;
+    switch (pal) {
+        case PAL_CHROME:  hue = 250.0f + nx * 120.0f; sat = 0.18f;
+                          val = 0.82f + 0.18f * sinf(ny * 3.14159f); break;
+        case PAL_NEON:    hue = 172.0f + nx * 80.0f;  sat = 0.88f; break;
+        case PAL_GOLD:    hue = 34.0f  + nx * 24.0f;  sat = 0.85f; break;
+        case PAL_FIRE:    hue = 2.0f   + nx * 48.0f - ny * 12.0f; sat = 0.92f; break;
+        case PAL_RAINBOW: hue = nx * 330.0f;          sat = 0.85f; break;
+        case PAL_ICE:     hue = 190.0f + nx * 70.0f;  sat = 0.55f; break;
+        /* Brushed white→grey industrial: cool steel tint, brushed vertical
+         * metallic sheen (bright band across the middle), brightening L→R. */
+        case PAL_INDUSTRIAL: hue = 212.0f; sat = 0.07f;
+                          val = 0.50f + 0.30f * sinf(ny * 3.14159f) + 0.20f * nx; break;
+        /* Cooler, more saturated steel-blue metal. */
+        case PAL_STEEL:   hue = 205.0f + nx * 24.0f;  sat = 0.24f;
+                          val = 0.55f + 0.30f * sinf(ny * 3.14159f) + 0.15f * nx; break;
+        /* Pure greyscale gradient, grey → white. */
+        case PAL_MONO:    hue = 0.0f; sat = 0.0f;
+                          val = 0.45f + 0.55f * nx; break;
+        default: /*IRIS*/ hue = 256.0f + nx * 98.0f;  sat = 0.84f; break;
+    }
+    if (val > 1.0f) val = 1.0f;
+    return tui_hsv_to_rgb(hue, sat, val);
+}
+
+static void welcome_pixel_logo(void) {
+    int w = tui_term_width();
+    int pal = splash_palette_id();
+
+    /* Choose a sub-pixel target width that fits the terminal (cells = TW/2). */
+    int avail = (w - 4) * 2;                 /* leave a small margin   */
+    int TW = avail;
+    if (TW > BRL_MAXW)      TW = BRL_MAXW;
+    if (TW > DIST_LOGO_W)   TW = DIST_LOGO_W;
+    if (TW < 80)            TW = 80;         /* keep it legible        */
+    TW &= ~1;                                /* even for 2-wide cells  */
+    int TH = (int)lroundf((float)DIST_LOGO_H * (float)TW / (float)DIST_LOGO_W);
+    TH = (TH + 3) & ~3;                      /* multiple of 4          */
+    if (TH > BRL_MAXH) TH = BRL_MAXH;
+
+    /* Box-downsample the master into a per-sub-pixel coverage grid (0..255). */
+    static unsigned char cov[BRL_MAXH][BRL_MAXW];
+    for (int y = 0; y < TH; y++) {
+        int sy0 = y * DIST_LOGO_H / TH;
+        int sy1 = (y + 1) * DIST_LOGO_H / TH; if (sy1 <= sy0) sy1 = sy0 + 1;
+        for (int x = 0; x < TW; x++) {
+            int sx0 = x * DIST_LOGO_W / TW;
+            int sx1 = (x + 1) * DIST_LOGO_W / TW; if (sx1 <= sx0) sx1 = sx0 + 1;
+            int sum = 0, tot = 0;
+            for (int yy = sy0; yy < sy1 && yy < DIST_LOGO_H; yy++)
+                for (int xx = sx0; xx < sx1 && xx < DIST_LOGO_W; xx++) {
+                    sum += DIST_LOGO_GRAY[yy * DIST_LOGO_W + xx]; tot++;
+                }
+            cov[y][x] = tot ? (unsigned char)(sum / tot) : 0;
+        }
+    }
+
+    int rows = TH / 4, cols = TW / 2;
+    int pad  = (w - cols) / 2; if (pad < 1) pad = 1;
+
+    /* Dot bit layout: [row][col] within the 2×4 cell. */
+    static const int dotbit[4][2] = {
+        {0x01, 0x08}, {0x02, 0x10}, {0x04, 0x20}, {0x40, 0x80}
+    };
+    const int DOT_THR = 112;                  /* coverage → dot lit         */
+
+    const int   NF = 22;                      /* reveal frames              */
+    const float sig = (float)TW * 0.11f + 5;  /* sheen half-width (subpx)   */
+
+    for (int f = 0; f < NF; f++) {
+        float prog = (float)f / (float)(NF - 1);
+        /* Sheen sweeps left→right and exits, leaving the final frame settled. */
+        float sx = -2.0f * sig + prog * ((float)TW + 4.0f * sig);
+
+        if (f > 0) fprintf(stderr, "\033[%dA", rows);
+
+        for (int cy = 0; cy < rows; cy++) {
+            fputc('\r', stderr);
+            for (int p = 0; p < pad; p++) fputc(' ', stderr);
+
+            tui_rgb_t cur = {0, 0, 0}; int have = 0;
+            for (int cx = 0; cx < cols; cx++) {
+                int gx = cx * 2, gy = cy * 4;
+                int dots = 0, csum = 0;
+                for (int j = 0; j < 4; j++)
+                    for (int i = 0; i < 2; i++) {
+                        int c = cov[gy + j][gx + i];
+                        csum += c;
+                        if (c >= DOT_THR) dots |= dotbit[j][i];
+                    }
+
+                if (!dots) {                 /* transparent cell */
+                    if (have) { fprintf(stderr, "\033[0m"); have = 0; }
+                    fputc(' ', stderr);
+                    continue;
+                }
+
+                float nx = (float)gx / (float)(TW - 1);
+                float ny = (float)gy / (float)(TH - 1);
+                float covavg = (float)csum / (8.0f * 255.0f);   /* 0..1, AA */
+                float d  = (float)gx - sx;
+                float hl = expf(-(d * d) / (2.0f * sig * sig));  /* specular */
+
+                tui_rgb_t base = splash_palette(pal, nx, ny);
+                base = brl_lerp_white(base, hl * 0.6f);          /* shimmer, keep hue */
+                float bright = 0.42f + 0.58f * covavg;           /* edge AA */
+                bright += hl * 0.18f;                            /* sheen lift */
+                if (bright > 1.0f) bright = 1.0f;
+                base.r = (unsigned char)(base.r * bright);
+                base.g = (unsigned char)(base.g * bright);
+                base.b = (unsigned char)(base.b * bright);
+
+                if (!have || base.r != cur.r || base.g != cur.g || base.b != cur.b) {
+                    brl_set_fg(base); cur = base; have = 1;
+                }
+                /* Braille U+2800+dots, emitted as raw UTF-8 (locale-independent). */
+                unsigned int cp = 0x2800u + (unsigned)dots;
+                fputc(0xE0 | (cp >> 12), stderr);
+                fputc(0x80 | ((cp >> 6) & 0x3F), stderr);
+                fputc(0x80 | (cp & 0x3F), stderr);
+            }
+            fprintf(stderr, "\033[0m\033[K\n");
+        }
+        fflush(stderr);
+        if (f < NF - 1) usleep(18000);
+    }
+
+    /* Letter-spaced subtitle in the same palette, crisp text. */
+    {
+        const char *sub = "S Y S T E M S";
+        int slen = (int)strlen(sub);
+        int spad = (w - slen) / 2; if (spad < 1) spad = 1;
+        for (int i = 0; i < spad; i++) fputc(' ', stderr);
+        tui_rgb_t a = splash_palette(pal, 0.0f, 0.5f);
+        tui_rgb_t b = splash_palette(pal, 1.0f, 0.5f);
+        int n = 0; for (const char *p = sub; *p; p++) if (((unsigned char)*p & 0xC0) != 0x80) n++;
+        int idx = 0;
+        for (const char *p = sub; *p; ) {
+            int clen = 1; unsigned char uc = (unsigned char)*p;
+            if (uc >= 0xF0) clen = 4; else if (uc >= 0xE0) clen = 3; else if (uc >= 0xC0) clen = 2;
+            float t = n > 1 ? (float)idx / (float)(n - 1) : 0;
+            tui_rgb_t c = { (unsigned char)(a.r + (b.r - a.r) * t),
+                            (unsigned char)(a.g + (b.g - a.g) * t),
+                            (unsigned char)(a.b + (b.b - a.b) * t) };
+            brl_set_fg(c);
+            fwrite(p, 1, clen, stderr);
+            p += clen; idx++;
+        }
+        fprintf(stderr, "\033[0m\n");
+    }
+}
+
+/* ══════════════════════════════════════════════════════════════════════════
  * ANIMATED WELCOME BANNER
  * ══════════════════════════════════════════════════════════════════════════ */
 
@@ -1673,18 +1900,6 @@ static void welcome_animated(const char *model, int core_count, int total_count,
     /* Left margin for banner content (left-aligned) */
     #define CENTER_PAD(content_w) 2
 
-    /* ASCII art lines (plain text, no ANSI) */
-    const char *art[] = {
-        "██████╗  ███████╗  ██████╗  ██████╗ ",
-        "██╔══██╗ ██╔════╝ ██╔════╝ ██╔═══██╗",
-        "██║  ██║ ███████╗ ██║      ██║   ██║",
-        "██║  ██║ ╚════██║ ██║      ██║   ██║",
-        "██████╔╝ ███████║ ╚██████╗ ╚██████╔╝",
-        "╚═════╝  ╚══════╝  ╚═════╝  ╚═════╝ ",
-    };
-    int art_lines = 6;
-    /* art_width unused after left-align change */
-
     fprintf(stderr, "\n");
 
     /* Full-width soft gradient top border */
@@ -1697,57 +1912,8 @@ static void welcome_animated(const char *model, int core_count, int total_count,
     }
     fprintf(stderr, TUI_RESET "\n\n");
 
-    /* Pastel gradient reveal: lavender(270°) → rose(340°) → peach(20°) */
-    float h_start = 270.0f, h_end = 350.0f;
-
-    int pad = CENTER_PAD(art_width);
-
-    for (int line = 0; line < art_lines; line++) {
-        const char *row = art[line];
-        int row_len = (int)strlen(row);
-
-        /* Center padding */
-        for (int i = 0; i < pad; i++) fputc(' ', stderr);
-
-        /* Count visible (non-space) characters for gradient */
-        int vis_chars = 0;
-        for (const char *p = row; *p; ) {
-            unsigned char uc = (unsigned char)*p;
-            int clen = 1;
-            if      (uc >= 0xF0) clen = 4;
-            else if (uc >= 0xE0) clen = 3;
-            else if (uc >= 0xC0) clen = 2;
-            vis_chars++;
-            p += clen;
-        }
-
-        int char_idx = 0;
-        for (int ci = 0; ci < row_len; ) {
-            unsigned char uc = (unsigned char)row[ci];
-            int clen = 1;
-            if      (uc >= 0xF0) clen = 4;
-            else if (uc >= 0xE0) clen = 3;
-            else if (uc >= 0xC0) clen = 2;
-
-            if (row[ci] == ' ') {
-                fputc(' ', stderr);
-                ci += clen;
-                char_idx++;
-                continue;
-            }
-            float t = (float)char_idx / (float)(vis_chars > 1 ? vis_chars - 1 : 1);
-            float h = h_start + t * (h_end - h_start);
-            /* Softer pastel: high value, moderate saturation */
-            tui_rgb_t c = tui_hsv_to_rgb(h, 0.45f, 1.0f);
-            fg_color_auto(c);
-            fwrite(&row[ci], 1, clen, stderr);
-            fflush(stderr);
-            usleep(1500); /* slightly faster reveal */
-            ci += clen;
-            char_idx++;
-        }
-        fprintf(stderr, TUI_RESET "\n");
-    }
+    /* Hyper-dense sub-cell pixel reveal of the DSCO logo. */
+    welcome_pixel_logo();
 
     fprintf(stderr, "\n");
 
@@ -3335,6 +3501,153 @@ void tui_retry_pulse(const char *label, int attempt, int max, double wait_sec) {
 
 /* ── F12: Result Sparkline ────────────────────────────────────────────── */
 
+/* ── Subpixel rendering primitives ──────────────────────────────────────── */
+
+/* Left-anchored eighth blocks: index 1..7 = 1/8..7/8 of a cell filled from
+ * the left; 0 = empty, 8 = full handled by caller via "█". */
+static const char *const k_eighths_left[8] = {
+    "", "▏", "▎", "▍", "▌", "▋", "▊", "▉",
+};
+
+int tui_subpixel_hbar(FILE *out, double frac, int cells,
+                      const char *fill_color, const char *empty_glyph,
+                      const char *empty_color) {
+    if (!out || cells <= 0) return 0;
+    if (frac < 0) frac = 0;
+    if (frac > 1) frac = 1;
+    const char *eg = empty_glyph ? empty_glyph : " ";
+
+    double exact = frac * cells;
+    int full = (int)exact;
+    int eighth = (int)((exact - full) * 8.0 + 0.5);   /* 0..8, rounded */
+    if (eighth >= 8) { full++; eighth = 0; }
+    if (full > cells) { full = cells; eighth = 0; }
+
+    if (fill_color) fputs(fill_color, out);
+    int used = 0;
+    for (; used < full; used++) fputs("█", out);
+    if (used < cells && eighth > 0) { fputs(k_eighths_left[eighth], out); used++; }
+    if (used < cells) {
+        if (empty_color) fputs(empty_color, out);
+        for (; used < cells; used++) fputs(eg, out);
+    }
+    fputs(TUI_RESET, out);
+    return cells;
+}
+
+/* Braille dot bit for sub-cell coord (col 0..1, row 0..3). Standard Unicode
+ * braille layout: dots 1-2-3-7 down the left column, 4-5-6-8 down the right. */
+static const unsigned char k_braille_bit[4][2] = {
+    { 0x01, 0x08 },   /* row 0 (top)    */
+    { 0x02, 0x10 },   /* row 1          */
+    { 0x04, 0x20 },   /* row 2          */
+    { 0x40, 0x80 },   /* row 3 (bottom) */
+};
+
+void tui_braille_init(tui_braille_t *b, int px_w, int px_h) {
+    if (!b) return;
+    if (px_w < 1) px_w = 1;
+    if (px_h < 1) px_h = 1;
+    b->px_w = px_w;
+    b->px_h = px_h;
+    b->w_cells = (px_w + 1) / 2;
+    b->h_cells = (px_h + 3) / 4;
+    b->cells = calloc((size_t)b->w_cells * b->h_cells, 1);
+}
+
+void tui_braille_free(tui_braille_t *b) {
+    if (!b || !b->cells) return;
+    free(b->cells);
+    b->cells = NULL;
+}
+
+void tui_braille_clear(tui_braille_t *b) {
+    if (b && b->cells) memset(b->cells, 0, (size_t)b->w_cells * b->h_cells);
+}
+
+void tui_braille_set(tui_braille_t *b, int x, int y) {
+    if (!b || !b->cells) return;
+    if (x < 0 || y < 0 || x >= b->px_w || y >= b->px_h) return;
+    int cx = x / 2, cy = y / 4;
+    b->cells[cy * b->w_cells + cx] |= k_braille_bit[y % 4][x % 2];
+}
+
+void tui_braille_line(tui_braille_t *b, int x0, int y0, int x1, int y1) {
+    if (!b) return;
+    int dx = abs(x1 - x0), sx = x0 < x1 ? 1 : -1;
+    int dy = -abs(y1 - y0), sy = y0 < y1 ? 1 : -1;
+    int err = dx + dy;
+    for (;;) {
+        tui_braille_set(b, x0, y0);
+        if (x0 == x1 && y0 == y1) break;
+        int e2 = 2 * err;
+        if (e2 >= dy) { err += dy; x0 += sx; }
+        if (e2 <= dx) { err += dx; y0 += sy; }
+    }
+}
+
+void tui_braille_plot(tui_braille_t *b, const double *values, int n) {
+    if (!b || !values || n <= 0 || b->px_w <= 0 || b->px_h <= 0) return;
+    double mn = values[0], mx = values[0];
+    for (int i = 1; i < n; i++) {
+        if (values[i] < mn) mn = values[i];
+        if (values[i] > mx) mx = values[i];
+    }
+    double range = mx - mn;
+    if (range < 1e-9) range = 1.0;
+
+    int prev_x = 0, prev_y = 0;
+    for (int i = 0; i < n; i++) {
+        int x = (n == 1) ? 0 : (int)((double)i / (n - 1) * (b->px_w - 1) + 0.5);
+        double norm = (values[i] - mn) / range;          /* 0..1 */
+        int y = (int)((1.0 - norm) * (b->px_h - 1) + 0.5); /* invert: high=top */
+        if (i == 0) tui_braille_set(b, x, y);
+        else        tui_braille_line(b, prev_x, prev_y, x, y);
+        prev_x = x; prev_y = y;
+    }
+}
+
+void tui_braille_render(const tui_braille_t *b, FILE *out, const char *color) {
+    if (!b || !b->cells || !out) return;
+    if (color) fputs(color, out);
+    for (int cy = 0; cy < b->h_cells; cy++) {
+        if (cy > 0) fputc('\n', out);
+        for (int cx = 0; cx < b->w_cells; cx++) {
+            unsigned int cp = 0x2800u + b->cells[cy * b->w_cells + cx];
+            char u[4] = {
+                (char)(0xE0 | (cp >> 12)),
+                (char)(0x80 | ((cp >> 6) & 0x3F)),
+                (char)(0x80 | (cp & 0x3F)),
+                0,
+            };
+            fputs(u, out);
+        }
+    }
+    if (color) fputs(TUI_RESET, out);
+}
+
+void tui_sparkline_braille(const double *values, int count, int rows,
+                           const char *color) {
+    if (!values || count <= 0) return;
+    if (rows <= 0) rows = 1;
+    /* Braille is BMP Unicode; degrade to the eighth-block sparkline if the
+     * terminal can't render it. */
+    if (tui_detect_glyph_tier() == TUI_GLYPH_ASCII) {
+        tui_sparkline(values, count, color);
+        return;
+    }
+    /* 2 samples per character column → px width = ceil(count/?)*… keep it
+     * compact: one column per sample gives the densest readable line. */
+    int px_w = count * 2;          /* 2 dot-columns per cell, 1 sample/dot-col */
+    if (px_w < 2) px_w = 2;
+    int px_h = rows * 4;
+    tui_braille_t b;
+    tui_braille_init(&b, px_w, px_h);
+    tui_braille_plot(&b, values, count);
+    tui_braille_render(&b, stderr, color);
+    tui_braille_free(&b);
+}
+
 void tui_sparkline(const double *values, int count, const char *color) {
     if (g_tui_features && !g_tui_features->result_sparkline) return;
     if (!values || count <= 0) return;
@@ -3399,8 +3712,6 @@ void tui_context_gauge(int used, int max_tok, int width) {
     if (max_tok <= 0) return;
     if (width <= 0) width = 30;
     double pct = (double)used / max_tok;
-    int filled = (int)(pct * width);
-    if (filled > width) filled = width;
 
     const char *color;
     if (pct < 0.5) color = TUI_GREEN;
@@ -3409,12 +3720,8 @@ void tui_context_gauge(int used, int max_tok, int width) {
     else color = TUI_RED;
 
     fprintf(stderr, "  [");
-    for (int i = 0; i < width; i++) {
-        if (i < filled)
-            fprintf(stderr, "%s█%s", color, TUI_RESET);
-        else
-            fprintf(stderr, "%s░%s", TUI_DIM, TUI_RESET);
-    }
+    /* Subpixel edge: 1/8-cell precision so small context deltas are visible. */
+    tui_subpixel_hbar(stderr, pct, width, color, "░", TUI_DIM);
     fprintf(stderr, " %s%.0f%%%s]", color, pct * 100, TUI_RESET);
     if (used >= 1000)
         fprintf(stderr, " %s%.1fk/%.0fk%s", TUI_DIM, used / 1000.0, max_tok / 1000.0, TUI_RESET);
@@ -3918,27 +4225,12 @@ void tui_throughput_render(tui_throughput_t *t) {
         sum += vals[n-1];
     }
     double avg = n > 0 ? sum / n : 0;
-    fprintf(stderr, "  %sthroughput: ", TUI_DIM);
-    /* Inline sparkline without feature check (already checked) */
-    {
-        const char *spark_bars = "▁▂▃▄▅▆▇█";
-        double mn = vals[0], mx2 = vals[0];
-        for (int i = 1; i < n; i++) {
-            if (vals[i] < mn) mn = vals[i];
-            if (vals[i] > mx2) mx2 = vals[i];
-        }
-        double range = mx2 - mn;
-        if (range < 1e-9) range = 1.0;
-        fprintf(stderr, "%s", TUI_BCYAN);
-        for (int i = 0; i < n; i++) {
-            int si = (int)((vals[i] - mn) / range * 7.0);
-            if (si < 0) si = 0;
-            if (si > 7) si = 7;
-            fwrite(spark_bars + si * 3, 1, 3, stderr);
-        }
-        fprintf(stderr, "%s", TUI_RESET);
-    }
-    fprintf(stderr, " avg %.0f tok/s%s\n", avg, TUI_RESET);
+    fprintf(stderr, "  %sthroughput: %s", TUI_DIM, TUI_RESET);
+    /* Maximal-subpixel line graph: a 2-row Braille plot gives 8 vertical dots
+     * and 2 samples per column — far smoother than 8-level eighth blocks.
+     * tui_sparkline_braille degrades to eighth blocks on ASCII terminals. */
+    tui_sparkline_braille(vals, n, 1, TUI_BCYAN);
+    fprintf(stderr, " %savg %.0f tok/s%s\n", TUI_DIM, avg, TUI_RESET);
 }
 
 /* ── F8: Flame Timeline ───────────────────────────────────────────────── */
@@ -7001,6 +7293,354 @@ bool tui_confirm(const char *question) {
     return (ch == 'y' || ch == 'Y');
 }
 
+/* ── Dynamic Question Dialog (AskUserQuestion) ──────────────────────── */
+
+enum {
+    DLG_K_UP = 1000, DLG_K_DOWN, DLG_K_LEFT, DLG_K_RIGHT,
+    DLG_K_TAB, DLG_K_BTAB, DLG_K_ENTER, DLG_K_ESC, DLG_K_SPACE,
+};
+
+/* Raw key reader with escape-sequence + lone-ESC handling (VTIME timeout so a
+ * bare ESC doesn't block waiting for a sequence tail). */
+static int dlg_read_key(void) {
+    struct termios oldt, newt;
+    tcgetattr(STDIN_FILENO, &oldt);
+    newt = oldt;
+    newt.c_lflag &= ~(ICANON | ECHO);
+    newt.c_cc[VMIN] = 1;
+    newt.c_cc[VTIME] = 0;
+    tcsetattr(STDIN_FILENO, TCSANOW, &newt);
+
+    int c = getchar();
+    int ret;
+    if (c == '\r' || c == '\n')       ret = DLG_K_ENTER;
+    else if (c == '\t')               ret = DLG_K_TAB;
+    else if (c == ' ')                ret = DLG_K_SPACE;
+    else if (c == 27) {
+        /* possible escape sequence; read tail with a short timeout */
+        newt.c_cc[VMIN] = 0;
+        newt.c_cc[VTIME] = 1; /* 0.1s */
+        tcsetattr(STDIN_FILENO, TCSANOW, &newt);
+        int c2 = getchar();
+        if (c2 == '[' || c2 == 'O') {
+            int c3 = getchar();
+            switch (c3) {
+                case 'A': ret = DLG_K_UP;    break;
+                case 'B': ret = DLG_K_DOWN;  break;
+                case 'C': ret = DLG_K_RIGHT; break;
+                case 'D': ret = DLG_K_LEFT;  break;
+                case 'Z': ret = DLG_K_BTAB;  break;
+                default:  ret = DLG_K_ESC;   break;
+            }
+        } else {
+            ret = DLG_K_ESC;
+        }
+    } else {
+        ret = c;
+    }
+    tcsetattr(STDIN_FILENO, TCSANOW, &oldt);
+    return ret;
+}
+
+const char *tui_ask_answer_value(const tui_ask_question_t *q,
+                                 char *out, size_t out_len) {
+    if (!out || !out_len) return out;
+    out[0] = '\0';
+    if (!q) return out;
+    if (q->custom[0]) { snprintf(out, out_len, "%s", q->custom); return out; }
+    size_t pos = 0;
+    bool first = true;
+    for (int i = 0; i < q->n_options && pos < out_len; i++) {
+        if (!q->selected[i]) continue;
+        const char *v = q->options[i].value[0] ? q->options[i].value
+                                               : q->options[i].label;
+        int w = snprintf(out + pos, out_len - pos, "%s%s",
+                         first ? "" : ", ", v);
+        if (w < 0) break;
+        pos += (size_t)w;
+        first = false;
+    }
+    return out;
+}
+
+bool tui_ask_question_visible(const tui_ask_question_t *qs, int n, int qi) {
+    if (!qs || qi < 0 || qi >= n) return false;
+    const tui_ask_question_t *q = &qs[qi];
+    if (q->gate_q < 0 || q->gate_q >= n || q->gate_q == qi) return true;
+    /* the gating question must itself be visible and answered */
+    if (!tui_ask_question_visible(qs, n, q->gate_q)) return false;
+    const tui_ask_question_t *g = &qs[q->gate_q];
+    if (!g->answered) return false;
+    for (int k = 0; k < q->n_gate_vals; k++) {
+        if (g->custom[0] && strcmp(g->custom, q->gate_vals[k]) == 0) return true;
+        for (int o = 0; o < g->n_options; o++) {
+            if (!g->selected[o]) continue;
+            const char *ov = g->options[o].value[0] ? g->options[o].value
+                                                    : g->options[o].label;
+            if (strcmp(ov, q->gate_vals[k]) == 0) return true;
+        }
+    }
+    return false;
+}
+
+/* number of selectable rows in a question tab (options + escape hatches) */
+static int dlg_row_count(const tui_ask_question_t *q) {
+    int n = q->n_options;
+    if (q->allow_custom) n++;
+    if (q->allow_chat)   n++;
+    return n;
+}
+/* row index of the "Type something" / "Chat about this" pseudo-rows, or -1 */
+static int dlg_custom_row(const tui_ask_question_t *q) {
+    return q->allow_custom ? q->n_options : -1;
+}
+static int dlg_chat_row(const tui_ask_question_t *q) {
+    if (!q->allow_chat) return -1;
+    return q->n_options + (q->allow_custom ? 1 : 0);
+}
+
+/* Read a free-text line in canonical mode (for "Type something"). */
+static void dlg_read_line(const char *prompt, char *buf, size_t buflen) {
+    struct termios oldt, newt;
+    tcgetattr(STDIN_FILENO, &oldt);
+    newt = oldt;
+    newt.c_lflag |= (ICANON | ECHO);
+    tcsetattr(STDIN_FILENO, TCSANOW, &newt);
+    tui_cursor_show();
+    fprintf(stderr, "\033[2J\033[H\n  %s%s%s\n  %s> %s",
+            TUI_BOLD, prompt ? prompt : "Type your answer:", TUI_RESET,
+            TUI_BCYAN, TUI_RESET);
+    fflush(stderr);
+    if (fgets(buf, (int)buflen, stdin)) {
+        buf[strcspn(buf, "\r\n")] = '\0';
+    } else {
+        buf[0] = '\0';
+    }
+    tcsetattr(STDIN_FILENO, TCSANOW, &oldt);
+    tui_cursor_hide();
+}
+
+static void dlg_render(tui_ask_question_t *qs, int n, const char *intro,
+                       const int *vis, int vc, int tabpos, int row) {
+    (void)n;
+    int w = tui_term_width();
+    if (w > 100) w = 100;
+    fprintf(stderr, "\033[2J\033[H");
+
+    /* Intro */
+    if (intro && intro[0]) {
+        fprintf(stderr, "  %s%s%s\n\n", TUI_DIM, intro, TUI_RESET);
+    }
+
+    /* Tab strip: visible questions + Submit */
+    fprintf(stderr, "  %s\xe2\x86\x90%s ", TUI_DIM, TUI_RESET); /* ← */
+    for (int i = 0; i < vc; i++) {
+        int qi = vis[i];
+        const char *box = qs[qi].answered ? "\xe2\x98\x92"  /* ☒ */
+                                          : "\xe2\x98\x90"; /* ☐ */
+        const char *hdr = qs[qi].header[0] ? qs[qi].header : "Q";
+        if (tabpos == i)
+            fprintf(stderr, "%s%s %s %s  ", TUI_REVERSE, box, hdr, TUI_RESET);
+        else
+            fprintf(stderr, "%s %s  ", box, hdr);
+    }
+    /* Submit tab */
+    if (tabpos == vc)
+        fprintf(stderr, "%s\xe2\x9c\x94 Submit %s ", TUI_REVERSE, TUI_RESET);
+    else
+        fprintf(stderr, "\xe2\x9c\x94 Submit ");
+    fprintf(stderr, "%s\xe2\x86\x92%s\n", TUI_DIM, TUI_RESET); /* → */
+
+    /* Divider */
+    fprintf(stderr, "  %s", TUI_DIM);
+    for (int i = 0; i < w - 4; i++) fprintf(stderr, "\xe2\x94\x80"); /* ─ */
+    fprintf(stderr, "%s\n\n", TUI_RESET);
+
+    if (tabpos < vc) {
+        /* ── Question body ── */
+        tui_ask_question_t *q = &qs[vis[tabpos]];
+        fprintf(stderr, "  %s%s%s\n\n", TUI_BOLD, q->question, TUI_RESET);
+
+        int num = 1;
+        for (int i = 0; i < q->n_options; i++, num++) {
+            bool cur = (row == i);
+            fprintf(stderr, "  %s%s%d.%s %s%s%s%s\n",
+                    cur ? TUI_BCYAN : " ", cur ? "\xe2\x80\xba " : "  ",
+                    num, TUI_RESET,
+                    cur ? TUI_BBLUE TUI_BOLD : TUI_BLUE,
+                    q->options[i].label, TUI_RESET,
+                    q->selected[i] ? "  \033[92m\xe2\x9c\x94\033[0m" : "");
+            if (q->options[i].description[0])
+                fprintf(stderr, "       %s%s%s\n",
+                        TUI_DIM, q->options[i].description, TUI_RESET);
+        }
+        int crow = dlg_custom_row(q);
+        if (crow >= 0) {
+            bool cur = (row == crow);
+            fprintf(stderr, "  %s%s%d.%s %sType something.%s\n",
+                    cur ? TUI_BCYAN : " ", cur ? "\xe2\x80\xba " : "  ",
+                    num++, TUI_RESET, TUI_DIM, TUI_RESET);
+        }
+        int hrow = dlg_chat_row(q);
+        if (hrow >= 0) {
+            bool cur = (row == hrow);
+            fprintf(stderr, "  %s%s%d.%s %sChat about this%s\n",
+                    cur ? TUI_BCYAN : " ", cur ? "\xe2\x80\xba " : "  ",
+                    num++, TUI_RESET, TUI_DIM, TUI_RESET);
+        }
+        if (q->multi_select)
+            fprintf(stderr, "\n  %s(multi-select: Space toggles, then \xe2\x86\x92/Submit)%s\n",
+                    TUI_DIM, TUI_RESET);
+    } else {
+        /* ── Review / Submit body ── */
+        fprintf(stderr, "  %sReview your answers%s\n\n", TUI_BOLD, TUI_RESET);
+        char val[1280];
+        for (int i = 0; i < vc; i++) {
+            tui_ask_question_t *q = &qs[vis[i]];
+            fprintf(stderr, "  %s\xe2\x97\x8f%s %s%s%s\n",
+                    TUI_BBLUE, TUI_RESET, TUI_BOLD,
+                    q->question[0] ? q->question : q->header, TUI_RESET);
+            tui_ask_answer_value(q, val, sizeof val);
+            fprintf(stderr, "     %s\xe2\x86\x92 %s%s\n",
+                    q->answered ? TUI_BBLUE : TUI_DIM,
+                    q->answered && val[0] ? val : "(unanswered)", TUI_RESET);
+        }
+        fprintf(stderr, "\n  %sReady to submit your answers?%s\n",
+                TUI_BOLD, TUI_RESET);
+        fprintf(stderr, "  %s%s1.%s Submit answers\n",
+                row == 0 ? TUI_BCYAN : " ", row == 0 ? "\xe2\x80\xba " : "  ",
+                TUI_RESET);
+        fprintf(stderr, "  %s%s2.%s Cancel\n",
+                row == 1 ? TUI_BCYAN : " ", row == 1 ? "\xe2\x80\xba " : "  ",
+                TUI_RESET);
+    }
+
+    /* Footer */
+    fprintf(stderr, "\n  %s", TUI_DIM);
+    for (int i = 0; i < w - 4; i++) fprintf(stderr, "\xe2\x94\x80");
+    fprintf(stderr, "%s\n", TUI_RESET);
+    fprintf(stderr, "  %sEnter/Space select \xc2\xb7 Tab/\xe2\x86\x90\xe2\x86\x92 tabs \xc2\xb7 \xe2\x86\x91\xe2\x86\x93 move \xc2\xb7 1-9 jump \xc2\xb7 Esc cancel%s\n",
+            TUI_DIM, TUI_RESET);
+    fflush(stderr);
+}
+
+/* Activate the highlighted row of a question tab. Returns true if the dialog
+ * should auto-advance to the next tab (single-select choice made). */
+static bool dlg_activate(tui_ask_question_t *q, int row, bool *out_chat) {
+    *out_chat = false;
+    int crow = dlg_custom_row(q);
+    int hrow = dlg_chat_row(q);
+    if (row >= 0 && row < q->n_options) {
+        if (q->multi_select) {
+            q->selected[row] = !q->selected[row];
+            q->custom[0] = '\0';
+            q->answered = false;
+            for (int i = 0; i < q->n_options; i++)
+                if (q->selected[i]) { q->answered = true; break; }
+            return false; /* stay; multi-select keeps choosing */
+        }
+        for (int i = 0; i < q->n_options; i++) q->selected[i] = false;
+        q->selected[row] = true;
+        q->custom[0] = '\0';
+        q->answered = true;
+        return true; /* advance */
+    }
+    if (row == crow) {
+        char buf[1024];
+        dlg_read_line(q->question[0] ? q->question : "Type your answer:",
+                      buf, sizeof buf);
+        if (buf[0]) {
+            for (int i = 0; i < q->n_options; i++) q->selected[i] = false;
+            snprintf(q->custom, sizeof q->custom, "%s", buf);
+            q->answered = true;
+            return true;
+        }
+        return false;
+    }
+    if (row == hrow) {
+        *out_chat = true;
+        return false;
+    }
+    return false;
+}
+
+tui_ask_status_t tui_ask_questions(tui_ask_question_t *qs, int n_questions,
+                                   const char *intro,
+                                   char *chat_out, size_t chat_len) {
+    if (chat_out && chat_len) chat_out[0] = '\0';
+    if (n_questions <= 0) return TUI_ASK_CANCEL;
+    if (!isatty(STDIN_FILENO) || !isatty(STDERR_FILENO))
+        return TUI_ASK_CANCEL;
+
+    int vis[TUI_ASK_MAX_QUESTIONS];
+    int tabpos = 0, row = 0;
+
+    tui_cursor_hide();
+    tui_ask_status_t status = TUI_ASK_CANCEL;
+
+    for (;;) {
+        /* Recompute visible-question list each iteration (branching is live). */
+        int vc = 0;
+        for (int i = 0; i < n_questions && vc < TUI_ASK_MAX_QUESTIONS; i++)
+            if (tui_ask_question_visible(qs, n_questions, i)) vis[vc++] = i;
+        if (tabpos > vc) tabpos = vc;
+
+        int maxrow = (tabpos < vc) ? dlg_row_count(&qs[vis[tabpos]]) - 1 : 1;
+        if (maxrow < 0) maxrow = 0;
+        if (row > maxrow) row = maxrow;
+        if (row < 0) row = 0;
+
+        dlg_render(qs, n_questions, intro, vis, vc, tabpos, row);
+
+        int k = dlg_read_key();
+        if (k == DLG_K_ESC) { status = TUI_ASK_CANCEL; break; }
+        if (k == DLG_K_TAB || k == DLG_K_RIGHT) {
+            if (tabpos < vc) tabpos++;
+            row = 0;
+            continue;
+        }
+        if (k == DLG_K_BTAB || k == DLG_K_LEFT) {
+            if (tabpos > 0) tabpos--;
+            row = 0;
+            continue;
+        }
+        if (k == DLG_K_UP)   { row = (row > 0) ? row - 1 : maxrow; continue; }
+        if (k == DLG_K_DOWN) { row = (row < maxrow) ? row + 1 : 0; continue; }
+
+        if (k >= '1' && k <= '9') {
+            int want = k - '1';
+            if (tabpos < vc) {
+                if (want <= maxrow) row = want; else continue;
+            } else {
+                if (want <= 1) row = want; else continue;
+            }
+            k = DLG_K_ENTER; /* fall through to activate */
+        }
+
+        if (k == DLG_K_ENTER || k == DLG_K_SPACE) {
+            if (tabpos == vc) {
+                status = (row == 0) ? TUI_ASK_SUBMIT : TUI_ASK_CANCEL;
+                break;
+            }
+            bool want_chat = false;
+            bool advance = dlg_activate(&qs[vis[tabpos]], row, &want_chat);
+            if (want_chat) {
+                if (chat_out && chat_len)
+                    snprintf(chat_out, chat_len, "%s", qs[vis[tabpos]].question);
+                status = TUI_ASK_CHAT;
+                break;
+            }
+            if (advance) { if (tabpos < vc) tabpos++; row = 0; }
+            continue;
+        }
+    }
+
+    tui_cursor_show();
+    fprintf(stderr, "\033[2J\033[H");
+    fflush(stderr);
+    return status;
+}
+
 /* ── Structured Diff Display ────────────────────────────────────────── */
 
 void tui_diff_init(tui_diff_t *d) {
@@ -7730,4 +8370,364 @@ void tui_lock_engage(void) {
 
     /* Release the global mutex so the composer can resume drawing. */
     tui_term_unlock();
+}
+
+/* ── Interactive Hierarchical Menu ──────────────────────────────────────── */
+
+void tui_menu_init(tui_menu_t *m, const char *title, const char *subtitle) {
+    if (!m) return;
+    memset(m, 0, sizeof(*m));
+    if (title)    snprintf(m->title, sizeof(m->title), "%s", title);
+    if (subtitle) snprintf(m->subtitle, sizeof(m->subtitle), "%s", subtitle);
+    m->items = calloc(TUI_MENU_MAX_NODES, sizeof(tui_menu_item_t));
+    m->item_count = 0;
+    m->accent = NULL;
+    m->max_visible = 0;
+    m->selected = 0;
+}
+
+static void menu_free_items(tui_menu_item_t *items, int count) {
+    if (!items) return;
+    for (int i = 0; i < count; i++) {
+        if (items[i].children) {
+            menu_free_items(items[i].children, items[i].child_count);
+            free(items[i].children);
+            items[i].children = NULL;
+        }
+    }
+}
+
+void tui_menu_free(tui_menu_t *m) {
+    if (!m || !m->items) return;
+    menu_free_items(m->items, m->item_count);
+    free(m->items);
+    m->items = NULL;
+    m->item_count = 0;
+}
+
+/* Append a fresh node to a level array (cap TUI_MENU_MAX_NODES). Returns it. */
+static tui_menu_item_t *menu_level_add(tui_menu_item_t *arr, int *count,
+                                       const char *label, tui_menu_kind_t kind,
+                                       int id) {
+    if (!arr || *count >= TUI_MENU_MAX_NODES) return NULL;
+    tui_menu_item_t *it = &arr[(*count)++];
+    memset(it, 0, sizeof(*it));
+    if (label) snprintf(it->label, sizeof(it->label), "%s", label);
+    it->kind = kind;
+    it->id   = id;
+    it->badge = TUI_MENU_BADGE_NONE;
+    if (kind == TUI_MENU_GROUP || kind == TUI_MENU_SEPARATOR) it->disabled = true;
+    return it;
+}
+
+/* Lazily allocate a parent's children array, then append. */
+static tui_menu_item_t *menu_child_add(tui_menu_item_t *parent,
+                                       const char *label, tui_menu_kind_t kind,
+                                       int id) {
+    if (!parent) return NULL;
+    if (!parent->children) {
+        parent->children = calloc(TUI_MENU_MAX_NODES, sizeof(tui_menu_item_t));
+        if (!parent->children) return NULL;
+    }
+    return menu_level_add(parent->children, &parent->child_count, label, kind, id);
+}
+
+tui_menu_item_t *tui_menu_add_group(tui_menu_t *m, const char *label) {
+    return m ? menu_level_add(m->items, &m->item_count, label, TUI_MENU_GROUP, -1) : NULL;
+}
+tui_menu_item_t *tui_menu_add_item(tui_menu_t *m, const char *label, int id) {
+    return m ? menu_level_add(m->items, &m->item_count, label, TUI_MENU_ITEM, id) : NULL;
+}
+tui_menu_item_t *tui_menu_add_separator(tui_menu_t *m) {
+    return m ? menu_level_add(m->items, &m->item_count, "", TUI_MENU_SEPARATOR, -1) : NULL;
+}
+tui_menu_item_t *tui_menu_add_child(tui_menu_item_t *parent, const char *label, int id) {
+    return menu_child_add(parent, label, TUI_MENU_ITEM, id);
+}
+tui_menu_item_t *tui_menu_add_submenu(tui_menu_item_t *parent, const char *label, int id) {
+    return menu_child_add(parent, label, TUI_MENU_SUBMENU, id);
+}
+tui_menu_item_t *tui_menu_add_action(tui_menu_item_t *parent, const char *label, int id) {
+    return menu_child_add(parent, label, TUI_MENU_ACTION, id);
+}
+
+void tui_menu_set_badge(tui_menu_item_t *it, tui_menu_badge_t badge, const char *text) {
+    if (!it) return;
+    it->badge = badge;
+    if (text) snprintf(it->badge_text, sizeof(it->badge_text), "%s", text);
+    else      it->badge_text[0] = '\0';
+}
+void tui_menu_set_detail(tui_menu_item_t *it, const char *detail) {
+    if (it && detail) snprintf(it->detail, sizeof(it->detail), "%s", detail);
+}
+void tui_menu_set_hint(tui_menu_item_t *it, const char *hint) {
+    if (it && hint) snprintf(it->hint, sizeof(it->hint), "%s", hint);
+}
+void tui_menu_set_disabled(tui_menu_item_t *it, bool disabled) {
+    if (it) it->disabled = disabled;
+}
+void tui_menu_set_expanded(tui_menu_item_t *it, bool expanded) {
+    if (it && it->kind == TUI_MENU_SUBMENU) it->expanded = expanded;
+}
+
+/* ── Flattening: walk the tree into the visible-row list ──────────────── */
+
+typedef struct {
+    tui_menu_item_t *item;
+    int  depth;
+    bool selectable;
+    bool is_hint;   /* synthetic dim sub-line row carrying item->hint */
+} menu_row_t;
+
+#define MENU_ROWS_MAX 512
+
+static void menu_flatten_level(tui_menu_item_t *arr, int count, int depth,
+                               menu_row_t *rows, int *nrows) {
+    for (int i = 0; i < count && *nrows < MENU_ROWS_MAX; i++) {
+        tui_menu_item_t *it = &arr[i];
+        bool sel = !it->disabled &&
+                   (it->kind == TUI_MENU_ITEM ||
+                    it->kind == TUI_MENU_SUBMENU ||
+                    it->kind == TUI_MENU_ACTION);
+        rows[*nrows].item = it;
+        rows[*nrows].depth = depth;
+        rows[*nrows].selectable = sel;
+        rows[*nrows].is_hint = false;
+        (*nrows)++;
+        if (it->hint[0] && *nrows < MENU_ROWS_MAX) {
+            rows[*nrows].item = it;
+            rows[*nrows].depth = depth;
+            rows[*nrows].selectable = false;
+            rows[*nrows].is_hint = true;
+            (*nrows)++;
+        }
+        /* Groups always show their children (section bodies); submenus only
+         * when expanded. A top-level group's children render at the same
+         * indent so the section reads flush-left like the `/mcp` picker. */
+        if (it->children &&
+            (it->kind == TUI_MENU_GROUP ||
+             (it->kind == TUI_MENU_SUBMENU && it->expanded))) {
+            int cd = it->kind == TUI_MENU_GROUP ? depth : depth + 1;
+            menu_flatten_level(it->children, it->child_count, cd, rows, nrows);
+        }
+    }
+}
+
+static const char *menu_badge_glyph(const tui_glyphs_t *g, tui_menu_badge_t b) {
+    switch (b) {
+        case TUI_MENU_BADGE_OK:       return g->ok;
+        case TUI_MENU_BADGE_FAIL:     return g->fail;
+        case TUI_MENU_BADGE_WARN:     return g->warn;
+        case TUI_MENU_BADGE_DISABLED: return g->circle_open;
+        case TUI_MENU_BADGE_ACTIVE:   return g->bullet;
+        default:                      return NULL;
+    }
+}
+
+static const char *menu_badge_color(tui_menu_badge_t b) {
+    switch (b) {
+        case TUI_MENU_BADGE_OK:       return TUI_BBLUE;
+        case TUI_MENU_BADGE_FAIL:     return TUI_BRED;
+        case TUI_MENU_BADGE_WARN:     return TUI_BYELLOW;
+        case TUI_MENU_BADGE_DISABLED: return "\033[38;5;244m";
+        case TUI_MENU_BADGE_ACTIVE:   return TUI_BGREEN;
+        default:                      return TUI_RESET;
+    }
+}
+
+/* Render one content row to stderr (no trailing newline). */
+static void menu_render_row(const menu_row_t *r, bool is_selected,
+                            const char *accent, const tui_glyphs_t *g) {
+    tui_menu_item_t *it = r->item;
+    int indent = 2 + r->depth * 2;
+
+    if (r->is_hint) {
+        fprintf(stderr, "%*s  %s%s%s", indent, "", "\033[38;5;240m", it->hint, TUI_RESET);
+        return;
+    }
+    if (it->kind == TUI_MENU_SEPARATOR) return;  /* blank line */
+
+    if (it->kind == TUI_MENU_GROUP) {
+        fprintf(stderr, "%*s%s%s%s%s", indent, "", TUI_BOLD, TUI_BWHITE, it->label, TUI_RESET);
+        return;
+    }
+
+    /* selection caret */
+    if (is_selected)
+        fprintf(stderr, "%*s%s%s%s ", r->depth * 2, "", accent, g->arrow_right ? "\xe2\x80\xba" : ">", TUI_RESET);
+    else
+        fprintf(stderr, "%*s  ", r->depth * 2, "");
+
+    /* expand caret for submenus */
+    if (it->kind == TUI_MENU_SUBMENU) {
+        const char *car = it->expanded ? "\xe2\x96\xbe" : "\xe2\x96\xb8"; /* ▾ / ▸ */
+        fprintf(stderr, "%s%s%s ", TUI_DIM, car, TUI_RESET);
+    } else if (it->kind == TUI_MENU_ACTION) {
+        fprintf(stderr, "%s%s%s ", TUI_DIM, g->arrow_right ? g->arrow_right : "->", TUI_RESET);
+    }
+
+    /* label */
+    const char *lcol = it->disabled ? "\033[38;5;244m"
+                     : is_selected   ? accent : TUI_RESET;
+    fprintf(stderr, "%s%s%s", lcol, it->label, TUI_RESET);
+
+    /* badge */
+    const char *bg = menu_badge_glyph(g, it->badge);
+    if (bg) {
+        const char *bc = menu_badge_color(it->badge);
+        fprintf(stderr, " %s%s%s%s", TUI_DIM TUI_SEP " " TUI_RESET, bc, bg, TUI_RESET);
+        if (it->badge_text[0])
+            fprintf(stderr, " %s%s%s", bc, it->badge_text, TUI_RESET);
+    }
+
+    /* trailing detail */
+    if (it->detail[0])
+        fprintf(stderr, " %s%s %s%s", TUI_DIM TUI_SEP " ", it->detail, TUI_RESET, "");
+}
+
+/* Erase `n` previously drawn lines, leaving cursor at the block's top column 0. */
+static void menu_erase_block(int n) {
+    if (n <= 0) return;
+    /* cursor is just below the block; move up n lines, clearing each */
+    for (int i = 0; i < n; i++)
+        fprintf(stderr, "\033[1A\033[2K\r");
+}
+
+int tui_menu_run(tui_menu_t *m, tui_menu_item_t **out_item) {
+    if (out_item) *out_item = NULL;
+    if (!m || !m->items || m->item_count == 0) return TUI_MENU_CANCELLED;
+
+    const tui_glyphs_t *g = tui_glyph();
+    const char *accent = m->accent ? m->accent : TUI_BCYAN;
+    bool tty = isatty(STDIN_FILENO) && isatty(STDERR_FILENO);
+
+    static menu_row_t rows[MENU_ROWS_MAX];
+    int nrows = 0;
+
+    /* Establish initial selection on the first selectable row. */
+    int sel = m->selected;
+
+    int prev_lines = 0;       /* lines drawn last frame (for in-place redraw) */
+    int result = TUI_MENU_CANCELLED;
+    bool first = true;
+
+    tui_term_lock();
+    tui_cursor_hide();
+
+    while (1) {
+        /* (Re)flatten — submenu expansion changes the row set each frame. */
+        nrows = 0;
+        menu_flatten_level(m->items, m->item_count, 0, rows, &nrows);
+
+        /* Clamp / snap selection to a selectable row. */
+        if (sel < 0) sel = 0;
+        if (sel >= nrows) sel = nrows - 1;
+        if (!rows[sel].selectable) {
+            int s = -1;
+            for (int i = sel; i < nrows; i++) if (rows[i].selectable) { s = i; break; }
+            if (s < 0) for (int i = sel; i >= 0; i--) if (rows[i].selectable) { s = i; break; }
+            if (s >= 0) sel = s;
+        }
+
+        /* Viewport: header + rows + footer must fit; scroll around selection. */
+        int term_h = tui_term_height();
+        int chrome = (m->title[0] ? 1 : 0) + (m->subtitle[0] ? 1 : 0) + 2 /*footer+gap*/;
+        int vis = m->max_visible > 0 ? m->max_visible : (term_h - chrome - 2);
+        if (vis < 3) vis = 3;
+        if (vis > nrows) vis = nrows;
+
+        int top = 0;
+        if (nrows > vis) {
+            top = sel - vis / 2;
+            if (top < 0) top = 0;
+            if (top > nrows - vis) top = nrows - vis;
+        }
+
+        /* Redraw in place: erase the previous frame first. */
+        if (!first) menu_erase_block(prev_lines);
+        first = false;
+
+        int lines = 0;
+        if (m->title[0]) {
+            fprintf(stderr, "%s%s%s%s\r\n", TUI_BOLD, TUI_BWHITE, m->title, TUI_RESET);
+            lines++;
+        }
+        if (m->subtitle[0]) {
+            fprintf(stderr, "%s%s%s\r\n", TUI_DIM, m->subtitle, TUI_RESET);
+            lines++;
+        }
+        if (top > 0) { fprintf(stderr, "  %s\xe2\x96\xb4 %d more%s\r\n", TUI_DIM, top, TUI_RESET); lines++; }
+        for (int i = top; i < top + vis && i < nrows; i++) {
+            menu_render_row(&rows[i], i == sel, accent, g);
+            fprintf(stderr, "\r\n");
+            lines++;
+        }
+        if (top + vis < nrows) {
+            fprintf(stderr, "  %s\xe2\x96\xbe %d more%s\r\n", TUI_DIM, nrows - (top + vis), TUI_RESET);
+            lines++;
+        }
+        fprintf(stderr, "%s%s/%s navigate %s %s/%s expand %s Enter select %s Esc cancel%s\r\n",
+                TUI_DIM, "\xe2\x86\x91", "\xe2\x86\x93", TUI_SEP,
+                "\xe2\x86\x90", "\xe2\x86\x92", TUI_SEP, TUI_SEP, TUI_RESET);
+        lines++;
+        fflush(stderr);
+        prev_lines = lines;
+
+        if (!tty) { result = TUI_MENU_CANCELLED; break; }
+
+        /* ── Input ── */
+        int ch = read_single_char();
+        if (ch == 27) {
+            int c2 = read_single_char();
+            if (c2 == '[') {
+                int c3 = read_single_char();
+                if (c3 == 'A') ch = 'k';          /* up */
+                else if (c3 == 'B') ch = 'j';     /* down */
+                else if (c3 == 'C') ch = 'l';     /* right */
+                else if (c3 == 'D') ch = 'h';     /* left */
+                else continue;
+            } else { result = TUI_MENU_CANCELLED; break; }  /* bare ESC */
+        }
+
+        if (ch == 'q' || ch == 'Q') { result = TUI_MENU_CANCELLED; break; }
+
+        if (ch == 'k') {                          /* prev selectable */
+            for (int i = sel - 1; i >= 0; i--) if (rows[i].selectable) { sel = i; break; }
+        } else if (ch == 'j') {                   /* next selectable */
+            for (int i = sel + 1; i < nrows; i++) if (rows[i].selectable) { sel = i; break; }
+        } else if (ch == 'g') {
+            for (int i = 0; i < nrows; i++) if (rows[i].selectable) { sel = i; break; }
+        } else if (ch == 'G') {
+            for (int i = nrows - 1; i >= 0; i--) if (rows[i].selectable) { sel = i; break; }
+        } else if (ch == 'l') {                   /* expand submenu / right */
+            tui_menu_item_t *it = rows[sel].item;
+            if (it->kind == TUI_MENU_SUBMENU) it->expanded = true;
+        } else if (ch == 'h') {                   /* collapse / jump to parent */
+            tui_menu_item_t *it = rows[sel].item;
+            if (it->kind == TUI_MENU_SUBMENU && it->expanded) {
+                it->expanded = false;
+            } else if (rows[sel].depth > 0) {
+                int d = rows[sel].depth;
+                for (int i = sel - 1; i >= 0; i--)
+                    if (rows[i].depth < d && rows[i].selectable) { sel = i; break; }
+            }
+        } else if (ch == '\r' || ch == '\n' || ch == ' ') {
+            tui_menu_item_t *it = rows[sel].item;
+            if (it->kind == TUI_MENU_SUBMENU) {
+                it->expanded = !it->expanded;     /* toggle */
+            } else if (it->kind == TUI_MENU_ITEM || it->kind == TUI_MENU_ACTION) {
+                result = it->id;
+                if (out_item) *out_item = it;
+                break;
+            }
+        }
+    }
+
+    /* Erase the menu block so the surrounding scrollback stays clean. */
+    menu_erase_block(prev_lines);
+    m->selected = sel;
+    tui_cursor_show();
+    fflush(stderr);
+    tui_term_unlock();
+    return result;
 }

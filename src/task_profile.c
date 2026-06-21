@@ -12,6 +12,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <ctype.h>
+#include <limits.h>
 #include <math.h>
 #include <strings.h>
 
@@ -60,13 +61,27 @@ static const char *pattern_keywords[PATTERN_COUNT][10] = {
     }
 };
 
-/* ── Case-insensitive substring search ──────────────────────────────────── */
+/* ── Case-insensitive keyword search ───────────────────────────────────── */
+
+static bool is_keyword_boundary(char c) {
+    return c == '\0' || !isalnum((unsigned char)c);
+}
+
+static bool starts_with_keyword(const char *text, const char *keyword) {
+    size_t len = strlen(keyword);
+    return strncasecmp(text, keyword, len) == 0 &&
+           is_keyword_boundary(text[len]);
+}
 
 static bool contains_keyword(const char *text, const char *keyword) {
     if (!text || !keyword) return false;
-    
+    size_t len = strlen(keyword);
+    if (len == 0) return false;
+
     for (const char *p = text; *p; p++) {
-        if (strncasecmp(p, keyword, strlen(keyword)) == 0) {
+        if (starts_with_keyword(p, keyword) &&
+            (p == text || is_keyword_boundary(p[-1])) &&
+            is_keyword_boundary(p[len])) {
             return true;
         }
     }
@@ -75,20 +90,22 @@ static bool contains_keyword(const char *text, const char *keyword) {
 
 /* ── Pattern detection ─────────────────────────────────────────────────── */
 
-static int detect_patterns(const char *task, bool *patterns_out) {
+static int detect_patterns(const char *task, bool *patterns_out, int *keyword_count_out) {
     int count = 0;
-    
+    int keyword_count = 0;
+
     for (int i = 0; i < PATTERN_COUNT; i++) {
         patterns_out[i] = false;
         for (int j = 0; pattern_keywords[i][j]; j++) {
             if (contains_keyword(task, pattern_keywords[i][j])) {
+                keyword_count++;
                 patterns_out[i] = true;
-                count++;
-                break;  // Count each pattern once
             }
         }
+        if (patterns_out[i]) count++;
     }
-    
+
+    if (keyword_count_out) *keyword_count_out = keyword_count;
     return count;
 }
 
@@ -152,6 +169,12 @@ static double compute_latency_score(const task_profile_t *tp) {
 static double compute_fit_score(const task_profile_t *tp,
                                 const topology_t *topo) {
     double score = 0.5;  // Baseline
+
+    if (tp->pattern_count == 0) {
+        if (strcasecmp(topo->name, "triage") == 0) return 0.85;
+        if (topo->category == CAT_SPECIALIST && topo->est_latency_mult <= 2.0) return 0.60;
+        return 0.45;
+    }
     
     // Match topology category to detected patterns
     switch (topo->category) {
@@ -192,8 +215,28 @@ static double compute_fit_score(const task_profile_t *tp,
         break;
         
     case CAT_DOMAIN:
-        // Generic domain-specific topologies
-        score += 0.1;
+        // Domain-specific topologies should win only when the task carries
+        // a domain signal, not for arbitrary generic text.
+        if (tp->patterns[PATTERN_CODING] &&
+            (contains_keyword(topo->name, "code") ||
+             contains_keyword(topo->description, "code") ||
+             contains_keyword(topo->description, "implement"))) {
+            score += 0.25;
+        }
+        if (tp->patterns[PATTERN_REVIEW] &&
+            (contains_keyword(topo->name, "review") ||
+             contains_keyword(topo->description, "review") ||
+             contains_keyword(topo->description, "audit") ||
+             contains_keyword(topo->description, "validate"))) {
+            score += 0.25;
+        }
+        if (tp->patterns[PATTERN_ANALYSIS] &&
+            (contains_keyword(topo->name, "research") ||
+             contains_keyword(topo->description, "research") ||
+             contains_keyword(topo->description, "analysis") ||
+             contains_keyword(topo->description, "gather"))) {
+            score += 0.25;
+        }
         break;
         
     case CAT_COMPETITIVE:
@@ -203,48 +246,58 @@ static double compute_fit_score(const task_profile_t *tp,
         break;
     }
     
+    if (tp->latency_score > 0.6) {
+        if (topo->est_latency_mult <= 2.0) score += 0.12;
+        if (topo->est_latency_mult >= 5.0) score -= 0.10;
+    }
+
+    if (tp->parallelism_score > 0.6 && topo->total_agents >= 5) score += 0.08;
+    if (tp->complexity_score < 0.35 && topo->total_agents > 8) score -= 0.10;
+
+    if (score < 0.0) return 0.0;
     return fmin(score, 1.0);
 }
 
 static int rank_topologies(task_profile_t *tp) {
-    // Dummy: for now just return the first runnable topology from registry
-    // Future: actually rank against all 60 topologies
-    
-    const topology_t *candidates[] = {
-        topology_find("chain_of_thought"),
-        topology_find("fanout_balance"),
-        topology_find("mesh_consensus"),
-        topology_find("feedback_refine"),
-        topology_find("specialist_tournament"),
-        topology_find("triage"),
-        NULL
-    };
-    
+    int topology_count = 0;
+    const topology_t *candidates = topology_registry(&topology_count);
+
     tp->suggestion_count = 0;
-    for (int i = 0; candidates[i] && tp->suggestion_count < 15; i++) {
-        if (!topology_is_runnable(candidates[i])) continue;
-        
-        double fit = compute_fit_score(tp, candidates[i]);
+    for (int i = 0; i < topology_count; i++) {
+        const topology_t *candidate = &candidates[i];
+        if (!topology_is_runnable(candidate)) continue;
+
+        double fit = compute_fit_score(tp, candidate);
         
         // Insert in sorted order (highest fit first)
         int insert_pos = tp->suggestion_count;
         for (int j = 0; j < tp->suggestion_count; j++) {
-            if (fit > tp->suggestions[j].fit_score) {
+            const topology_t *existing = tp->suggestions[j].topo;
+            bool better_fit = fit > tp->suggestions[j].fit_score;
+            bool same_fit = fabs(fit - tp->suggestions[j].fit_score) < 0.0001;
+            bool lower_latency = existing && candidate->est_latency_mult < existing->est_latency_mult;
+            bool same_latency = existing && candidate->est_latency_mult == existing->est_latency_mult;
+            bool lower_cost = existing && candidate->est_cost_1k < existing->est_cost_1k;
+
+            if (better_fit ||
+                (same_fit && (lower_latency ||
+                              (same_latency && lower_cost)))) {
                 insert_pos = j;
                 break;
             }
         }
-        
-        // Shift down
-        for (int j = tp->suggestion_count; j > insert_pos; j--) {
+
+        if (insert_pos >= 15) continue;
+
+        int last = tp->suggestion_count < 15 ? tp->suggestion_count : 14;
+        for (int j = last; j > insert_pos; j--) {
             tp->suggestions[j] = tp->suggestions[j-1];
         }
-        
-        // Insert
-        tp->suggestions[insert_pos].topo = candidates[i];
+
+        tp->suggestions[insert_pos].topo = candidate;
         tp->suggestions[insert_pos].fit_score = fit;
-        tp->suggestions[insert_pos].reason = "ranked";
-        tp->suggestion_count++;
+        tp->suggestions[insert_pos].reason = topo_category_label(candidate->category);
+        if (tp->suggestion_count < 15) tp->suggestion_count++;
     }
     
     return tp->suggestion_count;
@@ -271,17 +324,17 @@ task_profile_t *task_profile(const char *task, const char *api_key) {
     for (const char *p = tp->task; *p; p++) {
         if (*p == ',' || *p == ';' ||
             (p[0] == ' ' && (
-                (strncasecmp(p+1, "and", 3) == 0) ||
-                (strncasecmp(p+1, "or", 2) == 0) ||
-                (strncasecmp(p+1, "then", 4) == 0) ||
-                (strncasecmp(p+1, "next", 4) == 0)
+                starts_with_keyword(p + 1, "and") ||
+                starts_with_keyword(p + 1, "or") ||
+                starts_with_keyword(p + 1, "then") ||
+                starts_with_keyword(p + 1, "next")
             ))) {
             tp->clause_count++;
         }
     }
     
     // Detect patterns
-    tp->pattern_count = detect_patterns(tp->task, tp->patterns);
+    tp->pattern_count = detect_patterns(tp->task, tp->patterns, &tp->keyword_match_count);
     
     // Compute scores
     tp->parallelism_score = compute_parallelism_score(tp);
@@ -308,42 +361,45 @@ void task_profile_free(task_profile_t *tp) {
 }
 
 int task_profile_json(const task_profile_t *tp, char *buf, size_t len) {
-    if (!buf || len == 0) return -1;
-    
-    int written = snprintf(buf, len,
-        "{"
-        "\"task\":\"%.100s\","
-        "\"scores\":{"
-            "\"parallelism\":%.2f,"
-            "\"convergence\":%.2f,"
-            "\"complexity\":%.2f,"
-            "\"latency\":%.2f"
-        "},"
-        "\"metrics\":{"
-            "\"task_length\":%d,"
-            "\"clause_count\":%d,"
-            "\"pattern_count\":%d"
-        "},"
-        "\"suggestions\":["
-    , tp->task,
-      tp->parallelism_score,
-      tp->convergence_score,
-      tp->complexity_score,
-      tp->latency_score,
-      tp->task_length,
-      tp->clause_count,
-      tp->pattern_count);
-    
-    for (int i = 0; i < tp->suggestion_count && written < (int)len - 100; i++) {
-        written += snprintf(buf + written, len - written,
-            "%s{\"topo\":\"%.30s\",\"fit\":%.2f}",
-            i > 0 ? "," : "",
-            tp->suggestions[i].topo ? tp->suggestions[i].topo->name : "unknown",
-            tp->suggestions[i].fit_score);
+    if (!tp || !buf || len == 0) return -1;
+
+    jbuf_t b;
+    jbuf_init(&b, 2048);
+    jbuf_append(&b, "{\"task\":");
+    jbuf_append_json_str(&b, tp->task);
+    jbuf_appendf(&b,
+        ",\"scores\":{\"parallelism\":%.2f,\"convergence\":%.2f,"
+        "\"complexity\":%.2f,\"latency\":%.2f}"
+        ",\"metrics\":{\"task_length\":%d,\"clause_count\":%d,"
+        "\"pattern_count\":%d,\"keyword_match_count\":%d}"
+        ",\"suggestions\":[",
+        tp->parallelism_score,
+        tp->convergence_score,
+        tp->complexity_score,
+        tp->latency_score,
+        tp->task_length,
+        tp->clause_count,
+        tp->pattern_count,
+        tp->keyword_match_count);
+
+    for (int i = 0; i < tp->suggestion_count; i++) {
+        if (i > 0) jbuf_append_char(&b, ',');
+        const topology_t *topo = tp->suggestions[i].topo;
+        jbuf_append(&b, "{\"topo\":");
+        jbuf_append_json_str(&b, topo ? topo->name : "unknown");
+        jbuf_appendf(&b, ",\"fit\":%.2f,\"reason\":", tp->suggestions[i].fit_score);
+        jbuf_append_json_str(&b, tp->suggestions[i].reason ? tp->suggestions[i].reason : "");
+        jbuf_append_char(&b, '}');
     }
-    
-    written += snprintf(buf + written, len - written, "]}");
-    
+
+    jbuf_append(&b, "]}");
+
+    size_t copy_len = b.len < len - 1 ? b.len : len - 1;
+    memcpy(buf, b.data, copy_len);
+    buf[copy_len] = '\0';
+
+    int written = copy_len > (size_t)INT_MAX ? INT_MAX : (int)copy_len;
+    jbuf_free(&b);
     return written;
 }
 
@@ -353,9 +409,11 @@ const topology_t *task_profile_best_topology(const task_profile_t *tp) {
 }
 
 int task_profile_explain(const task_profile_t *tp, char *buf, size_t len) {
-    if (!buf || len == 0) return -1;
-    
-    int written = snprintf(buf, len,
+    if (!tp || !buf || len == 0) return -1;
+
+    jbuf_t b;
+    jbuf_init(&b, 1024);
+    jbuf_appendf(&b,
         "Task profile:\n"
         "  Parallelism:  %.0f%% (%.2f)\n"
         "  Convergence:  %.0f%% (%.2f)\n"
@@ -370,17 +428,23 @@ int task_profile_explain(const task_profile_t *tp, char *buf, size_t len) {
         tp->pattern_count);
     
     int top_n = (tp->suggestion_count < 3 ? tp->suggestion_count : 3);
-    written += snprintf(buf + written, len - written, "\nTop %d topologies:\n", top_n);
+    jbuf_appendf(&b, "\nTop %d topologies:\n", top_n);
     
     for (int i = 0; i < top_n; i++) {
         if (tp->suggestions[i].topo) {
-            written += snprintf(buf + written, len - written,
+            jbuf_appendf(&b,
                 "  %d. %s (fit: %.0f%%)\n",
                 i + 1,
                 tp->suggestions[i].topo->name,
                 tp->suggestions[i].fit_score * 100.0);
         }
     }
-    
+
+    size_t copy_len = b.len < len - 1 ? b.len : len - 1;
+    memcpy(buf, b.data, copy_len);
+    buf[copy_len] = '\0';
+
+    int written = copy_len > (size_t)INT_MAX ? INT_MAX : (int)copy_len;
+    jbuf_free(&b);
     return written;
 }
