@@ -22,7 +22,7 @@
 #include <pthread.h>
 
 static redisContext *g_redis = NULL;
-static redisContext *g_redis_sub = NULL;   /* dedicated subscribe connection */
+static __attribute__((unused)) redisContext *g_redis_sub = NULL;   /* dedicated subscribe connection */
 static pthread_mutex_t g_redis_mu = PTHREAD_MUTEX_INITIALIZER;
 
 static void redis_connect(void) {
