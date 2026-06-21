@@ -36,8 +36,6 @@ static char *openai_build_request(provider_t *p, conversation_t *conv,
                                    session_state_t *session, int max_tokens,
                                    const char *credential);
 static struct curl_slist *openai_build_headers(provider_t *p, const char *api_key);
-static bool openrouter_should_disable_thinking(session_state_t *session);
-static bool moonshot_should_disable_thinking(session_state_t *session);
 static char *xai_build_request(provider_t *p, conversation_t *conv,
                                 session_state_t *session, int max_tokens,
                                 const char *credential);
@@ -1124,14 +1122,14 @@ static char *openrouter_build_request(provider_t *p, conversation_t *conv,
     const char *fallback_models = getenv("DSCO_OR_FALLBACK_MODELS");
     const char *reasoning       = getenv("DSCO_OR_REASONING_EFFORT");
     const char *debug_mode      = getenv("DSCO_OR_DEBUG");
-    bool disable_thinking       = openrouter_should_disable_thinking(session);
+    /* thinking disabled by omission; explicit type=disabled rejected by some models */
 
     bool has_provider = prov_order || prov_only || prov_ignore || req_params ||
                         (allow_fb && !or_env_bool(allow_fb)) ||
                         data_collect || zdr || quantizations || sort_by ||
                         max_price_in || max_price_out;
     bool has_extras = transforms || route || has_provider || fallback_models ||
-                      reasoning || debug_mode || disable_thinking;
+                      reasoning || debug_mode;
 
     if (!has_extras) return base;
 
@@ -1170,12 +1168,10 @@ static char *openrouter_build_request(provider_t *p, conversation_t *conv,
         jbuf_append(&b, "}");
     }
 
-    /* Kimi/OpenRouter tool calls are more reliable with non-thinking mode
-       unless the user explicitly opts into a fixed thinking budget. */
-    if (disable_thinking) {
-        jbuf_append(&b, ",\"thinking\":{\"type\":\"disabled\"}");
-    }
-
+    /* Never emit type=disabled — some models (e.g. kimi-k2.7-code) only
+       accept type=enabled or omission. If the user wants thinking, they set
+       DSCO_OR_REASONING_EFFORT or pick a *-thinking / *-think model.
+       Otherwise we simply omit the field (thinking disabled by default). */
     /* debug: {"echo_upstream_body": true} */
     if (debug_mode && or_env_bool(debug_mode)) {
         jbuf_append(&b, ",\"debug\":{\"echo_upstream_body\":true}");
@@ -1273,8 +1269,6 @@ static char *moonshot_build_request(provider_t *p, conversation_t *conv,
     char *base = openai_build_request(p, conv, session, max_tokens, credential);
     if (!base) return NULL;
 
-    bool disable_thinking = moonshot_should_disable_thinking(session);
-    if (!disable_thinking) return base;
 
     size_t len = strlen(base);
     if (len == 0 || base[len - 1] != '}') return base;
@@ -1560,30 +1554,14 @@ static void openai_append_tool_choice_json(jbuf_t *b, session_state_t *session,
     }
 }
 
-static bool openrouter_should_disable_thinking(session_state_t *session) {
-    if (!session || !session->model[0]) return false;
-    if (session->thinking_budget > 0) return false;
-    if (getenv("DSCO_OR_REASONING_EFFORT")) return false;
-    if (strstr(session->model, "kimi") && !strstr(session->model, "thinking")) {
-        return true;
-    }
-    return false;
-}
+/* openrouter_should_disable_thinking removed — type=disabled is rejected by some models */
 
 /* Native Moonshot routing: kimi-k2.5 is multimodal and defaults to thinking
  * enabled. Tool-calling reliability improves substantially with thinking
  * disabled unless the user explicitly opts in via thinking_budget or picks
  * a *-thinking model. */
-static bool moonshot_should_disable_thinking(session_state_t *session) {
-    if (!session || !session->model[0]) return false;
-    if (session->thinking_budget > 0) return false;
-    const char *force = getenv("DSCO_MOONSHOT_THINKING");
-    if (force && (force[0] == '1' || strcasecmp(force, "true") == 0 ||
-                  strcasecmp(force, "enabled") == 0))
-        return false;
-    if (strstr(session->model, "thinking")) return false;
-    return true;
-}
+/* moonshot_should_disable_thinking excised */
+
 
 /* Emit text+image content array (skipping tool_use and tool_result blocks) */
 static void openai_append_text_content(jbuf_t *b, message_t *m) {
