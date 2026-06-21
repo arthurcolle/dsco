@@ -256,7 +256,17 @@ void self_improve_record_turn(self_improve_t *si,
 
     /* Detect high-cost turn */
     if (turn_cost > 0.50) {
-        if (si->pattern_count < SI_MAX_PATTERNS) {
+        bool found = false;
+        for (int i = 0; i < si->pattern_count; i++) {
+            if (si->patterns[i].type == SI_PATTERN_HIGH_COST_TURN) {
+                si->patterns[i].occurrences++;
+                si->patterns[i].last_seen = si_now();
+                si->patterns[i].severity = clampd(turn_cost / 2.0, 0.0, 1.0);
+                found = true;
+                break;
+            }
+        }
+        if (!found && si->pattern_count < SI_MAX_PATTERNS) {
             si_pattern_t *p = &si->patterns[si->pattern_count++];
             p->type = SI_PATTERN_HIGH_COST_TURN;
             snprintf(p->description, sizeof(p->description),
@@ -294,7 +304,17 @@ void self_improve_record_turn(self_improve_t *si,
 
     /* Detect budget approaching */
     if (budget_used_pct > 75.0) {
-        if (si->pattern_count < SI_MAX_PATTERNS) {
+        bool found = false;
+        for (int i = 0; i < si->pattern_count; i++) {
+            if (si->patterns[i].type == SI_PATTERN_BUDGET_APPROACHING) {
+                si->patterns[i].occurrences++;
+                si->patterns[i].last_seen = si_now();
+                si->patterns[i].severity = budget_used_pct / 100.0;
+                found = true;
+                break;
+            }
+        }
+        if (!found && si->pattern_count < SI_MAX_PATTERNS) {
             si_pattern_t *p = &si->patterns[si->pattern_count++];
             p->type = SI_PATTERN_BUDGET_APPROACHING;
             snprintf(p->description, sizeof(p->description),
@@ -393,7 +413,19 @@ static int add_suggestion(self_improve_t *si,
             }
         }
         if (worst_conf >= confidence) return -1; /* all existing are better */
-        si->suggestion_count = worst; /* reuse this slot */
+        /* Reuse the worst slot — count stays at SI_MAX_SUGGESTIONS */
+        si_suggestion_t *s = &si->suggestions[worst];
+        memset(s, 0, sizeof(*s));
+        s->type = type;
+        s->confidence = clampd(confidence, 0.0, 1.0);
+        s->estimated_savings = savings;
+        s->applied = false;
+        strncpy(s->description, desc, SI_MAX_SUGGESTION_LEN - 1);
+        if (target) strncpy(s->target_tool, target, SI_MAX_TOOL_NAME - 1);
+        if (alt)    strncpy(s->alternative_tool, alt, SI_MAX_TOOL_NAME - 1);
+
+        baseline_log("self_improve", "suggestion_generated", desc, NULL);
+        return worst;
     }
 
     si_suggestion_t *s = &si->suggestions[si->suggestion_count];

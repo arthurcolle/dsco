@@ -4401,6 +4401,16 @@ bool tool_systematic_ingest_kalshi(const char *input, char *result, size_t rlen)
 
             const char *cat = classify_market(title, ticker);
 
+            /* Extract close_time (ISO 8601 end date) from Kalshi market data */
+            char end_date[32] = {0};
+            const char *ct = strstr(end, "\"close_time\":\"");
+            if (ct && ct - end < 3000) {
+                ct += 14;
+                const char *ce = strchr(ct, '"');
+                if (ce && (size_t)(ce - ct) < 31)
+                    memcpy(end_date, ct, (size_t)(ce - ct));
+            }
+
             sqlite3_stmt *stmt;
             if (sqlite3_prepare_v2(db,
                     "INSERT OR IGNORE INTO resolved_markets"
@@ -4413,7 +4423,7 @@ bool tool_systematic_ingest_kalshi(const char *input, char *result, size_t rlen)
                 sqlite3_bind_text(stmt, 3, cat, -1, SQLITE_STATIC);
                 sqlite3_bind_text(stmt, 4, series, -1, SQLITE_STATIC);
                 sqlite3_bind_text(stmt, 5, ka_result, -1, SQLITE_STATIC);
-                sqlite3_bind_text(stmt, 6, "", -1, SQLITE_STATIC); /* end_date - TODO extract */
+                sqlite3_bind_text(stmt, 6, end_date, -1, SQLITE_STATIC);
                 sqlite3_bind_text(stmt, 7, settle_val, -1, SQLITE_STATIC);
                 sqlite3_bind_text(stmt, 8, settle_val, -1, SQLITE_STATIC);
                 if (sqlite3_step(stmt) == SQLITE_DONE && sqlite3_changes(db) > 0)

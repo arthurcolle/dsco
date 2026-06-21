@@ -20,6 +20,15 @@ OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
 THE SOFTWARE.
 */
 
+#ifndef DHT_H
+#define DHT_H
+
+#include <stddef.h>   /* size_t */
+#include <stdio.h>    /* FILE */
+#include <time.h>     /* time_t */
+#include <sys/socket.h>  /* struct sockaddr */
+#include <netinet/in.h>  /* struct sockaddr_in, struct sockaddr_in6 */
+
 #ifdef __cplusplus
 extern "C" {
 #endif
@@ -66,3 +75,5 @@ int dht_random_bytes(void *buf, size_t size);
 #ifdef __cplusplus
 }
 #endif
+
+#endif /* DHT_H */

@@ -76,6 +76,12 @@ void session_state_init(session_state_t *s, const char *model) {
     snprintf(s->model, sizeof(s->model), "%s", resolved);
     snprintf(s->effort, sizeof(s->effort), "%s", EFFORT_HIGH);
     s->trust_tier = DSCO_TRUST_STANDARD;
+    {
+        bool trust_ok = false;
+        dsco_trust_tier_t env_tier =
+            session_trust_tier_from_string(getenv("DSCO_TRUST_TIER"), &trust_ok);
+        if (trust_ok) s->trust_tier = env_tier;
+    }
     s->web_search = true;
     s->code_execution = true;
     s->context_window = model_context_window(resolved);
@@ -3778,6 +3784,7 @@ stream_result_t llm_stream(const char *api_key, const char *request_json,
             fprintf(stderr, "dsco: API error: %s\n", state.error_msg ? state.error_msg : "unknown");
         }
         result.ok = false;
+        result.context_overflow = provider_msg_is_context_overflow(state.error_msg);
     } else if (http_code != 200) {
         /* Credit/billing errors show up as 400 with an error.message body, or
          * as 402 Payment Required depending on the upstream. Parse the body
@@ -3801,6 +3808,10 @@ stream_result_t llm_stream(const char *api_key, const char *request_json,
                 } else {
                     fprintf(stderr, "dsco: HTTP %d: %s\n", (int)http_code, state.line_buf.data);
                 }
+                result.context_overflow =
+                    provider_msg_is_context_overflow(msg) ||
+                    provider_msg_is_context_overflow(typ) ||
+                    provider_msg_is_context_overflow(state.line_buf.data);
                 free(msg);
                 free(typ);
                 free(body_err);

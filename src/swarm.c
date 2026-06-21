@@ -5,6 +5,7 @@
 #include "llm.h"
 #include "json_util.h"
 #include "tui.h"
+#include "pets.h"
 #include "scheduler.h"
 #include <stdio.h>
 #include <stdlib.h>
@@ -50,7 +51,7 @@ static inline void bitset_clear(swarm_bitset_t *bs, int i) {
     if (bs->bits & (1ULL << i)) { bs->bits &= ~(1ULL << i); bs->count--; }
 }
 
-static inline bool bitset_test(const swarm_bitset_t *bs, int i) {
+static __attribute__((unused)) inline bool bitset_test(const swarm_bitset_t *bs, int i) {
     return i >= 0 && i < 64 && (bs->bits & (1ULL << i));
 }
 
@@ -198,6 +199,13 @@ void swarm_destroy(swarm_t *s) {
 
 static void post_spawn_register(swarm_t *s, int child_id) {
     bitset_set(&s->active, child_id);
+    /* Hatch a companion pet for this background agent. Seeded by the task so
+     * the same task always gets the same creature. */
+    {
+        swarm_child_t *pc = &s->children[child_id];
+        pet_roster_upsert(pet_roster_global(), child_id, -1,
+                          pc->task, pc->task, PET_ST_WORKING);
+    }
 #ifdef __APPLE__
     swarm_child_t *c = &s->children[child_id];
     kq_register_fd(s->kq_fd, c->pipe_fd, child_id);
@@ -213,6 +221,16 @@ static void post_complete(swarm_t *s, int child_id) {
     cq_push(&s->done_q, child_id);
     if (s->first_completion_time == 0)
         s->first_completion_time = now_sec();
+    /* Update the pet's status + cost; the main loop drains DONE/ERROR pets and
+     * fires a mini-notification (see drain_pet_notifications in agent.c). */
+    {
+        swarm_child_t *pc = &s->children[child_id];
+        double cost = pc->reported_cost_usd > 0 ? pc->reported_cost_usd
+                                                : pc->est_cost_usd;
+        pet_roster_set_status(pet_roster_global(), child_id,
+                              pc->status == SWARM_DONE ? PET_ST_DONE : PET_ST_ERROR,
+                              cost);
+    }
 #ifdef __APPLE__
     swarm_child_t *c = &s->children[child_id];
     kq_unregister_fd(s->kq_fd, c->pipe_fd);
@@ -1087,17 +1105,37 @@ void swarm_set_budget(swarm_t *s, double budget_usd) {
     s->swarm_budget_usd = budget_usd;
 }
 
-double swarm_budget_remaining(swarm_t *s) {
-    if (s->swarm_budget_usd <= 0) return 1e9; /* unlimited */
-    double spent = 0;
-    for (int i = 0; i < s->child_count; i++) {
-        double cost = s->children[i].reported_cost_usd > 0
-                    ? s->children[i].reported_cost_usd
-                    : s->children[i].est_cost_usd;
-        spent += cost;
+/* A child's tokens are "subsidized" — covered by a flat-rate subscription
+ * (the $200/mo Claude Max / ChatGPT Codex plans) rather than metered credit —
+ * when it runs through the Claude Code or Codex CLI executors. Their notional
+ * API cost is tracked for visibility but does NOT draw the real-dollar budget.
+ * Override the set via DSCO_SUBSIDIZED_EXECUTORS=claude,codex,dsco (dsco only
+ * when the parent itself runs on an Anthropic/OpenAI OAuth subscription). */
+bool swarm_child_is_subsidized(const swarm_child_t *c) {
+    if (!c) return false;
+    const char *ov = getenv("DSCO_SUBSIDIZED_EXECUTORS");
+    if (ov && ov[0]) {
+        const char *nm = executor_type_name(c->executor);
+        return nm && strstr(ov, nm) != NULL;
     }
-    s->spent_usd = spent;
-    return s->swarm_budget_usd - spent;
+    return c->executor == EXECUTOR_CLAUDE || c->executor == EXECUTOR_CODEX;
+}
+
+double swarm_budget_remaining(swarm_t *s) {
+    /* Always recompute the metered vs subsidized split, even when unlimited,
+     * so status/reporting stays accurate. */
+    double metered = 0, subsidized = 0;
+    for (int i = 0; i < s->child_count; i++) {
+        swarm_child_t *c = &s->children[i];
+        double cost = c->reported_cost_usd > 0 ? c->reported_cost_usd
+                                               : c->est_cost_usd;
+        if (swarm_child_is_subsidized(c)) subsidized += cost;
+        else                              metered    += cost;
+    }
+    s->spent_usd      = metered;
+    s->subsidized_usd = subsidized;
+    if (s->swarm_budget_usd <= 0) return 1e9; /* unlimited */
+    return s->swarm_budget_usd - metered;
 }
 
 double swarm_estimate_task_cost(swarm_t *s, const char *model) {
@@ -1117,29 +1155,37 @@ double swarm_estimate_task_cost(swarm_t *s, const char *model) {
 }
 
 void swarm_enforce_budgets(swarm_t *s) {
-    if (s->swarm_budget_usd <= 0) return;
-    double total_spent = 0;
+    double metered_spent = 0, subsidized_spent = 0;
     for (int i = 0; i < s->child_count; i++) {
         swarm_child_t *c = &s->children[i];
         double cost = c->reported_cost_usd > 0 ? c->reported_cost_usd : c->est_cost_usd;
-        total_spent += cost;
+        bool subsidized = swarm_child_is_subsidized(c);
+        if (subsidized) subsidized_spent += cost;
+        else            metered_spent    += cost;
 
-        /* Per-child budget enforcement */
-        if (c->budget_usd > 0 && cost > c->budget_usd &&
+        /* Per-child real-dollar budget enforcement — skip subsidized children
+         * since their flat-rate plan already covers the tokens; killing them
+         * for "cost" would waste prepaid subscription capacity. */
+        if (!subsidized && c->budget_usd > 0 && cost > c->budget_usd &&
             (c->status == SWARM_RUNNING || c->status == SWARM_STREAMING)) {
             fprintf(stderr, "  %s⚠%s agent #%d over budget ($%.4f > $%.4f) — killing\n",
                     TUI_YELLOW, TUI_RESET, c->id, cost, c->budget_usd);
             swarm_kill(s, c->id);
         }
     }
-    s->spent_usd = total_spent;
+    s->spent_usd      = metered_spent;
+    s->subsidized_usd = subsidized_spent;
 
-    /* Global swarm budget enforcement */
-    if (total_spent >= s->swarm_budget_usd) {
-        fprintf(stderr, "  %s%sswarm budget exhausted: $%.4f / $%.4f — killing all%s\n",
-                TUI_BOLD, TUI_RED, total_spent, s->swarm_budget_usd, TUI_RESET);
+    /* Global budget enforcement applies only to metered real-dollar spend. */
+    if (s->swarm_budget_usd > 0 && metered_spent >= s->swarm_budget_usd) {
+        fprintf(stderr, "  %s%sswarm budget exhausted: $%.4f / $%.4f metered "
+                "(+$%.4f subsidized) — killing metered children%s\n",
+                TUI_BOLD, TUI_RED, metered_spent, s->swarm_budget_usd,
+                subsidized_spent, TUI_RESET);
         for (int i = 0; i < s->child_count; i++) {
             swarm_child_t *c = &s->children[i];
+            /* Leave subsidized children running — they don't draw the budget. */
+            if (swarm_child_is_subsidized(c)) continue;
             if (c->status == SWARM_RUNNING || c->status == SWARM_STREAMING)
                 swarm_kill(s, c->id);
         }
@@ -1189,6 +1235,9 @@ int swarm_status_json(swarm_t *s, char *buf, size_t len) {
     jbuf_t b;
     jbuf_init(&b, 4096);
 
+    /* Refresh the metered-vs-subsidized spend split before reporting. */
+    swarm_budget_remaining(s);
+
     jbuf_append(&b, "{\"swarm\":{\"children\":");
     jbuf_append_int(&b, s->child_count);
     jbuf_append(&b, ",\"active\":");
@@ -1221,6 +1270,8 @@ int swarm_status_json(swarm_t *s, char *buf, size_t len) {
         jbuf_append_int(&b, (int)c->output_len);
         jbuf_append(&b, ",\"executor\":");
         jbuf_append_json_str(&b, executor_type_name(c->executor));
+        jbuf_append(&b, ",\"subsidized\":");
+        jbuf_append(&b, swarm_child_is_subsidized(c) ? "true" : "false");
         if (c->budget_usd > 0) {
             char bud[32];
             snprintf(bud, sizeof(bud), "%.6f", c->budget_usd);
@@ -1236,18 +1287,30 @@ int swarm_status_json(swarm_t *s, char *buf, size_t len) {
         jbuf_append(&b, "}");
     }
 
-    /* Swarm budget summary */
-    if (s->swarm_budget_usd > 0) {
-        char spent[32], bud[32];
+    /* Swarm budget summary. spent_usd is metered real-dollar (OpenRouter/API
+     * credit) draw; subsidized_usd is notional cost covered by flat-rate
+     * Claude Code / Codex plans (does NOT draw the budget). */
+    {
+        char spent[32], subs[32];
         snprintf(spent, sizeof(spent), "%.6f", s->spent_usd);
-        snprintf(bud, sizeof(bud), "%.6f", s->swarm_budget_usd);
-        jbuf_append(&b, "],\"budget\":{\"total_usd\":");
-        jbuf_append(&b, bud);
-        jbuf_append(&b, ",\"spent_usd\":");
+        snprintf(subs, sizeof(subs), "%.6f", s->subsidized_usd);
+        jbuf_append(&b, "],\"budget\":{");
+        if (s->swarm_budget_usd > 0) {
+            char bud[32];
+            snprintf(bud, sizeof(bud), "%.6f", s->swarm_budget_usd);
+            jbuf_append(&b, "\"total_usd\":");
+            jbuf_append(&b, bud);
+            jbuf_append(&b, ",\"remaining_usd\":");
+            char rem[32];
+            snprintf(rem, sizeof(rem), "%.6f", s->swarm_budget_usd - s->spent_usd);
+            jbuf_append(&b, rem);
+            jbuf_append(&b, ",");
+        }
+        jbuf_append(&b, "\"spent_usd\":");
         jbuf_append(&b, spent);
+        jbuf_append(&b, ",\"subsidized_usd\":");
+        jbuf_append(&b, subs);
         jbuf_append(&b, "},\"group_details\":[");
-    } else {
-        jbuf_append(&b, "],\"group_details\":[");
     }
 
     /* Executor availability */
