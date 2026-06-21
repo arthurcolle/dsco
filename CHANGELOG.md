@@ -6,7 +6,17 @@ The format loosely follows Keep a Changelog with an `Unreleased` section.
 
 ## [Unreleased]
 
+## [1.0.0]
+
 ### Added
+
+- Public release baseline: agent runtime, TUI, MCP/provider integrations,
+  vector store, security modules (tamper, sealed store, kill switch), and the
+  cross-OSI connector seam.
+- Portable build: libsodium-optional `tamper.c`, clang-compatible thread pool,
+  and CI dependency provisioning so Linux (gcc + clang) matches macOS.
+
+### Added (pre-1.0 history)
 
 - Comprehensive docs bundle under `docs/`:
   - architecture reference

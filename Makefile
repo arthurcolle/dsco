@@ -38,7 +38,7 @@ SRC_NAMES = main.c agent.c llm.c tools.c json_util.c ast.c swarm.c tui.c \
 	project.c project_mux.c project_grid.c \
 	dsco_accel.c dsco_mlx.c dsco_pool.c \
 	fingerprint.c trust.c toolmgmt.c connector.c openrouter_cache.c \
-	startup.c \
+	startup.c plot.c self_improve.c \
 	$(OPTIONAL_SRCS)
 TEST_SRC_NAMES = test.c
 

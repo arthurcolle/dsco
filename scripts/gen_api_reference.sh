@@ -10,7 +10,7 @@ if [[ "${1:-}" == "--check" ]]; then
   CHECK=1
 fi
 
-mapfile -t HEADERS < <(cd "$ROOT" && ls *.h 2>/dev/null | sort)
+mapfile -t HEADERS < <(cd "$ROOT/include" && ls *.h 2>/dev/null | sort)
 
 {
   echo "# API Reference"
