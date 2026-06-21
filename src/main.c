@@ -37,6 +37,16 @@
 #include "watchdog.h"
 #include "env_guard.h"
 #include "heartbeat.h"
+#include "mesh.h"
+#include "net_server.h"
+#include "peer_bootstrap.h"
+#include "cost_model.h"
+#include "plan_cache.h"
+#include "plan_optimizer.h"
+#include "dsco_dht.h"
+#if defined(HAVE_MBEDTLS) && defined(HAVE_LIBSODIUM)
+extern void dsco_net_routes_register(void *srv_opaque);
+#endif
 #include "presence.h"
 #include "touchid.h"
 #include "project.h"
@@ -70,12 +80,19 @@
 #include <limits.h>
 #ifdef __APPLE__
 #include <mach-o/dyld.h>
+#include <sys/stat.h>
 #endif
 
 static md_renderer_t s_oneshot_md;
 
 /* --cheap mode: only ALWAYS-core tools (5) + no compact catalog */
 int g_cheap_mode = 0;
+
+static bool is_legacy_sonnet_default_model(const char *model) {
+    if (!model || !model[0]) return false;
+    const char *resolved = model_resolve_alias(model);
+    return resolved && strstr(resolved, "claude-sonnet") != NULL;
+}
 
 /* Opt-in startup timing. Enable with DSCO_PERF=1. */
 static bool   g_perf_enabled = false;
@@ -154,6 +171,15 @@ static bool         g_trace_ready = false;
 static bool         g_ipc_ready = false;
 static bool         g_startup_initialized = false;
 
+/* ── Native networking globals ──────────────────────────────────────────── */
+#if defined(HAVE_LIBSODIUM)
+mesh_node_t      *g_mesh_node  = NULL;
+#endif
+#if defined(HAVE_MBEDTLS) && defined(HAVE_LIBSODIUM)
+dsco_net_server_t *g_net_server = NULL;
+/* Forward declaration — defined in net_tool.c (also declared above near includes) */
+#endif
+
 /* Signal handler for clean IPC shutdown in sub-agent mode */
 static volatile sig_atomic_t g_main_interrupted = 0;
 
@@ -220,6 +246,19 @@ static void main_atexit_handler(void) {
         ipc_shutdown();
         g_ipc_ready = false;
     }
+
+
+    /* ── Cost model + plan cache flush ─────────────────────────────────── */
+    cost_model_flush();
+    plan_cache_flush();
+    /* ── Native networking teardown ─────────────────────────────────────── */
+#if defined(HAVE_LIBSODIUM)
+    peer_bootstrap_stop();
+    if (g_mesh_node) { mesh_node_destroy(g_mesh_node); g_mesh_node = NULL; }
+#endif
+#if defined(HAVE_MBEDTLS) && defined(HAVE_LIBSODIUM)
+    if (g_net_server) { netsrv_destroy(g_net_server); g_net_server = NULL; }
+#endif
 }
 
 static void init_vos_subsystems(void) {
@@ -475,6 +514,83 @@ void dsco_startup_init(dsco_profile_t profile, dsco_caps_t caps) {
         env_guard_init();
         audit_log("startup", is_worker ? "dsco worker init" : "dsco init");
         if (!is_worker) heartbeat_start();
+
+        /* ── Priority 1/3/4: plan optimizer, cost model, plan cache ── */
+        if (!is_worker) {
+            cost_model_init();
+            plan_cache_init();
+        }
+
+#if defined(HAVE_LIBSODIUM)
+        if (!is_worker) {
+            /* ── Mesh P2P layer ─────────────────────────────────────── */
+            uint16_t mesh_port = 7337;
+            const char *mp_env = getenv("DSCO_MESH_PORT");
+            if (mp_env && atoi(mp_env) > 0) mesh_port = (uint16_t)atoi(mp_env);
+
+            g_mesh_node = mesh_node_create(mesh_port);
+            if (g_mesh_node) {
+                /* Callbacks wired in net_tool.c via dsco_net_node() */
+                if (mesh_node_start(g_mesh_node)) {
+                    audit_log("net", "mesh started");
+                    /* Bootstrap: discover peers via mDNS + ~/.dsco/peers.txt */
+                    peer_bootstrap_init(g_mesh_node, mesh_port);
+
+                    /* ── DHT peer discovery (opt-in via DSCO_DHT_SWARM) ──────
+                     * Joins a private Kademlia overlay; discovered peers are
+                     * written to ~/.dsco/peers.txt and dialed over the mesh. */
+                    const char *swarm = getenv("DSCO_DHT_SWARM");
+                    if (swarm && *swarm) {
+                        uint16_t dht_port = 7600;
+                        const char *dp = getenv("DSCO_DHT_PORT");
+                        if (dp && atoi(dp) > 0) dht_port = (uint16_t)atoi(dp);
+                        dsco_dht_config_t dc = {
+                            .udp_port  = dht_port,
+                            .mesh_port = mesh_port,
+                            .swarm_key = swarm,
+                        };
+                        if (dsco_dht_start(&dc))
+                            audit_log("net", "dht started");
+                    }
+                } else {
+                    audit_log("net", "mesh start failed");
+                    mesh_node_destroy(g_mesh_node);
+                    g_mesh_node = NULL;
+                }
+            }
+        }
+#endif /* HAVE_LIBSODIUM */
+
+#if defined(HAVE_MBEDTLS) && defined(HAVE_LIBSODIUM)
+        if (!is_worker) {
+            /* ── HTTP/TLS API server ─────────────────────────────────── */
+            uint16_t http_port = NETSRV_DEFAULT_PORT;
+            const char *hp_env = getenv("DSCO_HTTP_PORT");
+            if (hp_env && atoi(hp_env) > 0) http_port = (uint16_t)atoi(hp_env);
+
+            /* Auto-generate TLS cert if not present */
+            char cert_path[512], key_path[512];
+            const char *home = getenv("HOME");
+            snprintf(cert_path, sizeof(cert_path), "%s/.dsco/server.crt", home ? home : "/tmp");
+            snprintf(key_path,  sizeof(key_path),  "%s/.dsco/server.key", home ? home : "/tmp");
+
+            if (access(cert_path, F_OK) != 0)
+                netsrv_gen_tls_cert(cert_path, key_path, "dsco-node");
+
+            g_net_server = netsrv_create(http_port, true, cert_path, key_path);
+            if (g_net_server) {
+                /* Routes registered by dsco_net_routes_register() in tools.c */
+                dsco_net_routes_register(g_net_server);
+                if (netsrv_start(g_net_server)) {
+                    audit_log("net", "http server started");
+                } else {
+                    audit_log("net", "http server start failed");
+                    netsrv_destroy(g_net_server);
+                    g_net_server = NULL;
+                }
+            }
+        }
+#endif /* HAVE_MBEDTLS && HAVE_LIBSODIUM */
         perf_mark("env_heartbeat");
     }
 
@@ -583,7 +699,7 @@ static const native_provider_t NATIVE_PROVIDERS[] = {
       CAP_TOOLS|CAP_MULTITURN|CAP_STREAMING|CAP_VISION|CAP_THINKING|CAP_JSON|CAP_CACHE, 4 },
     { "openai",     "OpenAI API",                "OPENAI_API_KEY",      "gpt-4.1",
       CAP_TOOLS|CAP_MULTITURN|CAP_STREAMING|CAP_VISION|CAP_JSON, 3 },
-    { "openrouter", "OpenRouter (multi-model)",   "OPENROUTER_API_KEY", "anthropic/claude-opus-4-6",
+    { "openrouter", "OpenRouter (multi-model)",   "OPENROUTER_API_KEY", "z-ai/glm-5.2",
       CAP_TOOLS|CAP_MULTITURN|CAP_STREAMING|CAP_VISION|CAP_JSON, 4 },
     { "google",     "Google Gemini API",         "GOOGLE_API_KEY",      "gemini-2.5-pro",
       CAP_TOOLS|CAP_MULTITURN|CAP_STREAMING|CAP_VISION|CAP_JSON, 3 },
@@ -603,7 +719,7 @@ static const native_provider_t NATIVE_PROVIDERS[] = {
       CAP_TOOLS|CAP_MULTITURN|CAP_STREAMING, 2 },
     { "cohere",     "Cohere API",                "COHERE_API_KEY",      "command-a-03-2025",
       CAP_TOOLS|CAP_MULTITURN|CAP_STREAMING|CAP_JSON, 3 },
-    { "moonshot",   "Moonshot Kimi API",         "MOONSHOT_API_KEY",    "kimi-k2.5",
+    { "moonshot",   "Moonshot Kimi API",         "MOONSHOT_API_KEY",    "kimi-k2.7-code",
       CAP_TOOLS|CAP_MULTITURN|CAP_STREAMING|CAP_VISION|CAP_THINKING|CAP_JSON, 4 },
     { NULL, NULL, NULL, NULL, 0, 0 }
 };
@@ -1233,7 +1349,7 @@ static int run_provider_smoke(const char *self_path, bool full) {
         { "xAI",              SMOKE_NATIVE,     "xai",        "grok-4-fast",                 false },
         { "Together",         SMOKE_NATIVE,     "together",   "meta-llama/Llama-4-Maverick-17B-128E-Instruct-FP8", true },
         { "Cerebras",         SMOKE_NATIVE,     "cerebras",   "qwen-3-235b-a22b-instruct-2507", false },
-        { "Moonshot",         SMOKE_NATIVE,     "moonshot",   "kimi-k2.5",                   false },
+        { "Moonshot",         SMOKE_NATIVE,     "moonshot",   "kimi-k2.7-code",              false },
         { "Mistral",          SMOKE_NATIVE,     "mistral",    "mistral-large-latest",        true  },
         { "Cohere",           SMOKE_NATIVE,     "cohere",     "command-a-03-2025",           true  },
         { "Perplexity",       SMOKE_NATIVE,     "perplexity", "sonar-pro",                   true  },
@@ -1247,14 +1363,14 @@ static int run_provider_smoke(const char *self_path, bool full) {
         { "OR Google Flash",  SMOKE_OPENROUTER, NULL,         "google/gemini-2.5-flash",     true  },
         { "OR Google 3 Pro",  SMOKE_OPENROUTER, NULL,         "google/gemini-3.1-pro-preview", true },
         { "OR DeepSeek",      SMOKE_OPENROUTER, NULL,         "deepseek/deepseek-chat",      true  },
-        { "OR Moonshot",      SMOKE_OPENROUTER, NULL,         "moonshotai/kimi-k2.5",        true  },
+        { "OR Moonshot",      SMOKE_OPENROUTER, NULL,         "moonshotai/kimi-k2.7-code",   true  },
         { "OR Moonshot Think",SMOKE_OPENROUTER, NULL,         "moonshotai/kimi-k2-thinking", true  },
         { "OR Qwen",          SMOKE_OPENROUTER, NULL,         "qwen/qwen3.5-plus-02-15",     true  },
         { "OR Qwen Coder",    SMOKE_OPENROUTER, NULL,         "qwen/qwen3-coder-next",       true  },
         { "OR Mistral",       SMOKE_OPENROUTER, NULL,         "mistralai/mistral-large-2512", true },
         { "OR Codestral",     SMOKE_OPENROUTER, NULL,         "mistralai/codestral-2508",    true  },
         { "OR Cohere",        SMOKE_OPENROUTER, NULL,         "cohere/command-a",            true  },
-        { "OR GLM",           SMOKE_OPENROUTER, NULL,         "z-ai/glm-5",                  true  },
+        { "OR GLM",           SMOKE_OPENROUTER, NULL,         "z-ai/glm-5.2",                true  },
         { "OR Llama",         SMOKE_OPENROUTER, NULL,         "meta-llama/llama-4-maverick", true  },
         { "OR MiniMax",       SMOKE_OPENROUTER, NULL,         "minimax/minimax-m2.5",        true  },
         { "OR Nova",          SMOKE_OPENROUTER, NULL,         "amazon/nova-premier-v1",      true  },
@@ -1525,7 +1641,7 @@ static int run_login_flow(void) {
 
     const char *pname   = pidx == 0 ? "claude"                 : "codex";
     const char *plabel  = pidx == 0 ? "Claude Code (Anthropic)": "ChatGPT Codex (OpenAI)";
-    const char *pmodel  = pidx == 0 ? "claude-sonnet-4-6"      : "";
+    const char *pmodel  = "";
     const char *penvkey = pidx == 0 ? "ANTHROPIC_API_KEY"      : "OPENAI_API_KEY";
     bool pbin   = pidx == 0 ? claude_bin  : codex_bin;
     bool pready = pidx == 0 ? claude_auth : codex_auth;
@@ -1651,7 +1767,7 @@ static void usage(const char *prog) {
         "  --timeline-port PORT     Timeline webserver port (default: 8421)\n"
         "  --timeline-instance ID   Filter timeline to one instance ID\n"
         "  -O, --orchestrate      Orchestrator mode: Haiku routes to specialist workers\n"
-        "  -M, --worker-model M   Worker model for orchestrate mode (default: sonnet)\n"
+        "  -M, --worker-model M   Worker model for orchestrate mode (default: kimi-k2.7-code)\n"
         "  --topology NAME        Run/select an agent topology\n"
         "  --topology-auto        Auto-pick a topology for the task\n"
         "  --topology-list        List available topologies\n"
@@ -2019,6 +2135,9 @@ int main(int argc, char **argv) {
         if (strcmp(argv[i], "--status") == 0) { arg_status = true; break; }
     }
 
+    const char *pre_setup_model = getenv("DSCO_MODEL");
+    bool model_preexisted_setup = pre_setup_model && pre_setup_model[0];
+
     int loaded_env_count = dsco_setup_load_saved_env();
     char bootstrap_msg[512];
     if (!arg_requests_setup && !arg_skip_bootstrap && !arg_login && !arg_status) {
@@ -2035,6 +2154,12 @@ int main(int argc, char **argv) {
     const char *api_key = NULL;
     const char *env_model = getenv("DSCO_MODEL");
     bool model_from_env = env_model && env_model[0];
+    if (model_from_env && !model_preexisted_setup &&
+        is_legacy_sonnet_default_model(env_model)) {
+        unsetenv("DSCO_MODEL");
+        env_model = NULL;
+        model_from_env = false;
+    }
     const char *model = model_from_env ? env_model : DEFAULT_MODEL;
     char *oneshot_prompt = NULL;
     bool timeline_server_mode = false;
@@ -2847,8 +2972,26 @@ native_path:
         int turns = 0;
         bool oneshot_had_error = false;
         tools_loop_control_reset();
-        int oneshot_base_turn_limit = dsco_max_agent_turns();
-        while (turns < tools_loop_control_effective_max_turns(oneshot_base_turn_limit)) {
+        /* Agentic headless loop: run to the goal, bounded only by the cost
+         * budget and the runaway backstop — not an arbitrary turn count. Since
+         * there is no human to interrupt here, the cost gate below is the
+         * primary stop. DSCO_BUDGET (dollars, 0 = unlimited) controls it;
+         * defaults to $5 to match the interactive session cap. */
+        int oneshot_hard_ceiling = dsco_hard_turn_ceiling();
+        double oneshot_budget = 5.0;
+        {
+            const char *b = getenv("DSCO_BUDGET");
+            if (b && b[0]) oneshot_budget = atof(b);
+        }
+        while (turns < oneshot_hard_ceiling && !g_main_interrupted) {
+            if (oneshot_budget > 0 &&
+                oneshot_session.total_reported_cost_usd >= oneshot_budget) {
+                fprintf(stderr, "error: cost budget exceeded: $%.4f / $%.4f "
+                        "(raise via DSCO_BUDGET)\n",
+                        oneshot_session.total_reported_cost_usd, oneshot_budget);
+                oneshot_had_error = true;
+                break;
+            }
             turns++;
             md_reset(&s_oneshot_md);
 
@@ -2977,9 +3120,23 @@ native_path:
                 int t2 = 0;
                 bool task_ok = true;
                 tools_loop_control_reset();
-                int task_base_turn_limit = dsco_max_agent_turns();
-                while (t2 < tools_loop_control_effective_max_turns(task_base_turn_limit) &&
-                       !g_main_interrupted) {
+                /* Agentic per-task loop: bounded by cost budget + runaway
+                 * backstop, not a fixed turn count (see oneshot loop above). */
+                int task_hard_ceiling = dsco_hard_turn_ceiling();
+                double task_budget = 5.0;
+                {
+                    const char *b = getenv("DSCO_BUDGET");
+                    if (b && b[0]) task_budget = atof(b);
+                }
+                while (t2 < task_hard_ceiling && !g_main_interrupted) {
+                    if (task_budget > 0 &&
+                        oneshot_session.total_reported_cost_usd >= task_budget) {
+                        fprintf(stderr, "error: cost budget exceeded: $%.4f / "
+                                "$%.4f (raise via DSCO_BUDGET)\n",
+                                oneshot_session.total_reported_cost_usd, task_budget);
+                        task_ok = false;
+                        break;
+                    }
                     t2++;
                     md_reset(&s_oneshot_md);
                     char *req2 = oneshot_provider

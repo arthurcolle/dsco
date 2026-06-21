@@ -900,6 +900,15 @@ typedef struct {
 
 void tui_command_palette(const tui_cmd_entry_t *cmds, int count, const char *filter);
 
+/* Register the slash-command table the composer uses to drive its live
+ * dropdown. As the user types a leading "/<token>" the composer filters this
+ * list by prefix and renders matches in a popup that expands beneath the input
+ * line (↑/↓ to select, Tab to complete, Enter to run, Esc to dismiss).
+ * `cmds` must remain valid for the lifetime of the program (a static array is
+ * expected). Pass count = number of valid entries. Safe to call once at
+ * startup; calling with NULL/0 disables the dropdown. */
+void tui_composer_set_slash_commands(const tui_cmd_entry_t *cmds, int count);
+
 /* ── F25: Agent Topology ──────────────────────────────────────────────── */
 typedef struct {
     int         id;
