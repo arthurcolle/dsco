@@ -3034,7 +3034,10 @@ void agent_run(const char *api_key, const char *model,
 
 #ifdef HAVE_READLINE
     rl_attempted_completion_function = command_completion;
-    rl_completion_display_matches_hook = (VFunction *)command_completion_display;
+    /* command_completion_display is void(char**,int,int), exactly rl_compdisp_func_t.
+     * GNU readline (Homebrew, keg-only) lacks the libedit `VFunction` typedef, so
+     * cast to the portable readline type instead. */
+    rl_completion_display_matches_hook = (rl_compdisp_func_t *)command_completion_display;
     rl_bind_key('/', slash_completion_key);
     rl_bind_key('\f', dsco_clear_screen);  /* Ctrl+L clears screen */
     rl_basic_word_break_characters = " \t\n";
