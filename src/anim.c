@@ -22,8 +22,12 @@
 #include <unistd.h>
 #include <signal.h>
 #include <stdint.h>
+#include <termios.h>
+#include <fcntl.h>
+#include <errno.h>
 
 #include "fractal.h"
+#include "avatar.h"
 
 /* ── frame-loop control ──────────────────────────────────────────────────── */
 static volatile sig_atomic_t g_anim_stop = 0;
@@ -64,8 +68,8 @@ void anim_resolve_size(int width, int height, int *W, int *H) {
     int w = width, h = height;
     if (w <= 0) { int tw = tui_term_width();  w = (tw > 4 ? tw : 80) - 1; }
     if (h <= 0) { int th = tui_term_height(); h = (th > 6 ? th : 24) - 3; }
-    if (w < 8)  w = 8;   if (w > 240) w = 240;
-    if (h < 4)  h = 4;   if (h > 120) h = 120;
+    if (w < 8)  w = 8;   if (w > 480) w = 480;
+    if (h < 4)  h = 4;   if (h > 240) h = 240;
     *W = w; *H = h;
 }
 static void anim_size(const anim_opts_t *o, int *W, int *H) {
@@ -144,6 +148,122 @@ void anim_paint(FILE *out, const tui_braille_t *bc, bool color,
         line = nl + 1;
     }
     free(mb);
+}
+
+/* Quantize a 24-bit color to the xterm 6×6×6 cube + grey ramp, for terminals
+ * that lack truecolor. Mirrors the usual 16..231 cube / 232..255 grey layout. */
+static int rgb_to_256(tui_rgb_t c) {
+    int r = c.r, g = c.g, b = c.b;
+    if (abs(r - g) < 12 && abs(g - b) < 12 && abs(r - b) < 12) {
+        int grey = (r + g + b) / 3;
+        if (grey < 8)   return 16;
+        if (grey > 248) return 231;
+        return 232 + (grey - 8) * 24 / 240;
+    }
+    int qr = r * 5 / 255, qg = g * 5 / 255, qb = b * 5 / 255;
+    return 16 + 36 * qr + 6 * qg + qb;
+}
+
+/* Truecolor per-cell Braille blit. Same glyph walk as anim_paint, but each cell
+ * carries a full RGB. A pure-black cell is the dead field (drawn faint). */
+void anim_paint_rgb(FILE *out, const tui_braille_t *bc, const tui_rgb_t *cell_rgb) {
+    int truecolor = tui_supports_truecolor();
+    char *mb = NULL; size_t ms = 0;
+    FILE *f = open_memstream(&mb, &ms);
+    if (f) { tui_braille_render(bc, f, NULL); fclose(f); }
+    const int W = bc->w_cells;
+    int row = 0; char *line = mb;
+    while (line && *line && row < bc->h_cells) {
+        char *nl = strchr(line, '\n'); if (nl) *nl = '\0';
+        char *p = line; int col = 0;
+        while (*p && col < W) {
+            int glen = 1; unsigned char lead = (unsigned char)*p;
+            if (lead >= 0xF0) glen = 4; else if (lead >= 0xE0) glen = 3;
+            else if (lead >= 0xC0) glen = 2;
+            tui_rgb_t c = cell_rgb[row * W + col];
+            if (c.r == 0 && c.g == 0 && c.b == 0) {
+                fputs("\033[38;5;234m", out);          /* faint dead field */
+            } else if (truecolor) {
+                fprintf(out, "\033[38;2;%d;%d;%dm", c.r, c.g, c.b);
+            } else {
+                fprintf(out, "\033[38;5;%dm", rgb_to_256(c));
+            }
+            fwrite(p, 1, (size_t)glen, out); p += glen; col++;
+        }
+        fputs("\033[0m\033[K\n", out);
+        row++;
+        if (!nl) break;
+        line = nl + 1;
+    }
+    free(mb);
+}
+
+/* ── live keyboard input ──────────────────────────────────────────────────── */
+static struct termios g_raw_saved;
+
+void anim_raw_enable(anim_raw_t *r) {
+    if (!r) return;
+    r->was_raw = 0;
+    r->saved_flags = 0;
+    r->saved_flags_valid = 0;
+    if (!isatty(STDIN_FILENO)) return;
+    if (tcgetattr(STDIN_FILENO, &g_raw_saved) != 0) return;
+    struct termios raw = g_raw_saved;
+    raw.c_lflag &= ~(unsigned)(ICANON | ECHO);   /* cbreak, no echo */
+    raw.c_iflag &= ~(unsigned)(IXON | ICRNL);    /* let ^S/^Q and CR through raw */
+    raw.c_cc[VMIN]  = 0;                          /* non-blocking read */
+    raw.c_cc[VTIME] = 0;
+    int fl = fcntl(STDIN_FILENO, F_GETFL, 0);
+    if (fl != -1) {
+        r->saved_flags = fl;
+        r->saved_flags_valid = 1;
+    }
+    if (tcsetattr(STDIN_FILENO, TCSANOW, &raw) == 0) r->was_raw = 1;
+    if (fl != -1) fcntl(STDIN_FILENO, F_SETFL, fl | O_NONBLOCK);
+}
+
+void anim_raw_restore(anim_raw_t *r) {
+    if (!r) return;
+    if (r->was_raw) tcsetattr(STDIN_FILENO, TCSANOW, &g_raw_saved);
+    if (r->saved_flags_valid) fcntl(STDIN_FILENO, F_SETFL, r->saved_flags);
+    r->was_raw = 0;
+    r->saved_flags_valid = 0;
+}
+
+/* Read one logical key. Decodes CSI arrow keys (incl. shift-modified xterm
+ * "1;2A" form). Returns ANIM_KEY_NONE when nothing is buffered. */
+int anim_poll_key(void) {
+    unsigned char c;
+    ssize_t n = read(STDIN_FILENO, &c, 1);
+    if (n <= 0) return ANIM_KEY_NONE;
+    if (c == 0x1b) {                              /* ESC — maybe a CSI sequence */
+        unsigned char b1;
+        if (read(STDIN_FILENO, &b1, 1) <= 0) return ANIM_KEY_ESC;
+        if (b1 != '[' && b1 != 'O') return ANIM_KEY_ESC;
+        unsigned char seq[6]; int k = 0;
+        unsigned char b;
+        int shift = 0;
+        while (k < (int)sizeof seq && read(STDIN_FILENO, &b, 1) > 0) {
+            seq[k++] = b;
+            if (b >= 'A' && b <= 'Z') break;       /* final byte */
+            if (b == '~') break;
+        }
+        if (k == 0) return ANIM_KEY_ESC;
+        /* shift modifier arrives as "1;2A" */
+        for (int j = 0; j + 1 < k; j++) if (seq[j] == ';' && seq[j+1] == '2') shift = 1;
+        unsigned char fin = seq[k-1];
+        switch (fin) {
+            case 'A': return shift ? ANIM_KEY_SHIFT_UP    : ANIM_KEY_UP;
+            case 'B': return shift ? ANIM_KEY_SHIFT_DOWN  : ANIM_KEY_DOWN;
+            case 'C': return shift ? ANIM_KEY_SHIFT_RIGHT : ANIM_KEY_RIGHT;
+            case 'D': return shift ? ANIM_KEY_SHIFT_LEFT  : ANIM_KEY_LEFT;
+            default:  return ANIM_KEY_NONE;
+        }
+    }
+    if (c == '\r' || c == '\n') return ANIM_KEY_ENTER;
+    if (c == '\t')              return ANIM_KEY_TAB;
+    if (c == 0x7f || c == 0x08) return ANIM_KEY_BACKSPACE;
+    return (int)c;                                  /* printable ASCII as itself */
 }
 
 /* Built-in renderers paint to stdout with the popcount ramp. */
@@ -545,6 +665,7 @@ int anim_dispatch(const char *json) {
     else if (!strcmp(k, "attractor") || !strcmp(k, "dejong"))  rc = anim_attractor(&o);
     else if (!strcmp(k, "rain") || !strcmp(k, "matrix"))       rc = anim_rain(&o);
     else if (fractal_is_kind(k))                               rc = fractal_anim(json);
+    else if (avatar_is_kind(k))                                rc = avatar_anim(json);
     else                                                       rc = anim_life(&o);
 
     free(kind); free(pat); free(titl);

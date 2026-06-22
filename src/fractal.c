@@ -12,11 +12,14 @@
 #include "anim.h"
 #include "tui.h"
 #include "json_util.h"
+#include "shadeexpr.h"
+#include "face_sdf.h"
 
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <math.h>
+#include <unistd.h>
 
 /* ── small vec3 ──────────────────────────────────────────────────────────── */
 typedef struct { double x, y, z; } V3;
@@ -32,28 +35,42 @@ static inline double v3len(V3 a) { return sqrt(v3dot(a, a)); }
 static inline V3   v3norm(V3 a) { double l = v3len(a); return l > 1e-12 ? v3scl(a, 1.0/l) : a; }
 
 /* ── options ─────────────────────────────────────────────────────────────── */
-typedef enum { F_BULB, F_QUAT, F_BOX } fkind_t;
+typedef enum { F_BULB, F_QUAT, F_BOX, F_FACE, F_CUSTOM } fkind_t;
 
 typedef struct {
     fkind_t kind;
     const char *title;
-    const char *palette;       /* fire | ice | viridis | grey */
+    const char *palette;       /* fire | ice | viridis | grey | skin */
     int    width, height;      /* character cells (0 = auto) */
     bool   color;
+    bool   truecolor;          /* 24-bit per-cell shading (faces) vs 256 palette */
     int    iters;              /* fractal iteration cap */
     double power;              /* mandelbulb exponent */
     double cx, cy, cz, cw;     /* quaternion Julia constant */
     double wslice;             /* quaternion 4th-dim slice */
     double scale;              /* mandelbox scale */
     double yaw, pitch, dist, fov;
+    double lyaw, lpitch;       /* key-light direction (movable) */
+    double qknob, sknob;       /* extra knobs exposed to custom shaders (q,s) */
+    double phase;              /* animation time fed to custom shaders as `t` */
     long   gens;               /* anim: frames (<=0 = until ^C) */
     int    fps;
+
+    face_params_t face;        /* F_FACE geometry */
+    int           preset;      /* F_FACE preset index */
+    shadeexpr_t  *expr;        /* F_CUSTOM compiled distance estimator (owned) */
+    char         *shader_src;  /* F_CUSTOM source text (owned) */
+
+    bool   interactive;        /* drive params live from the keyboard */
+    bool   paused;             /* interactive: auto-orbit paused */
 } fopts_t;
 
 static fkind_t fkind_of(const char *k) {
     if (!k) return F_BULB;
     if (!strcmp(k, "quaternion") || !strcmp(k, "julia4d") || !strcmp(k, "qjulia")) return F_QUAT;
     if (!strcmp(k, "mandelbox")  || !strcmp(k, "box"))                              return F_BOX;
+    if (!strcmp(k, "face") || !strcmp(k, "head") || !strcmp(k, "portrait"))         return F_FACE;
+    if (!strcmp(k, "custom") || !strcmp(k, "shader") || !strcmp(k, "expr"))         return F_CUSTOM;
     return F_BULB;   /* mandelbulb / bulb / default */
 }
 
@@ -62,7 +79,10 @@ bool fractal_is_kind(const char *kind) {
     return !strcmp(kind, "mandelbulb") || !strcmp(kind, "bulb") ||
            !strcmp(kind, "quaternion") || !strcmp(kind, "julia4d") ||
            !strcmp(kind, "qjulia")     || !strcmp(kind, "mandelbox") ||
-           !strcmp(kind, "box");
+           !strcmp(kind, "box")        || !strcmp(kind, "face") ||
+           !strcmp(kind, "head")       || !strcmp(kind, "portrait") ||
+           !strcmp(kind, "custom")     || !strcmp(kind, "shader") ||
+           !strcmp(kind, "expr");
 }
 
 static fopts_t fractal_parse(const char *json, char **owned1, char **owned2, char **owned3) {
@@ -90,13 +110,48 @@ static fopts_t fractal_parse(const char *json, char **owned1, char **owned2, cha
     f.scale   = json ? json_get_double(json, "scale", -1.8) : -1.8;
     f.yaw     = json ? json_get_double(json, "yaw",   0.6) : 0.6;
     f.pitch   = json ? json_get_double(json, "pitch", 0.5) : 0.5;
-    f.dist    = json ? json_get_double(json, "dist",  f.kind == F_BOX ? 7.0 : 2.7) : 2.7;
     f.fov     = json ? json_get_double(json, "fov",   0.85) : 0.85;
+    f.lyaw    = json ? json_get_double(json, "lyaw",  0.7) : 0.7;
+    f.lpitch  = json ? json_get_double(json, "lpitch", 0.6) : 0.6;
+    f.qknob   = json ? json_get_double(json, "q", 0.0) : 0.0;
+    f.sknob   = json ? json_get_double(json, "s", 0.0) : 0.0;
     f.gens    = json ? json_get_int(json, "gens", 0) : 0;
     f.fps     = json ? json_get_int(json, "fps", 20) : 20;
+
+    /* face geometry: a preset, then per-field overrides on top */
+    f.preset = json ? json_get_int(json, "preset", 0) : 0;
+    face_preset(f.preset, &f.face, NULL);
+
+    /* custom "shadercode": compile the user's DE expression if present */
+    if (json) {
+        char *src = json_get_str(json, "shader");
+        if (!src) src = json_get_str(json, "de");
+        if (src && src[0]) {
+            char err[160];
+            f.expr = shadeexpr_compile(src, err, sizeof err);
+            f.shader_src = src;          /* keep for the HUD even if compile failed */
+            if (f.expr) f.kind = F_CUSTOM;
+        } else {
+            free(src);
+        }
+    }
+
+    /* default camera distance + truecolor per kind */
+    double dflt_dist = (f.kind == F_BOX) ? 7.0 : (f.kind == F_FACE ? 3.0 : 2.7);
+    f.dist      = json ? json_get_double(json, "dist", dflt_dist) : dflt_dist;
+    f.truecolor = json ? json_get_bool(json, "truecolor", f.kind == F_FACE) : (f.kind == F_FACE);
+    f.interactive = json ? json_get_bool(json, "interactive", false) : false;
+
     if (f.iters < 2)  f.iters = 2;
     if (f.iters > 64) f.iters = 64;
     return f;
+}
+
+/* Release the heap a parsed fopts owns (compiled shader + its source). */
+static void fopts_release(fopts_t *f) {
+    if (!f) return;
+    shadeexpr_free(f->expr); f->expr = NULL;
+    free(f->shader_src);     f->shader_src = NULL;
 }
 
 /* ── palettes (256-color ramps) ──────────────────────────────────────────── */
@@ -177,16 +232,33 @@ static double de_box(V3 p, const fopts_t *f) {
     return sqrt(x*x + y*y + z*z) / fabs(dr);
 }
 
+/* user "shadercode": evaluate the compiled expression as a distance field */
+static double de_custom(V3 p, const fopts_t *f) {
+    if (!f->expr) return v3len(p) - 1.0;      /* fall back to a unit sphere */
+    double slots[SE_SLOT_COUNT];
+    slots[SE_X] = p.x; slots[SE_Y] = p.y; slots[SE_Z] = p.z;
+    slots[SE_R] = v3len(p);
+    slots[SE_T] = f->phase;
+    slots[SE_P] = f->power; slots[SE_Q] = f->qknob; slots[SE_S] = f->sknob;
+    slots[SE_I] = 0.0;
+    slots[SE_U] = 0.0; slots[SE_V] = 0.0; slots[SE_W] = f->wslice;
+    double d = shadeexpr_eval(f->expr, slots);
+    if (!isfinite(d)) return 2.0;             /* keep the marcher from diverging */
+    return d;
+}
+
 static double de(V3 p, const fopts_t *f) {
     switch (f->kind) {
-        case F_QUAT: return de_quat(p, f);
-        case F_BOX:  return de_box(p, f);
-        default:     return de_bulb(p, f);
+        case F_QUAT:   return de_quat(p, f);
+        case F_BOX:    return de_box(p, f);
+        case F_FACE:   return face_sdf_de(p.x, p.y, p.z, &f->face);
+        case F_CUSTOM: return de_custom(p, f);
+        default:       return de_bulb(p, f);
     }
 }
 
 /* ── ray march → luminance in [0,1] for one ray ──────────────────────────── */
-static double march(V3 ro, V3 rd, const fopts_t *f) {
+static double march(V3 ro, V3 rd, const fopts_t *f, V3 *hitp, int *hit_out) {
     const int   MAXS = 110;
     const double MAXD = 12.0;
     double t = 0.0, minh = 1e9;
@@ -200,6 +272,7 @@ static double march(V3 ro, V3 rd, const fopts_t *f) {
         t += d * 0.92;
         if (t > MAXD) break;
     }
+    if (hit_out) *hit_out = hit;
     if (!hit) {
         /* tight halo hugging the silhouette; the far field falls to true black
          * so the void doesn't dither into background stipple */
@@ -207,12 +280,13 @@ static double march(V3 ro, V3 rd, const fopts_t *f) {
         return g > 0 ? g : 0.0;
     }
     V3 p = v3add(ro, v3scl(rd, t));
+    if (hitp) *hitp = p;
     double e = 0.0009;
     V3 n = v3norm(v3(
         de(v3(p.x+e,p.y,p.z), f) - de(v3(p.x-e,p.y,p.z), f),
         de(v3(p.x,p.y+e,p.z), f) - de(v3(p.x,p.y-e,p.z), f),
         de(v3(p.x,p.y,p.z+e), f) - de(v3(p.x,p.y,p.z-e), f)));
-    V3 L  = v3norm(v3(0.6, 0.75, -0.45));
+    V3 L  = v3norm(v3(cos(f->lpitch) * sin(f->lyaw), sin(f->lpitch), -cos(f->lpitch) * cos(f->lyaw)));
     double diff = v3dot(n, L); if (diff < 0) diff = 0;
     double amb  = 0.18 + 0.12 * (n.y * 0.5 + 0.5);
     double ao   = 1.0 - (double)s / MAXS;        /* cheap occlusion from step count */
@@ -222,7 +296,7 @@ static double march(V3 ro, V3 rd, const fopts_t *f) {
 }
 
 /* ── camera + frame render into a Braille canvas + per-cell color ─────────── */
-static void fractal_frame(tui_braille_t *bc, int *cell_color, const fopts_t *f) {
+static void fractal_frame(tui_braille_t *bc, int *cell_color, tui_rgb_t *cell_rgb, const fopts_t *f) {
     const int gw = bc->px_w, gh = bc->px_h, W = bc->w_cells, H = bc->h_cells;
     tui_braille_clear(bc);
 
@@ -240,31 +314,69 @@ static void fractal_frame(tui_braille_t *bc, int *cell_color, const fopts_t *f) 
 
     const int *pal; int paln; pal_pick(f->palette, f->kind, &pal, &paln);
     double *cellsum = calloc((size_t)W * H, sizeof(double));
+    double *rsum = NULL, *gsum = NULL, *bsum = NULL;
     if (!cellsum) return;
+    if (cell_rgb) {
+        rsum = calloc((size_t)W * H, sizeof(double));
+        gsum = calloc((size_t)W * H, sizeof(double));
+        bsum = calloc((size_t)W * H, sizeof(double));
+        if (!rsum || !gsum || !bsum) { free(cellsum); free(rsum); free(gsum); free(bsum); return; }
+    }
 
     for (int py = 0; py < gh; py++) {
         double v = -(((py + 0.5) / gh) * 2.0 - 1.0) * tanH;
         for (int px = 0; px < gw; px++) {
             double u = (((px + 0.5) / gw) * 2.0 - 1.0) * aspect * tanH;
             V3 rd = v3norm(v3add(fwd, v3add(v3scl(rgt, u), v3scl(up, v))));
-            double lum = march(ro, rd, f);
+            V3 hp = v3(0,0,0); int hit = 0;
+            double lum = march(ro, rd, f, &hp, &hit);
             double thr = (BAYER4[py & 3][px & 3] + 0.5) / 16.0;
             if (lum > thr) tui_braille_set(bc, px, py);
-            cellsum[(py / 4) * W + (px / 2)] += lum;
+            int ci = (py / 4) * W + (px / 2);
+            cellsum[ci] += lum;
+            if (cell_rgb && lum > 0.0) {
+                double ar = 1.0, ag = 1.0, ab = 1.0;
+                if (hit && f->kind == F_FACE) {
+                    int mat = face_sdf_material(hp.x, hp.y, hp.z, &f->face);
+                    face_sdf_albedo(mat, &ar, &ag, &ab);
+                } else if (!hit) {
+                    ar = ag = ab = 0.20;
+                }
+                rsum[ci] += ar * lum;
+                gsum[ci] += ag * lum;
+                bsum[ci] += ab * lum;
+            }
         }
     }
     for (int i = 0; i < W * H; i++) {
         double b = cellsum[i] / 8.0; if (b > 1) b = 1;
         cell_color[i] = (b < 0.02) ? -1 : pal[(int)(b * (paln - 1) + 0.5)];
+        if (cell_rgb) {
+            if (b < 0.02) {
+                cell_rgb[i] = (tui_rgb_t){0,0,0};
+            } else {
+                double inv = cellsum[i] > 1e-9 ? 1.0 / cellsum[i] : 0.0;
+                double shade = 0.35 + 0.95 * b;
+                int r = (int)(255.0 * rsum[i] * inv * shade);
+                int g = (int)(255.0 * gsum[i] * inv * shade);
+                int bl = (int)(255.0 * bsum[i] * inv * shade);
+                if (r < 1) r = 1; if (r > 255) r = 255;
+                if (g < 1) g = 1; if (g > 255) g = 255;
+                if (bl < 1) bl = 1; if (bl > 255) bl = 255;
+                cell_rgb[i] = (tui_rgb_t){(unsigned char)r,(unsigned char)g,(unsigned char)bl};
+            }
+        }
     }
-    free(cellsum);
+    free(cellsum); free(rsum); free(gsum); free(bsum);
 }
 
 /* ── still frame → string ─────────────────────────────────────────────────── */
 static const char *fractal_label(fkind_t k) {
-    return k == F_QUAT ? "Quaternion Julia (4-D slice)"
-         : k == F_BOX  ? "Mandelbox"
-                       : "Mandelbulb";
+    return k == F_QUAT   ? "Quaternion Julia (4-D slice)"
+         : k == F_BOX    ? "Mandelbox"
+         : k == F_FACE   ? "SDF Face"
+         : k == F_CUSTOM ? "Custom SDF Shader"
+                         : "Mandelbulb";
 }
 
 int fractal_plot(char *out, size_t cap, const char *json) {
@@ -275,28 +387,37 @@ int fractal_plot(char *out, size_t cap, const char *json) {
     int W, H; anim_resolve_size(f.width ? f.width : 64, f.height ? f.height : 30, &W, &H);
     tui_braille_t bc; tui_braille_init(&bc, W * 2, H * 4);
     int *cc = malloc((size_t)W * H * sizeof(int));
-    if (!cc) { tui_braille_free(&bc); free(o1); free(o2); free(o3); if (cap) out[0] = '\0'; return -1; }
+    tui_rgb_t *rgb = f.truecolor ? calloc((size_t)W * H, sizeof(*rgb)) : NULL;
+    if (!cc || (f.truecolor && !rgb)) {
+        free(cc); free(rgb); tui_braille_free(&bc); fopts_release(&f);
+        free(o1); free(o2); free(o3); if (cap) out[0] = '\0'; return -1;
+    }
 
-    fractal_frame(&bc, cc, &f);
+    fractal_frame(&bc, cc, rgb, &f);
 
     char *mb = NULL; size_t ms = 0;
     FILE *mf = open_memstream(&mb, &ms);
     if (mf) {
         const char *t = f.title ? f.title : fractal_label(f.kind);
         if (f.color) fprintf(mf, "\033[1m%s\033[0m\n", t); else fprintf(mf, "%s\n", t);
-        anim_paint(mf, &bc, f.color, cc);
+        if (f.color && f.truecolor && rgb) anim_paint_rgb(mf, &bc, rgb);
+        else anim_paint(mf, &bc, f.color, cc);
         if (f.kind == F_QUAT)
             fprintf(mf, "\033[2m  c=(%.2f,%.2f,%.2f,%.2f)  w=%.2f  iters=%d\033[0m\n",
                     f.cx, f.cy, f.cz, f.cw, f.wslice, f.iters);
         else if (f.kind == F_BOX)
             fprintf(mf, "\033[2m  scale=%.2f  iters=%d\033[0m\n", f.scale, f.iters);
+        else if (f.kind == F_FACE)
+            fprintf(mf, "\033[2m  preset=%d  yaw=%.2f  pitch=%.2f  iters=%d\033[0m\n", f.preset, f.yaw, f.pitch, f.iters);
+        else if (f.kind == F_CUSTOM)
+            fprintf(mf, "\033[2m  shader=%s  p=%.2f q=%.2f s=%.2f\033[0m\n", f.shader_src ? f.shader_src : "<sphere>", f.power, f.qknob, f.sknob);
         else
             fprintf(mf, "\033[2m  power=%.1f  iters=%d\033[0m\n", f.power, f.iters);
         fclose(mf);
     }
     int n = mb ? (int)snprintf(out, cap, "%s", mb) : -1;
-    free(mb); free(cc); tui_braille_free(&bc);
-    free(o1); free(o2); free(o3);
+    free(mb); free(cc); free(rgb); tui_braille_free(&bc);
+    fopts_release(&f); free(o1); free(o2); free(o3);
     return n;
 }
 
@@ -308,16 +429,36 @@ int fractal_anim(const char *json) {
     int W, H; anim_resolve_size(f.width, f.height, &W, &H);
     tui_braille_t bc; tui_braille_init(&bc, W * 2, H * 4);
     int *cc = malloc((size_t)W * H * sizeof(int));
-    if (!cc) { tui_braille_free(&bc); free(o1); free(o2); free(o3); return -1; }
+    tui_rgb_t *rgb = f.truecolor ? calloc((size_t)W * H, sizeof(*rgb)) : NULL;
+    if (!cc || (f.truecolor && !rgb)) { free(cc); free(rgb); tui_braille_free(&bc); fopts_release(&f); free(o1); free(o2); free(o3); return -1; }
 
     const long budget = anim_frame_budget(f.gens);
     anim_term_t term; anim_begin(&term);
+    anim_raw_t raw;
+    if (f.interactive) anim_raw_enable(&raw);
     long frames = 0;
     for (; budget < 0 || frames < budget; frames++) {
         if (anim_interrupted()) break;
         double ph = frames * 0.04;
-        f.yaw   += 0.035;                         /* slow orbit */
-        f.pitch  = 0.45 + 0.30 * sin(ph * 0.6);
+        f.phase = ph;
+        if (f.interactive) {
+            for (;;) {
+                int key = anim_poll_key();
+                if (key == ANIM_KEY_NONE) break;
+                if (key == 'q' || key == ANIM_KEY_ESC) { frames = budget >= 0 ? budget : frames; goto done; }
+                if (key == ' ') f.paused = !f.paused;
+                if (key == ANIM_KEY_LEFT)  f.yaw -= 0.08;
+                if (key == ANIM_KEY_RIGHT) f.yaw += 0.08;
+                if (key == ANIM_KEY_UP)    f.pitch += 0.06;
+                if (key == ANIM_KEY_DOWN)  f.pitch -= 0.06;
+                if (key == '+' || key == '=') f.dist *= 0.92;
+                if (key == '-' || key == '_') f.dist *= 1.08;
+                if (key == 'p') f.power += 0.25;
+                if (key == 'P') f.power -= 0.25;
+            }
+        }
+        if (!f.interactive || !f.paused) f.yaw += 0.035;  /* slow orbit */
+        if (!f.interactive || !f.paused) f.pitch = 0.45 + 0.30 * sin(ph * 0.6);
         if (f.kind == F_QUAT) {
             /* the 4-D reveal: sweep the slice and rotate c through 4-space */
             f.wslice = 0.55 * sin(ph * 0.8);
@@ -325,35 +466,46 @@ int fractal_anim(const char *json) {
             f.cy =  0.30 + 0.10 * cos(ph * 1.1);
             f.cw =  0.10 + 0.20 * sin(ph * 0.5);
         } else if (f.kind == F_BULB) {
-            f.power = 8.0 + 4.0 * sin(ph * 0.5);  /* breathe the exponent 4..12 */
-        } else {
-            f.scale = -1.8 + 0.3 * sin(ph * 0.7);
+            if (!f.interactive || !f.paused) f.power = 8.0 + 4.0 * sin(ph * 0.5);  /* breathe the exponent 4..12 */
+        } else if (f.kind == F_BOX) {
+            if (!f.interactive || !f.paused) f.scale = -1.8 + 0.3 * sin(ph * 0.7);
+        } else if (f.kind == F_CUSTOM) {
+            f.phase = ph;
         }
 
-        fractal_frame(&bc, cc, &f);
+        fractal_frame(&bc, cc, rgb, &f);
 
         char hdr[200];
         if (f.kind == F_QUAT)
             snprintf(hdr, sizeof hdr, "c=(%+.2f,%+.2f,%+.2f,%+.2f)  w=%+.2f  frame %-5ld  ^C to stop",
                      f.cx, f.cy, f.cz, f.cw, f.wslice, frames);
         else if (f.kind == F_BULB)
-            snprintf(hdr, sizeof hdr, "power=%.2f  yaw=%.2f  frame %-5ld  ^C to stop",
-                     f.power, f.yaw, frames);
+            snprintf(hdr, sizeof hdr, "power=%.2f  yaw=%.2f  frame %-5ld  %s",
+                     f.power, f.yaw, frames, f.interactive ? "arrows/+-/space/q" : "^C to stop");
+        else if (f.kind == F_BOX)
+            snprintf(hdr, sizeof hdr, "scale=%.2f  yaw=%.2f  frame %-5ld  %s",
+                     f.scale, f.yaw, frames, f.interactive ? "arrows/+-/space/q" : "^C to stop");
+        else if (f.kind == F_FACE)
+            snprintf(hdr, sizeof hdr, "face preset=%d  yaw=%.2f pitch=%.2f dist=%.2f  frame %-5ld  %s",
+                     f.preset, f.yaw, f.pitch, f.dist, frames, f.interactive ? "arrows/+-/space/q" : "^C to stop");
         else
-            snprintf(hdr, sizeof hdr, "scale=%.2f  yaw=%.2f  frame %-5ld  ^C to stop",
-                     f.scale, f.yaw, frames);
+            snprintf(hdr, sizeof hdr, "shader=%s  t=%.2f yaw=%.2f  frame %-5ld  %s",
+                     f.shader_src ? f.shader_src : "<sphere>", f.phase, f.yaw, frames, f.interactive ? "arrows/+-/space/q" : "^C to stop");
 
         fputs("\033[H", stdout);
         printf("\033[1m%s\033[0m\033[K\n", f.title ? f.title : fractal_label(f.kind));
         printf("\033[2m%s\033[0m\033[K\n", hdr);
-        anim_paint(stdout, &bc, f.color, cc);
+        if (f.color && f.truecolor && rgb) anim_paint_rgb(stdout, &bc, rgb);
+        else anim_paint(stdout, &bc, f.color, cc);
         fflush(stdout);
 
         if (!anim_tick(f.fps)) break;
     }
+done:
+    if (f.interactive) anim_raw_restore(&raw);
     anim_end(&term);
 
-    free(cc); tui_braille_free(&bc);
-    free(o1); free(o2); free(o3);
+    free(cc); free(rgb); tui_braille_free(&bc);
+    fopts_release(&f); free(o1); free(o2); free(o3);
     return (int)frames;
 }
