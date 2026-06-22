@@ -86,3 +86,9 @@ DEEP_REVIEW_IMPROVEMENTS.md
 DOCS_MANIFEST.md
 RAPID_INTEGRATION_PLAN.md
 CLAUDE_CODE_AUTH_QUICK_REFERENCE.md
+face_calibrate.py
+face_capture.py
+face_landmarker.task
+src/*.bak*
+src/*.gov_patch_backup
+src/topology_novel.c
