@@ -1546,25 +1546,16 @@ static void openai_append_tool_choice_json(jbuf_t *b, session_state_t *session,
     const char *choice = (session && session->tool_choice[0])
         ? session->tool_choice
         : "auto";
-    const char *model = session ? session->model : NULL;
-    bool is_kimi = model_is_moonshot_compatible(model);
-
     if (strcmp(choice, "auto") == 0) {
         jbuf_append(b, ",\"tool_choice\":\"auto\"");
     } else if (strcmp(choice, "any") == 0) {
-        jbuf_append(b, is_kimi
-            ? ",\"tool_choice\":\"auto\""
-            : ",\"tool_choice\":\"required\"");
+        jbuf_append(b, ",\"tool_choice\":\"required\"");
     } else if (strcmp(choice, "none") == 0) {
         jbuf_append(b, ",\"tool_choice\":\"none\"");
     } else if (strncmp(choice, "tool:", 5) == 0) {
-        if (is_kimi) {
-            jbuf_append(b, ",\"tool_choice\":\"auto\"");
-        } else {
-            jbuf_append(b, ",\"tool_choice\":{\"type\":\"function\",\"function\":{\"name\":");
-            jbuf_append_json_str(b, choice + 5);
-            jbuf_append(b, "}}");
-        }
+        jbuf_append(b, ",\"tool_choice\":{\"type\":\"function\",\"function\":{\"name\":");
+        jbuf_append_json_str(b, choice + 5);
+        jbuf_append(b, "}}");
     }
 }
 
@@ -3008,14 +2999,11 @@ static const char *provider_family_primary_model(const char *family, bool prefer
     }
     if (strcmp(family, "moonshot") == 0) {
         if (prefer_code) {
-            /* Prefer highspeed variant on native — 180+ tok/s vs ~36 tok/s,
-             * same model, just faster inference. Falls back to standard
-             * kimi-k2.7-code if highspeed is unavailable or rate-limited. */
-            if (provider_has_usable_key("moonshot", NULL)) return "kimi-k2.7-code-highspeed";
+            if (provider_has_usable_key("moonshot", NULL)) return "kimi-k2.7-code";
             if (provider_has_usable_key("openrouter", NULL)) return "moonshotai/kimi-k2.7-code";
             return NULL;
         }
-        if (provider_has_usable_key("moonshot", NULL)) return "kimi-k2.7-code-highspeed";
+        if (provider_has_usable_key("moonshot", NULL)) return "kimi-k2.7-code";
         if (provider_has_usable_key("openrouter", NULL)) return "moonshotai/kimi-k2.7-code";
         return NULL;
     }
