@@ -851,6 +851,107 @@ static void sarr_cb(const char *el, void *ctx) {
 
 #define PLOT_MAX_PTS 512
 
+/* ── strange attractor (phase-space, Braille dots + per-cell density color) ─
+ * A 2-D chaotic map traced for many iterations. The orbit's fine filaments
+ * come from the 2x4 Braille subpixel grid; each character cell is then tinted
+ * on the viridis ramp by how often the orbit visited it (log-scaled), so the
+ * dense folds of the attractor glow. No RNG — fully deterministic. */
+int plot_attractor(char *out, size_t cap, const char *kind,
+                   double a, double cb, double c, double d, long iters,
+                   const plot_opts_t *opt) {
+    if (!out || !cap) { if (out && cap) out[0] = '\0'; return -1; }
+    plot_opts_t o = norm(opt);
+    int clifford = (kind && (kind[0] == 'c' || kind[0] == 'C'));
+    if (iters <= 0) iters = 300000;
+    if (iters > 5000000) iters = 5000000;
+    const long burn = 1000;
+
+    pbuf_t b; pb_init(&b, out, cap);
+    pb_title(&b, &o);
+
+    tui_braille_t bc;
+    tui_braille_init(&bc, o.width * 2, o.height * 4);
+    int W = bc.w_cells, H = bc.h_cells;
+    unsigned *cd = calloc((size_t)W * H, sizeof(unsigned));
+    if (!cd) { tui_braille_free(&bc); if (cap) out[0] = '\0'; return -1; }
+
+    #define ATTR_STEP(X,Y,NX,NY) do { \
+        if (clifford) { NX = sin(a*(Y)) + c*cos(a*(X)); NY = sin(cb*(X)) + d*cos(cb*(Y)); } \
+        else          { NX = sin(a*(Y)) - cos(cb*(X));  NY = sin(c*(X)) - cos(d*(Y));    } \
+    } while (0)
+
+    /* pass 1: discover the orbit's bounding box */
+    double x = 0.1, y = 0.1, xmn = 1e30, xmx = -1e30, ymn = 1e30, ymx = -1e30;
+    for (long i = 0; i < iters; i++) {
+        double nx, ny; ATTR_STEP(x, y, nx, ny); x = nx; y = ny;
+        if (i < burn) continue;
+        if (x < xmn) xmn = x; if (x > xmx) xmx = x;
+        if (y < ymn) ymn = y; if (y > ymx) ymx = y;
+    }
+    double xr = xmx - xmn, yr = ymx - ymn;
+    if (xr < 1e-9) xr = 1; if (yr < 1e-9) yr = 1;
+    xmn -= xr * 0.02; xmx += xr * 0.02; ymn -= yr * 0.02; ymx += yr * 0.02;
+    xr = xmx - xmn; yr = ymx - ymn;
+
+    /* pass 2: trace dots and accumulate per-cell visit density */
+    x = 0.1; y = 0.1;
+    unsigned maxd = 1;
+    for (long i = 0; i < iters; i++) {
+        double nx, ny; ATTR_STEP(x, y, nx, ny); x = nx; y = ny;
+        if (i < burn) continue;
+        int px = (int)((x - xmn) / xr * (bc.px_w - 1) + 0.5);
+        int py = (int)((1.0 - (y - ymn) / yr) * (bc.px_h - 1) + 0.5);
+        if (px < 0 || px >= bc.px_w || py < 0 || py >= bc.px_h) continue;
+        tui_braille_set(&bc, px, py);
+        unsigned v = ++cd[(py / 4) * W + (px / 2)];
+        if (v > maxd) maxd = v;
+    }
+    #undef ATTR_STEP
+
+    /* render: glyphs from the canvas, each cell tinted by its log-density */
+    char *mb = NULL; size_t ms = 0;
+    FILE *f = open_memstream(&mb, &ms);
+    if (f) { tui_braille_render(&bc, f, NULL); fclose(f); }
+    double lmax = log(1.0 + maxd);
+    int row = 0;
+    char *line = mb;
+    while (line && *line && row < H) {
+        char *nl = strchr(line, '\n');
+        if (nl) *nl = '\0';
+        char *p = line; int col = 0;
+        while (*p && col < W) {
+            int glen = 1;                         /* a cell is one UTF-8 glyph */
+            unsigned char lead = (unsigned char)*p;
+            if (lead >= 0xF0) glen = 4; else if (lead >= 0xE0) glen = 3;
+            else if (lead >= 0xC0) glen = 2;
+            unsigned dv = cd[row * W + col];
+            if (o.color) {
+                if (dv == 0) pb_puts(&b, P_DIM);
+                else pb_putf(&b, "\033[38;5;%dm", viridis256(log(1.0 + dv) / lmax));
+            }
+            char g[5]; int k = 0;
+            for (; k < glen && *p; k++) g[k] = *p++;
+            g[k] = '\0';
+            pb_puts(&b, g);
+            col++;
+        }
+        pb_reset(&b, o.color);
+        pb_puts(&b, "\n");
+        row++;
+        if (!nl) break;
+        line = nl + 1;
+    }
+    free(mb); free(cd); tui_braille_free(&bc);
+
+    if (o.axes) {
+        pb_col(&b, o.color, P_GREY);
+        pb_putf(&b, "  %s  a=%.3g b=%.3g c=%.3g d=%.3g  %ldk pts\n",
+                clifford ? "clifford" : "de jong", a, cb, c, d, iters / 1000);
+        pb_reset(&b, o.color);
+    }
+    return b.ovf ? -1 : pb_done(&b);
+}
+
 int plot_dispatch(const char *input_json, char *out, size_t cap) {
     if (!input_json || !out) { if (out && cap) out[0] = '\0'; return -1; }
     char type[24] = "line";
@@ -949,6 +1050,19 @@ int plot_dispatch(const char *input_json, char *out, size_t cap) {
     } else if (strcmp(type, "bignum") == 0 || strcmp(type, "kpi") == 0) {
         double val = json_get_double(input_json, "value", n > 0 ? data[0] : 0);
         rc = plot_bignum(out, cap, val, o.title, &o);
+    } else if (strcmp(type, "attractor") == 0 || strcmp(type, "strange") == 0) {
+        char kind[16] = "dejong";
+        char *jk = json_get_str(input_json, "kind");
+        if (jk) { snprintf(kind, sizeof kind, "%s", jk); free(jk); }
+        int clifford = (kind[0] == 'c' || kind[0] == 'C');
+        double aa = json_get_double(input_json, "a", clifford ? -1.4 : 1.4);
+        double bb = json_get_double(input_json, "b", clifford ?  1.6 : -2.3);
+        double cc = json_get_double(input_json, "c", clifford ?  1.0 :  2.4);
+        double dd = json_get_double(input_json, "d", clifford ?  0.7 : -2.1);
+        long   it = (long)json_get_double(input_json, "iters", 300000);
+        if (o.width  < 50) o.width  = 64;   /* attractors want room to breathe */
+        if (o.height < 14) o.height = 18;
+        rc = plot_attractor(out, cap, kind, aa, bb, cc, dd, it, &o);
     } else if (strcmp(type, "ridgeline") == 0 || strcmp(type, "ridge") == 0) {
         /* parse "series":[[...],[...]] into per-series double arrays */
         const char *sp = json_get_raw(input_json, "series");
