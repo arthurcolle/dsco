@@ -1,4 +1,5 @@
 #include "vm.h"
+#include "crypto.h"  /* fnv1a_32 — consolidated */
 #include <string.h>
 #include <stdio.h>
 
@@ -8,16 +9,8 @@
 #define VM_USE_COMPUTED_GOTO 1
 #endif
 
-/* ── FNV-1a hash ───────────────────────────────────────────────────── */
-
-static uint32_t fnv1a(const char *s) {
-    uint32_t h = 2166136261u;
-    for (; *s; s++) {
-        h ^= (uint8_t)*s;
-        h *= 16777619u;
-    }
-    return h;
-}
+/* FNV-1a — consolidated into fnv1a_32() in crypto.h */
+#define fnv1a(s) fnv1a_32(s)
 
 /* ── Lifecycle ─────────────────────────────────────────────────────── */
 
