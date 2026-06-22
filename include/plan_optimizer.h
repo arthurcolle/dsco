@@ -47,4 +47,16 @@ void                  plan_options_free(plan_options_t *opts);
 int                   plan_options_json(const plan_options_t *opts, char *buf, size_t buflen);
 const plan_option_t  *plan_options_best(const plan_options_t *opts);
 
+/* ── Per-option cost refinement ────────────────────────────────────────────
+ *
+ * plan_estimate_cost() recomputes cost from the topology's model-tier mix
+ * and applies topology_cost_multiplier() for structural overhead.
+ * More accurate than the static est_cost_usd when node mix is known.
+ *
+ * topology_cost_multiplier() returns a category/strategy overhead factor:
+ *   1.0 = baseline chain, up to ~3x for mesh/competitive topologies.
+ */
+double plan_estimate_cost(const plan_option_t *opt);
+double topology_cost_multiplier(const char *topology_name);
+
 #endif /* DSCO_PLAN_OPTIMIZER_H */

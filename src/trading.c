@@ -9,6 +9,7 @@
  */
 
 #include "trading.h"
+#include "tools.h"
 #include "json_util.h"
 #include "crypto.h"
 #include "config.h"
@@ -23,6 +24,9 @@
 #include <math.h>
 #include <curl/curl.h>
 #include <sqlite3.h>
+
+/* Defined in tools.c — fork()+execvp() without a shell (no injection). */
+extern int safe_exec_argv(const char *const argv[], char *out, size_t out_len);
 
 /* POSIX-missing: case-insensitive substring search */
 static const char *ci_strstr(const char *haystack, const char *needle) {
@@ -353,11 +357,11 @@ static bool secp256k1_sign_hash(const uint8_t privkey[32], const uint8_t hash[32
     int fd_pem = mkstemp(pem_file);
     close(fd_pem);
 
-    char cmd[512];
-    snprintf(cmd, sizeof(cmd),
-             "openssl ec -inform DER -in '%s' -outform PEM -out '%s' 2>/dev/null",
-             der_file, pem_file);
-    int rc = system(cmd);
+    const char *openssl_argv[] = { "openssl", "ec", "-inform", "DER",
+                                    "-in", der_file, "-outform", "PEM",
+                                    "-out", pem_file, NULL };
+    char openssl_err[512] = {0};
+    int rc = safe_exec_argv(openssl_argv, openssl_err, sizeof(openssl_err));
     unlink(der_file);
     if (rc != 0) {
         unlink(pem_file);
@@ -375,6 +379,7 @@ static bool secp256k1_sign_hash(const uint8_t privkey[32], const uint8_t hash[32
     close(fd_hash);
 
     /* Sign with pkeyutl */
+    char cmd[1024];
     snprintf(cmd, sizeof(cmd),
              "openssl pkeyutl -sign -inkey '%s' -in '%s'",
              pem_file, hash_file);

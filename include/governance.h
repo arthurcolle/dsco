@@ -121,6 +121,26 @@ typedef struct {
     double         timestamp;
 } audit_entry_t;
 
+/* ── Circuit Breakers (Immune System Track E1) ──────────────────────── */
+
+typedef enum {
+    CB_ERROR_RATE = 0,      /* trip if error rate exceeds threshold */
+    CB_LATENCY,             /* trip if p99 latency exceeds threshold (ms) */
+    CB_COST_OVERRUN,         /* trip if GSU budget exceeded */
+    CB_PHEROMONE_SAT,        /* trip if pheromone field saturated */
+    CB_TYPE_COUNT,
+} circuit_breaker_type_t;
+
+typedef struct {
+    circuit_breaker_type_t type;
+    double threshold;           /* config: trip level */
+    double current_value;       /* live: current metric */
+    bool    tripped;            /* is breaker currently tripped? */
+    time_t  trip_time;          /* when tripped (0 = not tripped) */
+    char    trip_reason[256];   /* why tripped */
+    int     trip_count;         /* total trips since reset */
+} circuit_breaker_t;
+
 /* ── Governance Engine ────────────────────────────────────────────────── */
 
 typedef struct {
@@ -153,6 +173,13 @@ typedef struct {
     int                   total_authorizations;
     int                   total_denials;
     int                   total_hardcoded_blocks;
+
+    /* Circuit breakers (Immune System E1) */
+    circuit_breaker_t     breakers[CB_TYPE_COUNT];
+
+    /* Shadow examination history (Immune System E2) */
+    int                   shadow_checks_performed;
+    int                   shadow_violations;
 } governance_engine_t;
 
 /* ── Lifecycle ────────────────────────────────────────────────────────── */
@@ -247,5 +274,37 @@ typedef struct vfs_db vfs_db_t;
 
 /* Connect governance audit trail to VFS for persistent event logging */
 void governance_set_vfs(vfs_db_t *vfs);
+
+/* Check all breakers for an agent. Returns true if all clear. */
+bool governance_check_breakers(governance_engine_t *g, const char *agent_id);
+
+/* Trip a specific breaker with a reason. */
+bool governance_trip_breaker(governance_engine_t *g, circuit_breaker_type_t type,
+                              const char *reason);
+
+/* Reset a tripped breaker. */
+bool governance_reset_breaker(governance_engine_t *g, circuit_breaker_type_t type);
+
+/* Update breaker metric (called by monitoring). */
+void governance_breaker_update(governance_engine_t *g, circuit_breaker_type_t type,
+                                double value);
+
+/* Get all breaker states as JSON. */
+int governance_breakers_json(const governance_engine_t *g, char *buf, size_t len);
+
+/* ── Shadow Examination (Immune System Track E2) ───────────────────── */
+
+typedef struct {
+    bool   self_reward_detected;     /* action benefits agent, not principal */
+    bool   circular_optimization;     /* optimizing metric w/o improving outcome */
+    bool   reward_hacking;            /* gaming the objective function */
+    bool   self_mythology;            /* inflated self-assessment */
+    char   explanation[512];
+} shadow_check_result_t;
+
+/* Pre-action shadow check. Returns true if action passes (no shadow detected). */
+bool governance_shadow_check(governance_engine_t *g, const char *agent_id,
+                               const char *proposed_action,
+                               shadow_check_result_t *result);
 
 #endif
