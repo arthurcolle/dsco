@@ -95,6 +95,9 @@ typedef struct {
     double philtrum_d;                  /* philtrum groove depth */
     double stubble;                     /* beard stubble 0-1 */
     double lower_lid;                   /* lower eyelid puff 0-1 */
+    double mouth_open;                  /* jaw/open-mouth expression 0-1 */
+    double smile;                       /* smile expression 0-1 */
+    double brow_raise;                  /* brow raise expression 0-1 */
 
     int    view;                        /* 0 face, 1 bust, 2 full */
     double zoom;
@@ -122,6 +125,9 @@ static aface_t aface_from_name(const char *name) {
     f.philtrum_d = mrange(&st,0.018,0.030);
     f.stubble  = 0.0;
     f.lower_lid = mrange(&st,0.15,0.35);
+    f.mouth_open = 0.0;
+    f.smile = 0.0;
+    f.brow_raise = 0.0;
 
     f.skin    = (int)(mulf(&st)*5.0); if(f.skin>4)f.skin=4;
     f.iris    = (int)(mulf(&st)*4.0); if(f.iris>3)f.iris=3;
@@ -158,11 +164,14 @@ static void opU(double *d,int *mat,double nd,int nm){ if(nd<*d){*d=nd;*mat=nm;} 
 
 /* ── detailed head — v3 complete rewrite ────────────────────────────────── */
 static double sdHead(V3 p, const aface_t *f, int *mat) {
+    double open  = clampd(f->mouth_open, 0.0, 1.0);
+    double smile = clampd(f->smile, 0.0, 1.0);
+    double brow_lift = clampd(f->brow_raise, 0.0, 1.0) * 0.075;
 
     /* ── cranium: compound ellipsoid  ─────────────────────────────────── */
     double cran  = sdEll(v3sub(p, v3(0, 0.08, 0.0)),  v3(f->hw, f->hh*0.78, f->hd));
-    double mid   = sdEll(v3sub(p, v3(0,-0.10, 0.02)), v3(f->hw*0.92, f->hh*0.58, f->hd*0.97));
-    double jaw   = sdEll(v3sub(p, v3(0,-0.52, 0.06)), v3(f->hw*0.62, 0.38, f->hd*0.82));
+    double mid   = sdEll(v3sub(p, v3(0,-0.12, 0.02)), v3(f->hw*0.90, f->hh*0.60, f->hd*0.96));
+    double jaw   = sdEll(v3sub(p, v3(0,-0.50, 0.06)), v3(f->hw*0.58, 0.38, f->hd*0.80));
     double skin  = smin(smin(cran, mid, 0.22), jaw, 0.20);
 
     /* cheekbones */
@@ -183,7 +192,7 @@ static double sdHead(V3 p, const aface_t *f, int *mat) {
         skin = smin(skin, fem, 0.12);
     }
     /* glabella — supraorbital bridge between the brows */
-    double glab = sdEll(v3sub(p, v3(0, f->brow_y+0.010, f->hd*0.860)), v3(f->nose_w*0.55,0.055,0.045));
+    double glab = sdEll(v3sub(p, v3(0, f->brow_y+brow_lift*0.35+0.010, f->hd*0.860)), v3(f->nose_w*0.55,0.055,0.045));
     skin = smin(skin, glab, 0.030);
 
     /* ears: helix shell + antihelix + concha + lobe */
@@ -232,9 +241,9 @@ static double sdHead(V3 p, const aface_t *f, int *mat) {
 
     /* eye sockets — precise oval, orbital brow bone */
     for (int s=-1;s<=1;s+=2) {
-        double soc = sdEll(v3sub(p, v3(s*f->eye_sep,f->eye_y+0.010,f->hd*0.830)),
-                           v3(f->eye_size*1.25,f->eye_size*1.02,0.12));
-        skin = fmax(skin, -soc);
+        double soc = sdEll(v3sub(p, v3(s*f->eye_sep,f->eye_y+0.010,f->hd*0.835)),
+                           v3(f->eye_size*1.12,f->eye_size*0.86,0.080));
+        skin = fmax(skin, -soc - 0.026);
         double bbone = sdEll(v3sub(p, v3(s*f->eye_sep,f->eye_y+f->eye_size*0.88,f->hd*0.820)),
                              v3(f->eye_size*1.18,0.040,0.055));
         skin = smin(skin, bbone, 0.028);
@@ -274,9 +283,8 @@ static double sdHead(V3 p, const aface_t *f, int *mat) {
             V3 crB = v3(s*(f->eye_sep+f->eye_size*0.88), f->eye_y+f->eye_size*0.60, ez+f->eye_size*0.35);
             double crvol = sdEll(v3sub(p, v3(s*f->eye_sep,f->eye_y+f->eye_size*0.65,ez+f->eye_size*0.35)),
                                  v3(f->eye_size*0.90,0.032,0.040));
-            skin = fmax(skin, -sdCap(p,crA,crB,0.010) + 0.002);
-            skin = fmax(skin, -crvol + 0.004);
-            d = fmin(d, skin);
+            skin = fmax(skin, -sdCap(p,crA,crB,0.010) - 0.002);
+            skin = fmax(skin, -crvol - 0.004);
         }
 
         /* lower eyelid */
@@ -288,58 +296,64 @@ static double sdHead(V3 p, const aface_t *f, int *mat) {
         opU(&d, mat, sdSph(v3sub(p, v3(s*(f->eye_sep-f->eye_size*0.92),f->eye_y-0.008,ez+f->eye_size*0.35)), 0.018), M_EYE);
 
         /* brow: medial head + lateral tail */
-        V3 bm0 = v3(s*(f->eye_sep-f->eye_size*1.0),  f->brow_y+0.004, f->hd*0.825);
-        V3 bm1 = v3(s*(f->eye_sep+f->eye_size*0.15), f->brow_y+0.012, f->hd*0.822);
-        V3 bl1 = v3(s*(f->eye_sep+f->eye_size*0.95), f->brow_y+0.025, f->hd*0.815);
+        V3 bm0 = v3(s*(f->eye_sep-f->eye_size*1.0),  f->brow_y+brow_lift+0.004, f->hd*0.825);
+        V3 bm1 = v3(s*(f->eye_sep+f->eye_size*0.15), f->brow_y+brow_lift+0.012, f->hd*0.822);
+        V3 bl1 = v3(s*(f->eye_sep+f->eye_size*0.95), f->brow_y+brow_lift+0.025+smile*0.010, f->hd*0.815);
         double brow = smin(sdCap(p,bm0,bm1,0.030), sdCap(p,bm1,bl1,0.018), 0.012);
         opU(&d, mat, brow, M_BROW);
     }
 
     /* lips: Cupid's bow upper + full lower + commissures + seam */
-    double ulip_c = sdEll(v3sub(p,v3(0,f->mouth_y+0.062,f->hd*0.887)), v3(f->mouth_w*0.28,0.040,0.052));
-    double ulip_l = sdEll(v3sub(p,v3(-f->mouth_w*0.48,f->mouth_y+0.048,f->hd*0.882)), v3(f->mouth_w*0.30,0.035,0.048));
-    double ulip_r = sdEll(v3sub(p,v3( f->mouth_w*0.48,f->mouth_y+0.048,f->hd*0.882)), v3(f->mouth_w*0.30,0.035,0.048));
+    double mw = f->mouth_w * (1.0 + smile*0.16);
+    double ulip_c = sdEll(v3sub(p,v3(0,f->mouth_y+0.062+smile*0.014,f->hd*0.887)), v3(mw*0.28,0.036,0.052));
+    double ulip_l = sdEll(v3sub(p,v3(-mw*0.48,f->mouth_y+0.048+smile*0.026,f->hd*0.882)), v3(mw*0.30,0.033,0.048));
+    double ulip_r = sdEll(v3sub(p,v3( mw*0.48,f->mouth_y+0.048+smile*0.026,f->hd*0.882)), v3(mw*0.30,0.033,0.048));
     double upperlip = smin(smin(ulip_l,ulip_r,0.022), ulip_c, 0.028);
     for (int s=-1;s<=1;s+=2) {
-        double peak = sdSph(v3sub(p, v3(s*f->mouth_w*0.22,f->mouth_y+0.088,f->hd*0.888)), 0.024);
+        double peak = sdSph(v3sub(p, v3(s*mw*0.22,f->mouth_y+0.088+smile*0.010,f->hd*0.888)), 0.024);
         upperlip = smin(upperlip, peak, 0.018);
     }
-    double lowerlip = sdEll(v3sub(p,v3(0,f->mouth_y-0.052,f->hd*0.876)), v3(f->mouth_w*0.78,0.052,0.058));
+    double lowerlip = sdEll(v3sub(p,v3(0,f->mouth_y-0.052-open*0.050,f->hd*0.876)), v3(mw*0.78,0.052+open*0.014,0.058));
     double lips = smin(upperlip, lowerlip, 0.018);
     for (int s=-1;s<=1;s+=2) {
-        double comm = sdSph(v3sub(p, v3(s*f->mouth_w*0.90,f->mouth_y+0.006,f->hd*0.878)), 0.020);
+        double comm = sdSph(v3sub(p, v3(s*mw*0.90,f->mouth_y+0.006+smile*0.038,f->hd*0.878)), 0.020);
         lips = smin(lips, comm, 0.014);
     }
-    lips = fmax(lips, -sdCap(p, v3(-f->mouth_w*0.88,f->mouth_y+0.008,f->hd*0.895),
-                                  v3( f->mouth_w*0.88,f->mouth_y+0.008,f->hd*0.895), 0.007));
+    lips = fmax(lips, -sdCap(p, v3(-mw*0.88,f->mouth_y+0.008-open*0.012,f->hd*0.895),
+                                  v3( mw*0.88,f->mouth_y+0.008-open*0.012,f->hd*0.895), 0.007+open*0.020));
     opU(&d, mat, lips, M_LIP);
+    if (open > 0.015) {
+        double mouth_dark = sdEll(v3sub(p, v3(0,f->mouth_y-0.012-open*0.030,f->hd*0.912)),
+                                  v3(mw*0.76,0.012+open*0.046,0.030));
+        opU(&d, mat, mouth_dark, M_PUPIL);
+    }
 
     /* nasolabial folds */
     for (int s=-1;s<=1;s+=2) {
         double fold = sdCap(p, v3(s*f->nose_w*0.96,-0.085,f->hd*0.895),
-                               v3(s*f->mouth_w*0.94,f->mouth_y+0.040,f->hd*0.870), 0.010);
-        skin = fmax(skin, -fold + 0.005);
+                               v3(s*mw*0.94,f->mouth_y+0.040+smile*0.018,f->hd*0.870), 0.010);
+        skin = fmax(skin, -fold - 0.001);
     }
 
     /* philtrum ridges + centre groove */
     for (int s=-1;s<=1;s+=2) {
         double pr = sdCap(p, v3(s*f->nose_w*0.22,-0.175,f->hd*0.900),
-                             v3(s*f->mouth_w*0.20,f->mouth_y+0.085,f->hd*0.892), 0.009);
+                             v3(s*mw*0.20,f->mouth_y+0.085,f->hd*0.892), 0.009);
         skin = smin(skin, pr, 0.012);
     }
     skin = fmax(skin, -sdCap(p, v3(0,-0.168,f->hd*0.893),
                                   v3(0,f->mouth_y+0.082,f->hd*0.884), f->philtrum_d) + 0.003);
 
     /* mentolabial sulcus — groove between the lower lip and the chin */
-    skin = fmax(skin, -sdCap(p, v3(-f->mouth_w*0.62,f->mouth_y-0.105,f->hd*0.860),
-                                  v3( f->mouth_w*0.62,f->mouth_y-0.105,f->hd*0.860), 0.020) + 0.006);
+    skin = fmax(skin, -sdCap(p, v3(-mw*0.62,f->mouth_y-0.105-open*0.020,f->hd*0.860),
+                                  v3( mw*0.62,f->mouth_y-0.105-open*0.020,f->hd*0.860), 0.020) - 0.002);
 
     /* chin cleft */
     if (f->chin_d > 0.04) {
         skin = fmax(skin, -sdCap(p, v3(0,-0.530,f->hd*0.790),
                                       v3(0,-0.455,f->hd*0.820), f->chin_d*0.055));
     }
-    d = fmin(d, skin);
+    opU(&d, mat, skin, M_SKIN);
 
     /* hair */
     if (f->hair > 0) {
@@ -436,6 +450,84 @@ static int shade_mat(int mat, double lum, const aface_t *f) {
         case M_PANTS: return ramp_pick(PANTSC[f->pants], 4, lum);
         default:      return -1;
     }
+}
+
+static int mat_priority(int mat) {
+    switch (mat) {
+        case M_PUPIL: return 9;
+        case M_IRIS:  return 8;
+        case M_EYE:   return 7;
+        case M_LIP:   return 6;
+        case M_BROW:  return 5;
+        case M_GLASS: return 4;
+        case M_HAIR:  return 3;
+        case M_SKIN:  return 2;
+        default:      return 1;
+    }
+}
+
+static void braille_clear_dot(tui_braille_t *b, int x, int y) {
+    static const unsigned char bit[4][2] = {
+        {0x01,0x08},{0x02,0x10},{0x04,0x20},{0x40,0x80}
+    };
+    if (!b || !b->cells) return;
+    if (x < 0 || y < 0 || x >= b->px_w || y >= b->px_h) return;
+    int cx = x / 2, cy = y / 4;
+    b->cells[cy * b->w_cells + cx] &= (unsigned char)~bit[y % 4][x % 2];
+}
+
+static void braille_clear_disk(tui_braille_t *b, int x, int y, int r) {
+    for (int yy=-r; yy<=r; yy++) {
+        for (int xx=-r; xx<=r; xx++) {
+            if (xx*xx + yy*yy <= r*r) braille_clear_dot(b, x+xx, y+yy);
+        }
+    }
+}
+
+static void braille_clear_line(tui_braille_t *b, int x0, int y0, int x1, int y1, int r) {
+    int dx = abs(x1 - x0), sx = x0 < x1 ? 1 : -1;
+    int dy = -abs(y1 - y0), sy = y0 < y1 ? 1 : -1;
+    int err = dx + dy;
+    for (;;) {
+        braille_clear_disk(b, x0, y0, r);
+        if (x0 == x1 && y0 == y1) break;
+        int e2 = 2 * err;
+        if (e2 >= dy) { err += dy; x0 += sx; }
+        if (e2 <= dx) { err += dx; y0 += sy; }
+    }
+}
+
+static bool project_px(V3 p, V3 ro, V3 fwd, V3 rgt, V3 up,
+                       double tanH, double aspect, int gw, int gh,
+                       int *x, int *y) {
+    V3 q = v3sub(p, ro);
+    double z = v3dot(q, fwd);
+    if (z <= 1e-6) return false;
+    double u = v3dot(q, rgt) / z;
+    double v = v3dot(q, up) / z;
+    double sx = (u / (aspect * tanH) + 1.0) * 0.5;
+    double sy = (1.0 - v / tanH) * 0.5;
+    *x = (int)(sx * gw + 0.5);
+    *y = (int)(sy * gh + 0.5);
+    return *x >= -4 && *x < gw+4 && *y >= -4 && *y < gh+4;
+}
+
+static void clear_projected_line(tui_braille_t *bc, V3 a, V3 b,
+                                 V3 ro, V3 fwd, V3 rgt, V3 up,
+                                 double tanH, double aspect, int r) {
+    int x0,y0,x1,y1;
+    if (project_px(a,ro,fwd,rgt,up,tanH,aspect,bc->px_w,bc->px_h,&x0,&y0) &&
+        project_px(b,ro,fwd,rgt,up,tanH,aspect,bc->px_w,bc->px_h,&x1,&y1)) {
+        braille_clear_line(bc,x0,y0,x1,y1,r);
+    }
+}
+
+static void clear_projected_dot(tui_braille_t *bc, V3 p,
+                                V3 ro, V3 fwd, V3 rgt, V3 up,
+                                double tanH, double aspect, int r) {
+    int x,y;
+    if (project_px(p,ro,fwd,rgt,up,tanH,aspect,bc->px_w,bc->px_h,&x,&y))
+        braille_clear_disk(bc,x,y,r);
 }
 
 /* cheap hash → [0,1): drives skin grain (pores) and stubble speckle */
@@ -597,37 +689,95 @@ static void aface_frame(tui_braille_t *bc, int *cell_color, const aface_t *f) {
 
     for (int py=0; py<gh; py++) {
         for (int px=0; px<gw; px++) {
-            double lumsum=0; int hitmat=M_BG; double bestlum=-1;
+            double lumsum=0;
+            int hitcnt=0, hitmat=M_BG;
+            int matcnt[M_NMAT]={0};
+            double matlum[M_NMAT]={0};
             for (int sy=0; sy<aa; sy++) for (int sx=0; sx<aa; sx++) {
                 double ox=(sx+0.5)/aa-0.5, oy=(sy+0.5)/aa-0.5;
                 double u=(((px+0.5+ox)/gw)*2.0-1.0)*aspect*tanH;
                 double v=-(((py+0.5+oy)/gh)*2.0-1.0)*tanH;
                 V3 rd=v3norm(v3add(fwd, v3add(v3scl(rgt,u), v3scl(up,v))));
                 double lum; int mat=march(ro,rd,f,&lum);
-                if (mat!=M_BG) { lumsum+=lum; if (lum>bestlum){bestlum=lum;hitmat=mat;} }
+                if (mat!=M_BG) {
+                    lumsum += lum;
+                    hitcnt++;
+                    matcnt[mat]++;
+                    matlum[mat] += lum;
+                }
             }
             int ns=aa*aa;
-            double cover = (bestlum>=0) ? 0.0 : 0.0;   /* placeholder */
-            (void)cover;
-            double lum = hitmat!=M_BG ? lumsum/ns : 0.0;
+            if (hitcnt) {
+                int bestscore=-1;
+                for (int mm=1; mm<M_NMAT; mm++) {
+                    if (!matcnt[mm]) continue;
+                    int score = matcnt[mm]*16 + mat_priority(mm);
+                    if (score > bestscore) { bestscore=score; hitmat=mm; }
+                }
+            }
+            double cover = hitcnt ? (double)hitcnt/(double)ns : 0.0;
+            double lum = hitcnt ? lumsum/(double)hitcnt : 0.0;
             double thr = (BAYER[py&3][px&3]+0.5)/16.0;
-            /* ordered dither: keep a density floor so the head stays a solid
-             * silhouette, but let the lit→shadow range modulate dot density so
-             * the 3-D form (nose, sockets, cheekbones, lips) actually reads. */
-            double dotlum = hitmat!=M_BG ? 0.34 + 0.66*pow(clampd(lumsum/ns,0,1), 1.15) : 0.0;
+            /* Ordered dither from real hit coverage and hit-only luminance.
+             * This keeps silhouettes antialiased while allowing creases, eyes
+             * and the mouth to cut visible dark structure through the face. */
+            double dotlum = hitcnt ? cover * (0.18 + 0.92*pow(clampd(lum,0,1), 0.86)) : 0.0;
             if (dotlum > thr) tui_braille_set(bc, px, py);
 
             if (hitmat!=M_BG) {
                 int cell=(py/4)*W+(px/2);
-                acc[cell*M_NMAT+hitmat]+= bestlum;
+                double ml = matcnt[hitmat] ? matlum[hitmat]/matcnt[hitmat] : lum;
+                acc[cell*M_NMAT+hitmat]+= ml;
                 cnt[cell*M_NMAT+hitmat]+= 1;
             }
             (void)lum;
         }
     }
+    if (f->view <= 1) {
+        int stroke = gw >= 160 ? 2 : 1;
+        double open = clampd(f->mouth_open,0.0,1.0);
+        double smile = clampd(f->smile,0.0,1.0);
+        double brow_lift = clampd(f->brow_raise,0.0,1.0) * 0.075;
+        double front = f->hd * 0.94;
+        for (int s=-1; s<=1; s+=2) {
+            clear_projected_line(bc,
+                v3(s*(f->eye_sep-f->eye_size*0.96), f->eye_y-0.004, front),
+                v3(s*(f->eye_sep+f->eye_size*0.90), f->eye_y+0.002, front),
+                ro,fwd,rgt,up,tanH,aspect,stroke);
+            clear_projected_line(bc,
+                v3(s*(f->eye_sep-f->eye_size*0.95), f->brow_y+brow_lift+0.012, f->hd*0.93),
+                v3(s*(f->eye_sep+f->eye_size*0.92), f->brow_y+brow_lift+0.030+smile*0.010, f->hd*0.91),
+                ro,fwd,rgt,up,tanH,aspect,stroke);
+            clear_projected_dot(bc,
+                v3(s*f->nose_w*0.58, -0.222, f->hd*0.985),
+                ro,fwd,rgt,up,tanH,aspect,stroke);
+        }
+        clear_projected_line(bc,
+            v3(0, f->eye_y+0.11, f->hd*0.955),
+            v3(0, -0.145, f->hd*1.010),
+            ro,fwd,rgt,up,tanH,aspect,stroke);
+
+        double mw = f->mouth_w * (1.0 + smile*0.16);
+        int mouth_r = stroke + (open > 0.18 ? 1 : 0);
+        clear_projected_line(bc,
+            v3(-mw*0.86, f->mouth_y+0.008-open*0.015+smile*0.030, f->hd*0.975),
+            v3( mw*0.86, f->mouth_y+0.008-open*0.015+smile*0.030, f->hd*0.975),
+            ro,fwd,rgt,up,tanH,aspect,mouth_r);
+        if (open > 0.08) {
+            clear_projected_line(bc,
+                v3(-mw*0.58, f->mouth_y-0.012-open*0.055, f->hd*0.980),
+                v3( mw*0.58, f->mouth_y-0.012-open*0.055, f->hd*0.980),
+                ro,fwd,rgt,up,tanH,aspect,mouth_r);
+        }
+    }
     for (int c=0;c<W*H;c++) {
-        int best=M_BG; double bs=0;
-        for (int mm=1;mm<M_NMAT;mm++) if (acc[c*M_NMAT+mm]>bs){bs=acc[c*M_NMAT+mm];best=mm;}
+        int best=M_BG, bestscore=-1;
+        for (int mm=1;mm<M_NMAT;mm++) {
+            int n = cnt[c*M_NMAT+mm];
+            if (!n) continue;
+            int score = n*16 + mat_priority(mm);
+            if (score > bestscore) { bestscore=score; best=mm; }
+        }
         if (best==M_BG){ cell_color[c]=-1; continue; }
         double meanlum = acc[c*M_NMAT+best]/(cnt[c*M_NMAT+best]?cnt[c*M_NMAT+best]:1);
         cell_color[c]=shade_mat(best, meanlum, f);
@@ -682,6 +832,9 @@ static aface_t aface_parse(const char *json, char **owned_name, char **owned_tit
         f.philtrum_d=json_get_double(json,"philtrum_d",f.philtrum_d);
         f.stubble   =json_get_double(json,"stubble",   f.stubble);
         f.lower_lid =json_get_double(json,"lower_lid", f.lower_lid);
+        f.mouth_open=json_get_double(json,"mouth_open",f.mouth_open);
+        f.smile     =json_get_double(json,"smile",     f.smile);
+        f.brow_raise=json_get_double(json,"brow_raise",f.brow_raise);
 
     }
     if(f.skin<0)f.skin=0; if(f.skin>4)f.skin=4;
@@ -690,6 +843,11 @@ static aface_t aface_parse(const char *json, char **owned_name, char **owned_tit
     if(f.iris<0)f.iris=0; if(f.iris>3)f.iris=3;
     if(f.shirt<0)f.shirt=0; if(f.shirt>3)f.shirt=3;
     if(f.pants<0)f.pants=0; if(f.pants>1)f.pants=1;
+    f.blink=clampd(f.blink,0.0,1.0);
+    f.mouth_open=clampd(f.mouth_open,0.0,1.0);
+    f.smile=clampd(f.smile,0.0,1.0);
+    f.brow_raise=clampd(f.brow_raise,0.0,1.0);
+    f.lower_lid=clampd(f.lower_lid,0.0,1.0);
     return f;
 }
 
@@ -763,6 +921,8 @@ int avatar_anim(const char *json){
                 f.mouth_w=nf.mouth_w; f.mouth_y=nf.mouth_y;
                 f.brow_y=nf.brow_y; f.ear_size=nf.ear_size;
                 f.blink=nf.blink; f.yaw=nf.yaw; f.pitch=nf.pitch;
+                f.lower_lid=nf.lower_lid;
+                f.mouth_open=nf.mouth_open; f.smile=nf.smile; f.brow_raise=nf.brow_raise;
                 free(_n); free(_t);
             }
         } else {
