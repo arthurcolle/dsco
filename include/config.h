@@ -335,6 +335,38 @@ static inline const model_info_t *model_lookup(const char *name) {
             return &MODEL_REGISTRY[i];
     }
 
+    /* Pass 2.5: dated model slugs (e.g. "z-ai/glm-5.2-20260616") — strip a
+     * trailing "-YYYYMMDD" date suffix and match the base model. Without this a
+     * dated slug misses the table and falls back to the 2M default window, which
+     * makes auto-compaction never trigger (context grows unbounded) and pricing
+     * wrong. */
+    {
+        size_t nl = strlen(name);
+        if (nl > 9 && name[nl - 9] == '-') {
+            int all_digits = 1;
+            for (size_t i = nl - 8; i < nl; i++)
+                if (name[i] < '0' || name[i] > '9') { all_digits = 0; break; }
+            if (all_digits) {
+                char base[256];
+                size_t blen = (nl - 9 < sizeof(base)) ? nl - 9 : sizeof(base) - 1;
+                memcpy(base, name, blen);
+                base[blen] = '\0';
+                char base_norm[256];
+                model_normalize_key(base, base_norm, sizeof(base_norm));
+                for (int i = 0; MODEL_REGISTRY[i].alias; i++) {
+                    char alias_norm[256], model_norm[256];
+                    model_normalize_key(MODEL_REGISTRY[i].alias, alias_norm, sizeof(alias_norm));
+                    model_normalize_key(MODEL_REGISTRY[i].model_id, model_norm, sizeof(model_norm));
+                    if (strcmp(base, MODEL_REGISTRY[i].alias) == 0 ||
+                        strcmp(base, MODEL_REGISTRY[i].model_id) == 0 ||
+                        (base_norm[0] && (strcmp(base_norm, alias_norm) == 0 ||
+                                          strcmp(base_norm, model_norm) == 0)))
+                        return &MODEL_REGISTRY[i];
+                }
+            }
+        }
+    }
+
     /* Pass 3: runtime OpenRouter catalog — any real slug resolves with live
      * context/pricing once the background fetch has populated the cache. */
     return openrouter_cache_lookup(name);
