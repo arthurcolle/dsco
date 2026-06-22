@@ -1734,7 +1734,7 @@ static void brl_set_fg(tui_rgb_t c) {
         fprintf(stderr, "\033[38;5;%dm", rgb_to_256(c));
 }
 
-static tui_rgb_t brl_scale_rgb(tui_rgb_t c, float scale) {
+static __attribute__((unused)) tui_rgb_t brl_scale_rgb(tui_rgb_t c, float scale) {
     if (scale < 0.0f) scale = 0.0f;
     if (scale > 1.0f) scale = 1.0f;
     tui_rgb_t o;
