@@ -311,12 +311,25 @@ int supervisor_run(int child_argc, char **child_argv) {
         uint64_t peak_rss = 0;
         bool soft_warned = false;
         bool preempted = false;   /* we asked the child to restart for memory */
+        bool tracer_reaped = false; /* child reaped out from under us (lldb/gdb) */
 
         for (;;) {
             wr = waitpid(child, &status, WNOHANG);
             if (wr == child) break;             /* child exited on its own */
             if (wr < 0) {
                 if (errno == EINTR) continue;
+                if (errno == ECHILD) {
+                    /* The child was reaped out from under us. This happens on
+                     * the crash path: crash_handler ptrace-attaches lldb/gdb,
+                     * and the traced child dies while the debugger owns the
+                     * wait status. Only crashes attach a debugger, so we know
+                     * it died abnormally — let the restart policy + diagnostics
+                     * run rather than aborting supervision. */
+                    tracer_reaped = true;
+                    wr = child;
+                    status = 0;
+                    break;
+                }
                 fprintf(stderr, "[supervisor] waitpid failed: %s\n", strerror(errno));
                 return 1;
             }
@@ -384,7 +397,8 @@ int supervisor_run(int child_argc, char **child_argv) {
         /* A memory pre-emption is an abnormal exit we manufactured: classify
          * it as an OOM event so the restart path engages and the child is told
          * to come back leaner and resume from its last checkpoint. */
-        crash_class_t cls = preempted ? EXIT_OOM_KILL : classify_exit(status);
+        crash_class_t cls = preempted     ? EXIT_OOM_KILL :
+                            tracer_reaped  ? EXIT_SIGNAL   : classify_exit(status);
 
         /* Tell the next incarnation why it is restarting so it can resume the
          * session and (on memory events) start in a more conservative state. */
