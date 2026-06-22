@@ -193,7 +193,7 @@ static const provider_profile_t PROVIDER_PROFILES[] = {
         .transport_base_url = "https://api.moonshot.ai/v1",
         .env_vars = { "MOONSHOT_API_KEY", "KIMI_API_KEY", "KIMI_CODING_API_KEY" },
         .aliases = { "kimi", "kimi-coding", "kimi-for-coding" },
-        .default_model = "kimi-k2.7-code",
+        .default_model = "kimi-k2.7-code-highspeed",
         .caps = CAP_OPENAI_COMPAT_VISION | PROVIDER_CAP_REASONING,
     },
     {
