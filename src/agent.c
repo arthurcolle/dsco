@@ -523,10 +523,10 @@ static bool rate_limiter_acquire(rate_limiter_t *rl) {
 
 /* ── Cost budget ───────────────────────────────────────────────────────── */
 
-double g_cost_budget = 5.0;             /* default $5/session (non-static: llm.c budget pressure) */
-static double g_daily_budget = 50.0;    /* default $50/day */
+double g_cost_budget = 0.0;             /* default off (non-static: llm.c budget pressure) */
+static double g_daily_budget = 0.0;     /* default off */
 
-/* Budgets default to $5/session and $50/day. Override with env vars.
+/* Budgets default to off (0 = disabled). Override with env vars.
    Set to 0 to disable. Swarm children inherit DSCO_CHILD_BUDGET. */
 static void init_cost_budgets(void) {
     const char *sb = getenv("DSCO_BUDGET");
@@ -3034,10 +3034,11 @@ void agent_run(const char *api_key, const char *model,
 
 #ifdef HAVE_READLINE
     rl_attempted_completion_function = command_completion;
-    /* command_completion_display is void(char**,int,int), exactly rl_compdisp_func_t.
-     * GNU readline (Homebrew, keg-only) lacks the libedit `VFunction` typedef, so
-     * cast to the portable readline type instead. */
-    rl_completion_display_matches_hook = (rl_compdisp_func_t *)command_completion_display;
+    /* command_completion_display is void(char**,int,int). Cast to the hook
+     * field's own type via typeof — portable across readline builds that name
+     * it rl_compdisp_func_t* vs libedit VFunction* vs a bare pointer. */
+    rl_completion_display_matches_hook =
+        (typeof(rl_completion_display_matches_hook))command_completion_display;
     rl_bind_key('/', slash_completion_key);
     rl_bind_key('\f', dsco_clear_screen);  /* Ctrl+L clears screen */
     rl_basic_word_break_characters = " \t\n";
