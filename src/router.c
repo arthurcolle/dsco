@@ -222,6 +222,7 @@ int model_tier(const char *model_id) {
     if (strstr(model_id, "o3-pro"))           return 4;
     if (strstr(model_id, "grok-4.20"))        return 4;
     if (strstr(model_id, "grok-4") && !strstr(model_id, "fast")) return 4;
+    if (strstr(model_id, "kimi-k2.7-code"))   return 4;  /* matches both kimi-k2.7-code and kimi-k2.7-code-highspeed */
     if (strstr(model_id, "kimi-k2.5"))        return 4;
     if (strstr(model_id, "qwen3-max-thinking")) return 4;
     if (strstr(model_id, "gemini-3.1-pro"))   return 4;

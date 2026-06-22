@@ -13,8 +13,10 @@
  */
 
 #include "self_improve.h"
+#include "cost_model.h"
 #include "baseline.h"
 #include "json_util.h"
+#include "rsi_curriculum.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -256,7 +258,17 @@ void self_improve_record_turn(self_improve_t *si,
 
     /* Detect high-cost turn */
     if (turn_cost > 0.50) {
-        if (si->pattern_count < SI_MAX_PATTERNS) {
+        bool found = false;
+        for (int i = 0; i < si->pattern_count; i++) {
+            if (si->patterns[i].type == SI_PATTERN_HIGH_COST_TURN) {
+                si->patterns[i].occurrences++;
+                si->patterns[i].last_seen = si_now();
+                si->patterns[i].severity = clampd(turn_cost / 2.0, 0.0, 1.0);
+                found = true;
+                break;
+            }
+        }
+        if (!found && si->pattern_count < SI_MAX_PATTERNS) {
             si_pattern_t *p = &si->patterns[si->pattern_count++];
             p->type = SI_PATTERN_HIGH_COST_TURN;
             snprintf(p->description, sizeof(p->description),
@@ -294,7 +306,17 @@ void self_improve_record_turn(self_improve_t *si,
 
     /* Detect budget approaching */
     if (budget_used_pct > 75.0) {
-        if (si->pattern_count < SI_MAX_PATTERNS) {
+        bool found = false;
+        for (int i = 0; i < si->pattern_count; i++) {
+            if (si->patterns[i].type == SI_PATTERN_BUDGET_APPROACHING) {
+                si->patterns[i].occurrences++;
+                si->patterns[i].last_seen = si_now();
+                si->patterns[i].severity = budget_used_pct / 100.0;
+                found = true;
+                break;
+            }
+        }
+        if (!found && si->pattern_count < SI_MAX_PATTERNS) {
             si_pattern_t *p = &si->patterns[si->pattern_count++];
             p->type = SI_PATTERN_BUDGET_APPROACHING;
             snprintf(p->description, sizeof(p->description),
@@ -393,7 +415,19 @@ static int add_suggestion(self_improve_t *si,
             }
         }
         if (worst_conf >= confidence) return -1; /* all existing are better */
-        si->suggestion_count = worst; /* reuse this slot */
+        /* Reuse the worst slot — count stays at SI_MAX_SUGGESTIONS */
+        si_suggestion_t *s = &si->suggestions[worst];
+        memset(s, 0, sizeof(*s));
+        s->type = type;
+        s->confidence = clampd(confidence, 0.0, 1.0);
+        s->estimated_savings = savings;
+        s->applied = false;
+        strncpy(s->description, desc, SI_MAX_SUGGESTION_LEN - 1);
+        if (target) strncpy(s->target_tool, target, SI_MAX_TOOL_NAME - 1);
+        if (alt)    strncpy(s->alternative_tool, alt, SI_MAX_TOOL_NAME - 1);
+
+        baseline_log("self_improve", "suggestion_generated", desc, NULL);
+        return worst;
     }
 
     si_suggestion_t *s = &si->suggestions[si->suggestion_count];
@@ -818,6 +852,40 @@ bool tool_self_improve(const char *input_json, char *result, size_t result_len) 
 
     self_improve_t *si = &g_self_improve;
 
+    if (strcmp(action, "curriculum") == 0) {
+        return rsi_curriculum_summary_json(result, result_len) > 0;
+    }
+
+    if (strcmp(action, "skill") == 0) {
+        char *skill_id = json_get_str(input_json, "skill_id");
+        bool ok = false;
+        if (!skill_id || !*skill_id) {
+            snprintf(result, result_len, "{\"error\":\"skill_id_required\"}");
+        } else {
+            ok = rsi_curriculum_skill_json(skill_id, result, result_len) > 0;
+        }
+        free(skill_id);
+        return ok;
+    }
+
+    if (strcmp(action, "promotion_gate") == 0) {
+        rsi_eval_summary_t eval = {
+            .heldout_success_rate = json_get_double(input_json, "heldout_success_rate", 0.0),
+            .baseline_success_rate = json_get_double(input_json, "baseline_success_rate", 0.0),
+            .safety_violation_rate = json_get_double(input_json, "safety_violation_rate", 1.0),
+            .rollback_trigger_rate = json_get_double(input_json, "rollback_trigger_rate", 1.0),
+            .cost_per_success_usd = json_get_double(input_json, "cost_per_success_usd", 0.0),
+            .baseline_cost_per_success_usd = json_get_double(input_json, "baseline_cost_per_success_usd", 0.0),
+            .judge_human_kappa = json_get_double(input_json, "judge_human_kappa", 0.0),
+            .replay_stability = json_get_double(input_json, "replay_stability", 0.0),
+            .provenance_complete = json_get_bool(input_json, "provenance_complete", false),
+            .signature_verified = json_get_bool(input_json, "signature_verified", false),
+            .rollback_plan_ready = json_get_bool(input_json, "rollback_plan_ready", false),
+            .budget_lease_active = json_get_bool(input_json, "budget_lease_active", false),
+        };
+        return rsi_curriculum_gate_json(&eval, result, result_len) > 0;
+    }
+
     if (strcmp(action, "summary") == 0) {
         char summary[4096];
         self_improve_summary(si, summary, sizeof(summary));
@@ -870,7 +938,7 @@ bool tool_self_improve(const char *input_json, char *result, size_t result_len) 
 
     snprintf(result, result_len,
              "Unknown action '%s'. Available: summary, consolidate, "
-             "acknowledge, history, save", action);
+             "acknowledge, history, save, curriculum, skill, promotion_gate", action);
     return false;
 }
 
@@ -933,4 +1001,124 @@ bool tool_self_assess(const char *input_json, char *result, size_t result_len) {
              top_conf * 100, top_rec);
 
     return true;
+}
+
+/* ═══════════════════════════════════════════════════════════════════════════
+ * Extended hooks: goals, swarms, strategies, tournaments
+ * ═══════════════════════════════════════════════════════════════════════════ */
+
+void self_improve_record_goal_state(self_improve_t *si,
+                                    const char *goal_id,
+                                    int state,
+                                    int grip_strength,
+                                    double elapsed_s) {
+    if (!si || !si->initialized || !goal_id) return;
+
+    if (state == 5) { /* ESCAPED */
+        for (int i = 0; i < si->pattern_count; i++) {
+            if (si->patterns[i].type == SI_PATTERN_FAILING_TOOL &&
+                strstr(si->patterns[i].description, "goal")) {
+                si->patterns[i].occurrences++;
+                si->patterns[i].last_seen = si_now();
+                return;
+            }
+        }
+        if (si->pattern_count < SI_MAX_PATTERNS) {
+            si_pattern_t *p = &si->patterns[si->pattern_count++];
+            p->type = SI_PATTERN_FAILING_TOOL;
+            snprintf(p->description, sizeof(p->description),
+                     "Goal %s escaped after %.1fs (grip=%d)",
+                     goal_id, elapsed_s, grip_strength);
+            p->severity = 0.6;
+            p->occurrences = 1;
+            p->first_seen = p->last_seen = si_now();
+        }
+    }
+
+    if (state == 4 && grip_strength >= 7) { /* CAPTURED with strong grip */
+        si->improvements_applied++;
+    }
+}
+
+void self_improve_record_swarm_outcome(self_improve_t *si,
+                                       const char *topology,
+                                       int agents,
+                                       bool success,
+                                       double quality,
+                                       double elapsed_s) {
+    if (!si || !si->initialized || !topology) return;
+
+    /* Feed actual performance data into the learned cost model (Priority 3).
+     * We don't know exact token count here, so use a heuristic:
+     * agents × 800 tokens/agent as a proxy for total tokens. */
+    if (elapsed_s > 0) {
+        int est_tokens = agents * 800;
+        /* cost_usd unknown at this call site — pass 0.0 to update latency only */
+        cost_model_learn(topology, est_tokens, 0.0, elapsed_s);
+    }
+
+    if (success && quality > 0.85) {
+        for (int i = 0; i < si->pattern_count; i++) {
+            if (si->patterns[i].type == SI_PATTERN_SUCCESSFUL_STRATEGY &&
+                strstr(si->patterns[i].description, topology)) {
+                si->patterns[i].occurrences++;
+                si->patterns[i].last_seen = si_now();
+                return;
+            }
+        }
+        if (si->pattern_count < SI_MAX_PATTERNS) {
+            si_pattern_t *p = &si->patterns[si->pattern_count++];
+            p->type = SI_PATTERN_SUCCESSFUL_STRATEGY;
+            snprintf(p->description, sizeof(p->description),
+                     "Swarm %s (%d agents) succeeded quality=%.2f in %.1fs",
+                     topology, agents, quality, elapsed_s);
+            p->severity = quality;
+            p->occurrences = 1;
+            p->first_seen = p->last_seen = si_now();
+        }
+    }
+}
+
+void self_improve_record_strategy_result(self_improve_t *si,
+                                         const char *strategy,
+                                         const char *goal_type,
+                                         bool success,
+                                         int grip_escalations,
+                                         double elapsed_s) {
+    (void)goal_type; (void)elapsed_s;
+    if (!si || !si->initialized || !strategy) return;
+
+    if (success && grip_escalations <= 1) {
+        si->improvements_applied++;
+    }
+}
+
+void self_improve_record_tournament_result(self_improve_t *si,
+                                           const char *winner_strategy,
+                                           int competitors,
+                                           double margin,
+                                           double elapsed_s) {
+    (void)elapsed_s;
+    if (!si || !si->initialized || !winner_strategy) return;
+
+    if (margin > 0.15) {
+        for (int i = 0; i < si->pattern_count; i++) {
+            if (si->patterns[i].type == SI_PATTERN_SUCCESSFUL_STRATEGY &&
+                strstr(si->patterns[i].description, winner_strategy)) {
+                si->patterns[i].occurrences++;
+                si->patterns[i].last_seen = si_now();
+                return;
+            }
+        }
+        if (si->pattern_count < SI_MAX_PATTERNS) {
+            si_pattern_t *p = &si->patterns[si->pattern_count++];
+            p->type = SI_PATTERN_SUCCESSFUL_STRATEGY;
+            snprintf(p->description, sizeof(p->description),
+                     "Tournament winner: %s (beat %d others, margin=%.2f)",
+                     winner_strategy, competitors, margin);
+            p->severity = 0.9;
+            p->occurrences = 1;
+            p->first_seen = p->last_seen = si_now();
+        }
+    }
 }
