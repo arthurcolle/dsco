@@ -123,9 +123,13 @@ typedef struct {
     const char    *default_model;
     const char    *dsco_path;     /* path to dsco binary */
 
-    /* Budget system */
-    double         swarm_budget_usd;  /* total budget for all swarm ops (0=unlimited) */
-    double         spent_usd;         /* accumulated spend across all children */
+    /* Budget system. The budget represents REAL credit dollars (OpenRouter /
+     * metered API draws). Children running on flat-rate subscriptions (Claude
+     * Code / Codex $200-mo plans) are "subsidized": their notional API cost is
+     * tracked in subsidized_usd for visibility but does NOT draw the budget. */
+    double         swarm_budget_usd;  /* total real-dollar budget (0=unlimited) */
+    double         spent_usd;         /* metered real-dollar spend (draws budget) */
+    double         subsidized_usd;    /* notional cost covered by flat-rate plans */
 
     /* External executor registry */
     executor_registry_t executors;
@@ -145,6 +149,15 @@ void swarm_destroy(swarm_t *s);
 int  swarm_spawn(swarm_t *s, const char *task, const char *model);
 int  swarm_spawn_in_group(swarm_t *s, int group_id, const char *task, const char *model);
 
+/* Set the model-instance spec applied to the NEXT swarm_spawn*() child, so a
+ * spawned process wraps a fully distinct model instance (not just a model id).
+ * The freshly-forked child exports these as DSCO_* env and session_state_init()
+ * picks them up. Pass -1 / NULL to leave a field at its default. The spec is
+ * consumed (cleared) by the next spawn — set it immediately before spawning. */
+void swarm_set_next_instance(const char *effort, double temperature,
+                             double top_p, int top_k, int thinking_budget,
+                             const char *tool_choice, const char *system_prompt);
+
 /* Spawn a sub-dsco forced to a specific native provider (e.g. "openai", "groq").
  * The child process gets --exec <provider> -m <model> so it routes through
  * that provider's API directly, completely decoupled from the parent's provider. */
@@ -161,6 +174,10 @@ const char *executor_type_name(executor_type_t t);
 /* ── Budget partitioning ─────────────────────────────────────────────── */
 void swarm_set_budget(swarm_t *s, double budget_usd);
 double swarm_budget_remaining(swarm_t *s);
+/* True when a child's tokens are covered by a flat-rate subscription (Claude
+ * Code / Codex $200-mo plans) and therefore do NOT draw the real-dollar budget.
+ * Defaults to the claude+codex executors; override via DSCO_SUBSIDIZED_EXECUTORS. */
+bool swarm_child_is_subsidized(const swarm_child_t *c);
 double swarm_estimate_task_cost(swarm_t *s, const char *model);
 void swarm_enforce_budgets(swarm_t *s);  /* kill over-budget children */
 

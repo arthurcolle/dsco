@@ -36,8 +36,6 @@ static char *openai_build_request(provider_t *p, conversation_t *conv,
                                    session_state_t *session, int max_tokens,
                                    const char *credential);
 static struct curl_slist *openai_build_headers(provider_t *p, const char *api_key);
-static bool openrouter_should_disable_thinking(session_state_t *session);
-static bool moonshot_should_disable_thinking(session_state_t *session);
 static char *xai_build_request(provider_t *p, conversation_t *conv,
                                 session_state_t *session, int max_tokens,
                                 const char *credential);
@@ -910,10 +908,12 @@ static char *provider_replace_claude_code_oauth_json(const claude_code_oauth_bun
 
     size_t prefix_len = (size_t)(value_start - bundle->storage_json);
     size_t suffix_len = strlen(value_end);
-    char *out = safe_malloc(prefix_len + strlen(new_oauth_json) + suffix_len + 1);
+    size_t new_json_len = strlen(new_oauth_json);
+    size_t out_sz = prefix_len + new_json_len + suffix_len + 1;
+    char *out = safe_malloc(out_sz);
     memcpy(out, bundle->storage_json, prefix_len);
-    strcpy(out + prefix_len, new_oauth_json);
-    strcpy(out + prefix_len + strlen(new_oauth_json), value_end);
+    snprintf(out + prefix_len, out_sz - prefix_len, "%s", new_oauth_json);
+    snprintf(out + prefix_len + new_json_len, out_sz - prefix_len - new_json_len, "%s", value_end);
     return out;
 }
 
@@ -1124,14 +1124,14 @@ static char *openrouter_build_request(provider_t *p, conversation_t *conv,
     const char *fallback_models = getenv("DSCO_OR_FALLBACK_MODELS");
     const char *reasoning       = getenv("DSCO_OR_REASONING_EFFORT");
     const char *debug_mode      = getenv("DSCO_OR_DEBUG");
-    bool disable_thinking       = openrouter_should_disable_thinking(session);
+    /* thinking disabled by omission; explicit type=disabled rejected by some models */
 
     bool has_provider = prov_order || prov_only || prov_ignore || req_params ||
                         (allow_fb && !or_env_bool(allow_fb)) ||
                         data_collect || zdr || quantizations || sort_by ||
                         max_price_in || max_price_out;
     bool has_extras = transforms || route || has_provider || fallback_models ||
-                      reasoning || debug_mode || disable_thinking;
+                      reasoning || debug_mode;
 
     if (!has_extras) return base;
 
@@ -1170,12 +1170,10 @@ static char *openrouter_build_request(provider_t *p, conversation_t *conv,
         jbuf_append(&b, "}");
     }
 
-    /* Kimi/OpenRouter tool calls are more reliable with non-thinking mode
-       unless the user explicitly opts into a fixed thinking budget. */
-    if (disable_thinking) {
-        jbuf_append(&b, ",\"thinking\":{\"type\":\"disabled\"}");
-    }
-
+    /* Never emit type=disabled — some models (e.g. kimi-k2.7-code) only
+       accept type=enabled or omission. If the user wants thinking, they set
+       DSCO_OR_REASONING_EFFORT or pick a *-thinking / *-think model.
+       Otherwise we simply omit the field (thinking disabled by default). */
     /* debug: {"echo_upstream_body": true} */
     if (debug_mode && or_env_bool(debug_mode)) {
         jbuf_append(&b, ",\"debug\":{\"echo_upstream_body\":true}");
@@ -1263,29 +1261,31 @@ static char *openrouter_build_request(provider_t *p, conversation_t *conv,
 
 /* Native Moonshot routing. Speaks the OpenAI Chat Completions dialect, but
  * adds Anthropic-style {"thinking": {"type": "enabled"|"disabled"}} so we
- * can toggle Kimi K2.5 reasoning. Per the Kimi K2.5 docs, when thinking is
- * enabled, several sampling knobs (temperature/top_p/n/penalties) must be
- * left at their server-side defaults — we never send those today, so we're
- * already compliant. */
+ * can toggle Kimi K2.5 reasoning. Per the Kimi K2.7 Code docs, thinking must
+ * always be enabled (the model throws an error if disabled), and sampling
+ * parameters are fixed: temperature=1.0, top_p=0.95, n=1, penalties=0.0.
+ * These are now injected in openai_build_request for all moonshot-compatible
+ * models, so moonshot_build_request just needs to strip the type=disabled
+ * thinking field that openai_build_request might emit. */
 static char *moonshot_build_request(provider_t *p, conversation_t *conv,
                                      session_state_t *session, int max_tokens,
                                      const char *credential) {
     char *base = openai_build_request(p, conv, session, max_tokens, credential);
     if (!base) return NULL;
 
-    bool disable_thinking = moonshot_should_disable_thinking(session);
-    if (!disable_thinking) return base;
 
     size_t len = strlen(base);
     if (len == 0 || base[len - 1] != '}') return base;
     base[len - 1] = '\0';
 
-    jbuf_t b;
-    jbuf_init(&b, len + 64);
-    jbuf_append(&b, base);
-    free(base);
-    jbuf_append(&b, ",\"thinking\":{\"type\":\"disabled\"}}");
-    return b.data;
+    /* Never emit type=disabled for Moonshot/Kimi — kimi-k2.7-code and kimi-k2.5 reject it.
+       Thinking is disabled by omission. */
+    return base;
+}
+
+static bool model_is_moonshot_compatible(const char *model) {
+    if (!model || !model[0]) return false;
+    return strstr(model, "kimi") != NULL || strstr(model, "moonshot") != NULL;
 }
 
 /* ── xAI (native api.x.ai) ─────────────────────────────────────────────
@@ -1438,14 +1438,19 @@ static const char *openai_last_user_context(conversation_t *conv) {
 
 static void openai_append_function_tool(jbuf_t *b, const char *name,
                                         const char *description,
-                                        const char *schema_json) {
+                                        const char *schema_json,
+                                        bool cache_mark) {
     jbuf_append(b, "{\"type\":\"function\",\"function\":{\"name\":");
     jbuf_append_json_str(b, name ? name : "");
     jbuf_append(b, ",\"description\":");
     jbuf_append_json_str(b, description ? description : "");
     jbuf_append(b, ",\"parameters\":");
     jbuf_append(b, schema_json ? schema_json : "{}");
-    jbuf_append(b, "}}");
+    /* cache_control goes at the tool wrapper level, outside function{} */
+    if (cache_mark)
+        jbuf_append(b, "},\"cache_control\":{\"type\":\"ephemeral\"}}");
+    else
+        jbuf_append(b, "}}");
 }
 
 static bool openai_append_tools_json(jbuf_t *b, conversation_t *conv,
@@ -1479,14 +1484,33 @@ static bool openai_append_tools_json(jbuf_t *b, conversation_t *conv,
         return false;
     }
 
+    /* Gate cache markers: only Anthropic claude-* models via OpenRouter
+     * understand cache_control in the OpenAI wire format. */
+    bool want_cache = provider_model_supports_cache_control(
+        session ? session->model : NULL);
+
+    /* Pre-count total tools to identify the last one for cache marking. */
+    int loaded_ext_pre = 0;
+    for (int i = 0; i < g_external_tool_count; i++)
+        if (g_external_tools[i].loaded) loaded_ext_pre++;
+    int ext_budget_pre = loaded_ext_pre > 0 ? loaded_ext_pre : 16;
+    if (ext_budget_pre > 32) ext_budget_pre = 32;
+    int ext_total_pre = ext_budget_pre < g_external_tool_count
+                        ? ext_budget_pre : g_external_tool_count;
+    int total_tools = filtered_count + ext_total_pre;
+
     jbuf_append(b, ",\"tools\":[");
     bool wrote_any = false;
+    int emitted = 0;
     for (int i = 0; i < filtered_count; i++) {
         if (wrote_any) jbuf_append(b, ",");
+        bool is_last = want_cache && (emitted == total_tools - 1);
         openai_append_function_tool(b, filtered[i]->name,
                                     filtered[i]->description,
-                                    filtered[i]->input_schema_json);
+                                    filtered[i]->input_schema_json,
+                                    is_last);
         wrote_any = true;
+        emitted++;
     }
     free((void *)filtered);
 
@@ -1501,11 +1525,14 @@ static bool openai_append_tools_json(jbuf_t *b, conversation_t *conv,
         for (int i = 0; i < g_external_tool_count && ext_written < ext_budget; i++) {
             if ((bool)g_external_tools[i].loaded != want_loaded) continue;
             if (wrote_any) jbuf_append(b, ",");
+            bool is_last = want_cache && (emitted == total_tools - 1);
             openai_append_function_tool(b, g_external_tools[i].name,
                                         g_external_tools[i].description,
-                                        g_external_tools[i].input_schema_json);
+                                        g_external_tools[i].input_schema_json,
+                                        is_last);
             wrote_any = true;
             ext_written++;
+            emitted++;
         }
     }
     jbuf_append(b, "]");
@@ -1519,44 +1546,36 @@ static void openai_append_tool_choice_json(jbuf_t *b, session_state_t *session,
     const char *choice = (session && session->tool_choice[0])
         ? session->tool_choice
         : "auto";
+    const char *model = session ? session->model : NULL;
+    bool is_kimi = model_is_moonshot_compatible(model);
 
     if (strcmp(choice, "auto") == 0) {
         jbuf_append(b, ",\"tool_choice\":\"auto\"");
     } else if (strcmp(choice, "any") == 0) {
-        jbuf_append(b, ",\"tool_choice\":\"required\"");
+        jbuf_append(b, is_kimi
+            ? ",\"tool_choice\":\"auto\""
+            : ",\"tool_choice\":\"required\"");
     } else if (strcmp(choice, "none") == 0) {
         jbuf_append(b, ",\"tool_choice\":\"none\"");
     } else if (strncmp(choice, "tool:", 5) == 0) {
-        jbuf_append(b, ",\"tool_choice\":{\"type\":\"function\",\"function\":{\"name\":");
-        jbuf_append_json_str(b, choice + 5);
-        jbuf_append(b, "}}");
+        if (is_kimi) {
+            jbuf_append(b, ",\"tool_choice\":\"auto\"");
+        } else {
+            jbuf_append(b, ",\"tool_choice\":{\"type\":\"function\",\"function\":{\"name\":");
+            jbuf_append_json_str(b, choice + 5);
+            jbuf_append(b, "}}");
+        }
     }
 }
 
-static bool openrouter_should_disable_thinking(session_state_t *session) {
-    if (!session || !session->model[0]) return false;
-    if (session->thinking_budget > 0) return false;
-    if (getenv("DSCO_OR_REASONING_EFFORT")) return false;
-    if (strstr(session->model, "kimi") && !strstr(session->model, "thinking")) {
-        return true;
-    }
-    return false;
-}
+/* openrouter_should_disable_thinking removed — type=disabled is rejected by some models */
 
 /* Native Moonshot routing: kimi-k2.5 is multimodal and defaults to thinking
  * enabled. Tool-calling reliability improves substantially with thinking
  * disabled unless the user explicitly opts in via thinking_budget or picks
  * a *-thinking model. */
-static bool moonshot_should_disable_thinking(session_state_t *session) {
-    if (!session || !session->model[0]) return false;
-    if (session->thinking_budget > 0) return false;
-    const char *force = getenv("DSCO_MOONSHOT_THINKING");
-    if (force && (force[0] == '1' || strcasecmp(force, "true") == 0 ||
-                  strcasecmp(force, "enabled") == 0))
-        return false;
-    if (strstr(session->model, "thinking")) return false;
-    return true;
-}
+/* moonshot_should_disable_thinking excised */
+
 
 /* Emit text+image content array (skipping tool_use and tool_result blocks) */
 static void openai_append_text_content(jbuf_t *b, message_t *m) {
@@ -1583,21 +1602,35 @@ static void openai_append_text_content(jbuf_t *b, message_t *m) {
 static void openai_append_assistant_msg(jbuf_t *b, message_t *m) {
     jbuf_append(b, ",{\"role\":\"assistant\"");
 
-    /* Collect text content */
+    /* Collect text content and provider-specific reasoning replay content.
+     * Moonshot/Kimi multi-step tool calling requires preserving prior
+     * reasoning_content in conversation context. We store it internally as a
+     * content block of type="thinking" and replay it on resend only for
+     * OpenAI-compatible providers that understand reasoning_content. */
     jbuf_t text;
+    jbuf_t reasoning;
     jbuf_init(&text, 1024);
+    jbuf_init(&reasoning, 1024);
     for (int j = 0; j < m->content_count; j++) {
         msg_content_t *mc = &m->content[j];
         if (mc->type && strcmp(mc->type, "text") == 0 && mc->text) {
             if (text.len > 0) jbuf_append(&text, "\n");
             jbuf_append(&text, mc->text);
+        } else if (mc->type && strcmp(mc->type, "thinking") == 0 && mc->text) {
+            if (reasoning.len > 0) jbuf_append(&reasoning, "\n");
+            jbuf_append(&reasoning, mc->text);
         }
     }
     if (text.len > 0) {
         jbuf_append(b, ",\"content\":");
         jbuf_append_json_str(b, text.data);
     }
+    if (reasoning.len > 0) {
+        jbuf_append(b, ",\"reasoning_content\":");
+        jbuf_append_json_str(b, reasoning.data);
+    }
     jbuf_free(&text);
+    jbuf_free(&reasoning);
 
     /* Emit tool_calls array for tool_use blocks */
     if (msg_has_tool_use(m)) {
@@ -1712,6 +1745,29 @@ static void openai_append_user_msg(jbuf_t *b, message_t *m) {
     jbuf_append(b, "}");
 }
 
+/* OpenRouter forwards Anthropic-style `cache_control` breakpoints to Claude
+ * models. In an OpenAI-format request a breakpoint on the SYSTEM message caches
+ * the entire static prefix — in Anthropic's canonical order (tools → system →
+ * messages) the system block sits after the tools, so caching up to it covers
+ * both. Only Claude models honor the marker; other providers reached through
+ * this same OpenAI-compat path (xAI, DeepSeek, Mistral, Moonshot, Gemini) would
+ * ignore or reject it, so gate strictly on the model id. Override with
+ * DSCO_OR_CACHE=0 to disable, or =1 to force on for any model. */
+bool provider_model_supports_cache_control(const char *model) {
+    const char *force = getenv("DSCO_OR_CACHE");
+    if (force && force[0] == '0') return false;
+    if (force && force[0] == '1') return true;
+    if (!model) return false;
+    /* Anthropic claude-* (direct or namespaced via OpenRouter) */
+    if (strstr(model, "claude") || strstr(model, "anthropic/")) return true;
+    /* Alibaba Qwen via OpenRouter — uses identical cache_control:{type:ephemeral}
+     * syntax. Supported: qwen3-max, qwen-plus, qwen3-coder-plus/flash, etc.
+     * Snapshot endpoints (qwen3.5-plus-02-15 etc) do NOT support it, but OR
+     * silently ignores cache_control on unsupported models so it's safe to send. */
+    if (strstr(model, "qwen/") || strstr(model, "qwen3") || strstr(model, "qwen-")) return true;
+    return false;
+}
+
 static char *openai_build_request(provider_t *p, conversation_t *conv,
                                     session_state_t *session, int max_tokens,
                                     const char *credential) {
@@ -1728,20 +1784,46 @@ static char *openai_build_request(provider_t *p, conversation_t *conv,
     jbuf_append_int(&b, max_tokens);
     jbuf_append(&b, ",\"stream\":true");
 
-    /* System message */
+    /* Moonshot/Kimi K2.7 Code requires thinking mode and rejects explicit
+     * non-thinking payloads. Emit provider-native thinking enabled when using
+     * Moonshot-compatible models so tool-calling + reasoning can coexist.
+     *
+     * K2.7 Code also enforces fixed sampling parameters — temperature=1.0,
+     * top_p=0.95, n=1, penalties=0.0 — and rejects any other values with a 400.
+     * We inject the server-required values explicitly to avoid any downstream
+     * defaults or user overrides causing rejections. */
+    if (model_is_moonshot_compatible(session ? session->model : NULL)) {
+        jbuf_append(&b, ",\"thinking\":{\"type\":\"enabled\"}");
+        jbuf_append(&b, ",\"temperature\":1.0");
+        jbuf_append(&b, ",\"top_p\":0.95");
+        jbuf_append(&b, ",\"n\":1");
+        jbuf_append(&b, ",\"presence_penalty\":0.0");
+        jbuf_append(&b, ",\"frequency_penalty\":0.0");
+    }
+
+    /* System message. Build the text once, then emit either as a plain string
+     * (default) or as a single-block array carrying a cache_control breakpoint
+     * (Claude via OpenRouter) so the static tools+system prefix gets cached. */
+    bool cache_ctrl = provider_model_supports_cache_control(session ? session->model
+                                                                    : NULL);
     const char *custom = llm_get_custom_system_prompt();
-    jbuf_append(&b, ",\"messages\":[{\"role\":\"system\",\"content\":");
+    jbuf_t sys;
+    jbuf_init(&sys, 4096);
     if (custom) {
-        jbuf_t sys;
-        jbuf_init(&sys, 4096);
         jbuf_append(&sys, custom);
         jbuf_append(&sys, "\n\n");
-        jbuf_append(&sys, SYSTEM_PROMPT);
-        jbuf_append_json_str(&b, sys.data);
-        jbuf_free(&sys);
-    } else {
-        jbuf_append_json_str(&b, SYSTEM_PROMPT);
     }
+    jbuf_append(&sys, SYSTEM_PROMPT);
+
+    jbuf_append(&b, ",\"messages\":[{\"role\":\"system\",\"content\":");
+    if (cache_ctrl) {
+        jbuf_append(&b, "[{\"type\":\"text\",\"text\":");
+        jbuf_append_json_str(&b, sys.data ? sys.data : SYSTEM_PROMPT);
+        jbuf_append(&b, ",\"cache_control\":{\"type\":\"ephemeral\"}}]");
+    } else {
+        jbuf_append_json_str(&b, sys.data ? sys.data : SYSTEM_PROMPT);
+    }
+    jbuf_free(&sys);
     jbuf_append(&b, "}");
 
     /* Conversation messages — convert Anthropic format to OpenAI format:
@@ -1780,6 +1862,14 @@ static char *openai_build_request(provider_t *p, conversation_t *conv,
 
     bool has_tools = openai_append_tools_json(&b, conv, session);
     openai_append_tool_choice_json(&b, session, has_tools);
+
+    /* Top-level automatic cache_control for Anthropic/Qwen via OpenRouter.
+     * In "automatic" mode OR/Anthropic caches everything up to the last
+     * cacheable block, advancing the breakpoint each turn — covers growing
+     * conversation history without per-block markers. OR routes only to
+     * Anthropic direct when this field is present (Bedrock/Vertex excluded). */
+    if (provider_model_supports_cache_control(session ? session->model : NULL))
+        jbuf_append(&b, ",\"cache_control\":{\"type\":\"ephemeral\"}");
 
     jbuf_append(&b, "}");
     return b.data;
@@ -1857,6 +1947,36 @@ bool provider_msg_is_credit_too_low(const char *msg) {
         "quota_exceeded",
         "billing not active",
         "requires a paid plan",
+        NULL,
+    };
+    for (int i = 0; needles[i]; i++) {
+        const char *n = needles[i];
+        size_t nlen = strlen(n);
+        for (const char *p = msg; *p; p++) {
+            if (strncasecmp(p, n, nlen) == 0) return true;
+        }
+    }
+    return false;
+}
+
+bool provider_msg_is_context_overflow(const char *msg) {
+    if (!msg || !msg[0]) return false;
+    /* case-insensitive substring match against cross-provider phrases for a
+     * prompt/context-length rejection. Kept specific to avoid false positives
+     * on unrelated "too long" errors (e.g. path length). */
+    static const char *needles[] = {
+        "prompt is too long",
+        "prompt is too large",
+        "input is too long",
+        "input is too large",
+        "context length",
+        "context_length",
+        "context_length_exceeded",
+        "maximum context",
+        "context window",
+        "too many tokens",
+        "exceeds the maximum",
+        "reduce the length",
         NULL,
     };
     for (int i = 0; needles[i]; i++) {
@@ -2048,11 +2168,34 @@ static void oai_handle_sse_line(oai_sse_state_t *s, const char *line) {
             free(cost_str);
         }
 
-        /* Token detail breakdowns */
+        /* Token detail breakdowns — three possible locations depending on provider:
+         *
+         *  1. input_tokens_details.cached_tokens
+         *     → OpenAI, xAI/Grok, Groq, Gemini via google endpoint, OpenRouter OR-normalised
+         *  2. prompt_tokens_details.cached_tokens
+         *     → Some OpenRouter backends normalise here instead of input_tokens_details
+         *  3. prompt_cache_hit_tokens  (top-level in usage{})
+         *     → DeepSeek direct, Moonshot/Kimi direct, Alibaba/DashScope direct
+         *
+         * We read all three and take the first non-zero value so no provider is missed.
+         * Already-set values from earlier chunks are preserved (take max). */
         char *in_detail = json_get_raw(usage_raw, "input_tokens_details");
         if (in_detail) {
-            s->cached_tokens = json_get_int(in_detail, "cached_tokens", 0);
+            int v = json_get_int(in_detail, "cached_tokens", 0);
+            if (v > s->cached_tokens) s->cached_tokens = v;
             free(in_detail);
+        }
+        /* OpenRouter normalisation alias */
+        char *pt_detail = json_get_raw(usage_raw, "prompt_tokens_details");
+        if (pt_detail) {
+            int v = json_get_int(pt_detail, "cached_tokens", 0);
+            if (v > s->cached_tokens) s->cached_tokens = v;
+            free(pt_detail);
+        }
+        /* DeepSeek / Moonshot / Alibaba top-level cache hit field */
+        {
+            int v = json_get_int(usage_raw, "prompt_cache_hit_tokens", 0);
+            if (v > s->cached_tokens) s->cached_tokens = v;
         }
         char *out_detail = json_get_raw(usage_raw, "output_tokens_details");
         if (out_detail) {
@@ -2297,9 +2440,14 @@ static stream_result_t openai_stream(provider_t *p, const char *api_key,
          * appended to the conversation (which can later 400 on resend).
          * Promote the accumulated reasoning to a text block so the answer is
          * preserved in conv and can be surfaced to the user. */
-        if (state.block_count == 0 && state.reasoning_accum.len > 0) {
+        /* Preserve reasoning_content across turns for providers (notably
+         * Moonshot/Kimi) that require replaying prior reasoning during
+         * multi-step tool calling. Keep it as an internal 'thinking' block;
+         * request builders may serialize it provider-specifically. */
+        if (state.reasoning_accum.len > 0) {
             int bi = state.block_count++;
-            state.blocks[bi].type = safe_strdup("text");
+            state.blocks[bi].type = safe_strdup(
+                state.block_count == 1 ? "text" : "thinking");
             state.blocks[bi].text = safe_strdup(state.reasoning_accum.data);
         }
 
@@ -2311,6 +2459,12 @@ static stream_result_t openai_stream(provider_t *p, const char *api_key,
                state.block_count * sizeof(content_block_t));
         result.parsed.stop_reason = state.stop_reason;
         result.usage = state.usage;
+        /* BUG2 fix: OpenAI/xAI/DeepSeek/Gemini report cached tokens in
+         * state.cached_tokens (input_tokens_details.cached_tokens), not in
+         * cache_read_input_tokens. Merge into the canonical field so session
+         * cost accounting, turn budget, and UI stats all see the savings. */
+        if (state.cached_tokens > 0 && result.usage.cache_read_input_tokens == 0)
+            result.usage.cache_read_input_tokens = state.cached_tokens;
 
         /* Log model/cost info when available (OpenRouter provides these) */
         if (state.actual_model || state.cost_usd > 0) {
@@ -2853,8 +3007,16 @@ static const char *provider_family_primary_model(const char *family, bool prefer
         return NULL;
     }
     if (strcmp(family, "moonshot") == 0) {
-        if (provider_has_usable_key("moonshot", NULL)) return "kimi-k2.5";
-        if (provider_has_usable_key("openrouter", NULL)) return "moonshotai/kimi-k2.5";
+        if (prefer_code) {
+            /* Prefer highspeed variant on native — 180+ tok/s vs ~36 tok/s,
+             * same model, just faster inference. Falls back to standard
+             * kimi-k2.7-code if highspeed is unavailable or rate-limited. */
+            if (provider_has_usable_key("moonshot", NULL)) return "kimi-k2.7-code-highspeed";
+            if (provider_has_usable_key("openrouter", NULL)) return "moonshotai/kimi-k2.7-code";
+            return NULL;
+        }
+        if (provider_has_usable_key("moonshot", NULL)) return "kimi-k2.7-code-highspeed";
+        if (provider_has_usable_key("openrouter", NULL)) return "moonshotai/kimi-k2.7-code";
         return NULL;
     }
     if (strcmp(family, "cohere") == 0) {
@@ -2867,6 +3029,8 @@ static const char *provider_family_primary_model(const char *family, bool prefer
         return NULL;
     }
     if (strcmp(family, "zai") == 0) {
+        if (provider_has_usable_key("zai", NULL) ||
+            provider_has_usable_key("glm", NULL)) return "glm-5.2";
         if (provider_has_usable_key("openrouter", NULL)) return "z-ai/glm-5.2";
         return NULL;
     }
@@ -2978,6 +3142,16 @@ int provider_build_default_fallback_models(const char *model,
 const char *provider_select_default_primary_model(bool prefer_code) {
     const char *candidate = NULL;
 
+    if (prefer_code) {
+        /* Code mode: prefer Kimi K2.7 Code via OpenRouter */
+        candidate = provider_family_primary_model("moonshot", true);
+        if (candidate) return candidate;
+    } else {
+        /* General mode: prefer GLM (Z.AI) via OpenRouter for cost/quality */
+        candidate = provider_family_primary_model("zai", false);
+        if (candidate) return candidate;
+    }
+
     if (!prefer_code) {
         candidate = provider_xai_primary_model(false);
         if (candidate) return candidate;
@@ -3004,8 +3178,10 @@ const char *provider_select_default_primary_model(bool prefer_code) {
     candidate = provider_family_primary_model("mistral", false);
     if (candidate) return candidate;
 
-    candidate = provider_family_primary_model("moonshot", false);
-    if (candidate) return candidate;
+    if (!prefer_code) {
+        candidate = provider_family_primary_model("moonshot", false);
+        if (candidate) return candidate;
+    }
 
     return DEFAULT_MODEL;
 }

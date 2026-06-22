@@ -5,6 +5,7 @@
 #include "plot.h"
 #include "tui.h"
 #include "json_util.h"
+#include "fractal.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -851,6 +852,225 @@ static void sarr_cb(const char *el, void *ctx) {
 
 #define PLOT_MAX_PTS 512
 
+/* ── strange attractor (phase-space, Braille dots + per-cell density color) ─
+ * A 2-D chaotic map traced for many iterations. The orbit's fine filaments
+ * come from the 2x4 Braille subpixel grid; each character cell is then tinted
+ * on the viridis ramp by how often the orbit visited it (log-scaled), so the
+ * dense folds of the attractor glow. No RNG — fully deterministic. */
+int plot_attractor(char *out, size_t cap, const char *kind,
+                   double a, double cb, double c, double d, long iters,
+                   const plot_opts_t *opt) {
+    if (!out || !cap) { if (out && cap) out[0] = '\0'; return -1; }
+    plot_opts_t o = norm(opt);
+    int clifford = (kind && (kind[0] == 'c' || kind[0] == 'C'));
+    if (iters <= 0) iters = 300000;
+    if (iters > 5000000) iters = 5000000;
+    const long burn = 1000;
+
+    pbuf_t b; pb_init(&b, out, cap);
+    pb_title(&b, &o);
+
+    tui_braille_t bc;
+    tui_braille_init(&bc, o.width * 2, o.height * 4);
+    int W = bc.w_cells, H = bc.h_cells;
+    unsigned *cd = calloc((size_t)W * H, sizeof(unsigned));
+    if (!cd) { tui_braille_free(&bc); if (cap) out[0] = '\0'; return -1; }
+
+    #define ATTR_STEP(X,Y,NX,NY) do { \
+        if (clifford) { NX = sin(a*(Y)) + c*cos(a*(X)); NY = sin(cb*(X)) + d*cos(cb*(Y)); } \
+        else          { NX = sin(a*(Y)) - cos(cb*(X));  NY = sin(c*(X)) - cos(d*(Y));    } \
+    } while (0)
+
+    /* pass 1: discover the orbit's bounding box */
+    double x = 0.1, y = 0.1, xmn = 1e30, xmx = -1e30, ymn = 1e30, ymx = -1e30;
+    for (long i = 0; i < iters; i++) {
+        double nx, ny; ATTR_STEP(x, y, nx, ny); x = nx; y = ny;
+        if (i < burn) continue;
+        if (x < xmn) xmn = x; if (x > xmx) xmx = x;
+        if (y < ymn) ymn = y; if (y > ymx) ymx = y;
+    }
+    double xr = xmx - xmn, yr = ymx - ymn;
+    if (xr < 1e-9) xr = 1; if (yr < 1e-9) yr = 1;
+    xmn -= xr * 0.02; xmx += xr * 0.02; ymn -= yr * 0.02; ymx += yr * 0.02;
+    xr = xmx - xmn; yr = ymx - ymn;
+
+    /* pass 2: trace dots and accumulate per-cell visit density */
+    x = 0.1; y = 0.1;
+    unsigned maxd = 1;
+    for (long i = 0; i < iters; i++) {
+        double nx, ny; ATTR_STEP(x, y, nx, ny); x = nx; y = ny;
+        if (i < burn) continue;
+        int px = (int)((x - xmn) / xr * (bc.px_w - 1) + 0.5);
+        int py = (int)((1.0 - (y - ymn) / yr) * (bc.px_h - 1) + 0.5);
+        if (px < 0 || px >= bc.px_w || py < 0 || py >= bc.px_h) continue;
+        tui_braille_set(&bc, px, py);
+        unsigned v = ++cd[(py / 4) * W + (px / 2)];
+        if (v > maxd) maxd = v;
+    }
+    #undef ATTR_STEP
+
+    /* Tone curve: normalize over the *visited* density range, not [0,maxd].
+     * Otherwise ~300k points over ~1k cells leaves almost every cell in the
+     * upper (green→yellow) half of the ramp and the orbit reads as one flat
+     * color. Mapping [min_visited, max] → [0,1] in log space spends the whole
+     * blue→yellow gradient on the structure that's actually there. */
+    double lmax = log(1.0 + maxd), lmin = lmax;
+    for (int i = 0; i < W * H; i++)
+        if (cd[i]) { double l = log(1.0 + cd[i]); if (l < lmin) lmin = l; }
+    double lspan = lmax - lmin; if (lspan < 1e-9) lspan = 1;
+
+    /* render: glyphs from the canvas, each cell tinted by its log-density */
+    char *mb = NULL; size_t ms = 0;
+    FILE *f = open_memstream(&mb, &ms);
+    if (f) { tui_braille_render(&bc, f, NULL); fclose(f); }
+    int row = 0;
+    char *line = mb;
+    while (line && *line && row < H) {
+        char *nl = strchr(line, '\n');
+        if (nl) *nl = '\0';
+        char *p = line; int col = 0;
+        while (*p && col < W) {
+            int glen = 1;                         /* a cell is one UTF-8 glyph */
+            unsigned char lead = (unsigned char)*p;
+            if (lead >= 0xF0) glen = 4; else if (lead >= 0xE0) glen = 3;
+            else if (lead >= 0xC0) glen = 2;
+            unsigned dv = cd[row * W + col];
+            if (o.color && dv)                    /* blank cells need no color */
+                pb_putf(&b, "\033[38;5;%dm", viridis256((log(1.0 + dv) - lmin) / lspan));
+            char g[5]; int k = 0;
+            for (; k < glen && *p; k++) g[k] = *p++;
+            g[k] = '\0';
+            pb_puts(&b, g);
+            col++;
+        }
+        pb_reset(&b, o.color);
+        pb_puts(&b, "\n");
+        row++;
+        if (!nl) break;
+        line = nl + 1;
+    }
+    free(mb); free(cd); tui_braille_free(&bc);
+
+    if (o.axes) {
+        pb_col(&b, o.color, P_GREY);
+        pb_putf(&b, "  %s  a=%.3g b=%.3g c=%.3g d=%.3g  %ldk pts\n",
+                clifford ? "clifford" : "de jong", a, cb, c, d, iters / 1000);
+        pb_reset(&b, o.color);
+    }
+    return b.ovf ? -1 : pb_done(&b);
+}
+
+/* ── escape-time fractal (Mandelbrot / Julia) ────────────────────────────
+ * A dense field, so Braille's 1-bit subpixels are the wrong tool. Instead we
+ * render with the upper-half-block glyph U+2580 '▀': the cell's FOREGROUND
+ * 24-bit color paints the top pixel and the BACKGROUND color the bottom one,
+ * giving two independently-colored pixels per character — square pixels at 2×
+ * vertical resolution and full truecolor. Coloring is the continuous
+ * (smooth) escape count fed through a cosine palette, so the bands flow
+ * instead of stepping; interior points are black. */
+static void frac_palette(double mu, int *r, int *g, int *bl) {
+    /* Inigo-Quilez cosine palette over a LOG-compressed escape count. The raw
+     * smooth count spans 0..iters; feeding it linearly makes the palette wrap
+     * several times, so the sparse high-count filaments alias into rainbow
+     * salt-and-pepper. log(mu+1) compresses that range into a single sweep:
+     * the open exterior reads as a smooth low band and the colours fan out
+     * only as you approach the set boundary. */
+    double t = log(mu + 1.0) * 0.85 + 0.6;     /* one sweep, offset off pure red */
+    double rr = 0.5 + 0.5 * cos(t + 0.0);
+    double gg = 0.5 + 0.5 * cos(t + 2.0944);   /* +2π/3 */
+    double bb = 0.5 + 0.5 * cos(t + 4.1888);   /* +4π/3 */
+    *r = (int)(rr * 255 + 0.5); *g = (int)(gg * 255 + 0.5); *bl = (int)(bb * 255 + 0.5);
+}
+
+/* escaped: smooth iteration count, or -1 if the point is in the set */
+static double frac_escape(double zx, double zy, double cx, double cy, int maxit) {
+    double x2 = zx * zx, y2 = zy * zy;
+    int n = 0;
+    while (n < maxit && x2 + y2 <= 256.0) {       /* bailout 16² for smoother mu */
+        zy = 2.0 * zx * zy + cy;
+        zx = x2 - y2 + cx;
+        x2 = zx * zx; y2 = zy * zy;
+        n++;
+    }
+    if (n >= maxit) return -1.0;                  /* interior */
+    /* continuous escape: n + 1 - log2(log2(|z|)) */
+    double mag = sqrt(x2 + y2);
+    return (double)n + 1.0 - log(log(mag)) / log(2.0);
+}
+
+int plot_fractal(char *out, size_t cap, const char *set,
+                 double cx, double cy, double scale,
+                 double jx, double jy, int iters, const plot_opts_t *opt) {
+    if (!out || !cap) { if (out && cap) out[0] = '\0'; return -1; }
+    plot_opts_t o = norm(opt);
+    int julia = (set && (set[0] == 'j' || set[0] == 'J'));
+    if (iters <= 0) iters = 120;
+    if (iters > 4000) iters = 4000;
+    if (scale <= 0) scale = 1.5;
+
+    int Wc = o.width, Hc = o.height;              /* character cells */
+    int pw = Wc, ph = Hc * 2;                      /* pixels: 2 vertical per cell */
+    double sx = scale, sy = scale * (double)ph / (double)pw;   /* square pixels */
+
+    pbuf_t b; pb_init(&b, out, cap);
+    pb_title(&b, &o);
+
+    for (int row = 0; row < Hc; row++) {
+        int prev_r = -1, prev_g = -1, prev_b = -1, prev_fr = -1, prev_fg = -1, prev_fb = -1;
+        for (int col = 0; col < Wc; col++) {
+            /* top pixel = 2*row, bottom pixel = 2*row+1 */
+            int tr, tg, tb, br, bg, bb;
+            double mu_top = 0;
+            for (int half = 0; half < 2; half++) {
+                int py = row * 2 + half;
+                double re = cx + (2.0 * col / (pw - 1) - 1.0) * sx;
+                double im = cy + (2.0 * py / (ph - 1) - 1.0) * sy;
+                double mu = julia ? frac_escape(re, im, jx, jy, iters)
+                                  : frac_escape(0.0, 0.0, re, im, iters);
+                int r, g, bcol;
+                if (mu < 0) { r = g = bcol = 0; }   /* interior: black */
+                else frac_palette(mu, &r, &g, &bcol);
+                if (half == 0) { tr = r; tg = g; tb = bcol; mu_top = mu; }
+                else           { br = r; bg = g; bb = bcol; }
+            }
+            if (o.color) {
+                /* only re-emit an SGR when the color actually changes */
+                if (tr != prev_fr || tg != prev_fg || tb != prev_fb)
+                    pb_putf(&b, "\033[38;2;%d;%d;%dm", tr, tg, tb);
+                if (br != prev_r || bg != prev_g || bb != prev_b)
+                    pb_putf(&b, "\033[48;2;%d;%d;%dm", br, bg, bb);
+                prev_fr = tr; prev_fg = tg; prev_fb = tb;
+                prev_r = br; prev_g = bg; prev_b = bb;
+                pb_puts(&b, "\xe2\x96\x80");        /* ▀ U+2580 upper half block */
+            } else {
+                /* no truecolor: ramp by escape depth (interior = solid).
+                 * Use the top pixel's smooth iteration count — monotonic, so
+                 * the grayscale actually reads as depth (the palette is cyclic
+                 * and would not). */
+                static const char ramp[] = " .:-=+*#%@";
+                int ri;
+                if (mu_top < 0) ri = (int)sizeof(ramp) - 2;      /* interior */
+                else { double t = mu_top / iters; if (t > 1) t = 1;
+                       ri = (int)((1.0 - t) * ((int)sizeof(ramp) - 2) + 0.5); }
+                pb_putf(&b, "%c", ramp[ri]);
+            }
+        }
+        pb_reset(&b, o.color);
+        pb_puts(&b, "\n");
+    }
+    if (o.axes) {
+        pb_col(&b, o.color, P_GREY);
+        if (julia)
+            pb_putf(&b, "  julia  c=%.4g%+.4gi  center=%.4g%+.4gi  zoom=%.4g  %d it\n",
+                    jx, jy, cx, cy, 1.5 / scale, iters);
+        else
+            pb_putf(&b, "  mandelbrot  center=%.5g%+.5gi  zoom=%.4g  %d it\n",
+                    cx, cy, 1.5 / scale, iters);
+        pb_reset(&b, o.color);
+    }
+    return b.ovf ? -1 : pb_done(&b);
+}
+
 int plot_dispatch(const char *input_json, char *out, size_t cap) {
     if (!input_json || !out) { if (out && cap) out[0] = '\0'; return -1; }
     char type[24] = "line";
@@ -949,6 +1169,40 @@ int plot_dispatch(const char *input_json, char *out, size_t cap) {
     } else if (strcmp(type, "bignum") == 0 || strcmp(type, "kpi") == 0) {
         double val = json_get_double(input_json, "value", n > 0 ? data[0] : 0);
         rc = plot_bignum(out, cap, val, o.title, &o);
+    } else if (strcmp(type, "attractor") == 0 || strcmp(type, "strange") == 0) {
+        char kind[16] = "dejong";
+        char *jk = json_get_str(input_json, "kind");
+        if (jk) { snprintf(kind, sizeof kind, "%s", jk); free(jk); }
+        int clifford = (kind[0] == 'c' || kind[0] == 'C');
+        double aa = json_get_double(input_json, "a", clifford ? -1.4 : 1.4);
+        double bb = json_get_double(input_json, "b", clifford ?  1.6 : -2.3);
+        double cc = json_get_double(input_json, "c", clifford ?  1.0 :  2.4);
+        double dd = json_get_double(input_json, "d", clifford ?  0.7 : -2.1);
+        long   it = (long)json_get_double(input_json, "iters", 300000);
+        if (o.width  < 50) o.width  = 64;   /* attractors want room to breathe */
+        if (o.height < 14) o.height = 18;
+        rc = plot_attractor(out, cap, kind, aa, bb, cc, dd, it, &o);
+    } else if (strcmp(type, "fractal") == 0 || strcmp(type, "mandelbrot") == 0 ||
+               strcmp(type, "julia") == 0) {
+        char set[16];
+        snprintf(set, sizeof set, "%s", strcmp(type, "julia") == 0 ? "julia" : "mandelbrot");
+        char *js = json_get_str(input_json, "set");
+        if (js) { snprintf(set, sizeof set, "%s", js); free(js); }
+        int julia = (set[0] == 'j' || set[0] == 'J');
+        double fcx = json_get_double(input_json, "cx", julia ? 0.0 : -0.5);
+        double fcy = json_get_double(input_json, "cy", 0.0);
+        double zoom = json_get_double(input_json, "zoom", 1.0);
+        double scale = 1.5 / (zoom > 0 ? zoom : 1.0);
+        double jx = json_get_double(input_json, "jx", -0.8);
+        double jy = json_get_double(input_json, "jy", 0.156);
+        int it = (int)json_get_double(input_json, "iters", 120);
+        if (o.width  < 50) o.width  = 70;   /* fractals reward resolution */
+        if (o.height < 16) o.height = 22;
+        rc = plot_fractal(out, cap, set, fcx, fcy, scale, jx, jy, it, &o);
+    } else if (fractal_is_kind(type)) {
+        /* 3-D / 4-D ray-marched fractals (mandelbulb, quaternion/julia4d,
+         * mandelbox) live in fractal.c; it parses the spec itself. */
+        rc = fractal_plot(out, cap, input_json);
     } else if (strcmp(type, "ridgeline") == 0 || strcmp(type, "ridge") == 0) {
         /* parse "series":[[...],[...]] into per-series double arrays */
         const char *sp = json_get_raw(input_json, "series");
