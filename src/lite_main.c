@@ -97,10 +97,11 @@ static char *full_binary_path(const char *argv0) {
     const char *slash = argv0 ? strrchr(argv0, '/') : NULL;
     if (!slash) return strdup("dsco");
     size_t dir_len = (size_t)(slash - argv0);
-    char *path = malloc(dir_len + strlen("/dsco") + 1);
+    size_t path_cap = dir_len + strlen("/dsco") + 1;
+    char *path = malloc(path_cap);
     if (!path) return NULL;
     memcpy(path, argv0, dir_len);
-    strcpy(path + dir_len, "/dsco");
+    snprintf(path + dir_len, path_cap - dir_len, "/dsco");
     return path;
 }
 

@@ -204,6 +204,9 @@ const char *topology_resolve_model_for_tier(const char *coordinator_model,
                                             const char *api_key,
                                             model_tier_t tier,
                                             char *buf, size_t buflen);
+/* True when DSCO_TOPO_HETERO is set: tiers resolve to a cross-provider model
+ * pool (stepfun/kimi/glm) regardless of the coordinator's own provider. */
+bool topology_hetero_enabled(void);
 /* Execute a topology against a task using spawned sub-agents */
 bool topology_run(const topology_t *t,
                   const char *api_key,

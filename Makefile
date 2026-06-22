@@ -16,10 +16,26 @@ BUILD_DIR ?= build
 BASE_CFLAGS = -Wall -Wextra -O3 -std=c2y $(C2Y_WARNING_FLAGS) -D_POSIX_C_SOURCE=200809L \
 	-I$(INC_DIR) \
 	-march=native -mtune=native -funroll-loops -fvisibility=hidden \
+	-funwind-tables -fno-omit-frame-pointer -g \
 	-MMD -MP \
 	-DBUILD_DATE='"$(BUILD_DATE)"' -DGIT_HASH='"$(GIT_HASH)"'
 CFLAGS ?= $(BASE_CFLAGS)
 TEST_CFLAGS ?= $(BASE_CFLAGS) -O0 -g -fno-omit-frame-pointer -fno-inline
+# Release link-time optimizations:
+#  -dead_strip          : drop unreferenced functions/data (smaller binary, better I-cache)
+#  -dead_strip_dylibs   : drop dylibs no symbol references (gsl, gslcblas, libuv were
+#                         linked-but-unused, eagerly loaded at launch; removing them
+#                         cut `dsco --version` startup ~1.4ms / 1.35x — measured M4 Max).
+# Applied only to the release $(TARGET) link; test/asan/ubsan keep full symbols.
+RELEASE_LDFLAGS ?= -Wl,-dead_strip -Wl,-dead_strip_dylibs
+# Opt-in ThinLTO: `make LTO=1`. Cross-module inlining boosts long-running
+# throughput (agent loops, JSON, pipelines). Does NOT help the dyld-bound
+# startup path and ~8x the link time, so it is off by default. (M4 Max:
+# verified clean ThinLTO build, 81 objs in 1.5s compile + 2.5s LTO link.)
+ifeq ($(LTO),1)
+BASE_CFLAGS += -flto=thin
+RELEASE_LDFLAGS += -flto=thin
+endif
 LDFLAGS ?=
 LDLIBS ?= -lcurl -lsqlite3 -ldl -lm
 
@@ -30,7 +46,7 @@ DEBUG_TARGET = $(TARGET)-debug
 SRC_NAMES = main.c agent.c llm.c tools.c json_util.c ast.c swarm.c tui.c \
 	md.c baseline.c setup.c crypto.c eval.c pipeline.c plugin.c \
 			semantic.c ipc.c mcp.c mcp_names.c provider_profiles.c provider.c integrations.c error.c trace.c task_profile.c \
-	output_guard.c topology.c workspace.c plan.c router.c \
+	output_guard.c topology.c workspace.c plan.c stateful_atoms.c recovery.c router.c \
 	pheromone.c ooda.c killswitch.c governance.c memory_tier.c talons.c \
 	arena_alloc.c event_loop.c vm.c scheduler.c vfs.c trading.c legion.c \
 	agent_profile.c orchestrator.c vecstore.c tamper.c sealed_store.c \
@@ -38,11 +54,25 @@ SRC_NAMES = main.c agent.c llm.c tools.c json_util.c ast.c swarm.c tui.c \
 	project.c project_mux.c project_grid.c \
 	dsco_accel.c dsco_mlx.c dsco_pool.c \
 	fingerprint.c trust.c toolmgmt.c connector.c openrouter_cache.c \
-	startup.c plot.c self_improve.c \
+	startup.c plot.c anim.c fractal.c self_improve.c rsi_curriculum.c pets.c img_util.c supervisor.c \
+	graphsub_client.c graphsub_tools.c \
+	extension/backend.c extension/numerical_gsl.c extension/skill_requirements.c \
+	extension/eigen_backend.c extension/fftw_backend.c extension/backend_selftest.c \
+	control_flow.c \
+	introspect.c \
+	learned_cost.c \
+	session_memory.c \
 	$(OPTIONAL_SRCS)
 TEST_SRC_NAMES = test.c
 
 SRCS = $(addprefix $(SRC_DIR)/, $(SRC_NAMES))
+# GSL vendored sources (compiled as separate objects)
+GSL_OBJS = $(GSL_SRCS:gsl/src/%.c=$(OBJ_DIR)/gsl_%.o)
+GSL_DEBUG_OBJS = $(GSL_SRCS:gsl/src/%.c=$(DEBUG_OBJ_DIR)/gsl_%.o)
+GSL_TEST_OBJS = $(GSL_SRCS:gsl/src/%.c=$(TEST_OBJ_DIR)/gsl_%.o)
+GSL_COVERAGE_OBJS = $(GSL_SRCS:gsl/src/%.c=$(TEST_COVERAGE_OBJ_DIR)/gsl_%.o)
+GSL_ASAN_OBJS = $(GSL_SRCS:gsl/src/%.c=$(ASAN_OBJ_DIR)/gsl_%.o)
+GSL_UBSAN_OBJS = $(GSL_SRCS:gsl/src/%.c=$(UBSAN_OBJ_DIR)/gsl_%.o)
 # Test links against all src objects except main.c and agent.c
 LIB_SRCS = $(filter-out $(SRC_DIR)/main.c $(SRC_DIR)/agent.c $(SRC_DIR)/orchestrator.c, $(SRCS))
 
@@ -106,21 +136,48 @@ LDLIBS += -lreadline
 endif
 
 # ── Optional libraries ────────────────────────────────────────────────────
+#
+# STATIC_DEPS (default 1): link small homebrew deps (hiredis, mbedtls) from
+# their .a archives instead of .dylib. These dylibs live OUTSIDE the dyld
+# shared cache, so each one costs a stat + mmap + codesign check at every
+# process launch. Static-linking + -dead_strip removes that launch cost and
+# strips unused code. Measured on M4 Max: dynamic homebrew deps cost ~1.9ms of
+# a 5.7ms `dsco --version`; static hiredis+mbedtls cut startup to ~3.3ms (1.7x
+# total with -dead_strip_dylibs). Set STATIC_DEPS=0 to force dylibs.
+STATIC_DEPS ?= 1
 
 # hiredis (Redis fast-path IPC)
 HIREDIS_CFLAGS := $(shell pkg-config --cflags hiredis 2>/dev/null)
 HIREDIS_LIBS   := $(shell pkg-config --libs   hiredis 2>/dev/null)
+HIREDIS_A      := $(shell pkg-config --variable=libdir hiredis 2>/dev/null)/libhiredis.a
 ifneq ($(HIREDIS_CFLAGS),)
 BASE_CFLAGS += $(HIREDIS_CFLAGS) -DHAVE_REDIS
+ifeq ($(STATIC_DEPS),1)
+ifneq ($(wildcard $(HIREDIS_A)),)
+LDLIBS      += $(HIREDIS_A)
+else
 LDLIBS      += $(HIREDIS_LIBS)
 endif
+else
+LDLIBS      += $(HIREDIS_LIBS)
+endif
+endif
 
-# GNU Scientific Library
+# GNU Scientific Library (vendored or system)
+ifeq ($(wildcard gsl/gsl/gsl_version.h),gsl/gsl/gsl_version.h)
+GSL_CFLAGS := -Igsl -DHAVE_GSL_VENDORED
+GSL_LIBS   :=
+GSL_SRCS   := $(wildcard gsl/src/*.c)
+BASE_CFLAGS += $(GSL_CFLAGS)
+$(info Using vendored GSL ($(words $(GSL_SRCS)) source files))
+else
 GSL_CFLAGS := $(shell pkg-config --cflags gsl 2>/dev/null)
 GSL_LIBS   := $(shell pkg-config --libs   gsl 2>/dev/null)
 ifneq ($(GSL_CFLAGS),)
 BASE_CFLAGS += $(GSL_CFLAGS) -DHAVE_GSL
 LDLIBS      += $(GSL_LIBS)
+$(info Using system GSL via pkg-config)
+endif
 endif
 
 # libsodium (crypto for mesh)
@@ -147,17 +204,35 @@ MBEDTLS_PREFIX := $(shell \
   fi)
 ifneq ($(MBEDTLS_PREFIX),)
 BASE_CFLAGS += -I$(MBEDTLS_PREFIX)/include -DHAVE_MBEDTLS
+ifeq ($(STATIC_DEPS),1)
+ifneq ($(wildcard $(MBEDTLS_PREFIX)/lib/libmbedtls.a),)
+LDLIBS      += $(MBEDTLS_PREFIX)/lib/libmbedtls.a $(MBEDTLS_PREFIX)/lib/libmbedx509.a $(MBEDTLS_PREFIX)/lib/libmbedcrypto.a
+else
 LDLIBS      += -L$(MBEDTLS_PREFIX)/lib -lmbedtls -lmbedx509 -lmbedcrypto
+endif
+else
+LDLIBS      += -L$(MBEDTLS_PREFIX)/lib -lmbedtls -lmbedx509 -lmbedcrypto
+endif
 endif
 
 # Conditionally add mesh + net_server when libsodium is available
 OPTIONAL_SRCS =
 ifneq ($(SODIUM_CFLAGS),)
 OPTIONAL_SRCS += mesh.c
+OPTIONAL_SRCS += net_tool.c
+OPTIONAL_SRCS += plan_optimizer.c
+OPTIONAL_SRCS += cost_model.c
+OPTIONAL_SRCS += plan_cache.c
+OPTIONAL_SRCS += dsco_dht.c
+OPTIONAL_SRCS += dht_impl.c
 ifneq ($(MBEDTLS_PREFIX),)
 OPTIONAL_SRCS += net_server.c
 endif
 endif
+
+# Optional pkg-config libs such as GSL may include -lm. Keep one libm at the
+# end of the link line so clang does not emit duplicate-library notices.
+LDLIBS := $(filter-out -lm,$(LDLIBS)) -lm
 
 all: $(TARGET) dsc dsco-new $(LITE_TARGET)
 debug: $(DEBUG_TARGET)
@@ -166,11 +241,11 @@ dev: $(DEBUG_TARGET)
 dsc: dsc.c
 	$(CC) -O2 -std=c2y $(C2Y_WARNING_FLAGS) -D_POSIX_C_SOURCE=200809L -o $@ $< -lcurl -lreadline
 
-$(DEBUG_TARGET): $(DEBUG_OBJS)
+$(DEBUG_TARGET): $(DEBUG_OBJS) $(GSL_DEBUG_OBJS)
 	$(CC) $(DEBUG_CFLAGS) -o $@ $^ $(LDFLAGS) $(LDLIBS)
 
-$(TARGET): $(OBJS)
-	$(CC) $(CFLAGS) -o $@ $^ $(LDFLAGS) $(LDLIBS)
+$(TARGET): $(OBJS) $(GSL_OBJS)
+	$(CC) $(CFLAGS) -o $@ $^ $(LDFLAGS) $(RELEASE_LDFLAGS) $(LDLIBS)
 
 # dsco-new is a twin of dsco — same code, same composer, distinct name.
 dsco-new: $(TARGET)
@@ -182,28 +257,71 @@ $(LITE_TARGET): $(SRC_DIR)/lite_main.c $(INC_DIR)/config.h
 
 # Source compilation rules
 $(OBJ_DIR)/%.o: $(SRC_DIR)/%.c | $(OBJ_DIR)
+	@mkdir -p $(@D)
 	$(CC) $(CFLAGS) -c -o $@ $<
+
+# ── Memory-bounded compilation of large translation units ──────────────────
+# tools.c (>1MB of source), agent.c, tui.c, integrations.c, trading.c, llm.c,
+# provider.c, md.c and topology.c are huge dispatch/glue units. Newer
+# persistence/orchestration/network glue is also not hot numeric code and can
+# contribute to peak clang RSS during parallel builds. At
+# -O3 -funroll-loops -march=native clang's inliner/optimizer needs multiple GB
+# of RAM *per file*; a parallel `make -jN` compiling several at once exhausts
+# RAM+swap and the kernel SIGKILLs the build (and other resident processes).
+# These are not hot numeric paths, so -O1 costs ~nothing at runtime while
+# cutting peak compiler RSS ~5-8x. Hot numeric code (gsl/, extension/) keeps -O3.
+BIG_TU_NAMES = tools agent tui integrations trading llm provider md topology \
+	session_memory plan_optimizer cost_model plan_cache dsco_dht dht_impl \
+	net_server vecstore_metal
+BIG_TU_OBJS  = $(BIG_TU_NAMES:%=$(OBJ_DIR)/%.o)
+$(BIG_TU_OBJS): CFLAGS := $(filter-out -O3 -funroll-loops,$(CFLAGS)) -O1
 
 # Objective-C sources (macOS only)
 $(OBJ_DIR)/%.o: $(SRC_DIR)/%.m | $(OBJ_DIR)
+	@mkdir -p $(@D)
 	$(CC) $(CFLAGS) -fobjc-arc -x objective-c -c -o $@ $<
 
+# Vendored GSL source compilation rules
+$(OBJ_DIR)/gsl_%.o: gsl/src/%.c | $(OBJ_DIR)
+	$(CC) $(CFLAGS) -c -o $@ $<
+
+$(DEBUG_OBJ_DIR)/gsl_%.o: gsl/src/%.c | $(DEBUG_OBJ_DIR)
+	$(CC) $(DEBUG_CFLAGS) -c -o $@ $<
+
+$(TEST_OBJ_DIR)/gsl_%.o: gsl/src/%.c | $(TEST_OBJ_DIR)
+	$(CC) $(TEST_CFLAGS) -c -o $@ $<
+
+$(TEST_COVERAGE_OBJ_DIR)/gsl_%.o: gsl/src/%.c | $(TEST_COVERAGE_OBJ_DIR)
+	$(CC) $(COVERAGE_CFLAGS) -c -o $@ $<
+
+$(ASAN_OBJ_DIR)/gsl_%.o: gsl/src/%.c | $(ASAN_OBJ_DIR)
+	$(CC) $(ASAN_CFLAGS) -c -o $@ $<
+
+$(UBSAN_OBJ_DIR)/gsl_%.o: gsl/src/%.c | $(UBSAN_OBJ_DIR)
+	$(CC) $(UBSAN_CFLAGS) -c -o $@ $<
+
 $(DEBUG_OBJ_DIR)/%.o: $(SRC_DIR)/%.c | $(DEBUG_OBJ_DIR)
+	@mkdir -p $(@D)
 	$(CC) $(DEBUG_CFLAGS) -c -o $@ $<
 
 $(DEBUG_OBJ_DIR)/%.o: $(SRC_DIR)/%.m | $(DEBUG_OBJ_DIR)
+	@mkdir -p $(@D)
 	$(CC) $(DEBUG_CFLAGS) -fobjc-arc -x objective-c -c -o $@ $<
 
 $(ASAN_OBJ_DIR)/%.o: $(SRC_DIR)/%.c | $(ASAN_OBJ_DIR)
+	@mkdir -p $(@D)
 	$(CC) $(ASAN_CFLAGS) -c -o $@ $<
 
 $(ASAN_OBJ_DIR)/%.o: $(SRC_DIR)/%.m | $(ASAN_OBJ_DIR)
+	@mkdir -p $(@D)
 	$(CC) $(ASAN_CFLAGS) -fobjc-arc -x objective-c -c -o $@ $<
 
 $(UBSAN_OBJ_DIR)/%.o: $(SRC_DIR)/%.c | $(UBSAN_OBJ_DIR)
+	@mkdir -p $(@D)
 	$(CC) $(UBSAN_CFLAGS) -c -o $@ $<
 
 $(UBSAN_OBJ_DIR)/%.o: $(SRC_DIR)/%.m | $(UBSAN_OBJ_DIR)
+	@mkdir -p $(@D)
 	$(CC) $(UBSAN_CFLAGS) -fobjc-arc -x objective-c -c -o $@ $<
 
 # Test compilation rules — test sources from tests/, lib sources from src/
@@ -211,40 +329,49 @@ $(TEST_OBJ_DIR)/test.o: $(TEST_DIR)/test.c | $(TEST_OBJ_DIR)
 	$(CC) $(TEST_CFLAGS) -c -o $@ $<
 
 $(TEST_OBJ_DIR)/%.o: $(SRC_DIR)/%.c | $(TEST_OBJ_DIR)
+	@mkdir -p $(@D)
 	$(CC) $(TEST_CFLAGS) -c -o $@ $<
 
 $(TEST_OBJ_DIR)/%.o: $(SRC_DIR)/%.m | $(TEST_OBJ_DIR)
+	@mkdir -p $(@D)
 	$(CC) $(TEST_CFLAGS) -fobjc-arc -x objective-c -c -o $@ $<
 
 $(TEST_COVERAGE_OBJ_DIR)/test.o: $(TEST_DIR)/test.c | $(TEST_COVERAGE_OBJ_DIR)
 	$(CC) $(COVERAGE_CFLAGS) -c -o $@ $<
 
 $(TEST_COVERAGE_OBJ_DIR)/%.o: $(SRC_DIR)/%.c | $(TEST_COVERAGE_OBJ_DIR)
+	@mkdir -p $(@D)
 	$(CC) $(COVERAGE_CFLAGS) -c -o $@ $<
 
 $(TEST_COVERAGE_OBJ_DIR)/%.o: $(SRC_DIR)/%.m | $(TEST_COVERAGE_OBJ_DIR)
+	@mkdir -p $(@D)
 	$(CC) $(COVERAGE_CFLAGS) -fobjc-arc -x objective-c -c -o $@ $<
 
 $(ASAN_TEST_OBJ_DIR)/test.o: $(TEST_DIR)/test.c | $(ASAN_TEST_OBJ_DIR)
 	$(CC) $(ASAN_CFLAGS) -c -o $@ $<
 
 $(ASAN_TEST_OBJ_DIR)/%.o: $(SRC_DIR)/%.c | $(ASAN_TEST_OBJ_DIR)
+	@mkdir -p $(@D)
 	$(CC) $(ASAN_CFLAGS) -c -o $@ $<
 
 $(ASAN_TEST_OBJ_DIR)/%.o: $(SRC_DIR)/%.m | $(ASAN_TEST_OBJ_DIR)
+	@mkdir -p $(@D)
 	$(CC) $(ASAN_CFLAGS) -fobjc-arc -x objective-c -c -o $@ $<
 
 $(UBSAN_TEST_OBJ_DIR)/test.o: $(TEST_DIR)/test.c | $(UBSAN_TEST_OBJ_DIR)
 	$(CC) $(UBSAN_CFLAGS) -c -o $@ $<
 
 $(UBSAN_TEST_OBJ_DIR)/%.o: $(SRC_DIR)/%.c | $(UBSAN_TEST_OBJ_DIR)
+	@mkdir -p $(@D)
 	$(CC) $(UBSAN_CFLAGS) -c -o $@ $<
 
 $(UBSAN_TEST_OBJ_DIR)/%.o: $(SRC_DIR)/%.m | $(UBSAN_TEST_OBJ_DIR)
+	@mkdir -p $(@D)
 	$(CC) $(UBSAN_CFLAGS) -fobjc-arc -x objective-c -c -o $@ $<
 
 $(OBJ_DIR) $(DEBUG_OBJ_DIR) $(TEST_OBJ_DIR) $(TEST_COVERAGE_OBJ_DIR) $(ASAN_OBJ_DIR) $(UBSAN_OBJ_DIR) $(ASAN_TEST_OBJ_DIR) $(UBSAN_TEST_OBJ_DIR):
 	mkdir -p $@
+	mkdir -p $@/extension
 
 # Header dependency tracking: -MMD -MP (in BASE_CFLAGS) emits a .d file next to
 # each .o listing the headers it included. Including them here makes any object
@@ -256,13 +383,33 @@ $(OBJ_DIR) $(DEBUG_OBJ_DIR) $(TEST_OBJ_DIR) $(TEST_COVERAGE_OBJ_DIR) $(ASAN_OBJ_
 test: test_runner
 	./test_runner
 
-test_runner: $(TEST_OBJS)
+test_runner: $(TEST_OBJS) $(GSL_TEST_OBJS)
 	$(CC) $(TEST_CFLAGS) -o $@ $^ $(LDFLAGS) $(LDLIBS)
+
+# Priority 7 standalone test binary
+RECOVERY_TEST_OBJS = $(TEST_OBJ_DIR)/test_recovery.o \
+	$(LIB_OBJS:$(OBJ_DIR)/%=$(TEST_OBJ_DIR)/%)
+
+$(TEST_OBJ_DIR)/test_recovery.o: $(TEST_DIR)/test_recovery.c | $(TEST_OBJ_DIR)
+	$(CC) $(TEST_CFLAGS) -c -o $@ $<
+
+test_recovery: $(RECOVERY_TEST_OBJS) $(GSL_TEST_OBJS)
+	$(CC) $(TEST_CFLAGS) -o $@ $^ $(LDFLAGS) $(LDLIBS)
+
+test_stateful_atoms: $(TEST_OBJ_DIR)/test_stateful_atoms.o \
+	$(TEST_OBJ_DIR)/stateful_atoms.o \
+	$(TEST_OBJ_DIR)/plan.o \
+	$(TEST_OBJ_DIR)/json_util.o \
+	$(TEST_OBJ_DIR)/arena_alloc.o
+	$(CC) $(TEST_CFLAGS) -o $@ $^ $(LDFLAGS) -lm
+
+$(TEST_OBJ_DIR)/test_stateful_atoms.o: $(TEST_DIR)/test_stateful_atoms.c | $(TEST_OBJ_DIR)
+	$(CC) $(TEST_CFLAGS) -c -o $@ $<
 
 coverage: coverage_runner
 	./coverage_runner
 
-coverage_runner: $(TEST_COVERAGE_OBJS)
+coverage_runner: $(TEST_COVERAGE_OBJS) $(GSL_COVERAGE_OBJS)
 	$(CC) $(COVERAGE_CFLAGS) -o $@ $^ $(LDFLAGS) $(COVERAGE_LDFLAGS) $(LDLIBS)
 
 asan: $(TARGET)-asan
@@ -278,13 +425,13 @@ $(TARGET)-ubsan: $(UBSAN_OBJS)
 asan-test: asan-test_runner
 	ASAN_OPTIONS=$(ASAN_RUNTIME_OPTIONS) ./asan-test_runner
 
-asan-test_runner: $(ASAN_TEST_OBJS)
+asan-test_runner: $(ASAN_TEST_OBJS) $(GSL_ASAN_OBJS)
 	$(CC) $(ASAN_CFLAGS) -o $@ $^ $(LDFLAGS) $(ASAN_LDFLAGS) $(LDLIBS)
 
 ubsan-test: ubsan-test_runner
 	UBSAN_OPTIONS=print_stacktrace=1:halt_on_error=1 ./ubsan-test_runner
 
-ubsan-test_runner: $(UBSAN_TEST_OBJS)
+ubsan-test_runner: $(UBSAN_TEST_OBJS) $(GSL_UBSAN_OBJS)
 	$(CC) $(UBSAN_CFLAGS) -o $@ $^ $(LDFLAGS) $(UBSAN_LDFLAGS) $(LDLIBS)
 
 format:
