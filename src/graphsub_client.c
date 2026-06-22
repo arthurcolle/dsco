@@ -112,7 +112,7 @@ char *graphsub_post(const char *path, const char *json_body) {
 
     /* Write body to temp file to avoid shell escaping issues */
     char tmpl[] = "/tmp/dsco-gs-XXXXXX";
-    int fd = mkstemp(mtmpl);
+    int fd = mkstemp(tmpl);
     if (fd < 0) return NULL;
     if (json_body) {
         size_t blen = strlen(json_body);
