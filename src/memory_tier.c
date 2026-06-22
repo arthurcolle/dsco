@@ -483,10 +483,10 @@ int memory_search_semantic(memory_store_t *m, const char *query,
         int dim = 0;
         float *qvec = tools_embed_text(query, &dim);
         if (qvec && dim > 0) {
+            int count = 0;
             vecstore_result_t *results = calloc((size_t)max, sizeof(vecstore_result_t));
             if (results) {
                 int found = vecstore_query(g_mem_vecstore, qvec, dim, results, max);
-                int count = 0;
 
                 for (int i = 0; i < found && count < max; i++) {
                     memory_entry_t *e = find_by_key(m, results[i].id);
@@ -500,12 +500,10 @@ int memory_search_semantic(memory_store_t *m, const char *query,
 
                 vecstore_result_free(results, found);
                 free(results);
-                free(qvec);
-
-                if (count > 0) return count;
-                /* Fall through to substring if no semantic matches */
             }
             free(qvec);
+            if (count > 0) return count;
+            /* Fall through to substring if no semantic matches */
         }
     }
 

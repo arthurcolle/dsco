@@ -1357,6 +1357,18 @@ typedef struct {
     bool   active;
 } saved_session_entry_t;
 
+typedef struct {
+    char name[64];
+    char expansion[MAX_INPUT_LINE];
+} command_alias_t;
+
+static saved_session_entry_t *session_entries_alloc(void) {
+    saved_session_entry_t *entries =
+        safe_malloc((size_t)DSCO_SESSION_LIST_MAX * sizeof(*entries));
+    memset(entries, 0, (size_t)DSCO_SESSION_LIST_MAX * sizeof(*entries));
+    return entries;
+}
+
 static const char *session_current_name(const session_state_t *session) {
     return (session && session->slot_name[0]) ? session->slot_name : "default";
 }
@@ -2739,8 +2751,11 @@ static void print_tool_result_ex(const char *name, bool ok, const char *result, 
         tpos += snprintf(trail + tpos, sizeof(trail) - tpos, " · %s", size_str);
     print_role_header("tool_response", ok, trail);
 
-    /* Indented preview body — first ~10 lines or 800 bytes. */
-    if (result && result[0]) {
+    /* Display-art tools (plot) render in full color; otherwise a dim preview
+     * of the first ~10 lines / 800 bytes. */
+    if (ok && tui_print_tool_art(name, result)) {
+        /* full colored art already printed */
+    } else if (result && result[0]) {
         const char *p = result;
         int lines = 0;
         size_t emitted = 0;
@@ -3068,7 +3083,8 @@ void agent_run(const char *api_key, const char *model,
 
     /* Command aliases: /alias <name> <expansion> */
 #define MAX_ALIASES 32
-    struct { char name[64]; char expansion[MAX_INPUT_LINE]; } aliases[MAX_ALIASES];
+    command_alias_t *aliases = safe_malloc(MAX_ALIASES * sizeof(*aliases));
+    memset(aliases, 0, MAX_ALIASES * sizeof(*aliases));
     int alias_count = 0;
 
     int tool_count;
@@ -3208,9 +3224,16 @@ void agent_run(const char *api_key, const char *model,
         char dyn_prompt[256];
         {
             double cost = session_cost(&session);
-            int ctx_used = session.total_input_tokens + session.total_output_tokens;
+            /* Context occupancy = size of the LAST request (the full conversation
+             * we just sent), not the cumulative sum of every turn's tokens —
+             * otherwise the gauge climbs past 100% as turns accumulate. Matches
+             * the /context bar (print_context). */
+            int ctx_used = session.last_input_tokens > 0
+                         ? session.last_input_tokens
+                         : session.total_input_tokens + session.total_output_tokens;
             int ctx_max = session.context_window > 0 ? session.context_window : CONTEXT_WINDOW_TOKENS;
             double ctx_pct = ctx_max > 0 ? 100.0 * ctx_used / ctx_max : 0;
+            if (ctx_pct > 100.0) ctx_pct = 100.0;
             const char *ctx_color = ctx_pct < 60 ? TUI_GREEN : (ctx_pct < 85 ? TUI_YELLOW : TUI_RED);
 
             /* Shorten model name for prompt */
@@ -3939,9 +3962,10 @@ void agent_run(const char *api_key, const char *model,
         /* ── /sessions, /resume, /new, /rename — session workspace ─────── */
         if (strncmp(input_buf, "/sessions", 9) == 0 &&
             (input_buf[9] == '\0' || input_buf[9] == ' ')) {
-            saved_session_entry_t entries[DSCO_SESSION_LIST_MAX];
+            saved_session_entry_t *entries = session_entries_alloc();
             int count = session_load_entries(entries, DSCO_SESSION_LIST_MAX, &session);
             session_print_entries(entries, count);
+            free(entries);
             baseline_log("command", "/sessions", NULL, NULL);
             continue;
         }
@@ -3950,10 +3974,11 @@ void agent_run(const char *api_key, const char *model,
             const char *query = input_buf + 7;
             while (*query == ' ') query++;
 
-            saved_session_entry_t entries[DSCO_SESSION_LIST_MAX];
+            saved_session_entry_t *entries = session_entries_alloc();
             int count = session_load_entries(entries, DSCO_SESSION_LIST_MAX, &session);
             if (!query[0]) {
                 session_print_entries(entries, count);
+                free(entries);
                 continue;
             }
 
@@ -3963,6 +3988,7 @@ void agent_run(const char *api_key, const char *model,
                 tui_error(ambiguous ? "session query is ambiguous; use the numeric index"
                                     : "session not found");
                 if (count > 0) session_print_entries(entries, count);
+                free(entries);
                 continue;
             }
 
@@ -3979,6 +4005,7 @@ void agent_run(const char *api_key, const char *model,
                 tui_error("failed to resume session");
                 baseline_log("error", "/resume", "load failed", NULL);
             }
+            free(entries);
             continue;
         }
         if (strncmp(input_buf, "/new", 4) == 0 &&
@@ -4082,9 +4109,10 @@ void agent_run(const char *api_key, const char *model,
 
             /* /slot  or  /slot list — list all slots */
             if (slot_args[0] == '\0' || strncmp(slot_args, "list", 4) == 0) {
-                saved_session_entry_t entries[DSCO_SESSION_LIST_MAX];
+                saved_session_entry_t *entries = session_entries_alloc();
                 int count = session_load_entries(entries, DSCO_SESSION_LIST_MAX, &session);
                 session_print_entries(entries, count);
+                free(entries);
                 continue;
             }
 
@@ -7484,6 +7512,7 @@ reactive_retry:
     mcp_shutdown(&g_mcp);
     provider_free(g_provider);
     g_provider = NULL;
+    free(aliases);
     tools_cooc_persist();
     tools_cooc_free();
     tool_map_free(&g_tool_map);

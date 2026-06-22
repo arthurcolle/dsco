@@ -1,4 +1,5 @@
 #include "governance.h"
+#include "rsi_curriculum.h"
 #include "vfs.h"
 #include <stdio.h>
 #include <string.h>
@@ -51,6 +52,8 @@ static const struct { hardcoded_type_t type; const char *rule; } DEFAULT_HARDCOD
     { HARDCODED_MUST_ALWAYS, "Complete OODA cycle before any significant action" },
     { HARDCODED_MUST_ALWAYS, "Provide honest assessment of capability and confidence" },
     { HARDCODED_MUST_ALWAYS, "Accept and execute tier-0 override commands" },
+    { HARDCODED_MUST_ALWAYS, "Require replay evaluation, complete provenance, verified signature, active budget lease, and rollback plan before RSI/self-modification promotion" },
+    { HARDCODED_MUST_ALWAYS, "Bind self-improvement claims to curriculum skill IDs, held-out evals, and durable lineage evidence" },
     /* 6.2 Must Never */
     { HARDCODED_MUST_NEVER, "Override or bypass kill switch commands" },
     { HARDCODED_MUST_NEVER, "Exceed allocated resource budget" },
@@ -59,6 +62,8 @@ static const struct { hardcoded_type_t type; const char *rule; } DEFAULT_HARDCOD
     { HARDCODED_MUST_NEVER, "Act outside the bounded action space (EXECUTE/DELEGATE/WAIT/REST/ESCALATE)" },
     { HARDCODED_MUST_NEVER, "Spawn agents beyond authorized depth or count limits" },
     { HARDCODED_MUST_NEVER, "Access resources without proper principal authorization" },
+    { HARDCODED_MUST_NEVER, "Promote RSI or self-modification candidates without replay stability, rollback readiness, provenance, attestation, and lease evidence" },
+    { HARDCODED_MUST_NEVER, "Treat self-generated traces as held-out evidence for promotion" },
 };
 
 #define DEFAULT_HARDCODED_COUNT (sizeof(DEFAULT_HARDCODED) / sizeof(DEFAULT_HARDCODED[0]))
@@ -84,6 +89,14 @@ static const struct {
     { "memory.working_halflife", "Working memory half-life (seconds)", 60,    10,    600,   1 },
     { "memory.episodic_halflife","Episodic memory half-life (seconds)",3600,  300,   86400, 1 },
     { "memory.consolidation_int","Consolidation interval (seconds)",   30,    5,     300,   1 },
+    { "rsi.curriculum_active",   "Enable safety-aware RSI curriculum gates",  1,     0,     1,     0 },
+    { "rsi.heldout_success_min", "Minimum held-out success for promotion",    RSI_GATE_HELDOUT_SUCCESS_MIN, 0, 1, 0 },
+    { "rsi.safety_violation_max","Maximum safety violation rate",             RSI_GATE_SAFETY_VIOLATION_MAX, 0, 1, 0 },
+    { "rsi.rollback_trigger_max","Maximum rollback trigger rate",             RSI_GATE_ROLLBACK_TRIGGER_MAX, 0, 1, 0 },
+    { "rsi.judge_kappa_min",     "Minimum judge-human agreement kappa",       RSI_GATE_JUDGE_KAPPA_MIN, 0, 1, 0 },
+    { "rsi.replay_stability_min","Minimum replay stability for promotion",    RSI_GATE_REPLAY_STABILITY_MIN, 0, 1, 0 },
+    { "rsi.improvement_min",     "Minimum success lift over baseline",        RSI_GATE_SUCCESS_IMPROVEMENT_MIN, 0, 1, 0 },
+    { "rsi.cost_regression_max", "Maximum cost-per-success multiplier",       RSI_GATE_COST_REGRESSION_MAX, 1, 10, 0 },
 };
 
 #define DEFAULT_SOFTCODED_COUNT (sizeof(DEFAULT_SOFTCODED) / sizeof(DEFAULT_SOFTCODED[0]))
@@ -175,6 +188,24 @@ static bool hardcoded_rule_blocks_action(const char *rule, const char *action) {
     static const char *const auth_terms[] = {
         "unauthorized_resource", "unauthorized_access", NULL
     };
+    static const char *const rsi_gate_terms[] = {
+        "promote_self_mod_without_gate",
+        "self_modify_without_gate",
+        "rsi_promote_unsigned",
+        "rsi_promote_unproven",
+        "rsi_bypass_replay",
+        "rsi_disable_rollback",
+        "rsi_unbounded_lease",
+        "rsi_promote_without_lineage",
+        "rsi_promote_without_attestation",
+        NULL
+    };
+    static const char *const heldout_terms[] = {
+        "use_self_generated_as_heldout",
+        "contaminate_heldout",
+        "promote_on_training_traces",
+        NULL
+    };
 
     if (!rule || !action) return false;
     if (strstr(rule, "kill switch")) return action_contains_any(action, kill_terms);
@@ -184,6 +215,13 @@ static bool hardcoded_rule_blocks_action(const char *rule, const char *action) {
     if (strstr(rule, "bounded action space")) return action_contains_any(action, bounded_terms);
     if (strstr(rule, "Spawn agents")) return action_contains_any(action, spawn_terms);
     if (strstr(rule, "Access resources")) return action_contains_any(action, auth_terms);
+    if (strstr(rule, "RSI/self-modification") ||
+        strstr(rule, "self-modification candidates")) {
+        return action_contains_any(action, rsi_gate_terms);
+    }
+    if (strstr(rule, "self-generated traces")) {
+        return action_contains_any(action, heldout_terms);
+    }
     return false;
 }
 
@@ -472,12 +510,18 @@ int governance_status_json(const governance_engine_t *g, char *buf, size_t len) 
         "\"total_authorizations\":%d,"
         "\"total_denials\":%d,"
         "\"total_hardcoded_blocks\":%d,"
+        "\"rsi_curriculum\":{\"version\":\"%s\",\"active\":%s,"
+        "\"catalog_total\":%d,\"top_priority_count\":%d},"
         "\"system_budget\":{\"allocated\":%.0f,\"consumed\":%.0f,\"remaining\":%.0f},"
         "\"subsystems\":{",
         g->initialized ? "true" : "false",
         g->agent_count, g->hardcoded_count, g->softcoded_count,
         g->audit_count, g->total_authorizations, g->total_denials,
         g->total_hardcoded_blocks,
+        RSI_CURRICULUM_VERSION,
+        governance_get_param(g, "rsi.curriculum_active") > 0.0 ? "true" : "false",
+        RSI_CURRICULUM_TOTAL_SKILLS,
+        RSI_CURRICULUM_TOP_SKILL_COUNT,
         g->system_budget.allocated, g->system_budget.consumed,
         g->system_budget.allocated - g->system_budget.consumed);
 
@@ -521,4 +565,159 @@ int governance_audit_json(const governance_engine_t *g, char *buf, size_t len,
     }
     n += snprintf(buf + n, len - n, "]}");
     return n;
+}
+
+/* ═══════════════════════════════════════════════════════════════════════════
+ * Circuit Breakers (Immune System Track E1)
+ * ═══════════════════════════════════════════════════════════════════════════ */
+
+bool governance_check_breakers(governance_engine_t *g, const char *agent_id) {
+    if (!g || !g->initialized) return true; /* fail open if not initialized */
+    (void)agent_id;
+    for (int i = 0; i < CB_TYPE_COUNT; i++) {
+        if (g->breakers[i].tripped) return false;
+    }
+    return true;
+}
+
+bool governance_trip_breaker(governance_engine_t *g, circuit_breaker_type_t type,
+                              const char *reason) {
+    if (!g || type < 0 || type >= CB_TYPE_COUNT) return false;
+    circuit_breaker_t *cb = &g->breakers[type];
+    cb->tripped = true;
+    cb->trip_time = time(NULL);
+    cb->trip_count++;
+    if (reason) {
+        snprintf(cb->trip_reason, sizeof(cb->trip_reason), "%s", reason);
+    } else {
+        snprintf(cb->trip_reason, sizeof(cb->trip_reason), "threshold %.2f exceeded", cb->threshold);
+    }
+    /* Log to audit trail */
+    if (g->audit_count < GOV_AUDIT_MAX) {
+        audit_entry_t *e = &g->audit[g->audit_count++];
+        e->id = g->next_audit_id++;
+        snprintf(e->agent_id, sizeof(e->agent_id), "breaker:%d", (int)type);
+        snprintf(e->action, sizeof(e->action), "circuit_breaker_trip");
+        snprintf(e->detail, sizeof(e->detail), "%s", cb->trip_reason);
+        e->tier = PRINCIPAL_TIER_2;
+        e->gsu_cost = 0;
+        e->authorized = false;
+        e->hardcoded_blocked = true;
+        e->timestamp = (double)cb->trip_time;
+    }
+    return true;
+}
+
+bool governance_reset_breaker(governance_engine_t *g, circuit_breaker_type_t type) {
+    if (!g || type < 0 || type >= CB_TYPE_COUNT) return false;
+    g->breakers[type].tripped = false;
+    g->breakers[type].trip_time = 0;
+    g->breakers[type].trip_reason[0] = '\0';
+    g->breakers[type].current_value = 0;
+    return true;
+}
+
+void governance_breaker_update(governance_engine_t *g, circuit_breaker_type_t type,
+                                double value) {
+    if (!g || type < 0 || type >= CB_TYPE_COUNT) return;
+    circuit_breaker_t *cb = &g->breakers[type];
+    cb->current_value = value;
+    /* Auto-trip if threshold exceeded and not already tripped */
+    if (!cb->tripped && cb->threshold > 0 && value >= cb->threshold) {
+        char reason[256];
+        snprintf(reason, sizeof(reason), "%.2f >= threshold %.2f", value, cb->threshold);
+        governance_trip_breaker(g, type, reason);
+    }
+}
+
+int governance_breakers_json(const governance_engine_t *g, char *buf, size_t len) {
+    if (!g || !buf) return 0;
+    int n = snprintf(buf, len, "{\"breakers\":[");
+    for (int i = 0; i < CB_TYPE_COUNT; i++) {
+        const circuit_breaker_t *cb = &g->breakers[i];
+        n += snprintf(buf + n, len - n,
+            "%s{\"type\":%d,\"threshold\":%.2f,\"current\":%.2f,"
+            "\"tripped\":%s,\"trips\":%d,\"reason\":\"%s\"}",
+            i > 0 ? "," : "",
+            (int)cb->type, cb->threshold, cb->current_value,
+            cb->tripped ? "true" : "false",
+            cb->trip_count,
+            cb->trip_reason[0] ? cb->trip_reason : "");
+    }
+    n += snprintf(buf + n, len - n, "]}");
+    return n;
+}
+
+/* ═══════════════════════════════════════════════════════════════════════════
+ * Shadow Examination (Immune System Track E2)
+ * ═══════════════════════════════════════════════════════════════════════════ */
+
+bool governance_shadow_check(governance_engine_t *g, const char *agent_id,
+                               const char *proposed_action,
+                               shadow_check_result_t *result) {
+    if (!g || !result) return true; /* fail open */
+    g->shadow_checks_performed++;
+    memset(result, 0, sizeof(*result));
+
+    if (!proposed_action) return true;
+
+    /* Pattern-based shadow detection (not ML — deterministic rules) */
+
+    /* 1. Self-reward: agent's action benefits itself rather than principal */
+    if (strstr(proposed_action, "increase_own_budget") ||
+        strstr(proposed_action, "extend_own_deadline") ||
+        strstr(proposed_action, "reduce_own_workload")) {
+        result->self_reward_detected = true;
+        snprintf(result->explanation, sizeof(result->explanation),
+                 "Action appears to benefit the agent rather than the principal");
+    }
+
+    /* 2. Circular optimization: optimizing a metric without improving outcome */
+    if (strstr(proposed_action, "optimize_token_count") ||
+        strstr(proposed_action, "maximize_tool_calls") ||
+        strstr(proposed_action, "minimize_latency_metric")) {
+        result->circular_optimization = true;
+        snprintf(result->explanation, sizeof(result->explanation),
+                 "Action optimizes a proxy metric without clear outcome improvement");
+    }
+
+    /* 3. Reward hacking: gaming the objective function */
+    if (strstr(proposed_action, "bypass_validation") ||
+        strstr(proposed_action, "skip_tests") ||
+        strstr(proposed_action, "short_circuit") ||
+        strstr(proposed_action, "mark_all_passing")) {
+        result->reward_hacking = true;
+        snprintf(result->explanation, sizeof(result->explanation),
+                 "Action appears to game the objective function rather than achieve it");
+    }
+
+    /* 4. Self-mythology: inflated self-assessment */
+    if (strstr(proposed_action, "self_score_excellent") ||
+        strstr(proposed_action, "mark_self_complete") ||
+        strstr(proposed_action, "override_evaluation")) {
+        result->self_mythology = true;
+        snprintf(result->explanation, sizeof(result->explanation),
+                 "Action involves self-assessment without external verification");
+    }
+
+    /* If any shadow detected, log it */
+    if (result->self_reward_detected || result->circular_optimization ||
+        result->reward_hacking || result->self_mythology) {
+        g->shadow_violations++;
+        if (g->audit_count < GOV_AUDIT_MAX) {
+            audit_entry_t *e = &g->audit[g->audit_count++];
+            e->id = g->next_audit_id++;
+            snprintf(e->agent_id, sizeof(e->agent_id), "%s", agent_id ? agent_id : "unknown");
+            snprintf(e->action, sizeof(e->action), "shadow_check_violation");
+            snprintf(e->detail, sizeof(e->detail), "%s", result->explanation);
+            e->tier = PRINCIPAL_TIER_2;
+            e->gsu_cost = 0;
+            e->authorized = false;
+            e->hardcoded_blocked = true;
+            e->timestamp = (double)time(NULL);
+        }
+        return false; /* shadow detected — block action */
+    }
+
+    return true; /* no shadow detected — action is clear */
 }
