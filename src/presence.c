@@ -1,6 +1,7 @@
 #define _DARWIN_C_SOURCE 1
 #include "presence.h"
 #include "audit_log.h"
+#include "sealed_store.h"  /* Cross-pollination: wipe secrets on idle lock */
 
 #include <pthread.h>
 #include <unistd.h>
@@ -61,6 +62,12 @@ static void *presence_thread(void *arg) {
         if (idle >= (double)s_idle_threshold_s) {
             atomic_store(&s_locked, 1);
             audit_log("presence", "idle threshold reached — locking terminal");
+            /* Cross-pollination: wipe in-memory secrets when the terminal
+             * auto-locks. Reduces exposure window if the user walks away
+             * with secrets still in sealed_store. Secrets are re-loaded
+             * from env on next tool call that needs them. */
+            sealed_store_wipe_all();
+            audit_log("presence", "sealed_store wiped on idle lock");
             if (s_lock_cb) s_lock_cb(s_lock_ctx);
         }
     }
