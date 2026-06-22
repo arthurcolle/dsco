@@ -212,7 +212,10 @@ int model_tier(const char *model_id) {
     if (!model_id) return 1;
 
     /* ── Expert tier (4) — frontier reasoning, $10+/M output ─────────── */
+    if (strstr(model_id, "fable"))             return 4;
     if (strstr(model_id, "opus"))              return 4;
+    if (strstr(model_id, "gpt-5.5-pro"))      return 4;
+    if (strstr(model_id, "gpt-5.5"))          return 4;
     if (strstr(model_id, "gpt-5.4-pro"))      return 4;
     if (strstr(model_id, "gpt-5.4"))          return 4;
     if (strstr(model_id, "gpt-5.3"))          return 4;
@@ -225,10 +228,14 @@ int model_tier(const char *model_id) {
     if (strstr(model_id, "kimi-k2.7-code"))   return 4;  /* matches both kimi-k2.7-code and kimi-k2.7-code-highspeed */
     if (strstr(model_id, "kimi-k2.5"))        return 4;
     if (strstr(model_id, "qwen3-max-thinking")) return 4;
+    if (strstr(model_id, "gemini-3.1-deep-think")) return 4;
     if (strstr(model_id, "gemini-3.1-pro"))   return 4;
     if (strstr(model_id, "gemini-3-pro"))     return 4;
     if (strstr(model_id, "nova-premier"))     return 4;
     if (strstr(model_id, "deepseek-r1"))      return 4;
+    if (strstr(model_id, "deepseek-r2"))      return 4;
+    if (strstr(model_id, "deepseek-v4"))      return 4;
+    if (strstr(model_id, "fugu-ultra"))       return 4;
     if (strstr(model_id, "glm-5"))            return 4;
 
     /* ── Complex tier (3) — strong general, $1–10/M output ───────────── */
@@ -249,6 +256,8 @@ int model_tier(const char *model_id) {
     if (strstr(model_id, "devstral"))         return 3;
     if (strstr(model_id, "deepseek-v3"))      return 3;
     if (strstr(model_id, "deepseek-chat"))    return 3;
+    if (strstr(model_id, "composer"))         return 3;
+    if (strstr(model_id, "fugu"))             return 3;
     if (strstr(model_id, "glm-4.7"))         return 3;
     if (strstr(model_id, "kimi-k2"))          return 3;
     if (strstr(model_id, "qwen3.5-397b"))    return 3;

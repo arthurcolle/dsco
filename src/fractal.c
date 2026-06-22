@@ -108,11 +108,16 @@ static fopts_t fractal_parse(const char *json, char **owned1, char **owned2, cha
     f.cw      = json ? json_get_double(json, "cw",  0.10) :  0.10;
     f.wslice  = json ? json_get_double(json, "wslice", 0.0) : 0.0;
     f.scale   = json ? json_get_double(json, "scale", -1.8) : -1.8;
-    f.yaw     = json ? json_get_double(json, "yaw",   0.6) : 0.6;
-    f.pitch   = json ? json_get_double(json, "pitch", 0.5) : 0.5;
-    f.fov     = json ? json_get_double(json, "fov",   0.85) : 0.85;
-    f.lyaw    = json ? json_get_double(json, "lyaw",  0.7) : 0.7;
-    f.lpitch  = json ? json_get_double(json, "lpitch", 0.6) : 0.6;
+    /* a face wants a near-frontal portrait camera + a softer key from the
+     * upper-right; the abstract fractals look best from a steep 3/4 orbit. */
+    double dyaw   = f.kind == F_FACE ? 0.28 : 0.6;
+    double dpitch = f.kind == F_FACE ? 0.04 : 0.5;
+    double dfov   = f.kind == F_FACE ? 0.72 : 0.85;
+    f.yaw     = json ? json_get_double(json, "yaw",   dyaw) : dyaw;
+    f.pitch   = json ? json_get_double(json, "pitch", dpitch) : dpitch;
+    f.fov     = json ? json_get_double(json, "fov",   dfov) : dfov;
+    f.lyaw    = json ? json_get_double(json, "lyaw",  f.kind == F_FACE ? 0.45 : 0.7) : 0.7;
+    f.lpitch  = json ? json_get_double(json, "lpitch", f.kind == F_FACE ? 0.40 : 0.6) : 0.6;
     f.qknob   = json ? json_get_double(json, "q", 0.0) : 0.0;
     f.sknob   = json ? json_get_double(json, "s", 0.0) : 0.0;
     f.gens    = json ? json_get_int(json, "gens", 0) : 0;
@@ -137,7 +142,7 @@ static fopts_t fractal_parse(const char *json, char **owned1, char **owned2, cha
     }
 
     /* default camera distance + truecolor per kind */
-    double dflt_dist = (f.kind == F_BOX) ? 7.0 : (f.kind == F_FACE ? 3.0 : 2.7);
+    double dflt_dist = (f.kind == F_BOX) ? 7.0 : (f.kind == F_FACE ? 4.0 : 2.7);
     f.dist      = json ? json_get_double(json, "dist", dflt_dist) : dflt_dist;
     f.truecolor = json ? json_get_bool(json, "truecolor", f.kind == F_FACE) : (f.kind == F_FACE);
     f.interactive = json ? json_get_bool(json, "interactive", false) : false;
@@ -257,6 +262,21 @@ static double de(V3 p, const fopts_t *f) {
     }
 }
 
+/* ── ambient occlusion: sample the field along the surface normal. Recesses
+ *    (eye sockets, nostrils, the mouth seam, under the brow/chin) self-shadow
+ *    and read as real form — without this a smooth head is a flat egg. */
+static double calc_ao(V3 p, V3 n, const fopts_t *f) {
+    double occ = 0.0, sca = 1.0;
+    for (int i = 1; i <= 5; i++) {
+        double h = 0.015 + 0.12 * (i / 5.0);
+        double d = de(v3add(p, v3scl(n, h)), f);
+        occ += (h - d) * sca;
+        sca *= 0.80;
+    }
+    double ao = 1.0 - 1.6 * occ;
+    return ao < 0 ? 0 : (ao > 1 ? 1 : ao);
+}
+
 /* ── ray march → luminance in [0,1] for one ray ──────────────────────────── */
 static double march(V3 ro, V3 rd, const fopts_t *f, V3 *hitp, int *hit_out) {
     const int   MAXS = 110;
@@ -288,6 +308,20 @@ static double march(V3 ro, V3 rd, const fopts_t *f, V3 *hitp, int *hit_out) {
         de(v3(p.x,p.y,p.z+e), f) - de(v3(p.x,p.y,p.z-e), f)));
     V3 L  = v3norm(v3(cos(f->lpitch) * sin(f->lyaw), sin(f->lpitch), -cos(f->lpitch) * cos(f->lyaw)));
     double diff = v3dot(n, L); if (diff < 0) diff = 0;
+    if (f->kind == F_FACE) {
+        /* portrait rig: true SDF occlusion carves the features, a cool fill
+         * lifts the shadow side, a Fresnel rim peels the silhouette off black. */
+        V3 viewd = v3(-rd.x, -rd.y, -rd.z);
+        V3 Lfill = v3norm(v3(-0.55, 0.10, 0.62));
+        double dfill = v3dot(n, Lfill); if (dfill < 0) dfill = 0;
+        double ndotv = v3dot(n, viewd); if (ndotv < 0) ndotv = 0;
+        double ao    = calc_ao(p, n, f);
+        double fres  = (1.0 - ndotv); fres = fres * fres * fres * 0.30;
+        double amb   = (0.10 + 0.10 * (n.y * 0.5 + 0.5)) * ao;
+        double lum   = amb + diff * 0.82 * (0.30 + 0.70 * ao) + dfill * 0.18 * ao + fres;
+        if (lum < 0) lum = 0; if (lum > 1) lum = 1;
+        return lum;
+    }
     double amb  = 0.18 + 0.12 * (n.y * 0.5 + 0.5);
     double ao   = 1.0 - (double)s / MAXS;        /* cheap occlusion from step count */
     double lum  = (amb + diff * 0.85) * (0.45 + 0.55 * ao);

@@ -44,6 +44,8 @@ void             tools_set_context_window(int tokens);
 int              tools_context_window(void);
 /* Pass current token usage so inline budget is based on remaining context */
 void             tools_set_context_usage(int input_tokens, int output_tokens);
+/* Toggle inline tool-result truncation. Off = full output (human/raw dumps). */
+void             tools_set_inline_truncation(bool enabled);
 void             tools_context_turn_begin(void);
 swarm_t         *tools_swarm_instance(void);
 const tool_def_t *tools_get_all(int *count);
