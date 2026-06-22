@@ -9,6 +9,7 @@
 #include <errno.h>
 
 #ifdef HAVE_LIBSODIUM
+#  include <dirent.h>
 #  include <sodium.h>
 #  include "mesh.h"
 
@@ -91,6 +92,59 @@ static void read_seed_file(void) {
     fclose(f);
 }
 
+
+/* ── Read ~/bridge/fleet/ *.host and connect to mesh ─────────────────────── */
+static void read_bridge_fleet(void) {
+    if (!s_node) return;
+    const char *home = getenv("HOME");
+    if (!home) return;
+
+    char fleet_dir[512];
+    snprintf(fleet_dir, sizeof(fleet_dir), "%s/bridge/fleet", home);
+
+    DIR *d = opendir(fleet_dir);
+    if (!d) return;
+
+    struct dirent *ent;
+    while ((ent = readdir(d)) != NULL) {
+        size_t nl = strlen(ent->d_name);
+        if (nl < 6 || strcmp(ent->d_name + nl - 5, ".host") != 0) continue;
+
+        char fpath[1024];
+        snprintf(fpath, sizeof(fpath), "%s/%s", fleet_dir, ent->d_name);
+
+        FILE *f = fopen(fpath, "r");
+        if (!f) continue;
+
+        char addr[128] = {0}, name[64] = {0};
+        char line[512];
+        while (fgets(line, sizeof(line), f)) {
+            char key[64], val[256];
+            char *nl2 = strchr(line, '\n');
+            if (nl2) *nl2 = '\0';
+            if (sscanf(line, "%63[^=]=\"%255[^\"]\"", key, val) == 2) {
+                if      (strcmp(key, "ADDR") == 0) snprintf(addr, sizeof(addr), "%s", val);
+                else if (strcmp(key, "NAME") == 0) snprintf(name, sizeof(name), "%s", val);
+            }
+        }
+        fclose(f);
+
+        if (!addr[0] || !addr[0]) continue;
+
+        /* Skip self (empty addr or same hostname) */
+        char self_hostname[256] = {0};
+        gethostname(self_hostname, sizeof(self_hostname));
+        /* strip .local suffix for comparison */
+        char *dot = strchr(self_hostname, '.');
+        if (dot) *dot = '\0';
+        if (strcmp(name, self_hostname) == 0) continue;
+
+        /* Connect on default mesh port */
+        try_connect(addr, s_port);
+    }
+    closedir(d);
+}
+
 /* ── mDNS advertisement (macOS dns_sd) ─────────────────────────────────── */
 
 #ifdef __APPLE__
@@ -101,7 +155,7 @@ static void read_seed_file(void) {
 static DNSServiceRef s_sdref = NULL;
 static pthread_t     s_mdns_thread;
 
-static void DNSSD_API mdns_cb(DNSServiceRef sdRef, DNSServiceFlags flags,
+static __attribute__((unused)) void DNSSD_API mdns_cb(DNSServiceRef sdRef, DNSServiceFlags flags,
                                uint32_t interfaceIndex, DNSServiceErrorType err,
                                const char *fullname, const char *hosttarget,
                                uint16_t port_net, uint16_t txtLen,
@@ -162,6 +216,7 @@ static void *discovery_thread(void *arg) {
     (void)arg;
     /* initial seed read */
     read_seed_file();
+    read_bridge_fleet();
 
     /* re-read every 60 seconds */
     int tick = 0;
@@ -170,6 +225,7 @@ static void *discovery_thread(void *arg) {
         if (++tick >= 60) {
             tick = 0;
             read_seed_file();
+            read_bridge_fleet();
         }
     }
     return NULL;

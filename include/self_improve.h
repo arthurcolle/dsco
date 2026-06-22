@@ -235,9 +235,13 @@ void self_improve_turn_reset(self_improve_t *si);
 /* ── Tool implementations (for tools.c registration) ──────────────────── */
 
 /* Tool: self_improve — Run the self-improvement loop and return suggestions.
- * Input: { "action": "summary"|"consolidate"|"acknowledge"|"history",
- *           "suggestion_id": N (for acknowledge) }
- * Output: JSON with suggestions, patterns, and strategy weights. */
+ * Input: { "action": "summary"|"consolidate"|"acknowledge"|"history"|"save"|
+ *                    "curriculum"|"skill"|"promotion_gate",
+ *           "suggestion_id": N (for acknowledge),
+ *           "skill_id": "SP07" (for skill),
+ *           ...promotion metrics for promotion_gate }
+ * Output: summary text or JSON with suggestions, patterns, strategy weights,
+ *         RSI curriculum, and promotion gate decisions. */
 bool tool_self_improve(const char *input_json, char *result, size_t result_len);
 
 /* Tool: self_assess — Quick self-evaluation of current session performance.
@@ -263,3 +267,31 @@ extern self_improve_t g_self_improve;
     self_improve_turn_reset(&g_self_improve)
 
 #endif /* DSCO_SELF_IMPROVE_H */
+
+/* ── Goal / swarm / strategy hooks (new) ─────────────────────────────── */
+
+void self_improve_record_goal_state(self_improve_t *si,
+                                    const char *goal_id,
+                                    int state,   /* 0=nascent,1=stalking,2=striking,3=gripping,4=captured,5=escaped */
+                                    int grip_strength,
+                                    double elapsed_s);
+
+void self_improve_record_swarm_outcome(self_improve_t *si,
+                                       const char *topology,
+                                       int agents,
+                                       bool success,
+                                       double quality,
+                                       double elapsed_s);
+
+void self_improve_record_strategy_result(self_improve_t *si,
+                                         const char *strategy,
+                                         const char *goal_type,
+                                         bool success,
+                                         int grip_escalations,
+                                         double elapsed_s);
+
+void self_improve_record_tournament_result(self_improve_t *si,
+                                           const char *winner_strategy,
+                                           int competitors,
+                                           double margin,
+                                           double elapsed_s);

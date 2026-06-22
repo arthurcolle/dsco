@@ -26,7 +26,7 @@ static int alloc_tile(dsco_grid_t *g) {
     return -1;
 }
 
-static void free_tile_recursive(dsco_grid_t *g, int id) {
+static __attribute__((unused)) void free_tile_recursive(dsco_grid_t *g, int id) {
     if (id < 0 || id >= DSCO_GRID_MAX_TILES) return;
     dsco_tile_t *t = &g->tiles[id];
     if (!t->in_use) return;

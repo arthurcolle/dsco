@@ -22,7 +22,7 @@
 #include <pthread.h>
 
 static redisContext *g_redis = NULL;
-static redisContext *g_redis_sub = NULL;   /* dedicated subscribe connection */
+static __attribute__((unused)) redisContext *g_redis_sub = NULL;   /* dedicated subscribe connection */
 static pthread_mutex_t g_redis_mu = PTHREAD_MUTEX_INITIALIZER;
 
 static void redis_connect(void) {
@@ -1044,4 +1044,155 @@ int ipc_status_json(char *buf, size_t len) {
     buf[written] = '\0';
     jbuf_free(&b);
     return written;
+}
+
+/* ═══════════════════════════════════════════════════════════════════════════
+ * Agent Checkpoint System (Workstream B1 — Persistent Agents)
+ * ═══════════════════════════════════════════════════════════════════════════ */
+
+static const char *CHECKPOINT_SCHEMA =
+    "CREATE TABLE IF NOT EXISTS agent_checkpoint ("
+    "  agent_id    TEXT NOT NULL,"
+    "  generation  INTEGER NOT NULL,"
+    "  memory_json TEXT,"
+    "  conv_json   TEXT,"
+    "  plan_json   TEXT,"
+    "  task_json   TEXT,"
+    "  saved_at    REAL NOT NULL,"
+    "  PRIMARY KEY (agent_id, generation)"
+    ") WITHOUT ROWID;";
+
+static void ipc_ensure_checkpoint_table(void) {
+    if (!g_ipc.db) return;
+    sqlite3_exec(g_ipc.db, CHECKPOINT_SCHEMA, NULL, NULL, NULL);
+}
+
+bool ipc_checkpoint_save(const char *agent_id, int generation,
+                          const char *memory_json,
+                          const char *conv_json,
+                          const char *plan_json,
+                          const char *task_json) {
+    if (!g_ipc.db || !agent_id) return false;
+    ipc_ensure_checkpoint_table();
+
+    const char *sql =
+        "INSERT OR REPLACE INTO agent_checkpoint "
+        "(agent_id, generation, memory_json, conv_json, plan_json, task_json, saved_at) "
+        "VALUES (?,?,?,?,?,?);";
+
+    sqlite3_stmt *stmt = NULL;
+    if (sqlite3_prepare_v2(g_ipc.db, sql, -1, &stmt, NULL) != SQLITE_OK)
+        return false;
+
+    sqlite3_bind_text(stmt, 1, agent_id, -1, SQLITE_STATIC);
+    sqlite3_bind_int(stmt, 2, generation);
+    sqlite3_bind_text(stmt, 3, memory_json ? memory_json : "null", -1, SQLITE_STATIC);
+    sqlite3_bind_text(stmt, 4, conv_json ? conv_json : "null", -1, SQLITE_STATIC);
+    sqlite3_bind_text(stmt, 5, plan_json ? plan_json : "null", -1, SQLITE_STATIC);
+    sqlite3_bind_text(stmt, 6, task_json ? task_json : "null", -1, SQLITE_STATIC);
+    sqlite3_bind_double(stmt, 7, (double)time(NULL));
+
+    bool ok = (sqlite3_step(stmt) == SQLITE_DONE);
+    sqlite3_finalize(stmt);
+    return ok;
+}
+
+bool ipc_checkpoint_restore(const char *agent_id, int generation,
+                             char **memory_json_out,
+                             char **conv_json_out,
+                             char **plan_json_out,
+                             char **task_json_out) {
+    if (!g_ipc.db || !agent_id) return false;
+    if (memory_json_out) *memory_json_out = NULL;
+    if (conv_json_out)   *conv_json_out = NULL;
+    if (plan_json_out)   *plan_json_out = NULL;
+    if (task_json_out)   *task_json_out = NULL;
+    ipc_ensure_checkpoint_table();
+
+    sqlite3_stmt *stmt = NULL;
+    const char *sql;
+
+    if (generation < 0) {
+        sql = "SELECT memory_json, conv_json, plan_json, task_json "
+              "FROM agent_checkpoint WHERE agent_id=? "
+              "ORDER BY generation DESC LIMIT 1;";
+        sqlite3_prepare_v2(g_ipc.db, sql, -1, &stmt, NULL);
+        sqlite3_bind_text(stmt, 1, agent_id, -1, SQLITE_STATIC);
+    } else {
+        sql = "SELECT memory_json, conv_json, plan_json, task_json "
+              "FROM agent_checkpoint WHERE agent_id=? AND generation=?;";
+        sqlite3_prepare_v2(g_ipc.db, sql, -1, &stmt, NULL);
+        sqlite3_bind_text(stmt, 1, agent_id, -1, SQLITE_STATIC);
+        sqlite3_bind_int(stmt, 2, generation);
+    }
+
+    bool ok = false;
+    if (stmt && sqlite3_step(stmt) == SQLITE_ROW) {
+        if (memory_json_out) {
+            const char *t = (const char *)sqlite3_column_text(stmt, 0);
+            *memory_json_out = t ? strdup(t) : NULL;
+        }
+        if (conv_json_out) {
+            const char *t = (const char *)sqlite3_column_text(stmt, 1);
+            *conv_json_out = t ? strdup(t) : NULL;
+        }
+        if (plan_json_out) {
+            const char *t = (const char *)sqlite3_column_text(stmt, 2);
+            *plan_json_out = t ? strdup(t) : NULL;
+        }
+        if (task_json_out) {
+            const char *t = (const char *)sqlite3_column_text(stmt, 3);
+            *task_json_out = t ? strdup(t) : NULL;
+        }
+        ok = true;
+    }
+    if (stmt) sqlite3_finalize(stmt);
+    return ok;
+}
+
+int ipc_checkpoint_list(const char *agent_id, int *generations_out,
+                         double *timestamps_out, int max) {
+    if (!g_ipc.db || !agent_id) return 0;
+    ipc_ensure_checkpoint_table();
+
+    sqlite3_stmt *stmt = NULL;
+    const char *sql = "SELECT generation, saved_at FROM agent_checkpoint "
+                      "WHERE agent_id=? ORDER BY generation DESC LIMIT ?;";
+    if (sqlite3_prepare_v2(g_ipc.db, sql, -1, &stmt, NULL) != SQLITE_OK)
+        return 0;
+
+    sqlite3_bind_text(stmt, 1, agent_id, -1, SQLITE_STATIC);
+    sqlite3_bind_int(stmt, 2, max);
+
+    int count = 0;
+    while (count < max && sqlite3_step(stmt) == SQLITE_ROW) {
+        if (generations_out) generations_out[count] = sqlite3_column_int(stmt, 0);
+        if (timestamps_out) timestamps_out[count] = sqlite3_column_double(stmt, 1);
+        count++;
+    }
+    sqlite3_finalize(stmt);
+    return count;
+}
+
+int ipc_checkpoint_prune(const char *agent_id, int keep_generations) {
+    if (!g_ipc.db || !agent_id) return 0;
+    ipc_ensure_checkpoint_table();
+
+    /* Get all generations sorted desc */
+    int gens[256];
+    int total = ipc_checkpoint_list(agent_id, gens, NULL, 256);
+    if (total <= keep_generations) return 0;
+
+    int pruned = 0;
+    for (int i = keep_generations; i < total; i++) {
+        sqlite3_stmt *stmt = NULL;
+        const char *sql = "DELETE FROM agent_checkpoint WHERE agent_id=? AND generation=?;";
+        if (sqlite3_prepare_v2(g_ipc.db, sql, -1, &stmt, NULL) == SQLITE_OK) {
+            sqlite3_bind_text(stmt, 1, agent_id, -1, SQLITE_STATIC);
+            sqlite3_bind_int(stmt, 2, gens[i]);
+            if (sqlite3_step(stmt) == SQLITE_DONE) pruned++;
+            sqlite3_finalize(stmt);
+        }
+    }
+    return pruned;
 }
