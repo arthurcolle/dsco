@@ -29,22 +29,13 @@ static int pet_auto_frame(void) {
     return (int)(pet_now() * 6.0);
 }
 
-/* FNV-1a 32-bit — stable across processes/restarts. */
-static uint32_t pet_hash(const char *s) {
-    uint32_t h = 2166136261u;
-    if (!s) return h;
-    for (; *s; s++) { h ^= (unsigned char)*s; h *= 16777619u; }
-    return h;
-}
+#include "crypto.h"  /* fnv1a_32, mulberry32 — consolidated */
 
-/* mulberry32 — faithful port; uint32 wraps stand in for |0 / Math.imul. */
-static double mulberry(uint32_t *a) {
-    *a += 0x6D2B79F5u;
-    uint32_t t = *a;
-    t = (t ^ (t >> 15)) * (t | 1u);
-    t ^= t + (t ^ (t >> 7)) * (t | 61u);
-    return (double)(t ^ (t >> 14)) / 4294967296.0;
-}
+/* FNV-1a 32-bit — now uses shared fnv1a_32() from crypto.h */
+#define pet_hash(s) fnv1a_32(s)
+
+/* mulberry32 — now uses shared mulberry32() from crypto.h */
+#define mulberry(a) mulberry32(a)
 
 static int pick(uint32_t *rng, int n) {
     int v = (int)(mulberry(rng) * n);

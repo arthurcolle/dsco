@@ -1,4 +1,5 @@
 #include "project_grid.h"
+#include "crypto.h"  /* fnv1a_32 — consolidated */
 
 #include <math.h>
 #include <stdint.h>
@@ -40,11 +41,8 @@ static __attribute__((unused)) void free_tile_recursive(dsco_grid_t *g, int id) 
  *  Color math — HSL → RGB, project identity hash, state colors
  * ────────────────────────────────────────────────────────────────────────── */
 
-static uint32_t fnv1a(const char *s) {
-    uint32_t h = 0x811c9dc5u;
-    while (*s) { h ^= (uint8_t)*s++; h *= 0x01000193u; }
-    return h;
-}
+/* FNV-1a — consolidated into fnv1a_32() in crypto.h */
+#define fnv1a(s) fnv1a_32(s)
 
 static float clamp01(float x) { return x < 0 ? 0 : (x > 1 ? 1 : x); }
 
