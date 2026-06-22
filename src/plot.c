@@ -6,6 +6,7 @@
 #include "tui.h"
 #include "json_util.h"
 #include "fractal.h"
+#include "avatar.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -1203,6 +1204,9 @@ int plot_dispatch(const char *input_json, char *out, size_t cap) {
         /* 3-D / 4-D ray-marched fractals (mandelbulb, quaternion/julia4d,
          * mandelbox) live in fractal.c; it parses the spec itself. */
         rc = fractal_plot(out, cap, input_json);
+    } else if (avatar_is_kind(type)) {
+        /* procedural 3-D avatar faces live in avatar.c. */
+        rc = avatar_plot(out, cap, input_json);
     } else if (strcmp(type, "ridgeline") == 0 || strcmp(type, "ridge") == 0) {
         /* parse "series":[[...],[...]] into per-series double arrays */
         const char *sp = json_get_raw(input_json, "series");
