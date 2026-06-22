@@ -392,6 +392,12 @@ typedef struct {
 
 void tui_async_spinner_start(tui_async_spinner_t *s, const char *label,
                              tui_tool_type_t tool_type);
+/* Display-art tools (e.g. `plot`) — their result is shown in full color rather
+ * than a dim one-line preview. tui_print_tool_art prints the full result and
+ * returns true for such tools; false otherwise (caller does its dim preview). */
+bool tui_tool_is_display_art(const char *name);
+bool tui_print_tool_art(const char *name, const char *result);
+
 void tui_async_spinner_stop(tui_async_spinner_t *s, bool ok,
                             const char *result_preview, double elapsed_ms,
                             const char *suffix);

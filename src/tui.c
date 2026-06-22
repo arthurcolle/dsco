@@ -1363,6 +1363,29 @@ void tui_async_spinner_start(tui_async_spinner_t *s, const char *label,
     pthread_create(&s->thread, NULL, async_spinner_thread, s);
 }
 
+/* Tools whose result IS visual art — shown in full with their own ANSI color
+ * instead of a dimmed one-line preview. */
+bool tui_tool_is_display_art(const char *name) {
+    return name && strcmp(name, "plot") == 0;
+}
+
+/* If `name` is a display-art tool, print `result` in full (color preserved,
+ * 2-space indent) to stderr and return true; otherwise return false so the
+ * caller falls back to its usual dim preview. Shared by every tool-result
+ * display path so art renders identically wherever a tool completes. */
+bool tui_print_tool_art(const char *name, const char *result) {
+    if (!tui_tool_is_display_art(name) || !result || !*result) return false;
+    for (const char *p = result; *p; ) {
+        const char *nl = strchr(p, '\n');
+        int len = nl ? (int)(nl - p) : (int)strlen(p);
+        fprintf(stderr, "  %.*s\n", len, p);
+        if (!nl) break;
+        p = nl + 1;
+    }
+    fflush(stderr);
+    return true;
+}
+
 void tui_async_spinner_stop(tui_async_spinner_t *s, bool ok,
                             const char *result_preview, double elapsed_ms,
                             const char *suffix) {
@@ -1434,8 +1457,9 @@ void tui_async_spinner_stop(tui_async_spinner_t *s, bool ok,
             fprintf(stderr, "  %s%s%s", TUI_DIM, suffix, TUI_RESET);
     }
     fprintf(stderr, "\n");
-    /* Preview body indented under the header — first line, dim. */
-    if (preview[0])
+    /* Display-art tools render their FULL colored output; everything else
+     * shows the usual dim first-line preview. */
+    if (!(ok && tui_print_tool_art(s->label, result_preview)) && preview[0])
         fprintf(stderr, "  %s%s%s\n", TUI_DIM, preview, TUI_RESET);
     fflush(stderr);
 }
