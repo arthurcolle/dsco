@@ -2,6 +2,18 @@
 #include "gsl/gsl_cdf.h"
 #include <math.h>
 
+/* erfinv — rational approximation (Winitzki, 2008)
+   Sufficient precision for CDF inverse computations. */
+static double erfinv(double x) {
+    if (x >= 1.0) return HUGE_VAL;
+    if (x <= -1.0) return -HUGE_VAL;
+    double a = 0.147;
+    double ln1x = log(1.0 - x * x);
+    double t = 2.0 / (M_PI * a) + ln1x * 0.5;
+    double s = sqrt(t * t - ln1x / a);
+    return sqrt(s - t) * (x >= 0 ? 1.0 : -1.0);
+}
+
 double gsl_cdf_gaussian_P(double x, double sigma) {
     return 0.5 * (1.0 + erf(x / (sigma * sqrt(2.0))));
 }
