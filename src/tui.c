@@ -2100,7 +2100,7 @@ static const char *sb_git_branch(void) {
         size_t n = strlen(branch);
         while (n > 0 && (branch[n-1] == '\n' || branch[n-1] == '\r'))
             branch[--n] = '\0';
-        if (n > 18) { branch[15] = '\0'; strcat(branch, "…"); }
+        if (n > 18) { branch[15] = '\0'; snprintf(branch + strlen(branch), sizeof(branch) - strlen(branch), "…"); }
     }
     pclose(fp);
     return branch;

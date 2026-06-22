@@ -48,11 +48,6 @@
 #include <sys/time.h>
 #include <signal.h>
 #include <stdint.h>
-
-/* timegm is a BSD extension hidden by _POSIX_C_SOURCE; declare it explicitly. */
-#if defined(__APPLE__) && defined(_POSIX_C_SOURCE)
-time_t timegm(struct tm *tm);
-#endif
 #include <ctype.h>
 #include <math.h>
 #include <limits.h>
@@ -76,6 +71,9 @@ extern volatile int g_interrupted;
 /* ── Forward declaration: net_tool.c ─────────────────────────────────── */
 extern bool tool_net_dispatch(const char *input, char *result, size_t rlen);
 extern void dsco_net_routes_register(void *srv_opaque);
+
+/* ── Forward declaration: graphsub_tools.c ────────────────────────────── */
+extern bool tool_graphsub_dispatch(const char *input, char *result, size_t rlen);
 
 
 static double now_ms(void) {
@@ -19938,7 +19936,6 @@ static bool tool_kb_dispatch(const char *input, char *result, size_t rlen) {
     free(action); return ok;
 }
 
-/* Forward declarations for tools defined later in the file (native networking). */
 static bool tool_port_check(const char *input, char *result, size_t rlen);
 
 static bool tool_network_dispatch(const char *input, char *result, size_t rlen) {
@@ -20752,7 +20749,7 @@ static bool tool_timestamp(const char *input, char *result, size_t rlen) {
         if (!target) { snprintf(result, rlen, "{\"error\":\"target ISO timestamp required for relative\"}"); free(action); return false; }
         struct tm tm = {0};
         strptime(target, "%Y-%m-%dT%H:%M:%SZ", &tm);
-        time_t target_t = timegm(&tm);
+        time_t target_t = mktime(&tm) - timezone;
         double diff = difftime(target_t, now);
         char rel[128];
         if (diff > 0) snprintf(rel, sizeof(rel), "in %.0f seconds (%.1f hours)", diff, diff/3600.0);
@@ -21047,6 +21044,7 @@ static const tool_def_t s_tools[] = {
      *  AGENT & SWARM (2)
      * ══════════════════════════════════════════════════════════════════════ */
     { .name = "net", .description = "Native networking: mesh P2P (libsodium encrypted), HTTP/TLS server/client (mbedTLS), bridge fleet ops, remote tool invocation. Actions: mesh/status, mesh/peers, mesh/send, mesh/broadcast, mesh/connect, http/post, http/status, bridge/fleet, bridge/exec, bridge/send, bridge/bus_put, bridge/bus_get, remote.", .input_schema_json = "{\"type\":\"object\",\"properties\":{\"action\":{\"type\":\"string\",\"description\":\"mesh/status|mesh/peers|mesh/send|mesh/broadcast|mesh/connect|http/post|http/status|bridge/fleet|bridge/exec|bridge/send|bridge/bus_put|bridge/bus_get|remote\"},\"host\":{\"type\":\"string\"},\"port\":{\"type\":\"integer\"},\"peer\":{\"type\":\"string\",\"description\":\"Fleet peer name or IP for bridge/exec and remote\"},\"peer_pubkey\":{\"type\":\"string\",\"description\":\"Hex pubkey for mesh/send\"},\"data\":{\"type\":\"string\",\"description\":\"Payload for mesh/send or mesh/broadcast\"},\"tool\":{\"type\":\"string\",\"description\":\"Tool name for remote invocation\"},\"params\":{\"type\":\"string\",\"description\":\"JSON params for remote tool\"},\"message\":{\"type\":\"string\",\"description\":\"Message for bridge/send\"},\"kind\":{\"type\":\"string\",\"description\":\"Kind for bus_put/bus_get\"},\"body\":{\"type\":\"string\",\"description\":\"Body for bus_put or http/post\"},\"since\":{\"type\":\"integer\"},\"limit\":{\"type\":\"integer\"},\"tls\":{\"type\":\"boolean\"},\"cmd\":{\"type\":\"string\",\"description\":\"Shell command for bridge/exec\"}},\"required\":[\"action\"]}", .execute = tool_net_dispatch },
+    { .name = "graphsub", .description = "GraphSub substrate client: agent registration, pheromone coordination, graph traversal, memory sync, swarm topology, fleet management. Actions: status, register, pheromone (deposit|query|sweep), query (traverse), memory_sync, swarm, fleet.", .input_schema_json = "{\"type\":\"object\",\"properties\":{\"action\":{\"type\":\"string\",\"description\":\"status|register|pheromone|query|memory_sync|swarm|fleet\"},\"model\":{\"type\":\"string\"},\"capabilities\":{\"type\":\"array\",\"items\":{\"type\":\"string\"}},\"tools\":{\"type\":\"array\",\"items\":{\"type\":\"string\"}},\"target_type\":{\"type\":\"string\",\"description\":\"task|agent|path|resource\"},\"target_id\":{\"type\":\"string\"},\"signal_type\":{\"type\":\"string\",\"description\":\"progress|attraction|warning|success|help_needed|capacity\"},\"intensity\":{\"type\":\"number\"},\"ttl_seconds\":{\"type\":\"integer\"},\"start\":{\"type\":\"string\",\"description\":\"Starting node for traversal\"},\"depth\":{\"type\":\"integer\"},\"edge_filter\":{\"type\":\"array\",\"items\":{\"type\":\"string\"}},\"limit\":{\"type\":\"integer\"},\"episodes\":{\"type\":\"array\"},\"type\":{\"type\":\"string\",\"description\":\"episodic or semantic\"},\"topology\":{\"type\":\"string\",\"description\":\"fanout|fanin|debate|pipeline|tournament|stigmergic\"},\"agents\":{\"type\":\"array\"},\"task\":{\"type\":\"string\"},\"peers\":{\"type\":\"array\"}},\"required\":[\"action\"]}", .execute = tool_graphsub_dispatch, .is_read_only = false, .is_concurrent = true },
     { .name = "agent", .description = "Agent management: spawn, status, output, wait, race, kill.", .input_schema_json = "{\"type\":\"object\",\"properties\":{\"action\":{\"type\":\"string\",\"description\":\"spawn|status|output|wait|race|kill\"},\"task\":{\"type\":\"string\",\"description\":\"Task for action=spawn or race\"},\"model\":{\"type\":\"string\",\"description\":\"Model override for spawned agent\"},\"id\":{\"type\":\"integer\",\"description\":\"Agent ID for output|wait|kill\"},\"timeout\":{\"type\":\"integer\",\"description\":\"Seconds for wait or race timeout\"},\"contestants\":{\"type\":\"array\",\"description\":\"For action=race: array of model strings or {provider,model} objects\"}},\"required\":[\"action\"]}", .execute = tool_agent_dispatch },
     { .name = "swarm", .description = "Swarm orchestration: create, map_reduce, status, collect, budget, spawn_executor, spawn_provider, create_executor_swarm, executor_status, topology_list, topology_run, task_profile. map_reduce fans out 'tasks' as parallel workers then spawns a 'coordinator' sub-agent that synthesizes their outputs into one result (hierarchical map→reduce; workers may recurse). Each spawned agent is an INDEPENDENT OS process wrapping a model instance; action=create accepts per-agent effort/temperature/system_prompt/tool_choice so workers can run as distinct instances in parallel, interoperating via IPC.", .input_schema_json = "{\"type\":\"object\",\"properties\":{\"action\":{\"type\":\"string\",\"description\":\"create|map_reduce|status|collect|budget|spawn_executor|spawn_provider|create_executor_swarm|executor_status|topology_list|topology_run|topology_solve|task_profile\"},\"topologies\":{\"type\":\"array\",\"description\":\"topology_solve: names of topologies to run the task across (default: trident,debate,tournament — each anchored on a different model)\"},\"name\":{\"type\":\"string\",\"description\":\"Swarm/group name for create|map_reduce\"},\"group_id\":{\"type\":\"integer\",\"description\":\"Group ID for status|collect\"},\"task\":{\"type\":\"string\",\"description\":\"Single task for spawn_executor|spawn_provider\"},\"tasks\":{\"type\":\"array\",\"description\":\"Task array (strings or {task,model}) for create|map_reduce|create_executor_swarm\"},\"coordinator\":{\"type\":\"string\",\"description\":\"map_reduce: synthesis instruction for the coordinator sub-agent that reduces worker outputs\"},\"coordinator_model\":{\"type\":\"string\",\"description\":\"map_reduce: model for the coordinator (defaults to 'model')\"},\"model\":{\"type\":\"string\",\"description\":\"Default model for spawned workers or topology\"},\"effort\":{\"type\":\"string\",\"description\":\"create: per-agent reasoning effort low|medium|high — the spawned process wraps this model instance\"},\"temperature\":{\"type\":\"number\",\"description\":\"create: per-agent sampling temperature 0-2 for the spawned process\"},\"top_p\":{\"type\":\"number\"},\"top_k\":{\"type\":\"integer\"},\"thinking_budget\":{\"type\":\"integer\"},\"tool_choice\":{\"type\":\"string\"},\"system_prompt\":{\"type\":\"string\",\"description\":\"create: per-agent system prompt/persona for the spawned process (overrides workspace prompt)\"},\"provider\":{\"type\":\"string\",\"description\":\"Native provider name for spawn_provider\"},\"executor\":{\"type\":\"string\",\"description\":\"dsco|claude|codex for executor-based actions\"},\"budget\":{\"type\":\"number\",\"description\":\"Budget (USD) partitioned across workers for create|map_reduce\"},\"budget_usd\":{\"type\":\"number\",\"description\":\"Budget for action=budget\"},\"timeout\":{\"type\":\"integer\",\"description\":\"Seconds per phase for collect|map_reduce\"},\"topology\":{\"type\":\"string\",\"description\":\"Topology name for topology_run\"}},\"required\":[\"action\"]}", .execute = tool_swarm_dispatch },
 
