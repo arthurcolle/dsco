@@ -4,12 +4,14 @@
  *   cc -Iinclude -Wall -Wextra -o test_plan_cache \
  *      tests/test_plan_cache.c src/plan_cache.c -lpthread -lm
  *
- * Run (all tests):
- *   ./test_plan_cache
- * Run a subset (substring match on test name or tag):
- *   ./test_plan_cache adapt jaccard
- * List registered tests without running them:
- *   ./test_plan_cache --list
+ * Run (all tests):              ./test_plan_cache
+ * Filter by name or tag:        ./test_plan_cache adapt jaccard
+ * List tests:                   ./test_plan_cache --list
+ * CI / TAP output:              ./test_plan_cache --tap
+ * Throughput benchmarks:        ./test_plan_cache --bench
+ * Flake / order detection:      ./test_plan_cache --repeat 50 --shuffle
+ * Demonstrate the guards:       ./test_plan_cache guard --timeout 1
+ * Full option list:             ./test_plan_cache --help
  *
  * Sanitizer-friendly:
  *   cc -Iinclude -fsanitize=address,undefined -g -O1 ...
@@ -17,11 +19,16 @@
  * Harness features over the original:
  *   - Non-fatal CHECK_* assertions: a test keeps running after a failed check
  *     so one run surfaces *all* problems, not just the first.
- *   - Fatal REQUIRE_* assertions guarded by setjmp/longjmp: a NULL-deref-prone
+ *   - Fatal REQUIRE_* assertions guarded by sigsetjmp: a NULL-deref-prone
  *     precondition aborts only the current test (no crash, no skipped suite).
+ *   - Crash isolation: SIGSEGV/SIGBUS/SIGFPE/SIGILL/SIGABRT during a test are
+ *     caught and recorded as a failure; the rest of the suite keeps running.
+ *   - Per-test timeout (SIGALRM): a hung/deadlocked test is aborted and failed
+ *     instead of stalling the run (default 30s; --timeout N / --no-timeout).
  *   - Per-test isolation: each test gets its own throwaway $HOME so on-disk
  *     cache files never bleed between tests; teardown removes it.
- *   - Test registry with name/tag filtering from argv and per-test timing.
+ *   - Test registry with name/tag filtering, --repeat, --shuffle, and timing.
+ *   - TAP v13 output (--tap) and a --bench throughput mode.
  *   - Deterministic xorshift PRNG for reproducible fuzz/property tests.
  */
 
@@ -29,9 +36,11 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <ctype.h>
 #include <math.h>
 #include <unistd.h>
 #include <setjmp.h>
+#include <signal.h>
 #include <stdarg.h>
 #include <stdint.h>
 #include <stdbool.h>
@@ -50,9 +59,36 @@ static int g_checks_failed = 0;
 
 /* Per-test scratch state */
 static int        g_cur_fail  = 0;       /* failed checks in the current test */
-static jmp_buf    g_cur_jmp;             /* REQUIRE landing pad */
+static sigjmp_buf g_cur_jmp;             /* REQUIRE / crash / timeout landing pad */
 static char       g_tmp_home[256];       /* this test's throwaway $HOME */
 static const char *g_use_color = NULL;   /* "" or ANSI prefix, decided at start */
+
+/* Per-test diagnostic buffer — failures append here, the runner formats them
+ * (indented for the pretty printer, "# "-prefixed for TAP). */
+static char       g_diag[8192];
+static size_t     g_diag_len = 0;
+static void diag_reset(void) { g_diag[0] = '\0'; g_diag_len = 0; }
+static void diag_addf(const char *fmt, ...) {
+    if (g_diag_len + 1 >= sizeof(g_diag)) return;
+    va_list ap; va_start(ap, fmt);
+    int n = vsnprintf(g_diag + g_diag_len, sizeof(g_diag) - g_diag_len, fmt, ap);
+    va_end(ap);
+    if (n > 0) {
+        g_diag_len += (size_t)n;
+        if (g_diag_len >= sizeof(g_diag)) g_diag_len = sizeof(g_diag) - 1;
+    }
+}
+
+/* Run-mode configuration (set from argv). */
+static int  g_tap          = 0;   /* emit TAP version 13 instead of pretty output */
+static int  g_timeout_secs = 30;  /* per-test wall-clock cap; 0 disables */
+static int  g_repeat       = 1;   /* run the selected suite N times */
+static int  g_shuffle      = 0;   /* randomize test order */
+static uint64_t g_shuffle_seed = 0x1234567890abcdefull;
+
+/* Async crash/timeout capture: a fatal signal during a test siglongjmps back
+ * into the runner, which records it as a failure and moves on. */
+static volatile sig_atomic_t g_signo = 0;
 
 #define C_RED   (g_use_color[0] ? "\033[31m" : "")
 #define C_GRN   (g_use_color[0] ? "\033[32m" : "")
@@ -60,18 +96,23 @@ static const char *g_use_color = NULL;   /* "" or ANSI prefix, decided at start 
 #define C_DIM   (g_use_color[0] ? "\033[2m"  : "")
 #define C_RST   (g_use_color[0] ? "\033[0m"  : "")
 
-/* Record a failed check (non-fatal). */
+/* Record a failed check (non-fatal): append one line to the diag buffer. */
 static void fail_check(const char *file, int line, const char *expr,
                        const char *fmt, ...) {
     g_checks_failed++;
     g_cur_fail++;
-    fprintf(stderr, "\n    %sFAIL%s %s:%d  %s", C_RED, C_RST, file, line, expr);
+    /* basename for compactness */
+    const char *base = strrchr(file, '/');
+    base = base ? base + 1 : file;
+    diag_addf("%s:%d  %s", base, line, expr);
     if (fmt && fmt[0]) {
+        char msg[512];
         va_list ap; va_start(ap, fmt);
-        fprintf(stderr, "  — ");
-        vfprintf(stderr, fmt, ap);
+        vsnprintf(msg, sizeof(msg), fmt, ap);
         va_end(ap);
+        if (msg[0]) diag_addf("  — %s", msg);
     }
+    diag_addf("\n");
 }
 
 /* Non-fatal: keep going so one run reveals every broken expectation. */
@@ -85,7 +126,7 @@ static void fail_check(const char *file, int line, const char *expr,
     g_checks_run++;                                                 \
     if (!(cond)) {                                                  \
         fail_check(__FILE__, __LINE__, #cond, "" __VA_ARGS__);      \
-        longjmp(g_cur_jmp, 1);                                      \
+        siglongjmp(g_cur_jmp, 1);                                   \
     }                                                               \
 } while (0)
 
@@ -546,6 +587,11 @@ static void test_null_safety(void) {
 
 static void *worker(void *arg) {
     int tid = (int)(intptr_t)arg;
+    /* Keep the timeout alarm on the main thread: siglongjmp from a worker into
+     * the runner's jmp_buf would be undefined. (Synchronous faults still land
+     * on the offending thread, but our code shouldn't fault here.) */
+    sigset_t blk; sigemptyset(&blk); sigaddset(&blk, SIGALRM);
+    pthread_sigmask(SIG_BLOCK, &blk, NULL);
     char task[96];
     plan_cache_result_t hit;
     for (int i = 0; i < NOPS; i++) {
@@ -577,15 +623,213 @@ static void test_concurrency_no_corruption(void) {
           "entries within [0,%d], got %d: %s", PLAN_CACHE_MAX, entries, buf);
 }
 
-/* ── Registry & runner ───────────────────────────────────────────────────── */
+/* ── Guard self-tests (tag "manual": skipped unless explicitly filtered) ─── */
 
+/* Deliberately dereferences NULL to prove the crash guard converts a fatal
+ * signal into a recorded failure instead of killing the whole runner. */
+static void test_guard_crash_demo(void) {
+    volatile int *p = NULL;
+    CHECK(*p == 0, "unreachable — the NULL read above traps first");
+}
+
+/* Spins forever to prove the per-test timeout (SIGALRM) aborts a hang.
+ * Run with a short cap, e.g.  ./test_plan_cache --timeout 1 guard  */
+static void test_guard_timeout_demo(void) {
+    volatile unsigned long x = 0;
+    for (;;) x++;
+}
+
+/* Test descriptor — defined here so the generators below can read their
+ * per-case parameter from g_cur_tc->iparam. */
 typedef struct {
     const char *name;
     const char *tag;
     void (*fn)(void);
+    int  iparam;        /* parameter for table-driven/generated cases */
+    bool name_owned;    /* true if name was strdup'd and must be freed */
 } test_case_t;
 
-static const test_case_t TESTS[] = {
+/* The test currently executing — generated cases read their parameter here. */
+static const test_case_t *g_cur_tc = NULL;
+
+/* ── Parameterized / table-driven generators ─────────────────────────────────
+ * Each generator is registered hundreds of times with a distinct iparam, so a
+ * few functions expand into 600 independent, deterministic test cases. Every
+ * case re-seeds from its iparam, so results are reproducible across --repeat
+ * and --shuffle. The case's parameter is read from g_cur_tc->iparam. */
+
+/* alnum-only token (no spaces) so generated tasks always yield >=1 3-gram. */
+static void rng_token(char *buf, int min_len, int max_len) {
+    static const char al[] = "abcdefghijklmnopqrstuvwxyz0123456789";
+    int span = (max_len > min_len) ? (max_len - min_len) : 1;
+    int n = min_len + (int)(rng_u32() % (uint32_t)span);
+    for (int i = 0; i < n; i++) buf[i] = al[rng_u32() % (sizeof(al) - 1)];
+    buf[n] = '\0';
+}
+
+/* Distinct, mutually non-substring uppercase tickers for adapt() cases. */
+static const char *TICKERS[] = {
+    "MSFT","AAPL","GOOGL","AMZN","NVDA","TSLA","META","NFLX","INTC","ORCL",
+    "ADBE","PYPL","UBER","SHOP","COIN","SNOW","CRWD","DDOG","ZS","PLTR",
+    "ABNB","ROKU","TWLO","OKTA","NET","PANW","FTNT","WDAY","TEAM","DASH",
+    "RBLX","HOOD","SOFI","LYFT","PINS","SNAP","SPOT","DOCU","ZM","MDB",
+};
+enum { N_TICKERS = (int)(sizeof(TICKERS) / sizeof(TICKERS[0])) };
+
+/* P1 (×200): Jaccard symmetry, [0,1] bounds, and reflexivity on random pairs. */
+static void gen_similarity_property(void) {
+    int idx = g_cur_tc->iparam;
+    rng_seed(0xA5A50000ull ^ ((uint64_t)idx * 2654435761u + 1));
+    char a[96], b[96];
+    rng_str(a, 0, 80);
+    rng_str(b, 0, 80);
+    float ab = plan_similarity_score(a, b);
+    float ba = plan_similarity_score(b, a);
+    CHECK_FLOAT_EQ(ab, ba, "symmetry");
+    CHECK_FLOAT_GE(ab, 0.0f, "lower bound");
+    CHECK_FLOAT_LE(ab, 1.0f, "upper bound");
+    CHECK_FLOAT_GE(plan_similarity_score(a, a), 1.0f, "reflexive");
+}
+
+/* P2 (×120): store then exact lookup must hit with the stored topology. */
+static void gen_store_lookup(void) {
+    int idx = g_cur_tc->iparam;
+    rng_seed(0x511E0000ull + (uint64_t)idx);
+    char body[64], task[96], topo[32];
+    rng_token(body, 12, 40);
+    snprintf(task, sizeof(task), "g%d_%s", idx, body);
+    snprintf(topo, sizeof(topo), "topo_%d", idx % 7);
+    plan_cache_store(task, topo, "gen", 0.80f + (float)(idx % 20) / 100.0f);
+    plan_cache_result_t hit;
+    REQUIRE(plan_cache_lookup(task, &hit), "exact store must hit (case %d)", idx);
+    CHECK_STR_EQ(hit.topology_name, topo);
+    CHECK_FLOAT_GE(hit.similarity, 0.99f, "exact hit similarity");
+}
+
+/* P3 (×100): adapt() substitutes both entities for a permuted ticker pair. */
+static void gen_adapt(void) {
+    int idx = g_cur_tc->iparam;
+    const char *o1 = TICKERS[(idx + 0) % N_TICKERS];
+    const char *o2 = TICKERS[(idx + 1) % N_TICKERS];
+    const char *n1 = TICKERS[(idx + 2) % N_TICKERS];
+    const char *n2 = TICKERS[(idx + 3) % N_TICKERS];
+    char task[64], pj[96], newt[64];
+    snprintf(task, sizeof(task), "analyze %s and %s", o1, o2);
+    snprintf(pj,   sizeof(pj),   "{\"buy\":\"%s\",\"sell\":\"%s\"}", o1, o2);
+    snprintf(newt, sizeof(newt), "analyze %s and %s", n1, n2);
+    plan_cache_store(task, "fanout_balance", "", 0.9f);
+    plan_cache_store_json(task, pj);
+    const plan_cache_entry_t *e = plan_cache_find_entry(task);
+    REQUIRE(e != NULL, "entry must exist (case %d)", idx);
+    char *adapted = plan_cache_adapt(e, newt);
+    REQUIRE(adapted != NULL, "adapt must produce output");
+    CHECK(strstr(adapted, n1) != NULL, "expected %s after substitution", n1);
+    CHECK(strstr(adapted, n2) != NULL, "expected %s after substitution", n2);
+    CHECK(strcmp(adapted, pj) != 0, "plan must change");
+    free(adapted);
+}
+
+/* P4 (×60): metadata + plan_json survive save → free → init byte-exact;
+ *  a third of cases carry JSON metacharacters to exercise escaping. */
+static void gen_persist_roundtrip(void) {
+    int idx = g_cur_tc->iparam;
+    rng_seed(0x9E3700ull + (uint64_t)idx);
+    char body[48], task[96], topo[32], rat[96], pj[96];
+    rng_token(body, 10, 30);
+    snprintf(task, sizeof(task), "persist%d_%s", idx, body);
+    snprintf(topo, sizeof(topo), "topo_%d", idx % 5);
+    if (idx % 3 == 0)
+        snprintf(rat, sizeof(rat), "needs \"quotes\" \\ and\nnewline %d", idx);
+    else
+        snprintf(rat, sizeof(rat), "rationale variant %d", idx);
+    snprintf(pj, sizeof(pj), "{\"i\":%d,\"q\":\"v\\\"%d\"}", idx, idx);
+
+    plan_cache_store(task, topo, rat, 0.7f);
+    plan_cache_store_json(task, pj);
+    plan_cache_save();
+    plan_cache_free();
+    plan_cache_init();
+
+    plan_cache_result_t hit;
+    REQUIRE(plan_cache_lookup(task, &hit), "must hit after reload (case %d)", idx);
+    CHECK_STR_EQ(hit.topology_name, topo);
+    CHECK_STR_EQ(hit.rationale, rat, "rationale byte-exact");
+    const plan_cache_entry_t *e = plan_cache_find_entry(task);
+    REQUIRE(e != NULL && e->plan_json != NULL, "plan_json must reload");
+    CHECK_STR_EQ(e->plan_json, pj, "plan_json byte-exact");
+}
+
+/* P5 (×50): whitespace/case mutations stay (near-)identical under similarity. */
+static void gen_normalization(void) {
+    int idx = g_cur_tc->iparam;
+    const char *tk = TICKERS[idx % N_TICKERS];
+    char base[96], mut[160];
+    snprintf(base, sizeof(base), "analyze %s earnings report case %d", tk, idx);
+    /* Build an equivalent string: extra internal spaces + uppercased. */
+    size_t w = 0;
+    for (const char *p = base; *p && w < sizeof(mut) - 4; p++) {
+        char c = *p;
+        mut[w++] = (char)toupper((unsigned char)c);
+        if (c == ' ' && (idx & 1)) mut[w++] = ' '; /* widen some gaps */
+    }
+    mut[w] = '\0';
+    /* Internal-only changes (case + collapsible runs) normalize to identical. */
+    CHECK_FLOAT_GE(plan_similarity_score(base, mut), 0.99f,
+                   "normalized equivalence (internal-only mutation)");
+}
+
+/* P6 (×40): stats hit_rate = hits / (entries + hits), computed exactly. */
+static void gen_stats_math(void) {
+    int idx = g_cur_tc->iparam;
+    int E = 1 + (idx % 8);
+    int H = idx % 12;
+    char task[64];
+    for (int i = 0; i < E; i++) {
+        snprintf(task, sizeof(task), "stats%d_entry_%d_token", idx, i);
+        plan_cache_store(task, "fanout_balance", "", 0.8f);
+    }
+    snprintf(task, sizeof(task), "stats%d_entry_0_token", idx);
+    plan_cache_result_t hit;
+    for (int i = 0; i < H; i++) plan_cache_lookup(task, &hit);
+
+    char buf[256];
+    plan_cache_stats_json(buf, sizeof(buf));
+    const char *pe = strstr(buf, "\"entries\":");
+    const char *ph = strstr(buf, "\"total_hits\":");
+    const char *pr = strstr(buf, "\"hit_rate\":");
+    REQUIRE(pe && ph && pr, "stats keys present (case %d)", idx);
+    CHECK(atoi(pe + 10) == E, "entries: got %d want %d", atoi(pe + 10), E);
+    CHECK(atoi(ph + 13) == H, "total_hits: got %d want %d", atoi(ph + 13), H);
+    /* JSON stores hit_rate as %.3f, so allow a 3-decimal rounding margin. */
+    double got = atof(pr + 11), want = (double)H / (double)(E + H);
+    CHECK(fabs(got - want) < 1e-3,
+          "hit_rate case %d: got %.3f want %.3f", idx, got, want);
+}
+
+/* P7 (×30): entry count is exactly min(N, PLAN_CACHE_MAX) after N inserts. */
+static void gen_capacity_invariant(void) {
+    int idx = g_cur_tc->iparam;
+    int N = 1 + idx * 5;                 /* 1 … 146, crossing the cap at 100 */
+    char task[48];
+    for (int i = 0; i < N; i++) {
+        rng_seed(0xCA9A0000ull + (uint64_t)idx * 1000u + (uint64_t)i);
+        rng_token(task, 28, 40);         /* dissimilar, distinct tokens */
+        plan_cache_store(task, "topo", "", 0.8f);
+    }
+    int expect = N < PLAN_CACHE_MAX ? N : PLAN_CACHE_MAX;
+    char buf[256];
+    plan_cache_stats_json(buf, sizeof(buf));
+    const char *pe = strstr(buf, "\"entries\":");
+    REQUIRE(pe, "entries key present");
+    CHECK(atoi(pe + 10) == expect,
+          "N=%d → entries got %d want %d", N, atoi(pe + 10), expect);
+}
+
+/* ── Registry & runner ───────────────────────────────────────────────────── */
+
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wmissing-field-initializers"
+static const test_case_t BASE_TESTS[] = {
     { "similarity: identical → 1.0",                "jaccard",  test_similarity_identical },
     { "similarity: empty/short → 0.0",              "jaccard",  test_similarity_empty_and_short },
     { "similarity: unrelated → low",                "jaccard",  test_similarity_unrelated },
@@ -614,17 +858,63 @@ static const test_case_t TESTS[] = {
     { "flush: alias persists like save",            "persist",  test_flush_alias },
     { "null safety: degenerate inputs",             "safety",   test_null_safety },
     { "concurrency: no corruption under load",      "thread",   test_concurrency_no_corruption },
+    /* "manual" tests are skipped by default; run via an explicit filter, e.g.
+     *   ./test_plan_cache guard --timeout 1   */
+    { "guard: crash is caught (NULL deref)",        "manual",   test_guard_crash_demo },
+    { "guard: timeout aborts a hang",               "manual",   test_guard_timeout_demo },
 };
-static const int N_TESTS = (int)(sizeof(TESTS) / sizeof(TESTS[0]));
+#pragma GCC diagnostic pop
+static const int N_BASE = (int)(sizeof(BASE_TESTS) / sizeof(BASE_TESTS[0]));
 
-static bool selected(const test_case_t *tc, int argc, char **argv) {
-    if (argc <= 1) return true;
-    for (int i = 1; i < argc; i++) {
-        if (argv[i][0] == '-') continue; /* skip flags like --list */
-        if (strstr(tc->name, argv[i]) || (tc->tag && strstr(tc->tag, argv[i])))
-            return true;
+/* ── Dynamic registry: base tests + 600 generated parameterized cases ────── */
+
+static test_case_t *g_reg     = NULL;
+static int          g_reg_n   = 0;
+static int          g_reg_cap = 0;
+
+static void reg_push(const char *name, const char *tag, void (*fn)(void),
+                     int iparam, bool name_owned) {
+    if (g_reg_n == g_reg_cap) {
+        g_reg_cap = g_reg_cap ? g_reg_cap * 2 : 128;
+        g_reg = realloc(g_reg, (size_t)g_reg_cap * sizeof(*g_reg));
     }
-    return false;
+    g_reg[g_reg_n].name       = name;
+    g_reg[g_reg_n].tag        = tag;
+    g_reg[g_reg_n].fn         = fn;
+    g_reg[g_reg_n].iparam     = iparam;
+    g_reg[g_reg_n].name_owned = name_owned;
+    g_reg_n++;
+}
+
+/* Register `count` cases of one generator with an owned, formatted name. */
+static void reg_family(const char *prefix, const char *tag,
+                       void (*fn)(void), int count) {
+    for (int i = 0; i < count; i++) {
+        char nm[96];
+        snprintf(nm, sizeof(nm), "%s #%03d", prefix, i);
+        reg_push(strdup(nm), tag, fn, i, true);
+    }
+}
+
+static void build_registry(void) {
+    for (int i = 0; i < N_BASE; i++)
+        reg_push(BASE_TESTS[i].name, BASE_TESTS[i].tag, BASE_TESTS[i].fn, 0, false);
+
+    /* 600 generated cases across seven property/table-driven families. */
+    reg_family("prop-sim",  "gen-sim",     gen_similarity_property, 200);
+    reg_family("gen-store", "gen-store",   gen_store_lookup,        120);
+    reg_family("gen-adapt", "gen-adapt",   gen_adapt,               100);
+    reg_family("gen-persist","gen-persist",gen_persist_roundtrip,    60);
+    reg_family("gen-norm",  "gen-norm",    gen_normalization,        50);
+    reg_family("gen-stats", "gen-stats",   gen_stats_math,           40);
+    reg_family("gen-cap",   "gen-cap",     gen_capacity_invariant,   30);
+}
+
+static void free_registry(void) {
+    for (int i = 0; i < g_reg_n; i++)
+        if (g_reg[i].name_owned) free((char *)g_reg[i].name);
+    free(g_reg);
+    g_reg = NULL; g_reg_n = g_reg_cap = 0;
 }
 
 static double now_ms(void) {
@@ -633,59 +923,282 @@ static double now_ms(void) {
     return ts.tv_sec * 1000.0 + ts.tv_nsec / 1e6;
 }
 
+/* ── Name/tag filters (parsed from argv, flags excluded) ─────────────────── */
+
+static const char *g_filters[64];
+static int         g_nfilters = 0;
+
+static bool is_manual(const test_case_t *tc) {
+    return tc->tag && strcmp(tc->tag, "manual") == 0;
+}
+
+static bool selected(const test_case_t *tc) {
+    /* Manual tests never run in the default set — only when a filter names them. */
+    if (g_nfilters == 0) return !is_manual(tc);
+    for (int i = 0; i < g_nfilters; i++)
+        if (strstr(tc->name, g_filters[i]) ||
+            (tc->tag && strstr(tc->tag, g_filters[i])))
+            return true;
+    return false;
+}
+
+/* ── Crash / timeout guards ──────────────────────────────────────────────── */
+
+static const char *signame(int s) {
+    switch (s) {
+        case SIGSEGV: return "SIGSEGV";
+        case SIGBUS:  return "SIGBUS";
+        case SIGFPE:  return "SIGFPE";
+        case SIGILL:  return "SIGILL";
+        case SIGABRT: return "SIGABRT";
+        case SIGALRM: return "SIGALRM";
+        default:      return "signal";
+    }
+}
+
+static void crash_handler(int sig)   { g_signo = sig;     siglongjmp(g_cur_jmp, 2); }
+static void timeout_handler(int sig) { (void)sig; g_signo = SIGALRM; siglongjmp(g_cur_jmp, 3); }
+
+static void install_guards(void) {
+    struct sigaction sa;
+    memset(&sa, 0, sizeof(sa));
+    sigemptyset(&sa.sa_mask);
+    sa.sa_handler = crash_handler;
+    sa.sa_flags   = SA_NODEFER;
+    sigaction(SIGSEGV, &sa, NULL);
+    sigaction(SIGBUS,  &sa, NULL);
+    sigaction(SIGFPE,  &sa, NULL);
+    sigaction(SIGILL,  &sa, NULL);
+    sigaction(SIGABRT, &sa, NULL);
+    sa.sa_handler = timeout_handler;
+    sa.sa_flags   = 0;
+    sigaction(SIGALRM, &sa, NULL);
+}
+
+/* ── Order shuffling (Fisher-Yates, local PRNG) ──────────────────────────── */
+
+static void shuffle_order(int *order, int n, uint64_t seed) {
+    uint64_t st = seed ? seed : 0x9e3779b97f4a7c15ull;
+    for (int i = n - 1; i > 0; i--) {
+        st ^= st << 13; st ^= st >> 7; st ^= st << 17;
+        int j = (int)((st >> 11) % (uint64_t)(i + 1));
+        int t = order[i]; order[i] = order[j]; order[j] = t;
+    }
+}
+
+/* Print the diagnostic buffer line-by-line with a prefix/colour. */
+static void print_diag(FILE *f, const char *line_prefix,
+                       const char *col, const char *rst) {
+    const char *s = g_diag;
+    while (*s) {
+        const char *nl = strchr(s, '\n');
+        int len = nl ? (int)(nl - s) : (int)strlen(s);
+        if (len > 0)
+            fprintf(f, "%s%s%.*s%s\n", line_prefix, col, len, s, rst);
+        if (!nl) break;
+        s = nl + 1;
+    }
+}
+
+/* ── Single-test runner (handles pretty + TAP, crash + timeout) ──────────── */
+
+static void run_one(const test_case_t *tc, int tap_index) {
+    g_tests_run++;
+    g_cur_fail = 0;
+    g_signo    = 0;
+    g_cur_tc   = tc;
+    diag_reset();
+
+    if (!g_tap) fprintf(stderr, "  %-46s ", tc->name);
+
+    test_setup();
+    double t0 = now_ms();
+    int jrc = sigsetjmp(g_cur_jmp, 1);
+    if (jrc == 0) {
+        if (g_timeout_secs > 0) alarm((unsigned)g_timeout_secs);
+        tc->fn();
+        alarm(0);
+    } else {
+        alarm(0);
+        if (jrc == 2) {          /* fatal signal */
+            g_checks_run++; g_checks_failed++; g_cur_fail++;
+            diag_addf("CRASH: caught %s — test aborted by guard\n", signame(g_signo));
+        } else if (jrc == 3) {   /* SIGALRM timeout */
+            g_checks_run++; g_checks_failed++; g_cur_fail++;
+            diag_addf("TIMEOUT: exceeded %ds — possible hang/deadlock\n", g_timeout_secs);
+        }
+        /* jrc == 1 (REQUIRE) already recorded its own diagnostic */
+    }
+    double dt = now_ms() - t0;
+    test_teardown();
+
+    bool ok = (g_cur_fail == 0);
+    if (ok) g_tests_passed++; else g_tests_failed++;
+
+    if (g_tap) {
+        printf("%sok %d - %s # %.1fms\n", ok ? "" : "not ", tap_index, tc->name, dt);
+        if (!ok) print_diag(stdout, "# ", "", "");
+        fflush(stdout);
+    } else if (ok) {
+        fprintf(stderr, "%sPASS%s %s(%.1fms)%s\n", C_GRN, C_RST, C_DIM, dt, C_RST);
+    } else {
+        fprintf(stderr, "%sFAIL%s %s(%.1fms)%s\n", C_RED, C_RST, C_DIM, dt, C_RST);
+        print_diag(stderr, "      ", C_RED, C_RST);
+    }
+}
+
+/* ── Benchmark mode ──────────────────────────────────────────────────────── */
+
+static void bench_line(const char *name, long iters, double ms) {
+    double per = iters ? (ms * 1e6) / (double)iters : 0.0;       /* ns/op */
+    double ops = ms > 0 ? (double)iters / (ms / 1000.0) : 0.0;   /* ops/sec */
+    fprintf(stderr, "  %-28s %10ld iters  %9.1f ms  %8.0f ns/op  %12.0f ops/s\n",
+            name, iters, ms, per, ops);
+}
+
+static void run_benchmarks(void) {
+    test_setup();
+    fprintf(stderr, "\nplan_cache benchmarks  %s(persist-backed; /tmp HOME)%s\n", C_DIM, C_RST);
+    fprintf(stderr, "────────────────────────────────────────────────────────────────────────────────\n");
+
+    volatile float fsink = 0;
+    const char *a = "analyze MSFT and AAPL earnings for Q1 2026";
+    const char *b = "analyze GOOGL and AMZN earnings for Q1 2026";
+
+    long N = 200000;
+    double t0 = now_ms();
+    for (long i = 0; i < N; i++) fsink += plan_similarity_score(a, b);
+    bench_line("similarity (3-gram jaccard)", N, now_ms() - t0);
+
+    /* miss lookups: no disk write on the miss path */
+    plan_cache_store("seed task for benchmark", "fanout_balance", "", 0.9f);
+    plan_cache_result_t hit;
+    long M = 50000;
+    t0 = now_ms();
+    char q[64];
+    for (long i = 0; i < M; i++) {
+        snprintf(q, sizeof(q), "totally unrelated query token %ld zzz", i);
+        if (plan_cache_lookup(q, &hit)) fsink += 1.0f;
+    }
+    bench_line("lookup miss", M, now_ms() - t0);
+
+    /* hit lookups: each hit bumps stats and re-persists the index */
+    long H = 5000;
+    t0 = now_ms();
+    for (long i = 0; i < H; i++)
+        if (plan_cache_lookup("seed task for benchmark", &hit)) fsink += 1.0f;
+    bench_line("lookup hit (+persist)", H, now_ms() - t0);
+
+    /* stores: find-or-alloc + index persist on every call */
+    long S = 3000;
+    t0 = now_ms();
+    char tk[64];
+    for (long i = 0; i < S; i++) {
+        snprintf(tk, sizeof(tk), "benchmark store task variant %ld", i);
+        plan_cache_store(tk, "specialist_chain", "bench", 0.8f);
+    }
+    bench_line("store (+persist)", S, now_ms() - t0);
+
+    fprintf(stderr, "────────────────────────────────────────────────────────────────────────────────\n");
+    fprintf(stderr, "  %s(sink=%.0f)%s\n\n", C_DIM, (double)fsink, C_RST);
+    test_teardown();
+}
+
+/* ── Usage ───────────────────────────────────────────────────────────────── */
+
+static void usage(const char *prog) {
+    fprintf(stderr,
+        "usage: %s [options] [name-or-tag filters...]\n"
+        "  --list            list registered tests and exit\n"
+        "  --tap             emit TAP version 13 (for CI)\n"
+        "  --bench           run throughput benchmarks instead of tests\n"
+        "  --repeat N        run the selected suite N times (flake detection)\n"
+        "  --shuffle         randomize test order each repetition\n"
+        "  --seed=HEX        seed for --shuffle (default fixed/deterministic)\n"
+        "  --timeout N       per-test timeout in seconds (default 30)\n"
+        "  --no-timeout      disable the per-test timeout\n"
+        "  --help            this message\n"
+        "Filters match a substring of a test's name or tag; multiple are OR-ed.\n",
+        prog);
+}
+
 int main(int argc, char **argv) {
     g_use_color = isatty(2) ? "1" : "";
 
-    bool list_only = false;
-    for (int i = 1; i < argc; i++)
-        if (strcmp(argv[i], "--list") == 0) list_only = true;
+    bool list_only = false, bench = false;
+    for (int i = 1; i < argc; i++) {
+        const char *a = argv[i];
+        if      (!strcmp(a, "--list"))       list_only = true;
+        else if (!strcmp(a, "--tap"))        g_tap = 1;
+        else if (!strcmp(a, "--bench"))      bench = true;
+        else if (!strcmp(a, "--shuffle"))    g_shuffle = 1;
+        else if (!strcmp(a, "--no-timeout")) g_timeout_secs = 0;
+        else if (!strcmp(a, "--help"))       { usage(argv[0]); return 0; }
+        else if (!strncmp(a, "--timeout=", 10)) g_timeout_secs = atoi(a + 10);
+        else if (!strcmp(a, "--timeout") && i + 1 < argc) g_timeout_secs = atoi(argv[++i]);
+        else if (!strncmp(a, "--repeat=", 9))  g_repeat = atoi(a + 9);
+        else if (!strcmp(a, "--repeat") && i + 1 < argc)  g_repeat = atoi(argv[++i]);
+        else if (!strncmp(a, "--seed=", 7))  g_shuffle_seed = strtoull(a + 7, NULL, 0);
+        else if (a[0] == '-')                fprintf(stderr, "ignoring unknown flag: %s\n", a);
+        else if (g_nfilters < (int)(sizeof(g_filters)/sizeof(g_filters[0])))
+            g_filters[g_nfilters++] = a;
+    }
+    if (g_repeat < 1) g_repeat = 1;
 
+    install_guards();
+    build_registry();
+
+    if (bench)     { run_benchmarks(); free_registry(); return 0; }
     if (list_only) {
-        fprintf(stderr, "registered tests (%d):\n", N_TESTS);
-        for (int i = 0; i < N_TESTS; i++)
-            fprintf(stderr, "  %-44s [%s]\n", TESTS[i].name, TESTS[i].tag);
+        int shown = 0;
+        for (int i = 0; i < g_reg_n; i++) if (selected(&g_reg[i])) shown++;
+        fprintf(stderr, "registered tests: %d total, %d selected\n", g_reg_n, shown);
+        for (int i = 0; i < g_reg_n; i++)
+            if (selected(&g_reg[i]))
+                fprintf(stderr, "  %-44s [%s]\n", g_reg[i].name, g_reg[i].tag);
+        free_registry();
         return 0;
     }
 
-    fprintf(stderr, "\nplan_cache tests%s\n", argc > 1 ? " (filtered)" : "");
-    fprintf(stderr, "────────────────────────────────────────────────────────────\n");
+    /* Build the index of selected tests. */
+    int *order = malloc((size_t)g_reg_n * sizeof(int));
+    int nsel = 0;
+    for (int i = 0; i < g_reg_n; i++)
+        if (selected(&g_reg[i])) order[nsel++] = i;
+
+    if (g_tap) {
+        printf("TAP version 13\n1..%d\n", nsel * g_repeat);
+        fflush(stdout);
+    } else {
+        fprintf(stderr, "\nplan_cache tests%s%s\n",
+                g_nfilters ? " (filtered)" : "",
+                g_repeat > 1 ? " ×repeat" : "");
+        fprintf(stderr, "────────────────────────────────────────────────────────────\n");
+    }
 
     double t_start = now_ms();
-    for (int i = 0; i < N_TESTS; i++) {
-        const test_case_t *tc = &TESTS[i];
-        if (!selected(tc, argc, argv)) continue;
-
-        g_tests_run++;
-        g_cur_fail = 0;
-        fprintf(stderr, "  %-46s ", tc->name);
-
-        test_setup();
-        double t0 = now_ms();
-        if (setjmp(g_cur_jmp) == 0) {
-            tc->fn();
-        } /* else: REQUIRE aborted the test; g_cur_fail already > 0 */
-        double dt = now_ms() - t0;
-        test_teardown();
-
-        if (g_cur_fail == 0) {
-            g_tests_passed++;
-            fprintf(stderr, "%sPASS%s %s(%.1fms)%s\n", C_GRN, C_RST, C_DIM, dt, C_RST);
-        } else {
-            g_tests_failed++;
-            fprintf(stderr, "\n  %-46s %sFAILED%s (%d check%s) %s(%.1fms)%s\n",
-                    tc->name, C_RED, C_RST,
-                    g_cur_fail, g_cur_fail == 1 ? "" : "s", C_DIM, dt, C_RST);
-        }
+    int tap_index = 1;
+    for (int rep = 0; rep < g_repeat; rep++) {
+        if (g_shuffle) shuffle_order(order, nsel, g_shuffle_seed + (uint64_t)rep);
+        if (g_repeat > 1 && !g_tap)
+            fprintf(stderr, "%s── pass %d/%d ──%s\n", C_DIM, rep + 1, g_repeat, C_RST);
+        for (int k = 0; k < nsel; k++)
+            run_one(&g_reg[order[k]], tap_index++);
     }
     double total_ms = now_ms() - t_start;
 
-    fprintf(stderr, "────────────────────────────────────────────────────────────\n");
-    fprintf(stderr, "  %s%d/%d tests passed%s",
+    FILE *out = g_tap ? stdout : stderr;
+    if (!g_tap)
+        fprintf(out, "────────────────────────────────────────────────────────────\n");
+    fprintf(out, "%s%s%d/%d tests passed%s",
+            g_tap ? "# " : "  ",
             g_tests_failed ? C_YEL : C_GRN, g_tests_passed, g_tests_run, C_RST);
     if (g_tests_failed > 0)
-        fprintf(stderr, "  %s(%d failed)%s", C_RED, g_tests_failed, C_RST);
-    fprintf(stderr, "   %s%d checks, %d failed · %.1fms%s\n\n",
+        fprintf(out, "  %s(%d failed)%s", C_RED, g_tests_failed, C_RST);
+    fprintf(out, "   %s%d checks, %d failed · %.1fms%s\n\n",
             C_DIM, g_checks_run, g_checks_failed, total_ms, C_RST);
 
+    free(order);
+    free_registry();
     return g_tests_failed > 0 ? 1 : 0;
 }
