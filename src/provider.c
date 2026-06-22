@@ -1261,10 +1261,12 @@ static char *openrouter_build_request(provider_t *p, conversation_t *conv,
 
 /* Native Moonshot routing. Speaks the OpenAI Chat Completions dialect, but
  * adds Anthropic-style {"thinking": {"type": "enabled"|"disabled"}} so we
- * can toggle Kimi K2.5 reasoning. Per the Kimi K2.5 docs, when thinking is
- * enabled, several sampling knobs (temperature/top_p/n/penalties) must be
- * left at their server-side defaults — we never send those today, so we're
- * already compliant. */
+ * can toggle Kimi K2.5 reasoning. Per the Kimi K2.7 Code docs, thinking must
+ * always be enabled (the model throws an error if disabled), and sampling
+ * parameters are fixed: temperature=1.0, top_p=0.95, n=1, penalties=0.0.
+ * These are now injected in openai_build_request for all moonshot-compatible
+ * models, so moonshot_build_request just needs to strip the type=disabled
+ * thinking field that openai_build_request might emit. */
 static char *moonshot_build_request(provider_t *p, conversation_t *conv,
                                      session_state_t *session, int max_tokens,
                                      const char *credential) {
@@ -1784,9 +1786,19 @@ static char *openai_build_request(provider_t *p, conversation_t *conv,
 
     /* Moonshot/Kimi K2.7 Code requires thinking mode and rejects explicit
      * non-thinking payloads. Emit provider-native thinking enabled when using
-     * Moonshot-compatible models so tool-calling + reasoning can coexist. */
+     * Moonshot-compatible models so tool-calling + reasoning can coexist.
+     *
+     * K2.7 Code also enforces fixed sampling parameters — temperature=1.0,
+     * top_p=0.95, n=1, penalties=0.0 — and rejects any other values with a 400.
+     * We inject the server-required values explicitly to avoid any downstream
+     * defaults or user overrides causing rejections. */
     if (model_is_moonshot_compatible(session ? session->model : NULL)) {
         jbuf_append(&b, ",\"thinking\":{\"type\":\"enabled\"}");
+        jbuf_append(&b, ",\"temperature\":1.0");
+        jbuf_append(&b, ",\"top_p\":0.95");
+        jbuf_append(&b, ",\"n\":1");
+        jbuf_append(&b, ",\"presence_penalty\":0.0");
+        jbuf_append(&b, ",\"frequency_penalty\":0.0");
     }
 
     /* System message. Build the text once, then emit either as a plain string
@@ -2996,12 +3008,15 @@ static const char *provider_family_primary_model(const char *family, bool prefer
     }
     if (strcmp(family, "moonshot") == 0) {
         if (prefer_code) {
-            if (provider_has_usable_key("moonshot", NULL)) return "kimi-k2.7-code";
+            /* Prefer highspeed variant on native — 180+ tok/s vs ~36 tok/s,
+             * same model, just faster inference. Falls back to standard
+             * kimi-k2.7-code if highspeed is unavailable or rate-limited. */
+            if (provider_has_usable_key("moonshot", NULL)) return "kimi-k2.7-code-highspeed";
             if (provider_has_usable_key("openrouter", NULL)) return "moonshotai/kimi-k2.7-code";
             return NULL;
         }
-        if (provider_has_usable_key("moonshot", NULL)) return "kimi-k2.7";
-        if (provider_has_usable_key("openrouter", NULL)) return "moonshotai/kimi-k2.7";
+        if (provider_has_usable_key("moonshot", NULL)) return "kimi-k2.7-code-highspeed";
+        if (provider_has_usable_key("openrouter", NULL)) return "moonshotai/kimi-k2.7-code";
         return NULL;
     }
     if (strcmp(family, "cohere") == 0) {
