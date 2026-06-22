@@ -28,6 +28,7 @@
 #define STEP_MAX_CHILDREN    32   /* child steps per step */
 #define STEP_MAX_DEPS        16   /* dependency step ids per step */
 #define STEP_MAX_ATOMS       64   /* atoms per step */
+#define ATOM_MAX_DEPS        16   /* max input-from / output-to wires */
 
 #define PLAN_TAG_MAX         16
 #define PLAN_TAG_LEN         48
@@ -74,6 +75,10 @@ typedef enum {
     ATOM_DIALOG,
     ATOM_ASSERT,
     ATOM_NOOP,
+    ATOM_CONDITIONAL_IF,    /* if condition_slot is true → run true_step_id */
+    ATOM_CONDITIONAL_ELSE,  /* else → run false_step_id */
+    ATOM_LOOP_WHILE,        /* repeat child atoms while condition_slot is true */
+    ATOM_BREAK,             /* exit enclosing loop */
 } atom_type_t;
 
 /* ── Data structures ─────────────────────────────────────────────────────── */
@@ -128,6 +133,24 @@ typedef struct {
     char         *response;           /* heap */
     /* ASSERT */
     char         *condition;          /* heap */
+    /* ── Stateful wiring (Priority 2) ───────────────────────────────────
+     * input_from_ids : atom IDs whose result this atom reads as input
+     * input_keys     : optional JSON key to extract from each input
+     * output_to_ids  : atom IDs to push this atom's result to
+     * After atom_run() completes, the runtime resolves wired_input from
+     * upstream atom results before calling the tool / shell.            */
+    int           input_from_ids[ATOM_MAX_DEPS];
+    char          input_keys[ATOM_MAX_DEPS][64];
+    int           input_from_count;
+    int           output_to_ids[ATOM_MAX_DEPS];
+    int           output_to_count;
+    char         *wired_input;        /* heap; resolved upstream data */
+    /* ── Conditional branching (Priority 6) ─────────────────────────── */
+    char          condition_slot[64];  /* read this slot, evaluate as boolean */
+    int           true_step_id;        /* step to execute if condition true */
+    int           false_step_id;       /* step to execute if condition false */
+    int           loop_max_iterations; /* max iterations for LOOP_WHILE (0=unlimited) */
+    int           loop_current_iter;   /* current iteration count */
 } atom_t;
 
 typedef struct {
@@ -189,6 +212,21 @@ bool    atom_set_result(int atom_id, const char *result);
 
 /* Execute one atom; fills result_buf; updates atom status. */
 bool    atom_run(int atom_id, char *result_buf, size_t rlen);
+
+/* ── Stateful wiring API ─────────────────────────────────────────────────── */
+
+/* Wire src_atom_id's result into dst_atom_id's input.
+ * key: if non-NULL, extract this JSON field from upstream result.
+ * Also registers the reverse edge (output_to) on src_atom_id. */
+bool    atom_wire(int src_atom_id, int dst_atom_id, const char *key);
+
+/* Remove a wiring edge. */
+bool    atom_unwire(int src_atom_id, int dst_atom_id);
+
+/* Resolve wired_input for atom_id from all upstream atom results.
+ * Called automatically by atom_run, but can be called manually.
+ * Returns heap-allocated JSON object; caller must free. */
+char   *atom_resolve_inputs(int atom_id);
 
 /* ── Execution helpers ───────────────────────────────────────────────────── */
 
