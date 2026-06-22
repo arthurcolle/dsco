@@ -908,10 +908,12 @@ static char *provider_replace_claude_code_oauth_json(const claude_code_oauth_bun
 
     size_t prefix_len = (size_t)(value_start - bundle->storage_json);
     size_t suffix_len = strlen(value_end);
-    char *out = safe_malloc(prefix_len + strlen(new_oauth_json) + suffix_len + 1);
+    size_t new_json_len = strlen(new_oauth_json);
+    size_t out_sz = prefix_len + new_json_len + suffix_len + 1;
+    char *out = safe_malloc(out_sz);
     memcpy(out, bundle->storage_json, prefix_len);
-    strcpy(out + prefix_len, new_oauth_json);
-    strcpy(out + prefix_len + strlen(new_oauth_json), value_end);
+    snprintf(out + prefix_len, out_sz - prefix_len, "%s", new_oauth_json);
+    snprintf(out + prefix_len + new_json_len, out_sz - prefix_len - new_json_len, "%s", value_end);
     return out;
 }
 
@@ -1274,12 +1276,9 @@ static char *moonshot_build_request(provider_t *p, conversation_t *conv,
     if (len == 0 || base[len - 1] != '}') return base;
     base[len - 1] = '\0';
 
-    jbuf_t b;
-    jbuf_init(&b, len + 64);
-    jbuf_append(&b, base);
-    free(base);
-    jbuf_append(&b, ",\"thinking\":{\"type\":\"disabled\"}}");
-    return b.data;
+    /* Never emit type=disabled for Moonshot/Kimi — kimi-k2.7-code and kimi-k2.5 reject it.
+       Thinking is disabled by omission. */
+    return base;
 }
 
 /* ── xAI (native api.x.ai) ─────────────────────────────────────────────

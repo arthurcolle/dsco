@@ -244,6 +244,54 @@ int swarm_spawn(swarm_t *s, const char *task, const char *model) {
     return swarm_spawn_in_group(s, -1, task, model);
 }
 
+/* Optional per-spawn model-instance spec. The caller sets this immediately
+ * before swarm_spawn*(); the freshly-forked child applies it as DSCO_* env so
+ * it wraps a distinct model instance, then the parent clears it so it never
+ * leaks to the next child. */
+static struct {
+    bool   set;
+    char   effort[16];
+    double temperature, top_p;
+    int    top_k, thinking_budget;
+    char   tool_choice[128];
+    char  *system_prompt;
+} s_next_instance;
+
+void swarm_set_next_instance(const char *effort, double temperature,
+                             double top_p, int top_k, int thinking_budget,
+                             const char *tool_choice, const char *system_prompt) {
+    free(s_next_instance.system_prompt);
+    memset(&s_next_instance, 0, sizeof(s_next_instance));
+    s_next_instance.set = true;
+    if (effort) snprintf(s_next_instance.effort, sizeof(s_next_instance.effort), "%s", effort);
+    s_next_instance.temperature     = temperature;
+    s_next_instance.top_p           = top_p;
+    s_next_instance.top_k           = top_k;
+    s_next_instance.thinking_budget = thinking_budget;
+    if (tool_choice) snprintf(s_next_instance.tool_choice, sizeof(s_next_instance.tool_choice), "%s", tool_choice);
+    if (system_prompt) s_next_instance.system_prompt = strdup(system_prompt);
+}
+
+/* Child-side: export the pending instance spec as env before execl. */
+static void swarm_apply_instance_env(void) {
+    if (!s_next_instance.set) return;
+    char b[32];
+    if (s_next_instance.effort[0]) setenv("DSCO_EFFORT", s_next_instance.effort, 1);
+    if (s_next_instance.temperature >= 0) { snprintf(b, sizeof b, "%.4f", s_next_instance.temperature); setenv("DSCO_TEMPERATURE", b, 1); }
+    if (s_next_instance.top_p >= 0)       { snprintf(b, sizeof b, "%.4f", s_next_instance.top_p);       setenv("DSCO_TOP_P", b, 1); }
+    if (s_next_instance.top_k > 0)        { snprintf(b, sizeof b, "%d",   s_next_instance.top_k);        setenv("DSCO_TOP_K", b, 1); }
+    if (s_next_instance.thinking_budget > 0) { snprintf(b, sizeof b, "%d", s_next_instance.thinking_budget); setenv("DSCO_THINKING_BUDGET", b, 1); }
+    if (s_next_instance.tool_choice[0])   setenv("DSCO_TOOL_CHOICE", s_next_instance.tool_choice, 1);
+    if (s_next_instance.system_prompt)    setenv("DSCO_SYSTEM_PROMPT", s_next_instance.system_prompt, 1);
+}
+
+/* Parent-side: drop the spec so it does not bleed into the next spawn. */
+static void swarm_clear_next_instance(void) {
+    if (!s_next_instance.set) return;
+    free(s_next_instance.system_prompt);
+    memset(&s_next_instance, 0, sizeof(s_next_instance));
+}
+
 int swarm_spawn_in_group(swarm_t *s, int group_id, const char *task, const char *model) {
     if (s->child_count >= SWARM_MAX_CHILDREN) return -1;
 
@@ -363,6 +411,10 @@ int swarm_spawn_in_group(swarm_t *s, int group_id, const char *task, const char 
             }
         }
 
+        /* Apply the per-agent model-instance spec (effort/temp/system-prompt…)
+         * so this child wraps a distinct model instance. */
+        swarm_apply_instance_env();
+
         /* Use execl with absolute path (not execlp which searches PATH) */
         setenv("DSCO_PROFILE", "worker", 1);
         setenv("DSCO_WORKER", "1", 1);
@@ -375,6 +427,10 @@ int swarm_spawn_in_group(swarm_t *s, int group_id, const char *task, const char 
 
     /* ── Parent ── */
     close(stdout_pipe[1]);
+
+    /* The child has inherited the instance spec; drop it so the next spawn
+     * starts clean. */
+    swarm_clear_next_instance();
 
     /* Make pipe non-blocking */
     fcntl(stdout_pipe[0], F_SETFL, O_NONBLOCK);

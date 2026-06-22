@@ -149,6 +149,15 @@ void swarm_destroy(swarm_t *s);
 int  swarm_spawn(swarm_t *s, const char *task, const char *model);
 int  swarm_spawn_in_group(swarm_t *s, int group_id, const char *task, const char *model);
 
+/* Set the model-instance spec applied to the NEXT swarm_spawn*() child, so a
+ * spawned process wraps a fully distinct model instance (not just a model id).
+ * The freshly-forked child exports these as DSCO_* env and session_state_init()
+ * picks them up. Pass -1 / NULL to leave a field at its default. The spec is
+ * consumed (cleared) by the next spawn — set it immediately before spawning. */
+void swarm_set_next_instance(const char *effort, double temperature,
+                             double top_p, int top_k, int thinking_budget,
+                             const char *tool_choice, const char *system_prompt);
+
 /* Spawn a sub-dsco forced to a specific native provider (e.g. "openai", "groq").
  * The child process gets --exec <provider> -m <model> so it routes through
  * that provider's API directly, completely decoupled from the parent's provider. */
