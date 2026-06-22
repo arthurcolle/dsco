@@ -1,5 +1,6 @@
 #include "talons.h"
 #include "vfs.h"
+#include "audit_log.h"  /* Cross-pollination: strategy outcomes → audit chain */
 #include <math.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -157,6 +158,24 @@ static void record_hunt(talons_engine_t *t, const goal_t *g, bool won) {
     /* Persist updated strategy stats to VFS */
     if (g_talons_vfs && si >= 0 && si < STRATEGY_COUNT) {
         persist_strategy_from(t, si);
+    }
+
+    /* Cross-pollination: audit-log strategy outcomes into the HMAC-chained
+     * audit trail. This makes competitive execution decisions replayable
+     * and verifiable — you can reconstruct which strategy was used, whether
+     * it won, how many attempts it took, and what it cost, all from the
+     * tamper-evident audit log. */
+    {
+        char audit_msg[512];
+        const char *strat_name = talons_strategy_name(g->strategy);
+        const char *state_name = talons_goal_state_name(g->state);
+        snprintf(audit_msg, sizeof(audit_msg),
+                 "goal=%d strategy=%s result=%s attempts=%d cost=%.4f "
+                 "duration=%.1fs confidence=%.2f",
+                 g->id, strat_name, state_name,
+                 g->attempts, g->total_cost,
+                 h->duration, g->confidence);
+        audit_log("talons", audit_msg);
     }
 }
 
