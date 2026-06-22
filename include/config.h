@@ -135,11 +135,17 @@ const model_info_t *openrouter_cache_lookup(const char *slug);
 
 static const model_info_t MODEL_REGISTRY[] = {
     /* ── Anthropic (native API) ──────────────────────────────────────────── */
-    { "opus",         "claude-opus-4-7",             200000, 32000,  15.0,  75.0,  1.50, 18.75, 1 },
+    { "fable",        "claude-fable-5",              500000, 64000,  20.0, 100.0,  2.00, 25.00, 1 },
+    { "fable5",       "claude-fable-5",              500000, 64000,  20.0, 100.0,  2.00, 25.00, 1 },
+    { "opus",         "claude-opus-4-8",             200000, 64000,  15.0,  75.0,  1.50, 18.75, 1 },
+    { "opus48",       "claude-opus-4-8",             200000, 64000,  15.0,  75.0,  1.50, 18.75, 1 },
+    { "opus47",       "claude-opus-4-7",             200000, 32000,  15.0,  75.0,  1.50, 18.75, 1 },
     { "opus46",       "claude-opus-4-6",             200000, 32000,  15.0,  75.0,  1.50, 18.75, 1 },
     { "sonnet",       "claude-sonnet-4-6",           200000, 16000,   3.0,  15.0,  0.30,  3.75, 1 },
     { "haiku",        "claude-haiku-4-5-20251001",   200000,  8192,   0.80,  4.0,  0.08,  1.00, 0 },
     /* ── Anthropic (OpenRouter IDs — for cross-provider routing) ─────── */
+    { "or-fable",     "anthropic/claude-fable-5",     1000000, 64000, 20.0, 100.0,  0, 0, 1 },
+    { "or-opus48",    "anthropic/claude-opus-4.8",    1000000, 64000, 15.0,  75.0,  0, 0, 1 },
     { "or-opus47",    "anthropic/claude-opus-4.7",    1000000, 32000, 15.0,  75.0,  0, 0, 1 },
     { "or-opus46",    "anthropic/claude-opus-4.6",    1000000, 32000,  5.0,  25.0,  0, 0, 1 },
     { "or-sonnet46",  "anthropic/claude-sonnet-4.6",  1000000, 16000,  3.0,  15.0,  0, 0, 1 },
@@ -165,6 +171,9 @@ static const model_info_t MODEL_REGISTRY[] = {
     { "gpt5-codex",   "openai/gpt-5-codex",             400000, 32768,  1.25, 10.0,  0, 0, 1 },
     { "gpt5-mini",    "openai/gpt-5-mini",              400000, 32768,  0.25,  2.0,  0, 0, 0 },
     { "gpt5-nano",    "openai/gpt-5-nano",              400000, 32768,  0.05,  0.40, 0, 0, 0 },
+    /* ── Cursor Composer (agentic coding) ────────────────────────────── */
+    { "composer",     "cursor/composer-2.5",            256000, 32768,  1.25,  6.0,  0, 0, 1 },
+    { "composer2",    "cursor/composer-2",              256000, 32768,  1.0,   5.0,  0, 0, 1 },
     /* ── OpenAI — GPT-4.x / 4o family ───────────────────────────────── */
     { "gpt41",        "openai/gpt-4.1",               1047576, 32768,  2.0,   8.0,  0, 0, 0 },
     { "gpt41-mini",   "openai/gpt-4.1-mini",          1047576, 32768,  0.40,  1.60, 0, 0, 0 },
@@ -182,6 +191,7 @@ static const model_info_t MODEL_REGISTRY[] = {
     { "gpt-oss",      "openai/gpt-oss-120b",           131072, 32768,  0.04,  0.19, 0, 0, 0 },
     /* ── Google Gemini ───────────────────────────────────────────────── */
     { "gem31-pro",    "google/gemini-3.1-pro-preview", 1048576, 32768,  2.0,  12.0,  0, 0, 1 },
+    { "gem31-dt",     "google/gemini-3.1-deep-think",  1048576, 65536,  4.0,  24.0,  0, 0, 1 },
     { "gem31-flash",  "google/gemini-3.1-flash-lite-preview", 1048576, 32768, 0.25, 1.50, 0, 0, 0 },
     { "gem3-pro",     "google/gemini-3-pro-preview",   1048576, 32768,  2.0,  12.0,  0, 0, 1 },
     { "gem3-flash",   "google/gemini-3-flash-preview", 1048576, 32768,  0.50,  3.0,  0, 0, 0 },
@@ -228,6 +238,8 @@ static const model_info_t MODEL_REGISTRY[] = {
     { "glm47",        "z-ai/glm-4.7",                  202752, 65536,  0.38,  1.98, 0, 0, 1 },
     { "glm47-flash",  "z-ai/glm-4.7-flash",            202752, 65536,  0.06,  0.40, 0, 0, 0 },
     /* ── DeepSeek ────────────────────────────────────────────────────── */
+    { "ds-v4",        "deepseek/deepseek-v4",          262144, 32768,  0.27,  0.42, 0, 0, 0 },
+    { "ds-r2",        "deepseek/deepseek-r2",          262144, 32768,  0.50,  2.18, 0, 0, 1 },
     { "ds-v32",       "deepseek/deepseek-v3.2",        163840, 32768,  0.26,  0.38, 0, 0, 0 },
     { "ds-v31",       "deepseek/deepseek-v3.1-terminus", 163840, 32768, 0.21, 0.79, 0, 0, 0 },
     { "ds-chat",      "deepseek/deepseek-chat",         163840, 32768,  0.32,  0.89, 0, 0, 0 },
@@ -287,6 +299,9 @@ static const model_info_t MODEL_REGISTRY[] = {
     /* ── Perplexity ──────────────────────────────────────────────────── */
     { "pplx",         "sonar-pro",                       200000,  8192,  3.0,  15.0,  0, 0, 0 },
     { "pplx-small",   "sonar",                           128000,  8192,  1.0,   1.0,  0, 0, 0 },
+    /* ── Sakana (multi-model orchestrators behind a single endpoint) ─── */
+    { "fugu",         "sakana/fugu",                     200000, 32768,  3.0,  15.0,  0, 0, 1 },
+    { "fugu-ultra",   "sakana/fugu-ultra",               200000, 32768,  8.0,  40.0,  0, 0, 1 },
     { NULL, NULL, 0, 0, 0, 0, 0, 0, 0 }
 };
 

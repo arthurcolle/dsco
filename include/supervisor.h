@@ -43,6 +43,13 @@
  *   DSCO_SUPERVISE_MEM_SOFT_PCT  % of budget that logs a soft warning     (75)
  *   DSCO_SUPERVISE_POLL_MS       RSS sampling interval, ms               (250)
  *   DSCO_SUPERVISE_TERM_GRACE_MS SIGTERM→SIGKILL grace on pre-empt, ms  (4000)
+ *   DSCO_SUPERVISE_METRICS_SECS  child RSS JSONL sample cadence; 0=off     (5)
+ *
+ * Runtime artifacts:
+ *   ~/.dsco/supervisor.log                 human-readable supervisor events
+ *   ~/.dsco/incidents/incident-*.json      per-abnormal-exit incident report
+ *   ~/.dsco/last_incident.json             most recent incident report
+ *   ~/.dsco/child-metrics-<pid>.jsonl      low-rate child RSS samples
  * ─────────────────────────────────────────────────────────────────────── */
 
 /* Run argv as a supervised dsco child. Blocks until the child exits cleanly
