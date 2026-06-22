@@ -90,6 +90,13 @@ int plot_violin(char *out, size_t cap, const double *samples, int n,
 /* Big-number KPI: render a value in 5-row block digits with a caption. */
 int plot_bignum(char *out, size_t cap, double value, const char *caption,
                 const plot_opts_t *o);
+/* Strange attractor: iterate a 2-D chaotic map (`kind` = "dejong" or
+ * "clifford") for `iters` steps and render its orbit in phase space. Uses the
+ * full Braille subpixel grid (2x4 dots/cell) for the orbit's fine structure and
+ * tints each cell on the viridis ramp by log visit-density. */
+int plot_attractor(char *out, size_t cap, const char *kind,
+                   double a, double b, double c, double d, long iters,
+                   const plot_opts_t *o);
 
 /* Parse a JSON request and dispatch to the matching renderer. Schema:
  *   {"type":"line|scatter|area|bar|column|hist|heatmap|box|candlestick|
