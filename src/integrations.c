@@ -10,6 +10,7 @@
 
 #include "integrations.h"
 #include "json_util.h"
+#include "tools.h"
 #include "semantic.h"
 #include "config.h"
 #include <ctype.h>
@@ -1692,11 +1693,14 @@ bool tool_elevenlabs_tts(const char *input, char *result, size_t rlen) {
     long status = 0;
     if (res == CURLE_OK) curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, &status);
     fclose(fp); curl_slist_free_all(hdrs); curl_easy_cleanup(curl);
-    jbuf_free(&body); free(text); free(voice); free(output_path);
+    jbuf_free(&body);
 
-    if (status == 200) { snprintf(result, rlen, "audio saved to %s", out); return true; }
-    snprintf(result, rlen, "ElevenLabs error (HTTP %ld)", status);
-    return false;
+    /* Build the result before freeing: `out` may alias output_path. */
+    bool ok = (status == 200);
+    if (ok) snprintf(result, rlen, "audio saved to %s", out);
+    else    snprintf(result, rlen, "ElevenLabs error (HTTP %ld)", status);
+    free(text); free(voice); free(output_path);
+    return ok;
 }
 
 /* ══════════════════════════════════════════════════════════════════════════
@@ -2040,9 +2044,9 @@ bool tool_kb_ingest(const char *input, char *result, size_t rlen) {
     if (url && url[0]) {
         /* Download URL to temp file */
         snprintf(resolved, sizeof(resolved), "/tmp/dsco_kb_%ld.pdf", (long)time(NULL));
-        char cmd[2048];
-        snprintf(cmd, sizeof(cmd), "curl -sL -o '%s' '%s' 2>/dev/null", resolved, url);
-        if (system(cmd) != 0) {
+        const char *curl_argv[] = { "curl", "-sL", "-o", resolved, url, NULL };
+        char curl_err[512] = {0};
+        if (safe_exec_argv(curl_argv, curl_err, sizeof(curl_err)) != 0) {
             snprintf(result, rlen, "failed to download: %s", url);
             free(path); free(url); free(title); free(text);
             return false;
@@ -2063,8 +2067,8 @@ bool tool_kb_ingest(const char *input, char *result, size_t rlen) {
             sqlite3_finalize(stmt);
             snprintf(result, rlen, "{\"doc_id\":%d,\"status\":\"already_indexed\",\"hash\":\"%s\"}",
                      existing, hash);
-            free(path); free(url); free(title); free(text);
             if (url && url[0]) unlink(resolved);
+            free(path); free(url); free(title); free(text);
             return true;
         }
         sqlite3_finalize(stmt);
@@ -2074,20 +2078,22 @@ bool tool_kb_ingest(const char *input, char *result, size_t rlen) {
     char txt_path[1024];
     snprintf(txt_path, sizeof(txt_path), "/tmp/dsco_kb_%s.txt", hash);
     {
-        char cmd[2048];
-        snprintf(cmd, sizeof(cmd), "pdftotext -layout '%s' '%s' 2>/dev/null", resolved, txt_path);
-        int rc = system(cmd);
+        const char *pdftotext_argv[] = { "pdftotext", "-layout", resolved, txt_path, NULL };
+        char pdf_err[512] = {0};
+        int rc = safe_exec_argv(pdftotext_argv, pdf_err, sizeof(pdf_err));
         if (rc != 0) {
             /* Fallback: try python3 with our pdf_to_structure.py */
             const char *home = getenv("HOME");
-            snprintf(cmd, sizeof(cmd),
-                "python3 '%s/Library/Mobile Documents/com~apple~CloudDocs/Untitled Folder/NewMachine/what/pdf_to/pdf_to_structure.py' '%s' --max-pages 50 2>/dev/null",
-                home ? home : ".", resolved);
-            rc = system(cmd);
+            char py_script[4096];
+            snprintf(py_script, sizeof(py_script), "%s/Library/Mobile Documents/com~apple~CloudDocs/Untitled Folder/NewMachine/what/pdf_to/pdf_to_structure.py",
+                     home ? home : ".");
+            const char *py_argv[] = { "python3", py_script, resolved, "--max-pages", "50", NULL };
+            char py_err[512] = {0};
+            rc = safe_exec_argv(py_argv, py_err, sizeof(py_err));
             if (rc != 0) {
                 snprintf(result, rlen, "failed to extract text (install pdftotext or poppler)");
-                free(path); free(url); free(title); free(text);
                 if (url && url[0]) unlink(resolved);
+                free(path); free(url); free(title); free(text);
                 return false;
             }
         }
@@ -5018,12 +5024,13 @@ bool tool_cross_platform_delta(const char *input, char *result, size_t rlen) {
     http_buf_t ka = {0};
     long ka_code = kalshi_get(url_k, &ka);
 
-    curl_free(enc); curl_easy_cleanup(c); free(topic);
+    curl_free(enc); curl_easy_cleanup(c);
 
     /* Build delta report */
     jbuf_t out;
     jbuf_init(&out, 16384);
     jbuf_appendf(&out, "{\"cross_platform_delta\":{\"topic\":\"%s\"", topic ? topic : "");
+    free(topic);
     jbuf_appendf(&out, ",\"polymarket\":{\"status\":%ld,\"count\":\"see data\"", pm_code);
     if (pm_code == 200 && pm.data)
         jbuf_appendf(&out, ",\"markets\":%s", pm.data);
@@ -5922,9 +5929,9 @@ bool tool_synoptic(const char *input, char *result, size_t rlen) {
         free(stid); free(start); free(end_t);
 
     } else {
+        snprintf(result, rlen, "unknown synoptic action: %s", action);
         free(action);
         jbuf_free(&url);
-        snprintf(result, rlen, "unknown synoptic action: %s", action);
         return false;
     }
 
@@ -6099,8 +6106,8 @@ bool tool_nws(const char *input, char *result, size_t rlen) {
         free(office);
 
     } else {
-        free(action); jbuf_free(&url);
         snprintf(result, rlen, "unknown nws action: %s", action);
+        free(action); jbuf_free(&url);
         return false;
     }
 

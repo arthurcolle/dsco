@@ -16,7 +16,7 @@ BUILD_DIR ?= build
 BASE_CFLAGS = -Wall -Wextra -O3 -std=c2y $(C2Y_WARNING_FLAGS) -D_POSIX_C_SOURCE=200809L \
 	-I$(INC_DIR) \
 	-march=native -mtune=native -funroll-loops -fvisibility=hidden \
-	-funwind-tables \
+	-funwind-tables -fno-omit-frame-pointer -g \
 	-MMD -MP \
 	-DBUILD_DATE='"$(BUILD_DATE)"' -DGIT_HASH='"$(GIT_HASH)"'
 CFLAGS ?= $(BASE_CFLAGS)
@@ -46,7 +46,7 @@ DEBUG_TARGET = $(TARGET)-debug
 SRC_NAMES = main.c agent.c llm.c tools.c json_util.c ast.c swarm.c tui.c \
 	md.c baseline.c setup.c crypto.c eval.c pipeline.c plugin.c \
 			semantic.c ipc.c mcp.c mcp_names.c provider_profiles.c provider.c integrations.c error.c trace.c task_profile.c \
-	output_guard.c topology.c workspace.c plan.c router.c \
+	output_guard.c topology.c workspace.c plan.c stateful_atoms.c recovery.c router.c \
 	pheromone.c ooda.c killswitch.c governance.c memory_tier.c talons.c \
 	arena_alloc.c event_loop.c vm.c scheduler.c vfs.c trading.c legion.c \
 	agent_profile.c orchestrator.c vecstore.c tamper.c sealed_store.c \
@@ -54,10 +54,14 @@ SRC_NAMES = main.c agent.c llm.c tools.c json_util.c ast.c swarm.c tui.c \
 	project.c project_mux.c project_grid.c \
 	dsco_accel.c dsco_mlx.c dsco_pool.c \
 	fingerprint.c trust.c toolmgmt.c connector.c openrouter_cache.c \
-	startup.c plot.c self_improve.c pets.c img_util.c supervisor.c \
+	startup.c plot.c anim.c fractal.c self_improve.c rsi_curriculum.c pets.c img_util.c supervisor.c \
 	graphsub_client.c graphsub_tools.c \
 	extension/backend.c extension/numerical_gsl.c extension/skill_requirements.c \
 	extension/eigen_backend.c extension/fftw_backend.c extension/backend_selftest.c \
+	control_flow.c \
+	introspect.c \
+	learned_cost.c \
+	session_memory.c \
 	$(OPTIONAL_SRCS)
 TEST_SRC_NAMES = test.c
 
@@ -256,6 +260,22 @@ $(OBJ_DIR)/%.o: $(SRC_DIR)/%.c | $(OBJ_DIR)
 	@mkdir -p $(@D)
 	$(CC) $(CFLAGS) -c -o $@ $<
 
+# ── Memory-bounded compilation of large translation units ──────────────────
+# tools.c (>1MB of source), agent.c, tui.c, integrations.c, trading.c, llm.c,
+# provider.c, md.c and topology.c are huge dispatch/glue units. Newer
+# persistence/orchestration/network glue is also not hot numeric code and can
+# contribute to peak clang RSS during parallel builds. At
+# -O3 -funroll-loops -march=native clang's inliner/optimizer needs multiple GB
+# of RAM *per file*; a parallel `make -jN` compiling several at once exhausts
+# RAM+swap and the kernel SIGKILLs the build (and other resident processes).
+# These are not hot numeric paths, so -O1 costs ~nothing at runtime while
+# cutting peak compiler RSS ~5-8x. Hot numeric code (gsl/, extension/) keeps -O3.
+BIG_TU_NAMES = tools agent tui integrations trading llm provider md topology \
+	session_memory plan_optimizer cost_model plan_cache dsco_dht dht_impl \
+	net_server vecstore_metal
+BIG_TU_OBJS  = $(BIG_TU_NAMES:%=$(OBJ_DIR)/%.o)
+$(BIG_TU_OBJS): CFLAGS := $(filter-out -O3 -funroll-loops,$(CFLAGS)) -O1
+
 # Objective-C sources (macOS only)
 $(OBJ_DIR)/%.o: $(SRC_DIR)/%.m | $(OBJ_DIR)
 	@mkdir -p $(@D)
@@ -365,6 +385,26 @@ test: test_runner
 
 test_runner: $(TEST_OBJS) $(GSL_TEST_OBJS)
 	$(CC) $(TEST_CFLAGS) -o $@ $^ $(LDFLAGS) $(LDLIBS)
+
+# Priority 7 standalone test binary
+RECOVERY_TEST_OBJS = $(TEST_OBJ_DIR)/test_recovery.o \
+	$(LIB_OBJS:$(OBJ_DIR)/%=$(TEST_OBJ_DIR)/%)
+
+$(TEST_OBJ_DIR)/test_recovery.o: $(TEST_DIR)/test_recovery.c | $(TEST_OBJ_DIR)
+	$(CC) $(TEST_CFLAGS) -c -o $@ $<
+
+test_recovery: $(RECOVERY_TEST_OBJS) $(GSL_TEST_OBJS)
+	$(CC) $(TEST_CFLAGS) -o $@ $^ $(LDFLAGS) $(LDLIBS)
+
+test_stateful_atoms: $(TEST_OBJ_DIR)/test_stateful_atoms.o \
+	$(TEST_OBJ_DIR)/stateful_atoms.o \
+	$(TEST_OBJ_DIR)/plan.o \
+	$(TEST_OBJ_DIR)/json_util.o \
+	$(TEST_OBJ_DIR)/arena_alloc.o
+	$(CC) $(TEST_CFLAGS) -o $@ $^ $(LDFLAGS) -lm
+
+$(TEST_OBJ_DIR)/test_stateful_atoms.o: $(TEST_DIR)/test_stateful_atoms.c | $(TEST_OBJ_DIR)
+	$(CC) $(TEST_CFLAGS) -c -o $@ $<
 
 coverage: coverage_runner
 	./coverage_runner

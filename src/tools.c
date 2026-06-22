@@ -29,8 +29,11 @@
 #include "mcp_names.h"
 #include "workspace.h"
 #include "governance.h"
+#include "rsi_curriculum.h"
 #include "memory_tier.h"
 #include "talons.h"
+#include "learned_cost.h"
+#include "session_memory.h"
 #include "vm.h"
 #include <stdio.h>
 #include <stdlib.h>
@@ -45,6 +48,7 @@
 #include <time.h>
 #include <fcntl.h>
 #include <poll.h>
+#include <spawn.h>
 #include <sys/time.h>
 #include <signal.h>
 #include <stdint.h>
@@ -59,6 +63,8 @@
 #include <netdb.h>
 #include <arpa/inet.h>
 #include <netinet/in.h>
+
+extern char **environ;
 
 #ifdef __APPLE__
 #include <mach-o/dyld.h>
@@ -314,25 +320,26 @@ static int run_cmd_ex(const char *cmd, char *out, size_t out_len,
         return -1;
     }
 
-    pid_t pid = fork();
-    if (pid < 0) {
-        snprintf(out, out_len, "fork failed: %s", strerror(errno));
+    posix_spawn_file_actions_t fa;
+    posix_spawnattr_t attr;
+    posix_spawn_file_actions_init(&fa);
+    posix_spawnattr_init(&attr);
+    posix_spawn_file_actions_addclose(&fa, pipefd[0]);
+    posix_spawn_file_actions_adddup2(&fa, pipefd[1], STDOUT_FILENO);
+    posix_spawn_file_actions_adddup2(&fa, pipefd[1], STDERR_FILENO);
+    posix_spawn_file_actions_addclose(&fa, pipefd[1]);
+    posix_spawnattr_setflags(&attr, POSIX_SPAWN_SETPGROUP);
+    posix_spawnattr_setpgroup(&attr, 0);
+
+    char *spawn_argv[] = { "sh", "-c", (char *)cmd, NULL };
+    pid_t pid = -1;
+    int spawn_rc = posix_spawn(&pid, "/bin/sh", &fa, &attr, spawn_argv, environ);
+    posix_spawn_file_actions_destroy(&fa);
+    posix_spawnattr_destroy(&attr);
+    if (spawn_rc != 0) {
+        snprintf(out, out_len, "spawn failed: %s", strerror(spawn_rc));
         close(pipefd[0]); close(pipefd[1]);
         return -1;
-    }
-
-    if (pid == 0) {
-        /* ── Child ── */
-        close(pipefd[0]);
-        dup2(pipefd[1], STDOUT_FILENO);
-        dup2(pipefd[1], STDERR_FILENO);
-        close(pipefd[1]);
-
-        /* New process group so we can kill the whole tree */
-        setpgid(0, 0);
-
-        execl("/bin/sh", "sh", "-c", cmd, (char *)NULL);
-        _exit(127);
     }
 
     /* ── Parent ── */
@@ -516,6 +523,62 @@ static int run_cmd(const char *cmd, char *out, size_t out_len) {
     run_opts_t opts = RUN_OPTS_DEFAULT;
     opts.stream_to_tty = false;  /* quiet for internal helpers */
     return run_cmd_ex(cmd, out, out_len, &opts);
+}
+
+/* ── safe_exec_argv: posix_spawnp() without shell — eliminates injection ──
+ * Returns exit status (0-255) or -1 on error. Captures stdout+stderr to out. */
+int safe_exec_argv(const char *const argv[], char *out, size_t out_len) {
+    if (!argv || !argv[0]) { if (out && out_len) out[0] = '\0'; return -1; }
+
+    int pipefd[2];
+    if (pipe(pipefd) < 0) {
+        if (out && out_len) snprintf(out, out_len, "pipe failed: %s", strerror(errno));
+        return -1;
+    }
+
+    posix_spawn_file_actions_t fa;
+    posix_spawnattr_t attr;
+    posix_spawn_file_actions_init(&fa);
+    posix_spawnattr_init(&attr);
+    posix_spawn_file_actions_addclose(&fa, pipefd[0]);
+    posix_spawn_file_actions_adddup2(&fa, pipefd[1], STDOUT_FILENO);
+    posix_spawn_file_actions_adddup2(&fa, pipefd[1], STDERR_FILENO);
+    posix_spawn_file_actions_addclose(&fa, pipefd[1]);
+    posix_spawnattr_setflags(&attr, POSIX_SPAWN_SETPGROUP);
+    posix_spawnattr_setpgroup(&attr, 0);
+
+    pid_t pid = -1;
+    int spawn_rc = posix_spawnp(&pid, argv[0], &fa, &attr,
+                                (char *const *)argv, environ);
+    posix_spawn_file_actions_destroy(&fa);
+    posix_spawnattr_destroy(&attr);
+    if (spawn_rc != 0) {
+        if (out && out_len) snprintf(out, out_len, "spawn failed: %s", strerror(spawn_rc));
+        close(pipefd[0]); close(pipefd[1]);
+        return -1;
+    }
+
+    close(pipefd[1]);
+    size_t total = 0;
+    if (out && out_len) out[0] = '\0';
+
+    char buf[4096];
+    ssize_t n;
+    while ((n = read(pipefd[0], buf, sizeof(buf))) > 0) {
+        if (out && total < out_len - 1) {
+            size_t copy = (size_t)n < (out_len - 1 - total) ? (size_t)n : (out_len - 1 - total);
+            memcpy(out + total, buf, copy);
+            total += copy;
+            out[total] = '\0';
+        }
+    }
+    close(pipefd[0]);
+
+    int status;
+    waitpid(pid, &status, 0);
+    if (WIFEXITED(status)) return WEXITSTATUS(status);
+    if (WIFSIGNALED(status)) return 128 + WTERMSIG(status);
+    return -1;
 }
 
 /* Safe shell quoting helper — wraps a string in single quotes */
@@ -2402,18 +2465,16 @@ static __attribute__((unused)) bool tool_soul_replace(const char *input, char *r
 
     int replacements = 0;
     char *p = content;
-    while (*p) {
-        char *found = strstr(p, old_str);
-        if (found && (replacements == 0 || replace_all)) {
-            jbuf_append_len(&out, p, (size_t)(found - p));
-            jbuf_append_len(&out, new_str, new_len);
-            p = found + old_len;
-            replacements++;
-        } else {
-            jbuf_append_char(&out, *p);
-            p++;
-        }
+    char *end = content + base_len;
+    char *found;
+    while ((found = strstr(p, old_str)) != NULL) {
+        jbuf_append_len(&out, p, (size_t)(found - p));
+        jbuf_append_len(&out, new_str, new_len);
+        p = found + old_len;
+        replacements++;
+        if (!replace_all) break;
     }
+    jbuf_append_len(&out, p, (size_t)(end - p));
 
     if (ftruncate(fd, 0) != 0) {
         jbuf_free(&out);
@@ -2617,18 +2678,20 @@ static bool tool_edit_file(const char *input, char *result, size_t rlen) {
 
     int replacements = 0;
     char *p = content;
-    while (*p) {
-        char *found = strstr(p, old_str);
-        if (found && (replacements == 0 || replace_all)) {
-            jbuf_append_len(&out, p, (size_t)(found - p));
-            jbuf_append_len(&out, new_str, new_len);
-            p = found + old_len;
-            replacements++;
-        } else {
-            jbuf_append_char(&out, *p);
-            p++;
-        }
+    char *end = content + fsize;
+    /* Replace matches; once we've done the allowed replacement(s), copy the
+     * tail verbatim in one shot. The previous char-at-a-time fallback re-ran
+     * strstr() from every offset to end-of-file (O(n²)) — on a ~MB source that
+     * stalled past the tool watchdog (the "edit_file exceeded 30s" timeout). */
+    char *found;
+    while ((found = strstr(p, old_str)) != NULL) {
+        jbuf_append_len(&out, p, (size_t)(found - p));
+        jbuf_append_len(&out, new_str, new_len);
+        p = found + old_len;
+        replacements++;
+        if (!replace_all) break;
     }
+    jbuf_append_len(&out, p, (size_t)(end - p));   /* remainder, NUL-safe */
 
     f = fopen(path, "w");
     if (!f) {
@@ -13350,33 +13413,41 @@ static bool tool_governance_status(const char *input, char *result, size_t rlen)
     return true;
 }
 
+static bool tool_governance_curriculum(const char *input, char *result, size_t rlen) {
+    (void)input;
+    ensure_wt_init();
+    return rsi_curriculum_summary_json(result, rlen) > 0;
+}
+
 static bool tool_governance_authorize(const char *input, char *result, size_t rlen) {
     ensure_wt_init();
     char *agent_id = json_get_str(input,"agent_id");
-    char *action = json_get_str(input,"action");
+    char *operation = json_get_str(input,"operation");
     double gsu_cost = json_get_double(input, "gsu_cost", 0);
+    const char *op = (operation && *operation) ? operation : "unknown";
 
     bool ok = governance_authorize(&g_governance,
                                     agent_id ? agent_id : "root",
-                                    action ? action : "unknown", gsu_cost);
+                                    op, gsu_cost);
     snprintf(result, rlen,
              "{\"authorized\":%s,\"agent\":\"%s\",\"action\":\"%s\",\"gsu_cost\":%.2f}",
              ok ? "true" : "false", agent_id ? agent_id : "root",
-             action ? action : "unknown", gsu_cost);
-    free(agent_id); free(action);
+             op, gsu_cost);
+    free(agent_id); free(operation);
     return true;
 }
 
 static bool tool_governance_checkpoint(const char *input, char *result, size_t rlen) {
     ensure_wt_init();
     char *agent_id = json_get_str(input,"agent_id");
-    char *action = json_get_str(input,"action");
+    char *operation = json_get_str(input,"operation");
     double gsu_cost = json_get_double(input, "gsu_cost", 0);
     char *context = json_get_str(input,"context");
+    const char *op = (operation && *operation) ? operation : "unknown";
 
     bool ok = governance_checkpoint(&g_governance,
                                      agent_id ? agent_id : "root",
-                                     action ? action : "unknown",
+                                     op,
                                      gsu_cost, context);
     double remaining = governance_remaining_gsu(&g_governance,
                                                  agent_id ? agent_id : "root");
@@ -13384,8 +13455,8 @@ static bool tool_governance_checkpoint(const char *input, char *result, size_t r
              "{\"permitted\":%s,\"agent\":\"%s\",\"action\":\"%s\","
              "\"gsu_charged\":%.2f,\"gsu_remaining\":%.2f}",
              ok ? "true" : "false", agent_id ? agent_id : "root",
-             action ? action : "unknown", gsu_cost, remaining);
-    free(agent_id); free(action); free(context);
+             op, gsu_cost, remaining);
+    free(agent_id); free(operation); free(context);
     return true;
 }
 
@@ -19608,6 +19679,188 @@ static bool tool_agent_dispatch(const char *input, char *result, size_t rlen) {
     free(action); return ok;
 }
 
+/* ── Learned cost + session memory bridge (Priority 3 + 5) ────────── */
+
+static cost_db_t       g_learned_cost_db;
+static bool            g_learned_cost_inited = false;
+static pthread_mutex_t g_learned_cost_mu = PTHREAD_MUTEX_INITIALIZER;
+
+static void learned_cost_ensure(void) {
+    pthread_mutex_lock(&g_learned_cost_mu);
+    if (!g_learned_cost_inited) {
+        cost_db_init(&g_learned_cost_db);
+        cost_db_load(&g_learned_cost_db);
+        g_learned_cost_inited = true;
+    }
+    pthread_mutex_unlock(&g_learned_cost_mu);
+}
+
+static bool tool_learned_cost_predict(const char *input, char *result, size_t rlen) {
+    char *task = json_get_str(input, "task");
+    char *topo = json_get_str(input, "topology");
+    if (!task || !task[0] || !topo || !topo[0]) {
+        free(task); free(topo);
+        snprintf(result, rlen, "{\"error\":\"task and topology required\"}");
+        return false;
+    }
+    learned_cost_ensure();
+    cost_prediction_result_t pred = (cost_prediction_result_t){0};
+    bool ok = predict_cost(&g_learned_cost_db, task, topo, &pred);
+    if (ok) {
+        snprintf(result, rlen,
+            "{\"ok\":true,\"predicted_cost\":%.6f,\"confidence\":%.3f,\"k_used\":%d,\"records\":%d}",
+            pred.predicted_cost, pred.confidence, pred.k_used, g_learned_cost_db.count);
+    } else {
+        snprintf(result, rlen,
+            "{\"ok\":false,\"reason\":\"no_matching_records\",\"records\":%d}",
+            g_learned_cost_db.count);
+    }
+    free(task); free(topo);
+    return true;
+}
+
+static bool tool_learned_cost_record(const char *input, char *result, size_t rlen) {
+    char *task = json_get_str(input, "task");
+    char *topo = json_get_str(input, "topology");
+    int tokens = json_get_int(input, "tokens", 0);
+    double cost = json_get_double(input, "cost", 0.0);
+    if (!task || !task[0] || !topo || !topo[0] || tokens <= 0 || cost <= 0.0) {
+        free(task); free(topo);
+        snprintf(result, rlen, "{\"error\":\"need task, topology, tokens>0, cost>0\"}");
+        return false;
+    }
+    learned_cost_ensure();
+    pthread_mutex_lock(&g_learned_cost_mu);
+    learn_from_execution(&g_learned_cost_db, task, topo, tokens, cost);
+    int n = g_learned_cost_db.count;
+    pthread_mutex_unlock(&g_learned_cost_mu);
+    snprintf(result, rlen, "{\"ok\":true,\"records\":%d}", n);
+    free(task); free(topo);
+    return true;
+}
+
+static bool tool_learned_cost_stats(const char *input, char *result, size_t rlen) {
+    (void)input;
+    learned_cost_ensure();
+    int n = g_learned_cost_db.count;
+    int cap = COST_DB_CAPACITY;
+    double tot_cost = 0.0;
+    int    tot_tok  = 0;
+    for (int i = 0; i < n; i++) {
+        tot_cost += g_learned_cost_db.entries[i].cost;
+        tot_tok  += g_learned_cost_db.entries[i].tokens;
+    }
+    snprintf(result, rlen,
+        "{\"records\":%d,\"capacity\":%d,\"total_cost_usd\":%.6f,\"total_tokens\":%d,\"avg_cost\":%.6f}",
+        n, cap, tot_cost, tot_tok, n ? tot_cost / n : 0.0);
+    return true;
+}
+
+/* Session memory (Priority 5) bridge */
+static session_db_t    g_session_db;
+static bool            g_session_inited = false;
+static pthread_mutex_t g_session_mu = PTHREAD_MUTEX_INITIALIZER;
+
+static void session_ensure(void) {
+    pthread_mutex_lock(&g_session_mu);
+    if (!g_session_inited) {
+        session_init(&g_session_db, NULL);
+        g_session_inited = true;
+    }
+    pthread_mutex_unlock(&g_session_mu);
+}
+
+static bool tool_session_remember(const char *input, char *result, size_t rlen) {
+    char *key = json_get_str(input, "key");
+    char *val = json_get_str(input, "value");
+    int ttl = json_get_int(input, "ttl", 0);
+    if (!key || !key[0] || !val) {
+        free(key); free(val);
+        snprintf(result, rlen, "{\"error\":\"key and value required\"}");
+        return false;
+    }
+    session_ensure();
+    pthread_mutex_lock(&g_session_mu);
+    int rc = session_remember(&g_session_db, key, val, ttl);
+    session_persist(&g_session_db);
+    pthread_mutex_unlock(&g_session_mu);
+    snprintf(result, rlen, "{\"ok\":%s,\"ttl\":%d}", rc == 0 ? "true" : "false", ttl);
+    free(key); free(val);
+    return rc == 0;
+}
+
+static bool tool_session_recall(const char *input, char *result, size_t rlen) {
+    char *key = json_get_str(input, "key");
+    if (!key || !key[0]) {
+        free(key);
+        snprintf(result, rlen, "{\"error\":\"key required\"}");
+        return false;
+    }
+    session_ensure();
+    pthread_mutex_lock(&g_session_mu);
+    const char *v = session_recall(&g_session_db, key);
+    char buf[SESSION_VALUE_LEN];
+    bool hit = (v != NULL);
+    if (hit) { strncpy(buf, v, sizeof(buf)-1); buf[sizeof(buf)-1] = 0; }
+    pthread_mutex_unlock(&g_session_mu);
+    if (hit) {
+        /* JSON-escape minimally: replace " and \ */
+        char esc[SESSION_VALUE_LEN * 2 + 1]; size_t o = 0;
+        for (size_t i = 0; buf[i] && o + 2 < sizeof(esc); i++) {
+            char c = buf[i];
+            if (c == '"' || c == '\\') esc[o++] = '\\';
+            esc[o++] = c;
+        }
+        esc[o] = 0;
+        snprintf(result, rlen, "{\"hit\":true,\"value\":\"%s\"}", esc);
+    } else {
+        snprintf(result, rlen, "{\"hit\":false}");
+    }
+    free(key);
+    return true;
+}
+
+static bool tool_session_status(const char *input, char *result, size_t rlen) {
+    (void)input;
+    session_ensure();
+    pthread_mutex_lock(&g_session_mu);
+    int rc = session_status_json(&g_session_db, result, rlen);
+    pthread_mutex_unlock(&g_session_mu);
+    return rc == 0;
+}
+
+static bool tool_session_dispatch(const char *input, char *result, size_t rlen) {
+    char *action = json_get_str(input, "action");
+    if (!action || !action[0]) {
+        free(action);
+        snprintf(result, rlen, "missing: action (remember, recall, status)");
+        return false;
+    }
+    bool ok = false;
+    if      (strcmp(action, "remember") == 0) ok = tool_session_remember(input, result, rlen);
+    else if (strcmp(action, "recall")   == 0) ok = tool_session_recall(input, result, rlen);
+    else if (strcmp(action, "status")   == 0) ok = tool_session_status(input, result, rlen);
+    else snprintf(result, rlen, "{\"error\":\"unknown session action: %s\"}", action);
+    free(action);
+    return ok;
+}
+
+static bool tool_learned_cost_dispatch(const char *input, char *result, size_t rlen) {
+    char *action = json_get_str(input, "action");
+    if (!action || !action[0]) {
+        free(action);
+        snprintf(result, rlen, "missing: action (predict, record, stats)");
+        return false;
+    }
+    bool ok = false;
+    if      (strcmp(action, "predict") == 0) ok = tool_learned_cost_predict(input, result, rlen);
+    else if (strcmp(action, "record")  == 0) ok = tool_learned_cost_record(input, result, rlen);
+    else if (strcmp(action, "stats")   == 0) ok = tool_learned_cost_stats(input, result, rlen);
+    else snprintf(result, rlen, "{\"error\":\"unknown learned_cost action: %s\"}", action);
+    free(action);
+    return ok;
+}
+
 static bool tool_swarm_dispatch(const char *input, char *result, size_t rlen) {
     char *action = json_get_str(input, "action");
     if (!action || !action[0]) { free(action); snprintf(result, rlen, "missing: action (create, map_reduce, status, collect, budget, spawn_executor, spawn_provider, create_executor_swarm, executor_status, topology_list, topology_run)"); return false; }
@@ -19675,9 +19928,10 @@ static bool tool_killswitch_dispatch(const char *input, char *result, size_t rle
 
 static bool tool_governance_dispatch(const char *input, char *result, size_t rlen) {
     char *action = json_get_str(input, "action");
-    if (!action || !action[0]) { free(action); snprintf(result, rlen, "missing: action (status, authorize, checkpoint, budget, audit, param)"); return false; }
+    if (!action || !action[0]) { free(action); snprintf(result, rlen, "missing: action (status, curriculum, authorize, checkpoint, budget, audit, param)"); return false; }
     bool ok = false;
     if      (strcmp(action, "status") == 0)     ok = tool_governance_status(input, result, rlen);
+    else if (strcmp(action, "curriculum") == 0) ok = tool_governance_curriculum(input, result, rlen);
     else if (strcmp(action, "authorize") == 0)  ok = tool_governance_authorize(input, result, rlen);
     else if (strcmp(action, "checkpoint") == 0) ok = tool_governance_checkpoint(input, result, rlen);
     else if (strcmp(action, "budget") == 0)     ok = tool_governance_budget(input, result, rlen);
@@ -20925,7 +21179,7 @@ static const tool_def_t s_tools[] = {
     { .name = "token_audit", .description = "Audit token usage across conversation.", .input_schema_json = "{\"type\":\"object\",\"properties\":{}}", .execute = tool_token_audit, .is_read_only = true, .is_concurrent = true },
     { .name = "context_status", .description = "Context window self-awareness: tokens, schema overhead, recommendations.", .input_schema_json = "{\"type\":\"object\",\"properties\":{}}", .execute = tool_context_status, .core = true, .is_read_only = true, .is_concurrent = true },
     { .name = "context_compact", .description = "Compress old conversation history to reclaim tokens.", .input_schema_json = "{\"type\":\"object\",\"properties\":{\"aggressive\":{\"type\":\"boolean\"}}}", .execute = tool_context_compact, .core = true },
-    { .name = "plot", .description = "Render data as a Unicode chart (returns ANSI/Unicode art). Types: line, bar, column, area, scatter, hist, heatmap, box, candlestick, gauge, sparkline, pie, waterfall, bullet, lollipop, slope, ecdf, calendar, ridgeline, violin, bignum, attractor. Uses subpixel Braille (2x4 dots/cell) for line/scatter/area/ridgeline/attractor, eighth-block bars, and 256-color heatmaps/calendars. 'attractor' traces a 2-D chaotic map in phase space (kind=dejong|clifford, coeffs a/b/c/d, iters) with viridis density shading — no data needed. Inline-printable and usable as a display artifact.", .input_schema_json = "{\"type\":\"object\",\"properties\":{\"type\":{\"type\":\"string\",\"description\":\"line|bar|column|area|scatter|hist|heatmap|box|candlestick|gauge|sparkline|pie|waterfall|bullet|lollipop|slope|ecdf|calendar|ridgeline|violin|bignum|attractor\"},\"series\":{\"type\":\"array\",\"items\":{\"type\":\"array\",\"items\":{\"type\":\"number\"}},\"description\":\"ridgeline: array of series\"},\"left\":{\"type\":\"array\",\"items\":{\"type\":\"number\"}},\"right\":{\"type\":\"array\",\"items\":{\"type\":\"number\"}},\"ranges\":{\"type\":\"array\",\"items\":{\"type\":\"number\"}},\"target\":{\"type\":\"number\"},\"data\":{\"type\":\"array\",\"items\":{\"type\":\"number\"},\"description\":\"primary series\"},\"x\":{\"type\":\"array\",\"items\":{\"type\":\"number\"}},\"labels\":{\"type\":\"array\",\"items\":{\"type\":\"string\"}},\"open\":{\"type\":\"array\",\"items\":{\"type\":\"number\"}},\"high\":{\"type\":\"array\",\"items\":{\"type\":\"number\"}},\"low\":{\"type\":\"array\",\"items\":{\"type\":\"number\"}},\"close\":{\"type\":\"array\",\"items\":{\"type\":\"number\"}},\"kind\":{\"type\":\"string\",\"description\":\"attractor family: dejong|clifford\"},\"a\":{\"type\":\"number\"},\"b\":{\"type\":\"number\"},\"c\":{\"type\":\"number\"},\"d\":{\"type\":\"number\"},\"iters\":{\"type\":\"integer\",\"description\":\"attractor iterations (default 300000)\"},\"title\":{\"type\":\"string\"},\"width\":{\"type\":\"integer\"},\"height\":{\"type\":\"integer\"},\"bins\":{\"type\":\"integer\"},\"rows\":{\"type\":\"integer\"},\"cols\":{\"type\":\"integer\"},\"value\":{\"type\":\"number\"},\"min\":{\"type\":\"number\"},\"max\":{\"type\":\"number\"},\"color\":{\"type\":\"boolean\"},\"axes\":{\"type\":\"boolean\"}},\"required\":[\"type\"]}", .execute = tool_plot, .is_read_only = true, .is_concurrent = true },
+    { .name = "plot", .description = "Render data as a Unicode chart (returns ANSI/Unicode art). Types: line, bar, column, area, scatter, hist, heatmap, box, candlestick, gauge, sparkline, pie, waterfall, bullet, lollipop, slope, ecdf, calendar, ridgeline, violin, bignum, attractor, mandelbrot, julia. Uses subpixel Braille (2x4 dots/cell) for line/scatter/area/ridgeline/attractor, eighth-block bars, and 256-color heatmaps/calendars. 'attractor' traces a 2-D chaotic map in phase space (kind=dejong|clifford, coeffs a/b/c/d, iters) with viridis density shading. 'mandelbrot'/'julia' render escape-time fractals in truecolor half-blocks (cx/cy center, zoom, iters; julia adds jx/jy) — no data needed for any of these. Inline-printable and usable as a display artifact.", .input_schema_json = "{\"type\":\"object\",\"properties\":{\"type\":{\"type\":\"string\",\"description\":\"line|bar|column|area|scatter|hist|heatmap|box|candlestick|gauge|sparkline|pie|waterfall|bullet|lollipop|slope|ecdf|calendar|ridgeline|violin|bignum|attractor|mandelbrot|julia\"},\"series\":{\"type\":\"array\",\"items\":{\"type\":\"array\",\"items\":{\"type\":\"number\"}},\"description\":\"ridgeline: array of series\"},\"left\":{\"type\":\"array\",\"items\":{\"type\":\"number\"}},\"right\":{\"type\":\"array\",\"items\":{\"type\":\"number\"}},\"ranges\":{\"type\":\"array\",\"items\":{\"type\":\"number\"}},\"target\":{\"type\":\"number\"},\"data\":{\"type\":\"array\",\"items\":{\"type\":\"number\"},\"description\":\"primary series\"},\"x\":{\"type\":\"array\",\"items\":{\"type\":\"number\"}},\"labels\":{\"type\":\"array\",\"items\":{\"type\":\"string\"}},\"open\":{\"type\":\"array\",\"items\":{\"type\":\"number\"}},\"high\":{\"type\":\"array\",\"items\":{\"type\":\"number\"}},\"low\":{\"type\":\"array\",\"items\":{\"type\":\"number\"}},\"close\":{\"type\":\"array\",\"items\":{\"type\":\"number\"}},\"kind\":{\"type\":\"string\",\"description\":\"attractor family: dejong|clifford\"},\"a\":{\"type\":\"number\"},\"b\":{\"type\":\"number\"},\"c\":{\"type\":\"number\"},\"d\":{\"type\":\"number\"},\"iters\":{\"type\":\"integer\",\"description\":\"attractor iterations (default 300000); fractal iterations (default 120)\"},\"set\":{\"type\":\"string\",\"description\":\"fractal: mandelbrot|julia\"},\"cx\":{\"type\":\"number\",\"description\":\"fractal center real\"},\"cy\":{\"type\":\"number\",\"description\":\"fractal center imag\"},\"zoom\":{\"type\":\"number\",\"description\":\"fractal zoom factor\"},\"jx\":{\"type\":\"number\",\"description\":\"julia constant real\"},\"jy\":{\"type\":\"number\",\"description\":\"julia constant imag\"},\"title\":{\"type\":\"string\"},\"width\":{\"type\":\"integer\"},\"height\":{\"type\":\"integer\"},\"bins\":{\"type\":\"integer\"},\"rows\":{\"type\":\"integer\"},\"cols\":{\"type\":\"integer\"},\"value\":{\"type\":\"number\"},\"min\":{\"type\":\"number\"},\"max\":{\"type\":\"number\"},\"color\":{\"type\":\"boolean\"},\"axes\":{\"type\":\"boolean\"}},\"required\":[\"type\"]}", .execute = tool_plot, .is_read_only = true, .is_concurrent = true },
     { .name = "pets", .description = "Companion sprites for background agents. action=roster shows live background-agent pets (face, status, cost, activity sparkline); gallery shows a species sampler; roll shows a single deterministic pet for a seed string. Each agent deterministically hatches the same pet from its id/task.", .input_schema_json = "{\"type\":\"object\",\"properties\":{\"action\":{\"type\":\"string\",\"description\":\"roster|gallery|roll\"},\"seed\":{\"type\":\"string\",\"description\":\"seed for action=roll\"}}}", .execute = tool_pets, .is_read_only = true, .is_concurrent = true },
 
     /* ══════════════════════════════════════════════════════════════════════
@@ -21059,8 +21313,10 @@ static const tool_def_t s_tools[] = {
     { .name = "pheromone", .description = "Pheromone coordination (Wings): deposit, sense, status.", .input_schema_json = "{\"type\":\"object\",\"properties\":{\"action\":{\"type\":\"string\",\"description\":\"deposit|sense|status\"},\"trail\":{\"type\":\"string\"},\"strength\":{\"type\":\"number\"}},\"required\":[\"action\"]}", .execute = tool_pheromone_dispatch },
     { .name = "ooda", .description = "OODA loop discipline (Talons): begin, observe, orient, decide, complete, status.", .input_schema_json = "{\"type\":\"object\",\"properties\":{\"action\":{\"type\":\"string\",\"description\":\"begin|observe|orient|decide|complete|status\"},\"observation\":{\"type\":\"string\"},\"decision\":{\"type\":\"string\"},\"goal\":{\"type\":\"string\"}},\"required\":[\"action\"]}", .execute = tool_ooda_dispatch },
     { .name = "killswitch", .description = "Kill switch control: trigger, resolve, status.", .input_schema_json = "{\"type\":\"object\",\"properties\":{\"action\":{\"type\":\"string\",\"description\":\"trigger|resolve|status\"},\"reason\":{\"type\":\"string\"}},\"required\":[\"action\"]}", .execute = tool_killswitch_dispatch },
-    { .name = "governance", .description = "Governance controls: status, authorize, checkpoint, budget, audit, param.", .input_schema_json = "{\"type\":\"object\",\"properties\":{\"action\":{\"type\":\"string\",\"description\":\"status|authorize|checkpoint|budget|audit|param\"},\"operation\":{\"type\":\"string\"},\"amount\":{\"type\":\"number\"},\"param\":{\"type\":\"string\"},\"value\":{\"type\":\"string\"}},\"required\":[\"action\"]}", .execute = tool_governance_dispatch },
+    { .name = "governance", .description = "Governance controls: status, curriculum, authorize, checkpoint, budget, audit, param. Curriculum exposes the safety-aware RSI skill gates and top-priority control skills.", .input_schema_json = "{\"type\":\"object\",\"properties\":{\"action\":{\"type\":\"string\",\"description\":\"status|curriculum|authorize|checkpoint|budget|audit|param\"},\"operation\":{\"type\":\"string\"},\"amount\":{\"type\":\"number\"},\"param\":{\"type\":\"string\"},\"value\":{\"type\":\"string\"}},\"required\":[\"action\"]}", .execute = tool_governance_dispatch },
     { .name = "memory_tier", .description = "Three-tier memory: store, recall, promote, forget, status.", .input_schema_json = "{\"type\":\"object\",\"properties\":{\"action\":{\"type\":\"string\",\"description\":\"store|recall|promote|forget|status\"},\"key\":{\"type\":\"string\"},\"value\":{\"type\":\"string\"},\"query\":{\"type\":\"string\"}},\"required\":[\"action\"]}", .execute = tool_memory_dispatch },
+    { .name = "learned_cost", .description = "Learned k-NN cost model (Priority 3): predict/record/stats. action=predict needs {task,topology}; action=record needs {task,topology,tokens,cost}; action=stats returns DB summary.", .input_schema_json = "{\"type\":\"object\",\"properties\":{\"action\":{\"type\":\"string\",\"description\":\"predict|record|stats\"},\"task\":{\"type\":\"string\"},\"topology\":{\"type\":\"string\"},\"tokens\":{\"type\":\"integer\"},\"cost\":{\"type\":\"number\"}},\"required\":[\"action\"]}", .execute = tool_learned_cost_dispatch },
+    { .name = "session_memory", .description = "Persistent session KV memory (Priority 5): remember/recall/status. action=remember needs {key,value,ttl(seconds, 0=permanent)}; action=recall needs {key}; action=status returns counts.", .input_schema_json = "{\"type\":\"object\",\"properties\":{\"action\":{\"type\":\"string\",\"description\":\"remember|recall|status\"},\"key\":{\"type\":\"string\"},\"value\":{\"type\":\"string\"},\"ttl\":{\"type\":\"integer\"}},\"required\":[\"action\"]}", .execute = tool_session_dispatch },
     { .name = "talons", .description = "Competitive execution (Talons): goal, advance, depend, tick, tournament, recommend, status. Strategies (36, military-history canon): direct, flanking, escalation, divide, ambush, attrition, pincer, blitz, siege, feint, opportunistic, envelopment, encirclement, guerrilla, scorched_earth, fabian, defense_in_depth, oblique, infiltration, interior_lines, defeat_in_detail, turning_movement, breakthrough, shock, decapitation, blockade, raid, indirect, tempo, deterrence, counterattack, maneuver, hedgehog, screen, asymmetric, tournament. Or omit strategy and use action=recommend. depend gates a goal on a prerequisite (dep_goal_id); tick runs the deadline/dependency engine.", .input_schema_json = "{\"type\":\"object\",\"properties\":{\"action\":{\"type\":\"string\",\"description\":\"goal|advance|depend|tick|tournament|recommend|status\"},\"description\":{\"type\":\"string\"},\"goal_id\":{\"type\":\"integer\"},\"dep_goal_id\":{\"type\":\"integer\"},\"strategy\":{\"type\":\"string\"},\"grip\":{\"type\":\"string\"},\"action_kind\":{\"type\":\"string\",\"description\":\"for advance: stalk|strike|grip|capture|escaped|abandon\"}},\"required\":[\"action\"]}", .execute = tool_talons_dispatch },
     { .name = "wings_talons_status", .description = "Unified Wings+Talons+Immune system status.", .input_schema_json = "{\"type\":\"object\",\"properties\":{}}", .execute = tool_wings_talons_status, .is_read_only = true, .is_concurrent = true },
     { .name = "self_analyze", .description = "Deep self-analysis: per-tool efficiency (success rate, latency, efficiency score), session economy (turns/cost/failures/redundancy), adaptive strategy weights, and the live independent agent PROCESSES interoperating via IPC (pid, role, status, task).", .input_schema_json = "{\"type\":\"object\",\"properties\":{}}", .execute = tool_self_analyze, .is_read_only = true, .is_concurrent = true },
@@ -21073,7 +21329,7 @@ static const tool_def_t s_tools[] = {
     { .name = "scratchpad", .description = "Read/write scratchpad for temporary data.", .input_schema_json = "{\"type\":\"object\",\"properties\":{\"action\":{\"type\":\"string\",\"description\":\"read|write|clear\"},\"content\":{\"type\":\"string\"}}}", .execute = tool_scratchpad, .core = true },  /* mixed: read=RO, write/clear=write */
     { .name = "self_exit", .description = "Gracefully exit the agent loop.", .input_schema_json = "{\"type\":\"object\",\"properties\":{\"reason\":{\"type\":\"string\"}}}", .execute = tool_self_exit, .core = true },
     { .name = "self_exiting", .description = "Legacy alias for self_exit.", .input_schema_json = "{\"type\":\"object\",\"properties\":{\"reason\":{\"type\":\"string\"}}}", .execute = tool_self_exiting, .core = true },
-    { .name = "self_improve", .description = "Run the self-improvement loop: summary, consolidate, acknowledge suggestions, load/save history. Actions: summary|consolidate|acknowledge|history|save.", .input_schema_json = "{\"type\":\"object\",\"properties\":{\"action\":{\"type\":\"string\",\"description\":\"summary|consolidate|acknowledge|history|save\"},\"suggestion_id\":{\"type\":\"integer\",\"description\":\"1-based suggestion ID for acknowledge\"}},\"required\":[\"action\"]}", .execute = tool_self_improve, .is_read_only = true, .is_concurrent = false },
+    { .name = "self_improve", .description = "Run the self-improvement loop and RSI safety curriculum: summary, consolidate, acknowledge, history, save, curriculum, skill, promotion_gate.", .input_schema_json = "{\"type\":\"object\",\"properties\":{\"action\":{\"type\":\"string\",\"description\":\"summary|consolidate|acknowledge|history|save|curriculum|skill|promotion_gate\"},\"suggestion_id\":{\"type\":\"integer\",\"description\":\"1-based suggestion ID for acknowledge\"},\"skill_id\":{\"type\":\"string\",\"description\":\"Top-priority curriculum skill ID for action=skill\"},\"heldout_success_rate\":{\"type\":\"number\"},\"baseline_success_rate\":{\"type\":\"number\"},\"safety_violation_rate\":{\"type\":\"number\"},\"rollback_trigger_rate\":{\"type\":\"number\"},\"cost_per_success_usd\":{\"type\":\"number\"},\"baseline_cost_per_success_usd\":{\"type\":\"number\"},\"judge_human_kappa\":{\"type\":\"number\"},\"replay_stability\":{\"type\":\"number\"},\"provenance_complete\":{\"type\":\"boolean\"},\"signature_verified\":{\"type\":\"boolean\"},\"rollback_plan_ready\":{\"type\":\"boolean\"},\"budget_lease_active\":{\"type\":\"boolean\"}},\"required\":[\"action\"]}", .execute = tool_self_improve, .is_read_only = true, .is_concurrent = false },
     { .name = "self_assess", .description = "Quick self-evaluation of current session performance. Returns efficiency score, top issues, and recommendations. No input required.", .input_schema_json = "{\"type\":\"object\",\"properties\":{}}", .execute = tool_self_assess, .is_read_only = true, .is_concurrent = true },
     {
         .name = "StartOfLoopConstruct",
@@ -23471,6 +23727,8 @@ static bool tools_execute_internal(const char *name, const char *input_json,
                 (int)(input_json ? (strlen(input_json) < 512 ? strlen(input_json) : 512) : 0),
                 input_json ? input_json : "");
 
+    if (!name) { snprintf(result, result_len, "error: null tool name"); return false; }
+
     /* §8: VFS tool result cache for deterministic tools */
     if (g_tools_vfs && name && input_json && tool_is_cacheable(name)) {
         char hash[65];
@@ -23786,6 +24044,10 @@ static const tool_timeout_cfg_t s_timeout_overrides[] = {
     { "create_executor_swarm",  300 },
     { "executor_status",         30 },
     { "swarm_budget",            30 },
+    { "edit_file",      120 },   /* local file ops: generous margin for big files */
+    { "Edit",           120 },
+    { "write_file",     120 },
+    { "Write",          120 },
     { "http_request",    60 },
     { "curl",            60 },
     { "market_quote",    30 },
