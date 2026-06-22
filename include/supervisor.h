@@ -15,6 +15,14 @@
  *   3. Restarts the child with exponential backoff + a crash-loop circuit
  *      breaker, relying on dsco's _autosave.json to resume the session.
  *
+ * Beyond reacting to death, it actively samples the live child's resident-set
+ * size (proc_pid_rusage on macOS, /proc/<pid>/statm on Linux) every poll tick.
+ * As the footprint approaches a memory budget it pre-empts the kernel's
+ * uncatchable SIGKILL with a graceful, controlled restart of its own —
+ * SIGTERM → grace window → SIGKILL, then relaunch. The restarted child is
+ * handed DSCO_MEM_PRESSURE=1 and DSCO_RESUME_AFTER_CRASH=1 so it can come back
+ * leaner and resume from its last checkpoint instead of dying with no warning.
+ *
  * The child inherits the real controlling terminal directly (no pipe), so the
  * interactive TUI works unchanged. Signals are forwarded so Ctrl-C, window
  * resizes, and clean terminate behave as if the supervisor weren't there.
@@ -30,6 +38,11 @@
  *   DSCO_SUPERVISE_BACKOFF_MS    initial backoff in ms, doubles each crash(250)
  *   DSCO_SUPERVISE_BACKOFF_MAX_MS backoff ceiling in ms                 (30000)
  *   DSCO_CRASH_DEBUGGER          1 = attach lldb/gdb on crash (default 1 here)
+ *   DSCO_SUPERVISE_MEM_LIMIT_MB  child RSS budget; 0/unset = 60% of RAM,
+ *                                clamped to [1024, 6144]                  (0)
+ *   DSCO_SUPERVISE_MEM_SOFT_PCT  % of budget that logs a soft warning     (75)
+ *   DSCO_SUPERVISE_POLL_MS       RSS sampling interval, ms               (250)
+ *   DSCO_SUPERVISE_TERM_GRACE_MS SIGTERM→SIGKILL grace on pre-empt, ms  (4000)
  * ─────────────────────────────────────────────────────────────────────── */
 
 /* Run argv as a supervised dsco child. Blocks until the child exits cleanly

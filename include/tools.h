@@ -345,6 +345,13 @@ typedef bool (*tool_profile_filter_fn_t)(const char *tool_name, const char *grou
 void tools_set_profile_filter(tool_profile_filter_fn_t fn);
 void tools_clear_profile_filter(void);
 
+/* ── Safe subprocess exec ────────────────────────────────────────────── */
+
+/* fork()+execvp() without a shell — eliminates command injection. argv must be
+ * NULL-terminated. Captures stdout+stderr to out. Returns exit status (0-255)
+ * or -1 on error. */
+int safe_exec_argv(const char *const argv[], char *out, size_t out_len);
+
 /* ── Embedding API ─────────────────────────────────────────────────── */
 
 /* Embed text via Jina v4 API. Returns malloc'd float[*out_dim] or NULL.
@@ -355,5 +362,12 @@ float *tools_embed_text(const char *text, int *out_dim);
  * Both params may be NULL to clear. Strings are copied internally. */
 void tools_set_agent_context(const char *recent_results,
                              const char *working_memory_summary);
+
+/* ── Process execution ─────────────────────────────────────────────────
+ * fork()+execvp() without a shell — no argument is ever interpreted by a
+ * shell, eliminating command injection. Returns the child exit status (0 on
+ * success); stderr (truncated) is written to `out`. Shared by trading.c and
+ * integrations.c for their curl/openssl/pdftotext invocations. */
+int safe_exec_argv(const char *const argv[], char *out, size_t out_len);
 
 #endif
