@@ -6,6 +6,8 @@
 #include "swarm.h"
 #include "tui.h"
 #include "task_profile.h"
+#include "cost_model.h"
+#include "plan_cache.h"
 
 #include <ctype.h>
 #include <stdio.h>
@@ -706,7 +708,7 @@ bool topology_is_runnable(const topology_t *t) {
     return t && t->node_count > 0;
 }
 
-static const char *edge_type_label(edge_type_t type) {
+static __attribute__((unused)) const char *edge_type_label(edge_type_t type) {
     switch (type) {
     case EDGE_SEQUENCE: return "->";
     case EDGE_FANOUT: return "=>";
@@ -892,43 +894,77 @@ bool topology_plan_run(const topology_plan_t *plan,
     return topology_run(&plan->topology, api_key, coordinator_model, task, result, rlen, stats);
 }
 
-/* OpenRouter swarm tier defaults (validated through dsco runtime probes):
- *   HAIKU  → x-ai/grok-3-mini    $0.30/$0.50  clean topology run — reliable cheap worker
- *   SONNET → x-ai/grok-4-fast    $0.20/$0.50  clean topology run — fast mid-tier
- *   OPUS   → x-ai/grok-4.20-beta $2.00/$6.00  direct + eval pass — frontier reasoning
- *
- * Lower-cost alternatives are available, but currently less stable for swarm use:
- *   z-ai/glm-4-32b       $0.10/$0.10  stalled in one topology probe
- *   z-ai/glm-4.7-flash   $0.06/$0.40  completed, but spuriously used tools
- *   moonshotai/kimi-k2-0905 $0.40/$2.00 completed cleanly, but output cost is higher
+/* OpenRouter swarm tier defaults. The tier enum names are legacy, but the
+ * default models follow the current policy:
+ *   HAIKU  → z-ai/glm-5.2
+ *   SONNET → moonshotai/kimi-k2.7-code
+ *   OPUS   → z-ai/glm-5.2
  *
  * Override per-tier at runtime:
- *   DSCO_SWARM_HAIKU=z-ai/glm-4.7-flash
- *   DSCO_SWARM_SONNET=moonshotai/kimi-k2.5
- *   DSCO_SWARM_OPUS=x-ai/grok-4.20-multi-agent-beta
+ *   DSCO_SWARM_HAIKU=z-ai/glm-5.2
+ *   DSCO_SWARM_SONNET=moonshotai/kimi-k2.7-code
+ *   DSCO_SWARM_OPUS=z-ai/glm-5.2
  */
 static const char *or_tier_model(model_tier_t tier) {
     switch (tier) {
     case TIER_HAIKU: {
         const char *e = getenv("DSCO_SWARM_HAIKU");
-        return (e && e[0]) ? e : "x-ai/grok-3-mini";
+        return (e && e[0]) ? e : "z-ai/glm-5.2";
     }
     case TIER_SONNET: {
         const char *e = getenv("DSCO_SWARM_SONNET");
-        return (e && e[0]) ? e : "x-ai/grok-4-fast";
+        return (e && e[0]) ? e : "moonshotai/kimi-k2.7-code";
     }
     case TIER_OPUS: {
         const char *e = getenv("DSCO_SWARM_OPUS");
-        return (e && e[0]) ? e : "x-ai/grok-4.20-beta";
+        return (e && e[0]) ? e : "z-ai/glm-5.2";
     }
     }
-    return "x-ai/grok-4-fast";
+    return "z-ai/glm-5.2";
+}
+
+/* ── Heterogeneous tier pool ──────────────────────────────────────────────
+ * When DSCO_TOPO_HETERO is set, every topology node resolves its tier to a
+ * genuinely cross-provider model instead of three variants of one family,
+ * turning any of the 60 topologies into a multi-model graph:
+ *   HAIKU  → fast/cheap classify·scout·validate  (stepfun/step-3.7-flash)
+ *   SONNET → coder worker·implement·analyze       (moonshotai/kimi-k2.7-code)
+ *   OPUS   → long-ctx coordinate·synthesize·judge (z-ai/glm-5.2)
+ * Each tier is still overridable via DSCO_SWARM_{HAIKU,SONNET,OPUS}. */
+bool topology_hetero_enabled(void) {
+    const char *e = getenv("DSCO_TOPO_HETERO");
+    return e && e[0] && e[0] != '0';
+}
+
+static const char *hetero_tier_model(model_tier_t tier) {
+    switch (tier) {
+    case TIER_HAIKU: {
+        const char *e = getenv("DSCO_SWARM_HAIKU");
+        return (e && e[0]) ? e : "stepfun/step-3.7-flash";
+    }
+    case TIER_SONNET: {
+        const char *e = getenv("DSCO_SWARM_SONNET");
+        return (e && e[0]) ? e : "moonshotai/kimi-k2.7-code";
+    }
+    case TIER_OPUS: {
+        const char *e = getenv("DSCO_SWARM_OPUS");
+        return (e && e[0]) ? e : "z-ai/glm-5.2";
+    }
+    }
+    return "z-ai/glm-5.2";
 }
 
 const char *topology_resolve_model_for_tier(const char *coordinator_model,
                                             const char *api_key,
                                             model_tier_t tier,
                                             char *buf, size_t buflen) {
+    /* Heterogeneous pool short-circuits provider detection entirely. */
+    if (topology_hetero_enabled()) {
+        const char *h = model_resolve_alias(hetero_tier_model(tier));
+        if (buf && buflen > 0) snprintf(buf, buflen, "%s", h);
+        return buf ? buf : h;
+    }
+
     const char *model = coordinator_model && coordinator_model[0]
         ? model_resolve_alias(coordinator_model) : DEFAULT_MODEL;
     const char *provider = provider_detect(model, api_key);
@@ -1751,6 +1787,14 @@ bool topology_run(const topology_t *t,
         memcpy(result, out.data, (size_t)written);
         result[written] = '\0';
         if (stats) stats->est_cost_usd = topology_estimate_cost(t, (int)strlen(task) / 4, (int)strlen(result) / 4);
+            /* Teach the cost model from this execution */
+            if (stats && stats->est_cost_usd > 0) {
+                int total_toks = (int)(strlen(task)/4 + strlen(result)/4);
+                cost_model_learn(t->name, total_toks, stats->est_cost_usd, 0.0);
+                /* Cache successful topology selection */
+                plan_cache_store(task, t->name, "topology_run success", 0.85f);
+            }
+
         jbuf_free(&out);
     } else {
         snprintf(result, rlen, "error: topology execution failed");
@@ -2035,6 +2079,14 @@ bool topology_run_scheduled(const topology_t *t,
         memcpy(result, out.data, (size_t)written);
         result[written] = '\0';
         if (stats) stats->est_cost_usd = topology_estimate_cost(t, (int)strlen(task) / 4, (int)strlen(result) / 4);
+            /* Teach the cost model from this execution */
+            if (stats && stats->est_cost_usd > 0) {
+                int total_toks = (int)(strlen(task)/4 + strlen(result)/4);
+                cost_model_learn(t->name, total_toks, stats->est_cost_usd, 0.0);
+                /* Cache successful topology selection */
+                plan_cache_store(task, t->name, "topology_run success", 0.85f);
+            }
+
         jbuf_free(&out);
     } else {
         snprintf(result, rlen, "error: topology execution failed");

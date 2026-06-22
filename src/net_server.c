@@ -16,6 +16,7 @@
 #include <strings.h>
 #include <stdint.h>
 #include <unistd.h>
+#include <fcntl.h>
 #include <ctype.h>
 #include <time.h>
 #include <errno.h>
@@ -390,14 +391,39 @@ bool netsrv_start(dsco_net_server_t *s) {
     }
 
 bind_plain:;
-    char port_str[8];
-    snprintf(port_str, sizeof(port_str), "%u", s->port);
-    int r = mbedtls_net_bind(&s->listen_fd, NULL, port_str, MBEDTLS_NET_PROTO_TCP);
+    /* Bind the configured port; if it's already taken (e.g. another dsco
+     * instance owns it), walk a small range of fallbacks rather than failing
+     * loudly. Running a second instance is normal, so a wedged default port
+     * shouldn't dump an mbedtls error into the TUI. */
+    enum { NETSRV_BIND_TRIES = 8 };
+    uint16_t want = s->port;
+    int r = MBEDTLS_ERR_NET_BIND_FAILED;
+    for (int i = 0; i < NETSRV_BIND_TRIES; i++) {
+        uint16_t try_port = (uint16_t)(want + i);
+        char port_str[8];
+        snprintf(port_str, sizeof(port_str), "%u", try_port);
+        r = mbedtls_net_bind(&s->listen_fd, NULL, port_str, MBEDTLS_NET_PROTO_TCP);
+        if (r == 0) { s->port = try_port; break; }
+        mbedtls_net_free(&s->listen_fd);
+        mbedtls_net_init(&s->listen_fd);
+    }
     if (r != 0) {
-        char errbuf[128];
-        mbedtls_strerror(r, errbuf, sizeof(errbuf));
-        fprintf(stderr, "[netsrv] bind :%u failed: %s\n", s->port, errbuf);
+        /* Every candidate was taken — run without the HTTP API, quietly. */
+        fprintf(stderr, "[netsrv] :%u-%u all in use; HTTP API disabled "
+                        "(another dsco instance likely owns it)\n",
+                want, (uint16_t)(want + NETSRV_BIND_TRIES - 1));
         return false;
+    }
+    if (s->port != want)
+        fprintf(stderr, "[netsrv] :%u in use; HTTP API on :%u\n", want, s->port);
+
+    /* Mark the listen socket close-on-exec so the dozens of MCP subprocesses
+     * we fork+exec don't inherit it. Without this the port stays bound (held
+     * by orphaned children) long after this process exits, and the next launch
+     * fails with "bind :%u failed". mbedtls_net_bind does not set this. */
+    if (s->listen_fd.fd >= 0) {
+        int fl = fcntl(s->listen_fd.fd, F_GETFD);
+        if (fl >= 0) fcntl(s->listen_fd.fd, F_SETFD, fl | FD_CLOEXEC);
     }
 
     s->running = true;

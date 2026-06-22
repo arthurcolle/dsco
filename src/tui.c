@@ -1363,6 +1363,29 @@ void tui_async_spinner_start(tui_async_spinner_t *s, const char *label,
     pthread_create(&s->thread, NULL, async_spinner_thread, s);
 }
 
+/* Tools whose result IS visual art — shown in full with their own ANSI color
+ * instead of a dimmed one-line preview. */
+bool tui_tool_is_display_art(const char *name) {
+    return name && strcmp(name, "plot") == 0;
+}
+
+/* If `name` is a display-art tool, print `result` in full (color preserved,
+ * 2-space indent) to stderr and return true; otherwise return false so the
+ * caller falls back to its usual dim preview. Shared by every tool-result
+ * display path so art renders identically wherever a tool completes. */
+bool tui_print_tool_art(const char *name, const char *result) {
+    if (!tui_tool_is_display_art(name) || !result || !*result) return false;
+    for (const char *p = result; *p; ) {
+        const char *nl = strchr(p, '\n');
+        int len = nl ? (int)(nl - p) : (int)strlen(p);
+        fprintf(stderr, "  %.*s\n", len, p);
+        if (!nl) break;
+        p = nl + 1;
+    }
+    fflush(stderr);
+    return true;
+}
+
 void tui_async_spinner_stop(tui_async_spinner_t *s, bool ok,
                             const char *result_preview, double elapsed_ms,
                             const char *suffix) {
@@ -1434,8 +1457,9 @@ void tui_async_spinner_stop(tui_async_spinner_t *s, bool ok,
             fprintf(stderr, "  %s%s%s", TUI_DIM, suffix, TUI_RESET);
     }
     fprintf(stderr, "\n");
-    /* Preview body indented under the header — first line, dim. */
-    if (preview[0])
+    /* Display-art tools render their FULL colored output; everything else
+     * shows the usual dim first-line preview. */
+    if (!(ok && tui_print_tool_art(s->label, result_preview)) && preview[0])
         fprintf(stderr, "  %s%s%s\n", TUI_DIM, preview, TUI_RESET);
     fflush(stderr);
 }
@@ -1687,7 +1711,7 @@ void tui_batch_summary(const tui_batch_spinner_t *bs, const char *cost_suffix) {
 #define BRL_MAXW  256        /* max sub-pixel width we render (128 cells) */
 #define BRL_MAXH  64         /* max sub-pixel height (16 cells)           */
 
-static inline int dist_logo_bit(int x, int y) {
+static __attribute__((unused)) inline int dist_logo_bit(int x, int y) {
     /* dist_logo.h now ships an 8-bit grayscale master (DIST_LOGO_GRAY) instead
      * of a packed 1-bit bitmap; threshold it to preserve the on/off contract. */
     return DIST_LOGO_GRAY[y * DIST_LOGO_W + x] > 127;
@@ -1708,6 +1732,16 @@ static void brl_set_fg(tui_rgb_t c) {
         fprintf(stderr, "\033[38;2;%d;%d;%dm", c.r, c.g, c.b);
     else
         fprintf(stderr, "\033[38;5;%dm", rgb_to_256(c));
+}
+
+static tui_rgb_t brl_scale_rgb(tui_rgb_t c, float scale) {
+    if (scale < 0.0f) scale = 0.0f;
+    if (scale > 1.0f) scale = 1.0f;
+    tui_rgb_t o;
+    o.r = (unsigned char)lroundf((float)c.r * scale);
+    o.g = (unsigned char)lroundf((float)c.g * scale);
+    o.b = (unsigned char)lroundf((float)c.b * scale);
+    return o;
 }
 
 /* Splash palettes — full-bright letter colour for horizontal position nx (0..1)
@@ -1894,6 +1928,25 @@ static void welcome_pixel_logo(void) {
    Actually, we just modify the existing function above. We'll do it via
    a new internal helper called from the original. */
 
+static void tui_logo_compact_mark(FILE *out, int subdued) {
+    static const char *dense[] = {
+        "⣀⣤⣶⣶⣶⣤⣀",
+        "⣿⡇⢀⣀⢸⣿⣿",
+        "⣿⣷⣾⣿⣾⣿⣿"
+    };
+    static const char *soft[] = {
+        "⣀⣤⣶⣶⣤⣀",
+        "⣿⡇⢀⡀⢸⣿",
+        "⣿⣷⣾⣿⣾⣿"
+    };
+    const char **rows = subdued ? soft : dense;
+    const char *fg = subdued ? "\033[38;5;245m" : "\033[38;5;252m";
+    fputs(fg, out);
+    fputs(rows[0], out);
+    fputs(" ", out);
+    fputs(TUI_DIM "dsco" TUI_RESET, out);
+}
+
 static void welcome_animated(const char *model, int core_count, int total_count, const char *version) {
     int w = tui_term_width();
 
@@ -1997,6 +2050,7 @@ void tui_status_bar_init(tui_status_bar_t *sb, const char *model) {
     sb->visible = false;
     sb->panel_active = false;
     sb->panel_rows = TUI_COMPOSER_PANEL_ROWS;  /* 3: top rule + input + status */
+    sb->splash_started_at = (double)time(NULL);
 }
 
 void tui_status_bar_set_model(tui_status_bar_t *sb, const char *model,
@@ -2100,7 +2154,7 @@ static const char *sb_git_branch(void) {
         size_t n = strlen(branch);
         while (n > 0 && (branch[n-1] == '\n' || branch[n-1] == '\r'))
             branch[--n] = '\0';
-        if (n > 18) { branch[15] = '\0'; strcat(branch, "…"); }
+        if (n > 18) { branch[15] = '\0'; snprintf(branch + strlen(branch), sizeof(branch) - strlen(branch), "…"); }
     }
     pclose(fp);
     return branch;
@@ -2131,6 +2185,7 @@ void tui_status_bar_render(tui_status_bar_t *sb) {
     int turn = sb->turn;
     int tools = sb->tools_used;
     bool show_clock = sb->show_clock;
+    double splash_started_at = sb->splash_started_at;
     pthread_mutex_unlock(&sb->mutex);
 
     /* Format token counts with K suffix */
@@ -2172,8 +2227,20 @@ void tui_status_bar_render(tui_status_bar_t *sb) {
     /* user@cwd  bg=24 fg=255 ; branch bg=22 fg=255 ; metrics bg=236 fg=252 */
     char left_buf[512];
     int li = 0;
+    double logo_age = difftime(time(NULL), (time_t)splash_started_at);
+    bool logo_subdued = (logo_age >= 2.0);
     li += snprintf(left_buf + li, sizeof(left_buf) - li,
-                   "\033[48;5;24m\033[38;5;255m %s@%s ", user, cwd);
+                   "\033[48;5;24m\033[38;5;255m ");
+    {
+        char logo_buf[96] = {0};
+        FILE *mf = fmemopen(logo_buf, sizeof(logo_buf), "w");
+        if (mf) {
+            tui_logo_compact_mark(mf, logo_subdued);
+            fclose(mf);
+            li += snprintf(left_buf + li, sizeof(left_buf) - li, "%s  ", logo_buf);
+        }
+    }
+    li += snprintf(left_buf + li, sizeof(left_buf) - li, "%s@%s ", user, cwd);
     if (branch[0]) {
         li += snprintf(left_buf + li, sizeof(left_buf) - li,
                        "\033[48;5;22m\033[38;5;255m  %s ", branch);
@@ -2951,6 +3018,106 @@ static bool composer_clipboard_grab_image(char *out_path, size_t out_sz) {
 #endif
 }
 
+/* ── Slash-command dropdown ───────────────────────────────────────────────
+ * Registered by agent.c at startup; consumed by tui_composer_read to render a
+ * live, prefix-filtered popup that expands beneath the input line. */
+#define TUI_SLASHMENU_MAX     8     /* max rows shown at once (scrolls beyond) */
+#define TUI_SLASHMENU_CAP     128   /* max matches tracked per keystroke */
+
+static const tui_cmd_entry_t *s_slash_cmds = NULL;
+static int                    s_slash_cmds_n = 0;
+
+void tui_composer_set_slash_commands(const tui_cmd_entry_t *cmds, int count) {
+    s_slash_cmds   = cmds;
+    s_slash_cmds_n = (cmds && count > 0) ? count : 0;
+}
+
+/* Collect indices of registered commands whose name is prefixed by the current
+ * input. Only fires when the buffer is a single "/<token>" with no space or
+ * newline yet — i.e. the user is still typing the command word. Writes up to
+ * `max` match indices into `idx` and sets `*out_count`. */
+static void composer_slash_match(const char *buf, size_t len,
+                                 int *idx, int *out_count, int max) {
+    *out_count = 0;
+    if (!s_slash_cmds || s_slash_cmds_n == 0) return;
+    if (len == 0 || buf[0] != '/') return;
+    for (size_t i = 0; i < len; i++) {
+        if (buf[i] == ' ' || buf[i] == '\n') return;  /* past the command token */
+    }
+    for (int i = 0; i < s_slash_cmds_n && *out_count < max; i++) {
+        const char *name = s_slash_cmds[i].name;
+        if (!name || name[0] != '/') continue;
+        if (strncmp(name, buf, len) == 0) idx[(*out_count)++] = i;
+    }
+}
+
+/* Rows the dropdown will occupy for `count` matches (0 when closed). */
+static int slashmenu_rows(int count) {
+    if (count <= 0) return 0;
+    return count < TUI_SLASHMENU_MAX ? count : TUI_SLASHMENU_MAX;
+}
+
+/* Draw the dropdown starting at screen row r_first. Returns rows drawn.
+ * `idx`/`count` come from composer_slash_match; `sel` is the highlighted row. */
+static int slashmenu_render(int r_first, const int *idx, int count, int sel) {
+    int shown = slashmenu_rows(count);
+    if (shown == 0) return 0;
+
+    int cols = tui_term_width();
+    if (cols < 20) cols = 20;
+
+    /* Slide a window so the selection stays visible. */
+    int top = 0;
+    if (sel >= shown) top = sel - shown + 1;
+    if (top > count - shown) top = count - shown;
+    if (top < 0) top = 0;
+
+    /* Widest visible command name → column width for the description gutter. */
+    int namew = 0;
+    for (int r = 0; r < shown; r++) {
+        int l = (int)strlen(s_slash_cmds[idx[top + r]].name);
+        if (l > namew) namew = l;
+    }
+    if (namew > 22) namew = 22;
+
+    for (int r = 0; r < shown; r++) {
+        int gi = idx[top + r];
+        bool on = (top + r == sel);
+        const char *name = s_slash_cmds[gi].name;
+        const char *desc = s_slash_cmds[gi].desc ? s_slash_cmds[gi].desc : "";
+
+        tui_cursor_move(r_first + r, 1);
+        fprintf(stderr, "\033[2K");
+
+        /* "  ▸ /name        description" — pink for the active row, dim else. */
+        const char *mark = on ? "\033[38;5;213m\xe2\x96\xb8\033[0m" : " ";
+        const char *ncol = on ? "\033[1;38;5;213m" : "\033[38;5;250m";
+
+        /* Truncate description to the remaining cells. */
+        int used = 2 /*indent*/ + 1 /*mark*/ + 1 /*sp*/ + namew + 2 /*gap*/;
+        int dbudget = cols - used - 1;
+        if (dbudget < 0) dbudget = 0;
+        char dbuf[256];
+        snprintf(dbuf, sizeof(dbuf), "%s", desc);
+        if ((int)strlen(dbuf) > dbudget) dbuf[dbudget] = '\0';
+
+        fprintf(stderr, "  %s %s%-*s\033[0m  \033[2;38;5;245m%s\033[0m",
+                mark, ncol, namew, name, dbuf);
+    }
+    return shown;
+}
+
+/* Paint the input box plus (if open) the slash dropdown beneath it. Cursor
+ * coordinates (always inside the box) are returned via cur_r/cur_c. Returns
+ * the combined row count so the caller can anchor/scroll/clear correctly. */
+static int composer_paint(int r_top, const char *buf, size_t len, size_t cur,
+                          const int *sug_idx, int sug_count, int sug_sel,
+                          int *cur_r, int *cur_c) {
+    int h = inbox_render(r_top, buf, len, cur, true, cur_r, cur_c);
+    int m = slashmenu_render(r_top + h, sug_idx, sug_count, sug_sel);
+    return h + m;
+}
+
 char *tui_composer_read(tui_status_bar_t *sb, const char *prompt,
                         char *out, size_t out_sz) {
     if (!out || out_sz == 0) return NULL;
@@ -2987,6 +3154,15 @@ char *tui_composer_read(tui_status_bar_t *sb, const char *prompt,
         return NULL;
     }
     size_t len = 0, cur = 0;
+
+    /* Slash-command dropdown state. `sug_idx` holds indices into the registered
+     * command table for the current prefix matches; `sug_sel` is the highlight;
+     * `sug_suppress` is set when the user dismisses the menu (Esc) or completes
+     * a command (Tab) so it stays closed until the token changes again. */
+    int  sug_idx[TUI_SLASHMENU_CAP];
+    int  sug_count = 0;
+    int  sug_sel = 0;
+    bool sug_suppress = false;
 
     /* History snapshot pointer for up/down */
     /* (We don't integrate with readline history here — keep composer
@@ -3031,7 +3207,8 @@ char *tui_composer_read(tui_status_bar_t *sb, const char *prompt,
     tui_term_lock();
     fprintf(stderr, "\033[?25l");
     int cur_r = r_top + 1, cur_c = 5;
-    prev_height = inbox_render(r_top, buf, len, cur, true, &cur_r, &cur_c);
+    prev_height = composer_paint(r_top, buf, len, cur,
+                                 sug_idx, sug_count, sug_sel, &cur_r, &cur_c);
     tui_cursor_move(cur_r, cur_c);
     fprintf(stderr, "\033[?25h");
     fflush(stderr);
@@ -3166,20 +3343,47 @@ char *tui_composer_read(tui_status_bar_t *sb, const char *prompt,
             goto redraw;
         }
         if (c == '\r' || c == '\n') {
-            /* Enter: submit */
+            /* Enter with the dropdown open → complete the highlighted command,
+             * then submit it. (Use Tab if you need to add arguments first.)
+             * Require at least one char after "/" so a bare "/" + Enter never
+             * silently fires the first command (e.g. /clear). */
+            if (sug_count > 0 && len > 1) {
+                const char *name = s_slash_cmds[sug_idx[sug_sel]].name;
+                size_t nl = strlen(name);
+                if (nl < TUI_COMPOSER_BUF_CAP) {
+                    memcpy(buf, name, nl);
+                    buf[nl] = '\0';
+                    len = nl; cur = nl;
+                }
+            }
             done = true;
             break;
         }
         if (c == 0x0A) {
             /* Ctrl+J → literal newline in buffer */
             composer_insert(buf, TUI_COMPOSER_BUF_CAP, &len, &cur, "\n", 1);
+            sug_sel = 0; sug_suppress = false;
             goto redraw;
         }
         if (c == 0x7F || c == 0x08) {  /* Backspace */
             composer_backspace(buf, &len, &cur);
+            sug_sel = 0; sug_suppress = false;
             goto redraw;
         }
         if (c == 0x09) {  /* Tab */
+            /* With the dropdown open, Tab completes the highlighted command into
+             * the buffer and dismisses the menu so you can type arguments. */
+            if (sug_count > 0) {
+                const char *name = s_slash_cmds[sug_idx[sug_sel]].name;
+                size_t nl = strlen(name);
+                if (nl < TUI_COMPOSER_BUF_CAP) {
+                    memcpy(buf, name, nl);
+                    buf[nl] = '\0';
+                    len = nl; cur = nl;
+                }
+                sug_suppress = true;
+                goto redraw;
+            }
             composer_insert(buf, TUI_COMPOSER_BUF_CAP, &len, &cur, "  ", 2);
             goto redraw;
         }
@@ -3188,7 +3392,8 @@ char *tui_composer_read(tui_status_bar_t *sb, const char *prompt,
         if (c == 0x1B) {
             unsigned char n1 = 0;
             if (composer_read_byte(STDIN_FILENO, 30, &n1) <= 0) {
-                /* Standalone ESC → cancel */
+                /* Standalone ESC → dismiss the dropdown if open, else cancel. */
+                if (sug_count > 0) { sug_suppress = true; goto redraw; }
                 cancelled = true;
                 break;
             }
@@ -3241,6 +3446,13 @@ char *tui_composer_read(tui_status_bar_t *sb, const char *prompt,
                         goto redraw;
                     }
                 }
+                goto redraw;
+            }
+            /* When the dropdown is open, ↑/↓ move the highlight rather than the
+             * text cursor (wrapping at the ends, like Claude Code / Codex). */
+            if (sug_count > 0 && (n2 == 'A' || n2 == 'B')) {
+                if (n2 == 'A') sug_sel = (sug_sel - 1 + sug_count) % sug_count;
+                else           sug_sel = (sug_sel + 1) % sug_count;
                 goto redraw;
             }
             switch (n2) {
@@ -3326,6 +3538,9 @@ char *tui_composer_read(tui_status_bar_t *sb, const char *prompt,
             }
             composer_insert(buf, TUI_COMPOSER_BUF_CAP, &len, &cur,
                             (char *)utf, (size_t)(1 + want));
+            /* Editing the token resets the highlight and revives a menu that
+             * was dismissed with Esc/Tab. */
+            sug_sel = 0; sug_suppress = false;
             goto redraw;
         }
         continue;
@@ -3336,7 +3551,14 @@ redraw:
          * push the bottom of the box past the last row. */
         {
             int nrows = tui_term_height();
-            int need  = inbox_total_rows(buf, len);
+            /* Refresh the dropdown match set for the current token, then size
+             * the repaint to include however many rows it will occupy. */
+            sug_count = 0;
+            if (!sug_suppress)
+                composer_slash_match(buf, len, sug_idx, &sug_count, TUI_SLASHMENU_CAP);
+            if (sug_sel >= sug_count) sug_sel = sug_count > 0 ? sug_count - 1 : 0;
+            if (sug_sel < 0) sug_sel = 0;
+            int need  = inbox_total_rows(buf, len) + slashmenu_rows(sug_count);
             if (r_top + need - 1 > nrows) {
                 int overflow = (r_top + need - 1) - nrows;
                 tui_term_lock();
@@ -3361,7 +3583,8 @@ redraw:
                 }
             }
             int cr = r_top + 1, cc = 5;
-            prev_height = inbox_render(r_top, buf, len, cur, true, &cr, &cc);
+            prev_height = composer_paint(r_top, buf, len, cur,
+                                         sug_idx, sug_count, sug_sel, &cr, &cc);
             tui_cursor_move(cr, cc);
             fprintf(stderr, "\033[?25h");
             fflush(stderr);

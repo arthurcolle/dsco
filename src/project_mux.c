@@ -620,7 +620,7 @@ static void draw_status_bar(dsco_mux_t *m, int rows, int cols) {
 }
 
 /* Legacy single-pane renderer — kept for help overlay / fallback only. */
-static void draw_pane_legacy(dsco_project_t *p, int row0, int col0, int h, int w, bool focused) {
+static __attribute__((unused)) void draw_pane_legacy(dsco_project_t *p, int row0, int col0, int h, int w, bool focused) {
     /* border */
     for (int r = row0; r < row0 + h; r++) {
         move_to(r, col0);

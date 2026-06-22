@@ -31,11 +31,14 @@ static bool env_truthy(const char *value) {
                      value[0] == 'y' || value[0] == 'Y');
 }
 
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wdeprecated-declarations"
 static CFStringRef auth_ui_policy(void) {
     return env_truthy(getenv("DSCO_SECURE_STORE_AUTH_UI"))
         ? kSecUseAuthenticationUIAllow
         : kSecUseAuthenticationUIFail;
 }
+#pragma clang diagnostic pop
 
 /* ── module state ───────────────────────────────────────────────────────── */
 
