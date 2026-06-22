@@ -433,6 +433,12 @@ bool mesh_node_start(mesh_node_t *n) {
     }
 
     if (listen(s, 32) < 0) { close(s); return false; }
+    /* Don't leak the listen socket into fork+exec'd MCP subprocesses, or the
+     * mesh port stays held by orphaned children after this process exits. */
+    {
+        int fl = fcntl(s, F_GETFD);
+        if (fl >= 0) fcntl(s, F_SETFD, fl | FD_CLOEXEC);
+    }
     n->server_sock = s;
     n->running     = true;
 
