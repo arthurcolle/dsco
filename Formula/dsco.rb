@@ -27,7 +27,7 @@ class Dsco < Formula
     bin.install "dsco", "dsco-lite", "dsc"
 
     # The binary resolves this at runtime via <exe_dir>/../share/dsco/.
-    (share/"dsco").install "include/tool_embeddings.bin"
+    pkgshare.install "include/tool_embeddings.bin"
   end
 
   test do
