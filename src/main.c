@@ -832,7 +832,7 @@ static const native_provider_t NATIVE_PROVIDERS[] = {
       CAP_TOOLS|CAP_MULTITURN|CAP_STREAMING, 2 },
     { "cohere",     "Cohere API",                "COHERE_API_KEY",      "command-a-03-2025",
       CAP_TOOLS|CAP_MULTITURN|CAP_STREAMING|CAP_JSON, 3 },
-    { "moonshot",   "Moonshot Kimi API",         "MOONSHOT_API_KEY",    "kimi-k2.7-code",
+    { "moonshot",   "Moonshot Kimi API",         "MOONSHOT_API_KEY",    "kimi-k2.7-code-highspeed",
       CAP_TOOLS|CAP_MULTITURN|CAP_STREAMING|CAP_VISION|CAP_THINKING|CAP_JSON, 4 },
     { NULL, NULL, NULL, NULL, 0, 0 }
 };
@@ -1462,6 +1462,7 @@ static int run_provider_smoke(const char *self_path, bool full) {
         { "xAI",              SMOKE_NATIVE,     "xai",        "grok-4-fast",                 false },
         { "Together",         SMOKE_NATIVE,     "together",   "meta-llama/Llama-4-Maverick-17B-128E-Instruct-FP8", true },
         { "Cerebras",         SMOKE_NATIVE,     "cerebras",   "qwen-3-235b-a22b-instruct-2507", false },
+        { "Moonshot HS",      SMOKE_NATIVE,     "moonshot",   "kimi-k2.7-code-highspeed",     false },
         { "Moonshot",         SMOKE_NATIVE,     "moonshot",   "kimi-k2.7-code",              false },
         { "Mistral",          SMOKE_NATIVE,     "mistral",    "mistral-large-latest",        true  },
         { "Cohere",           SMOKE_NATIVE,     "cohere",     "command-a-03-2025",           true  },
@@ -1477,6 +1478,7 @@ static int run_provider_smoke(const char *self_path, bool full) {
         { "OR Google 3 Pro",  SMOKE_OPENROUTER, NULL,         "google/gemini-3.1-pro-preview", true },
         { "OR DeepSeek",      SMOKE_OPENROUTER, NULL,         "deepseek/deepseek-chat",      true  },
         { "OR Moonshot",      SMOKE_OPENROUTER, NULL,         "moonshotai/kimi-k2.7-code",   true  },
+        { "OR Moonshot HS",   SMOKE_OPENROUTER, NULL,         "moonshotai/kimi-k2.7-code-highspeed", true },
         { "OR Moonshot Think",SMOKE_OPENROUTER, NULL,         "moonshotai/kimi-k2-thinking", true  },
         { "OR Qwen",          SMOKE_OPENROUTER, NULL,         "qwen/qwen3.5-plus-02-15",     true  },
         { "OR Qwen Coder",    SMOKE_OPENROUTER, NULL,         "qwen/qwen3-coder-next",       true  },
@@ -1880,7 +1882,7 @@ static void usage(const char *prog) {
         "  --timeline-port PORT     Timeline webserver port (default: 8421)\n"
         "  --timeline-instance ID   Filter timeline to one instance ID\n"
         "  -O, --orchestrate      Orchestrator mode: Haiku routes to specialist workers\n"
-        "  -M, --worker-model M   Worker model for orchestrate mode (default: kimi-k2.7-code)\n"
+        "  -M, --worker-model M   Worker model for orchestrate mode (default: kimi-k2.7-code-highspeed)\n"
         "  --topology NAME        Run/select an agent topology\n"
         "  --topology-auto        Auto-pick a topology for the task\n"
         "  --topology-list        List available topologies\n"
