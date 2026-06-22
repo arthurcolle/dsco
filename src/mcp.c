@@ -532,6 +532,15 @@ static bool spawn_server(mcp_server_t *srv) {
             argv[i + 1] = srv->args[i];
         argv[argc + 1] = NULL;
 
+        /* Close every inherited fd above stdio before exec. The netsrv listen
+         * socket relies on FD_CLOEXEC, but that is set post-bind and so has a
+         * fork race: a child forked in that window inherits the socket and
+         * pins port 7547, making the next launch fail "bind :7547 failed".
+         * Closing here is race-free and unconditional. */
+        int maxfd = (int)sysconf(_SC_OPEN_MAX);
+        if (maxfd < 0 || maxfd > 4096) maxfd = 4096;
+        for (int fd = STDERR_FILENO + 1; fd < maxfd; fd++) close(fd);
+
         execvp(srv->command, argv);
         _exit(127);
     }

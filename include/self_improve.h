@@ -235,9 +235,13 @@ void self_improve_turn_reset(self_improve_t *si);
 /* ── Tool implementations (for tools.c registration) ──────────────────── */
 
 /* Tool: self_improve — Run the self-improvement loop and return suggestions.
- * Input: { "action": "summary"|"consolidate"|"acknowledge"|"history",
- *           "suggestion_id": N (for acknowledge) }
- * Output: JSON with suggestions, patterns, and strategy weights. */
+ * Input: { "action": "summary"|"consolidate"|"acknowledge"|"history"|"save"|
+ *                    "curriculum"|"skill"|"promotion_gate",
+ *           "suggestion_id": N (for acknowledge),
+ *           "skill_id": "SP07" (for skill),
+ *           ...promotion metrics for promotion_gate }
+ * Output: summary text or JSON with suggestions, patterns, strategy weights,
+ *         RSI curriculum, and promotion gate decisions. */
 bool tool_self_improve(const char *input_json, char *result, size_t result_len);
 
 /* Tool: self_assess — Quick self-evaluation of current session performance.

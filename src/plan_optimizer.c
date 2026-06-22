@@ -217,3 +217,81 @@ const plan_option_t *plan_options_best(const plan_options_t *opts) {
     }
     return &opts->options[0]; /* all over budget — return top fit anyway */
 }
+
+/* ── Per-tier pricing (USD per 1 K combined tokens, ~mid-2025) ─────────── */
+
+static const double s_tier_cost_per_1k[3] = {
+    [TIER_HAIKU]  = 0.00025,
+    [TIER_SONNET] = 0.00300,
+    [TIER_OPUS]   = 0.01500,
+};
+
+/*
+ * topology_cost_multiplier — structural overhead factor above raw token cost.
+ *
+ * Category-specific values reflect real execution patterns:
+ *   mesh        1.40 — O(N²) inter-node chatter
+ *   competitive 1.30 — redundant work (N attempts, 1 winner)
+ *   feedback    1.20 × iterations — multi-pass refinement
+ *   hierarchy   1.15 — delegation + aggregation overhead
+ *   fanout      1.05 — fan coordination (mostly parallel, low waste)
+ *   chain/etc   1.00 — baseline
+ */
+double topology_cost_multiplier(const char *topology_name) {
+    if (!topology_name) return 1.0;
+
+    const topology_t *t = topology_find(topology_name);
+    if (!t) return 1.0;
+
+    double mult;
+    switch (t->category) {
+        case CAT_MESH:        mult = 1.40; break;
+        case CAT_COMPETITIVE: mult = 1.30; break;
+        case CAT_FEEDBACK:    mult = 1.20; break;
+        case CAT_HIERARCHY:   mult = 1.15; break;
+        case CAT_FANOUT:      mult = 1.05; break;
+        default:              mult = 1.00; break;
+    }
+
+    /* Iterative strategies compound the multiplier per iteration */
+    if (t->strategy == EXEC_ITERATIVE && t->max_iterations > 1) {
+        double iter_factor = 0.30 + 0.70 * (double)t->max_iterations;
+        mult *= iter_factor;
+    }
+
+    return mult;
+}
+
+/*
+ * plan_estimate_cost — tier-weighted cost using the topology's actual node mix.
+ *
+ * Computes: (avg_rate × total_agents × tokens/1K) × topology_cost_multiplier.
+ * Falls back to opt->est_cost_usd when topology is unknown.
+ *
+ * Target accuracy: within 20% of actual execution cost (Priority 1 success metric).
+ */
+double plan_estimate_cost(const plan_option_t *opt) {
+    if (!opt || !opt->topology_name) return 0.0;
+
+    const topology_t *t = topology_find(opt->topology_name);
+    if (!t) return opt->est_cost_usd;
+
+    /* Walk nodes; accumulate tier-weighted cost × replicas */
+    double weighted_rate = 0.0;
+    int    total_agents  = 0;
+    for (int i = 0; i < t->node_count; i++) {
+        int tier = (int)t->nodes[i].tier;
+        int reps = t->nodes[i].replicas;
+        if (tier < 0 || tier > (int)TIER_OPUS) tier = (int)TIER_SONNET;
+        if (reps < 1) reps = 1;
+        weighted_rate += s_tier_cost_per_1k[tier] * (double)reps;
+        total_agents  += reps;
+    }
+
+    if (total_agents == 0) return opt->est_cost_usd;
+
+    int total_tokens = EST_INPUT_TOKENS + EST_OUTPUT_TOKENS;
+    double base = weighted_rate * ((double)total_tokens / 1000.0);
+
+    return base * topology_cost_multiplier(opt->topology_name);
+}

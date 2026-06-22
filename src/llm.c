@@ -2905,11 +2905,21 @@ void dsco_strip_terminal_controls_inplace(char *s) {
 
     while (*r) {
         if (*r == 0x1b) {  /* ESC */
+            unsigned char *esc = r;
             r++;
             if (*r == '[') {  /* CSI ... final-byte */
-                r++;
-                while (*r && !(*r >= 0x40 && *r <= 0x7e)) r++;
-                if (*r) r++;
+                unsigned char *fb = r + 1;
+                while (*fb && !(*fb >= 0x40 && *fb <= 0x7e)) fb++;
+                if (*fb == 'm') {
+                    /* SGR (color/style) is display-only — it can't move the
+                     * cursor, clear the screen, or inject data — so it's safe
+                     * to keep. This is what lets the `plot` tool's color art
+                     * (viridis density, heatmaps, candlesticks) survive. */
+                    while (esc <= fb) *w++ = (char)*esc++;
+                    r = fb + 1;
+                } else {  /* cursor move / erase / scroll / unterminated — strip */
+                    r = *fb ? fb + 1 : fb;
+                }
                 continue;
             }
             if (*r == ']') {  /* OSC ... BEL or ST */

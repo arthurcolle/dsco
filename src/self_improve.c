@@ -16,6 +16,7 @@
 #include "cost_model.h"
 #include "baseline.h"
 #include "json_util.h"
+#include "rsi_curriculum.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -851,6 +852,40 @@ bool tool_self_improve(const char *input_json, char *result, size_t result_len) 
 
     self_improve_t *si = &g_self_improve;
 
+    if (strcmp(action, "curriculum") == 0) {
+        return rsi_curriculum_summary_json(result, result_len) > 0;
+    }
+
+    if (strcmp(action, "skill") == 0) {
+        char *skill_id = json_get_str(input_json, "skill_id");
+        bool ok = false;
+        if (!skill_id || !*skill_id) {
+            snprintf(result, result_len, "{\"error\":\"skill_id_required\"}");
+        } else {
+            ok = rsi_curriculum_skill_json(skill_id, result, result_len) > 0;
+        }
+        free(skill_id);
+        return ok;
+    }
+
+    if (strcmp(action, "promotion_gate") == 0) {
+        rsi_eval_summary_t eval = {
+            .heldout_success_rate = json_get_double(input_json, "heldout_success_rate", 0.0),
+            .baseline_success_rate = json_get_double(input_json, "baseline_success_rate", 0.0),
+            .safety_violation_rate = json_get_double(input_json, "safety_violation_rate", 1.0),
+            .rollback_trigger_rate = json_get_double(input_json, "rollback_trigger_rate", 1.0),
+            .cost_per_success_usd = json_get_double(input_json, "cost_per_success_usd", 0.0),
+            .baseline_cost_per_success_usd = json_get_double(input_json, "baseline_cost_per_success_usd", 0.0),
+            .judge_human_kappa = json_get_double(input_json, "judge_human_kappa", 0.0),
+            .replay_stability = json_get_double(input_json, "replay_stability", 0.0),
+            .provenance_complete = json_get_bool(input_json, "provenance_complete", false),
+            .signature_verified = json_get_bool(input_json, "signature_verified", false),
+            .rollback_plan_ready = json_get_bool(input_json, "rollback_plan_ready", false),
+            .budget_lease_active = json_get_bool(input_json, "budget_lease_active", false),
+        };
+        return rsi_curriculum_gate_json(&eval, result, result_len) > 0;
+    }
+
     if (strcmp(action, "summary") == 0) {
         char summary[4096];
         self_improve_summary(si, summary, sizeof(summary));
@@ -903,7 +938,7 @@ bool tool_self_improve(const char *input_json, char *result, size_t result_len) 
 
     snprintf(result, result_len,
              "Unknown action '%s'. Available: summary, consolidate, "
-             "acknowledge, history, save", action);
+             "acknowledge, history, save, curriculum, skill, promotion_gate", action);
     return false;
 }
 
