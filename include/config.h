@@ -43,7 +43,7 @@
 extern int g_cheap_mode;
 
 /* API defaults */
-#define DEFAULT_MODEL       "z-ai/glm-5.2"
+#define DEFAULT_MODEL       "claude-sonnet-4-6"
 #define API_URL_ANTHROPIC   "https://api.anthropic.com/v1/messages"
 #define API_URL_COUNT_TOKENS "https://api.anthropic.com/v1/messages/count_tokens"
 #define ANTHROPIC_VERSION   "2023-06-01"
