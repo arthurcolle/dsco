@@ -15,8 +15,11 @@
  *   DSCO_BEACON_SECS  — interval in seconds (default: 60)
  *
  * Beacon JSON payload:
- *   { "node": "...", "ts": 1234567890, "seq": 42,
- *     "uptime_s": 300, "sig": "<hex-hmac>" }
+ *   { "event": "heartbeat", "node": "...", "pid": 1234,
+ *     "ts": 1234567890, "seq": 42, "uptime_s": 300,
+ *     "rss_mb": 128, "rss_delta_mb": 4, "peak_rss_mb": 192,
+ *     "fd_count": 41, "thread_count": 9, "mem_pressure": 1,
+ *     "phase": "startup_ready", "sig": "<hex-hmac>" }
  *
  * The HMAC signs ts+seq+node using the DSCO_NET_AUTH_KEY or mesh keypair.
  * ─────────────────────────────────────────────────────────────────────── */
@@ -26,6 +29,13 @@
 /* Start the beacon background thread.  No-op if already running. */
 void heartbeat_start(void);
 
+/* Attach stable process context to subsequent runtime records. Arguments that
+ * look like secrets are redacted before being persisted. */
+void heartbeat_set_context(int argc, char **argv);
+
+/* Update the lifecycle phase recorded in heartbeat/runtime diagnostics. */
+void heartbeat_set_phase(const char *phase);
+
 /* Stop the beacon thread (blocks until it exits). */
 void heartbeat_stop(void);
 
@@ -34,5 +44,9 @@ bool heartbeat_running(void);
 
 /* Force an immediate beacon emission (still async). */
 void heartbeat_poke(void);
+
+/* Write an immediate lifecycle diagnostic with the current process state.
+ * Useful before shutdown paths where the periodic thread may not wake again. */
+void heartbeat_note_event(const char *event, const char *detail);
 
 #endif /* DSCO_HEARTBEAT_H */
