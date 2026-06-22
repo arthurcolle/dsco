@@ -24028,6 +24028,10 @@ void watchdog_stop(tool_watchdog_t *wd) {
 
 /* Per-tool timeout overrides (tools that naturally take longer) */
 static const tool_timeout_cfg_t s_timeout_overrides[] = {
+    /* Interactive: blocks on the human, so the watchdog must not fire — a 30s
+     * timeout makes the agent re-issue the dialog in a loop, ballooning context.
+     * Effectively "wait for the user" (24h); Esc/Ctrl-C still cancels. */
+    { "AskUserQuestion", 86400 },
     { "bash",           120 },
     { "run_command",    120 },
     { "sandbox_run",    120 },
