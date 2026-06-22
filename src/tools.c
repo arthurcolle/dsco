@@ -35,6 +35,9 @@
 #include "learned_cost.h"
 #include "session_memory.h"
 #include "vm.h"
+#include "stateful_atoms.h"
+#include "control_flow.h"
+#include "recovery.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -5861,6 +5864,8 @@ static bool tool_computer(const char *input, char *result, size_t rlen) {
         free(action);
         return false;
     }
+    free(action);
+    action = NULL;
 #else
     /* Linux: drive xdotool. */
     char cmd[1024];
@@ -19837,6 +19842,94 @@ static bool tool_session_status(const char *input, char *result, size_t rlen) {
     return rc == 0;
 }
 
+/* ── Priority 2/6/7 tool stubs (full impl in separate modules) ─────────── */
+
+static plan_state_t *g_plan_state = NULL;
+
+static bool tool_plan_state_dispatch(const char *input, char *result, size_t rlen) {
+    char *action = json_get_str(input, "action");
+    if (!action || !action[0]) { free(action); snprintf(result, rlen, "missing: action (init|run|rollback|get|set)"); return false; }
+    bool ok = false;
+    if (strcmp(action, "init") == 0) {
+        int pid = json_get_int(input, "plan_id", 0);
+        if (g_plan_state) plan_state_free(g_plan_state);
+        g_plan_state = plan_state_init(pid);
+        ok = (g_plan_state != NULL);
+        snprintf(result, rlen, "{\"ok\":%s,\"plan_id\":%d}", ok?"true":"false", pid);
+    } else if (strcmp(action, "run") == 0 && g_plan_state) {
+        int aid = json_get_int(input, "atom_id", -1);
+        char buf[8192] = {0};
+        ok = execute_atom_with_input(g_plan_state, aid, buf, sizeof buf);
+        snprintf(result, rlen, "{\"ok\":%s,\"result\":\"%s\"}", ok?"true":"false", buf);
+    } else if (strcmp(action, "rollback") == 0 && g_plan_state) {
+        int steps = json_get_int(input, "steps", 1);
+        int undone = plan_state_rollback(g_plan_state, steps);
+        snprintf(result, rlen, "{\"undone\":%d}", undone);
+        ok = true;
+    } else if (strcmp(action, "get") == 0 && g_plan_state) {
+        int aid = json_get_int(input, "atom_id", -1);
+        const char *out = plan_state_get_output(g_plan_state, aid);
+        snprintf(result, rlen, "{\"atom_id\":%d,\"output\":%s}", aid, out?out:"null");
+        ok = true;
+    } else if (strcmp(action, "set") == 0 && g_plan_state) {
+        int aid = json_get_int(input, "atom_id", -1);
+        char *out = json_get_str(input, "output");
+        ok = plan_state_set_output(g_plan_state, aid, out);
+        free(out);
+        snprintf(result, rlen, "{\"ok\":%s}", ok?"true":"false");
+    } else {
+        snprintf(result, rlen, "unknown plan_state action or state not inited");
+    }
+    free(action);
+    return ok;
+}
+
+static bool tool_control_flow_dispatch(const char *input, char *result, size_t rlen) {
+    char *action = json_get_str(input, "action");
+    if (!action || !action[0]) { free(action); snprintf(result, rlen, "missing: action"); return false; }
+    bool ok = false;
+    if (strcmp(action, "parse") == 0) {
+        char *expr = json_get_str(input, "expr");
+        condition_t c = {0};
+        ok = condition_parse(expr, &c);
+        snprintf(result, rlen, "{\"ok\":%s,\"op\":%d}", ok?"true":"false", c.op);
+        free(expr);
+    } else if (strcmp(action, "evaluate") == 0) {
+        char *expr = json_get_str(input, "expr");
+        char *ctx = json_get_str(input, "ctx");
+        condition_t c = {0};
+        condition_parse(expr, &c);
+        ok = condition_evaluate(&c, ctx);
+        snprintf(result, rlen, "{\"result\":%s}", ok?"true":"false");
+        free(expr); free(ctx);
+    } else {
+        snprintf(result, rlen, "control_flow: parse|evaluate only (stub)");
+    }
+    free(action);
+    return true;
+}
+
+static bool tool_recovery_dispatch(const char *input, char *result, size_t rlen) {
+    char *action = json_get_str(input, "action");
+    if (!action || !action[0]) { free(action); snprintf(result, rlen, "missing: action"); return false; }
+    bool ok = false;
+    if (strcmp(action, "backtrack") == 0) {
+        int pid = json_get_int(input, "plan_id", 0);
+        int dist = json_get_int(input, "distance", 1);
+        int undone = backtrack_and_replay(pid, dist);
+        snprintf(result, rlen, "{\"undone\":%d}", undone);
+        ok = true;
+    } else if (strcmp(action, "log_dump") == 0) {
+        char *path = json_get_str(input, "path");
+        snprintf(result, rlen, "{\"note\":\"recovery log dump to %s (stub)\"}", path?path:"(null)");
+        ok = true; free(path);
+    } else {
+        snprintf(result, rlen, "recovery: backtrack|log_dump only (stub)");
+    }
+    free(action);
+    return true;
+}
+
 static bool tool_session_dispatch(const char *input, char *result, size_t rlen) {
     char *action = json_get_str(input, "action");
     if (!action || !action[0]) {
@@ -21325,6 +21418,13 @@ static const tool_def_t s_tools[] = {
     { .name = "memory_tier", .description = "Three-tier memory: store, recall, promote, forget, status.", .input_schema_json = "{\"type\":\"object\",\"properties\":{\"action\":{\"type\":\"string\",\"description\":\"store|recall|promote|forget|status\"},\"key\":{\"type\":\"string\"},\"value\":{\"type\":\"string\"},\"query\":{\"type\":\"string\"}},\"required\":[\"action\"]}", .execute = tool_memory_dispatch },
     { .name = "learned_cost", .description = "Learned k-NN cost model (Priority 3): predict/record/stats. action=predict needs {task,topology}; action=record needs {task,topology,tokens,cost}; action=stats returns DB summary.", .input_schema_json = "{\"type\":\"object\",\"properties\":{\"action\":{\"type\":\"string\",\"description\":\"predict|record|stats\"},\"task\":{\"type\":\"string\"},\"topology\":{\"type\":\"string\"},\"tokens\":{\"type\":\"integer\"},\"cost\":{\"type\":\"number\"}},\"required\":[\"action\"]}", .execute = tool_learned_cost_dispatch },
     { .name = "session_memory", .description = "Persistent session KV memory (Priority 5): remember/recall/status. action=remember needs {key,value,ttl(seconds, 0=permanent)}; action=recall needs {key}; action=status returns counts.", .input_schema_json = "{\"type\":\"object\",\"properties\":{\"action\":{\"type\":\"string\",\"description\":\"remember|recall|status\"},\"key\":{\"type\":\"string\"},\"value\":{\"type\":\"string\"},\"ttl\":{\"type\":\"integer\"}},\"required\":[\"action\"]}", .execute = tool_session_dispatch },
+
+    /* ══════════════════════════════════════════════════════════════════════
+     *  PRIORITY 2/6/7 — Stateful atoms, Control flow, Recovery
+     * ══════════════════════════════════════════════════════════════════════ */
+    { .name = "plan_state", .description = "Stateful atom execution (Priority 2): init/run/rollback/get/set. action=init needs {plan_id}; action=run needs {atom_id}; action=rollback needs {steps}; action=get/set needs {atom_id}.", .input_schema_json = "{\"type\":\"object\",\"properties\":{\"action\":{\"type\":\"string\",\"description\":\"init|run|rollback|get|set\"},\"plan_id\":{\"type\":\"integer\"},\"atom_id\":{\"type\":\"integer\"},\"steps\":{\"type\":\"integer\"},\"output\":{\"type\":\"string\"}},\"required\":[\"action\"]}", .execute = tool_plan_state_dispatch },
+    { .name = "control_flow", .description = "Conditional branching (Priority 6): if/while/for/switch/try on steps. action=parse|evaluate|execute|set|get.", .input_schema_json = "{\"type\":\"object\",\"properties\":{\"action\":{\"type\":\"string\"},\"step_id\":{\"type\":\"integer\"},\"expr\":{\"type\":\"string\"},\"ctx\":{\"type\":\"string\"}},\"required\":[\"action\"]}", .execute = tool_control_flow_dispatch },
+    { .name = "recovery", .description = "Failure recovery (Priority 7): retry/fallback/backtrack. action=retry|fallback|backtrack|log_dump.", .input_schema_json = "{\"type\":\"object\",\"properties\":{\"action\":{\"type\":\"string\"},\"plan_id\":{\"type\":\"integer\"},\"step_id\":{\"type\":\"integer\"},\"distance\":{\"type\":\"integer\"},\"path\":{\"type\":\"string\"}},\"required\":[\"action\"]}", .execute = tool_recovery_dispatch },
     { .name = "talons", .description = "Competitive execution (Talons): goal, advance, depend, tick, tournament, recommend, status. Strategies (36, military-history canon): direct, flanking, escalation, divide, ambush, attrition, pincer, blitz, siege, feint, opportunistic, envelopment, encirclement, guerrilla, scorched_earth, fabian, defense_in_depth, oblique, infiltration, interior_lines, defeat_in_detail, turning_movement, breakthrough, shock, decapitation, blockade, raid, indirect, tempo, deterrence, counterattack, maneuver, hedgehog, screen, asymmetric, tournament. Or omit strategy and use action=recommend. depend gates a goal on a prerequisite (dep_goal_id); tick runs the deadline/dependency engine.", .input_schema_json = "{\"type\":\"object\",\"properties\":{\"action\":{\"type\":\"string\",\"description\":\"goal|advance|depend|tick|tournament|recommend|status\"},\"description\":{\"type\":\"string\"},\"goal_id\":{\"type\":\"integer\"},\"dep_goal_id\":{\"type\":\"integer\"},\"strategy\":{\"type\":\"string\"},\"grip\":{\"type\":\"string\"},\"action_kind\":{\"type\":\"string\",\"description\":\"for advance: stalk|strike|grip|capture|escaped|abandon\"}},\"required\":[\"action\"]}", .execute = tool_talons_dispatch },
     { .name = "wings_talons_status", .description = "Unified Wings+Talons+Immune system status.", .input_schema_json = "{\"type\":\"object\",\"properties\":{}}", .execute = tool_wings_talons_status, .is_read_only = true, .is_concurrent = true },
     { .name = "self_analyze", .description = "Deep self-analysis: per-tool efficiency (success rate, latency, efficiency score), session economy (turns/cost/failures/redundancy), adaptive strategy weights, and the live independent agent PROCESSES interoperating via IPC (pid, role, status, task).", .input_schema_json = "{\"type\":\"object\",\"properties\":{}}", .execute = tool_self_analyze, .is_read_only = true, .is_concurrent = true },

@@ -22,4 +22,36 @@ void openrouter_cache_init(void);
 /* Number of models currently in the in-memory catalog (0 if not yet loaded). */
 int openrouter_cache_count(void);
 
+/* Block until a catalog is published or `timeout_ms` elapses. Returns the model
+ * count (>0) once ready, or 0 on timeout. Use before enumerating from a
+ * short-lived command so the background load has a chance to land. */
+int openrouter_cache_wait_ready(int timeout_ms);
+
+/* Synchronously load the catalog on the calling thread: publishes the on-disk
+ * copy, then refreshes over the network when stale. Returns the resulting model
+ * count. For CLI listing where waiting on the background thread is undesirable. */
+int openrouter_cache_load_sync(void);
+
+/* Read-only view of one indexed model, materialised for enumeration. */
+typedef struct {
+    const char *id;                 /* full slug, e.g. "openai/gpt-4o" */
+    const char *name;               /* human display name (may be NULL) */
+    const char *org;                /* provider prefix, e.g. "openai" */
+    int    context_window;
+    int    max_output;
+    double input_price;             /* $ per 1M tokens */
+    double output_price;
+    double cache_read_price;
+    double cache_write_price;
+    int    supports_thinking;       /* 1 = exposes a reasoning parameter */
+    int    multimodal;              /* 1 = accepts/produces non-text modalities */
+    long   created;                 /* unix timestamp, 0 if unknown */
+} or_model_view_t;
+
+typedef void (*or_model_cb)(const or_model_view_t *m, void *ud);
+
+/* Invoke `cb` once per indexed model (catalog order). Returns the number
+ * visited (0 if the catalog is not yet loaded). */
+int openrouter_cache_foreach(or_model_cb cb, void *ud);
+
 #endif /* DSCO_OPENROUTER_CACHE_H */

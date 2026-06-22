@@ -223,8 +223,11 @@ static void crash_alarm_handler(int sig) { (void)sig; g_alarm_fired = 1; }
 static void crash_write_sig(int fd, int sig, const char *name) {
     char buf[256];
     int n = snprintf(buf, sizeof(buf),
-                     "\n[dsco crash] signal=%s(%d) pid=%d build=%s\n",
-                     name, sig, getpid(), GIT_HASH);
+                     "\n[dsco crash] signal=%s(%d) pid=%d ppid=%d "
+                     "supervised=%s build=%s last_state=%s/.dsco/last_heartbeat.json\n",
+                     name, sig, getpid(), getppid(),
+                     getenv("DSCO_SUPERVISED") ? getenv("DSCO_SUPERVISED") : "0",
+                     GIT_HASH, getenv("HOME") ? getenv("HOME") : "/tmp");
     if (n > 0) (void)!write(fd, buf, (size_t)n);
 }
 
@@ -357,6 +360,11 @@ void main_install_crash_handlers(void) {
 }
 
 static void main_atexit_handler(void) {
+    if (heartbeat_running()) {
+        audit_log("runtime", "clean exit");
+        heartbeat_stop();
+    }
+
     /* Persist self-improvement learnings (strategy weights, session stats)
      * for the next run. Guarded by initialized so non-agent fast paths skip. */
     if (g_self_improve.initialized) {
@@ -598,6 +606,7 @@ static dsco_caps_t main_plan_startup_caps(int argc, char **argv,
 
 void dsco_startup_init(dsco_profile_t profile, dsco_caps_t caps) {
     if (g_startup_initialized) return;
+    heartbeat_set_phase("startup_init");
     if (profile == DSCO_PROFILE_FULL)
         caps = DSCO_CAP_FULL;
     if (profile == DSCO_PROFILE_WORKER)
@@ -616,6 +625,7 @@ void dsco_startup_init(dsco_profile_t profile, dsco_caps_t caps) {
     if (!is_worker) tui_screen_reset_full();
 
     if (caps & DSCO_CAP_SECURITY) {
+        if (!is_worker) heartbeat_set_phase("startup_security");
         tamper_init();          /* must be first: deny ptrace, hash code, watch binary */
         perf_mark("tamper");
         {   /* audit log opens here so every subsequent init step is captured */
@@ -627,6 +637,7 @@ void dsco_startup_init(dsco_profile_t profile, dsco_caps_t caps) {
         }
         perf_mark("audit");
         if (!is_worker) {
+            heartbeat_set_phase("startup_secure_store");
             uint8_t se_key[32] = {0};
             int timed_out = 0;
             bool show_secure_wait = isatty(STDERR_FILENO);
@@ -652,20 +663,26 @@ void dsco_startup_init(dsco_profile_t profile, dsco_caps_t caps) {
             perf_mark("secure_store");
         }
         tamper_register_wiper((tamper_wiper_fn)se_store_wipe, NULL);
+        if (!is_worker) heartbeat_set_phase("startup_sealed_store");
         if (!is_worker) sealed_store_init();
         perf_mark("sealed_store");
         env_guard_init();
         audit_log("startup", is_worker ? "dsco worker init" : "dsco init");
-        if (!is_worker) heartbeat_start();
+        if (!is_worker) {
+            heartbeat_set_phase("startup_heartbeat");
+            heartbeat_start();
+        }
 
         /* ── Priority 1/3/4: plan optimizer, cost model, plan cache ── */
         if (!is_worker) {
+            heartbeat_set_phase("startup_cost_state");
             cost_model_init();
             plan_cache_init();
         }
 
 #if defined(HAVE_LIBSODIUM)
         if (!is_worker) {
+            heartbeat_set_phase("startup_mesh");
             /* ── Mesh P2P layer ─────────────────────────────────────── */
             uint16_t mesh_port = 7337;
             const char *mp_env = getenv("DSCO_MESH_PORT");
@@ -706,6 +723,7 @@ void dsco_startup_init(dsco_profile_t profile, dsco_caps_t caps) {
 
 #if defined(HAVE_MBEDTLS) && defined(HAVE_LIBSODIUM)
         if (!is_worker) {
+            heartbeat_set_phase("startup_http");
             /* ── HTTP/TLS API server ─────────────────────────────────── */
             uint16_t http_port = NETSRV_DEFAULT_PORT;
             const char *hp_env = getenv("DSCO_HTTP_PORT");
@@ -738,6 +756,7 @@ void dsco_startup_init(dsco_profile_t profile, dsco_caps_t caps) {
     }
 
     if (caps & DSCO_CAP_ACCEL) {
+        if (!is_worker) heartbeat_set_phase("startup_accel");
         dsco_mlx_init();
         dsco_accel_init();
         dsco_pool_global_init(0);
@@ -796,6 +815,7 @@ void dsco_startup_init(dsco_profile_t profile, dsco_caps_t caps) {
     }
 
     g_startup_initialized = true;
+    if (!is_worker) heartbeat_set_phase("startup_ready");
     perf_mark("startup ready");
 }
 
@@ -2065,6 +2085,52 @@ static void print_models_json(void) {
     printf("]\n");
 }
 
+/* ── OpenRouter catalog listing (indexed via openrouter_cache) ─────────── */
+
+static void or_model_json_cb(const or_model_view_t *m, void *ud) {
+    int *n = ud;
+    if ((*n)++ > 0) printf(",");
+    printf("{\"id\":\"%s\",\"name\":\"", m->id);
+    json_print_escaped(stdout, m->name ? m->name : "");
+    printf("\",\"org\":\"%s\","
+           "\"context_window\":%d,\"max_output\":%d,"
+           "\"input_price\":%.4f,\"output_price\":%.4f,"
+           "\"cache_read_price\":%.4f,\"cache_write_price\":%.4f,"
+           "\"supports_thinking\":%d,\"multimodal\":%d,\"created\":%ld}",
+           m->org ? m->org : "", m->context_window, m->max_output,
+           m->input_price, m->output_price,
+           m->cache_read_price, m->cache_write_price,
+           m->supports_thinking, m->multimodal, m->created);
+}
+
+static void or_model_text_cb(const or_model_view_t *m, void *ud) {
+    (void)ud;
+    printf("%-44s %9d  $%7.3f/$%-7.3f  %s%s  %s\n",
+           m->id, m->context_window, m->input_price, m->output_price,
+           m->supports_thinking ? "R" : "-",
+           m->multimodal ? "M" : "-",
+           m->name ? m->name : "");
+}
+
+static int print_or_models(bool json) {
+    int n = openrouter_cache_load_sync();
+    if (n <= 0) {
+        if (json) printf("[]\n");
+        else fprintf(stderr, "openrouter: catalog unavailable (offline and no disk cache)\n");
+        return n > 0 ? 0 : 1;
+    }
+    if (json) {
+        int count = 0;
+        printf("[");
+        openrouter_cache_foreach(or_model_json_cb, &count);
+        printf("]\n");
+    } else {
+        fprintf(stderr, "# %d OpenRouter models indexed (R=reasoning, M=multimodal)\n", n);
+        openrouter_cache_foreach(or_model_text_cb, NULL);
+    }
+    return 0;
+}
+
 static void print_tools_json_fast(dsco_profile_t profile) {
     if (profile == DSCO_PROFILE_LITE || profile == DSCO_PROFILE_WORKER)
         tools_init_profile(TOOLS_CORE);
@@ -2327,6 +2393,8 @@ static int maybe_run_early_fast_path(int argc, char **argv,
 
 int main(int argc, char **argv) {
     perf_init();
+    heartbeat_set_context(argc, argv);
+    heartbeat_set_phase("main_entry");
 
     /* Fault-injection hook for exercising the crash handler + supervisor end
      * to end. Completely inert unless DSCO_TEST_CRASH is set. Installs the
@@ -2345,6 +2413,7 @@ int main(int argc, char **argv) {
                 fire = gen && atoi(gen) == atoi(at + 1);
             }
             if (fire) {
+                heartbeat_set_phase("fault_injection");
                 main_install_crash_handlers();
                 fprintf(stderr, "[dsco] DSCO_TEST_CRASH=%s — injecting fault "
                         "(gen %s)\n", tc, getenv("DSCO_SUPERVISED") ? getenv("DSCO_SUPERVISED") : "0");
@@ -2578,6 +2647,16 @@ int main(int argc, char **argv) {
             free(oneshot_prompt);
             return 0;
         }
+        if (strcmp(argv[i], "--or-models") == 0) {
+            int rc = print_or_models(false);
+            free(oneshot_prompt);
+            return rc;
+        }
+        if (strcmp(argv[i], "--or-models-json") == 0) {
+            int rc = print_or_models(true);
+            free(oneshot_prompt);
+            return rc;
+        }
         if (strcmp(argv[i], "--tools-json") == 0) {
             main_tools_init_for_runtime(runtime_profile);
             int count = 0;
@@ -2637,6 +2716,9 @@ int main(int argc, char **argv) {
             const char *tname = argv[++i];
             const char *tjson = argv[++i];
             main_tools_init_for_runtime(runtime_profile);
+            /* Raw dump is for humans (plot/avatar art) — never apply the agent
+             * loop's context-economy truncation, or the render gets cut off. */
+            tools_set_inline_truncation(false);
             char result[256 * 1024] = {0};
             bool ok = tools_execute(tname, tjson, result, sizeof(result));
             (void)write(STDOUT_FILENO, result, strlen(result));
