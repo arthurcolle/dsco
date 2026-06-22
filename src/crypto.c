@@ -491,6 +491,7 @@ bool jwt_decode(const char *token, char *header, size_t h_len,
     /* Decode header */
     size_t h_b64_len = (size_t)(dot1 - token);
     uint8_t *h_raw = malloc(h_b64_len + 4);
+    if (!h_raw) return false;
     size_t h_decoded = base64url_decode(token, h_b64_len, h_raw, h_b64_len + 4);
     if (h_decoded < h_len) {
         memcpy(header, h_raw, h_decoded);
@@ -504,6 +505,7 @@ bool jwt_decode(const char *token, char *header, size_t h_len,
     /* Decode payload */
     size_t p_b64_len = (size_t)(dot2 - dot1 - 1);
     uint8_t *p_raw = malloc(p_b64_len + 4);
+    if (!p_raw) return false;
     size_t p_decoded = base64url_decode(dot1 + 1, p_b64_len, p_raw, p_b64_len + 4);
     if (p_decoded < p_len) {
         memcpy(payload, p_raw, p_decoded);

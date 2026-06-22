@@ -10,6 +10,8 @@
 #include "json_util.h"
 #include "ipc.h"
 #include "tui.h"
+#include "img_util.h"
+#include "dsco_dht.h"
 #include "md.h"
 #include "baseline.h"
 #include "plugin.h"
@@ -21,6 +23,7 @@
 #include "topology.h"
 #include "router.h"
 #include "swarm.h"
+#include "pets.h"
 #include "arena_alloc.h"
 #include "vm.h"
 #include <stdio.h>
@@ -146,6 +149,96 @@ typedef struct {
 } concurrent_tool_slot_t;
 
 static double now_ms(void);
+
+/* Session-local permission overrides granted from the TUI prompt. "Allow"
+ * escalates one call; "Always" adds the tool to this allowlist for the
+ * current process. The actual trust policy remains in tools.c. */
+#define TOOL_PERMISSION_ALWAYS_MAX 128
+static char s_tool_permission_always[TOOL_PERMISSION_ALWAYS_MAX][128];
+static int  s_tool_permission_always_count = 0;
+
+static bool permission_env_truthy(const char *v) {
+    return v && v[0] &&
+           (strcmp(v, "0") != 0) &&
+           strcasecmp(v, "false") != 0 &&
+           strcasecmp(v, "no") != 0 &&
+           strcasecmp(v, "off") != 0;
+}
+
+static bool tool_permission_prompt_available(void) {
+    if (permission_env_truthy(getenv("DSCO_DISABLE_PERMISSION_PROMPTS"))) return false;
+    return isatty(STDIN_FILENO) && isatty(STDERR_FILENO);
+}
+
+static bool tool_permission_always_allowed(const char *tool_name) {
+    if (!tool_name || !tool_name[0]) return false;
+    for (int i = 0; i < s_tool_permission_always_count; i++) {
+        if (strcmp(s_tool_permission_always[i], tool_name) == 0) return true;
+    }
+    return false;
+}
+
+static void tool_permission_always_add(const char *tool_name) {
+    if (!tool_name || !tool_name[0] ||
+        s_tool_permission_always_count >= TOOL_PERMISSION_ALWAYS_MAX ||
+        tool_permission_always_allowed(tool_name)) {
+        return;
+    }
+    snprintf(s_tool_permission_always[s_tool_permission_always_count],
+             sizeof(s_tool_permission_always[s_tool_permission_always_count]),
+             "%s", tool_name);
+    s_tool_permission_always_count++;
+}
+
+static bool maybe_escalate_tool_permission(const char *tool_name,
+                                           const char *base_tier,
+                                           const char *reason,
+                                           const char **exec_tier,
+                                           char *deny_reason,
+                                           size_t deny_reason_len) {
+    if (exec_tier) *exec_tier = base_tier;
+
+    if (tool_permission_always_allowed(tool_name)) {
+        if (exec_tier) *exec_tier = "trusted";
+        baseline_log("security", "tool_escalated_always", tool_name, NULL);
+        return true;
+    }
+
+    if (!tool_permission_prompt_available()) {
+        if (deny_reason && deny_reason_len > 0) {
+            snprintf(deny_reason, deny_reason_len, "%s%s",
+                     reason ? reason : "tool blocked by trust policy",
+                     " (no interactive permission prompt available)");
+        }
+        return false;
+    }
+
+    char desc[256];
+    snprintf(desc, sizeof(desc),
+             "Blocked by %s trust tier. Escalate this call to trusted?",
+             base_tier ? base_tier : "current");
+    tui_perm_result_t choice =
+        tui_permission_prompt(tool_name, desc,
+                              reason ? reason : "tool blocked by trust policy");
+
+    if (choice == TUI_PERM_ALLOW || choice == TUI_PERM_ALWAYS) {
+        if (choice == TUI_PERM_ALWAYS) tool_permission_always_add(tool_name);
+        if (exec_tier) *exec_tier = "trusted";
+        baseline_log("security",
+                     choice == TUI_PERM_ALWAYS ? "tool_escalated_always"
+                                               : "tool_escalated_once",
+                     tool_name, NULL);
+        return true;
+    }
+
+    if (deny_reason && deny_reason_len > 0) {
+        snprintf(deny_reason, deny_reason_len, "%s%s",
+                 reason ? reason : "tool blocked by trust policy",
+                 choice == TUI_PERM_CANCEL ? " (permission prompt cancelled)"
+                                           : " (permission denied by user)");
+    }
+    return false;
+}
 
 static void *concurrent_tool_thread(void *arg) {
     concurrent_tool_slot_t *slot = (concurrent_tool_slot_t *)arg;
@@ -337,6 +430,29 @@ static void *mcp_bg_init_thread(void *arg) {
     return NULL;
 }
 
+/* Drain freshly-finished background-agent pets into mini-notifications in the
+ * input panel's middle rows. Called each time we read user input, so completions
+ * that land between turns surface without the user polling. Each pet notifies
+ * exactly once (pet_roster_next_unnotified marks it). */
+static void drain_pet_notifications(tui_status_bar_t *sb) {
+    if (!sb) return;
+    pet_roster_t *r = pet_roster_global();
+    pet_status_t st;
+    char label[64];
+    pet_bones_t bones;
+    int id;
+    while ((id = pet_roster_next_unnotified(r, &st, label, sizeof(label), &bones)) >= 0) {
+        pet_bones_t fb = bones;
+        fb.eye = (st == PET_ST_ERROR) ? 2 : 3;   /* dizzy × / wide ◉ */
+        char face[32];
+        pet_render_face(&fb, face, sizeof(face));
+        char note[160];
+        snprintf(note, sizeof(note), "%s  agent #%d %s — %.40s",
+                 face, id, st == PET_ST_DONE ? "done" : "failed", label);
+        tui_panel_notify(sb, st == PET_ST_DONE ? TUI_PANEL_NOTE_OK : TUI_PANEL_NOTE_WARN, note);
+    }
+}
+
 static void mcp_bg_init_start(tui_status_bar_t *sb) {
     if (g_mcp_bg_started) return;
     g_mcp_bg_sb = sb;
@@ -427,7 +543,23 @@ static void init_cost_budgets(void) {
     }
 }
 
+/* Per-turn cost from token usage × current model's registry prices. Used as
+ * the fallback when the provider doesn't report an authoritative cost. */
+static double turn_token_cost(session_state_t *session, const usage_t *u) {
+    const model_info_t *mi = model_lookup(session->model);
+    if (!mi) return 0;
+    return u->input_tokens                * mi->input_price       / 1e6
+         + u->output_tokens               * mi->output_price      / 1e6
+         + u->cache_read_input_tokens     * mi->cache_read_price   / 1e6
+         + u->cache_creation_input_tokens * mi->cache_write_price  / 1e6;
+}
+
 static double session_cost(session_state_t *session) {
+    /* Prefer the accumulated authoritative cost (provider-reported when
+     * available, else per-turn token math). Falls back to recomputing from
+     * cumulative tokens only before any turn has been accounted. */
+    if (session->total_reported_cost_usd > 0)
+        return session->total_reported_cost_usd;
     const model_info_t *mi = model_lookup(session->model);
     if (!mi) return 0;
     return session->total_input_tokens  * mi->input_price / 1e6
@@ -641,18 +773,25 @@ static char *load_and_encode_image(const char *path, const char *media_type,
             tui_spinner_tick(spinner);
         }
         snprintf(downscaled, sizeof(downscaled), "/tmp/dsco_drag_%d.jpg", getpid());
-        char q_path[8192];
-        char q_out[1024];
-        int rc = -1;
-        if (shell_quote_single(path, q_path, sizeof(q_path)) &&
-            shell_quote_single(downscaled, q_out, sizeof(q_out))) {
-            char cmd[12288];
-            snprintf(cmd, sizeof(cmd),
-                     "sips --resampleHeightWidthMax %d %s --setProperty format jpeg --out %s 2>/dev/null",
-                     IMG_MAX_DIMENSION, q_path, q_out);
-            rc = system(cmd);
+
+        /* Portable in-process path: decode → resize → JPEG via stb. */
+        bool ok = dsco_image_downscale_jpeg(path, IMG_MAX_DIMENSION, downscaled);
+#ifdef __APPLE__
+        if (!ok) {
+            /* stb can't decode HEIC/WEBP/AVIF/TIFF — fall back to macOS sips. */
+            char q_path[8192];
+            char q_out[1024];
+            if (shell_quote_single(path, q_path, sizeof(q_path)) &&
+                shell_quote_single(downscaled, q_out, sizeof(q_out))) {
+                char cmd[12288];
+                snprintf(cmd, sizeof(cmd),
+                         "sips --resampleHeightWidthMax %d %s --setProperty format jpeg --out %s 2>/dev/null",
+                         IMG_MAX_DIMENSION, q_path, q_out);
+                ok = (system(cmd) == 0);
+            }
         }
-        if (rc == 0 && stat(downscaled, &st) == 0) {
+#endif
+        if (ok && stat(downscaled, &st) == 0) {
             read_path = downscaled;
             media_type = "image/jpeg";
         } else {
@@ -1153,7 +1292,7 @@ static void sigwinch_handler(int sig) {
 }
 
 /* Called from main loop to handle deferred SIGWINCH resize */
-static void handle_pending_winch(void) {
+static __attribute__((unused)) void handle_pending_winch(void) {
     if (!g_winch_pending) return;
     g_winch_pending = 0;
     /* Ephemeral panel: nothing pinned. The next composer_read repaints
@@ -1217,6 +1356,18 @@ typedef struct {
     int    est_tokens;
     bool   active;
 } saved_session_entry_t;
+
+typedef struct {
+    char name[64];
+    char expansion[MAX_INPUT_LINE];
+} command_alias_t;
+
+static saved_session_entry_t *session_entries_alloc(void) {
+    saved_session_entry_t *entries =
+        safe_malloc((size_t)DSCO_SESSION_LIST_MAX * sizeof(*entries));
+    memset(entries, 0, (size_t)DSCO_SESSION_LIST_MAX * sizeof(*entries));
+    return entries;
+}
 
 static const char *session_current_name(const session_state_t *session) {
     return (session && session->slot_name[0]) ? session->slot_name : "default";
@@ -1451,6 +1602,7 @@ static void session_reset_usage_for_new(session_state_t *session) {
     session->total_output_tokens = 0;
     session->total_cache_read_tokens = 0;
     session->total_cache_write_tokens = 0;
+    session->total_reported_cost_usd = 0;
     session->turn_count = 0;
     session->total_ttft_ms = 0.0;
     session->total_stream_ms = 0.0;
@@ -1778,9 +1930,11 @@ static bool run_topology_prompt(session_state_t *session, const char *api_key,
     return true;
 }
 
-/* ── Readline tab completion ───────────────────────────────────────────── */
-
-#ifdef HAVE_READLINE
+/* ── Slash-command table ───────────────────────────────────────────────────
+ * Single source of truth for slash commands. Drives both readline tab
+ * completion (below, under HAVE_READLINE) and the composer's live dropdown
+ * (registered with the TUI via tui_composer_set_slash_commands), so it is
+ * compiled unconditionally. Layout matches tui_cmd_entry_t {name, desc}. */
 typedef struct {
     const char *command;
     const char *description;
@@ -1834,6 +1988,11 @@ static const slash_command_t s_slash_commands[] = {
     {"/mcp reload",   "reload MCP servers/tools"},
     {"/provider",     "show/detect API provider"},
     {"/status",       "show full session status"},
+    {"/dht",          "distributed peer discovery (Kademlia) over the mesh"},
+    {"/dht start",    "/dht start [swarm-key]  — join the private DHT overlay"},
+    {"/dht find",     "force a peer search/announce now"},
+    {"/dht boot",     "/dht boot <host:port>  — add a bootstrap node"},
+    {"/dht stop",     "leave the DHT overlay"},
     {"/temp",         "set request temperature"},
     {"/thinking",     "set thinking budget"},
     {"/fallback",     "set model fallback chain"},
@@ -1893,6 +2052,16 @@ static const slash_command_t s_slash_commands[] = {
     {NULL, NULL}
 };
 
+/* Number of real entries in s_slash_commands (excludes the NULL terminator). */
+static int slash_commands_count(void) {
+    int n = 0;
+    while (s_slash_commands[n].command) n++;
+    return n;
+}
+
+/* ── Readline tab completion ───────────────────────────────────────────── */
+
+#ifdef HAVE_READLINE
 static const char *command_description(const char *command) {
     for (size_t i = 0; s_slash_commands[i].command; i++) {
         if (strcmp(s_slash_commands[i].command, command) == 0) {
@@ -2103,7 +2272,7 @@ static char *command_generator(const char *text, int state) {
                 char *r = malloc(total);
                 if (!r) return NULL;
                 memcpy(r, prefix, cmd_len);
-                strcpy(r + cmd_len, p->name);
+                snprintf(r + cmd_len, sizeof(r) - cmd_len, "%s", p->name);
                 return r;
             }
         }
@@ -2582,8 +2751,11 @@ static void print_tool_result_ex(const char *name, bool ok, const char *result, 
         tpos += snprintf(trail + tpos, sizeof(trail) - tpos, " · %s", size_str);
     print_role_header("tool_response", ok, trail);
 
-    /* Indented preview body — first ~10 lines or 800 bytes. */
-    if (result && result[0]) {
+    /* Display-art tools (plot) render in full color; otherwise a dim preview
+     * of the first ~10 lines / 800 bytes. */
+    if (ok && tui_print_tool_art(name, result)) {
+        /* full colored art already printed */
+    } else if (result && result[0]) {
         const char *p = result;
         int lines = 0;
         size_t emitted = 0;
@@ -2687,8 +2859,19 @@ static void park_transcript_cursor_after_pane(void) {
 static char *read_input_line_prompt(char *buf, size_t buf_sz, const char *prompt) {
     const char *p = prompt ? prompt : "\033[1m\033[95m\xe2\x9d\xaf\033[0m ";
 
+    /* Surface any background agents that finished since the last prompt. */
+    drain_pet_notifications(g_winch_sb);
+
     /* Persistent-pane path: use the multi-line composer box. */
     if (g_winch_sb && g_winch_sb->visible) {
+        /* Feed the composer's live slash-command dropdown once. s_slash_commands
+         * shares tui_cmd_entry_t's {name, desc} layout, so it registers directly. */
+        static bool slash_registered = false;
+        if (!slash_registered) {
+            tui_composer_set_slash_commands(
+                (const tui_cmd_entry_t *)s_slash_commands, slash_commands_count());
+            slash_registered = true;
+        }
         char *r = tui_composer_read(g_winch_sb, p, buf, buf_sz);
         if (!r) return NULL;
 #ifdef HAVE_READLINE
@@ -2875,6 +3058,7 @@ void agent_run(const char *api_key, const char *model,
     /* Session state */
     session_state_t session;
     session_state_init(&session, model);
+    setenv("DSCO_TRUST_TIER", session_trust_tier_to_string(session.trust_tier), 1);
     if (topology_name && topology_name[0]) {
         const topology_t *cli_topology = topology_find(topology_name);
         if (cli_topology) {
@@ -2899,7 +3083,8 @@ void agent_run(const char *api_key, const char *model,
 
     /* Command aliases: /alias <name> <expansion> */
 #define MAX_ALIASES 32
-    struct { char name[64]; char expansion[MAX_INPUT_LINE]; } aliases[MAX_ALIASES];
+    command_alias_t *aliases = safe_malloc(MAX_ALIASES * sizeof(*aliases));
+    memset(aliases, 0, MAX_ALIASES * sizeof(*aliases));
     int alias_count = 0;
 
     int tool_count;
@@ -3039,9 +3224,16 @@ void agent_run(const char *api_key, const char *model,
         char dyn_prompt[256];
         {
             double cost = session_cost(&session);
-            int ctx_used = session.total_input_tokens + session.total_output_tokens;
+            /* Context occupancy = size of the LAST request (the full conversation
+             * we just sent), not the cumulative sum of every turn's tokens —
+             * otherwise the gauge climbs past 100% as turns accumulate. Matches
+             * the /context bar (print_context). */
+            int ctx_used = session.last_input_tokens > 0
+                         ? session.last_input_tokens
+                         : session.total_input_tokens + session.total_output_tokens;
             int ctx_max = session.context_window > 0 ? session.context_window : CONTEXT_WINDOW_TOKENS;
             double ctx_pct = ctx_max > 0 ? 100.0 * ctx_used / ctx_max : 0;
+            if (ctx_pct > 100.0) ctx_pct = 100.0;
             const char *ctx_color = ctx_pct < 60 ? TUI_GREEN : (ctx_pct < 85 ? TUI_YELLOW : TUI_RED);
 
             /* Shorten model name for prompt */
@@ -3126,6 +3318,7 @@ void agent_run(const char *api_key, const char *model,
             session.total_output_tokens = 0;
             session.total_cache_read_tokens = 0;
             session.total_cache_write_tokens = 0;
+            session.total_reported_cost_usd = 0;
             session.turn_count = 0;
             tui_success("conversation cleared");
             baseline_log("command", "/clear", NULL, NULL);
@@ -3626,6 +3819,64 @@ void agent_run(const char *api_key, const char *model,
             fprintf(stderr, "  dsco v%s (built %s, %s)\n", DSCO_VERSION, BUILD_DATE, GIT_HASH);
             continue;
         }
+        /* /dht — distributed peer discovery over a private Kademlia overlay */
+        if (strncmp(input_buf, "/dht", 4) == 0 &&
+            (input_buf[4] == '\0' || input_buf[4] == ' ')) {
+            const char *arg = input_buf + 4;
+            while (*arg == ' ') arg++;
+            dsco_dht_t *d = dsco_dht_global();
+            if (strncmp(arg, "start", 5) == 0) {
+                const char *key = arg + 5;
+                while (*key == ' ') key++;
+                if (!*key) key = getenv("DSCO_DHT_SWARM");
+                if (!key || !*key) key = "dsco-mesh";
+                uint16_t mp = 7337;
+                const char *mpe = getenv("DSCO_MESH_PORT");
+                if (mpe && atoi(mpe) > 0) mp = (uint16_t)atoi(mpe);
+                uint16_t dp = 7600;
+                const char *dpe = getenv("DSCO_DHT_PORT");
+                if (dpe && atoi(dpe) > 0) dp = (uint16_t)atoi(dpe);
+                dsco_dht_config_t dc = { .udp_port = dp, .mesh_port = mp, .swarm_key = key };
+                d = dsco_dht_start(&dc);
+                if (d) tui_success("dht: joined overlay, announcing mesh port");
+                else   tui_error("dht: failed to start (need libsodium + free UDP port)");
+            } else if (strcmp(arg, "find") == 0) {
+                if (d) { dsco_dht_find_peers(d); tui_success("dht: searching for peers"); }
+                else   tui_warning("dht: not running — /dht start first");
+            } else if (strncmp(arg, "boot", 4) == 0) {
+                const char *hp = arg + 4;
+                while (*hp == ' ') hp++;
+                char host[256]; const char *colon = strrchr(hp, ':');
+                if (!d) tui_warning("dht: not running — /dht start first");
+                else if (!colon || colon == hp) tui_error("usage: /dht boot <host:port>");
+                else {
+                    size_t hl = (size_t)(colon - hp);
+                    if (hl >= sizeof(host)) hl = sizeof(host) - 1;
+                    memcpy(host, hp, hl); host[hl] = '\0';
+                    if (dsco_dht_bootstrap(d, host, (uint16_t)atoi(colon + 1)))
+                        tui_success("dht: bootstrap node added");
+                    else tui_error("dht: could not resolve/ping bootstrap node");
+                }
+            } else if (strcmp(arg, "stop") == 0) {
+                if (d) { dsco_dht_stop(d); tui_success("dht: left overlay"); }
+                else   tui_warning("dht: not running");
+            } else {
+                /* status (default) */
+                if (!d) {
+                    fprintf(stderr, "  %sdht:%s not running\n", TUI_DIM, TUI_RESET);
+                    fprintf(stderr, "  %s/dht start [swarm-key]%s to join a private overlay "
+                                    "(or set DSCO_DHT_SWARM)\n", TUI_DIM, TUI_RESET);
+                } else {
+                    dsco_dht_stats_t s; dsco_dht_get_stats(d, &s);
+                    fprintf(stderr, "  %sdht:%s running · nodes: %d good / %d dubious / %d cached"
+                                    " · incoming %d\n", TUI_DIM, TUI_RESET,
+                            s.good, s.dubious, s.cached, s.incoming);
+                    fprintf(stderr, "  %s     peers discovered: %d · searches: %d%s\n",
+                            TUI_DIM, s.peers_found, s.searches, TUI_RESET);
+                }
+            }
+            continue;
+        }
         /* /force — tool_choice control */
         if (strncmp(input_buf, "/force", 6) == 0) {
             const char *arg = input_buf + 6;
@@ -3711,9 +3962,10 @@ void agent_run(const char *api_key, const char *model,
         /* ── /sessions, /resume, /new, /rename — session workspace ─────── */
         if (strncmp(input_buf, "/sessions", 9) == 0 &&
             (input_buf[9] == '\0' || input_buf[9] == ' ')) {
-            saved_session_entry_t entries[DSCO_SESSION_LIST_MAX];
+            saved_session_entry_t *entries = session_entries_alloc();
             int count = session_load_entries(entries, DSCO_SESSION_LIST_MAX, &session);
             session_print_entries(entries, count);
+            free(entries);
             baseline_log("command", "/sessions", NULL, NULL);
             continue;
         }
@@ -3722,10 +3974,11 @@ void agent_run(const char *api_key, const char *model,
             const char *query = input_buf + 7;
             while (*query == ' ') query++;
 
-            saved_session_entry_t entries[DSCO_SESSION_LIST_MAX];
+            saved_session_entry_t *entries = session_entries_alloc();
             int count = session_load_entries(entries, DSCO_SESSION_LIST_MAX, &session);
             if (!query[0]) {
                 session_print_entries(entries, count);
+                free(entries);
                 continue;
             }
 
@@ -3735,6 +3988,7 @@ void agent_run(const char *api_key, const char *model,
                 tui_error(ambiguous ? "session query is ambiguous; use the numeric index"
                                     : "session not found");
                 if (count > 0) session_print_entries(entries, count);
+                free(entries);
                 continue;
             }
 
@@ -3751,6 +4005,7 @@ void agent_run(const char *api_key, const char *model,
                 tui_error("failed to resume session");
                 baseline_log("error", "/resume", "load failed", NULL);
             }
+            free(entries);
             continue;
         }
         if (strncmp(input_buf, "/new", 4) == 0 &&
@@ -3854,9 +4109,10 @@ void agent_run(const char *api_key, const char *model,
 
             /* /slot  or  /slot list — list all slots */
             if (slot_args[0] == '\0' || strncmp(slot_args, "list", 4) == 0) {
-                saved_session_entry_t entries[DSCO_SESSION_LIST_MAX];
+                saved_session_entry_t *entries = session_entries_alloc();
                 int count = session_load_entries(entries, DSCO_SESSION_LIST_MAX, &session);
                 session_print_entries(entries, count);
+                free(entries);
                 continue;
             }
 
@@ -4613,7 +4869,7 @@ agents_done:
             fprintf(stderr, "\n");
             tui_header("Commands", TUI_BCYAN);
             fprintf(stderr, "  %s/clear%s       reset conversation\n", TUI_CYAN, TUI_RESET);
-            fprintf(stderr, "  %s/model [name]%s switch model (opus/sonnet/haiku)\n", TUI_CYAN, TUI_RESET);
+            fprintf(stderr, "  %s/model [name]%s switch model (glm52/kimi/opus/sonnet/haiku)\n", TUI_CYAN, TUI_RESET);
             fprintf(stderr, "  %s/effort [lvl]%s set effort (low/medium/high)\n", TUI_CYAN, TUI_RESET);
             fprintf(stderr, "  %s/cost%s        show session cost\n", TUI_CYAN, TUI_RESET);
             fprintf(stderr, "  %s/context%s     show token usage\n", TUI_CYAN, TUI_RESET);
@@ -4991,6 +5247,8 @@ agents_done:
                     tui_error("invalid trust tier (use trusted, standard, or untrusted)");
                 } else {
                     session.trust_tier = tier;
+                    setenv("DSCO_TRUST_TIER",
+                           session_trust_tier_to_string(session.trust_tier), 1);
                     char msg[128];
                     snprintf(msg, sizeof(msg), "trust tier set to %s",
                              session_trust_tier_to_string(session.trust_tier));
@@ -5137,7 +5395,7 @@ agents_done:
                         fprintf(stderr, "%s%s", fi ? " -> " : "", session.fallback_models[fi]);
                     fprintf(stderr, "\n");
                 }
-                fprintf(stderr, "  %susage: /fallback opus,sonnet,haiku | /fallback off%s\n", TUI_DIM, TUI_RESET);
+                fprintf(stderr, "  %susage: /fallback glm52,kimi,opus | /fallback off%s\n", TUI_DIM, TUI_RESET);
             } else if (strcmp(arg, "off") == 0 || strcmp(arg, "none") == 0) {
                 session.fallback_count = 0;
                 tui_success("fallback chain disabled");
@@ -5304,8 +5562,9 @@ agents_done:
             for (int ti = 0; ti < tool_metrics.count; ti++)
                 dash_total_tools += tool_metrics.entries[ti].calls;
 
-            /* Session stats */
-            int max_t = dsco_max_agent_turns();
+            /* Session stats — the agentic loop has no fixed turn cap, so the
+             * dashboard shows turns as unbounded (∞) rather than a fraction. */
+            int max_t = 999999;
             fprintf(stderr, "  %s┌─ Session ───────────────────────────────────┐%s\n", TUI_DIM, TUI_RESET);
             if (max_t >= 999999) {
                 fprintf(stderr, "  %s│%s  Turns: %s%-4d%s %s(∞)%s  Tools: %s%-4d%s  Msgs: %s%-4d%s  %s│%s\n",
@@ -5665,13 +5924,46 @@ send_to_llm:
         esc_poller_start();
         g_turn_start_time = now_ms();
         bool prompt_done = false;
-        int base_turn_limit = dsco_max_agent_turns();
+        /* Agentic loop: run to the goal, not to an arbitrary turn count. The
+         * checkpoint cadence (base_turn_limit) only governs how often we surface
+         * a "still working" status; hard_ceiling is the runaway backstop. Real
+         * stops — cost budget, context exhaustion, interrupt, repeated identical
+         * failures — break out of the loop body below, not via the count. */
+        int base_turn_limit = tools_loop_control_effective_max_turns(
+                                  dsco_max_agent_turns());
+        int hard_ceiling    = dsco_hard_turn_ceiling();
+        if (hard_ceiling < base_turn_limit) hard_ceiling = base_turn_limit;
+        int next_checkpoint = base_turn_limit;
 
 resume_turn_loop:
-        while (turns < tools_loop_control_effective_max_turns(base_turn_limit) &&
-               !g_interrupted) {
+        while (turns < hard_ceiling && !g_interrupted) {
             turns++;
             md_reset(&s_md);
+
+            /* Agentic checkpoint: at each cadence boundary the loop is still
+             * running because the model keeps issuing tool calls AND we are
+             * under budget (cost is hard-checked below). Surface a visible
+             * "still working" line — not a stop — so the user sees convergence
+             * and can interrupt if it's spinning. */
+            if (turns >= next_checkpoint) {
+                double ck_cost = session_cost(&session);
+                int    ck_eff  = effective_context_window(&session);
+                int    ck_used = session.total_input_tokens +
+                                 session.total_output_tokens;
+                int    ck_ctx  = ck_eff > 0 ? (int)(100.0 * ck_used / ck_eff) : 0;
+                if (g_cost_budget > 0)
+                    fprintf(stderr,
+                        "  %s↻ turn %d — continuing toward goal "
+                        "(cost $%.2f/$%.2f · ctx %d%%) · Esc to pause%s\n",
+                        TUI_DIM, turns, ck_cost, g_cost_budget, ck_ctx, TUI_RESET);
+                else
+                    fprintf(stderr,
+                        "  %s↻ turn %d — continuing toward goal "
+                        "(cost $%.2f · ctx %d%%) · Esc to pause%s\n",
+                        TUI_DIM, turns, ck_cost, ck_ctx, TUI_RESET);
+                baseline_log("agent", "turn_checkpoint", NULL, NULL);
+                next_checkpoint += base_turn_limit;
+            }
 
             /* Self-improvement: close out the turn that just finished (recording
              * its cost/token/context deltas) and reset per-turn counters for the
@@ -5881,6 +6173,13 @@ resume_turn_loop:
 
             /* Stream via provider with fallback chain */
             char llm_span[37] = "";
+            /* Reactive-compaction retry state (SOTA, cf. Claude Code
+             * reactive_compact_retry): on a context-overflow rejection we
+             * compact and re-stream this same request instead of ending the
+             * turn. Declared before the retry label so it survives the goto. */
+            int reactive_attempts = 0;
+            stream_result_t sr;
+reactive_retry:
             trace_span_begin(trace_id, "llm_stream", prompt_span, llm_span);
 
             /* Start heartbeat — auto-detects silent stream and shows spinner */
@@ -5894,7 +6193,7 @@ resume_turn_loop:
             /* Update terminal title with turn info */
             tui_set_title_fmt("dsco · %s · turn %d", session.model, turns);
 
-            stream_result_t sr = g_provider
+            sr = g_provider
                 ? g_provider->stream(g_provider, cur_key, req,
                                       on_stream_text, on_stream_tool_start,
                                       on_stream_thinking, NULL)
@@ -5961,6 +6260,44 @@ resume_turn_loop:
             }
 
             if (!sr.ok) {
+                /* SOTA reactive compaction (cf. Claude Code reactive_compact_retry):
+                 * if the provider rejected the prompt as too long, aggressively but
+                 * structure-preservingly compact the conversation (hard-trim OLD
+                 * tool results + strip images, keeping the recent turns intact) and
+                 * re-stream the SAME request — up to 2 escalating attempts — instead
+                 * of ending the turn. Old results are re-derivable; the model keeps
+                 * its recent working context. */
+                bool overflow = sr.context_overflow ||
+                                provider_msg_is_context_overflow(dsco_err_msg());
+                if (overflow && reactive_attempts < 2 && !g_interrupted) {
+                    reactive_attempts++;
+                    json_free_response(&sr.parsed);
+                    trace_span_end(llm_span, "reactive_compact", NULL);
+                    g_stream_heartbeat = NULL;
+                    tui_stream_heartbeat_stop(&s_heartbeat);
+                    dsco_err_clear();
+                    /* Escalate aggressiveness across the two attempts. */
+                    int keep   = reactive_attempts == 1 ? 4   : 2;
+                    int budget = reactive_attempts == 1 ? 200 : 100;
+                    conv_strip_binaries(&conv, keep);
+                    conv_trim_old_results(&conv, keep, budget);
+                    post_compact_restore_inject(&file_restore, &conv);
+                    free(req);
+                    req = g_provider
+                        ? g_provider->build_request(g_provider, &conv, &session,
+                                                    MAX_TOKENS, cur_key)
+                        : llm_build_request_ex_for_credential(&conv, &session,
+                                                              MAX_TOKENS, cur_key);
+                    if (req) {
+                        fprintf(stderr,
+                            "  %s\xe2\x86\xaf prompt too long \xe2\x80\x94 reactive compaction "
+                            "(attempt %d/2, keep %d), retrying%s\n",
+                            TUI_DIM, reactive_attempts, keep, TUI_RESET);
+                        baseline_log("agent", "reactive_compact_retry", NULL, NULL);
+                        goto reactive_retry;
+                    }
+                    /* request rebuild failed — fall through to the error path */
+                }
                 char err[128];
                 snprintf(err, sizeof(err), "stream failed (HTTP %d)", sr.http_status);
                 trace_span_end(llm_span, "error", NULL);
@@ -6012,6 +6349,12 @@ resume_turn_loop:
             session.total_output_tokens += sr.usage.output_tokens;
             session.total_cache_read_tokens += sr.usage.cache_read_input_tokens;
             session.total_cache_write_tokens += sr.usage.cache_creation_input_tokens;
+            /* Accumulate authoritative cost: trust the provider's reported cost
+             * (OpenRouter usage.cost) when present, else fall back to token math.
+             * This is what the budget enforces, so caching discounts count. */
+            session.total_reported_cost_usd += (sr.cost_usd > 0)
+                ? sr.cost_usd
+                : turn_token_cost(&session, &sr.usage);
             session.turn_count++;
 
             /* Calibrate non-conv overhead from this response's input usage.
@@ -6227,13 +6570,20 @@ resume_turn_loop:
 
                         char trust_reason[256];
                         const char *tier = session_trust_tier_to_string(session.trust_tier);
+                        const char *exec_tier = tier;
                         if (!tools_is_allowed_for_tier(blk->tool_name, tier,
                                                        trust_reason, sizeof(trust_reason))) {
-                            print_tool_result(blk->tool_name, false, trust_reason);
-                            baseline_log("security", "tool_blocked", trust_reason, NULL);
-                            conv_add_tool_result_named(&conv, blk->tool_id, blk->tool_name,
-                                                       trust_reason, true);
-                            break;
+                            char deny_reason[256];
+                            if (!maybe_escalate_tool_permission(blk->tool_name, tier,
+                                                                trust_reason, &exec_tier,
+                                                                deny_reason,
+                                                                sizeof(deny_reason))) {
+                                print_tool_result(blk->tool_name, false, deny_reason);
+                                baseline_log("security", "tool_blocked", deny_reason, NULL);
+                                conv_add_tool_result_named(&conv, blk->tool_id, blk->tool_name,
+                                                           deny_reason, true);
+                                break;
+                            }
                         }
 
                         /* Validate input schema */
@@ -6334,7 +6684,7 @@ resume_turn_loop:
                             tl_tool_cancelled = 0;
 
                             double t0 = now_ms();
-                            ok = tools_execute_for_tier(blk->tool_name, blk->tool_input, tier,
+                            ok = tools_execute_for_tier(blk->tool_name, blk->tool_input, exec_tier,
                                                         tool_result, MAX_TOOL_RESULT);
                             dsco_strip_terminal_controls_inplace(tool_result);
 
@@ -6484,6 +6834,31 @@ resume_turn_loop:
                     }
                 }
 
+                const char *tier = session_trust_tier_to_string(session.trust_tier);
+                const char *batch_tiers[TUI_BATCH_MAX];
+                bool batch_policy_blocked[TUI_BATCH_MAX];
+                char batch_policy_reason[TUI_BATCH_MAX][256];
+                for (int bi = 0; bi < batch_n; bi++) {
+                    content_block_t *blk = &sr.parsed.blocks[batch_indices[bi]];
+                    batch_tiers[bi] = tier;
+                    batch_policy_blocked[bi] = false;
+                    batch_policy_reason[bi][0] = '\0';
+
+                    char trust_reason[256];
+                    if (!tools_is_allowed_for_tier(blk->tool_name, tier,
+                                                   trust_reason, sizeof(trust_reason))) {
+                        const char *exec_tier = tier;
+                        if (maybe_escalate_tool_permission(blk->tool_name, tier,
+                                                           trust_reason, &exec_tier,
+                                                           batch_policy_reason[bi],
+                                                           sizeof(batch_policy_reason[bi]))) {
+                            batch_tiers[bi] = exec_tier;
+                        } else {
+                            batch_policy_blocked[bi] = true;
+                        }
+                    }
+                }
+
                 tui_batch_spinner_t batch_spinner;
                 tui_batch_spinner_start(&batch_spinner, batch_names, batch_n);
 
@@ -6493,9 +6868,8 @@ resume_turn_loop:
                 int conc_count = 0;
                 int serial_indices_arr[TUI_BATCH_MAX];
                 int serial_count = 0;
-                const char *tier = session_trust_tier_to_string(session.trust_tier);
 
-                /* Pre-process: trust check, validation, cache check, then route */
+                /* Pre-process: policy decision, validation, cache check, then route */
                 for (int bi = 0; bi < batch_n; bi++) {
                     content_block_t *blk = &sr.parsed.blocks[batch_indices[bi]];
 
@@ -6511,14 +6885,13 @@ resume_turn_loop:
                         pthread_mutex_unlock(&batch_spinner.mutex);
                     }
 
-                    /* Trust check */
-                    char trust_reason[256];
-                    if (!tools_is_allowed_for_tier(blk->tool_name, tier,
-                                                   trust_reason, sizeof(trust_reason))) {
-                        tui_batch_spinner_complete(&batch_spinner, bi, false, trust_reason, 0.0);
-                        baseline_log("security", "tool_blocked", trust_reason, NULL);
+                    if (batch_policy_blocked[bi]) {
+                        tui_batch_spinner_complete(&batch_spinner, bi, false,
+                                                   batch_policy_reason[bi], 0.0);
+                        baseline_log("security", "tool_blocked",
+                                     batch_policy_reason[bi], NULL);
                         conv_add_tool_result_named(&conv, blk->tool_id, blk->tool_name,
-                                                   trust_reason, true);
+                                                   batch_policy_reason[bi], true);
                         continue;
                     }
 
@@ -6578,7 +6951,7 @@ resume_turn_loop:
                         s->tool_name = blk->tool_name;
                         s->tool_id = blk->tool_id;
                         s->tool_input = blk->tool_input;
-                        s->tier = tier;
+                        s->tier = batch_tiers[bi];
                         s->block_index = batch_indices[bi];
                         s->batch_index = bi;
                         s->result = safe_malloc(MAX_TOOL_RESULT);
@@ -6621,7 +6994,8 @@ resume_turn_loop:
                     tl_tool_cancelled = 0;
 
                     double t0 = now_ms();
-                    ok = tools_execute_for_tier(blk->tool_name, blk->tool_input, tier,
+                    ok = tools_execute_for_tier(blk->tool_name, blk->tool_input,
+                                                batch_tiers[bi],
                                                 tool_result, MAX_TOOL_RESULT);
                     dsco_strip_terminal_controls_inplace(tool_result);
                     double elapsed = (now_ms() - t0) * 1000.0;
@@ -7060,7 +7434,9 @@ resume_turn_loop:
 
         if (g_interrupted && g_escape_state == ESC_PAUSED) {
             double elapsed = now_ms() - g_turn_start_time;
-            bool resume = show_pause_menu(turns, dsco_max_agent_turns(), elapsed);
+            /* Pass the ∞ sentinel: the agentic loop has no fixed turn cap, so
+             * the menu renders "turn N/∞" rather than a misleading fraction. */
+            bool resume = show_pause_menu(turns, 999999, elapsed);
             if (resume) {
                 g_interrupted  = 0;
                 g_escape_state = ESC_RUNNING;
@@ -7075,10 +7451,15 @@ resume_turn_loop:
             fprintf(stderr, "\n");
             tui_warning("interrupted (press Ctrl+C again to force quit)");
         }
-        int final_turn_limit = tools_loop_control_effective_max_turns(base_turn_limit);
-        if (!prompt_done && turns >= final_turn_limit) {
-            char msg[64];
-            snprintf(msg, sizeof(msg), "max turns reached (%d)", final_turn_limit);
+        /* Only the runaway backstop produces a "stopped short" warning now —
+         * the loop otherwise ends because the model finished (prompt_done),
+         * the user interrupted, or cost/context tripped (each with its own
+         * message). Hitting the hard ceiling means a likely no-progress spin. */
+        if (!prompt_done && !g_interrupted && turns >= hard_ceiling) {
+            char msg[128];
+            snprintf(msg, sizeof(msg),
+                     "hard turn ceiling reached (%d) — stopping to prevent a "
+                     "runaway loop; raise via DSCO_HARD_TURN_CEILING", hard_ceiling);
             tui_warning(msg);
         }
         if (turns > 1) {
@@ -7131,6 +7512,7 @@ resume_turn_loop:
     mcp_shutdown(&g_mcp);
     provider_free(g_provider);
     g_provider = NULL;
+    free(aliases);
     tools_cooc_persist();
     tools_cooc_free();
     tool_map_free(&g_tool_map);

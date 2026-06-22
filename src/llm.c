@@ -76,6 +76,12 @@ void session_state_init(session_state_t *s, const char *model) {
     snprintf(s->model, sizeof(s->model), "%s", resolved);
     snprintf(s->effort, sizeof(s->effort), "%s", EFFORT_HIGH);
     s->trust_tier = DSCO_TRUST_STANDARD;
+    {
+        bool trust_ok = false;
+        dsco_trust_tier_t env_tier =
+            session_trust_tier_from_string(getenv("DSCO_TRUST_TIER"), &trust_ok);
+        if (trust_ok) s->trust_tier = env_tier;
+    }
     s->web_search = true;
     s->code_execution = true;
     s->context_window = model_context_window(resolved);
@@ -92,6 +98,41 @@ void session_state_init(session_state_t *s, const char *model) {
         s->fallback_count = provider_build_default_fallback_models(
             resolved, s->fallback_models,
             (int)(sizeof(s->fallback_models) / sizeof(s->fallback_models[0])));
+    }
+
+    /* Model-instance spec via env — lets a spawned worker process wrap a fully
+     * distinct model instance (sampling/effort/tool-choice), not just a model
+     * id. The parent sets these per child before fork(); the child inherits and
+     * applies them here. System prompt is overridden in
+     * llm_get_custom_system_prompt() via DSCO_SYSTEM_PROMPT. */
+    {
+        const char *e = getenv("DSCO_EFFORT");
+        if (e && (!strcmp(e, EFFORT_LOW) || !strcmp(e, EFFORT_MEDIUM) || !strcmp(e, EFFORT_HIGH)))
+            snprintf(s->effort, sizeof(s->effort), "%s", e);
+
+        const char *temp = getenv("DSCO_TEMPERATURE");
+        if (temp && *temp) {
+            double v = atof(temp);
+            if (v >= 0.0 && v <= 2.0) s->temperature = v;
+        }
+        const char *tp = getenv("DSCO_TOP_P");
+        if (tp && *tp) {
+            double v = atof(tp);
+            if (v >= 0.0 && v <= 1.0) s->top_p = v;
+        }
+        const char *tk = getenv("DSCO_TOP_K");
+        if (tk && *tk) {
+            int v = atoi(tk);
+            if (v > 0) s->top_k = v;
+        }
+        const char *tb = getenv("DSCO_THINKING_BUDGET");
+        if (tb && *tb) {
+            int v = atoi(tb);
+            if (v >= 0) s->thinking_budget = v;
+        }
+        const char *tc = getenv("DSCO_TOOL_CHOICE");
+        if (tc && *tc)
+            snprintf(s->tool_choice, sizeof(s->tool_choice), "%s", tc);
     }
 }
 
@@ -286,6 +327,11 @@ injection_level_t detect_prompt_injection(const char *text) {
 }
 
 const char *llm_get_custom_system_prompt(void) {
+    /* Per-process system-prompt override: a spawned worker can be given a
+     * specialized role/persona via DSCO_SYSTEM_PROMPT without touching the
+     * workspace files. Takes precedence over the workspace prompt. */
+    const char *override = getenv("DSCO_SYSTEM_PROMPT");
+    if (override && *override) return override;
     if (g_cheap_mode) return NULL;  /* --cheap: skip workspace prompt */
     return dsco_workspace_prompt();
 }
@@ -1876,6 +1922,18 @@ static bool content_block_is_sendable(const msg_content_t *mc) {
     if (!mc || !mc->type) return false;
     /* Do not replay assistant thinking blocks: signature handling is not persisted. */
     if (strcmp(mc->type, "thinking") == 0) return false;
+    /* Filter whitespace-only text blocks — Anthropic API rejects them with
+     * HTTP 400 "text content blocks must contain non-whitespace text".
+     * This commonly happens when the assistant emits a space before a
+     * tool_use block during streaming. Skip these empty text blocks. */
+    if (strcmp(mc->type, "text") == 0) {
+        if (!mc->text || !mc->text[0]) return false;
+        bool has_non_ws = false;
+        for (const char *p = mc->text; *p; p++) {
+            if (!isspace((unsigned char)*p)) { has_non_ws = true; break; }
+        }
+        if (!has_non_ws) return false;
+    }
     /* Server-side tool types are managed by the API — pass through */
     if (strcmp(mc->type, "server_tool_use") == 0) return true;
     if (strcmp(mc->type, "web_search_tool_result") == 0) return true;
@@ -2847,11 +2905,21 @@ void dsco_strip_terminal_controls_inplace(char *s) {
 
     while (*r) {
         if (*r == 0x1b) {  /* ESC */
+            unsigned char *esc = r;
             r++;
             if (*r == '[') {  /* CSI ... final-byte */
-                r++;
-                while (*r && !(*r >= 0x40 && *r <= 0x7e)) r++;
-                if (*r) r++;
+                unsigned char *fb = r + 1;
+                while (*fb && !(*fb >= 0x40 && *fb <= 0x7e)) fb++;
+                if (*fb == 'm') {
+                    /* SGR (color/style) is display-only — it can't move the
+                     * cursor, clear the screen, or inject data — so it's safe
+                     * to keep. This is what lets the `plot` tool's color art
+                     * (viridis density, heatmaps, candlesticks) survive. */
+                    while (esc <= fb) *w++ = (char)*esc++;
+                    r = fb + 1;
+                } else {  /* cursor move / erase / scroll / unterminated — strip */
+                    r = *fb ? fb + 1 : fb;
+                }
                 continue;
             }
             if (*r == ']') {  /* OSC ... BEL or ST */
@@ -3778,6 +3846,7 @@ stream_result_t llm_stream(const char *api_key, const char *request_json,
             fprintf(stderr, "dsco: API error: %s\n", state.error_msg ? state.error_msg : "unknown");
         }
         result.ok = false;
+        result.context_overflow = provider_msg_is_context_overflow(state.error_msg);
     } else if (http_code != 200) {
         /* Credit/billing errors show up as 400 with an error.message body, or
          * as 402 Payment Required depending on the upstream. Parse the body
@@ -3801,6 +3870,10 @@ stream_result_t llm_stream(const char *api_key, const char *request_json,
                 } else {
                     fprintf(stderr, "dsco: HTTP %d: %s\n", (int)http_code, state.line_buf.data);
                 }
+                result.context_overflow =
+                    provider_msg_is_context_overflow(msg) ||
+                    provider_msg_is_context_overflow(typ) ||
+                    provider_msg_is_context_overflow(state.line_buf.data);
                 free(msg);
                 free(typ);
                 free(body_err);

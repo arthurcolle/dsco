@@ -392,6 +392,12 @@ typedef struct {
 
 void tui_async_spinner_start(tui_async_spinner_t *s, const char *label,
                              tui_tool_type_t tool_type);
+/* Display-art tools (e.g. `plot`) — their result is shown in full color rather
+ * than a dim one-line preview. tui_print_tool_art prints the full result and
+ * returns true for such tools; false otherwise (caller does its dim preview). */
+bool tui_tool_is_display_art(const char *name);
+bool tui_print_tool_art(const char *name, const char *result);
+
 void tui_async_spinner_stop(tui_async_spinner_t *s, bool ok,
                             const char *result_preview, double elapsed_ms,
                             const char *suffix);
@@ -444,6 +450,7 @@ typedef struct {
     int      turn;
     int      tools_used;
     int      panel_rows;    /* bottom panel rows: top rule + input + status (3) */
+    double   splash_started_at;
 } tui_status_bar_t;
 
 void tui_status_bar_init(tui_status_bar_t *sb, const char *model);
@@ -899,6 +906,15 @@ typedef struct {
 } tui_cmd_entry_t;
 
 void tui_command_palette(const tui_cmd_entry_t *cmds, int count, const char *filter);
+
+/* Register the slash-command table the composer uses to drive its live
+ * dropdown. As the user types a leading "/<token>" the composer filters this
+ * list by prefix and renders matches in a popup that expands beneath the input
+ * line (↑/↓ to select, Tab to complete, Enter to run, Esc to dismiss).
+ * `cmds` must remain valid for the lifetime of the program (a static array is
+ * expected). Pass count = number of valid entries. Safe to call once at
+ * startup; calling with NULL/0 disables the dropdown. */
+void tui_composer_set_slash_commands(const tui_cmd_entry_t *cmds, int count);
 
 /* ── F25: Agent Topology ──────────────────────────────────────────────── */
 typedef struct {

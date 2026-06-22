@@ -82,6 +82,8 @@ typedef struct {
     stream_telemetry_t telemetry;
     int                http_status;
     bool               ok;
+    bool               context_overflow;  /* provider rejected prompt as too long → reactive compaction can retry */
+    double             cost_usd;           /* authoritative per-turn cost reported by provider (OpenRouter usage.cost); 0 = not reported, fall back to token math */
 } stream_result_t;
 
 /* ── Session state (mutable per-session settings) ──────────────────────── */
@@ -108,6 +110,11 @@ typedef struct {
     int    total_cache_read_tokens;
     int    total_cache_write_tokens;
     int    turn_count;
+    /* Authoritative session cost. Accumulates the provider-reported cost
+     * (OpenRouter usage.cost) when present, else the per-turn token-math
+     * estimate. Used for budget enforcement so caching discounts are
+     * reflected instead of billing every cached token at full input price. */
+    double total_reported_cost_usd;
     /* Most recent API response's input usage (single turn, not cumulative).
      * Used by conv_token_estimate to calibrate the rough estimate against
      * what the API actually counted. */

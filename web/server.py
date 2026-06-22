@@ -67,7 +67,9 @@ def _load_dotenv():
                 if "=" in line:
                     key, _, val = line.partition("=")
                     key, val = key.strip(), val.strip()
-                    if val and key not in os.environ:  # don't override existing env
+                    # set from .env when unset OR when the existing value is blank
+                    # (a shell-exported empty var would otherwise shadow a real key)
+                    if val and not os.environ.get(key, "").strip():
                         os.environ[key] = val
             log.info(f"Loaded .env from {candidate}")
             return
@@ -834,7 +836,12 @@ def assistant_content_for_replay(content_blocks: list[dict[str, Any]]) -> list[d
 
 async def agent_loop_anthropic(ws: WebSocket, session: Session):
     """Agentic tool loop using Anthropic native SDK."""
-    client = anthropic.AsyncAnthropic()
+    api_key = get_provider_key("anthropic")
+    if not api_key:
+        await ws.send_json({"type": "error",
+                            "message": "No API key for anthropic — set ANTHROPIC_API_KEY env var or add it to .env"})
+        return
+    client = anthropic.AsyncAnthropic(api_key=api_key)
     turn = 0
     mi = model_info(session.model) or model_info(detect_provider(session.model))
     supports_thinking = mi and mi.get("supports_thinking")

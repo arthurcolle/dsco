@@ -116,6 +116,18 @@ bool provider_claude_code_get_account_info(char *subscription_type_out, size_t s
  * result as "credit_too_low" and trigger the fallback chain. */
 bool provider_msg_is_credit_too_low(const char *msg);
 
+/* Classify a provider error body as a context/prompt-length rejection
+ * ("prompt is too long", "context_length_exceeded", "maximum context length",
+ * etc.) so the agent loop can react with reactive compaction + retry instead
+ * of ending the turn. Shared by the Anthropic and OpenAI-compat paths. */
+bool provider_msg_is_context_overflow(const char *msg);
+
+/* True when a model honors Anthropic `cache_control` breakpoints forwarded by
+ * OpenRouter (Claude models). The OpenAI-compat request builder marks the
+ * system block ephemeral for these so the static tools+system prefix is cached;
+ * other providers ignore/reject the marker. DSCO_OR_CACHE=0/1 forces off/on. */
+bool provider_model_supports_cache_control(const char *model);
+
 /* Check whether a model is routable, returning the routed provider when asked */
 bool provider_model_is_routable(const char *model,
                                 const char *fallback_api_key,
