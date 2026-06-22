@@ -4,6 +4,7 @@
 #include "tui.h"
 #include "llm.h"
 #include "tools.h"
+#include "pets.h"
 #include "self_improve.h"
 #include "json_util.h"
 #include "ipc.h"
@@ -78,10 +79,13 @@ extern void dsco_net_routes_register(void *srv_opaque);
 #include <sys/time.h>
 #include <libgen.h>
 #include <limits.h>
+#include <glob.h>
+#include <sys/stat.h>
+#include <execinfo.h>
 #ifdef __APPLE__
 #include <mach-o/dyld.h>
-#include <sys/stat.h>
 #endif
+#include "supervisor.h"
 
 static md_renderer_t s_oneshot_md;
 
@@ -201,22 +205,94 @@ static void main_sigterm_handler(int sig) {
 static void main_zero32(uint8_t key[32]);
 static bool init_secure_store_required(uint8_t out_key[32], int *timed_out);
 
-/* Crash handler — save diagnostic info before dying */
+/* Crash handler — save diagnostic info before dying.
+ *
+ * Only async-signal-safe operations are strictly guaranteed here (write,
+ * _exit, fork). backtrace()/backtrace_symbols_fd() are practically safe and
+ * the process is dying anyway, so we accept best-effort. The supervisor
+ * (see supervisor.c) reads /tmp/dsco_crash.log and the per-pid backtrace to
+ * decide how to rescue/restart, so this is the bridge to the watcher. */
+static volatile sig_atomic_t g_in_crash = 0;
+
+static void crash_write_sig(int fd, int sig, const char *name) {
+    char buf[256];
+    int n = snprintf(buf, sizeof(buf),
+                     "\n[dsco crash] signal=%s(%d) pid=%d build=%s\n",
+                     name, sig, getpid(), GIT_HASH);
+    if (n > 0) (void)!write(fd, buf, (size_t)n);
+}
+
+/* Best-effort: spawn lldb (macOS) or gdb (Linux) to attach to the crashing
+ * process and dump a full backtrace to a per-pid report. Gated on
+ * DSCO_CRASH_DEBUGGER so it never fires in normal/unsupervised runs (and only
+ * works when anti-ptrace was skipped — see tamper_init/DSCO_DEBUG). */
+static void crash_spawn_debugger(int crashing_pid) {
+    const char *want = getenv("DSCO_CRASH_DEBUGGER");
+    if (!want || want[0] == '0' || want[0] == '\0') return;
+
+    char pidbuf[16], report[64];
+    snprintf(pidbuf, sizeof(pidbuf), "%d", crashing_pid);
+    snprintf(report, sizeof(report), "/tmp/dsco_bt_%d.txt", crashing_pid);
+
+    pid_t dbg = fork();
+    if (dbg != 0) return;  /* parent (crashing) returns to re-raise */
+
+    /* child: redirect output to the report file, then exec the debugger */
+    int rfd = open(report, O_WRONLY | O_CREAT | O_TRUNC, 0644);
+    if (rfd >= 0) { dup2(rfd, STDOUT_FILENO); dup2(rfd, STDERR_FILENO); close(rfd); }
+#ifdef __APPLE__
+    execlp("lldb", "lldb", "-p", pidbuf, "--batch",
+           "-o", "thread backtrace all", "-o", "register read",
+           "-o", "detach", "-o", "quit", (char *)NULL);
+#else
+    execlp("gdb", "gdb", "-p", pidbuf, "-batch", "-nx",
+           "-ex", "thread apply all bt full",
+           "-ex", "info registers", "-ex", "detach", "-ex", "quit",
+           (char *)NULL);
+#endif
+    _exit(127);  /* debugger not installed */
+}
+
 static void crash_handler(int sig) {
-    /* Async-signal-safe only: write, _exit */
+    if (g_in_crash) { signal(sig, SIG_DFL); raise(sig); return; }
+    g_in_crash = 1;
+
     const char *name = sig == SIGSEGV ? "SIGSEGV" :
                        sig == SIGBUS  ? "SIGBUS"  :
-                       sig == SIGABRT ? "SIGABRT" : "UNKNOWN";
+                       sig == SIGABRT ? "SIGABRT" :
+                       sig == SIGFPE  ? "SIGFPE"  :
+                       sig == SIGILL  ? "SIGILL"  : "UNKNOWN";
+
+    /* In-process backtrace via execinfo — works without a debugger or ptrace. */
+    void *frames[64];
+    int nframes = backtrace(frames, 64);
+
     int fd = open("/tmp/dsco_crash.log", O_WRONLY | O_CREAT | O_APPEND, 0644);
     if (fd >= 0) {
-        char buf[256];
-        int n = snprintf(buf, sizeof(buf), "\n[dsco crash] signal=%s(%d) pid=%d\n", name, sig, getpid());
-        if (n > 0) write(fd, buf, (size_t)n);
+        crash_write_sig(fd, sig, name);
+        if (nframes > 0) backtrace_symbols_fd(frames, nframes, fd);
         close(fd);
     }
-    /* Re-raise with default handler */
+    /* Also to stderr so a foreground user / supervisor sees it immediately. */
+    crash_write_sig(STDERR_FILENO, sig, name);
+    if (nframes > 0) backtrace_symbols_fd(frames, nframes, STDERR_FILENO);
+
+    /* Optional richer postmortem via an attached debugger. */
+    crash_spawn_debugger(getpid());
+
+    /* Re-raise with default handler so the OS produces a core / the
+     * supervisor's waitpid() sees WIFSIGNALED with the real signal. */
     signal(sig, SIG_DFL);
     raise(sig);
+}
+
+/* Register the full set of fatal-signal crash handlers. Idempotent. */
+void main_install_crash_handlers(void) {
+    signal(SIGSEGV, crash_handler);
+    signal(SIGBUS,  crash_handler);
+    signal(SIGABRT, crash_handler);
+    signal(SIGFPE,  crash_handler);
+    signal(SIGILL,  crash_handler);
 }
 
 static void main_atexit_handler(void) {
@@ -440,7 +516,8 @@ static dsco_caps_t main_plan_startup_caps(int argc, char **argv,
 
     if (main_argv_has(argc, argv, "-i") ||
         main_argv_has(argc, argv, "--interactive") ||
-        main_argv_has(argc, argv, "--ui")) {
+        main_argv_has(argc, argv, "--ui") ||
+        main_argv_has(argc, argv, "-ui")) {
         caps |= DSCO_CAP_TUI;
     }
 
@@ -2007,6 +2084,119 @@ static void main_tools_init_for_runtime(dsco_profile_t profile) {
 }
 
 /* Return -1 when not handled, otherwise the process exit code. */
+/* ── Live multi-project pet dashboard ──────────────────────────────────────
+ * Polls the shared IPC agent registry (which every dsco process/project writes
+ * to) and renders one companion pet per agent across all projects, refreshing
+ * ~2×/s in an alternate screen. This is the "manage hundreds of projects /
+ * thousands of agents" view: the roster caps to the terminal height and reports
+ * the overflow, sorted working-first. Read-only — never registers itself. */
+static volatile sig_atomic_t g_pets_watch_stop = 0;
+static void pets_watch_sigint(int sig) { (void)sig; g_pets_watch_stop = 1; }
+
+static uint32_t pets_id_hash(const char *s) {
+    uint32_t h = 2166136261u;
+    for (; s && *s; s++) { h ^= (unsigned char)*s; h *= 16777619u; }
+    return h & 0x7fffffffu;
+}
+
+static const char *pets_resolve_ipc_db(int argc, char **argv) {
+    if (argc >= 4 && argv[3][0]) return argv[3];          /* explicit path */
+    const char *env = getenv("DSCO_IPC_DB");
+    if (env && env[0]) return env;
+    /* else the most-recently-touched session DB across both default locations */
+    static char newest[1024];
+    newest[0] = '\0';
+    char home_pat[1024];
+    const char *home = getenv("HOME");
+    snprintf(home_pat, sizeof(home_pat), "%s/.dsco/ipc/dsco_ipc_*.db",
+             home ? home : "/tmp");
+    const char *patterns[] = { home_pat, "/tmp/dsco_ipc_*.db" };
+    time_t best = 0;
+    for (int p = 0; p < 2; p++) {
+        glob_t g;
+        if (glob(patterns[p], 0, NULL, &g) != 0) continue;
+        for (size_t i = 0; i < g.gl_pathc; i++) {
+            struct stat st;
+            if (stat(g.gl_pathv[i], &st) == 0 && st.st_mtime >= best) {
+                best = st.st_mtime;
+                snprintf(newest, sizeof(newest), "%s", g.gl_pathv[i]);
+            }
+        }
+        globfree(&g);
+    }
+    return newest[0] ? newest : NULL;
+}
+
+static pet_status_t pets_map_ipc(ipc_agent_status_t s) {
+    switch (s) {
+        case IPC_AGENT_STARTING: return PET_ST_PENDING;
+        case IPC_AGENT_WORKING:  return PET_ST_WORKING;
+        case IPC_AGENT_DONE:     return PET_ST_DONE;
+        case IPC_AGENT_ERROR:    return PET_ST_ERROR;
+        case IPC_AGENT_DEAD:     return PET_ST_ERROR;
+        case IPC_AGENT_IDLE:     return PET_ST_IDLE;
+        default:                 return PET_ST_IDLE;
+    }
+}
+
+static int run_pets_watch(int argc, char **argv) {
+    const char *db = pets_resolve_ipc_db(argc, argv);
+    ipc_init(db, NULL);   /* open the shared DB; never ipc_register → invisible */
+
+    struct termios orig, raw;
+    bool tty = isatty(STDIN_FILENO);
+    if (tty && tcgetattr(STDIN_FILENO, &orig) == 0) {
+        raw = orig;
+        raw.c_lflag &= ~((tcflag_t)(ICANON | ECHO));  /* keep ISIG so Ctrl-C works */
+        raw.c_cc[VMIN] = 0;
+        raw.c_cc[VTIME] = 0;
+        tcsetattr(STDIN_FILENO, TCSANOW, &raw);
+    }
+    struct sigaction sa, old;
+    memset(&sa, 0, sizeof(sa));
+    sa.sa_handler = pets_watch_sigint;
+    sigaction(SIGINT, &sa, &old);
+    fputs("\033[?1049h\033[?25l", stdout);   /* enter alt screen, hide cursor */
+
+    pet_roster_t roster;
+    pet_roster_init(&roster);
+
+    while (!g_pets_watch_stop) {
+        static ipc_agent_info_t agents[1024];
+        int n = ipc_list_agents(agents, 1024);
+        for (int i = 0; i < n; i++) {
+            int key = (int)pets_id_hash(agents[i].id);
+            const char *lbl = agents[i].current_task[0] ? agents[i].current_task
+                            : (agents[i].role[0] ? agents[i].role : agents[i].id);
+            pet_status_t st = pets_map_ipc(agents[i].status);
+            pet_roster_upsert(&roster, key, agents[i].depth, lbl, agents[i].id, st);
+            pet_roster_set_status(&roster, key, st, 0);
+        }
+
+        int h = tui_term_height();
+        if (h < 8) h = 24;
+        fputs("\033[2J\033[H", stdout);
+        printf("  \033[1m\033[96mdsco · live agent pets\033[0m   \033[2m%s\033[0m\n\n",
+               db ? db : "(no ipc db — set DSCO_IPC_DB or pass a path)");
+        pet_roster_render(stdout, &roster, tui_term_width(), h - 6);
+        printf("\n  \033[2mrefresh 0.5s · q / Ctrl-C to quit · %d agents in registry\033[0m\n", n);
+        fflush(stdout);
+
+        struct pollfd pfd = { .fd = STDIN_FILENO, .events = POLLIN, .revents = 0 };
+        if (poll(&pfd, 1, 500) > 0 && (pfd.revents & POLLIN)) {
+            char c;
+            if (read(STDIN_FILENO, &c, 1) == 1 && (c == 'q' || c == 27)) break;
+        }
+    }
+
+    fputs("\033[?25h\033[?1049l", stdout);   /* show cursor, leave alt screen */
+    fflush(stdout);
+    if (tty) tcsetattr(STDIN_FILENO, TCSANOW, &orig);
+    sigaction(SIGINT, &old, NULL);
+    pet_roster_free(&roster);
+    return 0;
+}
+
 static int maybe_run_early_fast_path(int argc, char **argv,
                                      dsco_profile_t profile) {
     for (int i = 1; i < argc; i++) {
@@ -2049,11 +2239,50 @@ int main(int argc, char **argv) {
     if (argc >= 2 && strcmp(argv[1], "tools") == 0)
         return toolmgmt_cli(argc, argv);
 
+    /* `dsco pets [gallery|roll|roster] [seed]` renders companion sprites
+     * straight to the terminal (real newlines + ANSI), unlike `--tool-exec`
+     * which wraps the art in escaped JSON. */
+    if (argc >= 2 && strcmp(argv[1], "pets") == 0) {
+        const char *action = argc >= 3 ? argv[2] : "gallery";
+        if (strcmp(action, "watch") == 0) {
+            return run_pets_watch(argc, argv);
+        } else if (strcmp(action, "roll") == 0) {
+            const char *seed = argc >= 4 ? argv[3] : "anon";
+            pet_t p;
+            memset(&p, 0, sizeof(p));
+            pet_roll(seed, &p.bones);
+            snprintf(p.name, sizeof(p.name), "%s", seed);
+            p.status = PET_ST_IDLE;
+            pet_card_print(stdout, &p, 0);
+        } else if (strcmp(action, "roster") == 0) {
+            pet_roster_render(stdout, pet_roster_global(), tui_term_width(), 0);
+        } else {
+            pet_gallery_print(stdout, 0);
+        }
+        return 0;
+    }
+
     /* `dsco connect …` drives the future-proof baseline connector: a single
      * seam every external system plugs into (tools today; chains, credit,
      * robotics, neural/haptic next). Dispatched first for the same reasons. */
     if (argc >= 2 && strcmp(argv[1], "connect") == 0)
         return connector_cli(argc, argv);
+
+    /* `dsco supervise [args...]` (or `dsco --supervise [args...]`) runs the
+     * real dsco as a managed child: a higher-order watcher that catches every
+     * crash/kill (incl. OOM SIGKILL), captures a backtrace via the debugger,
+     * and restarts/rescues the session in realtime. The child gets
+     * DSCO_NO_SUPERVISE=1 so it never recurses. */
+    if (!getenv("DSCO_NO_SUPERVISE") &&
+        argc >= 2 && (strcmp(argv[1], "supervise") == 0 ||
+                      strcmp(argv[1], "--supervise") == 0)) {
+        /* Hand the supervisor a clean argv whose [0] is the dsco binary and
+         * whose tail is the post-"supervise" args (overwrite argv[1], which
+         * held "supervise", with the binary path). child_argv stays NULL-
+         * terminated because argv[argc] == NULL. */
+        argv[1] = argv[0];
+        return supervisor_run(argc - 1, argv + 1);
+    }
 
     /* Trivial info flags must short-circuit BEFORE any keychain / secure-store
      * touch. Otherwise wrappers (web server, scripts) calling `dsco --version`
@@ -2074,6 +2303,35 @@ int main(int argc, char **argv) {
     int fast_rc = maybe_run_early_fast_path(argc, argv, runtime_profile);
     if (fast_rc >= 0) return fast_rc;
     dsco_startup_init(runtime_profile, startup_caps);
+
+    /* Catch fatal signals on the primary path too (previously only sub-agents
+     * installed these). On a real crash we dump a backtrace + crash log that
+     * the supervisor reads to rescue the session. */
+    main_install_crash_handlers();
+
+    /* Fault-injection hook for exercising the crash handler + supervisor end
+     * to end. Never fires unless DSCO_TEST_CRASH is set explicitly. Optional
+     * "@N" suffix crashes only on the Nth supervised generation, so the
+     * supervisor's restart/backoff/recovery path can be observed live. */
+    {
+        const char *tc = getenv("DSCO_TEST_CRASH");
+        if (tc && tc[0]) {
+            const char *at = strchr(tc, '@');
+            bool fire = true;
+            if (at) {
+                int want = atoi(at + 1);
+                const char *gen = getenv("DSCO_SUPERVISED");
+                fire = gen && atoi(gen) == want;
+            }
+            if (fire) {
+                fprintf(stderr, "[dsco] DSCO_TEST_CRASH=%s — injecting fault\n", tc);
+                if (strncmp(tc, "abort", 5) == 0) abort();
+                if (strncmp(tc, "exit", 4) == 0)  return 42;
+                volatile int *p = NULL;  /* default: SIGSEGV */
+                *p = 1;
+            }
+        }
+    }
 
     /* Bare `dsco` in a TTY drops into the interactive REPL.
      * Non-TTY (pipe/redirect) keeps the old behavior of printing usage + error,
@@ -2313,9 +2571,9 @@ int main(int argc, char **argv) {
             topology_show_mode = true;
             if (i + 1 < argc && argv[i+1][0] != '-')
                 topology_show_name = argv[++i];
-        } else if (strcmp(argv[i], "--ui") == 0) {
+        } else if (strcmp(argv[i], "--ui") == 0 || strcmp(argv[i], "-ui") == 0) {
             ui_mode = true;
-            /* Optional port: --ui 8080 */
+            /* Optional port: --ui 8080 | -ui 8080 */
             if (i + 1 < argc && argv[i+1][0] != '-') {
                 int p = atoi(argv[i+1]);
                 if (p > 0 && p <= 65535) { ui_port = p; i++; }
@@ -2353,8 +2611,8 @@ int main(int argc, char **argv) {
             oneshot_prompt[0] = '\0';
             for (int j = i; j < argc; j++) {
                 if (strcmp(argv[j], "--") == 0) break;
-                if (j > i) strcat(oneshot_prompt, " ");
-                strcat(oneshot_prompt, argv[j]);
+                if (j > i) snprintf(oneshot_prompt + strlen(oneshot_prompt), sizeof(oneshot_prompt) - strlen(oneshot_prompt), " ");
+                snprintf(oneshot_prompt + strlen(oneshot_prompt), sizeof(oneshot_prompt) - strlen(oneshot_prompt), "%s", argv[j]);
             }
             /* find -- after prompt if we haven't already */
             for (int j = i; j < argc; j++) {
@@ -2526,15 +2784,30 @@ int main(int argc, char **argv) {
             "\033[0m\n", server_path, port_str, cwd_str);
 
         free(oneshot_prompt);
-        execlp("python3", "python3", server_path,
-               "--port", port_str,
-               "--dir", cwd_str,
-               "--model", model,
-               "--open",
-               (char *)NULL);
+
+        /* Prefer the project-local venv (has fastapi, anthropic, etc.); fall
+         * back to system python3 if the venv doesn't exist. */
+        char venv_python[PATH_MAX];
+        snprintf(venv_python, sizeof(venv_python), "%s/.web-venv/bin/python",
+                 cwd_str);
+        if (access(venv_python, X_OK) == 0) {
+            execlp(venv_python, venv_python, server_path,
+                   "--port", port_str,
+                   "--dir", cwd_str,
+                   "--model", model,
+                   "--open",
+                   (char *)NULL);
+        } else {
+            execlp("python3", "python3", server_path,
+                   "--port", port_str,
+                   "--dir", cwd_str,
+                   "--model", model,
+                   "--open",
+                   (char *)NULL);
+        }
         /* Only reached on exec failure */
         perror("failed to launch web UI (is python3 + fastapi installed?)");
-        fprintf(stderr, "  install deps: pip install -r web/requirements.txt\n");
+        fprintf(stderr, "  install deps: uv pip install --python .web-venv/bin/python -r web/requirements.txt\n");
         return 1;
     }
 
@@ -3097,9 +3370,7 @@ native_path:
             sigaction(SIGTERM, &sa_term, NULL);
 
             /* Crash handlers — log diagnostics before dying */
-            signal(SIGSEGV, crash_handler);
-            signal(SIGBUS,  crash_handler);
-            signal(SIGABRT, crash_handler);
+            main_install_crash_handlers();
 
             const char *depth_s = getenv("DSCO_SWARM_DEPTH");
             ipc_register(getenv("DSCO_PARENT_INSTANCE_ID"),

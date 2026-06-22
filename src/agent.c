@@ -430,6 +430,29 @@ static void *mcp_bg_init_thread(void *arg) {
     return NULL;
 }
 
+/* Drain freshly-finished background-agent pets into mini-notifications in the
+ * input panel's middle rows. Called each time we read user input, so completions
+ * that land between turns surface without the user polling. Each pet notifies
+ * exactly once (pet_roster_next_unnotified marks it). */
+static void drain_pet_notifications(tui_status_bar_t *sb) {
+    if (!sb) return;
+    pet_roster_t *r = pet_roster_global();
+    pet_status_t st;
+    char label[64];
+    pet_bones_t bones;
+    int id;
+    while ((id = pet_roster_next_unnotified(r, &st, label, sizeof(label), &bones)) >= 0) {
+        pet_bones_t fb = bones;
+        fb.eye = (st == PET_ST_ERROR) ? 2 : 3;   /* dizzy × / wide ◉ */
+        char face[32];
+        pet_render_face(&fb, face, sizeof(face));
+        char note[160];
+        snprintf(note, sizeof(note), "%s  agent #%d %s — %.40s",
+                 face, id, st == PET_ST_DONE ? "done" : "failed", label);
+        tui_panel_notify(sb, st == PET_ST_DONE ? TUI_PANEL_NOTE_OK : TUI_PANEL_NOTE_WARN, note);
+    }
+}
+
 static void mcp_bg_init_start(tui_status_bar_t *sb) {
     if (g_mcp_bg_started) return;
     g_mcp_bg_sb = sb;
@@ -2237,7 +2260,7 @@ static char *command_generator(const char *text, int state) {
                 char *r = malloc(total);
                 if (!r) return NULL;
                 memcpy(r, prefix, cmd_len);
-                strcpy(r + cmd_len, p->name);
+                snprintf(r + cmd_len, sizeof(r) - cmd_len, "%s", p->name);
                 return r;
             }
         }
@@ -2820,6 +2843,9 @@ static void park_transcript_cursor_after_pane(void) {
 
 static char *read_input_line_prompt(char *buf, size_t buf_sz, const char *prompt) {
     const char *p = prompt ? prompt : "\033[1m\033[95m\xe2\x9d\xaf\033[0m ";
+
+    /* Surface any background agents that finished since the last prompt. */
+    drain_pet_notifications(g_winch_sb);
 
     /* Persistent-pane path: use the multi-line composer box. */
     if (g_winch_sb && g_winch_sb->visible) {

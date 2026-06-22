@@ -122,6 +122,12 @@ static void *watcher_thread(void *arg);
 /* ═══════════════════════════════════════════════════════════════════════ */
 
 static void deny_debugger(void) {
+    /* When running under the supervisor or an explicit debug session we WANT a
+     * debugger to be able to attach (crash-time lldb/gdb backtrace, live
+     * rescue). Honour those escape hatches; otherwise lock attach out. */
+    if (getenv("DSCO_SUPERVISED") || getenv("DSCO_DEBUG") ||
+        getenv("DSCO_ALLOW_DEBUGGER"))
+        return;
 #ifdef __APPLE__
     /* Prevent any debugger from attaching to this process. */
     ptrace(PT_DENY_ATTACH, 0, NULL, 0);

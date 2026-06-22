@@ -23,6 +23,12 @@ static double pet_now(void) {
     return (double)ts.tv_sec + (double)ts.tv_nsec / 1e9;
 }
 
+/* Wall-clock-derived animation frame (~6fps). Lets sprites fidget across
+ * successive renders without a perpetual render thread or per-call plumbing. */
+static int pet_auto_frame(void) {
+    return (int)(pet_now() * 6.0);
+}
+
 /* FNV-1a 32-bit — stable across processes/restarts. */
 static uint32_t pet_hash(const char *s) {
     uint32_t h = 2166136261u;
@@ -51,7 +57,9 @@ static const char *const EYES[PET_EYE_COUNT] = { "·", "✦", "×", "◉", "@", 
 
 static const char *const SPECIES_NAMES[PET_SPECIES_COUNT] = {
     "duck","goose","blob","cat","dragon","octopus","owl","penguin","turtle",
-    "snail","ghost","axolotl","capybara","cactus","robot","rabbit","mushroom","chonk"
+    "snail","ghost","axolotl","capybara","cactus","robot","rabbit","mushroom","chonk",
+    "fox","frog","bee","crab","whale","fish","bat","hedgehog","panda","sloth",
+    "narwhal","dino"
 };
 
 static const char *const STAT_NAMES[PET_STAT_COUNT] = {
@@ -169,6 +177,66 @@ static const char *const BODIES[PET_SPECIES_COUNT][3][5] = {
     { "            ", "  /\\    /\\  ", " ( {E}    {E} ) ", " (   ..   ) ", "  `------´  " },
     { "            ", "  /\\    /|  ", " ( {E}    {E} ) ", " (   ..   ) ", "  `------´  " },
     { "            ", "  /\\    /\\  ", " ( {E}    {E} ) ", " (   ..   ) ", "  `------´~ " },
+  },
+  [PET_FOX] = {
+    { "            ", "  /\\    /\\  ", " ( {E} ww {E}) ", "  (  ^^  )  ", "  \\_><_>>_  " },
+    { "            ", "  /\\    /\\  ", " ( {E} ww {E}) ", "  (  ^^  )  ", "  \\_><_>>_~ " },
+    { "   ^    ^   ", "  /\\    /\\  ", " ( {E} ww {E}) ", "  (  ^^  )  ", "  \\_><_>>_  " },
+  },
+  [PET_FROG] = {
+    { "            ", " ({E})  ({E})  ", "  \\(____)/  ", "  ( ~~~~ )  ", "  `-`  `-´  " },
+    { "            ", " ({E})  ({E})  ", "  \\(____)/  ", "  ( ____ )  ", "  `-`  `-´  " },
+    { "   ~    ~   ", " ({E})  ({E})  ", "  \\(____)/  ", "  ( ~~~~ )  ", "  `-`  `-´  " },
+  },
+  [PET_BEE] = {
+    { "            ", "  \\\\ {E}{E} //  ", "  (=-=-=)   ", "  (-=-=-)   ", "   `---´    " },
+    { "            ", "  // {E}{E} \\\\  ", "  (=-=-=)   ", "  (-=-=-)   ", "   `---´    " },
+    { "    z  z    ", "  \\\\ {E}{E} //  ", "  (=-=-=)   ", "  (-=-=-)   ", "   `---´    " },
+  },
+  [PET_CRAB] = {
+    { "            ", " (\\/)  (\\/) ", "  ( {E}{E} )   ", " <(======)> ", "  /\\    /\\ " },
+    { "            ", " (\\/)  (\\/) ", "  ( {E}{E} )   ", " <(======)> ", "  \\/    \\/ " },
+    { " (\\/)  (\\/) ", "   \\    /   ", "  ( {E}{E} )   ", " <(======)> ", "  /\\    /\\ " },
+  },
+  [PET_WHALE] = {
+    { "            ", "   .---.    ", "  ( {E}  {E})~~ ", "  (______)  ", "   \\~~~~/   " },
+    { "            ", "   .---.    ", " ~( {E}  {E})~~ ", "  (______)  ", "   \\~~~~/   " },
+    { "    ___     ", "  .'   '.   ", "  ( {E}  {E})~~ ", "  (______)  ", "   \\~~~~/   " },
+  },
+  [PET_FISH] = {
+    { "            ", "   ______   ", "  /{E}     \\> ", "  \\____~~~/  ", "            " },
+    { "            ", "   ______   ", "  /{E}    \\>> ", "  \\____~~~/  ", "            " },
+    { "            ", "   ______   ", "  /{E}     \\> ", "  \\___~~~~/  ", "   °   °    " },
+  },
+  [PET_BAT] = {
+    { "            ", " /\\_/\\_/\\  ", " ) {E}  {E} (  ", "  \\ vvvv /  ", "   ^^^^^^   " },
+    { "            ", " \\/^\\_/^\\/  ", " ) {E}  {E} (  ", "  \\ vvvv /  ", "   ^^^^^^   " },
+    { "  ^v^  ^v^  ", " /\\_/\\_/\\  ", " ) {E}  {E} (  ", "  \\ vvvv /  ", "   ^^^^^^   " },
+  },
+  [PET_HEDGEHOG] = {
+    { "            ", "  \\|/|\\|/   ", " <({E}  {E})>  ", "  (  ·-·  ) ", "   ^^  ^^   " },
+    { "            ", "  /|\\|/|\\   ", " <({E}  {E})>  ", "  (  ·-·  ) ", "   ^^  ^^   " },
+    { "  '''''''   ", "  \\|/|\\|/   ", " <({E}  {E})>  ", "  (  ·-·  ) ", "   ^^  ^^   " },
+  },
+  [PET_PANDA] = {
+    { "            ", "  (o)  (o)  ", " ( ({E})({E}) )", " (   ω    ) ", "  `------´  " },
+    { "            ", "  (o)  (o)  ", " ( ({E})({E}) )", " (   ω    ) ", "  `------´~ " },
+    { "   .    .   ", "  (o)  (o)  ", " ( ({E})({E}) )", " (   ω    ) ", "  `------´  " },
+  },
+  [PET_SLOTH] = {
+    { "            ", "   .----.   ", "  ( {E}__{E} )  ", "  ( \\__/ )  ", "   |    |   " },
+    { "            ", "   .----.   ", "  ( {E}__{E} )  ", "  ( \\__/ )  ", "    |  |    " },
+    { "   z z z    ", "   .----.   ", "  ( {E}__{E} )  ", "  ( \\__/ )  ", "   |    |   " },
+  },
+  [PET_NARWHAL] = {
+    { "            ", "    |       ", "  .-{E}{E}---.  ", " ( ______ ) ", "  \\~~~~~~/  " },
+    { "            ", "    |       ", "  .-{E}{E}---.  ", " ( ______ ) ", "  \\~~~~~~/~ " },
+    { "    |       ", "    |       ", "  .-{E}{E}---.  ", " ( ______ ) ", "  \\~~~~~~/  " },
+  },
+  [PET_DINO] = {
+    { "            ", "    ____    ", "   /{E}  {E}\\_ ", "  <  vvv  | ", "   ^^  ^^   " },
+    { "            ", "    ____    ", "   /{E}  {E}\\_ ", "  <  vvv  | ", "   ^^  ^^ ~ " },
+    { "   .  .     ", "    ____    ", "   /{E}  {E}\\_ ", "  <  vvv  | ", "   ^^  ^^   " },
   },
 };
 
@@ -291,6 +359,18 @@ void pet_render_face(const pet_bones_t *b, char *buf, size_t n) {
         case PET_RABBIT:               snprintf(buf, n, "(%s..%s)", e, e); break;
         case PET_MUSHROOM:             snprintf(buf, n, "|%s  %s|", e, e); break;
         case PET_CHONK:                snprintf(buf, n, "(%s.%s)", e, e); break;
+        case PET_FOX:                  snprintf(buf, n, "=%sw%s=", e, e); break;
+        case PET_FROG:                 snprintf(buf, n, "(%s)(%s)", e, e); break;
+        case PET_BEE:                  snprintf(buf, n, "\\%s%s/", e, e); break;
+        case PET_CRAB:                 snprintf(buf, n, "(%s%s)", e, e); break;
+        case PET_WHALE:                snprintf(buf, n, "(%s%s)~", e, e); break;
+        case PET_FISH:                 snprintf(buf, n, "<%s><", e); break;
+        case PET_BAT:                  snprintf(buf, n, ")%s%s(", e, e); break;
+        case PET_HEDGEHOG:             snprintf(buf, n, "<%s%s>", e, e); break;
+        case PET_PANDA:                snprintf(buf, n, "(%s)(%s)", e, e); break;
+        case PET_SLOTH:                snprintf(buf, n, "(%s_%s)", e, e); break;
+        case PET_NARWHAL:              snprintf(buf, n, "%s%s|", e, e); break;
+        case PET_DINO:                 snprintf(buf, n, "/%s%s\\", e, e); break;
         default:                       snprintf(buf, n, "(%s%s)", e, e); break;
     }
 }
@@ -379,6 +459,7 @@ static void emit_sprite_line(FILE *out, const char *line, const pet_bones_t *b,
 
 void pet_card_print(FILE *out, const pet_t *p, int frame) {
     if (!out || !p) return;
+    frame += pet_auto_frame();   /* animate idle fidget over wall-clock time */
     char lines[6][96];
     int n = pet_render_sprite(&p->bones, frame, lines);
 
@@ -405,14 +486,16 @@ void pet_card_print(FILE *out, const pet_t *p, int frame) {
 
 void pet_gallery_print(FILE *out, int frame) {
     if (!out) return;
-    /* Roll a few seeds to show variety of species/rarity. */
-    const char *seeds[] = { "alpha","bravo","charlie","delta","echo","foxtrot" };
-    int ns = (int)(sizeof(seeds) / sizeof(seeds[0]));
-    for (int s = 0; s < ns; s++) {
+    /* One card per species so every creature is on display; rarity/eye/hat
+     * still vary per seed for flavor. */
+    for (int s = 0; s < PET_SPECIES_COUNT; s++) {
         pet_t p; memset(&p, 0, sizeof(p));
-        pet_roll(seeds[s], &p.bones);
+        char seed[32];
+        snprintf(seed, sizeof(seed), "gallery-%d", s);
+        pet_roll(seed, &p.bones);
+        p.bones.species = (pet_species_t)s;   /* force this species */
         p.status = PET_ST_IDLE;
-        snprintf(p.name, sizeof(p.name), "%s", seeds[s]);
+        snprintf(p.name, sizeof(p.name), "%s", pet_species_name((pet_species_t)s));
         pet_card_print(out, &p, frame + s);
     }
 }
@@ -562,7 +645,7 @@ void pet_roster_render(FILE *out, pet_roster_t *r, int width, int max_rows) {
     pthread_mutex_lock(&r->mu);
 
     int n = r->count;
-    int frame = r->frame;
+    int frame = pet_auto_frame();
     if (n == 0) {
         pthread_mutex_unlock(&r->mu);
         fprintf(out, "  %sno background pets — spawn an agent to hatch one%s\n",

@@ -16,6 +16,7 @@ BUILD_DIR ?= build
 BASE_CFLAGS = -Wall -Wextra -O3 -std=c2y $(C2Y_WARNING_FLAGS) -D_POSIX_C_SOURCE=200809L \
 	-I$(INC_DIR) \
 	-march=native -mtune=native -funroll-loops -fvisibility=hidden \
+	-funwind-tables \
 	-MMD -MP \
 	-DBUILD_DATE='"$(BUILD_DATE)"' -DGIT_HASH='"$(GIT_HASH)"'
 CFLAGS ?= $(BASE_CFLAGS)
@@ -53,7 +54,8 @@ SRC_NAMES = main.c agent.c llm.c tools.c json_util.c ast.c swarm.c tui.c \
 	project.c project_mux.c project_grid.c \
 	dsco_accel.c dsco_mlx.c dsco_pool.c \
 	fingerprint.c trust.c toolmgmt.c connector.c openrouter_cache.c \
-	startup.c plot.c self_improve.c pets.c img_util.c \
+	startup.c plot.c self_improve.c pets.c img_util.c supervisor.c \
+	graphsub_client.c graphsub_tools.c \
 	$(OPTIONAL_SRCS)
 TEST_SRC_NAMES = test.c
 
@@ -148,12 +150,20 @@ LDLIBS      += $(HIREDIS_LIBS)
 endif
 endif
 
-# GNU Scientific Library
+# GNU Scientific Library (vendored or system)
+ifeq ($(wildcard gsl/gsl/gsl_version.h),gsl/gsl/gsl_version.h)
+GSL_CFLAGS := -Igsl -DHAVE_GSL_VENDORED
+GSL_LIBS   :=
+BASE_CFLAGS += $(GSL_CFLAGS)
+$(info Using vendored GSL)
+else
 GSL_CFLAGS := $(shell pkg-config --cflags gsl 2>/dev/null)
 GSL_LIBS   := $(shell pkg-config --libs   gsl 2>/dev/null)
 ifneq ($(GSL_CFLAGS),)
 BASE_CFLAGS += $(GSL_CFLAGS) -DHAVE_GSL
 LDLIBS      += $(GSL_LIBS)
+$(info Using system GSL via pkg-config)
+endif
 endif
 
 # libsodium (crypto for mesh)
