@@ -39,6 +39,9 @@
 #include "env_guard.h"
 #include "heartbeat.h"
 #include "mesh.h"
+#include "extension/numerical_backend.h"
+#include "extension/eigen_backend.h"
+#include "extension/fftw_backend.h"
 #include "net_server.h"
 #include "peer_bootstrap.h"
 #include "cost_model.h"
@@ -213,6 +216,8 @@ static bool init_secure_store_required(uint8_t out_key[32], int *timed_out);
  * (see supervisor.c) reads /tmp/dsco_crash.log and the per-pid backtrace to
  * decide how to rescue/restart, so this is the bridge to the watcher. */
 static volatile sig_atomic_t g_in_crash = 0;
+static volatile sig_atomic_t g_alarm_fired = 0;
+static void crash_alarm_handler(int sig) { (void)sig; g_alarm_fired = 1; }
 
 static void crash_write_sig(int fd, int sig, const char *name) {
     char buf[256];
@@ -225,7 +230,12 @@ static void crash_write_sig(int fd, int sig, const char *name) {
 /* Best-effort: spawn lldb (macOS) or gdb (Linux) to attach to the crashing
  * process and dump a full backtrace to a per-pid report. Gated on
  * DSCO_CRASH_DEBUGGER so it never fires in normal/unsupervised runs (and only
- * works when anti-ptrace was skipped — see tamper_init/DSCO_DEBUG). */
+ * works when anti-ptrace was skipped — see tamper_init/DSCO_DEBUG).
+ *
+ * The crashing thread is still alive inside this handler, so the debugger
+ * attaches to a LIVE target and captures the real faulting frames. We fork
+ * the debugger and block (waitpid) until it detaches before re-raising, so
+ * the process doesn't die out from under it. */
 static void crash_spawn_debugger(int crashing_pid) {
     const char *want = getenv("DSCO_CRASH_DEBUGGER");
     if (!want || want[0] == '0' || want[0] == '\0') return;
@@ -235,22 +245,36 @@ static void crash_spawn_debugger(int crashing_pid) {
     snprintf(report, sizeof(report), "/tmp/dsco_bt_%d.txt", crashing_pid);
 
     pid_t dbg = fork();
-    if (dbg != 0) return;  /* parent (crashing) returns to re-raise */
-
-    /* child: redirect output to the report file, then exec the debugger */
-    int rfd = open(report, O_WRONLY | O_CREAT | O_TRUNC, 0644);
-    if (rfd >= 0) { dup2(rfd, STDOUT_FILENO); dup2(rfd, STDERR_FILENO); close(rfd); }
+    if (dbg < 0) return;
+    if (dbg == 0) {
+        /* child: redirect output to the report file, then exec the debugger */
+        int rfd = open(report, O_WRONLY | O_CREAT | O_TRUNC, 0644);
+        if (rfd >= 0) { dup2(rfd, STDOUT_FILENO); dup2(rfd, STDERR_FILENO); close(rfd); }
 #ifdef __APPLE__
-    execlp("lldb", "lldb", "-p", pidbuf, "--batch",
-           "-o", "thread backtrace all", "-o", "register read",
-           "-o", "detach", "-o", "quit", (char *)NULL);
+        execlp("lldb", "lldb", "-p", pidbuf, "--batch",
+               "-o", "thread backtrace all", "-o", "register read",
+               "-o", "detach", "-o", "quit", (char *)NULL);
+        execlp("gdb", "gdb", "-p", pidbuf, "-batch", "-nx",
+               "-ex", "thread apply all bt full", "-ex", "detach", "-ex", "quit",
+               (char *)NULL);
 #else
-    execlp("gdb", "gdb", "-p", pidbuf, "-batch", "-nx",
-           "-ex", "thread apply all bt full",
-           "-ex", "info registers", "-ex", "detach", "-ex", "quit",
-           (char *)NULL);
+        execlp("gdb", "gdb", "-p", pidbuf, "-batch", "-nx",
+               "-ex", "thread apply all bt full",
+               "-ex", "info registers", "-ex", "detach", "-ex", "quit",
+               (char *)NULL);
+        execlp("lldb", "lldb", "-p", pidbuf, "--batch",
+               "-o", "thread backtrace all", "-o", "detach", "-o", "quit",
+               (char *)NULL);
 #endif
-    _exit(127);  /* debugger not installed */
+        _exit(127);  /* no debugger installed */
+    }
+    /* parent (crashing): wait for the debugger to finish, but don't hang
+     * forever if it stalls — SIGALRM breaks the waitpid. */
+    alarm(20);
+    int st;
+    while (waitpid(dbg, &st, 0) < 0 && errno == EINTR && !g_alarm_fired)
+        ;
+    alarm(0);
 }
 
 static void crash_handler(int sig) {
@@ -293,6 +317,13 @@ void main_install_crash_handlers(void) {
     signal(SIGABRT, crash_handler);
     signal(SIGFPE,  crash_handler);
     signal(SIGILL,  crash_handler);
+    /* Non-restarting SIGALRM so the crash-time debugger wait can time out. */
+    struct sigaction sa_alrm;
+    memset(&sa_alrm, 0, sizeof(sa_alrm));
+    sa_alrm.sa_handler = crash_alarm_handler;
+    sigemptyset(&sa_alrm.sa_mask);
+    sa_alrm.sa_flags = 0;  /* no SA_RESTART */
+    sigaction(SIGALRM, &sa_alrm, NULL);
 }
 
 static void main_atexit_handler(void) {
@@ -542,6 +573,11 @@ void dsco_startup_init(dsco_profile_t profile, dsco_caps_t caps) {
     if (profile == DSCO_PROFILE_WORKER)
         caps &= ~(DSCO_CAP_SECURITY | DSCO_CAP_TRUST);
     perf_set_startup_context(profile, caps);
+
+    /* Register extension backends early so skills/tools can resolve capabilities. */
+    numerical_backend_register(&numerical_backend_gsl);
+    eigen_backend_init();
+    fftw_backend_init();
 
     bool is_worker = profile == DSCO_PROFILE_WORKER;
 
@@ -2229,6 +2265,35 @@ static int maybe_run_early_fast_path(int argc, char **argv,
 
 int main(int argc, char **argv) {
     perf_init();
+
+    /* Fault-injection hook for exercising the crash handler + supervisor end
+     * to end. Completely inert unless DSCO_TEST_CRASH is set. Installs the
+     * crash handlers itself so the in-process backtrace path is exercised.
+     * Optional "@N" suffix crashes only on the Nth supervised generation so
+     * the supervisor's restart/backoff/recovery can be observed live. */
+    {
+        const char *tc = getenv("DSCO_TEST_CRASH");
+        bool is_supervise_launcher = argc >= 2 &&
+            (strcmp(argv[1], "supervise") == 0 || strcmp(argv[1], "--supervise") == 0);
+        if (tc && tc[0] && !is_supervise_launcher) {
+            const char *at = strchr(tc, '@');
+            bool fire = true;
+            if (at) {
+                const char *gen = getenv("DSCO_SUPERVISED");
+                fire = gen && atoi(gen) == atoi(at + 1);
+            }
+            if (fire) {
+                main_install_crash_handlers();
+                fprintf(stderr, "[dsco] DSCO_TEST_CRASH=%s — injecting fault "
+                        "(gen %s)\n", tc, getenv("DSCO_SUPERVISED") ? getenv("DSCO_SUPERVISED") : "0");
+                if (strncmp(tc, "abort", 5) == 0) abort();
+                if (strncmp(tc, "exit", 4) == 0)  return 42;
+                if (strncmp(tc, "kill", 4) == 0)  raise(SIGKILL);  /* mimic OOM/jetsam */
+                volatile int *p = NULL;  /* default: SIGSEGV */
+                *p = 1;
+            }
+        }
+    }
     dsco_profile_t runtime_profile = main_runtime_profile(argc, argv);
     dsco_caps_t startup_caps = main_plan_startup_caps(argc, argv, runtime_profile);
     perf_set_startup_context(runtime_profile, startup_caps);
@@ -2308,30 +2373,6 @@ int main(int argc, char **argv) {
      * installed these). On a real crash we dump a backtrace + crash log that
      * the supervisor reads to rescue the session. */
     main_install_crash_handlers();
-
-    /* Fault-injection hook for exercising the crash handler + supervisor end
-     * to end. Never fires unless DSCO_TEST_CRASH is set explicitly. Optional
-     * "@N" suffix crashes only on the Nth supervised generation, so the
-     * supervisor's restart/backoff/recovery path can be observed live. */
-    {
-        const char *tc = getenv("DSCO_TEST_CRASH");
-        if (tc && tc[0]) {
-            const char *at = strchr(tc, '@');
-            bool fire = true;
-            if (at) {
-                int want = atoi(at + 1);
-                const char *gen = getenv("DSCO_SUPERVISED");
-                fire = gen && atoi(gen) == want;
-            }
-            if (fire) {
-                fprintf(stderr, "[dsco] DSCO_TEST_CRASH=%s — injecting fault\n", tc);
-                if (strncmp(tc, "abort", 5) == 0) abort();
-                if (strncmp(tc, "exit", 4) == 0)  return 42;
-                volatile int *p = NULL;  /* default: SIGSEGV */
-                *p = 1;
-            }
-        }
-    }
 
     /* Bare `dsco` in a TTY drops into the interactive REPL.
      * Non-TTY (pipe/redirect) keeps the old behavior of printing usage + error,

@@ -141,6 +141,20 @@ int supervisor_run(int child_argc, char **child_argv) {
     int backoff_ms     = env_int("DSCO_SUPERVISE_BACKOFF_MS",    DEFAULT_BACKOFF_MS,  10, 60000);
     int backoff_max_ms = env_int("DSCO_SUPERVISE_BACKOFF_MAX_MS", DEFAULT_BACKOFF_MAX_MS, 100, 300000);
 
+    /* OTP restart type (erlang supervisor child_spec Restart):
+     *   transient (default) — restart only on abnormal exit; a clean exit 0
+     *                         (e.g. the user typed /quit) is honoured.
+     *   permanent           — always restart, even on a clean exit. Use for a
+     *                         daemon that must never stay down.
+     *   temporary           — never restart; just report and propagate.
+     * This is the genuinely useful piece of BEAM/OTP for "never get killed":
+     * supervision semantics, not the bytecode emulator (dsco already has a
+     * stack VM in vm.c + a reduction-style scheduler in scheduler.c). */
+    const char *rt = getenv("DSCO_SUPERVISE_RESTART");
+    enum { RT_TRANSIENT, RT_PERMANENT, RT_TEMPORARY } restart_type =
+        (rt && strcmp(rt, "permanent") == 0) ? RT_PERMANENT :
+        (rt && strcmp(rt, "temporary") == 0) ? RT_TEMPORARY : RT_TRANSIENT;
+
     /* Build the child argv: self-path + DSCO_NO_SUPERVISE=1 + passed args. */
     /* child_argv[0] is the original argv[0] (the dsco binary path). */
     /* The args after "supervise" were already stripped by main.c. */
@@ -204,13 +218,25 @@ int supervisor_run(int child_argc, char **child_argv) {
 
         crash_class_t cls = classify_exit(status);
 
-        /* Clean exit — we're done. */
+        /* Clean exit — honour OTP restart semantics. transient/temporary stop;
+         * only permanent keeps a cleanly-exited child alive. */
         if (cls == EXIT_CLEAN) {
-            if (restart_count > 0) {
-                fprintf(stderr, "[supervisor] child exited cleanly after %d restart(s).\n",
-                        restart_count);
+            if (restart_type != RT_PERMANENT) {
+                if (restart_count > 0)
+                    fprintf(stderr, "[supervisor] child exited cleanly after %d restart(s).\n",
+                            restart_count);
+                return 0;
             }
-            return 0;
+            fprintf(stderr, "[supervisor] child exited cleanly but restart=permanent — relaunching.\n");
+        }
+
+        /* temporary children are never restarted, abnormal exit or not. */
+        if (restart_type == RT_TEMPORARY) {
+            int sig0 = WIFSIGNALED(status) ? WTERMSIG(status) : 0;
+            fprintf(stderr, "\n[supervisor] child died (%s) and restart=temporary — not restarting.\n",
+                    crash_class_name(cls));
+            capture_diagnostics(child, cls, sig0);
+            return sig0 > 0 ? 128 + sig0 : (WIFEXITED(status) ? WEXITSTATUS(status) : 1);
         }
 
         /* Abnormal exit — classify and decide whether to restart. */

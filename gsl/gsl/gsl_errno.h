@@ -26,9 +26,7 @@ enum {
   GSL_ELOSS    = 17,
   GSL_EROUND   = 18,
   GSL_EBADLEN  = 19,
-  GSL_EINDEX   = 20,
-  GSL_EINVAL   = 21,
-  GSL_ETOL     = 14
+  GSL_EINDEX   = 20
 };
 
 void gsl_error(const char *reason, const char *file, int line, int gsl_errno);
