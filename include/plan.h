@@ -75,6 +75,10 @@ typedef enum {
     ATOM_DIALOG,
     ATOM_ASSERT,
     ATOM_NOOP,
+    ATOM_CONDITIONAL_IF,    /* if condition_slot is true → run true_step_id */
+    ATOM_CONDITIONAL_ELSE,  /* else → run false_step_id */
+    ATOM_LOOP_WHILE,        /* repeat child atoms while condition_slot is true */
+    ATOM_BREAK,             /* exit enclosing loop */
 } atom_type_t;
 
 /* ── Data structures ─────────────────────────────────────────────────────── */
@@ -141,6 +145,12 @@ typedef struct {
     int           output_to_ids[ATOM_MAX_DEPS];
     int           output_to_count;
     char         *wired_input;        /* heap; resolved upstream data */
+    /* ── Conditional branching (Priority 6) ─────────────────────────── */
+    char          condition_slot[64];  /* read this slot, evaluate as boolean */
+    int           true_step_id;        /* step to execute if condition true */
+    int           false_step_id;       /* step to execute if condition false */
+    int           loop_max_iterations; /* max iterations for LOOP_WHILE (0=unlimited) */
+    int           loop_current_iter;   /* current iteration count */
 } atom_t;
 
 typedef struct {

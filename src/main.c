@@ -6,6 +6,7 @@
 #include "tools.h"
 #include "pets.h"
 #include "self_improve.h"
+#include "anim.h"
 #include "json_util.h"
 #include "ipc.h"
 #include "md.h"
@@ -310,14 +311,43 @@ static void crash_handler(int sig) {
     raise(sig);
 }
 
-/* Register the full set of fatal-signal crash handlers. Idempotent. */
+/* Register the full set of fatal-signal crash handlers. Idempotent.
+ *
+ * The fatal handlers run on a dedicated alternate stack (SA_ONSTACK + a
+ * sigaltstack installed below). Without this, a stack-overflow SIGSEGV — or
+ * any fault that left the thread stack unusable — would re-fault the instant
+ * the handler pushed a frame, producing the silent "no crash log at all"
+ * failure mode: the OS kills us before /tmp/dsco_crash.log is ever written.
+ * The alt stack guarantees the in-process backtrace path always runs. */
 void main_install_crash_handlers(void) {
-    signal(SIGSEGV, crash_handler);
-    signal(SIGBUS,  crash_handler);
-    signal(SIGABRT, crash_handler);
-    signal(SIGFPE,  crash_handler);
-    signal(SIGILL,  crash_handler);
-    /* Non-restarting SIGALRM so the crash-time debugger wait can time out. */
+    /* Install the alternate signal stack once. 64 KiB comfortably holds the
+     * handler + backtrace()/backtrace_symbols_fd() working set. Static so it
+     * outlives this call; aligned for the platform. */
+    static _Alignas(16) char alt_stack[64 * 1024];
+    static int alt_installed = 0;
+    if (!alt_installed) {
+        stack_t ss;
+        memset(&ss, 0, sizeof(ss));
+        ss.ss_sp    = alt_stack;
+        ss.ss_size  = sizeof(alt_stack);
+        ss.ss_flags = 0;
+        if (sigaltstack(&ss, NULL) == 0) alt_installed = 1;
+    }
+
+    struct sigaction sa_crash;
+    memset(&sa_crash, 0, sizeof(sa_crash));
+    sa_crash.sa_handler = crash_handler;
+    sigemptyset(&sa_crash.sa_mask);
+    sa_crash.sa_flags = alt_installed ? SA_ONSTACK : 0;
+    sigaction(SIGSEGV, &sa_crash, NULL);
+    sigaction(SIGBUS,  &sa_crash, NULL);
+    sigaction(SIGABRT, &sa_crash, NULL);
+    sigaction(SIGFPE,  &sa_crash, NULL);
+    sigaction(SIGILL,  &sa_crash, NULL);
+
+    /* Non-restarting SIGALRM so the crash-time debugger wait can time out.
+     * Kept on the normal stack — it only fires during the (already-running)
+     * crash handler's waitpid, where the stack is known-good. */
     struct sigaction sa_alrm;
     memset(&sa_alrm, 0, sizeof(sa_alrm));
     sa_alrm.sa_handler = crash_alarm_handler;
@@ -2012,6 +2042,7 @@ static void json_print_escaped(FILE *out, const char *s) {
         else if (*p == '\n') fputs("\\n", out);
         else if (*p == '\r') fputs("\\r", out);
         else if (*p == '\t') fputs("\\t", out);
+        else if ((unsigned char)*p < 0x20) fprintf(out, "\\u%04x", (unsigned char)*p);
         else                 fputc(*p, out);
     }
 }
@@ -2249,6 +2280,35 @@ static int maybe_run_early_fast_path(int argc, char **argv,
             print_tools_json_fast(profile);
             perf_finish("fast exit");
             return 0;
+        }
+        if (strcmp(argv[i], "--codebase-stats") == 0) {
+            extern int introspect_print_codebase_stats(FILE *);
+            introspect_print_codebase_stats(stdout);
+            perf_finish("fast exit");
+            return 0;
+        }
+        if (strcmp(argv[i], "--selves") == 0) {
+            extern int introspect_run_selves(FILE *, int, const char *);
+            int nselves = 4;
+            const char *prompt = NULL;
+            if (i + 1 < argc) {
+                char *end = NULL;
+                long v = strtol(argv[i+1], &end, 10);
+                if (end && *end == 0 && v > 0 && i + 2 < argc) {
+                    nselves = (int)v;
+                    prompt = argv[i+2];
+                } else {
+                    prompt = argv[i+1];
+                }
+            }
+            if (!prompt) {
+                fprintf(stderr, "usage: dsco --selves [N] <prompt>\n");
+                perf_finish("fast error");
+                return 1;
+            }
+            int rc = introspect_run_selves(stdout, nselves, prompt);
+            perf_finish("fast exit");
+            return rc;
         }
         if (strcmp(argv[i], "--tool-exec") == 0) {
             if (i + 2 >= argc) {
@@ -2546,6 +2606,45 @@ int main(int argc, char **argv) {
             printf("]\n");
             free(oneshot_prompt);
             return 0;
+        }
+        if (strcmp(argv[i], "--anim") == 0) {
+            /* --anim <kind|json> [json] — run a direct-to-terminal cell
+             * animation (life|rule|attractor|rain). Animation needs real time
+             * and a TTY, so it lives here on the direct path, not as a tool.
+             *   ./dsco --anim life
+             *   ./dsco --anim '{"kind":"life","pattern":"gun"}'
+             *   ./dsco --anim rule '{"rule":30}' */
+            char jbuf[2048];
+            const char *a1 = (i + 1 < argc) ? argv[++i] : "life";
+            const char *spec = jbuf;
+            if (a1[0] == '{') {
+                spec = a1;
+            } else if (i + 1 < argc && argv[i + 1][0] == '{') {
+                const char *extra = argv[++i];
+                snprintf(jbuf, sizeof jbuf, "{\"kind\":\"%s\",%s", a1, extra + 1);
+            } else {
+                snprintf(jbuf, sizeof jbuf, "{\"kind\":\"%s\"}", a1);
+            }
+            int frames = anim_dispatch(spec);
+            free(oneshot_prompt);
+            return frames >= 0 ? 0 : 1;
+        }
+        if (strcmp(argv[i], "--tool-exec-raw") == 0 && i + 2 < argc) {
+            /* --tool-exec-raw <name> <json> — execute a single tool and write its
+             * result straight to the terminal (real newlines + ANSI), unescaped.
+             * For visual tools (plot, pets, …) whose output is art, not data,
+             * `--tool-exec`'s JSON escaping renders newlines as literal "\n". */
+            const char *tname = argv[++i];
+            const char *tjson = argv[++i];
+            main_tools_init_for_runtime(runtime_profile);
+            char result[256 * 1024] = {0};
+            bool ok = tools_execute(tname, tjson, result, sizeof(result));
+            (void)write(STDOUT_FILENO, result, strlen(result));
+            size_t rlen = strlen(result);
+            if (rlen == 0 || result[rlen - 1] != '\n')
+                (void)write(STDOUT_FILENO, "\n", 1);
+            free(oneshot_prompt);
+            return ok ? 0 : 1;
         }
         if (strcmp(argv[i], "--tool-exec") == 0 && i + 2 < argc) {
             /* --tool-exec <name> <json>  — execute a single tool and print result */

@@ -199,4 +199,31 @@ int ipc_poll(void);
 /* Format a status summary as JSON */
 int ipc_status_json(char *buf, size_t len);
 
+/* ── Agent Checkpoint System (Workstream B1) ─────────────────────────── */
+
+/* Save agent state (memory, conversation, plan) to checkpoint table.
+ * Returns true on success. Multiple generations per agent supported. */
+bool ipc_checkpoint_save(const char *agent_id, int generation,
+                          const char *memory_json,
+                          const char *conv_json,
+                          const char *plan_json,
+                          const char *task_json);
+
+/* Restore agent state from latest (or specific generation) checkpoint.
+ * Returns malloc'd strings (caller frees each non-NULL output).
+ * If generation < 0, uses the latest checkpoint for agent_id.
+ * Returns true on success. */
+bool ipc_checkpoint_restore(const char *agent_id, int generation,
+                             char **memory_json_out,
+                             char **conv_json_out,
+                             char **plan_json_out,
+                             char **task_json_out);
+
+/* List checkpoints for an agent. Returns count. */
+int ipc_checkpoint_list(const char *agent_id, int *generations_out,
+                         double *timestamps_out, int max);
+
+/* Delete old checkpoints, keeping only the latest N. */
+int ipc_checkpoint_prune(const char *agent_id, int keep_generations);
+
 #endif
