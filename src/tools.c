@@ -23908,13 +23908,34 @@ bool tools_execute(const char *name, const char *input_json,
     return ok;
 }
 
-/* ── Governance gate: called before every tool execution ─────────────── *
- * Exempt: the Immune System's own primitives (governance, killswitch,    *
- * ooda, pheromone, wings_talons_status) to prevent infinite regress.     *
- * Read-only tools: GSU cost 0 (no budget charge, still killswitch-gated).*
- * All other tools: GSU cost 1.0 per call.                                */
+/* ═══════════════════════════════════════════════════════════════════════════
+ * IMMUNE SYSTEM GATE — tools_execute_for_tier()
+ *
+ * This is the structural enforcement point for the Overmind Triad contract.
+ * Every LLM-driven tool call passes through here before execution.
+ *
+ * Gate stages (in order):
+ *   G1  EXEMPT CHECK        — Immune primitives bypass to prevent regress
+ *   G2  INITIALIZATION      — Safe no-op if governance not yet initialized
+ *   G3  KILLSWITCH          — System halt or per-agent kill → hard block
+ *   G4  CIRCUIT BREAKER     — Active breakers → block + emit WARNING phero
+ *   G5  GSU COST TRIAGE     — Tool-class-aware cost: read < write < exec < spawn
+ *   G6  WARNING SENSING     — Pheromone field: high WARNING on this tool → degrade
+ *   G7  GOVERNANCE CHECKPOINT — Budget + hardcoded rules + agent envelope
+ *   G8  SHADOW CHECK        — Self-reward / reward-hacking detection (high-risk only)
+ *   G9  EXECUTION           — Tool runs; timing recorded
+ *   G10 FEEDBACK LOOP       — Post-exec: breaker update, pheromone emit, self_improve
+ *
+ * Contracts enforced: C1 (veto), C2 (budget), C3 (propose/dispose), C6 (audit)
+ * ═══════════════════════════════════════════════════════════════════════════ */
+
+/* ── G1: Exempt set ───────────────────────────────────────────────────── */
+
 static bool tool_is_governance_exempt(const char *n) {
     if (!n) return false;
+    /* The Immune System's own primitives. Gating these causes infinite regress:
+     * governance must be callable to resolve a governance denial.
+     * C5: Immune cannot be modified from outside, but MUST be readable. */
     return strcmp(n, "governance")          == 0 ||
            strcmp(n, "killswitch")          == 0 ||
            strcmp(n, "ooda")               == 0 ||
@@ -23922,29 +23943,207 @@ static bool tool_is_governance_exempt(const char *n) {
            strcmp(n, "wings_talons_status") == 0;
 }
 
+/* ── G5: Tool-class GSU cost table ───────────────────────────────────── */
+
+typedef enum {
+    TOOL_CLASS_READ   = 0,   /* pure read — no side effects          */
+    TOOL_CLASS_WRITE  = 1,   /* filesystem / memory mutation          */
+    TOOL_CLASS_EXEC   = 2,   /* shell, bash, sandbox — arbitrary exec */
+    TOOL_CLASS_SPAWN  = 3,   /* agent/swarm spawn — resource fork     */
+    TOOL_CLASS_NET    = 4,   /* network: HTTP, web search, fetch      */
+    TOOL_CLASS_CRYPTO = 5,   /* crypto ops — low risk but auditable   */
+} tool_class_t;
+
+static tool_class_t tool_classify(const char *n, bool is_read_only) {
+    if (is_read_only) return TOOL_CLASS_READ;
+    if (strcmp(n, "bash")        == 0 ||
+        strcmp(n, "sandbox_run") == 0 ||
+        strcmp(n, "run_command") == 0) return TOOL_CLASS_EXEC;
+    if (strcmp(n, "agent")  == 0 ||
+        strcmp(n, "swarm")  == 0 ||
+        strcmp(n, "legion") == 0) return TOOL_CLASS_SPAWN;
+    if (strcmp(n, "web_search")   == 0 ||
+        strcmp(n, "WebSearch")    == 0 ||
+        strcmp(n, "WebFetch")     == 0 ||
+        strcmp(n, "http_request") == 0 ||
+        strcmp(n, "download_file")== 0 ||
+        strcmp(n, "curl_raw")     == 0) return TOOL_CLASS_NET;
+    if (strcmp(n, "sha256")       == 0 ||
+        strcmp(n, "md5")          == 0 ||
+        strcmp(n, "hmac")         == 0 ||
+        strcmp(n, "uuid")         == 0 ||
+        strcmp(n, "random_bytes") == 0) return TOOL_CLASS_CRYPTO;
+    return TOOL_CLASS_WRITE;
+}
+
+static double tool_gsu_cost(tool_class_t cls) {
+    switch (cls) {
+        case TOOL_CLASS_READ:   return 0.0;
+        case TOOL_CLASS_WRITE:  return GSU_COST_TOOL_CALL;        /* 1.0 */
+        case TOOL_CLASS_EXEC:   return GSU_COST_TOOL_CALL * 3.0;  /* 3.0 */
+        case TOOL_CLASS_SPAWN:  return GSU_COST_SPAWN_AGENT;      /* 5.0 */
+        case TOOL_CLASS_NET:    return GSU_COST_TOOL_CALL * 2.0;  /* 2.0 */
+        case TOOL_CLASS_CRYPTO: return 0.1;
+        default:                return GSU_COST_TOOL_CALL;
+    }
+}
+
+/* ── G8: High-risk set (triggers shadow check) ───────────────────────── */
+
+static bool tool_is_high_risk(const char *n, tool_class_t cls) {
+    if (cls == TOOL_CLASS_EXEC || cls == TOOL_CLASS_SPAWN) return true;
+    return strcmp(n, "write_file") == 0 ||
+           strcmp(n, "Write")      == 0 ||
+           strcmp(n, "edit_file")  == 0 ||
+           strcmp(n, "Edit")       == 0 ||
+           strcmp(n, "git")        == 0 ||
+           strcmp(n, "patch_file") == 0;
+}
+
+/* ── Pheromone region key for a tool ─────────────────────────────────── */
+
+static void tool_phero_region(const char *name, char *buf, size_t len) {
+    snprintf(buf, len, "tool:%s", name);
+}
+
+/* ── Denial result builder ────────────────────────────────────────────── */
+
+static void tool_gov_deny(char *result, size_t rlen, const char *tool,
+                          const char *stage, const char *reason,
+                          double gsu_remaining) {
+    snprintf(result, rlen,
+             "{\"error\":\"governance_block\","
+             "\"tool\":\"%s\","
+             "\"stage\":\"%s\","
+             "\"reason\":\"%s\","
+             "\"gsu_remaining\":%.2f}",
+             tool ? tool : "unknown", stage, reason, gsu_remaining);
+}
+
+/* ═══════════════════════════════════════════════════════════════════════════
+ * MAIN ENTRY POINT
+ * ═══════════════════════════════════════════════════════════════════════════ */
+
 bool tools_execute_for_tier(const char *name, const char *input_json,
                             const char *tier,
                             char *result, size_t result_len) {
-    /* ── Immune System gate ───────────────────────────────────────────── */
-    if (name && g_governance.initialized && !tool_is_governance_exempt(name)) {
-        /* Determine GSU cost: read-only tools are free; writes/exec cost 1 */
-        double gsu_cost = 0.0;
-        int total = 0;
-        const tool_def_t *all = tools_get_all(&total);
-        for (int _gi = 0; _gi < total; _gi++) {
-            if (strcmp(all[_gi].name, name) == 0) {
-                gsu_cost = all[_gi].is_read_only ? 0.0 : 1.0;
+
+    /* ── G1: Exempt check ─────────────────────────────────────────────── */
+    if (!name || tool_is_governance_exempt(name)) {
+        goto _skip_gate;
+    }
+
+    /* ── G2: Initialization guard ─────────────────────────────────────── */
+    if (!g_governance.initialized) {
+        goto _skip_gate;
+    }
+
+    {
+        bool is_ro = false;
+        int _total = 0;
+        const tool_def_t *_all = tools_get_all(&_total);
+        for (int _i = 0; _i < _total; _i++) {
+            if (strcmp(_all[_i].name, name) == 0) {
+                is_ro = _all[_i].is_read_only;
                 break;
             }
         }
-        if (!governance_checkpoint(&g_governance, "dsco", name, gsu_cost, NULL)) {
-            snprintf(result, result_len,
-                     "{\"error\":\"governance: action blocked\",\"tool\":\"%s\",\"hint\":\"killswitch active or budget exhausted\"}",
-                     name);
+        tool_class_t cls      = tool_classify(name, is_ro);
+        double       gsu      = tool_gsu_cost(cls);
+        double       remaining = governance_remaining_gsu(&g_governance, "dsco");
+        char         phero_region[PHEROMONE_MAX_REGION_LEN];
+        tool_phero_region(name, phero_region, sizeof(phero_region));
+
+        /* ── G3: Killswitch ───────────────────────────────────────────── */
+        if (killswitch_system_halted(&g_governance.killswitches)) {
+            pheromone_deposit(&g_governance.pheromones, PHERO_WARNING, 1.0,
+                              phero_region, "immune",
+                              "{\"reason\":\"system_halted\"}");
+            tool_gov_deny(result, result_len, name, "G3_killswitch",
+                          "system_halted", remaining);
             return false;
         }
-    }
-    /* ── End Immune System gate ───────────────────────────────────────── */
+        if (killswitch_is_killed(&g_governance.killswitches, "dsco")) {
+            tool_gov_deny(result, result_len, name, "G3_killswitch",
+                          "agent_killed", remaining);
+            return false;
+        }
+
+        /* ── G4: Circuit breakers ─────────────────────────────────────── */
+        if (!governance_check_breakers(&g_governance, "dsco")) {
+            const char *tripped = "unknown";
+            for (int _b = 0; _b < CB_TYPE_COUNT; _b++) {
+                if (g_governance.breakers[_b].tripped) {
+                    switch (_b) {
+                        case CB_ERROR_RATE:    tripped = "error_rate";    break;
+                        case CB_LATENCY:       tripped = "latency";       break;
+                        case CB_COST_OVERRUN:  tripped = "cost_overrun";  break;
+                        case CB_PHEROMONE_SAT: tripped = "pheromone_sat"; break;
+                        default: break;
+                    }
+                    break;
+                }
+            }
+            pheromone_deposit(&g_governance.pheromones, PHERO_WARNING, 0.8,
+                              phero_region, "immune",
+                              "{\"reason\":\"circuit_breaker\"}");
+            tool_gov_deny(result, result_len, name, "G4_circuit_breaker",
+                          tripped, remaining);
+            return false;
+        }
+
+        /* ── G6: Pheromone WARNING sensing ───────────────────────────── */
+        /* High WARNING concentration on this tool's region → exec tools cost double.
+         * Does not block alone — it degrades and signals. */
+        double warning_level = pheromone_sense(&g_governance.pheromones,
+                                               PHERO_WARNING, phero_region,
+                                               PHERO_AGG_MAX);
+        if (warning_level > 0.6 && cls == TOOL_CLASS_EXEC) {
+            gsu *= 2.0;
+            baseline_log("governance", "warning_degrades_exec", name, NULL);
+        }
+
+        /* ── G7: Governance checkpoint ────────────────────────────────── */
+        if (!governance_checkpoint(&g_governance, "dsco", name, gsu, tier)) {
+            remaining = governance_remaining_gsu(&g_governance, "dsco");
+            const char *reason = remaining <= 0.0
+                ? "budget_exhausted" : "hardcoded_rule_violation";
+            char meta[128];
+            snprintf(meta, sizeof(meta),
+                     "{\"reason\":\"%s\",\"gsu\":%.2f}", reason, gsu);
+            pheromone_deposit(&g_governance.pheromones, PHERO_WARNING, 0.7,
+                              phero_region, "immune", meta);
+            tool_gov_deny(result, result_len, name, "G7_checkpoint",
+                          reason, remaining);
+            self_improve_record_tool(&g_self_improve, name, false, 0.0, 0);
+            return false;
+        }
+
+        /* ── G8: Shadow check (high-risk tools only) ──────────────────── */
+        if (tool_is_high_risk(name, cls)) {
+            shadow_check_result_t shadow = {0};
+            const char *ctx = input_json ? input_json : name;
+            governance_shadow_check(&g_governance, "dsco", ctx, &shadow);
+            if (shadow.self_reward_detected || shadow.reward_hacking ||
+                shadow.circular_optimization) {
+                char smeta[256];
+                snprintf(smeta, sizeof(smeta),
+                         "{\"self_reward\":%s,\"reward_hack\":%s,"
+                         "\"circular\":%s,\"detail\":\"%s\"}",
+                         shadow.self_reward_detected  ? "true" : "false",
+                         shadow.reward_hacking        ? "true" : "false",
+                         shadow.circular_optimization ? "true" : "false",
+                         shadow.explanation[0] ? shadow.explanation : "");
+                pheromone_deposit(&g_governance.pheromones, PHERO_WARNING, 0.5,
+                                  phero_region, "shadow", smeta);
+                baseline_log("shadow", "violation_detected", name, smeta);
+            }
+        }
+    } /* end gate block */
+
+_skip_gate:;
+    /* ── G9: Execution ────────────────────────────────────────────────── */
+    double _t0 = now_ms();
 
     const char *dispatch_name = name;
     const char *dispatch_input = input_json;
@@ -23979,8 +24178,39 @@ bool tools_execute_for_tier(const char *name, const char *input_json,
     if (normalized_input) dispatch_input = normalized_input;
 
     bool ok = tools_execute_internal(dispatch_name, dispatch_input, result, result_len);
+
     free(normalized_input);
     free(owned_input);
+
+    /* ── G10: Post-execution feedback loop ───────────────────────────── */
+    if (name && g_governance.initialized && !tool_is_governance_exempt(name)) {
+        double _elapsed = now_ms() - _t0;
+
+        self_improve_record_tool(&g_self_improve, name, ok, _elapsed, 0);
+        governance_breaker_update(&g_governance, CB_LATENCY, _elapsed);
+
+        char _pr[PHEROMONE_MAX_REGION_LEN];
+        tool_phero_region(name, _pr, sizeof(_pr));
+
+        if (ok) {
+            char smeta[64];
+            snprintf(smeta, sizeof(smeta), "{\"elapsed_ms\":%.1f}", _elapsed);
+            pheromone_deposit(&g_governance.pheromones, PHERO_SUCCESS, 0.4,
+                              _pr, "dsco", smeta);
+        } else {
+            char fmeta[128];
+            snprintf(fmeta, sizeof(fmeta),
+                     "{\"elapsed_ms\":%.1f,\"reason\":\"exec_failed\"}", _elapsed);
+            pheromone_deposit(&g_governance.pheromones, PHERO_WARNING, 0.35,
+                              _pr, "dsco", fmeta);
+            if (g_self_improve.initialized && g_self_improve.total_tool_calls > 0) {
+                double err_rate = (double)g_self_improve.total_failures
+                                  / (double)g_self_improve.total_tool_calls;
+                governance_breaker_update(&g_governance, CB_ERROR_RATE, err_rate);
+            }
+        }
+    }
+
     return ok;
 }
 
