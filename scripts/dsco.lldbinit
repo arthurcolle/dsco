@@ -1,0 +1,39 @@
+# dsco.lldbinit — live-debug / rescue hooks for dsco (macOS lldb).
+#
+# Usage:
+#   lldb -s scripts/dsco.lldbinit ./dsco -- -i        # launch under lldb
+#   lldb -s scripts/dsco.lldbinit -p $(pgrep -n dsco) # attach to a running one
+#
+# Note: dsco denies debugger attach (PT_DENY_ATTACH) unless DSCO_DEBUG=1,
+# DSCO_SUPERVISED, or DSCO_ALLOW_DEBUGGER is set. Export one before attaching:
+#   DSCO_DEBUG=1 ./dsco -i      (then attach)
+#   ./dsco supervise -i         (supervised children already allow attach)
+
+# Stop on the fatal signals dsco's crash_handler also traps, so you land
+# exactly on the faulting frame instead of after re-raise.
+process handle SIGSEGV -s true  -n true -p true
+process handle SIGBUS  -s true  -n true -p true
+process handle SIGABRT -s true  -n true -p true
+process handle SIGILL  -s true  -n true -p true
+process handle SIGFPE  -s true  -n true -p true
+# These are normal control flow in dsco — never stop on them.
+process handle SIGWINCH -s false -n false -p true
+process handle SIGINT   -s false -n true  -p true
+process handle SIGTSTP  -s false -n false -p true
+
+# Break where dsco itself decides things have gone wrong.
+breakpoint set -n crash_handler
+breakpoint set -n __cxa_throw
+
+# One-shot postmortem: full backtrace + registers + key globals.
+command alias dsco-bt   thread backtrace all
+command alias dsco-regs register read
+
+command regex dsco-state 's/.*/script print("interrupted=%s" % lldb.frame.FindVariable("g_main_interrupted"))/'
+
+# Convenience: show the agent loop state without leaving lldb.
+command alias dsco-globals expression -- (int)g_main_interrupted
+
+# Auto-continue to the interesting part on launch.
+# (commented out — uncomment to run straight to a crash)
+# run
