@@ -26,3 +26,23 @@ int gsl_blas_dgemv(CBLAS_TRANSPOSE_t TransA, double alpha, const gsl_matrix *A,
     }
     return 0;
 }
+
+int gsl_blas_dgemm(CBLAS_TRANSPOSE_t TransA, CBLAS_TRANSPOSE_t TransB,
+                   double alpha, const gsl_matrix *A, const gsl_matrix *B,
+                   double beta, gsl_matrix *C) {
+    /* Simplified: C = alpha * A * B + beta * C (no transpose) */
+    (void)TransA; (void)TransB;
+    if (A->size2 != B->size1 || A->size1 != C->size1 || B->size2 != C->size2)
+        return -1;
+
+    for (size_t i = 0; i < C->size1; i++) {
+        for (size_t j = 0; j < C->size2; j++) {
+            double sum = 0.0;
+            for (size_t k = 0; k < A->size2; k++) {
+                sum += A->data[i * A->tda + k] * B->data[k * B->tda + j];
+            }
+            C->data[i * C->tda + j] = alpha * sum + beta * C->data[i * C->tda + j];
+        }
+    }
+    return 0;
+}
