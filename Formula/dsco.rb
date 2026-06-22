@@ -10,10 +10,10 @@ class Dsco < Formula
   depends_on "hiredis"
   depends_on "libsodium"
   depends_on "libuv"
-  depends_on "mbedtls@3"
-  depends_on "readline"
   # macOS-only: links Security, Metal, LocalAuthentication, Accelerate, etc.
   depends_on :macos
+  depends_on "mbedtls@3"
+  depends_on "readline"
 
   uses_from_macos "curl"
   uses_from_macos "sqlite"
