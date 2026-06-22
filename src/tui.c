@@ -1710,6 +1710,16 @@ static void brl_set_fg(tui_rgb_t c) {
         fprintf(stderr, "\033[38;5;%dm", rgb_to_256(c));
 }
 
+static tui_rgb_t brl_scale_rgb(tui_rgb_t c, float scale) {
+    if (scale < 0.0f) scale = 0.0f;
+    if (scale > 1.0f) scale = 1.0f;
+    tui_rgb_t o;
+    o.r = (unsigned char)lroundf((float)c.r * scale);
+    o.g = (unsigned char)lroundf((float)c.g * scale);
+    o.b = (unsigned char)lroundf((float)c.b * scale);
+    return o;
+}
+
 /* Splash palettes — full-bright letter colour for horizontal position nx (0..1)
  * and vertical ny (0..1). Selected via DSCO_SPLASH={iris,chrome,neon,gold,fire,
  * rainbow,ice}. `iris` (vivid violet→magenta→peach) is the default. */
@@ -1894,6 +1904,25 @@ static void welcome_pixel_logo(void) {
    Actually, we just modify the existing function above. We'll do it via
    a new internal helper called from the original. */
 
+static void tui_logo_compact_mark(FILE *out, int subdued) {
+    static const char *dense[] = {
+        "⣀⣤⣶⣶⣶⣤⣀",
+        "⣿⡇⢀⣀⢸⣿⣿",
+        "⣿⣷⣾⣿⣾⣿⣿"
+    };
+    static const char *soft[] = {
+        "⣀⣤⣶⣶⣤⣀",
+        "⣿⡇⢀⡀⢸⣿",
+        "⣿⣷⣾⣿⣾⣿"
+    };
+    const char **rows = subdued ? soft : dense;
+    const char *fg = subdued ? "\033[38;5;245m" : "\033[38;5;252m";
+    fputs(fg, out);
+    fputs(rows[0], out);
+    fputs(" ", out);
+    fputs(TUI_DIM "dsco" TUI_RESET, out);
+}
+
 static void welcome_animated(const char *model, int core_count, int total_count, const char *version) {
     int w = tui_term_width();
 
@@ -1997,6 +2026,7 @@ void tui_status_bar_init(tui_status_bar_t *sb, const char *model) {
     sb->visible = false;
     sb->panel_active = false;
     sb->panel_rows = TUI_COMPOSER_PANEL_ROWS;  /* 3: top rule + input + status */
+    sb->splash_started_at = (double)time(NULL);
 }
 
 void tui_status_bar_set_model(tui_status_bar_t *sb, const char *model,
@@ -2131,6 +2161,7 @@ void tui_status_bar_render(tui_status_bar_t *sb) {
     int turn = sb->turn;
     int tools = sb->tools_used;
     bool show_clock = sb->show_clock;
+    double splash_started_at = sb->splash_started_at;
     pthread_mutex_unlock(&sb->mutex);
 
     /* Format token counts with K suffix */
@@ -2172,8 +2203,20 @@ void tui_status_bar_render(tui_status_bar_t *sb) {
     /* user@cwd  bg=24 fg=255 ; branch bg=22 fg=255 ; metrics bg=236 fg=252 */
     char left_buf[512];
     int li = 0;
+    double logo_age = difftime(time(NULL), (time_t)splash_started_at);
+    bool logo_subdued = (logo_age >= 2.0);
     li += snprintf(left_buf + li, sizeof(left_buf) - li,
-                   "\033[48;5;24m\033[38;5;255m %s@%s ", user, cwd);
+                   "\033[48;5;24m\033[38;5;255m ");
+    {
+        char logo_buf[96] = {0};
+        FILE *mf = fmemopen(logo_buf, sizeof(logo_buf), "w");
+        if (mf) {
+            tui_logo_compact_mark(mf, logo_subdued);
+            fclose(mf);
+            li += snprintf(left_buf + li, sizeof(left_buf) - li, "%s  ", logo_buf);
+        }
+    }
+    li += snprintf(left_buf + li, sizeof(left_buf) - li, "%s@%s ", user, cwd);
     if (branch[0]) {
         li += snprintf(left_buf + li, sizeof(left_buf) - li,
                        "\033[48;5;22m\033[38;5;255m  %s ", branch);
