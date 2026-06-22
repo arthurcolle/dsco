@@ -190,6 +190,13 @@ int tools_context_window(void) {
     return g_ctx_window_tokens;
 }
 
+/* Inline tool-result truncation is a context-economy measure for the agent
+ * loop (keep big results out of the model's context, stash the full copy in
+ * the VFS). It is wrong for direct human-facing dumps like `--tool-exec-raw`
+ * rendering plot/avatar art to the terminal, so that path turns it off. */
+static bool g_ctx_inline_truncation = true;
+void tools_set_inline_truncation(bool enabled) { g_ctx_inline_truncation = enabled; }
+
 static double now_sec_helper(void) {
     struct timeval tv;
     gettimeofday(&tv, NULL);
@@ -1749,6 +1756,7 @@ static void ctx_persist_and_truncate(const char *tool_name,
                                      char *result,
                                      size_t result_len) {
     if (!ok || !tool_name || !result) return;
+    if (!g_ctx_inline_truncation) return;  /* raw/human dump — keep full output */
     if (ctx_is_internal_tool(tool_name)) return;
     if (strncmp(result, "error:", 6) == 0) return;
 
@@ -23900,9 +23908,44 @@ bool tools_execute(const char *name, const char *input_json,
     return ok;
 }
 
+/* ── Governance gate: called before every tool execution ─────────────── *
+ * Exempt: the Immune System's own primitives (governance, killswitch,    *
+ * ooda, pheromone, wings_talons_status) to prevent infinite regress.     *
+ * Read-only tools: GSU cost 0 (no budget charge, still killswitch-gated).*
+ * All other tools: GSU cost 1.0 per call.                                */
+static bool tool_is_governance_exempt(const char *n) {
+    if (!n) return false;
+    return strcmp(n, "governance")          == 0 ||
+           strcmp(n, "killswitch")          == 0 ||
+           strcmp(n, "ooda")               == 0 ||
+           strcmp(n, "pheromone")          == 0 ||
+           strcmp(n, "wings_talons_status") == 0;
+}
+
 bool tools_execute_for_tier(const char *name, const char *input_json,
                             const char *tier,
                             char *result, size_t result_len) {
+    /* ── Immune System gate ───────────────────────────────────────────── */
+    if (name && g_governance.initialized && !tool_is_governance_exempt(name)) {
+        /* Determine GSU cost: read-only tools are free; writes/exec cost 1 */
+        double gsu_cost = 0.0;
+        int total = 0;
+        const tool_def_t *all = tools_get_all(&total);
+        for (int _gi = 0; _gi < total; _gi++) {
+            if (strcmp(all[_gi].name, name) == 0) {
+                gsu_cost = all[_gi].is_read_only ? 0.0 : 1.0;
+                break;
+            }
+        }
+        if (!governance_checkpoint(&g_governance, "dsco", name, gsu_cost, NULL)) {
+            snprintf(result, result_len,
+                     "{\"error\":\"governance: action blocked\",\"tool\":\"%s\",\"hint\":\"killswitch active or budget exhausted\"}",
+                     name);
+            return false;
+        }
+    }
+    /* ── End Immune System gate ───────────────────────────────────────── */
+
     const char *dispatch_name = name;
     const char *dispatch_input = input_json;
     char *owned_input = NULL;
