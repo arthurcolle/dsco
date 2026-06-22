@@ -444,6 +444,7 @@ typedef struct {
     int      turn;
     int      tools_used;
     int      panel_rows;    /* bottom panel rows: top rule + input + status (3) */
+    double   splash_started_at;
 } tui_status_bar_t;
 
 void tui_status_bar_init(tui_status_bar_t *sb, const char *model);

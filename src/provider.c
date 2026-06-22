@@ -1281,6 +1281,11 @@ static char *moonshot_build_request(provider_t *p, conversation_t *conv,
     return base;
 }
 
+static bool model_is_moonshot_compatible(const char *model) {
+    if (!model || !model[0]) return false;
+    return strstr(model, "kimi") != NULL || strstr(model, "moonshot") != NULL;
+}
+
 /* ── xAI (native api.x.ai) ─────────────────────────────────────────────
  *
  * xAI speaks the OpenAI Chat Completions dialect and adds two extras:
@@ -1539,17 +1544,25 @@ static void openai_append_tool_choice_json(jbuf_t *b, session_state_t *session,
     const char *choice = (session && session->tool_choice[0])
         ? session->tool_choice
         : "auto";
+    const char *model = session ? session->model : NULL;
+    bool is_kimi = model_is_moonshot_compatible(model);
 
     if (strcmp(choice, "auto") == 0) {
         jbuf_append(b, ",\"tool_choice\":\"auto\"");
     } else if (strcmp(choice, "any") == 0) {
-        jbuf_append(b, ",\"tool_choice\":\"required\"");
+        jbuf_append(b, is_kimi
+            ? ",\"tool_choice\":\"auto\""
+            : ",\"tool_choice\":\"required\"");
     } else if (strcmp(choice, "none") == 0) {
         jbuf_append(b, ",\"tool_choice\":\"none\"");
     } else if (strncmp(choice, "tool:", 5) == 0) {
-        jbuf_append(b, ",\"tool_choice\":{\"type\":\"function\",\"function\":{\"name\":");
-        jbuf_append_json_str(b, choice + 5);
-        jbuf_append(b, "}}");
+        if (is_kimi) {
+            jbuf_append(b, ",\"tool_choice\":\"auto\"");
+        } else {
+            jbuf_append(b, ",\"tool_choice\":{\"type\":\"function\",\"function\":{\"name\":");
+            jbuf_append_json_str(b, choice + 5);
+            jbuf_append(b, "}}");
+        }
     }
 }
 
@@ -1587,21 +1600,35 @@ static void openai_append_text_content(jbuf_t *b, message_t *m) {
 static void openai_append_assistant_msg(jbuf_t *b, message_t *m) {
     jbuf_append(b, ",{\"role\":\"assistant\"");
 
-    /* Collect text content */
+    /* Collect text content and provider-specific reasoning replay content.
+     * Moonshot/Kimi multi-step tool calling requires preserving prior
+     * reasoning_content in conversation context. We store it internally as a
+     * content block of type="thinking" and replay it on resend only for
+     * OpenAI-compatible providers that understand reasoning_content. */
     jbuf_t text;
+    jbuf_t reasoning;
     jbuf_init(&text, 1024);
+    jbuf_init(&reasoning, 1024);
     for (int j = 0; j < m->content_count; j++) {
         msg_content_t *mc = &m->content[j];
         if (mc->type && strcmp(mc->type, "text") == 0 && mc->text) {
             if (text.len > 0) jbuf_append(&text, "\n");
             jbuf_append(&text, mc->text);
+        } else if (mc->type && strcmp(mc->type, "thinking") == 0 && mc->text) {
+            if (reasoning.len > 0) jbuf_append(&reasoning, "\n");
+            jbuf_append(&reasoning, mc->text);
         }
     }
     if (text.len > 0) {
         jbuf_append(b, ",\"content\":");
         jbuf_append_json_str(b, text.data);
     }
+    if (reasoning.len > 0) {
+        jbuf_append(b, ",\"reasoning_content\":");
+        jbuf_append_json_str(b, reasoning.data);
+    }
     jbuf_free(&text);
+    jbuf_free(&reasoning);
 
     /* Emit tool_calls array for tool_use blocks */
     if (msg_has_tool_use(m)) {
@@ -1754,6 +1781,13 @@ static char *openai_build_request(provider_t *p, conversation_t *conv,
     jbuf_append(&b, ",\"max_tokens\":");
     jbuf_append_int(&b, max_tokens);
     jbuf_append(&b, ",\"stream\":true");
+
+    /* Moonshot/Kimi K2.7 Code requires thinking mode and rejects explicit
+     * non-thinking payloads. Emit provider-native thinking enabled when using
+     * Moonshot-compatible models so tool-calling + reasoning can coexist. */
+    if (model_is_moonshot_compatible(session ? session->model : NULL)) {
+        jbuf_append(&b, ",\"thinking\":{\"type\":\"enabled\"}");
+    }
 
     /* System message. Build the text once, then emit either as a plain string
      * (default) or as a single-block array carrying a cache_control breakpoint
@@ -2394,9 +2428,14 @@ static stream_result_t openai_stream(provider_t *p, const char *api_key,
          * appended to the conversation (which can later 400 on resend).
          * Promote the accumulated reasoning to a text block so the answer is
          * preserved in conv and can be surfaced to the user. */
-        if (state.block_count == 0 && state.reasoning_accum.len > 0) {
+        /* Preserve reasoning_content across turns for providers (notably
+         * Moonshot/Kimi) that require replaying prior reasoning during
+         * multi-step tool calling. Keep it as an internal 'thinking' block;
+         * request builders may serialize it provider-specifically. */
+        if (state.reasoning_accum.len > 0) {
             int bi = state.block_count++;
-            state.blocks[bi].type = safe_strdup("text");
+            state.blocks[bi].type = safe_strdup(
+                state.block_count == 1 ? "text" : "thinking");
             state.blocks[bi].text = safe_strdup(state.reasoning_accum.data);
         }
 

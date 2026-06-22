@@ -4,6 +4,7 @@
 #define __GSL_HISTOGRAM_H__
 
 #include <stdlib.h>
+#include <stdio.h>
 
 typedef struct {
     size_t n;
