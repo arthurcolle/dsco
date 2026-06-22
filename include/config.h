@@ -7,7 +7,7 @@
 #include <stddef.h>
 #include <ctype.h>
 
-#define DSCO_VERSION "1.0.0"
+#define DSCO_VERSION "1.0.1"
 
 /* Build info — set via Makefile CFLAGS */
 #ifndef BUILD_DATE
