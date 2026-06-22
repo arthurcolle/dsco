@@ -4,7 +4,9 @@
 #include "tui.h"
 #include "llm.h"
 #include "tools.h"
+#include "pets.h"
 #include "self_improve.h"
+#include "anim.h"
 #include "json_util.h"
 #include "ipc.h"
 #include "md.h"
@@ -37,6 +39,19 @@
 #include "watchdog.h"
 #include "env_guard.h"
 #include "heartbeat.h"
+#include "mesh.h"
+#include "extension/numerical_backend.h"
+#include "extension/eigen_backend.h"
+#include "extension/fftw_backend.h"
+#include "net_server.h"
+#include "peer_bootstrap.h"
+#include "cost_model.h"
+#include "plan_cache.h"
+#include "plan_optimizer.h"
+#include "dsco_dht.h"
+#if defined(HAVE_MBEDTLS) && defined(HAVE_LIBSODIUM)
+extern void dsco_net_routes_register(void *srv_opaque);
+#endif
 #include "presence.h"
 #include "touchid.h"
 #include "project.h"
@@ -68,14 +83,24 @@
 #include <sys/time.h>
 #include <libgen.h>
 #include <limits.h>
+#include <glob.h>
+#include <sys/stat.h>
+#include <execinfo.h>
 #ifdef __APPLE__
 #include <mach-o/dyld.h>
 #endif
+#include "supervisor.h"
 
 static md_renderer_t s_oneshot_md;
 
 /* --cheap mode: only ALWAYS-core tools (5) + no compact catalog */
 int g_cheap_mode = 0;
+
+static bool is_legacy_sonnet_default_model(const char *model) {
+    if (!model || !model[0]) return false;
+    const char *resolved = model_resolve_alias(model);
+    return resolved && strstr(resolved, "claude-sonnet") != NULL;
+}
 
 /* Opt-in startup timing. Enable with DSCO_PERF=1. */
 static bool   g_perf_enabled = false;
@@ -154,6 +179,15 @@ static bool         g_trace_ready = false;
 static bool         g_ipc_ready = false;
 static bool         g_startup_initialized = false;
 
+/* ── Native networking globals ──────────────────────────────────────────── */
+#if defined(HAVE_LIBSODIUM)
+mesh_node_t      *g_mesh_node  = NULL;
+#endif
+#if defined(HAVE_MBEDTLS) && defined(HAVE_LIBSODIUM)
+dsco_net_server_t *g_net_server = NULL;
+/* Forward declaration — defined in net_tool.c (also declared above near includes) */
+#endif
+
 /* Signal handler for clean IPC shutdown in sub-agent mode */
 static volatile sig_atomic_t g_main_interrupted = 0;
 
@@ -175,22 +209,151 @@ static void main_sigterm_handler(int sig) {
 static void main_zero32(uint8_t key[32]);
 static bool init_secure_store_required(uint8_t out_key[32], int *timed_out);
 
-/* Crash handler — save diagnostic info before dying */
+/* Crash handler — save diagnostic info before dying.
+ *
+ * Only async-signal-safe operations are strictly guaranteed here (write,
+ * _exit, fork). backtrace()/backtrace_symbols_fd() are practically safe and
+ * the process is dying anyway, so we accept best-effort. The supervisor
+ * (see supervisor.c) reads /tmp/dsco_crash.log and the per-pid backtrace to
+ * decide how to rescue/restart, so this is the bridge to the watcher. */
+static volatile sig_atomic_t g_in_crash = 0;
+static volatile sig_atomic_t g_alarm_fired = 0;
+static void crash_alarm_handler(int sig) { (void)sig; g_alarm_fired = 1; }
+
+static void crash_write_sig(int fd, int sig, const char *name) {
+    char buf[256];
+    int n = snprintf(buf, sizeof(buf),
+                     "\n[dsco crash] signal=%s(%d) pid=%d build=%s\n",
+                     name, sig, getpid(), GIT_HASH);
+    if (n > 0) (void)!write(fd, buf, (size_t)n);
+}
+
+/* Best-effort: spawn lldb (macOS) or gdb (Linux) to attach to the crashing
+ * process and dump a full backtrace to a per-pid report. Gated on
+ * DSCO_CRASH_DEBUGGER so it never fires in normal/unsupervised runs (and only
+ * works when anti-ptrace was skipped — see tamper_init/DSCO_DEBUG).
+ *
+ * The crashing thread is still alive inside this handler, so the debugger
+ * attaches to a LIVE target and captures the real faulting frames. We fork
+ * the debugger and block (waitpid) until it detaches before re-raising, so
+ * the process doesn't die out from under it. */
+static void crash_spawn_debugger(int crashing_pid) {
+    const char *want = getenv("DSCO_CRASH_DEBUGGER");
+    if (!want || want[0] == '0' || want[0] == '\0') return;
+
+    char pidbuf[16], report[64];
+    snprintf(pidbuf, sizeof(pidbuf), "%d", crashing_pid);
+    snprintf(report, sizeof(report), "/tmp/dsco_bt_%d.txt", crashing_pid);
+
+    pid_t dbg = fork();
+    if (dbg < 0) return;
+    if (dbg == 0) {
+        /* child: redirect output to the report file, then exec the debugger */
+        int rfd = open(report, O_WRONLY | O_CREAT | O_TRUNC, 0644);
+        if (rfd >= 0) { dup2(rfd, STDOUT_FILENO); dup2(rfd, STDERR_FILENO); close(rfd); }
+#ifdef __APPLE__
+        execlp("lldb", "lldb", "-p", pidbuf, "--batch",
+               "-o", "thread backtrace all", "-o", "register read",
+               "-o", "detach", "-o", "quit", (char *)NULL);
+        execlp("gdb", "gdb", "-p", pidbuf, "-batch", "-nx",
+               "-ex", "thread apply all bt full", "-ex", "detach", "-ex", "quit",
+               (char *)NULL);
+#else
+        execlp("gdb", "gdb", "-p", pidbuf, "-batch", "-nx",
+               "-ex", "thread apply all bt full",
+               "-ex", "info registers", "-ex", "detach", "-ex", "quit",
+               (char *)NULL);
+        execlp("lldb", "lldb", "-p", pidbuf, "--batch",
+               "-o", "thread backtrace all", "-o", "detach", "-o", "quit",
+               (char *)NULL);
+#endif
+        _exit(127);  /* no debugger installed */
+    }
+    /* parent (crashing): wait for the debugger to finish, but don't hang
+     * forever if it stalls — SIGALRM breaks the waitpid. */
+    alarm(20);
+    int st;
+    while (waitpid(dbg, &st, 0) < 0 && errno == EINTR && !g_alarm_fired)
+        ;
+    alarm(0);
+}
+
 static void crash_handler(int sig) {
-    /* Async-signal-safe only: write, _exit */
+    if (g_in_crash) { signal(sig, SIG_DFL); raise(sig); return; }
+    g_in_crash = 1;
+
     const char *name = sig == SIGSEGV ? "SIGSEGV" :
                        sig == SIGBUS  ? "SIGBUS"  :
-                       sig == SIGABRT ? "SIGABRT" : "UNKNOWN";
+                       sig == SIGABRT ? "SIGABRT" :
+                       sig == SIGFPE  ? "SIGFPE"  :
+                       sig == SIGILL  ? "SIGILL"  : "UNKNOWN";
+
+    /* In-process backtrace via execinfo — works without a debugger or ptrace. */
+    void *frames[64];
+    int nframes = backtrace(frames, 64);
+
     int fd = open("/tmp/dsco_crash.log", O_WRONLY | O_CREAT | O_APPEND, 0644);
     if (fd >= 0) {
-        char buf[256];
-        int n = snprintf(buf, sizeof(buf), "\n[dsco crash] signal=%s(%d) pid=%d\n", name, sig, getpid());
-        if (n > 0) write(fd, buf, (size_t)n);
+        crash_write_sig(fd, sig, name);
+        if (nframes > 0) backtrace_symbols_fd(frames, nframes, fd);
         close(fd);
     }
-    /* Re-raise with default handler */
+    /* Also to stderr so a foreground user / supervisor sees it immediately. */
+    crash_write_sig(STDERR_FILENO, sig, name);
+    if (nframes > 0) backtrace_symbols_fd(frames, nframes, STDERR_FILENO);
+
+    /* Optional richer postmortem via an attached debugger. */
+    crash_spawn_debugger(getpid());
+
+    /* Re-raise with default handler so the OS produces a core / the
+     * supervisor's waitpid() sees WIFSIGNALED with the real signal. */
     signal(sig, SIG_DFL);
     raise(sig);
+}
+
+/* Register the full set of fatal-signal crash handlers. Idempotent.
+ *
+ * The fatal handlers run on a dedicated alternate stack (SA_ONSTACK + a
+ * sigaltstack installed below). Without this, a stack-overflow SIGSEGV — or
+ * any fault that left the thread stack unusable — would re-fault the instant
+ * the handler pushed a frame, producing the silent "no crash log at all"
+ * failure mode: the OS kills us before /tmp/dsco_crash.log is ever written.
+ * The alt stack guarantees the in-process backtrace path always runs. */
+void main_install_crash_handlers(void) {
+    /* Install the alternate signal stack once. 64 KiB comfortably holds the
+     * handler + backtrace()/backtrace_symbols_fd() working set. Static so it
+     * outlives this call; aligned for the platform. */
+    static _Alignas(16) char alt_stack[64 * 1024];
+    static int alt_installed = 0;
+    if (!alt_installed) {
+        stack_t ss;
+        memset(&ss, 0, sizeof(ss));
+        ss.ss_sp    = alt_stack;
+        ss.ss_size  = sizeof(alt_stack);
+        ss.ss_flags = 0;
+        if (sigaltstack(&ss, NULL) == 0) alt_installed = 1;
+    }
+
+    struct sigaction sa_crash;
+    memset(&sa_crash, 0, sizeof(sa_crash));
+    sa_crash.sa_handler = crash_handler;
+    sigemptyset(&sa_crash.sa_mask);
+    sa_crash.sa_flags = alt_installed ? SA_ONSTACK : 0;
+    sigaction(SIGSEGV, &sa_crash, NULL);
+    sigaction(SIGBUS,  &sa_crash, NULL);
+    sigaction(SIGABRT, &sa_crash, NULL);
+    sigaction(SIGFPE,  &sa_crash, NULL);
+    sigaction(SIGILL,  &sa_crash, NULL);
+
+    /* Non-restarting SIGALRM so the crash-time debugger wait can time out.
+     * Kept on the normal stack — it only fires during the (already-running)
+     * crash handler's waitpid, where the stack is known-good. */
+    struct sigaction sa_alrm;
+    memset(&sa_alrm, 0, sizeof(sa_alrm));
+    sa_alrm.sa_handler = crash_alarm_handler;
+    sigemptyset(&sa_alrm.sa_mask);
+    sa_alrm.sa_flags = 0;  /* no SA_RESTART */
+    sigaction(SIGALRM, &sa_alrm, NULL);
 }
 
 static void main_atexit_handler(void) {
@@ -220,6 +383,19 @@ static void main_atexit_handler(void) {
         ipc_shutdown();
         g_ipc_ready = false;
     }
+
+
+    /* ── Cost model + plan cache flush ─────────────────────────────────── */
+    cost_model_flush();
+    plan_cache_flush();
+    /* ── Native networking teardown ─────────────────────────────────────── */
+#if defined(HAVE_LIBSODIUM)
+    peer_bootstrap_stop();
+    if (g_mesh_node) { mesh_node_destroy(g_mesh_node); g_mesh_node = NULL; }
+#endif
+#if defined(HAVE_MBEDTLS) && defined(HAVE_LIBSODIUM)
+    if (g_net_server) { netsrv_destroy(g_net_server); g_net_server = NULL; }
+#endif
 }
 
 static void init_vos_subsystems(void) {
@@ -401,7 +577,8 @@ static dsco_caps_t main_plan_startup_caps(int argc, char **argv,
 
     if (main_argv_has(argc, argv, "-i") ||
         main_argv_has(argc, argv, "--interactive") ||
-        main_argv_has(argc, argv, "--ui")) {
+        main_argv_has(argc, argv, "--ui") ||
+        main_argv_has(argc, argv, "-ui")) {
         caps |= DSCO_CAP_TUI;
     }
 
@@ -426,6 +603,11 @@ void dsco_startup_init(dsco_profile_t profile, dsco_caps_t caps) {
     if (profile == DSCO_PROFILE_WORKER)
         caps &= ~(DSCO_CAP_SECURITY | DSCO_CAP_TRUST);
     perf_set_startup_context(profile, caps);
+
+    /* Register extension backends early so skills/tools can resolve capabilities. */
+    numerical_backend_register(&numerical_backend_gsl);
+    eigen_backend_init();
+    fftw_backend_init();
 
     bool is_worker = profile == DSCO_PROFILE_WORKER;
 
@@ -475,6 +657,83 @@ void dsco_startup_init(dsco_profile_t profile, dsco_caps_t caps) {
         env_guard_init();
         audit_log("startup", is_worker ? "dsco worker init" : "dsco init");
         if (!is_worker) heartbeat_start();
+
+        /* ── Priority 1/3/4: plan optimizer, cost model, plan cache ── */
+        if (!is_worker) {
+            cost_model_init();
+            plan_cache_init();
+        }
+
+#if defined(HAVE_LIBSODIUM)
+        if (!is_worker) {
+            /* ── Mesh P2P layer ─────────────────────────────────────── */
+            uint16_t mesh_port = 7337;
+            const char *mp_env = getenv("DSCO_MESH_PORT");
+            if (mp_env && atoi(mp_env) > 0) mesh_port = (uint16_t)atoi(mp_env);
+
+            g_mesh_node = mesh_node_create(mesh_port);
+            if (g_mesh_node) {
+                /* Callbacks wired in net_tool.c via dsco_net_node() */
+                if (mesh_node_start(g_mesh_node)) {
+                    audit_log("net", "mesh started");
+                    /* Bootstrap: discover peers via mDNS + ~/.dsco/peers.txt */
+                    peer_bootstrap_init(g_mesh_node, mesh_port);
+
+                    /* ── DHT peer discovery (opt-in via DSCO_DHT_SWARM) ──────
+                     * Joins a private Kademlia overlay; discovered peers are
+                     * written to ~/.dsco/peers.txt and dialed over the mesh. */
+                    const char *swarm = getenv("DSCO_DHT_SWARM");
+                    if (swarm && *swarm) {
+                        uint16_t dht_port = 7600;
+                        const char *dp = getenv("DSCO_DHT_PORT");
+                        if (dp && atoi(dp) > 0) dht_port = (uint16_t)atoi(dp);
+                        dsco_dht_config_t dc = {
+                            .udp_port  = dht_port,
+                            .mesh_port = mesh_port,
+                            .swarm_key = swarm,
+                        };
+                        if (dsco_dht_start(&dc))
+                            audit_log("net", "dht started");
+                    }
+                } else {
+                    audit_log("net", "mesh start failed");
+                    mesh_node_destroy(g_mesh_node);
+                    g_mesh_node = NULL;
+                }
+            }
+        }
+#endif /* HAVE_LIBSODIUM */
+
+#if defined(HAVE_MBEDTLS) && defined(HAVE_LIBSODIUM)
+        if (!is_worker) {
+            /* ── HTTP/TLS API server ─────────────────────────────────── */
+            uint16_t http_port = NETSRV_DEFAULT_PORT;
+            const char *hp_env = getenv("DSCO_HTTP_PORT");
+            if (hp_env && atoi(hp_env) > 0) http_port = (uint16_t)atoi(hp_env);
+
+            /* Auto-generate TLS cert if not present */
+            char cert_path[512], key_path[512];
+            const char *home = getenv("HOME");
+            snprintf(cert_path, sizeof(cert_path), "%s/.dsco/server.crt", home ? home : "/tmp");
+            snprintf(key_path,  sizeof(key_path),  "%s/.dsco/server.key", home ? home : "/tmp");
+
+            if (access(cert_path, F_OK) != 0)
+                netsrv_gen_tls_cert(cert_path, key_path, "dsco-node");
+
+            g_net_server = netsrv_create(http_port, true, cert_path, key_path);
+            if (g_net_server) {
+                /* Routes registered by dsco_net_routes_register() in tools.c */
+                dsco_net_routes_register(g_net_server);
+                if (netsrv_start(g_net_server)) {
+                    audit_log("net", "http server started");
+                } else {
+                    audit_log("net", "http server start failed");
+                    netsrv_destroy(g_net_server);
+                    g_net_server = NULL;
+                }
+            }
+        }
+#endif /* HAVE_MBEDTLS && HAVE_LIBSODIUM */
         perf_mark("env_heartbeat");
     }
 
@@ -583,7 +842,7 @@ static const native_provider_t NATIVE_PROVIDERS[] = {
       CAP_TOOLS|CAP_MULTITURN|CAP_STREAMING|CAP_VISION|CAP_THINKING|CAP_JSON|CAP_CACHE, 4 },
     { "openai",     "OpenAI API",                "OPENAI_API_KEY",      "gpt-4.1",
       CAP_TOOLS|CAP_MULTITURN|CAP_STREAMING|CAP_VISION|CAP_JSON, 3 },
-    { "openrouter", "OpenRouter (multi-model)",   "OPENROUTER_API_KEY", "anthropic/claude-opus-4-6",
+    { "openrouter", "OpenRouter (multi-model)",   "OPENROUTER_API_KEY", "z-ai/glm-5.2",
       CAP_TOOLS|CAP_MULTITURN|CAP_STREAMING|CAP_VISION|CAP_JSON, 4 },
     { "google",     "Google Gemini API",         "GOOGLE_API_KEY",      "gemini-2.5-pro",
       CAP_TOOLS|CAP_MULTITURN|CAP_STREAMING|CAP_VISION|CAP_JSON, 3 },
@@ -603,7 +862,7 @@ static const native_provider_t NATIVE_PROVIDERS[] = {
       CAP_TOOLS|CAP_MULTITURN|CAP_STREAMING, 2 },
     { "cohere",     "Cohere API",                "COHERE_API_KEY",      "command-a-03-2025",
       CAP_TOOLS|CAP_MULTITURN|CAP_STREAMING|CAP_JSON, 3 },
-    { "moonshot",   "Moonshot Kimi API",         "MOONSHOT_API_KEY",    "kimi-k2.5",
+    { "moonshot",   "Moonshot Kimi API",         "MOONSHOT_API_KEY",    "kimi-k2.7-code-highspeed",
       CAP_TOOLS|CAP_MULTITURN|CAP_STREAMING|CAP_VISION|CAP_THINKING|CAP_JSON, 4 },
     { NULL, NULL, NULL, NULL, 0, 0 }
 };
@@ -1233,7 +1492,8 @@ static int run_provider_smoke(const char *self_path, bool full) {
         { "xAI",              SMOKE_NATIVE,     "xai",        "grok-4-fast",                 false },
         { "Together",         SMOKE_NATIVE,     "together",   "meta-llama/Llama-4-Maverick-17B-128E-Instruct-FP8", true },
         { "Cerebras",         SMOKE_NATIVE,     "cerebras",   "qwen-3-235b-a22b-instruct-2507", false },
-        { "Moonshot",         SMOKE_NATIVE,     "moonshot",   "kimi-k2.5",                   false },
+        { "Moonshot HS",      SMOKE_NATIVE,     "moonshot",   "kimi-k2.7-code-highspeed",     false },
+        { "Moonshot",         SMOKE_NATIVE,     "moonshot",   "kimi-k2.7-code",              false },
         { "Mistral",          SMOKE_NATIVE,     "mistral",    "mistral-large-latest",        true  },
         { "Cohere",           SMOKE_NATIVE,     "cohere",     "command-a-03-2025",           true  },
         { "Perplexity",       SMOKE_NATIVE,     "perplexity", "sonar-pro",                   true  },
@@ -1247,14 +1507,15 @@ static int run_provider_smoke(const char *self_path, bool full) {
         { "OR Google Flash",  SMOKE_OPENROUTER, NULL,         "google/gemini-2.5-flash",     true  },
         { "OR Google 3 Pro",  SMOKE_OPENROUTER, NULL,         "google/gemini-3.1-pro-preview", true },
         { "OR DeepSeek",      SMOKE_OPENROUTER, NULL,         "deepseek/deepseek-chat",      true  },
-        { "OR Moonshot",      SMOKE_OPENROUTER, NULL,         "moonshotai/kimi-k2.5",        true  },
+        { "OR Moonshot",      SMOKE_OPENROUTER, NULL,         "moonshotai/kimi-k2.7-code",   true  },
+        { "OR Moonshot HS",   SMOKE_OPENROUTER, NULL,         "moonshotai/kimi-k2.7-code-highspeed", true },
         { "OR Moonshot Think",SMOKE_OPENROUTER, NULL,         "moonshotai/kimi-k2-thinking", true  },
         { "OR Qwen",          SMOKE_OPENROUTER, NULL,         "qwen/qwen3.5-plus-02-15",     true  },
         { "OR Qwen Coder",    SMOKE_OPENROUTER, NULL,         "qwen/qwen3-coder-next",       true  },
         { "OR Mistral",       SMOKE_OPENROUTER, NULL,         "mistralai/mistral-large-2512", true },
         { "OR Codestral",     SMOKE_OPENROUTER, NULL,         "mistralai/codestral-2508",    true  },
         { "OR Cohere",        SMOKE_OPENROUTER, NULL,         "cohere/command-a",            true  },
-        { "OR GLM",           SMOKE_OPENROUTER, NULL,         "z-ai/glm-5",                  true  },
+        { "OR GLM",           SMOKE_OPENROUTER, NULL,         "z-ai/glm-5.2",                true  },
         { "OR Llama",         SMOKE_OPENROUTER, NULL,         "meta-llama/llama-4-maverick", true  },
         { "OR MiniMax",       SMOKE_OPENROUTER, NULL,         "minimax/minimax-m2.5",        true  },
         { "OR Nova",          SMOKE_OPENROUTER, NULL,         "amazon/nova-premier-v1",      true  },
@@ -1525,7 +1786,7 @@ static int run_login_flow(void) {
 
     const char *pname   = pidx == 0 ? "claude"                 : "codex";
     const char *plabel  = pidx == 0 ? "Claude Code (Anthropic)": "ChatGPT Codex (OpenAI)";
-    const char *pmodel  = pidx == 0 ? "claude-sonnet-4-6"      : "";
+    const char *pmodel  = "";
     const char *penvkey = pidx == 0 ? "ANTHROPIC_API_KEY"      : "OPENAI_API_KEY";
     bool pbin   = pidx == 0 ? claude_bin  : codex_bin;
     bool pready = pidx == 0 ? claude_auth : codex_auth;
@@ -1651,7 +1912,7 @@ static void usage(const char *prog) {
         "  --timeline-port PORT     Timeline webserver port (default: 8421)\n"
         "  --timeline-instance ID   Filter timeline to one instance ID\n"
         "  -O, --orchestrate      Orchestrator mode: Haiku routes to specialist workers\n"
-        "  -M, --worker-model M   Worker model for orchestrate mode (default: sonnet)\n"
+        "  -M, --worker-model M   Worker model for orchestrate mode (default: kimi-k2.7-code-highspeed)\n"
         "  --topology NAME        Run/select an agent topology\n"
         "  --topology-auto        Auto-pick a topology for the task\n"
         "  --topology-list        List available topologies\n"
@@ -1781,6 +2042,7 @@ static void json_print_escaped(FILE *out, const char *s) {
         else if (*p == '\n') fputs("\\n", out);
         else if (*p == '\r') fputs("\\r", out);
         else if (*p == '\t') fputs("\\t", out);
+        else if ((unsigned char)*p < 0x20) fprintf(out, "\\u%04x", (unsigned char)*p);
         else                 fputc(*p, out);
     }
 }
@@ -1891,6 +2153,119 @@ static void main_tools_init_for_runtime(dsco_profile_t profile) {
 }
 
 /* Return -1 when not handled, otherwise the process exit code. */
+/* ── Live multi-project pet dashboard ──────────────────────────────────────
+ * Polls the shared IPC agent registry (which every dsco process/project writes
+ * to) and renders one companion pet per agent across all projects, refreshing
+ * ~2×/s in an alternate screen. This is the "manage hundreds of projects /
+ * thousands of agents" view: the roster caps to the terminal height and reports
+ * the overflow, sorted working-first. Read-only — never registers itself. */
+static volatile sig_atomic_t g_pets_watch_stop = 0;
+static void pets_watch_sigint(int sig) { (void)sig; g_pets_watch_stop = 1; }
+
+static uint32_t pets_id_hash(const char *s) {
+    uint32_t h = 2166136261u;
+    for (; s && *s; s++) { h ^= (unsigned char)*s; h *= 16777619u; }
+    return h & 0x7fffffffu;
+}
+
+static const char *pets_resolve_ipc_db(int argc, char **argv) {
+    if (argc >= 4 && argv[3][0]) return argv[3];          /* explicit path */
+    const char *env = getenv("DSCO_IPC_DB");
+    if (env && env[0]) return env;
+    /* else the most-recently-touched session DB across both default locations */
+    static char newest[1024];
+    newest[0] = '\0';
+    char home_pat[1024];
+    const char *home = getenv("HOME");
+    snprintf(home_pat, sizeof(home_pat), "%s/.dsco/ipc/dsco_ipc_*.db",
+             home ? home : "/tmp");
+    const char *patterns[] = { home_pat, "/tmp/dsco_ipc_*.db" };
+    time_t best = 0;
+    for (int p = 0; p < 2; p++) {
+        glob_t g;
+        if (glob(patterns[p], 0, NULL, &g) != 0) continue;
+        for (size_t i = 0; i < g.gl_pathc; i++) {
+            struct stat st;
+            if (stat(g.gl_pathv[i], &st) == 0 && st.st_mtime >= best) {
+                best = st.st_mtime;
+                snprintf(newest, sizeof(newest), "%s", g.gl_pathv[i]);
+            }
+        }
+        globfree(&g);
+    }
+    return newest[0] ? newest : NULL;
+}
+
+static pet_status_t pets_map_ipc(ipc_agent_status_t s) {
+    switch (s) {
+        case IPC_AGENT_STARTING: return PET_ST_PENDING;
+        case IPC_AGENT_WORKING:  return PET_ST_WORKING;
+        case IPC_AGENT_DONE:     return PET_ST_DONE;
+        case IPC_AGENT_ERROR:    return PET_ST_ERROR;
+        case IPC_AGENT_DEAD:     return PET_ST_ERROR;
+        case IPC_AGENT_IDLE:     return PET_ST_IDLE;
+        default:                 return PET_ST_IDLE;
+    }
+}
+
+static int run_pets_watch(int argc, char **argv) {
+    const char *db = pets_resolve_ipc_db(argc, argv);
+    ipc_init(db, NULL);   /* open the shared DB; never ipc_register → invisible */
+
+    struct termios orig, raw;
+    bool tty = isatty(STDIN_FILENO);
+    if (tty && tcgetattr(STDIN_FILENO, &orig) == 0) {
+        raw = orig;
+        raw.c_lflag &= ~((tcflag_t)(ICANON | ECHO));  /* keep ISIG so Ctrl-C works */
+        raw.c_cc[VMIN] = 0;
+        raw.c_cc[VTIME] = 0;
+        tcsetattr(STDIN_FILENO, TCSANOW, &raw);
+    }
+    struct sigaction sa, old;
+    memset(&sa, 0, sizeof(sa));
+    sa.sa_handler = pets_watch_sigint;
+    sigaction(SIGINT, &sa, &old);
+    fputs("\033[?1049h\033[?25l", stdout);   /* enter alt screen, hide cursor */
+
+    pet_roster_t roster;
+    pet_roster_init(&roster);
+
+    while (!g_pets_watch_stop) {
+        static ipc_agent_info_t agents[1024];
+        int n = ipc_list_agents(agents, 1024);
+        for (int i = 0; i < n; i++) {
+            int key = (int)pets_id_hash(agents[i].id);
+            const char *lbl = agents[i].current_task[0] ? agents[i].current_task
+                            : (agents[i].role[0] ? agents[i].role : agents[i].id);
+            pet_status_t st = pets_map_ipc(agents[i].status);
+            pet_roster_upsert(&roster, key, agents[i].depth, lbl, agents[i].id, st);
+            pet_roster_set_status(&roster, key, st, 0);
+        }
+
+        int h = tui_term_height();
+        if (h < 8) h = 24;
+        fputs("\033[2J\033[H", stdout);
+        printf("  \033[1m\033[96mdsco · live agent pets\033[0m   \033[2m%s\033[0m\n\n",
+               db ? db : "(no ipc db — set DSCO_IPC_DB or pass a path)");
+        pet_roster_render(stdout, &roster, tui_term_width(), h - 6);
+        printf("\n  \033[2mrefresh 0.5s · q / Ctrl-C to quit · %d agents in registry\033[0m\n", n);
+        fflush(stdout);
+
+        struct pollfd pfd = { .fd = STDIN_FILENO, .events = POLLIN, .revents = 0 };
+        if (poll(&pfd, 1, 500) > 0 && (pfd.revents & POLLIN)) {
+            char c;
+            if (read(STDIN_FILENO, &c, 1) == 1 && (c == 'q' || c == 27)) break;
+        }
+    }
+
+    fputs("\033[?25h\033[?1049l", stdout);   /* show cursor, leave alt screen */
+    fflush(stdout);
+    if (tty) tcsetattr(STDIN_FILENO, TCSANOW, &orig);
+    sigaction(SIGINT, &old, NULL);
+    pet_roster_free(&roster);
+    return 0;
+}
+
 static int maybe_run_early_fast_path(int argc, char **argv,
                                      dsco_profile_t profile) {
     for (int i = 1; i < argc; i++) {
@@ -1905,6 +2280,35 @@ static int maybe_run_early_fast_path(int argc, char **argv,
             print_tools_json_fast(profile);
             perf_finish("fast exit");
             return 0;
+        }
+        if (strcmp(argv[i], "--codebase-stats") == 0) {
+            extern int introspect_print_codebase_stats(FILE *);
+            introspect_print_codebase_stats(stdout);
+            perf_finish("fast exit");
+            return 0;
+        }
+        if (strcmp(argv[i], "--selves") == 0) {
+            extern int introspect_run_selves(FILE *, int, const char *);
+            int nselves = 4;
+            const char *prompt = NULL;
+            if (i + 1 < argc) {
+                char *end = NULL;
+                long v = strtol(argv[i+1], &end, 10);
+                if (end && *end == 0 && v > 0 && i + 2 < argc) {
+                    nselves = (int)v;
+                    prompt = argv[i+2];
+                } else {
+                    prompt = argv[i+1];
+                }
+            }
+            if (!prompt) {
+                fprintf(stderr, "usage: dsco --selves [N] <prompt>\n");
+                perf_finish("fast error");
+                return 1;
+            }
+            int rc = introspect_run_selves(stdout, nselves, prompt);
+            perf_finish("fast exit");
+            return rc;
         }
         if (strcmp(argv[i], "--tool-exec") == 0) {
             if (i + 2 >= argc) {
@@ -1923,6 +2327,35 @@ static int maybe_run_early_fast_path(int argc, char **argv,
 
 int main(int argc, char **argv) {
     perf_init();
+
+    /* Fault-injection hook for exercising the crash handler + supervisor end
+     * to end. Completely inert unless DSCO_TEST_CRASH is set. Installs the
+     * crash handlers itself so the in-process backtrace path is exercised.
+     * Optional "@N" suffix crashes only on the Nth supervised generation so
+     * the supervisor's restart/backoff/recovery can be observed live. */
+    {
+        const char *tc = getenv("DSCO_TEST_CRASH");
+        bool is_supervise_launcher = argc >= 2 &&
+            (strcmp(argv[1], "supervise") == 0 || strcmp(argv[1], "--supervise") == 0);
+        if (tc && tc[0] && !is_supervise_launcher) {
+            const char *at = strchr(tc, '@');
+            bool fire = true;
+            if (at) {
+                const char *gen = getenv("DSCO_SUPERVISED");
+                fire = gen && atoi(gen) == atoi(at + 1);
+            }
+            if (fire) {
+                main_install_crash_handlers();
+                fprintf(stderr, "[dsco] DSCO_TEST_CRASH=%s — injecting fault "
+                        "(gen %s)\n", tc, getenv("DSCO_SUPERVISED") ? getenv("DSCO_SUPERVISED") : "0");
+                if (strncmp(tc, "abort", 5) == 0) abort();
+                if (strncmp(tc, "exit", 4) == 0)  return 42;
+                if (strncmp(tc, "kill", 4) == 0)  raise(SIGKILL);  /* mimic OOM/jetsam */
+                volatile int *p = NULL;  /* default: SIGSEGV */
+                *p = 1;
+            }
+        }
+    }
     dsco_profile_t runtime_profile = main_runtime_profile(argc, argv);
     dsco_caps_t startup_caps = main_plan_startup_caps(argc, argv, runtime_profile);
     perf_set_startup_context(runtime_profile, startup_caps);
@@ -1933,11 +2366,50 @@ int main(int argc, char **argv) {
     if (argc >= 2 && strcmp(argv[1], "tools") == 0)
         return toolmgmt_cli(argc, argv);
 
+    /* `dsco pets [gallery|roll|roster] [seed]` renders companion sprites
+     * straight to the terminal (real newlines + ANSI), unlike `--tool-exec`
+     * which wraps the art in escaped JSON. */
+    if (argc >= 2 && strcmp(argv[1], "pets") == 0) {
+        const char *action = argc >= 3 ? argv[2] : "gallery";
+        if (strcmp(action, "watch") == 0) {
+            return run_pets_watch(argc, argv);
+        } else if (strcmp(action, "roll") == 0) {
+            const char *seed = argc >= 4 ? argv[3] : "anon";
+            pet_t p;
+            memset(&p, 0, sizeof(p));
+            pet_roll(seed, &p.bones);
+            snprintf(p.name, sizeof(p.name), "%s", seed);
+            p.status = PET_ST_IDLE;
+            pet_card_print(stdout, &p, 0);
+        } else if (strcmp(action, "roster") == 0) {
+            pet_roster_render(stdout, pet_roster_global(), tui_term_width(), 0);
+        } else {
+            pet_gallery_print(stdout, 0);
+        }
+        return 0;
+    }
+
     /* `dsco connect …` drives the future-proof baseline connector: a single
      * seam every external system plugs into (tools today; chains, credit,
      * robotics, neural/haptic next). Dispatched first for the same reasons. */
     if (argc >= 2 && strcmp(argv[1], "connect") == 0)
         return connector_cli(argc, argv);
+
+    /* `dsco supervise [args...]` (or `dsco --supervise [args...]`) runs the
+     * real dsco as a managed child: a higher-order watcher that catches every
+     * crash/kill (incl. OOM SIGKILL), captures a backtrace via the debugger,
+     * and restarts/rescues the session in realtime. The child gets
+     * DSCO_NO_SUPERVISE=1 so it never recurses. */
+    if (!getenv("DSCO_NO_SUPERVISE") &&
+        argc >= 2 && (strcmp(argv[1], "supervise") == 0 ||
+                      strcmp(argv[1], "--supervise") == 0)) {
+        /* Hand the supervisor a clean argv whose [0] is the dsco binary and
+         * whose tail is the post-"supervise" args (overwrite argv[1], which
+         * held "supervise", with the binary path). child_argv stays NULL-
+         * terminated because argv[argc] == NULL. */
+        argv[1] = argv[0];
+        return supervisor_run(argc - 1, argv + 1);
+    }
 
     /* Trivial info flags must short-circuit BEFORE any keychain / secure-store
      * touch. Otherwise wrappers (web server, scripts) calling `dsco --version`
@@ -1958,6 +2430,11 @@ int main(int argc, char **argv) {
     int fast_rc = maybe_run_early_fast_path(argc, argv, runtime_profile);
     if (fast_rc >= 0) return fast_rc;
     dsco_startup_init(runtime_profile, startup_caps);
+
+    /* Catch fatal signals on the primary path too (previously only sub-agents
+     * installed these). On a real crash we dump a backtrace + crash log that
+     * the supervisor reads to rescue the session. */
+    main_install_crash_handlers();
 
     /* Bare `dsco` in a TTY drops into the interactive REPL.
      * Non-TTY (pipe/redirect) keeps the old behavior of printing usage + error,
@@ -2019,6 +2496,9 @@ int main(int argc, char **argv) {
         if (strcmp(argv[i], "--status") == 0) { arg_status = true; break; }
     }
 
+    const char *pre_setup_model = getenv("DSCO_MODEL");
+    bool model_preexisted_setup = pre_setup_model && pre_setup_model[0];
+
     int loaded_env_count = dsco_setup_load_saved_env();
     char bootstrap_msg[512];
     if (!arg_requests_setup && !arg_skip_bootstrap && !arg_login && !arg_status) {
@@ -2035,6 +2515,12 @@ int main(int argc, char **argv) {
     const char *api_key = NULL;
     const char *env_model = getenv("DSCO_MODEL");
     bool model_from_env = env_model && env_model[0];
+    if (model_from_env && !model_preexisted_setup &&
+        is_legacy_sonnet_default_model(env_model)) {
+        unsetenv("DSCO_MODEL");
+        env_model = NULL;
+        model_from_env = false;
+    }
     const char *model = model_from_env ? env_model : DEFAULT_MODEL;
     char *oneshot_prompt = NULL;
     bool timeline_server_mode = false;
@@ -2121,6 +2607,45 @@ int main(int argc, char **argv) {
             free(oneshot_prompt);
             return 0;
         }
+        if (strcmp(argv[i], "--anim") == 0) {
+            /* --anim <kind|json> [json] — run a direct-to-terminal cell
+             * animation (life|rule|attractor|rain). Animation needs real time
+             * and a TTY, so it lives here on the direct path, not as a tool.
+             *   ./dsco --anim life
+             *   ./dsco --anim '{"kind":"life","pattern":"gun"}'
+             *   ./dsco --anim rule '{"rule":30}' */
+            char jbuf[2048];
+            const char *a1 = (i + 1 < argc) ? argv[++i] : "life";
+            const char *spec = jbuf;
+            if (a1[0] == '{') {
+                spec = a1;
+            } else if (i + 1 < argc && argv[i + 1][0] == '{') {
+                const char *extra = argv[++i];
+                snprintf(jbuf, sizeof jbuf, "{\"kind\":\"%s\",%s", a1, extra + 1);
+            } else {
+                snprintf(jbuf, sizeof jbuf, "{\"kind\":\"%s\"}", a1);
+            }
+            int frames = anim_dispatch(spec);
+            free(oneshot_prompt);
+            return frames >= 0 ? 0 : 1;
+        }
+        if (strcmp(argv[i], "--tool-exec-raw") == 0 && i + 2 < argc) {
+            /* --tool-exec-raw <name> <json> — execute a single tool and write its
+             * result straight to the terminal (real newlines + ANSI), unescaped.
+             * For visual tools (plot, pets, …) whose output is art, not data,
+             * `--tool-exec`'s JSON escaping renders newlines as literal "\n". */
+            const char *tname = argv[++i];
+            const char *tjson = argv[++i];
+            main_tools_init_for_runtime(runtime_profile);
+            char result[256 * 1024] = {0};
+            bool ok = tools_execute(tname, tjson, result, sizeof(result));
+            (void)write(STDOUT_FILENO, result, strlen(result));
+            size_t rlen = strlen(result);
+            if (rlen == 0 || result[rlen - 1] != '\n')
+                (void)write(STDOUT_FILENO, "\n", 1);
+            free(oneshot_prompt);
+            return ok ? 0 : 1;
+        }
         if (strcmp(argv[i], "--tool-exec") == 0 && i + 2 < argc) {
             /* --tool-exec <name> <json>  — execute a single tool and print result */
             const char *tname  = argv[++i];
@@ -2188,9 +2713,9 @@ int main(int argc, char **argv) {
             topology_show_mode = true;
             if (i + 1 < argc && argv[i+1][0] != '-')
                 topology_show_name = argv[++i];
-        } else if (strcmp(argv[i], "--ui") == 0) {
+        } else if (strcmp(argv[i], "--ui") == 0 || strcmp(argv[i], "-ui") == 0) {
             ui_mode = true;
-            /* Optional port: --ui 8080 */
+            /* Optional port: --ui 8080 | -ui 8080 */
             if (i + 1 < argc && argv[i+1][0] != '-') {
                 int p = atoi(argv[i+1]);
                 if (p > 0 && p <= 65535) { ui_port = p; i++; }
@@ -2228,8 +2753,8 @@ int main(int argc, char **argv) {
             oneshot_prompt[0] = '\0';
             for (int j = i; j < argc; j++) {
                 if (strcmp(argv[j], "--") == 0) break;
-                if (j > i) strcat(oneshot_prompt, " ");
-                strcat(oneshot_prompt, argv[j]);
+                if (j > i) snprintf(oneshot_prompt + strlen(oneshot_prompt), sizeof(oneshot_prompt) - strlen(oneshot_prompt), " ");
+                snprintf(oneshot_prompt + strlen(oneshot_prompt), sizeof(oneshot_prompt) - strlen(oneshot_prompt), "%s", argv[j]);
             }
             /* find -- after prompt if we haven't already */
             for (int j = i; j < argc; j++) {
@@ -2401,15 +2926,30 @@ int main(int argc, char **argv) {
             "\033[0m\n", server_path, port_str, cwd_str);
 
         free(oneshot_prompt);
-        execlp("python3", "python3", server_path,
-               "--port", port_str,
-               "--dir", cwd_str,
-               "--model", model,
-               "--open",
-               (char *)NULL);
+
+        /* Prefer the project-local venv (has fastapi, anthropic, etc.); fall
+         * back to system python3 if the venv doesn't exist. */
+        char venv_python[PATH_MAX];
+        snprintf(venv_python, sizeof(venv_python), "%s/.web-venv/bin/python",
+                 cwd_str);
+        if (access(venv_python, X_OK) == 0) {
+            execlp(venv_python, venv_python, server_path,
+                   "--port", port_str,
+                   "--dir", cwd_str,
+                   "--model", model,
+                   "--open",
+                   (char *)NULL);
+        } else {
+            execlp("python3", "python3", server_path,
+                   "--port", port_str,
+                   "--dir", cwd_str,
+                   "--model", model,
+                   "--open",
+                   (char *)NULL);
+        }
         /* Only reached on exec failure */
         perror("failed to launch web UI (is python3 + fastapi installed?)");
-        fprintf(stderr, "  install deps: pip install -r web/requirements.txt\n");
+        fprintf(stderr, "  install deps: uv pip install --python .web-venv/bin/python -r web/requirements.txt\n");
         return 1;
     }
 
@@ -2847,8 +3387,26 @@ native_path:
         int turns = 0;
         bool oneshot_had_error = false;
         tools_loop_control_reset();
-        int oneshot_base_turn_limit = dsco_max_agent_turns();
-        while (turns < tools_loop_control_effective_max_turns(oneshot_base_turn_limit)) {
+        /* Agentic headless loop: run to the goal, bounded only by the cost
+         * budget and the runaway backstop — not an arbitrary turn count. Since
+         * there is no human to interrupt here, the cost gate below is the
+         * primary stop. DSCO_BUDGET (dollars, 0 = unlimited) controls it;
+         * defaults to $5 to match the interactive session cap. */
+        int oneshot_hard_ceiling = dsco_hard_turn_ceiling();
+        double oneshot_budget = 5.0;
+        {
+            const char *b = getenv("DSCO_BUDGET");
+            if (b && b[0]) oneshot_budget = atof(b);
+        }
+        while (turns < oneshot_hard_ceiling && !g_main_interrupted) {
+            if (oneshot_budget > 0 &&
+                oneshot_session.total_reported_cost_usd >= oneshot_budget) {
+                fprintf(stderr, "error: cost budget exceeded: $%.4f / $%.4f "
+                        "(raise via DSCO_BUDGET)\n",
+                        oneshot_session.total_reported_cost_usd, oneshot_budget);
+                oneshot_had_error = true;
+                break;
+            }
             turns++;
             md_reset(&s_oneshot_md);
 
@@ -2954,9 +3512,7 @@ native_path:
             sigaction(SIGTERM, &sa_term, NULL);
 
             /* Crash handlers — log diagnostics before dying */
-            signal(SIGSEGV, crash_handler);
-            signal(SIGBUS,  crash_handler);
-            signal(SIGABRT, crash_handler);
+            main_install_crash_handlers();
 
             const char *depth_s = getenv("DSCO_SWARM_DEPTH");
             ipc_register(getenv("DSCO_PARENT_INSTANCE_ID"),
@@ -2977,9 +3533,23 @@ native_path:
                 int t2 = 0;
                 bool task_ok = true;
                 tools_loop_control_reset();
-                int task_base_turn_limit = dsco_max_agent_turns();
-                while (t2 < tools_loop_control_effective_max_turns(task_base_turn_limit) &&
-                       !g_main_interrupted) {
+                /* Agentic per-task loop: bounded by cost budget + runaway
+                 * backstop, not a fixed turn count (see oneshot loop above). */
+                int task_hard_ceiling = dsco_hard_turn_ceiling();
+                double task_budget = 5.0;
+                {
+                    const char *b = getenv("DSCO_BUDGET");
+                    if (b && b[0]) task_budget = atof(b);
+                }
+                while (t2 < task_hard_ceiling && !g_main_interrupted) {
+                    if (task_budget > 0 &&
+                        oneshot_session.total_reported_cost_usd >= task_budget) {
+                        fprintf(stderr, "error: cost budget exceeded: $%.4f / "
+                                "$%.4f (raise via DSCO_BUDGET)\n",
+                                oneshot_session.total_reported_cost_usd, task_budget);
+                        task_ok = false;
+                        break;
+                    }
                     t2++;
                     md_reset(&s_oneshot_md);
                     char *req2 = oneshot_provider

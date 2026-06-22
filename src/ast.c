@@ -228,6 +228,7 @@ ast_file_t *ast_parse_file(const char *path) {
                     while (*p && *p != end_delim && *p != '\n') p++;
                     int len = (int)(p - start);
                     char *inc = malloc(len + 1);
+                    if (!inc) { free(src); ast_free_file(f); return NULL; }
                     memcpy(inc, start, len);
                     inc[len] = '\0';
 
@@ -418,12 +419,14 @@ ast_file_t *ast_parse_file(const char *path) {
                     /* Name */
                     int nlen = (int)(name_end - name_start);
                     node.name = malloc(nlen + 1);
+                    if (!node.name) goto ast_oom;
                     memcpy(node.name, name_start, nlen);
                     node.name[nlen] = '\0';
 
                     /* Return type */
                     if (rt_len > 0) {
                         node.return_type = malloc(rt_len + 1);
+                        if (!node.return_type) { free(node.name); goto ast_oom; }
                         memcpy(node.return_type, return_type_start, rt_len);
                         node.return_type[rt_len] = '\0';
                     }
@@ -432,6 +435,7 @@ ast_file_t *ast_parse_file(const char *path) {
                     int plen = (int)(params_end - paren);
                     if (plen > 0 && plen < 500) {
                         node.params = malloc(plen + 1);
+                        if (!node.params) { free(node.name); free(node.return_type); goto ast_oom; }
                         memcpy(node.params, paren, plen);
                         node.params[plen] = '\0';
                     }
@@ -440,6 +444,7 @@ ast_file_t *ast_parse_file(const char *path) {
                     size_t body_len = (size_t)(body_end - body_start);
                     int preview_len = body_len < 200 ? (int)body_len : 200;
                     node.body_preview = malloc(preview_len + 1);
+                    if (!node.body_preview) { free(node.name); free(node.return_type); free(node.params); goto ast_oom; }
                     memcpy(node.body_preview, body_start, preview_len);
                     node.body_preview[preview_len] = '\0';
 
@@ -481,6 +486,11 @@ ast_file_t *ast_parse_file(const char *path) {
 
     free(src);
     return f;
+
+ast_oom:
+    free(src);
+    ast_free_file(f);
+    return NULL;
 }
 
 void ast_free_file(ast_file_t *f) {
