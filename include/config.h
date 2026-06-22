@@ -203,6 +203,7 @@ static const model_info_t MODEL_REGISTRY[] = {
      * any slug not listed here still resolves with real context/pricing once
      * the background fetch lands. */
     { "moonshotai/kimi-k2.7-code", "moonshotai/kimi-k2.7-code", 262144, 16384, 0.74, 3.50, 0.15, 0, 1 },
+    { "moonshotai/kimi-k2.7-code-highspeed", "moonshotai/kimi-k2.7-code-highspeed", 262144, 16384, 0.45, 8.00, 0.19, 0, 1 },
     { "kimi",         "moonshotai/kimi-k2.7-code",     262144, 16384,  0.74,  3.50, 0.15, 0, 1 },
     { "kimi-code",    "moonshotai/kimi-k2.7-code",     262144, 16384,  0.74,  3.50, 0.15, 0, 1 },
     { "or-kimi-code", "moonshotai/kimi-k2.7-code",     262144, 16384,  0.74,  3.50, 0.15, 0, 1 },
@@ -211,7 +212,10 @@ static const model_info_t MODEL_REGISTRY[] = {
     { "kimi-think",   "moonshotai/kimi-k2-thinking",    131072, 16384,  0.47,  2.00, 0, 0, 1 },
     /* ── Moonshot Kimi (native platform.moonshot.ai) ─────────────────── */
     { "kimi-k2.7-code", "kimi-k2.7-code",              262144, 32768,  0.60,  3.00, 0.10, 0, 1 },
+    { "kimi-k2.7-code-highspeed", "kimi-k2.7-code-highspeed", 262144, 32768, 0.60, 3.00, 0.10, 0, 1 },
+    { "kimi-hs",      "kimi-k2.7-code-highspeed",      262144, 32768,  0.60,  3.00, 0.10, 0, 1 },
     { "mk27-code",    "kimi-k2.7-code",                262144, 32768,  0.60,  3.00, 0.10, 0, 1 },
+    { "mk27-hs",      "kimi-k2.7-code-highspeed",      262144, 32768,  0.60,  3.00, 0.10, 0, 1 },
     { "mk25",         "kimi-k2.5",                      262144, 32768,  0.60,  3.00, 0.10, 0, 1 },
     { "mk2t",         "kimi-k2-turbo-preview",          262144, 32768,  0.60,  3.00, 0.10, 0, 0 },
     { "mk2-think",    "kimi-k2-thinking",               262144, 32768,  0.60,  3.00, 0.10, 0, 1 },
