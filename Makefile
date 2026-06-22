@@ -56,10 +56,19 @@ SRC_NAMES = main.c agent.c llm.c tools.c json_util.c ast.c swarm.c tui.c \
 	fingerprint.c trust.c toolmgmt.c connector.c openrouter_cache.c \
 	startup.c plot.c self_improve.c pets.c img_util.c supervisor.c \
 	graphsub_client.c graphsub_tools.c \
+	extension/backend.c extension/numerical_gsl.c extension/skill_requirements.c \
+	extension/eigen_backend.c extension/fftw_backend.c extension/backend_selftest.c \
 	$(OPTIONAL_SRCS)
 TEST_SRC_NAMES = test.c
 
 SRCS = $(addprefix $(SRC_DIR)/, $(SRC_NAMES))
+# GSL vendored sources (compiled as separate objects)
+GSL_OBJS = $(GSL_SRCS:gsl/src/%.c=$(OBJ_DIR)/gsl_%.o)
+GSL_DEBUG_OBJS = $(GSL_SRCS:gsl/src/%.c=$(DEBUG_OBJ_DIR)/gsl_%.o)
+GSL_TEST_OBJS = $(GSL_SRCS:gsl/src/%.c=$(TEST_OBJ_DIR)/gsl_%.o)
+GSL_COVERAGE_OBJS = $(GSL_SRCS:gsl/src/%.c=$(TEST_COVERAGE_OBJ_DIR)/gsl_%.o)
+GSL_ASAN_OBJS = $(GSL_SRCS:gsl/src/%.c=$(ASAN_OBJ_DIR)/gsl_%.o)
+GSL_UBSAN_OBJS = $(GSL_SRCS:gsl/src/%.c=$(UBSAN_OBJ_DIR)/gsl_%.o)
 # Test links against all src objects except main.c and agent.c
 LIB_SRCS = $(filter-out $(SRC_DIR)/main.c $(SRC_DIR)/agent.c $(SRC_DIR)/orchestrator.c, $(SRCS))
 
@@ -154,8 +163,9 @@ endif
 ifeq ($(wildcard gsl/gsl/gsl_version.h),gsl/gsl/gsl_version.h)
 GSL_CFLAGS := -Igsl -DHAVE_GSL_VENDORED
 GSL_LIBS   :=
+GSL_SRCS   := $(wildcard gsl/src/*.c)
 BASE_CFLAGS += $(GSL_CFLAGS)
-$(info Using vendored GSL)
+$(info Using vendored GSL ($(words $(GSL_SRCS)) source files))
 else
 GSL_CFLAGS := $(shell pkg-config --cflags gsl 2>/dev/null)
 GSL_LIBS   := $(shell pkg-config --libs   gsl 2>/dev/null)
@@ -227,10 +237,10 @@ dev: $(DEBUG_TARGET)
 dsc: dsc.c
 	$(CC) -O2 -std=c2y $(C2Y_WARNING_FLAGS) -D_POSIX_C_SOURCE=200809L -o $@ $< -lcurl -lreadline
 
-$(DEBUG_TARGET): $(DEBUG_OBJS)
+$(DEBUG_TARGET): $(DEBUG_OBJS) $(GSL_DEBUG_OBJS)
 	$(CC) $(DEBUG_CFLAGS) -o $@ $^ $(LDFLAGS) $(LDLIBS)
 
-$(TARGET): $(OBJS)
+$(TARGET): $(OBJS) $(GSL_OBJS)
 	$(CC) $(CFLAGS) -o $@ $^ $(LDFLAGS) $(RELEASE_LDFLAGS) $(LDLIBS)
 
 # dsco-new is a twin of dsco — same code, same composer, distinct name.
@@ -243,28 +253,55 @@ $(LITE_TARGET): $(SRC_DIR)/lite_main.c $(INC_DIR)/config.h
 
 # Source compilation rules
 $(OBJ_DIR)/%.o: $(SRC_DIR)/%.c | $(OBJ_DIR)
+	@mkdir -p $(@D)
 	$(CC) $(CFLAGS) -c -o $@ $<
 
 # Objective-C sources (macOS only)
 $(OBJ_DIR)/%.o: $(SRC_DIR)/%.m | $(OBJ_DIR)
+	@mkdir -p $(@D)
 	$(CC) $(CFLAGS) -fobjc-arc -x objective-c -c -o $@ $<
 
+# Vendored GSL source compilation rules
+$(OBJ_DIR)/gsl_%.o: gsl/src/%.c | $(OBJ_DIR)
+	$(CC) $(CFLAGS) -c -o $@ $<
+
+$(DEBUG_OBJ_DIR)/gsl_%.o: gsl/src/%.c | $(DEBUG_OBJ_DIR)
+	$(CC) $(DEBUG_CFLAGS) -c -o $@ $<
+
+$(TEST_OBJ_DIR)/gsl_%.o: gsl/src/%.c | $(TEST_OBJ_DIR)
+	$(CC) $(TEST_CFLAGS) -c -o $@ $<
+
+$(TEST_COVERAGE_OBJ_DIR)/gsl_%.o: gsl/src/%.c | $(TEST_COVERAGE_OBJ_DIR)
+	$(CC) $(COVERAGE_CFLAGS) -c -o $@ $<
+
+$(ASAN_OBJ_DIR)/gsl_%.o: gsl/src/%.c | $(ASAN_OBJ_DIR)
+	$(CC) $(ASAN_CFLAGS) -c -o $@ $<
+
+$(UBSAN_OBJ_DIR)/gsl_%.o: gsl/src/%.c | $(UBSAN_OBJ_DIR)
+	$(CC) $(UBSAN_CFLAGS) -c -o $@ $<
+
 $(DEBUG_OBJ_DIR)/%.o: $(SRC_DIR)/%.c | $(DEBUG_OBJ_DIR)
+	@mkdir -p $(@D)
 	$(CC) $(DEBUG_CFLAGS) -c -o $@ $<
 
 $(DEBUG_OBJ_DIR)/%.o: $(SRC_DIR)/%.m | $(DEBUG_OBJ_DIR)
+	@mkdir -p $(@D)
 	$(CC) $(DEBUG_CFLAGS) -fobjc-arc -x objective-c -c -o $@ $<
 
 $(ASAN_OBJ_DIR)/%.o: $(SRC_DIR)/%.c | $(ASAN_OBJ_DIR)
+	@mkdir -p $(@D)
 	$(CC) $(ASAN_CFLAGS) -c -o $@ $<
 
 $(ASAN_OBJ_DIR)/%.o: $(SRC_DIR)/%.m | $(ASAN_OBJ_DIR)
+	@mkdir -p $(@D)
 	$(CC) $(ASAN_CFLAGS) -fobjc-arc -x objective-c -c -o $@ $<
 
 $(UBSAN_OBJ_DIR)/%.o: $(SRC_DIR)/%.c | $(UBSAN_OBJ_DIR)
+	@mkdir -p $(@D)
 	$(CC) $(UBSAN_CFLAGS) -c -o $@ $<
 
 $(UBSAN_OBJ_DIR)/%.o: $(SRC_DIR)/%.m | $(UBSAN_OBJ_DIR)
+	@mkdir -p $(@D)
 	$(CC) $(UBSAN_CFLAGS) -fobjc-arc -x objective-c -c -o $@ $<
 
 # Test compilation rules — test sources from tests/, lib sources from src/
@@ -272,40 +309,49 @@ $(TEST_OBJ_DIR)/test.o: $(TEST_DIR)/test.c | $(TEST_OBJ_DIR)
 	$(CC) $(TEST_CFLAGS) -c -o $@ $<
 
 $(TEST_OBJ_DIR)/%.o: $(SRC_DIR)/%.c | $(TEST_OBJ_DIR)
+	@mkdir -p $(@D)
 	$(CC) $(TEST_CFLAGS) -c -o $@ $<
 
 $(TEST_OBJ_DIR)/%.o: $(SRC_DIR)/%.m | $(TEST_OBJ_DIR)
+	@mkdir -p $(@D)
 	$(CC) $(TEST_CFLAGS) -fobjc-arc -x objective-c -c -o $@ $<
 
 $(TEST_COVERAGE_OBJ_DIR)/test.o: $(TEST_DIR)/test.c | $(TEST_COVERAGE_OBJ_DIR)
 	$(CC) $(COVERAGE_CFLAGS) -c -o $@ $<
 
 $(TEST_COVERAGE_OBJ_DIR)/%.o: $(SRC_DIR)/%.c | $(TEST_COVERAGE_OBJ_DIR)
+	@mkdir -p $(@D)
 	$(CC) $(COVERAGE_CFLAGS) -c -o $@ $<
 
 $(TEST_COVERAGE_OBJ_DIR)/%.o: $(SRC_DIR)/%.m | $(TEST_COVERAGE_OBJ_DIR)
+	@mkdir -p $(@D)
 	$(CC) $(COVERAGE_CFLAGS) -fobjc-arc -x objective-c -c -o $@ $<
 
 $(ASAN_TEST_OBJ_DIR)/test.o: $(TEST_DIR)/test.c | $(ASAN_TEST_OBJ_DIR)
 	$(CC) $(ASAN_CFLAGS) -c -o $@ $<
 
 $(ASAN_TEST_OBJ_DIR)/%.o: $(SRC_DIR)/%.c | $(ASAN_TEST_OBJ_DIR)
+	@mkdir -p $(@D)
 	$(CC) $(ASAN_CFLAGS) -c -o $@ $<
 
 $(ASAN_TEST_OBJ_DIR)/%.o: $(SRC_DIR)/%.m | $(ASAN_TEST_OBJ_DIR)
+	@mkdir -p $(@D)
 	$(CC) $(ASAN_CFLAGS) -fobjc-arc -x objective-c -c -o $@ $<
 
 $(UBSAN_TEST_OBJ_DIR)/test.o: $(TEST_DIR)/test.c | $(UBSAN_TEST_OBJ_DIR)
 	$(CC) $(UBSAN_CFLAGS) -c -o $@ $<
 
 $(UBSAN_TEST_OBJ_DIR)/%.o: $(SRC_DIR)/%.c | $(UBSAN_TEST_OBJ_DIR)
+	@mkdir -p $(@D)
 	$(CC) $(UBSAN_CFLAGS) -c -o $@ $<
 
 $(UBSAN_TEST_OBJ_DIR)/%.o: $(SRC_DIR)/%.m | $(UBSAN_TEST_OBJ_DIR)
+	@mkdir -p $(@D)
 	$(CC) $(UBSAN_CFLAGS) -fobjc-arc -x objective-c -c -o $@ $<
 
 $(OBJ_DIR) $(DEBUG_OBJ_DIR) $(TEST_OBJ_DIR) $(TEST_COVERAGE_OBJ_DIR) $(ASAN_OBJ_DIR) $(UBSAN_OBJ_DIR) $(ASAN_TEST_OBJ_DIR) $(UBSAN_TEST_OBJ_DIR):
 	mkdir -p $@
+	mkdir -p $@/extension
 
 # Header dependency tracking: -MMD -MP (in BASE_CFLAGS) emits a .d file next to
 # each .o listing the headers it included. Including them here makes any object
@@ -317,13 +363,13 @@ $(OBJ_DIR) $(DEBUG_OBJ_DIR) $(TEST_OBJ_DIR) $(TEST_COVERAGE_OBJ_DIR) $(ASAN_OBJ_
 test: test_runner
 	./test_runner
 
-test_runner: $(TEST_OBJS)
+test_runner: $(TEST_OBJS) $(GSL_TEST_OBJS)
 	$(CC) $(TEST_CFLAGS) -o $@ $^ $(LDFLAGS) $(LDLIBS)
 
 coverage: coverage_runner
 	./coverage_runner
 
-coverage_runner: $(TEST_COVERAGE_OBJS)
+coverage_runner: $(TEST_COVERAGE_OBJS) $(GSL_COVERAGE_OBJS)
 	$(CC) $(COVERAGE_CFLAGS) -o $@ $^ $(LDFLAGS) $(COVERAGE_LDFLAGS) $(LDLIBS)
 
 asan: $(TARGET)-asan
@@ -339,13 +385,13 @@ $(TARGET)-ubsan: $(UBSAN_OBJS)
 asan-test: asan-test_runner
 	ASAN_OPTIONS=$(ASAN_RUNTIME_OPTIONS) ./asan-test_runner
 
-asan-test_runner: $(ASAN_TEST_OBJS)
+asan-test_runner: $(ASAN_TEST_OBJS) $(GSL_ASAN_OBJS)
 	$(CC) $(ASAN_CFLAGS) -o $@ $^ $(LDFLAGS) $(ASAN_LDFLAGS) $(LDLIBS)
 
 ubsan-test: ubsan-test_runner
 	UBSAN_OPTIONS=print_stacktrace=1:halt_on_error=1 ./ubsan-test_runner
 
-ubsan-test_runner: $(UBSAN_TEST_OBJS)
+ubsan-test_runner: $(UBSAN_TEST_OBJS) $(GSL_UBSAN_OBJS)
 	$(CC) $(UBSAN_CFLAGS) -o $@ $^ $(LDFLAGS) $(UBSAN_LDFLAGS) $(LDLIBS)
 
 format:
