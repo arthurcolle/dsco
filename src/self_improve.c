@@ -1050,6 +1050,7 @@ void self_improve_record_strategy_result(self_improve_t *si,
                                          bool success,
                                          int grip_escalations,
                                          double elapsed_s) {
+    (void)goal_type; (void)elapsed_s;
     if (!si || !si->initialized || !strategy) return;
 
     if (success && grip_escalations <= 1) {
@@ -1062,6 +1063,7 @@ void self_improve_record_tournament_result(self_improve_t *si,
                                            int competitors,
                                            double margin,
                                            double elapsed_s) {
+    (void)elapsed_s;
     if (!si || !si->initialized || !winner_strategy) return;
 
     if (margin > 0.15) {

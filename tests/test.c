@@ -1361,8 +1361,10 @@ static void test_openrouter_request_includes_external_tools_and_tool_choice(void
            "should include external tool");
     ASSERT(strstr(req, "\"tool_choice\":\"required\"") != NULL,
            "should map any -> required");
-    ASSERT(strstr(req, "\"thinking\":{\"type\":\"disabled\"}") != NULL,
-           "kimi openrouter request should disable thinking for tool mode");
+    /* thinking:type=disabled was removed because kimi-k2.7-code rejects it.
+       In tool mode, thinking is disabled by omission. Verify it's NOT present. */
+    ASSERT(strstr(req, "\"thinking\":{\"type\":\"disabled\"}") == NULL,
+           "kimi openrouter request should NOT emit type=disabled (rejected by kimi-k2.7-code)");
 
     free(req);
     provider_free(p);
