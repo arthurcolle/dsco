@@ -28,9 +28,7 @@ volatile int g_interrupted = 0;
 vm_t g_vm = {0};
 double g_cost_budget = 0.0;
 int g_cheap_mode = 0;
-
-/* agent.c defines this; we stub it here since agent.c is excluded from lib */
-volatile int g_agent_exit_requested = 0;
+/* NOTE: g_agent_exit_requested is defined in tools.o (linked) — do NOT stub. */
 
 /* ── Minimal test harness ──────────────────────────────────────────────── */
 
