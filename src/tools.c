@@ -26206,6 +26206,12 @@ int tools_get_core_count(void) {
 /* ── Jina v4 embeddings: static vectors + runtime query embedding ───── */
 #include "tool_embeddings.h"
 
+/* Embedded blob compiled directly into the binary (src/tool_embeddings_data.c).
+ * Eliminates the runtime file dependency. Users can still override via
+ * DSCO_TOOL_EMBEDDINGS_FILE env var or placing a newer .bin in the search path. */
+extern const unsigned char tool_embeddings_embedded[];
+extern const size_t        tool_embeddings_embedded_len;
+
 /* Static embeddings loaded from .bin file (1024d × 364 tools) */
 static float *g_emb_vectors = NULL; /* flat array: [TOOL_EMB_COUNT * TOOL_EMB_DIM] */
 static int g_emb_count = 0;
@@ -26301,6 +26307,28 @@ static void ensure_embeddings_loaded(void) {
             char candidate[PATH_MAX];
             snprintf(candidate, sizeof(candidate), "%s/.dsco/tool_embeddings.bin", home);
             tool_embeddings_try_open(&fp, loaded_path, sizeof(loaded_path), candidate);
+        }
+    }
+
+    /* ---- Embedded blob fallback (zero file-system dependency) ----------- */
+    if (!fp && tool_embeddings_embedded_len > 8) {
+        const unsigned char *blob = tool_embeddings_embedded;
+        uint32_t hdr0, hdr1;
+        memcpy(&hdr0, blob,     sizeof(uint32_t));
+        memcpy(&hdr1, blob + 4, sizeof(uint32_t));
+        int emb_cnt = (int)hdr0;
+        int emb_dim = (int)hdr1;
+        if (emb_dim > 1024) emb_dim = 1024;
+        size_t total_f = (size_t)emb_cnt * (size_t)emb_dim;
+        size_t expected = 8 + total_f * sizeof(float);
+        if (expected <= tool_embeddings_embedded_len && total_f > 0) {
+            g_emb_vectors = safe_malloc(total_f * sizeof(float));
+            memcpy(g_emb_vectors, blob + 8, total_f * sizeof(float));
+            g_emb_count = emb_cnt;
+            g_emb_dim   = emb_dim;
+            fprintf(stderr, "  \033[2memb: %d tools \xc3\x97 %dd (built-in)\033[0m\n",
+                    g_emb_count, g_emb_dim);
+            return;
         }
     }
 
