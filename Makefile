@@ -45,7 +45,7 @@ TARGET = dsco
 LITE_TARGET = dsco-lite
 DEBUG_TARGET = $(TARGET)-debug
 
-SRC_NAMES = main.c agent.c llm.c tools.c json_util.c ast.c swarm.c tui.c \
+SRC_NAMES = main.c agent.c llm.c tools.c json_util.c ast.c swarm.c tui.c env_config.c \
 	md.c baseline.c setup.c crypto.c eval.c pipeline.c plugin.c \
 			semantic.c ipc.c mcp.c mcp_names.c provider_profiles.c provider.c integrations.c error.c trace.c task_profile.c \
 	output_guard.c topology.c workspace.c plan.c stateful_atoms.c recovery.c router.c \
@@ -65,6 +65,7 @@ SRC_NAMES = main.c agent.c llm.c tools.c json_util.c ast.c swarm.c tui.c \
 	introspect.c \
 	learned_cost.c \
 	session_memory.c \
+	provider_pool.c \
 	$(OPTIONAL_SRCS)
 TEST_SRC_NAMES = test.c
 
@@ -273,6 +274,23 @@ bake_data: | $(OBJ_DIR)
 $(OBJ_DIR)/generated_%.o: src/generated/%.c | bake_data $(OBJ_DIR)
 	$(CC) $(CFLAGS) -c -o $@ $<
 
+# Pizza-box generated objects for the test/coverage/sanitizer trees. The test
+# object lists inherit GENERATED_OBJS (via LIB_OBJS), so each test variant needs
+# its own rule to compile src/generated/*.c into its build dir. Without these,
+# `make test` and the standalone test_* targets fail with
+# "No rule to make target build/test/generated_*.o".
+$(TEST_OBJ_DIR)/generated_%.o: src/generated/%.c | bake_data $(TEST_OBJ_DIR)
+	$(CC) $(TEST_CFLAGS) -c -o $@ $<
+
+$(TEST_COVERAGE_OBJ_DIR)/generated_%.o: src/generated/%.c | bake_data $(TEST_COVERAGE_OBJ_DIR)
+	$(CC) $(COVERAGE_CFLAGS) -c -o $@ $<
+
+$(ASAN_TEST_OBJ_DIR)/generated_%.o: src/generated/%.c | bake_data $(ASAN_TEST_OBJ_DIR)
+	$(CC) $(ASAN_CFLAGS) -c -o $@ $<
+
+$(UBSAN_TEST_OBJ_DIR)/generated_%.o: src/generated/%.c | bake_data $(UBSAN_TEST_OBJ_DIR)
+	$(CC) $(UBSAN_CFLAGS) -c -o $@ $<
+
 $(OBJ_DIR)/%.o: $(SRC_DIR)/%.c | $(OBJ_DIR)
 	@mkdir -p $(@D)
 	$(CC) $(CFLAGS) -c -o $@ $<
@@ -422,6 +440,58 @@ test_stateful_atoms: $(TEST_OBJ_DIR)/test_stateful_atoms.o \
 
 $(TEST_OBJ_DIR)/test_stateful_atoms.o: $(TEST_DIR)/test_stateful_atoms.c | $(TEST_OBJ_DIR)
 	$(CC) $(TEST_CFLAGS) -c -o $@ $<
+
+# Priority standalone test binaries (P1/P3/P4/P5/P6). Each test_*.c has its own
+# main() (so they can't fold into test_runner) and a self-contained stub for any
+# runtime globals it needs. They therefore link a MINIMAL object set — only the
+# module under test plus its direct deps — to avoid duplicate-symbol clashes
+# with tools.o/agent.o that define the same globals. Mirrors test_stateful_atoms.
+
+$(TEST_OBJ_DIR)/test_plan_optimizer.o: $(TEST_DIR)/test_plan_optimizer.c | $(TEST_OBJ_DIR)
+	$(CC) $(TEST_CFLAGS) -c -o $@ $<
+# plan_optimizer pulls in topology→swarm→provider→plan_cache; link full lib set.
+test_plan_optimizer: $(TEST_OBJ_DIR)/test_plan_optimizer.o \
+	$(LIB_OBJS:$(OBJ_DIR)/%=$(TEST_OBJ_DIR)/%) $(GSL_TEST_OBJS)
+	$(CC) $(TEST_CFLAGS) -o $@ $^ $(LDFLAGS) $(LDLIBS)
+
+$(TEST_OBJ_DIR)/test_plan_cache.o: $(TEST_DIR)/test_plan_cache.c | $(TEST_OBJ_DIR)
+	$(CC) $(TEST_CFLAGS) -c -o $@ $<
+test_plan_cache: $(TEST_OBJ_DIR)/test_plan_cache.o \
+	$(TEST_OBJ_DIR)/plan_cache.o $(TEST_OBJ_DIR)/json_util.o \
+	$(TEST_OBJ_DIR)/arena_alloc.o
+	$(CC) $(TEST_CFLAGS) -o $@ $^ $(LDFLAGS) -lm
+
+$(TEST_OBJ_DIR)/test_learned_cost.o: $(TEST_DIR)/test_learned_cost.c | $(TEST_OBJ_DIR)
+	$(CC) $(TEST_CFLAGS) -c -o $@ $<
+test_learned_cost: $(TEST_OBJ_DIR)/test_learned_cost.o \
+	$(TEST_OBJ_DIR)/learned_cost.o
+	$(CC) $(TEST_CFLAGS) -o $@ $^ $(LDFLAGS) -lm
+
+$(TEST_OBJ_DIR)/test_session_memory.o: $(TEST_DIR)/test_session_memory.c | $(TEST_OBJ_DIR)
+	$(CC) $(TEST_CFLAGS) -c -o $@ $<
+# session_memory pulls in vecstore + tools_embed_text; link full lib set.
+test_session_memory: $(TEST_OBJ_DIR)/test_session_memory.o \
+	$(LIB_OBJS:$(OBJ_DIR)/%=$(TEST_OBJ_DIR)/%) $(GSL_TEST_OBJS)
+	$(CC) $(TEST_CFLAGS) -o $@ $^ $(LDFLAGS) $(LDLIBS)
+
+$(TEST_OBJ_DIR)/test_control_flow.o: $(TEST_DIR)/test_control_flow.c | $(TEST_OBJ_DIR)
+	$(CC) $(TEST_CFLAGS) -c -o $@ $<
+test_control_flow: $(TEST_OBJ_DIR)/test_control_flow.o \
+	$(TEST_OBJ_DIR)/control_flow.o $(TEST_OBJ_DIR)/plan.o \
+	$(TEST_OBJ_DIR)/json_util.o $(TEST_OBJ_DIR)/arena_alloc.o
+	$(CC) $(TEST_CFLAGS) -o $@ $^ $(LDFLAGS) -lm
+
+# Build + run every standalone priority test in sequence.
+.PHONY: test_priorities
+test_priorities: test_recovery test_stateful_atoms test_plan_optimizer test_plan_cache \
+	test_learned_cost test_session_memory test_control_flow
+	./test_recovery
+	./test_stateful_atoms
+	./test_plan_optimizer
+	./test_plan_cache
+	./test_learned_cost
+	./test_session_memory
+	./test_control_flow
 
 coverage: coverage_runner
 	./coverage_runner
