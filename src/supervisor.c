@@ -337,6 +337,44 @@ static int system_mem_pressure(void) {
 /* ============================================================
  * Fleet registry: cross-session dynamic memory budget
  * ============================================================ */
+
+/* Remove this supervisor's entry from the fleet registry on clean exit. */
+static void fleet_remove(void) {
+    int lfd = open(DSCO_FLEET_LOCK_PATH, O_RDWR|O_CREAT, 0600);
+    if (lfd < 0) return;
+    if (flock(lfd, LOCK_EX|LOCK_NB) != 0) { close(lfd); return; }
+    int jfd = open(DSCO_FLEET_JSON_PATH, O_RDONLY);
+    char buf[16384]; buf[0]='\0';
+    if (jfd>=0){ssize_t n=read(jfd,buf,sizeof(buf)-1);if(n>0)buf[n]='\0';close(jfd);}
+    char mykey[32]; snprintf(mykey,sizeof(mykey),"\"sup%d\"",(int)getpid());
+    /* Rebuild JSON without our entry */
+    char out[16384]; int op=0; out[op++]='{';
+    bool first = true;
+    if (buf[0]=='{') {
+        const char*p=buf+1;
+        while(*p && op<(int)sizeof(out)-256) {
+            const char*q=strchr(p,'"'); if(!q) break;
+            if(strncmp(q,mykey,strlen(mykey))==0){
+                const char*ob=strchr(q,'{');const char*cb=ob?strchr(ob,'}'):NULL;
+                p=cb?cb+1:q+strlen(q);if(*p==',')p++;continue;
+            }
+            const char*ob=strchr(q,'{');const char*cb=ob?strchr(ob,'}'):NULL;
+            if(!ob||!cb) break;
+            const char*tsp=strstr(ob,"\"ts\":");long long ts=0;
+            if(tsp)ts=strtoll(tsp+6,NULL,10);
+            if(ts>0&&(long long)time(NULL)-ts>60){p=cb+1;if(*p==',')p++;continue;}
+            if(!first)out[op++]=',';
+            first=false;
+            int span=(int)(cb-q)+1;
+            if(op+span<(int)sizeof(out)-2){memcpy(out+op,q,span);op+=span;}
+            p=cb+1;if(*p==',')p++;
+        }
+    }
+    if(op<(int)sizeof(out)-1)out[op++]='}';out[op]='\0';
+    jfd=open(DSCO_FLEET_JSON_PATH,O_WRONLY|O_CREAT|O_TRUNC,0644);
+    if(jfd>=0){(void)write(jfd,out,op);close(jfd);}
+    flock(lfd,LOCK_UN);close(lfd);
+}
 typedef struct{uint64_t ewma_mb;uint64_t peak_mb;int sessions;}fleet_totals_t;
 static fleet_totals_t fleet_read_totals(void){
     fleet_totals_t t={0,0,0};
@@ -1003,9 +1041,11 @@ int supervisor_run(int child_argc, char **child_argv) {
                                (int)child, crash_class_name(cls),
                                now_monotonic() - last_start_time,
                                (unsigned long long)(peak_rss >> 20));
+                fleet_remove();
                 return 0;
             }
-            fprintf(stderr, "[supervisor] child exited cleanly but restart=permanent — relaunching.\n");
+            fleet_remove();
+                fprintf(stderr, "[supervisor] child exited cleanly but restart=permanent — relaunching.\n");
             supervisor_log("event=child_exit child_pid=%d class=%s restart=permanent peak_rss_mb=%llu",
                            (int)child, crash_class_name(cls),
                            (unsigned long long)(peak_rss >> 20));
