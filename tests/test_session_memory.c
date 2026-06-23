@@ -13,10 +13,18 @@
 
 #include "session_memory.h"
 #include "json_util.h"
+#include "vm.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
+
+/* Stubs for globals defined in objects excluded from this test link
+ * (agent.o, main.o). g_agent_exit_requested lives in tools.o (linked) → omit. */
+volatile int g_interrupted = 0;
+double g_cost_budget = 0.0;
+int g_cheap_mode = 0;
+vm_t g_vm = {0};
 
 /* ── Minimal test harness ─────────────────────────────────────────────── */
 

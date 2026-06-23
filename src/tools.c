@@ -58,6 +58,7 @@
 #include <sys/time.h>
 #include <signal.h>
 #include <stdint.h>
+#include <inttypes.h>
 #include <ctype.h>
 #include <math.h>
 #include <limits.h>
@@ -7783,11 +7784,11 @@ static bool tool_spawn_agent(const char *input, char *result, size_t rlen) {
 
     /* Check hierarchical depth limit */
     int depth = current_swarm_depth();
-    if (depth >= SWARM_MAX_DEPTH) {
+    if (depth >= dsco_swarm_max_depth()) {
         snprintf(result, rlen,
                  "{\"error\":\"max swarm depth %d reached (current depth: %d). "
                  "Execute the task directly instead of delegating.\"}",
-                 SWARM_MAX_DEPTH, depth);
+                 dsco_swarm_max_depth(), depth);
         return false;
     }
 
@@ -7817,7 +7818,7 @@ static bool tool_spawn_agent(const char *input, char *result, size_t rlen) {
     int id = swarm_spawn(&g_swarm, task, model);
     if (id < 0) {
         snprintf(result, rlen, "{\"error\":\"failed to spawn agent (max %d)\"}",
-                 SWARM_MAX_CHILDREN);
+                 dsco_swarm_max_children());
         free(task);
         free(model);
         return false;
@@ -7981,7 +7982,7 @@ static bool tool_agent_race(const char *input, char *result, size_t rlen) {
     if (*p == '[')
         p++;
 
-    while (*p && n < SWARM_MAX_CHILDREN) {
+    while (*p && n < dsco_swarm_max_children()) {
         while (*p && (*p == ' ' || *p == '\n' || *p == ','))
             p++;
         if (*p == ']' || !*p)
@@ -8178,7 +8179,7 @@ typedef struct {
 
 static void parse_swarm_task_element(const char *element_start, void *ctx) {
     swarm_task_parse_ctx_t *pctx = (swarm_task_parse_ctx_t *)ctx;
-    if (!pctx || !element_start || pctx->parse_error || pctx->count >= SWARM_MAX_CHILDREN)
+    if (!pctx || !element_start || pctx->parse_error || pctx->count >= dsco_swarm_max_children())
         return;
 
     while (*element_start && isspace((unsigned char)*element_start))
@@ -9322,11 +9323,11 @@ static bool tool_create_swarm(const char *input, char *result, size_t rlen) {
 
     /* Check hierarchical depth limit */
     int depth = current_swarm_depth();
-    if (depth >= SWARM_MAX_DEPTH) {
+    if (depth >= dsco_swarm_max_depth()) {
         snprintf(result, rlen,
                  "{\"error\":\"max swarm depth %d reached (current depth: %d). "
                  "Execute tasks directly instead of spawning more sub-agents.\"}",
-                 SWARM_MAX_DEPTH, depth);
+                 dsco_swarm_max_depth(), depth);
         return false;
     }
 
@@ -9665,7 +9666,7 @@ static bool tool_swarm_collect(const char *input, char *result, size_t rlen) {
         tui_swarm_cost_entry_t entries[SWARM_MAX_CHILDREN];
         int ec = 0;
         double total_cost = 0.0;
-        for (int i = 0; i < grp->child_count && ec < SWARM_MAX_CHILDREN; i++) {
+        for (int i = 0; i < grp->child_count && ec < dsco_swarm_max_children(); i++) {
             swarm_child_t *c = &g_swarm.children[grp->child_ids[i]];
             entries[ec].name = c->model[0] ? c->model : c->task;
             entries[ec].cost = c->est_cost_usd;
@@ -9724,11 +9725,11 @@ static bool tool_swarm_map_reduce(const char *input, char *result, size_t rlen) 
 
     /* Depth guard — the coordinator + its workers form one extra level. */
     int depth = current_swarm_depth();
-    if (depth >= SWARM_MAX_DEPTH) {
+    if (depth >= dsco_swarm_max_depth()) {
         snprintf(result, rlen,
                  "{\"error\":\"max swarm depth %d reached (current depth: %d). "
                  "Execute tasks directly instead of nesting more swarms.\"}",
-                 SWARM_MAX_DEPTH, depth);
+                 dsco_swarm_max_depth(), depth);
         return false;
     }
 
@@ -10308,8 +10309,8 @@ static bool tool_spawn_executor(const char *input, char *result, size_t rlen) {
     ensure_swarm();
 
     int depth = current_swarm_depth();
-    if (depth >= SWARM_MAX_DEPTH) {
-        snprintf(result, rlen, "{\"error\":\"max swarm depth %d reached\"}", SWARM_MAX_DEPTH);
+    if (depth >= dsco_swarm_max_depth()) {
+        snprintf(result, rlen, "{\"error\":\"max swarm depth %d reached\"}", dsco_swarm_max_depth());
         return false;
     }
 
@@ -10406,8 +10407,8 @@ static bool tool_spawn_provider(const char *input, char *result, size_t rlen) {
     ensure_swarm();
 
     int depth = current_swarm_depth();
-    if (depth >= SWARM_MAX_DEPTH) {
-        snprintf(result, rlen, "{\"error\":\"max swarm depth %d reached\"}", SWARM_MAX_DEPTH);
+    if (depth >= dsco_swarm_max_depth()) {
+        snprintf(result, rlen, "{\"error\":\"max swarm depth %d reached\"}", dsco_swarm_max_depth());
         return false;
     }
 
@@ -10484,7 +10485,7 @@ static bool tool_create_executor_swarm(const char *input, char *result, size_t r
     ensure_swarm();
 
     int depth = current_swarm_depth();
-    if (depth >= SWARM_MAX_DEPTH) {
+    if (depth >= dsco_swarm_max_depth()) {
         snprintf(result, rlen, "{\"error\":\"max swarm depth reached\"}");
         return false;
     }
@@ -20666,6 +20667,295 @@ void tools_loop_control_decide(int current_turn, bool model_done, bool has_follo
     pthread_mutex_unlock(&g_loop_lock);
 }
 
+static const char *loop_signal_state(double v) {
+    if (v > 0.001)
+        return "positive";
+    if (v < -0.001)
+        return "negative";
+    return "neutral";
+}
+
+static const char *loop_active_state(double v) {
+    return fabs(v) > 0.001 ? "active" : "neutral";
+}
+
+static void append_color_sample_json(jbuf_t *out, const char *path, const char *kind,
+                                     const char *name, const char *state, double weight,
+                                     bool include_ansi, int *count, int limit,
+                                     bool *truncated) {
+    if (!out || !count)
+        return;
+    if (limit > 0 && *count >= limit) {
+        if (truncated)
+            *truncated = true;
+        return;
+    }
+    tui_named_color_t color;
+    tui_construct_color_sample(kind, name, state, weight, &color);
+    if (*count)
+        jbuf_append(out, ",");
+    jbuf_append(out, "{\"path\":");
+    jbuf_append_json_str(out, path ? path : color.name);
+    jbuf_append(out, ",\"name\":");
+    jbuf_append_json_str(out, color.name);
+    jbuf_append(out, ",\"kind\":");
+    jbuf_append_json_str(out, kind ? kind : "");
+    jbuf_append(out, ",\"label\":");
+    jbuf_append_json_str(out, name ? name : "");
+    jbuf_append(out, ",\"state\":");
+    jbuf_append_json_str(out, state ? state : "");
+    jbuf_appendf(out,
+                 ",\"weight\":%.6g,\"hex\":\"%s\",\"rgb\":[%u,%u,%u],"
+                 "\"ansi256\":%d,\"hash\":%" PRIu64,
+                 weight, color.hex, (unsigned)color.rgb.r, (unsigned)color.rgb.g,
+                 (unsigned)color.rgb.b, color.ansi256, color.hash);
+    if (include_ansi) {
+        char fg[40], bg[40];
+        snprintf(fg, sizeof(fg), "\033[38;2;%u;%u;%um", (unsigned)color.rgb.r,
+                 (unsigned)color.rgb.g, (unsigned)color.rgb.b);
+        snprintf(bg, sizeof(bg), "\033[48;2;%u;%u;%um", (unsigned)color.rgb.r,
+                 (unsigned)color.rgb.g, (unsigned)color.rgb.b);
+        jbuf_append(out, ",\"fg\":");
+        jbuf_append_json_str(out, fg);
+        jbuf_append(out, ",\"bg\":");
+        jbuf_append_json_str(out, bg);
+        jbuf_append(out, ",\"reset\":\"\\u001b[0m\"");
+    }
+    jbuf_append(out, "}");
+    (*count)++;
+}
+
+static void append_named_color_sample_json(jbuf_t *out, const char *name, bool include_ansi) {
+    tui_named_color_t color;
+    tui_named_color_sample(name, &color);
+    jbuf_append(out, "{\"ok\":true,\"mode\":\"sample\",\"color\":{\"name\":");
+    jbuf_append_json_str(out, color.name);
+    jbuf_appendf(out,
+                 ",\"hex\":\"%s\",\"rgb\":[%u,%u,%u],\"ansi256\":%d,"
+                 "\"hash\":%" PRIu64,
+                 color.hex, (unsigned)color.rgb.r, (unsigned)color.rgb.g,
+                 (unsigned)color.rgb.b, color.ansi256, color.hash);
+    if (include_ansi) {
+        char fg[40], bg[40];
+        snprintf(fg, sizeof(fg), "\033[38;2;%u;%u;%um", (unsigned)color.rgb.r,
+                 (unsigned)color.rgb.g, (unsigned)color.rgb.b);
+        snprintf(bg, sizeof(bg), "\033[48;2;%u;%u;%um", (unsigned)color.rgb.r,
+                 (unsigned)color.rgb.g, (unsigned)color.rgb.b);
+        jbuf_append(out, ",\"fg\":");
+        jbuf_append_json_str(out, fg);
+        jbuf_append(out, ",\"bg\":");
+        jbuf_append_json_str(out, bg);
+        jbuf_append(out, ",\"reset\":\"\\u001b[0m\"");
+    }
+    jbuf_append(out, "}}");
+}
+
+static void append_construct_field_colors(jbuf_t *out, const loop_construct_t *c,
+                                          const char *base_path, bool include_ansi,
+                                          int *count, int limit, bool *truncated) {
+    char path[192], name[160], state[160];
+    append_color_sample_json(out, base_path, "loop", c->label, c->active ? "active" : "done",
+                             c->iterations, include_ansi, count, limit, truncated);
+
+    struct {
+        const char *name;
+        double value;
+    } effects[] = {{"conversational", c->effect_conversational},
+                   {"tool", c->effect_tool},
+                   {"world", c->effect_world},
+                   {"meta", c->effect_meta}};
+    for (size_t i = 0; i < sizeof(effects) / sizeof(effects[0]); i++) {
+        snprintf(path, sizeof(path), "%s.effects.%s", base_path, effects[i].name);
+        append_color_sample_json(out, path, "effect", effects[i].name,
+                                 loop_active_state(effects[i].value), effects[i].value,
+                                 include_ansi, count, limit, truncated);
+    }
+
+    struct {
+        const char *name;
+        double value;
+    } signals[] = {{"reward", c->reward},
+                   {"curiosity", c->curiosity},
+                   {"empowerment", c->empowerment},
+                   {"confidence", c->confidence},
+                   {"uncertainty", c->uncertainty},
+                   {"learning_rate", c->learning_rate},
+                   {"valence", c->valence},
+                   {"intensity", c->intensity},
+                   {"exploration_rate", c->exploration_rate},
+                   {"credit", c->credit},
+                   {"pruning_threshold", c->pruning_threshold},
+                   {"basin_temperature", c->basin_temperature}};
+    for (size_t i = 0; i < sizeof(signals) / sizeof(signals[0]); i++) {
+        snprintf(path, sizeof(path), "%s.signals.%s", base_path, signals[i].name);
+        append_color_sample_json(out, path, "signal", signals[i].name,
+                                 loop_signal_state(signals[i].value), signals[i].value,
+                                 include_ansi, count, limit, truncated);
+    }
+
+    for (int m = 0; m < c->meta_count; m++) {
+        loop_meta_entry_t *e = (loop_meta_entry_t *)&c->meta[m];
+        snprintf(path, sizeof(path), "%s.meta.%d.%s", base_path, m, e->name);
+        snprintf(state, sizeof(state), "%s:%s", e->kind, e->value);
+        append_color_sample_json(out, path, "meta", e->name, state, e->weight, include_ansi,
+                                 count, limit, truncated);
+    }
+    for (int n = 0; n < c->graph_node_count; n++) {
+        loop_graph_node_t *node = (loop_graph_node_t *)&c->graph_nodes[n];
+        snprintf(path, sizeof(path), "%s.graph.nodes.%s", base_path, node->name);
+        snprintf(state, sizeof(state), "%s:%s", node->type,
+                 node->state[0] ? node->state : "neutral");
+        append_color_sample_json(out, path, "graph.node", node->name, state, node->weight,
+                                 include_ansi, count, limit, truncated);
+    }
+    for (int e = 0; e < c->graph_edge_count; e++) {
+        loop_graph_edge_t *edge = (loop_graph_edge_t *)&c->graph_edges[e];
+        snprintf(name, sizeof(name), "%s->%s", edge->from, edge->to);
+        snprintf(path, sizeof(path), "%s.graph.edges.%d", base_path, e);
+        append_color_sample_json(out, path, "graph.edge", name, edge->relation, edge->weight,
+                                 include_ansi, count, limit, truncated);
+    }
+    for (int d = 0; d < c->dyad_count; d++) {
+        loop_dyad_t *dy = (loop_dyad_t *)&c->dyads[d];
+        snprintf(name, sizeof(name), "%s->%s", dy->from, dy->to);
+        snprintf(path, sizeof(path), "%s.dyads.%d", base_path, d);
+        append_color_sample_json(out, path, "dyad", name, dy->relation, 0.0, include_ansi,
+                                 count, limit, truncated);
+    }
+    for (int j = 0; j < c->mapreduce_job_count; j++) {
+        loop_mapreduce_job_t *job = (loop_mapreduce_job_t *)&c->mapreduce_jobs[j];
+        snprintf(state, sizeof(state), "%s%s%s", job->mapped ? "mapped" : "pending-map",
+                 job->shuffled ? ":shuffled" : "", job->reduced ? ":reduced" : "");
+        snprintf(path, sizeof(path), "%s.mapreduce.%s", base_path, job->name);
+        append_color_sample_json(out, path, "mapreduce.job", job->name, state,
+                                 job->partitions, include_ansi, count, limit, truncated);
+    }
+    for (int s = 0; s < c->srm_count; s++) {
+        loop_srm_entry_t *e = (loop_srm_entry_t *)&c->srm_entries[s];
+        snprintf(name, sizeof(name), "%s%s%s", e->id, e->name[0] ? ":" : "", e->name);
+        snprintf(state, sizeof(state), "%s%s%s%s%s%s",
+                 e->available ? "available" : "unavailable",
+                 e->orderable ? ":orderable" : "", e->traceable ? ":traceable" : "",
+                 e->certificate_current ? ":current" : "",
+                 e->shipping_blocked ? ":blocked" : "",
+                 e->archived_certificate ? ":archived" : "");
+        snprintf(path, sizeof(path), "%s.srm.%s", base_path, e->id);
+        append_color_sample_json(out, path, "srm.entry", name, state, e->uncertainty,
+                                 include_ansi, count, limit, truncated);
+    }
+    for (int m = 0; m < c->measurement_count; m++) {
+        loop_measurement_entry_t *me = (loop_measurement_entry_t *)&c->measurements[m];
+        snprintf(state, sizeof(state), "%s:%s:%s", me->calibrated ? "calibrated" : "uncalibrated",
+                 me->material, me->property);
+        snprintf(path, sizeof(path), "%s.measurements.%s", base_path, me->name);
+        append_color_sample_json(out, path, "measurement", me->name, state, me->uncertainty,
+                                 include_ansi, count, limit, truncated);
+    }
+    for (int o = 0; o < c->srm_operation_count; o++) {
+        loop_srm_operation_t *op = (loop_srm_operation_t *)&c->srm_operations[o];
+        snprintf(state, sizeof(state), "%s:%s", op->flag ? "enabled" : "recorded", op->value);
+        snprintf(path, sizeof(path), "%s.srm.operations.%d", base_path, o);
+        append_color_sample_json(out, path, op->kind, op->name, state, op->amount,
+                                 include_ansi, count, limit, truncated);
+    }
+    for (int r = 0; r < c->refine_count; r++) {
+        loop_refine_rule_t *rr = (loop_refine_rule_t *)&c->refine_rules[r];
+        snprintf(state, sizeof(state), "%s:%s", rr->fired ? "done" : "pending", rr->when);
+        snprintf(path, sizeof(path), "%s.refine.%d", base_path, r);
+        append_color_sample_json(out, path, "refine", rr->target, state, rr->value,
+                                 include_ansi, count, limit, truncated);
+    }
+    for (int r = 0; r < c->rewrite_count; r++) {
+        loop_rewrite_rule_t *rw = (loop_rewrite_rule_t *)&c->rewrite_rules[r];
+        snprintf(path, sizeof(path), "%s.rewrite.%d", base_path, r);
+        append_color_sample_json(out, path, "schema_rewrite", rw->action,
+                                 rw->fired ? "done" : rw->when, rw->fired ? 1.0 : 0.0,
+                                 include_ansi, count, limit, truncated);
+    }
+    if (c->policy[0]) {
+        snprintf(path, sizeof(path), "%s.policy", base_path);
+        append_color_sample_json(out, path, "policy", c->policy, "selected", 1.0, include_ansi,
+                                 count, limit, truncated);
+    }
+    if (c->decision[0]) {
+        snprintf(path, sizeof(path), "%s.decision", base_path);
+        append_color_sample_json(out, path, "decision", c->decision, "selected", 1.0,
+                                 include_ansi, count, limit, truncated);
+    }
+    if (c->attractor[0]) {
+        snprintf(path, sizeof(path), "%s.attractor", base_path);
+        append_color_sample_json(out, path, "attractor", c->attractor, "active",
+                                 c->basin_temperature, include_ansi, count, limit, truncated);
+    }
+    if (c->prompt_game[0]) {
+        snprintf(path, sizeof(path), "%s.prompt_game", base_path);
+        append_color_sample_json(out, path, "prompt_game", c->prompt_game, "active", 1.0,
+                                 include_ansi, count, limit, truncated);
+    }
+}
+
+static bool tool_construct_color_sample(const char *input, char *result, size_t rlen) {
+    char *action = json_get_str(input, "action");
+    char *name = json_get_str(input, "name");
+    char *kind = json_get_str(input, "kind");
+    char *state = json_get_str(input, "state");
+    bool include_ansi = json_get_bool(input, "include_ansi", false);
+    double weight = json_get_double(input, "weight", 0.0);
+    int limit = json_get_int(input, "limit", 4096);
+    if (limit <= 0)
+        limit = 4096;
+    if (limit > 20000)
+        limit = 20000;
+
+    const char *act = action && action[0] ? action : (name && name[0] ? "sample" : "palette");
+    jbuf_t out;
+    jbuf_init(&out, 1024);
+
+    if (strcmp(act, "sample") == 0 || strcmp(act, "color") == 0) {
+        if (kind && kind[0]) {
+            tui_named_color_t color;
+            tui_construct_color_sample(kind, name ? name : "unnamed", state ? state : "neutral",
+                                       weight, &color);
+            jbuf_append(&out, "{\"ok\":true,\"mode\":\"construct_sample\",\"color\":");
+            int count = 0;
+            bool truncated = false;
+            append_color_sample_json(&out, color.name, kind, name ? name : "unnamed",
+                                     state ? state : "neutral", weight, include_ansi, &count, 1,
+                                     &truncated);
+            jbuf_append(&out, "}");
+        } else {
+            append_named_color_sample_json(&out, name ? name : "dsco.color.default", include_ansi);
+        }
+    } else {
+        pthread_mutex_lock(&g_loop_lock);
+        bool active = g_loop_depth > 0;
+        jbuf_appendf(&out,
+                     "{\"ok\":true,\"mode\":\"construct_palette\","
+                     "\"active\":%s,\"depth\":%d,\"limit\":%d,\"colors\":[",
+                     active ? "true" : "false", g_loop_depth, limit);
+        int count = 0;
+        bool truncated = false;
+        for (int i = 0; i < g_loop_depth; i++) {
+            loop_construct_t *c = &g_loop_stack[i];
+            char base_path[160];
+            snprintf(base_path, sizeof(base_path), "construct.stack.%d.%s", i, c->label);
+            append_construct_field_colors(&out, c, base_path, include_ansi, &count, limit,
+                                          &truncated);
+        }
+        jbuf_appendf(&out, "],\"count\":%d,\"truncated\":%s}", count,
+                     truncated ? "true" : "false");
+        pthread_mutex_unlock(&g_loop_lock);
+    }
+
+    snprintf(result, rlen, "%s", out.data ? out.data : "{}");
+    jbuf_free(&out);
+    free(action);
+    free(name);
+    free(kind);
+    free(state);
+    return true;
+}
+
 static bool tool_start_loop_construct(const char *input, char *result, size_t rlen) {
     char *label = json_get_str(input, "label");
     char *program = json_get_str(input, "program");
@@ -22706,7 +22996,9 @@ static bool tool_session_status(const char *input, char *result, size_t rlen) {
     pthread_mutex_lock(&g_session_mu);
     int rc = session_status_json(&g_session_db, result, rlen);
     pthread_mutex_unlock(&g_session_mu);
-    return rc == 0;
+    /* session_status_json returns snprintf's byte count: success is a positive
+     * count that fit the buffer, not 0 (0 means db/buf was NULL). */
+    return rc > 0 && (size_t)rc < rlen;
 }
 
 /* ── Priority 2/6/7 tool stubs (full impl in separate modules) ─────────── */
@@ -22810,7 +23102,7 @@ static bool tool_recovery_dispatch(const char *input, char *result, size_t rlen)
         snprintf(result, rlen, "recovery: backtrack|log_dump only (stub)");
     }
     free(action);
-    return true;
+    return ok;
 }
 
 static bool tool_session_dispatch(const char *input, char *result, size_t rlen) {
@@ -25796,6 +26088,27 @@ static const tool_def_t s_tools[] = {
      .execute = tool_loop_construct_status,
      .core = true,
      .is_read_only = true},
+    {.name = "ConstructColorSample",
+     .description =
+         "Sample deterministic named colors or export dynamic highlight colors for the entire "
+         "live MetaConstruct stack. Use action=sample with name/kind/state/weight for one named "
+         "color, or action=palette to return colors for loop constructs, effects, signals, graph "
+         "nodes/edges, dyads, MapReduce jobs, SRM records, measurements, operations, refinements, "
+         "and schema rewrites. Returns RGB, hex, ansi256, and optional ANSI escapes.",
+     .input_schema_json =
+         "{\"type\":\"object\",\"properties\":{\"action\":{\"type\":\"string\",\"description\":"
+         "\"sample|color|palette\"},\"name\":{\"type\":\"string\",\"description\":\"Arbitrary "
+         "named color key or construct entity label\"},\"kind\":{\"type\":\"string\","
+         "\"description\":\"Optional construct kind, e.g. graph.node, signal, srm.entry\"},"
+         "\"state\":{\"type\":\"string\",\"description\":\"Optional state such as active, done, "
+         "blocked, pending, calibrated\"},\"weight\":{\"type\":\"number\"},\"limit\":{"
+         "\"type\":\"integer\",\"description\":\"Maximum palette entries, capped at 20000\"},"
+         "\"include_ansi\":{\"type\":\"boolean\",\"description\":\"Include truecolor ANSI fg/bg "
+         "escape strings\"}}}",
+     .execute = tool_construct_color_sample,
+     .core = true,
+     .is_read_only = true,
+     .is_concurrent = false},
     {.name = "discover_tools",
      .description = "List available tools by category or search.",
      .input_schema_json = "{\"type\":\"object\",\"properties\":{\"category\":{\"type\":\"string\"},"
@@ -26560,7 +26873,9 @@ static const char *CORE_ALWAYS[] = {
     "self_exit",
     "StartOfLoopConstruct",
     "EndOfLoopConstruct",
-    NULL /* minimal core: execution + dynamic loading + loop control */
+    NULL /* minimal core: execution + dynamic loading + loop control.
+          * NOTE: must stay <= TOOL_REG_ALWAYS (config.h) entries or the
+          * critical-budget pin loop will evict required tools. */
 };
 
 static const char *CORE_WARM[] = {
@@ -29109,7 +29424,7 @@ void watchdog_start(tool_watchdog_t *wd, pthread_t target, const char *name, int
 
     double now = watchdog_now();
     wd->deadline = now + timeout_s;
-    wd->grace_end = wd->deadline + TOOL_GRACE_PERIOD_S;
+    wd->grace_end = wd->deadline + dsco_tool_grace_period_s();
     wd->cancelled = 0;
     wd->timed_out = 0;
 
@@ -29159,25 +29474,16 @@ int tool_timeout_for(const char *name) {
     snprintf(env_key, sizeof(env_key), "DSCO_TOOL_TIMEOUT_%s", name);
     for (char *p = env_key + 19; *p; p++)
         *p = (*p >= 'a' && *p <= 'z') ? *p - 32 : *p;
-    const char *env_val = getenv(env_key);
-    if (env_val && env_val[0]) {
-        int v = atoi(env_val);
-        if (v > 0 && v <= 7200)
-            return v;
-    }
+    int env_timeout = dsco_env_int(env_key, -1, 1, 7200);
+    if (env_timeout > 0)
+        return env_timeout;
     /* 2. Static table */
     for (int i = 0; s_timeout_overrides[i].name; i++) {
         if (strcmp(s_timeout_overrides[i].name, name) == 0)
             return s_timeout_overrides[i].timeout_s;
     }
     /* 3. Global default override */
-    const char *g = getenv("DSCO_TOOL_DEFAULT_TIMEOUT");
-    if (g && g[0]) {
-        int v = atoi(g);
-        if (v > 0 && v <= 7200)
-            return v;
-    }
-    return TOOL_DEFAULT_TIMEOUT_S;
+    return dsco_tool_default_timeout_s();
 }
 
 /* ── JSON schema normalization + validation before tool dispatch ──────── */

@@ -21,11 +21,14 @@
 #include <time.h>
 #include <sys/stat.h>
 
-/* Stubs required by linked library objects */
+/* Stubs for globals defined in objects NOT linked into this minimal test
+ * (agent.o and main.o are excluded). g_agent_exit_requested is intentionally
+ * NOT stubbed here — it lives in tools.o, which IS linked. */
+#include "vm.h"
 volatile int g_interrupted = 0;
-volatile int g_agent_exit_requested = 0;
-double g_cost_budget = 0.0;
-int g_cheap_mode = 0;
+double g_cost_budget = 0.0; /* agent.o excluded → provide it */
+int g_cheap_mode = 0;       /* main.o excluded → provide it */
+vm_t g_vm = {0};            /* main.o excluded → provide it */
 
 /* ── Minimal test harness ────────────────────────────────────────────────── */
 

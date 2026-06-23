@@ -7421,9 +7421,11 @@ static void test_provider_select_default_primary_model_prefers_glm_kimi(void) {
     char saved_xai[256], saved_or[256], saved_anth[256], saved_openai[256];
     char saved_glm[256], saved_zai[256], saved_z_ai[256];
     char saved_moonshot[256], saved_kimi[256], saved_kimi_coding[256];
+    char saved_fugu[256], saved_sakana[256], saved_fish[256], saved_sakana_token[256];
     bool had_xai = false, had_or = false, had_anth = false, had_openai = false;
     bool had_glm = false, had_zai = false, had_z_ai = false;
     bool had_moonshot = false, had_kimi = false, had_kimi_coding = false;
+    bool had_fugu = false, had_sakana = false, had_fish = false, had_sakana_token = false;
     test_capture_env("XAI_API_KEY", saved_xai, sizeof(saved_xai), &had_xai);
     test_capture_env("OPENROUTER_API_KEY", saved_or, sizeof(saved_or), &had_or);
     test_capture_env("ANTHROPIC_API_KEY", saved_anth, sizeof(saved_anth), &had_anth);
@@ -7435,6 +7437,11 @@ static void test_provider_select_default_primary_model_prefers_glm_kimi(void) {
     test_capture_env("KIMI_API_KEY", saved_kimi, sizeof(saved_kimi), &had_kimi);
     test_capture_env("KIMI_CODING_API_KEY", saved_kimi_coding, sizeof(saved_kimi_coding),
                      &had_kimi_coding);
+    test_capture_env("FUGU_API_KEY", saved_fugu, sizeof(saved_fugu), &had_fugu);
+    test_capture_env("SAKANA_API_KEY", saved_sakana, sizeof(saved_sakana), &had_sakana);
+    test_capture_env("FISH_API_KEY", saved_fish, sizeof(saved_fish), &had_fish);
+    test_capture_env("SAKANA_TOKEN", saved_sakana_token, sizeof(saved_sakana_token),
+                     &had_sakana_token);
 
     unsetenv("GLM_API_KEY");
     unsetenv("ZAI_API_KEY");
@@ -7442,6 +7449,11 @@ static void test_provider_select_default_primary_model_prefers_glm_kimi(void) {
     unsetenv("MOONSHOT_API_KEY");
     unsetenv("KIMI_API_KEY");
     unsetenv("KIMI_CODING_API_KEY");
+    /* Sakana/Fugu is a native-only default with top priority; isolate it. */
+    unsetenv("FUGU_API_KEY");
+    unsetenv("SAKANA_API_KEY");
+    unsetenv("FISH_API_KEY");
+    unsetenv("SAKANA_TOKEN");
     setenv("XAI_API_KEY", "xai-test-key", 1);
     setenv("OPENROUTER_API_KEY", "sk-or-router", 1);
     setenv("ANTHROPIC_API_KEY", "sk-ant-native", 1);
@@ -7473,22 +7485,37 @@ static void test_provider_select_default_primary_model_prefers_glm_kimi(void) {
     test_restore_env("MOONSHOT_API_KEY", saved_moonshot, had_moonshot);
     test_restore_env("KIMI_API_KEY", saved_kimi, had_kimi);
     test_restore_env("KIMI_CODING_API_KEY", saved_kimi_coding, had_kimi_coding);
+    test_restore_env("FUGU_API_KEY", saved_fugu, had_fugu);
+    test_restore_env("SAKANA_API_KEY", saved_sakana, had_sakana);
+    test_restore_env("FISH_API_KEY", saved_fish, had_fish);
+    test_restore_env("SAKANA_TOKEN", saved_sakana_token, had_sakana_token);
     PASS();
 }
 
 static void test_provider_build_default_fallback_models_cross_lab(void) {
     TEST("provider_build_default_fallback_models cross-lab");
     char saved_xai[256], saved_or[256], saved_anth[256], saved_openai[256];
+    char saved_fugu[256], saved_sakana[256], saved_fish[256], saved_sakana_token[256];
     bool had_xai = false, had_or = false, had_anth = false, had_openai = false;
+    bool had_fugu = false, had_sakana = false, had_fish = false, had_sakana_token = false;
     test_capture_env("XAI_API_KEY", saved_xai, sizeof(saved_xai), &had_xai);
     test_capture_env("OPENROUTER_API_KEY", saved_or, sizeof(saved_or), &had_or);
     test_capture_env("ANTHROPIC_API_KEY", saved_anth, sizeof(saved_anth), &had_anth);
     test_capture_env("OPENAI_API_KEY", saved_openai, sizeof(saved_openai), &had_openai);
+    test_capture_env("FUGU_API_KEY", saved_fugu, sizeof(saved_fugu), &had_fugu);
+    test_capture_env("SAKANA_API_KEY", saved_sakana, sizeof(saved_sakana), &had_sakana);
+    test_capture_env("FISH_API_KEY", saved_fish, sizeof(saved_fish), &had_fish);
+    test_capture_env("SAKANA_TOKEN", saved_sakana_token, sizeof(saved_sakana_token),
+                     &had_sakana_token);
 
     unsetenv("XAI_API_KEY");
     setenv("OPENROUTER_API_KEY", "sk-or-router", 1);
     unsetenv("ANTHROPIC_API_KEY");
     unsetenv("OPENAI_API_KEY");
+    unsetenv("FUGU_API_KEY");
+    unsetenv("SAKANA_API_KEY");
+    unsetenv("FISH_API_KEY");
+    unsetenv("SAKANA_TOKEN");
 
     char models[4][128];
     int count = provider_build_default_fallback_models("claude-sonnet-4-6", models, 4);
@@ -7503,6 +7530,10 @@ static void test_provider_build_default_fallback_models_cross_lab(void) {
     test_restore_env("OPENROUTER_API_KEY", saved_or, had_or);
     test_restore_env("ANTHROPIC_API_KEY", saved_anth, had_anth);
     test_restore_env("OPENAI_API_KEY", saved_openai, had_openai);
+    test_restore_env("FUGU_API_KEY", saved_fugu, had_fugu);
+    test_restore_env("SAKANA_API_KEY", saved_sakana, had_sakana);
+    test_restore_env("FISH_API_KEY", saved_fish, had_fish);
+    test_restore_env("SAKANA_TOKEN", saved_sakana_token, had_sakana_token);
     PASS();
 }
 
