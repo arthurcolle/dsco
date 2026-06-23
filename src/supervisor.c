@@ -58,7 +58,8 @@
 
 #define DSCO_FLEET_LOCK_PATH    "/tmp/dsco_fleet.lock"
 #define DSCO_FLEET_JSON_PATH    "/tmp/dsco_fleet.json"
-#define DSCO_MIN_SESSION_BUDGET_MB  4096ULL
+#define DSCO_POOL_BASE_MB           2048ULL  /* 2 GB starting pool    */
+#define DSCO_POOL_STEP_MB           1024ULL  /* +1 GB per step        */
 #define DSCO_PREEMPT_PRESSURE_LEVEL 4
 
 #define INCIDENT_SNIPPET_BYTES  8192
@@ -328,23 +329,15 @@ static int system_mem_pressure(void) {
 /* ============================================================
  * Fleet registry: cross-session dynamic memory budget
  * ============================================================ */
-static uint64_t available_ram_bytes(void) {
-#ifdef __APPLE__
-    uint32_t pgsz = 16384; size_t sz = sizeof(pgsz);
-    (void)sysctlbyname("hw.pagesize",&pgsz,&sz,NULL,0);
-    uint64_t fp=0,ip=0,pp=0;
-    sz=sizeof(fp); (void)sysctlbyname("vm.page_free_count",&fp,&sz,NULL,0);
-    sz=sizeof(ip); (void)sysctlbyname("vm.page_inactive_count",&ip,&sz,NULL,0);
-    sz=sizeof(pp); (void)sysctlbyname("vm.page_purgeable_count",&pp,&sz,NULL,0);
-    return (fp+ip+pp)*(uint64_t)pgsz;
-#else
-    FILE *mf=fopen("/proc/meminfo","r"); if(!mf) return 0;
-    char ln[128]; uint64_t avail=0;
-    while(fgets(ln,sizeof(ln),mf))
-        if(strncmp(ln,"MemAvailable:",13)==0){
-            unsigned long long kb=0; sscanf(ln+13,"%llu",&kb); avail=kb*1024ULL; break;}
-    fclose(mf); return avail;
-#endif
+static uint64_t fleet_total_rss_mb(void) {
+    int fd = open(DSCO_FLEET_JSON_PATH, O_RDONLY); if (fd < 0) return 0;
+    char buf[16384]; buf[0] = '\0';
+    ssize_t n = read(fd, buf, sizeof(buf)-1); close(fd);
+    if (n <= 0) return 0; buf[n] = '\0';
+    uint64_t total = 0; const char *p = buf;
+    while ((p = strstr(p, "\"rss_mb\":")) != NULL)
+        { p += 10; total += (uint64_t)strtoull(p, NULL, 10); }
+    return total;
 }
 
 static void fleet_update(pid_t child, uint64_t rss_bytes, uint64_t budget_mb) {
@@ -396,18 +389,32 @@ static int fleet_session_count(void) {
 }
 
 /* Dynamic budget: max(4GB, (avail_ram + our_rss) / n_sessions), cap 90% RAM */
+/* Shared-pool model, no doublings:
+ *   pool = 2GB + k*1GB where k = steps until pool >= fleet_total_rss
+ *   budget = pool / n_sessions
+ * 1 session  @   0MB: pool=2GB budget=2GB
+ * 1 session  @ 2.1GB: pool=3GB budget=3GB
+ * 2 sessions @   0MB: pool=2GB budget=1GB each
+ * 2 sessions @ 2.1GB: pool=3GB budget=1.5GB each
+ * 2 sessions @ 3.1GB: pool=4GB budget=2GB each  */
 static uint64_t fleet_compute_budget(uint64_t our_rss_bytes) {
-    const char *em=getenv("DSCO_SUPERVISE_MEM_LIMIT_MB");
-    if(em && em[0] && atol(em)>0) return (uint64_t)atol(em)<<20;
-    uint64_t sys=system_mem_bytes();
-    uint64_t pool=available_ram_bytes()+our_rss_bytes;
-    int sessions=fleet_session_count();
-    uint64_t share=sessions>0?pool/(uint64_t)sessions:pool;
-    uint64_t floor_b=DSCO_MIN_SESSION_BUDGET_MB*1024ULL*1024ULL;
-    if(share<floor_b) share=floor_b;
-    uint64_t ceil_b=sys>0?sys*9ULL/10ULL:(43ULL<<30);
-    if(share>ceil_b) share=ceil_b;
-    return share;
+    (void)our_rss_bytes;
+    const char *em = getenv("DSCO_SUPERVISE_MEM_LIMIT_MB");
+    if (em && em[0] && atol(em) > 0) return (uint64_t)atol(em) << 20;
+
+    uint64_t sys = system_mem_bytes();
+    uint64_t sys_ceil_mb = sys > 0 ? (sys >> 20) * 90ULL / 100ULL : 43008ULL;
+
+    uint64_t fleet_rss = fleet_total_rss_mb();
+    uint64_t pool_mb = DSCO_POOL_BASE_MB;
+    while (pool_mb < fleet_rss && pool_mb < sys_ceil_mb)
+        pool_mb += DSCO_POOL_STEP_MB;
+    if (pool_mb > sys_ceil_mb) pool_mb = sys_ceil_mb;
+
+    int sessions = fleet_session_count();
+    uint64_t budget_mb = sessions > 0 ? pool_mb / (uint64_t)sessions : pool_mb;
+    if (budget_mb < 1) budget_mb = 1;
+    return budget_mb << 20;
 }
 
 /* Startup budget: delegate to fleet_compute_budget.
