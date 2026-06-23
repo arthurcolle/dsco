@@ -531,14 +531,20 @@ static const char *crash_class_name(crash_class_t c) {
 
 static crash_class_t classify_exit(int status) {
     if (WIFEXITED(status)) {
-        return WEXITSTATUS(status) == 0 ? EXIT_CLEAN : EXIT_NONZERO;
+        int code = WEXITSTATUS(status);
+        if (code == 0)                return EXIT_CLEAN;
+        /* 130=SIGINT, 131=SIGQUIT: deliberate user kill, not a crash */
+        if (code == 130 || code == 131) return EXIT_CLEAN;
+        return EXIT_NONZERO;
     }
     if (WIFSIGNALED(status)) {
         int sig = WTERMSIG(status);
-        if (sig == SIGKILL) return EXIT_OOM_KILL;
+        /* Terminal signals are deliberate user actions, not crashes */
+        if (sig == SIGINT || sig == SIGQUIT) return EXIT_CLEAN;
+        if (sig == SIGKILL)                  return EXIT_OOM_KILL;
         return EXIT_SIGNAL;
     }
-    return EXIT_NONZERO;
+    return EXIT_SIGNAL;
 }
 
 typedef struct incident_report {
@@ -1045,6 +1051,7 @@ int supervisor_run(int child_argc, char **child_argv) {
                 return 0;
             }
             fleet_remove();
+            unsetenv("DSCO_RESUME_AFTER_CRASH"); /* clear: clean exit, not a crash */
                 fprintf(stderr, "[supervisor] child exited cleanly but restart=permanent — relaunching.\n");
             supervisor_log("event=child_exit child_pid=%d class=%s restart=permanent peak_rss_mb=%llu",
                            (int)child, crash_class_name(cls),
