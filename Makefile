@@ -65,7 +65,6 @@ SRC_NAMES = main.c agent.c llm.c tools.c json_util.c ast.c swarm.c tui.c \
 	introspect.c \
 	learned_cost.c \
 	session_memory.c \
-	tool_embeddings_data.c \
 	$(OPTIONAL_SRCS)
 TEST_SRC_NAMES = test.c
 
@@ -90,6 +89,7 @@ ASAN_TEST_OBJ_DIR := $(BUILD_DIR)/asan-test
 UBSAN_TEST_OBJ_DIR := $(BUILD_DIR)/ubsan-test
 
 OBJS = $(SRC_NAMES:%.c=$(OBJ_DIR)/%.o)
+OBJS += $(GENERATED_OBJS)
 LIB_OBJS = $(filter-out $(OBJ_DIR)/main.o $(OBJ_DIR)/agent.o $(OBJ_DIR)/orchestrator.o, $(OBJS))
 TEST_OBJS = $(TEST_SRC_NAMES:%.c=$(TEST_OBJ_DIR)/%.o) $(LIB_OBJS:$(OBJ_DIR)/%=$(TEST_OBJ_DIR)/%)
 TEST_COVERAGE_OBJS = $(TEST_SRC_NAMES:%.c=$(TEST_COVERAGE_OBJ_DIR)/%.o) $(LIB_OBJS:$(OBJ_DIR)/%=$(TEST_COVERAGE_OBJ_DIR)/%)
@@ -219,6 +219,10 @@ LDLIBS      += -L$(MBEDTLS_PREFIX)/lib -lmbedtls -lmbedx509 -lmbedcrypto
 endif
 endif
 
+# Pizza-box: baked data blobs get their own flat obj names
+GENERATED_C    := $(wildcard src/generated/*.c)
+GENERATED_OBJS := $(patsubst src/generated/%.c,$(OBJ_DIR)/generated_%.o,$(GENERATED_C))
+
 # Conditionally add mesh + net_server when libsodium is available
 OPTIONAL_SRCS =
 ifneq ($(SODIUM_CFLAGS),)
@@ -260,6 +264,15 @@ $(LITE_TARGET): $(SRC_DIR)/lite_main.c $(INC_DIR)/config.h
 	-strip -x $@ 2>/dev/null || true
 
 # Source compilation rules
+# ── Pizza box: bake data/ blobs before any .o is compiled ──────────────
+.PHONY: bake_data
+bake_data: | $(OBJ_DIR)
+	@bash scripts/bake_data.sh data src/generated include
+
+# Pizza-box pattern rule: src/generated/foo.c -> build/obj/generated_foo.o
+$(OBJ_DIR)/generated_%.o: src/generated/%.c | bake_data $(OBJ_DIR)
+	$(CC) $(CFLAGS) -c -o $@ $<
+
 $(OBJ_DIR)/%.o: $(SRC_DIR)/%.c | $(OBJ_DIR)
 	@mkdir -p $(@D)
 	$(CC) $(CFLAGS) -c -o $@ $<
