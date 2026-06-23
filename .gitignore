@@ -68,7 +68,9 @@ ipc_experiment
 response.json
 
 # Large data / generated corpora (relocated out of repo)
-data/
+# data/ is the pizza-box — tracked in git
+data/cache/
+data/tmp/
 books/
 climate_data/
 papers/
@@ -91,3 +93,4 @@ face_landmarker.task
 src/*.bak*
 src/*.gov_patch_backup
 src/topology_novel.c
+src/generated/
