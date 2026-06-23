@@ -18,7 +18,9 @@ BASE_CFLAGS = -Wall -Wextra -O3 -std=c2y $(C2Y_WARNING_FLAGS) -D_POSIX_C_SOURCE=
 	-march=native -mtune=native -funroll-loops -fvisibility=hidden \
 	-funwind-tables -fno-omit-frame-pointer -g \
 	-MMD -MP \
-	-DBUILD_DATE='"$(BUILD_DATE)"' -DGIT_HASH='"$(GIT_HASH)"'
+	-DBUILD_DATE='"$(BUILD_DATE)"' -DGIT_HASH='"$(GIT_HASH)"' \
+	-fstack-protector-strong -D_FORTIFY_SOURCE=2 -Wformat -Wformat-security \
+	-Wno-error=format-security
 CFLAGS ?= $(BASE_CFLAGS)
 TEST_CFLAGS ?= $(BASE_CFLAGS) -O0 -g -fno-omit-frame-pointer -fno-inline
 # Release link-time optimizations:
@@ -54,6 +56,7 @@ SRC_NAMES = main.c agent.c llm.c tools.c json_util.c ast.c swarm.c tui.c \
 	project.c project_mux.c project_grid.c \
 	dsco_accel.c dsco_mlx.c dsco_pool.c \
 	fingerprint.c trust.c toolmgmt.c connector.c openrouter_cache.c \
+	openai_oauth.c local_llm.c \
 	startup.c plot.c anim.c fractal.c shadeexpr.c face_sdf.c avatar.c self_improve.c rsi_curriculum.c pets.c img_util.c supervisor.c \
 	graphsub_client.c graphsub_tools.c \
 	extension/backend.c extension/numerical_gsl.c extension/skill_requirements.c \
@@ -414,12 +417,12 @@ coverage_runner: $(TEST_COVERAGE_OBJS) $(GSL_COVERAGE_OBJS)
 
 asan: $(TARGET)-asan
 
-$(TARGET)-asan: $(ASAN_OBJS)
+$(TARGET)-asan: $(ASAN_OBJS) $(GSL_ASAN_OBJS)
 	$(CC) $(ASAN_CFLAGS) -o $@ $^ $(LDFLAGS) $(ASAN_LDFLAGS) $(LDLIBS)
 
 ubsan: $(TARGET)-ubsan
 
-$(TARGET)-ubsan: $(UBSAN_OBJS)
+$(TARGET)-ubsan: $(UBSAN_OBJS) $(GSL_UBSAN_OBJS)
 	$(CC) $(UBSAN_CFLAGS) -o $@ $^ $(LDFLAGS) $(UBSAN_LDFLAGS) $(LDLIBS)
 
 asan-test: asan-test_runner
@@ -445,7 +448,7 @@ clang-tidy:
 		echo "clang-tidy not found" >&2; \
 		exit 1; \
 	fi
-	clang-tidy $(SRCS) -- -I$(INC_DIR) -std=c11 -D_POSIX_C_SOURCE=200809L
+	clang-tidy $(SRCS) -- -I$(INC_DIR) -std=c11 -D_POSIX_C_SOURCE=200809L -DHAVE_MBEDTLS -DHAVE_LIBSODIUM -DHAVE_LIBUV
 
 cppcheck:
 	@if ! command -v cppcheck >/dev/null 2>&1; then \
@@ -522,11 +525,14 @@ install: $(TARGET) $(LITE_TARGET) dsc
 	install -m 755 $(TARGET) $(PREFIX)/bin/
 	install -m 755 $(LITE_TARGET) $(PREFIX)/bin/
 	install -m 755 dsc $(PREFIX)/bin/
+	install -m 755 scripts/live_face_avatar.sh $(PREFIX)/bin/dsco-live-face-avatar
 	test -f dsco-new && install -m 755 dsco-new $(PREFIX)/bin/ || true
 	install -m 644 $(INC_DIR)/tool_embeddings.bin $(DSCO_SHARE_DIR)/
+	install -m 755 face_capture.py $(DSCO_SHARE_DIR)/
 	install -d $(DSCO_DIR)/sessions $(DSCO_DIR)/plugins $(DSCO_DIR)/debug
 	@echo "installed dsco, dsco-lite, dsc, dsco-new to $(PREFIX)/bin/"
 	@echo "installed tool_embeddings.bin to $(DSCO_SHARE_DIR)/"
+	@echo "installed dsco-live-face-avatar and face_capture.py"
 	@echo "created $(DSCO_DIR)/{sessions,plugins,debug}"
 
 uninstall:

@@ -25,9 +25,11 @@ class Dsco < Formula
     system "make", "dsco", "dsco-lite", "dsc", "CC=#{ENV.cc}"
 
     bin.install "dsco", "dsco-lite", "dsc"
+    bin.install "scripts/live_face_avatar.sh" => "dsco-live-face-avatar"
 
     # The binary resolves this at runtime via <exe_dir>/../share/dsco/.
     pkgshare.install "include/tool_embeddings.bin"
+    pkgshare.install "face_capture.py"
   end
 
   test do

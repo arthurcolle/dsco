@@ -255,6 +255,11 @@ static inline int rough_token_estimate(const char *text) {
     return text ? ((int)strlen(text) + 3) / 4 : 0;
 }
 
+static inline int rough_token_estimate_len(const char *text, int len) {
+    (void)text;
+    return len > 0 ? (len + 3) / 4 : 0;
+}
+
 /* Per-image token cost. The API does NOT bill base64 byte length — it
  * downscales any image so the long edge is <=1568px and tokenizes at
  * ~(w*h)/750, which caps a full-screen capture near ~1.6k tokens. Counting

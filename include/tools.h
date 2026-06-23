@@ -44,6 +44,8 @@ void             tools_set_context_window(int tokens);
 int              tools_context_window(void);
 /* Pass current token usage so inline budget is based on remaining context */
 void             tools_set_context_usage(int input_tokens, int output_tokens);
+/* Pass actual serialized tool-schema overhead from the latest request. */
+void             tools_set_tool_schema_usage(int active_tools, int schema_tokens);
 /* Toggle inline tool-result truncation. Off = full output (human/raw dumps). */
 void             tools_set_inline_truncation(bool enabled);
 void             tools_context_turn_begin(void);
@@ -127,11 +129,11 @@ void  tools_register_external(const char *name, const char *description,
                                 external_tool_cb cb, void *ctx);
 void  tools_reset_external(void);
 
-#define MAX_EXTERNAL_TOOLS 1024
+#define MAX_EXTERNAL_TOOLS 4096
 
 typedef struct {
-    char   name[128];
-    char   description[512];
+    char   name[256];
+    char   description[1024];
     char  *input_schema_json;
     external_tool_cb cb;
     void  *ctx;
@@ -228,7 +230,7 @@ typedef enum {
 
 typedef struct {
     char          domain[64];
-    char          tools[HINT_MAX_TOOLS][64];
+    char          tools[HINT_MAX_TOOLS][128];
     int           tool_count;
     int           groups[HINT_MAX_GROUPS];
     int           group_count;

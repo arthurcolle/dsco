@@ -19,31 +19,40 @@ static void lite_usage(const char *prog) {
 }
 
 static void json_escape(FILE *out, const char *s) {
-    if (!s) return;
+    if (!s)
+        return;
     for (const char *p = s; *p; p++) {
-        if (*p == '"') fputs("\\\"", out);
-        else if (*p == '\\') fputs("\\\\", out);
-        else if (*p == '\n') fputs("\\n", out);
-        else if (*p == '\r') fputs("\\r", out);
-        else if (*p == '\t') fputs("\\t", out);
-        else fputc(*p, out);
+        if (*p == '"')
+            fputs("\\\"", out);
+        else if (*p == '\\')
+            fputs("\\\\", out);
+        else if (*p == '\n')
+            fputs("\\n", out);
+        else if (*p == '\r')
+            fputs("\\r", out);
+        else if (*p == '\t')
+            fputs("\\t", out);
+        else
+            fputc(*p, out);
     }
 }
 
 static bool json_string_needs_escape(const char *s) {
-    if (!s) return false;
+    if (!s)
+        return false;
     for (const unsigned char *p = (const unsigned char *)s; *p; p++) {
-        if (*p < 0x20 || *p == '"' || *p == '\\') return true;
+        if (*p < 0x20 || *p == '"' || *p == '\\')
+            return true;
     }
     return false;
 }
 
 static void print_tool_result_json(bool ok, const char *result) {
-    const char *prefix = ok ? "{\"ok\":true,\"result\":\""
-                            : "{\"ok\":false,\"result\":\"";
+    const char *prefix = ok ? "{\"ok\":true,\"result\":\"" : "{\"ok\":false,\"result\":\"";
     if (!json_string_needs_escape(result)) {
         (void)write(STDOUT_FILENO, prefix, strlen(prefix));
-        if (result) (void)write(STDOUT_FILENO, result, strlen(result));
+        if (result)
+            (void)write(STDOUT_FILENO, result, strlen(result));
         (void)write(STDOUT_FILENO, "\"}\n", 3);
         return;
     }
@@ -57,16 +66,15 @@ static int print_models_json(void) {
     printf("[");
     for (int j = 0; MODEL_REGISTRY[j].alias; j++) {
         const model_info_t *m = &MODEL_REGISTRY[j];
-        if (j > 0) printf(",");
+        if (j > 0)
+            printf(",");
         printf("{\"alias\":\"%s\",\"model_id\":\"%s\","
                "\"context_window\":%d,\"max_output\":%d,"
                "\"input_price\":%.2f,\"output_price\":%.2f,"
                "\"cache_read_price\":%.2f,\"cache_write_price\":%.2f,"
                "\"supports_thinking\":%d}",
-               m->alias, m->model_id, m->context_window, m->max_output,
-               m->input_price, m->output_price,
-               m->cache_read_price, m->cache_write_price,
-               m->supports_thinking);
+               m->alias, m->model_id, m->context_window, m->max_output, m->input_price,
+               m->output_price, m->cache_read_price, m->cache_write_price, m->supports_thinking);
     }
     printf("]\n");
     return 0;
@@ -95,11 +103,13 @@ static int run_tool_exec(const char *name, const char *input_json) {
 
 static char *full_binary_path(const char *argv0) {
     const char *slash = argv0 ? strrchr(argv0, '/') : NULL;
-    if (!slash) return strdup("dsco");
+    if (!slash)
+        return strdup("dsco");
     size_t dir_len = (size_t)(slash - argv0);
     size_t path_cap = dir_len + strlen("/dsco") + 1;
     char *path = malloc(path_cap);
-    if (!path) return NULL;
+    if (!path)
+        return NULL;
     memcpy(path, argv0, dir_len);
     snprintf(path + dir_len, path_cap - dir_len, "/dsco");
     return path;
@@ -147,8 +157,7 @@ int main(int argc, char **argv) {
 
     for (int i = 1; i < argc; i++) {
         if (strcmp(argv[i], "--version") == 0 || strcmp(argv[i], "-v") == 0) {
-            printf("dsco-lite v%s (built %s, %s)\n",
-                   DSCO_VERSION, BUILD_DATE, GIT_HASH);
+            printf("dsco-lite v%s (built %s, %s)\n", DSCO_VERSION, BUILD_DATE, GIT_HASH);
             return 0;
         }
         if (strcmp(argv[i], "--help") == 0 || strcmp(argv[i], "-h") == 0) {
