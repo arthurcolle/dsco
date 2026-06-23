@@ -240,10 +240,16 @@ const plan_option_t *plan_options_best(const plan_options_t *opts) {
 
 /* ── Per-tier pricing (USD per 1 K combined tokens, ~mid-2025) ─────────── */
 
+/* Per-1k blended token price by tier. MUST stay in sync with
+ * topology.c:tier_unit_cost() — both price the same tiers, and the
+ * plan_optimizer test asserts the refined estimate stays within 5× of the
+ * static est_cost_usd (which topo_finalize derives from tier_unit_cost).
+ * Previously these tables diverged ~6× (0.0048/0.018/0.090 vs
+ * 0.00025/0.003/0.015), which the now-runnable test correctly caught. */
 static const double s_tier_cost_per_1k[3] = {
-    [TIER_HAIKU] = 0.00025,
-    [TIER_SONNET] = 0.00300,
-    [TIER_OPUS] = 0.01500,
+    [TIER_HAIKU] = 0.0048,
+    [TIER_SONNET] = 0.0180,
+    [TIER_OPUS] = 0.0900,
 };
 
 /*
