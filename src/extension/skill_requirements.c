@@ -7,11 +7,10 @@ int skill_requirements_init(skill_requirements_t *req) {
     return 0;
 }
 
-int skill_requirements_add(skill_requirements_t *req,
-                           backend_category_t cat,
-                           const char *name,
+int skill_requirements_add(skill_requirements_t *req, backend_category_t cat, const char *name,
                            int mandatory) {
-    if (req->count >= MAX_BACKEND_REQUIREMENTS) return -1;
+    if (req->count >= MAX_BACKEND_REQUIREMENTS)
+        return -1;
     req->backends[req->count].category = cat;
     req->backends[req->count].required_name = name;
     req->backends[req->count].mandatory = mandatory;
@@ -22,9 +21,9 @@ int skill_requirements_add(skill_requirements_t *req,
 int skill_requirements_satisfy(const skill_requirements_t *req) {
     for (int i = 0; i < req->count; i++) {
         const backend_requirement_t *r = &req->backends[i];
-        backend_interface_t *b = backend_get(r->required_name ? r->required_name : "",
-                                             r->category);
-        if (!b && r->mandatory) return 0;
+        backend_interface_t *b = backend_get(r->required_name ? r->required_name : "", r->category);
+        if (!b && r->mandatory)
+            return 0;
     }
     return 1;
 }

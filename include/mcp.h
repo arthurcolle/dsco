@@ -32,7 +32,7 @@
  */
 
 #define MCP_MAX_SERVERS    64
-#define MCP_MAX_TOOLS      512
+#define MCP_MAX_TOOLS      2048
 #define MCP_MAX_LINE       (256 * 1024)
 #define MCP_MAX_ARGS       32
 #define MCP_MAX_ENV        32
@@ -44,10 +44,10 @@ typedef enum {
 } mcp_transport_t;
 
 typedef struct {
-    char  name[128];
-    char  remote_name[128];     /* exact MCP tool name to send in tools/call */
-    char  description[512];
-    char  input_schema[4096];  /* JSON schema string */
+    char  name[256];
+    char  remote_name[256];     /* exact MCP tool name to send in tools/call */
+    char  description[1024];
+    char  input_schema[16384];  /* JSON schema string */
     int   server_idx;          /* which server owns this tool */
 } mcp_tool_t;
 

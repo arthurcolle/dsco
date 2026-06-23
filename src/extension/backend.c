@@ -26,16 +26,20 @@ backend_interface_t *backend_get(const char *name, backend_category_t cat) {
 
 int backend_load(const char *name, backend_category_t cat) {
     backend_interface_t *b = backend_get(name, cat);
-    if (!b) return -1;
-    if (b->init) b->init(b->impl);
+    if (!b)
+        return -1;
+    if (b->init)
+        b->init(b->impl);
     b->status = BACKEND_STATUS_LOADED;
     return 0;
 }
 
 int backend_unload(const char *name, backend_category_t cat) {
     backend_interface_t *b = backend_get(name, cat);
-    if (!b) return -1;
-    if (b->shutdown) b->shutdown(b->impl);
+    if (!b)
+        return -1;
+    if (b->shutdown)
+        b->shutdown(b->impl);
     b->status = BACKEND_STATUS_UNLOADED;
     return 0;
 }
