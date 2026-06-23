@@ -3361,17 +3361,34 @@ void agent_run(const char *api_key, const char *model, const char *topology_name
     int core_count = tools_get_core_count() + g_external_tool_count;
     int display_core = g_cheap_mode ? TOOL_REG_ALWAYS : core_count;
 
-    /* Check for autosave to resume */
+    /* Auto-resume if supervisor set DSCO_RESUME_AFTER_CRASH=1
+     * (fires on crash, OOM kill, or pre-emption restart). */
     {
-        char autosave_path[560];
-        const char *home = getenv("HOME");
-        if (home) {
-            snprintf(autosave_path, sizeof(autosave_path), "%s/.dsco/sessions/_autosave.json",
-                     home);
-            if (access(autosave_path, R_OK) == 0) {
-                fprintf(stderr, "  %sautosave found. /load _autosave to resume%s\n", TUI_DIM,
-                        TUI_RESET);
+        const char *resume = getenv("DSCO_RESUME_AFTER_CRASH");
+        const char *home   = getenv("HOME");
+        char autosave_path[560]; autosave_path[0] = '\0';
+        if (home)
+            snprintf(autosave_path, sizeof(autosave_path),
+                     "%s/.dsco/sessions/_autosave.json", home);
+        if (resume && resume[0] == '1' && autosave_path[0]
+                && access(autosave_path, R_OK) == 0) {
+            fprintf(stderr, "  %s[supervisor] session crashed, resuming...%s\n",
+                    TUI_DIM, TUI_RESET);
+            /* Write a startup command file the REPL will consume on first turn */
+            {
+                char startup_f[512];
+                const char *h2 = getenv("HOME");
+                if (h2) {
+                    snprintf(startup_f, sizeof(startup_f),
+                             "%s/.dsco/sessions/_startup_cmd", h2);
+                    FILE *sf = fopen(startup_f, "w");
+                    if (sf) { fputs("/load _autosave", sf); fclose(sf); }
+                }
             }
+            unsetenv("DSCO_RESUME_AFTER_CRASH");
+        } else if (autosave_path[0] && access(autosave_path, R_OK) == 0) {
+            fprintf(stderr, "  %sautosave found. /load _autosave to resume%s\n",
+                    TUI_DIM, TUI_RESET);
         }
     }
 
@@ -3597,9 +3614,36 @@ void agent_run(const char *api_key, const char *model, const char *topology_name
             }
         }
 
-        if (strcmp(input_buf, "quit") == 0 || strcmp(input_buf, "exit") == 0 ||
-            strcmp(input_buf, "/exit") == 0 || strcmp(input_buf, "/quit") == 0)
+        /* Consume startup command (e.g. auto-resume after crash) */
+        {
+            static bool startup_consumed = false;
+            if (!startup_consumed) {
+                startup_consumed = true;
+                const char *h3 = getenv("HOME");
+                if (h3) {
+                    char scf[512];
+                    snprintf(scf, sizeof(scf),
+                             "%s/.dsco/sessions/_startup_cmd", h3);
+                    FILE *sf = fopen(scf, "r");
+                    if (sf) {
+                        if (fgets(input_buf, (int)sizeof(input_buf)-1, sf)) {
+                            /* trim newline */
+                            size_t sl = strlen(input_buf);
+                            if (sl > 0 && input_buf[sl-1] == '\n')
+                                input_buf[sl-1] = '\0';
+                        }
+                        fclose(sf);
+                        remove(scf);
+                    }
+                }
+            }
+        }
+                if (strcmp(input_buf, "quit") == 0 || strcmp(input_buf, "exit") == 0 ||
+            strcmp(input_buf, "/exit") == 0 || strcmp(input_buf, "/quit") == 0) {
+            /* Tell supervisor not to relaunch on this voluntary exit. */
+            setenv("DSCO_SUPERVISE_RESTART", "transient", 1);
             break;
+        }
 
         /* ── Alias expansion ───────────────────────────────────────────── */
         {
