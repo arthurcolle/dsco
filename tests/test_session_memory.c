@@ -22,22 +22,48 @@
 
 static int g_run = 0, g_pass = 0, g_fail = 0;
 
-#define TEST(name) do { g_run++; fprintf(stderr, "  %-52s ", (name)); } while(0)
-#define PASS()     do { g_pass++; fprintf(stderr, "\033[32mPASS\033[0m\n"); } while(0)
-#define FAIL(msg)  do { g_fail++; fprintf(stderr, "\033[31mFAIL\033[0m: %s\n", (msg)); } while(0)
-#define ASSERT(cond, msg) do { if (!(cond)) { FAIL(msg); return; } } while(0)
+#define TEST(name)                                                                                 \
+    do {                                                                                           \
+        g_run++;                                                                                   \
+        fprintf(stderr, "  %-52s ", (name));                                                       \
+    } while (0)
+#define PASS()                                                                                     \
+    do {                                                                                           \
+        g_pass++;                                                                                  \
+        fprintf(stderr, "\033[32mPASS\033[0m\n");                                                  \
+    } while (0)
+#define FAIL(msg)                                                                                  \
+    do {                                                                                           \
+        g_fail++;                                                                                  \
+        fprintf(stderr, "\033[31mFAIL\033[0m: %s\n", (msg));                                       \
+    } while (0)
+#define ASSERT(cond, msg)                                                                          \
+    do {                                                                                           \
+        if (!(cond)) {                                                                             \
+            FAIL(msg);                                                                             \
+            return;                                                                                \
+        }                                                                                          \
+    } while (0)
 
 /* Heap-allocate a session_db_t. session_init does memset internally so the
    caller does not need to zero the memory first. */
-#define ALLOC_DB(var) \
-    session_db_t *var = malloc(sizeof(*var)); \
-    if (!(var)) { FAIL("OOM allocating session_db_t"); return; }
+#define ALLOC_DB(var)                                                                              \
+    session_db_t *var = malloc(sizeof(*var));                                                      \
+    if (!(var)) {                                                                                  \
+        FAIL("OOM allocating session_db_t");                                                       \
+        return;                                                                                    \
+    }
 
-#define FREE_DB(var) do { session_free(var); free(var); } while(0)
+#define FREE_DB(var)                                                                               \
+    do {                                                                                           \
+        session_free(var);                                                                         \
+        free(var);                                                                                 \
+    } while (0)
 
 static void reset_test_db(void) {
     const char *p = getenv("DSCO_SESSION_PATH");
-    if (p && *p) remove(p);
+    if (p && *p)
+        remove(p);
 }
 
 /* Back-date a KV entry's created_at to simulate TTL expiry. */
@@ -113,7 +139,7 @@ static void test_remember_and_recall(void) {
     ASSERT(session_init(db, "crypto analysis") == 0, "init failed");
 
     ASSERT(session_remember(db, "btc_eth_corr", "0.92", 0) == 0, "remember failed");
-    ASSERT(session_remember(db, "vol_high",     "true", 0) == 0, "remember failed");
+    ASSERT(session_remember(db, "vol_high", "true", 0) == 0, "remember failed");
 
     const char *v = session_recall(db, "btc_eth_corr");
     ASSERT(v != NULL, "recall returned NULL");
@@ -250,8 +276,10 @@ static void test_cross_session_persistence(void) {
     {
         ALLOC_DB(db);
         ASSERT(session_init(db, "session one") == 0, "init S1 failed");
-        ASSERT(session_remember(db, "market_regime", "bull", SESSION_TTL_SEMANTIC) == 0, "store failed");
-        ASSERT(session_remember(db, "risk_level",    "low",  SESSION_TTL_SEMANTIC) == 0, "store failed");
+        ASSERT(session_remember(db, "market_regime", "bull", SESSION_TTL_SEMANTIC) == 0,
+               "store failed");
+        ASSERT(session_remember(db, "risk_level", "low", SESSION_TTL_SEMANTIC) == 0,
+               "store failed");
         ASSERT(session_persist(db) == 0, "persist S1 failed");
         FREE_DB(db);
     }
@@ -282,7 +310,8 @@ static void test_cross_session_episodic_survives(void) {
     {
         ALLOC_DB(db);
         ASSERT(session_init(db, "research") == 0, "init failed");
-        ASSERT(session_remember(db, "correlation", "0.87", SESSION_TTL_EPISODIC) == 0, "store failed");
+        ASSERT(session_remember(db, "correlation", "0.87", SESSION_TTL_EPISODIC) == 0,
+               "store failed");
         ASSERT(session_persist(db) == 0, "persist failed");
         FREE_DB(db);
     }
@@ -306,7 +335,8 @@ static void test_cross_session_working_expired(void) {
     {
         ALLOC_DB(db);
         ASSERT(session_init(db, "quick scan") == 0, "init failed");
-        ASSERT(session_remember(db, "tmp_scan", "results", SESSION_TTL_WORKING) == 0, "store failed");
+        ASSERT(session_remember(db, "tmp_scan", "results", SESSION_TTL_WORKING) == 0,
+               "store failed");
         /* Simulate 2 minutes passing: backdate past the 60s working TTL */
         backdate_kv(db, "tmp_scan", 120.0);
         ASSERT(session_persist(db) == 0, "persist failed");
@@ -329,8 +359,8 @@ static void test_multiple_kv_entries_serialized(void) {
     TEST("multiple KV entries survive persist+reload");
     reset_test_db();
 
-    const char *keys[]   = { "alpha", "beta", "gamma", "delta", "epsilon" };
-    const char *values[] = { "1",     "2",    "3",     "4",     "5"       };
+    const char *keys[] = {"alpha", "beta", "gamma", "delta", "epsilon"};
+    const char *values[] = {"1", "2", "3", "4", "5"};
     int n = 5;
 
     {
@@ -348,7 +378,8 @@ static void test_multiple_kv_entries_serialized(void) {
         int matched = 0;
         for (int i = 0; i < n; i++) {
             const char *v = session_recall(db, keys[i]);
-            if (v && strcmp(v, values[i]) == 0) matched++;
+            if (v && strcmp(v, values[i]) == 0)
+                matched++;
         }
         ASSERT(matched == n, "not all entries survived reload");
         FREE_DB(db);
@@ -438,7 +469,8 @@ static void test_promotion_semantic_persists_after_reload(void) {
     {
         ALLOC_DB(db);
         ASSERT(session_init(db, NULL) == 0, "init failed");
-        ASSERT(session_remember(db, "learned_fact", "important", SESSION_TTL_EPISODIC) == 0, "store failed");
+        ASSERT(session_remember(db, "learned_fact", "important", SESSION_TTL_EPISODIC) == 0,
+               "store failed");
         set_kv_access_count(db, "learned_fact", SESSION_PROMOTE_THRESHOLD);
         session_promote(db);
         ASSERT(get_kv_tier(db, "learned_fact") == MEM_SEMANTIC, "should be semantic");
@@ -466,7 +498,8 @@ static void test_session_end(void) {
     {
         ALLOC_DB(db);
         ASSERT(session_init(db, "trading analysis") == 0, "init failed");
-        ASSERT(session_remember(db, "edge_factor", "0.42", SESSION_TTL_EPISODIC) == 0, "store failed");
+        ASSERT(session_remember(db, "edge_factor", "0.42", SESSION_TTL_EPISODIC) == 0,
+               "store failed");
         set_kv_access_count(db, "edge_factor", SESSION_PROMOTE_THRESHOLD);
         ASSERT(session_end(db) == 0, "session_end failed");
         FREE_DB(db);
@@ -660,10 +693,11 @@ static void test_recall_accuracy(void) {
         int recalled = 0;
         for (int i = 0; i < 100; i++) {
             char key[64], expected[64];
-            snprintf(key,      sizeof(key),      "accuracy_key_%03d", i);
-            snprintf(expected, sizeof(expected),  "val_%03d", i);
+            snprintf(key, sizeof(key), "accuracy_key_%03d", i);
+            snprintf(expected, sizeof(expected), "val_%03d", i);
             const char *v = session_recall(db, key);
-            if (v && strcmp(v, expected) == 0) recalled++;
+            if (v && strcmp(v, expected) == 0)
+                recalled++;
         }
 
         double accuracy = (double)recalled / 100.0;
@@ -737,7 +771,8 @@ int main(void) {
 
     int total = g_run;
     fprintf(stderr, "\n=== Results: %d/%d passed", g_pass, total);
-    if (g_fail) fprintf(stderr, ", \033[31m%d FAILED\033[0m", g_fail);
+    if (g_fail)
+        fprintf(stderr, ", \033[31m%d FAILED\033[0m", g_fail);
     fprintf(stderr, " ===\n\n");
 
     return g_fail > 0 ? 1 : 0;

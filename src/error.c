@@ -31,8 +31,7 @@ void dsco_err_clear(void) {
     memset(&tl_error, 0, sizeof(tl_error));
 }
 
-void dsco_err_set(dsco_err_code_t code, const char *file, int line,
-                  const char *fmt, ...) {
+void dsco_err_set(dsco_err_code_t code, const char *file, int line, const char *fmt, ...) {
     dsco_err_clear();
     tl_error.code = code;
     tl_error.file = file;
@@ -44,8 +43,7 @@ void dsco_err_set(dsco_err_code_t code, const char *file, int line,
     va_end(ap);
 }
 
-void dsco_err_wrap(dsco_err_code_t code, const char *file, int line,
-                   const char *fmt, ...) {
+void dsco_err_wrap(dsco_err_code_t code, const char *file, int line, const char *fmt, ...) {
     /* Save current error as cause */
     dsco_error_t *prev = malloc(sizeof(dsco_error_t));
     if (prev) {
@@ -66,18 +64,30 @@ void dsco_err_wrap(dsco_err_code_t code, const char *file, int line,
 
 const char *dsco_err_code_str(dsco_err_code_t code) {
     switch (code) {
-        case DSCO_ERR_OK:        return "OK";
-        case DSCO_ERR_PARSE:     return "PARSE";
-        case DSCO_ERR_NET:       return "NET";
-        case DSCO_ERR_TOOL:      return "TOOL";
-        case DSCO_ERR_OOM:       return "OOM";
-        case DSCO_ERR_IO:        return "IO";
-        case DSCO_ERR_TIMEOUT:   return "TIMEOUT";
-        case DSCO_ERR_MCP:       return "MCP";
-        case DSCO_ERR_PROVIDER:  return "PROVIDER";
-        case DSCO_ERR_BUDGET:    return "BUDGET";
-        case DSCO_ERR_INJECTION: return "INJECTION";
-        case DSCO_ERR_INTERNAL:  return "INTERNAL";
+        case DSCO_ERR_OK:
+            return "OK";
+        case DSCO_ERR_PARSE:
+            return "PARSE";
+        case DSCO_ERR_NET:
+            return "NET";
+        case DSCO_ERR_TOOL:
+            return "TOOL";
+        case DSCO_ERR_OOM:
+            return "OOM";
+        case DSCO_ERR_IO:
+            return "IO";
+        case DSCO_ERR_TIMEOUT:
+            return "TIMEOUT";
+        case DSCO_ERR_MCP:
+            return "MCP";
+        case DSCO_ERR_PROVIDER:
+            return "PROVIDER";
+        case DSCO_ERR_BUDGET:
+            return "BUDGET";
+        case DSCO_ERR_INJECTION:
+            return "INJECTION";
+        case DSCO_ERR_INTERNAL:
+            return "INTERNAL";
     }
     return "UNKNOWN";
 }

@@ -23,17 +23,12 @@ static double now_sec(void) {
 
 /* ── Name Tables ──────────────────────────────────────────────────────── */
 
-static const char *LEVEL_NAMES[] = {
-    "agent", "workflow", "service", "pheromone", "system"
-};
+static const char *LEVEL_NAMES[] = {"agent", "workflow", "service", "pheromone", "system"};
 
-static const char *STATE_NAMES[] = {
-    "armed", "triggered", "resolved", "expired"
-};
+static const char *STATE_NAMES[] = {"armed", "triggered", "resolved", "expired"};
 
-static const char *TRIGGER_NAMES[] = {
-    "manual", "budget", "timeout", "safety", "cascade", "anomaly", "heartbeat"
-};
+static const char *TRIGGER_NAMES[] = {"manual",  "budget",  "timeout",  "safety",
+                                      "cascade", "anomaly", "heartbeat"};
 
 const char *killswitch_level_name(kill_level_t l) {
     return (l >= 0 && l < KILL_LEVEL_COUNT) ? LEVEL_NAMES[l] : "unknown";
@@ -71,10 +66,12 @@ void killswitch_set_vfs(vfs_db_t *vfs) {
 }
 
 int killswitch_restore_from_vfs(killswitch_registry_t *r) {
-    if (!r || !r->initialized || !g_ks_vfs) return 0;
+    if (!r || !r->initialized || !g_ks_vfs)
+        return 0;
     int key_count = 0;
     char **keys = vfs_kv_keys(g_ks_vfs, "killswitch", &key_count);
-    if (!keys || key_count <= 0) return 0;
+    if (!keys || key_count <= 0)
+        return 0;
 
     int restored = 0;
     for (int i = 0; i < key_count; i++) {
@@ -82,15 +79,19 @@ int killswitch_restore_from_vfs(killswitch_registry_t *r) {
         if (val && strcmp(val, "active") == 0) {
             /* Re-trigger as a safety kill at tier 0 with no timeout */
             kill_level_t level = KILL_AGENT; /* default */
-            if (strcmp(keys[i], "system") == 0)      level = KILL_SYSTEM;
-            else if (strcmp(keys[i], "workflow") == 0) level = KILL_WORKFLOW;
-            else if (strcmp(keys[i], "service") == 0)  level = KILL_SERVICE;
-            else if (strcmp(keys[i], "pheromone") == 0) level = KILL_PHEROMONE;
+            if (strcmp(keys[i], "system") == 0)
+                level = KILL_SYSTEM;
+            else if (strcmp(keys[i], "workflow") == 0)
+                level = KILL_WORKFLOW;
+            else if (strcmp(keys[i], "service") == 0)
+                level = KILL_SERVICE;
+            else if (strcmp(keys[i], "pheromone") == 0)
+                level = KILL_PHEROMONE;
 
-            int kid = killswitch_trigger(r, level, keys[i],
-                                          "restored from VFS persistence",
-                                          KILL_TRIGGER_SAFETY, 0, 0, false);
-            if (kid >= 0) restored++;
+            int kid = killswitch_trigger(r, level, keys[i], "restored from VFS persistence",
+                                         KILL_TRIGGER_SAFETY, 0, 0, false);
+            if (kid >= 0)
+                restored++;
             free(val);
         }
         free(keys[i]);
@@ -101,18 +102,22 @@ int killswitch_restore_from_vfs(killswitch_registry_t *r) {
 
 /* ── Trigger ──────────────────────────────────────────────────────────── */
 
-int killswitch_trigger(killswitch_registry_t *r, kill_level_t level,
-                       const char *target, const char *reason,
-                       kill_trigger_t trigger, int principal_tier,
+int killswitch_trigger(killswitch_registry_t *r, kill_level_t level, const char *target,
+                       const char *reason, kill_trigger_t trigger, int principal_tier,
                        double timeout, bool cascade) {
-    if (!r || !r->initialized) return -1;
-    if (level < 0 || level >= KILL_LEVEL_COUNT) return -1;
-    if (trigger < 0 || trigger > KILL_TRIGGER_HEARTBEAT) return -1;
-    if (r->active_count >= KILLSWITCH_MAX_ACTIVE) return -1;
+    if (!r || !r->initialized)
+        return -1;
+    if (level < 0 || level >= KILL_LEVEL_COUNT)
+        return -1;
+    if (trigger < 0 || trigger > KILL_TRIGGER_HEARTBEAT)
+        return -1;
+    if (r->active_count >= KILLSWITCH_MAX_ACTIVE)
+        return -1;
 
     /* Authorization check */
     int req_tier = required_tier_for_level(level, trigger);
-    if (principal_tier > req_tier) return -1; /* higher number = lower authority */
+    if (principal_tier > req_tier)
+        return -1; /* higher number = lower authority */
 
     killswitch_entry_t *e = &r->active[r->active_count];
     memset(e, 0, sizeof(*e));
@@ -126,8 +131,10 @@ int killswitch_trigger(killswitch_registry_t *r, kill_level_t level,
     e->timeout = timeout;
     e->cascade = cascade;
 
-    if (target) snprintf(e->target, sizeof(e->target), "%s", target);
-    if (reason) snprintf(e->reason, sizeof(e->reason), "%s", reason);
+    if (target)
+        snprintf(e->target, sizeof(e->target), "%s", target);
+    if (reason)
+        snprintf(e->reason, sizeof(e->reason), "%s", reason);
 
     r->active_count++;
     r->total_triggers++;
@@ -148,15 +155,16 @@ int killswitch_trigger(killswitch_registry_t *r, kill_level_t level,
 
 /* ── Resolve ──────────────────────────────────────────────────────────── */
 
-bool killswitch_resolve(killswitch_registry_t *r, int kill_id,
-                        int principal_tier) {
-    if (!r || !r->initialized) return false;
+bool killswitch_resolve(killswitch_registry_t *r, int kill_id, int principal_tier) {
+    if (!r || !r->initialized)
+        return false;
 
     for (int i = 0; i < r->active_count; i++) {
         killswitch_entry_t *e = &r->active[i];
         if (e->id == kill_id && e->state == KILL_STATE_TRIGGERED) {
             /* Must have equal or higher authority than the trigger level */
-            if (principal_tier > e->required_tier) return false;
+            if (principal_tier > e->required_tier)
+                return false;
 
             e->state = KILL_STATE_RESOLVED;
             e->resolved_at = now_sec();
@@ -200,13 +208,14 @@ bool killswitch_resolve(killswitch_registry_t *r, int kill_id,
 /* ── Query ────────────────────────────────────────────────────────────── */
 
 bool killswitch_is_killed(const killswitch_registry_t *r, const char *target) {
-    if (!r || !r->initialized || !target) return false;
-    if (r->system_halted) return true;
+    if (!r || !r->initialized || !target)
+        return false;
+    if (r->system_halted)
+        return true;
 
     for (int i = 0; i < r->active_count; i++) {
         const killswitch_entry_t *e = &r->active[i];
-        if (e->state == KILL_STATE_TRIGGERED &&
-            strcmp(e->target, target) == 0) {
+        if (e->state == KILL_STATE_TRIGGERED && strcmp(e->target, target) == 0) {
             return true;
         }
     }
@@ -217,9 +226,10 @@ bool killswitch_system_halted(const killswitch_registry_t *r) {
     return r && r->system_halted;
 }
 
-bool killswitch_level_active(const killswitch_registry_t *r,
-                             kill_level_t level, const char *target) {
-    if (!r || !r->initialized) return false;
+bool killswitch_level_active(const killswitch_registry_t *r, kill_level_t level,
+                             const char *target) {
+    if (!r || !r->initialized)
+        return false;
     for (int i = 0; i < r->active_count; i++) {
         const killswitch_entry_t *e = &r->active[i];
         if (e->state == KILL_STATE_TRIGGERED && e->level == level) {
@@ -232,7 +242,8 @@ bool killswitch_level_active(const killswitch_registry_t *r,
 
 int killswitch_get_active(const killswitch_registry_t *r, const char *target,
                           killswitch_entry_t *out, int max) {
-    if (!r || !out || max <= 0) return 0;
+    if (!r || !out || max <= 0)
+        return 0;
     int count = 0;
     for (int i = 0; i < r->active_count && count < max; i++) {
         const killswitch_entry_t *e = &r->active[i];
@@ -245,21 +256,22 @@ int killswitch_get_active(const killswitch_registry_t *r, const char *target,
     return count;
 }
 
-int killswitch_list_active(const killswitch_registry_t *r,
-                           killswitch_entry_t *out, int max) {
+int killswitch_list_active(const killswitch_registry_t *r, killswitch_entry_t *out, int max) {
     return killswitch_get_active(r, NULL, out, max);
 }
 
 /* ── Maintenance ──────────────────────────────────────────────────────── */
 
 int killswitch_tick(killswitch_registry_t *r) {
-    if (!r || !r->initialized) return 0;
+    if (!r || !r->initialized)
+        return 0;
     double t = now_sec();
     int changes = 0;
 
     for (int i = r->active_count - 1; i >= 0; i--) {
         killswitch_entry_t *e = &r->active[i];
-        if (e->state != KILL_STATE_TRIGGERED) continue;
+        if (e->state != KILL_STATE_TRIGGERED)
+            continue;
 
         /* Check timeout */
         if (e->timeout > 0 && (t - e->triggered_at) >= e->timeout) {
@@ -282,8 +294,7 @@ int killswitch_tick(killswitch_registry_t *r) {
     if (changes) {
         r->system_halted = false;
         for (int i = 0; i < r->active_count; i++) {
-            if (r->active[i].level == KILL_SYSTEM &&
-                r->active[i].state == KILL_STATE_TRIGGERED) {
+            if (r->active[i].level == KILL_SYSTEM && r->active[i].state == KILL_STATE_TRIGGERED) {
                 r->system_halted = true;
                 break;
             }
@@ -296,22 +307,20 @@ int killswitch_tick(killswitch_registry_t *r) {
 /* ── Serialization ────────────────────────────────────────────────────── */
 
 int killswitch_to_json(const killswitch_registry_t *r, char *buf, size_t len) {
-    if (!r || !buf) return 0;
+    if (!r || !buf)
+        return 0;
     double t = now_sec();
     int n = snprintf(buf, len, "{\"active\":[");
 
     for (int i = 0; i < r->active_count && (size_t)n < len - 256; i++) {
         const killswitch_entry_t *e = &r->active[i];
         n += snprintf(buf + n, len - n,
-            "%s{\"id\":%d,\"level\":\"%s\",\"state\":\"%s\","
-            "\"trigger\":\"%s\",\"target\":\"%s\","
-            "\"reason\":\"%s\",\"age\":%.1f,\"timeout\":%.1f}",
-            i ? "," : "", e->id,
-            killswitch_level_name(e->level),
-            killswitch_state_name(e->state),
-            killswitch_trigger_name(e->trigger),
-            e->target, e->reason,
-            t - e->triggered_at, e->timeout);
+                      "%s{\"id\":%d,\"level\":\"%s\",\"state\":\"%s\","
+                      "\"trigger\":\"%s\",\"target\":\"%s\","
+                      "\"reason\":\"%s\",\"age\":%.1f,\"timeout\":%.1f}",
+                      i ? "," : "", e->id, killswitch_level_name(e->level),
+                      killswitch_state_name(e->state), killswitch_trigger_name(e->trigger),
+                      e->target, e->reason, t - e->triggered_at, e->timeout);
     }
 
     n += snprintf(buf + n, len - n, "]}");
@@ -319,17 +328,17 @@ int killswitch_to_json(const killswitch_registry_t *r, char *buf, size_t len) {
 }
 
 int killswitch_status_json(const killswitch_registry_t *r, char *buf, size_t len) {
-    if (!r || !buf) return 0;
+    if (!r || !buf)
+        return 0;
     int n = snprintf(buf, len,
-        "{\"system_halted\":%s,\"active_count\":%d,"
-        "\"total_triggers\":%d,\"total_cascades\":%d,"
-        "\"per_level\":{",
-        r->system_halted ? "true" : "false",
-        r->active_count, r->total_triggers, r->total_cascades);
+                     "{\"system_halted\":%s,\"active_count\":%d,"
+                     "\"total_triggers\":%d,\"total_cascades\":%d,"
+                     "\"per_level\":{",
+                     r->system_halted ? "true" : "false", r->active_count, r->total_triggers,
+                     r->total_cascades);
 
     for (int l = 0; l < KILL_LEVEL_COUNT; l++) {
-        n += snprintf(buf + n, len - n, "%s\"%s\":%d",
-                      l ? "," : "", killswitch_level_name(l),
+        n += snprintf(buf + n, len - n, "%s\"%s\":%d", l ? "," : "", killswitch_level_name(l),
                       r->per_level_count[l]);
     }
     n += snprintf(buf + n, len - n, "}}");

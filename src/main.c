@@ -530,8 +530,13 @@ static dsco_caps_t main_plan_startup_caps(int argc, char **argv,
         caps |= DSCO_CAP_PROVIDER | DSCO_CAP_TOOLS;
 
     bool has_prompt = false;
+    bool local_mode = false;
     for (int i = 1; i < argc; i++) {
         if (strcmp(argv[i], "--") == 0) break;
+        if (strcmp(argv[i], "--local") == 0) {
+            local_mode = true;
+            continue;
+        }
         if (strcmp(argv[i], "--tool-exec") == 0) {
             caps |= DSCO_CAP_TOOLS;
             if (i + 2 < argc) i += 2;
@@ -579,12 +584,14 @@ static dsco_caps_t main_plan_startup_caps(int argc, char **argv,
         main_argv_has(argc, argv, "--interactive") ||
         main_argv_has(argc, argv, "-e") ||
         main_argv_has(argc, argv, "--exec") ||
-        main_argv_has(argc, argv, "--provider")) {
+        main_argv_has(argc, argv, "--provider") ||
+        local_mode) {
         caps |= DSCO_CAP_PROVIDER | DSCO_CAP_TOOLS;
     }
 
     if (main_argv_has(argc, argv, "-i") ||
         main_argv_has(argc, argv, "--interactive") ||
+        (local_mode && !has_prompt) ||
         main_argv_has(argc, argv, "--ui") ||
         main_argv_has(argc, argv, "-ui")) {
         caps |= DSCO_CAP_TUI;
@@ -847,6 +854,9 @@ static const exec_reg_t EXEC_REGISTRY[] = {
 #define CAP_THINKING    (1 << 4)   /* extended thinking / reasoning */
 #define CAP_JSON        (1 << 5)   /* structured JSON output */
 #define CAP_CACHE       (1 << 6)   /* prompt caching */
+
+#define DSCO_LOCAL_PROVIDER "lmstudio"
+#define DSCO_LOCAL_MODEL    "lmstudio:liquid/lfm2.5-1.2b"
 
 typedef struct {
     const char *name;
@@ -1938,6 +1948,7 @@ static void usage(const char *prog) {
         "  --topology-list        List available topologies\n"
         "  --ui [PORT]            Launch web UI (default port: 3141)\n"
         "  -i, --interactive      Start an interactive REPL (no prompt required)\n"
+        "  --local                Use LM Studio locally (default model: liquid/lfm2.5-1.2b)\n"
         "  -e, --exec BACKEND    Execute via CLI/provider (claude, codex, auto, smart, list, bench, bench-tools, smoke, smoke-full, <provider>)\n"
         "  --provider NAME       Force a native provider (anthropic, openai, openrouter, xai, ...)\n"
         "  --                    Pass remaining args to executor (after -e)\n"
@@ -2519,10 +2530,24 @@ int main(int argc, char **argv) {
      * Opt out with DSCO_NO_AUTO_SUPERVISE=1 or DSCO_SUPERVISE_RESTART=transient. */
     if (!getenv("DSCO_NO_SUPERVISE") && !getenv("DSCO_NO_AUTO_SUPERVISE")) {
         bool _is_interactive = (argc == 1);
+        bool _local_flag = false;
+        bool _local_has_prompt = false;
         for (int _k = 1; _k < argc && !_is_interactive; _k++) {
             if (strcmp(argv[_k], "-i") == 0 || strcmp(argv[_k], "--interactive") == 0)
                 _is_interactive = true;
+            else if (strcmp(argv[_k], "--local") == 0)
+                _local_flag = true;
+            else if ((strcmp(argv[_k], "-m") == 0 || strcmp(argv[_k], "-k") == 0 ||
+                      strcmp(argv[_k], "--profile") == 0 ||
+                      strcmp(argv[_k], "--provider") == 0 ||
+                      strcmp(argv[_k], "--exec") == 0 || strcmp(argv[_k], "-e") == 0) &&
+                     _k + 1 < argc)
+                _k++;
+            else if (_local_flag && argv[_k][0] != '-')
+                _local_has_prompt = true;
         }
+        if (_local_flag && !_local_has_prompt)
+            _is_interactive = true;
         if (_is_interactive && isatty(STDIN_FILENO) && isatty(STDERR_FILENO)) {
             int _sup_argc = argc + 1;
             char **_sup_argv = (char **)malloc((size_t)(_sup_argc + 1) * sizeof(char *));
@@ -2651,6 +2676,7 @@ int main(int argc, char **argv) {
     char **exec_extra = NULL;         /* passthrough args after -- */
     int exec_nextra = 0;
     bool user_set_model = false;
+    bool local_mode = false;
     bool ui_mode = false;
     int ui_port = 3141;
     bool orchestrate_mode = false;
@@ -2843,6 +2869,8 @@ int main(int argc, char **argv) {
                 int p = atoi(argv[i+1]);
                 if (p > 0 && p <= 65535) { ui_port = p; i++; }
             }
+        } else if (strcmp(argv[i], "--local") == 0) {
+            local_mode = true;
         } else if (strcmp(argv[i], "--cheap") == 0 || strcmp(argv[i], "-C") == 0) {
             g_cheap_mode = 1;
         } else if (strcmp(argv[i], "--orchestrate") == 0 || strcmp(argv[i], "-O") == 0) {
@@ -2891,8 +2919,17 @@ int main(int argc, char **argv) {
         }
     }
 
+    if (local_mode) {
+        g_provider_override = DSCO_LOCAL_PROVIDER;
+        if (!user_set_model) {
+            model = DSCO_LOCAL_MODEL;
+        }
+        if (!oneshot_prompt)
+            interactive_mode = true;
+    }
+
     /* DSCO_EXEC env var as default */
-    if (!exec_backend && !interactive_mode) {
+    if (!exec_backend && !interactive_mode && !local_mode) {
         const char *env_exec = getenv("DSCO_EXEC");
         if (env_exec && env_exec[0]) {
             exec_backend = env_exec;
