@@ -2505,6 +2505,47 @@ int main(int argc, char **argv) {
      * the supervisor reads to rescue the session. */
     main_install_crash_handlers();
 
+    /* Auto-supervise interactive sessions so terminal kills, OOM SIGKILL, and
+     * crashes never lose the session.  Bare `dsco` or `dsco -i` in a TTY
+     * re-execs as `dsco supervise <self> [args]` unless already supervised
+     * (DSCO_NO_SUPERVISE=1) or opted out (DSCO_NO_AUTO_SUPERVISE=1).
+     *
+     * Kill vectors handled:
+     *   Terminal close (SIGHUP):  supervisor catches, forwards to child,
+     *     child autosaves+exits, supervisor relaunches (permanent restart).
+     *   OOM SIGKILL (jetsam):     supervisor pre-empts with SIGTERM+restart.
+     *   Crash (SIGSEGV/SIGBUS):   supervisor captures backtrace, restarts
+     *     with DSCO_RESUME_AFTER_CRASH=1 so session continues.
+     * Opt out with DSCO_NO_AUTO_SUPERVISE=1 or DSCO_SUPERVISE_RESTART=transient. */
+    if (!getenv("DSCO_NO_SUPERVISE") && !getenv("DSCO_NO_AUTO_SUPERVISE")) {
+        bool _is_interactive = (argc == 1);
+        for (int _k = 1; _k < argc && !_is_interactive; _k++) {
+            if (strcmp(argv[_k], "-i") == 0 || strcmp(argv[_k], "--interactive") == 0)
+                _is_interactive = true;
+        }
+        if (_is_interactive && isatty(STDIN_FILENO) && isatty(STDERR_FILENO)) {
+            int _sup_argc = argc + 1;
+            char **_sup_argv = (char **)malloc((size_t)(_sup_argc + 1) * sizeof(char *));
+            if (_sup_argv) {
+                _sup_argv[0] = argv[0];
+                _sup_argv[1] = (char *)"supervise";
+                for (int _k = 1; _k < argc; _k++)
+                    _sup_argv[_k + 1] = argv[_k];
+                _sup_argv[_sup_argc] = NULL;
+                /* permanent: supervisor keeps the session alive through clean exits
+                 * (terminal close → child autosaves+exits → supervisor relaunches).
+                 * Explicit /quit sets DSCO_SUPERVISE_RESTART=transient to let it stop. */
+                setenv("DSCO_SUPERVISE_RESTART", "permanent", 0);
+                execvp(_sup_argv[0], _sup_argv);
+                free(_sup_argv);
+                /* exec failed — fall through to run unsupervised */
+                fprintf(stderr,
+                        "[dsco] auto-supervise exec failed (%s) — running unsupervised\n",
+                        strerror(errno));
+            }
+        }
+    }
+
     /* Bare `dsco` in a TTY drops into the interactive REPL.
      * Non-TTY (pipe/redirect) keeps the old behavior of printing usage + error,
      * so scripts that accidentally forget the prompt fail loudly instead of

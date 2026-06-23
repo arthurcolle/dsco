@@ -1411,12 +1411,19 @@ static void exit_autosave_handler(void) {
 }
 
 static void sigterm_autosave(int sig) {
-    (void)sig;
+    /* Always autosave first — no conversation lost regardless of kill vector. */
     if (g_autosave_conv)
         autosave(g_autosave_conv, g_autosave_session);
     /* Reset terminal before exit — scroll region, bracketed paste, SGR */
     const char reset[] = "\033[r\033[?2004l\033[0m\033[?25h\n";
     (void)write(STDERR_FILENO, reset, sizeof(reset) - 1);
+    /* Under auto-supervisor (DSCO_NO_SUPERVISE=1 is set on child processes),
+     * exit cleanly on both SIGTERM and SIGHUP.  The supervisor sees EXIT_CLEAN
+     * and, with permanent restart, immediately relaunches us with
+     * DSCO_RESUME_AFTER_CRASH=1 so the session continues.  If the user
+     * explicitly wants to stop, they should set DSCO_SUPERVISE_RESTART=transient
+     * before sending SIGTERM, or use the /quit command which does that. */
+    (void)sig;
     _exit(0);
 }
 
