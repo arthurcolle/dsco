@@ -11,6 +11,7 @@
 #include <math.h>
 #include <sys/ioctl.h>
 #include <sys/stat.h>
+#include <dirent.h>
 #include <sys/time.h>
 #include <unistd.h>
 #include <time.h>
@@ -3373,6 +3374,79 @@ static bool composer_clipboard_grab_image(char *out_path, size_t out_sz) {
 #define TUI_SLASHMENU_MAX 8   /* max rows shown at once (scrolls beyond) */
 #define TUI_SLASHMENU_CAP 128 /* max matches tracked per keystroke */
 
+/* ═══ @ Image-picker ═══════════════════════════════════════════════════ */
+#define TUI_IMGPICK_MAX   10
+#define TUI_IMGPICK_CAP  256
+#define TUI_IMGPICK_NAMEW 38
+static const char *s_imgpick_exts[]={
+    ".png",".jpg",".jpeg",".gif",".webp",
+    ".bmp",".tif",".tiff",".heic",".heif",".avif",
+    ".PNG",".JPG",".JPEG",".GIF",".WEBP",
+    ".BMP",".TIF",".TIFF",".HEIC",".HEIF",".AVIF",NULL};
+static bool imgpick_has_ext(const char *n){
+    size_t nl=strlen(n);
+    for(int i=0;s_imgpick_exts[i];i++){size_t el=strlen(s_imgpick_exts[i]);
+        if(nl>=el&&strcasecmp(n+nl-el,s_imgpick_exts[i])==0)return true;}
+    return false;}
+static char s_imgpick_paths[TUI_IMGPICK_CAP][4096];
+static int  s_imgpick_count=0;
+static void imgpick_scan(const char *dir,const char *pfx){
+    s_imgpick_count=0;
+    DIR *dp=opendir((dir&&*dir)?dir:".");if(!dp)return;
+    struct dirent *de;size_t pl=pfx?strlen(pfx):0;
+    char cwd[4096];if(getcwd(cwd,sizeof(cwd))==NULL)strcpy(cwd,".");
+    const char *base=(dir&&*dir)?dir:cwd;
+    while((de=readdir(dp))!=NULL&&s_imgpick_count<TUI_IMGPICK_CAP){
+        const char *nm=de->d_name;if(nm[0]=='.')continue;
+        if(!imgpick_has_ext(nm))continue;
+        if(pl>0&&strncasecmp(nm,pfx,pl)!=0)continue;
+        snprintf(s_imgpick_paths[s_imgpick_count],sizeof(s_imgpick_paths[0]),
+                 "%s/%s",base,nm);s_imgpick_count++;}
+    closedir(dp);}
+static int imgpick_render(int r_first,int count,int sel){
+    int shown=count<TUI_IMGPICK_MAX?count:TUI_IMGPICK_MAX;if(shown==0)return 0;
+    int cols=tui_term_width();if(cols<30)cols=30;
+    int top=0;if(sel>=shown)top=sel-shown+1;
+    if(top>count-shown)top=count-shown;if(top<0)top=0;
+    for(int r=0;r<shown;r++){
+        int gi=top+r;bool on=(gi==sel);
+        const char *path=s_imgpick_paths[gi];
+        const char *fname=strrchr(path,'/');fname=fname?fname+1:path;
+        tui_cursor_move(r_first+r,1);fprintf(stderr,"\033[2K");
+        const char *mark=on?"\033[38;5;45m\xe2\x96\xb8\033[0m":" ";
+        const char *nc=on?"\033[1;38;5;45m":"\033[38;5;250m";
+        char nbuf[TUI_IMGPICK_NAMEW+4];snprintf(nbuf,sizeof(nbuf),"%s",fname);
+        char tmp[4096];snprintf(tmp,sizeof(tmp),"%s",path);
+        char *sl=strrchr(tmp,'/');if(sl)*sl='\0';
+        int used=2+1+1+3+1+TUI_IMGPICK_NAMEW+2;int dbud=cols-used-1;if(dbud<0)dbud=0;
+        char dbuf[4100];snprintf(dbuf,sizeof(dbuf),"%s",tmp);
+        if((int)strlen(dbuf)>dbud&&dbud>4){char el[4100];
+            snprintf(el,sizeof(el),"\xe2\x80\xa6%s",dbuf+(int)strlen(dbuf)-(dbud-1));
+            snprintf(dbuf,sizeof(dbuf),"%s",el);}
+        else if((int)strlen(dbuf)>dbud)dbuf[dbud]='\0';
+        fprintf(stderr,"  %s \xf0\x9f\x96\xbc %s%-*s\033[0m  \033[2;38;5;245m%s\033[0m",
+                mark,nc,TUI_IMGPICK_NAMEW,nbuf,dbuf);}
+    return shown;}
+static bool imgpick_parse_at(const char *buf,size_t cur,
+                              char *dir_out,size_t dir_sz,
+                              char *pfx_out,size_t pfx_sz){
+    if(cur==0)return false;size_t p=cur;
+    while(p>0&&buf[p-1]!=' '&&buf[p-1]!='\n')p--;
+    if(p>=cur||buf[p]!='@')return false;
+    const char *after=buf+p+1;size_t alen=cur-p-1;
+    const char *sl=NULL;
+    for(size_t i=0;i<alen;i++)if(after[i]=='/')sl=after+i;
+    if(sl){size_t dlen=(size_t)(sl-after);if(dlen>=dir_sz)dlen=dir_sz-1;
+        memcpy(dir_out,after,dlen);dir_out[dlen]='\0';
+        snprintf(pfx_out,pfx_sz,"%s",sl+1);
+    }else{char _cwd[4096];if(getcwd(_cwd,sizeof(_cwd))==NULL)strcpy(_cwd,".");
+        size_t dlen2=strlen(_cwd);if(dlen2>=dir_sz)dlen2=dir_sz-1;
+        memcpy(dir_out,_cwd,dlen2);dir_out[dlen2]='\0';
+        size_t plen=alen<pfx_sz-1?alen:pfx_sz-1;
+        memcpy(pfx_out,after,plen);pfx_out[plen]='\0';}
+    return true;}
+
+
 static const tui_cmd_entry_t *s_slash_cmds = NULL;
 static int s_slash_cmds_n = 0;
 
@@ -3474,10 +3548,12 @@ static int slashmenu_render(int r_first, const int *idx, int count, int sel) {
  * coordinates (always inside the box) are returned via cur_r/cur_c. Returns
  * the combined row count so the caller can anchor/scroll/clear correctly. */
 static int composer_paint(int r_top, const char *buf, size_t len, size_t cur, const int *sug_idx,
-                          int sug_count, int sug_sel, int *cur_r, int *cur_c) {
+                          int sug_count, int sug_sel, int *cur_r, int *cur_c,
+                          int imgpick_cnt, int imgpick_s) {
     int h = inbox_render(r_top, buf, len, cur, true, cur_r, cur_c);
     int m = slashmenu_render(r_top + h, sug_idx, sug_count, sug_sel);
-    return h + m;
+    int q = imgpick_render(r_top + h + m, imgpick_cnt, imgpick_s);
+    return h + m + q;
 }
 
 char *tui_composer_read(tui_status_bar_t *sb, const char *prompt, char *out, size_t out_sz) {
@@ -3530,6 +3606,11 @@ char *tui_composer_read(tui_status_bar_t *sb, const char *prompt, char *out, siz
     int sug_sel = 0;
     bool sug_suppress = false;
 
+    /* @-image-picker state */
+    bool imgpick_open  = false;
+    int  imgpick_count = 0;
+    int  imgpick_sel   = 0;
+
     /* History snapshot pointer for up/down */
     /* (We don't integrate with readline history here — keep composer
      *  self-contained. History nav is handled by the agent loop via
@@ -3579,7 +3660,7 @@ char *tui_composer_read(tui_status_bar_t *sb, const char *prompt, char *out, siz
     tui_term_lock();
     fprintf(stderr, "\033[?25l");
     int cur_r = r_top + 1, cur_c = 5;
-    prev_height = composer_paint(r_top, buf, len, cur, sug_idx, sug_count, sug_sel, &cur_r, &cur_c);
+    prev_height = composer_paint(r_top, buf, len, cur, sug_idx, sug_count, sug_sel, &cur_r, &cur_c, imgpick_count, imgpick_sel);
     tui_cursor_move(cur_r, cur_c);
     fprintf(stderr, "\033[?25h");
     fflush(stderr);
@@ -3738,6 +3819,20 @@ char *tui_composer_read(tui_status_bar_t *sb, const char *prompt, char *out, siz
             goto redraw;
         }
         if (c == '\r' || c == '\n') {
+            /* @-image-picker: Enter inserts selected path (keeps picker open
+             * so user can append another @ for multi-image).             */
+            if (imgpick_open && imgpick_count > 0) {
+                const char *sel_path = s_imgpick_paths[imgpick_sel];
+                size_t p2 = cur;
+                while (p2 > 0 && buf[p2-1] != ' ' && buf[p2-1] != '\n') p2--;
+                memmove(buf + p2, buf + cur, len - cur + 1);
+                len -= (cur - p2); cur = p2;
+                char ins2[4098];
+                snprintf(ins2, sizeof(ins2), "%s ", sel_path);
+                composer_insert(buf, TUI_COMPOSER_BUF_CAP, &len, &cur, ins2, strlen(ins2));
+                imgpick_open = false; imgpick_count = 0; imgpick_sel = 0;
+                goto redraw;
+            }
             /* Enter with the dropdown open → complete the highlighted command,
              * then submit it. (Use Tab if you need to add arguments first.)
              * Require at least one char after "/" so a bare "/" + Enter never
@@ -3766,9 +3861,23 @@ char *tui_composer_read(tui_status_bar_t *sb, const char *prompt, char *out, siz
             composer_backspace(buf, &len, &cur);
             sug_sel = 0;
             sug_suppress = false;
+            imgpick_sel = 0; /* reset picker highlight on token change */
             goto redraw;
         }
         if (c == 0x09) { /* Tab */
+            /* @-image-picker: Tab inserts selected path */
+            if (imgpick_open && imgpick_count > 0) {
+                const char *sel_path = s_imgpick_paths[imgpick_sel];
+                size_t p = cur;
+                while (p > 0 && buf[p-1] != ' ' && buf[p-1] != '\n') p--;
+                memmove(buf + p, buf + cur, len - cur + 1);
+                len -= (cur - p); cur = p;
+                char ins[4098];
+                snprintf(ins, sizeof(ins), "%s ", sel_path);
+                composer_insert(buf, TUI_COMPOSER_BUF_CAP, &len, &cur, ins, strlen(ins));
+                imgpick_open = false; imgpick_count = 0; imgpick_sel = 0;
+                goto redraw;
+            }
             /* With the dropdown open, Tab completes the highlighted command into
              * the buffer and dismisses the menu so you can type arguments. */
             if (sug_count > 0) {
@@ -3791,7 +3900,11 @@ char *tui_composer_read(tui_status_bar_t *sb, const char *prompt, char *out, siz
         if (c == 0x1B) {
             unsigned char n1 = 0;
             if (composer_read_byte(STDIN_FILENO, 30, &n1) <= 0) {
-                /* Standalone ESC → dismiss the dropdown if open, else cancel. */
+                /* Standalone ESC → dismiss pickers, else cancel. */
+                if (imgpick_open) {
+                    imgpick_open = false; imgpick_count = 0; imgpick_sel = 0;
+                    goto redraw;
+                }
                 if (sug_count > 0) {
                     sug_suppress = true;
                     goto redraw;
@@ -3852,6 +3965,13 @@ char *tui_composer_read(tui_status_bar_t *sb, const char *prompt, char *out, siz
             }
             /* When the dropdown is open, ↑/↓ move the highlight rather than the
              * text cursor (wrapping at the ends, like Claude Code / Codex). */
+            if (imgpick_open && imgpick_count > 0 && (n2 == 'A' || n2 == 'B')) {
+                if (n2 == 'A')
+                    imgpick_sel = (imgpick_sel - 1 + imgpick_count) % imgpick_count;
+                else
+                    imgpick_sel = (imgpick_sel + 1) % imgpick_count;
+                goto redraw;
+            }
             if (sug_count > 0 && (n2 == 'A' || n2 == 'B')) {
                 if (n2 == 'A')
                     sug_sel = (sug_sel - 1 + sug_count) % sug_count;
@@ -3994,7 +4114,18 @@ char *tui_composer_read(tui_status_bar_t *sb, const char *prompt, char *out, siz
                 sug_sel = sug_count > 0 ? sug_count - 1 : 0;
             if (sug_sel < 0)
                 sug_sel = 0;
-            int need = inbox_total_rows(buf, len) + slashmenu_rows(sug_count);
+            /* Refresh @-image-picker */
+            { char ip_dir[4096], ip_pfx[256];
+              imgpick_open = imgpick_parse_at(buf, cur, ip_dir, sizeof(ip_dir), ip_pfx, sizeof(ip_pfx));
+              if (imgpick_open) {
+                  imgpick_scan(ip_dir, ip_pfx);
+                  imgpick_count = s_imgpick_count;
+              } else { imgpick_count = 0; }
+              if (imgpick_sel >= imgpick_count)
+                  imgpick_sel = imgpick_count > 0 ? imgpick_count - 1 : 0;
+              if (imgpick_sel < 0) imgpick_sel = 0; }
+            int need = inbox_total_rows(buf, len) + slashmenu_rows(sug_count)
+                       + (imgpick_count < TUI_IMGPICK_MAX ? imgpick_count : TUI_IMGPICK_MAX);
             if (r_top + need - 1 > nrows) {
                 int overflow = (r_top + need - 1) - nrows;
                 tui_term_lock();
@@ -4023,7 +4154,7 @@ char *tui_composer_read(tui_status_bar_t *sb, const char *prompt, char *out, siz
             }
             int cr = r_top + 1, cc = 5;
             prev_height =
-                composer_paint(r_top, buf, len, cur, sug_idx, sug_count, sug_sel, &cr, &cc);
+                composer_paint(r_top, buf, len, cur, sug_idx, sug_count, sug_sel, &cr, &cc, imgpick_count, imgpick_sel);
             tui_cursor_move(cr, cc);
             fprintf(stderr, "\033[?25h");
             fflush(stderr);

@@ -2124,6 +2124,7 @@ static const slash_command_t s_slash_commands[] = {
     {"/trust", "set trust tier"},
     {"/web", "toggle web search"},
     {"/code", "toggle code execution"},
+    {"/image", "attach image — type @ in composer or paste from clipboard (Alt+I)"},
     {"/mcp", "show MCP servers and tools"},
     {"/mcp reload", "reload MCP servers/tools"},
     {"/provider", "show/detect API provider"},
@@ -4410,6 +4411,16 @@ void agent_run(const char *api_key, const char *model, const char *topology_name
                      session.code_execution ? "enabled" : "disabled");
             tui_success(msg);
             baseline_log("command", "/code", session.code_execution ? "on" : "off", NULL);
+            continue;
+        }
+        /* ── /image — image attachment help ──────────────────────────────── */
+        if (strcmp(input_buf, "/image") == 0) {
+            tui_info("Image attachment — two ways:\n"
+                     "  \033[1m@\033[0m in the composer  → live image browser (↑/↓ navigate, Tab/Enter insert)\n"
+                     "  \033[1mAlt+I\033[0m              → paste image from system clipboard\n"
+                     "  drag & drop path   → type or paste any image path directly\n"
+                     "Supported: png jpg jpeg gif webp bmp tif heic heif avif");
+            baseline_log("command", "/image", NULL, NULL);
             continue;
         }
         /* ── /sessions, /resume, /new, /rename — session workspace ─────── */
