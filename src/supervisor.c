@@ -58,9 +58,17 @@
 
 #define DSCO_FLEET_LOCK_PATH    "/tmp/dsco_fleet.lock"
 #define DSCO_FLEET_JSON_PATH    "/tmp/dsco_fleet.json"
-#define DSCO_POOL_BASE_MB           2048ULL  /* 2 GB starting pool    */
-#define DSCO_POOL_STEP_MB           1024ULL  /* +1 GB per step        */
+#define DSCO_POOL_BASE_MB           2048ULL
+#define DSCO_POOL_STEP_MB           1024ULL
 #define DSCO_PREEMPT_PRESSURE_LEVEL 4
+/* SOTA: EWMA + peak blend + derivative lookahead + shrink hysteresis */
+#define DSCO_EWMA_ALPHA_NUM         15
+#define DSCO_EWMA_ALPHA_DEN         100
+#define DSCO_PEAK_WEIGHT_NUM        30
+#define DSCO_PEAK_WEIGHT_DEN        100
+#define DSCO_DERIV_LOOKAHEAD_MB     200
+#define DSCO_SHRINK_HOLD_TICKS      12
+#define DSCO_SESSION_MIN_BUDGET_MB  256
 
 #define INCIDENT_SNIPPET_BYTES  8192
 
@@ -329,98 +337,140 @@ static int system_mem_pressure(void) {
 /* ============================================================
  * Fleet registry: cross-session dynamic memory budget
  * ============================================================ */
-static uint64_t fleet_total_rss_mb(void) {
-    int fd = open(DSCO_FLEET_JSON_PATH, O_RDONLY); if (fd < 0) return 0;
-    char buf[16384]; buf[0] = '\0';
-    ssize_t n = read(fd, buf, sizeof(buf)-1); close(fd);
-    if (n <= 0) return 0; buf[n] = '\0';
-    uint64_t total = 0; const char *p = buf;
-    while ((p = strstr(p, "\"rss_mb\":")) != NULL)
-        { p += 10; total += (uint64_t)strtoull(p, NULL, 10); }
-    return total;
+typedef struct{uint64_t ewma_mb;uint64_t peak_mb;int sessions;}fleet_totals_t;
+static fleet_totals_t fleet_read_totals(void){
+    fleet_totals_t t={0,0,0};
+    int fd=open(DSCO_FLEET_JSON_PATH,O_RDONLY);if(fd<0)return t;
+    char buf[16384];buf[0]='\0';
+    ssize_t n=read(fd,buf,sizeof(buf)-1);close(fd);
+    if(n<=0)return t;buf[n]='\0';
+    const char*p=buf;
+    while(*p){
+        const char*tsp=strstr(p,"\"ts\":");if(!tsp)break;
+        long long ts=strtoll(tsp+6,NULL,10);
+        long long age=(long long)time(NULL)-ts;
+        const char*ob=tsp;while(ob>buf&&*ob!='{')ob--;
+        const char*cb=strchr(tsp,'}');if(!cb)break;
+        if(age<=60){
+            const char*em=strstr(ob,"\"ewma_mb\":");
+            const char*pm=strstr(ob,"\"peak_mb\":");
+            if(em&&em<cb)t.ewma_mb+=(uint64_t)strtoull(em+10,NULL,10);
+            if(pm&&pm<cb)t.peak_mb+=(uint64_t)strtoull(pm+10,NULL,10);
+            t.sessions++;
+        }
+        p=cb+1;
+    }
+    if(t.sessions==0)t.sessions=1;
+    return t;
 }
 
-static void fleet_update(pid_t child, uint64_t rss_bytes, uint64_t budget_mb) {
-    int lfd = open(DSCO_FLEET_LOCK_PATH, O_RDWR|O_CREAT, 0600);
-    if (lfd < 0) return;
-    if (flock(lfd, LOCK_EX|LOCK_NB) != 0) { close(lfd); return; }
+static void fleet_update(pid_t child, uint64_t rss_bytes,
+                         uint64_t ewma_mb, uint64_t peak_mb, uint64_t budget_mb) {
+    int lfd=open(DSCO_FLEET_LOCK_PATH,O_RDWR|O_CREAT,0600);
+    if(lfd<0) return;
+    if(flock(lfd,LOCK_EX|LOCK_NB)!=0){close(lfd);return;}
     char buf[16384]; buf[0]='\0';
-    int jfd = open(DSCO_FLEET_JSON_PATH, O_RDONLY);
-    if (jfd>=0) { ssize_t n=read(jfd,buf,sizeof(buf)-1); if(n>0) buf[n]='\0'; close(jfd); }
+    int jfd=open(DSCO_FLEET_JSON_PATH,O_RDONLY);
+    if(jfd>=0){ssize_t n=read(jfd,buf,sizeof(buf)-1);if(n>0)buf[n]='\0';close(jfd);}
     char mykey[32]; snprintf(mykey,sizeof(mykey),"\"sup%d\"",(int)getpid());
     char out[16384]; int op=0; out[op++]='{';
     int w=snprintf(out+op,sizeof(out)-op,
-        "%s:{\"sup\":%d,\"child\":%d,\"rss_mb\":%llu,\"budget_mb\":%llu,\"ts\":%lld}",
+        "%s:{\"sup\":%d,\"child\":%d,\"rss_mb\":%llu"
+        ",\"ewma_mb\":%llu,\"peak_mb\":%llu"
+        ",\"budget_mb\":%llu,\"ts\":%lld}",
         mykey,(int)getpid(),(int)child,
-        (unsigned long long)(rss_bytes>>20),(unsigned long long)budget_mb,(long long)time(NULL));
-    if(w>0 && w<(int)sizeof(out)-op-2) op+=w;
-    if (buf[0]=='{') {
-        const char *p=buf+1;
-        while(*p && op<(int)sizeof(out)-256) {
-            const char *q=strchr(p,'"'); if(!q) break;
+        (unsigned long long)(rss_bytes>>20),
+        (unsigned long long)ewma_mb,(unsigned long long)peak_mb,
+        (unsigned long long)budget_mb,(long long)time(NULL));
+    if(w>0&&w<(int)sizeof(out)-op-2)op+=w;
+    if(buf[0]=='{'){
+        const char*p=buf+1;
+        while(*p&&op<(int)sizeof(out)-256){
+            const char*q=strchr(p,'"');if(!q)break;
             if(strncmp(q,mykey,strlen(mykey))==0){
-                const char *ob=strchr(q,'{'); const char *cb=ob?strchr(ob,'}'):NULL;
-                p=cb?cb+1:q+strlen(q); if(*p==',')p++; continue;}
-            const char *ob=strchr(q,'{'); const char *cb=ob?strchr(ob,'}'):NULL;
-            if(!ob||!cb) break;
-            const char *tsp=strstr(ob,"\"ts\":"); long long ts=0;
-            if(tsp) ts=strtoll(tsp+6,NULL,10);
-            if(ts>0 && (long long)time(NULL)-ts>60){p=cb+1;if(*p==',')p++;continue;}
+                const char*ob=strchr(q,'{');const char*cb=ob?strchr(ob,'}'):NULL;
+                p=cb?cb+1:q+strlen(q);if(*p==',')p++;continue;}
+            const char*ob=strchr(q,'{');const char*cb=ob?strchr(ob,'}'):NULL;
+            if(!ob||!cb)break;
+            const char*tsp=strstr(ob,"\"ts\":");long long ts=0;
+            if(tsp)ts=strtoll(tsp+6,NULL,10);
+            if(ts>0&&(long long)time(NULL)-ts>60){p=cb+1;if(*p==',')p++;continue;}
             out[op++]=',';
             int span=(int)(cb-q)+1;
             if(op+span<(int)sizeof(out)-2){memcpy(out+op,q,span);op+=span;}
-            p=cb+1; if(*p==',')p++;
+            p=cb+1;if(*p==',')p++;
         }
     }
-    if(op<(int)sizeof(out)-1) out[op++]='}'; out[op]='\0';
+    if(op<(int)sizeof(out)-1)out[op++]='}';out[op]='\0';
     jfd=open(DSCO_FLEET_JSON_PATH,O_WRONLY|O_CREAT|O_TRUNC,0644);
     if(jfd>=0){(void)write(jfd,out,op);close(jfd);}
-    flock(lfd,LOCK_UN); close(lfd);
+    flock(lfd,LOCK_UN);close(lfd);
 }
 
-static int fleet_session_count(void) {
-    int fd=open(DSCO_FLEET_JSON_PATH,O_RDONLY); if(fd<0) return 1;
-    char buf[16384]; buf[0]='\0';
-    ssize_t n=read(fd,buf,sizeof(buf)-1); close(fd);
-    if(n<=0) return 1; buf[n]='\0';
-    int c=0; const char *p=buf;
-    while((p=strstr(p,"\"ts\":"))!=NULL){c++;p+=6;}
-    return c>0?c:1;
-}
+/* fleet_session_count: replaced by fleet_read_totals().sessions */
 
 /* Dynamic budget: max(4GB, (avail_ram + our_rss) / n_sessions), cap 90% RAM */
-/* Shared-pool model, no doublings:
- *   pool = 2GB + k*1GB where k = steps until pool >= fleet_total_rss
- *   budget = pool / n_sessions
- * 1 session  @   0MB: pool=2GB budget=2GB
- * 1 session  @ 2.1GB: pool=3GB budget=3GB
- * 2 sessions @   0MB: pool=2GB budget=1GB each
- * 2 sessions @ 2.1GB: pool=3GB budget=1.5GB each
- * 2 sessions @ 3.1GB: pool=4GB budget=2GB each  */
-static uint64_t fleet_compute_budget(uint64_t our_rss_bytes) {
+/* Budget: EWMA + peak blend + derivative lookahead + shrink hysteresis.
+ * Signal design from TMO (Weiner et al. ASPLOS 2022) + ARMS (2025). */
+static uint64_t fleet_compute_budget(uint64_t our_rss_bytes,
+                                     uint64_t our_ewma_mb,
+                                     uint64_t our_peak_mb,
+                                     uint64_t fleet_deriv_mb,
+                                     int *shrink_hold_ticks) {
     (void)our_rss_bytes;
-    const char *em = getenv("DSCO_SUPERVISE_MEM_LIMIT_MB");
-    if (em && em[0] && atol(em) > 0) return (uint64_t)atol(em) << 20;
+    const char *explicit_mb = getenv("DSCO_SUPERVISE_MEM_LIMIT_MB");
+    if (explicit_mb && explicit_mb[0] && atol(explicit_mb) > 0)
+        return (uint64_t)atol(explicit_mb) << 20;
 
     uint64_t sys = system_mem_bytes();
-    uint64_t sys_ceil_mb = sys > 0 ? (sys >> 20) * 90ULL / 100ULL : 43008ULL;
+    uint64_t sys_ceil = sys > 0 ? (sys >> 20) * 90ULL / 100ULL : 43008ULL;
 
-    uint64_t fleet_rss = fleet_total_rss_mb();
-    uint64_t pool_mb = DSCO_POOL_BASE_MB;
-    while (pool_mb < fleet_rss && pool_mb < sys_ceil_mb)
-        pool_mb += DSCO_POOL_STEP_MB;
-    if (pool_mb > sys_ceil_mb) pool_mb = sys_ceil_mb;
+    fleet_totals_t ft = fleet_read_totals();
 
-    int sessions = fleet_session_count();
-    uint64_t budget_mb = sessions > 0 ? pool_mb / (uint64_t)sessions : pool_mb;
-    if (budget_mb < 1) budget_mb = 1;
+    /* Fleet blended demand: 70% EWMA + 30% peak */
+    uint64_t fleet_demand =
+        (ft.ewma_mb * (DSCO_PEAK_WEIGHT_DEN - DSCO_PEAK_WEIGHT_NUM)
+         + ft.peak_mb * DSCO_PEAK_WEIGHT_NUM) / DSCO_PEAK_WEIGHT_DEN;
+
+    /* Reactive pool expansion */
+    uint64_t pool = DSCO_POOL_BASE_MB;
+    while (pool < fleet_demand && pool < sys_ceil)
+        pool += DSCO_POOL_STEP_MB;
+
+    /* Derivative lookahead: growing fast -> pre-step */
+    if (fleet_deriv_mb > DSCO_DERIV_LOOKAHEAD_MB && pool + DSCO_POOL_STEP_MB <= sys_ceil)
+        pool += DSCO_POOL_STEP_MB;
+
+    /* Shrink hysteresis */
+    if (shrink_hold_ticks && pool > DSCO_POOL_BASE_MB
+        && fleet_demand + DSCO_POOL_STEP_MB < pool) {
+        if (++(*shrink_hold_ticks) >= DSCO_SHRINK_HOLD_TICKS) {
+            pool -= DSCO_POOL_STEP_MB;
+            *shrink_hold_ticks = 0;
+        }
+    } else if (shrink_hold_ticks) {
+        *shrink_hold_ticks = 0;
+    }
+    if (pool > sys_ceil) pool = sys_ceil;
+
+    /* Proportional allocation: our blended demand / fleet demand */
+    uint64_t our_demand =
+        (our_ewma_mb * (DSCO_PEAK_WEIGHT_DEN - DSCO_PEAK_WEIGHT_NUM)
+         + our_peak_mb * DSCO_PEAK_WEIGHT_NUM) / DSCO_PEAK_WEIGHT_DEN;
+    uint64_t fd_total = fleet_demand > 0 ? fleet_demand : 1;
+
+    uint64_t budget_mb = our_demand > 0
+        ? (pool * our_demand) / fd_total
+        : pool / (uint64_t)(ft.sessions > 0 ? ft.sessions : 1);
+
+    if (budget_mb < DSCO_SESSION_MIN_BUDGET_MB) budget_mb = DSCO_SESSION_MIN_BUDGET_MB;
     return budget_mb << 20;
 }
 
 /* Startup budget: delegate to fleet_compute_budget.
  * The poll loop refreshes dynamically every tick. */
 static uint64_t resolve_mem_hard_limit(void) {
-    return fleet_compute_budget(0);
+    return fleet_compute_budget(0, 0, 0, 0, NULL);
 }
 
 /* ── Crash classification ─────────────────────────────────────────────── */
@@ -791,6 +841,11 @@ int supervisor_run(int child_argc, char **child_argv) {
         uint64_t peak_rss = 0;
         bool soft_warned = false;
         bool preempted = false;   /* we asked the child to restart for memory */
+        uint64_t rss_ewma_mb  = 0;
+        uint64_t rss_peak_mb  = 0;
+        uint64_t prev_ewma_mb = 0;
+        uint64_t fleet_deriv  = 0;
+        int shrink_hold_ticks = 0;
         bool tracer_reaped = false; /* child reaped out from under us (lldb/gdb) */
         char metrics_path[PATH_MAX];
         child_metrics_path(child, metrics_path, sizeof(metrics_path));
@@ -822,10 +877,19 @@ int supervisor_run(int child_argc, char **child_argv) {
             if (rss > peak_rss) peak_rss = rss;
             double sample_now = now_monotonic();
 
-            /* Dynamic budget refresh + fleet registration every tick */
-            mem_hard_bytes = fleet_compute_budget(rss);
+            /* EWMA(alpha=0.15): smoothed working-set proxy. Update per tick. */
+            uint64_t rss_mb = rss >> 20;
+            prev_ewma_mb  = rss_ewma_mb;
+            rss_ewma_mb   = (DSCO_EWMA_ALPHA_NUM * rss_mb
+                             + (DSCO_EWMA_ALPHA_DEN - DSCO_EWMA_ALPHA_NUM) * rss_ewma_mb)
+                            / DSCO_EWMA_ALPHA_DEN;
+            if (rss_mb > rss_peak_mb) rss_peak_mb = rss_mb;
+            fleet_deriv = rss_ewma_mb > prev_ewma_mb ? rss_ewma_mb - prev_ewma_mb : 0;
+
+            mem_hard_bytes = fleet_compute_budget(rss, rss_ewma_mb, rss_peak_mb,
+                                                  fleet_deriv, &shrink_hold_ticks);
             mem_soft_bytes = mem_hard_bytes / 100ULL * (uint64_t)soft_pct;
-            fleet_update(child, rss, mem_hard_bytes >> 20);
+            fleet_update(child, rss, rss_ewma_mb, rss_peak_mb, mem_hard_bytes >> 20);
 
             if (metrics_s > 0 &&
                 (last_metrics_at == 0.0 || sample_now - last_metrics_at >= (double)metrics_s)) {

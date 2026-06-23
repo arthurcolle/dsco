@@ -32,17 +32,16 @@ static const char *k_identity_template =
     "- Prefer direct action, concrete outputs, and verifiable changes.\n"
     "- Preserve user control through transparent tool use and local state.\n";
 
-static const char *k_user_template =
-    "# User\n\n"
-    "Information about the user belongs here.\n\n"
-    "## Preferences\n"
-    "- Communication style:\n"
-    "- Language:\n"
-    "- Timezone:\n\n"
-    "## Important Context\n"
-    "- Project preferences:\n"
-    "- Tooling preferences:\n"
-    "- Constraints to respect:\n";
+static const char *k_user_template = "# User\n\n"
+                                     "Information about the user belongs here.\n\n"
+                                     "## Preferences\n"
+                                     "- Communication style:\n"
+                                     "- Language:\n"
+                                     "- Timezone:\n\n"
+                                     "## Important Context\n"
+                                     "- Project preferences:\n"
+                                     "- Tooling preferences:\n"
+                                     "- Constraints to respect:\n";
 
 static const char *k_soul_template =
     "# Soul\n\n"
@@ -57,15 +56,14 @@ static const char *k_soul_template =
     "- Action over narration\n"
     "- User control over hidden automation\n";
 
-static const char *k_memory_template =
-    "# Long-term Memory\n\n"
-    "Persist useful information across sessions.\n\n"
-    "## User Facts\n"
-    "- \n\n"
-    "## Preferences\n"
-    "- \n\n"
-    "## Ongoing Work\n"
-    "- \n";
+static const char *k_memory_template = "# Long-term Memory\n\n"
+                                       "Persist useful information across sessions.\n\n"
+                                       "## User Facts\n"
+                                       "- \n\n"
+                                       "## Preferences\n"
+                                       "- \n\n"
+                                       "## Ongoing Work\n"
+                                       "- \n";
 
 static const char *k_skills_readme_template =
     "# Skills\n\n"
@@ -84,14 +82,13 @@ static const char *k_c_workflow_skill =
     "- Run `make test` after changing behavior.\n"
     "- When changing interfaces, update the matching header and implementation together.\n";
 
-static const char *k_review_skill =
-    "# Review Checklist\n\n"
-    "Use this skill when reviewing code or validating a patch.\n\n"
-    "## Workflow\n"
-    "- Prioritize correctness, regressions, and missing tests.\n"
-    "- List findings before summaries.\n"
-    "- Reference concrete files and behavior.\n"
-    "- Call out unverified paths when tests were not run.\n";
+static const char *k_review_skill = "# Review Checklist\n\n"
+                                    "Use this skill when reviewing code or validating a patch.\n\n"
+                                    "## Workflow\n"
+                                    "- Prioritize correctness, regressions, and missing tests.\n"
+                                    "- List findings before summaries.\n"
+                                    "- Reference concrete files and behavior.\n"
+                                    "- Call out unverified paths when tests were not run.\n";
 
 static const char *k_soul_curator_skill =
     "# SOUL Curator\n\n"
@@ -112,10 +109,12 @@ static const char *k_soul_guardian_skill =
     "- Avoid irreversible edits; prefer incremental updates.\n";
 
 static void sbuf_append(char *out, size_t out_len, size_t *pos, const char *text) {
-    if (!out || out_len == 0 || !pos || !text || *pos >= out_len) return;
+    if (!out || out_len == 0 || !pos || !text || *pos >= out_len)
+        return;
     size_t remain = out_len - *pos;
     size_t need = strlen(text);
-    if (need >= remain) need = remain - 1;
+    if (need >= remain)
+        need = remain - 1;
     memcpy(out + *pos, text, need);
     *pos += need;
     out[*pos] = '\0';
@@ -124,39 +123,55 @@ static void sbuf_append(char *out, size_t out_len, size_t *pos, const char *text
 static bool mkdir_p(const char *path) {
     char tmp[PATH_MAX];
     size_t n = strlen(path);
-    if (n == 0 || n >= sizeof(tmp)) return false;
+    if (n == 0 || n >= sizeof(tmp))
+        return false;
     memcpy(tmp, path, n + 1);
     for (char *p = tmp + 1; *p; p++) {
         if (*p == '/') {
             *p = '\0';
-            if (mkdir(tmp, 0755) != 0 && errno != EEXIST) return false;
+            if (mkdir(tmp, 0755) != 0 && errno != EEXIST)
+                return false;
             *p = '/';
         }
     }
-    if (mkdir(tmp, 0755) != 0 && errno != EEXIST) return false;
+    if (mkdir(tmp, 0755) != 0 && errno != EEXIST)
+        return false;
     return true;
 }
 
 static bool ensure_parent_dir(const char *path) {
     char tmp[PATH_MAX];
     size_t n = strlen(path);
-    if (n == 0 || n >= sizeof(tmp)) return false;
+    if (n == 0 || n >= sizeof(tmp))
+        return false;
     memcpy(tmp, path, n + 1);
     char *slash = strrchr(tmp, '/');
-    if (!slash) return true;
+    if (!slash)
+        return true;
     *slash = '\0';
-    if (tmp[0] == '\0') return true;
+    if (tmp[0] == '\0')
+        return true;
     return mkdir_p(tmp);
 }
 
 static bool read_file_limit(const char *path, size_t limit, char **out) {
     *out = NULL;
     FILE *f = fopen(path, "r");
-    if (!f) return false;
-    if (fseek(f, 0, SEEK_END) != 0) { fclose(f); return false; }
+    if (!f)
+        return false;
+    if (fseek(f, 0, SEEK_END) != 0) {
+        fclose(f);
+        return false;
+    }
     long sz = ftell(f);
-    if (sz < 0 || (size_t)sz > limit) { fclose(f); return false; }
-    if (fseek(f, 0, SEEK_SET) != 0) { fclose(f); return false; }
+    if (sz < 0 || (size_t)sz > limit) {
+        fclose(f);
+        return false;
+    }
+    if (fseek(f, 0, SEEK_SET) != 0) {
+        fclose(f);
+        return false;
+    }
     char *buf = safe_malloc((size_t)sz + 1);
     size_t nr = fread(buf, 1, (size_t)sz, f);
     buf[nr] = '\0';
@@ -166,35 +181,45 @@ static bool read_file_limit(const char *path, size_t limit, char **out) {
 }
 
 static bool write_if_missing(const char *path, const char *content, int *created) {
-    if (access(path, F_OK) == 0) return true;
-    if (!ensure_parent_dir(path)) return false;
+    if (access(path, F_OK) == 0)
+        return true;
+    if (!ensure_parent_dir(path))
+        return false;
     FILE *f = fopen(path, "w");
-    if (!f) return false;
+    if (!f)
+        return false;
     fputs(content, f);
     fclose(f);
-    if (created) (*created)++;
+    if (created)
+        (*created)++;
     return true;
 }
 
 static bool is_valid_skill_name(const char *name) {
-    if (!name || !*name) return false;
+    if (!name || !*name)
+        return false;
     for (const char *p = name; *p; p++) {
-        if (!(isalnum((unsigned char)*p) || *p == '_' || *p == '-' || *p == '.')) return false;
+        if (!(isalnum((unsigned char)*p) || *p == '_' || *p == '-' || *p == '.'))
+            return false;
     }
     return strstr(name, "..") == NULL;
 }
 
 static void workspace_path(char *out, size_t out_len, const char *suffix) {
     const char *root = dsco_workspace_root();
-    if (suffix && *suffix) snprintf(out, out_len, "%s/%s", root, suffix);
-    else snprintf(out, out_len, "%s", root);
+    if (suffix && *suffix)
+        snprintf(out, out_len, "%s/%s", root, suffix);
+    else
+        snprintf(out, out_len, "%s", root);
 }
 
 void dsco_workspace_doc_path(const char *name, char *out, size_t out_len) {
-    if (!out || out_len == 0) return;
+    if (!out || out_len == 0)
+        return;
     out[0] = '\0';
 
-    if (!name || !*name) return;
+    if (!name || !*name)
+        return;
     if (strcmp(name, "identity") == 0) {
         workspace_path(out, out_len, "IDENTITY.md");
     } else if (strcmp(name, "user") == 0) {
@@ -207,19 +232,23 @@ void dsco_workspace_doc_path(const char *name, char *out, size_t out_len) {
 }
 
 static void trim_line(char *s) {
-    if (!s) return;
+    if (!s)
+        return;
     size_t n = strlen(s);
     while (n > 0 && (s[n - 1] == '\n' || s[n - 1] == '\r' || isspace((unsigned char)s[n - 1]))) {
         s[--n] = '\0';
     }
     char *start = s;
-    while (*start && isspace((unsigned char)*start)) start++;
-    if (start != s) memmove(s, start, strlen(start) + 1);
+    while (*start && isspace((unsigned char)*start))
+        start++;
+    if (start != s)
+        memmove(s, start, strlen(start) + 1);
 }
 
 static void markdown_summary_line(const char *text, char *out, size_t out_len) {
     out[0] = '\0';
-    if (!text || !*text) return;
+    if (!text || !*text)
+        return;
     char *copy = safe_strdup(text);
     char *line = strtok(copy, "\n");
     while (line) {
@@ -237,14 +266,17 @@ static int count_installed_skills(void) {
     char skills_dir[PATH_MAX];
     workspace_path(skills_dir, sizeof(skills_dir), "skills");
     DIR *d = opendir(skills_dir);
-    if (!d) return 0;
+    if (!d)
+        return 0;
     int count = 0;
     struct dirent *ent;
     while ((ent = readdir(d)) != NULL) {
-        if (ent->d_name[0] == '.') continue;
+        if (ent->d_name[0] == '.')
+            continue;
         char skill_md[PATH_MAX];
         snprintf(skill_md, sizeof(skill_md), "%s/%s/SKILL.md", skills_dir, ent->d_name);
-        if (access(skill_md, R_OK) == 0) count++;
+        if (access(skill_md, R_OK) == 0)
+            count++;
     }
     closedir(d);
     return count;
@@ -253,8 +285,10 @@ static int count_installed_skills(void) {
 const char *dsco_workspace_root(void) {
     static char s_workspace_root[PATH_MAX];
     const char *home = getenv("HOME");
-    if (home && *home) snprintf(s_workspace_root, sizeof(s_workspace_root), "%s/.dsco/workspace", home);
-    else snprintf(s_workspace_root, sizeof(s_workspace_root), ".dsco/workspace");
+    if (home && *home)
+        snprintf(s_workspace_root, sizeof(s_workspace_root), "%s/.dsco/workspace", home);
+    else
+        snprintf(s_workspace_root, sizeof(s_workspace_root), ".dsco/workspace");
     return s_workspace_root;
 }
 
@@ -269,28 +303,37 @@ int dsco_workspace_bootstrap(char *summary, size_t summary_len) {
     }
 
     dsco_workspace_doc_path("identity", path, sizeof(path));
-    if (!write_if_missing(path, k_identity_template, &created)) goto fail;
+    if (!write_if_missing(path, k_identity_template, &created))
+        goto fail;
     dsco_workspace_doc_path("user", path, sizeof(path));
-    if (!write_if_missing(path, k_user_template, &created)) goto fail;
+    if (!write_if_missing(path, k_user_template, &created))
+        goto fail;
     dsco_workspace_doc_path("soul", path, sizeof(path));
-    if (!write_if_missing(path, k_soul_template, &created)) goto fail;
+    if (!write_if_missing(path, k_soul_template, &created))
+        goto fail;
     dsco_workspace_doc_path("memory", path, sizeof(path));
-    if (!write_if_missing(path, k_memory_template, &created)) goto fail;
+    if (!write_if_missing(path, k_memory_template, &created))
+        goto fail;
     workspace_path(path, sizeof(path), "skills/README.md");
-    if (!write_if_missing(path, k_skills_readme_template, &created)) goto fail;
+    if (!write_if_missing(path, k_skills_readme_template, &created))
+        goto fail;
     workspace_path(path, sizeof(path), "skills/c-workflow/SKILL.md");
-    if (!write_if_missing(path, k_c_workflow_skill, &created)) goto fail;
+    if (!write_if_missing(path, k_c_workflow_skill, &created))
+        goto fail;
     workspace_path(path, sizeof(path), "skills/review-checklist/SKILL.md");
-    if (!write_if_missing(path, k_review_skill, &created)) goto fail;
+    if (!write_if_missing(path, k_review_skill, &created))
+        goto fail;
     workspace_path(path, sizeof(path), "skills/soul-curator/SKILL.md");
-    if (!write_if_missing(path, k_soul_curator_skill, &created)) goto fail;
+    if (!write_if_missing(path, k_soul_curator_skill, &created))
+        goto fail;
     workspace_path(path, sizeof(path), "skills/soul-guardian/SKILL.md");
-    if (!write_if_missing(path, k_soul_guardian_skill, &created)) goto fail;
+    if (!write_if_missing(path, k_soul_guardian_skill, &created))
+        goto fail;
 
     dsco_workspace_prompt_invalidate();
-    snprintf(summary, summary_len, created > 0
-        ? "workspace ready at %s (%d files created)"
-        : "workspace ready at %s", dsco_workspace_root(), created);
+    snprintf(summary, summary_len,
+             created > 0 ? "workspace ready at %s (%d files created)" : "workspace ready at %s",
+             dsco_workspace_root(), created);
     return created;
 
 fail:
@@ -318,28 +361,28 @@ int dsco_workspace_status(dsco_workspace_status_t *status, char *summary, size_t
         st.has_legacy_prompt = access(path, R_OK) == 0;
     }
     st.installed_skills = count_installed_skills();
-    if (status) *status = st;
+    if (status)
+        *status = st;
     if (summary && summary_len > 0) {
         snprintf(summary, summary_len,
                  "workspace=%s identity=%s user=%s soul=%s memory=%s skills=%d legacy_prompt=%s",
-                 dsco_workspace_root(),
-                 st.has_identity ? "yes" : "no",
-                 st.has_user ? "yes" : "no",
-                 st.has_soul ? "yes" : "no",
-                 st.has_memory ? "yes" : "no",
-                 st.installed_skills,
+                 dsco_workspace_root(), st.has_identity ? "yes" : "no", st.has_user ? "yes" : "no",
+                 st.has_soul ? "yes" : "no", st.has_memory ? "yes" : "no", st.installed_skills,
                  st.has_legacy_prompt ? "yes" : "no");
     }
     return 0;
 }
 
 int dsco_workspace_read_doc(const char *name, char *out, size_t out_len) {
-    if (!out || out_len == 0) return -1;
+    if (!out || out_len == 0)
+        return -1;
     out[0] = '\0';
-    if (!name) return -1;
+    if (!name)
+        return -1;
     char path[PATH_MAX];
     dsco_workspace_doc_path(name, path, sizeof(path));
-    if (path[0] == '\0') return -1;
+    if (path[0] == '\0')
+        return -1;
 
     char *text = NULL;
     if (!read_file_limit(path, WORKSPACE_FILE_LIMIT, &text)) {
@@ -352,7 +395,8 @@ int dsco_workspace_read_doc(const char *name, char *out, size_t out_len) {
 }
 
 int dsco_workspace_show_skill(const char *name, char *out, size_t out_len) {
-    if (!out || out_len == 0) return -1;
+    if (!out || out_len == 0)
+        return -1;
     out[0] = '\0';
     if (!is_valid_skill_name(name)) {
         snprintf(out, out_len, "invalid skill name");
@@ -371,7 +415,8 @@ int dsco_workspace_show_skill(const char *name, char *out, size_t out_len) {
 }
 
 int dsco_workspace_list_skills(char *out, size_t out_len) {
-    if (!out || out_len == 0) return -1;
+    if (!out || out_len == 0)
+        return -1;
     out[0] = '\0';
     char skills_dir[PATH_MAX];
     workspace_path(skills_dir, sizeof(skills_dir), "skills");
@@ -386,17 +431,18 @@ int dsco_workspace_list_skills(char *out, size_t out_len) {
     int count = 0;
     struct dirent *ent;
     while ((ent = readdir(d)) != NULL) {
-        if (ent->d_name[0] == '.') continue;
+        if (ent->d_name[0] == '.')
+            continue;
         char path[PATH_MAX];
         snprintf(path, sizeof(path), "%s/%s/SKILL.md", skills_dir, ent->d_name);
         char *text = NULL;
-        if (!read_file_limit(path, 8192, &text)) continue;
+        if (!read_file_limit(path, 8192, &text))
+            continue;
         char summary[256];
         markdown_summary_line(text, summary, sizeof(summary));
         free(text);
         char line[512];
-        snprintf(line, sizeof(line), "- %s%s%s\n", ent->d_name,
-                 summary[0] ? ": " : "", summary);
+        snprintf(line, sizeof(line), "- %s%s%s\n", ent->d_name, summary[0] ? ": " : "", summary);
         sbuf_append(out, out_len, &pos, line);
         count++;
     }
@@ -408,9 +454,10 @@ int dsco_workspace_list_skills(char *out, size_t out_len) {
     return count;
 }
 
-static void append_prompt_section(char *dst, size_t dst_len, size_t *pos,
-                                  const char *title, const char *body) {
-    if (!body || !*body) return;
+static void append_prompt_section(char *dst, size_t dst_len, size_t *pos, const char *title,
+                                  const char *body) {
+    if (!body || !*body)
+        return;
     sbuf_append(dst, dst_len, pos, "\n\n[");
     sbuf_append(dst, dst_len, pos, title);
     sbuf_append(dst, dst_len, pos, "]\n");
@@ -418,7 +465,8 @@ static void append_prompt_section(char *dst, size_t dst_len, size_t *pos,
 }
 
 const char *dsco_workspace_prompt(void) {
-    if (s_workspace_prompt_loaded) return s_workspace_prompt;
+    if (s_workspace_prompt_loaded)
+        return s_workspace_prompt;
     s_workspace_prompt_loaded = true;
 
     char *buf = safe_malloc(131072);
@@ -437,10 +485,10 @@ const char *dsco_workspace_prompt(void) {
     }
 
     const char *docs[][2] = {
-        { "Identity", "IDENTITY.md" },
-        { "User", "USER.md" },
-        { "Soul", "SOUL.md" },
-        { "Long-term Memory", "memory/MEMORY.md" },
+        {"Identity", "IDENTITY.md"},
+        {"User", "USER.md"},
+        {"Soul", "SOUL.md"},
+        {"Long-term Memory", "memory/MEMORY.md"},
     };
     for (size_t i = 0; i < sizeof(docs) / sizeof(docs[0]); i++) {
         char path[PATH_MAX];
@@ -456,8 +504,10 @@ const char *dsco_workspace_prompt(void) {
     if (dsco_workspace_list_skills(skills, sizeof(skills)) > 0) {
         append_prompt_section(buf, 131072, &pos, "Installed Skills Catalog", skills);
         sbuf_append(buf, 131072, &pos,
-                    "\n\n[Skill Policy]\nInstalled skills live under ~/.dsco/workspace/skills/<name>/SKILL.md. "
-                    "If the user names a skill explicitly, follow it. Otherwise use skills only when relevant.\n");
+                    "\n\n[Skill Policy]\nInstalled skills live under "
+                    "~/.dsco/workspace/skills/<name>/SKILL.md. "
+                    "If the user names a skill explicitly, follow it. Otherwise use skills only "
+                    "when relevant.\n");
     }
 
     s_workspace_prompt = buf;
@@ -467,11 +517,13 @@ const char *dsco_workspace_prompt(void) {
 const char *dsco_workspace_skill_prompt(const char *name) {
     free(s_skill_prompt);
     s_skill_prompt = NULL;
-    if (!is_valid_skill_name(name)) return NULL;
+    if (!is_valid_skill_name(name))
+        return NULL;
 
     char path[PATH_MAX];
     snprintf(path, sizeof(path), "%s/skills/%s/SKILL.md", dsco_workspace_root(), name);
-    if (!read_file_limit(path, WORKSPACE_FILE_LIMIT, &s_skill_prompt)) return NULL;
+    if (!read_file_limit(path, WORKSPACE_FILE_LIMIT, &s_skill_prompt))
+        return NULL;
     return s_skill_prompt;
 }
 

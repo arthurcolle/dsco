@@ -180,4 +180,12 @@ void md_flush(md_renderer_t *r);
 /* Reset renderer state for a new message. */
 void md_reset(md_renderer_t *r);
 
+/* Reusable code highlighter used by fenced blocks and tool-output excerpts.
+ * `lang` uses common fence names such as c, python, bash, json, yaml. */
+void md_render_code_line(FILE *out, const char *line, const char *lang);
+
+/* Best-effort language inference from a file path or filename. Returns a
+ * static string suitable for md_render_code_line(), or NULL when unknown. */
+const char *md_lang_from_path(const char *path);
+
 #endif

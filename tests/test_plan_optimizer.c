@@ -24,10 +24,10 @@
 
 /* ── Globals required by linked library objects ────────────────────────── */
 
-volatile int g_interrupted   = 0;
-vm_t         g_vm            = {0};
-double       g_cost_budget   = 0.0;
-int          g_cheap_mode    = 0;
+volatile int g_interrupted = 0;
+vm_t g_vm = {0};
+double g_cost_budget = 0.0;
+int g_cheap_mode = 0;
 
 /* agent.c defines this; we stub it here since agent.c is excluded from lib */
 volatile int g_agent_exit_requested = 0;
@@ -36,22 +36,41 @@ volatile int g_agent_exit_requested = 0;
 
 static int s_run = 0, s_pass = 0, s_fail = 0;
 
-#define TEST(name) do { s_run++; fprintf(stderr, "  %-50s ", (name)); } while(0)
-#define PASS()     do { s_pass++; fprintf(stderr, "\033[32mPASS\033[0m\n"); } while(0)
-#define FAIL(msg)  do { s_fail++; fprintf(stderr, "\033[31mFAIL\033[0m: %s\n", (msg)); } while(0)
+#define TEST(name)                                                                                 \
+    do {                                                                                           \
+        s_run++;                                                                                   \
+        fprintf(stderr, "  %-50s ", (name));                                                       \
+    } while (0)
+#define PASS()                                                                                     \
+    do {                                                                                           \
+        s_pass++;                                                                                  \
+        fprintf(stderr, "\033[32mPASS\033[0m\n");                                                  \
+    } while (0)
+#define FAIL(msg)                                                                                  \
+    do {                                                                                           \
+        s_fail++;                                                                                  \
+        fprintf(stderr, "\033[31mFAIL\033[0m: %s\n", (msg));                                       \
+    } while (0)
 
-#define ASSERT(cond, msg) do { \
-    if (!(cond)) { FAIL(msg); return; } \
-} while(0)
+#define ASSERT(cond, msg)                                                                          \
+    do {                                                                                           \
+        if (!(cond)) {                                                                             \
+            FAIL(msg);                                                                             \
+            return;                                                                                \
+        }                                                                                          \
+    } while (0)
 
-#define ASSERT_DBL_RANGE(val, lo, hi, msg) do { \
-    double _v = (val); \
-    if (_v < (lo) || _v > (hi)) { \
-        char _buf[128]; \
-        snprintf(_buf, sizeof(_buf), "%s (got %.6f, want [%.6f, %.6f])", (msg), _v, (double)(lo), (double)(hi)); \
-        FAIL(_buf); return; \
-    } \
-} while(0)
+#define ASSERT_DBL_RANGE(val, lo, hi, msg)                                                         \
+    do {                                                                                           \
+        double _v = (val);                                                                         \
+        if (_v < (lo) || _v > (hi)) {                                                              \
+            char _buf[128];                                                                        \
+            snprintf(_buf, sizeof(_buf), "%s (got %.6f, want [%.6f, %.6f])", (msg), _v,            \
+                     (double)(lo), (double)(hi));                                                  \
+            FAIL(_buf);                                                                            \
+            return;                                                                                \
+        }                                                                                          \
+    } while (0)
 
 /* ── Helpers ───────────────────────────────────────────────────────────── */
 
@@ -66,7 +85,8 @@ static const char *find_topo_by_category(topo_category_t cat) {
     int count = 0;
     const topology_t *reg = topology_registry(&count);
     for (int i = 0; i < count; i++) {
-        if (reg[i].category == cat) return reg[i].name;
+        if (reg[i].category == cat)
+            return reg[i].name;
     }
     return NULL;
 }
@@ -92,7 +112,7 @@ static void test_multiplier_null(void) {
 /* 3. topology_cost_multiplier: mesh ≥ chain (mesh has highest overhead) */
 static void test_multiplier_mesh_gt_chain(void) {
     TEST("multiplier: mesh ≥ chain (overhead ordering)");
-    const char *mesh_name  = find_topo_by_category(CAT_MESH);
+    const char *mesh_name = find_topo_by_category(CAT_MESH);
     const char *chain_name = find_topo_by_category(CAT_CHAIN);
     if (!mesh_name || !chain_name) {
         /* Registry missing category — skip gracefully */
@@ -100,7 +120,7 @@ static void test_multiplier_mesh_gt_chain(void) {
         fprintf(stderr, "(skipped — category not found)\n");
         return;
     }
-    double m_mesh  = topology_cost_multiplier(mesh_name);
+    double m_mesh = topology_cost_multiplier(mesh_name);
     double m_chain = topology_cost_multiplier(chain_name);
     ASSERT(m_mesh >= m_chain, "mesh multiplier should be ≥ chain multiplier");
     PASS();
@@ -132,7 +152,7 @@ static void test_estimate_cost_positive(void) {
     /* Construct a minimal option pointing at the first topology */
     plan_option_t opt = {0};
     opt.topology_name = name;
-    opt.est_cost_usd  = 0.01;  /* sentinel fallback value */
+    opt.est_cost_usd = 0.01; /* sentinel fallback value */
 
     double cost = plan_estimate_cost(&opt);
     ASSERT(cost > 0.0, "expected positive cost estimate");
@@ -152,7 +172,7 @@ static void test_estimate_cost_fallback(void) {
     TEST("plan_estimate_cost: unknown topo falls back to est_cost_usd");
     plan_option_t opt = {0};
     opt.topology_name = "__no_such_topology__";
-    opt.est_cost_usd  = 3.14159;
+    opt.est_cost_usd = 3.14159;
 
     double cost = plan_estimate_cost(&opt);
     /* Should fall back to the stored value when topology is unknown */
@@ -185,16 +205,11 @@ static void test_analyze_options_have_names(void) {
     plan_options_t *opts = plan_analyze("summarize a research paper", 0);
     ASSERT(opts != NULL, "plan_analyze returned NULL");
     for (int i = 0; i < opts->count; i++) {
-        ASSERT(opts->options[i].topology_name != NULL,
-               "option has NULL topology_name");
-        ASSERT(opts->options[i].topology_name[0] != '\0',
-               "option has empty topology_name");
-        ASSERT(opts->options[i].est_cost_usd >= 0.0,
-               "option has negative cost");
-        ASSERT(opts->options[i].est_latency_s >= 0.0,
-               "option has negative latency");
-        ASSERT(opts->options[i].fit_score >= 0.0 &&
-               opts->options[i].fit_score <= 1.01,
+        ASSERT(opts->options[i].topology_name != NULL, "option has NULL topology_name");
+        ASSERT(opts->options[i].topology_name[0] != '\0', "option has empty topology_name");
+        ASSERT(opts->options[i].est_cost_usd >= 0.0, "option has negative cost");
+        ASSERT(opts->options[i].est_latency_s >= 0.0, "option has negative latency");
+        ASSERT(opts->options[i].fit_score >= 0.0 && opts->options[i].fit_score <= 1.01,
                "fit_score out of [0, 1]");
     }
     plan_options_free(opts);
@@ -247,12 +262,13 @@ static void test_estimate_vs_stored_order_of_magnitude(void) {
     int bad = 0;
     for (int i = 0; i < opts->count; i++) {
         const plan_option_t *o = &opts->options[i];
-        if (o->est_cost_usd <= 0.0) continue;  /* skip zero-cost entries */
+        if (o->est_cost_usd <= 0.0)
+            continue; /* skip zero-cost entries */
         double refined = plan_estimate_cost(o);
-        double ratio   = refined / o->est_cost_usd;
+        double ratio = refined / o->est_cost_usd;
         if (ratio < 0.20 || ratio > 5.0) {
-            fprintf(stderr, "\n    [%s] static=%.5f refined=%.5f ratio=%.2f",
-                    o->topology_name, o->est_cost_usd, refined, ratio);
+            fprintf(stderr, "\n    [%s] static=%.5f refined=%.5f ratio=%.2f", o->topology_name,
+                    o->est_cost_usd, refined, ratio);
             bad++;
         }
     }
@@ -285,7 +301,8 @@ int main(void) {
     test_estimate_vs_stored_order_of_magnitude();
 
     fprintf(stderr, "\n%d/%d passed", s_pass, s_run);
-    if (s_fail) fprintf(stderr, "  (%d FAILED)", s_fail);
+    if (s_fail)
+        fprintf(stderr, "  (%d FAILED)", s_fail);
     fprintf(stderr, "\n");
 
     return (s_fail > 0) ? 1 : 0;

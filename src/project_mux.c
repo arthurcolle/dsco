@@ -29,27 +29,27 @@
  *  Module state — kept small. The mux struct is the source of truth.
  * ────────────────────────────────────────────────────────────────────────── */
 
-static dsco_mux_t  *g_mux = NULL;
+static dsco_mux_t *g_mux = NULL;
 static struct termios g_saved_tio;
-static bool         g_tio_saved = false;
+static bool g_tio_saved = false;
 
-#define MUX_PREFIX        0x02   /* Ctrl+B */
-#define ANSI_CLEAR        "\x1b[2J\x1b[H"
-#define ANSI_CLEAR_LINE   "\x1b[2K"
-#define ANSI_HOME         "\x1b[H"
-#define ANSI_HIDE_CURSOR  "\x1b[?25l"
-#define ANSI_SHOW_CURSOR  "\x1b[?25h"
-#define ANSI_ALT_ON       "\x1b[?1049h"
-#define ANSI_ALT_OFF      "\x1b[?1049l"
-#define ANSI_RESET        "\x1b[0m"
-#define ANSI_BOLD         "\x1b[1m"
-#define ANSI_REV          "\x1b[7m"
-#define ANSI_DIM          "\x1b[2m"
-#define ANSI_FG_CYAN      "\x1b[36m"
-#define ANSI_FG_YELLOW    "\x1b[33m"
-#define ANSI_FG_GREEN     "\x1b[32m"
-#define ANSI_FG_RED       "\x1b[31m"
-#define ANSI_FG_GREY      "\x1b[90m"
+#define MUX_PREFIX 0x02 /* Ctrl+B */
+#define ANSI_CLEAR "\x1b[2J\x1b[H"
+#define ANSI_CLEAR_LINE "\x1b[2K"
+#define ANSI_HOME "\x1b[H"
+#define ANSI_HIDE_CURSOR "\x1b[?25l"
+#define ANSI_SHOW_CURSOR "\x1b[?25h"
+#define ANSI_ALT_ON "\x1b[?1049h"
+#define ANSI_ALT_OFF "\x1b[?1049l"
+#define ANSI_RESET "\x1b[0m"
+#define ANSI_BOLD "\x1b[1m"
+#define ANSI_REV "\x1b[7m"
+#define ANSI_DIM "\x1b[2m"
+#define ANSI_FG_CYAN "\x1b[36m"
+#define ANSI_FG_YELLOW "\x1b[33m"
+#define ANSI_FG_GREEN "\x1b[32m"
+#define ANSI_FG_RED "\x1b[31m"
+#define ANSI_FG_GREY "\x1b[90m"
 
 /* ──────────────────────────────────────────────────────────────────────────
  *  Terminal control
@@ -58,13 +58,16 @@ static bool         g_tio_saved = false;
 static void tio_restore(void) {
     if (g_tio_saved) {
         tcsetattr(STDIN_FILENO, TCSANOW, &g_saved_tio);
-        write(STDOUT_FILENO, ANSI_SHOW_CURSOR ANSI_ALT_OFF, sizeof(ANSI_SHOW_CURSOR ANSI_ALT_OFF) - 1);
+        write(STDOUT_FILENO, ANSI_SHOW_CURSOR ANSI_ALT_OFF,
+              sizeof(ANSI_SHOW_CURSOR ANSI_ALT_OFF) - 1);
     }
 }
 
 static int tio_raw(void) {
-    if (!isatty(STDIN_FILENO)) return -1;
-    if (tcgetattr(STDIN_FILENO, &g_saved_tio) != 0) return -1;
+    if (!isatty(STDIN_FILENO))
+        return -1;
+    if (tcgetattr(STDIN_FILENO, &g_saved_tio) != 0)
+        return -1;
     g_tio_saved = true;
     atexit(tio_restore);
 
@@ -75,7 +78,8 @@ static int tio_raw(void) {
     raw.c_cflag |= CS8;
     raw.c_cc[VMIN] = 0;
     raw.c_cc[VTIME] = 0;
-    if (tcsetattr(STDIN_FILENO, TCSAFLUSH, &raw) != 0) return -1;
+    if (tcsetattr(STDIN_FILENO, TCSAFLUSH, &raw) != 0)
+        return -1;
     write(STDOUT_FILENO, ANSI_ALT_ON ANSI_HIDE_CURSOR, sizeof(ANSI_ALT_ON ANSI_HIDE_CURSOR) - 1);
     return 0;
 }
@@ -92,10 +96,16 @@ static void term_size(int *rows, int *cols) {
 }
 
 static volatile sig_atomic_t g_resized = 0;
-static void on_winch(int sig) { (void)sig; g_resized = 1; }
+static void on_winch(int sig) {
+    (void)sig;
+    g_resized = 1;
+}
 
 static volatile sig_atomic_t g_term = 0;
-static void on_term(int sig) { (void)sig; g_term = 1; }
+static void on_term(int sig) {
+    (void)sig;
+    g_term = 1;
+}
 
 /* ──────────────────────────────────────────────────────────────────────────
  *  Worker spawn — child process exec'ing this binary in --worker mode.
@@ -106,7 +116,8 @@ static void on_term(int sig) { (void)sig; g_term = 1; }
 
 static int set_nonblock(int fd) {
     int fl = fcntl(fd, F_GETFL, 0);
-    if (fl < 0) return -1;
+    if (fl < 0)
+        return -1;
     return fcntl(fd, F_SETFL, fl | O_NONBLOCK);
 }
 
@@ -130,8 +141,7 @@ static void *drain_thread_main(void *arg) {
         if (n > 0) {
             dsco_ring_write(&p->scrollback, buf, (size_t)n);
             atomic_store_explicit(&p->has_unread, 1, memory_order_relaxed);
-            atomic_fetch_add_explicit(&p->activity_bytes,
-                                      (unsigned long long)n,
+            atomic_fetch_add_explicit(&p->activity_bytes, (unsigned long long)n,
                                       memory_order_relaxed);
             if (p->wake_fd_w >= 0) {
                 char wk = 1;
@@ -142,13 +152,18 @@ static void *drain_thread_main(void *arg) {
             /* EOF — worker exited */
             p->state = DSCO_PROJECT_DEAD;
             p->epoch++;
-            if (p->wake_fd_w >= 0) { char wk = 1; ssize_t w = write(p->wake_fd_w, &wk, 1); (void)w; }
+            if (p->wake_fd_w >= 0) {
+                char wk = 1;
+                ssize_t w = write(p->wake_fd_w, &wk, 1);
+                (void)w;
+            }
             break;
         } else {
-            if (errno == EINTR) continue;
+            if (errno == EINTR)
+                continue;
             if (errno == EAGAIN || errno == EWOULDBLOCK) {
                 /* drain_run set non-blocking somewhere; sleep briefly */
-                struct timespec ts = { 0, 5 * 1000000 };
+                struct timespec ts = {0, 5 * 1000000};
                 nanosleep(&ts, NULL);
                 continue;
             }
@@ -159,10 +174,12 @@ static void *drain_thread_main(void *arg) {
 }
 
 static int start_drain_thread(dsco_project_t *p, int wake_fd_w) {
-    if (!p || p->worker_out_fd < 0) return -1;
+    if (!p || p->worker_out_fd < 0)
+        return -1;
     /* Drain thread does blocking reads — undo any nonblock that spawn set. */
     int fl = fcntl(p->worker_out_fd, F_GETFL, 0);
-    if (fl >= 0) fcntl(p->worker_out_fd, F_SETFL, fl & ~O_NONBLOCK);
+    if (fl >= 0)
+        fcntl(p->worker_out_fd, F_SETFL, fl & ~O_NONBLOCK);
     p->wake_fd_w = wake_fd_w;
     atomic_store_explicit(&p->drain_run, 1, memory_order_release);
     if (pthread_create(&p->drain_thread, NULL, drain_thread_main, p) != 0) {
@@ -173,17 +190,22 @@ static int start_drain_thread(dsco_project_t *p, int wake_fd_w) {
 }
 
 static void stop_drain_thread(dsco_project_t *p) {
-    if (!p) return;
+    if (!p)
+        return;
     if (atomic_load_explicit(&p->drain_run, memory_order_acquire)) {
         atomic_store_explicit(&p->drain_run, 0, memory_order_release);
         /* closing worker_out_fd will unblock the read() */
-        if (p->worker_out_fd >= 0) { close(p->worker_out_fd); p->worker_out_fd = -1; }
+        if (p->worker_out_fd >= 0) {
+            close(p->worker_out_fd);
+            p->worker_out_fd = -1;
+        }
         pthread_join(p->drain_thread, NULL);
     }
 }
 
 static const char *self_exe(void) {
-    if (g_self_exe[0]) return g_self_exe;
+    if (g_self_exe[0])
+        return g_self_exe;
     /* /proc/self/exe on Linux; fall back to argv[0] surrogate via dladdr-free path */
     char buf[PATH_MAX];
     ssize_t n = readlink("/proc/self/exe", buf, sizeof(buf) - 1);
@@ -206,21 +228,29 @@ static const char *self_exe(void) {
 }
 
 int dsco_mux_spawn_worker(dsco_project_t *p, const char *api_key) {
-    if (!p) return -1;
+    if (!p)
+        return -1;
 
     int in_pipe[2], out_pipe[2];
-    if (pipe(in_pipe)  != 0) return -1;
-    if (pipe(out_pipe) != 0) { close(in_pipe[0]); close(in_pipe[1]); return -1; }
+    if (pipe(in_pipe) != 0)
+        return -1;
+    if (pipe(out_pipe) != 0) {
+        close(in_pipe[0]);
+        close(in_pipe[1]);
+        return -1;
+    }
 
     pid_t pid = fork();
     if (pid < 0) {
-        close(in_pipe[0]);  close(in_pipe[1]);
-        close(out_pipe[0]); close(out_pipe[1]);
+        close(in_pipe[0]);
+        close(in_pipe[1]);
+        close(out_pipe[0]);
+        close(out_pipe[1]);
         return -1;
     }
     if (pid == 0) {
         /* child */
-        dup2(in_pipe[0],  STDIN_FILENO);
+        dup2(in_pipe[0], STDIN_FILENO);
         dup2(out_pipe[1], STDOUT_FILENO);
         dup2(out_pipe[1], STDERR_FILENO);
         close(in_pipe[1]);
@@ -231,12 +261,13 @@ int dsco_mux_spawn_worker(dsco_project_t *p, const char *api_key) {
         if (chdir(p->id.root) != 0) {
             fprintf(stderr, "[worker] chdir(%s) failed: %s\n", p->id.root, strerror(errno));
         }
-        if (api_key && *api_key) setenv("ANTHROPIC_API_KEY", api_key, 1);
-        setenv("DSCO_PROJECT_ID",   p->id.id, 1);
+        if (api_key && *api_key)
+            setenv("ANTHROPIC_API_KEY", api_key, 1);
+        setenv("DSCO_PROJECT_ID", p->id.id, 1);
         setenv("DSCO_PROJECT_NAME", p->id.name, 1);
-        setenv("DSCO_WORKER",       "1", 1);
+        setenv("DSCO_WORKER", "1", 1);
 
-        char *argv[] = { (char *)self_exe(), "--worker", p->id.id, NULL };
+        char *argv[] = {(char *)self_exe(), "--worker", p->id.id, NULL};
         execve(self_exe(), argv, environ);
         fprintf(stderr, "[worker] execve failed: %s\n", strerror(errno));
         _exit(127);
@@ -247,19 +278,20 @@ int dsco_mux_spawn_worker(dsco_project_t *p, const char *api_key) {
     close(out_pipe[1]);
     /* drain thread does blocking reads — leave fd in default (blocking) mode */
 
-    p->worker_pid    = pid;
-    p->worker_in_fd  = in_pipe[1];
+    p->worker_pid = pid;
+    p->worker_in_fd = in_pipe[1];
     p->worker_out_fd = out_pipe[0];
 
     /* Start the per-project drain thread. wake_fd_w comes from the mux. */
-    int wake = (p->mux && ((dsco_mux_t *)p->mux)->wake_fd_w >= 0)
-               ? ((dsco_mux_t *)p->mux)->wake_fd_w : -1;
+    int wake =
+        (p->mux && ((dsco_mux_t *)p->mux)->wake_fd_w >= 0) ? ((dsco_mux_t *)p->mux)->wake_fd_w : -1;
     start_drain_thread(p, wake);
     return 0;
 }
 
 int dsco_mux_kill_worker(dsco_project_t *p) {
-    if (!p) return -1;
+    if (!p)
+        return -1;
     /* tear down the drain thread first — closing worker_out_fd unblocks read() */
     stop_drain_thread(p);
     if (p->worker_pid > 0) {
@@ -268,8 +300,11 @@ int dsco_mux_kill_worker(dsco_project_t *p) {
         for (int i = 0; i < 20; i++) {
             int status = 0;
             pid_t r = waitpid(p->worker_pid, &status, WNOHANG);
-            if (r == p->worker_pid) { p->worker_pid = -1; break; }
-            struct timespec ts = { 0, 10 * 1000000 };
+            if (r == p->worker_pid) {
+                p->worker_pid = -1;
+                break;
+            }
+            struct timespec ts = {0, 10 * 1000000};
             nanosleep(&ts, NULL);
         }
         if (p->worker_pid > 0) {
@@ -279,8 +314,14 @@ int dsco_mux_kill_worker(dsco_project_t *p) {
             p->worker_pid = -1;
         }
     }
-    if (p->worker_in_fd  >= 0) { close(p->worker_in_fd);  p->worker_in_fd  = -1; }
-    if (p->worker_out_fd >= 0) { close(p->worker_out_fd); p->worker_out_fd = -1; }
+    if (p->worker_in_fd >= 0) {
+        close(p->worker_in_fd);
+        p->worker_in_fd = -1;
+    }
+    if (p->worker_out_fd >= 0) {
+        close(p->worker_out_fd);
+        p->worker_out_fd = -1;
+    }
     return 0;
 }
 
@@ -288,8 +329,12 @@ int dsco_mux_kill_worker(dsco_project_t *p) {
  *  Rendering — deep grid with truecolor borders + heatmap shading
  * ────────────────────────────────────────────────────────────────────────── */
 
-static void out_write(const char *s) { write(STDOUT_FILENO, s, strlen(s)); }
-static void out_writen(const char *s, size_t n) { write(STDOUT_FILENO, s, n); }
+static void out_write(const char *s) {
+    write(STDOUT_FILENO, s, strlen(s));
+}
+static void out_writen(const char *s, size_t n) {
+    write(STDOUT_FILENO, s, n);
+}
 static void move_to(int row, int col) {
     char b[32];
     int n = snprintf(b, sizeof(b), "\x1b[%d;%dH", row, col);
@@ -311,7 +356,7 @@ static void ansi_bg_rgb(uint8_t r, uint8_t g, uint8_t b) {
  * grid color mode. Returns whether anything was emitted (so the caller
  * knows to reset afterwards). */
 static int apply_tile_colors(dsco_mux_t *m, dsco_project_t *p, bool focused,
-                              dsco_rgb_t *out_border) {
+                             dsco_rgb_t *out_border) {
     dsco_grid_t *g = &m->grid;
     dsco_rgb_t border = {200, 200, 200};
     bool emitted = false;
@@ -338,9 +383,10 @@ static int apply_tile_colors(dsco_mux_t *m, dsco_project_t *p, bool focused,
         case DSCO_COLOR_MODE_HEATMAP: {
             double bps = dsco_project_activity_bps(p);
             float t = (float)(bps / 8192.0);
-            if (t > 1.0f) t = 1.0f;
+            if (t > 1.0f)
+                t = 1.0f;
             dsco_rgb_t cold = {30, 30, 40};
-            dsco_rgb_t hot  = {255, 170, 60};
+            dsco_rgb_t hot = {255, 170, 60};
             border = dsco_grid_lerp(cold, hot, t);
             break;
         }
@@ -352,7 +398,8 @@ static int apply_tile_colors(dsco_mux_t *m, dsco_project_t *p, bool focused,
             }
             double bps = dsco_project_activity_bps(p);
             float t = (float)(bps / 16384.0);
-            if (t > 0.4f) t = 0.4f;
+            if (t > 0.4f)
+                t = 0.4f;
             dsco_rgb_t base = {18, 18, 22};
             dsco_rgb_t accent = dsco_grid_project_color(p->id.id);
             dsco_rgb_t bg = dsco_grid_lerp(base, accent, t);
@@ -360,11 +407,14 @@ static int apply_tile_colors(dsco_mux_t *m, dsco_project_t *p, bool focused,
             emitted = true;
             break;
         }
-        default: break;
+        default:
+            break;
     }
     ansi_fg_rgb(border.r, border.g, border.b);
-    if (focused) out_write("\x1b[1m");
-    if (out_border) *out_border = border;
+    if (focused)
+        out_write("\x1b[1m");
+    if (out_border)
+        *out_border = border;
     return emitted ? 1 : 0;
 }
 
@@ -375,7 +425,8 @@ static void draw_tile(dsco_mux_t *m, const dsco_tile_t *t, bool focused) {
     int c0 = t->rect.col0;
     int rows = t->rect.rows;
     int cols = t->rect.cols;
-    if (rows < 2 || cols < 2) return;
+    if (rows < 2 || cols < 2)
+        return;
 
     dsco_project_t *p = NULL;
     if (t->project_idx >= 0 && t->project_idx < m->count) {
@@ -384,36 +435,49 @@ static void draw_tile(dsco_mux_t *m, const dsco_tile_t *t, bool focused) {
 
     dsco_border_glyphs_t bg = dsco_grid_border_glyphs(m->grid.border);
     bool bg_painted = false;
-    if (p) bg_painted = apply_tile_colors(m, p, focused, NULL) != 0;
-    else { ansi_fg_rgb(70, 70, 80); }
+    if (p)
+        bg_painted = apply_tile_colors(m, p, focused, NULL) != 0;
+    else {
+        ansi_fg_rgb(70, 70, 80);
+    }
 
     /* top border with embedded title (Unicode sigil + sparkline) */
     move_to(r0, c0);
     out_write(bg.tl);
 
     /* Build title: " ⚙ name " — sigil reflects state */
-    static const char *k_spark[8] = {"▁","▂","▃","▄","▅","▆","▇","█"};
+    static const char *k_spark[8] = {"▁", "▂", "▃", "▄", "▅", "▆", "▇", "█"};
     const char *sigil = "◌";
     if (p) {
-        if (p->state == DSCO_PROJECT_RUNNING)         sigil = "⚙";
-        else if (p->state == DSCO_PROJECT_PAUSED)     sigil = "⏸";
-        else if (p->state == DSCO_PROJECT_DEAD)       sigil = "☠";
-        else if (p->state == DSCO_PROJECT_QUARANTINED) sigil = "⚠";
+        if (p->state == DSCO_PROJECT_RUNNING)
+            sigil = "⚙";
+        else if (p->state == DSCO_PROJECT_PAUSED)
+            sigil = "⏸";
+        else if (p->state == DSCO_PROJECT_DEAD)
+            sigil = "☠";
+        else if (p->state == DSCO_PROJECT_QUARANTINED)
+            sigil = "⚠";
     }
 
     char title[160];
-    if (p) snprintf(title, sizeof(title), " %s %s ", sigil, p->id.name);
-    else   snprintf(title, sizeof(title), " (empty) ");
+    if (p)
+        snprintf(title, sizeof(title), " %s %s ", sigil, p->id.name);
+    else
+        snprintf(title, sizeof(title), " (empty) ");
     int tlen = (int)strlen(title);
-    if (tlen > cols - 4) tlen = cols - 4;
+    if (tlen > cols - 4)
+        tlen = cols - 4;
 
     int left = 2;
-    for (int i = 0; i < left && i < cols - 2; i++) out_write(bg.h);
+    for (int i = 0; i < left && i < cols - 2; i++)
+        out_write(bg.h);
     if (tlen > 0) {
-        if (focused) out_write("\x1b[7m");
+        if (focused)
+            out_write("\x1b[7m");
         out_writen(title, tlen);
         out_write("\x1b[27m");
-        if (focused) out_write("\x1b[1m");
+        if (focused)
+            out_write("\x1b[1m");
     }
     /* sparkline: 8 most-recent samples, mapped to 8 block glyphs.
      * Drawn at the right end of the title bar, before tr corner. */
@@ -423,20 +487,27 @@ static void draw_tile(dsco_mux_t *m, const dsco_tile_t *t, bool focused) {
         double ring[16];
         dsco_project_activity_ring(p, ring);
         double peak = 1.0;
-        for (int i = 0; i < 16; i++) if (ring[i] > peak) peak = ring[i];
+        for (int i = 0; i < 16; i++)
+            if (ring[i] > peak)
+                peak = ring[i];
         spark_cells = 8;
         int border_before = right_pad - spark_cells - 2;
-        for (int i = 0; i < border_before; i++) out_write(bg.h);
+        for (int i = 0; i < border_before; i++)
+            out_write(bg.h);
         out_write(" ");
         for (int i = 8; i < 16; i++) {
             double v = ring[i];
             int idx = (int)(v / peak * 7.0);
-            if (idx < 0) idx = 0; if (idx > 7) idx = 7;
+            if (idx < 0)
+                idx = 0;
+            if (idx > 7)
+                idx = 7;
             out_write(k_spark[idx]);
         }
         out_write(" ");
     } else {
-        for (int i = 0; i < right_pad; i++) out_write(bg.h);
+        for (int i = 0; i < right_pad; i++)
+            out_write(bg.h);
     }
     out_write(bg.tr);
 
@@ -450,28 +521,33 @@ static void draw_tile(dsco_mux_t *m, const dsco_tile_t *t, bool focused) {
     /* bottom */
     move_to(r0 + rows - 1, c0);
     out_write(bg.bl);
-    for (int i = 0; i < cols - 2; i++) out_write(bg.h);
+    for (int i = 0; i < cols - 2; i++)
+        out_write(bg.h);
     out_write(bg.br);
 
     out_write(ANSI_RESET);
 
-    if (!p) return;
+    if (!p)
+        return;
 
     /* paint the inner background again (without border color) so heatmap is
      * visible across the interior */
-    if (m->grid.color_mode == DSCO_COLOR_MODE_FULL || m->grid.color_mode == DSCO_COLOR_MODE_HEATMAP) {
+    if (m->grid.color_mode == DSCO_COLOR_MODE_FULL ||
+        m->grid.color_mode == DSCO_COLOR_MODE_HEATMAP) {
         double bps = dsco_project_activity_bps(p);
         float t = (float)(bps / 16384.0);
-        if (t > 0.35f) t = 0.35f;
+        if (t > 0.35f)
+            t = 0.35f;
         dsco_rgb_t base = {12, 12, 16};
         dsco_rgb_t accent = (m->grid.color_mode == DSCO_COLOR_MODE_FULL)
-                            ? dsco_grid_project_color(p->id.id)
-                            : (dsco_rgb_t){255, 170, 60};
+                                ? dsco_grid_project_color(p->id.id)
+                                : (dsco_rgb_t){255, 170, 60};
         dsco_rgb_t bgc = dsco_grid_lerp(base, accent, t);
         ansi_bg_rgb(bgc.r, bgc.g, bgc.b);
         for (int r = 1; r < rows - 1; r++) {
             move_to(r0 + r, c0 + 1);
-            for (int c = 0; c < cols - 2; c++) out_write(" ");
+            for (int c = 0; c < cols - 2; c++)
+                out_write(" ");
         }
         out_write(ANSI_RESET);
     }
@@ -484,7 +560,8 @@ static void draw_tile(dsco_mux_t *m, const dsco_tile_t *t, bool focused) {
 
     int avail = rows - 2;
     int inner_w = cols - 2;
-    if (avail < 1 || inner_w < 1) return;
+    if (avail < 1 || inner_w < 1)
+        return;
 
     const char *lines[256];
     int line_count = 0;
@@ -492,8 +569,14 @@ static void draw_tile(dsco_mux_t *m, const dsco_tile_t *t, bool focused) {
     size_t cap = sizeof(lines) / sizeof(lines[0]);
     while (pos > 0 && line_count < (int)cap) {
         ssize_t nl = dsco_simd_rfind_byte(snap, pos, '\n');
-        if (nl < 0) { lines[line_count++] = snap; break; }
-        if ((size_t)nl == n - 1 && line_count == 0) { pos = (size_t)nl; continue; }
+        if (nl < 0) {
+            lines[line_count++] = snap;
+            break;
+        }
+        if ((size_t)nl == n - 1 && line_count == 0) {
+            pos = (size_t)nl;
+            continue;
+        }
         lines[line_count++] = snap + nl + 1;
         pos = (size_t)nl;
     }
@@ -504,9 +587,11 @@ static void draw_tile(dsco_mux_t *m, const dsco_tile_t *t, bool focused) {
     for (int i = draw_lines - 1; i >= 0; i--) {
         const char *ls = lines[i];
         const char *le = (i == 0) ? end : (lines[i - 1] - 1);
-        if (le < ls) le = ls;
+        if (le < ls)
+            le = ls;
         int len = (int)(le - ls);
-        if (len > inner_w) len = inner_w;
+        if (len > inner_w)
+            len = inner_w;
         move_to(row, c0 + 1);
         out_writen(ls, len);
         row++;
@@ -527,11 +612,17 @@ static void draw_tab_strip(dsco_mux_t *m, int cols) {
         const char *dot = (unread_flag && !active) ? "•" : " ";
         /* hue from identity, brightness from focus, state shown as suffix glyph */
         dsco_rgb_t hue = dsco_grid_project_color(p->id.id);
-        if (!active) { dsco_rgb_t grey = {90, 90, 100}; hue = dsco_grid_lerp(hue, grey, 0.55f); }
+        if (!active) {
+            dsco_rgb_t grey = {90, 90, 100};
+            hue = dsco_grid_lerp(hue, grey, 0.55f);
+        }
         const char *state_glyph = " ";
-        if (p->state == DSCO_PROJECT_RUNNING)      state_glyph = "*";
-        else if (p->state == DSCO_PROJECT_PAUSED)  state_glyph = "~";
-        else if (p->state == DSCO_PROJECT_DEAD)    state_glyph = "x";
+        if (p->state == DSCO_PROJECT_RUNNING)
+            state_glyph = "*";
+        else if (p->state == DSCO_PROJECT_PAUSED)
+            state_glyph = "~";
+        else if (p->state == DSCO_PROJECT_DEAD)
+            state_glyph = "x";
 
         if (active) {
             ansi_bg_rgb(hue.r / 3, hue.g / 3, hue.b / 3);
@@ -540,10 +631,11 @@ static void draw_tab_strip(dsco_mux_t *m, int cols) {
         } else {
             ansi_fg_rgb(hue.r, hue.g, hue.b);
         }
-        int n = snprintf(tab, sizeof(tab), " %d %s %s%s ",
-                         i + 1, p->id.name, state_glyph, dot);
-        if (x + n > cols - 4) n = cols - 4 - x;
-        if (n > 0) out_writen(tab, n);
+        int n = snprintf(tab, sizeof(tab), " %d %s %s%s ", i + 1, p->id.name, state_glyph, dot);
+        if (x + n > cols - 4)
+            n = cols - 4 - x;
+        if (n > 0)
+            out_writen(tab, n);
         out_write(ANSI_RESET);
         x += n;
     }
@@ -554,40 +646,54 @@ static void draw_tab_strip(dsco_mux_t *m, int cols) {
 
 static const char *color_mode_name(dsco_color_mode_t m) {
     switch (m) {
-        case DSCO_COLOR_MODE_OFF:      return "mono";
-        case DSCO_COLOR_MODE_STATE:    return "state";
-        case DSCO_COLOR_MODE_IDENTITY: return "id-hue";
-        case DSCO_COLOR_MODE_HEATMAP:  return "heat";
-        case DSCO_COLOR_MODE_FULL:     return "full";
-        default: return "?";
+        case DSCO_COLOR_MODE_OFF:
+            return "mono";
+        case DSCO_COLOR_MODE_STATE:
+            return "state";
+        case DSCO_COLOR_MODE_IDENTITY:
+            return "id-hue";
+        case DSCO_COLOR_MODE_HEATMAP:
+            return "heat";
+        case DSCO_COLOR_MODE_FULL:
+            return "full";
+        default:
+            return "?";
     }
 }
 static const char *border_name(dsco_border_t b) {
     switch (b) {
-        case DSCO_BORDER_NONE:   return "none";
-        case DSCO_BORDER_SINGLE: return "single";
-        case DSCO_BORDER_DOUBLE: return "double";
-        case DSCO_BORDER_HEAVY:  return "heavy";
-        case DSCO_BORDER_DASHED: return "dashed";
-        default: return "?";
+        case DSCO_BORDER_NONE:
+            return "none";
+        case DSCO_BORDER_SINGLE:
+            return "single";
+        case DSCO_BORDER_DOUBLE:
+            return "double";
+        case DSCO_BORDER_HEAVY:
+            return "heavy";
+        case DSCO_BORDER_DASHED:
+            return "dashed";
+        default:
+            return "?";
     }
 }
 
 static void draw_prefix_hud(dsco_mux_t *m, int rows, int cols) {
     /* When prefix is pending, show a single-row HUD of next-key options. */
-    if (!m->prefix_pending) return;
-    if (rows < 6) return;
+    if (!m->prefix_pending)
+        return;
+    if (rows < 6)
+        return;
     int row = rows - 2;
     move_to(row, 1);
     out_write(ANSI_CLEAR_LINE);
     ansi_bg_rgb(40, 40, 55);
     ansi_fg_rgb(220, 220, 230);
     out_write("\x1b[1m");
-    const char *hud =
-        " c:new x:close 1-9:focus h/j/k/l:nav z:zoom s/v:split "
-        "G:grid C:color B:border T:theme d:detach ?:help ";
+    const char *hud = " c:new x:close 1-9:focus h/j/k/l:nav z:zoom s/v:split "
+                      "G:grid C:color B:border T:theme d:detach ?:help ";
     int n = (int)strlen(hud);
-    if (n > cols) n = cols;
+    if (n > cols)
+        n = cols;
     out_writen(hud, n);
     out_write(ANSI_RESET);
 }
@@ -600,13 +706,11 @@ static void draw_status_bar(dsco_mux_t *m, int rows, int cols) {
         dsco_project_t *p = m->projects[m->focused];
         double bps = p->activity_ewma;
         int n = snprintf(buf, sizeof(buf),
-            " dsco-mux │ %s [%s] │ %d/%d │ col:%s bord:%s │ %.0f B/s │ Ctrl+B ? ",
-            p->id.name, dsco_project_state_name(p->state),
-            m->focused + 1, m->count,
-            color_mode_name(m->grid.color_mode),
-            border_name(m->grid.border),
-            bps);
-        if (n > cols) n = cols;
+                         " dsco-mux │ %s [%s] │ %d/%d │ col:%s bord:%s │ %.0f B/s │ Ctrl+B ? ",
+                         p->id.name, dsco_project_state_name(p->state), m->focused + 1, m->count,
+                         color_mode_name(m->grid.color_mode), border_name(m->grid.border), bps);
+        if (n > cols)
+            n = cols;
         out_writen(buf, n);
     } else {
         snprintf(buf, sizeof(buf), " dsco-mux │ empty │ Ctrl+B c to create │ Ctrl+B ? help ");
@@ -620,22 +724,27 @@ static void draw_status_bar(dsco_mux_t *m, int rows, int cols) {
 }
 
 /* Legacy single-pane renderer — kept for help overlay / fallback only. */
-static __attribute__((unused)) void draw_pane_legacy(dsco_project_t *p, int row0, int col0, int h, int w, bool focused) {
+static __attribute__((unused)) void draw_pane_legacy(dsco_project_t *p, int row0, int col0, int h,
+                                                     int w, bool focused) {
     /* border */
     for (int r = row0; r < row0 + h; r++) {
         move_to(r, col0);
-        for (int c = 0; c < w; c++) out_write(" ");
+        for (int c = 0; c < w; c++)
+            out_write(" ");
     }
     /* title row */
     move_to(row0, col0);
-    if (focused) out_write(ANSI_REV);
+    if (focused)
+        out_write(ANSI_REV);
     char title[128];
     int tn = snprintf(title, sizeof(title), "  %s  ", p ? p->id.name : "(empty)");
-    if (tn > w) tn = w;
+    if (tn > w)
+        tn = w;
     out_writen(title, tn);
     out_write(ANSI_RESET);
 
-    if (!p) return;
+    if (!p)
+        return;
 
     /* snapshot scrollback */
     static __thread char snap[DSCO_PROJECT_RING_BYTES + 1];
@@ -646,7 +755,8 @@ static __attribute__((unused)) void draw_pane_legacy(dsco_project_t *p, int row0
      * — the backward scan goes 16 bytes per cycle on NEON/SSE2 instead of
      * one byte per cycle. */
     int avail = h - 2;
-    if (avail < 1) return;
+    if (avail < 1)
+        return;
     const char *lines[256];
     int line_count = 0;
     const char *end = snap + n;
@@ -660,7 +770,10 @@ static __attribute__((unused)) void draw_pane_legacy(dsco_project_t *p, int row0
         }
         /* skip a trailing newline at the very end so we don't record an empty
          * line for it. */
-        if ((size_t)nl == n - 1 && line_count == 0) { pos = (size_t)nl; continue; }
+        if ((size_t)nl == n - 1 && line_count == 0) {
+            pos = (size_t)nl;
+            continue;
+        }
         lines[line_count++] = snap + nl + 1;
         pos = (size_t)nl;
     }
@@ -670,9 +783,11 @@ static __attribute__((unused)) void draw_pane_legacy(dsco_project_t *p, int row0
     for (int i = draw_lines - 1; i >= 0; i--) {
         const char *ls = lines[i];
         const char *le = (i == 0) ? end : (lines[i - 1] - 1);
-        if (le < ls) le = ls;
+        if (le < ls)
+            le = ls;
         int len = (int)(le - ls);
-        if (len > w - 1) len = w - 1;
+        if (len > w - 1)
+            len = w - 1;
         move_to(row, col0 + 1);
         /* sanitize control chars except color escape */
         out_writen(ls, len);
@@ -683,24 +798,30 @@ static __attribute__((unused)) void draw_pane_legacy(dsco_project_t *p, int row0
 /* Mini-map: a single-row chip strip at the bottom showing every project
  * as a colored cell sized proportional to its recent activity. */
 static void draw_minimap(dsco_mux_t *m, int row, int cols) {
-    if (m->count == 0) return;
+    if (m->count == 0)
+        return;
     move_to(row, 1);
     out_write(ANSI_CLEAR_LINE);
     int per = (cols - 2) / m->count;
-    if (per < 1) per = 1;
+    if (per < 1)
+        per = 1;
     int x = 1;
     for (int i = 0; i < m->count && x < cols - per; i++) {
         dsco_project_t *p = m->projects[i];
         dsco_rgb_t c = dsco_grid_project_color(p->id.id);
         double bps = p->activity_ewma;
-        float t = (float)(bps / 4096.0); if (t > 1.0f) t = 1.0f;
+        float t = (float)(bps / 4096.0);
+        if (t > 1.0f)
+            t = 1.0f;
         dsco_rgb_t dim = {30, 30, 35};
         dsco_rgb_t bg = dsco_grid_lerp(dim, c, 0.4f + 0.6f * t);
         ansi_bg_rgb(bg.r, bg.g, bg.b);
         ansi_fg_rgb(c.r, c.g, c.b);
         for (int k = 0; k < per; k++) {
-            if (k == per / 2 && i == m->focused) out_write("●");
-            else                                 out_write(" ");
+            if (k == per / 2 && i == m->focused)
+                out_write("●");
+            else
+                out_write(" ");
         }
         out_write(ANSI_RESET);
         x += per;
@@ -715,7 +836,8 @@ static void render(dsco_mux_t *m) {
     /* status bar = row `rows`, minimap = row `rows-1`, body = rows 2..rows-2 */
     int body_row0 = 2;
     int body_rows = rows - 3;
-    if (body_rows < 4) body_rows = rows - 2;  /* skip minimap if too small */
+    if (body_rows < 4)
+        body_rows = rows - 2; /* skip minimap if too small */
 
     if (m->count == 0) {
         move_to(body_row0 + body_rows / 2, cols / 2 - 12);
@@ -726,12 +848,12 @@ static void render(dsco_mux_t *m) {
 
     /* Bind grid leaves to projects and layout */
     dsco_grid_assign_projects(&m->grid, m->count);
-    if (m->grid.focused_id < 0 ||
-        !m->grid.tiles[m->grid.focused_id].in_use ||
+    if (m->grid.focused_id < 0 || !m->grid.tiles[m->grid.focused_id].in_use ||
         m->grid.tiles[m->grid.focused_id].kind != DSCO_TILE_LEAF) {
         /* refocus on the mux's focused project */
         int tid = dsco_grid_find_leaf(&m->grid, m->focused);
-        if (tid >= 0) m->grid.focused_id = tid;
+        if (tid >= 0)
+            m->grid.focused_id = tid;
     }
     dsco_grid_layout(&m->grid, body_row0, 1, body_rows, cols);
 
@@ -742,7 +864,8 @@ static void render(dsco_mux_t *m) {
     } else {
         for (int i = 0; i < DSCO_GRID_MAX_TILES; i++) {
             const dsco_tile_t *t = &m->grid.tiles[i];
-            if (!t->in_use || t->kind != DSCO_TILE_LEAF) continue;
+            if (!t->in_use || t->kind != DSCO_TILE_LEAF)
+                continue;
             bool focused = (i == m->grid.focused_id);
             draw_tile(m, t, focused);
         }
@@ -756,7 +879,8 @@ static void render(dsco_mux_t *m) {
         }
     }
 
-    if (rows >= 5) draw_minimap(m, rows - 1, cols);
+    if (rows >= 5)
+        draw_minimap(m, rows - 1, cols);
     draw_prefix_hud(m, rows, cols);
     draw_status_bar(m, rows, cols);
 }
@@ -766,28 +890,37 @@ static void render(dsco_mux_t *m) {
  * ────────────────────────────────────────────────────────────────────────── */
 
 static int mux_add(dsco_mux_t *m, dsco_project_t *p) {
-    if (m->count >= DSCO_PROJECT_MAX) return -1;
+    if (m->count >= DSCO_PROJECT_MAX)
+        return -1;
     p->mux = m;
     m->projects[m->count++] = p;
     return m->count - 1;
 }
 
 static void mux_remove_at(dsco_mux_t *m, int idx) {
-    if (idx < 0 || idx >= m->count) return;
+    if (idx < 0 || idx >= m->count)
+        return;
     dsco_project_t *p = m->projects[idx];
     dsco_project_close(p);
-    for (int i = idx; i < m->count - 1; i++) m->projects[i] = m->projects[i + 1];
+    for (int i = idx; i < m->count - 1; i++)
+        m->projects[i] = m->projects[i + 1];
     m->count--;
-    if (m->focused >= m->count) m->focused = m->count - 1;
-    if (m->focused < 0 && m->count > 0) m->focused = 0;
+    if (m->focused >= m->count)
+        m->focused = m->count - 1;
+    if (m->focused < 0 && m->count > 0)
+        m->focused = 0;
     m->needs_redraw = true;
 }
 
 static int mux_create_new(dsco_mux_t *m, const char *root, const char *name) {
     dsco_project_t *p = NULL;
-    if (dsco_project_create(root, name, &p) != 0) return -1;
+    if (dsco_project_create(root, name, &p) != 0)
+        return -1;
     int idx = mux_add(m, p);
-    if (idx < 0) { dsco_project_close(p); return -1; }
+    if (idx < 0) {
+        dsco_project_close(p);
+        return -1;
+    }
     if (dsco_project_start(p, m->api_key) != 0) {
         /* still keep it in the list, just IDLE */
     }
@@ -806,7 +939,8 @@ static int read_modal_line(const char *prompt, char *out, size_t out_cap) {
     out_write(ANSI_CLEAR_LINE ANSI_REV);
     char b[256];
     int n = snprintf(b, sizeof(b), " %s ", prompt);
-    if (n > cols) n = cols;
+    if (n > cols)
+        n = cols;
     out_writen(b, n);
     out_write(ANSI_RESET " ");
     out_write(ANSI_SHOW_CURSOR);
@@ -819,9 +953,17 @@ static int read_modal_line(const char *prompt, char *out, size_t out_cap) {
     char c;
     while (i < out_cap - 1) {
         ssize_t r = read(STDIN_FILENO, &c, 1);
-        if (r <= 0) break;
-        if (c == '\n' || c == '\r') break;
-        if (c == 127 || c == 8) { if (i > 0) { i--; write(STDOUT_FILENO, "\b \b", 3); } continue; }
+        if (r <= 0)
+            break;
+        if (c == '\n' || c == '\r')
+            break;
+        if (c == 127 || c == 8) {
+            if (i > 0) {
+                i--;
+                write(STDOUT_FILENO, "\b \b", 3);
+            }
+            continue;
+        }
         if (c == 27) { /* esc — cancel */
             tcsetattr(STDIN_FILENO, TCSANOW, &cooked);
             out_write(ANSI_HIDE_CURSOR);
@@ -861,7 +1003,8 @@ static void show_help(dsco_mux_t *m) {
     int c0 = (cols - boxw) / 2;
     for (int r = 0; r < boxh; r++) {
         move_to(r0 + r, c0);
-        for (int c = 0; c < boxw; c++) out_write(" ");
+        for (int c = 0; c < boxw; c++)
+            out_write(" ");
     }
     const char *lines[] = {
         " dsco-mux — deep grid console",
@@ -879,8 +1022,9 @@ static void show_help(dsco_mux_t *m) {
         " Any other key → focused project's stdin",
         " Press any key to dismiss",
     };
-    int n = (int)(sizeof(lines)/sizeof(lines[0]));
-    boxh = n + 1; (void)boxh;
+    int n = (int)(sizeof(lines) / sizeof(lines[0]));
+    boxh = n + 1;
+    (void)boxh;
     for (int i = 0; i < n; i++) {
         move_to(r0 + i, c0 + 1);
         out_write(lines[i]);
@@ -888,7 +1032,8 @@ static void show_help(dsco_mux_t *m) {
     /* wait for one key */
     char c;
     while (read(STDIN_FILENO, &c, 1) <= 0) {
-        struct timespec ts = { 0, 20 * 1000000 }; nanosleep(&ts, NULL);
+        struct timespec ts = {0, 20 * 1000000};
+        nanosleep(&ts, NULL);
     }
     m->needs_redraw = true;
 }
@@ -911,7 +1056,8 @@ static void handle_prefix_command(dsco_mux_t *m, char c) {
     switch (c) {
         case 'c': {
             char root[PATH_MAX];
-            if (read_modal_line("new project root path (absolute or relative)", root, sizeof(root)) > 0) {
+            if (read_modal_line("new project root path (absolute or relative)", root,
+                                sizeof(root)) > 0) {
                 mux_create_new(m, root, NULL);
             }
             m->needs_redraw = true;
@@ -920,8 +1066,8 @@ static void handle_prefix_command(dsco_mux_t *m, char c) {
         case 'x': {
             if (m->focused >= 0 && m->focused < m->count) {
                 char yn[8];
-                if (read_modal_line("close active project? [y/N]", yn, sizeof(yn)) > 0
-                    && (yn[0] == 'y' || yn[0] == 'Y')) {
+                if (read_modal_line("close active project? [y/N]", yn, sizeof(yn)) > 0 &&
+                    (yn[0] == 'y' || yn[0] == 'Y')) {
                     mux_remove_at(m, m->focused);
                 }
             }
@@ -933,36 +1079,76 @@ static void handle_prefix_command(dsco_mux_t *m, char c) {
                 m->focused = (m->focused + 1) % m->count;
                 dsco_grid_focus_project(&m->grid, m->focused);
             }
-            m->needs_redraw = true; return;
+            m->needs_redraw = true;
+            return;
         case 'p':
             if (m->count > 0) {
                 m->focused = (m->focused - 1 + m->count) % m->count;
                 dsco_grid_focus_project(&m->grid, m->focused);
             }
-            m->needs_redraw = true; return;
+            m->needs_redraw = true;
+            return;
 
         /* vim-style cell navigation */
-        case 'h': dsco_grid_focus_dir(&m->grid, -1,  0); m->needs_redraw = true; return;
-        case 'l': dsco_grid_focus_dir(&m->grid, +1,  0); m->needs_redraw = true; return;
-        case 'k': dsco_grid_focus_dir(&m->grid,  0, -1); m->needs_redraw = true; return;
-        case 'j': dsco_grid_focus_dir(&m->grid,  0, +1); m->needs_redraw = true; return;
+        case 'h':
+            dsco_grid_focus_dir(&m->grid, -1, 0);
+            m->needs_redraw = true;
+            return;
+        case 'l':
+            dsco_grid_focus_dir(&m->grid, +1, 0);
+            m->needs_redraw = true;
+            return;
+        case 'k':
+            dsco_grid_focus_dir(&m->grid, 0, -1);
+            m->needs_redraw = true;
+            return;
+        case 'j':
+            dsco_grid_focus_dir(&m->grid, 0, +1);
+            m->needs_redraw = true;
+            return;
 
         /* zoom toggle */
-        case 'z': dsco_grid_zoom_toggle(&m->grid); m->needs_redraw = true; return;
+        case 'z':
+            dsco_grid_zoom_toggle(&m->grid);
+            m->needs_redraw = true;
+            return;
 
         /* splits */
-        case 's': dsco_grid_split(&m->grid, m->grid.focused_id, DSCO_TILE_HSPLIT); m->needs_redraw = true; return;
-        case 'v': dsco_grid_split(&m->grid, m->grid.focused_id, DSCO_TILE_VSPLIT); m->needs_redraw = true; return;
+        case 's':
+            dsco_grid_split(&m->grid, m->grid.focused_id, DSCO_TILE_HSPLIT);
+            m->needs_redraw = true;
+            return;
+        case 'v':
+            dsco_grid_split(&m->grid, m->grid.focused_id, DSCO_TILE_VSPLIT);
+            m->needs_redraw = true;
+            return;
 
         /* cycle visual modes */
-        case 'G': dsco_grid_cycle_preset(&m->grid);     m->needs_redraw = true; return;
-        case 'C': dsco_grid_cycle_color_mode(&m->grid); m->needs_redraw = true; return;
-        case 'B': dsco_grid_cycle_border(&m->grid);     m->needs_redraw = true; return;
-        case 'T': dsco_grid_cycle_theme(&m->grid);      m->needs_redraw = true; return;
+        case 'G':
+            dsco_grid_cycle_preset(&m->grid);
+            m->needs_redraw = true;
+            return;
+        case 'C':
+            dsco_grid_cycle_color_mode(&m->grid);
+            m->needs_redraw = true;
+            return;
+        case 'B':
+            dsco_grid_cycle_border(&m->grid);
+            m->needs_redraw = true;
+            return;
+        case 'T':
+            dsco_grid_cycle_theme(&m->grid);
+            m->needs_redraw = true;
+            return;
 
-        case 'd': m->running = false; return;
-        case '?': show_help(m); return;
-        default: return;
+        case 'd':
+            m->running = false;
+            return;
+        case '?':
+            show_help(m);
+            return;
+        default:
+            return;
     }
 }
 
@@ -998,12 +1184,16 @@ int dsco_mux_run(const char *api_key, const char *initial_root) {
     dsco_grid_init(&mux.grid);
     mux.running = true;
     mux.needs_redraw = true;
-    if (api_key) snprintf(mux.api_key, sizeof(mux.api_key), "%s", api_key);
+    if (api_key)
+        snprintf(mux.api_key, sizeof(mux.api_key), "%s", api_key);
     term_size(&mux.term_rows, &mux.term_cols);
 
     /* wake-pipe: drain threads write 1 byte to nudge the render loop. */
-    int wake_pipe[2] = { -1, -1 };
-    if (pipe(wake_pipe) != 0) { fprintf(stderr, "dsco-mux: pipe(): %s\n", strerror(errno)); return 1; }
+    int wake_pipe[2] = {-1, -1};
+    if (pipe(wake_pipe) != 0) {
+        fprintf(stderr, "dsco-mux: pipe(): %s\n", strerror(errno));
+        return 1;
+    }
     set_nonblock(wake_pipe[0]);
     set_nonblock(wake_pipe[1]);
     mux.wake_fd_r = wake_pipe[0];
@@ -1014,16 +1204,16 @@ int dsco_mux_run(const char *api_key, const char *initial_root) {
         return 1;
     }
     signal(SIGWINCH, on_winch);
-    signal(SIGTERM,  on_term);
-    signal(SIGINT,   on_term);
-    signal(SIGPIPE,  SIG_IGN);
+    signal(SIGTERM, on_term);
+    signal(SIGINT, on_term);
+    signal(SIGPIPE, SIG_IGN);
 
     if (initial_root && *initial_root) {
         mux_create_new(&mux, initial_root, NULL);
     }
 
     int64_t last_render_ms = 0;
-    const int64_t frame_budget_ms = 33;  /* ~30 fps cap */
+    const int64_t frame_budget_ms = 33; /* ~30 fps cap */
     while (mux.running && !g_term) {
         if (g_resized) {
             g_resized = 0;
@@ -1032,7 +1222,8 @@ int dsco_mux_run(const char *api_key, const char *initial_root) {
         }
 
         if (mux.needs_redraw) {
-            struct timespec ts; clock_gettime(CLOCK_MONOTONIC, &ts);
+            struct timespec ts;
+            clock_gettime(CLOCK_MONOTONIC, &ts);
             int64_t now_ms_v = (int64_t)ts.tv_sec * 1000 + ts.tv_nsec / 1000000;
             if (now_ms_v - last_render_ms >= frame_budget_ms) {
                 render(&mux);
@@ -1046,34 +1237,42 @@ int dsco_mux_run(const char *api_key, const char *initial_root) {
          * Main loop polls just two fds — stdin and the wake-pipe.
          * Throughput across N projects no longer depends on N. */
         struct pollfd fds[2];
-        fds[0].fd = STDIN_FILENO;       fds[0].events = POLLIN; fds[0].revents = 0;
-        fds[1].fd = mux.wake_fd_r;      fds[1].events = POLLIN; fds[1].revents = 0;
+        fds[0].fd = STDIN_FILENO;
+        fds[0].events = POLLIN;
+        fds[0].revents = 0;
+        fds[1].fd = mux.wake_fd_r;
+        fds[1].events = POLLIN;
+        fds[1].revents = 0;
 
         /* If a redraw is pending but frame budget isn't elapsed yet, wake up
          * exactly when it elapses so we can render. Otherwise idle. */
         int poll_timeout = 1000;
         if (mux.needs_redraw) {
-            struct timespec ts; clock_gettime(CLOCK_MONOTONIC, &ts);
+            struct timespec ts;
+            clock_gettime(CLOCK_MONOTONIC, &ts);
             int64_t now_ms_v = (int64_t)ts.tv_sec * 1000 + ts.tv_nsec / 1000000;
             int64_t wait = frame_budget_ms - (now_ms_v - last_render_ms);
             poll_timeout = wait < 1 ? 1 : (int)wait;
         }
         int rc = poll(fds, 2, poll_timeout);
         if (rc < 0) {
-            if (errno == EINTR) continue;
+            if (errno == EINTR)
+                continue;
             break;
         }
 
         if (fds[0].revents & POLLIN) {
             char buf[128];
             ssize_t n = read(STDIN_FILENO, buf, sizeof(buf));
-            for (ssize_t i = 0; i < n; i++) handle_byte(&mux, buf[i]);
+            for (ssize_t i = 0; i < n; i++)
+                handle_byte(&mux, buf[i]);
         }
 
         if (fds[1].revents & POLLIN) {
             /* drain coalesced wakeup bytes */
             char drain[256];
-            while (read(mux.wake_fd_r, drain, sizeof(drain)) > 0) { /* drain */ }
+            while (read(mux.wake_fd_r, drain, sizeof(drain)) > 0) { /* drain */
+            }
             mux.needs_redraw = true;
         }
 
@@ -1093,9 +1292,12 @@ int dsco_mux_run(const char *api_key, const char *initial_root) {
     }
 
     /* shutdown */
-    for (int i = 0; i < mux.count; i++) dsco_project_close(mux.projects[i]);
-    if (mux.wake_fd_r >= 0) close(mux.wake_fd_r);
-    if (mux.wake_fd_w >= 0) close(mux.wake_fd_w);
+    for (int i = 0; i < mux.count; i++)
+        dsco_project_close(mux.projects[i]);
+    if (mux.wake_fd_r >= 0)
+        close(mux.wake_fd_r);
+    if (mux.wake_fd_w >= 0)
+        close(mux.wake_fd_w);
     tio_restore();
     g_mux = NULL;
     return 0;

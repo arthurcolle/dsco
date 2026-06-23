@@ -8,7 +8,8 @@
 /* ── Safe allocation wrappers ──────────────────────────────────────────── */
 
 void *safe_malloc(size_t size) {
-    if (size == 0) size = 1;
+    if (size == 0)
+        size = 1;
     void *p = malloc(size);
     if (!p) {
         fprintf(stderr, "dsco: fatal: malloc(%zu) failed\n", size);
@@ -18,7 +19,8 @@ void *safe_malloc(size_t size) {
 }
 
 void *safe_realloc(void *ptr, size_t size) {
-    if (size == 0) size = 1;
+    if (size == 0)
+        size = 1;
     void *p = realloc(ptr, size);
     if (!p) {
         fprintf(stderr, "dsco: fatal: realloc(%zu) failed\n", size);
@@ -28,7 +30,8 @@ void *safe_realloc(void *ptr, size_t size) {
 }
 
 char *safe_strdup(const char *s) {
-    if (!s) return NULL;
+    if (!s)
+        return NULL;
     char *p = strdup(s);
     if (!p) {
         fprintf(stderr, "dsco: fatal: strdup failed\n");
@@ -43,7 +46,8 @@ void jbuf_init(jbuf_t *b, size_t cap) {
     b->data = malloc(cap);
     b->len = 0;
     b->cap = cap;
-    if (b->data) b->data[0] = '\0';
+    if (b->data)
+        b->data[0] = '\0';
 }
 
 void jbuf_free(jbuf_t *b) {
@@ -54,15 +58,19 @@ void jbuf_free(jbuf_t *b) {
 
 void jbuf_reset(jbuf_t *b) {
     b->len = 0;
-    if (b->data) b->data[0] = '\0';
+    if (b->data)
+        b->data[0] = '\0';
 }
 
 static void jbuf_grow(jbuf_t *b, size_t need) {
-    if (b->len + need + 1 <= b->cap) return;
+    if (b->len + need + 1 <= b->cap)
+        return;
     /* Guard against size_t overflow */
     size_t newcap = b->cap * 2;
-    if (newcap < b->cap) newcap = b->len + need + 1; /* overflow: use exact */
-    if (newcap < b->len + need + 1) newcap = b->len + need + 1;
+    if (newcap < b->cap)
+        newcap = b->len + need + 1; /* overflow: use exact */
+    if (newcap < b->len + need + 1)
+        newcap = b->len + need + 1;
     b->data = safe_realloc(b->data, newcap);
     b->cap = newcap;
 }
@@ -81,7 +89,8 @@ void jbuf_appendf(jbuf_t *b, const char *fmt, ...) {
     va_start(ap, fmt);
     int n = vsnprintf(tmp, sizeof(tmp), fmt, ap);
     va_end(ap);
-    if (n > 0) jbuf_append_len(b, tmp, (size_t)(n < (int)sizeof(tmp) ? n : (int)sizeof(tmp)-1));
+    if (n > 0)
+        jbuf_append_len(b, tmp, (size_t)(n < (int)sizeof(tmp) ? n : (int)sizeof(tmp) - 1));
 }
 
 void jbuf_append_len(jbuf_t *b, const char *s, size_t n) {
@@ -101,14 +110,28 @@ void jbuf_append_json_str(jbuf_t *b, const char *s) {
     jbuf_append_char(b, '"');
     const unsigned char *p = (const unsigned char *)s;
     while (*p) {
-        if (*p == '"')       { jbuf_append(b, "\\\""); p++; }
-        else if (*p == '\\') { jbuf_append(b, "\\\\"); p++; }
-        else if (*p == '\b') { jbuf_append(b, "\\b");  p++; }
-        else if (*p == '\f') { jbuf_append(b, "\\f");  p++; }
-        else if (*p == '\n') { jbuf_append(b, "\\n");  p++; }
-        else if (*p == '\r') { jbuf_append(b, "\\r");  p++; }
-        else if (*p == '\t') { jbuf_append(b, "\\t");  p++; }
-        else if (*p < 0x20) {
+        if (*p == '"') {
+            jbuf_append(b, "\\\"");
+            p++;
+        } else if (*p == '\\') {
+            jbuf_append(b, "\\\\");
+            p++;
+        } else if (*p == '\b') {
+            jbuf_append(b, "\\b");
+            p++;
+        } else if (*p == '\f') {
+            jbuf_append(b, "\\f");
+            p++;
+        } else if (*p == '\n') {
+            jbuf_append(b, "\\n");
+            p++;
+        } else if (*p == '\r') {
+            jbuf_append(b, "\\r");
+            p++;
+        } else if (*p == '\t') {
+            jbuf_append(b, "\\t");
+            p++;
+        } else if (*p < 0x20) {
             char esc[8];
             snprintf(esc, sizeof(esc), "\\u%04x", *p);
             jbuf_append(b, esc);
@@ -117,26 +140,37 @@ void jbuf_append_json_str(jbuf_t *b, const char *s) {
             /* Validate UTF-8 and reject surrogates / overlong / invalid sequences */
             unsigned int cp = 0;
             int expect = 0;
-            if ((*p & 0xE0) == 0xC0)      { cp = *p & 0x1F; expect = 1; }
-            else if ((*p & 0xF0) == 0xE0)  { cp = *p & 0x0F; expect = 2; }
-            else if ((*p & 0xF8) == 0xF0)  { cp = *p & 0x07; expect = 3; }
-            else { jbuf_append(b, "\xEF\xBF\xBD"); p++; continue; } /* invalid lead byte -> U+FFFD */
+            if ((*p & 0xE0) == 0xC0) {
+                cp = *p & 0x1F;
+                expect = 1;
+            } else if ((*p & 0xF0) == 0xE0) {
+                cp = *p & 0x0F;
+                expect = 2;
+            } else if ((*p & 0xF8) == 0xF0) {
+                cp = *p & 0x07;
+                expect = 3;
+            } else {
+                jbuf_append(b, "\xEF\xBF\xBD");
+                p++;
+                continue;
+            } /* invalid lead byte -> U+FFFD */
 
             const unsigned char *start = p;
             bool valid = true;
             p++;
             for (int i = 0; i < expect; i++, p++) {
-                if ((*p & 0xC0) != 0x80) { valid = false; break; }
+                if ((*p & 0xC0) != 0x80) {
+                    valid = false;
+                    break;
+                }
                 cp = (cp << 6) | (*p & 0x3F);
             }
             /* Reject surrogates (U+D800..U+DFFF) and overlong encodings */
-            if (!valid || (cp >= 0xD800 && cp <= 0xDFFF) ||
-                (expect == 1 && cp < 0x80) ||
-                (expect == 2 && cp < 0x800) ||
-                (expect == 3 && cp < 0x10000) ||
-                cp > 0x10FFFF) {
+            if (!valid || (cp >= 0xD800 && cp <= 0xDFFF) || (expect == 1 && cp < 0x80) ||
+                (expect == 2 && cp < 0x800) || (expect == 3 && cp < 0x10000) || cp > 0x10FFFF) {
                 jbuf_append(b, "\xEF\xBF\xBD"); /* U+FFFD */
-                if (!valid) continue; /* p already advanced past the bad continuation */
+                if (!valid)
+                    continue; /* p already advanced past the bad continuation */
             } else {
                 jbuf_append_len(b, (const char *)start, (size_t)(p - start));
             }
@@ -157,34 +191,54 @@ void jbuf_append_int(jbuf_t *b, int v) {
 /* ── Minimal JSON parser ───────────────────────────────────────────────── */
 
 static const char *skip_ws(const char *p) {
-    while (*p && isspace((unsigned char)*p)) p++;
+    while (*p && isspace((unsigned char)*p))
+        p++;
     return p;
 }
 
 static const char *parse_string(const char *p, char **out) {
-    if (*p != '"') return NULL;
+    if (*p != '"')
+        return NULL;
     p++;
     jbuf_t b;
     jbuf_init(&b, 256);
     while (*p && *p != '"') {
         if (*p == '\\') {
             p++;
-            if (!*p) break;  /* truncated escape at end of input */
+            if (!*p)
+                break; /* truncated escape at end of input */
             switch (*p) {
-                case '"': case '\\': case '/': jbuf_append_char(&b, *p); break;
-                case 'b': jbuf_append_char(&b, '\b'); break;
-                case 'f': jbuf_append_char(&b, '\f'); break;
-                case 'n': jbuf_append_char(&b, '\n'); break;
-                case 'r': jbuf_append_char(&b, '\r'); break;
-                case 't': jbuf_append_char(&b, '\t'); break;
+                case '"':
+                case '\\':
+                case '/':
+                    jbuf_append_char(&b, *p);
+                    break;
+                case 'b':
+                    jbuf_append_char(&b, '\b');
+                    break;
+                case 'f':
+                    jbuf_append_char(&b, '\f');
+                    break;
+                case 'n':
+                    jbuf_append_char(&b, '\n');
+                    break;
+                case 'r':
+                    jbuf_append_char(&b, '\r');
+                    break;
+                case 't':
+                    jbuf_append_char(&b, '\t');
+                    break;
                 case 'u': {
                     unsigned int cp = 0;
                     for (int i = 0; i < 4 && p[1]; i++) {
                         p++;
                         cp = cp * 16;
-                        if (*p >= '0' && *p <= '9') cp += *p - '0';
-                        else if (*p >= 'a' && *p <= 'f') cp += *p - 'a' + 10;
-                        else if (*p >= 'A' && *p <= 'F') cp += *p - 'A' + 10;
+                        if (*p >= '0' && *p <= '9')
+                            cp += *p - '0';
+                        else if (*p >= 'a' && *p <= 'f')
+                            cp += *p - 'a' + 10;
+                        else if (*p >= 'A' && *p <= 'F')
+                            cp += *p - 'A' + 10;
                     }
                     /* Handle UTF-16 surrogate pairs: \uD800-\uDBFF followed by \uDC00-\uDFFF */
                     if (cp >= 0xD800 && cp <= 0xDBFF && p[1] == '\\' && p[2] == 'u') {
@@ -192,9 +246,12 @@ static const char *parse_string(const char *p, char **out) {
                         const char *q = p + 3; /* skip \u */
                         for (int i = 0; i < 4 && *q; i++, q++) {
                             lo = lo * 16;
-                            if (*q >= '0' && *q <= '9') lo += *q - '0';
-                            else if (*q >= 'a' && *q <= 'f') lo += *q - 'a' + 10;
-                            else if (*q >= 'A' && *q <= 'F') lo += *q - 'A' + 10;
+                            if (*q >= '0' && *q <= '9')
+                                lo += *q - '0';
+                            else if (*q >= 'a' && *q <= 'f')
+                                lo += *q - 'a' + 10;
+                            else if (*q >= 'A' && *q <= 'F')
+                                lo += *q - 'A' + 10;
                         }
                         if (lo >= 0xDC00 && lo <= 0xDFFF) {
                             cp = 0x10000 + ((cp - 0xD800) << 10) + (lo - 0xDC00);
@@ -222,58 +279,84 @@ static const char *parse_string(const char *p, char **out) {
                     }
                     break;
                 }
-                default: jbuf_append_char(&b, *p); break;
+                default:
+                    jbuf_append_char(&b, *p);
+                    break;
             }
         } else {
             jbuf_append_char(&b, *p);
         }
         p++;
     }
-    if (*p == '"') p++;
+    if (*p == '"')
+        p++;
     *out = b.data;
     return p;
 }
 
 static const char *skip_value(const char *p) {
     p = skip_ws(p);
-    if (!*p) return p;
+    if (!*p)
+        return p;
     if (*p == '"') {
         p++;
-        while (*p && *p != '"') { if (*p == '\\' && p[1]) p++; p++; }
-        if (*p == '"') p++;
+        while (*p && *p != '"') {
+            if (*p == '\\' && p[1])
+                p++;
+            p++;
+        }
+        if (*p == '"')
+            p++;
         return p;
     }
     if (*p == '{') {
-        int depth = 1; p++;
+        int depth = 1;
+        p++;
         while (*p && depth > 0) {
-            if (*p == '{') depth++;
-            else if (*p == '}') depth--;
+            if (*p == '{')
+                depth++;
+            else if (*p == '}')
+                depth--;
             else if (*p == '"') {
                 p++;
-                while (*p && *p != '"') { if (*p == '\\' && p[1]) p++; p++; }
+                while (*p && *p != '"') {
+                    if (*p == '\\' && p[1])
+                        p++;
+                    p++;
+                }
                 /* If unterminated string, don't advance past \0 */
-                if (!*p) return p;
+                if (!*p)
+                    return p;
             }
             p++;
         }
         return p;
     }
     if (*p == '[') {
-        int depth = 1; p++;
+        int depth = 1;
+        p++;
         while (*p && depth > 0) {
-            if (*p == '[') depth++;
-            else if (*p == ']') depth--;
+            if (*p == '[')
+                depth++;
+            else if (*p == ']')
+                depth--;
             else if (*p == '"') {
                 p++;
-                while (*p && *p != '"') { if (*p == '\\' && p[1]) p++; p++; }
+                while (*p && *p != '"') {
+                    if (*p == '\\' && p[1])
+                        p++;
+                    p++;
+                }
                 /* If unterminated string, don't advance past \0 */
-                if (!*p) return p;
+                if (!*p)
+                    return p;
             }
             p++;
         }
         return p;
     }
-    while (*p && *p != ',' && *p != '}' && *p != ']' && !isspace((unsigned char)*p)) p++;
+    while (*p && *p != ',' && *p != '}' && *p != ']' && !isspace((unsigned char)*p))
+        p++;
     return p;
 }
 
@@ -290,18 +373,28 @@ static const char *find_key(const char *p, const char *key) {
         if (*p == '"') {
             char *k = NULL;
             const char *after = parse_string(p, &k);
-            if (!after || after <= p) { free(k); return NULL; }
+            if (!after || after <= p) {
+                free(k);
+                return NULL;
+            }
             after = skip_ws(after);
-            if (*after == ':') after++;
+            if (*after == ':')
+                after++;
             after = skip_ws(after);
-            if (k && strcmp(k, key) == 0) { free(k); return after; }
+            if (k && strcmp(k, key) == 0) {
+                free(k);
+                return after;
+            }
             free(k);
             const char *before_skip = after;
             after = skip_value(after);
             /* Guard: if skip_value didn't advance, bail to prevent infinite loop */
-            if (after <= before_skip && *after) { return NULL; }
+            if (after <= before_skip && *after) {
+                return NULL;
+            }
             after = skip_ws(after);
-            if (*after == ',') after++;
+            if (*after == ',')
+                after++;
             p = after;
         } else {
             p++;
@@ -312,11 +405,14 @@ static const char *find_key(const char *p, const char *key) {
 
 char *json_get_str(const char *json, const char *key) {
     const char *p = skip_ws(json);
-    if (*p != '{') return NULL;
+    if (*p != '{')
+        return NULL;
     p = find_key(p + 1, key);
-    if (!p) return NULL;
+    if (!p)
+        return NULL;
     p = skip_ws(p);
-    if (*p != '"') return NULL;
+    if (*p != '"')
+        return NULL;
     char *val = NULL;
     parse_string(p, &val);
     return val;
@@ -324,9 +420,11 @@ char *json_get_str(const char *json, const char *key) {
 
 char *json_get_raw(const char *json, const char *key) {
     const char *p = skip_ws(json);
-    if (*p != '{') return NULL;
+    if (*p != '{')
+        return NULL;
     p = find_key(p + 1, key);
-    if (!p) return NULL;
+    if (!p)
+        return NULL;
     const char *start, *end;
     extract_raw_value(p, &start, &end);
     size_t len = (size_t)(end - start);
@@ -338,7 +436,8 @@ char *json_get_raw(const char *json, const char *key) {
 
 int json_get_int(const char *json, const char *key, int def) {
     char *raw = json_get_raw(json, key);
-    if (!raw) return def;
+    if (!raw)
+        return def;
     int v = atoi(raw);
     free(raw);
     return v;
@@ -346,7 +445,8 @@ int json_get_int(const char *json, const char *key, int def) {
 
 bool json_get_bool(const char *json, const char *key, bool def) {
     char *raw = json_get_raw(json, key);
-    if (!raw) return def;
+    if (!raw)
+        return def;
     bool v = (strncmp(raw, "true", 4) == 0);
     free(raw);
     return v;
@@ -354,7 +454,8 @@ bool json_get_bool(const char *json, const char *key, bool def) {
 
 double json_get_double(const char *json, const char *key, double def) {
     char *raw = json_get_raw(json, key);
-    if (!raw) return def;
+    if (!raw)
+        return def;
     double v = strtod(raw, NULL);
     free(raw);
     return v;
@@ -362,11 +463,14 @@ double json_get_double(const char *json, const char *key, double def) {
 
 int json_array_foreach(const char *json, const char *key, json_array_cb cb, void *ctx) {
     const char *p = skip_ws(json);
-    if (*p != '{') return 0;
+    if (*p != '{')
+        return 0;
     p = find_key(p + 1, key);
-    if (!p) return 0;
+    if (!p)
+        return 0;
     p = skip_ws(p);
-    if (*p != '[') return 0;
+    if (*p != '[')
+        return 0;
     p++; /* past [ */
     int count = 0;
     p = skip_ws(p);
@@ -376,9 +480,11 @@ int json_array_foreach(const char *json, const char *key, json_array_cb cb, void
         const char *before = p;
         p = skip_value(p);
         /* Guard: if skip_value didn't advance, bail to prevent infinite loop */
-        if (p <= before && *p) break;
+        if (p <= before && *p)
+            break;
         p = skip_ws(p);
-        if (*p == ',') p++;
+        if (*p == ',')
+            p++;
         p = skip_ws(p);
     }
     return count;
@@ -388,20 +494,25 @@ int json_array_foreach(const char *json, const char *key, json_array_cb cb, void
 
 static content_block_t parse_content_block(const char *p) {
     content_block_t blk = {0};
-    if (*p != '{') return blk;
+    if (*p != '{')
+        return blk;
 
     const char *obj_start = p + 1;
     const char *vp = find_key(obj_start, "type");
-    if (vp && *vp == '"') parse_string(vp, &blk.type);
+    if (vp && *vp == '"')
+        parse_string(vp, &blk.type);
 
     if (blk.type && strcmp(blk.type, "text") == 0) {
         vp = find_key(obj_start, "text");
-        if (vp && *vp == '"') parse_string(vp, &blk.text);
+        if (vp && *vp == '"')
+            parse_string(vp, &blk.text);
     } else if (blk.type && strcmp(blk.type, "tool_use") == 0) {
         vp = find_key(obj_start, "name");
-        if (vp && *vp == '"') parse_string(vp, &blk.tool_name);
+        if (vp && *vp == '"')
+            parse_string(vp, &blk.tool_name);
         vp = find_key(obj_start, "id");
-        if (vp && *vp == '"') parse_string(vp, &blk.tool_id);
+        if (vp && *vp == '"')
+            parse_string(vp, &blk.tool_id);
         vp = find_key(obj_start, "input");
         if (vp) {
             const char *start, *end;
@@ -418,14 +529,17 @@ static content_block_t parse_content_block(const char *p) {
 bool json_parse_response(const char *json, parsed_response_t *out) {
     memset(out, 0, sizeof(*out));
     const char *p = skip_ws(json);
-    if (*p != '{') return false;
+    if (*p != '{')
+        return false;
     p++;
 
     const char *vp = find_key(p, "stop_reason");
-    if (vp && *vp == '"') parse_string(vp, &out->stop_reason);
+    if (vp && *vp == '"')
+        parse_string(vp, &out->stop_reason);
 
     vp = find_key(p, "content");
-    if (!vp || *vp != '[') return false;
+    if (!vp || *vp != '[')
+        return false;
     vp++;
 
     int cap = 8;
@@ -444,10 +558,12 @@ bool json_parse_response(const char *json, parsed_response_t *out) {
             out->count++;
             const char *before = vp;
             vp = skip_value(vp);
-            if (vp <= before && *vp) break;
+            if (vp <= before && *vp)
+                break;
         }
         vp = skip_ws(vp);
-        if (*vp == ',') vp++;
+        if (*vp == ',')
+            vp++;
         vp = skip_ws(vp);
     }
     return true;
@@ -513,7 +629,8 @@ void *arena_alloc(arena_t *a, size_t size) {
 
     /* Need new chunk */
     size_t chunk_cap = ARENA_CHUNK_SIZE;
-    if (size > chunk_cap) chunk_cap = size;
+    if (size > chunk_cap)
+        chunk_cap = size;
     arena_chunk_t *c = arena_new_chunk(chunk_cap);
     c->next = a->head;
     a->head = c;
@@ -525,7 +642,8 @@ void *arena_alloc(arena_t *a, size_t size) {
 }
 
 char *arena_strdup(arena_t *a, const char *s) {
-    if (!s) return NULL;
+    if (!s)
+        return NULL;
     size_t len = strlen(s) + 1;
     char *p = arena_alloc(a, len);
     memcpy(p, s, len);
@@ -570,7 +688,8 @@ void arena_free(arena_t *a) {
    json_free_response becomes a no-op when arena is used. */
 static content_block_t parse_content_block_arena(const char *p, arena_t *arena) {
     content_block_t blk = {0};
-    if (*p != '{') return blk;
+    if (*p != '{')
+        return blk;
 
     const char *obj_start = p + 1;
     const char *vp = find_key(obj_start, "type");
@@ -618,11 +737,13 @@ static content_block_t parse_content_block_arena(const char *p, arena_t *arena) 
 }
 
 bool json_parse_response_arena(const char *json, parsed_response_t *out, arena_t *arena) {
-    if (!arena) return json_parse_response(json, out);
+    if (!arena)
+        return json_parse_response(json, out);
 
     memset(out, 0, sizeof(*out));
     const char *p = skip_ws(json);
-    if (*p != '{') return false;
+    if (*p != '{')
+        return false;
     p++;
 
     const char *vp = find_key(p, "stop_reason");
@@ -634,7 +755,8 @@ bool json_parse_response_arena(const char *json, parsed_response_t *out, arena_t
     }
 
     vp = find_key(p, "content");
-    if (!vp || *vp != '[') return false;
+    if (!vp || *vp != '[')
+        return false;
     vp++;
 
     int cap = 8;
@@ -656,10 +778,12 @@ bool json_parse_response_arena(const char *json, parsed_response_t *out, arena_t
             out->count++;
             const char *before = vp;
             vp = skip_value(vp);
-            if (vp <= before && *vp) break;
+            if (vp <= before && *vp)
+                break;
         }
         vp = skip_ws(vp);
-        if (*vp == ',') vp++;
+        if (*vp == ',')
+            vp++;
         vp = skip_ws(vp);
     }
     return true;
@@ -669,19 +793,21 @@ bool json_parse_response_arena(const char *json, parsed_response_t *out, arena_t
 
 /* Peek at first non-whitespace char to infer JSON type */
 static char json_peek_type(const char *p) {
-    while (*p && isspace((unsigned char)*p)) p++;
+    while (*p && isspace((unsigned char)*p))
+        p++;
     return *p;
 }
 
 /* Check if a key exists at the top level of a JSON object */
 static bool json_has_key(const char *json, const char *key) {
     const char *p = skip_ws(json);
-    if (*p != '{') return false;
+    if (*p != '{')
+        return false;
     return find_key(p + 1, key) != NULL;
 }
 
 json_validation_t json_validate_schema(const char *json, const char *schema_json) {
-    json_validation_t result = { .valid = true, .error = "", .field = "" };
+    json_validation_t result = {.valid = true, .error = "", .field = ""};
 
     if (!json || !schema_json) {
         result.valid = false;
@@ -698,7 +824,8 @@ json_validation_t json_validate_schema(const char *json, const char *schema_json
     }
 
     const char *sp = skip_ws(schema_json);
-    if (*sp != '{') return result; /* can't validate without schema */
+    if (*sp != '{')
+        return result; /* can't validate without schema */
 
     /* Extract "required" array from schema */
     const char *req = find_key(sp + 1, "required");
@@ -722,9 +849,11 @@ json_validation_t json_validate_schema(const char *json, const char *schema_json
                         }
                         free(field);
                     }
-                    if (!after || after <= req) break;
+                    if (!after || after <= req)
+                        break;
                     req = skip_ws(after);
-                    if (*req == ',') req++;
+                    if (*req == ',')
+                        req++;
                     req = skip_ws(req);
                 } else {
                     break;
@@ -744,9 +873,13 @@ json_validation_t json_validate_schema(const char *json, const char *schema_json
                 if (*props == '"') {
                     char *prop_name = NULL;
                     const char *after = parse_string(props, &prop_name);
-                    if (!after || after <= props) { free(prop_name); break; }
+                    if (!after || after <= props) {
+                        free(prop_name);
+                        break;
+                    }
                     after = skip_ws(after);
-                    if (*after == ':') after++;
+                    if (*after == ':')
+                        after++;
                     after = skip_ws(after);
 
                     /* Get expected type from property schema */
@@ -770,14 +903,14 @@ json_validation_t json_validate_schema(const char *json, const char *schema_json
                                 type_ok = false;
                             else if (strcmp(expected_type, "array") == 0 && actual != '[')
                                 type_ok = false;
-                            else if (strcmp(expected_type, "boolean") == 0 &&
-                                     actual != 't' && actual != 'f')
+                            else if (strcmp(expected_type, "boolean") == 0 && actual != 't' &&
+                                     actual != 'f')
                                 type_ok = false;
-                            else if (strcmp(expected_type, "number") == 0 &&
-                                     actual != '-' && !(actual >= '0' && actual <= '9'))
+                            else if (strcmp(expected_type, "number") == 0 && actual != '-' &&
+                                     !(actual >= '0' && actual <= '9'))
                                 type_ok = false;
-                            else if (strcmp(expected_type, "integer") == 0 &&
-                                     actual != '-' && !(actual >= '0' && actual <= '9'))
+                            else if (strcmp(expected_type, "integer") == 0 && actual != '-' &&
+                                     !(actual >= '0' && actual <= '9'))
                                 type_ok = false;
 
                             if (!type_ok) {
@@ -798,9 +931,11 @@ json_validation_t json_validate_schema(const char *json, const char *schema_json
                     /* Skip past property schema value */
                     const char *before = after;
                     after = skip_value(after);
-                    if (after <= before && *after) break;
+                    if (after <= before && *after)
+                        break;
                     after = skip_ws(after);
-                    if (*after == ',') after++;
+                    if (*after == ',')
+                        after++;
                     props = skip_ws(after);
                 } else {
                     break;
