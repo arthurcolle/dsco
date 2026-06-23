@@ -52,6 +52,7 @@
 
 #ifdef HAVE_READLINE
 #include <readline/readline.h>
+#include <mach-o/dyld.h>
 #include <readline/history.h>
 #endif
 
@@ -1327,15 +1328,15 @@ static int process_dragged_images(char *input_buf, conversation_t *conv) {
 
 static void terminal_input_echo_suspend(void);
 static void terminal_input_echo_restore(void);
+static void terminal_force_restore(void);
 
 static void sigint_handler(int sig) {
     (void)sig;
     /* First Ctrl+C: pause current streaming turn (ESC_PAUSED state).
        Second Ctrl+C: hard exit (already interrupted/stuck). */
     if (g_interrupted) {
-        terminal_input_echo_restore();
-        const char reset[] = "\033[r\033[?2004l\033[0m\033[?25h\n";
-        (void)write(STDERR_FILENO, reset, sizeof(reset) - 1);
+        terminal_force_restore();
+        (void)write(STDERR_FILENO, "\n", 1);
         _exit(130);
     }
     g_escape_state = ESC_PAUSED;
@@ -1345,9 +1346,7 @@ static void sigint_handler(int sig) {
 static void sigtstp_handler(int sig) {
     (void)sig;
     /* Reset terminal state before suspend so the parent shell isn't corrupted */
-    terminal_input_echo_restore();
-    const char reset[] = "\033[r\033[?2004l\033[0m\033[?25h";
-    (void)write(STDERR_FILENO, reset, sizeof(reset) - 1);
+    terminal_force_restore();
     /* Re-raise default SIGTSTP to actually suspend */
     signal(SIGTSTP, SIG_DFL);
     raise(SIGTSTP);
@@ -1355,12 +1354,11 @@ static void sigtstp_handler(int sig) {
 
 /* ── Terminal cleanup atexit handler ───────────────────────────────────── */
 static void terminal_reset_atexit(void) {
-    terminal_input_echo_restore();
-    /* Safety net: always restore terminal to sane state on exit.
-       This catches all exit() paths including readline EOF, quit command, etc.
-       Reset: scroll region, bracketed paste, SGR attributes, cursor visibility. */
-    fprintf(stderr, "\033[r\033[?2004l\033[0m\033[?25h");
-    fflush(stderr);
+    /* Safety net: always restore terminal to sane state on exit. Catches every
+       exit() path — readline EOF, /quit, composer death mid-raw-mode — by
+       forcing the captured cooked termios back (TCSAFLUSH drains any stray
+       escape reply) plus the mode resets. */
+    terminal_force_restore();
 }
 
 /* ── SIGWINCH handler (terminal resize) ────────────────────────────────── */
@@ -1424,8 +1422,8 @@ static void sigterm_autosave(int sig) {
         autosave(g_autosave_conv, g_autosave_session);
     /* Kill MCP children before exiting so they don't orphan. */
     mcp_shutdown(&g_mcp);
-    const char reset[] = "\033[r\033[?2004l\033[0m\033[?25h\n";
-    (void)write(STDERR_FILENO, reset, sizeof(reset) - 1);
+    terminal_force_restore();
+    (void)write(STDERR_FILENO, "\n", 1);
     (void)sig;
     _exit(0);
 }
@@ -2164,6 +2162,7 @@ static const slash_command_t s_slash_commands[] = {
     {"/workspace bootstrap", "create workspace files"},
     {"/workspace reload", "reload workspace prompt cache"},
     {"/workspace prompt", "show active workspace prompt"},
+    {"/voice", "record voice → transcribe → submit as prompt"},
     {"/skills", "list active skills"},
     {"/skills show", "show a skill body"},
     {"/skills use", "set active skill"},
@@ -2189,6 +2188,7 @@ static const slash_command_t s_slash_commands[] = {
     {"/agents edit", "edit an existing agent profile"},
     {"/agents delete", "delete an agent profile"},
     {"/agents groups", "list available tool groups"},
+    {"/restart", "hotswap to new binary and restart session (preserves history)"},
     {"quit", "exit dsco"},
     {"exit", "exit dsco"},
     {"/exit", "exit dsco"},
@@ -2572,6 +2572,41 @@ static struct termios s_saved_termios;
 static bool s_saved_termios_valid = false;
 static bool s_input_echo_suspended = false;
 
+/* Pristine (cooked) tty state captured ONCE before any subsystem switches to
+ * raw mode. The composer (tui_composer_read) and the ESC poller each flip the
+ * terminal to raw with their own local termios copy; if the process dies while
+ * one of them holds raw mode, the per-subsystem restore never runs and the tty
+ * is handed back to the shell still in raw mode (no echo / broken line
+ * discipline) — the "have to close the tab" failure. This global is the
+ * authoritative fallback every exit path restores from. */
+static struct termios g_term_orig;
+static volatile sig_atomic_t g_term_orig_valid = 0;
+
+static void terminal_capture_original(void) {
+    if (g_term_orig_valid || !isatty(STDIN_FILENO))
+        return;
+    if (tcgetattr(STDIN_FILENO, &g_term_orig) == 0)
+        g_term_orig_valid = 1;
+}
+
+/* Hard, async-signal-safe restore: only write() + tcsetattr(). Emits the
+ * mode resets the TUI may have left on (scroll region, bracketed paste, mouse
+ * + focus reporting, cursor, SGR) and forces the tty back to the captured
+ * cooked state. TCSAFLUSH discards pending input — notably a late DSR (ESC[6n)
+ * reply that would otherwise leak to the shell as a bogus command like the
+ * stray "^[[56;1R". Safe to call from a signal handler or atexit. */
+static void terminal_force_restore(void) {
+    static const char reset[] = "\033[r"          /* reset scroll region */
+                                "\033[?2004l"      /* bracketed paste off */
+                                "\033[?1000l\033[?1002l\033[?1003l\033[?1006l" /* mouse off */
+                                "\033[?1004l"      /* focus reporting off */
+                                "\033[?25h"        /* show cursor */
+                                "\033[0m";          /* reset attributes */
+    (void)write(STDERR_FILENO, reset, sizeof(reset) - 1);
+    if (g_term_orig_valid)
+        tcsetattr(STDIN_FILENO, TCSAFLUSH, &g_term_orig);
+}
+
 static void terminal_input_echo_suspend(void) {
     if (s_input_echo_suspended || !isatty(STDIN_FILENO))
         return;
@@ -2579,6 +2614,7 @@ static void terminal_input_echo_suspend(void) {
     struct termios tio;
     if (tcgetattr(STDIN_FILENO, &tio) != 0)
         return;
+    terminal_capture_original(); /* the current state is still cooked here */
     s_saved_termios = tio;
     s_saved_termios_valid = true;
     /* Disable echo and canonical mode so the ESC poller can read individual
@@ -3185,6 +3221,10 @@ static char *read_input_line_prompt(char *buf, size_t buf_sz, const char *prompt
 void agent_run(const char *api_key, const char *model, const char *topology_name,
                bool topology_auto, const char *provider_override) {
     g_provider_override_name = provider_override;
+    /* Capture the pristine cooked tty state BEFORE any raw-mode switch, so every
+       restore path (atexit, signals, composer death) can hand the terminal back
+       to the shell in line-discipline mode. */
+    terminal_capture_original();
     /* Register terminal reset FIRST — ensures scroll region, bracketed paste,
        and SGR attrs are cleaned up on ANY exit path through exit(). */
     atexit(terminal_reset_atexit);
@@ -3632,7 +3672,45 @@ void agent_run(const char *api_key, const char *model, const char *topology_name
                 }
             }
         }
-                if (strcmp(input_buf, "quit") == 0 || strcmp(input_buf, "exit") == 0 ||
+                if (strcmp(input_buf, "/restart") == 0 || strncmp(input_buf, "/restart ", 9) == 0) {
+            /* Hotswap restart: autosave, then exit with code 0.
+             * The supervisor (permanent restart mode) will relaunch dsco,
+             * and before execvp it will pick up dsco-new (if present) or
+             * whatever DSCO_HOTSWAP_BIN points to.
+             * History and session are preserved via _autosave.json. */
+            const char *new_bin = getenv("DSCO_HOTSWAP_BIN");
+            char staged[512] = {0};
+            if (!new_bin) {
+                /* Check for dsco-new sibling of the running binary */
+                char self[PATH_MAX] = {0};
+                uint32_t sz = sizeof(self);
+                if (_NSGetExecutablePath(self, &sz) == 0) {
+                    const char *sl = strrchr(self, '/');
+                    if (sl) {
+                        size_t dlen = (size_t)(sl - self);
+                        snprintf(staged, sizeof(staged), "%.*s/dsco-new", (int)dlen, self);
+                        if (access(staged, X_OK) == 0) {
+                            new_bin = staged;
+                            fprintf(stderr,
+                                "  %shotswap:%s staged binary found: %s%s\n",
+                                TUI_BCYAN, TUI_RESET, new_bin, TUI_RESET);
+                        }
+                    }
+                }
+            }
+            if (new_bin && new_bin[0]) {
+                setenv("DSCO_HOTSWAP_BIN", new_bin, 1);
+                tui_success("hotswap restart — new binary will load on next launch");
+            } else {
+                tui_success("restart — reloading same binary (no dsco-new found)");
+            }
+            /* Autosave then clean-exit so supervisor relaunches */
+            setenv("DSCO_SUPERVISE_RESTART", "permanent", 1);
+            baseline_log("command", "/restart", new_bin ? new_bin : "(same)", NULL);
+            break;  /* exits main loop → autosave → supervisor relaunches */
+        }
+
+        if (strcmp(input_buf, "quit") == 0 || strcmp(input_buf, "exit") == 0 ||
             strcmp(input_buf, "/exit") == 0 || strcmp(input_buf, "/quit") == 0) {
             /* Tell supervisor not to relaunch on this voluntary exit. */
             setenv("DSCO_SUPERVISE_RESTART", "transient", 1);
@@ -4911,6 +4989,56 @@ void agent_run(const char *api_key, const char *model, const char *topology_name
             }
             baseline_log("command", "/skills", NULL, NULL);
             continue;
+        }
+        if (strcmp(input_buf, "/voice") == 0 || strncmp(input_buf, "/voice ", 7) == 0) {
+            const char *varg = (input_buf[6] == ' ') ? input_buf + 7 : "";
+            /* Run voice recorder — blocks until speech captured and transcribed.
+             * Script writes transcript to stdout; we read it into input_buf
+             * and fall through to send_to_llm so it's submitted as a user turn. */
+            char vcmd[512];
+            const char *vscript = getenv("DSCO_VOICE_SCRIPT");
+            if (!vscript) vscript = getenv("HOME");
+            char vpath[256];
+            if (vscript && vscript[0] == '/') {
+                /* DSCO_VOICE_SCRIPT is set to full path */
+                snprintf(vpath, sizeof(vpath), "%s", vscript);
+            } else {
+                const char *home = getenv("HOME");
+                snprintf(vpath, sizeof(vpath), "%s/.dsco/voice/voice_input.py", home ? home : "");
+            }
+            /* Optional extra flags from /voice <flags> */
+            /* If DSCO_VOICE_SCRIPT is a .sh file, exec directly; otherwise run with python3 */
+            {
+                size_t vplen = strlen(vpath);
+                bool is_sh = vplen > 3 && strcmp(vpath + vplen - 3, ".sh") == 0;
+                if (is_sh)
+                    snprintf(vcmd, sizeof(vcmd), "'%s' %s 2>/dev/tty", vpath, varg);
+                else
+                    snprintf(vcmd, sizeof(vcmd), "python3 '%s' %s 2>/dev/tty", vpath, varg);
+            }
+            FILE *vp = popen(vcmd, "r");
+            if (!vp) {
+                tui_error("voice: failed to launch recorder");
+                continue;
+            }
+            char vtranscript[MAX_INPUT_LINE] = {0};
+            if (!fgets(vtranscript, sizeof(vtranscript), vp)) {
+                pclose(vp);
+                tui_error("voice: no transcript received");
+                continue;
+            }
+            pclose(vp);
+            /* Trim trailing newline */
+            size_t vl = strlen(vtranscript);
+            while (vl > 0 && (vtranscript[vl-1] == '\n' || vtranscript[vl-1] == '\r'))
+                vtranscript[--vl] = '\0';
+            if (vl == 0) {
+                tui_error("voice: empty transcript");
+                continue;
+            }
+            snprintf(input_buf, MAX_INPUT_LINE, "%s", vtranscript);
+            baseline_log("command", "/voice", input_buf, NULL);
+            goto send_to_llm;
         }
         if (strcmp(input_buf, "/topology") == 0 || strncmp(input_buf, "/topology ", 10) == 0) {
             const char *arg = input_buf + 9;
@@ -6826,8 +6954,10 @@ void agent_run(const char *api_key, const char *model, const char *topology_name
                                        cur_key);
             char *req =
                 g_provider
-                    ? g_provider->build_request(g_provider, &conv, &session, MAX_TOKENS, cur_key)
-                    : llm_build_request_ex_for_credential(&conv, &session, MAX_TOKENS, cur_key);
+                    ? g_provider->build_request(g_provider, &conv, &session, dsco_max_tokens(),
+                                                cur_key)
+                    : llm_build_request_ex_for_credential(&conv, &session, dsco_max_tokens(),
+                                                          cur_key);
             if (!req) {
                 tui_error("failed to build request");
                 baseline_log("error", "request_build_failed", NULL, NULL);
@@ -6867,9 +6997,10 @@ void agent_run(const char *api_key, const char *model, const char *topology_name
 
                     free(req);
                     req = g_provider ? g_provider->build_request(g_provider, &conv, &session,
-                                                                 MAX_TOKENS, cur_key)
+                                                                 dsco_max_tokens(), cur_key)
                                      : llm_build_request_ex_for_credential(&conv, &session,
-                                                                           MAX_TOKENS, cur_key);
+                                                                           dsco_max_tokens(),
+                                                                           cur_key);
                     if (!req) {
                         tui_error("failed to rebuild request after auto-compact");
                         break;
@@ -6945,9 +7076,10 @@ void agent_run(const char *api_key, const char *model, const char *topology_name
 
                     free(req);
                     req = g_provider ? g_provider->build_request(g_provider, &conv, &session,
-                                                                 MAX_TOKENS, fb_key)
+                                                                 dsco_max_tokens(), fb_key)
                                      : llm_build_request_ex_for_credential(&conv, &session,
-                                                                           MAX_TOKENS, fb_key);
+                                                                           dsco_max_tokens(),
+                                                                           fb_key);
                     if (!req)
                         break;
 
@@ -7006,9 +7138,10 @@ void agent_run(const char *api_key, const char *model, const char *topology_name
                     post_compact_restore_inject(&file_restore, &conv);
                     free(req);
                     req = g_provider ? g_provider->build_request(g_provider, &conv, &session,
-                                                                 MAX_TOKENS, cur_key)
+                                                                 dsco_max_tokens(), cur_key)
                                      : llm_build_request_ex_for_credential(&conv, &session,
-                                                                           MAX_TOKENS, cur_key);
+                                                                           dsco_max_tokens(),
+                                                                           cur_key);
                     if (req) {
                         fprintf(stderr,
                                 "  %s\xe2\x86\xaf prompt too long \xe2\x80\x94 reactive compaction "

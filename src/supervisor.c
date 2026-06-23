@@ -18,6 +18,7 @@
 #endif
 
 #include "supervisor.h"
+#include "env_config.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -71,15 +72,6 @@
 #define DSCO_SESSION_MIN_BUDGET_MB  256
 
 #define INCIDENT_SNIPPET_BYTES  8192
-
-static int env_int(const char *name, int def, int min_v, int max_v) {
-    const char *v = getenv(name);
-    if (!v || !v[0]) return def;
-    int n = atoi(v);
-    if (n < min_v) return min_v;
-    if (n > max_v) return max_v;
-    return n;
-}
 
 static double now_monotonic(void) {
     struct timespec ts;
@@ -777,17 +769,17 @@ static void forward_signal(int sig) {
 }
 
 int supervisor_run(int child_argc, char **child_argv) {
-    int max_restarts   = env_int("DSCO_SUPERVISE_MAX_RESTARTS", DEFAULT_MAX_RESTARTS, 1, 100);
-    int window_s       = env_int("DSCO_SUPERVISE_WINDOW_S",     DEFAULT_WINDOW_S,     5, 3600);
-    int stable_s       = env_int("DSCO_SUPERVISE_STABLE_S",      DEFAULT_STABLE_S,    5, 3600);
-    int backoff_ms     = env_int("DSCO_SUPERVISE_BACKOFF_MS",    DEFAULT_BACKOFF_MS,  10, 60000);
-    int backoff_max_ms = env_int("DSCO_SUPERVISE_BACKOFF_MAX_MS", DEFAULT_BACKOFF_MAX_MS, 100, 300000);
+    int max_restarts   = dsco_env_int("DSCO_SUPERVISE_MAX_RESTARTS", DEFAULT_MAX_RESTARTS, 1, 100);
+    int window_s       = dsco_env_int("DSCO_SUPERVISE_WINDOW_S",     DEFAULT_WINDOW_S,     5, 3600);
+    int stable_s       = dsco_env_int("DSCO_SUPERVISE_STABLE_S",      DEFAULT_STABLE_S,    5, 3600);
+    int backoff_ms     = dsco_env_int("DSCO_SUPERVISE_BACKOFF_MS",    DEFAULT_BACKOFF_MS,  10, 60000);
+    int backoff_max_ms = dsco_env_int("DSCO_SUPERVISE_BACKOFF_MAX_MS", DEFAULT_BACKOFF_MAX_MS, 100, 300000);
 
     /* ── Active memory watchdog tunables ──────────────────────────────── */
-    int poll_ms        = env_int("DSCO_SUPERVISE_POLL_MS",       DEFAULT_POLL_MS,     20, 5000);
-    int term_grace_ms  = env_int("DSCO_SUPERVISE_TERM_GRACE_MS", DEFAULT_TERM_GRACE_MS, 100, 60000);
-    int soft_pct       = env_int("DSCO_SUPERVISE_MEM_SOFT_PCT",  DEFAULT_MEM_SOFT_PCT, 10, 99);
-    int metrics_s      = env_int("DSCO_SUPERVISE_METRICS_SECS",  DEFAULT_METRICS_S,   0, 3600);
+    int poll_ms        = dsco_env_int("DSCO_SUPERVISE_POLL_MS",       DEFAULT_POLL_MS,     20, 5000);
+    int term_grace_ms  = dsco_env_int("DSCO_SUPERVISE_TERM_GRACE_MS", DEFAULT_TERM_GRACE_MS, 100, 60000);
+    int soft_pct       = dsco_env_int("DSCO_SUPERVISE_MEM_SOFT_PCT",  DEFAULT_MEM_SOFT_PCT, 10, 99);
+    int metrics_s      = dsco_env_int("DSCO_SUPERVISE_METRICS_SECS",  DEFAULT_METRICS_S,   0, 3600);
     uint64_t mem_hard_bytes = resolve_mem_hard_limit();
     uint64_t mem_soft_bytes = mem_hard_bytes / 100ULL * (uint64_t)soft_pct;
     char child_cmdline[512];
@@ -863,6 +855,55 @@ int supervisor_run(int child_argc, char **child_argv) {
             /* Child: restore default signal handlers, then exec. */
             signal(SIGTERM, SIG_DFL);
             signal(SIGHUP,  SIG_DFL);
+
+            /* ── Hotswap: if a newer binary is staged, exec it instead ──
+             * Priority order:
+             *   1. DSCO_HOTSWAP_BIN env var (explicit path)
+             *   2. <sibling dir>/dsco-new  (written by `make`)
+             *   3. child_argv[0] (original binary — no-op, normal restart)
+             *
+             * The staged binary is renamed to replace child_argv[0] so all
+             * future restarts also use it. This lets `make install` drop
+             * dsco-new and have it take effect on the next /restart or crash
+             * without killing the current session. */
+            {
+                const char *hotswap_env = getenv("DSCO_HOTSWAP_BIN");
+                char hotswap_path[PATH_MAX] = {0};
+
+                if (hotswap_env && hotswap_env[0]) {
+                    snprintf(hotswap_path, sizeof(hotswap_path), "%s", hotswap_env);
+                } else {
+                    /* Derive <dir>/dsco-new from child_argv[0] */
+                    const char *bin = child_argv[0];
+                    const char *slash = strrchr(bin, '/');
+                    if (slash) {
+                        size_t dir_len = (size_t)(slash - bin);
+                        if (dir_len + 10 < sizeof(hotswap_path)) {
+                            memcpy(hotswap_path, bin, dir_len);
+                            memcpy(hotswap_path + dir_len, "/dsco-new", 10);
+                        }
+                    }
+                }
+
+                if (hotswap_path[0] && access(hotswap_path, X_OK) == 0) {
+                    /* Atomically replace the running binary with the staged one */
+                    if (rename(hotswap_path, child_argv[0]) == 0) {
+                        fprintf(stderr,
+                            "[supervisor] hotswap: %s → %s\n",
+                            hotswap_path, child_argv[0]);
+                        supervisor_log("event=hotswap staged=%s target=%s",
+                                       hotswap_path, child_argv[0]);
+                    } else {
+                        /* rename failed (cross-device?) — exec staged binary directly */
+                        fprintf(stderr,
+                            "[supervisor] hotswap: exec staged %s (rename failed: %s)\n",
+                            hotswap_path, strerror(errno));
+                        child_argv[0] = hotswap_path;
+                    }
+                    unsetenv("DSCO_HOTSWAP_BIN");
+                }
+            }
+
             execvp(child_argv[0], child_argv);
             /* If exec fails, the child exits with an error. */
             fprintf(stderr, "[supervisor] exec failed: %s: %s\n",
