@@ -14,19 +14,33 @@
 #include <stddef.h>
 
 /* ── tiny vec3 ───────────────────────────────────────────────────────────── */
-typedef struct { double x, y, z; } V3;
-static inline V3 v3(double x, double y, double z) { V3 r = {x, y, z}; return r; }
-static inline V3 vsub(V3 a, V3 b) { return v3(a.x-b.x, a.y-b.y, a.z-b.z); }
-static inline double vlen(V3 a) { return sqrt(a.x*a.x + a.y*a.y + a.z*a.z); }
+typedef struct {
+    double x, y, z;
+} V3;
+static inline V3 v3(double x, double y, double z) {
+    V3 r = {x, y, z};
+    return r;
+}
+static inline V3 vsub(V3 a, V3 b) {
+    return v3(a.x - b.x, a.y - b.y, a.z - b.z);
+}
+static inline double vlen(V3 a) {
+    return sqrt(a.x * a.x + a.y * a.y + a.z * a.z);
+}
 
 /* ── primitives ──────────────────────────────────────────────────────────── */
-static double sdSphere(V3 p, double r) { return vlen(p) - r; }
+static double sdSphere(V3 p, double r) {
+    return vlen(p) - r;
+}
 
 /* scaled-gradient ellipsoid approximation (Quilez) */
 static double sdEllipsoid(V3 p, V3 r) {
-    double k0 = sqrt((p.x*p.x)/(r.x*r.x) + (p.y*p.y)/(r.y*r.y) + (p.z*p.z)/(r.z*r.z));
-    double k1 = sqrt((p.x*p.x)/(r.x*r.x*r.x*r.x) + (p.y*p.y)/(r.y*r.y*r.y*r.y) + (p.z*p.z)/(r.z*r.z*r.z*r.z));
-    if (k1 < 1e-9) return k0 - 1.0;
+    double k0 =
+        sqrt((p.x * p.x) / (r.x * r.x) + (p.y * p.y) / (r.y * r.y) + (p.z * p.z) / (r.z * r.z));
+    double k1 = sqrt((p.x * p.x) / (r.x * r.x * r.x * r.x) + (p.y * p.y) / (r.y * r.y * r.y * r.y) +
+                     (p.z * p.z) / (r.z * r.z * r.z * r.z));
+    if (k1 < 1e-9)
+        return k0 - 1.0;
     return k0 * (k0 - 1.0) / k1;
 }
 
@@ -34,77 +48,136 @@ static double sdBox(V3 p, V3 b) {
     double qx = fabs(p.x) - b.x, qy = fabs(p.y) - b.y, qz = fabs(p.z) - b.z;
     double ox = qx > 0 ? qx : 0, oy = qy > 0 ? qy : 0, oz = qz > 0 ? qz : 0;
     double mx = qx > qy ? (qx > qz ? qx : qz) : (qy > qz ? qy : qz);
-    return sqrt(ox*ox + oy*oy + oz*oz) + (mx < 0 ? mx : 0);
+    return sqrt(ox * ox + oy * oy + oz * oz) + (mx < 0 ? mx : 0);
 }
-static __attribute__((unused)) double sdRoundBox(V3 p, V3 b, double rad) { return sdBox(p, b) - rad; }
+static __attribute__((unused)) double sdRoundBox(V3 p, V3 b, double rad) {
+    return sdBox(p, b) - rad;
+}
 
 /* capsule from a to b, radius r */
 static double sdCapsule(V3 p, V3 a, V3 b, double r) {
     V3 pa = vsub(p, a), ba = vsub(b, a);
-    double h = (pa.x*ba.x + pa.y*ba.y + pa.z*ba.z) / (ba.x*ba.x + ba.y*ba.y + ba.z*ba.z + 1e-9);
-    if (h < 0) h = 0; if (h > 1) h = 1;
-    V3 d = v3(pa.x - ba.x*h, pa.y - ba.y*h, pa.z - ba.z*h);
+    double h = (pa.x * ba.x + pa.y * ba.y + pa.z * ba.z) /
+               (ba.x * ba.x + ba.y * ba.y + ba.z * ba.z + 1e-9);
+    if (h < 0)
+        h = 0;
+    if (h > 1)
+        h = 1;
+    V3 d = v3(pa.x - ba.x * h, pa.y - ba.y * h, pa.z - ba.z * h);
     return vlen(d) - r;
 }
 
 static __attribute__((unused)) double sdTorus(V3 p, double R, double r) {
-    double q = sqrt(p.x*p.x + p.z*p.z) - R;
-    return sqrt(q*q + p.y*p.y) - r;
+    double q = sqrt(p.x * p.x + p.z * p.z) - R;
+    return sqrt(q * q + p.y * p.y) - r;
 }
 
 /* polynomial smooth-min / smooth-max */
 static double smin(double a, double b, double k) {
-    if (k < 1e-6) return a < b ? a : b;
+    if (k < 1e-6)
+        return a < b ? a : b;
     double h = 0.5 + 0.5 * (b - a) / k;
-    if (h < 0) h = 0; if (h > 1) h = 1;
+    if (h < 0)
+        h = 0;
+    if (h > 1)
+        h = 1;
     return (b * (1.0 - h) + a * h) - k * h * (1.0 - h);
 }
-static double smax(double a, double b, double k) { return -smin(-a, -b, k); }
+static double smax(double a, double b, double k) {
+    return -smin(-a, -b, k);
+}
 
 /* ── defaults / presets ──────────────────────────────────────────────────── */
 void face_params_default(face_params_t *p) {
-    if (!p) return;
-    p->skull_r = 1.00; p->skull_flat = 0.10; p->face_long = 1.15;
-    p->jaw_w = 0.62; p->jaw_len = 0.55; p->cheek = 0.20; p->temple = 0.90;
-    p->brow = 0.10; p->brow_y = 0.18; p->forehead = 0.95;
-    p->nose_len = 0.34; p->nose_w = 0.18; p->nose_bridge = 0.10; p->nose_y = 0.02;
-    p->eye_sep = 0.30; p->eye_y = 0.06; p->eye_size = 0.14; p->eye_depth = 0.10; p->lid = 0.30;
-    p->mouth_w = 0.26; p->mouth_y = -0.40; p->lip = 0.06; p->smile = 0.10;
-    p->ear = 0.16; p->ear_y = 0.00;
+    if (!p)
+        return;
+    p->skull_r = 1.00;
+    p->skull_flat = 0.10;
+    p->face_long = 1.15;
+    p->jaw_w = 0.62;
+    p->jaw_len = 0.55;
+    p->cheek = 0.20;
+    p->temple = 0.90;
+    p->brow = 0.10;
+    p->brow_y = 0.18;
+    p->forehead = 0.95;
+    p->nose_len = 0.34;
+    p->nose_w = 0.18;
+    p->nose_bridge = 0.10;
+    p->nose_y = 0.02;
+    p->eye_sep = 0.30;
+    p->eye_y = 0.06;
+    p->eye_size = 0.14;
+    p->eye_depth = 0.10;
+    p->lid = 0.30;
+    p->mouth_w = 0.26;
+    p->mouth_y = -0.40;
+    p->lip = 0.06;
+    p->smile = 0.10;
+    p->ear = 0.16;
+    p->ear_y = 0.00;
     p->blend = 0.06;
 }
 
-int face_preset_count(void) { return 4; }
+int face_preset_count(void) {
+    return 4;
+}
 
 void face_preset(int idx, face_params_t *p, const char **name_out) {
     face_params_default(p);
     int n = face_preset_count();
     idx = ((idx % n) + n) % n;
-    static const char *names[] = { "neutral", "round", "angular", "elder" };
+    static const char *names[] = {"neutral", "round", "angular", "elder"};
     switch (idx) {
         case 1: /* round */
-            p->face_long = 1.02; p->temple = 1.00; p->jaw_w = 0.72; p->jaw_len = 0.46;
-            p->cheek = 0.30; p->forehead = 1.05; p->eye_size = 0.15; p->blend = 0.09;
+            p->face_long = 1.02;
+            p->temple = 1.00;
+            p->jaw_w = 0.72;
+            p->jaw_len = 0.46;
+            p->cheek = 0.30;
+            p->forehead = 1.05;
+            p->eye_size = 0.15;
+            p->blend = 0.09;
             break;
         case 2: /* angular */
-            p->face_long = 1.22; p->temple = 0.82; p->jaw_w = 0.56; p->jaw_len = 0.66;
-            p->cheek = 0.13; p->brow = 0.15; p->nose_len = 0.40; p->nose_bridge = 0.15;
+            p->face_long = 1.22;
+            p->temple = 0.82;
+            p->jaw_w = 0.56;
+            p->jaw_len = 0.66;
+            p->cheek = 0.13;
+            p->brow = 0.15;
+            p->nose_len = 0.40;
+            p->nose_bridge = 0.15;
             p->blend = 0.04;
             break;
         case 3: /* elder */
-            p->face_long = 1.18; p->jaw_w = 0.58; p->cheek = 0.10; p->brow = 0.16;
-            p->brow_y = 0.16; p->nose_len = 0.38; p->nose_w = 0.20; p->lip = 0.045;
-            p->eye_y = 0.05; p->lid = 0.42; p->ear = 0.18; p->blend = 0.055;
+            p->face_long = 1.18;
+            p->jaw_w = 0.58;
+            p->cheek = 0.10;
+            p->brow = 0.16;
+            p->brow_y = 0.16;
+            p->nose_len = 0.38;
+            p->nose_w = 0.20;
+            p->lip = 0.045;
+            p->eye_y = 0.05;
+            p->lid = 0.42;
+            p->ear = 0.18;
+            p->blend = 0.055;
             break;
-        default: break;     /* neutral */
+        default:
+            break; /* neutral */
     }
-    if (name_out) *name_out = names[idx];
+    if (name_out)
+        *name_out = names[idx];
 }
 
 /* ── distance field ──────────────────────────────────────────────────────── */
 double face_sdf_de(double X, double Y, double Z, const face_params_t *p) {
     face_params_t dp;
-    if (!p) { face_params_default(&dp); p = &dp; }
+    if (!p) {
+        face_params_default(&dp);
+        p = &dp;
+    }
     V3 q = v3(X, Y, Z);
     double R = p->skull_r;
     double k = p->blend;
@@ -134,8 +207,8 @@ double face_sdf_de(double X, double Y, double Z, const face_params_t *p) {
     V3 qm = v3(ax, q.y, q.z);
 
     /* cheekbones */
-    double cheek = sdEllipsoid(vsub(qm, v3(R * 0.42, R * 0.02, R * 0.40)),
-                               v3(R * 0.30, R * 0.26, R * 0.30));
+    double cheek =
+        sdEllipsoid(vsub(qm, v3(R * 0.42, R * 0.02, R * 0.40)), v3(R * 0.30, R * 0.26, R * 0.30));
     d = smin(d, cheek - R * 0.04 * p->cheek, k * 1.5);
 
     /* brow ridge: a capsule arching across, above the eyes */
@@ -159,8 +232,8 @@ double face_sdf_de(double X, double Y, double Z, const face_params_t *p) {
     /* eye sockets: carve a shallow recess, then set a proud eyeball into it */
     double eyey = R * (p->eye_y + 0.02);
     V3 eye_c = v3(R * p->eye_sep, eyey, R * (0.50 - p->eye_depth));
-    double socket = sdSphere(vsub(qm, v3(eye_c.x, eye_c.y, eye_c.z + R * 0.10)),
-                             R * (p->eye_size + 0.07));
+    double socket =
+        sdSphere(vsub(qm, v3(eye_c.x, eye_c.y, eye_c.z + R * 0.10)), R * (p->eye_size + 0.07));
     d = smax(d, -socket, k * 0.8);
     double eyeball = sdSphere(vsub(qm, eye_c), R * p->eye_size);
     d = smin(d, eyeball, k * 0.4);
@@ -193,7 +266,10 @@ double face_sdf_de(double X, double Y, double Z, const face_params_t *p) {
 /* ── material classification ─────────────────────────────────────────────── */
 int face_sdf_material(double X, double Y, double Z, const face_params_t *p) {
     face_params_t dp;
-    if (!p) { face_params_default(&dp); p = &dp; }
+    if (!p) {
+        face_params_default(&dp);
+        p = &dp;
+    }
     double R = p->skull_r;
     double ax = fabs(X);
     V3 qm = v3(ax, Y, Z);
@@ -203,8 +279,10 @@ int face_sdf_material(double X, double Y, double Z, const face_params_t *p) {
     V3 eye_c = v3(R * p->eye_sep, eyey, R * (0.50 - p->eye_depth));
     double de = vlen(vsub(qm, eye_c));
     if (de < R * (p->eye_size + 0.02)) {
-        if (de < R * p->eye_size * 0.34) return FACE_MAT_PUPIL;
-        if (de < R * p->eye_size * 0.62) return FACE_MAT_IRIS;
+        if (de < R * p->eye_size * 0.34)
+            return FACE_MAT_PUPIL;
+        if (de < R * p->eye_size * 0.62)
+            return FACE_MAT_IRIS;
         return FACE_MAT_EYE_WHITE;
     }
 
@@ -216,7 +294,8 @@ int face_sdf_material(double X, double Y, double Z, const face_params_t *p) {
     /* nostrils */
     double nd = vlen(vsub(qm, v3(R * (0.06 + p->nose_w * 0.5), R * (p->nose_y - 0.08),
                                  R * (0.60 + p->nose_len * 0.4))));
-    if (nd < R * 0.05) return FACE_MAT_NOSTRIL;
+    if (nd < R * 0.05)
+        return FACE_MAT_NOSTRIL;
 
     /* brow */
     if (Y > R * (p->brow_y - 0.03) && Y < R * (p->brow_y + 0.10) && ax < R * 0.42 && Z > R * 0.45)
@@ -226,15 +305,45 @@ int face_sdf_material(double X, double Y, double Z, const face_params_t *p) {
 }
 
 void face_sdf_albedo(int material, double *r, double *g, double *b) {
-    double cr = 0.86, cg = 0.66, cb = 0.54;     /* skin */
+    double cr = 0.86, cg = 0.66, cb = 0.54; /* skin */
     switch (material) {
-        case FACE_MAT_LIP:       cr = 0.72; cg = 0.34; cb = 0.34; break;
-        case FACE_MAT_EYE_WHITE: cr = 0.93; cg = 0.93; cb = 0.92; break;
-        case FACE_MAT_IRIS:      cr = 0.35; cg = 0.45; cb = 0.55; break;
-        case FACE_MAT_PUPIL:     cr = 0.04; cg = 0.04; cb = 0.04; break;
-        case FACE_MAT_BROW:      cr = 0.25; cg = 0.18; cb = 0.14; break;
-        case FACE_MAT_NOSTRIL:   cr = 0.30; cg = 0.22; cb = 0.20; break;
-        default: break;
+        case FACE_MAT_LIP:
+            cr = 0.72;
+            cg = 0.34;
+            cb = 0.34;
+            break;
+        case FACE_MAT_EYE_WHITE:
+            cr = 0.93;
+            cg = 0.93;
+            cb = 0.92;
+            break;
+        case FACE_MAT_IRIS:
+            cr = 0.35;
+            cg = 0.45;
+            cb = 0.55;
+            break;
+        case FACE_MAT_PUPIL:
+            cr = 0.04;
+            cg = 0.04;
+            cb = 0.04;
+            break;
+        case FACE_MAT_BROW:
+            cr = 0.25;
+            cg = 0.18;
+            cb = 0.14;
+            break;
+        case FACE_MAT_NOSTRIL:
+            cr = 0.30;
+            cg = 0.22;
+            cb = 0.20;
+            break;
+        default:
+            break;
     }
-    if (r) *r = cr; if (g) *g = cg; if (b) *b = cb;
+    if (r)
+        *r = cr;
+    if (g)
+        *g = cg;
+    if (b)
+        *b = cb;
 }

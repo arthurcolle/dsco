@@ -189,7 +189,7 @@ def load_model_registry():
 
     # Fallback: minimal set
     MODEL_REGISTRY = [
-        {"alias": "opus", "model_id": "claude-opus-4-6", "context_window": 200000,
+        {"alias": "opus", "model_id": "claude-opus-4-7", "context_window": 200000,
          "max_output": 32000, "input_price": 15.0, "output_price": 75.0,
          "cache_read_price": 1.5, "cache_write_price": 18.75, "supports_thinking": 1},
         {"alias": "sonnet", "model_id": "claude-sonnet-4-6", "context_window": 200000,

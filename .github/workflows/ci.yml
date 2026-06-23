@@ -28,7 +28,9 @@ jobs:
         if: runner.os == 'Linux'
         run: |
           sudo apt-get update
-          sudo apt-get install -y libcurl4-openssl-dev libsqlite3-dev libreadline-dev
+          sudo apt-get install -y \
+            libcurl4-openssl-dev libsqlite3-dev libreadline-dev \
+            libsodium-dev libuv1-dev libmbedtls-dev libhiredis-dev
 
       - name: Build
         run: make -j2
@@ -46,7 +48,9 @@ jobs:
       - name: Install dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y clang libcurl4-openssl-dev libsqlite3-dev libreadline-dev
+          sudo apt-get install -y \
+            clang libcurl4-openssl-dev libsqlite3-dev libreadline-dev \
+            libsodium-dev libuv1-dev libmbedtls-dev libhiredis-dev
 
       - name: ASan build and tests
         run: |
@@ -70,7 +74,10 @@ jobs:
       - name: Install dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y clang clang-tidy cppcheck libcurl4-openssl-dev libsqlite3-dev libreadline-dev
+          sudo apt-get install -y \
+            clang clang-tidy cppcheck \
+            libcurl4-openssl-dev libsqlite3-dev libreadline-dev \
+            libsodium-dev libuv1-dev libmbedtls-dev libhiredis-dev
 
       - name: clang-tidy
         run: make clang-tidy

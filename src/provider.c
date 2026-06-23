@@ -4482,7 +4482,12 @@ const char *provider_route_for_model(const char *model, const char *fallback_api
 
     const char *provider_name = provider_detect(model, fallback_api_key);
 
-    if (strcmp(provider_name, "openai") == 0 && provider_has_usable_key("openai-codex", NULL))
+    /* Redirect to openai-codex subscription only when discovery is not
+     * explicitly suppressed. DSCO_DISABLE_CODEX_OAUTH_DISCOVERY=1 means
+     * "use direct API keys instead of any subscription path". */
+    if (strcmp(provider_name, "openai") == 0 &&
+        !provider_env_truthy(getenv("DSCO_DISABLE_CODEX_OAUTH_DISCOVERY")) &&
+        provider_has_usable_key("openai-codex", NULL))
         return "openai-codex";
 
     if (provider_has_usable_key(provider_name, fallback_api_key))
@@ -4509,6 +4514,12 @@ const char *provider_resolve_request_api_key(const char *provider_name,
 
     if (strcmp(provider_name, "openai-codex") == 0)
         return provider_codex_subscription_credential();
+
+    if (provider_is_local_endpoint(provider_name)) {
+        if (fallback_api_key && fallback_api_key[0])
+            return fallback_api_key;
+        return "local";
+    }
 
     const char *native_key = provider_resolve_api_key(provider_name);
     if (provider_key_matches(provider_name, fallback_api_key))
