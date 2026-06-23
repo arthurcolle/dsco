@@ -3376,7 +3376,7 @@ static bool composer_clipboard_grab_image(char *out_path, size_t out_sz) {
 
 /* ═══ @ Image-picker ═══════════════════════════════════════════════════ */
 #define TUI_IMGPICK_MAX   10
-#define TUI_IMGPICK_CAP  256
+#define TUI_IMGPICK_CAP  256  /* picker scan; actual send cap is IMG_MAX_PER_MSG=100 */
 #define TUI_IMGPICK_NAMEW 38
 static const char *s_imgpick_exts[]={
     ".png",".jpg",".jpeg",".gif",".webp",
