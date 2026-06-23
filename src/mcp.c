@@ -676,20 +676,32 @@ static bool initialize_server(mcp_server_t *srv) {
 }
 
 static void stop_server(mcp_server_t *srv) {
-    if (srv->stdin_fd >= 0) {
-        close(srv->stdin_fd);
-        srv->stdin_fd = -1;
-    }
-    if (srv->stdout_fd >= 0) {
-        close(srv->stdout_fd);
-        srv->stdout_fd = -1;
-    }
+    /* Close pipes first so the child sees EOF on stdin */
+    if (srv->stdin_fd >= 0)  { close(srv->stdin_fd);  srv->stdin_fd  = -1; }
+    if (srv->stdout_fd >= 0) { close(srv->stdout_fd); srv->stdout_fd = -1; }
     if (srv->pid > 0) {
+        /* SIGTERM then wait up to 2s for graceful exit, then SIGKILL */
         kill(srv->pid, SIGTERM);
-        int status;
-        waitpid(srv->pid, &status, WNOHANG);
+        struct timespec ts_end;
+        clock_gettime(CLOCK_MONOTONIC, &ts_end);
+        ts_end.tv_sec += 2;
+        for (;;) {
+            int status = 0;
+            pid_t r = waitpid(srv->pid, &status, WNOHANG);
+            if (r == srv->pid || r < 0) break;  /* exited or error */
+            struct timespec now;
+            clock_gettime(CLOCK_MONOTONIC, &now);
+            if (now.tv_sec > ts_end.tv_sec ||
+                (now.tv_sec == ts_end.tv_sec && now.tv_nsec >= ts_end.tv_nsec)) {
+                kill(srv->pid, SIGKILL);
+                waitpid(srv->pid, &status, 0);
+                break;
+            }
+            struct timespec sl = {0, 10000000}; /* 10ms */
+            nanosleep(&sl, NULL);
+        }
+        srv->pid = 0;
     }
-    srv->pid = 0;
     srv->initialized = false;
 }
 
