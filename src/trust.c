@@ -34,19 +34,19 @@
 
 static struct {
     dsco_trust_config_t cfg;
-    bool                inited;
-    pthread_t           sender;
-    atomic_int          run;
-    pthread_mutex_t     mu;
-    pthread_cond_t      cv;
+    bool inited;
+    pthread_t sender;
+    atomic_int run;
+    pthread_mutex_t mu;
+    pthread_cond_t cv;
 
     /* in-memory queue (event_json strings) */
-    char              **queue;
-    int                 q_head, q_tail, q_size;
-    int                 q_cap;
+    char **queue;
+    int q_head, q_tail, q_size;
+    int q_cap;
 
-    dsco_trust_stats_t  stats;
-    pthread_mutex_t     stats_mu;
+    dsco_trust_stats_t stats;
+    pthread_mutex_t stats_mu;
 } g = {0};
 
 /* ──────────────────────────────────────────────────────────────────────────
@@ -76,9 +76,12 @@ static int mkdir_p(const char *path) {
     return 0;
 }
 
-static int64_t now_unix(void) { return (int64_t)time(NULL); }
+static int64_t now_unix(void) {
+    return (int64_t)time(NULL);
+}
 static __attribute__((unused)) int64_t now_ms(void) {
-    struct timespec ts; clock_gettime(CLOCK_MONOTONIC, &ts);
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
     return (int64_t)ts.tv_sec * 1000 + ts.tv_nsec / 1000000;
 }
 
@@ -95,12 +98,12 @@ static __attribute__((unused)) void stats_update_err(const char *msg) {
 void dsco_trust_default_config(dsco_trust_config_t *cfg) {
     memset(cfg, 0, sizeof(*cfg));
     const char *url = getenv("DSCO_TRUST_URL");
-    snprintf(cfg->endpoint_url, sizeof(cfg->endpoint_url),
-             "%s", url ? url : DSCO_TRUST_DEFAULT_URL);
-    cfg->opt_out      = getenv("DSCO_TRUST_OPT_OUT") != NULL;
+    snprintf(cfg->endpoint_url, sizeof(cfg->endpoint_url), "%s",
+             url ? url : DSCO_TRUST_DEFAULT_URL);
+    cfg->opt_out = getenv("DSCO_TRUST_OPT_OUT") != NULL;
     cfg->include_uuid = getenv("DSCO_TRUST_INCLUDE_UUID") != NULL;
-    cfg->dry_run      = getenv("DSCO_TRUST_DRY_RUN") != NULL;
-    cfg->queue_max    = 256;
+    cfg->dry_run = getenv("DSCO_TRUST_DRY_RUN") != NULL;
+    cfg->queue_max = 256;
     cfg->retry_max_seconds = 3600;
 
     /* HMAC key resolution order:
@@ -119,14 +122,14 @@ void dsco_trust_default_config(dsco_trust_config_t *cfg) {
     if (kf) {
         if (fgets(cfg->hmac_key_hex, sizeof(cfg->hmac_key_hex), kf)) {
             size_t n = strlen(cfg->hmac_key_hex);
-            while (n > 0 && (cfg->hmac_key_hex[n-1] == '\n' ||
-                             cfg->hmac_key_hex[n-1] == '\r' ||
-                             cfg->hmac_key_hex[n-1] == ' ')) {
+            while (n > 0 && (cfg->hmac_key_hex[n - 1] == '\n' || cfg->hmac_key_hex[n - 1] == '\r' ||
+                             cfg->hmac_key_hex[n - 1] == ' ')) {
                 cfg->hmac_key_hex[--n] = '\0';
             }
         }
         fclose(kf);
-        if (cfg->hmac_key_hex[0]) return;
+        if (cfg->hmac_key_hex[0])
+            return;
     }
     /* generate a fresh 256-bit key and persist it */
     uint8_t fresh[32];
@@ -148,11 +151,8 @@ void dsco_trust_default_config(dsco_trust_config_t *cfg) {
         const dsco_fingerprint_t *fp = dsco_fingerprint_get();
         if (fp) {
             uint8_t derived[32];
-            hkdf_sha256((const uint8_t *)fp->fingerprint_id,
-                        strlen(fp->fingerprint_id),
-                        NULL, 0,
-                        (const uint8_t *)"dsco-trust-v1", 13,
-                        derived, sizeof(derived));
+            hkdf_sha256((const uint8_t *)fp->fingerprint_id, strlen(fp->fingerprint_id), NULL, 0,
+                        (const uint8_t *)"dsco-trust-v1", 13, derived, sizeof(derived));
             hex_encode(derived, 32, cfg->hmac_key_hex);
             cfg->hmac_key_hex[64] = '\0';
             memset(derived, 0, sizeof(derived));
@@ -189,7 +189,10 @@ static char *queue_pop_blocking(void) {
     pthread_mutex_lock(&g.mu);
     while (g.q_size == 0 && atomic_load_explicit(&g.run, memory_order_acquire))
         pthread_cond_wait(&g.cv, &g.mu);
-    if (g.q_size == 0) { pthread_mutex_unlock(&g.mu); return NULL; }
+    if (g.q_size == 0) {
+        pthread_mutex_unlock(&g.mu);
+        return NULL;
+    }
     char *s = g.queue[g.q_head];
     g.q_head = (g.q_head + 1) % g.q_cap;
     g.q_size--;
@@ -203,7 +206,9 @@ static char *queue_pop_blocking(void) {
 
 /* curl write callback that discards the body */
 static size_t curl_discard(void *p, size_t s, size_t n, void *u) {
-    (void)p; (void)u; return s * n;
+    (void)p;
+    (void)u;
+    return s * n;
 }
 
 static int post_signed(const char *json, char *err, size_t err_cap) {
@@ -226,19 +231,22 @@ static int post_signed(const char *json, char *err, size_t err_cap) {
     size_t blen = strlen(json);
     size_t slen = strlen(ts) + 1 + strlen(nonce) + 1 + blen;
     char *sigbuf = (char *)malloc(slen + 1);
-    if (!sigbuf) { snprintf(err, err_cap, "oom"); return -1; }
+    if (!sigbuf) {
+        snprintf(err, err_cap, "oom");
+        return -1;
+    }
     int n = snprintf(sigbuf, slen + 1, "%s.%s.", ts, nonce);
     memcpy(sigbuf + n, json, blen);
     sigbuf[slen] = '\0';
 
     /* HMAC */
     uint8_t key[64];
-    size_t klen = hex_decode(g.cfg.hmac_key_hex, strlen(g.cfg.hmac_key_hex),
-                              key, sizeof(key));
+    size_t klen = hex_decode(g.cfg.hmac_key_hex, strlen(g.cfg.hmac_key_hex), key, sizeof(key));
     if (klen == 0) {
         /* fall back to raw key bytes (treat hex_key_hex as utf-8 secret) */
         klen = strlen(g.cfg.hmac_key_hex);
-        if (klen > sizeof(key)) klen = sizeof(key);
+        if (klen > sizeof(key))
+            klen = sizeof(key);
         memcpy(key, g.cfg.hmac_key_hex, klen);
     }
     char sig_hex[65];
@@ -247,7 +255,10 @@ static int post_signed(const char *json, char *err, size_t err_cap) {
     free(sigbuf);
 
     CURL *c = curl_easy_init();
-    if (!c) { snprintf(err, err_cap, "curl init"); return -1; }
+    if (!c) {
+        snprintf(err, err_cap, "curl init");
+        return -1;
+    }
     struct curl_slist *h = NULL;
     char buf[512];
     h = curl_slist_append(h, "Content-Type: application/json");
@@ -299,7 +310,8 @@ static void *sender_main(void *arg) {
     int backoff_ms = 0;
     while (atomic_load_explicit(&g.run, memory_order_acquire)) {
         char *json = queue_pop_blocking();
-        if (!json) break;
+        if (!json)
+            break;
         char err[128] = {0};
         int rc = post_signed(json, err, sizeof(err));
         if (rc == 0) {
@@ -320,11 +332,13 @@ static void *sender_main(void *arg) {
             g.queue[g.q_head] = json;
             g.q_size++;
             pthread_mutex_unlock(&g.mu);
-            if (backoff_ms == 0) backoff_ms = 500;
-            else backoff_ms = backoff_ms * 2;
+            if (backoff_ms == 0)
+                backoff_ms = 500;
+            else
+                backoff_ms = backoff_ms * 2;
             if (backoff_ms > g.cfg.retry_max_seconds * 1000)
                 backoff_ms = g.cfg.retry_max_seconds * 1000;
-            struct timespec ts = { backoff_ms / 1000, (backoff_ms % 1000) * 1000000L };
+            struct timespec ts = {backoff_ms / 1000, (backoff_ms % 1000) * 1000000L};
             nanosleep(&ts, NULL);
         }
     }
@@ -336,12 +350,16 @@ static void *sender_main(void *arg) {
  * ────────────────────────────────────────────────────────────────────────── */
 
 int dsco_trust_init(const dsco_trust_config_t *cfg_in) {
-    if (g.inited) return 0;
+    if (g.inited)
+        return 0;
     memset(&g, 0, sizeof(g));
-    if (cfg_in) g.cfg = *cfg_in;
-    else        dsco_trust_default_config(&g.cfg);
+    if (cfg_in)
+        g.cfg = *cfg_in;
+    else
+        dsco_trust_default_config(&g.cfg);
 
-    if (g.cfg.opt_out) return 0;  /* silently do nothing */
+    if (g.cfg.opt_out)
+        return 0; /* silently do nothing */
 
     pthread_mutex_init(&g.mu, NULL);
     pthread_mutex_init(&g.stats_mu, NULL);
@@ -349,7 +367,8 @@ int dsco_trust_init(const dsco_trust_config_t *cfg_in) {
 
     g.q_cap = g.cfg.queue_max > 0 ? g.cfg.queue_max : 256;
     g.queue = (char **)calloc(g.q_cap, sizeof(char *));
-    if (!g.queue) return -1;
+    if (!g.queue)
+        return -1;
 
     char dir[PATH_MAX];
     spool_dir(dir, sizeof(dir));
@@ -358,7 +377,8 @@ int dsco_trust_init(const dsco_trust_config_t *cfg_in) {
     atomic_store(&g.run, 1);
     if (pthread_create(&g.sender, NULL, sender_main, NULL) != 0) {
         atomic_store(&g.run, 0);
-        free(g.queue); g.queue = NULL;
+        free(g.queue);
+        g.queue = NULL;
         return -1;
     }
     g.inited = true;
@@ -366,7 +386,8 @@ int dsco_trust_init(const dsco_trust_config_t *cfg_in) {
 }
 
 void dsco_trust_shutdown(void) {
-    if (!g.inited) return;
+    if (!g.inited)
+        return;
     atomic_store(&g.run, 0);
     pthread_mutex_lock(&g.mu);
     pthread_cond_broadcast(&g.cv);
@@ -382,11 +403,16 @@ void dsco_trust_shutdown(void) {
     memset(&g, 0, sizeof(g));
 }
 
-const char *dsco_trust_endpoint(void) { return g.inited ? g.cfg.endpoint_url : NULL; }
-bool        dsco_trust_is_active(void) { return g.inited && !g.cfg.opt_out; }
+const char *dsco_trust_endpoint(void) {
+    return g.inited ? g.cfg.endpoint_url : NULL;
+}
+bool dsco_trust_is_active(void) {
+    return g.inited && !g.cfg.opt_out;
+}
 
 void dsco_trust_stats(dsco_trust_stats_t *out) {
-    if (!out) return;
+    if (!out)
+        return;
     pthread_mutex_lock(&g.stats_mu);
     *out = g.stats;
     pthread_mutex_unlock(&g.stats_mu);
@@ -397,43 +423,48 @@ void dsco_trust_stats(dsco_trust_stats_t *out) {
  * ────────────────────────────────────────────────────────────────────────── */
 
 int dsco_trust_emit(const char *event_type, const char *json_payload) {
-    if (!g.inited || g.cfg.opt_out) return 0;
-    if (!event_type || !json_payload) return -1;
+    if (!g.inited || g.cfg.opt_out)
+        return 0;
+    if (!event_type || !json_payload)
+        return -1;
     /* wrap payload into envelope */
     size_t need = strlen(event_type) + strlen(json_payload) + 128;
     char *env = (char *)malloc(need);
-    if (!env) return -1;
-    snprintf(env, need,
-        "{\"event\":\"%s\",\"emitted_at\":%lld,\"data\":%s}",
-        event_type, (long long)now_unix(), json_payload);
+    if (!env)
+        return -1;
+    snprintf(env, need, "{\"event\":\"%s\",\"emitted_at\":%lld,\"data\":%s}", event_type,
+             (long long)now_unix(), json_payload);
     return queue_push(env);
 }
 
 int dsco_trust_emit_attest(void) {
-    if (!g.inited || g.cfg.opt_out) return 0;
+    if (!g.inited || g.cfg.opt_out)
+        return 0;
     const dsco_fingerprint_t *fp = dsco_fingerprint_get();
-    if (!fp) return -1;
+    if (!fp)
+        return -1;
     char buf[8192];
-    size_t n = dsco_fingerprint_to_json(fp, g.cfg.include_uuid, buf, sizeof(buf));
-    if (n == 0) return -1;
+    size_t n = dsco_fingerprint_to_json_compat(fp, g.cfg.include_uuid, buf, sizeof(buf));
+    if (n == 0)
+        return -1;
     return dsco_trust_emit("attest", buf);
 }
 
 int dsco_trust_emit_heartbeat(const dsco_trust_runtime_t *r) {
-    if (!g.inited || g.cfg.opt_out) return 0;
+    if (!g.inited || g.cfg.opt_out)
+        return 0;
     char buf[512];
     int n = snprintf(buf, sizeof(buf),
-        "{\"projects_active\":%d,\"projects_total\":%d,"
-        "\"tokens_in\":%llu,\"tokens_out\":%llu,"
-        "\"bytes_in\":%llu,\"bytes_out\":%llu,"
-        "\"cents_spent\":%d}",
-        r ? r->projects_active : 0,
-        r ? r->projects_total  : 0,
-        r ? (unsigned long long)r->tokens_in  : 0ULL,
-        r ? (unsigned long long)r->tokens_out : 0ULL,
-        r ? (unsigned long long)r->bytes_in   : 0ULL,
-        r ? (unsigned long long)r->bytes_out  : 0ULL,
-        r ? r->cents_spent : 0);
-    if (n < 0) return -1;
+                     "{\"projects_active\":%d,\"projects_total\":%d,"
+                     "\"tokens_in\":%llu,\"tokens_out\":%llu,"
+                     "\"bytes_in\":%llu,\"bytes_out\":%llu,"
+                     "\"cents_spent\":%d}",
+                     r ? r->projects_active : 0, r ? r->projects_total : 0,
+                     r ? (unsigned long long)r->tokens_in : 0ULL,
+                     r ? (unsigned long long)r->tokens_out : 0ULL,
+                     r ? (unsigned long long)r->bytes_in : 0ULL,
+                     r ? (unsigned long long)r->bytes_out : 0ULL, r ? r->cents_spent : 0);
+    if (n < 0)
+        return -1;
     return dsco_trust_emit("heartbeat", buf);
 }
