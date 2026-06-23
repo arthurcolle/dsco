@@ -36,6 +36,8 @@
 #include <sodium.h>
 #endif
 
+void llm_debug_save_request(const char *request_json, int http_status);
+
 /* Forward declarations */
 static char *openai_build_request(provider_t *p, conversation_t *conv, session_state_t *session,
                                   int max_tokens, const char *credential);
@@ -1629,12 +1631,18 @@ static void openai_append_function_tool(jbuf_t *b, const char *name, const char 
         jbuf_append(b, "}}");
 }
 
-static bool openai_append_tools_json(jbuf_t *b, conversation_t *conv, session_state_t *session) {
+static bool openai_tools_disabled(void) {
     const char *disable_tools = getenv("DSCO_OR_DISABLE_TOOLS");
     if (disable_tools && disable_tools[0] && strcmp(disable_tools, "0") != 0 &&
         strcasecmp(disable_tools, "false") != 0) {
-        return false;
+        return true;
     }
+    return false;
+}
+
+static bool openai_append_tools_json(jbuf_t *b, conversation_t *conv, session_state_t *session) {
+    if (openai_tools_disabled())
+        return false;
 
     int max_tools_send = 128;
     const char *mt_env = getenv("DSCO_OR_MAX_TOOLS");
@@ -1642,6 +1650,8 @@ static bool openai_append_tools_json(jbuf_t *b, conversation_t *conv, session_st
         max_tools_send = atoi(mt_env);
         if (max_tools_send < 0)
             max_tools_send = 0;
+    } else if (g_cheap_mode) {
+        max_tools_send = TOOL_REG_ALWAYS;
     } else {
         const char *model = session ? session->model : "";
         if (model && strstr(model, "/"))
@@ -1983,7 +1993,11 @@ static char *openai_build_request(provider_t *p, conversation_t *conv, session_s
     const char *request_model =
         provider_request_model_id(p ? p->name : NULL, session ? session->model : DEFAULT_MODEL);
     jbuf_append_json_str(&b, request_model);
-    jbuf_append(&b, ",\"max_tokens\":");
+    const char *provider_name = p && p->name ? provider_profile_canonical_name(p->name) : NULL;
+    if (provider_name && strcmp(provider_name, "sakana") == 0)
+        jbuf_append(&b, ",\"max_completion_tokens\":");
+    else
+        jbuf_append(&b, ",\"max_tokens\":");
     jbuf_append_int(&b, max_tokens);
     jbuf_append(&b, ",\"stream\":true");
 
@@ -2015,15 +2029,19 @@ static char *openai_build_request(provider_t *p, conversation_t *conv, session_s
         jbuf_append(&sys, custom);
         jbuf_append(&sys, "\n\n");
     }
-    jbuf_append(&sys, SYSTEM_PROMPT);
+    const char *base_system = openai_tools_disabled()
+        ? "You are dsco, a concise local CLI assistant. Answer the user's request directly. "
+          "Do not mention tools unless the user asks about them."
+        : (g_cheap_mode ? SYSTEM_PROMPT_CHEAP : SYSTEM_PROMPT);
+    jbuf_append(&sys, base_system);
 
     jbuf_append(&b, ",\"messages\":[{\"role\":\"system\",\"content\":");
     if (cache_ctrl) {
         jbuf_append(&b, "[{\"type\":\"text\",\"text\":");
-        jbuf_append_json_str(&b, sys.data ? sys.data : SYSTEM_PROMPT);
+        jbuf_append_json_str(&b, sys.data ? sys.data : base_system);
         jbuf_append(&b, ",\"cache_control\":{\"type\":\"ephemeral\"}}]");
     } else {
-        jbuf_append_json_str(&b, sys.data ? sys.data : SYSTEM_PROMPT);
+        jbuf_append_json_str(&b, sys.data ? sys.data : base_system);
     }
     jbuf_free(&sys);
     jbuf_append(&b, "}");
@@ -2676,9 +2694,24 @@ static void oai_handle_sse_line(oai_sse_state_t *s, const char *line) {
     /* Parse usage (may appear in any chunk, usually the last) */
     char *usage_raw = json_get_raw(data, "usage");
     if (usage_raw) {
-        s->usage.input_tokens = json_get_int(usage_raw, "prompt_tokens", s->usage.input_tokens);
-        s->usage.output_tokens =
-            json_get_int(usage_raw, "completion_tokens", s->usage.output_tokens);
+        /* OpenAI-compatible usage aliases:
+         *   - OpenAI Chat Completions: prompt_tokens / completion_tokens
+         *   - Responses-style providers (Sakana Fugu): input_tokens / output_tokens
+         */
+        {
+            int prompt_tok = json_get_int(usage_raw, "prompt_tokens", -1);
+            int input_tok = json_get_int(usage_raw, "input_tokens", -1);
+            int completion_tok = json_get_int(usage_raw, "completion_tokens", -1);
+            int output_tok = json_get_int(usage_raw, "output_tokens", -1);
+            if (prompt_tok >= 0)
+                s->usage.input_tokens = prompt_tok;
+            else if (input_tok >= 0)
+                s->usage.input_tokens = input_tok;
+            if (completion_tok >= 0)
+                s->usage.output_tokens = completion_tok;
+            else if (output_tok >= 0)
+                s->usage.output_tokens = output_tok;
+        }
 
         /* Cost tracking (OpenRouter includes cost in usage) */
         char *cost_str = json_get_str(usage_raw, "cost");
@@ -2723,6 +2756,26 @@ static void oai_handle_sse_line(oai_sse_state_t *s, const char *line) {
         if (out_detail) {
             s->reasoning_tokens = json_get_int(out_detail, "reasoning_tokens", 0);
             free(out_detail);
+        }
+        /* Sakana Fugu Ultra: orchestration tokens are real billing tokens
+         * outside base input/output counts.  Accumulate them so session
+         * cost accounting isn't off by 2-5x on multi-agent turns. */
+        {
+            char *itd2 = json_get_raw(usage_raw, "input_tokens_details");
+            if (itd2) {
+                int orch_in = json_get_int(itd2, "orchestration_input_tokens", 0);
+                int orch_in_cached = json_get_int(itd2, "orchestration_input_cached_tokens", 0);
+                s->usage.input_tokens += orch_in;
+                if (orch_in_cached > 0)
+                    s->usage.cache_read_input_tokens += orch_in_cached;
+                free(itd2);
+            }
+            char *otd2 = json_get_raw(usage_raw, "output_tokens_details");
+            if (otd2) {
+                int orch_out = json_get_int(otd2, "orchestration_output_tokens", 0);
+                s->usage.output_tokens += orch_out;
+                free(otd2);
+            }
         }
         free(usage_raw);
     }
@@ -2903,6 +2956,9 @@ static stream_result_t openai_stream(provider_t *p, const char *api_key, const c
     curl_easy_setopt(curl, CURLOPT_CONNECTTIMEOUT, 30L);
     curl_easy_setopt(curl, CURLOPT_LOW_SPEED_LIMIT, 100L);
     curl_easy_setopt(curl, CURLOPT_LOW_SPEED_TIME, 120L);
+
+    if (provider_env_truthy(getenv("DSCO_DEBUG_REQUEST")))
+        llm_debug_save_request(request_json, 0);
 
     CURLcode res = curl_easy_perform(curl);
     long http_code = 0;
@@ -3599,6 +3655,7 @@ static const provider_endpoint_t PROVIDER_ENDPOINTS[] = {
     {"xai", "https://api.x.ai/v1", "XAI_API_KEY", "Bearer"},
     {"cohere", "https://api.cohere.com/v2", "COHERE_API_KEY", "Bearer"},
     {"moonshot", "https://api.moonshot.ai/v1", "MOONSHOT_API_KEY", "Bearer"},
+    {"sakana", "https://api.sakana.ai/v1", "FUGU_API_KEY", "Bearer"},
     {"alibaba", "https://dashscope-intl.aliyuncs.com/compatible-mode/v1", "DASHSCOPE_API_KEY",
      "Bearer"},
     {"alibaba-coding-plan", "https://coding-intl.dashscope.aliyuncs.com/v1",
@@ -3668,6 +3725,7 @@ static const provider_env_alias_t PROVIDER_ENV_ALIASES[] = {
     {"together", {"TOGETHER_TOKEN", NULL}},
     {"xai", {"GROK_API_KEY", "X_AI_API_KEY", NULL}},
     {"moonshot", {"KIMI_API_KEY", "MOONSHOTAI_API_KEY", NULL}},
+    {"sakana", {"SAKANA_API_KEY", "FISH_API_KEY", "SAKANA_TOKEN", NULL}},
     {"google",
      {"GEMINI_API_KEY", "GOOGLE_AI_API_KEY", "GOOGLE_AI_STUDIO_API_KEY", "GOOGLE_VERTEX_API_KEY",
       NULL}},
@@ -3692,6 +3750,16 @@ static void provider_build_env_name(const char *provider_name, const char *suffi
     }
     out[pos] = '\0';
     strncat(out, suffix, out_len - strlen(out) - 1);
+}
+
+static bool provider_str_ends_with(const char *s, const char *suffix) {
+    if (!s || !suffix)
+        return false;
+    size_t ls = strlen(s);
+    size_t lf = strlen(suffix);
+    if (lf > ls)
+        return false;
+    return strcmp(s + ls - lf, suffix) == 0;
 }
 
 static const char *provider_getenv_nonempty(const char *name) {
@@ -3749,6 +3817,12 @@ bool provider_has_custom_api_base(const char *provider_name) {
         return true;
 
     const char *canonical = provider_profile_canonical_name(provider_name);
+    if (canonical && strcmp(canonical, "sakana") == 0) {
+        const char *fugu_base = getenv("FUGU_BASE_URL");
+        const char *fugu_api_base = getenv("FUGU_API_BASE");
+        if ((fugu_base && fugu_base[0]) || (fugu_api_base && fugu_api_base[0]))
+            return true;
+    }
     if (canonical && provider_name && strcmp(canonical, provider_name) != 0) {
         provider_build_env_name(canonical, "_API_BASE", env_name, sizeof(env_name));
         if (provider_getenv_nonempty(env_name))
@@ -3772,8 +3846,16 @@ static provider_t *create_openai_compat(const char *name, const char *base_url,
 
     /* Check for env override */
     char env_base[128];
+    const char *canonical_name = provider_profile_canonical_name(name);
+    bool is_fugu = canonical_name && strcmp(canonical_name, "sakana") == 0;
+    const char *custom_base = NULL;
+    if (is_fugu)
+        custom_base = getenv("FUGU_BASE_URL");
+    if ((!custom_base || !custom_base[0]) && is_fugu)
+        custom_base = getenv("FUGU_API_BASE");
     provider_build_env_name(name, "_API_BASE", env_base, sizeof(env_base));
-    const char *custom_base = getenv(env_base);
+    if (!custom_base || !custom_base[0])
+        custom_base = getenv(env_base);
     if (!custom_base || !custom_base[0]) {
         provider_build_env_name(name, "_BASE_URL", env_base, sizeof(env_base));
         custom_base = getenv(env_base);
@@ -3781,7 +3863,17 @@ static provider_t *create_openai_compat(const char *name, const char *base_url,
     if (!custom_base)
         custom_base = base_url;
 
-    snprintf(od->api_url, sizeof(od->api_url), "%s/chat/completions", custom_base);
+    char normalized_base[1024];
+    snprintf(normalized_base, sizeof(normalized_base), "%s", custom_base ? custom_base : "");
+    size_t blen = strlen(normalized_base);
+    while (blen > 0 && normalized_base[blen - 1] == '/')
+        normalized_base[--blen] = '\0';
+    if (is_fugu && !provider_str_ends_with(normalized_base, "/v1") &&
+        strlen(normalized_base) + 3 < sizeof(normalized_base)) {
+        strncat(normalized_base, "/v1", sizeof(normalized_base) - strlen(normalized_base) - 1);
+    }
+
+    snprintf(od->api_url, sizeof(od->api_url), "%s/chat/completions", normalized_base);
     p->api_url = od->api_url;
     p->data = od;
     p->build_request = openai_build_request;
@@ -3802,6 +3894,58 @@ static provider_t *create_unsupported_provider(const provider_profile_t *profile
     p->build_headers = unsupported_build_headers;
     p->stream = unsupported_stream;
     return p;
+}
+
+
+/* ── Sakana Fugu Provider ───────────────────────────────────────────────
+ *
+ * Fugu speaks the OpenAI Chat Completions dialect.  Two quirks:
+ *
+ * 1. reasoning.effort only accepts "high" and "xhigh" (alias "max").
+ *    Any other value (low, medium, auto, etc.) is rejected with a 400.
+ *    We remap: anything below "high" → "high"; "max" → "xhigh".
+ *
+ * 2. Fugu Ultra returns orchestration tokens in token_details sub-fields
+ *    (orchestration_input_tokens, orchestration_input_cached_tokens,
+ *    orchestration_output_tokens).  Unlike OpenAI these ARE real billing
+ *    tokens outside the base input/output counts.  We accumulate them
+ *    into the usage struct so cost accounting doesn't under-count.
+ *
+ * Transport: standard OpenAI SSE streaming over /v1/chat/completions.
+ * Auth: FUGU_API_KEY (or SAKANA_API_KEY/FISH_API_KEY/SAKANA_TOKEN) as Bearer token.
+ */
+
+
+/* Remap dsco session effort string to Fugu's two-value enum. */
+static const char *fugu_remap_effort(const char *effort) {
+    if (!effort || !effort[0]) return "high";
+    if (strcmp(effort, "xhigh") == 0 || strcmp(effort, "max") == 0) return "xhigh";
+    /* high, low, medium, auto → "high" (lowest Fugu accepts) */
+    return "high";
+}
+
+static char *fugu_build_request(provider_t *p, conversation_t *conv, session_state_t *session,
+                                int max_tokens, const char *credential) {
+    char *base = openai_build_request(p, conv, session, max_tokens, credential);
+    if (!base) return NULL;
+
+    /* Append reasoning block with remapped effort.
+     * Strip trailing '}' from the base request to inject. */
+    size_t len = strlen(base);
+    if (len == 0 || base[len - 1] != '}') return base;
+    base[len - 1] = '\0';
+
+    const char *raw_effort = (session && session->effort[0]) ? session->effort : "high";
+    const char *effort = fugu_remap_effort(raw_effort);
+
+    jbuf_t b;
+    jbuf_init(&b, len + 128);
+    jbuf_append(&b, base);
+    free(base);
+    jbuf_append(&b, ",\"reasoning\":{\"effort\":");
+    jbuf_append_json_str(&b, effort);
+    jbuf_append(&b, "}}");
+    return b.data;
 }
 
 provider_t *provider_create(const char *name) {
@@ -3867,6 +4011,16 @@ provider_t *provider_create(const char *name) {
         provider_t *p = create_openai_compat(ep->name, ep->base_url, ep->env_key);
         p->build_request = xai_build_request;
         return p;
+    }
+
+    /* Sakana Fugu: Chat Completions dialect + restricted reasoning effort. */
+    if (strcmp(name, "sakana") == 0 || strcmp(name, "fugu") == 0) {
+        const provider_endpoint_t *ep = find_endpoint("sakana");
+        if (ep) {
+            provider_t *p = create_openai_compat(ep->name, ep->base_url, ep->env_key);
+            p->build_request = fugu_build_request;
+            return p;
+        }
     }
 
     /* All other providers use OpenAI-compatible API */
@@ -3966,6 +4120,8 @@ static const char *provider_model_family_from_namespaced(const char *model) {
         return "mistral";
     if (provider_model_has_prefix(model, "moonshotai/"))
         return "moonshot";
+    if (provider_model_has_prefix(model, "sakana/"))
+        return "sakana";
     if (provider_model_has_prefix(model, "cohere/"))
         return "cohere";
     if (provider_model_has_prefix(model, "minimax/"))
@@ -4014,6 +4170,8 @@ const char *provider_model_family(const char *model) {
         return "mistral";
     if (strstr(model, "kimi") || strstr(model, "moonshot"))
         return "moonshot";
+    if (strstr(model, "fugu") || strstr(model, "sakana"))
+        return "sakana";
     if (strstr(model, "command"))
         return "cohere";
     if (strstr(model, "sonar") || strstr(model, "pplx"))
@@ -4107,6 +4265,15 @@ static const char *provider_family_primary_model(const char *family, bool prefer
             return "moonshotai/kimi-k2.7-code";
         return NULL;
     }
+    if (strcmp(family, "sakana") == 0) {
+        /* Sakana/Fugu is a native-only provider: only route here when the user
+         * has an explicit FUGU/SAKANA key. Do NOT fall back via OpenRouter —
+         * doing so silently hijacks every OpenRouter user to Fugu and preempts
+         * the deliberate GLM/Kimi cost-optimized default contract. */
+        if (provider_has_usable_key("sakana", NULL))
+            return "fugu";
+        return NULL;
+    }
     if (strcmp(family, "cohere") == 0) {
         if (provider_has_usable_key("cohere", NULL))
             return "command-a-03-2025";
@@ -4183,6 +4350,8 @@ int provider_build_default_fallback_models(const char *model, char out_models[][
         provider_append_unique_model(out_models, &count, max_models, resolved_model,
                                      provider_family_primary_model("anthropic", false));
         provider_append_unique_model(out_models, &count, max_models, resolved_model,
+                                     provider_family_primary_model("sakana", prefer_code));
+        provider_append_unique_model(out_models, &count, max_models, resolved_model,
                                      provider_xai_primary_model(prefer_code));
         provider_append_unique_model(out_models, &count, max_models, resolved_model,
                                      provider_openai_primary_model(prefer_code));
@@ -4196,6 +4365,8 @@ int provider_build_default_fallback_models(const char *model, char out_models[][
     if (strcmp(family, "openai") == 0) {
         provider_append_unique_model(out_models, &count, max_models, resolved_model,
                                      provider_openai_primary_model(prefer_code));
+        provider_append_unique_model(out_models, &count, max_models, resolved_model,
+                                     provider_family_primary_model("sakana", prefer_code));
         provider_append_unique_model(out_models, &count, max_models, resolved_model,
                                      provider_xai_primary_model(true));
         provider_append_unique_model(out_models, &count, max_models, resolved_model,
@@ -4211,6 +4382,8 @@ int provider_build_default_fallback_models(const char *model, char out_models[][
         provider_append_unique_model(out_models, &count, max_models, resolved_model,
                                      provider_xai_primary_model(prefer_code));
         provider_append_unique_model(out_models, &count, max_models, resolved_model,
+                                     provider_family_primary_model("sakana", prefer_code));
+        provider_append_unique_model(out_models, &count, max_models, resolved_model,
                                      provider_family_primary_model("anthropic", false));
         provider_append_unique_model(out_models, &count, max_models, resolved_model,
                                      provider_openai_primary_model(prefer_code));
@@ -4223,6 +4396,8 @@ int provider_build_default_fallback_models(const char *model, char out_models[][
 
     provider_append_unique_model(out_models, &count, max_models, resolved_model,
                                  provider_xai_primary_model(prefer_code));
+    provider_append_unique_model(out_models, &count, max_models, resolved_model,
+                                 provider_family_primary_model("sakana", prefer_code));
     provider_append_unique_model(out_models, &count, max_models, resolved_model,
                                  provider_family_primary_model("anthropic", false));
     provider_append_unique_model(out_models, &count, max_models, resolved_model,
@@ -4238,6 +4413,10 @@ int provider_build_default_fallback_models(const char *model, char out_models[][
 
 const char *provider_select_default_primary_model(bool prefer_code) {
     const char *candidate = NULL;
+
+    candidate = provider_family_primary_model("sakana", prefer_code);
+    if (candidate)
+        return candidate;
 
     if (prefer_code) {
         /* Code mode: prefer Kimi K2.7 Code via OpenRouter */
@@ -4326,6 +4505,8 @@ const char *provider_detect(const char *model, const char *api_key) {
         /* OpenRouter auto-router */
         if (strncmp(model, "openrouter/", 11) == 0 || strcmp(model, "auto") == 0)
             return "openrouter";
+        if (strncmp(model, "sakana/", 7) == 0)
+            return "sakana";
         /* OpenAI aliases are stored as openai/gpt-* so they can still fall
          * back through OpenRouter when needed, but the family itself is
          * OpenAI and should prefer OpenAI/Codex credentials. */
@@ -4345,6 +4526,8 @@ const char *provider_detect(const char *model, const char *api_key) {
          * slash already routed to OpenRouter above). */
         if (strstr(model, "kimi") || strstr(model, "moonshot"))
             return "moonshot";
+        if (strstr(model, "fugu") || strstr(model, "sakana"))
+            return "sakana";
         /* Google Gemini native — bare gemini-* IDs only */
         if (strstr(model, "gemini") || strstr(model, "Gemini"))
             return "google";
@@ -4393,11 +4576,54 @@ const char *provider_detect(const char *model, const char *api_key) {
             return "perplexity";
         if (strncmp(api_key, "xai-", 4) == 0)
             return "xai";
+        if (strncmp(api_key, "fish_", 5) == 0)
+            return "sakana";
         if (strncmp(api_key, "sk-", 3) == 0)
             return "openai";
     }
 
     return "anthropic";
+}
+
+const char *provider_provider_for_api_key(const char *api_key) {
+    if (!api_key || !api_key[0])
+        return NULL;
+    if (strncmp(api_key, "sk-ant-", 7) == 0)
+        return "anthropic";
+    if (strncmp(api_key, "gsk_", 4) == 0)
+        return "groq";
+    if (strncmp(api_key, "sk-or-", 6) == 0)
+        return "openrouter";
+    if (strncmp(api_key, "pplx-", 5) == 0)
+        return "perplexity";
+    if (strncmp(api_key, "xai-", 4) == 0)
+        return "xai";
+    if (strncmp(api_key, "fish_", 5) == 0)
+        return "sakana";
+    if (strncmp(api_key, "sk-", 3) == 0)
+        return "openai";
+    return NULL;
+}
+
+const char *provider_publish_api_key_env(const char *api_key) {
+    const char *prov = provider_provider_for_api_key(api_key);
+    if (!prov)
+        return NULL;
+    const char *env_key = NULL;
+    if (strcmp(prov, "anthropic") == 0) {
+        env_key = "ANTHROPIC_API_KEY";
+    } else {
+        const provider_endpoint_t *ep = find_endpoint(prov);
+        if (ep)
+            env_key = ep->env_key;
+    }
+    if (env_key && env_key[0] && !provider_getenv_nonempty(env_key))
+        setenv(env_key, api_key, 1);
+    return prov;
+}
+
+const char *provider_primary_model_for(const char *family, bool prefer_code) {
+    return provider_family_primary_model(family, prefer_code);
 }
 
 /* ── Resolve API key for a provider ────────────────────────────────────── */
