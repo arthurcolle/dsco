@@ -49,6 +49,8 @@ typedef struct {
 static size_t oai_http_write_cb(char *ptr, size_t size, size_t nmemb, void *ud) {
     size_t total = size * nmemb;
     oai_http_buf_t *b = (oai_http_buf_t *)ud;
+    if (b->len + total > 4 * 1024 * 1024) /* 4 MB safety cap */
+        return 0;
     char *grown = realloc(b->data, b->len + total + 1);
     if (!grown)
         return 0;
@@ -105,6 +107,8 @@ static void oai_pkce_challenge(const char *verifier, char out[64]) {
     sha256_update(&ctx, (const uint8_t *)verifier, strlen(verifier));
     sha256_final(&ctx, hash);
     base64url_encode(hash, sizeof(hash), out, 64);
+    /* RFC 7636 §4.2: code_challenge MUST be BASE64URL with NO padding. */
+    for (char *p = out; *p; p++) { if (*p == '=') { *p = '\0'; break; } }
 }
 
 /* ── id_token (JWT) account-id extraction ───────────────────────────────── */
@@ -479,6 +483,9 @@ static char *oai_wait_for_callback(int listen_fd, char *state_out, size_t state_
         int client = accept(listen_fd, NULL, NULL);
         if (client < 0)
             continue;
+        /* Timeout recv() so a stalled browser connection cannot block forever. */
+        struct timeval rcv_tv = {5, 0};
+        setsockopt(client, SOL_SOCKET, SO_RCVTIMEO, &rcv_tv, sizeof(rcv_tv));
         char req[8192];
         ssize_t n = recv(client, req, sizeof(req) - 1, 0);
         if (n <= 0) {
@@ -486,8 +493,20 @@ static char *oai_wait_for_callback(int listen_fd, char *state_out, size_t state_
             continue;
         }
         req[n] = '\0';
+        /* Only search the first line to avoid matching headers (Cookie, Referer, etc). */
+        char *line_end = strstr(req, "\r\n");
+        char first_line[8192];
+        if (line_end) {
+            size_t ll = (size_t)(line_end - req);
+            if (ll >= sizeof(first_line)) ll = sizeof(first_line) - 1;
+            memcpy(first_line, req, ll);
+            first_line[ll] = '\0';
+        } else {
+            memcpy(first_line, req, sizeof(first_line) - 1);
+            first_line[sizeof(first_line) - 1] = '\0';
+        }
         /* request line: GET /auth/callback?code=...&state=... HTTP/1.1 */
-        char *q = strstr(req, "code=");
+        char *q = strstr(first_line, "code=");
         if (q) {
             q += 5;
             size_t i = 0;
@@ -499,7 +518,7 @@ static char *oai_wait_for_callback(int listen_fd, char *state_out, size_t state_
             buf[i] = '\0';
             code = buf;
         }
-        char *st = strstr(req, "state=");
+        char *st = strstr(first_line, "state=");
         if (st && state_out) {
             st += 6;
             size_t i = 0;
@@ -539,6 +558,9 @@ int openai_oauth_login(void) {
     uint8_t state_raw[16];
     crypto_random_bytes(state_raw, sizeof(state_raw));
     base64url_encode(state_raw, sizeof(state_raw), state, sizeof(state));
+    /* RFC 7636 / OAuth state: strip base64url padding so the value round-trips
+     * through curl_easy_escape() and back without percent-encoding mismatch. */
+    for (char *p = state; *p; p++) { if (*p == '=') { *p = '\0'; break; } }
 
     /* 2. loopback listener on 127.0.0.1:1455 */
     int listen_fd = socket(AF_INET, SOCK_STREAM, 0);
@@ -607,9 +629,11 @@ int openai_oauth_login(void) {
          * that first before giving up. */
         openai_oauth_bundle_t existing;
         if (openai_oauth_load(&existing) && existing.access_token[0]) {
+            static const char *src_names[] = {"missing","env","dsco-cache","codex"};
+            const char *sname = (existing.source < 4) ? src_names[existing.source] : "?";
             fprintf(stderr,
                     "  \033[32m✓ Signed in\033[0m (token loaded from %s).\n\n",
-                    openai_oauth_source_name());
+                    sname);
             free(code);
             return 0;
         }
