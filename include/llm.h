@@ -84,6 +84,10 @@ typedef struct {
     bool               ok;
     bool               context_overflow;  /* provider rejected prompt as too long → reactive compaction can retry */
     double             cost_usd;           /* authoritative per-turn cost reported by provider (OpenRouter usage.cost); 0 = not reported, fall back to token math */
+    /* OpenRouter/provider metadata — printed after md_flush, never inside stream */
+    char              *actual_model;       /* model actually used (may differ from requested) */
+    char              *generation_id;      /* provider generation/request ID */
+    int                reasoning_tokens;   /* reasoning tokens this turn */
 } stream_result_t;
 
 /* ── Session state (mutable per-session settings) ──────────────────────── */
