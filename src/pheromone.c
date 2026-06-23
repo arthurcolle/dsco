@@ -7,9 +7,9 @@
 #include <sys/time.h>
 
 /* §6: Event loop integration — register a periodic timer for pheromone decay */
-static ev_loop_t  *g_phero_ev_loop = NULL;
+static ev_loop_t *g_phero_ev_loop = NULL;
 static pheromone_field_t *g_phero_timer_field = NULL;
-static int         g_phero_timer_id = -1;
+static int g_phero_timer_id = -1;
 
 /* ═══════════════════════════════════════════════════════════════════════════
  * Pheromone Coordination System — Implementation
@@ -27,17 +27,12 @@ static double now_sec(void) {
 
 /* ── Name Tables ──────────────────────────────────────────────────────── */
 
-static const char *TYPE_NAMES[] = {
-    "PROGRESS", "ATTRACTION", "WARNING", "SUCCESS", "HELP_NEEDED", "CAPACITY"
-};
+static const char *TYPE_NAMES[] = {"PROGRESS", "ATTRACTION",  "WARNING",
+                                   "SUCCESS",  "HELP_NEEDED", "CAPACITY"};
 
-static const char *DECAY_NAMES[] = {
-    "exponential", "linear", "step", "logarithmic", "sigmoid"
-};
+static const char *DECAY_NAMES[] = {"exponential", "linear", "step", "logarithmic", "sigmoid"};
 
-static const char *AGG_NAMES[] = {
-    "sum", "max", "mean", "weighted", "quorum"
-};
+static const char *AGG_NAMES[] = {"sum", "max", "mean", "weighted", "quorum"};
 
 const char *pheromone_type_name(pheromone_type_t t) {
     return (t >= 0 && t < PHERO_TYPE_COUNT) ? TYPE_NAMES[t] : "unknown";
@@ -53,27 +48,28 @@ const char *pheromone_agg_name(pheromone_aggregation_t a) {
 
 /* ── Decay Functions ──────────────────────────────────────────────────── */
 
-static double compute_decay(pheromone_decay_t fn, double initial,
-                            double lambda, double ttl, double age) {
-    if (age < 0) age = 0;
+static double compute_decay(pheromone_decay_t fn, double initial, double lambda, double ttl,
+                            double age) {
+    if (age < 0)
+        age = 0;
     switch (fn) {
-    case PHERO_DECAY_EXPONENTIAL:
-        return initial * exp(-lambda * age);
-    case PHERO_DECAY_LINEAR: {
-        double rate = lambda > 0 ? lambda : (initial / (ttl > 0 ? ttl : 300));
-        double v = initial - rate * age;
-        return v > 0 ? v : 0;
-    }
-    case PHERO_DECAY_STEP:
-        return (ttl > 0 && age >= ttl) ? 0 : initial;
-    case PHERO_DECAY_LOGARITHMIC:
-        return initial / (1.0 + lambda * log(1.0 + age));
-    case PHERO_DECAY_SIGMOID: {
-        double mid = ttl > 0 ? ttl / 2.0 : 60.0;
-        return initial / (1.0 + exp(lambda * (age - mid)));
-    }
-    default:
-        return initial * exp(-lambda * age);
+        case PHERO_DECAY_EXPONENTIAL:
+            return initial * exp(-lambda * age);
+        case PHERO_DECAY_LINEAR: {
+            double rate = lambda > 0 ? lambda : (initial / (ttl > 0 ? ttl : 300));
+            double v = initial - rate * age;
+            return v > 0 ? v : 0;
+        }
+        case PHERO_DECAY_STEP:
+            return (ttl > 0 && age >= ttl) ? 0 : initial;
+        case PHERO_DECAY_LOGARITHMIC:
+            return initial / (1.0 + lambda * log(1.0 + age));
+        case PHERO_DECAY_SIGMOID: {
+            double mid = ttl > 0 ? ttl / 2.0 : 60.0;
+            return initial / (1.0 + exp(lambda * (age - mid)));
+        }
+        default:
+            return initial * exp(-lambda * age);
     }
 }
 
@@ -92,30 +88,34 @@ void pheromone_field_destroy(pheromone_field_t *f) {
 
 /* ── Deposit ──────────────────────────────────────────────────────────── */
 
-int pheromone_deposit(pheromone_field_t *f, pheromone_type_t type,
-                      double concentration, const char *region,
-                      const char *source, const char *meta) {
+int pheromone_deposit(pheromone_field_t *f, pheromone_type_t type, double concentration,
+                      const char *region, const char *source, const char *meta) {
     return pheromone_deposit_ex(f, type, concentration, region, source, meta,
                                 PHERO_DECAY_EXPONENTIAL, f->default_lambda, 0);
 }
 
-int pheromone_deposit_ex(pheromone_field_t *f, pheromone_type_t type,
-                         double concentration, const char *region,
-                         const char *source, const char *meta,
+int pheromone_deposit_ex(pheromone_field_t *f, pheromone_type_t type, double concentration,
+                         const char *region, const char *source, const char *meta,
                          pheromone_decay_t decay_fn, double lambda, double ttl) {
-    if (!f || !f->initialized) return -1;
+    if (!f || !f->initialized)
+        return -1;
     if (f->count >= PHEROMONE_MAX_SIGNALS) {
         /* Try to reap dead signals first */
         pheromone_tick(f);
-        if (f->count >= PHEROMONE_MAX_SIGNALS) return -1;
+        if (f->count >= PHEROMONE_MAX_SIGNALS)
+            return -1;
     }
 
     /* Find empty slot */
     int slot = -1;
     for (int i = 0; i < PHEROMONE_MAX_SIGNALS; i++) {
-        if (!f->signals[i].active) { slot = i; break; }
+        if (!f->signals[i].active) {
+            slot = i;
+            break;
+        }
     }
-    if (slot < 0) return -1;
+    if (slot < 0)
+        return -1;
 
     pheromone_signal_t *s = &f->signals[slot];
     s->id = f->next_id++;
@@ -128,12 +128,18 @@ int pheromone_deposit_ex(pheromone_field_t *f, pheromone_type_t type,
     s->ttl = ttl;
     s->active = true;
 
-    if (region) snprintf(s->region, sizeof(s->region), "%s", region);
-    else s->region[0] = '\0';
-    if (source) snprintf(s->source, sizeof(s->source), "%s", source);
-    else s->source[0] = '\0';
-    if (meta) snprintf(s->meta, sizeof(s->meta), "%s", meta);
-    else s->meta[0] = '\0';
+    if (region)
+        snprintf(s->region, sizeof(s->region), "%s", region);
+    else
+        s->region[0] = '\0';
+    if (source)
+        snprintf(s->source, sizeof(s->source), "%s", source);
+    else
+        s->source[0] = '\0';
+    if (meta)
+        snprintf(s->meta, sizeof(s->meta), "%s", meta);
+    else
+        s->meta[0] = '\0';
 
     f->count++;
     f->total_deposits++;
@@ -142,18 +148,18 @@ int pheromone_deposit_ex(pheromone_field_t *f, pheromone_type_t type,
 
 /* ── Sense ────────────────────────────────────────────────────────────── */
 
-double pheromone_sense(pheromone_field_t *f, pheromone_type_t type,
-                       const char *region, pheromone_aggregation_t agg) {
+double pheromone_sense(pheromone_field_t *f, pheromone_type_t type, const char *region,
+                       pheromone_aggregation_t agg) {
     pheromone_gradient_t g;
     if (pheromone_gradient(f, type, region, agg, &g))
         return g.concentration;
     return 0.0;
 }
 
-bool pheromone_gradient(pheromone_field_t *f, pheromone_type_t type,
-                        const char *region, pheromone_aggregation_t agg,
-                        pheromone_gradient_t *out) {
-    if (!f || !f->initialized || !out) return false;
+bool pheromone_gradient(pheromone_field_t *f, pheromone_type_t type, const char *region,
+                        pheromone_aggregation_t agg, pheromone_gradient_t *out) {
+    if (!f || !f->initialized || !out)
+        return false;
     f->total_reads++;
 
     double t = now_sec();
@@ -166,20 +172,22 @@ bool pheromone_gradient(pheromone_field_t *f, pheromone_type_t type,
 
     for (int i = 0; i < PHEROMONE_MAX_SIGNALS; i++) {
         pheromone_signal_t *s = &f->signals[i];
-        if (!s->active || s->type != type) continue;
-        if (region && region[0] && strcmp(s->region, region) != 0) continue;
+        if (!s->active || s->type != type)
+            continue;
+        if (region && region[0] && strcmp(s->region, region) != 0)
+            continue;
 
         double age = t - s->deposit_time;
         double c = compute_decay(s->decay_fn, s->initial, s->lambda, s->ttl, age);
-        if (c < PHEROMONE_CLEANUP_THRESHOLD) continue;
+        if (c < PHEROMONE_CLEANUP_THRESHOLD)
+            continue;
 
         count++;
         sum += c;
         if (c > maxv) {
             maxv = c;
             strongest_age = age;
-            snprintf(out->strongest_source, sizeof(out->strongest_source),
-                     "%s", s->source);
+            snprintf(out->strongest_source, sizeof(out->strongest_source), "%s", s->source);
         }
         /* Recency-weighted: weight by 1/(1+age) */
         double w = 1.0 / (1.0 + age);
@@ -196,24 +204,34 @@ bool pheromone_gradient(pheromone_field_t *f, pheromone_type_t type,
     }
 
     switch (agg) {
-    case PHERO_AGG_SUM:      out->concentration = sum; break;
-    case PHERO_AGG_MAX:      out->concentration = maxv; break;
-    case PHERO_AGG_MEAN:     out->concentration = sum / count; break;
-    case PHERO_AGG_WEIGHTED: out->concentration = wweight > 0 ? wsum / wweight : 0; break;
-    case PHERO_AGG_QUORUM:   out->concentration = count >= 3 ? sum : 0; break;
-    default:                 out->concentration = sum; break;
+        case PHERO_AGG_SUM:
+            out->concentration = sum;
+            break;
+        case PHERO_AGG_MAX:
+            out->concentration = maxv;
+            break;
+        case PHERO_AGG_MEAN:
+            out->concentration = sum / count;
+            break;
+        case PHERO_AGG_WEIGHTED:
+            out->concentration = wweight > 0 ? wsum / wweight : 0;
+            break;
+        case PHERO_AGG_QUORUM:
+            out->concentration = count >= 3 ? sum : 0;
+            break;
+        default:
+            out->concentration = sum;
+            break;
     }
     return true;
 }
 
-int pheromone_sense_all(pheromone_field_t *f, const char *region,
-                        pheromone_aggregation_t agg,
+int pheromone_sense_all(pheromone_field_t *f, const char *region, pheromone_aggregation_t agg,
                         pheromone_gradient_t *out, int max) {
     int n = 0;
     for (int t = 0; t < PHERO_TYPE_COUNT && n < max; t++) {
         pheromone_gradient_t g;
-        if (pheromone_gradient(f, (pheromone_type_t)t, region, agg, &g) &&
-            g.signal_count > 0) {
+        if (pheromone_gradient(f, (pheromone_type_t)t, region, agg, &g) && g.signal_count > 0) {
             out[n++] = g;
         }
     }
@@ -223,13 +241,15 @@ int pheromone_sense_all(pheromone_field_t *f, const char *region,
 /* ── Maintenance ──────────────────────────────────────────────────────── */
 
 int pheromone_tick(pheromone_field_t *f) {
-    if (!f || !f->initialized) return 0;
+    if (!f || !f->initialized)
+        return 0;
     double t = now_sec();
     int reaped = 0;
 
     for (int i = 0; i < PHEROMONE_MAX_SIGNALS; i++) {
         pheromone_signal_t *s = &f->signals[i];
-        if (!s->active) continue;
+        if (!s->active)
+            continue;
 
         double age = t - s->deposit_time;
         double c = compute_decay(s->decay_fn, s->initial, s->lambda, s->ttl, age);
@@ -247,7 +267,8 @@ int pheromone_tick(pheromone_field_t *f) {
 }
 
 bool pheromone_reinforce(pheromone_field_t *f, int signal_id, double amount) {
-    if (!f || !f->initialized) return false;
+    if (!f || !f->initialized)
+        return false;
     for (int i = 0; i < PHEROMONE_MAX_SIGNALS; i++) {
         if (f->signals[i].active && f->signals[i].id == signal_id) {
             f->signals[i].initial += amount;
@@ -260,7 +281,8 @@ bool pheromone_reinforce(pheromone_field_t *f, int signal_id, double amount) {
 }
 
 int pheromone_evaporate_region(pheromone_field_t *f, const char *region) {
-    if (!f || !f->initialized || !region) return 0;
+    if (!f || !f->initialized || !region)
+        return 0;
     int evaporated = 0;
     for (int i = 0; i < PHEROMONE_MAX_SIGNALS; i++) {
         pheromone_signal_t *s = &f->signals[i];
@@ -276,25 +298,26 @@ int pheromone_evaporate_region(pheromone_field_t *f, const char *region) {
 /* ── Serialization ────────────────────────────────────────────────────── */
 
 int pheromone_to_json(const pheromone_field_t *f, char *buf, size_t len) {
-    if (!f || !buf) return 0;
+    if (!f || !buf)
+        return 0;
     double t = now_sec();
     int n = snprintf(buf, len, "{\"signals\":[");
 
     bool first = true;
     for (int i = 0; i < PHEROMONE_MAX_SIGNALS && (size_t)n < len - 256; i++) {
         const pheromone_signal_t *s = &f->signals[i];
-        if (!s->active) continue;
+        if (!s->active)
+            continue;
 
         double age = t - s->deposit_time;
         double c = compute_decay(s->decay_fn, s->initial, s->lambda, s->ttl, age);
 
         n += snprintf(buf + n, len - n,
-            "%s{\"id\":%d,\"type\":\"%s\",\"concentration\":%.4f,"
-            "\"region\":\"%s\",\"source\":\"%s\",\"age\":%.1f,"
-            "\"decay\":\"%s\",\"lambda\":%.4f}",
-            first ? "" : ",", s->id, pheromone_type_name(s->type), c,
-            s->region, s->source, age,
-            pheromone_decay_name(s->decay_fn), s->lambda);
+                      "%s{\"id\":%d,\"type\":\"%s\",\"concentration\":%.4f,"
+                      "\"region\":\"%s\",\"source\":\"%s\",\"age\":%.1f,"
+                      "\"decay\":\"%s\",\"lambda\":%.4f}",
+                      first ? "" : ",", s->id, pheromone_type_name(s->type), c, s->region,
+                      s->source, age, pheromone_decay_name(s->decay_fn), s->lambda);
         first = false;
     }
 
@@ -303,7 +326,8 @@ int pheromone_to_json(const pheromone_field_t *f, char *buf, size_t len) {
 }
 
 bool pheromone_from_json(pheromone_field_t *f, const char *json) {
-    if (!f || !json || !f->initialized) return false;
+    if (!f || !json || !f->initialized)
+        return false;
 
     /*
      * Parse the array produced by pheromone_to_json:
@@ -317,70 +341,79 @@ bool pheromone_from_json(pheromone_field_t *f, const char *json) {
      */
 
     const char *arr = strstr(json, "\"signals\":[");
-    if (!arr) return false;
+    if (!arr)
+        return false;
     arr = strchr(arr, '[');
-    if (!arr) return false;
+    if (!arr)
+        return false;
     arr++;
 
     int loaded = 0;
     double now = now_sec();
 
-    static const char *s_decay_names[] = {
-        "EXPONENTIAL","LINEAR","STEP","LOGARITHMIC","SIGMOID", NULL
-    };
+    static const char *s_decay_names[] = {"EXPONENTIAL", "LINEAR",  "STEP",
+                                          "LOGARITHMIC", "SIGMOID", NULL};
 
     while (*arr && *arr != ']') {
         /* advance to next { */
-        while (*arr && *arr != '{') arr++;
-        if (*arr != '{') break;
+        while (*arr && *arr != '{')
+            arr++;
+        if (*arr != '{')
+            break;
 
         /* find matching } */
         const char *obj_end = arr + 1;
         int depth = 1;
         while (*obj_end && depth > 0) {
-            if      (*obj_end == '{') depth++;
-            else if (*obj_end == '}') depth--;
+            if (*obj_end == '{')
+                depth++;
+            else if (*obj_end == '}')
+                depth--;
             obj_end++;
         }
 
         /* --- field extraction helpers (operate within [arr, obj_end)) --- */
-#define PFJ_STR(key, dst, dsz) do {                                     \
-    const char *_pk = strstr(arr, "\"" key "\":\"");                    \
-    if (_pk && _pk < obj_end) {                                         \
-        _pk += (int)sizeof("\"" key "\":\"") - 1;                       \
-        const char *_pe = memchr(_pk, '"', (size_t)(obj_end - _pk));   \
-        if (_pe) {                                                       \
-            size_t _n = (size_t)(_pe - _pk);                            \
-            if (_n >= (dsz)) _n = (dsz) - 1;                           \
-            memcpy((dst), _pk, _n);                                     \
-            ((char*)(dst))[_n] = '\0';                                  \
-        }                                                                \
-    }                                                                    \
-} while(0)
+#define PFJ_STR(key, dst, dsz)                                                                     \
+    do {                                                                                           \
+        const char *_pk = strstr(arr, "\"" key "\":\"");                                           \
+        if (_pk && _pk < obj_end) {                                                                \
+            _pk += (int)sizeof("\"" key "\":\"") - 1;                                              \
+            const char *_pe = memchr(_pk, '"', (size_t)(obj_end - _pk));                           \
+            if (_pe) {                                                                             \
+                size_t _n = (size_t)(_pe - _pk);                                                   \
+                if (_n >= (dsz))                                                                   \
+                    _n = (dsz) - 1;                                                                \
+                memcpy((dst), _pk, _n);                                                            \
+                ((char *)(dst))[_n] = '\0';                                                        \
+            }                                                                                      \
+        }                                                                                          \
+    } while (0)
 
-#define PFJ_DBL(key, dst) do {                                          \
-    const char *_pk = strstr(arr, "\"" key "\":");                      \
-    if (_pk && _pk < obj_end) {                                         \
-        _pk += (int)sizeof("\"" key "\":") - 1;                         \
-        while (*_pk == ' ') _pk++;                                      \
-        (dst) = strtod(_pk, NULL);                                      \
-    }                                                                    \
-} while(0)
+#define PFJ_DBL(key, dst)                                                                          \
+    do {                                                                                           \
+        const char *_pk = strstr(arr, "\"" key "\":");                                             \
+        if (_pk && _pk < obj_end) {                                                                \
+            _pk += (int)sizeof("\"" key "\":") - 1;                                                \
+            while (*_pk == ' ')                                                                    \
+                _pk++;                                                                             \
+            (dst) = strtod(_pk, NULL);                                                             \
+        }                                                                                          \
+    } while (0)
 
-        char   type_str[32]                        = "PROGRESS";
-        char   region_str[PHEROMONE_MAX_REGION_LEN] = "";
-        char   source_str[PHEROMONE_MAX_SOURCE_LEN] = "";
-        char   decay_str[32]                        = "EXPONENTIAL";
+        char type_str[32] = "PROGRESS";
+        char region_str[PHEROMONE_MAX_REGION_LEN] = "";
+        char source_str[PHEROMONE_MAX_SOURCE_LEN] = "";
+        char decay_str[32] = "EXPONENTIAL";
         double concentration = 0.0, age_s = 0.0;
         double lambda = PHEROMONE_DEFAULT_LAMBDA;
 
-        PFJ_STR("type",   type_str,   sizeof(type_str));
+        PFJ_STR("type", type_str, sizeof(type_str));
         PFJ_STR("region", region_str, sizeof(region_str));
         PFJ_STR("source", source_str, sizeof(source_str));
-        PFJ_STR("decay",  decay_str,  sizeof(decay_str));
+        PFJ_STR("decay", decay_str, sizeof(decay_str));
         PFJ_DBL("concentration", concentration);
-        PFJ_DBL("age",           age_s);
-        PFJ_DBL("lambda",        lambda);
+        PFJ_DBL("age", age_s);
+        PFJ_DBL("lambda", lambda);
 
 #undef PFJ_STR
 #undef PFJ_DBL
@@ -408,17 +441,18 @@ bool pheromone_from_json(pheromone_field_t *f, const char *json) {
             double synthetic_deposit = now - age_s;
 
             for (int si = 0; si < PHEROMONE_MAX_SIGNALS; si++) {
-                if (f->signals[si].active) continue;
+                if (f->signals[si].active)
+                    continue;
                 pheromone_signal_t *s = &f->signals[si];
                 memset(s, 0, sizeof(*s));
-                s->id            = ++f->next_id;
-                s->type          = ptype;
+                s->id = ++f->next_id;
+                s->type = ptype;
                 s->concentration = concentration;
-                s->initial       = concentration;
-                s->deposit_time  = synthetic_deposit;
-                s->decay_fn      = pdecay;
-                s->lambda        = (lambda > 0.0) ? lambda : PHEROMONE_DEFAULT_LAMBDA;
-                s->active        = true;
+                s->initial = concentration;
+                s->deposit_time = synthetic_deposit;
+                s->decay_fn = pdecay;
+                s->lambda = (lambda > 0.0) ? lambda : PHEROMONE_DEFAULT_LAMBDA;
+                s->active = true;
                 strncpy(s->region, region_str, PHEROMONE_MAX_REGION_LEN - 1);
                 strncpy(s->source, source_str, PHEROMONE_MAX_SOURCE_LEN - 1);
                 f->count++;
@@ -433,9 +467,9 @@ bool pheromone_from_json(pheromone_field_t *f, const char *json) {
     return loaded > 0;
 }
 
-
 int pheromone_status_json(const pheromone_field_t *f, char *buf, size_t len) {
-    if (!f || !buf) return 0;
+    if (!f || !buf)
+        return 0;
 
     /* Count per type */
     int per_type[PHERO_TYPE_COUNT] = {0};
@@ -445,13 +479,13 @@ int pheromone_status_json(const pheromone_field_t *f, char *buf, size_t len) {
     }
 
     int n = snprintf(buf, len,
-        "{\"active_signals\":%d,\"total_deposits\":%d,\"total_reads\":%d,"
-        "\"total_reaped\":%d,\"per_type\":{",
-        f->count, f->total_deposits, f->total_reads, f->total_reaped);
+                     "{\"active_signals\":%d,\"total_deposits\":%d,\"total_reads\":%d,"
+                     "\"total_reaped\":%d,\"per_type\":{",
+                     f->count, f->total_deposits, f->total_reads, f->total_reaped);
 
     for (int t = 0; t < PHERO_TYPE_COUNT; t++) {
-        n += snprintf(buf + n, len - n, "%s\"%s\":%d",
-                      t ? "," : "", pheromone_type_name(t), per_type[t]);
+        n += snprintf(buf + n, len - n, "%s\"%s\":%d", t ? "," : "", pheromone_type_name(t),
+                      per_type[t]);
     }
     n += snprintf(buf + n, len - n, "}}");
     return n;
@@ -460,23 +494,24 @@ int pheromone_status_json(const pheromone_field_t *f, char *buf, size_t len) {
 /* ── §6: Event Loop Timer Integration ──────────────────────────────── */
 
 static void pheromone_timer_cb(int timer_id, void *ctx) {
-    (void)timer_id; (void)ctx;
+    (void)timer_id;
+    (void)ctx;
     if (g_phero_timer_field && g_phero_timer_field->initialized) {
         pheromone_tick(g_phero_timer_field);
     }
 }
 
-void pheromone_attach_event_loop(pheromone_field_t *f, ev_loop_t *loop,
-                                  int interval_ms) {
-    if (!f || !loop) return;
+void pheromone_attach_event_loop(pheromone_field_t *f, ev_loop_t *loop, int interval_ms) {
+    if (!f || !loop)
+        return;
     /* Cancel existing timer if any */
     if (g_phero_timer_id >= 0 && g_phero_ev_loop) {
         ev_timer_cancel(g_phero_ev_loop, g_phero_timer_id);
     }
     g_phero_ev_loop = loop;
     g_phero_timer_field = f;
-    g_phero_timer_id = ev_timer_repeat(loop, interval_ms > 0 ? interval_ms : 5000,
-                                        pheromone_timer_cb, NULL);
+    g_phero_timer_id =
+        ev_timer_repeat(loop, interval_ms > 0 ? interval_ms : 5000, pheromone_timer_cb, NULL);
 }
 
 void pheromone_detach_event_loop(void) {

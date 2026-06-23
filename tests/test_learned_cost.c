@@ -27,26 +27,32 @@ static double true_cost(int task_len) {
 /* Static baseline: $0.004 flat rate per task character — wrong multiplier. */
 static double static_estimate(int task_len) {
     (void)task_len;
-    return 0.65;   /* constant "average cost" guess — ±30-50% for most tasks */
+    return 0.65; /* constant "average cost" guess — ±30-50% for most tasks */
 }
 
 /* Build a task string of exactly `len` characters (filled with 'x'). */
 static void make_task(char *buf, int len) {
-    if (len <= 0) { buf[0] = '\0'; return; }
+    if (len <= 0) {
+        buf[0] = '\0';
+        return;
+    }
     memset(buf, 'x', (size_t)len);
     buf[len] = '\0';
 }
 
 /* Absolute percentage error */
 static double ape(double predicted, double actual) {
-    if (actual == 0.0) return 0.0;
+    if (actual == 0.0)
+        return 0.0;
     return fabs(predicted - actual) / actual;
 }
 
 /* ── Helpers ────────────────────────────────────────────────────────────── */
 
 static void check(bool cond, const char *msg) {
-    if (!cond) { fprintf(stderr, "FAIL: %s\n", msg); }
+    if (!cond) {
+        fprintf(stderr, "FAIL: %s\n", msg);
+    }
     assert(cond);
 }
 
@@ -60,20 +66,20 @@ static void test_accuracy_improves(void) {
     char task_buf[600];
 
     /* Training samples: task_lens 80-170 in steps of 10 (10 samples). */
-    static const int train_lens[] = { 80, 90, 100, 110, 120, 130, 140, 150, 160, 170 };
-    static const int train_tokens[] = { 900, 1000, 1100, 1200, 1300, 1400, 1500, 1600, 1700, 1800 };
+    static const int train_lens[] = {80, 90, 100, 110, 120, 130, 140, 150, 160, 170};
+    static const int train_tokens[] = {900, 1000, 1100, 1200, 1300, 1400, 1500, 1600, 1700, 1800};
     int ntrain = (int)(sizeof(train_lens) / sizeof(train_lens[0]));
 
     /* Test samples: task_lens between training points. */
-    static const int test_lens[]   = { 85, 105, 125, 145, 165 };
-    static const int test_tokens[] = { 950, 1150, 1350, 1550, 1750 };
+    static const int test_lens[] = {85, 105, 125, 145, 165};
+    static const int test_tokens[] = {950, 1150, 1350, 1550, 1750};
     int ntest = (int)(sizeof(test_lens) / sizeof(test_lens[0]));
 
     /* Measure static baseline error (no training) */
     double baseline_err_sum = 0.0;
     for (int i = 0; i < ntest; i++) {
         double actual = true_cost(test_lens[i]);
-        double est    = static_estimate(test_lens[i]);
+        double est = static_estimate(test_lens[i]);
         baseline_err_sum += ape(est, actual);
     }
     double baseline_mape = baseline_err_sum / ntest;
@@ -82,7 +88,7 @@ static void test_accuracy_improves(void) {
     /* Build and populate cost database */
     cost_db_t db;
     cost_db_init(&db);
-    db.loaded = true;  /* skip reading stale test file from prior runs */
+    db.loaded = true; /* skip reading stale test file from prior runs */
 
     for (int i = 0; i < ntrain; i++) {
         make_task(task_buf, train_lens[i]);
@@ -102,9 +108,9 @@ static void test_accuracy_improves(void) {
         check(ok, "predict_cost must succeed after 10 training samples");
         double actual = true_cost(test_lens[i]);
         learned_err_sum += ape(pred.predicted_cost, actual);
-        printf("  test[%d]: task_len=%d  true=$%.3f  pred=$%.3f  err=%.1f%%  conf=%.2f\n",
-               i, test_lens[i], actual, pred.predicted_cost,
-               ape(pred.predicted_cost, actual) * 100.0, pred.confidence);
+        printf("  test[%d]: task_len=%d  true=$%.3f  pred=$%.3f  err=%.1f%%  conf=%.2f\n", i,
+               test_lens[i], actual, pred.predicted_cost, ape(pred.predicted_cost, actual) * 100.0,
+               pred.confidence);
         predicted++;
     }
     double learned_mape = learned_err_sum / predicted;
@@ -162,8 +168,8 @@ static void test_find_similar(void) {
      * or the closest ones: 160 and 200 */
     /* Verify results are sorted by distance (closest first) */
     for (int i = 0; i + 1 < n; i++) {
-        int d1 = abs(results[i].task_len   - 180);
-        int d2 = abs(results[i+1].task_len - 180);
+        int d1 = abs(results[i].task_len - 180);
+        int d2 = abs(results[i + 1].task_len - 180);
         check(d1 <= d2, "results must be sorted nearest-first");
     }
 
@@ -189,7 +195,7 @@ static void test_confidence_increases(void) {
 
     double prev_conf = 0.0;
     for (int i = 1; i <= 10; i++) {
-        int task_len = 140 + i * 2;  /* vary slightly around the query */
+        int task_len = 140 + i * 2; /* vary slightly around the query */
         char tbuf[300];
         make_task(tbuf, task_len);
         learn_from_execution(&db, tbuf, topo, 1000 + i * 50, true_cost(task_len));
@@ -214,8 +220,7 @@ static void test_confidence_increases(void) {
           "confidence must exceed 0.5 after 10 closely-matched training samples");
     check(final_pred.k_used > 0, "k_used must be positive");
 
-    printf("[3] Final confidence: %.3f  k_used: %d\n",
-           final_pred.confidence, final_pred.k_used);
+    printf("[3] Final confidence: %.3f  k_used: %d\n", final_pred.confidence, final_pred.k_used);
     printf("[3] PASS: confidence_increases\n\n");
 
     remove("/tmp/dsco_test_confidence.json");
@@ -313,8 +318,8 @@ static void test_save_load_roundtrip(void) {
         cost_prediction_result_t pred;
         ok = predict_cost(&db2, task_buf, topo, &pred);
         check(ok, "predict_cost must work after reload");
-        printf("[6] After reload: pred=$%.3f  conf=%.2f  k=%d\n",
-               pred.predicted_cost, pred.confidence, pred.k_used);
+        printf("[6] After reload: pred=$%.3f  conf=%.2f  k=%d\n", pred.predicted_cost,
+               pred.confidence, pred.k_used);
     }
 
     printf("[6] PASS: save_load_roundtrip\n\n");
