@@ -34,6 +34,7 @@
 #include <sys/resource.h>
 #include <sys/sysctl.h>
 #include <sys/stat.h>
+#include <sys/file.h>
 #include <time.h>
 #include <stdarg.h>
 #include <limits.h>
@@ -42,18 +43,23 @@
 #endif
 
 /* ── Defaults ─────────────────────────────────────────────────────────── */
-#define DEFAULT_MAX_RESTARTS    8
-#define DEFAULT_WINDOW_S        60
+#define DEFAULT_MAX_RESTARTS    20
+#define DEFAULT_WINDOW_S        120
 #define DEFAULT_STABLE_S        30
 #define DEFAULT_BACKOFF_MS      250
-#define DEFAULT_BACKOFF_MAX_MS  30000
+#define DEFAULT_BACKOFF_MAX_MS  15000
 
-/* Active memory watchdog: sample the live child's RSS and pre-empt the
- * kernel's uncatchable SIGKILL with a graceful, resumable restart. */
-#define DEFAULT_POLL_MS         250    /* how often to sample child RSS       */
-#define DEFAULT_MEM_SOFT_PCT    75     /* % of hard limit → warn (no signal)  */
-#define DEFAULT_TERM_GRACE_MS   4000   /* SIGTERM→SIGKILL grace on pre-empt   */
-#define DEFAULT_METRICS_S       5      /* child metrics JSONL cadence         */
+/* Memory watchdog: FRIENDLY TENANT.
+ * >= 4GB floor/session. Dynamic fleet budget. Pre-empt only at CRITICAL pressure. */
+#define DEFAULT_POLL_MS         500
+#define DEFAULT_MEM_SOFT_PCT    80
+#define DEFAULT_TERM_GRACE_MS   8000
+#define DEFAULT_METRICS_S       10
+
+#define DSCO_FLEET_LOCK_PATH    "/tmp/dsco_fleet.lock"
+#define DSCO_FLEET_JSON_PATH    "/tmp/dsco_fleet.json"
+#define DSCO_MIN_SESSION_BUDGET_MB  4096ULL
+#define DSCO_PREEMPT_PRESSURE_LEVEL 4
 
 #define INCIDENT_SNIPPET_BYTES  8192
 
@@ -318,17 +324,96 @@ static int system_mem_pressure(void) {
 #endif
 }
 
-/* Resolve the child RSS hard limit (bytes). Explicit env wins; otherwise
- * 60% of physical RAM, clamped to [1 GiB, 6 GiB]. */
+
+/* ============================================================
+ * Fleet registry: cross-session dynamic memory budget
+ * ============================================================ */
+static uint64_t available_ram_bytes(void) {
+#ifdef __APPLE__
+    uint32_t pgsz = 16384; size_t sz = sizeof(pgsz);
+    (void)sysctlbyname("hw.pagesize",&pgsz,&sz,NULL,0);
+    uint64_t fp=0,ip=0,pp=0;
+    sz=sizeof(fp); (void)sysctlbyname("vm.page_free_count",&fp,&sz,NULL,0);
+    sz=sizeof(ip); (void)sysctlbyname("vm.page_inactive_count",&ip,&sz,NULL,0);
+    sz=sizeof(pp); (void)sysctlbyname("vm.page_purgeable_count",&pp,&sz,NULL,0);
+    return (fp+ip+pp)*(uint64_t)pgsz;
+#else
+    FILE *mf=fopen("/proc/meminfo","r"); if(!mf) return 0;
+    char ln[128]; uint64_t avail=0;
+    while(fgets(ln,sizeof(ln),mf))
+        if(strncmp(ln,"MemAvailable:",13)==0){
+            unsigned long long kb=0; sscanf(ln+13,"%llu",&kb); avail=kb*1024ULL; break;}
+    fclose(mf); return avail;
+#endif
+}
+
+static void fleet_update(pid_t child, uint64_t rss_bytes, uint64_t budget_mb) {
+    int lfd = open(DSCO_FLEET_LOCK_PATH, O_RDWR|O_CREAT, 0600);
+    if (lfd < 0) return;
+    if (flock(lfd, LOCK_EX|LOCK_NB) != 0) { close(lfd); return; }
+    char buf[16384]; buf[0]='\0';
+    int jfd = open(DSCO_FLEET_JSON_PATH, O_RDONLY);
+    if (jfd>=0) { ssize_t n=read(jfd,buf,sizeof(buf)-1); if(n>0) buf[n]='\0'; close(jfd); }
+    char mykey[32]; snprintf(mykey,sizeof(mykey),"\"sup%d\"",(int)getpid());
+    char out[16384]; int op=0; out[op++]='{';
+    int w=snprintf(out+op,sizeof(out)-op,
+        "%s:{\"sup\":%d,\"child\":%d,\"rss_mb\":%llu,\"budget_mb\":%llu,\"ts\":%lld}",
+        mykey,(int)getpid(),(int)child,
+        (unsigned long long)(rss_bytes>>20),(unsigned long long)budget_mb,(long long)time(NULL));
+    if(w>0 && w<(int)sizeof(out)-op-2) op+=w;
+    if (buf[0]=='{') {
+        const char *p=buf+1;
+        while(*p && op<(int)sizeof(out)-256) {
+            const char *q=strchr(p,'"'); if(!q) break;
+            if(strncmp(q,mykey,strlen(mykey))==0){
+                const char *ob=strchr(q,'{'); const char *cb=ob?strchr(ob,'}'):NULL;
+                p=cb?cb+1:q+strlen(q); if(*p==',')p++; continue;}
+            const char *ob=strchr(q,'{'); const char *cb=ob?strchr(ob,'}'):NULL;
+            if(!ob||!cb) break;
+            const char *tsp=strstr(ob,"\"ts\":"); long long ts=0;
+            if(tsp) ts=strtoll(tsp+6,NULL,10);
+            if(ts>0 && (long long)time(NULL)-ts>60){p=cb+1;if(*p==',')p++;continue;}
+            out[op++]=',';
+            int span=(int)(cb-q)+1;
+            if(op+span<(int)sizeof(out)-2){memcpy(out+op,q,span);op+=span;}
+            p=cb+1; if(*p==',')p++;
+        }
+    }
+    if(op<(int)sizeof(out)-1) out[op++]='}'; out[op]='\0';
+    jfd=open(DSCO_FLEET_JSON_PATH,O_WRONLY|O_CREAT|O_TRUNC,0644);
+    if(jfd>=0){(void)write(jfd,out,op);close(jfd);}
+    flock(lfd,LOCK_UN); close(lfd);
+}
+
+static int fleet_session_count(void) {
+    int fd=open(DSCO_FLEET_JSON_PATH,O_RDONLY); if(fd<0) return 1;
+    char buf[16384]; buf[0]='\0';
+    ssize_t n=read(fd,buf,sizeof(buf)-1); close(fd);
+    if(n<=0) return 1; buf[n]='\0';
+    int c=0; const char *p=buf;
+    while((p=strstr(p,"\"ts\":"))!=NULL){c++;p+=6;}
+    return c>0?c:1;
+}
+
+/* Dynamic budget: max(4GB, (avail_ram + our_rss) / n_sessions), cap 90% RAM */
+static uint64_t fleet_compute_budget(uint64_t our_rss_bytes) {
+    const char *em=getenv("DSCO_SUPERVISE_MEM_LIMIT_MB");
+    if(em && em[0] && atol(em)>0) return (uint64_t)atol(em)<<20;
+    uint64_t sys=system_mem_bytes();
+    uint64_t pool=available_ram_bytes()+our_rss_bytes;
+    int sessions=fleet_session_count();
+    uint64_t share=sessions>0?pool/(uint64_t)sessions:pool;
+    uint64_t floor_b=DSCO_MIN_SESSION_BUDGET_MB*1024ULL*1024ULL;
+    if(share<floor_b) share=floor_b;
+    uint64_t ceil_b=sys>0?sys*9ULL/10ULL:(43ULL<<30);
+    if(share>ceil_b) share=ceil_b;
+    return share;
+}
+
+/* Startup budget: delegate to fleet_compute_budget.
+ * The poll loop refreshes dynamically every tick. */
 static uint64_t resolve_mem_hard_limit(void) {
-    long mb = env_int("DSCO_SUPERVISE_MEM_LIMIT_MB", 0, 0, 1 << 20);
-    if (mb > 0) return (uint64_t)mb * 1024ULL * 1024ULL;
-    uint64_t sys = system_mem_bytes();
-    uint64_t budget = sys ? (sys * 6ULL / 10ULL) : (4ULL << 30);
-    const uint64_t cap = 6ULL << 30, floor_b = 1ULL << 30;
-    if (budget > cap)     budget = cap;
-    if (budget < floor_b) budget = floor_b;
-    return budget;
+    return fleet_compute_budget(0);
 }
 
 /* ── Crash classification ─────────────────────────────────────────────── */
@@ -729,27 +814,43 @@ int supervisor_run(int child_argc, char **child_argv) {
             uint64_t rss = child_rss_bytes(child);
             if (rss > peak_rss) peak_rss = rss;
             double sample_now = now_monotonic();
+
+            /* Dynamic budget refresh + fleet registration every tick */
+            mem_hard_bytes = fleet_compute_budget(rss);
+            mem_soft_bytes = mem_hard_bytes / 100ULL * (uint64_t)soft_pct;
+            fleet_update(child, rss, mem_hard_bytes >> 20);
+
             if (metrics_s > 0 &&
                 (last_metrics_at == 0.0 || sample_now - last_metrics_at >= (double)metrics_s)) {
-                append_child_metric(metrics_path, child, sample_now - last_start_time,
-                                    rss, peak_rss, system_mem_pressure());
+                append_child_metric(metrics_path, child, sample_now - last_start_time, rss,
+                                    peak_rss, system_mem_pressure());
                 last_metrics_at = sample_now;
             }
 
+            /* Friendly tenant: only pre-empt on CRITICAL system pressure.
+             * Level 1=normal, 2=warn (log+continue), 4=critical (act). */
             if (rss > 0 && rss >= mem_hard_bytes) {
                 int pressure = system_mem_pressure();
-                fprintf(stderr,
-                    "\n[supervisor] child pid=%d RSS %lluMB ≥ budget %lluMB"
-                    "%s — pre-empting the OOM killer with a graceful restart.\n",
-                    (int)child,
-                    (unsigned long long)(rss >> 20),
-                    (unsigned long long)(mem_hard_bytes >> 20),
-                    pressure >= 2 ? " (system under memory pressure)" : "");
+                if (pressure < DSCO_PREEMPT_PRESSURE_LEVEL) {
+                    if (!soft_warned) {
+                        soft_warned = true;
+                        fprintf(stderr,
+                            "[supervisor] pid=%d RSS %lluMB > budget %lluMB"
+                            " pressure=%d (need %d) — growing freely.\n",
+                            (int)child,(unsigned long long)(rss>>20),
+                            (unsigned long long)(mem_hard_bytes>>20),
+                            pressure, DSCO_PREEMPT_PRESSURE_LEVEL);
+                        supervisor_log("event=mem_grow child_pid=%d rss_mb=%llu budget_mb=%llu pressure=%d",
+                            (int)child,(unsigned long long)(rss>>20),
+                            (unsigned long long)(mem_hard_bytes>>20),pressure);
+                    }
+                    sleep_ms(poll_ms); continue;
+                }
+                fprintf(stderr,"\n[supervisor] pid=%d RSS %lluMB CRITICAL pressure=%d — restart.\n",
+                    (int)child,(unsigned long long)(rss>>20),pressure);
                 supervisor_log("event=mem_preempt child_pid=%d rss_mb=%llu budget_mb=%llu pressure=%d",
-                               (int)child,
-                               (unsigned long long)(rss >> 20),
-                               (unsigned long long)(mem_hard_bytes >> 20),
-                               pressure);
+                    (int)child,(unsigned long long)(rss>>20),
+                    (unsigned long long)(mem_hard_bytes>>20),pressure);
                 preempted = true;
 
                 /* Hand the child a chance to checkpoint and exit cleanly. */
