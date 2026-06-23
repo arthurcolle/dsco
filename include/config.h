@@ -6,6 +6,7 @@
 #include <string.h>
 #include <stddef.h>
 #include <ctype.h>
+#include "env_config.h"
 
 #define DSCO_VERSION "1.0.1"
 
@@ -43,12 +44,15 @@
 extern int g_cheap_mode;
 
 /* API defaults */
-#define DEFAULT_MODEL       "claude-sonnet-4-6"
+#define DEFAULT_MODEL       "fugu"
 #define API_URL_ANTHROPIC   "https://api.anthropic.com/v1/messages"
 #define API_URL_COUNT_TOKENS "https://api.anthropic.com/v1/messages/count_tokens"
 #define ANTHROPIC_VERSION   "2023-06-01"
 #define ANTHROPIC_BETAS     "interleaved-thinking-2025-05-14,code-execution-2025-05-22,advanced-tool-use-2025-11-20"
 #define MAX_TOKENS          16384
+static inline int dsco_max_tokens(void) {
+    return dsco_env_int("DSCO_MAX_TOKENS", MAX_TOKENS, 1, 100000);
+}
 #define TOOLMGMT_API_URL_DEFAULT "https://tools.distributed.systems"
 
 /* Tool limits */
@@ -65,12 +69,7 @@ extern int g_cheap_mode;
    via DSCO_MAX_AGENT_TURNS. */
 #define MAX_AGENT_TURNS     40
 static inline int dsco_max_agent_turns(void) {
-    const char *e = getenv("DSCO_MAX_AGENT_TURNS");
-    if (e && e[0]) {
-        int v = atoi(e);
-        if (v >= 1 && v <= 999999) return v;
-    }
-    return MAX_AGENT_TURNS;
+    return dsco_env_int("DSCO_MAX_AGENT_TURNS", MAX_AGENT_TURNS, 1, 999999);
 }
 
 /* Absolute runaway backstop. The loop never relies on this in normal operation
@@ -79,12 +78,7 @@ static inline int dsco_max_agent_turns(void) {
    DSCO_HARD_TURN_CEILING. */
 #define HARD_TURN_CEILING   100000
 static inline int dsco_hard_turn_ceiling(void) {
-    const char *e = getenv("DSCO_HARD_TURN_CEILING");
-    if (e && e[0]) {
-        int v = atoi(e);
-        if (v >= 1) return v;
-    }
-    return HARD_TURN_CEILING;
+    return dsco_env_int("DSCO_HARD_TURN_CEILING", HARD_TURN_CEILING, 1, 100000000);
 }
 
 /* Context window / token budget */
@@ -299,9 +293,15 @@ static const model_info_t MODEL_REGISTRY[] = {
     /* ── Perplexity ──────────────────────────────────────────────────── */
     { "pplx",         "sonar-pro",                       200000,  8192,  3.0,  15.0,  0, 0, 0 },
     { "pplx-small",   "sonar",                           128000,  8192,  1.0,   1.0,  0, 0, 0 },
-    /* ── Sakana (multi-model orchestrators behind a single endpoint) ─── */
-    { "fugu",         "sakana/fugu",                     200000, 32768,  3.0,  15.0,  0, 0, 1 },
-    { "fugu-ultra",   "sakana/fugu-ultra",               200000, 32768,  8.0,  40.0,  0, 0, 1 },
+    /* ── Sakana Fugu (native endpoint) ────────────────────────────────
+     * Treat subscription-backed Fugu usage as zero marginal cost for routing,
+     * local estimates, and budget gates. */
+    { "fugu",         "fugu",                            272000, 32768,  0.0,   0.0,  0.0, 0, 1 },
+    { "fugu-ultra",   "fugu-ultra",                      272000, 32768,  0.0,   0.0,  0.0, 0, 1 },
+    { "fugu-ultra-20260615", "fugu-ultra-20260615",      272000, 32768,  0.0,   0.0,  0.0, 0, 1 },
+    { "sakana/fugu",  "sakana/fugu",                     272000, 32768,  0.0,   0.0,  0.0, 0, 1 },
+    { "sakana/fugu-ultra", "sakana/fugu-ultra",          272000, 32768,  0.0,   0.0,  0.0, 0, 1 },
+    { "sakana/fugu-ultra-20260615", "sakana/fugu-ultra-20260615", 272000, 32768, 0.0, 0.0, 0.0, 0, 1 },
     { NULL, NULL, 0, 0, 0, 0, 0, 0, 0 }
 };
 
