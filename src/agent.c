@@ -660,9 +660,18 @@ static const char *resolve_provider_key(const char *session_key) {
 /* ── Image drag-and-drop support ─────────────────────────────────────── */
 
 /* Max image size before downscaling (5MB raw, ~20MP) */
-#define IMG_MAX_FILE_SIZE (20 * 1024 * 1024)
-#define IMG_MAX_DIMENSION 1568 /* Anthropic recommended max (avoids resize latency) */
-#define IMG_MAX_B64_SIZE (10 * 1024 * 1024)
+/* ── Image limits (from Anthropic Vision docs, 2026) ─────────────────────
+ * Direct API:       100 images/request (200k-ctx models), 600 for others
+ *                   10 MB per image (base64), 8000x8000 px max
+ *                   >20 images → stricter per-image dimension limit applies
+ * Bedrock/Vertex:   20 images/request, 5 MB per image
+ * claude.ai:        20 images/message, 10 MB per image
+ * dsco cap (safety margin): 100 images/request, 5 MB raw, 2000px max dim
+ * (2000px keeps us safely under the >20-image stricter dimension limit)   */
+#define IMG_MAX_FILE_SIZE  (5  * 1024 * 1024)  /* 5 MB — matches Bedrock/Vertex; safe for direct API (10 MB) */
+#define IMG_MAX_DIMENSION   2000                /* safe for all platforms incl. >20-image requests */
+#define IMG_MAX_B64_SIZE   (10 * 1024 * 1024)  /* 10 MB base64 — direct API limit */
+#define IMG_MAX_PER_MSG     100                 /* direct API cap for 200k-ctx models */
 
 static const char *img_media_type_for_ext(const char *ext) {
     if (strcasecmp(ext, ".png") == 0)
@@ -1175,8 +1184,8 @@ static int process_dragged_images(char *input_buf, conversation_t *conv) {
     char clean_path[4096];
     int img_count = 0;
 
-    char *images_b64[16] = {0};
-    const char *images_mt[16] = {0};
+    char *images_b64[IMG_MAX_PER_MSG] = {0};
+    const char *images_mt[IMG_MAX_PER_MSG] = {0};
     char remaining_text[MAX_INPUT_LINE];
     remaining_text[0] = '\0';
     int rem_pos = 0;
@@ -1184,7 +1193,7 @@ static int process_dragged_images(char *input_buf, conversation_t *conv) {
     char *buf = safe_strdup(input_buf);
     char *p = buf;
 
-    while (*p && img_count < 16) {
+    while (*p && img_count < IMG_MAX_PER_MSG) {
         char *ext_pos = NULL;
         const char *matched_ext = NULL;
         for (int i = 0; i < 22; i++) {
