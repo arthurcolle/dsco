@@ -65,6 +65,7 @@ SRC_NAMES = main.c agent.c llm.c tools.c json_util.c ast.c swarm.c tui.c \
 	introspect.c \
 	learned_cost.c \
 	session_memory.c \
+	tool_embeddings_data.c \
 	$(OPTIONAL_SRCS)
 TEST_SRC_NAMES = test.c
 
