@@ -671,7 +671,7 @@ static const char *resolve_provider_key(const char *session_key) {
 #define IMG_MAX_FILE_SIZE  (5  * 1024 * 1024)  /* 5 MB — matches Bedrock/Vertex; safe for direct API (10 MB) */
 #define IMG_MAX_DIMENSION   2000                /* safe for all platforms incl. >20-image requests */
 #define IMG_MAX_B64_SIZE   (10 * 1024 * 1024)  /* 10 MB base64 — direct API limit */
-#define IMG_MAX_PER_MSG     100                 /* direct API cap for 200k-ctx models */
+#define IMG_MAX_PER_MSG     8                   /* conservative default; API supports 100 */
 
 static const char *img_media_type_for_ext(const char *ext) {
     if (strcasecmp(ext, ".png") == 0)
