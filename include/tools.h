@@ -2,6 +2,7 @@
 #define DSCO_TOOLS_H
 
 #include <stdbool.h>
+#include "env_config.h"
 #include <stddef.h>
 #include <pthread.h>
 #include "swarm.h"
@@ -187,6 +188,13 @@ extern volatile int g_tool_timed_out;
 /* Default and per-tool timeout configuration */
 #define TOOL_DEFAULT_TIMEOUT_S  30
 #define TOOL_GRACE_PERIOD_S     5
+
+static inline int dsco_tool_default_timeout_s(void) {
+    return dsco_env_int("DSCO_TOOL_DEFAULT_TIMEOUT", TOOL_DEFAULT_TIMEOUT_S, 1, 7200);
+}
+static inline int dsco_tool_grace_period_s(void) {
+    return dsco_env_int("DSCO_TOOL_GRACE_PERIOD_S", TOOL_GRACE_PERIOD_S, 0, 300);
+}
 
 typedef struct {
     const char *name;

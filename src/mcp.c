@@ -25,6 +25,20 @@ void mcp_set_silent(bool silent) {
     g_mcp_silent = silent ? 1 : 0;
 }
 
+static volatile int g_mcp_cancel = 0;
+
+static bool mcp_cancelled(void) {
+    return __atomic_load_n(&g_mcp_cancel, __ATOMIC_ACQUIRE) != 0;
+}
+
+void mcp_cancel(void) {
+    __atomic_store_n(&g_mcp_cancel, 1, __ATOMIC_RELEASE);
+}
+
+void mcp_cancel_reset(void) {
+    __atomic_store_n(&g_mcp_cancel, 0, __ATOMIC_RELEASE);
+}
+
 #define MCP_LOG(...)                                                                               \
     do {                                                                                           \
         if (!g_mcp_silent)                                                                         \
@@ -44,18 +58,7 @@ static bool starts_http(const char *s) {
 }
 
 static int mcp_timeout_ms(int def_ms) {
-    const char *env = getenv("DSCO_MCP_TIMEOUT_MS");
-    if (!env || !*env)
-        return def_ms;
-    char *end = NULL;
-    long v = strtol(env, &end, 10);
-    if (end == env || v <= 0)
-        return def_ms;
-    if (v < 250)
-        v = 250;
-    if (v > 120000)
-        v = 120000;
-    return (int)v;
+    return dsco_env_int("DSCO_MCP_TIMEOUT_MS", def_ms, 250, 120000);
 }
 
 static char *trim_inplace(char *s) {
@@ -356,12 +359,18 @@ static char *rpc_read_response(int fd, int timeout_ms) {
     double deadline = mcp_now_sec() + (timeout_ms / 1000.0);
 
     while (1) {
+        if (mcp_cancelled()) {
+            jbuf_free(&line);
+            return NULL;
+        }
         double now = mcp_now_sec();
         int remain_ms = (int)((deadline - now) * 1000.0);
         if (remain_ms <= 0) {
             jbuf_free(&line);
             return NULL;
         }
+        if (remain_ms > 100)
+            remain_ms = 100;
         int rc = poll(&pfd, 1, remain_ms);
         if (rc < 0) {
             if (errno == EINTR)
@@ -452,6 +461,16 @@ static size_t http_header_cb(char *buffer, size_t size, size_t nitems, void *use
     return total;
 }
 
+static int http_cancel_cb(void *clientp, curl_off_t dltotal, curl_off_t dlnow,
+                          curl_off_t ultotal, curl_off_t ulnow) {
+    (void)clientp;
+    (void)dltotal;
+    (void)dlnow;
+    (void)ultotal;
+    (void)ulnow;
+    return mcp_cancelled() ? 1 : 0;
+}
+
 static char *extract_first_json_object(const char *data) {
     if (!data)
         return NULL;
@@ -484,6 +503,9 @@ static char *extract_first_json_object(const char *data) {
 }
 
 static char *http_post_rpc(mcp_server_t *srv, const char *payload, int timeout_ms) {
+    if (mcp_cancelled())
+        return NULL;
+
     CURL *curl = curl_easy_init();
     if (!curl)
         return NULL;
@@ -527,6 +549,9 @@ static char *http_post_rpc(mcp_server_t *srv, const char *payload, int timeout_m
     curl_easy_setopt(curl, CURLOPT_FOLLOWLOCATION, 1L);
     curl_easy_setopt(curl, CURLOPT_USERAGENT, "dsco/" DSCO_VERSION);
     curl_easy_setopt(curl, CURLOPT_HTTP_VERSION, CURL_HTTP_VERSION_2TLS);
+    curl_easy_setopt(curl, CURLOPT_NOPROGRESS, 0L);
+    curl_easy_setopt(curl, CURLOPT_XFERINFOFUNCTION, http_cancel_cb);
+    curl_easy_setopt(curl, CURLOPT_XFERINFODATA, NULL);
 
     CURLcode res = curl_easy_perform(curl);
     long code = 0;
@@ -546,6 +571,8 @@ static char *http_post_rpc(mcp_server_t *srv, const char *payload, int timeout_m
 }
 
 static char *send_rpc_request(mcp_server_t *srv, const char *req, int timeout_ms) {
+    if (mcp_cancelled())
+        return NULL;
     if (srv->transport == MCP_TRANSPORT_HTTP) {
         return http_post_rpc(srv, req, timeout_ms);
     }
@@ -974,6 +1001,8 @@ typedef struct {
 static void *mcp_connect_worker(void *arg) {
     connect_pool_t *p = arg;
     for (;;) {
+        if (mcp_cancelled())
+            break;
         int i = __atomic_fetch_add(&p->next, 1, __ATOMIC_RELAXED);
         if (i >= p->pending->count)
             break;
@@ -997,15 +1026,17 @@ static void *mcp_connect_worker(void *arg) {
             ok = initialize_server(&srv);
         } else {
             pthread_mutex_lock(&p->spawn_lock);
-            bool spawned = spawn_server(&srv);
+            bool spawned = !mcp_cancelled() && spawn_server(&srv);
             pthread_mutex_unlock(&p->spawn_lock);
             ok = spawned && initialize_server(&srv);
         }
+        if (mcp_cancelled())
+            ok = false;
 
         pthread_mutex_lock(&p->merge_lock);
         mcp_registry_t *reg = p->reg;
         reg->configured_count++;
-        if (ok && reg->server_count < MCP_MAX_SERVERS) {
+        if (ok && !mcp_cancelled() && reg->server_count < MCP_MAX_SERVERS) {
             int idx = reg->server_count;
             reg->servers[idx] = srv;
             reg->server_count++; /* publish slot before discovery uses it */
@@ -1516,11 +1547,20 @@ int mcp_init(mcp_registry_t *reg) {
     load_json_config(reg, path, "claude:settings", false, false);
     snprintf(path, sizeof(path), "%s/.claude/settings.local.json", home);
     load_json_config(reg, path, "claude:settings-local", false, false);
-    snprintf(path, sizeof(path), "%s/Library/Application Support/Claude/claude_desktop_config.json",
-             home);
-    load_json_config(reg, path, "claude:desktop", false, false);
-    snprintf(path, sizeof(path), "%s/Library/Application Support/Claude/config.json", home);
-    load_json_config(reg, path, "claude:desktop-config", false, false);
+    /* Claude Desktop stores its config under ~/Library/Application Support/Claude,
+     * which macOS (Sequoia+) treats as another app's protected data: merely
+     * touching it triggers the "would like to access data from other apps" TCC
+     * prompt. Because MCP discovery re-runs on the periodic heartbeat, probing it
+     * unconditionally re-fires that prompt every ~10 min. Make it strictly
+     * opt-in (DSCO_MCP_IMPORT_CLAUDE_DESKTOP=1) so the default never reaches into
+     * another app's container. */
+    if (getenv("DSCO_MCP_IMPORT_CLAUDE_DESKTOP")) {
+        snprintf(path, sizeof(path), "%s/Library/Application Support/Claude/claude_desktop_config.json",
+                 home);
+        load_json_config(reg, path, "claude:desktop", false, false);
+        snprintf(path, sizeof(path), "%s/Library/Application Support/Claude/config.json", home);
+        load_json_config(reg, path, "claude:desktop-config", false, false);
+    }
 
     snprintf(path, sizeof(path), "%s/.codex/config.toml", home);
     load_toml_config(reg, path, "codex:global");
@@ -1529,8 +1569,14 @@ int mcp_init(mcp_registry_t *reg) {
     /* Phase 2: connect every collected server concurrently so one slow or dead
      * endpoint can't stall the rest behind a per-RPC timeout. */
     g_collect = NULL;
-    mcp_connect_all(reg, &collect);
+    if (!mcp_cancelled())
+        mcp_connect_all(reg, &collect);
     free(collect.items);
+
+    if (mcp_cancelled()) {
+        mcp_shutdown(reg);
+        return 0;
+    }
 
     reg->loaded = true;
     return reg->tool_count;

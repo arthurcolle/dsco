@@ -989,24 +989,7 @@ static bool g_risk_inited = false;
 static void risk_init(void) {
     if (g_risk_inited)
         return;
-    g_risk = risk_limits_default();
-    const char *e;
-    if ((e = getenv("DSCO_TRADING_DRY_RUN")))
-        g_risk.dry_run = !(strcmp(e, "0") == 0 || strcasecmp(e, "false") == 0 ||
-                           strcasecmp(e, "off") == 0 || strcasecmp(e, "no") == 0);
-    if ((e = getenv("DSCO_TRADING_MAX_ORDER")))
-        g_risk.max_order_usd = atof(e);
-    if ((e = getenv("DSCO_TRADING_MAX_EXPOSURE")))
-        g_risk.max_total_exposure_usd = atof(e);
-    if ((e = getenv("DSCO_TRADING_MIN_ARB_SPREAD")))
-        g_risk.min_arb_spread = atof(e);
-    if ((e = getenv("DSCO_TRADING_MAX_OPEN_ORDERS"))) {
-        int v = atoi(e);
-        if (v > 0)
-            g_risk.max_open_orders = v;
-    }
-    if ((e = getenv("DSCO_TRADING_MAX_POSITION")))
-        g_risk.max_position_usd = atof(e);
+    g_risk = risk_limits_from_env();
     g_risk_inited = true;
 }
 
@@ -1230,19 +1213,10 @@ static bool session_preflight(const char *ticker, int count, double order_usd,
         g_session_trades.daily_date = today;
     }
 
-    double env_session = SESSION_MAX_USD;
-    double env_daily = DAILY_MAX_USD;
-    double env_per_event = MAX_USD_PER_EVENT;
-    double env_per_event_multi = MAX_USD_PER_EVENT_MULTI;
-    const char *e;
-    if ((e = getenv("DSCO_TRADING_SESSION_MAX")))
-        env_session = atof(e);
-    if ((e = getenv("DSCO_TRADING_DAILY_MAX")))
-        env_daily = atof(e);
-    if ((e = getenv("DSCO_TRADING_MAX_PER_EVENT"))) {
-        env_per_event = atof(e);
-        env_per_event_multi = env_per_event * 2.0;
-    }
+    double env_session = dsco_env_double("DSCO_TRADING_SESSION_MAX", SESSION_MAX_USD, 0.0, 1000000000.0);
+    double env_daily = dsco_env_double("DSCO_TRADING_DAILY_MAX", DAILY_MAX_USD, 0.0, 1000000000.0);
+    double env_per_event = dsco_env_double("DSCO_TRADING_MAX_PER_EVENT", MAX_USD_PER_EVENT, 0.0, 1000000000.0);
+    double env_per_event_multi = env_per_event * 2.0;
 
     /* 1. Session cap */
     if (g_session_trades.session_usd + order_usd > env_session) {
