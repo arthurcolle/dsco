@@ -2050,7 +2050,7 @@ static void usage(const char *prog) {
         "Usage: %s [options] [prompt]\n"
         "       %s login          Choose Claude Code or ChatGPT Codex backend\n"
         "       %s status         Show auth state and account info for all backends\n"
-        "       %s config [show|init|validate|ingest|explain]  DSCO Config Registry\n"
+        "       %s config [show|init|validate|ingest|explain|metadata]  DSCO Config Registry\n"
         "\n"
         "Options:\n"
         "  -m MODEL    Model name (default: %s)\n"
