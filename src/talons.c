@@ -242,6 +242,7 @@ int talons_goal_create_sub(talons_engine_t *t, int parent_id, const char *descri
 }
 
 bool talons_goal_stalk(talons_engine_t *t, int goal_id) {
+    DSCO_REQUIRE(t != NULL);
     goal_t *g = find_goal(t, goal_id);
     if (!g || (g->state != GOAL_NASCENT && g->state != GOAL_REGROUPING && g->state != GOAL_BLOCKED))
         return false;
@@ -253,6 +254,7 @@ bool talons_goal_stalk(talons_engine_t *t, int goal_id) {
 }
 
 bool talons_goal_strike(talons_engine_t *t, int goal_id) {
+    DSCO_REQUIRE(t != NULL);
     goal_t *g = find_goal(t, goal_id);
     if (!g ||
         (g->state != GOAL_STALKING && g->state != GOAL_NASCENT && g->state != GOAL_REGROUPING))
@@ -272,6 +274,7 @@ bool talons_goal_strike(talons_engine_t *t, int goal_id) {
 }
 
 bool talons_goal_grip(talons_engine_t *t, int goal_id) {
+    DSCO_REQUIRE(t != NULL);
     goal_t *g = find_goal(t, goal_id);
     if (!g || g->state != GOAL_STRIKING)
         return false;
@@ -281,6 +284,10 @@ bool talons_goal_grip(talons_engine_t *t, int goal_id) {
 }
 
 bool talons_goal_capture(talons_engine_t *t, int goal_id, const char *result, double cost) {
+    DSCO_REQUIRE(t != NULL);
+    /* A capture must carry a finite, non-negative cost or the running
+     * total_cost (used in win-rate economics) becomes corrupt. */
+    DSCO_REQUIRE(cost == cost && cost >= 0.0);
     goal_t *g = find_goal(t, goal_id);
     if (!g)
         return false;
@@ -309,6 +316,8 @@ bool talons_goal_capture(talons_engine_t *t, int goal_id, const char *result, do
 }
 
 bool talons_goal_escaped(talons_engine_t *t, int goal_id, const char *reason, double cost) {
+    DSCO_REQUIRE(t != NULL);
+    DSCO_REQUIRE(cost == cost && cost >= 0.0);
     goal_t *g = find_goal(t, goal_id);
     if (!g)
         return false;
