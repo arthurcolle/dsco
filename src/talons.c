@@ -887,6 +887,11 @@ strategy_type_t talons_best_strategy(const talons_engine_t *t) {
     double best = -1;
     int best_idx = 0;
     for (int i = 0; i < STRATEGY_COUNT; i++) {
+        /* Skip never-tried strategies: dividing by zero attempts yields NaN,
+         * and NaN > best is always false, which would silently bias selection
+         * toward STRATEGY_DIRECT (index 0). A strategy must earn its rate. */
+        if (t->strategy_attempts[i] <= 0)
+            continue;
         double rate = t->strategy_success[i] / (double)t->strategy_attempts[i];
         if (rate > best) {
             best = rate;
