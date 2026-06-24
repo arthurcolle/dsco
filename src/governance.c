@@ -671,6 +671,9 @@ bool governance_reset_breaker(governance_engine_t *g, circuit_breaker_type_t typ
 void governance_breaker_update(governance_engine_t *g, circuit_breaker_type_t type, double value) {
     if (!g || type < 0 || type >= CB_TYPE_COUNT)
         return;
+    /* A NaN metric must never silently disarm the breaker: NaN >= threshold is
+     * always false, which would suppress an auto-trip. Reject it. */
+    DSCO_REQUIRE_VOID(value == value);
     circuit_breaker_t *cb = &g->breakers[type];
     cb->current_value = value;
     /* Auto-trip if threshold exceeded and not already tripped */
