@@ -3,6 +3,7 @@
 
 #include <stdbool.h>
 #include <stddef.h>
+#include "env_config.h"
 
 /* Forward-declare event loop handle (avoid pulling in event_loop.h) */
 typedef struct ev_loop ev_loop_t;
@@ -27,6 +28,16 @@ typedef struct ev_loop ev_loop_t;
 #define IPC_MAX_KEY          128
 #define IPC_HEARTBEAT_SEC    5
 #define IPC_STALE_SEC        30      /* agent considered dead after this */
+
+static inline int dsco_ipc_heartbeat_sec(void) {
+    return dsco_env_int("DSCO_IPC_HEARTBEAT_SEC", IPC_HEARTBEAT_SEC, 1, 3600);
+}
+static inline int dsco_ipc_stale_sec(void) {
+    return dsco_env_int("DSCO_IPC_STALE_SEC", IPC_STALE_SEC, 2, 86400);
+}
+static inline size_t dsco_ipc_max_body(void) {
+    return dsco_env_size("DSCO_IPC_MAX_BODY", IPC_MAX_BODY, 1024, IPC_MAX_BODY);
+}
 
 /* ── Agent Status ──────────────────────────────────────────────────────── */
 
