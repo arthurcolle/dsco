@@ -7118,19 +7118,25 @@ bool agent_run(const char *api_key, const char *model, const char *topology_name
              * new one. The just-completed turn's tool calls were recorded inline. */
             {
                 static double si_prev_cost = 0.0;
-                static int si_prev_in = 0, si_prev_out = 0;
+                static int si_prev_in = 0, si_prev_out = 0, si_prev_cache_read = 0;
+                static int si_prev_cache_write = 0;
                 if (turns > 1) {
                     double c = session_cost(&session);
                     int in = session.total_input_tokens;
                     int out = session.total_output_tokens;
+                    int cache_read = session.total_cache_read_tokens;
+                    int cache_write = session.total_cache_write_tokens;
                     int eff = effective_context_window(&session);
                     int ctx_pct = eff > 0 ? (int)(100.0 * (in + out) / eff) : 0;
                     double budget_pct = g_cost_budget > 0 ? 100.0 * c / g_cost_budget : 0.0;
-                    SI_RECORD_TURN(turns - 1, c - si_prev_cost, in - si_prev_in, out - si_prev_out,
-                                   ctx_pct, budget_pct);
+                    SI_RECORD_TURN_USAGE(turns - 1, c - si_prev_cost, in - si_prev_in,
+                                         out - si_prev_out, cache_read - si_prev_cache_read,
+                                         cache_write - si_prev_cache_write, ctx_pct, budget_pct);
                     si_prev_cost = c;
                     si_prev_in = in;
                     si_prev_out = out;
+                    si_prev_cache_read = cache_read;
+                    si_prev_cache_write = cache_write;
                 }
                 SI_TURN_RESET();
             }

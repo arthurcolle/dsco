@@ -73,6 +73,10 @@ const char *provider_detect(const char *model, const char *api_key);
 /* Detect the underlying model family (anthropic/openai/xai/google/...) even
  * when the request will ultimately route through OpenRouter. */
 const char *provider_model_family(const char *model);
+bool provider_model_supports_cache_control(const char *model);
+bool provider_model_supports_automatic_prompt_cache(const char *model);
+bool provider_model_supports_prompt_cache_key(const char *model);
+bool provider_model_supports_prompt_cache_retention(const char *model);
 
 /* Resolve the API key env var for a provider */
 const char *provider_resolve_api_key(const char *provider_name);

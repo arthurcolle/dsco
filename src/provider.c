@@ -16,6 +16,8 @@
 #include "sealed_store.h"
 #include "provider_profiles.h"
 #include "openai_oauth.h"
+#include "codex_cache.h"
+#include "dcr.h"
 #include <stdlib.h>
 #include <string.h>
 #include <strings.h>
@@ -50,6 +52,7 @@ static stream_result_t codex_exec_stream(provider_t *p, const char *api_key,
                                          const char *request_json, stream_text_cb text_cb,
                                          stream_tool_start_cb tool_cb,
                                          stream_thinking_cb thinking_cb, void *cb_ctx);
+static bool provider_is_sakana(const provider_t *p);
 
 static char *unsupported_build_request(provider_t *p, conversation_t *conv,
                                        session_state_t *session, int max_tokens,
@@ -1940,6 +1943,26 @@ static void openai_append_user_msg(jbuf_t *b, message_t *m) {
  * this same OpenAI-compat path (xAI, DeepSeek, Mistral, Moonshot, Gemini) would
  * ignore or reject it, so gate strictly on the model id. Override with
  * DSCO_OR_CACHE=0 to disable, or =1 to force on for any model. */
+static const char *provider_model_strip_explicit_openrouter_prefix(const char *model);
+
+static bool provider_model_has_any_prefix(const char *m, const char *const *prefixes) {
+    if (!m || !prefixes)
+        return false;
+    for (int i = 0; prefixes[i]; i++)
+        if (strncmp(m, prefixes[i], strlen(prefixes[i])) == 0)
+            return true;
+    return false;
+}
+
+static bool provider_model_contains_any(const char *m, const char *const *needles) {
+    if (!m || !needles)
+        return false;
+    for (int i = 0; needles[i]; i++)
+        if (strstr(m, needles[i]))
+            return true;
+    return false;
+}
+
 bool provider_model_supports_cache_control(const char *model) {
     const char *force = getenv("DSCO_OR_CACHE");
     if (force && force[0] == '0')
@@ -1948,25 +1971,96 @@ bool provider_model_supports_cache_control(const char *model) {
         return true;
     if (!model)
         return false;
-    /* Anthropic claude-* (direct or namespaced via OpenRouter) */
+    /* Explicit cache breakpoints: Anthropic/Claude and Qwen-compatible routes. */
     if (strstr(model, "claude") || strstr(model, "anthropic/"))
         return true;
-    /* Alibaba Qwen via OpenRouter — uses identical cache_control:{type:ephemeral}
-     * syntax. Supported: qwen3-max, qwen-plus, qwen3-coder-plus/flash, etc.
-     * Snapshot endpoints (qwen3.5-plus-02-15 etc) do NOT support it, but OR
-     * silently ignores cache_control on unsupported models so it's safe to send. */
     if (strstr(model, "qwen/") || strstr(model, "qwen3") || strstr(model, "qwen-"))
         return true;
     return false;
 }
 
+bool provider_model_supports_prompt_cache_retention(const char *model) {
+    if (!model)
+        return false;
+    const char *m = provider_model_strip_explicit_openrouter_prefix(model);
+    static const char *const openai_prefixes[] = {
+        "gpt-", "o1", "o3", "o4", "chatgpt-", "openai/gpt-", "openai/o", NULL
+    };
+    static const char *const azure_prefixes[] = {"azure/", "azure-foundry/", "microsoft/", NULL};
+    return provider_model_has_any_prefix(m, openai_prefixes) || provider_model_has_any_prefix(m, azure_prefixes);
+}
+
+bool provider_model_supports_prompt_cache_key(const char *model) {
+    if (!model)
+        return false;
+    const char *m = provider_model_strip_explicit_openrouter_prefix(model);
+    static const char *const key_prefixes[] = {
+        "gpt-", "o1", "o3", "o4", "chatgpt-", "openai/gpt-", "openai/o",
+        "azure/", "azure-foundry/", "microsoft/",
+        "mistral", "mistralai/", "codestral", "ministral",
+        "grok", "xai/", "x-ai/",
+        "cerebras/", NULL
+    };
+    return provider_model_has_any_prefix(m, key_prefixes);
+}
+
+bool provider_model_supports_automatic_prompt_cache(const char *model) {
+    if (!model)
+        return false;
+    const char *m = provider_model_strip_explicit_openrouter_prefix(model);
+    static const char *const prefixes[] = {
+        "gpt-4o", "gpt-4.1", "gpt-5", "o1", "o3", "o4", "chatgpt-",
+        "openai/gpt-4o", "openai/gpt-4.1", "openai/gpt-5", "openai/o",
+        "azure/", "azure-foundry/", "microsoft/",
+        "mistral", "mistralai/", "codestral", "ministral",
+        "deepseek", "deepseek/",
+        "grok", "xai/", "x-ai/",
+        "openai/gpt-oss-", "gpt-oss-",
+        "cerebras/", "llama-", NULL
+    };
+    static const char *const contains[] = {"gpt-oss", NULL};
+    return provider_model_has_any_prefix(m, prefixes) || provider_model_contains_any(m, contains);
+}
+
+
 static const char *provider_request_model_id(const char *provider_name, const char *model) {
     if (!model || !model[0])
         return DEFAULT_MODEL;
+    if (provider_name && strcmp(provider_profile_canonical_name(provider_name), "openrouter") == 0)
+        return provider_model_strip_explicit_openrouter_prefix(model);
     if (provider_name &&
         (strcmp(provider_name, "openai") == 0 || strcmp(provider_name, "openai-codex") == 0) &&
         strncmp(model, "openai/", 7) == 0) {
         return model + 7;
+    }
+    if (provider_name && provider_name[0]) {
+        const char *canonical = provider_profile_canonical_name(provider_name);
+        if (strcmp(canonical, "anthropic") == 0 && strncmp(model, "anthropic/", 10) == 0)
+            return model + 10;
+        if (strcmp(canonical, "xai") == 0 && strncmp(model, "x-ai/", 5) == 0)
+            return model + 5;
+        if (strcmp(canonical, "google") == 0 && strncmp(model, "google/", 7) == 0)
+            return model + 7;
+        if (strcmp(canonical, "deepseek") == 0 && strncmp(model, "deepseek/", 9) == 0)
+            return model + 9;
+        if (strcmp(canonical, "qwen-oauth") == 0 && strncmp(model, "qwen/", 5) == 0)
+            return model + 5;
+        if (strcmp(canonical, "mistral") == 0 && strncmp(model, "mistralai/", 10) == 0)
+            return model + 10;
+        if (strcmp(canonical, "moonshot") == 0 && strncmp(model, "moonshotai/", 11) == 0)
+            return model + 11;
+        if (strcmp(canonical, "sakana") == 0 && strncmp(model, "sakana/", 7) == 0)
+            return model + 7;
+        if (strcmp(canonical, "cohere") == 0 && strncmp(model, "cohere/", 7) == 0)
+            return model + 7;
+        if (strcmp(canonical, "perplexity") == 0 && strncmp(model, "perplexity/", 11) == 0)
+            return model + 11;
+        if (strcmp(canonical, "zai") == 0 && strncmp(model, "z-ai/", 5) == 0)
+            return model + 5;
+        if (strcmp(canonical, "minimax") == 0 && strncmp(model, "minimax/", 8) == 0)
+            return model + 8;
+        if (strcmp(canonical, "amazon") == 0 && strncmp(model, "amazon/", 7) == 0)
+            return model + 7;
     }
     /* Strip a leading "<provider>:" prefix (e.g. "vllm:Qwen2.5" -> "Qwen2.5",
      * "ollama:llama3.3:latest" -> "llama3.3:latest") so self-hosted backends
@@ -2000,6 +2094,24 @@ static char *openai_build_request(provider_t *p, conversation_t *conv, session_s
         jbuf_append(&b, ",\"max_tokens\":");
     jbuf_append_int(&b, max_tokens);
     jbuf_append(&b, ",\"stream\":true");
+
+    if (provider_model_supports_prompt_cache_key(session ? session->model : request_model)) {
+        const char *cache_key = (session && session->prompt_cache_key[0]) ? session->prompt_cache_key
+                              : getenv("DSCO_PROMPT_CACHE_KEY");
+        if (!cache_key || !cache_key[0])
+            cache_key = "dsco-default";
+        jbuf_append(&b, ",\"prompt_cache_key\":");
+        jbuf_append_json_str(&b, cache_key);
+    }
+    if (provider_model_supports_prompt_cache_retention(session ? session->model : request_model)) {
+        const char *retention = (session && session->prompt_cache_retention[0])
+                                    ? session->prompt_cache_retention
+                                    : getenv("DSCO_PROMPT_CACHE_RETENTION");
+        if (!retention || !retention[0])
+            retention = "24h";
+        jbuf_append(&b, ",\"prompt_cache_retention\":");
+        jbuf_append_json_str(&b, retention);
+    }
 
     /* Moonshot/Kimi K2.7 Code requires thinking mode and rejects explicit
      * non-thinking payloads. Emit provider-native thinking enabled when using
@@ -2096,12 +2208,20 @@ static char *openai_build_request(provider_t *p, conversation_t *conv, session_s
 }
 
 static struct curl_slist *openai_build_headers(provider_t *p, const char *api_key) {
-    (void)p;
     struct curl_slist *hdrs = NULL;
     hdrs = curl_slist_append(hdrs, "Content-Type: application/json");
     char auth[512];
     snprintf(auth, sizeof(auth), "Authorization: Bearer %s", api_key);
     hdrs = curl_slist_append(hdrs, auth);
+    const char *canonical = p && p->name ? provider_profile_canonical_name(p->name) : NULL;
+    if (canonical && strcmp(canonical, "xai") == 0) {
+        const char *cache_key = getenv("DSCO_PROMPT_CACHE_KEY");
+        if (!cache_key || !cache_key[0])
+            cache_key = "dsco-default";
+        char hdr[256];
+        snprintf(hdr, sizeof(hdr), "x-grok-conv-id: %s", cache_key);
+        hdrs = curl_slist_append(hdrs, hdr);
+    }
     return hdrs;
 }
 
@@ -2168,7 +2288,8 @@ static char *codex_exec_build_request(provider_t *p, conversation_t *conv, sessi
     (void)credential;
 
     const char *model =
-        provider_request_model_id("openai-codex", session ? session->model : "gpt-5.3-codex-spark");
+        provider_request_model_id("openai-codex",
+                                  session ? session->model : codex_cache_default_model());
 
     jbuf_t prompt;
     jbuf_init(&prompt, 8192);
@@ -2957,8 +3078,25 @@ static stream_result_t openai_stream(provider_t *p, const char *api_key, const c
     curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, oai_sse_write_cb);
     curl_easy_setopt(curl, CURLOPT_WRITEDATA, &state);
     curl_easy_setopt(curl, CURLOPT_CONNECTTIMEOUT, 30L);
-    curl_easy_setopt(curl, CURLOPT_LOW_SPEED_LIMIT, 100L);
-    curl_easy_setopt(curl, CURLOPT_LOW_SPEED_TIME, 120L);
+    if (provider_is_sakana(p) || dcr_provider_find(p ? p->name : NULL)) {
+        /* Slow multi-agent / imported providers can legitimately stay quiet
+         * during reasoning. DCR can carry provider-specific idle policy learned
+         * from Codex/provider docs; Sakana defaults to 2h. */
+        long idle_ms = dcr_provider_stream_idle_timeout_ms(p ? p->name : NULL,
+                                                           provider_is_sakana(p) ? 7200000L : 120000L);
+        long idle_s = idle_ms > 0 ? (idle_ms + 999L) / 1000L : 120L;
+        const char *idle_env = getenv("DSCO_FUGU_STREAM_IDLE_TIMEOUT_S");
+        if (provider_is_sakana(p) && idle_env && idle_env[0]) {
+            long v = atol(idle_env);
+            if (v > 0)
+                idle_s = v;
+        }
+        curl_easy_setopt(curl, CURLOPT_LOW_SPEED_LIMIT, 1L);
+        curl_easy_setopt(curl, CURLOPT_LOW_SPEED_TIME, idle_s);
+    } else {
+        curl_easy_setopt(curl, CURLOPT_LOW_SPEED_LIMIT, 100L);
+        curl_easy_setopt(curl, CURLOPT_LOW_SPEED_TIME, 120L);
+    }
 
     if (provider_env_truthy(getenv("DSCO_DEBUG_REQUEST")))
         llm_debug_save_request(request_json, 0);
@@ -3165,11 +3303,15 @@ static const char *chatgpt_backend_url(void) {
  * backend sees a bare model name (e.g. "openai/gpt-5.5" -> "gpt-5.5"). */
 static const char *chatgpt_model_id(session_state_t *session) {
     const char *m = provider_request_model_id("openai-codex",
-                                               session ? session->model : "gpt-5.5");
+                                               session ? session->model
+                                                       : codex_cache_default_model());
     if (!m)
-        return "gpt-5.5";
+        return codex_cache_default_model();
     const char *slash = strrchr(m, '/');
-    return slash ? slash + 1 : m;
+    const char *bare = slash ? slash + 1 : m;
+    if (!codex_cache_model_supported(bare))
+        return codex_cache_default_model();
+    return bare;
 }
 
 /* Emit one Responses input "message" item wrapping text/image parts for a
@@ -3366,7 +3508,9 @@ static char *chatgpt_native_build_request(provider_t *p, conversation_t *conv,
     }
 
     /* Reasoning effort from the session. gpt-5.x reasoning models honor this. */
-    const char *effort = (session && session->effort[0]) ? session->effort : "medium";
+    const char *effort = (session && session->effort[0])
+        ? session->effort
+        : codex_cache_default_effort(chatgpt_model_id(session));
     jbuf_append(&b, ",\"reasoning\":{\"effort\":");
     jbuf_append_json_str(&b, effort);
     jbuf_append(&b, "}");
@@ -3658,7 +3802,7 @@ static const provider_endpoint_t PROVIDER_ENDPOINTS[] = {
     {"cerebras", "https://api.cerebras.ai/v1", "CEREBRAS_API_KEY", "Bearer"},
     {"xai", "https://api.x.ai/v1", "XAI_API_KEY", "Bearer"},
     {"cohere", "https://api.cohere.com/v2", "COHERE_API_KEY", "Bearer"},
-    {"moonshot", "https://api.moonshot.ai/v1", "MOONSHOT_API_KEY", "Bearer"},
+    {"moonshot", "https://api.moonshot.ai/v1", "KIMI_API_KEY", "Bearer"},
     {"sakana", "https://api.sakana.ai/v1", "FUGU_API_KEY", "Bearer"},
     {"alibaba", "https://dashscope-intl.aliyuncs.com/compatible-mode/v1", "DASHSCOPE_API_KEY",
      "Bearer"},
@@ -3696,8 +3840,18 @@ static const provider_endpoint_t PROVIDER_ENDPOINTS[] = {
     {"local", "http://localhost:8181/v1", "LOCAL_API_KEY", "Bearer"},
     {NULL, NULL, NULL, NULL}};
 
+static provider_endpoint_t dcr_endpoint_scratch;
+
 static const provider_endpoint_t *find_endpoint(const char *name) {
     name = provider_profile_canonical_name(name);
+    const dcr_provider_t *dp = dcr_provider_find(name);
+    if (dp && dp->base_url[0]) {
+        dcr_endpoint_scratch.name = dp->name;
+        dcr_endpoint_scratch.base_url = dp->base_url;
+        dcr_endpoint_scratch.env_key = dcr_provider_primary_env_var(dp);
+        dcr_endpoint_scratch.key_header = "Bearer";
+        return &dcr_endpoint_scratch;
+    }
     for (int i = 0; PROVIDER_ENDPOINTS[i].name; i++) {
         if (strcmp(name, PROVIDER_ENDPOINTS[i].name) == 0)
             return &PROVIDER_ENDPOINTS[i];
@@ -3728,7 +3882,7 @@ static const provider_env_alias_t PROVIDER_ENV_ALIASES[] = {
     {"openrouter", {"OPEN_ROUTER_API_KEY", NULL}},
     {"together", {"TOGETHER_TOKEN", NULL}},
     {"xai", {"GROK_API_KEY", "X_AI_API_KEY", NULL}},
-    {"moonshot", {"KIMI_API_KEY", "MOONSHOTAI_API_KEY", NULL}},
+    {"moonshot", {"KIMI_CODING_API_KEY", "MOONSHOT_API_KEY", "MOONSHOTAI_API_KEY", NULL}},
     {"sakana", {"SAKANA_API_KEY", "FISH_API_KEY", "SAKANA_TOKEN", NULL}},
     {"google",
      {"GEMINI_API_KEY", "GOOGLE_AI_API_KEY", "GOOGLE_AI_STUDIO_API_KEY", "GOOGLE_VERTEX_API_KEY",
@@ -3784,6 +3938,14 @@ static const char *provider_getenv_nonempty(const char *name) {
 static const char *provider_resolve_alias_env_key(const char *provider_name) {
     if (!provider_name || !provider_name[0])
         return NULL;
+    const dcr_provider_t *dp = dcr_provider_find(provider_name);
+    if (dp) {
+        for (int i = 0; i < PROVIDER_PROFILE_MAX_ENV_VARS && dp->env_vars[i][0]; i++) {
+            const char *value = provider_getenv_nonempty(dp->env_vars[i]);
+            if (value)
+                return value;
+        }
+    }
     for (int i = 0; PROVIDER_ENV_ALIASES[i].provider_name; i++) {
         if (strcmp(PROVIDER_ENV_ALIASES[i].provider_name, provider_name) != 0)
             continue;
@@ -3922,10 +4084,18 @@ static provider_t *create_unsupported_provider(const provider_profile_t *profile
 
 /* Remap dsco session effort string to Fugu's two-value enum. */
 static const char *fugu_remap_effort(const char *effort) {
-    if (!effort || !effort[0]) return "high";
-    if (strcmp(effort, "xhigh") == 0 || strcmp(effort, "max") == 0) return "xhigh";
-    /* high, low, medium, auto → "high" (lowest Fugu accepts) */
+    if (!effort || !effort[0])
+        return "high";
+    if (strcmp(effort, "xhigh") == 0 || strcmp(effort, "max") == 0)
+        return "xhigh";
+    if (strcmp(effort, "high") == 0)
+        return "high";
+    /* Sakana rejects low/medium/auto. Normalize locally before request. */
     return "high";
+}
+
+static bool provider_is_sakana(const provider_t *p) {
+    return p && p->name && strcmp(provider_profile_canonical_name(p->name), "sakana") == 0;
 }
 
 static char *fugu_build_request(provider_t *p, conversation_t *conv, session_state_t *session,
@@ -3940,7 +4110,13 @@ static char *fugu_build_request(provider_t *p, conversation_t *conv, session_sta
     base[len - 1] = '\0';
 
     const char *raw_effort = (session && session->effort[0]) ? session->effort : "high";
-    const char *effort = fugu_remap_effort(raw_effort);
+    char effort_buf[32];
+    const char *effort = dcr_reasoning_effort_normalize("sakana",
+                                                        session ? session->model : "fugu",
+                                                        raw_effort, effort_buf,
+                                                        sizeof(effort_buf));
+    if (!effort)
+        effort = fugu_remap_effort(raw_effort);
 
     jbuf_t b;
     jbuf_init(&b, len + 128);
@@ -4105,6 +4281,22 @@ static bool provider_model_has_prefix(const char *model, const char *prefix) {
     return model && prefix && strncmp(model, prefix, strlen(prefix)) == 0;
 }
 
+static bool provider_model_has_explicit_openrouter_prefix(const char *model) {
+    return model &&
+           (provider_model_has_prefix(model, "openrouter:") ||
+            provider_model_has_prefix(model, "openrouter/") ||
+            strcmp(model, "auto") == 0);
+}
+
+static const char *provider_model_strip_explicit_openrouter_prefix(const char *model) {
+    if (!model)
+        return NULL;
+    if (provider_model_has_prefix(model, "openrouter:") ||
+        provider_model_has_prefix(model, "openrouter/"))
+        return model + 11;
+    return model;
+}
+
 static const char *provider_model_family_from_namespaced(const char *model) {
     if (!model)
         return NULL;
@@ -4145,9 +4337,8 @@ const char *provider_model_family(const char *model) {
     if (!model || !model[0])
         return "anthropic";
 
-    if (provider_model_has_prefix(model, "openrouter:"))
-        model += 11;
-    if (provider_model_has_prefix(model, "openrouter/"))
+    model = provider_model_strip_explicit_openrouter_prefix(model);
+    if (!model || !model[0] || strcmp(model, "auto") == 0)
         return "openrouter";
 
     const char *namespaced = provider_model_family_from_namespaced(model);
@@ -4202,13 +4393,20 @@ static const char *provider_xai_primary_model(bool prefer_code) {
     if (provider_has_usable_key("xai", NULL))
         return prefer_code ? "grok-code-fast-1" : "grok-4-fast";
     if (provider_has_usable_key("openrouter", NULL))
-        return "x-ai/grok-4.20-beta";
+        return "openrouter/x-ai/grok-4.20-beta";
     return NULL;
 }
 
 static const char *provider_openai_primary_model(bool prefer_code) {
+    if (!provider_env_truthy(getenv("DSCO_DISABLE_CODEX_OAUTH_DISCOVERY")) &&
+        provider_has_usable_key("openai-codex", NULL)) {
+        (void)prefer_code;
+        static char model[128];
+        snprintf(model, sizeof(model), "openai/%s", codex_cache_default_model());
+        return model;
+    }
     if (provider_has_usable_key("openrouter", NULL))
-        return prefer_code ? "openai/gpt-5.3-codex" : "openai/gpt-5.4";
+        return prefer_code ? "openrouter/openai/gpt-5.3-codex" : "openrouter/openai/gpt-5.4";
     if (provider_has_usable_key("openai", NULL))
         return "gpt-4.1";
     return NULL;
@@ -4226,33 +4424,33 @@ static const char *provider_family_primary_model(const char *family, bool prefer
         if (provider_has_usable_key("anthropic", NULL))
             return "claude-sonnet-4-6";
         if (provider_has_usable_key("openrouter", NULL))
-            return "anthropic/claude-sonnet-4.6";
+            return "openrouter/anthropic/claude-sonnet-4.6";
         return NULL;
     }
     if (strcmp(family, "google") == 0) {
         if (provider_has_usable_key("google", NULL))
             return "gemini-2.5-pro";
         if (provider_has_usable_key("openrouter", NULL))
-            return "google/gemini-2.5-pro";
+            return "openrouter/google/gemini-2.5-pro";
         return NULL;
     }
     if (strcmp(family, "deepseek") == 0) {
         if (provider_has_usable_key("openrouter", NULL))
-            return "deepseek/deepseek-chat";
+            return "openrouter/deepseek/deepseek-chat";
         if (provider_has_usable_key("deepseek", NULL))
             return "deepseek-chat";
         return NULL;
     }
     if (strcmp(family, "qwen") == 0) {
         if (provider_has_usable_key("openrouter", NULL))
-            return "qwen/qwen3.5-plus-02-15";
+            return "openrouter/qwen/qwen3.5-plus-02-15";
         return NULL;
     }
     if (strcmp(family, "mistral") == 0) {
         if (provider_has_usable_key("mistral", NULL))
             return "mistral-large-latest";
         if (provider_has_usable_key("openrouter", NULL))
-            return "mistralai/mistral-large-2512";
+            return "openrouter/mistralai/mistral-large-2512";
         return NULL;
     }
     if (strcmp(family, "moonshot") == 0) {
@@ -4260,13 +4458,13 @@ static const char *provider_family_primary_model(const char *family, bool prefer
             if (provider_has_usable_key("moonshot", NULL))
                 return "kimi-k2.7-code";
             if (provider_has_usable_key("openrouter", NULL))
-                return "moonshotai/kimi-k2.7-code";
+                return "openrouter/moonshotai/kimi-k2.7-code";
             return NULL;
         }
         if (provider_has_usable_key("moonshot", NULL))
             return "kimi-k2.7-code";
         if (provider_has_usable_key("openrouter", NULL))
-            return "moonshotai/kimi-k2.7-code";
+            return "openrouter/moonshotai/kimi-k2.7-code";
         return NULL;
     }
     if (strcmp(family, "sakana") == 0) {
@@ -4282,7 +4480,7 @@ static const char *provider_family_primary_model(const char *family, bool prefer
         if (provider_has_usable_key("cohere", NULL))
             return "command-a-03-2025";
         if (provider_has_usable_key("openrouter", NULL))
-            return "cohere/command-a";
+            return "openrouter/cohere/command-a";
         return NULL;
     }
     if (strcmp(family, "perplexity") == 0) {
@@ -4294,22 +4492,22 @@ static const char *provider_family_primary_model(const char *family, bool prefer
         if (provider_has_usable_key("zai", NULL) || provider_has_usable_key("glm", NULL))
             return "glm-5.2";
         if (provider_has_usable_key("openrouter", NULL))
-            return "z-ai/glm-5.2";
+            return "openrouter/z-ai/glm-5.2";
         return NULL;
     }
     if (strcmp(family, "meta") == 0) {
         if (provider_has_usable_key("openrouter", NULL))
-            return "meta-llama/llama-4-maverick";
+            return "openrouter/meta-llama/llama-4-maverick";
         return NULL;
     }
     if (strcmp(family, "minimax") == 0) {
         if (provider_has_usable_key("openrouter", NULL))
-            return "minimax/minimax-m2.5";
+            return "openrouter/minimax/minimax-m2.5";
         return NULL;
     }
     if (strcmp(family, "amazon") == 0) {
         if (provider_has_usable_key("openrouter", NULL))
-            return "amazon/nova-premier-v1";
+            return "openrouter/amazon/nova-premier-v1";
         return NULL;
     }
 
@@ -4325,17 +4523,37 @@ static void provider_append_unique_model(char out_models[][128], int *count, int
 
     const char *resolved_candidate = model_resolve_alias(candidate);
     const char *resolved_current = current_model ? model_resolve_alias(current_model) : NULL;
+    bool candidate_openrouter = provider_model_has_explicit_openrouter_prefix(candidate);
+    bool current_openrouter = provider_model_has_explicit_openrouter_prefix(current_model);
+    char stored_candidate[128];
 
-    if (resolved_current && strcmp(resolved_candidate, resolved_current) == 0)
+    if (candidate_openrouter) {
+        snprintf(stored_candidate, sizeof(stored_candidate), "%s", candidate);
+    } else {
+        snprintf(stored_candidate, sizeof(stored_candidate), "%s", resolved_candidate);
+    }
+
+    if (resolved_current && strcmp(resolved_candidate, resolved_current) == 0 &&
+        candidate_openrouter == current_openrouter)
         return;
 
     for (int i = 0; i < *count; i++) {
-        if (strcmp(out_models[i], resolved_candidate) == 0)
+        const char *resolved_existing = model_resolve_alias(out_models[i]);
+        bool existing_openrouter = provider_model_has_explicit_openrouter_prefix(out_models[i]);
+        if (strcmp(out_models[i], stored_candidate) == 0 ||
+            (strcmp(resolved_existing, resolved_candidate) == 0 &&
+             existing_openrouter == candidate_openrouter))
             return;
     }
 
-    snprintf(out_models[*count], 128, "%s", resolved_candidate);
+    snprintf(out_models[*count], 128, "%s", stored_candidate);
     (*count)++;
+}
+
+static const char *provider_openai_fallback_model(bool prefer_code) {
+    if (provider_has_usable_key("openrouter", NULL))
+        return prefer_code ? "openrouter/openai/gpt-5.3-codex" : "openrouter/openai/gpt-5.4";
+    return provider_openai_primary_model(prefer_code);
 }
 
 int provider_build_default_fallback_models(const char *model, char out_models[][128],
@@ -4345,72 +4563,73 @@ int provider_build_default_fallback_models(const char *model, char out_models[][
     for (int i = 0; i < max_models; i++)
         out_models[i][0] = '\0';
 
-    const char *resolved_model = model_resolve_alias(model ? model : DEFAULT_MODEL);
+    const char *requested_model = model ? model : DEFAULT_MODEL;
+    const char *resolved_model = model_resolve_alias(requested_model);
     const char *family = provider_model_family(resolved_model);
     bool prefer_code = provider_model_is_code_oriented(resolved_model);
     int count = 0;
 
     if (strcmp(family, "anthropic") == 0) {
-        provider_append_unique_model(out_models, &count, max_models, resolved_model,
+        provider_append_unique_model(out_models, &count, max_models, requested_model,
                                      provider_family_primary_model("anthropic", false));
-        provider_append_unique_model(out_models, &count, max_models, resolved_model,
+        provider_append_unique_model(out_models, &count, max_models, requested_model,
                                      provider_family_primary_model("sakana", prefer_code));
-        provider_append_unique_model(out_models, &count, max_models, resolved_model,
+        provider_append_unique_model(out_models, &count, max_models, requested_model,
                                      provider_xai_primary_model(prefer_code));
-        provider_append_unique_model(out_models, &count, max_models, resolved_model,
-                                     provider_openai_primary_model(prefer_code));
-        provider_append_unique_model(out_models, &count, max_models, resolved_model,
+        provider_append_unique_model(out_models, &count, max_models, requested_model,
+                                     provider_openai_fallback_model(prefer_code));
+        provider_append_unique_model(out_models, &count, max_models, requested_model,
                                      provider_family_primary_model("google", false));
-        provider_append_unique_model(out_models, &count, max_models, resolved_model,
+        provider_append_unique_model(out_models, &count, max_models, requested_model,
                                      provider_family_primary_model("deepseek", false));
         return count;
     }
 
     if (strcmp(family, "openai") == 0) {
-        provider_append_unique_model(out_models, &count, max_models, resolved_model,
+        provider_append_unique_model(out_models, &count, max_models, requested_model,
                                      provider_openai_primary_model(prefer_code));
-        provider_append_unique_model(out_models, &count, max_models, resolved_model,
+        provider_append_unique_model(out_models, &count, max_models, requested_model,
                                      provider_family_primary_model("sakana", prefer_code));
-        provider_append_unique_model(out_models, &count, max_models, resolved_model,
+        provider_append_unique_model(out_models, &count, max_models, requested_model,
                                      provider_xai_primary_model(true));
-        provider_append_unique_model(out_models, &count, max_models, resolved_model,
+        provider_append_unique_model(out_models, &count, max_models, requested_model,
                                      provider_family_primary_model("anthropic", false));
-        provider_append_unique_model(out_models, &count, max_models, resolved_model,
+        provider_append_unique_model(out_models, &count, max_models, requested_model,
                                      provider_family_primary_model("google", false));
-        provider_append_unique_model(out_models, &count, max_models, resolved_model,
+        provider_append_unique_model(out_models, &count, max_models, requested_model,
                                      provider_family_primary_model("deepseek", false));
         return count;
     }
 
     if (strcmp(family, "xai") == 0) {
-        provider_append_unique_model(out_models, &count, max_models, resolved_model,
+        provider_append_unique_model(out_models, &count, max_models, requested_model,
                                      provider_xai_primary_model(prefer_code));
-        provider_append_unique_model(out_models, &count, max_models, resolved_model,
+        provider_append_unique_model(out_models, &count, max_models, requested_model,
                                      provider_family_primary_model("sakana", prefer_code));
-        provider_append_unique_model(out_models, &count, max_models, resolved_model,
+        provider_append_unique_model(out_models, &count, max_models, requested_model,
                                      provider_family_primary_model("anthropic", false));
-        provider_append_unique_model(out_models, &count, max_models, resolved_model,
-                                     provider_openai_primary_model(prefer_code));
-        provider_append_unique_model(out_models, &count, max_models, resolved_model,
+        provider_append_unique_model(out_models, &count, max_models, requested_model,
+                                     provider_openai_fallback_model(prefer_code));
+        provider_append_unique_model(out_models, &count, max_models, requested_model,
                                      provider_family_primary_model("google", false));
-        provider_append_unique_model(out_models, &count, max_models, resolved_model,
+        provider_append_unique_model(out_models, &count, max_models, requested_model,
                                      provider_family_primary_model("deepseek", false));
         return count;
     }
 
-    provider_append_unique_model(out_models, &count, max_models, resolved_model,
+    provider_append_unique_model(out_models, &count, max_models, requested_model,
                                  provider_xai_primary_model(prefer_code));
-    provider_append_unique_model(out_models, &count, max_models, resolved_model,
+    provider_append_unique_model(out_models, &count, max_models, requested_model,
                                  provider_family_primary_model("sakana", prefer_code));
-    provider_append_unique_model(out_models, &count, max_models, resolved_model,
+    provider_append_unique_model(out_models, &count, max_models, requested_model,
                                  provider_family_primary_model("anthropic", false));
-    provider_append_unique_model(out_models, &count, max_models, resolved_model,
-                                 provider_openai_primary_model(prefer_code));
-    provider_append_unique_model(out_models, &count, max_models, resolved_model,
+    provider_append_unique_model(out_models, &count, max_models, requested_model,
+                                 provider_openai_fallback_model(prefer_code));
+    provider_append_unique_model(out_models, &count, max_models, requested_model,
                                  provider_family_primary_model("google", false));
-    provider_append_unique_model(out_models, &count, max_models, resolved_model,
+    provider_append_unique_model(out_models, &count, max_models, requested_model,
                                  provider_family_primary_model("deepseek", false));
-    provider_append_unique_model(out_models, &count, max_models, resolved_model,
+    provider_append_unique_model(out_models, &count, max_models, requested_model,
                                  provider_family_primary_model("qwen", false));
     return count;
 }
@@ -4483,7 +4702,7 @@ const char *provider_detect(const char *model, const char *api_key) {
 
     if (model) {
         /* Explicit provider prefix: "openrouter:model/id" */
-        if (strncmp(model, "openrouter:", 11) == 0)
+        if (provider_model_has_explicit_openrouter_prefix(model))
             return "openrouter";
         /* Generic "<provider>:model" prefix for self-hosted / local backends
          * (e.g. "vllm:Qwen2.5-Coder", "ollama:llama3.3:latest"). The model id
@@ -4506,17 +4725,11 @@ const char *provider_detect(const char *model, const char *api_key) {
                 }
             }
         }
-        /* OpenRouter auto-router */
-        if (strncmp(model, "openrouter/", 11) == 0 || strcmp(model, "auto") == 0)
-            return "openrouter";
-        /* OpenAI aliases are stored as openai/gpt-* so they can still fall
-         * back through OpenRouter when needed, but the family itself is
-         * OpenAI and should prefer OpenAI/Codex credentials. */
-        if (strncmp(model, "openai/", 7) == 0)
-            return "openai";
-        if (strncmp(model, "sakana/", 7) == 0)
-            return "sakana";
-        /* Other org/model IDs with a slash route to OpenRouter first. */
+        const char *namespaced = provider_model_family_from_namespaced(model);
+        if (namespaced)
+            return namespaced;
+        /* Unknown org/model IDs are OpenRouter slugs unless explicitly claimed
+         * by a native provider namespace above. */
         if (strstr(model, "/"))
             return "openrouter";
         /* Anthropic — bare model IDs only (no slash) */
@@ -4526,8 +4739,7 @@ const char *provider_detect(const char *model, const char *api_key) {
         /* Cerebras provider-prefixed models should beat generic family matches */
         if (strstr(model, "cerebras"))
             return "cerebras";
-        /* Moonshot native — bare kimi-* / moonshot-* IDs (anything with a
-         * slash already routed to OpenRouter above). */
+        /* Moonshot native — bare kimi-* / moonshot-* IDs. */
         if (strstr(model, "kimi") || strstr(model, "moonshot"))
             return "moonshot";
         if (strstr(model, "fugu") || strstr(model, "sakana"))
@@ -4558,8 +4770,9 @@ const char *provider_detect(const char *model, const char *api_key) {
         /* Cohere */
         if (strstr(model, "command"))
             return "cohere";
-        /* xAI — native only for bare "grok" IDs, x-ai/ prefix goes to OpenRouter.
-         * Covers grok-4, grok-4-fast, grok-3, grok-3-mini, grok-code-fast-1. */
+        /* xAI — bare "grok" IDs route natively; x-ai/... is handled by the
+         * known namespace block above. Covers grok-4, grok-4-fast, grok-3,
+         * grok-3-mini, grok-code-fast-1. */
         if ((strstr(model, "grok") || strstr(model, "Grok")) && !strstr(model, "/"))
             return "xai";
         /* Perplexity */
@@ -4711,16 +4924,23 @@ const char *provider_route_for_model(const char *model, const char *fallback_api
         return provider_profile_canonical_name(provider_override);
 
     const char *provider_name = provider_detect(model, fallback_api_key);
+    bool explicit_native_namespace =
+        model && !provider_model_has_explicit_openrouter_prefix(model) &&
+        provider_model_family_from_namespaced(model) != NULL;
 
     /* Redirect to openai-codex subscription only when discovery is not
      * explicitly suppressed. DSCO_DISABLE_CODEX_OAUTH_DISCOVERY=1 means
      * "use direct API keys instead of any subscription path". */
     if (strcmp(provider_name, "openai") == 0 &&
         !provider_env_truthy(getenv("DSCO_DISABLE_CODEX_OAUTH_DISCOVERY")) &&
-        provider_has_usable_key("openai-codex", NULL))
+        provider_has_usable_key("openai-codex", NULL) &&
+        codex_cache_model_supported(model))
         return "openai-codex";
 
     if (provider_has_usable_key(provider_name, fallback_api_key))
+        return provider_name;
+
+    if (explicit_native_namespace)
         return provider_name;
 
     if (strcmp(provider_name, "sakana") == 0)
@@ -4836,6 +5056,14 @@ void provider_export_child_process_credentials_for_provider(const char *provider
             setenv("ANTHROPIC_API_KEY", resolved_key, 1);
             unsetenv("DSCO_CLAUDE_CODE_OAUTH_TOKEN");
             unsetenv("CLAUDE_CODE_OAUTH_TOKEN");
+        }
+        return;
+    }
+
+    if (strcmp(provider_name, "openai-codex") == 0) {
+        if (strcmp(resolved_key, "chatgpt-subscription") != 0) {
+            setenv("DSCO_CHATGPT_OAUTH_TOKEN", resolved_key, 1);
+            setenv("CHATGPT_OAUTH_TOKEN", resolved_key, 1);
         }
         return;
     }

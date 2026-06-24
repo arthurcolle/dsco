@@ -52,7 +52,7 @@ static const char *s_domain_desc[ORCH_DOMAIN_COUNT] = {
     "Web requests, HTTP, browser, research, DNS, port scan (~15 tools)",
     "Kalshi/Polymarket order execution and position management (~22 tools)",
     "Market data, prediction prices, arbitrage scanning (~27 tools)",
-    "Wings/Talons: governance, OODA, memory, pheromones, immune (~22 tools)",
+    "Wings/Talons: governance, OODA, memory, pheromones, avian nesting/brooding, immune (~23 tools)",
     "Text processing: sed, awk, jq, CSV, regex, zip, url (~14 tools)",
     "General purpose — all tools via register-file paging (up to 32)",
 };
@@ -86,6 +86,7 @@ static orch_domain_t classify_tool(const char *name) {
     if (strncmp(name, "pheromone_", 10) == 0 || strncmp(name, "ooda_", 5) == 0 ||
         strncmp(name, "killswitch_", 11) == 0 || strncmp(name, "governance_", 11) == 0 ||
         strncmp(name, "memory_", 7) == 0 || strncmp(name, "talons_", 7) == 0 ||
+        strncmp(name, "avian_", 6) == 0 || strcmp(name, "avian") == 0 ||
         strncmp(name, "legion_", 7) == 0)
         return ORCH_DOMAIN_WINGS;
 
