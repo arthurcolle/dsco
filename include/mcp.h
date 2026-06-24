@@ -91,6 +91,11 @@ int  mcp_init(mcp_registry_t *reg);
  * background thread and would otherwise corrupt the TUI input panel). */
 void mcp_set_silent(bool silent);
 
+/* Ask any in-flight MCP init/discovery work to abort quickly. This is used by
+ * fast restart paths before joining the background init thread. */
+void mcp_cancel(void);
+void mcp_cancel_reset(void);
+
 /* Shutdown all servers */
 void mcp_shutdown(mcp_registry_t *reg);
 
