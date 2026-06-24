@@ -72,6 +72,17 @@
 #define TUI_ACCENT_DANGER    TUI_CORAL
 #define TUI_ACCENT_MUTED     TUI_SLATE
 
+/* ── Status roles (Integument: meaning-coded surface) ─────────────────────
+ * These name the SEMANTIC INTENT of the classic 8-color status palette so
+ * call sites express meaning ("this is a failure") rather than appearance
+ * ("this is red"). They alias the literal ANSI colors to preserve the exact
+ * current rendering while making the surface migratable to a theme later. */
+#define TUI_ROLE_OK       TUI_GREEN    /* success / healthy / pass        */
+#define TUI_ROLE_FAIL     TUI_RED      /* failure / error / danger        */
+#define TUI_ROLE_WARN     TUI_YELLOW   /* warning / degraded / retry      */
+#define TUI_ROLE_INFO     TUI_CYAN     /* informational accent / model    */
+#define TUI_ROLE_MUTED    TUI_DIM      /* secondary / de-emphasized       */
+
 /* Semantic syntax roles */
 #define TUI_SYN_COMMENT   TUI_SLATE
 #define TUI_SYN_STRING    TUI_MINT
