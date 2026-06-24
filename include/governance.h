@@ -6,6 +6,7 @@
 #include "killswitch.h"
 #include "ooda.h"
 #include "pheromone.h"
+#include "avian.h"
 
 /* ═══════════════════════════════════════════════════════════════════════════
  * Governance Layer (Talons — master control)
@@ -146,6 +147,7 @@ typedef struct {
 typedef struct {
     /* Subsystems */
     pheromone_field_t     pheromones;
+    avian_engine_t        avian;
     ooda_engine_t         ooda;
     killswitch_registry_t killswitches;
 

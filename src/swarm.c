@@ -34,11 +34,23 @@ static void swarm_export_child_credential_for_provider(const char *provider,
     provider_export_child_process_credentials_for_provider(provider, credential);
 }
 
+static const char *swarm_provider_cli_name(const char *provider) {
+    if (!provider || !provider[0])
+        return NULL;
+    /* openai-codex is a native ChatGPT/Codex subscription provider inside
+     * dsco, not the external executor name. It is valid for --provider and
+     * must not be collapsed to executor=codex when spawning dsco children. */
+    if (strcmp(provider, "codex") == 0)
+        return "openai-codex";
+    return provider;
+}
+
 static bool swarm_provider_cli_pin_supported(const char *provider) {
+    provider = swarm_provider_cli_name(provider);
     static const char *supported[] = {
-        "anthropic", "openai", "openrouter", "google", "groq", "deepseek",
-        "mistral", "xai", "together", "perplexity", "cerebras", "cohere",
-        "moonshot", "sakana", NULL
+        "anthropic", "openai", "openai-codex", "openrouter", "google", "groq",
+        "deepseek", "mistral", "xai", "together", "perplexity", "cerebras",
+        "cohere", "moonshot", "sakana", NULL
     };
     if (!provider || !provider[0])
         return false;
@@ -460,9 +472,14 @@ int swarm_spawn_in_group(swarm_t *s, int group_id, const char *task, const char 
          * so this child wraps a distinct model instance. */
         swarm_apply_instance_env();
 
-        /* Use execl with absolute path (not execlp which searches PATH) */
+        /* Use execl with absolute path (not execlp which searches PATH).
+         * Workers inherit the parent's effective capability envelope, but the
+         * worker runtime must retain the full core workbench. This prevents a
+         * restrictive active agent profile from starving sub-agents of bash,
+         * file IO, grep, and swarm coordination tools. */
         setenv("DSCO_PROFILE", "worker", 1);
         setenv("DSCO_WORKER", "1", 1);
+        setenv("DSCO_SWARM_INHERIT_TOOLS", "1", 1);
         if (getenv("DSCO_DEBUG_SPAWN")) {
             fprintf(stderr,
                     "[spawn-dbg] child model='%s' default='%s' provider='%s' "
@@ -471,8 +488,9 @@ int swarm_spawn_in_group(swarm_t *s, int group_id, const char *task, const char 
                     child_provider ? child_provider : "(null)",
                     (child_key && child_key[0]) ? "set" : "unset");
         }
-        if (swarm_provider_cli_pin_supported(child_provider)) {
-            execl(bin, bin, "--profile", "worker", "--provider", child_provider,
+        const char *child_provider_cli = swarm_provider_cli_name(child_provider);
+        if (swarm_provider_cli_pin_supported(child_provider_cli)) {
+            execl(bin, bin, "--profile", "worker", "--provider", child_provider_cli,
                   "-m", m, task, NULL);
         } else {
             execl(bin, bin, "--profile", "worker", "-m", m, task, NULL);
@@ -1104,7 +1122,7 @@ void swarm_detect_executors(swarm_t *s) {
     if (detect_binary("codex", e->codex_path, sizeof(e->codex_path))) {
         e->codex_available = check_codex_auth();
         if (e->codex_available) {
-            snprintf(e->codex_model, sizeof(e->codex_model), "gpt-5.3-codex-spark");
+            snprintf(e->codex_model, sizeof(e->codex_model), "gpt-5.5");
         }
     }
 }

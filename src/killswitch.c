@@ -1,4 +1,5 @@
 #include "killswitch.h"
+#include "error.h"
 #include "vfs.h"
 #include <stdio.h>
 #include <stdlib.h>

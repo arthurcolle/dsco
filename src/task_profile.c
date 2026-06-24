@@ -18,13 +18,13 @@
 
 /* ── Pattern definitions ───────────────────────────────────────────────── */
 
-static const char *pattern_keywords[PATTERN_COUNT][10] = {
+static const char *pattern_keywords[PATTERN_COUNT][16] = {
     [PATTERN_ANALYSIS] = {"analyze", "examine", "inspect", "evaluate", "assess", "audit", "review",
-                          "check", "test", NULL},
+                          "check", "test", "learn", "patterns", "metrics", "usage", NULL},
     [PATTERN_CODING] = {"code", "implement", "refactor", "debug", "fix", "write", "compile",
-                        "build", "deploy", NULL},
+                        "build", "deploy", "cli", "repo", "codebase", NULL},
     [PATTERN_PLANNING] = {"plan", "design", "architect", "strategize", "organize", "outline",
-                          "structure", "framework", "system", NULL},
+                          "structure", "framework", "system", "optimize", "roadmap", NULL},
     [PATTERN_SYNTHESIS] = {"combine", "integrate", "merge", "consolidate", "aggregate", "unite",
                            "gather", "collect", "summarize", NULL},
     [PATTERN_REVIEW] = {"review", "audit", "verify", "check", "validate", "confirm", "approve",
@@ -32,13 +32,16 @@ static const char *pattern_keywords[PATTERN_COUNT][10] = {
     [PATTERN_REASONING] = {"reason", "deduce", "infer", "conclude", "analyze", "explain", "derive",
                            "determine", "find", NULL},
     [PATTERN_ITERATION] = {"refine", "improve", "optimize", "iterate", "enhance", "revise",
-                           "adjust", "tune", "polish", NULL},
+                           "adjust", "tune", "polish", "self-improvement", "self_improve",
+                           "curriculum", "adaptive", "learn", NULL},
     [PATTERN_PARALLELISM] = {"parallel", "concurrent", "simultaneous", "fanout", "distribute",
-                             "batch", "multiple", "several", "many", NULL},
+                             "batch", "multiple", "several", "many", "broad", "wide", "scale",
+                             "large", "large-scale", NULL},
     [PATTERN_CONSENSUS] = {"consensus", "agreement", "debate", "discussion", "converge", "agree",
                            "vote", "majority", "conflict", NULL},
     [PATTERN_SPECIALIST] = {"expert", "specialist", "domain", "specific", "technical",
-                            "specialized", "advanced", "deep", "nuanced", NULL}};
+                            "specialized", "advanced", "deep", "nuanced", "ai", "agent",
+                            "agents", "model", "models", NULL}};
 
 /* ── Case-insensitive keyword search ───────────────────────────────────── */
 
@@ -65,6 +68,36 @@ static bool contains_keyword(const char *text, const char *keyword) {
         }
     }
     return false;
+}
+
+static bool mentions_self_improvement(const char *task) {
+    if (!task)
+        return false;
+    return contains_keyword(task, "self-improvement") ||
+           contains_keyword(task, "self_improve") ||
+           (contains_keyword(task, "self") && contains_keyword(task, "improvement")) ||
+           (contains_keyword(task, "learn") && contains_keyword(task, "patterns"));
+}
+
+static bool mentions_large_scale(const char *task) {
+    if (!task)
+        return false;
+    return contains_keyword(task, "large-scale") ||
+           (contains_keyword(task, "large") && contains_keyword(task, "scale")) ||
+           contains_keyword(task, "broad") ||
+           contains_keyword(task, "wide");
+}
+
+static bool mentions_ai_agent_system(const char *task) {
+    if (!task)
+        return false;
+    return contains_keyword(task, "ai") ||
+           contains_keyword(task, "agent") ||
+           contains_keyword(task, "agents") ||
+           contains_keyword(task, "model") ||
+           contains_keyword(task, "models") ||
+           contains_keyword(task, "dsco-cli") ||
+           contains_keyword(task, "cli");
 }
 
 /* ── Pattern detection ─────────────────────────────────────────────────── */
@@ -102,6 +135,10 @@ static double compute_parallelism_score(const task_profile_t *tp) {
         score += 0.3;
     if (tp->patterns[PATTERN_ANALYSIS] && tp->clause_count > 2)
         score += 0.2;
+    if (mentions_large_scale(tp->task))
+        score += 0.25;
+    if (mentions_self_improvement(tp->task))
+        score += 0.15;
 
     return fmin(score, 1.0);
 }
@@ -116,6 +153,8 @@ static double compute_convergence_score(const task_profile_t *tp) {
         score += 0.3;
     if (tp->patterns[PATTERN_REVIEW])
         score += 0.2;
+    if (mentions_self_improvement(tp->task))
+        score += 0.25;
 
     // More clauses → more refinement needed
     if (tp->clause_count > 3)
@@ -134,6 +173,10 @@ static double compute_complexity_score(const task_profile_t *tp) {
         score += 0.3;
     if (tp->patterns[PATTERN_PLANNING])
         score += 0.2;
+    if (mentions_self_improvement(tp->task))
+        score += 0.25;
+    if (mentions_ai_agent_system(tp->task))
+        score += 0.15;
 
     // Longer task ≈ more complex
     if (tp->task_length > 200)

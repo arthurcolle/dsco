@@ -1,4 +1,5 @@
 #include "provider_profiles.h"
+#include "dcr.h"
 
 #include <string.h>
 
@@ -190,7 +191,7 @@ static const provider_profile_t PROVIDER_PROFILES[] = {
         .transport = PROVIDER_TRANSPORT_OPENAI_CHAT,
         .base_url = "https://api.moonshot.ai/v1",
         .transport_base_url = "https://api.moonshot.ai/v1",
-        .env_vars = {"MOONSHOT_API_KEY", "KIMI_API_KEY", "KIMI_CODING_API_KEY"},
+        .env_vars = {"KIMI_API_KEY", "KIMI_CODING_API_KEY", "MOONSHOT_API_KEY", "MOONSHOTAI_API_KEY"},
         .aliases = {"kimi", "kimi-coding", "kimi-for-coding"},
         .default_model = "kimi-k2.7-code-highspeed",
         .caps = CAP_OPENAI_COMPAT_VISION | PROVIDER_CAP_REASONING,
@@ -457,7 +458,7 @@ static const provider_profile_t PROVIDER_PROFILES[] = {
     {
         .name = "sakana",
         .display_name = "Sakana Fugu",
-        .description = "Sakana Fugu multi-agent orchestration system (Chat Completions + Responses API).",
+        .description = "Sakana Fugu multi-agent orchestration system (OpenAI-compatible Chat Completions; Codex profile uses Responses API).",
         .api_mode = PROVIDER_API_CHAT_COMPLETIONS,
         .auth_type = PROVIDER_AUTH_API_KEY,
         .transport = PROVIDER_TRANSPORT_OPENAI_CHAT,
@@ -513,7 +514,7 @@ static const provider_profile_t PROVIDER_PROFILES[] = {
         .transport = PROVIDER_TRANSPORT_CODEX_RESPONSES,
         .base_url = "https://chatgpt.com/backend-api/codex",
         .aliases = {"codex", "openai_codex"},
-        .default_model = "gpt-5.3-codex-spark",
+        .default_model = "gpt-5.5",
         .caps = PROVIDER_CAP_TOOLS | PROVIDER_CAP_MULTITURN | PROVIDER_CAP_STREAMING |
                 PROVIDER_CAP_REASONING | PROVIDER_CAP_JSON,
     },
@@ -611,6 +612,9 @@ bool provider_profile_has_env_var(const provider_profile_t *profile, const char 
 const provider_profile_t *provider_profile_find(const char *name_or_alias) {
     if (!name_or_alias || !name_or_alias[0])
         return NULL;
+    const provider_profile_t *dynamic = dcr_provider_profile_find(name_or_alias);
+    if (dynamic)
+        return dynamic;
     for (size_t i = 0; i < provider_profile_count(); i++) {
         const provider_profile_t *profile = &PROVIDER_PROFILES[i];
         if (strcmp(profile->name, name_or_alias) == 0)

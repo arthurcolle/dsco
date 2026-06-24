@@ -356,6 +356,7 @@ typedef bool (*tool_profile_filter_fn_t)(const char *tool_name, const char *grou
 
 void tools_set_profile_filter(tool_profile_filter_fn_t fn);
 void tools_clear_profile_filter(void);
+bool tools_is_parent_specified_core_tool(const char *tool_name);
 
 /* ── Safe subprocess exec ────────────────────────────────────────────── */
 

@@ -148,6 +148,8 @@ typedef struct {
     char   fallback_models[4][128];
     int    fallback_count;
     bool   model_locked;      /* block auto-routing model switches */
+    char   prompt_cache_key[128];       /* provider-native cache routing hint */
+    char   prompt_cache_retention[16];  /* OpenAI/Azure: "in_memory" or "24h" */
     /* Telemetry aggregates */
     double total_ttft_ms;
     double total_stream_ms;

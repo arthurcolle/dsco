@@ -1,4 +1,5 @@
 #include "ooda.h"
+#include "error.h"
 #include "scheduler.h"
 #include <math.h>
 #include <stdio.h>
@@ -82,6 +83,11 @@ bool ooda_observe(ooda_engine_t *e, const char *content, const char *source, dou
         return false;
     if (e->current.observation_count >= OODA_MAX_OBSERVATIONS)
         return false;
+    /* HINDBRAIN CONTRACT: an observation's confidence is a probability in [0,1];
+     * a bad value would corrupt the DECIDE-phase threshold logic (>=0.8 EXECUTE,
+     * <=0.3 ESCALATE). Reject NaN and out-of-range. Fail closed. */
+    DSCO_REQUIRE(confidence == confidence);
+    DSCO_REQUIRE(confidence >= 0.0 && confidence <= 1.0);
 
     ooda_observation_t *obs = &e->current.observations[e->current.observation_count++];
     snprintf(obs->content, sizeof(obs->content), "%s", content ? content : "");

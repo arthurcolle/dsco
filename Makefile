@@ -49,13 +49,13 @@ SRC_NAMES = main.c agent.c llm.c tools.c json_util.c ast.c swarm.c tui.c env_con
 	md.c baseline.c setup.c crypto.c eval.c pipeline.c plugin.c \
 			semantic.c ipc.c mcp.c mcp_names.c provider_profiles.c provider.c integrations.c error.c trace.c task_profile.c \
 	output_guard.c topology.c workspace.c plan.c stateful_atoms.c recovery.c router.c \
-	pheromone.c ooda.c killswitch.c governance.c memory_tier.c talons.c \
+	pheromone.c ooda.c killswitch.c governance.c memory_tier.c talons.c avian.c \
 	arena_alloc.c event_loop.c vm.c scheduler.c vfs.c trading.c legion.c \
 	agent_profile.c orchestrator.c vecstore.c tamper.c sealed_store.c \
 	se_store.c watchdog.c audit_log.c heartbeat.c env_guard.c peer_bootstrap.c presence.c \
 	project.c project_mux.c project_grid.c \
 	dsco_accel.c dsco_mlx.c dsco_pool.c \
-	fingerprint.c trust.c toolmgmt.c connector.c openrouter_cache.c \
+	fingerprint.c trust.c toolmgmt.c connector.c openrouter_cache.c codex_cache.c dcr.c \
 	openai_oauth.c local_llm.c \
 	startup.c plot.c anim.c fractal.c shadeexpr.c face_sdf.c avatar.c self_improve.c rsi_curriculum.c pets.c img_util.c supervisor.c \
 	graphsub_client.c graphsub_tools.c \
@@ -496,10 +496,15 @@ test_control_flow: $(TEST_OBJ_DIR)/test_control_flow.o \
 	$(TEST_OBJ_DIR)/json_util.o $(TEST_OBJ_DIR)/arena_alloc.o
 	$(CC) $(TEST_CFLAGS) -o $@ $^ $(LDFLAGS) -lm
 
+$(TEST_OBJ_DIR)/test_avian.o: $(TEST_DIR)/test_avian.c | $(TEST_OBJ_DIR)
+	$(CC) $(TEST_CFLAGS) -c -o $@ $<
+test_avian: $(TEST_OBJ_DIR)/test_avian.o $(TEST_OBJ_DIR)/avian.o
+	$(CC) $(TEST_CFLAGS) -o $@ $^ $(LDFLAGS) -lm
+
 # Build + run every standalone priority test in sequence.
 .PHONY: test_priorities
 test_priorities: test_recovery test_stateful_atoms test_plan_optimizer test_plan_cache \
-	test_learned_cost test_session_memory test_control_flow
+	test_learned_cost test_session_memory test_control_flow test_avian
 	./test_recovery
 	./test_stateful_atoms
 	./test_plan_optimizer
@@ -507,6 +512,7 @@ test_priorities: test_recovery test_stateful_atoms test_plan_optimizer test_plan
 	./test_learned_cost
 	./test_session_memory
 	./test_control_flow
+	./test_avian
 
 coverage: coverage_runner
 	./coverage_runner
