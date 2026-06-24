@@ -29,13 +29,23 @@
 
 static void parse_child_cost_report(swarm_child_t *c);
 
-static void swarm_export_child_credential(const char *model, const char *credential) {
-    provider_export_child_process_credentials(model, credential);
-}
-
 static void swarm_export_child_credential_for_provider(const char *provider,
                                                        const char *credential) {
     provider_export_child_process_credentials_for_provider(provider, credential);
+}
+
+static bool swarm_provider_cli_pin_supported(const char *provider) {
+    static const char *supported[] = {
+        "anthropic", "openai", "openrouter", "google", "groq", "deepseek",
+        "mistral", "xai", "together", "perplexity", "cerebras", "cohere",
+        "moonshot", "sakana", NULL
+    };
+    if (!provider || !provider[0])
+        return false;
+    for (int i = 0; supported[i]; i++)
+        if (strcmp(provider, supported[i]) == 0)
+            return true;
+    return false;
 }
 
 /* ── Bitset helpers ───────────────────────────────────────────────────── */
@@ -334,7 +344,7 @@ static void swarm_clear_next_instance(void) {
 }
 
 int swarm_spawn_in_group(swarm_t *s, int group_id, const char *task, const char *model) {
-    if (s->child_count >= SWARM_MAX_CHILDREN)
+    if (s->child_count >= dsco_swarm_max_children())
         return -1;
 
     int stdout_pipe[2];
@@ -383,32 +393,21 @@ int swarm_spawn_in_group(swarm_t *s, int group_id, const char *task, const char 
             m = s->default_model;
         const char *bin = s->dsco_path;
 
-        /* Ensure child inherits the exact credential/auth mode the parent resolved.
-         * Also resolve credentials for the child's model/provider — if the child
-         * uses a different provider (e.g. openrouter), export that provider's key too. */
-        swarm_export_child_credential(m, s->api_key);
-
-        /* ── If the child's model routes to a different provider than the parent,
-         * make sure that provider's key is also exported.  This handles the case
-         * where the parent runs on Anthropic but the child model is on OpenRouter. */
-        {
-            const char *child_provider = provider_detect(m, s->api_key);
-            const char *parent_provider = provider_detect(s->default_model, s->api_key);
-            if (child_provider && parent_provider && strcmp(child_provider, parent_provider) != 0) {
-                const char *child_key = provider_resolve_api_key(child_provider);
-                if (child_key && child_key[0]) {
-                    swarm_export_child_credential_for_provider(child_provider, child_key);
-                } else {
-                    /* No key for the child's provider — fall back to parent's model
-                     * so the child can actually run instead of dying on credential error. */
-                    fprintf(stdout,
-                            "swarm: no credentials for provider '%s' (model '%s'), "
-                            "falling back to parent model '%s'\n",
-                            child_provider, m, s->default_model);
-                    m = s->default_model;
-                }
-            }
+        const char *child_provider = provider_route_for_model(m, s->api_key, NULL);
+        const char *child_key =
+            provider_resolve_request_api_key(child_provider, s->api_key);
+        if ((!child_key || !child_key[0]) && s->default_model && s->default_model[0] &&
+            strcmp(m, s->default_model) != 0) {
+            fprintf(stdout,
+                    "swarm: no credentials for provider '%s' (model '%s'), "
+                    "falling back to parent model '%s'\n",
+                    child_provider ? child_provider : "(unknown)", m, s->default_model);
+            m = s->default_model;
+            child_provider = provider_route_for_model(m, s->api_key, NULL);
+            child_key = provider_resolve_request_api_key(child_provider, s->api_key);
         }
+        if (child_key && child_key[0])
+            swarm_export_child_credential_for_provider(child_provider, child_key);
 
         /* ── Clear DSCO_EXEC so the child uses native dsco routing, not an
          * external CLI executor.  The parent may have DSCO_EXEC=claude or
@@ -464,7 +463,20 @@ int swarm_spawn_in_group(swarm_t *s, int group_id, const char *task, const char 
         /* Use execl with absolute path (not execlp which searches PATH) */
         setenv("DSCO_PROFILE", "worker", 1);
         setenv("DSCO_WORKER", "1", 1);
-        execl(bin, bin, "--profile", "worker", "-m", m, task, NULL);
+        if (getenv("DSCO_DEBUG_SPAWN")) {
+            fprintf(stderr,
+                    "[spawn-dbg] child model='%s' default='%s' provider='%s' "
+                    "credential=%s\n",
+                    m ? m : "(null)", s->default_model ? s->default_model : "(null)",
+                    child_provider ? child_provider : "(null)",
+                    (child_key && child_key[0]) ? "set" : "unset");
+        }
+        if (swarm_provider_cli_pin_supported(child_provider)) {
+            execl(bin, bin, "--profile", "worker", "--provider", child_provider,
+                  "-m", m, task, NULL);
+        } else {
+            execl(bin, bin, "--profile", "worker", "-m", m, task, NULL);
+        }
 
         /* If exec fails, write a clear error */
         fprintf(stdout, "swarm: exec failed for '%s': %s\n", bin, strerror(errno));
@@ -511,7 +523,7 @@ int swarm_spawn_in_group(swarm_t *s, int group_id, const char *task, const char 
     /* Add to group if specified */
     if (group_id >= 0 && group_id < s->group_count) {
         swarm_group_t *g = &s->groups[group_id];
-        if (g->child_count < SWARM_MAX_CHILDREN) {
+        if (g->child_count < dsco_swarm_max_children()) {
             g->child_ids[g->child_count++] = id;
         }
     }
@@ -529,7 +541,7 @@ int swarm_spawn_provider(swarm_t *s, int group_id, const char *task, const char 
     if (!provider || !provider[0])
         return swarm_spawn_in_group(s, group_id, task, model);
 
-    if (s->child_count >= SWARM_MAX_CHILDREN)
+    if (s->child_count >= dsco_swarm_max_children())
         return -1;
 
     int stdout_pipe[2];
@@ -646,7 +658,7 @@ int swarm_spawn_provider(swarm_t *s, int group_id, const char *task, const char 
 
     if (group_id >= 0 && group_id < s->group_count) {
         swarm_group_t *g = &s->groups[group_id];
-        if (g->child_count < SWARM_MAX_CHILDREN)
+        if (g->child_count < dsco_swarm_max_children())
             g->child_ids[g->child_count++] = id;
     }
 
@@ -656,7 +668,7 @@ int swarm_spawn_provider(swarm_t *s, int group_id, const char *task, const char 
 /* ── Groups ───────────────────────────────────────────────────────────── */
 
 int swarm_group_create(swarm_t *s, const char *name) {
-    if (s->group_count >= SWARM_MAX_GROUPS)
+    if (s->group_count >= dsco_swarm_max_groups())
         return -1;
     int id = s->group_count;
     swarm_group_t *g = &s->groups[id];
@@ -766,10 +778,10 @@ static void child_read(swarm_child_t *c, int fd, swarm_stream_cb cb, void *ctx) 
 
         /* Grow output buffer if needed */
         size_t needed = c->output_len + (size_t)n + 1;
-        while (needed > c->output_cap && c->output_cap < SWARM_MAX_OUTPUT) {
+        while (needed > c->output_cap && c->output_cap < dsco_swarm_max_output()) {
             c->output_cap *= 2;
-            if (c->output_cap > SWARM_MAX_OUTPUT)
-                c->output_cap = SWARM_MAX_OUTPUT;
+            if (c->output_cap > dsco_swarm_max_output())
+                c->output_cap = dsco_swarm_max_output();
             c->output = safe_realloc(c->output, c->output_cap);
         }
 
@@ -1126,7 +1138,7 @@ int swarm_spawn_executor(swarm_t *s, int group_id, const char *task, const char 
         return swarm_spawn_in_group(s, group_id, task, model);
     }
 
-    if (s->child_count >= SWARM_MAX_CHILDREN)
+    if (s->child_count >= dsco_swarm_max_children())
         return -1;
 
     executor_registry_t *e = &s->executors;
@@ -1242,7 +1254,7 @@ int swarm_spawn_executor(swarm_t *s, int group_id, const char *task, const char 
 
     if (group_id >= 0 && group_id < s->group_count) {
         swarm_group_t *g = &s->groups[group_id];
-        if (g->child_count < SWARM_MAX_CHILDREN) {
+        if (g->child_count < dsco_swarm_max_children()) {
             g->child_ids[g->child_count++] = id;
         }
     }

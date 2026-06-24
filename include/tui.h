@@ -5,6 +5,7 @@
 #include <stddef.h>
 #include <stdio.h>
 #include <pthread.h>
+#include <stdint.h>
 
 /* ── ANSI Colors & Styles ─────────────────────────────────────────────── */
 #define TUI_RESET     "\033[0m"
@@ -48,6 +49,44 @@
 /* 256 color */
 #define TUI_FG256(n)  "\033[38;5;" #n "m"
 #define TUI_BG256(n)  "\033[48;5;" #n "m"
+
+/* Extended 256-color palette */
+#define TUI_SKY           TUI_FG256(75)
+#define TUI_TEAL          TUI_FG256(37)
+#define TUI_MINT          TUI_FG256(121)
+#define TUI_LIME          TUI_FG256(154)
+#define TUI_GOLD          TUI_FG256(220)
+#define TUI_AMBER         TUI_FG256(214)
+#define TUI_CORAL         TUI_FG256(203)
+#define TUI_PINK          TUI_FG256(205)
+#define TUI_VIOLET        TUI_FG256(141)
+#define TUI_LAVENDER      TUI_FG256(183)
+#define TUI_SLATE         TUI_FG256(244)
+#define TUI_STEEL         TUI_FG256(67)
+
+/* Semantic UI roles */
+#define TUI_ACCENT_PRIMARY   TUI_SKY
+#define TUI_ACCENT_SECONDARY TUI_VIOLET
+#define TUI_ACCENT_SUCCESS   TUI_MINT
+#define TUI_ACCENT_WARN      TUI_GOLD
+#define TUI_ACCENT_DANGER    TUI_CORAL
+#define TUI_ACCENT_MUTED     TUI_SLATE
+
+/* Semantic syntax roles */
+#define TUI_SYN_COMMENT   TUI_SLATE
+#define TUI_SYN_STRING    TUI_MINT
+#define TUI_SYN_ESCAPE    TUI_GOLD
+#define TUI_SYN_NUMBER    TUI_AMBER
+#define TUI_SYN_KEYWORD   TUI_VIOLET
+#define TUI_SYN_DECL      TUI_PINK
+#define TUI_SYN_TYPE      TUI_GOLD
+#define TUI_SYN_FUNCTION  TUI_SKY
+#define TUI_SYN_CONSTANT  TUI_CORAL
+#define TUI_SYN_PROPERTY  TUI_TEAL
+#define TUI_SYN_TAG       TUI_SKY
+#define TUI_SYN_OPERATOR  TUI_LAVENDER
+#define TUI_SYN_PUNCT     TUI_STEEL
+#define TUI_SYN_PREPROC   TUI_PINK
 
 /* ── Activity indicator (Claude Code aesthetic) ───────────────────────── */
 /* ⏺  U+23FA — the primary action bullet */
@@ -333,6 +372,14 @@ void tui_set_glyph_tier(tui_glyph_tier_t tier);
 
 typedef struct { unsigned char r, g, b; } tui_rgb_t;
 
+typedef struct {
+    char     name[160];
+    char     hex[8];
+    tui_rgb_t rgb;
+    int      ansi256;
+    uint64_t hash;
+} tui_named_color_t;
+
 /* Terminal capability levels */
 typedef enum {
     TUI_COLOR_NONE,      /* no color */
@@ -348,8 +395,24 @@ bool              tui_supports_truecolor(void);
 /* HSV (h=0-360, s/v=0-1) → RGB conversion */
 tui_rgb_t tui_hsv_to_rgb(float h, float s, float v);
 
+/* Deterministic named-color sampler. Names are unbounded; truecolor terminals
+ * expose up to 16,777,216 RGB colors, with automatic fallback elsewhere. */
+uint64_t  tui_color_name_hash(const char *name);
+int       tui_rgb_to_256(tui_rgb_t c);
+tui_rgb_t tui_named_color_rgb(const char *name);
+void      tui_named_color_sample(const char *name, tui_named_color_t *out);
+void      tui_construct_color_sample(const char *kind, const char *name,
+                                     const char *state, double weight,
+                                     tui_named_color_t *out);
+
 /* Write a foreground truecolor escape to stderr */
 void tui_fg_rgb(tui_rgb_t c);
+void tui_write_fg(FILE *out, tui_rgb_t c);
+void tui_write_bg(FILE *out, tui_rgb_t c);
+const char *tui_rgb_fg_escape(tui_rgb_t c);
+const char *tui_rgb_bg_escape(tui_rgb_t c);
+const char *tui_named_fg(const char *name);
+const char *tui_named_bg(const char *name);
 
 /* Print text with horizontal hue gradient (h_start→h_end degrees) */
 void tui_gradient_text(const char *text, float h_start, float h_end, float s, float v);

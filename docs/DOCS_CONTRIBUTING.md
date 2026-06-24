@@ -10,7 +10,7 @@ Keep documentation synchronized with behavior, not intent.
 - Header declaration changes (`*.h`) -> regenerate [API_REFERENCE.md](API_REFERENCE.md)
 - Runtime flow changes (`main.c`, `agent.c`, `llm.c`, `provider.c`, `swarm.c`, `ipc.c`) -> update [ARCHITECTURE.md](ARCHITECTURE.md)
 - Env/config/storage changes (`setup.c`, `baseline.c`, provider keys, paths) -> update [OPERATIONS.md](OPERATIONS.md)
-- New scripts/web assets -> update [PYTHON_AND_WEB_REFERENCE.md](PYTHON_AND_WEB_REFERENCE.md)
+- New supported scripts/web assets -> update [INDEX.md](INDEX.md) and the relevant runbook or reference doc
 - User-facing command changes -> update `README.md` and operations command list
 
 ## Generation Commands

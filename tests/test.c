@@ -7160,6 +7160,24 @@ static void test_provider_msg_is_context_overflow(void) {
     PASS();
 }
 
+static void test_provider_msg_is_credit_too_low_classifies_exhaustion(void) {
+    TEST("provider_msg_is_credit_too_low classifies subscription exhaustion");
+    ASSERT(provider_msg_is_credit_too_low(
+               "Subscription window is exhausted. Try again after 2026-06-24T04:03:31+00:00"),
+           "subscription window exhaustion detected");
+    ASSERT(provider_msg_is_credit_too_low("rate_limit_exceeded"),
+           "rate-limit error code detected");
+    ASSERT(provider_msg_is_credit_too_low("too many requests"),
+           "too-many-requests detected");
+    ASSERT(provider_msg_is_credit_too_low("usage limit reached"),
+           "usage-limit exhaustion detected");
+    ASSERT(!provider_msg_is_credit_too_low("invalid authentication credentials"),
+           "auth error is not credit/rate-limit exhaustion");
+    ASSERT(!provider_msg_is_credit_too_low(NULL) && !provider_msg_is_credit_too_low(""),
+           "null/empty are not credit/rate-limit exhaustion");
+    PASS();
+}
+
 static void test_provider_detect_matrix(void) {
     TEST("provider_detect routes common model families");
     ASSERT(strcmp(provider_detect("claude-sonnet-4-6", NULL), "anthropic") == 0,
@@ -7189,6 +7207,8 @@ static void test_provider_detect_namespaced_models(void) {
            "openai namespaced model should prefer OpenAI-family routing");
     ASSERT(strcmp(provider_detect("anthropic/claude-sonnet-4-6", NULL), "openrouter") == 0,
            "anthropic namespaced model should route through openrouter");
+    ASSERT(strcmp(provider_detect("sakana/fugu-ultra", NULL), "sakana") == 0,
+           "sakana namespaced model should route to native Sakana");
     ASSERT(strcmp(provider_detect("openrouter/auto", NULL), "openrouter") == 0,
            "openrouter auto route should stay openrouter");
     PASS();
@@ -7534,6 +7554,98 @@ static void test_provider_build_default_fallback_models_cross_lab(void) {
     test_restore_env("SAKANA_API_KEY", saved_sakana, had_sakana);
     test_restore_env("FISH_API_KEY", saved_fish, had_fish);
     test_restore_env("SAKANA_TOKEN", saved_sakana_token, had_sakana_token);
+    PASS();
+}
+
+static void test_provider_build_default_fallback_models_for_fugu_cross_provider(void) {
+    TEST("provider_build_default_fallback_models for Fugu uses other subscriptions");
+    char saved_xai[256], saved_grok[256], saved_x_ai[256], saved_or[256];
+    char saved_anth[256], saved_openai[256], saved_disable_codex[256];
+    char saved_fugu[256], saved_sakana[256], saved_fish[256], saved_sakana_token[256];
+    bool had_xai = false, had_grok = false, had_x_ai = false, had_or = false;
+    bool had_anth = false, had_openai = false, had_disable_codex = false;
+    bool had_fugu = false, had_sakana = false, had_fish = false, had_sakana_token = false;
+    test_capture_env("XAI_API_KEY", saved_xai, sizeof(saved_xai), &had_xai);
+    test_capture_env("GROK_API_KEY", saved_grok, sizeof(saved_grok), &had_grok);
+    test_capture_env("X_AI_API_KEY", saved_x_ai, sizeof(saved_x_ai), &had_x_ai);
+    test_capture_env("OPENROUTER_API_KEY", saved_or, sizeof(saved_or), &had_or);
+    test_capture_env("ANTHROPIC_API_KEY", saved_anth, sizeof(saved_anth), &had_anth);
+    test_capture_env("OPENAI_API_KEY", saved_openai, sizeof(saved_openai), &had_openai);
+    test_capture_env("DSCO_DISABLE_CODEX_OAUTH_DISCOVERY", saved_disable_codex,
+                     sizeof(saved_disable_codex), &had_disable_codex);
+    test_capture_env("FUGU_API_KEY", saved_fugu, sizeof(saved_fugu), &had_fugu);
+    test_capture_env("SAKANA_API_KEY", saved_sakana, sizeof(saved_sakana), &had_sakana);
+    test_capture_env("FISH_API_KEY", saved_fish, sizeof(saved_fish), &had_fish);
+    test_capture_env("SAKANA_TOKEN", saved_sakana_token, sizeof(saved_sakana_token),
+                     &had_sakana_token);
+
+    unsetenv("XAI_API_KEY");
+    unsetenv("GROK_API_KEY");
+    unsetenv("X_AI_API_KEY");
+    unsetenv("OPENROUTER_API_KEY");
+    setenv("ANTHROPIC_API_KEY", "sk-ant-native", 1);
+    setenv("OPENAI_API_KEY", "sk-openai-native", 1);
+    setenv("DSCO_DISABLE_CODEX_OAUTH_DISCOVERY", "1", 1);
+    setenv("FUGU_API_KEY", "fish_native", 1);
+    unsetenv("SAKANA_API_KEY");
+    unsetenv("FISH_API_KEY");
+    unsetenv("SAKANA_TOKEN");
+
+    char models[4][128];
+    int count = provider_build_default_fallback_models("fugu", models, 4);
+
+    ASSERT(count >= 2, "Fugu fallback chain should include other keyed providers");
+    ASSERT(strcmp(provider_route_for_model(models[0], NULL, NULL), "anthropic") == 0,
+           "first non-Fugu fallback should use Anthropic");
+    ASSERT(strcmp(provider_route_for_model(models[1], NULL, NULL), "openai") == 0,
+           "second non-Fugu fallback should use OpenAI direct API when Codex discovery is disabled");
+
+    test_restore_env("XAI_API_KEY", saved_xai, had_xai);
+    test_restore_env("GROK_API_KEY", saved_grok, had_grok);
+    test_restore_env("X_AI_API_KEY", saved_x_ai, had_x_ai);
+    test_restore_env("OPENROUTER_API_KEY", saved_or, had_or);
+    test_restore_env("ANTHROPIC_API_KEY", saved_anth, had_anth);
+    test_restore_env("OPENAI_API_KEY", saved_openai, had_openai);
+    test_restore_env("DSCO_DISABLE_CODEX_OAUTH_DISCOVERY", saved_disable_codex,
+                     had_disable_codex);
+    test_restore_env("FUGU_API_KEY", saved_fugu, had_fugu);
+    test_restore_env("SAKANA_API_KEY", saved_sakana, had_sakana);
+    test_restore_env("FISH_API_KEY", saved_fish, had_fish);
+    test_restore_env("SAKANA_TOKEN", saved_sakana_token, had_sakana_token);
+    PASS();
+}
+
+static void test_provider_route_keeps_sakana_native(void) {
+    TEST("provider routing keeps Sakana native");
+    char saved_fugu[256], saved_sakana[256], saved_fish[256], saved_token[256], saved_or[256];
+    bool had_fugu = false, had_sakana = false, had_fish = false, had_token = false, had_or = false;
+    test_capture_env("FUGU_API_KEY", saved_fugu, sizeof(saved_fugu), &had_fugu);
+    test_capture_env("SAKANA_API_KEY", saved_sakana, sizeof(saved_sakana), &had_sakana);
+    test_capture_env("FISH_API_KEY", saved_fish, sizeof(saved_fish), &had_fish);
+    test_capture_env("SAKANA_TOKEN", saved_token, sizeof(saved_token), &had_token);
+    test_capture_env("OPENROUTER_API_KEY", saved_or, sizeof(saved_or), &had_or);
+
+    unsetenv("FUGU_API_KEY");
+    unsetenv("SAKANA_API_KEY");
+    unsetenv("FISH_API_KEY");
+    unsetenv("SAKANA_TOKEN");
+    setenv("OPENROUTER_API_KEY", "sk-or-router", 1);
+
+    const char *routed = provider_route_for_model("fugu", NULL, NULL);
+    ASSERT(strcmp(routed, "sakana") == 0,
+           "Fugu should not fall back to OpenRouter when Sakana credentials are absent");
+
+    routed = provider_route_for_model("sakana/fugu-ultra", "fish_session", NULL);
+    const char *req_key = provider_resolve_request_api_key(routed, "fish_session");
+    ASSERT(strcmp(routed, "sakana") == 0, "Sakana namespace should stay native");
+    ASSERT(req_key && strcmp(req_key, "fish_session") == 0,
+           "Sakana request should reuse a matching session key");
+
+    test_restore_env("FUGU_API_KEY", saved_fugu, had_fugu);
+    test_restore_env("SAKANA_API_KEY", saved_sakana, had_sakana);
+    test_restore_env("FISH_API_KEY", saved_fish, had_fish);
+    test_restore_env("SAKANA_TOKEN", saved_token, had_token);
+    test_restore_env("OPENROUTER_API_KEY", saved_or, had_or);
     PASS();
 }
 
@@ -7911,7 +8023,7 @@ static void test_swarm_poll_reaps_killed_child_without_readable_fds(void) {
            "failed to create temp swarm script");
 
     swarm_t sw;
-    swarm_init(&sw, NULL, "grok-4-fast");
+    swarm_init(&sw, "xai-test-key", "grok-4-fast");
     free((void *)sw.dsco_path);
     sw.dsco_path = safe_strdup(script_path);
 
@@ -7986,6 +8098,8 @@ static void test_swarm_spawn_uses_worker_profile(void) {
 
     ASSERT(strstr(buf, "--profile\nworker\n") != NULL,
            "swarm child argv should include --profile worker");
+    ASSERT(strstr(buf, "--provider\nxai\n") != NULL,
+           "swarm child argv should pin the resolved provider");
     ASSERT(strstr(buf, "-m\ngrok-4-fast\n") != NULL,
            "swarm child argv should preserve model argument");
 
@@ -13559,6 +13673,7 @@ int main(void) {
     test_model_context_window_lookup();
     test_switch_reason_names();
     test_provider_msg_is_context_overflow();
+    test_provider_msg_is_credit_too_low_classifies_exhaustion();
     test_provider_detect_matrix();
     test_provider_detect_namespaced_models();
     test_provider_model_family_detects_underlying_family();
@@ -13571,6 +13686,8 @@ int main(void) {
     test_provider_resolve_api_key_supports_generic_providers();
     test_provider_select_default_primary_model_prefers_glm_kimi();
     test_provider_build_default_fallback_models_cross_lab();
+    test_provider_build_default_fallback_models_for_fugu_cross_provider();
+    test_provider_route_keeps_sakana_native();
     test_provider_route_uses_session_key_when_native_env_missing();
     test_provider_route_uses_claude_code_oauth_when_env_key_missing();
     test_provider_route_uses_claude_code_credentials_file_when_present();

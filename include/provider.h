@@ -145,4 +145,20 @@ int provider_build_default_fallback_models(const char *model,
  * toward cost-effective frontier models, currently favoring Grok. */
 const char *provider_select_default_primary_model(bool prefer_code);
 
+/* Map a raw API key to its native provider purely from its prefix
+ * (e.g. "fish_" -> sakana, "sk-ant-" -> anthropic, "xai-" -> xai). Unlike
+ * provider_detect(), this never falls back to a default: an unrecognized
+ * prefix returns NULL. */
+const char *provider_provider_for_api_key(const char *api_key);
+
+/* Publish a raw key under its provider's canonical env var (only if that var
+ * is not already set) so every downstream credential lookup recognizes it.
+ * Returns the detected provider name, or NULL if the prefix is unknown. */
+const char *provider_publish_api_key_env(const char *api_key);
+
+/* Public wrapper: the primary model id for a given provider family, honoring
+ * which credentials are actually available. Returns NULL if the family has no
+ * usable route. */
+const char *provider_primary_model_for(const char *family, bool prefer_code);
+
 #endif

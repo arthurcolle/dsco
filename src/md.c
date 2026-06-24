@@ -1964,31 +1964,31 @@ void md_render_code_line(FILE *out, const char *line, const char *lang) {
         /* Comments */
         if ((is_c || is_js || is_rust || is_go || is_java || is_css) && p[0] == '/' &&
             p[1] == '/') {
-            fprintf(out, "%s", TUI_DIM);
+            fprintf(out, "%s", tui_named_fg("syntax.comment.line"));
             fputs_safe(out, p);
             fprintf(out, "%s", TUI_RESET);
             return;
         }
         if (is_c && p[0] == '/' && p[1] == '*') {
-            fprintf(out, "%s", TUI_DIM);
+            fprintf(out, "%s", tui_named_fg("syntax.comment.block"));
             fputs_safe(out, p);
             fprintf(out, "%s", TUI_RESET);
             return;
         }
         if ((is_py || is_sh || is_rb || is_yaml) && *p == '#') {
-            fprintf(out, "%s", TUI_DIM);
+            fprintf(out, "%s", tui_named_fg("syntax.comment.hash"));
             fputs_safe(out, p);
             fprintf(out, "%s", TUI_RESET);
             return;
         }
         if (is_sql && *p == '-' && p[1] == '-') {
-            fprintf(out, "%s", TUI_DIM);
+            fprintf(out, "%s", tui_named_fg("syntax.comment.sql"));
             fputs_safe(out, p);
             fprintf(out, "%s", TUI_RESET);
             return;
         }
         if (is_html && p[0] == '<' && p[1] == '!' && p[2] == '-' && p[3] == '-') {
-            fprintf(out, "%s", TUI_DIM);
+            fprintf(out, "%s", tui_named_fg("syntax.comment.html"));
             fputs_safe(out, p);
             fprintf(out, "%s", TUI_RESET);
             return;
@@ -1997,11 +1997,12 @@ void md_render_code_line(FILE *out, const char *line, const char *lang) {
         /* Strings */
         if (*p == '"' || *p == '\'' || (is_py && *p == '\'')) {
             char quote = *p;
-            fprintf(out, "%s%c", TUI_GREEN, quote);
+            fprintf(out, "%s%c", tui_named_fg("syntax.string"), quote);
             p++;
             while (*p && *p != quote) {
                 if (*p == '\\' && p[1]) {
-                    fprintf(out, "%s\\%c%s", TUI_BYELLOW, p[1], TUI_GREEN);
+                    fprintf(out, "%s\\%c%s", tui_named_fg("syntax.escape"), p[1],
+                            tui_named_fg("syntax.string"));
                     p += 2;
                 } else {
                     fput_safe_byte(out, (unsigned char)*p);
@@ -2018,7 +2019,7 @@ void md_render_code_line(FILE *out, const char *line, const char *lang) {
 
         /* Numbers */
         if (isdigit((unsigned char)*p) && (p == line || !isalpha((unsigned char)*(p - 1)))) {
-            fprintf(out, "%s", TUI_BYELLOW);
+            fprintf(out, "%s", tui_named_fg("syntax.number"));
             while (isdigit((unsigned char)*p) || *p == '.' || *p == 'x' || *p == 'X' ||
                    (*p >= 'a' && *p <= 'f') || (*p >= 'A' && *p <= 'F')) {
                 fputc(*p, out);
@@ -2034,7 +2035,7 @@ void md_render_code_line(FILE *out, const char *line, const char *lang) {
 
         /* C preprocessor */
         if (is_c && *p == '#' && (p == line || *(p - 1) == ' ' || *(p - 1) == '\t')) {
-            fprintf(out, "%s", TUI_BMAGENTA);
+            fprintf(out, "%s", tui_named_fg("syntax.preprocessor"));
             while (*p && *p != ' ' && *p != '\t' && *p != '\n') {
                 fputc(*p, out);
                 p++;
@@ -2045,7 +2046,7 @@ void md_render_code_line(FILE *out, const char *line, const char *lang) {
 
         /* HTML/XML tags */
         if (is_html && *p == '<') {
-            fprintf(out, "%s", TUI_BBLUE);
+            fprintf(out, "%s", tui_named_fg("syntax.tag"));
             while (*p && *p != '>') {
                 fputc(*p, out);
                 p++;
@@ -2063,7 +2064,7 @@ void md_render_code_line(FILE *out, const char *line, const char *lang) {
             fputc(*p, out);
             p++;
             /* Value part in a different color */
-            fprintf(out, "%s", TUI_BCYAN);
+            fprintf(out, "%s", tui_named_fg("syntax.css.value"));
             while (*p && *p != ';' && *p != '}') {
                 fputc(*p, out);
                 p++;
@@ -2081,7 +2082,7 @@ void md_render_code_line(FILE *out, const char *line, const char *lang) {
                 while (*after == ' ' || *after == '\t')
                     after++;
                 if (*after == ':') {
-                    fprintf(out, "%s", TUI_BCYAN);
+                    fprintf(out, "%s", tui_named_fg("syntax.json.key"));
                     while (p <= end) {
                         fputc(*p, out);
                         p++;
@@ -2091,11 +2092,12 @@ void md_render_code_line(FILE *out, const char *line, const char *lang) {
                 }
             }
             /* It's a value string */
-            fprintf(out, "%s\"", TUI_GREEN);
+            fprintf(out, "%s\"", tui_named_fg("syntax.json.string"));
             p++;
             while (*p && *p != '"') {
                 if (*p == '\\' && p[1]) {
-                    fprintf(out, "%s\\%c%s", TUI_BYELLOW, p[1], TUI_GREEN);
+                    fprintf(out, "%s\\%c%s", tui_named_fg("syntax.escape"), p[1],
+                            tui_named_fg("syntax.json.string"));
                     p += 2;
                 } else {
                     fput_safe_byte(out, (unsigned char)*p);
@@ -2114,7 +2116,7 @@ void md_render_code_line(FILE *out, const char *line, const char *lang) {
         if (is_yaml && (p == line || *(p - 1) == '\n')) {
             const char *colon = strchr(p, ':');
             if (colon && colon > p) {
-                fprintf(out, "%s", TUI_BCYAN);
+                fprintf(out, "%s", tui_named_fg("syntax.yaml.key"));
                 while (p <= colon) {
                     fputc(*p, out);
                     p++;
@@ -2332,21 +2334,47 @@ void md_render_code_line(FILE *out, const char *line, const char *lang) {
             }
 
             if (is_kw) {
-                fprintf(out, "%s%s%s", TUI_BMAGENTA, word, TUI_RESET);
+                const char *role = "syntax.keyword";
+                if (strcmp(word, "def") == 0 || strcmp(word, "class") == 0 ||
+                    strcmp(word, "fn") == 0 || strcmp(word, "func") == 0 ||
+                    strcmp(word, "function") == 0 || strcmp(word, "struct") == 0 ||
+                    strcmp(word, "enum") == 0 || strcmp(word, "interface") == 0)
+                    role = "syntax.declaration";
+                else if (strcmp(word, "true") == 0 || strcmp(word, "false") == 0 ||
+                         strcmp(word, "True") == 0 || strcmp(word, "False") == 0 ||
+                         strcmp(word, "None") == 0 || strcmp(word, "NULL") == 0 ||
+                         strcmp(word, "null") == 0 || strcmp(word, "nil") == 0 ||
+                         strcmp(word, "undefined") == 0)
+                    role = "syntax.constant";
+                fprintf(out, "%s%s%s", tui_named_fg(role), word, TUI_RESET);
             } else {
                 /* Check if it looks like a type (starts with uppercase in most langs) */
                 if (isupper((unsigned char)word[0]) && !is_sql && !is_sh) {
-                    fprintf(out, "%s%s%s", TUI_BYELLOW, word, TUI_RESET);
+                    fprintf(out, "%s%s%s", tui_named_fg("syntax.type"), word, TUI_RESET);
                 } else {
-                    fputs(word, out);
+                    const char *q = p;
+                    while (*q == ' ' || *q == '\t')
+                        q++;
+                    if (*q == '(' && !is_sql && !is_sh)
+                        fprintf(out, "%s%s%s", tui_named_fg("syntax.function.call"), word,
+                                TUI_RESET);
+                    else
+                        fputs(word, out);
                 }
             }
             continue;
         }
 
+        /* Punctuation */
+        if (strchr("()[]{}.,;", *p)) {
+            fprintf(out, "%s%c%s", tui_named_fg("syntax.punctuation"), *p, TUI_RESET);
+            p++;
+            continue;
+        }
+
         /* Operators */
         if (strchr("=!<>+-*/&|^~%?:", *p)) {
-            fprintf(out, "%s%c%s", TUI_CYAN, *p, TUI_RESET);
+            fprintf(out, "%s%c%s", tui_named_fg("syntax.operator"), *p, TUI_RESET);
             p++;
             continue;
         }
