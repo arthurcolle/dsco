@@ -144,6 +144,12 @@ void session_state_init(session_state_t *s, const char *model) {
         const char *tc = getenv("DSCO_TOOL_CHOICE");
         if (tc && *tc)
             snprintf(s->tool_choice, sizeof(s->tool_choice), "%s", tc);
+        const char *pck = getenv("DSCO_PROMPT_CACHE_KEY");
+        if (pck && *pck)
+            snprintf(s->prompt_cache_key, sizeof(s->prompt_cache_key), "%s", pck);
+        const char *pcr = getenv("DSCO_PROMPT_CACHE_RETENTION");
+        if (pcr && *pcr)
+            snprintf(s->prompt_cache_retention, sizeof(s->prompt_cache_retention), "%s", pcr);
     }
 }
 
