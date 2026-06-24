@@ -52,6 +52,10 @@
  *   ~/.dsco/child-metrics-<pid>.jsonl      low-rate child RSS samples
  * ─────────────────────────────────────────────────────────────────────── */
 
+/* Reserved nonzero exits that are expected process outcomes, not crashes. */
+#define DSCO_EXIT_CONFIG 78
+#define DSCO_EXIT_USER_REQUESTED 79
+
 /* Run argv as a supervised dsco child. Blocks until the child exits cleanly
  * or the circuit breaker trips. Returns the child's final exit status (or a
  * nonzero code if supervision gave up). */

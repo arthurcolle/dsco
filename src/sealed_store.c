@@ -64,7 +64,9 @@ static void sealed_wiper(void *ctx) {
 static const char *s_env_keys[] = {"ANTHROPIC_API_KEY",  "OPENAI_API_KEY",
                                    "GEMINI_API_KEY",     "XAI_API_KEY",
                                    "DEEPSEEK_API_KEY",   "GROQ_API_KEY",
-                                   "OPENROUTER_API_KEY", "DSCO_MESH_SECRET",
+                                   "OPENROUTER_API_KEY", "SAKANA_API_KEY",
+                                   "FISH_API_KEY",       "FUGU_API_KEY",
+                                   "DSCO_MESH_SECRET",
                                    "DSCO_NET_AUTH_KEY",  NULL};
 
 static void load_from_env(void) {

@@ -506,6 +506,8 @@ static uint64_t resolve_mem_hard_limit(void) {
 /* ── Crash classification ─────────────────────────────────────────────── */
 typedef enum {
     EXIT_CLEAN = 0,       /* WIFEXITED, status 0 */
+    EXIT_USER_REQUESTED,  /* WIFEXITED, user explicitly chose /exit or /quit */
+    EXIT_CONFIG,          /* WIFEXITED, configuration/user-action failure */
     EXIT_NONZERO,         /* WIFEXITED, status != 0 */
     EXIT_SIGNAL,          /* WIFSIGNALED — SIGSEGV, SIGBUS, SIGABRT, etc. */
     EXIT_OOM_KILL,        /* WIFSIGNALED, SIGKILL — likely jetsam/OOM */
@@ -514,6 +516,8 @@ typedef enum {
 static const char *crash_class_name(crash_class_t c) {
     switch (c) {
         case EXIT_CLEAN:     return "clean";
+        case EXIT_USER_REQUESTED: return "user_exit";
+        case EXIT_CONFIG:    return "config";
         case EXIT_NONZERO:   return "nonzero";
         case EXIT_SIGNAL:    return "signal";
         case EXIT_OOM_KILL:  return "oom_kill";
@@ -524,15 +528,17 @@ static const char *crash_class_name(crash_class_t c) {
 static crash_class_t classify_exit(int status) {
     if (WIFEXITED(status)) {
         int code = WEXITSTATUS(status);
-        if (code == 0)                return EXIT_CLEAN;
-        /* 130=SIGINT, 131=SIGQUIT: deliberate user kill, not a crash */
-        if (code == 130 || code == 131) return EXIT_CLEAN;
+        if (code == 0)                         return EXIT_CLEAN;
+        if (code == DSCO_EXIT_USER_REQUESTED)  return EXIT_USER_REQUESTED;
+        if (code == DSCO_EXIT_CONFIG)          return EXIT_CONFIG;
+        /* 130=SIGINT, 131=SIGQUIT: deliberate user kill, not a crash/restart. */
+        if (code == 130 || code == 131) return EXIT_USER_REQUESTED;
         return EXIT_NONZERO;
     }
     if (WIFSIGNALED(status)) {
         int sig = WTERMSIG(status);
-        /* Terminal signals are deliberate user actions, not crashes */
-        if (sig == SIGINT || sig == SIGQUIT) return EXIT_CLEAN;
+        /* Terminal signals are deliberate user actions, not crashes/restarts. */
+        if (sig == SIGINT || sig == SIGQUIT) return EXIT_USER_REQUESTED;
         if (sig == SIGKILL)                  return EXIT_OOM_KILL;
         return EXIT_SIGNAL;
     }
@@ -1075,6 +1081,28 @@ int supervisor_run(int child_argc, char **child_argv) {
         } else {
             unsetenv("DSCO_MEM_PRESSURE");
             unsetenv("DSCO_RESUME_AFTER_CRASH");
+        }
+
+        if (cls == EXIT_CONFIG) {
+            int code = WIFEXITED(status) ? WEXITSTATUS(status) : 1;
+            fprintf(stderr,
+                    "[supervisor] child exited with configuration error; not restarting.\n");
+            supervisor_log("event=child_exit child_pid=%d class=%s exit_code=%d restart=never peak_rss_mb=%llu",
+                           (int)child, crash_class_name(cls), code,
+                           (unsigned long long)(peak_rss >> 20));
+            fleet_remove();
+            return code;
+        }
+
+        if (cls == EXIT_USER_REQUESTED) {
+            if (restart_count > 0)
+                fprintf(stderr, "[supervisor] child exited by user request after %d restart(s).\n",
+                        restart_count);
+            supervisor_log("event=child_exit child_pid=%d class=%s restart=user_exit peak_rss_mb=%llu",
+                           (int)child, crash_class_name(cls),
+                           (unsigned long long)(peak_rss >> 20));
+            fleet_remove();
+            return 0;
         }
 
         /* Clean exit — honour OTP restart semantics. transient/temporary stop;

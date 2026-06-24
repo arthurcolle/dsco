@@ -4,16 +4,35 @@
 #include <stdbool.h>
 #include <stddef.h>
 #include <sys/types.h>
+#include "env_config.h"
 
 /* ── Sub-dsco process handle ──────────────────────────────────────────── */
 
-#define SWARM_MAX_CHILDREN  64
-#define SWARM_MAX_GROUPS    16
+#define SWARM_MAX_CHILDREN  64  /* structural array/bitset cap; not env-resizable */
+#define SWARM_MAX_GROUPS    16  /* structural array cap; not env-resizable */
 #define SWARM_MAX_OUTPUT    (512 * 1024)
 #define SWARM_LABEL_LEN     128
 #define SWARM_GROUP_NAME_LEN 64
 #define SWARM_MAX_DEPTH     6
 #define SWARM_READ_BUF      (64 * 1024) /* 64KB read buffer (was 4KB) */
+
+/* Runtime caps. These cannot exceed the structural compile-time maxima above
+ * without changing struct layouts and the 64-bit active-child bitset. */
+static inline int dsco_swarm_max_children(void) {
+    return dsco_env_int("DSCO_SWARM_MAX_CHILDREN", SWARM_MAX_CHILDREN, 1, SWARM_MAX_CHILDREN);
+}
+static inline int dsco_swarm_max_groups(void) {
+    return dsco_env_int("DSCO_SWARM_MAX_GROUPS", SWARM_MAX_GROUPS, 1, SWARM_MAX_GROUPS);
+}
+static inline int dsco_swarm_max_depth(void) {
+    return dsco_env_int("DSCO_SWARM_MAX_DEPTH", SWARM_MAX_DEPTH, 0, SWARM_MAX_DEPTH);
+}
+static inline size_t dsco_swarm_max_output(void) {
+    return dsco_env_size("DSCO_SWARM_MAX_OUTPUT", SWARM_MAX_OUTPUT, 4096, SWARM_MAX_OUTPUT);
+}
+static inline size_t dsco_swarm_read_buf(void) {
+    return dsco_env_size("DSCO_SWARM_READ_BUF", SWARM_READ_BUF, 1024, SWARM_READ_BUF);
+}
 
 typedef enum {
     SWARM_PENDING,

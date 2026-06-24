@@ -13,6 +13,7 @@
 #include "baseline.h"
 #include "setup.h"
 #include "provider.h"
+#include "provider_profiles.h"
 #include "openrouter_cache.h"
 #include "topology.h"
 #include "workspace.h"
@@ -492,6 +493,89 @@ static bool main_argv_has_value(int argc, char **argv, const char *flag,
     return false;
 }
 
+static bool main_is_credential_env_name(const char *name) {
+    if (!name || !name[0])
+        return false;
+    unsigned char first = (unsigned char)name[0];
+    if (!(isalpha(first) || first == '_'))
+        return false;
+    for (const char *p = name; *p; p++) {
+        unsigned char ch = (unsigned char)*p;
+        if (!(isalnum(ch) || ch == '_'))
+            return false;
+    }
+    return strcmp(name, "API_KEY") == 0 ||
+           strstr(name, "_API_KEY") != NULL ||
+           strstr(name, "_AUTH_TOKEN") != NULL ||
+           strstr(name, "_ACCESS_TOKEN") != NULL ||
+           strstr(name, "_TOKEN") != NULL ||
+           strstr(name, "_KEY") != NULL;
+}
+
+static bool main_parse_credential_assignment(const char *arg, char *env_name,
+                                             size_t env_name_len,
+                                             const char **value_out) {
+    if (env_name && env_name_len)
+        env_name[0] = '\0';
+    if (value_out)
+        *value_out = NULL;
+    if (!arg || !arg[0] || !env_name || env_name_len == 0 || !value_out)
+        return false;
+
+    const char *eq = strchr(arg, '=');
+    if (!eq || eq == arg || !eq[1])
+        return false;
+
+    size_t name_len = (size_t)(eq - arg);
+    if (name_len >= env_name_len)
+        return false;
+
+    memcpy(env_name, arg, name_len);
+    env_name[name_len] = '\0';
+    if (!main_is_credential_env_name(env_name)) {
+        env_name[0] = '\0';
+        return false;
+    }
+
+    *value_out = eq + 1;
+    return true;
+}
+
+static bool main_cli_token_looks_like_api_key(const char *value) {
+    if (!value || !value[0] || value[0] == '-')
+        return false;
+    if (provider_provider_for_api_key(value))
+        return true;
+
+    size_t n = strlen(value);
+    if (n < 20)
+        return false;
+
+    bool has_alpha = false;
+    bool has_digit = false;
+    bool has_secret_punct = false;
+    for (const char *p = value; *p; p++) {
+        unsigned char ch = (unsigned char)*p;
+        if (isspace(ch) || iscntrl(ch) || ch == '=')
+            return false;
+        if (isalpha(ch))
+            has_alpha = true;
+        else if (isdigit(ch))
+            has_digit = true;
+        else if (ch == '_' || ch == '-' || ch == '.')
+            has_secret_punct = true;
+    }
+    return has_alpha && (has_digit || has_secret_punct);
+}
+
+static bool main_store_cli_credential(const char *env_name, const char *value) {
+    if (!env_name || !env_name[0] || !value || !value[0])
+        return false;
+    if (sealed_store_put(env_name, value, 0) == 0)
+        return true;
+    return setenv(env_name, value, 1) == 0;
+}
+
 static dsco_profile_t main_runtime_profile(int argc, char **argv) {
     dsco_profile_t profile = DSCO_PROFILE_FULL;
 
@@ -564,8 +648,17 @@ static dsco_caps_t main_plan_startup_caps(int argc, char **argv,
             has_prompt = true;
             break;
         }
+        if (strcmp(argv[i], "-k") == 0 && i + 1 < argc) {
+            if (main_is_credential_env_name(argv[i + 1]) &&
+                i + 2 < argc &&
+                main_cli_token_looks_like_api_key(argv[i + 2])) {
+                i += 2;
+            } else {
+                i++;
+            }
+            continue;
+        }
         if ((strcmp(argv[i], "-m") == 0 ||
-             strcmp(argv[i], "-k") == 0 ||
              strcmp(argv[i], "-M") == 0 ||
              strcmp(argv[i], "--worker-model") == 0 ||
              strcmp(argv[i], "--exec") == 0 ||
@@ -894,6 +987,8 @@ static const native_provider_t NATIVE_PROVIDERS[] = {
       CAP_TOOLS|CAP_MULTITURN|CAP_STREAMING|CAP_JSON, 3 },
     { "moonshot",   "Moonshot Kimi API",         "MOONSHOT_API_KEY",    "kimi-k2.7-code-highspeed",
       CAP_TOOLS|CAP_MULTITURN|CAP_STREAMING|CAP_VISION|CAP_THINKING|CAP_JSON, 4 },
+    { "sakana",     "Sakana Fugu API",           "FUGU_API_KEY",        "fugu",
+      CAP_TOOLS|CAP_MULTITURN|CAP_STREAMING|CAP_VISION|CAP_THINKING|CAP_JSON, 4 },
     { NULL, NULL, NULL, NULL, 0, 0 }
 };
 
@@ -906,11 +1001,28 @@ static const exec_reg_t *exec_find(const char *name) {
 }
 
 static const native_provider_t *native_find(const char *name) {
+    name = provider_profile_canonical_name(name);
+    if (!name || !name[0])
+        return NULL;
     for (int i = 0; NATIVE_PROVIDERS[i].name; i++) {
         if (strcmp(NATIVE_PROVIDERS[i].name, name) == 0)
             return &NATIVE_PROVIDERS[i];
     }
     return NULL;
+}
+
+static const char *native_default_model_for_setting(const native_provider_t *np,
+                                                    const char *setting) {
+    if (!np)
+        return NULL;
+    if (strcmp(np->name, "sakana") == 0) {
+        if (setting && strstr(setting, "fugu-ultra-20260615"))
+            return "fugu-ultra-20260615";
+        if (setting && strstr(setting, "fugu-ultra"))
+            return "fugu-ultra";
+        return "fugu";
+    }
+    return np->example_model;
 }
 
 static bool exec_bin_available(const char *bin) {
@@ -1930,7 +2042,7 @@ static void usage(const char *prog) {
         "\n"
         "Options:\n"
         "  -m MODEL    Model name (default: %s)\n"
-        "  -k KEY      API key (default: provider env for selected model)\n"
+        "  -k KEY      API key, or ENV=KEY / ENV KEY (default: provider env for selected model)\n"
         "  --profile full|lite|worker  Runtime startup profile (default: full)\n"
         "  --login                Interactive backend login (Claude Code / Codex)\n"
         "  --setup                Save detected API keys/tokens into dsco env file\n"
@@ -1950,7 +2062,7 @@ static void usage(const char *prog) {
         "  -i, --interactive      Start an interactive REPL (no prompt required)\n"
         "  --local                Use LM Studio locally (default model: liquid/lfm2.5-1.2b)\n"
         "  -e, --exec BACKEND    Execute via CLI/provider (claude, codex, auto, smart, list, bench, bench-tools, smoke, smoke-full, <provider>)\n"
-        "  --provider NAME       Force a native provider (anthropic, openai, openrouter, xai, ...)\n"
+        "  --provider NAME       Force a native provider (anthropic, openai, openrouter, fugu/sakana, xai, ...)\n"
         "  --                    Pass remaining args to executor (after -e)\n"
         "  -C, --cheap            Cheap mode: 5 core tools + discover/load (env: DSCO_CHEAP=1)\n"
         "  --version              Print version and build info\n"
@@ -1962,11 +2074,12 @@ static void usage(const char *prog) {
         "Environment:\n"
         "  ANTHROPIC_API_KEY   Anthropic API key (Claude Code OAuth is auto-detected when available)\n"
         "  OPENROUTER_API_KEY  OpenRouter API key for namespaced org/model IDs\n"
+        "  FUGU_API_KEY        Sakana/Fugu API key (SAKANA_API_KEY also accepted)\n"
         "  DSCO_MODEL          Default model override\n"
         "  DSCO_PROFILE        Runtime startup profile when full/lite/worker\n"
         "  DSCO_ENV_FILE       Override setup env file path\n"
         "  DSCO_BASELINE_DB    Override sqlite baseline path\n"
-        "  DSCO_EXEC           Default executor (claude, codex, auto)\n"
+        "  DSCO_EXEC           Default executor/provider (claude, codex, auto, fugu, sakana)\n"
         "  DSCO_BUDGET         Session cost budget in dollars (0=unlimited)\n"
         "  DSCO_DAILY_BUDGET   Daily cost budget in dollars (0=unlimited)\n",
     DSCO_VERSION, prog, prog, prog, DEFAULT_MODEL, prog, prog, prog);
@@ -2537,7 +2650,16 @@ int main(int argc, char **argv) {
                 _is_interactive = true;
             else if (strcmp(argv[_k], "--local") == 0)
                 _local_flag = true;
-            else if ((strcmp(argv[_k], "-m") == 0 || strcmp(argv[_k], "-k") == 0 ||
+            else if (strcmp(argv[_k], "-k") == 0 && _k + 1 < argc) {
+                if (main_is_credential_env_name(argv[_k + 1]) &&
+                    _k + 2 < argc &&
+                    main_cli_token_looks_like_api_key(argv[_k + 2])) {
+                    _k += 2;
+                } else {
+                    _k++;
+                }
+            }
+            else if ((strcmp(argv[_k], "-m") == 0 ||
                       strcmp(argv[_k], "--profile") == 0 ||
                       strcmp(argv[_k], "--provider") == 0 ||
                       strcmp(argv[_k], "--exec") == 0 || strcmp(argv[_k], "-e") == 0) &&
@@ -2684,6 +2806,7 @@ int main(int argc, char **argv) {
     bool mux_mode = false;
     const char *mux_initial_root = NULL;
     const char *worker_model = NULL;
+    bool native_provider_model_selected = false;
 
     for (int i = 1; i < argc; i++) {
         if (strcmp(argv[i], "-h") == 0 || strcmp(argv[i], "--help") == 0) {
@@ -2826,7 +2949,31 @@ int main(int argc, char **argv) {
             model = argv[++i];
             user_set_model = true;
         } else if (strcmp(argv[i], "-k") == 0 && i + 1 < argc) {
-            api_key = argv[++i];
+            const char *key_arg = argv[++i];
+            const char *key_value = NULL;
+            char key_env_name[128];
+            if (main_parse_credential_assignment(key_arg, key_env_name,
+                                                 sizeof(key_env_name),
+                                                 &key_value)) {
+                if (!main_store_cli_credential(key_env_name, key_value)) {
+                    fprintf(stderr, "error: failed to store credential for %s\n", key_env_name);
+                    free(oneshot_prompt);
+                    return 1;
+                }
+                api_key = key_value;
+            } else if (main_is_credential_env_name(key_arg) &&
+                       i + 1 < argc &&
+                       main_cli_token_looks_like_api_key(argv[i + 1])) {
+                key_value = argv[++i];
+                if (!main_store_cli_credential(key_arg, key_value)) {
+                    fprintf(stderr, "error: failed to store credential for %s\n", key_arg);
+                    free(oneshot_prompt);
+                    return 1;
+                }
+                api_key = key_value;
+            } else {
+                api_key = key_arg;
+            }
         } else if (strcmp(argv[i], "--profile") == 0 && i + 1 < argc) {
             i++;
         } else if (strcmp(argv[i], "--setup") == 0) {
@@ -2902,10 +3049,17 @@ int main(int argc, char **argv) {
             }
             oneshot_prompt = safe_malloc(total + 1);
             oneshot_prompt[0] = '\0';
+            size_t prompt_cap = total + 1;
             for (int j = i; j < argc; j++) {
                 if (strcmp(argv[j], "--") == 0) break;
-                if (j > i) snprintf(oneshot_prompt + strlen(oneshot_prompt), sizeof(oneshot_prompt) - strlen(oneshot_prompt), " ");
-                snprintf(oneshot_prompt + strlen(oneshot_prompt), sizeof(oneshot_prompt) - strlen(oneshot_prompt), "%s", argv[j]);
+                size_t used = strlen(oneshot_prompt);
+                if (j > i && used + 1 < prompt_cap) {
+                    oneshot_prompt[used++] = ' ';
+                    oneshot_prompt[used] = '\0';
+                }
+                if (used < prompt_cap) {
+                    snprintf(oneshot_prompt + used, prompt_cap - used, "%s", argv[j]);
+                }
             }
             /* find -- after prompt if we haven't already */
             for (int j = i; j < argc; j++) {
@@ -2928,8 +3082,58 @@ int main(int argc, char **argv) {
             interactive_mode = true;
     }
 
+    if (!local_mode && api_key && api_key[0]) {
+        const char *key_provider = provider_publish_api_key_env(api_key);
+        if (key_provider && !user_set_model && !model_from_env) {
+            const char *km =
+                provider_primary_model_for(key_provider, prompt_looks_code_task(oneshot_prompt));
+            if (km && km[0]) {
+                model = km;
+                native_provider_model_selected = true;
+            }
+        }
+    }
+
+    if (!local_mode && !user_set_model && !model_from_env &&
+        provider_has_usable_key("sakana", api_key)) {
+        model = provider_select_default_primary_model(prompt_looks_code_task(oneshot_prompt));
+        native_provider_model_selected = true;
+    }
+
+    if (api_key && api_key[0] && !oneshot_prompt && !interactive_mode &&
+        !exec_backend && !setup_mode && !setup_report_mode &&
+        !workspace_bootstrap_mode && !workspace_status_mode &&
+        !timeline_server_mode && !topology_list_mode && !topology_show_mode &&
+        !ui_mode && isatty(STDIN_FILENO) && isatty(STDERR_FILENO)) {
+        interactive_mode = true;
+    }
+
+    if (!exec_backend && !local_mode) {
+        const char *env_exec = getenv("DSCO_EXEC");
+        const native_provider_t *env_np =
+            (env_exec && env_exec[0]) ? native_find(env_exec) : NULL;
+        if (env_np) {
+            g_provider_override = env_np->name;
+            const char *env_model_default = native_default_model_for_setting(env_np, env_exec);
+            if (!user_set_model && !model_from_env && env_model_default) {
+                model = env_model_default;
+                native_provider_model_selected = true;
+            }
+        }
+    }
+
+    /* A native-provider signal must win over a persisted DSCO_EXEC that points
+     * at an external CLI. Otherwise `dsco -k fish_... "prompt"` or
+     * `dsco --provider sakana "prompt"` gets hijacked into the Codex/Claude CLI
+     * (the source of unexpected openai/gpt-* routing) instead of the pinned
+     * native provider. Signals: an explicit --provider/native pin, or a
+     * provider-prefixed -k key (fish_/sk-ant-/xai-/...). */
+    bool native_provider_signal =
+        (g_provider_override != NULL) ||
+        (api_key && api_key[0] && provider_provider_for_api_key(api_key) != NULL);
+
     /* DSCO_EXEC env var as default */
-    if (!exec_backend && !interactive_mode && !local_mode) {
+    if (!exec_backend && !interactive_mode && !local_mode && !native_provider_signal) {
         const char *env_exec = getenv("DSCO_EXEC");
         if (env_exec && env_exec[0]) {
             exec_backend = env_exec;
@@ -2937,7 +3141,8 @@ int main(int argc, char **argv) {
         }
     }
 
-    if (exec_backend_from_env && (user_set_model || model_from_env)) {
+    if (exec_backend_from_env &&
+        (user_set_model || model_from_env || native_provider_model_selected)) {
         const exec_reg_t *env_exec = exec_find(exec_backend);
         if (env_exec && !model_supports_executor(model, env_exec->name)) {
             fprintf(stderr,
@@ -3416,8 +3621,9 @@ int main(int argc, char **argv) {
                so Claude Code OAuth discovery still works for Anthropic. */
             g_provider_override = np->name;
             /* If user didn't pick a model, suggest one for this provider */
-            if (!user_set_model && np->example_model) {
-                model = np->example_model;
+            const char *native_model_default = native_default_model_for_setting(np, exec_backend);
+            if (!user_set_model && native_model_default) {
+                model = native_model_default;
                 fprintf(stderr, "  %s%s → %s%s\n", "\033[2m", np->name, model, "\033[0m");
             }
             /* Fall through to normal dsco oneshot/interactive path */
@@ -3495,10 +3701,57 @@ int main(int argc, char **argv) {
 native_path:
     ;
 
+    /* An explicit API key selects its provider. Publish it under the
+     * provider's canonical env var so credential lookups and routing
+     * recognize it, and — unless the user forced a model — switch to that
+     * provider's default model (e.g. -k fish_... -> sakana + Fugu). */
+    if (!local_mode && api_key && api_key[0]) {
+        const char *key_provider = provider_publish_api_key_env(api_key);
+        if (key_provider && !user_set_model && !model_from_env) {
+            const char *km =
+                provider_primary_model_for(key_provider, prompt_looks_code_task(oneshot_prompt));
+            if (km && km[0]) {
+                model = km;
+            }
+        }
+    }
+
+    /* No model/key forced: prefer subscription-backed compute (Fugu) whenever
+     * its credentials are available. */
+    if (!local_mode && !g_provider_override && !user_set_model && !model_from_env &&
+        provider_has_usable_key("sakana", api_key)) {
+        model = provider_select_default_primary_model(prompt_looks_code_task(oneshot_prompt));
+    }
+
     /* Resolve API key for the active provider */
     const char *active_provider = provider_route_for_model(model, api_key, g_provider_override);
     const char *resolved_api_key =
         provider_resolve_request_api_key(active_provider, api_key);
+
+    /* Crash-safe recovery: if the auto-selected provider has no usable
+     * credential AND the user did not explicitly pin a provider/model, re-select
+     * a model whose provider we can actually authenticate. Without this, a
+     * missing key for the default model hard-exits — and under the supervisor
+     * that becomes a restart crash-loop. An explicitly pinned provider
+     * (--provider / -e / -m / -k) still errors loudly below. */
+    bool provider_was_pinned = (g_provider_override != NULL) || user_set_model || model_from_env;
+    if ((!resolved_api_key || resolved_api_key[0] == '\0') && !provider_was_pinned) {
+        const char *recovered =
+            provider_select_default_primary_model(prompt_looks_code_task(oneshot_prompt));
+        if (recovered && recovered[0] && strcmp(recovered, model) != 0) {
+            const char *rp = provider_route_for_model(recovered, api_key, NULL);
+            const char *rk = provider_resolve_request_api_key(rp, api_key);
+            if (rk && rk[0]) {
+                fprintf(stderr,
+                        "  \033[2mno credential for '%s'; falling back to %s (%s)\033[0m\n",
+                        active_provider, rp, recovered);
+                model = recovered;
+                active_provider = rp;
+                resolved_api_key = rk;
+            }
+        }
+    }
+
     if (!resolved_api_key || resolved_api_key[0] == '\0') {
         fprintf(stderr, "error: credentials not set for provider '%s'\n", active_provider);
         if (strcmp(active_provider, "anthropic") == 0) {
@@ -3507,7 +3760,7 @@ native_path:
             fprintf(stderr, "  use -k KEY or export the provider-specific env var\n");
         }
         free(oneshot_prompt);
-        return 1;
+        return DSCO_EXIT_CONFIG;
     }
     api_key = resolved_api_key;
     provider_debug_log_request(active_provider, model, api_key);
@@ -3515,6 +3768,10 @@ native_path:
     if (!baseline_start(model, oneshot_prompt ? "oneshot" : "interactive")) {
         fprintf(stderr, "warning: baseline disabled (sqlite unavailable)\n");
     }
+
+    agent_set_launch_argv(argc, argv);
+
+    bool user_exit_requested = false;
 
     if (oneshot_prompt) {
         main_tools_init_for_runtime(runtime_profile);
@@ -3572,9 +3829,9 @@ native_path:
 
             char *req = oneshot_provider
                 ? oneshot_provider->build_request(oneshot_provider, &conv, &oneshot_session,
-                                                 MAX_TOKENS, oneshot_key)
+                                                 dsco_max_tokens(), oneshot_key)
                 : llm_build_request_ex_for_credential(&conv, &oneshot_session,
-                                                      MAX_TOKENS, oneshot_key);
+                                                      dsco_max_tokens(), oneshot_key);
             if (!req) {
                 fprintf(stderr, "error: failed to build request\n");
                 baseline_log("error", "request_build_failed", NULL, NULL);
@@ -3714,9 +3971,9 @@ native_path:
                     md_reset(&s_oneshot_md);
                     char *req2 = oneshot_provider
                         ? oneshot_provider->build_request(oneshot_provider, &conv, &oneshot_session,
-                                                         MAX_TOKENS, oneshot_key)
+                                                         dsco_max_tokens(), oneshot_key)
                         : llm_build_request_ex_for_credential(&conv, &oneshot_session,
-                                                              MAX_TOKENS, oneshot_key);
+                                                              dsco_max_tokens(), oneshot_key);
                     if (!req2) { task_ok = false; break; }
 
                     stream_result_t sr2 = oneshot_provider
@@ -3809,12 +4066,14 @@ native_path:
         }
         dsco_mux_run(api_key, root);
     } else if (orchestrate_mode) {
-        agent_run_orchestrated(api_key, model, worker_model, g_provider_override);
+        user_exit_requested = agent_run_orchestrated(api_key, model, worker_model, g_provider_override);
     } else {
-        agent_run(api_key, model, topology_name, topology_auto, g_provider_override);
+        user_exit_requested = agent_run(api_key, model, topology_name, topology_auto, g_provider_override);
     }
 
     curl_global_cleanup();
     baseline_stop();
+    if (user_exit_requested && getenv("DSCO_SUPERVISED"))
+        return DSCO_EXIT_USER_REQUESTED;
     return 0;
 }

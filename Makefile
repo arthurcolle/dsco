@@ -220,9 +220,14 @@ LDLIBS      += -L$(MBEDTLS_PREFIX)/lib -lmbedtls -lmbedx509 -lmbedcrypto
 endif
 endif
 
-# Pizza-box: baked data blobs get their own flat obj names
-GENERATED_C    := $(wildcard src/generated/*.c)
-GENERATED_OBJS := $(patsubst src/generated/%.c,$(OBJ_DIR)/generated_%.o,$(GENERATED_C))
+# Pizza-box: baked data blobs get their own flat obj names. Derive this from
+# data/ rather than src/generated/, because src/generated/ may not exist until
+# the bake step runs.
+BAKED_DATA       := $(shell find data -maxdepth 1 -type f -print 2>/dev/null | sort)
+BAKED_DATA_SYMS  := $(subst -,_,$(subst .,_,$(notdir $(BAKED_DATA))))
+GENERATED_C      := $(addprefix src/generated/embedded_,$(addsuffix .c,$(BAKED_DATA_SYMS)))
+GENERATED_REGISTRY := $(INC_DIR)/embedded_data_registry.h
+GENERATED_OBJS   := $(patsubst src/generated/%.c,$(OBJ_DIR)/generated_%.o,$(GENERATED_C))
 
 # Conditionally add mesh + net_server when libsodium is available
 OPTIONAL_SRCS =
@@ -265,10 +270,20 @@ $(LITE_TARGET): $(SRC_DIR)/lite_main.c $(INC_DIR)/config.h
 	-strip -x $@ 2>/dev/null || true
 
 # Source compilation rules
-# ── Pizza box: bake data/ blobs before any .o is compiled ──────────────
+# ── Pizza box: bake data/ blobs before generated .o files are compiled ──
 .PHONY: bake_data
-bake_data: | $(OBJ_DIR)
+bake_data: $(BUILD_DIR)/.bake_data.stamp
+
+$(BUILD_DIR)/.bake_data.stamp: $(BAKED_DATA) scripts/bake_data.sh | $(BUILD_DIR)
 	@bash scripts/bake_data.sh data src/generated include
+	@touch $@
+
+$(GENERATED_C) $(GENERATED_REGISTRY): $(BUILD_DIR)/.bake_data.stamp
+	@if [ ! -f "$@" ]; then \
+		rm -f $(BUILD_DIR)/.bake_data.stamp; \
+		$(MAKE) --no-print-directory bake_data; \
+	fi
+	@test -f "$@"
 
 # Pizza-box pattern rule: src/generated/foo.c -> build/obj/generated_foo.o
 $(OBJ_DIR)/generated_%.o: src/generated/%.c | bake_data $(OBJ_DIR)

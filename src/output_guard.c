@@ -1,4 +1,5 @@
 #include "output_guard.h"
+#include "env_config.h"
 #include <ctype.h>
 #include <errno.h>
 #include <pthread.h>
@@ -49,36 +50,6 @@ typedef struct {
 } og_state_t;
 
 static og_state_t g_og = {0};
-
-static int env_int_clamped(const char *name, int def_val, int min_v, int max_v) {
-    const char *s = getenv(name);
-    if (!s || !*s)
-        return def_val;
-    char *end = NULL;
-    long v = strtol(s, &end, 10);
-    if (!end || *end != '\0')
-        return def_val;
-    if (v < min_v)
-        v = min_v;
-    if (v > max_v)
-        v = max_v;
-    return (int)v;
-}
-
-static size_t env_size_clamped(const char *name, size_t def_val, size_t min_v, size_t max_v) {
-    const char *s = getenv(name);
-    if (!s || !*s)
-        return def_val;
-    char *end = NULL;
-    unsigned long long v = strtoull(s, &end, 10);
-    if (!end || *end != '\0')
-        return def_val;
-    if (v < min_v)
-        v = min_v;
-    if (v > max_v)
-        v = max_v;
-    return (size_t)v;
-}
 
 static void write_all_fd(int fd, const char *buf, size_t len) {
     while (len > 0) {
@@ -456,14 +427,14 @@ bool output_guard_init(void) {
     }
 
     g_og.repeat_limit =
-        env_int_clamped("DSCO_OUTPUT_REPEAT_LIMIT", OG_DEFAULT_REPEAT_LIMIT, 1, 1000000);
-    g_og.repeat_min_bytes = env_size_clamped("DSCO_OUTPUT_REPEAT_MIN_BYTES",
-                                             OG_DEFAULT_REPEAT_MIN_BYTES, 1, (size_t)1 << 30);
-    g_og.motif_min_bytes = env_size_clamped("DSCO_OUTPUT_MOTIF_MIN_BYTES",
-                                            OG_DEFAULT_REPEAT_MIN_BYTES, 256, (size_t)1 << 30);
-    g_og.motif_skip_path_like = env_int_clamped("DSCO_OUTPUT_MOTIF_SKIP_PATHLIKE", 1, 0, 1) != 0;
-    g_og.max_total_bytes = env_size_clamped("DSCO_OUTPUT_MAX_BYTES", OG_DEFAULT_MAX_TOTAL_BYTES,
-                                            1024, (size_t)1 << 32);
+        dsco_env_int("DSCO_OUTPUT_REPEAT_LIMIT", OG_DEFAULT_REPEAT_LIMIT, 1, 1000000);
+    g_og.repeat_min_bytes = dsco_env_size("DSCO_OUTPUT_REPEAT_MIN_BYTES",
+                                          OG_DEFAULT_REPEAT_MIN_BYTES, 1, (size_t)1 << 30);
+    g_og.motif_min_bytes = dsco_env_size("DSCO_OUTPUT_MOTIF_MIN_BYTES",
+                                         OG_DEFAULT_REPEAT_MIN_BYTES, 256, (size_t)1 << 30);
+    g_og.motif_skip_path_like = dsco_env_bool("DSCO_OUTPUT_MOTIF_SKIP_PATHLIKE", true);
+    g_og.max_total_bytes = dsco_env_size("DSCO_OUTPUT_MAX_BYTES", OG_DEFAULT_MAX_TOTAL_BYTES,
+                                         1024, (size_t)1 << 32);
     g_og.tripped = 0;
 
     bool out_ok = install_stream(&g_og.streams[0], STDOUT_FILENO, "stdout");
