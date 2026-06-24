@@ -20,6 +20,7 @@
 #include "mcp.h"
 #include "toolmgmt.h"
 #include "provider.h"
+#include "provider_pool.h"
 #include "openai_oauth.h"
 #include "local_llm.h"
 #include "topology.h"
@@ -44,6 +45,7 @@
 #include <termios.h>
 #include <time.h>
 #include <curl/curl.h>
+#include <mach-o/dyld.h>
 #include "crypto.h"
 #include "output_guard.h"
 #include "agent_profile.h"
@@ -52,12 +54,33 @@
 
 #ifdef HAVE_READLINE
 #include <readline/readline.h>
-#include <mach-o/dyld.h>
 #include <readline/history.h>
 #endif
 
 volatile int g_interrupted = 0;
 extern volatile int g_agent_exit_requested;
+
+static int g_launch_argc = 0;
+static char **g_launch_argv = NULL;
+
+void agent_set_launch_argv(int argc, char **argv) {
+    if (g_launch_argv) {
+        for (int i = 0; i < g_launch_argc; i++)
+            free(g_launch_argv[i]);
+        free(g_launch_argv);
+        g_launch_argv = NULL;
+        g_launch_argc = 0;
+    }
+
+    if (argc <= 0 || !argv)
+        return;
+
+    g_launch_argv = safe_malloc((size_t)(argc + 1) * sizeof(*g_launch_argv));
+    for (int i = 0; i < argc; i++)
+        g_launch_argv[i] = safe_strdup(argv[i] ? argv[i] : "");
+    g_launch_argv[argc] = NULL;
+    g_launch_argc = argc;
+}
 
 /* Escape key state machine — first ESC pauses, second ESC cancels */
 typedef enum { ESC_RUNNING = 0, ESC_PAUSED = 1 } escape_state_t;
@@ -473,6 +496,7 @@ static void mcp_bg_init_start(tui_status_bar_t *sb) {
     if (g_mcp_bg_started)
         return;
     g_mcp_bg_sb = sb;
+    mcp_cancel_reset();
     __atomic_store_n(&g_mcp_bg_active, 1, __ATOMIC_RELEASE);
     if (pthread_create(&g_mcp_bg_thread, NULL, mcp_bg_init_thread, sb) != 0) {
         /* Fall back to synchronous init on the calling thread. */
@@ -641,12 +665,69 @@ static bool env_truthy(const char *value) {
            (value[0] == '1' || strcasecmp(value, "true") == 0 || strcasecmp(value, "yes") == 0);
 }
 
-static void ensure_provider(session_state_t *session, const char *api_key) {
-    const char *pname = provider_route_for_model(session->model, api_key, g_provider_override_name);
-    if (g_provider && strcmp(g_provider->name, pname) == 0)
+typedef struct {
+    char providers[8][64];
+    int  count;
+} provider_failover_state_t;
+
+static void provider_failover_reset(provider_failover_state_t *st) {
+    if (st)
+        memset(st, 0, sizeof(*st));
+}
+
+static bool provider_failover_has(const provider_failover_state_t *st, const char *provider) {
+    if (!st || !provider || !provider[0])
+        return false;
+    for (int i = 0; i < st->count; i++) {
+        if (strcmp(st->providers[i], provider) == 0)
+            return true;
+    }
+    return false;
+}
+
+static void provider_failover_mark(provider_failover_state_t *st, const char *provider) {
+    if (!st || !provider || !provider[0] || provider_failover_has(st, provider))
         return;
-    provider_free(g_provider);
-    g_provider = provider_create(pname);
+    if (st->count >= (int)(sizeof(st->providers) / sizeof(st->providers[0])))
+        return;
+    snprintf(st->providers[st->count++], sizeof(st->providers[0]), "%s", provider);
+}
+
+static bool provider_failover_available(const char *provider, const char *api_key) {
+    if (!provider || !provider[0])
+        return false;
+    if (!provider_has_usable_key(provider, api_key))
+        return false;
+    provider_slot_t *slot = provider_pool_slot(provider);
+    if (slot && slot->state == POOL_SLOT_TRIPPED && slot->tripped_until &&
+        time(NULL) < slot->tripped_until)
+        return false;
+    return true;
+}
+
+static bool ensure_provider_with_override(session_state_t *session, const char *api_key,
+                                          const char *provider_override) {
+    const char *pname = provider_route_for_model(session->model, api_key, provider_override);
+    if (!pname || !pname[0])
+        return false;
+    if (g_provider && strcmp(g_provider->name, pname) == 0)
+        return true;
+    /* Acquire from the durable pool: the previous provider stays warm (its
+     * transport is kept alive) instead of being torn down, and switching back
+     * is instant. The pool owns every instance — never provider_free() here. */
+    provider_t *pooled = provider_pool_acquire(pname);
+    if (pooled) {
+        g_provider = pooled;
+        return true;
+    }
+    /* If the pool can't serve this name (only when full — unreachable in
+     * practice), keep the current provider rather than risk an unpooled
+     * instance escaping the pool's ownership. */
+    return false;
+}
+
+static bool ensure_provider(session_state_t *session, const char *api_key) {
+    return ensure_provider_with_override(session, api_key, g_provider_override_name);
 }
 
 /* Resolve the API key for the current provider, falling back to the session
@@ -1408,6 +1489,175 @@ static void autosave(conversation_t *conv, session_state_t *session) {
     conv_save_ex(conv, session, save_path);
 }
 
+static bool startup_command_write(const char *cmd) {
+    const char *home = getenv("HOME");
+    if (!home || !cmd || !cmd[0])
+        return false;
+
+    char dir_path[512], startup_path[560];
+    snprintf(dir_path, sizeof(dir_path), "%s/.dsco/sessions", home);
+    mkdir(dir_path, 0755);
+    snprintf(startup_path, sizeof(startup_path), "%s/_startup_cmd", dir_path);
+
+    FILE *sf = fopen(startup_path, "w");
+    if (!sf)
+        return false;
+    fputs(cmd, sf);
+    fclose(sf);
+    return true;
+}
+
+static bool startup_command_consume(char *out, size_t out_len) {
+    if (!out || out_len == 0)
+        return false;
+    out[0] = '\0';
+
+    const char *home = getenv("HOME");
+    if (!home)
+        return false;
+
+    char startup_path[560];
+    snprintf(startup_path, sizeof(startup_path), "%s/.dsco/sessions/_startup_cmd", home);
+    FILE *sf = fopen(startup_path, "r");
+    if (!sf)
+        return false;
+
+    bool ok = false;
+    if (fgets(out, (int)out_len, sf)) {
+        size_t sl = strlen(out);
+        while (sl > 0 && (out[sl - 1] == '\n' || out[sl - 1] == '\r'))
+            out[--sl] = '\0';
+        ok = out[0] != '\0';
+    }
+    fclose(sf);
+    remove(startup_path);
+    return ok;
+}
+
+static bool current_executable_path(char *out, size_t out_len) {
+    if (!out || out_len == 0)
+        return false;
+    out[0] = '\0';
+    uint32_t sz = (uint32_t)out_len;
+    return _NSGetExecutablePath(out, &sz) == 0 && out[0] != '\0';
+}
+
+static bool resolve_restart_binary(char *target, size_t target_len, bool *hotswap) {
+    if (!target || target_len == 0)
+        return false;
+    target[0] = '\0';
+    if (hotswap)
+        *hotswap = false;
+
+    const char *env_bin = getenv("DSCO_HOTSWAP_BIN");
+    if (env_bin && env_bin[0] && access(env_bin, X_OK) == 0) {
+        snprintf(target, target_len, "%s", env_bin);
+        if (hotswap)
+            *hotswap = true;
+        return true;
+    }
+
+    char self[PATH_MAX] = {0};
+    if (current_executable_path(self, sizeof(self))) {
+        const char *sl = strrchr(self, '/');
+        if (sl) {
+            char staged[PATH_MAX];
+            size_t dlen = (size_t)(sl - self);
+            snprintf(staged, sizeof(staged), "%.*s/dsco-new", (int)dlen, self);
+            if (access(staged, X_OK) == 0) {
+                snprintf(target, target_len, "%s", staged);
+                if (hotswap)
+                    *hotswap = true;
+                return true;
+            }
+        }
+        snprintf(target, target_len, "%s", self);
+        return true;
+    }
+
+    if (g_launch_argc > 0 && g_launch_argv && g_launch_argv[0] && g_launch_argv[0][0]) {
+        snprintf(target, target_len, "%s", g_launch_argv[0]);
+        return true;
+    }
+
+    snprintf(target, target_len, "dsco");
+    return true;
+}
+
+static void materialize_hotswap_target(char *target, size_t target_len) {
+    if (!target || !target[0] || target_len == 0)
+        return;
+
+    char self[PATH_MAX] = {0};
+    if (!current_executable_path(self, sizeof(self)))
+        return;
+    if (strcmp(target, self) == 0)
+        return;
+    if (rename(target, self) == 0)
+        snprintf(target, target_len, "%s", self);
+}
+
+static bool fast_exec_restart(conversation_t *conv, session_state_t *session,
+                              tui_status_bar_t *status_bar, char *target,
+                              size_t target_len, bool hotswap) {
+    if (!target || !target[0])
+        return false;
+
+    bool resume_saved = conv && conv->count > 0;
+    if (resume_saved) {
+        autosave(conv, session);
+        startup_command_write("/load _autosave");
+    }
+
+#ifdef HAVE_READLINE
+    {
+        const char *home = getenv("HOME");
+        if (home) {
+            char hist_path[560];
+            snprintf(hist_path, sizeof(hist_path), "%s/.dsco/history", home);
+            write_history(hist_path);
+        }
+    }
+#endif
+
+    mcp_cancel();
+    mcp_bg_init_join();
+    mcp_shutdown(&g_mcp);
+
+    terminal_input_echo_restore();
+    fprintf(stderr, "\033[?2004l");
+    fflush(stderr);
+    g_winch_sb = NULL;
+    if (status_bar)
+        tui_status_bar_disable(status_bar);
+    tui_reset_title();
+
+    if (hotswap)
+        materialize_hotswap_target(target, target_len);
+
+    int argc = g_launch_argc > 0 ? g_launch_argc : 1;
+    char **exec_argv = safe_malloc((size_t)(argc + 1) * sizeof(*exec_argv));
+    exec_argv[0] = target;
+    for (int i = 1; i < argc; i++)
+        exec_argv[i] = g_launch_argv[i];
+    exec_argv[argc] = NULL;
+
+    char old_hotswap[PATH_MAX] = {0};
+    const char *old_env = getenv("DSCO_HOTSWAP_BIN");
+    if (old_env && old_env[0])
+        snprintf(old_hotswap, sizeof(old_hotswap), "%s", old_env);
+    unsetenv("DSCO_HOTSWAP_BIN");
+
+    execvp(target, exec_argv);
+
+    int err = errno;
+    if (old_hotswap[0])
+        setenv("DSCO_HOTSWAP_BIN", old_hotswap, 1);
+    free(exec_argv);
+    errno = err;
+    return false;
+}
+
 /* Global for signal-handler auto-save */
 static conversation_t *g_autosave_conv = NULL;
 static session_state_t *g_autosave_session = NULL;
@@ -2128,7 +2378,8 @@ static const slash_command_t s_slash_commands[] = {
     {"/image", "attach image — type @ in composer or paste from clipboard (Alt+I)"},
     {"/mcp", "show MCP servers and tools"},
     {"/mcp reload", "reload MCP servers/tools"},
-    {"/provider", "show/detect API provider"},
+    {"/provider", "show or pin the active provider (/provider <name>|auto)"},
+    {"/providers", "show the durable provider pool + health (alias /pool)"},
     {"/status", "show full session status"},
     {"/dht", "distributed peer discovery (Kademlia) over the mesh"},
     {"/dht start", "/dht start [swarm-key]  — join the private DHT overlay"},
@@ -3218,8 +3469,9 @@ static char *read_input_line_prompt(char *buf, size_t buf_sz, const char *prompt
 
 /* ── Main agent loop ───────────────────────────────────────────────────── */
 
-void agent_run(const char *api_key, const char *model, const char *topology_name,
+bool agent_run(const char *api_key, const char *model, const char *topology_name,
                bool topology_auto, const char *provider_override) {
+    bool user_exit_requested = false;
     g_provider_override_name = provider_override;
     /* Capture the pristine cooked tty state BEFORE any raw-mode switch, so every
        restore path (atexit, signals, composer death) can hand the terminal back
@@ -3371,6 +3623,11 @@ void agent_run(const char *api_key, const char *model, const char *topology_name
     }
     session.topology_auto = topology_auto;
     g_autosave_session = &session;
+
+    /* Warm the durable provider pool: keeps the core subscriptions (Anthropic,
+     * OpenAI/ChatGPT, Sakana/Fugu) "up" with persistent transport + resolved
+     * credentials so provider switches don't rebuild connections. */
+    provider_pool_init(api_key);
 
     /* Initialize provider based on model */
     ensure_provider(&session, api_key);
@@ -3528,6 +3785,7 @@ void agent_run(const char *api_key, const char *model, const char *topology_name
         bool sync_mcp =
             sync_env && (sync_env[0] == '1' || sync_env[0] == 't' || sync_env[0] == 'T');
         if (sync_mcp) {
+            mcp_cancel_reset();
             int n = mcp_init(&g_mcp);
             if (n > 0)
                 mcp_register_discovered_tools(&g_mcp);
@@ -3540,6 +3798,7 @@ void agent_run(const char *api_key, const char *model, const char *topology_name
         }
     }
 
+    bool startup_consumed = false;
     while (1) {
         g_interrupted = 0;
         g_escape_state = ESC_RUNNING;
@@ -3616,8 +3875,15 @@ void agent_run(const char *api_key, const char *model, const char *topology_name
          * bottom panel and place cursor on the input row.  This prevents
          * the input prompt from appearing in the middle of output. */
         fflush(stderr);
-        if (!read_input_line_prompt(input_buf, sizeof(input_buf), dyn_prompt))
-            break;
+        bool have_startup_cmd = false;
+        if (!startup_consumed) {
+            startup_consumed = true;
+            have_startup_cmd = startup_command_consume(input_buf, sizeof(input_buf));
+        }
+        if (!have_startup_cmd) {
+            if (!read_input_line_prompt(input_buf, sizeof(input_buf), dyn_prompt))
+                break;
+        }
 
         size_t len = strlen(input_buf);
         if (len == 0)
@@ -3648,72 +3914,39 @@ void agent_run(const char *api_key, const char *model, const char *topology_name
             }
         }
 
-        /* Consume startup command (e.g. auto-resume after crash) */
-        {
-            static bool startup_consumed = false;
-            if (!startup_consumed) {
-                startup_consumed = true;
-                const char *h3 = getenv("HOME");
-                if (h3) {
-                    char scf[512];
-                    snprintf(scf, sizeof(scf),
-                             "%s/.dsco/sessions/_startup_cmd", h3);
-                    FILE *sf = fopen(scf, "r");
-                    if (sf) {
-                        if (fgets(input_buf, (int)sizeof(input_buf)-1, sf)) {
-                            /* trim newline */
-                            size_t sl = strlen(input_buf);
-                            if (sl > 0 && input_buf[sl-1] == '\n')
-                                input_buf[sl-1] = '\0';
-                        }
-                        fclose(sf);
-                        remove(scf);
-                    }
-                }
-            }
-        }
-                if (strcmp(input_buf, "/restart") == 0 || strncmp(input_buf, "/restart ", 9) == 0) {
-            /* Hotswap restart: autosave, then exit with code 0.
-             * The supervisor (permanent restart mode) will relaunch dsco,
-             * and before execvp it will pick up dsco-new (if present) or
-             * whatever DSCO_HOTSWAP_BIN points to.
-             * History and session are preserved via _autosave.json. */
-            const char *new_bin = getenv("DSCO_HOTSWAP_BIN");
-            char staged[512] = {0};
-            if (!new_bin) {
-                /* Check for dsco-new sibling of the running binary */
-                char self[PATH_MAX] = {0};
-                uint32_t sz = sizeof(self);
-                if (_NSGetExecutablePath(self, &sz) == 0) {
-                    const char *sl = strrchr(self, '/');
-                    if (sl) {
-                        size_t dlen = (size_t)(sl - self);
-                        snprintf(staged, sizeof(staged), "%.*s/dsco-new", (int)dlen, self);
-                        if (access(staged, X_OK) == 0) {
-                            new_bin = staged;
-                            fprintf(stderr,
-                                "  %shotswap:%s staged binary found: %s%s\n",
-                                TUI_BCYAN, TUI_RESET, new_bin, TUI_RESET);
-                        }
-                    }
-                }
-            }
-            if (new_bin && new_bin[0]) {
-                setenv("DSCO_HOTSWAP_BIN", new_bin, 1);
-                tui_success("hotswap restart — new binary will load on next launch");
+        if (strcmp(input_buf, "/restart") == 0 || strncmp(input_buf, "/restart ", 9) == 0) {
+            char restart_bin[PATH_MAX] = {0};
+            bool hotswap = false;
+            resolve_restart_binary(restart_bin, sizeof(restart_bin), &hotswap);
+
+            if (hotswap) {
+                fprintf(stderr,
+                    "  %shotswap:%s staged binary found: %s%s\n",
+                    TUI_BCYAN, TUI_RESET, restart_bin, TUI_RESET);
+                tui_success("hotswap restart — execing new binary now");
             } else {
-                tui_success("restart — reloading same binary (no dsco-new found)");
+                tui_success("restart — execing same binary now");
             }
-            /* Autosave then clean-exit so supervisor relaunches */
+
             setenv("DSCO_SUPERVISE_RESTART", "permanent", 1);
-            baseline_log("command", "/restart", new_bin ? new_bin : "(same)", NULL);
-            break;  /* exits main loop → autosave → supervisor relaunches */
+            baseline_log("command", "/restart", hotswap ? restart_bin : "(same)", NULL);
+
+            if (!fast_exec_restart(&conv, &session, &status_bar, restart_bin,
+                                   sizeof(restart_bin), hotswap)) {
+                char msg[256];
+                snprintf(msg, sizeof(msg),
+                         "fast restart failed (%s); falling back to supervisor relaunch",
+                         strerror(errno));
+                tui_warning(msg);
+                break;
+            }
         }
 
         if (strcmp(input_buf, "quit") == 0 || strcmp(input_buf, "exit") == 0 ||
             strcmp(input_buf, "/exit") == 0 || strcmp(input_buf, "/quit") == 0) {
             /* Tell supervisor not to relaunch on this voluntary exit. */
             setenv("DSCO_SUPERVISE_RESTART", "transient", 1);
+            user_exit_requested = true;
             break;
         }
 
@@ -5776,6 +6009,7 @@ void agent_run(const char *api_key, const char *model, const char *topology_name
                 mcp_bg_init_join();
                 mcp_shutdown(&g_mcp);
                 tools_reset_external();
+                mcp_cancel_reset();
                 int n = mcp_init(&g_mcp);
                 if (n > 0)
                     mcp_register_discovered_tools(&g_mcp);
@@ -5820,13 +6054,71 @@ void agent_run(const char *api_key, const char *model, const char *topology_name
             baseline_log("command", "/mcp", NULL, NULL);
             continue;
         }
-        if (strcmp(input_buf, "/provider") == 0) {
-            fprintf(stderr, "  %sprovider:%s %s\n", TUI_DIM, TUI_RESET,
-                    g_provider ? g_provider->name : "none");
-            fprintf(stderr, "  %sdetected from:%s model=%s\n", TUI_DIM, TUI_RESET, session.model);
-            fprintf(stderr, "  %savailable:%s anthropic, openai\n", TUI_DIM, TUI_RESET);
-            fprintf(stderr, "  %snote: provider auto-detected from /model selection%s\n\n", TUI_DIM,
-                    TUI_RESET);
+        if (strcmp(input_buf, "/providers") == 0 || strcmp(input_buf, "/pool") == 0) {
+            char table[2560];
+            provider_pool_render(table, sizeof(table));
+            fprintf(stderr, "\n  %sprovider pool%s  %s(active: %s)%s\n", TUI_BCYAN, TUI_RESET,
+                    TUI_DIM, g_provider ? g_provider->name : "none", TUI_RESET);
+            fprintf(stderr, "%s\n", table);
+            continue;
+        }
+        if (strncmp(input_buf, "/provider", 9) == 0 &&
+            (input_buf[9] == '\0' || input_buf[9] == ' ')) {
+            const char *arg = input_buf + 9;
+            while (*arg == ' ')
+                arg++;
+            if (*arg == '\0') {
+                fprintf(stderr, "  %sprovider:%s %s %s\n", TUI_DIM, TUI_RESET,
+                        g_provider ? g_provider->name : "none",
+                        g_provider_override_name ? "(pinned)" : "(auto)");
+                fprintf(stderr, "  %smodel:%s %s\n", TUI_DIM, TUI_RESET, session.model);
+                fprintf(stderr,
+                        "  %savailable:%s anthropic, openai, openrouter, sakana, xai, moonshot, "
+                        "google, deepseek, groq, mistral, cohere, perplexity\n",
+                        TUI_DIM, TUI_RESET);
+                fprintf(stderr,
+                        "  %susage:%s /provider <name> to pin · /provider auto to unpin\n\n",
+                        TUI_DIM, TUI_RESET);
+                continue;
+            }
+            if (strcmp(arg, "auto") == 0 || strcmp(arg, "none") == 0 ||
+                strcmp(arg, "unpin") == 0) {
+                g_provider_override_name = NULL;
+                ensure_provider(&session, api_key);
+                char msg[128];
+                snprintf(msg, sizeof(msg), "provider unpinned — auto-routing from model (%s)",
+                         g_provider ? g_provider->name : "none");
+                tui_success(msg);
+                continue;
+            }
+            /* Pin to an explicit provider. Persist the name in a stable buffer
+             * since g_provider_override_name is honored by ensure_provider on
+             * every turn. Also switch the model to this provider's default so we
+             * don't POST a mismatched model id to the endpoint. */
+            static char pinned_provider[64];
+            snprintf(pinned_provider, sizeof(pinned_provider), "%s", arg);
+            g_provider_override_name = pinned_provider;
+            const char *pdefault = provider_primary_model_for(pinned_provider, false);
+            if (pdefault && pdefault[0] &&
+                strcmp(provider_route_for_model(session.model, api_key, NULL), pinned_provider) != 0) {
+                snprintf(session.model, sizeof(session.model), "%s", pdefault);
+                session.model_locked = true;
+                tools_set_runtime_model(session.model);
+            }
+            ensure_provider(&session, api_key);
+            const char *pk = resolve_provider_key(api_key);
+            if (!pk || !pk[0]) {
+                char w[160];
+                snprintf(w, sizeof(w),
+                         "pinned '%s' but no credential found — set its API key (env or -k)",
+                         pinned_provider);
+                tui_warning(w);
+            } else {
+                char msg[160];
+                snprintf(msg, sizeof(msg), "provider pinned → %s (model %s)",
+                         g_provider ? g_provider->name : pinned_provider, session.model);
+                tui_success(msg);
+            }
             continue;
         }
         if (strncmp(input_buf, "/budget", 7) == 0) {
@@ -5951,6 +6243,7 @@ void agent_run(const char *api_key, const char *model, const char *topology_name
                                   {"perplexity", "Perplexity", "PERPLEXITY_API_KEY"},
                                   {"cerebras", "Cerebras", "CEREBRAS_API_KEY"},
                                   {"cohere", "Cohere", "COHERE_API_KEY"},
+                                  {"sakana", "Sakana Fugu", "FUGU_API_KEY"},
                                   {NULL, NULL, NULL}};
                     for (int ni = 0; nprovs[ni].name; ni++) {
                         const char *k = getenv(nprovs[ni].env);
@@ -7032,6 +7325,8 @@ void agent_run(const char *api_key, const char *model, const char *topology_name
              * turn. Declared before the retry label so it survives the goto. */
             int reactive_attempts = 0;
             stream_result_t sr;
+            provider_failover_state_t failed_providers;
+            provider_failover_reset(&failed_providers);
         reactive_retry:
             trace_span_begin(trace_id, "llm_stream", prompt_span, llm_span);
 
@@ -7046,24 +7341,46 @@ void agent_run(const char *api_key, const char *model, const char *topology_name
             /* Update terminal title with turn info */
             tui_set_title_fmt("dsco · %s · turn %d", session.model, turns);
 
+            struct timeval pool_t0, pool_t1;
+            gettimeofday(&pool_t0, NULL);
             sr = g_provider ? g_provider->stream(g_provider, cur_key, req, on_stream_text,
                                                  on_stream_tool_start, on_stream_thinking, NULL)
                             : llm_stream(api_key, req, on_stream_text, on_stream_tool_start,
                                          on_stream_thinking, NULL);
+            gettimeofday(&pool_t1, NULL);
+            if (g_provider)
+                provider_pool_report(g_provider->name, sr.ok,
+                                     (pool_t1.tv_sec - pool_t0.tv_sec) * 1000.0 +
+                                         (pool_t1.tv_usec - pool_t0.tv_usec) / 1000.0);
+            if (!sr.ok)
+                provider_failover_mark(&failed_providers, g_provider ? g_provider->name : NULL);
 
             /* Fallback: if failed and fallback chain configured, try next model */
             if (!sr.ok && session.fallback_count > 0) {
+                char original_model[128];
+                char original_provider[64];
+                snprintf(original_model, sizeof(original_model), "%s", session.model);
+                snprintf(original_provider, sizeof(original_provider), "%s",
+                         g_provider ? g_provider->name : "");
+
                 for (int fi = 0; fi < session.fallback_count && !sr.ok && !g_interrupted; fi++) {
                     const char *fb_model = session.fallback_models[fi];
                     if (strcmp(fb_model, session.model) == 0)
                         continue;
+                    const char *fb_provider = provider_route_for_model(fb_model, api_key, NULL);
+                    if (!fb_provider || !fb_provider[0])
+                        continue;
+                    if (provider_failover_has(&failed_providers, fb_provider))
+                        continue;
+                    if (!provider_failover_available(fb_provider, api_key))
+                        continue;
 
                     if (g_outq)
-                        tui_outq_writef(g_outq, "  %sfallback: trying %s%s\n", TUI_YELLOW, fb_model,
-                                        TUI_RESET);
+                        tui_outq_writef(g_outq, "  %sfallback: trying %s via %s%s\n",
+                                        TUI_YELLOW, fb_model, fb_provider, TUI_RESET);
                     else
-                        fprintf(stderr, "  %sfallback: trying %s%s\n", TUI_YELLOW, fb_model,
-                                TUI_RESET);
+                        fprintf(stderr, "  %sfallback: trying %s via %s%s\n", TUI_YELLOW,
+                                fb_model, fb_provider, TUI_RESET);
                     tui_stream_heartbeat_poke(&s_heartbeat, "fallback...");
                     json_free_response(&sr.parsed);
 
@@ -7071,8 +7388,15 @@ void agent_run(const char *api_key, const char *model, const char *topology_name
                     char saved_model[128];
                     snprintf(saved_model, sizeof(saved_model), "%s", session.model);
                     snprintf(session.model, sizeof(session.model), "%s", fb_model);
-                    ensure_provider(&session, api_key);
+                    if (!ensure_provider_with_override(&session, api_key, fb_provider) ||
+                        !g_provider || strcmp(g_provider->name, fb_provider) != 0) {
+                        provider_failover_mark(&failed_providers, fb_provider);
+                        snprintf(session.model, sizeof(session.model), "%s", saved_model);
+                        continue;
+                    }
                     const char *fb_key = resolve_provider_key(api_key);
+                    provider_debug_log_request(g_provider ? g_provider->name : fb_provider,
+                                               session.model, fb_key);
 
                     free(req);
                     req = g_provider ? g_provider->build_request(g_provider, &conv, &session,
@@ -7080,26 +7404,48 @@ void agent_run(const char *api_key, const char *model, const char *topology_name
                                      : llm_build_request_ex_for_credential(&conv, &session,
                                                                            dsco_max_tokens(),
                                                                            fb_key);
-                    if (!req)
-                        break;
+                    if (!req) {
+                        provider_failover_mark(&failed_providers, fb_provider);
+                        snprintf(session.model, sizeof(session.model), "%s", saved_model);
+                        continue;
+                    }
 
+                    struct timeval fb_t0, fb_t1;
+                    gettimeofday(&fb_t0, NULL);
                     sr = g_provider
                              ? g_provider->stream(g_provider, fb_key, req, on_stream_text,
                                                   on_stream_tool_start, on_stream_thinking, NULL)
                              : llm_stream(fb_key, req, on_stream_text, on_stream_tool_start,
                                           on_stream_thinking, NULL);
+                    gettimeofday(&fb_t1, NULL);
+                    if (g_provider)
+                        provider_pool_report(g_provider->name, sr.ok,
+                                             (fb_t1.tv_sec - fb_t0.tv_sec) * 1000.0 +
+                                                 (fb_t1.tv_usec - fb_t0.tv_usec) / 1000.0);
 
                     if (sr.ok) {
+                        if (g_provider_override_name && g_provider &&
+                            strcmp(g_provider_override_name, g_provider->name) != 0)
+                            g_provider_override_name = NULL;
                         if (g_outq)
-                            tui_outq_writef(g_outq, "  %sfallback succeeded with %s%s\n", TUI_GREEN,
-                                            fb_model, TUI_RESET);
+                            tui_outq_writef(g_outq, "  %sfallback succeeded with %s via %s%s\n",
+                                            TUI_GREEN, fb_model,
+                                            g_provider ? g_provider->name : fb_provider, TUI_RESET);
                         else
-                            fprintf(stderr, "  %sfallback succeeded with %s%s\n", TUI_GREEN,
-                                    fb_model, TUI_RESET);
+                            fprintf(stderr, "  %sfallback succeeded with %s via %s%s\n",
+                                    TUI_GREEN, fb_model, g_provider ? g_provider->name : fb_provider,
+                                    TUI_RESET);
                     } else {
+                        provider_failover_mark(&failed_providers,
+                                               g_provider ? g_provider->name : fb_provider);
                         /* Restore original model for next fallback attempt */
                         snprintf(session.model, sizeof(session.model), "%s", saved_model);
                     }
+                }
+                if (!sr.ok) {
+                    snprintf(session.model, sizeof(session.model), "%s", original_model);
+                    if (original_provider[0])
+                        ensure_provider_with_override(&session, api_key, original_provider);
                 }
             }
             free(req);
@@ -8353,8 +8699,10 @@ void agent_run(const char *api_key, const char *model, const char *topology_name
         fflush(stderr);
 
         /* Agent self-exit: break outer REPL loop after delivering final message */
-        if (g_agent_exit_requested)
+        if (g_agent_exit_requested) {
+            user_exit_requested = true;
             break;
+        }
 
         /* Periodic auto-save every 5 turns */
         if (session.turn_count % 5 == 0 && conv.count > 0) {
@@ -8389,8 +8737,9 @@ void agent_run(const char *api_key, const char *model, const char *topology_name
      * HTTP/stdio handles. */
     mcp_bg_init_join();
     mcp_shutdown(&g_mcp);
-    provider_free(g_provider);
+    /* g_provider points into the pool; the pool owns and frees every instance. */
     g_provider = NULL;
+    provider_pool_shutdown();
     free(aliases);
     tools_cooc_persist();
     tools_cooc_free();
@@ -8414,4 +8763,5 @@ void agent_run(const char *api_key, const char *model, const char *topology_name
     } else {
         fprintf(stderr, "%s  goodbye%s\n", TUI_DIM, TUI_RESET);
     }
+    return user_exit_requested;
 }

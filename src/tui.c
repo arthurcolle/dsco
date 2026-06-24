@@ -9,6 +9,8 @@
 #include <strings.h>
 #include <stdarg.h>
 #include <math.h>
+#include <ctype.h>
+#include <limits.h>
 #include <sys/ioctl.h>
 #include <sys/stat.h>
 #include <dirent.h>
@@ -241,7 +243,7 @@ void tui_spinner_init(tui_spinner_t *s, tui_spinner_type_t type, const char *lab
     s->type = type;
     s->frame = 0;
     s->label = label;
-    s->color = color ? color : TUI_CYAN;
+    s->color = color ? color : tui_named_fg("ui.spinner");
     s->active = true;
 }
 
@@ -264,8 +266,8 @@ void tui_spinner_tick(tui_spinner_t *s) {
 void tui_spinner_done(tui_spinner_t *s, const char *final_label) {
     s->active = false;
     tui_clear_line();
-    fprintf(stderr, "  %s%s%s %s%s%s\n", TUI_GREEN, tui_glyph()->florette, TUI_RESET, TUI_DIM,
-            final_label ? final_label : "done", TUI_RESET);
+    fprintf(stderr, "  %s%s%s %s%s%s\n", tui_named_fg("ui.spinner.done"), tui_glyph()->florette,
+            TUI_RESET, TUI_DIM, final_label ? final_label : "done", TUI_RESET);
 }
 
 /* ── Progress bar ─────────────────────────────────────────────────────── */
@@ -287,7 +289,7 @@ void tui_progress(const char *label, double pct, int width, const char *fill_col
     int filled = (int)(pct * bar_width);
     int empty = bar_width - filled;
 
-    const char *fc = fill_color ? fill_color : TUI_GREEN;
+    const char *fc = fill_color ? fill_color : tui_named_fg("ui.progress.fill");
     const char *ec = empty_color ? empty_color : TUI_DIM;
     (void)filled;
     (void)empty;
@@ -306,8 +308,8 @@ void tui_progress(const char *label, double pct, int width, const char *fill_col
 void tui_table_init(tui_table_t *t, int cols, const char *header_color) {
     memset(t, 0, sizeof(*t));
     t->col_count = cols < TUI_TABLE_MAX_COLS ? cols : TUI_TABLE_MAX_COLS;
-    t->header_color = header_color ? header_color : TUI_CYAN;
-    t->border_color = TUI_DIM;
+    t->header_color = header_color ? header_color : tui_named_fg("ui.table.header");
+    t->border_color = tui_named_fg("ui.table.border");
     t->style = BOX_ROUND;
 }
 
@@ -426,19 +428,19 @@ void tui_subheader(const char *text) {
 }
 
 void tui_info(const char *text) {
-    fprintf(stderr, "  %sℹ%s %s\n", TUI_BLUE, TUI_RESET, text);
+    fprintf(stderr, "  %sℹ%s %s\n", tui_named_fg("ui.info"), TUI_RESET, text);
 }
 
 void tui_success(const char *text) {
-    fprintf(stderr, "  %s✓%s %s\n", TUI_GREEN, TUI_RESET, text);
+    fprintf(stderr, "  %s✓%s %s\n", tui_named_fg("ui.success"), TUI_RESET, text);
 }
 
 void tui_warning(const char *text) {
-    fprintf(stderr, "  %s⚠%s %s\n", TUI_YELLOW, TUI_RESET, text);
+    fprintf(stderr, "  %s⚠%s %s\n", tui_named_fg("ui.warning"), TUI_RESET, text);
 }
 
 void tui_error(const char *text) {
-    fprintf(stderr, "  %s✗%s %s\n", TUI_RED, TUI_RESET, text);
+    fprintf(stderr, "  %s✗%s %s\n", tui_named_fg("ui.error"), TUI_RESET, text);
 }
 
 /* Forward declarations for functions defined later */
@@ -1139,6 +1141,21 @@ bool tui_supports_truecolor(void) {
     return tui_detect_color_level() == TUI_COLOR_TRUECOLOR;
 }
 
+uint64_t tui_color_name_hash(const char *name) {
+    uint64_t h = 1469598103934665603ULL;
+    const unsigned char *p = (const unsigned char *)(name && name[0] ? name : "dsco.color.default");
+    while (*p) {
+        unsigned char ch = *p++;
+        if (isspace(ch))
+            ch = '-';
+        else
+            ch = (unsigned char)tolower(ch);
+        h ^= (uint64_t)ch;
+        h *= 1099511628211ULL;
+    }
+    return h ? h : 1469598103934665603ULL;
+}
+
 tui_rgb_t tui_hsv_to_rgb(float h, float s, float v) {
     float c = v * s;
     float hp = fmodf(h / 60.0f, 6.0f);
@@ -1186,7 +1203,7 @@ void tui_fg_rgb(tui_rgb_t c) {
 }
 
 /* Approximate RGB to nearest 256-color index */
-static int rgb_to_256(tui_rgb_t c) {
+int tui_rgb_to_256(tui_rgb_t c) {
     /* Check greyscale ramp first (232-255) */
     if (c.r == c.g && c.g == c.b) {
         if (c.r < 8)
@@ -1206,9 +1223,194 @@ static void fg_color_auto(tui_rgb_t c) {
     if (tui_supports_truecolor()) {
         fprintf(stderr, "\033[38;2;%d;%d;%dm", c.r, c.g, c.b);
     } else if (tui_detect_color_level() >= TUI_COLOR_256) {
-        fprintf(stderr, "\033[38;5;%dm", rgb_to_256(c));
+        fprintf(stderr, "\033[38;5;%dm", tui_rgb_to_256(c));
     }
     /* 16-color: caller should use ANSI constants instead */
+}
+
+static float hash_unit(uint64_t h, int shift) {
+    return (float)((h >> shift) & 0xFFFFu) / 65535.0f;
+}
+
+static tui_rgb_t rgb_blend(tui_rgb_t a, tui_rgb_t b, float t) {
+    if (t < 0.0f)
+        t = 0.0f;
+    if (t > 1.0f)
+        t = 1.0f;
+    tui_rgb_t out;
+    out.r = (unsigned char)(a.r + (b.r - a.r) * t + 0.5f);
+    out.g = (unsigned char)(a.g + (b.g - a.g) * t + 0.5f);
+    out.b = (unsigned char)(a.b + (b.b - a.b) * t + 0.5f);
+    return out;
+}
+
+static bool str_contains_ci_local(const char *s, const char *needle) {
+    if (!s || !needle || !needle[0])
+        return false;
+    size_t n = strlen(needle);
+    for (const char *p = s; *p; p++) {
+        if (strncasecmp(p, needle, n) == 0)
+            return true;
+    }
+    return false;
+}
+
+static void rgb_hex(tui_rgb_t rgb, char out[8]) {
+    snprintf(out, 8, "#%02x%02x%02x", rgb.r, rgb.g, rgb.b);
+}
+
+tui_rgb_t tui_named_color_rgb(const char *name) {
+    uint64_t h = tui_color_name_hash(name);
+    float hue = hash_unit(h, 0) * 360.0f;
+    float sat = 0.52f + hash_unit(h, 16) * 0.38f;
+    float val = 0.68f + hash_unit(h, 32) * 0.28f;
+
+    if (str_contains_ci_local(name, "muted") || str_contains_ci_local(name, "comment")) {
+        sat *= 0.42f;
+        val *= 0.74f;
+    } else if (str_contains_ci_local(name, "danger") || str_contains_ci_local(name, "error") ||
+               str_contains_ci_local(name, "blocked")) {
+        hue = 358.0f + hash_unit(h, 48) * 16.0f;
+        sat = 0.72f + hash_unit(h, 8) * 0.20f;
+        val = 0.82f + hash_unit(h, 24) * 0.14f;
+    } else if (str_contains_ci_local(name, "success") || str_contains_ci_local(name, "done") ||
+               str_contains_ci_local(name, "complete")) {
+        hue = 118.0f + hash_unit(h, 48) * 42.0f;
+        sat = 0.58f + hash_unit(h, 8) * 0.24f;
+        val = 0.74f + hash_unit(h, 24) * 0.20f;
+    } else if (str_contains_ci_local(name, "warn") || str_contains_ci_local(name, "pending")) {
+        hue = 35.0f + hash_unit(h, 48) * 30.0f;
+        sat = 0.66f + hash_unit(h, 8) * 0.22f;
+        val = 0.80f + hash_unit(h, 24) * 0.16f;
+    }
+
+    return tui_hsv_to_rgb(hue, sat, val);
+}
+
+void tui_named_color_sample(const char *name, tui_named_color_t *out) {
+    if (!out)
+        return;
+    const char *key = (name && name[0]) ? name : "dsco.color.default";
+    memset(out, 0, sizeof(*out));
+    snprintf(out->name, sizeof(out->name), "%s", key);
+    out->hash = tui_color_name_hash(key);
+    out->rgb = tui_named_color_rgb(key);
+    out->ansi256 = tui_rgb_to_256(out->rgb);
+    rgb_hex(out->rgb, out->hex);
+}
+
+void tui_construct_color_sample(const char *kind, const char *name, const char *state,
+                                double weight, tui_named_color_t *out) {
+    char key[512];
+    const char *k = (kind && kind[0]) ? kind : "item";
+    const char *n = (name && name[0]) ? name : "unnamed";
+    const char *s = (state && state[0]) ? state : "neutral";
+    snprintf(key, sizeof(key), "construct.%s.%s.%s", k, n, s);
+    tui_named_color_sample(key, out);
+    if (!out)
+        return;
+
+    tui_rgb_t status = out->rgb;
+    float blend = 0.0f;
+    if (str_contains_ci_local(s, "error") || str_contains_ci_local(s, "blocked") ||
+        str_contains_ci_local(s, "fail") || str_contains_ci_local(s, "danger")) {
+        status = tui_hsv_to_rgb(2.0f + hash_unit(out->hash, 8) * 18.0f, 0.86f, 0.94f);
+        blend = 0.55f;
+    } else if (str_contains_ci_local(s, "done") || str_contains_ci_local(s, "complete") ||
+               str_contains_ci_local(s, "available") || str_contains_ci_local(s, "current") ||
+               str_contains_ci_local(s, "calibrated") || str_contains_ci_local(s, "ok")) {
+        status = tui_hsv_to_rgb(126.0f + hash_unit(out->hash, 8) * 34.0f, 0.70f, 0.88f);
+        blend = 0.45f;
+    } else if (str_contains_ci_local(s, "active") || str_contains_ci_local(s, "running") ||
+               str_contains_ci_local(s, "continue")) {
+        status = tui_hsv_to_rgb(190.0f + hash_unit(out->hash, 8) * 45.0f, 0.72f, 0.92f);
+        blend = 0.42f;
+    } else if (str_contains_ci_local(s, "warn") || str_contains_ci_local(s, "uncertain") ||
+               str_contains_ci_local(s, "pending")) {
+        status = tui_hsv_to_rgb(38.0f + hash_unit(out->hash, 8) * 24.0f, 0.78f, 0.92f);
+        blend = 0.42f;
+    }
+    if (blend > 0.0f)
+        out->rgb = rgb_blend(out->rgb, status, blend);
+
+    if (isfinite(weight) && fabs(weight) > 0.0001) {
+        float w = (float)fabs(weight);
+        if (w > 1.0f)
+            w = 1.0f;
+        tui_rgb_t white = {255, 255, 255};
+        tui_rgb_t black = {0, 0, 0};
+        out->rgb = weight >= 0 ? rgb_blend(out->rgb, white, 0.06f * w)
+                               : rgb_blend(out->rgb, black, 0.18f * w);
+    }
+    out->ansi256 = tui_rgb_to_256(out->rgb);
+    rgb_hex(out->rgb, out->hex);
+}
+
+static int rgb_to_ansi16_code(tui_rgb_t c, bool bg) {
+    static const struct {
+        unsigned char r, g, b;
+        int fg;
+        int bg;
+    } pal[] = {{0, 0, 0, 30, 40},       {128, 0, 0, 31, 41},     {0, 128, 0, 32, 42},
+               {128, 128, 0, 33, 43},   {0, 0, 128, 34, 44},     {128, 0, 128, 35, 45},
+               {0, 128, 128, 36, 46},   {192, 192, 192, 37, 47}, {128, 128, 128, 90, 100},
+               {255, 0, 0, 91, 101},    {0, 255, 0, 92, 102},    {255, 255, 0, 93, 103},
+               {0, 0, 255, 94, 104},    {255, 0, 255, 95, 105},  {0, 255, 255, 96, 106},
+               {255, 255, 255, 97, 107}};
+    long best = LONG_MAX;
+    int best_code = bg ? 40 : 37;
+    for (size_t i = 0; i < sizeof(pal) / sizeof(pal[0]); i++) {
+        long dr = (long)c.r - pal[i].r;
+        long dg = (long)c.g - pal[i].g;
+        long db = (long)c.b - pal[i].b;
+        long dist = dr * dr + dg * dg + db * db;
+        if (dist < best) {
+            best = dist;
+            best_code = bg ? pal[i].bg : pal[i].fg;
+        }
+    }
+    return best_code;
+}
+
+static const char *rgb_escape(tui_rgb_t c, bool bg) {
+    static _Thread_local char ring[32][40];
+    static _Thread_local unsigned idx;
+    tui_color_level_t level = tui_detect_color_level();
+    if (level == TUI_COLOR_NONE)
+        return "";
+    char *buf = ring[idx++ % 32];
+    if (level == TUI_COLOR_TRUECOLOR) {
+        snprintf(buf, 40, "\033[%d;2;%d;%d;%dm", bg ? 48 : 38, c.r, c.g, c.b);
+    } else if (level == TUI_COLOR_256) {
+        snprintf(buf, 40, "\033[%d;5;%dm", bg ? 48 : 38, tui_rgb_to_256(c));
+    } else {
+        snprintf(buf, 40, "\033[%dm", rgb_to_ansi16_code(c, bg));
+    }
+    return buf;
+}
+
+const char *tui_rgb_fg_escape(tui_rgb_t c) {
+    return rgb_escape(c, false);
+}
+
+const char *tui_rgb_bg_escape(tui_rgb_t c) {
+    return rgb_escape(c, true);
+}
+
+const char *tui_named_fg(const char *name) {
+    return tui_rgb_fg_escape(tui_named_color_rgb(name));
+}
+
+const char *tui_named_bg(const char *name) {
+    return tui_rgb_bg_escape(tui_named_color_rgb(name));
+}
+
+void tui_write_fg(FILE *out, tui_rgb_t c) {
+    fputs(tui_rgb_fg_escape(c), out ? out : stderr);
+}
+
+void tui_write_bg(FILE *out, tui_rgb_t c) {
+    fputs(tui_rgb_bg_escape(c), out ? out : stderr);
 }
 
 void tui_gradient_text(const char *text, float h_start, float h_end, float s, float v) {
@@ -1355,23 +1557,23 @@ tui_tool_type_t tui_classify_tool(const char *name) {
 const char *tui_tool_color(tui_tool_type_t type) {
     switch (type) {
         case TUI_TOOL_READ:
-            return TUI_BBLUE;
+            return tui_named_fg("tool.read");
         case TUI_TOOL_WRITE:
-            return TUI_BYELLOW;
+            return tui_named_fg("tool.write");
         case TUI_TOOL_EXEC:
-            return TUI_BMAGENTA;
+            return tui_named_fg("tool.exec");
         case TUI_TOOL_WEB:
-            return TUI_BGREEN;
+            return tui_named_fg("tool.web");
         case TUI_TOOL_CRYPTO:
-            return TUI_BRED;
+            return tui_named_fg("tool.crypto");
         case TUI_TOOL_MATH:
-            return TUI_BYELLOW;
+            return tui_named_fg("tool.math");
         case TUI_TOOL_DATA:
-            return TUI_BCYAN;
+            return tui_named_fg("tool.data");
         case TUI_TOOL_OTHER:
-            return TUI_BCYAN;
+            return tui_named_fg("tool.other");
     }
-    return TUI_BCYAN;
+    return tui_named_fg("tool.other");
 }
 
 tui_rgb_t tui_tool_rgb(tui_tool_type_t type) {
@@ -1857,7 +2059,7 @@ static void brl_set_fg(tui_rgb_t c) {
     if (tui_supports_truecolor())
         fprintf(stderr, "\033[38;2;%d;%d;%dm", c.r, c.g, c.b);
     else
-        fprintf(stderr, "\033[38;5;%dm", rgb_to_256(c));
+        fprintf(stderr, "\033[38;5;%dm", tui_rgb_to_256(c));
 }
 
 static __attribute__((unused)) tui_rgb_t brl_scale_rgb(tui_rgb_t c, float scale) {

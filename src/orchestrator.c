@@ -751,7 +751,7 @@ static const char s_list_domains_schema[] = "{\"type\":\"object\",\"properties\"
 
 /* ── Public entry point ─────────────────────────────────────────────── */
 
-void agent_run_orchestrated(const char *api_key, const char *chat_model, const char *worker_model,
+bool agent_run_orchestrated(const char *api_key, const char *chat_model, const char *worker_model,
                             const char *provider_override) {
     /* Apply defaults */
     if (!chat_model || !chat_model[0])
@@ -816,8 +816,9 @@ void agent_run_orchestrated(const char *api_key, const char *chat_model, const c
      * Haiku sees only dispatch_agent, dispatch_topology, list_domains.
      * It routes user requests to domain-filtered workers or multi-agent
      * topologies as needed. */
-    agent_run(api_key, chat_model, NULL, false, provider_override);
+    bool user_exit_requested = agent_run(api_key, chat_model, NULL, false, provider_override);
 
     /* Clean up on exit */
     tools_set_profile_filter(NULL);
+    return user_exit_requested;
 }

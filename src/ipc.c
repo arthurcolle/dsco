@@ -370,7 +370,7 @@ bool ipc_init(const char *db_path, const char *agent_id) {
                                "AND last_heartbeat < ?";
         sqlite3_stmt *dead_stmt;
         if (sqlite3_prepare_v2(g_ipc.db, dead_sql, -1, &dead_stmt, NULL) == SQLITE_OK) {
-            sqlite3_bind_double(dead_stmt, 1, now_ts() - IPC_STALE_SEC);
+            sqlite3_bind_double(dead_stmt, 1, now_ts() - dsco_ipc_stale_sec());
             sqlite3_step(dead_stmt);
             sqlite3_finalize(dead_stmt);
         }
@@ -557,7 +557,7 @@ void ipc_set_event_loop(ev_loop_t *loop) {
     g_ipc_ev_loop = loop;
     if (loop) {
         g_ipc_heartbeat_timer =
-            ev_timer_repeat(loop, IPC_HEARTBEAT_SEC * 1000, ipc_heartbeat_timer_cb, NULL);
+            ev_timer_repeat(loop, dsco_ipc_heartbeat_sec() * 1000, ipc_heartbeat_timer_cb, NULL);
     }
 }
 
@@ -640,7 +640,7 @@ bool ipc_agent_alive(const char *agent_id) {
     if (info.status == IPC_AGENT_DONE || info.status == IPC_AGENT_ERROR ||
         info.status == IPC_AGENT_DEAD)
         return false;
-    return (now_ts() - info.last_heartbeat) < IPC_STALE_SEC;
+    return (now_ts() - info.last_heartbeat) < dsco_ipc_stale_sec();
 }
 
 int ipc_reap_dead_agents(double stale_s) {

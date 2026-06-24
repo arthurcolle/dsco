@@ -2469,7 +2469,10 @@ bool provider_msg_is_credit_too_low(const char *msg) {
         "credit balance is too low",   "credit balance too low", "insufficient_quota",
         "insufficient funds",          "insufficient credit",    "billing_hard_limit_reached",
         "exceeded your current quota", "payment required",       "quota_exceeded",
-        "billing not active",          "requires a paid plan",   NULL,
+        "billing not active",          "requires a paid plan",   "subscription window is exhausted",
+        "window is exhausted",         "rate_limit_exceeded",    "rate limit exceeded",
+        "too many requests",           "temporarily rate limited", "usage limit",
+        NULL,
     };
     for (int i = 0; needles[i]; i++) {
         const char *n = needles[i];
@@ -2669,7 +2672,7 @@ static void oai_handle_sse_line(oai_sse_state_t *s, const char *line) {
             s->got_error = true;
             free(s->error_msg);
             s->error_msg = err_msg;
-            if (err_code == 402 || provider_msg_is_credit_too_low(err_msg))
+            if (err_code == 402 || err_code == 429 || provider_msg_is_credit_too_low(err_msg))
                 s->credit_too_low = true;
             fprintf(stderr, "  \033[31mAPI error %d: %s\033[0m\n", err_code, err_msg);
         }
@@ -3068,13 +3071,14 @@ static stream_result_t openai_stream(provider_t *p, const char *api_key, const c
                 if (msg) {
                     state.got_error = true;
                     state.error_msg = msg;
-                    if (provider_msg_is_credit_too_low(msg) || http_code == 402)
+                    if (provider_msg_is_credit_too_low(msg) || http_code == 402 ||
+                        http_code == 429)
                         state.credit_too_low = true;
                 }
                 free(err_obj);
             }
         }
-        if (http_code == 402)
+        if (http_code == 402 || http_code == 429)
             state.credit_too_low = true;
 
         if (res != CURLE_OK) {
@@ -3082,7 +3086,7 @@ static stream_result_t openai_stream(provider_t *p, const char *api_key, const c
                     (int)http_code, od->api_url);
         } else if (state.credit_too_low) {
             fprintf(stderr,
-                    "  \033[31m✗ %s credit/billing error (HTTP %d):\033[0m %s\n"
+                    "  \033[31m✗ %s credit/rate-limit error (HTTP %d):\033[0m %s\n"
                     "  \033[2mhint: switch provider with /model, e.g.\033[0m "
                     "\033[36m/model x-ai/grok-4.20-beta\033[0m \033[2m(needs "
                     "OPENROUTER_API_KEY)\033[0m\n",
@@ -4505,13 +4509,13 @@ const char *provider_detect(const char *model, const char *api_key) {
         /* OpenRouter auto-router */
         if (strncmp(model, "openrouter/", 11) == 0 || strcmp(model, "auto") == 0)
             return "openrouter";
-        if (strncmp(model, "sakana/", 7) == 0)
-            return "sakana";
         /* OpenAI aliases are stored as openai/gpt-* so they can still fall
          * back through OpenRouter when needed, but the family itself is
          * OpenAI and should prefer OpenAI/Codex credentials. */
         if (strncmp(model, "openai/", 7) == 0)
             return "openai";
+        if (strncmp(model, "sakana/", 7) == 0)
+            return "sakana";
         /* Other org/model IDs with a slash route to OpenRouter first. */
         if (strstr(model, "/"))
             return "openrouter";
@@ -4717,6 +4721,9 @@ const char *provider_route_for_model(const char *model, const char *fallback_api
         return "openai-codex";
 
     if (provider_has_usable_key(provider_name, fallback_api_key))
+        return provider_name;
+
+    if (strcmp(provider_name, "sakana") == 0)
         return provider_name;
 
     if (strcmp(provider_name, "openrouter") != 0 &&

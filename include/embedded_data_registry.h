@@ -8,6 +8,8 @@
 #include <stddef.h>
 #include <string.h>
 
+extern const unsigned char dsco_data_constants_env_index_json[];
+extern const size_t        dsco_data_constants_env_index_json_len;
 extern const unsigned char dsco_data_tool_embeddings_bin[];
 extern const size_t        dsco_data_tool_embeddings_bin_len;
 
@@ -20,6 +22,7 @@ typedef struct {
 static inline const unsigned char *
 embedded_data_get(const char *name, size_t *out_len) {
     static const dsco_embedded_entry_t _registry[] = {
+        { "constants_env_index.json", dsco_data_constants_env_index_json, &dsco_data_constants_env_index_json_len },
         { "tool_embeddings.bin", dsco_data_tool_embeddings_bin, &dsco_data_tool_embeddings_bin_len },
         { NULL, NULL, NULL }
     };
