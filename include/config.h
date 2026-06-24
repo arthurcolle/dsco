@@ -126,6 +126,7 @@ typedef struct {
  * OpenRouter /models response, or NULL if absent / not yet loaded. Lets
  * model_lookup() resolve any real slug — no hardcoded alias required. */
 const model_info_t *openrouter_cache_lookup(const char *slug);
+const model_info_t *codex_cache_lookup(const char *name);
 
 static const model_info_t MODEL_REGISTRY[] = {
     /* ── Anthropic (native API) ──────────────────────────────────────────── */
@@ -151,6 +152,8 @@ static const model_info_t MODEL_REGISTRY[] = {
     { "gpt54-mini",   "openai/gpt-5.4-mini",           400000, 32768,  0.75,  4.50, 0, 0, 0 },
     { "gpt54-nano",   "openai/gpt-5.4-nano",           400000, 32768,  0.20,  1.25, 0, 0, 0 },
     { "gpt55-pro",    "openai/gpt-5.5-pro",            400000, 32768,  6.0,  24.0,  0, 0, 1 },
+    { "codex",        "openai/gpt-5.5",                272000, 32768,  0.0,   0.0,  0, 0, 1 },
+    { "gpt-5.5",      "openai/gpt-5.5",                272000, 32768,  0.0,   0.0,  0, 0, 1 },
     { "gpt55",        "openai/gpt-5.5",                400000, 32768,  1.75, 14.0,  0, 0, 1 },
     { "gpt53-codex",      "openai/gpt-5.3-codex",           400000, 32768,  1.75, 14.0,  0, 0, 1 },
     { "gpt52-pro",        "openai/gpt-5.2-pro",              400000, 32768, 21.0, 168.0,  0, 0, 1 },
@@ -296,12 +299,12 @@ static const model_info_t MODEL_REGISTRY[] = {
     /* ── Sakana Fugu (native endpoint) ────────────────────────────────
      * Treat subscription-backed Fugu usage as zero marginal cost for routing,
      * local estimates, and budget gates. */
-    { "fugu",         "fugu",                            272000, 32768,  0.0,   0.0,  0.0, 0, 1 },
-    { "fugu-ultra",   "fugu-ultra",                      272000, 32768,  0.0,   0.0,  0.0, 0, 1 },
-    { "fugu-ultra-20260615", "fugu-ultra-20260615",      272000, 32768,  0.0,   0.0,  0.0, 0, 1 },
-    { "sakana/fugu",  "sakana/fugu",                     272000, 32768,  0.0,   0.0,  0.0, 0, 1 },
-    { "sakana/fugu-ultra", "sakana/fugu-ultra",          272000, 32768,  0.0,   0.0,  0.0, 0, 1 },
-    { "sakana/fugu-ultra-20260615", "sakana/fugu-ultra-20260615", 272000, 32768, 0.0, 0.0, 0.0, 0, 1 },
+    { "fugu",         "fugu",                           1000000, 32768,  0.0,   0.0,  0.0, 0, 1 },
+    { "fugu-ultra",   "fugu-ultra",                     1000000, 32768,  0.0,   0.0,  0.0, 0, 1 },
+    { "fugu-ultra-20260615", "fugu-ultra-20260615",     1000000, 32768,  0.0,   0.0,  0.0, 0, 1 },
+    { "sakana/fugu",  "sakana/fugu",                    1000000, 32768,  0.0,   0.0,  0.0, 0, 1 },
+    { "sakana/fugu-ultra", "sakana/fugu-ultra",         1000000, 32768,  0.0,   0.0,  0.0, 0, 1 },
+    { "sakana/fugu-ultra-20260615", "sakana/fugu-ultra-20260615", 1000000, 32768, 0.0, 0.0, 0.0, 0, 1 },
     { NULL, NULL, 0, 0, 0, 0, 0, 0, 0 }
 };
 
@@ -311,7 +314,11 @@ static inline void model_normalize_key(const char *src, char *dst, size_t dst_le
     if (!src || !*src) return;
 
     const char *p = src;
+    if (strncmp(p, "openrouter/", 11) == 0 || strncmp(p, "openrouter:", 11) == 0)
+        p += 11;
     const char *slash = strchr(src, '/');
+    if (slash && slash < p)
+        slash = strchr(p, '/');
     if (slash && slash[1] != '\0') p = slash + 1;
 
     size_t out = 0;
@@ -382,6 +389,10 @@ static inline const model_info_t *model_lookup(const char *name) {
         }
     }
 
+    const model_info_t *codex_model = codex_cache_lookup(name);
+    if (codex_model)
+        return codex_model;
+
     /* Pass 3: runtime OpenRouter catalog — any real slug resolves with live
      * context/pricing once the background fetch has populated the cache. */
     return openrouter_cache_lookup(name);
@@ -415,7 +426,10 @@ static inline int model_context_window(const char *name) {
     "- HIERARCHICAL SWARMS: Sub-agent hierarchies (depth 6). " \
     "topology_run for fanout/fanin, debate, competition.\n" \
     "- CAPABILITY MATCHING: EXPERT/PROFICIENT/COMPETENT/NOVICE. " \
-    "Self-assess and delegate when outmatched.\n\n" \
+    "Self-assess and delegate when outmatched.\n" \
+    "- AVIAN MECHANISMS: Use avian nesting to create bounded workspaces, brooding to " \
+    "incubate fragile candidates, fledging to promote mature work, roosting for cooldown, " \
+    "and molting to refresh stale context.\n\n" \
     "TALONS (Competitive Execution — the ability to WIN):\n" \
     "- GOAL PURSUIT: Track goals through hunt states: nascent -> stalking -> " \
     "striking -> gripping -> captured (win) or escaped (fail). " \

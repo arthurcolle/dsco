@@ -1,7 +1,9 @@
 #include "topology.h"
 #include "config.h"
+#include "env_config.h"
 #include "json_util.h"
 #include "provider.h"
+#include "provider_profiles.h"
 #include "scheduler.h"
 #include "swarm.h"
 #include "tui.h"
@@ -1410,18 +1412,18 @@ static const char *or_tier_model(model_tier_t tier) {
     switch (tier) {
         case TIER_HAIKU: {
             const char *e = getenv("DSCO_SWARM_HAIKU");
-            return (e && e[0]) ? e : "z-ai/glm-5.2";
+            return (e && e[0]) ? e : "openrouter/z-ai/glm-5.2";
         }
         case TIER_SONNET: {
             const char *e = getenv("DSCO_SWARM_SONNET");
-            return (e && e[0]) ? e : "moonshotai/kimi-k2.7-code";
+            return (e && e[0]) ? e : "openrouter/moonshotai/kimi-k2.7-code";
         }
         case TIER_OPUS: {
             const char *e = getenv("DSCO_SWARM_OPUS");
-            return (e && e[0]) ? e : "z-ai/glm-5.2";
+            return (e && e[0]) ? e : "openrouter/z-ai/glm-5.2";
         }
     }
-    return "z-ai/glm-5.2";
+    return "openrouter/z-ai/glm-5.2";
 }
 
 /* ── Heterogeneous tier pool ──────────────────────────────────────────────
@@ -1437,32 +1439,58 @@ bool topology_hetero_enabled(void) {
     return e && e[0] && e[0] != '0';
 }
 
+bool topology_throughput_enabled(void) {
+    return dsco_env_bool("DSCO_TOPO_THROUGHPUT", false) ||
+           dsco_env_bool("DSCO_MAX_THROUGHPUT", false) ||
+           dsco_env_bool("DSCO_PROVIDER_THROUGHPUT", false);
+}
+
 static const char *hetero_tier_model(model_tier_t tier) {
     switch (tier) {
         case TIER_HAIKU: {
             const char *e = getenv("DSCO_SWARM_HAIKU");
-            return (e && e[0]) ? e : "stepfun/step-3.7-flash";
+            return (e && e[0]) ? e : "openrouter/stepfun/step-3.7-flash";
         }
         case TIER_SONNET: {
             const char *e = getenv("DSCO_SWARM_SONNET");
-            return (e && e[0]) ? e : "moonshotai/kimi-k2.7-code";
+            return (e && e[0]) ? e : "openrouter/moonshotai/kimi-k2.7-code";
         }
         case TIER_OPUS: {
             const char *e = getenv("DSCO_SWARM_OPUS");
-            return (e && e[0]) ? e : "z-ai/glm-5.2";
+            return (e && e[0]) ? e : "openrouter/z-ai/glm-5.2";
         }
     }
-    return "z-ai/glm-5.2";
+    return "openrouter/z-ai/glm-5.2";
+}
+
+static bool topology_model_has_openrouter_prefix(const char *model) {
+    return model &&
+           (strncmp(model, "openrouter/", 11) == 0 || strncmp(model, "openrouter:", 11) == 0);
+}
+
+static const char *topology_resolve_openrouter_model(const char *model, char *buf, size_t buflen) {
+    const char *resolved = topology_model_has_openrouter_prefix(model)
+                               ? model
+                               : model_resolve_alias(model ? model : "auto");
+    if (!resolved || !resolved[0])
+        resolved = "auto";
+
+    if (!buf || buflen == 0)
+        return resolved;
+
+    if (topology_model_has_openrouter_prefix(resolved)) {
+        snprintf(buf, buflen, "%s", resolved);
+    } else {
+        snprintf(buf, buflen, "openrouter/%s", resolved);
+    }
+    return buf;
 }
 
 const char *topology_resolve_model_for_tier(const char *coordinator_model, const char *api_key,
                                             model_tier_t tier, char *buf, size_t buflen) {
     /* Heterogeneous pool short-circuits provider detection entirely. */
     if (topology_hetero_enabled()) {
-        const char *h = model_resolve_alias(hetero_tier_model(tier));
-        if (buf && buflen > 0)
-            snprintf(buf, buflen, "%s", h);
-        return buf ? buf : h;
+        return topology_resolve_openrouter_model(hetero_tier_model(tier), buf, buflen);
     }
 
     const char *model = coordinator_model && coordinator_model[0]
@@ -1474,7 +1502,7 @@ const char *topology_resolve_model_for_tier(const char *coordinator_model, const
     if (strcmp(provider, "anthropic") == 0) {
         resolved = tier_model_id(tier);
     } else if (strcmp(provider, "openrouter") == 0) {
-        resolved = or_tier_model(tier);
+        return topology_resolve_openrouter_model(or_tier_model(tier), buf, buflen);
     } else if (strcmp(provider, "openai") == 0) {
         resolved = (tier == TIER_OPUS) ? "o1" : (tier == TIER_SONNET ? "gpt-4o" : "gpt-4o-mini");
     } else if (strcmp(provider, "groq") == 0) {
@@ -1494,6 +1522,207 @@ const char *topology_resolve_model_for_tier(const char *coordinator_model, const
     if (buf && buflen > 0)
         snprintf(buf, buflen, "%s", model_resolve_alias(resolved));
     return buf ? buf : model_resolve_alias(resolved);
+}
+
+typedef struct {
+    char provider[64];
+    char model[128];
+} topo_throughput_lane_t;
+
+static bool topology_provider_is_local_lane(const char *provider) {
+    if (!provider || !provider[0])
+        return false;
+    const char *p = provider_profile_canonical_name(provider);
+    return strcmp(p, "ollama") == 0 || strcmp(p, "lmstudio") == 0 ||
+           strcmp(p, "mlx") == 0 || strcmp(p, "local") == 0;
+}
+
+static bool topology_provider_supported_for_lane(const char *provider) {
+    const provider_profile_t *profile = provider_profile_find(provider);
+    if (!profile)
+        return false;
+    return provider_profile_transport_supported(profile) ||
+           profile->transport == PROVIDER_TRANSPORT_CODEX_RESPONSES;
+}
+
+static bool topology_lane_provider_exists(const topo_throughput_lane_t lanes[], int count,
+                                          const char *provider) {
+    for (int i = 0; i < count; i++) {
+        if (strcmp(lanes[i].provider, provider) == 0)
+            return true;
+    }
+    return false;
+}
+
+static bool topology_add_throughput_lane(topo_throughput_lane_t lanes[], int *count, int max,
+                                         const char *provider, const char *model,
+                                         const char *api_key) {
+    if (!lanes || !count || *count >= max || !provider || !provider[0] || !model || !model[0])
+        return false;
+
+    const char *canonical = provider_profile_canonical_name(provider);
+    if (!topology_provider_supported_for_lane(canonical))
+        return false;
+    if (strcmp(canonical, "openai-codex") == 0 &&
+        dsco_env_bool("DSCO_DISABLE_CODEX_OAUTH_DISCOVERY", false))
+        return false;
+    if (topology_provider_is_local_lane(canonical) &&
+        !dsco_env_bool("DSCO_TOPO_THROUGHPUT_INCLUDE_LOCAL", false))
+        return false;
+    if (!provider_has_usable_key(canonical, api_key))
+        return false;
+
+    for (int i = 0; i < *count; i++) {
+        if (strcmp(lanes[i].provider, canonical) == 0 && strcmp(lanes[i].model, model) == 0)
+            return false;
+    }
+
+    snprintf(lanes[*count].provider, sizeof(lanes[*count].provider), "%s", canonical);
+    snprintf(lanes[*count].model, sizeof(lanes[*count].model), "%s", model);
+    (*count)++;
+    return true;
+}
+
+static const char *topology_native_lane_model(const provider_profile_t *profile,
+                                              model_tier_t tier) {
+    if (!profile || !profile->name)
+        return NULL;
+    const char *p = profile->name;
+
+    if (strcmp(p, "sakana") == 0)
+        return tier == TIER_OPUS ? "fugu-ultra" : "fugu";
+    if (strcmp(p, "anthropic") == 0)
+        return tier == TIER_HAIKU   ? "claude-haiku-4-5-20251001"
+               : tier == TIER_OPUS ? "claude-opus-4-8"
+                                    : "claude-sonnet-4-6";
+    if (strcmp(p, "openai-codex") == 0)
+        return "gpt-5.5";
+    if (strcmp(p, "openai") == 0)
+        return tier == TIER_HAIKU   ? "gpt-4.1-mini"
+               : tier == TIER_OPUS ? "gpt-5.4"
+                                    : "gpt-4.1";
+    if (strcmp(p, "xai") == 0)
+        return tier == TIER_OPUS ? "grok-4" : "grok-4-fast";
+    if (strcmp(p, "moonshot") == 0)
+        return "kimi-k2.7-code-highspeed";
+    if (strcmp(p, "google") == 0)
+        return tier == TIER_OPUS ? "gemini-2.5-pro" : "gemini-2.5-flash";
+    if (strcmp(p, "groq") == 0)
+        return tier == TIER_HAIKU ? "llama-3.1-8b-instant" : "llama-3.3-70b-versatile";
+    if (strcmp(p, "deepseek") == 0)
+        return tier == TIER_OPUS ? "deepseek-reasoner" : "deepseek-chat";
+    if (strcmp(p, "mistral") == 0)
+        return tier == TIER_HAIKU   ? "mistral-small-latest"
+               : tier == TIER_OPUS ? "mistral-large-latest"
+                                    : "codestral-latest";
+    if (strcmp(p, "perplexity") == 0)
+        return tier == TIER_HAIKU ? "sonar" : "sonar-pro";
+    if (strcmp(p, "cerebras") == 0)
+        return "qwen-3-235b-a22b-instruct-2507";
+    if (strcmp(p, "cohere") == 0)
+        return "command-a-03-2025";
+    if (strcmp(p, "alibaba") == 0 || strcmp(p, "alibaba-coding-plan") == 0 ||
+        strcmp(p, "qwen-oauth") == 0)
+        return "qwen3-coder-plus";
+    if (strcmp(p, "zai") == 0)
+        return "glm-5.2";
+
+    if (tier == TIER_HAIKU && profile->default_aux_model && profile->default_aux_model[0])
+        return profile->default_aux_model;
+    return profile->default_model;
+}
+
+static const char *topology_openrouter_lane_model(model_tier_t tier, int slot) {
+    static const char *haiku[] = {
+        "stepfun/step-3.7-flash",
+        "qwen/qwen3.5-flash-02-23",
+        "z-ai/glm-5.2",
+    };
+    static const char *sonnet[] = {
+        "moonshotai/kimi-k2.7-code",
+        "x-ai/grok-4.20-beta",
+        "deepseek/deepseek-chat",
+    };
+    static const char *opus[] = {
+        "z-ai/glm-5.2",
+        "google/gemini-2.5-pro",
+        "anthropic/claude-sonnet-4.6",
+    };
+
+    const char **models = sonnet;
+    int count = (int)(sizeof(sonnet) / sizeof(sonnet[0]));
+    if (tier == TIER_HAIKU) {
+        models = haiku;
+        count = (int)(sizeof(haiku) / sizeof(haiku[0]));
+    } else if (tier == TIER_OPUS) {
+        models = opus;
+        count = (int)(sizeof(opus) / sizeof(opus[0]));
+    }
+    if (slot < 0)
+        slot = 0;
+    return models[slot % count];
+}
+
+static int topology_collect_throughput_lanes(const char *api_key, model_tier_t tier,
+                                             topo_throughput_lane_t lanes[], int max) {
+    int count = 0;
+    static const char *preferred[] = {
+        "sakana",       "anthropic", "openai-codex", "openai",   "xai",
+        "moonshot",     "google",    "groq",         "cerebras", "deepseek",
+        "mistral",      "together",  "cohere",       "perplexity",
+        "alibaba",      "alibaba-coding-plan",       "qwen-oauth",
+        "zai",          NULL,
+    };
+
+    for (int i = 0; preferred[i] && count < max; i++) {
+        const provider_profile_t *profile = provider_profile_find(preferred[i]);
+        const char *model = topology_native_lane_model(profile, tier);
+        if (profile && model)
+            topology_add_throughput_lane(lanes, &count, max, profile->name, model, api_key);
+    }
+
+    if (provider_has_usable_key("openrouter", api_key)) {
+        for (int i = 0; i < 3 && count < max; i++) {
+            topology_add_throughput_lane(lanes, &count, max, "openrouter",
+                                         topology_openrouter_lane_model(tier, i), api_key);
+        }
+    }
+
+    for (size_t i = 0; i < provider_profile_count() && count < max; i++) {
+        const provider_profile_t *profile = provider_profile_at(i);
+        if (!profile || !profile->name || strcmp(profile->name, "openrouter") == 0)
+            continue;
+        if (topology_lane_provider_exists(lanes, count, profile->name))
+            continue;
+        const char *model = topology_native_lane_model(profile, tier);
+        if (model)
+            topology_add_throughput_lane(lanes, &count, max, profile->name, model, api_key);
+    }
+
+    return count;
+}
+
+bool topology_resolve_throughput_lane_for_tier(const char *api_key, model_tier_t tier, int slot,
+                                               char *provider_buf, size_t provider_len,
+                                               char *model_buf, size_t model_len) {
+    if (!provider_buf || provider_len == 0 || !model_buf || model_len == 0)
+        return false;
+
+    topo_throughput_lane_t lanes[64];
+    int count = topology_collect_throughput_lanes(api_key, tier, lanes,
+                                                  (int)(sizeof(lanes) / sizeof(lanes[0])));
+    if (count <= 0) {
+        provider_buf[0] = '\0';
+        model_buf[0] = '\0';
+        return false;
+    }
+
+    if (slot < 0)
+        slot = 0;
+    const topo_throughput_lane_t *lane = &lanes[slot % count];
+    snprintf(provider_buf, provider_len, "%s", lane->provider);
+    snprintf(model_buf, model_len, "%s", lane->model);
+    return true;
 }
 
 static bool has_incoming_type(const topology_t *t, int node_id, edge_type_t type) {
@@ -1596,6 +1825,25 @@ static bool strcasestr_simple(const char *haystack, const char *needle) {
     return false;
 }
 
+static bool task_mentions_self_improvement(const char *task) {
+    return strcasestr_simple(task, "self-improvement") ||
+           strcasestr_simple(task, "self_improve") ||
+           (strcasestr_simple(task, "self") && strcasestr_simple(task, "improvement")) ||
+           (strcasestr_simple(task, "learn") && strcasestr_simple(task, "patterns"));
+}
+
+static bool task_mentions_large_scale_ai_work(const char *task) {
+    bool scale = strcasestr_simple(task, "large-scale") ||
+                 (strcasestr_simple(task, "large") && strcasestr_simple(task, "scale")) ||
+                 strcasestr_simple(task, "broad") ||
+                 strcasestr_simple(task, "wide");
+    bool ai = strcasestr_simple(task, "ai") ||
+              strcasestr_simple(task, "agent") ||
+              strcasestr_simple(task, "model") ||
+              strcasestr_simple(task, "dsco-cli");
+    return scale && (ai || task_mentions_self_improvement(task));
+}
+
 static topology_task_kind_t map_task_profile_to_kind(const task_profile_t *tp, const char *task) {
     int score[TOPO_TASK_INCIDENT + 1] = {0};
     if (!tp)
@@ -1636,10 +1884,22 @@ static topology_task_kind_t map_task_profile_to_kind(const task_profile_t *tp, c
         score[TOPO_TASK_CODE] += 1;
     }
 
+    if (task_mentions_self_improvement(task)) {
+        score[TOPO_TASK_CODE] += 2;
+        score[TOPO_TASK_REVIEW] += 1;
+        score[TOPO_TASK_RESEARCH] += 1;
+    }
+    if (task_mentions_large_scale_ai_work(task)) {
+        score[TOPO_TASK_CODE] += 2;
+        score[TOPO_TASK_REVIEW] += 1;
+    }
+
     if (strcasestr_simple(task, "code") || strcasestr_simple(task, "implement") ||
         strcasestr_simple(task, "bug") || strcasestr_simple(task, "refactor") ||
         strcasestr_simple(task, "build") || strcasestr_simple(task, "compile") ||
-        strcasestr_simple(task, "deploy") || strcasestr_simple(task, "ci")) {
+        strcasestr_simple(task, "deploy") || strcasestr_simple(task, "ci") ||
+        strcasestr_simple(task, "cli") || strcasestr_simple(task, "repo") ||
+        strcasestr_simple(task, "codebase")) {
         score[TOPO_TASK_CODE] += 2;
     }
     if (strcasestr_simple(task, "review") || strcasestr_simple(task, "audit") ||
@@ -1694,6 +1954,26 @@ static bool is_dynamic_topology_name(const char *name) {
     return name && name[0] &&
            (strcasecmp(name, "dynamic") == 0 || strcasecmp(name, "adaptive") == 0 ||
             strcasecmp(name, "auto_dynamic") == 0);
+}
+
+static bool task_mentions_provider_throughput(const char *task) {
+    if (!task || !task[0])
+        return false;
+
+    bool provider_scope = strcasestr_simple(task, "all providers") ||
+                          strcasestr_simple(task, "across providers") ||
+                          strcasestr_simple(task, "across all providers") ||
+                          strcasestr_simple(task, "provider") ||
+                          strcasestr_simple(task, "providers");
+    bool throughput_goal = strcasestr_simple(task, "throughput") ||
+                           strcasestr_simple(task, "fanout") ||
+                           strcasestr_simple(task, "fan-out") ||
+                           strcasestr_simple(task, "parallel") ||
+                           strcasestr_simple(task, "concurrency") ||
+                           strcasestr_simple(task, "maximize") ||
+                           strcasestr_simple(task, "maximise");
+
+    return provider_scope && throughput_goal;
 }
 
 bool topology_profile_task(const char *task, topology_task_profile_t *profile) {
@@ -1766,6 +2046,20 @@ bool topology_profile_task(const char *task, topology_task_profile_t *profile) {
     }
     if (profile->kind == TOPO_TASK_CREATIVE && profile->desired_parallelism < 3) {
         profile->desired_parallelism = 3;
+    }
+    if (task_mentions_self_improvement(task) || task_mentions_large_scale_ai_work(task)) {
+        profile->complexity = clamp_int(profile->complexity < 4 ? 4 : profile->complexity, 1, 5);
+        profile->needs_iteration = true;
+        profile->needs_validation = true;
+        profile->prefers_breadth = true;
+        if (profile->desired_parallelism < 6)
+            profile->desired_parallelism = 6;
+    }
+    if (task_mentions_provider_throughput(task)) {
+        profile->complexity = clamp_int(profile->complexity < 4 ? 4 : profile->complexity, 1, 5);
+        profile->needs_validation = true;
+        profile->prefers_breadth = true;
+        profile->desired_parallelism = 8;
     }
     profile->desired_parallelism = clamp_int(profile->desired_parallelism, 1, 8);
 
@@ -2096,11 +2390,12 @@ static bool run_stage(const topology_t *t, const int ready_nodes[], int ready_co
 
     stage_child_map_t child_map[TOPO_MAX_NODES * 4];
     int child_count = 0;
+    bool throughput_mode = topology_throughput_enabled() || task_mentions_provider_throughput(task);
 
     for (int i = 0; i < ready_count; i++) {
         const topo_node_t *node = &t->nodes[ready_nodes[i]];
         char model_buf[128];
-        const char *node_model = topology_resolve_model_for_tier(
+        const char *default_node_model = topology_resolve_model_for_tier(
             coordinator_model, api_key, node->tier, model_buf, sizeof(model_buf));
         for (int rep = 0; rep < node->replicas; rep++) {
             char *prompt =
@@ -2116,7 +2411,22 @@ static bool run_stage(const topology_t *t, const int ready_nodes[], int ready_co
                 free(prompt);
                 prompt = extra.data;
             }
-            int child_id = swarm_spawn(&sw, prompt, node_model);
+
+            char lane_provider[64];
+            char lane_model[128];
+            const char *node_model = default_node_model;
+            const char *node_provider = NULL;
+            if (throughput_mode &&
+                topology_resolve_throughput_lane_for_tier(api_key, node->tier, child_count,
+                                                          lane_provider, sizeof(lane_provider),
+                                                          lane_model, sizeof(lane_model))) {
+                node_provider = lane_provider;
+                node_model = lane_model;
+            }
+
+            int child_id = node_provider ? swarm_spawn_provider(&sw, -1, prompt, node_model,
+                                                                node_provider)
+                                         : swarm_spawn(&sw, prompt, node_model);
             free(prompt);
             if (child_id < 0) {
                 swarm_destroy(&sw);

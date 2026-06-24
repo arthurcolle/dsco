@@ -1,4 +1,5 @@
 #include "memory_tier.h"
+#include "error.h"
 #include "vecstore.h"
 #include "tools.h"
 #include "vfs.h"
@@ -119,6 +120,12 @@ int memory_store_tagged(memory_store_t *m, memory_tier_t tier, const char *key, 
                         double importance, const char **tags, int tag_count) {
     if (!m || !m->initialized || !key || !value)
         return -1;
+    /* DIGESTIVE CONTRACT: tier must be a real tier; importance is a probability
+     * in [0,1] — an out-of-range importance corrupts the consolidation gate
+     * (promote at >=0.7) and the decay model. Fail closed. */
+    DSCO_REQUIRE_RET(tier >= 0 && tier < MEM_TIER_COUNT, -1);
+    DSCO_REQUIRE_RET(importance >= 0.0 && importance <= 1.0, -1);
+    DSCO_REQUIRE_RET(tag_count >= 0, -1);
 
     /* Check if key already exists — update instead */
     memory_entry_t *existing = find_by_key(m, key);
@@ -131,6 +138,8 @@ int memory_store_tagged(memory_store_t *m, memory_tier_t tier, const char *key, 
     }
 
     int slot = find_slot(m);
+    /* CONSERVATION: find_slot returns -1 when full; never index with it. */
+    DSCO_REQUIRE_RET(slot >= 0 && slot < MEMTIER_MAX_ENTRIES, -1);
     memory_entry_t *e = &m->entries[slot];
     memset(e, 0, sizeof(*e));
 

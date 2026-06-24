@@ -33,6 +33,7 @@
 #include "rsi_curriculum.h"
 #include "memory_tier.h"
 #include "talons.h"
+#include "avian.h"
 #include "learned_cost.h"
 #include "session_memory.h"
 #include "toolmgmt.h"
@@ -10235,7 +10236,8 @@ static executor_type_t parse_executor_type(const char *name) {
         return EXECUTOR_DSCO;
     if (strcmp(name, "claude") == 0)
         return EXECUTOR_CLAUDE;
-    if (strcmp(name, "codex") == 0)
+    if (strcmp(name, "codex") == 0 || strcmp(name, "openai-codex") == 0 ||
+        strcmp(name, "chatgpt-codex") == 0)
         return EXECUTOR_CODEX;
     return EXECUTOR_DSCO;
 }
@@ -15436,8 +15438,17 @@ static void ensure_wt_init(void) {
         if (!self_id)
             self_id = "root";
         governance_register_agent(&g_governance, self_id, PRINCIPAL_TIER_2, 10000);
+        if (strcmp(self_id, "dsco") != 0)
+            governance_register_agent(&g_governance, "dsco", PRINCIPAL_TIER_2, 10000);
         g_wt_initialized = true;
     }
+}
+
+static void tool_governance_ensure_dsco_agent(void) {
+    if (!g_governance.initialized)
+        return;
+    if (!governance_get_agent(&g_governance, "dsco"))
+        governance_register_agent(&g_governance, "dsco", PRINCIPAL_TIER_2, 10000);
 }
 
 /* ── Pheromone Tools ──────────────────────────────────────────────────── */
@@ -15530,6 +15541,140 @@ static bool tool_pheromone_status(const char *input, char *result, size_t rlen) 
     (void)input;
     ensure_wt_init();
     pheromone_status_json(&g_governance.pheromones, result, rlen);
+    return true;
+}
+
+/* ── Avian Tools ──────────────────────────────────────────────────────── */
+
+static bool tool_avian_nest(const char *input, char *result, size_t rlen) {
+    ensure_wt_init();
+    char *op = json_get_str(input, "op");
+    if (!op || !op[0]) {
+        free(op);
+        snprintf(result, rlen, "missing: op (create, material, roost, molt, get)");
+        return false;
+    }
+
+    bool ok = true;
+    if (strcmp(op, "create") == 0) {
+        char *name = json_get_str(input, "name");
+        char *purpose = json_get_str(input, "purpose");
+        double warmth = json_get_double(input, "warmth", 0.35);
+        double stability = json_get_double(input, "stability", 0.35);
+        int id = avian_nest_create(&g_governance.avian, name ? name : "nest",
+                                   purpose ? purpose : "bounded workspace", warmth, stability);
+        snprintf(result, rlen,
+                 "{\"ok\":%s,\"nest_id\":%d,\"mechanism\":\"nesting\",\"state\":\"%s\"}",
+                 id >= 0 ? "true" : "false", id,
+                 id >= 0 ? avian_nest_state_name(avian_nest_get(&g_governance.avian, id)->state)
+                         : "failed");
+        free(name);
+        free(purpose);
+    } else if (strcmp(op, "material") == 0 || strcmp(op, "add_material") == 0) {
+        int nest_id = (int)json_get_double(input, "nest_id", 0);
+        char *material = json_get_str(input, "material");
+        double quality = json_get_double(input, "quality", 0.5);
+        bool lining = json_get_bool(input, "lining", true);
+        bool added = avian_nest_add_material(&g_governance.avian, nest_id,
+                                             material ? material : "context", quality, lining);
+        if (added)
+            avian_nest_json(&g_governance.avian, nest_id, result, rlen);
+        else
+            snprintf(result, rlen, "{\"ok\":false,\"error\":\"could not add material\"}");
+        free(material);
+    } else if (strcmp(op, "roost") == 0) {
+        int nest_id = (int)json_get_double(input, "nest_id", 0);
+        char *reason = json_get_str(input, "reason");
+        double cooldown = json_get_double(input, "cooldown", 0.15);
+        bool roosted = avian_nest_roost(&g_governance.avian, nest_id, reason, cooldown);
+        snprintf(result, rlen,
+                 "{\"ok\":%s,\"nest_id\":%d,\"mechanism\":\"roosting\",\"reason\":\"%s\"}",
+                 roosted ? "true" : "false", nest_id, reason ? reason : "cooldown");
+        free(reason);
+    } else if (strcmp(op, "molt") == 0) {
+        int nest_id = (int)json_get_double(input, "nest_id", 0);
+        char *reason = json_get_str(input, "reason");
+        bool molted = avian_nest_molt(&g_governance.avian, nest_id, reason);
+        snprintf(result, rlen,
+                 "{\"ok\":%s,\"nest_id\":%d,\"mechanism\":\"molting\",\"reason\":\"%s\"}",
+                 molted ? "true" : "false", nest_id, reason ? reason : "refresh stale lining");
+        free(reason);
+    } else if (strcmp(op, "get") == 0) {
+        int nest_id = (int)json_get_double(input, "nest_id", 0);
+        avian_nest_json(&g_governance.avian, nest_id, result, rlen);
+    } else {
+        ok = false;
+        snprintf(result, rlen, "unknown avian nest op: %s", op);
+    }
+    free(op);
+    return ok;
+}
+
+static bool tool_avian_brood(const char *input, char *result, size_t rlen) {
+    ensure_wt_init();
+    char *op = json_get_str(input, "op");
+    if (!op || !op[0]) {
+        free(op);
+        snprintf(result, rlen, "missing: op (lay, tend, fledge, abandon, get)");
+        return false;
+    }
+
+    bool ok = true;
+    if (strcmp(op, "lay") == 0) {
+        int nest_id = (int)json_get_double(input, "nest_id", 0);
+        char *name = json_get_str(input, "name");
+        char *kind = json_get_str(input, "kind");
+        char *lineage = json_get_str(input, "lineage");
+        double risk = json_get_double(input, "risk", 0.45);
+        int required = (int)json_get_double(input, "required_cycles", 3);
+        int id = avian_brood_lay(&g_governance.avian, nest_id, name ? name : "candidate",
+                                 kind ? kind : "proposal", lineage ? lineage : "local", risk, required);
+        snprintf(result, rlen,
+                 "{\"ok\":%s,\"egg_id\":%d,\"nest_id\":%d,\"mechanism\":\"brooding\",\"state\":\"%s\"}",
+                 id >= 0 ? "true" : "false", id, nest_id,
+                 id >= 0 ? avian_egg_state_name(avian_egg_get(&g_governance.avian, id)->state)
+                         : "failed");
+        free(name); free(kind); free(lineage);
+    } else if (strcmp(op, "tend") == 0 || strcmp(op, "incubate") == 0) {
+        int egg_id = (int)json_get_double(input, "egg_id", 0);
+        double warmth = json_get_double(input, "warmth", 0.55);
+        char *evidence = json_get_str(input, "evidence");
+        bool tended = avian_brood_tend(&g_governance.avian, egg_id, warmth, evidence);
+        if (tended)
+            avian_egg_json(&g_governance.avian, egg_id, result, rlen);
+        else
+            snprintf(result, rlen, "{\"ok\":false,\"error\":\"could not tend egg\"}");
+        free(evidence);
+    } else if (strcmp(op, "fledge") == 0) {
+        int egg_id = (int)json_get_double(input, "egg_id", 0);
+        char reason[256];
+        bool fledged = avian_brood_fledge(&g_governance.avian, egg_id, reason, sizeof(reason));
+        snprintf(result, rlen,
+                 "{\"ok\":%s,\"egg_id\":%d,\"mechanism\":\"fledging\",\"reason\":\"%s\"}",
+                 fledged ? "true" : "false", egg_id, reason);
+    } else if (strcmp(op, "abandon") == 0) {
+        int egg_id = (int)json_get_double(input, "egg_id", 0);
+        char *reason = json_get_str(input, "reason");
+        bool abandoned = avian_brood_abandon(&g_governance.avian, egg_id, reason);
+        snprintf(result, rlen,
+                 "{\"ok\":%s,\"egg_id\":%d,\"mechanism\":\"abandonment\",\"reason\":\"%s\"}",
+                 abandoned ? "true" : "false", egg_id, reason ? reason : "not viable");
+        free(reason);
+    } else if (strcmp(op, "get") == 0) {
+        int egg_id = (int)json_get_double(input, "egg_id", 0);
+        avian_egg_json(&g_governance.avian, egg_id, result, rlen);
+    } else {
+        ok = false;
+        snprintf(result, rlen, "unknown avian brood op: %s", op);
+    }
+    free(op);
+    return ok;
+}
+
+static bool tool_avian_status(const char *input, char *result, size_t rlen) {
+    (void)input;
+    ensure_wt_init();
+    avian_status_json(&g_governance.avian, result, rlen);
     return true;
 }
 
@@ -16115,7 +16260,11 @@ static bool tool_wings_talons_status(const char *input, char *result, size_t rle
 
     char mbuf[4096];
     memory_status_json(&g_memory, mbuf, sizeof(mbuf));
-    jbuf_appendf(&b, "%s},\"talons\":", mbuf);
+    jbuf_appendf(&b, "%s,\"avian\":", mbuf);
+
+    char abuf[2048];
+    avian_status_json(&g_governance.avian, abuf, sizeof(abuf));
+    jbuf_appendf(&b, "%s},\"talons\":", abuf);
 
     char tbuf[4096];
     talons_status_json(&g_talons, tbuf, sizeof(tbuf));
@@ -21708,8 +21857,9 @@ static bool tool_discover_tools(const char *input, char *result, size_t rlen) {
                 gid = 13;
             else if (strncmp(n, "ipc_", 4) == 0 || strstr(n, "swarm") || strstr(n, "spawn") ||
                      strstr(n, "agent") || strstr(n, "topology") || strstr(n, "ooda") ||
-                     strstr(n, "pheromone") || strstr(n, "talons") || strstr(n, "governance") ||
-                     strstr(n, "killswitch") || strstr(n, "executor") || strstr(n, "openrouter"))
+                     strstr(n, "pheromone") || strstr(n, "avian") || strstr(n, "talons") ||
+                     strstr(n, "governance") || strstr(n, "killswitch") || strstr(n, "executor") ||
+                     strstr(n, "openrouter"))
                 gid = 6;
             else if (strstr(n, "memory_") || strstr(n, "soul_"))
                 gid = 14;
@@ -23220,6 +23370,26 @@ static bool tool_pheromone_dispatch(const char *input, char *result, size_t rlen
         ok = tool_pheromone_status(input, result, rlen);
     else
         snprintf(result, rlen, "unknown pheromone action: %s", action);
+    free(action);
+    return ok;
+}
+
+static bool tool_avian_dispatch(const char *input, char *result, size_t rlen) {
+    char *action = json_get_str(input, "action");
+    if (!action || !action[0]) {
+        free(action);
+        snprintf(result, rlen, "missing: action (nest, brood, status)");
+        return false;
+    }
+    bool ok = false;
+    if (strcmp(action, "nest") == 0)
+        ok = tool_avian_nest(input, result, rlen);
+    else if (strcmp(action, "brood") == 0)
+        ok = tool_avian_brood(input, result, rlen);
+    else if (strcmp(action, "status") == 0)
+        ok = tool_avian_status(input, result, rlen);
+    else
+        snprintf(result, rlen, "unknown avian action: %s", action);
     free(action);
     return ok;
 }
@@ -25736,7 +25906,8 @@ static const tool_def_t s_tools[] = {
          "or race timeout\"},\"contestants\":{\"type\":\"array\",\"description\":\"For "
          "action=race: array of model strings or {provider,model} "
          "objects\"}},\"required\":[\"action\"]}",
-     .execute = tool_agent_dispatch},
+     .execute = tool_agent_dispatch,
+     .core = true},
     {.name = "swarm",
      .description = "Swarm orchestration: create, map_reduce, status, collect, budget, "
                     "spawn_executor, spawn_provider, create_executor_swarm, executor_status, "
@@ -25779,7 +25950,8 @@ static const tool_def_t s_tools[] = {
          "action=budget\"},\"timeout\":{\"type\":\"integer\",\"description\":\"Seconds per phase "
          "for collect|map_reduce\"},\"topology\":{\"type\":\"string\",\"description\":\"Topology "
          "name for topology_run\"}},\"required\":[\"action\"]}",
-     .execute = tool_swarm_dispatch},
+     .execute = tool_swarm_dispatch,
+     .core = true},
 
     /* ══════════════════════════════════════════════════════════════════════
      *  IPC (1)
@@ -25794,7 +25966,7 @@ static const tool_def_t s_tools[] = {
      .execute = tool_ipc_dispatch},
 
     /* ══════════════════════════════════════════════════════════════════════
-     *  WINGS + TALONS + IMMUNE (7)
+     *  WINGS + TALONS + IMMUNE (8)
      * ══════════════════════════════════════════════════════════════════════ */
     {.name = "pheromone",
      .description = "Pheromone coordination (Wings): deposit, sense, status.",
@@ -25803,6 +25975,15 @@ static const tool_def_t s_tools[] = {
          "\"deposit|sense|status\"},\"trail\":{\"type\":\"string\"},\"strength\":{\"type\":"
          "\"number\"}},\"required\":[\"action\"]}",
      .execute = tool_pheromone_dispatch},
+    {.name = "avian",
+     .description = "Bird-inspired Wings mechanisms: nesting workspaces, brooding incubation, fledging promotion, roosting cooldown, molting refresh.",
+     .input_schema_json =
+         "{\"type\":\"object\",\"properties\":{\"action\":{\"type\":\"string\",\"description\":\"nest|brood|status\"},"
+         "\"op\":{\"type\":\"string\",\"description\":\"nest:create|material|roost|molt|get; brood:lay|tend|fledge|abandon|get\"},"
+         "\"nest_id\":{\"type\":\"integer\"},\"egg_id\":{\"type\":\"integer\"},\"name\":{\"type\":\"string\"},"
+         "\"purpose\":{\"type\":\"string\"},\"material\":{\"type\":\"string\"},\"evidence\":{\"type\":\"string\"},"
+         "\"warmth\":{\"type\":\"number\"},\"stability\":{\"type\":\"number\"},\"risk\":{\"type\":\"number\"}},\"required\":[\"action\"]}",
+     .execute = tool_avian_dispatch},
     {.name = "ooda",
      .description =
          "OODA loop discipline (Talons): begin, observe, orient, decide, complete, status.",
@@ -26249,7 +26430,8 @@ static const tool_def_t s_tools[] = {
          "\"items\":{\"type\":\"string\"}},\"verify_min_bytes\":{\"type\":\"integer\"},\"verify_"
          "contains\":{\"type\":\"string\"},\"verify_sha256\":{\"type\":\"string\"}},\"required\":["
          "\"command\"]}",
-     .execute = tool_run_command},
+     .execute = tool_run_command,
+     .core = true},
     {.name = "sandbox_run",
      .description = "Run command in sandboxed container.",
      .input_schema_json =
@@ -26433,6 +26615,16 @@ void tools_set_profile_filter(tool_profile_filter_fn_t fn) {
 
 void tools_clear_profile_filter(void) {
     g_profile_filter = NULL;
+}
+
+bool tools_is_parent_specified_core_tool(const char *tool_name) {
+    if (!tool_name || !tool_name[0])
+        return false;
+    for (int i = 0; i < s_tool_count; i++) {
+        if (s_tools[i].name && strcmp(s_tools[i].name, tool_name) == 0)
+            return s_tools[i].core;
+    }
+    return false;
 }
 
 void tools_init_local_only(void) {
@@ -26917,8 +27109,9 @@ static int assign_group(const char *name, const char *desc) {
         return 13;
     if (strncmp(name, "ipc_", 4) == 0 || strstr(name, "swarm") || strstr(name, "spawn") ||
         strstr(name, "agent") || strstr(name, "topology") || strstr(name, "ooda") ||
-        strstr(name, "pheromone") || strstr(name, "talons") || strstr(name, "governance") ||
-        strstr(name, "killswitch") || strstr(name, "executor") || strstr(name, "openrouter"))
+        strstr(name, "pheromone") || strstr(name, "avian") || strstr(name, "talons") ||
+        strstr(name, "governance") || strstr(name, "killswitch") || strstr(name, "executor") ||
+        strstr(name, "openrouter"))
         return 6;
     if (strstr(name, "memory_") || strstr(name, "soul_"))
         return 14;
@@ -29081,7 +29274,8 @@ static bool tool_is_governance_exempt(const char *n) {
      * governance must be callable to resolve a governance denial.
      * C5: Immune cannot be modified from outside, but MUST be readable. */
     return strcmp(n, "governance") == 0 || strcmp(n, "killswitch") == 0 || strcmp(n, "ooda") == 0 ||
-           strcmp(n, "pheromone") == 0 || strcmp(n, "wings_talons_status") == 0;
+           strcmp(n, "pheromone") == 0 || strcmp(n, "avian") == 0 ||
+           strcmp(n, "wings_talons_status") == 0;
 }
 
 /* ── G5: Tool-class GSU cost table ───────────────────────────────────── */
@@ -29140,6 +29334,83 @@ static bool tool_is_high_risk(const char *n, tool_class_t cls) {
            strcmp(n, "Edit") == 0 || strcmp(n, "git") == 0 || strcmp(n, "patch_file") == 0;
 }
 
+/* ── Runtime self-preservation preflight ──────────────────────────────── */
+
+static bool tool_ascii_contains_ci(const char *haystack, const char *needle) {
+    if (!haystack || !needle || !needle[0])
+        return false;
+    size_t n = strlen(needle);
+    for (const char *p = haystack; *p; p++) {
+        size_t i = 0;
+        for (; i < n; i++) {
+            unsigned char a = (unsigned char)p[i];
+            unsigned char b = (unsigned char)needle[i];
+            if (!a)
+                return false;
+            if (a >= 'A' && a <= 'Z')
+                a = (unsigned char)(a - 'A' + 'a');
+            if (b >= 'A' && b <= 'Z')
+                b = (unsigned char)(b - 'A' + 'a');
+            if (a != b)
+                break;
+        }
+        if (i == n)
+            return true;
+    }
+    return false;
+}
+
+static bool tool_exec_command_blocked_by_self_preservation(const char *name, const char *input_json,
+                                                           char *reason, size_t reason_len) {
+    if (!name || !input_json)
+        return false;
+    if (!(strcmp(name, "bash") == 0 || strcmp(name, "run_command") == 0 ||
+          strcmp(name, "sandbox_run") == 0))
+        return false;
+
+    char *cmd = json_get_str(input_json, "command");
+    if (!cmd || !cmd[0]) {
+        free(cmd);
+        return false;
+    }
+
+    bool blocked = false;
+    const char *why = NULL;
+
+    if (tool_ascii_contains_ci(cmd, "kill -9") || tool_ascii_contains_ci(cmd, "kill -KILL") ||
+        tool_ascii_contains_ci(cmd, "pkill -9") || tool_ascii_contains_ci(cmd, "pkill -KILL") ||
+        tool_ascii_contains_ci(cmd, "killall -9") || tool_ascii_contains_ci(cmd, "taskkill /F") ||
+        tool_ascii_contains_ci(cmd, "Stop-Process -Force")) {
+        blocked = true;
+        why = "raw_force_kill_requires_user_confirmation";
+    } else if (tool_ascii_contains_ci(cmd, "wsl --shutdown") ||
+               tool_ascii_contains_ci(cmd, "wsl --terminate") ||
+               tool_ascii_contains_ci(cmd, "tmux kill-session") ||
+               tool_ascii_contains_ci(cmd, "screen -X quit") ||
+               tool_ascii_contains_ci(cmd, "reboot") || tool_ascii_contains_ci(cmd, "shutdown") ||
+               tool_ascii_contains_ci(cmd, "poweroff") || tool_ascii_contains_ci(cmd, "halt")) {
+        blocked = true;
+        why = "runtime_or_host_termination_requires_manual_user_run";
+    } else if ((tool_ascii_contains_ci(cmd, "systemctl restart") ||
+                tool_ascii_contains_ci(cmd, "systemctl stop") ||
+                tool_ascii_contains_ci(cmd, "launchctl bootout") ||
+                tool_ascii_contains_ci(cmd, "launchctl kill")) &&
+               (tool_ascii_contains_ci(cmd, "dsco") || tool_ascii_contains_ci(cmd, "codex") ||
+                tool_ascii_contains_ci(cmd, "claude") || tool_ascii_contains_ci(cmd, "terminal") ||
+                tool_ascii_contains_ci(cmd, "shell") || tool_ascii_contains_ci(cmd, "ssh"))) {
+        blocked = true;
+        why = "possible_agent_runtime_service_termination_requires_manual_user_run";
+    }
+
+    if (blocked && reason && reason_len) {
+        snprintf(reason, reason_len,
+                 "%s; provide recovery steps and let the user run this command manually if ready",
+                 why ? why : "runtime_self_preservation_block");
+    }
+    free(cmd);
+    return blocked;
+}
+
 /* ── Pheromone region key for a tool ─────────────────────────────────── */
 
 static void tool_phero_region(const char *name, char *buf, size_t len) {
@@ -29175,6 +29446,7 @@ bool tools_execute_for_tier(const char *name, const char *input_json, const char
     if (!g_governance.initialized) {
         goto _skip_gate;
     }
+    tool_governance_ensure_dsco_agent();
 
     {
         bool is_ro = false;
@@ -29191,6 +29463,22 @@ bool tools_execute_for_tier(const char *name, const char *input_json, const char
         double remaining = governance_remaining_gsu(&g_governance, "dsco");
         char phero_region[PHEROMONE_MAX_REGION_LEN];
         tool_phero_region(name, phero_region, sizeof(phero_region));
+
+        /* ── G2b: Runtime self-preservation preflight ─────────────────── */
+        if (cls == TOOL_CLASS_EXEC) {
+            char preserve_reason[256];
+            preserve_reason[0] = '\0';
+            if (tool_exec_command_blocked_by_self_preservation(name, input_json, preserve_reason,
+                                                               sizeof(preserve_reason))) {
+                pheromone_deposit(&g_governance.pheromones, PHERO_WARNING, 1.0, phero_region,
+                                  "immune", "{\"reason\":\"runtime_self_preservation\"}");
+                tool_gov_deny(result, result_len, name, "G2b_self_preservation",
+                              preserve_reason[0] ? preserve_reason : "runtime_self_preservation",
+                              remaining);
+                self_improve_record_tool(&g_self_improve, name, false, 0.0, 0);
+                return false;
+            }
+        }
 
         /* ── G3: Killswitch ───────────────────────────────────────────── */
         if (killswitch_system_halted(&g_governance.killswitches)) {
