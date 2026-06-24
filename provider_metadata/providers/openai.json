@@ -1,0 +1,210 @@
+{
+  "auth": {
+    "client_side_notes": [],
+    "env_keys": [
+      "OPENAI_API_KEY"
+    ],
+    "headers": [
+      {
+        "name": "Authorization",
+        "value": "Bearer $OPENAI_API_KEY"
+      }
+    ],
+    "scheme": "bearer"
+  },
+  "client_side_mechanics": {
+    "codex_config": {},
+    "headers_optional": [],
+    "headers_required": [],
+    "quirks": [],
+    "sdk_compatibility": [
+      "openai-compatible"
+    ],
+    "unsupported_fields": []
+  },
+  "confidence": 0.82,
+  "display_name": "OpenAI",
+  "docs": [
+    {
+      "confidence": 0.93,
+      "retrieved": "2026-06-24",
+      "title": "Prompt caching",
+      "url": "https://developers.openai.com/api/docs/guides/prompt-caching"
+    },
+    {
+      "confidence": 0.9,
+      "retrieved": "2026-06-24",
+      "title": "Responses API",
+      "url": "https://platform.openai.com/docs/api-reference/responses"
+    }
+  ],
+  "dsco": {
+    "implemented_features": [
+      "automatic_prompt_cache",
+      "prompt_cache_key",
+      "prompt_cache_retention",
+      "cached_token_usage_parse"
+    ],
+    "missing_features": [
+      "Responses transport default migration"
+    ],
+    "provider_profile": "openai",
+    "risk": "low",
+    "tests": [
+      "test_prompt_cache_openai_request_shape",
+      "test_prompt_cache_provider_policy_matrix"
+    ]
+  },
+  "last_reviewed": "2026-06-24",
+  "prompt_caching": {
+    "invalidates_on": [
+      "prefix_change",
+      "model_change"
+    ],
+    "mechanisms": [
+      {
+        "default_policy": "auto",
+        "dsco_support": "implemented",
+        "field": null,
+        "kind": "automatic",
+        "models": [
+          "gpt-4o*",
+          "gpt-4.1*",
+          "gpt-5*",
+          "o-series*"
+        ],
+        "name": "automatic_prefix_cache",
+        "scope": "request_prefix",
+        "usage_fields": [
+          "usage.prompt_tokens_details.cached_tokens",
+          "usage.input_tokens_details.cached_tokens"
+        ]
+      },
+      {
+        "default_policy": "enabled",
+        "dsco_support": "implemented",
+        "field": "prompt_cache_key",
+        "kind": "request_field",
+        "models": [
+          "supported OpenAI models"
+        ],
+        "name": "prompt_cache_key",
+        "scope": "request",
+        "usage_fields": [
+          "usage.*.cached_tokens"
+        ]
+      },
+      {
+        "default_policy": "24h",
+        "dsco_support": "implemented",
+        "field": "prompt_cache_retention",
+        "kind": "request_field",
+        "models": [
+          "supported OpenAI models"
+        ],
+        "name": "prompt_cache_retention",
+        "scope": "request",
+        "usage_fields": []
+      }
+    ],
+    "minimum_cacheable_tokens": 1024,
+    "notes": [
+      "Cache hits depend on stable prefix ordering."
+    ],
+    "status": "explicit",
+    "ttl": "provider_default/retention"
+  },
+  "provider": "openai",
+  "reasoning": {
+    "aliases": {},
+    "efforts": [
+      "low",
+      "medium",
+      "high"
+    ],
+    "field": "reasoning.effort",
+    "supported": true,
+    "unsupported_values_rejected": true
+  },
+  "streaming": {
+    "idempotent_retries": true,
+    "idle_timeout_ms_recommended": 120000,
+    "known_failure_modes": [
+      "429_rate_limit",
+      "5xx_overload",
+      "stream_idle"
+    ],
+    "request_max_retries": 2,
+    "stream_max_retries": 2
+  },
+  "usage_accounting": {
+    "cached_tokens": [
+      "usage.prompt_tokens_details.cached_tokens",
+      "usage.input_tokens_details.cached_tokens"
+    ],
+    "input_tokens": [
+      "usage.prompt_tokens",
+      "usage.input_tokens"
+    ],
+    "output_tokens": [
+      "usage.completion_tokens",
+      "usage.output_tokens"
+    ],
+    "provider_specific": [],
+    "reasoning_tokens": [
+      "usage.completion_tokens_details.reasoning_tokens",
+      "usage.output_tokens_details.reasoning_tokens"
+    ]
+  },
+  "wire_apis": [
+    {
+      "base_url": "https://api.openai.com/v1",
+      "endpoint": "/responses",
+      "modalities": {
+        "input": [
+          "text",
+          "image",
+          "audio"
+        ],
+        "output": [
+          "text"
+        ]
+      },
+      "name": "responses",
+      "status": "preferred",
+      "streaming": {
+        "format": "sse",
+        "supported": true
+      },
+      "tools": {
+        "parallel_tool_calls": true,
+        "strict_schema": true,
+        "supported": true
+      }
+    },
+    {
+      "base_url": "https://api.openai.com/v1",
+      "endpoint": "/chat/completions",
+      "modalities": {
+        "input": [
+          "text",
+          "image"
+        ],
+        "output": [
+          "text"
+        ]
+      },
+      "name": "chat_completions",
+      "status": "supported",
+      "streaming": {
+        "format": "sse",
+        "supported": true
+      },
+      "tools": {
+        "parallel_tool_calls": true,
+        "strict_schema": true,
+        "supported": true
+      }
+    }
+  ]
+}
