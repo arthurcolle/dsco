@@ -10,6 +10,7 @@ dsco_asan
 test_runner
 asan-test_runner
 ubsan-test_runner
+/test_*
 *.dSYM/
 
 # Editor / OS
@@ -29,14 +30,20 @@ error
 __pycache__/
 *.pyc
 *.pyo
+.mypy_cache/
+.pytest_cache/
+.ruff_cache/
 .venv/
 venv/
+.test-venv/
+.web-venv/
 
 # IDE
 .vscode/
 .idea/
 
 # Private notes / scratch
+research_notes/
 notes/
 prompt*.txt
 trading_mind.txt

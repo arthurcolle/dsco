@@ -4171,13 +4171,14 @@ stream_result_t llm_stream(const char *api_key, const char *request_json, stream
             if (body_err) {
                 char *msg = json_get_str(body_err, "message");
                 char *typ = json_get_str(body_err, "type");
-                if (http_code == 402 || provider_msg_is_credit_too_low(msg) ||
+                if (http_code == 402 || http_code == 429 ||
+                    provider_msg_is_credit_too_low(msg) ||
                     provider_msg_is_credit_too_low(typ) ||
                     provider_msg_is_credit_too_low(state.line_buf.data))
                     state.credit_too_low = true;
                 if (state.credit_too_low) {
                     fprintf(stderr,
-                            "  \033[31m\xe2\x9c\x97 anthropic credit/billing error (HTTP "
+                            "  \033[31m\xe2\x9c\x97 anthropic credit/rate-limit error (HTTP "
                             "%d):\033[0m %s\n"
                             "  \033[2mhint: fallback chain will retry via xAI/OpenAI/Google/... "
                             "or set OPENROUTER_API_KEY for a cross-lab path.\033[0m\n",
@@ -4192,12 +4193,13 @@ stream_result_t llm_stream(const char *api_key, const char *request_json, stream
                 free(typ);
                 free(body_err);
             } else {
-                if (http_code == 402 || provider_msg_is_credit_too_low(state.line_buf.data))
+                if (http_code == 402 || http_code == 429 ||
+                    provider_msg_is_credit_too_low(state.line_buf.data))
                     state.credit_too_low = true;
                 fprintf(stderr, "dsco: HTTP %d: %s\n", (int)http_code, state.line_buf.data);
             }
         } else {
-            if (http_code == 402)
+            if (http_code == 402 || http_code == 429)
                 state.credit_too_low = true;
             fprintf(stderr, "dsco: HTTP %d\n", (int)http_code);
         }
