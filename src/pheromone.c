@@ -1,4 +1,5 @@
 #include "pheromone.h"
+#include "error.h"
 #include "event_loop.h"
 #include <math.h>
 #include <stdio.h>
@@ -99,6 +100,13 @@ int pheromone_deposit_ex(pheromone_field_t *f, pheromone_type_t type, double con
                          pheromone_decay_t decay_fn, double lambda, double ttl) {
     if (!f || !f->initialized)
         return -1;
+    /* ENDOCRINE CONTRACT: a hormone with non-finite or negative concentration is
+     * meaningless and would poison every downstream gradient aggregation. The
+     * signal type must be a valid enum member. Fail closed (return -1). */
+    DSCO_REQUIRE_RET(type >= 0 && type < PHERO_TYPE_COUNT, -1);
+    DSCO_REQUIRE_RET(concentration == concentration, -1); /* reject NaN */
+    DSCO_REQUIRE_RET(concentration >= 0.0, -1);
+    DSCO_REQUIRE_RET(decay_fn >= 0 && decay_fn < PHERO_DECAY_COUNT, -1);
     if (f->count >= PHEROMONE_MAX_SIGNALS) {
         /* Try to reap dead signals first */
         pheromone_tick(f);

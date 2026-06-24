@@ -13,10 +13,14 @@
 #include "plugin.h"
 #include "provider.h"
 #include "provider_profiles.h"
+#include <curl/curl.h>
+#include "codex_cache.h"
 #include "router.h"
 #include "setup.h"
 #include "swarm.h"
 #include "task_profile.h"
+#include "agent_profile.h"
+#include "self_improve.h"
 #include "arena_alloc.h"
 #include "event_loop.h"
 #include "vm.h"
@@ -103,6 +107,25 @@ static void test_restore_env(const char *name, const char *saved, bool had_value
         setenv(name, saved ? saved : "", 1);
     else
         unsetenv(name);
+}
+
+typedef struct {
+    const char *name;
+    char        value[256];
+    bool        had_value;
+} test_env_snapshot_t;
+
+static void test_capture_env_list(test_env_snapshot_t vars[], size_t count) {
+    for (size_t i = 0; i < count; i++) {
+        test_capture_env(vars[i].name, vars[i].value, sizeof(vars[i].value),
+                         &vars[i].had_value);
+    }
+}
+
+static void test_restore_env_list(test_env_snapshot_t vars[], size_t count) {
+    for (size_t i = 0; i < count; i++) {
+        test_restore_env(vars[i].name, vars[i].value, vars[i].had_value);
+    }
 }
 
 static int test_count_substr(const char *haystack, const char *needle);
@@ -1407,6 +1430,58 @@ static void test_openrouter_request_named_tool_choice(void) {
     PASS();
 }
 
+static void test_provider_request_model_prefix_routing(void) {
+    TEST("provider request model prefix routing");
+    conversation_t conv;
+    conv_init(&conv);
+    conv_add_user_text(&conv, "hello");
+
+    session_state_t moonshot_session;
+    session_state_init(&moonshot_session, "moonshotai/kimi-k2.7-code");
+    provider_t *moonshot = provider_create("moonshot");
+    ASSERT(moonshot != NULL, "moonshot provider should be created");
+    char *moonshot_req = moonshot->build_request(moonshot, &conv, &moonshot_session, 1024, NULL);
+    ASSERT(moonshot_req != NULL, "moonshot request should not be NULL");
+    ASSERT(strstr(moonshot_req, "\"model\":\"kimi-k2.7-code\"") != NULL,
+           "native Moonshot should receive bare model id");
+    ASSERT(strstr(moonshot_req, "\"model\":\"moonshotai/kimi-k2.7-code\"") == NULL,
+           "native Moonshot should not receive OpenRouter namespace");
+    free(moonshot_req);
+    provider_free(moonshot);
+
+    session_state_t fugu_session;
+    session_state_init(&fugu_session, "sakana/fugu-ultra");
+    snprintf(fugu_session.effort, sizeof(fugu_session.effort), "%s", "max");
+    provider_t *fugu = provider_create("sakana");
+    ASSERT(fugu != NULL, "sakana provider should be created");
+    char *fugu_req = fugu->build_request(fugu, &conv, &fugu_session, 1024, NULL);
+    ASSERT(fugu_req != NULL, "fugu request should not be NULL");
+    ASSERT(strstr(fugu_req, "\"model\":\"fugu-ultra\"") != NULL,
+           "native Sakana should receive bare fugu model id");
+    ASSERT(strstr(fugu_req, "\"reasoning\":{\"effort\":\"xhigh\"}") != NULL,
+           "Sakana max effort should normalize to xhigh");
+    ASSERT(strstr(fugu_req, "\"model\":\"sakana/fugu-ultra\"") == NULL,
+           "native Sakana should not receive Sakana namespace");
+    free(fugu_req);
+    provider_free(fugu);
+
+    session_state_t openrouter_session;
+    session_state_init(&openrouter_session, "openrouter/moonshotai/kimi-k2.7-code");
+    provider_t *openrouter = provider_create("openrouter");
+    ASSERT(openrouter != NULL, "openrouter provider should be created");
+    char *openrouter_req = openrouter->build_request(openrouter, &conv, &openrouter_session, 1024, NULL);
+    ASSERT(openrouter_req != NULL, "openrouter request should not be NULL");
+    ASSERT(strstr(openrouter_req, "\"model\":\"moonshotai/kimi-k2.7-code\"") != NULL,
+           "OpenRouter should receive slug after explicit openrouter prefix");
+    ASSERT(strstr(openrouter_req, "\"model\":\"openrouter/moonshotai/kimi-k2.7-code\"") == NULL,
+           "OpenRouter request should strip explicit routing prefix");
+    free(openrouter_req);
+    provider_free(openrouter);
+
+    conv_free(&conv);
+    PASS();
+}
+
 static void test_openai_request_defaults_auto_tool_choice(void) {
     TEST("openai request defaults to auto tool_choice");
     tools_init();
@@ -2057,6 +2132,98 @@ static void test_session_state_init_inherits_trust_tier_env(void) {
     ASSERT(s2.trust_tier == DSCO_TRUST_STANDARD, "invalid env tier should fail closed to standard");
 
     test_restore_env("DSCO_TRUST_TIER", saved_trust, had_trust);
+    PASS();
+}
+
+static void test_session_state_init_populates_fallbacks_without_changing_model(void) {
+    TEST("session_state_init fallbacks preserve canonical model");
+    char saved_disable_fallbacks[64], saved_disable_codex[64], saved_or[256], saved_anth[256];
+    char saved_openai[256], saved_xai[256], saved_grok[256], saved_x_ai[256];
+    char saved_fugu[256], saved_sakana[256], saved_fish[256], saved_sakana_token[256];
+    bool had_disable_fallbacks = false, had_disable_codex = false, had_or = false,
+         had_anth = false;
+    bool had_openai = false, had_xai = false, had_grok = false, had_x_ai = false;
+    bool had_fugu = false, had_sakana = false, had_fish = false, had_sakana_token = false;
+
+    test_capture_env("DSCO_DISABLE_DEFAULT_FALLBACKS", saved_disable_fallbacks,
+                     sizeof(saved_disable_fallbacks), &had_disable_fallbacks);
+    test_capture_env("DSCO_DISABLE_CODEX_OAUTH_DISCOVERY", saved_disable_codex,
+                     sizeof(saved_disable_codex), &had_disable_codex);
+    test_capture_env("OPENROUTER_API_KEY", saved_or, sizeof(saved_or), &had_or);
+    test_capture_env("ANTHROPIC_API_KEY", saved_anth, sizeof(saved_anth), &had_anth);
+    test_capture_env("OPENAI_API_KEY", saved_openai, sizeof(saved_openai), &had_openai);
+    test_capture_env("XAI_API_KEY", saved_xai, sizeof(saved_xai), &had_xai);
+    test_capture_env("GROK_API_KEY", saved_grok, sizeof(saved_grok), &had_grok);
+    test_capture_env("X_AI_API_KEY", saved_x_ai, sizeof(saved_x_ai), &had_x_ai);
+    test_capture_env("FUGU_API_KEY", saved_fugu, sizeof(saved_fugu), &had_fugu);
+    test_capture_env("SAKANA_API_KEY", saved_sakana, sizeof(saved_sakana), &had_sakana);
+    test_capture_env("FISH_API_KEY", saved_fish, sizeof(saved_fish), &had_fish);
+    test_capture_env("SAKANA_TOKEN", saved_sakana_token, sizeof(saved_sakana_token),
+                     &had_sakana_token);
+
+    unsetenv("DSCO_DISABLE_DEFAULT_FALLBACKS");
+    setenv("DSCO_DISABLE_CODEX_OAUTH_DISCOVERY", "1", 1);
+    setenv("OPENROUTER_API_KEY", "sk-or-router", 1);
+    unsetenv("ANTHROPIC_API_KEY");
+    unsetenv("OPENAI_API_KEY");
+    unsetenv("XAI_API_KEY");
+    unsetenv("GROK_API_KEY");
+    unsetenv("X_AI_API_KEY");
+    unsetenv("FUGU_API_KEY");
+    unsetenv("SAKANA_API_KEY");
+    unsetenv("FISH_API_KEY");
+    unsetenv("SAKANA_TOKEN");
+
+    session_state_t s;
+    session_state_init(&s, "sonnet");
+    ASSERT(strcmp(s.model, "claude-sonnet-4-6") == 0,
+           "fallback construction must not rewrite the canonical session model");
+    ASSERT(s.fallback_count >= 3, "fallback chain should be populated from usable routes");
+    ASSERT(strcmp(s.fallback_models[0], "openrouter/anthropic/claude-sonnet-4.6") == 0,
+           "first fallback should preserve model family through an alternate route");
+    ASSERT(strcmp(s.fallback_models[1], "openrouter/x-ai/grok-4.20-beta") == 0,
+           "second fallback should cross labs");
+    ASSERT(strcmp(s.fallback_models[2], "openrouter/openai/gpt-5.4") == 0,
+           "third fallback should include OpenAI-family route");
+
+    test_restore_env("DSCO_DISABLE_DEFAULT_FALLBACKS", saved_disable_fallbacks,
+                     had_disable_fallbacks);
+    test_restore_env("DSCO_DISABLE_CODEX_OAUTH_DISCOVERY", saved_disable_codex,
+                     had_disable_codex);
+    test_restore_env("OPENROUTER_API_KEY", saved_or, had_or);
+    test_restore_env("ANTHROPIC_API_KEY", saved_anth, had_anth);
+    test_restore_env("OPENAI_API_KEY", saved_openai, had_openai);
+    test_restore_env("XAI_API_KEY", saved_xai, had_xai);
+    test_restore_env("GROK_API_KEY", saved_grok, had_grok);
+    test_restore_env("X_AI_API_KEY", saved_x_ai, had_x_ai);
+    test_restore_env("FUGU_API_KEY", saved_fugu, had_fugu);
+    test_restore_env("SAKANA_API_KEY", saved_sakana, had_sakana);
+    test_restore_env("FISH_API_KEY", saved_fish, had_fish);
+    test_restore_env("SAKANA_TOKEN", saved_sakana_token, had_sakana_token);
+    PASS();
+}
+
+static void test_session_state_init_can_disable_default_fallbacks(void) {
+    TEST("session_state_init can disable default fallbacks");
+    char saved_disable_fallbacks[64], saved_or[256];
+    bool had_disable_fallbacks = false, had_or = false;
+    test_capture_env("DSCO_DISABLE_DEFAULT_FALLBACKS", saved_disable_fallbacks,
+                     sizeof(saved_disable_fallbacks), &had_disable_fallbacks);
+    test_capture_env("OPENROUTER_API_KEY", saved_or, sizeof(saved_or), &had_or);
+
+    setenv("DSCO_DISABLE_DEFAULT_FALLBACKS", "1", 1);
+    setenv("OPENROUTER_API_KEY", "sk-or-router", 1);
+
+    session_state_t s;
+    session_state_init(&s, "sonnet");
+    ASSERT(strcmp(s.model, "claude-sonnet-4-6") == 0,
+           "disabled fallbacks should still preserve requested model");
+    ASSERT(s.fallback_count == 0, "disabled default fallbacks should leave chain empty");
+    ASSERT(s.fallback_models[0][0] == '\0', "fallback storage should remain zeroed");
+
+    test_restore_env("DSCO_DISABLE_DEFAULT_FALLBACKS", saved_disable_fallbacks,
+                     had_disable_fallbacks);
+    test_restore_env("OPENROUTER_API_KEY", saved_or, had_or);
     PASS();
 }
 
@@ -6150,12 +6317,58 @@ static void test_agent_and_swarm_tool_schemas_expose_spawn_fields(void) {
     ASSERT(strstr(agent->input_schema_json, "\"model\"") != NULL,
            "agent schema should expose model");
     ASSERT(strstr(agent->input_schema_json, "\"id\"") != NULL, "agent schema should expose id");
+    ASSERT(agent->core, "agent tool should be core so workers can recurse/delegate");
+    ASSERT(swarm->core, "swarm tool should be core so workers can coordinate");
     ASSERT(strstr(swarm->input_schema_json, "\"group_id\"") != NULL,
            "swarm schema should expose group_id");
     ASSERT(strstr(swarm->input_schema_json, "\"tasks\"") != NULL,
            "swarm schema should expose tasks");
     ASSERT(strstr(swarm->input_schema_json, "\"provider\"") != NULL,
            "swarm schema should expose provider");
+    PASS();
+}
+
+static void test_worker_core_tools_survive_restrictive_agent_profile(void) {
+    TEST("worker core tools survive restrictive agent profile");
+    tools_init();
+    agent_profiles_init();
+    agent_profile_t p;
+    memset(&p, 0, sizeof(p));
+    snprintf(p.name, sizeof(p.name), "%s", "restrictive-test");
+    snprintf(p.tools[0], sizeof(p.tools[0]), "%s", "read_file");
+    p.tool_count = 1;
+    agent_profile_save(&p);
+    agent_profile_set_active("restrictive-test");
+    ASSERT(agent_profile_tool_allowed("bash", NULL), "bash must remain available to workers");
+    ASSERT(agent_profile_tool_allowed("run_command", NULL), "run_command must remain available");
+    ASSERT(agent_profile_tool_allowed("agent", NULL), "agent must remain available");
+    ASSERT(agent_profile_tool_allowed("swarm", NULL), "swarm must remain available");
+    ASSERT(agent_profile_tool_allowed_strict("bash", NULL) == false,
+           "strict filter should still show the restrictive profile would deny bash");
+    agent_profile_set_active(NULL);
+    agent_profile_delete("restrictive-test");
+    PASS();
+}
+
+static void test_worker_tool_profile_allows_full_builtin_catalog(void) {
+    TEST("worker tool profile allows full builtin catalog");
+    tools_init_profile(TOOLS_CORE);
+    int count = 0;
+    const tool_def_t *defs = tools_get_all(&count);
+    int non_core = -1;
+    for (int i = 0; i < count; i++) {
+        if (defs[i].name && !defs[i].core) {
+            non_core = i;
+            break;
+        }
+    }
+    ASSERT(non_core >= 0, "test requires at least one non-core builtin tool");
+    ASSERT(!tools_profile_allows_index(non_core),
+           "core profile should not expose non-core builtin tools");
+
+    tools_init_profile(TOOLS_AGENT);
+    ASSERT(tools_profile_allows_index(non_core),
+           "worker/agent profile should expose non-core builtin tools");
     PASS();
 }
 
@@ -7106,6 +7319,8 @@ static void test_model_resolve_alias_extended(void) {
     ASSERT(strcmp(model_resolve_alias("opus"), "claude-opus-4-8") == 0, "opus alias");
     ASSERT(strcmp(model_resolve_alias("sonnet"), "claude-sonnet-4-6") == 0, "sonnet alias");
     ASSERT(strcmp(model_resolve_alias("glm52"), "z-ai/glm-5.2") == 0, "glm52 alias");
+    ASSERT(strcmp(model_resolve_alias("codex"), "openai/gpt-5.5") == 0,
+           "codex alias should resolve to ChatGPT Codex default");
     ASSERT(strcmp(model_resolve_alias("kimi"), "moonshotai/kimi-k2.7-code") == 0,
            "kimi alias should resolve to K2.7 Code on OpenRouter");
     ASSERT(strcmp(model_resolve_alias("kimi-k2.7-code"), "kimi-k2.7-code") == 0,
@@ -7113,6 +7328,19 @@ static void test_model_resolve_alias_extended(void) {
     /* Unknown name returns itself */
     ASSERT(strcmp(model_resolve_alias("unknown-model-xyz"), "unknown-model-xyz") == 0,
            "unknown alias returns self");
+    PASS();
+}
+
+static void test_codex_cache_first_run_defaults(void) {
+    TEST("codex cache first-run defaults");
+    ASSERT(strcmp(codex_cache_default_model(), "gpt-5.5") == 0,
+           "Codex default should be gpt-5.5 before cache refresh");
+    ASSERT(strcmp(codex_cache_default_effort("gpt-5.5"), "medium") == 0,
+           "Codex default effort should be medium before cache refresh");
+    ASSERT(codex_cache_model_supported("openai/gpt-5.5"),
+           "Codex should support gpt-5.5 before cache refresh");
+    ASSERT(!codex_cache_model_supported("openai/gpt-4.1"),
+           "Codex should not treat gpt-4.1 as supported");
     PASS();
 }
 
@@ -7205,12 +7433,14 @@ static void test_provider_detect_namespaced_models(void) {
     TEST("provider_detect handles namespaced models");
     ASSERT(strcmp(provider_detect("openai/gpt-5.4", NULL), "openai") == 0,
            "openai namespaced model should prefer OpenAI-family routing");
-    ASSERT(strcmp(provider_detect("anthropic/claude-sonnet-4-6", NULL), "openrouter") == 0,
-           "anthropic namespaced model should route through openrouter");
+    ASSERT(strcmp(provider_detect("anthropic/claude-sonnet-4-6", NULL), "anthropic") == 0,
+           "anthropic namespaced model should prefer Anthropic-family routing");
+    ASSERT(strcmp(provider_detect("moonshotai/kimi-k2.7-code", NULL), "moonshot") == 0,
+           "moonshotai namespaced model should route to native Moonshot");
     ASSERT(strcmp(provider_detect("sakana/fugu-ultra", NULL), "sakana") == 0,
            "sakana namespaced model should route to native Sakana");
-    ASSERT(strcmp(provider_detect("openrouter/auto", NULL), "openrouter") == 0,
-           "openrouter auto route should stay openrouter");
+    ASSERT(strcmp(provider_detect("openrouter/openai/gpt-5.5", NULL), "openrouter") == 0,
+           "openrouter-prefixed provider namespace should route through OpenRouter");
     PASS();
 }
 
@@ -7220,6 +7450,8 @@ static void test_provider_model_family_detects_underlying_family(void) {
            "x-ai namespace should map to xai family");
     ASSERT(strcmp(provider_model_family("openai/gpt-5.4"), "openai") == 0,
            "openai namespace should map to openai family");
+    ASSERT(strcmp(provider_model_family("openrouter/openai/gpt-5.4"), "openai") == 0,
+           "openrouter wrapper should preserve the underlying model family");
     ASSERT(strcmp(provider_model_family("google/gemini-2.5-pro"), "google") == 0,
            "google namespace should map to google family");
     ASSERT(strcmp(provider_model_family("claude-sonnet-4-6"), "anthropic") == 0,
@@ -7390,14 +7622,22 @@ static void test_provider_custom_base_uses_profile_canonical_name(void) {
 
 static void test_provider_resolve_api_key_supports_aliases(void) {
     TEST("provider_resolve_api_key supports common aliases");
-    char saved_kimi[256], saved_grok[256], saved_moonshot[256], saved_xai[256];
-    bool had_kimi = false, had_grok = false, had_moonshot = false, had_xai = false;
+    char saved_kimi[256], saved_grok[256], saved_moonshot[256], saved_xai[256],
+        saved_kimi_coding[256], saved_moonshotai[256];
+    bool had_kimi = false, had_grok = false, had_moonshot = false, had_xai = false,
+        had_kimi_coding = false, had_moonshotai = false;
     test_capture_env("KIMI_API_KEY", saved_kimi, sizeof(saved_kimi), &had_kimi);
     test_capture_env("GROK_API_KEY", saved_grok, sizeof(saved_grok), &had_grok);
     test_capture_env("MOONSHOT_API_KEY", saved_moonshot, sizeof(saved_moonshot), &had_moonshot);
     test_capture_env("XAI_API_KEY", saved_xai, sizeof(saved_xai), &had_xai);
+    test_capture_env("KIMI_CODING_API_KEY", saved_kimi_coding, sizeof(saved_kimi_coding),
+                     &had_kimi_coding);
+    test_capture_env("MOONSHOTAI_API_KEY", saved_moonshotai, sizeof(saved_moonshotai),
+                     &had_moonshotai);
 
     unsetenv("MOONSHOT_API_KEY");
+    unsetenv("KIMI_CODING_API_KEY");
+    unsetenv("MOONSHOTAI_API_KEY");
     unsetenv("XAI_API_KEY");
     setenv("KIMI_API_KEY", "sk-kimi-alias", 1);
     setenv("GROK_API_KEY", "xai-grok-alias", 1);
@@ -7409,10 +7649,17 @@ static void test_provider_resolve_api_key_supports_aliases(void) {
            "moonshot should accept KIMI_API_KEY");
     ASSERT(xai && strcmp(xai, "xai-grok-alias") == 0, "xai should accept GROK_API_KEY");
 
+    setenv("MOONSHOT_API_KEY", "sk-stale-moonshot", 1);
+    moonshot = provider_resolve_api_key("moonshot");
+    ASSERT(moonshot && strcmp(moonshot, "sk-kimi-alias") == 0,
+           "moonshot should prefer KIMI_API_KEY over stale MOONSHOT_API_KEY");
+
     test_restore_env("KIMI_API_KEY", saved_kimi, had_kimi);
     test_restore_env("GROK_API_KEY", saved_grok, had_grok);
     test_restore_env("MOONSHOT_API_KEY", saved_moonshot, had_moonshot);
     test_restore_env("XAI_API_KEY", saved_xai, had_xai);
+    test_restore_env("KIMI_CODING_API_KEY", saved_kimi_coding, had_kimi_coding);
+    test_restore_env("MOONSHOTAI_API_KEY", saved_moonshotai, had_moonshotai);
     PASS();
 }
 
@@ -7480,10 +7727,10 @@ static void test_provider_select_default_primary_model_prefers_glm_kimi(void) {
     setenv("OPENAI_API_KEY", "sk-openai-native", 1);
 
     const char *selected = provider_select_default_primary_model(false);
-    ASSERT(selected && strcmp(selected, "z-ai/glm-5.2") == 0,
+    ASSERT(selected && strcmp(selected, "openrouter/z-ai/glm-5.2") == 0,
            "general default should prefer GLM over Grok/Anthropic");
     selected = provider_select_default_primary_model(true);
-    ASSERT(selected && strcmp(selected, "moonshotai/kimi-k2.7-code") == 0,
+    ASSERT(selected && strcmp(selected, "openrouter/moonshotai/kimi-k2.7-code") == 0,
            "code default should prefer Kimi K2.7 Code over Sonnet");
 
     setenv("GLM_API_KEY", "glm-native", 1);
@@ -7514,14 +7761,18 @@ static void test_provider_select_default_primary_model_prefers_glm_kimi(void) {
 
 static void test_provider_build_default_fallback_models_cross_lab(void) {
     TEST("provider_build_default_fallback_models cross-lab");
-    char saved_xai[256], saved_or[256], saved_anth[256], saved_openai[256];
+    char saved_xai[256], saved_or[256], saved_anth[256], saved_openai[256],
+        saved_disable_codex[256];
     char saved_fugu[256], saved_sakana[256], saved_fish[256], saved_sakana_token[256];
     bool had_xai = false, had_or = false, had_anth = false, had_openai = false;
+    bool had_disable_codex = false;
     bool had_fugu = false, had_sakana = false, had_fish = false, had_sakana_token = false;
     test_capture_env("XAI_API_KEY", saved_xai, sizeof(saved_xai), &had_xai);
     test_capture_env("OPENROUTER_API_KEY", saved_or, sizeof(saved_or), &had_or);
     test_capture_env("ANTHROPIC_API_KEY", saved_anth, sizeof(saved_anth), &had_anth);
     test_capture_env("OPENAI_API_KEY", saved_openai, sizeof(saved_openai), &had_openai);
+    test_capture_env("DSCO_DISABLE_CODEX_OAUTH_DISCOVERY", saved_disable_codex,
+                     sizeof(saved_disable_codex), &had_disable_codex);
     test_capture_env("FUGU_API_KEY", saved_fugu, sizeof(saved_fugu), &had_fugu);
     test_capture_env("SAKANA_API_KEY", saved_sakana, sizeof(saved_sakana), &had_sakana);
     test_capture_env("FISH_API_KEY", saved_fish, sizeof(saved_fish), &had_fish);
@@ -7532,6 +7783,7 @@ static void test_provider_build_default_fallback_models_cross_lab(void) {
     setenv("OPENROUTER_API_KEY", "sk-or-router", 1);
     unsetenv("ANTHROPIC_API_KEY");
     unsetenv("OPENAI_API_KEY");
+    setenv("DSCO_DISABLE_CODEX_OAUTH_DISCOVERY", "1", 1);
     unsetenv("FUGU_API_KEY");
     unsetenv("SAKANA_API_KEY");
     unsetenv("FISH_API_KEY");
@@ -7541,19 +7793,223 @@ static void test_provider_build_default_fallback_models_cross_lab(void) {
     int count = provider_build_default_fallback_models("claude-sonnet-4-6", models, 4);
 
     ASSERT(count >= 3, "fallback chain should include multiple labs");
-    ASSERT(strcmp(models[0], "anthropic/claude-sonnet-4.6") == 0,
+    ASSERT(strcmp(models[0], "openrouter/anthropic/claude-sonnet-4.6") == 0,
            "first fallback should preserve Claude family via OpenRouter");
-    ASSERT(strcmp(models[1], "x-ai/grok-4.20-beta") == 0, "second fallback should prefer Grok");
-    ASSERT(strcmp(models[2], "openai/gpt-5.4") == 0, "third fallback should include OpenAI");
+    ASSERT(strcmp(models[1], "openrouter/x-ai/grok-4.20-beta") == 0,
+           "second fallback should prefer Grok");
+    ASSERT(strcmp(models[2], "openrouter/openai/gpt-5.4") == 0,
+           "third fallback should include OpenAI");
 
     test_restore_env("XAI_API_KEY", saved_xai, had_xai);
     test_restore_env("OPENROUTER_API_KEY", saved_or, had_or);
     test_restore_env("ANTHROPIC_API_KEY", saved_anth, had_anth);
     test_restore_env("OPENAI_API_KEY", saved_openai, had_openai);
+    test_restore_env("DSCO_DISABLE_CODEX_OAUTH_DISCOVERY", saved_disable_codex,
+                     had_disable_codex);
     test_restore_env("FUGU_API_KEY", saved_fugu, had_fugu);
     test_restore_env("SAKANA_API_KEY", saved_sakana, had_sakana);
     test_restore_env("FISH_API_KEY", saved_fish, had_fish);
     test_restore_env("SAKANA_TOKEN", saved_sakana_token, had_sakana_token);
+    PASS();
+}
+
+static bool test_model_list_contains(char models[][128], int count, const char *needle) {
+    for (int i = 0; i < count; i++) {
+        if (strcmp(models[i], needle) == 0)
+            return true;
+    }
+    return false;
+}
+
+static void test_provider_build_default_fallback_models_never_includes_primary_duplicate(void) {
+    TEST("provider fallback chain excludes primary duplicate");
+    char saved_or[256], saved_anth[256], saved_openai[256], saved_xai[256], saved_grok[256];
+    char saved_disable_codex[64];
+    bool had_or = false, had_anth = false, had_openai = false, had_xai = false, had_grok = false;
+    bool had_disable_codex = false;
+    test_capture_env("OPENROUTER_API_KEY", saved_or, sizeof(saved_or), &had_or);
+    test_capture_env("ANTHROPIC_API_KEY", saved_anth, sizeof(saved_anth), &had_anth);
+    test_capture_env("OPENAI_API_KEY", saved_openai, sizeof(saved_openai), &had_openai);
+    test_capture_env("XAI_API_KEY", saved_xai, sizeof(saved_xai), &had_xai);
+    test_capture_env("GROK_API_KEY", saved_grok, sizeof(saved_grok), &had_grok);
+    test_capture_env("DSCO_DISABLE_CODEX_OAUTH_DISCOVERY", saved_disable_codex,
+                     sizeof(saved_disable_codex), &had_disable_codex);
+
+    setenv("OPENROUTER_API_KEY", "sk-or-router", 1);
+    unsetenv("ANTHROPIC_API_KEY");
+    unsetenv("OPENAI_API_KEY");
+    unsetenv("XAI_API_KEY");
+    unsetenv("GROK_API_KEY");
+    setenv("DSCO_DISABLE_CODEX_OAUTH_DISCOVERY", "1", 1);
+
+    char models[4][128];
+    int count = provider_build_default_fallback_models("openrouter/x-ai/grok-4.20-beta",
+                                                       models, 4);
+    ASSERT(count >= 2, "fallback chain should still include other labs");
+    ASSERT(!test_model_list_contains(models, count, "openrouter/x-ai/grok-4.20-beta"),
+           "fallback chain must not retry the already-failed primary model");
+    ASSERT(test_model_list_contains(models, count, "openrouter/anthropic/claude-sonnet-4.6"),
+           "fallback chain should include Anthropic family");
+    ASSERT(test_model_list_contains(models, count, "openrouter/openai/gpt-5.4"),
+           "fallback chain should include OpenAI family");
+
+    test_restore_env("OPENROUTER_API_KEY", saved_or, had_or);
+    test_restore_env("ANTHROPIC_API_KEY", saved_anth, had_anth);
+    test_restore_env("OPENAI_API_KEY", saved_openai, had_openai);
+    test_restore_env("XAI_API_KEY", saved_xai, had_xai);
+    test_restore_env("GROK_API_KEY", saved_grok, had_grok);
+    test_restore_env("DSCO_DISABLE_CODEX_OAUTH_DISCOVERY", saved_disable_codex,
+                     had_disable_codex);
+    PASS();
+}
+
+static void test_provider_build_default_fallback_models_respects_capacity(void) {
+    TEST("provider fallback chain respects caller capacity");
+    char saved_or[256], saved_anth[256], saved_openai[256], saved_xai[256], saved_disable_codex[64];
+    bool had_or = false, had_anth = false, had_openai = false, had_xai = false;
+    bool had_disable_codex = false;
+    test_capture_env("OPENROUTER_API_KEY", saved_or, sizeof(saved_or), &had_or);
+    test_capture_env("ANTHROPIC_API_KEY", saved_anth, sizeof(saved_anth), &had_anth);
+    test_capture_env("OPENAI_API_KEY", saved_openai, sizeof(saved_openai), &had_openai);
+    test_capture_env("XAI_API_KEY", saved_xai, sizeof(saved_xai), &had_xai);
+    test_capture_env("DSCO_DISABLE_CODEX_OAUTH_DISCOVERY", saved_disable_codex,
+                     sizeof(saved_disable_codex), &had_disable_codex);
+
+    setenv("OPENROUTER_API_KEY", "sk-or-router", 1);
+    setenv("ANTHROPIC_API_KEY", "sk-ant-native", 1);
+    setenv("OPENAI_API_KEY", "sk-openai-native", 1);
+    setenv("XAI_API_KEY", "xai-native", 1);
+    setenv("DSCO_DISABLE_CODEX_OAUTH_DISCOVERY", "1", 1);
+
+    char one[1][128];
+    int count = provider_build_default_fallback_models("claude-sonnet-4-6", one, 1);
+    ASSERT(count == 1, "max_models=1 should return exactly one fallback");
+    ASSERT(one[0][0] != '\0', "first fallback should be populated");
+
+    char zero[1][128];
+    snprintf(zero[0], sizeof(zero[0]), "sentinel");
+    count = provider_build_default_fallback_models("claude-sonnet-4-6", zero, 0);
+    ASSERT(count == 0, "max_models=0 should return no fallbacks");
+    ASSERT(strcmp(zero[0], "sentinel") == 0,
+           "max_models=0 should not write outside caller-declared capacity");
+
+    test_restore_env("OPENROUTER_API_KEY", saved_or, had_or);
+    test_restore_env("ANTHROPIC_API_KEY", saved_anth, had_anth);
+    test_restore_env("OPENAI_API_KEY", saved_openai, had_openai);
+    test_restore_env("XAI_API_KEY", saved_xai, had_xai);
+    test_restore_env("DSCO_DISABLE_CODEX_OAUTH_DISCOVERY", saved_disable_codex,
+                     had_disable_codex);
+    PASS();
+}
+
+static void test_provider_build_default_fallback_models_empty_without_credentials(void) {
+    TEST("provider fallback chain empty without credentials");
+    char saved_or[256], saved_anth[256], saved_openai[256], saved_xai[256], saved_grok[256];
+    char saved_google[256], saved_deepseek[256], saved_mistral[256], saved_kimi[256];
+    char saved_moonshot[256], saved_fugu[256], saved_sakana[256], saved_fish[256];
+    char saved_sakana_token[256], saved_disable_claude[64], saved_disable_codex[64];
+    bool had_or = false, had_anth = false, had_openai = false, had_xai = false;
+    bool had_grok = false, had_google = false, had_deepseek = false, had_mistral = false;
+    bool had_kimi = false, had_moonshot = false, had_fugu = false, had_sakana = false;
+    bool had_fish = false, had_sakana_token = false, had_disable_claude = false;
+    bool had_disable_codex = false;
+
+    test_capture_env("OPENROUTER_API_KEY", saved_or, sizeof(saved_or), &had_or);
+    test_capture_env("ANTHROPIC_API_KEY", saved_anth, sizeof(saved_anth), &had_anth);
+    test_capture_env("OPENAI_API_KEY", saved_openai, sizeof(saved_openai), &had_openai);
+    test_capture_env("XAI_API_KEY", saved_xai, sizeof(saved_xai), &had_xai);
+    test_capture_env("GROK_API_KEY", saved_grok, sizeof(saved_grok), &had_grok);
+    test_capture_env("GEMINI_API_KEY", saved_google, sizeof(saved_google), &had_google);
+    test_capture_env("DEEPSEEK_API_KEY", saved_deepseek, sizeof(saved_deepseek), &had_deepseek);
+    test_capture_env("MISTRAL_API_KEY", saved_mistral, sizeof(saved_mistral), &had_mistral);
+    test_capture_env("KIMI_API_KEY", saved_kimi, sizeof(saved_kimi), &had_kimi);
+    test_capture_env("MOONSHOT_API_KEY", saved_moonshot, sizeof(saved_moonshot), &had_moonshot);
+    test_capture_env("FUGU_API_KEY", saved_fugu, sizeof(saved_fugu), &had_fugu);
+    test_capture_env("SAKANA_API_KEY", saved_sakana, sizeof(saved_sakana), &had_sakana);
+    test_capture_env("FISH_API_KEY", saved_fish, sizeof(saved_fish), &had_fish);
+    test_capture_env("SAKANA_TOKEN", saved_sakana_token, sizeof(saved_sakana_token),
+                     &had_sakana_token);
+    test_capture_env("DSCO_DISABLE_CLAUDE_CODE_OAUTH_DISCOVERY", saved_disable_claude,
+                     sizeof(saved_disable_claude), &had_disable_claude);
+    test_capture_env("DSCO_DISABLE_CODEX_OAUTH_DISCOVERY", saved_disable_codex,
+                     sizeof(saved_disable_codex), &had_disable_codex);
+
+    unsetenv("OPENROUTER_API_KEY");
+    unsetenv("ANTHROPIC_API_KEY");
+    unsetenv("OPENAI_API_KEY");
+    unsetenv("XAI_API_KEY");
+    unsetenv("GROK_API_KEY");
+    unsetenv("GEMINI_API_KEY");
+    unsetenv("DEEPSEEK_API_KEY");
+    unsetenv("MISTRAL_API_KEY");
+    unsetenv("KIMI_API_KEY");
+    unsetenv("MOONSHOT_API_KEY");
+    unsetenv("FUGU_API_KEY");
+    unsetenv("SAKANA_API_KEY");
+    unsetenv("FISH_API_KEY");
+    unsetenv("SAKANA_TOKEN");
+    setenv("DSCO_DISABLE_CLAUDE_CODE_OAUTH_DISCOVERY", "1", 1);
+    setenv("DSCO_DISABLE_CODEX_OAUTH_DISCOVERY", "1", 1);
+
+    char models[4][128];
+    int count = provider_build_default_fallback_models("claude-sonnet-4-6", models, 4);
+    ASSERT(count == 0, "fallback chain should be empty when no route has credentials");
+    ASSERT(models[0][0] == '\0', "fallback buffer should be zeroed even when empty");
+
+    test_restore_env("OPENROUTER_API_KEY", saved_or, had_or);
+    test_restore_env("ANTHROPIC_API_KEY", saved_anth, had_anth);
+    test_restore_env("OPENAI_API_KEY", saved_openai, had_openai);
+    test_restore_env("XAI_API_KEY", saved_xai, had_xai);
+    test_restore_env("GROK_API_KEY", saved_grok, had_grok);
+    test_restore_env("GEMINI_API_KEY", saved_google, had_google);
+    test_restore_env("DEEPSEEK_API_KEY", saved_deepseek, had_deepseek);
+    test_restore_env("MISTRAL_API_KEY", saved_mistral, had_mistral);
+    test_restore_env("KIMI_API_KEY", saved_kimi, had_kimi);
+    test_restore_env("MOONSHOT_API_KEY", saved_moonshot, had_moonshot);
+    test_restore_env("FUGU_API_KEY", saved_fugu, had_fugu);
+    test_restore_env("SAKANA_API_KEY", saved_sakana, had_sakana);
+    test_restore_env("FISH_API_KEY", saved_fish, had_fish);
+    test_restore_env("SAKANA_TOKEN", saved_sakana_token, had_sakana_token);
+    test_restore_env("DSCO_DISABLE_CLAUDE_CODE_OAUTH_DISCOVERY", saved_disable_claude,
+                     had_disable_claude);
+    test_restore_env("DSCO_DISABLE_CODEX_OAUTH_DISCOVERY", saved_disable_codex,
+                     had_disable_codex);
+    PASS();
+}
+
+static void test_provider_build_default_fallback_models_native_primary_duplicate(void) {
+    TEST("provider fallback chain excludes native primary duplicate");
+    char saved_xai[256], saved_or[256], saved_anth[256], saved_openai[256], saved_disable_codex[64];
+    bool had_xai = false, had_or = false, had_anth = false, had_openai = false;
+    bool had_disable_codex = false;
+    test_capture_env("XAI_API_KEY", saved_xai, sizeof(saved_xai), &had_xai);
+    test_capture_env("OPENROUTER_API_KEY", saved_or, sizeof(saved_or), &had_or);
+    test_capture_env("ANTHROPIC_API_KEY", saved_anth, sizeof(saved_anth), &had_anth);
+    test_capture_env("OPENAI_API_KEY", saved_openai, sizeof(saved_openai), &had_openai);
+    test_capture_env("DSCO_DISABLE_CODEX_OAUTH_DISCOVERY", saved_disable_codex,
+                     sizeof(saved_disable_codex), &had_disable_codex);
+
+    setenv("XAI_API_KEY", "xai-native", 1);
+    setenv("OPENROUTER_API_KEY", "sk-or-router", 1);
+    setenv("ANTHROPIC_API_KEY", "sk-ant-native", 1);
+    setenv("OPENAI_API_KEY", "sk-openai-native", 1);
+    setenv("DSCO_DISABLE_CODEX_OAUTH_DISCOVERY", "1", 1);
+
+    char models[4][128];
+    int count = provider_build_default_fallback_models("grok-4-fast", models, 4);
+    ASSERT(count >= 2, "native Grok fallback chain should include other providers");
+    ASSERT(!test_model_list_contains(models, count, "grok-4-fast"),
+           "native primary should not appear in its own fallback chain");
+    ASSERT(test_model_list_contains(models, count, "claude-sonnet-4-6") ||
+               test_model_list_contains(models, count, "openrouter/anthropic/claude-sonnet-4.6"),
+           "Grok fallback should include Anthropic family");
+
+    test_restore_env("XAI_API_KEY", saved_xai, had_xai);
+    test_restore_env("OPENROUTER_API_KEY", saved_or, had_or);
+    test_restore_env("ANTHROPIC_API_KEY", saved_anth, had_anth);
+    test_restore_env("OPENAI_API_KEY", saved_openai, had_openai);
+    test_restore_env("DSCO_DISABLE_CODEX_OAUTH_DISCOVERY", saved_disable_codex,
+                     had_disable_codex);
     PASS();
 }
 
@@ -7615,6 +8071,140 @@ static void test_provider_build_default_fallback_models_for_fugu_cross_provider(
     PASS();
 }
 
+static void test_provider_route_explicit_openrouter_overrides_native_namespace(void) {
+    TEST("provider routing explicit OpenRouter overrides native namespace");
+    char saved_or[256], saved_anth[256], saved_moonshot[256], saved_kimi[256];
+    bool had_or = false, had_anth = false, had_moonshot = false, had_kimi = false;
+    test_capture_env("OPENROUTER_API_KEY", saved_or, sizeof(saved_or), &had_or);
+    test_capture_env("ANTHROPIC_API_KEY", saved_anth, sizeof(saved_anth), &had_anth);
+    test_capture_env("MOONSHOT_API_KEY", saved_moonshot, sizeof(saved_moonshot), &had_moonshot);
+    test_capture_env("KIMI_API_KEY", saved_kimi, sizeof(saved_kimi), &had_kimi);
+
+    setenv("OPENROUTER_API_KEY", "sk-or-router", 1);
+    setenv("ANTHROPIC_API_KEY", "sk-ant-native", 1);
+    setenv("MOONSHOT_API_KEY", "sk-moonshot-native", 1);
+    setenv("KIMI_API_KEY", "sk-kimi-native", 1);
+
+    ASSERT(strcmp(provider_route_for_model("openrouter/anthropic/claude-sonnet-4.6",
+                                           NULL, NULL),
+                  "openrouter") == 0,
+           "explicit openrouter/anthropic slug must route via OpenRouter, not native Anthropic");
+    ASSERT(strcmp(provider_route_for_model("openrouter/moonshotai/kimi-k2.7-code",
+                                           NULL, NULL),
+                  "openrouter") == 0,
+           "explicit openrouter/moonshot slug must route via OpenRouter, not native Moonshot");
+
+    test_restore_env("OPENROUTER_API_KEY", saved_or, had_or);
+    test_restore_env("ANTHROPIC_API_KEY", saved_anth, had_anth);
+    test_restore_env("MOONSHOT_API_KEY", saved_moonshot, had_moonshot);
+    test_restore_env("KIMI_API_KEY", saved_kimi, had_kimi);
+    PASS();
+}
+
+static void test_provider_route_native_namespace_does_not_silently_fallback_to_openrouter(void) {
+    TEST("provider routing native namespace does not silently fallback");
+    char saved_or[256], saved_anth[256], saved_moonshot[256], saved_kimi[256];
+    bool had_or = false, had_anth = false, had_moonshot = false, had_kimi = false;
+    test_capture_env("OPENROUTER_API_KEY", saved_or, sizeof(saved_or), &had_or);
+    test_capture_env("ANTHROPIC_API_KEY", saved_anth, sizeof(saved_anth), &had_anth);
+    test_capture_env("MOONSHOT_API_KEY", saved_moonshot, sizeof(saved_moonshot), &had_moonshot);
+    test_capture_env("KIMI_API_KEY", saved_kimi, sizeof(saved_kimi), &had_kimi);
+
+    setenv("OPENROUTER_API_KEY", "sk-or-router", 1);
+    unsetenv("ANTHROPIC_API_KEY");
+    unsetenv("MOONSHOT_API_KEY");
+    unsetenv("KIMI_API_KEY");
+
+    ASSERT(strcmp(provider_route_for_model("anthropic/claude-sonnet-4.6", NULL, NULL),
+                  "anthropic") == 0,
+           "native Anthropic namespace should not be hijacked to OpenRouter");
+    ASSERT(strcmp(provider_route_for_model("moonshotai/kimi-k2.7-code", NULL, NULL),
+                  "moonshot") == 0,
+           "native Moonshot namespace should not be hijacked to OpenRouter");
+
+    test_restore_env("OPENROUTER_API_KEY", saved_or, had_or);
+    test_restore_env("ANTHROPIC_API_KEY", saved_anth, had_anth);
+    test_restore_env("MOONSHOT_API_KEY", saved_moonshot, had_moonshot);
+    test_restore_env("KIMI_API_KEY", saved_kimi, had_kimi);
+    PASS();
+}
+
+static void test_provider_model_is_routable_respects_native_namespace_without_key(void) {
+    TEST("provider_model_is_routable respects native namespace credentials");
+    char saved_or[256], saved_kimi[256], saved_moonshot[256];
+    bool had_or = false, had_kimi = false, had_moonshot = false;
+    test_capture_env("OPENROUTER_API_KEY", saved_or, sizeof(saved_or), &had_or);
+    test_capture_env("KIMI_API_KEY", saved_kimi, sizeof(saved_kimi), &had_kimi);
+    test_capture_env("MOONSHOT_API_KEY", saved_moonshot, sizeof(saved_moonshot), &had_moonshot);
+
+    setenv("OPENROUTER_API_KEY", "sk-or-router", 1);
+    unsetenv("KIMI_API_KEY");
+    unsetenv("MOONSHOT_API_KEY");
+
+    const char *provider_name = NULL;
+    bool routable = provider_model_is_routable("moonshotai/kimi-k2.7-code", NULL, NULL,
+                                               &provider_name);
+    ASSERT(!routable, "native Moonshot namespace should not be routable without Moonshot key");
+    ASSERT(provider_name && strcmp(provider_name, "moonshot") == 0,
+           "routability should report the intended native provider, not OpenRouter");
+
+    routable = provider_model_is_routable("openrouter/moonshotai/kimi-k2.7-code", NULL, NULL,
+                                          &provider_name);
+    ASSERT(routable, "explicit OpenRouter namespace should be routable with OpenRouter key");
+    ASSERT(provider_name && strcmp(provider_name, "openrouter") == 0,
+           "explicit OpenRouter routability should report OpenRouter");
+
+    test_restore_env("OPENROUTER_API_KEY", saved_or, had_or);
+    test_restore_env("KIMI_API_KEY", saved_kimi, had_kimi);
+    test_restore_env("MOONSHOT_API_KEY", saved_moonshot, had_moonshot);
+    PASS();
+}
+
+static void test_provider_resolve_request_api_key_refuses_cross_provider_session_key(void) {
+    TEST("provider request key refuses cross-provider session key");
+    char saved_or[256], saved_anth[256];
+    bool had_or = false, had_anth = false;
+    test_capture_env("OPENROUTER_API_KEY", saved_or, sizeof(saved_or), &had_or);
+    test_capture_env("ANTHROPIC_API_KEY", saved_anth, sizeof(saved_anth), &had_anth);
+
+    setenv("OPENROUTER_API_KEY", "sk-or-native-router", 1);
+    unsetenv("ANTHROPIC_API_KEY");
+
+    const char *key = provider_resolve_request_api_key("openrouter", "sk-ant-session");
+    ASSERT(key && strcmp(key, "sk-or-native-router") == 0,
+           "OpenRouter route must prefer OpenRouter env key over mismatched Anthropic session key");
+
+    key = provider_resolve_request_api_key("anthropic", "sk-or-session");
+    ASSERT(key == NULL || strncmp(key, "sk-or-", 6) != 0,
+           "Anthropic route must not accept an OpenRouter session key");
+
+    test_restore_env("OPENROUTER_API_KEY", saved_or, had_or);
+    test_restore_env("ANTHROPIC_API_KEY", saved_anth, had_anth);
+    PASS();
+}
+
+static void test_provider_route_override_does_not_rewrite_request_key_family(void) {
+    TEST("provider override requires matching request key family");
+    char saved_or[256], saved_anth[256];
+    bool had_or = false, had_anth = false;
+    test_capture_env("OPENROUTER_API_KEY", saved_or, sizeof(saved_or), &had_or);
+    test_capture_env("ANTHROPIC_API_KEY", saved_anth, sizeof(saved_anth), &had_anth);
+
+    unsetenv("OPENROUTER_API_KEY");
+    unsetenv("ANTHROPIC_API_KEY");
+
+    const char *routed = provider_route_for_model("claude-sonnet-4-6", "sk-ant-session",
+                                                  "openrouter");
+    const char *key = provider_resolve_request_api_key(routed, "sk-ant-session");
+    ASSERT(strcmp(routed, "openrouter") == 0, "override should choose requested provider");
+    ASSERT(key == NULL,
+           "OpenRouter override should not reuse a mismatched Anthropic session key as request key");
+
+    test_restore_env("OPENROUTER_API_KEY", saved_or, had_or);
+    test_restore_env("ANTHROPIC_API_KEY", saved_anth, had_anth);
+    PASS();
+}
+
 static void test_provider_route_keeps_sakana_native(void) {
     TEST("provider routing keeps Sakana native");
     char saved_fugu[256], saved_sakana[256], saved_fish[256], saved_token[256], saved_or[256];
@@ -7645,6 +8235,62 @@ static void test_provider_route_keeps_sakana_native(void) {
     test_restore_env("SAKANA_API_KEY", saved_sakana, had_sakana);
     test_restore_env("FISH_API_KEY", saved_fish, had_fish);
     test_restore_env("SAKANA_TOKEN", saved_token, had_token);
+    test_restore_env("OPENROUTER_API_KEY", saved_or, had_or);
+    PASS();
+}
+
+static void test_provider_route_keeps_moonshot_namespace_native(void) {
+    TEST("provider routing keeps Moonshot namespace native");
+    char saved_kimi[256], saved_moonshot[256], saved_or[256];
+    bool had_kimi = false, had_moonshot = false, had_or = false;
+    test_capture_env("KIMI_API_KEY", saved_kimi, sizeof(saved_kimi), &had_kimi);
+    test_capture_env("MOONSHOT_API_KEY", saved_moonshot, sizeof(saved_moonshot), &had_moonshot);
+    test_capture_env("OPENROUTER_API_KEY", saved_or, sizeof(saved_or), &had_or);
+
+    setenv("KIMI_API_KEY", "kimi-native", 1);
+    unsetenv("MOONSHOT_API_KEY");
+    unsetenv("OPENROUTER_API_KEY");
+
+    const char *routed = provider_route_for_model("moonshotai/kimi-k2.7-code", NULL, NULL);
+    const char *req_key = provider_resolve_request_api_key(routed, NULL);
+
+    ASSERT(strcmp(routed, "moonshot") == 0,
+           "moonshotai namespace should use native Moonshot when KIMI_API_KEY is available");
+    ASSERT(req_key && strcmp(req_key, "kimi-native") == 0,
+           "Moonshot request should use KIMI_API_KEY");
+
+    test_restore_env("KIMI_API_KEY", saved_kimi, had_kimi);
+    test_restore_env("MOONSHOT_API_KEY", saved_moonshot, had_moonshot);
+    test_restore_env("OPENROUTER_API_KEY", saved_or, had_or);
+    PASS();
+}
+
+static void test_provider_route_requires_explicit_openrouter_namespace(void) {
+    TEST("provider routing requires explicit OpenRouter namespace");
+    char saved_kimi[256], saved_moonshot[256], saved_or[256];
+    bool had_kimi = false, had_moonshot = false, had_or = false;
+    test_capture_env("KIMI_API_KEY", saved_kimi, sizeof(saved_kimi), &had_kimi);
+    test_capture_env("MOONSHOT_API_KEY", saved_moonshot, sizeof(saved_moonshot), &had_moonshot);
+    test_capture_env("OPENROUTER_API_KEY", saved_or, sizeof(saved_or), &had_or);
+
+    unsetenv("KIMI_API_KEY");
+    unsetenv("MOONSHOT_API_KEY");
+    setenv("OPENROUTER_API_KEY", "sk-or-router", 1);
+
+    const char *native_route = provider_route_for_model("moonshotai/kimi-k2.7-code", NULL, NULL);
+    const char *or_route =
+        provider_route_for_model("openrouter/moonshotai/kimi-k2.7-code", NULL, NULL);
+    const char *or_key = provider_resolve_request_api_key(or_route, NULL);
+
+    ASSERT(strcmp(native_route, "moonshot") == 0,
+           "native namespace should not silently fall back to OpenRouter");
+    ASSERT(strcmp(or_route, "openrouter") == 0,
+           "openrouter namespace should explicitly choose OpenRouter");
+    ASSERT(or_key && strcmp(or_key, "sk-or-router") == 0,
+           "explicit OpenRouter route should use OPENROUTER_API_KEY");
+
+    test_restore_env("KIMI_API_KEY", saved_kimi, had_kimi);
+    test_restore_env("MOONSHOT_API_KEY", saved_moonshot, had_moonshot);
     test_restore_env("OPENROUTER_API_KEY", saved_or, had_or);
     PASS();
 }
@@ -7852,11 +8498,17 @@ static void test_provider_route_prefers_codex_subscription_for_openai_models(voi
 
     const char *routed = provider_route_for_model("openai/gpt-5.5", NULL, NULL);
     const char *req_key = provider_resolve_request_api_key(routed, NULL);
+    const char *openai_default = provider_primary_model_for("openai", true);
+    const char *legacy_route = provider_route_for_model("openai/gpt-4.1", NULL, NULL);
 
     ASSERT(strcmp(routed, "openai-codex") == 0,
            "OpenAI model should use ChatGPT Codex subscription before API keys");
     ASSERT(req_key && strcmp(req_key, "chatgpt-subscription") == 0,
            "Codex subscription route should expose a non-secret credential marker");
+    ASSERT(openai_default && strcmp(openai_default, "openai/gpt-5.5") == 0,
+           "OpenAI-family fallback should use Codex gpt-5.5 when ChatGPT auth exists");
+    ASSERT(strcmp(legacy_route, "openai") == 0,
+           "gpt-4.1 should not be routed through ChatGPT Codex");
 
     unlink(bin_path);
     unlink(auth_path);
@@ -7950,6 +8602,56 @@ static void test_provider_exports_explicit_provider_for_children(void) {
     test_restore_env("ANTHROPIC_API_KEY", saved_anth, had_anth);
     test_restore_env("DSCO_CLAUDE_CODE_OAUTH_TOKEN", saved_dsco_oauth, had_dsco_oauth);
     test_restore_env("CLAUDE_CODE_OAUTH_TOKEN", saved_oauth, had_oauth);
+    PASS();
+}
+
+static void test_provider_exports_openai_codex_oauth_for_children(void) {
+    TEST("provider exports OpenAI Codex OAuth for child processes");
+    char saved_dsco_oauth[8192], saved_oauth[8192];
+    bool had_dsco_oauth = false, had_oauth = false;
+    test_capture_env("DSCO_CHATGPT_OAUTH_TOKEN", saved_dsco_oauth, sizeof(saved_dsco_oauth),
+                     &had_dsco_oauth);
+    test_capture_env("CHATGPT_OAUTH_TOKEN", saved_oauth, sizeof(saved_oauth), &had_oauth);
+    unsetenv("DSCO_CHATGPT_OAUTH_TOKEN");
+    unsetenv("CHATGPT_OAUTH_TOKEN");
+
+    provider_export_child_process_credentials_for_provider("openai-codex",
+                                                           "chatgpt-oauth-child");
+
+    ASSERT(getenv("DSCO_CHATGPT_OAUTH_TOKEN") &&
+               strcmp(getenv("DSCO_CHATGPT_OAUTH_TOKEN"), "chatgpt-oauth-child") == 0,
+           "explicit openai-codex export should set DSCO_CHATGPT_OAUTH_TOKEN");
+    ASSERT(getenv("CHATGPT_OAUTH_TOKEN") &&
+               strcmp(getenv("CHATGPT_OAUTH_TOKEN"), "chatgpt-oauth-child") == 0,
+           "explicit openai-codex export should set CHATGPT_OAUTH_TOKEN");
+
+    test_restore_env("DSCO_CHATGPT_OAUTH_TOKEN", saved_dsco_oauth, had_dsco_oauth);
+    test_restore_env("CHATGPT_OAUTH_TOKEN", saved_oauth, had_oauth);
+    PASS();
+}
+
+static void test_provider_openai_codex_marker_does_not_fake_oauth_env(void) {
+    TEST("provider OpenAI Codex marker does not fake OAuth env");
+    char saved_dsco_oauth[8192], saved_oauth[8192];
+    bool had_dsco_oauth = false, had_oauth = false;
+    test_capture_env("DSCO_CHATGPT_OAUTH_TOKEN", saved_dsco_oauth, sizeof(saved_dsco_oauth),
+                     &had_dsco_oauth);
+    test_capture_env("CHATGPT_OAUTH_TOKEN", saved_oauth, sizeof(saved_oauth), &had_oauth);
+    setenv("DSCO_CHATGPT_OAUTH_TOKEN", "existing-dsco-oauth", 1);
+    setenv("CHATGPT_OAUTH_TOKEN", "existing-alias-oauth", 1);
+
+    provider_export_child_process_credentials_for_provider("openai-codex",
+                                                           "chatgpt-subscription");
+
+    ASSERT(getenv("DSCO_CHATGPT_OAUTH_TOKEN") &&
+               strcmp(getenv("DSCO_CHATGPT_OAUTH_TOKEN"), "existing-dsco-oauth") == 0,
+           "subscription marker should not overwrite DSCO_CHATGPT_OAUTH_TOKEN");
+    ASSERT(getenv("CHATGPT_OAUTH_TOKEN") &&
+               strcmp(getenv("CHATGPT_OAUTH_TOKEN"), "existing-alias-oauth") == 0,
+           "subscription marker should not overwrite CHATGPT_OAUTH_TOKEN");
+
+    test_restore_env("DSCO_CHATGPT_OAUTH_TOKEN", saved_dsco_oauth, had_dsco_oauth);
+    test_restore_env("CHATGPT_OAUTH_TOKEN", saved_oauth, had_oauth);
     PASS();
 }
 
@@ -8055,6 +8757,16 @@ static void test_swarm_poll_reaps_killed_child_without_readable_fds(void) {
 
 static void test_swarm_spawn_uses_worker_profile(void) {
     TEST("swarm spawn uses worker profile");
+    char saved_xai[256], saved_grok[256], saved_x_ai[256], saved_or[256];
+    bool had_xai = false, had_grok = false, had_x_ai = false, had_or = false;
+    test_capture_env("XAI_API_KEY", saved_xai, sizeof(saved_xai), &had_xai);
+    test_capture_env("GROK_API_KEY", saved_grok, sizeof(saved_grok), &had_grok);
+    test_capture_env("X_AI_API_KEY", saved_x_ai, sizeof(saved_x_ai), &had_x_ai);
+    test_capture_env("OPENROUTER_API_KEY", saved_or, sizeof(saved_or), &had_or);
+    setenv("XAI_API_KEY", "xai-native", 1);
+    unsetenv("GROK_API_KEY");
+    unsetenv("X_AI_API_KEY");
+    unsetenv("OPENROUTER_API_KEY");
 
     char arglog_path[] = "/tmp/dsco_swarm_args_XXXXXX";
     int arglog_fd = mkstemp(arglog_path);
@@ -8106,6 +8818,494 @@ static void test_swarm_spawn_uses_worker_profile(void) {
     swarm_destroy(&sw);
     unlink(script_path);
     unlink(arglog_path);
+    test_restore_env("XAI_API_KEY", saved_xai, had_xai);
+    test_restore_env("GROK_API_KEY", saved_grok, had_grok);
+    test_restore_env("X_AI_API_KEY", saved_x_ai, had_x_ai);
+    test_restore_env("OPENROUTER_API_KEY", saved_or, had_or);
+    PASS();
+}
+
+static void test_swarm_spawn_pins_openai_codex_provider(void) {
+    TEST("swarm spawn pins openai-codex provider");
+    char saved_home[512], saved_path[2048], saved_openai[256], saved_openai_alias[256];
+    char saved_chatgpt[256], saved_or[256], saved_disable[256];
+    char saved_dsco_oauth[8192], saved_oauth[8192];
+    bool had_home = false, had_path = false, had_openai = false;
+    bool had_openai_alias = false, had_chatgpt = false, had_or = false;
+    bool had_disable = false;
+    bool had_dsco_oauth = false, had_oauth = false;
+    test_capture_env("HOME", saved_home, sizeof(saved_home), &had_home);
+    test_capture_env("PATH", saved_path, sizeof(saved_path), &had_path);
+    test_capture_env("OPENAI_API_KEY", saved_openai, sizeof(saved_openai), &had_openai);
+    test_capture_env("OPENAI_KEY", saved_openai_alias, sizeof(saved_openai_alias),
+                     &had_openai_alias);
+    test_capture_env("CHATGPT_API_KEY", saved_chatgpt, sizeof(saved_chatgpt), &had_chatgpt);
+    test_capture_env("OPENROUTER_API_KEY", saved_or, sizeof(saved_or), &had_or);
+    test_capture_env("DSCO_DISABLE_CODEX_OAUTH_DISCOVERY", saved_disable, sizeof(saved_disable),
+                     &had_disable);
+    test_capture_env("DSCO_CHATGPT_OAUTH_TOKEN", saved_dsco_oauth, sizeof(saved_dsco_oauth),
+                     &had_dsco_oauth);
+    test_capture_env("CHATGPT_OAUTH_TOKEN", saved_oauth, sizeof(saved_oauth), &had_oauth);
+
+    char root[512];
+    snprintf(root, sizeof(root), "/tmp/dsco_codex_swarm_%d_%ld", (int)getpid(), (long)time(NULL));
+    ASSERT(mkdir(root, 0700) == 0, "mkdir Codex swarm root failed");
+
+    char home[512], codex_dir[640], auth_path[768];
+    snprintf(home, sizeof(home), "%s/home", root);
+    snprintf(codex_dir, sizeof(codex_dir), "%s/.codex", home);
+    ASSERT(mkdir(home, 0700) == 0, "mkdir fake swarm HOME failed");
+    ASSERT(mkdir(codex_dir, 0700) == 0, "mkdir fake swarm .codex failed");
+    snprintf(auth_path, sizeof(auth_path), "%s/auth.json", codex_dir);
+    FILE *auth = fopen(auth_path, "w");
+    ASSERT(auth != NULL, "open fake swarm codex auth failed");
+    fputs("{\"auth_mode\":\"chatgpt\"}", auth);
+    fclose(auth);
+
+    char arglog_path[] = "/tmp/dsco_codex_swarm_args_XXXXXX";
+    int arglog_fd = mkstemp(arglog_path);
+    ASSERT(arglog_fd >= 0, "failed to create Codex swarm arg log");
+    close(arglog_fd);
+
+    char script_body[512];
+    snprintf(script_body, sizeof(script_body),
+             "#!/bin/sh\n"
+             "printf '%%s\\n' \"$@\" > '%s'\n",
+             arglog_path);
+
+    char script_path[128];
+    ASSERT(test_write_temp_script(script_path, sizeof(script_path), script_body),
+           "failed to create Codex swarm argv script");
+
+    setenv("HOME", home, 1);
+    setenv("PATH", root, 1);
+    unsetenv("DSCO_DISABLE_CODEX_OAUTH_DISCOVERY");
+    setenv("DSCO_CHATGPT_OAUTH_TOKEN", "chatgpt-oauth-test-token", 1);
+    unsetenv("CHATGPT_OAUTH_TOKEN");
+    setenv("OPENAI_API_KEY", "sk-openai-native", 1);
+    unsetenv("OPENAI_KEY");
+    unsetenv("CHATGPT_API_KEY");
+    setenv("OPENROUTER_API_KEY", "sk-or-router", 1);
+
+    swarm_t sw;
+    swarm_init(&sw, NULL, "openai/gpt-5.5");
+    free((void *)sw.dsco_path);
+    sw.dsco_path = safe_strdup(script_path);
+
+    int child_id = swarm_spawn(&sw, "--version", "openai/gpt-5.5");
+    ASSERT(child_id >= 0, "failed to spawn Codex argv-capture swarm child");
+
+    for (int i = 0; i < 40 && sw.active.count > 0; i++) {
+        swarm_poll(&sw, 50);
+        usleep(25000);
+    }
+
+    ASSERT(sw.active.count == 0, "Codex argv-capture child should finish");
+    swarm_child_t *c = swarm_get(&sw, child_id);
+    ASSERT(c != NULL, "spawned Codex child should remain addressable");
+    ASSERT(c->status == SWARM_DONE, "Codex argv-capture child should report done");
+
+    char buf[512];
+    ASSERT(test_read_file_small(arglog_path, buf, sizeof(buf)),
+           "failed to read Codex swarm arg log");
+
+    ASSERT(strstr(buf, "--profile\nworker\n") != NULL,
+           "Codex swarm child argv should include --profile worker");
+    ASSERT(strstr(buf, "--provider\nopenai-codex\n") != NULL,
+           "Codex swarm child argv should pin openai-codex provider");
+    ASSERT(strstr(buf, "-m\nopenai/gpt-5.5\n") != NULL,
+           "Codex swarm child argv should preserve namespaced model argument");
+
+    swarm_destroy(&sw);
+    unlink(script_path);
+    unlink(arglog_path);
+    unlink(auth_path);
+    rmdir(codex_dir);
+    rmdir(home);
+    rmdir(root);
+    test_restore_env("HOME", saved_home, had_home);
+    test_restore_env("PATH", saved_path, had_path);
+    test_restore_env("OPENAI_API_KEY", saved_openai, had_openai);
+    test_restore_env("OPENAI_KEY", saved_openai_alias, had_openai_alias);
+    test_restore_env("CHATGPT_API_KEY", saved_chatgpt, had_chatgpt);
+    test_restore_env("OPENROUTER_API_KEY", saved_or, had_or);
+    test_restore_env("DSCO_DISABLE_CODEX_OAUTH_DISCOVERY", saved_disable, had_disable);
+    test_restore_env("DSCO_CHATGPT_OAUTH_TOKEN", saved_dsco_oauth, had_dsco_oauth);
+    test_restore_env("CHATGPT_OAUTH_TOKEN", saved_oauth, had_oauth);
+    PASS();
+}
+
+static void test_swarm_spawn_exports_chatgpt_oauth_env_to_codex_child(void) {
+    TEST("swarm spawn exports ChatGPT OAuth env to Codex child");
+    char saved_openai[256], saved_openai_alias[256], saved_chatgpt_key[256], saved_or[256];
+    char saved_disable[256], saved_dsco_oauth[8192], saved_oauth[8192];
+    bool had_openai = false, had_openai_alias = false, had_chatgpt_key = false, had_or = false;
+    bool had_disable = false, had_dsco_oauth = false, had_oauth = false;
+    test_capture_env("OPENAI_API_KEY", saved_openai, sizeof(saved_openai), &had_openai);
+    test_capture_env("OPENAI_KEY", saved_openai_alias, sizeof(saved_openai_alias),
+                     &had_openai_alias);
+    test_capture_env("CHATGPT_API_KEY", saved_chatgpt_key, sizeof(saved_chatgpt_key),
+                     &had_chatgpt_key);
+    test_capture_env("OPENROUTER_API_KEY", saved_or, sizeof(saved_or), &had_or);
+    test_capture_env("DSCO_DISABLE_CODEX_OAUTH_DISCOVERY", saved_disable, sizeof(saved_disable),
+                     &had_disable);
+    test_capture_env("DSCO_CHATGPT_OAUTH_TOKEN", saved_dsco_oauth, sizeof(saved_dsco_oauth),
+                     &had_dsco_oauth);
+    test_capture_env("CHATGPT_OAUTH_TOKEN", saved_oauth, sizeof(saved_oauth), &had_oauth);
+
+    char envlog_path[] = "/tmp/dsco_codex_child_env_XXXXXX";
+    int envlog_fd = mkstemp(envlog_path);
+    ASSERT(envlog_fd >= 0, "failed to create Codex child env log");
+    close(envlog_fd);
+
+    char script_body[768];
+    snprintf(script_body, sizeof(script_body),
+             "#!/bin/sh\n"
+             "printf 'DSCO=%%s\\nCHATGPT=%%s\\n' "
+             "\"$DSCO_CHATGPT_OAUTH_TOKEN\" \"$CHATGPT_OAUTH_TOKEN\" > '%s'\n",
+             envlog_path);
+
+    char script_path[128];
+    ASSERT(test_write_temp_script(script_path, sizeof(script_path), script_body),
+           "failed to create Codex env capture script");
+
+    unsetenv("DSCO_DISABLE_CODEX_OAUTH_DISCOVERY");
+    setenv("DSCO_CHATGPT_OAUTH_TOKEN", "chatgpt-oauth-env-propagated", 1);
+    unsetenv("CHATGPT_OAUTH_TOKEN");
+    setenv("OPENAI_API_KEY", "sk-openai-native", 1);
+    unsetenv("OPENAI_KEY");
+    unsetenv("CHATGPT_API_KEY");
+    unsetenv("OPENROUTER_API_KEY");
+
+    swarm_t sw;
+    swarm_init(&sw, NULL, "openai/gpt-5.5");
+    free((void *)sw.dsco_path);
+    sw.dsco_path = safe_strdup(script_path);
+
+    int child_id = swarm_spawn(&sw, "--version", "openai/gpt-5.5");
+    ASSERT(child_id >= 0, "failed to spawn Codex env-capture child");
+    for (int i = 0; i < 40 && sw.active.count > 0; i++) {
+        swarm_poll(&sw, 50);
+        usleep(25000);
+    }
+    ASSERT(sw.active.count == 0, "Codex env-capture child should finish");
+    swarm_child_t *c = swarm_get(&sw, child_id);
+    ASSERT(c != NULL && c->status == SWARM_DONE, "Codex env-capture child should report done");
+
+    char buf[512];
+    ASSERT(test_read_file_small(envlog_path, buf, sizeof(buf)),
+           "failed to read Codex child env log");
+    ASSERT(strstr(buf, "DSCO=chatgpt-oauth-env-propagated\n") != NULL,
+           "Codex child should receive DSCO_CHATGPT_OAUTH_TOKEN");
+    ASSERT(strstr(buf, "CHATGPT=chatgpt-oauth-env-propagated\n") != NULL,
+           "Codex child should receive CHATGPT_OAUTH_TOKEN alias");
+
+    swarm_destroy(&sw);
+    unlink(script_path);
+    unlink(envlog_path);
+    test_restore_env("OPENAI_API_KEY", saved_openai, had_openai);
+    test_restore_env("OPENAI_KEY", saved_openai_alias, had_openai_alias);
+    test_restore_env("CHATGPT_API_KEY", saved_chatgpt_key, had_chatgpt_key);
+    test_restore_env("OPENROUTER_API_KEY", saved_or, had_or);
+    test_restore_env("DSCO_DISABLE_CODEX_OAUTH_DISCOVERY", saved_disable, had_disable);
+    test_restore_env("DSCO_CHATGPT_OAUTH_TOKEN", saved_dsco_oauth, had_dsco_oauth);
+    test_restore_env("CHATGPT_OAUTH_TOKEN", saved_oauth, had_oauth);
+    PASS();
+}
+
+static void test_swarm_spawn_codex_discovery_disabled_pins_openai(void) {
+    TEST("swarm spawn with Codex discovery disabled pins OpenAI");
+    char saved_openai[256], saved_openai_alias[256], saved_chatgpt_key[256], saved_or[256];
+    char saved_disable[256], saved_dsco_oauth[8192], saved_oauth[8192];
+    bool had_openai = false, had_openai_alias = false, had_chatgpt_key = false, had_or = false;
+    bool had_disable = false, had_dsco_oauth = false, had_oauth = false;
+    test_capture_env("OPENAI_API_KEY", saved_openai, sizeof(saved_openai), &had_openai);
+    test_capture_env("OPENAI_KEY", saved_openai_alias, sizeof(saved_openai_alias),
+                     &had_openai_alias);
+    test_capture_env("CHATGPT_API_KEY", saved_chatgpt_key, sizeof(saved_chatgpt_key),
+                     &had_chatgpt_key);
+    test_capture_env("OPENROUTER_API_KEY", saved_or, sizeof(saved_or), &had_or);
+    test_capture_env("DSCO_DISABLE_CODEX_OAUTH_DISCOVERY", saved_disable, sizeof(saved_disable),
+                     &had_disable);
+    test_capture_env("DSCO_CHATGPT_OAUTH_TOKEN", saved_dsco_oauth, sizeof(saved_dsco_oauth),
+                     &had_dsco_oauth);
+    test_capture_env("CHATGPT_OAUTH_TOKEN", saved_oauth, sizeof(saved_oauth), &had_oauth);
+
+    char arglog_path[] = "/tmp/dsco_codex_disabled_args_XXXXXX";
+    int arglog_fd = mkstemp(arglog_path);
+    ASSERT(arglog_fd >= 0, "failed to create disabled-Codex arg log");
+    close(arglog_fd);
+
+    char script_body[512];
+    snprintf(script_body, sizeof(script_body),
+             "#!/bin/sh\n"
+             "printf '%%s\\n' \"$@\" > '%s'\n",
+             arglog_path);
+
+    char script_path[128];
+    ASSERT(test_write_temp_script(script_path, sizeof(script_path), script_body),
+           "failed to create disabled-Codex argv script");
+
+    setenv("DSCO_DISABLE_CODEX_OAUTH_DISCOVERY", "1", 1);
+    setenv("DSCO_CHATGPT_OAUTH_TOKEN", "chatgpt-oauth-ignored", 1);
+    unsetenv("CHATGPT_OAUTH_TOKEN");
+    setenv("OPENAI_API_KEY", "sk-openai-native", 1);
+    unsetenv("OPENAI_KEY");
+    unsetenv("CHATGPT_API_KEY");
+    unsetenv("OPENROUTER_API_KEY");
+
+    swarm_t sw;
+    swarm_init(&sw, NULL, "openai/gpt-5.5");
+    free((void *)sw.dsco_path);
+    sw.dsco_path = safe_strdup(script_path);
+
+    int child_id = swarm_spawn(&sw, "--version", "openai/gpt-5.5");
+    ASSERT(child_id >= 0, "failed to spawn disabled-Codex argv-capture child");
+    for (int i = 0; i < 40 && sw.active.count > 0; i++) {
+        swarm_poll(&sw, 50);
+        usleep(25000);
+    }
+    ASSERT(sw.active.count == 0, "disabled-Codex argv-capture child should finish");
+
+    char buf[512];
+    ASSERT(test_read_file_small(arglog_path, buf, sizeof(buf)),
+           "failed to read disabled-Codex arg log");
+    ASSERT(strstr(buf, "--provider\nopenai\n") != NULL,
+           "disabled Codex discovery should pin direct OpenAI provider");
+    ASSERT(strstr(buf, "--provider\nopenai-codex\n") == NULL,
+           "disabled Codex discovery should not pin openai-codex");
+
+    swarm_destroy(&sw);
+    unlink(script_path);
+    unlink(arglog_path);
+    test_restore_env("OPENAI_API_KEY", saved_openai, had_openai);
+    test_restore_env("OPENAI_KEY", saved_openai_alias, had_openai_alias);
+    test_restore_env("CHATGPT_API_KEY", saved_chatgpt_key, had_chatgpt_key);
+    test_restore_env("OPENROUTER_API_KEY", saved_or, had_or);
+    test_restore_env("DSCO_DISABLE_CODEX_OAUTH_DISCOVERY", saved_disable, had_disable);
+    test_restore_env("DSCO_CHATGPT_OAUTH_TOKEN", saved_dsco_oauth, had_dsco_oauth);
+    test_restore_env("CHATGPT_OAUTH_TOKEN", saved_oauth, had_oauth);
+    PASS();
+}
+
+
+static void test_cross_provider_durable_agent_matrix_generated(void) {
+    static const char *providers[] = {
+        "anthropic", "openai", "openai-codex", "openrouter", "google", "groq",
+        "deepseek", "mistral", "xai", "together", "perplexity", "cerebras",
+        "cohere", "moonshot", "sakana"
+    };
+    static const char *models[] = {
+        "claude-sonnet-4-6", "gpt-5.5", "openai/gpt-5.5", "openrouter/anthropic/claude-sonnet-4",
+        "gemini-2.5-pro", "llama-3.3-70b", "deepseek-chat", "mistral-large-latest",
+        "grok-4-fast", "qwen3-coder", "sonar-pro", "qwen-3-coder-480b",
+        "command-a", "kimi-k2-0711-preview", "fugu-ultra", "fugu"
+    };
+    static const char *tools[] = {"bash", "run_command", "read_file", "write_file", "grep_files", "agent", "swarm"};
+    const int target = 2500;
+    const int batch = 32;
+
+    char script_path[128];
+    ASSERT(test_write_temp_script(script_path, sizeof(script_path),
+                                  "#!/bin/sh\n"
+                                  "profile=0; worker=0; ex=0; model=0; prev=''\n"
+                                  "for a in \"$@\"; do\n"
+                                  "  [ \"$prev\" = '--profile' ] && [ \"$a\" = 'worker' ] && worker=1\n"
+                                  "  [ \"$prev\" = '--exec' ] && ex=1\n"
+                                  "  [ \"$prev\" = '-m' ] && model=1\n"
+                                  "  [ \"$a\" = '--profile' ] && profile=1\n"
+                                  "  prev=\"$a\"\n"
+                                  "done\n"
+                                  "[ $profile -eq 1 ] && [ $worker -eq 1 ] && [ $ex -eq 1 ] && [ $model -eq 1 ]\n"),
+           "failed to create durable-agent spawn probe script");
+
+    int completed = 0;
+    while (completed < target) {
+        swarm_t sw;
+        swarm_init(&sw, NULL, models[completed % (int)(sizeof(models) / sizeof(models[0]))]);
+        free((void *)sw.dsco_path);
+        sw.dsco_path = safe_strdup(script_path);
+        int gid = swarm_group_create(&sw, "durable-cross-provider");
+        ASSERT(gid >= 0, "durable cross-provider group should be created");
+        swarm_set_budget(&sw, 1.0 + (double)(completed % 17) / 100.0);
+        ASSERT(swarm_budget_remaining(&sw) > 0.0, "durable swarm budget should be initialized");
+
+        int ids[32];
+        int spawned = 0;
+        for (; spawned < batch && completed + spawned < target; spawned++) {
+            int i = completed + spawned;
+            tests_run++;
+            const char *provider = providers[i % (int)(sizeof(providers) / sizeof(providers[0]))];
+            const char *model = models[(i * 7) % (int)(sizeof(models) / sizeof(models[0]))];
+            int cid = swarm_spawn_provider(&sw, gid, "durable spawn probe", model, provider);
+            if (cid < 0) {
+                tests_failed++;
+                fprintf(stderr, "  generated durable cross-provider agent %04d FAIL: spawn_provider returned <0\n", i);
+                swarm_destroy(&sw);
+                unlink(script_path);
+                return;
+            }
+            ids[spawned] = cid;
+            swarm_child_t *c = swarm_get(&sw, cid);
+            ASSERT(c != NULL, "spawned child should be addressable immediately");
+            ASSERT(strcmp(c->provider, provider) == 0, "provider pin should be durable on child record");
+            ASSERT(strcmp(c->model, model) == 0, "model pin should be durable on child record");
+            ASSERT(c->executor == EXECUTOR_DSCO, "provider-spawned durable child should use dsco executor");
+            ASSERT(c->group_id == gid, "group membership should be durable on child record");
+            ASSERT(provider_profile_canonical_name(provider) != NULL,
+                   "provider canonicalization should return a stable string");
+            ASSERT(provider_route_for_model(model, NULL, provider) != NULL,
+                   "provider route should be resolvable for pinned provider/model");
+            ASSERT(dsco_swarm_max_depth() <= SWARM_MAX_DEPTH, "runtime max depth should respect structural cap");
+            ASSERT(dsco_swarm_max_children() <= SWARM_MAX_CHILDREN,
+                   "runtime max children should respect structural cap");
+            for (size_t t = 0; t < sizeof(tools) / sizeof(tools[0]); t++) {
+                ASSERT(tools_is_parent_specified_core_tool(tools[t]),
+                       "durable agents must retain parent-specified core tools");
+            }
+        }
+
+        for (int poll = 0; poll < 80 && sw.active.count > 0; poll++) {
+            swarm_poll(&sw, 25);
+            usleep(5000);
+        }
+        for (int j = 0; j < spawned; j++) {
+            int i = completed + j;
+            swarm_child_t *c = swarm_get(&sw, ids[j]);
+            if (!c || c->status != SWARM_DONE || c->exit_code != 0) {
+                tests_failed++;
+                fprintf(stderr, "  generated durable cross-provider agent %04d FAIL: child did not complete cleanly\n", i);
+                swarm_destroy(&sw);
+                unlink(script_path);
+                return;
+            }
+            tests_passed++;
+        }
+        completed += spawned;
+        swarm_destroy(&sw);
+    }
+    fprintf(stderr, "  generated durable cross-provider spawned agents x2500 \\033[32mPASS\\033[0m\n");
+    unlink(script_path);
+}
+
+static void test_prompt_cache_provider_policy_matrix(void) {
+    static const struct {
+        const char *model;
+        bool cache_control;
+        bool automatic;
+        bool cache_key;
+        bool retention;
+    } cases[] = {
+        {"claude-sonnet-4-6", true, false, false, false},
+        {"anthropic/claude-sonnet-4", true, false, false, false},
+        {"openrouter/anthropic/claude-3.5-sonnet", true, false, false, false},
+        {"qwen/qwen3-coder", true, false, false, false},
+        {"qwen3-coder-plus", true, false, false, false},
+        {"qwen-plus", true, false, false, false},
+        {"openai/gpt-5.5", false, true, true, true},
+        {"gpt-5.5", false, true, true, true},
+        {"gpt-4.1", false, true, true, true},
+        {"azure/gpt-5", false, true, true, true},
+        {"deepseek-chat", false, true, false, false},
+        {"mistral-large-latest", false, true, true, false},
+        {"grok-4-fast", false, true, true, false},
+        {"xai/grok-4.3", false, true, true, false},
+        {"cerebras/llama-3.3-70b", false, true, true, false},
+        {"openai/gpt-oss-120b", false, true, true, true},
+        {"fugu-ultra", false, false, false, false},
+        {"kimi-k2-0711-preview", false, false, false, false},
+        {"gemini-2.5-pro", false, false, false, false},
+    };
+    for (size_t i = 0; i < sizeof(cases) / sizeof(cases[0]); i++) {
+        char name[128];
+        snprintf(name, sizeof(name), "prompt cache policy %s", cases[i].model);
+        TEST(name);
+        ASSERT(provider_model_supports_cache_control(cases[i].model) == cases[i].cache_control,
+               "cache_control policy should match provider docs");
+        ASSERT(provider_model_supports_automatic_prompt_cache(cases[i].model) == cases[i].automatic,
+               "automatic prompt-cache policy should match provider docs");
+        ASSERT(provider_model_supports_prompt_cache_key(cases[i].model) == cases[i].cache_key,
+               "prompt_cache_key policy should match provider docs");
+        ASSERT(provider_model_supports_prompt_cache_retention(cases[i].model) == cases[i].retention,
+               "prompt_cache_retention policy should match provider docs");
+        PASS();
+    }
+}
+
+static void test_prompt_cache_openai_request_shape(void) {
+    TEST("prompt cache OpenAI request shape includes key and retention");
+    conversation_t conv;
+    conv_init(&conv);
+    conv_add_user_text(&conv, "hello");
+    session_state_t session;
+    session_state_init(&session, "gpt-5.5");
+    snprintf(session.prompt_cache_key, sizeof(session.prompt_cache_key), "%s", "dsco-test-cache");
+    snprintf(session.prompt_cache_retention, sizeof(session.prompt_cache_retention), "%s", "24h");
+    provider_t *p = provider_create("openai");
+    ASSERT(p != NULL, "openai provider should be creatable");
+    char *req = p->build_request(p, &conv, &session, 1024, NULL);
+    ASSERT(req != NULL, "openai request should build");
+    ASSERT(strstr(req, "\"prompt_cache_key\":\"dsco-test-cache\"") != NULL,
+           "OpenAI request should include prompt_cache_key");
+    ASSERT(strstr(req, "\"prompt_cache_retention\":\"24h\"") != NULL,
+           "OpenAI request should include prompt_cache_retention");
+    free(req);
+    conv_free(&conv);
+    provider_free(p);
+    PASS();
+}
+
+static void test_prompt_cache_xai_header_shape(void) {
+    TEST("prompt cache xAI headers include x-grok-conv-id");
+    char saved[256];
+    bool had = false;
+    test_capture_env("DSCO_PROMPT_CACHE_KEY", saved, sizeof(saved), &had);
+    setenv("DSCO_PROMPT_CACHE_KEY", "conv_test_cache", 1);
+    provider_t *p = provider_create("xai");
+    ASSERT(p != NULL, "xai provider should be creatable");
+    struct curl_slist *hdrs = p->build_headers(p, "dummy");
+    bool found = false;
+    for (struct curl_slist *h = hdrs; h; h = h->next) {
+        if (h->data && strstr(h->data, "x-grok-conv-id: conv_test_cache"))
+            found = true;
+    }
+    ASSERT(found, "xAI headers should include x-grok-conv-id cache routing header");
+    curl_slist_free_all(hdrs);
+    provider_free(p);
+    test_restore_env("DSCO_PROMPT_CACHE_KEY", saved, had);
+    PASS();
+}
+
+static void test_prompt_cache_provider_profile_cap_audit(void) {
+    for (size_t i = 0; i < provider_profile_count(); i++) {
+        const provider_profile_t *p = provider_profile_at(i);
+        char name[128];
+        snprintf(name, sizeof(name), "prompt cache profile cap %s", p && p->name ? p->name : "null");
+        TEST(name);
+        ASSERT(p != NULL && p->name != NULL, "provider profile should exist");
+        if (p->caps & PROVIDER_CAP_PROMPT_CACHE) {
+            ASSERT(p->transport == PROVIDER_TRANSPORT_ANTHROPIC_MESSAGES ||
+                       strcmp(p->name, "anthropic") == 0,
+                   "native prompt-cache cap should only be set where DSCO emits supported cache markers");
+        }
+        PASS();
+    }
+}
+
+static void test_governance_spawn_class_status_has_dsco_budget(void) {
+    TEST("governance spawn-class status has dsco budget");
+    tools_init();
+    char result[4096];
+    bool ok = tools_execute("governance", "{\"action\":\"status\"}", result, sizeof(result));
+    ASSERT(ok, "governance status should initialize Wings/Talons");
+
+    result[0] = '\0';
+    ok = tools_execute_for_tier("agent", "{\"action\":\"status\"}", "trusted", result,
+                                sizeof(result));
+    ASSERT(ok, "agent status should not fail G7 budget after governance init");
+    ASSERT(strstr(result, "\"children\"") != NULL || strstr(result, "\"agents\"") != NULL ||
+               strstr(result, "\"active\"") != NULL,
+           "agent status should return swarm status JSON");
     PASS();
 }
 
@@ -10447,6 +11647,228 @@ static void test_task_profile_word_boundaries(void) {
     ASSERT(strcmp(best->name, "triage") == 0, "generic task should remain triage");
 
     task_profile_free(tp);
+    PASS();
+}
+
+static void test_task_profile_large_scale_ai_self_improvement(void) {
+    TEST("task_profile large-scale AI self-improvement");
+    const char *task =
+        "review and try to learn from my patterns and optimize for the use case of broad, "
+        "large scale AI self-improvement for dsco-cli";
+    task_profile_t *tp = task_profile(task, NULL);
+    ASSERT(tp != NULL, "profile should allocate");
+
+    ASSERT(tp->patterns[PATTERN_ANALYSIS], "usage-pattern prompt should be analysis");
+    ASSERT(tp->patterns[PATTERN_ITERATION], "self-improvement prompt should be iterative");
+    ASSERT(tp->patterns[PATTERN_PARALLELISM], "broad large-scale prompt should prefer breadth");
+    ASSERT(tp->patterns[PATTERN_SPECIALIST], "AI agent prompt should be specialized");
+    ASSERT(tp->parallelism_score >= 0.85, "large-scale self-improvement should be highly parallel");
+    ASSERT(tp->convergence_score >= 0.45, "self-improvement should require convergence");
+    ASSERT(tp->complexity_score >= 0.80, "AI self-improvement should be high complexity");
+
+    task_profile_free(tp);
+    PASS();
+}
+
+static void test_self_improve_learns_ccusage_cache_output_shape(void) {
+    TEST("self_improve learns ccusage cache/output shape");
+    self_improve_t si;
+    self_improve_init(&si);
+
+    self_improve_record_turn_usage(&si, 1, 8.25, 10000, 60000, 1000000, 25000, 45, 25.0);
+    int suggestions = self_improve_consolidate(&si);
+
+    bool saw_cache = false;
+    bool saw_output = false;
+    for (int i = 0; i < si.pattern_count; i++) {
+        if (si.patterns[i].type == SI_PATTERN_CACHE_LEVERAGED)
+            saw_cache = true;
+        if (si.patterns[i].type == SI_PATTERN_OUTPUT_HEAVY_TURN)
+            saw_output = true;
+    }
+
+    ASSERT(si.total_input_tokens == 10000, "input tokens should be accumulated");
+    ASSERT(si.total_output_tokens == 60000, "output tokens should be accumulated");
+    ASSERT(si.total_cache_read_tokens == 1000000, "cache-read tokens should be accumulated");
+    ASSERT(si.total_cache_write_tokens == 25000, "cache-write tokens should be accumulated");
+    ASSERT(saw_cache, "large cache-read reuse should be detected");
+    ASSERT(saw_output, "output-heavy synthesis should be detected");
+    ASSERT(suggestions >= 2, "cache/output shape should generate suggestions");
+    ASSERT(si.weights.cache_aggressiveness > 0.5, "cache leverage should raise cache aggression");
+    ASSERT(si.weights.model_cost_sensitivity > 0.3,
+           "output-heavy work should raise model cost sensitivity");
+
+    char summary[2048];
+    self_improve_summary(&si, summary, sizeof(summary));
+    ASSERT(strstr(summary, "cache-read 1000000") != NULL,
+           "summary should expose cache-read usage");
+    ASSERT(strstr(summary, "out 60000") != NULL, "summary should expose output usage");
+    PASS();
+}
+
+static void test_topology_profile_large_scale_ai_self_improvement(void) {
+    TEST("topology_profile large-scale AI self-improvement");
+    const char *task =
+        "review and try to learn from my patterns and optimize for the use case of broad, "
+        "large scale AI self-improvement for dsco-cli";
+    topology_task_profile_t profile;
+    ASSERT(topology_profile_task(task, &profile), "topology profile should succeed");
+
+    ASSERT(profile.kind == TOPO_TASK_CODE,
+           "dsco-cli self-improvement should route as code-oriented work");
+    ASSERT(profile.complexity >= 4, "self-improvement should force high complexity");
+    ASSERT(profile.desired_parallelism >= 6,
+           "large-scale self-improvement should request broad parallelism");
+    ASSERT(profile.needs_iteration, "self-improvement should be iterative");
+    ASSERT(profile.needs_validation, "self-improvement should require validation");
+    ASSERT(profile.prefers_breadth, "large-scale prompt should prefer breadth");
+    PASS();
+}
+
+static void test_topology_profile_provider_throughput_maxes_parallelism(void) {
+    TEST("topology_profile provider throughput");
+    topology_task_profile_t profile;
+    ASSERT(topology_profile_task("Maximize throughput across all providers", &profile),
+           "throughput profile should succeed");
+
+    ASSERT(profile.complexity >= 4, "provider throughput should be high complexity");
+    ASSERT(profile.desired_parallelism == 8, "provider throughput should max parallelism");
+    ASSERT(profile.needs_validation, "provider throughput should validate merged results");
+    ASSERT(profile.prefers_breadth, "provider throughput should prefer breadth");
+    PASS();
+}
+
+static void test_topology_throughput_lanes_spread_keyed_providers(void) {
+    TEST("topology throughput lanes spread providers");
+    test_env_snapshot_t envs[] = {
+        {.name = "DSCO_TOPO_THROUGHPUT"},
+        {.name = "DSCO_MAX_THROUGHPUT"},
+        {.name = "DSCO_PROVIDER_THROUGHPUT"},
+        {.name = "DSCO_TOPO_THROUGHPUT_INCLUDE_LOCAL"},
+        {.name = "DSCO_DISABLE_CODEX_OAUTH_DISCOVERY"},
+        {.name = "FUGU_API_KEY"},
+        {.name = "SAKANA_API_KEY"},
+        {.name = "FISH_API_KEY"},
+        {.name = "SAKANA_TOKEN"},
+        {.name = "OPENAI_API_KEY"},
+        {.name = "OPENAI_KEY"},
+        {.name = "CHATGPT_API_KEY"},
+        {.name = "ANTHROPIC_API_KEY"},
+        {.name = "XAI_API_KEY"},
+        {.name = "GROK_API_KEY"},
+        {.name = "X_AI_API_KEY"},
+        {.name = "KIMI_API_KEY"},
+        {.name = "KIMI_CODING_API_KEY"},
+        {.name = "MOONSHOT_API_KEY"},
+        {.name = "MOONSHOTAI_API_KEY"},
+        {.name = "OPENROUTER_API_KEY"},
+    };
+    size_t env_count = sizeof(envs) / sizeof(envs[0]);
+    test_capture_env_list(envs, env_count);
+
+    unsetenv("DSCO_TOPO_THROUGHPUT");
+    unsetenv("DSCO_MAX_THROUGHPUT");
+    unsetenv("DSCO_PROVIDER_THROUGHPUT");
+    unsetenv("DSCO_TOPO_THROUGHPUT_INCLUDE_LOCAL");
+    setenv("DSCO_DISABLE_CODEX_OAUTH_DISCOVERY", "1", 1);
+    unsetenv("FUGU_API_KEY");
+    unsetenv("SAKANA_API_KEY");
+    unsetenv("FISH_API_KEY");
+    unsetenv("SAKANA_TOKEN");
+    unsetenv("OPENAI_API_KEY");
+    unsetenv("OPENAI_KEY");
+    unsetenv("CHATGPT_API_KEY");
+    setenv("ANTHROPIC_API_KEY", "sk-ant-native", 1);
+    setenv("XAI_API_KEY", "xai-native", 1);
+    unsetenv("GROK_API_KEY");
+    unsetenv("X_AI_API_KEY");
+    setenv("KIMI_API_KEY", "kimi-native", 1);
+    unsetenv("KIMI_CODING_API_KEY");
+    unsetenv("MOONSHOT_API_KEY");
+    unsetenv("MOONSHOTAI_API_KEY");
+    setenv("OPENROUTER_API_KEY", "sk-or-router", 1);
+
+    ASSERT(!topology_throughput_enabled(), "throughput env should be off by default");
+    setenv("DSCO_TOPO_THROUGHPUT", "1", 1);
+    ASSERT(topology_throughput_enabled(), "throughput env should enable lane routing");
+
+    char provider[64];
+    char model[128];
+    ASSERT(topology_resolve_throughput_lane_for_tier(NULL, TIER_SONNET, 0, provider,
+                                                     sizeof(provider), model, sizeof(model)),
+           "slot 0 should resolve");
+    ASSERT(strcmp(provider, "anthropic") == 0, "slot 0 should use Anthropic");
+    ASSERT(strcmp(model, "claude-sonnet-4-6") == 0, "Anthropic slot should use Sonnet");
+
+    ASSERT(topology_resolve_throughput_lane_for_tier(NULL, TIER_SONNET, 1, provider,
+                                                     sizeof(provider), model, sizeof(model)),
+           "slot 1 should resolve");
+    ASSERT(strcmp(provider, "xai") == 0, "slot 1 should use xAI");
+    ASSERT(strcmp(model, "grok-4-fast") == 0, "xAI slot should use Grok fast");
+
+    ASSERT(topology_resolve_throughput_lane_for_tier(NULL, TIER_SONNET, 2, provider,
+                                                     sizeof(provider), model, sizeof(model)),
+           "slot 2 should resolve");
+    ASSERT(strcmp(provider, "moonshot") == 0, "slot 2 should use Moonshot/Kimi");
+    ASSERT(strcmp(model, "kimi-k2.7-code-highspeed") == 0,
+           "Moonshot slot should use high-speed Kimi");
+
+    bool saw_openrouter = false;
+    for (int slot = 3; slot < 16; slot++) {
+        ASSERT(topology_resolve_throughput_lane_for_tier(NULL, TIER_SONNET, slot, provider,
+                                                         sizeof(provider), model, sizeof(model)),
+               "later throughput slot should resolve");
+        if (strcmp(provider, "openrouter") == 0) {
+            ASSERT(strncmp(model, "openrouter/", 11) != 0,
+                   "OpenRouter lane should return provider-native model for pinned spawn");
+            saw_openrouter = true;
+            break;
+        }
+    }
+    ASSERT(saw_openrouter, "throughput lanes should include OpenRouter when keyed");
+
+    test_restore_env_list(envs, env_count);
+    PASS();
+}
+
+static void test_topology_openrouter_tiers_keep_explicit_route(void) {
+    TEST("topology OpenRouter tiers keep explicit route");
+    char saved_haiku[256], saved_sonnet[256], saved_opus[256], saved_hetero[256];
+    bool had_haiku = false, had_sonnet = false, had_opus = false, had_hetero = false;
+    test_capture_env("DSCO_SWARM_HAIKU", saved_haiku, sizeof(saved_haiku), &had_haiku);
+    test_capture_env("DSCO_SWARM_SONNET", saved_sonnet, sizeof(saved_sonnet), &had_sonnet);
+    test_capture_env("DSCO_SWARM_OPUS", saved_opus, sizeof(saved_opus), &had_opus);
+    test_capture_env("DSCO_TOPO_HETERO", saved_hetero, sizeof(saved_hetero), &had_hetero);
+
+    unsetenv("DSCO_SWARM_HAIKU");
+    unsetenv("DSCO_SWARM_SONNET");
+    unsetenv("DSCO_SWARM_OPUS");
+    unsetenv("DSCO_TOPO_HETERO");
+
+    char buf[128];
+    const char *resolved =
+        topology_resolve_model_for_tier("openrouter/auto", NULL, TIER_HAIKU, buf, sizeof(buf));
+    ASSERT(resolved == buf, "resolver should return caller buffer");
+    ASSERT(strcmp(buf, "openrouter/z-ai/glm-5.2") == 0,
+           "OpenRouter HAIKU tier should keep explicit OpenRouter route");
+
+    setenv("DSCO_SWARM_HAIKU", "glm52", 1);
+    resolved =
+        topology_resolve_model_for_tier("openrouter/auto", NULL, TIER_HAIKU, buf, sizeof(buf));
+    ASSERT(strcmp(resolved, "openrouter/z-ai/glm-5.2") == 0,
+           "OpenRouter tier alias override should rewrap with explicit route");
+
+    unsetenv("DSCO_SWARM_HAIKU");
+    setenv("DSCO_TOPO_HETERO", "1", 1);
+    resolved =
+        topology_resolve_model_for_tier("claude-sonnet-4-6", NULL, TIER_SONNET, buf, sizeof(buf));
+    ASSERT(strcmp(resolved, "openrouter/moonshotai/kimi-k2.7-code") == 0,
+           "heterogeneous tier defaults should keep explicit OpenRouter route");
+
+    test_restore_env("DSCO_SWARM_HAIKU", saved_haiku, had_haiku);
+    test_restore_env("DSCO_SWARM_SONNET", saved_sonnet, had_sonnet);
+    test_restore_env("DSCO_SWARM_OPUS", saved_opus, had_opus);
+    test_restore_env("DSCO_TOPO_HETERO", saved_hetero, had_hetero);
     PASS();
 }
 
@@ -13337,6 +14759,7 @@ int main(void) {
     test_system_prompts_mention_bash_parallel_workers();
     test_openrouter_request_includes_external_tools_and_tool_choice();
     test_openrouter_request_named_tool_choice();
+    test_provider_request_model_prefix_routing();
     test_openai_request_defaults_auto_tool_choice();
     test_openrouter_request_tool_choice_none();
     test_openrouter_request_external_tools_when_builtin_budget_zero();
@@ -13360,6 +14783,8 @@ int main(void) {
     /* Session state */
     test_session_state_init();
     test_session_state_init_inherits_trust_tier_env();
+    test_session_state_init_populates_fallbacks_without_changing_model();
+    test_session_state_init_can_disable_default_fallbacks();
     test_session_trust_tier_parse();
 
     /* Conversation growth behavior */
@@ -13599,6 +15024,8 @@ int main(void) {
     test_tools_builtin_count();
     test_tools_get_all();
     test_agent_and_swarm_tool_schemas_expose_spawn_fields();
+    test_worker_core_tools_survive_restrictive_agent_profile();
+    test_worker_tool_profile_allows_full_builtin_catalog();
     test_tools_get_paged_budget_floor();
 
     /* Dynamic AskUserQuestion dialog logic */
@@ -13670,6 +15097,7 @@ int main(void) {
     test_model_registry_opus_pricing();
     test_model_registry_haiku_cheaper();
     test_model_resolve_alias_extended();
+    test_codex_cache_first_run_defaults();
     test_model_context_window_lookup();
     test_switch_reason_names();
     test_provider_msg_is_context_overflow();
@@ -13686,8 +15114,19 @@ int main(void) {
     test_provider_resolve_api_key_supports_generic_providers();
     test_provider_select_default_primary_model_prefers_glm_kimi();
     test_provider_build_default_fallback_models_cross_lab();
+    test_provider_build_default_fallback_models_never_includes_primary_duplicate();
+    test_provider_build_default_fallback_models_respects_capacity();
+    test_provider_build_default_fallback_models_empty_without_credentials();
+    test_provider_build_default_fallback_models_native_primary_duplicate();
     test_provider_build_default_fallback_models_for_fugu_cross_provider();
+    test_provider_route_explicit_openrouter_overrides_native_namespace();
+    test_provider_route_native_namespace_does_not_silently_fallback_to_openrouter();
+    test_provider_model_is_routable_respects_native_namespace_without_key();
+    test_provider_resolve_request_api_key_refuses_cross_provider_session_key();
+    test_provider_route_override_does_not_rewrite_request_key_family();
     test_provider_route_keeps_sakana_native();
+    test_provider_route_keeps_moonshot_namespace_native();
+    test_provider_route_requires_explicit_openrouter_namespace();
     test_provider_route_uses_session_key_when_native_env_missing();
     test_provider_route_uses_claude_code_oauth_when_env_key_missing();
     test_provider_route_uses_claude_code_credentials_file_when_present();
@@ -13698,10 +15137,21 @@ int main(void) {
     test_provider_exports_claude_code_oauth_for_children();
     test_provider_export_prefers_credential_provider_over_model();
     test_provider_exports_explicit_provider_for_children();
+    test_provider_exports_openai_codex_oauth_for_children();
+    test_provider_openai_codex_marker_does_not_fake_oauth_env();
     test_swarm_prepare_executor_env_prefers_claude_oauth();
     test_swarm_prepare_executor_env_keeps_api_key_without_oauth();
     test_swarm_poll_reaps_killed_child_without_readable_fds();
     test_swarm_spawn_uses_worker_profile();
+    test_swarm_spawn_pins_openai_codex_provider();
+    test_swarm_spawn_exports_chatgpt_oauth_env_to_codex_child();
+    test_swarm_spawn_codex_discovery_disabled_pins_openai();
+    test_cross_provider_durable_agent_matrix_generated();
+    test_prompt_cache_provider_policy_matrix();
+    test_prompt_cache_openai_request_shape();
+    test_prompt_cache_xai_header_shape();
+    test_prompt_cache_provider_profile_cap_audit();
+    test_governance_spawn_class_status_has_dsco_budget();
     test_provider_request_key_prefers_claude_code_oauth_over_fallback();
     test_provider_route_falls_back_to_openrouter();
     test_provider_route_respects_override();
@@ -13870,6 +15320,12 @@ int main(void) {
     test_task_profile_ranks_full_registry();
     test_task_profile_json_escaping_and_truncation();
     test_task_profile_word_boundaries();
+    test_task_profile_large_scale_ai_self_improvement();
+    test_self_improve_learns_ccusage_cache_output_shape();
+    test_topology_profile_large_scale_ai_self_improvement();
+    test_topology_profile_provider_throughput_maxes_parallelism();
+    test_topology_throughput_lanes_spread_keyed_providers();
+    test_topology_openrouter_tiers_keep_explicit_route();
     test_trace_log_functions();
     test_tui_table_lifecycle();
     test_tool_timeout_specific_tools();

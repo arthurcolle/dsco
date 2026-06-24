@@ -1,4 +1,5 @@
 #include "governance.h"
+#include "error.h"
 #include "rsi_curriculum.h"
 #include "vfs.h"
 #include <stdio.h>
@@ -70,6 +71,10 @@ static const struct {
     {HARDCODED_MUST_NEVER, "Promote RSI or self-modification candidates without replay stability, "
                            "rollback readiness, provenance, attestation, and lease evidence"},
     {HARDCODED_MUST_NEVER, "Treat self-generated traces as held-out evidence for promotion"},
+    {HARDCODED_MUST_NEVER,
+     "Automatically execute commands that may stop, restart, replace, or terminate the active agent runtime, shell, host, VM, container, service, or session without explicit user-run confirmation and recovery steps"},
+    {HARDCODED_MUST_NEVER,
+     "Force-kill arbitrary or unverified PID lists; stop owning services or named tasks first, and require explicit confirmation before targeted force termination"},
 };
 
 #define DEFAULT_HARDCODED_COUNT (sizeof(DEFAULT_HARDCODED) / sizeof(DEFAULT_HARDCODED[0]))
@@ -122,6 +127,7 @@ void governance_init(governance_engine_t *g) {
 
     /* Initialize subsystems */
     pheromone_field_init(&g->pheromones);
+    avian_init(&g->avian);
     ooda_engine_init(&g->ooda);
     killswitch_init(&g->killswitches);
 
@@ -160,6 +166,7 @@ void governance_destroy(governance_engine_t *g) {
     if (!g)
         return;
     pheromone_field_destroy(&g->pheromones);
+    avian_destroy(&g->avian);
     memset(g, 0, sizeof(*g));
 }
 
@@ -339,6 +346,11 @@ bool governance_set_param(governance_engine_t *g, const char *name, double value
 bool governance_charge_gsu(governance_engine_t *g, const char *agent_id, double amount) {
     if (!g || !g->initialized || !agent_id)
         return false;
+    /* INTEGRITY: a charge must never be negative (would be a covert refund) and
+     * must be finite — a NaN/inf charge would corrupt the budget invariant. */
+    DSCO_REQUIRE(amount >= 0.0);
+    DSCO_REQUIRE(amount == amount);          /* reject NaN */
+    DSCO_REQUIRE(amount < 1e12);             /* reject inf / absurd charge */
     agent_envelope_t *a = find_agent(g, agent_id);
     if (!a)
         return false;
@@ -347,6 +359,8 @@ bool governance_charge_gsu(governance_engine_t *g, const char *agent_id, double 
     if (amount > remaining)
         return false; /* hard budget limit */
 
+    /* CONSERVATION: consumed must never exceed allocated after the charge. */
+    DSCO_REQUIRE(a->budget.consumed + amount <= a->budget.allocated + 1e-9);
     a->budget.consumed += amount;
     g->system_budget.consumed += amount;
     a->last_action_at = now_sec();
@@ -487,6 +501,12 @@ bool governance_checkpoint(governance_engine_t *g, const char *agent_id, const c
                            double gsu_cost, const char *context) {
     if (!g || !g->initialized)
         return false;
+    /* IMMUNE CONTRACT: the checkpoint must never be invoked without an action to
+     * judge, and never with a negative/NaN cost (would let a charge become a
+     * refund and bypass the budget gate). Fail closed. */
+    DSCO_REQUIRE(action != NULL);
+    DSCO_REQUIRE(gsu_cost >= 0.0);
+    DSCO_REQUIRE(gsu_cost == gsu_cost); /* reject NaN */
 
     /* Step 1: Authorize the action */
     if (!governance_authorize(g, agent_id, action, gsu_cost)) {
