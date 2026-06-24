@@ -1,0 +1,172 @@
+{
+  "auth": {
+    "client_side_notes": [],
+    "env_keys": [
+      "GEMINI_API_KEY",
+      "GOOGLE_API_KEY"
+    ],
+    "headers": [
+      {
+        "name": "Authorization",
+        "value": "Bearer $GEMINI_API_KEY"
+      }
+    ],
+    "scheme": "bearer"
+  },
+  "client_side_mechanics": {
+    "codex_config": {},
+    "headers_optional": [],
+    "headers_required": [],
+    "quirks": [],
+    "sdk_compatibility": [
+      "openai-compatible"
+    ],
+    "unsupported_fields": []
+  },
+  "confidence": 0.82,
+  "display_name": "Google Gemini",
+  "docs": [
+    {
+      "confidence": 0.9,
+      "retrieved": "2026-06-24",
+      "title": "Context caching",
+      "url": "https://ai.google.dev/gemini-api/docs/caching"
+    },
+    {
+      "confidence": 0.82,
+      "retrieved": "2026-06-24",
+      "title": "OpenAI compatibility",
+      "url": "https://ai.google.dev/gemini-api/docs/openai"
+    }
+  ],
+  "dsco": {
+    "implemented_features": [
+      "openai_compat_chat"
+    ],
+    "missing_features": [
+      "Gemini native cachedContent resource lifecycle",
+      "usageMetadata parse on native transport"
+    ],
+    "provider_profile": "google",
+    "risk": "high",
+    "tests": [
+      "test_prompt_cache_provider_policy_matrix"
+    ]
+  },
+  "last_reviewed": "2026-06-24",
+  "prompt_caching": {
+    "invalidates_on": [
+      "cache_resource_expiry",
+      "model_change",
+      "content_hash_change"
+    ],
+    "mechanisms": [
+      {
+        "default_policy": "planned",
+        "dsco_support": "planned",
+        "field": "cachedContent",
+        "kind": "resource_lifecycle",
+        "models": [
+          "gemini*"
+        ],
+        "name": "cachedContent",
+        "scope": "request/resource",
+        "usage_fields": [
+          "usageMetadata.cachedContentTokenCount"
+        ]
+      }
+    ],
+    "minimum_cacheable_tokens": null,
+    "notes": [
+      "Requires create/reuse cached content resource; not an OpenAI-compatible one-field patch."
+    ],
+    "status": "resource",
+    "ttl": "resource TTL"
+  },
+  "provider": "google",
+  "reasoning": {
+    "aliases": {},
+    "efforts": [],
+    "field": null,
+    "supported": false,
+    "unsupported_values_rejected": false
+  },
+  "streaming": {
+    "idempotent_retries": true,
+    "idle_timeout_ms_recommended": 120000,
+    "known_failure_modes": [
+      "429_rate_limit",
+      "5xx_overload",
+      "stream_idle"
+    ],
+    "request_max_retries": 2,
+    "stream_max_retries": 2
+  },
+  "usage_accounting": {
+    "cached_tokens": [
+      "usageMetadata.cachedContentTokenCount"
+    ],
+    "input_tokens": [
+      "usageMetadata.promptTokenCount"
+    ],
+    "output_tokens": [
+      "usageMetadata.candidatesTokenCount"
+    ],
+    "provider_specific": [],
+    "reasoning_tokens": [
+      "usageMetadata.thoughtsTokenCount"
+    ]
+  },
+  "wire_apis": [
+    {
+      "base_url": "https://generativelanguage.googleapis.com/v1beta/openai",
+      "endpoint": "/chat/completions",
+      "modalities": {
+        "input": [
+          "text",
+          "image"
+        ],
+        "output": [
+          "text"
+        ]
+      },
+      "name": "openai_chat_compat",
+      "status": "supported",
+      "streaming": {
+        "format": "sse",
+        "supported": true
+      },
+      "tools": {
+        "parallel_tool_calls": false,
+        "strict_schema": false,
+        "supported": true
+      }
+    },
+    {
+      "base_url": "https://generativelanguage.googleapis.com",
+      "endpoint": "/v1beta/models/{model}:generateContent",
+      "modalities": {
+        "input": [
+          "text",
+          "image",
+          "audio",
+          "video"
+        ],
+        "output": [
+          "text"
+        ]
+      },
+      "name": "generateContent",
+      "status": "preferred_for_context_cache",
+      "streaming": {
+        "format": "sse",
+        "supported": true
+      },
+      "tools": {
+        "parallel_tool_calls": false,
+        "strict_schema": false,
+        "supported": true
+      }
+    }
+  ]
+}
