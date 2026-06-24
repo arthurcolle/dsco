@@ -477,6 +477,11 @@ int talons_tournament_begin(talons_engine_t *t, const char *objective, double de
                             double weight_quality, double weight_speed, double weight_cost) {
     if (!t || !t->initialized || t->tournament_count >= TALONS_MAX_STRATEGIES)
         return -1;
+    /* NERVOUS CONTRACT: scoring weights must be finite — a NaN weight would make
+     * every competitor's composite score NaN and the winner undefined. */
+    DSCO_REQUIRE_RET(weight_quality == weight_quality, -1);
+    DSCO_REQUIRE_RET(weight_speed == weight_speed, -1);
+    DSCO_REQUIRE_RET(weight_cost == weight_cost, -1);
 
     tournament_t *tr = &t->tournaments[t->tournament_count++];
     memset(tr, 0, sizeof(*tr));
