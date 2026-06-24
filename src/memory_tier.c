@@ -292,6 +292,10 @@ bool memory_promote(memory_store_t *m, const char *key) {
         return false;
     if (e->tier >= MEM_SEMANTIC)
         return false; /* already at top */
+    /* CONSERVATION: both the source and destination tier indices must be in
+     * range before we mutate the per-tier counters, or we corrupt the histogram
+     * that drives consolidation decisions. */
+    DSCO_REQUIRE(e->tier >= 0 && e->tier < MEM_TIER_COUNT - 1);
 
     m->tier_count[e->tier]--;
     e->tier++;
