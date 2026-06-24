@@ -4837,7 +4837,7 @@ void tui_agent_rollup(int total, int done, int running, int errored) {
     if (running > 0)
         fprintf(stderr, " %s%d running%s", TUI_CYAN, running, TUI_RESET);
     if (errored > 0)
-        fprintf(stderr, " %s%d errors%s", TUI_RED, errored, TUI_RESET);
+        fprintf(stderr, " %s%d errors%s", TUI_ROLE_FAIL, errored, TUI_RESET);
     fprintf(stderr, " %s(%d total)%s\n", TUI_DIM, total, TUI_RESET);
 }
 
@@ -7435,7 +7435,7 @@ void tui_stream_state_render_badge(const tui_stream_state_t *ss) {
     if (ss->tool_count > 0) {
         fprintf(stderr, " %s%d tools%s", TUI_DIM, ss->tool_count, TUI_RESET);
         if (ss->tool_errors > 0) {
-            fprintf(stderr, " %s(%d err)%s", TUI_RED, ss->tool_errors, TUI_RESET);
+            fprintf(stderr, " %s(%d err)%s", TUI_ROLE_FAIL, ss->tool_errors, TUI_RESET);
         }
     }
     if (ss->peak_tok_per_sec > 0) {
@@ -8696,7 +8696,7 @@ tui_perm_result_t tui_permission_prompt(const char *tool_name, const char *descr
 
 bool tui_confirm(const char *question) {
     const tui_glyphs_t *g = tui_glyph();
-    fprintf(stderr, "  %s%s %s%s %s[y/n]%s ", TUI_YELLOW, g->warn, TUI_RESET,
+    fprintf(stderr, "  %s%s %s%s %s[y/n]%s ", TUI_ROLE_WARN, g->warn, TUI_RESET,
             question ? question : "Continue?", TUI_DIM, TUI_RESET);
     fflush(stderr);
     int ch = read_single_char();
