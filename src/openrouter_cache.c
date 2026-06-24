@@ -30,7 +30,7 @@
 #include "json_util.h"
 
 #define OR_MODELS_URL "https://openrouter.ai/api/v1/models"
-#define OR_CACHE_TTL (12 * 60 * 60) /* refresh over network when older */
+#define OR_CACHE_TTL (60 * 60) /* refresh over network when older */
 
 /* One indexed model. `info` is the registry-compatible view returned by
  * model_lookup(); the trailing fields carry the richer OpenRouter metadata. */

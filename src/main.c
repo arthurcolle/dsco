@@ -15,6 +15,7 @@
 #include "provider.h"
 #include "provider_profiles.h"
 #include "openrouter_cache.h"
+#include "codex_cache.h"
 #include "topology.h"
 #include "workspace.h"
 #include "trace.h"
@@ -64,6 +65,7 @@ extern void dsco_net_routes_register(void *srv_opaque);
 #include "trust.h"
 #include "toolmgmt.h"
 #include "connector.h"
+#include "dcr.h"
 #include "startup.h"
 #include <stdio.h>
 #include <stdlib.h>
@@ -571,9 +573,10 @@ static bool main_cli_token_looks_like_api_key(const char *value) {
 static bool main_store_cli_credential(const char *env_name, const char *value) {
     if (!env_name || !env_name[0] || !value || !value[0])
         return false;
-    if (sealed_store_put(env_name, value, 0) == 0)
-        return true;
-    return setenv(env_name, value, 1) == 0;
+    if (setenv(env_name, value, 1) != 0)
+        return false;
+    (void)sealed_store_put(env_name, value, 0);
+    return true;
 }
 
 static dsco_profile_t main_runtime_profile(int argc, char **argv) {
@@ -985,7 +988,7 @@ static const native_provider_t NATIVE_PROVIDERS[] = {
       CAP_TOOLS|CAP_MULTITURN|CAP_STREAMING, 2 },
     { "cohere",     "Cohere API",                "COHERE_API_KEY",      "command-a-03-2025",
       CAP_TOOLS|CAP_MULTITURN|CAP_STREAMING|CAP_JSON, 3 },
-    { "moonshot",   "Moonshot Kimi API",         "MOONSHOT_API_KEY",    "kimi-k2.7-code-highspeed",
+    { "moonshot",   "Moonshot Kimi API",         "KIMI_API_KEY",        "kimi-k2.7-code-highspeed",
       CAP_TOOLS|CAP_MULTITURN|CAP_STREAMING|CAP_VISION|CAP_THINKING|CAP_JSON, 4 },
     { "sakana",     "Sakana Fugu API",           "FUGU_API_KEY",        "fugu",
       CAP_TOOLS|CAP_MULTITURN|CAP_STREAMING|CAP_VISION|CAP_THINKING|CAP_JSON, 4 },
@@ -993,6 +996,14 @@ static const native_provider_t NATIVE_PROVIDERS[] = {
 };
 
 static const exec_reg_t *exec_find(const char *name) {
+    if (!name || !name[0])
+        return NULL;
+    /* Historical/provider alias: openai-codex names dsco's ChatGPT/Codex
+     * subscription provider, but executor surfaces must use the Codex CLI.
+     * Accept it here so swarm/coordinator code that says executor=openai-codex
+     * does not strand a worker before it can use tools. */
+    if (strcmp(name, "openai-codex") == 0 || strcmp(name, "chatgpt-codex") == 0)
+        name = "codex";
     for (int i = 0; EXEC_REGISTRY[i].name; i++) {
         if (strcmp(EXEC_REGISTRY[i].name, name) == 0)
             return &EXEC_REGISTRY[i];
@@ -1118,7 +1129,7 @@ static const exec_reg_t *select_auto_executor(const char *model,
 static const char *default_model_for_executor(const exec_reg_t *e) {
     if (!e) return NULL;
     if (strcmp(e->name, "claude") == 0) return "claude-sonnet-4-6";
-    if (strcmp(e->name, "codex") == 0) return "gpt-5.3-codex-spark";
+    if (strcmp(e->name, "codex") == 0) return codex_cache_default_model();
     return NULL;
 }
 
@@ -2039,6 +2050,7 @@ static void usage(const char *prog) {
         "Usage: %s [options] [prompt]\n"
         "       %s login          Choose Claude Code or ChatGPT Codex backend\n"
         "       %s status         Show auth state and account info for all backends\n"
+        "       %s config [show|init|validate|ingest|explain]  DSCO Config Registry\n"
         "\n"
         "Options:\n"
         "  -m MODEL    Model name (default: %s)\n"
@@ -2082,7 +2094,7 @@ static void usage(const char *prog) {
         "  DSCO_EXEC           Default executor/provider (claude, codex, auto, fugu, sakana)\n"
         "  DSCO_BUDGET         Session cost budget in dollars (0=unlimited)\n"
         "  DSCO_DAILY_BUDGET   Daily cost budget in dollars (0=unlimited)\n",
-    DSCO_VERSION, prog, prog, prog, DEFAULT_MODEL, prog, prog, prog);
+    DSCO_VERSION, prog, prog, prog, prog, DEFAULT_MODEL, prog, prog, prog);
 }
 
 static void print_topology_list(void) {
@@ -2191,11 +2203,14 @@ static void json_print_escaped(FILE *out, const char *s) {
     }
 }
 
+static void codex_model_json_cb(const codex_model_view_t *m, void *ud);
+
 static void print_models_json(void) {
     printf("[");
+    int emitted = 0;
     for (int j = 0; MODEL_REGISTRY[j].alias; j++) {
         const model_info_t *m = &MODEL_REGISTRY[j];
-        if (j > 0) printf(",");
+        if (emitted++ > 0) printf(",");
         printf("{\"alias\":\"%s\",\"model_id\":\"%s\","
                "\"context_window\":%d,\"max_output\":%d,"
                "\"input_price\":%.2f,\"output_price\":%.2f,"
@@ -2206,6 +2221,9 @@ static void print_models_json(void) {
                m->cache_read_price, m->cache_write_price,
                m->supports_thinking);
     }
+    if (codex_cache_count() <= 0)
+        (void)codex_cache_load_sync();
+    codex_cache_foreach(codex_model_json_cb, &emitted);
     printf("]\n");
 }
 
@@ -2236,6 +2254,60 @@ static void or_model_text_cb(const or_model_view_t *m, void *ud) {
            m->name ? m->name : "");
 }
 
+static void codex_model_json_cb(const codex_model_view_t *m, void *ud) {
+    int *n = ud;
+    if (n && (*n)++ > 0)
+        printf(",");
+    printf("{\"alias\":\"");
+    json_print_escaped(stdout, m->slug ? m->slug : "");
+    printf("\",\"model_id\":\"");
+    json_print_escaped(stdout, m->slug ? m->slug : "");
+    printf("\",\"provider\":\"openai-codex\","
+           "\"display_name\":\"");
+    json_print_escaped(stdout, m->display_name ? m->display_name : "");
+    printf("\",\"context_window\":%d,\"max_output\":%d,"
+           "\"input_price\":%.2f,\"output_price\":%.2f,"
+           "\"cache_read_price\":%.2f,\"cache_write_price\":%.2f,"
+           "\"supports_thinking\":%d,"
+           "\"default_reasoning_level\":\"",
+           m->context_window, 32768, 0.0, 0.0, 0.0, 0.0,
+           m->supports_thinking);
+    json_print_escaped(stdout, m->default_reasoning_level ? m->default_reasoning_level : "");
+    printf("\",\"supported_in_api\":%d,\"visibility\":\"",
+           m->supported_in_api);
+    json_print_escaped(stdout, m->visibility ? m->visibility : "");
+    printf("\"}");
+}
+
+static void codex_model_text_cb(const codex_model_view_t *m, void *ud) {
+    (void)ud;
+    printf("%-28s %9d  %s  %-6s  %s\n",
+           m->slug ? m->slug : "",
+           m->context_window,
+           m->supported_in_api ? "api" : "cli",
+           m->default_reasoning_level ? m->default_reasoning_level : "-",
+           m->display_name ? m->display_name : "");
+}
+
+static int print_codex_models(bool json) {
+    int n = codex_cache_load_sync();
+    if (n <= 0) {
+        if (json) printf("[]\n");
+        else fprintf(stderr, "codex: catalog unavailable (codex CLI missing and no disk cache)\n");
+        return n > 0 ? 0 : 1;
+    }
+    if (json) {
+        int count = 0;
+        printf("[");
+        codex_cache_foreach(codex_model_json_cb, &count);
+        printf("]\n");
+    } else {
+        fprintf(stderr, "# %d Codex models indexed (api=usable via ChatGPT backend)\n", n);
+        codex_cache_foreach(codex_model_text_cb, NULL);
+    }
+    return 0;
+}
+
 static int print_or_models(bool json) {
     int n = openrouter_cache_load_sync();
     if (n <= 0) {
@@ -2256,7 +2328,7 @@ static int print_or_models(bool json) {
 }
 
 static void print_tools_json_fast(dsco_profile_t profile) {
-    if (profile == DSCO_PROFILE_LITE || profile == DSCO_PROFILE_WORKER)
+    if (profile == DSCO_PROFILE_LITE)
         tools_init_profile(TOOLS_CORE);
     else
         tools_init_local_only();
@@ -2317,7 +2389,7 @@ static int run_tool_exec_fast(dsco_profile_t profile,
         return 0;
     }
 
-    if (profile == DSCO_PROFILE_LITE || profile == DSCO_PROFILE_WORKER)
+    if (profile == DSCO_PROFILE_LITE)
         tools_init_profile(TOOLS_CORE);
     else
         tools_init_local_only();
@@ -2330,8 +2402,10 @@ static int run_tool_exec_fast(dsco_profile_t profile,
 }
 
 static void main_tools_init_for_runtime(dsco_profile_t profile) {
-    if (profile == DSCO_PROFILE_LITE || profile == DSCO_PROFILE_WORKER)
+    if (profile == DSCO_PROFILE_LITE)
         tools_init_profile(TOOLS_CORE);
+    else if (profile == DSCO_PROFILE_WORKER)
+        tools_init();
     else
         tools_init();
 
@@ -2582,6 +2656,12 @@ int main(int argc, char **argv) {
         return 0;
     }
 
+    /* `dsco config …` drives the DSCO Config Registry (DCR): a local-first
+     * canonical config substrate plus import/provenance hooks for external
+     * provider configs (Codex, provider docs, catalogs). */
+    if (argc >= 2 && strcmp(argv[1], "config") == 0)
+        return dcr_cli(argc, argv);
+
     /* `dsco connect …` drives the future-proof baseline connector: a single
      * seam every external system plugs into (tools today; chains, credit,
      * robotics, neural/haptic next). Dispatched first for the same reasons. */
@@ -2819,23 +2899,19 @@ int main(int argc, char **argv) {
             return 0;
         }
         if (strcmp(argv[i], "--models-json") == 0) {
-            printf("[");
-            for (int j = 0; MODEL_REGISTRY[j].alias; j++) {
-                const model_info_t *m = &MODEL_REGISTRY[j];
-                if (j > 0) printf(",");
-                printf("{\"alias\":\"%s\",\"model_id\":\"%s\","
-                       "\"context_window\":%d,\"max_output\":%d,"
-                       "\"input_price\":%.2f,\"output_price\":%.2f,"
-                       "\"cache_read_price\":%.2f,\"cache_write_price\":%.2f,"
-                       "\"supports_thinking\":%d}",
-                       m->alias, m->model_id, m->context_window, m->max_output,
-                       m->input_price, m->output_price,
-                       m->cache_read_price, m->cache_write_price,
-                       m->supports_thinking);
-            }
-            printf("]\n");
+            print_models_json();
             free(oneshot_prompt);
             return 0;
+        }
+        if (strcmp(argv[i], "--codex-models") == 0) {
+            int rc = print_codex_models(false);
+            free(oneshot_prompt);
+            return rc;
+        }
+        if (strcmp(argv[i], "--codex-models-json") == 0) {
+            int rc = print_codex_models(true);
+            free(oneshot_prompt);
+            return rc;
         }
         if (strcmp(argv[i], "--or-models") == 0) {
             int rc = print_or_models(false);
@@ -3336,10 +3412,10 @@ int main(int argc, char **argv) {
 
     curl_global_init(CURL_GLOBAL_DEFAULT);
 
-    /* Kick off the background OpenRouter catalog refresh: loads the on-disk
-     * cache immediately, then refreshes from the live /models endpoint when
-     * stale, so any real slug resolves with current context/pricing. */
+    /* Kick off background model catalog refreshes. Each cache publishes any
+     * on-disk copy first, then refreshes its source when stale. */
     openrouter_cache_init();
+    codex_cache_init();
 
     /* --exec: dispatch to external CLI or force native provider */
     if (exec_backend && exec_backend[0]) {
