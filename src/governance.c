@@ -427,6 +427,10 @@ bool governance_authorize(governance_engine_t *g, const char *agent_id, const ch
                           double gsu_cost) {
     if (!g || !g->initialized)
         return false;
+    /* IMMUNE CONTRACT: authorization must judge a named action with a finite,
+     * non-negative cost — a NaN/negative cost would defeat the budget gate. */
+    DSCO_REQUIRE(action != NULL);
+    DSCO_REQUIRE(gsu_cost == gsu_cost && gsu_cost >= 0.0);
 
     /* 1. Kill switch check */
     if (killswitch_system_halted(&g->killswitches)) {
