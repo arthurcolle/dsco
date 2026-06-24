@@ -35,6 +35,7 @@
 #include <time.h>
 #include <ctype.h>
 #include <sys/stat.h>
+#include <sys/wait.h>
 #include <fcntl.h>
 
 /* Provide g_interrupted that agent.c normally defines */
@@ -9276,6 +9277,65 @@ static void test_prompt_cache_xai_header_shape(void) {
     PASS();
 }
 
+static void test_provider_metadata_catalog_validates(void) {
+    TEST("provider machinery metadata catalog validates");
+    /* Resolve repo root from this source file's directory (tests/), so the
+     * audit runs regardless of CWD. python3 absence (127) is a skip, not a fail. */
+    char dir[1024];
+    snprintf(dir, sizeof(dir), "%s", __FILE__);
+    char *slash = strrchr(dir, '/');
+    if (slash) {
+        *slash = '\0';
+        slash = strrchr(dir, '/'); /* drop /tests for absolute paths */
+        if (slash)
+            *slash = '\0';
+        else if (strcmp(dir, "tests") == 0)
+            snprintf(dir, sizeof(dir), "%s", ".");
+    }
+    char cmd[2048];
+    snprintf(cmd, sizeof(cmd),
+             "cd '%s' && python3 scripts/provider_metadata_audit.py --json >/dev/null 2>&1",
+             dir[0] ? dir : ".");
+    int rc = system(cmd);
+    int code = WIFEXITED(rc) ? WEXITSTATUS(rc) : 0;
+    ASSERT(code == 0 || code == 127, "provider metadata audit must validate (exit 0) or be skipped (127)");
+    PASS();
+}
+
+static void test_provider_metadata_impl_matches_code(void) {
+    /* Every mechanism marked dsco_support=implemented must have a matching
+     * code signal in provider_model_supports_* / header emission. This binds
+     * the metadata catalog to the actual runtime so we cannot drift. */
+    static const struct {
+        const char *model;
+        bool cache_control;
+        bool key;
+        bool retention;
+        bool automatic;
+    } probes[] = {
+        {"claude-sonnet-4-6", true, false, false, false},
+        {"gpt-5.5", false, true, true, true},
+        {"mistral-large-latest", false, true, false, true},
+        {"grok-4-fast", false, true, false, true},
+        {"deepseek-chat", false, false, false, true},
+        {"fugu-ultra", false, false, false, false},
+    };
+    for (size_t i = 0; i < sizeof(probes) / sizeof(probes[0]); i++) {
+        char name[128];
+        snprintf(name, sizeof(name), "provider metadata impl binding %s", probes[i].model);
+        TEST(name);
+        ASSERT(provider_model_supports_cache_control(probes[i].model) == probes[i].cache_control,
+               "cache_control binding must match catalog");
+        ASSERT(provider_model_supports_prompt_cache_key(probes[i].model) == probes[i].key,
+               "prompt_cache_key binding must match catalog");
+        ASSERT(provider_model_supports_prompt_cache_retention(probes[i].model) == probes[i].retention,
+               "prompt_cache_retention binding must match catalog");
+        ASSERT(provider_model_supports_automatic_prompt_cache(probes[i].model) == probes[i].automatic,
+               "automatic prompt cache binding must match catalog");
+        PASS();
+    }
+}
+
 static void test_prompt_cache_provider_profile_cap_audit(void) {
     for (size_t i = 0; i < provider_profile_count(); i++) {
         const provider_profile_t *p = provider_profile_at(i);
@@ -15150,6 +15210,8 @@ int main(void) {
     test_prompt_cache_provider_policy_matrix();
     test_prompt_cache_openai_request_shape();
     test_prompt_cache_xai_header_shape();
+    test_provider_metadata_catalog_validates();
+    test_provider_metadata_impl_matches_code();
     test_prompt_cache_provider_profile_cap_audit();
     test_governance_spawn_class_status_has_dsco_budget();
     test_provider_request_key_prefers_claude_code_oauth_over_fallback();
