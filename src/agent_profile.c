@@ -1,4 +1,5 @@
 #include "agent_profile.h"
+#include "tools.h"
 #include "json_util.h"
 
 #include <stdio.h>
@@ -132,7 +133,7 @@ const agent_profile_t *agent_profile_active(void) {
     return agent_profile_find(g_active_name);
 }
 
-bool agent_profile_tool_allowed(const char *tool_name, const char *group_hint) {
+bool agent_profile_tool_allowed_strict(const char *tool_name, const char *group_hint) {
     const agent_profile_t *p = agent_profile_active();
     if (!p)
         return true; /* no active profile = allow all */
@@ -166,6 +167,16 @@ bool agent_profile_tool_allowed(const char *tool_name, const char *group_hint) {
         return false;
 
     return false;
+}
+
+bool agent_profile_tool_allowed(const char *tool_name, const char *group_hint) {
+    /* Swarm children inherit parent capability but must never lose the core
+     * workbench. A restrictive parent profile can hide non-core tools, but
+     * worker agents always retain bash/read/write/grep/swarm and the other
+     * DSCO core tools needed to actually execute delegated work. */
+    if (tools_is_parent_specified_core_tool(tool_name))
+        return true;
+    return agent_profile_tool_allowed_strict(tool_name, group_hint);
 }
 
 /* ── JSON serialization ──────────────────────────────────────────────── */

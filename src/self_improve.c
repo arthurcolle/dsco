@@ -248,6 +248,14 @@ void self_improve_record_redundant(self_improve_t *si, const char *tool_name) {
 void self_improve_record_turn(self_improve_t *si, int turn_number, double turn_cost,
                               int input_tokens, int output_tokens, int context_usage_pct,
                               double budget_used_pct) {
+    self_improve_record_turn_usage(si, turn_number, turn_cost, input_tokens, output_tokens, 0, 0,
+                                   context_usage_pct, budget_used_pct);
+}
+
+void self_improve_record_turn_usage(self_improve_t *si, int turn_number, double turn_cost,
+                                    int input_tokens, int output_tokens,
+                                    int cache_read_tokens, int cache_write_tokens,
+                                    int context_usage_pct, double budget_used_pct) {
     if (!si->initialized)
         return;
 
@@ -256,6 +264,10 @@ void self_improve_record_turn(self_improve_t *si, int turn_number, double turn_c
     si->total_cost += turn_cost;
     si->total_turns++;
     si->turns_since_consolidation++;
+    si->total_input_tokens += input_tokens;
+    si->total_output_tokens += output_tokens;
+    si->total_cache_read_tokens += cache_read_tokens;
+    si->total_cache_write_tokens += cache_write_tokens;
 
     /* Detect high-cost turn */
     if (turn_cost > 0.50) {
@@ -327,16 +339,75 @@ void self_improve_record_turn(self_improve_t *si, int turn_number, double turn_c
         }
     }
 
+    /* Detect cache leverage. ccusage-style broad runs are often viable because
+     * the expensive static prefix is being read from cache across turns. */
+    long long fresh_input = input_tokens > 0 ? (long long)input_tokens : 0;
+    long long cache_read = cache_read_tokens > 0 ? (long long)cache_read_tokens : 0;
+    long long output = output_tokens > 0 ? (long long)output_tokens : 0;
+
+    if (cache_read >= 100000 &&
+        cache_read >= (fresh_input > 0 ? fresh_input * 3 : 100000)) {
+        bool found = false;
+        for (int i = 0; i < si->pattern_count; i++) {
+            if (si->patterns[i].type == SI_PATTERN_CACHE_LEVERAGED) {
+                si->patterns[i].occurrences++;
+                si->patterns[i].last_seen = si_now();
+                si->patterns[i].severity =
+                    clampd((double)cache_read_tokens / 1000000.0, 0.2, 1.0);
+                found = true;
+                break;
+            }
+        }
+        if (!found && si->pattern_count < SI_MAX_PATTERNS) {
+            si_pattern_t *p = &si->patterns[si->pattern_count++];
+            p->type = SI_PATTERN_CACHE_LEVERAGED;
+            snprintf(p->description, sizeof(p->description),
+                     "Turn %d reused %d cached tokens vs %d fresh input — preserve stable prefix",
+                     turn_number, cache_read_tokens, input_tokens);
+            p->severity = clampd((double)cache_read_tokens / 1000000.0, 0.2, 1.0);
+            p->occurrences = 1;
+            p->first_seen = p->last_seen = si_now();
+        }
+    }
+
+    /* Detect output-heavy synthesis. Large-scale exploration should fan out
+     * cheaply, then spend premium output on a bounded reducer. */
+    if (output >= 12000 &&
+        output >= (fresh_input > 0 ? fresh_input * 2 : 12000)) {
+        bool found = false;
+        for (int i = 0; i < si->pattern_count; i++) {
+            if (si->patterns[i].type == SI_PATTERN_OUTPUT_HEAVY_TURN) {
+                si->patterns[i].occurrences++;
+                si->patterns[i].last_seen = si_now();
+                si->patterns[i].severity = clampd((double)output_tokens / 50000.0, 0.2, 1.0);
+                found = true;
+                break;
+            }
+        }
+        if (!found && si->pattern_count < SI_MAX_PATTERNS) {
+            si_pattern_t *p = &si->patterns[si->pattern_count++];
+            p->type = SI_PATTERN_OUTPUT_HEAVY_TURN;
+            snprintf(p->description, sizeof(p->description),
+                     "Turn %d produced %d output tokens — cap exploratory output or use reducers",
+                     turn_number, output_tokens);
+            p->severity = clampd((double)output_tokens / 50000.0, 0.2, 1.0);
+            p->occurrences = 1;
+            p->first_seen = p->last_seen = si_now();
+        }
+    }
+
     /* Auto-run meso-loop at interval */
     if (si->turns_since_consolidation >= SI_CONSOLIDATION_INTERVAL) {
         self_improve_consolidate(si);
     }
 
-    baseline_log_usage("self_improve", "turn_record", "", NULL, input_tokens, output_tokens, 0, 0);
+    baseline_log_usage("self_improve", "turn_record", "", NULL, input_tokens, output_tokens,
+                       cache_read_tokens, cache_write_tokens);
 
     char turn_info[128];
-    snprintf(turn_info, sizeof(turn_info), "turn=%d cost=%.4f tools=%d failures=%d", turn_number,
-             turn_cost, si->turn_tool_calls, si->turn_failures);
+    snprintf(turn_info, sizeof(turn_info),
+             "turn=%d cost=%.4f tools=%d failures=%d cache_read=%d output=%d", turn_number,
+             turn_cost, si->turn_tool_calls, si->turn_failures, cache_read_tokens, output_tokens);
     baseline_log("self_improve", "turn_record", turn_info, NULL);
 }
 
@@ -347,7 +418,8 @@ void self_improve_record_turn(self_improve_t *si, int turn_number, double turn_c
 static void update_strategy_weights(self_improve_t *si) {
     /* Adapt strategy weights based on observed patterns */
 
-    int fail_count = 0, slow_count = 0, spam_count = 0;
+    int fail_count = 0, slow_count = 0, spam_count = 0, cache_leverage_count = 0;
+    int output_heavy_count = 0;
     for (int i = 0; i < si->pattern_count; i++) {
         switch (si->patterns[i].type) {
             case SI_PATTERN_FAILING_TOOL:
@@ -361,6 +433,12 @@ static void update_strategy_weights(self_improve_t *si) {
                 break;
             case SI_PATTERN_REDUNDANT_CALLS:
                 spam_count++;
+                break;
+            case SI_PATTERN_CACHE_LEVERAGED:
+                cache_leverage_count++;
+                break;
+            case SI_PATTERN_OUTPUT_HEAVY_TURN:
+                output_heavy_count++;
                 break;
             default:
                 break;
@@ -385,6 +463,24 @@ static void update_strategy_weights(self_improve_t *si) {
             clampd(si->weights.batch_willingness + 0.05 * spam_count, 0.0, 1.0);
         si->weights.cache_aggressiveness =
             clampd(si->weights.cache_aggressiveness + 0.03 * spam_count, 0.0, 1.0);
+    }
+
+    /* If cache reads dominate, preserve stable prompt/tool prefixes and batch
+     * more work per cached prefix. */
+    if (cache_leverage_count > 0) {
+        si->weights.cache_aggressiveness =
+            clampd(si->weights.cache_aggressiveness + 0.08 * cache_leverage_count, 0.0, 1.0);
+        si->weights.batch_willingness =
+            clampd(si->weights.batch_willingness + 0.04 * cache_leverage_count, 0.0, 1.0);
+    }
+
+    /* Output-heavy turns are where premium models become expensive. Bias future
+     * broad runs toward cheaper scouts and bounded reducers. */
+    if (output_heavy_count > 0) {
+        si->weights.model_cost_sensitivity =
+            clampd(si->weights.model_cost_sensitivity + 0.08 * output_heavy_count, 0.0, 1.0);
+        si->weights.parallel_preference =
+            clampd(si->weights.parallel_preference + 0.03 * output_heavy_count, 0.0, 1.0);
     }
 
     /* If session is expensive, increase cost sensitivity */
@@ -550,6 +646,30 @@ int self_improve_consolidate(self_improve_t *si) {
         }
     }
 
+    if (si->total_cache_read_tokens >= 1000000 &&
+        si->total_cache_read_tokens >= si->total_input_tokens * 5) {
+        char desc[SI_MAX_SUGGESTION_LEN];
+        snprintf(desc, sizeof(desc),
+                 "Cache reads dominate this session (%lld cached vs %lld fresh input tokens). "
+                 "Keep system prompts, tool schemas, and pinned context stable across broad runs.",
+                 si->total_cache_read_tokens, si->total_input_tokens);
+        if (add_suggestion(si, SI_SUGGEST_CACHE_RESULTS, desc, NULL, NULL, 0.85,
+                           si->total_cost * 0.20) >= 0)
+            new_count++;
+    }
+
+    if (si->total_output_tokens >= 50000 &&
+        si->total_output_tokens >= si->total_input_tokens) {
+        char desc[SI_MAX_SUGGESTION_LEN];
+        snprintf(desc, sizeof(desc),
+                 "Output tokens dominate this session (%lld out vs %lld fresh input). "
+                 "Use cheap parallel scouts, then a single bounded synthesis reducer.",
+                 si->total_output_tokens, si->total_input_tokens);
+        if (add_suggestion(si, SI_SUGGEST_ADJUST_MODEL, desc, NULL, NULL, 0.80,
+                           si->total_cost * 0.25) >= 0)
+            new_count++;
+    }
+
     /* Update strategy weights based on all detected patterns */
     update_strategy_weights(si);
 
@@ -703,6 +823,10 @@ bool self_improve_save_history(const self_improve_t *si) {
     fprintf(f, "  \"total_tool_calls\": %d,\n", si->total_tool_calls);
     fprintf(f, "  \"total_failures\": %d,\n", si->total_failures);
     fprintf(f, "  \"total_redundant_calls\": %d,\n", si->total_redundant_calls);
+    fprintf(f, "  \"total_input_tokens\": %lld,\n", si->total_input_tokens);
+    fprintf(f, "  \"total_output_tokens\": %lld,\n", si->total_output_tokens);
+    fprintf(f, "  \"total_cache_read_tokens\": %lld,\n", si->total_cache_read_tokens);
+    fprintf(f, "  \"total_cache_write_tokens\": %lld,\n", si->total_cache_write_tokens);
     fprintf(f, "  \"total_cost\": %.4f,\n", si->total_cost);
     fprintf(f, "  \"pattern_count\": %d,\n", si->pattern_count);
     fprintf(f, "  \"suggestion_count\": %d,\n", si->suggestion_count);
@@ -736,11 +860,14 @@ const char *self_improve_summary(const self_improve_t *si, char *buf, size_t buf
                     "════════════════════════\n"
                     "Session: %d turns, %d tool calls, %d failures\n"
                     "Cost: $%.4f total ($%.4f/turn avg)\n"
+                    "Tokens: in %lld | out %lld | cache-read %lld | cache-write %lld\n"
                     "Redundant calls: %d | Retries: %d\n"
                     "Patterns detected: %d\n"
                     "Suggestions: %d (new)\n\n",
                     si->total_turns, si->total_tool_calls, si->total_failures, si->total_cost,
                     si->total_turns > 0 ? si->total_cost / si->total_turns : 0,
+                    si->total_input_tokens, si->total_output_tokens,
+                    si->total_cache_read_tokens, si->total_cache_write_tokens,
                     si->total_redundant_calls, si->total_retries, si->pattern_count,
                     si->suggestion_count);
 

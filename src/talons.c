@@ -1,4 +1,5 @@
 #include "talons.h"
+#include "error.h"
 #include "vfs.h"
 #include "audit_log.h" /* Cross-pollination: strategy outcomes → audit chain */
 #include <math.h>
@@ -197,6 +198,12 @@ int talons_goal_create(talons_engine_t *t, const char *description, double prior
                        grip_strength_t grip, strategy_type_t strategy, double deadline) {
     if (!t || !t->initialized || t->goal_count >= TALONS_MAX_GOALS)
         return -1;
+    /* NERVOUS/MIDBRAIN CONTRACT: a hunt cannot begin with an invalid grip or an
+     * out-of-range strategy — both index fixed tables (grip_max_retries,
+     * STRATEGY_NAMES). priority must be finite. Fail closed. */
+    DSCO_REQUIRE_RET(grip >= GRIP_TENTATIVE && grip <= GRIP_DEATH_GRIP, -1);
+    DSCO_REQUIRE_RET(strategy >= 0 && strategy < STRATEGY_COUNT, -1);
+    DSCO_REQUIRE_RET(priority == priority, -1); /* reject NaN */
 
     goal_t *g = &t->goals[t->goal_count++];
     memset(g, 0, sizeof(*g));
