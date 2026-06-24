@@ -277,6 +277,9 @@ int pheromone_tick(pheromone_field_t *f) {
 bool pheromone_reinforce(pheromone_field_t *f, int signal_id, double amount) {
     if (!f || !f->initialized)
         return false;
+    /* ENDOCRINE CONTRACT: reinforcement must be finite and non-negative — a NaN
+     * would poison the signal's concentration permanently. */
+    DSCO_REQUIRE(amount == amount && amount >= 0.0);
     for (int i = 0; i < PHEROMONE_MAX_SIGNALS; i++) {
         if (f->signals[i].active && f->signals[i].id == signal_id) {
             f->signals[i].initial += amount;

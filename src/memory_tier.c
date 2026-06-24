@@ -217,6 +217,10 @@ int memory_recall_by_tag(memory_store_t *m, const char *tag, const memory_entry_
 int memory_recall_tier(memory_store_t *m, memory_tier_t tier, const memory_entry_t **out, int max) {
     if (!m || !m->initialized || !out)
         return 0;
+    /* DIGESTIVE CONTRACT: tier must be a real tier; max must be non-negative or
+     * the bounded copy loop below would underflow. */
+    DSCO_REQUIRE_RET(tier >= 0 && tier < MEM_TIER_COUNT, 0);
+    DSCO_REQUIRE_RET(max >= 0, 0);
     int count = 0;
     for (int i = 0; i < MEMTIER_MAX_ENTRIES && count < max; i++) {
         if (m->entries[i].active && m->entries[i].tier == tier)
