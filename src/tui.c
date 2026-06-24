@@ -560,7 +560,7 @@ void tui_stream_tool_result(const char *name, bool ok, const char *preview) {
     (void)name;
     const tui_glyphs_t *gl = tui_glyph();
     const char *icon = ok ? gl->ok : gl->fail;
-    const char *color = ok ? TUI_GREEN : TUI_RED;
+    const char *color = ok ? TUI_ROLE_OK : TUI_ROLE_FAIL;
 
     char trunc[128];
     if (preview) {
@@ -604,10 +604,10 @@ void tui_swarm_panel(tui_swarm_entry_t *entries, int count, int width) {
             status_color = TUI_BCYAN;
             status_icon = gl->circle_dot;
         } else if (strcmp(e->status, "done") == 0) {
-            status_color = TUI_GREEN;
+            status_color = TUI_ROLE_OK;
             status_icon = gl->ok;
         } else if (strcmp(e->status, "error") == 0) {
-            status_color = TUI_RED;
+            status_color = TUI_ROLE_FAIL;
             status_icon = gl->fail;
         }
 
@@ -1771,7 +1771,7 @@ void tui_async_spinner_stop(tui_async_spinner_t *s, bool ok, const char *result_
         if (suffix && suffix[0])
             fprintf(stderr, "  \033[2m%s\033[0m", suffix);
     } else {
-        const char *bar_color = ok ? TUI_GREEN : TUI_RED;
+        const char *bar_color = ok ? TUI_ROLE_OK : TUI_ROLE_FAIL;
         fprintf(stderr, "\n  %s▌%s %stool_response%s", bar_color, TUI_RESET, TUI_BOLD, TUI_RESET);
         fprintf(stderr, " %s%s%s", TUI_DIM, s->label ? s->label : "", TUI_RESET);
         fprintf(stderr, " %s" TUI_SEP " %s%s%s", TUI_DIM, elapsed_str, size_str[0] ? " " : "",
@@ -1994,7 +1994,7 @@ void tui_batch_summary(const tui_batch_spinner_t *bs, const char *cost_suffix) {
     const tui_glyphs_t *gl = tui_glyph();
 
     /* Summary: ✓ 5 tools (42ms avg, 120ms max) [2 cached]  [in:N out:N $cost] */
-    fprintf(stderr, "  %s%s%s %s%d tool%s%s", fail_count == 0 ? TUI_GREEN : TUI_YELLOW,
+    fprintf(stderr, "  %s%s%s %s%d tool%s%s", fail_count == 0 ? TUI_ROLE_OK : TUI_ROLE_WARN,
             fail_count == 0 ? gl->ok : gl->warn, TUI_RESET, TUI_BOLD, bs->count,
             bs->count == 1 ? "" : "s", TUI_RESET);
 
@@ -2014,7 +2014,7 @@ void tui_batch_summary(const tui_batch_spinner_t *bs, const char *cost_suffix) {
         fprintf(stderr, " %s[%d cached]%s", TUI_DIM, cached, TUI_RESET);
     }
     if (fail_count > 0) {
-        fprintf(stderr, " %s[%d failed]%s", TUI_RED, fail_count, TUI_RESET);
+        fprintf(stderr, " %s[%d failed]%s", TUI_ROLE_FAIL, fail_count, TUI_RESET);
     }
     if (cost_suffix && cost_suffix[0]) {
         fprintf(stderr, "  %s%s%s", TUI_DIM, cost_suffix, TUI_RESET);
@@ -4767,13 +4767,13 @@ void tui_context_gauge(int used, int max_tok, int width) {
 
     const char *color;
     if (pct < 0.5)
-        color = TUI_GREEN;
+        color = TUI_ROLE_OK;
     else if (pct < 0.75)
-        color = TUI_YELLOW;
+        color = TUI_ROLE_WARN;
     else if (pct < 0.90)
         color = TUI_BYELLOW;
     else
-        color = TUI_RED;
+        color = TUI_ROLE_FAIL;
 
     fprintf(stderr, "  [");
     /* Subpixel edge: 1/8-cell precision so small context deltas are visible. */
@@ -4833,7 +4833,7 @@ void tui_ipc_message_line(const char *from, const char *to, const char *topic,
 void tui_agent_rollup(int total, int done, int running, int errored) {
     if (g_tui_features && !g_tui_features->agent_rollup)
         return;
-    fprintf(stderr, "  %sagents: %s%d done%s", TUI_DIM, TUI_GREEN, done, TUI_RESET);
+    fprintf(stderr, "  %sagents: %s%d done%s", TUI_DIM, TUI_ROLE_OK, done, TUI_RESET);
     if (running > 0)
         fprintf(stderr, " %s%d running%s", TUI_CYAN, running, TUI_RESET);
     if (errored > 0)
@@ -6359,9 +6359,9 @@ static void topo_print_children(const tui_agent_node_t *agents, int count, int p
                 if (strcmp(agents[i].status, "running") == 0)
                     status_color = TUI_BCYAN;
                 else if (strcmp(agents[i].status, "done") == 0)
-                    status_color = TUI_GREEN;
+                    status_color = TUI_ROLE_OK;
                 else if (strcmp(agents[i].status, "error") == 0)
-                    status_color = TUI_RED;
+                    status_color = TUI_ROLE_FAIL;
             }
 
             fprintf(stderr, "%s%s %s[%d]%s %s%s%s", prefix, connector, status_color, agents[i].id,
@@ -7411,16 +7411,16 @@ void tui_stream_state_render_badge(const tui_stream_state_t *ss) {
             color = TUI_MAGENTA;
             break;
         case TUI_STREAM_TEXT:
-            color = TUI_GREEN;
+            color = TUI_ROLE_OK;
             break;
         case TUI_STREAM_TOOL_PENDING:
-            color = TUI_YELLOW;
+            color = TUI_ROLE_WARN;
             break;
         case TUI_STREAM_TOOL_RUNNING:
             color = TUI_CYAN;
             break;
         case TUI_STREAM_ERROR:
-            color = TUI_RED;
+            color = TUI_ROLE_FAIL;
             break;
         default:
             break;
