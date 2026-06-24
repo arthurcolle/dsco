@@ -707,6 +707,66 @@ int dcr_cli(int argc, char **argv) {
         fprintf(stderr, "dcr: unknown ingest source '%s'\n", source);
         return 2;
     }
+    if (strcmp(cmd, "metadata") == 0 || strcmp(cmd, "machinery") == 0) {
+        const char *home = getenv("DSCO_REPO_ROOT");
+        char base[PATH_MAX];
+        if (home && home[0])
+            snprintf(base, sizeof(base), "%s", home);
+        else
+            snprintf(base, sizeof(base), ".");
+        char dir[PATH_MAX];
+        snprintf(dir, sizeof(dir), "%s/provider_metadata/providers", base);
+        DIR *d = opendir(dir);
+        if (!d) {
+            printf("{\"ok\":false,\"error\":\"no provider_metadata/providers dir\",\"hint\":\"run from repo root or set DSCO_REPO_ROOT\"}\n");
+            return 1;
+        }
+        printf("{\"ok\":true,\"providers\":[");
+        struct dirent *de;
+        int first = 1;
+        while ((de = readdir(d))) {
+            const char *ext = strrchr(de->d_name, '.');
+            if (!ext || strcmp(ext, ".json") != 0)
+                continue;
+            char path[PATH_MAX];
+            snprintf(path, sizeof(path), "%s/%s", dir, de->d_name);
+            FILE *f = fopen(path, "rb");
+            if (!f)
+                continue;
+            fseek(f, 0, SEEK_END);
+            long n = ftell(f);
+            fseek(f, 0, SEEK_SET);
+            if (n <= 0 || n > 256 * 1024) { fclose(f); continue; }
+            char *buf = malloc((size_t)n + 1);
+            if (!buf) { fclose(f); continue; }
+            if (fread(buf, 1, (size_t)n, f) != (size_t)n) { free(buf); fclose(f); continue; }
+            fclose(f);
+            buf[n] = '\0';
+            char *prov = json_get_str(buf, "provider");
+            /* status is nested under prompt_caching; cheap surface extraction */
+            char *status = strstr(buf, "\"status\"");
+            char status_val[32] = "unknown";
+            if (status) {
+                char *q = strchr(status + 8, '"');
+                if (q) {
+                    char *q2 = strchr(q + 1, '"');
+                    if (q2 && (size_t)(q2 - q - 1) < sizeof(status_val)) {
+                        size_t len = (size_t)(q2 - q - 1);
+                        memcpy(status_val, q + 1, len);
+                        status_val[len] = '\0';
+                    }
+                }
+            }
+            printf("%s{\"provider\":\"%s\",\"prompt_cache_status\":\"%s\"}",
+                   first ? "" : ",", prov ? prov : de->d_name, status_val);
+            first = 0;
+            free(prov);
+            free(buf);
+        }
+        closedir(d);
+        printf("]}\n");
+        return 0;
+    }
     if (strcmp(cmd, "explain") == 0) {
         const char *key = argc >= 4 ? argv[3] : "";
         dcr_reload();
