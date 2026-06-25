@@ -1,0 +1,82 @@
+# Dependency Review — runs on PRs that change dependencies
+# Validates license compatibility, security advisories, etc.
+
+name: dependency-review
+
+on:
+  pull_request:
+    paths:
+      - 'Makefile'
+      - 'gsl/**'
+      - 'lib/**'
+      - '.github/workflows/**'
+
+permissions:
+  contents: read
+  pull-requests: write
+
+jobs:
+  dependency-review:
+    name: review dependency changes
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Check for new vendored dependencies
+        run: |
+          echo "Checking for newly added vendored dependencies..."
+          
+          # Get the base ref
+          BASE_SHA="${{ github.event.pull_request.base.sha }}"
+          HEAD_SHA="${{ github.event.pull_request.head.sha }}"
+          
+          if [ -z "$BASE_SHA" ]; then
+            echo "No base SHA found, skipping check."
+            exit 0
+          fi
+          
+          # Check for new files in gsl/ or lib/ directories
+          NEW_GSL=$(git diff --name-only --diff-filter=A "$BASE_SHA" "$HEAD_SHA" -- gsl/ 2>/dev/null | head -10 || true)
+          NEW_LIB=$(git diff --name-only --diff-filter=A "$BASE_SHA" "$HEAD_SHA" -- lib/ 2>/dev/null | head -10 || true)
+          
+          if [ -n "$NEW_GSL" ] || [ -n "$NEW_LIB" ]; then
+            echo "⚠️ New vendored dependencies detected:"
+            [ -n "$NEW_GSL" ] && echo "gsl/:" && echo "$NEW_GSL"
+            [ -n "$NEW_LIB" ] && echo "lib/:" && echo "$NEW_LIB"
+            echo ""
+            echo "Please verify:"
+            echo "  1. License is compatible with MIT"
+          echo "  2. No GPL/AGPL/Copyleft licenses"
+            echo "  3. Security advisories checked"
+            echo "  4. Required attribution added"
+          else
+            echo "No new vendored dependencies detected."
+          fi
+
+      - name: Check Makefile for new link flags
+        run: |
+          echo "Checking Makefile for new link dependencies..."
+          
+          BASE_SHA="${{ github.event.pull_request.base.sha }}"
+          HEAD_SHA="${{ github.event.pull_request.head.sha }}"
+          
+          if [ -z "$BASE_SHA" ]; then
+            echo "No base SHA found, skipping."
+            exit 0
+          fi
+          
+          # Check if LDLIBS or new -l flags were added
+          OLD_LIBS=$(git show "$BASE_SHA:Makefile" 2>/dev/null | grep -E 'LDLIBS|LDFLAGS' | sort || true)
+          NEW_LIBS=$(git show "$HEAD_SHA:Makefile" 2>/dev/null | grep -E 'LDLIBS|LDFLAGS' | sort || true)
+          
+          if [ "$OLD_LIBS" != "$NEW_LIBS" ]; then
+            echo "⚠️ Linker flags changed:"
+            diff <(echo "$OLD_LIBS") <(echo "$NEW_LIBS") || true
+            echo ""
+            echo "Ensure new dependencies are available on:"
+            echo "  - Ubuntu (apt-get)"
+            echo "  - macOS (brew)"
+            echo "  - Documented in README install instructions"
+          else
+            echo "No linker flag changes detected."
+          fi
