@@ -1,0 +1,246 @@
+name: release
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Tag to release (e.g. v1.0.3)'
+        required: true
+        type: string
+
+permissions:
+  contents: write
+
+jobs:
+  # ─────────────────────────────────────────────────────────────────────
+  # BUILD BINARIES FOR macOS (Intel + ARM)
+  # Produces universal static binaries for Homebrew distribution
+  # ─────────────────────────────────────────────────────────────────────
+  build-macos:
+    name: build macOS (${{ matrix.runner }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: macos-13
+            arch: x86-64
+            suffix: intel
+          - runner: macos-latest
+            arch: arm64
+            suffix: arm
+    runs-on: ${{ matrix.runner }}
+    env:
+      CC: clang
+      DSCO_ARCH: ${{ matrix.arch }}
+      DSCO_STD: c2y
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install dependencies
+        run: |
+          brew update
+          brew install hiredis libsodium libuv mbedtls@3 readline pkg-config
+
+      - name: Build
+        run: make -j$(sysctl -n hw.ncpu) dsco dsco-lite dsc
+
+      - name: Smoke test
+        run: |
+          ./dsco --version
+          ./dsco --tool-exec cwd '{}'
+
+      - name: Package binaries
+        run: |
+          mkdir -p dist
+          tar czf dist/dsco-${{ matrix.suffix }}.tar.gz \
+            dsco dsco-lite dsc
+          shasum -a 256 dist/dsco-${{ matrix.suffix }}.tar.gz > dist/dsco-${{ matrix.suffix }}.tar.gz.sha256
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: dsco-macos-${{ matrix.suffix }}
+          path: dist/
+
+  # ─────────────────────────────────────────────────────────────────────
+  # BUILD SOURCE TARBALL
+  # This is what the Homebrew formula downloads
+  # ─────────────────────────────────────────────────────────────────────
+  build-source:
+    name: build source tarball
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Create source tarball
+        run: |
+          VERSION="${GITHUB_REF_NAME#v}"
+          if [ -z "$VERSION" ] || [ "$VERSION" = "$GITHUB_REF_NAME" ]; then
+            VERSION="${{ github.event.inputs.tag }}"
+            VERSION="${VERSION#v}"
+          fi
+          echo "Version: $VERSION"
+
+          # Create clean source archive (exclude dev-only files)
+          mkdir -p dist
+          git archive --format=tar.gz --prefix="dsco-${VERSION}/" \
+            -o dist/dsco-${VERSION}.tar.gz HEAD
+
+          # Generate SHA256
+          sha256sum dist/dsco-${VERSION}.tar.gz > dist/dsco-${VERSION}.tar.gz.sha256
+
+          echo "## Source Tarball" >> $GITHUB_STEP_SUMMARY
+          echo "\`\`\`" >> $GITHUB_STEP_SUMMARY
+          cat dist/dsco-${VERSION}.tar.gz.sha256 >> $GITHUB_STEP_SUMMARY
+          echo "\`\`\`" >> $GITHUB_STEP_SUMMARY
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: dsco-source
+          path: dist/
+
+  # ─────────────────────────────────────────────────────────────────────
+  # CREATE GITHUB RELEASE
+  # Combines all artifacts into a single GitHub Release
+  # ─────────────────────────────────────────────────────────────────────
+  create-release:
+    name: create GitHub release
+    needs: [build-macos, build-source]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: dist/
+          merge-multiple: true
+
+      - name: Determine version
+        id: version
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            TAG="${{ github.event.inputs.tag }}"
+          else
+            TAG="${GITHUB_REF_NAME}"
+          fi
+          VERSION="${TAG#v}"
+          echo "tag=$TAG" >> $GITHUB_OUTPUT
+          echo "version=$VERSION" >> $GITHUB_OUTPUT
+          echo "Releasing $TAG (version $VERSION)"
+
+      - name: Extract changelog for this version
+        id: changelog
+        run: |
+          # Extract the section for this version from CHANGELOG.md
+          VERSION="${{ steps.version.outputs.version }}"
+          CHANGELOG_BODY=$(awk '/^## \['"${VERSION}"'\]/{found=1} found{print} /^## \[/ && !/^## \['"${VERSION}"'\]/{if(found)exit}' CHANGELOG.md | head -100)
+          if [ -z "$CHANGELOG_BODY" ]; then
+            CHANGELOG_BODY="Release ${VERSION}"
+          fi
+
+          # Write to file for multi-line output
+          echo "$CHANGELOG_BODY" > /tmp/release_notes.md
+
+      - name: List artifacts
+        run: |
+          echo "Artifacts to upload:"
+          find dist/ -type f | sort
+          echo "---"
+          echo "SHA256 checksums:"
+          cat dist/*.sha256 2>/dev/null || echo "No checksums found"
+
+      - name: Create release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.version.outputs.tag }}
+          name: DSCO ${{ steps.version.outputs.tag }}
+          body_path: /tmp/release_notes.md
+          files: |
+            dist/*.tar.gz
+            dist/*.sha256
+          draft: false
+          prerelease: false
+          generate_release_notes: false
+
+  # ─────────────────────────────────────────────────────────────────────
+  # UPDATE HOMEBREW TAP
+  # Auto-updates the formula in arthurcolle/homebrew-dsco with new SHA256
+  # ─────────────────────────────────────────────────────────────────────
+  update-homebrew:
+    name: update Homebrew tap
+    needs: [create-release]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Determine version
+        id: version
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            TAG="${{ github.event.inputs.tag }}"
+          else
+            TAG="${GITHUB_REF_NAME}"
+          fi
+          VERSION="${TAG#v}"
+          echo "tag=$TAG" >> $GITHUB_OUTPUT
+          echo "version=$VERSION" >> $GITHUB_OUTPUT
+
+      - name: Checkout homebrew-dsco tap
+        uses: actions/checkout@v4
+        with:
+          repository: arthurcolle/homebrew-dsco
+          token: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+          path: homebrew-tap
+
+      - name: Download source tarball SHA256
+        uses: actions/download-artifact@v4
+        with:
+          name: dsco-source
+          path: dist/
+
+      - name: Update formula
+        run: |
+          VERSION="${{ steps.version.outputs.version }}"
+          TAG="${{ steps.version.outputs.tag }}"
+          SHA256=$(cut -d' ' -f1 dist/dsco-${VERSION}.tar.gz.sha256)
+          URL="https://github.com/arthurcolle/dsco/archive/refs/tags/${TAG}.tar.gz"
+
+          echo "Updating formula:"
+          echo "  Version: $VERSION"
+          echo "  URL: $URL"
+          echo "  SHA256: $SHA256"
+
+          FORMULA_FILE="homebrew-tap/Formula/dsco.rb"
+
+          # Update URL
+          sed -i "s|url .*|url \"${URL}\"|" "$FORMULA_FILE"
+
+          # Update SHA256
+          sed -i "s|sha256 .*|sha256 \"${SHA256}\"|" "$FORMULA_FILE"
+
+          # Update version in Cask if it exists
+          if [ -f "homebrew-tap/Casks/dsco.rb" ]; then
+            sed -i "s|version .*|version \"${VERSION}\"|" "homebrew-tap/Casks/dsco.rb"
+            sed -i "s|sha256 .*|sha256 \"${SHA256}\"|" "homebrew-tap/Casks/dsco.rb"
+          fi
+
+          echo "Updated formula:"
+          cat "$FORMULA_FILE"
+
+      - name: Commit and push
+        working-directory: homebrew-tap
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add -A
+          git commit -m "dsco ${{ steps.version.outputs.tag }} — auto-update formula" || exit 0
+          git push

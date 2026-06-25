@@ -42,11 +42,22 @@ venv/
 .vscode/
 .idea/
 
-# Private notes / scratch
+# Private notes / scratch / personal files
 research_notes/
 notes/
+memory/
 prompt*.txt
 trading_mind.txt
+*.personal.md
+*.scratch.md
+bufkit.py
+kukulkan.py
+calibration.py
+kalman_bias.py
+nwp_pipeline.py
+realtime.py
+msty_explainer.html
+weather_api_schemas.json
 
 # Secrets / credentials
 .env

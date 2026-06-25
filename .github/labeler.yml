@@ -1,0 +1,91 @@
+# Pull request labeler — auto-labels PRs based on changed file paths
+# Used by actions/labeler@v5 in .github/workflows/pr.yml
+
+# Source code changes
+"area:core":
+  - changed-files:
+    - any-glob-to-any-file:
+      - 'src/main.c'
+      - 'src/agent.c'
+      - 'src/llm.c'
+      - 'src/tools.c'
+      - 'src/execution_layer.c'
+
+"area:swarm":
+  - changed-files:
+    - any-glob-to-any-file:
+      - 'src/swarm.c'
+      - 'src/topology.c'
+      - 'src/avian.c'
+      - 'src/pheromone.c'
+
+"area:governance":
+  - changed-files:
+    - any-glob-to-any-file:
+      - 'src/governance.c'
+      - 'src/killswitch.c'
+      - 'src/ooda.c'
+      - 'src/audit_log.c'
+
+"area:memory":
+  - changed-files:
+    - any-glob-to-any-file:
+      - 'src/memory_tier.c'
+      - 'src/vfs.c'
+      - 'src/session_memory.c'
+
+"area:market":
+  - changed-files:
+    - any-glob-to-any-file:
+      - 'src/trading.c'
+      - 'src/market.c'
+
+"area:crypto":
+  - changed-files:
+    - any-glob-to-any-file:
+      - 'src/crypto.c'
+      - 'src/sealed_store.c'
+      - 'src/se_store.c'
+
+"area:tui":
+  - changed-files:
+    - any-glob-to-any-file:
+      - 'src/tui.c'
+      - 'src/plot.c'
+      - 'src/anim.c'
+      - 'src/pets.c'
+
+"area:build":
+  - changed-files:
+    - any-glob-to-any-file:
+      - 'Makefile'
+      - 'CMakeLists.txt'
+      - '.github/**'
+
+"area:docs":
+  - changed-files:
+    - any-glob-to-any-file:
+      - 'README.md'
+      - 'CHANGELOG.md'
+      - 'docs/**'
+
+"area:ci":
+  - changed-files:
+    - any-glob-to-any-file:
+      - '.github/workflows/**'
+
+"area:deps":
+  - changed-files:
+    - any-glob-to-any-file:
+      - 'gsl/**'
+      - 'lib/**'
+
+"area:tests":
+  - changed-files:
+    - any-glob-to-any-file:
+      - 'tests/**'
+
+"area:skills":
+  - changed-files:
+    - any-glob-to-any-file:
+      - 'skills/**'
