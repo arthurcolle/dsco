@@ -1,9 +1,0 @@
-FROM python:3.11-slim
-
-WORKDIR /app
-
-COPY scripts/claude_proxy.py /app/claude_proxy.py
-
-EXPOSE 8031
-
-CMD ["python", "/app/claude_proxy.py", "--host", "0.0.0.0", "--port", "8031"]
