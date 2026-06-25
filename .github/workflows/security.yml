@@ -3,7 +3,7 @@ name: security
 on:
   pull_request:
   push:
-    branches: [ main, master ]
+    branches: [main, master]
   schedule:
     - cron: '0 5 * * 1'
   workflow_dispatch:
@@ -13,31 +13,50 @@ permissions:
   contents: read
   security-events: write
 
+concurrency:
+  group: security-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
+  # ─────────────────────────────────────────────────────────────────────
+  # CODEQL — Semantic code analysis for C/C++
+  # ─────────────────────────────────────────────────────────────────────
   codeql:
     name: codeql (c-cpp)
     runs-on: ubuntu-latest
+    env:
+      CC: gcc
+      DSCO_ARCH: x86-64
+      DSCO_STD: c2y
     steps:
       - uses: actions/checkout@v4
 
       - name: Install build dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y build-essential libcurl4-openssl-dev libsqlite3-dev libreadline-dev
+          sudo apt-get install -y \
+            build-essential libcurl4-openssl-dev libsqlite3-dev libreadline-dev \
+            libsodium-dev libuv1-dev libmbedtls-dev libhiredis-dev
 
       - name: Initialize CodeQL
         uses: github/codeql-action/init@v3
         with:
           languages: c-cpp
+          queries: security-extended
 
       - name: Build
-        run: make -j2
+        run: make -j2 dsco
 
       - name: Analyze
         uses: github/codeql-action/analyze@v3
+        with:
+          category: "/language:c-cpp"
 
+  # ─────────────────────────────────────────────────────────────────────
+  # GITLEAKS — Scan for leaked secrets, API keys, tokens
+  # ─────────────────────────────────────────────────────────────────────
   gitleaks:
-    name: gitleaks
+    name: gitleaks (secret scan)
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -51,3 +70,56 @@ jobs:
         uses: gitleaks/gitleaks-action@v2
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  # ─────────────────────────────────────────────────────────────────────
+  # DEPENDENCY LICENSE AUDIT
+  # Scans vendored deps for license compatibility issues
+  # ─────────────────────────────────────────────────────────────────────
+  license-audit:
+    name: license audit
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Check for problematic licenses
+        run: |
+          set -e
+          echo "Scanning vendored dependencies for license compatibility..."
+          PROBLEMATIC=0
+
+          # Check for GPL/AGPL in vendored directories
+          for dir in gsl/ lib/ vendor/ third_party/; do
+            if [ -d "$dir" ]; then
+              FOUND=$(find "$dir" -iname "COPYING*" -o -iname "LICENSE*" -o -iname "COPYRIGHT*" 2>/dev/null \
+                | xargs grep -l -i -E "GPL|AGPL|GPLv3" 2>/dev/null || true)
+              if [ -n "$FOUND" ]; then
+                echo "WARNING: GPL/AGPL license found in $dir:"
+                echo "$FOUND"
+                PROBLEMATIC=1
+              fi
+            fi
+          done
+
+          # Check the main LICENSE
+          echo "Main project license:"
+          head -3 LICENSE
+
+          # Check for any .env files that shouldn't be tracked
+          if git ls-files | grep -qE '\.env$|\.env\.'; then
+            echo "ERROR: .env files found in git tracking!"
+            git ls-files | grep -E '\.env$|\.env\.'
+            PROBLEMATIC=1
+          fi
+
+          # Check .gitignore covers .env
+          if ! grep -qE '^\.env$' .gitignore; then
+            echo "ERROR: .env not in .gitignore!"
+            PROBLEMATIC=1
+          fi
+
+          if [ "$PROBLEMATIC" -eq 1 ]; then
+            echo "License audit FAILED — fix issues before release."
+            exit 1
+          fi
+
+          echo "License audit PASSED."
