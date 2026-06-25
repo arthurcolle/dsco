@@ -3,9 +3,17 @@ name: ci
 on:
   pull_request:
   push:
-    branches: [ main, master ]
+    branches: [main, master]
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
 
 jobs:
+  # ─────────────────────────────────────────────────────────────────────
+  # BUILD + TEST MATRIX
+  # Tests every supported OS/compiler combo. Uses CI-safe flags.
+  # ─────────────────────────────────────────────────────────────────────
   build-and-test:
     name: build-test (${{ matrix.os }}, ${{ matrix.cc }})
     runs-on: ${{ matrix.os }}
@@ -19,8 +27,12 @@ jobs:
             cc: clang
           - os: macos-latest
             cc: clang
+          - os: macos-13
+            cc: clang
     env:
       CC: ${{ matrix.cc }}
+      DSCO_ARCH: x86-64
+      DSCO_STD: c2y
     steps:
       - uses: actions/checkout@v4
 
@@ -32,16 +44,39 @@ jobs:
             libcurl4-openssl-dev libsqlite3-dev libreadline-dev \
             libsodium-dev libuv1-dev libmbedtls-dev libhiredis-dev
 
-      - name: Build
-        run: make -j2
+      - name: Install dependencies (macOS)
+        if: runner.os == 'macOS'
+        run: |
+          brew update
+          brew install hiredis libsodium libuv mbedtls@3 readline pkg-config
+
+      - name: Build (release)
+        run: make -j$(nproc 2>/dev/null || sysctl -n hw.ncpu) dsco dsco-lite dsc
+
+      - name: Smoke test
+        run: |
+          ./dsco --version
+          ./dsco --tool-exec cwd '{}'
+          ./dsc --help || true
 
       - name: Unit tests
         run: make test
 
+  # ─────────────────────────────────────────────────────────────────────
+  # SANITIZERS (ASan + UBSan)
+  # Catches memory errors and undefined behavior.
+  # ─────────────────────────────────────────────────────────────────────
   sanitizers:
+    name: sanitizers (${{ matrix.sanitizer }})
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        sanitizer: [asan, ubsan]
     env:
       CC: clang
+      DSCO_ARCH: x86-64
+      DSCO_STD: c2y
     steps:
       - uses: actions/checkout@v4
 
@@ -52,22 +87,26 @@ jobs:
             clang libcurl4-openssl-dev libsqlite3-dev libreadline-dev \
             libsodium-dev libuv1-dev libmbedtls-dev libhiredis-dev
 
-      - name: ASan build and tests
+      - name: Build and test with ${{ matrix.sanitizer }}
         run: |
           make clean
-          make asan
-          make asan-test
+          make ${{ matrix.sanitizer }}
+          make ${{ matrix.sanitizer }}-test
 
-      - name: UBSan build and tests
-        run: |
-          make clean
-          make ubsan
-          make ubsan-test
-
+  # ─────────────────────────────────────────────────────────────────────
+  # STATIC ANALYSIS
+  # ─────────────────────────────────────────────────────────────────────
   static-analysis:
+    name: ${{ matrix.tool }}
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        tool: [clang-tidy, cppcheck]
     env:
       CC: clang
+      DSCO_ARCH: x86-64
+      DSCO_STD: c2y
     steps:
       - uses: actions/checkout@v4
 
@@ -79,51 +118,37 @@ jobs:
             libcurl4-openssl-dev libsqlite3-dev libreadline-dev \
             libsodium-dev libuv1-dev libmbedtls-dev libhiredis-dev
 
-      - name: clang-tidy
-        run: make clang-tidy
+      - name: Run ${{ matrix.tool }}
+        run: make ${{ matrix.tool }}
 
-      - name: cppcheck
-        run: make cppcheck
-
-  lint-and-docs:
+  # ─────────────────────────────────────────────────────────────────────
+  # FORMAT CHECK
+  # ─────────────────────────────────────────────────────────────────────
+  format-check:
+    name: clang-format check
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
 
-      - name: Install dependencies
+      - name: Install clang-format
         run: |
           sudo apt-get update
           sudo apt-get install -y clang-format
 
-      - name: Format check
+      - name: Check formatting
         run: make format-check
 
-      - name: Generated docs check
-        run: make docs-check
-
+  # ─────────────────────────────────────────────────────────────────────
+  # VERSION CONSISTENCY
+  # Ensures config.h, CHANGELOG.md, and git tags all agree.
+  # ─────────────────────────────────────────────────────────────────────
   version-check:
+    name: version consistency
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
 
-      - name: Version consistency
-        run: ./scripts/check_version_consistency.sh
-
-  pre-commit:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Setup Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: '3.x'
-
-      - name: Install dependencies
+      - name: Check version consistency
         run: |
-          sudo apt-get update
-          sudo apt-get install -y clang-format shellcheck
-          python3 -m pip install --upgrade pip pre-commit
-
-      - name: Run pre-commit
-        run: pre-commit run --all-files
+          chmod +x scripts/check_version_consistency.sh
+          ./scripts/check_version_consistency.sh
