@@ -1,15 +1,15 @@
 # Build artifacts
 *.o
 build/
-dsco
-dsco-debug
-dsco-asan
-dsco-ubsan
-dsco-codex
-dsco_asan
-test_runner
-asan-test_runner
-ubsan-test_runner
+/dsco
+/dsco-debug
+/dsco-asan
+/dsco-ubsan
+/dsco-codex
+/dsco_asan
+/test_runner
+/asan-test_runner
+/ubsan-test_runner
 /test_*
 *.dSYM/
 
