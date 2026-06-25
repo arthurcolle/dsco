@@ -1,0 +1,41 @@
+name: npm-publish
+
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'npm package version to publish (must match package.json)'
+        required: false
+        type: string
+
+permissions:
+  contents: read
+  id-token: write
+
+jobs:
+  publish:
+    name: publish @distributed.systems/dsco
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          registry-url: 'https://registry.npmjs.org'
+          scope: '@distributed.systems'
+
+      - name: Validate package metadata
+        working-directory: npm/dsco
+        run: |
+          node -e "const p=require('./package.json'); console.log(p.name, p.version); if (p.name !== '@distributed.systems/dsco') process.exit(1)"
+          npm pack --dry-run
+
+      - name: Publish to npm
+        working-directory: npm/dsco
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: npm publish --access public
