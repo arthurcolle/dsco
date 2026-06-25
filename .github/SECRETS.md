@@ -8,6 +8,7 @@
 | Secret Name | Purpose | How to Generate |
 |---|---|---|
 | `HOMEBREW_TAP_TOKEN` | Push to arthurcolle/homebrew-dsco on release | GitHub → Settings → Developer settings → Personal access tokens → Fine-grained → Repository access to `homebrew-dsco` → Contents: Read & Write |
+| `NPM_TOKEN` | Publish `@distributed.systems/dsco` to npm | npm → Access Tokens → Generate New Token → Automation token with publish rights for the `distributed.systems` org | Package Manager.
 
 ## Auto-Provided (No Action Needed)
 
