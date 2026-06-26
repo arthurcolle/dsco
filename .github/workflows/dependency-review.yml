@@ -1,82 +1,99 @@
-# Dependency Review — runs on PRs that change dependencies
-# Validates license compatibility, security advisories, etc.
-
 name: dependency-review
 
 on:
   pull_request:
     paths:
-      - 'Makefile'
-      - 'gsl/**'
-      - 'lib/**'
-      - '.github/workflows/**'
+      - Makefile
+      - gsl/**
+      - lib/**
+      - vendor/**
+      - third_party/**
+      - npm/dsco/package.json
+      - .github/workflows/**
 
 permissions:
   contents: read
-  pull-requests: write
+  pull-requests: read
+
+concurrency:
+  group: dependency-review-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+defaults:
+  run:
+    shell: bash
 
 jobs:
   dependency-review:
-    name: review dependency changes
-    runs-on: ubuntu-latest
+    name: dependency review
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
-      - name: Check for new vendored dependencies
+      - name: GitHub dependency review
+        uses: actions/dependency-review-action@v4
+        with:
+          fail-on-severity: high
+          deny-licenses: GPL-2.0, GPL-3.0, AGPL-1.0, AGPL-3.0, LGPL-2.0, LGPL-2.1, LGPL-3.0
+
+      - name: Review vendored dependency changes
         run: |
-          echo "Checking for newly added vendored dependencies..."
-          
-          # Get the base ref
+          set -euo pipefail
           BASE_SHA="${{ github.event.pull_request.base.sha }}"
           HEAD_SHA="${{ github.event.pull_request.head.sha }}"
-          
-          if [ -z "$BASE_SHA" ]; then
-            echo "No base SHA found, skipping check."
+
+          new_files="$(git diff --name-only --diff-filter=A "$BASE_SHA" "$HEAD_SHA" -- gsl/ lib/ vendor/ third_party/ || true)"
+          if [[ -z "$new_files" ]]; then
+            echo "No newly added vendored files."
             exit 0
-          fi
-          
-          # Check for new files in gsl/ or lib/ directories
-          NEW_GSL=$(git diff --name-only --diff-filter=A "$BASE_SHA" "$HEAD_SHA" -- gsl/ 2>/dev/null | head -10 || true)
-          NEW_LIB=$(git diff --name-only --diff-filter=A "$BASE_SHA" "$HEAD_SHA" -- lib/ 2>/dev/null | head -10 || true)
-          
-          if [ -n "$NEW_GSL" ] || [ -n "$NEW_LIB" ]; then
-            echo "⚠️ New vendored dependencies detected:"
-            [ -n "$NEW_GSL" ] && echo "gsl/:" && echo "$NEW_GSL"
-            [ -n "$NEW_LIB" ] && echo "lib/:" && echo "$NEW_LIB"
-            echo ""
-            echo "Please verify:"
-            echo "  1. License is compatible with MIT"
-          echo "  2. No GPL/AGPL/Copyleft licenses"
-            echo "  3. Security advisories checked"
-            echo "  4. Required attribution added"
-          else
-            echo "No new vendored dependencies detected."
           fi
 
-      - name: Check Makefile for new link flags
+          {
+            echo "## Vendored dependency review"
+            echo
+            echo "New files:"
+            echo '```'
+            echo "$new_files"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+          license_files="$(echo "$new_files" | grep -Ei '(^|/)(LICENSE|COPYING|COPYRIGHT|NOTICE)(\.|$)' || true)"
+          if [[ -z "$license_files" ]]; then
+            echo "::warning::New vendored files were added without a matching LICENSE/COPYING/COPYRIGHT/NOTICE file in the same PR."
+          fi
+
+          problematic=0
+          while IFS= read -r file; do
+            [[ -n "$file" ]] || continue
+            if grep -IiqE 'AGPL|GPL-?v?[23]|GNU GENERAL PUBLIC LICENSE|LESSER GENERAL PUBLIC LICENSE' "$file"; then
+              echo "Problematic copyleft license text detected in $file" >&2
+              problematic=1
+            fi
+          done <<< "$license_files"
+
+          if [[ "$problematic" -ne 0 ]]; then
+            exit 1
+          fi
+
+      - name: Review native linker dependency changes
         run: |
-          echo "Checking Makefile for new link dependencies..."
-          
+          set -euo pipefail
           BASE_SHA="${{ github.event.pull_request.base.sha }}"
           HEAD_SHA="${{ github.event.pull_request.head.sha }}"
-          
-          if [ -z "$BASE_SHA" ]; then
-            echo "No base SHA found, skipping."
-            exit 0
-          fi
-          
-          # Check if LDLIBS or new -l flags were added
-          OLD_LIBS=$(git show "$BASE_SHA:Makefile" 2>/dev/null | grep -E 'LDLIBS|LDFLAGS' | sort || true)
-          NEW_LIBS=$(git show "$HEAD_SHA:Makefile" 2>/dev/null | grep -E 'LDLIBS|LDFLAGS' | sort || true)
-          
-          if [ "$OLD_LIBS" != "$NEW_LIBS" ]; then
-            echo "⚠️ Linker flags changed:"
-            diff <(echo "$OLD_LIBS") <(echo "$NEW_LIBS") || true
-            echo ""
-            echo "Ensure new dependencies are available on:"
-            echo "  - Ubuntu (apt-get)"
-            echo "  - macOS (brew)"
-            echo "  - Documented in README install instructions"
+          old_flags="$(git show "$BASE_SHA:Makefile" 2>/dev/null | grep -E 'LDLIBS|LDFLAGS' | sort || true)"
+          new_flags="$(git show "$HEAD_SHA:Makefile" 2>/dev/null | grep -E 'LDLIBS|LDFLAGS' | sort || true)"
+
+          if [[ "$old_flags" != "$new_flags" ]]; then
+            echo "::notice::Native link flags changed; ensure Ubuntu, macOS, README, release.yml, and setup-native stay in sync."
+            {
+              echo "## Native link flag changes"
+              echo '```diff'
+              diff -u <(echo "$old_flags") <(echo "$new_flags") || true
+              echo '```'
+            } >> "$GITHUB_STEP_SUMMARY"
           else
             echo "No linker flag changes detected."
           fi

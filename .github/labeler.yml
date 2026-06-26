@@ -73,12 +73,24 @@
   - changed-files:
     - any-glob-to-any-file:
       - '.github/workflows/**'
+      - '.github/actions/**'
 
 "area:deps":
   - changed-files:
     - any-glob-to-any-file:
       - 'gsl/**'
       - 'lib/**'
+      - 'vendor/**'
+      - 'third_party/**'
+      - 'npm/dsco/package.json'
+
+"area:release":
+  - changed-files:
+    - any-glob-to-any-file:
+      - 'Formula/**'
+      - 'npm/dsco/**'
+      - 'scripts/check_version_consistency.sh'
+      - 'CHANGELOG.md'
 
 "area:tests":
   - changed-files:

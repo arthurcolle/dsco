@@ -14,29 +14,31 @@ permissions:
   security-events: write
 
 concurrency:
-  group: security-${{ github.ref }}
+  group: security-${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
+defaults:
+  run:
+    shell: bash
+
+env:
+  DSCO_CI: "1"
+  DSCO_NO_SUPERVISE: "1"
+  DSCO_SECURE_STORE_NO_PROMPT: "1"
+  DSCO_STD: c2y
+
 jobs:
-  # ─────────────────────────────────────────────────────────────────────
-  # CODEQL — Semantic code analysis for C/C++
-  # ─────────────────────────────────────────────────────────────────────
   codeql:
     name: codeql (c-cpp)
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
     env:
       CC: gcc
       DSCO_ARCH: x86-64
-      DSCO_STD: c2y
     steps:
       - uses: actions/checkout@v4
 
-      - name: Install build dependencies
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y \
-            build-essential libcurl4-openssl-dev libsqlite3-dev libreadline-dev \
-            libsodium-dev libuv1-dev libmbedtls-dev libhiredis-dev
+      - uses: ./.github/actions/setup-native
 
       - name: Initialize CodeQL
         uses: github/codeql-action/init@v3
@@ -50,14 +52,12 @@ jobs:
       - name: Analyze
         uses: github/codeql-action/analyze@v3
         with:
-          category: "/language:c-cpp"
+          category: /language:c-cpp
 
-  # ─────────────────────────────────────────────────────────────────────
-  # GITLEAKS — Scan for leaked secrets, API keys, tokens
-  # ─────────────────────────────────────────────────────────────────────
   gitleaks:
     name: gitleaks (secret scan)
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
     permissions:
       contents: read
       pull-requests: read
@@ -71,55 +71,68 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
-  # ─────────────────────────────────────────────────────────────────────
-  # DEPENDENCY LICENSE AUDIT
-  # Scans vendored deps for license compatibility issues
-  # ─────────────────────────────────────────────────────────────────────
   license-audit:
     name: license audit
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@v4
 
       - name: Check for problematic licenses
         run: |
-          set -e
-          echo "Scanning vendored dependencies for license compatibility..."
-          PROBLEMATIC=0
+          set -euo pipefail
+          problematic=0
 
-          # Check for GPL/AGPL in vendored directories
           for dir in gsl/ lib/ vendor/ third_party/; do
-            if [ -d "$dir" ]; then
-              FOUND=$(find "$dir" -iname "COPYING*" -o -iname "LICENSE*" -o -iname "COPYRIGHT*" 2>/dev/null \
-                | xargs grep -l -i -E "GPL|AGPL|GPLv3" 2>/dev/null || true)
-              if [ -n "$FOUND" ]; then
-                echo "WARNING: GPL/AGPL license found in $dir:"
-                echo "$FOUND"
-                PROBLEMATIC=1
+            [[ -d "$dir" ]] || continue
+            while IFS= read -r -d '' file; do
+              if grep -IiqE 'AGPL|GPL-?v?[23]|GNU GENERAL PUBLIC LICENSE|LESSER GENERAL PUBLIC LICENSE' "$file"; then
+                echo "Problematic license text found in $file" >&2
+                problematic=1
               fi
-            fi
+            done < <(find "$dir" \( -iname 'COPYING*' -o -iname 'LICENSE*' -o -iname 'COPYRIGHT*' \) -print0)
           done
 
-          # Check the main LICENSE
-          echo "Main project license:"
-          head -3 LICENSE
-
-          # Check for any .env files that shouldn't be tracked
-          if git ls-files | grep -qE '\.env$|\.env\.'; then
-            echo "ERROR: .env files found in git tracking!"
-            git ls-files | grep -E '\.env$|\.env\.'
-            PROBLEMATIC=1
+          if git ls-files | grep -qE '(^|/)\.env($|\.)'; then
+            echo "Tracked .env file found:" >&2
+            git ls-files | grep -E '(^|/)\.env($|\.)' >&2
+            problematic=1
           fi
 
-          # Check .gitignore covers .env
           if ! grep -qE '^\.env$' .gitignore; then
-            echo "ERROR: .env not in .gitignore!"
-            PROBLEMATIC=1
+            echo ".gitignore must include .env" >&2
+            problematic=1
           fi
 
-          if [ "$PROBLEMATIC" -eq 1 ]; then
-            echo "License audit FAILED — fix issues before release."
+          if [[ "$problematic" -ne 0 ]]; then
             exit 1
           fi
 
-          echo "License audit PASSED."
+          echo "License audit passed."
+
+  scorecard:
+    name: ossf scorecard
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    permissions:
+      contents: read
+      security-events: write
+      id-token: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Run Scorecard
+        uses: ossf/scorecard-action@v2.4.0
+        with:
+          repo_token: ${{ secrets.GITHUB_TOKEN }}
+          results_file: scorecard.sarif
+          results_format: sarif
+          publish_results: true
+
+      - name: Upload Scorecard SARIF
+        uses: github/codeql-action/upload-sarif@v3
+        with:
+          sarif_file: scorecard.sarif

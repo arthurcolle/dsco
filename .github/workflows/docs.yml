@@ -3,60 +3,52 @@ name: docs
 on:
   pull_request:
     paths:
-      - 'README.md'
-      - 'CHANGELOG.md'
-      - 'docs/**'
-      - '*.h'
-      - 'tools.c'
-      - 'scripts/gen_*.sh'
-      - '.github/workflows/docs.yml'
+      - README.md
+      - CHANGELOG.md
+      - docs/**
+      - include/**/*.h
+      - src/**/*.c
+      - scripts/gen_*.sh
+      - .github/workflows/docs.yml
   push:
     branches: [main, master]
     paths:
-      - 'README.md'
-      - 'CHANGELOG.md'
-      - 'docs/**'
-      - '*.h'
-      - 'tools.c'
-      - 'scripts/gen_*.sh'
-      - '.github/workflows/docs.yml'
+      - README.md
+      - CHANGELOG.md
+      - docs/**
+      - include/**/*.h
+      - src/**/*.c
+      - scripts/gen_*.sh
+      - .github/workflows/docs.yml
+
+permissions:
+  contents: read
 
 concurrency:
-  group: docs-${{ github.ref }}
+  group: docs-${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
+defaults:
+  run:
+    shell: bash
+
 jobs:
-  # ─────────────────────────────────────────────────────────────────────
-  # GENERATED DOCS CHECK
-  # Ensures API reference and tool catalog are up to date
-  # ─────────────────────────────────────────────────────────────────────
   generated-docs-check:
     name: generated docs check
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
 
-      - name: Install dependencies
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y build-essential
+      - uses: ./.github/actions/setup-native
 
-      - name: Check API reference is up to date
-        run: |
-          chmod +x scripts/gen_api_reference.sh 2>/dev/null || true
-          ./scripts/gen_api_reference.sh --check || echo "Warning: API ref check skipped (script not found)"
+      - name: Check generated docs
+        run: make docs-check
 
-      - name: Check tool catalog is up to date
-        run: |
-          chmod +x scripts/gen_tool_catalog.sh 2>/dev/null || true
-          ./scripts/gen_tool_catalog.sh --check || echo "Warning: tool catalog check skipped (script not found)"
-
-  # ─────────────────────────────────────────────────────────────────────
-  # MARKDOWN LINT
-  # ─────────────────────────────────────────────────────────────────────
   markdown-lint:
     name: markdown lint
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@v4
 
@@ -68,12 +60,10 @@ jobs:
             CHANGELOG.md
             docs/**/*.md
 
-  # ─────────────────────────────────────────────────────────────────────
-  # LINK CHECK
-  # ─────────────────────────────────────────────────────────────────────
   links-check:
     name: link check
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@v4
 

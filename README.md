@@ -2,9 +2,9 @@
 
 > A local-first, self-introspecting agentic CLI, written in pure C.
 
-[![CI](https://github.com/arthurcolle/dsco-cli/actions/workflows/ci.yml/badge.svg)](https://github.com/arthurcolle/dsco-cli/actions/workflows/ci.yml)
-[![Docs](https://github.com/arthurcolle/dsco-cli/actions/workflows/docs.yml/badge.svg)](https://github.com/arthurcolle/dsco-cli/actions/workflows/docs.yml)
-[![Security](https://github.com/arthurcolle/dsco-cli/actions/workflows/security.yml/badge.svg)](https://github.com/arthurcolle/dsco-cli/actions/workflows/security.yml)
+[![CI](https://github.com/arthurcolle/dsco/actions/workflows/ci.yml/badge.svg)](https://github.com/arthurcolle/dsco/actions/workflows/ci.yml)
+[![Docs](https://github.com/arthurcolle/dsco/actions/workflows/docs.yml/badge.svg)](https://github.com/arthurcolle/dsco/actions/workflows/docs.yml)
+[![Security](https://github.com/arthurcolle/dsco/actions/workflows/security.yml/badge.svg)](https://github.com/arthurcolle/dsco/actions/workflows/security.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 
 **DSCO** (Distributed Systems Corporation Operator) is an agent runtime that lives

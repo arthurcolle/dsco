@@ -7,25 +7,94 @@ on:
   workflow_dispatch:
     inputs:
       tag:
-        description: 'Tag to release (e.g. v1.0.3)'
+        description: 'Tag to release, for example v1.0.2'
         required: true
         type: string
 
 permissions:
-  contents: write
+  contents: read
+
+concurrency:
+  group: release-${{ github.event_name == 'workflow_dispatch' && github.event.inputs.tag || github.ref }}
+  cancel-in-progress: false
+
+defaults:
+  run:
+    shell: bash
+
+env:
+  DSCO_CI: "1"
+  DSCO_NO_SUPERVISE: "1"
+  DSCO_SECURE_STORE_NO_PROMPT: "1"
+  DSCO_STD: c2y
 
 jobs:
-  # ─────────────────────────────────────────────────────────────────────
-  # BUILD PLATFORM BINARIES
-  # These assets are consumed by npm/dsco/scripts/install.js.
-  # Expected names:
-  #   dsco-darwin-arm64.tar.gz
-  #   dsco-darwin-x64.tar.gz
-  #   dsco-linux-x64.tar.gz
-  # ─────────────────────────────────────────────────────────────────────
+  validate-release:
+    name: validate release inputs
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    outputs:
+      tag: ${{ steps.meta.outputs.tag }}
+      version: ${{ steps.meta.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          ref: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.tag || github.ref }}
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: npm
+          cache-dependency-path: npm/dsco/package.json
+
+      - name: Validate tag, changelog, and package metadata
+        id: meta
+        run: |
+          set -euo pipefail
+          if [[ "${{ github.event_name }}" == "workflow_dispatch" ]]; then
+            TAG="${{ github.event.inputs.tag }}"
+          else
+            TAG="${GITHUB_REF_NAME}"
+          fi
+          if [[ ! "$TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+([.-][0-9A-Za-z.-]+)?$ ]]; then
+            echo "Release tag must look like v1.2.3; got '$TAG'" >&2
+            exit 1
+          fi
+
+          VERSION="${TAG#v}"
+          CONFIG_VERSION="$(sed -nE 's/^#define[[:space:]]+DSCO_VERSION[[:space:]]+"([^"]+)".*/\1/p' include/config.h | head -n1)"
+          NPM_VERSION="$(node -p "require('./npm/dsco/package.json').version")"
+
+          [[ "$CONFIG_VERSION" == "$VERSION" ]] || {
+            echo "include/config.h has $CONFIG_VERSION but tag is $TAG" >&2
+            exit 1
+          }
+          [[ "$NPM_VERSION" == "$VERSION" ]] || {
+            echo "npm/dsco/package.json has $NPM_VERSION but tag is $TAG" >&2
+            exit 1
+          }
+          grep -Eq "^## \[$VERSION\]([[:space:]]|$)" CHANGELOG.md || {
+            echo "CHANGELOG.md is missing section [$VERSION]" >&2
+            exit 1
+          }
+          git rev-parse --verify --quiet "$TAG^{commit}" >/dev/null
+
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "Validated DSCO $TAG" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Validate npm package dry run
+        working-directory: npm/dsco
+        env:
+          DSCO_SKIP_DOWNLOAD: "1"
+        run: npm pack --dry-run
+
   build-binaries:
     name: build binary (${{ matrix.triple }})
+    needs: validate-release
     runs-on: ${{ matrix.runner }}
+    timeout-minutes: 35
     strategy:
       fail-fast: false
       matrix:
@@ -33,114 +102,105 @@ jobs:
           - runner: macos-14
             triple: darwin-arm64
             arch: arm64
-            deps: brew
-          - runner: macos-13
+            cc: clang
+          - runner: macos-15-intel
             triple: darwin-x64
             arch: x86-64
-            deps: brew
-          - runner: ubuntu-latest
+            cc: clang
+          - runner: ubuntu-24.04
             triple: linux-x64
             arch: x86-64
-            deps: apt
+            cc: gcc
     env:
-      CC: ${{ matrix.runner == 'ubuntu-latest' && 'gcc' || 'clang' }}
+      CC: ${{ matrix.cc }}
       DSCO_ARCH: ${{ matrix.arch }}
-      DSCO_STD: c2y
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.validate-release.outputs.tag }}
 
-      - name: Install dependencies (Ubuntu)
-        if: matrix.deps == 'apt'
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y \
-            build-essential libcurl4-openssl-dev libsqlite3-dev libreadline-dev \
-            libsodium-dev libuv1-dev libmbedtls-dev libhiredis-dev
-
-      - name: Install dependencies (macOS)
-        if: matrix.deps == 'brew'
-        run: |
-          brew update
-          brew install hiredis libsodium libuv mbedtls@3 readline pkg-config
+      - uses: ./.github/actions/setup-native
 
       - name: Build
-        run: make -j$(nproc 2>/dev/null || sysctl -n hw.ncpu) dsco dsco-lite dsc
+        run: |
+          set -euo pipefail
+          NCPU="$(getconf _NPROCESSORS_ONLN 2>/dev/null || sysctl -n hw.ncpu)"
+          make -j"${NCPU}" dsco dsco-lite dsc
 
       - name: Smoke test
         run: |
+          set -euo pipefail
           ./dsco --version
+          ./dsco-lite --version
           ./dsco --tool-exec cwd '{}'
 
       - name: Package binaries
         run: |
+          set -euo pipefail
           mkdir -p dist
-          tar czf dist/dsco-${{ matrix.triple }}.tar.gz dsco dsco-lite dsc
+          tar czf "dist/dsco-${{ matrix.triple }}.tar.gz" dsco dsco-lite dsc README.md LICENSE
           if command -v sha256sum >/dev/null 2>&1; then
-            sha256sum dist/dsco-${{ matrix.triple }}.tar.gz > dist/dsco-${{ matrix.triple }}.tar.gz.sha256
+            sha256sum "dist/dsco-${{ matrix.triple }}.tar.gz" > "dist/dsco-${{ matrix.triple }}.tar.gz.sha256"
           else
-            shasum -a 256 dist/dsco-${{ matrix.triple }}.tar.gz > dist/dsco-${{ matrix.triple }}.tar.gz.sha256
+            shasum -a 256 "dist/dsco-${{ matrix.triple }}.tar.gz" > "dist/dsco-${{ matrix.triple }}.tar.gz.sha256"
           fi
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
           name: dsco-${{ matrix.triple }}
-          path: dist/
+          path: dist/dsco-${{ matrix.triple }}.tar.gz*
+          if-no-files-found: error
 
-  # ─────────────────────────────────────────────────────────────────────
-  # BUILD SOURCE TARBALL
-  # This is what the Homebrew formula downloads.
-  # ─────────────────────────────────────────────────────────────────────
   build-source:
     name: build source tarball
-    runs-on: ubuntu-latest
+    needs: validate-release
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@v4
-
-      - name: Determine version
-        id: version
-        run: |
-          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
-            TAG="${{ github.event.inputs.tag }}"
-          else
-            TAG="${GITHUB_REF_NAME}"
-          fi
-          VERSION="${TAG#v}"
-          echo "tag=$TAG" >> $GITHUB_OUTPUT
-          echo "version=$VERSION" >> $GITHUB_OUTPUT
+        with:
+          fetch-depth: 0
+          ref: ${{ needs.validate-release.outputs.tag }}
 
       - name: Create source tarball
         run: |
-          VERSION="${{ steps.version.outputs.version }}"
+          set -euo pipefail
+          VERSION="${{ needs.validate-release.outputs.version }}"
+          TAG="${{ needs.validate-release.outputs.tag }}"
           mkdir -p dist
           git archive --format=tar.gz --prefix="dsco-${VERSION}/" \
-            -o dist/dsco-${VERSION}.tar.gz HEAD
-          sha256sum dist/dsco-${VERSION}.tar.gz > dist/dsco-${VERSION}.tar.gz.sha256
+            -o "dist/dsco-${VERSION}.tar.gz" "$TAG"
+          sha256sum "dist/dsco-${VERSION}.tar.gz" > "dist/dsco-${VERSION}.tar.gz.sha256"
 
-          echo "## Source Tarball" >> $GITHUB_STEP_SUMMARY
-          echo '```' >> $GITHUB_STEP_SUMMARY
-          cat dist/dsco-${VERSION}.tar.gz.sha256 >> $GITHUB_STEP_SUMMARY
-          echo '```' >> $GITHUB_STEP_SUMMARY
+          {
+            echo "## Source Tarball"
+            echo '```'
+            cat "dist/dsco-${VERSION}.tar.gz.sha256"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
           name: dsco-source
-          path: dist/
+          path: dist/dsco-${{ needs.validate-release.outputs.version }}.tar.gz*
+          if-no-files-found: error
 
-  # ─────────────────────────────────────────────────────────────────────
-  # CREATE GITHUB RELEASE
-  # ─────────────────────────────────────────────────────────────────────
   create-release:
     name: create GitHub release
-    needs: [build-binaries, build-source]
-    runs-on: ubuntu-latest
+    needs: [validate-release, build-binaries, build-source]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
     permissions:
       contents: write
+      attestations: write
+      id-token: write
     steps:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
+          ref: ${{ needs.validate-release.outputs.tag }}
 
       - name: Download all artifacts
         uses: actions/download-artifact@v4
@@ -148,38 +208,45 @@ jobs:
           path: dist/
           merge-multiple: true
 
-      - name: Determine version
-        id: version
-        run: |
-          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
-            TAG="${{ github.event.inputs.tag }}"
-          else
-            TAG="${GITHUB_REF_NAME}"
-          fi
-          VERSION="${TAG#v}"
-          echo "tag=$TAG" >> $GITHUB_OUTPUT
-          echo "version=$VERSION" >> $GITHUB_OUTPUT
-          echo "Releasing $TAG (version $VERSION)"
-
       - name: Extract changelog
         run: |
-          VERSION="${{ steps.version.outputs.version }}"
+          set -euo pipefail
+          VERSION="${{ needs.validate-release.outputs.version }}"
           awk '/^## \['"${VERSION}"'\]/{found=1} found{print} /^## \[/ && !/^## \['"${VERSION}"'\]/{if(found)exit}' CHANGELOG.md | head -200 > /tmp/release_notes.md
-          if [ ! -s /tmp/release_notes.md ]; then
-            echo "DSCO ${{ steps.version.outputs.tag }}" > /tmp/release_notes.md
+          if [[ ! -s /tmp/release_notes.md ]]; then
+            echo "No changelog notes found for $VERSION" >&2
+            exit 1
           fi
 
-      - name: List artifacts
+      - name: Verify release assets
         run: |
+          set -euo pipefail
+          expected=(
+            "dsco-darwin-arm64.tar.gz"
+            "dsco-darwin-x64.tar.gz"
+            "dsco-linux-x64.tar.gz"
+            "dsco-${{ needs.validate-release.outputs.version }}.tar.gz"
+          )
+          for asset in "${expected[@]}"; do
+            test -f "dist/$asset"
+            test -f "dist/$asset.sha256"
+          done
           find dist/ -type f | sort
           echo "--- SHA256 ---"
-          cat dist/*.sha256 2>/dev/null || true
+          cat dist/*.sha256
+
+      - name: Attest release artifacts
+        uses: actions/attest-build-provenance@v2
+        with:
+          subject-path: |
+            dist/*.tar.gz
+            dist/*.sha256
 
       - name: Create release
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: ${{ steps.version.outputs.tag }}
-          name: DSCO ${{ steps.version.outputs.tag }}
+          tag_name: ${{ needs.validate-release.outputs.tag }}
+          name: DSCO ${{ needs.validate-release.outputs.tag }}
           body_path: /tmp/release_notes.md
           files: |
             dist/*.tar.gz
@@ -188,28 +255,27 @@ jobs:
           prerelease: false
           generate_release_notes: false
 
-  # ─────────────────────────────────────────────────────────────────────
-  # UPDATE HOMEBREW TAP
-  # Requires repo secret HOMEBREW_TAP_TOKEN.
-  # ─────────────────────────────────────────────────────────────────────
   update-homebrew:
     name: update Homebrew tap
-    needs: [create-release]
-    runs-on: ubuntu-latest
+    needs: [validate-release, create-release]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
     steps:
-      - name: Determine version
-        id: version
+      - name: Check tap token
+        id: tap-token
+        env:
+          HOMEBREW_TAP_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
         run: |
-          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
-            TAG="${{ github.event.inputs.tag }}"
+          set -euo pipefail
+          if [[ -n "${HOMEBREW_TAP_TOKEN:-}" ]]; then
+            echo "configured=true" >> "$GITHUB_OUTPUT"
           else
-            TAG="${GITHUB_REF_NAME}"
+            echo "configured=false" >> "$GITHUB_OUTPUT"
+            echo "HOMEBREW_TAP_TOKEN is not configured; skipping tap update." >> "$GITHUB_STEP_SUMMARY"
           fi
-          VERSION="${TAG#v}"
-          echo "tag=$TAG" >> $GITHUB_OUTPUT
-          echo "version=$VERSION" >> $GITHUB_OUTPUT
 
       - name: Checkout homebrew-dsco tap
+        if: steps.tap-token.outputs.configured == 'true'
         uses: actions/checkout@v4
         with:
           repository: arthurcolle/homebrew-dsco
@@ -217,32 +283,43 @@ jobs:
           path: homebrew-tap
 
       - name: Download source tarball SHA256
+        if: steps.tap-token.outputs.configured == 'true'
         uses: actions/download-artifact@v4
         with:
           name: dsco-source
           path: dist/
 
       - name: Update formula and cask
+        if: steps.tap-token.outputs.configured == 'true'
         run: |
-          VERSION="${{ steps.version.outputs.version }}"
-          TAG="${{ steps.version.outputs.tag }}"
-          SHA256=$(cut -d' ' -f1 dist/dsco-${VERSION}.tar.gz.sha256)
-          URL="https://github.com/arthurcolle/dsco/archive/refs/tags/${TAG}.tar.gz"
+          set -euo pipefail
+          VERSION="${{ needs.validate-release.outputs.version }}"
+          TAG="${{ needs.validate-release.outputs.tag }}"
+          SHA256="$(cut -d' ' -f1 "dist/dsco-${VERSION}.tar.gz.sha256")"
+          URL="https://github.com/arthurcolle/dsco/releases/download/${TAG}/dsco-${VERSION}.tar.gz"
 
           FORMULA_FILE="homebrew-tap/Formula/dsco.rb"
-          sed -i "s|url .*|url \"${URL}\"|" "$FORMULA_FILE"
-          sed -i "s|sha256 .*|sha256 \"${SHA256}\"|" "$FORMULA_FILE"
+          test -f "$FORMULA_FILE"
+          sed -i "s|^[[:space:]]*url .*|  url \"${URL}\"|" "$FORMULA_FILE"
+          sed -i "s|^[[:space:]]*sha256 .*|  sha256 \"${SHA256}\"|" "$FORMULA_FILE"
 
-          if [ -f "homebrew-tap/Casks/dsco.rb" ]; then
-            sed -i "s|version .*|version \"${VERSION}\"|" "homebrew-tap/Casks/dsco.rb"
-            sed -i "s|sha256 .*|sha256 \"${SHA256}\"|" "homebrew-tap/Casks/dsco.rb"
+          CASK_FILE="homebrew-tap/Casks/dsco.rb"
+          if [[ -f "$CASK_FILE" ]]; then
+            sed -i "s|^[[:space:]]*version .*|  version \"${VERSION}\"|" "$CASK_FILE"
+            sed -i "s|^[[:space:]]*sha256 .*|  sha256 \"${SHA256}\"|" "$CASK_FILE"
           fi
 
       - name: Commit and push
+        if: steps.tap-token.outputs.configured == 'true'
         working-directory: homebrew-tap
         run: |
+          set -euo pipefail
+          if git diff --quiet; then
+            echo "Homebrew tap already up to date."
+            exit 0
+          fi
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
           git add -A
-          git commit -m "dsco ${{ steps.version.outputs.tag }} — auto-update formula" || exit 0
+          git commit -m "dsco ${{ needs.validate-release.outputs.tag }} release"
           git push
