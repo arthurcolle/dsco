@@ -36,23 +36,27 @@ This repository (`dsco-cli`) is the canonical home of the project.
 ## Highlights
 
 - **Local-first.** Runs entirely from your terminal; state lives on your machine.
-- **Tool-first.** 171 built-in tools (plus any MCP-provided tools) span files,
-  git, shell, compilation, data pipelines, crypto, market data, and web research.
+- **Tool-first.** 126 built-in tools (plus any MCP/plugin-provided tools) span files,
+  git, shell, compilation, data pipelines, crypto, market data, integrations, and web research.
 - **Self-introspecting.** Reads, analyzes (via AST), and edits its own codebase.
 - **Swarm-capable.** Nested sub-agents and pre-built orchestration topologies.
-- **Pure C.** ~344K lines across `src/` and `include/`; no model code linked in.
+- **Local flight recorder.** Chronicle records local session/tool/LLM activity unless explicitly disabled.
+- **Portable distribution lane.** Cosmopolitan/APE builds emit `dsco.com` for portable smoke/distribution work.
+- **Pure C.** ~353K lines across `src/` and `include/`; no model code linked in.
 
 ## At a Glance
 
 | Property       | Value                                                    |
 | -------------- | -------------------------------------------------------- |
 | Version        | `1.0.2`                                                  |
-| Language       | C (C11)                                                  |
-| Source size    | ~344K LOC across `src/` + `include/`                     |
-| Source files   | 104 `.c` / 108 `.h`                                      |
-| Built-in tools | 171 (see [`docs/TOOL_CATALOG.md`](docs/TOOL_CATALOG.md)) |
+| Language       | C (C2y build default; C11-compatible style where possible) |
+| Source size    | ~353K LOC across `src/` + `include/`                     |
+| Source files   | 118 `.c` / 119 `.h`                                      |
+| Built-in tools | 126 (see [`docs/TOOL_CATALOG.md`](docs/TOOL_CATALOG.md)) |
 | Orchestration  | Hierarchical swarms, documented topologies               |
-| Platforms      | macOS (primary), Linux (CI: gcc + clang)                 |
+| Observability  | Baseline SQLite timeline + Chronicle activity ledger     |
+| Portable lane  | Cosmopolitan/APE `dsco.com` via `make cosmo`             |
+| Platforms      | macOS primary; portable/lite APE lane; Linux CI/tooling   |
 | License        | MIT                                                      |
 
 > Counts above are ground-truthed against the source tree. Regenerate the tool
@@ -82,7 +86,7 @@ See [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) and
 | Local integration   | macOS-native bridges (Spotlight, AppleScript/JXA, notifications, LaunchAgents) |
 | Cryptography        | Pure-C SHA-256, HMAC, HKDF, JWT, UUID (no OpenSSL dependency)                  |
 | Media & docs        | FFmpeg, ImageMagick, and Pandoc-backed document conversion                     |
-| Observability       | SQLite timeline, trace spans, TUI with markdown rendering                      |
+| Observability       | SQLite timeline, trace spans, Chronicle local activity ledger, TUI markdown    |
 
 The full, generated tool list lives in [`docs/TOOL_CATALOG.md`](docs/TOOL_CATALOG.md).
 
@@ -167,14 +171,16 @@ Common Makefile targets (run `make help`-style discovery via the Makefile itself
 | `make test`           | Run the test suite                           |
 | `make fast-build`     | Fast dev build (`-O0 -g3`) into `build/fast` |
 | `make fast-quick`     | Fast build + smoke + targeted tests          |
+| `make cosmo`          | Build portable Cosmopolitan/APE `dsco.com`   |
+| `make cosmo-selftest` | Build + smoke the portable APE artifact      |
 | `make docs`           | Regenerate generated docs                    |
 | `make docs-check`     | Verify generated docs are in sync            |
 | `make format`         | Apply `clang-format`                         |
 | `make lint`           | Static analysis (`clang-tidy`, `cppcheck`)   |
 | `make asan` / `ubsan` | Sanitizer builds                             |
 
-The accelerated edit→compile→test loop is documented in
-[`BUILD_FAST.md`](BUILD_FAST.md).
+The accelerated edit→compile→test loop is implemented by `scripts/dev_fast.sh`.
+Portable builds are documented in [`docs/COSMOPOLITAN.md`](docs/COSMOPOLITAN.md).
 
 ## Documentation
 
@@ -185,6 +191,9 @@ Start at [`docs/INDEX.md`](docs/INDEX.md). Key references:
 - [API Reference](docs/API_REFERENCE.md) *(generated from headers)*
 - [Built-in Tool Catalog](docs/TOOL_CATALOG.md) *(generated from `tools.c`)*
 - [Operations & Troubleshooting](docs/OPERATIONS.md)
+- [Chronicle TokenLedger](docs/CHRONICLE_TOKENLEDGER.md)
+- [Integration Catalog](docs/INTEGRATION_CATALOG.md)
+- [Cosmopolitan Build Lane](docs/COSMOPOLITAN.md)
 - [How-To Guides](docs/HOW_TO.md)
 - [Runbooks](docs/RUNBOOKS.md)
 
@@ -192,8 +201,8 @@ Start at [`docs/INDEX.md`](docs/INDEX.md). Key references:
 
 ```text
 dsco-cli/
-├── src/            # C runtime implementation (104 .c)
-├── include/        # Public headers (108 .h)
+├── src/            # C runtime implementation (118 .c)
+├── include/        # Public headers (119 .h)
 ├── tests/          # Runtime and CLI tests
 ├── scripts/        # Build, packaging, docs-generation, smoke helpers
 ├── docs/           # Full documentation set (see docs/INDEX.md)
@@ -217,9 +226,10 @@ make docs-check
 pre-commit run --all-files   # optional but recommended
 ```
 
-If you change the tool registry or header declarations, regenerate the affected
-docs (`./scripts/gen_tool_catalog.sh`, `./scripts/gen_api_reference.sh`) and
-include them in the same PR.
+If you change the tool registry, header declarations, constants, or environment
+variable usage, regenerate the affected docs (`make docs`) and include them in
+the same PR. `make docs-check` verifies the generated API reference, tool catalog,
+and constants/env index.
 
 ## Security
 

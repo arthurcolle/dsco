@@ -2,6 +2,10 @@
 *.o
 build/
 /dsco
+/dsco.com
+/dsco.com.dbg
+/dsco.com.aarch64.elf
+/dsco.aarch64.elf
 /dsco-debug
 /dsco-asan
 /dsco-ubsan

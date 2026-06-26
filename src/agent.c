@@ -15,6 +15,7 @@
 #include "dsco_dht.h"
 #include "md.h"
 #include "baseline.h"
+#include "chronicle.h"
 #include "plugin.h"
 #include "setup.h"
 #include "workspace.h"
@@ -3202,8 +3203,12 @@ static void fsm_tool_pending_enter(void *ctx) {
     tui_transition_divider();
 }
 
+static char g_chronicle_active_trace_id[37] = "";
+static char g_chronicle_active_llm_span_id[37] = "";
+
 static void on_stream_text(const char *text, void *ctx) {
     (void)ctx;
+    chronicle_llm_delta(g_chronicle_active_trace_id, g_chronicle_active_llm_span_id, "text", text);
     tui_stream_heartbeat_poke(&s_heartbeat, NULL);
 
     /* FSM drives all transitions — thinking_exit and text_enter fire
@@ -3235,6 +3240,7 @@ static void on_stream_text(const char *text, void *ctx) {
 
 static void on_stream_thinking(const char *text, void *ctx) {
     (void)ctx;
+    chronicle_llm_delta(g_chronicle_active_trace_id, g_chronicle_active_llm_span_id, "thinking", text);
     tui_stream_heartbeat_poke(&s_heartbeat, "thinking...");
 
     /* FSM: thinking_enter fires on first chunk (prints header, inits state) */
@@ -3250,6 +3256,19 @@ static void on_stream_thinking(const char *text, void *ctx) {
         fflush(stderr);
     }
     tui_term_unlock();
+}
+
+static char *chronicle_collect_visible_text(parsed_response_t *parsed) {
+    if (!parsed)
+        return safe_strdup("");
+    jbuf_t b;
+    jbuf_init(&b, 1024);
+    for (int i = 0; i < parsed->count; i++) {
+        content_block_t *blk = &parsed->blocks[i];
+        if (blk->type && strcmp(blk->type, "text") == 0 && blk->text)
+            jbuf_append(&b, blk->text);
+    }
+    return b.data ? b.data : safe_strdup("");
 }
 
 static void on_stream_tool_start(const char *name, const char *id, void *ctx) {
@@ -3269,6 +3288,9 @@ static void on_stream_tool_start(const char *name, const char *id, void *ctx) {
             fprintf(stderr, "  %s[%d]%s ", TUI_DIM, fn, TUI_RESET);
         }
     }
+    chronicle_event("llm.tool_use.started", g_chronicle_active_trace_id,
+                    g_chronicle_active_llm_span_id, NULL, "model", "provider", NULL,
+                    "model_output");
     baseline_log("tool", name, "tool_use started", NULL);
 }
 
@@ -7203,6 +7225,9 @@ bool agent_run(const char *api_key, const char *model, const char *topology_name
         trace_new_id(trace_id, sizeof(trace_id));
         char prompt_span[37] = "";
         trace_span_begin(trace_id, "user_turn", NULL, prompt_span);
+        char chron_prompt_span[37] = "";
+        chronicle_span_begin(trace_id, NULL, "turn", "user_turn", NULL, chron_prompt_span);
+        chronicle_user_message(trace_id, chron_prompt_span, input_buf);
 
         /* Per-turn arena allocator */
         arena_t turn_arena;
@@ -7463,6 +7488,7 @@ bool agent_run(const char *api_key, const char *model, const char *topology_name
 
             /* Stream via provider with fallback chain */
             char llm_span[37] = "";
+            char chron_llm_span[37] = "";
             /* Reactive-compaction retry state (SOTA, cf. Claude Code
              * reactive_compact_retry): on a context-overflow rejection we
              * compact and re-stream this same request instead of ending the
@@ -7475,6 +7501,17 @@ bool agent_run(const char *api_key, const char *model, const char *topology_name
             char chosen_fallback_model[128] = "";
         reactive_retry:
             trace_span_begin(trace_id, "llm_stream", prompt_span, llm_span);
+            chronicle_span_begin(trace_id, chron_prompt_span, "llm", "llm_stream", NULL,
+                                 chron_llm_span);
+            snprintf(g_chronicle_active_trace_id, sizeof(g_chronicle_active_trace_id), "%s",
+                     trace_id);
+            snprintf(g_chronicle_active_llm_span_id, sizeof(g_chronicle_active_llm_span_id), "%s",
+                     chron_llm_span);
+            chronicle_context_materialized(trace_id, chron_llm_span, req,
+                                           conv_token_estimate(&conv, &session));
+            chronicle_llm_request(trace_id, chron_llm_span,
+                                  g_provider ? g_provider->name : "anthropic", session.model, req,
+                                  conv_token_estimate(&conv, &session));
 
             /* Start heartbeat — auto-detects silent stream and shows spinner */
             tui_stream_heartbeat_start(&s_heartbeat);
@@ -7715,6 +7752,8 @@ bool agent_run(const char *api_key, const char *model, const char *topology_name
                     reactive_attempts++;
                     json_free_response(&sr.parsed);
                     trace_span_end(llm_span, "reactive_compact", NULL);
+                    chronicle_span_end(chron_llm_span, "reactive_compact", NULL);
+                    g_chronicle_active_llm_span_id[0] = '\0';
                     g_stream_heartbeat = NULL;
                     tui_stream_heartbeat_stop(&s_heartbeat);
                     dsco_err_clear();
@@ -7743,6 +7782,8 @@ bool agent_run(const char *api_key, const char *model, const char *topology_name
                 char err[128];
                 snprintf(err, sizeof(err), "stream failed (HTTP %d)", sr.http_status);
                 trace_span_end(llm_span, "error", NULL);
+                chronicle_span_end(chron_llm_span, "error", NULL);
+                g_chronicle_active_llm_span_id[0] = '\0';
                 /* Show structured error if available */
                 if (dsco_err_code() != DSCO_ERR_OK) {
                     if (g_outq)
@@ -7762,6 +7803,18 @@ bool agent_run(const char *api_key, const char *model, const char *topology_name
                 break;
             }
             trace_span_end(llm_span, "ok", NULL);
+            char *chron_output_text = chronicle_collect_visible_text(&sr.parsed);
+            chronicle_llm_response(trace_id, chron_llm_span,
+                                   g_provider ? g_provider->name : "anthropic", session.model,
+                                   chron_output_text, NULL, sr.usage.input_tokens,
+                                   sr.usage.output_tokens, sr.usage.cache_read_input_tokens,
+                                   sr.usage.cache_creation_input_tokens, sr.reasoning_tokens,
+                                   sr.cost_usd, sr.telemetry.total_ms,
+                                   sr.parsed.stop_reason ? sr.parsed.stop_reason : "",
+                                   sr.generation_id ? sr.generation_id : "");
+            chronicle_span_end(chron_llm_span, "ok", NULL);
+            g_chronicle_active_llm_span_id[0] = '\0';
+            free(chron_output_text);
 
             /* Drain any bytes still held by the typing-cadence buffer
                before STREAM_END fires md_flush — otherwise the tail of
@@ -8061,7 +8114,11 @@ bool agent_run(const char *api_key, const char *model, const char *topology_name
                              * spinner, watchdog, cache, or parallel orchestration: the UI must be
                              * live and repeat calls must re-ask rather than replay stale answers. */
                             char tool_span[37] = "";
+                            char chron_tool_span[37] = "";
                             trace_span_begin(trace_id, blk->tool_name, prompt_span, tool_span);
+                            chronicle_tool_call_start(trace_id, chron_prompt_span, blk->tool_name,
+                                                      blk->tool_id, blk->tool_input,
+                                                      chron_tool_span);
                             double t0 = now_ms();
                             ok = tools_execute_for_tier(blk->tool_name, blk->tool_input, exec_tier,
                                                         tool_result, MAX_TOOL_RESULT);
@@ -8079,6 +8136,8 @@ bool agent_run(const char *api_key, const char *model, const char *topology_name
                             SI_RECORD_TOOL(blk->tool_name, ok, elapsed,
                                            (int)(strlen(tool_result) / 4));
                             trace_span_end(tool_span, ok ? "ok" : "error", NULL);
+                            chronicle_tool_call_end(trace_id, chron_tool_span, blk->tool_name,
+                                                    tool_result, ok, false, elapsed);
                             conv_add_tool_result_named(&conv, blk->tool_id, blk->tool_name,
                                                        tool_result, !ok);
                             free(tool_result);
@@ -8161,7 +8220,11 @@ bool agent_run(const char *api_key, const char *model, const char *topology_name
                         } else {
                             /* Trace span for tool execution */
                             char tool_span[37] = "";
+                            char chron_tool_span[37] = "";
                             trace_span_begin(trace_id, blk->tool_name, prompt_span, tool_span);
+                            chronicle_tool_call_start(trace_id, chron_prompt_span, blk->tool_name,
+                                                      blk->tool_id, blk->tool_input,
+                                                      chron_tool_span);
 
                             /* Start async spinner + watchdog */
                             tui_async_spinner_t spinner;
@@ -8265,6 +8328,9 @@ bool agent_run(const char *api_key, const char *model, const char *topology_name
 
                             trace_span_end(tool_span,
                                            was_timeout ? "timeout" : (ok ? "ok" : "error"), NULL);
+                            chronicle_tool_call_end(trace_id, chron_tool_span, blk->tool_name,
+                                                    tool_result, ok && !was_timeout, was_timeout,
+                                                    elapsed);
                         }
                         /* Track file reads for post-compact restoration */
                         if (ok && blk->tool_name &&
@@ -8503,7 +8569,11 @@ bool agent_run(const char *api_key, const char *model, const char *topology_name
 
                     if (dsco_tool_is_interactive(blk->tool_name)) {
                         char tool_span[37] = "";
+                        char chron_tool_span[37] = "";
                         trace_span_begin(trace_id, blk->tool_name, prompt_span, tool_span);
+                        chronicle_tool_call_start(trace_id, chron_prompt_span, blk->tool_name,
+                                                  blk->tool_id, blk->tool_input,
+                                                  chron_tool_span);
                         double t0 = now_ms();
                         ok = tools_execute_for_tier(blk->tool_name, blk->tool_input, batch_tiers[bi],
                                                     tool_result, MAX_TOOL_RESULT);
@@ -8520,6 +8590,8 @@ bool agent_run(const char *api_key, const char *model, const char *topology_name
                         pthread_mutex_unlock(&g_locks.metrics_lock);
                         SI_RECORD_TOOL(blk->tool_name, ok, elapsed, (int)(strlen(tool_result) / 4));
                         trace_span_end(tool_span, ok ? "ok" : "error", NULL);
+                        chronicle_tool_call_end(trace_id, chron_tool_span, blk->tool_name,
+                                                tool_result, ok, false, elapsed);
                         conv_add_tool_result_named(&conv, blk->tool_id, blk->tool_name, tool_result,
                                                    !ok);
                         free(tool_result);
@@ -8527,7 +8599,10 @@ bool agent_run(const char *api_key, const char *model, const char *topology_name
                     }
 
                     char tool_span[37] = "";
+                    char chron_tool_span[37] = "";
                     trace_span_begin(trace_id, blk->tool_name, prompt_span, tool_span);
+                    chronicle_tool_call_start(trace_id, chron_prompt_span, blk->tool_name,
+                                              blk->tool_id, blk->tool_input, chron_tool_span);
 
                     tool_watchdog_t wd;
                     int timeout = tool_timeout_for(blk->tool_name);
@@ -8582,6 +8657,8 @@ bool agent_run(const char *api_key, const char *model, const char *topology_name
                     }
                     trace_span_end(tool_span, was_timeout ? "timeout" : (ok ? "ok" : "error"),
                                    NULL);
+                    chronicle_tool_call_end(trace_id, chron_tool_span, blk->tool_name, tool_result,
+                                            ok && !was_timeout, was_timeout, elapsed);
 
                     /* Track file reads */
                     if (ok && blk->tool_name &&
@@ -8613,6 +8690,9 @@ bool agent_run(const char *api_key, const char *model, const char *topology_name
                     pthread_join(conc_slots[ci].thread, NULL);
                     concurrent_tool_slot_t *s = &conc_slots[ci];
                     content_block_t *blk = &sr.parsed.blocks[s->block_index];
+                    char chron_tool_span[37] = "";
+                    chronicle_tool_call_start(trace_id, chron_prompt_span, s->tool_name,
+                                              blk->tool_id, s->tool_input, chron_tool_span);
 
                     tui_batch_spinner_complete(&batch_spinner, s->batch_index,
                                                s->ok && !s->was_timeout, s->result, s->elapsed_ms);
@@ -8656,6 +8736,9 @@ bool agent_run(const char *api_key, const char *model, const char *topology_name
                         }
                     }
 
+                    chronicle_tool_call_end(trace_id, chron_tool_span, s->tool_name, s->result,
+                                            s->ok && !s->was_timeout, s->was_timeout,
+                                            s->elapsed_ms);
                     conv_add_tool_result_named(&conv, blk->tool_id, blk->tool_name, s->result,
                                                !s->ok);
 
@@ -8971,6 +9054,7 @@ bool agent_run(const char *api_key, const char *model, const char *topology_name
 
         /* End prompt-level trace span */
         trace_span_end(prompt_span, g_interrupted ? "interrupted" : "ok", NULL);
+        chronicle_span_end(chron_prompt_span, g_interrupted ? "interrupted" : "ok", NULL);
         esc_poller_stop();
         arena_free(&turn_arena);
         terminal_input_echo_restore();
