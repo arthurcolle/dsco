@@ -25,12 +25,15 @@ static sched_task_t *find_task(scheduler_t *s, task_id_t id) {
 
 static void enqueue(scheduler_t *s, sched_priority_t prio, task_id_t id) {
     int p = (int)prio;
-    if (p < 0 || p >= SCHED_PRIO_COUNT) return;
-    if (s->run_queue_len[p] >= SCHED_MAX_TASKS) return;
+    if (p < 0 || p >= SCHED_PRIO_COUNT)
+        return;
+    if (s->run_queue_len[p] >= SCHED_MAX_TASKS)
+        return;
 
     /* Avoid duplicates */
     for (int i = 0; i < s->run_queue_len[p]; i++) {
-        if (s->run_queue[p][i] == id) return;
+        if (s->run_queue[p][i] == id)
+            return;
     }
 
     s->run_queue[p][s->run_queue_len[p]++] = id;
@@ -63,8 +66,8 @@ void sched_destroy(scheduler_t *s) {
 
 /* ── Task management ───────────────────────────────────────────────── */
 
-task_id_t sched_spawn(scheduler_t *s, task_func_t func, void *ctx,
-                      const char *label, sched_priority_t prio) {
+task_id_t sched_spawn(scheduler_t *s, task_func_t func, void *ctx, const char *label,
+                      sched_priority_t prio) {
     if (!s || !func || s->task_count >= SCHED_MAX_TASKS)
         return TASK_INVALID;
 
@@ -72,16 +75,16 @@ task_id_t sched_spawn(scheduler_t *s, task_func_t func, void *ctx,
     sched_task_t *t = &s->tasks[idx];
     memset(t, 0, sizeof(*t));
 
-    t->id           = s->next_id++;
-    t->func         = func;
-    t->ctx          = ctx;
-    t->label        = label;
-    t->priority     = prio;
-    t->state        = TASK_READY;
-    t->created_ms   = now_ms();
-    t->wait_fd      = -1;
-    t->wait_task    = TASK_INVALID;
-    t->budget       = s->default_budget;
+    t->id = s->next_id++;
+    t->func = func;
+    t->ctx = ctx;
+    t->label = label;
+    t->priority = prio;
+    t->state = TASK_READY;
+    t->created_ms = now_ms();
+    t->wait_fd = -1;
+    t->wait_task = TASK_INVALID;
+    t->budget = s->default_budget;
 
     enqueue(s, prio, t->id);
     return t->id;
@@ -89,8 +92,10 @@ task_id_t sched_spawn(scheduler_t *s, task_func_t func, void *ctx,
 
 bool sched_cancel(scheduler_t *s, task_id_t id) {
     sched_task_t *t = find_task(s, id);
-    if (!t) return false;
-    if (t->state == TASK_COMPLETED || t->state == TASK_FAILED) return false;
+    if (!t)
+        return false;
+    if (t->state == TASK_COMPLETED || t->state == TASK_FAILED)
+        return false;
 
     t->state = TASK_CANCELLED;
     t->completed_ms = now_ms();
@@ -104,7 +109,8 @@ sched_task_t *sched_task_get(scheduler_t *s, task_id_t id) {
 /* ── Wait operations ───────────────────────────────────────────────── */
 
 void sched_wait_fd(scheduler_t *s, int fd) {
-    if (s->current == TASK_INVALID) return;
+    if (s->current == TASK_INVALID)
+        return;
     sched_task_t *t = find_task(s, s->current);
     if (t) {
         t->state = TASK_WAITING_IO;
@@ -113,7 +119,8 @@ void sched_wait_fd(scheduler_t *s, int fd) {
 }
 
 void sched_sleep(scheduler_t *s, int ms) {
-    if (s->current == TASK_INVALID) return;
+    if (s->current == TASK_INVALID)
+        return;
     sched_task_t *t = find_task(s, s->current);
     if (t) {
         t->state = TASK_WAITING_TIMER;
@@ -122,7 +129,8 @@ void sched_sleep(scheduler_t *s, int ms) {
 }
 
 void sched_wait_task(scheduler_t *s, task_id_t other) {
-    if (s->current == TASK_INVALID) return;
+    if (s->current == TASK_INVALID)
+        return;
     sched_task_t *t = find_task(s, s->current);
     if (t) {
         t->state = TASK_WAITING_TASK;
@@ -144,8 +152,8 @@ static void check_wakeups(scheduler_t *s) {
 
         if (task->state == TASK_WAITING_TASK) {
             sched_task_t *other = find_task(s, task->wait_task);
-            if (!other || other->state == TASK_COMPLETED ||
-                other->state == TASK_FAILED || other->state == TASK_CANCELLED) {
+            if (!other || other->state == TASK_COMPLETED || other->state == TASK_FAILED ||
+                other->state == TASK_CANCELLED) {
                 task->state = TASK_READY;
                 enqueue(s, task->priority, task->id);
             }
@@ -156,7 +164,8 @@ static void check_wakeups(scheduler_t *s) {
 /* ── Execution ─────────────────────────────────────────────────────── */
 
 int sched_tick(scheduler_t *s) {
-    if (!s) return 0;
+    if (!s)
+        return 0;
 
     s->tick_count++;
     check_wakeups(s);
@@ -165,7 +174,8 @@ int sched_tick(scheduler_t *s) {
     task_id_t picked = TASK_INVALID;
     for (int p = 0; p < SCHED_PRIO_COUNT; p++) {
         picked = dequeue(s, (sched_priority_t)p);
-        if (picked != TASK_INVALID) break;
+        if (picked != TASK_INVALID)
+            break;
     }
 
     if (picked == TASK_INVALID) {
@@ -180,11 +190,13 @@ int sched_tick(scheduler_t *s) {
     }
 
     sched_task_t *task = find_task(s, picked);
-    if (!task) return 0;
+    if (!task)
+        return 0;
 
     /* Execute */
     task->state = TASK_RUNNING;
-    if (task->started_ms == 0) task->started_ms = now_ms();
+    if (task->started_ms == 0)
+        task->started_ms = now_ms();
     s->current = task->id;
     s->total_dispatches++;
 
@@ -214,7 +226,8 @@ int sched_tick(scheduler_t *s) {
             if (task->budget > 0 && task->ticks >= task->budget) {
                 /* Preempted — lower priority */
                 sched_priority_t demoted = task->priority;
-                if (demoted < SCHED_PRIO_IDLE) demoted++;
+                if (demoted < SCHED_PRIO_IDLE)
+                    demoted++;
                 enqueue(s, demoted, task->id);
             } else {
                 enqueue(s, task->priority, task->id);
@@ -235,33 +248,40 @@ int sched_tick(scheduler_t *s) {
 
 int sched_run(scheduler_t *s, int poll_ms) {
     (void)poll_ms;
-    if (!s) return -1;
+    if (!s)
+        return -1;
     s->running = true;
     while (s->running) {
         int active = sched_tick(s);
-        if (active == 0) break;
+        if (active == 0)
+            break;
     }
     s->running = false;
     return 0;
 }
 
 void sched_stop(scheduler_t *s) {
-    if (s) s->running = false;
+    if (s)
+        s->running = false;
 }
 
 /* ── Convenience ───────────────────────────────────────────────────── */
 
-int sched_run_sync(scheduler_t *s, task_func_t func, void *ctx,
-                   const char *label) {
+int sched_run_sync(scheduler_t *s, task_func_t func, void *ctx, const char *label) {
     task_id_t id = sched_spawn(s, func, ctx, label, SCHED_PRIO_HIGH);
-    if (id == TASK_INVALID) return -1;
+    if (id == TASK_INVALID)
+        return -1;
 
     while (1) {
         sched_task_t *t = find_task(s, id);
-        if (!t) return -1;
-        if (t->state == TASK_COMPLETED) return t->exit_code;
-        if (t->state == TASK_FAILED)    return t->exit_code;
-        if (t->state == TASK_CANCELLED) return -2;
+        if (!t)
+            return -1;
+        if (t->state == TASK_COMPLETED)
+            return t->exit_code;
+        if (t->state == TASK_FAILED)
+            return t->exit_code;
+        if (t->state == TASK_CANCELLED)
+            return -2;
         sched_tick(s);
     }
 }
@@ -269,7 +289,8 @@ int sched_run_sync(scheduler_t *s, task_func_t func, void *ctx,
 int sched_count_by_state(scheduler_t *s, task_state_t state) {
     int count = 0;
     for (int i = 0; i < s->task_count; i++) {
-        if (s->tasks[i].state == state) count++;
+        if (s->tasks[i].state == state)
+            count++;
     }
     return count;
 }
@@ -279,7 +300,8 @@ int sched_count_by_state(scheduler_t *s, task_state_t state) {
 sched_stats_t sched_get_stats(scheduler_t *s) {
     sched_stats_t st;
     memset(&st, 0, sizeof(st));
-    if (!s) return st;
+    if (!s)
+        return st;
     st.tick_count = s->tick_count;
     st.total_dispatches = s->total_dispatches;
     st.tasks_total = s->task_count;
@@ -296,47 +318,58 @@ sched_stats_t sched_get_stats(scheduler_t *s) {
 
 static const char *state_name(task_state_t st) {
     switch (st) {
-    case TASK_CREATED:       return "CREATED";
-    case TASK_READY:         return "READY";
-    case TASK_RUNNING:       return "RUNNING";
-    case TASK_WAITING_IO:    return "WAIT_IO";
-    case TASK_WAITING_TIMER: return "WAIT_TMR";
-    case TASK_WAITING_TASK:  return "WAIT_TSK";
-    case TASK_COMPLETED:     return "DONE";
-    case TASK_FAILED:        return "FAILED";
-    case TASK_CANCELLED:     return "CANCEL";
+        case TASK_CREATED:
+            return "CREATED";
+        case TASK_READY:
+            return "READY";
+        case TASK_RUNNING:
+            return "RUNNING";
+        case TASK_WAITING_IO:
+            return "WAIT_IO";
+        case TASK_WAITING_TIMER:
+            return "WAIT_TMR";
+        case TASK_WAITING_TASK:
+            return "WAIT_TSK";
+        case TASK_COMPLETED:
+            return "DONE";
+        case TASK_FAILED:
+            return "FAILED";
+        case TASK_CANCELLED:
+            return "CANCEL";
     }
     return "???";
 }
 
 static const char *prio_name(sched_priority_t p) {
     switch (p) {
-    case SCHED_PRIO_CRITICAL: return "CRIT";
-    case SCHED_PRIO_HIGH:     return "HIGH";
-    case SCHED_PRIO_NORMAL:   return "NORM";
-    case SCHED_PRIO_LOW:      return "LOW";
-    case SCHED_PRIO_IDLE:     return "IDLE";
-    default:                  return "???";
+        case SCHED_PRIO_CRITICAL:
+            return "CRIT";
+        case SCHED_PRIO_HIGH:
+            return "HIGH";
+        case SCHED_PRIO_NORMAL:
+            return "NORM";
+        case SCHED_PRIO_LOW:
+            return "LOW";
+        case SCHED_PRIO_IDLE:
+            return "IDLE";
+        default:
+            return "???";
     }
 }
 
 void sched_dump(scheduler_t *s) {
-    if (!s) return;
-    fprintf(stderr, "  scheduler: %d tasks, %llu ticks, %llu dispatches\n",
-            s->task_count, (unsigned long long)s->tick_count,
-            (unsigned long long)s->total_dispatches);
-    fprintf(stderr, "  %-4s %-16s %-5s %-8s %6s %8s\n",
-            "ID", "LABEL", "PRIO", "STATE", "TICKS", "CPU(ms)");
-    fprintf(stderr, "  %-4s %-16s %-5s %-8s %6s %8s\n",
-            "──", "─────", "────", "─────", "─────", "───────");
+    if (!s)
+        return;
+    fprintf(stderr, "  scheduler: %d tasks, %llu ticks, %llu dispatches\n", s->task_count,
+            (unsigned long long)s->tick_count, (unsigned long long)s->total_dispatches);
+    fprintf(stderr, "  %-4s %-16s %-5s %-8s %6s %8s\n", "ID", "LABEL", "PRIO", "STATE", "TICKS",
+            "CPU(ms)");
+    fprintf(stderr, "  %-4s %-16s %-5s %-8s %6s %8s\n", "──", "─────", "────", "─────", "─────",
+            "───────");
     for (int i = 0; i < s->task_count; i++) {
         sched_task_t *t = &s->tasks[i];
-        fprintf(stderr, "  %-4d %-16s %-5s %-8s %6d %8llu\n",
-                t->id,
-                t->label ? t->label : "(none)",
-                prio_name(t->priority),
-                state_name(t->state),
-                t->ticks,
+        fprintf(stderr, "  %-4d %-16s %-5s %-8s %6d %8llu\n", t->id, t->label ? t->label : "(none)",
+                prio_name(t->priority), state_name(t->state), t->ticks,
                 (unsigned long long)t->cpu_ms);
     }
 }

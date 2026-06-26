@@ -13,12 +13,17 @@ INC_DIR = include
 TEST_DIR = tests
 BUILD_DIR ?= build
 
-BASE_CFLAGS = -Wall -Wextra -O3 -std=c2y $(C2Y_WARNING_FLAGS) -D_POSIX_C_SOURCE=200809L \
+# CI-safe defaults: allow override via env for reproducible builds
+DSCO_STD ?= c2y
+DSCO_ARCH ?= native
+BASE_CFLAGS = -Wall -Wextra -O3 -std=$(DSCO_STD) $(C2Y_WARNING_FLAGS) -D_POSIX_C_SOURCE=200809L \
 	-I$(INC_DIR) \
-	-march=native -mtune=native -funroll-loops -fvisibility=hidden \
+	-march=$(DSCO_ARCH) -mtune=$(DSCO_ARCH) -funroll-loops -fvisibility=hidden \
 	-funwind-tables -fno-omit-frame-pointer -g \
 	-MMD -MP \
-	-DBUILD_DATE='"$(BUILD_DATE)"' -DGIT_HASH='"$(GIT_HASH)"'
+	-DBUILD_DATE='"$(BUILD_DATE)"' -DGIT_HASH='"$(GIT_HASH)"' \
+	-fstack-protector-strong -D_FORTIFY_SOURCE=2 -Wformat -Wformat-security \
+	-Wno-error=format-security
 CFLAGS ?= $(BASE_CFLAGS)
 TEST_CFLAGS ?= $(BASE_CFLAGS) -O0 -g -fno-omit-frame-pointer -fno-inline
 # Release link-time optimizations:
@@ -43,18 +48,19 @@ TARGET = dsco
 LITE_TARGET = dsco-lite
 DEBUG_TARGET = $(TARGET)-debug
 
-SRC_NAMES = main.c agent.c llm.c tools.c json_util.c ast.c swarm.c tui.c \
+SRC_NAMES = main.c agent.c llm.c tools.c execution_layer.c json_util.c ast.c swarm.c tui.c env_config.c \
 	md.c baseline.c setup.c crypto.c eval.c pipeline.c plugin.c \
-			semantic.c ipc.c mcp.c mcp_names.c provider_profiles.c provider.c integrations.c error.c trace.c task_profile.c \
+			semantic.c hlc.c ipc.c mcp.c mcp_names.c provider_profiles.c provider.c integrations.c error.c trace.c task_profile.c \
 	output_guard.c topology.c workspace.c plan.c stateful_atoms.c recovery.c router.c \
-	pheromone.c ooda.c killswitch.c governance.c memory_tier.c talons.c \
+	pheromone.c ooda.c killswitch.c governance.c memory_tier.c talons.c avian.c \
 	arena_alloc.c event_loop.c vm.c scheduler.c vfs.c trading.c legion.c \
 	agent_profile.c orchestrator.c vecstore.c tamper.c sealed_store.c \
 	se_store.c watchdog.c audit_log.c heartbeat.c env_guard.c peer_bootstrap.c presence.c \
 	project.c project_mux.c project_grid.c \
 	dsco_accel.c dsco_mlx.c dsco_pool.c \
-	fingerprint.c trust.c toolmgmt.c connector.c openrouter_cache.c \
-	startup.c plot.c anim.c fractal.c self_improve.c rsi_curriculum.c pets.c img_util.c supervisor.c \
+	fingerprint.c trust.c toolmgmt.c connector.c integration_fabric.c openrouter_cache.c codex_cache.c dcr.c \
+	openai_oauth.c local_llm.c \
+	startup.c plot.c anim.c fractal.c shadeexpr.c face_sdf.c avatar.c self_improve.c bg_learn.c rsi_curriculum.c pets.c img_util.c supervisor.c \
 	graphsub_client.c graphsub_tools.c \
 	extension/backend.c extension/numerical_gsl.c extension/skill_requirements.c \
 	extension/eigen_backend.c extension/fftw_backend.c extension/backend_selftest.c \
@@ -62,6 +68,9 @@ SRC_NAMES = main.c agent.c llm.c tools.c json_util.c ast.c swarm.c tui.c \
 	introspect.c \
 	learned_cost.c \
 	session_memory.c \
+	provider_pool.c \
+	math_fastpath.c \
+	http_pool.c \
 	$(OPTIONAL_SRCS)
 TEST_SRC_NAMES = test.c
 
@@ -86,6 +95,7 @@ ASAN_TEST_OBJ_DIR := $(BUILD_DIR)/asan-test
 UBSAN_TEST_OBJ_DIR := $(BUILD_DIR)/ubsan-test
 
 OBJS = $(SRC_NAMES:%.c=$(OBJ_DIR)/%.o)
+OBJS += $(GENERATED_OBJS)
 LIB_OBJS = $(filter-out $(OBJ_DIR)/main.o $(OBJ_DIR)/agent.o $(OBJ_DIR)/orchestrator.o, $(OBJS))
 TEST_OBJS = $(TEST_SRC_NAMES:%.c=$(TEST_OBJ_DIR)/%.o) $(LIB_OBJS:$(OBJ_DIR)/%=$(TEST_OBJ_DIR)/%)
 TEST_COVERAGE_OBJS = $(TEST_SRC_NAMES:%.c=$(TEST_COVERAGE_OBJ_DIR)/%.o) $(LIB_OBJS:$(OBJ_DIR)/%=$(TEST_COVERAGE_OBJ_DIR)/%)
@@ -100,7 +110,7 @@ ASAN_LDFLAGS = -fsanitize=address
 UBSAN_CFLAGS = $(BASE_CFLAGS) -O0 -g -fno-omit-frame-pointer -fno-inline -fsanitize=undefined -fno-sanitize-recover=all
 UBSAN_LDFLAGS = -fsanitize=undefined -fno-sanitize-recover=all
 DEBUG_CFLAGS = $(BASE_CFLAGS) -O0 -g -fno-omit-frame-pointer -fno-inline -DDSCO_DEV_BINARY
-LITE_CFLAGS ?= -Oz -std=c2y $(C2Y_WARNING_FLAGS) -D_POSIX_C_SOURCE=200809L \
+LITE_CFLAGS ?= -Oz -std=$(DSCO_STD) $(C2Y_WARNING_FLAGS) -D_POSIX_C_SOURCE=200809L \
 	-I$(INC_DIR) -DBUILD_DATE='"$(BUILD_DATE)"' -DGIT_HASH='"$(GIT_HASH)"'
 COVERAGE_CFLAGS = $(BASE_CFLAGS) -O0 -g -fno-omit-frame-pointer -fno-inline --coverage
 COVERAGE_LDFLAGS = --coverage
@@ -215,6 +225,15 @@ LDLIBS      += -L$(MBEDTLS_PREFIX)/lib -lmbedtls -lmbedx509 -lmbedcrypto
 endif
 endif
 
+# Pizza-box: baked data blobs get their own flat obj names. Derive this from
+# data/ rather than src/generated/, because src/generated/ may not exist until
+# the bake step runs.
+BAKED_DATA       := $(shell find data -maxdepth 1 -type f -print 2>/dev/null | sort)
+BAKED_DATA_SYMS  := $(subst -,_,$(subst .,_,$(notdir $(BAKED_DATA))))
+GENERATED_C      := $(addprefix src/generated/embedded_,$(addsuffix .c,$(BAKED_DATA_SYMS)))
+GENERATED_REGISTRY := $(INC_DIR)/embedded_data_registry.h
+GENERATED_OBJS   := $(patsubst src/generated/%.c,$(OBJ_DIR)/generated_%.o,$(GENERATED_C))
+
 # Conditionally add mesh + net_server when libsodium is available
 OPTIONAL_SRCS =
 ifneq ($(SODIUM_CFLAGS),)
@@ -238,8 +257,44 @@ all: $(TARGET) dsc dsco-new $(LITE_TARGET)
 debug: $(DEBUG_TARGET)
 dev: $(DEBUG_TARGET)
 
+# Ultra-fast edit→signal loop. Uses scripts/dev_fast.sh with a separate
+# build/fast object tree, low-optimizer dev flags, dependency files, and
+# optional sccache/ccache if installed.
+.PHONY: fast fast-build fast-test fast-quick fast-syntax fast-changed fast-bench fast-doctor changed-tests compile-commands build-report
+fast: fast-build
+fast-build:
+	./scripts/dev_fast.sh build
+fast-test:
+	./scripts/dev_fast.sh test
+fast-quick:
+	./scripts/dev_fast.sh quick
+fast-syntax:
+	./scripts/dev_fast.sh syntax
+fast-changed:
+	./scripts/dev_fast.sh changed
+fast-bench:
+	./scripts/dev_fast.sh bench
+fast-doctor:
+	./scripts/dev_fast.sh doctor
+changed-tests:
+	./scripts/changed_tests.sh
+compile-commands:
+	python3 scripts/gen_compile_commands.py
+build-report:
+	python3 scripts/build_report.py
+build-cache-doctor:
+	./scripts/build_cache_doctor.sh
+fast-objects:
+	./scripts/fast_touch.sh
+time-trace:
+	./scripts/build_time_trace.sh
+ninja-file:
+	python3 scripts/gen_ninja.py
+ninja-build: ninja-file
+	ninja -f build.ninja
+
 dsc: dsc.c
-	$(CC) -O2 -std=c2y $(C2Y_WARNING_FLAGS) -D_POSIX_C_SOURCE=200809L -o $@ $< -lcurl -lreadline
+	$(CC) -O2 -std=$(DSCO_STD) $(C2Y_WARNING_FLAGS) -D_POSIX_C_SOURCE=200809L -o $@ $< -lcurl -lreadline
 
 $(DEBUG_TARGET): $(DEBUG_OBJS) $(GSL_DEBUG_OBJS)
 	$(CC) $(DEBUG_CFLAGS) -o $@ $^ $(LDFLAGS) $(LDLIBS)
@@ -256,6 +311,42 @@ $(LITE_TARGET): $(SRC_DIR)/lite_main.c $(INC_DIR)/config.h
 	-strip -x $@ 2>/dev/null || true
 
 # Source compilation rules
+# ── Pizza box: bake data/ blobs before generated .o files are compiled ──
+.PHONY: bake_data
+bake_data: $(BUILD_DIR)/.bake_data.stamp
+
+$(BUILD_DIR)/.bake_data.stamp: $(BAKED_DATA) scripts/bake_data.sh | $(BUILD_DIR)
+	@bash scripts/bake_data.sh data src/generated include
+	@touch $@
+
+$(GENERATED_C) $(GENERATED_REGISTRY): $(BUILD_DIR)/.bake_data.stamp
+	@if [ ! -f "$@" ]; then \
+		rm -f $(BUILD_DIR)/.bake_data.stamp; \
+		$(MAKE) --no-print-directory bake_data; \
+	fi
+	@test -f "$@"
+
+# Pizza-box pattern rule: src/generated/foo.c -> build/obj/generated_foo.o
+$(OBJ_DIR)/generated_%.o: src/generated/%.c | bake_data $(OBJ_DIR)
+	$(CC) $(CFLAGS) -c -o $@ $<
+
+# Pizza-box generated objects for the test/coverage/sanitizer trees. The test
+# object lists inherit GENERATED_OBJS (via LIB_OBJS), so each test variant needs
+# its own rule to compile src/generated/*.c into its build dir. Without these,
+# `make test` and the standalone test_* targets fail with
+# "No rule to make target build/test/generated_*.o".
+$(TEST_OBJ_DIR)/generated_%.o: src/generated/%.c | bake_data $(TEST_OBJ_DIR)
+	$(CC) $(TEST_CFLAGS) -c -o $@ $<
+
+$(TEST_COVERAGE_OBJ_DIR)/generated_%.o: src/generated/%.c | bake_data $(TEST_COVERAGE_OBJ_DIR)
+	$(CC) $(COVERAGE_CFLAGS) -c -o $@ $<
+
+$(ASAN_TEST_OBJ_DIR)/generated_%.o: src/generated/%.c | bake_data $(ASAN_TEST_OBJ_DIR)
+	$(CC) $(ASAN_CFLAGS) -c -o $@ $<
+
+$(UBSAN_TEST_OBJ_DIR)/generated_%.o: src/generated/%.c | bake_data $(UBSAN_TEST_OBJ_DIR)
+	$(CC) $(UBSAN_CFLAGS) -c -o $@ $<
+
 $(OBJ_DIR)/%.o: $(SRC_DIR)/%.c | $(OBJ_DIR)
 	@mkdir -p $(@D)
 	$(CC) $(CFLAGS) -c -o $@ $<
@@ -328,6 +419,9 @@ $(UBSAN_OBJ_DIR)/%.o: $(SRC_DIR)/%.m | $(UBSAN_OBJ_DIR)
 $(TEST_OBJ_DIR)/test.o: $(TEST_DIR)/test.c | $(TEST_OBJ_DIR)
 	$(CC) $(TEST_CFLAGS) -c -o $@ $<
 
+$(TEST_OBJ_DIR)/test_%.o: $(TEST_DIR)/test_%.c | $(TEST_OBJ_DIR)
+	$(CC) $(TEST_CFLAGS) -c -o $@ $<
+
 $(TEST_OBJ_DIR)/%.o: $(SRC_DIR)/%.c | $(TEST_OBJ_DIR)
 	@mkdir -p $(@D)
 	$(CC) $(TEST_CFLAGS) -c -o $@ $<
@@ -386,6 +480,24 @@ test: test_runner
 test_runner: $(TEST_OBJS) $(GSL_TEST_OBJS)
 	$(CC) $(TEST_CFLAGS) -o $@ $^ $(LDFLAGS) $(LDLIBS)
 
+# ── TUI snapshot tests (Integument golden tests) ─────────────────────────
+# Headless golden tests for deterministic render primitives. These link the
+# test-object graph (main/agent/orchestrator excluded by LIB_OBJS) plus vendored
+# GSL, and provide test-local globals for CLI-entry symbols.
+TUI_TEST_LIB_OBJS = $(LIB_OBJS) $(GSL_OBJS)
+
+.PHONY: test_tui_snapshot test_tui_theme_snapshot test_tui_snapshots
+
+test_tui_snapshot: $(TEST_OBJ_DIR)/test_tui_snapshot.o $(TUI_TEST_LIB_OBJS)
+	$(CC) $(TEST_CFLAGS) -fcommon -o $(BUILD_DIR)/$@ $^ $(LDFLAGS) $(LDLIBS)
+	$(BUILD_DIR)/$@
+
+test_tui_theme_snapshot: $(TEST_OBJ_DIR)/test_tui_theme_snapshot.o $(TUI_TEST_LIB_OBJS)
+	$(CC) $(TEST_CFLAGS) -fcommon -o $(BUILD_DIR)/$@ $^ $(LDFLAGS) $(LDLIBS)
+	$(BUILD_DIR)/$@
+
+test_tui_snapshots: test_tui_snapshot test_tui_theme_snapshot
+
 # Priority 7 standalone test binary
 RECOVERY_TEST_OBJS = $(TEST_OBJ_DIR)/test_recovery.o \
 	$(LIB_OBJS:$(OBJ_DIR)/%=$(TEST_OBJ_DIR)/%)
@@ -406,6 +518,77 @@ test_stateful_atoms: $(TEST_OBJ_DIR)/test_stateful_atoms.o \
 $(TEST_OBJ_DIR)/test_stateful_atoms.o: $(TEST_DIR)/test_stateful_atoms.c | $(TEST_OBJ_DIR)
 	$(CC) $(TEST_CFLAGS) -c -o $@ $<
 
+# Priority standalone test binaries (P1/P3/P4/P5/P6). Each test_*.c has its own
+# main() (so they can't fold into test_runner) and a self-contained stub for any
+# runtime globals it needs. They therefore link a MINIMAL object set — only the
+# module under test plus its direct deps — to avoid duplicate-symbol clashes
+# with tools.o/agent.o that define the same globals. Mirrors test_stateful_atoms.
+
+$(TEST_OBJ_DIR)/test_plan_optimizer.o: $(TEST_DIR)/test_plan_optimizer.c | $(TEST_OBJ_DIR)
+	$(CC) $(TEST_CFLAGS) -c -o $@ $<
+# plan_optimizer pulls in topology→swarm→provider→plan_cache; link full lib set.
+test_plan_optimizer: $(TEST_OBJ_DIR)/test_plan_optimizer.o \
+	$(LIB_OBJS:$(OBJ_DIR)/%=$(TEST_OBJ_DIR)/%) $(GSL_TEST_OBJS)
+	$(CC) $(TEST_CFLAGS) -o $@ $^ $(LDFLAGS) $(LDLIBS)
+
+$(TEST_OBJ_DIR)/test_plan_cache.o: $(TEST_DIR)/test_plan_cache.c | $(TEST_OBJ_DIR)
+	$(CC) $(TEST_CFLAGS) -c -o $@ $<
+test_plan_cache: $(TEST_OBJ_DIR)/test_plan_cache.o \
+	$(TEST_OBJ_DIR)/plan_cache.o $(TEST_OBJ_DIR)/json_util.o \
+	$(TEST_OBJ_DIR)/arena_alloc.o
+	$(CC) $(TEST_CFLAGS) -o $@ $^ $(LDFLAGS) -lm
+
+$(TEST_OBJ_DIR)/test_learned_cost.o: $(TEST_DIR)/test_learned_cost.c | $(TEST_OBJ_DIR)
+	$(CC) $(TEST_CFLAGS) -c -o $@ $<
+test_learned_cost: $(TEST_OBJ_DIR)/test_learned_cost.o \
+	$(TEST_OBJ_DIR)/learned_cost.o
+	$(CC) $(TEST_CFLAGS) -o $@ $^ $(LDFLAGS) -lm
+
+$(TEST_OBJ_DIR)/test_session_memory.o: $(TEST_DIR)/test_session_memory.c | $(TEST_OBJ_DIR)
+	$(CC) $(TEST_CFLAGS) -c -o $@ $<
+# session_memory pulls in vecstore + tools_embed_text; link full lib set.
+test_session_memory: $(TEST_OBJ_DIR)/test_session_memory.o \
+	$(LIB_OBJS:$(OBJ_DIR)/%=$(TEST_OBJ_DIR)/%) $(GSL_TEST_OBJS)
+	$(CC) $(TEST_CFLAGS) -o $@ $^ $(LDFLAGS) $(LDLIBS)
+
+$(TEST_OBJ_DIR)/test_control_flow.o: $(TEST_DIR)/test_control_flow.c | $(TEST_OBJ_DIR)
+	$(CC) $(TEST_CFLAGS) -c -o $@ $<
+test_control_flow: $(TEST_OBJ_DIR)/test_control_flow.o \
+	$(TEST_OBJ_DIR)/control_flow.o $(TEST_OBJ_DIR)/plan.o \
+	$(TEST_OBJ_DIR)/json_util.o $(TEST_OBJ_DIR)/arena_alloc.o
+	$(CC) $(TEST_CFLAGS) -o $@ $^ $(LDFLAGS) -lm
+
+$(TEST_OBJ_DIR)/test_avian.o: $(TEST_DIR)/test_avian.c | $(TEST_OBJ_DIR)
+	$(CC) $(TEST_CFLAGS) -c -o $@ $<
+test_avian: $(TEST_OBJ_DIR)/test_avian.o $(TEST_OBJ_DIR)/avian.o
+	$(CC) $(TEST_CFLAGS) -o $@ $^ $(LDFLAGS) -lm
+
+# Math fast-path corpus test. Links the REAL production logic (math_fastpath.c
+# + eval.c) and validates routing + value over thousands of generated cases.
+# Regenerates the corpus first so it can never drift from the generator.
+$(TEST_OBJ_DIR)/test_math_corpus.o: $(TEST_DIR)/test_math_corpus.c | $(TEST_OBJ_DIR)
+	$(CC) $(TEST_CFLAGS) -c -o $@ $<
+
+test_math_corpus: $(TEST_OBJ_DIR)/test_math_corpus.o \
+	$(TEST_OBJ_DIR)/math_fastpath.o $(TEST_OBJ_DIR)/eval.o
+	$(CC) $(TEST_CFLAGS) -o $@ $^ $(LDFLAGS) -lm
+	python3 $(TEST_DIR)/gen_math_corpus.py $(TEST_DIR)/math_corpus.tsv
+	./test_math_corpus $(TEST_DIR)/math_corpus.tsv
+
+# Build + run every standalone priority test in sequence.
+.PHONY: test_priorities
+test_priorities: test_recovery test_stateful_atoms test_plan_optimizer test_plan_cache \
+	test_learned_cost test_session_memory test_control_flow test_avian test_math_corpus
+	./test_recovery
+	./test_stateful_atoms
+	./test_plan_optimizer
+	./test_plan_cache
+	./test_learned_cost
+	./test_session_memory
+	./test_control_flow
+	./test_avian
+	./test_math_corpus $(TEST_DIR)/math_corpus.tsv
+
 coverage: coverage_runner
 	./coverage_runner
 
@@ -414,12 +597,12 @@ coverage_runner: $(TEST_COVERAGE_OBJS) $(GSL_COVERAGE_OBJS)
 
 asan: $(TARGET)-asan
 
-$(TARGET)-asan: $(ASAN_OBJS)
+$(TARGET)-asan: $(ASAN_OBJS) $(GSL_ASAN_OBJS)
 	$(CC) $(ASAN_CFLAGS) -o $@ $^ $(LDFLAGS) $(ASAN_LDFLAGS) $(LDLIBS)
 
 ubsan: $(TARGET)-ubsan
 
-$(TARGET)-ubsan: $(UBSAN_OBJS)
+$(TARGET)-ubsan: $(UBSAN_OBJS) $(GSL_UBSAN_OBJS)
 	$(CC) $(UBSAN_CFLAGS) -o $@ $^ $(LDFLAGS) $(UBSAN_LDFLAGS) $(LDLIBS)
 
 asan-test: asan-test_runner
@@ -445,7 +628,7 @@ clang-tidy:
 		echo "clang-tidy not found" >&2; \
 		exit 1; \
 	fi
-	clang-tidy $(SRCS) -- -I$(INC_DIR) -std=c11 -D_POSIX_C_SOURCE=200809L
+	clang-tidy $(SRCS) -- -I$(INC_DIR) -std=c11 -D_POSIX_C_SOURCE=200809L -DHAVE_MBEDTLS -DHAVE_LIBSODIUM -DHAVE_LIBUV
 
 cppcheck:
 	@if ! command -v cppcheck >/dev/null 2>&1; then \
@@ -522,11 +705,14 @@ install: $(TARGET) $(LITE_TARGET) dsc
 	install -m 755 $(TARGET) $(PREFIX)/bin/
 	install -m 755 $(LITE_TARGET) $(PREFIX)/bin/
 	install -m 755 dsc $(PREFIX)/bin/
+	install -m 755 scripts/live_face_avatar.sh $(PREFIX)/bin/dsco-live-face-avatar
 	test -f dsco-new && install -m 755 dsco-new $(PREFIX)/bin/ || true
 	install -m 644 $(INC_DIR)/tool_embeddings.bin $(DSCO_SHARE_DIR)/
+	install -m 755 face_capture.py $(DSCO_SHARE_DIR)/
 	install -d $(DSCO_DIR)/sessions $(DSCO_DIR)/plugins $(DSCO_DIR)/debug
 	@echo "installed dsco, dsco-lite, dsc, dsco-new to $(PREFIX)/bin/"
 	@echo "installed tool_embeddings.bin to $(DSCO_SHARE_DIR)/"
+	@echo "installed dsco-live-face-avatar and face_capture.py"
 	@echo "created $(DSCO_DIR)/{sessions,plugins,debug}"
 
 uninstall:
@@ -534,7 +720,10 @@ uninstall:
 	rm -f $(PREFIX)/bin/$(LITE_TARGET)
 	rm -f $(PREFIX)/bin/dsc
 	rm -f $(PREFIX)/bin/dsco-new
+	rm -f $(PREFIX)/bin/dsco-live-face-avatar
 	rm -f $(DSCO_SHARE_DIR)/tool_embeddings.bin
+	rm -f $(DSCO_SHARE_DIR)/face_capture.py
+	-rmdir $(DSCO_SHARE_DIR) 2>/dev/null || true
 	@echo "removed $(PREFIX)/bin/$(TARGET)"
 
 ui-deps:
@@ -545,6 +734,8 @@ ui: $(TARGET) ui-deps
 
 .PHONY: all debug dev clean install uninstall test coverage docs docs-check \
 	asan ubsan asan-test ubsan-test format format-check \
+	fast fast-build fast-test fast-quick fast-syntax fast-changed fast-bench fast-doctor \
+	changed-tests compile-commands build-report build-cache-doctor fast-objects time-trace ninja-file ninja-build \
 	lint clang-tidy cppcheck static-analysis check-version \
 	ui ui-deps bench-startup bench-tool bench-agent-loop bench-local \
 	bench-sota bench-ttft bench-worker bench-size

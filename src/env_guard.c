@@ -8,27 +8,25 @@
 #include <unistd.h>
 
 #ifdef __APPLE__
-#  include <mach-o/dyld.h>
+#include <mach-o/dyld.h>
 #endif
 
 /* ── dangerous environment variables ───────────────────────────────────── */
 
-static const char *s_dangerous[] = {
-    "LD_PRELOAD",
-    "LD_AUDIT",
-    "LD_DEBUG",
-    "LD_PROFILE",
-    "DYLD_INSERT_LIBRARIES",
-    "DYLD_FORCE_FLAT_NAMESPACE",
-    "DYLD_IMAGE_SUFFIX",
-    "DYLD_FRAMEWORK_PATH",
-    "DYLD_LIBRARY_PATH",
-    "MALLOC_CHECK_",
-    "MALLOC_PERTURB_",
-    "GLIBC_TUNABLES",
-    "LIBC_FATAL_STDERR_",
-    NULL
-};
+static const char *s_dangerous[] = {"LD_PRELOAD",
+                                    "LD_AUDIT",
+                                    "LD_DEBUG",
+                                    "LD_PROFILE",
+                                    "DYLD_INSERT_LIBRARIES",
+                                    "DYLD_FORCE_FLAT_NAMESPACE",
+                                    "DYLD_IMAGE_SUFFIX",
+                                    "DYLD_FRAMEWORK_PATH",
+                                    "DYLD_LIBRARY_PATH",
+                                    "MALLOC_CHECK_",
+                                    "MALLOC_PERTURB_",
+                                    "GLIBC_TUNABLES",
+                                    "LIBC_FATAL_STDERR_",
+                                    NULL};
 
 /* ── baseline dylib count captured at env_guard_init() ─────────────────── */
 
@@ -39,15 +37,15 @@ static uint32_t s_baseline_img_count = 0;
 uint32_t env_guard_init(void) {
     uint32_t flags = 0;
     char report[2048] = {0};
-    int  roff = 0;
+    int roff = 0;
 
     /* 1. strip dangerous env vars and record which were set */
     for (int i = 0; s_dangerous[i]; i++) {
         const char *val = getenv(s_dangerous[i]);
         if (val && val[0]) {
             flags |= ENVG_PRELOAD_FOUND;
-            roff += snprintf(report + roff, sizeof(report) - (size_t)roff,
-                             "%s=%s; ", s_dangerous[i], val);
+            roff += snprintf(report + roff, sizeof(report) - (size_t)roff, "%s=%s; ",
+                             s_dangerous[i], val);
             unsetenv(s_dangerous[i]);
         }
     }
@@ -71,19 +69,27 @@ uint32_t env_guard_init(void) {
         static char exepath[4096];
         uint32_t sz = sizeof(exepath);
         extern int _NSGetExecutablePath(char *, uint32_t *);
-        if (_NSGetExecutablePath(exepath, &sz) == 0) exe = exepath;
+        if (_NSGetExecutablePath(exepath, &sz) == 0)
+            exe = exepath;
     }
 
     for (uint32_t i = 0; i < s_baseline_img_count; i++) {
         const char *img = _dyld_get_image_name(i);
-        if (!img) continue;
+        if (!img)
+            continue;
         /* known-safe prefixes */
-        if (strncmp(img, "/usr/",    5) == 0) continue;
-        if (strncmp(img, "/System/", 8) == 0) continue;
-        if (strncmp(img, "/Library/",9) == 0) continue;
-        if (strncmp(img, "/opt/homebrew/", 14) == 0) continue;
-        if (strncmp(img, "/usr/local/", 11) == 0) continue;
-        if (exe && strncmp(img, exe, strlen(exe)) == 0) continue;
+        if (strncmp(img, "/usr/", 5) == 0)
+            continue;
+        if (strncmp(img, "/System/", 8) == 0)
+            continue;
+        if (strncmp(img, "/Library/", 9) == 0)
+            continue;
+        if (strncmp(img, "/opt/homebrew/", 14) == 0)
+            continue;
+        if (strncmp(img, "/usr/local/", 11) == 0)
+            continue;
+        if (exe && strncmp(img, exe, strlen(exe)) == 0)
+            continue;
         /* anything else — could be injected */
         flags |= ENVG_INJECTED_DYLIB;
         char msg[1024];
@@ -99,14 +105,14 @@ uint32_t env_guard_init(void) {
 bool env_guard_check_dylibs(void) {
 #ifdef __APPLE__
     uint32_t current = _dyld_image_count();
-    if (current <= s_baseline_img_count) return true;
+    if (current <= s_baseline_img_count)
+        return true;
 
     /* new images appeared — enumerate them */
     for (uint32_t i = s_baseline_img_count; i < current; i++) {
         const char *img = _dyld_get_image_name(i);
         char msg[1024];
-        snprintf(msg, sizeof(msg), "dylib injected after init: %s",
-                 img ? img : "(null)");
+        snprintf(msg, sizeof(msg), "dylib injected after init: %s", img ? img : "(null)");
         audit_log("env_guard", msg);
         fprintf(stderr, "[env_guard] ALERT: %s\n", msg);
     }

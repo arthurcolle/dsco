@@ -26,9 +26,9 @@
 /* ── Stub: tools_execute ─────────────────────────────────────────────────── */
 /* plan.c calls this for ATOM_TOOL_CALL; none of our test atoms use it, but
  * the linker needs the symbol.  We don't use tools.c here. */
-bool tools_execute(const char *name, const char *input_json,
-                   char *result, size_t result_len) {
-    (void)name; (void)input_json;
+bool tools_execute(const char *name, const char *input_json, char *result, size_t result_len) {
+    (void)name;
+    (void)input_json;
     snprintf(result, result_len, "{\"stub\":true}");
     return true;
 }
@@ -38,15 +38,16 @@ bool tools_execute(const char *name, const char *input_json,
 static int g_pass = 0;
 static int g_fail = 0;
 
-#define CHECK(cond, msg) do { \
-    if (cond) { \
-        fprintf(stderr, "  PASS  %s\n", msg); \
-        g_pass++; \
-    } else { \
-        fprintf(stderr, "  FAIL  %s\n", msg); \
-        g_fail++; \
-    } \
-} while (0)
+#define CHECK(cond, msg)                                                                           \
+    do {                                                                                           \
+        if (cond) {                                                                                \
+            fprintf(stderr, "  PASS  %s\n", msg);                                                  \
+            g_pass++;                                                                              \
+        } else {                                                                                   \
+            fprintf(stderr, "  FAIL  %s\n", msg);                                                  \
+            g_fail++;                                                                              \
+        }                                                                                          \
+    } while (0)
 
 /* ── Helpers ─────────────────────────────────────────────────────────────── */
 
@@ -61,9 +62,9 @@ static void test_state_init_free(void) {
     fprintf(stderr, "\n[test_state_init_free]\n");
 
     plan_state_t *st = plan_state_init(42);
-    CHECK(st != NULL,              "init returns non-NULL");
-    CHECK(st->plan_id == 42,       "plan_id stored");
-    CHECK(st->output_count == 0,   "output_count starts at 0");
+    CHECK(st != NULL, "init returns non-NULL");
+    CHECK(st->plan_id == 42, "plan_id stored");
+    CHECK(st->output_count == 0, "output_count starts at 0");
     CHECK(st->executed_count == 0, "executed_count starts at 0");
     plan_state_free(st);
     CHECK(true, "free does not crash");
@@ -112,8 +113,8 @@ static void test_linear_pipeline(void) {
 
     /* atom3: noop that reads from atom1 and atom2 */
     int a3 = step_add_atom(step_id, "compare", ATOM_NOOP);
-    atom_wire(a1, a3, NULL);   /* a3 reads a1 full output as "atom_<id>" */
-    atom_wire(a2, a3, NULL);   /* a3 reads a2 full output as "atom_<id>" */
+    atom_wire(a1, a3, NULL); /* a3 reads a1 full output as "atom_<id>" */
+    atom_wire(a2, a3, NULL); /* a3 reads a2 full output as "atom_<id>" */
 
     CHECK(a1 > 0 && a2 > 0 && a3 > 0, "atoms allocated");
 
@@ -142,17 +143,17 @@ static void test_linear_pipeline(void) {
     CHECK(a3_ptr->wired_input != NULL, "atom3 has wired_input");
 
     const char *wi = a3_ptr->wired_input;
-    CHECK(contains(wi, "MSFT"),  "wired_input contains MSFT from atom1");
-    CHECK(contains(wi, "AAPL"),  "wired_input contains AAPL from atom2");
-    CHECK(contains(wi, "380"),   "wired_input has atom1 price field");
-    CHECK(contains(wi, "29.1"),  "wired_input has atom2 pe field");
+    CHECK(contains(wi, "MSFT"), "wired_input contains MSFT from atom1");
+    CHECK(contains(wi, "AAPL"), "wired_input contains AAPL from atom2");
+    CHECK(contains(wi, "380"), "wired_input has atom1 price field");
+    CHECK(contains(wi, "29.1"), "wired_input has atom2 pe field");
 
     fprintf(stderr, "        wired_input = %.120s...\n", wi ? wi : "(null)");
 
     CHECK(st->executed_count == 3, "executed_count is 3");
 
     plan_state_free(st);
-    plan_engine_init();  /* reset engine for next test */
+    plan_engine_init(); /* reset engine for next test */
 }
 
 /* Key-extraction wiring: atom_wire(src, dst, "price") */
@@ -168,7 +169,7 @@ static void test_key_extraction(void) {
     atom_set_shell(a1, "printf '{\"ticker\":\"MSFT\",\"price\":380,\"pe\":28.5}'");
 
     int a2 = step_add_atom(step_id, "consumer", ATOM_NOOP);
-    atom_wire(a1, a2, "price");   /* extract only the "price" field */
+    atom_wire(a1, a2, "price"); /* extract only the "price" field */
 
     plan_state_t *st = plan_state_init(plan_id);
 
@@ -180,9 +181,9 @@ static void test_key_extraction(void) {
     const char *wi = a2_ptr ? a2_ptr->wired_input : NULL;
 
     CHECK(wi != NULL, "consumer has wired_input");
-    CHECK(contains(wi, "380"),   "extracted price value present");
+    CHECK(contains(wi, "380"), "extracted price value present");
     CHECK(!contains(wi, "MSFT"), "ticker NOT present (only 'price' extracted)");
-    CHECK(!contains(wi, "pe"),   "'pe' NOT present (only 'price' extracted)");
+    CHECK(!contains(wi, "pe"), "'pe' NOT present (only 'price' extracted)");
 
     fprintf(stderr, "        wired_input = %.80s\n", wi ? wi : "(null)");
 
@@ -223,15 +224,15 @@ static void test_rollback(void) {
     plan_state_checkpoint(st);
     int rolled = plan_state_rollback(st, 1);
 
-    CHECK(rolled == 1,               "rolled back 1 atom");
-    CHECK(st->executed_count == 2,   "executed_count decremented to 2");
+    CHECK(rolled == 1, "rolled back 1 atom");
+    CHECK(st->executed_count == 2, "executed_count decremented to 2");
     CHECK(plan_state_get_output(st, a3) == NULL, "a3 output removed from state");
     CHECK(plan_state_get_output(st, a1) != NULL, "a1 output still in state");
     CHECK(plan_state_get_output(st, a2) != NULL, "a2 output still in state");
 
     atom_t *a3_ptr = atom_get(a3);
     CHECK(a3_ptr && a3_ptr->status == PLAN_PENDING, "a3 status reset to PENDING");
-    CHECK(a3_ptr && a3_ptr->result == NULL,         "a3 result cleared");
+    CHECK(a3_ptr && a3_ptr->result == NULL, "a3 result cleared");
 
     /* Re-execute a3 after rollback — data should flow again */
     bool ok = execute_atom_with_input(st, a3, buf, sizeof buf);
@@ -240,7 +241,7 @@ static void test_rollback(void) {
 
     /* Rollback 2 steps */
     rolled = plan_state_rollback(st, 2);
-    CHECK(rolled == 2,             "rolled back 2 atoms");
+    CHECK(rolled == 2, "rolled back 2 atoms");
     CHECK(st->executed_count == 1, "executed_count is 1");
 
     plan_state_free(st);
@@ -299,7 +300,7 @@ static void test_run_all(void) {
     plan_state_t *st = plan_state_init(plan_id);
 
     int ran = plan_state_run_all(st);
-    CHECK(ran >= 1,   "plan_state_run_all executed at least 1 atom");
+    CHECK(ran >= 1, "plan_state_run_all executed at least 1 atom");
     CHECK(plan_state_get_output(st, a1) != NULL, "a1 output stored");
 
     plan_state_free(st);
@@ -319,7 +320,6 @@ int main(void) {
     test_checkpoint();
     test_run_all();
 
-    fprintf(stderr, "\n=== Results: %d passed, %d failed ===\n",
-            g_pass, g_fail);
+    fprintf(stderr, "\n=== Results: %d passed, %d failed ===\n", g_pass, g_fail);
     return g_fail > 0 ? 1 : 0;
 }

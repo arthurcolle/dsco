@@ -6,16 +6,16 @@
 #include <sys/mman.h>
 
 #ifdef HAVE_LIBSODIUM
-#  include <sodium.h>
+#include <sodium.h>
 #endif
 
 /* ── storage ───────────────────────────────────────────────────────────── */
 
 typedef struct {
-    char   key[SEALED_KEY_MAX];
-    char   val[SEALED_VAL_MAX];
+    char key[SEALED_KEY_MAX];
+    char val[SEALED_VAL_MAX];
     size_t val_len;
-    int    live;
+    int live;
 } sealed_entry_t;
 
 static sealed_entry_t s_entries[SEALED_ENTRIES];
@@ -31,10 +31,11 @@ static void zero_entry(sealed_entry_t *e) {
 #else
     /* volatile write prevents the compiler from eliding the clear */
     volatile char *p = (volatile char *)e;
-    for (size_t i = 0; i < sizeof(*e); i++) p[i] = 0;
+    for (size_t i = 0; i < sizeof(*e); i++)
+        p[i] = 0;
 #endif
     e->val_len = 0;
-    e->live    = 0;
+    e->live = 0;
 }
 
 static sealed_entry_t *find(const char *key) {
@@ -60,18 +61,16 @@ static void sealed_wiper(void *ctx) {
 
 /* ── environment bootstrap ─────────────────────────────────────────────── */
 
-static const char *s_env_keys[] = {
-    "ANTHROPIC_API_KEY",
-    "OPENAI_API_KEY",
-    "GEMINI_API_KEY",
-    "XAI_API_KEY",
-    "DEEPSEEK_API_KEY",
-    "GROQ_API_KEY",
-    "OPENROUTER_API_KEY",
-    "DSCO_MESH_SECRET",
-    "DSCO_NET_AUTH_KEY",
-    NULL
-};
+static const char *s_env_keys[] = {"ANTHROPIC_API_KEY",  "OPENAI_API_KEY",
+                                   "GEMINI_API_KEY",     "XAI_API_KEY",
+                                   "DEEPSEEK_API_KEY",   "GROQ_API_KEY",
+                                   "OPENROUTER_API_KEY", "SAKANA_API_KEY",
+                                   "FISH_API_KEY",       "SAKANA_TOKEN",
+                                   "FUGU_API_KEY",
+                                   "FUGU_PAYG_API_KEY",  "SAKANA_PAYG_API_KEY",
+                                   "FISH_PAYG_API_KEY",  "SAKANA_PAYG_TOKEN",
+                                   "DSCO_MESH_SECRET",
+                                   "DSCO_NET_AUTH_KEY",  NULL};
 
 static void load_from_env(void) {
     for (int i = 0; s_env_keys[i]; i++) {
@@ -84,7 +83,8 @@ static void load_from_env(void) {
             char *env_val = getenv(s_env_keys[i]);
             if (env_val) {
                 volatile char *p = (volatile char *)env_val;
-                for (size_t j = 0; env_val[j]; j++) p[j] = 0;
+                for (size_t j = 0; env_val[j]; j++)
+                    p[j] = 0;
             }
 #endif
         }
@@ -93,8 +93,8 @@ static void load_from_env(void) {
 
 /* ── SE master key storage (mlock'd, zeroed on wipe) ───────────────────── */
 
-static uint8_t s_master_key[32];   /* set by sealed_store_set_master_key */
-static int     s_has_master = 0;
+static uint8_t s_master_key[32]; /* set by sealed_store_set_master_key */
+static int s_has_master = 0;
 
 void sealed_store_set_master_key(const uint8_t key[32]) {
     memcpy(s_master_key, key, 32);
@@ -103,7 +103,8 @@ void sealed_store_set_master_key(const uint8_t key[32]) {
 }
 
 bool sealed_store_master_key_copy(uint8_t out[32]) {
-    if (!s_has_master || !out) return false;
+    if (!s_has_master || !out)
+        return false;
     memcpy(out, s_master_key, 32);
     return true;
 }
@@ -112,7 +113,10 @@ bool sealed_store_master_key_copy(uint8_t out[32]) {
 
 void sealed_store_init(void) {
     pthread_mutex_lock(&s_lock);
-    if (s_inited) { pthread_mutex_unlock(&s_lock); return; }
+    if (s_inited) {
+        pthread_mutex_unlock(&s_lock);
+        return;
+    }
 
     memset(s_entries, 0, sizeof(s_entries));
 
@@ -129,15 +133,23 @@ void sealed_store_init(void) {
 }
 
 int sealed_store_put(const char *key, const char *val, size_t val_len) {
-    if (!key || !val) return -1;
-    if (strlen(key) >= SEALED_KEY_MAX) return -1;
-    if (!val_len) val_len = strlen(val);
-    if (val_len >= SEALED_VAL_MAX) return -1;
+    if (!key || !val)
+        return -1;
+    if (strlen(key) >= SEALED_KEY_MAX)
+        return -1;
+    if (!val_len)
+        val_len = strlen(val);
+    if (val_len >= SEALED_VAL_MAX)
+        return -1;
 
     pthread_mutex_lock(&s_lock);
     sealed_entry_t *e = find(key);
-    if (!e) e = find_free();
-    if (!e) { pthread_mutex_unlock(&s_lock); return -1; }
+    if (!e)
+        e = find_free();
+    if (!e) {
+        pthread_mutex_unlock(&s_lock);
+        return -1;
+    }
 
     if (!e->live) {
         strncpy(e->key, key, SEALED_KEY_MAX - 1);
@@ -151,17 +163,24 @@ int sealed_store_put(const char *key, const char *val, size_t val_len) {
     memcpy(e->val, val, val_len);
     e->val[val_len] = '\0';
     e->val_len = val_len;
-    e->live    = 1;
+    e->live = 1;
     pthread_mutex_unlock(&s_lock);
     return 0;
 }
 
 int sealed_store_get(const char *key, char *buf, size_t buf_len) {
-    if (!key || !buf || !buf_len) return -1;
+    if (!key || !buf || !buf_len)
+        return -1;
     pthread_mutex_lock(&s_lock);
     sealed_entry_t *e = find(key);
-    if (!e) { pthread_mutex_unlock(&s_lock); return -1; }
-    if (e->val_len + 1 > buf_len) { pthread_mutex_unlock(&s_lock); return -1; }
+    if (!e) {
+        pthread_mutex_unlock(&s_lock);
+        return -1;
+    }
+    if (e->val_len + 1 > buf_len) {
+        pthread_mutex_unlock(&s_lock);
+        return -1;
+    }
     memcpy(buf, e->val, e->val_len + 1);
     int len = (int)e->val_len;
     pthread_mutex_unlock(&s_lock);
@@ -169,22 +188,26 @@ int sealed_store_get(const char *key, char *buf, size_t buf_len) {
 }
 
 void sealed_store_wipe(const char *key) {
-    if (!key) return;
+    if (!key)
+        return;
     pthread_mutex_lock(&s_lock);
     sealed_entry_t *e = find(key);
-    if (e) zero_entry(e);
+    if (e)
+        zero_entry(e);
     pthread_mutex_unlock(&s_lock);
 }
 
 void sealed_store_wipe_all(void) {
     pthread_mutex_lock(&s_lock);
     for (int i = 0; i < SEALED_ENTRIES; i++)
-        if (s_entries[i].live) zero_entry(&s_entries[i]);
+        if (s_entries[i].live)
+            zero_entry(&s_entries[i]);
     pthread_mutex_unlock(&s_lock);
 }
 
 const char *sealed_store_peek(const char *key) {
-    if (!key) return NULL;
+    if (!key)
+        return NULL;
     pthread_mutex_lock(&s_lock);
     sealed_entry_t *e = find(key);
     /* The entry's val buffer lives in the static s_entries array and is never
