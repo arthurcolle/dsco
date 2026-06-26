@@ -8,6 +8,7 @@ The importer reads JSON from:
 
 1. `DSCO_CODEX_APP_DIRECTORY`, if set
 2. `~/.dsco/codex_app_directory.json`, otherwise
+3. the newest `~/.codex/cache/codex_app_directory/*.json` cache file, otherwise
 
 Accepted top-level array keys are `apps`, `connectors`, or `items`; a bare array is also accepted. Each entry may use either snake_case or camelCase fields:
 
@@ -22,6 +23,12 @@ Accepted top-level array keys are `apps`, `connectors`, or `items`; a bare array
 - `isEnabled` / `is_enabled`
 - `isAccessible` / `is_accessible`
 - `interactive`, `consequential`, `retrievable`, `sync`
+- nested `appMetadata.categories`
+
+The generated [External Tool and Integration Catalog](EXTERNAL_TOOL_CATALOG.md)
+materializes the cached app-directory universe for docs review. It is separate
+from [Built-in Tool Catalog](TOOL_CATALOG.md), which only covers compiled
+`src/tools.c` tools.
 
 ## Label-to-policy mapping
 
@@ -40,6 +47,7 @@ Mutating connectors are therefore confirmation-gated by metadata, not by hardcod
 
 - `discover_integrations` — returns cached, installed, connected, live, inaccessible, stale, OAuth-gated, mutating, and sync-capable status.
 - `dsco_doctor_integrations` — compares live MCP registrations to the cached catalog and flags stale connector IDs, missing catalog/auth/install state, dangerous mutating connectors, and governance/control-plane candidates.
+- `hermes_agent` — emits Nous Hermes Agent compatibility presets and a capability showcase for `hermes mcp serve`, `hermes acp`, messaging gateway, skills, memory, scheduling, terminal backends, provider routing, context files, approvals/security, research exports, local install/config status, and the Hermes MCP config import paths DSCO reads.
 
 ## Vertical profiles
 
