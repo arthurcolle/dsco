@@ -41,6 +41,8 @@
 #include "toolmgmt.h"
 #include "local_llm.h"
 #include "vm.h"
+#include "codex_app_directory.h"
+#include "integration_fabric.h"
 #include "stateful_atoms.h"
 #include "control_flow.h"
 #include "recovery.h"
@@ -21737,6 +21739,28 @@ static bool tool_matches_query_local(const char *name, const char *desc, const c
     return total > 0 && matched == total;
 }
 
+static void integration_action_flags_json(jbuf_t *b, unsigned actions) {
+    bool first = true;
+#define APPEND_ACTION(flag, name)                                                                  \
+    do {                                                                                           \
+        if (actions & (flag)) {                                                                    \
+            if (!first)                                                                            \
+                jbuf_append(b, ",");                                                              \
+            first = false;                                                                         \
+            jbuf_append_json_str(b, (name));                                                       \
+        }                                                                                          \
+    } while (0)
+    APPEND_ACTION(DSCO_INTEGRATION_ACTION_READ, "read");
+    APPEND_ACTION(DSCO_INTEGRATION_ACTION_WRITE, "write");
+    APPEND_ACTION(DSCO_INTEGRATION_ACTION_SEND, "send");
+    APPEND_ACTION(DSCO_INTEGRATION_ACTION_DELETE, "delete");
+    APPEND_ACTION(DSCO_INTEGRATION_ACTION_ADMIN, "admin");
+    APPEND_ACTION(DSCO_INTEGRATION_ACTION_UNTRUSTED_CONTENT, "untrusted_content");
+    APPEND_ACTION(DSCO_INTEGRATION_ACTION_REQUIRES_CONFIRMATION, "requires_confirmation");
+    APPEND_ACTION(DSCO_INTEGRATION_ACTION_INTERACTIVE, "interactive");
+#undef APPEND_ACTION
+}
+
 static void discover_append_tool_detail(jbuf_t *b, const char *name, const char *desc,
                                         const char *schema, const char *source) {
     char params[256];
@@ -21981,6 +22005,311 @@ static bool tool_discover_tools(const char *input, char *result, size_t rlen) {
     off += snprintf(result + off, rlen - off, "]}");
     free(query);
     free(category_owned);
+    return true;
+}
+
+static bool integration_query_matches(const char *query, const char *a, const char *b,
+                                      const char *c, const char *d) {
+    if (!query || !query[0])
+        return true;
+    return tools_ci_contains_local(a ? a : "", query) || tools_ci_contains_local(b ? b : "", query) ||
+           tools_ci_contains_local(c ? c : "", query) || tools_ci_contains_local(d ? d : "", query);
+}
+
+static bool integration_profile_matches(const char *profile, const char *name,
+                                        const char *categories, const char *labels) {
+    if (!profile || !profile[0])
+        return true;
+    if (integration_query_matches(profile, name, categories, labels, NULL))
+        return true;
+#define PROFILE_KEY(p, k1, k2, k3, k4, k5, k6, k7, k8)                                            \
+    do {                                                                                           \
+        if (strcasecmp(profile, (p)) == 0) {                                                       \
+            const char *keys[] = {(k1), (k2), (k3), (k4), (k5), (k6), (k7), (k8), NULL};            \
+            for (int i = 0; keys[i]; i++)                                                          \
+                if (integration_query_matches(keys[i], name, categories, labels, NULL))             \
+                    return true;                                                                   \
+            return false;                                                                          \
+        }                                                                                          \
+    } while (0)
+    PROFILE_KEY("engineering", "github", "linear", "atlassian", "slack", "notion", "datadog",
+                "posthog", "developer");
+    PROFILE_KEY("gtm", "hubspot", "pipedrive", "close", "intercom", "apollo", "clay",
+                "demandbase", "sales");
+    PROFILE_KEY("finance", "bigquery", "motherduck", "quickbooks", "brex", "alpaca", "factset",
+                "finance", "");
+    PROFILE_KEY("enterprise_knowledge", "glean", "box", "sharepoint", "alation", "atlan", "coveo",
+                "knowledge", "");
+    PROFILE_KEY("governed_agent_runtime", "toolcheck", "agent ready", "hapi", "registry",
+                "accessowl", "vantage", "governance", "agent");
+#undef PROFILE_KEY
+    return false;
+}
+
+static void append_integration_status_flags(jbuf_t *b, bool cached, bool live, bool accessible,
+                                            bool stale, unsigned actions, bool sync_capable) {
+    jbuf_append(b, "\"status\":{");
+    jbuf_appendf(b,
+                 "\"cached\":%s,\"installed\":%s,\"connected\":%s,\"live\":%s,"
+                 "\"inaccessible\":%s,\"stale\":%s,\"requires_oauth\":%s,"
+                 "\"mutating\":%s,\"sync_capable\":%s}",
+                 cached ? "true" : "false", live ? "true" : "false",
+                 accessible ? "true" : "false", live ? "true" : "false",
+                 (!accessible && cached) ? "true" : "false", stale ? "true" : "false",
+                 (!accessible && cached) ? "true" : "false",
+                 (actions & (DSCO_INTEGRATION_ACTION_WRITE | DSCO_INTEGRATION_ACTION_SEND |
+                             DSCO_INTEGRATION_ACTION_DELETE | DSCO_INTEGRATION_ACTION_ADMIN))
+                     ? "true"
+                     : "false",
+                 sync_capable ? "true" : "false");
+}
+
+static void append_catalog_integration_json(jbuf_t *b, const codex_app_directory_entry_t *e,
+                                            bool live) {
+    jbuf_append(b, "{");
+    jbuf_append(b, "\"integration_id\":");
+    jbuf_append_json_str(b, e->connector_id[0] ? e->connector_id : e->id);
+    jbuf_append(b, ",\"display_name\":");
+    jbuf_append_json_str(b, e->display_name);
+    jbuf_append(b, ",\"distribution_channel\":");
+    jbuf_append_json_str(b, e->distribution_channel);
+    jbuf_append(b, ",\"categories\":");
+    jbuf_append_json_str(b, e->categories);
+    jbuf_append(b, ",\"labels\":");
+    jbuf_append_json_str(b, e->labels);
+    jbuf_append(b, ",\"scope\":");
+    jbuf_append_json_str(b, e->scope);
+    jbuf_append(b, ",\"catalog_status\":");
+    jbuf_append_json_str(b, e->catalog_status);
+    jbuf_append(b, ",\"action_flags\":[");
+    integration_action_flags_json(b, e->action_flags);
+    jbuf_append(b, "],");
+    append_integration_status_flags(b, true, live, e->is_accessible, e->stale, e->action_flags, e->sync);
+    jbuf_append(b, "}");
+}
+
+static void append_external_integration_json(jbuf_t *b, const external_tool_t *t) {
+    unsigned actions = t->action_flags ? t->action_flags : dsco_integration_actions_for_tool(t->name);
+    jbuf_append(b, "{");
+    jbuf_append(b, "\"tool_name\":");
+    jbuf_append_json_str(b, t->name);
+    jbuf_append(b, ",\"integration_id\":");
+    jbuf_append_json_str(b, t->integration_id[0] ? t->integration_id : t->name);
+    jbuf_append(b, ",\"display_name\":");
+    jbuf_append_json_str(b, t->display_name[0] ? t->display_name : t->name);
+    jbuf_append(b, ",\"distribution_channel\":");
+    jbuf_append_json_str(b, t->distribution_channel[0] ? t->distribution_channel : "mcp");
+    jbuf_append(b, ",\"categories\":");
+    jbuf_append_json_str(b, t->categories);
+    jbuf_append(b, ",\"labels\":");
+    jbuf_append_json_str(b, t->labels);
+    jbuf_append(b, ",\"scope\":");
+    jbuf_append_json_str(b, t->scope);
+    jbuf_append(b, ",\"catalog_status\":");
+    jbuf_append_json_str(b, t->catalog_status[0] ? t->catalog_status : "live");
+    jbuf_append(b, ",\"action_flags\":[");
+    integration_action_flags_json(b, actions);
+    jbuf_append(b, "],");
+    append_integration_status_flags(b, t->integration_id[0], true, true,
+                                    strcmp(t->catalog_status, "stale") == 0, actions,
+                                    strstr(t->labels, "sync") != NULL);
+    jbuf_append(b, "}");
+}
+
+static bool tool_discover_integrations(const char *input, char *result, size_t rlen) {
+    char *query = input ? json_get_str(input, "query") : NULL;
+    char *path = input ? json_get_str(input, "path") : NULL;
+    char *profile = input ? json_get_str(input, "profile") : NULL;
+    int offset = input ? json_get_int(input, "offset", 0) : 0;
+    int limit = input ? json_get_int(input, "limit", 50) : 50;
+    if (offset < 0)
+        offset = 0;
+    if (limit <= 0)
+        limit = 50;
+    if (limit > 500)
+        limit = 500;
+
+    codex_app_directory_t dir;
+    codex_app_directory_init(&dir);
+    char err[256] = "";
+    bool have_catalog = codex_app_directory_load_file(&dir, path, err, sizeof(err));
+
+    jbuf_t b;
+    jbuf_init(&b, 4096);
+    jbuf_append(&b, "{\"subsystem\":\"Chronicle-adjacent IntegrationCatalog\",");
+    jbuf_append(&b, "\"catalog\":{");
+    jbuf_appendf(&b,
+                 "\"loaded\":%s,\"source_path\":", have_catalog ? "true" : "false");
+    jbuf_append_json_str(&b, have_catalog ? dir.source_path : (path ? path : ""));
+    jbuf_appendf(&b,
+                 ",\"total\":%zu,\"enabled\":%zu,\"accessible\":%zu,"
+                 "\"interactive\":%zu,\"consequential\":%zu,\"retrievable\":%zu,"
+                 "\"sync\":%zu,\"stale\":%zu",
+                 dir.count, dir.enabled_count, dir.accessible_count, dir.interactive_count,
+                 dir.consequential_count, dir.retrievable_count, dir.sync_count, dir.stale_count);
+    if (!have_catalog) {
+        jbuf_append(&b, ",\"warning\":");
+        jbuf_append_json_str(&b, err);
+    }
+    jbuf_append(&b, "},\"profiles\":{");
+    jbuf_append(&b,
+                "\"engineering\":[\"GitHub\",\"Linear\",\"Atlassian\",\"Slack\",\"Notion\",\"Datadog\",\"PostHog\",\"Stripe\"],"
+                "\"gtm\":[\"HubSpot\",\"Pipedrive\",\"Close\",\"Intercom\",\"Apollo\",\"Clay\",\"Demandbase\",\"Attio\"],"
+                "\"finance\":[\"BigQuery\",\"MotherDuck\",\"QuickBooks\",\"Brex\",\"Alpaca\",\"FactSet\",\"PitchBook\"],"
+                "\"enterprise_knowledge\":[\"Glean\",\"Box\",\"SharePoint\",\"Alation\",\"Atlan\",\"Coveo\"],"
+                "\"governed_agent_runtime\":[\"ToolCheck\",\"Agent Ready\",\"HAPI MCP Registry\",\"AccessOwl\",\"Vantage\"]");
+    jbuf_append(&b, "},\"integrations\":[");
+
+    int matched = 0, skipped = 0, emitted = 0;
+    bool first = true;
+    if (have_catalog) {
+        for (size_t i = 0; i < dir.count; i++) {
+            const codex_app_directory_entry_t *e = &dir.entries[i];
+            if (query && query[0] &&
+                !integration_query_matches(query, e->id, e->connector_id, e->display_name, e->categories))
+                continue;
+            if (!integration_profile_matches(profile, e->display_name, e->categories, e->labels))
+                continue;
+            matched++;
+            if (skipped++ < offset)
+                continue;
+            if (emitted >= limit)
+                continue;
+            bool live = false;
+            for (int j = 0; j < g_external_tool_count; j++) {
+                if ((g_external_tools[j].integration_id[0] &&
+                     strcasecmp(g_external_tools[j].integration_id, e->connector_id) == 0) ||
+                    strcasecmp(g_external_tools[j].name, e->connector_id) == 0 ||
+                    strcasecmp(g_external_tools[j].display_name, e->display_name) == 0) {
+                    live = true;
+                    break;
+                }
+            }
+            if (!first)
+                jbuf_append(&b, ",");
+            first = false;
+            append_catalog_integration_json(&b, e, live);
+            emitted++;
+        }
+    }
+    for (int i = 0; i < g_external_tool_count; i++) {
+        const external_tool_t *t = &g_external_tools[i];
+        if (!integration_query_matches(query, t->name, t->integration_id, t->display_name, t->categories))
+            continue;
+        if (!integration_profile_matches(profile, t->display_name[0] ? t->display_name : t->name,
+                                         t->categories, t->labels))
+            continue;
+        matched++;
+        if (skipped++ < offset)
+            continue;
+        if (emitted >= limit)
+            continue;
+        if (!first)
+            jbuf_append(&b, ",");
+        first = false;
+        append_external_integration_json(&b, t);
+        emitted++;
+    }
+    jbuf_appendf(&b, "],\"matched\":%d,\"offset\":%d,\"limit\":%d,\"showing\":%d,\"has_more\":%s}",
+                 matched, offset, limit, emitted, matched > offset + emitted ? "true" : "false");
+
+    snprintf(result, rlen, "%s", b.data ? b.data : "{}");
+    jbuf_free(&b);
+    codex_app_directory_free(&dir);
+    free(query);
+    free(path);
+    free(profile);
+    return true;
+}
+
+static bool tool_dsco_doctor_integrations(const char *input, char *result, size_t rlen) {
+    char *path = input ? json_get_str(input, "path") : NULL;
+    codex_app_directory_t dir;
+    codex_app_directory_init(&dir);
+    char err[256] = "";
+    bool have_catalog = codex_app_directory_load_file(&dir, path, err, sizeof(err));
+
+    int live_total = g_external_tool_count;
+    int live_without_catalog = 0;
+    int stale_catalog = 0;
+    int inaccessible_catalog = 0;
+    int mutating_live = 0;
+    int control_plane = 0;
+    for (int i = 0; i < g_external_tool_count; i++) {
+        external_tool_t *t = &g_external_tools[i];
+        unsigned actions = t->action_flags ? t->action_flags : dsco_integration_actions_for_tool(t->name);
+        if (actions & (DSCO_INTEGRATION_ACTION_WRITE | DSCO_INTEGRATION_ACTION_SEND |
+                       DSCO_INTEGRATION_ACTION_DELETE | DSCO_INTEGRATION_ACTION_ADMIN))
+            mutating_live++;
+        if (!t->integration_id[0])
+            live_without_catalog++;
+        if (tools_ci_contains_local(t->name, "registry") || tools_ci_contains_local(t->name, "toolcheck") ||
+            tools_ci_contains_local(t->name, "agent_ready") || tools_ci_contains_local(t->name, "monitor"))
+            control_plane++;
+    }
+    if (have_catalog) {
+        for (size_t i = 0; i < dir.count; i++) {
+            if (dir.entries[i].stale)
+                stale_catalog++;
+            if (!dir.entries[i].is_accessible)
+                inaccessible_catalog++;
+        }
+    }
+
+    jbuf_t b;
+    jbuf_init(&b, 2048);
+    jbuf_append(&b, "{\"ok\":");
+    bool ok = have_catalog && stale_catalog == 0;
+    jbuf_append(&b, ok ? "true" : "false");
+    jbuf_append(&b, ",\"catalog_loaded\":");
+    jbuf_append(&b, have_catalog ? "true" : "false");
+    jbuf_append(&b, ",\"catalog_path\":");
+    jbuf_append_json_str(&b, have_catalog ? dir.source_path : (path ? path : ""));
+    if (!have_catalog) {
+        jbuf_append(&b, ",\"catalog_error\":");
+        jbuf_append_json_str(&b, err);
+    }
+    jbuf_appendf(&b,
+                 ",\"counts\":{\"catalog\":%zu,\"live_mcp\":%d,"
+                 "\"live_without_catalog_metadata\":%d,\"stale_catalog\":%d,"
+                 "\"inaccessible_catalog\":%d,\"mutating_live\":%d,\"control_plane_candidates\":%d}",
+                 dir.count, live_total, live_without_catalog, stale_catalog,
+                 inaccessible_catalog, mutating_live, control_plane);
+    jbuf_append(&b, ",\"release_blockers\":[");
+    bool first = true;
+    if (!have_catalog) {
+        jbuf_append_json_str(&b, "codex app directory cache missing; set DSCO_CODEX_APP_DIRECTORY or create ~/.dsco/codex_app_directory.json");
+        first = false;
+    }
+    if (stale_catalog > 0) {
+        if (!first)
+            jbuf_append(&b, ",");
+        jbuf_append_json_str(&b, "stale connector IDs present in catalog");
+        first = false;
+    }
+    jbuf_append(&b, "],\"warnings\":[");
+    first = true;
+    if (live_without_catalog > 0) {
+        jbuf_append_json_str(&b, "live MCP tools lack integration catalog metadata");
+        first = false;
+    }
+    if (mutating_live > 0) {
+        if (!first)
+            jbuf_append(&b, ",");
+        jbuf_append_json_str(&b, "mutating integrations require confirmation-gated policy");
+        first = false;
+    }
+    if (control_plane > 0) {
+        if (!first)
+            jbuf_append(&b, ",");
+        jbuf_append_json_str(&b, "governance/meta integrations detected; treat as control-plane tools");
+    }
+    jbuf_append(&b, "]}");
+
+    snprintf(result, rlen, "%s", b.data ? b.data : "{}");
+    jbuf_free(&b);
+    codex_app_directory_free(&dir);
+    free(path);
     return true;
 }
 
@@ -26417,6 +26746,20 @@ static const tool_def_t s_tools[] = {
      .core = true,
      .is_read_only = true,
      .is_concurrent = true},
+    {.name = "discover_integrations",
+     .description = "Discover cached, installed, connected, live, inaccessible, stale, OAuth-gated, mutating, and sync-capable external integrations from the Codex app directory plus live MCP tools.",
+     .input_schema_json = "{\"type\":\"object\",\"properties\":{\"query\":{\"type\":\"string\"},\"profile\":{\"type\":\"string\",\"description\":\"engineering|gtm|finance|enterprise_knowledge|governed_agent_runtime or free-text category\"},\"path\":{\"type\":\"string\",\"description\":\"Optional catalog JSON path; defaults to DSCO_CODEX_APP_DIRECTORY or ~/.dsco/codex_app_directory.json\"},\"offset\":{\"type\":\"integer\"},\"limit\":{\"type\":\"integer\"}}}",
+     .execute = tool_discover_integrations,
+     .core = true,
+     .is_read_only = true,
+     .is_concurrent = true},
+    {.name = "dsco_doctor_integrations",
+     .description = "Diagnose integration catalog/cache health: stale connector IDs, missing auth/install state, dangerous mutating connectors, and control-plane governance tools.",
+     .input_schema_json = "{\"type\":\"object\",\"properties\":{\"path\":{\"type\":\"string\",\"description\":\"Optional catalog JSON path\"}}}",
+     .execute = tool_dsco_doctor_integrations,
+     .core = true,
+     .is_read_only = true,
+     .is_concurrent = true},
     {.name = "load_tools",
      .description = "Dynamically load tools into the active register file. Provide at least one "
                     "of: names (comma-separated), tools (array), or category.",
@@ -28890,6 +29233,53 @@ int g_external_tool_count = 0;
  * sees the new count is guaranteed to see a fully-initialized entry. */
 static pthread_mutex_t g_external_tools_mu = PTHREAD_MUTEX_INITIALIZER;
 
+static void external_tool_copy_metadata(external_tool_t *t, const char *integration_id,
+                                        const char *display_name,
+                                        const char *distribution_channel,
+                                        const char *categories, const char *labels,
+                                        const char *scope, unsigned action_flags,
+                                        const char *catalog_status) {
+    if (!t)
+        return;
+    if (integration_id)
+        snprintf(t->integration_id, sizeof(t->integration_id), "%s", integration_id);
+    if (display_name)
+        snprintf(t->display_name, sizeof(t->display_name), "%s", display_name);
+    if (distribution_channel)
+        snprintf(t->distribution_channel, sizeof(t->distribution_channel), "%s", distribution_channel);
+    if (categories)
+        snprintf(t->categories, sizeof(t->categories), "%s", categories);
+    if (labels)
+        snprintf(t->labels, sizeof(t->labels), "%s", labels);
+    if (scope)
+        snprintf(t->scope, sizeof(t->scope), "%s", scope);
+    if (action_flags != 0)
+        t->action_flags = action_flags;
+    if (catalog_status)
+        snprintf(t->catalog_status, sizeof(t->catalog_status), "%s", catalog_status);
+}
+
+void tools_register_external_metadata(const char *name, const char *integration_id,
+                                      const char *display_name,
+                                      const char *distribution_channel,
+                                      const char *categories, const char *labels,
+                                      const char *scope, unsigned action_flags,
+                                      const char *catalog_status) {
+    if (!name || !name[0])
+        return;
+    pthread_mutex_lock(&g_external_tools_mu);
+    int current = g_external_tool_count;
+    for (int i = 0; i < current; i++) {
+        if (strcmp(g_external_tools[i].name, name) == 0) {
+            external_tool_copy_metadata(&g_external_tools[i], integration_id, display_name,
+                                        distribution_channel, categories, labels, scope,
+                                        action_flags, catalog_status);
+            break;
+        }
+    }
+    pthread_mutex_unlock(&g_external_tools_mu);
+}
+
 void tools_register_external(const char *name, const char *description,
                              const char *input_schema_json, external_tool_cb cb, void *ctx) {
     if (!name || !name[0])
@@ -28906,6 +29296,10 @@ void tools_register_external(const char *name, const char *description,
                 input_schema_json ? input_schema_json : "{\"type\":\"object\",\"properties\":{}}");
             existing->cb = cb;
             existing->ctx = ctx;
+            if (!existing->display_name[0])
+                snprintf(existing->display_name, sizeof(existing->display_name), "%s", name);
+            if (!existing->catalog_status[0])
+                snprintf(existing->catalog_status, sizeof(existing->catalog_status), "%s", "live");
             tool_map_insert(&g_tool_map, existing->name, -(10000 + i));
             pthread_mutex_unlock(&g_external_tools_mu);
             free(old_schema);
@@ -28920,6 +29314,7 @@ void tools_register_external(const char *name, const char *description,
      * Readers loop `for (i = 0; i < g_external_tool_count; i++)`, so we must
      * not advertise the slot until its contents are valid. */
     external_tool_t *t = &g_external_tools[current];
+    memset(t, 0, sizeof(*t));
     snprintf(t->name, sizeof(t->name), "%s", name);
     snprintf(t->description, sizeof(t->description), "%s", description ? description : "");
     t->input_schema_json = safe_strdup(
@@ -28927,6 +29322,8 @@ void tools_register_external(const char *name, const char *description,
     t->cb = cb;
     t->ctx = ctx;
     t->loaded = false;
+    snprintf(t->display_name, sizeof(t->display_name), "%s", name);
+    snprintf(t->catalog_status, sizeof(t->catalog_status), "%s", "live");
     tool_map_insert(&g_tool_map, t->name, -(10000 + current));
     __atomic_store_n(&g_external_tool_count, current + 1, __ATOMIC_RELEASE);
     pthread_mutex_unlock(&g_external_tools_mu);

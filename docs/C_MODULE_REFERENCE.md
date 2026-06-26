@@ -14,13 +14,13 @@ This document covers every C source/header module in the root of the repository.
 
 Purpose:
 
-- Process CLI args and dispatch interactive/one-shot/setup/timeline modes.
+- Process CLI args and dispatch interactive/one-shot/setup/timeline/portable-support modes.
 
 Key responsibilities:
 
 - Parses `-m`, `-k`, `--setup*`, `--timeline-*`, `--profile`, and prompt tail.
 - Loads setup profile env values and optionally bootstraps env file.
-- Starts baseline DB and optional timeline HTTP server.
+- Starts Chronicle at process entry, then baseline DB and optional timeline HTTP server.
 - In one-shot mode, executes the same tool loop used by interactive mode.
 - In sub-agent mode, claims IPC tasks and runs them in-turn.
 
@@ -43,7 +43,7 @@ Internal behavior:
 - Maintains `conversation_t`, `session_state_t`, metrics, and status UI.
 - Handles slash commands for model, effort, provider, budget, telemetry, etc.
 - Supports drag/drop image path ingestion and URL image injection.
-- Executes streamed tool rounds until `end_turn`.
+- Executes streamed tool rounds until `end_turn` and mirrors LLM/tool activity into Chronicle.
 - Tracks cost budget, context pressure, and autosave handling.
 
 ## LLM and Provider Layer
@@ -102,7 +102,7 @@ Public API:
 
 - `tools_init`, `tools_get_all`, `tools_builtin_count`, `tools_execute`
 - Tool hash map (`tool_map_*`)
-- External registration: `tools_register_external`
+- External registration: `tools_register_external`, `tools_register_external_metadata`
 - Lock management: `dsco_locks_init/destroy`
 - Timeout watchdog: `watchdog_start/stop`, `tool_timeout_for`
 - Input validation: `tools_validate_input`
@@ -113,7 +113,9 @@ Internal behavior:
 - Performs schema validation and dispatches by name.
 - Applies timeout watchdog and cancellation signaling.
 - Merges built-in tools with MCP and plugin extras.
+- Tracks optional integration metadata for external tools: connector ID, display name, channel, categories, labels, scope, action flags, and catalog status.
 - Includes many local system/file/network/git/shell/swarm/introspection utilities.
+- Exposes integration discovery/doctor tools backed by Codex app directory metadata.
 
 See full list: [Built-in Tool Catalog](TOOL_CATALOG.md)
 
