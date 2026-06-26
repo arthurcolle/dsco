@@ -95,6 +95,9 @@ bool chronicle_tool_call_end(const char *trace_id, const char *tool_span_id,
 /* HTTP/server support. */
 char *chronicle_build_activity_json(int limit, const char *session_filter);
 char *chronicle_build_activity_html(int limit, const char *session_filter);
+char *chronicle_build_activity_html_ex(int limit, const char *session_filter,
+                                       const char *type_filter,
+                                       const char *search_filter);
 char *chronicle_read_blob_hex(const char *sha256, size_t max_bytes, const char **content_type_out);
 
 #endif

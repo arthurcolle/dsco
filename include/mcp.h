@@ -15,6 +15,7 @@
  *   ./.dsco/config.json
  *   ~/.claude.json, ~/.claude/settings*.json, Claude Desktop configs
  *   ~/.codex/config.toml and ./.codex/config.toml
+ *   ~/.hermes/config.yaml and ~/.hermes/mcp_servers.yaml
  *
  * {
  *   "servers": {

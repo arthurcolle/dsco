@@ -273,7 +273,7 @@ Public API:
 Internal behavior:
 
 - Initializes SQLite schema (`instances`, `events`, `trace_spans`).
-- Exposes local HTTP endpoints (`/`, `/events.json`, `/health`, `/freight`, `/www/*`).
+- Exposes local HTTP endpoints (`/`, `/events.json`, `/health`, `/freight`, `/chronicle`, `/chronicle.json`, `/chronicle/blob/<sha256>`, `/www/*`).
 - Emits lifecycle events for server and session boundaries.
 
 ### `setup.c` / `setup.h` (700 LOC / 28 LOC)
@@ -296,6 +296,63 @@ Internal behavior:
 - Supports alias mapping (e.g., `GH_TOKEN` -> `GITHUB_TOKEN`).
 - Captures known keys + generic `_API_KEY`/`_TOKEN` patterns.
 - Writes profile-specific env files under `~/.dsco`.
+
+### `chronicle.c` / `chronicle.h`
+
+Purpose:
+
+- Local-first flight recorder for session, LLM, tool, and artifact activity.
+
+Public API highlights:
+
+- Lifecycle: `chronicle_start`, `chronicle_stop`
+- Generic activity: `chronicle_event`, `chronicle_span_begin`, `chronicle_span_end`
+- Conversation/tool helpers: `chronicle_user_message`, `chronicle_llm_delta`, `chronicle_tool_call_start`, `chronicle_tool_call_end`
+- Timeline-server helpers: `chronicle_build_activity_html`, `chronicle_build_activity_json`, `chronicle_read_blob_hex`
+
+Internal behavior:
+
+- Starts near process entry and is reconfigured idempotently by runtime mode.
+- Stores compact activity records with content-addressed blob references.
+- Honors `DSCO_CHRONICLE_MODE`, `DSCO_CHRONICLE_DIR`, and `DSCO_CHRONICLE_SESSION_ID`.
+- Provides the `/chronicle` local activity view through `baseline_serve_http`.
+
+## Integration Catalog and Governance Metadata
+
+### `codex_app_directory.c` / `codex_app_directory.h`
+
+Purpose:
+
+- Load and normalize cached Codex/app-directory connector metadata for MCP/integration discovery.
+
+Public API highlights:
+
+- Directory lifecycle: `codex_app_directory_init`, `codex_app_directory_free`
+- Loading: `codex_app_directory_load_file`
+- Policy mapping: `codex_app_directory_actions_for_labels`
+
+Internal behavior:
+
+- Reads `DSCO_CODEX_APP_DIRECTORY` or `~/.dsco/codex_app_directory.json`.
+- Accepts common snake_case/camelCase connector fields.
+- Tracks counts for enabled, accessible, interactive, consequential, retrievable, sync-capable, and stale entries.
+
+### `integration_fabric.c` / `integration_fabric.h`
+
+Purpose:
+
+- Convert tool/catalog names and labels into DSCO integration action policy flags.
+
+Public API highlights:
+
+- Profile lookup: `dsco_integration_profile_for_server`, `dsco_integration_profile_for_tool`
+- Action inference: `dsco_integration_actions_for_tool`, `dsco_integration_actions_for_catalog_labels`
+- Confirmation checks: `dsco_integration_requires_confirmation`, `dsco_integration_action_has`
+
+Internal behavior:
+
+- Classifies read/write/send/delete/admin/untrusted/confirmation/interactive actions.
+- Delegates catalog label policy to the Codex app directory mapper.
 
 ## Semantic/Analysis Engines
 
