@@ -6,23 +6,19 @@ on:
   workflow_dispatch:
 
 permissions:
+  contents: read
   issues: write
   pull-requests: write
 
 jobs:
-  # ─────────────────────────────────────────────────────────────────────
-  # STALE ISSUE / PR MANAGEMENT
-  # Closes inactive issues after 60 days, PRs after 30 days.
-  # ─────────────────────────────────────────────────────────────────────
   stale:
     name: close stale issues & PRs
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
     steps:
       - uses: actions/stale@v9
         with:
           repo-token: ${{ secrets.GITHUB_TOKEN }}
-          
-          # Issues
           days-before-issue-stale: 60
           days-before-issue-close: 14
           stale-issue-label: 'stale'
@@ -45,6 +41,5 @@ jobs:
           close-pr-message: |
             This PR was closed due to inactivity. Feel free to reopen when ready.
           exempt-pr-labels: 'pinned,security,dependencies'
-
-          # General
+          remove-stale-when-updated: true
           operations-per-run: 30
