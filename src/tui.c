@@ -22,6 +22,7 @@
 #include <pthread.h>
 #include <stdatomic.h>
 #include <termios.h>
+#include <signal.h>
 
 /* ── Box character sets ───────────────────────────────────────────────── */
 
@@ -65,6 +66,98 @@ int tui_term_height(void) {
 
 /* ── Terminal output mutex — serializes cursor-positioned writes ──────── */
 static pthread_mutex_t g_term_mutex = PTHREAD_MUTEX_INITIALIZER;
+static volatile sig_atomic_t g_composer_reading = 0;
+static volatile sig_atomic_t g_composer_interrupt_requested = 0;
+static volatile sig_atomic_t g_composer_restore_active = 0;
+static volatile sig_atomic_t g_composer_restore_top = 0;
+static volatile sig_atomic_t g_composer_restore_bottom = 0;
+
+static size_t tui_append_positive_int(char *buf, size_t cap, size_t off, int value) {
+    char tmp[16];
+    size_t n = 0;
+    if (value < 1)
+        value = 1;
+    do {
+        tmp[n++] = (char)('0' + (value % 10));
+        value /= 10;
+    } while (value > 0 && n < sizeof(tmp));
+    while (n > 0 && off < cap)
+        buf[off++] = tmp[--n];
+    return off;
+}
+
+static void tui_write_clear_row(int fd, int row) {
+    char seq[32];
+    size_t n = 0;
+    seq[n++] = '\033';
+    seq[n++] = '[';
+    n = tui_append_positive_int(seq, sizeof(seq), n, row);
+    if (n + 8 >= sizeof(seq))
+        return;
+    seq[n++] = ';';
+    seq[n++] = '1';
+    seq[n++] = 'H';
+    seq[n++] = '\033';
+    seq[n++] = '[';
+    seq[n++] = '2';
+    seq[n++] = 'K';
+    (void)write(fd, seq, n);
+}
+
+static void tui_write_move_cursor(int fd, int row, int col) {
+    char seq[32];
+    size_t n = 0;
+    seq[n++] = '\033';
+    seq[n++] = '[';
+    n = tui_append_positive_int(seq, sizeof(seq), n, row);
+    if (n + 8 >= sizeof(seq))
+        return;
+    seq[n++] = ';';
+    n = tui_append_positive_int(seq, sizeof(seq), n, col);
+    if (n + 2 >= sizeof(seq))
+        return;
+    seq[n++] = 'H';
+    (void)write(fd, seq, n);
+}
+
+static void tui_composer_restore_track(int top, int bottom) {
+    if (top < 1)
+        top = 1;
+    if (bottom < top)
+        bottom = top;
+    g_composer_restore_top = (sig_atomic_t)top;
+    g_composer_restore_bottom = (sig_atomic_t)bottom;
+    g_composer_restore_active = 1;
+}
+
+static void tui_composer_restore_untrack(void) {
+    g_composer_restore_active = 0;
+    g_composer_restore_top = 0;
+    g_composer_restore_bottom = 0;
+}
+
+int tui_composer_signal_interrupt(void) {
+    if (!g_composer_reading)
+        return 0;
+    int repeated = g_composer_interrupt_requested != 0;
+    g_composer_interrupt_requested = 1;
+    return repeated ? 2 : 1;
+}
+
+static void tui_clear_tracked_composer_area(int fd) {
+    if (!g_composer_restore_active)
+        return;
+    int top = (int)g_composer_restore_top;
+    int bottom = (int)g_composer_restore_bottom;
+    if (top < 1 || bottom < top)
+        return;
+    if (bottom - top > 80)
+        bottom = top + 80;
+    for (int row = top; row <= bottom; row++)
+        tui_write_clear_row(fd, row);
+    tui_write_move_cursor(fd, top, 1);
+    tui_composer_restore_untrack();
+}
 
 void tui_term_lock(void) {
     pthread_mutex_lock(&g_term_mutex);
@@ -162,8 +255,10 @@ void tui_terminal_restore_sane(void) {
                                 "\033[?25h"
                                 "\033[0m";
     int out_fd = isatty(STDERR_FILENO) ? STDERR_FILENO : STDOUT_FILENO;
-    if (isatty(out_fd))
+    if (isatty(out_fd)) {
         (void)write(out_fd, reset, sizeof(reset) - 1);
+        tui_clear_tracked_composer_area(out_fd);
+    }
 
     if (!isatty(STDIN_FILENO))
         return;
@@ -3870,7 +3965,9 @@ char *tui_composer_read(tui_status_bar_t *sb, const char *prompt, char *out, siz
         return out;
     }
     raw = saved;
-    raw.c_lflag &= (tcflag_t) ~(ECHO | ECHONL | ICANON | IEXTEN);
+    g_composer_interrupt_requested = 0;
+    g_composer_reading = 1;
+    raw.c_lflag &= (tcflag_t) ~(ECHO | ECHONL | ICANON | IEXTEN | ISIG);
     raw.c_iflag &= (tcflag_t) ~(IXON | ICRNL | BRKINT | INPCK | ISTRIP);
     raw.c_cc[VMIN] = 1;
     raw.c_cc[VTIME] = 0;
@@ -3882,6 +3979,10 @@ char *tui_composer_read(tui_status_bar_t *sb, const char *prompt, char *out, siz
 
     char *buf = (char *)calloc(1, TUI_COMPOSER_BUF_CAP);
     if (!buf) {
+        fprintf(stderr, "\033[?2004l");
+        fflush(stderr);
+        g_composer_reading = 0;
+        g_composer_interrupt_requested = 0;
         tcsetattr(STDIN_FILENO, TCSAFLUSH, &saved);
         return NULL;
     }
@@ -3945,6 +4046,7 @@ char *tui_composer_read(tui_status_bar_t *sb, const char *prompt, char *out, siz
         if (r_top < 1)
             r_top = 1;
     }
+    tui_composer_restore_track(r_top, rows);
     int prev_height = 0;
 
     tui_term_lock();
@@ -3966,6 +4068,10 @@ char *tui_composer_read(tui_status_bar_t *sb, const char *prompt, char *out, siz
 
     bool was_locked = false;
     while (!done) {
+        if (g_composer_interrupt_requested) {
+            cancelled = true;
+            break;
+        }
         /* Cheap, non-blocking check first: if presence has engaged the lock
          * overlay, do not race it for the user's keystrokes. Block here until
          * Touch ID clears the lock, then force a full composer redraw because
@@ -3997,14 +4103,24 @@ char *tui_composer_read(tui_status_bar_t *sb, const char *prompt, char *out, siz
         if (sr == 0)
             continue; /* timeout — re-check presence_is_locked */
         if (sr < 0) {
-            if (errno == EINTR)
+            if (errno == EINTR) {
+                if (g_composer_interrupt_requested) {
+                    cancelled = true;
+                    break;
+                }
                 continue;
+            }
             break;
         }
         ssize_t n = read(STDIN_FILENO, &c, 1);
         if (n < 0) {
-            if (errno == EINTR)
+            if (errno == EINTR) {
+                if (g_composer_interrupt_requested) {
+                    cancelled = true;
+                    break;
+                }
                 continue;
+            }
             break;
         }
         if (n == 0) {
@@ -4431,6 +4547,7 @@ char *tui_composer_read(tui_status_bar_t *sb, const char *prompt, char *out, siz
             }
             if (nrows != rows)
                 rows = nrows;
+            tui_composer_restore_track(r_top, rows);
 
             tui_term_lock();
             fprintf(stderr, "\033[?25l");
@@ -4471,6 +4588,9 @@ char *tui_composer_read(tui_status_bar_t *sb, const char *prompt, char *out, siz
     fprintf(stderr, "\033[?25h");
     fflush(stderr);
     tui_term_unlock();
+    tui_composer_restore_untrack();
+    g_composer_reading = 0;
+    g_composer_interrupt_requested = 0;
 
     if (cancelled) {
         free(buf);
