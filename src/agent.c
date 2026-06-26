@@ -1544,6 +1544,15 @@ static void terminal_force_restore(void);
 
 static void sigint_handler(int sig) {
     (void)sig;
+    int composer_interrupt = tui_composer_signal_interrupt();
+    if (composer_interrupt) {
+        if (composer_interrupt > 1) {
+            terminal_force_restore();
+            (void)write(STDERR_FILENO, "\n", 1);
+            _exit(130);
+        }
+        return;
+    }
     /* First Ctrl+C: pause current streaming turn (ESC_PAUSED state).
        Second Ctrl+C: hard exit (already interrupted/stuck). */
     if (g_interrupted) {
@@ -2972,16 +2981,17 @@ static void terminal_capture_original(void) {
         g_term_orig_valid = 1;
 }
 
-/* Hard, async-signal-safe restore: only write() + tcsetattr(). Emits the
- * mode resets the TUI may have left on (scroll region, bracketed paste, mouse
- * + focus reporting, cursor, SGR) and forces the tty back to the captured
- * cooked state. TCSAFLUSH discards pending input — notably a late DSR (ESC[6n)
- * reply that would otherwise leak to the shell as a bogus command like the
- * stray "^[[56;1R". Safe to call from a signal handler or atexit. */
+/* Hard terminal restore for signal and atexit paths. Applies the captured
+ * cooked state first, then emits the mode resets the TUI may have left
+ * on (scroll region, bracketed paste, mouse + focus reporting, cursor, SGR) and
+ * forces canonical/echo as the final tty write. TCSAFLUSH discards pending
+ * input — notably a late DSR (ESC[6n) reply that would otherwise leak to the
+ * shell as a bogus command like the stray "^[[56;1R". Safe to call from a
+ * signal handler or atexit. */
 static void terminal_force_restore(void) {
-    tui_terminal_restore_sane();
     if (g_term_orig_valid)
         tcsetattr(STDIN_FILENO, TCSAFLUSH, &g_term_orig);
+    tui_terminal_restore_sane();
 }
 
 static void terminal_input_echo_suspend(void) {
