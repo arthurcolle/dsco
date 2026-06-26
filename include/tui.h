@@ -600,6 +600,10 @@ void tui_pad_to_panel_anchor(void);
  */
 char *tui_composer_read(tui_status_bar_t *sb, const char *prompt,
                         char *out, size_t out_sz);
+/* Signal handler hook for Ctrl+C while the composer owns stdin.
+ * Returns 0 when no composer is reading, 1 when cancellation was requested,
+ * and 2 when an interrupt was already pending. */
+int tui_composer_signal_interrupt(void);
 
 /* ── Swarm UI ─────────────────────────────────────────────────────────── */
 typedef struct {
