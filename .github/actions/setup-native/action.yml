@@ -1,0 +1,68 @@
+name: setup-native
+description: Install native dependencies for DSCO builds and quality gates.
+
+inputs:
+  static-analysis:
+    description: Install clang-tidy and cppcheck.
+    required: false
+    default: "false"
+  format:
+    description: Install clang-format.
+    required: false
+    default: "false"
+
+runs:
+  using: composite
+  steps:
+    - name: Install native dependencies (Ubuntu)
+      if: runner.os == 'Linux'
+      shell: bash
+      run: |
+        set -euo pipefail
+        sudo apt-get update
+        packages=(
+          build-essential
+          pkg-config
+          clang
+          libcurl4-openssl-dev
+          libsqlite3-dev
+          libreadline-dev
+          libsodium-dev
+          libuv1-dev
+          libmbedtls-dev
+          libhiredis-dev
+          python3
+        )
+        if [[ "${{ inputs.static-analysis }}" == "true" ]]; then
+          packages+=(clang-tidy cppcheck)
+        fi
+        if [[ "${{ inputs.format }}" == "true" ]]; then
+          packages+=(clang-format)
+        fi
+        sudo apt-get install -y "${packages[@]}"
+
+    - name: Install native dependencies (macOS)
+      if: runner.os == 'macOS'
+      shell: bash
+      run: |
+        set -euo pipefail
+        brew update
+        packages=(
+          hiredis
+          libsodium
+          libuv
+          mbedtls@3
+          readline
+          pkg-config
+        )
+        if [[ "${{ inputs.static-analysis }}" == "true" ]]; then
+          packages+=(llvm cppcheck)
+        fi
+        if [[ "${{ inputs.format }}" == "true" ]]; then
+          packages+=(clang-format)
+        fi
+        for package in "${packages[@]}"; do
+          if ! brew list "$package" >/dev/null 2>&1; then
+            brew install "$package"
+          fi
+        done
