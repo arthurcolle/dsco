@@ -27,6 +27,26 @@ Canonical event names:
 15. `artifact.promoted`
 16. `session.completed`
 
+## Runtime controls
+
+Chronicle starts at process entry from `main.c` and is updated when DSCO enters interactive, one-shot, or timeline-server mode. Calls are idempotent, so later runtime configuration refines the same local activity stream rather than creating an unrelated subsystem.
+
+Environment controls:
+
+| Variable | Purpose |
+|---|---|
+| `DSCO_CHRONICLE_MODE` | Set to `off` to disable Chronicle for a run. Runtime code also uses mode labels such as `startup`, `interactive`, `oneshot`, and `activity-server`. |
+| `DSCO_CHRONICLE_DIR` | Override the ledger/blob directory. Useful for tests, demos, and sandboxed repros. |
+| `DSCO_CHRONICLE_SESSION_ID` | Session correlation ID; normally set by DSCO. Do not put this in shell startup files. |
+
+Timeline server endpoints:
+
+| Endpoint | Purpose |
+|---|---|
+| `/chronicle` | Local HTML activity view. |
+| `/chronicle.json` | JSON activity export. |
+| `/chronicle/blob/<sha256>` | Blob lookup for referenced payloads, capped by server-side read limits. |
+
 ## Storage shape
 
 Timeline events are compact JSONL records:
@@ -55,8 +75,10 @@ Payload blobs are content-addressed, fsynced, and linked by SHA-256. Secrets mus
 
 ## Integration points
 
+- Process/session startup emits local activity metadata before provider resolution.
+- Streaming LLM deltas emit `llm.response.delta` activity for visible text and thinking streams.
 - LLM request/response construction emits `llm.*` events.
-- Tool dispatch emits `tool.call.*` events.
+- Tool dispatch emits `tool.call.*` events, including start/end status, timeout state, elapsed time, inputs, and outputs by blob reference.
 - Memory operations emit `memory.*` events before and after commitment.
 - Skill load/write paths emit `skill.*` events.
 - Artifact creation/promotion emits `artifact.*` events.

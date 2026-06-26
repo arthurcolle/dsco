@@ -48,8 +48,14 @@ TARGET = dsco
 LITE_TARGET = dsco-lite
 DEBUG_TARGET = $(TARGET)-debug
 
+# Cosmopolitan / APE portable build lane. The default target is intentionally
+# separate from $(TARGET): native DSCO keeps Darwin frameworks + Homebrew deps;
+# dsco.com is the portable artifact built by scripts/cosmo_build.sh.
+COSMO_TARGET ?= dsco.com
+COSMOCC_VERSION ?= 4.0.2
+
 SRC_NAMES = main.c agent.c llm.c tools.c execution_layer.c json_util.c ast.c swarm.c tui.c env_config.c \
-	md.c baseline.c setup.c crypto.c eval.c pipeline.c plugin.c \
+	md.c baseline.c chronicle.c setup.c crypto.c eval.c pipeline.c plugin.c \
 			semantic.c hlc.c ipc.c mcp.c mcp_names.c provider_profiles.c provider.c integrations.c error.c trace.c task_profile.c \
 	output_guard.c topology.c workspace.c plan.c stateful_atoms.c recovery.c router.c \
 	pheromone.c ooda.c killswitch.c governance.c memory_tier.c talons.c avian.c \
@@ -58,7 +64,7 @@ SRC_NAMES = main.c agent.c llm.c tools.c execution_layer.c json_util.c ast.c swa
 	se_store.c watchdog.c audit_log.c heartbeat.c env_guard.c peer_bootstrap.c presence.c \
 	project.c project_mux.c project_grid.c \
 	dsco_accel.c dsco_mlx.c dsco_pool.c \
-	fingerprint.c trust.c toolmgmt.c connector.c integration_fabric.c openrouter_cache.c codex_cache.c dcr.c \
+	fingerprint.c trust.c toolmgmt.c connector.c integration_fabric.c codex_app_directory.c openrouter_cache.c codex_cache.c dcr.c \
 	openai_oauth.c local_llm.c \
 	startup.c plot.c anim.c fractal.c shadeexpr.c face_sdf.c avatar.c self_improve.c bg_learn.c rsi_curriculum.c pets.c img_util.c supervisor.c \
 	graphsub_client.c graphsub_tools.c \
@@ -117,7 +123,10 @@ COVERAGE_LDFLAGS = --coverage
 ASAN_RUNTIME_OPTIONS = detect_leaks=1
 ifeq ($(UNAME_S),Darwin)
 ASAN_RUNTIME_OPTIONS = detect_leaks=0
-# Secure Enclave + PAC + Touch ID + presence detection
+# Secure Enclave + PAC + Touch ID + presence detection. Disabled for the
+# Cosmopolitan lane: cosmocc targets the APE portable ABI, not Darwin
+# Objective-C frameworks / Metal / LocalAuthentication.
+ifneq ($(COSMO_BUILD),1)
 BASE_CFLAGS += -DHAVE_SECURE_ENCLAVE -DHAVE_TOUCHID -mbranch-protection=standard
 LDLIBS      += -framework Security -framework CoreFoundation -framework IOKit \
                -framework CoreGraphics -framework LocalAuthentication \
@@ -132,6 +141,7 @@ OBJS       += $(OBJC_OBJS)
 DEBUG_OBJS += $(OBJC_NAMES:%.m=$(DEBUG_OBJ_DIR)/%.o)
 ASAN_OBJS  += $(OBJC_NAMES:%.m=$(ASAN_OBJ_DIR)/%.o)
 UBSAN_OBJS += $(OBJC_NAMES:%.m=$(UBSAN_OBJ_DIR)/%.o)
+endif
 endif
 
 PREFIX ?= /opt/homebrew
@@ -257,6 +267,33 @@ all: $(TARGET) dsc dsco-new $(LITE_TARGET)
 debug: $(DEBUG_TARGET)
 dev: $(DEBUG_TARGET)
 
+.PHONY: cosmo-bootstrap cosmo cosmo-run cosmo-selftest cosmo-clean cosmo-info
+cosmo-bootstrap:
+	chmod +x scripts/cosmo_bootstrap.sh scripts/cosmo_build.sh
+	DSCO_COSMOCC_VERSION=$(COSMOCC_VERSION) scripts/cosmo_bootstrap.sh
+
+cosmo: cosmo-bootstrap
+	DSCO_COSMO_OUT=$(COSMO_TARGET) scripts/cosmo_build.sh
+
+cosmo-run: cosmo
+	./$(COSMO_TARGET) --version
+
+cosmo-selftest: cosmo
+	./$(COSMO_TARGET) --version
+	./$(COSMO_TARGET) --models-json >/dev/null
+	./$(COSMO_TARGET) --tools-json >/dev/null
+	./$(COSMO_TARGET) --tool-exec cwd '{}' >/dev/null
+	@echo "cosmo selftest ok: $(COSMO_TARGET)"
+
+cosmo-clean:
+	rm -rf build/cosmo $(COSMO_TARGET)
+
+cosmo-info:
+	@echo "COSMO_TARGET=$(COSMO_TARGET)"
+	@echo "COSMOCC_VERSION=$(COSMOCC_VERSION)"
+	@echo "DSCO_COSMO_MODE=$${DSCO_COSMO_MODE:-normal}"
+	@echo "DSCO_COSMO_EXPERIMENTAL_FULL=$${DSCO_COSMO_EXPERIMENTAL_FULL:-0}"
+
 # Ultra-fast edit→signal loop. Uses scripts/dev_fast.sh with a separate
 # build/fast object tree, low-optimizer dev flags, dependency files, and
 # optional sccache/ccache if installed.
@@ -292,6 +329,16 @@ ninja-file:
 	python3 scripts/gen_ninja.py
 ninja-build: ninja-file
 	ninja -f build.ninja
+
+ifeq ($(COSMO_BUILD),1)
+ifeq ($(COSMO_PORTABLE),1)
+$(COSMO_TARGET): $(SRC_DIR)/lite_main.c $(INC_DIR)/config.h
+	$(CC) $(CFLAGS) -o $@ $< $(LDFLAGS) $(RELEASE_LDFLAGS) $(LDLIBS)
+else
+$(COSMO_TARGET): $(OBJS) $(GSL_OBJS)
+	$(CC) $(CFLAGS) -o $@ $^ $(LDFLAGS) $(RELEASE_LDFLAGS) $(LDLIBS)
+endif
+endif
 
 dsc: dsc.c
 	$(CC) -O2 -std=$(DSCO_STD) $(C2Y_WARNING_FLAGS) -D_POSIX_C_SOURCE=200809L -o $@ $< -lcurl -lreadline
@@ -651,10 +698,12 @@ check-version:
 docs:
 	./scripts/gen_api_reference.sh
 	./scripts/gen_tool_catalog.sh
+	python3 scripts/index_constants_env.py --root .
 
 docs-check:
 	./scripts/gen_api_reference.sh --check
 	./scripts/gen_tool_catalog.sh --check
+	python3 scripts/index_constants_env.py --root . --check
 
 bench-startup: $(TARGET) dsc
 	@echo "== dsco metadata startup =="
