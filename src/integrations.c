@@ -13,6 +13,7 @@
 #include "tools.h"
 #include "semantic.h"
 #include "config.h"
+#include "http_pool.h"
 #include <ctype.h>
 #include <stdio.h>
 #include <math.h>
@@ -162,6 +163,7 @@ static bool external_http_url_is_public(const char *url) {
 static long http_json_request(const char *method, const char *url, const char *body,
                               const char *headers[], int header_count, http_buf_t *out_buf) {
     CURL *curl = curl_easy_init();
+    dsco_http_pool_apply(curl);
     if (!curl)
         return -1;
 
@@ -214,6 +216,7 @@ static long http_json_request(const char *method, const char *url, const char *b
 /* Simple GET request with auth header */
 static long http_get_authed(const char *url, const char *auth_header, http_buf_t *out_buf) {
     CURL *curl = curl_easy_init();
+    dsco_http_pool_apply(curl);
     if (!curl)
         return -1;
 
@@ -357,6 +360,7 @@ bool tool_brave_search(const char *input, char *result, size_t rlen) {
 
     /* URL-encode query */
     CURL *curl = curl_easy_init();
+    dsco_http_pool_apply(curl);
     char *encoded = curl_easy_escape(curl, query, 0);
     char url[2048];
     snprintf(url, sizeof(url), "https://api.search.brave.com/res/v1/web/search?q=%s&count=%d",
@@ -413,6 +417,7 @@ static bool github_api(const char *path, const char *method, const char *body, c
     } else {
         http_buf_t r = {0};
         CURL *curl = curl_easy_init();
+        dsco_http_pool_apply(curl);
         if (!curl) {
             snprintf(result, rlen, "curl init failed");
             return false;
@@ -466,6 +471,7 @@ bool tool_github_search(const char *input, char *result, size_t rlen) {
 
     const char *search_type = (type && type[0]) ? type : "repositories";
     CURL *curl = curl_easy_init();
+    dsco_http_pool_apply(curl);
     char *enc = curl_easy_escape(curl, query, 0);
     char path[2048];
     snprintf(path, sizeof(path), "/search/%s?q=%s&per_page=10", search_type, enc);
@@ -661,6 +667,7 @@ static bool av_generic(const char *av_func, const char *input, const char *req1,
     }
 
     CURL *curl = curl_easy_init();
+    dsco_http_pool_apply(curl);
     if (!curl) {
         snprintf(result, rlen, "curl init failed");
         return false;
@@ -880,6 +887,7 @@ bool tool_fred_series(const char *input, char *result, size_t rlen) {
     const char *sort_order = (sort && strcmp(sort, "asc") == 0) ? "asc" : "desc";
 
     CURL *curl = curl_easy_init();
+    dsco_http_pool_apply(curl);
     if (!curl) {
         free(series_id);
         free(sort);
@@ -1071,6 +1079,7 @@ bool tool_weather(const char *input, char *result, size_t rlen) {
     const char *wsym = (strcmp(u, "imperial") == 0) ? "mph" : "m/s";
 
     CURL *curl = curl_easy_init();
+    dsco_http_pool_apply(curl);
     char *enc = curl_easy_escape(curl, location, 0);
     char url[2048];
     snprintf(url, sizeof(url),
@@ -1296,6 +1305,7 @@ bool tool_jina_search(const char *input, char *result, size_t rlen) {
 
     /* POST to s.jina.ai */
     CURL *curl = curl_easy_init();
+    dsco_http_pool_apply(curl);
     if (!curl) {
         jbuf_free(&body);
         snprintf(result, rlen, "curl init failed");
@@ -1381,6 +1391,7 @@ bool tool_jina_embed(const char *input, char *result, size_t rlen) {
     free(task);
 
     CURL *curl = curl_easy_init();
+    dsco_http_pool_apply(curl);
     if (!curl) {
         jbuf_free(&body);
         snprintf(result, rlen, "curl init failed");
@@ -1580,6 +1591,7 @@ bool tool_serpapi(const char *input, char *result, size_t rlen) {
     }
 
     CURL *curl = curl_easy_init();
+    dsco_http_pool_apply(curl);
     char *enc = curl_easy_escape(curl, query, 0);
     char url[2048];
     snprintf(url, sizeof(url), "https://serpapi.com/search.json?q=%s&api_key=%s&num=5", enc,
@@ -1711,6 +1723,7 @@ bool tool_twilio_sms(const char *input, char *result, size_t rlen) {
              account_sid);
 
     CURL *curl = curl_easy_init();
+    dsco_http_pool_apply(curl);
     if (!curl) {
         free(to);
         free(body_text);
@@ -1789,6 +1802,7 @@ bool tool_elevenlabs_tts(const char *input, char *result, size_t rlen) {
     jbuf_append(&body, ",\"model_id\":\"eleven_multilingual_v2\"}");
 
     CURL *curl = curl_easy_init();
+    dsco_http_pool_apply(curl);
     FILE *fp = fopen(out, "wb");
     if (!curl || !fp) {
         if (fp)
@@ -1961,6 +1975,7 @@ bool tool_supabase_query(const char *input, char *result, size_t rlen) {
     }
 
     CURL *curl = curl_easy_init();
+    dsco_http_pool_apply(curl);
     if (!curl) {
         free(table);
         free(select);
@@ -1985,6 +2000,7 @@ bool tool_supabase_query(const char *input, char *result, size_t rlen) {
     snprintf(apikey_hdr, sizeof(apikey_hdr), "apikey: %s", api_key);
 
     CURL *curl2 = curl_easy_init();
+    dsco_http_pool_apply(curl2);
     http_buf_t resp = {0};
     resp.data = malloc(8192);
     resp.len = 0;
@@ -2143,6 +2159,7 @@ bool tool_mapbox_geocode(const char *input, char *result, size_t rlen) {
     }
 
     CURL *curl = curl_easy_init();
+    dsco_http_pool_apply(curl);
     char *enc = curl_easy_escape(curl, query, 0);
     char url[2048];
     snprintf(url, sizeof(url),
@@ -2796,6 +2813,7 @@ bool tool_arxiv_search(const char *input, char *result, size_t rlen) {
         limit = 50;
 
     CURL *c = curl_easy_init();
+    dsco_http_pool_apply(c);
     char *enc = curl_easy_escape(c, query, 0);
     char url[2048];
     snprintf(
@@ -3429,6 +3447,7 @@ bool tool_strat_spread_scan(const char *input, char *result, size_t rlen) {
                  limit);
     if (category && category[0]) {
         CURL *c = curl_easy_init();
+        dsco_http_pool_apply(c);
         char *enc = curl_easy_escape(c, category, 0);
         jbuf_appendf(&url, "&tag=%s", enc);
         curl_free(enc);
@@ -3522,6 +3541,7 @@ bool tool_polymarket_markets(const char *input, char *result, size_t rlen) {
         jbuf_appendf(&url, "&closed=%s", closed);
     if (tag && tag[0]) {
         CURL *c = curl_easy_init();
+        dsco_http_pool_apply(c);
         char *enc = curl_easy_escape(c, tag, 0);
         jbuf_appendf(&url, "&tag=%s", enc);
         curl_free(enc);
@@ -3561,6 +3581,7 @@ bool tool_polymarket_events(const char *input, char *result, size_t rlen) {
         jbuf_appendf(&url, "https://gamma-api.polymarket.com/events/%s", id);
     } else if (slug && slug[0]) {
         CURL *c = curl_easy_init();
+        dsco_http_pool_apply(c);
         char *enc = curl_easy_escape(c, slug, 0);
         jbuf_appendf(&url, "https://gamma-api.polymarket.com/events?slug=%s", enc);
         curl_free(enc);
@@ -3572,6 +3593,7 @@ bool tool_polymarket_events(const char *input, char *result, size_t rlen) {
                      limit, offset);
         if (tag && tag[0]) {
             CURL *c = curl_easy_init();
+            dsco_http_pool_apply(c);
             char *enc = curl_easy_escape(c, tag, 0);
             jbuf_appendf(&url, "&tag=%s", enc);
             curl_free(enc);
@@ -3806,6 +3828,7 @@ bool tool_polymarket_search(const char *input, char *result, size_t rlen) {
         limit = 50;
 
     CURL *c = curl_easy_init();
+    dsco_http_pool_apply(c);
     char *enc = curl_easy_escape(c, query, 0);
     char url[2048];
     snprintf(url, sizeof(url),
@@ -4394,6 +4417,7 @@ bool tool_prediction_weather(const char *input, char *result, size_t rlen) {
 
         for (int q = 0; weather_queries[q] && pm_count < limit; q++) {
             CURL *c = curl_easy_init();
+            dsco_http_pool_apply(c);
             char *enc = curl_easy_escape(c, weather_queries[q], 0);
             char url[2048];
             snprintf(url, sizeof(url),
@@ -4652,6 +4676,7 @@ bool tool_historical_cross_platform(const char *input, char *result, size_t rlen
     /* Polymarket: closed markets matching topic */
     if (topic && topic[0]) {
         CURL *c = curl_easy_init();
+        dsco_http_pool_apply(c);
         char *enc = curl_easy_escape(c, topic, 0);
         char url[2048];
         snprintf(url, sizeof(url),
@@ -5781,6 +5806,7 @@ bool tool_cross_platform_delta(const char *input, char *result, size_t rlen) {
         limit = 50;
 
     CURL *c = curl_easy_init();
+    dsco_http_pool_apply(c);
     char *enc = curl_easy_escape(c, topic, 0);
 
     /* Fetch Polymarket markets */
@@ -5889,6 +5915,7 @@ bool tool_prediction_scan(const char *input, char *result, size_t rlen) {
     /* Polymarket */
     {
         CURL *c = curl_easy_init();
+        dsco_http_pool_apply(c);
         char *enc = curl_easy_escape(c, query, 0);
         char url[2048];
         snprintf(url, sizeof(url),
@@ -5969,6 +5996,7 @@ bool tool_prediction_snapshot(const char *input, char *result, size_t rlen) {
                      limit);
         if (category && category[0]) {
             CURL *c = curl_easy_init();
+            dsco_http_pool_apply(c);
             char *enc = curl_easy_escape(c, category, 0);
             jbuf_appendf(&url, "&tag=%s", enc);
             curl_free(enc);
@@ -6172,6 +6200,7 @@ bool tool_prediction_arb(const char *input, char *result, size_t rlen) {
     jbuf_append(&out, ",\"polymarket\":{");
     {
         CURL *c = curl_easy_init();
+        dsco_http_pool_apply(c);
         char *enc = curl_easy_escape(c, topic, 0);
         char url[2048];
         snprintf(url, sizeof(url),
@@ -6476,6 +6505,7 @@ bool tool_prediction_semantic_match(const char *input, char *result, size_t rlen
         jbuf_init(&url, 512);
         if (topic && topic[0]) {
             CURL *c = curl_easy_init();
+            dsco_http_pool_apply(c);
             char *enc = curl_easy_escape(c, topic, 0);
             jbuf_appendf(&url,
                          "https://gamma-api.polymarket.com/"
@@ -6973,6 +7003,7 @@ bool tool_nws(const char *input, char *result, size_t rlen) {
             jbuf_appendf(&url, "&area=%s", area);
         if (event && event[0]) {
             CURL *c = curl_easy_init();
+            dsco_http_pool_apply(c);
             char *enc = curl_easy_escape(c, event, 0);
             jbuf_appendf(&url, "&event=%s", enc);
             curl_free(enc);

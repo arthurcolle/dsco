@@ -10,6 +10,7 @@
  */
 
 #include "provider.h"
+#include "http_pool.h"
 #include "config.h"
 #include "crypto.h"
 #include "tools.h"
@@ -32,6 +33,7 @@
 #include <fcntl.h>
 #include <pwd.h>
 #include <unistd.h>
+#include <time.h>
 #include <curl/curl.h>
 
 #ifdef HAVE_LIBSODIUM
@@ -53,6 +55,7 @@ static stream_result_t codex_exec_stream(provider_t *p, const char *api_key,
                                          stream_tool_start_cb tool_cb,
                                          stream_thinking_cb thinking_cb, void *cb_ctx);
 static bool provider_is_sakana(const provider_t *p);
+static bool provider_is_local_endpoint(const char *name);
 
 static char *unsupported_build_request(provider_t *p, conversation_t *conv,
                                        session_state_t *session, int max_tokens,
@@ -206,6 +209,13 @@ static bool provider_env_truthy(const char *val) {
     return val && (val[0] == '1' || strcasecmp(val, "true") == 0 || strcasecmp(val, "yes") == 0);
 }
 
+static bool provider_env_matches(const char *val, const char *a, const char *b) {
+    return val && ((a && strcasecmp(val, a) == 0) || (b && strcasecmp(val, b) == 0));
+}
+
+static const char *provider_sakana_subscription_key(void);
+static const char *provider_sakana_payg_key(void);
+
 static double provider_now_sec(void) {
     struct timeval tv;
     gettimeofday(&tv, NULL);
@@ -229,6 +239,16 @@ const char *provider_auth_mode(const char *provider_name, const char *resolved_k
         return "openai-api-key";
     if (provider_name && strcmp(provider_name, "openai-codex") == 0)
         return "chatgpt-subscription";
+    if (provider_name && strcmp(provider_profile_canonical_name(provider_name), "sakana") == 0) {
+        const char *payg = provider_sakana_payg_key();
+        if (resolved_key && payg && strcmp(resolved_key, payg) == 0)
+            return "sakana-payg-api-key";
+        const char *sub = provider_sakana_subscription_key();
+        if (resolved_key && sub && strcmp(resolved_key, sub) == 0)
+            return "sakana-subscription-api-key";
+        return provider_sakana_current_key_is_subscription() ? "sakana-subscription-api-key"
+                                                            : "sakana-payg-api-key";
+    }
     return "api-key";
 }
 
@@ -1158,6 +1178,7 @@ static bool provider_refresh_claude_code_oauth_bundle(claude_code_oauth_bundle_t
 
     curl_global_init(CURL_GLOBAL_DEFAULT);
     CURL *curl = curl_easy_init();
+    dsco_http_pool_apply(curl);
     if (!curl)
         return false;
 
@@ -1444,13 +1465,11 @@ static char *moonshot_build_request(provider_t *p, conversation_t *conv, session
     if (!base)
         return NULL;
 
-    size_t len = strlen(base);
-    if (len == 0 || base[len - 1] != '}')
-        return base;
-    base[len - 1] = '\0';
-
-    /* Never emit type=disabled for Moonshot/Kimi — kimi-k2.7-code and kimi-k2.5 reject it.
-       Thinking is disabled by omission. */
+    /* openai_build_request() already emits Moonshot-safe payloads: Kimi-compatible
+     * models get thinking enabled plus the fixed sampling parameters required by
+     * K2.7 Code. Do not mutate the JSON here. A previous version chopped the
+     * final closing brace while trying to strip a disabled-thinking field, which
+     * made Moonshot return HTTP 400 "unexpected EOF" for every native Kimi call. */
     return base;
 }
 
@@ -2023,6 +2042,89 @@ bool provider_model_supports_automatic_prompt_cache(const char *model) {
 }
 
 
+static const char *openai_extra_params_json(void) {
+    const char *raw = getenv("DSCO_OPENAI_PARAMS");
+    if (!raw || !raw[0])
+        raw = getenv("OPENAI_PARAMS");
+    if (!raw || !raw[0])
+        return NULL;
+    while (*raw && isspace((unsigned char)*raw))
+        raw++;
+    return *raw == '{' ? raw : NULL;
+}
+
+static bool openai_extra_has_param(const char *extra, const char *key) {
+    if (!extra || !key)
+        return false;
+    char *raw = json_get_raw(extra, key);
+    if (!raw)
+        return false;
+    free(raw);
+    return true;
+}
+
+static void openai_append_raw_param(jbuf_t *b, const char *key, const char *raw) {
+    if (!b || !key || !raw)
+        return;
+    const char *v = raw;
+    while (*v && isspace((unsigned char)*v))
+        v++;
+    if (!*v)
+        return;
+    jbuf_append(b, ",\"");
+    jbuf_append(b, key);
+    jbuf_append(b, "\":");
+    jbuf_append(b, v);
+}
+
+static void openai_append_extra_param_if_present(jbuf_t *b, const char *extra, const char *key) {
+    char *raw = json_get_raw(extra, key);
+    if (!raw)
+        return;
+    openai_append_raw_param(b, key, raw);
+    free(raw);
+}
+
+static void openai_append_extra_request_params(jbuf_t *b, const char *extra) {
+    if (!extra)
+        return;
+    /* Chat Completions + current OpenAI-compatible extensions. Ownership fields
+     * (model/messages/stream/tools/tool_choice/token limit) are emitted by dsco
+     * itself; everything below is safe request policy or output-shaping surface.
+     * Use DSCO_OPENAI_PARAMS='{"response_format":{"type":"json_object"},...}'. */
+    static const char *const keys[] = {
+        "audio",
+        "frequency_penalty",
+        "function_call",
+        "functions",
+        "logit_bias",
+        "logprobs",
+        "metadata",
+        "modalities",
+        "n",
+        "parallel_tool_calls",
+        "prediction",
+        "presence_penalty",
+        "reasoning",
+        "reasoning_effort",
+        "response_format",
+        "seed",
+        "service_tier",
+        "stop",
+        "store",
+        "stream_options",
+        "temperature",
+        "top_logprobs",
+        "top_p",
+        "user",
+        "verbosity",
+        "web_search_options",
+        NULL,
+    };
+    for (int i = 0; keys[i]; i++)
+        openai_append_extra_param_if_present(b, extra, keys[i]);
+}
+
 static const char *provider_request_model_id(const char *provider_name, const char *model) {
     if (!model || !model[0])
         return DEFAULT_MODEL;
@@ -2082,17 +2184,24 @@ static char *openai_build_request(provider_t *p, conversation_t *conv, session_s
 
     jbuf_t b;
     jbuf_init(&b, 8192);
+    const char *extra_params = openai_extra_params_json();
 
     jbuf_append(&b, "{\"model\":");
     const char *request_model =
         provider_request_model_id(p ? p->name : NULL, session ? session->model : DEFAULT_MODEL);
     jbuf_append_json_str(&b, request_model);
     const char *provider_name = p && p->name ? provider_profile_canonical_name(p->name) : NULL;
-    if (provider_name && strcmp(provider_name, "sakana") == 0)
-        jbuf_append(&b, ",\"max_completion_tokens\":");
-    else
-        jbuf_append(&b, ",\"max_tokens\":");
-    jbuf_append_int(&b, max_tokens);
+    if (extra_params && openai_extra_has_param(extra_params, "max_completion_tokens")) {
+        openai_append_extra_param_if_present(&b, extra_params, "max_completion_tokens");
+    } else if (extra_params && openai_extra_has_param(extra_params, "max_tokens")) {
+        openai_append_extra_param_if_present(&b, extra_params, "max_tokens");
+    } else {
+        if (provider_name && strcmp(provider_name, "sakana") == 0)
+            jbuf_append(&b, ",\"max_completion_tokens\":");
+        else
+            jbuf_append(&b, ",\"max_tokens\":");
+        jbuf_append_int(&b, max_tokens);
+    }
     jbuf_append(&b, ",\"stream\":true");
 
     if (provider_model_supports_prompt_cache_key(session ? session->model : request_model)) {
@@ -2121,13 +2230,30 @@ static char *openai_build_request(provider_t *p, conversation_t *conv, session_s
      * top_p=0.95, n=1, penalties=0.0 — and rejects any other values with a 400.
      * We inject the server-required values explicitly to avoid any downstream
      * defaults or user overrides causing rejections. */
-    if (model_is_moonshot_compatible(session ? session->model : NULL)) {
+    bool moonshot_fixed_sampling = model_is_moonshot_compatible(session ? session->model : NULL);
+    if (moonshot_fixed_sampling) {
         jbuf_append(&b, ",\"thinking\":{\"type\":\"enabled\"}");
         jbuf_append(&b, ",\"temperature\":1.0");
         jbuf_append(&b, ",\"top_p\":0.95");
         jbuf_append(&b, ",\"n\":1");
         jbuf_append(&b, ",\"presence_penalty\":0.0");
         jbuf_append(&b, ",\"frequency_penalty\":0.0");
+    } else {
+        if (session && session->temperature >= 0 &&
+            !(extra_params && openai_extra_has_param(extra_params, "temperature"))) {
+            jbuf_appendf(&b, ",\"temperature\":%.6g", session->temperature);
+        }
+        if (session && session->top_p >= 0 &&
+            !(extra_params && openai_extra_has_param(extra_params, "top_p"))) {
+            jbuf_appendf(&b, ",\"top_p\":%.6g", session->top_p);
+        }
+        if (session && session->effort[0] && strcmp(session->effort, "high") != 0 &&
+            !(extra_params && (openai_extra_has_param(extra_params, "reasoning_effort") ||
+                               openai_extra_has_param(extra_params, "reasoning")))) {
+            jbuf_append(&b, ",\"reasoning_effort\":");
+            jbuf_append_json_str(&b, session->effort);
+        }
+        openai_append_extra_request_params(&b, extra_params);
     }
 
     /* System message. Build the text once, then emit either as a plain string
@@ -2210,10 +2336,16 @@ static char *openai_build_request(provider_t *p, conversation_t *conv, session_s
 static struct curl_slist *openai_build_headers(provider_t *p, const char *api_key) {
     struct curl_slist *hdrs = NULL;
     hdrs = curl_slist_append(hdrs, "Content-Type: application/json");
-    char auth[512];
-    snprintf(auth, sizeof(auth), "Authorization: Bearer %s", api_key);
-    hdrs = curl_slist_append(hdrs, auth);
     const char *canonical = p && p->name ? provider_profile_canonical_name(p->name) : NULL;
+    /* Local OpenAI-compatible servers (Ollama, LM Studio, MLX, vLLM, etc.)
+     * are keyless by default.  Avoid sending DSCO's synthetic "local" token:
+     * some local gateways tolerate it, but Ollama's OpenAI shim does not need
+     * auth and custom proxies may reject unexpected Authorization headers. */
+    if (!provider_is_local_endpoint(canonical) || (api_key && api_key[0] && strcmp(api_key, "local") != 0)) {
+        char auth[512];
+        snprintf(auth, sizeof(auth), "Authorization: Bearer %s", api_key ? api_key : "");
+        hdrs = curl_slist_append(hdrs, auth);
+    }
     if (canonical && strcmp(canonical, "xai") == 0) {
         const char *cache_key = getenv("DSCO_PROMPT_CACHE_KEY");
         if (!cache_key || !cache_key[0])
@@ -2561,6 +2693,7 @@ typedef struct {
     bool got_error;
     bool credit_too_low; /* 402 / "credit balance too low" / insufficient funds */
     char *error_msg;
+    time_t credit_reset_at;
     /* OpenRouter-specific */
     char *generation_id;  /* x-generation-id from response */
     char *actual_model;   /* model actually used (may differ from requested) */
@@ -2604,6 +2737,227 @@ bool provider_msg_is_credit_too_low(const char *msg) {
         }
     }
     return false;
+}
+
+static time_t provider_reset_max(time_t a, time_t b) {
+    if (b <= 0)
+        return a;
+    if (a <= 0)
+        return b;
+    return b > a ? b : a;
+}
+
+static void provider_reset_value_copy(const char *value, char *out, size_t out_len) {
+    if (!out || out_len == 0)
+        return;
+    out[0] = '\0';
+    if (!value)
+        return;
+    while (*value && isspace((unsigned char)*value))
+        value++;
+    size_t n = strlen(value);
+    while (n > 0 && isspace((unsigned char)value[n - 1]))
+        n--;
+    if (n >= 2 && value[0] == '"' && value[n - 1] == '"') {
+        value++;
+        n -= 2;
+    }
+    if (n >= out_len)
+        n = out_len - 1;
+    memcpy(out, value, n);
+    out[n] = '\0';
+}
+
+static long long provider_days_from_civil(int y, unsigned m, unsigned d) {
+    y -= m <= 2;
+    const int era = (y >= 0 ? y : y - 399) / 400;
+    const unsigned yoe = (unsigned)(y - era * 400);
+    const unsigned doy = (153 * (m + (m > 2 ? (unsigned)-3 : 9)) + 2) / 5 + d - 1;
+    const unsigned doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+    return (long long)era * 146097LL + (long long)doe - 719468LL;
+}
+
+static time_t provider_parse_iso_reset_at(const char *value) {
+    int y = 0, mo = 0, d = 0, h = 0, mi = 0, s = 0, pos = 0;
+    if (sscanf(value, "%4d-%2d-%2dT%2d:%2d:%2d%n", &y, &mo, &d, &h, &mi, &s, &pos) != 6 &&
+        sscanf(value, "%4d-%2d-%2d %2d:%2d:%2d%n", &y, &mo, &d, &h, &mi, &s, &pos) != 6)
+        return 0;
+    if (y < 1970 || mo < 1 || mo > 12 || d < 1 || d > 31 || h < 0 || h > 23 ||
+        mi < 0 || mi > 59 || s < 0 || s > 60)
+        return 0;
+
+    long long epoch = provider_days_from_civil(y, (unsigned)mo, (unsigned)d) * 86400LL +
+                      h * 3600LL + mi * 60LL + s;
+    if (value[pos] == 'Z' || value[pos] == '\0')
+        return (time_t)epoch;
+    if (value[pos] == '+' || value[pos] == '-') {
+        int sign = value[pos] == '+' ? 1 : -1;
+        int tzh = 0, tzm = 0;
+        if (sscanf(value + pos + 1, "%2d:%2d", &tzh, &tzm) >= 1) {
+            long long offset = (long long)tzh * 3600LL + (long long)tzm * 60LL;
+            epoch -= sign * offset;
+            return (time_t)epoch;
+        }
+    }
+    return 0;
+}
+
+time_t provider_credit_reset_at_from_value(const char *value, time_t now) {
+    char buf[256];
+    provider_reset_value_copy(value, buf, sizeof(buf));
+    if (!buf[0])
+        return 0;
+
+    char *end = NULL;
+    double num = strtod(buf, &end);
+    if (end && end > buf) {
+        while (*end && isspace((unsigned char)*end))
+            end++;
+        if (strncasecmp(end, "ms", 2) == 0) {
+            long long sec = (long long)((num + 999.0) / 1000.0);
+            return now + (time_t)(sec > 0 ? sec : 1);
+        }
+        if (*end == 's' || strncasecmp(end, "sec", 3) == 0) {
+            long long sec = (long long)num;
+            if ((double)sec < num)
+                sec++;
+            return now + (time_t)(sec > 0 ? sec : 1);
+        }
+        if (*end == 'm' || strncasecmp(end, "min", 3) == 0)
+            return now + (time_t)(num * 60.0);
+        if (*end == 'h')
+            return now + (time_t)(num * 3600.0);
+        if (*end == 'd')
+            return now + (time_t)(num * 86400.0);
+        if (*end == '\0') {
+            if (num > 100000000000.0)
+                return (time_t)(num / 1000.0); /* epoch milliseconds */
+            if (num > 1000000000.0)
+                return (time_t)num; /* epoch seconds */
+            long long sec = (long long)num;
+            if ((double)sec < num)
+                sec++;
+            return now + (time_t)(sec > 0 ? sec : 1);
+        }
+    }
+
+    time_t iso = provider_parse_iso_reset_at(buf);
+    if (iso > 0)
+        return iso;
+
+    time_t parsed = curl_getdate(buf, &now);
+    if (parsed != (time_t)-1)
+        return parsed;
+
+    return 0;
+}
+
+static time_t provider_credit_reset_at_from_json_fields(const char *json, time_t now) {
+    if (!json || !json[0])
+        return 0;
+    static const char *fields[] = {
+        "resetsAt", "resets_at", "resetAt", "reset_at", "reset_time", "resetTime",
+        "retryAfter", "retry_after", "retry_after_seconds", "retryAfterSeconds",
+        "availableAt", "available_at", "reopensAt", "reopens_at", "opensAt", "opens_at",
+        "until", "window_reset_at", "windowResetAt", NULL,
+    };
+    time_t best = 0;
+    for (int i = 0; fields[i]; i++) {
+        char *raw = json_get_raw(json, fields[i]);
+        if (!raw)
+            continue;
+        best = provider_reset_max(best, provider_credit_reset_at_from_value(raw, now));
+        free(raw);
+    }
+    return best;
+}
+
+static time_t provider_credit_reset_at_from_embedded_date(const char *text, time_t now) {
+    if (!text)
+        return 0;
+    for (const char *p = text; *p; p++) {
+        if (!isdigit((unsigned char)p[0]) || !isdigit((unsigned char)p[1]) ||
+            !isdigit((unsigned char)p[2]) || !isdigit((unsigned char)p[3]) ||
+            p[4] != '-' || !isdigit((unsigned char)p[5]) || !isdigit((unsigned char)p[6]) ||
+            p[7] != '-' || !isdigit((unsigned char)p[8]) || !isdigit((unsigned char)p[9]))
+            continue;
+        char candidate[80];
+        size_t n = 0;
+        while (p[n] && n < sizeof(candidate) - 1 && !isspace((unsigned char)p[n]) &&
+               p[n] != '"' && p[n] != '\'' && p[n] != ',' && p[n] != ')' && p[n] != ']')
+            n++;
+        memcpy(candidate, p, n);
+        candidate[n] = '\0';
+        time_t parsed = provider_credit_reset_at_from_value(candidate, now);
+        if (parsed > 0)
+            return parsed;
+    }
+    return 0;
+}
+
+time_t provider_credit_reset_at_from_text(const char *text, time_t now) {
+    if (!text || !text[0])
+        return 0;
+
+    time_t best = provider_credit_reset_at_from_json_fields(text, now);
+    static const char *objects[] = {
+        "error", "rate_limit", "rateLimit", "limits", "details", "metadata", NULL,
+    };
+    for (int i = 0; objects[i]; i++) {
+        char *raw = json_get_raw(text, objects[i]);
+        if (!raw)
+            continue;
+        best = provider_reset_max(best, provider_credit_reset_at_from_json_fields(raw, now));
+        best = provider_reset_max(best, provider_credit_reset_at_from_embedded_date(raw, now));
+        free(raw);
+    }
+    best = provider_reset_max(best, provider_credit_reset_at_from_embedded_date(text, now));
+    return best;
+}
+
+bool provider_credit_reset_at_from_header_line(const char *line, time_t now,
+                                               time_t *reset_at) {
+    if (!line || !reset_at)
+        return false;
+    const char *colon = strchr(line, ':');
+    if (!colon)
+        return false;
+
+    char key[160];
+    size_t kn = (size_t)(colon - line);
+    while (kn > 0 && isspace((unsigned char)line[kn - 1]))
+        kn--;
+    if (kn >= sizeof(key))
+        kn = sizeof(key) - 1;
+    for (size_t i = 0; i < kn; i++)
+        key[i] = (char)tolower((unsigned char)line[i]);
+    key[kn] = '\0';
+
+    bool relevant = strcmp(key, "retry-after") == 0 ||
+                    ((strstr(key, "ratelimit") || strstr(key, "rate-limit")) &&
+                     (strstr(key, "reset") || strstr(key, "retry") || strstr(key, "until")));
+    if (!relevant)
+        return false;
+
+    time_t parsed = provider_credit_reset_at_from_value(colon + 1, now);
+    if (parsed <= 0)
+        return false;
+    *reset_at = provider_reset_max(*reset_at, parsed);
+    return true;
+}
+
+static size_t provider_credit_header_cb(char *buffer, size_t size, size_t nitems,
+                                        void *userdata) {
+    size_t total = size * nitems;
+    time_t *reset_at = (time_t *)userdata;
+    if (!buffer || !reset_at || total == 0)
+        return total;
+    char line[512];
+    size_t n = total < sizeof(line) - 1 ? total : sizeof(line) - 1;
+    memcpy(line, buffer, n);
+    line[n] = '\0';
+    provider_credit_reset_at_from_header_line(line, time(NULL), reset_at);
+    return total;
 }
 
 bool provider_msg_is_context_overflow(const char *msg) {
@@ -2787,6 +3141,8 @@ static void oai_handle_sse_line(oai_sse_state_t *s, const char *line) {
     /* Check for top-level error object (OpenRouter sends errors mid-stream) */
     char *err_raw = json_get_raw(data, "error");
     if (err_raw) {
+        s->credit_reset_at = provider_reset_max(
+            s->credit_reset_at, provider_credit_reset_at_from_text(err_raw, time(NULL)));
         char *err_msg = json_get_str(err_raw, "message");
         int err_code = json_get_int(err_raw, "code", 0);
         if (err_msg) {
@@ -3077,6 +3433,8 @@ static stream_result_t openai_stream(provider_t *p, const char *api_key, const c
     curl_easy_setopt(curl, CURLOPT_POSTFIELDS, request_json);
     curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, oai_sse_write_cb);
     curl_easy_setopt(curl, CURLOPT_WRITEDATA, &state);
+    curl_easy_setopt(curl, CURLOPT_HEADERFUNCTION, provider_credit_header_cb);
+    curl_easy_setopt(curl, CURLOPT_HEADERDATA, &state.credit_reset_at);
     curl_easy_setopt(curl, CURLOPT_CONNECTTIMEOUT, 30L);
     if (provider_is_sakana(p) || dcr_provider_find(p ? p->name : NULL)) {
         /* Slow multi-agent / imported providers can legitimately stay quiet
@@ -3203,8 +3561,14 @@ static stream_result_t openai_stream(provider_t *p, const char *api_key, const c
          * a structured, actionable message to the agent layer — critical
          * for the credit-too-low fallback path. */
         if (state.line_buf.len > 0 && !state.error_msg) {
+            state.credit_reset_at = provider_reset_max(
+                state.credit_reset_at,
+                provider_credit_reset_at_from_text(state.line_buf.data, time(NULL)));
             char *err_obj = json_get_raw(state.line_buf.data, "error");
             if (err_obj) {
+                state.credit_reset_at = provider_reset_max(
+                    state.credit_reset_at,
+                    provider_credit_reset_at_from_text(err_obj, time(NULL)));
                 char *msg = json_get_str(err_obj, "message");
                 if (msg) {
                     state.got_error = true;
@@ -3223,13 +3587,25 @@ static stream_result_t openai_stream(provider_t *p, const char *api_key, const c
             fprintf(stderr, "dsco: curl error: %s (HTTP %d, url: %s)\n", curl_easy_strerror(res),
                     (int)http_code, od->api_url);
         } else if (state.credit_too_low) {
-            fprintf(stderr,
-                    "  \033[31m✗ %s credit/rate-limit error (HTTP %d):\033[0m %s\n"
-                    "  \033[2mhint: switch provider with /model, e.g.\033[0m "
-                    "\033[36m/model x-ai/grok-4.20-beta\033[0m \033[2m(needs "
-                    "OPENROUTER_API_KEY)\033[0m\n",
+            fprintf(stderr, "  \033[31m✗ %s credit/rate-limit error (HTTP %d):\033[0m %s\n",
                     p->name ? p->name : "provider", (int)http_code,
                     state.error_msg ? state.error_msg : "(no message)");
+            if (provider_is_sakana(p)) {
+                if (provider_sakana_has_payg_key()) {
+                    fprintf(stderr,
+                            "  \033[2mhint: Fugu PAYG key is configured; retrying metered "
+                            "Sakana before cross-provider fallback.\033[0m\n");
+                } else {
+                    fprintf(stderr,
+                            "  \033[2mhint: set FUGU_PAYG_API_KEY for metered Fugu fallback, "
+                            "or switch provider with /model.\033[0m\n");
+                }
+            } else {
+                fprintf(stderr,
+                        "  \033[2mhint: switch provider with /model, e.g.\033[0m "
+                        "\033[36m/model x-ai/grok-4.20-beta\033[0m \033[2m(needs "
+                        "OPENROUTER_API_KEY)\033[0m\n");
+            }
         } else if (state.got_error && state.error_msg) {
             fprintf(stderr, "dsco: HTTP %d: %s\n", (int)http_code, state.error_msg);
         } else if (state.line_buf.len > 0) {
@@ -3249,6 +3625,7 @@ static stream_result_t openai_stream(provider_t *p, const char *api_key, const c
     if (state.credit_too_low) {
         free(result.parsed.stop_reason);
         result.parsed.stop_reason = safe_strdup("credit_too_low");
+        result.credit_reset_at = state.credit_reset_at;
     }
 
     double telemetry_end = provider_now_sec();
@@ -3556,6 +3933,7 @@ typedef struct {
     bool got_error;
     bool credit_too_low;
     char *error_msg;
+    time_t credit_reset_at;
     content_block_t tool_blocks[MAX_CONTENT_BLOCKS];
     int tool_block_count;
 } chatgpt_sse_state_t;
@@ -3634,8 +4012,14 @@ static void chatgpt_handle_event(chatgpt_sse_state_t *s, const char *data) {
         if (!s->stop_reason)
             s->stop_reason = safe_strdup(s->tool_block_count > 0 ? "tool_use" : "end_turn");
     } else if (strcmp(type, "response.failed") == 0 || strcmp(type, "error") == 0) {
+        s->credit_reset_at = provider_reset_max(
+            s->credit_reset_at, provider_credit_reset_at_from_text(data, time(NULL)));
         char *resp = json_get_raw(data, "response");
         char *err = json_get_raw(resp ? resp : data, "error");
+        if (err) {
+            s->credit_reset_at = provider_reset_max(
+                s->credit_reset_at, provider_credit_reset_at_from_text(err, time(NULL)));
+        }
         char *msg = json_get_str(err ? err : data, "message");
         if (msg) {
             s->got_error = true;
@@ -3683,6 +4067,7 @@ static stream_result_t chatgpt_native_stream(provider_t *p, const char *api_key,
                                              stream_thinking_cb thinking_cb, void *cb_ctx) {
     stream_result_t result = {0};
     CURL *curl = curl_easy_init();
+    dsco_http_pool_apply(curl);
     if (!curl) {
         result.ok = false;
         return result;
@@ -3706,6 +4091,8 @@ static stream_result_t chatgpt_native_stream(provider_t *p, const char *api_key,
     curl_easy_setopt(curl, CURLOPT_POSTFIELDS, request_json);
     curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, chatgpt_sse_write_cb);
     curl_easy_setopt(curl, CURLOPT_WRITEDATA, &state);
+    curl_easy_setopt(curl, CURLOPT_HEADERFUNCTION, provider_credit_header_cb);
+    curl_easy_setopt(curl, CURLOPT_HEADERDATA, &state.credit_reset_at);
     curl_easy_setopt(curl, CURLOPT_CONNECTTIMEOUT, 30L);
     curl_easy_setopt(curl, CURLOPT_LOW_SPEED_LIMIT, 1L);
     curl_easy_setopt(curl, CURLOPT_LOW_SPEED_TIME, 120L);
@@ -3771,6 +4158,7 @@ static stream_result_t chatgpt_native_stream(provider_t *p, const char *api_key,
     if (state.credit_too_low) {
         free(result.parsed.stop_reason);
         result.parsed.stop_reason = safe_strdup("credit_too_low");
+        result.credit_reset_at = state.credit_reset_at;
     }
 
     free(state.error_msg);
@@ -3927,12 +4315,87 @@ static const char *provider_getenv_nonempty(const char *name) {
     if (value && value[0])
         return value;
     /* When libsodium is built in, sealed_store_init() interns allowlisted
-     * provider keys (e.g. OPENROUTER_API_KEY) and zeroes the environment copy.
-     * Fall back to the sealed store so those keys are still discoverable here.
-     * sealed_store_peek() returns a pointer stable for the entry's lifetime,
-     * matching getenv()'s stability contract that callers rely on. */
-    const char *sealed = sealed_store_peek(name);
-    return (sealed && sealed[0]) ? sealed : NULL;
+     * provider keys (e.g. OPENROUTER_API_KEY) and zeroes the environment copy
+     * in place. In that case getenv(name) still returns a present-but-empty
+     * string, so fall back to the sealed store.
+     *
+     * Important: if getenv(name) is NULL, the variable was explicitly absent
+     * or was unset by a test/child environment. Do NOT resurrect a stale sealed
+     * value. Routing tests and subprocess isolation rely on unsetenv() meaning
+     * "this provider is unavailable" even if the parent process sealed a real
+     * key earlier in the session. */
+    if (value) {
+        const char *sealed = sealed_store_peek(name);
+        return (sealed && sealed[0]) ? sealed : NULL;
+    }
+    return NULL;
+}
+
+static const char *provider_sakana_subscription_key(void) {
+    static const char *vars[] = {
+        "FUGU_API_KEY", "SAKANA_API_KEY", "FISH_API_KEY", "SAKANA_TOKEN", NULL,
+    };
+    for (int i = 0; vars[i]; i++) {
+        const char *value = provider_getenv_nonempty(vars[i]);
+        if (value)
+            return value;
+    }
+    return NULL;
+}
+
+static const char *provider_sakana_payg_key(void) {
+    static const char *vars[] = {
+        "FUGU_PAYG_API_KEY", "SAKANA_PAYG_API_KEY", "FISH_PAYG_API_KEY",
+        "SAKANA_PAYG_TOKEN", NULL,
+    };
+    for (int i = 0; vars[i]; i++) {
+        const char *value = provider_getenv_nonempty(vars[i]);
+        if (value)
+            return value;
+    }
+    return NULL;
+}
+
+static bool provider_sakana_has_subscription_key(void) {
+    return provider_sakana_subscription_key() != NULL;
+}
+
+static bool provider_sakana_prefer_payg(void) {
+    const char *cls = getenv("DSCO_SAKANA_KEY_CLASS");
+    if (!cls || !cls[0])
+        cls = getenv("DSCO_FUGU_KEY_CLASS");
+    if (provider_env_matches(cls, "payg", "metered"))
+        return true;
+    if (provider_env_matches(cls, "subscription", "sub"))
+        return false;
+    return provider_env_truthy(getenv("DSCO_PREFER_METERED_API")) ||
+           provider_env_truthy(getenv("DSCO_API_BILLING_FALLBACK"));
+}
+
+static const char *provider_sakana_resolve_key(void) {
+    const char *sub = provider_sakana_subscription_key();
+    const char *payg = provider_sakana_payg_key();
+    if (provider_sakana_prefer_payg() && payg)
+        return payg;
+    if (sub)
+        return sub;
+    return payg;
+}
+
+bool provider_sakana_current_key_is_subscription(void) {
+    const char *resolved = provider_sakana_resolve_key();
+    const char *sub = provider_sakana_subscription_key();
+    if (!resolved)
+        return true;
+    return resolved && sub && strcmp(resolved, sub) == 0;
+}
+
+bool provider_sakana_has_payg_key(void) {
+    return provider_sakana_payg_key() != NULL;
+}
+
+const char *provider_sakana_payg_request_key(void) {
+    return provider_sakana_payg_key();
 }
 
 static const char *provider_resolve_alias_env_key(const char *provider_name) {
@@ -4468,11 +4931,10 @@ static const char *provider_family_primary_model(const char *family, bool prefer
         return NULL;
     }
     if (strcmp(family, "sakana") == 0) {
-        /* Sakana/Fugu is a native-only provider: only route here when the user
-         * has an explicit FUGU/SAKANA key. Do NOT fall back via OpenRouter —
-         * doing so silently hijacks every OpenRouter user to Fugu and preempts
-         * the deliberate GLM/Kimi cost-optimized default contract. */
-        if (provider_has_usable_key("sakana", NULL))
+        /* Sakana/Fugu is native-only and should win the global default only for
+         * subscription-class Fugu keys. Metered PAYG keys are additive fallback
+         * capacity, not a reason to preempt the GLM/Kimi/OpenRouter defaults. */
+        if (provider_sakana_has_subscription_key())
             return "fugu";
         return NULL;
     }
@@ -4573,9 +5035,9 @@ int provider_build_default_fallback_models(const char *model, char out_models[][
         provider_append_unique_model(out_models, &count, max_models, requested_model,
                                      provider_family_primary_model("anthropic", false));
         provider_append_unique_model(out_models, &count, max_models, requested_model,
-                                     provider_family_primary_model("sakana", prefer_code));
-        provider_append_unique_model(out_models, &count, max_models, requested_model,
                                      provider_xai_primary_model(prefer_code));
+        provider_append_unique_model(out_models, &count, max_models, requested_model,
+                                     provider_family_primary_model("sakana", prefer_code));
         provider_append_unique_model(out_models, &count, max_models, requested_model,
                                      provider_openai_fallback_model(prefer_code));
         provider_append_unique_model(out_models, &count, max_models, requested_model,
@@ -4589,9 +5051,9 @@ int provider_build_default_fallback_models(const char *model, char out_models[][
         provider_append_unique_model(out_models, &count, max_models, requested_model,
                                      provider_openai_primary_model(prefer_code));
         provider_append_unique_model(out_models, &count, max_models, requested_model,
-                                     provider_family_primary_model("sakana", prefer_code));
-        provider_append_unique_model(out_models, &count, max_models, requested_model,
                                      provider_xai_primary_model(true));
+        provider_append_unique_model(out_models, &count, max_models, requested_model,
+                                     provider_family_primary_model("sakana", prefer_code));
         provider_append_unique_model(out_models, &count, max_models, requested_model,
                                      provider_family_primary_model("anthropic", false));
         provider_append_unique_model(out_models, &count, max_models, requested_model,
@@ -4605,9 +5067,9 @@ int provider_build_default_fallback_models(const char *model, char out_models[][
         provider_append_unique_model(out_models, &count, max_models, requested_model,
                                      provider_xai_primary_model(prefer_code));
         provider_append_unique_model(out_models, &count, max_models, requested_model,
-                                     provider_family_primary_model("sakana", prefer_code));
-        provider_append_unique_model(out_models, &count, max_models, requested_model,
                                      provider_family_primary_model("anthropic", false));
+        provider_append_unique_model(out_models, &count, max_models, requested_model,
+                                     provider_family_primary_model("sakana", prefer_code));
         provider_append_unique_model(out_models, &count, max_models, requested_model,
                                      provider_openai_fallback_model(prefer_code));
         provider_append_unique_model(out_models, &count, max_models, requested_model,
@@ -4620,9 +5082,9 @@ int provider_build_default_fallback_models(const char *model, char out_models[][
     provider_append_unique_model(out_models, &count, max_models, requested_model,
                                  provider_xai_primary_model(prefer_code));
     provider_append_unique_model(out_models, &count, max_models, requested_model,
-                                 provider_family_primary_model("sakana", prefer_code));
-    provider_append_unique_model(out_models, &count, max_models, requested_model,
                                  provider_family_primary_model("anthropic", false));
+    provider_append_unique_model(out_models, &count, max_models, requested_model,
+                                 provider_family_primary_model("sakana", prefer_code));
     provider_append_unique_model(out_models, &count, max_models, requested_model,
                                  provider_openai_fallback_model(prefer_code));
     provider_append_unique_model(out_models, &count, max_models, requested_model,
@@ -4640,6 +5102,21 @@ const char *provider_select_default_primary_model(bool prefer_code) {
     candidate = provider_family_primary_model("sakana", prefer_code);
     if (candidate)
         return candidate;
+
+    /* A direct native Moonshot subscription/API key is stronger than an
+     * OpenRouter code-default route. Keep OpenRouter as the normal code default
+     * below so a mere router key still selects the Kimi route. */
+    if (prefer_code && provider_has_usable_key("moonshot", NULL)) {
+        candidate = provider_family_primary_model("moonshot", true);
+        if (candidate)
+            return candidate;
+    }
+    if (!prefer_code &&
+        (provider_has_usable_key("zai", NULL) || provider_has_usable_key("glm", NULL))) {
+        candidate = provider_family_primary_model("zai", false);
+        if (candidate)
+            return candidate;
+    }
 
     if (prefer_code) {
         /* Code mode: prefer Kimi K2.7 Code via OpenRouter */
@@ -4871,6 +5348,9 @@ const char *provider_resolve_api_key(const char *provider_name) {
             return key;
         return provider_resolve_alias_env_key("anthropic");
     }
+
+    if (strcmp(provider_name, "sakana") == 0)
+        return provider_sakana_resolve_key();
 
     const provider_endpoint_t *ep = find_endpoint(provider_name);
     if (ep) {
