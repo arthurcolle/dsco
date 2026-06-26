@@ -2,24 +2,8 @@ name: docs
 
 on:
   pull_request:
-    paths:
-      - README.md
-      - CHANGELOG.md
-      - docs/**
-      - include/**/*.h
-      - src/**/*.c
-      - scripts/gen_*.sh
-      - .github/workflows/docs.yml
   push:
     branches: [main, master]
-    paths:
-      - README.md
-      - CHANGELOG.md
-      - docs/**
-      - include/**/*.h
-      - src/**/*.c
-      - scripts/gen_*.sh
-      - .github/workflows/docs.yml
 
 permissions:
   contents: read

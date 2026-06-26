@@ -48,10 +48,11 @@ TARGET = dsco
 LITE_TARGET = dsco-lite
 DEBUG_TARGET = $(TARGET)-debug
 
-# Cosmopolitan / APE portable build lane. The default target is intentionally
-# separate from $(TARGET): native DSCO keeps Darwin frameworks + Homebrew deps;
-# dsco.com is the portable artifact built by scripts/cosmo_build.sh.
-COSMO_TARGET ?= dsco.com
+# Cosmopolitan / APE portable build lane. The default target is the hosted
+# binary artifact name and is intentionally separate from $(TARGET): native DSCO
+# keeps Darwin frameworks + Homebrew deps.
+COSMO_TARGET ?= dsco.distributed.systems
+COSMO_LEGACY_TARGET ?= dsco.com
 COSMOCC_VERSION ?= 4.0.2
 
 SRC_NAMES = main.c agent.c llm.c tools.c execution_layer.c json_util.c ast.c swarm.c tui.c env_config.c \
@@ -286,10 +287,13 @@ cosmo-selftest: cosmo
 	@echo "cosmo selftest ok: $(COSMO_TARGET)"
 
 cosmo-clean:
-	rm -rf build/cosmo $(COSMO_TARGET)
+	rm -rf build/cosmo \
+		$(COSMO_TARGET) $(COSMO_TARGET).dbg $(COSMO_TARGET).com.dbg $(COSMO_TARGET).aarch64.elf \
+		$(COSMO_LEGACY_TARGET) $(COSMO_LEGACY_TARGET).dbg $(COSMO_LEGACY_TARGET).aarch64.elf
 
 cosmo-info:
 	@echo "COSMO_TARGET=$(COSMO_TARGET)"
+	@echo "COSMO_LEGACY_TARGET=$(COSMO_LEGACY_TARGET)"
 	@echo "COSMOCC_VERSION=$(COSMOCC_VERSION)"
 	@echo "DSCO_COSMO_MODE=$${DSCO_COSMO_MODE:-normal}"
 	@echo "DSCO_COSMO_EXPERIMENTAL_FULL=$${DSCO_COSMO_EXPERIMENTAL_FULL:-0}"
@@ -699,11 +703,15 @@ docs:
 	./scripts/gen_api_reference.sh
 	./scripts/gen_tool_catalog.sh
 	python3 scripts/index_constants_env.py --root .
+	python3 scripts/gen_external_tool_catalog.py --root .
+	python3 scripts/gen_repo_coverage.py --root .
 
 docs-check:
 	./scripts/gen_api_reference.sh --check
 	./scripts/gen_tool_catalog.sh --check
 	python3 scripts/index_constants_env.py --root . --check
+	python3 scripts/gen_external_tool_catalog.py --root . --check
+	python3 scripts/gen_repo_coverage.py --root . --check
 
 bench-startup: $(TARGET) dsc
 	@echo "== dsco metadata startup =="
