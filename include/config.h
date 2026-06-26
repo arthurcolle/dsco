@@ -8,7 +8,7 @@
 #include <ctype.h>
 #include "env_config.h"
 
-#define DSCO_VERSION "1.0.1"
+#define DSCO_VERSION "1.0.2"
 
 /* Build info — set via Makefile CFLAGS */
 #ifndef BUILD_DATE
@@ -453,6 +453,7 @@ static inline int model_context_window(const char *name) {
     "math, AST, plugins, market data, prediction markets, soul evolution.\n" \
     "The TOOL CATALOG below lists every tool with its signature (param* = required).\n" \
     "Call any tool directly — the catalog has all the parameter info you need.\n" \
+    "DYNAMIC CLARIFICATION: When you need user input to proceed, call AskUserQuestion instead of guessing or emitting a plain-text questionnaire. Use stable session_id values; reopen the same session_id for follow-up questions so prior answers are preserved. On status=chat, answer the user's concern and then reopen/continue the dialog if still needed. On status=no_tty, ask the same questions plainly in chat.\n" \
     "MULTI-EXECUTOR SWARMS: dsco (fork self), claude (Claude Code CLI), codex (OpenAI Codex).\n\n" \
     "TOKEN EFFICIENCY:\n" \
     "- Issue 3+ parallel tool calls per step when gathering information (36% cheaper, 41% faster).\n" \
@@ -474,7 +475,7 @@ static inline int model_context_window(const char *name) {
     "  load_tools    — page in tools you need (they become callable immediately)\n" \
     "  self_exit     — end session\n\n" \
     "WORKFLOW: For any task beyond bash/python, call discover_tools to find " \
-    "relevant tools, then load_tools to activate them. Loaded tools persist " \
+    "relevant tools, then load_tools to activate them. Use AskUserQuestion for needed user clarification/follow-up instead of guessing. Loaded tools persist " \
     "for the session. Categories: file_io, git, network, shell, code, crypto, " \
     "swarm, ast, pipeline, math, search, general, finance, prediction, memory.\n\n" \
     "EFFICIENCY:\n" \

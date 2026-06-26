@@ -3,6 +3,7 @@
 
 #include <stdbool.h>
 #include <stddef.h>
+#include <time.h>
 #include "llm.h"
 #include "json_util.h"
 
@@ -110,6 +111,13 @@ void provider_debug_log_request(const char *provider_name, const char *model,
                                 const char *resolved_key);
 const char *provider_claude_code_oauth_source(void);
 
+/* Sakana/Fugu supports both flat-rate subscription keys and metered PAYG keys.
+ * The subscription key remains the default when both are present; set
+ * DSCO_SAKANA_KEY_CLASS=payg or DSCO_PREFER_METERED_API=1 to prefer PAYG. */
+bool provider_sakana_current_key_is_subscription(void);
+bool provider_sakana_has_payg_key(void);
+const char *provider_sakana_payg_request_key(void);
+
 /* Fill subscription_type_out and rate_limit_tier_out (both at least 64 bytes).
  * Returns true when at least one field was found. */
 bool provider_claude_code_get_account_info(char *subscription_type_out, size_t st_len,
@@ -119,6 +127,10 @@ bool provider_claude_code_get_account_info(char *subscription_type_out, size_t s
  * Anthropic and OpenAI-compat streaming paths so both can mark the stream
  * result as "credit_too_low" and trigger the fallback chain. */
 bool provider_msg_is_credit_too_low(const char *msg);
+time_t provider_credit_reset_at_from_value(const char *value, time_t now);
+time_t provider_credit_reset_at_from_text(const char *text, time_t now);
+bool provider_credit_reset_at_from_header_line(const char *line, time_t now,
+                                               time_t *reset_at);
 
 /* Classify a provider error body as a context/prompt-length rejection
  * ("prompt is too long", "context_length_exceeded", "maximum context length",
