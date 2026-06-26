@@ -41,6 +41,7 @@ typedef struct {
     long              total_requests;
     long              total_failures;
     time_t            tripped_until;      /* 0 = not tripped */
+    time_t            exhausted_until;    /* subscription allocation reset; 0 = available/unknown */
     time_t            last_used;
 } provider_slot_t;
 
@@ -71,6 +72,10 @@ provider_slot_t *provider_pool_slot(const char *name);
 
 /* Record a request outcome for health + circuit-breaker tracking. */
 void provider_pool_report(const char *name, bool ok, double latency_ms);
+
+/* Persist and query provider-supplied subscription exhaustion reset times. */
+void provider_pool_mark_subscription_exhausted(const char *name, time_t exhausted_until);
+time_t provider_pool_subscription_exhausted_until(const char *name);
 
 /* True if the provider is registered, has a credential, and is not tripped. */
 bool provider_pool_healthy(const char *name);

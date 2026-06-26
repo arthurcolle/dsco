@@ -6,6 +6,7 @@
 #include "provider.h"
 #include "workspace.h"
 #include "mcp_names.h"
+#include "http_pool.h"
 #include <stdlib.h>
 #include <string.h>
 #include <strings.h>
@@ -3036,6 +3037,7 @@ int llm_count_tokens(const char *api_key, const char *request_json) {
     CURL *curl = curl_easy_init();
     if (!curl)
         return -1;
+    dsco_http_pool_apply(curl);
 
     struct curl_slist *hdrs = NULL;
     hdrs = curl_slist_append(hdrs, "Content-Type: application/json");
@@ -3115,6 +3117,7 @@ typedef struct {
     bool got_error;
     bool credit_too_low; /* 402 / credit balance too low / insufficient funds */
     char *error_msg;
+    time_t credit_reset_at;
 
     /* ── Streaming telemetry ───────────────────────────────────────── */
     double telemetry_start;       /* request start time      */
@@ -3859,8 +3862,16 @@ static void sse_handle_event(sse_state_t *s, const char *data) {
         }
     } else if (strcmp(event_type, "error") == 0) {
         s->got_error = true;
+        {
+            time_t reset_at = provider_credit_reset_at_from_text(data, time(NULL));
+            if (reset_at > s->credit_reset_at)
+                s->credit_reset_at = reset_at;
+        }
         char *err_raw = json_get_raw(data, "error");
         if (err_raw) {
+            time_t reset_at = provider_credit_reset_at_from_text(err_raw, time(NULL));
+            if (reset_at > s->credit_reset_at)
+                s->credit_reset_at = reset_at;
             s->error_msg = json_get_str(err_raw, "message");
             char *err_type = json_get_str(err_raw, "type");
             if (provider_msg_is_credit_too_low(s->error_msg) ||
@@ -3917,6 +3928,19 @@ static size_t stream_write_cb(void *ptr, size_t size, size_t nmemb, void *userda
     return total;
 }
 
+static size_t stream_header_cb(char *buffer, size_t size, size_t nmemb, void *userdata) {
+    size_t total = size * nmemb;
+    sse_state_t *s = (sse_state_t *)userdata;
+    if (!buffer || !s || total == 0)
+        return total;
+    char line[512];
+    size_t n = total < sizeof(line) - 1 ? total : sizeof(line) - 1;
+    memcpy(line, buffer, n);
+    line[n] = '\0';
+    provider_credit_reset_at_from_header_line(line, time(NULL), &s->credit_reset_at);
+    return total;
+}
+
 /* Helper: build curl headers for API request */
 static struct curl_slist *build_api_headers(const char *api_key) {
     struct curl_slist *hdrs = NULL;
@@ -3945,11 +3969,14 @@ static struct curl_slist *build_api_headers(const char *api_key) {
 /* Helper: configure curl handle for streaming API call */
 static void setup_curl_opts(CURL *curl, struct curl_slist *hdrs, const char *request_json,
                             sse_state_t *st) {
+    dsco_http_pool_apply(curl);
     curl_easy_setopt(curl, CURLOPT_URL, API_URL_ANTHROPIC);
     curl_easy_setopt(curl, CURLOPT_HTTPHEADER, hdrs);
     curl_easy_setopt(curl, CURLOPT_POSTFIELDS, request_json);
     curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, stream_write_cb);
     curl_easy_setopt(curl, CURLOPT_WRITEDATA, st);
+    curl_easy_setopt(curl, CURLOPT_HEADERFUNCTION, stream_header_cb);
+    curl_easy_setopt(curl, CURLOPT_HEADERDATA, st);
     curl_easy_setopt(curl, CURLOPT_XFERINFOFUNCTION, stream_progress_cb);
     curl_easy_setopt(curl, CURLOPT_XFERINFODATA, st);
     curl_easy_setopt(curl, CURLOPT_NOPROGRESS, 0L);
@@ -4173,8 +4200,17 @@ stream_result_t llm_stream(const char *api_key, const char *request_json, stream
          * as 402 Payment Required depending on the upstream. Parse the body
          * so we can classify and present an actionable hint. */
         if (state.line_buf.len > 0) {
+            {
+                time_t reset_at =
+                    provider_credit_reset_at_from_text(state.line_buf.data, time(NULL));
+                if (reset_at > state.credit_reset_at)
+                    state.credit_reset_at = reset_at;
+            }
             char *body_err = json_get_raw(state.line_buf.data, "error");
             if (body_err) {
+                time_t reset_at = provider_credit_reset_at_from_text(body_err, time(NULL));
+                if (reset_at > state.credit_reset_at)
+                    state.credit_reset_at = reset_at;
                 char *msg = json_get_str(body_err, "message");
                 char *typ = json_get_str(body_err, "type");
                 if (http_code == 402 || http_code == 429 ||
@@ -4247,6 +4283,8 @@ stream_result_t llm_stream(const char *api_key, const char *request_json, stream
     }
     result.parsed.stop_reason = state.stop_reason; /* move ownership */
     result.usage = state.usage;
+    if (state.credit_too_low)
+        result.credit_reset_at = state.credit_reset_at;
 
     /* Populate streaming telemetry */
     double end_time = cache_now_sec();

@@ -30,6 +30,7 @@
 #include <fcntl.h>
 #include <signal.h>
 #include <sys/types.h>
+#include <sys/select.h>
 #include <sys/wait.h>
 #include <sys/time.h>
 #include <sys/resource.h>
@@ -37,8 +38,10 @@
 #include <sys/stat.h>
 #include <sys/file.h>
 #include <time.h>
+#include <termios.h>
 #include <stdarg.h>
 #include <limits.h>
+#include <ctype.h>
 #ifdef __APPLE__
 #include <libproc.h>
 #endif
@@ -774,6 +777,220 @@ static void forward_signal(int sig) {
     signal(sig, forward_signal);
 }
 
+static bool env_truthy(const char *v) {
+    return v && (strcmp(v, "1") == 0 || strcmp(v, "true") == 0 || strcmp(v, "TRUE") == 0 ||
+                 strcmp(v, "yes") == 0 || strcmp(v, "YES") == 0 || strcmp(v, "on") == 0 ||
+                 strcmp(v, "ON") == 0);
+}
+
+static bool env_falsey(const char *v) {
+    return v && (strcmp(v, "0") == 0 || strcmp(v, "false") == 0 || strcmp(v, "FALSE") == 0 ||
+                 strcmp(v, "no") == 0 || strcmp(v, "NO") == 0 || strcmp(v, "off") == 0 ||
+                 strcmp(v, "OFF") == 0);
+}
+
+static const char *path_basename(const char *path) {
+    if (!path || !path[0])
+        return "";
+    const char *slash = strrchr(path, '/');
+    return slash ? slash + 1 : path;
+}
+
+static bool process_name(pid_t pid, char *out, size_t out_len) {
+    if (!out || out_len == 0)
+        return false;
+    out[0] = '\0';
+#ifdef __APPLE__
+    if (proc_name((int)pid, out, (uint32_t)out_len) > 0 && out[0])
+        return true;
+#else
+    char path[64];
+    snprintf(path, sizeof(path), "/proc/%d/comm", (int)pid);
+    FILE *f = fopen(path, "r");
+    if (f) {
+        bool ok = fgets(out, (int)out_len, f) != NULL;
+        fclose(f);
+        if (ok) {
+            size_t n = strlen(out);
+            while (n > 0 && (out[n - 1] == '\n' || out[n - 1] == '\r'))
+                out[--n] = '\0';
+            if (out[0])
+                return true;
+        }
+    }
+#endif
+    return false;
+}
+
+static bool common_shell_name(const char *name) {
+    if (!name || !name[0])
+        return false;
+    const char *base = path_basename(name);
+    while (*base == '-')
+        base++;
+    char lower[64];
+    size_t i = 0;
+    for (; base[i] && i + 1 < sizeof(lower); i++)
+        lower[i] = (char)tolower((unsigned char)base[i]);
+    lower[i] = '\0';
+    return strcmp(lower, "sh") == 0 || strcmp(lower, "bash") == 0 ||
+           strcmp(lower, "zsh") == 0 || strcmp(lower, "fish") == 0 ||
+           strcmp(lower, "tcsh") == 0 || strcmp(lower, "csh") == 0 ||
+           strcmp(lower, "ksh") == 0 || strcmp(lower, "dash") == 0 ||
+           strcmp(lower, "nu") == 0 || strcmp(lower, "elvish") == 0 ||
+           strcmp(lower, "pwsh") == 0;
+}
+
+static bool running_in_iterm(void) {
+    const char *tp = getenv("TERM_PROGRAM");
+    if (tp && strcmp(tp, "iTerm.app") == 0)
+        return true;
+    const char *sid = getenv("ITERM_SESSION_ID");
+    return sid && sid[0];
+}
+
+static void drain_tty_input_for_ms(int fd, int total_ms) {
+    if (fd < 0 || total_ms <= 0)
+        return;
+
+    struct timeval start, now;
+    gettimeofday(&start, NULL);
+    for (;;) {
+        gettimeofday(&now, NULL);
+        int elapsed_ms =
+            (int)((now.tv_sec - start.tv_sec) * 1000 + (now.tv_usec - start.tv_usec) / 1000);
+        if (elapsed_ms >= total_ms)
+            break;
+
+        int left_ms = total_ms - elapsed_ms;
+        if (left_ms > 20)
+            left_ms = 20;
+
+        fd_set rfd;
+        FD_ZERO(&rfd);
+        FD_SET(fd, &rfd);
+        struct timeval tv = {.tv_sec = 0, .tv_usec = left_ms * 1000};
+        int rv = select(fd + 1, &rfd, NULL, NULL, &tv);
+        if (rv <= 0) {
+            if (rv < 0 && errno == EINTR)
+                continue;
+            continue;
+        }
+
+        char buf[128];
+        while (read(fd, buf, sizeof(buf)) > 0)
+            ;
+    }
+}
+
+static void restore_tty_before_shell(void) {
+    if (!isatty(STDIN_FILENO))
+        return;
+
+    static const char reset[] =
+        "\033[?1049l\033[?1047l\033[?47l" /* leave alt screens */
+        "\033[r"                          /* reset scroll region */
+        "\033[?2004l"                     /* bracketed paste off */
+        "\033[?1000l\033[?1002l\033[?1003l\033[?1006l" /* mouse off */
+        "\033[?1004l" /* focus reporting off */
+        "\033[?25h"   /* show cursor */
+        "\033[0m";    /* reset attributes */
+
+    int out_fd = isatty(STDERR_FILENO) ? STDERR_FILENO : STDOUT_FILENO;
+    if (isatty(out_fd))
+        (void)write(out_fd, reset, sizeof(reset) - 1);
+
+    struct termios saved, raw, sane;
+    bool have_termios = tcgetattr(STDIN_FILENO, &saved) == 0;
+    if (have_termios) {
+        raw = saved;
+        raw.c_lflag &= (tcflag_t) ~(ICANON | ECHO);
+        raw.c_cc[VMIN] = 0;
+        raw.c_cc[VTIME] = 0;
+        (void)tcsetattr(STDIN_FILENO, TCSAFLUSH, &raw);
+    }
+
+    /* Late cursor-position replies from ESC[6n can arrive after the child has
+     * already flushed. Drain them here before exec'ing zsh, otherwise the new
+     * shell reads fragments like "2R" as commands. */
+    (void)tcflush(STDIN_FILENO, TCIFLUSH);
+    drain_tty_input_for_ms(STDIN_FILENO, 120);
+    (void)tcflush(STDIN_FILENO, TCIFLUSH);
+
+    if (have_termios) {
+        sane = saved;
+        sane.c_iflag |= (tcflag_t)(ICRNL | BRKINT);
+        sane.c_iflag &= (tcflag_t) ~(INPCK | ISTRIP);
+        sane.c_lflag |= (tcflag_t)(ICANON | ECHO | ECHONL | ISIG | IEXTEN);
+        sane.c_oflag |= (tcflag_t)OPOST;
+        sane.c_cc[VMIN] = 1;
+        sane.c_cc[VTIME] = 0;
+        (void)tcsetattr(STDIN_FILENO, TCSAFLUSH, &sane);
+    }
+}
+
+static bool parent_is_interactive_shell(void) {
+    pid_t parent = getppid();
+    if (parent <= 1)
+        return false;
+
+    char name[64];
+    if (!process_name(parent, name, sizeof(name)) || !common_shell_name(name))
+        return false;
+
+    pid_t self_pgrp = getpgrp();
+    pid_t parent_pgrp = getpgid(parent);
+    if (self_pgrp <= 0 || parent_pgrp <= 0)
+        return false;
+
+    /* Interactive job-control shells put the foreground command in a distinct
+     * process group. Non-interactive profile commands usually share one. */
+    return parent_pgrp != self_pgrp;
+}
+
+void dsco_maybe_exec_shell_to_keep_terminal(void) {
+    const char *keep = getenv("DSCO_KEEP_TERMINAL_ON_EXIT");
+    bool should_keep = false;
+
+    if (env_falsey(keep))
+        return;
+    if (env_truthy(keep)) {
+        should_keep = true;
+    } else {
+        if (!isatty(STDIN_FILENO) || !isatty(STDERR_FILENO))
+            return;
+        if (!running_in_iterm())
+            return;
+        if (parent_is_interactive_shell())
+            return;
+        should_keep = true;
+    }
+
+    if (!should_keep)
+        return;
+
+    const char *shell = getenv("SHELL");
+    if (!shell || !shell[0])
+#ifdef __APPLE__
+        shell = "/bin/zsh";
+#else
+        shell = "/bin/sh";
+#endif
+
+    const char *argv0 = path_basename(shell);
+    if (!argv0[0])
+        argv0 = "sh";
+
+    fprintf(stderr,
+            "[dsco] session ended; opening %s to keep the iTerm session alive "
+            "(set DSCO_KEEP_TERMINAL_ON_EXIT=0 to disable).\n",
+            argv0);
+    fflush(stderr);
+    restore_tty_before_shell();
+    execlp(shell, argv0, (char *)NULL);
+    fprintf(stderr, "[dsco] failed to exec shell %s: %s\n", shell, strerror(errno));
+}
+
 int supervisor_run(int child_argc, char **child_argv) {
     int max_restarts   = dsco_env_int("DSCO_SUPERVISE_MAX_RESTARTS", DEFAULT_MAX_RESTARTS, 1, 100);
     int window_s       = dsco_env_int("DSCO_SUPERVISE_WINDOW_S",     DEFAULT_WINDOW_S,     5, 3600);
@@ -1102,6 +1319,7 @@ int supervisor_run(int child_argc, char **child_argv) {
                            (int)child, crash_class_name(cls),
                            (unsigned long long)(peak_rss >> 20));
             fleet_remove();
+            dsco_maybe_exec_shell_to_keep_terminal();
             return 0;
         }
 

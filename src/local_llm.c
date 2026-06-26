@@ -1,5 +1,6 @@
 /* local_llm.c — discovery for local OpenAI-compatible inference servers. */
 #include "local_llm.h"
+#include "http_pool.h"
 #include "json_util.h"
 
 #include <ctype.h>
@@ -81,6 +82,7 @@ static size_t ll_write_cb(char *ptr, size_t size, size_t nmemb, void *ud) {
 /* GET (or POST when body!=NULL) with a short timeout. Returns malloc'd body. */
 static char *ll_http(const char *url, const char *post_body, long timeout_ms) {
     CURL *c = curl_easy_init();
+    dsco_http_pool_apply(c);
     if (!c)
         return NULL;
     ll_buf_t b = {0};
