@@ -2,6 +2,7 @@
 #define _GNU_SOURCE
 
 #include "trust.h"
+#include "http_pool.h"
 #include "fingerprint.h"
 #include "crypto.h"
 
@@ -255,6 +256,7 @@ static int post_signed(const char *json, char *err, size_t err_cap) {
     free(sigbuf);
 
     CURL *c = curl_easy_init();
+    dsco_http_pool_apply(c);
     if (!c) {
         snprintf(err, err_cap, "curl init");
         return -1;

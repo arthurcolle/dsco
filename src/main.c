@@ -67,12 +67,14 @@ extern void dsco_net_routes_register(void *srv_opaque);
 #include "connector.h"
 #include "dcr.h"
 #include "startup.h"
+#include "local_llm.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <strings.h>
 #include <ctype.h>
 #include <curl/curl.h>
+#include "http_pool.h"
 #include <sqlite3.h>
 #include <signal.h>
 #include <fcntl.h>
@@ -992,6 +994,14 @@ static const native_provider_t NATIVE_PROVIDERS[] = {
       CAP_TOOLS|CAP_MULTITURN|CAP_STREAMING|CAP_VISION|CAP_THINKING|CAP_JSON, 4 },
     { "sakana",     "Sakana Fugu API",           "FUGU_API_KEY",        "fugu",
       CAP_TOOLS|CAP_MULTITURN|CAP_STREAMING|CAP_VISION|CAP_THINKING|CAP_JSON, 4 },
+    { "ollama-cloud", "Ollama Cloud",            "OLLAMA_API_KEY",      "gpt-oss:120b",
+      CAP_TOOLS|CAP_MULTITURN|CAP_STREAMING|CAP_JSON, 3 },
+    { "ollama",     "Ollama local",              "OLLAMA_API_KEY",      "ollama:llama3.2",
+      CAP_TOOLS|CAP_MULTITURN|CAP_STREAMING|CAP_JSON, 2 },
+    { "lmstudio",   "LM Studio local",           "LMSTUDIO_API_KEY",    "lmstudio:local-model",
+      CAP_TOOLS|CAP_MULTITURN|CAP_STREAMING|CAP_JSON, 2 },
+    { "mlx",        "MLX local",                 "MLX_API_KEY",         "mlx:local-model",
+      CAP_TOOLS|CAP_MULTITURN|CAP_STREAMING|CAP_JSON, 2 },
     { NULL, NULL, NULL, NULL, 0, 0 }
 };
 
@@ -1024,6 +1034,7 @@ static const native_provider_t *native_find(const char *name) {
 
 static const char *native_default_model_for_setting(const native_provider_t *np,
                                                     const char *setting) {
+    static char local_model[160];
     if (!np)
         return NULL;
     if (strcmp(np->name, "sakana") == 0) {
@@ -1032,6 +1043,17 @@ static const char *native_default_model_for_setting(const native_provider_t *np,
         if (setting && strstr(setting, "fugu-ultra"))
             return "fugu-ultra";
         return "fugu";
+    }
+    if (strcmp(np->name, "ollama") == 0 || strcmp(np->name, "lmstudio") == 0 ||
+        strcmp(np->name, "mlx") == 0) {
+        local_model_t models[32];
+        int n = local_llm_list_models(models, (int)(sizeof(models) / sizeof(models[0])));
+        for (int i = 0; i < n; i++) {
+            if (strcmp(models[i].server, np->name) == 0) {
+                snprintf(local_model, sizeof(local_model), "%s", models[i].qualified);
+                return local_model;
+            }
+        }
     }
     return np->example_model;
 }
@@ -2074,7 +2096,7 @@ static void usage(const char *prog) {
         "  -i, --interactive      Start an interactive REPL (no prompt required)\n"
         "  --local                Use LM Studio locally (default model: liquid/lfm2.5-1.2b)\n"
         "  -e, --exec BACKEND    Execute via CLI/provider (claude, codex, auto, smart, list, bench, bench-tools, smoke, smoke-full, <provider>)\n"
-        "  --provider NAME       Force a native provider (anthropic, openai, openrouter, fugu/sakana, xai, ...)\n"
+        "  --provider NAME       Force a native provider (anthropic, openai, openrouter, ollama, ollama-cloud, fugu/sakana, xai, ...)\n"
         "  --                    Pass remaining args to executor (after -e)\n"
         "  -C, --cheap            Cheap mode: 5 core tools + discover/load (env: DSCO_CHEAP=1)\n"
         "  --version              Print version and build info\n"
@@ -2760,8 +2782,8 @@ int main(int argc, char **argv) {
                     _sup_argv[_k + 1] = argv[_k];
                 _sup_argv[_sup_argc] = NULL;
                 /* permanent: supervisor keeps the session alive through clean exits
-                 * (terminal close → child autosaves+exits → supervisor relaunches).
-                 * Explicit /quit sets DSCO_SUPERVISE_RESTART=transient to let it stop. */
+                 * (terminal close -> child autosaves+exits -> supervisor relaunches).
+                 * Explicit /quit returns DSCO_EXIT_USER_REQUESTED so the supervisor stops. */
                 setenv("DSCO_SUPERVISE_RESTART", "permanent", 0);
                 execvp(_sup_argv[0], _sup_argv);
                 free(_sup_argv);
@@ -3702,6 +3724,12 @@ int main(int argc, char **argv) {
                 model = native_model_default;
                 fprintf(stderr, "  %s%s → %s%s\n", "\033[2m", np->name, model, "\033[0m");
             }
+            if (!user_set_model && strcmp(np->name, "ollama") == 0 &&
+                native_model_default && strcmp(native_model_default, np->example_model) == 0) {
+                fprintf(stderr,
+                        "  \033[2mhint: no running Ollama model discovered; use -m ollama:<model> "
+                        "or run `ollama pull llama3.2 && ollama serve`.\033[0m\n");
+            }
             /* Fall through to normal dsco oneshot/interactive path */
             goto native_path;
         }
@@ -4147,9 +4175,14 @@ native_path:
         user_exit_requested = agent_run(api_key, model, topology_name, topology_auto, g_provider_override);
     }
 
+    dsco_http_pool_cleanup();
     curl_global_cleanup();
     baseline_stop();
     if (user_exit_requested && getenv("DSCO_SUPERVISED"))
         return DSCO_EXIT_USER_REQUESTED;
+    if (user_exit_requested) {
+        tui_terminal_restore_sane();
+        dsco_maybe_exec_shell_to_keep_terminal();
+    }
     return 0;
 }

@@ -60,7 +60,7 @@ SRC_NAMES = main.c agent.c llm.c tools.c execution_layer.c json_util.c ast.c swa
 	dsco_accel.c dsco_mlx.c dsco_pool.c \
 	fingerprint.c trust.c toolmgmt.c connector.c integration_fabric.c openrouter_cache.c codex_cache.c dcr.c \
 	openai_oauth.c local_llm.c \
-	startup.c plot.c anim.c fractal.c shadeexpr.c face_sdf.c avatar.c self_improve.c rsi_curriculum.c pets.c img_util.c supervisor.c \
+	startup.c plot.c anim.c fractal.c shadeexpr.c face_sdf.c avatar.c self_improve.c bg_learn.c rsi_curriculum.c pets.c img_util.c supervisor.c \
 	graphsub_client.c graphsub_tools.c \
 	extension/backend.c extension/numerical_gsl.c extension/skill_requirements.c \
 	extension/eigen_backend.c extension/fftw_backend.c extension/backend_selftest.c \
@@ -70,6 +70,7 @@ SRC_NAMES = main.c agent.c llm.c tools.c execution_layer.c json_util.c ast.c swa
 	session_memory.c \
 	provider_pool.c \
 	math_fastpath.c \
+	http_pool.c \
 	$(OPTIONAL_SRCS)
 TEST_SRC_NAMES = test.c
 

@@ -139,6 +139,8 @@ void tui_screen_reset_full(void);  /* full reset + scrollback wipe for clean fir
 void tui_clear_line(void);
 void tui_save_cursor(void);
 void tui_restore_cursor(void);
+void tui_terminal_restore_sane(void);
+bool tui_cursor_report_queries_enabled(void);
 
 /* Terminal output mutex — serialize cursor-positioned writes between threads */
 void tui_term_lock(void);
@@ -579,8 +581,9 @@ void tui_input_panel_clear(tui_status_bar_t *sb);
 void tui_bottom_panel_refresh(tui_status_bar_t *sb, const char *prompt_hint);
 
 /* Push cursor down with newlines until it sits just above the input panel
- * area (row `rows - 3`). No-op if cursor already at/past that row. Queries
- * cursor row via DSR (ESC[6n); briefly enters raw mode if stdin is a tty.
+ * area (row `rows - 3`). No-op if cursor already at/past that row. By default
+ * this avoids terminal DSR cursor queries; set DSCO_TUI_DSR=1 to opt into
+ * ESC[6n cursor-position reports on terminals where they are known safe.
  * Call once after the startup banner + notes finish printing so the bottom
  * panel sits flush against them on tall terminals. */
 void tui_pad_to_panel_anchor(void);
@@ -1743,6 +1746,7 @@ typedef struct {
     /* ── branching gate: show this question only if question index `gate_q`
      *    resolved to one of gate_vals[]. gate_q < 0 ⇒ always shown. ── */
     int  gate_q;
+    char gate_id[64];       /* unresolved gate id; preserved across session reopen */
     char gate_vals[TUI_ASK_MAX_GATEVALS][128];
     int  n_gate_vals;
 
