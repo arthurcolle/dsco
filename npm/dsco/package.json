@@ -1,6 +1,6 @@
 {
   "name": "@distributed.systems/dsco",
-  "version": "1.0.3",
+  "version": "1.0.2",
   "description": "DSCO: local-first agentic CLI runtime with tools, swarms, governance, and a pure C core",
   "homepage": "https://github.com/arthurcolle/dsco#readme",
   "repository": {
