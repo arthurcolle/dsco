@@ -21,6 +21,8 @@
  * binary). Provide them here so the TUI/agent object graph links standalone. */
 int  g_cheap_mode = 0;
 vm_t g_vm;
+volatile int g_interrupted = 0;
+double g_cost_budget = 0.0;
 
 static int g_pass = 0, g_fail = 0;
 
