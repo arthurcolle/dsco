@@ -2354,7 +2354,7 @@ Function-like declarations: 9
 
 ## `tui.h`
 
-Function-like declarations: 290
+Function-like declarations: 291
 
 ### Declarations
 
@@ -2444,6 +2444,7 @@ Function-like declarations: 290
 - `void tui_bottom_panel_refresh(tui_status_bar_t *sb, const char *prompt_hint);`
 - `void tui_pad_to_panel_anchor(void);`
 - `char *tui_composer_read(tui_status_bar_t *sb, const char *prompt, char *out, size_t out_sz);`
+- `int tui_composer_signal_interrupt(void);`
 - `void tui_swarm_panel(tui_swarm_entry_t *entries, int count, int width);`
 - `void tui_retry_pulse(const char *label, int attempt, int max, double wait_sec);`
 - `int tui_subpixel_hbar(FILE *out, double frac, int cells, const char *fill_color, const char *empty_glyph, const char *empty_color);`
