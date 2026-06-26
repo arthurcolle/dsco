@@ -1,4 +1,5 @@
 #include "integration_fabric.h"
+#include "codex_app_directory.h"
 
 #include <ctype.h>
 #include <string.h>
@@ -130,6 +131,11 @@ const dsco_integration_profile_t *dsco_integration_profile_for_tool(const char *
 
 static bool action_word(const char *folded, const char *word) {
     return has_token(folded, word);
+}
+
+unsigned dsco_integration_actions_for_catalog_labels(bool retrievable, bool sync,
+                                                    bool consequential, bool interactive) {
+    return codex_app_directory_actions_for_labels(retrievable, sync, consequential, interactive);
 }
 
 unsigned dsco_integration_actions_for_tool(const char *tool_name) {

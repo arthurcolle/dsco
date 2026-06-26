@@ -479,6 +479,7 @@ def main() -> int:
     ap.add_argument("--root", default=".", help="repo root")
     ap.add_argument("--json", default="data/constants_env_index.json", help="JSON output")
     ap.add_argument("--md", default="docs/CONSTANTS_ENV_INDEX.md", help="Markdown output")
+    ap.add_argument("--check", action="store_true", help="verify generated outputs are current without rewriting them")
     args = ap.parse_args()
 
     root = Path(args.root).resolve()
@@ -487,8 +488,35 @@ def main() -> int:
     envs = extract_env_vars(root, files)
     map_constants_to_env(constants, envs)
     summary = summarize(constants, envs)
-    write_json(root / args.json, constants, envs, summary)
-    write_markdown(root / args.md, constants, envs, summary)
+
+    json_path = root / args.json
+    md_path = root / args.md
+    if args.check:
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as td:
+            tmp_json = Path(td) / "constants_env_index.json"
+            tmp_md = Path(td) / "CONSTANTS_ENV_INDEX.md"
+            write_json(tmp_json, constants, envs, summary)
+            write_markdown(tmp_md, constants, envs, summary)
+            drift = []
+            if not json_path.exists() or json_path.read_text(errors="ignore") != tmp_json.read_text(errors="ignore"):
+                drift.append(str(json_path.relative_to(root)))
+            if not md_path.exists() or md_path.read_text(errors="ignore") != tmp_md.read_text(errors="ignore"):
+                drift.append(str(md_path.relative_to(root)))
+            if drift:
+                print(
+                    "docs drift: constants/env index is out of date. Run "
+                    "python3 scripts/index_constants_env.py --root .",
+                    file=os.sys.stderr,
+                )
+                for p in drift:
+                    print(f"  - {p}", file=os.sys.stderr)
+                return 1
+        return 0
+
+    write_json(json_path, constants, envs, summary)
+    write_markdown(md_path, constants, envs, summary)
     print(json.dumps(summary, indent=2, sort_keys=True))
     return 0
 

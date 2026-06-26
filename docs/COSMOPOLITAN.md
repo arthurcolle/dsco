@@ -22,6 +22,7 @@ make cosmo                # build dsco.com portable APE lane
 make cosmo-run            # run dsco.com --version
 make cosmo-selftest       # basic portable binary checks
 make cosmo-clean          # remove cosmo build outputs
+make cosmo-info           # print effective cosmo target/version/mode settings
 ```
 
 Direct script usage:
@@ -62,6 +63,8 @@ This is intentionally explicit. The full DSCO runtime currently depends on libra
 - readline or replacement line editor
 - optional libsodium / mbedTLS / libuv
 - Darwin-only Objective-C and framework integrations must stay gated or stubbed
+
+The Makefile gates Darwin frameworks, Objective-C objects, Secure Enclave, Touch ID, Metal, and LocalAuthentication behind the native build path. `COSMO_BUILD=1` keeps those host-native dependencies out of the portable lane.
 
 ## Upgrade process
 
