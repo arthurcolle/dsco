@@ -32,7 +32,7 @@
  */
 
 #define MCP_MAX_SERVERS    64
-#define MCP_MAX_TOOLS      512
+#define MCP_MAX_TOOLS      2048
 #define MCP_MAX_LINE       (256 * 1024)
 #define MCP_MAX_ARGS       32
 #define MCP_MAX_ENV        32
@@ -44,10 +44,10 @@ typedef enum {
 } mcp_transport_t;
 
 typedef struct {
-    char  name[128];
-    char  remote_name[128];     /* exact MCP tool name to send in tools/call */
-    char  description[512];
-    char  input_schema[4096];  /* JSON schema string */
+    char  name[256];
+    char  remote_name[256];     /* exact MCP tool name to send in tools/call */
+    char  description[1024];
+    char  input_schema[16384];  /* JSON schema string */
     int   server_idx;          /* which server owns this tool */
 } mcp_tool_t;
 
@@ -90,6 +90,11 @@ int  mcp_init(mcp_registry_t *reg);
 /* Suppress mcp_init's stderr progress lines (useful when init runs in a
  * background thread and would otherwise corrupt the TUI input panel). */
 void mcp_set_silent(bool silent);
+
+/* Ask any in-flight MCP init/discovery work to abort quickly. This is used by
+ * fast restart paths before joining the background init thread. */
+void mcp_cancel(void);
+void mcp_cancel_reset(void);
 
 /* Shutdown all servers */
 void mcp_shutdown(mcp_registry_t *reg);

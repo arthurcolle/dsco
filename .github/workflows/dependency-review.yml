@@ -1,0 +1,99 @@
+name: dependency-review
+
+on:
+  pull_request:
+    paths:
+      - Makefile
+      - gsl/**
+      - lib/**
+      - vendor/**
+      - third_party/**
+      - npm/dsco/package.json
+      - .github/workflows/**
+
+permissions:
+  contents: read
+  pull-requests: read
+
+concurrency:
+  group: dependency-review-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  dependency-review:
+    name: dependency review
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: GitHub dependency review
+        uses: actions/dependency-review-action@v4
+        with:
+          fail-on-severity: high
+          deny-licenses: GPL-2.0, GPL-3.0, AGPL-1.0, AGPL-3.0, LGPL-2.0, LGPL-2.1, LGPL-3.0
+
+      - name: Review vendored dependency changes
+        run: |
+          set -euo pipefail
+          BASE_SHA="${{ github.event.pull_request.base.sha }}"
+          HEAD_SHA="${{ github.event.pull_request.head.sha }}"
+
+          new_files="$(git diff --name-only --diff-filter=A "$BASE_SHA" "$HEAD_SHA" -- gsl/ lib/ vendor/ third_party/ || true)"
+          if [[ -z "$new_files" ]]; then
+            echo "No newly added vendored files."
+            exit 0
+          fi
+
+          {
+            echo "## Vendored dependency review"
+            echo
+            echo "New files:"
+            echo '```'
+            echo "$new_files"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+          license_files="$(echo "$new_files" | grep -Ei '(^|/)(LICENSE|COPYING|COPYRIGHT|NOTICE)(\.|$)' || true)"
+          if [[ -z "$license_files" ]]; then
+            echo "::warning::New vendored files were added without a matching LICENSE/COPYING/COPYRIGHT/NOTICE file in the same PR."
+          fi
+
+          problematic=0
+          while IFS= read -r file; do
+            [[ -n "$file" ]] || continue
+            if grep -IiqE 'AGPL|GPL-?v?[23]|GNU GENERAL PUBLIC LICENSE|LESSER GENERAL PUBLIC LICENSE' "$file"; then
+              echo "Problematic copyleft license text detected in $file" >&2
+              problematic=1
+            fi
+          done <<< "$license_files"
+
+          if [[ "$problematic" -ne 0 ]]; then
+            exit 1
+          fi
+
+      - name: Review native linker dependency changes
+        run: |
+          set -euo pipefail
+          BASE_SHA="${{ github.event.pull_request.base.sha }}"
+          HEAD_SHA="${{ github.event.pull_request.head.sha }}"
+          old_flags="$(git show "$BASE_SHA:Makefile" 2>/dev/null | grep -E 'LDLIBS|LDFLAGS' | sort || true)"
+          new_flags="$(git show "$HEAD_SHA:Makefile" 2>/dev/null | grep -E 'LDLIBS|LDFLAGS' | sort || true)"
+
+          if [[ "$old_flags" != "$new_flags" ]]; then
+            echo "::notice::Native link flags changed; ensure Ubuntu, macOS, README, release.yml, and setup-native stay in sync."
+            {
+              echo "## Native link flag changes"
+              echo '```diff'
+              diff -u <(echo "$old_flags") <(echo "$new_flags") || true
+              echo '```'
+            } >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "No linker flag changes detected."
+          fi

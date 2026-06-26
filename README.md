@@ -1,76 +1,239 @@
 # dsco-cli
 
-**DSCO** (Distributed Systems Corporation Operator) is a **local-first, self-introspecting, agentic CLI** compiled from **135,000+ lines of pure C**.
+> A local-first, self-introspecting agentic CLI, written in pure C.
 
-It is not a wrapper around an LLM. It *is* a 320+-tool runtime with hierarchical swarms, AST-level code intelligence, streaming pipelines, pure-C cryptography, market intelligence tooling, and the ability to recursively modify and extend itself.
+[![CI](https://github.com/arthurcolle/dsco/actions/workflows/ci.yml/badge.svg)](https://github.com/arthurcolle/dsco/actions/workflows/ci.yml)
+[![Docs](https://github.com/arthurcolle/dsco/actions/workflows/docs.yml/badge.svg)](https://github.com/arthurcolle/dsco/actions/workflows/docs.yml)
+[![Security](https://github.com/arthurcolle/dsco/actions/workflows/security.yml/badge.svg)](https://github.com/arthurcolle/dsco/actions/workflows/security.yml)
+[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
+
+**DSCO** (Distributed Systems Corporation Operator) is an agent runtime that lives
+in your terminal. It is not a wrapper around a model API — it is a tool-first C
+runtime with hierarchical sub-agents, AST-level code intelligence, streaming data
+pipelines, pure-C cryptography, and the ability to read and edit its own source.
 
 This repository (`dsco-cli`) is the canonical home of the project.
 
-## What DSCO Is
+---
 
-- A pragmatic, high-performance agent that lives in your terminal.
-- A tool-first system: 364+ callable capabilities across filesystems, git, compilation, debugging, data pipelines, financial markets, web research, binary analysis, media processing, and more.
-- Self-aware: it can read, analyze (via AST), and surgically edit its own 129-source-file codebase.
-- Swarm-native: supports up to 6 levels of nested sub-agents, 64 concurrent agents, and 60 pre-built orchestration topologies.
-- Continuous and evolving: identity, skills, doctrine, and memory are versioned and improved across sessions.
-- Built by Arthur Colle (distributed.systems) as the foundation for a commercial agentic infrastructure company.
+## Contents
 
-Current version in the screenshot you shared: **v1.0.0** (with 18/40 features active, swarm-ready, streaming I/O, AST introspection, crypto toolkit, coroutine pipelines, plugin system, etc.).
-
-## Core Architecture (Wings + Talons + Immune System)
-
-- **Wings** — Autonomy & emergence via pheromone-style stigmergy, three-tier memory (working/episodic/semantic), hierarchical swarms, and semantic capability routing.
-- **Talons** — Competitive execution engine. Tracks goals through "hunt states," uses grip strength for retry semantics, runs strategy tournaments, and learns which approaches win over time.
-- **Immune System** — Governance, OODA loops, kill switches, GSU (governance spending unit) budgets, principal tiers, and hardcoded safety invariants.
-
-## Key Capabilities
-
-- **Code Intelligence**: Full AST introspection, call graphs, dependency analysis, self-surgery via `self-surgeon` skill.
-- **Data & Pipelines**: 30+ coroutine-based streaming pipeline stages (`pipeline` tool).
-- **Market Intelligence**: 80+ financial/market tools (Bloomberg-lite). Native Kalshi contract ingestion, analysis, and landscape tools.
-- **Orchestration**: `swarm-orchestrator`, dynamic topology selection, multi-executor support (includes Claude Code and OpenAI Codex as rival agents).
-- **Local-first**: Full macOS integration (Spotlight, AppleScript/JXA, Swift bridge to Vision/CoreML/NaturalLanguage, LaunchAgents, notifications).
-- **Crypto-native**: Pure C implementations of SHA-256, HMAC, HKDF, JWT, UUID, etc. (no OpenSSL).
-- **Media & Docs**: FFmpeg, ImageMagick, Pandoc, universal document conversion.
-- **Self-Evolution**: 25 installed skills (meta-skill `skill-weaver` creates and audits others), 5 doctrine documents, 5 rituals, structured memory system.
-- **Observability**: SQLite timeline, trace spans, TUI with markdown rendering.
-
-## Philosophy & Doctrine
-
-DSCO is governed by explicit doctrine located in `.dsco/workspace/` (or `~/.dsco/workspace/`):
-
-- **EPISTEMOLOGY.md** — 6-tier knowledge hierarchy (Computed > Observed > Analyzed > Researched > Inferred > Recalled). Calibration is mandatory.
-- **TOOL_PHILOSOPHY.md**, **SWARM_DOCTRINE.md**, **REASONING.md**, **FAILURE_MODES.md** — define how tools are chosen, when to swarm, cognitive traps, and 30 catalogued failure modes with mitigations.
-- **Rituals** (SESSION_OPEN, DEEP_WORK, SELF_EVAL, SESSION_CLOSE, etc.) — enforce disciplined session lifecycles.
-
-Core values: Accuracy over theater. Action over narration. Evidence over intuition. Minimal diffs over maximal rewrites. Earned complexity. Calibration over confidence.
-
-## Quick Start
-
-```bash
-# Bootstrap, build, run
-./scripts/bootstrap.sh
-make -j8
-export ANTHROPIC_API_KEY=...
-./dsco "your command here"
-```
-
-See the full [Quick Start](https://github.com/arthurcolle/dsco-cli#quick-start) and [docs/](docs/) for details.
-
-## This Repository Represents
-
-The living, breathing implementation of a new class of developer tooling — deeper, more local, more self-improving than existing LLM coding agents.
-
-It is the foundation for DSCO's commercial vision: $300K ARR within one year by proving extreme local-first agentic capability, then expanding into always-on cloud daemons, multi-user orchestration, and infrastructure products.
-
-> **"Big things have small beginnings."**
-
-— Arthur Colle, CEO, Distributed Systems Corporation
+- [Highlights](#highlights)
+- [At a Glance](#at-a-glance)
+- [Architecture](#architecture)
+- [Capabilities](#capabilities)
+- [Quick Start](#quick-start)
+- [Usage](#usage)
+- [Build Targets](#build-targets)
+- [Documentation](#documentation)
+- [Repository Layout](#repository-layout)
+- [Contributing](#contributing)
+- [Security](#security)
+- [License](#license)
 
 ---
 
-**Canonical identity & soul documents live at `~/.dsco/workspace/` (SOUL.md, IDENTITY.md, USER.md, doctrine/, rituals/, skills/, memory/).**
+## Highlights
 
-The system is designed to be continuous: one Claw, growing across every session.
+- **Local-first.** Runs entirely from your terminal; state lives on your machine.
+- **Tool-first.** 171 built-in tools (plus any MCP-provided tools) span files,
+  git, shell, compilation, data pipelines, crypto, market data, and web research.
+- **Self-introspecting.** Reads, analyzes (via AST), and edits its own codebase.
+- **Swarm-capable.** Nested sub-agents and pre-built orchestration topologies.
+- **Pure C.** ~344K lines across `src/` and `include/`; no model code linked in.
 
-Welcome to DSCO. Let's build.
+## At a Glance
+
+| Property       | Value                                                    |
+| -------------- | -------------------------------------------------------- |
+| Version        | `1.0.2`                                                  |
+| Language       | C (C11)                                                  |
+| Source size    | ~344K LOC across `src/` + `include/`                     |
+| Source files   | 104 `.c` / 108 `.h`                                      |
+| Built-in tools | 171 (see [`docs/TOOL_CATALOG.md`](docs/TOOL_CATALOG.md)) |
+| Orchestration  | Hierarchical swarms, documented topologies               |
+| Platforms      | macOS (primary), Linux (CI: gcc + clang)                 |
+| License        | MIT                                                      |
+
+> Counts above are ground-truthed against the source tree. Regenerate the tool
+> catalog with `./scripts/gen_tool_catalog.sh` after registry changes.
+
+## Architecture
+
+DSCO is organized as three cooperating layers.
+
+| Layer             | Responsibility        | Mechanisms                                                                                                        |
+| ----------------- | --------------------- | ----------------------------------------------------------------------------------------------------------------- |
+| **Wings**         | Autonomy & emergence  | Pheromone-style stigmergy, three-tier memory (working/episodic/semantic), hierarchical swarms, capability routing |
+| **Talons**        | Competitive execution | Goal hunt-states, grip-strength retry semantics, strategy tournaments that learn over time                        |
+| **Immune System** | Governance & safety   | OODA loops, kill switches, resource budgets, principal tiers, hardcoded safety invariants                         |
+
+See [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) and
+[`docs/DIAGRAMS.md`](docs/DIAGRAMS.md) for runtime flows and diagrams.
+
+## Capabilities
+
+| Area                | What it provides                                                               |
+| ------------------- | ------------------------------------------------------------------------------ |
+| Code intelligence   | AST introspection, call graphs, dependency analysis, in-place self-editing     |
+| Data & pipelines    | Coroutine-based streaming pipeline stages via the `pipeline` tool              |
+| Market intelligence | Financial/market tooling, including Kalshi contract ingestion and analysis     |
+| Orchestration       | Swarm orchestration, dynamic topology selection, multi-executor support        |
+| Local integration   | macOS-native bridges (Spotlight, AppleScript/JXA, notifications, LaunchAgents) |
+| Cryptography        | Pure-C SHA-256, HMAC, HKDF, JWT, UUID (no OpenSSL dependency)                  |
+| Media & docs        | FFmpeg, ImageMagick, and Pandoc-backed document conversion                     |
+| Observability       | SQLite timeline, trace spans, TUI with markdown rendering                      |
+
+The full, generated tool list lives in [`docs/TOOL_CATALOG.md`](docs/TOOL_CATALOG.md).
+
+## Quick Start
+
+### Install with npm
+
+```bash
+npm install -g @distributed.systems/dsco
+dsco --version
+```
+
+Or run directly:
+
+```bash
+npx @distributed.systems/dsco --version
+```
+
+The npm package downloads the native DSCO binary from GitHub Releases. No Python is required.
+
+### Install with Homebrew
+
+```bash
+brew install arthurcolle/dsco/dsco
+dsco --version
+```
+
+### Build from source
+
+Prerequisites:
+
+- A C compiler (`clang` or `gcc`)
+- `make`
+- macOS or Linux
+
+```bash
+git clone https://github.com/arthurcolle/dsco.git
+cd dsco
+./scripts/bootstrap.sh   # provision dependencies
+make -j8                 # build the dsco binary
+make test                # run the test suite
+```
+
+### Run
+
+```bash
+export ANTHROPIC_API_KEY=...   # or another supported provider key
+./dsco "summarize the architecture of this repository"
+```
+
+Check the build:
+
+```bash
+./dsco --version
+# dsco v1.0.2 (built ..., <commit>)
+```
+
+## Usage
+
+```bash
+# One-shot task
+./dsco "refactor src/json_util.c to add a streaming parser"
+
+# Local model via Ollama
+./dsco --local --ollama --pull-and-use gpt-oss:20b
+
+# Inspect available tools
+./dsco "list your tools"
+```
+
+For provider configuration, environment variables, and storage locations, see
+[`docs/OPERATIONS.md`](docs/OPERATIONS.md) and
+[`docs/CONSTANTS_ENV_INDEX.md`](docs/CONSTANTS_ENV_INDEX.md).
+
+## Build Targets
+
+Common Makefile targets (run `make help`-style discovery via the Makefile itself):
+
+| Target                | Purpose                                      |
+| --------------------- | -------------------------------------------- |
+| `make` / `make all`   | Build the release `dsco` binary              |
+| `make test`           | Run the test suite                           |
+| `make fast-build`     | Fast dev build (`-O0 -g3`) into `build/fast` |
+| `make fast-quick`     | Fast build + smoke + targeted tests          |
+| `make docs`           | Regenerate generated docs                    |
+| `make docs-check`     | Verify generated docs are in sync            |
+| `make format`         | Apply `clang-format`                         |
+| `make lint`           | Static analysis (`clang-tidy`, `cppcheck`)   |
+| `make asan` / `ubsan` | Sanitizer builds                             |
+
+The accelerated edit→compile→test loop is documented in
+[`BUILD_FAST.md`](BUILD_FAST.md).
+
+## Documentation
+
+Start at [`docs/INDEX.md`](docs/INDEX.md). Key references:
+
+- [Architecture & Runtime Flows](docs/ARCHITECTURE.md)
+- [C Module Reference](docs/C_MODULE_REFERENCE.md)
+- [API Reference](docs/API_REFERENCE.md) *(generated from headers)*
+- [Built-in Tool Catalog](docs/TOOL_CATALOG.md) *(generated from `tools.c`)*
+- [Operations & Troubleshooting](docs/OPERATIONS.md)
+- [How-To Guides](docs/HOW_TO.md)
+- [Runbooks](docs/RUNBOOKS.md)
+
+## Repository Layout
+
+```text
+dsco-cli/
+├── src/            # C runtime implementation (104 .c)
+├── include/        # Public headers (108 .h)
+├── tests/          # Runtime and CLI tests
+├── scripts/        # Build, packaging, docs-generation, smoke helpers
+├── docs/           # Full documentation set (see docs/INDEX.md)
+├── web/            # Local web surface
+├── Formula/        # Homebrew formula
+├── Makefile        # Canonical build
+└── build.ninja     # Generated dev build graph (optional)
+```
+
+## Contributing
+
+Contributions for runtime behavior, tools, docs, CI, and scripts are welcome.
+Please read [`CONTRIBUTING.md`](CONTRIBUTING.md) and the
+[Code of Conduct](CODE_OF_CONDUCT.md) first.
+
+Before opening a PR:
+
+```bash
+make test
+make docs-check
+pre-commit run --all-files   # optional but recommended
+```
+
+If you change the tool registry or header declarations, regenerate the affected
+docs (`./scripts/gen_tool_catalog.sh`, `./scripts/gen_api_reference.sh`) and
+include them in the same PR.
+
+## Security
+
+Please report vulnerabilities via GitHub Private Vulnerability Reporting. Details
+and response targets are in [`SECURITY.md`](SECURITY.md). Do not file public
+issues containing exploit details.
+
+## License
+
+Released under the [MIT License](LICENSE).
+
+---
+
+Built by Arthur Colle ([distributed.systems](https://distributed.systems)) as the
+foundation for a local-first agentic infrastructure platform.
+
+> "Big things have small beginnings."

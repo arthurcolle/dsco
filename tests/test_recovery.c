@@ -21,42 +21,53 @@
 #include <time.h>
 #include <sys/stat.h>
 
-/* Stubs required by linked library objects */
-volatile int g_interrupted        = 0;
-volatile int g_agent_exit_requested = 0;
-double       g_cost_budget        = 0.0;
-int          g_cheap_mode         = 0;
+/* Stubs for globals defined in objects NOT linked into this minimal test
+ * (agent.o and main.o are excluded). g_agent_exit_requested is intentionally
+ * NOT stubbed here — it lives in tools.o, which IS linked. */
+#include "vm.h"
+volatile int g_interrupted = 0;
+double g_cost_budget = 0.0; /* agent.o excluded → provide it */
+int g_cheap_mode = 0;       /* main.o excluded → provide it */
+vm_t g_vm = {0};            /* main.o excluded → provide it */
 
 /* ── Minimal test harness ────────────────────────────────────────────────── */
 
-static int g_tests_run    = 0;
+static int g_tests_run = 0;
 static int g_tests_passed = 0;
 static int g_tests_failed = 0;
 
-#define TEST(name) do { \
-    g_tests_run++; \
-    fprintf(stderr, "  test %-50s ", (name)); \
-} while(0)
+#define TEST(name)                                                                                 \
+    do {                                                                                           \
+        g_tests_run++;                                                                             \
+        fprintf(stderr, "  test %-50s ", (name));                                                  \
+    } while (0)
 
-#define PASS() do { \
-    g_tests_passed++; \
-    fprintf(stderr, "\033[32mPASS\033[0m\n"); \
-} while(0)
+#define PASS()                                                                                     \
+    do {                                                                                           \
+        g_tests_passed++;                                                                          \
+        fprintf(stderr, "\033[32mPASS\033[0m\n");                                                  \
+    } while (0)
 
-#define FAIL(msg) do { \
-    g_tests_failed++; \
-    fprintf(stderr, "\033[31mFAIL\033[0m: %s\n", (msg)); \
-    return; \
-} while(0)
+#define FAIL(msg)                                                                                  \
+    do {                                                                                           \
+        g_tests_failed++;                                                                          \
+        fprintf(stderr, "\033[31mFAIL\033[0m: %s\n", (msg));                                       \
+        return;                                                                                    \
+    } while (0)
 
-#define ASSERT(cond, msg) do { if (!(cond)) { FAIL(msg); } } while(0)
+#define ASSERT(cond, msg)                                                                          \
+    do {                                                                                           \
+        if (!(cond)) {                                                                             \
+            FAIL(msg);                                                                             \
+        }                                                                                          \
+    } while (0)
 
 /* ── Transient failure simulation ────────────────────────────────────────── */
 
 /* Fails the first `fail_n` calls then succeeds forever. */
 typedef struct {
-    int fail_n;   /* calls that should fail  */
-    int called;   /* total calls so far       */
+    int fail_n; /* calls that should fail  */
+    int called; /* total calls so far       */
 } transient_t;
 
 static bool transient_fn(void *arg, char *errbuf, size_t errlen) {
@@ -80,7 +91,9 @@ static bool always_fail(void *arg, char *errbuf, size_t errlen) {
 
 /* Always succeeds. */
 static bool always_ok(void *arg, char *errbuf, size_t errlen) {
-    (void)arg; (void)errbuf; (void)errlen;
+    (void)arg;
+    (void)errbuf;
+    (void)errlen;
     return true;
 }
 
@@ -88,36 +101,36 @@ static bool always_ok(void *arg, char *errbuf, size_t errlen) {
 
 static void test_retry_immediate_success(void) {
     TEST("retry: immediate success");
-    transient_t t = { .fail_n = 0 };
+    transient_t t = {.fail_n = 0};
     char errbuf[64] = {0};
-    retry_config_t cfg = { .max_retries = 3, .base_delay_ms = 0,
-                           .backoff_mult = 2.0, .jitter = false };
+    retry_config_t cfg = {
+        .max_retries = 3, .base_delay_ms = 0, .backoff_mult = 2.0, .jitter = false};
     bool ok = execute_with_retry(transient_fn, &t, &cfg, errbuf, sizeof errbuf);
-    ASSERT(ok,       "expected success");
+    ASSERT(ok, "expected success");
     ASSERT(t.called == 1, "expected exactly 1 call");
     PASS();
 }
 
 static void test_retry_succeed_on_third(void) {
     TEST("retry: succeed on attempt 3");
-    transient_t t = { .fail_n = 2 };
+    transient_t t = {.fail_n = 2};
     char errbuf[64] = {0};
-    retry_config_t cfg = { .max_retries = 3, .base_delay_ms = 0,
-                           .backoff_mult = 2.0, .jitter = false };
+    retry_config_t cfg = {
+        .max_retries = 3, .base_delay_ms = 0, .backoff_mult = 2.0, .jitter = false};
     bool ok = execute_with_retry(transient_fn, &t, &cfg, errbuf, sizeof errbuf);
-    ASSERT(ok,       "expected success after 2 failures");
+    ASSERT(ok, "expected success after 2 failures");
     ASSERT(t.called == 3, "expected exactly 3 calls");
     PASS();
 }
 
 static void test_retry_exhaust_max(void) {
     TEST("retry: exhaust max_retries");
-    transient_t t = { .fail_n = 99 };
+    transient_t t = {.fail_n = 99};
     char errbuf[64] = {0};
-    retry_config_t cfg = { .max_retries = 2, .base_delay_ms = 0,
-                           .backoff_mult = 2.0, .jitter = false };
+    retry_config_t cfg = {
+        .max_retries = 2, .base_delay_ms = 0, .backoff_mult = 2.0, .jitter = false};
     bool ok = execute_with_retry(transient_fn, &t, &cfg, errbuf, sizeof errbuf);
-    ASSERT(!ok,        "expected failure");
+    ASSERT(!ok, "expected failure");
     ASSERT(t.called == 3, "expected initial + 2 retries = 3 calls");
     ASSERT(errbuf[0] != '\0', "expected non-empty error message");
     PASS();
@@ -125,11 +138,10 @@ static void test_retry_exhaust_max(void) {
 
 static void test_retry_zero_retries(void) {
     TEST("retry: RETRY_NONE config");
-    transient_t t = { .fail_n = 1 };
+    transient_t t = {.fail_n = 1};
     char errbuf[64] = {0};
-    bool ok = execute_with_retry(transient_fn, &t, &RETRY_NONE,
-                                 errbuf, sizeof errbuf);
-    ASSERT(!ok,        "expected failure with no retries");
+    bool ok = execute_with_retry(transient_fn, &t, &RETRY_NONE, errbuf, sizeof errbuf);
+    ASSERT(!ok, "expected failure with no retries");
     ASSERT(t.called == 1, "expected exactly 1 call");
     PASS();
 }
@@ -137,8 +149,7 @@ static void test_retry_zero_retries(void) {
 static void test_retry_null_fn(void) {
     TEST("retry: null fn returns false");
     char errbuf[64] = {0};
-    bool ok = execute_with_retry(NULL, NULL, &RETRY_DEFAULT,
-                                 errbuf, sizeof errbuf);
+    bool ok = execute_with_retry(NULL, NULL, &RETRY_DEFAULT, errbuf, sizeof errbuf);
     ASSERT(!ok, "expected false for null fn");
     PASS();
 }
@@ -147,40 +158,36 @@ static void test_retry_null_fn(void) {
 
 static void test_fallback_primary_succeeds(void) {
     TEST("fallback: primary succeeds, no fallback needed");
-    recovery_fn_t fbs[] = { always_fail };
+    recovery_fn_t fbs[] = {always_fail};
     char errbuf[64] = {0};
-    bool ok = execute_with_fallback(always_ok, fbs, 1, NULL,
-                                    errbuf, sizeof errbuf);
+    bool ok = execute_with_fallback(always_ok, fbs, 1, NULL, errbuf, sizeof errbuf);
     ASSERT(ok, "expected success from primary");
     PASS();
 }
 
 static void test_fallback_first_fallback(void) {
     TEST("fallback: primary fails, first fallback succeeds");
-    recovery_fn_t fbs[] = { always_ok };
+    recovery_fn_t fbs[] = {always_ok};
     char errbuf[64] = {0};
-    bool ok = execute_with_fallback(always_fail, fbs, 1, NULL,
-                                    errbuf, sizeof errbuf);
+    bool ok = execute_with_fallback(always_fail, fbs, 1, NULL, errbuf, sizeof errbuf);
     ASSERT(ok, "expected success from fallback[0]");
     PASS();
 }
 
 static void test_fallback_second_fallback(void) {
     TEST("fallback: two failures, second fallback succeeds");
-    recovery_fn_t fbs[] = { always_fail, always_ok };
+    recovery_fn_t fbs[] = {always_fail, always_ok};
     char errbuf[64] = {0};
-    bool ok = execute_with_fallback(always_fail, fbs, 2, NULL,
-                                    errbuf, sizeof errbuf);
+    bool ok = execute_with_fallback(always_fail, fbs, 2, NULL, errbuf, sizeof errbuf);
     ASSERT(ok, "expected success from fallback[1]");
     PASS();
 }
 
 static void test_fallback_all_fail(void) {
     TEST("fallback: all functions fail");
-    recovery_fn_t fbs[] = { always_fail, always_fail };
+    recovery_fn_t fbs[] = {always_fail, always_fail};
     char errbuf[64] = {0};
-    bool ok = execute_with_fallback(always_fail, fbs, 2, NULL,
-                                    errbuf, sizeof errbuf);
+    bool ok = execute_with_fallback(always_fail, fbs, 2, NULL, errbuf, sizeof errbuf);
     ASSERT(!ok, "expected total failure");
     ASSERT(errbuf[0] != '\0', "expected error message after total failure");
     PASS();
@@ -204,9 +211,9 @@ static void test_log_record_and_get(void) {
 
     for (int i = 0; i < 5; i++) {
         recovery_log_entry_t e = {
-            .step_id      = i + 1,
-            .attempt      = i,
-            .timestamp    = (time_t)(1000 + i),
+            .step_id = i + 1,
+            .attempt = i,
+            .timestamp = (time_t)(1000 + i),
             .action_taken = RECOVERY_ACTION_RETRY,
         };
         snprintf(e.error_str, sizeof e.error_str, "err_%d", i);
@@ -259,9 +266,9 @@ static void test_log_dump_csv(void) {
     recovery_log_init(&log);
 
     recovery_log_entry_t e = {
-        .step_id      = 42,
-        .attempt      = 2,
-        .timestamp    = 9999,
+        .step_id = 42,
+        .attempt = 2,
+        .timestamp = 9999,
         .action_taken = RECOVERY_ACTION_BACKTRACK,
     };
     snprintf(e.error_str, sizeof e.error_str, "rate_limited");
@@ -319,8 +326,8 @@ static void test_backtrack_resets_done_atoms(void) {
     plan_engine_init();
     int pid = plan_create("bt_reset", "backtrack reset", PLAN_MODE_HYBRID);
     int sid = plan_add_step(pid, 0, "stepA", STEP_ATOMIC);
-    int a1  = step_add_atom(sid, "noop1", ATOM_NOOP);
-    int a2  = step_add_atom(sid, "noop2", ATOM_NOOP);
+    int a1 = step_add_atom(sid, "noop1", ATOM_NOOP);
+    int a2 = step_add_atom(sid, "noop2", ATOM_NOOP);
 
     char buf[128];
     atom_run(a1, buf, sizeof buf);
@@ -345,8 +352,8 @@ static void test_backtrack_partial_distance(void) {
     plan_engine_init();
     int pid = plan_create("bt_partial", "partial backtrack", PLAN_MODE_HYBRID);
     int sid = plan_add_step(pid, 0, "stepB", STEP_ATOMIC);
-    int a1  = step_add_atom(sid, "noop_a", ATOM_NOOP);
-    int a2  = step_add_atom(sid, "noop_b", ATOM_NOOP);
+    int a1 = step_add_atom(sid, "noop_a", ATOM_NOOP);
+    int a2 = step_add_atom(sid, "noop_b", ATOM_NOOP);
 
     char buf[128];
     atom_run(a1, buf, sizeof buf);
@@ -358,9 +365,9 @@ static void test_backtrack_partial_distance(void) {
     atom_t *pa1 = atom_get(a1);
     atom_t *pa2 = atom_get(a2);
     /* a1 ran first — with DFS/sequential order, a2 is "last" */
-    bool one_pending  = (pa1->status == PLAN_PENDING || pa2->status == PLAN_PENDING);
+    bool one_pending = (pa1->status == PLAN_PENDING || pa2->status == PLAN_PENDING);
     bool both_pending = (pa1->status == PLAN_PENDING && pa2->status == PLAN_PENDING);
-    ASSERT(one_pending,   "at least one atom should be PENDING");
+    ASSERT(one_pending, "at least one atom should be PENDING");
     ASSERT(!both_pending, "should NOT have rolled back both atoms");
 
     plan_delete(pid);
@@ -374,8 +381,8 @@ static void test_backtrack_partial_distance(void) {
 static void test_recovery_rate_80pct(void) {
     TEST("recovery rate: >=80% on 30%-chance transient failures (100 trials)");
 
-    retry_config_t cfg = { .max_retries = 3, .base_delay_ms = 0,
-                           .backoff_mult = 2.0, .jitter = false };
+    retry_config_t cfg = {
+        .max_retries = 3, .base_delay_ms = 0, .backoff_mult = 2.0, .jitter = false};
 
     /* seed rand for determinism in CI */
     srand(42);
@@ -388,16 +395,16 @@ static void test_recovery_rate_80pct(void) {
          * ~20% fail once → recovered by retry; ~10% fail twice → recovered).
          * P(final failure) = P(fail 3+ times) ≈ 0 for this distribution. */
         int failures = (rand() % 10) < 7 ? 0 : ((rand() % 10) < 8 ? 1 : 2);
-        transient_t t = { .fail_n = failures };
+        transient_t t = {.fail_n = failures};
         bool ok = execute_with_retry(transient_fn, &t, &cfg, NULL, 0);
-        if (ok) success++;
+        if (ok)
+            success++;
     }
 
     double rate = (double)success / TRIALS;
     char msg[128];
-    snprintf(msg, sizeof msg,
-             "recovery rate %.0f%% < 80%% (%d/%d succeeded)",
-             rate * 100.0, success, TRIALS);
+    snprintf(msg, sizeof msg, "recovery rate %.0f%% < 80%% (%d/%d succeeded)", rate * 100.0,
+             success, TRIALS);
     ASSERT(rate >= 0.80, msg);
     PASS();
 }
@@ -406,11 +413,11 @@ static void test_recovery_rate_80pct(void) {
 
 static void test_action_names(void) {
     TEST("recovery_action_name: all values");
-    ASSERT(strcmp(recovery_action_name(RECOVERY_ACTION_NONE),      "none")      == 0, "none");
-    ASSERT(strcmp(recovery_action_name(RECOVERY_ACTION_RETRY),     "retry")     == 0, "retry");
-    ASSERT(strcmp(recovery_action_name(RECOVERY_ACTION_FALLBACK),  "fallback")  == 0, "fallback");
+    ASSERT(strcmp(recovery_action_name(RECOVERY_ACTION_NONE), "none") == 0, "none");
+    ASSERT(strcmp(recovery_action_name(RECOVERY_ACTION_RETRY), "retry") == 0, "retry");
+    ASSERT(strcmp(recovery_action_name(RECOVERY_ACTION_FALLBACK), "fallback") == 0, "fallback");
     ASSERT(strcmp(recovery_action_name(RECOVERY_ACTION_BACKTRACK), "backtrack") == 0, "backtrack");
-    ASSERT(strcmp(recovery_action_name(RECOVERY_ACTION_GIVE_UP),   "give_up")   == 0, "give_up");
+    ASSERT(strcmp(recovery_action_name(RECOVERY_ACTION_GIVE_UP), "give_up") == 0, "give_up");
     PASS();
 }
 
@@ -451,9 +458,7 @@ int main(void) {
     /* Name helpers */
     test_action_names();
 
-    fprintf(stderr,
-            "\n\033[1m  %d tests: \033[32m%d passed\033[0m",
-            g_tests_run, g_tests_passed);
+    fprintf(stderr, "\n\033[1m  %d tests: \033[32m%d passed\033[0m", g_tests_run, g_tests_passed);
     if (g_tests_failed > 0)
         fprintf(stderr, ", \033[31m%d failed\033[0m", g_tests_failed);
     fprintf(stderr, "\033[0m\n\n");
