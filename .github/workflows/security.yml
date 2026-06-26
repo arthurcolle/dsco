@@ -3,7 +3,7 @@ name: security
 on:
   pull_request:
   push:
-    branches: [ main, master ]
+    branches: [main, master]
   schedule:
     - cron: '0 5 * * 1'
   workflow_dispatch:
@@ -13,32 +13,51 @@ permissions:
   contents: read
   security-events: write
 
+concurrency:
+  group: security-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+defaults:
+  run:
+    shell: bash
+
+env:
+  DSCO_CI: "1"
+  DSCO_NO_SUPERVISE: "1"
+  DSCO_SECURE_STORE_NO_PROMPT: "1"
+  DSCO_STD: c2y
+
 jobs:
   codeql:
     name: codeql (c-cpp)
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    env:
+      CC: gcc
+      DSCO_ARCH: x86-64
     steps:
       - uses: actions/checkout@v4
 
-      - name: Install build dependencies
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y build-essential libcurl4-openssl-dev libsqlite3-dev libreadline-dev
+      - uses: ./.github/actions/setup-native
 
       - name: Initialize CodeQL
         uses: github/codeql-action/init@v3
         with:
           languages: c-cpp
+          queries: security-extended
 
       - name: Build
-        run: make -j2
+        run: make -j2 dsco
 
       - name: Analyze
         uses: github/codeql-action/analyze@v3
+        with:
+          category: /language:c-cpp
 
   gitleaks:
-    name: gitleaks
-    runs-on: ubuntu-latest
+    name: gitleaks (secret scan)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
     permissions:
       contents: read
       pull-requests: read
@@ -51,3 +70,69 @@ jobs:
         uses: gitleaks/gitleaks-action@v2
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  license-audit:
+    name: license audit
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Check for problematic licenses
+        run: |
+          set -euo pipefail
+          problematic=0
+
+          for dir in gsl/ lib/ vendor/ third_party/; do
+            [[ -d "$dir" ]] || continue
+            while IFS= read -r -d '' file; do
+              if grep -IiqE 'AGPL|GPL-?v?[23]|GNU GENERAL PUBLIC LICENSE|LESSER GENERAL PUBLIC LICENSE' "$file"; then
+                echo "Problematic license text found in $file" >&2
+                problematic=1
+              fi
+            done < <(find "$dir" \( -iname 'COPYING*' -o -iname 'LICENSE*' -o -iname 'COPYRIGHT*' \) -print0)
+          done
+
+          if git ls-files | grep -qE '(^|/)\.env($|\.)'; then
+            echo "Tracked .env file found:" >&2
+            git ls-files | grep -E '(^|/)\.env($|\.)' >&2
+            problematic=1
+          fi
+
+          if ! grep -qE '^\.env$' .gitignore; then
+            echo ".gitignore must include .env" >&2
+            problematic=1
+          fi
+
+          if [[ "$problematic" -ne 0 ]]; then
+            exit 1
+          fi
+
+          echo "License audit passed."
+
+  scorecard:
+    name: ossf scorecard
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    permissions:
+      contents: read
+      security-events: write
+      id-token: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Run Scorecard
+        uses: ossf/scorecard-action@v2.4.0
+        with:
+          repo_token: ${{ secrets.GITHUB_TOKEN }}
+          results_file: scorecard.sarif
+          results_format: sarif
+          publish_results: true
+
+      - name: Upload Scorecard SARIF
+        uses: github/codeql-action/upload-sarif@v3
+        with:
+          sarif_file: scorecard.sarif

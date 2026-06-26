@@ -34,6 +34,8 @@ long toolmgmt_request(const char *method, const char *path,
 /* High-level operations. Each returns a malloc'd response body (caller frees)
  * or NULL on transport/HTTP error. */
 char *toolmgmt_list_tools(int limit);                 /* GET catalog */
+char *toolmgmt_list_tools_paginated(int offset, int limit); /* GET catalog page */
+char *toolmgmt_list_tools_all(int page_limit);        /* GET full catalog when API supports pagination */
 char *toolmgmt_execute(const char *tool,
                        const char *args_json,         /* JSON object, may be NULL → {} */
                        int timeout_ms);               /* 0 = server default */

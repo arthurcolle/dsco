@@ -11,12 +11,16 @@ static arena_t g_session;
 /* ── Stats counters ────────────────────────────────────────────────── */
 
 static size_t s_scratch_resets = 0;
-static size_t s_temp_scopes   = 0;
+static size_t s_temp_scopes = 0;
 
 /* ── Accessors ─────────────────────────────────────────────────────── */
 
-arena_t *arena_scratch(void) { return &g_scratch; }
-arena_t *arena_session(void) { return &g_session; }
+arena_t *arena_scratch(void) {
+    return &g_scratch;
+}
+arena_t *arena_session(void) {
+    return &g_session;
+}
 
 /* ── Lifecycle ─────────────────────────────────────────────────────── */
 
@@ -44,7 +48,8 @@ void *scratch_alloc(size_t size) {
 }
 
 char *scratch_strdup(const char *s) {
-    if (!s) return NULL;
+    if (!s)
+        return NULL;
     return arena_strdup(&g_scratch, s);
 }
 
@@ -55,7 +60,10 @@ char *scratch_sprintf(const char *fmt, ...) {
     va_copy(args2, args);
     int n = vsnprintf(NULL, 0, fmt, args);
     va_end(args);
-    if (n < 0) { va_end(args2); return NULL; }
+    if (n < 0) {
+        va_end(args2);
+        return NULL;
+    }
     char *buf = arena_alloc(&g_scratch, (size_t)n + 1);
     vsnprintf(buf, (size_t)n + 1, fmt, args2);
     va_end(args2);
@@ -69,7 +77,8 @@ void *session_alloc(size_t size) {
 }
 
 char *session_strdup(const char *s) {
-    if (!s) return NULL;
+    if (!s)
+        return NULL;
     return arena_strdup(&g_session, s);
 }
 
@@ -79,7 +88,10 @@ char *session_sprintf(const char *fmt, ...) {
     va_copy(args2, args);
     int n = vsnprintf(NULL, 0, fmt, args);
     va_end(args);
-    if (n < 0) { va_end(args2); return NULL; }
+    if (n < 0) {
+        va_end(args2);
+        return NULL;
+    }
     char *buf = arena_alloc(&g_session, (size_t)n + 1);
     vsnprintf(buf, (size_t)n + 1, fmt, args2);
     va_end(args2);

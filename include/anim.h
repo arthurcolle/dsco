@@ -66,4 +66,32 @@ void anim_resolve_size(int width, int height, int *W, int *H);
 void anim_paint(FILE *out, const tui_braille_t *bc, bool color,
                 const int *cell_color);
 
+/* Truecolor variant: cell_rgb holds one 24-bit color per character cell (W*H).
+ * A cell that is exactly black (0,0,0) is treated as dead field and drawn faint,
+ * so callers should clamp lit cells to a minimum non-zero channel. Falls back to
+ * 256-color quantization on terminals without truecolor support. */
+void anim_paint_rgb(FILE *out, const tui_braille_t *bc, const tui_rgb_t *cell_rgb);
+
+/* ── live keyboard input (interactive renderers) ──────────────────────────────
+ * Put the TTY into cbreak/non-blocking mode around an interactive loop so a
+ * renderer can read keystrokes without waiting. Pair raw_enable/raw_restore. */
+typedef struct {
+    int was_raw;
+    int saved_flags;
+    int saved_flags_valid;
+} anim_raw_t;
+
+/* Decoded keys. Printable ASCII is returned as itself (its char value); these
+ * are the non-printable codes, kept above the ASCII range to avoid collision. */
+enum {
+    ANIM_KEY_NONE  = 0,
+    ANIM_KEY_UP    = 256, ANIM_KEY_DOWN, ANIM_KEY_LEFT, ANIM_KEY_RIGHT,
+    ANIM_KEY_ESC, ANIM_KEY_ENTER, ANIM_KEY_TAB, ANIM_KEY_BACKSPACE,
+    ANIM_KEY_SHIFT_UP, ANIM_KEY_SHIFT_DOWN, ANIM_KEY_SHIFT_LEFT, ANIM_KEY_SHIFT_RIGHT
+};
+
+void anim_raw_enable(anim_raw_t *r);    /* cbreak, no echo, non-blocking stdin */
+void anim_raw_restore(anim_raw_t *r);   /* restore prior termios */
+int  anim_poll_key(void);               /* next key or ANIM_KEY_NONE if none ready */
+
 #endif /* DSCO_ANIM_H */

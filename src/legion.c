@@ -20,8 +20,8 @@
 /* ── Global registry ─────────────────────────────────────────────────── */
 
 static legion_variant_t g_variants[LEGION_TOTAL_COUNT];
-static int              g_variant_count = 0;
-static bool             g_initialized = false;
+static int g_variant_count = 0;
+static bool g_initialized = false;
 
 /* ── Role prompt prefixes ─────────────────────────────────────────────── */
 
@@ -31,7 +31,8 @@ static const char *angel_prompts[LEGION_ROLE_COUNT] = {
     "Commit per task. Stop for architectural decisions (Rule 4). Verify every output.",
     /* planner */
     "You are an Angel Planner. Decompose work into 2-3 task plans with XML structure. "
-    "Derive goal-backward must_haves. Ensure every requirement is mapped. Target 50% context budget.",
+    "Derive goal-backward must_haves. Ensure every requirement is mapped. Target 50% context "
+    "budget.",
     /* plan_checker */
     "You are an Angel Plan Checker. Validate plans across 9 dimensions: requirement coverage, "
     "task completeness, dependency correctness, key links, scope sanity, verification derivation, "
@@ -41,7 +42,8 @@ static const char *angel_prompts[LEGION_ROLE_COUNT] = {
     "Three-level artifact check: exists → substantive → wired. Trust codebase, not summaries. "
     "Detect stubs: placeholder divs, static ok responses, empty handlers.",
     /* debugger */
-    "You are an Angel Debugger. Use hypothesis-testing methodology. Hypotheses must be falsifiable. "
+    "You are an Angel Debugger. Use hypothesis-testing methodology. Hypotheses must be "
+    "falsifiable. "
     "Maintain persistent debug file. 7 techniques: binary search, rubber duck, minimal repro, "
     "working backwards, differential, comment-out, git bisect. Update file BEFORE every action.",
     /* researcher */
@@ -131,13 +133,12 @@ static const char *demon_prompts[LEGION_ROLE_COUNT] = {
 
 /* ── Variant generation ──────────────────────────────────────────────── */
 
-static void add_variant(agent_class_t cls, legion_role_t role, model_tier_t tier,
-                        int max_turns, int max_tools, int ctx_pct,
-                        bool verify, bool auto_fix, bool paralysis,
-                        int paralysis_thresh, bool paace, bool goal_bw,
-                        bool hypothesis, bool nyquist, double budget,
-                        int wave, int replicas, const char *suffix) {
-    if (g_variant_count >= LEGION_TOTAL_COUNT) return;
+static void add_variant(agent_class_t cls, legion_role_t role, model_tier_t tier, int max_turns,
+                        int max_tools, int ctx_pct, bool verify, bool auto_fix, bool paralysis,
+                        int paralysis_thresh, bool paace, bool goal_bw, bool hypothesis,
+                        bool nyquist, double budget, int wave, int replicas, const char *suffix) {
+    if (g_variant_count >= LEGION_TOTAL_COUNT)
+        return;
 
     legion_variant_t *v = &g_variants[g_variant_count];
     v->id = g_variant_count;
@@ -163,8 +164,7 @@ static void add_variant(agent_class_t cls, legion_role_t role, model_tier_t tier
     const char *role_name = legion_role_name(role);
     const char *tier_name = tier_label(tier);
 
-    snprintf(v->name, sizeof(v->name), "%s_%s_%s_%s",
-             cls_prefix, role_name, tier_name, suffix);
+    snprintf(v->name, sizeof(v->name), "%s_%s_%s_%s", cls_prefix, role_name, tier_name, suffix);
 
     const char **prompts = (cls == AGENT_CLASS_ANGEL) ? angel_prompts : demon_prompts;
     snprintf(v->prompt_prefix, sizeof(v->prompt_prefix), "%s", prompts[role]);
@@ -191,16 +191,20 @@ static void generate_angels(void) {
      */
 
     /* Sweep dimensions */
-    static const int    ctx_budgets[]   = {30, 50, 70};
-    static const int    max_tools_arr[] = {1, 3};
-    static const int    turns_arr[]     = {5, 15, 30};
-    static const double budgets[]       = {0.50, 2.00, 5.00};
+    static const int ctx_budgets[] = {30, 50, 70};
+    static const int max_tools_arr[] = {1, 3};
+    static const int turns_arr[] = {5, 15, 30};
+    static const double budgets[] = {0.50, 2.00, 5.00};
 
-    typedef struct { bool verify, auto_fix, paralysis, paace, goal_bw, hypothesis, nyquist; int p_thresh; const char *tag; } feature_set_t;
+    typedef struct {
+        bool verify, auto_fix, paralysis, paace, goal_bw, hypothesis, nyquist;
+        int p_thresh;
+        const char *tag;
+    } feature_set_t;
     static const feature_set_t features[] = {
-        {true,  false, false, false, false, false, false, 10, "min"},
-        {true,  true,  true,  false, true,  false, true,  5,  "std"},
-        {true,  true,  true,  true,  true,  true,  true,  3,  "full"},
+        {true, false, false, false, false, false, false, 10, "min"},
+        {true, true, true, false, true, false, true, 5, "std"},
+        {true, true, true, true, true, true, true, 3, "full"},
     };
 
     int count = 0;
@@ -215,23 +219,22 @@ static void generate_angels(void) {
                         int budget_idx = (ti + fi) % 3;
 
                         char suffix[32];
-                        snprintf(suffix, sizeof(suffix), "c%d_t%d_%s",
-                                 ctx_budgets[ci], max_tools_arr[mi], features[fi].tag);
+                        snprintf(suffix, sizeof(suffix), "c%d_t%d_%s", ctx_budgets[ci],
+                                 max_tools_arr[mi], features[fi].tag);
 
                         const feature_set_t *f = &features[fi];
 
                         /* Role-specific overrides */
                         bool use_hypothesis = f->hypothesis && (role == LEGION_ROLE_DEBUGGER);
                         bool use_nyquist = f->nyquist && (role == LEGION_ROLE_PLAN_CHECKER ||
-                                                           role == LEGION_ROLE_VERIFIER ||
-                                                           role == LEGION_ROLE_AUDITOR);
+                                                          role == LEGION_ROLE_VERIFIER ||
+                                                          role == LEGION_ROLE_AUDITOR);
 
                         add_variant(AGENT_CLASS_ANGEL, (legion_role_t)role, tier,
-                                    turns_arr[turns_idx], max_tools_arr[mi],
-                                    ctx_budgets[ci], f->verify, f->auto_fix,
-                                    f->paralysis, f->p_thresh, f->paace,
-                                    f->goal_bw, use_hypothesis, use_nyquist,
-                                    budgets[budget_idx], 0, 1, suffix);
+                                    turns_arr[turns_idx], max_tools_arr[mi], ctx_budgets[ci],
+                                    f->verify, f->auto_fix, f->paralysis, f->p_thresh, f->paace,
+                                    f->goal_bw, use_hypothesis, use_nyquist, budgets[budget_idx], 0,
+                                    1, suffix);
                         count++;
                     }
                 }
@@ -242,26 +245,30 @@ static void generate_angels(void) {
     /* Special angel variants: 777 - count remaining */
     /* Named elite variants for critical paths */
     static const struct {
-        legion_role_t role; model_tier_t tier; const char *name_suffix;
-        int turns; int tools; int ctx; double budget;
+        legion_role_t role;
+        model_tier_t tier;
+        const char *name_suffix;
+        int turns;
+        int tools;
+        int ctx;
+        double budget;
     } elites[] = {
-        {LEGION_ROLE_EXECUTOR,     TIER_OPUS,   "seraph",        30, 3, 50, 5.0},
-        {LEGION_ROLE_PLANNER,      TIER_OPUS,   "archangel",     20, 1, 40, 3.0},
-        {LEGION_ROLE_DEBUGGER,     TIER_OPUS,   "raphael",       25, 3, 60, 5.0},
-        {LEGION_ROLE_VERIFIER,     TIER_OPUS,   "metatron",      15, 1, 30, 2.0},
-        {LEGION_ROLE_RESEARCHER,   TIER_SONNET, "uriel",         20, 3, 70, 3.0},
-        {LEGION_ROLE_SYNTHESIZER,  TIER_OPUS,   "gabriel",       10, 1, 40, 2.0},
-        {LEGION_ROLE_PLAN_CHECKER, TIER_SONNET, "cherub",        10, 1, 30, 1.0},
-        {LEGION_ROLE_AUDITOR,      TIER_OPUS,   "throne",        15, 3, 50, 3.0},
-        {LEGION_ROLE_SCOUT,        TIER_HAIKU,  "virtue",         5, 3, 20, 0.25},
+        {LEGION_ROLE_EXECUTOR, TIER_OPUS, "seraph", 30, 3, 50, 5.0},
+        {LEGION_ROLE_PLANNER, TIER_OPUS, "archangel", 20, 1, 40, 3.0},
+        {LEGION_ROLE_DEBUGGER, TIER_OPUS, "raphael", 25, 3, 60, 5.0},
+        {LEGION_ROLE_VERIFIER, TIER_OPUS, "metatron", 15, 1, 30, 2.0},
+        {LEGION_ROLE_RESEARCHER, TIER_SONNET, "uriel", 20, 3, 70, 3.0},
+        {LEGION_ROLE_SYNTHESIZER, TIER_OPUS, "gabriel", 10, 1, 40, 2.0},
+        {LEGION_ROLE_PLAN_CHECKER, TIER_SONNET, "cherub", 10, 1, 30, 1.0},
+        {LEGION_ROLE_AUDITOR, TIER_OPUS, "throne", 15, 3, 50, 3.0},
+        {LEGION_ROLE_SCOUT, TIER_HAIKU, "virtue", 5, 3, 20, 0.25},
     };
     for (int i = 0; i < 9 && count < LEGION_ANGEL_COUNT; i++) {
-        add_variant(AGENT_CLASS_ANGEL, elites[i].role, elites[i].tier,
-                    elites[i].turns, elites[i].tools, elites[i].ctx,
-                    true, true, true, 3, true, true,
-                    elites[i].role == LEGION_ROLE_DEBUGGER,
-                    elites[i].role == LEGION_ROLE_PLAN_CHECKER || elites[i].role == LEGION_ROLE_AUDITOR,
-                    elites[i].budget, 0, 1, elites[i].name_suffix);
+        add_variant(
+            AGENT_CLASS_ANGEL, elites[i].role, elites[i].tier, elites[i].turns, elites[i].tools,
+            elites[i].ctx, true, true, true, 3, true, true, elites[i].role == LEGION_ROLE_DEBUGGER,
+            elites[i].role == LEGION_ROLE_PLAN_CHECKER || elites[i].role == LEGION_ROLE_AUDITOR,
+            elites[i].budget, 0, 1, elites[i].name_suffix);
         count++;
     }
 
@@ -271,9 +278,8 @@ static void generate_angels(void) {
         int ti = (count / LEGION_ROLE_COUNT) % 3;
         char suffix[32];
         snprintf(suffix, sizeof(suffix), "x%d", count);
-        add_variant(AGENT_CLASS_ANGEL, (legion_role_t)role, (model_tier_t)ti,
-                    15, 2, 50, true, true, true, 5, false, true, false, false,
-                    1.0, 0, 1, suffix);
+        add_variant(AGENT_CLASS_ANGEL, (legion_role_t)role, (model_tier_t)ti, 15, 2, 50, true, true,
+                    true, 5, false, true, false, false, 1.0, 0, 1, suffix);
         count++;
     }
 }
@@ -294,17 +300,21 @@ static void generate_demons(void) {
      *   - Auto-fix EVERYTHING including architectural decisions
      */
 
-    static const int    ctx_budgets[]   = {60, 80, 90};
-    static const int    max_tools_arr[] = {3, 5, 8};
-    static const int    turns_arr[]     = {3, 5, 10};
-    static const double budgets[]       = {0.25, 0.50, 1.00};
-    static const int    replicas_arr[]  = {1, 2, 3};
+    static const int ctx_budgets[] = {60, 80, 90};
+    static const int max_tools_arr[] = {3, 5, 8};
+    static const int turns_arr[] = {3, 5, 10};
+    static const double budgets[] = {0.25, 0.50, 1.00};
+    static const int replicas_arr[] = {1, 2, 3};
 
-    typedef struct { bool verify, auto_fix, paralysis, paace; int p_thresh; const char *tag; } demon_feature_t;
+    typedef struct {
+        bool verify, auto_fix, paralysis, paace;
+        int p_thresh;
+        const char *tag;
+    } demon_feature_t;
     static const demon_feature_t features[] = {
-        {false, true,  false, false, 99, "blitz"},    /* no checks, just go */
-        {false, true,  true,  false, 3,  "rush"},     /* minimal guard */
-        {true,  true,  true,  false, 5,  "balanced"}, /* spot-check */
+        {false, true, false, false, 99, "blitz"}, /* no checks, just go */
+        {false, true, true, false, 3, "rush"},    /* minimal guard */
+        {true, true, true, false, 5, "balanced"}, /* spot-check */
     };
 
     int count = 0;
@@ -319,17 +329,16 @@ static void generate_demons(void) {
                         int rep_idx = (mi + fi) % 3;
 
                         char suffix[32];
-                        snprintf(suffix, sizeof(suffix), "c%d_t%d_%s",
-                                 ctx_budgets[ci], max_tools_arr[mi], features[fi].tag);
+                        snprintf(suffix, sizeof(suffix), "c%d_t%d_%s", ctx_budgets[ci],
+                                 max_tools_arr[mi], features[fi].tag);
 
                         const demon_feature_t *f = &features[fi];
 
                         add_variant(AGENT_CLASS_DEMON, (legion_role_t)role, tier,
-                                    turns_arr[turns_idx], max_tools_arr[mi],
-                                    ctx_budgets[ci], f->verify, f->auto_fix,
-                                    f->paralysis, f->p_thresh, f->paace,
-                                    false, false, false,
-                                    budgets[budget_idx], 0, replicas_arr[rep_idx], suffix);
+                                    turns_arr[turns_idx], max_tools_arr[mi], ctx_budgets[ci],
+                                    f->verify, f->auto_fix, f->paralysis, f->p_thresh, f->paace,
+                                    false, false, false, budgets[budget_idx], 0,
+                                    replicas_arr[rep_idx], suffix);
                         count++;
                     }
                 }
@@ -339,41 +348,45 @@ static void generate_demons(void) {
 
     /* Named demon elites */
     static const struct {
-        legion_role_t role; model_tier_t tier; const char *name_suffix;
-        int turns; int tools; int ctx; double budget; int reps;
+        legion_role_t role;
+        model_tier_t tier;
+        const char *name_suffix;
+        int turns;
+        int tools;
+        int ctx;
+        double budget;
+        int reps;
     } elites[] = {
-        {LEGION_ROLE_EXECUTOR,     TIER_HAIKU,  "asmodeus",       3, 8, 90, 0.25, 3},
-        {LEGION_ROLE_EXECUTOR,     TIER_SONNET, "bael",           5, 5, 80, 0.50, 2},
-        {LEGION_ROLE_PLANNER,      TIER_SONNET, "mammon",         3, 3, 80, 0.50, 1},
-        {LEGION_ROLE_DEBUGGER,     TIER_HAIKU,  "astaroth",       3, 5, 90, 0.25, 3},
-        {LEGION_ROLE_RESEARCHER,   TIER_HAIKU,  "belial",         2, 5, 80, 0.10, 5},
-        {LEGION_ROLE_SCOUT,        TIER_HAIKU,  "legion",         2, 8, 90, 0.10, 8},
-        {LEGION_ROLE_SYNTHESIZER,  TIER_SONNET, "mephistopheles",  3, 1, 60, 0.50, 1},
-        {LEGION_ROLE_REDUCER,      TIER_HAIKU,  "beelzebub",       2, 3, 90, 0.10, 3},
-        {LEGION_ROLE_VERIFIER,     TIER_HAIKU,  "azazel",          2, 1, 80, 0.10, 1},
-        {LEGION_ROLE_AUDITOR,      TIER_HAIKU,  "samael",          2, 3, 80, 0.10, 2},
-        {LEGION_ROLE_PROFILER,     TIER_HAIKU,  "lilith",          1, 1, 90, 0.05, 1},
-        {LEGION_ROLE_CODEBASE_MAPPER, TIER_HAIKU, "abaddon",       2, 5, 90, 0.10, 3},
-        {LEGION_ROLE_ROADMAPPER,   TIER_HAIKU,  "leviathan",       2, 1, 80, 0.10, 1},
-        {LEGION_ROLE_INTEGRATION_CHK, TIER_HAIKU, "moloch",        2, 3, 90, 0.10, 2},
-        {LEGION_ROLE_UI_RESEARCHER, TIER_HAIKU,  "pazuzu",         2, 3, 80, 0.10, 2},
-        {LEGION_ROLE_UI_CHECKER,   TIER_HAIKU,   "baphomet",       1, 1, 90, 0.05, 1},
+        {LEGION_ROLE_EXECUTOR, TIER_HAIKU, "asmodeus", 3, 8, 90, 0.25, 3},
+        {LEGION_ROLE_EXECUTOR, TIER_SONNET, "bael", 5, 5, 80, 0.50, 2},
+        {LEGION_ROLE_PLANNER, TIER_SONNET, "mammon", 3, 3, 80, 0.50, 1},
+        {LEGION_ROLE_DEBUGGER, TIER_HAIKU, "astaroth", 3, 5, 90, 0.25, 3},
+        {LEGION_ROLE_RESEARCHER, TIER_HAIKU, "belial", 2, 5, 80, 0.10, 5},
+        {LEGION_ROLE_SCOUT, TIER_HAIKU, "legion", 2, 8, 90, 0.10, 8},
+        {LEGION_ROLE_SYNTHESIZER, TIER_SONNET, "mephistopheles", 3, 1, 60, 0.50, 1},
+        {LEGION_ROLE_REDUCER, TIER_HAIKU, "beelzebub", 2, 3, 90, 0.10, 3},
+        {LEGION_ROLE_VERIFIER, TIER_HAIKU, "azazel", 2, 1, 80, 0.10, 1},
+        {LEGION_ROLE_AUDITOR, TIER_HAIKU, "samael", 2, 3, 80, 0.10, 2},
+        {LEGION_ROLE_PROFILER, TIER_HAIKU, "lilith", 1, 1, 90, 0.05, 1},
+        {LEGION_ROLE_CODEBASE_MAPPER, TIER_HAIKU, "abaddon", 2, 5, 90, 0.10, 3},
+        {LEGION_ROLE_ROADMAPPER, TIER_HAIKU, "leviathan", 2, 1, 80, 0.10, 1},
+        {LEGION_ROLE_INTEGRATION_CHK, TIER_HAIKU, "moloch", 2, 3, 90, 0.10, 2},
+        {LEGION_ROLE_UI_RESEARCHER, TIER_HAIKU, "pazuzu", 2, 3, 80, 0.10, 2},
+        {LEGION_ROLE_UI_CHECKER, TIER_HAIKU, "baphomet", 1, 1, 90, 0.05, 1},
         /* Swarm demons: massive parallelism */
-        {LEGION_ROLE_SCOUT,        TIER_HAIKU,  "locust_swarm",    1, 8, 90, 0.05, 8},
-        {LEGION_ROLE_EXECUTOR,     TIER_HAIKU,  "hellfire",        2, 8, 90, 0.10, 5},
-        {LEGION_ROLE_RESEARCHER,   TIER_HAIKU,  "inferno",         2, 5, 90, 0.10, 5},
-        {LEGION_ROLE_REDUCER,      TIER_HAIKU,  "void",            1, 1, 90, 0.05, 1},
-        {LEGION_ROLE_SYNTHESIZER,  TIER_HAIKU,  "chimera",         2, 3, 80, 0.10, 2},
-        {LEGION_ROLE_DEBUGGER,     TIER_SONNET, "cerberus",        5, 5, 80, 0.50, 3},
-        {LEGION_ROLE_PLANNER,      TIER_HAIKU,  "imp",             2, 3, 90, 0.10, 2},
-        {LEGION_ROLE_VERIFIER,     TIER_HAIKU,  "wraith",          1, 1, 90, 0.05, 1},
+        {LEGION_ROLE_SCOUT, TIER_HAIKU, "locust_swarm", 1, 8, 90, 0.05, 8},
+        {LEGION_ROLE_EXECUTOR, TIER_HAIKU, "hellfire", 2, 8, 90, 0.10, 5},
+        {LEGION_ROLE_RESEARCHER, TIER_HAIKU, "inferno", 2, 5, 90, 0.10, 5},
+        {LEGION_ROLE_REDUCER, TIER_HAIKU, "void", 1, 1, 90, 0.05, 1},
+        {LEGION_ROLE_SYNTHESIZER, TIER_HAIKU, "chimera", 2, 3, 80, 0.10, 2},
+        {LEGION_ROLE_DEBUGGER, TIER_SONNET, "cerberus", 5, 5, 80, 0.50, 3},
+        {LEGION_ROLE_PLANNER, TIER_HAIKU, "imp", 2, 3, 90, 0.10, 2},
+        {LEGION_ROLE_VERIFIER, TIER_HAIKU, "wraith", 1, 1, 90, 0.05, 1},
     };
     for (int i = 0; i < 24 && count < LEGION_DEMON_COUNT; i++) {
-        add_variant(AGENT_CLASS_DEMON, elites[i].role, elites[i].tier,
-                    elites[i].turns, elites[i].tools, elites[i].ctx,
-                    false, true, true, 3, false,
-                    false, false, false,
-                    elites[i].budget, 0, elites[i].reps, elites[i].name_suffix);
+        add_variant(AGENT_CLASS_DEMON, elites[i].role, elites[i].tier, elites[i].turns,
+                    elites[i].tools, elites[i].ctx, false, true, true, 3, false, false, false,
+                    false, elites[i].budget, 0, elites[i].reps, elites[i].name_suffix);
         count++;
     }
 
@@ -383,9 +396,8 @@ static void generate_demons(void) {
         int ti = (count / LEGION_ROLE_COUNT) % 3;
         char suffix[32];
         snprintf(suffix, sizeof(suffix), "d%d", count);
-        add_variant(AGENT_CLASS_DEMON, (legion_role_t)role, (model_tier_t)ti,
-                    3, 5, 80, false, true, true, 3, false, false, false, false,
-                    0.25, 0, 2, suffix);
+        add_variant(AGENT_CLASS_DEMON, (legion_role_t)role, (model_tier_t)ti, 3, 5, 80, false, true,
+                    true, 3, false, false, false, false, 0.25, 0, 2, suffix);
         count++;
     }
 }
@@ -393,7 +405,8 @@ static void generate_demons(void) {
 /* ── Initialization ──────────────────────────────────────────────────── */
 
 void legion_init(void) {
-    if (g_initialized) return;
+    if (g_initialized)
+        return;
     memset(g_variants, 0, sizeof(g_variants));
     g_variant_count = 0;
     generate_angels();
@@ -404,14 +417,18 @@ void legion_init(void) {
 /* ── Lookup functions ────────────────────────────────────────────────── */
 
 const legion_variant_t *legion_get(int id) {
-    if (!g_initialized) legion_init();
-    if (id < 0 || id >= g_variant_count) return NULL;
+    if (!g_initialized)
+        legion_init();
+    if (id < 0 || id >= g_variant_count)
+        return NULL;
     return &g_variants[id];
 }
 
 const legion_variant_t *legion_find(const char *name) {
-    if (!g_initialized) legion_init();
-    if (!name) return NULL;
+    if (!g_initialized)
+        legion_init();
+    if (!name)
+        return NULL;
     for (int i = 0; i < g_variant_count; i++) {
         if (strcmp(g_variants[i].name, name) == 0)
             return &g_variants[i];
@@ -425,14 +442,17 @@ const legion_variant_t *legion_find(const char *name) {
 }
 
 const legion_variant_t *legion_registry(int *count) {
-    if (!g_initialized) legion_init();
-    if (count) *count = g_variant_count;
+    if (!g_initialized)
+        legion_init();
+    if (count)
+        *count = g_variant_count;
     return g_variants;
 }
 
-int legion_find_by_role(legion_role_t role, agent_class_t cls,
-                        const legion_variant_t **out, int max_out) {
-    if (!g_initialized) legion_init();
+int legion_find_by_role(legion_role_t role, agent_class_t cls, const legion_variant_t **out,
+                        int max_out) {
+    if (!g_initialized)
+        legion_init();
     int found = 0;
     for (int i = 0; i < g_variant_count && found < max_out; i++) {
         if (g_variants[i].role == role && g_variants[i].cls == cls) {
@@ -445,8 +465,10 @@ int legion_find_by_role(legion_role_t role, agent_class_t cls,
 /* ── Auto-selection ──────────────────────────────────────────────────── */
 
 const legion_variant_t *legion_auto_select(const char *task, agent_class_t cls) {
-    if (!g_initialized) legion_init();
-    if (!task) return NULL;
+    if (!g_initialized)
+        legion_init();
+    if (!task)
+        return NULL;
 
     /* Simple keyword-based role detection */
     legion_role_t role = LEGION_ROLE_EXECUTOR; /* default */
@@ -459,7 +481,8 @@ const legion_variant_t *legion_auto_select(const char *task, agent_class_t cls) 
         role = LEGION_ROLE_DEBUGGER;
     else if (strstr(task, "research") || strstr(task, "investigate") || strstr(task, "study"))
         role = LEGION_ROLE_RESEARCHER;
-    else if (strstr(task, "search") || strstr(task, "find") || strstr(task, "scan") || strstr(task, "scout"))
+    else if (strstr(task, "search") || strstr(task, "find") || strstr(task, "scan") ||
+             strstr(task, "scout"))
         role = LEGION_ROLE_SCOUT;
     else if (strstr(task, "map") || strstr(task, "analyze codebase") || strstr(task, "audit code"))
         role = LEGION_ROLE_CODEBASE_MAPPER;
@@ -479,13 +502,23 @@ const legion_variant_t *legion_auto_select(const char *task, agent_class_t cls) 
 
     for (int i = 0; i < g_variant_count; i++) {
         const legion_variant_t *v = &g_variants[i];
-        if (v->role != role || v->cls != cls) continue;
-        if (!best) { best = v; continue; }
+        if (v->role != role || v->cls != cls)
+            continue;
+        if (!best) {
+            best = v;
+            continue;
+        }
         /* Prefer matching tier */
-        if (v->tier == preferred && best->tier != preferred) { best = v; continue; }
+        if (v->tier == preferred && best->tier != preferred) {
+            best = v;
+            continue;
+        }
         /* Among same tier, prefer standard features (not minimal, not full) */
         if (v->tier == best->tier) {
-            if (strstr(v->name, "std") || strstr(v->name, "rush")) { best = v; continue; }
+            if (strstr(v->name, "std") || strstr(v->name, "rush")) {
+                best = v;
+                continue;
+            }
         }
     }
 
@@ -496,7 +529,8 @@ const legion_variant_t *legion_auto_select(const char *task, agent_class_t cls) 
 
 int legion_spawn(int variant_id, const char *task) {
     const legion_variant_t *v = legion_get(variant_id);
-    if (!v || !task) return -1;
+    if (!v || !task)
+        return -1;
 
     /* Build augmented task with variant prompt prefix */
     char augmented[4096];
@@ -504,12 +538,9 @@ int legion_spawn(int variant_id, const char *task) {
              "[Legion Agent %d: %s | class=%s role=%s tier=%s "
              "turns=%d tools/turn=%d ctx=%d%% budget=$%.2f replicas=%d]\n\n"
              "%s\n\n---\n\nTask: %s",
-             v->id, v->name,
-             v->cls == AGENT_CLASS_ANGEL ? "angel" : "demon",
-             legion_role_name(v->role), tier_label(v->tier),
-             v->max_turns, v->max_tools_per_turn, v->context_budget_pct,
-             v->budget_usd, v->replicas,
-             v->prompt_prefix, task);
+             v->id, v->name, v->cls == AGENT_CLASS_ANGEL ? "angel" : "demon",
+             legion_role_name(v->role), tier_label(v->tier), v->max_turns, v->max_tools_per_turn,
+             v->context_budget_pct, v->budget_usd, v->replicas, v->prompt_prefix, task);
 
     /* Use the swarm infrastructure */
     extern swarm_t *tools_swarm_instance(void);
@@ -520,13 +551,13 @@ int legion_spawn(int variant_id, const char *task) {
     return agent_id;
 }
 
-int legion_spawn_squad(const int *variant_ids, int count,
-                       const char *task, int *out_agent_ids) {
+int legion_spawn_squad(const int *variant_ids, int count, const char *task, int *out_agent_ids) {
     int spawned = 0;
     for (int i = 0; i < count; i++) {
         int aid = legion_spawn(variant_ids[i], task);
         if (aid >= 0) {
-            if (out_agent_ids) out_agent_ids[spawned] = aid;
+            if (out_agent_ids)
+                out_agent_ids[spawned] = aid;
             spawned++;
         }
     }
@@ -536,50 +567,52 @@ int legion_spawn_squad(const int *variant_ids, int count,
 /* ── JSON output ─────────────────────────────────────────────────────── */
 
 int legion_variant_json(const legion_variant_t *v, char *buf, size_t len) {
-    if (!v || !buf) return 0;
-    return snprintf(buf, len,
+    if (!v || !buf)
+        return 0;
+    return snprintf(
+        buf, len,
         "{\"id\":%d,\"name\":\"%s\",\"class\":\"%s\",\"role\":\"%s\","
         "\"tier\":\"%s\",\"max_turns\":%d,\"max_tools_per_turn\":%d,"
         "\"context_budget_pct\":%d,\"verify\":%s,\"auto_fix\":%s,"
         "\"paralysis_guard\":%s,\"plan_aware_compress\":%s,"
         "\"goal_backward\":%s,\"hypothesis_driven\":%s,"
         "\"nyquist_check\":%s,\"budget_usd\":%.2f,\"replicas\":%d}",
-        v->id, v->name,
-        v->cls == AGENT_CLASS_ANGEL ? "angel" : "demon",
-        legion_role_name(v->role), tier_label(v->tier),
-        v->max_turns, v->max_tools_per_turn, v->context_budget_pct,
-        v->verify_output ? "true" : "false",
-        v->auto_fix ? "true" : "false",
-        v->paralysis_guard ? "true" : "false",
-        v->plan_aware_compress ? "true" : "false",
-        v->goal_backward ? "true" : "false",
-        v->hypothesis_driven ? "true" : "false",
-        v->nyquist_check ? "true" : "false",
-        v->budget_usd, v->replicas);
+        v->id, v->name, v->cls == AGENT_CLASS_ANGEL ? "angel" : "demon", legion_role_name(v->role),
+        tier_label(v->tier), v->max_turns, v->max_tools_per_turn, v->context_budget_pct,
+        v->verify_output ? "true" : "false", v->auto_fix ? "true" : "false",
+        v->paralysis_guard ? "true" : "false", v->plan_aware_compress ? "true" : "false",
+        v->goal_backward ? "true" : "false", v->hypothesis_driven ? "true" : "false",
+        v->nyquist_check ? "true" : "false", v->budget_usd, v->replicas);
 }
 
 /* ── Stats ───────────────────────────────────────────────────────────── */
 
 int legion_angel_count(void) {
-    if (!g_initialized) legion_init();
+    if (!g_initialized)
+        legion_init();
     int n = 0;
     for (int i = 0; i < g_variant_count; i++)
-        if (g_variants[i].cls == AGENT_CLASS_ANGEL) n++;
+        if (g_variants[i].cls == AGENT_CLASS_ANGEL)
+            n++;
     return n;
 }
 
 int legion_demon_count(void) {
-    if (!g_initialized) legion_init();
+    if (!g_initialized)
+        legion_init();
     int n = 0;
     for (int i = 0; i < g_variant_count; i++)
-        if (g_variants[i].cls == AGENT_CLASS_DEMON) n++;
+        if (g_variants[i].cls == AGENT_CLASS_DEMON)
+            n++;
     return n;
 }
 
 int legion_count_by_role(legion_role_t role) {
-    if (!g_initialized) legion_init();
+    if (!g_initialized)
+        legion_init();
     int n = 0;
     for (int i = 0; i < g_variant_count; i++)
-        if (g_variants[i].role == role) n++;
+        if (g_variants[i].role == role)
+            n++;
     return n;
 }

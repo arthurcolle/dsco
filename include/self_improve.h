@@ -73,6 +73,8 @@ typedef enum {
     SI_PATTERN_HIGH_COST_TURN,        /* turn cost > $0.50 */
     SI_PATTERN_CONTEXT_PRESSURE,      /* context usage > 80% */
     SI_PATTERN_BUDGET_APPROACHING,   /* approaching cost budget */
+    SI_PATTERN_CACHE_LEVERAGED,       /* high cache-read reuse */
+    SI_PATTERN_OUTPUT_HEAVY_TURN,     /* output-heavy synthesis/reduction */
     SI_PATTERN_SUCCESSFUL_STRATEGY,   /* strategy that worked well */
 } si_pattern_type_t;
 
@@ -148,6 +150,10 @@ typedef struct {
     int                total_failures;
     int                total_retries;
     int                total_redundant_calls;
+    long long          total_input_tokens;
+    long long          total_output_tokens;
+    long long          total_cache_read_tokens;
+    long long          total_cache_write_tokens;
 
     /* Patterns & suggestions */
     si_pattern_t       patterns[SI_MAX_PATTERNS];
@@ -188,6 +194,18 @@ void self_improve_record_turn(self_improve_t *si,
                               int output_tokens,
                               int context_usage_pct,
                               double budget_used_pct);
+
+/* LOOP 1 (micro): Record turn-level metrics including provider cache usage.
+ * Prefer this from the agent loop when cache read/write counters are known. */
+void self_improve_record_turn_usage(self_improve_t *si,
+                                    int turn_number,
+                                    double turn_cost,
+                                    int input_tokens,
+                                    int output_tokens,
+                                    int cache_read_tokens,
+                                    int cache_write_tokens,
+                                    int context_usage_pct,
+                                    double budget_used_pct);
 
 /* LOOP 2 (meso): Consolidate patterns and generate suggestions.
  * Called every SI_CONSOLIDATION_INTERVAL turns or at session end.
@@ -259,6 +277,10 @@ extern self_improve_t g_self_improve;
 #define SI_RECORD_TURN(n, cost, in_tok, out_tok, ctx_pct, budget_pct) \
     self_improve_record_turn(&g_self_improve, (n), (cost), (in_tok), \
                              (out_tok), (ctx_pct), (budget_pct))
+
+#define SI_RECORD_TURN_USAGE(n, cost, in_tok, out_tok, cr_tok, cw_tok, ctx_pct, budget_pct) \
+    self_improve_record_turn_usage(&g_self_improve, (n), (cost), (in_tok), (out_tok),       \
+                                   (cr_tok), (cw_tok), (ctx_pct), (budget_pct))
 
 #define SI_CONSOLIDATE() \
     self_improve_consolidate(&g_self_improve)

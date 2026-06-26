@@ -41,13 +41,16 @@ static double si_now(void) {
 }
 
 static double clampd(double v, double lo, double hi) {
-    if (v < lo) return lo;
-    if (v > hi) return hi;
+    if (v < lo)
+        return lo;
+    if (v > hi)
+        return hi;
     return v;
 }
 
 static int find_tool_idx(self_improve_t *si, const char *name) {
-    if (!name || !*name) return -1;
+    if (!name || !*name)
+        return -1;
     for (int i = 0; i < si->tool_count; i++) {
         if (strncmp(si->tools[i].name, name, SI_MAX_TOOL_NAME - 1) == 0)
             return i;
@@ -57,7 +60,8 @@ static int find_tool_idx(self_improve_t *si, const char *name) {
 
 static si_tool_metric_t *find_or_add_tool(self_improve_t *si, const char *name) {
     int idx = find_tool_idx(si, name);
-    if (idx >= 0) return &si->tools[idx];
+    if (idx >= 0)
+        return &si->tools[idx];
 
     if (si->tool_count >= SI_MAX_TOOLS_TRACKED) {
         /* Evict worst-performing tool to make room */
@@ -65,7 +69,10 @@ static si_tool_metric_t *find_or_add_tool(self_improve_t *si, const char *name) 
         double worst_score = 2.0;
         for (int i = 0; i < si->tool_count; i++) {
             double s = si->tools[i].efficiency_score;
-            if (s < worst_score) { worst = i; worst_score = s; }
+            if (s < worst_score) {
+                worst = i;
+                worst_score = s;
+            }
         }
         idx = worst;
     } else {
@@ -87,12 +94,12 @@ void self_improve_init(self_improve_t *si) {
     si->session_start_time = si_now();
 
     /* Default strategy weights — moderate, will adapt over time */
-    si->weights.parallel_preference    = 0.7;
-    si->weights.cache_aggressiveness   = 0.5;
+    si->weights.parallel_preference = 0.7;
+    si->weights.cache_aggressiveness = 0.5;
     si->weights.model_cost_sensitivity = 0.3;
     si->weights.tool_timeout_aggression = 0.3;
     si->weights.context_compaction_thresh = 0.80;
-    si->weights.batch_willingness      = 0.6;
+    si->weights.batch_willingness = 0.6;
 
     si->initialized = true;
 
@@ -100,7 +107,8 @@ void self_improve_init(self_improve_t *si) {
 }
 
 void self_improve_turn_reset(self_improve_t *si) {
-    if (!si->initialized) return;
+    if (!si->initialized)
+        return;
     si->same_tool_streak = 0;
     si->turn_cost = 0.0;
     si->turn_start_time = si_now();
@@ -113,12 +121,10 @@ void self_improve_turn_reset(self_improve_t *si) {
  * LOOP 1 (micro): Per-tool and per-turn recording
  * ═══════════════════════════════════════════════════════════════════════════ */
 
-void self_improve_record_tool(self_improve_t *si,
-                              const char *tool_name,
-                              bool success,
-                              double latency_ms,
-                              int estimated_tokens) {
-    if (!si->initialized || !tool_name) return;
+void self_improve_record_tool(self_improve_t *si, const char *tool_name, bool success,
+                              double latency_ms, int estimated_tokens) {
+    if (!si->initialized || !tool_name)
+        return;
 
     si_tool_metric_t *t = find_or_add_tool(si, tool_name);
     t->calls++;
@@ -126,8 +132,10 @@ void self_improve_record_tool(self_improve_t *si,
     t->total_input_tokens += estimated_tokens;
     t->last_latency_ms = latency_ms;
 
-    if (latency_ms < t->best_latency_ms)  t->best_latency_ms = latency_ms;
-    if (latency_ms > t->worst_latency_ms) t->worst_latency_ms = latency_ms;
+    if (latency_ms < t->best_latency_ms)
+        t->best_latency_ms = latency_ms;
+    if (latency_ms > t->worst_latency_ms)
+        t->worst_latency_ms = latency_ms;
 
     if (success) {
         t->successes++;
@@ -142,9 +150,10 @@ void self_improve_record_tool(self_improve_t *si,
     /* Derived scores */
     if (t->calls > 0) {
         t->success_rate = (double)t->successes / (double)t->calls;
-        double speed_factor = t->total_latency_ms > 0
-            ? clampd(2000.0 / (t->total_latency_ms / t->calls + 1.0), 0.0, 1.0)
-            : 0.5;
+        double speed_factor =
+            t->total_latency_ms > 0
+                ? clampd(2000.0 / (t->total_latency_ms / t->calls + 1.0), 0.0, 1.0)
+                : 0.5;
         t->efficiency_score = t->success_rate * speed_factor;
     }
 
@@ -159,8 +168,7 @@ void self_improve_record_tool(self_improve_t *si,
             /* Record retry storm pattern */
             for (int i = 0; i < si->pattern_count; i++) {
                 if (si->patterns[i].type == SI_PATTERN_RETRY_STORM &&
-                    strncmp(si->patterns[i].tool_name, tool_name,
-                            SI_MAX_TOOL_NAME) == 0) {
+                    strncmp(si->patterns[i].tool_name, tool_name, SI_MAX_TOOL_NAME) == 0) {
                     si->patterns[i].occurrences++;
                     si->patterns[i].last_seen = si_now();
                     si->total_retries += si->same_tool_streak;
@@ -171,15 +179,14 @@ void self_improve_record_tool(self_improve_t *si,
                 si_pattern_t *p = &si->patterns[si->pattern_count++];
                 p->type = SI_PATTERN_RETRY_STORM;
                 snprintf(p->description, sizeof(p->description),
-                         "Tool '%s' failed %d consecutive times — retry storm",
-                         tool_name, si->same_tool_streak);
+                         "Tool '%s' failed %d consecutive times — retry storm", tool_name,
+                         si->same_tool_streak);
                 strncpy(p->tool_name, tool_name, SI_MAX_TOOL_NAME - 1);
                 p->severity = clampd(0.3 + 0.1 * si->same_tool_streak, 0.0, 1.0);
                 p->occurrences = 1;
                 p->first_seen = p->last_seen = si_now();
                 si->total_retries += si->same_tool_streak;
-                baseline_log("self_improve", "pattern_retry_storm",
-                             p->description, NULL);
+                baseline_log("self_improve", "pattern_retry_storm", p->description, NULL);
             }
         }
     } else {
@@ -191,8 +198,7 @@ void self_improve_record_tool(self_improve_t *si,
     if (si->same_tool_streak >= 10) {
         for (int i = 0; i < si->pattern_count; i++) {
             if (si->patterns[i].type == SI_PATTERN_TOOL_SPAM &&
-                strncmp(si->patterns[i].tool_name, tool_name,
-                        SI_MAX_TOOL_NAME) == 0) {
+                strncmp(si->patterns[i].tool_name, tool_name, SI_MAX_TOOL_NAME) == 0) {
                 si->patterns[i].occurrences++;
                 si->patterns[i].last_seen = si_now();
                 return;
@@ -202,27 +208,26 @@ void self_improve_record_tool(self_improve_t *si,
             si_pattern_t *p = &si->patterns[si->pattern_count++];
             p->type = SI_PATTERN_TOOL_SPAM;
             snprintf(p->description, sizeof(p->description),
-                     "Tool '%s' called %d+ times in a single turn — possible spam",
-                     tool_name, si->same_tool_streak);
+                     "Tool '%s' called %d+ times in a single turn — possible spam", tool_name,
+                     si->same_tool_streak);
             strncpy(p->tool_name, tool_name, SI_MAX_TOOL_NAME - 1);
             p->severity = 0.6;
             p->occurrences = 1;
             p->first_seen = p->last_seen = si_now();
-            baseline_log("self_improve", "pattern_tool_spam",
-                         p->description, NULL);
+            baseline_log("self_improve", "pattern_tool_spam", p->description, NULL);
         }
     }
 }
 
 void self_improve_record_redundant(self_improve_t *si, const char *tool_name) {
-    if (!si->initialized || !tool_name) return;
+    if (!si->initialized || !tool_name)
+        return;
     si->total_redundant_calls++;
 
     /* Check if we already have a redundant_calls pattern for this tool */
     for (int i = 0; i < si->pattern_count; i++) {
         if (si->patterns[i].type == SI_PATTERN_REDUNDANT_CALLS &&
-            strncmp(si->patterns[i].tool_name, tool_name,
-                    SI_MAX_TOOL_NAME) == 0) {
+            strncmp(si->patterns[i].tool_name, tool_name, SI_MAX_TOOL_NAME) == 0) {
             si->patterns[i].occurrences++;
             si->patterns[i].last_seen = si_now();
             return;
@@ -232,8 +237,7 @@ void self_improve_record_redundant(self_improve_t *si, const char *tool_name) {
         si_pattern_t *p = &si->patterns[si->pattern_count++];
         p->type = SI_PATTERN_REDUNDANT_CALLS;
         snprintf(p->description, sizeof(p->description),
-                 "Redundant calls to '%s' — consider batching or caching",
-                 tool_name);
+                 "Redundant calls to '%s' — consider batching or caching", tool_name);
         strncpy(p->tool_name, tool_name, SI_MAX_TOOL_NAME - 1);
         p->severity = 0.4;
         p->occurrences = 1;
@@ -241,20 +245,29 @@ void self_improve_record_redundant(self_improve_t *si, const char *tool_name) {
     }
 }
 
-void self_improve_record_turn(self_improve_t *si,
-                              int turn_number,
-                              double turn_cost,
-                              int input_tokens,
-                              int output_tokens,
-                              int context_usage_pct,
+void self_improve_record_turn(self_improve_t *si, int turn_number, double turn_cost,
+                              int input_tokens, int output_tokens, int context_usage_pct,
                               double budget_used_pct) {
-    if (!si->initialized) return;
+    self_improve_record_turn_usage(si, turn_number, turn_cost, input_tokens, output_tokens, 0, 0,
+                                   context_usage_pct, budget_used_pct);
+}
+
+void self_improve_record_turn_usage(self_improve_t *si, int turn_number, double turn_cost,
+                                    int input_tokens, int output_tokens,
+                                    int cache_read_tokens, int cache_write_tokens,
+                                    int context_usage_pct, double budget_used_pct) {
+    if (!si->initialized)
+        return;
 
     si->current_turn = turn_number;
     si->turn_cost = turn_cost;
     si->total_cost += turn_cost;
     si->total_turns++;
     si->turns_since_consolidation++;
+    si->total_input_tokens += input_tokens;
+    si->total_output_tokens += output_tokens;
+    si->total_cache_read_tokens += cache_read_tokens;
+    si->total_cache_write_tokens += cache_write_tokens;
 
     /* Detect high-cost turn */
     if (turn_cost > 0.50) {
@@ -272,8 +285,7 @@ void self_improve_record_turn(self_improve_t *si,
             si_pattern_t *p = &si->patterns[si->pattern_count++];
             p->type = SI_PATTERN_HIGH_COST_TURN;
             snprintf(p->description, sizeof(p->description),
-                     "Turn %d cost $%.4f — exceeds $0.50 threshold",
-                     turn_number, turn_cost);
+                     "Turn %d cost $%.4f — exceeds $0.50 threshold", turn_number, turn_cost);
             p->severity = clampd(turn_cost / 2.0, 0.0, 1.0);
             p->occurrences = 1;
             p->first_seen = p->last_seen = si_now();
@@ -327,19 +339,75 @@ void self_improve_record_turn(self_improve_t *si,
         }
     }
 
+    /* Detect cache leverage. ccusage-style broad runs are often viable because
+     * the expensive static prefix is being read from cache across turns. */
+    long long fresh_input = input_tokens > 0 ? (long long)input_tokens : 0;
+    long long cache_read = cache_read_tokens > 0 ? (long long)cache_read_tokens : 0;
+    long long output = output_tokens > 0 ? (long long)output_tokens : 0;
+
+    if (cache_read >= 100000 &&
+        cache_read >= (fresh_input > 0 ? fresh_input * 3 : 100000)) {
+        bool found = false;
+        for (int i = 0; i < si->pattern_count; i++) {
+            if (si->patterns[i].type == SI_PATTERN_CACHE_LEVERAGED) {
+                si->patterns[i].occurrences++;
+                si->patterns[i].last_seen = si_now();
+                si->patterns[i].severity =
+                    clampd((double)cache_read_tokens / 1000000.0, 0.2, 1.0);
+                found = true;
+                break;
+            }
+        }
+        if (!found && si->pattern_count < SI_MAX_PATTERNS) {
+            si_pattern_t *p = &si->patterns[si->pattern_count++];
+            p->type = SI_PATTERN_CACHE_LEVERAGED;
+            snprintf(p->description, sizeof(p->description),
+                     "Turn %d reused %d cached tokens vs %d fresh input — preserve stable prefix",
+                     turn_number, cache_read_tokens, input_tokens);
+            p->severity = clampd((double)cache_read_tokens / 1000000.0, 0.2, 1.0);
+            p->occurrences = 1;
+            p->first_seen = p->last_seen = si_now();
+        }
+    }
+
+    /* Detect output-heavy synthesis. Large-scale exploration should fan out
+     * cheaply, then spend premium output on a bounded reducer. */
+    if (output >= 12000 &&
+        output >= (fresh_input > 0 ? fresh_input * 2 : 12000)) {
+        bool found = false;
+        for (int i = 0; i < si->pattern_count; i++) {
+            if (si->patterns[i].type == SI_PATTERN_OUTPUT_HEAVY_TURN) {
+                si->patterns[i].occurrences++;
+                si->patterns[i].last_seen = si_now();
+                si->patterns[i].severity = clampd((double)output_tokens / 50000.0, 0.2, 1.0);
+                found = true;
+                break;
+            }
+        }
+        if (!found && si->pattern_count < SI_MAX_PATTERNS) {
+            si_pattern_t *p = &si->patterns[si->pattern_count++];
+            p->type = SI_PATTERN_OUTPUT_HEAVY_TURN;
+            snprintf(p->description, sizeof(p->description),
+                     "Turn %d produced %d output tokens — cap exploratory output or use reducers",
+                     turn_number, output_tokens);
+            p->severity = clampd((double)output_tokens / 50000.0, 0.2, 1.0);
+            p->occurrences = 1;
+            p->first_seen = p->last_seen = si_now();
+        }
+    }
+
     /* Auto-run meso-loop at interval */
     if (si->turns_since_consolidation >= SI_CONSOLIDATION_INTERVAL) {
         self_improve_consolidate(si);
     }
 
-    baseline_log_usage("self_improve", "turn_record",
-                       "", NULL,
-                       input_tokens, output_tokens, 0, 0);
+    baseline_log_usage("self_improve", "turn_record", "", NULL, input_tokens, output_tokens,
+                       cache_read_tokens, cache_write_tokens);
 
     char turn_info[128];
     snprintf(turn_info, sizeof(turn_info),
-             "turn=%d cost=%.4f tools=%d failures=%d",
-             turn_number, turn_cost, si->turn_tool_calls, si->turn_failures);
+             "turn=%d cost=%.4f tools=%d failures=%d cache_read=%d output=%d", turn_number,
+             turn_cost, si->turn_tool_calls, si->turn_failures, cache_read_tokens, output_tokens);
     baseline_log("self_improve", "turn_record", turn_info, NULL);
 }
 
@@ -350,14 +418,30 @@ void self_improve_record_turn(self_improve_t *si,
 static void update_strategy_weights(self_improve_t *si) {
     /* Adapt strategy weights based on observed patterns */
 
-    int fail_count = 0, slow_count = 0, spam_count = 0;
+    int fail_count = 0, slow_count = 0, spam_count = 0, cache_leverage_count = 0;
+    int output_heavy_count = 0;
     for (int i = 0; i < si->pattern_count; i++) {
         switch (si->patterns[i].type) {
-        case SI_PATTERN_FAILING_TOOL:     fail_count++;  break;
-        case SI_PATTERN_SLOW_TOOL:         slow_count++;  break;
-        case SI_PATTERN_TOOL_SPAM:         spam_count++;  break;
-        case SI_PATTERN_REDUNDANT_CALLS:   spam_count++;  break;
-        default: break;
+            case SI_PATTERN_FAILING_TOOL:
+                fail_count++;
+                break;
+            case SI_PATTERN_SLOW_TOOL:
+                slow_count++;
+                break;
+            case SI_PATTERN_TOOL_SPAM:
+                spam_count++;
+                break;
+            case SI_PATTERN_REDUNDANT_CALLS:
+                spam_count++;
+                break;
+            case SI_PATTERN_CACHE_LEVERAGED:
+                cache_leverage_count++;
+                break;
+            case SI_PATTERN_OUTPUT_HEAVY_TURN:
+                output_heavy_count++;
+                break;
+            default:
+                break;
         }
     }
 
@@ -381,6 +465,24 @@ static void update_strategy_weights(self_improve_t *si) {
             clampd(si->weights.cache_aggressiveness + 0.03 * spam_count, 0.0, 1.0);
     }
 
+    /* If cache reads dominate, preserve stable prompt/tool prefixes and batch
+     * more work per cached prefix. */
+    if (cache_leverage_count > 0) {
+        si->weights.cache_aggressiveness =
+            clampd(si->weights.cache_aggressiveness + 0.08 * cache_leverage_count, 0.0, 1.0);
+        si->weights.batch_willingness =
+            clampd(si->weights.batch_willingness + 0.04 * cache_leverage_count, 0.0, 1.0);
+    }
+
+    /* Output-heavy turns are where premium models become expensive. Bias future
+     * broad runs toward cheaper scouts and bounded reducers. */
+    if (output_heavy_count > 0) {
+        si->weights.model_cost_sensitivity =
+            clampd(si->weights.model_cost_sensitivity + 0.08 * output_heavy_count, 0.0, 1.0);
+        si->weights.parallel_preference =
+            clampd(si->weights.parallel_preference + 0.03 * output_heavy_count, 0.0, 1.0);
+    }
+
     /* If session is expensive, increase cost sensitivity */
     if (si->total_cost > 1.0) {
         si->weights.model_cost_sensitivity =
@@ -397,13 +499,8 @@ static void update_strategy_weights(self_improve_t *si) {
     }
 }
 
-static int add_suggestion(self_improve_t *si,
-                          si_suggestion_type_t type,
-                          const char *desc,
-                          const char *target,
-                          const char *alt,
-                          double confidence,
-                          double savings) {
+static int add_suggestion(self_improve_t *si, si_suggestion_type_t type, const char *desc,
+                          const char *target, const char *alt, double confidence, double savings) {
     if (si->suggestion_count >= SI_MAX_SUGGESTIONS) {
         /* Overwrite lowest-confidence suggestion */
         int worst = 0;
@@ -414,7 +511,8 @@ static int add_suggestion(self_improve_t *si,
                 worst_conf = si->suggestions[i].confidence;
             }
         }
-        if (worst_conf >= confidence) return -1; /* all existing are better */
+        if (worst_conf >= confidence)
+            return -1; /* all existing are better */
         /* Reuse the worst slot — count stays at SI_MAX_SUGGESTIONS */
         si_suggestion_t *s = &si->suggestions[worst];
         memset(s, 0, sizeof(*s));
@@ -423,8 +521,10 @@ static int add_suggestion(self_improve_t *si,
         s->estimated_savings = savings;
         s->applied = false;
         strncpy(s->description, desc, SI_MAX_SUGGESTION_LEN - 1);
-        if (target) strncpy(s->target_tool, target, SI_MAX_TOOL_NAME - 1);
-        if (alt)    strncpy(s->alternative_tool, alt, SI_MAX_TOOL_NAME - 1);
+        if (target)
+            strncpy(s->target_tool, target, SI_MAX_TOOL_NAME - 1);
+        if (alt)
+            strncpy(s->alternative_tool, alt, SI_MAX_TOOL_NAME - 1);
 
         baseline_log("self_improve", "suggestion_generated", desc, NULL);
         return worst;
@@ -437,8 +537,10 @@ static int add_suggestion(self_improve_t *si,
     s->estimated_savings = savings;
     s->applied = false;
     strncpy(s->description, desc, SI_MAX_SUGGESTION_LEN - 1);
-    if (target) strncpy(s->target_tool, target, SI_MAX_TOOL_NAME - 1);
-    if (alt)    strncpy(s->alternative_tool, alt, SI_MAX_TOOL_NAME - 1);
+    if (target)
+        strncpy(s->target_tool, target, SI_MAX_TOOL_NAME - 1);
+    if (alt)
+        strncpy(s->alternative_tool, alt, SI_MAX_TOOL_NAME - 1);
 
     int idx = si->suggestion_count++;
     baseline_log("self_improve", "suggestion_generated", desc, NULL);
@@ -446,7 +548,8 @@ static int add_suggestion(self_improve_t *si,
 }
 
 int self_improve_consolidate(self_improve_t *si) {
-    if (!si->initialized) return 0;
+    if (!si->initialized)
+        return 0;
 
     int new_count = 0;
     double now = si_now();
@@ -455,7 +558,8 @@ int self_improve_consolidate(self_improve_t *si) {
     for (int i = 0; i < si->tool_count; i++) {
         si_tool_metric_t *t = &si->tools[i];
 
-        if (t->calls < 2) continue; /* not enough data */
+        if (t->calls < 2)
+            continue; /* not enough data */
 
         /* Failing tool detection */
         if (t->success_rate < 0.5 && t->calls >= 3) {
@@ -463,8 +567,7 @@ int self_improve_consolidate(self_improve_t *si) {
             bool found = false;
             for (int p = 0; p < si->pattern_count; p++) {
                 if (si->patterns[p].type == SI_PATTERN_FAILING_TOOL &&
-                    strncmp(si->patterns[p].tool_name, t->name,
-                            SI_MAX_TOOL_NAME) == 0) {
+                    strncmp(si->patterns[p].tool_name, t->name, SI_MAX_TOOL_NAME) == 0) {
                     si->patterns[p].occurrences++;
                     si->patterns[p].last_seen = now;
                     si->patterns[p].severity = 1.0 - t->success_rate;
@@ -476,8 +579,8 @@ int self_improve_consolidate(self_improve_t *si) {
                 si_pattern_t *p = &si->patterns[si->pattern_count++];
                 p->type = SI_PATTERN_FAILING_TOOL;
                 snprintf(p->description, sizeof(p->description),
-                         "Tool '%s' success rate %.0f%% (%d/%d calls)",
-                         t->name, t->success_rate * 100, t->successes, t->calls);
+                         "Tool '%s' success rate %.0f%% (%d/%d calls)", t->name,
+                         t->success_rate * 100, t->successes, t->calls);
                 strncpy(p->tool_name, t->name, SI_MAX_TOOL_NAME - 1);
                 p->severity = 1.0 - t->success_rate;
                 p->occurrences = 1;
@@ -489,10 +592,8 @@ int self_improve_consolidate(self_improve_t *si) {
             snprintf(desc, sizeof(desc),
                      "Tool '%s' is failing %.0f%% of the time (%d/%d). "
                      "Consider using an alternative tool or fixing the input.",
-                     t->name, (1.0 - t->success_rate) * 100,
-                     t->failures, t->calls);
-            if (add_suggestion(si, SI_SUGGEST_DISABLE_TOOL, desc,
-                              t->name, NULL, 0.8, 0.0) >= 0)
+                     t->name, (1.0 - t->success_rate) * 100, t->failures, t->calls);
+            if (add_suggestion(si, SI_SUGGEST_DISABLE_TOOL, desc, t->name, NULL, 0.8, 0.0) >= 0)
                 new_count++;
         }
 
@@ -502,8 +603,7 @@ int self_improve_consolidate(self_improve_t *si) {
             bool found = false;
             for (int p = 0; p < si->pattern_count; p++) {
                 if (si->patterns[p].type == SI_PATTERN_SLOW_TOOL &&
-                    strncmp(si->patterns[p].tool_name, t->name,
-                            SI_MAX_TOOL_NAME) == 0) {
+                    strncmp(si->patterns[p].tool_name, t->name, SI_MAX_TOOL_NAME) == 0) {
                     si->patterns[p].occurrences++;
                     si->patterns[p].last_seen = now;
                     found = true;
@@ -514,9 +614,8 @@ int self_improve_consolidate(self_improve_t *si) {
                 si_pattern_t *p = &si->patterns[si->pattern_count++];
                 p->type = SI_PATTERN_SLOW_TOOL;
                 snprintf(p->description, sizeof(p->description),
-                         "Tool '%s' avg latency %.0fms (best: %.0fms, worst: %.0fms)",
-                         t->name, avg_latency, t->best_latency_ms,
-                         t->worst_latency_ms);
+                         "Tool '%s' avg latency %.0fms (best: %.0fms, worst: %.0fms)", t->name,
+                         avg_latency, t->best_latency_ms, t->worst_latency_ms);
                 strncpy(p->tool_name, t->name, SI_MAX_TOOL_NAME - 1);
                 p->severity = clampd(avg_latency / 20000.0, 0.0, 1.0);
                 p->occurrences = 1;
@@ -528,8 +627,8 @@ int self_improve_consolidate(self_improve_t *si) {
                      "Tool '%s' averages %.1fs per call. Consider increasing "
                      "timeout or using a faster alternative.",
                      t->name, avg_latency / 1000.0);
-            if (add_suggestion(si, SI_SUGGEST_INCREASE_TIMEOUT, desc,
-                              t->name, NULL, 0.6, avg_latency / 1000.0) >= 0)
+            if (add_suggestion(si, SI_SUGGEST_INCREASE_TIMEOUT, desc, t->name, NULL, 0.6,
+                               avg_latency / 1000.0) >= 0)
                 new_count++;
         }
 
@@ -541,10 +640,34 @@ int self_improve_consolidate(self_improve_t *si) {
                      "Tool '%s' called %d times this session. Consider batching "
                      "inputs or enabling result caching to reduce overhead.",
                      t->name, t->calls);
-            if (add_suggestion(si, SI_SUGGEST_CACHE_RESULTS, desc,
-                              t->name, NULL, 0.5, t->calls * 0.01) >= 0)
+            if (add_suggestion(si, SI_SUGGEST_CACHE_RESULTS, desc, t->name, NULL, 0.5,
+                               t->calls * 0.01) >= 0)
                 new_count++;
         }
+    }
+
+    if (si->total_cache_read_tokens >= 1000000 &&
+        si->total_cache_read_tokens >= si->total_input_tokens * 5) {
+        char desc[SI_MAX_SUGGESTION_LEN];
+        snprintf(desc, sizeof(desc),
+                 "Cache reads dominate this session (%lld cached vs %lld fresh input tokens). "
+                 "Keep system prompts, tool schemas, and pinned context stable across broad runs.",
+                 si->total_cache_read_tokens, si->total_input_tokens);
+        if (add_suggestion(si, SI_SUGGEST_CACHE_RESULTS, desc, NULL, NULL, 0.85,
+                           si->total_cost * 0.20) >= 0)
+            new_count++;
+    }
+
+    if (si->total_output_tokens >= 50000 &&
+        si->total_output_tokens >= si->total_input_tokens) {
+        char desc[SI_MAX_SUGGESTION_LEN];
+        snprintf(desc, sizeof(desc),
+                 "Output tokens dominate this session (%lld out vs %lld fresh input). "
+                 "Use cheap parallel scouts, then a single bounded synthesis reducer.",
+                 si->total_output_tokens, si->total_input_tokens);
+        if (add_suggestion(si, SI_SUGGEST_ADJUST_MODEL, desc, NULL, NULL, 0.80,
+                           si->total_cost * 0.25) >= 0)
+            new_count++;
     }
 
     /* Update strategy weights based on all detected patterns */
@@ -552,8 +675,7 @@ int self_improve_consolidate(self_improve_t *si) {
 
     /* Detect successful strategy (many tools, high success, reasonable cost) */
     if (si->total_tool_calls > 10 && si->total_failures < si->total_tool_calls * 0.1) {
-        double avg_cost_per_turn = si->total_turns > 0
-            ? si->total_cost / si->total_turns : 0;
+        double avg_cost_per_turn = si->total_turns > 0 ? si->total_cost / si->total_turns : 0;
         if (avg_cost_per_turn < 0.10 && avg_cost_per_turn > 0) {
             char desc[SI_MAX_SUGGESTION_LEN];
             snprintf(desc, sizeof(desc),
@@ -562,8 +684,7 @@ int self_improve_consolidate(self_improve_t *si) {
                      si->total_tool_calls,
                      100.0 * (1.0 - (double)si->total_failures / si->total_tool_calls),
                      avg_cost_per_turn);
-            if (add_suggestion(si, SI_SUGGEST_STRATEGY_SHIFT, desc,
-                              NULL, NULL, 0.9, 0.0) >= 0)
+            if (add_suggestion(si, SI_SUGGEST_STRATEGY_SHIFT, desc, NULL, NULL, 0.9, 0.0) >= 0)
                 new_count++;
         }
     }
@@ -571,8 +692,7 @@ int self_improve_consolidate(self_improve_t *si) {
     si->turns_since_consolidation = 0;
 
     baseline_log("self_improve", "consolidate",
-                 si->pattern_count > 0 ? "patterns_detected" : "no_patterns",
-                 NULL);
+                 si->pattern_count > 0 ? "patterns_detected" : "no_patterns", NULL);
 
     return new_count;
 }
@@ -582,10 +702,12 @@ int self_improve_consolidate(self_improve_t *si) {
  * ═══════════════════════════════════════════════════════════════════════════ */
 
 static void expand_path(const char *src, char *dst, size_t dst_len) {
-    if (!src || !dst || dst_len == 0) return;
+    if (!src || !dst || dst_len == 0)
+        return;
     if (src[0] == '~' && src[1] == '/') {
         const char *home = getenv("HOME");
-        if (!home) home = "/tmp";
+        if (!home)
+            home = "/tmp";
         snprintf(dst, dst_len, "%s%s", home, src + 1);
     } else {
         strncpy(dst, src, dst_len - 1);
@@ -594,7 +716,8 @@ static void expand_path(const char *src, char *dst, size_t dst_len) {
 }
 
 bool self_improve_load_history(self_improve_t *si) {
-    if (!si->initialized) return false;
+    if (!si->initialized)
+        return false;
 
     char path[512];
     expand_path(SI_HISTORY_FILE, path, sizeof(path));
@@ -609,17 +732,23 @@ bool self_improve_load_history(self_improve_t *si) {
     char buf[8192];
     size_t n = fread(buf, 1, sizeof(buf) - 1, f);
     fclose(f);
-    if (n == 0) { si->history_loaded = true; return false; }
+    if (n == 0) {
+        si->history_loaded = true;
+        return false;
+    }
     buf[n] = '\0';
 
     /* Extract session count and accuracy */
     const char *p;
     p = strstr(buf, "\"sessions_seen\"");
-    if (p) sscanf(p, "\"sessions_seen\":%d", &si->sessions_seen);
+    if (p)
+        sscanf(p, "\"sessions_seen\":%d", &si->sessions_seen);
     p = strstr(buf, "\"improvements_applied\"");
-    if (p) sscanf(p, "\"improvements_applied\":%d", &si->improvements_applied);
+    if (p)
+        sscanf(p, "\"improvements_applied\":%d", &si->improvements_applied);
     p = strstr(buf, "\"historical_accuracy\"");
-    if (p) sscanf(p, "\"historical_accuracy\":%lf", &si->historical_accuracy);
+    if (p)
+        sscanf(p, "\"historical_accuracy\":%lf", &si->historical_accuracy);
 
     /* Load strategy weights if present */
     p = strstr(buf, "\"parallel_preference\"");
@@ -659,15 +788,15 @@ bool self_improve_load_history(self_improve_t *si) {
     char log_msg[128];
     snprintf(log_msg, sizeof(log_msg),
              "Loaded history: %d sessions, %.0f%% accuracy, %d improvements applied",
-             si->sessions_seen, si->historical_accuracy * 100,
-             si->improvements_applied);
+             si->sessions_seen, si->historical_accuracy * 100, si->improvements_applied);
     baseline_log("self_improve", "history_loaded", log_msg, NULL);
 
     return true;
 }
 
 bool self_improve_save_history(const self_improve_t *si) {
-    if (!si->initialized) return false;
+    if (!si->initialized)
+        return false;
 
     char path[512];
     expand_path(SI_HISTORY_FILE, path, sizeof(path));
@@ -677,10 +806,14 @@ bool self_improve_save_history(const self_improve_t *si) {
     strncpy(dir, path, sizeof(dir) - 1);
     dir[sizeof(dir) - 1] = '\0';
     char *slash = strrchr(dir, '/');
-    if (slash) { *slash = '\0'; mkdir(dir, 0755); }
+    if (slash) {
+        *slash = '\0';
+        mkdir(dir, 0755);
+    }
 
     FILE *f = fopen(path, "w");
-    if (!f) return false;
+    if (!f)
+        return false;
 
     fprintf(f, "{\n");
     fprintf(f, "  \"sessions_seen\": %d,\n", si->sessions_seen);
@@ -690,6 +823,10 @@ bool self_improve_save_history(const self_improve_t *si) {
     fprintf(f, "  \"total_tool_calls\": %d,\n", si->total_tool_calls);
     fprintf(f, "  \"total_failures\": %d,\n", si->total_failures);
     fprintf(f, "  \"total_redundant_calls\": %d,\n", si->total_redundant_calls);
+    fprintf(f, "  \"total_input_tokens\": %lld,\n", si->total_input_tokens);
+    fprintf(f, "  \"total_output_tokens\": %lld,\n", si->total_output_tokens);
+    fprintf(f, "  \"total_cache_read_tokens\": %lld,\n", si->total_cache_read_tokens);
+    fprintf(f, "  \"total_cache_write_tokens\": %lld,\n", si->total_cache_write_tokens);
     fprintf(f, "  \"total_cost\": %.4f,\n", si->total_cost);
     fprintf(f, "  \"pattern_count\": %d,\n", si->pattern_count);
     fprintf(f, "  \"suggestion_count\": %d,\n", si->suggestion_count);
@@ -713,33 +850,34 @@ bool self_improve_save_history(const self_improve_t *si) {
  * Query API
  * ═══════════════════════════════════════════════════════════════════════════ */
 
-const char *self_improve_summary(const self_improve_t *si,
-                                  char *buf, size_t buf_len) {
-    if (!si || !buf || buf_len == 0) return "";
+const char *self_improve_summary(const self_improve_t *si, char *buf, size_t buf_len) {
+    if (!si || !buf || buf_len == 0)
+        return "";
     int off = 0;
 
     off += snprintf(buf + off, buf_len - off,
-        "Self-Improvement Summary\n"
-        "════════════════════════\n"
-        "Session: %d turns, %d tool calls, %d failures\n"
-        "Cost: $%.4f total ($%.4f/turn avg)\n"
-        "Redundant calls: %d | Retries: %d\n"
-        "Patterns detected: %d\n"
-        "Suggestions: %d (new)\n\n",
-        si->total_turns, si->total_tool_calls, si->total_failures,
-        si->total_cost,
-        si->total_turns > 0 ? si->total_cost / si->total_turns : 0,
-        si->total_redundant_calls, si->total_retries,
-        si->pattern_count, si->suggestion_count);
+                    "Self-Improvement Summary\n"
+                    "════════════════════════\n"
+                    "Session: %d turns, %d tool calls, %d failures\n"
+                    "Cost: $%.4f total ($%.4f/turn avg)\n"
+                    "Tokens: in %lld | out %lld | cache-read %lld | cache-write %lld\n"
+                    "Redundant calls: %d | Retries: %d\n"
+                    "Patterns detected: %d\n"
+                    "Suggestions: %d (new)\n\n",
+                    si->total_turns, si->total_tool_calls, si->total_failures, si->total_cost,
+                    si->total_turns > 0 ? si->total_cost / si->total_turns : 0,
+                    si->total_input_tokens, si->total_output_tokens,
+                    si->total_cache_read_tokens, si->total_cache_write_tokens,
+                    si->total_redundant_calls, si->total_retries, si->pattern_count,
+                    si->suggestion_count);
 
     if (si->pattern_count > 0) {
         off += snprintf(buf + off, buf_len - off, "Patterns:\n");
         for (int i = 0; i < si->pattern_count && off < (int)buf_len - 100; i++) {
-            off += snprintf(buf + off, buf_len - off,
-                "  [%d] %s (severity: %.0f%%, seen %d times)\n",
-                i + 1, si->patterns[i].description,
-                si->patterns[i].severity * 100,
-                si->patterns[i].occurrences);
+            off +=
+                snprintf(buf + off, buf_len - off, "  [%d] %s (severity: %.0f%%, seen %d times)\n",
+                         i + 1, si->patterns[i].description, si->patterns[i].severity * 100,
+                         si->patterns[i].occurrences);
         }
         off += snprintf(buf + off, buf_len - off, "\n");
     }
@@ -747,34 +885,29 @@ const char *self_improve_summary(const self_improve_t *si,
     if (si->suggestion_count > 0) {
         off += snprintf(buf + off, buf_len - off, "Suggestions:\n");
         for (int i = 0; i < si->suggestion_count && off < (int)buf_len - 200; i++) {
-            off += snprintf(buf + off, buf_len - off,
-                "  [%d] (confidence: %.0f%%) %s%s\n",
-                i + 1, si->suggestions[i].confidence * 100,
-                si->suggestions[i].description,
-                si->suggestions[i].applied ? " [APPLIED]" : "");
+            off += snprintf(buf + off, buf_len - off, "  [%d] (confidence: %.0f%%) %s%s\n", i + 1,
+                            si->suggestions[i].confidence * 100, si->suggestions[i].description,
+                            si->suggestions[i].applied ? " [APPLIED]" : "");
         }
         off += snprintf(buf + off, buf_len - off, "\n");
     }
 
     off += snprintf(buf + off, buf_len - off,
-        "Strategy Weights:\n"
-        "  parallel_preference:    %.0f%%\n"
-        "  cache_aggressiveness:  %.0f%%\n"
-        "  model_cost_sensitivity: %.0f%%\n"
-        "  batch_willingness:     %.0f%%\n"
-        "  compaction_threshold:  %.0f%%\n",
-        si->weights.parallel_preference * 100,
-        si->weights.cache_aggressiveness * 100,
-        si->weights.model_cost_sensitivity * 100,
-        si->weights.batch_willingness * 100,
-        si->weights.context_compaction_thresh * 100);
+                    "Strategy Weights:\n"
+                    "  parallel_preference:    %.0f%%\n"
+                    "  cache_aggressiveness:  %.0f%%\n"
+                    "  model_cost_sensitivity: %.0f%%\n"
+                    "  batch_willingness:     %.0f%%\n"
+                    "  compaction_threshold:  %.0f%%\n",
+                    si->weights.parallel_preference * 100, si->weights.cache_aggressiveness * 100,
+                    si->weights.model_cost_sensitivity * 100, si->weights.batch_willingness * 100,
+                    si->weights.context_compaction_thresh * 100);
 
     if (si->sessions_seen > 0) {
         off += snprintf(buf + off, buf_len - off,
-            "\nCross-session: %d sessions, %d improvements applied, "
-            "%.0f%% historical accuracy\n",
-            si->sessions_seen, si->improvements_applied,
-            si->historical_accuracy * 100);
+                        "\nCross-session: %d sessions, %d improvements applied, "
+                        "%.0f%% historical accuracy\n",
+                        si->sessions_seen, si->improvements_applied, si->historical_accuracy * 100);
     }
 
     return buf;
@@ -785,18 +918,20 @@ const si_strategy_weights_t *self_improve_weights(const self_improve_t *si) {
 }
 
 void self_improve_acknowledge(self_improve_t *si, int suggestion_idx) {
-    if (suggestion_idx < 0 || suggestion_idx >= si->suggestion_count) return;
+    if (suggestion_idx < 0 || suggestion_idx >= si->suggestion_count)
+        return;
     si->suggestions[suggestion_idx].applied = true;
     si->improvements_applied++;
 
     char log_msg[256];
-    snprintf(log_msg, sizeof(log_msg), "Suggestion #%d acknowledged: %s",
-             suggestion_idx + 1, si->suggestions[suggestion_idx].description);
+    snprintf(log_msg, sizeof(log_msg), "Suggestion #%d acknowledged: %s", suggestion_idx + 1,
+             si->suggestions[suggestion_idx].description);
     baseline_log("self_improve", "suggestion_acknowledged", log_msg, NULL);
 }
 
 double self_improve_tool_score(const self_improve_t *si, const char *tool_name) {
-    if (!si || !tool_name) return 0.5;
+    if (!si || !tool_name)
+        return 0.5;
     for (int i = 0; i < si->tool_count; i++) {
         if (strncmp(si->tools[i].name, tool_name, SI_MAX_TOOL_NAME - 1) == 0) {
             return si->tools[i].efficiency_score;
@@ -806,7 +941,8 @@ double self_improve_tool_score(const self_improve_t *si, const char *tool_name) 
 }
 
 bool self_improve_tool_failing(const self_improve_t *si, const char *tool_name) {
-    if (!si || !tool_name) return false;
+    if (!si || !tool_name)
+        return false;
     for (int i = 0; i < si->tool_count; i++) {
         if (strncmp(si->tools[i].name, tool_name, SI_MAX_TOOL_NAME - 1) == 0) {
             return si->tools[i].consecutive_failures >= 3;
@@ -815,17 +951,16 @@ bool self_improve_tool_failing(const self_improve_t *si, const char *tool_name) 
     return false;
 }
 
-bool self_improve_suggest_alternative(const self_improve_t *si,
-                                       const char *tool_name,
-                                       char *alt_name, size_t alt_len) {
-    if (!si || !tool_name || !alt_name || alt_len == 0) return false;
+bool self_improve_suggest_alternative(const self_improve_t *si, const char *tool_name,
+                                      char *alt_name, size_t alt_len) {
+    if (!si || !tool_name || !alt_name || alt_len == 0)
+        return false;
 
     /* Check suggestions for a "prefer alternative" targeting this tool */
     for (int i = 0; i < si->suggestion_count; i++) {
         if ((si->suggestions[i].type == SI_SUGGEST_PREFER_ALTERNATIVE ||
              si->suggestions[i].type == SI_SUGGEST_DISABLE_TOOL) &&
-            strncmp(si->suggestions[i].target_tool, tool_name,
-                    SI_MAX_TOOL_NAME - 1) == 0 &&
+            strncmp(si->suggestions[i].target_tool, tool_name, SI_MAX_TOOL_NAME - 1) == 0 &&
             si->suggestions[i].alternative_tool[0]) {
             strncpy(alt_name, si->suggestions[i].alternative_tool, alt_len - 1);
             alt_name[alt_len - 1] = '\0';
@@ -875,7 +1010,8 @@ bool tool_self_improve(const char *input_json, char *result, size_t result_len) 
             .safety_violation_rate = json_get_double(input_json, "safety_violation_rate", 1.0),
             .rollback_trigger_rate = json_get_double(input_json, "rollback_trigger_rate", 1.0),
             .cost_per_success_usd = json_get_double(input_json, "cost_per_success_usd", 0.0),
-            .baseline_cost_per_success_usd = json_get_double(input_json, "baseline_cost_per_success_usd", 0.0),
+            .baseline_cost_per_success_usd =
+                json_get_double(input_json, "baseline_cost_per_success_usd", 0.0),
             .judge_human_kappa = json_get_double(input_json, "judge_human_kappa", 0.0),
             .replay_stability = json_get_double(input_json, "replay_stability", 0.0),
             .provenance_complete = json_get_bool(input_json, "provenance_complete", false),
@@ -897,8 +1033,7 @@ bool tool_self_improve(const char *input_json, char *result, size_t result_len) 
         int n = self_improve_consolidate(si);
         char summary[4096];
         self_improve_summary(si, summary, sizeof(summary));
-        snprintf(result, result_len,
-                 "Consolidation complete: %d new suggestions generated.\n\n%s",
+        snprintf(result, result_len, "Consolidation complete: %d new suggestions generated.\n\n%s",
                  n, summary);
         return true;
     }
@@ -906,13 +1041,12 @@ bool tool_self_improve(const char *input_json, char *result, size_t result_len) 
     if (strcmp(action, "acknowledge") == 0) {
         int sid = json_get_int(input_json, "suggestion_id", -1);
         if (sid < 1 || sid > si->suggestion_count) {
-            snprintf(result, result_len,
-                     "Invalid suggestion ID. Range: 1-%d", si->suggestion_count);
+            snprintf(result, result_len, "Invalid suggestion ID. Range: 1-%d",
+                     si->suggestion_count);
             return false;
         }
         self_improve_acknowledge(si, sid - 1);
-        snprintf(result, result_len,
-                 "Suggestion #%d acknowledged and marked as applied.", sid);
+        snprintf(result, result_len, "Suggestion #%d acknowledged and marked as applied.", sid);
         return true;
     }
 
@@ -921,24 +1055,22 @@ bool tool_self_improve(const char *input_json, char *result, size_t result_len) 
         snprintf(result, result_len,
                  "History %s. Sessions seen: %d, improvements applied: %d, "
                  "historical accuracy: %.0f%%",
-                 loaded ? "loaded" : "not found or already loaded",
-                 si->sessions_seen, si->improvements_applied,
-                 si->historical_accuracy * 100);
+                 loaded ? "loaded" : "not found or already loaded", si->sessions_seen,
+                 si->improvements_applied, si->historical_accuracy * 100);
         return true;
     }
 
     if (strcmp(action, "save") == 0) {
         bool saved = self_improve_save_history(si);
-        snprintf(result, result_len,
-                 "History %s to %s",
-                 saved ? "saved" : "failed to save",
+        snprintf(result, result_len, "History %s to %s", saved ? "saved" : "failed to save",
                  SI_HISTORY_FILE);
         return saved;
     }
 
     snprintf(result, result_len,
              "Unknown action '%s'. Available: summary, consolidate, "
-             "acknowledge, history, save, curriculum, skill, promotion_gate", action);
+             "acknowledge, history, save, curriculum, skill, promotion_gate",
+             action);
     return false;
 }
 
@@ -947,17 +1079,14 @@ bool tool_self_assess(const char *input_json, char *result, size_t result_len) {
     self_improve_t *si = &g_self_improve;
 
     /* Calculate efficiency score */
-    double tool_success_rate = si->total_tool_calls > 0
-        ? 1.0 - (double)si->total_failures / si->total_tool_calls
-        : 1.0;
-    double cost_efficiency = si->total_turns > 0
-        ? clampd(0.10 / (si->total_cost / si->total_turns + 0.01), 0.0, 1.0)
-        : 1.0;
-    double redundancy_penalty = clampd(
-        1.0 - (double)si->total_redundant_calls /
-              (si->total_tool_calls + 1), 0.0, 1.0);
-    double overall = (tool_success_rate * 0.4 + cost_efficiency * 0.3 +
-                      redundancy_penalty * 0.3);
+    double tool_success_rate =
+        si->total_tool_calls > 0 ? 1.0 - (double)si->total_failures / si->total_tool_calls : 1.0;
+    double cost_efficiency =
+        si->total_turns > 0 ? clampd(0.10 / (si->total_cost / si->total_turns + 0.01), 0.0, 1.0)
+                            : 1.0;
+    double redundancy_penalty =
+        clampd(1.0 - (double)si->total_redundant_calls / (si->total_tool_calls + 1), 0.0, 1.0);
+    double overall = (tool_success_rate * 0.4 + cost_efficiency * 0.3 + redundancy_penalty * 0.3);
 
     /* Find top issue */
     const char *top_issue = "None — session is performing well";
@@ -991,14 +1120,10 @@ bool tool_self_assess(const char *input_json, char *result, size_t result_len) {
              "  Cost: $%.4f | Redundant: %d | Retries: %d\n\n"
              "Top issue (severity %.0f%%):\n  %s\n\n"
              "Top recommendation (confidence %.0f%%):\n  %s\n",
-             overall * 100,
-             tool_success_rate * 100,
-             cost_efficiency * 100,
-             redundancy_penalty * 100,
-             si->total_turns, si->total_tool_calls, si->total_failures,
-             si->total_cost, si->total_redundant_calls, si->total_retries,
-             top_severity * 100, top_issue,
-             top_conf * 100, top_rec);
+             overall * 100, tool_success_rate * 100, cost_efficiency * 100,
+             redundancy_penalty * 100, si->total_turns, si->total_tool_calls, si->total_failures,
+             si->total_cost, si->total_redundant_calls, si->total_retries, top_severity * 100,
+             top_issue, top_conf * 100, top_rec);
 
     return true;
 }
@@ -1007,12 +1132,10 @@ bool tool_self_assess(const char *input_json, char *result, size_t result_len) {
  * Extended hooks: goals, swarms, strategies, tournaments
  * ═══════════════════════════════════════════════════════════════════════════ */
 
-void self_improve_record_goal_state(self_improve_t *si,
-                                    const char *goal_id,
-                                    int state,
-                                    int grip_strength,
-                                    double elapsed_s) {
-    if (!si || !si->initialized || !goal_id) return;
+void self_improve_record_goal_state(self_improve_t *si, const char *goal_id, int state,
+                                    int grip_strength, double elapsed_s) {
+    if (!si || !si->initialized || !goal_id)
+        return;
 
     if (state == 5) { /* ESCAPED */
         for (int i = 0; i < si->pattern_count; i++) {
@@ -1027,8 +1150,7 @@ void self_improve_record_goal_state(self_improve_t *si,
             si_pattern_t *p = &si->patterns[si->pattern_count++];
             p->type = SI_PATTERN_FAILING_TOOL;
             snprintf(p->description, sizeof(p->description),
-                     "Goal %s escaped after %.1fs (grip=%d)",
-                     goal_id, elapsed_s, grip_strength);
+                     "Goal %s escaped after %.1fs (grip=%d)", goal_id, elapsed_s, grip_strength);
             p->severity = 0.6;
             p->occurrences = 1;
             p->first_seen = p->last_seen = si_now();
@@ -1040,13 +1162,10 @@ void self_improve_record_goal_state(self_improve_t *si,
     }
 }
 
-void self_improve_record_swarm_outcome(self_improve_t *si,
-                                       const char *topology,
-                                       int agents,
-                                       bool success,
-                                       double quality,
-                                       double elapsed_s) {
-    if (!si || !si->initialized || !topology) return;
+void self_improve_record_swarm_outcome(self_improve_t *si, const char *topology, int agents,
+                                       bool success, double quality, double elapsed_s) {
+    if (!si || !si->initialized || !topology)
+        return;
 
     /* Feed actual performance data into the learned cost model (Priority 3).
      * We don't know exact token count here, so use a heuristic:
@@ -1070,8 +1189,8 @@ void self_improve_record_swarm_outcome(self_improve_t *si,
             si_pattern_t *p = &si->patterns[si->pattern_count++];
             p->type = SI_PATTERN_SUCCESSFUL_STRATEGY;
             snprintf(p->description, sizeof(p->description),
-                     "Swarm %s (%d agents) succeeded quality=%.2f in %.1fs",
-                     topology, agents, quality, elapsed_s);
+                     "Swarm %s (%d agents) succeeded quality=%.2f in %.1fs", topology, agents,
+                     quality, elapsed_s);
             p->severity = quality;
             p->occurrences = 1;
             p->first_seen = p->last_seen = si_now();
@@ -1079,27 +1198,24 @@ void self_improve_record_swarm_outcome(self_improve_t *si,
     }
 }
 
-void self_improve_record_strategy_result(self_improve_t *si,
-                                         const char *strategy,
-                                         const char *goal_type,
-                                         bool success,
-                                         int grip_escalations,
+void self_improve_record_strategy_result(self_improve_t *si, const char *strategy,
+                                         const char *goal_type, bool success, int grip_escalations,
                                          double elapsed_s) {
-    (void)goal_type; (void)elapsed_s;
-    if (!si || !si->initialized || !strategy) return;
+    (void)goal_type;
+    (void)elapsed_s;
+    if (!si || !si->initialized || !strategy)
+        return;
 
     if (success && grip_escalations <= 1) {
         si->improvements_applied++;
     }
 }
 
-void self_improve_record_tournament_result(self_improve_t *si,
-                                           const char *winner_strategy,
-                                           int competitors,
-                                           double margin,
-                                           double elapsed_s) {
+void self_improve_record_tournament_result(self_improve_t *si, const char *winner_strategy,
+                                           int competitors, double margin, double elapsed_s) {
     (void)elapsed_s;
-    if (!si || !si->initialized || !winner_strategy) return;
+    if (!si || !si->initialized || !winner_strategy)
+        return;
 
     if (margin > 0.15) {
         for (int i = 0; i < si->pattern_count; i++) {
@@ -1114,8 +1230,8 @@ void self_improve_record_tournament_result(self_improve_t *si,
             si_pattern_t *p = &si->patterns[si->pattern_count++];
             p->type = SI_PATTERN_SUCCESSFUL_STRATEGY;
             snprintf(p->description, sizeof(p->description),
-                     "Tournament winner: %s (beat %d others, margin=%.2f)",
-                     winner_strategy, competitors, margin);
+                     "Tournament winner: %s (beat %d others, margin=%.2f)", winner_strategy,
+                     competitors, margin);
             p->severity = 0.9;
             p->occurrences = 1;
             p->first_seen = p->last_seen = si_now();

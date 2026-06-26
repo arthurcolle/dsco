@@ -1,0 +1,216 @@
+{
+  "impl_signals": {
+    "cache_control": true,
+    "cached_tokens_parse": true,
+    "prompt_cache_key": true,
+    "prompt_cache_retention": true,
+    "x-grok-conv-id": true
+  },
+  "providers": {
+    "anthropic": {
+      "cache_status": "explicit",
+      "confidence": 0.82,
+      "errors": [],
+      "implemented": "cache_control_ephemeral,cache_read_usage_parse",
+      "last_reviewed": "2026-06-24",
+      "mechanisms": "cache_control_ephemeral",
+      "missing": [
+        "1h beta cache controls if enabled by header"
+      ],
+      "risk": "low",
+      "valid": true
+    },
+    "cerebras": {
+      "cache_status": "explicit",
+      "confidence": 0.82,
+      "errors": [],
+      "implemented": "prompt_cache_key",
+      "last_reviewed": "2026-06-24",
+      "mechanisms": "prompt_cache_key",
+      "missing": [
+        "request-shape test for cerebras profile"
+      ],
+      "risk": "medium",
+      "valid": true
+    },
+    "cohere": {
+      "cache_status": "unknown",
+      "confidence": 0.45,
+      "errors": [],
+      "implemented": "-",
+      "last_reviewed": "2026-06-24",
+      "mechanisms": "-",
+      "missing": [
+        "provider metadata refresh",
+        "prompt cache docs verification"
+      ],
+      "risk": "high",
+      "valid": true
+    },
+    "deepseek": {
+      "cache_status": "automatic",
+      "confidence": 0.82,
+      "errors": [],
+      "implemented": "automatic_prompt_cache_policy",
+      "last_reviewed": "2026-06-24",
+      "mechanisms": "disk_context_cache",
+      "missing": [
+        "prompt_cache_hit_tokens parse mapped to cache_read_tokens"
+      ],
+      "risk": "medium",
+      "valid": true
+    },
+    "google": {
+      "cache_status": "resource",
+      "confidence": 0.82,
+      "errors": [],
+      "implemented": "openai_compat_chat",
+      "last_reviewed": "2026-06-24",
+      "mechanisms": "cachedContent",
+      "missing": [
+        "Gemini native cachedContent resource lifecycle",
+        "usageMetadata parse on native transport"
+      ],
+      "risk": "high",
+      "valid": true
+    },
+    "groq": {
+      "cache_status": "automatic",
+      "confidence": 0.82,
+      "errors": [],
+      "implemented": "automatic_prompt_cache_policy",
+      "last_reviewed": "2026-06-24",
+      "mechanisms": "automatic_prompt_cache",
+      "missing": [
+        "live model capability refresh"
+      ],
+      "risk": "medium",
+      "valid": true
+    },
+    "mistral": {
+      "cache_status": "explicit",
+      "confidence": 0.82,
+      "errors": [],
+      "implemented": "prompt_cache_key",
+      "last_reviewed": "2026-06-24",
+      "mechanisms": "prompt_cache_key",
+      "missing": [
+        "provider-specific cached-token usage verification"
+      ],
+      "risk": "medium",
+      "valid": true
+    },
+    "moonshot": {
+      "cache_status": "unknown",
+      "confidence": 0.45,
+      "errors": [],
+      "implemented": "-",
+      "last_reviewed": "2026-06-24",
+      "mechanisms": "-",
+      "missing": [
+        "provider metadata refresh",
+        "prompt cache docs verification"
+      ],
+      "risk": "high",
+      "valid": true
+    },
+    "openai": {
+      "cache_status": "explicit",
+      "confidence": 0.82,
+      "errors": [],
+      "implemented": "automatic_prompt_cache,prompt_cache_key,prompt_cache_retention,cached_token_usage_parse",
+      "last_reviewed": "2026-06-24",
+      "mechanisms": "automatic_prefix_cache,prompt_cache_key,prompt_cache_retention",
+      "missing": [
+        "Responses transport default migration"
+      ],
+      "risk": "low",
+      "valid": true
+    },
+    "openrouter": {
+      "cache_status": "explicit",
+      "confidence": 0.82,
+      "errors": [],
+      "implemented": "cache_control_for_claude_qwen,model_catalog_cache",
+      "last_reviewed": "2026-06-24",
+      "mechanisms": "provider_forwarded_cache_control",
+      "missing": [
+        "per-model cache capability ingestion from /models"
+      ],
+      "risk": "medium",
+      "valid": true
+    },
+    "perplexity": {
+      "cache_status": "unknown",
+      "confidence": 0.45,
+      "errors": [],
+      "implemented": "-",
+      "last_reviewed": "2026-06-24",
+      "mechanisms": "-",
+      "missing": [
+        "provider metadata refresh",
+        "prompt cache docs verification"
+      ],
+      "risk": "high",
+      "valid": true
+    },
+    "sakana": {
+      "cache_status": "unknown",
+      "confidence": 0.82,
+      "errors": [],
+      "implemented": "effort_normalization,long_stream_idle,responses_codex_profile_metadata",
+      "last_reviewed": "2026-06-24",
+      "mechanisms": "-",
+      "missing": [
+        "direct Responses transport default",
+        "prompt cache syntax unknown"
+      ],
+      "risk": "medium",
+      "valid": true
+    },
+    "together": {
+      "cache_status": "unknown",
+      "confidence": 0.45,
+      "errors": [],
+      "implemented": "-",
+      "last_reviewed": "2026-06-24",
+      "mechanisms": "-",
+      "missing": [
+        "provider metadata refresh",
+        "prompt cache docs verification"
+      ],
+      "risk": "high",
+      "valid": true
+    },
+    "xai": {
+      "cache_status": "automatic",
+      "confidence": 0.82,
+      "errors": [],
+      "implemented": "x-grok-conv-id_header,automatic_prompt_cache_policy",
+      "last_reviewed": "2026-06-24",
+      "mechanisms": "x-grok-conv-id",
+      "missing": [
+        "live cache-hit telemetry test"
+      ],
+      "risk": "low",
+      "valid": true
+    }
+  },
+  "summary": {
+    "errors": 0,
+    "high_risk": [
+      "cohere",
+      "google",
+      "moonshot",
+      "perplexity",
+      "together"
+    ],
+    "needs_review": [
+      "cohere",
+      "moonshot",
+      "perplexity",
+      "together"
+    ],
+    "providers": 14
+  }
+}

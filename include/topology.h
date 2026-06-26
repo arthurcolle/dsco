@@ -204,6 +204,15 @@ const char *topology_resolve_model_for_tier(const char *coordinator_model,
                                             const char *api_key,
                                             model_tier_t tier,
                                             char *buf, size_t buflen);
+/* True when provider-throughput fanout is explicitly requested via env. */
+bool topology_throughput_enabled(void);
+/* Resolve a provider-pinned throughput lane for a tier. The returned model is
+ * native to provider_buf; callers should use swarm_spawn_provider(). */
+bool topology_resolve_throughput_lane_for_tier(const char *api_key,
+                                               model_tier_t tier,
+                                               int slot,
+                                               char *provider_buf, size_t provider_len,
+                                               char *model_buf, size_t model_len);
 /* True when DSCO_TOPO_HETERO is set: tiers resolve to a cross-provider model
  * pool (stepfun/kimi/glm) regardless of the coordinator's own provider. */
 bool topology_hetero_enabled(void);
