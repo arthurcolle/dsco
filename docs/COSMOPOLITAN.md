@@ -2,7 +2,7 @@
 
 DSCO has a first-class Cosmopolitan lane for producing Actually Portable Executables (APE) with `cosmocc`.
 
-This is not a toy demo path. It is the portable distribution lane. Today `make cosmo` emits a real APE executable for DSCO's lite front door (`dsco.com`) and wires the full-runtime lane behind `DSCO_COSMO_EXPERIMENTAL_FULL=1`. The native macOS build remains the full-feature development target because it links Darwin frameworks, Objective-C acceleration, Homebrew curl/sqlite/readline, Secure Enclave, Touch ID, Metal, and other host-native libraries. The Cosmopolitan lane is isolated so portability work can advance without breaking the native target.
+This is not a toy demo path. It is the portable distribution lane. Today `make cosmo` emits a real APE executable for DSCO's lite front door (`dsco.distributed.systems`) and wires the full-runtime lane behind `DSCO_COSMO_EXPERIMENTAL_FULL=1`. The native macOS build remains the full-feature development target because it links Darwin frameworks, Objective-C acceleration, Homebrew curl/sqlite/readline, Secure Enclave, Touch ID, Metal, and other host-native libraries. The Cosmopolitan lane is isolated so portability work can advance without breaking the native target.
 
 ## Pinned toolchain
 
@@ -18,8 +18,8 @@ The archive is downloaded to `build/cache/` and unpacked to `build/cosmocc/`. Bo
 
 ```sh
 make cosmo-bootstrap      # fetch + verify cosmocc
-make cosmo                # build dsco.com portable APE lane
-make cosmo-run            # run dsco.com --version
+make cosmo                # build dsco.distributed.systems portable APE lane
+make cosmo-run            # run dsco.distributed.systems --version
 make cosmo-selftest       # basic portable binary checks
 make cosmo-clean          # remove cosmo build outputs
 make cosmo-info           # print effective cosmo target/version/mode settings
@@ -83,9 +83,29 @@ make cosmo-bootstrap cosmo-selftest
 
 ## Distribution notes
 
-`dsco.com` is an APE binary. The build also emits `dsco.com.dbg` for debugger/symbol workflows. On most supported systems it runs directly:
+`dsco.distributed.systems` is the hosted APE binary name. The release workflow publishes that exact artifact so the canonical smoke check is:
 
 ```sh
+./dsco.distributed.systems --version
+```
+
+On macOS shells that do not hand APE files to a POSIX shell fallback, including
+the default zsh on this machine, run it through the installed APE loader:
+
+```sh
+ape ./dsco.distributed.systems --version
+```
+
+If the loader is not installed yet, run it explicitly through `/bin/sh`:
+
+```sh
+/bin/sh ./dsco.distributed.systems --version
+```
+
+If you need the legacy `.com` filename, build it explicitly:
+
+```sh
+COSMO_TARGET=dsco.com make cosmo
 ./dsco.com --version
 ```
 

@@ -52,6 +52,7 @@ Config sources, loaded in this order:
 - `./.dsco/config.json`
 - Claude configs: `~/.claude.json`, `~/.claude/settings*.json`, Claude Desktop config
 - Codex configs: `~/.codex/config.toml`, `./.codex/config.toml`
+- Hermes Agent configs: `~/.hermes/config.yaml`, `~/.hermes/mcp_servers.yaml`
 
 DSCO JSON config accepts `servers`, `mcpServers`, or `mcp_servers`:
 
@@ -86,6 +87,27 @@ cat ~/.dsco/mcp.json
 5. Check environment variables or HTTP headers required by the server.
 6. If startup is slow, set `DSCO_MCP_TIMEOUT_MS=2000` temporarily.
 7. Confirm tool schemas are returned by MCP initialize/list tools flow.
+
+Hermes Agent bridge:
+
+```json
+{
+  "servers": {
+    "hermes-agent": {
+      "command": "hermes",
+      "args": ["mcp", "serve"]
+    }
+  }
+}
+```
+
+Use `./dsco --tool-exec hermes_agent '{"action":"status"}'` for the current
+preset, local doctor hints, and the broad capability showcase. Use
+`./dsco --tool-exec hermes_agent '{"action":"capabilities"}'` when you only want
+the map of Hermes surfaces DSCO can reason about: MCP, ACP, messaging, skills,
+memory, scheduling, terminal backends, provider routing, context files, approvals,
+and research/export workflows. Hermes `acp` mode is Agent Client Protocol for
+editors, not the agentic commerce ACP tracked by `agentic_commerce`.
 
 ## 3. Provider/API Outage or Stream Errors
 

@@ -780,7 +780,7 @@
           "confidence": "direct",
           "env": "DSCO_OR_MAX_TOOLS",
           "file": "src/main.c",
-          "line": 1586,
+          "line": 1694,
           "reason": "env name suffix equals constant",
           "score": 0.95
         }
@@ -3323,7 +3323,7 @@
       "env_status": "proposed",
       "file": "include/mcp.h",
       "function_like": false,
-      "line": 34,
+      "line": 35,
       "mapped_env": [],
       "name": "MCP_MAX_SERVERS",
       "proposed_env": "DSCO_MCP_MAX_SERVERS",
@@ -3335,7 +3335,7 @@
       "env_status": "proposed",
       "file": "include/mcp.h",
       "function_like": false,
-      "line": 35,
+      "line": 36,
       "mapped_env": [],
       "name": "MCP_MAX_TOOLS",
       "proposed_env": "DSCO_MCP_MAX_TOOLS",
@@ -3347,7 +3347,7 @@
       "env_status": "proposed",
       "file": "include/mcp.h",
       "function_like": false,
-      "line": 36,
+      "line": 37,
       "mapped_env": [],
       "name": "MCP_MAX_LINE",
       "proposed_env": "DSCO_MCP_MAX_LINE",
@@ -3359,7 +3359,7 @@
       "env_status": "proposed",
       "file": "include/mcp.h",
       "function_like": false,
-      "line": 37,
+      "line": 38,
       "mapped_env": [],
       "name": "MCP_MAX_ARGS",
       "proposed_env": "DSCO_MCP_MAX_ARGS",
@@ -3371,7 +3371,7 @@
       "env_status": "proposed",
       "file": "include/mcp.h",
       "function_like": false,
-      "line": 38,
+      "line": 39,
       "mapped_env": [],
       "name": "MCP_MAX_ENV",
       "proposed_env": "DSCO_MCP_MAX_ENV",
@@ -3383,7 +3383,7 @@
       "env_status": "proposed",
       "file": "include/mcp.h",
       "function_like": false,
-      "line": 39,
+      "line": 40,
       "mapped_env": [],
       "name": "MCP_MAX_HEADERS",
       "proposed_env": "DSCO_MCP_MAX_HEADERS",
@@ -8261,7 +8261,7 @@
       "env_status": "proposed",
       "file": "src/agent.c",
       "function_like": false,
-      "line": 884,
+      "line": 887,
       "mapped_env": [],
       "name": "IMG_MAX_FILE_SIZE",
       "proposed_env": "DSCO_IMG_MAX_FILE_SIZE",
@@ -8273,7 +8273,7 @@
       "env_status": "proposed",
       "file": "src/agent.c",
       "function_like": false,
-      "line": 885,
+      "line": 888,
       "mapped_env": [],
       "name": "IMG_MAX_DIMENSION",
       "proposed_env": "DSCO_IMG_MAX_DIMENSION",
@@ -8285,7 +8285,7 @@
       "env_status": "proposed",
       "file": "src/agent.c",
       "function_like": false,
-      "line": 886,
+      "line": 889,
       "mapped_env": [],
       "name": "IMG_MAX_B64_SIZE",
       "proposed_env": "DSCO_IMG_MAX_B64_SIZE",
@@ -8297,7 +8297,7 @@
       "env_status": "proposed",
       "file": "src/agent.c",
       "function_like": false,
-      "line": 887,
+      "line": 890,
       "mapped_env": [],
       "name": "IMG_MAX_PER_MSG",
       "proposed_env": "DSCO_IMG_MAX_PER_MSG",
@@ -8309,7 +8309,7 @@
       "env_status": "proposed",
       "file": "src/agent.c",
       "function_like": false,
-      "line": 1825,
+      "line": 1828,
       "mapped_env": [],
       "name": "DSCO_SESSION_LIST_MAX",
       "proposed_env": "DSCO_SESSION_LIST_MAX",
@@ -8321,7 +8321,7 @@
       "env_status": "proposed",
       "file": "src/agent.c",
       "function_like": false,
-      "line": 3802,
+      "line": 3896,
       "mapped_env": [],
       "name": "MAX_ALIASES",
       "proposed_env": "DSCO_MAX_ALIASES",
@@ -9818,7 +9818,7 @@
       "env_status": "none",
       "file": "src/main.c",
       "function_like": false,
-      "line": 949,
+      "line": 972,
       "mapped_env": [],
       "name": "CAP_TOOLS",
       "proposed_env": null,
@@ -9830,7 +9830,7 @@
       "env_status": "none",
       "file": "src/main.c",
       "function_like": false,
-      "line": 950,
+      "line": 973,
       "mapped_env": [],
       "name": "CAP_MULTITURN",
       "proposed_env": null,
@@ -9842,7 +9842,7 @@
       "env_status": "none",
       "file": "src/main.c",
       "function_like": false,
-      "line": 951,
+      "line": 974,
       "mapped_env": [],
       "name": "CAP_STREAMING",
       "proposed_env": null,
@@ -9854,7 +9854,7 @@
       "env_status": "none",
       "file": "src/main.c",
       "function_like": false,
-      "line": 952,
+      "line": 975,
       "mapped_env": [],
       "name": "CAP_VISION",
       "proposed_env": null,
@@ -9866,7 +9866,7 @@
       "env_status": "none",
       "file": "src/main.c",
       "function_like": false,
-      "line": 953,
+      "line": 976,
       "mapped_env": [],
       "name": "CAP_THINKING",
       "proposed_env": null,
@@ -9878,7 +9878,7 @@
       "env_status": "none",
       "file": "src/main.c",
       "function_like": false,
-      "line": 954,
+      "line": 977,
       "mapped_env": [],
       "name": "CAP_JSON",
       "proposed_env": null,
@@ -9890,7 +9890,7 @@
       "env_status": "none",
       "file": "src/main.c",
       "function_like": false,
-      "line": 955,
+      "line": 978,
       "mapped_env": [],
       "name": "CAP_CACHE",
       "proposed_env": null,
@@ -9902,7 +9902,7 @@
       "env_status": "proposed",
       "file": "src/main.c",
       "function_like": false,
-      "line": 957,
+      "line": 980,
       "mapped_env": [],
       "name": "DSCO_LOCAL_PROVIDER",
       "proposed_env": "DSCO_LOCAL_PROVIDER",
@@ -9914,11 +9914,35 @@
       "env_status": "proposed",
       "file": "src/main.c",
       "function_like": false,
-      "line": 958,
+      "line": 981,
       "mapped_env": [],
       "name": "DSCO_LOCAL_MODEL",
       "proposed_env": "DSCO_LOCAL_MODEL",
       "value": "\"lmstudio:liquid/lfm2.5-1.2b\""
+    },
+    {
+      "category": "string_default",
+      "comment": "",
+      "env_status": "proposed",
+      "file": "src/main.c",
+      "function_like": false,
+      "line": 982,
+      "mapped_env": [],
+      "name": "DSCO_OLLAMA_PROVIDER",
+      "proposed_env": "DSCO_OLLAMA_PROVIDER",
+      "value": "\"ollama\""
+    },
+    {
+      "category": "string_default",
+      "comment": "",
+      "env_status": "proposed",
+      "file": "src/main.c",
+      "function_like": false,
+      "line": 983,
+      "mapped_env": [],
+      "name": "DSCO_OLLAMA_MODEL",
+      "proposed_env": "DSCO_OLLAMA_MODEL",
+      "value": "\"ollama:llama3.2\""
     },
     {
       "category": "macro_function",
@@ -9926,7 +9950,7 @@
       "env_status": "none",
       "file": "src/mcp.c",
       "function_like": true,
-      "line": 43,
+      "line": 44,
       "mapped_env": [],
       "name": "MCP_LOG",
       "proposed_env": null,
@@ -9938,7 +9962,7 @@
       "env_status": "proposed",
       "file": "src/mcp.c",
       "function_like": false,
-      "line": 993,
+      "line": 994,
       "mapped_env": [],
       "name": "MCP_CONNECT_WORKERS",
       "proposed_env": "DSCO_MCP_CONNECT_WORKERS",
@@ -10989,7 +11013,7 @@
       "env_status": "proposed",
       "file": "src/provider.c",
       "function_like": false,
-      "line": 3672,
+      "line": 3741,
       "mapped_env": [],
       "name": "CHATGPT_RESPONSES_URL",
       "proposed_env": "DSCO_CHATGPT_RESPONSES_URL",
@@ -12225,7 +12249,7 @@
       "env_status": "proposed",
       "file": "src/tools.c",
       "function_like": false,
-      "line": 16556,
+      "line": 16552,
       "mapped_env": [],
       "name": "PB_MAX_BULLETS",
       "proposed_env": "DSCO_PB_MAX_BULLETS",
@@ -12237,7 +12261,7 @@
       "env_status": "proposed",
       "file": "src/tools.c",
       "function_like": false,
-      "line": 16557,
+      "line": 16553,
       "mapped_env": [],
       "name": "PB_MAX_CONTENT",
       "proposed_env": "DSCO_PB_MAX_CONTENT",
@@ -12249,7 +12273,7 @@
       "env_status": "proposed",
       "file": "src/tools.c",
       "function_like": false,
-      "line": 16558,
+      "line": 16554,
       "mapped_env": [],
       "name": "PB_MAX_SECTION",
       "proposed_env": "DSCO_PB_MAX_SECTION",
@@ -12261,7 +12285,7 @@
       "env_status": "proposed",
       "file": "src/tools.c",
       "function_like": false,
-      "line": 16559,
+      "line": 16555,
       "mapped_env": [],
       "name": "PB_MAX_TAGS",
       "proposed_env": "DSCO_PB_MAX_TAGS",
@@ -12273,7 +12297,7 @@
       "env_status": "proposed",
       "file": "src/tools.c",
       "function_like": false,
-      "line": 16560,
+      "line": 16556,
       "mapped_env": [],
       "name": "PB_TAG_LEN",
       "proposed_env": "DSCO_PB_TAG_LEN",
@@ -12285,7 +12309,7 @@
       "env_status": "proposed",
       "file": "src/tools.c",
       "function_like": false,
-      "line": 16561,
+      "line": 16557,
       "mapped_env": [],
       "name": "PB_DEDUP_THRESHOLD",
       "proposed_env": "DSCO_PB_DEDUP_THRESHOLD",
@@ -12297,7 +12321,7 @@
       "env_status": "proposed",
       "file": "src/tools.c",
       "function_like": false,
-      "line": 17201,
+      "line": 17197,
       "mapped_env": [],
       "name": "SP_MAX_ENTRIES",
       "proposed_env": "DSCO_SP_MAX_ENTRIES",
@@ -12309,7 +12333,7 @@
       "env_status": "proposed",
       "file": "src/tools.c",
       "function_like": false,
-      "line": 17202,
+      "line": 17198,
       "mapped_env": [],
       "name": "SP_KEY_LEN",
       "proposed_env": "DSCO_SP_KEY_LEN",
@@ -12321,7 +12345,7 @@
       "env_status": "proposed",
       "file": "src/tools.c",
       "function_like": false,
-      "line": 17203,
+      "line": 17199,
       "mapped_env": [],
       "name": "SP_VALUE_LEN",
       "proposed_env": "DSCO_SP_VALUE_LEN",
@@ -12333,7 +12357,7 @@
       "env_status": "proposed",
       "file": "src/tools.c",
       "function_like": false,
-      "line": 17588,
+      "line": 17584,
       "mapped_env": [],
       "name": "LOOP_STACK_MAX",
       "proposed_env": "DSCO_LOOP_STACK_MAX",
@@ -12345,7 +12369,7 @@
       "env_status": "proposed",
       "file": "src/tools.c",
       "function_like": false,
-      "line": 17589,
+      "line": 17585,
       "mapped_env": [],
       "name": "LOOP_LABEL_MAX",
       "proposed_env": "DSCO_LOOP_LABEL_MAX",
@@ -12357,7 +12381,7 @@
       "env_status": "proposed",
       "file": "src/tools.c",
       "function_like": false,
-      "line": 17590,
+      "line": 17586,
       "mapped_env": [],
       "name": "LOOP_COND_MAX",
       "proposed_env": "DSCO_LOOP_COND_MAX",
@@ -12369,7 +12393,7 @@
       "env_status": "proposed",
       "file": "src/tools.c",
       "function_like": false,
-      "line": 17591,
+      "line": 17587,
       "mapped_env": [],
       "name": "LOOP_EXPR_MAX",
       "proposed_env": "DSCO_LOOP_EXPR_MAX",
@@ -12381,7 +12405,7 @@
       "env_status": "proposed",
       "file": "src/tools.c",
       "function_like": false,
-      "line": 17592,
+      "line": 17588,
       "mapped_env": [],
       "name": "LOOP_META_MAX",
       "proposed_env": "DSCO_LOOP_META_MAX",
@@ -12393,7 +12417,7 @@
       "env_status": "proposed",
       "file": "src/tools.c",
       "function_like": false,
-      "line": 17593,
+      "line": 17589,
       "mapped_env": [],
       "name": "LOOP_DYAD_MAX",
       "proposed_env": "DSCO_LOOP_DYAD_MAX",
@@ -12405,7 +12429,7 @@
       "env_status": "proposed",
       "file": "src/tools.c",
       "function_like": false,
-      "line": 17594,
+      "line": 17590,
       "mapped_env": [],
       "name": "LOOP_REFINE_MAX",
       "proposed_env": "DSCO_LOOP_REFINE_MAX",
@@ -12417,7 +12441,7 @@
       "env_status": "proposed",
       "file": "src/tools.c",
       "function_like": false,
-      "line": 17595,
+      "line": 17591,
       "mapped_env": [],
       "name": "LOOP_REWRITE_MAX",
       "proposed_env": "DSCO_LOOP_REWRITE_MAX",
@@ -12429,7 +12453,7 @@
       "env_status": "proposed",
       "file": "src/tools.c",
       "function_like": false,
-      "line": 17596,
+      "line": 17592,
       "mapped_env": [],
       "name": "LOOP_MAPREDUCE_MAX",
       "proposed_env": "DSCO_LOOP_MAPREDUCE_MAX",
@@ -12441,7 +12465,7 @@
       "env_status": "proposed",
       "file": "src/tools.c",
       "function_like": false,
-      "line": 17597,
+      "line": 17593,
       "mapped_env": [],
       "name": "LOOP_SRM_MAX",
       "proposed_env": "DSCO_LOOP_SRM_MAX",
@@ -12453,7 +12477,7 @@
       "env_status": "proposed",
       "file": "src/tools.c",
       "function_like": false,
-      "line": 17598,
+      "line": 17594,
       "mapped_env": [],
       "name": "LOOP_MEASUREMENT_MAX",
       "proposed_env": "DSCO_LOOP_MEASUREMENT_MAX",
@@ -12465,7 +12489,7 @@
       "env_status": "proposed",
       "file": "src/tools.c",
       "function_like": false,
-      "line": 17599,
+      "line": 17595,
       "mapped_env": [],
       "name": "LOOP_SRM_OPERATION_MAX",
       "proposed_env": "DSCO_LOOP_SRM_OPERATION_MAX",
@@ -12477,7 +12501,7 @@
       "env_status": "proposed",
       "file": "src/tools.c",
       "function_like": false,
-      "line": 17600,
+      "line": 17596,
       "mapped_env": [],
       "name": "LOOP_GRAPH_NODE_MAX",
       "proposed_env": "DSCO_LOOP_GRAPH_NODE_MAX",
@@ -12489,7 +12513,7 @@
       "env_status": "proposed",
       "file": "src/tools.c",
       "function_like": false,
-      "line": 17601,
+      "line": 17597,
       "mapped_env": [],
       "name": "LOOP_GRAPH_EDGE_MAX",
       "proposed_env": "DSCO_LOOP_GRAPH_EDGE_MAX",
@@ -12501,7 +12525,7 @@
       "env_status": "proposed",
       "file": "src/tools.c",
       "function_like": false,
-      "line": 17602,
+      "line": 17598,
       "mapped_env": [],
       "name": "LOOP_META_KIND_MAX",
       "proposed_env": "DSCO_LOOP_META_KIND_MAX",
@@ -12513,7 +12537,7 @@
       "env_status": "proposed",
       "file": "src/tools.c",
       "function_like": false,
-      "line": 17603,
+      "line": 17599,
       "mapped_env": [],
       "name": "LOOP_META_NAME_MAX",
       "proposed_env": "DSCO_LOOP_META_NAME_MAX",
@@ -12525,7 +12549,7 @@
       "env_status": "proposed",
       "file": "src/tools.c",
       "function_like": false,
-      "line": 17604,
+      "line": 17600,
       "mapped_env": [],
       "name": "LOOP_META_VALUE_MAX",
       "proposed_env": "DSCO_LOOP_META_VALUE_MAX",
@@ -12537,7 +12561,7 @@
       "env_status": "none",
       "file": "src/tools.c",
       "function_like": true,
-      "line": 21744,
+      "line": 21740,
       "mapped_env": [],
       "name": "APPEND_ACTION",
       "proposed_env": null,
@@ -12549,7 +12573,7 @@
       "env_status": "none",
       "file": "src/tools.c",
       "function_like": true,
-      "line": 22025,
+      "line": 22024,
       "mapped_env": [],
       "name": "PROFILE_KEY",
       "proposed_env": null,
@@ -12561,7 +12585,7 @@
       "env_status": "proposed",
       "file": "src/tools.c",
       "function_like": false,
-      "line": 25424,
+      "line": 25839,
       "mapped_env": [],
       "name": "S_ACTION",
       "proposed_env": "DSCO_S_ACTION",
@@ -12573,7 +12597,7 @@
       "env_status": "mapped",
       "file": "src/tools.c",
       "function_like": false,
-      "line": 27484,
+      "line": 28090,
       "mapped_env": [
         {
           "confidence": "direct",
@@ -12594,7 +12618,7 @@
       "env_status": "proposed",
       "file": "src/tools.c",
       "function_like": false,
-      "line": 27485,
+      "line": 28091,
       "mapped_env": [],
       "name": "MAX_GROUP_TOOLS",
       "proposed_env": "DSCO_MAX_GROUP_TOOLS",
@@ -12606,7 +12630,7 @@
       "env_status": "proposed",
       "file": "src/tools.c",
       "function_like": false,
-      "line": 27486,
+      "line": 28092,
       "mapped_env": [],
       "name": "HOT_CACHE_SIZE",
       "proposed_env": "DSCO_HOT_CACHE_SIZE",
@@ -12618,7 +12642,7 @@
       "env_status": "proposed",
       "file": "src/tools.c",
       "function_like": false,
-      "line": 28278,
+      "line": 28884,
       "mapped_env": [],
       "name": "COOC_MAX_TOOLS",
       "proposed_env": "DSCO_COOC_MAX_TOOLS",
@@ -12630,7 +12654,7 @@
       "env_status": "none",
       "file": "src/tools.c",
       "function_like": false,
-      "line": 28279,
+      "line": 28885,
       "mapped_env": [],
       "name": "COOC_MAGIC",
       "proposed_env": null,
@@ -12642,7 +12666,7 @@
       "env_status": "proposed",
       "file": "src/tools.c",
       "function_like": false,
-      "line": 28280,
+      "line": 28886,
       "mapped_env": [],
       "name": "COOC_VERSION",
       "proposed_env": "DSCO_COOC_VERSION",
@@ -14035,7 +14059,7 @@
           "confidence": "direct",
           "constant": "MAX_GROUPS",
           "file": "src/tools.c",
-          "line": 27484,
+          "line": 28090,
           "reason": "env name suffix equals constant",
           "score": 0.95
         },
@@ -14496,7 +14520,7 @@
     },
     {
       "file": "src/agent.c",
-      "line": 741,
+      "line": 737,
       "mapped_constants": [],
       "name": "DSCO_FALLBACK_PROMPT",
       "operation": "getenv",
@@ -14505,7 +14529,7 @@
     },
     {
       "file": "src/agent.c",
-      "line": 741,
+      "line": 737,
       "mapped_constants": [],
       "name": "DSCO_FALLBACK_PROMPT",
       "operation": "string",
@@ -14514,7 +14538,7 @@
     },
     {
       "file": "src/agent.c",
-      "line": 745,
+      "line": 741,
       "mapped_constants": [],
       "name": "DSCO_AUTO_FALLBACK",
       "operation": "getenv",
@@ -14523,7 +14547,7 @@
     },
     {
       "file": "src/agent.c",
-      "line": 745,
+      "line": 741,
       "mapped_constants": [],
       "name": "DSCO_AUTO_FALLBACK",
       "operation": "string",
@@ -14532,25 +14556,25 @@
     },
     {
       "file": "src/agent.c",
-      "line": 1693,
+      "line": 868,
       "mapped_constants": [],
-      "name": "DSCO_HOTSWAP_BIN",
-      "operation": "getenv",
-      "sensitive": false,
+      "name": "DSCO_SAKANA_KEY_CLASS",
+      "operation": "setenv",
+      "sensitive": true,
       "source": "env_call"
     },
     {
       "file": "src/agent.c",
-      "line": 1693,
+      "line": 868,
       "mapped_constants": [],
-      "name": "DSCO_HOTSWAP_BIN",
+      "name": "DSCO_SAKANA_KEY_CLASS",
       "operation": "string",
-      "sensitive": false,
+      "sensitive": true,
       "source": "envish_string_literal"
     },
     {
       "file": "src/agent.c",
-      "line": 1787,
+      "line": 1696,
       "mapped_constants": [],
       "name": "DSCO_HOTSWAP_BIN",
       "operation": "getenv",
@@ -14559,7 +14583,7 @@
     },
     {
       "file": "src/agent.c",
-      "line": 1787,
+      "line": 1696,
       "mapped_constants": [],
       "name": "DSCO_HOTSWAP_BIN",
       "operation": "string",
@@ -14571,7 +14595,7 @@
       "line": 1790,
       "mapped_constants": [],
       "name": "DSCO_HOTSWAP_BIN",
-      "operation": "unsetenv",
+      "operation": "getenv",
       "sensitive": false,
       "source": "env_call"
     },
@@ -14586,16 +14610,16 @@
     },
     {
       "file": "src/agent.c",
-      "line": 1796,
+      "line": 1793,
       "mapped_constants": [],
       "name": "DSCO_HOTSWAP_BIN",
-      "operation": "setenv",
+      "operation": "unsetenv",
       "sensitive": false,
       "source": "env_call"
     },
     {
       "file": "src/agent.c",
-      "line": 1796,
+      "line": 1793,
       "mapped_constants": [],
       "name": "DSCO_HOTSWAP_BIN",
       "operation": "string",
@@ -14604,7 +14628,25 @@
     },
     {
       "file": "src/agent.c",
-      "line": 3771,
+      "line": 1799,
+      "mapped_constants": [],
+      "name": "DSCO_HOTSWAP_BIN",
+      "operation": "setenv",
+      "sensitive": false,
+      "source": "env_call"
+    },
+    {
+      "file": "src/agent.c",
+      "line": 1799,
+      "mapped_constants": [],
+      "name": "DSCO_HOTSWAP_BIN",
+      "operation": "string",
+      "sensitive": false,
+      "source": "envish_string_literal"
+    },
+    {
+      "file": "src/agent.c",
+      "line": 3859,
       "mapped_constants": [],
       "name": "DSCO_TRUST_TIER",
       "operation": "setenv",
@@ -14613,7 +14655,7 @@
     },
     {
       "file": "src/agent.c",
-      "line": 3771,
+      "line": 3859,
       "mapped_constants": [],
       "name": "DSCO_TRUST_TIER",
       "operation": "string",
@@ -14622,7 +14664,7 @@
     },
     {
       "file": "src/agent.c",
-      "line": 3816,
+      "line": 3910,
       "mapped_constants": [],
       "name": "DSCO_RESUME_AFTER_CRASH",
       "operation": "getenv",
@@ -14631,7 +14673,7 @@
     },
     {
       "file": "src/agent.c",
-      "line": 3816,
+      "line": 3910,
       "mapped_constants": [],
       "name": "DSCO_RESUME_AFTER_CRASH",
       "operation": "string",
@@ -14640,7 +14682,7 @@
     },
     {
       "file": "src/agent.c",
-      "line": 3837,
+      "line": 3931,
       "mapped_constants": [],
       "name": "DSCO_RESUME_AFTER_CRASH",
       "operation": "unsetenv",
@@ -14649,7 +14691,7 @@
     },
     {
       "file": "src/agent.c",
-      "line": 3837,
+      "line": 3931,
       "mapped_constants": [],
       "name": "DSCO_RESUME_AFTER_CRASH",
       "operation": "string",
@@ -14658,7 +14700,7 @@
     },
     {
       "file": "src/agent.c",
-      "line": 3904,
+      "line": 3998,
       "mapped_constants": [],
       "name": "DSCO_NO_PANE",
       "operation": "getenv",
@@ -14667,7 +14709,7 @@
     },
     {
       "file": "src/agent.c",
-      "line": 3904,
+      "line": 3998,
       "mapped_constants": [],
       "name": "DSCO_NO_PANE",
       "operation": "string",
@@ -14676,7 +14718,7 @@
     },
     {
       "file": "src/agent.c",
-      "line": 3942,
+      "line": 4036,
       "mapped_constants": [],
       "name": "DSCO_MCP_SYNC",
       "operation": "getenv",
@@ -14685,7 +14727,7 @@
     },
     {
       "file": "src/agent.c",
-      "line": 3942,
+      "line": 4036,
       "mapped_constants": [],
       "name": "DSCO_MCP_SYNC",
       "operation": "string",
@@ -14694,7 +14736,7 @@
     },
     {
       "file": "src/agent.c",
-      "line": 4091,
+      "line": 4185,
       "mapped_constants": [],
       "name": "DSCO_SUPERVISE_RESTART",
       "operation": "setenv",
@@ -14703,7 +14745,7 @@
     },
     {
       "file": "src/agent.c",
-      "line": 4091,
+      "line": 4185,
       "mapped_constants": [],
       "name": "DSCO_SUPERVISE_RESTART",
       "operation": "string",
@@ -14712,7 +14754,7 @@
     },
     {
       "file": "src/agent.c",
-      "line": 4108,
+      "line": 4202,
       "mapped_constants": [],
       "name": "DSCO_SUPERVISE_RESTART",
       "operation": "setenv",
@@ -14721,7 +14763,7 @@
     },
     {
       "file": "src/agent.c",
-      "line": 4108,
+      "line": 4202,
       "mapped_constants": [],
       "name": "DSCO_SUPERVISE_RESTART",
       "operation": "string",
@@ -14730,7 +14772,7 @@
     },
     {
       "file": "src/agent.c",
-      "line": 4767,
+      "line": 4861,
       "mapped_constants": [],
       "name": "DSCO_DHT_SWARM",
       "operation": "getenv",
@@ -14739,7 +14781,7 @@
     },
     {
       "file": "src/agent.c",
-      "line": 4767,
+      "line": 4861,
       "mapped_constants": [],
       "name": "DSCO_DHT_SWARM",
       "operation": "string",
@@ -14748,7 +14790,7 @@
     },
     {
       "file": "src/agent.c",
-      "line": 4771,
+      "line": 4865,
       "mapped_constants": [],
       "name": "DSCO_MESH_PORT",
       "operation": "getenv",
@@ -14757,7 +14799,7 @@
     },
     {
       "file": "src/agent.c",
-      "line": 4771,
+      "line": 4865,
       "mapped_constants": [],
       "name": "DSCO_MESH_PORT",
       "operation": "string",
@@ -14766,7 +14808,7 @@
     },
     {
       "file": "src/agent.c",
-      "line": 4775,
+      "line": 4869,
       "mapped_constants": [],
       "name": "DSCO_DHT_PORT",
       "operation": "getenv",
@@ -14775,7 +14817,7 @@
     },
     {
       "file": "src/agent.c",
-      "line": 4775,
+      "line": 4869,
       "mapped_constants": [],
       "name": "DSCO_DHT_PORT",
       "operation": "string",
@@ -14784,7 +14826,7 @@
     },
     {
       "file": "src/agent.c",
-      "line": 5392,
+      "line": 5486,
       "mapped_constants": [],
       "name": "DSCO_VOICE_SCRIPT",
       "operation": "getenv",
@@ -14793,7 +14835,7 @@
     },
     {
       "file": "src/agent.c",
-      "line": 5392,
+      "line": 5486,
       "mapped_constants": [],
       "name": "DSCO_VOICE_SCRIPT",
       "operation": "string",
@@ -14802,7 +14844,7 @@
     },
     {
       "file": "src/agent.c",
-      "line": 6395,
+      "line": 6489,
       "mapped_constants": [],
       "name": "ANTHROPIC_API_KEY",
       "operation": "string",
@@ -14811,7 +14853,7 @@
     },
     {
       "file": "src/agent.c",
-      "line": 6396,
+      "line": 6490,
       "mapped_constants": [],
       "name": "OPENAI_API_KEY",
       "operation": "string",
@@ -14820,7 +14862,7 @@
     },
     {
       "file": "src/agent.c",
-      "line": 6397,
+      "line": 6491,
       "mapped_constants": [],
       "name": "OPENROUTER_API_KEY",
       "operation": "string",
@@ -14829,7 +14871,7 @@
     },
     {
       "file": "src/agent.c",
-      "line": 6398,
+      "line": 6492,
       "mapped_constants": [],
       "name": "GROQ_API_KEY",
       "operation": "string",
@@ -14838,7 +14880,7 @@
     },
     {
       "file": "src/agent.c",
-      "line": 6399,
+      "line": 6493,
       "mapped_constants": [],
       "name": "DEEPSEEK_API_KEY",
       "operation": "string",
@@ -14847,7 +14889,7 @@
     },
     {
       "file": "src/agent.c",
-      "line": 6400,
+      "line": 6494,
       "mapped_constants": [],
       "name": "XAI_API_KEY",
       "operation": "string",
@@ -14856,7 +14898,7 @@
     },
     {
       "file": "src/agent.c",
-      "line": 6401,
+      "line": 6495,
       "mapped_constants": [],
       "name": "MISTRAL_API_KEY",
       "operation": "string",
@@ -14865,7 +14907,7 @@
     },
     {
       "file": "src/agent.c",
-      "line": 6402,
+      "line": 6496,
       "mapped_constants": [],
       "name": "TOGETHER_API_KEY",
       "operation": "string",
@@ -14874,7 +14916,7 @@
     },
     {
       "file": "src/agent.c",
-      "line": 6403,
+      "line": 6497,
       "mapped_constants": [],
       "name": "PERPLEXITY_API_KEY",
       "operation": "string",
@@ -14883,7 +14925,7 @@
     },
     {
       "file": "src/agent.c",
-      "line": 6404,
+      "line": 6498,
       "mapped_constants": [],
       "name": "CEREBRAS_API_KEY",
       "operation": "string",
@@ -14892,7 +14934,7 @@
     },
     {
       "file": "src/agent.c",
-      "line": 6405,
+      "line": 6499,
       "mapped_constants": [],
       "name": "COHERE_API_KEY",
       "operation": "string",
@@ -14901,7 +14943,7 @@
     },
     {
       "file": "src/agent.c",
-      "line": 6406,
+      "line": 6500,
       "mapped_constants": [],
       "name": "FUGU_API_KEY",
       "operation": "string",
@@ -14910,7 +14952,7 @@
     },
     {
       "file": "src/agent.c",
-      "line": 6510,
+      "line": 6604,
       "mapped_constants": [],
       "name": "DSCO_TRUST_TIER",
       "operation": "setenv",
@@ -14919,7 +14961,7 @@
     },
     {
       "file": "src/agent.c",
-      "line": 6510,
+      "line": 6604,
       "mapped_constants": [],
       "name": "DSCO_TRUST_TIER",
       "operation": "string",
@@ -14928,7 +14970,7 @@
     },
     {
       "file": "src/agent.c",
-      "line": 7600,
+      "line": 7704,
       "mapped_constants": [],
       "name": "DSCO_SAKANA_KEY_CLASS",
       "operation": "setenv",
@@ -14937,7 +14979,7 @@
     },
     {
       "file": "src/agent.c",
-      "line": 7600,
+      "line": 7704,
       "mapped_constants": [],
       "name": "DSCO_SAKANA_KEY_CLASS",
       "operation": "string",
@@ -14946,7 +14988,7 @@
     },
     {
       "file": "src/agent.c",
-      "line": 8009,
+      "line": 8124,
       "mapped_constants": [],
       "name": "DSCO_DISABLE_CROSS_PROVIDER_ROUTING",
       "operation": "getenv",
@@ -14955,7 +14997,7 @@
     },
     {
       "file": "src/agent.c",
-      "line": 8009,
+      "line": 8124,
       "mapped_constants": [],
       "name": "DSCO_DISABLE_CROSS_PROVIDER_ROUTING",
       "operation": "string",
@@ -15144,7 +15186,7 @@
     },
     {
       "file": "src/codex_app_directory.c",
-      "line": 203,
+      "line": 314,
       "mapped_constants": [],
       "name": "DSCO_CODEX_APP_DIRECTORY",
       "operation": "getenv",
@@ -15153,7 +15195,7 @@
     },
     {
       "file": "src/codex_app_directory.c",
-      "line": 203,
+      "line": 314,
       "mapped_constants": [],
       "name": "DSCO_CODEX_APP_DIRECTORY",
       "operation": "string",
@@ -16761,7 +16803,7 @@
     },
     {
       "file": "src/main.c",
-      "line": 794,
+      "line": 817,
       "mapped_constants": [],
       "name": "DSCO_MESH_PORT",
       "operation": "getenv",
@@ -16770,7 +16812,7 @@
     },
     {
       "file": "src/main.c",
-      "line": 794,
+      "line": 817,
       "mapped_constants": [],
       "name": "DSCO_MESH_PORT",
       "operation": "string",
@@ -16779,7 +16821,7 @@
     },
     {
       "file": "src/main.c",
-      "line": 808,
+      "line": 831,
       "mapped_constants": [],
       "name": "DSCO_DHT_SWARM",
       "operation": "getenv",
@@ -16788,7 +16830,7 @@
     },
     {
       "file": "src/main.c",
-      "line": 808,
+      "line": 831,
       "mapped_constants": [],
       "name": "DSCO_DHT_SWARM",
       "operation": "string",
@@ -16797,7 +16839,7 @@
     },
     {
       "file": "src/main.c",
-      "line": 811,
+      "line": 834,
       "mapped_constants": [],
       "name": "DSCO_DHT_PORT",
       "operation": "getenv",
@@ -16806,7 +16848,7 @@
     },
     {
       "file": "src/main.c",
-      "line": 811,
+      "line": 834,
       "mapped_constants": [],
       "name": "DSCO_DHT_PORT",
       "operation": "string",
@@ -16815,7 +16857,7 @@
     },
     {
       "file": "src/main.c",
-      "line": 835,
+      "line": 858,
       "mapped_constants": [],
       "name": "DSCO_HTTP_PORT",
       "operation": "getenv",
@@ -16824,7 +16866,7 @@
     },
     {
       "file": "src/main.c",
-      "line": 835,
+      "line": 858,
       "mapped_constants": [],
       "name": "DSCO_HTTP_PORT",
       "operation": "string",
@@ -16833,7 +16875,7 @@
     },
     {
       "file": "src/main.c",
-      "line": 884,
+      "line": 907,
       "mapped_constants": [],
       "name": "DSCO_ACCEL_BANNER",
       "operation": "getenv",
@@ -16842,7 +16884,7 @@
     },
     {
       "file": "src/main.c",
-      "line": 884,
+      "line": 907,
       "mapped_constants": [],
       "name": "DSCO_ACCEL_BANNER",
       "operation": "string",
@@ -16851,7 +16893,7 @@
     },
     {
       "file": "src/main.c",
-      "line": 899,
+      "line": 922,
       "mapped_constants": [],
       "name": "DSCO_IDLE_LOCK_S",
       "operation": "getenv",
@@ -16860,7 +16902,7 @@
     },
     {
       "file": "src/main.c",
-      "line": 899,
+      "line": 922,
       "mapped_constants": [],
       "name": "DSCO_IDLE_LOCK_S",
       "operation": "string",
@@ -16869,7 +16911,7 @@
     },
     {
       "file": "src/main.c",
-      "line": 970,
+      "line": 995,
       "mapped_constants": [],
       "name": "ANTHROPIC_API_KEY",
       "operation": "string",
@@ -16878,7 +16920,7 @@
     },
     {
       "file": "src/main.c",
-      "line": 972,
+      "line": 997,
       "mapped_constants": [],
       "name": "OPENAI_API_KEY",
       "operation": "string",
@@ -16887,7 +16929,7 @@
     },
     {
       "file": "src/main.c",
-      "line": 974,
+      "line": 999,
       "mapped_constants": [],
       "name": "OPENROUTER_API_KEY",
       "operation": "string",
@@ -16896,7 +16938,7 @@
     },
     {
       "file": "src/main.c",
-      "line": 976,
+      "line": 1001,
       "mapped_constants": [],
       "name": "GOOGLE_API_KEY",
       "operation": "string",
@@ -16905,7 +16947,7 @@
     },
     {
       "file": "src/main.c",
-      "line": 978,
+      "line": 1003,
       "mapped_constants": [],
       "name": "GROQ_API_KEY",
       "operation": "string",
@@ -16914,7 +16956,7 @@
     },
     {
       "file": "src/main.c",
-      "line": 980,
+      "line": 1005,
       "mapped_constants": [],
       "name": "DEEPSEEK_API_KEY",
       "operation": "string",
@@ -16923,7 +16965,7 @@
     },
     {
       "file": "src/main.c",
-      "line": 982,
+      "line": 1007,
       "mapped_constants": [],
       "name": "MISTRAL_API_KEY",
       "operation": "string",
@@ -16932,7 +16974,7 @@
     },
     {
       "file": "src/main.c",
-      "line": 984,
+      "line": 1009,
       "mapped_constants": [],
       "name": "XAI_API_KEY",
       "operation": "string",
@@ -16941,7 +16983,7 @@
     },
     {
       "file": "src/main.c",
-      "line": 986,
+      "line": 1011,
       "mapped_constants": [],
       "name": "TOGETHER_API_KEY",
       "operation": "string",
@@ -16950,7 +16992,7 @@
     },
     {
       "file": "src/main.c",
-      "line": 988,
+      "line": 1013,
       "mapped_constants": [],
       "name": "PERPLEXITY_API_KEY",
       "operation": "string",
@@ -16959,7 +17001,7 @@
     },
     {
       "file": "src/main.c",
-      "line": 990,
+      "line": 1015,
       "mapped_constants": [],
       "name": "CEREBRAS_API_KEY",
       "operation": "string",
@@ -16968,7 +17010,7 @@
     },
     {
       "file": "src/main.c",
-      "line": 992,
+      "line": 1017,
       "mapped_constants": [],
       "name": "COHERE_API_KEY",
       "operation": "string",
@@ -16977,7 +17019,7 @@
     },
     {
       "file": "src/main.c",
-      "line": 994,
+      "line": 1019,
       "mapped_constants": [],
       "name": "KIMI_API_KEY",
       "operation": "string",
@@ -16986,7 +17028,151 @@
     },
     {
       "file": "src/main.c",
-      "line": 996,
+      "line": 1021,
+      "mapped_constants": [],
+      "name": "DASHSCOPE_API_KEY",
+      "operation": "string",
+      "sensitive": true,
+      "source": "envish_string_literal"
+    },
+    {
+      "file": "src/main.c",
+      "line": 1023,
+      "mapped_constants": [],
+      "name": "ALIBABA_CODING_PLAN_API_KEY",
+      "operation": "string",
+      "sensitive": true,
+      "source": "envish_string_literal"
+    },
+    {
+      "file": "src/main.c",
+      "line": 1025,
+      "mapped_constants": [],
+      "name": "ARCEEAI_API_KEY",
+      "operation": "string",
+      "sensitive": true,
+      "source": "envish_string_literal"
+    },
+    {
+      "file": "src/main.c",
+      "line": 1027,
+      "mapped_constants": [],
+      "name": "AZURE_FOUNDRY_API_KEY",
+      "operation": "string",
+      "sensitive": true,
+      "source": "envish_string_literal"
+    },
+    {
+      "file": "src/main.c",
+      "line": 1029,
+      "mapped_constants": [],
+      "name": "GMI_API_KEY",
+      "operation": "string",
+      "sensitive": true,
+      "source": "envish_string_literal"
+    },
+    {
+      "file": "src/main.c",
+      "line": 1031,
+      "mapped_constants": [],
+      "name": "HF_TOKEN",
+      "operation": "string",
+      "sensitive": true,
+      "source": "envish_string_literal"
+    },
+    {
+      "file": "src/main.c",
+      "line": 1033,
+      "mapped_constants": [],
+      "name": "KILOCODE_API_KEY",
+      "operation": "string",
+      "sensitive": true,
+      "source": "envish_string_literal"
+    },
+    {
+      "file": "src/main.c",
+      "line": 1035,
+      "mapped_constants": [],
+      "name": "NOUS_API_KEY",
+      "operation": "string",
+      "sensitive": true,
+      "source": "envish_string_literal"
+    },
+    {
+      "file": "src/main.c",
+      "line": 1037,
+      "mapped_constants": [],
+      "name": "NOVITA_API_KEY",
+      "operation": "string",
+      "sensitive": true,
+      "source": "envish_string_literal"
+    },
+    {
+      "file": "src/main.c",
+      "line": 1039,
+      "mapped_constants": [],
+      "name": "NVIDIA_API_KEY",
+      "operation": "string",
+      "sensitive": true,
+      "source": "envish_string_literal"
+    },
+    {
+      "file": "src/main.c",
+      "line": 1041,
+      "mapped_constants": [],
+      "name": "OPENCODE_ZEN_API_KEY",
+      "operation": "string",
+      "sensitive": true,
+      "source": "envish_string_literal"
+    },
+    {
+      "file": "src/main.c",
+      "line": 1043,
+      "mapped_constants": [],
+      "name": "OPENCODE_GO_API_KEY",
+      "operation": "string",
+      "sensitive": true,
+      "source": "envish_string_literal"
+    },
+    {
+      "file": "src/main.c",
+      "line": 1045,
+      "mapped_constants": [],
+      "name": "QWEN_API_KEY",
+      "operation": "string",
+      "sensitive": true,
+      "source": "envish_string_literal"
+    },
+    {
+      "file": "src/main.c",
+      "line": 1047,
+      "mapped_constants": [],
+      "name": "STEPFUN_API_KEY",
+      "operation": "string",
+      "sensitive": true,
+      "source": "envish_string_literal"
+    },
+    {
+      "file": "src/main.c",
+      "line": 1049,
+      "mapped_constants": [],
+      "name": "XIAOMI_API_KEY",
+      "operation": "string",
+      "sensitive": true,
+      "source": "envish_string_literal"
+    },
+    {
+      "file": "src/main.c",
+      "line": 1051,
+      "mapped_constants": [],
+      "name": "GLM_API_KEY",
+      "operation": "string",
+      "sensitive": true,
+      "source": "envish_string_literal"
+    },
+    {
+      "file": "src/main.c",
+      "line": 1053,
       "mapped_constants": [],
       "name": "FUGU_API_KEY",
       "operation": "string",
@@ -16995,7 +17181,7 @@
     },
     {
       "file": "src/main.c",
-      "line": 998,
+      "line": 1055,
       "mapped_constants": [],
       "name": "OLLAMA_API_KEY",
       "operation": "string",
@@ -17004,7 +17190,7 @@
     },
     {
       "file": "src/main.c",
-      "line": 1000,
+      "line": 1057,
       "mapped_constants": [],
       "name": "OLLAMA_API_KEY",
       "operation": "string",
@@ -17013,7 +17199,7 @@
     },
     {
       "file": "src/main.c",
-      "line": 1002,
+      "line": 1059,
       "mapped_constants": [],
       "name": "LMSTUDIO_API_KEY",
       "operation": "string",
@@ -17022,7 +17208,7 @@
     },
     {
       "file": "src/main.c",
-      "line": 1004,
+      "line": 1061,
       "mapped_constants": [],
       "name": "MLX_API_KEY",
       "operation": "string",
@@ -17031,7 +17217,7 @@
     },
     {
       "file": "src/main.c",
-      "line": 1242,
+      "line": 1350,
       "mapped_constants": [],
       "name": "ANTHROPIC_API_KEY",
       "operation": "unsetenv",
@@ -17040,7 +17226,7 @@
     },
     {
       "file": "src/main.c",
-      "line": 1242,
+      "line": 1350,
       "mapped_constants": [],
       "name": "ANTHROPIC_API_KEY",
       "operation": "string",
@@ -17049,7 +17235,7 @@
     },
     {
       "file": "src/main.c",
-      "line": 1243,
+      "line": 1351,
       "mapped_constants": [],
       "name": "ANTHROPIC_AUTH_TOKEN",
       "operation": "unsetenv",
@@ -17058,7 +17244,7 @@
     },
     {
       "file": "src/main.c",
-      "line": 1243,
+      "line": 1351,
       "mapped_constants": [],
       "name": "ANTHROPIC_AUTH_TOKEN",
       "operation": "string",
@@ -17067,7 +17253,7 @@
     },
     {
       "file": "src/main.c",
-      "line": 1244,
+      "line": 1352,
       "mapped_constants": [],
       "name": "ANTHROPIC_BASE_URL",
       "operation": "unsetenv",
@@ -17076,7 +17262,7 @@
     },
     {
       "file": "src/main.c",
-      "line": 1244,
+      "line": 1352,
       "mapped_constants": [],
       "name": "ANTHROPIC_BASE_URL",
       "operation": "string",
@@ -17085,7 +17271,7 @@
     },
     {
       "file": "src/main.c",
-      "line": 1245,
+      "line": 1353,
       "mapped_constants": [],
       "name": "ANTHROPIC_MODEL",
       "operation": "unsetenv",
@@ -17094,7 +17280,7 @@
     },
     {
       "file": "src/main.c",
-      "line": 1246,
+      "line": 1354,
       "mapped_constants": [],
       "name": "DSCO_CLAUDE_CODE_OAUTH_TOKEN",
       "operation": "setenv",
@@ -17103,7 +17289,7 @@
     },
     {
       "file": "src/main.c",
-      "line": 1246,
+      "line": 1354,
       "mapped_constants": [],
       "name": "DSCO_CLAUDE_CODE_OAUTH_TOKEN",
       "operation": "string",
@@ -17112,7 +17298,7 @@
     },
     {
       "file": "src/main.c",
-      "line": 1247,
+      "line": 1355,
       "mapped_constants": [],
       "name": "CLAUDE_CODE_OAUTH_TOKEN",
       "operation": "setenv",
@@ -17121,7 +17307,7 @@
     },
     {
       "file": "src/main.c",
-      "line": 1247,
+      "line": 1355,
       "mapped_constants": [],
       "name": "CLAUDE_CODE_OAUTH_TOKEN",
       "operation": "string",
@@ -17130,7 +17316,7 @@
     },
     {
       "file": "src/main.c",
-      "line": 1298,
+      "line": 1406,
       "mapped_constants": [],
       "name": "DSCO_SECURE_STORE_TIMEOUT_MS",
       "operation": "getenv",
@@ -17139,7 +17325,7 @@
     },
     {
       "file": "src/main.c",
-      "line": 1298,
+      "line": 1406,
       "mapped_constants": [],
       "name": "DSCO_SECURE_STORE_TIMEOUT_MS",
       "operation": "string",
@@ -17148,7 +17334,7 @@
     },
     {
       "file": "src/main.c",
-      "line": 1584,
+      "line": 1692,
       "mapped_constants": [
         {
           "confidence": "direct",
@@ -17174,7 +17360,7 @@
     },
     {
       "file": "src/main.c",
-      "line": 1584,
+      "line": 1692,
       "mapped_constants": [],
       "name": "DSCO_MAX_AGENT_TURNS",
       "operation": "string",
@@ -17183,7 +17369,7 @@
     },
     {
       "file": "src/main.c",
-      "line": 1585,
+      "line": 1693,
       "mapped_constants": [],
       "name": "DSCO_DISABLE_DEFAULT_FALLBACKS",
       "operation": "setenv",
@@ -17192,7 +17378,7 @@
     },
     {
       "file": "src/main.c",
-      "line": 1585,
+      "line": 1693,
       "mapped_constants": [],
       "name": "DSCO_DISABLE_DEFAULT_FALLBACKS",
       "operation": "string",
@@ -17201,7 +17387,7 @@
     },
     {
       "file": "src/main.c",
-      "line": 1586,
+      "line": 1694,
       "mapped_constants": [
         {
           "confidence": "direct",
@@ -17219,7 +17405,7 @@
     },
     {
       "file": "src/main.c",
-      "line": 1586,
+      "line": 1694,
       "mapped_constants": [],
       "name": "DSCO_OR_MAX_TOOLS",
       "operation": "string",
@@ -17228,7 +17414,7 @@
     },
     {
       "file": "src/main.c",
-      "line": 1587,
+      "line": 1695,
       "mapped_constants": [],
       "name": "DSCO_OR_DISABLE_TOOLS",
       "operation": "setenv",
@@ -17237,7 +17423,7 @@
     },
     {
       "file": "src/main.c",
-      "line": 1587,
+      "line": 1695,
       "mapped_constants": [],
       "name": "DSCO_OR_DISABLE_TOOLS",
       "operation": "string",
@@ -17246,7 +17432,7 @@
     },
     {
       "file": "src/main.c",
-      "line": 1588,
+      "line": 1696,
       "mapped_constants": [],
       "name": "DSCO_DEBUG_AUTH",
       "operation": "setenv",
@@ -17255,7 +17441,7 @@
     },
     {
       "file": "src/main.c",
-      "line": 1588,
+      "line": 1696,
       "mapped_constants": [],
       "name": "DSCO_DEBUG_AUTH",
       "operation": "string",
@@ -17264,7 +17450,7 @@
     },
     {
       "file": "src/main.c",
-      "line": 1589,
+      "line": 1697,
       "mapped_constants": [],
       "name": "DSCO_TRACE",
       "operation": "setenv",
@@ -17273,7 +17459,7 @@
     },
     {
       "file": "src/main.c",
-      "line": 1589,
+      "line": 1697,
       "mapped_constants": [],
       "name": "DSCO_TRACE",
       "operation": "string",
@@ -17282,7 +17468,7 @@
     },
     {
       "file": "src/main.c",
-      "line": 1590,
+      "line": 1698,
       "mapped_constants": [],
       "name": "DSCO_TRACE_STDERR",
       "operation": "unsetenv",
@@ -17291,7 +17477,7 @@
     },
     {
       "file": "src/main.c",
-      "line": 1590,
+      "line": 1698,
       "mapped_constants": [],
       "name": "DSCO_TRACE_STDERR",
       "operation": "string",
@@ -17300,7 +17486,7 @@
     },
     {
       "file": "src/main.c",
-      "line": 1857,
+      "line": 1965,
       "mapped_constants": [],
       "name": "DSCO_EXEC",
       "operation": "getenv",
@@ -17309,27 +17495,9 @@
     },
     {
       "file": "src/main.c",
-      "line": 1857,
+      "line": 1965,
       "mapped_constants": [],
       "name": "DSCO_EXEC",
-      "operation": "string",
-      "sensitive": false,
-      "source": "envish_string_literal"
-    },
-    {
-      "file": "src/main.c",
-      "line": 1858,
-      "mapped_constants": [],
-      "name": "DSCO_MODEL",
-      "operation": "getenv",
-      "sensitive": false,
-      "source": "env_call"
-    },
-    {
-      "file": "src/main.c",
-      "line": 1858,
-      "mapped_constants": [],
-      "name": "DSCO_MODEL",
       "operation": "string",
       "sensitive": false,
       "source": "envish_string_literal"
@@ -17337,6 +17505,24 @@
     {
       "file": "src/main.c",
       "line": 1966,
+      "mapped_constants": [],
+      "name": "DSCO_MODEL",
+      "operation": "getenv",
+      "sensitive": false,
+      "source": "env_call"
+    },
+    {
+      "file": "src/main.c",
+      "line": 1966,
+      "mapped_constants": [],
+      "name": "DSCO_MODEL",
+      "operation": "string",
+      "sensitive": false,
+      "source": "envish_string_literal"
+    },
+    {
+      "file": "src/main.c",
+      "line": 2074,
       "mapped_constants": [],
       "name": "ANTHROPIC_API_KEY",
       "operation": "string",
@@ -17345,7 +17531,7 @@
     },
     {
       "file": "src/main.c",
-      "line": 1966,
+      "line": 2074,
       "mapped_constants": [],
       "name": "OPENAI_API_KEY",
       "operation": "string",
@@ -17354,7 +17540,7 @@
     },
     {
       "file": "src/main.c",
-      "line": 2055,
+      "line": 2163,
       "mapped_constants": [],
       "name": "DSCO_EXEC",
       "operation": "setenv",
@@ -17363,7 +17549,7 @@
     },
     {
       "file": "src/main.c",
-      "line": 2055,
+      "line": 2163,
       "mapped_constants": [],
       "name": "DSCO_EXEC",
       "operation": "string",
@@ -17372,7 +17558,7 @@
     },
     {
       "file": "src/main.c",
-      "line": 2056,
+      "line": 2164,
       "mapped_constants": [],
       "name": "DSCO_MODEL",
       "operation": "setenv",
@@ -17381,7 +17567,7 @@
     },
     {
       "file": "src/main.c",
-      "line": 2056,
+      "line": 2164,
       "mapped_constants": [],
       "name": "DSCO_MODEL",
       "operation": "string",
@@ -17390,7 +17576,7 @@
     },
     {
       "file": "src/main.c",
-      "line": 2057,
+      "line": 2165,
       "mapped_constants": [],
       "name": "DSCO_EXEC",
       "operation": "string",
@@ -17399,7 +17585,7 @@
     },
     {
       "file": "src/main.c",
-      "line": 2058,
+      "line": 2166,
       "mapped_constants": [],
       "name": "DSCO_MODEL",
       "operation": "string",
@@ -17408,7 +17594,7 @@
     },
     {
       "file": "src/main.c",
-      "line": 2460,
+      "line": 2715,
       "mapped_constants": [],
       "name": "DSCO_IPC_DB",
       "operation": "getenv",
@@ -17417,7 +17603,7 @@
     },
     {
       "file": "src/main.c",
-      "line": 2460,
+      "line": 2715,
       "mapped_constants": [],
       "name": "DSCO_IPC_DB",
       "operation": "string",
@@ -17426,7 +17612,7 @@
     },
     {
       "file": "src/main.c",
-      "line": 2638,
+      "line": 2899,
       "mapped_constants": [],
       "name": "DSCO_TEST_CRASH",
       "operation": "getenv",
@@ -17435,7 +17621,7 @@
     },
     {
       "file": "src/main.c",
-      "line": 2638,
+      "line": 2899,
       "mapped_constants": [],
       "name": "DSCO_TEST_CRASH",
       "operation": "string",
@@ -17444,7 +17630,7 @@
     },
     {
       "file": "src/main.c",
-      "line": 2645,
+      "line": 2906,
       "mapped_constants": [],
       "name": "DSCO_SUPERVISED",
       "operation": "getenv",
@@ -17453,25 +17639,7 @@
     },
     {
       "file": "src/main.c",
-      "line": 2645,
-      "mapped_constants": [],
-      "name": "DSCO_SUPERVISED",
-      "operation": "string",
-      "sensitive": false,
-      "source": "envish_string_literal"
-    },
-    {
-      "file": "src/main.c",
-      "line": 2652,
-      "mapped_constants": [],
-      "name": "DSCO_SUPERVISED",
-      "operation": "getenv",
-      "sensitive": false,
-      "source": "env_call"
-    },
-    {
-      "file": "src/main.c",
-      "line": 2652,
+      "line": 2906,
       "mapped_constants": [],
       "name": "DSCO_SUPERVISED",
       "operation": "string",
@@ -17480,7 +17648,25 @@
     },
     {
       "file": "src/main.c",
-      "line": 2711,
+      "line": 2913,
+      "mapped_constants": [],
+      "name": "DSCO_SUPERVISED",
+      "operation": "getenv",
+      "sensitive": false,
+      "source": "env_call"
+    },
+    {
+      "file": "src/main.c",
+      "line": 2913,
+      "mapped_constants": [],
+      "name": "DSCO_SUPERVISED",
+      "operation": "string",
+      "sensitive": false,
+      "source": "envish_string_literal"
+    },
+    {
+      "file": "src/main.c",
+      "line": 2972,
       "mapped_constants": [],
       "name": "DSCO_NO_SUPERVISE",
       "operation": "getenv",
@@ -17489,7 +17675,7 @@
     },
     {
       "file": "src/main.c",
-      "line": 2711,
+      "line": 2972,
       "mapped_constants": [],
       "name": "DSCO_NO_SUPERVISE",
       "operation": "string",
@@ -17498,7 +17684,7 @@
     },
     {
       "file": "src/main.c",
-      "line": 2759,
+      "line": 3020,
       "mapped_constants": [],
       "name": "DSCO_NO_SUPERVISE",
       "operation": "getenv",
@@ -17507,7 +17693,7 @@
     },
     {
       "file": "src/main.c",
-      "line": 2759,
+      "line": 3020,
       "mapped_constants": [],
       "name": "DSCO_NO_AUTO_SUPERVISE",
       "operation": "getenv",
@@ -17516,7 +17702,7 @@
     },
     {
       "file": "src/main.c",
-      "line": 2759,
+      "line": 3020,
       "mapped_constants": [],
       "name": "DSCO_NO_SUPERVISE",
       "operation": "string",
@@ -17525,7 +17711,7 @@
     },
     {
       "file": "src/main.c",
-      "line": 2759,
+      "line": 3020,
       "mapped_constants": [],
       "name": "DSCO_NO_AUTO_SUPERVISE",
       "operation": "string",
@@ -17534,7 +17720,7 @@
     },
     {
       "file": "src/main.c",
-      "line": 2800,
+      "line": 3077,
       "mapped_constants": [],
       "name": "DSCO_SUPERVISE_RESTART",
       "operation": "setenv",
@@ -17543,7 +17729,7 @@
     },
     {
       "file": "src/main.c",
-      "line": 2800,
+      "line": 3077,
       "mapped_constants": [],
       "name": "DSCO_SUPERVISE_RESTART",
       "operation": "string",
@@ -17552,7 +17738,7 @@
     },
     {
       "file": "src/main.c",
-      "line": 2816,
+      "line": 3093,
       "mapped_constants": [],
       "name": "DSCO_NO_AUTO_INTERACTIVE",
       "operation": "getenv",
@@ -17561,7 +17747,7 @@
     },
     {
       "file": "src/main.c",
-      "line": 2816,
+      "line": 3093,
       "mapped_constants": [],
       "name": "DSCO_NO_AUTO_INTERACTIVE",
       "operation": "string",
@@ -17570,7 +17756,7 @@
     },
     {
       "file": "src/main.c",
-      "line": 2844,
+      "line": 3121,
       "mapped_constants": [],
       "name": "DSCO_PROFILE",
       "operation": "setenv",
@@ -17579,7 +17765,7 @@
     },
     {
       "file": "src/main.c",
-      "line": 2844,
+      "line": 3121,
       "mapped_constants": [],
       "name": "DSCO_PROFILE",
       "operation": "string",
@@ -17588,7 +17774,7 @@
     },
     {
       "file": "src/main.c",
-      "line": 2871,
+      "line": 3148,
       "mapped_constants": [],
       "name": "DSCO_MODEL",
       "operation": "getenv",
@@ -17597,7 +17783,7 @@
     },
     {
       "file": "src/main.c",
-      "line": 2871,
+      "line": 3148,
       "mapped_constants": [],
       "name": "DSCO_MODEL",
       "operation": "string",
@@ -17606,7 +17792,7 @@
     },
     {
       "file": "src/main.c",
-      "line": 2888,
+      "line": 3165,
       "mapped_constants": [],
       "name": "DSCO_MODEL",
       "operation": "getenv",
@@ -17615,7 +17801,7 @@
     },
     {
       "file": "src/main.c",
-      "line": 2888,
+      "line": 3165,
       "mapped_constants": [],
       "name": "DSCO_MODEL",
       "operation": "string",
@@ -17624,7 +17810,7 @@
     },
     {
       "file": "src/main.c",
-      "line": 2892,
+      "line": 3169,
       "mapped_constants": [],
       "name": "DSCO_MODEL",
       "operation": "unsetenv",
@@ -17633,7 +17819,7 @@
     },
     {
       "file": "src/main.c",
-      "line": 2892,
+      "line": 3169,
       "mapped_constants": [],
       "name": "DSCO_MODEL",
       "operation": "string",
@@ -17642,7 +17828,7 @@
     },
     {
       "file": "src/main.c",
-      "line": 3223,
+      "line": 3505,
       "mapped_constants": [],
       "name": "DSCO_EXEC",
       "operation": "getenv",
@@ -17651,7 +17837,7 @@
     },
     {
       "file": "src/main.c",
-      "line": 3223,
+      "line": 3505,
       "mapped_constants": [],
       "name": "DSCO_EXEC",
       "operation": "string",
@@ -17660,7 +17846,7 @@
     },
     {
       "file": "src/main.c",
-      "line": 3248,
+      "line": 3530,
       "mapped_constants": [],
       "name": "DSCO_EXEC",
       "operation": "getenv",
@@ -17669,7 +17855,7 @@
     },
     {
       "file": "src/main.c",
-      "line": 3248,
+      "line": 3530,
       "mapped_constants": [],
       "name": "DSCO_EXEC",
       "operation": "string",
@@ -17678,7 +17864,7 @@
     },
     {
       "file": "src/main.c",
-      "line": 3269,
+      "line": 3551,
       "mapped_constants": [],
       "name": "DSCO_CHEAP",
       "operation": "getenv",
@@ -17687,7 +17873,7 @@
     },
     {
       "file": "src/main.c",
-      "line": 3269,
+      "line": 3551,
       "mapped_constants": [],
       "name": "DSCO_CHEAP",
       "operation": "string",
@@ -17696,7 +17882,7 @@
     },
     {
       "file": "src/main.c",
-      "line": 3728,
+      "line": 4010,
       "mapped_constants": [],
       "name": "DSCO_SMOKE_FULL",
       "operation": "getenv",
@@ -17705,7 +17891,7 @@
     },
     {
       "file": "src/main.c",
-      "line": 3728,
+      "line": 4010,
       "mapped_constants": [],
       "name": "DSCO_SMOKE_FULL",
       "operation": "string",
@@ -17714,7 +17900,7 @@
     },
     {
       "file": "src/main.c",
-      "line": 3941,
+      "line": 4223,
       "mapped_constants": [],
       "name": "DSCO_BUDGET",
       "operation": "getenv",
@@ -17723,7 +17909,7 @@
     },
     {
       "file": "src/main.c",
-      "line": 3941,
+      "line": 4223,
       "mapped_constants": [],
       "name": "DSCO_BUDGET",
       "operation": "string",
@@ -17732,7 +17918,7 @@
     },
     {
       "file": "src/main.c",
-      "line": 4049,
+      "line": 4331,
       "mapped_constants": [],
       "name": "DSCO_SUBAGENT",
       "operation": "getenv",
@@ -17741,7 +17927,7 @@
     },
     {
       "file": "src/main.c",
-      "line": 4049,
+      "line": 4331,
       "mapped_constants": [],
       "name": "DSCO_IPC_DB",
       "operation": "getenv",
@@ -17750,7 +17936,7 @@
     },
     {
       "file": "src/main.c",
-      "line": 4049,
+      "line": 4331,
       "mapped_constants": [],
       "name": "DSCO_SUBAGENT",
       "operation": "string",
@@ -17759,7 +17945,7 @@
     },
     {
       "file": "src/main.c",
-      "line": 4049,
+      "line": 4331,
       "mapped_constants": [],
       "name": "DSCO_IPC_DB",
       "operation": "string",
@@ -17768,7 +17954,7 @@
     },
     {
       "file": "src/main.c",
-      "line": 4060,
+      "line": 4342,
       "mapped_constants": [],
       "name": "DSCO_SWARM_DEPTH",
       "operation": "getenv",
@@ -17777,7 +17963,7 @@
     },
     {
       "file": "src/main.c",
-      "line": 4060,
+      "line": 4342,
       "mapped_constants": [],
       "name": "DSCO_SWARM_DEPTH",
       "operation": "string",
@@ -17786,7 +17972,7 @@
     },
     {
       "file": "src/main.c",
-      "line": 4061,
+      "line": 4343,
       "mapped_constants": [],
       "name": "DSCO_PARENT_INSTANCE_ID",
       "operation": "getenv",
@@ -17795,7 +17981,7 @@
     },
     {
       "file": "src/main.c",
-      "line": 4061,
+      "line": 4343,
       "mapped_constants": [],
       "name": "DSCO_PARENT_INSTANCE_ID",
       "operation": "string",
@@ -17804,7 +17990,7 @@
     },
     {
       "file": "src/main.c",
-      "line": 4084,
+      "line": 4366,
       "mapped_constants": [],
       "name": "DSCO_BUDGET",
       "operation": "getenv",
@@ -17813,7 +17999,7 @@
     },
     {
       "file": "src/main.c",
-      "line": 4084,
+      "line": 4366,
       "mapped_constants": [],
       "name": "DSCO_BUDGET",
       "operation": "string",
@@ -17822,7 +18008,7 @@
     },
     {
       "file": "src/main.c",
-      "line": 4204,
+      "line": 4486,
       "mapped_constants": [],
       "name": "DSCO_SUPERVISED",
       "operation": "getenv",
@@ -17831,7 +18017,7 @@
     },
     {
       "file": "src/main.c",
-      "line": 4204,
+      "line": 4486,
       "mapped_constants": [],
       "name": "DSCO_SUPERVISED",
       "operation": "string",
@@ -17840,7 +18026,7 @@
     },
     {
       "file": "src/mcp.c",
-      "line": 62,
+      "line": 63,
       "mapped_constants": [],
       "name": "DSCO_MCP_TIMEOUT_MS",
       "operation": "dsco_env_int",
@@ -17849,7 +18035,7 @@
     },
     {
       "file": "src/mcp.c",
-      "line": 62,
+      "line": 63,
       "mapped_constants": [],
       "name": "DSCO_MCP_TIMEOUT_MS",
       "operation": "string",
@@ -17858,7 +18044,7 @@
     },
     {
       "file": "src/mcp.c",
-      "line": 1559,
+      "line": 1952,
       "mapped_constants": [],
       "name": "DSCO_MCP_IMPORT_CLAUDE_DESKTOP",
       "operation": "getenv",
@@ -17867,7 +18053,7 @@
     },
     {
       "file": "src/mcp.c",
-      "line": 1559,
+      "line": 1952,
       "mapped_constants": [],
       "name": "DSCO_MCP_IMPORT_CLAUDE_DESKTOP",
       "operation": "string",
@@ -19123,7 +19309,7 @@
     },
     {
       "file": "src/provider.c",
-      "line": 2209,
+      "line": 2260,
       "mapped_constants": [],
       "name": "DSCO_PROMPT_CACHE_KEY",
       "operation": "getenv",
@@ -19132,7 +19318,7 @@
     },
     {
       "file": "src/provider.c",
-      "line": 2209,
+      "line": 2260,
       "mapped_constants": [],
       "name": "DSCO_PROMPT_CACHE_KEY",
       "operation": "string",
@@ -19141,7 +19327,7 @@
     },
     {
       "file": "src/provider.c",
-      "line": 2218,
+      "line": 2269,
       "mapped_constants": [],
       "name": "DSCO_PROMPT_CACHE_RETENTION",
       "operation": "getenv",
@@ -19150,7 +19336,7 @@
     },
     {
       "file": "src/provider.c",
-      "line": 2218,
+      "line": 2269,
       "mapped_constants": [],
       "name": "DSCO_PROMPT_CACHE_RETENTION",
       "operation": "string",
@@ -19159,7 +19345,7 @@
     },
     {
       "file": "src/provider.c",
-      "line": 2350,
+      "line": 2401,
       "mapped_constants": [],
       "name": "DSCO_PROMPT_CACHE_KEY",
       "operation": "getenv",
@@ -19168,7 +19354,7 @@
     },
     {
       "file": "src/provider.c",
-      "line": 2350,
+      "line": 2401,
       "mapped_constants": [],
       "name": "DSCO_PROMPT_CACHE_KEY",
       "operation": "string",
@@ -19177,7 +19363,7 @@
     },
     {
       "file": "src/provider.c",
-      "line": 2584,
+      "line": 2635,
       "mapped_constants": [],
       "name": "DSCO_CODEX_EXEC_TIMEOUT",
       "operation": "getenv",
@@ -19186,7 +19372,7 @@
     },
     {
       "file": "src/provider.c",
-      "line": 2584,
+      "line": 2635,
       "mapped_constants": [],
       "name": "DSCO_CODEX_EXEC_TIMEOUT",
       "operation": "string",
@@ -19195,7 +19381,7 @@
     },
     {
       "file": "src/provider.c",
-      "line": 3446,
+      "line": 3515,
       "mapped_constants": [],
       "name": "DSCO_FUGU_STREAM_IDLE_TIMEOUT_S",
       "operation": "getenv",
@@ -19204,7 +19390,7 @@
     },
     {
       "file": "src/provider.c",
-      "line": 3446,
+      "line": 3515,
       "mapped_constants": [],
       "name": "DSCO_FUGU_STREAM_IDLE_TIMEOUT_S",
       "operation": "string",
@@ -19213,7 +19399,7 @@
     },
     {
       "file": "src/provider.c",
-      "line": 3459,
+      "line": 3528,
       "mapped_constants": [],
       "name": "DSCO_DEBUG_REQUEST",
       "operation": "getenv",
@@ -19222,7 +19408,7 @@
     },
     {
       "file": "src/provider.c",
-      "line": 3459,
+      "line": 3528,
       "mapped_constants": [],
       "name": "DSCO_DEBUG_REQUEST",
       "operation": "string",
@@ -19231,7 +19417,7 @@
     },
     {
       "file": "src/provider.c",
-      "line": 3675,
+      "line": 3744,
       "mapped_constants": [],
       "name": "DSCO_CHATGPT_BASE_URL",
       "operation": "getenv",
@@ -19240,7 +19426,7 @@
     },
     {
       "file": "src/provider.c",
-      "line": 3675,
+      "line": 3744,
       "mapped_constants": [],
       "name": "DSCO_CHATGPT_BASE_URL",
       "operation": "string",
@@ -19249,7 +19435,7 @@
     },
     {
       "file": "src/provider.c",
-      "line": 3786,
+      "line": 3855,
       "mapped_constants": [],
       "name": "DSCO_OR_DISABLE_TOOLS",
       "operation": "getenv",
@@ -19258,7 +19444,7 @@
     },
     {
       "file": "src/provider.c",
-      "line": 3786,
+      "line": 3855,
       "mapped_constants": [],
       "name": "DSCO_OR_DISABLE_TOOLS",
       "operation": "string",
@@ -19267,7 +19453,7 @@
     },
     {
       "file": "src/provider.c",
-      "line": 4181,
+      "line": 4250,
       "mapped_constants": [],
       "name": "OPENAI_API_KEY",
       "operation": "string",
@@ -19276,7 +19462,7 @@
     },
     {
       "file": "src/provider.c",
-      "line": 4182,
+      "line": 4251,
       "mapped_constants": [],
       "name": "GOOGLE_API_KEY",
       "operation": "string",
@@ -19285,7 +19471,7 @@
     },
     {
       "file": "src/provider.c",
-      "line": 4184,
+      "line": 4253,
       "mapped_constants": [],
       "name": "GROQ_API_KEY",
       "operation": "string",
@@ -19294,7 +19480,7 @@
     },
     {
       "file": "src/provider.c",
-      "line": 4185,
+      "line": 4254,
       "mapped_constants": [],
       "name": "DEEPSEEK_API_KEY",
       "operation": "string",
@@ -19303,7 +19489,7 @@
     },
     {
       "file": "src/provider.c",
-      "line": 4186,
+      "line": 4255,
       "mapped_constants": [],
       "name": "TOGETHER_API_KEY",
       "operation": "string",
@@ -19312,7 +19498,7 @@
     },
     {
       "file": "src/provider.c",
-      "line": 4187,
+      "line": 4256,
       "mapped_constants": [],
       "name": "MISTRAL_API_KEY",
       "operation": "string",
@@ -19321,7 +19507,7 @@
     },
     {
       "file": "src/provider.c",
-      "line": 4188,
+      "line": 4257,
       "mapped_constants": [],
       "name": "OPENROUTER_API_KEY",
       "operation": "string",
@@ -19330,7 +19516,7 @@
     },
     {
       "file": "src/provider.c",
-      "line": 4189,
+      "line": 4258,
       "mapped_constants": [],
       "name": "PERPLEXITY_API_KEY",
       "operation": "string",
@@ -19339,7 +19525,7 @@
     },
     {
       "file": "src/provider.c",
-      "line": 4190,
+      "line": 4259,
       "mapped_constants": [],
       "name": "CEREBRAS_API_KEY",
       "operation": "string",
@@ -19348,7 +19534,7 @@
     },
     {
       "file": "src/provider.c",
-      "line": 4191,
+      "line": 4260,
       "mapped_constants": [],
       "name": "XAI_API_KEY",
       "operation": "string",
@@ -19357,7 +19543,7 @@
     },
     {
       "file": "src/provider.c",
-      "line": 4192,
+      "line": 4261,
       "mapped_constants": [],
       "name": "COHERE_API_KEY",
       "operation": "string",
@@ -19366,7 +19552,7 @@
     },
     {
       "file": "src/provider.c",
-      "line": 4193,
+      "line": 4262,
       "mapped_constants": [],
       "name": "KIMI_API_KEY",
       "operation": "string",
@@ -19375,7 +19561,7 @@
     },
     {
       "file": "src/provider.c",
-      "line": 4194,
+      "line": 4263,
       "mapped_constants": [],
       "name": "FUGU_API_KEY",
       "operation": "string",
@@ -19384,7 +19570,7 @@
     },
     {
       "file": "src/provider.c",
-      "line": 4195,
+      "line": 4264,
       "mapped_constants": [],
       "name": "DASHSCOPE_API_KEY",
       "operation": "string",
@@ -19393,7 +19579,7 @@
     },
     {
       "file": "src/provider.c",
-      "line": 4198,
+      "line": 4267,
       "mapped_constants": [],
       "name": "ALIBABA_CODING_PLAN_API_KEY",
       "operation": "string",
@@ -19402,7 +19588,7 @@
     },
     {
       "file": "src/provider.c",
-      "line": 4199,
+      "line": 4268,
       "mapped_constants": [],
       "name": "ARCEEAI_API_KEY",
       "operation": "string",
@@ -19411,7 +19597,7 @@
     },
     {
       "file": "src/provider.c",
-      "line": 4200,
+      "line": 4269,
       "mapped_constants": [],
       "name": "GMI_API_KEY",
       "operation": "string",
@@ -19420,7 +19606,7 @@
     },
     {
       "file": "src/provider.c",
-      "line": 4201,
+      "line": 4270,
       "mapped_constants": [],
       "name": "HF_TOKEN",
       "operation": "string",
@@ -19429,7 +19615,7 @@
     },
     {
       "file": "src/provider.c",
-      "line": 4202,
+      "line": 4271,
       "mapped_constants": [],
       "name": "KILOCODE_API_KEY",
       "operation": "string",
@@ -19438,7 +19624,7 @@
     },
     {
       "file": "src/provider.c",
-      "line": 4203,
+      "line": 4272,
       "mapped_constants": [],
       "name": "NOUS_API_KEY",
       "operation": "string",
@@ -19447,7 +19633,7 @@
     },
     {
       "file": "src/provider.c",
-      "line": 4204,
+      "line": 4273,
       "mapped_constants": [],
       "name": "NOVITA_API_KEY",
       "operation": "string",
@@ -19456,7 +19642,7 @@
     },
     {
       "file": "src/provider.c",
-      "line": 4205,
+      "line": 4274,
       "mapped_constants": [],
       "name": "NVIDIA_API_KEY",
       "operation": "string",
@@ -19465,7 +19651,7 @@
     },
     {
       "file": "src/provider.c",
-      "line": 4206,
+      "line": 4275,
       "mapped_constants": [],
       "name": "OLLAMA_API_KEY",
       "operation": "string",
@@ -19474,7 +19660,7 @@
     },
     {
       "file": "src/provider.c",
-      "line": 4207,
+      "line": 4276,
       "mapped_constants": [],
       "name": "OPENCODE_ZEN_API_KEY",
       "operation": "string",
@@ -19483,7 +19669,7 @@
     },
     {
       "file": "src/provider.c",
-      "line": 4208,
+      "line": 4277,
       "mapped_constants": [],
       "name": "OPENCODE_GO_API_KEY",
       "operation": "string",
@@ -19492,7 +19678,7 @@
     },
     {
       "file": "src/provider.c",
-      "line": 4209,
+      "line": 4278,
       "mapped_constants": [],
       "name": "QWEN_API_KEY",
       "operation": "string",
@@ -19501,7 +19687,7 @@
     },
     {
       "file": "src/provider.c",
-      "line": 4210,
+      "line": 4279,
       "mapped_constants": [],
       "name": "STEPFUN_API_KEY",
       "operation": "string",
@@ -19510,7 +19696,7 @@
     },
     {
       "file": "src/provider.c",
-      "line": 4211,
+      "line": 4280,
       "mapped_constants": [],
       "name": "XIAOMI_API_KEY",
       "operation": "string",
@@ -19519,7 +19705,7 @@
     },
     {
       "file": "src/provider.c",
-      "line": 4212,
+      "line": 4281,
       "mapped_constants": [],
       "name": "GLM_API_KEY",
       "operation": "string",
@@ -19528,7 +19714,7 @@
     },
     {
       "file": "src/provider.c",
-      "line": 4214,
+      "line": 4283,
       "mapped_constants": [],
       "name": "MLX_API_KEY",
       "operation": "string",
@@ -19537,7 +19723,7 @@
     },
     {
       "file": "src/provider.c",
-      "line": 4215,
+      "line": 4284,
       "mapped_constants": [],
       "name": "OLLAMA_API_KEY",
       "operation": "string",
@@ -19546,7 +19732,7 @@
     },
     {
       "file": "src/provider.c",
-      "line": 4216,
+      "line": 4285,
       "mapped_constants": [],
       "name": "LMSTUDIO_API_KEY",
       "operation": "string",
@@ -19555,7 +19741,7 @@
     },
     {
       "file": "src/provider.c",
-      "line": 4217,
+      "line": 4286,
       "mapped_constants": [],
       "name": "VLLM_API_KEY",
       "operation": "string",
@@ -19564,7 +19750,7 @@
     },
     {
       "file": "src/provider.c",
-      "line": 4218,
+      "line": 4287,
       "mapped_constants": [],
       "name": "LLAMACPP_API_KEY",
       "operation": "string",
@@ -19573,7 +19759,7 @@
     },
     {
       "file": "src/provider.c",
-      "line": 4219,
+      "line": 4288,
       "mapped_constants": [],
       "name": "LOCALAI_API_KEY",
       "operation": "string",
@@ -19582,7 +19768,7 @@
     },
     {
       "file": "src/provider.c",
-      "line": 4220,
+      "line": 4289,
       "mapped_constants": [],
       "name": "JAN_API_KEY",
       "operation": "string",
@@ -19591,7 +19777,7 @@
     },
     {
       "file": "src/provider.c",
-      "line": 4221,
+      "line": 4290,
       "mapped_constants": [],
       "name": "GPT4ALL_API_KEY",
       "operation": "string",
@@ -19600,7 +19786,7 @@
     },
     {
       "file": "src/provider.c",
-      "line": 4222,
+      "line": 4291,
       "mapped_constants": [],
       "name": "KOBOLDCPP_API_KEY",
       "operation": "string",
@@ -19609,7 +19795,7 @@
     },
     {
       "file": "src/provider.c",
-      "line": 4223,
+      "line": 4292,
       "mapped_constants": [],
       "name": "TEXTGEN_API_KEY",
       "operation": "string",
@@ -19618,7 +19804,7 @@
     },
     {
       "file": "src/provider.c",
-      "line": 4224,
+      "line": 4293,
       "mapped_constants": [],
       "name": "TABBY_API_KEY",
       "operation": "string",
@@ -19627,7 +19813,7 @@
     },
     {
       "file": "src/provider.c",
-      "line": 4225,
+      "line": 4294,
       "mapped_constants": [],
       "name": "TGI_API_KEY",
       "operation": "string",
@@ -19636,7 +19822,7 @@
     },
     {
       "file": "src/provider.c",
-      "line": 4226,
+      "line": 4295,
       "mapped_constants": [],
       "name": "SGLANG_API_KEY",
       "operation": "string",
@@ -19645,7 +19831,7 @@
     },
     {
       "file": "src/provider.c",
-      "line": 4227,
+      "line": 4296,
       "mapped_constants": [],
       "name": "LLAMAFILE_API_KEY",
       "operation": "string",
@@ -19654,7 +19840,7 @@
     },
     {
       "file": "src/provider.c",
-      "line": 4228,
+      "line": 4297,
       "mapped_constants": [],
       "name": "LOCAL_API_KEY",
       "operation": "string",
@@ -19663,7 +19849,7 @@
     },
     {
       "file": "src/provider.c",
-      "line": 4268,
+      "line": 4337,
       "mapped_constants": [],
       "name": "CLAUDE_API_KEY",
       "operation": "string",
@@ -19672,7 +19858,7 @@
     },
     {
       "file": "src/provider.c",
-      "line": 4269,
+      "line": 4338,
       "mapped_constants": [],
       "name": "OPENAI_KEY",
       "operation": "string",
@@ -19681,7 +19867,7 @@
     },
     {
       "file": "src/provider.c",
-      "line": 4269,
+      "line": 4338,
       "mapped_constants": [],
       "name": "CHATGPT_API_KEY",
       "operation": "string",
@@ -19690,7 +19876,7 @@
     },
     {
       "file": "src/provider.c",
-      "line": 4270,
+      "line": 4339,
       "mapped_constants": [],
       "name": "OPEN_ROUTER_API_KEY",
       "operation": "string",
@@ -19699,7 +19885,7 @@
     },
     {
       "file": "src/provider.c",
-      "line": 4271,
+      "line": 4340,
       "mapped_constants": [],
       "name": "TOGETHER_TOKEN",
       "operation": "string",
@@ -19708,7 +19894,7 @@
     },
     {
       "file": "src/provider.c",
-      "line": 4272,
+      "line": 4341,
       "mapped_constants": [],
       "name": "GROK_API_KEY",
       "operation": "string",
@@ -19717,7 +19903,7 @@
     },
     {
       "file": "src/provider.c",
-      "line": 4272,
+      "line": 4341,
       "mapped_constants": [],
       "name": "X_AI_API_KEY",
       "operation": "string",
@@ -19726,7 +19912,7 @@
     },
     {
       "file": "src/provider.c",
-      "line": 4273,
+      "line": 4342,
       "mapped_constants": [],
       "name": "KIMI_CODING_API_KEY",
       "operation": "string",
@@ -19735,7 +19921,7 @@
     },
     {
       "file": "src/provider.c",
-      "line": 4273,
+      "line": 4342,
       "mapped_constants": [],
       "name": "MOONSHOT_API_KEY",
       "operation": "string",
@@ -19744,7 +19930,7 @@
     },
     {
       "file": "src/provider.c",
-      "line": 4273,
+      "line": 4342,
       "mapped_constants": [],
       "name": "MOONSHOTAI_API_KEY",
       "operation": "string",
@@ -19753,7 +19939,7 @@
     },
     {
       "file": "src/provider.c",
-      "line": 4274,
+      "line": 4343,
       "mapped_constants": [],
       "name": "SAKANA_API_KEY",
       "operation": "string",
@@ -19762,7 +19948,7 @@
     },
     {
       "file": "src/provider.c",
-      "line": 4274,
+      "line": 4343,
       "mapped_constants": [],
       "name": "FISH_API_KEY",
       "operation": "string",
@@ -19771,7 +19957,7 @@
     },
     {
       "file": "src/provider.c",
-      "line": 4274,
+      "line": 4343,
       "mapped_constants": [],
       "name": "SAKANA_TOKEN",
       "operation": "string",
@@ -19780,7 +19966,7 @@
     },
     {
       "file": "src/provider.c",
-      "line": 4276,
+      "line": 4345,
       "mapped_constants": [],
       "name": "GEMINI_API_KEY",
       "operation": "string",
@@ -19789,7 +19975,7 @@
     },
     {
       "file": "src/provider.c",
-      "line": 4276,
+      "line": 4345,
       "mapped_constants": [],
       "name": "GOOGLE_AI_API_KEY",
       "operation": "string",
@@ -19798,7 +19984,7 @@
     },
     {
       "file": "src/provider.c",
-      "line": 4276,
+      "line": 4345,
       "mapped_constants": [],
       "name": "GOOGLE_AI_STUDIO_API_KEY",
       "operation": "string",
@@ -19807,7 +19993,7 @@
     },
     {
       "file": "src/provider.c",
-      "line": 4276,
+      "line": 4345,
       "mapped_constants": [],
       "name": "GOOGLE_VERTEX_API_KEY",
       "operation": "string",
@@ -19816,7 +20002,7 @@
     },
     {
       "file": "src/provider.c",
-      "line": 4336,
+      "line": 4405,
       "mapped_constants": [],
       "name": "FUGU_API_KEY",
       "operation": "string",
@@ -19825,7 +20011,7 @@
     },
     {
       "file": "src/provider.c",
-      "line": 4336,
+      "line": 4405,
       "mapped_constants": [],
       "name": "SAKANA_API_KEY",
       "operation": "string",
@@ -19834,7 +20020,7 @@
     },
     {
       "file": "src/provider.c",
-      "line": 4336,
+      "line": 4405,
       "mapped_constants": [],
       "name": "FISH_API_KEY",
       "operation": "string",
@@ -19843,7 +20029,7 @@
     },
     {
       "file": "src/provider.c",
-      "line": 4336,
+      "line": 4405,
       "mapped_constants": [],
       "name": "SAKANA_TOKEN",
       "operation": "string",
@@ -19852,7 +20038,7 @@
     },
     {
       "file": "src/provider.c",
-      "line": 4348,
+      "line": 4417,
       "mapped_constants": [],
       "name": "FUGU_PAYG_API_KEY",
       "operation": "string",
@@ -19861,7 +20047,7 @@
     },
     {
       "file": "src/provider.c",
-      "line": 4348,
+      "line": 4417,
       "mapped_constants": [],
       "name": "SAKANA_PAYG_API_KEY",
       "operation": "string",
@@ -19870,7 +20056,7 @@
     },
     {
       "file": "src/provider.c",
-      "line": 4348,
+      "line": 4417,
       "mapped_constants": [],
       "name": "FISH_PAYG_API_KEY",
       "operation": "string",
@@ -19879,7 +20065,7 @@
     },
     {
       "file": "src/provider.c",
-      "line": 4349,
+      "line": 4418,
       "mapped_constants": [],
       "name": "SAKANA_PAYG_TOKEN",
       "operation": "string",
@@ -19888,7 +20074,7 @@
     },
     {
       "file": "src/provider.c",
-      "line": 4364,
+      "line": 4433,
       "mapped_constants": [],
       "name": "DSCO_SAKANA_KEY_CLASS",
       "operation": "getenv",
@@ -19897,7 +20083,7 @@
     },
     {
       "file": "src/provider.c",
-      "line": 4364,
+      "line": 4433,
       "mapped_constants": [],
       "name": "DSCO_SAKANA_KEY_CLASS",
       "operation": "string",
@@ -19906,7 +20092,7 @@
     },
     {
       "file": "src/provider.c",
-      "line": 4366,
+      "line": 4435,
       "mapped_constants": [],
       "name": "DSCO_FUGU_KEY_CLASS",
       "operation": "getenv",
@@ -19915,7 +20101,7 @@
     },
     {
       "file": "src/provider.c",
-      "line": 4366,
+      "line": 4435,
       "mapped_constants": [],
       "name": "DSCO_FUGU_KEY_CLASS",
       "operation": "string",
@@ -19924,7 +20110,7 @@
     },
     {
       "file": "src/provider.c",
-      "line": 4371,
+      "line": 4440,
       "mapped_constants": [],
       "name": "DSCO_PREFER_METERED_API",
       "operation": "getenv",
@@ -19933,7 +20119,7 @@
     },
     {
       "file": "src/provider.c",
-      "line": 4371,
+      "line": 4440,
       "mapped_constants": [],
       "name": "DSCO_PREFER_METERED_API",
       "operation": "string",
@@ -19942,7 +20128,7 @@
     },
     {
       "file": "src/provider.c",
-      "line": 4372,
+      "line": 4441,
       "mapped_constants": [],
       "name": "DSCO_API_BILLING_FALLBACK",
       "operation": "getenv",
@@ -19951,7 +20137,7 @@
     },
     {
       "file": "src/provider.c",
-      "line": 4372,
+      "line": 4441,
       "mapped_constants": [],
       "name": "DSCO_API_BILLING_FALLBACK",
       "operation": "string",
@@ -19960,7 +20146,7 @@
     },
     {
       "file": "src/provider.c",
-      "line": 4450,
+      "line": 4519,
       "mapped_constants": [],
       "name": "FUGU_BASE_URL",
       "operation": "getenv",
@@ -19969,34 +20155,7 @@
     },
     {
       "file": "src/provider.c",
-      "line": 4450,
-      "mapped_constants": [],
-      "name": "FUGU_BASE_URL",
-      "operation": "string",
-      "sensitive": false,
-      "source": "envish_string_literal"
-    },
-    {
-      "file": "src/provider.c",
-      "line": 4451,
-      "mapped_constants": [],
-      "name": "FUGU_API_BASE",
-      "operation": "getenv",
-      "sensitive": false,
-      "source": "env_call"
-    },
-    {
-      "file": "src/provider.c",
-      "line": 4482,
-      "mapped_constants": [],
-      "name": "FUGU_BASE_URL",
-      "operation": "getenv",
-      "sensitive": false,
-      "source": "env_call"
-    },
-    {
-      "file": "src/provider.c",
-      "line": 4482,
+      "line": 4519,
       "mapped_constants": [],
       "name": "FUGU_BASE_URL",
       "operation": "string",
@@ -20005,7 +20164,7 @@
     },
     {
       "file": "src/provider.c",
-      "line": 4484,
+      "line": 4520,
       "mapped_constants": [],
       "name": "FUGU_API_BASE",
       "operation": "getenv",
@@ -20014,7 +20173,34 @@
     },
     {
       "file": "src/provider.c",
-      "line": 4689,
+      "line": 4562,
+      "mapped_constants": [],
+      "name": "FUGU_BASE_URL",
+      "operation": "getenv",
+      "sensitive": false,
+      "source": "env_call"
+    },
+    {
+      "file": "src/provider.c",
+      "line": 4562,
+      "mapped_constants": [],
+      "name": "FUGU_BASE_URL",
+      "operation": "string",
+      "sensitive": false,
+      "source": "envish_string_literal"
+    },
+    {
+      "file": "src/provider.c",
+      "line": 4564,
+      "mapped_constants": [],
+      "name": "FUGU_API_BASE",
+      "operation": "getenv",
+      "sensitive": false,
+      "source": "env_call"
+    },
+    {
+      "file": "src/provider.c",
+      "line": 4785,
       "mapped_constants": [],
       "name": "OPENAI_API_KEY",
       "operation": "string",
@@ -20023,7 +20209,7 @@
     },
     {
       "file": "src/provider.c",
-      "line": 4864,
+      "line": 5043,
       "mapped_constants": [],
       "name": "DSCO_DISABLE_CODEX_OAUTH_DISCOVERY",
       "operation": "getenv",
@@ -20032,7 +20218,7 @@
     },
     {
       "file": "src/provider.c",
-      "line": 4864,
+      "line": 5043,
       "mapped_constants": [],
       "name": "DSCO_DISABLE_CODEX_OAUTH_DISCOVERY",
       "operation": "string",
@@ -20041,7 +20227,7 @@
     },
     {
       "file": "src/provider.c",
-      "line": 5308,
+      "line": 5487,
       "mapped_constants": [],
       "name": "ANTHROPIC_API_KEY",
       "operation": "string",
@@ -20050,7 +20236,7 @@
     },
     {
       "file": "src/provider.c",
-      "line": 5415,
+      "line": 5594,
       "mapped_constants": [],
       "name": "DSCO_DISABLE_CODEX_OAUTH_DISCOVERY",
       "operation": "getenv",
@@ -20059,7 +20245,7 @@
     },
     {
       "file": "src/provider.c",
-      "line": 5415,
+      "line": 5594,
       "mapped_constants": [],
       "name": "DSCO_DISABLE_CODEX_OAUTH_DISCOVERY",
       "operation": "string",
@@ -20068,7 +20254,7 @@
     },
     {
       "file": "src/provider.c",
-      "line": 5468,
+      "line": 5647,
       "mapped_constants": [],
       "name": "DSCO_CLAUDE_CODE_OAUTH_TOKEN",
       "operation": "getenv",
@@ -20077,7 +20263,7 @@
     },
     {
       "file": "src/provider.c",
-      "line": 5468,
+      "line": 5647,
       "mapped_constants": [],
       "name": "DSCO_CLAUDE_CODE_OAUTH_TOKEN",
       "operation": "string",
@@ -20086,7 +20272,7 @@
     },
     {
       "file": "src/provider.c",
-      "line": 5471,
+      "line": 5650,
       "mapped_constants": [],
       "name": "CLAUDE_CODE_OAUTH_TOKEN",
       "operation": "getenv",
@@ -20095,7 +20281,7 @@
     },
     {
       "file": "src/provider.c",
-      "line": 5471,
+      "line": 5650,
       "mapped_constants": [],
       "name": "CLAUDE_CODE_OAUTH_TOKEN",
       "operation": "string",
@@ -20104,7 +20290,7 @@
     },
     {
       "file": "src/provider.c",
-      "line": 5475,
+      "line": 5654,
       "mapped_constants": [],
       "name": "DSCO_DISABLE_CLAUDE_CODE_OAUTH_DISCOVERY",
       "operation": "getenv",
@@ -20113,7 +20299,7 @@
     },
     {
       "file": "src/provider.c",
-      "line": 5475,
+      "line": 5654,
       "mapped_constants": [],
       "name": "DSCO_DISABLE_CLAUDE_CODE_OAUTH_DISCOVERY",
       "operation": "string",
@@ -20122,7 +20308,7 @@
     },
     {
       "file": "src/provider.c",
-      "line": 5532,
+      "line": 5711,
       "mapped_constants": [],
       "name": "ANTHROPIC_API_KEY",
       "operation": "unsetenv",
@@ -20131,7 +20317,7 @@
     },
     {
       "file": "src/provider.c",
-      "line": 5532,
+      "line": 5711,
       "mapped_constants": [],
       "name": "ANTHROPIC_API_KEY",
       "operation": "string",
@@ -20140,7 +20326,7 @@
     },
     {
       "file": "src/provider.c",
-      "line": 5533,
+      "line": 5712,
       "mapped_constants": [],
       "name": "DSCO_CLAUDE_CODE_OAUTH_TOKEN",
       "operation": "setenv",
@@ -20149,7 +20335,7 @@
     },
     {
       "file": "src/provider.c",
-      "line": 5533,
+      "line": 5712,
       "mapped_constants": [],
       "name": "DSCO_CLAUDE_CODE_OAUTH_TOKEN",
       "operation": "string",
@@ -20158,7 +20344,7 @@
     },
     {
       "file": "src/provider.c",
-      "line": 5534,
+      "line": 5713,
       "mapped_constants": [],
       "name": "CLAUDE_CODE_OAUTH_TOKEN",
       "operation": "setenv",
@@ -20167,7 +20353,7 @@
     },
     {
       "file": "src/provider.c",
-      "line": 5534,
+      "line": 5713,
       "mapped_constants": [],
       "name": "CLAUDE_CODE_OAUTH_TOKEN",
       "operation": "string",
@@ -20176,7 +20362,7 @@
     },
     {
       "file": "src/provider.c",
-      "line": 5536,
+      "line": 5715,
       "mapped_constants": [],
       "name": "ANTHROPIC_API_KEY",
       "operation": "setenv",
@@ -20185,7 +20371,7 @@
     },
     {
       "file": "src/provider.c",
-      "line": 5536,
+      "line": 5715,
       "mapped_constants": [],
       "name": "ANTHROPIC_API_KEY",
       "operation": "string",
@@ -20194,7 +20380,7 @@
     },
     {
       "file": "src/provider.c",
-      "line": 5537,
+      "line": 5716,
       "mapped_constants": [],
       "name": "DSCO_CLAUDE_CODE_OAUTH_TOKEN",
       "operation": "unsetenv",
@@ -20203,7 +20389,7 @@
     },
     {
       "file": "src/provider.c",
-      "line": 5537,
+      "line": 5716,
       "mapped_constants": [],
       "name": "DSCO_CLAUDE_CODE_OAUTH_TOKEN",
       "operation": "string",
@@ -20212,7 +20398,7 @@
     },
     {
       "file": "src/provider.c",
-      "line": 5538,
+      "line": 5717,
       "mapped_constants": [],
       "name": "CLAUDE_CODE_OAUTH_TOKEN",
       "operation": "unsetenv",
@@ -20221,7 +20407,7 @@
     },
     {
       "file": "src/provider.c",
-      "line": 5538,
+      "line": 5717,
       "mapped_constants": [],
       "name": "CLAUDE_CODE_OAUTH_TOKEN",
       "operation": "string",
@@ -20230,7 +20416,7 @@
     },
     {
       "file": "src/provider.c",
-      "line": 5545,
+      "line": 5724,
       "mapped_constants": [],
       "name": "DSCO_CHATGPT_OAUTH_TOKEN",
       "operation": "setenv",
@@ -20239,7 +20425,7 @@
     },
     {
       "file": "src/provider.c",
-      "line": 5545,
+      "line": 5724,
       "mapped_constants": [],
       "name": "DSCO_CHATGPT_OAUTH_TOKEN",
       "operation": "string",
@@ -20248,7 +20434,7 @@
     },
     {
       "file": "src/provider.c",
-      "line": 5546,
+      "line": 5725,
       "mapped_constants": [],
       "name": "CHATGPT_OAUTH_TOKEN",
       "operation": "setenv",
@@ -20257,7 +20443,7 @@
     },
     {
       "file": "src/provider.c",
-      "line": 5546,
+      "line": 5725,
       "mapped_constants": [],
       "name": "CHATGPT_OAUTH_TOKEN",
       "operation": "string",
@@ -20266,7 +20452,7 @@
     },
     {
       "file": "src/provider.c",
-      "line": 4429,
+      "line": 4498,
       "mapped_constants": [],
       "name": "<PROVIDER>_API_KEY",
       "operation": "dynamic",
@@ -20275,7 +20461,7 @@
     },
     {
       "file": "src/provider.c",
-      "line": 4429,
+      "line": 4498,
       "mapped_constants": [],
       "name": "<PROVIDER>_ACCESS_TOKEN",
       "operation": "dynamic",
@@ -20284,7 +20470,7 @@
     },
     {
       "file": "src/provider.c",
-      "line": 4429,
+      "line": 4498,
       "mapped_constants": [],
       "name": "<PROVIDER>_AUTH_TOKEN",
       "operation": "dynamic",
@@ -20293,7 +20479,7 @@
     },
     {
       "file": "src/provider.c",
-      "line": 4429,
+      "line": 4498,
       "mapped_constants": [],
       "name": "<PROVIDER>_TOKEN",
       "operation": "dynamic",
@@ -20302,7 +20488,7 @@
     },
     {
       "file": "src/provider.c",
-      "line": 4441,
+      "line": 4510,
       "mapped_constants": [],
       "name": "<PROVIDER>_API_BASE",
       "operation": "dynamic",
@@ -20311,7 +20497,7 @@
     },
     {
       "file": "src/provider.c",
-      "line": 4444,
+      "line": 4513,
       "mapped_constants": [],
       "name": "<PROVIDER>_BASE_URL",
       "operation": "dynamic",
@@ -20320,7 +20506,7 @@
     },
     {
       "file": "src/provider.c",
-      "line": 4456,
+      "line": 4525,
       "mapped_constants": [],
       "name": "<PROVIDER>_API_BASE",
       "operation": "dynamic",
@@ -20329,7 +20515,7 @@
     },
     {
       "file": "src/provider.c",
-      "line": 4459,
+      "line": 4528,
       "mapped_constants": [],
       "name": "<PROVIDER>_BASE_URL",
       "operation": "dynamic",
@@ -20338,7 +20524,7 @@
     },
     {
       "file": "src/provider.c",
-      "line": 4485,
+      "line": 4535,
       "mapped_constants": [],
       "name": "<PROVIDER>_API_BASE",
       "operation": "dynamic",
@@ -20347,7 +20533,43 @@
     },
     {
       "file": "src/provider.c",
-      "line": 4489,
+      "line": 4538,
+      "mapped_constants": [],
+      "name": "<PROVIDER>_BASE_URL",
+      "operation": "dynamic",
+      "sensitive": false,
+      "source": "dynamic_env_pattern"
+    },
+    {
+      "file": "src/provider.c",
+      "line": 4565,
+      "mapped_constants": [],
+      "name": "<PROVIDER>_API_BASE",
+      "operation": "dynamic",
+      "sensitive": false,
+      "source": "dynamic_env_pattern"
+    },
+    {
+      "file": "src/provider.c",
+      "line": 4569,
+      "mapped_constants": [],
+      "name": "<PROVIDER>_BASE_URL",
+      "operation": "dynamic",
+      "sensitive": false,
+      "source": "dynamic_env_pattern"
+    },
+    {
+      "file": "src/provider.c",
+      "line": 4576,
+      "mapped_constants": [],
+      "name": "<PROVIDER>_API_BASE",
+      "operation": "dynamic",
+      "sensitive": false,
+      "source": "dynamic_env_pattern"
+    },
+    {
+      "file": "src/provider.c",
+      "line": 4581,
       "mapped_constants": [],
       "name": "<PROVIDER>_BASE_URL",
       "operation": "dynamic",
@@ -23333,7 +23555,7 @@
     },
     {
       "file": "src/swarm.c",
-      "line": 1143,
+      "line": 1163,
       "mapped_constants": [],
       "name": "ANTHROPIC_API_KEY",
       "operation": "unsetenv",
@@ -23342,7 +23564,7 @@
     },
     {
       "file": "src/swarm.c",
-      "line": 1143,
+      "line": 1163,
       "mapped_constants": [],
       "name": "ANTHROPIC_API_KEY",
       "operation": "string",
@@ -23351,7 +23573,7 @@
     },
     {
       "file": "src/swarm.c",
-      "line": 1144,
+      "line": 1164,
       "mapped_constants": [],
       "name": "ANTHROPIC_AUTH_TOKEN",
       "operation": "unsetenv",
@@ -23360,7 +23582,7 @@
     },
     {
       "file": "src/swarm.c",
-      "line": 1144,
+      "line": 1164,
       "mapped_constants": [],
       "name": "ANTHROPIC_AUTH_TOKEN",
       "operation": "string",
@@ -23369,7 +23591,7 @@
     },
     {
       "file": "src/swarm.c",
-      "line": 1145,
+      "line": 1165,
       "mapped_constants": [],
       "name": "ANTHROPIC_BASE_URL",
       "operation": "unsetenv",
@@ -23378,7 +23600,7 @@
     },
     {
       "file": "src/swarm.c",
-      "line": 1145,
+      "line": 1165,
       "mapped_constants": [],
       "name": "ANTHROPIC_BASE_URL",
       "operation": "string",
@@ -23387,7 +23609,7 @@
     },
     {
       "file": "src/swarm.c",
-      "line": 1146,
+      "line": 1166,
       "mapped_constants": [],
       "name": "ANTHROPIC_MODEL",
       "operation": "unsetenv",
@@ -23396,7 +23618,7 @@
     },
     {
       "file": "src/swarm.c",
-      "line": 1147,
+      "line": 1167,
       "mapped_constants": [],
       "name": "DSCO_CLAUDE_CODE_OAUTH_TOKEN",
       "operation": "setenv",
@@ -23405,7 +23627,7 @@
     },
     {
       "file": "src/swarm.c",
-      "line": 1147,
+      "line": 1167,
       "mapped_constants": [],
       "name": "DSCO_CLAUDE_CODE_OAUTH_TOKEN",
       "operation": "string",
@@ -23414,7 +23636,7 @@
     },
     {
       "file": "src/swarm.c",
-      "line": 1148,
+      "line": 1168,
       "mapped_constants": [],
       "name": "CLAUDE_CODE_OAUTH_TOKEN",
       "operation": "setenv",
@@ -23423,7 +23645,7 @@
     },
     {
       "file": "src/swarm.c",
-      "line": 1148,
+      "line": 1168,
       "mapped_constants": [],
       "name": "CLAUDE_CODE_OAUTH_TOKEN",
       "operation": "string",
@@ -23432,7 +23654,7 @@
     },
     {
       "file": "src/swarm.c",
-      "line": 1298,
+      "line": 1318,
       "mapped_constants": [],
       "name": "DSCO_SUBSIDIZED_EXECUTORS",
       "operation": "getenv",
@@ -23441,7 +23663,7 @@
     },
     {
       "file": "src/swarm.c",
-      "line": 1298,
+      "line": 1318,
       "mapped_constants": [],
       "name": "DSCO_SUBSIDIZED_EXECUTORS",
       "operation": "string",
@@ -23855,7 +24077,7 @@
     },
     {
       "file": "src/tools.c",
-      "line": 15486,
+      "line": 15482,
       "mapped_constants": [],
       "name": "DSCO_AGENT_ID",
       "operation": "getenv",
@@ -23864,7 +24086,7 @@
     },
     {
       "file": "src/tools.c",
-      "line": 15486,
+      "line": 15482,
       "mapped_constants": [],
       "name": "DSCO_AGENT_ID",
       "operation": "string",
@@ -23873,7 +24095,7 @@
     },
     {
       "file": "src/tools.c",
-      "line": 27119,
+      "line": 27725,
       "mapped_constants": [],
       "name": "DSCO_SWARM_DEPTH",
       "operation": "getenv",
@@ -23882,7 +24104,7 @@
     },
     {
       "file": "src/tools.c",
-      "line": 27119,
+      "line": 27725,
       "mapped_constants": [],
       "name": "DSCO_SWARM_DEPTH",
       "operation": "string",
@@ -23891,7 +24113,7 @@
     },
     {
       "file": "src/tools.c",
-      "line": 27120,
+      "line": 27726,
       "mapped_constants": [],
       "name": "DSCO_PARENT_INSTANCE_ID",
       "operation": "getenv",
@@ -23900,7 +24122,7 @@
     },
     {
       "file": "src/tools.c",
-      "line": 27120,
+      "line": 27726,
       "mapped_constants": [],
       "name": "DSCO_PARENT_INSTANCE_ID",
       "operation": "string",
@@ -23909,7 +24131,7 @@
     },
     {
       "file": "src/tools.c",
-      "line": 27122,
+      "line": 27728,
       "mapped_constants": [],
       "name": "DSCO_SUBAGENT",
       "operation": "getenv",
@@ -23918,7 +24140,7 @@
     },
     {
       "file": "src/tools.c",
-      "line": 27122,
+      "line": 27728,
       "mapped_constants": [],
       "name": "DSCO_SUBAGENT",
       "operation": "string",
@@ -23927,7 +24149,7 @@
     },
     {
       "file": "src/tools.c",
-      "line": 27232,
+      "line": 27838,
       "mapped_constants": [],
       "name": "DSCO_TOOL_EMBEDDINGS_FILE",
       "operation": "getenv",
@@ -23936,7 +24158,7 @@
     },
     {
       "file": "src/tools.c",
-      "line": 27232,
+      "line": 27838,
       "mapped_constants": [],
       "name": "DSCO_TOOL_EMBEDDINGS_FILE",
       "operation": "string",
@@ -23945,7 +24167,7 @@
     },
     {
       "file": "src/tools.c",
-      "line": 27345,
+      "line": 27951,
       "mapped_constants": [],
       "name": "JINA_API_KEY",
       "operation": "getenv",
@@ -23954,7 +24176,7 @@
     },
     {
       "file": "src/tools.c",
-      "line": 27345,
+      "line": 27951,
       "mapped_constants": [],
       "name": "JINA_API_KEY",
       "operation": "string",
@@ -23963,7 +24185,7 @@
     },
     {
       "file": "src/tools.c",
-      "line": 28957,
+      "line": 29563,
       "mapped_constants": [],
       "name": "DSCO_QUORUM_GATE",
       "operation": "getenv",
@@ -23972,7 +24194,7 @@
     },
     {
       "file": "src/tools.c",
-      "line": 28957,
+      "line": 29563,
       "mapped_constants": [],
       "name": "DSCO_QUORUM_GATE",
       "operation": "string",
@@ -25026,16 +25248,15 @@
       "numeric_expression": 133,
       "numeric_literal": 424,
       "prompt_or_blob": 12,
-      "string_default": 196
+      "string_default": 198
     },
-    "constant_count": 1057,
-    "env_occurrence_count": 1242,
+    "constant_count": 1059,
+    "env_occurrence_count": 1264,
     "mapped_constant_count": 29,
     "mapped_unique_env_var_count": 27,
-    "proposed_env_constant_count": 770,
+    "proposed_env_constant_count": 772,
     "top_constant_files": {
       "dsc.c": 20,
-      "include/agent_profile.h": 9,
       "include/config.h": 49,
       "include/dsco_crypto.h": 23,
       "include/error.h": 10,
@@ -25053,6 +25274,7 @@
       "src/crypto.c": 12,
       "src/fingerprint.c": 20,
       "src/llm.c": 15,
+      "src/main.c": 11,
       "src/plot.c": 12,
       "src/project_mux.c": 20,
       "src/supervisor.c": 24,
@@ -25064,16 +25286,16 @@
       "dsc.c": 47,
       "include/swarm.h": 10,
       "include/trading.h": 12,
-      "src/agent.c": 62,
+      "src/agent.c": 64,
       "src/connector.c": 8,
       "src/heartbeat.c": 20,
       "src/integrations.c": 56,
       "src/ipc.c": 10,
       "src/llm.c": 38,
-      "src/main.c": 132,
+      "src/main.c": 148,
       "src/openai_oauth.c": 16,
       "src/output_guard.c": 12,
-      "src/provider.c": 227,
+      "src/provider.c": 231,
       "src/provider_profiles.c": 64,
       "src/se_store.c": 14,
       "src/sealed_store.c": 17,
@@ -25088,7 +25310,7 @@
       "src/tui.c": 14
     },
     "unique_env_var_count": 382,
-    "unmapped_constant_count": 1028,
+    "unmapped_constant_count": 1030,
     "unmapped_unique_env_var_count": 355
   }
 }

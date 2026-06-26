@@ -6,6 +6,30 @@ The format loosely follows Keep a Changelog with an `Unreleased` section.
 
 ## [Unreleased]
 
+### Added
+
+- Chronicle local activity ledger docs now cover startup behavior, env controls, and timeline-server endpoints.
+- Integration catalog docs now surface Codex app-directory discovery and doctor tooling.
+- External tool catalog docs now materialize the cached Codex app-directory universe separately from built-in tools.
+- Repository coverage docs now generate a tracked-file manifest for docs review.
+- Cosmopolitan build docs now include the Makefile `cosmo-info` target and native-dependency gating notes.
+
+### Fixed
+
+- Vision input: downscaled images now report the correct media type. When a large
+  PNG/HEIC/WEBP is resized to JPEG, `load_and_encode_image` now propagates the
+  corrected `image/jpeg` media type to the caller instead of mislabeling the JPEG
+  bytes with the original extension's type (which some providers reject).
+- Hardened `print_tool_result_ex` against a NULL `result` pointer (latent null
+  dereference in the size-preview path; the function already null-guards the body
+  preview below it).
+
+### Changed
+
+- Regenerated generated docs: API reference, built-in tool catalog, and constants/env index.
+- `make docs` / `make docs-check` now include constants/env, external tool catalog, and repo coverage generators.
+- README and docs index now reflect current source counts, built-in tool count, Chronicle, integrations, and Cosmopolitan build lane.
+
 ## [1.0.2] - 2026-06-26
 
 ### Added
