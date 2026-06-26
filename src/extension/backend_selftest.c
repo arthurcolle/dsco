@@ -13,7 +13,9 @@ int backend_selftest_numerical(void) {
     double ys[4] = {2.0, 4.0, 6.0, 8.0};
     double mean = nb->mean(xs, 4);
     double corr = nb->correlation(xs, ys, 4);
-    if (mean < 2.49 || mean > 2.51) return -2;
-    if (corr < 0.999) return -3;
+    if (mean < 2.49 || mean > 2.51)
+        return -2;
+    if (corr < 0.999)
+        return -3;
     return 0;
 }

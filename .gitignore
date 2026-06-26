@@ -1,15 +1,16 @@
 # Build artifacts
 *.o
 build/
-dsco
-dsco-debug
-dsco-asan
-dsco-ubsan
-dsco-codex
-dsco_asan
-test_runner
-asan-test_runner
-ubsan-test_runner
+/dsco
+/dsco-debug
+/dsco-asan
+/dsco-ubsan
+/dsco-codex
+/dsco_asan
+/test_runner
+/asan-test_runner
+/ubsan-test_runner
+/test_*
 *.dSYM/
 
 # Editor / OS
@@ -29,17 +30,34 @@ error
 __pycache__/
 *.pyc
 *.pyo
+.mypy_cache/
+.pytest_cache/
+.ruff_cache/
 .venv/
 venv/
+.test-venv/
+.web-venv/
 
 # IDE
 .vscode/
 .idea/
 
-# Private notes / scratch
+# Private notes / scratch / personal files
+research_notes/
 notes/
+memory/
 prompt*.txt
 trading_mind.txt
+*.personal.md
+*.scratch.md
+bufkit.py
+kukulkan.py
+calibration.py
+kalman_bias.py
+nwp_pipeline.py
+realtime.py
+msty_explainer.html
+weather_api_schemas.json
 
 # Secrets / credentials
 .env
@@ -55,6 +73,7 @@ data/ginnie/
 # Agent harness / local state
 .claude/
 .arthur/
+email-mcp/
 
 # Build outputs (single-file + variant binaries)
 dsc
@@ -68,7 +87,9 @@ ipc_experiment
 response.json
 
 # Large data / generated corpora (relocated out of repo)
-data/
+# data/ is the pizza-box — tracked in git
+data/cache/
+data/tmp/
 books/
 climate_data/
 papers/
@@ -86,3 +107,9 @@ DEEP_REVIEW_IMPROVEMENTS.md
 DOCS_MANIFEST.md
 RAPID_INTEGRATION_PLAN.md
 CLAUDE_CODE_AUTH_QUICK_REFERENCE.md
+face_calibrate.py
+face_landmarker.task
+src/*.bak*
+src/*.gov_patch_backup
+src/topology_novel.c
+src/generated/
