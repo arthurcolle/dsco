@@ -58,5 +58,6 @@ const agent_profile_t  *agent_profile_active(void);
  * Always true when no profile is active (tool_count == 0 && group_count == 0).
  * group_hint: optional group name (may be NULL), used for group-based filtering. */
 bool agent_profile_tool_allowed(const char *tool_name, const char *group_hint);
+bool agent_profile_tool_allowed_strict(const char *tool_name, const char *group_hint);
 
 #endif /* DSCO_AGENT_PROFILE_H */

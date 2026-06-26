@@ -12,42 +12,67 @@
 
 /* ── State ────────────────────────────────────────────────────────────── */
 
-static FILE          *s_trace_fp     = NULL;
-static bool           s_trace_stderr = false;
-static trace_level_t  s_min_level    = TRACE_LVL_OFF;
-static bool           s_initialized  = false;
-static pthread_mutex_t s_trace_mu    = PTHREAD_MUTEX_INITIALIZER;
+static FILE *s_trace_fp = NULL;
+static bool s_trace_stderr = false;
+static trace_level_t s_min_level = TRACE_LVL_OFF;
+static bool s_initialized = false;
+static pthread_mutex_t s_trace_mu = PTHREAD_MUTEX_INITIALIZER;
 
 static const char *level_str(trace_level_t lvl) {
     switch (lvl) {
-    case TRACE_LVL_DEBUG: return "debug";
-    case TRACE_LVL_INFO:  return "info";
-    case TRACE_LVL_WARN:  return "warn";
-    case TRACE_LVL_ERROR: return "error";
-    default:              return "?";
+        case TRACE_LVL_DEBUG:
+            return "debug";
+        case TRACE_LVL_INFO:
+            return "info";
+        case TRACE_LVL_WARN:
+            return "warn";
+        case TRACE_LVL_ERROR:
+            return "error";
+        default:
+            return "?";
     }
 }
 
 /* JSON-escape a string into buf. Returns bytes written (excluding NUL). */
 static size_t json_escape(char *buf, size_t cap, const char *s) {
     size_t w = 0;
-    if (!s) { if (cap > 0) buf[0] = '\0'; return 0; }
+    if (!s) {
+        if (cap > 0)
+            buf[0] = '\0';
+        return 0;
+    }
     for (; *s && w + 6 < cap; s++) {
         switch (*s) {
-        case '"':  buf[w++] = '\\'; buf[w++] = '"';  break;
-        case '\\': buf[w++] = '\\'; buf[w++] = '\\'; break;
-        case '\n': buf[w++] = '\\'; buf[w++] = 'n';  break;
-        case '\r': buf[w++] = '\\'; buf[w++] = 'r';  break;
-        case '\t': buf[w++] = '\\'; buf[w++] = 't';  break;
-        default:
-            if ((unsigned char)*s < 0x20) {
-                w += (size_t)snprintf(buf + w, cap - w, "\\u%04x", (unsigned char)*s);
-            } else {
-                buf[w++] = *s;
-            }
+            case '"':
+                buf[w++] = '\\';
+                buf[w++] = '"';
+                break;
+            case '\\':
+                buf[w++] = '\\';
+                buf[w++] = '\\';
+                break;
+            case '\n':
+                buf[w++] = '\\';
+                buf[w++] = 'n';
+                break;
+            case '\r':
+                buf[w++] = '\\';
+                buf[w++] = 'r';
+                break;
+            case '\t':
+                buf[w++] = '\\';
+                buf[w++] = 't';
+                break;
+            default:
+                if ((unsigned char)*s < 0x20) {
+                    w += (size_t)snprintf(buf + w, cap - w, "\\u%04x", (unsigned char)*s);
+                } else {
+                    buf[w++] = *s;
+                }
         }
     }
-    if (w < cap) buf[w] = '\0';
+    if (w < cap)
+        buf[w] = '\0';
     return w;
 }
 
@@ -69,15 +94,18 @@ static const char *basename_only(const char *path) {
 }
 
 static bool mkdir_p_trace(const char *path) {
-    if (!path || !*path) return false;
+    if (!path || !*path)
+        return false;
 
     char tmp[512];
     size_t n = strlen(path);
-    if (n >= sizeof(tmp)) return false;
+    if (n >= sizeof(tmp))
+        return false;
     memcpy(tmp, path, n + 1);
 
     for (char *p = tmp + 1; *p; p++) {
-        if (*p != '/') continue;
+        if (*p != '/')
+            continue;
         *p = '\0';
         if (tmp[0] != '\0' && mkdir(tmp, 0755) != 0 && errno != EEXIST) {
             return false;
@@ -85,7 +113,8 @@ static bool mkdir_p_trace(const char *path) {
         *p = '/';
     }
 
-    if (mkdir(tmp, 0755) != 0 && errno != EEXIST) return false;
+    if (mkdir(tmp, 0755) != 0 && errno != EEXIST)
+        return false;
     return true;
 }
 
@@ -98,7 +127,8 @@ static FILE *open_trace_default(const char *home, char *path, size_t path_len) {
         mkdir_p_trace(dir);
         snprintf(path, path_len, "%s/trace-%d.jsonl", dir, (int)getpid());
         fp = fopen(path, "a");
-        if (fp) return fp;
+        if (fp)
+            return fp;
     }
 
     snprintf(path, path_len, "/tmp/dsco-trace-%d.jsonl", (int)getpid());
@@ -110,7 +140,10 @@ static FILE *open_trace_default(const char *home, char *path, size_t path_len) {
 
 void trace_init(void) {
     pthread_mutex_lock(&s_trace_mu);
-    if (s_initialized) { pthread_mutex_unlock(&s_trace_mu); return; }
+    if (s_initialized) {
+        pthread_mutex_unlock(&s_trace_mu);
+        return;
+    }
     s_initialized = true;
 
     const char *env = getenv("DSCO_TRACE");
@@ -124,7 +157,7 @@ void trace_init(void) {
     if (strcmp(env, "debug") == 0) {
         s_min_level = TRACE_LVL_DEBUG;
     } else {
-        s_min_level = TRACE_LVL_INFO;  /* "1", "true", or a path */
+        s_min_level = TRACE_LVL_INFO; /* "1", "true", or a path */
     }
 
     /* Determine output file */
@@ -132,8 +165,8 @@ void trace_init(void) {
     if (trace_stderr && (strcmp(trace_stderr, "1") == 0 || strcmp(trace_stderr, "true") == 0))
         s_trace_stderr = true;
 
-    if (strcmp(env, "1") == 0 || strcmp(env, "true") == 0 ||
-        strcmp(env, "debug") == 0 || strcmp(env, "info") == 0) {
+    if (strcmp(env, "1") == 0 || strcmp(env, "true") == 0 || strcmp(env, "debug") == 0 ||
+        strcmp(env, "info") == 0) {
         /* Default path: ~/.dsco/debug/trace-<pid>.jsonl */
         const char *home = getenv("HOME");
         char path[600];
@@ -189,9 +222,10 @@ static void emit_line(const char *line) {
     pthread_mutex_unlock(&s_trace_mu);
 }
 
-void trace_log(trace_level_t lvl, const char *func, const char *file,
-               int line, const char *fmt, ...) {
-    if (lvl < s_min_level) return;
+void trace_log(trace_level_t lvl, const char *func, const char *file, int line, const char *fmt,
+               ...) {
+    if (lvl < s_min_level)
+        return;
 
     char ts[40];
     timestamp(ts, sizeof(ts));
@@ -210,20 +244,19 @@ void trace_log(trace_level_t lvl, const char *func, const char *file,
 
     char buf[8192];
     snprintf(buf, sizeof(buf),
-        "{\"ts\":\"%s\",\"level\":\"%s\",\"pid\":%d,\"tid\":%lu,"
-        "\"func\":\"%s\",\"file\":\"%s\",\"line\":%d,"
-        "\"msg\":\"%s\"}",
-        ts, level_str(lvl), (int)getpid(),
-        (unsigned long)pthread_self(),
-        esc_func, basename_only(file), line,
-        esc_msg);
+             "{\"ts\":\"%s\",\"level\":\"%s\",\"pid\":%d,\"tid\":%lu,"
+             "\"func\":\"%s\",\"file\":\"%s\",\"line\":%d,"
+             "\"msg\":\"%s\"}",
+             ts, level_str(lvl), (int)getpid(), (unsigned long)pthread_self(), esc_func,
+             basename_only(file), line, esc_msg);
 
     emit_line(buf);
 }
 
-void trace_log_kv(trace_level_t lvl, const char *func, const char *file,
-                  int line, const char *event, ...) {
-    if (lvl < s_min_level) return;
+void trace_log_kv(trace_level_t lvl, const char *func, const char *file, int line,
+                  const char *event, ...) {
+    if (lvl < s_min_level)
+        return;
 
     char ts[40];
     timestamp(ts, sizeof(ts));
@@ -237,28 +270,28 @@ void trace_log_kv(trace_level_t lvl, const char *func, const char *file,
     /* Build the JSON line with key-value pairs */
     char buf[8192];
     int pos = snprintf(buf, sizeof(buf),
-        "{\"ts\":\"%s\",\"level\":\"%s\",\"pid\":%d,\"tid\":%lu,"
-        "\"func\":\"%s\",\"file\":\"%s\",\"line\":%d,"
-        "\"event\":\"%s\"",
-        ts, level_str(lvl), (int)getpid(),
-        (unsigned long)pthread_self(),
-        esc_func, basename_only(file), line,
-        esc_event);
+                       "{\"ts\":\"%s\",\"level\":\"%s\",\"pid\":%d,\"tid\":%lu,"
+                       "\"func\":\"%s\",\"file\":\"%s\",\"line\":%d,"
+                       "\"event\":\"%s\"",
+                       ts, level_str(lvl), (int)getpid(), (unsigned long)pthread_self(), esc_func,
+                       basename_only(file), line, esc_event);
 
     va_list ap;
     va_start(ap, event);
     for (;;) {
         const char *key = va_arg(ap, const char *);
-        if (!key) break;
+        if (!key)
+            break;
         const char *val = va_arg(ap, const char *);
-        if (!val) val = "(null)";
+        if (!val)
+            val = "(null)";
 
         char esc_key[256], esc_val[2048];
         json_escape(esc_key, sizeof(esc_key), key);
         json_escape(esc_val, sizeof(esc_val), val);
 
-        int wrote = snprintf(buf + pos, sizeof(buf) - (size_t)pos,
-                             ",\"%s\":\"%s\"", esc_key, esc_val);
+        int wrote =
+            snprintf(buf + pos, sizeof(buf) - (size_t)pos, ",\"%s\":\"%s\"", esc_key, esc_val);
         if (wrote > 0 && (size_t)(pos + wrote) < sizeof(buf))
             pos += wrote;
         else

@@ -15,7 +15,7 @@ mapfile -t HEADERS < <(cd "$ROOT/include" && ls *.h 2>/dev/null | sort)
 {
   echo "# API Reference"
   echo
-  echo "This file is auto-generated from header declarations in the repository root."
+  echo "This file is auto-generated from header declarations in \`include/\`."
   echo
   echo "- Generator: \`./scripts/gen_api_reference.sh\`"
   echo "- Headers scanned: ${#HEADERS[@]}"
@@ -27,7 +27,7 @@ mapfile -t HEADERS < <(cd "$ROOT/include" && ls *.h 2>/dev/null | sort)
   echo "\`\`\`"
 
   for h in "${HEADERS[@]}"; do
-    path="$ROOT/$h"
+    path="$ROOT/include/$h"
     echo
     echo "## \`$h\`"
     echo

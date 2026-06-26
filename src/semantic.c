@@ -21,45 +21,353 @@ void semantic_set_vfs(vfs_db_t *vfs) {
  * STOP WORDS — filtered during tokenization
  * ═══════════════════════════════════════════════════════════════════════════ */
 
-static const char *STOP_WORDS[] = {
-    "a","about","above","across","after","afterwards","again","against","ain","all",
-    "almost","alone","along","already","also","although","always","am","among","amongst",
-    "amoungst","amount","an","and","another","any","anyhow","anyone","anything","anyway",
-    "anywhere","are","aren","around","as","at","back","be","became","because","become",
-    "becomes","becoming","been","before","beforehand","behind","being","below","beside",
-    "besides","between","beyond","bill","both","bottom","but","by","call","can","cannot",
-    "cant","co","con","could","couldn","cry","de","describe","detail","did","didn","do",
-    "does","doesn","doing","don","done","down","due","during","each","eg","eight","either",
-    "eleven","else","elsewhere","empty","enough","etc","even","ever","every","everyone",
-    "everything","everywhere","except","few","fifteen","fifty","fill","find","fire","first",
-    "five","for","former","formerly","forty","found","four","from","front","full","further",
-    "get","give","go","had","hadn","has","hasn","have","haven","having","he","hence","her",
-    "here","hereafter","hereby","herein","hereupon","hers","herself","him","himself","his",
-    "how","however","hundred","i","ie","if","in","inc","indeed","interest","into","is",
-    "isn","it","its","itself","just","keep","last","latter","latterly","least","less","ltd",
-    "made","many","may","me","meanwhile","might","mightn","mill","mine","more","moreover",
-    "most","mostly","move","much","must","mustn","my","myself","name","namely","neither",
-    "never","nevertheless","next","nine","no","nobody","none","noone","nor","not","nothing",
-    "now","nowhere","of","off","often","on","once","one","only","onto","or","other","others",
-    "otherwise","our","ours","ourselves","out","over","own","part","per","perhaps","please",
-    "put","rather","re","same","see","seem","seemed","seeming","seems","serious","several",
-    "shall","shan","she","should","shouldn","show","side","since","sincere","six","sixty",
-    "so","some","somehow","someone","something","sometime","sometimes","somewhere","still",
-    "such","system","take","ten","than","that","the","their","theirs","them","themselves",
-    "then","thence","there","thereafter","thereby","therefore","therein","thereupon",
-    "these","they","thick","thin","third","this","those","though","three","through",
-    "throughout","thru","thus","to","together","too","top","toward","towards","twelve",
-    "twenty","two","un","under","until","up","upon","us","very","via","was","wasn","we",
-    "well","were","weren","what","whatever","when","whence","whenever","where","whereafter",
-    "whereas","whereby","wherein","whereupon","wherever","whether","which","while",
-    "whither","who","whoever","whole","whom","whose","why","will","with","within",
-    "without","won","would","wouldn","yet","you","your","yours","yourself","yourselves",
-    NULL
-};
+static const char *STOP_WORDS[] = {"a",
+                                   "about",
+                                   "above",
+                                   "across",
+                                   "after",
+                                   "afterwards",
+                                   "again",
+                                   "against",
+                                   "ain",
+                                   "all",
+                                   "almost",
+                                   "alone",
+                                   "along",
+                                   "already",
+                                   "also",
+                                   "although",
+                                   "always",
+                                   "am",
+                                   "among",
+                                   "amongst",
+                                   "amoungst",
+                                   "amount",
+                                   "an",
+                                   "and",
+                                   "another",
+                                   "any",
+                                   "anyhow",
+                                   "anyone",
+                                   "anything",
+                                   "anyway",
+                                   "anywhere",
+                                   "are",
+                                   "aren",
+                                   "around",
+                                   "as",
+                                   "at",
+                                   "back",
+                                   "be",
+                                   "became",
+                                   "because",
+                                   "become",
+                                   "becomes",
+                                   "becoming",
+                                   "been",
+                                   "before",
+                                   "beforehand",
+                                   "behind",
+                                   "being",
+                                   "below",
+                                   "beside",
+                                   "besides",
+                                   "between",
+                                   "beyond",
+                                   "bill",
+                                   "both",
+                                   "bottom",
+                                   "but",
+                                   "by",
+                                   "call",
+                                   "can",
+                                   "cannot",
+                                   "cant",
+                                   "co",
+                                   "con",
+                                   "could",
+                                   "couldn",
+                                   "cry",
+                                   "de",
+                                   "describe",
+                                   "detail",
+                                   "did",
+                                   "didn",
+                                   "do",
+                                   "does",
+                                   "doesn",
+                                   "doing",
+                                   "don",
+                                   "done",
+                                   "down",
+                                   "due",
+                                   "during",
+                                   "each",
+                                   "eg",
+                                   "eight",
+                                   "either",
+                                   "eleven",
+                                   "else",
+                                   "elsewhere",
+                                   "empty",
+                                   "enough",
+                                   "etc",
+                                   "even",
+                                   "ever",
+                                   "every",
+                                   "everyone",
+                                   "everything",
+                                   "everywhere",
+                                   "except",
+                                   "few",
+                                   "fifteen",
+                                   "fifty",
+                                   "fill",
+                                   "find",
+                                   "fire",
+                                   "first",
+                                   "five",
+                                   "for",
+                                   "former",
+                                   "formerly",
+                                   "forty",
+                                   "found",
+                                   "four",
+                                   "from",
+                                   "front",
+                                   "full",
+                                   "further",
+                                   "get",
+                                   "give",
+                                   "go",
+                                   "had",
+                                   "hadn",
+                                   "has",
+                                   "hasn",
+                                   "have",
+                                   "haven",
+                                   "having",
+                                   "he",
+                                   "hence",
+                                   "her",
+                                   "here",
+                                   "hereafter",
+                                   "hereby",
+                                   "herein",
+                                   "hereupon",
+                                   "hers",
+                                   "herself",
+                                   "him",
+                                   "himself",
+                                   "his",
+                                   "how",
+                                   "however",
+                                   "hundred",
+                                   "i",
+                                   "ie",
+                                   "if",
+                                   "in",
+                                   "inc",
+                                   "indeed",
+                                   "interest",
+                                   "into",
+                                   "is",
+                                   "isn",
+                                   "it",
+                                   "its",
+                                   "itself",
+                                   "just",
+                                   "keep",
+                                   "last",
+                                   "latter",
+                                   "latterly",
+                                   "least",
+                                   "less",
+                                   "ltd",
+                                   "made",
+                                   "many",
+                                   "may",
+                                   "me",
+                                   "meanwhile",
+                                   "might",
+                                   "mightn",
+                                   "mill",
+                                   "mine",
+                                   "more",
+                                   "moreover",
+                                   "most",
+                                   "mostly",
+                                   "move",
+                                   "much",
+                                   "must",
+                                   "mustn",
+                                   "my",
+                                   "myself",
+                                   "name",
+                                   "namely",
+                                   "neither",
+                                   "never",
+                                   "nevertheless",
+                                   "next",
+                                   "nine",
+                                   "no",
+                                   "nobody",
+                                   "none",
+                                   "noone",
+                                   "nor",
+                                   "not",
+                                   "nothing",
+                                   "now",
+                                   "nowhere",
+                                   "of",
+                                   "off",
+                                   "often",
+                                   "on",
+                                   "once",
+                                   "one",
+                                   "only",
+                                   "onto",
+                                   "or",
+                                   "other",
+                                   "others",
+                                   "otherwise",
+                                   "our",
+                                   "ours",
+                                   "ourselves",
+                                   "out",
+                                   "over",
+                                   "own",
+                                   "part",
+                                   "per",
+                                   "perhaps",
+                                   "please",
+                                   "put",
+                                   "rather",
+                                   "re",
+                                   "same",
+                                   "see",
+                                   "seem",
+                                   "seemed",
+                                   "seeming",
+                                   "seems",
+                                   "serious",
+                                   "several",
+                                   "shall",
+                                   "shan",
+                                   "she",
+                                   "should",
+                                   "shouldn",
+                                   "show",
+                                   "side",
+                                   "since",
+                                   "sincere",
+                                   "six",
+                                   "sixty",
+                                   "so",
+                                   "some",
+                                   "somehow",
+                                   "someone",
+                                   "something",
+                                   "sometime",
+                                   "sometimes",
+                                   "somewhere",
+                                   "still",
+                                   "such",
+                                   "system",
+                                   "take",
+                                   "ten",
+                                   "than",
+                                   "that",
+                                   "the",
+                                   "their",
+                                   "theirs",
+                                   "them",
+                                   "themselves",
+                                   "then",
+                                   "thence",
+                                   "there",
+                                   "thereafter",
+                                   "thereby",
+                                   "therefore",
+                                   "therein",
+                                   "thereupon",
+                                   "these",
+                                   "they",
+                                   "thick",
+                                   "thin",
+                                   "third",
+                                   "this",
+                                   "those",
+                                   "though",
+                                   "three",
+                                   "through",
+                                   "throughout",
+                                   "thru",
+                                   "thus",
+                                   "to",
+                                   "together",
+                                   "too",
+                                   "top",
+                                   "toward",
+                                   "towards",
+                                   "twelve",
+                                   "twenty",
+                                   "two",
+                                   "un",
+                                   "under",
+                                   "until",
+                                   "up",
+                                   "upon",
+                                   "us",
+                                   "very",
+                                   "via",
+                                   "was",
+                                   "wasn",
+                                   "we",
+                                   "well",
+                                   "were",
+                                   "weren",
+                                   "what",
+                                   "whatever",
+                                   "when",
+                                   "whence",
+                                   "whenever",
+                                   "where",
+                                   "whereafter",
+                                   "whereas",
+                                   "whereby",
+                                   "wherein",
+                                   "whereupon",
+                                   "wherever",
+                                   "whether",
+                                   "which",
+                                   "while",
+                                   "whither",
+                                   "who",
+                                   "whoever",
+                                   "whole",
+                                   "whom",
+                                   "whose",
+                                   "why",
+                                   "will",
+                                   "with",
+                                   "within",
+                                   "without",
+                                   "won",
+                                   "would",
+                                   "wouldn",
+                                   "yet",
+                                   "you",
+                                   "your",
+                                   "yours",
+                                   "yourself",
+                                   "yourselves",
+                                   NULL};
 
 static bool is_stop_word(const char *word) {
     for (int i = 0; STOP_WORDS[i]; i++) {
-        if (strcmp(word, STOP_WORDS[i]) == 0) return true;
+        if (strcmp(word, STOP_WORDS[i]) == 0)
+            return true;
     }
     return false;
 }
@@ -70,17 +378,17 @@ static bool is_stop_word(const char *word) {
 
 void sem_tokenize(const char *text, token_list_t *out) {
     out->count = 0;
-    if (!text) return;
+    if (!text)
+        return;
 
     char buf[SEM_MAX_TOKEN_LEN];
     int blen = 0;
 
-    for (const char *p = text; ; p++) {
-        bool is_sep = (*p == '\0' || isspace((unsigned char)*p) ||
-                       *p == ',' || *p == '.' || *p == ':' || *p == ';' ||
-                       *p == '(' || *p == ')' || *p == '[' || *p == ']' ||
-                       *p == '{' || *p == '}' || *p == '"' || *p == '\'' ||
-                       *p == '/' || *p == '|' || *p == '!' || *p == '?');
+    for (const char *p = text;; p++) {
+        bool is_sep = (*p == '\0' || isspace((unsigned char)*p) || *p == ',' || *p == '.' ||
+                       *p == ':' || *p == ';' || *p == '(' || *p == ')' || *p == '[' || *p == ']' ||
+                       *p == '{' || *p == '}' || *p == '"' || *p == '\'' || *p == '/' ||
+                       *p == '|' || *p == '!' || *p == '?');
 
         if (is_sep) {
             if (blen > 1 && blen < SEM_MAX_TOKEN_LEN - 1 && out->count < SEM_MAX_TOKENS) {
@@ -91,7 +399,8 @@ void sem_tokenize(const char *text, token_list_t *out) {
                 }
             }
             blen = 0;
-            if (*p == '\0') break;
+            if (*p == '\0')
+                break;
         } else {
             if (blen < SEM_MAX_TOKEN_LEN - 2) {
                 buf[blen++] = (char)tolower((unsigned char)*p);
@@ -112,9 +421,11 @@ void sem_tfidf_init(tfidf_index_t *idx) {
 static int vocab_get_or_add(tfidf_index_t *idx, const char *term) {
     /* Linear scan — fine for <4096 terms */
     for (int i = 0; i < idx->vocab_count; i++) {
-        if (strcmp(idx->vocab[i].term, term) == 0) return i;
+        if (strcmp(idx->vocab[i].term, term) == 0)
+            return i;
     }
-    if (idx->vocab_count >= SEM_VOCAB_SIZE) return -1;
+    if (idx->vocab_count >= SEM_VOCAB_SIZE)
+        return -1;
     int id = idx->vocab_count++;
     strncpy(idx->vocab[id].term, term, SEM_MAX_TOKEN_LEN - 1);
     idx->vocab[id].vocab_id = id;
@@ -125,23 +436,25 @@ static int vocab_get_or_add(tfidf_index_t *idx, const char *term) {
 
 static int vocab_find(tfidf_index_t *idx, const char *term) {
     for (int i = 0; i < idx->vocab_count; i++) {
-        if (strcmp(idx->vocab[i].term, term) == 0) return i;
+        if (strcmp(idx->vocab[i].term, term) == 0)
+            return i;
     }
     return -1;
 }
 
 /* Track which terms appear in each document for DF computation */
 typedef struct {
-    int    doc_terms[SEM_VOCAB_SIZE];  /* vocab IDs seen in this doc */
-    int    doc_tfs[SEM_VOCAB_SIZE];    /* term frequency per vocab ID */
-    int    term_count;
-    int    total_tokens;
+    int doc_terms[SEM_VOCAB_SIZE]; /* vocab IDs seen in this doc */
+    int doc_tfs[SEM_VOCAB_SIZE];   /* term frequency per vocab ID */
+    int term_count;
+    int total_tokens;
 } doc_stats_t;
 
 static doc_stats_t s_doc_stats[SEM_MAX_DOCS];
 
 int sem_tfidf_add_doc(tfidf_index_t *idx, const char *text) {
-    if (idx->doc_count >= SEM_MAX_DOCS) return -1;
+    if (idx->doc_count >= SEM_MAX_DOCS)
+        return -1;
     int doc_id = idx->doc_count++;
 
     token_list_t tokens;
@@ -154,7 +467,8 @@ int sem_tfidf_add_doc(tfidf_index_t *idx, const char *text) {
     /* Count term frequencies for this document */
     for (int i = 0; i < tokens.count; i++) {
         int vid = vocab_get_or_add(idx, tokens.tokens[i]);
-        if (vid < 0) continue;
+        if (vid < 0)
+            continue;
 
         /* Check if we already saw this term in this doc */
         bool found = false;
@@ -182,7 +496,8 @@ int sem_tfidf_add_doc(tfidf_index_t *idx, const char *text) {
 
 void sem_tfidf_finalize(tfidf_index_t *idx) {
     int N = idx->doc_count;
-    if (N == 0) return;
+    if (N == 0)
+        return;
 
     /* Compute IDF for each term: log((N + 1) / (df + 1)) + 1 (smoothed) */
     for (int i = 0; i < idx->vocab_count; i++) {
@@ -198,7 +513,8 @@ void sem_tfidf_finalize(tfidf_index_t *idx) {
 
         for (int j = 0; j < ds->term_count; j++) {
             int vid = ds->doc_terms[j];
-            double tf = (double)ds->doc_tfs[j] / (double)(ds->total_tokens > 0 ? ds->total_tokens : 1);
+            double tf =
+                (double)ds->doc_tfs[j] / (double)(ds->total_tokens > 0 ? ds->total_tokens : 1);
             double tfidf = tf * idx->vocab[vid].idf;
             vec->values[vid] = tfidf;
             vec->nonzero[vec->nnz++] = vid;
@@ -213,7 +529,8 @@ void sem_tfidf_vectorize(tfidf_index_t *idx, const char *text, tfidf_vec_t *out)
 
     token_list_t tokens;
     sem_tokenize(text, &tokens);
-    if (tokens.count == 0) return;
+    if (tokens.count == 0)
+        return;
 
     /* Count term frequencies */
     int tfs[SEM_VOCAB_SIZE] = {0};
@@ -222,7 +539,8 @@ void sem_tfidf_vectorize(tfidf_index_t *idx, const char *text, tfidf_vec_t *out)
 
     for (int i = 0; i < tokens.count; i++) {
         int vid = vocab_find(idx, tokens.tokens[i]);
-        if (vid < 0) continue;
+        if (vid < 0)
+            continue;
 
         if (tfs[vid] == 0) {
             seen[seen_count++] = vid;
@@ -254,7 +572,8 @@ double sem_cosine_sim(const tfidf_vec_t *a, const tfidf_vec_t *b) {
     }
 
     double denom = sqrt(norm_a) * sqrt(norm_b);
-    if (denom < 1e-10) return 0.0;
+    if (denom < 1e-10)
+        return 0.0;
     return dot / denom;
 }
 
@@ -265,16 +584,18 @@ double sem_cosine_sim(const tfidf_vec_t *a, const tfidf_vec_t *b) {
 static int bm25_cmp(const void *a, const void *b) {
     double sa = ((const bm25_result_t *)a)->score;
     double sb = ((const bm25_result_t *)b)->score;
-    if (sb > sa) return 1;
-    if (sb < sa) return -1;
+    if (sb > sa)
+        return 1;
+    if (sb < sa)
+        return -1;
     return 0;
 }
 
-int sem_bm25_rank(tfidf_index_t *idx, const char *query,
-                  bm25_result_t *results, int max_results) {
+int sem_bm25_rank(tfidf_index_t *idx, const char *query, bm25_result_t *results, int max_results) {
     token_list_t qtoks;
     sem_tokenize(query, &qtoks);
-    if (qtoks.count == 0 || idx->doc_count == 0) return 0;
+    if (qtoks.count == 0 || idx->doc_count == 0)
+        return 0;
 
     /* Compute average document length */
     double avg_dl = 0;
@@ -282,7 +603,8 @@ int sem_bm25_rank(tfidf_index_t *idx, const char *query,
         avg_dl += s_doc_stats[d].total_tokens;
     }
     avg_dl /= idx->doc_count;
-    if (avg_dl < 1.0) avg_dl = 1.0;
+    if (avg_dl < 1.0)
+        avg_dl = 1.0;
 
     int result_count = 0;
     for (int d = 0; d < idx->doc_count && result_count < max_results; d++) {
@@ -292,7 +614,8 @@ int sem_bm25_rank(tfidf_index_t *idx, const char *query,
 
         for (int qi = 0; qi < qtoks.count; qi++) {
             int vid = vocab_find(idx, qtoks.tokens[qi]);
-            if (vid < 0) continue;
+            if (vid < 0)
+                continue;
 
             /* Find term frequency in this document */
             int tf = 0;
@@ -302,7 +625,8 @@ int sem_bm25_rank(tfidf_index_t *idx, const char *query,
                     break;
                 }
             }
-            if (tf == 0) continue;
+            if (tf == 0)
+                continue;
 
             double idf = idx->vocab[vid].idf;
             double tf_norm = ((double)tf * (BM25_K1 + 1.0)) /
@@ -325,8 +649,7 @@ int sem_bm25_rank(tfidf_index_t *idx, const char *query,
  * TOOL RELEVANCE SCORING
  * ═══════════════════════════════════════════════════════════════════════════ */
 
-void sem_tools_index_build(tfidf_index_t *idx,
-                           const char **names, const char **descriptions,
+void sem_tools_index_build(tfidf_index_t *idx, const char **names, const char **descriptions,
                            int tool_count) {
     sem_tfidf_init(idx);
 
@@ -334,8 +657,8 @@ void sem_tools_index_build(tfidf_index_t *idx,
     for (int i = 0; i < tool_count && i < SEM_MAX_DOCS; i++) {
         char combined[2048];
         /* Repeat name for extra weight, include description */
-        snprintf(combined, sizeof(combined), "%s %s %s %s",
-                 names[i], names[i], names[i], descriptions[i]);
+        snprintf(combined, sizeof(combined), "%s %s %s %s", names[i], names[i], names[i],
+                 descriptions[i]);
         sem_tfidf_add_doc(idx, combined);
     }
     sem_tfidf_finalize(idx);
@@ -354,13 +677,15 @@ void sem_tools_index_build(tfidf_index_t *idx,
 static int tool_score_cmp(const void *a, const void *b) {
     double sa = ((const tool_score_t *)a)->score;
     double sb = ((const tool_score_t *)b)->score;
-    if (sb > sa) return 1;
-    if (sb < sa) return -1;
+    if (sb > sa)
+        return 1;
+    if (sb < sa)
+        return -1;
     return 0;
 }
 
-int sem_tools_rank(tfidf_index_t *idx, const char *query,
-                   tool_score_t *results, int max_results, int tool_count) {
+int sem_tools_rank(tfidf_index_t *idx, const char *query, tool_score_t *results, int max_results,
+                   int tool_count) {
     /* Log semantic query to VFS for observability */
     if (g_sem_vfs && query) {
         vfs_log_event(g_sem_vfs, "semantic", "query", query);
@@ -381,7 +706,8 @@ int sem_tools_rank(tfidf_index_t *idx, const char *query,
     /* BM25 scores (normalized to 0-1 range) */
     double max_bm25 = 0.001;
     for (int i = 0; i < bm25_count; i++) {
-        if (bm25_results[i].score > max_bm25) max_bm25 = bm25_results[i].score;
+        if (bm25_results[i].score > max_bm25)
+            max_bm25 = bm25_results[i].score;
     }
     for (int i = 0; i < bm25_count; i++) {
         scores[bm25_results[i].doc_id] = bm25_results[i].score / max_bm25;
@@ -412,52 +738,56 @@ int sem_tools_rank(tfidf_index_t *idx, const char *query,
 
 typedef struct {
     query_category_t cat;
-    const char      *name;
-    const char      *keywords[SEM_CATEGORY_KEYWORDS];
+    const char *name;
+    const char *keywords[SEM_CATEGORY_KEYWORDS];
 } category_def_t;
 
 static const category_def_t CATEGORIES[] = {
-    { QCAT_FILE_IO, "file_io", {
-        "file", "read", "write", "edit", "create", "delete", "copy", "move",
-        "directory", "folder", "path", "list", "find", "search", "grep",
-        "content", "append", "mkdir", "tree", "permission", "chmod", NULL }},
-    { QCAT_GIT, "git", {
-        "git", "commit", "branch", "merge", "push", "pull", "clone", "diff",
-        "status", "log", "rebase", "stash", "checkout", "remote", "tag", NULL }},
-    { QCAT_NETWORK, "network", {
-        "http", "https", "url", "api", "request", "curl", "download", "upload",
-        "dns", "ping", "port", "socket", "websocket", "fetch", "web",
-        "server", "endpoint", "rest", "json", "weather", "ip", NULL }},
-    { QCAT_SHELL, "shell", {
-        "bash", "shell", "command", "run", "execute", "terminal", "process",
-        "script", "pipe", "sudo", "install", "brew", "apt", "npm", "make",
-        "compile", "build", "docker", "container", NULL }},
-    { QCAT_CODE, "code", {
-        "code", "function", "class", "variable", "compile", "debug", "error",
-        "bug", "fix", "refactor", "implement", "program", "source", "header",
-        "syntax", "type", "struct", "define", "macro", NULL }},
-    { QCAT_CRYPTO, "crypto", {
-        "hash", "sha", "md5", "hmac", "encrypt", "decrypt", "key", "token",
-        "jwt", "uuid", "random", "base64", "sign", "verify", "certificate",
-        "password", "secret", "hkdf", "crypto", NULL }},
-    { QCAT_SWARM, "swarm", {
-        "swarm", "agent", "spawn", "parallel", "concurrent", "distribute",
-        "worker", "task", "delegate", "orchestrate", "fan", "sub-agent",
-        "multi", "batch", NULL }},
-    { QCAT_AST, "ast", {
-        "ast", "parse", "inspect", "introspect", "analyze", "complexity",
-        "call_graph", "dependency", "function", "struct", "symbol", NULL }},
-    { QCAT_PIPELINE, "pipeline", {
-        "pipeline", "filter", "sort", "map", "reduce", "transform", "stream",
-        "csv", "json", "column", "stats", "uniq", "count", "regex", NULL }},
-    { QCAT_MATH, "math", {
-        "calculate", "math", "eval", "expression", "formula", "number",
-        "factorial", "fibonacci", "prime", "sqrt", "sin", "cos", "log",
-        "convert", "hex", "binary", "octal", NULL }},
-    { QCAT_SEARCH, "search", {
-        "search", "find", "look", "where", "locate", "which", "grep",
-        "pattern", "match", "query", "index", NULL }},
-    { QCAT_GENERAL, "general", { NULL }},
+    {QCAT_FILE_IO, "file_io", {"file", "read",       "write",     "edit",    "create", "delete",
+                               "copy", "move",       "directory", "folder",  "path",   "list",
+                               "find", "search",     "grep",      "content", "append", "mkdir",
+                               "tree", "permission", "chmod",     NULL}},
+    {QCAT_GIT,
+     "git",
+     {"git", "commit", "branch", "merge", "push", "pull", "clone", "diff", "status", "log",
+      "rebase", "stash", "checkout", "remote", "tag", NULL}},
+    {QCAT_NETWORK, "network", {"http",      "https",   "url", "api",    "request",  "curl",
+                               "download",  "upload",  "dns", "ping",   "port",     "socket",
+                               "websocket", "fetch",   "web", "server", "endpoint", "rest",
+                               "json",      "weather", "ip",  NULL}},
+    {QCAT_SHELL, "shell", {"bash",     "shell",   "command", "run",       "execute",
+                           "terminal", "process", "script",  "pipe",      "sudo",
+                           "install",  "brew",    "apt",     "npm",       "make",
+                           "compile",  "build",   "docker",  "container", NULL}},
+    {QCAT_CODE, "code", {"code",      "function", "class",  "variable", "compile",
+                         "debug",     "error",    "bug",    "fix",      "refactor",
+                         "implement", "program",  "source", "header",   "syntax",
+                         "type",      "struct",   "define", "macro",    NULL}},
+    {QCAT_CRYPTO, "crypto", {"hash",     "sha",    "md5",   "hmac",   "encrypt",
+                             "decrypt",  "key",    "token", "jwt",    "uuid",
+                             "random",   "base64", "sign",  "verify", "certificate",
+                             "password", "secret", "hkdf",  "crypto", NULL}},
+    {QCAT_SWARM,
+     "swarm",
+     {"swarm", "agent", "spawn", "parallel", "concurrent", "distribute", "worker", "task",
+      "delegate", "orchestrate", "fan", "sub-agent", "multi", "batch", NULL}},
+    {QCAT_AST,
+     "ast",
+     {"ast", "parse", "inspect", "introspect", "analyze", "complexity", "call_graph", "dependency",
+      "function", "struct", "symbol", NULL}},
+    {QCAT_PIPELINE,
+     "pipeline",
+     {"pipeline", "filter", "sort", "map", "reduce", "transform", "stream", "csv", "json", "column",
+      "stats", "uniq", "count", "regex", NULL}},
+    {QCAT_MATH,
+     "math",
+     {"calculate", "math", "eval", "expression", "formula", "number", "factorial", "fibonacci",
+      "prime", "sqrt", "sin", "cos", "log", "convert", "hex", "binary", "octal", NULL}},
+    {QCAT_SEARCH,
+     "search",
+     {"search", "find", "look", "where", "locate", "which", "grep", "pattern", "match", "query",
+      "index", NULL}},
+    {QCAT_GENERAL, "general", {NULL}},
 };
 
 static const int CATEGORY_COUNT = sizeof(CATEGORIES) / sizeof(CATEGORIES[0]);
@@ -465,8 +795,10 @@ static const int CATEGORY_COUNT = sizeof(CATEGORIES) / sizeof(CATEGORIES[0]);
 static int classify_cmp(const void *a, const void *b) {
     double ca = ((const classification_t *)a)->confidence;
     double cb = ((const classification_t *)b)->confidence;
-    if (cb > ca) return 1;
-    if (cb < ca) return -1;
+    if (cb > ca)
+        return 1;
+    if (cb < ca)
+        return -1;
     return 0;
 }
 
@@ -486,7 +818,7 @@ int sem_classify(const char *query, classification_t *results, int max_results) 
     memset(scores, 0, sizeof(scores));
 
     for (int ti = 0; ti < tokens.count; ti++) {
-        for (int ci = 0; ci < CATEGORY_COUNT - 1; ci++) {  /* skip GENERAL */
+        for (int ci = 0; ci < CATEGORY_COUNT - 1; ci++) { /* skip GENERAL */
             for (int ki = 0; CATEGORIES[ci].keywords[ki]; ki++) {
                 /* Exact match */
                 if (strcmp(tokens.tokens[ti], CATEGORIES[ci].keywords[ki]) == 0) {
@@ -509,7 +841,8 @@ int sem_classify(const char *query, classification_t *results, int max_results) 
     /* If no category scored, default to GENERAL */
     double max_score = 0;
     for (int i = 0; i < QCAT_COUNT - 1; i++) {
-        if (scores[i] > max_score) max_score = scores[i];
+        if (scores[i] > max_score)
+            max_score = scores[i];
     }
     if (max_score < 0.1) {
         scores[QCAT_GENERAL] = 1.0;
@@ -531,7 +864,8 @@ int sem_classify(const char *query, classification_t *results, int max_results) 
 
 const char *sem_category_name(query_category_t cat) {
     for (int i = 0; i < CATEGORY_COUNT; i++) {
-        if (CATEGORIES[i].cat == cat) return CATEGORIES[i].name;
+        if (CATEGORIES[i].cat == cat)
+            return CATEGORIES[i].name;
     }
     return "unknown";
 }
@@ -543,13 +877,14 @@ const char *sem_category_name(query_category_t cat) {
 static int msg_score_cmp(const void *a, const void *b) {
     double sa = ((const msg_score_t *)a)->final_score;
     double sb = ((const msg_score_t *)b)->final_score;
-    if (sb > sa) return 1;
-    if (sb < sa) return -1;
+    if (sb > sa)
+        return 1;
+    if (sb < sa)
+        return -1;
     return 0;
 }
 
-int sem_score_messages(tfidf_index_t *idx, const char *query,
-                       const char **msg_texts, int msg_count,
+int sem_score_messages(tfidf_index_t *idx, const char *query, const char **msg_texts, int msg_count,
                        msg_score_t *results, int max_results) {
     /* Vectorize query */
     tfidf_vec_t query_vec;
@@ -564,16 +899,19 @@ int sem_score_messages(tfidf_index_t *idx, const char *query,
         msg_score_t *ms = &results[count];
         ms->msg_index = i;
         ms->relevance = sem_cosine_sim(&query_vec, &msg_vec);
-        ms->is_recent = (i >= msg_count - 6);  /* last 3 turns (user+assistant pairs) */
+        ms->is_recent = (i >= msg_count - 6); /* last 3 turns (user+assistant pairs) */
         ms->has_tool_result = (strstr(msg_texts[i], "tool_result") != NULL ||
                                strstr(msg_texts[i], "tool_use") != NULL);
 
         /* Combined score: recency bonus + relevance + tool content bonus */
         ms->final_score = ms->relevance;
-        if (ms->is_recent)       ms->final_score += 0.5;
-        if (ms->has_tool_result) ms->final_score += 0.2;
+        if (ms->is_recent)
+            ms->final_score += 0.5;
+        if (ms->has_tool_result)
+            ms->final_score += 0.2;
         /* First message (initial context) gets a bonus */
-        if (i == 0)              ms->final_score += 0.3;
+        if (i == 0)
+            ms->final_score += 0.3;
 
         count++;
     }

@@ -6,6 +6,23 @@ The format loosely follows Keep a Changelog with an `Unreleased` section.
 
 ## [Unreleased]
 
+## [1.0.2] - 2026-06-26
+
+### Added
+
+- Terminal cleanup now has a shared sane-restore path for interactive exits.
+
+### Changed
+
+- Cursor-position DSR probes are opt-in via `DSCO_TUI_DSR=1`.
+- Version bump tooling now updates `include/config.h`.
+
+### Fixed
+
+- Normal `/quit` and keep-terminal handoff restore shell line discipline,
+  bracketed paste, cursor visibility, alt-screen state, and pending terminal
+  replies before returning control to the shell.
+
 ## [1.0.0]
 
 ### Added
