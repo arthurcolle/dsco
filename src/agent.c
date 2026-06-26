@@ -15,6 +15,7 @@
 #include "dsco_dht.h"
 #include "md.h"
 #include "baseline.h"
+#include "chronicle.h"
 #include "plugin.h"
 #include "setup.h"
 #include "workspace.h"
@@ -592,18 +593,7 @@ static void init_cost_budgets(void) {
     }
 }
 
-/* Per-turn cost from token usage × current model's registry prices. Used as
- * the fallback when the provider doesn't report an authoritative cost. */
-static double turn_token_cost(session_state_t *session, const usage_t *u) {
-    const model_info_t *mi = model_lookup(session->model);
-    if (!mi)
-        return 0;
-    return u->input_tokens * mi->input_price / 1e6 + u->output_tokens * mi->output_price / 1e6 +
-           u->cache_read_input_tokens * mi->cache_read_price / 1e6 +
-           u->cache_creation_input_tokens * mi->cache_write_price / 1e6;
-}
-
-static double session_cost(session_state_t *session) {
+static double session_cost(const session_state_t *session) {
     /* Prefer the accumulated authoritative cost (provider-reported when
      * available, else per-turn token math). Falls back to recomputing from
      * cumulative tokens only before any turn has been accounted. */
@@ -706,6 +696,23 @@ static bool provider_failover_available(const char *provider, const char *api_ke
         time(NULL) < slot->tripped_until)
         return false;
     return true;
+}
+
+static bool g_sakana_payg_overflow_active = false;
+
+static bool provider_should_force_sakana_payg(const char *provider) {
+    if (!provider || strcmp(provider, "sakana") != 0)
+        return false;
+    if (!provider_sakana_has_payg_key())
+        return false;
+    /* Once subscription exhaustion has been observed and PAYG succeeds, keep
+     * Sakana on the metered overflow key for the rest of the process.  Do not
+     * depend solely on the provider-pool slot's is_subscription bit: PAYG
+     * retries temporarily mark the slot metered so provider_pool_report()
+     * doesn't clear the persisted subscription reset timestamp. */
+    if (g_sakana_payg_overflow_active)
+        return true;
+    return provider_pool_subscription_exhausted_until("sakana") > time(NULL);
 }
 
 static bool stream_result_is_credit_exhausted(const stream_result_t *sr) {
@@ -865,6 +872,13 @@ static bool ensure_provider(session_state_t *session, const char *api_key) {
 static const char *resolve_provider_key(const char *session_key) {
     if (!g_provider)
         return session_key;
+    if (provider_should_force_sakana_payg(g_provider->name)) {
+        const char *payg = provider_sakana_payg_request_key();
+        if (payg && payg[0]) {
+            setenv("DSCO_SAKANA_KEY_CLASS", "payg", 1);
+            return payg;
+        }
+    }
     const char *k = provider_resolve_request_api_key(g_provider->name, session_key);
     return (k && k[0]) ? k : session_key;
 }
@@ -1028,8 +1042,10 @@ static const char *extract_image_path(const char *token, char *out_path, size_t 
 }
 
 static char *load_and_encode_image(const char *path, const char *media_type,
-                                   tui_spinner_t *spinner) {
+                                   tui_spinner_t *spinner, const char **effective_media_type_out) {
     struct stat st;
+    if (effective_media_type_out)
+        *effective_media_type_out = media_type;
     if (stat(path, &st) != 0 || !S_ISREG(st.st_mode))
         return NULL;
     if (st.st_size > IMG_MAX_FILE_SIZE)
@@ -1066,6 +1082,10 @@ static char *load_and_encode_image(const char *path, const char *media_type,
         if (ok && stat(downscaled, &st) == 0) {
             read_path = downscaled;
             media_type = "image/jpeg";
+            /* The bytes we return are now JPEG; propagate the corrected media
+             * type so the caller does not mislabel downscaled images. */
+            if (effective_media_type_out)
+                *effective_media_type_out = "image/jpeg";
         } else {
             downscaled[0] = '\0';
         }
@@ -1469,10 +1489,11 @@ static int process_dragged_images(char *input_buf, conversation_t *conv) {
                 tui_spinner_init(&spin, SPINNER_DOTS, "dragging image...", TUI_CYAN);
                 tui_spinner_tick(&spin);
 
-                char *b64 = load_and_encode_image(clean_path, mt, &spin);
+                const char *eff_mt = mt;
+                char *b64 = load_and_encode_image(clean_path, mt, &spin, &eff_mt);
                 if (b64) {
                     images_b64[img_count] = b64;
-                    images_mt[img_count] = mt;
+                    images_mt[img_count] = eff_mt;
                     img_count++;
 
                     const char *fname = strrchr(clean_path, '/');
@@ -3202,8 +3223,12 @@ static void fsm_tool_pending_enter(void *ctx) {
     tui_transition_divider();
 }
 
+static char g_chronicle_active_trace_id[37] = "";
+static char g_chronicle_active_llm_span_id[37] = "";
+
 static void on_stream_text(const char *text, void *ctx) {
     (void)ctx;
+    chronicle_llm_delta(g_chronicle_active_trace_id, g_chronicle_active_llm_span_id, "text", text);
     tui_stream_heartbeat_poke(&s_heartbeat, NULL);
 
     /* FSM drives all transitions — thinking_exit and text_enter fire
@@ -3235,6 +3260,7 @@ static void on_stream_text(const char *text, void *ctx) {
 
 static void on_stream_thinking(const char *text, void *ctx) {
     (void)ctx;
+    chronicle_llm_delta(g_chronicle_active_trace_id, g_chronicle_active_llm_span_id, "thinking", text);
     tui_stream_heartbeat_poke(&s_heartbeat, "thinking...");
 
     /* FSM: thinking_enter fires on first chunk (prints header, inits state) */
@@ -3250,6 +3276,19 @@ static void on_stream_thinking(const char *text, void *ctx) {
         fflush(stderr);
     }
     tui_term_unlock();
+}
+
+static char *chronicle_collect_visible_text(parsed_response_t *parsed) {
+    if (!parsed)
+        return safe_strdup("");
+    jbuf_t b;
+    jbuf_init(&b, 1024);
+    for (int i = 0; i < parsed->count; i++) {
+        content_block_t *blk = &parsed->blocks[i];
+        if (blk->type && strcmp(blk->type, "text") == 0 && blk->text)
+            jbuf_append(&b, blk->text);
+    }
+    return b.data ? b.data : safe_strdup("");
 }
 
 static void on_stream_tool_start(const char *name, const char *id, void *ctx) {
@@ -3269,6 +3308,9 @@ static void on_stream_tool_start(const char *name, const char *id, void *ctx) {
             fprintf(stderr, "  %s[%d]%s ", TUI_DIM, fn, TUI_RESET);
         }
     }
+    chronicle_event("llm.tool_use.started", g_chronicle_active_trace_id,
+                    g_chronicle_active_llm_span_id, NULL, "model", "provider", NULL,
+                    "model_output");
     baseline_log("tool", name, "tool_use started", NULL);
 }
 
@@ -3414,7 +3456,7 @@ static void print_tool_result_ex(const char *name, bool ok, const char *result, 
     }
 
     char size_str[32] = "";
-    size_t total = strlen(result);
+    size_t total = result ? strlen(result) : 0;
     if (total > 1024)
         snprintf(size_str, sizeof(size_str), "%.1fKB", total / 1024.0);
 
@@ -3455,6 +3497,91 @@ static void print_tool_result_ex(const char *name, bool ok, const char *result, 
 /* Legacy wrapper for any callers that don't have elapsed info */
 static void print_tool_result(const char *name, bool ok, const char *result) {
     print_tool_result_ex(name, ok, result, 0.0);
+}
+
+static double usage_cost_for_model(const char *model, const usage_t *u, double reported_cost_usd) {
+    if (reported_cost_usd > 0)
+        return reported_cost_usd;
+    const model_info_t *mi = model_lookup(model);
+    if (!mi || !u)
+        return 0.0;
+    return u->input_tokens * mi->input_price / 1e6 +
+           u->output_tokens * mi->output_price / 1e6 +
+           u->cache_read_input_tokens * mi->cache_read_price / 1e6 +
+           u->cache_creation_input_tokens * mi->cache_write_price / 1e6;
+}
+
+static bool usage_cost_is_known(const char *provider, const char *model, const char *request_key,
+                                double reported_cost_usd) {
+    if (reported_cost_usd > 0)
+        return true;
+    const model_info_t *mi = model_lookup(model);
+    if (!mi)
+        return false;
+    if (mi->input_price > 0 || mi->output_price > 0 || mi->cache_read_price > 0 ||
+        mi->cache_write_price > 0)
+        return true;
+    if (provider && strcmp(provider, "sakana") == 0 &&
+        strcmp(provider_auth_mode(provider, request_key), "sakana-payg-api-key") == 0)
+        return false;
+    return true;
+}
+
+static bool input_is_local_usage_question(const char *input) {
+    if (!input || !input[0] || input[0] == '/')
+        return false;
+
+    char buf[512];
+    size_t n = strlen(input);
+    if (n >= sizeof(buf))
+        n = sizeof(buf) - 1;
+    for (size_t i = 0; i < n; i++)
+        buf[i] = (char)tolower((unsigned char)input[i]);
+    buf[n] = '\0';
+
+    bool asks_usage = strstr(buf, "cost") || strstr(buf, "spend") ||
+                      strstr(buf, "price") || strstr(buf, "usage") ||
+                      strstr(buf, "token");
+    if (!asks_usage)
+        return false;
+
+    return strstr(buf, "generation") || strstr(buf, "response") ||
+           strstr(buf, "last turn") || strstr(buf, "last message") ||
+           strstr(buf, "just now") || strstr(buf, "that one") ||
+           strstr(buf, "that cost") || strstr(buf, "session cost");
+}
+
+static void print_local_usage_answer(const session_state_t *session, const usage_t *last_usage,
+                                     bool have_last_usage, double last_cost_usd,
+                                     bool last_cost_known, const char *last_model,
+                                     const char *last_provider) {
+    print_role_header("assistant", true, NULL);
+    if (!have_last_usage) {
+        fprintf(stderr, "  No generation has completed in this session yet.\n");
+        return;
+    }
+
+    fprintf(stderr, "  Last generation: ");
+    if (last_cost_known)
+        fprintf(stderr, "$%.4f", last_cost_usd);
+    else
+        fprintf(stderr, "cost unknown locally");
+    fprintf(stderr, "  model=%s  provider=%s  in=%d out=%d",
+            last_model && last_model[0] ? last_model : "?",
+            last_provider && last_provider[0] ? last_provider : "?",
+            last_usage ? last_usage->input_tokens : 0,
+            last_usage ? last_usage->output_tokens : 0);
+    if (last_usage && last_usage->cache_read_input_tokens > 0)
+        fprintf(stderr, " cache-read=%d", last_usage->cache_read_input_tokens);
+    if (last_usage && last_usage->cache_creation_input_tokens > 0)
+        fprintf(stderr, " cache-write=%d", last_usage->cache_creation_input_tokens);
+    fprintf(stderr, "\n");
+
+    if (!last_cost_known)
+        fprintf(stderr, "  Note: provider did not report cost and local PAYG pricing is unset.\n");
+    if (session)
+        fprintf(stderr, "  Known session total: $%.4f across %d turn%s.\n", session_cost(session),
+                session->turn_count, session->turn_count == 1 ? "" : "s");
 }
 
 static void print_usage_ex(usage_t *u, const char *model, session_state_t *session) {
@@ -3774,6 +3901,12 @@ bool agent_run(const char *api_key, const char *model, const char *topology_name
     char input_buf[MAX_INPUT_LINE];
     char last_user_input[MAX_INPUT_LINE] = {0}; /* for /retry */
     int last_input_tokens = 0;
+    usage_t last_turn_usage = {0};
+    double last_turn_cost_usd = 0.0;
+    bool last_turn_cost_known = false;
+    char last_turn_model[128] = "";
+    char last_turn_provider[64] = "";
+    bool have_last_turn_usage = false;
     int consecutive_tool_failures = 0; /* for router failure escalation */
 
     /* Command aliases: /alias <name> <expansion> */
@@ -7066,6 +7199,14 @@ bool agent_run(const char *api_key, const char *model, const char *topology_name
         }
 
     send_to_llm:
+        if (input_is_local_usage_question(input_buf)) {
+            print_local_usage_answer(&session, &last_turn_usage, have_last_turn_usage,
+                                     last_turn_cost_usd, last_turn_cost_known, last_turn_model,
+                                     last_turn_provider);
+            baseline_log("command", "local_usage_question", input_buf, NULL);
+            continue;
+        }
+
         if ((session.active_topology[0] || session.topology_auto) &&
             run_topology_prompt(&session, api_key, &conv, input_buf, &last_input_tokens)) {
             continue;
@@ -7203,6 +7344,9 @@ bool agent_run(const char *api_key, const char *model, const char *topology_name
         trace_new_id(trace_id, sizeof(trace_id));
         char prompt_span[37] = "";
         trace_span_begin(trace_id, "user_turn", NULL, prompt_span);
+        char chron_prompt_span[37] = "";
+        chronicle_span_begin(trace_id, NULL, "turn", "user_turn", NULL, chron_prompt_span);
+        chronicle_user_message(trace_id, chron_prompt_span, input_buf);
 
         /* Per-turn arena allocator */
         arena_t turn_arena;
@@ -7463,6 +7607,7 @@ bool agent_run(const char *api_key, const char *model, const char *topology_name
 
             /* Stream via provider with fallback chain */
             char llm_span[37] = "";
+            char chron_llm_span[37] = "";
             /* Reactive-compaction retry state (SOTA, cf. Claude Code
              * reactive_compact_retry): on a context-overflow rejection we
              * compact and re-stream this same request instead of ending the
@@ -7475,6 +7620,17 @@ bool agent_run(const char *api_key, const char *model, const char *topology_name
             char chosen_fallback_model[128] = "";
         reactive_retry:
             trace_span_begin(trace_id, "llm_stream", prompt_span, llm_span);
+            chronicle_span_begin(trace_id, chron_prompt_span, "llm", "llm_stream", NULL,
+                                 chron_llm_span);
+            snprintf(g_chronicle_active_trace_id, sizeof(g_chronicle_active_trace_id), "%s",
+                     trace_id);
+            snprintf(g_chronicle_active_llm_span_id, sizeof(g_chronicle_active_llm_span_id), "%s",
+                     chron_llm_span);
+            chronicle_context_materialized(trace_id, chron_llm_span, req,
+                                           conv_token_estimate(&conv, &session));
+            chronicle_llm_request(trace_id, chron_llm_span,
+                                  g_provider ? g_provider->name : "anthropic", session.model, req,
+                                  conv_token_estimate(&conv, &session));
 
             /* Start heartbeat — auto-detects silent stream and shows spinner */
             tui_stream_heartbeat_start(&s_heartbeat);
@@ -7500,16 +7656,27 @@ bool agent_run(const char *api_key, const char *model, const char *topology_name
                                          (pool_t1.tv_usec - pool_t0.tv_usec) / 1000.0);
             bool primary_credit_exhausted =
                 !sr.ok && g_provider && stream_result_is_credit_exhausted(&sr);
+            const char *sakana_payg_key_for_turn =
+                (g_provider && strcmp(g_provider->name, "sakana") == 0)
+                    ? provider_sakana_payg_request_key()
+                    : NULL;
+            bool current_request_is_sakana_payg =
+                sakana_payg_key_for_turn && sakana_payg_key_for_turn[0] && cur_key &&
+                strcmp(cur_key, sakana_payg_key_for_turn) == 0;
             bool primary_subscription_exhausted = false;
             if (primary_credit_exhausted && g_provider) {
                 provider_slot_t *slot = provider_pool_slot(g_provider->name);
                 primary_subscription_exhausted =
-                    (slot && slot->is_subscription) ||
-                    (strcmp(g_provider->name, "sakana") == 0 &&
-                     provider_sakana_current_key_is_subscription());
+                    !current_request_is_sakana_payg &&
+                    ((slot && slot->is_subscription) ||
+                     (strcmp(g_provider->name, "sakana") == 0 &&
+                      provider_sakana_current_key_is_subscription()));
                 if (primary_subscription_exhausted) {
+                    time_t exhausted_until = sr.credit_reset_at > 0
+                                               ? sr.credit_reset_at
+                                               : provider_pool_subscription_exhausted_until(g_provider->name);
                     provider_pool_mark_subscription_exhausted(g_provider->name,
-                                                              sr.credit_reset_at);
+                                                              exhausted_until);
                     if (sr.credit_reset_at > 0) {
                         char when[64];
                         format_reset_time(sr.credit_reset_at, when, sizeof(when));
@@ -7528,6 +7695,7 @@ bool agent_run(const char *api_key, const char *model, const char *topology_name
             }
             if (!sr.ok && g_provider && strcmp(g_provider->name, "sakana") == 0 &&
                 stream_result_is_credit_exhausted(&sr) &&
+                !current_request_is_sakana_payg &&
                 provider_sakana_current_key_is_subscription() &&
                 provider_sakana_has_payg_key() && !g_interrupted &&
                 (fallback_decision == FALLBACK_DECISION_AUTO ||
@@ -7560,6 +7728,9 @@ bool agent_run(const char *api_key, const char *model, const char *topology_name
                                          (pool_t1.tv_sec - pool_t0.tv_sec) * 1000.0 +
                                              (pool_t1.tv_usec - pool_t0.tv_usec) / 1000.0);
                     if (sr.ok) {
+                        if (payg_slot)
+                            payg_slot->is_subscription = saved_is_subscription;
+                        g_sakana_payg_overflow_active = true;
                         setenv("DSCO_SAKANA_KEY_CLASS", "payg", 1);
                         if (g_outq)
                             tui_outq_writef(g_outq,
@@ -7715,6 +7886,8 @@ bool agent_run(const char *api_key, const char *model, const char *topology_name
                     reactive_attempts++;
                     json_free_response(&sr.parsed);
                     trace_span_end(llm_span, "reactive_compact", NULL);
+                    chronicle_span_end(chron_llm_span, "reactive_compact", NULL);
+                    g_chronicle_active_llm_span_id[0] = '\0';
                     g_stream_heartbeat = NULL;
                     tui_stream_heartbeat_stop(&s_heartbeat);
                     dsco_err_clear();
@@ -7743,6 +7916,8 @@ bool agent_run(const char *api_key, const char *model, const char *topology_name
                 char err[128];
                 snprintf(err, sizeof(err), "stream failed (HTTP %d)", sr.http_status);
                 trace_span_end(llm_span, "error", NULL);
+                chronicle_span_end(chron_llm_span, "error", NULL);
+                g_chronicle_active_llm_span_id[0] = '\0';
                 /* Show structured error if available */
                 if (dsco_err_code() != DSCO_ERR_OK) {
                     if (g_outq)
@@ -7762,6 +7937,18 @@ bool agent_run(const char *api_key, const char *model, const char *topology_name
                 break;
             }
             trace_span_end(llm_span, "ok", NULL);
+            char *chron_output_text = chronicle_collect_visible_text(&sr.parsed);
+            chronicle_llm_response(trace_id, chron_llm_span,
+                                   g_provider ? g_provider->name : "anthropic", session.model,
+                                   chron_output_text, NULL, sr.usage.input_tokens,
+                                   sr.usage.output_tokens, sr.usage.cache_read_input_tokens,
+                                   sr.usage.cache_creation_input_tokens, sr.reasoning_tokens,
+                                   sr.cost_usd, sr.telemetry.total_ms,
+                                   sr.parsed.stop_reason ? sr.parsed.stop_reason : "",
+                                   sr.generation_id ? sr.generation_id : "");
+            chronicle_span_end(chron_llm_span, "ok", NULL);
+            g_chronicle_active_llm_span_id[0] = '\0';
+            free(chron_output_text);
 
             /* Drain any bytes still held by the typing-cadence buffer
                before STREAM_END fires md_flush — otherwise the tail of
@@ -7816,9 +8003,20 @@ bool agent_run(const char *api_key, const char *model, const char *topology_name
             /* Accumulate authoritative cost: trust the provider's reported cost
              * (OpenRouter usage.cost) when present, else fall back to token math.
              * This is what the budget enforces, so caching discounts count. */
-            session.total_reported_cost_usd +=
-                (sr.cost_usd > 0) ? sr.cost_usd : turn_token_cost(&session, &sr.usage);
+            double accounted_turn_cost =
+                usage_cost_for_model(session.model, &sr.usage, sr.cost_usd);
+            session.total_reported_cost_usd += accounted_turn_cost;
             session.turn_count++;
+            const char *accounting_key = resolve_provider_key(api_key);
+            last_turn_usage = sr.usage;
+            last_turn_cost_usd = accounted_turn_cost;
+            last_turn_cost_known = usage_cost_is_known(g_provider ? g_provider->name : NULL,
+                                                       session.model, accounting_key,
+                                                       sr.cost_usd);
+            snprintf(last_turn_model, sizeof(last_turn_model), "%s", session.model);
+            snprintf(last_turn_provider, sizeof(last_turn_provider), "%s",
+                     g_provider ? g_provider->name : "?");
+            have_last_turn_usage = true;
 
             /* Calibrate non-conv overhead from this response's input usage.
              * The API counted (system_prompt + tool_schemas + cache_prefix + conv).
@@ -8061,7 +8259,11 @@ bool agent_run(const char *api_key, const char *model, const char *topology_name
                              * spinner, watchdog, cache, or parallel orchestration: the UI must be
                              * live and repeat calls must re-ask rather than replay stale answers. */
                             char tool_span[37] = "";
+                            char chron_tool_span[37] = "";
                             trace_span_begin(trace_id, blk->tool_name, prompt_span, tool_span);
+                            chronicle_tool_call_start(trace_id, chron_prompt_span, blk->tool_name,
+                                                      blk->tool_id, blk->tool_input,
+                                                      chron_tool_span);
                             double t0 = now_ms();
                             ok = tools_execute_for_tier(blk->tool_name, blk->tool_input, exec_tier,
                                                         tool_result, MAX_TOOL_RESULT);
@@ -8079,6 +8281,8 @@ bool agent_run(const char *api_key, const char *model, const char *topology_name
                             SI_RECORD_TOOL(blk->tool_name, ok, elapsed,
                                            (int)(strlen(tool_result) / 4));
                             trace_span_end(tool_span, ok ? "ok" : "error", NULL);
+                            chronicle_tool_call_end(trace_id, chron_tool_span, blk->tool_name,
+                                                    tool_result, ok, false, elapsed);
                             conv_add_tool_result_named(&conv, blk->tool_id, blk->tool_name,
                                                        tool_result, !ok);
                             free(tool_result);
@@ -8161,7 +8365,11 @@ bool agent_run(const char *api_key, const char *model, const char *topology_name
                         } else {
                             /* Trace span for tool execution */
                             char tool_span[37] = "";
+                            char chron_tool_span[37] = "";
                             trace_span_begin(trace_id, blk->tool_name, prompt_span, tool_span);
+                            chronicle_tool_call_start(trace_id, chron_prompt_span, blk->tool_name,
+                                                      blk->tool_id, blk->tool_input,
+                                                      chron_tool_span);
 
                             /* Start async spinner + watchdog */
                             tui_async_spinner_t spinner;
@@ -8265,6 +8473,9 @@ bool agent_run(const char *api_key, const char *model, const char *topology_name
 
                             trace_span_end(tool_span,
                                            was_timeout ? "timeout" : (ok ? "ok" : "error"), NULL);
+                            chronicle_tool_call_end(trace_id, chron_tool_span, blk->tool_name,
+                                                    tool_result, ok && !was_timeout, was_timeout,
+                                                    elapsed);
                         }
                         /* Track file reads for post-compact restoration */
                         if (ok && blk->tool_name &&
@@ -8503,7 +8714,11 @@ bool agent_run(const char *api_key, const char *model, const char *topology_name
 
                     if (dsco_tool_is_interactive(blk->tool_name)) {
                         char tool_span[37] = "";
+                        char chron_tool_span[37] = "";
                         trace_span_begin(trace_id, blk->tool_name, prompt_span, tool_span);
+                        chronicle_tool_call_start(trace_id, chron_prompt_span, blk->tool_name,
+                                                  blk->tool_id, blk->tool_input,
+                                                  chron_tool_span);
                         double t0 = now_ms();
                         ok = tools_execute_for_tier(blk->tool_name, blk->tool_input, batch_tiers[bi],
                                                     tool_result, MAX_TOOL_RESULT);
@@ -8520,6 +8735,8 @@ bool agent_run(const char *api_key, const char *model, const char *topology_name
                         pthread_mutex_unlock(&g_locks.metrics_lock);
                         SI_RECORD_TOOL(blk->tool_name, ok, elapsed, (int)(strlen(tool_result) / 4));
                         trace_span_end(tool_span, ok ? "ok" : "error", NULL);
+                        chronicle_tool_call_end(trace_id, chron_tool_span, blk->tool_name,
+                                                tool_result, ok, false, elapsed);
                         conv_add_tool_result_named(&conv, blk->tool_id, blk->tool_name, tool_result,
                                                    !ok);
                         free(tool_result);
@@ -8527,7 +8744,10 @@ bool agent_run(const char *api_key, const char *model, const char *topology_name
                     }
 
                     char tool_span[37] = "";
+                    char chron_tool_span[37] = "";
                     trace_span_begin(trace_id, blk->tool_name, prompt_span, tool_span);
+                    chronicle_tool_call_start(trace_id, chron_prompt_span, blk->tool_name,
+                                              blk->tool_id, blk->tool_input, chron_tool_span);
 
                     tool_watchdog_t wd;
                     int timeout = tool_timeout_for(blk->tool_name);
@@ -8582,6 +8802,8 @@ bool agent_run(const char *api_key, const char *model, const char *topology_name
                     }
                     trace_span_end(tool_span, was_timeout ? "timeout" : (ok ? "ok" : "error"),
                                    NULL);
+                    chronicle_tool_call_end(trace_id, chron_tool_span, blk->tool_name, tool_result,
+                                            ok && !was_timeout, was_timeout, elapsed);
 
                     /* Track file reads */
                     if (ok && blk->tool_name &&
@@ -8613,6 +8835,9 @@ bool agent_run(const char *api_key, const char *model, const char *topology_name
                     pthread_join(conc_slots[ci].thread, NULL);
                     concurrent_tool_slot_t *s = &conc_slots[ci];
                     content_block_t *blk = &sr.parsed.blocks[s->block_index];
+                    char chron_tool_span[37] = "";
+                    chronicle_tool_call_start(trace_id, chron_prompt_span, s->tool_name,
+                                              blk->tool_id, s->tool_input, chron_tool_span);
 
                     tui_batch_spinner_complete(&batch_spinner, s->batch_index,
                                                s->ok && !s->was_timeout, s->result, s->elapsed_ms);
@@ -8656,6 +8881,9 @@ bool agent_run(const char *api_key, const char *model, const char *topology_name
                         }
                     }
 
+                    chronicle_tool_call_end(trace_id, chron_tool_span, s->tool_name, s->result,
+                                            s->ok && !s->was_timeout, s->was_timeout,
+                                            s->elapsed_ms);
                     conv_add_tool_result_named(&conv, blk->tool_id, blk->tool_name, s->result,
                                                !s->ok);
 
@@ -8971,6 +9199,7 @@ bool agent_run(const char *api_key, const char *model, const char *topology_name
 
         /* End prompt-level trace span */
         trace_span_end(prompt_span, g_interrupted ? "interrupted" : "ok", NULL);
+        chronicle_span_end(chron_prompt_span, g_interrupted ? "interrupted" : "ok", NULL);
         esc_poller_stop();
         arena_free(&turn_arena);
         terminal_input_echo_restore();
