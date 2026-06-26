@@ -3,7 +3,7 @@
 This catalog is generated from `src/tools.c` tool registrations (`.name` / `.description` pairs).
 
 - Source: `src/tools.c`
-- Total built-in tools: 124
+- Total built-in tools: 126
 
 Regeneration:
 
@@ -13,22 +13,8 @@ Regeneration:
 
 | Tool | Description |
 |---|---|
-| <code>Agent</code> | Claude-compatible sub-agent task alias. |
-| <code>Bash</code> | Claude-compatible shell runner. Use Write/write_file for durable artifacts;  |
-| <code>Edit</code> | Claude-compatible alias for edit_file. |
-| <code>EnterPlanMode</code> | Enter Claude-compatible advisory plan mode. |
-| <code>ExitPlanMode</code> | Exit Claude-compatible advisory plan mode. |
-| <code>Glob</code> | Claude-compatible file glob search. |
-| <code>Grep</code> | Claude-compatible content search with glob/output_mode/head_limit support. |
-| <code>Read</code> | Claude-compatible alias for read_file. |
-| <code>StartOfLoopConstruct</code> | Start a live recursive agent loop construct. Accepts a bounded  |
-| <code>Task</code> | Claude-compatible task agent alias. |
-| <code>TaskList</code> | Return the Claude-compatible todo list state. |
-| <code>TodoWrite</code> | Claude-compatible todo list state writer. |
-| <code>WebFetch</code> | Claude-compatible URL fetch/extract. |
-| <code>WebSearch</code> | Claude-compatible web search alias. |
-| <code>Write</code> | Claude-compatible alias for verified atomic write_file. |
 | <code>agent</code> | Agent management: spawn, status, output, wait, race, kill. |
+| <code>Agent</code> | Claude-compatible sub-agent task alias. |
 | <code>agent_wait</code> | Wait for agent(s) to complete. |
 | <code>alpha_vantage</code> | Alpha Vantage financial data API. Supports 100+ functions: time series  |
 | <code>append_file</code> | Append content, fsync it, and verify appended bytes on disk. |
@@ -36,6 +22,7 @@ Regeneration:
 | <code>base64</code> | Base64 encode/decode (legacy). |
 | <code>base64_tool</code> | Base64 encode/decode. |
 | <code>bash</code> | Run a shell command. Use write_file/append_file for durable artifacts;  |
+| <code>Bash</code> | Claude-compatible shell runner. Use Write/write_file for durable artifacts;  |
 | <code>bg_learn</code> | Control the realtime background learner that consolidates  |
 | <code>browser</code> | Browser operations: snapshot, extract, viewport, outline. |
 | <code>calc</code> | Evaluate math expressions. |
@@ -54,17 +41,24 @@ Regeneration:
 | <code>date</code> | Get current date/time or parse dates. |
 | <code>delete_file</code> | Delete a file or empty directory. |
 | <code>diff</code> | Compare two files or strings. |
+| <code>discover_integrations</code> | Discover cached, installed, connected, live, inaccessible, stale, OAuth-gated, mutating, and sync-capable external integrations from the Codex app directory plus live MCP tools. |
 | <code>discover_tools</code> | List available tools by category or search. |
 | <code>disk_usage</code> | Disk usage for a path. |
 | <code>docker</code> | Docker operations. |
 | <code>download_file</code> | Download a file from URL. |
+| <code>dsco_doctor_integrations</code> | Diagnose integration catalog/cache health: stale connector IDs, missing auth/install state, dangerous mutating connectors, and control-plane governance tools. |
+| <code>Edit</code> | Claude-compatible alias for edit_file. |
 | <code>edit_file</code> | Edit file by replacing old_string with new_string. |
+| <code>EnterPlanMode</code> | Enter Claude-compatible advisory plan mode. |
 | <code>env_get</code> | Get environment variable. |
 | <code>eval</code> | Evaluate a math expression. |
+| <code>ExitPlanMode</code> | Exit Claude-compatible advisory plan mode. |
 | <code>file_hash</code> | Compute SHA-256 hash of a file on disk. Returns hash, path, and file size. |
 | <code>file_info</code> | Get file metadata (size, permissions, timestamps). |
 | <code>find_files</code> | Find files by name pattern (glob). |
 | <code>github_search</code> | Search GitHub repos, code, issues. |
+| <code>Glob</code> | Claude-compatible file glob search. |
+| <code>Grep</code> | Claude-compatible content search with glob/output_mode/head_limit support. |
 | <code>grep_files</code> | Search file contents with regex. |
 | <code>head_tail</code> | Read first or last N lines of a file. action=head (default) or tail. |
 | <code>hmac</code> | Compute HMAC-SHA256. |
@@ -104,6 +98,7 @@ Regeneration:
 | <code>ps</code> | List running processes. |
 | <code>python</code> | Run Python code. |
 | <code>random_bytes</code> | Generate random bytes (hex). |
+| <code>Read</code> | Claude-compatible alias for read_file. |
 | <code>read_file</code> | Read file with line numbers. Use offset/limit for large files. |
 | <code>recovery</code> | Failure recovery (Priority 7): retry/fallback/backtrack.  |
 | <code>research_probe</code> | Deep research probe on a topic. |
@@ -120,20 +115,27 @@ Regeneration:
 | <code>slack_post</code> | Post message to Slack. |
 | <code>sqlite</code> | Execute SQLite queries. |
 | <code>ssh_command</code> | Run command on remote host via SSH. |
+| <code>StartOfLoopConstruct</code> | Start a live recursive agent loop construct. Accepts a bounded  |
 | <code>string_transform</code> | String transformations: upper, lower, trim, reverse, slugify, capitalize. |
 | <code>swarm</code> | Swarm orchestration: create, map_reduce, status, collect, budget,  |
 | <code>synoptic</code> | Synoptic Data real-time weather station observations (ASOS/METAR). Actions:  |
 | <code>sysinfo</code> | System info: CPU, memory, OS. |
 | <code>systematic</code> | Systematic trading: ingest_polymarket, ingest_kalshi, analytics, signals. |
+| <code>Task</code> | Claude-compatible task agent alias. |
+| <code>TaskList</code> | Return the Claude-compatible todo list state. |
 | <code>tavily_search</code> | Web search via Tavily. |
 | <code>timestamp</code> | Current time: epoch, iso (ISO 8601), local, date, or relative (time until a  |
+| <code>TodoWrite</code> | Claude-compatible todo list state writer. |
 | <code>token_audit</code> | Audit token usage across conversation. |
 | <code>trading</code> | Trading ops: arb_execute, arb_monitor, portfolio, risk_check, risk_configure. |
 | <code>url_parse</code> | Parse a URL into components. |
 | <code>uuid</code> | Generate a UUID v4. |
 | <code>vos_status</code> | Virtual OS subsystem status. |
 | <code>weather</code> | Get weather data for a location. |
+| <code>WebFetch</code> | Claude-compatible URL fetch/extract. |
+| <code>WebSearch</code> | Claude-compatible web search alias. |
 | <code>wings_talons_status</code> | Unified Wings+Talons+Immune system status. |
 | <code>word_count</code> | Count words, lines, and characters in a file or text string. |
 | <code>workflow</code> | Workflow management: plan, status, checkpoint, resume, heartbeat,  |
+| <code>Write</code> | Claude-compatible alias for verified atomic write_file. |
 | <code>write_file</code> | Create/overwrite a file atomically, fsync it, and verify bytes on disk.  |

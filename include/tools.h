@@ -130,6 +130,12 @@ typedef char *(*external_tool_cb)(const char *name, const char *input_json, void
 void  tools_register_external(const char *name, const char *description,
                                 const char *input_schema_json,
                                 external_tool_cb cb, void *ctx);
+void  tools_register_external_metadata(const char *name, const char *integration_id,
+                                       const char *display_name,
+                                       const char *distribution_channel,
+                                       const char *categories, const char *labels,
+                                       const char *scope, unsigned action_flags,
+                                       const char *catalog_status);
 void  tools_reset_external(void);
 
 #define MAX_EXTERNAL_TOOLS 4096
@@ -141,6 +147,14 @@ typedef struct {
     external_tool_cb cb;
     void  *ctx;
     bool   loaded;
+    char   integration_id[256];
+    char   display_name[256];
+    char   distribution_channel[64];
+    char   categories[256];
+    char   labels[256];
+    char   scope[64];
+    unsigned action_flags;
+    char   catalog_status[64];
 } external_tool_t;
 
 extern external_tool_t g_external_tools[];
