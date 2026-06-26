@@ -2,6 +2,7 @@
 #define _DARWIN_C_SOURCE
 #endif
 #include "agent.h"
+#include "http_pool.h"
 #include "llm.h"
 #include "tools.h"
 #include "self_improve.h"
@@ -698,11 +699,140 @@ static bool provider_failover_available(const char *provider, const char *api_ke
         return false;
     if (!provider_has_usable_key(provider, api_key))
         return false;
+    if (provider_pool_subscription_exhausted_until(provider) > time(NULL))
+        return false;
     provider_slot_t *slot = provider_pool_slot(provider);
     if (slot && slot->state == POOL_SLOT_TRIPPED && slot->tripped_until &&
         time(NULL) < slot->tripped_until)
         return false;
     return true;
+}
+
+static bool stream_result_is_credit_exhausted(const stream_result_t *sr) {
+    if (!sr || sr->ok)
+        return false;
+    if (sr->http_status == 402 || sr->http_status == 429)
+        return true;
+    return provider_msg_is_credit_too_low(sr->parsed.stop_reason);
+}
+
+typedef enum {
+    FALLBACK_DECISION_AUTO = 0,
+    FALLBACK_DECISION_PAYG,
+    FALLBACK_DECISION_CHAIN,
+    FALLBACK_DECISION_MODEL,
+    FALLBACK_DECISION_STOP,
+} fallback_decision_t;
+
+static void format_reset_time(time_t reset_at, char *out, size_t out_len) {
+    if (!out || out_len == 0)
+        return;
+    if (reset_at <= 0) {
+        snprintf(out, out_len, "unknown reset time");
+        return;
+    }
+    struct tm tmv;
+    localtime_r(&reset_at, &tmv);
+    strftime(out, out_len, "%Y-%m-%d %H:%M %Z", &tmv);
+}
+
+static bool fallback_prompt_enabled(void) {
+    const char *prompt = getenv("DSCO_FALLBACK_PROMPT");
+    if (prompt && prompt[0] &&
+        (prompt[0] == '0' || strcasecmp(prompt, "false") == 0 || strcasecmp(prompt, "no") == 0))
+        return false;
+    if (env_truthy(getenv("DSCO_AUTO_FALLBACK")))
+        return false;
+    return isatty(STDIN_FILENO) && isatty(STDERR_FILENO);
+}
+
+static fallback_decision_t prompt_subscription_fallback_choice(
+    const session_state_t *session, const char *provider_name, const char *api_key,
+    time_t reset_at, char *chosen_model, size_t chosen_model_len) {
+    if (chosen_model && chosen_model_len > 0)
+        chosen_model[0] = '\0';
+    if (!fallback_prompt_enabled())
+        return FALLBACK_DECISION_AUTO;
+
+    char reset_buf[64];
+    format_reset_time(reset_at, reset_buf, sizeof(reset_buf));
+    char title[128];
+    snprintf(title, sizeof(title), "%s allocation exhausted",
+             provider_name && provider_name[0] ? provider_name : "provider");
+    char subtitle[128];
+    snprintf(subtitle, sizeof(subtitle), "reopens: %s", reset_buf);
+
+    enum {
+        FB_MENU_PAYG = 1,
+        FB_MENU_CHAIN = 2,
+        FB_MENU_STOP = 3,
+        FB_MENU_MODEL_BASE = 100,
+    };
+    tui_menu_t menu;
+    tui_menu_init(&menu, title, subtitle);
+    menu.accent = TUI_YELLOW;
+    menu.max_visible = 12;
+
+    tui_menu_item_t *actions = tui_menu_add_group(&menu, "Fallback choices");
+    if (provider_name && strcmp(provider_name, "sakana") == 0 && provider_sakana_has_payg_key()) {
+        tui_menu_item_t *payg = tui_menu_add_child(actions, "Use Fugu PAYG key", FB_MENU_PAYG);
+        tui_menu_set_badge(payg, TUI_MENU_BADGE_WARN, "metered");
+        tui_menu_set_hint(payg, "Retry the same model with FUGU_PAYG_API_KEY.");
+    }
+
+    if (session) {
+        for (int fi = 0; fi < session->fallback_count && fi < 4; fi++) {
+            const char *model = session->fallback_models[fi];
+            if (!model || !model[0] || strcmp(model, session->model) == 0)
+                continue;
+            const char *fb_provider = provider_route_for_model(model, api_key, NULL);
+            if (!fb_provider || !fb_provider[0])
+                continue;
+            provider_slot_t *slot = provider_pool_slot(fb_provider);
+            time_t exhausted = provider_pool_subscription_exhausted_until(fb_provider);
+            char label[128];
+            snprintf(label, sizeof(label), "Switch to %s", model);
+            tui_menu_item_t *it = tui_menu_add_child(actions, label, FB_MENU_MODEL_BASE + fi);
+            char detail[128];
+            snprintf(detail, sizeof(detail), "via %s", fb_provider);
+            tui_menu_set_detail(it, detail);
+            if (slot && slot->is_subscription) {
+                tui_menu_set_badge(it, exhausted ? TUI_MENU_BADGE_DISABLED : TUI_MENU_BADGE_OK,
+                                  "subscription");
+            } else {
+                tui_menu_set_badge(it, TUI_MENU_BADGE_WARN, "metered");
+            }
+            if (exhausted) {
+                char when[64];
+                format_reset_time(exhausted, when, sizeof(when));
+                char hint[192];
+                snprintf(hint, sizeof(hint), "Unavailable until %s.", when);
+                tui_menu_set_hint(it, hint);
+                tui_menu_set_disabled(it, true);
+            }
+        }
+    }
+
+    tui_menu_item_t *chain = tui_menu_add_child(actions, "Run fallback chain", FB_MENU_CHAIN);
+    tui_menu_set_hint(chain, "Try the configured models in order, skipping exhausted providers.");
+    tui_menu_item_t *stop = tui_menu_add_child(actions, "Stop and wait for reset", FB_MENU_STOP);
+    tui_menu_set_badge(stop, TUI_MENU_BADGE_DISABLED, "wait");
+
+    int id = tui_menu_run(&menu, NULL);
+    fallback_decision_t decision = FALLBACK_DECISION_STOP;
+    if (id == FB_MENU_PAYG) {
+        decision = FALLBACK_DECISION_PAYG;
+    } else if (id == FB_MENU_CHAIN) {
+        decision = FALLBACK_DECISION_CHAIN;
+    } else if (id >= FB_MENU_MODEL_BASE && session) {
+        int fi = id - FB_MENU_MODEL_BASE;
+        if (fi >= 0 && fi < session->fallback_count && chosen_model && chosen_model_len > 0) {
+            snprintf(chosen_model, chosen_model_len, "%s", session->fallback_models[fi]);
+            decision = FALLBACK_DECISION_MODEL;
+        }
+    }
+    tui_menu_free(&menu);
+    return decision;
 }
 
 static bool ensure_provider_with_override(session_state_t *session, const char *api_key,
@@ -1057,6 +1187,7 @@ static char *download_and_encode_image_url(const char *url, const char **media_t
         return NULL;
 
     CURL *curl = curl_easy_init();
+    dsco_http_pool_apply(curl);
     if (!curl) {
         if (err && err_sz > 0)
             snprintf(err, err_sz, "failed to initialize curl");
@@ -1668,6 +1799,7 @@ static void exit_autosave_handler(void) {
 }
 
 static void sigterm_autosave(int sig) {
+    terminal_force_restore();
     if (g_autosave_conv)
         autosave(g_autosave_conv, g_autosave_session);
     /* Kill MCP children before exiting so they don't orphan. */
@@ -2847,13 +2979,7 @@ static void terminal_capture_original(void) {
  * reply that would otherwise leak to the shell as a bogus command like the
  * stray "^[[56;1R". Safe to call from a signal handler or atexit. */
 static void terminal_force_restore(void) {
-    static const char reset[] = "\033[r"          /* reset scroll region */
-                                "\033[?2004l"      /* bracketed paste off */
-                                "\033[?1000l\033[?1002l\033[?1003l\033[?1006l" /* mouse off */
-                                "\033[?1004l"      /* focus reporting off */
-                                "\033[?25h"        /* show cursor */
-                                "\033[0m";          /* reset attributes */
-    (void)write(STDERR_FILENO, reset, sizeof(reset) - 1);
+    tui_terminal_restore_sane();
     if (g_term_orig_valid)
         tcsetattr(STDIN_FILENO, TCSAFLUSH, &g_term_orig);
 }
@@ -2924,8 +3050,8 @@ static void *esc_poll_thread_fn(void *arg) {
             g_interrupted = 1;
         } else if (g_escape_state == ESC_PAUSED) {
             /* Second ESC → hard exit */
-            const char msg[] = "\n\033[r\033[?2004l\033[0m\033[?25h\n";
-            (void)write(STDERR_FILENO, msg, sizeof(msg) - 1);
+            terminal_force_restore();
+            (void)write(STDERR_FILENO, "\n", 1);
             _exit(130);
         }
     }
@@ -3881,8 +4007,10 @@ bool agent_run(const char *api_key, const char *model, const char *topology_name
             have_startup_cmd = startup_command_consume(input_buf, sizeof(input_buf));
         }
         if (!have_startup_cmd) {
-            if (!read_input_line_prompt(input_buf, sizeof(input_buf), dyn_prompt))
+            if (!read_input_line_prompt(input_buf, sizeof(input_buf), dyn_prompt)) {
+                user_exit_requested = true;
                 break;
+            }
         }
 
         size_t len = strlen(input_buf);
@@ -3944,7 +4072,7 @@ bool agent_run(const char *api_key, const char *model, const char *topology_name
 
         if (strcmp(input_buf, "quit") == 0 || strcmp(input_buf, "exit") == 0 ||
             strcmp(input_buf, "/exit") == 0 || strcmp(input_buf, "/quit") == 0) {
-            /* Tell supervisor not to relaunch on this voluntary exit. */
+            /* The caller returns DSCO_EXIT_USER_REQUESTED so the supervisor stops. */
             setenv("DSCO_SUPERVISE_RESTART", "transient", 1);
             user_exit_requested = true;
             break;
@@ -7333,6 +7461,8 @@ bool agent_run(const char *api_key, const char *model, const char *topology_name
             stream_result_t sr;
             provider_failover_state_t failed_providers;
             provider_failover_reset(&failed_providers);
+            fallback_decision_t fallback_decision = FALLBACK_DECISION_AUTO;
+            char chosen_fallback_model[128] = "";
         reactive_retry:
             trace_span_begin(trace_id, "llm_stream", prompt_span, llm_span);
 
@@ -7358,19 +7488,115 @@ bool agent_run(const char *api_key, const char *model, const char *topology_name
                 provider_pool_report(g_provider->name, sr.ok,
                                      (pool_t1.tv_sec - pool_t0.tv_sec) * 1000.0 +
                                          (pool_t1.tv_usec - pool_t0.tv_usec) / 1000.0);
+            bool primary_credit_exhausted =
+                !sr.ok && g_provider && stream_result_is_credit_exhausted(&sr);
+            bool primary_subscription_exhausted = false;
+            if (primary_credit_exhausted && g_provider) {
+                provider_slot_t *slot = provider_pool_slot(g_provider->name);
+                primary_subscription_exhausted =
+                    (slot && slot->is_subscription) ||
+                    (strcmp(g_provider->name, "sakana") == 0 &&
+                     provider_sakana_current_key_is_subscription());
+                if (primary_subscription_exhausted) {
+                    provider_pool_mark_subscription_exhausted(g_provider->name,
+                                                              sr.credit_reset_at);
+                    if (sr.credit_reset_at > 0) {
+                        char when[64];
+                        format_reset_time(sr.credit_reset_at, when, sizeof(when));
+                        if (g_outq)
+                            tui_outq_writef(g_outq,
+                                            "  %ssubscription allocation reopens: %s%s\n",
+                                            TUI_DIM, when, TUI_RESET);
+                        else
+                            fprintf(stderr, "  %ssubscription allocation reopens: %s%s\n",
+                                    TUI_DIM, when, TUI_RESET);
+                    }
+                    fallback_decision = prompt_subscription_fallback_choice(
+                        &session, g_provider->name, api_key, sr.credit_reset_at,
+                        chosen_fallback_model, sizeof(chosen_fallback_model));
+                }
+            }
+            if (!sr.ok && g_provider && strcmp(g_provider->name, "sakana") == 0 &&
+                stream_result_is_credit_exhausted(&sr) &&
+                provider_sakana_current_key_is_subscription() &&
+                provider_sakana_has_payg_key() && !g_interrupted &&
+                (fallback_decision == FALLBACK_DECISION_AUTO ||
+                 fallback_decision == FALLBACK_DECISION_PAYG)) {
+                const char *payg_key = provider_sakana_payg_request_key();
+                if (payg_key && payg_key[0] && (!cur_key || strcmp(payg_key, cur_key) != 0)) {
+                    if (g_outq)
+                        tui_outq_writef(g_outq,
+                                        "  %sfallback: Sakana subscription exhausted; retrying "
+                                        "Fugu via PAYG%s\n",
+                                        TUI_YELLOW, TUI_RESET);
+                    else
+                        fprintf(stderr,
+                                "  %sfallback: Sakana subscription exhausted; retrying Fugu via "
+                                "PAYG%s\n",
+                                TUI_YELLOW, TUI_RESET);
+                    tui_stream_heartbeat_poke(&s_heartbeat, "fugu payg fallback...");
+                    json_free_response(&sr.parsed);
+                    provider_debug_log_request(g_provider->name, session.model, payg_key);
+
+                    provider_slot_t *payg_slot = provider_pool_slot("sakana");
+                    bool saved_is_subscription = payg_slot ? payg_slot->is_subscription : false;
+                    if (payg_slot)
+                        payg_slot->is_subscription = false;
+                    gettimeofday(&pool_t0, NULL);
+                    sr = g_provider->stream(g_provider, payg_key, req, on_stream_text,
+                                            on_stream_tool_start, on_stream_thinking, NULL);
+                    gettimeofday(&pool_t1, NULL);
+                    provider_pool_report(g_provider->name, sr.ok,
+                                         (pool_t1.tv_sec - pool_t0.tv_sec) * 1000.0 +
+                                             (pool_t1.tv_usec - pool_t0.tv_usec) / 1000.0);
+                    if (sr.ok) {
+                        setenv("DSCO_SAKANA_KEY_CLASS", "payg", 1);
+                        if (g_outq)
+                            tui_outq_writef(g_outq,
+                                            "  %sfallback succeeded with Fugu PAYG%s\n",
+                                            TUI_GREEN, TUI_RESET);
+                        else
+                            fprintf(stderr, "  %sfallback succeeded with Fugu PAYG%s\n",
+                                    TUI_GREEN, TUI_RESET);
+                    } else if (payg_slot) {
+                        payg_slot->is_subscription = saved_is_subscription;
+                    }
+                }
+            }
             if (!sr.ok)
                 provider_failover_mark(&failed_providers, g_provider ? g_provider->name : NULL);
 
             /* Fallback: if failed and fallback chain configured, try next model */
-            if (!sr.ok && session.fallback_count > 0) {
+            if (!sr.ok && session.fallback_count > 0 &&
+                fallback_decision != FALLBACK_DECISION_STOP) {
                 char original_model[128];
                 char original_provider[64];
                 snprintf(original_model, sizeof(original_model), "%s", session.model);
                 snprintf(original_provider, sizeof(original_provider), "%s",
                          g_provider ? g_provider->name : "");
 
-                for (int fi = 0; fi < session.fallback_count && !sr.ok && !g_interrupted; fi++) {
-                    const char *fb_model = session.fallback_models[fi];
+                char fallback_order[4][128];
+                int fallback_order_count = 0;
+                if (chosen_fallback_model[0]) {
+                    snprintf(fallback_order[fallback_order_count++],
+                             sizeof(fallback_order[0]), "%s", chosen_fallback_model);
+                }
+                for (int fi = 0; fi < session.fallback_count && fallback_order_count < 4; fi++) {
+                    bool duplicate = false;
+                    for (int oi = 0; oi < fallback_order_count; oi++) {
+                        if (strcmp(fallback_order[oi], session.fallback_models[fi]) == 0) {
+                            duplicate = true;
+                            break;
+                        }
+                    }
+                    if (duplicate)
+                        continue;
+                    snprintf(fallback_order[fallback_order_count++],
+                             sizeof(fallback_order[0]), "%s", session.fallback_models[fi]);
+                }
+
+                for (int fi = 0; fi < fallback_order_count && !sr.ok && !g_interrupted; fi++) {
+                    const char *fb_model = fallback_order[fi];
                     if (strcmp(fb_model, session.model) == 0)
                         continue;
                     const char *fb_provider = provider_route_for_model(fb_model, api_key, NULL);
@@ -7818,6 +8044,36 @@ bool agent_run(const char *api_key, const char *model, const char *topology_name
                         char *tool_result = safe_malloc(MAX_TOOL_RESULT);
                         tool_result[0] = '\0';
                         bool ok = false;
+                        bool interactive_tool = dsco_tool_is_interactive(blk->tool_name);
+
+                        if (interactive_tool) {
+                            /* Interactive tools own the terminal/user turn. Never run them under
+                             * spinner, watchdog, cache, or parallel orchestration: the UI must be
+                             * live and repeat calls must re-ask rather than replay stale answers. */
+                            char tool_span[37] = "";
+                            trace_span_begin(trace_id, blk->tool_name, prompt_span, tool_span);
+                            double t0 = now_ms();
+                            ok = tools_execute_for_tier(blk->tool_name, blk->tool_input, exec_tier,
+                                                        tool_result, MAX_TOOL_RESULT);
+                            double elapsed = (now_ms() - t0) * 1000.0;
+                            size_t result_len = strlen(tool_result);
+                            if (result_len >= MAX_TOOL_RESULT - 256) {
+                                size_t cur = strlen(tool_result);
+                                snprintf(tool_result + cur, MAX_TOOL_RESULT - cur,
+                                         "\n[WARNING: output truncated at %zu bytes]", result_len);
+                            }
+                            print_tool_result_ex(blk->tool_name, ok, tool_result, elapsed);
+                            pthread_mutex_lock(&g_locks.metrics_lock);
+                            tool_metrics_record(&tool_metrics, blk->tool_name, ok, elapsed);
+                            pthread_mutex_unlock(&g_locks.metrics_lock);
+                            SI_RECORD_TOOL(blk->tool_name, ok, elapsed,
+                                           (int)(strlen(tool_result) / 4));
+                            trace_span_end(tool_span, ok ? "ok" : "error", NULL);
+                            conv_add_tool_result_named(&conv, blk->tool_id, blk->tool_name,
+                                                       tool_result, !ok);
+                            free(tool_result);
+                            continue;
+                        }
 
                         /* Check cache (under lock) */
                         pthread_mutex_lock(&g_locks.cache_lock);
@@ -8087,8 +8343,19 @@ bool agent_run(const char *api_key, const char *model, const char *topology_name
                     }
                 }
 
+                bool batch_has_interactive = false;
+                for (int bi = 0; bi < batch_n; bi++) {
+                    content_block_t *blk = &sr.parsed.blocks[batch_indices[bi]];
+                    if (dsco_tool_is_interactive(blk->tool_name)) {
+                        batch_has_interactive = true;
+                        break;
+                    }
+                }
+
                 tui_batch_spinner_t batch_spinner;
-                tui_batch_spinner_start(&batch_spinner, batch_names, batch_n);
+                memset(&batch_spinner, 0, sizeof(batch_spinner));
+                if (!batch_has_interactive)
+                    tui_batch_spinner_start(&batch_spinner, batch_names, batch_n);
 
                 /* ── Partition: concurrent (read-only) vs serial (write) ── */
                 concurrent_tool_slot_t *conc_slots =
@@ -8105,11 +8372,13 @@ bool agent_run(const char *api_key, const char *model, const char *topology_name
                     {
                         char bp[128];
                         extract_tool_preview(blk->tool_name, blk->tool_input, bp, sizeof(bp));
-                        pthread_mutex_lock(&batch_spinner.mutex);
-                        if (bi < batch_spinner.count)
-                            snprintf(batch_spinner.entries[bi].args_preview,
-                                     sizeof(batch_spinner.entries[bi].args_preview), "%s", bp);
-                        pthread_mutex_unlock(&batch_spinner.mutex);
+                        if (!batch_has_interactive) {
+                            pthread_mutex_lock(&batch_spinner.mutex);
+                            if (bi < batch_spinner.count)
+                                snprintf(batch_spinner.entries[bi].args_preview,
+                                         sizeof(batch_spinner.entries[bi].args_preview), "%s", bp);
+                            pthread_mutex_unlock(&batch_spinner.mutex);
+                        }
                     }
 
                     if (batch_policy_blocked[bi]) {
@@ -8128,6 +8397,12 @@ bool agent_run(const char *api_key, const char *model, const char *topology_name
                         tui_batch_spinner_complete(&batch_spinner, bi, false, val_err, 0.0);
                         conv_add_tool_result_named(&conv, blk->tool_id, blk->tool_name, val_err,
                                                    true);
+                        continue;
+                    }
+
+                    bool interactive_tool = dsco_tool_is_interactive(blk->tool_name);
+                    if (interactive_tool) {
+                        serial_indices_arr[serial_count++] = bi;
                         continue;
                     }
 
@@ -8173,8 +8448,10 @@ bool agent_run(const char *api_key, const char *model, const char *topology_name
                     }
                     free(cached_result);
 
-                    /* Route to concurrent or serial */
-                    if (tool_is_concurrent_safe(blk->tool_name) &&
+                    /* Route to concurrent or serial. If any interactive tool is present, keep the
+                     * whole batch serial so no background thread writes/logs while the dialog owns
+                     * the terminal. */
+                    if (!batch_has_interactive && tool_is_concurrent_safe(blk->tool_name) &&
                         conc_count < CONCURRENT_TOOL_MAX) {
                         concurrent_tool_slot_t *s = &conc_slots[conc_count];
                         memset(s, 0, sizeof(*s));
@@ -8213,6 +8490,31 @@ bool agent_run(const char *api_key, const char *model, const char *topology_name
                     char *tool_result = safe_malloc(MAX_TOOL_RESULT);
                     tool_result[0] = '\0';
                     bool ok = false;
+
+                    if (dsco_tool_is_interactive(blk->tool_name)) {
+                        char tool_span[37] = "";
+                        trace_span_begin(trace_id, blk->tool_name, prompt_span, tool_span);
+                        double t0 = now_ms();
+                        ok = tools_execute_for_tier(blk->tool_name, blk->tool_input, batch_tiers[bi],
+                                                    tool_result, MAX_TOOL_RESULT);
+                        double elapsed = (now_ms() - t0) * 1000.0;
+                        size_t result_len2 = strlen(tool_result);
+                        if (result_len2 >= MAX_TOOL_RESULT - 256) {
+                            size_t cur = strlen(tool_result);
+                            snprintf(tool_result + cur, MAX_TOOL_RESULT - cur,
+                                     "\n[WARNING: output truncated at %zu bytes]", result_len2);
+                        }
+                        print_tool_result_ex(blk->tool_name, ok, tool_result, elapsed);
+                        pthread_mutex_lock(&g_locks.metrics_lock);
+                        tool_metrics_record(&tool_metrics, blk->tool_name, ok, elapsed);
+                        pthread_mutex_unlock(&g_locks.metrics_lock);
+                        SI_RECORD_TOOL(blk->tool_name, ok, elapsed, (int)(strlen(tool_result) / 4));
+                        trace_span_end(tool_span, ok ? "ok" : "error", NULL);
+                        conv_add_tool_result_named(&conv, blk->tool_id, blk->tool_name, tool_result,
+                                                   !ok);
+                        free(tool_result);
+                        continue;
+                    }
 
                     char tool_span[37] = "";
                     trace_span_begin(trace_id, blk->tool_name, prompt_span, tool_span);
@@ -8361,7 +8663,8 @@ bool agent_run(const char *api_key, const char *model, const char *topology_name
 
                 free(conc_slots);
 
-                tui_batch_spinner_stop(&batch_spinner);
+                if (!batch_has_interactive)
+                    tui_batch_spinner_stop(&batch_spinner);
 
                 /* Update co-occurrence matrix */
                 {
@@ -8374,7 +8677,7 @@ bool agent_run(const char *api_key, const char *model, const char *topology_name
                 }
 
                 /* Batch aggregate summary */
-                if (batch_n >= 2) {
+                if (!batch_has_interactive && batch_n >= 2) {
                     const model_info_t *mi = model_lookup(session.model);
                     char batch_cost_suffix[128] = "";
                     if (mi) {

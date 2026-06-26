@@ -1,6 +1,7 @@
 /* Tool Management API client — discover, execute, and fan out across many
  * remote tools served by the dsco-autobot registry. See include/toolmgmt.h. */
 #include "toolmgmt.h"
+#include "http_pool.h"
 #include "json_util.h"
 #include "tools.h"
 #include "config.h"
@@ -111,6 +112,7 @@ static long tm_request_once(const char *method, const char *path, const char *bo
     pthread_once(&s_curl_once, tm_curl_global_init);
 
     CURL *c = curl_easy_init();
+    dsco_http_pool_apply(c);
     if (!c)
         return -1;
 

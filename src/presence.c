@@ -27,6 +27,36 @@ static pthread_t s_thread;
 static atomic_int s_running = 0;
 static atomic_int s_locked = 0;
 static atomic_int s_kq = -1; /* kqueue fd, for stop() */
+static atomic_llong s_idle_grace_until_ms = 0;
+
+static long long monotonic_ms(void) {
+    struct timespec ts;
+    if (clock_gettime(CLOCK_MONOTONIC, &ts) != 0)
+        return 0;
+    return (long long)ts.tv_sec * 1000LL + (long long)ts.tv_nsec / 1000000LL;
+}
+
+static void presence_reset_idle_grace(void) {
+    long long now = monotonic_ms();
+    if (now <= 0)
+        return;
+    atomic_store(&s_idle_grace_until_ms, now + (long long)s_idle_threshold_s * 1000LL);
+}
+
+static bool presence_idle_grace_active(void) {
+    long long until = atomic_load(&s_idle_grace_until_ms);
+    if (until <= 0)
+        return false;
+
+    long long now = monotonic_ms();
+    if (now <= 0)
+        return false;
+    if (now < until)
+        return true;
+
+    atomic_store(&s_idle_grace_until_ms, 0);
+    return false;
+}
 
 /* ── kqueue presence thread ──────────────────────────────────────────────── */
 
@@ -63,6 +93,8 @@ static void *presence_thread(void *arg) {
             break;
         if (atomic_load(&s_locked))
             continue; /* already locked; skip */
+        if (presence_idle_grace_active())
+            continue;
 
         double idle = presence_idle_seconds();
         if (idle >= (double)s_idle_threshold_s) {
@@ -123,13 +155,16 @@ bool presence_is_locked(void) {
 
 void presence_mark_unlocked(void) {
     atomic_store(&s_locked, 0);
+    presence_reset_idle_grace();
     audit_log("presence", "terminal unlocked");
 }
 
 void presence_poke(void) {
-    /* Reset the software idle counter to < threshold so we don't re-lock
-     * immediately on the next timer tick after a user keystroke. */
+    /* CoreGraphics idle time cannot be reset by us. Keep a local grace window
+     * after unlock/keypress so an already-idle OS session does not relock
+     * immediately on the next presence timer tick. */
     atomic_store(&s_locked, 0);
+    presence_reset_idle_grace();
 }
 
 #else /* !__APPLE__ — stubs */

@@ -414,6 +414,87 @@ int dsco_workspace_show_skill(const char *name, char *out, size_t out_len) {
     return 0;
 }
 
+bool dsco_workspace_skill_exists(const char *name) {
+    if (!is_valid_skill_name(name))
+        return false;
+    char path[PATH_MAX];
+    snprintf(path, sizeof(path), "%s/skills/%s/SKILL.md", dsco_workspace_root(), name);
+    return access(path, R_OK) == 0;
+}
+
+int dsco_workspace_create_skill(const char *name, const char *body, bool overwrite) {
+    if (!is_valid_skill_name(name) || !body)
+        return -1;
+
+    char dir[PATH_MAX];
+    snprintf(dir, sizeof(dir), "%s/skills/%s", dsco_workspace_root(), name);
+    char path[PATH_MAX];
+    snprintf(path, sizeof(path), "%s/SKILL.md", dir);
+    if (!overwrite && access(path, F_OK) == 0)
+        return 0;
+    if (!mkdir_p(dir))
+        return -1;
+
+    FILE *f = fopen(path, "w");
+    if (!f)
+        return -1;
+    fputs(body, f);
+    if (body[0] && body[strlen(body) - 1] != '\n')
+        fputc('\n', f);
+    fclose(f);
+    dsco_workspace_prompt_invalidate();
+    return 1;
+}
+
+int dsco_workspace_delete_skill(const char *name, bool force) {
+    if (!is_valid_skill_name(name))
+        return -1;
+    char dir[PATH_MAX];
+    snprintf(dir, sizeof(dir), "%s/skills/%s", dsco_workspace_root(), name);
+    char path[PATH_MAX];
+    snprintf(path, sizeof(path), "%s/SKILL.md", dir);
+    if (access(path, F_OK) != 0)
+        return 0;
+
+    if (!force) {
+        char *text = NULL;
+        bool ok = read_file_limit(path, WORKSPACE_FILE_LIMIT, &text);
+        bool generated = ok && text && strstr(text, "<!-- dsco:auto-generated -->") != NULL;
+        free(text);
+        if (!generated)
+            return 0;
+    }
+    if (unlink(path) != 0)
+        return -1;
+    rmdir(dir);
+    dsco_workspace_prompt_invalidate();
+    return 1;
+}
+
+int dsco_workspace_count_auto_skills(void) {
+    char skills_dir[PATH_MAX];
+    workspace_path(skills_dir, sizeof(skills_dir), "skills");
+    DIR *d = opendir(skills_dir);
+    if (!d)
+        return 0;
+    int count = 0;
+    struct dirent *ent;
+    while ((ent = readdir(d)) != NULL) {
+        if (ent->d_name[0] == '.')
+            continue;
+        char path[PATH_MAX];
+        snprintf(path, sizeof(path), "%s/%s/SKILL.md", skills_dir, ent->d_name);
+        char *text = NULL;
+        if (read_file_limit(path, WORKSPACE_FILE_LIMIT, &text)) {
+            if (strstr(text, "<!-- dsco:auto-generated -->") != NULL)
+                count++;
+            free(text);
+        }
+    }
+    closedir(d);
+    return count;
+}
+
 int dsco_workspace_list_skills(char *out, size_t out_len) {
     if (!out || out_len == 0)
         return -1;

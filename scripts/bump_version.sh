@@ -33,7 +33,9 @@ fi
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT"
 
-if [[ ! -f config.h || ! -f CHANGELOG.md ]]; then
+CONFIG_H="include/config.h"
+
+if [[ ! -f "$CONFIG_H" || ! -f CHANGELOG.md ]]; then
   echo "error: run this script from a dsco-cli checkout" >&2
   exit 1
 fi
@@ -54,8 +56,8 @@ END {
     exit 2
   }
 }
-' config.h > "$TMP_FILE"
-mv "$TMP_FILE" config.h
+' "$CONFIG_H" > "$TMP_FILE"
+mv "$TMP_FILE" "$CONFIG_H"
 
 if grep -Eq "^## \[$NEW_VERSION\]([[:space:]]|$)" CHANGELOG.md; then
   echo "changelog section [$NEW_VERSION] already exists"
@@ -81,11 +83,14 @@ else
 
   BEGIN { inserted = 0 }
 
-  /^## Historical Notes/ {
+  /^## \[Unreleased\]/ {
+    print
     if (!inserted) {
+      print ""
       print_release_block()
       inserted = 1
     }
+    next
   }
 
   { print }

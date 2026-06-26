@@ -14,6 +14,7 @@
 
 #define _POSIX_C_SOURCE 200809L
 #include <stdatomic.h>
+#include "http_pool.h"
 #include <stdbool.h>
 #include <stdint.h>
 #include <stdio.h>
@@ -429,6 +430,7 @@ static size_t http_write_cb(char *ptr, size_t sz, size_t nm, void *ud) {
 
 static char *http_get(const char *url, size_t *len_out) {
     CURL *c = curl_easy_init();
+    dsco_http_pool_apply(c);
     if (!c)
         return NULL;
     http_buf_t b = {0};
