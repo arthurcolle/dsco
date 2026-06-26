@@ -11,6 +11,7 @@
 #include "ipc.h"
 #include "md.h"
 #include "baseline.h"
+#include "chronicle.h"
 #include "setup.h"
 #include "provider.h"
 #include "provider_profiles.h"
@@ -626,6 +627,16 @@ static dsco_caps_t main_plan_startup_caps(int argc, char **argv,
             local_mode = true;
             continue;
         }
+        if (strcmp(argv[i], "--ollama") == 0) {
+            local_mode = true;
+            continue;
+        }
+        if (strcmp(argv[i], "--pull-and-use") == 0) {
+            local_mode = true;
+            if (i + 1 < argc)
+                i++;
+            continue;
+        }
         if (strcmp(argv[i], "--tool-exec") == 0) {
             caps |= DSCO_CAP_TOOLS;
             if (i + 2 < argc) i += 2;
@@ -635,11 +646,23 @@ static dsco_caps_t main_plan_startup_caps(int argc, char **argv,
             caps |= DSCO_CAP_TOOLS;
             continue;
         }
+        if ((strcmp(argv[i], "-p") == 0 ||
+             strcmp(argv[i], "--prompt") == 0 ||
+             strcmp(argv[i], "--p") == 0) && i + 1 < argc) {
+            has_prompt = true;
+            i++;
+            break;
+        }
         if (strcmp(argv[i], "--models-json") == 0 ||
             strcmp(argv[i], "--version") == 0 ||
             strcmp(argv[i], "-v") == 0 ||
             strcmp(argv[i], "--help") == 0 ||
             strcmp(argv[i], "-h") == 0) {
+            continue;
+        }
+        if (strcmp(argv[i], "--route-explain") == 0) {
+            if (i + 1 < argc && argv[i + 1][0] != '-')
+                i++;
             continue;
         }
         if (argv[i][0] != '-') {
@@ -664,6 +687,7 @@ static dsco_caps_t main_plan_startup_caps(int argc, char **argv,
             continue;
         }
         if ((strcmp(argv[i], "-m") == 0 ||
+             strcmp(argv[i], "--model") == 0 ||
              strcmp(argv[i], "-M") == 0 ||
              strcmp(argv[i], "--worker-model") == 0 ||
              strcmp(argv[i], "--exec") == 0 ||
@@ -955,6 +979,8 @@ static const exec_reg_t EXEC_REGISTRY[] = {
 
 #define DSCO_LOCAL_PROVIDER "lmstudio"
 #define DSCO_LOCAL_MODEL    "lmstudio:liquid/lfm2.5-1.2b"
+#define DSCO_OLLAMA_PROVIDER "ollama"
+#define DSCO_OLLAMA_MODEL    "ollama:llama3.2"
 
 typedef struct {
     const char *name;
@@ -992,6 +1018,38 @@ static const native_provider_t NATIVE_PROVIDERS[] = {
       CAP_TOOLS|CAP_MULTITURN|CAP_STREAMING|CAP_JSON, 3 },
     { "moonshot",   "Moonshot Kimi API",         "KIMI_API_KEY",        "kimi-k2.7-code-highspeed",
       CAP_TOOLS|CAP_MULTITURN|CAP_STREAMING|CAP_VISION|CAP_THINKING|CAP_JSON, 4 },
+    { "alibaba",    "Alibaba DashScope",         "DASHSCOPE_API_KEY",   "qwen3-coder-plus",
+      CAP_TOOLS|CAP_MULTITURN|CAP_STREAMING|CAP_VISION|CAP_JSON, 3 },
+    { "alibaba-coding-plan", "Alibaba Coding Plan", "ALIBABA_CODING_PLAN_API_KEY", "qwen3-coder-plus",
+      CAP_TOOLS|CAP_MULTITURN|CAP_STREAMING|CAP_JSON, 3 },
+    { "arcee",      "Arcee AI",                  "ARCEEAI_API_KEY",     "auto",
+      CAP_TOOLS|CAP_MULTITURN|CAP_STREAMING|CAP_JSON, 2 },
+    { "azure-foundry", "Azure AI Foundry",       "AZURE_FOUNDRY_API_KEY", "gpt-4.1",
+      CAP_TOOLS|CAP_MULTITURN|CAP_STREAMING|CAP_VISION|CAP_JSON, 3 },
+    { "gmi",        "GMI Cloud",                 "GMI_API_KEY",         "auto",
+      CAP_TOOLS|CAP_MULTITURN|CAP_STREAMING|CAP_JSON, 2 },
+    { "huggingface","Hugging Face Router",       "HF_TOKEN",            "meta-llama/Llama-3.3-70B-Instruct",
+      CAP_TOOLS|CAP_MULTITURN|CAP_STREAMING|CAP_JSON, 2 },
+    { "kilocode",   "KiloCode Gateway",          "KILOCODE_API_KEY",    "auto",
+      CAP_TOOLS|CAP_MULTITURN|CAP_STREAMING|CAP_JSON, 2 },
+    { "nous",       "Nous Research",             "NOUS_API_KEY",        "auto",
+      CAP_TOOLS|CAP_MULTITURN|CAP_STREAMING|CAP_JSON, 2 },
+    { "novita",     "Novita AI",                 "NOVITA_API_KEY",      "meta-llama/llama-3.1-8b-instruct",
+      CAP_TOOLS|CAP_MULTITURN|CAP_STREAMING|CAP_VISION|CAP_JSON, 2 },
+    { "nvidia",     "NVIDIA NIM",                "NVIDIA_API_KEY",      "meta/llama-3.1-70b-instruct",
+      CAP_TOOLS|CAP_MULTITURN|CAP_STREAMING|CAP_JSON, 2 },
+    { "opencode-zen", "OpenCode Zen",            "OPENCODE_ZEN_API_KEY", "auto",
+      CAP_TOOLS|CAP_MULTITURN|CAP_STREAMING|CAP_JSON, 2 },
+    { "opencode-go", "OpenCode Go",              "OPENCODE_GO_API_KEY", "auto",
+      CAP_TOOLS|CAP_MULTITURN|CAP_STREAMING|CAP_JSON, 2 },
+    { "qwen-oauth", "Qwen Portal",               "QWEN_API_KEY",        "qwen3-coder-plus",
+      CAP_TOOLS|CAP_MULTITURN|CAP_STREAMING|CAP_JSON, 3 },
+    { "stepfun",    "StepFun Coding Plan",       "STEPFUN_API_KEY",     "auto",
+      CAP_TOOLS|CAP_MULTITURN|CAP_STREAMING|CAP_JSON, 2 },
+    { "xiaomi",     "Xiaomi MiMo",               "XIAOMI_API_KEY",      "auto",
+      CAP_TOOLS|CAP_MULTITURN|CAP_STREAMING|CAP_VISION|CAP_JSON, 2 },
+    { "zai",        "Z.AI GLM",                  "GLM_API_KEY",         "glm-5.2",
+      CAP_TOOLS|CAP_MULTITURN|CAP_STREAMING|CAP_VISION|CAP_JSON, 3 },
     { "sakana",     "Sakana Fugu API",           "FUGU_API_KEY",        "fugu",
       CAP_TOOLS|CAP_MULTITURN|CAP_STREAMING|CAP_VISION|CAP_THINKING|CAP_JSON, 4 },
     { "ollama-cloud", "Ollama Cloud",            "OLLAMA_API_KEY",      "gpt-oss:120b",
@@ -1062,6 +1120,57 @@ static bool exec_bin_available(const char *bin) {
     char cmd[256];
     snprintf(cmd, sizeof(cmd), "command -v %s >/dev/null 2>&1", bin);
     return system(cmd) == 0;
+}
+
+static void main_prompt_append_arg(char **prompt, const char *arg) {
+    if (!prompt || !arg)
+        return;
+    size_t old_len = *prompt ? strlen(*prompt) : 0;
+    size_t add_len = strlen(arg);
+    size_t sep_len = old_len ? 1 : 0;
+    char *out = *prompt ? safe_realloc(*prompt, old_len + sep_len + add_len + 1)
+                        : safe_malloc(add_len + 1);
+    size_t pos = old_len;
+    if (sep_len)
+        out[pos++] = ' ';
+    memcpy(out + pos, arg, add_len + 1);
+    *prompt = out;
+}
+
+static int main_ollama_pull_model(const char *model) {
+    if (!model || !model[0] || model[0] == '-') {
+        fprintf(stderr, "error: --pull-and-use requires an Ollama model name\n");
+        return 2;
+    }
+
+    fprintf(stderr, "  \033[2mollama pull %s\033[0m\n", model);
+    pid_t pid = fork();
+    if (pid < 0) {
+        fprintf(stderr, "error: failed to start ollama pull: %s\n", strerror(errno));
+        return 1;
+    }
+    if (pid == 0) {
+        execlp("ollama", "ollama", "pull", model, (char *)NULL);
+        fprintf(stderr, "error: failed to exec ollama: %s\n", strerror(errno));
+        _exit(errno == ENOENT ? 127 : 126);
+    }
+
+    int status = 0;
+    for (;;) {
+        if (waitpid(pid, &status, 0) >= 0)
+            break;
+        if (errno == EINTR)
+            continue;
+        fprintf(stderr, "error: failed waiting for ollama pull: %s\n", strerror(errno));
+        return 1;
+    }
+    if (WIFEXITED(status))
+        return WEXITSTATUS(status);
+    if (WIFSIGNALED(status)) {
+        fprintf(stderr, "error: ollama pull terminated by signal %d\n", WTERMSIG(status));
+        return 128 + WTERMSIG(status);
+    }
+    return 1;
 }
 
 static bool main_claude_exec_ready(void) {
@@ -2075,7 +2184,8 @@ static void usage(const char *prog) {
         "       %s config [show|init|validate|ingest|explain|metadata]  DSCO Config Registry\n"
         "\n"
         "Options:\n"
-        "  -m MODEL    Model name (default: %s)\n"
+        "  -m, --model MODEL      Model name (default: %s)\n"
+        "  -p, --prompt PROMPT    One-shot prompt (same as positional prompt)\n"
         "  -k KEY      API key, or ENV=KEY / ENV KEY (default: provider env for selected model)\n"
         "  --profile full|lite|worker  Runtime startup profile (default: full)\n"
         "  --login                Interactive backend login (Claude Code / Codex)\n"
@@ -2095,8 +2205,11 @@ static void usage(const char *prog) {
         "  --ui [PORT]            Launch web UI (default port: 3141)\n"
         "  -i, --interactive      Start an interactive REPL (no prompt required)\n"
         "  --local                Use LM Studio locally (default model: liquid/lfm2.5-1.2b)\n"
+        "  --ollama               Use local Ollama (default model: llama3.2)\n"
+        "  --pull-and-use MODEL   Pull an Ollama model, then use it locally\n"
         "  -e, --exec BACKEND    Execute via CLI/provider (claude, codex, auto, smart, list, bench, bench-tools, smoke, smoke-full, <provider>)\n"
         "  --provider NAME       Force a native provider (anthropic, openai, openrouter, ollama, ollama-cloud, fugu/sakana, xai, ...)\n"
+        "  --route-explain [MODEL]  Explain provider/model routing without streaming\n"
         "  --                    Pass remaining args to executor (after -e)\n"
         "  -C, --cheap            Cheap mode: 5 core tools + discover/load (env: DSCO_CHEAP=1)\n"
         "  --version              Print version and build info\n"
@@ -2373,27 +2486,66 @@ static void print_tools_json_fast(dsco_profile_t profile) {
     printf("]\n");
 }
 
-static bool main_json_string_needs_escape(const char *s) {
-    if (!s) return false;
-    for (const unsigned char *p = (const unsigned char *)s; *p; p++) {
-        if (*p < 0x20 || *p == '"' || *p == '\\') return true;
+static bool main_result_is_structured_json(const char *s) {
+    if (!s)
+        return false;
+    const char *p = s;
+    while (*p && isspace((unsigned char)*p))
+        p++;
+    if (*p != '{' && *p != '[')
+        return false;
+
+    char stack[128];
+    int depth = 0;
+    bool in_string = false;
+    bool escaped = false;
+    for (; *p; p++) {
+        char c = *p;
+        if (in_string) {
+            if (escaped)
+                escaped = false;
+            else if (c == '\\')
+                escaped = true;
+            else if (c == '"')
+                in_string = false;
+            continue;
+        }
+        if (c == '"') {
+            in_string = true;
+            continue;
+        }
+        if (c == '{' || c == '[') {
+            if (depth >= (int)(sizeof(stack) / sizeof(stack[0])))
+                return false;
+            stack[depth++] = (c == '{') ? '}' : ']';
+            continue;
+        }
+        if (c == '}' || c == ']') {
+            if (depth <= 0 || c != stack[depth - 1])
+                return false;
+            depth--;
+            if (depth == 0) {
+                p++;
+                while (*p && isspace((unsigned char)*p))
+                    p++;
+                return *p == '\0';
+            }
+        }
     }
     return false;
 }
 
 static void main_print_tool_exec_json(bool ok, const char *result) {
-    const char *prefix = ok ? "{\"ok\":true,\"result\":\""
-                            : "{\"ok\":false,\"result\":\"";
-    if (!main_json_string_needs_escape(result)) {
-        (void)write(STDOUT_FILENO, prefix, strlen(prefix));
-        if (result) (void)write(STDOUT_FILENO, result, strlen(result));
-        (void)write(STDOUT_FILENO, "\"}\n", 3);
+    printf("{\"ok\":%s,\"result\":", ok ? "true" : "false");
+    if (main_result_is_structured_json(result)) {
+        fputs(result, stdout);
+        printf("}\n");
         return;
     }
 
-    fputs(prefix, stdout);
+    putchar('"');
     json_print_escaped(stdout, result ? result : "");
-    fputs("\"}\n", stdout);
+    printf("\"}\n");
 }
 
 static int run_tool_exec_fast(dsco_profile_t profile,
@@ -2417,10 +2569,114 @@ static int run_tool_exec_fast(dsco_profile_t profile,
         tools_init_local_only();
     char result[256 * 1024] = {0};
     bool ok = tools_execute(name, input_json, result, sizeof(result));
-    printf("{\"ok\":%s,\"result\":\"", ok ? "true" : "false");
-    json_print_escaped(stdout, result);
-    printf("\"}\n");
+    main_print_tool_exec_json(ok, result);
     return ok ? 0 : 1;
+}
+
+static bool main_route_explain_requested(int argc, char **argv,
+                                         const char **out_model) {
+    for (int i = 1; i < argc; i++) {
+        if (strcmp(argv[i], "--route-explain") != 0)
+            continue;
+        if (i + 1 < argc && argv[i + 1][0] != '-') {
+            if (out_model) *out_model = argv[i + 1];
+            return true;
+        }
+        const char *model_arg = NULL;
+        if (main_argv_has_value(argc, argv, "--model", &model_arg) ||
+            main_argv_has_value(argc, argv, "-m", &model_arg)) {
+            if (out_model) *out_model = model_arg;
+            return true;
+        }
+        if (out_model) *out_model = DEFAULT_MODEL;
+        return true;
+    }
+    return false;
+}
+
+static const char *main_route_explain_cli_key(int argc, char **argv) {
+    for (int i = 1; i + 1 < argc; i++) {
+        if (strcmp(argv[i], "-k") != 0)
+            continue;
+        const char *key_arg = argv[i + 1];
+        const char *key_value = NULL;
+        char key_env_name[128];
+        if (main_parse_credential_assignment(key_arg, key_env_name,
+                                             sizeof(key_env_name),
+                                             &key_value)) {
+            return key_value;
+        }
+        if (main_is_credential_env_name(key_arg) &&
+            i + 2 < argc &&
+            main_cli_token_looks_like_api_key(argv[i + 2])) {
+            return argv[i + 2];
+        }
+        if (main_is_credential_env_name(key_arg))
+            return getenv(key_arg);
+        return key_arg;
+    }
+    return NULL;
+}
+
+static const char *main_route_explain_override(int argc, char **argv) {
+    const char *provider = NULL;
+    if (main_argv_has_value(argc, argv, "--provider", &provider))
+        return provider;
+
+    const char *exec_backend = NULL;
+    if (!main_argv_has_value(argc, argv, "--exec", &exec_backend) &&
+        !main_argv_has_value(argc, argv, "-e", &exec_backend)) {
+        return NULL;
+    }
+    if (native_find(exec_backend) || provider_has_custom_api_base(exec_backend))
+        return exec_backend;
+    return NULL;
+}
+
+static bool main_route_api_url_is_loopback(const char *url) {
+    return url && (strstr(url, "localhost") ||
+                   strstr(url, "127.0.0.1") ||
+                   strstr(url, "[::1]"));
+}
+
+static int run_route_explain_fast(int argc, char **argv) {
+    const char *model = NULL;
+    if (!main_route_explain_requested(argc, argv, &model))
+        return -1;
+    if (!model || !model[0])
+        model = DEFAULT_MODEL;
+
+    const char *api_key = main_route_explain_cli_key(argc, argv);
+    const char *override = main_route_explain_override(argc, argv);
+    const char *alias_resolved = model_resolve_alias(model);
+    const char *family = provider_model_family(model);
+    const char *detected = provider_detect(model, api_key);
+    const char *routed = provider_route_for_model(model, api_key, override);
+    const char *request_key = provider_resolve_request_api_key(routed, api_key);
+    const char *auth_mode = provider_auth_mode(routed, request_key);
+    bool key_usable = provider_has_usable_key(routed, api_key);
+    bool custom_base = provider_has_custom_api_base(routed);
+    provider_t *provider = provider_create(routed);
+    const char *api_url = provider && provider->api_url ? provider->api_url : NULL;
+    bool local_endpoint = main_route_api_url_is_loopback(api_url);
+
+    printf("model: %s\n", model);
+    printf("alias_resolved_model: %s\n", alias_resolved ? alias_resolved : model);
+    printf("model_family: %s\n", family ? family : "(unknown)");
+    printf("detected_provider: %s\n", detected ? detected : "(unknown)");
+    printf("route_provider: %s\n", routed ? routed : "(unknown)");
+    printf("provider_override: %s\n", override ? override : "(none)");
+    printf("fallback_active: %s\n",
+           (detected && routed && strcmp(detected, routed) != 0) ? "yes" : "no");
+    printf("endpoint_class: %s\n", local_endpoint ? "local" : "remote");
+    printf("auth_mode: %s\n", local_endpoint ? "local" : (auth_mode ? auth_mode : "none"));
+    printf("credential_present: %s\n",
+           (!local_endpoint && request_key && request_key[0]) ? "yes" : "no");
+    printf("credential_usable: %s\n", key_usable ? "yes" : "no");
+    printf("custom_api_base: %s\n", custom_base ? "yes" : "no");
+    printf("api_url: %s\n", api_url ? api_url : "(unresolved)");
+    provider_free(provider);
+    return 0;
 }
 
 static void main_tools_init_for_runtime(dsco_profile_t profile) {
@@ -2573,6 +2829,12 @@ static int maybe_run_early_fast_path(int argc, char **argv,
             perf_finish("fast exit");
             return 0;
         }
+        if (strcmp(argv[i], "--route-explain") == 0) {
+            perf_mark("fast route-explain begin");
+            int rc = run_route_explain_fast(argc, argv);
+            perf_finish("fast exit");
+            return rc;
+        }
         if (strcmp(argv[i], "--selves") == 0) {
             extern int introspect_run_selves(FILE *, int, const char *);
             int nselves = 4;
@@ -2615,6 +2877,18 @@ int main(int argc, char **argv) {
     perf_init();
     heartbeat_set_context(argc, argv);
     heartbeat_set_phase("main_entry");
+
+    /* Chronicle is the DSCO flight recorder. It starts at process entry —
+     * before fast paths, info flags, tool exec, setup, timeline server, or
+     * provider resolution — so every dsco invocation leaves a local activity
+     * record unless DSCO_CHRONICLE_MODE=off. Later chronicle_start() calls are
+     * idempotent runtime-configuration updates. */
+    if (chronicle_start(&(chronicle_start_opts_t){.provider = "startup",
+                                                  .model = "",
+                                                  .mode = "startup",
+                                                  .instance_id = NULL})) {
+        atexit(chronicle_stop);
+    }
 
     /* Fault-injection hook for exercising the crash handler + supervisor end
      * to end. Completely inert unless DSCO_TEST_CRASH is set. Installs the
@@ -2752,6 +3026,13 @@ int main(int argc, char **argv) {
                 _is_interactive = true;
             else if (strcmp(argv[_k], "--local") == 0)
                 _local_flag = true;
+            else if (strcmp(argv[_k], "--ollama") == 0)
+                _local_flag = true;
+            else if (strcmp(argv[_k], "--pull-and-use") == 0) {
+                _local_flag = true;
+                if (_k + 1 < argc)
+                    _k++;
+            }
             else if (strcmp(argv[_k], "-k") == 0 && _k + 1 < argc) {
                 if (main_is_credential_env_name(argv[_k + 1]) &&
                     _k + 2 < argc &&
@@ -2762,11 +3043,20 @@ int main(int argc, char **argv) {
                 }
             }
             else if ((strcmp(argv[_k], "-m") == 0 ||
+                      strcmp(argv[_k], "--model") == 0 ||
                       strcmp(argv[_k], "--profile") == 0 ||
                       strcmp(argv[_k], "--provider") == 0 ||
                       strcmp(argv[_k], "--exec") == 0 || strcmp(argv[_k], "-e") == 0) &&
                      _k + 1 < argc)
                 _k++;
+            else if ((strcmp(argv[_k], "-p") == 0 ||
+                      strcmp(argv[_k], "--prompt") == 0 ||
+                      strcmp(argv[_k], "--p") == 0) &&
+                     _k + 1 < argc) {
+                if (_local_flag)
+                    _local_has_prompt = true;
+                _k++;
+            }
             else if (_local_flag && argv[_k][0] != '-')
                 _local_has_prompt = true;
         }
@@ -2901,6 +3191,9 @@ int main(int argc, char **argv) {
     int exec_nextra = 0;
     bool user_set_model = false;
     bool local_mode = false;
+    const char *local_provider = DSCO_LOCAL_PROVIDER;
+    const char *ollama_pull_model = NULL;
+    char ollama_model_buf[192] = "";
     bool ui_mode = false;
     int ui_port = 3141;
     bool orchestrate_mode = false;
@@ -3023,17 +3316,7 @@ int main(int argc, char **argv) {
             main_tools_init_for_runtime(runtime_profile);
             char result[256 * 1024] = {0};
             bool ok = tools_execute(tname, tjson, result, sizeof(result));
-            /* Always emit valid JSON: {"ok":bool,"result":"..."} */
-            printf("{\"ok\":%s,\"result\":\"", ok ? "true" : "false");
-            for (const char *p = result; *p; p++) {
-                if (*p == '"')       printf("\\\"");
-                else if (*p == '\\') printf("\\\\");
-                else if (*p == '\n') printf("\\n");
-                else if (*p == '\r') printf("\\r");
-                else if (*p == '\t') printf("\\t");
-                else                 putchar(*p);
-            }
-            printf("\"}\n");
+            main_print_tool_exec_json(ok, result);
             free(oneshot_prompt);
             return ok ? 0 : 1;
         }
@@ -3043,9 +3326,14 @@ int main(int argc, char **argv) {
             exec_nextra = argc - i - 1;
             break;
         }
-        if (strcmp(argv[i], "-m") == 0 && i + 1 < argc) {
+        if ((strcmp(argv[i], "-m") == 0 || strcmp(argv[i], "--model") == 0) && i + 1 < argc) {
             model = argv[++i];
             user_set_model = true;
+        } else if ((strcmp(argv[i], "-p") == 0 ||
+                    strcmp(argv[i], "--prompt") == 0 ||
+                    strcmp(argv[i], "--p") == 0) &&
+                   i + 1 < argc) {
+            main_prompt_append_arg(&oneshot_prompt, argv[++i]);
         } else if (strcmp(argv[i], "-k") == 0 && i + 1 < argc) {
             const char *key_arg = argv[++i];
             const char *key_value = NULL;
@@ -3116,6 +3404,29 @@ int main(int argc, char **argv) {
             }
         } else if (strcmp(argv[i], "--local") == 0) {
             local_mode = true;
+        } else if (strcmp(argv[i], "--ollama") == 0) {
+            local_mode = true;
+            local_provider = DSCO_OLLAMA_PROVIDER;
+            if (!user_set_model && !ollama_pull_model)
+                model = DSCO_OLLAMA_MODEL;
+        } else if (strcmp(argv[i], "--pull-and-use") == 0) {
+            if (i + 1 >= argc || argv[i + 1][0] == '-') {
+                fprintf(stderr, "error: --pull-and-use requires an Ollama model name\n");
+                free(oneshot_prompt);
+                return 1;
+            }
+            ollama_pull_model = argv[++i];
+            local_mode = true;
+            local_provider = DSCO_OLLAMA_PROVIDER;
+            int n = snprintf(ollama_model_buf, sizeof(ollama_model_buf), "%s:%s",
+                             DSCO_OLLAMA_PROVIDER, ollama_pull_model);
+            if (n < 0 || (size_t)n >= sizeof(ollama_model_buf)) {
+                fprintf(stderr, "error: Ollama model name is too long\n");
+                free(oneshot_prompt);
+                return 1;
+            }
+            model = ollama_model_buf;
+            user_set_model = true;
         } else if (strcmp(argv[i], "--cheap") == 0 || strcmp(argv[i], "-C") == 0) {
             g_cheap_mode = 1;
         } else if (strcmp(argv[i], "--orchestrate") == 0 || strcmp(argv[i], "-O") == 0) {
@@ -3140,41 +3451,25 @@ int main(int argc, char **argv) {
         } else if (strcmp(argv[i], "--provider") == 0 && i + 1 < argc) {
             exec_backend = argv[++i];
         } else {
-            size_t total = 0;
-            for (int j = i; j < argc; j++) {
-                if (strcmp(argv[j], "--") == 0) break;
-                total += strlen(argv[j]) + 1;
-            }
-            oneshot_prompt = safe_malloc(total + 1);
-            oneshot_prompt[0] = '\0';
-            size_t prompt_cap = total + 1;
-            for (int j = i; j < argc; j++) {
-                if (strcmp(argv[j], "--") == 0) break;
-                size_t used = strlen(oneshot_prompt);
-                if (j > i && used + 1 < prompt_cap) {
-                    oneshot_prompt[used++] = ' ';
-                    oneshot_prompt[used] = '\0';
-                }
-                if (used < prompt_cap) {
-                    snprintf(oneshot_prompt + used, prompt_cap - used, "%s", argv[j]);
-                }
-            }
-            /* find -- after prompt if we haven't already */
-            for (int j = i; j < argc; j++) {
-                if (strcmp(argv[j], "--") == 0) {
-                    exec_extra = argv + j + 1;
-                    exec_nextra = argc - j - 1;
-                    break;
-                }
-            }
-            break;
+            main_prompt_append_arg(&oneshot_prompt, argv[i]);
         }
     }
 
     if (local_mode) {
-        g_provider_override = DSCO_LOCAL_PROVIDER;
+        g_provider_override = local_provider;
         if (!user_set_model) {
-            model = DSCO_LOCAL_MODEL;
+            if (strcmp(local_provider, DSCO_OLLAMA_PROVIDER) == 0) {
+                model = DSCO_OLLAMA_MODEL;
+            } else {
+                model = DSCO_LOCAL_MODEL;
+            }
+        }
+        if (ollama_pull_model) {
+            int pull_rc = main_ollama_pull_model(ollama_pull_model);
+            if (pull_rc != 0) {
+                free(oneshot_prompt);
+                return pull_rc;
+            }
         }
         if (!oneshot_prompt)
             interactive_mode = true;
@@ -3421,6 +3716,10 @@ int main(int argc, char **argv) {
             fprintf(stderr, "error: failed to start baseline sqlite storage\n");
             return 1;
         }
+        chronicle_start(&(chronicle_start_opts_t){.provider = "local",
+                                                  .model = model,
+                                                  .mode = "activity-server",
+                                                  .instance_id = baseline_instance_id()});
         baseline_log("setup", "env_loaded", dsco_setup_env_path(), NULL);
         if (loaded_env_count > 0) {
             char msg[128];
@@ -3428,6 +3727,7 @@ int main(int argc, char **argv) {
             baseline_log("setup", "keys_loaded", msg, NULL);
         }
         int rc = baseline_serve_http(timeline_port, timeline_instance_filter);
+        chronicle_stop();
         baseline_stop();
         return rc == 0 ? 0 : 1;
     }
@@ -3872,6 +4172,10 @@ native_path:
     if (!baseline_start(model, oneshot_prompt ? "oneshot" : "interactive")) {
         fprintf(stderr, "warning: baseline disabled (sqlite unavailable)\n");
     }
+    chronicle_start(&(chronicle_start_opts_t){.provider = active_provider,
+                                              .model = model,
+                                              .mode = oneshot_prompt ? "oneshot" : "interactive",
+                                              .instance_id = baseline_instance_id()});
 
     agent_set_launch_argv(argc, argv);
 
@@ -4177,6 +4481,7 @@ native_path:
 
     dsco_http_pool_cleanup();
     curl_global_cleanup();
+    chronicle_stop();
     baseline_stop();
     if (user_exit_requested && getenv("DSCO_SUPERVISED"))
         return DSCO_EXIT_USER_REQUESTED;

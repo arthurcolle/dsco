@@ -2,6 +2,14 @@
 *.o
 build/
 /dsco
+/dsco.distributed.systems
+/dsco.distributed.systems.com.dbg
+/dsco.distributed.systems.dbg
+/dsco.distributed.systems.aarch64.elf
+/dsco.com
+/dsco.com.dbg
+/dsco.com.aarch64.elf
+/dsco.aarch64.elf
 /dsco-debug
 /dsco-asan
 /dsco-ubsan

@@ -582,7 +582,7 @@ void tui_bottom_panel_refresh(tui_status_bar_t *sb, const char *prompt_hint);
 
 /* Push cursor down with newlines until it sits just above the input panel
  * area (row `rows - 3`). No-op if cursor already at/past that row. By default
- * this avoids terminal DSR cursor queries; set DSCO_TUI_DSR=1 to opt into
+ * this avoids terminal DSR cursor queries by default; set DSCO_TUI_DSR=1 to opt into
  * ESC[6n cursor-position reports on terminals where they are known safe.
  * Call once after the startup banner + notes finish printing so the bottom
  * panel sits flush against them on tall terminals. */

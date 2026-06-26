@@ -3,7 +3,7 @@
 This file is auto-generated from header declarations in `include/`.
 
 - Generator: `./scripts/gen_api_reference.sh`
-- Headers scanned: 112
+- Headers scanned: 119
 
 ## Regeneration
 
@@ -190,6 +190,52 @@ Function-like declarations: 6
 - `void bg_learn_stop(void);`
 - `int bg_learn_run_once(void);`
 - `void bg_learn_stats(bg_learn_stats_t *out);`
+
+## `chronicle.h`
+
+Function-like declarations: 26
+
+### Declarations
+
+- `bool chronicle_start(const chronicle_start_opts_t *opts);`
+- `void chronicle_stop(void);`
+- `bool chronicle_ready(void);`
+- `chronicle_mode_t chronicle_mode(void);`
+- `const char *chronicle_installation_id(void);`
+- `const char *chronicle_session_id(void);`
+- `const char *chronicle_root(void);`
+- `const char *chronicle_db_path(void);`
+- `void chronicle_new_id(char *out, size_t out_len);`
+- `bool chronicle_span_begin(const char *trace_id, const char *parent_span_id, const char *span_type, const char *name, const char *payload_json, char *span_id_out);`
+- `bool chronicle_span_end(const char *span_id, const char *status, const char *payload_json);`
+- `bool chronicle_event(const char *event_type, const char *trace_id, const char *span_id, const char *parent_span_id, const char *actor_type, const char *actor_id, const char *payload_json, const char *sensitivity);`
+- `bool chronicle_blob_put(const void *data, size_t len, const char *logical_type, const char *content_type, const char *sensitivity, char *sha_out, size_t sha_out_len);`
+- `bool chronicle_blob_put_text(const char *text, const char *logical_type, const char *sensitivity, char *sha_out, size_t sha_out_len);`
+- `bool chronicle_edge(const char *from_id, const char *to_id, const char *relation, double confidence, const char *metadata_json);`
+- `bool chronicle_user_message(const char *trace_id, const char *span_id, const char *text);`
+- `bool chronicle_context_materialized(const char *trace_id, const char *span_id, const char *request_json, int estimated_tokens);`
+- `bool chronicle_llm_request(const char *trace_id, const char *span_id, const char *provider, const char *model, const char *request_json, int estimated_tokens);`
+- `bool chronicle_llm_delta(const char *trace_id, const char *span_id, const char *kind, const char *text);`
+- `bool chronicle_llm_response(const char *trace_id, const char *span_id, const char *provider, const char *model, const char *output_text, const char *raw_response_json, int input_tokens, int output_tokens, int cache_read_tokens, int cache_write_tokens, int reasoning_tokens, double cost_usd, double latency_ms, const char *finish_reason, const char *generation_id);`
+- `bool chronicle_tool_call_start(const char *trace_id, const char *parent_span_id, const char *tool_name, const char *tool_id, const char *args_json, char *tool_span_id_out);`
+- `bool chronicle_tool_call_end(const char *trace_id, const char *tool_span_id, const char *tool_name, const char *result_text, bool ok, bool timeout, double latency_ms);`
+- `char *chronicle_build_activity_json(int limit, const char *session_filter);`
+- `char *chronicle_build_activity_html(int limit, const char *session_filter);`
+- `char *chronicle_build_activity_html_ex(int limit, const char *session_filter, const char *type_filter, const char *search_filter);`
+- `char *chronicle_read_blob_hex(const char *sha256, size_t max_bytes, const char **content_type_out);`
+
+## `codex_app_directory.h`
+
+Function-like declarations: 6
+
+### Declarations
+
+- `void codex_app_directory_init(codex_app_directory_t *dir);`
+- `void codex_app_directory_free(codex_app_directory_t *dir);`
+- `bool codex_app_directory_load_file(codex_app_directory_t *dir, const char *path, char *err, size_t err_len);`
+- `const codex_app_directory_entry_t *codex_app_directory_find(const codex_app_directory_t *dir, const char *id_or_name);`
+- `unsigned codex_app_directory_actions_for_labels(bool retrievable, bool sync, bool consequential, bool interactive);`
+- `const char *codex_app_directory_default_path(char *buf, size_t buf_len);`
 
 ## `codex_cache.h`
 
@@ -559,6 +605,68 @@ Function-like declarations: 5
 - `bool execution_submit(const execution_intent_t *intent, execution_receipt_t *receipt, char *result, size_t result_len);`
 - `bool execution_last_receipt_json(char *out, size_t out_len);`
 
+## `extension/backend.h`
+
+Function-like declarations: 7
+
+### Declarations
+
+- `int (*init)(void *impl);`
+- `void (*shutdown)(void *impl);`
+- `const char *(*version)(void *impl);`
+- `int backend_register(backend_interface_t *backend);`
+- `backend_interface_t *backend_get(const char *name, backend_category_t cat);`
+- `int backend_load(const char *name, backend_category_t cat);`
+- `int backend_unload(const char *name, backend_category_t cat);`
+
+## `extension/eigen_backend.h`
+
+Function-like declarations: 1
+
+### Declarations
+
+- `int eigen_backend_init(void);`
+
+## `extension/fftw_backend.h`
+
+Function-like declarations: 1
+
+### Declarations
+
+- `int fftw_backend_init(void);`
+
+## `extension/numerical_backend.h`
+
+Function-like declarations: 15
+
+### Declarations
+
+- `int (*matrix_alloc)(size_t rows, size_t cols, gsl_matrix **out);`
+- `int (*matrix_free)(gsl_matrix *m);`
+- `int (*gemm)(const gsl_matrix *A, const gsl_matrix *B, gsl_matrix *C, double alpha, double beta);`
+- `int (*fft_complex_forward)(double *data, size_t n);`
+- `double (*mean)(const double *data, size_t n);`
+- `double (*variance)(const double *data, size_t n);`
+- `double (*correlation)(const double *x, const double *y, size_t n);`
+- `double (*gaussian_sample)(double mu, double sigma);`
+- `double (*gaussian_pdf)(double x, double mu, double sigma);`
+- `double (*gaussian_cdf)(double x, double mu, double sigma);`
+- `int (*optimize)(double (*f)(const double *x, size_t n), double *x, size_t n, int max_iter);`
+- `double (*bessel_J0)(double x);`
+- `double (*gamma)(double x);`
+- `double (*erf)(double x);`
+- `int numerical_backend_register(numerical_backend_t *impl);`
+
+## `extension/skill_requirements.h`
+
+Function-like declarations: 3
+
+### Declarations
+
+- `int skill_requirements_init(skill_requirements_t *req);`
+- `int skill_requirements_add(skill_requirements_t *req, backend_category_t cat, const char *name, int mandatory);`
+- `int skill_requirements_satisfy(const skill_requirements_t *req);`
+
 ## `face_sdf.h`
 
 Function-like declarations: 6
@@ -704,13 +812,14 @@ Function-like declarations: 1
 
 ## `integration_fabric.h`
 
-Function-like declarations: 7
+Function-like declarations: 8
 
 ### Declarations
 
 - `const dsco_integration_profile_t *dsco_integration_profiles(size_t *count);`
 - `const dsco_integration_profile_t *dsco_integration_profile_for_server(const char *server_name);`
 - `const dsco_integration_profile_t *dsco_integration_profile_for_tool(const char *tool_name);`
+- `unsigned dsco_integration_actions_for_catalog_labels(bool retrievable, bool sync, bool consequential, bool interactive);`
 - `unsigned dsco_integration_actions_for_tool(const char *tool_name);`
 - `bool dsco_integration_requires_confirmation(const char *tool_name);`
 - `bool dsco_integration_action_has(unsigned actions, dsco_integration_action_t action);`
@@ -2162,7 +2271,7 @@ Function-like declarations: 14
 
 ## `tools.h`
 
-Function-like declarations: 79
+Function-like declarations: 80
 
 ### Declarations
 
@@ -2205,6 +2314,7 @@ Function-like declarations: 79
 - `int tool_map_lookup(tool_map_t *m, const char *name);`
 - `typedef char *(*external_tool_cb)(const char *name, const char *input_json, void *ctx);`
 - `void tools_register_external(const char *name, const char *description, const char *input_schema_json, external_tool_cb cb, void *ctx);`
+- `void tools_register_external_metadata(const char *name, const char *integration_id, const char *display_name, const char *distribution_channel, const char *categories, const char *labels, const char *scope, unsigned action_flags, const char *catalog_status);`
 - `void tools_reset_external(void);`
 - `void dsco_locks_init(dsco_locks_t *l);`
 - `void dsco_locks_destroy(dsco_locks_t *l);`
