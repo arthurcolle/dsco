@@ -1,9 +1,11 @@
 #include "tools.h"
+#include "http_pool.h"
 #include "net_server.h"
 #include "mesh.h"
 #include "peer_bootstrap.h"
 #include "vfs.h"
 #include "self_improve.h"
+#include "bg_learn.h"
 #include "error.h"
 #include "integrations.h"
 #include "trading.h"
@@ -4824,6 +4826,9 @@ static bool tool_ol_call(const char *input, char *result, size_t rlen) {
     char *system = json_get_str(input, "system");
     char *messages = json_get_raw(input, "messages");
     char *api_key = json_get_str(input, "api_key");
+    char *extra_body = json_get_raw(input, "extra_body");
+    if (!extra_body)
+        extra_body = json_get_raw(input, "extra_params");
     int max_tokens = json_get_int(input, "max_tokens", 256);
     int timeout = json_get_int(input, "timeout", 120);
     double temperature = json_get_double(input, "temperature", 0.2);
@@ -4838,6 +4843,7 @@ static bool tool_ol_call(const char *input, char *result, size_t rlen) {
         free(system);
         free(messages);
         free(api_key);
+        free(extra_body);
         return false;
     }
     if ((!prompt || !prompt[0]) && (!messages || !messages[0])) {
@@ -4850,6 +4856,7 @@ static bool tool_ol_call(const char *input, char *result, size_t rlen) {
         free(system);
         free(messages);
         free(api_key);
+        free(extra_body);
         return false;
     }
     if (messages) {
@@ -4866,6 +4873,7 @@ static bool tool_ol_call(const char *input, char *result, size_t rlen) {
             free(system);
             free(messages);
             free(api_key);
+            free(extra_body);
             return false;
         }
     }
@@ -4917,6 +4925,7 @@ static bool tool_ol_call(const char *input, char *result, size_t rlen) {
         free(system);
         free(messages);
         free(api_key);
+        free(extra_body);
         return false;
     }
 
@@ -4930,6 +4939,7 @@ static bool tool_ol_call(const char *input, char *result, size_t rlen) {
         free(system);
         free(messages);
         free(api_key);
+        free(extra_body);
         return false;
     }
 
@@ -4960,11 +4970,45 @@ static bool tool_ol_call(const char *input, char *result, size_t rlen) {
     }
     jbuf_append(&req, ",\"stream\":false,\"max_tokens\":");
     jbuf_append_int(&req, max_tokens);
-    jbuf_append(&req, ",\"temperature\":");
-    jbuf_appendf(&req, "%.6g", temperature);
+    const char *extra_object = NULL;
+    if (extra_body) {
+        extra_object = extra_body;
+        while (*extra_object && isspace((unsigned char)*extra_object))
+            extra_object++;
+        if (*extra_object != '{')
+            extra_object = NULL;
+    }
+    char *extra_temperature = extra_object ? json_get_raw(extra_object, "temperature") : NULL;
+    if (extra_temperature) {
+        jbuf_append(&req, ",\"temperature\":");
+        jbuf_append(&req, extra_temperature);
+        free(extra_temperature);
+    } else {
+        jbuf_append(&req, ",\"temperature\":");
+        jbuf_appendf(&req, "%.6g", temperature);
+    }
+    if (extra_object) {
+        static const char *const pass_keys[] = {
+            "audio", "frequency_penalty", "function_call", "functions", "logit_bias", "logprobs",
+            "metadata", "modalities", "n", "parallel_tool_calls", "prediction", "presence_penalty",
+            "reasoning", "reasoning_effort", "response_format", "seed", "service_tier", "stop",
+            "store", "stream_options", "top_logprobs", "top_p", "user", "verbosity",
+            "web_search_options", NULL};
+        for (int i = 0; pass_keys[i]; i++) {
+            char *raw = json_get_raw(extra_object, pass_keys[i]);
+            if (!raw)
+                continue;
+            jbuf_append(&req, ",\"");
+            jbuf_append(&req, pass_keys[i]);
+            jbuf_append(&req, "\":");
+            jbuf_append(&req, raw);
+            free(raw);
+        }
+    }
     jbuf_append_char(&req, '}');
 
     CURL *curl = curl_easy_init();
+    dsco_http_pool_apply(curl);
     if (!curl) {
         snprintf(result, rlen, "error: curl init failed");
         jbuf_free(&req);
@@ -4976,6 +5020,7 @@ static bool tool_ol_call(const char *input, char *result, size_t rlen) {
         free(system);
         free(messages);
         free(api_key);
+        free(extra_body);
         return false;
     }
 
@@ -5048,6 +5093,7 @@ static bool tool_ol_call(const char *input, char *result, size_t rlen) {
     free(system);
     free(messages);
     free(api_key);
+    free(extra_body);
     return ok;
 }
 
@@ -10021,6 +10067,7 @@ static __attribute__((unused)) bool tool_openrouter_models(const char *input, ch
 
     /* Fetch models list via curl */
     CURL *curl = curl_easy_init();
+    dsco_http_pool_apply(curl);
     if (!curl) {
         snprintf(result, rlen, "{\"error\":\"curl init failed\"}");
         free(search);
@@ -22579,8 +22626,10 @@ static void ask_question_cb(const char *el, void *ctx) {
         char *gq = json_get_str(showif, "q");
         if (!gq)
             gq = json_get_str(showif, "question");
-        if (gq)
+        if (gq) {
             snprintf(pc->gate_id[idx], 64, "%s", gq);
+            snprintf(q->gate_id, sizeof q->gate_id, "%s", gq);
+        }
         free(gq);
         char *eq = json_get_str(showif, "equals");
         if (eq && eq[0] && q->n_gate_vals < TUI_ASK_MAX_GATEVALS)
@@ -22593,27 +22642,39 @@ static void ask_question_cb(const char *el, void *ctx) {
     s->n++;
 }
 
-/* Copy prior answer state from an old question with the same id (reopen). */
-static void ask_merge_prior(tui_ask_question_t *dst, const ask_session_t *old) {
-    if (!dst->id[0])
+static void ask_resolve_gates(ask_session_t *s) {
+    if (!s)
         return;
-    for (int i = 0; i < old->n; i++) {
-        if (strcmp(old->q[i].id, dst->id) != 0)
+    for (int i = 0; i < s->n; i++) {
+        if (!s->q[i].gate_id[0])
             continue;
-        const tui_ask_question_t *src = &old->q[i];
-        dst->answered = src->answered;
-        snprintf(dst->custom, sizeof dst->custom, "%s", src->custom);
-        /* re-map selections by option value so reordered options still match */
-        for (int a = 0; a < dst->n_options; a++) {
-            for (int b = 0; b < src->n_options; b++) {
-                if (src->selected[b] && strcmp(src->options[b].value, dst->options[a].value) == 0) {
-                    dst->selected[a] = true;
+        s->q[i].gate_q = -1;
+        for (int j = 0; j < s->n; j++) {
+            if (s->q[j].id[0] && strcmp(s->q[j].id, s->q[i].gate_id) == 0) {
+                s->q[i].gate_q = j;
+                break;
+            }
+        }
+    }
+}
+
+static void ask_session_append_new(ask_session_t *dst, const ask_session_t *src) {
+    if (!dst || !src)
+        return;
+    for (int i = 0; i < src->n && dst->n < TUI_ASK_MAX_QUESTIONS; i++) {
+        bool exists = false;
+        if (src->q[i].id[0]) {
+            for (int j = 0; j < dst->n; j++) {
+                if (dst->q[j].id[0] && strcmp(dst->q[j].id, src->q[i].id) == 0) {
+                    exists = true;
                     break;
                 }
             }
         }
-        return;
+        if (!exists)
+            dst->q[dst->n++] = src->q[i];
     }
+    ask_resolve_gates(dst);
 }
 
 bool dsco_run_ask_dialog(const char *input, char *result, size_t rlen) {
@@ -22652,23 +22713,24 @@ bool dsco_run_ask_dialog(const char *input, char *result, size_t rlen) {
     }
 
     /* Resolve branching gates (id → index). */
-    for (int i = 0; i < incoming.n; i++) {
-        if (!pc.gate_id[i][0])
-            continue;
-        for (int j = 0; j < incoming.n; j++)
-            if (incoming.q[j].id[0] && strcmp(incoming.q[j].id, pc.gate_id[i]) == 0) {
-                incoming.q[i].gate_q = j;
-                break;
-            }
-    }
+    ask_resolve_gates(&incoming);
 
-    /* Reopen: merge prior answers by id, then persist merged spec. */
+    /* Reopen semantics: same session_id preserves prior answered questions and
+     * appends only new model-generated follow-ups. This enables pure dynamic
+     * flows: Ask → answer → model decides it needs more → AskUserQuestion with
+     * the same session_id and just the new questions. */
+    ask_session_t working;
+    memset(&working, 0, sizeof working);
     ask_session_t *sess = ask_session_find(session_id);
     if (sess) {
-        for (int i = 0; i < incoming.n; i++)
-            ask_merge_prior(&incoming.q[i], sess);
-    } else if (session_id && session_id[0]) {
-        sess = ask_session_alloc(session_id);
+        ask_session_append_new(sess, &incoming);
+        working = *sess;
+    } else {
+        working = incoming;
+        if (session_id && session_id[0]) {
+            sess = ask_session_alloc(session_id);
+            *sess = working;
+        }
     }
 
     /* Non-interactive: degrade gracefully — emit the spec so the model can
@@ -22677,22 +22739,20 @@ bool dsco_run_ask_dialog(const char *input, char *result, size_t rlen) {
         jbuf_t out;
         jbuf_init(&out, 256);
         jbuf_append(&out, "{\"status\":\"no_tty\",\"questions\":[");
-        for (int i = 0; i < incoming.n; i++) {
+        for (int i = 0; i < working.n; i++) {
             if (i)
                 jbuf_append(&out, ",");
             jbuf_append(&out, "{\"id\":");
-            jbuf_append_json_str(&out, incoming.q[i].id);
+            jbuf_append_json_str(&out, working.q[i].id);
             jbuf_append(&out, ",\"question\":");
-            jbuf_append_json_str(&out, incoming.q[i].question);
+            jbuf_append_json_str(&out, working.q[i].question);
             jbuf_append(&out, "}");
         }
         jbuf_append(&out, "]}");
         snprintf(result, rlen, "%s", out.data ? out.data : "{}");
         jbuf_free(&out);
-        if (sess) {
-            memcpy(sess->q, incoming.q, sizeof incoming.q);
-            sess->n = incoming.n;
-        }
+        if (sess)
+            *sess = working;
         free(session_id);
         free(intro);
         free(questions);
@@ -22700,13 +22760,11 @@ bool dsco_run_ask_dialog(const char *input, char *result, size_t rlen) {
     }
 
     char chat[1280] = "";
-    tui_ask_status_t st = tui_ask_questions(incoming.q, incoming.n, intro, chat, sizeof chat);
+    tui_ask_status_t st = tui_ask_questions(working.q, working.n, intro, chat, sizeof chat);
 
     /* Persist merged + answered state back into the session for reopen. */
-    if (sess) {
-        memcpy(sess->q, incoming.q, sizeof incoming.q);
-        sess->n = incoming.n;
-    }
+    if (sess)
+        *sess = working;
 
     const char *status_str = st == TUI_ASK_SUBMIT ? "submit"
                              : st == TUI_ASK_CHAT ? "chat"
@@ -22727,10 +22785,10 @@ bool dsco_run_ask_dialog(const char *input, char *result, size_t rlen) {
     jbuf_append(&out, ",\"answers\":[");
     bool first = true;
     char val[1280];
-    for (int i = 0; i < incoming.n; i++) {
-        if (!tui_ask_question_visible(incoming.q, incoming.n, i))
+    for (int i = 0; i < working.n; i++) {
+        if (!tui_ask_question_visible(working.q, working.n, i))
             continue;
-        tui_ask_question_t *q = &incoming.q[i];
+        tui_ask_question_t *q = &working.q[i];
         if (!first)
             jbuf_append(&out, ",");
         first = false;
@@ -23696,6 +23754,48 @@ static bool tool_meta_optimize(const char *input, char *result, size_t rlen) {
     jbuf_free(&b);
     free(action);
     return true;
+}
+
+static bool tool_bg_learn(const char *input, char *result, size_t rlen) {
+    char *action = json_get_str(input, "action");
+    const char *act = action && action[0] ? action : "status";
+    bool ok = true;
+    int created = -1;
+
+    if (strcmp(act, "on") == 0 || strcmp(act, "start") == 0) {
+        bg_learn_set_enabled(true);
+        ok = bg_learn_start();
+    } else if (strcmp(act, "off") == 0 || strcmp(act, "stop") == 0) {
+        bg_learn_set_enabled(false);
+        bg_learn_stop();
+    } else if (strcmp(act, "run") == 0) {
+        created = bg_learn_run_once();
+    } else if (strcmp(act, "status") != 0) {
+        snprintf(result, rlen, "{\"error\":\"unknown bg_learn action\",\"action\":\"%s\"}", act);
+        free(action);
+        return false;
+    }
+
+    bg_learn_stats_t st;
+    bg_learn_stats(&st);
+    jbuf_t b;
+    jbuf_init(&b, 512);
+    jbuf_appendf(&b,
+                 "{\"ok\":%s,\"action\":\"%s\",\"enabled\":%s,\"running\":%s,"
+                 "\"interval_sec\":%u,\"cycles\":%u,\"skills_created\":%u,"
+                 "\"skills_pruned\":%u,\"auto_skill_count\":%d,\"last_run_epoch\":%.0f,"
+                 "\"last_skill_write\":",
+                 ok ? "true" : "false", act, st.enabled ? "true" : "false",
+                 st.running ? "true" : "false", st.interval_sec, st.cycles,
+                 st.skills_created, st.skills_pruned, st.auto_skill_count, st.last_run_epoch);
+    jbuf_append_json_str(&b, st.last_skill_write);
+    if (created >= 0)
+        jbuf_appendf(&b, ",\"created\":%d", created);
+    jbuf_append(&b, "}");
+    snprintf(result, rlen, "%s", b.data ? b.data : "{}");
+    jbuf_free(&b);
+    free(action);
+    return ok;
 }
 
 /* talons depend: goal_id cannot strike until dep_goal_id is captured. */
@@ -25133,7 +25233,9 @@ static const tool_def_t s_tools[] = {
          "question {q} answered {equals} or value in "
          "{in:[...]}.\",\"properties\":{\"q\":{\"type\":\"string\"},\"equals\":{\"type\":"
          "\"string\"},\"in\":{\"type\":\"array\"}}}},\"required\":[\"question\"]}}}}",
-     .execute = dsco_run_ask_dialog},
+     .execute = dsco_run_ask_dialog,
+     .core = true,
+     .is_interactive = true},
 
     /* ══════════════════════════════════════════════════════════════════════
      *  CORE FILE TOOLS (13)
@@ -25249,7 +25351,12 @@ static const tool_def_t s_tools[] = {
          "for example http://localhost:1234/v1.\"},\"model\":{\"type\":\"string\"},\"prompt\":{"
          "\"type\":\"string\"},\"system\":{\"type\":\"string\"},\"messages\":{\"type\":\"array\","
          "\"items\":{\"type\":\"object\"}},\"max_tokens\":{\"type\":\"integer\"},\"temperature\":{"
-         "\"type\":\"number\"},\"timeout\":{\"type\":\"integer\"},\"api_key\":{\"type\":\"string\"}"
+         "\"type\":\"number\"},\"extra_body\":{\"type\":\"object\",\"description\":\"Additional "
+         "OpenAI-compatible request parameters: top_p, stop, response_format, seed, presence_"
+         "penalty, frequency_penalty, logit_bias, logprobs, top_logprobs, n, user, metadata, "
+         "reasoning_effort, parallel_tool_calls, service_tier, etc.\"},\"extra_params\":{"
+         "\"type\":\"object\",\"description\":\"Alias for extra_body.\"},\"timeout\":{\"type\":"
+         "\"integer\"},\"api_key\":{\"type\":\"string\"}"
          "},\"required\":[\"model\"]}",
      .execute = tool_ol_call,
      .core = true,
@@ -26163,6 +26270,17 @@ static const tool_def_t s_tools[] = {
      .execute = tool_self_assess,
      .is_read_only = true,
      .is_concurrent = true},
+    {.name = "bg_learn",
+     .description = "Control the realtime background learner that consolidates "
+                    "self-improvement patterns and mines tool co-occurrence into "
+                    "auto-generated skills. action=status (default) | on | off | run "
+                    "(force one cycle now).",
+     .input_schema_json =
+         "{\"type\":\"object\",\"properties\":{\"action\":{\"type\":\"string\","
+         "\"description\":\"status|on|off|run\"}}}",
+     .execute = tool_bg_learn,
+     .is_read_only = false,
+     .is_concurrent = false},
     {.name = "StartOfLoopConstruct",
      .description = "Start a live recursive agent loop construct. Accepts a bounded "
                     "MetaConstruct/OORL DSL: continue/break expressions, max controls, "
@@ -26704,6 +26822,16 @@ int tools_get_core_count(void) {
     return n;
 }
 
+bool dsco_tool_is_interactive(const char *name) {
+    if (!name || !*name)
+        return false;
+    for (int i = 0; i < s_tool_count; i++) {
+        if (s_tools[i].name && strcmp(s_tools[i].name, name) == 0)
+            return s_tools[i].is_interactive;
+    }
+    return false;
+}
+
 /* ── Tool retrieval: BM25 + TF-IDF semantic index ──────────────────── */
 
 #include "semantic.h"
@@ -26876,6 +27004,7 @@ static float *embed_query_jina(const char *text) {
         return NULL;
 
     CURL *curl = curl_easy_init();
+    dsco_http_pool_apply(curl);
     if (!curl)
         return NULL;
 
@@ -27912,16 +28041,74 @@ static int cooc_predict_internal(const char *tool_name, int *out_tool_indices, i
     return result;
 }
 
+int tools_cooc_top_edges(tools_cooc_edge_t *out, int max) {
+    if (!out || max <= 0)
+        return 0;
+    memset(out, 0, (size_t)max * sizeof(out[0]));
+    if (!g_cooc)
+        return 0;
+
+    int n = 0;
+    for (int i = 0; i < g_cooc->name_count; i++) {
+        for (int j = 0; j < g_cooc->name_count; j++) {
+            unsigned count = g_cooc->matrix[i][j];
+            if (i == j || count == 0)
+                continue;
+
+            int slot = -1;
+            if (n < max) {
+                slot = n++;
+            } else {
+                int min_i = 0;
+                for (int k = 1; k < max; k++)
+                    if (out[k].count < out[min_i].count)
+                        min_i = k;
+                if (count > out[min_i].count)
+                    slot = min_i;
+            }
+            if (slot >= 0) {
+                snprintf(out[slot].from, sizeof(out[slot].from), "%s", g_cooc->names[i]);
+                snprintf(out[slot].to, sizeof(out[slot].to), "%s", g_cooc->names[j]);
+                out[slot].count = count;
+            }
+        }
+    }
+
+    for (int i = 0; i < n - 1; i++) {
+        for (int j = i + 1; j < n; j++) {
+            if (out[j].count > out[i].count) {
+                tools_cooc_edge_t tmp = out[i];
+                out[i] = out[j];
+                out[j] = tmp;
+            }
+        }
+    }
+    return n;
+}
+
 void tools_cooc_persist(void) {
     if (!g_cooc || g_cooc->name_count == 0)
         return;
+    char dir[256];
     char path[256];
+    char tmp_path[320];
     const char *home = getenv("HOME");
     if (!home)
         return;
-    snprintf(path, sizeof(path), "%s/.dsco/tool_cooc.bin", home);
+    int dn = snprintf(dir, sizeof(dir), "%s/.dsco", home);
+    if (dn < 0 || (size_t)dn >= sizeof(dir))
+        return;
+    if (mkdir(dir, 0700) != 0 && errno != EEXIST)
+        return;
 
-    FILE *f = fopen(path, "wb");
+    int pn = snprintf(path, sizeof(path), "%s/tool_cooc.bin", dir);
+    if (pn < 0 || (size_t)pn >= sizeof(path))
+        return;
+    int tn = snprintf(tmp_path, sizeof(tmp_path), "%s.tmp.%ld", path, (long)getpid());
+    if (tn < 0 || (size_t)tn >= sizeof(tmp_path))
+        return;
+
+    FILE *f = fopen(tmp_path, "wb");
     if (!f)
         return;
 
@@ -27929,13 +28116,22 @@ void tools_cooc_persist(void) {
     uint32_t version = COOC_VERSION;
     uint32_t nc = (uint32_t)g_cooc->name_count;
 
-    fwrite(&magic, 4, 1, f);
-    fwrite(&version, 4, 1, f);
-    fwrite(&nc, 4, 1, f);
-    fwrite(g_cooc->names, 64, nc, f);
+    bool ok = true;
+    ok = ok && fwrite(&magic, 4, 1, f) == 1;
+    ok = ok && fwrite(&version, 4, 1, f) == 1;
+    ok = ok && fwrite(&nc, 4, 1, f) == 1;
+    ok = ok && fwrite(g_cooc->names, 64, nc, f) == nc;
     for (uint32_t i = 0; i < nc; i++)
-        fwrite(g_cooc->matrix[i], 2, nc, f);
-    fclose(f);
+        ok = ok && fwrite(g_cooc->matrix[i], 2, nc, f) == nc;
+    if (fclose(f) != 0)
+        ok = false;
+
+    if (ok) {
+        if (rename(tmp_path, path) != 0)
+            unlink(tmp_path);
+    } else {
+        unlink(tmp_path);
+    }
 }
 
 void tools_cooc_load(void) {
@@ -28438,6 +28634,7 @@ void tool_quorum_gate_api(const char *context, const char *api_key) {
 
     /* Fire synchronous request to haiku */
     CURL *curl = curl_easy_init();
+    dsco_http_pool_apply(curl);
     if (!curl) {
         jbuf_free(&req);
         return;

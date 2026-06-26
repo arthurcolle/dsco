@@ -325,6 +325,7 @@ debug files can contain prompts, documents, tool results, and provider payloads.
 | `DSCO_NO_AUTO_INTERACTIVE` | Truthy makes bare `dsco` fail instead of entering interactive mode. Good for scripts. |
 | `DSCO_NO_CLEAR` | Disables initial terminal clear. Use when embedding or logging. |
 | `DSCO_NO_PANE` | Disables the interactive side pane. Use for plain logs or terminals with layout issues. |
+| `DSCO_TUI_DSR` | Opts into terminal cursor-position DSR queries (`ESC[6n`). Leave unset unless debugging prompt placement on a known-good terminal. |
 | `DSCO_SPLASH` | Splash control. Disable in scripts and screenshots. |
 | `DSCO_GLYPH` | Glyph tier override, such as `ascii`, `unicode`, or `full`. Use for terminal compatibility. |
 | `DSCO_NERD_FONT`, `NERD_FONT` | Enables Nerd Font UI assumptions. Set only when the terminal font supports it. |

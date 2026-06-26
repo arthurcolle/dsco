@@ -17,6 +17,7 @@ typedef struct {
     bool core;           /* true = always pageable; false = only via load_tools */
     bool is_read_only;   /* true = no side effects (safe for streaming exec) */
     bool is_concurrent;  /* true = no shared state (safe for parallel exec) */
+    bool is_interactive; /* true = owns the terminal/user turn; no cache/spinner/parallel */
 } tool_def_t;
 
 typedef enum {
@@ -70,6 +71,7 @@ char            *tools_normalize_input(const char *name, const char *input_json)
  * ({status, answers:[...]}). Returns true on success. */
 bool             dsco_run_ask_dialog(const char *spec_json,
                                      char *result, size_t result_len);
+bool             dsco_tool_is_interactive(const char *name);
 
 /* ── Live agent loop constructs ──────────────────────────────────────── */
 
@@ -262,6 +264,14 @@ void  tools_cooc_update(const char **tool_names, int n);
 void  tools_cooc_persist(void);
 void  tools_cooc_load(void);
 void  tools_cooc_free(void);
+
+typedef struct {
+    char from[64];
+    char to[64];
+    unsigned count;
+} tools_cooc_edge_t;
+
+int tools_cooc_top_edges(tools_cooc_edge_t *out, int max);
 
 /* Tiered retrieval result */
 typedef struct {

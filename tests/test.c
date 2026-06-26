@@ -1516,6 +1516,52 @@ static void test_openai_request_defaults_auto_tool_choice(void) {
     PASS();
 }
 
+static void test_openai_request_accepts_extra_params_env(void) {
+    TEST("openai request accepts extra params env");
+    tools_init();
+    conversation_t conv;
+    conv_init(&conv);
+    conv_add_user_text(&conv, "emit json");
+
+    char saved[2048];
+    bool had = false;
+    test_capture_env("DSCO_OPENAI_PARAMS", saved, sizeof(saved), &had);
+    setenv("DSCO_OPENAI_PARAMS",
+           "{\"response_format\":{\"type\":\"json_object\"},\"seed\":123,"
+           "\"presence_penalty\":0.25,\"frequency_penalty\":0.5,"
+           "\"parallel_tool_calls\":false,\"service_tier\":\"flex\","
+           "\"stream_options\":{\"include_usage\":true}}",
+           1);
+
+    session_state_t session;
+    session_state_init(&session, "gpt-4o");
+
+    provider_t *p = provider_create("openai");
+    ASSERT(p != NULL, "provider should be created");
+
+    char *req = p->build_request(p, &conv, &session, 1024, NULL);
+    ASSERT(req != NULL, "request should not be NULL");
+    ASSERT(strstr(req, "\"response_format\":{\"type\":\"json_object\"}") != NULL,
+           "OpenAI extra params should include response_format");
+    ASSERT(strstr(req, "\"seed\":123") != NULL, "OpenAI extra params should include seed");
+    ASSERT(strstr(req, "\"presence_penalty\":0.25") != NULL,
+           "OpenAI extra params should include presence_penalty");
+    ASSERT(strstr(req, "\"frequency_penalty\":0.5") != NULL,
+           "OpenAI extra params should include frequency_penalty");
+    ASSERT(strstr(req, "\"parallel_tool_calls\":false") != NULL,
+           "OpenAI extra params should include parallel_tool_calls");
+    ASSERT(strstr(req, "\"service_tier\":\"flex\"") != NULL,
+           "OpenAI extra params should include service_tier");
+    ASSERT(strstr(req, "\"stream_options\":{\"include_usage\":true}") != NULL,
+           "OpenAI extra params should include stream_options");
+
+    free(req);
+    provider_free(p);
+    conv_free(&conv);
+    test_restore_env("DSCO_OPENAI_PARAMS", saved, had);
+    PASS();
+}
+
 static void test_openrouter_request_tool_choice_none(void) {
     TEST("openrouter request tool_choice none");
     tools_init();
@@ -6897,6 +6943,18 @@ static void test_cooc_decay_reduces_counts(void) {
 
 static void test_cooc_persist_and_load(void) {
     TEST("cooc persist/load roundtrip");
+    char saved_home[512];
+    bool had_home = false;
+    test_capture_env("HOME", saved_home, sizeof(saved_home), &had_home);
+
+    char home[512];
+    snprintf(home, sizeof(home), "/tmp/dsco_cooc_home_%d_%ld", (int)getpid(), (long)time(NULL));
+    if (mkdir(home, 0700) != 0) {
+        FAIL("mkdir temp cooc HOME failed");
+        return;
+    }
+    setenv("HOME", home, 1);
+
     tools_cooc_init();
     const char *seq[] = {"bash", "python", "grep_files"};
     for (int i = 0; i < 5; i++)
@@ -6911,9 +6969,19 @@ static void test_cooc_persist_and_load(void) {
     const char *probe[] = {"bash"};
     tools_cooc_inject_hints(probe, 1);
     int hints = tools_hint_count();
-    ASSERT(hints > 0, "cooc predictions survive persist/load roundtrip");
     tools_hint_clear();
     tools_cooc_free();
+
+    char cooc_path[640];
+    char dsco_dir[576];
+    snprintf(dsco_dir, sizeof(dsco_dir), "%s/.dsco", home);
+    snprintf(cooc_path, sizeof(cooc_path), "%s/tool_cooc.bin", dsco_dir);
+    unlink(cooc_path);
+    rmdir(dsco_dir);
+    rmdir(home);
+    test_restore_env("HOME", saved_home, had_home);
+
+    ASSERT(hints > 0, "cooc predictions survive persist/load roundtrip");
     PASS();
 }
 
@@ -7407,6 +7475,33 @@ static void test_provider_msg_is_credit_too_low_classifies_exhaustion(void) {
     PASS();
 }
 
+static void test_provider_credit_reset_at_parser(void) {
+    TEST("provider_credit_reset_at parser handles reset fields and headers");
+    time_t now = (time_t)1700000000;
+    time_t reset = provider_credit_reset_at_from_text(
+        "{\"error\":{\"message\":\"subscription window is exhausted\","
+        "\"resetsAt\":1700003600}}",
+        now);
+    ASSERT(reset == (time_t)1700003600, "nested resetsAt should parse as epoch seconds");
+
+    reset = provider_credit_reset_at_from_text("{\"reset_at\":1700007200000}", now);
+    ASSERT(reset == (time_t)1700007200, "epoch milliseconds should be normalized");
+
+    reset = provider_credit_reset_at_from_value("\"1970-01-01T00:02:00+00:00\"", now);
+    ASSERT(reset == (time_t)120, "ISO-8601 reset timestamps should parse as UTC");
+
+    reset = 0;
+    ASSERT(provider_credit_reset_at_from_header_line("retry-after: 120\r\n", now, &reset),
+           "Retry-After header should be recognized");
+    ASSERT(reset == now + 120, "Retry-After seconds should be relative to now");
+
+    ASSERT(provider_credit_reset_at_from_header_line(
+               "anthropic-ratelimit-unified-reset: 1700009000\r\n", now, &reset),
+           "Anthropic unified reset header should be recognized");
+    ASSERT(reset == (time_t)1700009000, "furthest reset should be retained");
+    PASS();
+}
+
 static void test_provider_detect_matrix(void) {
     TEST("provider_detect routes common model families");
     ASSERT(strcmp(provider_detect("claude-sonnet-4-6", NULL), "anthropic") == 0,
@@ -7442,6 +7537,10 @@ static void test_provider_detect_namespaced_models(void) {
            "sakana namespaced model should route to native Sakana");
     ASSERT(strcmp(provider_detect("openrouter/openai/gpt-5.5", NULL), "openrouter") == 0,
            "openrouter-prefixed provider namespace should route through OpenRouter");
+    ASSERT(strcmp(provider_detect("ollama:llama3.2:latest", NULL), "ollama") == 0,
+           "ollama-prefixed local model should route to Ollama");
+    ASSERT(strcmp(provider_route_for_model("ollama:llama3.2:latest", NULL, NULL), "ollama") == 0,
+           "ollama-prefixed model should be usable without an API key");
     PASS();
 }
 
@@ -7540,6 +7639,27 @@ static void test_provider_profile_env_resolution_uses_aliases(void) {
     PASS();
 }
 
+static void test_provider_local_headers_omit_synthetic_auth(void) {
+    TEST("provider local headers omit synthetic auth");
+
+    provider_t *ollama = provider_create("ollama");
+    ASSERT(ollama != NULL, "ollama provider should be created");
+    struct curl_slist *hdrs = ollama->build_headers(ollama, "local");
+    bool saw_auth = false;
+    bool saw_content_type = false;
+    for (struct curl_slist *h = hdrs; h; h = h->next) {
+        if (strncmp(h->data, "Authorization:", 14) == 0)
+            saw_auth = true;
+        if (strcmp(h->data, "Content-Type: application/json") == 0)
+            saw_content_type = true;
+    }
+    ASSERT(saw_content_type, "local provider should still set JSON content type");
+    ASSERT(!saw_auth, "local provider should not send Authorization: Bearer local");
+    curl_slist_free_all(hdrs);
+    provider_free(ollama);
+    PASS();
+}
+
 static void test_provider_create_uses_profile_alias_transport(void) {
     TEST("provider_create uses profile aliases for implemented transports");
 
@@ -7557,6 +7677,21 @@ static void test_provider_create_uses_profile_alias_transport(void) {
     ASSERT(strstr(qwen->api_url, "portal.qwen.ai/v1/chat/completions") != NULL,
            "qwen-oauth provider should use portal transport base");
     provider_free(qwen);
+
+    provider_t *ollama = provider_create("ollama");
+    ASSERT(ollama != NULL, "ollama should create a local provider");
+    ASSERT(strcmp(ollama->name, "ollama") == 0, "ollama should keep canonical name");
+    ASSERT(strcmp(ollama->api_url, "http://localhost:11434/v1/chat/completions") == 0,
+           "ollama should use the local OpenAI-compatible chat completions endpoint");
+    provider_free(ollama);
+
+    provider_t *ollama_cloud = provider_create("ollama-cloud");
+    ASSERT(ollama_cloud != NULL, "ollama-cloud should create a cloud provider");
+    ASSERT(strcmp(ollama_cloud->name, "ollama-cloud") == 0,
+           "ollama-cloud should keep distinct canonical name");
+    ASSERT(strcmp(ollama_cloud->api_url, "https://ollama.com/v1/chat/completions") == 0,
+           "ollama-cloud should use Ollama's hosted OpenAI-compatible endpoint");
+    provider_free(ollama_cloud);
 
     PASS();
 }
@@ -7661,6 +7796,89 @@ static void test_provider_resolve_api_key_supports_aliases(void) {
     test_restore_env("XAI_API_KEY", saved_xai, had_xai);
     test_restore_env("KIMI_CODING_API_KEY", saved_kimi_coding, had_kimi_coding);
     test_restore_env("MOONSHOTAI_API_KEY", saved_moonshotai, had_moonshotai);
+    PASS();
+}
+
+static void test_provider_sakana_payg_key_is_additive(void) {
+    TEST("provider_resolve_api_key keeps Sakana subscription default with PAYG key");
+    char saved_fugu[256], saved_sakana[256], saved_fish[256], saved_sakana_token[256];
+    char saved_payg[256], saved_sakana_payg[256], saved_fish_payg[256], saved_payg_token[256];
+    char saved_class[64], saved_fugu_class[64], saved_metered[16], saved_billing_fb[16];
+    bool had_fugu = false, had_sakana = false, had_fish = false, had_sakana_token = false;
+    bool had_payg = false, had_sakana_payg = false, had_fish_payg = false, had_payg_token = false;
+    bool had_class = false, had_fugu_class = false, had_metered = false, had_billing_fb = false;
+
+    test_capture_env("FUGU_API_KEY", saved_fugu, sizeof(saved_fugu), &had_fugu);
+    test_capture_env("SAKANA_API_KEY", saved_sakana, sizeof(saved_sakana), &had_sakana);
+    test_capture_env("FISH_API_KEY", saved_fish, sizeof(saved_fish), &had_fish);
+    test_capture_env("SAKANA_TOKEN", saved_sakana_token, sizeof(saved_sakana_token),
+                     &had_sakana_token);
+    test_capture_env("FUGU_PAYG_API_KEY", saved_payg, sizeof(saved_payg), &had_payg);
+    test_capture_env("SAKANA_PAYG_API_KEY", saved_sakana_payg, sizeof(saved_sakana_payg),
+                     &had_sakana_payg);
+    test_capture_env("FISH_PAYG_API_KEY", saved_fish_payg, sizeof(saved_fish_payg),
+                     &had_fish_payg);
+    test_capture_env("SAKANA_PAYG_TOKEN", saved_payg_token, sizeof(saved_payg_token),
+                     &had_payg_token);
+    test_capture_env("DSCO_SAKANA_KEY_CLASS", saved_class, sizeof(saved_class), &had_class);
+    test_capture_env("DSCO_FUGU_KEY_CLASS", saved_fugu_class, sizeof(saved_fugu_class),
+                     &had_fugu_class);
+    test_capture_env("DSCO_PREFER_METERED_API", saved_metered, sizeof(saved_metered),
+                     &had_metered);
+    test_capture_env("DSCO_API_BILLING_FALLBACK", saved_billing_fb, sizeof(saved_billing_fb),
+                     &had_billing_fb);
+
+    setenv("FUGU_API_KEY", "fish_subscription", 1);
+    unsetenv("SAKANA_API_KEY");
+    unsetenv("FISH_API_KEY");
+    unsetenv("SAKANA_TOKEN");
+    setenv("FUGU_PAYG_API_KEY", "fish_payg", 1);
+    unsetenv("SAKANA_PAYG_API_KEY");
+    unsetenv("FISH_PAYG_API_KEY");
+    unsetenv("SAKANA_PAYG_TOKEN");
+    unsetenv("DSCO_SAKANA_KEY_CLASS");
+    unsetenv("DSCO_FUGU_KEY_CLASS");
+    unsetenv("DSCO_PREFER_METERED_API");
+    unsetenv("DSCO_API_BILLING_FALLBACK");
+
+    const char *key = provider_resolve_api_key("sakana");
+    ASSERT(key && strcmp(key, "fish_subscription") == 0,
+           "subscription Sakana key should stay default when PAYG key is also present");
+    ASSERT(provider_sakana_current_key_is_subscription(),
+           "default Sakana key class should be subscription");
+    ASSERT(provider_sakana_has_payg_key(), "Sakana PAYG helper should detect configured PAYG key");
+    ASSERT(strcmp(provider_sakana_payg_request_key(), "fish_payg") == 0,
+           "Sakana PAYG helper should expose the metered request key");
+    ASSERT(strcmp(provider_auth_mode("sakana", key), "sakana-subscription-api-key") == 0,
+           "auth mode should expose subscription Sakana key class");
+    ASSERT(strcmp(provider_auth_mode("sakana", "fish_payg"), "sakana-payg-api-key") == 0,
+           "auth mode should follow an explicitly resolved PAYG Sakana key");
+
+    setenv("DSCO_SAKANA_KEY_CLASS", "payg", 1);
+    key = provider_resolve_api_key("sakana");
+    ASSERT(key && strcmp(key, "fish_payg") == 0, "explicit payg key class should select PAYG");
+    ASSERT(!provider_sakana_current_key_is_subscription(), "PAYG Sakana key is metered");
+    ASSERT(strcmp(provider_auth_mode("sakana", key), "sakana-payg-api-key") == 0,
+           "auth mode should expose PAYG Sakana key class");
+
+    unsetenv("DSCO_SAKANA_KEY_CLASS");
+    setenv("DSCO_PREFER_METERED_API", "1", 1);
+    key = provider_resolve_api_key("sakana");
+    ASSERT(key && strcmp(key, "fish_payg") == 0,
+           "global metered preference should select Sakana PAYG key");
+
+    test_restore_env("FUGU_API_KEY", saved_fugu, had_fugu);
+    test_restore_env("SAKANA_API_KEY", saved_sakana, had_sakana);
+    test_restore_env("FISH_API_KEY", saved_fish, had_fish);
+    test_restore_env("SAKANA_TOKEN", saved_sakana_token, had_sakana_token);
+    test_restore_env("FUGU_PAYG_API_KEY", saved_payg, had_payg);
+    test_restore_env("SAKANA_PAYG_API_KEY", saved_sakana_payg, had_sakana_payg);
+    test_restore_env("FISH_PAYG_API_KEY", saved_fish_payg, had_fish_payg);
+    test_restore_env("SAKANA_PAYG_TOKEN", saved_payg_token, had_payg_token);
+    test_restore_env("DSCO_SAKANA_KEY_CLASS", saved_class, had_class);
+    test_restore_env("DSCO_FUGU_KEY_CLASS", saved_fugu_class, had_fugu_class);
+    test_restore_env("DSCO_PREFER_METERED_API", saved_metered, had_metered);
+    test_restore_env("DSCO_API_BILLING_FALLBACK", saved_billing_fb, had_billing_fb);
     PASS();
 }
 
@@ -12309,8 +12527,36 @@ static void test_tui_cursor_primitives(void) {
     tui_cursor_move(5, 10);
     tui_clear_line();
     tui_clear_screen();
+    tui_terminal_restore_sane();
     fclose(stderr);
     stderr = save;
+    PASS();
+}
+
+static void test_tui_cursor_report_queries_opt_in(void) {
+    TEST("tui cursor report queries are opt-in");
+    char saved[128];
+    bool had_value = false;
+    test_capture_env("DSCO_TUI_DSR", saved, sizeof(saved), &had_value);
+
+    bool ok = true;
+    unsetenv("DSCO_TUI_DSR");
+    ok = ok && !tui_cursor_report_queries_enabled();
+    setenv("DSCO_TUI_DSR", "1", 1);
+    ok = ok && tui_cursor_report_queries_enabled();
+    setenv("DSCO_TUI_DSR", "true", 1);
+    ok = ok && tui_cursor_report_queries_enabled();
+    setenv("DSCO_TUI_DSR", "yes", 1);
+    ok = ok && tui_cursor_report_queries_enabled();
+    setenv("DSCO_TUI_DSR", "on", 1);
+    ok = ok && tui_cursor_report_queries_enabled();
+    setenv("DSCO_TUI_DSR", "0", 1);
+    ok = ok && !tui_cursor_report_queries_enabled();
+    setenv("DSCO_TUI_DSR", "false", 1);
+    ok = ok && !tui_cursor_report_queries_enabled();
+
+    test_restore_env("DSCO_TUI_DSR", saved, had_value);
+    ASSERT(ok, "DSCO_TUI_DSR should default off and enable only for truthy values");
     PASS();
 }
 
@@ -14821,6 +15067,7 @@ int main(void) {
     test_openrouter_request_named_tool_choice();
     test_provider_request_model_prefix_routing();
     test_openai_request_defaults_auto_tool_choice();
+    test_openai_request_accepts_extra_params_env();
     test_openrouter_request_tool_choice_none();
     test_openrouter_request_external_tools_when_builtin_budget_zero();
     test_openrouter_request_disable_tools_env();
@@ -15162,15 +15409,18 @@ int main(void) {
     test_switch_reason_names();
     test_provider_msg_is_context_overflow();
     test_provider_msg_is_credit_too_low_classifies_exhaustion();
+    test_provider_credit_reset_at_parser();
     test_provider_detect_matrix();
     test_provider_detect_namespaced_models();
     test_provider_model_family_detects_underlying_family();
     test_provider_profile_catalog_lifts_hermes_contract();
     test_provider_profile_env_resolution_uses_aliases();
+    test_provider_local_headers_omit_synthetic_auth();
     test_provider_create_uses_profile_alias_transport();
     test_provider_create_known_unsupported_does_not_fallback_openai();
     test_provider_custom_base_uses_profile_canonical_name();
     test_provider_resolve_api_key_supports_aliases();
+    test_provider_sakana_payg_key_is_additive();
     test_provider_resolve_api_key_supports_generic_providers();
     test_provider_select_default_primary_model_prefers_glm_kimi();
     test_provider_build_default_fallback_models_cross_lab();
@@ -15421,6 +15671,7 @@ int main(void) {
     test_tui_image_preview_badge_smoke();
     test_tui_swarm_panel_smoke();
     test_tui_cursor_primitives();
+    test_tui_cursor_report_queries_opt_in();
     test_tui_gradient_text_smoke();
     test_tui_gradient_divider_smoke();
     test_tui_transition_divider_smoke();

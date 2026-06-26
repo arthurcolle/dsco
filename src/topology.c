@@ -1569,6 +1569,10 @@ static bool topology_add_throughput_lane(topo_throughput_lane_t lanes[], int *co
     if (topology_provider_is_local_lane(canonical) &&
         !dsco_env_bool("DSCO_TOPO_THROUGHPUT_INCLUDE_LOCAL", false))
         return false;
+    /* Fugu PAYG keys are metered overflow capacity, not default throughput
+     * lanes. Only subscription-class Sakana keys should preempt slot 0. */
+    if (strcmp(canonical, "sakana") == 0 && !provider_sakana_current_key_is_subscription())
+        return false;
     if (!provider_has_usable_key(canonical, api_key))
         return false;
 

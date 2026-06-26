@@ -1,5 +1,6 @@
 /* Native ChatGPT-subscription OAuth (Codex-compatible PKCE flow). */
 #include "openai_oauth.h"
+#include "http_pool.h"
 
 #include "crypto.h"
 #include "json_util.h"
@@ -65,6 +66,7 @@ static size_t oai_http_write_cb(char *ptr, size_t size, size_t nmemb, void *ud) 
  * http_code_out receives the response status. */
 static char *oai_http_post_form(const char *url, const char *form, long *http_code_out) {
     CURL *curl = curl_easy_init();
+    dsco_http_pool_apply(curl);
     if (!curl)
         return NULL;
     oai_http_buf_t buf = {0};
@@ -352,6 +354,7 @@ bool openai_oauth_refresh(openai_oauth_bundle_t *bundle) {
     const char *token_url = oai_env("DSCO_CHATGPT_OAUTH_TOKEN_URL", OAI_OAUTH_TOKEN_URL);
 
     CURL *esc = curl_easy_init();
+    dsco_http_pool_apply(esc);
     char *enc_refresh = esc ? curl_easy_escape(esc, bundle->refresh_token, 0) : NULL;
     char *enc_client = esc ? curl_easy_escape(esc, client_id, 0) : NULL;
     char *enc_scope = esc ? curl_easy_escape(esc, OAI_OAUTH_SCOPE, 0) : NULL;
@@ -590,6 +593,7 @@ int openai_oauth_login(void) {
 
     /* 3. authorize URL */
     CURL *esc = curl_easy_init();
+    dsco_http_pool_apply(esc);
     char *e_client = curl_easy_escape(esc, client_id, 0);
     char *e_redirect = curl_easy_escape(esc, OAI_OAUTH_REDIRECT, 0);
     char *e_scope = curl_easy_escape(esc, OAI_OAUTH_SCOPE, 0);
@@ -647,6 +651,7 @@ int openai_oauth_login(void) {
     char *decoded_code = NULL;
     {
         CURL *d = curl_easy_init();
+        dsco_http_pool_apply(d);
         int outlen = 0;
         char *u = d ? curl_easy_unescape(d, code, 0, &outlen) : NULL;
         if (u) {
@@ -660,6 +665,7 @@ int openai_oauth_login(void) {
     const char *use_code = decoded_code ? decoded_code : "";
 
     CURL *e2 = curl_easy_init();
+    dsco_http_pool_apply(e2);
     char *enc_code = curl_easy_escape(e2, use_code, 0);
     char *enc_redirect = curl_easy_escape(e2, OAI_OAUTH_REDIRECT, 0);
     char *enc_client = curl_easy_escape(e2, client_id, 0);

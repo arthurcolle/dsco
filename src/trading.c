@@ -9,6 +9,7 @@
  */
 
 #include "trading.h"
+#include "http_pool.h"
 #include "tools.h"
 #include "json_util.h"
 #include "crypto.h"
@@ -69,6 +70,7 @@ static size_t http_write_cb(void *ptr, size_t size, size_t nmemb, void *userdata
 static long trading_http_request(const char *method, const char *url, const char *body,
                                  const char *headers[], int header_count, http_buf_t *out_buf) {
     CURL *curl = curl_easy_init();
+    dsco_http_pool_apply(curl);
     if (!curl)
         return -1;
 
@@ -4187,6 +4189,7 @@ bool tool_arb_monitor(const char *input, char *result, size_t rlen) {
     char p_url[512];
     if (topic && topic[0]) {
         CURL *c = curl_easy_init();
+        dsco_http_pool_apply(c);
         char *enc = c ? curl_easy_escape(c, topic, 0) : NULL;
         snprintf(p_url, sizeof(p_url),
                  "https://gamma-api.polymarket.com/markets?_q=%s&limit=%d&active=true"

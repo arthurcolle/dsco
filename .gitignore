@@ -73,6 +73,7 @@ data/ginnie/
 # Agent harness / local state
 .claude/
 .arthur/
+email-mcp/
 
 # Build outputs (single-file + variant binaries)
 dsc

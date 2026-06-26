@@ -1,4 +1,5 @@
 #include "mcp.h"
+#include "http_pool.h"
 #include "json_util.h"
 #include "config.h"
 #include "mcp_names.h"
@@ -507,6 +508,7 @@ static char *http_post_rpc(mcp_server_t *srv, const char *payload, int timeout_m
         return NULL;
 
     CURL *curl = curl_easy_init();
+    dsco_http_pool_apply(curl);
     if (!curl)
         return NULL;
 

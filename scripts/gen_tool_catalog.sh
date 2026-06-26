@@ -2,7 +2,7 @@
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-SRC="$ROOT/tools.c"
+SRC="$ROOT/src/tools.c"
 OUT="$ROOT/docs/TOOL_CATALOG.md"
 TMP="$(mktemp)"
 CHECK=0
@@ -14,9 +14,9 @@ fi
 {
   echo "# Built-in Tool Catalog"
   echo
-  echo "This catalog is generated from \`tools.c\` tool registrations (\`.name\` / \`.description\` pairs)."
+  echo "This catalog is generated from \`src/tools.c\` tool registrations (\`.name\` / \`.description\` pairs)."
   echo
-  echo "- Source: \`tools.c\`"
+  echo "- Source: \`src/tools.c\`"
 
   awk '
   /\.name = "/ {
