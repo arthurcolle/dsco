@@ -1,0 +1,142 @@
+{
+  "auth": {
+    "client_side_notes": [],
+    "env_keys": [
+      "XAI_API_KEY"
+    ],
+    "headers": [
+      {
+        "name": "Authorization",
+        "value": "Bearer $XAI_API_KEY"
+      }
+    ],
+    "scheme": "bearer"
+  },
+  "client_side_mechanics": {
+    "codex_config": {},
+    "headers_optional": [],
+    "headers_required": [],
+    "quirks": [],
+    "sdk_compatibility": [
+      "openai-compatible"
+    ],
+    "unsupported_fields": []
+  },
+  "confidence": 0.82,
+  "display_name": "xAI Grok",
+  "docs": [
+    {
+      "confidence": 0.9,
+      "retrieved": "2026-06-24",
+      "title": "Prompt Caching",
+      "url": "https://docs.x.ai/developers/advanced-api-usage/prompt-caching"
+    }
+  ],
+  "dsco": {
+    "implemented_features": [
+      "x-grok-conv-id_header",
+      "automatic_prompt_cache_policy"
+    ],
+    "missing_features": [
+      "live cache-hit telemetry test"
+    ],
+    "provider_profile": "xai",
+    "risk": "low",
+    "tests": [
+      "test_prompt_cache_xai_header_shape"
+    ]
+  },
+  "last_reviewed": "2026-06-24",
+  "prompt_caching": {
+    "invalidates_on": [
+      "conversation_id_change",
+      "prefix_change"
+    ],
+    "mechanisms": [
+      {
+        "default_policy": "enabled",
+        "dsco_support": "implemented",
+        "field": "x-grok-conv-id",
+        "kind": "header",
+        "models": [
+          "grok*"
+        ],
+        "name": "x-grok-conv-id",
+        "scope": "request/conversation",
+        "usage_fields": [
+          "usage.prompt_tokens_details.cached_tokens"
+        ]
+      }
+    ],
+    "minimum_cacheable_tokens": null,
+    "notes": [
+      "Header gives cache/conversation affinity."
+    ],
+    "status": "automatic",
+    "ttl": "provider_default"
+  },
+  "provider": "xai",
+  "reasoning": {
+    "aliases": {},
+    "efforts": [],
+    "field": null,
+    "supported": false,
+    "unsupported_values_rejected": false
+  },
+  "streaming": {
+    "idempotent_retries": true,
+    "idle_timeout_ms_recommended": 120000,
+    "known_failure_modes": [
+      "429_rate_limit",
+      "5xx_overload",
+      "stream_idle"
+    ],
+    "request_max_retries": 2,
+    "stream_max_retries": 2
+  },
+  "usage_accounting": {
+    "cached_tokens": [
+      "usage.prompt_tokens_details.cached_tokens",
+      "usage.input_tokens_details.cached_tokens"
+    ],
+    "input_tokens": [
+      "usage.prompt_tokens",
+      "usage.input_tokens"
+    ],
+    "output_tokens": [
+      "usage.completion_tokens",
+      "usage.output_tokens"
+    ],
+    "provider_specific": [],
+    "reasoning_tokens": [
+      "usage.completion_tokens_details.reasoning_tokens",
+      "usage.output_tokens_details.reasoning_tokens"
+    ]
+  },
+  "wire_apis": [
+    {
+      "base_url": "https://api.x.ai/v1",
+      "endpoint": "/chat/completions",
+      "modalities": {
+        "input": [
+          "text",
+          "image"
+        ],
+        "output": [
+          "text"
+        ]
+      },
+      "name": "chat_completions",
+      "status": "preferred",
+      "streaming": {
+        "format": "sse",
+        "supported": true
+      },
+      "tools": {
+        "parallel_tool_calls": true,
+        "strict_schema": false,
+        "supported": true
+      }
+    }
+  ]
+}

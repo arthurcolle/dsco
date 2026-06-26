@@ -1,0 +1,96 @@
+name: npm-publish
+
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'npm package version to publish; must match package.json'
+        required: false
+        type: string
+
+permissions:
+  contents: read
+  id-token: write
+
+concurrency:
+  group: npm-publish-${{ github.event_name == 'release' && github.event.release.tag_name || github.event.inputs.version || github.ref }}
+  cancel-in-progress: false
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  publish:
+    name: publish @distributed.systems/dsco
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event_name == 'release' && github.event.release.tag_name || github.ref }}
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          registry-url: https://registry.npmjs.org
+          scope: "@distributed.systems"
+          cache: npm
+          cache-dependency-path: npm/dsco/package.json
+
+      - name: Validate version and release assets
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          NPM_VERSION="$(node -p "require('./npm/dsco/package.json').version")"
+          CONFIG_VERSION="$(sed -nE 's/^#define[[:space:]]+DSCO_VERSION[[:space:]]+"([^"]+)".*/\1/p' include/config.h | head -n1)"
+          [[ "$NPM_VERSION" == "$CONFIG_VERSION" ]] || {
+            echo "package.json has $NPM_VERSION but include/config.h has $CONFIG_VERSION" >&2
+            exit 1
+          }
+
+          if [[ "${{ github.event_name }}" == "release" ]]; then
+            EXPECTED_TAG="${{ github.event.release.tag_name }}"
+            [[ "$EXPECTED_TAG" == "v${NPM_VERSION}" ]] || {
+              echo "Release tag $EXPECTED_TAG does not match npm version $NPM_VERSION" >&2
+              exit 1
+            }
+          elif [[ -n "${{ github.event.inputs.version }}" ]]; then
+            [[ "${{ github.event.inputs.version }}" == "$NPM_VERSION" ]] || {
+              echo "Manual version ${{ github.event.inputs.version }} does not match package.json $NPM_VERSION" >&2
+              exit 1
+            }
+          fi
+
+          gh release view "v${NPM_VERSION}" --json assets --jq '.assets[].name' > /tmp/release_assets.txt
+          for asset in dsco-darwin-arm64.tar.gz dsco-darwin-x64.tar.gz dsco-linux-x64.tar.gz; do
+            grep -Fx "$asset" /tmp/release_assets.txt >/dev/null || {
+              echo "GitHub release v${NPM_VERSION} is missing npm installer asset $asset" >&2
+              exit 1
+            }
+          done
+
+      - name: Validate package metadata
+        working-directory: npm/dsco
+        env:
+          DSCO_SKIP_DOWNLOAD: "1"
+        run: |
+          set -euo pipefail
+          node -e "const p=require('./package.json'); if (p.name !== '@distributed.systems/dsco') throw new Error('unexpected package name'); console.log(p.name, p.version);"
+          npm pack --dry-run
+
+      - name: Publish to npm
+        working-directory: npm/dsco
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: |
+          set -euo pipefail
+          if [[ -z "${NODE_AUTH_TOKEN:-}" ]]; then
+            echo "NPM_TOKEN is required to publish @distributed.systems/dsco" >&2
+            exit 1
+          fi
+          npm publish --provenance --access public

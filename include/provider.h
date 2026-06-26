@@ -3,6 +3,7 @@
 
 #include <stdbool.h>
 #include <stddef.h>
+#include <time.h>
 #include "llm.h"
 #include "json_util.h"
 
@@ -73,6 +74,10 @@ const char *provider_detect(const char *model, const char *api_key);
 /* Detect the underlying model family (anthropic/openai/xai/google/...) even
  * when the request will ultimately route through OpenRouter. */
 const char *provider_model_family(const char *model);
+bool provider_model_supports_cache_control(const char *model);
+bool provider_model_supports_automatic_prompt_cache(const char *model);
+bool provider_model_supports_prompt_cache_key(const char *model);
+bool provider_model_supports_prompt_cache_retention(const char *model);
 
 /* Resolve the API key env var for a provider */
 const char *provider_resolve_api_key(const char *provider_name);
@@ -106,6 +111,13 @@ void provider_debug_log_request(const char *provider_name, const char *model,
                                 const char *resolved_key);
 const char *provider_claude_code_oauth_source(void);
 
+/* Sakana/Fugu supports both flat-rate subscription keys and metered PAYG keys.
+ * The subscription key remains the default when both are present; set
+ * DSCO_SAKANA_KEY_CLASS=payg or DSCO_PREFER_METERED_API=1 to prefer PAYG. */
+bool provider_sakana_current_key_is_subscription(void);
+bool provider_sakana_has_payg_key(void);
+const char *provider_sakana_payg_request_key(void);
+
 /* Fill subscription_type_out and rate_limit_tier_out (both at least 64 bytes).
  * Returns true when at least one field was found. */
 bool provider_claude_code_get_account_info(char *subscription_type_out, size_t st_len,
@@ -115,6 +127,10 @@ bool provider_claude_code_get_account_info(char *subscription_type_out, size_t s
  * Anthropic and OpenAI-compat streaming paths so both can mark the stream
  * result as "credit_too_low" and trigger the fallback chain. */
 bool provider_msg_is_credit_too_low(const char *msg);
+time_t provider_credit_reset_at_from_value(const char *value, time_t now);
+time_t provider_credit_reset_at_from_text(const char *text, time_t now);
+bool provider_credit_reset_at_from_header_line(const char *line, time_t now,
+                                               time_t *reset_at);
 
 /* Classify a provider error body as a context/prompt-length rejection
  * ("prompt is too long", "context_length_exceeded", "maximum context length",
@@ -144,5 +160,21 @@ int provider_build_default_fallback_models(const char *model,
  * prefer_code is true, bias toward coding-oriented families; otherwise bias
  * toward cost-effective frontier models, currently favoring Grok. */
 const char *provider_select_default_primary_model(bool prefer_code);
+
+/* Map a raw API key to its native provider purely from its prefix
+ * (e.g. "fish_" -> sakana, "sk-ant-" -> anthropic, "xai-" -> xai). Unlike
+ * provider_detect(), this never falls back to a default: an unrecognized
+ * prefix returns NULL. */
+const char *provider_provider_for_api_key(const char *api_key);
+
+/* Publish a raw key under its provider's canonical env var (only if that var
+ * is not already set) so every downstream credential lookup recognizes it.
+ * Returns the detected provider name, or NULL if the prefix is unknown. */
+const char *provider_publish_api_key_env(const char *api_key);
+
+/* Public wrapper: the primary model id for a given provider family, honoring
+ * which credentials are actually available. Returns NULL if the family has no
+ * usable route. */
+const char *provider_primary_model_for(const char *family, bool prefer_code);
 
 #endif
