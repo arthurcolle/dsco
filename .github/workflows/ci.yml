@@ -3,120 +3,178 @@ name: ci
 on:
   pull_request:
   push:
-    branches: [ main, master ]
+    branches: [main, master]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+defaults:
+  run:
+    shell: bash
+
+env:
+  DSCO_CI: "1"
+  DSCO_NO_SUPERVISE: "1"
+  DSCO_SECURE_STORE_NO_PROMPT: "1"
+  DSCO_STD: c2y
 
 jobs:
-  build-and-test:
-    name: build-test (${{ matrix.os }}, ${{ matrix.cc }})
+  build-test:
+    name: build-test (${{ matrix.label }})
     runs-on: ${{ matrix.os }}
+    timeout-minutes: 40
     strategy:
       fail-fast: false
       matrix:
         include:
-          - os: ubuntu-latest
+          - label: ubuntu-24.04-gcc
+            os: ubuntu-24.04
             cc: gcc
-          - os: ubuntu-latest
+            arch: x86-64
+          - label: ubuntu-24.04-clang
+            os: ubuntu-24.04
             cc: clang
-          - os: macos-latest
+            arch: x86-64
+          - label: macos-14-clang-arm64
+            os: macos-14
             cc: clang
+            arch: arm64
+          - label: macos-15-intel-clang-x64
+            os: macos-15-intel
+            cc: clang
+            arch: x86-64
     env:
       CC: ${{ matrix.cc }}
+      DSCO_ARCH: ${{ matrix.arch }}
     steps:
       - uses: actions/checkout@v4
 
-      - name: Install dependencies (Ubuntu)
-        if: runner.os == 'Linux'
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y libcurl4-openssl-dev libsqlite3-dev libreadline-dev
+      - uses: ./.github/actions/setup-native
 
-      - name: Build
-        run: make -j2
+      - name: Build release binaries
+        run: |
+          set -euo pipefail
+          NCPU="$(getconf _NPROCESSORS_ONLN 2>/dev/null || sysctl -n hw.ncpu)"
+          make -j"${NCPU}" dsco dsco-lite dsc
+
+      - name: Smoke test binaries
+        run: |
+          set -euo pipefail
+          ./dsco --version
+          ./dsco-lite --version
+          ./dsco --tool-exec cwd '{}'
+          ./dsc --help >/dev/null
 
       - name: Unit tests
         run: make test
 
-  sanitizers:
-    runs-on: ubuntu-latest
+      - name: Upload CI binaries
+        if: github.event_name == 'push'
+        uses: actions/upload-artifact@v4
+        with:
+          name: ci-binaries-${{ matrix.label }}
+          path: |
+            dsco
+            dsco-lite
+            dsc
+          if-no-files-found: error
+          retention-days: 7
+
+  extended-tests:
+    name: extended standalone tests
+    runs-on: ubuntu-24.04
+    timeout-minutes: 35
     env:
-      CC: clang
+      CC: gcc
+      DSCO_ARCH: x86-64
     steps:
       - uses: actions/checkout@v4
 
-      - name: Install dependencies
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y clang libcurl4-openssl-dev libsqlite3-dev libreadline-dev
+      - uses: ./.github/actions/setup-native
 
-      - name: ASan build and tests
+      - name: Run standalone suites
         run: |
-          make clean
-          make asan
-          make asan-test
+          set -euo pipefail
+          make test_tui_snapshots
+          make test_priorities
 
-      - name: UBSan build and tests
+  sanitizers:
+    name: sanitizers (${{ matrix.sanitizer }})
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        sanitizer: [asan, ubsan]
+    env:
+      CC: clang
+      DSCO_ARCH: x86-64
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: ./.github/actions/setup-native
+
+      - name: Build and test with ${{ matrix.sanitizer }}
         run: |
+          set -euo pipefail
           make clean
-          make ubsan
-          make ubsan-test
+          make ${{ matrix.sanitizer }}
+          make ${{ matrix.sanitizer }}-test
 
   static-analysis:
-    runs-on: ubuntu-latest
+    name: static-analysis (${{ matrix.tool }})
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        tool: [clang-tidy, cppcheck]
     env:
       CC: clang
+      DSCO_ARCH: x86-64
     steps:
       - uses: actions/checkout@v4
 
-      - name: Install dependencies
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y clang clang-tidy cppcheck libcurl4-openssl-dev libsqlite3-dev libreadline-dev
-
-      - name: clang-tidy
-        run: make clang-tidy
-
-      - name: cppcheck
-        run: make cppcheck
-
-  lint-and-docs:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Install dependencies
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y clang-format
-
-      - name: Format check
-        run: make format-check
-
-      - name: Generated docs check
-        run: make docs-check
-
-  version-check:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Version consistency
-        run: ./scripts/check_version_consistency.sh
-
-  pre-commit:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Setup Python
-        uses: actions/setup-python@v5
+      - uses: ./.github/actions/setup-native
         with:
-          python-version: '3.x'
+          static-analysis: "true"
 
-      - name: Install dependencies
+      - name: Run ${{ matrix.tool }}
+        run: make ${{ matrix.tool }}
+
+  hygiene:
+    name: repo hygiene
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: ./.github/actions/setup-native
+        with:
+          format: "true"
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: npm
+          cache-dependency-path: npm/dsco/package.json
+
+      - name: Formatting, docs, and version checks
         run: |
-          sudo apt-get update
-          sudo apt-get install -y clang-format shellcheck
-          python3 -m pip install --upgrade pip pre-commit
+          set -euo pipefail
+          make format-check
+          make docs-check
+          make check-version
 
-      - name: Run pre-commit
-        run: pre-commit run --all-files
+      - name: Validate npm package contents
+        working-directory: npm/dsco
+        env:
+          DSCO_SKIP_DOWNLOAD: "1"
+        run: |
+          set -euo pipefail
+          node -e "const p=require('./package.json'); if (p.name !== '@distributed.systems/dsco') throw new Error('unexpected package name');"
+          npm pack --dry-run

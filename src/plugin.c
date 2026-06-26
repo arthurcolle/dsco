@@ -17,9 +17,9 @@ plugin_registry_t g_plugins = {0};
 typedef const char *(*plugin_name_fn)(void);
 typedef const char *(*plugin_version_fn)(void);
 typedef tool_def_t *(*plugin_tools_fn)(void);
-typedef int         (*plugin_count_fn)(void);
-typedef bool        (*plugin_init_fn)(void);
-typedef void        (*plugin_cleanup_fn)(void);
+typedef int (*plugin_count_fn)(void);
+typedef bool (*plugin_init_fn)(void);
+typedef void (*plugin_cleanup_fn)(void);
 
 typedef struct {
     char name[128];
@@ -53,24 +53,25 @@ static const char *k_manifest_schema =
     "\"capabilities\":{\"type\":\"array\"}"
     "},\"required\":[\"name\",\"version\",\"hash\",\"signer\",\"capabilities\"]}";
 
-static const char *k_lock_schema =
-    "{\"type\":\"object\",\"properties\":{"
-    "\"schema_version\":{\"type\":\"integer\"},"
-    "\"plugins\":{\"type\":\"array\"}"
-    "},\"required\":[\"schema_version\",\"plugins\"]}";
+static const char *k_lock_schema = "{\"type\":\"object\",\"properties\":{"
+                                   "\"schema_version\":{\"type\":\"integer\"},"
+                                   "\"plugins\":{\"type\":\"array\"}"
+                                   "},\"required\":[\"schema_version\",\"plugins\"]}";
 
-static const char *k_lock_entry_schema =
-    "{\"type\":\"object\",\"properties\":{"
-    "\"name\":{\"type\":\"string\"},"
-    "\"version\":{\"type\":\"string\"},"
-    "\"hash\":{\"type\":\"string\"}"
-    "},\"required\":[\"name\",\"version\",\"hash\"]}";
+static const char *k_lock_entry_schema = "{\"type\":\"object\",\"properties\":{"
+                                         "\"name\":{\"type\":\"string\"},"
+                                         "\"version\":{\"type\":\"string\"},"
+                                         "\"hash\":{\"type\":\"string\"}"
+                                         "},\"required\":[\"name\",\"version\",\"hash\"]}";
 
 static bool is_sha256_hex(const char *s) {
-    if (!s) return false;
-    if (strlen(s) != 64) return false;
+    if (!s)
+        return false;
+    if (strlen(s) != 64)
+        return false;
     for (int i = 0; i < 64; i++) {
-        if (!isxdigit((unsigned char)s[i])) return false;
+        if (!isxdigit((unsigned char)s[i]))
+            return false;
     }
     return true;
 }
@@ -108,9 +109,11 @@ static bool read_text_file(const char *path, char **out, char *err, size_t err_l
 
 static void cap_iter_cb(const char *element_start, void *ctx) {
     cap_iter_ctx_t *it = (cap_iter_ctx_t *)ctx;
-    if (!it->ok) return;
+    if (!it->ok)
+        return;
     const char *p = element_start;
-    while (*p && isspace((unsigned char)*p)) p++;
+    while (*p && isspace((unsigned char)*p))
+        p++;
     if (*p != '"') {
         it->ok = false;
         return;
@@ -118,8 +121,8 @@ static void cap_iter_cb(const char *element_start, void *ctx) {
     it->count++;
 }
 
-static bool parse_manifest_json(const char *json, plugin_manifest_info_t *out,
-                                char *err, size_t err_len) {
+static bool parse_manifest_json(const char *json, plugin_manifest_info_t *out, char *err,
+                                size_t err_len) {
     json_validation_t v = json_validate_schema(json, k_manifest_schema);
     if (!v.valid) {
         snprintf(err, err_len, "manifest schema invalid: %s", v.error);
@@ -148,7 +151,7 @@ static bool parse_manifest_json(const char *json, plugin_manifest_info_t *out,
         return false;
     }
 
-    cap_iter_ctx_t cap = { .ok = true, .count = 0 };
+    cap_iter_ctx_t cap = {.ok = true, .count = 0};
     int cap_n = json_array_foreach(json, "capabilities", cap_iter_cb, &cap);
     if (!cap.ok || cap_n <= 0 || cap.count <= 0) {
         snprintf(err, err_len, "manifest capabilities must be a non-empty string array");
@@ -175,7 +178,8 @@ static bool parse_manifest_json(const char *json, plugin_manifest_info_t *out,
 
 static void lock_iter_cb(const char *element_start, void *ctx) {
     lock_iter_ctx_t *it = (lock_iter_ctx_t *)ctx;
-    if (!it->ok) return;
+    if (!it->ok)
+        return;
 
     json_validation_t v = json_validate_schema(element_start, k_lock_entry_schema);
     if (!v.valid) {
@@ -211,10 +215,8 @@ static void lock_iter_cb(const char *element_start, void *ctx) {
         it->names_count++;
     }
 
-    if (it->manifest &&
-        strcmp(name, it->manifest->name) == 0 &&
-        strcmp(version, it->manifest->version) == 0 &&
-        strcmp(hash, it->manifest->hash) == 0) {
+    if (it->manifest && strcmp(name, it->manifest->name) == 0 &&
+        strcmp(version, it->manifest->version) == 0 && strcmp(hash, it->manifest->hash) == 0) {
         it->found_pin = true;
     }
 
@@ -225,8 +227,8 @@ static void lock_iter_cb(const char *element_start, void *ctx) {
 }
 
 static bool validate_lock_json(const char *json, const plugin_manifest_info_t *manifest,
-                               int *plugins_count_out, bool *has_manifest_pin_out,
-                               char *err, size_t err_len) {
+                               int *plugins_count_out, bool *has_manifest_pin_out, char *err,
+                               size_t err_len) {
     json_validation_t v = json_validate_schema(json, k_lock_schema);
     if (!v.valid) {
         snprintf(err, err_len, "lockfile schema invalid: %s", v.error);
@@ -251,8 +253,10 @@ static bool validate_lock_json(const char *json, const plugin_manifest_info_t *m
         snprintf(err, err_len, "lockfile plugins must contain at least one entry");
         return false;
     }
-    if (plugins_count_out) *plugins_count_out = it.count;
-    if (has_manifest_pin_out) *has_manifest_pin_out = it.found_pin;
+    if (plugins_count_out)
+        *plugins_count_out = it.count;
+    if (has_manifest_pin_out)
+        *has_manifest_pin_out = it.found_pin;
     return true;
 }
 
@@ -268,8 +272,10 @@ static void plugin_metadata_default_path(const char *file_name, char *out, size_
 /* ── Load a single plugin ────────────────────────────────────────────── */
 
 bool plugin_load(plugin_registry_t *reg, const char *path) {
-    if (!reg || !path) return false;
-    if (reg->count >= PLUGIN_MAX_PLUGINS) return false;
+    if (!reg || !path)
+        return false;
+    if (reg->count >= PLUGIN_MAX_PLUGINS)
+        return false;
 
     /* Reject directory traversal in plugin paths */
     if (strstr(path, "..") != NULL) {
@@ -284,13 +290,14 @@ bool plugin_load(plugin_registry_t *reg, const char *path) {
     }
 
     /* Required exports */
-    plugin_name_fn    get_name    = (plugin_name_fn)dlsym(handle, "dsco_plugin_name");
+    plugin_name_fn get_name = (plugin_name_fn)dlsym(handle, "dsco_plugin_name");
     plugin_version_fn get_version = (plugin_version_fn)dlsym(handle, "dsco_plugin_version");
-    plugin_tools_fn   get_tools   = (plugin_tools_fn)dlsym(handle, "dsco_plugin_tools");
-    plugin_count_fn   get_count   = (plugin_count_fn)dlsym(handle, "dsco_plugin_count");
+    plugin_tools_fn get_tools = (plugin_tools_fn)dlsym(handle, "dsco_plugin_tools");
+    plugin_count_fn get_count = (plugin_count_fn)dlsym(handle, "dsco_plugin_count");
 
     if (!get_name || !get_tools || !get_count) {
-        fprintf(stderr, "  plugin: %s missing required exports (dsco_plugin_name/tools/count)\n", path);
+        fprintf(stderr, "  plugin: %s missing required exports (dsco_plugin_name/tools/count)\n",
+                path);
         dlclose(handle);
         return false;
     }
@@ -315,8 +322,10 @@ bool plugin_load(plugin_registry_t *reg, const char *path) {
     p->loaded = true;
 
     /* Validate tool_count from plugin */
-    if (p->tool_count < 0) p->tool_count = 0;
-    if (!p->tools) p->tool_count = 0;
+    if (p->tool_count < 0)
+        p->tool_count = 0;
+    if (!p->tools)
+        p->tool_count = 0;
 
     reg->count++;
 
@@ -332,13 +341,16 @@ bool plugin_load(plugin_registry_t *reg, const char *path) {
 
 bool plugin_unload(plugin_registry_t *reg, const char *name) {
     for (int i = 0; i < reg->count; i++) {
-        if (!reg->plugins[i].loaded) continue;
-        if (strcmp(reg->plugins[i].name, name) != 0) continue;
+        if (!reg->plugins[i].loaded)
+            continue;
+        if (strcmp(reg->plugins[i].name, name) != 0)
+            continue;
 
         /* Call cleanup if available */
-        plugin_cleanup_fn cleanup = (plugin_cleanup_fn)dlsym(
-            reg->plugins[i].handle, "dsco_plugin_cleanup");
-        if (cleanup) cleanup();
+        plugin_cleanup_fn cleanup =
+            (plugin_cleanup_fn)dlsym(reg->plugins[i].handle, "dsco_plugin_cleanup");
+        if (cleanup)
+            cleanup();
 
         dlclose(reg->plugins[i].handle);
         reg->plugins[i].loaded = false;
@@ -346,9 +358,10 @@ bool plugin_unload(plugin_registry_t *reg, const char *name) {
         /* Rebuild flat tool list */
         reg->extra_tool_count = 0;
         for (int j = 0; j < reg->count; j++) {
-            if (!reg->plugins[j].loaded) continue;
-            for (int k = 0; k < reg->plugins[j].tool_count &&
-                           reg->extra_tool_count < PLUGIN_MAX_TOOLS; k++) {
+            if (!reg->plugins[j].loaded)
+                continue;
+            for (int k = 0;
+                 k < reg->plugins[j].tool_count && reg->extra_tool_count < PLUGIN_MAX_TOOLS; k++) {
                 reg->extra_tools[reg->extra_tool_count++] = reg->plugins[j].tools[k];
             }
         }
@@ -362,8 +375,10 @@ bool plugin_unload(plugin_registry_t *reg, const char *name) {
 static bool is_plugin(const char *name) {
     size_t len = strlen(name);
     /* .dylib on macOS, .so on Linux */
-    if (len > 6 && strcmp(name + len - 6, ".dylib") == 0) return true;
-    if (len > 3 && strcmp(name + len - 3, ".so") == 0) return true;
+    if (len > 6 && strcmp(name + len - 6, ".dylib") == 0)
+        return true;
+    if (len > 3 && strcmp(name + len - 3, ".so") == 0)
+        return true;
     return false;
 }
 
@@ -372,7 +387,8 @@ void plugin_init(plugin_registry_t *reg) {
 
     /* Build plugin directory path */
     const char *home = getenv("HOME");
-    if (!home) return;
+    if (!home)
+        return;
     snprintf(reg->plugin_dir, sizeof(reg->plugin_dir), "%s/%s", home, PLUGIN_DIR_NAME);
 
     /* Create plugin dir if it doesn't exist */
@@ -387,13 +403,16 @@ void plugin_init(plugin_registry_t *reg) {
 
     /* Scan for plugins */
     DIR *dir = opendir(reg->plugin_dir);
-    if (!dir) return;
+    if (!dir)
+        return;
 
     struct dirent *ent;
     while ((ent = readdir(dir)) != NULL) {
-        if (!is_plugin(ent->d_name)) continue;
+        if (!is_plugin(ent->d_name))
+            continue;
         /* Reject entries with directory traversal */
-        if (strstr(ent->d_name, "..") != NULL) continue;
+        if (strstr(ent->d_name, "..") != NULL)
+            continue;
 
         char path[2048];
         snprintf(path, sizeof(path), "%s/%s", reg->plugin_dir, ent->d_name);
@@ -413,11 +432,13 @@ void plugin_reload(plugin_registry_t *reg) {
 
 void plugin_cleanup(plugin_registry_t *reg) {
     for (int i = 0; i < reg->count; i++) {
-        if (!reg->plugins[i].loaded) continue;
+        if (!reg->plugins[i].loaded)
+            continue;
 
-        plugin_cleanup_fn cleanup = (plugin_cleanup_fn)dlsym(
-            reg->plugins[i].handle, "dsco_plugin_cleanup");
-        if (cleanup) cleanup();
+        plugin_cleanup_fn cleanup =
+            (plugin_cleanup_fn)dlsym(reg->plugins[i].handle, "dsco_plugin_cleanup");
+        if (cleanup)
+            cleanup();
 
         dlclose(reg->plugins[i].handle);
         reg->plugins[i].loaded = false;
@@ -455,24 +476,22 @@ void plugin_list(const plugin_registry_t *reg, char *out, size_t out_len) {
         return;
     }
 
-    int n = snprintf(out + pos, out_len - pos,
-                     "Loaded plugins (%d):\n", reg->count);
-    if (n > 0) pos += (size_t)n;
+    int n = snprintf(out + pos, out_len - pos, "Loaded plugins (%d):\n", reg->count);
+    if (n > 0)
+        pos += (size_t)n;
 
     for (int i = 0; i < reg->count; i++) {
-        if (!reg->plugins[i].loaded) continue;
-        n = snprintf(out + pos, out_len - pos,
-                     "  %s v%s — %d tools (%s)\n",
-                     reg->plugins[i].name,
-                     reg->plugins[i].version,
-                     reg->plugins[i].tool_count,
-                     reg->plugins[i].path);
-        if (n > 0) pos += (size_t)n;
+        if (!reg->plugins[i].loaded)
+            continue;
+        n = snprintf(out + pos, out_len - pos, "  %s v%s — %d tools (%s)\n", reg->plugins[i].name,
+                     reg->plugins[i].version, reg->plugins[i].tool_count, reg->plugins[i].path);
+        if (n > 0)
+            pos += (size_t)n;
     }
 
-    n = snprintf(out + pos, out_len - pos,
-                 "\nPlugin directory: %s\n", reg->plugin_dir);
-    if (n > 0) pos += (size_t)n;
+    n = snprintf(out + pos, out_len - pos, "\nPlugin directory: %s\n", reg->plugin_dir);
+    if (n > 0)
+        pos += (size_t)n;
 }
 
 bool plugin_validate_manifest_file(const char *path, char *out, size_t out_len) {
@@ -498,8 +517,8 @@ bool plugin_validate_manifest_file(const char *path, char *out, size_t out_len) 
     }
 
     snprintf(out, out_len,
-             "manifest valid: path=%s name=%s version=%s signer=%s hash=%s capabilities=%d",
-             path, info.name, info.version, info.signer, info.hash, info.capabilities);
+             "manifest valid: path=%s name=%s version=%s signer=%s hash=%s capabilities=%d", path,
+             info.name, info.version, info.signer, info.hash, info.capabilities);
     return true;
 }
 
@@ -529,12 +548,13 @@ bool plugin_validate_lockfile_file(const char *path, char *out, size_t out_len) 
     return true;
 }
 
-bool plugin_validate_manifest_and_lock(const char *manifest_path, const char *lock_path,
-                                       char *out, size_t out_len) {
+bool plugin_validate_manifest_and_lock(const char *manifest_path, const char *lock_path, char *out,
+                                       size_t out_len) {
     char manifest_resolved[1024];
     char lock_resolved[1024];
     if (!manifest_path || !*manifest_path) {
-        plugin_metadata_default_path(PLUGIN_MANIFEST_FILE, manifest_resolved, sizeof(manifest_resolved));
+        plugin_metadata_default_path(PLUGIN_MANIFEST_FILE, manifest_resolved,
+                                     sizeof(manifest_resolved));
         manifest_path = manifest_resolved;
     }
     if (!lock_path || !*lock_path) {
@@ -577,14 +597,14 @@ bool plugin_validate_manifest_and_lock(const char *manifest_path, const char *lo
     free(lock_json);
 
     if (!has_pin) {
-        snprintf(out, out_len,
-                 "plugin validation failed: %s %s (hash=%s) missing from %s",
+        snprintf(out, out_len, "plugin validation failed: %s %s (hash=%s) missing from %s",
                  manifest.name, manifest.version, manifest.hash, lock_path);
         return false;
     }
 
     snprintf(out, out_len,
-             "plugin metadata valid: manifest=%s lock=%s name=%s version=%s hash=%s caps=%d lock_plugins=%d",
+             "plugin metadata valid: manifest=%s lock=%s name=%s version=%s hash=%s caps=%d "
+             "lock_plugins=%d",
              manifest_path, lock_path, manifest.name, manifest.version, manifest.hash,
              manifest.capabilities, lock_plugins);
     return true;

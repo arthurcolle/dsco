@@ -4,6 +4,7 @@
 #include <stdbool.h>
 #include <stddef.h>
 #include <string.h>
+#include <time.h>
 #include "json_util.h"
 
 typedef enum { ROLE_USER, ROLE_ASSISTANT } msg_role_t;
@@ -84,6 +85,11 @@ typedef struct {
     bool               ok;
     bool               context_overflow;  /* provider rejected prompt as too long → reactive compaction can retry */
     double             cost_usd;           /* authoritative per-turn cost reported by provider (OpenRouter usage.cost); 0 = not reported, fall back to token math */
+    time_t             credit_reset_at;    /* provider-supplied epoch seconds when exhausted subscription/rate window reopens */
+    /* OpenRouter/provider metadata — printed after md_flush, never inside stream */
+    char              *actual_model;       /* model actually used (may differ from requested) */
+    char              *generation_id;      /* provider generation/request ID */
+    int                reasoning_tokens;   /* reasoning tokens this turn */
 } stream_result_t;
 
 /* ── Session state (mutable per-session settings) ──────────────────────── */
@@ -144,6 +150,8 @@ typedef struct {
     char   fallback_models[4][128];
     int    fallback_count;
     bool   model_locked;      /* block auto-routing model switches */
+    char   prompt_cache_key[128];       /* provider-native cache routing hint */
+    char   prompt_cache_retention[16];  /* OpenAI/Azure: "in_memory" or "24h" */
     /* Telemetry aggregates */
     double total_ttft_ms;
     double total_stream_ms;
@@ -249,6 +257,11 @@ void conv_drop_rounds(conversation_t *c, api_round_t *rounds,
 /* Fast local estimate: ~4 chars per token, no network round-trip */
 static inline int rough_token_estimate(const char *text) {
     return text ? ((int)strlen(text) + 3) / 4 : 0;
+}
+
+static inline int rough_token_estimate_len(const char *text, int len) {
+    (void)text;
+    return len > 0 ? (len + 3) / 4 : 0;
 }
 
 /* Per-image token cost. The API does NOT bill base64 byte length — it

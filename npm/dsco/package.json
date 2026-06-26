@@ -1,0 +1,60 @@
+{
+  "name": "@distributed.systems/dsco",
+  "version": "1.0.2",
+  "description": "DSCO: local-first agentic CLI runtime with tools, swarms, governance, and a pure C core",
+  "homepage": "https://github.com/arthurcolle/dsco#readme",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/arthurcolle/dsco.git",
+    "directory": "npm/dsco"
+  },
+  "bugs": {
+    "url": "https://github.com/arthurcolle/dsco/issues"
+  },
+  "license": "MIT",
+  "author": "Arthur Colle <arthur@distributed.systems>",
+  "type": "commonjs",
+  "bin": {
+    "dsco": "bin/dsco.js",
+    "dsc": "bin/dsc.js",
+    "dsco-lite": "bin/dsco-lite.js"
+  },
+  "scripts": {
+    "postinstall": "node scripts/install.js",
+    "prepack": "node scripts/prepack.js"
+  },
+  "files": [
+    "bin/",
+    "scripts/",
+    "vendor/.gitkeep",
+    "README.md",
+    "LICENSE"
+  ],
+  "keywords": [
+    "agent",
+    "agents",
+    "ai",
+    "cli",
+    "llm",
+    "runtime",
+    "local-first",
+    "sovereign",
+    "swarm",
+    "multi-agent",
+    "distributed-systems"
+  ],
+  "os": [
+    "darwin",
+    "linux"
+  ],
+  "cpu": [
+    "arm64",
+    "x64"
+  ],
+  "engines": {
+    "node": ">=18"
+  },
+  "publishConfig": {
+    "access": "public"
+  }
+}

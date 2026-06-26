@@ -1,0 +1,139 @@
+{
+  "auth": {
+    "client_side_notes": [],
+    "env_keys": [
+      "DEEPSEEK_API_KEY"
+    ],
+    "headers": [
+      {
+        "name": "Authorization",
+        "value": "Bearer $DEEPSEEK_API_KEY"
+      }
+    ],
+    "scheme": "bearer"
+  },
+  "client_side_mechanics": {
+    "codex_config": {},
+    "headers_optional": [],
+    "headers_required": [],
+    "quirks": [],
+    "sdk_compatibility": [
+      "openai-compatible"
+    ],
+    "unsupported_fields": []
+  },
+  "confidence": 0.82,
+  "display_name": "DeepSeek",
+  "docs": [
+    {
+      "confidence": 0.9,
+      "retrieved": "2026-06-24",
+      "title": "Context Caching",
+      "url": "https://api-docs.deepseek.com/guides/kv_cache"
+    }
+  ],
+  "dsco": {
+    "implemented_features": [
+      "automatic_prompt_cache_policy"
+    ],
+    "missing_features": [
+      "prompt_cache_hit_tokens parse mapped to cache_read_tokens"
+    ],
+    "provider_profile": "deepseek",
+    "risk": "medium",
+    "tests": [
+      "test_prompt_cache_provider_policy_matrix"
+    ]
+  },
+  "last_reviewed": "2026-06-24",
+  "prompt_caching": {
+    "invalidates_on": [
+      "prefix_change"
+    ],
+    "mechanisms": [
+      {
+        "default_policy": "auto",
+        "dsco_support": "implemented",
+        "field": null,
+        "kind": "automatic",
+        "models": [
+          "deepseek-chat",
+          "deepseek-reasoner"
+        ],
+        "name": "disk_context_cache",
+        "scope": "prefix",
+        "usage_fields": [
+          "usage.prompt_cache_hit_tokens",
+          "usage.prompt_cache_miss_tokens"
+        ]
+      }
+    ],
+    "minimum_cacheable_tokens": null,
+    "notes": [
+      "No request parameter required; client must parse hit/miss usage."
+    ],
+    "status": "automatic",
+    "ttl": "provider_managed"
+  },
+  "provider": "deepseek",
+  "reasoning": {
+    "aliases": {},
+    "efforts": [],
+    "field": null,
+    "supported": false,
+    "unsupported_values_rejected": false
+  },
+  "streaming": {
+    "idempotent_retries": true,
+    "idle_timeout_ms_recommended": 120000,
+    "known_failure_modes": [
+      "429_rate_limit",
+      "5xx_overload",
+      "stream_idle"
+    ],
+    "request_max_retries": 2,
+    "stream_max_retries": 2
+  },
+  "usage_accounting": {
+    "cached_tokens": [
+      "usage.prompt_cache_hit_tokens"
+    ],
+    "input_tokens": [
+      "usage.prompt_tokens"
+    ],
+    "output_tokens": [
+      "usage.completion_tokens"
+    ],
+    "provider_specific": [
+      "usage.prompt_cache_miss_tokens"
+    ],
+    "reasoning_tokens": [
+      "usage.completion_tokens_details.reasoning_tokens"
+    ]
+  },
+  "wire_apis": [
+    {
+      "base_url": "https://api.deepseek.com",
+      "endpoint": "/chat/completions",
+      "modalities": {
+        "input": [
+          "text"
+        ],
+        "output": [
+          "text"
+        ]
+      },
+      "name": "chat_completions",
+      "status": "preferred",
+      "streaming": {
+        "format": "sse",
+        "supported": true
+      },
+      "tools": {
+        "parallel_tool_calls": false,
+        "strict_schema": false,
+        "supported": true
+      }
+    }
+  ]
+}

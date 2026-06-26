@@ -6,8 +6,9 @@
 #include <string.h>
 #include <stddef.h>
 #include <ctype.h>
+#include "env_config.h"
 
-#define DSCO_VERSION "1.0.0"
+#define DSCO_VERSION "1.0.2"
 
 /* Build info — set via Makefile CFLAGS */
 #ifndef BUILD_DATE
@@ -43,12 +44,15 @@
 extern int g_cheap_mode;
 
 /* API defaults */
-#define DEFAULT_MODEL       "z-ai/glm-5.2"
+#define DEFAULT_MODEL       "fugu"
 #define API_URL_ANTHROPIC   "https://api.anthropic.com/v1/messages"
 #define API_URL_COUNT_TOKENS "https://api.anthropic.com/v1/messages/count_tokens"
 #define ANTHROPIC_VERSION   "2023-06-01"
 #define ANTHROPIC_BETAS     "interleaved-thinking-2025-05-14,code-execution-2025-05-22,advanced-tool-use-2025-11-20"
 #define MAX_TOKENS          16384
+static inline int dsco_max_tokens(void) {
+    return dsco_env_int("DSCO_MAX_TOKENS", MAX_TOKENS, 1, 100000);
+}
 #define TOOLMGMT_API_URL_DEFAULT "https://tools.distributed.systems"
 
 /* Tool limits */
@@ -65,12 +69,7 @@ extern int g_cheap_mode;
    via DSCO_MAX_AGENT_TURNS. */
 #define MAX_AGENT_TURNS     40
 static inline int dsco_max_agent_turns(void) {
-    const char *e = getenv("DSCO_MAX_AGENT_TURNS");
-    if (e && e[0]) {
-        int v = atoi(e);
-        if (v >= 1 && v <= 999999) return v;
-    }
-    return MAX_AGENT_TURNS;
+    return dsco_env_int("DSCO_MAX_AGENT_TURNS", MAX_AGENT_TURNS, 1, 999999);
 }
 
 /* Absolute runaway backstop. The loop never relies on this in normal operation
@@ -79,12 +78,7 @@ static inline int dsco_max_agent_turns(void) {
    DSCO_HARD_TURN_CEILING. */
 #define HARD_TURN_CEILING   100000
 static inline int dsco_hard_turn_ceiling(void) {
-    const char *e = getenv("DSCO_HARD_TURN_CEILING");
-    if (e && e[0]) {
-        int v = atoi(e);
-        if (v >= 1) return v;
-    }
-    return HARD_TURN_CEILING;
+    return dsco_env_int("DSCO_HARD_TURN_CEILING", HARD_TURN_CEILING, 1, 100000000);
 }
 
 /* Context window / token budget */
@@ -132,14 +126,21 @@ typedef struct {
  * OpenRouter /models response, or NULL if absent / not yet loaded. Lets
  * model_lookup() resolve any real slug — no hardcoded alias required. */
 const model_info_t *openrouter_cache_lookup(const char *slug);
+const model_info_t *codex_cache_lookup(const char *name);
 
 static const model_info_t MODEL_REGISTRY[] = {
     /* ── Anthropic (native API) ──────────────────────────────────────────── */
-    { "opus",         "claude-opus-4-7",             200000, 32000,  15.0,  75.0,  1.50, 18.75, 1 },
+    { "fable",        "claude-fable-5",              500000, 64000,  20.0, 100.0,  2.00, 25.00, 1 },
+    { "fable5",       "claude-fable-5",              500000, 64000,  20.0, 100.0,  2.00, 25.00, 1 },
+    { "opus",         "claude-opus-4-8",             200000, 64000,  15.0,  75.0,  1.50, 18.75, 1 },
+    { "opus48",       "claude-opus-4-8",             200000, 64000,  15.0,  75.0,  1.50, 18.75, 1 },
+    { "opus47",       "claude-opus-4-7",             200000, 32000,  15.0,  75.0,  1.50, 18.75, 1 },
     { "opus46",       "claude-opus-4-6",             200000, 32000,  15.0,  75.0,  1.50, 18.75, 1 },
     { "sonnet",       "claude-sonnet-4-6",           200000, 16000,   3.0,  15.0,  0.30,  3.75, 1 },
     { "haiku",        "claude-haiku-4-5-20251001",   200000,  8192,   0.80,  4.0,  0.08,  1.00, 0 },
     /* ── Anthropic (OpenRouter IDs — for cross-provider routing) ─────── */
+    { "or-fable",     "anthropic/claude-fable-5",     1000000, 64000, 20.0, 100.0,  0, 0, 1 },
+    { "or-opus48",    "anthropic/claude-opus-4.8",    1000000, 64000, 15.0,  75.0,  0, 0, 1 },
     { "or-opus47",    "anthropic/claude-opus-4.7",    1000000, 32000, 15.0,  75.0,  0, 0, 1 },
     { "or-opus46",    "anthropic/claude-opus-4.6",    1000000, 32000,  5.0,  25.0,  0, 0, 1 },
     { "or-sonnet46",  "anthropic/claude-sonnet-4.6",  1000000, 16000,  3.0,  15.0,  0, 0, 1 },
@@ -151,6 +152,8 @@ static const model_info_t MODEL_REGISTRY[] = {
     { "gpt54-mini",   "openai/gpt-5.4-mini",           400000, 32768,  0.75,  4.50, 0, 0, 0 },
     { "gpt54-nano",   "openai/gpt-5.4-nano",           400000, 32768,  0.20,  1.25, 0, 0, 0 },
     { "gpt55-pro",    "openai/gpt-5.5-pro",            400000, 32768,  6.0,  24.0,  0, 0, 1 },
+    { "codex",        "openai/gpt-5.5",                272000, 32768,  0.0,   0.0,  0, 0, 1 },
+    { "gpt-5.5",      "openai/gpt-5.5",                272000, 32768,  0.0,   0.0,  0, 0, 1 },
     { "gpt55",        "openai/gpt-5.5",                400000, 32768,  1.75, 14.0,  0, 0, 1 },
     { "gpt53-codex",      "openai/gpt-5.3-codex",           400000, 32768,  1.75, 14.0,  0, 0, 1 },
     { "gpt52-pro",        "openai/gpt-5.2-pro",              400000, 32768, 21.0, 168.0,  0, 0, 1 },
@@ -165,6 +168,9 @@ static const model_info_t MODEL_REGISTRY[] = {
     { "gpt5-codex",   "openai/gpt-5-codex",             400000, 32768,  1.25, 10.0,  0, 0, 1 },
     { "gpt5-mini",    "openai/gpt-5-mini",              400000, 32768,  0.25,  2.0,  0, 0, 0 },
     { "gpt5-nano",    "openai/gpt-5-nano",              400000, 32768,  0.05,  0.40, 0, 0, 0 },
+    /* ── Cursor Composer (agentic coding) ────────────────────────────── */
+    { "composer",     "cursor/composer-2.5",            256000, 32768,  1.25,  6.0,  0, 0, 1 },
+    { "composer2",    "cursor/composer-2",              256000, 32768,  1.0,   5.0,  0, 0, 1 },
     /* ── OpenAI — GPT-4.x / 4o family ───────────────────────────────── */
     { "gpt41",        "openai/gpt-4.1",               1047576, 32768,  2.0,   8.0,  0, 0, 0 },
     { "gpt41-mini",   "openai/gpt-4.1-mini",          1047576, 32768,  0.40,  1.60, 0, 0, 0 },
@@ -182,6 +188,7 @@ static const model_info_t MODEL_REGISTRY[] = {
     { "gpt-oss",      "openai/gpt-oss-120b",           131072, 32768,  0.04,  0.19, 0, 0, 0 },
     /* ── Google Gemini ───────────────────────────────────────────────── */
     { "gem31-pro",    "google/gemini-3.1-pro-preview", 1048576, 32768,  2.0,  12.0,  0, 0, 1 },
+    { "gem31-dt",     "google/gemini-3.1-deep-think",  1048576, 65536,  4.0,  24.0,  0, 0, 1 },
     { "gem31-flash",  "google/gemini-3.1-flash-lite-preview", 1048576, 32768, 0.25, 1.50, 0, 0, 0 },
     { "gem3-pro",     "google/gemini-3-pro-preview",   1048576, 32768,  2.0,  12.0,  0, 0, 1 },
     { "gem3-flash",   "google/gemini-3-flash-preview", 1048576, 32768,  0.50,  3.0,  0, 0, 0 },
@@ -228,6 +235,8 @@ static const model_info_t MODEL_REGISTRY[] = {
     { "glm47",        "z-ai/glm-4.7",                  202752, 65536,  0.38,  1.98, 0, 0, 1 },
     { "glm47-flash",  "z-ai/glm-4.7-flash",            202752, 65536,  0.06,  0.40, 0, 0, 0 },
     /* ── DeepSeek ────────────────────────────────────────────────────── */
+    { "ds-v4",        "deepseek/deepseek-v4",          262144, 32768,  0.27,  0.42, 0, 0, 0 },
+    { "ds-r2",        "deepseek/deepseek-r2",          262144, 32768,  0.50,  2.18, 0, 0, 1 },
     { "ds-v32",       "deepseek/deepseek-v3.2",        163840, 32768,  0.26,  0.38, 0, 0, 0 },
     { "ds-v31",       "deepseek/deepseek-v3.1-terminus", 163840, 32768, 0.21, 0.79, 0, 0, 0 },
     { "ds-chat",      "deepseek/deepseek-chat",         163840, 32768,  0.32,  0.89, 0, 0, 0 },
@@ -287,6 +296,15 @@ static const model_info_t MODEL_REGISTRY[] = {
     /* ── Perplexity ──────────────────────────────────────────────────── */
     { "pplx",         "sonar-pro",                       200000,  8192,  3.0,  15.0,  0, 0, 0 },
     { "pplx-small",   "sonar",                           128000,  8192,  1.0,   1.0,  0, 0, 0 },
+    /* ── Sakana Fugu (native endpoint) ────────────────────────────────
+     * Treat subscription-backed Fugu usage as zero marginal cost for routing,
+     * local estimates, and budget gates. */
+    { "fugu",         "fugu",                           1000000, 32768,  0.0,   0.0,  0.0, 0, 1 },
+    { "fugu-ultra",   "fugu-ultra",                     1000000, 32768,  0.0,   0.0,  0.0, 0, 1 },
+    { "fugu-ultra-20260615", "fugu-ultra-20260615",     1000000, 32768,  0.0,   0.0,  0.0, 0, 1 },
+    { "sakana/fugu",  "sakana/fugu",                    1000000, 32768,  0.0,   0.0,  0.0, 0, 1 },
+    { "sakana/fugu-ultra", "sakana/fugu-ultra",         1000000, 32768,  0.0,   0.0,  0.0, 0, 1 },
+    { "sakana/fugu-ultra-20260615", "sakana/fugu-ultra-20260615", 1000000, 32768, 0.0, 0.0, 0.0, 0, 1 },
     { NULL, NULL, 0, 0, 0, 0, 0, 0, 0 }
 };
 
@@ -296,7 +314,11 @@ static inline void model_normalize_key(const char *src, char *dst, size_t dst_le
     if (!src || !*src) return;
 
     const char *p = src;
+    if (strncmp(p, "openrouter/", 11) == 0 || strncmp(p, "openrouter:", 11) == 0)
+        p += 11;
     const char *slash = strchr(src, '/');
+    if (slash && slash < p)
+        slash = strchr(p, '/');
     if (slash && slash[1] != '\0') p = slash + 1;
 
     size_t out = 0;
@@ -335,6 +357,42 @@ static inline const model_info_t *model_lookup(const char *name) {
             return &MODEL_REGISTRY[i];
     }
 
+    /* Pass 2.5: dated model slugs (e.g. "z-ai/glm-5.2-20260616") — strip a
+     * trailing "-YYYYMMDD" date suffix and match the base model. Without this a
+     * dated slug misses the table and falls back to the 2M default window, which
+     * makes auto-compaction never trigger (context grows unbounded) and pricing
+     * wrong. */
+    {
+        size_t nl = strlen(name);
+        if (nl > 9 && name[nl - 9] == '-') {
+            int all_digits = 1;
+            for (size_t i = nl - 8; i < nl; i++)
+                if (name[i] < '0' || name[i] > '9') { all_digits = 0; break; }
+            if (all_digits) {
+                char base[256];
+                size_t blen = (nl - 9 < sizeof(base)) ? nl - 9 : sizeof(base) - 1;
+                memcpy(base, name, blen);
+                base[blen] = '\0';
+                char base_norm[256];
+                model_normalize_key(base, base_norm, sizeof(base_norm));
+                for (int i = 0; MODEL_REGISTRY[i].alias; i++) {
+                    char alias_norm[256], model_norm[256];
+                    model_normalize_key(MODEL_REGISTRY[i].alias, alias_norm, sizeof(alias_norm));
+                    model_normalize_key(MODEL_REGISTRY[i].model_id, model_norm, sizeof(model_norm));
+                    if (strcmp(base, MODEL_REGISTRY[i].alias) == 0 ||
+                        strcmp(base, MODEL_REGISTRY[i].model_id) == 0 ||
+                        (base_norm[0] && (strcmp(base_norm, alias_norm) == 0 ||
+                                          strcmp(base_norm, model_norm) == 0)))
+                        return &MODEL_REGISTRY[i];
+                }
+            }
+        }
+    }
+
+    const model_info_t *codex_model = codex_cache_lookup(name);
+    if (codex_model)
+        return codex_model;
+
     /* Pass 3: runtime OpenRouter catalog — any real slug resolves with live
      * context/pricing once the background fetch has populated the cache. */
     return openrouter_cache_lookup(name);
@@ -368,7 +426,10 @@ static inline int model_context_window(const char *name) {
     "- HIERARCHICAL SWARMS: Sub-agent hierarchies (depth 6). " \
     "topology_run for fanout/fanin, debate, competition.\n" \
     "- CAPABILITY MATCHING: EXPERT/PROFICIENT/COMPETENT/NOVICE. " \
-    "Self-assess and delegate when outmatched.\n\n" \
+    "Self-assess and delegate when outmatched.\n" \
+    "- AVIAN MECHANISMS: Use avian nesting to create bounded workspaces, brooding to " \
+    "incubate fragile candidates, fledging to promote mature work, roosting for cooldown, " \
+    "and molting to refresh stale context.\n\n" \
     "TALONS (Competitive Execution — the ability to WIN):\n" \
     "- GOAL PURSUIT: Track goals through hunt states: nascent -> stalking -> " \
     "striking -> gripping -> captured (win) or escaped (fail). " \
@@ -392,6 +453,7 @@ static inline int model_context_window(const char *name) {
     "math, AST, plugins, market data, prediction markets, soul evolution.\n" \
     "The TOOL CATALOG below lists every tool with its signature (param* = required).\n" \
     "Call any tool directly — the catalog has all the parameter info you need.\n" \
+    "DYNAMIC CLARIFICATION: When you need user input to proceed, call AskUserQuestion instead of guessing or emitting a plain-text questionnaire. Use stable session_id values; reopen the same session_id for follow-up questions so prior answers are preserved. On status=chat, answer the user's concern and then reopen/continue the dialog if still needed. On status=no_tty, ask the same questions plainly in chat.\n" \
     "MULTI-EXECUTOR SWARMS: dsco (fork self), claude (Claude Code CLI), codex (OpenAI Codex).\n\n" \
     "TOKEN EFFICIENCY:\n" \
     "- Issue 3+ parallel tool calls per step when gathering information (36% cheaper, 41% faster).\n" \
@@ -413,7 +475,7 @@ static inline int model_context_window(const char *name) {
     "  load_tools    — page in tools you need (they become callable immediately)\n" \
     "  self_exit     — end session\n\n" \
     "WORKFLOW: For any task beyond bash/python, call discover_tools to find " \
-    "relevant tools, then load_tools to activate them. Loaded tools persist " \
+    "relevant tools, then load_tools to activate them. Use AskUserQuestion for needed user clarification/follow-up instead of guessing. Loaded tools persist " \
     "for the session. Categories: file_io, git, network, shell, code, crypto, " \
     "swarm, ast, pipeline, math, search, general, finance, prediction, memory.\n\n" \
     "EFFICIENCY:\n" \

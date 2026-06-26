@@ -82,4 +82,29 @@ bool jwt_decode(const char *token, char *header, size_t h_len,
 
 bool crypto_ct_equal(const uint8_t *a, const uint8_t *b, size_t len);
 
+/* ── FNV-1a 32-bit hash ──────────────────────────────────────────────────
+ * Non-cryptographic hash for deterministic keying (pets, avatars, VM
+ * dispatch, project grid). Consolidated from 5 duplicate copies across
+ * pets.c, avatar.c, project_grid.c, vm.c, tools.c. */
+
+static inline uint32_t fnv1a_32(const char *s) {
+    uint32_t h = 2166136261u;
+    if (!s) return h;
+    for (; *s; s++) { h ^= (unsigned char)*s; h *= 16777619u; }
+    return h;
+}
+
+/* ── Mulberry32 PRNG ───────────────────────────────────────────────────────
+ * Deterministic PRNG seeded from fnv1a_32(). Used by pets.c and avatar.c
+ * for stable procedural generation. Consolidated here for cross-subsystem
+ * reuse (e.g. tournament seeding, pipeline sampling). */
+
+static inline double mulberry32(uint32_t *a) {
+    *a += 0x6D2B79F5u;
+    uint32_t t = *a;
+    t = (t ^ (t >> 15)) * (t | 1u);
+    t ^= t + (t ^ (t >> 7)) * (t | 61u);
+    return (double)(t ^ (t >> 14)) / 4294967296.0;
+}
+
 #endif

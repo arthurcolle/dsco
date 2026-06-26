@@ -3,39 +3,55 @@ name: docs
 on:
   pull_request:
     paths:
-      - 'README.md'
-      - 'CHANGELOG.md'
-      - 'docs/**'
-      - '*.h'
-      - 'tools.c'
-      - 'scripts/gen_*.sh'
-      - '.github/workflows/docs.yml'
+      - README.md
+      - CHANGELOG.md
+      - docs/**
+      - include/**/*.h
+      - src/**/*.c
+      - scripts/gen_*.sh
+      - .github/workflows/docs.yml
   push:
-    branches: [ main, master ]
+    branches: [main, master]
     paths:
-      - 'README.md'
-      - 'CHANGELOG.md'
-      - 'docs/**'
-      - '*.h'
-      - 'tools.c'
-      - 'scripts/gen_*.sh'
-      - '.github/workflows/docs.yml'
+      - README.md
+      - CHANGELOG.md
+      - docs/**
+      - include/**/*.h
+      - src/**/*.c
+      - scripts/gen_*.sh
+      - .github/workflows/docs.yml
+
+permissions:
+  contents: read
+
+concurrency:
+  group: docs-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+defaults:
+  run:
+    shell: bash
 
 jobs:
   generated-docs-check:
-    runs-on: ubuntu-latest
+    name: generated docs check
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
-      - name: Check generated docs are up to date
-        run: |
-          chmod +x scripts/gen_api_reference.sh scripts/gen_tool_catalog.sh
-          ./scripts/gen_api_reference.sh --check
-          ./scripts/gen_tool_catalog.sh --check
+
+      - uses: ./.github/actions/setup-native
+
+      - name: Check generated docs
+        run: make docs-check
 
   markdown-lint:
-    runs-on: ubuntu-latest
+    name: markdown lint
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@v4
+
       - name: markdownlint
         uses: DavidAnson/markdownlint-cli2-action@v17
         with:
@@ -45,9 +61,12 @@ jobs:
             docs/**/*.md
 
   links-check:
-    runs-on: ubuntu-latest
+    name: link check
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@v4
+
       - name: Link check
         uses: lycheeverse/lychee-action@v2
         with:
@@ -55,7 +74,9 @@ jobs:
             --verbose
             --no-progress
             --exclude-mail
-            --exclude '^http://127\\.0\\.0\\.1'
-            --exclude '^https://127\\.0\\.0\\.1'
+            --exclude '^http://127\.0\.0\.1'
+            --exclude '^https://127\.0\.0\.1'
+            --exclude '^http://localhost'
+            --exclude '^https://localhost'
             README.md CHANGELOG.md docs/**/*.md
           fail: true

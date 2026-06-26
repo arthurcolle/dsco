@@ -2,6 +2,7 @@
 #define DSCO_TOOLS_H
 
 #include <stdbool.h>
+#include "env_config.h"
 #include <stddef.h>
 #include <pthread.h>
 #include "swarm.h"
@@ -16,6 +17,7 @@ typedef struct {
     bool core;           /* true = always pageable; false = only via load_tools */
     bool is_read_only;   /* true = no side effects (safe for streaming exec) */
     bool is_concurrent;  /* true = no shared state (safe for parallel exec) */
+    bool is_interactive; /* true = owns the terminal/user turn; no cache/spinner/parallel */
 } tool_def_t;
 
 typedef enum {
@@ -44,6 +46,10 @@ void             tools_set_context_window(int tokens);
 int              tools_context_window(void);
 /* Pass current token usage so inline budget is based on remaining context */
 void             tools_set_context_usage(int input_tokens, int output_tokens);
+/* Pass actual serialized tool-schema overhead from the latest request. */
+void             tools_set_tool_schema_usage(int active_tools, int schema_tokens);
+/* Toggle inline tool-result truncation. Off = full output (human/raw dumps). */
+void             tools_set_inline_truncation(bool enabled);
 void             tools_context_turn_begin(void);
 swarm_t         *tools_swarm_instance(void);
 const tool_def_t *tools_get_all(int *count);
@@ -65,6 +71,7 @@ char            *tools_normalize_input(const char *name, const char *input_json)
  * ({status, answers:[...]}). Returns true on success. */
 bool             dsco_run_ask_dialog(const char *spec_json,
                                      char *result, size_t result_len);
+bool             dsco_tool_is_interactive(const char *name);
 
 /* ── Live agent loop constructs ──────────────────────────────────────── */
 
@@ -125,11 +132,11 @@ void  tools_register_external(const char *name, const char *description,
                                 external_tool_cb cb, void *ctx);
 void  tools_reset_external(void);
 
-#define MAX_EXTERNAL_TOOLS 1024
+#define MAX_EXTERNAL_TOOLS 4096
 
 typedef struct {
-    char   name[128];
-    char   description[512];
+    char   name[256];
+    char   description[1024];
     char  *input_schema_json;
     external_tool_cb cb;
     void  *ctx;
@@ -184,6 +191,13 @@ extern volatile int g_tool_timed_out;
 #define TOOL_DEFAULT_TIMEOUT_S  30
 #define TOOL_GRACE_PERIOD_S     5
 
+static inline int dsco_tool_default_timeout_s(void) {
+    return dsco_env_int("DSCO_TOOL_DEFAULT_TIMEOUT", TOOL_DEFAULT_TIMEOUT_S, 1, 7200);
+}
+static inline int dsco_tool_grace_period_s(void) {
+    return dsco_env_int("DSCO_TOOL_GRACE_PERIOD_S", TOOL_GRACE_PERIOD_S, 0, 300);
+}
+
 typedef struct {
     const char *name;
     int         timeout_s;
@@ -226,7 +240,7 @@ typedef enum {
 
 typedef struct {
     char          domain[64];
-    char          tools[HINT_MAX_TOOLS][64];
+    char          tools[HINT_MAX_TOOLS][128];
     int           tool_count;
     int           groups[HINT_MAX_GROUPS];
     int           group_count;
@@ -250,6 +264,14 @@ void  tools_cooc_update(const char **tool_names, int n);
 void  tools_cooc_persist(void);
 void  tools_cooc_load(void);
 void  tools_cooc_free(void);
+
+typedef struct {
+    char from[64];
+    char to[64];
+    unsigned count;
+} tools_cooc_edge_t;
+
+int tools_cooc_top_edges(tools_cooc_edge_t *out, int max);
 
 /* Tiered retrieval result */
 typedef struct {
@@ -344,6 +366,7 @@ typedef bool (*tool_profile_filter_fn_t)(const char *tool_name, const char *grou
 
 void tools_set_profile_filter(tool_profile_filter_fn_t fn);
 void tools_clear_profile_filter(void);
+bool tools_is_parent_specified_core_tool(const char *tool_name);
 
 /* ── Safe subprocess exec ────────────────────────────────────────────── */
 
