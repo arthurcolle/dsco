@@ -780,19 +780,69 @@ static void html_escape(jbuf_t *b, const char *s) {
     }
 }
 
-char *chronicle_build_activity_html(int limit, const char *session_filter) {
-    char *json = chronicle_build_activity_json(limit, session_filter);
-    jbuf_t b; jbuf_init(&b, 16384);
-    jbuf_append(&b, "<!doctype html><html><head><meta charset='utf-8'><meta name='viewport' content='width=device-width,initial-scale=1'>"
-                   "<title>DSCO Chronicle</title><style>body{font-family:ui-sans-serif,system-ui;margin:0;background:#090d14;color:#e8eef9}"
-                   "header{padding:20px 28px;background:#101827;border-bottom:1px solid #26344d;position:sticky;top:0}main{padding:20px 28px}.card{background:#111a2a;border:1px solid #26344d;border-radius:12px;padding:14px;margin:12px 0}.chip{display:inline-block;background:#203a63;color:#9dccff;border-radius:999px;padding:2px 8px;font-size:12px}.muted{color:#91a0b8;font-size:13px}pre{white-space:pre-wrap;word-break:break-word;background:#070a10;border:1px solid #26344d;border-radius:8px;padding:10px;max-height:280px;overflow:auto}a{color:#8cc7ff}input,button{padding:8px;border-radius:8px;border:1px solid #344761;background:#0b111c;color:#e8eef9}button{background:#1e5aa8}</style></head><body>");
-    jbuf_append(&b, "<header><h1>DSCO Chronicle</h1><div class='muted'>full activity recorder · local store: "); html_escape(&b, chronicle_root()); jbuf_append(&b, "</div>");
-    jbuf_append(&b, "<form><input name='session' placeholder='session id' value='"); html_escape(&b, session_filter ? session_filter : ""); jbuf_append(&b, "'> <button>Filter</button> <a href='/chronicle.json'>json</a></form></header><main>");
-    jbuf_append(&b, "<section class='card'><h2>Raw activity JSON</h2><p class='muted'>First product slice: complete event graph + blob hashes. UI projections come next.</p><pre>");
-    html_escape(&b, json);
-    jbuf_append(&b, "</pre></section></main></body></html>");
-    free(json);
+char *chronicle_build_activity_html_ex(int limit, const char *session_filter,
+                                       const char *type_filter,
+                                       const char *search_filter) {
+    (void)type_filter;
+    (void)search_filter;
+    if (limit <= 0 || limit > 5000)
+        limit = 1000;
+
+    jbuf_t b;
+    jbuf_init(&b, 32768);
+    jbuf_append(&b,
+                "<!doctype html><html><head><meta charset='utf-8'>"
+                "<meta name='viewport' content='width=device-width,initial-scale=1'>"
+                "<title>DSCO Chronicle</title>"
+                "<style>"
+                ":root{--bg:#05070d;--panel:#0b1220;--panel2:#0f1a2d;--line:#21314d;--text:#e8f1ff;--muted:#8da2c0;--accent:#7dd3fc;--good:#34d399;--warn:#fbbf24;--bad:#fb7185;--violet:#a78bfa;--blue:#60a5fa}"
+                "*{box-sizing:border-box}body{margin:0;background:radial-gradient(circle at 20% 0%,#14213f 0,#05070d 34%,#03050a 100%);color:var(--text);font-family:ui-sans-serif,system-ui,-apple-system,Segoe UI,Helvetica,Arial;min-height:100vh}"
+                "header{position:sticky;top:0;z-index:10;padding:18px 24px;border-bottom:1px solid rgba(125,211,252,.22);background:rgba(5,7,13,.82);backdrop-filter:blur(16px)}"
+                ".top{display:flex;align-items:center;justify-content:space-between;gap:16px;flex-wrap:wrap}.brand{display:flex;align-items:center;gap:12px}.orb{width:42px;height:42px;border-radius:50%;background:conic-gradient(from 180deg,var(--accent),var(--violet),var(--good),var(--accent));box-shadow:0 0 34px rgba(125,211,252,.45)}"
+                "h1{font-size:24px;margin:0;letter-spacing:.02em}.sub{color:var(--muted);font-size:12px;margin-top:3px}.pill{display:inline-flex;align-items:center;gap:6px;padding:6px 10px;border:1px solid var(--line);background:rgba(15,26,45,.78);border-radius:999px;color:#b9c8df;font-size:12px}.dot{width:8px;height:8px;border-radius:50%;background:var(--good);box-shadow:0 0 18px var(--good)}"
+                ".controls{display:grid;grid-template-columns:2fr 1fr 1fr auto auto;gap:10px;margin-top:16px}.controls input,.controls select,.controls button{border:1px solid var(--line);background:rgba(11,18,32,.92);color:var(--text);border-radius:12px;padding:10px 12px}.controls button{cursor:pointer;background:linear-gradient(135deg,#155e75,#3730a3);font-weight:700}.controls button:hover{filter:brightness(1.14)}"
+                "main{padding:22px 24px 50px;display:grid;grid-template-columns:minmax(0,1fr) 360px;gap:18px}.stats{display:grid;grid-template-columns:repeat(5,minmax(0,1fr));gap:12px;margin-bottom:16px}.stat{background:linear-gradient(180deg,rgba(15,26,45,.92),rgba(11,18,32,.82));border:1px solid var(--line);border-radius:18px;padding:14px;box-shadow:0 10px 30px rgba(0,0,0,.22)}.stat .k{font-size:11px;color:var(--muted);text-transform:uppercase;letter-spacing:.08em}.stat .v{font-size:28px;font-weight:800;margin-top:6px}.stat.good .v{color:var(--good)}.stat.warn .v{color:var(--warn)}.stat.bad .v{color:var(--bad)}"
+                ".rail{position:sticky;top:154px;align-self:start;background:rgba(11,18,32,.82);border:1px solid var(--line);border-radius:18px;padding:14px;max-height:calc(100vh - 174px);overflow:auto}.rail h3{margin:4px 0 10px}.bar{height:8px;background:#0a1020;border-radius:999px;overflow:hidden;margin:8px 0 12px}.bar>i{display:block;height:100%;background:linear-gradient(90deg,var(--accent),var(--violet));width:0%}.legend{display:flex;justify-content:space-between;gap:10px;color:var(--muted);font-size:12px;margin:6px 0}.typebtn{display:flex;width:100%;align-items:center;justify-content:space-between;border:1px solid var(--line);background:#0b1426;color:var(--text);border-radius:12px;padding:8px 10px;margin:7px 0;cursor:pointer}.typebtn.active{border-color:var(--accent);box-shadow:0 0 0 1px rgba(125,211,252,.28) inset}.mini{font-size:11px;color:var(--muted)}"
+                ".timeline{position:relative}.timeline:before{content:'';position:absolute;left:18px;top:0;bottom:0;width:2px;background:linear-gradient(var(--accent),rgba(167,139,250,.18))}.event{position:relative;margin:0 0 12px 42px;background:rgba(11,18,32,.86);border:1px solid var(--line);border-radius:18px;padding:13px 14px;box-shadow:0 10px 24px rgba(0,0,0,.20)}.event:before{content:'';position:absolute;left:-31px;top:18px;width:12px;height:12px;border-radius:50%;background:var(--accent);box-shadow:0 0 18px var(--accent)}"
+                ".event.tool:before{background:var(--good);box-shadow:0 0 18px var(--good)}.event.llm:before{background:var(--violet);box-shadow:0 0 18px var(--violet)}.event.err:before{background:var(--bad);box-shadow:0 0 18px var(--bad)}"
+                ".evhead{display:flex;align-items:flex-start;justify-content:space-between;gap:12px}.etype{font-weight:800}.meta{color:var(--muted);font-size:12px;margin-top:4px}.chips{display:flex;gap:6px;flex-wrap:wrap;margin-top:9px}.chip{font-size:11px;border:1px solid var(--line);border-radius:999px;padding:3px 7px;color:#c5d4eb;background:#101b2f}.hash{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;color:#9dccff}.payload{display:none;margin-top:10px;white-space:pre-wrap;word-break:break-word;background:#050914;border:1px solid #1b2943;border-radius:12px;padding:10px;font:12px ui-monospace,SFMono-Regular,Menlo,monospace;color:#dbeafe;max-height:360px;overflow:auto}.event.open .payload{display:block}.actions{display:flex;gap:8px;flex-wrap:wrap}.ghost{background:transparent;border:1px solid var(--line);color:#bdd0ea;border-radius:10px;padding:6px 8px;cursor:pointer}.ghost:hover{border-color:var(--accent);color:white}"
+                ".empty{border:1px dashed var(--line);border-radius:18px;padding:40px;text-align:center;color:var(--muted);background:rgba(11,18,32,.55)}a{color:var(--accent);text-decoration:none}@media(max-width:980px){main{grid-template-columns:1fr}.rail{position:relative;top:auto}.stats{grid-template-columns:repeat(2,1fr)}.controls{grid-template-columns:1fr}.timeline:before{display:none}.event{margin-left:0}.event:before{display:none}}"
+                "</style></head><body><header><div class='top'><div class='brand'><div class='orb'></div><div><h1>DSCO Chronicle</h1><div class='sub'>local-first provenance · blob-backed payloads · cost, replay, forensic timeline</div></div></div><div class='pill'><span class='dot'></span><span id='live'>live</span></div></div>");
+    jbuf_append(&b,
+                "<div class='controls'><input id='q' placeholder='Search event type, tool, model, hash, payload…' autofocus>"
+                "<select id='type'><option value=''>all event types</option></select>"
+                "<input id='session' placeholder='session filter' value='");
+    html_escape(&b, session_filter ? session_filter : "");
+    jbuf_append(&b,
+                "'><button id='refresh'>Refresh</button><button id='auto'>Auto: on</button></div>"
+                 "<div class='sub'>store: ");
+    html_escape(&b, chronicle_root());
+    jbuf_appendf(&b,
+                 " · <a href='/chronicle.json'>json</a> · <a href='/'>baseline</a></div></header>"
+                 "<main><section><div class='stats' id='stats'></div><div class='timeline' id='timeline'><div class='empty'>Loading Chronicle…</div></div></section>"
+                 "<aside class='rail'><h3>Signal</h3><div id='signal'></div><h3>Event Types</h3><div id='types'></div><h3>Blob Links</h3><div class='mini' id='blobs'>No blobs selected yet.</div></aside></main>"
+                 "<script>"
+                 "const LIMIT=%d;let raw=[],filtered=[],auto=true,lastCount=0;"
+                 "const $=id=>document.getElementById(id);"
+                 "const esc=s=>String(s||'').replace(/[&<>\"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','\"':'&quot;',\"'\":'&#39;'}[c]));"
+                 "const cls=e=>e.event_type.includes('tool')?'tool':e.event_type.includes('llm')?'llm':JSON.stringify(e.payload).includes('error')?'err':'';"
+                 "const short=s=>s?String(s).slice(0,12)+'…':'';"
+                 "function walk(o,a=[]){if(!o||typeof o!=='object')return a;for(const[k,v]of Object.entries(o)){if(k.includes('sha256')&&typeof v==='string'&&v.length===64)a.push(v);else if(typeof v==='object')walk(v,a)}return a}"
+                 "async function load(){const sess=$('session').value.trim();const url='/chronicle.json'+(sess?'?session='+encodeURIComponent(sess):'');$('live').textContent='loading';const r=await fetch(url,{cache:'no-store'});const j=await r.json();raw=j.events||[];$('live').textContent='live · '+raw.length;render()}"
+                 "function render(){const q=$('q').value.toLowerCase();const t=$('type').value;filtered=raw.filter(e=>(!t||e.event_type===t)&&(!q||JSON.stringify(e).toLowerCase().includes(q)));renderStats();renderTypes();renderTimeline();}"
+                 "function renderStats(){const llm=raw.filter(e=>e.event_type.startsWith('llm.')).length,tools=raw.filter(e=>e.event_type.startsWith('tool.')).length,ctx=raw.filter(e=>e.event_type==='context.materialized').length,blobs=raw.reduce((n,e)=>n+walk(e.payload).length,0);$('stats').innerHTML=[['Events',raw.length,''],['Shown',filtered.length,'good'],['LLM',llm,''],['Tools',tools,'warn'],['Blobs',blobs,'bad']].map(x=>`<div class='stat ${x[2]}'><div class='k'>${x[0]}</div><div class='v'>${x[1]}</div></div>`).join('');const max=Math.max(1,raw.length);$('signal').innerHTML=`<div class='legend'><span>tool I/O</span><b>${tools}</b></div><div class='bar'><i style='width:${Math.min(100,tools/max*100)}%%'></i></div><div class='legend'><span>model events</span><b>${llm}</b></div><div class='bar'><i style='width:${Math.min(100,llm/max*100)}%%'></i></div><div class='legend'><span>contexts</span><b>${ctx}</b></div><div class='bar'><i style='width:${Math.min(100,ctx/max*100)}%%'></i></div>`}"
+                 "function renderTypes(){const counts={};raw.forEach(e=>counts[e.event_type]=(counts[e.event_type]||0)+1);const keys=Object.keys(counts).sort((a,b)=>counts[b]-counts[a]);const sel=$('type'),cur=sel.value;sel.innerHTML='<option value=\"\">all event types</option>'+keys.map(k=>`<option value=\"${esc(k)}\">${esc(k)} (${counts[k]})</option>`).join('');sel.value=cur;$('types').innerHTML=keys.slice(0,18).map(k=>`<button class='typebtn ${cur===k?'active':''}' onclick=\"document.getElementById('type').value='${esc(k)}';render()\"><span>${esc(k)}</span><b>${counts[k]}</b></button>`).join('')}"
+                 "function renderTimeline(){const el=$('timeline');if(!filtered.length){el.innerHTML='<div class=empty>No matching Chronicle events.</div>';return}el.innerHTML=filtered.slice(0,LIMIT).map((e,i)=>{const p=JSON.stringify(e.payload,null,2);const blobs=walk(e.payload);const when=new Date((e.wall_time||0)*1000).toLocaleString();return `<article class='event ${cls(e)}' data-i='${i}'><div class='evhead'><div><div class='etype'>${esc(e.event_type)}</div><div class='meta'>#${e.seq} · ${esc(when)} · ${esc(short(e.session_id))} · ${esc(e.actor_type)}/${esc(e.actor_id)}</div></div><div class='actions'><button class='ghost' onclick='toggle(${i})'>payload</button>${blobs.length?`<button class='ghost' onclick='showBlobs(${i})'>${blobs.length} blobs</button>`:''}</div></div><div class='chips'><span class='chip'>${esc(e.sensitivity||'')}</span>${e.trace_id?`<span class='chip'>trace ${esc(short(e.trace_id))}</span>`:''}${e.span_id?`<span class='chip'>span ${esc(short(e.span_id))}</span>`:''}${blobs.slice(0,2).map(h=>`<span class='chip hash'>${esc(short(h))}</span>`).join('')}</div><pre class='payload'>${esc(p)}</pre></article>`}).join('')}"
+                 "window.toggle=i=>document.querySelector(`[data-i=\"${i}\"]`).classList.toggle('open');"
+                 "window.showBlobs=i=>{const e=filtered[i],bs=walk(e.payload);$('blobs').innerHTML=bs.map(h=>`<div style='margin:8px 0'><a class='hash' href='/chronicle/blob/${h}' target='_blank'>${h}</a></div>`).join('')||'No blobs.'};"
+                 "$('q').oninput=render;$('type').onchange=render;$('session').onkeydown=e=>{if(e.key==='Enter')load()};$('refresh').onclick=load;$('auto').onclick=()=>{auto=!auto;$('auto').textContent='Auto: '+(auto?'on':'off')};setInterval(()=>{if(auto)load()},5000);load();"
+                 "</script></body></html>",
+                 limit);
     return b.data;
+}
+
+char *chronicle_build_activity_html(int limit, const char *session_filter) {
+    return chronicle_build_activity_html_ex(limit, session_filter, NULL, NULL);
 }
 
 char *chronicle_read_blob_hex(const char *sha256, size_t max_bytes, const char **content_type_out) {

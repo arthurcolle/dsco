@@ -2125,18 +2125,53 @@ static void openai_append_extra_request_params(jbuf_t *b, const char *extra) {
         openai_append_extra_param_if_present(b, extra, keys[i]);
 }
 
+static bool provider_strip_slash_namespace(const char *model, const char *ns,
+                                           const char **stripped) {
+    if (!model || !ns || !ns[0])
+        return false;
+    size_t n = strlen(ns);
+    if (strncmp(model, ns, n) == 0 && model[n] == '/' && model[n + 1] != '\0') {
+        if (stripped)
+            *stripped = model + n + 1;
+        return true;
+    }
+    return false;
+}
+
+static const char *provider_strip_profile_namespace(const char *provider_name,
+                                                    const char *model) {
+    const char *canonical =
+        provider_name && provider_name[0] ? provider_profile_canonical_name(provider_name) : NULL;
+    if (!canonical || !canonical[0])
+        return model;
+
+    const char *stripped = NULL;
+    if (provider_strip_slash_namespace(model, canonical, &stripped))
+        return stripped;
+
+    const provider_profile_t *profile = provider_profile_find(canonical);
+    if (!profile)
+        return model;
+    for (int i = 0; i < PROVIDER_PROFILE_MAX_ALIASES && profile->aliases[i]; i++) {
+        if (provider_strip_slash_namespace(model, profile->aliases[i], &stripped))
+            return stripped;
+    }
+    return model;
+}
+
 static const char *provider_request_model_id(const char *provider_name, const char *model) {
     if (!model || !model[0])
         return DEFAULT_MODEL;
-    if (provider_name && strcmp(provider_profile_canonical_name(provider_name), "openrouter") == 0)
+    const char *canonical =
+        provider_name && provider_name[0] ? provider_profile_canonical_name(provider_name) : NULL;
+    if (canonical && strcmp(canonical, "openrouter") == 0)
         return provider_model_strip_explicit_openrouter_prefix(model);
-    if (provider_name &&
-        (strcmp(provider_name, "openai") == 0 || strcmp(provider_name, "openai-codex") == 0) &&
+    if (canonical &&
+        (strcmp(canonical, "openai") == 0 || strcmp(canonical, "openai-codex") == 0) &&
         strncmp(model, "openai/", 7) == 0) {
         return model + 7;
     }
-    if (provider_name && provider_name[0]) {
-        const char *canonical = provider_profile_canonical_name(provider_name);
+    if (canonical && canonical[0]) {
         if (strcmp(canonical, "anthropic") == 0 && strncmp(model, "anthropic/", 10) == 0)
             return model + 10;
         if (strcmp(canonical, "xai") == 0 && strncmp(model, "x-ai/", 5) == 0)
@@ -2161,17 +2196,33 @@ static const char *provider_request_model_id(const char *provider_name, const ch
             return model + 5;
         if (strcmp(canonical, "minimax") == 0 && strncmp(model, "minimax/", 8) == 0)
             return model + 8;
-        if (strcmp(canonical, "amazon") == 0 && strncmp(model, "amazon/", 7) == 0)
+        if (strcmp(canonical, "bedrock") == 0 && strncmp(model, "amazon/", 7) == 0)
             return model + 7;
+        if (strcmp(canonical, "azure-foundry") == 0) {
+            const char *stripped = NULL;
+            if (provider_strip_slash_namespace(model, "microsoft", &stripped))
+                return stripped;
+        }
+        const char *profile_model = provider_strip_profile_namespace(canonical, model);
+        if (profile_model != model)
+            return profile_model;
     }
     /* Strip a leading "<provider>:" prefix (e.g. "vllm:Qwen2.5" -> "Qwen2.5",
      * "ollama:llama3.3:latest" -> "llama3.3:latest") so self-hosted backends
      * receive the bare served model name. Only the provider's own prefix is
      * stripped; colons inside the model id are preserved. */
-    if (provider_name && provider_name[0]) {
-        size_t pn = strlen(provider_name);
-        if (strncmp(model, provider_name, pn) == 0 && model[pn] == ':')
+    if (canonical && canonical[0]) {
+        size_t pn = strlen(canonical);
+        if (strncmp(model, canonical, pn) == 0 && model[pn] == ':')
             return model + pn + 1;
+        const provider_profile_t *profile = provider_profile_find(canonical);
+        if (profile) {
+            for (int i = 0; i < PROVIDER_PROFILE_MAX_ALIASES && profile->aliases[i]; i++) {
+                size_t an = strlen(profile->aliases[i]);
+                if (strncmp(model, profile->aliases[i], an) == 0 && model[an] == ':')
+                    return model + an + 1;
+            }
+        }
     }
     return model;
 }
@@ -3406,6 +3457,24 @@ static stream_result_t openai_stream(provider_t *p, const char *api_key, const c
     openai_data_t *od = (openai_data_t *)p->data;
     stream_result_t result = {0};
 
+    if (!od || !od->api_url[0]) {
+        result.ok = false;
+        result.http_status = 0;
+        result.parsed.stop_reason = safe_strdup("missing_api_base");
+        result.parsed.blocks = safe_malloc(sizeof(content_block_t));
+        memset(result.parsed.blocks, 0, sizeof(content_block_t));
+        result.parsed.count = 1;
+        result.parsed.blocks[0].type = safe_strdup("text");
+        char msg[512];
+        snprintf(msg, sizeof(msg),
+                 "Provider '%s' needs a custom API base URL before DSCO can call it.",
+                 p && p->name ? p->name : "unknown");
+        result.parsed.blocks[0].text = safe_strdup(msg);
+        if (text_cb)
+            text_cb(msg, cb_ctx);
+        return result;
+    }
+
     CURL *curl = od && od->curl ? od->curl : curl_easy_init();
     if (!curl) {
         result.ok = false;
@@ -4460,6 +4529,17 @@ bool provider_has_custom_api_base(const char *provider_name) {
         if (provider_getenv_nonempty(env_name))
             return true;
     }
+    const provider_profile_t *profile = provider_profile_find(provider_name);
+    if (profile) {
+        for (int i = 0; i < PROVIDER_PROFILE_MAX_ALIASES && profile->aliases[i]; i++) {
+            provider_build_env_name(profile->aliases[i], "_API_BASE", env_name, sizeof(env_name));
+            if (provider_getenv_nonempty(env_name))
+                return true;
+            provider_build_env_name(profile->aliases[i], "_BASE_URL", env_name, sizeof(env_name));
+            if (provider_getenv_nonempty(env_name))
+                return true;
+        }
+    }
     return false;
 }
 
@@ -4489,6 +4569,23 @@ static provider_t *create_openai_compat(const char *name, const char *base_url,
         provider_build_env_name(name, "_BASE_URL", env_base, sizeof(env_base));
         custom_base = getenv(env_base);
     }
+    if (!custom_base || !custom_base[0]) {
+        const provider_profile_t *profile = provider_profile_find(canonical_name);
+        if (profile) {
+            for (int i = 0; i < PROVIDER_PROFILE_MAX_ALIASES && profile->aliases[i]; i++) {
+                provider_build_env_name(profile->aliases[i], "_API_BASE", env_base,
+                                        sizeof(env_base));
+                custom_base = getenv(env_base);
+                if (custom_base && custom_base[0])
+                    break;
+                provider_build_env_name(profile->aliases[i], "_BASE_URL", env_base,
+                                        sizeof(env_base));
+                custom_base = getenv(env_base);
+                if (custom_base && custom_base[0])
+                    break;
+            }
+        }
+    }
     if (!custom_base)
         custom_base = base_url;
 
@@ -4502,7 +4599,10 @@ static provider_t *create_openai_compat(const char *name, const char *base_url,
         strncat(normalized_base, "/v1", sizeof(normalized_base) - strlen(normalized_base) - 1);
     }
 
-    snprintf(od->api_url, sizeof(od->api_url), "%s/chat/completions", normalized_base);
+    if (normalized_base[0])
+        snprintf(od->api_url, sizeof(od->api_url), "%s/chat/completions", normalized_base);
+    else
+        od->api_url[0] = '\0';
     p->api_url = od->api_url;
     p->data = od;
     p->build_request = openai_build_request;
@@ -4674,12 +4774,8 @@ provider_t *provider_create(const char *name) {
 
     if (profile && profile->transport == PROVIDER_TRANSPORT_OPENAI_CHAT) {
         const char *base = profile->transport_base_url;
-        if ((base && base[0]) || provider_has_custom_api_base(profile->name)) {
-            if (!base || !base[0])
-                base = "https://api.openai.com/v1";
-            return create_openai_compat(profile->name, base,
-                                        provider_profile_primary_env_var(profile));
-        }
+        return create_openai_compat(profile->name, base ? base : "",
+                                    provider_profile_primary_env_var(profile));
     }
 
     if (profile)
@@ -4767,24 +4863,107 @@ static const char *provider_model_family_from_namespaced(const char *model) {
         return "anthropic";
     if (provider_model_has_prefix(model, "openai/"))
         return "openai";
+    if (provider_model_has_prefix(model, "azure/") ||
+        provider_model_has_prefix(model, "azure-foundry/") ||
+        provider_model_has_prefix(model, "microsoft/"))
+        return "azure-foundry";
     if (provider_model_has_prefix(model, "x-ai/"))
+        return "xai";
+    if (provider_model_has_prefix(model, "xai/"))
         return "xai";
     if (provider_model_has_prefix(model, "google/"))
         return "google";
+    if (provider_model_has_prefix(model, "gemini/"))
+        return "google";
+    if (provider_model_has_prefix(model, "groq/"))
+        return "groq";
     if (provider_model_has_prefix(model, "deepseek/"))
         return "deepseek";
+    if (provider_model_has_prefix(model, "together/"))
+        return "together";
+    if (provider_model_has_prefix(model, "cerebras/"))
+        return "cerebras";
+    if (provider_model_has_prefix(model, "alibaba/") ||
+        provider_model_has_prefix(model, "dashscope/") ||
+        provider_model_has_prefix(model, "alibaba-cloud/") ||
+        provider_model_has_prefix(model, "qwen-dashscope/"))
+        return "alibaba";
+    if (provider_model_has_prefix(model, "alibaba-coding-plan/") ||
+        provider_model_has_prefix(model, "alibaba-coding/") ||
+        provider_model_has_prefix(model, "dashscope-coding/"))
+        return "alibaba-coding-plan";
     if (provider_model_has_prefix(model, "qwen/"))
         return "qwen";
-    if (provider_model_has_prefix(model, "mistralai/"))
+    if (provider_model_has_prefix(model, "qwen-oauth/") ||
+        provider_model_has_prefix(model, "qwen-cli/") ||
+        provider_model_has_prefix(model, "qwen-portal/"))
+        return "qwen-oauth";
+    if (provider_model_has_prefix(model, "mistral/") ||
+        provider_model_has_prefix(model, "mistralai/"))
         return "mistral";
-    if (provider_model_has_prefix(model, "moonshotai/"))
+    if (provider_model_has_prefix(model, "moonshot/") ||
+        provider_model_has_prefix(model, "moonshotai/"))
         return "moonshot";
-    if (provider_model_has_prefix(model, "sakana/"))
+    if (provider_model_has_prefix(model, "sakana/") ||
+        provider_model_has_prefix(model, "sakana-ai/") ||
+        provider_model_has_prefix(model, "sakanaai/"))
         return "sakana";
+    if (provider_model_has_prefix(model, "arcee/") ||
+        provider_model_has_prefix(model, "arcee-ai/") ||
+        provider_model_has_prefix(model, "arceeai/"))
+        return "arcee";
+    if (provider_model_has_prefix(model, "gmi/") ||
+        provider_model_has_prefix(model, "gmi-cloud/") ||
+        provider_model_has_prefix(model, "gmicloud/"))
+        return "gmi";
+    if (provider_model_has_prefix(model, "huggingface/") ||
+        provider_model_has_prefix(model, "hugging-face/") ||
+        provider_model_has_prefix(model, "hf/") ||
+        provider_model_has_prefix(model, "huggingface-hub/"))
+        return "huggingface";
+    if (provider_model_has_prefix(model, "kilocode/") ||
+        provider_model_has_prefix(model, "kilo-code/") ||
+        provider_model_has_prefix(model, "kilo/") ||
+        provider_model_has_prefix(model, "kilo-gateway/"))
+        return "kilocode";
+    if (provider_model_has_prefix(model, "nous/") ||
+        provider_model_has_prefix(model, "nous-portal/") ||
+        provider_model_has_prefix(model, "nousresearch/"))
+        return "nous";
+    if (provider_model_has_prefix(model, "novita/") ||
+        provider_model_has_prefix(model, "novita-ai/") ||
+        provider_model_has_prefix(model, "novitaai/"))
+        return "novita";
+    if (provider_model_has_prefix(model, "nvidia/") ||
+        provider_model_has_prefix(model, "nvidia-nim/"))
+        return "nvidia";
+    if (provider_model_has_prefix(model, "ollama-cloud/") ||
+        provider_model_has_prefix(model, "ollama_cloud/"))
+        return "ollama-cloud";
+    if (provider_model_has_prefix(model, "opencode-zen/") ||
+        provider_model_has_prefix(model, "opencode/") ||
+        provider_model_has_prefix(model, "opencode_zen/") ||
+        provider_model_has_prefix(model, "zen/"))
+        return "opencode-zen";
+    if (provider_model_has_prefix(model, "opencode-go/") ||
+        provider_model_has_prefix(model, "opencode_go/"))
+        return "opencode-go";
+    if (provider_model_has_prefix(model, "stepfun/") ||
+        provider_model_has_prefix(model, "step/") ||
+        provider_model_has_prefix(model, "stepfun-coding-plan/"))
+        return "stepfun";
+    if (provider_model_has_prefix(model, "xiaomi/") ||
+        provider_model_has_prefix(model, "mimo/") ||
+        provider_model_has_prefix(model, "xiaomi-mimo/"))
+        return "xiaomi";
     if (provider_model_has_prefix(model, "cohere/"))
         return "cohere";
     if (provider_model_has_prefix(model, "minimax/"))
         return "minimax";
+    if (provider_model_has_prefix(model, "zai/") ||
+        provider_model_has_prefix(model, "glm/") ||
+        provider_model_has_prefix(model, "zhipu/"))
+        return "zai";
     if (provider_model_has_prefix(model, "z-ai/"))
         return "zai";
     if (provider_model_has_prefix(model, "meta-llama/"))

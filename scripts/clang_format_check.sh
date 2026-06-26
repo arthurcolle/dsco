@@ -9,7 +9,10 @@ if ! command -v clang-format >/dev/null 2>&1; then
   exit 1
 fi
 
-mapfile -t FILES < <(git ls-files '*.c' '*.h' | grep -v '^vendor/')
+FILES=()
+while IFS= read -r file; do
+  FILES+=("$file")
+done < <(git ls-files '*.c' '*.h' | grep -v '^vendor/')
 if [[ ${#FILES[@]} -eq 0 ]]; then
   echo "no C/C++ files found"
   exit 0
