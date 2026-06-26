@@ -2,11 +2,13 @@
 #include "json_util.h"
 
 #include <ctype.h>
+#include <dirent.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <strings.h>
 #include <sys/stat.h>
+#include <time.h>
 #include <unistd.h>
 
 static void cad_strlcpy(char *dst, size_t dst_len, const char *src) {
@@ -98,6 +100,74 @@ static void cad_copy_array_strings(const char *obj, const char *key, char *dst, 
     free(raw);
 }
 
+static void cad_copy_label_tokens(const char *obj, char *dst, size_t dst_len) {
+    char *raw = json_get_raw(obj, "labels");
+    if (!raw)
+        return;
+
+    const char *p = raw;
+    while (isspace((unsigned char)*p))
+        p++;
+
+    if (*p == '{') {
+        while ((p = strchr(p, '"')) != NULL) {
+            p++;
+            const char *q = strchr(p, '"');
+            if (!q)
+                break;
+            char key[128];
+            size_t n = (size_t)(q - p);
+            if (n >= sizeof(key))
+                n = sizeof(key) - 1;
+            memcpy(key, p, n);
+            key[n] = '\0';
+
+            const char *colon = strchr(q + 1, ':');
+            if (!colon)
+                break;
+            const char *value = colon + 1;
+            while (isspace((unsigned char)*value))
+                value++;
+            if (strncasecmp(value, "false", 5) != 0 && strncasecmp(value, "null", 4) != 0 &&
+                strncmp(value, "0", 1) != 0)
+                cad_append_token(dst, dst_len, key);
+            const char *next = strchr(value, ',');
+            if (!next)
+                break;
+            p = next + 1;
+        }
+    } else {
+        p = raw;
+        while ((p = strchr(p, '"')) != NULL) {
+            p++;
+            const char *q = p;
+            bool esc = false;
+            while (*q) {
+                if (esc) {
+                    esc = false;
+                } else if (*q == '\\') {
+                    esc = true;
+                } else if (*q == '"') {
+                    break;
+                }
+                q++;
+            }
+            if (*q != '"')
+                break;
+            char tok[128];
+            size_t n = (size_t)(q - p);
+            if (n >= sizeof(tok))
+                n = sizeof(tok) - 1;
+            memcpy(tok, p, n);
+            tok[n] = '\0';
+            cad_append_token(dst, dst_len, tok);
+            p = q + 1;
+        }
+    }
+
+    free(raw);
+}
+
 static void cad_extract_labels(codex_app_directory_entry_t *e, const char *obj) {
     e->interactive = cad_raw_bool(obj, "interactive", e->interactive);
     e->consequential = cad_raw_bool(obj, "consequential", e->consequential);
@@ -117,7 +187,7 @@ static void cad_extract_labels(codex_app_directory_entry_t *e, const char *obj) 
         free(labels_raw);
     }
 
-    cad_copy_array_strings(obj, "labels", e->labels, sizeof(e->labels));
+    cad_copy_label_tokens(obj, e->labels, sizeof(e->labels));
     if (e->interactive)
         cad_append_token(e->labels, sizeof(e->labels), "interactive");
     if (e->consequential)
@@ -197,6 +267,47 @@ void codex_app_directory_free(codex_app_directory_t *dir) {
     memset(dir, 0, sizeof(*dir));
 }
 
+static bool cad_file_exists(const char *path) {
+    struct stat st;
+    return path && path[0] && stat(path, &st) == 0 && S_ISREG(st.st_mode);
+}
+
+static bool cad_has_json_suffix(const char *name) {
+    if (!name)
+        return false;
+    size_t n = strlen(name);
+    return n > 5 && strcmp(name + n - 5, ".json") == 0;
+}
+
+static bool cad_find_codex_cache(char *buf, size_t buf_len, const char *home) {
+    char dir_path[1024];
+    snprintf(dir_path, sizeof(dir_path), "%s/.codex/cache/codex_app_directory", home);
+
+    DIR *dir = opendir(dir_path);
+    if (!dir)
+        return false;
+
+    bool found = false;
+    time_t newest = 0;
+    struct dirent *de;
+    while ((de = readdir(dir)) != NULL) {
+        if (!cad_has_json_suffix(de->d_name))
+            continue;
+        char candidate[1024];
+        snprintf(candidate, sizeof(candidate), "%s/%s", dir_path, de->d_name);
+        struct stat st;
+        if (stat(candidate, &st) != 0 || !S_ISREG(st.st_mode))
+            continue;
+        if (!found || st.st_mtime > newest) {
+            cad_strlcpy(buf, buf_len, candidate);
+            newest = st.st_mtime;
+            found = true;
+        }
+    }
+    closedir(dir);
+    return found;
+}
+
 const char *codex_app_directory_default_path(char *buf, size_t buf_len) {
     if (!buf || buf_len == 0)
         return NULL;
@@ -208,6 +319,11 @@ const char *codex_app_directory_default_path(char *buf, size_t buf_len) {
     const char *home = getenv("HOME");
     if (!home || !home[0])
         home = ".";
+    snprintf(buf, buf_len, "%s/.dsco/codex_app_directory.json", home);
+    if (cad_file_exists(buf))
+        return buf;
+    if (cad_find_codex_cache(buf, buf_len, home))
+        return buf;
     snprintf(buf, buf_len, "%s/.dsco/codex_app_directory.json", home);
     return buf;
 }
@@ -236,6 +352,13 @@ static void cad_parse_entry_cb(const char *element_start, void *ctx) {
     cad_copy_array_strings(element_start, "categories", e.categories, sizeof(e.categories));
     if (!e.categories[0])
         cad_copy_str_key(element_start, "category", e.categories, sizeof(e.categories));
+    if (!e.categories[0]) {
+        char *meta = json_get_raw(element_start, "appMetadata");
+        if (meta) {
+            cad_copy_array_strings(meta, "categories", e.categories, sizeof(e.categories));
+            free(meta);
+        }
+    }
 
     e.is_enabled = cad_raw_bool(element_start, "isEnabled", cad_raw_bool(element_start, "is_enabled", false));
     e.is_accessible = cad_raw_bool(element_start, "isAccessible", cad_raw_bool(element_start, "is_accessible", false));

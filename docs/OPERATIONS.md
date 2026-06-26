@@ -26,7 +26,8 @@ make ubsan-test
 make check-version
 ```
 
-`make docs` regenerates the API reference, built-in tool catalog, and constants/env index.
+`make docs` regenerates the API reference, built-in tool catalog, external
+integration catalog, constants/env index, and repository coverage manifest.
 `make docs-check` verifies those generated artifacts without rewriting them.
 
 ### Install/Uninstall
@@ -202,11 +203,15 @@ Chronicle records can include prompts, tool inputs/results, streamed model delta
 
 ### Integration Catalog Diagnostics
 
-DSCO separates cached app catalogs from live MCP/tool registrations. The cached Codex app directory is read from `DSCO_CODEX_APP_DIRECTORY` or `~/.dsco/codex_app_directory.json`.
+DSCO separates cached app catalogs from live MCP/tool registrations. The cached
+Codex app directory is read from `DSCO_CODEX_APP_DIRECTORY`,
+`~/.dsco/codex_app_directory.json`, or the newest JSON cache under
+`~/.codex/cache/codex_app_directory/`.
 
 ```bash
 ./dsco --tool-exec discover_integrations '{"profile":"engineering","limit":20}'
 ./dsco --tool-exec dsco_doctor_integrations '{}'
+./dsco --tool-exec hermes_agent '{"action":"capabilities"}'
 ```
 
 See [`INTEGRATION_CATALOG.md`](INTEGRATION_CATALOG.md) for schema and governance mapping.
@@ -511,6 +516,8 @@ When adding or changing an env var:
 - Plugins: `~/.dsco/plugins`
 - Debug requests: `~/.dsco/debug`
 - MCP config: `~/.dsco/mcp.json`
+- Imported Hermes Agent MCP configs: `~/.hermes/config.yaml`,
+  `~/.hermes/mcp_servers.yaml`
 - Optional system prompt override: `~/.dsco/system_prompt.txt`
 - Baseline DB default: `~/.dsco/baseline.db`
 

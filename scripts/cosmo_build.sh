@@ -19,7 +19,7 @@ if [[ ! -x "$COSMOCC" ]]; then
   COSMOCC="$("$ROOT/scripts/cosmo_bootstrap.sh")"
 fi
 
-OUT="${DSCO_COSMO_OUT:-dsco.com}"
+OUT="${DSCO_COSMO_OUT:-dsco.distributed.systems}"
 BUILD_DIR="${DSCO_COSMO_BUILD_DIR:-$ROOT/build/cosmo}"
 MODE="${DSCO_COSMO_MODE:-normal}"
 STD="${DSCO_COSMO_STD:-gnu2x}"
