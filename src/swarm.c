@@ -1054,38 +1054,58 @@ const char *executor_type_name(executor_type_t t) {
 
 /* ── Executor detection ───────────────────────────────────────────────── */
 
-static bool detect_binary(const char *name, char *out_path, size_t out_len) {
-    /* Check common locations + PATH */
-    const char *candidates[] = {"/opt/homebrew/bin", "/usr/local/bin", "/usr/bin", NULL};
+static bool detect_binary_at(const char *dir, const char *name, char *out_path, size_t out_len) {
+    if (!dir || !dir[0] || !name || !name[0] || !out_path || out_len == 0)
+        return false;
 
-    /* First try which(1) for PATH-based lookup */
-    char cmd[256];
-    snprintf(cmd, sizeof(cmd), "which %s 2>/dev/null", name);
-    FILE *f = popen(cmd, "r");
-    if (f) {
-        char line[512];
-        if (fgets(line, sizeof(line), f)) {
-            /* Strip trailing newline */
-            size_t l = strlen(line);
-            while (l > 0 && (line[l - 1] == '\n' || line[l - 1] == '\r'))
-                line[--l] = '\0';
-            if (l > 0 && access(line, X_OK) == 0) {
-                snprintf(out_path, out_len, "%s", line);
-                pclose(f);
-                return true;
+    char path[1024];
+    int n = snprintf(path, sizeof(path), "%s/%s", dir, name);
+    if (n < 0 || (size_t)n >= sizeof(path))
+        return false;
+    if (access(path, X_OK) != 0)
+        return false;
+
+    snprintf(out_path, out_len, "%s", path);
+    return true;
+}
+
+static bool detect_binary(const char *name, char *out_path, size_t out_len) {
+    if (!name || !name[0] || !out_path || out_len == 0)
+        return false;
+
+    /* Refuse path fragments: executor lookup is for binary names only. This
+     * keeps detection shell-free and prevents future call sites from turning
+     * PATH lookup into arbitrary path probing. */
+    if (strchr(name, '/') != NULL)
+        return false;
+
+    /* First search PATH manually. This replaces the older popen("which ...")
+     * path, avoiding a shell spawn during startup and eliminating command-name
+     * injection risk if this helper is reused with user-controlled input. */
+    const char *path_env = getenv("PATH");
+    if (path_env && path_env[0]) {
+        const char *p = path_env;
+        while (*p) {
+            const char *colon = strchr(p, ':');
+            size_t len = colon ? (size_t)(colon - p) : strlen(p);
+            if (len > 0 && len < 512) {
+                char dir[512];
+                memcpy(dir, p, len);
+                dir[len] = '\0';
+                if (detect_binary_at(dir, name, out_path, out_len))
+                    return true;
             }
+            if (!colon)
+                break;
+            p = colon + 1;
         }
-        pclose(f);
     }
 
-    /* Fallback: check known paths */
+    /* Fallback: check common absolute locations even when PATH is minimal. */
+    const char *candidates[] = {"/opt/homebrew/bin", "/usr/local/bin", "/usr/bin", NULL};
     for (int i = 0; candidates[i]; i++) {
-        char path[1024];
-        snprintf(path, sizeof(path), "%s/%s", candidates[i], name);
-        if (access(path, X_OK) == 0) {
-            snprintf(out_path, out_len, "%s", path);
+        if (detect_binary_at(candidates[i], name, out_path, out_len))
             return true;
-        }
     }
     return false;
 }

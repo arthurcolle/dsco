@@ -10,6 +10,14 @@
 - inter-agent state in [`ipc.c`](../src/ipc.c)
 - swarm process orchestration in [`swarm.c`](../src/swarm.c)
 
+`dsco` is local-first, not local-only. When a hosted coordination surface is
+useful, servers can be deployed under `distributed.systems`. The current
+production example is `tools.distributed.systems`, which already acts as the
+remote Tool Management API for discovery, execution, batching, recommendation,
+durable jobs, and backend fan-out. Future hosted planes should follow the same
+shape: keep local execution, secrets, policy, and audit state authoritative, and
+use hosted services for coordination that benefits from shared availability.
+
 What it does not yet have is a strong local control plane that learns per user, per project, per model, per topology, and per tool. That is the missing layer if `dsco` is going to become a genuinely optimized agentic CLI rather than just a capable tool-using chat loop.
 
 This document defines the additional local data/configuration surfaces needed to support:
@@ -37,6 +45,251 @@ This document defines the additional local data/configuration surfaces needed to
 
 5. Treat dynamic topologies as planned-and-validated graphs.
    Do not allow unconstrained graph generation with no stored validation context.
+
+6. Make hosted control planes optional accelerators.
+   `distributed.systems` services may provide shared catalogs, fleet health,
+   durable remote jobs, and cross-node routing, but local policy must decide
+   what can be sent, redacted, executed, or synchronized.
+
+## Hybrid Edge/Cloud Architecture
+
+The control-plane model is an edge runtime with optional hosted services. The
+local `dsco` process remains the authority for execution and policy. Hosted
+`distributed.systems` services provide shared availability, remote tools, fleet
+coordination, and aggregate learning when the user enables them.
+
+```mermaid
+flowchart LR
+  subgraph Edge["Local dsco edge"]
+    CLI["main.c / agent.c"]
+    Policy["~/.dsco/config.json\n.dsco/project.json\n.dsco/policies/*"]
+    RuntimeDB[".dsco/runtime.db"]
+    ControlDB["~/.dsco/control_plane.db"]
+    Baseline["baseline.db"]
+    Chronicle["Chronicle TokenLedger"]
+    IPC["ipc.c swarm state"]
+    Tools["built-ins / MCP / plugins"]
+    Providers["provider.c / local models"]
+    Secrets["env / sealed store / Keychain"]
+  end
+
+  subgraph Hosted["distributed.systems hosted planes"]
+    ToolPlane["tools.distributed.systems\nTool Management API"]
+    FleetPlane["control.distributed.systems\nfuture fleet/control API"]
+    GraphPlane["graph.distributed.systems\nfuture GraphSub/memory API"]
+    ArtifactPlane["artifacts.distributed.systems\nfuture redacted trace/artifact API"]
+  end
+
+  CLI --> Policy
+  CLI --> RuntimeDB
+  CLI --> ControlDB
+  CLI --> Baseline
+  CLI --> Chronicle
+  CLI --> IPC
+  CLI --> Tools
+  CLI --> Providers
+  CLI --> Secrets
+
+  Tools -->|optional token-gated remote calls| ToolPlane
+  CLI -->|optional signed heartbeat| FleetPlane
+  Chronicle -->|optional redacted summaries only| ArtifactPlane
+  ControlDB -->|optional aggregate priors| GraphPlane
+
+  FleetPlane -->|desired-state hints, never raw authority| CLI
+  ToolPlane -->|catalog, execute, batch, recommend| Tools
+  GraphPlane -->|shared pheromone/memory hints| CLI
+```
+
+### Ownership Boundaries
+
+| Surface | Local owner | Hosted owner | Rule |
+|---|---|---|---|
+| Source files and shell | `dsco` edge | none | Never execute remotely unless the user routes work to a remote tool or sandbox explicitly. |
+| Secrets and credentials | env, sealed store, Keychain | none by default | Do not sync raw secrets. Hosted services receive bearer tokens only for their own APIs. |
+| Tool catalog | local built-ins/MCP/plugin cache | `tools.distributed.systems` | Hosted catalog can extend tools, but local policy decides registration and execution. |
+| Tool execution | local tools by default | remote tool plane when selected | Remote results are treated like external tool output and logged locally. |
+| Policy | global/project JSON | optional signed policy snapshots later | Hosted policy can suggest, local policy gates. |
+| Telemetry | Baseline, Chronicle, runtime DB | optional aggregate analytics later | Upload only redacted summaries or metrics by consent/config. |
+| Fleet liveness | heartbeat local files | optional fleet API later | Remote fleet state is advisory unless the operator enables orchestration. |
+| Memory | workspace/session memory | optional GraphSub-style sync later | Local memory is canonical; remote memory must carry sensitivity and consent state. |
+
+### Current Hosted Tool Flow
+
+`tools.distributed.systems` is the deployed hosted plane today. The local client
+is [`toolmgmt.c`](../src/toolmgmt.c) and defaults to that host via
+`TOOLMGMT_API_URL_DEFAULT`.
+
+```mermaid
+sequenceDiagram
+  participant U as User / model
+  participant A as agent.c
+  participant P as local policy
+  participant T as toolmgmt.c
+  participant H as tools.distributed.systems
+  participant B as Baseline/Chronicle
+
+  U->>A: request tool capability
+  A->>P: classify action and risk
+  P-->>A: allow, require confirmation, or deny
+  A->>T: discover/search/recommend/execute
+  T->>H: Bearer-token request
+  H-->>T: catalog, plan, batch, or result
+  T-->>A: normalized JSON result
+  A->>B: log tool call, latency, status, cost/metadata
+  A-->>U: response or follow-up tool turn
+```
+
+Operational notes:
+
+- `DSCO_TOOLMGMT=1` enables remote tool registration in interactive startup.
+- `TOOLS_API_TOKEN` or `AUTH_TOKEN` provides the bearer token.
+- `TOOLS_API_URL` or `TOOL_MANAGEMENT_API_URL` can point to a staging plane.
+- A missing token should degrade to local-only tools, not block normal DSCO use.
+- Remote tool descriptions should carry action flags so mutating tools go
+  through the same confirmation path as local/MCP tools.
+
+### Future Fleet Heartbeat Flow
+
+The existing heartbeat code already writes local runtime state and can POST to a
+configured beacon URL. A hosted fleet plane should receive signed liveness and
+return hints, not commands with unchecked authority.
+
+```mermaid
+sequenceDiagram
+  participant D as dsco edge
+  participant L as local heartbeat files
+  participant F as control.distributed.systems
+  participant O as operator UI
+
+  D->>D: collect pid, rss, fd count, phase, uptime
+  D->>D: sign ts + seq + node with local auth key
+  D->>L: write last_heartbeat.json and runtime log
+  alt DSCO_BEACON_URL configured
+    D->>F: POST signed heartbeat
+    F->>F: verify node signature and tenant policy
+    F-->>D: advisory desired state
+    F-->>O: fleet health, stale nodes, version drift
+  else local-only mode
+    D-->>L: no network call
+  end
+```
+
+The first fleet service should store only:
+
+- node id, version, pid, uptime, phase, resource counters
+- host class and build fingerprint
+- active profile: `full`, `lite`, or `worker`
+- stale/healthy/degraded status
+- optional current task class, not prompt text
+
+### Topology Feedback Loop
+
+Topology selection should become a measured routing problem. The local runtime
+executes and logs everything. Hosted services can aggregate coarse priors across
+machines only after redaction and consent gates.
+
+```mermaid
+flowchart TD
+  Prompt["Task prompt"] --> Classify["task_profile / router classify"]
+  Classify --> Project["project fingerprint\nlanguage, build, tests, trust"]
+  Project --> Policy["global + project policy gate"]
+  Policy --> Select["choose static topology or validate dynamic graph"]
+  Select --> Run["swarm/topology execution"]
+  Run --> NodeRuns["topology_node_runs\nmodel, role, latency, status"]
+  Run --> ToolStats["tool_stats\nsuccess, timeout, usefulness"]
+  Run --> CostStats["model/provider stats\ncost, TTFT, throughput"]
+  NodeRuns --> LocalLearn["local control_plane.db update"]
+  ToolStats --> LocalLearn
+  CostStats --> LocalLearn
+  LocalLearn --> NextRoute["next routing decision"]
+  LocalLearn -. optional redacted aggregate .-> HostedLearn["distributed.systems aggregate priors"]
+  HostedLearn -. advisory priors .-> Policy
+```
+
+Important invariant: hosted priors can bias recommendations, but local trust,
+budget, allowlist, and confirmation rules decide what actually runs.
+
+### Policy Gate Flow
+
+Every local, MCP, plugin, and hosted tool should pass through the same policy
+shape before execution.
+
+```mermaid
+flowchart TD
+  Req["candidate action"] --> Class["classify action flags"]
+  Class --> ReadPolicy["load global/project/session policy"]
+  ReadPolicy --> Sensitive{"sensitive data involved?"}
+  Sensitive -- yes --> Redact["redact, summarize, or keep local"]
+  Sensitive -- no --> Risk{"mutating, send, delete, admin, remote?"}
+  Redact --> Risk
+  Risk -- no --> Execute["execute"]
+  Risk -- yes --> Confirm{"policy permits with confirmation?"}
+  Confirm -- no --> Deny["deny with reason"]
+  Confirm -- yes --> Human["ask user / approval gate"]
+  Human -- approved --> Execute
+  Human -- rejected --> Deny
+  Execute --> Log["Baseline + Chronicle + control DB"]
+```
+
+This keeps the hosted tool plane from becoming a bypass around local safety.
+
+### Data Sync Policy
+
+| Data class | Default | Hosted sync | Notes |
+|---|---|---|---|
+| API keys, OAuth tokens, private keys | local only | never | Keep in env, sealed store, Keychain, or provider-native stores. |
+| Raw source files | local only | opt-in artifact upload only | Prefer hashes, file paths, language tags, and summaries. |
+| User prompts | local only | opt-in redacted summaries | Chronicle already tracks sensitivity; use that as the sync gate. |
+| Tool catalog metadata | remote pull allowed | yes | Catalog metadata is expected from `tools.distributed.systems`. |
+| Remote tool results | local log | result already remote | Store result locally; redact before secondary sync. |
+| Baseline events | local | aggregate metrics only | Good for latency, cost, status, not raw content by default. |
+| Chronicle blobs | local | consented artifact export | Training examples must carry consent and redaction state. |
+| Topology run stats | local first | aggregate allowed | Useful for shared routing priors without exposing code. |
+| Failure signatures | local first | hashed aggregate allowed | Share signature hash, class, mitigation, not private stack traces. |
+| Fleet heartbeat | local and optional remote | yes when enabled | Signed runtime counters, not conversation content. |
+
+### Hosted Service Split
+
+The services should stay small and separately replaceable.
+
+| Service | Status | Responsibility | Local client |
+|---|---|---|---|
+| `tools.distributed.systems` | deployed | remote tool catalog, execution, batch, recommendation, durable jobs | `toolmgmt.c`, `connector.c` |
+| `control.distributed.systems` | proposed | node registry, signed heartbeat, version drift, fleet desired-state hints | `heartbeat.c`, future `control_client.c` |
+| `graph.distributed.systems` | proposed | shared pheromone graph, optional memory consolidation, topology priors | `graphsub_client.c` after hardening |
+| `artifacts.distributed.systems` | proposed | consented trace/artifact snapshots, training candidates, replay bundles | `chronicle.c` export path |
+| `auth.distributed.systems` | optional | first-party token issuance for hosted planes | setup/login layer |
+
+Endpoint sketch:
+
+```text
+GET  /health
+GET  /.well-known/oauth-protected-resource
+GET  /api/v1/tools
+GET  /api/v1/discover/search
+POST /api/v1/tools/{tool}/execute
+POST /api/v1/batch
+POST /api/v1/orchestration/recommend
+
+POST /api/v1/nodes/heartbeat          # future fleet plane
+GET  /api/v1/nodes                    # future fleet plane
+POST /api/v1/topologies/feedback      # future aggregate priors
+GET  /api/v1/policy/snapshot          # future signed advisory policy
+POST /api/v1/artifacts/redacted-trace  # future consented export
+```
+
+### Offline and Failure Modes
+
+| Failure | Expected behavior |
+|---|---|
+| No network | Stay fully usable with built-ins, local providers, MCP, plugins, Baseline, Chronicle, IPC, and local memory. |
+| Missing hosted token | Do not register remote tools; show setup hint only when the user asks for hosted tools. |
+| Hosted 401 | Keep local tools active, surface auth status, do not retry indefinitely. |
+| Hosted 429/5xx | Back off, circuit-break remote calls, continue local execution. |
+| Hosted recommendation unavailable | Fall back to local tool discovery and topology priors. |
+| Fleet service unavailable | Continue writing local heartbeat files and runtime logs. |
+| Remote policy unavailable | Use last local policy or deny high-risk remote actions by default. |
+| Redaction uncertain | Keep data local. |
 
 ## Recommended Storage Layout
 

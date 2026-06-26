@@ -10,6 +10,7 @@
 #include <unistd.h>
 #include <signal.h>
 #include <errno.h>
+#include <ctype.h>
 #include <sys/wait.h>
 #include <sys/stat.h>
 #include <fcntl.h>
@@ -1517,6 +1518,398 @@ static void load_toml_config(mcp_registry_t *reg, const char *path, const char *
     free(data);
 }
 
+static int yaml_indent_width(const char *line) {
+    int n = 0;
+    while (*line == ' ' || *line == '\t') {
+        n += (*line == '\t') ? 2 : 1;
+        line++;
+    }
+    return n;
+}
+
+static void yaml_strip_comment(char *s) {
+    bool in_single = false;
+    bool in_double = false;
+    bool escaped = false;
+    for (char *p = s; *p; p++) {
+        if (escaped) {
+            escaped = false;
+            continue;
+        }
+        if (in_double && *p == '\\') {
+            escaped = true;
+            continue;
+        }
+        if (*p == '\'' && !in_double) {
+            in_single = !in_single;
+            continue;
+        }
+        if (*p == '"' && !in_single) {
+            in_double = !in_double;
+            continue;
+        }
+        if (*p == '#' && !in_single && !in_double && (p == s || isspace((unsigned char)p[-1]))) {
+            *p = '\0';
+            return;
+        }
+    }
+}
+
+static char *parse_yaml_scalar(const char *raw) {
+    const char *p = skip_ws_local(raw);
+    if (*p == '"')
+        return parse_json_string_local_at(&p);
+    if (*p == '\'') {
+        p++;
+        const char *start = p;
+        while (*p && *p != '\'')
+            p++;
+        size_t n = (size_t)(p - start);
+        char *out = safe_malloc(n + 1);
+        memcpy(out, start, n);
+        out[n] = '\0';
+        return out;
+    }
+
+    const char *start = p;
+    while (*p && *p != '\n' && *p != '\r')
+        p++;
+    size_t n = (size_t)(p - start);
+    char *out = safe_malloc(n + 1);
+    memcpy(out, start, n);
+    out[n] = '\0';
+    char *t = trim_inplace(out);
+    if (t != out)
+        memmove(out, t, strlen(t) + 1);
+    return out;
+}
+
+static bool yaml_bool_false(const char *raw) {
+    char *v = parse_yaml_scalar(raw);
+    bool out = v && (strcasecmp(v, "false") == 0 || strcasecmp(v, "no") == 0 ||
+                     strcasecmp(v, "off") == 0 || strcmp(v, "0") == 0);
+    free(v);
+    return out;
+}
+
+static bool yaml_bool_true(const char *raw) {
+    char *v = parse_yaml_scalar(raw);
+    bool out = v && (strcasecmp(v, "true") == 0 || strcasecmp(v, "yes") == 0 ||
+                     strcasecmp(v, "on") == 0 || strcmp(v, "1") == 0);
+    free(v);
+    return out;
+}
+
+static void parse_yaml_array_strings(const char *raw, mcp_server_t *srv) {
+    const char *p = skip_ws_local(raw);
+    if (*p != '[') {
+        char *one = parse_yaml_scalar(p);
+        if (one && one[0] && srv->argc < MCP_MAX_ARGS)
+            copy_str(srv->args[srv->argc++], sizeof(srv->args[0]), one);
+        free(one);
+        return;
+    }
+    p++;
+    while (*p && *p != ']' && srv->argc < MCP_MAX_ARGS) {
+        p = skip_ws_local(p);
+        char *s = NULL;
+        if (*p == '"') {
+            s = parse_json_string_local_at(&p);
+        } else if (*p == '\'') {
+            const char *start = ++p;
+            while (*p && *p != '\'')
+                p++;
+            size_t n = (size_t)(p - start);
+            s = safe_malloc(n + 1);
+            memcpy(s, start, n);
+            s[n] = '\0';
+            if (*p == '\'')
+                p++;
+        } else {
+            const char *start = p;
+            while (*p && *p != ',' && *p != ']')
+                p++;
+            size_t n = (size_t)(p - start);
+            s = safe_malloc(n + 1);
+            memcpy(s, start, n);
+            s[n] = '\0';
+            char *t = trim_inplace(s);
+            if (t != s)
+                memmove(s, t, strlen(t) + 1);
+        }
+        if (s && s[0])
+            copy_str(srv->args[srv->argc++], sizeof(srv->args[0]), s);
+        free(s);
+        p = skip_ws_local(p);
+        if (*p == ',')
+            p++;
+    }
+}
+
+static void parse_yaml_inline_map(const char *raw, mcp_server_t *srv, bool headers) {
+    const char *p = skip_ws_local(raw);
+    if (*p != '{')
+        return;
+    p++;
+    while (*p && *p != '}') {
+        p = skip_ws_local(p);
+        char *key = NULL;
+        if (*p == '"') {
+            key = parse_json_string_local_at(&p);
+        } else if (*p == '\'') {
+            const char *start = ++p;
+            while (*p && *p != '\'')
+                p++;
+            size_t n = (size_t)(p - start);
+            key = safe_malloc(n + 1);
+            memcpy(key, start, n);
+            key[n] = '\0';
+            if (*p == '\'')
+                p++;
+        } else {
+            const char *start = p;
+            while (*p && *p != ':' && *p != ',' && *p != '}')
+                p++;
+            size_t n = (size_t)(p - start);
+            key = safe_malloc(n + 1);
+            memcpy(key, start, n);
+            key[n] = '\0';
+            char *t = trim_inplace(key);
+            if (t != key)
+                memmove(key, t, strlen(t) + 1);
+        }
+        p = skip_ws_local(p);
+        if (*p != ':') {
+            free(key);
+            break;
+        }
+        p++;
+        const char *value_start = skip_ws_local(p);
+        bool in_single = false, in_double = false, escaped = false;
+        while (*p) {
+            if (escaped) {
+                escaped = false;
+                p++;
+                continue;
+            }
+            if (in_double && *p == '\\') {
+                escaped = true;
+                p++;
+                continue;
+            }
+            if (*p == '\'' && !in_double)
+                in_single = !in_single;
+            else if (*p == '"' && !in_single)
+                in_double = !in_double;
+            else if (!in_single && !in_double && (*p == ',' || *p == '}'))
+                break;
+            p++;
+        }
+        size_t n = (size_t)(p - value_start);
+        char *raw_value = safe_malloc(n + 1);
+        memcpy(raw_value, value_start, n);
+        raw_value[n] = '\0';
+        char *val = parse_yaml_scalar(raw_value);
+        add_server_kv(srv, headers, key, val);
+        free(val);
+        free(raw_value);
+        free(key);
+        p = skip_ws_local(p);
+        if (*p == ',')
+            p++;
+    }
+}
+
+static bool yaml_mcp_root_key(const char *key) {
+    return strcmp(key, "mcp_servers") == 0 || strcmp(key, "mcpServers") == 0 ||
+           strcmp(key, "servers") == 0;
+}
+
+static bool yaml_split_key_value(char *s, char **key_out, char **val_out) {
+    char *colon = strchr(s, ':');
+    if (!colon)
+        return false;
+    *colon = '\0';
+    char *key = trim_inplace(s);
+    char *val = trim_inplace(colon + 1);
+    if (!key[0])
+        return false;
+    *key_out = key;
+    *val_out = val;
+    return true;
+}
+
+static bool yaml_common_server_key(const char *key) {
+    return strcmp(key, "command") == 0 || strcmp(key, "cmd") == 0 || strcmp(key, "args") == 0 ||
+           strcmp(key, "env") == 0 || strcmp(key, "headers") == 0 ||
+           strcmp(key, "http_headers") == 0 || strcmp(key, "url") == 0 ||
+           strcmp(key, "cwd") == 0 || strcmp(key, "type") == 0 ||
+           strcmp(key, "transport") == 0 || strcmp(key, "disabled") == 0 ||
+           strcmp(key, "enabled") == 0;
+}
+
+static void yaml_apply_server_field(mcp_server_t *srv, const char *key, const char *val,
+                                    bool *disabled) {
+    if (strcmp(key, "command") == 0 || strcmp(key, "cmd") == 0) {
+        char *v = parse_yaml_scalar(val);
+        copy_str(srv->command, sizeof(srv->command), v);
+        free(v);
+    } else if (strcmp(key, "url") == 0) {
+        char *v = parse_yaml_scalar(val);
+        normalize_http_url(v, srv->url, sizeof(srv->url));
+        srv->transport = MCP_TRANSPORT_HTTP;
+        if (!srv->command[0])
+            copy_str(srv->command, sizeof(srv->command), srv->url);
+        free(v);
+    } else if (strcmp(key, "cwd") == 0) {
+        char *v = parse_yaml_scalar(val);
+        copy_str(srv->cwd, sizeof(srv->cwd), v);
+        free(v);
+    } else if (strcmp(key, "args") == 0) {
+        parse_yaml_array_strings(val, srv);
+    } else if (strcmp(key, "env") == 0) {
+        parse_yaml_inline_map(val, srv, false);
+    } else if (strcmp(key, "headers") == 0 || strcmp(key, "http_headers") == 0) {
+        parse_yaml_inline_map(val, srv, true);
+    } else if (strcmp(key, "type") == 0 || strcmp(key, "transport") == 0) {
+        char *v = parse_yaml_scalar(val);
+        if (strcasecmp(v, "http") == 0 || strcasecmp(v, "sse") == 0 ||
+            strcasecmp(v, "streamable_http") == 0)
+            srv->transport = MCP_TRANSPORT_HTTP;
+        free(v);
+    } else if (strcmp(key, "disabled") == 0) {
+        if (yaml_bool_true(val))
+            *disabled = true;
+    } else if (strcmp(key, "enabled") == 0) {
+        if (yaml_bool_false(val))
+            *disabled = true;
+    }
+    if (starts_http(srv->command)) {
+        normalize_http_url(srv->command, srv->url, sizeof(srv->url));
+        srv->transport = MCP_TRANSPORT_HTTP;
+    }
+}
+
+static void load_hermes_yaml_config(mcp_registry_t *reg, const char *path, const char *source,
+                                    bool allow_bare_servers) {
+    char *data = read_file_limited(path, 512 * 1024);
+    if (!data)
+        return;
+
+    mcp_server_t *parsed = calloc(MCP_MAX_SERVERS, sizeof(*parsed));
+    bool *disabled = calloc(MCP_MAX_SERVERS, sizeof(*disabled));
+    if (!parsed || !disabled) {
+        free(parsed);
+        free(disabled);
+        free(data);
+        return;
+    }
+
+    int parsed_count = 0;
+    int current = -1;
+    int root_indent = allow_bare_servers ? -1 : 0;
+    int server_indent = -1;
+    int section_indent = -1;
+    bool in_mcp = allow_bare_servers;
+    enum { YSEC_NONE, YSEC_ROOT, YSEC_ARGS, YSEC_ENV, YSEC_HEADERS } section = YSEC_NONE;
+
+    char *save = NULL;
+    for (char *line = strtok_r(data, "\n", &save); line; line = strtok_r(NULL, "\n", &save)) {
+        int indent = yaml_indent_width(line);
+        yaml_strip_comment(line);
+        char *s = trim_inplace(line);
+        if (!*s || strcmp(s, "---") == 0 || strcmp(s, "...") == 0)
+            continue;
+
+        if (section == YSEC_ARGS && current >= 0 && indent > section_indent && s[0] == '-') {
+            char *v = parse_yaml_scalar(s + 1);
+            if (v && v[0] && parsed[current].argc < MCP_MAX_ARGS)
+                copy_str(parsed[current].args[parsed[current].argc++],
+                         sizeof(parsed[current].args[0]), v);
+            free(v);
+            continue;
+        }
+
+        char *key = NULL;
+        char *val = NULL;
+        if (!yaml_split_key_value(s, &key, &val))
+            continue;
+
+        if (indent <= root_indent && in_mcp && !yaml_mcp_root_key(key)) {
+            in_mcp = allow_bare_servers;
+            current = -1;
+            section = YSEC_NONE;
+            if (!in_mcp)
+                continue;
+        }
+
+        if (yaml_mcp_root_key(key) && (!val[0] || strcmp(val, "{}") == 0)) {
+            in_mcp = true;
+            root_indent = indent;
+            current = -1;
+            section = YSEC_NONE;
+            continue;
+        }
+        if (!in_mcp)
+            continue;
+
+        bool server_decl = indent > root_indent && !val[0] &&
+                           (current < 0 || indent <= server_indent) &&
+                           !yaml_common_server_key(key);
+        if (server_decl) {
+            current = find_or_add_toml_server(parsed, &parsed_count, key, source);
+            server_indent = indent;
+            section_indent = indent;
+            section = YSEC_ROOT;
+            continue;
+        }
+
+        if (current < 0)
+            continue;
+        if (indent <= server_indent)
+            continue;
+
+        mcp_server_t *srv = &parsed[current];
+        if ((section == YSEC_ENV || section == YSEC_HEADERS) && indent > section_indent) {
+            char *v = parse_yaml_scalar(val);
+            add_server_kv(srv, section == YSEC_HEADERS, key, v);
+            free(v);
+            continue;
+        }
+
+        if (!val[0] && strcmp(key, "args") == 0) {
+            section = YSEC_ARGS;
+            section_indent = indent;
+            continue;
+        }
+        if (!val[0] && strcmp(key, "env") == 0) {
+            section = YSEC_ENV;
+            section_indent = indent;
+            continue;
+        }
+        if (!val[0] && (strcmp(key, "headers") == 0 || strcmp(key, "http_headers") == 0)) {
+            section = YSEC_HEADERS;
+            section_indent = indent;
+            continue;
+        }
+
+        section = YSEC_ROOT;
+        yaml_apply_server_field(srv, key, val, &disabled[current]);
+    }
+
+    for (int i = 0; i < parsed_count; i++) {
+        if (disabled[i])
+            continue;
+        if (parsed[i].transport == MCP_TRANSPORT_HTTP && !parsed[i].url[0])
+            normalize_http_url(parsed[i].command, parsed[i].url, sizeof(parsed[i].url));
+        start_configured_server(reg, &parsed[i]);
+    }
+
+    free(disabled);
+    free(parsed);
+    free(data);
+}
+
 /* ── Public API ────────────────────────────────────────────────────────── */
 
 int mcp_init(mcp_registry_t *reg) {
@@ -1567,6 +1960,15 @@ int mcp_init(mcp_registry_t *reg) {
     snprintf(path, sizeof(path), "%s/.codex/config.toml", home);
     load_toml_config(reg, path, "codex:global");
     load_toml_config(reg, ".codex/config.toml", "project:codex");
+
+    snprintf(path, sizeof(path), "%s/.hermes/config.yaml", home);
+    load_hermes_yaml_config(reg, path, "hermes:config", false);
+    snprintf(path, sizeof(path), "%s/.hermes/config.yml", home);
+    load_hermes_yaml_config(reg, path, "hermes:config", false);
+    snprintf(path, sizeof(path), "%s/.hermes/mcp_servers.yaml", home);
+    load_hermes_yaml_config(reg, path, "hermes:mcp-servers", true);
+    snprintf(path, sizeof(path), "%s/.hermes/mcp_servers.yml", home);
+    load_hermes_yaml_config(reg, path, "hermes:mcp-servers", true);
 
     /* Phase 2: connect every collected server concurrently so one slow or dead
      * endpoint can't stall the rest behind a per-RPC timeout. */

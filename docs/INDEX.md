@@ -16,12 +16,22 @@ This documentation set is intended as a full-codebase reference for `dsco-cli`, 
 - [C Module Reference](C_MODULE_REFERENCE.md)
 - [API Reference](API_REFERENCE.md)
 - [Built-in Tool Catalog](TOOL_CATALOG.md)
+- [External Tool and Integration Catalog](EXTERNAL_TOOL_CATALOG.md)
 - [MetaConstruct DSL](META_CONSTRUCT_DSL.md)
 - [Operations, Config, Storage, and Troubleshooting](OPERATIONS.md)
 - [Constants and Environment Index](CONSTANTS_ENV_INDEX.md)
+- [Repository Coverage Manifest](REPO_COVERAGE.md)
+- [Chronicle TokenLedger](CHRONICLE_TOKENLEDGER.md)
+- [Integration Catalog](INTEGRATION_CATALOG.md)
+- [Swarm Parallelism Proof](SWARM_PARALLELISM_PROOF.md)
+- [Cosmopolitan Build Lane](COSMOPOLITAN.md)
+- [Local Control Plane](LOCAL_CONTROL_PLANE.md)
+- [Distributed Agent Performance Doctrine](DISTRIBUTED_AGENT_PERFORMANCE.md)
+- [Avian Mechanisms](AVIAN_MECHANISMS.md)
 - [Sakana Fugu Provider](SAKANA_FUGU_PROVIDER.md)
 - [Plugin Manifest + Lockfile Spec](PLUGIN_MANIFEST_LOCK_SPEC.md)
 - [How-To Guides](HOW_TO.md)
+- [Examples Cookbook](EXAMPLES.md)
 - [Architecture Diagrams](DIAGRAMS.md)
 - [Docs Contributing Guide](DOCS_CONTRIBUTING.md)
 - [Runbooks](RUNBOOKS.md)
@@ -57,11 +67,15 @@ This documentation set is intended as a full-codebase reference for `dsco-cli`, 
 - `tests/` for supported runtime and CLI tests
 - `scripts/` for build, packaging, docs-generation, and provider smoke helpers
 - `web/` for the local web surface
+- `provider_metadata/`, `npm/`, `Formula/`, `demos/`, `gsl/`, and `vendor/` for metadata, packaging, examples, and compatibility code
 
 ## Reading Order
 
 1. Read [Architecture & Runtime Flows](ARCHITECTURE.md) for system-level mental model.
 2. Use [C Module Reference](C_MODULE_REFERENCE.md) for per-file implementation details.
 3. Use [Tool Catalog](TOOL_CATALOG.md) when working on tool selection/execution behavior.
-4. Use [Operations](OPERATIONS.md) for env/config/runtime storage and troubleshooting.
-5. Use [Runbooks](RUNBOOKS.md) for operational procedures.
+4. Use [External Tool and Integration Catalog](EXTERNAL_TOOL_CATALOG.md) for the cached Codex app-directory universe.
+5. Use [Chronicle TokenLedger](CHRONICLE_TOKENLEDGER.md) for local activity/provenance semantics.
+6. Use [Integration Catalog](INTEGRATION_CATALOG.md) when working on external app/MCP metadata.
+7. Use [Operations](OPERATIONS.md) for env/config/runtime storage and troubleshooting.
+8. Use [Runbooks](RUNBOOKS.md) for operational procedures.

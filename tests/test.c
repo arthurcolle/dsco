@@ -12,9 +12,12 @@
 #include "mcp_names.h"
 #include "plugin.h"
 #include "provider.h"
+#include "provider_pool.h"
 #include "provider_profiles.h"
 #include <curl/curl.h>
 #include "codex_cache.h"
+#include "codex_app_directory.h"
+#include "chronicle.h"
 #include "router.h"
 #include "setup.h"
 #include "swarm.h"
@@ -37,6 +40,7 @@
 #include <sys/stat.h>
 #include <sys/wait.h>
 #include <fcntl.h>
+#include <dirent.h>
 
 /* Provide g_interrupted that agent.c normally defines */
 volatile int g_interrupted = 0;
@@ -131,6 +135,34 @@ static void test_restore_env_list(test_env_snapshot_t vars[], size_t count) {
 
 static int test_count_substr(const char *haystack, const char *needle);
 static bool test_has_single_underscore_mcp_name_field(const char *json);
+
+static void test_rm_rf(const char *path) {
+    if (!path || strncmp(path, "/tmp/dsco_", 10) != 0)
+        return;
+
+    struct stat st;
+    if (lstat(path, &st) != 0)
+        return;
+    if (S_ISDIR(st.st_mode)) {
+        DIR *dir = opendir(path);
+        if (dir) {
+            struct dirent *ent;
+            while ((ent = readdir(dir)) != NULL) {
+                if (strcmp(ent->d_name, ".") == 0 || strcmp(ent->d_name, "..") == 0)
+                    continue;
+                char child[1024];
+                int n = snprintf(child, sizeof(child), "%s/%s", path, ent->d_name);
+                if (n > 0 && (size_t)n < sizeof(child))
+                    test_rm_rf(child);
+            }
+            closedir(dir);
+        }
+        (void)rmdir(path);
+        return;
+    }
+    (void)unlink(path);
+}
+
 
 static bool test_write_temp_script(char *path, size_t path_len, const char *body) {
     char tmpl[] = "/tmp/dsco_swarm_XXXXXX";
@@ -1479,6 +1511,32 @@ static void test_provider_request_model_prefix_routing(void) {
     free(openrouter_req);
     provider_free(openrouter);
 
+    session_state_t hf_session;
+    session_state_init(&hf_session, "hf/meta-llama/Llama-3.3-70B-Instruct");
+    provider_t *hf = provider_create("hf");
+    ASSERT(hf != NULL, "hf alias should create provider");
+    char *hf_req = hf->build_request(hf, &conv, &hf_session, 1024, NULL);
+    ASSERT(hf_req != NULL, "huggingface request should not be NULL");
+    ASSERT(strstr(hf_req, "\"model\":\"meta-llama/Llama-3.3-70B-Instruct\"") != NULL,
+           "Hugging Face should receive model id after hf namespace");
+    ASSERT(strstr(hf_req, "\"model\":\"hf/meta-llama/Llama-3.3-70B-Instruct\"") == NULL,
+           "Hugging Face request should strip hf alias namespace");
+    free(hf_req);
+    provider_free(hf);
+
+    session_state_t nvidia_session;
+    session_state_init(&nvidia_session, "nvidia/meta/llama-3.1-70b-instruct");
+    provider_t *nvidia = provider_create("nvidia-nim");
+    ASSERT(nvidia != NULL, "nvidia-nim alias should create provider");
+    char *nvidia_req = nvidia->build_request(nvidia, &conv, &nvidia_session, 1024, NULL);
+    ASSERT(nvidia_req != NULL, "nvidia request should not be NULL");
+    ASSERT(strstr(nvidia_req, "\"model\":\"meta/llama-3.1-70b-instruct\"") != NULL,
+           "NVIDIA should receive model id after nvidia namespace");
+    ASSERT(strstr(nvidia_req, "\"model\":\"nvidia/meta/llama-3.1-70b-instruct\"") == NULL,
+           "NVIDIA request should strip native namespace");
+    free(nvidia_req);
+    provider_free(nvidia);
+
     conv_free(&conv);
     PASS();
 }
@@ -2311,6 +2369,69 @@ static void test_tool_execute_unknown(void) {
     PASS();
 }
 
+static void test_tool_registry_expanded_builtin_count(void) {
+    TEST("tool registry expanded built-in count");
+    tools_init();
+    ASSERT(tools_builtin_count() >= 172, "built-in tool registry should expose expanded tools");
+    PASS();
+}
+
+static void test_expanded_text_tools_json_serializers(void) {
+    TEST("expanded text tools emit structured JSON");
+    tools_init();
+    char result[8192] = {0};
+
+    bool ok = tools_execute("csv_parse",
+                            "{\"text\":\"a,b\\n1,2\\n\",\"headers\":true}",
+                            result, sizeof(result));
+    ASSERT(ok, "csv_parse should succeed");
+    ASSERT(strstr(result, "\"rows\":[[\"1\",\"2\"]]") != NULL,
+           "csv_parse rows should be valid JSON strings");
+    ASSERT(strstr(result, "\"headers\":[\"a\",\"b\"]") != NULL,
+           "csv_parse headers should be valid JSON strings");
+    ASSERT(strstr(result, "\"\"1\"\"") == NULL, "csv_parse must not double-quote values");
+
+    result[0] = '\0';
+    ok = tools_execute("regex_match",
+                       "{\"text\":\"ab xx ab\",\"pattern\":\"ab\",\"global\":true}",
+                       result, sizeof(result));
+    ASSERT(ok, "regex_match should succeed");
+    ASSERT(strstr(result, "\"matches\":[\"ab\",\"ab\"]") != NULL,
+           "regex_match should return valid JSON string matches");
+    ASSERT(strstr(result, "\"\"ab\"\"") == NULL, "regex_match must not double-quote matches");
+
+    result[0] = '\0';
+    ok = tools_execute("text_diff",
+                       "{\"text_a\":\"one\\ntwo\\n\",\"text_b\":\"one\\nthree\\n\"}",
+                       result, sizeof(result));
+    ASSERT(ok, "text_diff should succeed");
+    ASSERT(strstr(result, "{\"diff\":\"") == result, "text_diff should return a JSON object");
+    ASSERT(strstr(result, "\"\"}") == NULL, "text_diff must not add an extra closing quote");
+    PASS();
+}
+
+static void test_discover_tools_grouped_json_has_no_leading_commas(void) {
+    TEST("discover_tools grouped JSON has no leading commas");
+    tools_init();
+    char result[32768] = {0};
+
+    bool ok = tools_execute("discover_tools", "{\"category\":\"pipeline\",\"limit\":10}",
+                            result, sizeof(result));
+    ASSERT(ok, "discover_tools category listing should succeed");
+    ASSERT(strstr(result, "\"tools\":[,") == NULL,
+           "discover_tools grouped listing must not emit a leading comma");
+    ASSERT(strstr(result, "\"tools\":[{\"category\":\"pipeline\"") != NULL,
+           "discover_tools category listing should start with a category object");
+
+    result[0] = '\0';
+    ok = tools_execute("discover_tools", "{\"category\":\"mcp\",\"limit\":10}",
+                       result, sizeof(result));
+    ASSERT(ok, "discover_tools empty/mcp listing should succeed");
+    ASSERT(strstr(result, "\"tools\":[,") == NULL,
+           "discover_tools filtered listing must not emit a leading comma");
+    PASS();
+}
+
 static void test_tool_execute_self_exiting_alias(void) {
     TEST("tools_execute self_exiting alias");
     tools_init();
@@ -3028,6 +3149,83 @@ static void test_tool_agent_wait_no_agents(void) {
     bool ok = tools_execute("agent_wait", "{\"timeout\":5}", result, sizeof(result));
     ASSERT(!ok, "agent_wait should fail when there are no agents");
     ASSERT(strstr(result, "no agents") != NULL, "agent_wait should report no agents");
+    PASS();
+}
+
+static void test_hermes_agent_mcp_preset(void) {
+    TEST("Hermes Agent MCP preset");
+    tools_init();
+
+    char result[16384];
+    result[0] = '\0';
+    bool ok = tools_execute("hermes_agent", "{\"action\":\"mcp_preset\"}", result, sizeof(result));
+    ASSERT(ok, result);
+    ASSERT(strstr(result, "\"command\":\"hermes\"") != NULL,
+           "Hermes preset should use hermes executable");
+    ASSERT(strstr(result, "\"args\":[\"mcp\",\"serve\"]") != NULL,
+           "Hermes preset should use mcp serve args");
+    ASSERT(strstr(result, "~/.dsco/mcp.json") != NULL,
+           "Hermes preset should target dsco MCP config");
+    ASSERT(strstr(result, "~/.hermes/config.yaml") != NULL,
+           "Hermes config import path should be documented");
+    PASS();
+}
+
+static void test_hermes_agent_acp_preset_is_agent_client_protocol(void) {
+    TEST("Hermes Agent ACP preset names Agent Client Protocol");
+    tools_init();
+
+    char result[16384];
+    result[0] = '\0';
+    bool ok = tools_execute("hermes_agent", "{\"action\":\"acp_preset\"}", result, sizeof(result));
+    ASSERT(ok, result);
+    ASSERT(strstr(result, "\"protocol\":\"Agent Client Protocol\"") != NULL,
+           "Hermes ACP should be classified as Agent Client Protocol");
+    ASSERT(strstr(result, "\"args\":[\"acp\"]") != NULL,
+           "Hermes ACP preset should launch hermes acp");
+    ASSERT(strstr(result, "not the same ACP as agentic commerce") != NULL,
+           "Hermes ACP note should avoid commerce ACP confusion");
+    PASS();
+}
+
+static void test_hermes_agent_tools_surface(void) {
+    TEST("Hermes Agent MCP tool surface");
+    tools_init();
+
+    char result[16384];
+    result[0] = '\0';
+    bool ok = tools_execute("hermes_agent", "{\"action\":\"tools\"}", result, sizeof(result));
+    ASSERT(ok, result);
+    ASSERT(strstr(result, "conversations_list") != NULL,
+           "Hermes MCP surface should include conversation listing");
+    ASSERT(strstr(result, "messages_send") != NULL,
+           "Hermes MCP surface should include message sending");
+    ASSERT(strstr(result, "permissions_respond") != NULL,
+           "Hermes MCP surface should include approval response bridge");
+    PASS();
+}
+
+static void test_hermes_agent_capability_showcase(void) {
+    TEST("Hermes Agent capability showcase");
+    tools_init();
+
+    char result[32768];
+    result[0] = '\0';
+    bool ok = tools_execute("hermes_agent", "{\"action\":\"capabilities\"}", result, sizeof(result));
+    ASSERT(ok, result);
+    ASSERT(strstr(result, "\"capability_count\":") != NULL,
+           "capability showcase should count surfaced capabilities");
+    ASSERT(strstr(result, "mcp_server_bridge") != NULL, "showcase should include MCP bridge");
+    ASSERT(strstr(result, "acp_editor_server") != NULL,
+           "showcase should include Agent Client Protocol editor mode");
+    ASSERT(strstr(result, "messaging_gateway") != NULL,
+           "showcase should include Hermes messaging gateway");
+    ASSERT(strstr(result, "skills_system") != NULL, "showcase should include skills");
+    ASSERT(strstr(result, "persistent_memory") != NULL, "showcase should include memory");
+    ASSERT(strstr(result, "provider_routing") != NULL, "showcase should include provider routing");
+    ASSERT(strstr(result, "terminal_backends") != NULL,
+           "showcase should include terminal backends");
+    ASSERT(strstr(result, "approval_security") != NULL, "showcase should include approval/security");
     PASS();
 }
 
@@ -6154,6 +6352,334 @@ static void test_tools_normalize_schema_scalars(void) {
     PASS();
 }
 
+static void test_codex_app_directory_importer_variants(void) {
+    TEST("codex app directory importer variants");
+    test_env_snapshot_t envs[] = {{"DSCO_CODEX_APP_DIRECTORY", "", false}};
+    test_capture_env_list(envs, sizeof(envs) / sizeof(envs[0]));
+
+    char path[256];
+    snprintf(path, sizeof(path), "/tmp/dsco_codex_apps_variants_%d.json", (int)getpid());
+    FILE *f = fopen(path, "w");
+    ASSERT(f != NULL, "open variant codex app directory");
+    fprintf(f,
+            "["
+            "{\"connectorId\":\"toolcheck\",\"displayName\":\"ToolCheck\","
+            "\"distributionChannel\":\"ecosystem-directory\",\"category\":\"Governance\","
+            "\"interactive\":true,\"consequential\":true,\"is_enabled\":true,"
+            "\"is_accessible\":false,\"catalogStatus\":\"stale\"},"
+            "{\"slug\":\"common-room\",\"title\":\"Common Room\","
+            "\"categories\":[\"Business\",\"GTM\"],\"retrievable\":true,\"sync\":true,"
+            "\"isEnabled\":true,\"isAccessible\":true}]\n");
+    fclose(f);
+    setenv("DSCO_CODEX_APP_DIRECTORY", path, 1);
+
+    codex_app_directory_t dir;
+    codex_app_directory_init(&dir);
+    char err[128];
+    ASSERT(codex_app_directory_load_file(&dir, NULL, err, sizeof(err)),
+           "load app directory through env default");
+    ASSERT(dir.count == 2, "imports bare-array connectors");
+    ASSERT(dir.stale_count == 1, "counts stale connector");
+    ASSERT(dir.consequential_count == 1, "counts consequential connector");
+    ASSERT(dir.retrievable_count == 1 && dir.sync_count == 1, "counts retrievable sync connector");
+    const codex_app_directory_entry_t *toolcheck = codex_app_directory_find(&dir, "ToolCheck");
+    ASSERT(toolcheck != NULL, "find connector by display name");
+    ASSERT((toolcheck->action_flags & DSCO_INTEGRATION_ACTION_REQUIRES_CONFIRMATION) != 0,
+           "boolean consequential maps to confirmation");
+    ASSERT((toolcheck->action_flags & DSCO_INTEGRATION_ACTION_INTERACTIVE) != 0,
+           "boolean interactive maps to interactive action");
+    const codex_app_directory_entry_t *common_room = codex_app_directory_find(&dir, "common-room");
+    ASSERT(common_room != NULL, "find connector by slug");
+    ASSERT((common_room->action_flags & DSCO_INTEGRATION_ACTION_UNTRUSTED_CONTENT) != 0,
+           "retrievable/sync connector marks untrusted content");
+    codex_app_directory_free(&dir);
+
+    ASSERT(!codex_app_directory_load_file(&dir, "/tmp/dsco_missing_catalog_does_not_exist.json", err,
+                                          sizeof(err)),
+           "missing catalog fails closed");
+    codex_app_directory_free(&dir);
+    unlink(path);
+    test_restore_env_list(envs, sizeof(envs) / sizeof(envs[0]));
+    PASS();
+}
+
+static void test_codex_app_directory_importer_and_integration_discovery(void) {
+    TEST("codex app directory importer and integration discovery");
+    char path[256];
+    snprintf(path, sizeof(path), "/tmp/dsco_codex_apps_%d.json", (int)getpid());
+    FILE *f = fopen(path, "w");
+    ASSERT(f != NULL, "open temp codex app directory");
+    fprintf(f,
+            "{\"apps\":["
+            "{\"id\":\"github\",\"connector_id\":\"github\",\"display_name\":\"GitHub\","
+            "\"distribution_channel\":\"ecosystem-directory\",\"categories\":[\"Developer Tools\"],"
+            "\"labels\":[\"retrievable\",\"interactive\"],\"isEnabled\":true,\"isAccessible\":false},"
+            "{\"id\":\"stripe\",\"connector_id\":\"stripe\",\"display_name\":\"Stripe\","
+            "\"categories\":[\"Finance\"],\"labels\":[\"consequential\",\"sync\"],"
+            "\"isEnabled\":true,\"isAccessible\":true}]}\n");
+    fclose(f);
+
+    codex_app_directory_t dir;
+    codex_app_directory_init(&dir);
+    char err[128];
+    ASSERT(codex_app_directory_load_file(&dir, path, err, sizeof(err)), "load app directory");
+    ASSERT(dir.count == 2, "imports two connectors");
+    const codex_app_directory_entry_t *stripe = codex_app_directory_find(&dir, "stripe");
+    ASSERT(stripe != NULL, "find stripe connector");
+    ASSERT((stripe->action_flags & DSCO_INTEGRATION_ACTION_REQUIRES_CONFIRMATION) != 0,
+           "consequential connector is confirmation-gated");
+    ASSERT((stripe->action_flags & DSCO_INTEGRATION_ACTION_UNTRUSTED_CONTENT) != 0,
+           "sync connector marks untrusted read content");
+    codex_app_directory_free(&dir);
+
+    tools_init();
+    tools_reset_external();
+    tools_register_external("mcp__github__get_issue", "Read GitHub issue",
+                            "{\"type\":\"object\",\"properties\":{}}",
+                            test_external_tool_stub, NULL);
+    tools_register_external_metadata("mcp__github__get_issue", "github", "GitHub",
+                                     "ecosystem-directory", "Developer Tools",
+                                     "retrievable,interactive", "public_app",
+                                     DSCO_INTEGRATION_ACTION_READ |
+                                         DSCO_INTEGRATION_ACTION_UNTRUSTED_CONTENT |
+                                         DSCO_INTEGRATION_ACTION_INTERACTIVE,
+                                     "cached");
+
+    char input[512];
+    snprintf(input, sizeof(input), "{\"path\":\"%s\",\"query\":\"GitHub\",\"profile\":\"engineering\"}", path);
+    char result[16384];
+    bool ok = tools_execute("discover_integrations", input, result, sizeof(result));
+    ASSERT(ok, "discover_integrations succeeds");
+    ASSERT(strstr(result, "\"display_name\":\"GitHub\"") != NULL,
+           "discover_integrations returns GitHub");
+    ASSERT(strstr(result, "\"live\":true") != NULL, "live MCP status is surfaced");
+    ASSERT(strstr(result, "\"inaccessible\":true") != NULL,
+           "cached inaccessible status is surfaced");
+
+    snprintf(input, sizeof(input), "{\"path\":\"%s\"}", path);
+    ok = tools_execute("dsco_doctor_integrations", input, result, sizeof(result));
+    ASSERT(ok, "doctor integrations succeeds");
+    ASSERT(strstr(result, "\"catalog_loaded\":true") != NULL, "doctor loads catalog");
+    ASSERT(strstr(result, "\"mutating_live\":0") != NULL, "doctor counts mutating live tools");
+
+    tools_reset_external();
+    unlink(path);
+    PASS();
+}
+
+static void test_integration_discovery_profiles_pagination_and_doctor_flags(void) {
+    TEST("integration discovery profiles pagination and doctor flags");
+    char path[256];
+    snprintf(path, sizeof(path), "/tmp/dsco_codex_apps_profiles_%d.json", (int)getpid());
+    FILE *f = fopen(path, "w");
+    ASSERT(f != NULL, "open profile codex app directory");
+    fprintf(f,
+            "{\"connectors\":["
+            "{\"id\":\"toolcheck\",\"connector_id\":\"toolcheck\",\"display_name\":\"ToolCheck\","
+            "\"categories\":[\"Governance\",\"Agent Runtime\"],"
+            "\"labels\":[\"interactive\",\"consequential\"],\"isEnabled\":true,"
+            "\"isAccessible\":false,\"catalog_status\":\"stale\"},"
+            "{\"id\":\"hubspot\",\"connector_id\":\"hubspot\",\"display_name\":\"HubSpot\","
+            "\"categories\":[\"Business\",\"Sales\",\"GTM\"],\"labels\":[\"retrievable\"],"
+            "\"isEnabled\":true,\"isAccessible\":true},"
+            "{\"id\":\"github\",\"connector_id\":\"github\",\"display_name\":\"GitHub\","
+            "\"categories\":[\"Developer Tools\"],\"labels\":[\"retrievable\"],"
+            "\"isEnabled\":true,\"isAccessible\":true}]}\n");
+    fclose(f);
+
+    tools_init();
+    tools_reset_external();
+    tools_register_external("mcp__toolcheck__scan", "Run ToolCheck scan",
+                            "{\"type\":\"object\",\"properties\":{}}",
+                            test_external_tool_stub, NULL);
+    tools_register_external_metadata("mcp__toolcheck__scan", "toolcheck", "ToolCheck",
+                                     "ecosystem-directory", "Governance,Agent Runtime",
+                                     "interactive,consequential", "control_plane",
+                                     DSCO_INTEGRATION_ACTION_WRITE |
+                                         DSCO_INTEGRATION_ACTION_ADMIN |
+                                         DSCO_INTEGRATION_ACTION_REQUIRES_CONFIRMATION |
+                                         DSCO_INTEGRATION_ACTION_INTERACTIVE,
+                                     "stale");
+    tools_register_external("mcp__unmapped__delete_record", "Delete an unmapped record",
+                            "{\"type\":\"object\",\"properties\":{}}",
+                            test_external_tool_stub, NULL);
+
+    char input[512];
+    char result[32768];
+    snprintf(input, sizeof(input),
+             "{\"path\":\"%s\",\"profile\":\"governed_agent_runtime\",\"query\":\"ToolCheck\"}",
+             path);
+    bool ok = tools_execute("discover_integrations", input, result, sizeof(result));
+    ASSERT(ok, "discover_integrations governed profile succeeds");
+    ASSERT(strstr(result, "\"display_name\":\"ToolCheck\"") != NULL,
+           "governed profile returns ToolCheck");
+    ASSERT(strstr(result, "\"stale\":true") != NULL, "stale catalog status is surfaced");
+    ASSERT(strstr(result, "requires_confirmation") != NULL,
+           "consequential/control-plane actions require confirmation");
+    ASSERT(strstr(result, "\"requires_oauth\":true") != NULL,
+           "inaccessible cached connector reports OAuth requirement");
+
+    snprintf(input, sizeof(input), "{\"path\":\"%s\",\"profile\":\"gtm\"}", path);
+    ok = tools_execute("discover_integrations", input, result, sizeof(result));
+    ASSERT(ok, "discover_integrations gtm profile succeeds");
+    ASSERT(strstr(result, "\"display_name\":\"HubSpot\"") != NULL, "gtm profile returns HubSpot");
+    ASSERT(strstr(result, "\"display_name\":\"GitHub\"") == NULL,
+           "gtm profile excludes engineering-only GitHub");
+
+    snprintf(input, sizeof(input), "{\"path\":\"%s\",\"limit\":1}", path);
+    ok = tools_execute("discover_integrations", input, result, sizeof(result));
+    ASSERT(ok, "discover_integrations pagination succeeds");
+    ASSERT(strstr(result, "\"limit\":1") != NULL, "pagination echoes limit");
+    ASSERT(strstr(result, "\"has_more\":true") != NULL, "pagination reports more rows");
+
+    snprintf(input, sizeof(input), "{\"path\":\"%s\"}", path);
+    ok = tools_execute("dsco_doctor_integrations", input, result, sizeof(result));
+    ASSERT(ok, "doctor integrations succeeds");
+    ASSERT(strstr(result, "\"stale_catalog\":1") != NULL, "doctor counts stale catalog");
+    ASSERT(strstr(result, "\"live_without_catalog_metadata\":1") != NULL,
+           "doctor counts live tools without catalog metadata");
+    ASSERT(strstr(result, "mutating integrations require confirmation-gated policy") != NULL,
+           "doctor warns on mutating live integrations");
+    ASSERT(strstr(result, "control-plane tools") != NULL,
+           "doctor warns on governance/control-plane integrations");
+
+    tools_reset_external();
+    unlink(path);
+    PASS();
+}
+
+static void test_chronicle_local_event_blob_roundtrip(void) {
+    TEST("chronicle local event blob roundtrip");
+    test_env_snapshot_t envs[] = {{"DSCO_CHRONICLE_DIR", "", false},
+                                  {"DSCO_CHRONICLE_MODE", "", false},
+                                  {"DSCO_CHRONICLE_SESSION_ID", "", false}};
+    test_capture_env_list(envs, sizeof(envs) / sizeof(envs[0]));
+    chronicle_stop();
+
+    char root[256];
+    snprintf(root, sizeof(root), "/tmp/dsco_chronicle_roundtrip_%d", (int)getpid());
+    test_rm_rf(root);
+    setenv("DSCO_CHRONICLE_DIR", root, 1);
+    setenv("DSCO_CHRONICLE_MODE", "full-local", 1);
+
+    ASSERT(chronicle_start(&(chronicle_start_opts_t){.provider = "test-provider",
+                                                     .model = "test-model",
+                                                     .mode = "test",
+                                                     .instance_id = "test-instance"}),
+           "chronicle starts");
+    ASSERT(chronicle_ready(), "chronicle ready after start");
+    ASSERT(strstr(chronicle_db_path(), "chronicle.sqlite") != NULL, "chronicle db path set");
+    const char *session = chronicle_session_id();
+    ASSERT(session && strlen(session) == 36, "chronicle session id is uuid-ish");
+
+    char trace_id[37], turn_span[37], llm_span[37], tool_span[37], sha[65];
+    chronicle_new_id(trace_id, sizeof(trace_id));
+    ASSERT(chronicle_span_begin(trace_id, NULL, "turn", "test_turn", NULL, turn_span),
+           "turn span begins");
+    ASSERT(chronicle_user_message(trace_id, turn_span, "hello chronicle"), "user message recorded");
+    ASSERT(chronicle_context_materialized(trace_id, turn_span, "{\"messages\":[]}", 7),
+           "context materialized recorded");
+    ASSERT(chronicle_span_begin(trace_id, turn_span, "llm", "test_llm", NULL, llm_span),
+           "llm span begins");
+    ASSERT(chronicle_llm_request(trace_id, llm_span, "test-provider", "test-model",
+                                 "{\"input\":\"hello\"}", 8),
+           "llm request recorded");
+    ASSERT(chronicle_tool_call_start(trace_id, turn_span, "test_tool", "toolu_test",
+                                     "{\"x\":1}", tool_span),
+           "tool call start recorded");
+    ASSERT(chronicle_tool_call_end(trace_id, tool_span, "test_tool", "tool result", true, false,
+                                   12.5),
+           "tool call end recorded");
+    ASSERT(chronicle_llm_response(trace_id, llm_span, "test-provider", "test-model", "answer",
+                                  "{\"raw\":true}", 8, 2, 1, 0, 0, 0.001, 23.0, "stop",
+                                  "gen-test"),
+           "llm response recorded");
+    ASSERT(chronicle_blob_put_text("blob payload", "test.blob", "test", sha, sizeof(sha)),
+           "blob stored");
+    const char *ctype = NULL;
+    char *blob = chronicle_read_blob_hex(sha, 1024, &ctype);
+    ASSERT(blob && strcmp(blob, "blob payload") == 0, "blob reads back by sha");
+    ASSERT(ctype && strstr(ctype, "text/plain") != NULL, "blob content type preserved");
+    free(blob);
+    ASSERT(chronicle_span_end(llm_span, "ok", NULL), "llm span ends");
+    ASSERT(chronicle_span_end(turn_span, "ok", NULL), "turn span ends");
+
+    char *activity = chronicle_build_activity_json(100, session);
+    ASSERT(activity != NULL, "activity json builds");
+    ASSERT(strstr(activity, "session.started") != NULL, "activity contains session start");
+    ASSERT(strstr(activity, "context.materialized") != NULL, "activity contains context event");
+    ASSERT(strstr(activity, "llm.request.created") != NULL, "activity contains llm request");
+    ASSERT(strstr(activity, "tool.call.completed") != NULL, "activity contains tool completion");
+    ASSERT(strstr(activity, "llm.response.completed") != NULL, "activity contains llm response");
+    free(activity);
+
+    char *html = chronicle_build_activity_html(10, session);
+    ASSERT(html && strstr(html, "DSCO Chronicle") != NULL, "activity html builds");
+    free(html);
+
+    chronicle_stop();
+    ASSERT(!chronicle_ready(), "chronicle not ready after stop");
+    test_rm_rf(root);
+    test_restore_env_list(envs, sizeof(envs) / sizeof(envs[0]));
+    PASS();
+}
+
+static void test_chronicle_modes_and_delta_policy(void) {
+    TEST("chronicle modes and delta policy");
+    test_env_snapshot_t envs[] = {{"DSCO_CHRONICLE_DIR", "", false},
+                                  {"DSCO_CHRONICLE_MODE", "", false},
+                                  {"DSCO_CHRONICLE_SESSION_ID", "", false}};
+    test_capture_env_list(envs, sizeof(envs) / sizeof(envs[0]));
+    chronicle_stop();
+
+    char root[256];
+    snprintf(root, sizeof(root), "/tmp/dsco_chronicle_modes_%d", (int)getpid());
+    test_rm_rf(root);
+    setenv("DSCO_CHRONICLE_DIR", root, 1);
+
+    setenv("DSCO_CHRONICLE_MODE", "off", 1);
+    ASSERT(!chronicle_start(&(chronicle_start_opts_t){.provider = "p", .model = "m"}),
+           "chronicle off mode does not start");
+    ASSERT(!chronicle_ready(), "chronicle remains not ready in off mode");
+
+    setenv("DSCO_CHRONICLE_MODE", "metadata", 1);
+    ASSERT(chronicle_start(&(chronicle_start_opts_t){.provider = "p", .model = "m"}),
+           "chronicle metadata mode starts");
+    char trace_id[37], span_id[37];
+    chronicle_new_id(trace_id, sizeof(trace_id));
+    ASSERT(chronicle_span_begin(trace_id, NULL, "turn", "metadata_turn", NULL, span_id),
+           "metadata span begins");
+    ASSERT(chronicle_user_message(trace_id, span_id, "secret text that should not be in metadata"),
+           "metadata user message records");
+    ASSERT(!chronicle_llm_delta(trace_id, span_id, "text", "delta hidden"),
+           "metadata mode does not record streaming deltas");
+    char *activity = chronicle_build_activity_json(50, chronicle_session_id());
+    ASSERT(activity && strstr(activity, "\"byte_len\":") != NULL,
+           "metadata mode records byte length");
+    ASSERT(strstr(activity, "secret text that should not be in metadata") == NULL,
+           "metadata mode does not inline private text");
+    free(activity);
+    chronicle_stop();
+
+    setenv("DSCO_CHRONICLE_MODE", "blackbox", 1);
+    ASSERT(chronicle_start(&(chronicle_start_opts_t){.provider = "p", .model = "m"}),
+           "chronicle blackbox mode starts");
+    chronicle_new_id(trace_id, sizeof(trace_id));
+    ASSERT(chronicle_span_begin(trace_id, NULL, "llm", "blackbox_llm", NULL, span_id),
+           "blackbox span begins");
+    ASSERT(chronicle_llm_delta(trace_id, span_id, "text", "visible delta"),
+           "blackbox mode records streaming deltas");
+    activity = chronicle_build_activity_json(50, chronicle_session_id());
+    ASSERT(activity && strstr(activity, "llm.response.delta") != NULL,
+           "blackbox activity contains delta event");
+    free(activity);
+    chronicle_stop();
+
+    test_rm_rf(root);
+    test_restore_env_list(envs, sizeof(envs) / sizeof(envs[0]));
+    PASS();
+}
+
 static void test_tools_execute_mcp_double_underscore_alias(void) {
     TEST("tools_execute resolves mcp__ alias");
     tools_init();
@@ -7535,6 +8061,24 @@ static void test_provider_detect_namespaced_models(void) {
            "moonshotai namespaced model should route to native Moonshot");
     ASSERT(strcmp(provider_detect("sakana/fugu-ultra", NULL), "sakana") == 0,
            "sakana namespaced model should route to native Sakana");
+    ASSERT(strcmp(provider_detect("cerebras/qwen-3-235b-a22b-instruct-2507", NULL),
+                  "cerebras") == 0,
+           "cerebras namespaced model should route to native Cerebras");
+    ASSERT(strcmp(provider_detect("huggingface/meta-llama/Llama-3.3-70B-Instruct", NULL),
+                  "huggingface") == 0,
+           "huggingface namespaced model should route to native Hugging Face");
+    ASSERT(strcmp(provider_detect("hf/meta-llama/Llama-3.3-70B-Instruct", NULL),
+                  "huggingface") == 0,
+           "hf alias namespace should route to native Hugging Face");
+    ASSERT(strcmp(provider_detect("nvidia/meta/llama-3.1-70b-instruct", NULL),
+                  "nvidia") == 0,
+           "nvidia namespaced model should route to native NVIDIA");
+    ASSERT(strcmp(provider_detect("dashscope/qwen3-coder-plus", NULL), "alibaba") == 0,
+           "dashscope namespace should route to native Alibaba");
+    ASSERT(strcmp(provider_detect("azure/gpt-4.1", NULL), "azure-foundry") == 0,
+           "azure namespace should route to Azure Foundry");
+    ASSERT(strcmp(provider_detect("zai/glm-5.2", NULL), "zai") == 0,
+           "zai namespace should route to native Z.AI");
     ASSERT(strcmp(provider_detect("openrouter/openai/gpt-5.5", NULL), "openrouter") == 0,
            "openrouter-prefixed provider namespace should route through OpenRouter");
     ASSERT(strcmp(provider_detect("ollama:llama3.2:latest", NULL), "ollama") == 0,
@@ -7678,6 +8222,31 @@ static void test_provider_create_uses_profile_alias_transport(void) {
            "qwen-oauth provider should use portal transport base");
     provider_free(qwen);
 
+    provider_t *dashscope = provider_create("dashscope");
+    ASSERT(dashscope != NULL, "dashscope alias should create a provider");
+    ASSERT(strcmp(dashscope->name, "alibaba") == 0,
+           "dashscope alias should canonicalize to alibaba");
+    ASSERT(strstr(dashscope->api_url,
+                  "dashscope-intl.aliyuncs.com/compatible-mode/v1/chat/completions") != NULL,
+           "alibaba provider should use DashScope OpenAI-compatible base");
+    provider_free(dashscope);
+
+    provider_t *nvidia = provider_create("nvidia-nim");
+    ASSERT(nvidia != NULL, "nvidia-nim alias should create a provider");
+    ASSERT(strcmp(nvidia->name, "nvidia") == 0,
+           "nvidia-nim alias should canonicalize to nvidia");
+    ASSERT(strstr(nvidia->api_url, "integrate.api.nvidia.com/v1/chat/completions") != NULL,
+           "nvidia provider should use NIM OpenAI-compatible base");
+    provider_free(nvidia);
+
+    provider_t *opencode = provider_create("opencode");
+    ASSERT(opencode != NULL, "opencode alias should create a provider");
+    ASSERT(strcmp(opencode->name, "opencode-zen") == 0,
+           "opencode alias should canonicalize to opencode-zen");
+    ASSERT(strstr(opencode->api_url, "opencode.ai/zen/v1/chat/completions") != NULL,
+           "opencode provider should use Zen transport base");
+    provider_free(opencode);
+
     provider_t *ollama = provider_create("ollama");
     ASSERT(ollama != NULL, "ollama should create a local provider");
     ASSERT(strcmp(ollama->name, "ollama") == 0, "ollama should keep canonical name");
@@ -7753,6 +8322,57 @@ static void test_provider_custom_base_uses_profile_canonical_name(void) {
 
     test_restore_env("HUGGINGFACE_BASE_URL", saved_base, had_base);
     test_restore_env("HUGGINGFACE_API_BASE", saved_api_base, had_api_base);
+    PASS();
+}
+
+static void test_provider_configurable_base_requires_explicit_base(void) {
+    TEST("provider configurable base requires explicit base");
+
+    char saved_azure_base[512], saved_azure_api_base[512];
+    char saved_foundry_base[512], saved_foundry_api_base[512];
+    bool had_azure_base = false, had_azure_api_base = false;
+    bool had_foundry_base = false, had_foundry_api_base = false;
+    test_capture_env("AZURE_BASE_URL", saved_azure_base, sizeof(saved_azure_base),
+                     &had_azure_base);
+    test_capture_env("AZURE_API_BASE", saved_azure_api_base, sizeof(saved_azure_api_base),
+                     &had_azure_api_base);
+    test_capture_env("AZURE_FOUNDRY_BASE_URL", saved_foundry_base, sizeof(saved_foundry_base),
+                     &had_foundry_base);
+    test_capture_env("AZURE_FOUNDRY_API_BASE", saved_foundry_api_base,
+                     sizeof(saved_foundry_api_base), &had_foundry_api_base);
+
+    unsetenv("AZURE_BASE_URL");
+    unsetenv("AZURE_API_BASE");
+    unsetenv("AZURE_FOUNDRY_BASE_URL");
+    unsetenv("AZURE_FOUNDRY_API_BASE");
+
+    provider_t *missing = provider_create("azure");
+    ASSERT(missing != NULL, "azure alias should create a configurable provider");
+    ASSERT(strcmp(missing->name, "azure-foundry") == 0,
+           "azure alias should canonicalize to azure-foundry");
+    ASSERT(missing->api_url && missing->api_url[0] == '\0',
+           "azure without base should not inherit the OpenAI base URL");
+    stream_result_t sr = missing->stream(missing, "azure-key", "{}", NULL, NULL, NULL, NULL);
+    ASSERT(!sr.ok, "missing Azure base should fail locally");
+    ASSERT(sr.parsed.stop_reason && strcmp(sr.parsed.stop_reason, "missing_api_base") == 0,
+           "missing Azure base should report missing_api_base");
+    json_free_response(&sr.parsed);
+    provider_free(missing);
+
+    setenv("AZURE_BASE_URL", "https://azure.example/openai/deployments/dsco/v1", 1);
+    ASSERT(provider_has_custom_api_base("azure-foundry"),
+           "canonical Azure profile should detect alias BASE_URL overrides");
+    provider_t *configured = provider_create("azure");
+    ASSERT(configured != NULL, "configured azure provider should be created");
+    ASSERT(strcmp(configured->api_url,
+                  "https://azure.example/openai/deployments/dsco/v1/chat/completions") == 0,
+           "azure alias BASE_URL should supply the transport base");
+    provider_free(configured);
+
+    test_restore_env("AZURE_BASE_URL", saved_azure_base, had_azure_base);
+    test_restore_env("AZURE_API_BASE", saved_azure_api_base, had_azure_api_base);
+    test_restore_env("AZURE_FOUNDRY_BASE_URL", saved_foundry_base, had_foundry_base);
+    test_restore_env("AZURE_FOUNDRY_API_BASE", saved_foundry_api_base, had_foundry_api_base);
     PASS();
 }
 
@@ -7879,6 +8499,57 @@ static void test_provider_sakana_payg_key_is_additive(void) {
     test_restore_env("DSCO_FUGU_KEY_CLASS", saved_fugu_class, had_fugu_class);
     test_restore_env("DSCO_PREFER_METERED_API", saved_metered, had_metered);
     test_restore_env("DSCO_API_BILLING_FALLBACK", saved_billing_fb, had_billing_fb);
+    PASS();
+}
+
+static void test_provider_pool_payg_success_preserves_sakana_subscription_reset(void) {
+    TEST("provider_pool Sakana PAYG success preserves subscription reset");
+    char saved_home[512];
+    char saved_fugu[256], saved_payg[256], saved_class[64], saved_fugu_class[64];
+    bool had_home = false, had_fugu = false, had_payg = false;
+    bool had_class = false, had_fugu_class = false;
+
+    test_capture_env("HOME", saved_home, sizeof(saved_home), &had_home);
+    test_capture_env("FUGU_API_KEY", saved_fugu, sizeof(saved_fugu), &had_fugu);
+    test_capture_env("FUGU_PAYG_API_KEY", saved_payg, sizeof(saved_payg), &had_payg);
+    test_capture_env("DSCO_SAKANA_KEY_CLASS", saved_class, sizeof(saved_class), &had_class);
+    test_capture_env("DSCO_FUGU_KEY_CLASS", saved_fugu_class, sizeof(saved_fugu_class),
+                     &had_fugu_class);
+
+    char home[512];
+    snprintf(home, sizeof(home), "/tmp/dsco_provider_pool_home_%d_%ld", (int)getpid(),
+             (long)time(NULL));
+    ASSERT(mkdir(home, 0700) == 0, "mkdir provider pool HOME failed");
+    setenv("HOME", home, 1);
+    setenv("FUGU_API_KEY", "fish_subscription", 1);
+    setenv("FUGU_PAYG_API_KEY", "fish_payg", 1);
+    unsetenv("DSCO_SAKANA_KEY_CLASS");
+    unsetenv("DSCO_FUGU_KEY_CLASS");
+
+    provider_pool_shutdown();
+    provider_pool_init(NULL);
+    time_t until = time(NULL) + 3600;
+    provider_pool_mark_subscription_exhausted("sakana", until);
+    ASSERT(provider_pool_subscription_exhausted_until("sakana") >= until - 1,
+           "Sakana subscription reset should be recorded");
+
+    setenv("DSCO_SAKANA_KEY_CLASS", "payg", 1);
+    provider_pool_report("sakana", true, 12.0);
+    ASSERT(provider_pool_subscription_exhausted_until("sakana") >= until - 1,
+           "PAYG success must not clear subscription reset");
+
+    setenv("DSCO_SAKANA_KEY_CLASS", "subscription", 1);
+    provider_pool_report("sakana", true, 12.0);
+    ASSERT(provider_pool_subscription_exhausted_until("sakana") == 0,
+           "subscription success should clear subscription reset");
+
+    provider_pool_shutdown();
+    test_restore_env("HOME", saved_home, had_home);
+    test_restore_env("FUGU_API_KEY", saved_fugu, had_fugu);
+    test_restore_env("FUGU_PAYG_API_KEY", saved_payg, had_payg);
+    test_restore_env("DSCO_SAKANA_KEY_CLASS", saved_class, had_class);
+    test_restore_env("DSCO_FUGU_KEY_CLASS", saved_fugu_class, had_fugu_class);
+    test_rm_rf(home);
     PASS();
 }
 
@@ -12554,6 +13225,10 @@ static void test_tui_cursor_report_queries_opt_in(void) {
     ok = ok && !tui_cursor_report_queries_enabled();
     setenv("DSCO_TUI_DSR", "false", 1);
     ok = ok && !tui_cursor_report_queries_enabled();
+    setenv("DSCO_TUI_DSR", "off", 1);
+    ok = ok && !tui_cursor_report_queries_enabled();
+    setenv("DSCO_TUI_DSR", "no", 1);
+    ok = ok && !tui_cursor_report_queries_enabled();
 
     test_restore_env("DSCO_TUI_DSR", saved, had_value);
     ASSERT(ok, "DSCO_TUI_DSR should default off and enable only for truthy values");
@@ -15100,6 +15775,9 @@ int main(void) {
     /* Tool execution */
     test_tool_execute_eval();
     test_tool_execute_unknown();
+    test_tool_registry_expanded_builtin_count();
+    test_expanded_text_tools_json_serializers();
+    test_discover_tools_grouped_json_has_no_leading_commas();
     test_tool_execute_self_exiting_alias();
     test_loop_construct_tools_control_turns();
     test_loop_construct_dsl_program_controls_flow();
@@ -15115,6 +15793,10 @@ int main(void) {
     test_loop_construct_srm_catalog_aliases();
     test_tool_edit_file_empty_old_string();
     test_tool_agent_wait_no_agents();
+    test_hermes_agent_mcp_preset();
+    test_hermes_agent_acp_preset_is_agent_client_protocol();
+    test_hermes_agent_tools_surface();
+    test_hermes_agent_capability_showcase();
     test_agentic_commerce_protocol_registry();
     test_agentic_commerce_ap2_status();
     test_agentic_commerce_x402_plan();
@@ -15321,6 +16003,11 @@ int main(void) {
     test_tools_shell_schemas_expose_artifact_aliases();
     test_tools_copy_move_accept_dest_alias();
     test_tools_normalize_schema_scalars();
+    test_codex_app_directory_importer_variants();
+    test_codex_app_directory_importer_and_integration_discovery();
+    test_integration_discovery_profiles_pagination_and_doctor_flags();
+    test_chronicle_local_event_blob_roundtrip();
+    test_chronicle_modes_and_delta_policy();
     test_tools_execute_mcp_double_underscore_alias();
     test_tools_execute_mcp_legacy_alias_to_canonical();
     test_tools_mcp_double_alias_uses_legacy_schema();
@@ -15419,8 +16106,10 @@ int main(void) {
     test_provider_create_uses_profile_alias_transport();
     test_provider_create_known_unsupported_does_not_fallback_openai();
     test_provider_custom_base_uses_profile_canonical_name();
+    test_provider_configurable_base_requires_explicit_base();
     test_provider_resolve_api_key_supports_aliases();
     test_provider_sakana_payg_key_is_additive();
+    test_provider_pool_payg_success_preserves_sakana_subscription_reset();
     test_provider_resolve_api_key_supports_generic_providers();
     test_provider_select_default_primary_model_prefers_glm_kimi();
     test_provider_build_default_fallback_models_cross_lab();
