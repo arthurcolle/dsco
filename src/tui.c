@@ -11,7 +11,9 @@
 #include <math.h>
 #include <ctype.h>
 #include <limits.h>
+#include <errno.h>
 #include <sys/ioctl.h>
+#include <sys/select.h>
 #include <sys/stat.h>
 #include <dirent.h>
 #include <sys/time.h>
@@ -19,6 +21,7 @@
 #include <time.h>
 #include <pthread.h>
 #include <stdatomic.h>
+#include <termios.h>
 
 /* ── Box character sets ───────────────────────────────────────────────── */
 
@@ -86,6 +89,14 @@ void tui_clear_line(void) {
     fprintf(stderr, "\033[2K\r");
 }
 
+bool tui_cursor_report_queries_enabled(void) {
+    const char *v = getenv("DSCO_TUI_DSR");
+    if (!v || !v[0])
+        return false;
+    return v[0] == '1' || strcasecmp(v, "true") == 0 ||
+           strcasecmp(v, "yes") == 0 || strcasecmp(v, "on") == 0;
+}
+
 /* Full reset for a clean first paint: reset SGR, show cursor, clear the
  * visible screen *and* the scrollback buffer (\033[3J), then home. This wipes
  * any content left by the previous program so the banner doesn't bleed
@@ -105,6 +116,71 @@ void tui_save_cursor(void) {
 }
 void tui_restore_cursor(void) {
     fprintf(stderr, "\033[u");
+}
+
+static void tui_drain_tty_input_for_ms(int fd, int total_ms) {
+    if (total_ms <= 0)
+        return;
+    struct timeval start, now;
+    gettimeofday(&start, NULL);
+    while (1) {
+        gettimeofday(&now, NULL);
+        int elapsed_ms =
+            (int)((now.tv_sec - start.tv_sec) * 1000 + (now.tv_usec - start.tv_usec) / 1000);
+        int left_ms = total_ms - elapsed_ms;
+        if (left_ms <= 0)
+            break;
+
+        fd_set rfd;
+        FD_ZERO(&rfd);
+        FD_SET(fd, &rfd);
+        struct timeval tv = {.tv_sec = left_ms / 1000, .tv_usec = (left_ms % 1000) * 1000};
+        int rv = select(fd + 1, &rfd, NULL, NULL, &tv);
+        if (rv <= 0) {
+            if (rv < 0 && errno == EINTR)
+                continue;
+            break;
+        }
+        int pending = 0;
+        while (ioctl(fd, FIONREAD, &pending) == 0 && pending > 0) {
+            char discard[128];
+            size_t want = (size_t)pending;
+            if (want > sizeof(discard))
+                want = sizeof(discard);
+            if (read(fd, discard, want) <= 0)
+                break;
+        }
+    }
+}
+
+void tui_terminal_restore_sane(void) {
+    static const char reset[] = "\033[?1049l\033[?1047l\033[?47l"
+                                "\033[r"
+                                "\033[?2004l"
+                                "\033[?1000l\033[?1002l\033[?1003l\033[?1006l"
+                                "\033[?1004l"
+                                "\033[?25h"
+                                "\033[0m";
+    int out_fd = isatty(STDERR_FILENO) ? STDERR_FILENO : STDOUT_FILENO;
+    if (isatty(out_fd))
+        (void)write(out_fd, reset, sizeof(reset) - 1);
+
+    if (!isatty(STDIN_FILENO))
+        return;
+
+    struct termios tio;
+    if (tcgetattr(STDIN_FILENO, &tio) != 0)
+        return;
+    tio.c_iflag |= (tcflag_t)(BRKINT | ICRNL | IXON);
+    tio.c_iflag &= (tcflag_t) ~(INPCK | ISTRIP | INLCR | IGNCR | IXOFF);
+    tio.c_oflag |= (tcflag_t)OPOST;
+    tio.c_lflag |= (tcflag_t)(ECHO | ECHONL | ICANON | ISIG | IEXTEN);
+    tio.c_cc[VMIN] = 1;
+    tio.c_cc[VTIME] = 0;
+    (void)tcsetattr(STDIN_FILENO, TCSAFLUSH, &tio);
+    (void)tcflush(STDIN_FILENO, TCIFLUSH);
+    tui_drain_tty_input_for_ms(STDIN_FILENO, 120);
+    (void)tcflush(STDIN_FILENO, TCIFLUSH);
 }
 
 /* ── Visible string length (strip ANSI) ───────────────────────────────── */
@@ -459,7 +535,7 @@ void tui_welcome(const char *model, int core_count, int total_count, const char 
         return; /* silent startup */
 
     if (splash_env && strcasecmp(splash_env, "compact") == 0) {
-        /* One-line compact header: dsco v1.0.1 · model · N tools (M loadable) */
+        /* One-line compact header: dsco version · model · N tools (M loadable) */
         const tui_glyphs_t *gl = tui_glyph();
         fprintf(stderr, "%s%s%s dsco %sv%s%s  %s·%s  %s%s%s  %s·%s  %s%d tools%s %s(%d loadable)%s\n",
                 TUI_BMAGENTA, gl->diamond, TUI_RESET,
@@ -1939,6 +2015,8 @@ void tui_batch_spinner_start(tui_batch_spinner_t *bs, const char **names, int co
 
 void tui_batch_spinner_complete(tui_batch_spinner_t *bs, int idx, bool ok, const char *preview,
                                 double elapsed_ms) {
+    if (!bs || bs->count <= 0)
+        return;
     pthread_mutex_lock(&bs->mutex);
     if (idx >= 0 && idx < bs->count) {
         bs->entries[idx].done = true;
@@ -1957,6 +2035,8 @@ void tui_batch_spinner_complete(tui_batch_spinner_t *bs, int idx, bool ok, const
 }
 
 void tui_batch_spinner_stop(tui_batch_spinner_t *bs) {
+    if (!bs || bs->count <= 0 || !bs->running)
+        return;
     pthread_mutex_lock(&bs->mutex);
     bs->running = false;
     pthread_mutex_unlock(&bs->mutex);
@@ -1968,7 +2048,7 @@ void tui_batch_spinner_stop(tui_batch_spinner_t *bs) {
 }
 
 void tui_batch_summary(const tui_batch_spinner_t *bs, const char *cost_suffix) {
-    if (bs->count < 2)
+    if (!bs || bs->count < 2)
         return;
 
     int ok_count = 0, fail_count = 0, cached = 0;
@@ -3310,11 +3390,14 @@ __attribute__((unused)) static int composer_draw_input(const char *prompt, const
 }
 
 /* Query current cursor row via DSR (ESC[6n). Returns row, or `fallback` if
- * the query fails or times out. Briefly enters raw mode if stdin is a tty
- * in cooked mode; restores the original termios on exit. */
+ * disabled, the query fails, or it times out. DSR replies are terminal-generated
+ * input; if they arrive after dsco stops reading, shells can execute fragments
+ * such as "1R". Keep this opt-in via DSCO_TUI_DSR for known-good terminals. */
 static int tui_query_cursor_row(int fallback) {
     int fd = STDIN_FILENO;
     if (!isatty(fd) || !isatty(STDERR_FILENO))
+        return fallback;
+    if (!tui_cursor_report_queries_enabled())
         return fallback;
 
     struct termios saved, raw;
@@ -3359,8 +3442,13 @@ static int tui_query_cursor_row(int fallback) {
     }
     buf[n] = '\0';
 
-    if (restore)
-        tcsetattr(fd, TCSANOW, &saved);
+    if (restore) {
+        /* DSR replies are terminal-generated input. If the reply arrives late
+         * or malformed, do not leave its tail for the composer or parent shell
+         * to interpret as user keystrokes. */
+        tcsetattr(fd, TCSAFLUSH, &saved);
+        tcflush(fd, TCIFLUSH);
+    }
 
     const char *p = buf;
     while (*p && *p != '\033')
@@ -8805,7 +8893,7 @@ bool tui_ask_question_visible(const tui_ask_question_t *qs, int n, int qi) {
         return false;
     const tui_ask_question_t *q = &qs[qi];
     if (q->gate_q < 0 || q->gate_q >= n || q->gate_q == qi)
-        return true;
+        return q->gate_id[0] ? false : true;
     /* the gating question must itself be visible and answered */
     if (!tui_ask_question_visible(qs, n, q->gate_q))
         return false;
@@ -9625,11 +9713,22 @@ static void touchid_lock_cb(bool success, const char *err_msg, void *ctx) {
         presence_mark_unlocked();
     /* Clear the in-flight flag on BOTH success and failure/cancel, then wake
      * the loop. On success the loop sees !locked and exits; on failure it
-     * stays locked but the flag is now clear, so a keystroke or the next timer
-     * tick can re-pop the prompt. Without clearing on failure the flag stuck
-     * true forever and the user was trapped behind a dead dialog. */
+     * stays locked but the flag is now clear, so an explicit keypress can
+     * retry the prompt. */
     atomic_store(&s_lock_touchid_pending, false);
     tui_lock_wake();
+}
+
+static void tui_lock_drain_input(void) {
+    int pending = 0;
+    while (ioctl(STDIN_FILENO, FIONREAD, &pending) == 0 && pending > 0) {
+        unsigned char discard[64];
+        size_t want = (size_t)pending;
+        if (want > sizeof(discard))
+            want = sizeof(discard);
+        if (read(STDIN_FILENO, discard, want) <= 0)
+            break;
+    }
 }
 
 /* Draw the full lock overlay into a stack buffer; return bytes written.
@@ -9865,7 +9964,7 @@ void tui_lock_engage(void) {
         if (ev.filter == EVFILT_USER) {
             /* Touch ID callback fired. If it unlocked us, leave the loop.
              * Otherwise the attempt failed/cancelled — the flag is already
-             * clear, so a keypress or the next timer tick will re-pop it.
+             * clear, so an explicit keypress can retry it.
              * We deliberately do NOT re-arm here: an instant-fail policy
              * (e.g. biometry lockout) would otherwise spin popping dialogs. */
             if (!presence_is_locked())
@@ -9874,11 +9973,8 @@ void tui_lock_engage(void) {
         }
 
         if (ev.filter == EVFILT_READ) {
-            /* Drain ALL pending bytes so they can't trickle back to the
-             * composer. */
-            unsigned char discard[64];
-            while (read(STDIN_FILENO, discard, sizeof(discard)) > 0) {
-            }
+            /* Drain pending bytes so they can't trickle back to the composer. */
+            tui_lock_drain_input();
             if (have_touchid) {
                 /* Re-pop the prompt on any key if no dialog is currently up. */
                 if (!atomic_load(&s_lock_touchid_pending)) {
@@ -9899,12 +9995,6 @@ void tui_lock_engage(void) {
              * through before we acquired the term mutex. */
             n = tui_lock_render(frame, sizeof(frame));
             write(STDOUT_FILENO, frame, n);
-            /* Safety net: if we're still locked and no dialog is up, re-pop so
-             * there's always a live prompt the user can interact with. */
-            if (have_touchid && !atomic_load(&s_lock_touchid_pending)) {
-                atomic_store(&s_lock_touchid_pending, true);
-                touchid_authenticate("Unlock dsco", touchid_lock_cb, NULL);
-            }
         }
     }
 

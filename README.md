@@ -46,7 +46,7 @@ This repository (`dsco-cli`) is the canonical home of the project.
 
 | Property       | Value                                                    |
 | -------------- | -------------------------------------------------------- |
-| Version        | `1.0.1`                                                  |
+| Version        | `1.0.2`                                                  |
 | Language       | C (C11)                                                  |
 | Source size    | ~344K LOC across `src/` + `include/`                     |
 | Source files   | 104 `.c` / 108 `.h`                                      |
@@ -137,7 +137,7 @@ Check the build:
 
 ```bash
 ./dsco --version
-# dsco v1.0.1 (built ..., <commit>)
+# dsco v1.0.2 (built ..., <commit>)
 ```
 
 ## Usage

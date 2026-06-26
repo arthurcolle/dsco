@@ -61,6 +61,12 @@
  * nonzero code if supervision gave up). */
 int supervisor_run(int child_argc, char **child_argv);
 
+/* If dsco is the top-level command in an iTerm session, a voluntary exit would
+ * otherwise end the pty and close the tab. This helper execs the user's shell
+ * only for that interactive no-parent-shell case; it returns when not needed or
+ * if exec fails. */
+void dsco_maybe_exec_shell_to_keep_terminal(void);
+
 /* Install fatal-signal crash handlers (SIGSEGV/SIGBUS/SIGABRT/SIGFPE/SIGILL).
  * Defined in main.c; declared here so the supervised child path can share it. */
 void main_install_crash_handlers(void);
