@@ -41,6 +41,8 @@
 #include "toolmgmt.h"
 #include "local_llm.h"
 #include "vm.h"
+#include "codex_app_directory.h"
+#include "integration_fabric.h"
 #include "stateful_atoms.h"
 #include "control_flow.h"
 #include "recovery.h"
@@ -14869,9 +14871,7 @@ static __attribute__((unused)) bool tool_csv_parse(const char *input, char *resu
                     *end = 0;
                 if (row > (headers ? 1 : 0))
                     jbuf_append(&b, ",");
-                jbuf_append(&b, "\"");
                 jbuf_append_json_str(&b, col);
-                jbuf_append(&b, "\"");
             }
         } else {
             if (row > (headers ? 1 : 0))
@@ -14885,9 +14885,7 @@ static __attribute__((unused)) bool tool_csv_parse(const char *input, char *resu
                     *sep = 0;
                 if (ci > 0)
                     jbuf_append(&b, ",");
-                jbuf_append(&b, "\"");
                 jbuf_append_json_str(&b, col);
-                jbuf_append(&b, "\"");
                 col = sep ? sep + 1 : NULL;
                 ci++;
             }
@@ -14902,9 +14900,7 @@ static __attribute__((unused)) bool tool_csv_parse(const char *input, char *resu
         for (int i = 0; i < ncols_header; i++) {
             if (i)
                 jbuf_append(&b, ",");
-            jbuf_append(&b, "\"");
             jbuf_append_json_str(&b, header_names[i]);
-            jbuf_append(&b, "\"");
             free(header_names[i]);
         }
         jbuf_append(&b, "]");
@@ -14946,10 +14942,10 @@ static __attribute__((unused)) bool tool_regex_match(const char *input, char *re
     while (regexec(&re, p, 1, &m, p == text ? 0 : REG_NOTBOL) == 0) {
         if (count > 0)
             jbuf_append(&b, ",");
-        jbuf_append(&b, "\"");
-        for (regoff_t i = m.rm_so; i < m.rm_eo; i++)
-            jbuf_appendf(&b, "%c", p[i]);
-        jbuf_append(&b, "\"");
+        char saved = p[m.rm_eo];
+        p[m.rm_eo] = '\0';
+        jbuf_append_json_str(&b, p + m.rm_so);
+        p[m.rm_eo] = saved;
         count++;
         p += m.rm_eo;
         if (!global || m.rm_eo == 0)
@@ -15148,7 +15144,7 @@ static __attribute__((unused)) bool tool_template_render(const char *input, char
             /* Look up in vars JSON */
             char *val = vars ? json_get_str(vars, ks) : NULL;
             if (val) {
-                jbuf_append_json_str(&b, val);
+                jbuf_append(&b, val);
                 free(val);
             } else
                 jbuf_appendf(&b, "{{%s}}", ks);
@@ -15202,9 +15198,9 @@ static __attribute__((unused)) bool tool_text_diff(const char *input, char *resu
     unlink(fb);
     jbuf_t buf;
     jbuf_init(&buf, strlen(diff_out) + 64);
-    jbuf_append(&buf, "{\"diff\":\"");
+    jbuf_append(&buf, "{\"diff\":");
     jbuf_append_json_str(&buf, diff_out);
-    jbuf_append(&buf, "\"}");
+    jbuf_append(&buf, "}");
     snprintf(result, rlen, "%s", buf.data ? buf.data : "{}");
     jbuf_free(&buf);
     free(a);
@@ -15429,9 +15425,10 @@ static __attribute__((unused)) bool tool_xml_extract(const char *input, char *re
                 if (aend && aend <= tag_end) {
                     if (count > 0)
                         jbuf_append(&b, ",");
-                    jbuf_append(&b, "\"");
-                    jbuf_append_len(&b, apos, (size_t)(aend - apos));
-                    jbuf_append(&b, "\"");
+                    char saved = *aend;
+                    *aend = '\0';
+                    jbuf_append_json_str(&b, apos);
+                    *aend = saved;
                     count++;
                 }
             }
@@ -15445,9 +15442,10 @@ static __attribute__((unused)) bool tool_xml_extract(const char *input, char *re
             }
             if (count > 0)
                 jbuf_append(&b, ",");
-            jbuf_append(&b, "\"");
-            jbuf_append_len(&b, content_start, (size_t)(content_end - content_start));
-            jbuf_append(&b, "\"");
+            char saved = *content_end;
+            *content_end = '\0';
+            jbuf_append_json_str(&b, content_start);
+            *content_end = saved;
             count++;
             p = content_end + strlen(close_tag);
             continue;
@@ -21737,6 +21735,28 @@ static bool tool_matches_query_local(const char *name, const char *desc, const c
     return total > 0 && matched == total;
 }
 
+static void integration_action_flags_json(jbuf_t *b, unsigned actions) {
+    bool first = true;
+#define APPEND_ACTION(flag, name)                                                                  \
+    do {                                                                                           \
+        if (actions & (flag)) {                                                                    \
+            if (!first)                                                                            \
+                jbuf_append(b, ",");                                                              \
+            first = false;                                                                         \
+            jbuf_append_json_str(b, (name));                                                       \
+        }                                                                                          \
+    } while (0)
+    APPEND_ACTION(DSCO_INTEGRATION_ACTION_READ, "read");
+    APPEND_ACTION(DSCO_INTEGRATION_ACTION_WRITE, "write");
+    APPEND_ACTION(DSCO_INTEGRATION_ACTION_SEND, "send");
+    APPEND_ACTION(DSCO_INTEGRATION_ACTION_DELETE, "delete");
+    APPEND_ACTION(DSCO_INTEGRATION_ACTION_ADMIN, "admin");
+    APPEND_ACTION(DSCO_INTEGRATION_ACTION_UNTRUSTED_CONTENT, "untrusted_content");
+    APPEND_ACTION(DSCO_INTEGRATION_ACTION_REQUIRES_CONFIRMATION, "requires_confirmation");
+    APPEND_ACTION(DSCO_INTEGRATION_ACTION_INTERACTIVE, "interactive");
+#undef APPEND_ACTION
+}
+
 static void discover_append_tool_detail(jbuf_t *b, const char *name, const char *desc,
                                         const char *schema, const char *source) {
     char params[256];
@@ -21880,13 +21900,15 @@ static bool tool_discover_tools(const char *input, char *result, size_t rlen) {
     int group_count = 15;
 
     /* Simple categorization: list tools by group */
+    bool first_group = true;
     for (int g = 0; g < group_count && (size_t)off < rlen - 100; g++) {
         /* Filter by category if specified */
         if (category[0] && strcasecmp(category, group_names[g]) != 0)
             continue;
 
-        if (off > 80)
+        if (!first_group)
             off += snprintf(result + off, rlen - off, ",");
+        first_group = false;
         off +=
             snprintf(result + off, rlen - off, "{\"category\":\"%s\",\"tools\":[", group_names[g]);
 
@@ -21954,8 +21976,9 @@ static bool tool_discover_tools(const char *input, char *result, size_t rlen) {
 
     if ((!category[0] || strcasecmp(category, "mcp") == 0) && g_external_tool_count > 0 &&
         (size_t)off < rlen - 256) {
-        if (off > 80)
+        if (!first_group)
             off += snprintf(result + off, rlen - off, ",");
+        first_group = false;
         off += snprintf(result + off, rlen - off, "{\"category\":\"mcp\",\"tools\":[");
         int shown = 0;
         int skipped = 0;
@@ -21981,6 +22004,311 @@ static bool tool_discover_tools(const char *input, char *result, size_t rlen) {
     off += snprintf(result + off, rlen - off, "]}");
     free(query);
     free(category_owned);
+    return true;
+}
+
+static bool integration_query_matches(const char *query, const char *a, const char *b,
+                                      const char *c, const char *d) {
+    if (!query || !query[0])
+        return true;
+    return tools_ci_contains_local(a ? a : "", query) || tools_ci_contains_local(b ? b : "", query) ||
+           tools_ci_contains_local(c ? c : "", query) || tools_ci_contains_local(d ? d : "", query);
+}
+
+static bool integration_profile_matches(const char *profile, const char *name,
+                                        const char *categories, const char *labels) {
+    if (!profile || !profile[0])
+        return true;
+    if (integration_query_matches(profile, name, categories, labels, NULL))
+        return true;
+#define PROFILE_KEY(p, k1, k2, k3, k4, k5, k6, k7, k8)                                            \
+    do {                                                                                           \
+        if (strcasecmp(profile, (p)) == 0) {                                                       \
+            const char *keys[] = {(k1), (k2), (k3), (k4), (k5), (k6), (k7), (k8), NULL};            \
+            for (int i = 0; keys[i]; i++)                                                          \
+                if (integration_query_matches(keys[i], name, categories, labels, NULL))             \
+                    return true;                                                                   \
+            return false;                                                                          \
+        }                                                                                          \
+    } while (0)
+    PROFILE_KEY("engineering", "github", "linear", "atlassian", "slack", "notion", "datadog",
+                "posthog", "developer");
+    PROFILE_KEY("gtm", "hubspot", "pipedrive", "close", "intercom", "apollo", "clay",
+                "demandbase", "sales");
+    PROFILE_KEY("finance", "bigquery", "motherduck", "quickbooks", "brex", "alpaca", "factset",
+                "finance", "");
+    PROFILE_KEY("enterprise_knowledge", "glean", "box", "sharepoint", "alation", "atlan", "coveo",
+                "knowledge", "");
+    PROFILE_KEY("governed_agent_runtime", "toolcheck", "agent ready", "hapi", "registry",
+                "accessowl", "vantage", "governance", "agent");
+#undef PROFILE_KEY
+    return false;
+}
+
+static void append_integration_status_flags(jbuf_t *b, bool cached, bool live, bool accessible,
+                                            bool stale, unsigned actions, bool sync_capable) {
+    jbuf_append(b, "\"status\":{");
+    jbuf_appendf(b,
+                 "\"cached\":%s,\"installed\":%s,\"connected\":%s,\"live\":%s,"
+                 "\"inaccessible\":%s,\"stale\":%s,\"requires_oauth\":%s,"
+                 "\"mutating\":%s,\"sync_capable\":%s}",
+                 cached ? "true" : "false", live ? "true" : "false",
+                 accessible ? "true" : "false", live ? "true" : "false",
+                 (!accessible && cached) ? "true" : "false", stale ? "true" : "false",
+                 (!accessible && cached) ? "true" : "false",
+                 (actions & (DSCO_INTEGRATION_ACTION_WRITE | DSCO_INTEGRATION_ACTION_SEND |
+                             DSCO_INTEGRATION_ACTION_DELETE | DSCO_INTEGRATION_ACTION_ADMIN))
+                     ? "true"
+                     : "false",
+                 sync_capable ? "true" : "false");
+}
+
+static void append_catalog_integration_json(jbuf_t *b, const codex_app_directory_entry_t *e,
+                                            bool live) {
+    jbuf_append(b, "{");
+    jbuf_append(b, "\"integration_id\":");
+    jbuf_append_json_str(b, e->connector_id[0] ? e->connector_id : e->id);
+    jbuf_append(b, ",\"display_name\":");
+    jbuf_append_json_str(b, e->display_name);
+    jbuf_append(b, ",\"distribution_channel\":");
+    jbuf_append_json_str(b, e->distribution_channel);
+    jbuf_append(b, ",\"categories\":");
+    jbuf_append_json_str(b, e->categories);
+    jbuf_append(b, ",\"labels\":");
+    jbuf_append_json_str(b, e->labels);
+    jbuf_append(b, ",\"scope\":");
+    jbuf_append_json_str(b, e->scope);
+    jbuf_append(b, ",\"catalog_status\":");
+    jbuf_append_json_str(b, e->catalog_status);
+    jbuf_append(b, ",\"action_flags\":[");
+    integration_action_flags_json(b, e->action_flags);
+    jbuf_append(b, "],");
+    append_integration_status_flags(b, true, live, e->is_accessible, e->stale, e->action_flags, e->sync);
+    jbuf_append(b, "}");
+}
+
+static void append_external_integration_json(jbuf_t *b, const external_tool_t *t) {
+    unsigned actions = t->action_flags ? t->action_flags : dsco_integration_actions_for_tool(t->name);
+    jbuf_append(b, "{");
+    jbuf_append(b, "\"tool_name\":");
+    jbuf_append_json_str(b, t->name);
+    jbuf_append(b, ",\"integration_id\":");
+    jbuf_append_json_str(b, t->integration_id[0] ? t->integration_id : t->name);
+    jbuf_append(b, ",\"display_name\":");
+    jbuf_append_json_str(b, t->display_name[0] ? t->display_name : t->name);
+    jbuf_append(b, ",\"distribution_channel\":");
+    jbuf_append_json_str(b, t->distribution_channel[0] ? t->distribution_channel : "mcp");
+    jbuf_append(b, ",\"categories\":");
+    jbuf_append_json_str(b, t->categories);
+    jbuf_append(b, ",\"labels\":");
+    jbuf_append_json_str(b, t->labels);
+    jbuf_append(b, ",\"scope\":");
+    jbuf_append_json_str(b, t->scope);
+    jbuf_append(b, ",\"catalog_status\":");
+    jbuf_append_json_str(b, t->catalog_status[0] ? t->catalog_status : "live");
+    jbuf_append(b, ",\"action_flags\":[");
+    integration_action_flags_json(b, actions);
+    jbuf_append(b, "],");
+    append_integration_status_flags(b, t->integration_id[0], true, true,
+                                    strcmp(t->catalog_status, "stale") == 0, actions,
+                                    strstr(t->labels, "sync") != NULL);
+    jbuf_append(b, "}");
+}
+
+static bool tool_discover_integrations(const char *input, char *result, size_t rlen) {
+    char *query = input ? json_get_str(input, "query") : NULL;
+    char *path = input ? json_get_str(input, "path") : NULL;
+    char *profile = input ? json_get_str(input, "profile") : NULL;
+    int offset = input ? json_get_int(input, "offset", 0) : 0;
+    int limit = input ? json_get_int(input, "limit", 50) : 50;
+    if (offset < 0)
+        offset = 0;
+    if (limit <= 0)
+        limit = 50;
+    if (limit > 500)
+        limit = 500;
+
+    codex_app_directory_t dir;
+    codex_app_directory_init(&dir);
+    char err[256] = "";
+    bool have_catalog = codex_app_directory_load_file(&dir, path, err, sizeof(err));
+
+    jbuf_t b;
+    jbuf_init(&b, 4096);
+    jbuf_append(&b, "{\"subsystem\":\"Chronicle-adjacent IntegrationCatalog\",");
+    jbuf_append(&b, "\"catalog\":{");
+    jbuf_appendf(&b,
+                 "\"loaded\":%s,\"source_path\":", have_catalog ? "true" : "false");
+    jbuf_append_json_str(&b, have_catalog ? dir.source_path : (path ? path : ""));
+    jbuf_appendf(&b,
+                 ",\"total\":%zu,\"enabled\":%zu,\"accessible\":%zu,"
+                 "\"interactive\":%zu,\"consequential\":%zu,\"retrievable\":%zu,"
+                 "\"sync\":%zu,\"stale\":%zu",
+                 dir.count, dir.enabled_count, dir.accessible_count, dir.interactive_count,
+                 dir.consequential_count, dir.retrievable_count, dir.sync_count, dir.stale_count);
+    if (!have_catalog) {
+        jbuf_append(&b, ",\"warning\":");
+        jbuf_append_json_str(&b, err);
+    }
+    jbuf_append(&b, "},\"profiles\":{");
+    jbuf_append(&b,
+                "\"engineering\":[\"GitHub\",\"Linear\",\"Atlassian\",\"Slack\",\"Notion\",\"Datadog\",\"PostHog\",\"Stripe\"],"
+                "\"gtm\":[\"HubSpot\",\"Pipedrive\",\"Close\",\"Intercom\",\"Apollo\",\"Clay\",\"Demandbase\",\"Attio\"],"
+                "\"finance\":[\"BigQuery\",\"MotherDuck\",\"QuickBooks\",\"Brex\",\"Alpaca\",\"FactSet\",\"PitchBook\"],"
+                "\"enterprise_knowledge\":[\"Glean\",\"Box\",\"SharePoint\",\"Alation\",\"Atlan\",\"Coveo\"],"
+                "\"governed_agent_runtime\":[\"ToolCheck\",\"Agent Ready\",\"HAPI MCP Registry\",\"AccessOwl\",\"Vantage\"]");
+    jbuf_append(&b, "},\"integrations\":[");
+
+    int matched = 0, skipped = 0, emitted = 0;
+    bool first = true;
+    if (have_catalog) {
+        for (size_t i = 0; i < dir.count; i++) {
+            const codex_app_directory_entry_t *e = &dir.entries[i];
+            if (query && query[0] &&
+                !integration_query_matches(query, e->id, e->connector_id, e->display_name, e->categories))
+                continue;
+            if (!integration_profile_matches(profile, e->display_name, e->categories, e->labels))
+                continue;
+            matched++;
+            if (skipped++ < offset)
+                continue;
+            if (emitted >= limit)
+                continue;
+            bool live = false;
+            for (int j = 0; j < g_external_tool_count; j++) {
+                if ((g_external_tools[j].integration_id[0] &&
+                     strcasecmp(g_external_tools[j].integration_id, e->connector_id) == 0) ||
+                    strcasecmp(g_external_tools[j].name, e->connector_id) == 0 ||
+                    strcasecmp(g_external_tools[j].display_name, e->display_name) == 0) {
+                    live = true;
+                    break;
+                }
+            }
+            if (!first)
+                jbuf_append(&b, ",");
+            first = false;
+            append_catalog_integration_json(&b, e, live);
+            emitted++;
+        }
+    }
+    for (int i = 0; i < g_external_tool_count; i++) {
+        const external_tool_t *t = &g_external_tools[i];
+        if (!integration_query_matches(query, t->name, t->integration_id, t->display_name, t->categories))
+            continue;
+        if (!integration_profile_matches(profile, t->display_name[0] ? t->display_name : t->name,
+                                         t->categories, t->labels))
+            continue;
+        matched++;
+        if (skipped++ < offset)
+            continue;
+        if (emitted >= limit)
+            continue;
+        if (!first)
+            jbuf_append(&b, ",");
+        first = false;
+        append_external_integration_json(&b, t);
+        emitted++;
+    }
+    jbuf_appendf(&b, "],\"matched\":%d,\"offset\":%d,\"limit\":%d,\"showing\":%d,\"has_more\":%s}",
+                 matched, offset, limit, emitted, matched > offset + emitted ? "true" : "false");
+
+    snprintf(result, rlen, "%s", b.data ? b.data : "{}");
+    jbuf_free(&b);
+    codex_app_directory_free(&dir);
+    free(query);
+    free(path);
+    free(profile);
+    return true;
+}
+
+static bool tool_dsco_doctor_integrations(const char *input, char *result, size_t rlen) {
+    char *path = input ? json_get_str(input, "path") : NULL;
+    codex_app_directory_t dir;
+    codex_app_directory_init(&dir);
+    char err[256] = "";
+    bool have_catalog = codex_app_directory_load_file(&dir, path, err, sizeof(err));
+
+    int live_total = g_external_tool_count;
+    int live_without_catalog = 0;
+    int stale_catalog = 0;
+    int inaccessible_catalog = 0;
+    int mutating_live = 0;
+    int control_plane = 0;
+    for (int i = 0; i < g_external_tool_count; i++) {
+        external_tool_t *t = &g_external_tools[i];
+        unsigned actions = t->action_flags ? t->action_flags : dsco_integration_actions_for_tool(t->name);
+        if (actions & (DSCO_INTEGRATION_ACTION_WRITE | DSCO_INTEGRATION_ACTION_SEND |
+                       DSCO_INTEGRATION_ACTION_DELETE | DSCO_INTEGRATION_ACTION_ADMIN))
+            mutating_live++;
+        if (!t->integration_id[0])
+            live_without_catalog++;
+        if (tools_ci_contains_local(t->name, "registry") || tools_ci_contains_local(t->name, "toolcheck") ||
+            tools_ci_contains_local(t->name, "agent_ready") || tools_ci_contains_local(t->name, "monitor"))
+            control_plane++;
+    }
+    if (have_catalog) {
+        for (size_t i = 0; i < dir.count; i++) {
+            if (dir.entries[i].stale)
+                stale_catalog++;
+            if (!dir.entries[i].is_accessible)
+                inaccessible_catalog++;
+        }
+    }
+
+    jbuf_t b;
+    jbuf_init(&b, 2048);
+    jbuf_append(&b, "{\"ok\":");
+    bool ok = have_catalog && stale_catalog == 0;
+    jbuf_append(&b, ok ? "true" : "false");
+    jbuf_append(&b, ",\"catalog_loaded\":");
+    jbuf_append(&b, have_catalog ? "true" : "false");
+    jbuf_append(&b, ",\"catalog_path\":");
+    jbuf_append_json_str(&b, have_catalog ? dir.source_path : (path ? path : ""));
+    if (!have_catalog) {
+        jbuf_append(&b, ",\"catalog_error\":");
+        jbuf_append_json_str(&b, err);
+    }
+    jbuf_appendf(&b,
+                 ",\"counts\":{\"catalog\":%zu,\"live_mcp\":%d,"
+                 "\"live_without_catalog_metadata\":%d,\"stale_catalog\":%d,"
+                 "\"inaccessible_catalog\":%d,\"mutating_live\":%d,\"control_plane_candidates\":%d}",
+                 dir.count, live_total, live_without_catalog, stale_catalog,
+                 inaccessible_catalog, mutating_live, control_plane);
+    jbuf_append(&b, ",\"release_blockers\":[");
+    bool first = true;
+    if (!have_catalog) {
+        jbuf_append_json_str(&b, "codex app directory cache missing; set DSCO_CODEX_APP_DIRECTORY or create ~/.dsco/codex_app_directory.json");
+        first = false;
+    }
+    if (stale_catalog > 0) {
+        if (!first)
+            jbuf_append(&b, ",");
+        jbuf_append_json_str(&b, "stale connector IDs present in catalog");
+        first = false;
+    }
+    jbuf_append(&b, "],\"warnings\":[");
+    first = true;
+    if (live_without_catalog > 0) {
+        jbuf_append_json_str(&b, "live MCP tools lack integration catalog metadata");
+        first = false;
+    }
+    if (mutating_live > 0) {
+        if (!first)
+            jbuf_append(&b, ",");
+        jbuf_append_json_str(&b, "mutating integrations require confirmation-gated policy");
+        first = false;
+    }
+    if (control_plane > 0) {
+        if (!first)
+            jbuf_append(&b, ",");
+        jbuf_append_json_str(&b, "governance/meta integrations detected; treat as control-plane tools");
+    }
+    jbuf_append(&b, "]}");
+
+    snprintf(result, rlen, "%s", b.data ? b.data : "{}");
+    jbuf_free(&b);
+    codex_app_directory_free(&dir);
+    free(path);
     return true;
 }
 
@@ -24055,6 +24383,422 @@ static bool tool_trading_dispatch(const char *input, char *result, size_t rlen) 
     return ok;
 }
 
+/* ══════════════════════════════════════════════════════════════════════════
+ *  HERMES AGENT COMPATIBILITY — MCP + Agent Client Protocol
+ * ══════════════════════════════════════════════════════════════════════════ */
+
+static const char *s_hermes_mcp_tools[] = {
+    "conversations_list", "conversation_get",       "messages_read",
+    "attachments_fetch",  "events_poll",            "events_wait",
+    "messages_send",      "channels_list",          "permissions_list_open",
+    "permissions_respond", NULL};
+
+typedef struct {
+    const char *id;
+    const char *surface;
+    const char *name;
+    const char *entrypoint;
+    const char *dsco_mode;
+    const char *config_path;
+    const char *risk_posture;
+    const char *docs_url;
+    const char *notes;
+} hermes_capability_t;
+
+static const hermes_capability_t s_hermes_capabilities[] = {
+    {"mcp_server_bridge", "mcp", "Hermes messaging/channel bridge as MCP server",
+     "hermes mcp serve", "dsco consumes this through ~/.dsco/mcp.json or imported Hermes YAML",
+     "~/.dsco/mcp.json", "read tools plus message-send and permission-response tools",
+     "https://hermes-agent.nousresearch.com/docs/user-guide/features/mcp",
+     "Best dsco integration point for conversations, channels, events, and approvals."},
+    {"mcp_client_catalog", "mcp", "Hermes MCP client configuration import", "~/.hermes/config.yaml",
+     "dsco imports Hermes MCP server blocks so both runtimes can share configured MCP servers",
+     "~/.hermes/config.yaml; ~/.hermes/mcp_servers.yaml",
+     "inherits each MCP server's own command/env/header risk",
+     "https://hermes-agent.nousresearch.com/docs/user-guide/features/mcp",
+     "Accepts stdio and HTTP-style server metadata where the YAML block is simple."},
+    {"acp_editor_server", "acp", "Agent Client Protocol editor server", "hermes acp",
+     "editor-facing peer mode; dsco documents it but does not treat it as commerce ACP",
+     "~/.hermes/config.yaml", "editor approval prompts for file/terminal workflows",
+     "https://hermes-agent.nousresearch.com/docs/user-guide/features/acp",
+     "Use for VS Code, Zed, JetBrains, and other ACP-compatible editor shells."},
+    {"cli_tui", "operator", "Interactive Hermes CLI/TUI", "hermes",
+     "side-by-side operator runtime; dsco can hand off setup or diagnostics to Hermes CLI",
+     "~/.hermes/config.yaml", "human-in-the-loop terminal session",
+     "https://hermes-agent.nousresearch.com/docs/user-guide/cli",
+     "Useful for direct model/provider setup, conversation control, and slash-command UX."},
+    {"provider_routing", "models", "Provider and model routing", "hermes model",
+     "keeps Hermes' provider resolver separate from dsco's provider resolver",
+     "~/.hermes/.env; ~/.hermes/config.yaml", "credentials stay in Hermes config",
+     "https://hermes-agent.nousresearch.com/docs/user-guide/configuring-models",
+     "Covers Nous Portal, OpenRouter, OpenAI-compatible endpoints, and BYO provider keys."},
+    {"portal_tool_gateway", "providers", "Nous Portal model and tool gateway",
+     "hermes setup --portal", "optional Hermes-owned subscription/tool gateway path",
+     "~/.hermes/.env", "OAuth/subscription-gated external services",
+     "https://hermes-agent.nousresearch.com/docs/user-guide/features/tool-gateway",
+     "Can bundle model access, web search, image generation, TTS, and browser services."},
+    {"messaging_gateway", "messaging", "Cross-platform messaging gateway", "hermes gateway",
+     "Hermes owns platform adapters; dsco can inspect and send through Hermes MCP tools",
+     "~/.hermes/config.yaml", "send operations require platform auth and active adapters",
+     "https://hermes-agent.nousresearch.com/docs/user-guide/messaging",
+     "Targets Telegram, Discord, Slack, WhatsApp, Signal, and related platform bridges."},
+    {"skills_system", "memory", "Skills and procedural memory", "/skills and skill files",
+     "Hermes-owned reusable procedures can complement dsco tools and workflows",
+     "~/.hermes/skills", "agent-created skill writes should remain reviewed",
+     "https://hermes-agent.nousresearch.com/docs/user-guide/features/skills",
+     "Compatible with the agentskills.io-style skill ecosystem."},
+    {"persistent_memory", "memory", "Persistent memory, profile, and session recall",
+     "/insights and session search", "Hermes can be a long-lived memory peer for dsco",
+     "~/.hermes/state.db; ~/.hermes/sessions", "memory may contain sensitive user/session data",
+     "https://hermes-agent.nousresearch.com/docs/user-guide/features/memory",
+     "Useful for cross-session continuity, user modeling, and conversation search."},
+    {"cron_scheduling", "automation", "Scheduled automations", "Hermes cron scheduler",
+     "Hermes runs unattended reminders/reports while dsco keeps local build/tool control",
+     "~/.hermes/config.yaml", "delivery side effects depend on platform/tool permissions",
+     "https://hermes-agent.nousresearch.com/docs/user-guide/features/cron",
+     "Good fit for scheduled reports, audits, backups, and gateway-delivered updates."},
+    {"terminal_backends", "execution", "Terminal backends and remote execution substrate",
+     "hermes config set terminal.backend", "complements dsco local subprocess/sandbox tools",
+     "~/.hermes/config.yaml", "remote/container backends require explicit trust boundaries",
+     "https://hermes-agent.nousresearch.com/docs/user-guide/configuration",
+     "Covers local, Docker, SSH, Singularity, Modal, and Daytona-style environments."},
+    {"delegation_parallelism", "agents", "Delegation and parallel subagents", "delegate_task",
+     "maps cleanly to dsco swarm/topology work while preserving Hermes task isolation",
+     "~/.hermes/config.yaml", "subagents need bounded scope and reviewed side effects",
+     "https://hermes-agent.nousresearch.com/docs/",
+     "Useful for splitting research, code, and diagnostics into parallel workstreams."},
+    {"context_files", "context", "Project and identity context files", "SOUL.md; AGENTS.md",
+     "lets Hermes and dsco share repo-local operating instructions where appropriate",
+     "~/.hermes/SOUL.md; .hermes.md; HERMES.md; AGENTS.md; CLAUDE.md",
+     "prompt/context files are privileged instruction inputs",
+     "https://hermes-agent.nousresearch.com/docs/user-guide/configuration",
+     "Keep dsco repo instructions precise so both runtimes inherit the same boundaries."},
+    {"approval_security", "safety", "Approvals, allowlists, and safe execution posture",
+     "hermes doctor; hermes acp --check", "aligns with dsco confirmation gates and audit logs",
+     "~/.hermes/config.yaml; ~/.hermes/.env", "dangerous commands and sends require review",
+     "https://hermes-agent.nousresearch.com/docs/user-guide/security",
+     "ACP supports allow-once/session/always style approval flows in editor contexts."},
+    {"trajectory_research", "research", "Batch trajectory generation and compression",
+     "Hermes research tooling", "research/export peer surface rather than live dsco runtime path",
+     "~/.hermes/sessions", "training data exports need privacy review",
+     "https://github.com/NousResearch/hermes-agent",
+     "Useful when building evals or tool-calling datasets from agent sessions."},
+    {0}};
+
+static void hermes_json_field(jbuf_t *b, const char *key, const char *value) {
+    jbuf_append(b, "\"");
+    jbuf_append(b, key);
+    jbuf_append(b, "\":");
+    jbuf_append_json_str(b, value ? value : "");
+}
+
+static bool hermes_find_executable(const char *name, char *out, size_t out_len) {
+    if (!name || !name[0])
+        return false;
+    if (strchr(name, '/')) {
+        if (access(name, X_OK) == 0) {
+            if (out && out_len)
+                snprintf(out, out_len, "%s", name);
+            return true;
+        }
+        return false;
+    }
+
+    const char *path = getenv("PATH");
+    if (!path || !path[0])
+        path = "/usr/local/bin:/opt/homebrew/bin:/usr/bin:/bin:/usr/sbin:/sbin";
+    char *copy = strdup(path);
+    if (!copy)
+        return false;
+    bool found = false;
+    char *save = NULL;
+    for (char *dir = strtok_r(copy, ":", &save); dir; dir = strtok_r(NULL, ":", &save)) {
+        if (!dir[0])
+            dir = ".";
+        char candidate[PATH_MAX];
+        snprintf(candidate, sizeof(candidate), "%s/%s", dir, name);
+        if (access(candidate, X_OK) == 0) {
+            if (out && out_len)
+                snprintf(out, out_len, "%s", candidate);
+            found = true;
+            break;
+        }
+    }
+    free(copy);
+    return found;
+}
+
+static bool hermes_path_readable(const char *home, const char *suffix) {
+    if (!home || !home[0] || !suffix || !suffix[0])
+        return false;
+    char path[PATH_MAX];
+    snprintf(path, sizeof(path), "%s/%s", home, suffix);
+    return access(path, R_OK) == 0;
+}
+
+static void hermes_append_sources(jbuf_t *b) {
+    jbuf_append(b, "\"sources\":{");
+    hermes_json_field(b, "repo", "https://github.com/NousResearch/hermes-agent");
+    jbuf_append(b, ",");
+    hermes_json_field(b, "docs", "https://hermes-agent.nousresearch.com/docs/");
+    jbuf_append(b, ",");
+    hermes_json_field(b, "mcp_docs",
+                      "https://hermes-agent.nousresearch.com/docs/user-guide/features/mcp");
+    jbuf_append(b, ",");
+    hermes_json_field(b, "acp_docs",
+                      "https://hermes-agent.nousresearch.com/docs/user-guide/features/acp");
+    jbuf_append(b, "}");
+}
+
+static void hermes_append_install(jbuf_t *b) {
+    jbuf_append(b, "\"install\":{");
+    hermes_json_field(
+        b, "macos_linux_wsl",
+        "curl -fsSL https://hermes-agent.nousresearch.com/install.sh | bash");
+    jbuf_append(b, ",");
+    hermes_json_field(b, "post_install", "source ~/.zshrc || source ~/.bashrc; hermes doctor");
+    jbuf_append(b, ",");
+    hermes_json_field(b, "setup", "hermes setup");
+    jbuf_append(b, "}");
+}
+
+static void hermes_append_dsco_mcp_preset(jbuf_t *b) {
+    jbuf_append(b, "\"dsco_mcp_preset\":{");
+    hermes_json_field(b, "config_path", "~/.dsco/mcp.json");
+    jbuf_append(b, ",");
+    hermes_json_field(b, "command", "hermes");
+    jbuf_append(b, ",\"args\":[\"mcp\",\"serve\"],");
+    hermes_json_field(
+        b, "json",
+        "{\n  \"servers\": {\n    \"hermes-agent\": {\n      \"command\": \"hermes\",\n      "
+        "\"args\": [\"mcp\", \"serve\"]\n    }\n  }\n}");
+    jbuf_append(b, ",");
+    hermes_json_field(b, "reload", "/mcp reload");
+    jbuf_append(b, ",");
+    hermes_json_field(b, "verify", "/mcp; /tools");
+    jbuf_append(b, "}");
+}
+
+static void hermes_append_acp_preset(jbuf_t *b) {
+    jbuf_append(b, "\"acp_preset\":{");
+    hermes_json_field(b, "protocol", "Agent Client Protocol");
+    jbuf_append(b, ",");
+    hermes_json_field(b, "command", "hermes");
+    jbuf_append(b, ",\"args\":[\"acp\"],");
+    hermes_json_field(b, "check", "hermes acp --check");
+    jbuf_append(b, ",");
+    hermes_json_field(b, "version", "hermes acp --version");
+    jbuf_append(b, ",");
+    hermes_json_field(
+        b, "manual_agent_server_json",
+        "{\n  \"agent_servers\": {\n    \"Hermes Agent\": {\n      \"command\": \"hermes\",\n      "
+        "\"args\": [\"acp\"]\n    }\n  }\n}");
+    jbuf_append(b, "}");
+}
+
+static void hermes_append_config_import(jbuf_t *b) {
+    jbuf_append(b, "\"dsco_imports_hermes_mcp_configs\":[");
+    jbuf_append_json_str(b, "~/.hermes/config.yaml");
+    jbuf_append(b, ",");
+    jbuf_append_json_str(b, "~/.hermes/config.yml");
+    jbuf_append(b, ",");
+    jbuf_append_json_str(b, "~/.hermes/mcp_servers.yaml");
+    jbuf_append(b, ",");
+    jbuf_append_json_str(b, "~/.hermes/mcp_servers.yml");
+    jbuf_append(b, "]");
+}
+
+static void hermes_append_tools(jbuf_t *b) {
+    jbuf_append(b, "\"mcp_server_tools\":[");
+    for (int i = 0; s_hermes_mcp_tools[i]; i++) {
+        if (i > 0)
+            jbuf_append(b, ",");
+        jbuf_append_json_str(b, s_hermes_mcp_tools[i]);
+    }
+    jbuf_append(b, "]");
+}
+
+static void hermes_append_capability(jbuf_t *b, const hermes_capability_t *c) {
+    jbuf_append(b, "{");
+    hermes_json_field(b, "id", c->id);
+    jbuf_append(b, ",");
+    hermes_json_field(b, "surface", c->surface);
+    jbuf_append(b, ",");
+    hermes_json_field(b, "name", c->name);
+    jbuf_append(b, ",");
+    hermes_json_field(b, "entrypoint", c->entrypoint);
+    jbuf_append(b, ",");
+    hermes_json_field(b, "dsco_mode", c->dsco_mode);
+    jbuf_append(b, ",");
+    hermes_json_field(b, "config_path", c->config_path);
+    jbuf_append(b, ",");
+    hermes_json_field(b, "risk_posture", c->risk_posture);
+    jbuf_append(b, ",");
+    hermes_json_field(b, "docs_url", c->docs_url);
+    jbuf_append(b, ",");
+    hermes_json_field(b, "notes", c->notes);
+    jbuf_append(b, "}");
+}
+
+static void hermes_append_capabilities(jbuf_t *b) {
+    int count = 0;
+    for (int i = 0; s_hermes_capabilities[i].id; i++)
+        count++;
+
+    jbuf_append(b, "\"capability_count\":");
+    jbuf_append_int(b, count);
+    jbuf_append(b, ",\"capability_surfaces\":[");
+    const char *surfaces[] = {"mcp",   "acp",      "operator", "models", "providers",
+                              "messaging", "memory", "automation", "execution", "agents",
+                              "context", "safety",   "research",  NULL};
+    for (int i = 0; surfaces[i]; i++) {
+        if (i > 0)
+            jbuf_append(b, ",");
+        jbuf_append_json_str(b, surfaces[i]);
+    }
+    jbuf_append(b, "],\"capabilities\":[");
+    for (int i = 0; s_hermes_capabilities[i].id; i++) {
+        if (i > 0)
+            jbuf_append(b, ",");
+        hermes_append_capability(b, &s_hermes_capabilities[i]);
+    }
+    jbuf_append(b, "],\"showcase_commands\":[");
+    const char *cmds[] = {
+        "./dsco --tool-exec hermes_agent '{\"action\":\"status\"}'",
+        "./dsco --tool-exec hermes_agent '{\"action\":\"capabilities\"}'",
+        "./dsco --tool-exec hermes_agent '{\"action\":\"mcp_preset\"}'",
+        "./dsco --tool-exec hermes_agent '{\"action\":\"acp_preset\"}'",
+        "./dsco --tool-exec hermes_agent '{\"action\":\"tools\"}'", NULL};
+    for (int i = 0; cmds[i]; i++) {
+        if (i > 0)
+            jbuf_append(b, ",");
+        jbuf_append_json_str(b, cmds[i]);
+    }
+    jbuf_append(b, "]");
+}
+
+static void hermes_append_status(jbuf_t *b) {
+    char exe[PATH_MAX] = {0};
+    bool installed = hermes_find_executable("hermes", exe, sizeof(exe));
+    const char *home = getenv("HOME");
+    jbuf_append(b, "\"local_status\":{");
+    jbuf_append(b, "\"hermes_on_path\":");
+    jbuf_append(b, installed ? "true" : "false");
+    jbuf_append(b, ",");
+    hermes_json_field(b, "hermes_path", installed ? exe : "");
+    jbuf_append(b, ",\"config_yaml\":");
+    jbuf_append(b, hermes_path_readable(home, ".hermes/config.yaml") ? "true" : "false");
+    jbuf_append(b, ",\"config_yml\":");
+    jbuf_append(b, hermes_path_readable(home, ".hermes/config.yml") ? "true" : "false");
+    jbuf_append(b, ",\"mcp_servers_yaml\":");
+    jbuf_append(b, hermes_path_readable(home, ".hermes/mcp_servers.yaml") ? "true" : "false");
+    jbuf_append(b, ",\"mcp_servers_yml\":");
+    jbuf_append(b, hermes_path_readable(home, ".hermes/mcp_servers.yml") ? "true" : "false");
+    jbuf_append(b, ",");
+    hermes_json_field(b, "doctor", "hermes doctor");
+    jbuf_append(b, "}");
+}
+
+static void hermes_append_notes(jbuf_t *b) {
+    jbuf_append(b, "\"notes\":[");
+    jbuf_append_json_str(b, "Use MCP when dsco should call Hermes' messaging/channel bridge tools.");
+    jbuf_append(b, ",");
+    jbuf_append_json_str(
+        b, "Use Hermes ACP only for Agent Client Protocol editor integrations; it is not the same ACP as agentic commerce.");
+    jbuf_append(b, ",");
+    jbuf_append_json_str(
+        b, "Hermes MCP server mode is stdio-first; keep the command as hermes with args [mcp, serve].");
+    jbuf_append(b, "]");
+}
+
+static bool tool_hermes_agent(const char *input, char *result, size_t rlen) {
+    char *action = input ? json_get_str(input, "action") : NULL;
+    if (!action || !action[0]) {
+        free(action);
+        action = strdup("status");
+    }
+    if (!action) {
+        snprintf(result, rlen, "out of memory");
+        return false;
+    }
+
+    bool full = strcmp(action, "status") == 0 || strcmp(action, "doctor") == 0;
+    bool preset = strcmp(action, "preset") == 0 || strcmp(action, "mcp_preset") == 0 ||
+                  strcmp(action, "config_snippet") == 0 || full;
+    bool acp = strcmp(action, "acp_preset") == 0 || strcmp(action, "acp") == 0 || full;
+    bool tools = strcmp(action, "tools") == 0 || full;
+    bool capabilities = strcmp(action, "capabilities") == 0 ||
+                        strcmp(action, "showcase") == 0 || full;
+
+    if (!full && !preset && !acp && !tools && !capabilities && strcmp(action, "plan") != 0) {
+        snprintf(result, rlen,
+                 "unknown hermes_agent action: %s (status, doctor, preset, mcp_preset, "
+                 "acp_preset, tools, capabilities, showcase, plan)",
+                 action);
+        free(action);
+        return false;
+    }
+
+    jbuf_t out;
+    jbuf_init(&out, 8192);
+    jbuf_append(&out, "{\"ok\":true,\"integration\":\"hermes-agent\",\"action\":");
+    jbuf_append_json_str(&out, action);
+    jbuf_append(&out, ",");
+    hermes_append_sources(&out);
+    jbuf_append(&out, ",");
+    hermes_append_install(&out);
+    if (full) {
+        jbuf_append(&out, ",");
+        hermes_append_status(&out);
+    }
+    if (preset) {
+        jbuf_append(&out, ",");
+        hermes_append_dsco_mcp_preset(&out);
+        jbuf_append(&out, ",");
+        hermes_append_config_import(&out);
+    }
+    if (acp) {
+        jbuf_append(&out, ",");
+        hermes_append_acp_preset(&out);
+    }
+    if (tools) {
+        jbuf_append(&out, ",");
+        hermes_append_tools(&out);
+    }
+    if (capabilities) {
+        jbuf_append(&out, ",");
+        hermes_append_capabilities(&out);
+    }
+    if (strcmp(action, "plan") == 0) {
+        jbuf_append(&out, ",\"plan\":[");
+        jbuf_append_json_str(&out, "Install Hermes and run hermes setup or hermes setup --portal.");
+        jbuf_append(&out, ",");
+        jbuf_append_json_str(&out,
+                             "Add hermes-agent to ~/.dsco/mcp.json with command hermes and args "
+                             "[mcp, serve].");
+        jbuf_append(&out, ",");
+        jbuf_append_json_str(&out,
+                             "Reload dsco MCP discovery and verify mcp__hermes-agent__* tools.");
+        jbuf_append(&out, ",");
+        jbuf_append_json_str(&out,
+                             "For editor workflows, configure the editor's ACP agent server as "
+                             "hermes acp and verify with hermes acp --check.");
+        jbuf_append(&out, ",");
+        jbuf_append_json_str(&out,
+                             "Use hermes_agent capabilities/showcase to review messaging, memory, "
+                             "skills, scheduling, terminal-backend, provider, context, and safety "
+                             "surfaces before enabling side effects.");
+        jbuf_append(&out, "]");
+    }
+    jbuf_append(&out, ",");
+    hermes_append_notes(&out);
+    jbuf_append(&out, "}");
+    snprintf(result, rlen, "%s", out.data ? out.data : "{}");
+    jbuf_free(&out);
+    free(action);
+    return true;
+}
+
 typedef struct {
     const char *id;
     const char *aliases;
@@ -25867,8 +26611,21 @@ static const tool_def_t s_tools[] = {
      .execute = tool_trading_dispatch},
 
     /* ══════════════════════════════════════════════════════════════════════
-     *  AGENTIC COMMERCE PROTOCOLS (1)
+     *  HERMES AGENT + AGENTIC COMMERCE PROTOCOLS (2)
      * ══════════════════════════════════════════════════════════════════════ */
+    {.name = "hermes_agent",
+     .description =
+         "Nous Hermes Agent compatibility helper: status/doctor/preset/capabilities for MCP "
+         "stdio bridge (hermes mcp serve), Agent Client Protocol editor mode (hermes acp), "
+         "gateway/memory/skills/scheduling/provider surfaces, and Hermes MCP config import paths.",
+     .input_schema_json =
+         "{\"type\":\"object\",\"properties\":{\"action\":{\"type\":\"string\",\"description\":"
+         "\"status|doctor|preset|mcp_preset|acp_preset|tools|capabilities|showcase|plan\"}},"
+         "\"required\":["
+         "\"action\"]}",
+     .execute = tool_hermes_agent,
+     .is_read_only = true,
+     .is_concurrent = true},
     {.name = "agentic_commerce",
      .description =
          "Agentic commerce protocol registry: list/status/coverage/plan for ACP, UCP, AP2, x402, "
@@ -26417,6 +27174,20 @@ static const tool_def_t s_tools[] = {
      .core = true,
      .is_read_only = true,
      .is_concurrent = true},
+    {.name = "discover_integrations",
+     .description = "Discover cached, installed, connected, live, inaccessible, stale, OAuth-gated, mutating, and sync-capable external integrations from the Codex app directory plus live MCP tools.",
+     .input_schema_json = "{\"type\":\"object\",\"properties\":{\"query\":{\"type\":\"string\"},\"profile\":{\"type\":\"string\",\"description\":\"engineering|gtm|finance|enterprise_knowledge|governed_agent_runtime or free-text category\"},\"path\":{\"type\":\"string\",\"description\":\"Optional catalog JSON path; defaults to DSCO_CODEX_APP_DIRECTORY or ~/.dsco/codex_app_directory.json\"},\"offset\":{\"type\":\"integer\"},\"limit\":{\"type\":\"integer\"}}}",
+     .execute = tool_discover_integrations,
+     .core = true,
+     .is_read_only = true,
+     .is_concurrent = true},
+    {.name = "dsco_doctor_integrations",
+     .description = "Diagnose integration catalog/cache health: stale connector IDs, missing auth/install state, dangerous mutating connectors, and control-plane governance tools.",
+     .input_schema_json = "{\"type\":\"object\",\"properties\":{\"path\":{\"type\":\"string\",\"description\":\"Optional catalog JSON path\"}}}",
+     .execute = tool_dsco_doctor_integrations,
+     .core = true,
+     .is_read_only = true,
+     .is_concurrent = true},
     {.name = "load_tools",
      .description = "Dynamically load tools into the active register file. Provide at least one "
                     "of: names (comma-separated), tools (array), or category.",
@@ -26603,6 +27374,184 @@ static const tool_def_t s_tools[] = {
      .input_schema_json = "{\"type\":\"object\",\"properties\":{\"url\":{\"type\":\"string\"}},"
                           "\"required\":[\"url\"]}",
      .execute = tool_url_parse,
+     .is_read_only = true,
+     .is_concurrent = true},
+
+    /* ══════════════════════════════════════════════════════════════════════
+     *  EXPANDED BUILT-IN UTILITIES (23)
+     * ══════════════════════════════════════════════════════════════════════ */
+    {.name = "openrouter_models",
+     .description = "Fetch and filter OpenRouter model metadata by search, context, price, and "
+                    "free/chat-only constraints.",
+     .input_schema_json =
+         "{\"type\":\"object\",\"properties\":{\"search\":{\"type\":\"string\"},\"min_context\":{"
+         "\"type\":\"integer\"},\"max_price_per_million\":{\"type\":\"number\"},\"free_only\":{"
+         "\"type\":\"boolean\"},\"chat_only\":{\"type\":\"boolean\"},\"limit\":{\"type\":"
+         "\"integer\"}}}",
+     .execute = tool_openrouter_models,
+     .is_read_only = true,
+     .is_concurrent = true},
+    {.name = "self_inspect",
+     .description = "AST summary for a C/C header project directory.",
+     .input_schema_json =
+         "{\"type\":\"object\",\"properties\":{\"project_dir\":{\"type\":\"string\"}}}",
+     .execute = tool_self_inspect,
+     .is_read_only = true,
+     .is_concurrent = true},
+    {.name = "inspect_file",
+     .description = "AST summary for one C/C header source file.",
+     .input_schema_json = "{\"type\":\"object\",\"properties\":{\"path\":{\"type\":\"string\"}},"
+                          "\"required\":[\"path\"]}",
+     .execute = tool_inspect_file,
+     .is_read_only = true,
+     .is_concurrent = true},
+    {.name = "call_graph",
+     .description = "Build a call graph rooted at a C function in a project directory.",
+     .input_schema_json =
+         "{\"type\":\"object\",\"properties\":{\"function\":{\"type\":\"string\"},\"project_dir\":{"
+         "\"type\":\"string\"}},\"required\":[\"function\"]}",
+     .execute = tool_call_graph,
+     .is_read_only = true,
+     .is_concurrent = true},
+    {.name = "dependency_graph",
+     .description = "Build a C/C header dependency graph for a project directory.",
+     .input_schema_json =
+         "{\"type\":\"object\",\"properties\":{\"project_dir\":{\"type\":\"string\"}}}",
+     .execute = tool_dependency_graph,
+     .is_read_only = true,
+     .is_concurrent = true},
+    {.name = "code_index",
+     .description = "Index source files into the local context store for later code_search.",
+     .input_schema_json =
+         "{\"type\":\"object\",\"properties\":{\"path\":{\"type\":\"string\"},\"max_files\":{"
+         "\"type\":\"integer\"},\"max_chars_per_file\":{\"type\":\"integer\"}}}",
+     .execute = tool_code_index},
+    {.name = "research_compare",
+     .description = "Compare two text snippets with token overlap and Jaccard similarity.",
+     .input_schema_json =
+         "{\"type\":\"object\",\"properties\":{\"text_a\":{\"type\":\"string\"},\"text_b\":{"
+         "\"type\":\"string\"}},\"required\":[\"text_a\",\"text_b\"]}",
+     .execute = tool_research_compare,
+     .is_read_only = true,
+     .is_concurrent = true},
+    {.name = "privacy_filter",
+     .description = "Redact obvious email addresses and phone-like tokens from text.",
+     .input_schema_json = "{\"type\":\"object\",\"properties\":{\"text\":{\"type\":\"string\"}},"
+                          "\"required\":[\"text\"]}",
+     .execute = tool_privacy_filter,
+     .is_read_only = true,
+     .is_concurrent = true},
+    {.name = "secret_scan",
+     .description = "Scan text or one file for obvious secret patterns.",
+     .input_schema_json = "{\"type\":\"object\",\"properties\":{\"text\":{\"type\":\"string\"},"
+                          "\"file\":{\"type\":\"string\"}}}",
+     .execute = tool_secret_scan,
+     .is_read_only = true,
+     .is_concurrent = true},
+    {.name = "risk_gate",
+     .description = "Score an action/content pair for destructive, privileged, secret, or PII risk.",
+     .input_schema_json =
+         "{\"type\":\"object\",\"properties\":{\"action\":{\"type\":\"string\"},\"content\":{"
+         "\"type\":\"string\"}},\"required\":[\"action\"]}",
+     .execute = tool_risk_gate,
+     .is_read_only = true,
+     .is_concurrent = true},
+    {.name = "plugin_validate",
+     .description = "Validate a plugin manifest and optional lockfile.",
+     .input_schema_json =
+         "{\"type\":\"object\",\"properties\":{\"manifest_path\":{\"type\":\"string\"},"
+         "\"lock_path\":{\"type\":\"string\"}}}",
+     .execute = tool_plugin_validate,
+     .is_read_only = true,
+     .is_concurrent = true},
+    {.name = "view_image",
+     .description = "Prepare a local image file for model-side vision analysis.",
+     .input_schema_json = "{\"type\":\"object\",\"properties\":{\"path\":{\"type\":\"string\"}},"
+                          "\"required\":[\"path\"]}",
+     .execute = tool_view_image},
+    {.name = "view_pdf",
+     .description = "Prepare a local PDF file for model-side document analysis.",
+     .input_schema_json = "{\"type\":\"object\",\"properties\":{\"path\":{\"type\":\"string\"}},"
+                          "\"required\":[\"path\"]}",
+     .execute = tool_view_pdf},
+    {.name = "csv_parse",
+     .description = "Parse CSV text or a CSV file, optionally extracting one column.",
+     .input_schema_json =
+         "{\"type\":\"object\",\"properties\":{\"text\":{\"type\":\"string\"},\"file\":{"
+         "\"type\":\"string\"},\"delimiter\":{\"type\":\"string\"},\"headers\":{\"type\":"
+         "\"boolean\"},\"column\":{\"type\":\"integer\"}}}",
+     .execute = tool_csv_parse,
+     .is_read_only = true,
+     .is_concurrent = true},
+    {.name = "regex_match",
+     .description = "Run an extended regular expression over text and return matches.",
+     .input_schema_json =
+         "{\"type\":\"object\",\"properties\":{\"text\":{\"type\":\"string\"},\"pattern\":{"
+         "\"type\":\"string\"},\"global\":{\"type\":\"boolean\"}},\"required\":[\"text\","
+         "\"pattern\"]}",
+     .execute = tool_regex_match,
+     .is_read_only = true,
+     .is_concurrent = true},
+    {.name = "template_render",
+     .description = "Render a simple {{name}} template from a JSON-object string of variables.",
+     .input_schema_json =
+         "{\"type\":\"object\",\"properties\":{\"template\":{\"type\":\"string\"},\"variables\":{"
+         "\"type\":\"string\",\"description\":\"JSON object string\"}},\"required\":[\"template\"]}",
+     .execute = tool_template_render,
+     .is_read_only = true,
+     .is_concurrent = true},
+    {.name = "text_diff",
+     .description = "Compute a unified diff between two text strings.",
+     .input_schema_json =
+         "{\"type\":\"object\",\"properties\":{\"text_a\":{\"type\":\"string\"},\"text_b\":{"
+         "\"type\":\"string\"}},\"required\":[\"text_a\",\"text_b\"]}",
+     .execute = tool_text_diff,
+     .is_read_only = true,
+     .is_concurrent = true},
+    {.name = "process_tree",
+     .description = "Show process parent/child rows, optionally filtered.",
+     .input_schema_json =
+         "{\"type\":\"object\",\"properties\":{\"filter\":{\"type\":\"string\"}}}",
+     .execute = tool_process_tree,
+     .is_read_only = true,
+     .is_concurrent = true},
+    {.name = "system_profiler",
+     .description = "Summarize local CPU, disk, network, or load information.",
+     .input_schema_json =
+         "{\"type\":\"object\",\"properties\":{\"section\":{\"type\":\"string\",\"description\":"
+         "\"all|cpu|disk|network|load\"}}}",
+     .execute = tool_system_profiler,
+     .is_read_only = true,
+     .is_concurrent = true},
+    {.name = "xml_extract",
+     .description = "Extract tag contents or attribute values from XML/HTML text or a file.",
+     .input_schema_json =
+         "{\"type\":\"object\",\"properties\":{\"text\":{\"type\":\"string\"},\"file\":{"
+         "\"type\":\"string\"},\"tag\":{\"type\":\"string\"},\"attribute\":{\"type\":\"string\"}},"
+         "\"required\":[\"tag\"]}",
+     .execute = tool_xml_extract,
+     .is_read_only = true,
+     .is_concurrent = true},
+    {.name = "jwt_decode",
+     .description = "Decode a JWT header and payload without verifying the signature.",
+     .input_schema_json = "{\"type\":\"object\",\"properties\":{\"token\":{\"type\":\"string\"}},"
+                          "\"required\":[\"token\"]}",
+     .execute = tool_jwt_decode,
+     .is_read_only = true,
+     .is_concurrent = true},
+    {.name = "hkdf",
+     .description = "Derive bytes using HKDF-SHA256 from hex input key material.",
+     .input_schema_json = "{\"type\":\"object\",\"properties\":{\"ikm\":{\"type\":\"string\"},"
+                          "\"salt\":{\"type\":\"string\"},\"info\":{\"type\":\"string\"},"
+                          "\"length\":{\"type\":\"integer\"}},\"required\":[\"ikm\"]}",
+     .execute = tool_hkdf,
+     .is_read_only = true,
+     .is_concurrent = true},
+    {.name = "big_factorial",
+     .description = "Compute n! for n from 0 through 500 using the bigint engine.",
+     .input_schema_json = "{\"type\":\"object\",\"properties\":{\"n\":{\"type\":\"integer\"}},"
+                          "\"required\":[\"n\"]}",
+     .execute = tool_big_factorial,
      .is_read_only = true,
      .is_concurrent = true},
 
@@ -28890,6 +29839,53 @@ int g_external_tool_count = 0;
  * sees the new count is guaranteed to see a fully-initialized entry. */
 static pthread_mutex_t g_external_tools_mu = PTHREAD_MUTEX_INITIALIZER;
 
+static void external_tool_copy_metadata(external_tool_t *t, const char *integration_id,
+                                        const char *display_name,
+                                        const char *distribution_channel,
+                                        const char *categories, const char *labels,
+                                        const char *scope, unsigned action_flags,
+                                        const char *catalog_status) {
+    if (!t)
+        return;
+    if (integration_id)
+        snprintf(t->integration_id, sizeof(t->integration_id), "%s", integration_id);
+    if (display_name)
+        snprintf(t->display_name, sizeof(t->display_name), "%s", display_name);
+    if (distribution_channel)
+        snprintf(t->distribution_channel, sizeof(t->distribution_channel), "%s", distribution_channel);
+    if (categories)
+        snprintf(t->categories, sizeof(t->categories), "%s", categories);
+    if (labels)
+        snprintf(t->labels, sizeof(t->labels), "%s", labels);
+    if (scope)
+        snprintf(t->scope, sizeof(t->scope), "%s", scope);
+    if (action_flags != 0)
+        t->action_flags = action_flags;
+    if (catalog_status)
+        snprintf(t->catalog_status, sizeof(t->catalog_status), "%s", catalog_status);
+}
+
+void tools_register_external_metadata(const char *name, const char *integration_id,
+                                      const char *display_name,
+                                      const char *distribution_channel,
+                                      const char *categories, const char *labels,
+                                      const char *scope, unsigned action_flags,
+                                      const char *catalog_status) {
+    if (!name || !name[0])
+        return;
+    pthread_mutex_lock(&g_external_tools_mu);
+    int current = g_external_tool_count;
+    for (int i = 0; i < current; i++) {
+        if (strcmp(g_external_tools[i].name, name) == 0) {
+            external_tool_copy_metadata(&g_external_tools[i], integration_id, display_name,
+                                        distribution_channel, categories, labels, scope,
+                                        action_flags, catalog_status);
+            break;
+        }
+    }
+    pthread_mutex_unlock(&g_external_tools_mu);
+}
+
 void tools_register_external(const char *name, const char *description,
                              const char *input_schema_json, external_tool_cb cb, void *ctx) {
     if (!name || !name[0])
@@ -28906,6 +29902,10 @@ void tools_register_external(const char *name, const char *description,
                 input_schema_json ? input_schema_json : "{\"type\":\"object\",\"properties\":{}}");
             existing->cb = cb;
             existing->ctx = ctx;
+            if (!existing->display_name[0])
+                snprintf(existing->display_name, sizeof(existing->display_name), "%s", name);
+            if (!existing->catalog_status[0])
+                snprintf(existing->catalog_status, sizeof(existing->catalog_status), "%s", "live");
             tool_map_insert(&g_tool_map, existing->name, -(10000 + i));
             pthread_mutex_unlock(&g_external_tools_mu);
             free(old_schema);
@@ -28920,6 +29920,7 @@ void tools_register_external(const char *name, const char *description,
      * Readers loop `for (i = 0; i < g_external_tool_count; i++)`, so we must
      * not advertise the slot until its contents are valid. */
     external_tool_t *t = &g_external_tools[current];
+    memset(t, 0, sizeof(*t));
     snprintf(t->name, sizeof(t->name), "%s", name);
     snprintf(t->description, sizeof(t->description), "%s", description ? description : "");
     t->input_schema_json = safe_strdup(
@@ -28927,6 +29928,8 @@ void tools_register_external(const char *name, const char *description,
     t->cb = cb;
     t->ctx = ctx;
     t->loaded = false;
+    snprintf(t->display_name, sizeof(t->display_name), "%s", name);
+    snprintf(t->catalog_status, sizeof(t->catalog_status), "%s", "live");
     tool_map_insert(&g_tool_map, t->name, -(10000 + current));
     __atomic_store_n(&g_external_tool_count, current + 1, __ATOMIC_RELEASE);
     pthread_mutex_unlock(&g_external_tools_mu);

@@ -8,6 +8,8 @@ Keep documentation synchronized with behavior, not intent.
 
 - Tool registry changes (`tools.c`) -> regenerate [TOOL_CATALOG.md](TOOL_CATALOG.md)
 - Header declaration changes (`*.h`) -> regenerate [API_REFERENCE.md](API_REFERENCE.md)
+- External app-directory/cache changes -> regenerate [EXTERNAL_TOOL_CATALOG.md](EXTERNAL_TOOL_CATALOG.md)
+- Tracked file additions/removals/moves -> regenerate [REPO_COVERAGE.md](REPO_COVERAGE.md)
 - Runtime flow changes (`main.c`, `agent.c`, `llm.c`, `provider.c`, `swarm.c`, `ipc.c`) -> update [ARCHITECTURE.md](ARCHITECTURE.md)
 - Env/config/storage changes (`setup.c`, `baseline.c`, provider keys, paths) -> update [OPERATIONS.md](OPERATIONS.md)
 - New supported scripts/web assets -> update [INDEX.md](INDEX.md) and the relevant runbook or reference doc
@@ -18,6 +20,8 @@ Keep documentation synchronized with behavior, not intent.
 ```bash
 ./scripts/gen_api_reference.sh
 ./scripts/gen_tool_catalog.sh
+python3 scripts/gen_external_tool_catalog.py --root .
+python3 scripts/gen_repo_coverage.py --root .
 ```
 
 ## Validation Commands
@@ -46,5 +50,6 @@ make docs-check
 `docs` workflow should fail if:
 
 - generated docs drift
+- generated repo/tool coverage drift
 - markdown lint fails
 - link check fails

@@ -238,7 +238,10 @@ void provider_pool_report(const char *name, bool ok, double latency_ms) {
     if (ok) {
         s->consec_failures = 0;
         s->tripped_until = 0;
-        if (s->is_subscription && s->exhausted_until) {
+        bool clears_subscription_exhaustion = true;
+        if (strcmp(s->name, "sakana") == 0 && !provider_sakana_current_key_is_subscription())
+            clears_subscription_exhaustion = false;
+        if (s->is_subscription && s->exhausted_until && clears_subscription_exhaustion) {
             s->exhausted_until = 0;
             pool_limits_save();
         }

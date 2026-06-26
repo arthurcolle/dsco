@@ -2,20 +2,29 @@
 
 #include <errno.h>
 #include <stdbool.h>
+#include <ctype.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
 
+static const char *lite_display_name(const char *prog) {
+    const char *base = prog ? strrchr(prog, '/') : NULL;
+    base = base ? base + 1 : prog;
+    if (base && strcmp(base, "dsco-lite") == 0)
+        return "dsco-lite";
+    return "dsco";
+}
+
 static void lite_usage(const char *prog) {
     fprintf(stderr,
-            "dsco-lite v%s\n\n"
+            "%s v%s\n\n"
             "Usage: %s [--version] [--help]\n"
             "       %s --models-json\n"
             "       %s --tools-json\n"
             "       %s --tool-exec cwd '{}'\n"
             "       %s [dsco provider options] PROMPT\n",
-            DSCO_VERSION, prog, prog, prog, prog, prog);
+            lite_display_name(prog), DSCO_VERSION, prog, prog, prog, prog, prog);
 }
 
 static void json_escape(FILE *out, const char *s) {
@@ -37,29 +46,66 @@ static void json_escape(FILE *out, const char *s) {
     }
 }
 
-static bool json_string_needs_escape(const char *s) {
+static bool result_is_structured_json(const char *s) {
     if (!s)
         return false;
-    for (const unsigned char *p = (const unsigned char *)s; *p; p++) {
-        if (*p < 0x20 || *p == '"' || *p == '\\')
-            return true;
+    const char *p = s;
+    while (*p && isspace((unsigned char)*p))
+        p++;
+    if (*p != '{' && *p != '[')
+        return false;
+
+    char stack[128];
+    int depth = 0;
+    bool in_string = false;
+    bool escaped = false;
+    for (; *p; p++) {
+        char c = *p;
+        if (in_string) {
+            if (escaped)
+                escaped = false;
+            else if (c == '\\')
+                escaped = true;
+            else if (c == '"')
+                in_string = false;
+            continue;
+        }
+        if (c == '"') {
+            in_string = true;
+            continue;
+        }
+        if (c == '{' || c == '[') {
+            if (depth >= (int)(sizeof(stack) / sizeof(stack[0])))
+                return false;
+            stack[depth++] = (c == '{') ? '}' : ']';
+            continue;
+        }
+        if (c == '}' || c == ']') {
+            if (depth <= 0 || c != stack[depth - 1])
+                return false;
+            depth--;
+            if (depth == 0) {
+                p++;
+                while (*p && isspace((unsigned char)*p))
+                    p++;
+                return *p == '\0';
+            }
+        }
     }
     return false;
 }
 
 static void print_tool_result_json(bool ok, const char *result) {
-    const char *prefix = ok ? "{\"ok\":true,\"result\":\"" : "{\"ok\":false,\"result\":\"";
-    if (!json_string_needs_escape(result)) {
-        (void)write(STDOUT_FILENO, prefix, strlen(prefix));
-        if (result)
-            (void)write(STDOUT_FILENO, result, strlen(result));
-        (void)write(STDOUT_FILENO, "\"}\n", 3);
+    printf("{\"ok\":%s,\"result\":", ok ? "true" : "false");
+    if (result_is_structured_json(result)) {
+        fputs(result, stdout);
+        printf("}\n");
         return;
     }
 
-    fputs(prefix, stdout);
+    putchar('"');
     json_escape(stdout, result);
-    fputs("\"}\n", stdout);
+    printf("\"}\n");
 }
 
 static int print_models_json(void) {
@@ -157,7 +203,8 @@ int main(int argc, char **argv) {
 
     for (int i = 1; i < argc; i++) {
         if (strcmp(argv[i], "--version") == 0 || strcmp(argv[i], "-v") == 0) {
-            printf("dsco-lite v%s (built %s, %s)\n", DSCO_VERSION, BUILD_DATE, GIT_HASH);
+            printf("%s v%s (built %s, %s)\n", lite_display_name(argv[0]), DSCO_VERSION,
+                   BUILD_DATE, GIT_HASH);
             return 0;
         }
         if (strcmp(argv[i], "--help") == 0 || strcmp(argv[i], "-h") == 0) {
