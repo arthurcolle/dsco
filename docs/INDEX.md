@@ -19,6 +19,11 @@ This documentation set is intended as a full-codebase reference for `dsco-cli`, 
 - [MetaConstruct DSL](META_CONSTRUCT_DSL.md)
 - [Operations, Config, Storage, and Troubleshooting](OPERATIONS.md)
 - [Constants and Environment Index](CONSTANTS_ENV_INDEX.md)
+- [Chronicle TokenLedger](CHRONICLE_TOKENLEDGER.md)
+- [Integration Catalog](INTEGRATION_CATALOG.md)
+- [Cosmopolitan Build Lane](COSMOPOLITAN.md)
+- [Local Control Plane](LOCAL_CONTROL_PLANE.md)
+- [Avian Mechanisms](AVIAN_MECHANISMS.md)
 - [Sakana Fugu Provider](SAKANA_FUGU_PROVIDER.md)
 - [Plugin Manifest + Lockfile Spec](PLUGIN_MANIFEST_LOCK_SPEC.md)
 - [How-To Guides](HOW_TO.md)
@@ -63,5 +68,7 @@ This documentation set is intended as a full-codebase reference for `dsco-cli`, 
 1. Read [Architecture & Runtime Flows](ARCHITECTURE.md) for system-level mental model.
 2. Use [C Module Reference](C_MODULE_REFERENCE.md) for per-file implementation details.
 3. Use [Tool Catalog](TOOL_CATALOG.md) when working on tool selection/execution behavior.
-4. Use [Operations](OPERATIONS.md) for env/config/runtime storage and troubleshooting.
-5. Use [Runbooks](RUNBOOKS.md) for operational procedures.
+4. Use [Chronicle TokenLedger](CHRONICLE_TOKENLEDGER.md) for local activity/provenance semantics.
+5. Use [Integration Catalog](INTEGRATION_CATALOG.md) when working on external app/MCP metadata.
+6. Use [Operations](OPERATIONS.md) for env/config/runtime storage and troubleshooting.
+7. Use [Runbooks](RUNBOOKS.md) for operational procedures.

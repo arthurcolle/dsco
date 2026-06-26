@@ -11,6 +11,7 @@
 #include "ipc.h"
 #include "md.h"
 #include "baseline.h"
+#include "chronicle.h"
 #include "setup.h"
 #include "provider.h"
 #include "provider_profiles.h"
@@ -2616,6 +2617,18 @@ int main(int argc, char **argv) {
     heartbeat_set_context(argc, argv);
     heartbeat_set_phase("main_entry");
 
+    /* Chronicle is the DSCO flight recorder. It starts at process entry —
+     * before fast paths, info flags, tool exec, setup, timeline server, or
+     * provider resolution — so every dsco invocation leaves a local activity
+     * record unless DSCO_CHRONICLE_MODE=off. Later chronicle_start() calls are
+     * idempotent runtime-configuration updates. */
+    if (chronicle_start(&(chronicle_start_opts_t){.provider = "startup",
+                                                  .model = "",
+                                                  .mode = "startup",
+                                                  .instance_id = NULL})) {
+        atexit(chronicle_stop);
+    }
+
     /* Fault-injection hook for exercising the crash handler + supervisor end
      * to end. Completely inert unless DSCO_TEST_CRASH is set. Installs the
      * crash handlers itself so the in-process backtrace path is exercised.
@@ -3421,6 +3434,10 @@ int main(int argc, char **argv) {
             fprintf(stderr, "error: failed to start baseline sqlite storage\n");
             return 1;
         }
+        chronicle_start(&(chronicle_start_opts_t){.provider = "local",
+                                                  .model = model,
+                                                  .mode = "activity-server",
+                                                  .instance_id = baseline_instance_id()});
         baseline_log("setup", "env_loaded", dsco_setup_env_path(), NULL);
         if (loaded_env_count > 0) {
             char msg[128];
@@ -3428,6 +3445,7 @@ int main(int argc, char **argv) {
             baseline_log("setup", "keys_loaded", msg, NULL);
         }
         int rc = baseline_serve_http(timeline_port, timeline_instance_filter);
+        chronicle_stop();
         baseline_stop();
         return rc == 0 ? 0 : 1;
     }
@@ -3872,6 +3890,10 @@ native_path:
     if (!baseline_start(model, oneshot_prompt ? "oneshot" : "interactive")) {
         fprintf(stderr, "warning: baseline disabled (sqlite unavailable)\n");
     }
+    chronicle_start(&(chronicle_start_opts_t){.provider = active_provider,
+                                              .model = model,
+                                              .mode = oneshot_prompt ? "oneshot" : "interactive",
+                                              .instance_id = baseline_instance_id()});
 
     agent_set_launch_argv(argc, argv);
 
@@ -4177,6 +4199,7 @@ native_path:
 
     dsco_http_pool_cleanup();
     curl_global_cleanup();
+    chronicle_stop();
     baseline_stop();
     if (user_exit_requested && getenv("DSCO_SUPERVISED"))
         return DSCO_EXIT_USER_REQUESTED;

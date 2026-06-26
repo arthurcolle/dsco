@@ -3,23 +3,13 @@
 This file is auto-generated from header declarations in `include/`.
 
 - Generator: `./scripts/gen_api_reference.sh`
-- Headers scanned: 112
+- Headers scanned: 114
 
 ## Regeneration
 
 ```bash
 ./scripts/gen_api_reference.sh
 ```
-
-## `agent.h`
-
-Function-like declarations: 3
-
-### Declarations
-
-- `void agent_set_launch_argv(int argc, char **argv);`
-- `bool agent_run(const char *api_key, const char *model, const char *topology_name, bool topology_auto, const char *provider_override);`
-- `bool agent_run_orchestrated(const char *api_key, const char *chat_model, const char *worker_model, const char *provider_override);`
 
 ## `agent_profile.h`
 
@@ -43,6 +33,16 @@ Function-like declarations: 16
 - `const agent_profile_t *agent_profile_active(void);`
 - `bool agent_profile_tool_allowed(const char *tool_name, const char *group_hint);`
 - `bool agent_profile_tool_allowed_strict(const char *tool_name, const char *group_hint);`
+
+## `agent.h`
+
+Function-like declarations: 3
+
+### Declarations
+
+- `void agent_set_launch_argv(int argc, char **argv);`
+- `bool agent_run(const char *api_key, const char *model, const char *topology_name, bool topology_auto, const char *provider_override);`
+- `bool agent_run_orchestrated(const char *api_key, const char *chat_model, const char *worker_model, const char *provider_override);`
 
 ## `anim.h`
 
@@ -190,6 +190,51 @@ Function-like declarations: 6
 - `void bg_learn_stop(void);`
 - `int bg_learn_run_once(void);`
 - `void bg_learn_stats(bg_learn_stats_t *out);`
+
+## `chronicle.h`
+
+Function-like declarations: 25
+
+### Declarations
+
+- `bool chronicle_start(const chronicle_start_opts_t *opts);`
+- `void chronicle_stop(void);`
+- `bool chronicle_ready(void);`
+- `chronicle_mode_t chronicle_mode(void);`
+- `const char *chronicle_installation_id(void);`
+- `const char *chronicle_session_id(void);`
+- `const char *chronicle_root(void);`
+- `const char *chronicle_db_path(void);`
+- `void chronicle_new_id(char *out, size_t out_len);`
+- `bool chronicle_span_begin(const char *trace_id, const char *parent_span_id, const char *span_type, const char *name, const char *payload_json, char *span_id_out);`
+- `bool chronicle_span_end(const char *span_id, const char *status, const char *payload_json);`
+- `bool chronicle_event(const char *event_type, const char *trace_id, const char *span_id, const char *parent_span_id, const char *actor_type, const char *actor_id, const char *payload_json, const char *sensitivity);`
+- `bool chronicle_blob_put(const void *data, size_t len, const char *logical_type, const char *content_type, const char *sensitivity, char *sha_out, size_t sha_out_len);`
+- `bool chronicle_blob_put_text(const char *text, const char *logical_type, const char *sensitivity, char *sha_out, size_t sha_out_len);`
+- `bool chronicle_edge(const char *from_id, const char *to_id, const char *relation, double confidence, const char *metadata_json);`
+- `bool chronicle_user_message(const char *trace_id, const char *span_id, const char *text);`
+- `bool chronicle_context_materialized(const char *trace_id, const char *span_id, const char *request_json, int estimated_tokens);`
+- `bool chronicle_llm_request(const char *trace_id, const char *span_id, const char *provider, const char *model, const char *request_json, int estimated_tokens);`
+- `bool chronicle_llm_delta(const char *trace_id, const char *span_id, const char *kind, const char *text);`
+- `bool chronicle_llm_response(const char *trace_id, const char *span_id, const char *provider, const char *model, const char *output_text, const char *raw_response_json, int input_tokens, int output_tokens, int cache_read_tokens, int cache_write_tokens, int reasoning_tokens, double cost_usd, double latency_ms, const char *finish_reason, const char *generation_id);`
+- `bool chronicle_tool_call_start(const char *trace_id, const char *parent_span_id, const char *tool_name, const char *tool_id, const char *args_json, char *tool_span_id_out);`
+- `bool chronicle_tool_call_end(const char *trace_id, const char *tool_span_id, const char *tool_name, const char *result_text, bool ok, bool timeout, double latency_ms);`
+- `char *chronicle_build_activity_json(int limit, const char *session_filter);`
+- `char *chronicle_build_activity_html(int limit, const char *session_filter);`
+- `char *chronicle_read_blob_hex(const char *sha256, size_t max_bytes, const char **content_type_out);`
+
+## `codex_app_directory.h`
+
+Function-like declarations: 6
+
+### Declarations
+
+- `void codex_app_directory_init(codex_app_directory_t *dir);`
+- `void codex_app_directory_free(codex_app_directory_t *dir);`
+- `bool codex_app_directory_load_file(codex_app_directory_t *dir, const char *path, char *err, size_t err_len);`
+- `const codex_app_directory_entry_t *codex_app_directory_find(const codex_app_directory_t *dir, const char *id_or_name);`
+- `unsigned codex_app_directory_actions_for_labels(bool retrievable, bool sync, bool consequential, bool interactive);`
+- `const char *codex_app_directory_default_path(char *buf, size_t buf_len);`
 
 ## `codex_cache.h`
 
@@ -704,13 +749,14 @@ Function-like declarations: 1
 
 ## `integration_fabric.h`
 
-Function-like declarations: 7
+Function-like declarations: 8
 
 ### Declarations
 
 - `const dsco_integration_profile_t *dsco_integration_profiles(size_t *count);`
 - `const dsco_integration_profile_t *dsco_integration_profile_for_server(const char *server_name);`
 - `const dsco_integration_profile_t *dsco_integration_profile_for_tool(const char *tool_name);`
+- `unsigned dsco_integration_actions_for_catalog_labels(bool retrievable, bool sync, bool consequential, bool interactive);`
 - `unsigned dsco_integration_actions_for_tool(const char *tool_name);`
 - `bool dsco_integration_requires_confirmation(const char *tool_name);`
 - `bool dsco_integration_action_has(unsigned actions, dsco_integration_action_t action);`
@@ -1158,6 +1204,17 @@ Function-like declarations: 6
 - `bool mfp_rewrite_func_shorthand(const char *expr, char *out, size_t out_len);`
 - `bool mfp_eval(const char *expr, char *out, size_t out_len);`
 
+## `mcp_names.h`
+
+Function-like declarations: 4
+
+### Declarations
+
+- `void dsco_mcp_normalize_name(const char *in, char *out, size_t out_len);`
+- `void dsco_mcp_build_tool_name(const char *server_name, const char *tool_name, char *out, size_t out_len);`
+- `bool dsco_mcp_is_canonical_tool_name(const char *name);`
+- `void dsco_mcp_legacy_alias_from_canonical(const char *name, char *out, size_t out_len);`
+
 ## `mcp.h`
 
 Function-like declarations: 7
@@ -1171,17 +1228,6 @@ Function-like declarations: 7
 - `void mcp_shutdown(mcp_registry_t *reg);`
 - `const mcp_tool_t *mcp_get_tools(mcp_registry_t *reg, int *count);`
 - `char *mcp_call_tool(mcp_registry_t *reg, const char *tool_name, const char *arguments_json);`
-
-## `mcp_names.h`
-
-Function-like declarations: 4
-
-### Declarations
-
-- `void dsco_mcp_normalize_name(const char *in, char *out, size_t out_len);`
-- `void dsco_mcp_build_tool_name(const char *server_name, const char *tool_name, char *out, size_t out_len);`
-- `bool dsco_mcp_is_canonical_tool_name(const char *name);`
-- `void dsco_mcp_legacy_alias_from_canonical(const char *name, char *out, size_t out_len);`
 
 ## `md.h`
 
@@ -1425,6 +1471,38 @@ Function-like declarations: 7
 - `pipeline_t *pipeline_parse(const char *input, const char *spec);`
 - `char *pipeline_run(const char *input, const char *spec);`
 
+## `plan_cache.h`
+
+Function-like declarations: 12
+
+### Declarations
+
+- `void plan_cache_init(void);`
+- `void plan_cache_free(void);`
+- `void plan_cache_load(void);`
+- `void plan_cache_save(void);`
+- `void plan_cache_flush(void);`
+- `bool plan_cache_lookup(const char *task, plan_cache_result_t *result);`
+- `void plan_cache_store(const char *task, const char *topology_name, const char *rationale, float fit_score);`
+- `void plan_cache_store_json(const char *task, const char *plan_json);`
+- `const plan_cache_entry_t *plan_cache_find_entry(const char *task);`
+- `int plan_cache_stats_json(char *buf, size_t buflen);`
+- `float plan_similarity_score(const char *task_a, const char *task_b);`
+- `char *plan_cache_adapt(const plan_cache_entry_t *entry, const char *new_task);`
+
+## `plan_optimizer.h`
+
+Function-like declarations: 6
+
+### Declarations
+
+- `plan_options_t *plan_analyze(const char *task, int budget_cents);`
+- `void plan_options_free(plan_options_t *opts);`
+- `int plan_options_json(const plan_options_t *opts, char *buf, size_t buflen);`
+- `const plan_option_t *plan_options_best(const plan_options_t *opts);`
+- `double plan_estimate_cost(const plan_option_t *opt);`
+- `double topology_cost_multiplier(const char *topology_name);`
+
 ## `plan.h`
 
 Function-like declarations: 50
@@ -1481,38 +1559,6 @@ Function-like declarations: 50
 - `step_type_t step_type_parse(const char *s);`
 - `atom_type_t atom_type_parse(const char *s);`
 - `plan_status_t plan_status_parse(const char *s);`
-
-## `plan_cache.h`
-
-Function-like declarations: 12
-
-### Declarations
-
-- `void plan_cache_init(void);`
-- `void plan_cache_free(void);`
-- `void plan_cache_load(void);`
-- `void plan_cache_save(void);`
-- `void plan_cache_flush(void);`
-- `bool plan_cache_lookup(const char *task, plan_cache_result_t *result);`
-- `void plan_cache_store(const char *task, const char *topology_name, const char *rationale, float fit_score);`
-- `void plan_cache_store_json(const char *task, const char *plan_json);`
-- `const plan_cache_entry_t *plan_cache_find_entry(const char *task);`
-- `int plan_cache_stats_json(char *buf, size_t buflen);`
-- `float plan_similarity_score(const char *task_a, const char *task_b);`
-- `char *plan_cache_adapt(const plan_cache_entry_t *entry, const char *new_task);`
-
-## `plan_optimizer.h`
-
-Function-like declarations: 6
-
-### Declarations
-
-- `plan_options_t *plan_analyze(const char *task, int budget_cents);`
-- `void plan_options_free(plan_options_t *opts);`
-- `int plan_options_json(const plan_options_t *opts, char *buf, size_t buflen);`
-- `const plan_option_t *plan_options_best(const plan_options_t *opts);`
-- `double plan_estimate_cost(const plan_option_t *opt);`
-- `double topology_cost_multiplier(const char *topology_name);`
 
 ## `plot.h`
 
@@ -1579,37 +1625,6 @@ Function-like declarations: 8
 - `void presence_mark_unlocked(void);`
 - `void presence_poke(void);`
 
-## `project.h`
-
-Function-like declarations: 24
-
-### Declarations
-
-- `void dsco_ring_init(dsco_ring_t *r, size_t cap);`
-- `void dsco_ring_free(dsco_ring_t *r);`
-- `size_t dsco_ring_write(dsco_ring_t *r, const char *data, size_t len);`
-- `size_t dsco_ring_snapshot(dsco_ring_t *r, char *out, size_t out_cap);`
-- `const char *dsco_project_registry_root(void);`
-- `int dsco_project_registry_ensure(void);`
-- `int dsco_project_create(const char *root, const char *name, dsco_project_t **out);`
-- `int dsco_project_open(const char *id_or_name_or_path, dsco_project_t **out);`
-- `int dsco_project_save(const dsco_project_t *p);`
-- `int dsco_project_close(dsco_project_t *p);`
-- `void dsco_project_free(dsco_project_t *p);`
-- `int dsco_project_archive(const char *id);`
-- `int dsco_project_list(dsco_project_summary_t *out, int max, bool include_archived);`
-- `int dsco_project_start(dsco_project_t *p, const char *api_key);`
-- `int dsco_project_pause(dsco_project_t *p);`
-- `int dsco_project_resume(dsco_project_t *p);`
-- `int dsco_project_kill(dsco_project_t *p);`
-- `int dsco_project_send_input(dsco_project_t *p, const char *line);`
-- `int dsco_project_drain_output(dsco_project_t *p);`
-- `int dsco_project_poll_fd(const dsco_project_t *p);`
-- `size_t dsco_project_snapshot(dsco_project_t *p, char *out, size_t out_cap);`
-- `double dsco_project_activity_bps(dsco_project_t *p);`
-- `void dsco_project_activity_ring(dsco_project_t *p, double *out16);`
-- `const char *dsco_project_state_name(dsco_project_state_t s);`
-
 ## `project_grid.h`
 
 Function-like declarations: 21
@@ -1647,6 +1662,72 @@ Function-like declarations: 3
 - `int dsco_mux_run(const char *api_key, const char *initial_root);`
 - `int dsco_mux_spawn_worker(dsco_project_t *p, const char *api_key);`
 - `int dsco_mux_kill_worker(dsco_project_t *p);`
+
+## `project.h`
+
+Function-like declarations: 24
+
+### Declarations
+
+- `void dsco_ring_init(dsco_ring_t *r, size_t cap);`
+- `void dsco_ring_free(dsco_ring_t *r);`
+- `size_t dsco_ring_write(dsco_ring_t *r, const char *data, size_t len);`
+- `size_t dsco_ring_snapshot(dsco_ring_t *r, char *out, size_t out_cap);`
+- `const char *dsco_project_registry_root(void);`
+- `int dsco_project_registry_ensure(void);`
+- `int dsco_project_create(const char *root, const char *name, dsco_project_t **out);`
+- `int dsco_project_open(const char *id_or_name_or_path, dsco_project_t **out);`
+- `int dsco_project_save(const dsco_project_t *p);`
+- `int dsco_project_close(dsco_project_t *p);`
+- `void dsco_project_free(dsco_project_t *p);`
+- `int dsco_project_archive(const char *id);`
+- `int dsco_project_list(dsco_project_summary_t *out, int max, bool include_archived);`
+- `int dsco_project_start(dsco_project_t *p, const char *api_key);`
+- `int dsco_project_pause(dsco_project_t *p);`
+- `int dsco_project_resume(dsco_project_t *p);`
+- `int dsco_project_kill(dsco_project_t *p);`
+- `int dsco_project_send_input(dsco_project_t *p, const char *line);`
+- `int dsco_project_drain_output(dsco_project_t *p);`
+- `int dsco_project_poll_fd(const dsco_project_t *p);`
+- `size_t dsco_project_snapshot(dsco_project_t *p, char *out, size_t out_cap);`
+- `double dsco_project_activity_bps(dsco_project_t *p);`
+- `void dsco_project_activity_ring(dsco_project_t *p, double *out16);`
+- `const char *dsco_project_state_name(dsco_project_state_t s);`
+
+## `provider_pool.h`
+
+Function-like declarations: 10
+
+### Declarations
+
+- `provider_pool_t *provider_pool(void);`
+- `void provider_pool_init(const char *session_key);`
+- `provider_t *provider_pool_acquire(const char *name);`
+- `provider_slot_t *provider_pool_slot(const char *name);`
+- `void provider_pool_report(const char *name, bool ok, double latency_ms);`
+- `void provider_pool_mark_subscription_exhausted(const char *name, time_t exhausted_until);`
+- `time_t provider_pool_subscription_exhausted_until(const char *name);`
+- `bool provider_pool_healthy(const char *name);`
+- `void provider_pool_render(char *out, size_t out_len);`
+- `void provider_pool_shutdown(void);`
+
+## `provider_profiles.h`
+
+Function-like declarations: 11
+
+### Declarations
+
+- `size_t provider_profile_count(void);`
+- `const provider_profile_t *provider_profile_at(size_t index);`
+- `const provider_profile_t *provider_profile_find(const char *name_or_alias);`
+- `const char *provider_profile_canonical_name(const char *name_or_alias);`
+- `const char *provider_api_mode_name(provider_api_mode_t mode);`
+- `const char *provider_auth_type_name(provider_auth_type_t auth_type);`
+- `const char *provider_transport_kind_name(provider_transport_kind_t transport);`
+- `const char *provider_profile_primary_env_var(const provider_profile_t *profile);`
+- `bool provider_profile_has_env_var(const provider_profile_t *profile, const char *env_var);`
+- `bool provider_profile_has_alias(const provider_profile_t *profile, const char *alias);`
+- `bool provider_profile_transport_supported(const provider_profile_t *profile);`
 
 ## `provider.h`
 
@@ -1695,41 +1776,6 @@ Function-like declarations: 41
 - `const char *provider_provider_for_api_key(const char *api_key);`
 - `const char *provider_publish_api_key_env(const char *api_key);`
 - `const char *provider_primary_model_for(const char *family, bool prefer_code);`
-
-## `provider_pool.h`
-
-Function-like declarations: 10
-
-### Declarations
-
-- `provider_pool_t *provider_pool(void);`
-- `void provider_pool_init(const char *session_key);`
-- `provider_t *provider_pool_acquire(const char *name);`
-- `provider_slot_t *provider_pool_slot(const char *name);`
-- `void provider_pool_report(const char *name, bool ok, double latency_ms);`
-- `void provider_pool_mark_subscription_exhausted(const char *name, time_t exhausted_until);`
-- `time_t provider_pool_subscription_exhausted_until(const char *name);`
-- `bool provider_pool_healthy(const char *name);`
-- `void provider_pool_render(char *out, size_t out_len);`
-- `void provider_pool_shutdown(void);`
-
-## `provider_profiles.h`
-
-Function-like declarations: 11
-
-### Declarations
-
-- `size_t provider_profile_count(void);`
-- `const provider_profile_t *provider_profile_at(size_t index);`
-- `const provider_profile_t *provider_profile_find(const char *name_or_alias);`
-- `const char *provider_profile_canonical_name(const char *name_or_alias);`
-- `const char *provider_api_mode_name(provider_api_mode_t mode);`
-- `const char *provider_auth_type_name(provider_auth_type_t auth_type);`
-- `const char *provider_transport_kind_name(provider_transport_kind_t transport);`
-- `const char *provider_profile_primary_env_var(const provider_profile_t *profile);`
-- `bool provider_profile_has_env_var(const provider_profile_t *profile, const char *env_var);`
-- `bool provider_profile_has_alias(const provider_profile_t *profile, const char *alias);`
-- `bool provider_profile_transport_supported(const provider_profile_t *profile);`
 
 ## `recovery.h`
 
@@ -2162,7 +2208,7 @@ Function-like declarations: 14
 
 ## `tools.h`
 
-Function-like declarations: 79
+Function-like declarations: 80
 
 ### Declarations
 
@@ -2205,6 +2251,7 @@ Function-like declarations: 79
 - `int tool_map_lookup(tool_map_t *m, const char *name);`
 - `typedef char *(*external_tool_cb)(const char *name, const char *input_json, void *ctx);`
 - `void tools_register_external(const char *name, const char *description, const char *input_schema_json, external_tool_cb cb, void *ctx);`
+- `void tools_register_external_metadata(const char *name, const char *integration_id, const char *display_name, const char *distribution_channel, const char *categories, const char *labels, const char *scope, unsigned action_flags, const char *catalog_status);`
 - `void tools_reset_external(void);`
 - `void dsco_locks_init(dsco_locks_t *l);`
 - `void dsco_locks_destroy(dsco_locks_t *l);`
@@ -2650,6 +2697,16 @@ Function-like declarations: 291
 - `void tui_menu_set_expanded(tui_menu_item_t *it, bool expanded);`
 - `int tui_menu_run(tui_menu_t *m, tui_menu_item_t **out_item);`
 
+## `vecstore_metal.h`
+
+Function-like declarations: 3
+
+### Declarations
+
+- `bool vm_metal_available(void);`
+- `bool vm_query_cosine(const float *query, unsigned int dim, const float *corpus, unsigned int n_docs, float *out_scores);`
+- `void vm_topk(const float *scores, unsigned int n, unsigned int k, unsigned int *out_indices, float *out_vals);`
+
 ## `vecstore.h`
 
 Function-like declarations: 9
@@ -2665,16 +2722,6 @@ Function-like declarations: 9
 - `void vecstore_result_free(vecstore_result_t *results, int count);`
 - `int vecstore_count(vecstore_t *vs);`
 - `float cosine_similarity_f(const float *a, const float *b, int dim);`
-
-## `vecstore_metal.h`
-
-Function-like declarations: 3
-
-### Declarations
-
-- `bool vm_metal_available(void);`
-- `bool vm_query_cosine(const float *query, unsigned int dim, const float *corpus, unsigned int n_docs, float *out_scores);`
-- `void vm_topk(const float *scores, unsigned int n, unsigned int k, unsigned int *out_indices, float *out_vals);`
 
 ## `vfs.h`
 

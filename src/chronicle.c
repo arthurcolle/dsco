@@ -623,8 +623,7 @@ bool chronicle_user_message(const char *trace_id, const char *span_id, const cha
     jbuf_append(&p, "{\"byte_len\":"); jbuf_appendf(&p, "%zu", text ? strlen(text) : 0);
     jbuf_append(&p, ",\"blob_sha256\":"); if (sha[0]) jbuf_append_json_str(&p, sha); else jbuf_append(&p, "null");
     if (g_chronicle.mode == CHRONICLE_MODE_METADATA && text) {
-        jbuf_append(&p, ",\"preview\":");
-        char prev[121]; snprintf(prev, sizeof(prev), "%.*s", 120, text); jbuf_append_json_str(&p, prev);
+        jbuf_append(&p, ",\"redacted\":true");
     }
     jbuf_append(&p, "}");
     bool ok = chronicle_event("user.message", trace_id, span_id, NULL, "user", "local", p.data, "private_user_content");
