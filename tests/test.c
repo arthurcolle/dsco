@@ -15,6 +15,8 @@
 #include "provider_profiles.h"
 #include <curl/curl.h>
 #include "codex_cache.h"
+#include "codex_app_directory.h"
+#include "chronicle.h"
 #include "router.h"
 #include "setup.h"
 #include "swarm.h"
@@ -131,6 +133,15 @@ static void test_restore_env_list(test_env_snapshot_t vars[], size_t count) {
 
 static int test_count_substr(const char *haystack, const char *needle);
 static bool test_has_single_underscore_mcp_name_field(const char *json);
+
+static void test_rm_rf(const char *path) {
+    if (!path || strncmp(path, "/tmp/dsco_", 10) != 0)
+        return;
+    char cmd[1024];
+    snprintf(cmd, sizeof(cmd), "rm -rf '%s'", path);
+    (void)system(cmd);
+}
+
 
 static bool test_write_temp_script(char *path, size_t path_len, const char *body) {
     char tmpl[] = "/tmp/dsco_swarm_XXXXXX";
@@ -6151,6 +6162,334 @@ static void test_tools_normalize_schema_scalars(void) {
            "discover_tools returns matching MCP tool");
     ASSERT(strstr(result, "\"input_schema\"") != NULL,
            "discover_tools returns full schema for query matches");
+    PASS();
+}
+
+static void test_codex_app_directory_importer_variants(void) {
+    TEST("codex app directory importer variants");
+    test_env_snapshot_t envs[] = {{"DSCO_CODEX_APP_DIRECTORY", "", false}};
+    test_capture_env_list(envs, sizeof(envs) / sizeof(envs[0]));
+
+    char path[256];
+    snprintf(path, sizeof(path), "/tmp/dsco_codex_apps_variants_%d.json", (int)getpid());
+    FILE *f = fopen(path, "w");
+    ASSERT(f != NULL, "open variant codex app directory");
+    fprintf(f,
+            "["
+            "{\"connectorId\":\"toolcheck\",\"displayName\":\"ToolCheck\","
+            "\"distributionChannel\":\"ecosystem-directory\",\"category\":\"Governance\","
+            "\"interactive\":true,\"consequential\":true,\"is_enabled\":true,"
+            "\"is_accessible\":false,\"catalogStatus\":\"stale\"},"
+            "{\"slug\":\"common-room\",\"title\":\"Common Room\","
+            "\"categories\":[\"Business\",\"GTM\"],\"retrievable\":true,\"sync\":true,"
+            "\"isEnabled\":true,\"isAccessible\":true}]\n");
+    fclose(f);
+    setenv("DSCO_CODEX_APP_DIRECTORY", path, 1);
+
+    codex_app_directory_t dir;
+    codex_app_directory_init(&dir);
+    char err[128];
+    ASSERT(codex_app_directory_load_file(&dir, NULL, err, sizeof(err)),
+           "load app directory through env default");
+    ASSERT(dir.count == 2, "imports bare-array connectors");
+    ASSERT(dir.stale_count == 1, "counts stale connector");
+    ASSERT(dir.consequential_count == 1, "counts consequential connector");
+    ASSERT(dir.retrievable_count == 1 && dir.sync_count == 1, "counts retrievable sync connector");
+    const codex_app_directory_entry_t *toolcheck = codex_app_directory_find(&dir, "ToolCheck");
+    ASSERT(toolcheck != NULL, "find connector by display name");
+    ASSERT((toolcheck->action_flags & DSCO_INTEGRATION_ACTION_REQUIRES_CONFIRMATION) != 0,
+           "boolean consequential maps to confirmation");
+    ASSERT((toolcheck->action_flags & DSCO_INTEGRATION_ACTION_INTERACTIVE) != 0,
+           "boolean interactive maps to interactive action");
+    const codex_app_directory_entry_t *common_room = codex_app_directory_find(&dir, "common-room");
+    ASSERT(common_room != NULL, "find connector by slug");
+    ASSERT((common_room->action_flags & DSCO_INTEGRATION_ACTION_UNTRUSTED_CONTENT) != 0,
+           "retrievable/sync connector marks untrusted content");
+    codex_app_directory_free(&dir);
+
+    ASSERT(!codex_app_directory_load_file(&dir, "/tmp/dsco_missing_catalog_does_not_exist.json", err,
+                                          sizeof(err)),
+           "missing catalog fails closed");
+    codex_app_directory_free(&dir);
+    unlink(path);
+    test_restore_env_list(envs, sizeof(envs) / sizeof(envs[0]));
+    PASS();
+}
+
+static void test_codex_app_directory_importer_and_integration_discovery(void) {
+    TEST("codex app directory importer and integration discovery");
+    char path[256];
+    snprintf(path, sizeof(path), "/tmp/dsco_codex_apps_%d.json", (int)getpid());
+    FILE *f = fopen(path, "w");
+    ASSERT(f != NULL, "open temp codex app directory");
+    fprintf(f,
+            "{\"apps\":["
+            "{\"id\":\"github\",\"connector_id\":\"github\",\"display_name\":\"GitHub\","
+            "\"distribution_channel\":\"ecosystem-directory\",\"categories\":[\"Developer Tools\"],"
+            "\"labels\":[\"retrievable\",\"interactive\"],\"isEnabled\":true,\"isAccessible\":false},"
+            "{\"id\":\"stripe\",\"connector_id\":\"stripe\",\"display_name\":\"Stripe\","
+            "\"categories\":[\"Finance\"],\"labels\":[\"consequential\",\"sync\"],"
+            "\"isEnabled\":true,\"isAccessible\":true}]}\n");
+    fclose(f);
+
+    codex_app_directory_t dir;
+    codex_app_directory_init(&dir);
+    char err[128];
+    ASSERT(codex_app_directory_load_file(&dir, path, err, sizeof(err)), "load app directory");
+    ASSERT(dir.count == 2, "imports two connectors");
+    const codex_app_directory_entry_t *stripe = codex_app_directory_find(&dir, "stripe");
+    ASSERT(stripe != NULL, "find stripe connector");
+    ASSERT((stripe->action_flags & DSCO_INTEGRATION_ACTION_REQUIRES_CONFIRMATION) != 0,
+           "consequential connector is confirmation-gated");
+    ASSERT((stripe->action_flags & DSCO_INTEGRATION_ACTION_UNTRUSTED_CONTENT) != 0,
+           "sync connector marks untrusted read content");
+    codex_app_directory_free(&dir);
+
+    tools_init();
+    tools_reset_external();
+    tools_register_external("mcp__github__get_issue", "Read GitHub issue",
+                            "{\"type\":\"object\",\"properties\":{}}",
+                            test_external_tool_stub, NULL);
+    tools_register_external_metadata("mcp__github__get_issue", "github", "GitHub",
+                                     "ecosystem-directory", "Developer Tools",
+                                     "retrievable,interactive", "public_app",
+                                     DSCO_INTEGRATION_ACTION_READ |
+                                         DSCO_INTEGRATION_ACTION_UNTRUSTED_CONTENT |
+                                         DSCO_INTEGRATION_ACTION_INTERACTIVE,
+                                     "cached");
+
+    char input[512];
+    snprintf(input, sizeof(input), "{\"path\":\"%s\",\"query\":\"GitHub\",\"profile\":\"engineering\"}", path);
+    char result[16384];
+    bool ok = tools_execute("discover_integrations", input, result, sizeof(result));
+    ASSERT(ok, "discover_integrations succeeds");
+    ASSERT(strstr(result, "\"display_name\":\"GitHub\"") != NULL,
+           "discover_integrations returns GitHub");
+    ASSERT(strstr(result, "\"live\":true") != NULL, "live MCP status is surfaced");
+    ASSERT(strstr(result, "\"inaccessible\":true") != NULL,
+           "cached inaccessible status is surfaced");
+
+    snprintf(input, sizeof(input), "{\"path\":\"%s\"}", path);
+    ok = tools_execute("dsco_doctor_integrations", input, result, sizeof(result));
+    ASSERT(ok, "doctor integrations succeeds");
+    ASSERT(strstr(result, "\"catalog_loaded\":true") != NULL, "doctor loads catalog");
+    ASSERT(strstr(result, "\"mutating_live\":0") != NULL, "doctor counts mutating live tools");
+
+    tools_reset_external();
+    unlink(path);
+    PASS();
+}
+
+static void test_integration_discovery_profiles_pagination_and_doctor_flags(void) {
+    TEST("integration discovery profiles pagination and doctor flags");
+    char path[256];
+    snprintf(path, sizeof(path), "/tmp/dsco_codex_apps_profiles_%d.json", (int)getpid());
+    FILE *f = fopen(path, "w");
+    ASSERT(f != NULL, "open profile codex app directory");
+    fprintf(f,
+            "{\"connectors\":["
+            "{\"id\":\"toolcheck\",\"connector_id\":\"toolcheck\",\"display_name\":\"ToolCheck\","
+            "\"categories\":[\"Governance\",\"Agent Runtime\"],"
+            "\"labels\":[\"interactive\",\"consequential\"],\"isEnabled\":true,"
+            "\"isAccessible\":false,\"catalog_status\":\"stale\"},"
+            "{\"id\":\"hubspot\",\"connector_id\":\"hubspot\",\"display_name\":\"HubSpot\","
+            "\"categories\":[\"Business\",\"Sales\",\"GTM\"],\"labels\":[\"retrievable\"],"
+            "\"isEnabled\":true,\"isAccessible\":true},"
+            "{\"id\":\"github\",\"connector_id\":\"github\",\"display_name\":\"GitHub\","
+            "\"categories\":[\"Developer Tools\"],\"labels\":[\"retrievable\"],"
+            "\"isEnabled\":true,\"isAccessible\":true}]}\n");
+    fclose(f);
+
+    tools_init();
+    tools_reset_external();
+    tools_register_external("mcp__toolcheck__scan", "Run ToolCheck scan",
+                            "{\"type\":\"object\",\"properties\":{}}",
+                            test_external_tool_stub, NULL);
+    tools_register_external_metadata("mcp__toolcheck__scan", "toolcheck", "ToolCheck",
+                                     "ecosystem-directory", "Governance,Agent Runtime",
+                                     "interactive,consequential", "control_plane",
+                                     DSCO_INTEGRATION_ACTION_WRITE |
+                                         DSCO_INTEGRATION_ACTION_ADMIN |
+                                         DSCO_INTEGRATION_ACTION_REQUIRES_CONFIRMATION |
+                                         DSCO_INTEGRATION_ACTION_INTERACTIVE,
+                                     "stale");
+    tools_register_external("mcp__unmapped__delete_record", "Delete an unmapped record",
+                            "{\"type\":\"object\",\"properties\":{}}",
+                            test_external_tool_stub, NULL);
+
+    char input[512];
+    char result[32768];
+    snprintf(input, sizeof(input),
+             "{\"path\":\"%s\",\"profile\":\"governed_agent_runtime\",\"query\":\"ToolCheck\"}",
+             path);
+    bool ok = tools_execute("discover_integrations", input, result, sizeof(result));
+    ASSERT(ok, "discover_integrations governed profile succeeds");
+    ASSERT(strstr(result, "\"display_name\":\"ToolCheck\"") != NULL,
+           "governed profile returns ToolCheck");
+    ASSERT(strstr(result, "\"stale\":true") != NULL, "stale catalog status is surfaced");
+    ASSERT(strstr(result, "requires_confirmation") != NULL,
+           "consequential/control-plane actions require confirmation");
+    ASSERT(strstr(result, "\"requires_oauth\":true") != NULL,
+           "inaccessible cached connector reports OAuth requirement");
+
+    snprintf(input, sizeof(input), "{\"path\":\"%s\",\"profile\":\"gtm\"}", path);
+    ok = tools_execute("discover_integrations", input, result, sizeof(result));
+    ASSERT(ok, "discover_integrations gtm profile succeeds");
+    ASSERT(strstr(result, "\"display_name\":\"HubSpot\"") != NULL, "gtm profile returns HubSpot");
+    ASSERT(strstr(result, "\"display_name\":\"GitHub\"") == NULL,
+           "gtm profile excludes engineering-only GitHub");
+
+    snprintf(input, sizeof(input), "{\"path\":\"%s\",\"limit\":1}", path);
+    ok = tools_execute("discover_integrations", input, result, sizeof(result));
+    ASSERT(ok, "discover_integrations pagination succeeds");
+    ASSERT(strstr(result, "\"limit\":1") != NULL, "pagination echoes limit");
+    ASSERT(strstr(result, "\"has_more\":true") != NULL, "pagination reports more rows");
+
+    snprintf(input, sizeof(input), "{\"path\":\"%s\"}", path);
+    ok = tools_execute("dsco_doctor_integrations", input, result, sizeof(result));
+    ASSERT(ok, "doctor integrations succeeds");
+    ASSERT(strstr(result, "\"stale_catalog\":1") != NULL, "doctor counts stale catalog");
+    ASSERT(strstr(result, "\"live_without_catalog_metadata\":1") != NULL,
+           "doctor counts live tools without catalog metadata");
+    ASSERT(strstr(result, "mutating integrations require confirmation-gated policy") != NULL,
+           "doctor warns on mutating live integrations");
+    ASSERT(strstr(result, "control-plane tools") != NULL,
+           "doctor warns on governance/control-plane integrations");
+
+    tools_reset_external();
+    unlink(path);
+    PASS();
+}
+
+static void test_chronicle_local_event_blob_roundtrip(void) {
+    TEST("chronicle local event blob roundtrip");
+    test_env_snapshot_t envs[] = {{"DSCO_CHRONICLE_DIR", "", false},
+                                  {"DSCO_CHRONICLE_MODE", "", false},
+                                  {"DSCO_CHRONICLE_SESSION_ID", "", false}};
+    test_capture_env_list(envs, sizeof(envs) / sizeof(envs[0]));
+    chronicle_stop();
+
+    char root[256];
+    snprintf(root, sizeof(root), "/tmp/dsco_chronicle_roundtrip_%d", (int)getpid());
+    test_rm_rf(root);
+    setenv("DSCO_CHRONICLE_DIR", root, 1);
+    setenv("DSCO_CHRONICLE_MODE", "full-local", 1);
+
+    ASSERT(chronicle_start(&(chronicle_start_opts_t){.provider = "test-provider",
+                                                     .model = "test-model",
+                                                     .mode = "test",
+                                                     .instance_id = "test-instance"}),
+           "chronicle starts");
+    ASSERT(chronicle_ready(), "chronicle ready after start");
+    ASSERT(strstr(chronicle_db_path(), "chronicle.sqlite") != NULL, "chronicle db path set");
+    const char *session = chronicle_session_id();
+    ASSERT(session && strlen(session) == 36, "chronicle session id is uuid-ish");
+
+    char trace_id[37], turn_span[37], llm_span[37], tool_span[37], sha[65];
+    chronicle_new_id(trace_id, sizeof(trace_id));
+    ASSERT(chronicle_span_begin(trace_id, NULL, "turn", "test_turn", NULL, turn_span),
+           "turn span begins");
+    ASSERT(chronicle_user_message(trace_id, turn_span, "hello chronicle"), "user message recorded");
+    ASSERT(chronicle_context_materialized(trace_id, turn_span, "{\"messages\":[]}", 7),
+           "context materialized recorded");
+    ASSERT(chronicle_span_begin(trace_id, turn_span, "llm", "test_llm", NULL, llm_span),
+           "llm span begins");
+    ASSERT(chronicle_llm_request(trace_id, llm_span, "test-provider", "test-model",
+                                 "{\"input\":\"hello\"}", 8),
+           "llm request recorded");
+    ASSERT(chronicle_tool_call_start(trace_id, turn_span, "test_tool", "toolu_test",
+                                     "{\"x\":1}", tool_span),
+           "tool call start recorded");
+    ASSERT(chronicle_tool_call_end(trace_id, tool_span, "test_tool", "tool result", true, false,
+                                   12.5),
+           "tool call end recorded");
+    ASSERT(chronicle_llm_response(trace_id, llm_span, "test-provider", "test-model", "answer",
+                                  "{\"raw\":true}", 8, 2, 1, 0, 0, 0.001, 23.0, "stop",
+                                  "gen-test"),
+           "llm response recorded");
+    ASSERT(chronicle_blob_put_text("blob payload", "test.blob", "test", sha, sizeof(sha)),
+           "blob stored");
+    const char *ctype = NULL;
+    char *blob = chronicle_read_blob_hex(sha, 1024, &ctype);
+    ASSERT(blob && strcmp(blob, "blob payload") == 0, "blob reads back by sha");
+    ASSERT(ctype && strstr(ctype, "text/plain") != NULL, "blob content type preserved");
+    free(blob);
+    ASSERT(chronicle_span_end(llm_span, "ok", NULL), "llm span ends");
+    ASSERT(chronicle_span_end(turn_span, "ok", NULL), "turn span ends");
+
+    char *activity = chronicle_build_activity_json(100, session);
+    ASSERT(activity != NULL, "activity json builds");
+    ASSERT(strstr(activity, "session.started") != NULL, "activity contains session start");
+    ASSERT(strstr(activity, "context.materialized") != NULL, "activity contains context event");
+    ASSERT(strstr(activity, "llm.request.created") != NULL, "activity contains llm request");
+    ASSERT(strstr(activity, "tool.call.completed") != NULL, "activity contains tool completion");
+    ASSERT(strstr(activity, "llm.response.completed") != NULL, "activity contains llm response");
+    free(activity);
+
+    char *html = chronicle_build_activity_html(10, session);
+    ASSERT(html && strstr(html, "DSCO Chronicle") != NULL, "activity html builds");
+    free(html);
+
+    chronicle_stop();
+    ASSERT(!chronicle_ready(), "chronicle not ready after stop");
+    test_rm_rf(root);
+    test_restore_env_list(envs, sizeof(envs) / sizeof(envs[0]));
+    PASS();
+}
+
+static void test_chronicle_modes_and_delta_policy(void) {
+    TEST("chronicle modes and delta policy");
+    test_env_snapshot_t envs[] = {{"DSCO_CHRONICLE_DIR", "", false},
+                                  {"DSCO_CHRONICLE_MODE", "", false},
+                                  {"DSCO_CHRONICLE_SESSION_ID", "", false}};
+    test_capture_env_list(envs, sizeof(envs) / sizeof(envs[0]));
+    chronicle_stop();
+
+    char root[256];
+    snprintf(root, sizeof(root), "/tmp/dsco_chronicle_modes_%d", (int)getpid());
+    test_rm_rf(root);
+    setenv("DSCO_CHRONICLE_DIR", root, 1);
+
+    setenv("DSCO_CHRONICLE_MODE", "off", 1);
+    ASSERT(!chronicle_start(&(chronicle_start_opts_t){.provider = "p", .model = "m"}),
+           "chronicle off mode does not start");
+    ASSERT(!chronicle_ready(), "chronicle remains not ready in off mode");
+
+    setenv("DSCO_CHRONICLE_MODE", "metadata", 1);
+    ASSERT(chronicle_start(&(chronicle_start_opts_t){.provider = "p", .model = "m"}),
+           "chronicle metadata mode starts");
+    char trace_id[37], span_id[37];
+    chronicle_new_id(trace_id, sizeof(trace_id));
+    ASSERT(chronicle_span_begin(trace_id, NULL, "turn", "metadata_turn", NULL, span_id),
+           "metadata span begins");
+    ASSERT(chronicle_user_message(trace_id, span_id, "secret text that should not be in metadata"),
+           "metadata user message records");
+    ASSERT(!chronicle_llm_delta(trace_id, span_id, "text", "delta hidden"),
+           "metadata mode does not record streaming deltas");
+    char *activity = chronicle_build_activity_json(50, chronicle_session_id());
+    ASSERT(activity && strstr(activity, "\"byte_len\":") != NULL,
+           "metadata mode records byte length");
+    ASSERT(strstr(activity, "secret text that should not be in metadata") == NULL,
+           "metadata mode does not inline private text");
+    free(activity);
+    chronicle_stop();
+
+    setenv("DSCO_CHRONICLE_MODE", "blackbox", 1);
+    ASSERT(chronicle_start(&(chronicle_start_opts_t){.provider = "p", .model = "m"}),
+           "chronicle blackbox mode starts");
+    chronicle_new_id(trace_id, sizeof(trace_id));
+    ASSERT(chronicle_span_begin(trace_id, NULL, "llm", "blackbox_llm", NULL, span_id),
+           "blackbox span begins");
+    ASSERT(chronicle_llm_delta(trace_id, span_id, "text", "visible delta"),
+           "blackbox mode records streaming deltas");
+    activity = chronicle_build_activity_json(50, chronicle_session_id());
+    ASSERT(activity && strstr(activity, "llm.response.delta") != NULL,
+           "blackbox activity contains delta event");
+    free(activity);
+    chronicle_stop();
+
+    test_rm_rf(root);
+    test_restore_env_list(envs, sizeof(envs) / sizeof(envs[0]));
     PASS();
 }
 
@@ -12554,6 +12893,10 @@ static void test_tui_cursor_report_queries_opt_in(void) {
     ok = ok && !tui_cursor_report_queries_enabled();
     setenv("DSCO_TUI_DSR", "false", 1);
     ok = ok && !tui_cursor_report_queries_enabled();
+    setenv("DSCO_TUI_DSR", "off", 1);
+    ok = ok && !tui_cursor_report_queries_enabled();
+    setenv("DSCO_TUI_DSR", "no", 1);
+    ok = ok && !tui_cursor_report_queries_enabled();
 
     test_restore_env("DSCO_TUI_DSR", saved, had_value);
     ASSERT(ok, "DSCO_TUI_DSR should default off and enable only for truthy values");
@@ -15321,6 +15664,11 @@ int main(void) {
     test_tools_shell_schemas_expose_artifact_aliases();
     test_tools_copy_move_accept_dest_alias();
     test_tools_normalize_schema_scalars();
+    test_codex_app_directory_importer_variants();
+    test_codex_app_directory_importer_and_integration_discovery();
+    test_integration_discovery_profiles_pagination_and_doctor_flags();
+    test_chronicle_local_event_blob_roundtrip();
+    test_chronicle_modes_and_delta_policy();
     test_tools_execute_mcp_double_underscore_alias();
     test_tools_execute_mcp_legacy_alias_to_canonical();
     test_tools_mcp_double_alias_uses_legacy_schema();

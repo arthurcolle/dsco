@@ -18,12 +18,16 @@ make test
 
 ```bash
 make format-check
+make docs-check
 make lint
 make static-analysis
 make asan-test
 make ubsan-test
 make check-version
 ```
+
+`make docs` regenerates the API reference, built-in tool catalog, and constants/env index.
+`make docs-check` verifies those generated artifacts without rewriting them.
 
 ### Install/Uninstall
 
@@ -49,6 +53,11 @@ At runtime `dsco` searches, in order:
   - `./dsco --setup-report`
 - Timeline server mode:
   - `./dsco --timeline-server --timeline-port 8421`
+  - Chronicle activity UI/API are served at `/chronicle`, `/chronicle.json`, and `/chronicle/blob/<sha256>`.
+- Portable APE lane:
+  - `make cosmo`
+  - `make cosmo-selftest`
+  - See [`COSMOPOLITAN.md`](COSMOPOLITAN.md).
 
 ## Interactive Slash Commands
 
@@ -170,6 +179,37 @@ DSCO_ENV_FILE="$PWD/.dsco.env.ci" DSCO_NO_AUTO_INTERACTIVE=1 ./dsco --version
 | Diagnostics | `DSCO_DEBUG_AUTH`, `DSCO_DEBUG_REQUEST`, `DSCO_TRACE`, `DSCO_PERF`, `DSCO_TEST_CRASH`. | Use narrowly. Remove after the repro. Treat generated logs as potentially sensitive. |
 | Resource policy | `DSCO_SUPERVISE_*`, `DSCO_MAX_TOKENS`, `DSCO_TOOL_DEFAULT_TIMEOUT`, swarm limits. | Tune per host or test suite. Do not globally raise limits without load testing. |
 | UI/local preference | `DSCO_GLYPH`, `DSCO_NO_CLEAR`, `DSCO_HYPERLINKS`, local host overrides. | Safe to persist if non-secret and machine-specific. |
+
+### Chronicle Activity Ledger
+
+Chronicle is DSCO's local flight recorder. It starts near process entry so even fast-path invocations can leave an activity record unless disabled.
+
+| Env var | Guideline |
+|---|---|
+| `DSCO_CHRONICLE_MODE` | Set to `off` to disable Chronicle for a run. Other modes are set internally from startup/runtime context. |
+| `DSCO_CHRONICLE_DIR` | Override the local activity ledger directory. Use for repro sandboxes and tests. |
+| `DSCO_CHRONICLE_SESSION_ID` | Internal/session correlation value. Do not persist globally. |
+
+Runtime surfaces:
+
+```bash
+./dsco --timeline-server --timeline-port 8421
+open http://127.0.0.1:8421/chronicle
+curl http://127.0.0.1:8421/chronicle.json
+```
+
+Chronicle records can include prompts, tool inputs/results, streamed model deltas, file names, and local metadata. Treat exported records as sensitive until reviewed.
+
+### Integration Catalog Diagnostics
+
+DSCO separates cached app catalogs from live MCP/tool registrations. The cached Codex app directory is read from `DSCO_CODEX_APP_DIRECTORY` or `~/.dsco/codex_app_directory.json`.
+
+```bash
+./dsco --tool-exec discover_integrations '{"profile":"engineering","limit":20}'
+./dsco --tool-exec dsco_doctor_integrations '{}'
+```
+
+See [`INTEGRATION_CATALOG.md`](INTEGRATION_CATALOG.md) for schema and governance mapping.
 
 ### Advanced Debug Commands
 
