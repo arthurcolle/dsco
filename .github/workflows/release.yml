@@ -187,9 +187,43 @@ jobs:
           path: dist/dsco-${{ needs.validate-release.outputs.version }}.tar.gz*
           if-no-files-found: error
 
+  build-cosmopolitan:
+    name: build portable APE
+    needs: validate-release
+    runs-on: ubuntu-24.04
+    timeout-minutes: 35
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          ref: ${{ needs.validate-release.outputs.tag }}
+
+      - name: Build and smoke-test portable APE
+        run: |
+          set -euo pipefail
+          make cosmo-selftest
+          mkdir -p dist
+          cp dsco.distributed.systems dist/dsco.distributed.systems
+          chmod 0755 dist/dsco.distributed.systems
+          sha256sum dist/dsco.distributed.systems > dist/dsco.distributed.systems.sha256
+
+          {
+            echo "## Cosmopolitan APE"
+            echo '```'
+            cat dist/dsco.distributed.systems.sha256
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: dsco-cosmopolitan
+          path: dist/dsco.distributed.systems*
+          if-no-files-found: error
+
   create-release:
     name: create GitHub release
-    needs: [validate-release, build-binaries, build-source]
+    needs: [validate-release, build-binaries, build-source, build-cosmopolitan]
     runs-on: ubuntu-24.04
     timeout-minutes: 15
     permissions:
@@ -226,6 +260,7 @@ jobs:
             "dsco-darwin-x64.tar.gz"
             "dsco-linux-x64.tar.gz"
             "dsco-${{ needs.validate-release.outputs.version }}.tar.gz"
+            "dsco.distributed.systems"
           )
           for asset in "${expected[@]}"; do
             test -f "dist/$asset"
@@ -240,6 +275,7 @@ jobs:
         with:
           subject-path: |
             dist/*.tar.gz
+            dist/dsco.distributed.systems
             dist/*.sha256
 
       - name: Create release
@@ -250,6 +286,7 @@ jobs:
           body_path: /tmp/release_notes.md
           files: |
             dist/*.tar.gz
+            dist/dsco.distributed.systems
             dist/*.sha256
           draft: false
           prerelease: false

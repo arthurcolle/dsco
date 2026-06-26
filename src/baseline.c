@@ -636,6 +636,19 @@ static void resolve_instance_filter(const char *uri, const char *default_filter,
     }
 }
 
+static int resolve_int_param(const char *uri, const char *key, int def, int min, int max) {
+    char buf[64];
+    extract_query_param(uri, key, buf, sizeof(buf));
+    if (!buf[0])
+        return def;
+    int v = atoi(buf);
+    if (v < min)
+        return min;
+    if (v > max)
+        return max;
+    return v;
+}
+
 static void jbuf_append_long(jbuf_t *b, long v) {
     char tmp[32];
     snprintf(tmp, sizeof(tmp), "%ld", v);
@@ -1070,12 +1083,22 @@ int baseline_serve_http(int port, const char *default_instance_filter) {
             }
             jbuf_free(&json);
         } else if (strcmp(path, "/chronicle") == 0 || strcmp(path, "/chronicle/") == 0) {
-            char *html = chronicle_build_activity_html(500, NULL);
+            char session_filter[256];
+            char type_filter[128];
+            char search_filter[256];
+            extract_query_param(uri, "session", session_filter, sizeof(session_filter));
+            extract_query_param(uri, "type", type_filter, sizeof(type_filter));
+            extract_query_param(uri, "q", search_filter, sizeof(search_filter));
+            int limit = resolve_int_param(uri, "limit", 1000, 50, 5000);
+            char *html = chronicle_build_activity_html_ex(limit, session_filter, type_filter, search_filter);
             send_response(client_fd, html ? "200 OK" : "500 Internal Server Error", "text/html",
                           html ? html : "chronicle unavailable");
             free(html);
         } else if (strcmp(path, "/chronicle.json") == 0) {
-            char *json = chronicle_build_activity_json(1000, NULL);
+            char session_filter[256];
+            extract_query_param(uri, "session", session_filter, sizeof(session_filter));
+            int limit = resolve_int_param(uri, "limit", 1000, 1, 5000);
+            char *json = chronicle_build_activity_json(limit, session_filter);
             send_response(client_fd, json ? "200 OK" : "500 Internal Server Error", "application/json",
                           json ? json : "{\"error\":\"chronicle unavailable\"}");
             free(json);
