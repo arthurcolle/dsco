@@ -10,7 +10,10 @@ if [[ "${1:-}" == "--check" ]]; then
   CHECK=1
 fi
 
-mapfile -t HEADERS < <(cd "$ROOT/include" && ls *.h 2>/dev/null | sort)
+HEADERS=()
+while IFS= read -r header; do
+  HEADERS+=("$header")
+done < <(cd "$ROOT/include" && find . -type f -name '*.h' | sed 's#^\./##' | sort)
 
 {
   echo "# API Reference"
