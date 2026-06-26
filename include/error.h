@@ -72,4 +72,50 @@ const char *dsco_err_code_str(dsco_err_code_t code);
     } \
 } while(0)
 
+/* ── Runtime invariant guards (Skeletal/Immune: defensive contracts) ─────
+ *
+ * Unlike <assert.h>, these are PRODUCTION-SAFE: they never abort(). A failed
+ * invariant records a structured error and returns a caller-chosen value, so a
+ * violated precondition degrades gracefully instead of crashing the runtime.
+ * This is the INTEGRITY doctrine in C: state the contract, fail closed.
+ *
+ *   DSCO_REQUIRE(expr)            — precondition; on fail, return false
+ *   DSCO_REQUIRE_RET(expr, ret)   — precondition; on fail, return `ret`
+ *   DSCO_REQUIRE_VOID(expr)       — precondition in void fn; on fail, return
+ *   DSCO_CHECK(expr)              — soft invariant; on fail, log + continue
+ *   DSCO_ASSERT(expr)            — alias of DSCO_REQUIRE (audit-discoverable)
+ *
+ * All record file/line via the thread-local error state, so a violated
+ * contract is observable through dsco_err_last() and the audit trail.
+ */
+#define DSCO_REQUIRE(expr) do { \
+    if (!(expr)) { \
+        DSCO_SET_ERR(DSCO_ERR_INTERNAL, "invariant violated: %s", #expr); \
+        return false; \
+    } \
+} while(0)
+
+#define DSCO_REQUIRE_RET(expr, ret) do { \
+    if (!(expr)) { \
+        DSCO_SET_ERR(DSCO_ERR_INTERNAL, "invariant violated: %s", #expr); \
+        return (ret); \
+    } \
+} while(0)
+
+#define DSCO_REQUIRE_VOID(expr) do { \
+    if (!(expr)) { \
+        DSCO_SET_ERR(DSCO_ERR_INTERNAL, "invariant violated: %s", #expr); \
+        return; \
+    } \
+} while(0)
+
+#define DSCO_CHECK(expr) do { \
+    if (!(expr)) { \
+        DSCO_SET_ERR(DSCO_ERR_INTERNAL, "soft invariant: %s", #expr); \
+    } \
+} while(0)
+
+/* Audit-discoverable alias; same fail-closed semantics as DSCO_REQUIRE. */
+#define DSCO_ASSERT(expr) DSCO_REQUIRE(expr)
+
 #endif

@@ -14,7 +14,10 @@
 ## Validation
 
 - [ ] `make test`
+- [ ] `make test_tui_snapshots`
 - [ ] `make docs-check`
+- [ ] `make check-version`
+- [ ] `DSCO_SKIP_DOWNLOAD=1 npm pack --dry-run` in `npm/dsco`
 - [ ] (optional) `pre-commit run --all-files`
 
 ## Risk Assessment
@@ -33,3 +36,4 @@
 - [ ] No unrelated changes included
 - [ ] New/changed behavior covered by tests or rationale
 - [ ] API keys/secrets not committed
+- [ ] Release/npm/Homebrew metadata stays version-consistent

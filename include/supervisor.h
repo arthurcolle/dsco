@@ -43,12 +43,29 @@
  *   DSCO_SUPERVISE_MEM_SOFT_PCT  % of budget that logs a soft warning     (75)
  *   DSCO_SUPERVISE_POLL_MS       RSS sampling interval, ms               (250)
  *   DSCO_SUPERVISE_TERM_GRACE_MS SIGTERM→SIGKILL grace on pre-empt, ms  (4000)
+ *   DSCO_SUPERVISE_METRICS_SECS  child RSS JSONL sample cadence; 0=off     (5)
+ *
+ * Runtime artifacts:
+ *   ~/.dsco/supervisor.log                 human-readable supervisor events
+ *   ~/.dsco/incidents/incident-*.json      per-abnormal-exit incident report
+ *   ~/.dsco/last_incident.json             most recent incident report
+ *   ~/.dsco/child-metrics-<pid>.jsonl      low-rate child RSS samples
  * ─────────────────────────────────────────────────────────────────────── */
+
+/* Reserved nonzero exits that are expected process outcomes, not crashes. */
+#define DSCO_EXIT_CONFIG 78
+#define DSCO_EXIT_USER_REQUESTED 79
 
 /* Run argv as a supervised dsco child. Blocks until the child exits cleanly
  * or the circuit breaker trips. Returns the child's final exit status (or a
  * nonzero code if supervision gave up). */
 int supervisor_run(int child_argc, char **child_argv);
+
+/* If dsco is the top-level command in an iTerm session, a voluntary exit would
+ * otherwise end the pty and close the tab. This helper execs the user's shell
+ * only for that interactive no-parent-shell case; it returns when not needed or
+ * if exec fails. */
+void dsco_maybe_exec_shell_to_keep_terminal(void);
 
 /* Install fatal-signal crash handlers (SIGSEGV/SIGBUS/SIGABRT/SIGFPE/SIGILL).
  * Defined in main.c; declared here so the supervised child path can share it. */

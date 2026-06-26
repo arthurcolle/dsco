@@ -2,6 +2,7 @@
 #define DSCO_TRADING_H
 
 #include <stdbool.h>
+#include "env_config.h"
 #include <stddef.h>
 #include <stdint.h>
 #include <time.h>
@@ -70,15 +71,32 @@ typedef struct {
 } risk_limits_t;
 
 /* Default risk limits — conservative */
+#define TRADING_DEFAULT_MAX_POSITION_USD        500.0
+#define TRADING_DEFAULT_MAX_TOTAL_EXPOSURE_USD 2000.0
+#define TRADING_DEFAULT_MAX_ORDER_USD           100.0
+#define TRADING_DEFAULT_MIN_ARB_SPREAD            0.03
+#define TRADING_DEFAULT_MAX_OPEN_ORDERS          20
+
 static inline risk_limits_t risk_limits_default(void) {
     return (risk_limits_t){
-        .max_position_usd       = 500.0,
-        .max_total_exposure_usd = 2000.0,
-        .max_order_usd          = 100.0,
-        .min_arb_spread         = 0.03,
-        .max_open_orders        = 20,
+        .max_position_usd       = TRADING_DEFAULT_MAX_POSITION_USD,
+        .max_total_exposure_usd = TRADING_DEFAULT_MAX_TOTAL_EXPOSURE_USD,
+        .max_order_usd          = TRADING_DEFAULT_MAX_ORDER_USD,
+        .min_arb_spread         = TRADING_DEFAULT_MIN_ARB_SPREAD,
+        .max_open_orders        = TRADING_DEFAULT_MAX_OPEN_ORDERS,
         .dry_run                = true,  /* safe default: dry run */
     };
+}
+
+static inline risk_limits_t risk_limits_from_env(void) {
+    risk_limits_t r = risk_limits_default();
+    r.dry_run = dsco_env_bool("DSCO_TRADING_DRY_RUN", r.dry_run);
+    r.max_order_usd = dsco_env_double("DSCO_TRADING_MAX_ORDER", r.max_order_usd, 0.0, 1000000000.0);
+    r.max_total_exposure_usd = dsco_env_double("DSCO_TRADING_MAX_EXPOSURE", r.max_total_exposure_usd, 0.0, 1000000000.0);
+    r.min_arb_spread = dsco_env_double("DSCO_TRADING_MIN_ARB_SPREAD", r.min_arb_spread, 0.0, 1.0);
+    r.max_open_orders = dsco_env_int("DSCO_TRADING_MAX_OPEN_ORDERS", r.max_open_orders, 1, 1000000);
+    r.max_position_usd = dsco_env_double("DSCO_TRADING_MAX_POSITION", r.max_position_usd, 0.0, 1000000000.0);
+    return r;
 }
 
 /* ── Kalshi Auth ──────────────────────────────────────────────────────── */

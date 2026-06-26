@@ -8,17 +8,13 @@ static int eigen_init(void *impl) {
     return 0;
 }
 
-numerical_backend_t numerical_backend_eigen = {
-    .base = {
-        .name = "eigen",
-        .category = BACKEND_NUMERICAL,
-        .status = BACKEND_STATUS_UNLOADED,
-        .impl = NULL,
-        .init = eigen_init,
-        .shutdown = NULL,
-        .version = NULL
-    }
-};
+numerical_backend_t numerical_backend_eigen = {.base = {.name = "eigen",
+                                                        .category = BACKEND_NUMERICAL,
+                                                        .status = BACKEND_STATUS_UNLOADED,
+                                                        .impl = NULL,
+                                                        .init = eigen_init,
+                                                        .shutdown = NULL,
+                                                        .version = NULL}};
 
 int eigen_backend_init(void) {
     return backend_register(&numerical_backend_eigen.base);

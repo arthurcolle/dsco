@@ -15,28 +15,28 @@
 
 /* ── constants ──────────────────────────────────────────────────────────── */
 
-#define SE_KEY_LABEL   "systems.distributed.dsco.master"
-#define SE_KEY_TAG     "systems.distributed.dsco.master.v1"
-#define KC_SERVICE     "systems.distributed.dsco.secure-store.v2"
-#define KC_ACCOUNT     "master.v2"
-#define ECDH_KEY_SIZE  32
+#define SE_KEY_LABEL "systems.distributed.dsco.master"
+#define SE_KEY_TAG "systems.distributed.dsco.master.v1"
+#define KC_SERVICE "systems.distributed.dsco.secure-store.v2"
+#define KC_ACCOUNT "master.v2"
+#define ECDH_KEY_SIZE 32
 
 static inline void zero_buf(void *p, size_t n) {
     volatile uint8_t *q = (volatile uint8_t *)p;
-    for (size_t i = 0; i < n; i++) q[i] = 0;
+    for (size_t i = 0; i < n; i++)
+        q[i] = 0;
 }
 
 static bool env_truthy(const char *value) {
-    return value && (value[0] == '1' || value[0] == 't' || value[0] == 'T' ||
-                     value[0] == 'y' || value[0] == 'Y');
+    return value && (value[0] == '1' || value[0] == 't' || value[0] == 'T' || value[0] == 'y' ||
+                     value[0] == 'Y');
 }
 
 #pragma clang diagnostic push
 #pragma clang diagnostic ignored "-Wdeprecated-declarations"
 static CFStringRef auth_ui_policy(void) {
-    return env_truthy(getenv("DSCO_SECURE_STORE_AUTH_UI"))
-        ? kSecUseAuthenticationUIAllow
-        : kSecUseAuthenticationUIFail;
+    return env_truthy(getenv("DSCO_SECURE_STORE_AUTH_UI")) ? kSecUseAuthenticationUIAllow
+                                                           : kSecUseAuthenticationUIFail;
 }
 #pragma clang diagnostic pop
 
@@ -44,8 +44,8 @@ static CFStringRef auth_ui_policy(void) {
 
 typedef enum { TIER_NONE, TIER_SE, TIER_KEYCHAIN, TIER_IOKIT } se_tier_t;
 
-static se_tier_t s_tier      = TIER_NONE;
-static SecKeyRef s_se_private = NULL;   /* Tier 1 only; freed on wipe */
+static se_tier_t s_tier = TIER_NONE;
+static SecKeyRef s_se_private = NULL; /* Tier 1 only; freed on wipe */
 
 /* ── helpers ────────────────────────────────────────────────────────────── */
 
@@ -54,7 +54,8 @@ static CFDataRef make_tag(void) {
 }
 
 static void log_cferr(const char *ctx, CFErrorRef err) {
-    if (!err) return;
+    if (!err)
+        return;
     CFStringRef desc = CFErrorCopyDescription(err);
     char buf[512] = {0};
     CFStringGetCString(desc, buf, sizeof(buf), kCFStringEncodingUTF8);
@@ -72,8 +73,7 @@ static void log_secstatus(const char *ctx, OSStatus status) {
         CFRelease(desc);
     }
     char msg[420];
-    snprintf(msg, sizeof(msg), "%s: OSStatus %d%s%s",
-             ctx, (int)status, text[0] ? " - " : "", text);
+    snprintf(msg, sizeof(msg), "%s: OSStatus %d%s%s", ctx, (int)status, text[0] ? " - " : "", text);
     audit_log("se_store", msg);
 }
 
@@ -81,14 +81,14 @@ static void log_secstatus(const char *ctx, OSStatus status) {
 
 static SecKeyRef retrieve_se_key(void) {
     CFDataRef tag = make_tag();
-    CFMutableDictionaryRef q = CFDictionaryCreateMutable(
-        NULL, 0, &kCFTypeDictionaryKeyCallBacks, &kCFTypeDictionaryValueCallBacks);
+    CFMutableDictionaryRef q = CFDictionaryCreateMutable(NULL, 0, &kCFTypeDictionaryKeyCallBacks,
+                                                         &kCFTypeDictionaryValueCallBacks);
 
-    CFDictionarySetValue(q, kSecClass,              kSecClassKey);
-    CFDictionarySetValue(q, kSecAttrKeyClass,       kSecAttrKeyClassPrivate);
+    CFDictionarySetValue(q, kSecClass, kSecClassKey);
+    CFDictionarySetValue(q, kSecAttrKeyClass, kSecAttrKeyClassPrivate);
     CFDictionarySetValue(q, kSecAttrApplicationTag, tag);
-    CFDictionarySetValue(q, kSecAttrKeyType,        kSecAttrKeyTypeECSECPrimeRandom);
-    CFDictionarySetValue(q, kSecReturnRef,          kCFBooleanTrue);
+    CFDictionarySetValue(q, kSecAttrKeyType, kSecAttrKeyTypeECSECPrimeRandom);
+    CFDictionarySetValue(q, kSecReturnRef, kCFBooleanTrue);
     CFDictionarySetValue(q, kSecUseAuthenticationUI, auth_ui_policy());
 
     SecKeyRef key = NULL;
@@ -97,19 +97,19 @@ static SecKeyRef retrieve_se_key(void) {
     CFRelease(q);
     CFRelease(tag);
 
-    if (status == errSecSuccess && key) return key;
+    if (status == errSecSuccess && key)
+        return key;
     return NULL;
 }
 
 static SecAccessControlRef create_se_acl(void) {
     CFErrorRef err = NULL;
-    SecAccessControlRef acl = SecAccessControlCreateWithFlags(
-        NULL,
-        kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly,
-        kSecAccessControlPrivateKeyUsage,
-        &err);
+    SecAccessControlRef acl =
+        SecAccessControlCreateWithFlags(NULL, kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly,
+                                        kSecAccessControlPrivateKeyUsage, &err);
     if (!acl) {
-        if (err) CFRelease(err);
+        if (err)
+            CFRelease(err);
         return NULL;
     }
     return acl;
@@ -118,15 +118,16 @@ static SecAccessControlRef create_se_acl(void) {
 static SecKeyRef create_ephemeral_se_key(void) {
     CFErrorRef err = NULL;
     SecAccessControlRef acl = create_se_acl();
-    if (!acl) return NULL;
+    if (!acl)
+        return NULL;
 
     CFNumberRef key_size = CFNumberCreate(NULL, kCFNumberIntType, &(int){256});
 
     CFMutableDictionaryRef params = CFDictionaryCreateMutable(
         NULL, 0, &kCFTypeDictionaryKeyCallBacks, &kCFTypeDictionaryValueCallBacks);
-    CFDictionarySetValue(params, kSecAttrKeyType,       kSecAttrKeyTypeECSECPrimeRandom);
+    CFDictionarySetValue(params, kSecAttrKeyType, kSecAttrKeyTypeECSECPrimeRandom);
     CFDictionarySetValue(params, kSecAttrKeySizeInBits, key_size);
-    CFDictionarySetValue(params, kSecAttrTokenID,       kSecAttrTokenIDSecureEnclave);
+    CFDictionarySetValue(params, kSecAttrTokenID, kSecAttrTokenIDSecureEnclave);
     CFDictionarySetValue(params, kSecAttrAccessControl, acl);
 
     SecKeyRef private_key = SecKeyCreateRandomKey(params, &err);
@@ -136,7 +137,8 @@ static SecKeyRef create_ephemeral_se_key(void) {
 
     if (!private_key) {
         log_cferr("SecKeyCreateRandomKey (ephemeral SE)", err);
-        if (err) CFRelease(err);
+        if (err)
+            CFRelease(err);
         return NULL;
     }
 
@@ -146,7 +148,7 @@ static SecKeyRef create_ephemeral_se_key(void) {
 
 static SecKeyRef create_persistent_se_key(void) {
     CFErrorRef err = NULL;
-    CFDataRef  tag = make_tag();
+    CFDataRef tag = make_tag();
     SecAccessControlRef acl = create_se_acl();
     if (!acl) {
         CFRelease(tag);
@@ -157,12 +159,12 @@ static SecKeyRef create_persistent_se_key(void) {
 
     CFMutableDictionaryRef params = CFDictionaryCreateMutable(
         NULL, 0, &kCFTypeDictionaryKeyCallBacks, &kCFTypeDictionaryValueCallBacks);
-    CFDictionarySetValue(params, kSecAttrKeyType,          kSecAttrKeyTypeECSECPrimeRandom);
-    CFDictionarySetValue(params, kSecAttrKeySizeInBits,    key_size);
-    CFDictionarySetValue(params, kSecAttrTokenID,          kSecAttrTokenIDSecureEnclave);
-    CFDictionarySetValue(params, kSecAttrIsPermanent,      kCFBooleanTrue);
-    CFDictionarySetValue(params, kSecAttrApplicationTag,   tag);
-    CFDictionarySetValue(params, kSecAttrAccessControl,    acl);
+    CFDictionarySetValue(params, kSecAttrKeyType, kSecAttrKeyTypeECSECPrimeRandom);
+    CFDictionarySetValue(params, kSecAttrKeySizeInBits, key_size);
+    CFDictionarySetValue(params, kSecAttrTokenID, kSecAttrTokenIDSecureEnclave);
+    CFDictionarySetValue(params, kSecAttrIsPermanent, kCFBooleanTrue);
+    CFDictionarySetValue(params, kSecAttrApplicationTag, tag);
+    CFDictionarySetValue(params, kSecAttrAccessControl, acl);
 
     err = NULL;
     SecKeyRef private_key = SecKeyCreateRandomKey(params, &err);
@@ -170,8 +172,11 @@ static SecKeyRef create_persistent_se_key(void) {
 
     if (!private_key) {
         log_cferr("SecKeyCreateRandomKey (persistent SE)", err);
-        if (err) CFRelease(err);
-        CFRelease(key_size); CFRelease(acl); CFRelease(tag);
+        if (err)
+            CFRelease(err);
+        CFRelease(key_size);
+        CFRelease(acl);
+        CFRelease(tag);
         return NULL;
     }
 
@@ -188,7 +193,7 @@ static bool derive_se_master_key(SecKeyRef se_private, uint8_t out[ECDH_KEY_SIZE
     CFMutableDictionaryRef eph_params = CFDictionaryCreateMutable(
         NULL, 0, &kCFTypeDictionaryKeyCallBacks, &kCFTypeDictionaryValueCallBacks);
     CFNumberRef eph_size = CFNumberCreate(NULL, kCFNumberIntType, &(int){256});
-    CFDictionarySetValue(eph_params, kSecAttrKeyType,       kSecAttrKeyTypeECSECPrimeRandom);
+    CFDictionarySetValue(eph_params, kSecAttrKeyType, kSecAttrKeyTypeECSECPrimeRandom);
     CFDictionarySetValue(eph_params, kSecAttrKeySizeInBits, eph_size);
 
     SecKeyRef eph_private = SecKeyCreateRandomKey(eph_params, &err);
@@ -197,37 +202,42 @@ static bool derive_se_master_key(SecKeyRef se_private, uint8_t out[ECDH_KEY_SIZE
 
     if (!eph_private) {
         log_cferr("SecKeyCreateRandomKey (eph)", err);
-        if (err) CFRelease(err);
+        if (err)
+            CFRelease(err);
         return false;
     }
     SecKeyRef eph_public = SecKeyCopyPublicKey(eph_private);
 
-    CFMutableDictionaryRef kdf = CFDictionaryCreateMutable(
-        NULL, 0, &kCFTypeDictionaryKeyCallBacks, &kCFTypeDictionaryValueCallBacks);
+    CFMutableDictionaryRef kdf = CFDictionaryCreateMutable(NULL, 0, &kCFTypeDictionaryKeyCallBacks,
+                                                           &kCFTypeDictionaryValueCallBacks);
     CFNumberRef req = CFNumberCreate(NULL, kCFNumberIntType, &(int){ECDH_KEY_SIZE});
-    CFDataRef   info = CFDataCreate(NULL,
-        (const uint8_t *)SE_KEY_TAG, sizeof(SE_KEY_TAG) - 1);
+    CFDataRef info = CFDataCreate(NULL, (const uint8_t *)SE_KEY_TAG, sizeof(SE_KEY_TAG) - 1);
 
     CFDictionarySetValue(kdf, kSecKeyKeyExchangeParameterRequestedSize, req);
-    CFDictionarySetValue(kdf, kSecKeyKeyExchangeParameterSharedInfo,    info);
+    CFDictionarySetValue(kdf, kSecKeyKeyExchangeParameterSharedInfo, info);
 
     err = NULL;
     CFDataRef shared = SecKeyCopyKeyExchangeResult(
-        se_private,
-        kSecKeyAlgorithmECDHKeyExchangeStandardX963SHA256,
-        eph_public, kdf, &err);
+        se_private, kSecKeyAlgorithmECDHKeyExchangeStandardX963SHA256, eph_public, kdf, &err);
 
-    CFRelease(req); CFRelease(info); CFRelease(kdf);
-    CFRelease(eph_public); CFRelease(eph_private);
+    CFRelease(req);
+    CFRelease(info);
+    CFRelease(kdf);
+    CFRelease(eph_public);
+    CFRelease(eph_private);
 
     if (!shared) {
         log_cferr("SecKeyCopyKeyExchangeResult", err);
-        if (err) CFRelease(err);
+        if (err)
+            CFRelease(err);
         return false;
     }
 
     size_t len = (size_t)CFDataGetLength(shared);
-    if (len < ECDH_KEY_SIZE) { CFRelease(shared); return false; }
+    if (len < ECDH_KEY_SIZE) {
+        CFRelease(shared);
+        return false;
+    }
     memcpy(out, CFDataGetBytePtr(shared), ECDH_KEY_SIZE);
     CFRelease(shared);
     return true;
@@ -236,11 +246,13 @@ static bool derive_se_master_key(SecKeyRef se_private, uint8_t out[ECDH_KEY_SIZE
 static bool try_se_tier(uint8_t out[32]) {
     if (env_truthy(getenv("DSCO_SE_PERSISTENT"))) {
         s_se_private = retrieve_se_key();
-        if (!s_se_private) s_se_private = create_persistent_se_key();
+        if (!s_se_private)
+            s_se_private = create_persistent_se_key();
     } else {
         s_se_private = create_ephemeral_se_key();
     }
-    if (!s_se_private) return false;
+    if (!s_se_private)
+        return false;
     if (!derive_se_master_key(s_se_private, out)) {
         CFRelease(s_se_private);
         s_se_private = NULL;
@@ -256,13 +268,13 @@ static bool try_keychain_tier(uint8_t out[32]) {
     CFStringRef svc = CFSTR(KC_SERVICE);
     CFStringRef acc = CFSTR(KC_ACCOUNT);
 
-    CFMutableDictionaryRef q = CFDictionaryCreateMutable(
-        NULL, 0, &kCFTypeDictionaryKeyCallBacks, &kCFTypeDictionaryValueCallBacks);
-    CFDictionarySetValue(q, kSecClass,       kSecClassGenericPassword);
+    CFMutableDictionaryRef q = CFDictionaryCreateMutable(NULL, 0, &kCFTypeDictionaryKeyCallBacks,
+                                                         &kCFTypeDictionaryValueCallBacks);
+    CFDictionarySetValue(q, kSecClass, kSecClassGenericPassword);
     CFDictionarySetValue(q, kSecAttrService, svc);
     CFDictionarySetValue(q, kSecAttrAccount, acc);
-    CFDictionarySetValue(q, kSecReturnData,  kCFBooleanTrue);
-    CFDictionarySetValue(q, kSecMatchLimit,  kSecMatchLimitOne);
+    CFDictionarySetValue(q, kSecReturnData, kCFBooleanTrue);
+    CFDictionarySetValue(q, kSecMatchLimit, kSecMatchLimitOne);
     CFDictionarySetValue(q, kSecUseAuthenticationUI, auth_ui_policy());
 
     CFDataRef data = NULL;
@@ -277,20 +289,22 @@ static bool try_keychain_tier(uint8_t out[32]) {
     if (st != errSecSuccess && st != errSecItemNotFound) {
         log_secstatus("keychain lookup failed", st);
     }
-    if (data) CFRelease(data);
+    if (data)
+        CFRelease(data);
 
     /* First run: generate and persist */
     uint8_t key[32];
     arc4random_buf(key, sizeof(key));
 
     CFDataRef key_data = CFDataCreate(NULL, key, 32);
-    CFMutableDictionaryRef item = CFDictionaryCreateMutable(
-        NULL, 0, &kCFTypeDictionaryKeyCallBacks, &kCFTypeDictionaryValueCallBacks);
-    CFDictionarySetValue(item, kSecClass,          kSecClassGenericPassword);
-    CFDictionarySetValue(item, kSecAttrService,    svc);
-    CFDictionarySetValue(item, kSecAttrAccount,    acc);
-    CFDictionarySetValue(item, kSecAttrAccessible, kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly);
-    CFDictionarySetValue(item, kSecValueData,      key_data);
+    CFMutableDictionaryRef item = CFDictionaryCreateMutable(NULL, 0, &kCFTypeDictionaryKeyCallBacks,
+                                                            &kCFTypeDictionaryValueCallBacks);
+    CFDictionarySetValue(item, kSecClass, kSecClassGenericPassword);
+    CFDictionarySetValue(item, kSecAttrService, svc);
+    CFDictionarySetValue(item, kSecAttrAccount, acc);
+    CFDictionarySetValue(item, kSecAttrAccessible,
+                         kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly);
+    CFDictionarySetValue(item, kSecValueData, key_data);
 
     st = SecItemAdd(item, NULL);
     CFRelease(item);
@@ -310,20 +324,22 @@ static bool try_keychain_tier(uint8_t out[32]) {
 /* ── Tier 3: IOKit machine UUID → HKDF-SHA256 ──────────────────────────── */
 
 static bool try_iokit_tier(uint8_t out[32]) {
-    io_service_t expert = IOServiceGetMatchingService(
-        kIOMainPortDefault,
-        IOServiceMatching("IOPlatformExpertDevice"));
-    if (!expert) return false;
+    io_service_t expert = IOServiceGetMatchingService(kIOMainPortDefault,
+                                                      IOServiceMatching("IOPlatformExpertDevice"));
+    if (!expert)
+        return false;
 
-    CFStringRef uuid_cf = IORegistryEntryCreateCFProperty(
-        expert, CFSTR("IOPlatformUUID"), kCFAllocatorDefault, 0);
+    CFStringRef uuid_cf =
+        IORegistryEntryCreateCFProperty(expert, CFSTR("IOPlatformUUID"), kCFAllocatorDefault, 0);
     IOObjectRelease(expert);
-    if (!uuid_cf) return false;
+    if (!uuid_cf)
+        return false;
 
     char uuid[64] = {0};
     CFStringGetCString(uuid_cf, uuid, sizeof(uuid), kCFStringEncodingUTF8);
     CFRelease(uuid_cf);
-    if (!uuid[0]) return false;
+    if (!uuid[0])
+        return false;
 
     /* HKDF-SHA256 (two-step with CommonCrypto HMAC-SHA256)
      * Extract: PRK = HMAC-SHA256(salt="dsco.master.v1", IKM=uuid)
@@ -332,15 +348,9 @@ static bool try_iokit_tier(uint8_t out[32]) {
     static const char info[] = "machine-bound-key\x01";
 
     uint8_t prk[CC_SHA256_DIGEST_LENGTH];
-    CCHmac(kCCHmacAlgSHA256,
-           salt, sizeof(salt) - 1,
-           uuid, strlen(uuid),
-           prk);
+    CCHmac(kCCHmacAlgSHA256, salt, sizeof(salt) - 1, uuid, strlen(uuid), prk);
 
-    CCHmac(kCCHmacAlgSHA256,
-           prk,  sizeof(prk),
-           info, sizeof(info) - 1,
-           out);
+    CCHmac(kCCHmacAlgSHA256, prk, sizeof(prk), info, sizeof(info) - 1, out);
 
     zero_buf(prk, sizeof(prk));
     return true;
@@ -350,9 +360,8 @@ static bool try_iokit_tier(uint8_t out[32]) {
 
 bool se_store_init(uint8_t out_key[32]) {
     bool require_se = env_truthy(getenv("DSCO_REQUIRE_SECURE_ENCLAVE"));
-    bool no_prompt  = env_truthy(getenv("DSCO_SECURE_STORE_NO_PROMPT"));
-    bool try_se = require_se ||
-                  env_truthy(getenv("DSCO_TRY_SECURE_ENCLAVE")) ||
+    bool no_prompt = env_truthy(getenv("DSCO_SECURE_STORE_NO_PROMPT"));
+    bool try_se = require_se || env_truthy(getenv("DSCO_TRY_SECURE_ENCLAVE")) ||
                   env_truthy(getenv("DSCO_SE_PERSISTENT"));
 
     if (try_se) {
@@ -408,63 +417,86 @@ void se_store_wipe(void) {
     }
 }
 
-bool se_store_available(void) { return s_tier != TIER_NONE; }
+bool se_store_available(void) {
+    return s_tier != TIER_NONE;
+}
 
-int se_store_sign(const uint8_t *data, size_t data_len,
-                  uint8_t *sig_buf, size_t sig_buf_len) {
-    if (s_tier != TIER_SE || !s_se_private || !data || !sig_buf) return -1;
+int se_store_sign(const uint8_t *data, size_t data_len, uint8_t *sig_buf, size_t sig_buf_len) {
+    if (s_tier != TIER_SE || !s_se_private || !data || !sig_buf)
+        return -1;
 
-    CFErrorRef err  = NULL;
-    CFDataRef  msg  = CFDataCreate(NULL, data, (CFIndex)data_len);
-    CFDataRef  sig  = SecKeyCreateSignature(
-        s_se_private,
-        kSecKeyAlgorithmECDSASignatureMessageX962SHA256,
-        msg, &err);
+    CFErrorRef err = NULL;
+    CFDataRef msg = CFDataCreate(NULL, data, (CFIndex)data_len);
+    CFDataRef sig = SecKeyCreateSignature(
+        s_se_private, kSecKeyAlgorithmECDSASignatureMessageX962SHA256, msg, &err);
     CFRelease(msg);
 
     if (!sig) {
         log_cferr("SecKeyCreateSignature", err);
-        if (err) CFRelease(err);
+        if (err)
+            CFRelease(err);
         return -1;
     }
     size_t sig_len = (size_t)CFDataGetLength(sig);
-    if (sig_len > sig_buf_len) { CFRelease(sig); return -1; }
+    if (sig_len > sig_buf_len) {
+        CFRelease(sig);
+        return -1;
+    }
     memcpy(sig_buf, CFDataGetBytePtr(sig), sig_len);
     CFRelease(sig);
     return (int)sig_len;
 }
 
 bool se_store_pubkey(uint8_t out[65]) {
-    if (s_tier != TIER_SE || !s_se_private) return false;
+    if (s_tier != TIER_SE || !s_se_private)
+        return false;
 
     CFErrorRef err = NULL;
-    SecKeyRef pub  = SecKeyCopyPublicKey(s_se_private);
-    if (!pub) return false;
+    SecKeyRef pub = SecKeyCopyPublicKey(s_se_private);
+    if (!pub)
+        return false;
 
     CFDataRef ext = SecKeyCopyExternalRepresentation(pub, &err);
     CFRelease(pub);
     if (!ext) {
         log_cferr("SecKeyCopyExternalRepresentation", err);
-        if (err) CFRelease(err);
+        if (err)
+            CFRelease(err);
         return false;
     }
     size_t len = (size_t)CFDataGetLength(ext);
-    if (len != 65) { CFRelease(ext); return false; }
+    if (len != 65) {
+        CFRelease(ext);
+        return false;
+    }
     memcpy(out, CFDataGetBytePtr(ext), 65);
     CFRelease(ext);
     return true;
 }
 
-#else  /* !__APPLE__ — stubs */
+#else /* !__APPLE__ — stubs */
 
 #include "se_store.h"
 #include <string.h>
 
-bool se_store_init(uint8_t out_key[32]) { (void)out_key; return false; }
+bool se_store_init(uint8_t out_key[32]) {
+    (void)out_key;
+    return false;
+}
 void se_store_wipe(void) {}
-bool se_store_available(void) { return false; }
-int  se_store_sign(const uint8_t *d, size_t dl, uint8_t *s, size_t sl)
-     { (void)d;(void)dl;(void)s;(void)sl; return -1; }
-bool se_store_pubkey(uint8_t out[65]) { (void)out; return false; }
+bool se_store_available(void) {
+    return false;
+}
+int se_store_sign(const uint8_t *d, size_t dl, uint8_t *s, size_t sl) {
+    (void)d;
+    (void)dl;
+    (void)s;
+    (void)sl;
+    return -1;
+}
+bool se_store_pubkey(uint8_t out[65]) {
+    (void)out;
+    return false;
+}
 
 #endif /* __APPLE__ */
