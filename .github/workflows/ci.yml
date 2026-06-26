@@ -5,70 +5,107 @@ on:
   push:
     branches: [main, master]
 
+permissions:
+  contents: read
+
 concurrency:
-  group: ci-${{ github.ref }}
+  group: ci-${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
+defaults:
+  run:
+    shell: bash
+
+env:
+  DSCO_CI: "1"
+  DSCO_NO_SUPERVISE: "1"
+  DSCO_SECURE_STORE_NO_PROMPT: "1"
+  DSCO_STD: c2y
+
 jobs:
-  # ─────────────────────────────────────────────────────────────────────
-  # BUILD + TEST MATRIX
-  # Tests every supported OS/compiler combo. Uses CI-safe flags.
-  # ─────────────────────────────────────────────────────────────────────
-  build-and-test:
-    name: build-test (${{ matrix.os }}, ${{ matrix.cc }})
+  build-test:
+    name: build-test (${{ matrix.label }})
     runs-on: ${{ matrix.os }}
+    timeout-minutes: 40
     strategy:
       fail-fast: false
       matrix:
         include:
-          - os: ubuntu-latest
+          - label: ubuntu-24.04-gcc
+            os: ubuntu-24.04
             cc: gcc
-          - os: ubuntu-latest
+            arch: x86-64
+          - label: ubuntu-24.04-clang
+            os: ubuntu-24.04
             cc: clang
-          - os: macos-latest
+            arch: x86-64
+          - label: macos-14-clang-arm64
+            os: macos-14
             cc: clang
-          - os: macos-13
+            arch: arm64
+          - label: macos-15-intel-clang-x64
+            os: macos-15-intel
             cc: clang
+            arch: x86-64
     env:
       CC: ${{ matrix.cc }}
-      DSCO_ARCH: x86-64
-      DSCO_STD: c2y
+      DSCO_ARCH: ${{ matrix.arch }}
     steps:
       - uses: actions/checkout@v4
 
-      - name: Install dependencies (Ubuntu)
-        if: runner.os == 'Linux'
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y \
-            libcurl4-openssl-dev libsqlite3-dev libreadline-dev \
-            libsodium-dev libuv1-dev libmbedtls-dev libhiredis-dev
+      - uses: ./.github/actions/setup-native
 
-      - name: Install dependencies (macOS)
-        if: runner.os == 'macOS'
+      - name: Build release binaries
         run: |
-          brew update
-          brew install hiredis libsodium libuv mbedtls@3 readline pkg-config
+          set -euo pipefail
+          NCPU="$(getconf _NPROCESSORS_ONLN 2>/dev/null || sysctl -n hw.ncpu)"
+          make -j"${NCPU}" dsco dsco-lite dsc
 
-      - name: Build (release)
-        run: make -j$(nproc 2>/dev/null || sysctl -n hw.ncpu) dsco dsco-lite dsc
-
-      - name: Smoke test
+      - name: Smoke test binaries
         run: |
+          set -euo pipefail
           ./dsco --version
+          ./dsco-lite --version
           ./dsco --tool-exec cwd '{}'
-          ./dsc --help || true
+          ./dsc --help >/dev/null
 
       - name: Unit tests
         run: make test
 
-  # ─────────────────────────────────────────────────────────────────────
-  # SANITIZERS (ASan + UBSan)
-  # Catches memory errors and undefined behavior.
-  # ─────────────────────────────────────────────────────────────────────
+      - name: Upload CI binaries
+        if: github.event_name == 'push'
+        uses: actions/upload-artifact@v4
+        with:
+          name: ci-binaries-${{ matrix.label }}
+          path: |
+            dsco
+            dsco-lite
+            dsc
+          if-no-files-found: error
+          retention-days: 7
+
+  extended-tests:
+    name: extended standalone tests
+    runs-on: ubuntu-24.04
+    timeout-minutes: 35
+    env:
+      CC: gcc
+      DSCO_ARCH: x86-64
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: ./.github/actions/setup-native
+
+      - name: Run standalone suites
+        run: |
+          set -euo pipefail
+          make test_tui_snapshots
+          make test_priorities
+
   sanitizers:
     name: sanitizers (${{ matrix.sanitizer }})
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
     strategy:
       fail-fast: false
       matrix:
@@ -76,29 +113,22 @@ jobs:
     env:
       CC: clang
       DSCO_ARCH: x86-64
-      DSCO_STD: c2y
     steps:
       - uses: actions/checkout@v4
 
-      - name: Install dependencies
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y \
-            clang libcurl4-openssl-dev libsqlite3-dev libreadline-dev \
-            libsodium-dev libuv1-dev libmbedtls-dev libhiredis-dev
+      - uses: ./.github/actions/setup-native
 
       - name: Build and test with ${{ matrix.sanitizer }}
         run: |
+          set -euo pipefail
           make clean
           make ${{ matrix.sanitizer }}
           make ${{ matrix.sanitizer }}-test
 
-  # ─────────────────────────────────────────────────────────────────────
-  # STATIC ANALYSIS
-  # ─────────────────────────────────────────────────────────────────────
   static-analysis:
-    name: ${{ matrix.tool }}
-    runs-on: ubuntu-latest
+    name: static-analysis (${{ matrix.tool }})
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
     strategy:
       fail-fast: false
       matrix:
@@ -106,49 +136,45 @@ jobs:
     env:
       CC: clang
       DSCO_ARCH: x86-64
-      DSCO_STD: c2y
     steps:
       - uses: actions/checkout@v4
 
-      - name: Install dependencies
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y \
-            clang clang-tidy cppcheck \
-            libcurl4-openssl-dev libsqlite3-dev libreadline-dev \
-            libsodium-dev libuv1-dev libmbedtls-dev libhiredis-dev
+      - uses: ./.github/actions/setup-native
+        with:
+          static-analysis: "true"
 
       - name: Run ${{ matrix.tool }}
         run: make ${{ matrix.tool }}
 
-  # ─────────────────────────────────────────────────────────────────────
-  # FORMAT CHECK
-  # ─────────────────────────────────────────────────────────────────────
-  format-check:
-    name: clang-format check
-    runs-on: ubuntu-latest
+  hygiene:
+    name: repo hygiene
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
 
-      - name: Install clang-format
+      - uses: ./.github/actions/setup-native
+        with:
+          format: "true"
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: npm
+          cache-dependency-path: npm/dsco/package.json
+
+      - name: Formatting, docs, and version checks
         run: |
-          sudo apt-get update
-          sudo apt-get install -y clang-format
+          set -euo pipefail
+          make format-check
+          make docs-check
+          make check-version
 
-      - name: Check formatting
-        run: make format-check
-
-  # ─────────────────────────────────────────────────────────────────────
-  # VERSION CONSISTENCY
-  # Ensures config.h, CHANGELOG.md, and git tags all agree.
-  # ─────────────────────────────────────────────────────────────────────
-  version-check:
-    name: version consistency
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Check version consistency
+      - name: Validate npm package contents
+        working-directory: npm/dsco
+        env:
+          DSCO_SKIP_DOWNLOAD: "1"
         run: |
-          chmod +x scripts/check_version_consistency.sh
-          ./scripts/check_version_consistency.sh
+          set -euo pipefail
+          node -e "const p=require('./package.json'); if (p.name !== '@distributed.systems/dsco') throw new Error('unexpected package name');"
+          npm pack --dry-run

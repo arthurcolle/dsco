@@ -5,6 +5,7 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT"
 
 CONFIG_H="include/config.h"
+NPM_PACKAGE="npm/dsco/package.json"
 if [[ ! -f "$CONFIG_H" ]]; then
   echo "error: $CONFIG_H not found" >&2
   exit 1
@@ -35,6 +36,18 @@ fi
 if ! grep -Eq "^## \[$DSCO_VERSION\]([[:space:]]|$)" CHANGELOG.md; then
   echo "error: CHANGELOG.md is missing section for DSCO_VERSION [$DSCO_VERSION]" >&2
   exit 1
+fi
+
+if [[ -f "$NPM_PACKAGE" ]]; then
+  NPM_VERSION="$(sed -nE 's/^[[:space:]]*"version"[[:space:]]*:[[:space:]]*"([^"]+)".*/\1/p' "$NPM_PACKAGE" | head -n1)"
+  if [[ -z "$NPM_VERSION" ]]; then
+    echo "error: unable to parse version from $NPM_PACKAGE" >&2
+    exit 1
+  fi
+  if [[ "$NPM_VERSION" != "$DSCO_VERSION" ]]; then
+    echo "error: npm package version '$NPM_VERSION' does not match DSCO_VERSION '$DSCO_VERSION'" >&2
+    exit 1
+  fi
 fi
 
 echo "version consistency check passed: DSCO_VERSION=$DSCO_VERSION"

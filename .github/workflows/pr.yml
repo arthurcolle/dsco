@@ -7,41 +7,16 @@ on:
 permissions:
   contents: read
   pull-requests: write
-  checks: read
 
 concurrency:
   group: pr-${{ github.event.pull_request.number }}
   cancel-in-progress: true
 
 jobs:
-  # ─────────────────────────────────────────────────────────────────────
-  # PR GATE — Ensures CI is green before merge
-  # ─────────────────────────────────────────────────────────────────────
-  check-ci:
-    name: CI status gate
-    runs-on: ubuntu-latest
-    steps:
-      - name: Wait for CI workflows
-        uses: lewagon/wait-on-check-action@v1.3.4
-        with:
-          ref: ${{ github.event.pull_request.head.sha }}
-          check-name: 'build-test (ubuntu-latest, gcc)'
-          repo-token: ${{ secrets.GITHUB_TOKEN }}
-          wait-interval: 15
-          running-workflow-name: 'build-test (ubuntu-latest, gcc)'
-
-      - name: Check all required statuses
-        run: |
-          echo "All required CI checks must pass before merge."
-          echo "This job serves as a merge gate."
-          echo "Required: build-and-test (all matrix), sanitizers, format-check"
-
-  # ─────────────────────────────────────────────────────────────────────
-  # PR LABELER — Auto-label based on changed files
-  # ─────────────────────────────────────────────────────────────────────
   label:
     name: auto-label
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
     if: github.event.action == 'opened' || github.event.action == 'synchronize'
     permissions:
       pull-requests: write
@@ -51,12 +26,10 @@ jobs:
         with:
           repo-token: ${{ secrets.GITHUB_TOKEN }}
 
-  # ─────────────────────────────────────────────────────────────────────
-  # SIZE LABELER — Labels PRs by lines changed
-  # ─────────────────────────────────────────────────────────────────────
   size:
     name: size label
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
     if: github.event.action == 'opened' || github.event.action == 'synchronize'
     permissions:
       pull-requests: write
@@ -75,13 +48,11 @@ jobs:
               "800": "XL"
             }
 
-  # ─────────────────────────────────────────────────────────────────────
-  # PR TITLE LINT — Enforce conventional commits
-  # ─────────────────────────────────────────────────────────────────────
   title-lint:
     name: PR title format
-    runs-on: ubuntu-latest
-    if: github.event.action == 'opened' || github.event.action == 'edited' || github.event.action == 'reopened'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    if: github.event.action == 'opened' || github.event.action == 'edited' || github.event.action == 'reopened' || github.event.action == 'ready_for_review'
     steps:
       - uses: amannn/action-semantic-pull-request@v5
         env:
@@ -101,8 +72,3 @@ jobs:
             revert
             release
           requireScope: false
-          subjectPattern: ^[A-Z].+|^[a-z].+
-          subjectPatternError: |
-            The subject "{subject}" in the PR title "{title}" doesn't match the
-            configured pattern. Please ensure the subject starts with a
-            capital letter or is lowercase.
