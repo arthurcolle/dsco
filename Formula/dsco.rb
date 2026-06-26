@@ -1,7 +1,7 @@
 class Dsco < Formula
   desc "Local-first self-introspecting agentic runtime written in pure C"
   homepage "https://github.com/arthurcolle/dsco"
-  url "https://github.com/arthurcolle/dsco/archive/refs/tags/v1.0.1.tar.gz"
+  url "https://github.com/arthurcolle/dsco/archive/refs/tags/v1.0.2.tar.gz"
   sha256 "REPLACE_WITH_TARBALL_SHA256"
   license "MIT"
   head "https://github.com/arthurcolle/dsco.git", branch: "perf/dramatic-20260621"
