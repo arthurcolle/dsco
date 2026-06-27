@@ -320,6 +320,8 @@ debug files can contain prompts, documents, tool results, and provider payloads.
 | `DSCO_ENV_FILE` | Override the setup env file. Use for profiles, tests, and temporary sandboxes. |
 | `DSCO_BASELINE_DB` | Override sqlite baseline path. Use for isolated test runs or shared timeline storage. |
 | `DSCO_SESSION_PATH` | Override session-memory storage path. Use in tests; keep default for normal use. |
+| `DSCO_SESSION_TTL_EXPIRY` | Opt-in legacy TTL deletion for session memory. Default is retention: TTL classifies working/episodic/semantic but does not erase context after a timeout. |
+| `DSCO_AUTO_COMPACT` | Opt-in automatic context compaction. Default is retention; manual `/compact` and reactive provider-overflow recovery remain available. |
 | `DSCO_COST_HISTORY` | Override learned-cost history file. Use when benchmarking separately from personal history. |
 | `DSCO_INSTANCE_ID` | Baseline instance id set by dsco. Do not persist manually. |
 | `DSCO_TRACE`, `DSCO_TRACE_STDERR` | Enable trace logging. Use for repros; disable for normal interactive sessions. |
