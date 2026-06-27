@@ -9,10 +9,12 @@
  * Priority 5: Memory/Context Persistence
  *
  * Persistent key-value scratchpad + session history. Three tiers:
- *   Working  (TTL ≤ 60s)   — ephemeral facts for the current task
+ *   Working  (TTL ≤ 60s)   — current-task facts
  *   Episodic (TTL ≤ 3600s) — recent session insights
  *   Semantic (TTL = 0)     — permanent learned facts
  *
+ * TTL classifies tiers but does not expire entries by default. Set
+ * DSCO_SESSION_TTL_EXPIRY=1 to restore wall-clock eviction semantics.
  * Stored as flat JSON at $DSCO_SESSION_PATH or ~/.dsco/memory/sessions.json.
  * Automatic tier promotion: episodic → semantic when access_count ≥ 3.
  * ═══════════════════════════════════════════════════════════════════════════ */

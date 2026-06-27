@@ -2839,6 +2839,72 @@ static __attribute__((unused)) bool tool_soul_replace(const char *input, char *r
     return true;
 }
 
+/* ── Read-dedup cache (Tier-0 token saver) ────────────────────────────────
+ * Tracks (path, offset, limit, mtime, size) for recent reads. On an identical
+ * re-read with an unchanged file, return a one-line stub instead of resending
+ * the content — the model already has it in context. Pure client-side, safe on
+ * all providers. Disable with DSCO_READ_DEDUP=0. Mutex-guarded for the
+ * concurrent read path (read_file is is_read_only && is_concurrent). */
+#define RD_DEDUP_SLOTS 64
+typedef struct {
+    char   path[512];
+    int    offset;
+    int    limit;
+    long   size;
+    time_t mtime;
+    bool   used;
+} rd_dedup_entry_t;
+static rd_dedup_entry_t  s_rd_dedup[RD_DEDUP_SLOTS];
+static int               s_rd_dedup_next = 0;
+static pthread_mutex_t   s_rd_dedup_lock = PTHREAD_MUTEX_INITIALIZER;
+
+static bool rd_dedup_enabled(void) {
+    const char *e = getenv("DSCO_READ_DEDUP");
+    return !(e && e[0] == '0');
+}
+
+/* Returns true if this exact read was already successfully served and the file
+ * is unchanged (caller should emit a stub). */
+static bool rd_dedup_lookup(const char *path, int offset, int limit, long size, time_t mtime) {
+    bool hit = false;
+    pthread_mutex_lock(&s_rd_dedup_lock);
+    for (int i = 0; i < RD_DEDUP_SLOTS; i++) {
+        rd_dedup_entry_t *e = &s_rd_dedup[i];
+        if (e->used && e->offset == offset && e->limit == limit &&
+            strncmp(e->path, path, sizeof(e->path) - 1) == 0) {
+            hit = (e->mtime == mtime && e->size == size);
+            break;
+        }
+    }
+    pthread_mutex_unlock(&s_rd_dedup_lock);
+    return hit;
+}
+
+static void rd_dedup_record(const char *path, int offset, int limit, long size, time_t mtime) {
+    pthread_mutex_lock(&s_rd_dedup_lock);
+    /* Refresh existing slot first. */
+    for (int i = 0; i < RD_DEDUP_SLOTS; i++) {
+        rd_dedup_entry_t *e = &s_rd_dedup[i];
+        if (e->used && e->offset == offset && e->limit == limit &&
+            strncmp(e->path, path, sizeof(e->path) - 1) == 0) {
+            e->mtime = mtime;
+            e->size = size;
+            pthread_mutex_unlock(&s_rd_dedup_lock);
+            return;
+        }
+    }
+    rd_dedup_entry_t *e = &s_rd_dedup[s_rd_dedup_next];
+    s_rd_dedup_next = (s_rd_dedup_next + 1) % RD_DEDUP_SLOTS;
+    strncpy(e->path, path, sizeof(e->path) - 1);
+    e->path[sizeof(e->path) - 1] = '\0';
+    e->offset = offset;
+    e->limit = limit;
+    e->size = size;
+    e->mtime = mtime;
+    e->used = true;
+    pthread_mutex_unlock(&s_rd_dedup_lock);
+}
+
 static bool tool_read_file(const char *input, char *result, size_t rlen) {
     char *path = json_get_path_or_file_path(input);
     if (!path) {
@@ -2852,6 +2918,31 @@ static bool tool_read_file(const char *input, char *result, size_t rlen) {
 
     int offset = json_get_int(input, "offset", 0);
     int limit = json_get_int(input, "limit", 0);
+
+    /* Tier-0 read dedup: if this exact range was already read and the file is
+     * unchanged, return a stub instead of resending the bytes. */
+    bool rd_dedup_on = rd_dedup_enabled();
+    long rd_size = 0;
+    time_t rd_mtime = 0;
+    if (rd_dedup_on) {
+        struct stat st;
+        if (stat(path, &st) == 0) {
+            rd_size = (long)st.st_size;
+            rd_mtime = st.st_mtime;
+            if (rd_dedup_lookup(path, offset, limit, rd_size, rd_mtime)) {
+                snprintf(result, rlen,
+                         "[read_file: %s unchanged since last read this session "
+                         "(size=%ld, same offset/limit). Refer to the earlier read "
+                         "result. Re-read with a different range or after edit if you "
+                         "need fresh content.]",
+                         path, rd_size);
+                free(path);
+                return true;
+            }
+        } else {
+            rd_dedup_on = false; /* can't stat — don't cache */
+        }
+    }
 
     FILE *f = fopen(path, "r");
     if (!f) {
@@ -2888,6 +2979,9 @@ static bool tool_read_file(const char *input, char *result, size_t rlen) {
         lines_written++;
     }
     fclose(f);
+    /* Record the successful read so an identical re-read is deduped. */
+    if (rd_dedup_on)
+        rd_dedup_record(path, offset, limit, rd_size, rd_mtime);
     free(path);
     return true;
 }

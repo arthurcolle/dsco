@@ -4490,7 +4490,10 @@ bool agent_run(const char *api_key, const char *model, const char *topology_name
             compact_config_init(&manual_cfg);
             manual_cfg.max_result_chars = 128; /* aggressive for manual */
             int msgs_before = conv.count;
+            bool saved_compact_enabled = session.compact_enabled;
+            session.compact_enabled = true; /* manual command explicitly authorizes compaction */
             compact_result_t cr = conv_auto_compact(&conv, &session, &manual_cfg);
+            session.compact_enabled = saved_compact_enabled;
             /* Post-compact: re-inject recently-read files (only if we
              * actually shrank, otherwise we'd grow the conversation). */
             int freed_tokens = cr.pre_token_count - cr.post_token_count;
@@ -7469,7 +7472,7 @@ bool agent_run(const char *api_key, const char *model, const char *topology_name
                     tool_quorum_gate_api(last_user_msg, api_key);
             }
 
-            if (conv.count > 10) {
+            if (session.compact_enabled && conv.count > 10) {
                 int est = conv_token_estimate(&conv, &session);
                 int thresh = auto_compact_threshold(&session);
                 if (est > thresh * 3 / 4) { /* start micro-compact at 75% of threshold */
@@ -7554,7 +7557,7 @@ bool agent_run(const char *api_key, const char *model, const char *topology_name
                 int est_tokens = conv_token_estimate(&conv, &session);
                 int eff_window = effective_context_window(&session);
                 int thresh = auto_compact_threshold(&session);
-                if (est_tokens > thresh) {
+                if (session.compact_enabled && est_tokens > thresh) {
                     /* §9: Preserve context summary in episodic memory before compaction */
                     {
                         agent_memory_ensure_init();
@@ -8185,21 +8188,27 @@ bool agent_run(const char *api_key, const char *model, const char *topology_name
                 if (sr.usage.input_tokens > thresh) {
                     fprintf(
                         stderr,
-                        "  \033[33m\xe2\x9a\xa0 token budget: %dk/%dk effective (%.0f%%)\033[0m\n",
+                        "  \033[33m\xe2\x9a\xa0 token budget: %dk/%dk effective (%.0f%%)%s\033[0m\n",
                         sr.usage.input_tokens / 1000, eff_window / 1000,
-                        100.0 * sr.usage.input_tokens / eff_window);
-                    /* Tiered compaction with circuit breaker */
-                    compact_result_t cr = conv_auto_compact(&conv, &session, &compact_cfg);
-                    if (cr.tier_used >= COMPACT_SNIP)
-                        post_compact_restore_inject(&file_restore, &conv);
+                        100.0 * sr.usage.input_tokens / eff_window,
+                        session.compact_enabled ? " — auto-compact enabled" : " — retaining context");
+                    if (session.compact_enabled) {
+                        /* Tiered compaction with circuit breaker */
+                        compact_result_t cr = conv_auto_compact(&conv, &session, &compact_cfg);
+                        if (cr.tier_used >= COMPACT_SNIP)
+                            post_compact_restore_inject(&file_restore, &conv);
+                    }
                 } else if (sr.usage.input_tokens > (int)(eff_window * TOKEN_BUDGET_WARN)) {
                     fprintf(stderr,
-                            "  \033[33m\xe2\x9a\xa0 context pressure: %dk/%dk (%.0f%%)\033[0m\n",
+                            "  \033[33m\xe2\x9a\xa0 context pressure: %dk/%dk (%.0f%%)%s\033[0m\n",
                             sr.usage.input_tokens / 1000, eff_window / 1000,
-                            100.0 * sr.usage.input_tokens / eff_window);
-                    /* Light compaction: strip binaries + trim old results */
-                    conv_strip_binaries(&conv, 6);
-                    conv_trim_old_results(&conv, 6, 256);
+                            100.0 * sr.usage.input_tokens / eff_window,
+                            session.compact_enabled ? " — auto-compact enabled" : " — retaining context");
+                    if (session.compact_enabled) {
+                        /* Light compaction: strip binaries + trim old results */
+                        conv_strip_binaries(&conv, 6);
+                        conv_trim_old_results(&conv, 6, 256);
+                    }
                 }
             }
 
@@ -9100,6 +9109,45 @@ bool agent_run(const char *api_key, const char *model, const char *topology_name
             /* Agent invoked self_exit tool — finish this turn then terminate */
             if (g_agent_exit_requested)
                 done = true;
+
+            /* Diminishing-returns stop (autonomous long-run safety): if the loop
+             * wants to keep going but the model's output has flatlined for two
+             * consecutive turns after warm-up, it is almost certainly stalled
+             * rather than progressing. Stop burning budget. Conservative: only
+             * engages in unattended (non-TTY) runs and only when there are no
+             * tool results pending (a tool turn is genuine progress). Override
+             * with DSCO_STALL_STOP=0. */
+            {
+                static int stall_streak = 0;
+                static bool stall_cfg_read = false;
+                static bool stall_enabled = true;
+                if (!stall_cfg_read) {
+                    const char *e = getenv("DSCO_STALL_STOP");
+                    stall_enabled = !(e && e[0] == '0');
+                    stall_cfg_read = true;
+                }
+                const int STALL_TOK_THR = 500; /* tokens/turn below = no progress */
+                bool unattended = !(isatty(STDIN_FILENO) && isatty(STDERR_FILENO));
+                if (stall_enabled && unattended && !done && !needs_followup_turn &&
+                    !g_agent_exit_requested && !g_interrupted && turns >= 3) {
+                    if (sr.usage.output_tokens > 0 &&
+                        sr.usage.output_tokens < STALL_TOK_THR)
+                        stall_streak++;
+                    else
+                        stall_streak = 0;
+                    if (stall_streak >= 2) {
+                        fprintf(stderr,
+                                "  %s⚠ stopping: output flatlined %d turns "
+                                "(<%d tok/turn) — diminishing returns%s\n",
+                                TUI_BYELLOW, stall_streak, STALL_TOK_THR, TUI_RESET);
+                        baseline_log("agent", "diminishing_returns_stop", NULL, NULL);
+                        done = true;
+                        stall_streak = 0;
+                    }
+                } else if (needs_followup_turn || done) {
+                    stall_streak = 0; /* genuine work or natural end resets the counter */
+                }
+            }
 
             if (!g_agent_exit_requested && !g_interrupted) {
                 loop_control_decision_t loop_decision;
