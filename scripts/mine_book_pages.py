@@ -13,7 +13,6 @@ import collections
 import datetime as dt
 import hashlib
 import json
-import os
 from pathlib import Path
 import re
 import sqlite3
@@ -560,16 +559,28 @@ def write_report(path: Path, book_rows: List[dict], page_rows: List[dict],
         for signal, count in themes.most_common():
             f.write(f"- {signal} ({count} page pointers)\n")
 
-        f.write("\n## Extraction Gaps\n\n")
-        gaps = [r for r in book_rows if r["status"] != "ok"]
+        f.write("\n## OCR Recovery\n\n")
+        recovered = [r for r in book_rows if str(r["status"]).startswith("ocr_")]
+        if not recovered:
+            f.write("- No book-level OCR recovery was needed.\n")
+        else:
+            for row in recovered:
+                f.write(
+                    f"- `{Path(str(row['file'])).name}`: status={row['status']}, "
+                    f"pages={row['pages']}, extracted_pages={row['extracted_pages']}, "
+                    f"chars={row['chars']:,}.\n"
+                )
+
+        f.write("\n## Residual Extraction Gaps\n\n")
+        gaps = [r for r in book_rows if r["status"] in {"empty", "low_text"}]
         if not gaps:
-            f.write("- No book-level extraction gaps detected.\n")
+            f.write("- No residual book-level extraction gaps detected.\n")
         else:
             for row in gaps:
                 f.write(
                     f"- `{Path(str(row['file'])).name}`: status={row['status']}, "
                     f"pages={row['pages']}, extracted_pages={row['extracted_pages']}, "
-                    f"chars={row['chars']:,}. Needs OCR or a better text layer.\n"
+                    f"chars={row['chars']:,}. Needs a better source file or targeted OCR tuning.\n"
                 )
 
         f.write("\n## Query Examples\n\n")

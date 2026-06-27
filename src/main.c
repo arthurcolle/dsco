@@ -2808,6 +2808,8 @@ static int run_pets_watch(int argc, char **argv) {
     return 0;
 }
 
+static int maybe_run_introspect_fast_path(int argc, char **argv, int i);
+
 static int maybe_run_early_fast_path(int argc, char **argv,
                                      dsco_profile_t profile) {
     for (int i = 1; i < argc; i++) {
@@ -2823,41 +2825,9 @@ static int maybe_run_early_fast_path(int argc, char **argv,
             perf_finish("fast exit");
             return 0;
         }
-        if (strcmp(argv[i], "--codebase-stats") == 0) {
-            extern int introspect_print_codebase_stats(FILE *);
-            introspect_print_codebase_stats(stdout);
-            perf_finish("fast exit");
-            return 0;
-        }
-        if (strcmp(argv[i], "--route-explain") == 0) {
-            perf_mark("fast route-explain begin");
-            int rc = run_route_explain_fast(argc, argv);
-            perf_finish("fast exit");
-            return rc;
-        }
-        if (strcmp(argv[i], "--selves") == 0) {
-            extern int introspect_run_selves(FILE *, int, const char *);
-            int nselves = 4;
-            const char *prompt = NULL;
-            if (i + 1 < argc) {
-                char *end = NULL;
-                long v = strtol(argv[i+1], &end, 10);
-                if (end && *end == 0 && v > 0 && i + 2 < argc) {
-                    nselves = (int)v;
-                    prompt = argv[i+2];
-                } else {
-                    prompt = argv[i+1];
-                }
-            }
-            if (!prompt) {
-                fprintf(stderr, "usage: dsco --selves [N] <prompt>\n");
-                perf_finish("fast error");
-                return 1;
-            }
-            int rc = introspect_run_selves(stdout, nselves, prompt);
-            perf_finish("fast exit");
-            return rc;
-        }
+        int introspect_rc = maybe_run_introspect_fast_path(argc, argv, i);
+        if (introspect_rc != -1)
+            return introspect_rc;
         if (strcmp(argv[i], "--tool-exec") == 0) {
             if (i + 2 >= argc) {
                 fprintf(stderr, "error: --tool-exec requires <name> <json>\n");
@@ -2873,16 +2843,105 @@ static int maybe_run_early_fast_path(int argc, char **argv,
     return -1;
 }
 
+static int maybe_run_introspect_fast_path(int argc, char **argv, int i) {
+    if (strcmp(argv[i], "--codebase-stats") == 0) {
+        extern int introspect_print_codebase_stats(FILE *);
+        introspect_print_codebase_stats(stdout);
+        perf_finish("fast exit");
+        return 0;
+    }
+    if (strcmp(argv[i], "--route-explain") == 0) {
+        perf_mark("fast route-explain begin");
+        int rc = run_route_explain_fast(argc, argv);
+        perf_finish("fast exit");
+        return rc;
+    }
+    if (strcmp(argv[i], "--selves") == 0) {
+        extern int introspect_run_selves(FILE *, int, const char *);
+        int nselves = 4;
+        const char *prompt = NULL;
+        if (i + 1 < argc) {
+            char *end = NULL;
+            long v = strtol(argv[i + 1], &end, 10);
+            if (end && *end == 0 && v > 0 && i + 2 < argc) {
+                nselves = (int)v;
+                prompt = argv[i + 2];
+            } else {
+                prompt = argv[i + 1];
+            }
+        }
+        if (!prompt) {
+            fprintf(stderr, "usage: dsco --selves [N] <prompt>\n");
+            perf_finish("fast error");
+            return 1;
+        }
+        int rc = introspect_run_selves(stdout, nselves, prompt);
+        perf_finish("fast exit");
+        return rc;
+    }
+    return -1;
+}
+
+static int maybe_run_pre_chronicle_fast_path(int argc, char **argv,
+                                             dsco_profile_t profile) {
+    if (profile != DSCO_PROFILE_LITE && profile != DSCO_PROFILE_WORKER)
+        return -1;
+
+    for (int i = 1; i < argc; i++) {
+        if (strcmp(argv[i], "--models-json") == 0) {
+            perf_mark("fast models-json");
+            print_models_json();
+            perf_finish("fast exit");
+            return 0;
+        }
+        if (strcmp(argv[i], "--tools-json") == 0) {
+            perf_mark("fast tools-json begin");
+            print_tools_json_fast(profile);
+            perf_finish("fast exit");
+            return 0;
+        }
+        int introspect_rc = maybe_run_introspect_fast_path(argc, argv, i);
+        if (introspect_rc != -1)
+            return introspect_rc;
+        if (strcmp(argv[i], "--tool-exec") == 0) {
+            if (i + 2 >= argc) {
+                fprintf(stderr, "error: --tool-exec requires <name> <json>\n");
+                perf_finish("fast error");
+                return 1;
+            }
+            const char *name = argv[i + 1];
+            const char *input_json = argv[i + 2];
+            if (!name || strcmp(name, "cwd") != 0 ||
+                (input_json && strstr(input_json, "path"))) {
+                return -1;
+            }
+            perf_mark("fast tool-exec begin");
+            int rc = run_tool_exec_fast(profile, name, input_json);
+            perf_finish("fast exit");
+            return rc;
+        }
+    }
+    return -1;
+}
+
 int main(int argc, char **argv) {
     perf_init();
+    dsco_profile_t runtime_profile = main_runtime_profile(argc, argv);
+    dsco_caps_t startup_caps = main_plan_startup_caps(argc, argv, runtime_profile);
+    perf_set_startup_context(runtime_profile, startup_caps);
+
+    int pre_chronicle_fast_rc = maybe_run_pre_chronicle_fast_path(argc, argv,
+                                                                  runtime_profile);
+    if (pre_chronicle_fast_rc >= 0) return pre_chronicle_fast_rc;
+
     heartbeat_set_context(argc, argv);
     heartbeat_set_phase("main_entry");
 
-    /* Chronicle is the DSCO flight recorder. It starts at process entry —
-     * before fast paths, info flags, tool exec, setup, timeline server, or
-     * provider resolution — so every dsco invocation leaves a local activity
-     * record unless DSCO_CHRONICLE_MODE=off. Later chronicle_start() calls are
-     * idempotent runtime-configuration updates. */
+    /* Chronicle is the DSCO flight recorder. Normal/default paths start it
+     * before info flags, general fast paths, setup, timeline server, or provider
+     * resolution. Explicit lite/worker local-only fast paths above return before
+     * this to preserve sub-millisecond internal tool loops. Later
+     * chronicle_start() calls are idempotent runtime-configuration updates. */
     if (chronicle_start(&(chronicle_start_opts_t){.provider = "startup",
                                                   .model = "",
                                                   .mode = "startup",
@@ -2919,10 +2978,6 @@ int main(int argc, char **argv) {
             }
         }
     }
-    dsco_profile_t runtime_profile = main_runtime_profile(argc, argv);
-    dsco_caps_t startup_caps = main_plan_startup_caps(argc, argv, runtime_profile);
-    perf_set_startup_context(runtime_profile, startup_caps);
-
     /* `dsco tools …` drives the external Tool Management API. Dispatch first so
      * its own -h/subcommands aren't swallowed by the global flag loop below; it
      * manages its own config + auth and never touches the keychain. */
@@ -4282,6 +4337,8 @@ native_path:
                     char *tr = safe_malloc(MAX_TOOL_RESULT);
                     tr[0] = '\0';
                     const char *tier = session_trust_tier_to_string(oneshot_session.trust_tier);
+                    struct timeval tv0, tv1;
+                    gettimeofday(&tv0, NULL);
                     bool ok = tools_is_allowed_for_tier(blk->tool_name, tier, tr, MAX_TOOL_RESULT);
                     if (ok) {
                         ok = tools_execute_for_tier(blk->tool_name, blk->tool_input, tier,
@@ -4289,6 +4346,13 @@ native_path:
                     } else {
                         baseline_log("security", "tool_blocked", tr, NULL);
                     }
+                    gettimeofday(&tv1, NULL);
+                    /* Headless path: record tool outcome so the continual-learning
+                     * trace fires in autonomous runs (not just interactive). */
+                    SI_RECORD_TOOL(blk->tool_name, ok,
+                                   (tv1.tv_sec - tv0.tv_sec) * 1000.0 +
+                                       (tv1.tv_usec - tv0.tv_usec) / 1000.0,
+                                   (int)(strlen(tr) / 4));
                     conv_add_tool_result_named(&conv, blk->tool_id, blk->tool_name, tr, !ok);
                     baseline_log(ok ? "tool_result" : "tool_error",
                                  blk->tool_name ? blk->tool_name : "tool",
@@ -4411,6 +4475,8 @@ native_path:
                             char *tr = safe_malloc(MAX_TOOL_RESULT);
                             tr[0] = '\0';
                             const char *tier = session_trust_tier_to_string(oneshot_session.trust_tier);
+                            struct timeval tv0, tv1;
+                            gettimeofday(&tv0, NULL);
                             bool ok = tools_is_allowed_for_tier(blk->tool_name, tier, tr, MAX_TOOL_RESULT);
                             if (ok) {
                                 ok = tools_execute_for_tier(blk->tool_name, blk->tool_input, tier,
@@ -4418,6 +4484,11 @@ native_path:
                             } else {
                                 baseline_log("security", "tool_blocked", tr, NULL);
                             }
+                            gettimeofday(&tv1, NULL);
+                            SI_RECORD_TOOL(blk->tool_name, ok,
+                                           (tv1.tv_sec - tv0.tv_sec) * 1000.0 +
+                                               (tv1.tv_usec - tv0.tv_usec) / 1000.0,
+                                           (int)(strlen(tr) / 4));
                             conv_add_tool_result_named(&conv, blk->tool_id, blk->tool_name, tr, !ok);
                             free(tr);
                         }

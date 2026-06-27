@@ -4,11 +4,13 @@
 #include <string.h>
 #include <stdio.h>
 #include <time.h>
+#include <pthread.h>
 
 /* ── Internal handle ───────────────────────────────────────────────── */
 
 struct vfs_db {
     sqlite3 *db;
+    pthread_mutex_t mu;
 
     /* Cached prepared statements */
     sqlite3_stmt *kv_put;
@@ -33,6 +35,14 @@ struct vfs_db {
     int64_t cache_hits;
     int64_t cache_misses;
 };
+
+static void vfs_lock(vfs_db_t *db) {
+    pthread_mutex_lock(&db->mu);
+}
+
+static void vfs_unlock(vfs_db_t *db) {
+    pthread_mutex_unlock(&db->mu);
+}
 
 /* ── Schema ────────────────────────────────────────────────────────── */
 
@@ -132,10 +142,18 @@ vfs_db_t *vfs_open(const char *path) {
     if (!vdb)
         return NULL;
 
-    int rc = sqlite3_open_v2(path, &vdb->db, SQLITE_OPEN_READWRITE | SQLITE_OPEN_CREATE, NULL);
+    if (pthread_mutex_init(&vdb->mu, NULL) != 0) {
+        free(vdb);
+        return NULL;
+    }
+
+    int rc = sqlite3_open_v2(path, &vdb->db,
+                             SQLITE_OPEN_READWRITE | SQLITE_OPEN_CREATE | SQLITE_OPEN_FULLMUTEX,
+                             NULL);
     if (rc != SQLITE_OK) {
         fprintf(stderr, "vfs_open: %s\n", sqlite3_errmsg(vdb->db));
         sqlite3_close(vdb->db);
+        pthread_mutex_destroy(&vdb->mu);
         free(vdb);
         return NULL;
     }
@@ -152,6 +170,7 @@ vfs_db_t *vfs_open(const char *path) {
         fprintf(stderr, "vfs_open schema: %s\n", err ? err : "unknown");
         sqlite3_free(err);
         sqlite3_close(vdb->db);
+        pthread_mutex_destroy(&vdb->mu);
         free(vdb);
         return NULL;
     }
@@ -234,8 +253,11 @@ vfs_db_t *vfs_open(const char *path) {
 void vfs_close(vfs_db_t *db) {
     if (!db)
         return;
+    vfs_lock(db);
     finalize_all(db);
     sqlite3_close(db->db);
+    vfs_unlock(db);
+    pthread_mutex_destroy(&db->mu);
     free(db);
 }
 
@@ -245,11 +267,15 @@ bool vfs_kv_put(vfs_db_t *db, const char *bucket, const char *key, const void *v
                 size_t val_len) {
     if (!db || !db->kv_put)
         return false;
+    vfs_lock(db);
     sqlite3_reset(db->kv_put);
     sqlite3_bind_text(db->kv_put, 1, bucket, -1, SQLITE_TRANSIENT);
     sqlite3_bind_text(db->kv_put, 2, key, -1, SQLITE_TRANSIENT);
     sqlite3_bind_blob(db->kv_put, 3, val, (int)val_len, SQLITE_TRANSIENT);
-    return sqlite3_step(db->kv_put) == SQLITE_DONE;
+    bool ok = sqlite3_step(db->kv_put) == SQLITE_DONE;
+    sqlite3_reset(db->kv_put);
+    vfs_unlock(db);
+    return ok;
 }
 
 bool vfs_kv_put_str(vfs_db_t *db, const char *bucket, const char *key, const char *val) {
@@ -259,17 +285,24 @@ bool vfs_kv_put_str(vfs_db_t *db, const char *bucket, const char *key, const cha
 void *vfs_kv_get(vfs_db_t *db, const char *bucket, const char *key, size_t *out_len) {
     if (!db || !db->kv_get)
         return NULL;
+    vfs_lock(db);
     sqlite3_reset(db->kv_get);
     sqlite3_bind_text(db->kv_get, 1, bucket, -1, SQLITE_TRANSIENT);
     sqlite3_bind_text(db->kv_get, 2, key, -1, SQLITE_TRANSIENT);
 
-    if (sqlite3_step(db->kv_get) != SQLITE_ROW)
+    if (sqlite3_step(db->kv_get) != SQLITE_ROW) {
+        sqlite3_reset(db->kv_get);
+        vfs_unlock(db);
         return NULL;
+    }
 
     int len = sqlite3_column_bytes(db->kv_get, 0);
     const void *data = sqlite3_column_blob(db->kv_get, 0);
-    if (!data || len <= 0)
+    if (!data || len <= 0) {
+        sqlite3_reset(db->kv_get);
+        vfs_unlock(db);
         return NULL;
+    }
 
     void *copy = malloc((size_t)len);
     if (copy) {
@@ -277,6 +310,8 @@ void *vfs_kv_get(vfs_db_t *db, const char *bucket, const char *key, size_t *out_
         if (out_len)
             *out_len = (size_t)len;
     }
+    sqlite3_reset(db->kv_get);
+    vfs_unlock(db);
     return copy;
 }
 
@@ -299,10 +334,14 @@ char *vfs_kv_get_str(vfs_db_t *db, const char *bucket, const char *key) {
 bool vfs_kv_delete(vfs_db_t *db, const char *bucket, const char *key) {
     if (!db || !db->kv_del)
         return false;
+    vfs_lock(db);
     sqlite3_reset(db->kv_del);
     sqlite3_bind_text(db->kv_del, 1, bucket, -1, SQLITE_TRANSIENT);
     sqlite3_bind_text(db->kv_del, 2, key, -1, SQLITE_TRANSIENT);
-    return sqlite3_step(db->kv_del) == SQLITE_DONE;
+    bool ok = sqlite3_step(db->kv_del) == SQLITE_DONE;
+    sqlite3_reset(db->kv_del);
+    vfs_unlock(db);
+    return ok;
 }
 
 char **vfs_kv_keys(vfs_db_t *db, const char *bucket, int *out_count) {
@@ -311,15 +350,15 @@ char **vfs_kv_keys(vfs_db_t *db, const char *bucket, int *out_count) {
     if (!db || !db->kv_keys)
         return NULL;
 
-    sqlite3_reset(db->kv_keys);
-    sqlite3_bind_text(db->kv_keys, 1, bucket, -1, SQLITE_TRANSIENT);
-
     int cap = 64;
     int count = 0;
     char **keys = malloc((size_t)cap * sizeof(char *));
     if (!keys)
         return NULL;
 
+    vfs_lock(db);
+    sqlite3_reset(db->kv_keys);
+    sqlite3_bind_text(db->kv_keys, 1, bucket, -1, SQLITE_TRANSIENT);
     while (sqlite3_step(db->kv_keys) == SQLITE_ROW) {
         if (count >= cap) {
             cap *= 2;
@@ -331,6 +370,8 @@ char **vfs_kv_keys(vfs_db_t *db, const char *bucket, int *out_count) {
         const char *k = (const char *)sqlite3_column_text(db->kv_keys, 0);
         keys[count++] = k ? strdup(k) : strdup("");
     }
+    sqlite3_reset(db->kv_keys);
+    vfs_unlock(db);
 
     if (out_count)
         *out_count = count;
@@ -343,11 +384,15 @@ bool vfs_conv_append(vfs_db_t *db, const char *session_id, const char *role,
                      const char *content_json) {
     if (!db || !db->conv_ins)
         return false;
+    vfs_lock(db);
     sqlite3_reset(db->conv_ins);
     sqlite3_bind_text(db->conv_ins, 1, session_id, -1, SQLITE_TRANSIENT);
     sqlite3_bind_text(db->conv_ins, 2, role, -1, SQLITE_TRANSIENT);
     sqlite3_bind_text(db->conv_ins, 3, content_json, -1, SQLITE_TRANSIENT);
-    return sqlite3_step(db->conv_ins) == SQLITE_DONE;
+    bool ok = sqlite3_step(db->conv_ins) == SQLITE_DONE;
+    sqlite3_reset(db->conv_ins);
+    vfs_unlock(db);
+    return ok;
 }
 
 vfs_conv_turn_t *vfs_conv_load(vfs_db_t *db, const char *session_id, int *out_count) {
@@ -356,15 +401,15 @@ vfs_conv_turn_t *vfs_conv_load(vfs_db_t *db, const char *session_id, int *out_co
     if (!db || !db->conv_load)
         return NULL;
 
-    sqlite3_reset(db->conv_load);
-    sqlite3_bind_text(db->conv_load, 1, session_id, -1, SQLITE_TRANSIENT);
-
     int cap = 64;
     int count = 0;
     vfs_conv_turn_t *turns = malloc((size_t)cap * sizeof(vfs_conv_turn_t));
     if (!turns)
         return NULL;
 
+    vfs_lock(db);
+    sqlite3_reset(db->conv_load);
+    sqlite3_bind_text(db->conv_load, 1, session_id, -1, SQLITE_TRANSIENT);
     while (sqlite3_step(db->conv_load) == SQLITE_ROW) {
         if (count >= cap) {
             cap *= 2;
@@ -380,6 +425,8 @@ vfs_conv_turn_t *vfs_conv_load(vfs_db_t *db, const char *session_id, int *out_co
         turns[count].timestamp = sqlite3_column_int64(db->conv_load, 2);
         count++;
     }
+    sqlite3_reset(db->conv_load);
+    vfs_unlock(db);
 
     if (out_count)
         *out_count = count;
@@ -399,9 +446,13 @@ void vfs_conv_free(vfs_conv_turn_t *turns, int count) {
 bool vfs_conv_delete(vfs_db_t *db, const char *session_id) {
     if (!db || !db->conv_del)
         return false;
+    vfs_lock(db);
     sqlite3_reset(db->conv_del);
     sqlite3_bind_text(db->conv_del, 1, session_id, -1, SQLITE_TRANSIENT);
-    return sqlite3_step(db->conv_del) == SQLITE_DONE;
+    bool ok = sqlite3_step(db->conv_del) == SQLITE_DONE;
+    sqlite3_reset(db->conv_del);
+    vfs_unlock(db);
+    return ok;
 }
 
 char **vfs_conv_sessions(vfs_db_t *db, int *out_count) {
@@ -410,14 +461,14 @@ char **vfs_conv_sessions(vfs_db_t *db, int *out_count) {
     if (!db || !db->conv_sessions)
         return NULL;
 
-    sqlite3_reset(db->conv_sessions);
-
     int cap = 32;
     int count = 0;
     char **ids = malloc((size_t)cap * sizeof(char *));
     if (!ids)
         return NULL;
 
+    vfs_lock(db);
+    sqlite3_reset(db->conv_sessions);
     while (sqlite3_step(db->conv_sessions) == SQLITE_ROW) {
         if (count >= cap) {
             cap *= 2;
@@ -429,6 +480,8 @@ char **vfs_conv_sessions(vfs_db_t *db, int *out_count) {
         const char *s = (const char *)sqlite3_column_text(db->conv_sessions, 0);
         ids[count++] = s ? strdup(s) : strdup("");
     }
+    sqlite3_reset(db->conv_sessions);
+    vfs_unlock(db);
 
     if (out_count)
         *out_count = count;
@@ -440,11 +493,15 @@ char **vfs_conv_sessions(vfs_db_t *db, int *out_count) {
 bool vfs_log_event(vfs_db_t *db, const char *category, const char *action, const char *detail) {
     if (!db || !db->event_ins)
         return false;
+    vfs_lock(db);
     sqlite3_reset(db->event_ins);
     sqlite3_bind_text(db->event_ins, 1, category, -1, SQLITE_TRANSIENT);
     sqlite3_bind_text(db->event_ins, 2, action, -1, SQLITE_TRANSIENT);
     sqlite3_bind_text(db->event_ins, 3, detail, -1, SQLITE_TRANSIENT);
-    return sqlite3_step(db->event_ins) == SQLITE_DONE;
+    bool ok = sqlite3_step(db->event_ins) == SQLITE_DONE;
+    sqlite3_reset(db->event_ins);
+    vfs_unlock(db);
+    return ok;
 }
 
 vfs_event_t *vfs_log_query(vfs_db_t *db, const char *category, int limit, int *out_count) {
@@ -453,19 +510,19 @@ vfs_event_t *vfs_log_query(vfs_db_t *db, const char *category, int limit, int *o
     if (!db || !db->event_query)
         return NULL;
 
-    sqlite3_reset(db->event_query);
-    if (category)
-        sqlite3_bind_text(db->event_query, 1, category, -1, SQLITE_TRANSIENT);
-    else
-        sqlite3_bind_null(db->event_query, 1);
-    sqlite3_bind_int(db->event_query, 2, limit > 0 ? limit : 100);
-
     int cap = 64;
     int count = 0;
     vfs_event_t *events = malloc((size_t)cap * sizeof(vfs_event_t));
     if (!events)
         return NULL;
 
+    vfs_lock(db);
+    sqlite3_reset(db->event_query);
+    if (category)
+        sqlite3_bind_text(db->event_query, 1, category, -1, SQLITE_TRANSIENT);
+    else
+        sqlite3_bind_null(db->event_query, 1);
+    sqlite3_bind_int(db->event_query, 2, limit > 0 ? limit : 100);
     while (sqlite3_step(db->event_query) == SQLITE_ROW) {
         if (count >= cap) {
             cap *= 2;
@@ -483,6 +540,8 @@ vfs_event_t *vfs_log_query(vfs_db_t *db, const char *category, int limit, int *o
         events[count].detail = d ? strdup(d) : strdup("");
         count++;
     }
+    sqlite3_reset(db->event_query);
+    vfs_unlock(db);
 
     if (out_count)
         *out_count = count;
@@ -506,36 +565,49 @@ bool vfs_cache_put(vfs_db_t *db, const char *tool_name, const char *input_hash, 
                    int ttl_seconds) {
     if (!db || !db->cache_put)
         return false;
+    vfs_lock(db);
     sqlite3_reset(db->cache_put);
     sqlite3_bind_text(db->cache_put, 1, tool_name, -1, SQLITE_TRANSIENT);
     sqlite3_bind_text(db->cache_put, 2, input_hash, -1, SQLITE_TRANSIENT);
     sqlite3_bind_text(db->cache_put, 3, result, -1, SQLITE_TRANSIENT);
     sqlite3_bind_int(db->cache_put, 4, ttl_seconds);
-    return sqlite3_step(db->cache_put) == SQLITE_DONE;
+    bool ok = sqlite3_step(db->cache_put) == SQLITE_DONE;
+    sqlite3_reset(db->cache_put);
+    vfs_unlock(db);
+    return ok;
 }
 
 char *vfs_cache_get(vfs_db_t *db, const char *tool_name, const char *input_hash) {
     if (!db || !db->cache_get)
         return NULL;
+    vfs_lock(db);
     sqlite3_reset(db->cache_get);
     sqlite3_bind_text(db->cache_get, 1, tool_name, -1, SQLITE_TRANSIENT);
     sqlite3_bind_text(db->cache_get, 2, input_hash, -1, SQLITE_TRANSIENT);
 
+    char *ret = NULL;
     if (sqlite3_step(db->cache_get) == SQLITE_ROW) {
         const char *r = (const char *)sqlite3_column_text(db->cache_get, 0);
         db->cache_hits++;
-        return r ? strdup(r) : NULL;
+        ret = r ? strdup(r) : NULL;
+    } else {
+        db->cache_misses++;
     }
-    db->cache_misses++;
-    return NULL;
+    sqlite3_reset(db->cache_get);
+    vfs_unlock(db);
+    return ret;
 }
 
 int vfs_cache_evict(vfs_db_t *db) {
     if (!db || !db->cache_evict)
         return 0;
+    vfs_lock(db);
     sqlite3_reset(db->cache_evict);
     sqlite3_step(db->cache_evict);
-    return sqlite3_changes(db->db);
+    int changes = sqlite3_changes(db->db);
+    sqlite3_reset(db->cache_evict);
+    vfs_unlock(db);
+    return changes;
 }
 
 /* ── Tool result persistence ──────────────────────────────────────── */
@@ -549,6 +621,7 @@ bool vfs_result_put(vfs_db_t *db, const char *tool_name, const char *input_hash,
     char key[128];
     snprintf(key, sizeof(key), "%s:%.16s", tool_name, input_hash);
 
+    vfs_lock(db);
     sqlite3_reset(db->result_put);
     sqlite3_bind_text(db->result_put, 1, key, -1, SQLITE_TRANSIENT);
     sqlite3_bind_text(db->result_put, 2, tool_name, -1, SQLITE_TRANSIENT);
@@ -556,12 +629,17 @@ bool vfs_result_put(vfs_db_t *db, const char *tool_name, const char *input_hash,
     sqlite3_bind_text(db->result_put, 4, result, -1, SQLITE_TRANSIENT);
     sqlite3_bind_int(db->result_put, 5, (int)strlen(result));
     sqlite3_bind_int(db->result_put, 6, ttl_seconds);
-    return sqlite3_step(db->result_put) == SQLITE_DONE;
+    bool ok = sqlite3_step(db->result_put) == SQLITE_DONE;
+    sqlite3_reset(db->result_put);
+    vfs_unlock(db);
+    return ok;
 }
 
 char *vfs_result_get(vfs_db_t *db, const char *key) {
     if (!db || !db->result_get || !key)
         return NULL;
+
+    vfs_lock(db);
 
     /* Bump access_count */
     sqlite3_stmt *bump = NULL;
@@ -584,15 +662,20 @@ char *vfs_result_get(vfs_db_t *db, const char *key) {
             result = strdup(txt);
     }
     sqlite3_reset(db->result_get);
+    vfs_unlock(db);
     return result;
 }
 
 int vfs_result_evict(vfs_db_t *db) {
     if (!db || !db->result_evict)
         return 0;
+    vfs_lock(db);
     sqlite3_reset(db->result_evict);
     sqlite3_step(db->result_evict);
-    return sqlite3_changes(db->db);
+    int changes = sqlite3_changes(db->db);
+    sqlite3_reset(db->result_evict);
+    vfs_unlock(db);
+    return changes;
 }
 
 char **vfs_result_list(vfs_db_t *db, int *out_count) {
@@ -601,14 +684,14 @@ char **vfs_result_list(vfs_db_t *db, int *out_count) {
     if (!db || !db->result_list)
         return NULL;
 
-    sqlite3_reset(db->result_list);
-
     int cap = 64;
     int count = 0;
     char **keys = malloc((size_t)cap * sizeof(char *));
     if (!keys)
         return NULL;
 
+    vfs_lock(db);
+    sqlite3_reset(db->result_list);
     while (sqlite3_step(db->result_list) == SQLITE_ROW) {
         if (count >= cap) {
             cap *= 2;
@@ -621,6 +704,7 @@ char **vfs_result_list(vfs_db_t *db, int *out_count) {
         keys[count++] = k ? strdup(k) : strdup("");
     }
     sqlite3_reset(db->result_list);
+    vfs_unlock(db);
 
     if (out_count)
         *out_count = count;
@@ -632,6 +716,7 @@ char **vfs_result_list(vfs_db_t *db, int *out_count) {
 int vfs_schema_version(vfs_db_t *db) {
     if (!db)
         return -1;
+    vfs_lock(db);
     sqlite3_stmt *stmt = NULL;
     sqlite3_prepare_v2(db->db, "SELECT version FROM schema_version LIMIT 1", -1, &stmt, NULL);
     int ver = -1;
@@ -639,6 +724,7 @@ int vfs_schema_version(vfs_db_t *db) {
         ver = sqlite3_column_int(stmt, 0);
     }
     sqlite3_finalize(stmt);
+    vfs_unlock(db);
     return ver;
 }
 
@@ -663,6 +749,7 @@ vfs_stats_t vfs_get_stats(vfs_db_t *db) {
     if (!db)
         return st;
 
+    vfs_lock(db);
     st.kv_entries = count_table(db, "kv");
     st.conv_turns = count_table(db, "conversations");
     st.event_count = count_table(db, "events");
@@ -679,6 +766,7 @@ vfs_stats_t vfs_get_stats(vfs_db_t *db) {
             st.db_size_bytes = sqlite3_column_int64(stmt, 0);
     }
     sqlite3_finalize(stmt);
+    vfs_unlock(db);
 
     return st;
 }

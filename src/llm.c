@@ -93,7 +93,7 @@ void session_state_init(session_state_t *s, const char *model) {
     s->web_search = true;
     s->code_execution = true;
     s->context_window = model_context_window(resolved);
-    s->compact_enabled = true;
+    s->compact_enabled = llm_env_truthy(getenv("DSCO_AUTO_COMPACT"));
     s->temperature = -1.0;
     s->top_p = -1.0;
     s->top_k = -1;
@@ -1204,6 +1204,14 @@ char *tools_build_deferred_catalog(const char **paged_names, int paged_count,
 compact_result_t conv_auto_compact(conversation_t *c, session_state_t *s, compact_config_t *cfg) {
     compact_result_t result;
     memset(&result, 0, sizeof(result));
+
+    if (s && !s->compact_enabled) {
+        int current_tokens = conv_token_estimate(c, s);
+        result.pre_token_count = current_tokens;
+        result.post_token_count = current_tokens;
+        result.messages_kept = c ? c->count : 0;
+        return result;
+    }
 
     double start = cache_now_sec();
     int threshold = auto_compact_threshold(s);
