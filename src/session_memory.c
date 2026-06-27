@@ -30,6 +30,20 @@ static memory_tier_t tier_from_ttl(int ttl) {
     return MEM_EPISODIC;
 }
 
+static bool session_ttl_expiry_enabled(void) {
+    const char *e = getenv("DSCO_SESSION_TTL_EXPIRY");
+    if (!e || !e[0])
+        return false;
+    if (e[0] == '1')
+        return true;
+    char tmp[16];
+    size_t i = 0;
+    for (; e[i] && i + 1 < sizeof(tmp); i++)
+        tmp[i] = (char)tolower((unsigned char)e[i]);
+    tmp[i] = '\0';
+    return strcmp(tmp, "true") == 0 || strcmp(tmp, "yes") == 0;
+}
+
 static const char *tier_name(memory_tier_t t) {
     switch (t) {
         case MEM_WORKING:
@@ -271,7 +285,10 @@ int session_init(session_db_t *db, const char *task_text) {
         return -1;
     }
 
-    /* Drop expired KV entries inherited from previous sessions */
+    /* TTL expiry used to erase working context between pauses, which made
+     * long-running interactive sessions feel like they were blanking out.
+     * Retain by default; operators can opt back into TTL GC with
+     * DSCO_SESSION_TTL_EXPIRY=1. */
     session_evict_expired(db);
 
     /* Register the current session */
@@ -368,8 +385,10 @@ const char *session_recall(session_db_t *db, const char *key) {
     if (!kv)
         return NULL;
 
-    /* Check TTL expiry */
-    if (kv->ttl_seconds > 0) {
+    /* Check TTL expiry only when explicitly enabled. Default behavior is
+     * retention: TTL still classifies memory tiers, but does not erase context
+     * after a wall-clock timeout. */
+    if (session_ttl_expiry_enabled() && kv->ttl_seconds > 0) {
         double age = now_sec() - kv->created_at;
         if (age > (double)kv->ttl_seconds) {
             kv->active = false;
@@ -591,6 +610,8 @@ int session_end(session_db_t *db) {
 
 int session_evict_expired(session_db_t *db) {
     if (!db || !db->initialized)
+        return 0;
+    if (!session_ttl_expiry_enabled())
         return 0;
 
     double t = now_sec();

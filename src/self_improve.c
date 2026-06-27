@@ -25,6 +25,7 @@
 #include <sys/stat.h>
 #include <unistd.h>
 #include <errno.h>
+#include <time.h>
 
 /* ═══════════════════════════════════════════════════════════════════════════
  * Global instance — shared across agent loop and tools
@@ -46,6 +47,96 @@ static double clampd(double v, double lo, double hi) {
     if (v > hi)
         return hi;
     return v;
+}
+
+/* ── Runtime trace sink (closes the continual-learning Loop 1 → disk) ──────
+ * Appends one JSONL record per tool execution to
+ *   ~/.dsco/workspace/memory/traces/<session>/tools.jsonl
+ * Fail-closed: any error silently disables tracing for the process (a trace
+ * sink must never break the agent). Disable with DSCO_TRACE=0. */
+static int   s_trace_state = 0; /* 0=unknown 1=enabled 2=disabled */
+static char  s_trace_path[640];
+
+static void si_mkdir_p(const char *path) {
+    char tmp[640];
+    size_t len = strnlen(path, sizeof(tmp) - 1);
+    memcpy(tmp, path, len);
+    tmp[len] = '\0';
+    for (char *p = tmp + 1; *p; p++) {
+        if (*p == '/') {
+            *p = '\0';
+            mkdir(tmp, 0700);
+            *p = '/';
+        }
+    }
+    mkdir(tmp, 0700);
+}
+
+static void si_trace_init(void) {
+    const char *dis = getenv("DSCO_TRACE");
+    if (dis && dis[0] == '0') {
+        s_trace_state = 2;
+        return;
+    }
+    const char *home = getenv("HOME");
+    if (!home || !home[0]) {
+        s_trace_state = 2;
+        return;
+    }
+    const char *sess = getenv("DSCO_SESSION_ID");
+    char sessbuf[64];
+    if (!sess || !sess[0]) {
+        snprintf(sessbuf, sizeof(sessbuf), "sess_%ld_%d", (long)time(NULL), (int)getpid());
+        sess = sessbuf;
+    }
+    char dir[600];
+    snprintf(dir, sizeof(dir), "%s/.dsco/workspace/memory/traces/%s", home, sess);
+    si_mkdir_p(dir);
+    snprintf(s_trace_path, sizeof(s_trace_path), "%s/tools.jsonl", dir);
+    s_trace_state = 1;
+}
+
+static void si_json_escape(const char *in, char *out, size_t out_len) {
+    size_t o = 0;
+    for (size_t i = 0; in && in[i] && o + 2 < out_len; i++) {
+        unsigned char c = (unsigned char)in[i];
+        if (c == '"' || c == '\\') {
+            out[o++] = '\\';
+            out[o++] = (char)c;
+        } else if (c == '\n') {
+            out[o++] = '\\';
+            out[o++] = 'n';
+        } else if (c == '\r') {
+            out[o++] = '\\';
+            out[o++] = 'r';
+        } else if (c == '\t') {
+            out[o++] = '\\';
+            out[o++] = 't';
+        } else if (c < 0x20) {
+            continue; /* drop other control chars */
+        } else {
+            out[o++] = (char)c;
+        }
+    }
+    out[o] = '\0';
+}
+
+static void si_trace_tool(const char *tool_name, bool success, double latency_ms,
+                          int estimated_tokens) {
+    if (s_trace_state == 0)
+        si_trace_init();
+    if (s_trace_state != 1)
+        return;
+    char esc[SI_MAX_TOOL_NAME * 2 + 8];
+    si_json_escape(tool_name ? tool_name : "", esc, sizeof(esc));
+    FILE *f = fopen(s_trace_path, "a");
+    if (!f) {
+        s_trace_state = 2; /* fail-closed: stop trying */
+        return;
+    }
+    fprintf(f, "{\"ts\":%.3f,\"tool\":\"%s\",\"ok\":%s,\"ms\":%.1f,\"tok\":%d}\n",
+            si_now(), esc, success ? "true" : "false", latency_ms, estimated_tokens);
+    fclose(f);
 }
 
 static int find_tool_idx(self_improve_t *si, const char *name) {
@@ -125,6 +216,9 @@ void self_improve_record_tool(self_improve_t *si, const char *tool_name, bool su
                               double latency_ms, int estimated_tokens) {
     if (!si->initialized || !tool_name)
         return;
+
+    /* Persist a durable trace record (Loop 1 → disk; fail-closed). */
+    si_trace_tool(tool_name, success, latency_ms, estimated_tokens);
 
     si_tool_metric_t *t = find_or_add_tool(si, tool_name);
     t->calls++;

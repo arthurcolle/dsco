@@ -41,6 +41,7 @@
 #include <sys/wait.h>
 #include <fcntl.h>
 #include <dirent.h>
+#include <pthread.h>
 
 /* Provide g_interrupted that agent.c normally defines */
 volatile int g_interrupted = 0;
@@ -14966,6 +14967,72 @@ static void test_vos_vfs_stats(void) {
     PASS();
 }
 
+typedef struct {
+    vfs_db_t *db;
+    int thread_id;
+    int failures;
+} vfs_concurrent_arg_t;
+
+static void *vfs_result_concurrent_worker(void *arg) {
+    vfs_concurrent_arg_t *a = (vfs_concurrent_arg_t *)arg;
+    for (int i = 0; i < 200; i++) {
+        char hash[64];
+        char result[128];
+        char key[128];
+        snprintf(hash, sizeof(hash), "t%02di%04d_%08d_hash", a->thread_id, i, i);
+        snprintf(result, sizeof(result), "result from thread %02d iter %04d", a->thread_id, i);
+        snprintf(key, sizeof(key), "parallel_tool:%.16s", hash);
+
+        if (!vfs_result_put(a->db, "parallel_tool", hash, result, 3600)) {
+            a->failures++;
+            continue;
+        }
+
+        char *got = vfs_result_get(a->db, key);
+        if (!got || strcmp(got, result) != 0)
+            a->failures++;
+        free(got);
+    }
+    return NULL;
+}
+
+static void test_vos_vfs_result_concurrent(void) {
+    TEST("§8 VFS result persistence is thread-safe");
+    enum { THREADS = 8 };
+    vfs_db_t *db = vfs_open(":memory:");
+    ASSERT(db != NULL, "opened in-memory");
+
+    pthread_t threads[THREADS];
+    vfs_concurrent_arg_t args[THREADS];
+    for (int i = 0; i < THREADS; i++) {
+        args[i].db = db;
+        args[i].thread_id = i;
+        args[i].failures = 0;
+        if (pthread_create(&threads[i], NULL, vfs_result_concurrent_worker, &args[i]) != 0) {
+            vfs_close(db);
+            FAIL("pthread_create failed");
+            return;
+        }
+    }
+
+    int failures = 0;
+    for (int i = 0; i < THREADS; i++) {
+        pthread_join(threads[i], NULL);
+        failures += args[i].failures;
+    }
+    ASSERT(failures == 0, "concurrent writes and reads succeeded");
+
+    int count = 0;
+    char **keys = vfs_result_list(db, &count);
+    ASSERT(count == THREADS * 200, "all concurrent results persisted");
+    for (int i = 0; i < count; i++)
+        free(keys[i]);
+    free(keys);
+
+    vfs_close(db);
+    PASS();
+}
+
 static void test_vos_vfs_null_safety(void) {
     TEST("§8 VFS null-safety on all functions");
     /* None of these should crash */
@@ -16493,6 +16560,7 @@ int main(void) {
     test_vos_vfs_cache_miss();
     test_vos_vfs_cache_evict();
     test_vos_vfs_stats();
+    test_vos_vfs_result_concurrent();
     test_vos_vfs_null_safety();
 
     /* Cross-module integration */
