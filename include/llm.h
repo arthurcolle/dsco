@@ -132,7 +132,8 @@ typedef struct {
      * while pre/post compaction deltas still reflect real conversation
      * shrinkage. */
     int    non_conv_overhead_tokens;
-    /* Compaction */
+    /* Compaction: enabled only as an emergency overflow/retry path or manual
+     * command. We no longer silently blank/drop history on a timer/threshold. */
     bool   compact_enabled;
     /* Tool choice: "" = auto, "any" = any, "tool:name" = force specific */
     char   tool_choice[128];
