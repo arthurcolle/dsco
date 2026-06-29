@@ -1,0 +1,210 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>DSCO Ontology Admin</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+<style>
+*,*::before,*::after{box-sizing:border-box;margin:0;padding:0}
+:root{
+  --bg:#050711;
+  --ink:#f6f8ff;
+  --muted:#a9b2cf;
+  --soft:#727d9c;
+  --faint:#48516c;
+  --cyan:#7df9ff;
+  --mint:#67ffd2;
+  --blue:#86a8ff;
+  --violet:#c49bff;
+  --pink:#ff8fd8;
+  --amber:#ffd166;
+  --red:#ff6b87;
+  --green:#69f0ae;
+  --glass:rgba(255,255,255,.084);
+  --glass-2:rgba(255,255,255,.12);
+  --line:rgba(255,255,255,.18);
+  --line-2:rgba(255,255,255,.30);
+  --shadow:0 28px 90px rgba(0,0,0,.48);
+  --inner:inset 0 1px 0 rgba(255,255,255,.28), inset 0 -1px 0 rgba(255,255,255,.08);
+  --font:-apple-system,BlinkMacSystemFont,'Inter',sans-serif;
+  --mono:'JetBrains Mono','SF Mono',monospace;
+}
+html,body{height:100%;overflow:hidden;background:var(--bg);color:var(--ink);font-family:var(--font);font-size:13px}
+body::before{content:"";position:fixed;inset:-20%;z-index:-3;background:
+  radial-gradient(circle at 14% 18%,rgba(125,249,255,.33),transparent 28%),
+  radial-gradient(circle at 86% 16%,rgba(196,155,255,.28),transparent 26%),
+  radial-gradient(circle at 76% 78%,rgba(103,255,210,.20),transparent 31%),
+  radial-gradient(circle at 22% 88%,rgba(255,143,216,.16),transparent 28%),
+  linear-gradient(135deg,#050711 0%,#0a1026 48%,#080611 100%);filter:saturate(1.2)}
+body::after{content:"";position:fixed;inset:0;z-index:-2;background-image:
+  linear-gradient(rgba(255,255,255,.045) 1px,transparent 1px),
+  linear-gradient(90deg,rgba(255,255,255,.035) 1px,transparent 1px);background-size:64px 64px;mask-image:radial-gradient(circle at 50% 34%,black,transparent 78%)}
+.blob{position:fixed;border-radius:999px;filter:blur(30px);opacity:.58;z-index:-1;mix-blend-mode:screen;animation:float 16s ease-in-out infinite}
+.blob.b1{width:380px;height:380px;background:rgba(125,249,255,.30);left:5%;top:9%}.blob.b2{width:300px;height:300px;background:rgba(255,143,216,.22);right:10%;top:15%;animation-delay:-5s}.blob.b3{width:460px;height:460px;background:rgba(103,255,210,.14);right:20%;bottom:4%;animation-delay:-9s}
+@keyframes float{0%,100%{transform:translate3d(0,0,0) scale(1)}50%{transform:translate3d(22px,-28px,0) scale(1.05)}}
+::-webkit-scrollbar{width:8px;height:8px}::-webkit-scrollbar-thumb{background:rgba(255,255,255,.18);border-radius:999px;border:2px solid transparent;background-clip:content-box}::-webkit-scrollbar-track{background:transparent}
+
+.app{height:100vh;display:grid;grid-template-columns:280px 1fr;gap:18px;padding:18px}
+.glass{background:linear-gradient(145deg,rgba(255,255,255,.145),rgba(255,255,255,.055));border:1px solid var(--line);box-shadow:var(--shadow),var(--inner);backdrop-filter:blur(28px) saturate(1.45);-webkit-backdrop-filter:blur(28px) saturate(1.45);position:relative;overflow:hidden}
+.glass::before{content:"";position:absolute;inset:0;border-radius:inherit;background:linear-gradient(135deg,rgba(255,255,255,.24),transparent 28%,transparent 68%,rgba(255,255,255,.08));pointer-events:none;mix-blend-mode:screen}
+.sidebar{border-radius:30px;padding:18px;display:flex;flex-direction:column;min-height:0}
+.brand{display:flex;align-items:center;gap:12px;margin-bottom:22px}.orb{width:42px;height:42px;border-radius:16px;background:radial-gradient(circle at 32% 26%,#fff,rgba(125,249,255,.95) 22%,rgba(134,168,255,.65) 48%,rgba(196,155,255,.42) 70%,rgba(255,255,255,.12));box-shadow:0 0 34px rgba(125,249,255,.38),inset 0 1px 8px rgba(255,255,255,.65)}
+.brand h1{font-size:18px;letter-spacing:-.04em}.brand p{font-family:var(--mono);font-size:10px;color:var(--muted);margin-top:2px}.pill{display:inline-flex;align-items:center;gap:7px;border:1px solid rgba(255,255,255,.18);background:rgba(255,255,255,.08);border-radius:999px;padding:7px 10px;color:var(--muted);font-family:var(--mono);font-size:10px}.dot{width:7px;height:7px;border-radius:50%;background:var(--green);box-shadow:0 0 16px var(--green)}
+.nav{display:flex;flex-direction:column;gap:8px;margin:18px 0}.nav button{border:1px solid transparent;background:transparent;color:var(--muted);font:600 12px var(--font);text-align:left;padding:11px 12px;border-radius:16px;cursor:pointer;display:flex;align-items:center;gap:10px;transition:.18s}.nav button:hover{background:rgba(255,255,255,.08);border-color:rgba(255,255,255,.12);color:var(--ink)}.nav button.active{background:linear-gradient(135deg,rgba(125,249,255,.18),rgba(196,155,255,.12));border-color:rgba(125,249,255,.36);color:white;box-shadow:0 12px 35px rgba(0,0,0,.22),inset 0 1px 0 rgba(255,255,255,.25)}.nav .ico{width:24px;height:24px;border-radius:9px;display:grid;place-items:center;background:rgba(255,255,255,.08)}
+.side-card{border-radius:22px;padding:14px;margin-top:auto;background:rgba(255,255,255,.055);border:1px solid rgba(255,255,255,.13)}.side-card h3{font-size:12px;margin-bottom:8px}.side-card p{color:var(--muted);font-size:12px;line-height:1.55}.danger-text{color:var(--red)}
+
+.main{display:flex;flex-direction:column;min-width:0;min-height:0;gap:16px}.top{height:76px;border-radius:30px;display:flex;align-items:center;justify-content:space-between;padding:0 22px}.title h2{font-size:24px;letter-spacing:-.055em}.title p{font-family:var(--mono);font-size:11px;color:var(--muted);margin-top:4px}.actions{display:flex;align-items:center;gap:10px}.btn{border:1px solid rgba(255,255,255,.18);background:rgba(255,255,255,.09);color:var(--ink);border-radius:999px;padding:10px 14px;font:600 12px var(--font);cursor:pointer;box-shadow:inset 0 1px 0 rgba(255,255,255,.18);transition:.18s;text-decoration:none}.btn:hover{border-color:rgba(125,249,255,.42);background:rgba(125,249,255,.12);transform:translateY(-1px)}.btn.primary{background:linear-gradient(135deg,rgba(125,249,255,.32),rgba(196,155,255,.22));border-color:rgba(125,249,255,.45)}
+.content{display:grid;grid-template-rows:auto 1fr;gap:16px;min-height:0}.metrics{display:grid;grid-template-columns:repeat(5,minmax(0,1fr));gap:14px}.metric{border-radius:26px;padding:16px;min-height:122px}.metric .label{font-family:var(--mono);font-size:10px;text-transform:uppercase;letter-spacing:.09em;color:var(--muted);display:flex;justify-content:space-between;gap:8px}.metric .value{font-size:33px;font-weight:800;letter-spacing:-.07em;margin-top:16px}.metric .sub{font-size:11px;color:var(--soft);font-family:var(--mono);margin-top:5px}.metric .ring{width:38px;height:38px;border-radius:50%;background:conic-gradient(var(--cyan),var(--violet),rgba(255,255,255,.10));display:grid;place-items:center}.metric .ring::after{content:"";width:26px;height:26px;border-radius:50%;background:rgba(8,11,22,.74);backdrop-filter:blur(8px)}
+
+.workspace{display:grid;grid-template-columns:1.35fr .85fr;gap:16px;min-height:0}.panel{border-radius:30px;min-height:0;display:flex;flex-direction:column}.panel-head{display:flex;align-items:center;justify-content:space-between;gap:14px;padding:17px 18px;border-bottom:1px solid rgba(255,255,255,.12)}.panel-head h3{font-size:14px;letter-spacing:-.02em}.panel-head .sub{font-family:var(--mono);font-size:10px;color:var(--soft)}
+.filters{display:flex;gap:8px;flex-wrap:wrap}.input,.select{border:1px solid rgba(255,255,255,.16);background:rgba(255,255,255,.08);color:var(--ink);border-radius:14px;padding:9px 11px;font:500 12px var(--font);outline:none}.input{width:240px}.input::placeholder{color:rgba(255,255,255,.38)}.select option{background:#11162a;color:var(--ink)}
+.table-wrap{overflow:auto;min-height:0;padding:0 8px 10px}table{width:100%;border-collapse:separate;border-spacing:0 8px;font-size:12px}th{position:sticky;top:0;z-index:2;text-align:left;font:600 10px var(--mono);letter-spacing:.08em;text-transform:uppercase;color:var(--soft);padding:8px 10px;background:rgba(8,11,22,.72);backdrop-filter:blur(16px)}td{padding:12px 10px;color:var(--muted);background:rgba(255,255,255,.055);border-top:1px solid rgba(255,255,255,.09);border-bottom:1px solid rgba(255,255,255,.06)}td:first-child{border-left:1px solid rgba(255,255,255,.09);border-radius:16px 0 0 16px}td:last-child{border-right:1px solid rgba(255,255,255,.09);border-radius:0 16px 16px 0}.facet{font-family:var(--mono);font-size:11px;color:#dfe7ff}.muted{color:var(--soft)}.badge{display:inline-flex;align-items:center;border-radius:999px;padding:4px 8px;border:1px solid rgba(255,255,255,.14);font:600 10px var(--mono);white-space:nowrap}.s0{color:var(--blue);background:rgba(134,168,255,.10)}.s1{color:var(--mint);background:rgba(103,255,210,.10)}.s2{color:var(--amber);background:rgba(255,209,102,.10)}.s3{color:var(--pink);background:rgba(255,143,216,.10)}.s4{color:var(--red);background:rgba(255,107,135,.12);border-color:rgba(255,107,135,.32)}
+.right-stack{display:grid;grid-template-rows:1fr 1fr;gap:16px;min-height:0}.list{overflow:auto;padding:12px;display:flex;flex-direction:column;gap:10px}.item{border:1px solid rgba(255,255,255,.12);background:rgba(255,255,255,.055);border-radius:20px;padding:12px}.item-top{display:flex;justify-content:space-between;gap:10px;align-items:start}.item h4{font-size:12px}.item p{font-size:11px;color:var(--muted);line-height:1.5;margin-top:7px}.bar{height:7px;border-radius:999px;background:rgba(255,255,255,.08);overflow:hidden;margin-top:10px}.bar span{display:block;height:100%;border-radius:999px;background:linear-gradient(90deg,var(--cyan),var(--violet))}.boundary .bar span{background:linear-gradient(90deg,var(--red),var(--pink))}.mono{font-family:var(--mono)}
+.empty{padding:40px;color:var(--soft);font-family:var(--mono);text-align:center}.shine{position:absolute;inset:-1px;border-radius:inherit;pointer-events:none;background:linear-gradient(105deg,transparent 0%,rgba(255,255,255,.14) 28%,transparent 42%);transform:translateX(-140%);animation:shine 9s ease-in-out infinite}@keyframes shine{0%,78%{transform:translateX(-140%)}100%{transform:translateX(140%)}}
+@media(max-width:1220px){.app{grid-template-columns:1fr}.sidebar{display:none}.metrics{grid-template-columns:repeat(2,1fr)}.workspace{grid-template-columns:1fr}.right-stack{grid-template-rows:auto auto}.top{height:auto;align-items:flex-start;gap:14px;flex-direction:column;padding:18px}.actions{flex-wrap:wrap}}
+@media(max-width:720px){.app{padding:10px}.metrics{grid-template-columns:1fr}.filters{width:100%}.input{width:100%}.panel-head{align-items:flex-start;flex-direction:column}}
+</style>
+</head>
+<body>
+<div class="blob b1"></div><div class="blob b2"></div><div class="blob b3"></div>
+<div class="app">
+  <aside class="sidebar glass">
+    <div class="shine"></div>
+    <div class="brand"><div class="orb"></div><div><h1>DSCO Admin</h1><p>ontology control plane</p></div></div>
+    <div class="pill"><span class="dot"></span><span id="statusText">loading registry</span></div>
+    <nav class="nav">
+      <button class="active" data-view="facets"><span class="ico">◇</span>Facets</button>
+      <button data-view="boundaries"><span class="ico">⛔</span>Hyper-private boundaries</button>
+      <button data-view="policy"><span class="ico">⌁</span>Policy gates</button>
+      <button data-view="documents"><span class="ico">◰</span>Document vault</button>
+    </nav>
+    <div class="side-card">
+      <h3>Negative ontology active</h3>
+      <p>S4 surfaces are modeled as deactivated boundaries: named so they can be blocked, tested, audited, and prevented from becoming profile values.</p>
+    </div>
+  </aside>
+
+  <main class="main">
+    <header class="top glass">
+      <div class="shine"></div>
+      <div class="title">
+        <h2>Consumer Profile Ontology</h2>
+        <p id="subtitle">50k active facets + S4 boundary registry</p>
+      </div>
+      <div class="actions">
+        <a class="btn" href="/">← agent</a>
+        <button class="btn" onclick="refreshAll()">refresh</button>
+        <button class="btn primary" onclick="exportCurrent()">export view</button>
+      </div>
+    </header>
+
+    <section class="content">
+      <div class="metrics" id="metrics"></div>
+      <div class="workspace">
+        <section class="panel glass">
+          <div class="panel-head">
+            <div><h3 id="tableTitle">Facet Registry</h3><div class="sub" id="tableSub">governed profile attributes</div></div>
+            <div class="filters">
+              <input class="input" id="q" placeholder="Search facet id, topic, class…">
+              <select class="select" id="domain"><option value="">all domains</option></select>
+              <select class="select" id="sensitivity">
+                <option value="">all sensitivity</option><option>S0_OPERATIONAL</option><option>S1_STANDARD</option><option>S2_PRIVATE</option><option>S3_RESTRICTED</option><option>S4_PROHIBITED_FOR_INFERENCE_OR_ACTIVATION</option>
+              </select>
+            </div>
+          </div>
+          <div class="table-wrap"><table><thead><tr><th>Facet</th><th>Domain</th><th>Class</th><th>State</th><th>Controls</th></tr></thead><tbody id="facetRows"><tr><td colspan="5" class="empty">Loading…</td></tr></tbody></table></div>
+        </section>
+
+        <aside class="right-stack">
+          <section class="panel glass">
+            <div class="panel-head"><div><h3>Domain distribution</h3><div class="sub">active + boundary coverage</div></div></div>
+            <div class="list" id="domainsList"></div>
+          </section>
+          <section class="panel glass boundary">
+            <div class="panel-head"><div><h3>Boundary classes</h3><div class="sub">hyper-private surfaces modeled but deactivated</div></div></div>
+            <div class="list" id="boundaryList"></div>
+          </section>
+        </aside>
+      </div>
+    </section>
+  </main>
+</div>
+
+<script>
+const $ = s => document.querySelector(s);
+const fmt = n => Number(n||0).toLocaleString();
+let summary = null;
+let rows = [];
+let currentView = 'facets';
+
+function cls(s){return s?.startsWith('S0')?'s0':s?.startsWith('S1')?'s1':s?.startsWith('S2')?'s2':s?.startsWith('S3')?'s3':s?.startsWith('S4')?'s4':''}
+function shortClass(s){return (s||'').replace('_PROHIBITED_FOR_INFERENCE_OR_ACTIVATION','').replace('_OPERATIONAL','').replace('_STANDARD','').replace('_PRIVATE','').replace('_RESTRICTED','')}
+async function getJSON(url){const r=await fetch(url);if(!r.ok)throw new Error(`${r.status} ${url}`);return r.json()}
+
+function metric(label,value,sub,tone=''){
+  return `<article class="metric glass"><div class="label"><span>${label}</span><span class="ring"></span></div><div class="value ${tone}">${value}</div><div class="sub">${sub}</div></article>`;
+}
+function renderMetrics(){
+  const s=summary||{}; const sens=s.counts_by_sensitivity||{};
+  $('#metrics').innerHTML = [
+    metric('Total registry',fmt(s.total_extended_with_boundaries||s.total_base_with_boundaries||s.total_facets),'rows in current ontology'),
+    metric('Active facets',fmt(s.active_extended_facets||s.base_active_facets||s.total_facets),'collectible governed facets'),
+    metric('S4 boundaries',fmt(s.boundary_facets||sens.S4_PROHIBITED_FOR_INFERENCE_OR_ACTIVATION),'modeled / deactivated','danger-text'),
+    metric('Private / restricted',fmt((sens.S2_PRIVATE||0)+(sens.S3_RESTRICTED||0)),'S2 + S3 controlled surfaces'),
+    metric('Operational',fmt(sens.S0_OPERATIONAL||0),'consent, policy, system state')
+  ].join('');
+}
+function renderDomains(){
+  const counts=summary?.counts_by_domain||{}; const max=Math.max(1,...Object.values(counts));
+  $('#domainsList').innerHTML = Object.entries(counts).sort((a,b)=>b[1]-a[1]).slice(0,16).map(([k,v])=>`
+    <div class="item"><div class="item-top"><h4>${k}</h4><span class="badge">${fmt(v)}</span></div><div class="bar"><span style="width:${Math.max(3,v/max*100)}%"></span></div></div>`).join('');
+  const sel=$('#domain'); sel.innerHTML='<option value="">all domains</option>'+Object.keys(counts).sort().map(d=>`<option>${d}</option>`).join('');
+}
+function renderBoundaries(){
+  const counts=summary?.boundary_class_count||{}; const max=Math.max(1,...Object.values(counts));
+  $('#boundaryList').innerHTML = Object.entries(counts).sort((a,b)=>a[0].localeCompare(b[0])).map(([k,v])=>`
+    <div class="item"><div class="item-top"><h4>${k.replaceAll('_',' ')}</h4><span class="badge s4">${fmt(v)}</span></div><p>Boundary-only: block collection, inference, storage, activation and proxy use.</p><div class="bar"><span style="width:${Math.max(8,v/max*100)}%"></span></div></div>`).join('') || '<div class="empty">No boundary summary loaded</div>';
+}
+function rowHTML(f){
+  const state=f.facet_state||'active';
+  const controls = f.sensitivity_class?.startsWith('S4') ? 'blocked / denylisted' : `${f.user_visible?'visible':'hidden'} · ${f.user_editable?'editable':'locked'}`;
+  return `<tr><td><div class="facet">${f.facet_id}</div><div class="muted">${f.display_name||''}</div></td><td>${f.domain||''}<div class="muted">${f.subdomain||''}</div></td><td><span class="badge ${cls(f.sensitivity_class)}">${shortClass(f.sensitivity_class)}</span></td><td>${state}</td><td class="muted">${controls}</td></tr>`;
+}
+function renderRows(){
+  $('#facetRows').innerHTML = rows.length ? rows.map(rowHTML).join('') : '<tr><td colspan="5" class="empty">No facets match this filter</td></tr>';
+}
+async function loadRows(){
+  const q=encodeURIComponent($('#q').value.trim()); const domain=encodeURIComponent($('#domain').value); const sens=encodeURIComponent($('#sensitivity').value);
+  const boundary=currentView==='boundaries'?'&boundary=1':'';
+  const data=await getJSON(`/api/ontology/facets?limit=80&q=${q}&domain=${domain}&sensitivity=${sens}${boundary}`);
+  rows=data.facets||[]; renderRows();
+  $('#tableSub').textContent = `${fmt(data.total_matched)} matched · showing ${fmt(rows.length)}`;
+}
+async function refreshAll(){
+  $('#statusText').textContent='loading registry';
+  summary=await getJSON('/api/ontology/summary');
+  renderMetrics(); renderDomains(); renderBoundaries(); await loadRows();
+  $('#statusText').textContent='registry online';
+  $('#subtitle').textContent = `${fmt(summary.active_extended_facets||summary.base_active_facets||summary.total_facets)} active facets + ${fmt(summary.boundary_facets||0)} S4 boundaries`;
+}
+function exportCurrent(){
+  const path=currentView==='boundaries'?'/api/ontology/facets?boundary=1&limit=5000':'/api/ontology/facets?limit=5000';
+  window.open(path,'_blank');
+}
+let t=null; $('#q').addEventListener('input',()=>{clearTimeout(t);t=setTimeout(loadRows,180)}); $('#domain').addEventListener('change',loadRows); $('#sensitivity').addEventListener('change',loadRows);
+document.querySelectorAll('.nav button').forEach(b=>b.onclick=()=>{
+  document.querySelectorAll('.nav button').forEach(x=>x.classList.remove('active')); b.classList.add('active'); currentView=b.dataset.view;
+  const title={facets:'Facet Registry',boundaries:'Hyper-private Boundary Registry',policy:'Policy Gate Surfaces',documents:'Document Reference Controls'}[currentView];
+  $('#tableTitle').textContent=title;
+  if(currentView==='boundaries'){$('#domain').value='boundary';$('#sensitivity').value='S4_PROHIBITED_FOR_INFERENCE_OR_ACTIVATION'}
+  if(currentView==='policy'){$('#domain').value='privacy';$('#sensitivity').value=''}
+  if(currentView==='documents'){$('#domain').value='boundary';$('#sensitivity').value='S4_PROHIBITED_FOR_INFERENCE_OR_ACTIVATION';$('#q').value='document'}
+  if(currentView==='facets'){$('#domain').value='';$('#sensitivity').value='';$('#q').value=''}
+  loadRows();
+});
+refreshAll().catch(e=>{$('#statusText').textContent='registry unavailable';$('#facetRows').innerHTML=`<tr><td colspan="5" class="empty">${e.message}</td></tr>`});
+</script>
+</body>
+</html>

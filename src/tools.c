@@ -46,6 +46,7 @@
 #include "stateful_atoms.h"
 #include "control_flow.h"
 #include "recovery.h"
+#include "env_config.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -7665,6 +7666,8 @@ static bool tool_date(const char *input, char *result, size_t rlen) {
 
 static bool tool_calc(const char *input, char *result, size_t rlen) {
     char *expression = json_get_str(input, "expression");
+    if (!expression)
+        expression = json_get_str(input, "expr"); /* backwards-compatible schema alias */
     if (!expression) {
         snprintf(result, rlen, "error: expression required");
         return false;
@@ -8312,6 +8315,8 @@ static bool tool_agent_kill(const char *input, char *result, size_t rlen) {
 typedef struct {
     char *task;
     char *model;
+    char *provider;
+    char *executor;
 } swarm_task_spec_t;
 
 typedef struct {
@@ -8358,6 +8363,8 @@ static void parse_swarm_task_element(const char *element_start, void *ctx) {
     } else if (*element_start == '{') {
         spec->task = json_get_str(element_start, "task");
         spec->model = json_get_str(element_start, "model");
+        spec->provider = json_get_str(element_start, "provider");
+        spec->executor = json_get_str(element_start, "executor");
     } else {
         pctx->parse_error = true;
         return;
@@ -8366,13 +8373,32 @@ static void parse_swarm_task_element(const char *element_start, void *ctx) {
     if (!spec->task || !spec->task[0]) {
         free(spec->task);
         free(spec->model);
+        free(spec->provider);
+        free(spec->executor);
         spec->task = NULL;
         spec->model = NULL;
+        spec->provider = NULL;
+        spec->executor = NULL;
         pctx->parse_error = true;
         return;
     }
 
     pctx->count++;
+}
+
+static void free_swarm_task_specs(swarm_task_parse_ctx_t *pctx) {
+    if (!pctx)
+        return;
+    for (int i = 0; i < pctx->count; i++) {
+        free(pctx->specs[i].task);
+        free(pctx->specs[i].model);
+        free(pctx->specs[i].provider);
+        free(pctx->specs[i].executor);
+        pctx->specs[i].task = NULL;
+        pctx->specs[i].model = NULL;
+        pctx->specs[i].provider = NULL;
+        pctx->specs[i].executor = NULL;
+    }
 }
 
 static const char *topology_strategy_label(exec_strategy_t strategy) {
@@ -9255,10 +9281,7 @@ static bool tool_topology_solve(const char *input, char *result, size_t rlen) {
         jbuf_free(&b);
 
         baseline_log("swarm", "topology_solve", task, NULL);
-        for (int i = 0; i < pc.count; i++) {
-            free(pc.specs[i].task);
-            free(pc.specs[i].model);
-        }
+        free_swarm_task_specs(&pc);
         free(topos_raw);
         free(task);
         return true;
@@ -9351,6 +9374,20 @@ static bool tool_cost_model_predict(const char *input, char *result, size_t rlen
              pred.cost_usd, pred.cost_lo, pred.cost_hi, pred.latency_s, pred.confidence,
              pred.observations);
     return true;
+}
+
+static void retire_swarm_group(swarm_t *sw, int gid) {
+    if (!sw || gid < 0 || gid >= sw->group_count)
+        return;
+    swarm_group_t *g = &sw->groups[gid];
+    g->active = false;
+    g->child_count = 0;
+    if (gid == sw->group_count - 1) {
+        while (sw->group_count > 0 && !sw->groups[sw->group_count - 1].active &&
+               sw->groups[sw->group_count - 1].child_count == 0) {
+            sw->group_count--;
+        }
+    }
 }
 
 /* plan_analyze — Priority 1: show ranked topology options with cost/latency before execution */
@@ -9495,10 +9532,7 @@ static bool tool_create_swarm(const char *input, char *result, size_t rlen) {
     char *tasks_raw = json_get_raw(input, "tasks");
     if (!tasks_raw || *tasks_raw != '[') {
         snprintf(result, rlen, "error: tasks array required");
-        if (gid == g_swarm.group_count - 1)
-            g_swarm.group_count--;
-        else
-            g_swarm.groups[gid].active = false;
+        retire_swarm_group(&g_swarm, gid);
         free(name);
         free(model);
         free(tasks_raw);
@@ -9510,14 +9544,8 @@ static bool tool_create_swarm(const char *input, char *result, size_t rlen) {
     json_array_foreach(input, "tasks", parse_swarm_task_element, &parse_ctx);
 
     if (parse_ctx.parse_error || parse_ctx.count == 0) {
-        for (int i = 0; i < parse_ctx.count; i++) {
-            free(parse_ctx.specs[i].task);
-            free(parse_ctx.specs[i].model);
-        }
-        if (gid == g_swarm.group_count - 1)
-            g_swarm.group_count--;
-        else
-            g_swarm.groups[gid].active = false;
+        free_swarm_task_specs(&parse_ctx);
+        retire_swarm_group(&g_swarm, gid);
         free(tasks_raw);
         free(name);
         free(model);
@@ -9530,7 +9558,15 @@ static bool tool_create_swarm(const char *input, char *result, size_t rlen) {
         const char *task_model = (parse_ctx.specs[i].model && parse_ctx.specs[i].model[0])
                                      ? parse_ctx.specs[i].model
                                      : model;
-        int cid = swarm_spawn_in_group(&g_swarm, gid, parse_ctx.specs[i].task, task_model);
+        const char *task_provider =
+            (parse_ctx.specs[i].provider && parse_ctx.specs[i].provider[0])
+                ? parse_ctx.specs[i].provider
+                : NULL;
+        int cid = task_provider
+                      ? swarm_spawn_provider(&g_swarm, gid, parse_ctx.specs[i].task,
+                                             task_model, task_provider)
+                      : swarm_spawn_in_group(&g_swarm, gid, parse_ctx.specs[i].task,
+                                             task_model);
         if (cid >= 0)
             spawned++;
     }
@@ -9565,6 +9601,19 @@ static bool tool_create_swarm(const char *input, char *result, size_t rlen) {
             jbuf_append(&b, ",");
         jbuf_append_int(&b, g->child_ids[i]);
     }
+    jbuf_append(&b, "],\"agents\":[");
+    for (int i = 0; i < g->child_count; i++) {
+        if (i > 0)
+            jbuf_append(&b, ",");
+        swarm_child_t *c = &g_swarm.children[g->child_ids[i]];
+        jbuf_append(&b, "{\"id\":");
+        jbuf_append_int(&b, c->id);
+        jbuf_append(&b, ",\"provider\":");
+        jbuf_append_json_str(&b, c->provider);
+        jbuf_append(&b, ",\"model\":");
+        jbuf_append_json_str(&b, c->model);
+        jbuf_append(&b, "}");
+    }
     jbuf_append(&b, "]}");
 
     int written = (int)b.len < (int)rlen - 1 ? (int)b.len : (int)rlen - 1;
@@ -9572,10 +9621,7 @@ static bool tool_create_swarm(const char *input, char *result, size_t rlen) {
     result[written] = '\0';
     jbuf_free(&b);
 
-    for (int i = 0; i < parse_ctx.count; i++) {
-        free(parse_ctx.specs[i].task);
-        free(parse_ctx.specs[i].model);
-    }
+    free_swarm_task_specs(&parse_ctx);
     free(tasks_raw);
     free(name);
     free(model);
@@ -9602,6 +9648,8 @@ static void swarm_collect_results(swarm_t *sw, int gid, char *result, size_t rle
 
     jbuf_append(&b, "{\"group\":");
     jbuf_append_json_str(&b, g->name);
+    jbuf_append(&b, ",\"group_id\":");
+    jbuf_append_int(&b, gid);
     jbuf_append(&b, ",\"complete\":");
     jbuf_append(&b, complete ? "true" : "false");
     if (reason && reason[0]) {
@@ -9628,8 +9676,14 @@ static void swarm_collect_results(swarm_t *sw, int gid, char *result, size_t rle
         jbuf_append_json_str(&b, c->task);
         jbuf_append(&b, ",\"status\":");
         jbuf_append_json_str(&b, swarm_status_str(c->status));
+        jbuf_append(&b, ",\"executor\":");
+        jbuf_append_json_str(&b, executor_type_name(c->executor));
+        jbuf_append(&b, ",\"subsidized\":");
+        jbuf_append(&b, swarm_child_is_subsidized(c) ? "true" : "false");
         jbuf_append(&b, ",\"model\":");
         jbuf_append_json_str(&b, c->model);
+        jbuf_append(&b, ",\"provider\":");
+        jbuf_append_json_str(&b, c->provider);
         jbuf_append(&b, ",\"depth\":");
         jbuf_append_int(&b, c->depth);
         jbuf_append(&b, ",\"exit_code\":");
@@ -9909,10 +9963,7 @@ static bool tool_swarm_map_reduce(const char *input, char *result, size_t rlen) 
     memset(&parse_ctx, 0, sizeof(parse_ctx));
     json_array_foreach(input, "tasks", parse_swarm_task_element, &parse_ctx);
     if (parse_ctx.parse_error || parse_ctx.count == 0) {
-        for (int i = 0; i < parse_ctx.count; i++) {
-            free(parse_ctx.specs[i].task);
-            free(parse_ctx.specs[i].model);
-        }
+        free_swarm_task_specs(&parse_ctx);
         snprintf(result, rlen, "{\"error\":\"malformed or empty tasks array\"}");
         free(name);
         free(model);
@@ -9924,10 +9975,7 @@ static bool tool_swarm_map_reduce(const char *input, char *result, size_t rlen) 
 
     int gid = swarm_group_create(&g_swarm, name);
     if (gid < 0) {
-        for (int i = 0; i < parse_ctx.count; i++) {
-            free(parse_ctx.specs[i].task);
-            free(parse_ctx.specs[i].model);
-        }
+        free_swarm_task_specs(&parse_ctx);
         snprintf(result, rlen, "{\"error\":\"max groups reached\"}");
         free(name);
         free(model);
@@ -9951,7 +9999,12 @@ static bool tool_swarm_map_reduce(const char *input, char *result, size_t rlen) 
         const char *tm = (parse_ctx.specs[i].model && parse_ctx.specs[i].model[0])
                              ? parse_ctx.specs[i].model
                              : model;
-        if (swarm_spawn_in_group(&g_swarm, gid, parse_ctx.specs[i].task, tm) >= 0)
+        const char *tp = (parse_ctx.specs[i].provider && parse_ctx.specs[i].provider[0])
+                             ? parse_ctx.specs[i].provider
+                             : NULL;
+        int cid = tp ? swarm_spawn_provider(&g_swarm, gid, parse_ctx.specs[i].task, tm, tp)
+                     : swarm_spawn_in_group(&g_swarm, gid, parse_ctx.specs[i].task, tm);
+        if (cid >= 0)
             spawned++;
     }
 
@@ -9967,10 +10020,7 @@ static bool tool_swarm_map_reduce(const char *input, char *result, size_t rlen) 
     if (wait_st < 0) {
         swarm_collect_results(&g_swarm, gid, result, rlen, false, "interrupted");
         fprintf(stderr, "  %s└─ interrupted — workers left running%s\n\n", TUI_BRED, TUI_RESET);
-        for (int i = 0; i < parse_ctx.count; i++) {
-            free(parse_ctx.specs[i].task);
-            free(parse_ctx.specs[i].model);
-        }
+        free_swarm_task_specs(&parse_ctx);
         free(name);
         free(model);
         free(coordinator);
@@ -10105,10 +10155,7 @@ static bool tool_swarm_map_reduce(const char *input, char *result, size_t rlen) 
              gid, name, grp->child_count, coord_id, depth + 1);
     baseline_log("swarm", "map_reduce", mr_detail, NULL);
 
-    for (int i = 0; i < parse_ctx.count; i++) {
-        free(parse_ctx.specs[i].task);
-        free(parse_ctx.specs[i].model);
-    }
+    free_swarm_task_specs(&parse_ctx);
     free(name);
     free(model);
     free(coordinator);
@@ -10462,13 +10509,45 @@ static bool tool_spawn_executor(const char *input, char *result, size_t rlen) {
     char *task = json_get_str(input, "task");
     char *model = json_get_str(input, "model");
     char *exec_name = json_get_str(input, "executor");
+    char *group_name = json_get_str(input, "name");
     double budget = json_get_double(input, "budget", 0.0);
+    int group_id = json_get_int(input, "group_id", -1);
+    bool collectable = json_get_bool(input, "collect", true);
+    bool wait = json_get_bool(input, "wait", false);
+    int wait_timeout = json_get_int(input, "timeout", 300);
 
     if (!task) {
         snprintf(result, rlen, "error: task required");
         free(model);
         free(exec_name);
+        free(group_name);
         return false;
+    }
+
+    if (group_id >= g_swarm.group_count) {
+        snprintf(result, rlen, "{\"error\":\"invalid group_id\"}");
+        free(task);
+        free(model);
+        free(exec_name);
+        free(group_name);
+        return false;
+    }
+
+    bool owns_group = false;
+    if (group_id < 0 && collectable) {
+        char implicit_name[SWARM_GROUP_NAME_LEN];
+        snprintf(implicit_name, sizeof(implicit_name), "%s",
+                 (group_name && group_name[0]) ? group_name : "executor-spawn");
+        group_id = swarm_group_create(&g_swarm, implicit_name);
+        if (group_id < 0) {
+            snprintf(result, rlen, "{\"error\":\"max groups reached\"}");
+            free(task);
+            free(model);
+            free(exec_name);
+            free(group_name);
+            return false;
+        }
+        owns_group = true;
     }
 
     executor_type_t exec_type = parse_executor_type(exec_name);
@@ -10478,18 +10557,24 @@ static bool tool_spawn_executor(const char *input, char *result, size_t rlen) {
         snprintf(result, rlen,
                  "{\"error\":\"claude CLI not available — "
                  "install Claude Code and sign in, or set ANTHROPIC_API_KEY\"}");
+        if (owns_group)
+            retire_swarm_group(&g_swarm, group_id);
         free(task);
         free(model);
         free(exec_name);
+        free(group_name);
         return false;
     }
     if (exec_type == EXECUTOR_CODEX && !g_swarm.executors.codex_available) {
         snprintf(result, rlen,
                  "{\"error\":\"codex CLI not available — "
                  "install OpenAI Codex and authenticate with `codex auth`\"}");
+        if (owns_group)
+            retire_swarm_group(&g_swarm, group_id);
         free(task);
         free(model);
         free(exec_name);
+        free(group_name);
         return false;
     }
 
@@ -10501,20 +10586,26 @@ static bool tool_spawn_executor(const char *input, char *result, size_t rlen) {
             snprintf(result, rlen,
                      "{\"error\":\"insufficient swarm budget: estimated $%.4f > remaining $%.4f\"}",
                      est, remaining);
+            if (owns_group)
+                retire_swarm_group(&g_swarm, group_id);
             free(task);
             free(model);
             free(exec_name);
+            free(group_name);
             return false;
         }
     }
 
-    int id = swarm_spawn_executor(&g_swarm, -1, task, model, exec_type);
+    int id = swarm_spawn_executor(&g_swarm, group_id, task, model, exec_type);
     if (id < 0) {
         snprintf(result, rlen, "{\"error\":\"failed to spawn %s executor\"}",
                  executor_type_name(exec_type));
+        if (owns_group)
+            retire_swarm_group(&g_swarm, group_id);
         free(task);
         free(model);
         free(exec_name);
+        free(group_name);
         return false;
     }
 
@@ -10529,18 +10620,52 @@ static bool tool_spawn_executor(const char *input, char *result, size_t rlen) {
                         : (exec_type == EXECUTOR_CLAUDE ? g_swarm.executors.claude_model
                                                         : g_swarm.executors.codex_model));
 
-    snprintf(result, rlen,
-             "{\"agent_id\":%d,\"pid\":%d,\"executor\":\"%s\",\"model\":\"%s\","
-             "\"est_cost_usd\":%.6f,\"status\":\"running\","
-             "\"hint\":\"Use agent_status to monitor\"}",
-             id, (int)c->pid, executor_type_name(exec_type), c->model, c->est_cost_usd);
-
     fprintf(stderr, "  %s⚡%s spawned %s%s%s agent #%d: %s%.60s%s\n", TUI_BCYAN, TUI_RESET,
             TUI_BOLD, executor_type_name(exec_type), TUI_RESET, id, TUI_DIM, task, TUI_RESET);
+
+    if (wait && group_id >= 0) {
+        char collect_input[128];
+        snprintf(collect_input, sizeof(collect_input), "{\"group_id\":%d,\"timeout\":%d}",
+                 group_id, wait_timeout);
+        bool ok = tool_swarm_collect(collect_input, result, rlen);
+        free(task);
+        free(model);
+        free(exec_name);
+        free(group_name);
+        return ok;
+    }
+
+    jbuf_t b;
+    jbuf_init(&b, 512);
+    jbuf_append(&b, "{\"agent_id\":");
+    jbuf_append_int(&b, id);
+    jbuf_append(&b, ",\"pid\":");
+    jbuf_append_int(&b, (int)c->pid);
+    if (group_id >= 0) {
+        jbuf_append(&b, ",\"group_id\":");
+        jbuf_append_int(&b, group_id);
+    }
+    jbuf_append(&b, ",\"executor\":");
+    jbuf_append_json_str(&b, executor_type_name(exec_type));
+    jbuf_append(&b, ",\"model\":");
+    jbuf_append_json_str(&b, c->model);
+    jbuf_append(&b, ",\"est_cost_usd\":");
+    char cost[32];
+    snprintf(cost, sizeof(cost), "%.6f", c->est_cost_usd);
+    jbuf_append(&b, cost);
+    jbuf_append(&b, ",\"status\":\"running\",\"hint\":");
+    jbuf_append_json_str(&b, group_id >= 0 ? "Use swarm collect with group_id to stream output"
+                                           : "Use agent status/output to monitor");
+    jbuf_append(&b, "}");
+    int written = (int)b.len < (int)rlen - 1 ? (int)b.len : (int)rlen - 1;
+    memcpy(result, b.data, written);
+    result[written] = '\0';
+    jbuf_free(&b);
 
     free(task);
     free(model);
     free(exec_name);
+    free(group_name);
     return true;
 }
 
@@ -10570,10 +10695,10 @@ static bool tool_spawn_provider(const char *input, char *result, size_t rlen) {
         return false;
     }
 
-    /* Validate provider has an API key */
-    const char *pkey = provider_resolve_api_key(provider);
-    if (!pkey || !pkey[0]) {
-        snprintf(result, rlen, "{\"error\":\"no API key for provider '%s' — set the env var\"}",
+    /* Validate the provider can be used. This accepts direct API keys,
+     * local endpoints, and subscription/OAuth lanes such as openai-codex. */
+    if (!provider_has_usable_key(provider, NULL)) {
+        snprintf(result, rlen, "{\"error\":\"no usable credential for provider '%s'\"}",
                  provider);
         free(task);
         free(model);
@@ -10639,6 +10764,8 @@ static bool tool_create_executor_swarm(const char *input, char *result, size_t r
     char *default_executor = json_get_str(input, "executor");
     char *default_model = json_get_str(input, "model");
     double total_budget = json_get_double(input, "budget", 0.0);
+    bool wait = json_get_bool(input, "wait", false) || json_get_bool(input, "collect", false);
+    int wait_timeout = json_get_int(input, "timeout", 300);
 
     if (!name) {
         snprintf(result, rlen, "error: name required");
@@ -10660,6 +10787,7 @@ static bool tool_create_executor_swarm(const char *input, char *result, size_t r
     char *tasks_raw = json_get_raw(input, "tasks");
     if (!tasks_raw || *tasks_raw != '[') {
         snprintf(result, rlen, "error: tasks array required");
+        retire_swarm_group(&g_swarm, gid);
         free(name);
         free(default_executor);
         free(default_model);
@@ -10673,11 +10801,9 @@ static bool tool_create_executor_swarm(const char *input, char *result, size_t r
     json_array_foreach(input, "tasks", parse_swarm_task_element, &parse_ctx);
 
     if (parse_ctx.parse_error || parse_ctx.count == 0) {
-        for (int i = 0; i < parse_ctx.count; i++) {
-            free(parse_ctx.specs[i].task);
-            free(parse_ctx.specs[i].model);
-        }
+        free_swarm_task_specs(&parse_ctx);
         free(tasks_raw);
+        retire_swarm_group(&g_swarm, gid);
         free(name);
         free(default_executor);
         free(default_model);
@@ -10692,16 +10818,21 @@ static bool tool_create_executor_swarm(const char *input, char *result, size_t r
     }
 
     int spawned = 0;
+    int failed = 0;
     for (int i = 0; i < parse_ctx.count; i++) {
         const char *task_model = (parse_ctx.specs[i].model && parse_ctx.specs[i].model[0])
                                      ? parse_ctx.specs[i].model
                                      : default_model;
+        const char *task_executor = (parse_ctx.specs[i].executor && parse_ctx.specs[i].executor[0])
+                                        ? parse_ctx.specs[i].executor
+                                        : default_executor;
+        executor_type_t exec_type = parse_executor_type(task_executor);
 
-        /* Check if task object has an executor field (stored in model as "exec:name" hack) */
-        executor_type_t exec_type = parse_executor_type(default_executor);
-
-        /* Try to extract executor from the task spec — check for "executor" key in the raw JSON */
-        /* For now use the default executor */
+        if ((exec_type == EXECUTOR_CLAUDE && !g_swarm.executors.claude_available) ||
+            (exec_type == EXECUTOR_CODEX && !g_swarm.executors.codex_available)) {
+            failed++;
+            continue;
+        }
 
         int cid =
             swarm_spawn_executor(&g_swarm, gid, parse_ctx.specs[i].task, task_model, exec_type);
@@ -10712,22 +10843,59 @@ static bool tool_create_executor_swarm(const char *input, char *result, size_t r
             c->est_cost_usd =
                 swarm_estimate_task_cost(&g_swarm, task_model ? task_model : g_swarm.default_model);
             spawned++;
+        } else {
+            failed++;
         }
     }
 
+    if (spawned == 0) {
+        retire_swarm_group(&g_swarm, gid);
+        snprintf(result, rlen, "{\"error\":\"failed to spawn executor swarm\",\"failed\":%d}",
+                 failed);
+        free_swarm_task_specs(&parse_ctx);
+        free(tasks_raw);
+        free(name);
+        free(default_executor);
+        free(default_model);
+        return false;
+    }
+
     /* TUI feedback */
-    fprintf(stderr, "\n  %s⚡%s Swarm %s\"%s\"%s (%s): %d agents\n", TUI_BYELLOW, TUI_RESET,
-            TUI_BOLD, name, TUI_RESET, executor_type_name(parse_executor_type(default_executor)),
-            spawned);
+    fprintf(stderr, "\n  %s⚡%s Swarm %s\"%s\"%s: %d agents", TUI_BYELLOW, TUI_RESET,
+            TUI_BOLD, name, TUI_RESET, spawned);
+    if (failed > 0)
+        fprintf(stderr, " (%d failed)", failed);
+    fprintf(stderr, "\n");
     for (int i = 0; i < parse_ctx.count; i++) {
-        fprintf(stderr, "    %s◉%s %s%.60s%s\n", TUI_BCYAN, TUI_RESET, TUI_DIM,
-                parse_ctx.specs[i].task, TUI_RESET);
+        const char *task_executor = (parse_ctx.specs[i].executor && parse_ctx.specs[i].executor[0])
+                                        ? parse_ctx.specs[i].executor
+                                        : default_executor;
+        const char *task_model = (parse_ctx.specs[i].model && parse_ctx.specs[i].model[0])
+                                     ? parse_ctx.specs[i].model
+                                     : default_model;
+        fprintf(stderr, "    %s◉%s %s[%s%s%s", TUI_BCYAN, TUI_RESET, TUI_DIM,
+                executor_type_name(parse_executor_type(task_executor)),
+                task_model && task_model[0] ? ":" : "", task_model ? task_model : "");
+        fprintf(stderr, "] %.60s%s\n", parse_ctx.specs[i].task, TUI_RESET);
     }
     if (total_budget > 0) {
         fprintf(stderr, "    %s$%s budget: $%.4f total ($%.4f/agent)\n", TUI_BYELLOW, TUI_RESET,
                 total_budget, per_child_budget);
     }
     fprintf(stderr, "\n");
+
+    if (wait) {
+        char collect_input[128];
+        snprintf(collect_input, sizeof(collect_input), "{\"group_id\":%d,\"timeout\":%d}", gid,
+                 wait_timeout);
+        bool ok = tool_swarm_collect(collect_input, result, rlen);
+        free_swarm_task_specs(&parse_ctx);
+        free(tasks_raw);
+        free(name);
+        free(default_executor);
+        free(default_model);
+        return ok;
+    }
 
     /* Build result */
     jbuf_t b;
@@ -10740,6 +10908,10 @@ static bool tool_create_executor_swarm(const char *input, char *result, size_t r
     jbuf_append_json_str(&b, executor_type_name(parse_executor_type(default_executor)));
     jbuf_append(&b, ",\"agents_spawned\":");
     jbuf_append_int(&b, spawned);
+    if (failed > 0) {
+        jbuf_append(&b, ",\"failed\":");
+        jbuf_append_int(&b, failed);
+    }
     if (total_budget > 0) {
         char bud[32];
         snprintf(bud, sizeof(bud), "%.6f", total_budget);
@@ -10753,6 +10925,21 @@ static bool tool_create_executor_swarm(const char *input, char *result, size_t r
             jbuf_append(&b, ",");
         jbuf_append_int(&b, g->child_ids[i]);
     }
+    jbuf_append(&b, "],\"agents\":[");
+    for (int i = 0; i < g->child_count; i++) {
+        if (i > 0)
+            jbuf_append(&b, ",");
+        swarm_child_t *c = &g_swarm.children[g->child_ids[i]];
+        jbuf_append(&b, "{\"id\":");
+        jbuf_append_int(&b, c->id);
+        jbuf_append(&b, ",\"executor\":");
+        jbuf_append_json_str(&b, executor_type_name(c->executor));
+        jbuf_append(&b, ",\"model\":");
+        jbuf_append_json_str(&b, c->model);
+        jbuf_append(&b, ",\"task\":");
+        jbuf_append_json_str(&b, c->task);
+        jbuf_append(&b, "}");
+    }
     jbuf_append(&b, "]}");
 
     int written = (int)b.len < (int)rlen - 1 ? (int)b.len : (int)rlen - 1;
@@ -10760,10 +10947,7 @@ static bool tool_create_executor_swarm(const char *input, char *result, size_t r
     result[written] = '\0';
     jbuf_free(&b);
 
-    for (int i = 0; i < parse_ctx.count; i++) {
-        free(parse_ctx.specs[i].task);
-        free(parse_ctx.specs[i].model);
-    }
+    free_swarm_task_specs(&parse_ctx);
     free(tasks_raw);
     free(name);
     free(default_executor);
@@ -26475,8 +26659,10 @@ static const tool_def_t s_tools[] = {
      .is_concurrent = true},
     {.name = "calc",
      .description = "Evaluate math expressions.",
-     .input_schema_json = "{\"type\":\"object\",\"properties\":{\"expr\":{\"type\":\"string\"}},"
-                          "\"required\":[\"expr\"]}",
+     .input_schema_json = "{\"type\":\"object\",\"properties\":{"
+                          "\"expression\":{\"type\":\"string\"},"
+                          "\"expr\":{\"type\":\"string\",\"description\":\"Deprecated alias for expression\"}},"
+                          "\"required\":[\"expression\"]}",
      .execute = tool_calc,
      .is_read_only = true,
      .is_concurrent = true},
@@ -26882,10 +27068,11 @@ static const tool_def_t s_tools[] = {
          "\"topologies\":{\"type\":\"array\",\"description\":\"topology_solve: names of topologies "
          "to run the task across (default: trident,debate,tournament — each anchored on a "
          "different model)\"},\"name\":{\"type\":\"string\",\"description\":\"Swarm/group name for "
-         "create|map_reduce\"},\"group_id\":{\"type\":\"integer\",\"description\":\"Group ID for "
-         "status|collect\"},\"task\":{\"type\":\"string\",\"description\":\"Single task for "
+         "create|map_reduce|spawn_executor\"},\"group_id\":{\"type\":\"integer\","
+         "\"description\":\"Group ID for status|collect, or existing group for "
+         "spawn_executor\"},\"task\":{\"type\":\"string\",\"description\":\"Single task for "
          "spawn_executor|spawn_provider\"},\"tasks\":{\"type\":\"array\",\"description\":\"Task "
-         "array (strings or {task,model}) for "
+         "array (strings or {task,model,provider,executor}) for "
          "create|map_reduce|create_executor_swarm\"},\"coordinator\":{\"type\":\"string\","
          "\"description\":\"map_reduce: synthesis instruction for the coordinator sub-agent that "
          "reduces worker "
@@ -26901,8 +27088,14 @@ static const tool_def_t s_tools[] = {
          "\"type\":\"string\",\"description\":\"create: per-agent system prompt/persona for the "
          "spawned process (overrides workspace "
          "prompt)\"},\"provider\":{\"type\":\"string\",\"description\":\"Native provider name for "
-         "spawn_provider\"},\"executor\":{\"type\":\"string\",\"description\":\"dsco|claude|codex "
-         "for executor-based actions\"},\"budget\":{\"type\":\"number\",\"description\":\"Budget "
+         "spawn_provider, or per-task provider in tasks objects for cross-provider swarms\"},"
+         "\"executor\":{\"type\":\"string\",\"description\":\"dsco|claude|codex "
+         "for executor-based actions or per-task executor objects\"},\"collect\":{\"type\":"
+         "\"boolean\",\"description\":\"spawn_executor: create/return a collectable group_id "
+         "(default true); create_executor_swarm: collect after spawn when true\"},\"wait\":{"
+         "\"type\":\"boolean\",\"description\":\"spawn_executor|create_executor_swarm: wait and "
+         "return collect results in one tool call\"},\"budget\":{\"type\":\"number\","
+         "\"description\":\"Budget "
          "(USD) partitioned across workers for "
          "create|map_reduce\"},\"budget_usd\":{\"type\":\"number\",\"description\":\"Budget for "
          "action=budget\"},\"timeout\":{\"type\":\"integer\",\"description\":\"Seconds per phase "
@@ -27832,6 +28025,26 @@ tools_init_profile_t tools_current_profile(void) {
 bool tools_profile_allows_index(int index) {
     if (index < 0 || index >= s_tool_count)
         return false;
+    const char *allow = getenv("DSCO_TOOL_ALLOWLIST");
+    if (allow && allow[0]) {
+        const char *name = s_tools[index].name;
+        const char *p = allow;
+        while (*p) {
+            while (*p == ',' || isspace((unsigned char)*p))
+                p++;
+            const char *start = p;
+            while (*p && *p != ',')
+                p++;
+            const char *end = p;
+            while (end > start && isspace((unsigned char)end[-1]))
+                end--;
+            if (name && (size_t)(end - start) == strlen(name) &&
+                strncmp(start, name, (size_t)(end - start)) == 0) {
+                return true;
+            }
+        }
+        return false;
+    }
     if (g_tools_init_profile == TOOLS_FULL || g_tools_init_profile == TOOLS_AGENT)
         return true;
     return s_tools[index].core;
@@ -27922,6 +28135,12 @@ static bool tool_embeddings_try_open(FILE **out_fp, char *loaded_path, size_t lo
     return true;
 }
 
+static bool tools_lazy_load_status_enabled(void) {
+    if (isatty(STDERR_FILENO) || isatty(STDOUT_FILENO))
+        return false;
+    return dsco_env_bool("DSCO_TOOL_LOAD_STATUS", false);
+}
+
 static void ensure_embeddings_loaded(void) {
     if (g_emb_vectors)
         return;
@@ -27997,20 +28216,26 @@ static void ensure_embeddings_loaded(void) {
             size_t expected = 8 + total_f * sizeof(float);
             if (expected <= blob_len && total_f > 0) {
                 g_emb_vectors = safe_malloc(total_f * sizeof(float));
-                memcpy(g_emb_vectors, blob + 8, total_f * sizeof(float));
-                g_emb_count = emb_cnt;
-                g_emb_dim   = emb_dim;
-                fprintf(stderr, "  \033[2memb: %d tools \xc3\x97 %dd (built-in)\033[0m\n",
-                        g_emb_count, g_emb_dim);
-                return;
+	                memcpy(g_emb_vectors, blob + 8, total_f * sizeof(float));
+	                g_emb_count = emb_cnt;
+	                g_emb_dim   = emb_dim;
+	                if (tools_lazy_load_status_enabled()) {
+	                    tui_prepare_external_output();
+	                    fprintf(stderr, "  \033[2memb: %d tools \xc3\x97 %dd (built-in)\033[0m\n",
+	                            g_emb_count, g_emb_dim);
+	                }
+	                return;
             }
         }
     }
 
-    if (!fp) {
-        fprintf(stderr, "  \033[33mno tool_embeddings.bin found\033[0m\n");
-        return;
-    }
+	    if (!fp) {
+	        if (tools_lazy_load_status_enabled()) {
+	            tui_prepare_external_output();
+	            fprintf(stderr, "  \033[33mno tool_embeddings.bin found\033[0m\n");
+	        }
+	        return;
+	    }
 
     uint32_t header[2];
     if (fread(header, sizeof(uint32_t), 2, fp) != 2) {
@@ -28027,17 +28252,25 @@ static void ensure_embeddings_loaded(void) {
     size_t read_n = fread(g_emb_vectors, sizeof(float), total_floats, fp);
     fclose(fp);
 
-    if ((int)read_n != (int)total_floats) {
-        free(g_emb_vectors);
-        g_emb_vectors = NULL;
-        g_emb_count = 0;
-        fprintf(stderr, "  \033[31mtool_embeddings.bin truncated\033[0m\n");
-        return;
-    }
+	    if ((int)read_n != (int)total_floats) {
+	        free(g_emb_vectors);
+	        g_emb_vectors = NULL;
+	        g_emb_count = 0;
+	        if (tools_lazy_load_status_enabled()) {
+	            tui_prepare_external_output();
+	            fprintf(stderr, "  \033[31mtool_embeddings.bin truncated\033[0m\n");
+	        }
+	        return;
+	    }
 
-    fprintf(stderr, "  \033[2memb: %d tools × %dd loaded\033[0m\n", g_emb_count, g_emb_dim);
-    if (provider_debug_auth_enabled() && loaded_path[0])
-        fprintf(stderr, "  \033[2m[emb] path=%s\033[0m\n", loaded_path);
+	    if (tools_lazy_load_status_enabled()) {
+	        tui_prepare_external_output();
+	        fprintf(stderr, "  \033[2memb: %d tools × %dd loaded\033[0m\n", g_emb_count, g_emb_dim);
+	    }
+	    if (provider_debug_auth_enabled() && loaded_path[0]) {
+	        tui_prepare_external_output();
+	        fprintf(stderr, "  \033[2m[emb] path=%s\033[0m\n", loaded_path);
+	    }
 }
 
 /* Embed a query via Jina v4. Returns malloc'd float[g_emb_dim] or NULL. */
@@ -28563,8 +28796,11 @@ static void ensure_groups(void) {
         }
     }
 
-    g_groups_built = true;
-    fprintf(stderr, "  \033[2mgroups:");
+	    g_groups_built = true;
+	    if (!tools_lazy_load_status_enabled())
+	        return;
+	    tui_prepare_external_output();
+	    fprintf(stderr, "  \033[2mgroups:");
     for (int g = 0; g < g_group_count; g++)
         if (g_tool_groups[g].count > 0)
             fprintf(stderr, " %s=%d", g_tool_groups[g].name, g_tool_groups[g].count);
@@ -28738,19 +28974,35 @@ int tools_retrieve(const char *context, int *out_indices, int max_tools) {
 }
 
 const tool_def_t **tools_get_filtered(const char *context, int max_tools, int *out_count) {
+    int total;
+    const tool_def_t *all = tools_get_all(&total);
+
+    const char *allow = getenv("DSCO_TOOL_ALLOWLIST");
+    if (allow && allow[0]) {
+        int cap = max_tools > 0 ? max_tools : total;
+        const tool_def_t **result = safe_malloc((cap > 0 ? cap : 1) * sizeof(tool_def_t *));
+        int n = 0;
+        for (int i = 0; i < total && n < cap; i++) {
+            if (tools_profile_allows_index(i))
+                result[n++] = &all[i];
+        }
+        *out_count = n;
+        return result;
+    }
+
     int cap = max_tools > 0 ? max_tools : 128;
     int *indices = safe_malloc(cap * sizeof(int));
     int n = tools_retrieve(context, indices, cap);
 
-    int total;
-    const tool_def_t *all = tools_get_all(&total);
-
     const tool_def_t **result = safe_malloc((n > 0 ? n : 1) * sizeof(tool_def_t *));
+    int kept = 0;
     for (int i = 0; i < n; i++) {
-        result[i] = &all[indices[i]];
+        if (indices[i] < 0 || indices[i] >= total || !tools_profile_allows_index(indices[i]))
+            continue;
+        result[kept++] = &all[indices[i]];
     }
     free(indices);
-    *out_count = n;
+    *out_count = kept;
     return result;
 }
 
@@ -29211,10 +29463,13 @@ void tools_cooc_load(void) {
     for (uint32_t i = 0; i < nc; i++) {
         if (fread(g_cooc->matrix[i], 2, nc, f) != nc)
             break;
-    }
-    fclose(f);
-    fprintf(stderr, "  \033[2mcooc: loaded %d tool pairs\033[0m\n", (int)nc);
-}
+	    }
+	    fclose(f);
+	    if (tools_lazy_load_status_enabled()) {
+	        tui_prepare_external_output();
+	        fprintf(stderr, "  \033[2mcooc: loaded %d tool pairs\033[0m\n", (int)nc);
+	    }
+	}
 
 /* ── Tiered retrieval: register-file model with multi-signal quorum ──── */
 
@@ -30331,6 +30586,9 @@ bool tools_is_allowed_for_tier(const char *name, const char *tier, char *reason,
             return false;
         }
 
+        if (tool_is_untrusted_sandbox_routed(name))
+            return true;
+
         int idx = tool_map_lookup(&g_tool_map, name);
         if (idx < 0) {
             if (reason && reason_len > 0) {
@@ -30531,11 +30789,15 @@ static bool tools_execute_internal(const char *name, const char *input_json, cha
 }
 
 bool tools_execute(const char *name, const char *input_json, char *result, size_t result_len) {
-    char *normalized = tools_normalize_input(name, input_json);
-    bool ok =
-        tools_execute_internal(name, normalized ? normalized : input_json, result, result_len);
-    free(normalized);
-    return ok;
+    /* Public tool execution must not bypass the Immune System. Historically this
+     * called tools_execute_internal() directly, which meant CLI/direct callers
+     * skipped trust-tier routing, approval prompts, killswitches, budgets, and
+     * audit feedback. Route through the tier-aware gate instead; the gate still
+     * has explicit bootstrap no-ops for early initialization. */
+    const char *tier = getenv("DSCO_TRUST_TIER");
+    if (!tier || !tier[0])
+        tier = "standard";
+    return tools_execute_for_tier(name, input_json, tier, result, result_len);
 }
 
 /* ═══════════════════════════════════════════════════════════════════════════
@@ -30547,6 +30809,8 @@ bool tools_execute(const char *name, const char *input_json, char *result, size_
  * Gate stages (in order):
  *   G1  EXEMPT CHECK        — Immune primitives bypass to prevent regress
  *   G2  INITIALIZATION      — Safe no-op if governance not yet initialized
+ *   G2a EARLY IMMUNE VETO   — Killswitch / circuit breaker before user approval prompts
+ *   G2b C5 SELF-SURGERY     — Block agent-routed edits to Immune surfaces without external auth
  *   G3  KILLSWITCH          — System halt or per-agent kill → hard block
  *   G4  CIRCUIT BREAKER     — Active breakers → block + emit WARNING phero
  *   G5  GSU COST TRIAGE     — Tool-class-aware cost: read < write < exec < spawn
@@ -30556,7 +30820,7 @@ bool tools_execute(const char *name, const char *input_json, char *result, size_
  *   G9  EXECUTION           — Tool runs; timing recorded
  *   G10 FEEDBACK LOOP       — Post-exec: breaker update, pheromone emit, self_improve
  *
- * Contracts enforced: C1 (veto), C2 (budget), C3 (propose/dispose), C6 (audit)
+ * Contracts enforced: C1 (veto), C2 (budget), C3 (propose/dispose), C5 (no self-surgery), C6 (audit)
  * ═══════════════════════════════════════════════════════════════════════════ */
 
 /* ── G1: Exempt set ───────────────────────────────────────────────────── */
@@ -30621,11 +30885,273 @@ static double tool_gsu_cost(tool_class_t cls) {
 
 /* ── G8: High-risk set (triggers shadow check) ───────────────────────── */
 
+static void tool_gov_deny(char *result, size_t rlen, const char *tool, const char *stage,
+                          const char *reason, double gsu_remaining);
+static bool tool_ascii_contains_ci(const char *haystack, const char *needle);
+
 static bool tool_is_high_risk(const char *n, tool_class_t cls) {
+    if (!n)
+        return false;
     if (cls == TOOL_CLASS_EXEC || cls == TOOL_CLASS_SPAWN)
         return true;
-    return strcmp(n, "write_file") == 0 || strcmp(n, "Write") == 0 || strcmp(n, "edit_file") == 0 ||
-           strcmp(n, "Edit") == 0 || strcmp(n, "git") == 0 || strcmp(n, "patch_file") == 0;
+    return strcmp(n, "write_file") == 0 || strcmp(n, "Write") == 0 || strcmp(n, "append_file") == 0 ||
+           strcmp(n, "edit_file") == 0 || strcmp(n, "Edit") == 0 || strcmp(n, "delete_file") == 0 ||
+           strcmp(n, "move_file") == 0 || strcmp(n, "copy_file") == 0 || strcmp(n, "chmod_tool") == 0 ||
+           strcmp(n, "git") == 0 || strcmp(n, "patch_file") == 0 || strcmp(n, "http_request") == 0 ||
+           strcmp(n, "curl_raw") == 0 || strcmp(n, "download_file") == 0 || strcmp(n, "ssh_command") == 0 ||
+           strcmp(n, "docker") == 0 || strcmp(n, "trading") == 0 || strcmp(n, "kalshi") == 0 ||
+           strcmp(n, "polymarket") == 0 || strcmp(n, "slack_post") == 0;
+}
+
+static bool tool_env_truthy(const char *name) {
+    const char *v = name ? getenv(name) : NULL;
+    return v && v[0] && strcmp(v, "0") != 0 && strcasecmp(v, "false") != 0 &&
+           strcasecmp(v, "no") != 0 && strcasecmp(v, "off") != 0;
+}
+
+static bool tool_approval_prompt_available(void) {
+    if (tool_env_truthy("DSCO_DISABLE_APPROVAL_PROMPTS"))
+        return false;
+    if (tool_env_truthy("DSCO_NO_APPROVAL_PROMPTS"))
+        return false;
+    return isatty(STDIN_FILENO) && isatty(STDERR_FILENO);
+}
+
+typedef enum {
+    TOOL_RISK_LOW = 0,
+    TOOL_RISK_MEDIUM,
+    TOOL_RISK_HIGH,
+    TOOL_RISK_CRITICAL,
+} tool_risk_level_t;
+
+typedef struct {
+    tool_risk_level_t level;
+    bool requires_approval;
+    bool blocked_by_tier;
+    bool strict_no_tty;
+    bool allow_always;
+    char reason[192];
+    char fingerprint[65];
+} tool_approval_assessment_t;
+
+#define TOOL_APPROVAL_ALWAYS_MAX 128
+typedef struct {
+    char tool[96];
+    char fingerprint[65];
+    time_t expires_at;
+} tool_approval_cache_entry_t;
+static tool_approval_cache_entry_t s_tool_approval_always[TOOL_APPROVAL_ALWAYS_MAX];
+static int s_tool_approval_always_count = 0;
+
+static const char *tool_class_name(tool_class_t cls) {
+    switch (cls) {
+        case TOOL_CLASS_READ:
+            return "read";
+        case TOOL_CLASS_WRITE:
+            return "write";
+        case TOOL_CLASS_EXEC:
+            return "exec";
+        case TOOL_CLASS_SPAWN:
+            return "spawn";
+        case TOOL_CLASS_NET:
+            return "network";
+        case TOOL_CLASS_CRYPTO:
+            return "crypto";
+        default:
+            return "unknown";
+    }
+}
+
+static const char *tool_risk_name(tool_risk_level_t r) {
+    switch (r) {
+        case TOOL_RISK_LOW:
+            return "low";
+        case TOOL_RISK_MEDIUM:
+            return "medium";
+        case TOOL_RISK_HIGH:
+            return "high";
+        case TOOL_RISK_CRITICAL:
+            return "critical";
+        default:
+            return "unknown";
+    }
+}
+
+static void tool_input_fingerprint(const char *name, const char *input_json, char out[65]) {
+    const char *safe_name = name ? name : "";
+    const char *safe_input = input_json ? input_json : "{}";
+    sha256_ctx_t ctx;
+    uint8_t digest[32];
+    sha256_init(&ctx);
+    sha256_update(&ctx, (const uint8_t *)safe_name, strlen(safe_name));
+    sha256_update(&ctx, (const uint8_t *)"\n", 1);
+    sha256_update(&ctx, (const uint8_t *)safe_input, strlen(safe_input));
+    sha256_final(&ctx, digest);
+    hex_encode(digest, sizeof(digest), out);
+}
+
+static bool tool_approval_cache_hit(const char *name, const char fingerprint[65]) {
+    time_t now = time(NULL);
+    for (int i = 0; i < s_tool_approval_always_count; i++) {
+        if (s_tool_approval_always[i].expires_at > 0 && s_tool_approval_always[i].expires_at < now)
+            continue;
+        if (strcmp(s_tool_approval_always[i].tool, name ? name : "") == 0 &&
+            strcmp(s_tool_approval_always[i].fingerprint, fingerprint) == 0)
+            return true;
+    }
+    return false;
+}
+
+static void tool_approval_cache_add(const char *name, const char fingerprint[65]) {
+    if (!name || !fingerprint || !fingerprint[0])
+        return;
+    if (tool_approval_cache_hit(name, fingerprint))
+        return;
+    if (s_tool_approval_always_count >= TOOL_APPROVAL_ALWAYS_MAX)
+        return;
+    int ttl = dsco_env_int("DSCO_APPROVAL_ALWAYS_TTL", 3600, 1, 86400);
+    tool_approval_cache_entry_t *e = &s_tool_approval_always[s_tool_approval_always_count++];
+    snprintf(e->tool, sizeof(e->tool), "%s", name);
+    snprintf(e->fingerprint, sizeof(e->fingerprint), "%s", fingerprint);
+    e->expires_at = time(NULL) + ttl;
+}
+
+static void tool_approval_assess(const char *name, const char *input_json, tool_class_t cls,
+                                 const char *tier, tool_approval_assessment_t *out) {
+    memset(out, 0, sizeof(*out));
+    out->level = TOOL_RISK_LOW;
+    out->allow_always = true;
+    tool_input_fingerprint(name, input_json, out->fingerprint);
+
+    char trust_reason[160];
+    trust_reason[0] = '\0';
+    bool tier_allowed = tools_is_allowed_for_tier(name, tier ? tier : "standard", trust_reason,
+                                                  sizeof(trust_reason));
+    bool high_risk = tool_is_high_risk(name, cls);
+
+    if (!tier_allowed) {
+        out->requires_approval = true;
+        out->blocked_by_tier = true;
+        out->strict_no_tty = true;
+        out->allow_always = false;
+        out->level = TOOL_RISK_HIGH;
+        snprintf(out->reason, sizeof(out->reason), "%s", trust_reason[0] ? trust_reason : "blocked_by_trust_tier");
+    } else if (high_risk) {
+        out->requires_approval = true;
+        out->level = TOOL_RISK_MEDIUM;
+        snprintf(out->reason, sizeof(out->reason), "high_risk_%s_tool", tool_class_name(cls));
+    }
+
+    if (tool_env_truthy("DSCO_APPROVAL_ALWAYS")) {
+        out->requires_approval = high_risk || !tier_allowed;
+        if (!tier_allowed) {
+            out->blocked_by_tier = true;
+            out->strict_no_tty = true;
+            out->allow_always = false;
+        }
+        if (out->requires_approval && out->reason[0] == '\0')
+            snprintf(out->reason, sizeof(out->reason), "approval_always_enabled");
+    }
+
+    if (input_json) {
+        if ((cls == TOOL_CLASS_EXEC &&
+             (tool_ascii_contains_ci(input_json, "sudo") || tool_ascii_contains_ci(input_json, " rm -rf") ||
+              tool_ascii_contains_ci(input_json, "mkfs") || tool_ascii_contains_ci(input_json, "dd if=") ||
+              tool_ascii_contains_ci(input_json, "launchctl") || tool_ascii_contains_ci(input_json, "systemctl"))) ||
+            tool_ascii_contains_ci(input_json, "private_key") || tool_ascii_contains_ci(input_json, "api_key") ||
+            tool_ascii_contains_ci(input_json, "password") || tool_ascii_contains_ci(input_json, "secret")) {
+            out->requires_approval = true;
+            out->strict_no_tty = true;
+            out->allow_always = false;
+            out->level = TOOL_RISK_CRITICAL;
+            snprintf(out->reason, sizeof(out->reason), "critical_pattern_in_tool_input");
+        }
+    }
+
+    if (strcmp(name ? name : "", "delete_file") == 0 || strcmp(name ? name : "", "ssh_command") == 0 ||
+        strcmp(name ? name : "", "trading") == 0 || strcmp(name ? name : "", "kalshi") == 0 ||
+        strcmp(name ? name : "", "polymarket") == 0) {
+        out->requires_approval = true;
+        if (out->level < TOOL_RISK_HIGH)
+            out->level = TOOL_RISK_HIGH;
+        if (out->reason[0] == '\0')
+            snprintf(out->reason, sizeof(out->reason), "destructive_or_external_mutation_tool");
+    }
+
+    if (tier && strcasecmp(tier, "trusted") == 0 && !tool_env_truthy("DSCO_APPROVAL_ALWAYS") &&
+        out->level < TOOL_RISK_CRITICAL) {
+        out->requires_approval = false;
+    }
+
+    if (tool_env_truthy("DSCO_APPROVAL_NEVER") && !out->blocked_by_tier &&
+        out->level < TOOL_RISK_CRITICAL)
+        out->requires_approval = false;
+}
+
+static bool tool_request_approval(const char *name, const char *input_json, tool_class_t cls,
+                                  const char *tier, char *result, size_t result_len) {
+    tool_approval_assessment_t a;
+    tool_approval_assess(name, input_json, cls, tier, &a);
+    if (!a.requires_approval)
+        return true;
+
+    const char *mode = getenv("DSCO_APPROVAL_MODE");
+    if (mode && strcasecmp(mode, "never") == 0 && !a.blocked_by_tier &&
+        a.level < TOOL_RISK_CRITICAL)
+        return true;
+
+    if (a.allow_always && !a.blocked_by_tier && tool_approval_cache_hit(name, a.fingerprint)) {
+        baseline_log("security", "tool_approval_cached", name, a.fingerprint);
+        return true;
+    }
+
+    bool strict_headless = a.strict_no_tty || (mode && (strcasecmp(mode, "strict") == 0 ||
+                                                       strcasecmp(mode, "require") == 0));
+    if (a.blocked_by_tier) {
+        char deny_reason[256];
+        snprintf(deny_reason, sizeof(deny_reason), "blocked_by_trust_tier risk=%s reason=%s",
+                 tool_risk_name(a.level), a.reason[0] ? a.reason : "blocked_by_trust_tier");
+        tool_gov_deny(result, result_len, name, "G2c_approval", deny_reason,
+                      g_governance.initialized ? governance_remaining_gsu(&g_governance, "dsco")
+                                               : 0.0);
+        return false;
+    }
+    if (!tool_approval_prompt_available()) {
+        if (strict_headless) {
+            char deny_reason[256];
+            snprintf(deny_reason, sizeof(deny_reason), "approval_required_no_tty risk=%s reason=%s",
+                     tool_risk_name(a.level), a.reason[0] ? a.reason : "approval_required");
+            tool_gov_deny(result, result_len, name, "G2c_approval", deny_reason,
+                          g_governance.initialized ? governance_remaining_gsu(&g_governance, "dsco")
+                                                   : 0.0);
+            return false;
+        }
+        baseline_log("security", "tool_approval_no_tty_auto", name, a.reason);
+        return true;
+    }
+
+    char desc[256];
+    snprintf(desc, sizeof(desc), "risk=%s class=%s tier=%s reason=%s", tool_risk_name(a.level),
+             tool_class_name(cls), tier && tier[0] ? tier : "standard",
+             a.reason[0] ? a.reason : "approval_required");
+    char detail[512];
+    snprintf(detail, sizeof(detail), "fingerprint=%.12s input=%.360s", a.fingerprint,
+             input_json && input_json[0] ? input_json : "{}");
+
+    tui_perm_result_t choice = tui_permission_prompt(name ? name : "unknown", desc, detail);
+    if (choice == TUI_PERM_ALLOW || choice == TUI_PERM_ALWAYS) {
+        if (choice == TUI_PERM_ALWAYS && a.allow_always)
+            tool_approval_cache_add(name, a.fingerprint);
+        baseline_log("security", choice == TUI_PERM_ALWAYS ? "tool_approval_always" : "tool_approval_granted",
+                     name, a.reason);
+        return true;
+    }
+
+    tool_gov_deny(result, result_len, name, "G2c_approval",
+                  choice == TUI_PERM_CANCEL ? "cancelled_by_user" : "denied_by_user",
+                  g_governance.initialized ? governance_remaining_gsu(&g_governance, "dsco") : 0.0);
+    baseline_log("security", "tool_approval_denied", name, a.reason);
+    return false;
 }
 
 /* ── Runtime self-preservation preflight ──────────────────────────────── */
@@ -30705,6 +31231,85 @@ static bool tool_exec_command_blocked_by_self_preservation(const char *name, con
     return blocked;
 }
 
+
+/* ── C5: No self-surgery on the Immune System ────────────────────────────
+ *
+ * Wings and Talons may propose self-improvements, but agent-routed high-risk
+ * tools must not directly modify the guard that authorizes them.  Protected
+ * Immune surfaces require an external authorization path: set
+ * DSCO_IMMUNE_SURGERY_AUTH=external and run under a trusted/operator tier.
+ * This is intentionally coarse and fail-closed; exact semantic intent is not
+ * trusted when the target is the authorization substrate itself. */
+
+static bool tool_tier_is_external_immune_operator(const char *tier) {
+    if (!tier || !tier[0])
+        return false;
+    return strcasecmp(tier, "trusted") == 0 || strcasecmp(tier, "operator") == 0 ||
+           strcasecmp(tier, "tier0") == 0 || strcasecmp(tier, "founder") == 0;
+}
+
+static bool tool_immune_surgery_authorized(const char *tier) {
+    const char *auth = getenv("DSCO_IMMUNE_SURGERY_AUTH");
+    return auth && strcmp(auth, "external") == 0 && tool_tier_is_external_immune_operator(tier);
+}
+
+static bool tool_input_touches_immune_surface(const char *input_json, char *match,
+                                              size_t match_len) {
+    static const char *const protected_fragments[] = {
+        "src/governance.c",
+        "include/governance.h",
+        "src/killswitch.c",
+        "include/killswitch.h",
+        "src/ooda.c",
+        "include/ooda.h",
+        "src/tools.c",
+        "include/tools.h",
+        "src/audit_log.c",
+        "include/audit_log.h",
+        "src/tamper.c",
+        "include/tamper.h",
+        "src/rsi_curriculum.c",
+        "include/rsi_curriculum.h",
+        "doctrine/OVERMIND_ARCHITECTURE.md",
+        ".dsco/workspace/doctrine/OVERMIND_ARCHITECTURE.md",
+        NULL,
+    };
+
+    if (!input_json || !input_json[0])
+        return false;
+
+    for (int i = 0; protected_fragments[i]; i++) {
+        if (tool_ascii_contains_ci(input_json, protected_fragments[i])) {
+            if (match && match_len > 0)
+                snprintf(match, match_len, "%s", protected_fragments[i]);
+            return true;
+        }
+    }
+    return false;
+}
+
+static bool tool_blocks_immune_self_surgery(const char *name, tool_class_t cls,
+                                            const char *input_json, const char *tier,
+                                            char *reason, size_t reason_len) {
+    if (!tool_is_high_risk(name, cls))
+        return false;
+
+    char matched[128];
+    matched[0] = '\0';
+    if (!tool_input_touches_immune_surface(input_json, matched, sizeof(matched)))
+        return false;
+
+    if (tool_immune_surgery_authorized(tier))
+        return false;
+
+    if (reason && reason_len > 0) {
+        snprintf(reason, reason_len,
+                 "immune_self_surgery_blocked target=%s; requires DSCO_IMMUNE_SURGERY_AUTH=external and trusted/operator tier",
+                 matched[0] ? matched : "immune_surface");
+    }
+    return true;
+}
+
 /* ── Pheromone region key for a tool ─────────────────────────────────── */
 
 static void tool_phero_region(const char *name, char *buf, size_t len) {
@@ -30737,8 +31342,11 @@ bool tools_execute_for_tier(const char *name, const char *input_json, const char
     }
 
     /* ── G2: Initialization guard ─────────────────────────────────────── */
+    if (!g_governance.initialized)
+        ensure_wt_init();
     if (!g_governance.initialized) {
-        goto _skip_gate;
+        tool_gov_deny(result, result_len, name, "G2_init", "governance_unavailable", 0.0);
+        return false;
     }
     tool_governance_ensure_dsco_agent();
 
@@ -30757,6 +31365,46 @@ bool tools_execute_for_tier(const char *name, const char *input_json, const char
         double remaining = governance_remaining_gsu(&g_governance, "dsco");
         char phero_region[PHEROMONE_MAX_REGION_LEN];
         tool_phero_region(name, phero_region, sizeof(phero_region));
+
+        /* ── G2a: Early Immune veto before user approval prompts ───────── */
+        if (killswitch_system_halted(&g_governance.killswitches)) {
+            pheromone_deposit(&g_governance.pheromones, PHERO_WARNING, 1.0, phero_region, "immune",
+                              "{\"reason\":\"system_halted\"}");
+            tool_gov_deny(result, result_len, name, "G2a_killswitch", "system_halted", remaining);
+            return false;
+        }
+        if (killswitch_is_killed(&g_governance.killswitches, "dsco")) {
+            tool_gov_deny(result, result_len, name, "G2a_killswitch", "agent_killed", remaining);
+            return false;
+        }
+        if (!governance_check_breakers(&g_governance, "dsco")) {
+            pheromone_deposit(&g_governance.pheromones, PHERO_WARNING, 0.8, phero_region, "immune",
+                              "{\"reason\":\"circuit_breaker\"}");
+            tool_gov_deny(result, result_len, name, "G2a_circuit_breaker", "active_breaker", remaining);
+            return false;
+        }
+
+        /* ── G2b: C5 no self-surgery on the Immune System ─────────────── */
+        char immune_reason[256];
+        immune_reason[0] = '\0';
+        if (tool_blocks_immune_self_surgery(name, cls, input_json, tier, immune_reason,
+                                            sizeof(immune_reason))) {
+            pheromone_deposit(&g_governance.pheromones, PHERO_WARNING, 1.0, phero_region, "immune",
+                              "{\"reason\":\"immune_self_surgery_blocked\"}");
+            tool_gov_deny(result, result_len, name, "G2b_immune_self_surgery",
+                          immune_reason[0] ? immune_reason : "immune_self_surgery_blocked",
+                          remaining);
+            self_improve_record_tool(&g_self_improve, name, false, 0.0, 0);
+            return false;
+        }
+
+        /* ── G2c: Human approval for risky/blocked tools ──────────────── */
+        if (!tool_request_approval(name, input_json, cls, tier, result, result_len)) {
+            pheromone_deposit(&g_governance.pheromones, PHERO_WARNING, 0.8, phero_region,
+                              "immune", "{\"reason\":\"approval_denied\"}");
+            self_improve_record_tool(&g_self_improve, name, false, 0.0, 0);
+            return false;
+        }
 
         /* ── G2b: Runtime self-preservation preflight ─────────────────── */
         if (cls == TOOL_CLASS_EXEC) {
