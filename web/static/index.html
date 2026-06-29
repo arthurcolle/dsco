@@ -1104,8 +1104,13 @@ function postProcess(el){
 }
 
 // ── Input ────────────────────────────────────────────────────
+let draftTimer=null, resizeFrame=0, pasteFastPath=false;
 function setDraftStatus(msg){const el=$('#draft-status');if(el)el.textContent=msg}
 function autoResize(){const el=$('#input');const minHeight=window.innerWidth<=760?84:96;el.style.height='auto';el.style.height=Math.min(Math.max(el.scrollHeight,minHeight),260)+'px'}
+function scheduleAutoResize(){
+  if(resizeFrame)return;
+  resizeFrame=requestAnimationFrame(()=>{resizeFrame=0;autoResize()});
+}
 function persistDraft(){
   const text=$('#input').value;
   try{
@@ -1114,6 +1119,10 @@ function persistDraft(){
   }catch(e){}
   if(text||S.attachments.length)setDraftStatus(`Draft saved locally${S.attachments.length?' · images stay in this tab until send':''}.`);
   else setDraftStatus('Draft is local to this browser tab.');
+}
+function schedulePersistDraft(delay=180){
+  if(draftTimer)clearTimeout(draftTimer);
+  draftTimer=setTimeout(()=>{draftTimer=null;persistDraft()},delay);
 }
 function loadDraft(){
   try{
@@ -1181,6 +1190,18 @@ async function handlePastedImages(e){
   }
   if(files.length)await addImageFiles(files,'paste');
 }
+function handlePasteFastPath(e){
+  const text=e.clipboardData?.getData('text/plain')||'';
+  if(text.length<4096)return;
+  pasteFastPath=true;
+  setDraftStatus(`Pasting ${text.length.toLocaleString()} chars...`);
+  requestAnimationFrame(()=>{
+    pasteFastPath=false;
+    autoResize();
+    persistDraft();
+    setDraftStatus(`Draft saved locally (${text.length.toLocaleString()} pasted chars).`);
+  });
+}
 function clearComposer(){
   $('#input').value='';
   S.attachments=[];
@@ -1211,8 +1232,12 @@ function sendMsg(){
   logActivity('text','You: '+trunc(text||`[${attachments.length} image${attachments.length===1?'':'s'}]`,40));
 }
 $('#input').addEventListener('keydown',e=>{if(e.key==='Enter'&&(e.metaKey||e.ctrlKey)){e.preventDefault();sendMsg()}});
-$('#input').addEventListener('input',()=>{autoResize();persistDraft()});
-$('#input').addEventListener('paste',e=>{void handlePastedImages(e)});
+$('#input').addEventListener('input',()=>{
+  if(pasteFastPath)return;
+  scheduleAutoResize();
+  schedulePersistDraft();
+});
+$('#input').addEventListener('paste',e=>{handlePasteFastPath(e);void handlePastedImages(e)});
 $('#send-btn').addEventListener('click',sendMsg);
 $('#attach-btn').addEventListener('click',()=>$('#image-picker').click());
 $('#clear-draft-btn').addEventListener('click',()=>{clearComposer();setDraftStatus('Composer cleared.')});

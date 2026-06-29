@@ -1,0 +1,80 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://distributed.systems/schemas/consumer_profile_ontology/user_facet_value.schema.json",
+  "title": "User Facet Value",
+  "type": "object",
+  "required": [
+    "user_id",
+    "facet_id",
+    "value",
+    "confidence",
+    "freshness_score",
+    "last_computed_at",
+    "activation_state",
+    "model_version"
+  ],
+  "properties": {
+    "user_id": {
+      "type": "string"
+    },
+    "facet_id": {
+      "type": "string"
+    },
+    "value": {},
+    "confidence": {
+      "type": "number",
+      "minimum": 0,
+      "maximum": 1
+    },
+    "freshness_score": {
+      "type": "number",
+      "minimum": 0,
+      "maximum": 1
+    },
+    "stability_score": {
+      "type": [
+        "number",
+        "null"
+      ],
+      "minimum": 0,
+      "maximum": 1
+    },
+    "evidence_count_7d": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "evidence_count_30d": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "evidence_count_180d": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "source_mix": {
+      "type": "object"
+    },
+    "last_computed_at": {
+      "type": "string"
+    },
+    "expires_at": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "activation_state": {
+      "enum": [
+        "eligible",
+        "suppressed",
+        "expired",
+        "blocked",
+        "needs_review"
+      ]
+    },
+    "model_version": {
+      "type": "string"
+    }
+  },
+  "additionalProperties": true
+}

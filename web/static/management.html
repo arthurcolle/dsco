@@ -1,0 +1,524 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>DSCO Management</title>
+<style>
+:root{
+  --bg:#0f1311;
+  --bg-2:#151a17;
+  --panel:#171d19;
+  --panel-2:#1d2520;
+  --line:#2a342d;
+  --line-2:#39453d;
+  --ink:#eef3ee;
+  --muted:#98a39b;
+  --soft:#6f7a72;
+  --green:#86d989;
+  --amber:#edc56a;
+  --cyan:#73d0c4;
+  --red:#ea8b81;
+  --blue:#88b4ff;
+  --mono:ui-monospace,SFMono-Regular,Menlo,Monaco,Consolas,"Liberation Mono",monospace;
+  --sans:-apple-system,BlinkMacSystemFont,"Segoe UI",Inter,Arial,sans-serif;
+}
+*{box-sizing:border-box}
+html,body{margin:0;background:var(--bg);color:var(--ink);font:13px/1.4 var(--sans)}
+body{min-height:100vh}
+a{color:inherit}
+button,input,select,textarea{font:inherit}
+header{position:sticky;top:0;z-index:20;background:rgba(15,19,17,.96);backdrop-filter:blur(10px);border-bottom:1px solid var(--line)}
+.bar{max-width:1520px;margin:0 auto;padding:16px 24px;display:flex;align-items:flex-end;justify-content:space-between;gap:24px}
+.title h1{margin:0;font-size:24px;font-weight:700;letter-spacing:0}
+.title p{margin:4px 0 0;color:var(--muted);font-family:var(--mono);font-size:12px}
+.nav{display:flex;gap:10px;flex-wrap:wrap}
+.nav a,.nav button{padding:9px 12px;border:1px solid var(--line);background:var(--bg-2);border-radius:8px;text-decoration:none;color:var(--ink);cursor:pointer}
+.nav a:hover,.nav button:hover{border-color:var(--line-2)}
+main{max-width:1520px;margin:0 auto;padding:22px 24px 52px}
+.status{margin-bottom:14px;color:var(--muted);font-family:var(--mono)}
+.metrics{display:grid;grid-template-columns:repeat(6,minmax(0,1fr));gap:12px}
+.metric{border:1px solid var(--line);background:var(--panel);border-radius:8px;padding:14px;min-height:110px}
+.metric .k{display:flex;justify-content:space-between;gap:8px;color:var(--muted);font-family:var(--mono);font-size:11px;text-transform:uppercase}
+.metric .v{margin-top:18px;font-size:31px;font-weight:700}
+.metric .s{margin-top:5px;color:var(--soft);font-family:var(--mono);font-size:11px}
+.metric.green .v{color:var(--green)}
+.metric.amber .v{color:var(--amber)}
+.metric.cyan .v{color:var(--cyan)}
+.metric.red .v{color:var(--red)}
+.band{padding-top:26px;margin-top:26px;border-top:1px solid var(--line)}
+.band-head{display:flex;justify-content:space-between;gap:16px;align-items:flex-end;margin-bottom:14px}
+.band-head h2{margin:0;font-size:15px}
+.band-head p{margin:4px 0 0;color:var(--muted);font-family:var(--mono);font-size:11px}
+.grid-3{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:14px}
+.grid-2{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:14px}
+.panel{border:1px solid var(--line);background:var(--panel);border-radius:8px;overflow:hidden;min-width:0}
+.panel h3{margin:0;font-size:13px}
+.panel-head{display:flex;justify-content:space-between;gap:12px;align-items:center;padding:12px 14px;border-bottom:1px solid var(--line)}
+.panel-head .sub{color:var(--muted);font-family:var(--mono);font-size:11px}
+.panel-body{padding:14px}
+.form-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:10px}
+.form-grid.full{grid-template-columns:1fr}
+label{display:flex;flex-direction:column;gap:5px;color:var(--muted);font-family:var(--mono);font-size:11px;text-transform:uppercase}
+input,select,textarea{width:100%;border:1px solid var(--line);background:var(--panel-2);color:var(--ink);border-radius:6px;padding:10px 11px;outline:none}
+input:focus,select:focus,textarea:focus{border-color:var(--cyan)}
+textarea{min-height:76px;resize:vertical}
+.checks{display:flex;gap:14px;flex-wrap:wrap;padding-top:4px}
+.check{display:flex;align-items:center;gap:8px;color:var(--ink);font-family:var(--sans);font-size:12px;text-transform:none}
+.check input{width:auto;margin:0}
+.actions{display:flex;justify-content:flex-end;gap:10px;margin-top:12px}
+.btn{padding:10px 12px;border-radius:6px;border:1px solid var(--line);background:var(--panel-2);color:var(--ink);cursor:pointer}
+.btn.primary{background:#203326;border-color:#33513d;color:#dff4e1}
+.btn:hover{border-color:var(--line-2)}
+.table-wrap{overflow:auto}
+table{width:100%;border-collapse:collapse;min-width:760px}
+th,td{padding:10px 12px;border-bottom:1px solid var(--line);text-align:left;vertical-align:top}
+th{position:sticky;top:0;background:var(--panel);z-index:1;color:var(--muted);font:11px var(--mono);text-transform:uppercase}
+td{color:#dce4dd}
+.mono{font-family:var(--mono)}
+.muted{color:var(--muted)}
+.pill{display:inline-flex;align-items:center;gap:6px;border:1px solid var(--line);border-radius:999px;padding:3px 8px;font:11px var(--mono);white-space:nowrap}
+.ok{color:var(--green)}
+.warn{color:var(--amber)}
+.bad{color:var(--red)}
+.tiny{font-size:11px}
+.empty{padding:18px 14px;color:var(--soft);font-family:var(--mono)}
+.stack{display:flex;flex-direction:column;gap:14px}
+@media (max-width:1280px){
+  .metrics{grid-template-columns:repeat(3,minmax(0,1fr))}
+  .grid-3{grid-template-columns:1fr}
+  .grid-2{grid-template-columns:1fr}
+}
+@media (max-width:760px){
+  .bar,main{padding-left:14px;padding-right:14px}
+  .metrics{grid-template-columns:repeat(2,minmax(0,1fr))}
+  .form-grid{grid-template-columns:1fr}
+}
+</style>
+</head>
+<body>
+<header>
+  <div class="bar">
+    <div class="title">
+      <h1>DSCO Management</h1>
+      <p>people, plans, routed usage, provider inventory</p>
+    </div>
+    <nav class="nav">
+      <a href="/">Agent UI</a>
+      <a href="/engine">Engine</a>
+      <a href="/admin">Ontology</a>
+      <button id="refreshBtn" type="button">Refresh</button>
+    </nav>
+  </div>
+</header>
+
+<main>
+  <div class="status" id="status">loading control plane</div>
+
+  <section class="metrics" id="metrics"></section>
+
+  <section class="band">
+    <div class="band-head">
+      <div>
+        <h2>Provision</h2>
+        <p>seed people, plan lanes, and routed backends without leaving the control surface</p>
+      </div>
+    </div>
+    <div class="grid-3">
+      <section class="panel">
+        <div class="panel-head"><h3>Add Person</h3><div class="sub">tenant</div></div>
+        <div class="panel-body">
+          <form id="personForm">
+            <div class="form-grid">
+              <label>Name<input name="name" required></label>
+              <label>Email<input name="email" required type="email"></label>
+              <label>Organization<input name="organization"></label>
+              <label>Plan<select name="plan_id" id="personPlan"></select></label>
+              <label>Auth Policy
+                <select name="auth_policy">
+                  <option value="managed_or_byok">Managed or BYOK</option>
+                  <option value="managed_only">Managed only</option>
+                  <option value="byok_only">BYOK only</option>
+                </select>
+              </label>
+              <label>Spend Limit USD<input name="monthly_spend_limit" type="number" step="0.01" min="0" value="0"></label>
+            </div>
+            <div class="actions"><button class="btn primary" type="submit">Save Person</button></div>
+          </form>
+        </div>
+      </section>
+
+      <section class="panel">
+        <div class="panel-head"><h3>Add Plan</h3><div class="sub">commercial lane</div></div>
+        <div class="panel-body">
+          <form id="planForm">
+            <div class="form-grid">
+              <label>Name<input name="name" required></label>
+              <label>Price Monthly<input name="price_monthly" type="number" step="0.01" min="0" value="0"></label>
+              <label>Included Input<input name="included_input_tokens" type="number" min="0" value="0"></label>
+              <label>Included Output<input name="included_output_tokens" type="number" min="0" value="0"></label>
+              <label>Overage Input<input name="overage_rate_input" type="number" step="0.01" min="0" value="0"></label>
+              <label>Overage Output<input name="overage_rate_output" type="number" step="0.01" min="0" value="0"></label>
+              <label>Seats<input name="seats" type="number" min="1" value="1"></label>
+              <label>Notes<input name="notes"></label>
+            </div>
+            <div class="checks">
+              <label class="check"><input type="checkbox" name="byok_allowed" checked>BYOK allowed</label>
+              <label class="check"><input type="checkbox" name="managed_allowed" checked>Managed allowed</label>
+              <label class="check"><input type="checkbox" name="hosted_models_allowed">Hosted allowed</label>
+              <label class="check"><input type="checkbox" name="is_active" checked>Active</label>
+            </div>
+            <div class="actions"><button class="btn primary" type="submit">Save Plan</button></div>
+          </form>
+        </div>
+      </section>
+
+      <section class="panel">
+        <div class="panel-head"><h3>Add Backend</h3><div class="sub">routing target</div></div>
+        <div class="panel-body">
+          <form id="backendForm">
+            <div class="form-grid">
+              <label>Name<input name="name" required></label>
+              <label>Provider
+                <select name="provider" id="backendProvider">
+                  <option>anthropic</option><option>openai</option><option>openrouter</option>
+                  <option>groq</option><option>deepseek</option><option>together</option>
+                  <option>mistral</option><option>perplexity</option><option>cerebras</option>
+                  <option>xai</option><option>cohere</option>
+                </select>
+              </label>
+              <label>Transport
+                <select name="transport">
+                  <option value="openai_compat">openai_compat</option>
+                  <option value="anthropic">anthropic</option>
+                </select>
+              </label>
+              <label>Status
+                <select name="status">
+                  <option value="planned">planned</option>
+                  <option value="live">live</option>
+                  <option value="disabled">disabled</option>
+                </select>
+              </label>
+              <label>Base URL<input name="base_url" placeholder="https://..."></label>
+              <label>API Key Env<input name="api_key_env" placeholder="OPENAI_API_KEY"></label>
+              <label>Priority<input name="priority" type="number" min="0" value="100"></label>
+              <label>Notes<input name="notes"></label>
+            </div>
+            <div class="checks">
+              <label class="check"><input type="checkbox" name="hosted_by_dsco">Hosted by DSCO</label>
+              <label class="check"><input type="checkbox" name="enabled" checked>Enabled</label>
+            </div>
+            <div class="actions"><button class="btn primary" type="submit">Save Backend</button></div>
+          </form>
+        </div>
+      </section>
+    </div>
+  </section>
+
+  <section class="band">
+    <div class="band-head">
+      <div>
+        <h2>Tenants</h2>
+        <p>who is on the system, what plan they are on, and what they have consumed</p>
+      </div>
+    </div>
+    <div class="grid-2">
+      <section class="panel">
+        <div class="panel-head"><h3>People</h3><div class="sub" id="peopleMeta">0 rows</div></div>
+        <div class="table-wrap"><table>
+          <thead><tr><th>Name</th><th>Plan</th><th>Auth</th><th>Usage</th><th>Last Seen</th></tr></thead>
+          <tbody id="peopleRows"></tbody>
+        </table></div>
+      </section>
+      <section class="panel">
+        <div class="panel-head"><h3>Plans</h3><div class="sub" id="plansMeta">0 rows</div></div>
+        <div class="table-wrap"><table>
+          <thead><tr><th>Plan</th><th>Commercials</th><th>Capabilities</th><th>Members</th></tr></thead>
+          <tbody id="planRows"></tbody>
+        </table></div>
+      </section>
+    </div>
+  </section>
+
+  <section class="band">
+    <div class="band-head">
+      <div>
+        <h2>Routing</h2>
+        <p>managed backends and the credential trails they leave behind</p>
+      </div>
+    </div>
+    <div class="grid-2">
+      <section class="panel">
+        <div class="panel-head"><h3>Backends</h3><div class="sub" id="backendMeta">0 rows</div></div>
+        <div class="table-wrap"><table>
+          <thead><tr><th>Backend</th><th>Provider</th><th>Transport</th><th>Key</th><th>Readiness</th></tr></thead>
+          <tbody id="backendRows"></tbody>
+        </table></div>
+      </section>
+      <section class="panel">
+        <div class="panel-head"><h3>Credential Bindings</h3><div class="sub" id="credMeta">0 rows</div></div>
+        <div class="table-wrap"><table>
+          <thead><tr><th>Person</th><th>Provider</th><th>Source</th><th>Reference</th><th>Last Used</th></tr></thead>
+          <tbody id="credentialRows"></tbody>
+        </table></div>
+      </section>
+    </div>
+  </section>
+
+  <section class="band">
+    <div class="band-head">
+      <div>
+        <h2>Traffic</h2>
+        <p>recent routed requests through the DSCO engine layer</p>
+      </div>
+    </div>
+    <section class="panel">
+      <div class="panel-head"><h3>Request Log</h3><div class="sub" id="requestMeta">0 rows</div></div>
+      <div class="table-wrap"><table>
+        <thead><tr><th>Time</th><th>Person</th><th>Route</th><th>Status</th><th>Tokens</th><th>Cost</th><th>Latency</th></tr></thead>
+        <tbody id="requestRows"></tbody>
+      </table></div>
+    </section>
+  </section>
+</main>
+
+<script>
+const $ = (s) => document.querySelector(s);
+const fmt = (n) => Number(n || 0).toLocaleString();
+const usd = (n) => Number(n || 0).toLocaleString(undefined, {style:'currency', currency:'USD', maximumFractionDigits:3});
+const when = (v) => v ? new Date(v).toLocaleString() : 'never';
+const short = (v) => v && v.length > 54 ? `${v.slice(0, 54)}…` : (v || '');
+const state = {overview:null, plans:[], people:[], backends:[], credentials:[], requests:[]};
+
+async function getJSON(url){
+  const r = await fetch(url);
+  if(!r.ok) throw new Error(`${r.status} ${url}`);
+  return r.json();
+}
+
+async function postJSON(url, body){
+  const r = await fetch(url, {
+    method:'POST',
+    headers:{'Content-Type':'application/json'},
+    body:JSON.stringify(body)
+  });
+  const data = await r.json().catch(() => ({}));
+  if(!r.ok) throw new Error(data.error || `${r.status} ${url}`);
+  return data;
+}
+
+function metric(label, value, sub, tone=''){
+  return `<article class="metric ${tone}"><div class="k"><span>${label}</span></div><div class="v">${value}</div><div class="s">${sub}</div></article>`;
+}
+
+function renderMetrics(){
+  const o = state.overview || {};
+  const traffic = o.traffic || {};
+  const routing = o.routing || {};
+  $('#metrics').innerHTML = [
+    metric('People', `${fmt(o.people?.active)}/${fmt(o.people?.total)}`, 'active / total', 'green'),
+    metric('Requests 24h', fmt(traffic.requests_24h), 'routed through engine', 'cyan'),
+    metric('Spend 30d', usd(traffic.estimated_spend_30d), 'estimated from model registry', 'amber'),
+    metric('Tokens 30d', fmt((traffic.input_tokens_30d || 0) + (traffic.output_tokens_30d || 0)), 'input + output', ''),
+    metric('Ready Backends', fmt(routing.ready_backends), `${fmt(routing.configured_backends)} configured`, 'green'),
+    metric('Top Auth', short((routing.auth_mix_30d || [])[0]?.auth_mode || 'none'), `${fmt((routing.auth_mix_30d || [])[0]?.count || 0)} requests`, 'red')
+  ].join('');
+}
+
+function renderPlanOptions(){
+  const options = state.plans.map(plan => `<option value="${plan.id}">${plan.name}</option>`).join('');
+  $('#personPlan').innerHTML = options || '<option value="">no plans</option>';
+}
+
+function renderPeople(){
+  $('#peopleMeta').textContent = `${fmt(state.people.length)} rows`;
+  $('#peopleRows').innerHTML = state.people.length ? state.people.map(person => `
+    <tr>
+      <td>
+        <div>${person.name}</div>
+        <div class="muted tiny mono">${person.email}</div>
+        <div class="muted tiny">${person.organization || 'unassigned org'}</div>
+      </td>
+      <td>
+        <div>${person.plan_name}</div>
+        <div class="muted tiny mono">${person.plan_id}</div>
+      </td>
+      <td>
+        <div class="pill">${person.auth_policy}</div>
+        <div class="muted tiny">${person.status}</div>
+      </td>
+      <td>
+        <div>${fmt(person.request_count)} requests</div>
+        <div class="muted tiny mono">${fmt(person.input_tokens)} in / ${fmt(person.output_tokens)} out</div>
+        <div class="muted tiny">${usd(person.estimated_cost_usd)}</div>
+      </td>
+      <td class="mono tiny">${when(person.last_seen_at)}</td>
+    </tr>`).join('') : '<tr><td colspan="5" class="empty">No people registered.</td></tr>';
+}
+
+function renderPlans(){
+  $('#plansMeta').textContent = `${fmt(state.plans.length)} rows`;
+  $('#planRows').innerHTML = state.plans.length ? state.plans.map(plan => `
+    <tr>
+      <td>
+        <div>${plan.name}</div>
+        <div class="muted tiny mono">${plan.id}</div>
+      </td>
+      <td>
+        <div>${usd(plan.price_monthly)} / month</div>
+        <div class="muted tiny mono">${fmt(plan.included_input_tokens)} in / ${fmt(plan.included_output_tokens)} out</div>
+        <div class="muted tiny">${usd(plan.estimated_cost_usd)} routed</div>
+      </td>
+      <td>
+        <div class="pill">${plan.byok_allowed ? 'BYOK' : 'No BYOK'}</div>
+        <div class="pill">${plan.managed_allowed ? 'Managed' : 'No managed'}</div>
+        <div class="pill">${plan.hosted_models_allowed ? 'Hosted' : 'No hosted'}</div>
+      </td>
+      <td>
+        <div>${fmt(plan.member_count)} members</div>
+        <div class="muted tiny">${fmt(plan.request_count)} requests</div>
+      </td>
+    </tr>`).join('') : '<tr><td colspan="4" class="empty">No plans defined.</td></tr>';
+}
+
+function renderBackends(){
+  $('#backendMeta').textContent = `${fmt(state.backends.length)} rows`;
+  $('#backendRows').innerHTML = state.backends.length ? state.backends.map(backend => `
+    <tr>
+      <td>
+        <div>${backend.name}</div>
+        <div class="muted tiny mono">${backend.id}</div>
+        <div class="muted tiny">${short(backend.base_url)}</div>
+      </td>
+      <td>
+        <div>${backend.provider}</div>
+        <div class="muted tiny">${backend.hosted_by_dsco ? 'DSCO hosted' : 'provider managed'}</div>
+      </td>
+      <td>
+        <div class="pill">${backend.transport}</div>
+        <div class="muted tiny">${backend.status}</div>
+      </td>
+      <td>
+        <div class="${backend.has_managed_key ? 'ok' : 'warn'}">${backend.api_key_env || 'request scoped'}</div>
+        <div class="muted tiny">${backend.has_managed_key ? 'env present' : 'env missing'}</div>
+      </td>
+      <td>
+        <div class="${backend.ready ? 'ok' : 'bad'}">${backend.ready ? 'ready' : 'not ready'}</div>
+        <div class="muted tiny">priority ${fmt(backend.priority)}</div>
+      </td>
+    </tr>`).join('') : '<tr><td colspan="5" class="empty">No backends configured.</td></tr>';
+}
+
+function renderCredentials(){
+  $('#credMeta').textContent = `${fmt(state.credentials.length)} rows`;
+  $('#credentialRows').innerHTML = state.credentials.length ? state.credentials.map(row => `
+    <tr>
+      <td>
+        <div>${row.person_name || row.person_id || 'unknown'}</div>
+        <div class="muted tiny mono">${row.person_id || 'unbound'}</div>
+      </td>
+      <td>${row.provider}</td>
+      <td><span class="pill">${row.source}</span></td>
+      <td>
+        <div class="mono">${row.secret_ref || row.masked_key || 'request scoped only'}</div>
+        <div class="muted tiny mono">${row.fingerprint || ''}</div>
+      </td>
+      <td class="mono tiny">${when(row.last_used_at)}</td>
+    </tr>`).join('') : '<tr><td colspan="5" class="empty">No credential usage recorded yet.</td></tr>';
+}
+
+function renderRequests(){
+  $('#requestMeta').textContent = `${fmt(state.requests.length)} rows`;
+  $('#requestRows').innerHTML = state.requests.length ? state.requests.map(req => `
+    <tr>
+      <td class="mono tiny">${when(req.created_at)}</td>
+      <td>
+        <div>${req.person_name || req.person_email || req.person_id || 'unknown'}</div>
+        <div class="muted tiny">${req.organization || ''}</div>
+      </td>
+      <td>
+        <div>${req.model}</div>
+        <div class="muted tiny">${req.provider} via ${req.backend_id || req.route_source}</div>
+        <div class="muted tiny mono">${req.auth_mode}</div>
+      </td>
+      <td>
+        <div class="${req.status === 'ok' ? 'ok' : req.status === 'dry_run' ? 'warn' : 'bad'}">${req.status}</div>
+        <div class="muted tiny">${short(req.error)}</div>
+      </td>
+      <td class="mono tiny">${fmt(req.input_tokens)} / ${fmt(req.output_tokens)}</td>
+      <td class="mono tiny">${usd(req.estimated_cost_usd)}</td>
+      <td class="mono tiny">${req.latency_ms} ms</td>
+    </tr>`).join('') : '<tr><td colspan="7" class="empty">No routed requests yet.</td></tr>';
+}
+
+async function loadAll(){
+  $('#status').textContent = 'loading control plane';
+  const [overview, plans, people, backends, credentials, requests] = await Promise.all([
+    getJSON('/api/control/overview'),
+    getJSON('/api/control/plans'),
+    getJSON('/api/control/people'),
+    getJSON('/api/control/backends'),
+    getJSON('/api/control/credentials?limit=80'),
+    getJSON('/api/control/requests?limit=120')
+  ]);
+  state.overview = overview;
+  state.plans = plans.plans || [];
+  state.people = people.people || [];
+  state.backends = backends.backends || [];
+  state.credentials = credentials.credentials || [];
+  state.requests = requests.requests || [];
+  renderMetrics();
+  renderPlanOptions();
+  renderPeople();
+  renderPlans();
+  renderBackends();
+  renderCredentials();
+  renderRequests();
+  $('#status').textContent = `db ${overview.db_path} • ${overview.people.active}/${overview.people.total} people • ${overview.traffic.requests_24h} requests in last 24h`;
+}
+
+function formJSON(form){
+  const data = new FormData(form);
+  const payload = {};
+  for(const [key, value] of data.entries()) payload[key] = value;
+  form.querySelectorAll('input[type="checkbox"]').forEach(el => payload[el.name] = el.checked);
+  return payload;
+}
+
+async function bindForms(){
+  $('#personForm').addEventListener('submit', async (e) => {
+    e.preventDefault();
+    await postJSON('/api/control/people', formJSON(e.currentTarget));
+    e.currentTarget.reset();
+    await loadAll();
+  });
+  $('#planForm').addEventListener('submit', async (e) => {
+    e.preventDefault();
+    await postJSON('/api/control/plans', formJSON(e.currentTarget));
+    e.currentTarget.reset();
+    e.currentTarget.byok_allowed.checked = true;
+    e.currentTarget.managed_allowed.checked = true;
+    e.currentTarget.is_active.checked = true;
+    await loadAll();
+  });
+  $('#backendForm').addEventListener('submit', async (e) => {
+    e.preventDefault();
+    await postJSON('/api/control/backends', formJSON(e.currentTarget));
+    e.currentTarget.reset();
+    e.currentTarget.enabled.checked = true;
+    await loadAll();
+  });
+}
+
+$('#refreshBtn').addEventListener('click', () => loadAll().catch(showError));
+
+function showError(err){
+  $('#status').textContent = err.message || String(err);
+}
+
+bindForms();
+loadAll().catch(showError);
+</script>
+</body>
+</html>
