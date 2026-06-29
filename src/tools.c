@@ -17491,7 +17491,8 @@ static bool tool_scratchpad(const char *input, char *result, size_t rlen) {
         return false;
     }
 
-    /* Parse operation: get, set, delete, list, clear */
+    /* Parse operation: get, set, delete, list, clear.
+     * Accept "action" (schema-published) as alias for "op"/"operation". */
     char op[16] = "get";
     char key[SP_KEY_LEN] = "";
     char value[SP_VALUE_LEN] = "";
@@ -17499,6 +17500,8 @@ static bool tool_scratchpad(const char *input, char *result, size_t rlen) {
     const char *s = strstr(input, "\"op\"");
     if (!s)
         s = strstr(input, "\"operation\"");
+    if (!s)
+        s = strstr(input, "\"action\"");
     if (s) {
         s = strchr(s, ':');
         if (s) {
@@ -17510,6 +17513,86 @@ static bool tool_scratchpad(const char *input, char *result, size_t rlen) {
                     memcpy(op, s, e - s);
                     op[e - s] = '\0';
                 }
+            }
+        }
+    }
+
+    /* Normalize action verbs to internal op names */
+    if (strcasecmp(op, "read") == 0)
+        snprintf(op, sizeof(op), "get");
+    else if (strcasecmp(op, "write") == 0)
+        snprintf(op, sizeof(op), "set");
+
+    /* If no key was found via "key" field, accept "content" as the key for
+     * get/read, or parse "key=value" from content for set/write. */
+    if (!key[0]) {
+        const char *c = strstr(input, "\"content\"");
+        if (c) {
+            c = strchr(c + 10, '"');
+            if (c) {
+                c++;
+                char buf[SP_VALUE_LEN] = "";
+                int ci = 0;
+                while (*c && ci < (int)sizeof(buf) - 1) {
+                    if (*c == '\\' && *(c + 1)) {
+                        c++;
+                        if (*c == 'n') buf[ci++] = '\n';
+                        else if (*c == 't') buf[ci++] = '\t';
+                        else if (*c == '"') buf[ci++] = '"';
+                        else if (*c == '\\') buf[ci++] = '\\';
+                        else buf[ci++] = *c;
+                    } else if (*c == '"')
+                        break;
+                    else
+                        buf[ci++] = *c;
+                    c++;
+                }
+                buf[ci] = '\0';
+                /* For get/read: use content as the key */
+                if (strcasecmp(op, "get") == 0) {
+                    snprintf(key, SP_KEY_LEN, "%s", buf);
+                }
+                /* For set/write: parse "key=value" or "key:value" from content */
+                if (strcasecmp(op, "set") == 0 && !key[0]) {
+                    char *sep = strpbrk(buf, "=:|");
+                    if (sep && sep != buf) {
+                        size_t klen = (size_t)(sep - buf);
+                        if (klen < SP_KEY_LEN) {
+                            memcpy(key, buf, klen);
+                            key[klen] = '\0';
+                            sep++;
+                            if (*sep == ' ' || *sep == '\t') sep++;
+                            snprintf(value, SP_VALUE_LEN, "%s", sep);
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    /* Also accept "content" as value for set when key was found but value wasn't */
+    if (strcasecmp(op, "set") == 0 && key[0] && !value[0]) {
+        const char *c = strstr(input, "\"content\"");
+        if (c) {
+            c = strchr(c + 10, '"');
+            if (c) {
+                c++;
+                int ci = 0;
+                while (*c && ci < SP_VALUE_LEN - 1) {
+                    if (*c == '\\' && *(c + 1)) {
+                        c++;
+                        if (*c == 'n') value[ci++] = '\n';
+                        else if (*c == 't') value[ci++] = '\t';
+                        else if (*c == '"') value[ci++] = '"';
+                        else if (*c == '\\') value[ci++] = '\\';
+                        else value[ci++] = *c;
+                    } else if (*c == '"')
+                        break;
+                    else
+                        value[ci++] = *c;
+                    c++;
+                }
+                value[ci] = '\0';
             }
         }
     }
@@ -27275,7 +27358,11 @@ static const tool_def_t s_tools[] = {
      .description = "Read/write scratchpad for temporary data.",
      .input_schema_json =
          "{\"type\":\"object\",\"properties\":{\"action\":{\"type\":\"string\",\"description\":"
-         "\"read|write|clear\"},\"content\":{\"type\":\"string\"}}}",
+         "\"read|write|clear|list|delete\"},\"key\":{\"type\":\"string\",\"description\":"
+         "\"Key for the entry (required for read/write/delete)\"},\"value\":{\"type\":\"string\","
+         "\"description\":\"Value to store (required for write)\"},\"content\":{\"type\":\"string\","
+         "\"description\":\"Fallback: for read, treated as key; for write, parsed as key=value\"}},"
+         "\"required\":[\"action\"]}",
      .execute = tool_scratchpad,
      .core = true}, /* mixed: read=RO, write/clear=write */
     {.name = "self_exit",
