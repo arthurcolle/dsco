@@ -8424,6 +8424,8 @@ bool agent_run(const char *api_key, const char *model, const char *topology_name
              * routes OpenRouter-prefixed models). Disable with DSCO_DYNAMIC_FAILOVER=0. */
             if (!sr.ok && session.fallback_count == 0 &&
                 fallback_decision != FALLBACK_DECISION_STOP && !g_interrupted &&
+                !provider_is_local_endpoint(g_provider ? g_provider->name :
+                                            provider_route_for_model(session.model, api_key, NULL)) &&
                 dsco_env_bool("DSCO_DYNAMIC_FAILOVER", true) &&
                 provider_has_usable_key("openrouter", api_key)) {
                 const char *reason = sr.parsed.stop_reason;

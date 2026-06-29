@@ -88,6 +88,9 @@ bool provider_has_custom_api_base(const char *provider_name);
 /* Whether a provider can be used with its env key or the current session key */
 bool provider_has_usable_key(const char *provider_name, const char *fallback_api_key);
 
+/* Whether a provider name is a local/self-hosted loopback endpoint. */
+bool provider_is_local_endpoint(const char *provider_name);
+
 /* Select the provider that should service a model for the current session */
 const char *provider_route_for_model(const char *model,
                                      const char *fallback_api_key,
