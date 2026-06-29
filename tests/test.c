@@ -10434,11 +10434,21 @@ static void test_swarm_create_accepts_per_task_providers(void) {
     ASSERT(arglog_fd >= 0, "failed to create cross-provider arg log");
     close(arglog_fd);
 
-    char script_body[768];
+    char script_body[1536];
     snprintf(script_body, sizeof(script_body),
              "#!/bin/sh\n"
-             "printf -- '---\\n' >> '%s'\n"
-             "printf '%%s\\n' \"$@\" >> '%s'\n",
+             "lock='%s.lock'\n"
+             "i=0\n"
+             "while ! mkdir \"$lock\" 2>/dev/null; do\n"
+             "  i=$((i+1))\n"
+             "  [ \"$i\" -gt 200 ] && exit 97\n"
+             "  sleep 0.01\n"
+             "done\n"
+             "{\n"
+             "  printf -- '---\\n'\n"
+             "  printf '%%s\\n' \"$@\"\n"
+             "} >> '%s'\n"
+             "rmdir \"$lock\"\n",
              arglog_path, arglog_path);
 
     char script_path[128];
@@ -10489,6 +10499,9 @@ static void test_swarm_create_accepts_per_task_providers(void) {
     free(saved_path);
     unlink(script_path);
     unlink(arglog_path);
+    char lock_path[160];
+    snprintf(lock_path, sizeof(lock_path), "%s.lock", arglog_path);
+    rmdir(lock_path);
     test_restore_env("XAI_API_KEY", saved_xai, had_xai);
     test_restore_env("ANTHROPIC_API_KEY", saved_anth, had_anth);
     PASS();
