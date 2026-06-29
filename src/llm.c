@@ -73,6 +73,49 @@ dsco_trust_tier_t session_trust_tier_from_string(const char *s, bool *ok) {
     return DSCO_TRUST_STANDARD;
 }
 
+const char *session_goal_status_to_string(dsco_goal_status_t status) {
+    switch (status) {
+        case DSCO_GOAL_NONE:
+            return "none";
+        case DSCO_GOAL_ACTIVE:
+            return "active";
+        case DSCO_GOAL_PAUSED:
+            return "paused";
+        case DSCO_GOAL_BLOCKED:
+            return "blocked";
+        case DSCO_GOAL_COMPLETE:
+            return "complete";
+        case DSCO_GOAL_BUDGET_LIMITED:
+            return "budget_limited";
+    }
+    return "none";
+}
+
+dsco_goal_status_t session_goal_status_from_string(const char *s, bool *ok) {
+    if (ok)
+        *ok = true;
+    if (!s || !s[0]) {
+        if (ok)
+            *ok = false;
+        return DSCO_GOAL_NONE;
+    }
+    if (strcmp(s, "active") == 0)
+        return DSCO_GOAL_ACTIVE;
+    if (strcmp(s, "paused") == 0)
+        return DSCO_GOAL_PAUSED;
+    if (strcmp(s, "blocked") == 0)
+        return DSCO_GOAL_BLOCKED;
+    if (strcmp(s, "complete") == 0)
+        return DSCO_GOAL_COMPLETE;
+    if (strcmp(s, "budget_limited") == 0 || strcmp(s, "limited by budget") == 0)
+        return DSCO_GOAL_BUDGET_LIMITED;
+    if (strcmp(s, "none") == 0)
+        return DSCO_GOAL_NONE;
+    if (ok)
+        *ok = false;
+    return DSCO_GOAL_NONE;
+}
+
 static bool llm_env_truthy(const char *val) {
     return val && (val[0] == '1' || strcasecmp(val, "true") == 0 || strcasecmp(val, "yes") == 0);
 }
@@ -101,6 +144,7 @@ void session_state_init(session_state_t *s, const char *model) {
     s->active_topology[0] = '\0';
     s->topology_auto = false;
     s->tool_budget_ratio = 1.0f;
+    s->structured_output_max_repairs = 1;
 
     if (!llm_env_truthy(getenv("DSCO_DISABLE_DEFAULT_FALLBACKS"))) {
         s->fallback_count = provider_build_default_fallback_models(
@@ -145,6 +189,30 @@ void session_state_init(session_state_t *s, const char *model) {
         const char *tc = getenv("DSCO_TOOL_CHOICE");
         if (tc && *tc)
             snprintf(s->tool_choice, sizeof(s->tool_choice), "%s", tc);
+        const char *so = getenv("DSCO_STRUCTURED_OUTPUT");
+        if (llm_env_truthy(so)) {
+            s->structured_output = true;
+            s->structured_output_strict = true;
+            snprintf(s->structured_output_name, sizeof(s->structured_output_name), "%s",
+                     "dsco_structured_output");
+        }
+        const char *son = getenv("DSCO_STRUCTURED_OUTPUT_NAME");
+        if (son && *son)
+            snprintf(s->structured_output_name, sizeof(s->structured_output_name), "%s", son);
+        const char *sos = getenv("DSCO_STRUCTURED_OUTPUT_SCHEMA");
+        if (sos && *sos && json_is_valid_container(sos)) {
+            s->structured_output = true;
+            snprintf(s->structured_output_schema, sizeof(s->structured_output_schema), "%s", sos);
+        }
+        const char *sostrict = getenv("DSCO_STRUCTURED_OUTPUT_STRICT");
+        if (sostrict && *sostrict)
+            s->structured_output_strict = llm_env_truthy(sostrict);
+        const char *sorepairs = getenv("DSCO_STRUCTURED_OUTPUT_REPAIRS");
+        if (sorepairs && *sorepairs) {
+            int v = atoi(sorepairs);
+            if (v >= 0 && v <= 5)
+                s->structured_output_max_repairs = v;
+        }
         const char *pck = getenv("DSCO_PROMPT_CACHE_KEY");
         if (pck && *pck)
             snprintf(s->prompt_cache_key, sizeof(s->prompt_cache_key), "%s", pck);
@@ -1429,6 +1497,22 @@ bool conv_save_ex(conversation_t *c, const session_state_t *session, const char 
             jbuf_append(&sb, ",\"pin_text\":");
             jbuf_append_json_str(&sb, session->pin_text);
         }
+        if (session->structured_output) {
+            jbuf_append(&sb, ",\"structured_output\":true");
+            jbuf_append(&sb, ",\"structured_output_strict\":");
+            jbuf_append(&sb, session->structured_output_strict ? "true" : "false");
+            if (session->structured_output_max_repairs > 0)
+                jbuf_appendf(&sb, ",\"structured_output_max_repairs\":%d",
+                             session->structured_output_max_repairs);
+            if (session->structured_output_name[0]) {
+                jbuf_append(&sb, ",\"structured_output_name\":");
+                jbuf_append_json_str(&sb, session->structured_output_name);
+            }
+            if (session->structured_output_schema[0]) {
+                jbuf_append(&sb, ",\"structured_output_schema\":");
+                jbuf_append_json_str(&sb, session->structured_output_schema);
+            }
+        }
         if (session->model[0]) {
             jbuf_append(&sb, ",\"model\":");
             jbuf_append_json_str(&sb, session->model);
@@ -1436,6 +1520,25 @@ bool conv_save_ex(conversation_t *c, const session_state_t *session, const char 
         if (session->slot_name[0]) {
             jbuf_append(&sb, ",\"slot_name\":");
             jbuf_append_json_str(&sb, session->slot_name);
+        }
+        if (session->goal_objective[0]) {
+            jbuf_append(&sb, ",\"goal_objective\":");
+            jbuf_append_json_str(&sb, session->goal_objective);
+            jbuf_append(&sb, ",\"goal_status\":");
+            jbuf_append_json_str(&sb, session_goal_status_to_string(session->goal_status));
+            if (session->goal_token_budget > 0)
+                jbuf_appendf(&sb, ",\"goal_token_budget\":%d", session->goal_token_budget);
+            if (session->goal_tokens_at_start >= 0)
+                jbuf_appendf(&sb, ",\"goal_tokens_at_start\":%d",
+                             session->goal_tokens_at_start);
+            if (session->goal_turns_at_start >= 0)
+                jbuf_appendf(&sb, ",\"goal_turns_at_start\":%d", session->goal_turns_at_start);
+            if (session->goal_started_at > 0)
+                jbuf_appendf(&sb, ",\"goal_started_at\":%lld",
+                             (long long)session->goal_started_at);
+            if (session->goal_updated_at > 0)
+                jbuf_appendf(&sb, ",\"goal_updated_at\":%lld",
+                             (long long)session->goal_updated_at);
         }
         jbuf_append(&sb, "},");
         fwrite(sb.data, 1, sb.len, f);
@@ -1543,6 +1646,24 @@ bool conv_load_ex(conversation_t *c, session_state_t *session, const char *path)
                 snprintf(session->pin_text, sizeof(session->pin_text), "%s", pin_text);
                 free(pin_text);
             }
+            session->structured_output = json_get_bool(session_raw, "structured_output",
+                                                       session->structured_output);
+            session->structured_output_strict = json_get_bool(
+                session_raw, "structured_output_strict", session->structured_output_strict);
+            int so_repairs = json_get_int(session_raw, "structured_output_max_repairs",
+                                          session->structured_output_max_repairs);
+            if (so_repairs >= 0 && so_repairs <= 5)
+                session->structured_output_max_repairs = so_repairs;
+            char *so_name = json_get_str(session_raw, "structured_output_name");
+            if (so_name && so_name[0])
+                snprintf(session->structured_output_name, sizeof(session->structured_output_name),
+                         "%s", so_name);
+            free(so_name);
+            char *so_schema = json_get_str(session_raw, "structured_output_schema");
+            if (so_schema && json_is_valid_container(so_schema))
+                snprintf(session->structured_output_schema,
+                         sizeof(session->structured_output_schema), "%s", so_schema);
+            free(so_schema);
             char *saved_model = json_get_str(session_raw, "model");
             if (saved_model && saved_model[0])
                 snprintf(session->model, sizeof(session->model), "%s", saved_model);
@@ -1551,6 +1672,31 @@ bool conv_load_ex(conversation_t *c, session_state_t *session, const char *path)
             if (saved_slot && saved_slot[0])
                 snprintf(session->slot_name, sizeof(session->slot_name), "%s", saved_slot);
             free(saved_slot);
+            char *goal_objective = json_get_str(session_raw, "goal_objective");
+            if (goal_objective && goal_objective[0]) {
+                snprintf(session->goal_objective, sizeof(session->goal_objective), "%s",
+                         goal_objective);
+                char *goal_status = json_get_str(session_raw, "goal_status");
+                bool goal_ok = false;
+                dsco_goal_status_t parsed_goal =
+                    session_goal_status_from_string(goal_status, &goal_ok);
+                session->goal_status = goal_ok ? parsed_goal : DSCO_GOAL_ACTIVE;
+                free(goal_status);
+                session->goal_token_budget =
+                    json_get_int(session_raw, "goal_token_budget", session->goal_token_budget);
+                session->goal_tokens_at_start =
+                    json_get_int(session_raw, "goal_tokens_at_start",
+                                 session->goal_tokens_at_start);
+                session->goal_turns_at_start =
+                    json_get_int(session_raw, "goal_turns_at_start", session->goal_turns_at_start);
+                session->goal_started_at =
+                    (time_t)json_get_int(session_raw, "goal_started_at",
+                                         (int)session->goal_started_at);
+                session->goal_updated_at =
+                    (time_t)json_get_int(session_raw, "goal_updated_at",
+                                         (int)session->goal_updated_at);
+            }
+            free(goal_objective);
             free(session_raw);
         }
     }
@@ -2950,6 +3096,44 @@ char *llm_build_request_ex_for_credential(conversation_t *c, session_state_t *se
     if (session->memory_context[0]) {
         jbuf_append(&b, ",{\"type\":\"text\",\"text\":");
         jbuf_append_json_str(&b, session->memory_context);
+        jbuf_append(&b, "}");
+    }
+    if (session->structured_output) {
+        jbuf_append(&b, ",{\"type\":\"text\",\"text\":");
+        jbuf_t sop;
+        jbuf_init(&sop, 1024);
+        jbuf_append(&sop, "[Structured Output Contract]\nFor the final assistant answer, emit exactly one valid JSON object and no markdown, prose, code fences, comments, or trailing text. Preserve numeric/boolean/null types exactly. ");
+        if (session->structured_output_schema[0]) {
+            jbuf_append(&sop, "The JSON must conform to this schema: ");
+            jbuf_append(&sop, session->structured_output_schema);
+        } else {
+            jbuf_append(&sop, "Use a stable object shape with explicit keys appropriate to the task.");
+        }
+        jbuf_append_json_str(&b, sop.data ? sop.data : "");
+        jbuf_append(&b, "}");
+        jbuf_free(&sop);
+    }
+    if (session->goal_objective[0] && session->goal_status == DSCO_GOAL_ACTIVE) {
+        char goal_prompt[2600];
+        int used = session->total_input_tokens + session->total_output_tokens -
+                   session->goal_tokens_at_start;
+        if (used < 0)
+            used = 0;
+        if (session->goal_token_budget > 0) {
+            snprintf(goal_prompt, sizeof(goal_prompt),
+                     "[Active Goal]\nObjective: %s\nStatus: active\nTokens used on goal: %d / %d\n"
+                     "Keep working toward this objective until the user changes it with /goal. "
+                     "If the objective is complete, call self_exit with a concise completion reason.",
+                     session->goal_objective, used, session->goal_token_budget);
+        } else {
+            snprintf(goal_prompt, sizeof(goal_prompt),
+                     "[Active Goal]\nObjective: %s\nStatus: active\nTokens used on goal: %d\n"
+                     "Keep working toward this objective until the user changes it with /goal. "
+                     "If the objective is complete, call self_exit with a concise completion reason.",
+                     session->goal_objective, used);
+        }
+        jbuf_append(&b, ",{\"type\":\"text\",\"text\":");
+        jbuf_append_json_str(&b, goal_prompt);
         jbuf_append(&b, "}");
     }
 

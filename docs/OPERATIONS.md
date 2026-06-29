@@ -69,6 +69,8 @@ From `agent.c`, key commands include:
 - `/effort [low|medium|high]`
 - `/cost`
 - `/context`
+- `/goal [objective|edit <objective>|pause|resume|blocked|complete|clear]`
+- `/goal budget <tokens|off>`
 - `/compact`
 - `/save [name]`
 - `/load [name]`
@@ -179,7 +181,7 @@ DSCO_ENV_FILE="$PWD/.dsco.env.ci" DSCO_NO_AUTO_INTERACTIVE=1 ./dsco --version
 | Runtime internal | `DSCO_SUPERVISED`, `DSCO_RESUME_AFTER_CRASH`, `DSCO_MEM_PRESSURE`, `DSCO_SUBAGENT`, `DSCO_SWARM_DEPTH`. | Never persist. Clear before manual repros. |
 | Diagnostics | `DSCO_DEBUG_AUTH`, `DSCO_DEBUG_REQUEST`, `DSCO_TRACE`, `DSCO_PERF`, `DSCO_TEST_CRASH`. | Use narrowly. Remove after the repro. Treat generated logs as potentially sensitive. |
 | Resource policy | `DSCO_SUPERVISE_*`, `DSCO_MAX_TOKENS`, `DSCO_TOOL_DEFAULT_TIMEOUT`, swarm limits. | Tune per host or test suite. Do not globally raise limits without load testing. |
-| UI/local preference | `DSCO_GLYPH`, `DSCO_NO_CLEAR`, `DSCO_HYPERLINKS`, local host overrides. | Safe to persist if non-secret and machine-specific. |
+| UI/local preference | `DSCO_GLYPH`, `DSCO_TUI_ANIM`, `DSCO_REDUCED_MOTION`, `DSCO_NO_CLEAR`, `DSCO_HYPERLINKS`, local host overrides. | Safe to persist if non-secret and machine-specific. |
 
 ### Chronicle Activity Ledger
 

@@ -34,6 +34,26 @@ extern char **environ;
 static char s_env_path[PATH_MAX] = {0};
 static char s_profile[128] = {0};
 
+static bool setup_ascii_eq_ci(const char *a, const char *b) {
+    if (!a || !b)
+        return false;
+    while (*a && *b) {
+        if (tolower((unsigned char)*a) != tolower((unsigned char)*b))
+            return false;
+        a++;
+        b++;
+    }
+    return *a == '\0' && *b == '\0';
+}
+
+static bool setup_env_truthy(const char *value) {
+    if (!value || !value[0])
+        return false;
+    return strcmp(value, "1") == 0 || setup_ascii_eq_ci(value, "true") ||
+           setup_ascii_eq_ci(value, "yes") || setup_ascii_eq_ci(value, "on") ||
+           setup_ascii_eq_ci(value, "y") || setup_ascii_eq_ci(value, "t");
+}
+
 static const char *k_known_env_keys[] = {
     "ANTHROPIC_API_KEY", "OPENAI_API_KEY", "JINA_API_KEY", "PARALLEL_API_KEY", "OPENROUTER_API_KEY",
     "TOGETHER_API_KEY", "GROQ_API_KEY", "DEEPSEEK_API_KEY", "MISTRAL_API_KEY", "KIMI_API_KEY",
@@ -49,6 +69,8 @@ static const char *k_known_env_keys[] = {
     "DISCORD_TOKEN", "TWILIO_AUTH_TOKEN", "STRIPE_API_KEY", "MAPBOX_API_KEY",
     "OPENWEATHERMAP_API_KEY", "ALPHA_VANTAGE_API_KEY", "FRED_API_KEY",
     "FUGU_API_KEY", "FUGU_PAYG_API_KEY", "FUGU_BASE_URL",
+    "GLM_API_KEY", "ZAI_API_KEY", "Z_AI_API_KEY", "ZAI_CODING_PLAN_API_KEY",
+    "Z_AI_CODING_PLAN_API_KEY", "ZHIPU_API_KEY",
     /* Trading / Prediction Markets */
     "KALSHI_API_KEY", "KALSHI_RSA_PRIVATE_KEY_PATH", "POLYMARKET_ADDRESS", "POLYMARKET_API_KEY",
     "POLYMARKET_API_SECRET", "POLYMARKET_PASSPHRASE", "POLYMARKET_PRIVATE_KEY",
@@ -74,6 +96,9 @@ static const alias_map_t k_aliases[] = {
     {"TOGETHER_API_KEY", {"TOGETHER_TOKEN", NULL}},
     {"XAI_API_KEY", {"GROK_API_KEY", "X_AI_API_KEY", NULL}},
     {"KIMI_API_KEY", {"KIMI_CODING_API_KEY", "MOONSHOT_API_KEY", "MOONSHOTAI_API_KEY", NULL}},
+    {"GLM_API_KEY",
+     {"ZAI_API_KEY", "Z_AI_API_KEY", "ZAI_CODING_PLAN_API_KEY", "Z_AI_CODING_PLAN_API_KEY",
+      "ZHIPU_API_KEY", NULL}},
     {"FUGU_API_KEY", {"SAKANA_API_KEY", "FISH_API_KEY", "SAKANA_TOKEN", NULL}},
     {"FUGU_PAYG_API_KEY", {"SAKANA_PAYG_API_KEY", "FISH_PAYG_API_KEY", "SAKANA_PAYG_TOKEN", NULL}},
     {"FUGU_BASE_URL", {"FUGU_API_BASE", "SAKANA_API_BASE", "SAKANA_BASE_URL", NULL}},
@@ -199,16 +224,9 @@ static void mask_value(const char *val, char *out, size_t out_len) {
         snprintf(out, out_len, "(unset)");
         return;
     }
-    size_t n = strlen(val);
-    if (n <= 6) {
-        snprintf(out, out_len, "**** (%zu chars)", n);
-        return;
-    }
-    char prefix[5] = {0};
-    char suffix[5] = {0};
-    memcpy(prefix, val, 3);
-    memcpy(suffix, val + n - 3, 3);
-    snprintf(out, out_len, "%s...%s (%zu chars)", prefix, suffix, n);
+    /* Do not leak token prefixes/suffixes in reports or artifacts. Length is
+     * enough to diagnose presence/shape without creating reusable fragments. */
+    snprintf(out, out_len, "[redacted] (%zu chars)", strlen(val));
 }
 
 static void kv_list_init(kv_list_t *l) {
@@ -778,6 +796,13 @@ int dsco_setup_autopopulate(bool overwrite, bool include_generic, char *summary,
 }
 
 int dsco_setup_bootstrap_from_env(char *summary, size_t summary_len) {
+    if (setup_env_truthy(getenv("DSCO_SETUP_NO_AUTO_BOOTSTRAP")) ||
+        setup_env_truthy(getenv("DSCO_NO_SETUP_BOOTSTRAP"))) {
+        if (summary && summary_len > 0) {
+            snprintf(summary, summary_len, "bootstrap skipped: disabled by env");
+        }
+        return 0;
+    }
     const char *path = resolve_env_path();
     if (access(path, F_OK) == 0) {
         if (summary && summary_len > 0) {

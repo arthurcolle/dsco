@@ -1,0 +1,55 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://distributed.systems/schemas/consumer_profile_ontology/evidence_event.schema.json",
+  "title": "Facet Evidence Event",
+  "type": "object",
+  "required": [
+    "event_id",
+    "user_id",
+    "event_type",
+    "event_time",
+    "source_class",
+    "facet_impacts"
+  ],
+  "properties": {
+    "event_id": {
+      "type": "string"
+    },
+    "user_id": {
+      "type": "string"
+    },
+    "event_type": {
+      "type": "string"
+    },
+    "event_time": {
+      "type": "string"
+    },
+    "source_class": {
+      "type": "string"
+    },
+    "source_system": {
+      "type": "string"
+    },
+    "entity_refs": {
+      "type": "array"
+    },
+    "facet_impacts": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": [
+          "facet_id",
+          "direction",
+          "strength"
+        ]
+      }
+    },
+    "privacy_scope": {
+      "type": "string"
+    },
+    "retention_class": {
+      "type": "string"
+    }
+  },
+  "additionalProperties": true
+}

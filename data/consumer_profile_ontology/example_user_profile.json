@@ -1,0 +1,25 @@
+{
+  "user_id": "hash:user:example",
+  "facets": {
+    "u.content.sports.trail_running.affinity": {
+      "value": 0.88,
+      "confidence": 0.89,
+      "freshness_score": 0.84
+    },
+    "u.commerce.apparel.footwear.purchase_intent": {
+      "value": 0.72,
+      "confidence": 0.7,
+      "freshness_score": 0.91
+    },
+    "u.comm.format.longform_text.preference": {
+      "value": 0.83,
+      "confidence": 0.86,
+      "freshness_score": 0.8
+    }
+  },
+  "privacy_controls": {
+    "ads_personalization_allowed": true,
+    "partner_data_allowed": false,
+    "precise_location_allowed": false
+  }
+}

@@ -63,14 +63,24 @@ void jbuf_reset(jbuf_t *b) {
 }
 
 static void jbuf_grow(jbuf_t *b, size_t need) {
-    if (b->len + need + 1 <= b->cap)
+    if (!b)
         return;
-    /* Guard against size_t overflow */
-    size_t newcap = b->cap * 2;
-    if (newcap < b->cap)
-        newcap = b->len + need + 1; /* overflow: use exact */
-    if (newcap < b->len + need + 1)
-        newcap = b->len + need + 1;
+    if (need > (size_t)-1 - b->len - 1) {
+        fprintf(stderr, "dsco: fatal: jbuf size overflow\n");
+        abort();
+    }
+    size_t required = b->len + need + 1;
+    if (required <= b->cap)
+        return;
+
+    size_t newcap = b->cap ? b->cap : 64;
+    while (newcap < required) {
+        if (newcap > (size_t)-1 / 2) {
+            newcap = required;
+            break;
+        }
+        newcap *= 2;
+    }
     b->data = safe_realloc(b->data, newcap);
     b->cap = newcap;
 }
@@ -84,13 +94,29 @@ void jbuf_append(jbuf_t *b, const char *s) {
 }
 
 void jbuf_appendf(jbuf_t *b, const char *fmt, ...) {
+    if (!b || !fmt)
+        return;
     char tmp[1024];
     va_list ap;
     va_start(ap, fmt);
     int n = vsnprintf(tmp, sizeof(tmp), fmt, ap);
     va_end(ap);
-    if (n > 0)
-        jbuf_append_len(b, tmp, (size_t)(n < (int)sizeof(tmp) ? n : (int)sizeof(tmp) - 1));
+    if (n <= 0)
+        return;
+    if ((size_t)n < sizeof(tmp)) {
+        jbuf_append_len(b, tmp, (size_t)n);
+        return;
+    }
+
+    char *dyn = safe_malloc((size_t)n + 1);
+    va_start(ap, fmt);
+    int n2 = vsnprintf(dyn, (size_t)n + 1, fmt, ap);
+    va_end(ap);
+    if (n2 > 0) {
+        size_t used = (size_t)n2 < (size_t)n ? (size_t)n2 : (size_t)n;
+        jbuf_append_len(b, dyn, used);
+    }
+    free(dyn);
 }
 
 void jbuf_append_len(jbuf_t *b, const char *s, size_t n) {
@@ -461,6 +487,192 @@ double json_get_double(const char *json, const char *key, double def) {
     return v;
 }
 
+static bool json_strict_hex4(const char *p) {
+    for (int i = 0; i < 4; i++, p++) {
+        if (*p == '\0')
+            return false;
+        unsigned char c = (unsigned char)*p;
+        if (!isxdigit(c))
+            return false;
+    }
+    return true;
+}
+
+static bool json_strict_string(const char **pp) {
+    const char *p = *pp;
+    if (*p != '"')
+        return false;
+    p++;
+    while (*p) {
+        unsigned char c = (unsigned char)*p++;
+        if (c == '"') {
+            *pp = p;
+            return true;
+        }
+        if (c < 0x20)
+            return false;
+        if (c == '\\') {
+            char e = *p++;
+            switch (e) {
+                case '"':
+                case '\\':
+                case '/':
+                case 'b':
+                case 'f':
+                case 'n':
+                case 'r':
+                case 't':
+                    break;
+                case 'u':
+                    if (!json_strict_hex4(p))
+                        return false;
+                    p += 4;
+                    break;
+                default:
+                    return false;
+            }
+        }
+    }
+    return false;
+}
+
+static bool json_strict_number(const char **pp) {
+    const char *p = *pp;
+    if (*p == '-')
+        p++;
+    if (*p == '0') {
+        p++;
+    } else if (*p >= '1' && *p <= '9') {
+        while (*p >= '0' && *p <= '9')
+            p++;
+    } else {
+        return false;
+    }
+    if (*p == '.') {
+        p++;
+        if (!(*p >= '0' && *p <= '9'))
+            return false;
+        while (*p >= '0' && *p <= '9')
+            p++;
+    }
+    if (*p == 'e' || *p == 'E') {
+        p++;
+        if (*p == '+' || *p == '-')
+            p++;
+        if (!(*p >= '0' && *p <= '9'))
+            return false;
+        while (*p >= '0' && *p <= '9')
+            p++;
+    }
+    *pp = p;
+    return true;
+}
+
+static bool json_strict_value(const char **pp, int depth);
+
+static bool json_strict_array(const char **pp, int depth) {
+    const char *p = *pp;
+    if (*p != '[')
+        return false;
+    p++;
+    p = skip_ws(p);
+    if (*p == ']') {
+        *pp = p + 1;
+        return true;
+    }
+    while (*p) {
+        if (!json_strict_value(&p, depth + 1))
+            return false;
+        p = skip_ws(p);
+        if (*p == ']') {
+            *pp = p + 1;
+            return true;
+        }
+        if (*p != ',')
+            return false;
+        p++;
+        p = skip_ws(p);
+        if (*p == ']')
+            return false; /* trailing comma */
+    }
+    return false;
+}
+
+static bool json_strict_object(const char **pp, int depth) {
+    const char *p = *pp;
+    if (*p != '{')
+        return false;
+    p++;
+    p = skip_ws(p);
+    if (*p == '}') {
+        *pp = p + 1;
+        return true;
+    }
+    while (*p) {
+        if (!json_strict_string(&p))
+            return false;
+        p = skip_ws(p);
+        if (*p != ':')
+            return false;
+        p++;
+        if (!json_strict_value(&p, depth + 1))
+            return false;
+        p = skip_ws(p);
+        if (*p == '}') {
+            *pp = p + 1;
+            return true;
+        }
+        if (*p != ',')
+            return false;
+        p++;
+        p = skip_ws(p);
+        if (*p == '}')
+            return false; /* trailing comma */
+    }
+    return false;
+}
+
+static bool json_strict_value(const char **pp, int depth) {
+    if (depth > 512)
+        return false;
+    const char *p = skip_ws(*pp);
+    bool ok = false;
+    if (*p == '{') {
+        ok = json_strict_object(&p, depth);
+    } else if (*p == '[') {
+        ok = json_strict_array(&p, depth);
+    } else if (*p == '"') {
+        ok = json_strict_string(&p);
+    } else if (*p == '-' || (*p >= '0' && *p <= '9')) {
+        ok = json_strict_number(&p);
+    } else if (strncmp(p, "true", 4) == 0) {
+        p += 4;
+        ok = true;
+    } else if (strncmp(p, "false", 5) == 0) {
+        p += 5;
+        ok = true;
+    } else if (strncmp(p, "null", 4) == 0) {
+        p += 4;
+        ok = true;
+    }
+    if (!ok)
+        return false;
+    *pp = p;
+    return true;
+}
+
+bool json_is_valid_container(const char *json) {
+    if (!json)
+        return false;
+    const char *p = skip_ws(json);
+    if (*p != '{' && *p != '[')
+        return false;
+    if (!json_strict_value(&p, 0))
+        return false;
+    p = skip_ws(p);
+    return *p == '\0';
+}
+
 int json_array_foreach(const char *json, const char *key, json_array_cb cb, void *ctx) {
     const char *p = skip_ws(json);
     if (*p != '{')
@@ -806,6 +1018,262 @@ static bool json_has_key(const char *json, const char *key) {
     return find_key(p + 1, key) != NULL;
 }
 
+static bool json_value_type_matches(const char *value, const char *expected_type) {
+    if (!value || !expected_type)
+        return true;
+    char actual = json_peek_type(value);
+    if (strcmp(expected_type, "string") == 0)
+        return actual == '"';
+    if (strcmp(expected_type, "object") == 0)
+        return actual == '{';
+    if (strcmp(expected_type, "array") == 0)
+        return actual == '[';
+    if (strcmp(expected_type, "boolean") == 0)
+        return actual == 't' || actual == 'f';
+    if (strcmp(expected_type, "number") == 0)
+        return actual == '-' || (actual >= '0' && actual <= '9');
+    if (strcmp(expected_type, "integer") == 0) {
+        if (!(actual == '-' || (actual >= '0' && actual <= '9')))
+            return false;
+        const char *p = skip_ws(value);
+        const char *end = skip_value(p);
+        while (p < end) {
+            if (*p == '.' || *p == 'e' || *p == 'E')
+                return false;
+            p++;
+        }
+        return true;
+    }
+    if (strcmp(expected_type, "null") == 0)
+        return actual == 'n';
+    return true; /* unknown schema type: don't fail closed on dialect extensions */
+}
+
+static void json_schema_set_error(json_validation_t *result, const char *field,
+                                  const char *fmt, const char *a, const char *b) {
+    if (!result)
+        return;
+    result->valid = false;
+    snprintf(result->field, sizeof(result->field), "%s", field ? field : "");
+    snprintf(result->error, sizeof(result->error), fmt, a ? a : "", b ? b : "");
+}
+
+static bool json_schema_validate_value(const char *value, const char *schema,
+                                       const char *path, int depth,
+                                       json_validation_t *result);
+
+static bool json_schema_validate_required(const char *value, const char *schema,
+                                          const char *path, int depth,
+                                          json_validation_t *result) {
+    const char *req = find_key(skip_ws(schema) + 1, "required");
+    if (!req)
+        return true;
+    req = skip_ws(req);
+    if (*req != '[')
+        return true;
+    req++;
+    req = skip_ws(req);
+    while (*req && *req != ']') {
+        if (*req != '"')
+            break;
+        char *field = NULL;
+        const char *after = parse_string(req, &field);
+        if (field) {
+            if (!json_has_key(value, field)) {
+                char field_path[128];
+                snprintf(field_path, sizeof(field_path), "%s%s%s",
+                         path && path[0] ? path : "$", path && path[0] ? "." : "", field);
+                json_schema_set_error(result, field_path, "missing required field: %s", field,
+                                      NULL);
+                free(field);
+                return false;
+            }
+            free(field);
+        }
+        if (!after || after <= req)
+            break;
+        req = skip_ws(after);
+        if (*req == ',')
+            req++;
+        req = skip_ws(req);
+    }
+    (void)depth;
+    return true;
+}
+
+static bool json_schema_validate_properties(const char *value, const char *schema,
+                                            const char *path, int depth,
+                                            json_validation_t *result) {
+    const char *props = find_key(skip_ws(schema) + 1, "properties");
+    if (!props)
+        return true;
+    props = skip_ws(props);
+    if (*props != '{')
+        return true;
+    props++;
+    props = skip_ws(props);
+    while (*props && *props != '}') {
+        if (*props != '"')
+            break;
+        char *prop_name = NULL;
+        const char *after = parse_string(props, &prop_name);
+        if (!after || after <= props) {
+            free(prop_name);
+            break;
+        }
+        after = skip_ws(after);
+        if (*after == ':')
+            after++;
+        after = skip_ws(after);
+        const char *schema_start = after;
+        const char *schema_end = skip_value(after);
+        if (prop_name && json_has_key(value, prop_name)) {
+            const char *child_value = find_key(skip_ws(value) + 1, prop_name);
+            if (child_value) {
+                size_t slen = (size_t)(schema_end - schema_start);
+                char *child_schema = safe_malloc(slen + 1);
+                memcpy(child_schema, schema_start, slen);
+                child_schema[slen] = '\0';
+                char child_path[128];
+                snprintf(child_path, sizeof(child_path), "%s.%s", path && path[0] ? path : "$",
+                         prop_name);
+                bool ok = json_schema_validate_value(child_value, child_schema, child_path,
+                                                     depth + 1, result);
+                free(child_schema);
+                if (!ok) {
+                    free(prop_name);
+                    return false;
+                }
+            }
+        }
+        free(prop_name);
+        if (schema_end <= schema_start && *schema_end)
+            break;
+        after = skip_ws(schema_end);
+        if (*after == ',')
+            after++;
+        props = skip_ws(after);
+    }
+    return true;
+}
+
+static bool json_schema_validate_array_items(const char *value, const char *schema,
+                                             const char *path, int depth,
+                                             json_validation_t *result) {
+    const char *items = find_key(skip_ws(schema) + 1, "items");
+    if (!items)
+        return true;
+    items = skip_ws(items);
+    if (*items != '{')
+        return true;
+    const char *items_end = skip_value(items);
+    size_t ilen = (size_t)(items_end - items);
+    char *item_schema = safe_malloc(ilen + 1);
+    memcpy(item_schema, items, ilen);
+    item_schema[ilen] = '\0';
+
+    const char *p = skip_ws(value);
+    if (*p != '[') {
+        free(item_schema);
+        return true;
+    }
+    p++;
+    p = skip_ws(p);
+    int idx = 0;
+    while (*p && *p != ']') {
+        char item_path[128];
+        snprintf(item_path, sizeof(item_path), "%s[%d]", path && path[0] ? path : "$", idx);
+        if (!json_schema_validate_value(p, item_schema, item_path, depth + 1, result)) {
+            free(item_schema);
+            return false;
+        }
+        const char *before = p;
+        p = skip_value(p);
+        if (p <= before && *p)
+            break;
+        p = skip_ws(p);
+        if (*p == ',')
+            p++;
+        p = skip_ws(p);
+        idx++;
+    }
+    free(item_schema);
+    return true;
+}
+
+static bool json_schema_validate_value(const char *value, const char *schema,
+                                       const char *path, int depth,
+                                       json_validation_t *result) {
+    if (depth > 32)
+        return true; /* recursion guard: schema is advisory, not a parser bomb */
+    const char *sp = skip_ws(schema);
+    if (*sp != '{')
+        return true;
+
+    char *expected_type = NULL;
+    const char *type_val = find_key(sp + 1, "type");
+    if (type_val) {
+        type_val = skip_ws(type_val);
+        if (*type_val == '"')
+            parse_string(type_val, &expected_type);
+        else if (*type_val == '[') {
+            /* Accept union types when any listed primitive matches. */
+            const char *tp = type_val + 1;
+            bool any_match = false;
+            while (*tp && *tp != ']') {
+                if (*tp == '"') {
+                    char *one = NULL;
+                    const char *after = parse_string(tp, &one);
+                    if (one && json_value_type_matches(value, one))
+                        any_match = true;
+                    free(one);
+                    if (!after || after <= tp)
+                        break;
+                    tp = skip_ws(after);
+                    if (*tp == ',')
+                        tp++;
+                    tp = skip_ws(tp);
+                } else {
+                    tp++;
+                }
+            }
+            if (!any_match) {
+                json_schema_set_error(result, path, "field '%s': expected one of union types",
+                                      path ? path : "$", NULL);
+                return false;
+            }
+        }
+    }
+    if (expected_type) {
+        if (!json_value_type_matches(value, expected_type)) {
+            json_schema_set_error(result, path, "field '%s': expected %s", path ? path : "$",
+                                  expected_type);
+            free(expected_type);
+            return false;
+        }
+    }
+
+    const char *vp = skip_ws(value);
+    if (*vp == '{') {
+        if (!json_schema_validate_required(vp, sp, path, depth, result)) {
+            free(expected_type);
+            return false;
+        }
+        if (!json_schema_validate_properties(vp, sp, path, depth, result)) {
+            free(expected_type);
+            return false;
+        }
+    } else if (*vp == '[') {
+        if (!json_schema_validate_array_items(vp, sp, path, depth, result)) {
+            free(expected_type);
+            return false;
+        }
+    }
+
+    free(expected_type);
+    return true;
+}
+
 json_validation_t json_validate_schema(const char *json, const char *schema_json) {
     json_validation_t result = {.valid = true, .error = "", .field = ""};
 
@@ -815,134 +1283,38 @@ json_validation_t json_validate_schema(const char *json, const char *schema_json
         return result;
     }
 
-    /* Quick check: input should be an object */
-    const char *jp = skip_ws(json);
-    if (*jp != '{') {
+    const char *effective_json = json;
+    char *json_slice = NULL;
+    if (!json_is_valid_container(json)) {
+        /* json_array_foreach callbacks receive a pointer to the element start,
+         * not a bounded slice.  Validate exactly the first JSON value in that
+         * stream so schema validation remains strict without rejecting valid
+         * array elements followed by ',' or ']'. */
+        const char *start = skip_ws(json);
+        const char *end = skip_value(start);
+        if (end > start) {
+            size_t n = (size_t)(end - start);
+            json_slice = safe_malloc(n + 1);
+            memcpy(json_slice, start, n);
+            json_slice[n] = '\0';
+            if (json_is_valid_container(json_slice))
+                effective_json = json_slice;
+        }
+        if (effective_json == json) {
+            result.valid = false;
+            snprintf(result.error, sizeof(result.error), "input is not a valid JSON object/array");
+            free(json_slice);
+            return result;
+        }
+    }
+    if (!json_is_valid_container(schema_json)) {
         result.valid = false;
-        snprintf(result.error, sizeof(result.error), "input is not a JSON object");
+        snprintf(result.error, sizeof(result.error), "schema is not a valid JSON object/array");
+        free(json_slice);
         return result;
     }
 
-    const char *sp = skip_ws(schema_json);
-    if (*sp != '{')
-        return result; /* can't validate without schema */
-
-    /* Extract "required" array from schema */
-    const char *req = find_key(sp + 1, "required");
-    if (req) {
-        req = skip_ws(req);
-        if (*req == '[') {
-            req++;
-            req = skip_ws(req);
-            while (*req && *req != ']') {
-                if (*req == '"') {
-                    char *field = NULL;
-                    const char *after = parse_string(req, &field);
-                    if (field) {
-                        if (!json_has_key(json, field)) {
-                            result.valid = false;
-                            snprintf(result.field, sizeof(result.field), "%s", field);
-                            snprintf(result.error, sizeof(result.error),
-                                     "missing required field: %s", field);
-                            free(field);
-                            return result;
-                        }
-                        free(field);
-                    }
-                    if (!after || after <= req)
-                        break;
-                    req = skip_ws(after);
-                    if (*req == ',')
-                        req++;
-                    req = skip_ws(req);
-                } else {
-                    break;
-                }
-            }
-        }
-    }
-
-    /* Extract "properties" from schema and type-check present fields */
-    const char *props = find_key(sp + 1, "properties");
-    if (props) {
-        props = skip_ws(props);
-        if (*props == '{') {
-            props++;
-            props = skip_ws(props);
-            while (*props && *props != '}') {
-                if (*props == '"') {
-                    char *prop_name = NULL;
-                    const char *after = parse_string(props, &prop_name);
-                    if (!after || after <= props) {
-                        free(prop_name);
-                        break;
-                    }
-                    after = skip_ws(after);
-                    if (*after == ':')
-                        after++;
-                    after = skip_ws(after);
-
-                    /* Get expected type from property schema */
-                    char *expected_type = NULL;
-                    if (*after == '{') {
-                        const char *type_val = find_key(after + 1, "type");
-                        if (type_val && *type_val == '"') {
-                            parse_string(type_val, &expected_type);
-                        }
-                    }
-
-                    /* Check actual value type if field exists */
-                    if (prop_name && expected_type && json_has_key(json, prop_name)) {
-                        const char *val = find_key(jp + 1, prop_name);
-                        if (val) {
-                            char actual = json_peek_type(val);
-                            bool type_ok = true;
-                            if (strcmp(expected_type, "string") == 0 && actual != '"')
-                                type_ok = false;
-                            else if (strcmp(expected_type, "object") == 0 && actual != '{')
-                                type_ok = false;
-                            else if (strcmp(expected_type, "array") == 0 && actual != '[')
-                                type_ok = false;
-                            else if (strcmp(expected_type, "boolean") == 0 && actual != 't' &&
-                                     actual != 'f')
-                                type_ok = false;
-                            else if (strcmp(expected_type, "number") == 0 && actual != '-' &&
-                                     !(actual >= '0' && actual <= '9'))
-                                type_ok = false;
-                            else if (strcmp(expected_type, "integer") == 0 && actual != '-' &&
-                                     !(actual >= '0' && actual <= '9'))
-                                type_ok = false;
-
-                            if (!type_ok) {
-                                result.valid = false;
-                                snprintf(result.field, sizeof(result.field), "%s", prop_name);
-                                snprintf(result.error, sizeof(result.error),
-                                         "field '%s': expected %s", prop_name, expected_type);
-                                free(prop_name);
-                                free(expected_type);
-                                return result;
-                            }
-                        }
-                    }
-
-                    free(prop_name);
-                    free(expected_type);
-
-                    /* Skip past property schema value */
-                    const char *before = after;
-                    after = skip_value(after);
-                    if (after <= before && *after)
-                        break;
-                    after = skip_ws(after);
-                    if (*after == ',')
-                        after++;
-                    props = skip_ws(after);
-                } else {
-                    break;
-                }
-            }
-        }
-    }
-
+    json_schema_validate_value(effective_json, schema_json, "$", 0, &result);
+    free(json_slice);
     return result;
 }

@@ -348,20 +348,30 @@ int memory_consolidate(memory_store_t *m) {
         if (!e->active || e->tier >= MEM_SEMANTIC)
             continue;
 
-        /* Promote if frequently accessed or high importance */
+        /* Principled promotion (doctrine/MEMORY.md Rule 0): rank by the computable
+         * keep_score in PROMOTION mode (importance dominates so an old, rarely-
+         * re-accessed failure-lesson still survives) instead of a boolean OR of
+         * thresholds. Relevance has no live query at sweep time, so it is neutral
+         * (0.5). access_count acts as an evidence multiplier: a trace seen many
+         * times is more believable (Dalio: track record). */
         bool should_promote = false;
 
-        if (e->access_count >= MEM_CONSOLIDATION_ACCESS_COUNT && e->tier == MEM_WORKING) {
+        double base = memory_keep_score(e, MEM_KEEP_PROMOTION, 0.5, t);
+        /* Evidence bonus: +0.05 per access, capped, so repeatedly-confirmed
+         * traces clear the bar faster without letting noise alone promote. */
+        double evidence = e->access_count * 0.05;
+        if (evidence > 0.15) evidence = 0.15;
+        double rank = base + evidence;
+        if (rank > 1.0) rank = 1.0;
+
+        /* Tier-graduated gate: episodic -> semantic is the durable commitment and
+         * demands more evidence than working -> episodic (preserves the original
+         * "more evidence for semantic" discipline, now as a threshold on rank). */
+        double gate = (e->tier == MEM_EPISODIC)
+                        ? MEM_KEEP_PROMOTE_GATE_SEMANTIC
+                        : MEM_KEEP_PROMOTE_GATE_EPISODIC;
+        if (rank >= gate)
             should_promote = true;
-        }
-        if (e->importance >= MEM_CONSOLIDATION_IMPORTANCE && e->tier < MEM_SEMANTIC) {
-            should_promote = true;
-        }
-        /* Episodic → Semantic: need more evidence */
-        if (e->tier == MEM_EPISODIC && e->access_count >= MEM_CONSOLIDATION_ACCESS_COUNT * 2 &&
-            e->importance >= MEM_CONSOLIDATION_IMPORTANCE) {
-            should_promote = true;
-        }
 
         if (should_promote) {
             m->tier_count[e->tier]--;
@@ -374,6 +384,41 @@ int memory_consolidate(memory_store_t *m) {
         }
     }
     return promotions;
+}
+
+/* ── Computable keep/promote score (doctrine/MEMORY.md Rule 0) ─────────────
+ * score = w_r*recency + w_i*importance + w_v*relevance, clamped to [0,1].
+ * PROMOTION weights importance heavily so an old failure-lesson still ranks;
+ * RETRIEVAL weights recency. Grounded in Generative Agents + MemGPT, and in a
+ * real test failure: a 4-day-old high-importance trace must not be discarded
+ * just because recency decayed to 0. Additive; memory_consolidate() unchanged. */
+double memory_keep_score(const memory_entry_t *e, memory_keep_mode_t mode,
+                         double relevance, double now) {
+    if (!e)
+        return 0.0;
+
+    double w_r, w_i, w_v;
+    if (mode == MEM_KEEP_RETRIEVAL) {
+        w_r = MEM_KEEP_RETRIEVAL_W_RECENCY;
+        w_i = MEM_KEEP_RETRIEVAL_W_IMPORTANCE;
+        w_v = MEM_KEEP_RETRIEVAL_W_RELEVANCE;
+    } else {
+        w_r = MEM_KEEP_PROMOTION_W_RECENCY;
+        w_i = MEM_KEEP_PROMOTION_W_IMPORTANCE;
+        w_v = MEM_KEEP_PROMOTION_W_RELEVANCE;
+    }
+
+    /* Recency on the episodic 1h half-life (matches keep_score.py). */
+    double age = now - e->created_at;
+    double recency = (age <= 0) ? 1.0 : exp(-0.693147 * age / MEM_EPISODIC_HALFLIFE);
+
+    double imp = e->importance;
+    if (imp < 0.0) imp = 0.0; else if (imp > 1.0) imp = 1.0;
+    if (relevance < 0.0) relevance = 0.0; else if (relevance > 1.0) relevance = 1.0;
+
+    double score = w_r * recency + w_i * imp + w_v * relevance;
+    if (score < 0.0) score = 0.0; else if (score > 1.0) score = 1.0;
+    return score;
 }
 
 int memory_tick(memory_store_t *m) {

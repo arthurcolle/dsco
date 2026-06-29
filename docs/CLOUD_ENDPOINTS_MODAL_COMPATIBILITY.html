@@ -1,0 +1,433 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>dsco Cloud Endpoint Compatibility: Modal, GLM-5.2, and Live Coding Agents</title>
+  <style>
+    :root {
+      color-scheme: dark;
+      --bg: #101113;
+      --panel: #17191d;
+      --panel-2: #20242a;
+      --ink: #f1f3f5;
+      --muted: #a7afb8;
+      --line: #353b44;
+      --cyan: #62d4ff;
+      --pink: #ff70c8;
+      --green: #77f29a;
+      --yellow: #ffd36c;
+      --red: #ff7676;
+      --blue: #8bb7ff;
+      --shadow: 0 18px 48px rgba(0, 0, 0, 0.35);
+      font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      background:
+        radial-gradient(circle at 20% 0%, rgba(98, 212, 255, 0.16), transparent 34rem),
+        radial-gradient(circle at 80% 4%, rgba(255, 112, 200, 0.11), transparent 30rem),
+        linear-gradient(180deg, #121419 0%, var(--bg) 42%, #0c0d0f 100%);
+      color: var(--ink);
+      line-height: 1.55;
+    }
+    a { color: var(--cyan); }
+    .wrap { width: min(1180px, calc(100vw - 40px)); margin: 0 auto; }
+    header {
+      min-height: 88vh;
+      display: grid;
+      align-items: center;
+      padding: 42px 0 28px;
+      position: relative;
+    }
+    .hero {
+      display: grid;
+      grid-template-columns: minmax(0, 1.02fr) minmax(380px, 0.98fr);
+      gap: 36px;
+      align-items: center;
+    }
+    .eyebrow {
+      display: inline-flex;
+      align-items: center;
+      gap: 10px;
+      color: var(--green);
+      border: 1px solid rgba(119, 242, 154, 0.42);
+      background: rgba(119, 242, 154, 0.08);
+      padding: 7px 11px;
+      border-radius: 999px;
+      font-size: 13px;
+      font-weight: 700;
+      letter-spacing: 0;
+    }
+    h1 {
+      font-size: clamp(42px, 7vw, 92px);
+      line-height: 0.93;
+      letter-spacing: 0;
+      margin: 24px 0 20px;
+      max-width: 920px;
+    }
+    .lede {
+      color: #d5d9de;
+      font-size: clamp(18px, 2.1vw, 24px);
+      max-width: 780px;
+      margin: 0 0 28px;
+    }
+    .hero-actions { display: flex; flex-wrap: wrap; gap: 12px; }
+    button, .button {
+      border: 1px solid var(--line);
+      background: var(--panel-2);
+      color: var(--ink);
+      border-radius: 8px;
+      padding: 10px 14px;
+      font: inherit;
+      font-weight: 700;
+      cursor: pointer;
+      text-decoration: none;
+    }
+    button.primary, .button.primary {
+      border-color: rgba(98, 212, 255, 0.55);
+      background: linear-gradient(180deg, rgba(98, 212, 255, 0.22), rgba(98, 212, 255, 0.1));
+    }
+    .terminal {
+      background: #08090b;
+      border: 1px solid #2d333c;
+      border-radius: 8px;
+      box-shadow: var(--shadow);
+      overflow: hidden;
+    }
+    .term-bar {
+      height: 38px;
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      padding: 0 14px;
+      background: #171a1f;
+      color: var(--muted);
+      border-bottom: 1px solid #2d333c;
+      font-size: 13px;
+    }
+    .dot { width: 10px; height: 10px; border-radius: 50%; background: var(--red); }
+    .dot:nth-child(2) { background: var(--yellow); }
+    .dot:nth-child(3) { background: var(--green); }
+    pre {
+      margin: 0;
+      padding: 18px;
+      overflow: auto;
+      color: #dce4ec;
+      font: 13px/1.55 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    }
+    .prompt { color: var(--pink); }
+    .ok { color: var(--green); }
+    .dim { color: #7f8994; }
+    .section { padding: 72px 0; border-top: 1px solid rgba(255,255,255,0.06); }
+    h2 { font-size: clamp(30px, 4vw, 52px); line-height: 1.02; letter-spacing: 0; margin: 0 0 14px; }
+    .section-lede { color: var(--muted); font-size: 18px; max-width: 820px; margin: 0 0 28px; }
+    .grid { display: grid; gap: 16px; }
+    .grid.three { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+    .grid.two { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+    .card {
+      background: rgba(23, 25, 29, 0.9);
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      padding: 20px;
+      min-width: 0;
+    }
+    .metric { font-size: 34px; font-weight: 800; margin: 4px 0; }
+    .label { color: var(--muted); font-size: 13px; text-transform: uppercase; letter-spacing: 0.08em; }
+    .pipeline {
+      display: grid;
+      grid-template-columns: repeat(5, minmax(0, 1fr));
+      gap: 10px;
+      align-items: stretch;
+    }
+    .step {
+      border: 1px solid var(--line);
+      background: var(--panel);
+      border-radius: 8px;
+      padding: 16px;
+      position: relative;
+      min-height: 132px;
+    }
+    .step::after {
+      content: "";
+      position: absolute;
+      right: -10px;
+      top: 50%;
+      width: 10px;
+      height: 1px;
+      background: var(--line);
+    }
+    .step:last-child::after { display: none; }
+    .step strong { display: block; margin-bottom: 8px; }
+    .step span { color: var(--muted); font-size: 14px; }
+    .tabs { display: flex; flex-wrap: wrap; gap: 8px; margin: 22px 0 14px; }
+    .tab[aria-selected="true"] { border-color: var(--cyan); color: var(--cyan); }
+    .tab-panel { display: none; }
+    .tab-panel.active { display: block; }
+    .codebox { position: relative; }
+    .copy {
+      position: absolute;
+      top: 8px;
+      right: 8px;
+      padding: 6px 9px;
+      font-size: 12px;
+      background: #242a32;
+    }
+    .calc {
+      display: grid;
+      grid-template-columns: 1fr 320px;
+      gap: 18px;
+      align-items: start;
+    }
+    input[type="range"] { width: 100%; accent-color: var(--cyan); }
+    .readout {
+      background: #0a0c0f;
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      padding: 18px;
+    }
+    .big-money { font-size: 44px; font-weight: 900; color: var(--green); }
+    table { width: 100%; border-collapse: collapse; overflow: hidden; border-radius: 8px; }
+    th, td { border-bottom: 1px solid var(--line); padding: 12px; text-align: left; }
+    th { color: var(--muted); font-size: 13px; text-transform: uppercase; letter-spacing: 0.08em; }
+    .diagram {
+      min-height: 320px;
+      background: #0b0d10;
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      overflow: hidden;
+    }
+    svg { width: 100%; height: 100%; display: block; }
+    .pulse { animation: pulse 1.8s ease-in-out infinite; transform-origin: center; }
+    @keyframes pulse { 0%, 100% { opacity: .55; } 50% { opacity: 1; } }
+    .callout {
+      border-left: 4px solid var(--cyan);
+      background: rgba(98, 212, 255, 0.08);
+      padding: 14px 16px;
+      border-radius: 0 8px 8px 0;
+      color: #dceeff;
+    }
+    footer { padding: 40px 0 70px; color: var(--muted); }
+    @media (max-width: 900px) {
+      .hero, .grid.two, .grid.three, .calc { grid-template-columns: 1fr; }
+      header { min-height: auto; }
+      .pipeline { grid-template-columns: 1fr; }
+      .step::after { display: none; }
+      .wrap { width: min(100vw - 24px, 1180px); }
+    }
+  </style>
+</head>
+<body>
+  <header>
+    <div class="wrap hero">
+      <div>
+        <div class="eyebrow">Live cloud endpoint compatibility</div>
+        <h1>dsco can route coding agents to Modal-hosted frontier models.</h1>
+        <p class="lede">The same agent runtime that talks to native Z.AI, OpenRouter, Moonshot, and local backends can now hit authenticated Modal OpenAI-compatible endpoints with a single provider override.</p>
+        <div class="hero-actions">
+          <a class="button primary" href="#runbook">Run the smoke</a>
+          <a class="button" href="#economics">Cost model</a>
+          <a class="button" href="#compat">Compatibility matrix</a>
+        </div>
+      </div>
+      <div class="terminal" aria-label="Terminal smoke output">
+        <div class="term-bar"><span class="dot"></span><span class="dot"></span><span class="dot"></span><span>modal/zai-org/GLM-5.2-FP8</span></div>
+        <pre><span class="prompt">$</span> dsco --provider modal -m modal/zai-org/GLM-5.2-FP8 \
+  "Reply with exactly OK."
+
+<span class="dim">modal via custom API base</span>
+<span class="ok">OK</span>
+
+<span class="prompt">$</span> dsco --route-explain modal/zai-org/GLM-5.2-FP8
+route_provider: modal
+credential_usable: yes
+api_url: https://...modal.direct/v1/chat/completions</pre>
+      </div>
+    </div>
+  </header>
+
+  <main>
+    <section class="section" id="compat">
+      <div class="wrap">
+        <h2>What changed</h2>
+        <p class="section-lede">Cloud endpoints are treated as first-class OpenAI-compatible providers. The model identifier chooses the model, while environment variables choose the endpoint and authentication surface.</p>
+        <div class="grid three">
+          <div class="card"><div class="label">Provider</div><div class="metric">modal</div><p>Custom Modal endpoint routing through `MODAL_ENDPOINT_URL`.</p></div>
+          <div class="card"><div class="label">Auth</div><div class="metric">proxy</div><p>`Modal-Key` and `Modal-Secret` headers from local runtime env.</p></div>
+          <div class="card"><div class="label">Protocol</div><div class="metric">OpenAI</div><p>`/v1/chat/completions` with streaming, tools, and normal dsco turn accounting.</p></div>
+        </div>
+      </div>
+    </section>
+
+    <section class="section">
+      <div class="wrap">
+        <h2>Request path</h2>
+        <p class="section-lede">The routing surface stays small: one endpoint URL, one provider pin, and a normal model name. The agent loop does not need Modal-specific business logic.</p>
+        <div class="pipeline">
+          <div class="step"><strong>Prompt</strong><span>User submits a coding task through the dsco TUI or one-shot CLI.</span></div>
+          <div class="step"><strong>Route</strong><span>`--provider modal` selects the custom endpoint transport.</span></div>
+          <div class="step"><strong>Headers</strong><span>Proxy credentials become Modal headers, never prompt text.</span></div>
+          <div class="step"><strong>SGLang</strong><span>Modal serves GLM-5.2 FP8 on 8x B200 using the OpenAI schema.</span></div>
+          <div class="step"><strong>Agent</strong><span>dsco streams text, parses tool calls, and continues the coding loop.</span></div>
+        </div>
+      </div>
+    </section>
+
+    <section class="section">
+      <div class="wrap grid two">
+        <div>
+          <h2>Architecture</h2>
+          <p class="section-lede">Native Z.AI remains the default low-friction path. Modal becomes the heavy cloud lane for latency, throughput, and custom serving experiments.</p>
+          <div class="callout">Use `glm52` for native Z.AI coding-plan API. Use `modal/zai-org/GLM-5.2-FP8` only when you intentionally want the 8x B200 cloud deployment.</div>
+        </div>
+        <div class="diagram">
+          <svg viewBox="0 0 720 360" role="img" aria-label="dsco cloud endpoint routing diagram">
+            <defs>
+              <linearGradient id="g1" x1="0" x2="1">
+                <stop offset="0" stop-color="#62d4ff"/>
+                <stop offset="1" stop-color="#ff70c8"/>
+              </linearGradient>
+            </defs>
+            <rect width="720" height="360" fill="#0b0d10"/>
+            <g fill="#17191d" stroke="#353b44" stroke-width="2">
+              <rect x="44" y="62" width="150" height="86" rx="8"/>
+              <rect x="282" y="62" width="158" height="86" rx="8"/>
+              <rect x="526" y="38" width="150" height="74" rx="8"/>
+              <rect x="526" y="138" width="150" height="74" rx="8"/>
+              <rect x="282" y="230" width="158" height="74" rx="8"/>
+            </g>
+            <g stroke="url(#g1)" stroke-width="4" fill="none" stroke-linecap="round">
+              <path d="M194 105 C236 105 240 105 282 105"/>
+              <path d="M440 105 C480 85 486 75 526 75"/>
+              <path d="M440 105 C480 130 486 174 526 174"/>
+              <path d="M361 148 C361 180 361 198 361 230"/>
+            </g>
+            <g font-family="ui-monospace, Menlo, monospace" font-size="18" fill="#f1f3f5">
+              <text x="72" y="98">dsco agent</text>
+              <text x="78" y="124" fill="#a7afb8" font-size="13">TUI / CLI</text>
+              <text x="314" y="98">provider</text>
+              <text x="315" y="124" fill="#62d4ff" font-size="13">modal | zai</text>
+              <text x="554" y="72">Modal</text>
+              <text x="553" y="94" fill="#a7afb8" font-size="13">8x B200</text>
+              <text x="558" y="172">Z.AI</text>
+              <text x="548" y="194" fill="#a7afb8" font-size="13">coding plan</text>
+              <text x="318" y="268">OpenAI API</text>
+              <text x="321" y="290" fill="#a7afb8" font-size="13">chat/completions</text>
+            </g>
+            <circle class="pulse" cx="526" cy="75" r="7" fill="#77f29a"/>
+            <circle class="pulse" cx="526" cy="174" r="7" fill="#77f29a"/>
+          </svg>
+        </div>
+      </div>
+    </section>
+
+    <section class="section" id="runbook">
+      <div class="wrap">
+        <h2>End-to-end smoke</h2>
+        <p class="section-lede">The script reads Modal proxy credentials from `/tmp/modal_proxy_token.json`, probes readiness, sends a direct OpenAI-compatible request, and then sends the same prompt through dsco.</p>
+        <div class="tabs" role="tablist">
+          <button class="tab" aria-selected="true" data-tab="native">Native Z.AI</button>
+          <button class="tab" aria-selected="false" data-tab="modal">Modal cloud</button>
+          <button class="tab" aria-selected="false" data-tab="script">Script</button>
+        </div>
+        <div class="tab-panel active" id="tab-native">
+          <div class="terminal codebox"><button class="copy">Copy</button><pre>export ZAI_API_KEY='...'
+dsco -m glm52 'Reply with exactly OK.'
+
+DSCO_SECURE_STORE_NO_PROMPT=1 dsco --route-explain glm52</pre></div>
+        </div>
+        <div class="tab-panel" id="tab-modal">
+          <div class="terminal codebox"><button class="copy">Copy</button><pre>export MODAL_ENDPOINT_URL='https://arthurcolle--ep-agent-server.us-west.modal.direct'
+export MODAL_KEY='...'
+export MODAL_SECRET='...'
+
+dsco --provider modal -m modal/zai-org/GLM-5.2-FP8 \
+  'Reply with exactly OK.'</pre></div>
+        </div>
+        <div class="tab-panel" id="tab-script">
+          <div class="terminal codebox"><button class="copy">Copy</button><pre>scripts/test_modal_dsco_live.sh
+
+MODAL_PROXY_TOKEN_FILE=/tmp/modal_proxy_token.json \
+MODAL_ENDPOINT_URL=https://arthurcolle--ep-agent-server.us-west.modal.direct \
+scripts/test_modal_dsco_live.sh</pre></div>
+        </div>
+      </div>
+    </section>
+
+    <section class="section" id="economics">
+      <div class="wrap">
+        <h2>Cost calculator</h2>
+        <p class="section-lede">B200 endpoints are powerful and not subtle. Keep Modal for measured benchmarks and use native Z.AI for day-to-day coding-agent turns.</p>
+        <div class="calc">
+          <div class="card">
+            <label for="minutes">Runtime minutes: <strong id="minutesLabel">30</strong></label>
+            <input id="minutes" type="range" min="1" max="1440" value="30">
+            <label for="multiplier">Region multiplier: <strong id="multiplierLabel">1.00x</strong></label>
+            <input id="multiplier" type="range" min="1" max="1.75" value="1" step="0.05">
+            <p class="dim">Assumes 8x B200 at $0.001736/GPU/sec plus 4 CPU cores and 16 GiB memory from Modal's public pricing.</p>
+          </div>
+          <div class="readout">
+            <div class="label">Estimated burn</div>
+            <div class="big-money" id="cost">$25.15</div>
+            <div class="dim" id="hourly">$50.31/hour effective</div>
+          </div>
+        </div>
+        <table aria-label="Cost examples">
+          <thead><tr><th>Scenario</th><th>Base estimate</th><th>Operational advice</th></tr></thead>
+          <tbody>
+            <tr><td>5 minute warm window</td><td>$4.19</td><td>Acceptable for a readiness smoke.</td></tr>
+            <tr><td>30 minute benchmark</td><td>$25.15</td><td>Enough for latency and throughput sampling.</td></tr>
+            <tr><td>24 hour always-on</td><td>$1,207</td><td>Do not run casually; require utilization data.</td></tr>
+          </tbody>
+        </table>
+      </div>
+    </section>
+  </main>
+
+  <footer>
+    <div class="wrap">Built for dsco cloud endpoint validation. Do not embed real Modal proxy credentials in HTML, docs, screenshots, or commits.</div>
+  </footer>
+
+  <script>
+    const tabs = [...document.querySelectorAll('.tab')];
+    const panels = [...document.querySelectorAll('.tab-panel')];
+    tabs.forEach(tab => tab.addEventListener('click', () => {
+      tabs.forEach(t => t.setAttribute('aria-selected', String(t === tab)));
+      panels.forEach(p => p.classList.toggle('active', p.id === `tab-${tab.dataset.tab}`));
+    }));
+
+    document.querySelectorAll('.copy').forEach(button => {
+      button.addEventListener('click', async () => {
+        const text = button.parentElement.querySelector('pre').innerText;
+        await navigator.clipboard.writeText(text);
+        button.textContent = 'Copied';
+        setTimeout(() => button.textContent = 'Copy', 900);
+      });
+    });
+
+    const minutes = document.getElementById('minutes');
+    const multiplier = document.getElementById('multiplier');
+    const minutesLabel = document.getElementById('minutesLabel');
+    const multiplierLabel = document.getElementById('multiplierLabel');
+    const cost = document.getElementById('cost');
+    const hourly = document.getElementById('hourly');
+    const baseHourly = (8 * 0.001736 + 4 * 0.0000131 + 16 * 0.00000222) * 3600;
+    function money(n) {
+      return n >= 1000 ? `$${Math.round(n).toLocaleString()}` : `$${n.toFixed(2)}`;
+    }
+    function updateCalc() {
+      const m = Number(minutes.value);
+      const mult = Number(multiplier.value);
+      const h = baseHourly * mult;
+      minutesLabel.textContent = m;
+      multiplierLabel.textContent = `${mult.toFixed(2)}x`;
+      cost.textContent = money(h * m / 60);
+      hourly.textContent = `${money(h)}/hour effective`;
+    }
+    minutes.addEventListener('input', updateCalc);
+    multiplier.addEventListener('input', updateCalc);
+    updateCalc();
+  </script>
+</body>
+</html>
