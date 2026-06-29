@@ -1469,9 +1469,7 @@ static bool topology_model_has_openrouter_prefix(const char *model) {
 }
 
 static const char *topology_resolve_openrouter_model(const char *model, char *buf, size_t buflen) {
-    const char *resolved = topology_model_has_openrouter_prefix(model)
-                               ? model
-                               : model_resolve_alias(model ? model : "auto");
+    const char *resolved = model_resolve_alias(model ? model : "auto");
     if (!resolved || !resolved[0])
         resolved = "auto";
 
@@ -1480,6 +1478,8 @@ static const char *topology_resolve_openrouter_model(const char *model, char *bu
 
     if (topology_model_has_openrouter_prefix(resolved)) {
         snprintf(buf, buflen, "%s", resolved);
+    } else if (strncmp(resolved, "zai/", 4) == 0) {
+        snprintf(buf, buflen, "openrouter/z-ai/%s", resolved + 4);
     } else {
         snprintf(buf, buflen, "openrouter/%s", resolved);
     }

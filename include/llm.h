@@ -100,6 +100,15 @@ typedef enum {
     DSCO_TRUST_UNTRUSTED,
 } dsco_trust_tier_t;
 
+typedef enum {
+    DSCO_GOAL_NONE = 0,
+    DSCO_GOAL_ACTIVE,
+    DSCO_GOAL_PAUSED,
+    DSCO_GOAL_BLOCKED,
+    DSCO_GOAL_COMPLETE,
+    DSCO_GOAL_BUDGET_LIMITED,
+} dsco_goal_status_t;
+
 typedef struct {
     char   model[128];        /* current model ID */
     char   active_skill[128];
@@ -137,8 +146,15 @@ typedef struct {
     bool   compact_enabled;
     /* Tool choice: "" = auto, "any" = any, "tool:name" = force specific */
     char   tool_choice[128];
-    /* Prefill: pre-seed assistant response (for JSON forcing, format control) */
+    /* Prefill: pre-seed assistant response (legacy lightweight format control) */
     char   prefill[1024];
+    /* Structured output contract: first-class JSON/schema mode for workflows. */
+    bool   structured_output;
+    bool   structured_output_strict;
+    char   structured_output_name[64];
+    char   structured_output_schema[8192];
+    char   structured_output_error[256];
+    int    structured_output_max_repairs;
     /* Stop sequences */
     char   stop_seq[256];
     /* Sampling parameters */
@@ -169,11 +185,21 @@ typedef struct {
     char   memory_context[4096];     /* recalled memories, injected into system prompt */
     /* Workspace slot */
     char   slot_name[64];            /* active named slot, empty = default */
+    /* Session goal: persisted objective and state for goal-directed runs. */
+    char   goal_objective[2048];
+    dsco_goal_status_t goal_status;
+    int    goal_token_budget;        /* 0 = no explicit budget */
+    int    goal_tokens_at_start;
+    int    goal_turns_at_start;
+    time_t goal_started_at;
+    time_t goal_updated_at;
 } session_state_t;
 
 void  session_state_init(session_state_t *s, const char *model);
 const char *session_trust_tier_to_string(dsco_trust_tier_t tier);
 dsco_trust_tier_t session_trust_tier_from_string(const char *s, bool *ok);
+const char *session_goal_status_to_string(dsco_goal_status_t status);
+dsco_goal_status_t session_goal_status_from_string(const char *s, bool *ok);
 
 void  conv_init(conversation_t *c);
 void  conv_free(conversation_t *c);

@@ -1131,7 +1131,23 @@ static bool detect_binary(const char *name, char *out_path, size_t out_len) {
 static bool check_claude_auth(void) {
     /* Claude executor is usable with either Anthropic API key or Claude Code OAuth. */
     const char *key = provider_resolve_request_api_key("anthropic", NULL);
-    return (key && key[0]);
+    if (key && key[0])
+        return true;
+
+    /* Claude Code can be logged in via its own local store without exporting a
+     * token into dsco's provider layer. We only use this as an executor
+     * availability marker; request/auth handling remains inside the Claude CLI. */
+    const char *home = getenv("HOME");
+    if (home && home[0]) {
+        char path[1024];
+        snprintf(path, sizeof(path), "%s/.claude.json", home);
+        if (access(path, R_OK) == 0)
+            return true;
+        snprintf(path, sizeof(path), "%s/.claude/.credentials.json", home);
+        if (access(path, R_OK) == 0)
+            return true;
+    }
+    return false;
 }
 
 static bool check_codex_auth(void) {
@@ -1166,7 +1182,21 @@ void swarm_detect_executors(swarm_t *s) {
 }
 
 void swarm_prepare_executor_env(swarm_t *s, executor_type_t executor) {
-    if (!s || executor != EXECUTOR_CLAUDE)
+    if (!s)
+        return;
+
+    if (executor == EXECUTOR_CODEX) {
+        const char *dsco_oauth = getenv("DSCO_CHATGPT_OAUTH_TOKEN");
+        const char *chatgpt_oauth = getenv("CHATGPT_OAUTH_TOKEN");
+        if (dsco_oauth && dsco_oauth[0]) {
+            setenv("CHATGPT_OAUTH_TOKEN", dsco_oauth, 1);
+        } else if (chatgpt_oauth && chatgpt_oauth[0]) {
+            setenv("DSCO_CHATGPT_OAUTH_TOKEN", chatgpt_oauth, 1);
+        }
+        return;
+    }
+
+    if (executor != EXECUTOR_CLAUDE)
         return;
 
     /* Claude Code prefers ANTHROPIC_API_KEY over the logged-in subscription
@@ -1497,6 +1527,8 @@ int swarm_status_json(swarm_t *s, char *buf, size_t len) {
         jbuf_append_int(&b, (int)c->output_len);
         jbuf_append(&b, ",\"executor\":");
         jbuf_append_json_str(&b, executor_type_name(c->executor));
+        jbuf_append(&b, ",\"model\":");
+        jbuf_append_json_str(&b, c->model);
         jbuf_append(&b, ",\"subsidized\":");
         jbuf_append(&b, swarm_child_is_subsidized(c) ? "true" : "false");
         if (c->budget_usd > 0) {
@@ -1633,6 +1665,10 @@ int swarm_group_status_json(swarm_t *s, int group_id, char *buf, size_t len) {
         jbuf_append_int(&b, c->id);
         jbuf_append(&b, ",\"status\":");
         jbuf_append_json_str(&b, swarm_status_str(c->status));
+        jbuf_append(&b, ",\"executor\":");
+        jbuf_append_json_str(&b, executor_type_name(c->executor));
+        jbuf_append(&b, ",\"model\":");
+        jbuf_append_json_str(&b, c->model);
         jbuf_append(&b, ",\"task\":");
         jbuf_append_json_str(&b, c->task);
 
