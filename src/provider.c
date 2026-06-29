@@ -55,7 +55,6 @@ static stream_result_t codex_exec_stream(provider_t *p, const char *api_key,
                                          stream_tool_start_cb tool_cb,
                                          stream_thinking_cb thinking_cb, void *cb_ctx);
 static bool provider_is_sakana(const provider_t *p);
-static bool provider_is_local_endpoint(const char *name);
 
 static void provider_format_goal_prompt(char *out, size_t out_len, const session_state_t *session) {
     if (!out || out_len == 0)
@@ -4480,7 +4479,9 @@ static const provider_endpoint_t *find_endpoint(const char *name) {
  * endpoint — ollama, lmstudio, mlx, vllm, llamacpp, localai, jan, gpt4all,
  * koboldcpp, textgen, tabby, tgi, sglang, llamafile, local. These are keyless,
  * so they are always "usable" regardless of any API-key environment. */
-static bool provider_is_local_endpoint(const char *name) {
+bool provider_is_local_endpoint(const char *name) {
+    if (!name || !name[0])
+        return false;
     const provider_endpoint_t *ep = find_endpoint(name);
     if (!ep || !ep->base_url)
         return false;
@@ -5401,6 +5402,9 @@ int provider_build_default_fallback_models(const char *model, char out_models[][
     const char *family = provider_model_family(resolved_model);
     bool prefer_code = provider_model_is_code_oriented(resolved_model);
     int count = 0;
+
+    if (provider_is_local_endpoint(provider_detect(resolved_model, NULL)))
+        return 0;
 
     if (strcmp(family, "anthropic") == 0) {
         provider_append_unique_model(out_models, &count, max_models, requested_model,
