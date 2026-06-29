@@ -44,7 +44,7 @@
 extern int g_cheap_mode;
 
 /* API defaults */
-#define DEFAULT_MODEL       "fugu"
+#define DEFAULT_MODEL       "zai/glm-5.2"
 #define API_URL_ANTHROPIC   "https://api.anthropic.com/v1/messages"
 #define API_URL_COUNT_TOKENS "https://api.anthropic.com/v1/messages/count_tokens"
 #define ANTHROPIC_VERSION   "2023-06-01"
@@ -228,12 +228,21 @@ static const model_info_t MODEL_REGISTRY[] = {
     { "mk2-think",    "kimi-k2-thinking",               262144, 32768,  0.60,  3.00, 0.10, 0, 1 },
     { "mk2-think-tb", "kimi-k2-thinking-turbo",         262144, 32768,  0.60,  3.00, 0.10, 0, 1 },
     /* ── Zhipu GLM ───────────────────────────────────────────────────── */
-    { "glm52",        "z-ai/glm-5.2",                  1048576, 262144, 1.40,  4.40, 0, 0, 1 },
-    { "glm51",        "z-ai/glm-5.1",                  202752, 65536,  0.72,  2.30, 0, 0, 1 },
-    { "glm5",         "z-ai/glm-5",                    202752, 65536,  0.72,  2.30, 0, 0, 1 },
-    { "glm5-turbo",   "z-ai/glm-5-turbo",              202752, 65536,  0.96,  3.20, 0, 0, 1 },
-    { "glm47",        "z-ai/glm-4.7",                  202752, 65536,  0.38,  1.98, 0, 0, 1 },
-    { "glm47-flash",  "z-ai/glm-4.7-flash",            202752, 65536,  0.06,  0.40, 0, 0, 0 },
+    { "glm-5.2",      "glm-5.2",                       1048576, 262144, 1.40,  4.40, 0, 0, 1 },
+    { "glm-5.1",      "glm-5.1",                       202752, 65536,  0.72,  2.30, 0, 0, 1 },
+    { "glm-5",        "glm-5",                         202752, 65536,  0.72,  2.30, 0, 0, 1 },
+    { "glm-5-turbo",  "glm-5-turbo",                   202752, 65536,  0.96,  3.20, 0, 0, 1 },
+    { "glm-4.7",      "glm-4.7",                       202752, 65536,  0.38,  1.98, 0, 0, 1 },
+    { "glm-4.7-flash", "glm-4.7-flash",                202752, 65536,  0.06,  0.40, 0, 0, 0 },
+    { "glm52",        "zai/glm-5.2",                   1048576, 262144, 1.40,  4.40, 0, 0, 1 },
+    { "glm51",        "zai/glm-5.1",                   202752, 65536,  0.72,  2.30, 0, 0, 1 },
+    { "glm5",         "zai/glm-5",                     202752, 65536,  0.72,  2.30, 0, 0, 1 },
+    { "glm5-turbo",   "zai/glm-5-turbo",               202752, 65536,  0.96,  3.20, 0, 0, 1 },
+    { "glm47",        "zai/glm-4.7",                   202752, 65536,  0.38,  1.98, 0, 0, 1 },
+    { "glm47-flash",  "zai/glm-4.7-flash",             202752, 65536,  0.06,  0.40, 0, 0, 0 },
+    { "or-glm52",     "openrouter/z-ai/glm-5.2",       1048576, 262144, 1.40,  4.40, 0, 0, 1 },
+    { "or-glm51",     "openrouter/z-ai/glm-5.1",       202752, 65536,  0.72,  2.30, 0, 0, 1 },
+    { "or-glm5",      "openrouter/z-ai/glm-5",         202752, 65536,  0.72,  2.30, 0, 0, 1 },
     /* ── DeepSeek ────────────────────────────────────────────────────── */
     { "ds-v4",        "deepseek/deepseek-v4",          262144, 32768,  0.27,  0.42, 0, 0, 0 },
     { "ds-r2",        "deepseek/deepseek-r2",          262144, 32768,  0.50,  2.18, 0, 0, 1 },
@@ -399,6 +408,15 @@ static inline const model_info_t *model_lookup(const char *name) {
 }
 
 static inline const char *model_resolve_alias(const char *name) {
+    if (name && *name) {
+        for (int i = 0; MODEL_REGISTRY[i].alias; i++) {
+            if (strcmp(name, MODEL_REGISTRY[i].alias) == 0 ||
+                strcmp(name, MODEL_REGISTRY[i].model_id) == 0)
+                return MODEL_REGISTRY[i].model_id;
+        }
+        if (strchr(name, '/') || strchr(name, ':'))
+            return name;
+    }
     const model_info_t *m = model_lookup(name);
     return m ? m->model_id : name;
 }

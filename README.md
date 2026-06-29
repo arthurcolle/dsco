@@ -146,7 +146,7 @@ new operator should know first.
 | MCP servers | 64 | Upper bound for configured MCP server processes. |
 | MCP tools | 2,048 | Upper bound for MCP-discovered tools before profile/dynamic loading. |
 | MCP line size | 256 KiB | JSON-RPC stdio line bound for MCP transport. |
-| Default model alias | `fugu` | Local default in `include/config.h`; can be overridden with `-m` or `DSCO_MODEL`. |
+| Default model alias | `zai/glm-5.2` | Native Z.AI GLM Coding Plan default in `include/config.h`; can be overridden with `-m` or `DSCO_MODEL`. |
 | Max output reserve | 16,384 tokens | Default output token reserve; `DSCO_MAX_TOKENS` can override. |
 | Agent checkpoint cadence | 40 turns | `MAX_AGENT_TURNS` is a progress checkpoint cadence, not the primary stop wall. |
 | Hard turn ceiling | 100,000 | Emergency runaway backstop; normal stops are budget/context/interrupt/no-progress. |

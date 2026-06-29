@@ -49,6 +49,7 @@
 #include "net_server.h"
 #include "peer_bootstrap.h"
 #include "cost_model.h"
+#include "plan.h"
 #include "plan_cache.h"
 #include "plan_optimizer.h"
 #include "dsco_dht.h"
@@ -69,6 +70,7 @@ extern void dsco_net_routes_register(void *srv_opaque);
 #include "dcr.h"
 #include "startup.h"
 #include "local_llm.h"
+#include "structured_process.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -582,6 +584,29 @@ static bool main_store_cli_credential(const char *env_name, const char *value) {
     return true;
 }
 
+static void main_restore_sealed_env_for_exec(void) {
+    static const char *const keys[] = {
+        "ANTHROPIC_API_KEY", "OPENAI_API_KEY", "GEMINI_API_KEY",
+        "XAI_API_KEY", "DEEPSEEK_API_KEY", "GROQ_API_KEY",
+        "OPENROUTER_API_KEY", "SAKANA_API_KEY", "FISH_API_KEY",
+        "SAKANA_TOKEN", "FUGU_API_KEY", "FUGU_PAYG_API_KEY",
+        "SAKANA_PAYG_API_KEY", "FISH_PAYG_API_KEY", "SAKANA_PAYG_TOKEN",
+        "GLM_API_KEY", "ZAI_API_KEY", "Z_AI_API_KEY",
+        "ZAI_CODING_PLAN_API_KEY", "Z_AI_CODING_PLAN_API_KEY",
+        "ZHIPU_API_KEY",
+        "DSCO_MESH_SECRET", "DSCO_NET_AUTH_KEY", NULL,
+    };
+
+    for (int i = 0; keys[i]; i++) {
+        const char *env = getenv(keys[i]);
+        if (!env || env[0])
+            continue;
+        const char *sealed = sealed_store_peek(keys[i]);
+        if (sealed && sealed[0])
+            setenv(keys[i], sealed, 1);
+    }
+}
+
 static dsco_profile_t main_runtime_profile(int argc, char **argv) {
     dsco_profile_t profile = DSCO_PROFILE_FULL;
 
@@ -694,6 +719,8 @@ static dsco_caps_t main_plan_startup_caps(int argc, char **argv,
              strcmp(argv[i], "-e") == 0 ||
              strcmp(argv[i], "--provider") == 0 ||
              strcmp(argv[i], "--profile") == 0 ||
+             strcmp(argv[i], "--approval-mode") == 0 ||
+             strcmp(argv[i], "--trust-tier") == 0 ||
              strcmp(argv[i], "--timeline-port") == 0 ||
              strcmp(argv[i], "--timeline-instance") == 0 ||
              strcmp(argv[i], "--topology") == 0) && i + 1 < argc) {
@@ -782,6 +809,7 @@ void dsco_startup_init(dsco_profile_t profile, dsco_caps_t caps) {
                         "error: secure store initialization %s; refusing to start\n"
                         "  unlock the login keychain/Secure Enclave and retry\n"
                         "  set DSCO_SECURE_STORE_AUTH_UI=1 if macOS should show an auth prompt\n"
+                        "  set DSCO_SECURE_STORE_NO_PROMPT=1 for noninteractive/CI read-only probing\n"
                         "  set DSCO_SECURE_STORE_TIMEOUT_MS=<ms> to allow more time\n",
                         timed_out ? "timed out" : "failed");
                 main_zero32(se_key);
@@ -920,7 +948,7 @@ void dsco_startup_init(dsco_profile_t profile, dsco_caps_t caps) {
     if ((caps & DSCO_CAP_TUI) && isatty(STDIN_FILENO)) {
         extern void tui_lock_engage(void);
         const char *idle_s_str = getenv("DSCO_IDLE_LOCK_S");
-        int idle_s = idle_s_str ? atoi(idle_s_str) : 300;
+        int idle_s = idle_s_str ? atoi(idle_s_str) : 0;
         if (idle_s > 0) {
             presence_init(idle_s, (presence_lock_fn)tui_lock_engage, NULL);
             presence_start();
@@ -996,7 +1024,7 @@ static const native_provider_t NATIVE_PROVIDERS[] = {
       CAP_TOOLS|CAP_MULTITURN|CAP_STREAMING|CAP_VISION|CAP_THINKING|CAP_JSON|CAP_CACHE, 4 },
     { "openai",     "OpenAI API",                "OPENAI_API_KEY",      "gpt-4.1",
       CAP_TOOLS|CAP_MULTITURN|CAP_STREAMING|CAP_VISION|CAP_JSON, 3 },
-    { "openrouter", "OpenRouter (multi-model)",   "OPENROUTER_API_KEY", "z-ai/glm-5.2",
+    { "openrouter", "OpenRouter (multi-model)",   "OPENROUTER_API_KEY", "moonshotai/kimi-k2.7-code",
       CAP_TOOLS|CAP_MULTITURN|CAP_STREAMING|CAP_VISION|CAP_JSON, 4 },
     { "google",     "Google Gemini API",         "GOOGLE_API_KEY",      "gemini-2.5-pro",
       CAP_TOOLS|CAP_MULTITURN|CAP_STREAMING|CAP_VISION|CAP_JSON, 3 },
@@ -1225,6 +1253,17 @@ static bool model_supports_executor(const char *model, const char *executor_name
     return false;
 }
 
+static bool model_supports_native_provider(const char *model, const char *provider_name) {
+    if (!model || !model[0] || !provider_name || !provider_name[0])
+        return true;
+    const char *resolved = model_resolve_alias(model);
+    const char *canonical = provider_profile_canonical_name(provider_name);
+    const char *detected = provider_detect(resolved, NULL);
+    const char *family = provider_model_family(resolved);
+    return (detected && strcmp(detected, canonical) == 0) ||
+           (family && strcmp(family, canonical) == 0);
+}
+
 static void print_executor_model_mismatch(const exec_reg_t *e, const char *model) {
     const char *resolved = model_resolve_alias(model);
     const char *family = provider_model_family(resolved);
@@ -1303,6 +1342,10 @@ static void exec_list(void) {
                 avail ? "ready" : "not found",
                 "\033[0m");
     }
+    bool no_prompt = getenv("DSCO_SECURE_STORE_NO_PROMPT") ||
+                     getenv("DSCO_CREDENTIAL_DISCOVERY_NO_PROMPT") ||
+                     (!isatty(STDIN_FILENO) && !isatty(STDERR_FILENO));
+
     fprintf(stderr, "\n  \033[1mNative API Providers\033[0m\n");
     fprintf(stderr, "  %-12s %-24s %-10s %-18s %s\n",
             "NAME", "DESCRIPTION", "STATUS", "CAPABILITIES", "DEFAULT MODEL");
@@ -1310,7 +1353,8 @@ static void exec_list(void) {
             "────", "───────────", "──────", "────────────", "─────────────");
     for (int i = 0; NATIVE_PROVIDERS[i].name; i++) {
         const native_provider_t *np = &NATIVE_PROVIDERS[i];
-        bool has_key = provider_has_usable_key(np->name, NULL);
+        bool has_key = no_prompt ? provider_resolve_api_key(np->name) != NULL
+                                 : provider_has_usable_key(np->name, NULL);
 
         /* Build capability string */
         char caps[64] = "";
@@ -2204,12 +2248,20 @@ static void usage(const char *prog) {
         "  --topology-list        List available topologies\n"
         "  --ui [PORT]            Launch web UI (default port: 3141)\n"
         "  -i, --interactive      Start an interactive REPL (no prompt required)\n"
+        "  --autonomous           No routine approval prompts; trusted tier; critical gates still fail closed\n"
+        "  --sandboxed            Untrusted tier: route exec tools through sandbox_run, block writes/network/control-plane\n"
+        "  --approval-mode MODE   ask|strict|never (never skips routine prompts)\n"
+        "  --trust-tier TIER      standard|trusted|untrusted tool permission tier\n"
         "  --local                Use LM Studio locally (default model: liquid/lfm2.5-1.2b)\n"
         "  --ollama               Use local Ollama (default model: llama3.2)\n"
         "  --pull-and-use MODEL   Pull an Ollama model, then use it locally\n"
         "  -e, --exec BACKEND    Execute via CLI/provider (claude, codex, auto, smart, list, bench, bench-tools, smoke, smoke-full, <provider>)\n"
         "  --provider NAME       Force a native provider (anthropic, openai, openrouter, ollama, ollama-cloud, fugu/sakana, xai, ...)\n"
         "  --route-explain [MODEL]  Explain provider/model routing without streaming\n"
+        "  --structured-schema-json  Print strict structured-process response schema\n"
+        "  --structured-plan-json PROMPT  Synthesize a bounded process JSON locally\n"
+        "  --structured-plan-tree PROMPT  Synthesize and render plan/step/atom tree\n"
+        "  --structured-plan-run PROMPT   Synthesize, execute, and render the plan with real results\n"
         "  --                    Pass remaining args to executor (after -e)\n"
         "  -C, --cheap            Cheap mode: 5 core tools + discover/load (env: DSCO_CHEAP=1)\n"
         "  --version              Print version and build info\n"
@@ -2226,7 +2278,7 @@ static void usage(const char *prog) {
         "  DSCO_PROFILE        Runtime startup profile when full/lite/worker\n"
         "  DSCO_ENV_FILE       Override setup env file path\n"
         "  DSCO_BASELINE_DB    Override sqlite baseline path\n"
-        "  DSCO_EXEC           Default executor/provider (claude, codex, auto, fugu, sakana)\n"
+        "  DSCO_EXEC           Default executor/provider (claude, codex, auto, zai, moonshot, fugu, sakana)\n"
         "  DSCO_BUDGET         Session cost budget in dollars (0=unlimited)\n"
         "  DSCO_DAILY_BUDGET   Daily cost budget in dollars (0=unlimited)\n",
     DSCO_VERSION, prog, prog, prog, prog, DEFAULT_MODEL, prog, prog, prog);
@@ -2474,13 +2526,13 @@ static int print_route(const char *arg) {
         }
         /* Treat arg as a failed-model slug and show the dynamic failover chain. */
         char chain[8][128];
-        int cnt = dsco_route_failover_dynamic(arg, chain, 8);
-        if (cnt <= 0) {
+        int c = dsco_route_failover_dynamic(arg, chain, 8);
+        if (c <= 0) {
             fprintf(stderr, "route: no failover candidates for '%s'\n", arg);
             return 1;
         }
         fprintf(stderr, "# dynamic failover chain for '%s' (price-ascending):\n", arg);
-        for (int i = 0; i < cnt; i++)
+        for (int i = 0; i < c; i++)
             printf("%s\n", chain[i]);
         return 0;
     }
@@ -2623,6 +2675,60 @@ static int run_tool_exec_fast(dsco_profile_t profile,
     return ok ? 0 : 1;
 }
 
+static void main_join_prompt_args(int argc, char **argv, int start, char *buf, size_t len) {
+    if (!buf || len == 0)
+        return;
+    buf[0] = '\0';
+    size_t used = 0;
+    for (int i = start; i < argc; i++) {
+        const char *arg = argv[i] ? argv[i] : "";
+        if (i > start && used + 1 < len)
+            buf[used++] = ' ';
+        while (*arg && used + 1 < len)
+            buf[used++] = *arg++;
+    }
+    buf[used] = '\0';
+}
+
+static int run_structured_process_cli(const char *mode, const char *prompt) {
+    if (strcmp(mode, "schema") == 0) {
+        char buf[32768];
+        structured_process_schema_response_format_json(buf, sizeof(buf));
+        printf("%s\n", buf);
+        return 0;
+    }
+
+    char process_json[65536];
+    structured_process_synthesize_json(prompt ? prompt : "", process_json, sizeof(process_json));
+    if (strcmp(mode, "json") == 0) {
+        printf("%s\n", process_json);
+        return 0;
+    }
+
+    plan_engine_init();
+    int plan_id = structured_process_create_plan_from_json(process_json);
+    if (plan_id < 0) {
+        fprintf(stderr, "error: failed to import structured process\n");
+        return 1;
+    }
+
+    bool run = (strcmp(mode, "run") == 0);
+    if (run) {
+        /* Tool-call atoms (e.g. cwd) need a live tool registry. Use the
+         * local-only fast init so we don't pay for plugins/MCP/daemon setup. */
+        tools_init_local_only();
+        int executed = plan_run_all(plan_id, 0);
+        char summary[512];
+        plan_summary(plan_id, summary, sizeof(summary));
+        fprintf(stderr, "executed %d atom(s)\n%s\n", executed, summary);
+    }
+
+    char tree[32768];
+    plan_tree_render(plan_id, tree, sizeof(tree));
+    printf("%s", tree);
+    return run && plan_get(plan_id) && plan_get(plan_id)->status == PLAN_FAILED ? 1 : 0;
+}
+
 static bool main_route_explain_requested(int argc, char **argv,
                                          const char **out_model) {
     for (int i = 1; i < argc; i++) {
@@ -2699,9 +2805,10 @@ static int run_route_explain_fast(int argc, char **argv) {
     const char *api_key = main_route_explain_cli_key(argc, argv);
     const char *override = main_route_explain_override(argc, argv);
     const char *alias_resolved = model_resolve_alias(model);
-    const char *family = provider_model_family(model);
-    const char *detected = provider_detect(model, api_key);
-    const char *routed = provider_route_for_model(model, api_key, override);
+    const char *route_model = alias_resolved && alias_resolved[0] ? alias_resolved : model;
+    const char *family = provider_model_family(route_model);
+    const char *detected = provider_detect(route_model, api_key);
+    const char *routed = provider_route_for_model(route_model, api_key, override);
     const char *request_key = provider_resolve_request_api_key(routed, api_key);
     const char *auth_mode = provider_auth_mode(routed, request_key);
     bool key_usable = provider_has_usable_key(routed, api_key);
@@ -2860,6 +2967,66 @@ static int run_pets_watch(int argc, char **argv) {
 
 static int maybe_run_introspect_fast_path(int argc, char **argv, int i);
 
+static bool main_apply_runtime_mode_flags(int argc, char **argv) {
+    bool saw_mode = false;
+    for (int i = 1; i < argc; i++) {
+        if (strcmp(argv[i], "--autonomous") == 0 ||
+            strcmp(argv[i], "--auto-approve") == 0 ||
+            strcmp(argv[i], "--no-approval-prompts") == 0) {
+            setenv("DSCO_TRUST_TIER", "trusted", 1);
+            setenv("DSCO_APPROVAL_MODE", "never", 1);
+            setenv("DSCO_APPROVAL_NEVER", "1", 1);
+            setenv("DSCO_NO_APPROVAL_PROMPTS", "1", 1);
+            saw_mode = true;
+            continue;
+        }
+        if (strcmp(argv[i], "--sandboxed") == 0 ||
+            strcmp(argv[i], "--sandbox-mode") == 0) {
+            setenv("DSCO_TRUST_TIER", "untrusted", 1);
+            setenv("DSCO_APPROVAL_MODE", "never", 1);
+            setenv("DSCO_APPROVAL_NEVER", "1", 1);
+            setenv("DSCO_NO_APPROVAL_PROMPTS", "1", 1);
+            saw_mode = true;
+            continue;
+        }
+        if (strcmp(argv[i], "--trust-tier") == 0 && i + 1 < argc) {
+            bool ok = false;
+            (void)session_trust_tier_from_string(argv[i + 1], &ok);
+            if (ok) {
+                setenv("DSCO_TRUST_TIER", argv[i + 1], 1);
+                saw_mode = true;
+            }
+            i++;
+            continue;
+        }
+        if (strcmp(argv[i], "--approval-mode") == 0 && i + 1 < argc) {
+            const char *mode = argv[++i];
+            if (strcasecmp(mode, "never") == 0 ||
+                strcasecmp(mode, "auto") == 0 ||
+                strcasecmp(mode, "autonomous") == 0) {
+                setenv("DSCO_APPROVAL_MODE", "never", 1);
+                setenv("DSCO_APPROVAL_NEVER", "1", 1);
+                setenv("DSCO_NO_APPROVAL_PROMPTS", "1", 1);
+                saw_mode = true;
+            } else if (strcasecmp(mode, "strict") == 0 ||
+                       strcasecmp(mode, "require") == 0) {
+                setenv("DSCO_APPROVAL_MODE", "strict", 1);
+                setenv("DSCO_APPROVAL_NEVER", "0", 1);
+                saw_mode = true;
+            } else if (strcasecmp(mode, "ask") == 0 ||
+                       strcasecmp(mode, "prompt") == 0 ||
+                       strcasecmp(mode, "default") == 0) {
+                setenv("DSCO_APPROVAL_MODE", "ask", 1);
+                setenv("DSCO_APPROVAL_NEVER", "0", 1);
+                setenv("DSCO_NO_APPROVAL_PROMPTS", "0", 1);
+                saw_mode = true;
+            }
+            continue;
+        }
+    }
+    return saw_mode;
+}
+
 static int maybe_run_early_fast_path(int argc, char **argv,
                                      dsco_profile_t profile) {
     for (int i = 1; i < argc; i++) {
@@ -2872,6 +3039,73 @@ static int maybe_run_early_fast_path(int argc, char **argv,
         if (strcmp(argv[i], "--tools-json") == 0) {
             perf_mark("fast tools-json begin");
             print_tools_json_fast(profile);
+            perf_finish("fast exit");
+            return 0;
+        }
+        if (strcmp(argv[i], "--structured-schema-json") == 0) {
+            int rc = run_structured_process_cli("schema", NULL);
+            perf_finish("fast exit");
+            return rc;
+        }
+        if (strcmp(argv[i], "--structured-plan-json") == 0 ||
+            strcmp(argv[i], "--structured-plan-tree") == 0) {
+            if (i + 1 >= argc) {
+                fprintf(stderr, "error: %s requires <prompt>\n", argv[i]);
+                perf_finish("fast error");
+                return 1;
+            }
+            char prompt[8192];
+            main_join_prompt_args(argc, argv, i + 1, prompt, sizeof(prompt));
+            int rc = run_structured_process_cli(
+                strcmp(argv[i], "--structured-plan-json") == 0 ? "json" : "tree",
+                prompt);
+            perf_finish("fast exit");
+            return rc;
+        }
+        if (strcmp(argv[i], "--workspace-status") == 0) {
+            dsco_workspace_status_t st;
+            char workspace_summary[768];
+            if (dsco_workspace_status(&st, workspace_summary, sizeof(workspace_summary)) < 0) {
+                fprintf(stderr, "workspace status failed\n");
+                perf_finish("fast error");
+                return 1;
+            }
+            printf("%s\n", workspace_summary);
+            perf_finish("fast exit");
+            return 0;
+        }
+        if (strcmp(argv[i], "--setup-report") == 0) {
+            char report[32768];
+            if (dsco_setup_report(report, sizeof(report)) < 0) {
+                fprintf(stderr, "setup report failed\n");
+                perf_finish("fast error");
+                return 1;
+            }
+            printf("%s", report);
+            perf_finish("fast exit");
+            return 0;
+        }
+        if (strcmp(argv[i], "--topology-list") == 0) {
+            print_topology_list();
+            perf_finish("fast exit");
+            return 0;
+        }
+        if (strcmp(argv[i], "--topology-show") == 0) {
+            const char *name = NULL;
+            if (i + 1 < argc && argv[i + 1][0] != '-')
+                name = argv[i + 1];
+            print_topology_show(name);
+            perf_finish("fast exit");
+            return 0;
+        }
+        if ((i == 1 && strcmp(argv[i], "status") == 0) || strcmp(argv[i], "--status") == 0) {
+            int rc = run_status_flow();
+            perf_finish("fast exit");
+            return rc;
+        }
+        if ((strcmp(argv[i], "-e") == 0 || strcmp(argv[i], "--exec") == 0) &&
+            i + 1 < argc && strcmp(argv[i + 1], "list") == 0) {
+            exec_list();
             perf_finish("fast exit");
             return 0;
         }
@@ -2950,6 +3184,26 @@ static int maybe_run_pre_chronicle_fast_path(int argc, char **argv,
             perf_finish("fast exit");
             return 0;
         }
+        if (strcmp(argv[i], "--structured-schema-json") == 0) {
+            int rc = run_structured_process_cli("schema", NULL);
+            perf_finish("fast exit");
+            return rc;
+        }
+        if (strcmp(argv[i], "--structured-plan-json") == 0 ||
+            strcmp(argv[i], "--structured-plan-tree") == 0) {
+            if (i + 1 >= argc) {
+                fprintf(stderr, "error: %s requires <prompt>\n", argv[i]);
+                perf_finish("fast error");
+                return 1;
+            }
+            char prompt[8192];
+            main_join_prompt_args(argc, argv, i + 1, prompt, sizeof(prompt));
+            int rc = run_structured_process_cli(
+                strcmp(argv[i], "--structured-plan-json") == 0 ? "json" : "tree",
+                prompt);
+            perf_finish("fast exit");
+            return rc;
+        }
         int introspect_rc = maybe_run_introspect_fast_path(argc, argv, i);
         if (introspect_rc != -1)
             return introspect_rc;
@@ -2979,6 +3233,7 @@ int main(int argc, char **argv) {
     dsco_profile_t runtime_profile = main_runtime_profile(argc, argv);
     dsco_caps_t startup_caps = main_plan_startup_caps(argc, argv, runtime_profile);
     perf_set_startup_context(runtime_profile, startup_caps);
+    bool cli_runtime_mode = main_apply_runtime_mode_flags(argc, argv);
 
     int pre_chronicle_fast_rc = maybe_run_pre_chronicle_fast_path(argc, argv,
                                                                   runtime_profile);
@@ -3101,6 +3356,43 @@ int main(int argc, char **argv) {
         }
     }
 
+    if (argc == 1) {
+        bool auto_ok = !main_env_truthy(getenv("DSCO_NO_AUTO_INTERACTIVE"));
+        if (!auto_ok || !isatty(STDIN_FILENO) || !isatty(STDERR_FILENO)) {
+            usage(argv[0]);
+            fprintf(stderr, "\nerror: prompt required (try -i for interactive mode)\n");
+            perf_finish("prompt required");
+            return getenv("DSCO_SUPERVISED") ? DSCO_EXIT_CONFIG : 1;
+        }
+    }
+
+    bool pre_no_prompt_probe = false;
+    for (int i = 1; i < argc; i++) {
+        if (strcmp(argv[i], "--workspace-status") == 0 ||
+            strcmp(argv[i], "--setup-report") == 0 ||
+            strcmp(argv[i], "--status") == 0 ||
+            strcmp(argv[i], "--topology-list") == 0 ||
+            strcmp(argv[i], "--topology-show") == 0 ||
+            (i == 1 && strcmp(argv[i], "status") == 0)) {
+            pre_no_prompt_probe = true;
+            break;
+        }
+        if ((strcmp(argv[i], "-e") == 0 || strcmp(argv[i], "--exec") == 0) && i + 1 < argc) {
+            const char *backend = argv[i + 1];
+            if (strcmp(backend, "list") == 0 || strcmp(backend, "bench") == 0 ||
+                strcmp(backend, "bench-tools") == 0 || strcmp(backend, "smoke") == 0 ||
+                strcmp(backend, "smoke-full") == 0) {
+                pre_no_prompt_probe = true;
+                break;
+            }
+        }
+    }
+    if (pre_no_prompt_probe) {
+        setenv("DSCO_SETUP_NO_AUTO_BOOTSTRAP", "1", 0);
+        setenv("DSCO_CREDENTIAL_DISCOVERY_NO_PROMPT", "1", 0);
+        setenv("DSCO_SECURE_STORE_NO_PROMPT", "1", 0);
+    }
+
     int fast_rc = maybe_run_early_fast_path(argc, argv, runtime_profile);
     if (fast_rc >= 0) return fast_rc;
     dsco_startup_init(runtime_profile, startup_caps);
@@ -3123,7 +3415,9 @@ int main(int argc, char **argv) {
      *     with DSCO_RESUME_AFTER_CRASH=1 so session continues.
      * Opt out with DSCO_NO_AUTO_SUPERVISE=1 or DSCO_SUPERVISE_RESTART=transient. */
     if (!getenv("DSCO_NO_SUPERVISE") && !getenv("DSCO_NO_AUTO_SUPERVISE")) {
-        bool _is_interactive = (argc == 1);
+        bool _bare_auto_interactive = (argc == 1) &&
+                                      !main_env_truthy(getenv("DSCO_NO_AUTO_INTERACTIVE"));
+        bool _is_interactive = _bare_auto_interactive;
         bool _local_flag = false;
         bool _local_has_prompt = false;
         for (int _k = 1; _k < argc && !_is_interactive; _k++) {
@@ -3168,18 +3462,22 @@ int main(int argc, char **argv) {
         if (_local_flag && !_local_has_prompt)
             _is_interactive = true;
         if (_is_interactive && isatty(STDIN_FILENO) && isatty(STDERR_FILENO)) {
-            int _sup_argc = argc + 1;
+            int _sup_argc = argc + (_bare_auto_interactive ? 2 : 1);
             char **_sup_argv = (char **)malloc((size_t)(_sup_argc + 1) * sizeof(char *));
             if (_sup_argv) {
-                _sup_argv[0] = argv[0];
-                _sup_argv[1] = (char *)"supervise";
+                int _dst = 0;
+                _sup_argv[_dst++] = argv[0];
+                _sup_argv[_dst++] = (char *)"supervise";
+                if (_bare_auto_interactive)
+                    _sup_argv[_dst++] = (char *)"-i";
                 for (int _k = 1; _k < argc; _k++)
-                    _sup_argv[_k + 1] = argv[_k];
-                _sup_argv[_sup_argc] = NULL;
+                    _sup_argv[_dst++] = argv[_k];
+                _sup_argv[_dst] = NULL;
                 /* permanent: supervisor keeps the session alive through clean exits
                  * (terminal close -> child autosaves+exits -> supervisor relaunches).
                  * Explicit /quit returns DSCO_EXIT_USER_REQUESTED so the supervisor stops. */
                 setenv("DSCO_SUPERVISE_RESTART", "permanent", 0);
+                main_restore_sealed_env_for_exec();
                 execvp(_sup_argv[0], _sup_argv);
                 free(_sup_argv);
                 /* exec failed — fall through to run unsupervised */
@@ -3209,7 +3507,7 @@ int main(int argc, char **argv) {
         } else {
             usage(argv[0]);
             fprintf(stderr, "\nerror: prompt required (try -i for interactive mode)\n");
-            return 1;
+            return getenv("DSCO_SUPERVISED") ? DSCO_EXIT_CONFIG : 1;
         }
     }
 
@@ -3229,7 +3527,14 @@ int main(int argc, char **argv) {
     bool arg_requests_setup = false;
     bool arg_skip_bootstrap = false;
     for (int i = 1; i < argc; i++) {
-        if (strcmp(argv[i], "-h") == 0 || strcmp(argv[i], "--help") == 0) {
+        if (strcmp(argv[i], "-h") == 0 || strcmp(argv[i], "--help") == 0 ||
+            strcmp(argv[i], "--workspace-status") == 0 ||
+            strcmp(argv[i], "--setup-report") == 0 ||
+            strcmp(argv[i], "--status") == 0 ||
+            strcmp(argv[i], "--route-explain") == 0 ||
+            strcmp(argv[i], "--topology-list") == 0 ||
+            strcmp(argv[i], "--topology-show") == 0 ||
+            strcmp(argv[i], "-e") == 0 || strcmp(argv[i], "--exec") == 0) {
             arg_skip_bootstrap = true;
         }
         if (strcmp(argv[i], "--setup") == 0 ||
@@ -3243,6 +3548,11 @@ int main(int argc, char **argv) {
     /* Detect `login` / `status` subcommands early (before bootstrap) */
     bool arg_login  = false;
     bool arg_status = false;
+    if (arg_skip_bootstrap) {
+        setenv("DSCO_SETUP_NO_AUTO_BOOTSTRAP", "1", 0);
+        setenv("DSCO_CREDENTIAL_DISCOVERY_NO_PROMPT", "1", 0);
+        setenv("DSCO_SECURE_STORE_NO_PROMPT", "1", 0);
+    }
     if (argc >= 2 && strcmp(argv[1], "login") == 0)  arg_login  = true;
     if (argc >= 2 && strcmp(argv[1], "status") == 0) arg_status = true;
     for (int i = 1; i < argc && !arg_login && !arg_status; i++) {
@@ -3254,6 +3564,8 @@ int main(int argc, char **argv) {
     bool model_preexisted_setup = pre_setup_model && pre_setup_model[0];
 
     int loaded_env_count = dsco_setup_load_saved_env();
+    if (cli_runtime_mode)
+        main_apply_runtime_mode_flags(argc, argv);
     char bootstrap_msg[512];
     if (!arg_requests_setup && !arg_skip_bootstrap && !arg_login && !arg_status) {
         int bootstrap_state = dsco_setup_bootstrap_from_env(bootstrap_msg, sizeof(bootstrap_msg));
@@ -3306,7 +3618,6 @@ int main(int argc, char **argv) {
     bool mux_mode = false;
     const char *mux_initial_root = NULL;
     const char *worker_model = NULL;
-    bool native_provider_model_selected = false;
 
     for (int i = 1; i < argc; i++) {
         if (strcmp(argv[i], "-h") == 0 || strcmp(argv[i], "--help") == 0) {
@@ -3540,6 +3851,18 @@ int main(int argc, char **argv) {
             user_set_model = true;
         } else if (strcmp(argv[i], "--cheap") == 0 || strcmp(argv[i], "-C") == 0) {
             g_cheap_mode = 1;
+        } else if (strcmp(argv[i], "--autonomous") == 0 ||
+                   strcmp(argv[i], "--auto-approve") == 0 ||
+                   strcmp(argv[i], "--no-approval-prompts") == 0 ||
+                   strcmp(argv[i], "--sandboxed") == 0 ||
+                   strcmp(argv[i], "--sandbox-mode") == 0) {
+            /* Applied by main_apply_runtime_mode_flags() before startup and
+             * again after saved env is loaded. Keep parser branch so mode flags
+             * do not become prompt text. */
+        } else if (strcmp(argv[i], "--approval-mode") == 0 && i + 1 < argc) {
+            i++;
+        } else if (strcmp(argv[i], "--trust-tier") == 0 && i + 1 < argc) {
+            i++;
         } else if (strcmp(argv[i], "--orchestrate") == 0 || strcmp(argv[i], "-O") == 0) {
             orchestrate_mode = true;
         } else if (strcmp(argv[i], "--mux") == 0 || strcmp(argv[i], "mux") == 0) {
@@ -3593,15 +3916,8 @@ int main(int argc, char **argv) {
                 provider_primary_model_for(key_provider, prompt_looks_code_task(oneshot_prompt));
             if (km && km[0]) {
                 model = km;
-                native_provider_model_selected = true;
             }
         }
-    }
-
-    if (!local_mode && !user_set_model && !model_from_env &&
-        provider_has_usable_key("sakana", api_key)) {
-        model = provider_select_default_primary_model(prompt_looks_code_task(oneshot_prompt));
-        native_provider_model_selected = true;
     }
 
     if (api_key && api_key[0] && !oneshot_prompt && !interactive_mode &&
@@ -3611,17 +3927,32 @@ int main(int argc, char **argv) {
         !ui_mode && isatty(STDIN_FILENO) && isatty(STDERR_FILENO)) {
         interactive_mode = true;
     }
+    if (cli_runtime_mode && !oneshot_prompt && !interactive_mode &&
+        !exec_backend && !setup_mode && !setup_report_mode &&
+        !workspace_bootstrap_mode && !workspace_status_mode &&
+        !timeline_server_mode && !topology_list_mode && !topology_show_mode &&
+        !ui_mode && isatty(STDIN_FILENO) && isatty(STDERR_FILENO)) {
+        interactive_mode = true;
+    }
 
+    bool env_native_exec_ignored = false;
     if (!exec_backend && !local_mode) {
         const char *env_exec = getenv("DSCO_EXEC");
         const native_provider_t *env_np =
             (env_exec && env_exec[0]) ? native_find(env_exec) : NULL;
         if (env_np) {
-            g_provider_override = env_np->name;
-            const char *env_model_default = native_default_model_for_setting(env_np, env_exec);
-            if (!user_set_model && !model_from_env && env_model_default) {
-                model = env_model_default;
-                native_provider_model_selected = true;
+            if ((user_set_model || model_from_env) &&
+                !model_supports_native_provider(model, env_np->name)) {
+                env_native_exec_ignored = true;
+                fprintf(stderr,
+                        "  \033[2mignoring DSCO_EXEC=%s for model %s; using native routing\033[0m\n",
+                        env_exec, model_resolve_alias(model));
+            } else {
+                g_provider_override = env_np->name;
+                const char *env_model_default = native_default_model_for_setting(env_np, env_exec);
+                if (!user_set_model && !model_from_env && env_model_default) {
+                    model = env_model_default;
+                }
             }
         }
     }
@@ -3637,7 +3968,8 @@ int main(int argc, char **argv) {
         (api_key && api_key[0] && provider_provider_for_api_key(api_key) != NULL);
 
     /* DSCO_EXEC env var as default */
-    if (!exec_backend && !interactive_mode && !local_mode && !native_provider_signal) {
+    if (!exec_backend && !interactive_mode && !local_mode && !native_provider_signal &&
+        !env_native_exec_ignored) {
         const char *env_exec = getenv("DSCO_EXEC");
         if (env_exec && env_exec[0]) {
             exec_backend = env_exec;
@@ -3645,8 +3977,7 @@ int main(int argc, char **argv) {
         }
     }
 
-    if (exec_backend_from_env &&
-        (user_set_model || model_from_env || native_provider_model_selected)) {
+    if (exec_backend_from_env) {
         const exec_reg_t *env_exec = exec_find(exec_backend);
         if (env_exec && !model_supports_executor(model, env_exec->name)) {
             fprintf(stderr,
@@ -4231,15 +4562,12 @@ native_path:
         }
     }
 
-    /* No model/key forced: prefer subscription-backed compute (Fugu) whenever
-     * its credentials are available. */
-    if (!local_mode && !g_provider_override && !user_set_model && !model_from_env &&
-        provider_has_usable_key("sakana", api_key)) {
-        model = provider_select_default_primary_model(prompt_looks_code_task(oneshot_prompt));
-    }
-
-    /* Resolve API key for the active provider */
-    const char *active_provider = provider_route_for_model(model, api_key, g_provider_override);
+    /* Resolve API key for the active provider. Route on the resolved alias so
+     * short forms such as glm52/kimi/or-glm52 select the intended provider. */
+    const char *route_model = model_resolve_alias(model);
+    if (!route_model || !route_model[0])
+        route_model = model;
+    const char *active_provider = provider_route_for_model(route_model, api_key, g_provider_override);
     const char *resolved_api_key =
         provider_resolve_request_api_key(active_provider, api_key);
 
@@ -4254,7 +4582,7 @@ native_path:
         const char *recovered =
             provider_select_default_primary_model(prompt_looks_code_task(oneshot_prompt));
         if (recovered && recovered[0] && strcmp(recovered, model) != 0) {
-            const char *rp = provider_route_for_model(recovered, api_key, NULL);
+            const char *rp = provider_route_for_model(model_resolve_alias(recovered), api_key, NULL);
             const char *rk = provider_resolve_request_api_key(rp, api_key);
             if (rk && rk[0]) {
                 fprintf(stderr,
@@ -4311,8 +4639,9 @@ native_path:
         baseline_log("user", "oneshot_prompt", oneshot_prompt, NULL);
         session_state_t oneshot_session;
         session_state_init(&oneshot_session, model);
+        const char *oneshot_route_model = model_resolve_alias(oneshot_session.model);
         const char *oneshot_provider_name =
-            provider_route_for_model(oneshot_session.model, api_key, g_provider_override);
+            provider_route_for_model(oneshot_route_model, api_key, g_provider_override);
         provider_t *oneshot_provider = provider_create(oneshot_provider_name);
         provider_prepare(oneshot_provider);
         /* Resolve the correct API key for this provider (e.g. OPENROUTER_API_KEY) */

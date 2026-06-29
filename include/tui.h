@@ -516,6 +516,7 @@ typedef struct {
     bool     enabled;
     bool     visible;
     bool     show_clock;
+    bool     animations_enabled;
     bool     panel_active;  /* true while tui_composer_read is actively reading
                              * keystrokes — drives dual-state caret color */
     char     model[64];
@@ -527,6 +528,8 @@ typedef struct {
     int      tools_used;
     int      panel_rows;    /* bottom panel rows: top rule + input + status (3) */
     double   splash_started_at;
+    double   motion_started_at;
+    int      motion_frame;
 } tui_status_bar_t;
 
 void tui_status_bar_init(tui_status_bar_t *sb, const char *model);
@@ -536,6 +539,8 @@ void tui_status_bar_update(tui_status_bar_t *sb, int in_tok, int out_tok,
 void tui_status_bar_enable(tui_status_bar_t *sb);
 void tui_status_bar_disable(tui_status_bar_t *sb);
 void tui_status_bar_render(tui_status_bar_t *sb);
+bool tui_motion_enabled(void);
+const char *tui_motion_activity_frame(int frame, bool unicode);
 
 /* ── Input Panel (ephemeral bottom panel) ─────────────────────────────── */
 /* The bottom panel is 3 rows, painted only when reading user input:
@@ -579,6 +584,7 @@ void tui_panel_set_active(tui_status_bar_t *sb, bool active);
 void tui_input_panel_render(tui_status_bar_t *sb, const char *prompt_hint);
 void tui_input_panel_clear(tui_status_bar_t *sb);
 void tui_bottom_panel_refresh(tui_status_bar_t *sb, const char *prompt_hint);
+bool tui_prepare_external_output(void);
 
 /* Push cursor down with newlines until it sits just above the input panel
  * area (row `rows - 3`). No-op if cursor already at/past that row. By default
@@ -600,10 +606,18 @@ void tui_pad_to_panel_anchor(void);
  */
 char *tui_composer_read(tui_status_bar_t *sb, const char *prompt,
                         char *out, size_t out_sz);
+/* Optional bare-ESC hook. Return true to consume ESC and make the composer
+ * return promptly; return false to keep the normal composer behavior
+ * (dismiss picker/menu, then cancel the input). Used by the agent loop so ESC
+ * can pause an in-flight stream/tool even when the follow-up composer owns
+ * stdin. */
+typedef bool (*tui_composer_escape_hook_t)(void *ctx);
+void tui_composer_set_escape_hook(tui_composer_escape_hook_t hook, void *ctx);
 /* Signal handler hook for Ctrl+C while the composer owns stdin.
  * Returns 0 when no composer is reading, 1 when cancellation was requested,
  * and 2 when an interrupt was already pending. */
 int tui_composer_signal_interrupt(void);
+bool tui_composer_is_reading(void);
 
 /* ── Swarm UI ─────────────────────────────────────────────────────────── */
 typedef struct {
