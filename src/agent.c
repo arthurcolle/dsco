@@ -3283,6 +3283,7 @@ static tui_latency_breakdown_t s_last_latency;
 static tui_stream_heartbeat_t s_heartbeat;
 static void terminal_input_echo_suspend(void);
 static void terminal_input_echo_restore(void);
+static void terminal_input_echo_restore_preserve_input(void);
 static struct termios s_saved_termios;
 static bool s_saved_termios_valid = false;
 static bool s_input_echo_suspended = false;
@@ -3342,6 +3343,15 @@ static void terminal_input_echo_restore(void) {
         return;
     if (s_saved_termios_valid) {
         tcsetattr(STDIN_FILENO, TCSAFLUSH, &s_saved_termios);
+    }
+    s_input_echo_suspended = false;
+}
+
+static void terminal_input_echo_restore_preserve_input(void) {
+    if (!s_input_echo_suspended || !isatty(STDIN_FILENO))
+        return;
+    if (s_saved_termios_valid) {
+        tcsetattr(STDIN_FILENO, TCSANOW, &s_saved_termios);
     }
     s_input_echo_suspended = false;
 }
@@ -3442,8 +3452,8 @@ static bool followup_reader_start(followup_reader_t *r, tui_status_bar_t *sb,
         return false;
     memset(r, 0, sizeof(*r));
     const char *enabled = getenv("DSCO_FOLLOWUP_COMPOSER");
-    if (!enabled || !(enabled[0] == '1' || enabled[0] == 't' || enabled[0] == 'T' ||
-                      strcasecmp(enabled, "yes") == 0 || strcasecmp(enabled, "on") == 0))
+    if (enabled && (enabled[0] == '0' || strcasecmp(enabled, "false") == 0 ||
+                    strcasecmp(enabled, "no") == 0 || strcasecmp(enabled, "off") == 0))
         return false;
     if (!sb || !sb->visible || !isatty(STDIN_FILENO))
         return false;
@@ -4132,6 +4142,11 @@ bool agent_run(const char *api_key, const char *model, const char *topology_name
     /* Register terminal reset FIRST — ensures scroll region, bracketed paste,
        and SGR attrs are cleaned up on ANY exit path through exit(). */
     atexit(terminal_reset_atexit);
+    bool startup_input_suppressed = false;
+    if (isatty(STDIN_FILENO) && isatty(STDERR_FILENO)) {
+        terminal_input_echo_suspend();
+        startup_input_suppressed = s_input_echo_suspended;
+    }
 
     struct sigaction sa_int;
     memset(&sa_int, 0, sizeof(sa_int));
@@ -4466,7 +4481,13 @@ bool agent_run(const char *api_key, const char *model, const char *topology_name
         g_interrupted = 0;
         g_escape_state = ESC_RUNNING;
         output_guard_reset();
-        terminal_input_echo_restore();
+        if (startup_input_suppressed) {
+            if (!(interactive_composer_enabled() && g_winch_sb && g_winch_sb->visible))
+                terminal_input_echo_restore_preserve_input();
+            startup_input_suppressed = false;
+        } else {
+            terminal_input_echo_restore();
+        }
 
         /* Build dynamic prompt: [turn N] model · $cost · context% ▸ */
         char dyn_prompt[256];
