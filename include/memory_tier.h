@@ -48,6 +48,29 @@ typedef enum {
 #define MEM_CONSOLIDATION_IMPORTANCE    0.7 /* importance to auto-promote */
 #define MEM_CONSOLIDATION_INTERVAL      30  /* seconds between consolidation sweeps */
 
+/* ── keep_score weighting (doctrine/MEMORY.md Rule 0, 2026-06-28) ──────────
+ * Computable promotion/retrieval score grounded in Generative Agents
+ * (arXiv:2304.03442) + MemGPT (arXiv:2310.08560). Two modes: PROMOTION
+ * (keep-forever; importance dominates, recency must not decay an old lesson)
+ * and RETRIEVAL (recall-now; recency leads). See scripts/memory/keep_score.py. */
+#define MEM_KEEP_PROMOTION_W_RECENCY    0.05
+#define MEM_KEEP_PROMOTION_W_IMPORTANCE 0.65
+#define MEM_KEEP_PROMOTION_W_RELEVANCE  0.30
+#define MEM_KEEP_RETRIEVAL_W_RECENCY    0.34
+#define MEM_KEEP_RETRIEVAL_W_IMPORTANCE 0.33
+#define MEM_KEEP_RETRIEVAL_W_RELEVANCE  0.33
+
+/* Promotion gates on keep_score (PROMOTION mode, +evidence bonus).
+ * Episodic->Semantic is the durable commitment and needs a higher bar than
+ * Working->Episodic — preserves the original "more evidence for semantic" rule. */
+#define MEM_KEEP_PROMOTE_GATE_EPISODIC  0.50  /* working  -> episodic */
+#define MEM_KEEP_PROMOTE_GATE_SEMANTIC  0.62  /* episodic -> semantic */
+
+typedef enum {
+    MEM_KEEP_PROMOTION = 0,  /* what to keep forever  */
+    MEM_KEEP_RETRIEVAL = 1   /* what to recall now    */
+} memory_keep_mode_t;
+
 /* ── Memory Entry ─────────────────────────────────────────────────────── */
 
 typedef struct {
@@ -148,6 +171,12 @@ int memory_decay_tick(memory_store_t *m, double threshold);
 /* Run consolidation: promote frequently-accessed or important memories.
    Returns number of promotions. */
 int memory_consolidate(memory_store_t *m);
+
+/* Computable keep/promote score in [0,1] for one entry.
+ * relevance is caller-supplied in [0,1] (0.5 = neutral/no query).
+ * Additive: does not alter memory_consolidate() behavior. */
+double memory_keep_score(const memory_entry_t *e, memory_keep_mode_t mode,
+                         double relevance, double now);
 
 /* Full maintenance pass (decay + consolidate). */
 int memory_tick(memory_store_t *m);

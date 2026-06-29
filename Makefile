@@ -46,7 +46,12 @@ LDLIBS ?= -lcurl -lsqlite3 -ldl -lm
 
 TARGET = dsco
 LITE_TARGET = dsco-lite
+WASM_TARGET = web/static/dsco_wasm.js
+WASM_EXPORTS = '["_dsco_wasm_version","_dsco_wasm_exports_json","_dsco_wasm_models_json","_dsco_wasm_tools_json","_dsco_wasm_route_explain","_dsco_wasm_tool_exec","_dsco_wasm_session_reset","_dsco_wasm_session_add","_dsco_wasm_session_state"]'
+WASM_CACHE_DIR ?= $(BUILD_DIR)/emscripten-cache
+WASM_CACHE_ABS := $(abspath $(WASM_CACHE_DIR))
 DEBUG_TARGET = $(TARGET)-debug
+PROFILE_TARGET ?= dsco-instrumented
 
 # Cosmopolitan / APE portable build lane. The default target is the hosted
 # binary artifact name and is intentionally separate from $(TARGET): native DSCO
@@ -57,7 +62,7 @@ COSMOCC_VERSION ?= 4.0.2
 
 SRC_NAMES = main.c agent.c llm.c tools.c execution_layer.c json_util.c ast.c swarm.c tui.c env_config.c \
 	md.c baseline.c chronicle.c setup.c crypto.c eval.c pipeline.c plugin.c \
-			semantic.c hlc.c ipc.c mcp.c mcp_names.c provider_profiles.c provider.c integrations.c error.c trace.c task_profile.c \
+			semantic.c hlc.c ipc.c mcp.c mcp_names.c provider_profiles.c provider.c integrations.c error.c trace.c instrumenter.c structured_process.c task_profile.c \
 	output_guard.c topology.c workspace.c plan.c stateful_atoms.c recovery.c router.c \
 	pheromone.c ooda.c killswitch.c governance.c memory_tier.c talons.c avian.c \
 	arena_alloc.c event_loop.c vm.c scheduler.c vfs.c trading.c legion.c \
@@ -117,6 +122,12 @@ ASAN_LDFLAGS = -fsanitize=address
 UBSAN_CFLAGS = $(BASE_CFLAGS) -O0 -g -fno-omit-frame-pointer -fno-inline -fsanitize=undefined -fno-sanitize-recover=all
 UBSAN_LDFLAGS = -fsanitize=undefined -fno-sanitize-recover=all
 DEBUG_CFLAGS = $(BASE_CFLAGS) -O0 -g -fno-omit-frame-pointer -fno-inline -DDSCO_DEV_BINARY
+PROFILE_COVERAGE_FLAGS = -finstrument-functions -fsanitize-coverage=trace-pc-guard,trace-cmp,indirect-calls,trace-div,trace-gep
+PROFILE_CFLAGS = $(BASE_CFLAGS) -O1 -g -fno-omit-frame-pointer -fno-inline \
+	-fno-optimize-sibling-calls -DDSCO_OBJECT_INSTRUMENTATION $(PROFILE_COVERAGE_FLAGS)
+ifeq ($(PROFILE_BUILD),1)
+override CFLAGS = $(PROFILE_CFLAGS)
+endif
 LITE_CFLAGS ?= -Oz -std=$(DSCO_STD) $(C2Y_WARNING_FLAGS) -D_POSIX_C_SOURCE=200809L \
 	-I$(INC_DIR) -DBUILD_DATE='"$(BUILD_DATE)"' -DGIT_HASH='"$(GIT_HASH)"'
 COVERAGE_CFLAGS = $(BASE_CFLAGS) -O0 -g -fno-omit-frame-pointer -fno-inline --coverage
@@ -268,6 +279,33 @@ all: $(TARGET) dsc dsco-new $(LITE_TARGET)
 debug: $(DEBUG_TARGET)
 dev: $(DEBUG_TARGET)
 
+profile-instrumented:
+	$(MAKE) BUILD_DIR=build/instrumented TARGET=$(PROFILE_TARGET) PROFILE_BUILD=1 $(PROFILE_TARGET)
+
+profile:
+	python3 scripts/dsco_profile.py -- ./$(PROFILE_TARGET) --version
+
+.PHONY: wasm wasm-check wasm-smoke-native test_wasm_core
+wasm: $(WASM_TARGET)
+
+wasm-check:
+	@command -v emcc >/dev/null 2>&1 || { \
+		echo "emcc not found; install Emscripten to build $(WASM_TARGET)"; \
+		exit 1; \
+	}
+
+$(WASM_TARGET): $(SRC_DIR)/wasm_core.c $(INC_DIR)/wasm_core.h $(INC_DIR)/config.h | wasm-check $(BUILD_DIR)
+	EM_CACHE=$(WASM_CACHE_ABS) emcc -Oz -std=$(DSCO_STD) $(C2Y_WARNING_FLAGS) -I$(INC_DIR) \
+		-DBUILD_DATE='"$(BUILD_DATE)"' -DGIT_HASH='"$(GIT_HASH)"' \
+		--no-entry \
+		-sMODULARIZE=1 -sEXPORT_NAME=DscoWasm -sENVIRONMENT=web,node \
+		-sALLOW_MEMORY_GROWTH=1 -sFILESYSTEM=0 \
+		-sEXPORTED_RUNTIME_METHODS='["ccall","cwrap"]' \
+		-sEXPORTED_FUNCTIONS=$(WASM_EXPORTS) \
+		-o $@ $<
+
+wasm-smoke-native: test_wasm_core
+
 .PHONY: cosmo-bootstrap cosmo cosmo-run cosmo-selftest cosmo-clean cosmo-info
 cosmo-bootstrap:
 	chmod +x scripts/cosmo_bootstrap.sh scripts/cosmo_build.sh
@@ -401,6 +439,10 @@ $(UBSAN_TEST_OBJ_DIR)/generated_%.o: src/generated/%.c | bake_data $(UBSAN_TEST_
 $(OBJ_DIR)/%.o: $(SRC_DIR)/%.c | $(OBJ_DIR)
 	@mkdir -p $(@D)
 	$(CC) $(CFLAGS) -c -o $@ $<
+
+ifeq ($(PROFILE_BUILD),1)
+$(OBJ_DIR)/instrumenter.o: CFLAGS := $(filter-out $(PROFILE_COVERAGE_FLAGS),$(CFLAGS)) -fsanitize-coverage=0
+endif
 
 # ── Memory-bounded compilation of large translation units ──────────────────
 # tools.c (>1MB of source), agent.c, tui.c, integrations.c, trading.c, llm.c,
@@ -602,6 +644,21 @@ test_session_memory: $(TEST_OBJ_DIR)/test_session_memory.o \
 	$(LIB_OBJS:$(OBJ_DIR)/%=$(TEST_OBJ_DIR)/%) $(GSL_TEST_OBJS)
 	$(CC) $(TEST_CFLAGS) -o $@ $^ $(LDFLAGS) $(LDLIBS)
 
+$(TEST_OBJ_DIR)/test_memory_keep_score.o: $(TEST_DIR)/test_memory_keep_score.c | $(TEST_OBJ_DIR)
+	$(CC) $(TEST_CFLAGS) -c -o $@ $<
+# memory_keep_score pulls in vecstore + tools_embed_text via memory_tier.c; link full lib set.
+test_memory_keep_score: $(TEST_OBJ_DIR)/test_memory_keep_score.o \
+	$(LIB_OBJS:$(OBJ_DIR)/%=$(TEST_OBJ_DIR)/%) $(GSL_TEST_OBJS)
+	$(CC) $(TEST_CFLAGS) -o $@ $^ $(LDFLAGS) $(LDLIBS)
+
+$(TEST_OBJ_DIR)/test_wasm_core.o: $(TEST_DIR)/test_wasm_core.c | $(TEST_OBJ_DIR)
+	$(CC) $(TEST_CFLAGS) -c -o $@ $<
+$(TEST_OBJ_DIR)/wasm_core.o: $(SRC_DIR)/wasm_core.c | $(TEST_OBJ_DIR)
+	$(CC) $(TEST_CFLAGS) -c -o $@ $<
+test_wasm_core: $(TEST_OBJ_DIR)/test_wasm_core.o $(TEST_OBJ_DIR)/wasm_core.o
+	$(CC) $(TEST_CFLAGS) -o $@ $^ $(LDFLAGS) -lm
+	./$@
+
 $(TEST_OBJ_DIR)/test_control_flow.o: $(TEST_DIR)/test_control_flow.c | $(TEST_OBJ_DIR)
 	$(CC) $(TEST_CFLAGS) -c -o $@ $<
 test_control_flow: $(TEST_OBJ_DIR)/test_control_flow.o \
@@ -613,6 +670,17 @@ $(TEST_OBJ_DIR)/test_avian.o: $(TEST_DIR)/test_avian.c | $(TEST_OBJ_DIR)
 	$(CC) $(TEST_CFLAGS) -c -o $@ $<
 test_avian: $(TEST_OBJ_DIR)/test_avian.o $(TEST_OBJ_DIR)/avian.o
 	$(CC) $(TEST_CFLAGS) -o $@ $^ $(LDFLAGS) -lm
+
+# Live MCP integration smoke test (not part of test_priorities — needs network +
+# OPENROUTER_API_KEY). Loads dsco's full MCP config (incl. ./.mcp.json), proves the
+# OpenRouter remote MCP server authenticates via the env-expanded Bearer header,
+# discovers its tools, and fires one live models-list call. Links LIB_OBJS
+# (mcp.o + its deps; excludes main/agent/orchestrator).
+$(TEST_OBJ_DIR)/mcp_openrouter_smoke.o: $(TEST_DIR)/mcp_openrouter_smoke.c | $(TEST_OBJ_DIR)
+	$(CC) $(TEST_CFLAGS) -c -o $@ $<
+mcp_smoke: $(TEST_OBJ_DIR)/mcp_openrouter_smoke.o $(filter-out $(OBJ_DIR)/main.o, $(OBJS)) $(GSL_OBJS)
+	$(CC) $(TEST_CFLAGS) -fcommon -o $(BUILD_DIR)/$@ $^ $(LDFLAGS) $(RELEASE_LDFLAGS) $(LDLIBS)
+	$(BUILD_DIR)/$@
 
 # Math fast-path corpus test. Links the REAL production logic (math_fastpath.c
 # + eval.c) and validates routing + value over thousands of generated cases.
@@ -629,13 +697,15 @@ test_math_corpus: $(TEST_OBJ_DIR)/test_math_corpus.o \
 # Build + run every standalone priority test in sequence.
 .PHONY: test_priorities
 test_priorities: test_recovery test_stateful_atoms test_plan_optimizer test_plan_cache \
-	test_learned_cost test_session_memory test_control_flow test_avian test_math_corpus
+	test_learned_cost test_session_memory test_memory_keep_score test_wasm_core test_control_flow test_avian test_math_corpus
 	./test_recovery
 	./test_stateful_atoms
 	./test_plan_optimizer
 	./test_plan_cache
 	./test_learned_cost
 	./test_session_memory
+	./test_memory_keep_score
+	./test_wasm_core
 	./test_control_flow
 	./test_avian
 	./test_math_corpus $(TEST_DIR)/math_corpus.tsv
@@ -751,19 +821,25 @@ bench-size: $(TARGET) $(LITE_TARGET)
 	@printf '{"bench":"size","binary":"%s","bytes":%s}\n' "$(TARGET)" "$$(wc -c < ./$(TARGET))"
 	@printf '{"bench":"size","binary":"%s","bytes":%s}\n' "$(LITE_TARGET)" "$$(wc -c < ./$(LITE_TARGET))"
 
+release-hardened:
+	python3 scripts/release_hardened.py $${DSCO_RELEASE_BINARY:-$(COSMO_TARGET).aarch64.elf}
+
+release-hardened-native: $(TARGET)
+	python3 scripts/release_hardened.py ./$(TARGET)
+
 lint: format-check docs-check check-version
 
 clean:
-	rm -rf $(BUILD_DIR) $(TARGET) $(LITE_TARGET) $(DEBUG_TARGET) dsc test_runner coverage_runner $(TARGET)-asan $(TARGET)-ubsan asan-test_runner ubsan-test_runner
+	rm -rf $(BUILD_DIR) $(TARGET) $(LITE_TARGET) $(DEBUG_TARGET) $(PROFILE_TARGET) dsc test_runner coverage_runner $(TARGET)-asan $(TARGET)-ubsan asan-test_runner ubsan-test_runner
 
-install: $(TARGET) $(LITE_TARGET) dsc
+install: $(TARGET) dsco-new $(LITE_TARGET) dsc
 	install -d $(PREFIX)/bin
 	install -d $(DSCO_SHARE_DIR)
 	install -m 755 $(TARGET) $(PREFIX)/bin/
 	install -m 755 $(LITE_TARGET) $(PREFIX)/bin/
 	install -m 755 dsc $(PREFIX)/bin/
 	install -m 755 scripts/live_face_avatar.sh $(PREFIX)/bin/dsco-live-face-avatar
-	test -f dsco-new && install -m 755 dsco-new $(PREFIX)/bin/ || true
+	install -m 755 dsco-new $(PREFIX)/bin/
 	install -m 644 $(INC_DIR)/tool_embeddings.bin $(DSCO_SHARE_DIR)/
 	install -m 755 face_capture.py $(DSCO_SHARE_DIR)/
 	install -d $(DSCO_DIR)/sessions $(DSCO_DIR)/plugins $(DSCO_DIR)/debug
@@ -790,9 +866,10 @@ ui: $(TARGET) ui-deps
 	./$(TARGET) --ui
 
 .PHONY: all debug dev clean install uninstall test coverage docs docs-check \
+	profile profile-instrumented \
 	asan ubsan asan-test ubsan-test format format-check \
 	fast fast-build fast-test fast-quick fast-syntax fast-changed fast-bench fast-doctor \
 	changed-tests compile-commands build-report build-cache-doctor fast-objects time-trace ninja-file ninja-build \
 	lint clang-tidy cppcheck static-analysis check-version \
 	ui ui-deps bench-startup bench-tool bench-agent-loop bench-local \
-	bench-sota bench-ttft bench-worker bench-size
+	bench-sota bench-ttft bench-worker bench-size release-hardened release-hardened-native

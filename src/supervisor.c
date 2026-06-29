@@ -893,6 +893,8 @@ static void restore_tty_before_shell(void) {
         "\033[?2004l"                     /* bracketed paste off */
         "\033[?1000l\033[?1002l\033[?1003l\033[?1006l" /* mouse off */
         "\033[?1004l" /* focus reporting off */
+        "\033[<u\033[=0;1u" /* keyboard protocol / CSI-u off */
+        "\033[>4;0m\033[>1;0m" /* xterm/iTerm modified-key modes off */
         "\033[?25h"   /* show cursor */
         "\033[0m";    /* reset attributes */
 
