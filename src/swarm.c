@@ -1,4 +1,5 @@
 #include "swarm.h"
+#include "openrouter_cache.h"
 #include "config.h"
 #include "provider.h"
 #include "router.h"
@@ -387,10 +388,27 @@ int swarm_spawn_in_group(swarm_t *s, int group_id, const char *task, const char 
         /* New process group for clean kill */
         setpgid(0, 0);
 
+        /* Sub-agent cost routing: when the caller did not pin a model and
+           DSCO_SWARM_FREE_SUBAGENTS is set, route swarm workers to the free
+           agentic meta-model (openrouter/owl-alpha — 1M ctx, native tools) so
+           parallel exploration costs $0. Requires an OpenRouter key. The
+           explicit-model and unknown-model paths below still apply. */
+        const char *m = model ? model : s->default_model;
+        if (!model) {
+            const char *free_sub = getenv("DSCO_SWARM_FREE_SUBAGENTS");
+            if (free_sub && free_sub[0] && free_sub[0] != '0' &&
+                provider_has_usable_key("openrouter", s->api_key)) {
+                const char *routed = dsco_route_by_task(DSCO_TASK_SUBAGENT);
+                if (routed && routed[0]) {
+                    m = routed;
+                    fprintf(stdout, "swarm: free sub-agent routing -> %s\n", m);
+                }
+            }
+        }
+
         /* Validate model against registry — LLMs sometimes hallucinate
            model names (e.g. "claude-3-5-sonnet-20241022" which is gone).
            Fall back to parent's model if the requested one is unknown. */
-        const char *m = model ? model : s->default_model;
         if (m && m[0]) {
             const char *resolved = model_resolve_alias(m);
             if (resolved == m && !model_lookup(m)) {

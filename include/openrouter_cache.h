@@ -45,6 +45,7 @@ typedef struct {
     double cache_write_price;
     int    supports_thinking;       /* 1 = exposes a reasoning parameter */
     int    multimodal;              /* 1 = accepts/produces non-text modalities */
+    int    tool_capable;             /* 1 = supports tool/function calling */
     long   created;                 /* unix timestamp, 0 if unknown */
 } or_model_view_t;
 
@@ -53,5 +54,44 @@ typedef void (*or_model_cb)(const or_model_view_t *m, void *ud);
 /* Invoke `cb` once per indexed model (catalog order). Returns the number
  * visited (0 if the catalog is not yet loaded). */
 int openrouter_cache_foreach(or_model_cb cb, void *ud);
+
+
+/* ── Task-based routing ────────────────────────────────────────────────── */
+
+typedef enum {
+    DSCO_TASK_GENERAL   = 0,   /* general purpose — openrouter/auto */
+    DSCO_TASK_CODE      = 1,   /* coding tasks — openrouter/pareto-code */
+    DSCO_TASK_COMPLEX   = 2,   /* multi-model deliberation — openrouter/fusion */
+    DSCO_TASK_SUBAGENT  = 3,   /* sub-agent/swarm worker — openrouter/owl-alpha (free) */
+    DSCO_TASK_CHEAP     = 4,   /* cheapest tool-capable model from catalog */
+    DSCO_TASK_LONG_CTX  = 5,   /* largest context tool-capable model */
+    DSCO_TASK_PREMIUM   = 6,   /* highest-quality model available */
+    DSCO_TASK_FREE      = 7,   /* free tier — openrouter/free */
+} dsco_task_type_t;
+
+/* Return the optimal model slug for a task type. The result points to static
+ * or catalog-owned memory and must not be freed. Returns NULL if no suitable
+ * model is found (caller should fall back to default). */
+const char *dsco_route_by_task(dsco_task_type_t task);
+
+/* Return a tool-capable model slug from the catalog that best matches the
+ * given constraints. budget_per_1m is the max $/1M input tokens (0 = no limit).
+ * min_ctx is the minimum context window required (0 = any). */
+const char *dsco_route_optimal(double budget_per_1m, int min_ctx);
+
+/* Build a dynamic failover chain from the live catalog. Finds models with
+ * similar capabilities to the failed model, sorted by price ascending.
+ * Returns the number of models written to out_models. */
+int dsco_route_failover_dynamic(const char *failed_model, char out_models[][128],
+                                int max_models);
+
+/* Return the cheapest tool-capable model from the catalog. */
+const char *dsco_route_cheapest_tool(void);
+
+/* Return a free tool-capable model from the catalog. */
+const char *dsco_route_free_tool(void);
+
+/* Return the model with the largest context window that supports tools. */
+const char *dsco_route_largest_ctx_tool(void);
 
 #endif /* DSCO_OPENROUTER_CACHE_H */

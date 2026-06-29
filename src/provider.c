@@ -2790,6 +2790,37 @@ bool provider_msg_is_credit_too_low(const char *msg) {
     return false;
 }
 
+/* Classify an error body/message as a policy/gating rejection: the model or
+ * provider is administratively unavailable to this principal (regulatory
+ * gating, region/allowlist restriction, model retired, access not granted).
+ * Distinct from credit_too_low (billing) - gating is not fixed by paying, so
+ * the right response is to route to a different model entirely. HTTP 403 and
+ * "model not available" style errors map here. */
+bool provider_msg_is_gated(const char *msg) {
+    if (!msg || !msg[0])
+        return false;
+    static const char *needles[] = {
+        "access denied",                "not authorized",          "unauthorized",
+        "permission denied",            "forbidden",               "not available in your",
+        "not available to your",        "model not found",         "model_not_found",
+        "no access to model",           "access to this model",    "not allowed to access",
+        "requires approval",            "approved access",         "gated",
+        "restricted to",                "region is not supported", "country is not supported",
+        "policy restriction",           "model is retired",        "model has been deprecated",
+        "no endpoints found",           "data policy",             "requires moderation",
+        NULL,
+    };
+    for (int i = 0; needles[i]; i++) {
+        const char *n = needles[i];
+        size_t nlen = strlen(n);
+        for (const char *p = msg; *p; p++) {
+            if (strncasecmp(p, n, nlen) == 0)
+                return true;
+        }
+    }
+    return false;
+}
+
 static time_t provider_reset_max(time_t a, time_t b) {
     if (b <= 0)
         return a;
