@@ -9230,6 +9230,54 @@ static void test_provider_build_default_fallback_models_for_fugu_cross_provider(
     PASS();
 }
 
+static void test_provider_build_default_fallback_models_empty_for_local_endpoint(void) {
+    TEST("provider_build_default_fallback_models empty for local endpoint");
+    char saved_disable_fallbacks[64], saved_xai[256], saved_grok[256], saved_x_ai[256];
+    char saved_or[256], saved_anth[256], saved_openai[256], saved_disable_codex[64];
+    bool had_disable_fallbacks = false, had_xai = false, had_grok = false, had_x_ai = false;
+    bool had_or = false, had_anth = false, had_openai = false, had_disable_codex = false;
+    test_capture_env("DSCO_DISABLE_DEFAULT_FALLBACKS", saved_disable_fallbacks,
+                     sizeof(saved_disable_fallbacks), &had_disable_fallbacks);
+    test_capture_env("XAI_API_KEY", saved_xai, sizeof(saved_xai), &had_xai);
+    test_capture_env("GROK_API_KEY", saved_grok, sizeof(saved_grok), &had_grok);
+    test_capture_env("X_AI_API_KEY", saved_x_ai, sizeof(saved_x_ai), &had_x_ai);
+    test_capture_env("OPENROUTER_API_KEY", saved_or, sizeof(saved_or), &had_or);
+    test_capture_env("ANTHROPIC_API_KEY", saved_anth, sizeof(saved_anth), &had_anth);
+    test_capture_env("OPENAI_API_KEY", saved_openai, sizeof(saved_openai), &had_openai);
+    test_capture_env("DSCO_DISABLE_CODEX_OAUTH_DISCOVERY", saved_disable_codex,
+                     sizeof(saved_disable_codex), &had_disable_codex);
+
+    unsetenv("DSCO_DISABLE_DEFAULT_FALLBACKS");
+    setenv("XAI_API_KEY", "xai-native", 1);
+    setenv("OPENROUTER_API_KEY", "sk-or-router", 1);
+    setenv("ANTHROPIC_API_KEY", "sk-ant-native", 1);
+    setenv("OPENAI_API_KEY", "sk-openai-native", 1);
+    setenv("DSCO_DISABLE_CODEX_OAUTH_DISCOVERY", "1", 1);
+
+    char models[4][128];
+    int count = provider_build_default_fallback_models("lmstudio:liquid/lfm2.5-1.2b",
+                                                       models, 4);
+    ASSERT(count == 0, "local LM Studio model should not get remote fallback models");
+
+    session_state_t s;
+    session_state_init(&s, "lmstudio:liquid/lfm2.5-1.2b");
+    ASSERT(strcmp(s.model, "lmstudio:liquid/lfm2.5-1.2b") == 0,
+           "local model id should remain unchanged");
+    ASSERT(s.fallback_count == 0, "local sessions should not auto-fallback to remote providers");
+
+    test_restore_env("DSCO_DISABLE_DEFAULT_FALLBACKS", saved_disable_fallbacks,
+                     had_disable_fallbacks);
+    test_restore_env("XAI_API_KEY", saved_xai, had_xai);
+    test_restore_env("GROK_API_KEY", saved_grok, had_grok);
+    test_restore_env("X_AI_API_KEY", saved_x_ai, had_x_ai);
+    test_restore_env("OPENROUTER_API_KEY", saved_or, had_or);
+    test_restore_env("ANTHROPIC_API_KEY", saved_anth, had_anth);
+    test_restore_env("OPENAI_API_KEY", saved_openai, had_openai);
+    test_restore_env("DSCO_DISABLE_CODEX_OAUTH_DISCOVERY", saved_disable_codex,
+                     had_disable_codex);
+    PASS();
+}
+
 static void test_provider_route_explicit_openrouter_overrides_native_namespace(void) {
     TEST("provider routing explicit OpenRouter overrides native namespace");
     char saved_or[256], saved_anth[256], saved_moonshot[256], saved_kimi[256];
@@ -16868,6 +16916,7 @@ int main(void) {
     test_provider_build_default_fallback_models_empty_without_credentials();
     test_provider_build_default_fallback_models_native_primary_duplicate();
     test_provider_build_default_fallback_models_for_fugu_cross_provider();
+    test_provider_build_default_fallback_models_empty_for_local_endpoint();
     test_provider_route_explicit_openrouter_overrides_native_namespace();
     test_provider_route_native_namespace_does_not_silently_fallback_to_openrouter();
     test_provider_model_is_routable_respects_native_namespace_without_key();
