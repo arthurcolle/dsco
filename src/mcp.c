@@ -311,6 +311,66 @@ typedef struct {
     bool headers;
 } kv_map_ctx_t;
 
+/* Expand $VAR / ${VAR} references in buf (NUL-terminated) using getenv().
+ * Applied to MCP header and env values so configs can reference secrets
+ * without hardcoding them (e.g. "Authorization": "Bearer $OPENROUTER_API_KEY").
+ * A reference to an UNSET variable is left as-is (the literal $VAR/${VAR}) so
+ * ordinary strings that happen to contain '$' are not silently mangled; only
+ * references that resolve to a set environment variable are substituted.
+ * Output is truncated to cap-1 and always NUL-terminated. */
+static void expand_env_inplace(char *buf, size_t cap) {
+    if (!buf || cap == 0)
+        return;
+    char *out = (char *)malloc(cap);
+    if (!out)
+        return;
+    size_t oi = 0;
+    const char *p = buf;
+    while (*p && oi < cap - 1) {
+        if (*p != '$') {
+            out[oi++] = *p++;
+            continue;
+        }
+        const char *name = NULL;
+        size_t namelen = 0;
+        const char *after = p + 1; /* where the token ends */
+        if (p[1] == '{') {
+            const char *end = strchr(p + 2, '}');
+            if (end) {
+                name = p + 2;
+                namelen = (size_t)(end - name);
+                after = end + 1;
+            }
+        } else if ((p[1] >= 'A' && p[1] <= 'Z') || (p[1] >= 'a' && p[1] <= 'z') || p[1] == '_') {
+            name = p + 1;
+            const char *q = p + 1;
+            while ((*q >= 'A' && *q <= 'Z') || (*q >= 'a' && *q <= 'z') ||
+                   (*q >= '0' && *q <= '9') || *q == '_')
+                q++;
+            namelen = (size_t)(q - name);
+            after = q;
+        }
+        char varbuf[128];
+        const char *val = NULL;
+        if (name && namelen > 0 && namelen < sizeof(varbuf)) {
+            memcpy(varbuf, name, namelen);
+            varbuf[namelen] = '\0';
+            val = getenv(varbuf);
+        }
+        if (val) {
+            while (*val && oi < cap - 1)
+                out[oi++] = *val++;
+            p = after;
+        } else {
+            /* no valid/expandable reference: copy the '$' literally and advance */
+            out[oi++] = *p++;
+        }
+    }
+    out[oi] = '\0';
+    memcpy(buf, out, oi + 1);
+    free(out);
+}
+
 static void add_server_kv(mcp_server_t *srv, bool header, const char *key, const char *val) {
     if (!key || !val)
         return;
@@ -319,12 +379,14 @@ static void add_server_kv(mcp_server_t *srv, bool header, const char *key, const
             return;
         copy_str(srv->header_keys[srv->headerc], sizeof(srv->header_keys[0]), key);
         copy_str(srv->header_vals[srv->headerc], sizeof(srv->header_vals[0]), val);
+        expand_env_inplace(srv->header_vals[srv->headerc], sizeof(srv->header_vals[0]));
         srv->headerc++;
     } else {
         if (srv->envc >= MCP_MAX_ENV)
             return;
         copy_str(srv->env_keys[srv->envc], sizeof(srv->env_keys[0]), key);
         copy_str(srv->env_vals[srv->envc], sizeof(srv->env_vals[0]), val);
+        expand_env_inplace(srv->env_vals[srv->envc], sizeof(srv->env_vals[0]));
         srv->envc++;
     }
 }
