@@ -69,6 +69,10 @@ static const char *s_env_keys[] = {"ANTHROPIC_API_KEY",  "OPENAI_API_KEY",
                                    "FUGU_API_KEY",
                                    "FUGU_PAYG_API_KEY",  "SAKANA_PAYG_API_KEY",
                                    "FISH_PAYG_API_KEY",  "SAKANA_PAYG_TOKEN",
+                                   "GLM_API_KEY",        "ZAI_API_KEY",
+                                   "Z_AI_API_KEY",       "ZAI_CODING_PLAN_API_KEY",
+                                   "Z_AI_CODING_PLAN_API_KEY",
+                                   "ZHIPU_API_KEY",
                                    "DSCO_MESH_SECRET",
                                    "DSCO_NET_AUTH_KEY",  NULL};
 

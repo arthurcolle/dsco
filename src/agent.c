@@ -93,6 +93,70 @@ static volatile sig_atomic_t g_escape_state = ESC_RUNNING;
 static volatile int g_esc_poller_active = 0;
 static pthread_t g_esc_poller_tid;
 
+static void agent_request_pause(void) {
+    if (g_escape_state == ESC_RUNNING && !g_interrupted) {
+        g_escape_state = ESC_PAUSED;
+        g_interrupted = 1;
+        mcp_cancel();
+    }
+}
+
+/* Follow-up composer: while a turn is running, keep stdin owned by a real
+ * composer and enqueue submitted messages for the next user turns. */
+#define FOLLOWUP_QUEUE_CAP 8
+typedef struct {
+    pthread_mutex_t mutex;
+    char messages[FOLLOWUP_QUEUE_CAP][MAX_INPUT_LINE];
+    int head;
+    int tail;
+    int count;
+} followup_queue_t;
+
+typedef struct {
+    tui_status_bar_t *sb;
+    followup_queue_t *queue;
+    volatile bool stop;
+    volatile bool running;
+    pthread_t thread;
+} followup_reader_t;
+
+static void followup_queue_init(followup_queue_t *q) {
+    memset(q, 0, sizeof(*q));
+    pthread_mutex_init(&q->mutex, NULL);
+}
+
+static void followup_queue_destroy(followup_queue_t *q) {
+    pthread_mutex_destroy(&q->mutex);
+}
+
+static bool followup_queue_push(followup_queue_t *q, const char *msg) {
+    if (!q || !msg || !msg[0])
+        return false;
+    pthread_mutex_lock(&q->mutex);
+    bool ok = q->count < FOLLOWUP_QUEUE_CAP;
+    if (ok) {
+        snprintf(q->messages[q->tail], sizeof(q->messages[q->tail]), "%s", msg);
+        q->tail = (q->tail + 1) % FOLLOWUP_QUEUE_CAP;
+        q->count++;
+    }
+    pthread_mutex_unlock(&q->mutex);
+    return ok;
+}
+
+static bool followup_queue_pop(followup_queue_t *q, char *out, size_t out_sz) {
+    if (!q || !out || out_sz == 0)
+        return false;
+    pthread_mutex_lock(&q->mutex);
+    bool ok = q->count > 0;
+    if (ok) {
+        snprintf(out, out_sz, "%s", q->messages[q->head]);
+        q->head = (q->head + 1) % FOLLOWUP_QUEUE_CAP;
+        q->count--;
+    }
+    pthread_mutex_unlock(&q->mutex);
+    return ok;
+}
+
 /* Timestamp when current agent turn started (for pause display) */
 static double g_turn_start_time = 0.0;
 
@@ -1582,8 +1646,7 @@ static void sigint_handler(int sig) {
         (void)write(STDERR_FILENO, "\n", 1);
         _exit(130);
     }
-    g_escape_state = ESC_PAUSED;
-    g_interrupted = 1;
+    agent_request_pause();
 }
 
 static void sigtstp_handler(int sig) {
@@ -2014,6 +2077,8 @@ static void session_entry_load_metadata(saved_session_entry_t *entry, const char
     conv_free(&tmp_conv);
 }
 
+static void goal_clear(session_state_t *session);
+
 static int session_entry_cmp(const void *a, const void *b) {
     const saved_session_entry_t *ea = (const saved_session_entry_t *)a;
     const saved_session_entry_t *eb = (const saved_session_entry_t *)b;
@@ -2141,6 +2206,7 @@ static void session_reset_usage_for_new(session_state_t *session) {
     session->stop_seq[0] = '\0';
     session->pin_text[0] = '\0';
     session->memory_context[0] = '\0';
+    goal_clear(session);
 }
 
 static bool session_switch_to_file(conversation_t *conv, session_state_t *session,
@@ -2198,6 +2264,55 @@ static void print_cost(session_state_t *session) {
             TUI_RESET);
 }
 
+/* ── Structured output presets ─────────────────────────────────────────── */
+
+static const char *structured_output_preset_schema(const char *name) {
+    if (!name)
+        return NULL;
+    if (strcmp(name, "deep-research") == 0 || strcmp(name, "deep_research") == 0) {
+        return "{\"type\":\"object\",\"properties\":{"
+               "\"question\":{\"type\":\"string\"},"
+               "\"scope\":{\"type\":\"object\"},"
+               "\"search_angles\":{\"type\":\"array\",\"items\":{\"type\":\"string\"}},"
+               "\"sources\":{\"type\":\"array\",\"items\":{\"type\":\"object\",\"properties\":{"
+               "\"url\":{\"type\":\"string\"},\"title\":{\"type\":\"string\"},\"publisher\":{\"type\":\"string\"},\"date\":{\"type\":\"string\"}}}},"
+               "\"claims\":{\"type\":\"array\",\"items\":{\"type\":\"object\",\"properties\":{"
+               "\"id\":{\"type\":\"string\"},\"claim\":{\"type\":\"string\"},\"evidence_tier\":{\"type\":\"string\"},\"confidence\":{\"type\":\"number\"},\"citations\":{\"type\":\"array\",\"items\":{\"type\":\"string\"}}},\"required\":[\"id\",\"claim\",\"citations\"]}},"
+               "\"adversarial_checks\":{\"type\":\"array\"},"
+               "\"synthesis\":{\"type\":\"string\"},"
+               "\"open_questions\":{\"type\":\"array\"}},"
+               "\"required\":[\"question\",\"sources\",\"claims\",\"synthesis\"]}";
+    }
+    if (strcmp(name, "workflow-phase") == 0 || strcmp(name, "workflow_phase") == 0) {
+        return "{\"type\":\"object\",\"properties\":{"
+               "\"workflow\":{\"type\":\"string\"},\"phase\":{\"type\":\"string\"},"
+               "\"status\":{\"type\":\"string\"},\"artifacts\":{\"type\":\"array\"},"
+               "\"facts\":{\"type\":\"array\"},\"risks\":{\"type\":\"array\"},"
+               "\"next_actions\":{\"type\":\"array\"}},"
+               "\"required\":[\"workflow\",\"phase\",\"status\",\"artifacts\",\"next_actions\"]}";
+    }
+    if (strcmp(name, "claims") == 0 || strcmp(name, "evidence-claims") == 0) {
+        return "{\"type\":\"object\",\"properties\":{"
+               "\"claims\":{\"type\":\"array\",\"items\":{\"type\":\"object\",\"properties\":{"
+               "\"claim\":{\"type\":\"string\"},\"evidence_tier\":{\"type\":\"string\"},\"confidence\":{\"type\":\"number\"},\"sources\":{\"type\":\"array\",\"items\":{\"type\":\"string\"}}},\"required\":[\"claim\",\"sources\"]}}},"
+               "\"required\":[\"claims\"]}";
+    }
+    return NULL;
+}
+
+static void structured_output_apply_schema(session_state_t *session, const char *name,
+                                           const char *schema) {
+    if (!session || !schema || !json_is_valid_container(schema))
+        return;
+    session->structured_output = true;
+    session->structured_output_strict = true;
+    snprintf(session->structured_output_name, sizeof(session->structured_output_name), "%s",
+             (name && name[0]) ? name : "dsco_structured_output");
+    snprintf(session->structured_output_schema, sizeof(session->structured_output_schema), "%s",
+             schema);
+    session->structured_output_error[0] = '\0';
+}
+
 /* ── Context display ───────────────────────────────────────────────────── */
 
 static void print_context(session_state_t *session, int last_input_tokens) {
@@ -2220,6 +2335,187 @@ static void print_context(session_state_t *session, int last_input_tokens) {
             fprintf(stderr, "%s\xe2\x96\x91%s", TUI_DIM, TUI_RESET);
     }
     fprintf(stderr, "]\n\n");
+}
+
+static int goal_tokens_used(const session_state_t *session) {
+    if (!session)
+        return 0;
+    int used = session->total_input_tokens + session->total_output_tokens -
+               session->goal_tokens_at_start;
+    return used > 0 ? used : 0;
+}
+
+static const char *goal_status_label(dsco_goal_status_t status) {
+    switch (status) {
+        case DSCO_GOAL_ACTIVE:
+            return "active";
+        case DSCO_GOAL_PAUSED:
+            return "paused";
+        case DSCO_GOAL_BLOCKED:
+            return "blocked";
+        case DSCO_GOAL_COMPLETE:
+            return "complete";
+        case DSCO_GOAL_BUDGET_LIMITED:
+            return "limited by budget";
+        case DSCO_GOAL_NONE:
+            return "none";
+    }
+    return "none";
+}
+
+static void goal_format_elapsed(time_t started_at, char *out, size_t out_len) {
+    if (!out || out_len == 0)
+        return;
+    out[0] = '\0';
+    if (started_at <= 0) {
+        snprintf(out, out_len, "0s");
+        return;
+    }
+    long seconds = (long)difftime(time(NULL), started_at);
+    if (seconds < 0)
+        seconds = 0;
+    long hours = seconds / 3600;
+    long minutes = (seconds % 3600) / 60;
+    long secs = seconds % 60;
+    if (hours > 0)
+        snprintf(out, out_len, "%ldh %ldm", hours, minutes);
+    else if (minutes > 0)
+        snprintf(out, out_len, "%ldm %lds", minutes, secs);
+    else
+        snprintf(out, out_len, "%lds", secs);
+}
+
+static int goal_parse_token_budget(const char *s) {
+    if (!s || !s[0])
+        return -1;
+    char *end = NULL;
+    double value = strtod(s, &end);
+    if (end == s || value < 0)
+        return -1;
+    while (*end == ' ' || *end == '\t')
+        end++;
+    if (*end == 'k' || *end == 'K') {
+        value *= 1000.0;
+        end++;
+    } else if (*end == 'm' || *end == 'M') {
+        value *= 1000000.0;
+        end++;
+    }
+    while (*end == ' ' || *end == '\t')
+        end++;
+    if (*end != '\0' || value > 2147483647.0)
+        return -1;
+    return (int)value;
+}
+
+static void goal_print_summary(const session_state_t *session) {
+    fprintf(stderr, "\n");
+    tui_header("Goal", TUI_BCYAN);
+    if (!session || !session->goal_objective[0] || session->goal_status == DSCO_GOAL_NONE) {
+        fprintf(stderr, "  %s(no active goal)%s\n", TUI_DIM, TUI_RESET);
+        fprintf(stderr,
+                "  %susage:%s /goal <objective>  |  /goal budget <tokens>  |  "
+                "/goal pause|resume|blocked|complete|clear\n\n",
+                TUI_DIM, TUI_RESET);
+        return;
+    }
+
+    char elapsed[32];
+    goal_format_elapsed(session->goal_started_at, elapsed, sizeof(elapsed));
+    int used = goal_tokens_used(session);
+    fprintf(stderr, "  %sStatus:%s       %s\n", TUI_DIM, TUI_RESET,
+            goal_status_label(session->goal_status));
+    fprintf(stderr, "  %sObjective:%s    %s\n", TUI_DIM, TUI_RESET, session->goal_objective);
+    fprintf(stderr, "  %sTime used:%s    %s\n", TUI_DIM, TUI_RESET, elapsed);
+    if (session->goal_token_budget > 0)
+        fprintf(stderr, "  %sTokens used:%s  %d / %d\n", TUI_DIM, TUI_RESET, used,
+                session->goal_token_budget);
+    else
+        fprintf(stderr, "  %sTokens used:%s  %d\n", TUI_DIM, TUI_RESET, used);
+
+    if (session->goal_status == DSCO_GOAL_ACTIVE)
+        fprintf(stderr, "  %sCommands:%s /goal edit, /goal pause, /goal complete, /goal clear\n\n",
+                TUI_DIM, TUI_RESET);
+    else if (session->goal_status == DSCO_GOAL_COMPLETE ||
+             session->goal_status == DSCO_GOAL_BUDGET_LIMITED)
+        fprintf(stderr, "  %sCommands:%s /goal edit, /goal clear\n\n", TUI_DIM, TUI_RESET);
+    else
+        fprintf(stderr, "  %sCommands:%s /goal edit, /goal resume, /goal clear\n\n", TUI_DIM,
+                TUI_RESET);
+}
+
+static void goal_set_objective(session_state_t *session, const char *objective,
+                               bool reset_accounting) {
+    if (!session || !objective)
+        return;
+    while (*objective == ' ' || *objective == '\t')
+        objective++;
+    snprintf(session->goal_objective, sizeof(session->goal_objective), "%s", objective);
+    session->goal_status = DSCO_GOAL_ACTIVE;
+    time_t now = time(NULL);
+    if (reset_accounting || session->goal_started_at <= 0) {
+        session->goal_tokens_at_start = session->total_input_tokens + session->total_output_tokens;
+        session->goal_turns_at_start = session->turn_count;
+        session->goal_started_at = now;
+    }
+    session->goal_updated_at = now;
+}
+
+static void goal_clear(session_state_t *session) {
+    if (!session)
+        return;
+    session->goal_objective[0] = '\0';
+    session->goal_status = DSCO_GOAL_NONE;
+    session->goal_token_budget = 0;
+    session->goal_tokens_at_start = 0;
+    session->goal_turns_at_start = 0;
+    session->goal_started_at = 0;
+    session->goal_updated_at = 0;
+}
+
+static bool goal_is_active(const session_state_t *session) {
+    return session && session->goal_objective[0] && session->goal_status == DSCO_GOAL_ACTIVE;
+}
+
+static void goal_bootstrap_from_env(session_state_t *session) {
+    if (!session || session->goal_objective[0])
+        return;
+    const char *objective = getenv("DSCO_GOAL");
+    if (!objective || !objective[0])
+        objective = getenv("DSCO_ACTIVE_GOAL");
+    if (!objective || !objective[0])
+        return;
+    goal_set_objective(session, objective, true);
+    const char *budget = getenv("DSCO_GOAL_TOKEN_BUDGET");
+    if (budget && budget[0]) {
+        int parsed = goal_parse_token_budget(budget);
+        if (parsed > 0)
+            session->goal_token_budget = parsed;
+    }
+}
+
+static void goal_make_autorun_prompt(const session_state_t *session, char *out, size_t out_len) {
+    if (!out || out_len == 0)
+        return;
+    out[0] = '\0';
+    if (!goal_is_active(session))
+        return;
+    int used = goal_tokens_used(session);
+    if (session->goal_token_budget > 0) {
+        snprintf(out, out_len,
+                 "[Goal autorun]\nObjective: %s\nTokens used on goal: %d / %d\n"
+                 "Continue working autonomously toward this active goal. Use tools as needed. "
+                 "If the objective is complete, call self_exit with a concise completion reason. "
+                 "If you need user input, ask a focused question.",
+                 session->goal_objective, used, session->goal_token_budget);
+    } else {
+        snprintf(out, out_len,
+                 "[Goal autorun]\nObjective: %s\nTokens used on goal: %d\n"
+                 "Continue working autonomously toward this active goal. Use tools as needed. "
+                 "If the objective is complete, call self_exit with a concise completion reason. "
+                 "If you need user input, ask a focused question.",
+                 session->goal_objective, used);
+    }
 }
 
 static void print_topology_summary(const topology_t *topo) {
@@ -2518,6 +2814,10 @@ static const slash_command_t s_slash_commands[] = {
     {"/cost", "show session cost"},
     {"/context", "show context usage"},
     {"/effort", "set effort: low/medium/high"},
+    {"/goal", "show or set active session goal"},
+    {"/goal pause", "pause active session goal"},
+    {"/goal resume", "resume paused/blocked session goal"},
+    {"/goal clear", "clear session goal"},
     {"/compact", "trim conversation history"},
     {"/undo", "remove last exchange from conversation"},
     {"/retry", "re-run last user message (optionally with new model)"},
@@ -2528,7 +2828,8 @@ static const slash_command_t s_slash_commands[] = {
     {"/version", "show version/build information"},
     {"/force", "control next tool choice"},
     {"/prefill", "set prefill text for the next response"},
-    {"/json", "set JSON mode for next response"},
+    {"/json", "enable structured JSON object output"},
+    {"/structured", "show/configure structured output schema"},
     {"/cheap", "switch to cheap mode (5 core tools, no catalog)"},
     {"/full", "switch to full mode (all tools + catalog)"},
     {"/budget", "set session cost budget"},
@@ -3078,8 +3379,7 @@ static void *esc_poll_thread_fn(void *arg) {
 
         /* Standalone ESC */
         if (g_escape_state == ESC_RUNNING && !g_interrupted) {
-            g_escape_state = ESC_PAUSED;
-            g_interrupted = 1;
+            agent_request_pause();
         } else if (g_escape_state == ESC_PAUSED) {
             /* Second ESC → hard exit */
             terminal_force_restore();
@@ -3104,11 +3404,81 @@ static void esc_poller_stop(void) {
     pthread_join(g_esc_poller_tid, NULL);
 }
 
-/* ── Pause menu ────────────────────────────────────────────────────────── */
-/* Called when the turns loop exits due to ESC_PAUSED.
-   Returns true if the user chose to resume, false to cancel. */
+static bool followup_escape_hook(void *ctx) {
+    followup_reader_t *r = (followup_reader_t *)ctx;
+    if (r)
+        r->stop = true;
+    agent_request_pause();
+    return true;
+}
 
-static bool show_pause_menu(int cur_turn, int max_turns, double elapsed_sec) {
+static void *followup_reader_thread_fn(void *arg) {
+    followup_reader_t *r = (followup_reader_t *)arg;
+    char buf[MAX_INPUT_LINE];
+    r->running = true;
+    tui_composer_set_escape_hook(followup_escape_hook, r);
+    while (!r->stop) {
+        char *line = tui_composer_read(r->sb, NULL, buf, sizeof(buf));
+        if (r->stop)
+            break;
+        if (!line)
+            break;
+        dsco_strip_terminal_controls_inplace(buf);
+        if (buf[0]) {
+            if (followup_queue_push(r->queue, buf))
+                tui_panel_notify(r->sb, TUI_PANEL_NOTE_OK, "queued follow-up");
+            else
+                tui_panel_notify(r->sb, TUI_PANEL_NOTE_WARN, "follow-up queue full");
+        }
+    }
+    tui_composer_set_escape_hook(NULL, NULL);
+    r->running = false;
+    return NULL;
+}
+
+static bool followup_reader_start(followup_reader_t *r, tui_status_bar_t *sb,
+                                  followup_queue_t *queue) {
+    if (!r)
+        return false;
+    memset(r, 0, sizeof(*r));
+    const char *enabled = getenv("DSCO_FOLLOWUP_COMPOSER");
+    if (!enabled || !(enabled[0] == '1' || enabled[0] == 't' || enabled[0] == 'T' ||
+                      strcasecmp(enabled, "yes") == 0 || strcasecmp(enabled, "on") == 0))
+        return false;
+    if (!sb || !sb->visible || !isatty(STDIN_FILENO))
+        return false;
+    r->sb = sb;
+    r->queue = queue;
+    if (pthread_create(&r->thread, NULL, followup_reader_thread_fn, r) != 0) {
+        memset(r, 0, sizeof(*r));
+        return false;
+    }
+    for (int i = 0; i < 100 && !tui_composer_is_reading(); i++) {
+        struct timespec ts = {.tv_sec = 0, .tv_nsec = 2 * 1000 * 1000};
+        nanosleep(&ts, NULL);
+    }
+    return true;
+}
+
+static void followup_reader_stop(followup_reader_t *r) {
+    if (!r || !r->sb)
+        return;
+    r->stop = true;
+    tui_composer_signal_interrupt();
+    pthread_join(r->thread, NULL);
+    memset(r, 0, sizeof(*r));
+}
+
+/* ── Pause menu ────────────────────────────────────────────────────────── */
+/* Called when the turns loop exits due to ESC_PAUSED. */
+
+typedef enum {
+    PAUSE_CANCEL = 0,
+    PAUSE_RESUME = 1,
+    PAUSE_PROMPT = 2,
+} pause_decision_t;
+
+static pause_decision_t show_pause_menu(int cur_turn, int max_turns, double elapsed_sec) {
     struct termios tio_saved, tio_raw;
     bool tio_ok = (isatty(STDIN_FILENO) && tcgetattr(STDIN_FILENO, &tio_saved) == 0);
     if (tio_ok) {
@@ -3131,36 +3501,40 @@ static bool show_pause_menu(int cur_turn, int max_turns, double elapsed_sec) {
                 cur_turn, max_t, elapsed_sec);
     }
     fprintf(stderr,
-            "  %s[R]%s Resume  %s[C]%s Cancel  "
+            "  %s[R]%s Resume  %s[C]%s Cancel  %s[P]%s Prompt  "
             "%s(Esc again = cancel)%s  ▸ ",
-            TUI_BOLD, TUI_RESET, TUI_BOLD, TUI_RESET, TUI_DIM, TUI_RESET);
+            TUI_BOLD, TUI_RESET, TUI_BOLD, TUI_RESET, TUI_BOLD, TUI_RESET, TUI_DIM, TUI_RESET);
     fflush(stderr);
 
-    bool resume = false;
+    pause_decision_t decision = PAUSE_CANCEL;
     for (;;) {
         char key = 0;
         if (read(STDIN_FILENO, &key, 1) != 1)
             break;
         if (key == 'r' || key == 'R') {
-            resume = true;
+            decision = PAUSE_RESUME;
+            break;
+        }
+        if (key == 'p' || key == 'P') {
+            decision = PAUSE_PROMPT;
             break;
         }
         if (key == 'c' || key == 'C' || key == '\033' || key == 'q' || key == 'Q' ||
             key == '\003' /* Ctrl+C */) {
-            resume = false;
+            decision = PAUSE_CANCEL;
             break;
         }
         fprintf(stderr,
-                "\r  %s[R]%s Resume  %s[C]%s Cancel  "
+                "\r  %s[R]%s Resume  %s[C]%s Cancel  %s[P]%s Prompt  "
                 "%s(Esc again = cancel)%s  ▸ ",
-                TUI_BOLD, TUI_RESET, TUI_BOLD, TUI_RESET, TUI_DIM, TUI_RESET);
+                TUI_BOLD, TUI_RESET, TUI_BOLD, TUI_RESET, TUI_BOLD, TUI_RESET, TUI_DIM, TUI_RESET);
         fflush(stderr);
     }
 
     if (tio_ok)
         tcsetattr(STDIN_FILENO, TCSANOW, &tio_saved);
     fprintf(stderr, "\n");
-    return resume;
+    return decision;
 }
 
 /* Forward declaration for FSM access */
@@ -3389,6 +3763,7 @@ static void extract_tool_preview(const char *name, const char *input_json, char 
  *   ok    — only meaningful for tool_response; selects green vs red bar
  *   trail — extra text appended on the header line after the role (may be NULL) */
 static void print_role_header(const char *role, bool ok, const char *trail) {
+    tui_prepare_external_output();
     bool rgb = tui_detect_color_level() >= TUI_COLOR_256;
     /* Bar color per role: cyan user, mauve assistant, orange tool_call,
      * green/red tool_response based on `ok`. */
@@ -3662,14 +4037,27 @@ static void park_transcript_cursor_after_pane(void) {
      * sits where the next streamed text should begin. */
 }
 
+static bool interactive_composer_enabled(void) {
+    /* The cursor-addressed composer is the default interactive experience
+     * (matches the persistent-pane path). It can be opted OUT for terminals
+     * where repainting the box on every keypress churns earlier scrollback by
+     * setting DSCO_TUI_COMPOSER=0. Unset/empty ⇒ enabled. */
+    const char *v = getenv("DSCO_TUI_COMPOSER");
+    if (!v || !v[0])
+        return true;
+    return !(v[0] == '0' || strcasecmp(v, "false") == 0 ||
+             strcasecmp(v, "no") == 0 || strcasecmp(v, "off") == 0);
+}
+
 static char *read_input_line_prompt(char *buf, size_t buf_sz, const char *prompt) {
     const char *p = prompt ? prompt : "\033[1m\033[95m\xe2\x9d\xaf\033[0m ";
 
     /* Surface any background agents that finished since the last prompt. */
     drain_pet_notifications(g_winch_sb);
 
-    /* Persistent-pane path: use the multi-line composer box. */
-    if (g_winch_sb && g_winch_sb->visible) {
+    /* The cursor-addressed composer is on by default; opt out with
+     * DSCO_TUI_COMPOSER=0 if its per-keystroke repaint churns scrollback. */
+    if (interactive_composer_enabled() && g_winch_sb && g_winch_sb->visible) {
         /* Feed the composer's live slash-command dropdown once. s_slash_commands
          * shares tui_cmd_entry_t's {name, desc} layout, so it registers directly. */
         static bool slash_registered = false;
@@ -3874,6 +4262,7 @@ bool agent_run(const char *api_key, const char *model, const char *topology_name
     /* Session state */
     session_state_t session;
     session_state_init(&session, model);
+    goal_bootstrap_from_env(&session);
     setenv("DSCO_TRUST_TIER", session_trust_tier_to_string(session.trust_tier), 1);
     if (topology_name && topology_name[0]) {
         const topology_t *cli_topology = topology_find(topology_name);
@@ -4022,6 +4411,8 @@ bool agent_run(const char *api_key, const char *model, const char *topology_name
          * itself just-in-time inside tui_composer_read. Welcome banner
          * and startup notes print normally above the eventual panel. */
     }
+    followup_queue_t followup_queue;
+    followup_queue_init(&followup_queue);
 
     /* SIGWINCH handler for terminal resize */
     g_winch_sb = &status_bar;
@@ -4069,6 +4460,8 @@ bool agent_run(const char *api_key, const char *model, const char *topology_name
     }
 
     bool startup_consumed = false;
+    bool goal_autorun_pending = goal_is_active(&session) &&
+                                !env_truthy(getenv("DSCO_GOAL_NO_AUTORUN"));
     while (1) {
         g_interrupted = 0;
         g_escape_state = ESC_RUNNING;
@@ -4150,10 +4543,19 @@ bool agent_run(const char *api_key, const char *model, const char *topology_name
             startup_consumed = true;
             have_startup_cmd = startup_command_consume(input_buf, sizeof(input_buf));
         }
-        if (!have_startup_cmd) {
-            if (!read_input_line_prompt(input_buf, sizeof(input_buf), dyn_prompt)) {
-                user_exit_requested = true;
-                break;
+        if (!have_startup_cmd && followup_queue_pop(&followup_queue, input_buf, sizeof(input_buf))) {
+            fprintf(stderr, "  %squeued:%s %s\n", TUI_DIM, TUI_RESET, input_buf);
+        } else if (!have_startup_cmd) {
+            if (goal_autorun_pending && goal_is_active(&session)) {
+                goal_autorun_pending = false;
+                goal_make_autorun_prompt(&session, input_buf, sizeof(input_buf));
+                fprintf(stderr, "  %sgoal: autorun active objective — /goal pause to stop%s\n",
+                        TUI_DIM, TUI_RESET);
+            } else {
+                if (!read_input_line_prompt(input_buf, sizeof(input_buf), dyn_prompt)) {
+                    user_exit_requested = true;
+                    break;
+                }
             }
         }
 
@@ -4483,6 +4885,122 @@ bool agent_run(const char *api_key, const char *model, const char *topology_name
             tui_context_gauge(session.total_input_tokens + session.total_output_tokens,
                               session.context_window, 0);
             baseline_log("command", "/context", NULL, NULL);
+            continue;
+        }
+        if (strncmp(input_buf, "/goal", 5) == 0 &&
+            (input_buf[5] == '\0' || input_buf[5] == ' ')) {
+            const char *arg = input_buf + 5;
+            while (*arg == ' ')
+                arg++;
+            if (*arg == '\0') {
+                goal_print_summary(&session);
+            } else if (strcmp(arg, "clear") == 0) {
+                goal_clear(&session);
+                goal_autorun_pending = false;
+                autosave(&conv, &session);
+                tui_success("goal cleared");
+            } else if (strcmp(arg, "pause") == 0) {
+                if (!session.goal_objective[0]) {
+                    tui_warning("no goal to pause");
+                } else {
+                    session.goal_status = DSCO_GOAL_PAUSED;
+                    session.goal_updated_at = time(NULL);
+                    goal_autorun_pending = false;
+                    autosave(&conv, &session);
+                    tui_success("goal paused");
+                }
+            } else if (strcmp(arg, "resume") == 0) {
+                if (!session.goal_objective[0]) {
+                    tui_warning("no goal to resume");
+                } else {
+                    session.goal_status = DSCO_GOAL_ACTIVE;
+                    session.goal_updated_at = time(NULL);
+                    goal_autorun_pending = !env_truthy(getenv("DSCO_GOAL_NO_AUTORUN"));
+                    autosave(&conv, &session);
+                    tui_success("goal resumed");
+                }
+            } else if (strcmp(arg, "blocked") == 0) {
+                if (!session.goal_objective[0]) {
+                    tui_warning("no goal to mark blocked");
+                } else {
+                    session.goal_status = DSCO_GOAL_BLOCKED;
+                    session.goal_updated_at = time(NULL);
+                    goal_autorun_pending = false;
+                    autosave(&conv, &session);
+                    tui_success("goal marked blocked");
+                }
+            } else if (strcmp(arg, "complete") == 0 || strcmp(arg, "done") == 0) {
+                if (!session.goal_objective[0]) {
+                    tui_warning("no goal to mark complete");
+                } else {
+                    session.goal_status = DSCO_GOAL_COMPLETE;
+                    session.goal_updated_at = time(NULL);
+                    goal_autorun_pending = false;
+                    autosave(&conv, &session);
+                    tui_success("goal complete");
+                }
+            } else if (strncmp(arg, "budget", 6) == 0 &&
+                       (arg[6] == '\0' || arg[6] == ' ')) {
+                const char *budget_arg = arg + 6;
+                while (*budget_arg == ' ')
+                    budget_arg++;
+                if (!budget_arg[0]) {
+                    if (session.goal_token_budget > 0)
+                        fprintf(stderr, "  %sgoal token budget:%s %d\n", TUI_DIM, TUI_RESET,
+                                session.goal_token_budget);
+                    else
+                        fprintf(stderr, "  %sgoal token budget:%s none\n", TUI_DIM, TUI_RESET);
+                } else if (strcmp(budget_arg, "off") == 0 || strcmp(budget_arg, "none") == 0) {
+                    session.goal_token_budget = 0;
+                    session.goal_updated_at = time(NULL);
+                    autosave(&conv, &session);
+                    tui_success("goal token budget cleared");
+                } else {
+                    int budget = goal_parse_token_budget(budget_arg);
+                    if (budget <= 0) {
+                        tui_error("usage: /goal budget <tokens|80k|1.5m|off>");
+                    } else {
+                        session.goal_token_budget = budget;
+                        session.goal_updated_at = time(NULL);
+                        autosave(&conv, &session);
+                        char msg[128];
+                        snprintf(msg, sizeof(msg), "goal token budget set to %d", budget);
+                        tui_success(msg);
+                    }
+                }
+            } else if (strncmp(arg, "edit", 4) == 0 &&
+                       (arg[4] == '\0' || arg[4] == ' ')) {
+                const char *objective = arg + 4;
+                while (*objective == ' ')
+                    objective++;
+                if (!objective[0]) {
+                    fprintf(stderr, "  %susage:%s /goal edit <objective>%s\n", TUI_DIM,
+                            TUI_RESET, TUI_RESET);
+                } else {
+                    goal_set_objective(&session, objective, false);
+                    goal_autorun_pending = !env_truthy(getenv("DSCO_GOAL_NO_AUTORUN"));
+                    autosave(&conv, &session);
+                    tui_success("goal updated");
+                }
+            } else if (strncmp(arg, "set ", 4) == 0) {
+                const char *objective = arg + 4;
+                while (*objective == ' ')
+                    objective++;
+                if (!objective[0])
+                    tui_error("usage: /goal set <objective>");
+                else {
+                    goal_set_objective(&session, objective, true);
+                    goal_autorun_pending = !env_truthy(getenv("DSCO_GOAL_NO_AUTORUN"));
+                    autosave(&conv, &session);
+                    tui_success("goal set");
+                }
+            } else {
+                goal_set_objective(&session, arg, true);
+                goal_autorun_pending = !env_truthy(getenv("DSCO_GOAL_NO_AUTORUN"));
+                autosave(&conv, &session);
+                tui_success("goal set");
+            }
+            baseline_log("command", "/goal", arg, NULL);
             continue;
         }
         if (strcmp(input_buf, "/compact") == 0) {
@@ -5008,10 +5526,120 @@ bool agent_run(const char *api_key, const char *model, const char *topology_name
             }
             continue;
         }
-        /* /json — shortcut to force JSON output via prefill */
-        if (strcmp(input_buf, "/json") == 0) {
-            snprintf(session.prefill, sizeof(session.prefill), "{");
-            tui_success("JSON mode: next response will be JSON (prefill=\"{\")");
+        /* /json / /structured — first-class structured output contracts */
+        if (strcmp(input_buf, "/json") == 0 || strcmp(input_buf, "/json on") == 0) {
+            session.structured_output = true;
+            session.structured_output_strict = true;
+            if (!session.structured_output_name[0])
+                snprintf(session.structured_output_name, sizeof(session.structured_output_name),
+                         "%s", "dsco_structured_output");
+            session.structured_output_error[0] = '\0';
+            tui_success("structured JSON output enabled");
+            continue;
+        }
+        if (strcmp(input_buf, "/json off") == 0 || strcmp(input_buf, "/structured off") == 0 ||
+            strcmp(input_buf, "/structured clear") == 0) {
+            session.structured_output = false;
+            session.structured_output_strict = false;
+            session.structured_output_name[0] = '\0';
+            session.structured_output_schema[0] = '\0';
+            session.structured_output_error[0] = '\0';
+            tui_success("structured output disabled");
+            continue;
+        }
+        if (strncmp(input_buf, "/structured", 11) == 0 &&
+            (input_buf[11] == '\0' || input_buf[11] == ' ')) {
+            const char *arg = input_buf + 11;
+            while (*arg == ' ')
+                arg++;
+            if (*arg == '\0' || strcmp(arg, "status") == 0) {
+                fprintf(stderr, "  %sstructured:%s %s strict=%s name=%s\n", TUI_DIM, TUI_RESET,
+                        session.structured_output ? "on" : "off",
+                        session.structured_output_strict ? "true" : "false",
+                        session.structured_output_name[0] ? session.structured_output_name : "-");
+                if (session.structured_output_schema[0])
+                    fprintf(stderr, "  %sschema:%s %.600s%s\n", TUI_DIM, TUI_RESET,
+                            session.structured_output_schema,
+                            strlen(session.structured_output_schema) > 600 ? "…" : "");
+                if (session.structured_output_error[0])
+                    fprintf(stderr, "  %slast validation:%s %s\n", TUI_DIM, TUI_RESET,
+                            session.structured_output_error);
+                fprintf(stderr,
+                        "  %susage:%s /structured preset <deep-research|workflow-phase|claims> | /structured schema <name> <json-schema> | /structured repair <0-5> | /structured off\n",
+                        TUI_DIM, TUI_RESET);
+            } else if (strcmp(arg, "json") == 0 || strcmp(arg, "on") == 0) {
+                session.structured_output = true;
+                session.structured_output_strict = true;
+                if (!session.structured_output_name[0])
+                    snprintf(session.structured_output_name, sizeof(session.structured_output_name),
+                             "%s", "dsco_structured_output");
+                session.structured_output_schema[0] = '\0';
+                tui_success("structured JSON object mode enabled");
+            } else if (strncmp(arg, "preset ", 7) == 0) {
+                const char *preset = arg + 7;
+                while (*preset == ' ')
+                    preset++;
+                const char *schema = structured_output_preset_schema(preset);
+                if (!schema) {
+                    tui_error("unknown preset; use deep-research, workflow-phase, or claims");
+                } else {
+                    structured_output_apply_schema(&session, preset, schema);
+                    char msg[128];
+                    snprintf(msg, sizeof(msg), "structured preset enabled: %s", preset);
+                    tui_success(msg);
+                }
+            } else if (strncmp(arg, "repair ", 7) == 0) {
+                int n = atoi(arg + 7);
+                if (n < 0 || n > 5) {
+                    tui_error("repair budget must be 0..5");
+                } else {
+                    session.structured_output_max_repairs = n;
+                    char msg[96];
+                    snprintf(msg, sizeof(msg), "structured repair budget set to %d", n);
+                    tui_success(msg);
+                }
+            } else if (strncmp(arg, "schema ", 7) == 0) {
+                const char *rest = arg + 7;
+                while (*rest == ' ')
+                    rest++;
+                const char *sp = strchr(rest, ' ');
+                if (!sp || !sp[1]) {
+                    tui_error("usage: /structured schema <name> <json-schema>");
+                } else {
+                    char name[64];
+                    size_t nl = (size_t)(sp - rest);
+                    if (nl >= sizeof(name))
+                        nl = sizeof(name) - 1;
+                    memcpy(name, rest, nl);
+                    name[nl] = '\0';
+                    const char *schema = sp + 1;
+                    while (*schema == ' ')
+                        schema++;
+                    if (!json_is_valid_container(schema)) {
+                        tui_error("schema must be a valid JSON object or array");
+                    } else if (strlen(schema) >= sizeof(session.structured_output_schema)) {
+                        tui_error("schema too large for session contract");
+                    } else {
+                        session.structured_output = true;
+                        session.structured_output_strict = true;
+                        snprintf(session.structured_output_name,
+                                 sizeof(session.structured_output_name), "%s", name);
+                        snprintf(session.structured_output_schema,
+                                 sizeof(session.structured_output_schema), "%s", schema);
+                        session.structured_output_error[0] = '\0';
+                        tui_success("structured schema mode enabled");
+                    }
+                }
+            } else if (strncmp(arg, "strict ", 7) == 0) {
+                const char *v = arg + 7;
+                session.structured_output_strict =
+                    (strcmp(v, "on") == 0 || strcmp(v, "true") == 0 || strcmp(v, "1") == 0);
+                tui_success(session.structured_output_strict ? "strict structured output on"
+                                                             : "strict structured output off");
+            } else {
+                tui_error("usage: /structured [status|json|off|preset <name>|repair <0-5>|strict on|strict off|schema <name> <json-schema>]");
+            }
+            baseline_log("command", "/structured", arg, NULL);
             continue;
         }
         /* /web — toggle server-side web search */
@@ -5097,6 +5725,8 @@ bool agent_run(const char *api_key, const char *model, const char *topology_name
                 snprintf(msg, sizeof(msg), "resumed '%s' (%s, %d messages)", entries[idx].name,
                          session.model[0] ? session.model : "?", conv.count);
                 tui_success(msg);
+                goal_autorun_pending = goal_is_active(&session) &&
+                                       !env_truthy(getenv("DSCO_GOAL_NO_AUTORUN"));
                 baseline_log("command", "/resume", entries[idx].name, NULL);
             } else {
                 tui_error("failed to resume session");
@@ -5319,6 +5949,8 @@ bool agent_run(const char *api_key, const char *model, const char *topology_name
                 snprintf(load_path, sizeof(load_path), "%s/%s.json", slot_dir, target_name);
                 if (conv_load_ex(&conv, &session, load_path)) {
                     snprintf(session.slot_name, sizeof(session.slot_name), "%s", target_name);
+                    goal_autorun_pending = goal_is_active(&session) &&
+                                           !env_truthy(getenv("DSCO_GOAL_NO_AUTORUN"));
                     session.model_locked = true;
                     tools_set_runtime_model(session.model);
                     tui_status_bar_set_model(&status_bar, session.model, session.slot_name);
@@ -5380,6 +6012,8 @@ bool agent_run(const char *api_key, const char *model, const char *topology_name
 
             if (conv_load_ex(&conv, &session, load_path)) {
                 snprintf(session.slot_name, sizeof(session.slot_name), "%s", name);
+                goal_autorun_pending = goal_is_active(&session) &&
+                                       !env_truthy(getenv("DSCO_GOAL_NO_AUTORUN"));
                 session.model_locked = true;
                 tools_set_runtime_model(session.model);
                 tui_status_bar_set_model(&status_bar, session.model, session.slot_name);
@@ -6141,6 +6775,8 @@ bool agent_run(const char *api_key, const char *model, const char *topology_name
                     TUI_RESET);
             fprintf(stderr, "  %s/cost%s        show session cost\n", TUI_CYAN, TUI_RESET);
             fprintf(stderr, "  %s/context%s     show token usage\n", TUI_CYAN, TUI_RESET);
+            fprintf(stderr, "  %s/goal [cmd]%s   show/set goal, pause/resume/complete/clear\n",
+                    TUI_CYAN, TUI_RESET);
             fprintf(stderr, "  %s/compact%s     trim conversation history\n", TUI_CYAN, TUI_RESET);
             fprintf(stderr, "  %s/undo%s        remove last exchange\n", TUI_CYAN, TUI_RESET);
             fprintf(stderr, "  %s/retry [model]%s re-run last message\n", TUI_CYAN, TUI_RESET);
@@ -7355,8 +7991,12 @@ bool agent_run(const char *api_key, const char *model, const char *topology_name
         /* Per-turn arena allocator */
         arena_t turn_arena;
         arena_init(&turn_arena);
-        terminal_input_echo_suspend();
-        esc_poller_start();
+        followup_reader_t followup_reader;
+        bool followup_active = followup_reader_start(&followup_reader, &status_bar, &followup_queue);
+        if (!followup_active) {
+            terminal_input_echo_suspend();
+            esc_poller_start();
+        }
         g_turn_start_time = now_ms();
         bool prompt_done = false;
         /* Agentic loop: run to the goal, not to an arbitrary turn count. The
@@ -7365,6 +8005,7 @@ bool agent_run(const char *api_key, const char *model, const char *topology_name
          * stops — cost budget, context exhaustion, interrupt, repeated identical
          * failures — break out of the loop body below, not via the count. */
         int base_turn_limit = tools_loop_control_effective_max_turns(dsco_max_agent_turns());
+        int structured_repair_attempts = 0;
         int hard_ceiling = dsco_hard_turn_ceiling();
         if (hard_ceiling < base_turn_limit)
             hard_ceiling = base_turn_limit;
@@ -7757,9 +8398,9 @@ bool agent_run(const char *api_key, const char *model, const char *topology_name
              * static fallback chain, synthesize one from the live OpenRouter
              * catalog (tool-capable, context-parity, price-ascending). This is
              * the self-healing path for "the model got gated / went away":
-             * dsco routes around the dead provider automatically. Requires an
-             * OpenRouter key (the synthesized chain routes OpenRouter-prefixed
-             * models). Disable with DSCO_DYNAMIC_FAILOVER=0. */
+             * dsco routes around the dead provider automatically. Gated only
+             * matters when an OpenRouter key exists (the synthesized chain
+             * routes OpenRouter-prefixed models). Disable with DSCO_DYNAMIC_FAILOVER=0. */
             if (!sr.ok && session.fallback_count == 0 &&
                 fallback_decision != FALLBACK_DECISION_STOP && !g_interrupted &&
                 dsco_env_bool("DSCO_DYNAMIC_FAILOVER", true) &&
@@ -8055,6 +8696,13 @@ bool agent_run(const char *api_key, const char *model, const char *topology_name
             session.total_output_tokens += sr.usage.output_tokens;
             session.total_cache_read_tokens += sr.usage.cache_read_input_tokens;
             session.total_cache_write_tokens += sr.usage.cache_creation_input_tokens;
+            if (session.goal_objective[0] && session.goal_status == DSCO_GOAL_ACTIVE &&
+                session.goal_token_budget > 0 &&
+                goal_tokens_used(&session) >= session.goal_token_budget) {
+                session.goal_status = DSCO_GOAL_BUDGET_LIMITED;
+                session.goal_updated_at = time(NULL);
+                tui_warning("goal token budget reached; goal is now budget-limited");
+            }
             /* Accumulate authoritative cost: trust the provider's reported cost
              * (OpenRouter usage.cost) when present, else fall back to token math.
              * This is what the budget enforces, so caching discounts count. */
@@ -8117,6 +8765,47 @@ bool agent_run(const char *api_key, const char *model, const char *topology_name
                         break;
                     }
                 }
+            }
+
+            bool structured_output_invalid = false;
+            char structured_repair_prompt[1600] = "";
+            if (session.structured_output && tool_count_this_turn == 0) {
+                char *structured_text = chronicle_collect_visible_text(&sr.parsed);
+                if (!json_is_valid_container(structured_text)) {
+                    structured_output_invalid = true;
+                    snprintf(session.structured_output_error,
+                             sizeof(session.structured_output_error),
+                             "final answer was not a single valid JSON object/array");
+                    fprintf(stderr, "  %sstructured validation failed:%s %s\n", TUI_YELLOW,
+                            TUI_RESET, session.structured_output_error);
+                } else if (session.structured_output_schema[0]) {
+                    json_validation_t v =
+                        json_validate_schema(structured_text, session.structured_output_schema);
+                    if (!v.valid) {
+                        structured_output_invalid = true;
+                        snprintf(session.structured_output_error,
+                                 sizeof(session.structured_output_error), "%s", v.error);
+                        fprintf(stderr, "  %sstructured schema failed:%s %s\n", TUI_YELLOW,
+                                TUI_RESET, v.error);
+                    } else {
+                        session.structured_output_error[0] = '\0';
+                    }
+                } else {
+                    session.structured_output_error[0] = '\0';
+                }
+                if (structured_output_invalid &&
+                    structured_repair_attempts < session.structured_output_max_repairs) {
+                    snprintf(structured_repair_prompt, sizeof(structured_repair_prompt),
+                             "[Structured output repair %d/%d]\nYour previous final answer failed the active structured output contract: %s\nEmit ONLY one corrected JSON object. Do not include markdown, prose, apologies, or code fences.%s%s",
+                             structured_repair_attempts + 1,
+                             session.structured_output_max_repairs,
+                             session.structured_output_error,
+                             session.structured_output_schema[0] ? "\nSchema: " : "",
+                             session.structured_output_schema[0]
+                                 ? session.structured_output_schema
+                                 : "");
+                }
+                free(structured_text);
             }
 
             /* Only print usage/telemetry for non-tool turns (tool turns fold it inline) */
@@ -8316,6 +9005,12 @@ bool agent_run(const char *api_key, const char *model, const char *topology_name
                         bool interactive_tool = dsco_tool_is_interactive(blk->tool_name);
 
                         if (interactive_tool) {
+                            if (followup_active) {
+                                followup_reader_stop(&followup_reader);
+                                followup_active = false;
+                                terminal_input_echo_suspend();
+                                esc_poller_start();
+                            }
                             /* Interactive tools own the terminal/user turn. Never run them under
                              * spinner, watchdog, cache, or parallel orchestration: the UI must be
                              * live and repeat calls must re-ask rather than replay stale answers. */
@@ -8774,6 +9469,12 @@ bool agent_run(const char *api_key, const char *model, const char *topology_name
                     bool ok = false;
 
                     if (dsco_tool_is_interactive(blk->tool_name)) {
+                        if (followup_active) {
+                            followup_reader_stop(&followup_reader);
+                            followup_active = false;
+                            terminal_input_echo_suspend();
+                            esc_poller_start();
+                        }
                         char tool_span[37] = "";
                         char chron_tool_span[37] = "";
                         trace_span_begin(trace_id, blk->tool_name, prompt_span, tool_span);
@@ -9020,10 +9721,14 @@ bool agent_run(const char *api_key, const char *model, const char *topology_name
             {
                 double turn_cost = session_cost(&session);
                 double tps = sr.telemetry.tokens_per_sec;
-                int ctx_used = session.total_input_tokens + session.total_output_tokens;
+                int ctx_used = session.last_input_tokens > 0
+                                   ? session.last_input_tokens
+                                   : session.total_input_tokens + session.total_output_tokens;
                 int ctx_max =
                     session.context_window > 0 ? session.context_window : CONTEXT_WINDOW_TOKENS;
                 double ctx_pct = ctx_max > 0 ? 100.0 * ctx_used / ctx_max : 0;
+                if (ctx_pct > 100.0)
+                    ctx_pct = 100.0;
 
                 /* Count successes/failures for this turn from flame data */
                 int turn_ok = 0, turn_fail = 0, turn_cache = 0;
@@ -9154,13 +9859,45 @@ bool agent_run(const char *api_key, const char *model, const char *topology_name
             }
 
             bool done = !needs_followup_turn && !pause_turn;
+            if (done && structured_repair_prompt[0] && !g_agent_exit_requested) {
+                structured_repair_attempts++;
+                conv_add_user_text(&conv, structured_repair_prompt);
+                needs_followup_turn = true;
+                done = false;
+                pause_turn_streak = 0;
+                fprintf(stderr, "  %sstructured: repair turn %d/%d%s\n", TUI_DIM,
+                        structured_repair_attempts, session.structured_output_max_repairs,
+                        TUI_RESET);
+                baseline_log("agent", "structured_output_repair", session.structured_output_error,
+                             NULL);
+            } else if (done && !structured_output_invalid) {
+                structured_repair_attempts = 0;
+            }
+            if (done && goal_is_active(&session) && !g_agent_exit_requested) {
+                const char *goal_continue_prompt =
+                    "[Goal loop] The active session goal is still marked active. Continue working. "
+                    "Use tools as needed. If the objective is now complete, call self_exit with a "
+                    "concise completion reason.";
+                conv_add_user_text(&conv, goal_continue_prompt);
+                needs_followup_turn = true;
+                done = false;
+                pause_turn_streak = 0;
+                fprintf(stderr, "  %sgoal: continuing toward active objective%s\n", TUI_DIM,
+                        TUI_RESET);
+                baseline_log("agent", "goal_continue", session.goal_objective, NULL);
+            }
             if (pause_turn_streak >= 3) {
                 tui_warning("provider returned pause_turn repeatedly; ending turn");
                 done = true;
             }
             /* Agent invoked self_exit tool — finish this turn then terminate */
-            if (g_agent_exit_requested)
+            if (g_agent_exit_requested) {
+                if (goal_is_active(&session)) {
+                    session.goal_status = DSCO_GOAL_COMPLETE;
+                    session.goal_updated_at = time(NULL);
+                }
                 done = true;
+            }
 
             /* Diminishing-returns stop (autonomous long-run safety): if the loop
              * wants to keep going but the model's output has flatlined for two
@@ -9300,7 +10037,10 @@ bool agent_run(const char *api_key, const char *model, const char *topology_name
         /* End prompt-level trace span */
         trace_span_end(prompt_span, g_interrupted ? "interrupted" : "ok", NULL);
         chronicle_span_end(chron_prompt_span, g_interrupted ? "interrupted" : "ok", NULL);
-        esc_poller_stop();
+        if (followup_active)
+            followup_reader_stop(&followup_reader);
+        else
+            esc_poller_stop();
         arena_free(&turn_arena);
         terminal_input_echo_restore();
 
@@ -9308,17 +10048,27 @@ bool agent_run(const char *api_key, const char *model, const char *topology_name
             double elapsed = now_ms() - g_turn_start_time;
             /* Pass the ∞ sentinel: the agentic loop has no fixed turn cap, so
              * the menu renders "turn N/∞" rather than a misleading fraction. */
-            bool resume = show_pause_menu(turns, 999999, elapsed);
-            if (resume) {
+            pause_decision_t pause_decision = show_pause_menu(turns, 999999, elapsed);
+            if (pause_decision == PAUSE_RESUME) {
                 g_interrupted = 0;
                 g_escape_state = ESC_RUNNING;
+                mcp_cancel_reset();
                 /* Re-enter raw mode and restart the turns loop from where we paused */
                 terminal_input_echo_suspend();
                 esc_poller_start();
+                followup_active = false;
                 goto resume_turn_loop;
             }
-            /* User chose to cancel — fall through to normal post-loop handling */
-            g_escape_state = ESC_RUNNING;
+            if (pause_decision == PAUSE_PROMPT) {
+                g_interrupted = 0;
+                g_escape_state = ESC_RUNNING;
+                mcp_cancel_reset();
+                followup_active = false;
+                prompt_done = true;
+            } else {
+                /* User chose to cancel — fall through to normal post-loop handling */
+                g_escape_state = ESC_RUNNING;
+            }
         } else if (g_interrupted) {
             fprintf(stderr, "\n");
             tui_warning("interrupted (press Ctrl+C again to force quit)");
@@ -9328,17 +10078,26 @@ bool agent_run(const char *api_key, const char *model, const char *topology_name
          * the user interrupted, or cost/context tripped (each with its own
          * message). Hitting the hard ceiling means a likely no-progress spin. */
         if (!prompt_done && !g_interrupted && turns >= hard_ceiling) {
-            char msg[128];
+            char msg[160];
             snprintf(msg, sizeof(msg),
-                     "hard turn ceiling reached (%d) — stopping to prevent a "
-                     "runaway loop; raise via DSCO_HARD_TURN_CEILING",
-                     hard_ceiling);
+                     "hard turn ceiling reached (%d) — %s; raise via DSCO_HARD_TURN_CEILING",
+                     hard_ceiling,
+                     goal_is_active(&session)
+                         ? "active goal remains pending and will autorun next prompt"
+                         : "stopping to prevent a runaway loop");
             tui_warning(msg);
+            if (goal_is_active(&session))
+                goal_autorun_pending = !env_truthy(getenv("DSCO_GOAL_NO_AUTORUN"));
         }
         if (turns > 1) {
             double multi_turn_cost = session_cost(&session);
             fprintf(stderr, "%s  [%d turns | in:%d out:%d cache-read:%d | $%.4f]%s\n", TUI_DIM,
                     turns, total_input, total_output, total_cache_read, multi_turn_cost, TUI_RESET);
+        }
+        if (goal_is_active(&session) && prompt_done && !g_agent_exit_requested && !g_interrupted) {
+            goal_autorun_pending = !env_truthy(getenv("DSCO_GOAL_NO_AUTORUN"));
+            fprintf(stderr, "  %sgoal still active: queued next autonomous step%s\n", TUI_DIM,
+                    TUI_RESET);
         }
         /* Use stderr for the blank line separator — stdout writes can
            desync with the scroll region and push the cursor into the
@@ -9369,6 +10128,7 @@ bool agent_run(const char *api_key, const char *model, const char *topology_name
     g_autosave_conv = NULL;
     g_autosave_session = NULL;
     autosave(&conv, &session);
+    followup_queue_destroy(&followup_queue);
     conv_free(&conv);
 #ifdef HAVE_READLINE
     {

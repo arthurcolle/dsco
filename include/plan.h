@@ -233,6 +233,18 @@ char   *atom_resolve_inputs(int atom_id);
 int  plan_ready_atoms(int plan_id, int *atom_ids_out, int max_out);
 int  plan_run_next(int plan_id);    /* returns atom_id run, or -1 */
 
+/* True when every upstream wired-input atom for atom_id is PLAN_DONE. */
+bool atom_inputs_ready(int atom_id);
+
+/* Roll up status: atoms -> steps -> plan. Call after executing atoms so the
+ * rendered tree reflects real completion. Safe to call repeatedly. */
+void plan_rollup_status(int plan_id);
+
+/* Drive the plan to quiescence: repeatedly run ready atoms until none remain
+ * runnable (all done/failed/blocked) or max_atoms executed (0 = unbounded,
+ * capped internally). Rolls up status as it goes. Returns atoms executed. */
+int  plan_run_all(int plan_id, int max_atoms);
+
 /* ── Top-down decomposition ──────────────────────────────────────────────── */
 
 /* Bulk-add child steps under focus_step_id (0 = root).
