@@ -2443,6 +2443,56 @@ static int print_codex_models(bool json) {
     return 0;
 }
 
+/* ── Routing intelligence demo (task-based + dynamic failover) ─────────── */
+
+static int print_route(const char *arg) {
+    /* Ensure the catalog is loaded so catalog-driven routes resolve. */
+    int n = openrouter_cache_load_sync();
+    if (n <= 0)
+        fprintf(stderr, "route: catalog unavailable (offline, no disk cache) — "
+                        "meta-model routes still work\n");
+
+    struct { const char *name; dsco_task_type_t t; const char *why; } tasks[] = {
+        {"general",  DSCO_TASK_GENERAL,  "openrouter/auto meta-router"},
+        {"code",     DSCO_TASK_CODE,     "pareto-code quality-ranked router"},
+        {"complex",  DSCO_TASK_COMPLEX,  "fusion multi-model deliberation"},
+        {"subagent", DSCO_TASK_SUBAGENT, "free agentic model for swarm workers"},
+        {"free",     DSCO_TASK_FREE,     "free tier"},
+        {"cheap",    DSCO_TASK_CHEAP,    "cheapest tool-capable in catalog"},
+        {"long-ctx", DSCO_TASK_LONG_CTX, "largest-context tool-capable"},
+        {"premium",  DSCO_TASK_PREMIUM,  "highest-quality tool-capable"},
+    };
+    int ntasks = (int)(sizeof(tasks) / sizeof(tasks[0]));
+
+    if (arg && arg[0]) {
+        for (int i = 0; i < ntasks; i++) {
+            if (strcmp(arg, tasks[i].name) == 0) {
+                const char *m = dsco_route_by_task(tasks[i].t);
+                printf("%s\n", m ? m : "(no route)");
+                return 0;
+            }
+        }
+        /* Treat arg as a failed-model slug and show the dynamic failover chain. */
+        char chain[8][128];
+        int cnt = dsco_route_failover_dynamic(arg, chain, 8);
+        if (cnt <= 0) {
+            fprintf(stderr, "route: no failover candidates for '%s'\n", arg);
+            return 1;
+        }
+        fprintf(stderr, "# dynamic failover chain for '%s' (price-ascending):\n", arg);
+        for (int i = 0; i < cnt; i++)
+            printf("%s\n", chain[i]);
+        return 0;
+    }
+
+    fprintf(stderr, "# task-based routing (override with DSCO_ROUTE_* / DSCO_SWARM_*):\n");
+    for (int i = 0; i < ntasks; i++) {
+        const char *m = dsco_route_by_task(tasks[i].t);
+        printf("%-9s -> %-44s  (%s)\n", tasks[i].name, m ? m : "(none)", tasks[i].why);
+    }
+    return 0;
+}
+
 static int print_or_models(bool json) {
     int n = openrouter_cache_load_sync();
     if (n <= 0) {
@@ -3290,6 +3340,12 @@ int main(int argc, char **argv) {
         }
         if (strcmp(argv[i], "--or-models-json") == 0) {
             int rc = print_or_models(true);
+            free(oneshot_prompt);
+            return rc;
+        }
+        if (strcmp(argv[i], "--route") == 0) {
+            const char *arg = (i + 1 < argc) ? argv[i + 1] : NULL;
+            int rc = print_route(arg);
             free(oneshot_prompt);
             return rc;
         }
