@@ -22,6 +22,7 @@
 #include "mcp.h"
 #include "toolmgmt.h"
 #include "provider.h"
+#include "openrouter_cache.h"
 #include "provider_pool.h"
 #include "openai_oauth.h"
 #include "local_llm.h"
@@ -7621,6 +7622,7 @@ bool agent_run(const char *api_key, const char *model, const char *topology_name
             provider_failover_reset(&failed_providers);
             fallback_decision_t fallback_decision = FALLBACK_DECISION_AUTO;
             char chosen_fallback_model[128] = "";
+            int dynamic_fallback_count = 0;
         reactive_retry:
             trace_span_begin(trace_id, "llm_stream", prompt_span, llm_span);
             chronicle_span_begin(trace_id, chron_prompt_span, "llm", "llm_stream", NULL,
@@ -7750,6 +7752,43 @@ bool agent_run(const char *api_key, const char *model, const char *topology_name
             if (!sr.ok)
                 provider_failover_mark(&failed_providers, g_provider ? g_provider->name : NULL);
 
+            /* Dynamic catalog failover: when the primary failed with a gating
+             * or credit/quota rejection and the operator has NOT configured a
+             * static fallback chain, synthesize one from the live OpenRouter
+             * catalog (tool-capable, context-parity, price-ascending). This is
+             * the self-healing path for "the model got gated / went away":
+             * dsco routes around the dead provider automatically. Requires an
+             * OpenRouter key (the synthesized chain routes OpenRouter-prefixed
+             * models). Disable with DSCO_DYNAMIC_FAILOVER=0. */
+            if (!sr.ok && session.fallback_count == 0 &&
+                fallback_decision != FALLBACK_DECISION_STOP && !g_interrupted &&
+                dsco_env_bool("DSCO_DYNAMIC_FAILOVER", true) &&
+                provider_has_usable_key("openrouter", api_key)) {
+                const char *reason = sr.parsed.stop_reason;
+                bool gating_or_credit =
+                    (sr.http_status == 403 || sr.http_status == 401 ||
+                     sr.http_status == 404 || stream_result_is_credit_exhausted(&sr) ||
+                     provider_msg_is_gated(reason));
+                if (gating_or_credit) {
+                    int n = dsco_route_failover_dynamic(session.model,
+                                                        session.fallback_models, 4);
+                    if (n > 0) {
+                        session.fallback_count = n;
+                        dynamic_fallback_count = n;
+                        if (g_outq)
+                            tui_outq_writef(g_outq,
+                                "  %sdynamic failover: %s unavailable; routing around it "
+                                "(%d catalog candidates)%s\n",
+                                TUI_YELLOW, session.model, n, TUI_RESET);
+                        else
+                            fprintf(stderr,
+                                "  %sdynamic failover: %s unavailable; routing around it "
+                                "(%d catalog candidates)%s\n",
+                                TUI_YELLOW, session.model, n, TUI_RESET);
+                    }
+                }
+            }
+
             /* Fallback: if failed and fallback chain configured, try next model */
             if (!sr.ok && session.fallback_count > 0 &&
                 fallback_decision != FALLBACK_DECISION_STOP) {
@@ -7786,7 +7825,12 @@ bool agent_run(const char *api_key, const char *model, const char *topology_name
                     const char *fb_provider = provider_route_for_model(fb_model, api_key, NULL);
                     if (!fb_provider || !fb_provider[0])
                         continue;
-                    if (provider_failover_has(&failed_providers, fb_provider))
+                    /* OpenRouter is a gateway: multiple fallback model candidates can share
+                     * the same provider while targeting different upstream labs. Do not
+                     * provider-level-skip the rest of a dynamic OpenRouter chain just
+                     * because one upstream model failed; keep walking the model list. */
+                    bool fb_is_openrouter = (strcmp(fb_provider, "openrouter") == 0);
+                    if (!fb_is_openrouter && provider_failover_has(&failed_providers, fb_provider))
                         continue;
                     if (!provider_failover_available(fb_provider, api_key))
                         continue;
@@ -7863,6 +7907,14 @@ bool agent_run(const char *api_key, const char *model, const char *topology_name
                     if (original_provider[0])
                         ensure_provider_with_override(&session, api_key, original_provider);
                 }
+            }
+            if (dynamic_fallback_count > 0) {
+                /* Dynamic catalog fallbacks are per-turn recovery, not an
+                 * operator-configured /fallback policy. Clear them after the
+                 * turn so interactive state remains honest. */
+                for (int di = 0; di < dynamic_fallback_count && di < 4; di++)
+                    session.fallback_models[di][0] = '\0';
+                session.fallback_count = 0;
             }
             free(req);
 
