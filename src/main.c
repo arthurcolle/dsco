@@ -4932,6 +4932,11 @@ native_path:
     } else if (orchestrate_mode) {
         user_exit_requested = agent_run_orchestrated(api_key, model, worker_model, g_provider_override);
     } else {
+        /* Type-ahead during secure-store/provider startup is echoed by the
+         * terminal before the composer owns stdin. Clear that cooked-mode echo
+         * immediately before the real TUI banner and first prompt are drawn. */
+        if (isatty(STDERR_FILENO))
+            tui_screen_reset_full();
         user_exit_requested = agent_run(api_key, model, topology_name, topology_auto, g_provider_override);
     }
 
