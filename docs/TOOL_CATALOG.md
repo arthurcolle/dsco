@@ -6,7 +6,7 @@ This catalog is generated from the static `src/tools.c` built-in tool registry.
 - Total built-in tools: 229
 - Core tools: 39
 - Read-only tools: 137
-- Concurrent tools: 146
+- Concurrent tools: 143
 - Interactive tools: 1
 
 Regeneration:
@@ -111,12 +111,12 @@ Flags:
 | <code>jina_ai_constellation</code> |  |  |  |  | High-level native Jina capability router over live_kb, research, search, reader, embed, rerank, classify, train, match, models, batches, classifiers, and chat. |
 | <code>jina_ai_embed</code> |  | yes | yes |  | Native Jina Embeddings API call for text, code, image, PDF, and multimodal input arrays. Defaults to jina-embeddings-v5-text-small. |
 | <code>jina_ai_live_kb</code> |  |  |  |  | Realtime Jina web-to-knowledge-base generator. Searches live web, reads sources, chunks cited evidence, optionally reranks/classifies/embeds chunks, and can persist results into the local knowledge_base with persist=true. |
-| <code>jina_ai_match</code> |  | yes | yes |  | Embedding similarity matcher using Jina embeddings. Embeds query and documents with task=text-matching, then returns documents ranked by cosine similarity. |
+| <code>jina_ai_match</code> |  | yes |  |  | Embedding similarity matcher using Jina embeddings. Embeds query and documents with task=text-matching, then returns documents ranked by cosine similarity. |
 | <code>jina_ai_model_get</code> |  | yes | yes |  | Get a native Jina AI model catalog entry by short or full model_id, such as jina-embeddings-v5-text-small or jina-ai/jina-vlm. |
 | <code>jina_ai_models_list</code> |  | yes | yes |  | List native Jina AI model catalog entries, including modalities, context lengths, and pricing metadata. |
 | <code>jina_ai_reader</code> |  | yes | yes |  | Native Jina Reader API call. Reads one public URL into LLM-ready content with browser, selector, cache, locale, proxy, markdown, and return-format controls. |
 | <code>jina_ai_rerank</code> |  | yes | yes |  | Native Jina Reranker API call. Reranks string/object/multimodal documents for a query; defaults to jina-reranker-v3. |
-| <code>jina_ai_research</code> |  | yes | yes |  | Compound native Jina research pipeline: search the web, read top result URLs, and rerank the extracted page text for the query. |
+| <code>jina_ai_research</code> |  | yes |  |  | Compound native Jina research pipeline: search the web, read top result URLs, and rerank the extracted page text for the query. |
 | <code>jina_ai_search</code> |  | yes | yes |  | Native Jina Search API call. Searches the web through s.jina.ai with SERP, site, engine, cache, locale, proxy, return-format, links, images, and favicon controls. |
 | <code>jina_ai_train</code> |  |  | yes |  | Native Jina Train API call. Creates or updates a few-shot classifier from labeled text/image training items; accepts body/request for full passthrough. |
 | <code>jina_embed</code> |  | yes | yes |  | Compute embeddings via Jina v4 API. Returns 1024d float vectors for semantic similarity. |
@@ -179,7 +179,7 @@ Flags:
 | <code>parallel_ai_task_input</code> |  | yes | yes |  | Retrieve the original input for a Parallel.ai Task run by run_id, or the tracked latest task run when run_id is omitted. |
 | <code>parallel_ai_task_result</code> |  | yes | yes |  | Long-poll a Parallel.ai Task API run result by run_id, or the tracked latest task run when run_id is omitted. |
 | <code>parallel_ai_task_status</code> |  | yes | yes |  | Retrieve a Parallel.ai Task API run status by run_id, or the tracked latest task run when run_id is omitted. |
-| <code>parallel_ai_wait</code> |  | yes | yes |  | Poll a tracked Parallel.ai async job until terminal status, then fetch the result/runs when available. Supports task_run, task_group, findall, and monitor; ids default to the locally tracked latest job for the kind. |
+| <code>parallel_ai_wait</code> |  | yes |  |  | Poll a tracked Parallel.ai async job until terminal status, then fetch the result/runs when available. Supports task_run, task_group, findall, and monitor; ids default to the locally tracked latest job for the kind. |
 | <code>parallel_search</code> | yes | yes | yes |  | Fan out web search to multiple providers (Jina, Tavily, Brave) concurrently. Returns merged results from all available providers. |
 | <code>pets</code> |  | yes | yes |  | Companion sprites for background agents. action=roster shows live background-agent pets (face, status, cost, activity sparkline); gallery shows a species sampler; roll shows a single deterministic pet for a seed string. Each agent deterministically hatches the same pet from its id/task. |
 | <code>pheromone</code> |  |  |  |  | Pheromone coordination (Wings): deposit, sense, status. |
