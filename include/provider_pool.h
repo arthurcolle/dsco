@@ -10,8 +10,8 @@
  *
  * Keeps a set of live provider_t instances "always up" — each with its own
  * warm transport (persistent CURL handle via provider_prepare) and resolved
- * credential — so the agent can route between providers (e.g. the three flat-
- * rate $200 subscriptions: Anthropic/Claude, OpenAI/ChatGPT, Sakana/Fugu)
+ * credential — so the agent can route between providers (e.g. flat-rate or
+ * coding-plan lanes: Anthropic/Claude, OpenAI/ChatGPT, Sakana/Fugu, Z.AI)
  * without tearing down and rebuilding the connection on every switch.
  *
  * The pool OWNS every provider_t it hands out: callers must never provider_free()

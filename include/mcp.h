@@ -17,6 +17,9 @@
  *   ~/.codex/config.toml and ./.codex/config.toml
  *   ~/.hermes/config.yaml and ~/.hermes/mcp_servers.yaml
  *
+ * Set DSCO_MCP_SERVER=<name>[,<name>...] to load only selected server names.
+ * The CLI flag `--mcp-server <name>` sets this env var for one run.
+ *
  * {
  *   "servers": {
  *     "my-server": {

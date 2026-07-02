@@ -684,9 +684,13 @@ bool chronicle_llm_response(const char *trace_id, const char *span_id, const cha
     jbuf_t p; jbuf_init(&p, 512);
     jbuf_append(&p, "{\"provider\":"); jbuf_append_json_str(&p, nz(provider));
     jbuf_append(&p, ",\"model\":"); jbuf_append_json_str(&p, nz(model));
+    int cache_side_tokens = input_tokens + cache_read_tokens + cache_write_tokens;
+    double cache_hit_ratio =
+        cache_side_tokens > 0 ? (double)cache_read_tokens / (double)cache_side_tokens : 0.0;
     jbuf_append(&p, ",\"usage\":{");
-    jbuf_appendf(&p, "\"input_tokens\":%d,\"output_tokens\":%d,\"cache_read_tokens\":%d,\"cache_write_tokens\":%d,\"reasoning_tokens\":%d}",
-                 input_tokens, output_tokens, cache_read_tokens, cache_write_tokens, reasoning_tokens);
+    jbuf_appendf(&p, "\"input_tokens\":%d,\"output_tokens\":%d,\"cache_read_tokens\":%d,\"cache_write_tokens\":%d,\"reasoning_tokens\":%d,\"cache_hit_ratio\":%.6f}",
+                 input_tokens, output_tokens, cache_read_tokens, cache_write_tokens,
+                 reasoning_tokens, cache_hit_ratio);
     jbuf_append(&p, ",\"cost_usd\":"); jbuf_appendf(&p, "%.8f", cost_usd);
     jbuf_append(&p, ",\"latency_ms\":"); jbuf_appendf(&p, "%.3f", latency_ms);
     jbuf_append(&p, ",\"finish_reason\":"); jbuf_append_json_str(&p, nz(finish_reason));
@@ -728,6 +732,65 @@ bool chronicle_tool_call_end(const char *trace_id, const char *tool_span_id, con
     chronicle_event("tool.call.completed", trace_id, tool_span_id, NULL, "tool", nz(tool_name), p.data, "tool_output");
     bool ret = chronicle_span_end(tool_span_id, timeout ? "timeout" : (ok ? "ok" : "error"), p.data);
     jbuf_free(&p); return ret;
+}
+
+static void chronicle_cost_totals_add_payload(chronicle_cost_totals_t *out, const char *payload_json) {
+    if (!out || !payload_json) return;
+    out->response_count++;
+    out->cost_usd += json_get_double(payload_json, "cost_usd", 0.0);
+    char *usage = json_get_raw(payload_json, "usage");
+    if (usage) {
+        out->input_tokens += json_get_int(usage, "input_tokens", 0);
+        out->output_tokens += json_get_int(usage, "output_tokens", 0);
+        out->cache_read_tokens += json_get_int(usage, "cache_read_tokens", 0);
+        out->cache_write_tokens += json_get_int(usage, "cache_write_tokens", 0);
+        out->reasoning_tokens += json_get_int(usage, "reasoning_tokens", 0);
+        free(usage);
+    }
+}
+
+static bool chronicle_cost_totals_query(const char *sql, const char *session_id,
+                                        sqlite3_int64 start_time, sqlite3_int64 end_time,
+                                        chronicle_cost_totals_t *out) {
+    if (!g_chronicle.db || !out) return false;
+    memset(out, 0, sizeof(*out));
+    sqlite3_stmt *st = NULL;
+    if (sqlite3_prepare_v2(g_chronicle.db, sql, -1, &st, NULL) != SQLITE_OK) return false;
+    if (session_id) sqlite3_bind_text(st, 1, session_id, -1, SQLITE_TRANSIENT);
+    else {
+        sqlite3_bind_int64(st, 1, start_time);
+        sqlite3_bind_int64(st, 2, end_time);
+    }
+    int rc;
+    while ((rc = sqlite3_step(st)) == SQLITE_ROW) {
+        chronicle_cost_totals_add_payload(out, (const char *)sqlite3_column_text(st, 0));
+    }
+    sqlite3_finalize(st);
+    return rc == SQLITE_DONE;
+}
+
+bool chronicle_cost_totals_for_session(const char *session_id, chronicle_cost_totals_t *out) {
+    const char *sid = (session_id && session_id[0]) ? session_id : g_chronicle.session_id;
+    if (!sid || !sid[0]) return false;
+    return chronicle_cost_totals_query(
+        "SELECT COALESCE(payload_json,'{}') FROM events "
+        "WHERE event_type='llm.response.completed' AND session_id=?1;",
+        sid, 0, 0, out);
+}
+
+bool chronicle_cost_totals_today(chronicle_cost_totals_t *out) {
+    time_t now = time(NULL);
+    struct tm tmv;
+    localtime_r(&now, &tmv);
+    tmv.tm_hour = 0;
+    tmv.tm_min = 0;
+    tmv.tm_sec = 0;
+    time_t start = mktime(&tmv);
+    if (start == (time_t)-1) return false;
+    return chronicle_cost_totals_query(
+        "SELECT COALESCE(payload_json,'{}') FROM events "
+        "WHERE event_type='llm.response.completed' AND wall_time>=?1 AND wall_time<?2;",
+        NULL, (sqlite3_int64)start, (sqlite3_int64)(start + 86400), out);
 }
 
 char *chronicle_build_activity_json(int limit, const char *session_filter) {
