@@ -1,0 +1,3 @@
+# False positive: 40-hex git commit SHA in the embedded capsule JSON payload
+# ("head" field), matched by the sourcegraph-access-token rule.
+59834cbbf31a67dfc5ea757a769cc98a922fd98b:web/static/agency_graph.html:sourcegraph-access-token:146

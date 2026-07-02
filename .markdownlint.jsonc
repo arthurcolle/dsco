@@ -1,0 +1,20 @@
+{
+  // Tuned to this repo's docs, most of which are generated (API_REFERENCE,
+  // TOOL_CATALOG, CONSTANTS_ENV_INDEX) or follow keep-a-changelog conventions
+  // that the strict defaults reject.
+  "MD012": false, // multiple blank lines — generated docs
+  "MD022": false, // blanks around headings — generated docs
+  "MD024": false, // duplicate headings — changelog sections / generated modules
+  "MD029": false, // ordered-list prefix style
+  "MD031": false, // blanks around fences — generated docs
+  "MD032": false, // blanks around lists — generated docs
+  "MD036": false, // emphasis-as-heading — intentional in docs
+  "MD040": false, // fenced code language — generated snippets
+  "MD056": false, // table column count — generated tables
+  "MD058": false, // blanks around tables — generated docs
+  "MD013": false, // line length
+  "MD033": false, // inline HTML (badges, anchors)
+  "MD041": false, // first line heading — some docs open with badges
+  "MD059": false, // descriptive link text — "see here" style links in docs
+  "MD060": false  // table column style — existing tables use compact pipes
+}
