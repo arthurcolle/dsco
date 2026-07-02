@@ -65,7 +65,7 @@ SRC_NAMES = main.c agent.c llm.c tools.c execution_layer.c json_util.c ast.c swa
 			semantic.c hlc.c ipc.c mcp.c mcp_names.c provider_profiles.c provider.c integrations.c error.c trace.c instrumenter.c structured_process.c task_profile.c \
 	output_guard.c topology.c workspace.c plan.c stateful_atoms.c recovery.c router.c \
 	pheromone.c ooda.c killswitch.c governance.c memory_tier.c talons.c avian.c \
-	arena_alloc.c event_loop.c vm.c scheduler.c vfs.c trading.c legion.c \
+	arena_alloc.c event_loop.c vm.c scheduler.c waiter.c vfs.c trading.c legion.c \
 	agent_profile.c orchestrator.c vecstore.c tamper.c sealed_store.c \
 	se_store.c watchdog.c audit_log.c heartbeat.c env_guard.c peer_bootstrap.c presence.c \
 	project.c project_mux.c project_grid.c \
@@ -681,6 +681,12 @@ $(TEST_OBJ_DIR)/test_avian.o: $(TEST_DIR)/test_avian.c | $(TEST_OBJ_DIR)
 test_avian: $(TEST_OBJ_DIR)/test_avian.o $(TEST_OBJ_DIR)/avian.o
 	$(CC) $(TEST_CFLAGS) -o $@ $^ $(LDFLAGS) -lm
 
+# Interruptible-waiter primitive (replaces sleep-poll loops in bg threads).
+$(TEST_OBJ_DIR)/test_waiter.o: $(TEST_DIR)/test_waiter.c | $(TEST_OBJ_DIR)
+	$(CC) $(TEST_CFLAGS) -c -o $@ $<
+test_waiter: $(TEST_OBJ_DIR)/test_waiter.o $(TEST_OBJ_DIR)/waiter.o
+	$(CC) $(TEST_CFLAGS) -o $@ $^ $(LDFLAGS) -lpthread
+
 # Live MCP integration smoke test (not part of test_priorities — needs network +
 # OPENROUTER_API_KEY). Loads dsco's full MCP config (incl. ./.mcp.json), proves the
 # OpenRouter remote MCP server authenticates via the env-expanded Bearer header,
@@ -707,7 +713,7 @@ test_math_corpus: $(TEST_OBJ_DIR)/test_math_corpus.o \
 # Build + run every standalone priority test in sequence.
 .PHONY: test_priorities
 test_priorities: test_recovery test_stateful_atoms test_plan_optimizer test_plan_cache \
-	test_learned_cost test_session_memory test_memory_keep_score test_wasm_core test_control_flow test_avian test_math_corpus
+	test_learned_cost test_session_memory test_memory_keep_score test_wasm_core test_control_flow test_avian test_waiter test_math_corpus
 	./test_recovery
 	./test_stateful_atoms
 	./test_plan_optimizer
@@ -718,6 +724,7 @@ test_priorities: test_recovery test_stateful_atoms test_plan_optimizer test_plan
 	./test_wasm_core
 	./test_control_flow
 	./test_avian
+	./test_waiter
 	./test_math_corpus $(TEST_DIR)/math_corpus.tsv
 
 coverage: coverage_runner

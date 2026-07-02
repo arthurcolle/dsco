@@ -479,6 +479,7 @@ tui_rgb_t       tui_tool_rgb(tui_tool_type_t type);
 typedef struct {
     pthread_t       thread;
     pthread_mutex_t mutex;
+    pthread_cond_t  cond;      /* wakes spinner thread instantly on stop */
     volatile bool   running;
     const char     *label;
     const char     *color;
@@ -516,6 +517,7 @@ typedef struct {
 typedef struct {
     pthread_t        thread;
     pthread_mutex_t  mutex;
+    pthread_cond_t   cond;     /* wakes spinner thread instantly on stop */
     volatile bool    running;
     tui_batch_entry_t entries[TUI_BATCH_MAX];
     int              count;
@@ -1436,6 +1438,7 @@ tui_stream_phase_t tui_stream_state_phase(const tui_stream_state_t *ss);
 typedef struct {
     pthread_t       thread;
     pthread_mutex_t mutex;
+    pthread_cond_t  cond;           /* wakes indicator thread instantly on stop */
     volatile bool   running;        /* false → thread should exit */
     volatile bool   visible;        /* heartbeat indicator currently on screen */
     double          last_poke;      /* timestamp of last visible output */
@@ -1599,6 +1602,7 @@ typedef struct {
 typedef struct {
     pthread_t        thread;
     pthread_mutex_t  mutex;
+    pthread_cond_t   cond;    /* wakes clock thread on subscribe/activate/stop */
     volatile bool    running;
 
     tui_anim_sub_t   subs[TUI_ANIM_MAX_SUBS];
@@ -1724,6 +1728,7 @@ void tui_reset_title(void);
 typedef struct {
     pthread_t       thread;
     pthread_mutex_t mutex;
+    pthread_cond_t  cond;        /* wakes shimmer thread instantly on stop */
     volatile bool   running;
     const char     *label;
     double          start_time;

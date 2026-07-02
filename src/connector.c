@@ -22,6 +22,7 @@
 #include <fcntl.h>
 #include <termios.h>
 #include <errno.h>
+#include <poll.h>
 #include <sqlite3.h>
 
 /* ── Shared helpers ───────────────────────────────────────────────────── */
@@ -1241,13 +1242,21 @@ static void serial_invoke(void *self, const char *method, const char *params, co
     char buf[512];
     while (conn_now_ms() < deadline) {
         ssize_t r = read(fd, buf, sizeof(buf));
-        if (r > 0)
+        if (r > 0) {
             jbuf_append_len(&acc, buf, (size_t)r);
-        else if (r < 0 && (errno == EAGAIN || errno == EWOULDBLOCK)) {
-            struct timespec ts = {0, 20 * 1000000L};
-            nanosleep(&ts, NULL);
-        } else
+        } else if (r < 0 && (errno == EAGAIN || errno == EWOULDBLOCK)) {
+            /* Block on the fd until data arrives or the deadline hits —
+             * wakes the instant bytes land instead of 20ms-granularity
+             * sleep-polling (lower latency, zero idle wakeups). */
+            long left = deadline - conn_now_ms();
+            if (left <= 0)
+                break;
+            struct pollfd pfd = {.fd = fd, .events = POLLIN};
+            if (poll(&pfd, 1, (int)left) < 0 && errno != EINTR)
+                break;
+        } else {
             break;
+        }
     }
     close(fd);
     if (!out) {

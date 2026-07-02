@@ -2,6 +2,7 @@
 #include <string.h>
 #include <stdio.h>
 #include <time.h>
+#include <poll.h>
 
 /* ── Monotonic clock ───────────────────────────────────────────────── */
 
@@ -246,8 +247,47 @@ int sched_tick(scheduler_t *s) {
     return active;
 }
 
+/* When no task is READY, block instead of busy-spinning:
+ *   - poll() any WAITING_IO fds (wakes the instant data arrives)
+ *   - cap the wait at the earliest WAITING_TIMER deadline
+ *   - cap at max_wait_ms as a safety valve (external state changes)
+ * Returns immediately if a task is READY. */
+static void sched_idle_wait(scheduler_t *s, int max_wait_ms) {
+    for (int p = 0; p < SCHED_PRIO_COUNT; p++)
+        if (s->run_queue_len[p] > 0)
+            return; /* work available — don't sleep */
+
+    uint64_t now = now_ms();
+    long wait = max_wait_ms > 0 ? max_wait_ms : 50;
+
+    struct pollfd pfds[SCHED_MAX_TASKS];
+    int nfds = 0;
+    for (int i = 0; i < s->task_count; i++) {
+        sched_task_t *t = &s->tasks[i];
+        if (t->state == TASK_WAITING_TIMER) {
+            long until = t->wake_time_ms > now ? (long)(t->wake_time_ms - now) : 0;
+            if (until < wait)
+                wait = until;
+        } else if (t->state == TASK_WAITING_IO && t->wait_fd >= 0 &&
+                   nfds < SCHED_MAX_TASKS) {
+            pfds[nfds].fd = t->wait_fd;
+            pfds[nfds].events = POLLIN | POLLOUT;
+            pfds[nfds].revents = 0;
+            nfds++;
+        }
+    }
+    if (wait <= 0)
+        return; /* a timer is already due */
+
+    if (nfds > 0) {
+        (void)poll(pfds, (nfds_t)nfds, (int)wait);
+    } else {
+        struct timespec ts = {wait / 1000, (wait % 1000) * 1000000L};
+        nanosleep(&ts, NULL);
+    }
+}
+
 int sched_run(scheduler_t *s, int poll_ms) {
-    (void)poll_ms;
     if (!s)
         return -1;
     s->running = true;
@@ -255,6 +295,7 @@ int sched_run(scheduler_t *s, int poll_ms) {
         int active = sched_tick(s);
         if (active == 0)
             break;
+        sched_idle_wait(s, poll_ms > 0 ? poll_ms : 50);
     }
     s->running = false;
     return 0;
@@ -283,6 +324,7 @@ int sched_run_sync(scheduler_t *s, task_func_t func, void *ctx, const char *labe
         if (t->state == TASK_CANCELLED)
             return -2;
         sched_tick(s);
+        sched_idle_wait(s, 50); /* no-op when work is ready; blocks when idle */
     }
 }
 
