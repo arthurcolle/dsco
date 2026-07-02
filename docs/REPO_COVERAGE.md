@@ -6,23 +6,23 @@ This manifest is generated from `git ls-files` plus the coverage generator/outpu
 
 ## Summary
 
-- Total covered files: 598
+- Total covered files: 615
 
 | Category | Files |
 |---|---:|
-| Root project files | 20 |
+| Root project files | 24 |
 | Repository policy and CI | 15 |
-| Documentation | 46 |
-| Runtime source and headers | 244 |
-| Tests | 26 |
-| Scripts and tooling | 44 |
+| Documentation | 47 |
+| Runtime source and headers | 249 |
+| Tests | 27 |
+| Scripts and tooling | 48 |
 | Generated data assets | 8 |
 | Provider metadata | 17 |
 | Web surface | 11 |
 | Packaging and distribution | 12 |
 | Demos | 3 |
 | Vendored and compatibility code | 144 |
-| Other tracked files | 8 |
+| Other tracked files | 10 |
 
 ## Generated Coverage
 
@@ -37,10 +37,14 @@ This manifest is generated from `git ls-files` plus the coverage generator/outpu
 
 - `.clang-format`
 - `.clang-tidy`
+- `.clangd`
+- `.dir-locals.el`
 - `.editorconfig`
 - `.gitattributes`
 - `.gitignore`
+- `.gitleaksignore`
 - `.markdownlint-cli2.yaml`
+- `.markdownlint.jsonc`
 - `.mcp.json`
 - `.pre-commit-config.yaml`
 - `CHANGELOG.md`
@@ -107,6 +111,7 @@ This manifest is generated from `git ls-files` plus the coverage generator/outpu
 - `docs/SWARM_PARALLELISM_PROOF.md`
 - `docs/TOOL_CATALOG.md`
 - `docs/WASM.md`
+- `docs/assets/provider_fabric.svg`
 - `docs/consumer_profile_ontology/ARCHITECTURE.md`
 - `docs/consumer_profile_ontology/EXTENDED_50K.md`
 - `docs/consumer_profile_ontology/EXTENDED_50K_WITH_BOUNDARIES.md`
@@ -142,6 +147,7 @@ This manifest is generated from `git ls-files` plus the coverage generator/outpu
 - `include/connector.h`
 - `include/control_flow.h`
 - `include/coroutine.h`
+- `include/cost_budget.h`
 - `include/cost_model.h`
 - `include/crypto.h`
 - `include/dcr.h`
@@ -210,6 +216,7 @@ This manifest is generated from `git ls-files` plus the coverage generator/outpu
 - `include/provider.h`
 - `include/provider_pool.h`
 - `include/provider_profiles.h`
+- `include/realtime.h`
 - `include/recovery.h`
 - `include/router.h`
 - `include/rsi_curriculum.h`
@@ -244,6 +251,7 @@ This manifest is generated from `git ls-files` plus the coverage generator/outpu
 - `include/vecstore_metal.h`
 - `include/vfs.h`
 - `include/vm.h`
+- `include/waiter.h`
 - `include/wasm_core.h`
 - `include/watchdog.h`
 - `include/workspace.h`
@@ -334,6 +342,7 @@ This manifest is generated from `git ls-files` plus the coverage generator/outpu
 - `src/provider.c`
 - `src/provider_pool.c`
 - `src/provider_profiles.c`
+- `src/realtime.c`
 - `src/recovery.c`
 - `src/router.c`
 - `src/rsi_curriculum.c`
@@ -366,6 +375,7 @@ This manifest is generated from `git ls-files` plus the coverage generator/outpu
 - `src/vecstore_metal.metal`
 - `src/vfs.c`
 - `src/vm.c`
+- `src/waiter.c`
 - `src/wasm_core.c`
 - `src/watchdog.c`
 - `src/workspace.c`
@@ -396,11 +406,13 @@ This manifest is generated from `git ls-files` plus the coverage generator/outpu
 - `tests/test_stateful_atoms.c`
 - `tests/test_tui_snapshot.c`
 - `tests/test_tui_theme_snapshot.c`
+- `tests/test_waiter.c`
 - `tests/test_wasm_core.c`
 - `tests/test_web_server.py`
 
 ### Scripts and tooling
 
+- `scripts/analyze_locks.sh`
 - `scripts/bake_data.sh`
 - `scripts/bench_sota.py`
 - `scripts/bootstrap.sh`
@@ -422,6 +434,8 @@ This manifest is generated from `git ls-files` plus the coverage generator/outpu
 - `scripts/dev_fast.sh`
 - `scripts/dsco.gdbinit`
 - `scripts/dsco.lldbinit`
+- `scripts/dsco_perf_multiturn.py`
+- `scripts/dsco_perf_rollout.py`
 - `scripts/dsco_profile.py`
 - `scripts/dsco_run_watch.py`
 - `scripts/elf_symbol_graph_audit.py`
@@ -436,6 +450,7 @@ This manifest is generated from `git ls-files` plus the coverage generator/outpu
 - `scripts/index_constants_env.py`
 - `scripts/live_face_avatar.sh`
 - `scripts/mine_book_pages.py`
+- `scripts/perf_diagram_suite.py`
 - `scripts/provider_metadata_audit.py`
 - `scripts/qualify_provisioned_dsco.sh`
 - `scripts/release_hardened.py`
@@ -663,6 +678,8 @@ This manifest is generated from `git ls-files` plus the coverage generator/outpu
 
 - `doctrine/MEMORY.md`
 - `doctrine/MEMORY_UPGRADE_2026-06-28.md`
+- `examples/dspy_via_dsco.py`
+- `proposals/LOOP-F1-F4/PATCHSET.md`
 - `proposals/PRAXIS-v1/GATE.md`
 - `proposals/PRAXIS-v1/PROPOSAL.md`
 - `schemas/consumer_profile_ontology/activation_request.schema.json`
