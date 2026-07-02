@@ -8,7 +8,10 @@ trim_trailing_whitespace = true
 indent_style = space
 indent_size = 2
 
-[*.{c,h,sh,yml,yaml,md}]
+[*.{c,h}]
+indent_size = 4
+
+[*.{sh,yml,yaml,md}]
 indent_size = 2
 
 [Makefile]

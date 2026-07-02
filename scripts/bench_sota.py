@@ -90,7 +90,8 @@ def run_once(argv: list[str], env_extra: dict[str, str] | None = None,
     )
 
 
-def bench_case(name: str, argv: list[str], samples: int, warmup: int) -> bool:
+def bench_case(name: str, argv: list[str], samples: int, warmup: int,
+               kind: str = "timing") -> bool:
     for _ in range(warmup):
         cp = run_once(argv)
         if cp.returncode != 0:
@@ -111,7 +112,7 @@ def bench_case(name: str, argv: list[str], samples: int, warmup: int) -> bool:
 
     stats = {
         "bench": "sota",
-        "type": "timing",
+        "type": kind,
         "case": name,
         "samples": samples,
         "p50_ms": round(statistics.median(values), 3),
@@ -120,6 +121,8 @@ def bench_case(name: str, argv: list[str], samples: int, warmup: int) -> bool:
         "max_ms": round(max(values), 3),
         "mean_ms": round(statistics.fmean(values), 3),
     }
+    if kind == "cold_start":
+        stats["cold_start_ms"] = stats["p50_ms"]
     emit(stats)
     return gate(name, "p50_ms", float(stats["p50_ms"]))
 
@@ -179,22 +182,40 @@ def emit_size(binary: str) -> bool:
 def main() -> int:
     samples = int(os.environ.get("DSCO_BENCH_SAMPLES", "25"))
     warmup = int(os.environ.get("DSCO_BENCH_WARMUP", "3"))
+    cold_samples = int(os.environ.get("DSCO_BENCH_COLD_SAMPLES", str(samples)))
+    cold_warmup = int(os.environ.get("DSCO_BENCH_COLD_WARMUP", "0"))
     if samples <= 0 or samples > 1000:
         raise SystemExit("DSCO_BENCH_SAMPLES must be 1..1000")
     if warmup < 0 or warmup > 100:
         raise SystemExit("DSCO_BENCH_WARMUP must be 0..100")
+    if cold_samples <= 0 or cold_samples > 1000:
+        raise SystemExit("DSCO_BENCH_COLD_SAMPLES must be 1..1000")
+    if cold_warmup < 0 or cold_warmup > 100:
+        raise SystemExit("DSCO_BENCH_COLD_WARMUP must be 0..100")
 
     emit({
         "bench": "sota",
         "type": "begin",
         "samples": samples,
         "warmup": warmup,
+        "cold_samples": cold_samples,
+        "cold_warmup": cold_warmup,
         "system": platform.system(),
         "machine": platform.machine(),
         "gates": DEFAULT_THRESHOLDS,
     })
 
     ok = True
+    cold_cases = [
+        ("dsco-cold-version", ["./dsco", "--version"]),
+        ("dsco-cold-help", ["./dsco", "--help"]),
+        ("dsco-cold-models-json", ["./dsco", "--models-json"]),
+        ("dsco-lite-cold-version", ["./dsco-lite", "--version"]),
+    ]
+    for name, argv in cold_cases:
+        ok = bench_case(name, argv, cold_samples, cold_warmup,
+                        kind="cold_start") and ok
+
     cases = [
         ("dsco-lite-tool-exec-cwd", ["./dsco-lite", "--tool-exec", "cwd", "{}"]),
         ("dsco-lite-models-json", ["./dsco-lite", "--models-json"]),

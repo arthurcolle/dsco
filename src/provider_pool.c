@@ -170,11 +170,52 @@ static void pool_warm(provider_slot_t *s) {
     s->state = have_key ? POOL_SLOT_UP : POOL_SLOT_NOKEY;
 }
 
+static bool pool_slot_has_usable_key(const provider_slot_t *s) {
+    if (!s)
+        return false;
+    const char *sk = g_pool.session_key[0] ? g_pool.session_key : NULL;
+    return provider_has_usable_key(s->name, sk);
+}
+
+static bool pool_refresh_slot(provider_slot_t *s, time_t now, bool warm_if_keyed) {
+    if (!s)
+        return false;
+    bool changed = false;
+    bool allocation_reset =
+        s->is_subscription && s->exhausted_until && now >= s->exhausted_until;
+    bool breaker_reset =
+        s->state == POOL_SLOT_TRIPPED && s->tripped_until && now >= s->tripped_until;
+
+    if (!allocation_reset && !breaker_reset)
+        return false;
+
+    bool have_key = pool_slot_has_usable_key(s);
+    if (allocation_reset) {
+        s->exhausted_until = 0;
+        changed = true;
+    }
+    if (allocation_reset || breaker_reset) {
+        s->consec_failures = 0;
+        s->tripped_until = 0;
+        if (!have_key) {
+            s->state = POOL_SLOT_NOKEY;
+        } else {
+            if (warm_if_keyed && !s->provider) {
+                s->state = POOL_SLOT_EMPTY;
+                pool_warm(s);
+            }
+            s->state = s->provider ? POOL_SLOT_UP : POOL_SLOT_EMPTY;
+        }
+        changed = true;
+    }
+    return changed;
+}
+
 void provider_pool_init(const char *session_key) {
     if (session_key && session_key[0])
         snprintf(g_pool.session_key, sizeof(g_pool.session_key), "%s", session_key);
 
-    /* The three flat-rate core subscriptions are always registered so they show
+    /* The flat-rate/core subscription lanes are always registered so they show
      * up in /providers even before first use; they are warmed when a credential
      * is available. openai-codex covers the ChatGPT subscription path. */
     struct {
@@ -184,6 +225,7 @@ void provider_pool_init(const char *session_key) {
         {"sakana", provider_sakana_current_key_is_subscription()},
         {"anthropic", true}, {"openai", true},
         {"openai-codex", true},
+        {"zai", true},
         /* Common metered fallbacks — registered lazily-warm only if keyed. */
         {"openrouter", false}, {"xai", false},      {"moonshot", false},
         {"google", false},
@@ -216,15 +258,13 @@ provider_t *provider_pool_acquire(const char *name) {
     if (!s)
         return NULL; /* pool full (unreachable in practice): caller keeps current
                       * provider rather than receiving a non-pool instance */
-    /* Auto-reset an expired circuit breaker. */
-    if (s->state == POOL_SLOT_TRIPPED && s->tripped_until && time(NULL) >= s->tripped_until) {
-        s->state = POOL_SLOT_UP;
-        s->tripped_until = 0;
-        s->consec_failures = 0;
-    }
+    time_t now = time(NULL);
+    bool changed = pool_refresh_slot(s, now, true);
+    if (changed)
+        pool_limits_save();
     if (!s->provider)
         pool_warm(s);
-    s->last_used = time(NULL);
+    s->last_used = now;
     return s->provider;
 }
 
@@ -280,8 +320,9 @@ time_t provider_pool_subscription_exhausted_until(const char *name) {
     provider_slot_t *s = provider_pool_slot(name);
     if (!s || !s->is_subscription || !s->exhausted_until)
         return 0;
-    if (time(NULL) >= s->exhausted_until) {
-        s->exhausted_until = 0;
+    time_t now = time(NULL);
+    if (now >= s->exhausted_until) {
+        pool_refresh_slot(s, now, true);
         pool_limits_save();
         return 0;
     }
@@ -290,17 +331,18 @@ time_t provider_pool_subscription_exhausted_until(const char *name) {
 
 bool provider_pool_healthy(const char *name) {
     provider_slot_t *s = provider_pool_slot(name);
-    if (!s || !s->provider)
+    if (!s)
+        return false;
+    time_t now = time(NULL);
+    if (pool_refresh_slot(s, now, true))
+        pool_limits_save();
+    if (!s->provider)
         return false;
     if (s->is_subscription && s->exhausted_until) {
-        if (time(NULL) < s->exhausted_until)
+        if (now < s->exhausted_until)
             return false;
-        s->exhausted_until = 0;
-        pool_limits_save();
     }
     if (s->state == POOL_SLOT_TRIPPED) {
-        if (s->tripped_until && time(NULL) >= s->tripped_until)
-            return true; /* breaker window elapsed; treat as recoverable */
         return false;
     }
     return s->state == POOL_SLOT_UP;
@@ -333,6 +375,8 @@ void provider_pool_render(char *out, size_t out_len) {
         provider_slot_t *s = &g_pool.slots[i];
         char fails[32];
         char reset[32] = "-";
+        if (pool_refresh_slot(s, time(NULL), false))
+            pool_limits_save();
         snprintf(fails, sizeof(fails), "%ld/%ld", s->total_failures, s->total_requests);
         if (s->exhausted_until > time(NULL)) {
             struct tm tmv;

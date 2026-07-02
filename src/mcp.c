@@ -980,6 +980,43 @@ static void pending_uniquify(const pending_list_t *pl, mcp_server_t *srv) {
     }
 }
 
+static bool mcp_server_filter_allows(const char *server_name) {
+    const char *filter = getenv("DSCO_MCP_SERVER");
+    if (!filter || !filter[0])
+        filter = getenv("DSCO_MCP_SERVERS");
+    if (!filter || !filter[0])
+        return true;
+
+    const char *p = filter;
+    while (*p) {
+        while (*p == ',' || isspace((unsigned char)*p))
+            p++;
+        const char *start = p;
+        while (*p && *p != ',')
+            p++;
+        const char *end = p;
+        while (end > start && isspace((unsigned char)end[-1]))
+            end--;
+        size_t n = (size_t)(end - start);
+        if (n > 0) {
+            if (n == 1 && start[0] == '*')
+                return true;
+            if (n == 3 && strncasecmp(start, "all", 3) == 0)
+                return true;
+            char raw[256];
+            char normalized[256];
+            if (n >= sizeof(raw))
+                n = sizeof(raw) - 1;
+            memcpy(raw, start, n);
+            raw[n] = '\0';
+            sanitize_name(raw, normalized, sizeof(normalized));
+            if (strcmp(raw, server_name) == 0 || strcmp(normalized, server_name) == 0)
+                return true;
+        }
+    }
+    return false;
+}
+
 static void start_configured_server(mcp_registry_t *reg, const mcp_server_t *cfg) {
     if (!cfg->command[0] && !cfg->url[0])
         return;
@@ -997,6 +1034,9 @@ static void start_configured_server(mcp_registry_t *reg, const mcp_server_t *cfg
         if (!srv.command[0])
             copy_str(srv.command, sizeof(srv.command), srv.url);
     }
+
+    if (!mcp_server_filter_allows(srv.name))
+        return;
 
     /* Collection phase: stash for the parallel connect pool and return. */
     if (g_collect) {

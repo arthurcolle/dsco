@@ -146,6 +146,27 @@ bool tui_cursor_report_queries_enabled(void);
 void tui_term_lock(void);
 void tui_term_unlock(void);
 
+/* Terminal state management — crash recovery and centralized mode control */
+void tui_install_crash_handlers(void);
+
+/* ── Error Recovery Framework ─────────────────────────────────────────── */
+typedef enum {
+    TUI_ERR_NONE,           /* No error */
+    TUI_ERR_WARNING,        /* Non-fatal, continue */
+    TUI_ERR_DEGRADED,       /* Reduced functionality */
+    TUI_ERR_FATAL           /* Must exit */
+} tui_error_severity_t;
+
+typedef struct {
+    tui_error_severity_t severity;
+    const char *message;
+    const char *context;
+    int error_code;
+} tui_error_t;
+
+/* Emergency cleanup for fatal errors */
+void tui_cleanup(void);
+
 /* ── Box drawing ──────────────────────────────────────────────────────── */
 
 /* Draw a box with optional title, width auto-detected from terminal */
@@ -524,6 +545,10 @@ typedef struct {
     int      input_tokens;
     int      output_tokens;
     double   cost;
+    double   budget_limit; /* session cap; <=0 disables budget HUD */
+    double   burn_rate;    /* USD/hour EWMA/simple rate supplied by agent */
+    double   percent;      /* 0-100 budget consumed */
+    double   runway;       /* seconds until exhaustion at burn_rate; <0 unknown */
     int      turn;
     int      tools_used;
     int      panel_rows;    /* bottom panel rows: top rule + input + status (3) */
@@ -536,6 +561,8 @@ void tui_status_bar_init(tui_status_bar_t *sb, const char *model);
 void tui_status_bar_set_model(tui_status_bar_t *sb, const char *model, const char *slot_name);
 void tui_status_bar_update(tui_status_bar_t *sb, int in_tok, int out_tok,
                            double cost, int turn, int tools);
+void tui_status_bar_set_budget(tui_status_bar_t *sb, double budget_limit,
+                               double burn_rate, double percent, double runway);
 void tui_status_bar_enable(tui_status_bar_t *sb);
 void tui_status_bar_disable(tui_status_bar_t *sb);
 void tui_status_bar_render(tui_status_bar_t *sb);
@@ -1341,6 +1368,7 @@ typedef struct {
 typedef struct {
     tui_evt_sub_t   subs[TUI_EVT_SUBS_MAX];
     int             sub_count;
+    int             removed_count;    /* Track removed subs for compaction triggering */
     pthread_mutex_t mutex;
     /* Ring buffer for recent events (debugging/replay) */
     tui_event_t     history[64];

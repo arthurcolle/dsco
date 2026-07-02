@@ -51,7 +51,10 @@ static bool swarm_provider_cli_pin_supported(const char *provider) {
     static const char *supported[] = {
         "anthropic", "openai", "openai-codex", "openrouter", "google", "groq",
         "deepseek", "mistral", "xai", "together", "perplexity", "cerebras",
-        "cohere", "moonshot", "sakana", NULL
+        "cohere", "moonshot", "sakana", "zai", "alibaba", "alibaba-coding-plan",
+        "qwen-oauth", "ollama", "lmstudio", "mlx", "vllm", "llamacpp", "localai",
+        "jan", "gpt4all", "koboldcpp", "textgen", "tgi", "sglang", "llamafile",
+        "local", NULL
     };
     if (!provider || !provider[0])
         return false;
@@ -652,12 +655,22 @@ int swarm_spawn_provider(swarm_t *s, int group_id, const char *task, const char 
         }
         swarm_export_child_credential_for_provider(provider, resolved_credential);
 
-        /* Key: --exec <provider> forces the child to use that provider's API */
+        /* Key: --provider <provider> keeps the child on dsco's native provider
+         * router. Fall back to --exec only for generic custom providers that
+         * are not accepted by the explicit provider-pin surface. */
         setenv("DSCO_PROFILE", "worker", 1);
         setenv("DSCO_WORKER", "1", 1);
-        execl(bin, bin, "--profile", "worker", "--exec", provider, "-m", m, task, NULL);
-        fprintf(stdout, "swarm: exec failed for '%s --exec %s': %s\n", bin, provider,
-                strerror(errno));
+        const char *child_provider_cli = swarm_provider_cli_name(provider);
+        if (swarm_provider_cli_pin_supported(child_provider_cli)) {
+            execl(bin, bin, "--profile", "worker", "--provider", child_provider_cli,
+                  "-m", m, task, NULL);
+            fprintf(stdout, "swarm: exec failed for '%s --provider %s': %s\n", bin,
+                    child_provider_cli, strerror(errno));
+        } else {
+            execl(bin, bin, "--profile", "worker", "--exec", provider, "-m", m, task, NULL);
+            fprintf(stdout, "swarm: exec failed for '%s --exec %s': %s\n", bin, provider,
+                    strerror(errno));
+        }
         _exit(127);
     }
 
@@ -1510,6 +1523,8 @@ int swarm_status_json(swarm_t *s, char *buf, size_t len) {
         jbuf_append_int(&b, c->id);
         jbuf_append(&b, ",\"pid\":");
         jbuf_append_int(&b, (int)c->pid);
+        jbuf_append(&b, ",\"process_group_id\":");
+        jbuf_append_int(&b, (int)c->pid);
         jbuf_append(&b, ",\"status\":");
         jbuf_append_json_str(&b, swarm_status_str(c->status));
         jbuf_append(&b, ",\"task\":");
@@ -1663,6 +1678,10 @@ int swarm_group_status_json(swarm_t *s, int group_id, char *buf, size_t len) {
         swarm_child_t *c = &s->children[g->child_ids[i]];
         jbuf_append(&b, "{\"id\":");
         jbuf_append_int(&b, c->id);
+        jbuf_append(&b, ",\"pid\":");
+        jbuf_append_int(&b, (int)c->pid);
+        jbuf_append(&b, ",\"process_group_id\":");
+        jbuf_append_int(&b, (int)c->pid);
         jbuf_append(&b, ",\"status\":");
         jbuf_append_json_str(&b, swarm_status_str(c->status));
         jbuf_append(&b, ",\"executor\":");

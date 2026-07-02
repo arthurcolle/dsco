@@ -14,6 +14,7 @@ import hmac
 import json
 import logging
 import os
+import secrets
 import sqlite3
 import subprocess
 import time
@@ -32,7 +33,7 @@ import openai
 import uvicorn
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect, Request
 from fastapi.encoders import jsonable_encoder
-from fastapi.responses import HTMLResponse, FileResponse, JSONResponse, PlainTextResponse
+from fastapi.responses import HTMLResponse, FileResponse, JSONResponse, PlainTextResponse, StreamingResponse
 
 # Optional WebRTC
 try:
@@ -94,6 +95,23 @@ CONTROL_PLANE_DIR = WEB_DIR.parent / ".workspace" / "control_plane"
 CONTROL_PLANE_DB = Path(os.getenv("DSCO_CONTROL_PLANE_DB", str(CONTROL_PLANE_DIR / "control_plane.db")))
 CONTROL_PLANE_SCHEMA_VERSION = 1
 _control_plane_ready = False
+
+# Security defaults: this server is a privileged local agent control plane.
+# Keep dangerous capability behind explicit operator opt-in even on localhost.
+WEB_AUTH_TOKEN = os.getenv("DSCO_WEB_TOKEN") or secrets.token_urlsafe(32)
+WEB_REQUIRE_TOKEN = os.getenv("DSCO_WEB_REQUIRE_TOKEN", "1").strip().lower() not in ("0", "false", "off", "no")
+WEB_ALLOW_DANGEROUS_TOOLS = os.getenv("DSCO_WEB_ALLOW_DANGEROUS_TOOLS", "0").strip().lower() in ("1", "true", "on", "yes")
+WEB_ALLOW_ABSOLUTE_PATHS = os.getenv("DSCO_WEB_ALLOW_ABSOLUTE_PATHS", "0").strip().lower() in ("1", "true", "on", "yes")
+WEB_ALLOW_CUSTOM_BASE_URL = os.getenv("DSCO_WEB_ALLOW_CUSTOM_BASE_URL", "0").strip().lower() in ("1", "true", "on", "yes")
+WEB_TRADING_LIVE = os.getenv("DSCO_TRADING_LIVE", "0").strip().lower() in ("1", "true", "on", "yes")
+WEB_ALLOWED_ORIGINS = {o.strip().rstrip("/") for o in os.getenv("DSCO_WEB_ALLOWED_ORIGINS", "").split(",") if o.strip()}
+WEB_AUTH_COOKIE = "dsco_web_token"
+WEB_SECRET_DENY_NAMES = {
+    ".env", ".env.local", ".envrc", "id_rsa", "id_dsa", "id_ecdsa", "id_ed25519",
+    "known_hosts", "credentials", "credentials.json", "secrets.json",
+}
+WEB_SECRET_DENY_SUFFIXES = {".pem", ".key", ".p12", ".pfx"}
+WEB_SAFE_TOOL_NAMES = {"read_file", "glob", "grep"}
 
 SYSTEM_PROMPT = """You are dsco, an AI software engineering agent running in a web interface.
 
@@ -1096,6 +1114,8 @@ def load_tool_registry():
             log.warning(f"Could not load tools from dsco: {e}")
 
     TOOLS_ANTHROPIC = _TOOLS_ANTHROPIC_FALLBACK
+    if not WEB_ALLOW_DANGEROUS_TOOLS:
+        TOOLS_ANTHROPIC = [t for t in TOOLS_ANTHROPIC if t.get("name") in WEB_SAFE_TOOL_NAMES]
     log.info(f"Using {len(TOOLS_ANTHROPIC)} fallback tools")
 
 
@@ -1123,14 +1143,45 @@ TOOLS_OPENAI: list[dict] = []
 
 # ── Tool Execution ───────────────────────────────────────────────────────────
 
-def _resolve_path(p: str) -> Path:
+def _is_secret_path(path: Path) -> bool:
+    parts = {p.lower() for p in path.parts}
+    name = path.name.lower()
+    if name in WEB_SECRET_DENY_NAMES or path.suffix.lower() in WEB_SECRET_DENY_SUFFIXES:
+        return True
+    if ".ssh" in parts or ".gnupg" in parts or ".aws" in parts or ".config" in parts and "gh" in parts:
+        return True
+    return False
+
+
+def _resolve_path(p: str, *, write: bool = False) -> Path:
     path = Path(p)
-    if not path.is_absolute():
-        path = WORK_DIR / path
-    return path.resolve()
+    if path.is_absolute():
+        if not WEB_ALLOW_ABSOLUTE_PATHS:
+            raise PermissionError("absolute paths are disabled in web mode")
+        resolved = path.resolve()
+    else:
+        resolved = (WORK_DIR / path).resolve()
+    if not WEB_ALLOW_ABSOLUTE_PATHS:
+        resolved.relative_to(WORK_DIR.resolve())
+    if _is_secret_path(resolved):
+        raise PermissionError("secret-like paths are denied in web mode")
+    if write and not WEB_ALLOW_DANGEROUS_TOOLS:
+        raise PermissionError("write/edit tools are disabled; set DSCO_WEB_ALLOW_DANGEROUS_TOOLS=1")
+    return resolved
+
+
+def _safe_subprocess_env(extra: Optional[dict[str, str]] = None) -> dict[str, str]:
+    allowed = {"PATH", "HOME", "USER", "TMPDIR", "LANG", "LC_ALL", "SHELL"}
+    env = {k: v for k, v in os.environ.items() if k in allowed}
+    env.update({"TERM": "dumb", "NO_COLOR": "1"})
+    if extra:
+        env.update(extra)
+    return env
 
 
 async def tool_bash(command: str, timeout: int = 120) -> str:
+    if not WEB_ALLOW_DANGEROUS_TOOLS:
+        return "[blocked: bash is disabled in web mode; set DSCO_WEB_ALLOW_DANGEROUS_TOOLS=1]"
     proc = None
     try:
         proc = await asyncio.create_subprocess_shell(
@@ -1138,7 +1189,7 @@ async def tool_bash(command: str, timeout: int = 120) -> str:
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.STDOUT,
             cwd=str(WORK_DIR),
-            env={**os.environ, "TERM": "dumb", "NO_COLOR": "1"},
+            env=_safe_subprocess_env(),
         )
         stdout, _ = await asyncio.wait_for(proc.communicate(), timeout=timeout)
         out = stdout.decode("utf-8", errors="replace")
@@ -1177,7 +1228,7 @@ def tool_read_file(path: str, offset: Optional[int] = None, limit: Optional[int]
 
 
 def tool_write_file(path: str, content: str) -> str:
-    fp = _resolve_path(path)
+    fp = _resolve_path(path, write=True)
     try:
         fp.parent.mkdir(parents=True, exist_ok=True)
         fp.write_text(content)
@@ -1187,7 +1238,7 @@ def tool_write_file(path: str, content: str) -> str:
 
 
 def tool_edit_file(path: str, old_string: str, new_string: str) -> str:
-    fp = _resolve_path(path)
+    fp = _resolve_path(path, write=True)
     if not fp.exists():
         return f"[error: file not found: {fp}]"
     try:
@@ -1237,6 +1288,8 @@ async def tool_grep(pattern: str, path: Optional[str] = None, include: Optional[
 
 async def tool_dsco_exec(name: str, input_data: dict) -> str:
     """Proxy any tool through `dsco --tool-exec <name> <json>`."""
+    if not WEB_ALLOW_DANGEROUS_TOOLS:
+        return "[blocked: dsco tool proxy is disabled in web mode; set DSCO_WEB_ALLOW_DANGEROUS_TOOLS=1]"
     if not DSCO_BIN.exists():
         return f"[dsco binary not found — cannot execute tool: {name}]"
     input_json = json.dumps(input_data)
@@ -1246,7 +1299,7 @@ async def tool_dsco_exec(name: str, input_data: dict) -> str:
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
             cwd=str(WORK_DIR),
-            env={**os.environ},
+            env=_safe_subprocess_env(),
         )
         stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=60)
         out = stdout.decode("utf-8", errors="replace").strip()
@@ -1751,12 +1804,53 @@ async def agent_loop(ws: WebSocket, session: Session):
         await agent_loop_openai(ws, session)
 
 
-# ── FastAPI App ──────────────────────────────────────────────────────────────
+# ── FastAPI App / Security Gate ──────────────────────────────────────────────
+
+def _is_loopback_host(host: str) -> bool:
+    host = (host or "").split(":", 1)[0].strip().lower()
+    return host in ("127.0.0.1", "localhost", "::1", "[::1]")
+
+
+def _allowed_origins(host: str, port: int) -> set[str]:
+    origins = set(WEB_ALLOWED_ORIGINS)
+    for h in ("127.0.0.1", "localhost"):
+        origins.add(f"http://{h}:{port}")
+        origins.add(f"https://{h}:{port}")
+    return origins
+
+
+def _token_from_request(request: Request) -> str:
+    auth = request.headers.get("authorization", "")
+    if auth.lower().startswith("bearer "):
+        return auth[7:].strip()
+    cookie_token = request.cookies.get(WEB_AUTH_COOKIE, "")
+    return (request.query_params.get("token", "") or cookie_token).strip()
+
+
+def _token_ok(token: str) -> bool:
+    return bool(token) and secrets.compare_digest(token, WEB_AUTH_TOKEN)
+
+
+def _auth_error() -> JSONResponse:
+    return JSONResponse({"error": "authentication required"}, status_code=401)
+
+
+def _is_public_http_path(path: str) -> bool:
+    return path in ("/", "/health", "/auth") or path.startswith("/static/")
+
 
 app = FastAPI(title="dsco", docs_url=None, redoc_url=None)
 sessions: dict[str, Session] = {}
 pcs: set = set()
 relay = MediaRelay() if HAS_WEBRTC else None
+
+
+@app.middleware("http")
+async def enforce_http_auth(request: Request, call_next):
+    if WEB_REQUIRE_TOKEN and not _is_public_http_path(request.url.path):
+        if not _token_ok(_token_from_request(request)):
+            return _auth_error()
+    return await call_next(request)
 
 
 @app.middleware("http")
@@ -1781,6 +1875,15 @@ async def record_http_metrics(request: Request, call_next):
 @app.get("/", response_class=HTMLResponse)
 async def index():
     return FileResponse(STATIC_DIR / "index.html")
+
+
+@app.get("/auth")
+async def auth(token: str = ""):
+    if WEB_REQUIRE_TOKEN and not _token_ok(token):
+        return _auth_error()
+    response = JSONResponse({"status": "ok"})
+    response.set_cookie(WEB_AUTH_COOKIE, WEB_AUTH_TOKEN, httponly=True, samesite="strict")
+    return response
 
 
 @app.get("/admin", response_class=HTMLResponse)
@@ -2452,6 +2555,286 @@ async def engine_chat(request: Request):
     return payload
 
 
+# ── OpenAI-compatible gateway (raw provider routing; no control plane) ───────
+#
+# Exposes dsco as a standard OpenAI /v1/chat/completions endpoint so any
+# OpenAI-compatible client — DSPy included — can run LM calls through dsco's
+# provider routing and credential resolution. DSPy usage is a one-liner:
+#
+#     import dspy
+#     lm = dspy.LM("openai/<model>", api_base="http://localhost:PORT/v1", api_key="dsco")
+#     dspy.configure(lm=lm)
+#     dspy.Predict("question -> answer")(question="...")
+#
+# Unlike /api/engine/chat this BYPASSES the person/plan/billing control plane:
+#   - provider is derived from the model id via detect_provider() (or forced with
+#     a top-level "provider" field),
+#   - the credential is read from the provider's env var (PROVIDER_ENDPOINTS) or
+#     supplied per-call via "api_key",
+#   - responses come back in the OpenAI chat.completion shape (with SSE streaming
+#     when stream=true).
+# Set dry_run=true to validate the full wiring end-to-end with no credentials.
+
+
+class _GatewayHttp(Exception):
+    """Carry an OpenAI-shaped error out of the gateway routing layer."""
+
+    def __init__(self, status_code: int, message: str, err_type: str = "invalid_request_error", code: Optional[str] = None):
+        super().__init__(message)
+        self.status_code = status_code
+        self.message = message
+        self.err_type = err_type
+        self.code = code
+
+
+def _openai_error_response(status_code: int, message: str, err_type: str = "invalid_request_error", code: Optional[str] = None) -> JSONResponse:
+    return JSONResponse(
+        {"error": {"message": message, "type": err_type, "code": code, "param": None}},
+        status_code=status_code,
+    )
+
+
+def _completion_envelope(model: str, content: str, *, input_tokens: int = 0, output_tokens: int = 0, finish_reason: str = "stop") -> dict[str, Any]:
+    """Build an OpenAI chat.completion response object."""
+    return {
+        "id": f"chatcmpl-{uuid.uuid4().hex[:24]}",
+        "object": "chat.completion",
+        "created": int(time.time()),
+        "model": model,
+        "choices": [
+            {"index": 0, "message": {"role": "assistant", "content": content}, "logprobs": None, "finish_reason": finish_reason}
+        ],
+        "usage": {
+            "prompt_tokens": input_tokens,
+            "completion_tokens": output_tokens,
+            "total_tokens": input_tokens + output_tokens,
+        },
+    }
+
+
+# OpenAI chat params forwarded verbatim to the upstream provider when present.
+_GATEWAY_PASSTHROUGH = ("temperature", "top_p", "stop", "seed", "tools", "tool_choice", "response_format", "n")
+
+
+def _gateway_resolve(body: dict[str, Any]) -> dict[str, Any]:
+    """Resolve model/provider/credential/messages for a gateway request.
+
+    Raises _GatewayHttp on a malformed request or a missing credential.
+    """
+    requested = str(body.get("model", "") or DEFAULT_MODEL).strip() or DEFAULT_MODEL
+    model_id = resolve_model(requested)
+    provider = str(body.get("provider", "") or "").strip().lower() or detect_provider(model_id)
+    backend = _implicit_backend(provider)
+
+    provided_key = str(body.get("api_key", "") or "").strip()
+    env_name = backend.get("api_key_env") or _provider_env_name(provider) or ""
+    api_key = provided_key or (os.getenv(env_name, "").strip() if env_name else "")
+    dry_run = _bool_flag(body.get("dry_run", False)) == 1
+
+    try:
+        system_text, openai_messages, anthropic_messages = _normalize_engine_messages(body)
+    except ValueError as exc:
+        raise _GatewayHttp(400, str(exc)) from None
+
+    if not api_key and not dry_run:
+        raise _GatewayHttp(
+            401,
+            f"No routed credential for provider '{provider}' (expected env {env_name or '<none>'}). "
+            "Set it, pass api_key in the request body, or use dry_run=true for a credential-free echo.",
+            code="no_credentials",
+        )
+
+    max_tokens = int(body.get("max_tokens") or 1024)
+    info = model_info(model_id)
+    if info and info.get("max_output"):
+        max_tokens = max(1, min(max_tokens, int(info["max_output"])))
+
+    requested_base_url = str(body.get("base_url", "") or "").strip()
+    using_env_key = bool(api_key) and not provided_key
+    if requested_base_url and (using_env_key or not WEB_ALLOW_CUSTOM_BASE_URL):
+        raise _GatewayHttp(
+            403,
+            "custom base_url is disabled for env-managed credentials; pass a request-scoped api_key and set DSCO_WEB_ALLOW_CUSTOM_BASE_URL=1",
+            code="custom_base_url_blocked",
+        )
+    base_url = requested_base_url or backend.get("base_url") or None
+
+    return {
+        "model_id": model_id,
+        "provider": provider,
+        "backend": backend,
+        "api_key": api_key,
+        "dry_run": dry_run,
+        "system_text": system_text,
+        "openai_messages": openai_messages,
+        "anthropic_messages": anthropic_messages,
+        "max_tokens": max_tokens,
+        "base_url": base_url,
+        "passthrough": {k: body[k] for k in _GATEWAY_PASSTHROUGH if k in body and body[k] is not None},
+    }
+
+
+async def _gateway_complete(ctx: dict[str, Any]) -> dict[str, Any]:
+    """Call the provider (or synthesize a dry-run) and return a chat.completion envelope."""
+    model_id, provider, backend = ctx["model_id"], ctx["provider"], ctx["backend"]
+    dry_run, api_key, passthrough = ctx["dry_run"], ctx["api_key"], ctx["passthrough"]
+
+    if dry_run:
+        last_user = ""
+        for m in reversed(ctx["openai_messages"]):
+            if m.get("role") == "user":
+                last_user = m.get("content", "")
+                break
+        content = f"[dsco dry-run · {provider}/{model_id}] {last_user}".strip()
+        return _completion_envelope(model_id, content)
+
+    if backend["transport"] == "anthropic":
+        client = anthropic.AsyncAnthropic(api_key=api_key)
+        kwargs: dict[str, Any] = {"model": model_id, "max_tokens": ctx["max_tokens"], "messages": ctx["anthropic_messages"]}
+        if ctx["system_text"]:
+            kwargs["system"] = ctx["system_text"]
+        if "temperature" in passthrough:
+            kwargs["temperature"] = float(passthrough["temperature"])
+        if "top_p" in passthrough:
+            kwargs["top_p"] = float(passthrough["top_p"])
+        if "stop" in passthrough:
+            kwargs["stop_sequences"] = passthrough["stop"]
+        resp = await client.messages.create(**kwargs)
+        content = "\n".join(b.text for b in resp.content if getattr(b, "type", "") == "text" and getattr(b, "text", "")).strip()
+        usage = getattr(resp, "usage", None)
+        return _completion_envelope(
+            model_id, content,
+            input_tokens=int(getattr(usage, "input_tokens", 0) or 0),
+            output_tokens=int(getattr(usage, "output_tokens", 0) or 0),
+        )
+
+    # openai-compat transport (openai / openrouter / groq / deepseek / mistral / together / xai / local ollama …)
+    client = openai.AsyncOpenAI(api_key=api_key, base_url=ctx["base_url"])
+    create_kwargs: dict[str, Any] = {"model": model_id, "messages": ctx["openai_messages"], "max_tokens": ctx["max_tokens"]}
+    for k in _GATEWAY_PASSTHROUGH:
+        if k in passthrough:
+            create_kwargs[k] = passthrough[k]
+    resp = await client.chat.completions.create(**create_kwargs)
+    message = resp.choices[0].message if resp.choices else None
+    content = _openai_message_text(message.content if message else "")
+    usage = getattr(resp, "usage", None)
+    return _completion_envelope(
+        model_id, content,
+        input_tokens=int(getattr(usage, "prompt_tokens", 0) or 0),
+        output_tokens=int(getattr(usage, "completion_tokens", 0) or 0),
+    )
+
+
+async def _gateway_stream(ctx: dict[str, Any]):
+    """Async generator emitting OpenAI SSE chat.completion.chunk bytes."""
+    model_id, provider, backend = ctx["model_id"], ctx["provider"], ctx["backend"]
+    dry_run, api_key, passthrough = ctx["dry_run"], ctx["api_key"], ctx["passthrough"]
+    cid = f"chatcmpl-{uuid.uuid4().hex[:24]}"
+    created = int(time.time())
+
+    def emit(delta: dict[str, Any], finish_reason: Optional[str] = None) -> bytes:
+        payload = {
+            "id": cid,
+            "object": "chat.completion.chunk",
+            "created": created,
+            "model": model_id,
+            "choices": [{"index": 0, "delta": delta, "finish_reason": finish_reason}],
+        }
+        return ("data: " + json.dumps(payload, ensure_ascii=False) + "\n\n").encode("utf-8")
+
+    yield emit({"role": "assistant"})
+    try:
+        if dry_run:
+            last_user = ""
+            for m in reversed(ctx["openai_messages"]):
+                if m.get("role") == "user":
+                    last_user = m.get("content", "")
+                    break
+            text = f"[dsco dry-run · {provider}/{model_id}] {last_user}".strip()
+            for i in range(0, len(text), 8):
+                yield emit({"content": text[i:i + 8]})
+        elif backend["transport"] == "anthropic":
+            client = anthropic.AsyncAnthropic(api_key=api_key)
+            kwargs: dict[str, Any] = {"model": model_id, "max_tokens": ctx["max_tokens"], "messages": ctx["anthropic_messages"]}
+            if ctx["system_text"]:
+                kwargs["system"] = ctx["system_text"]
+            if "temperature" in passthrough:
+                kwargs["temperature"] = float(passthrough["temperature"])
+            async with client.messages.stream(**kwargs) as stream:
+                async for piece in stream.text_stream:
+                    if piece:
+                        yield emit({"content": piece})
+        else:
+            client = openai.AsyncOpenAI(api_key=api_key, base_url=ctx["base_url"])
+            create_kwargs: dict[str, Any] = {"model": model_id, "messages": ctx["openai_messages"], "max_tokens": ctx["max_tokens"]}
+            for k in _GATEWAY_PASSTHROUGH:
+                if k in passthrough:
+                    create_kwargs[k] = passthrough[k]
+            stream = await client.chat.completions.create(stream=True, **create_kwargs)
+            async for ev in stream:
+                if not ev.choices:
+                    continue
+                choice = ev.choices[0]
+                piece = getattr(getattr(choice, "delta", None), "content", None)
+                if piece:
+                    yield emit({"content": piece})
+                if getattr(choice, "finish_reason", None):
+                    yield emit({}, finish_reason=choice.finish_reason)
+                    break
+    except Exception as exc:
+        log.error(f"gateway stream error: {exc}\n{traceback.format_exc()}")
+        err = ("data: " + json.dumps({"error": {"message": f"Upstream provider error: {exc}", "type": "api_error"}}, ensure_ascii=False) + "\n\n").encode("utf-8")
+        yield err
+    yield emit({}, finish_reason="stop")
+    yield b"data: [DONE]\n\n"
+
+
+@app.post("/v1/chat/completions")
+async def gateway_chat_completions(request: Request):
+    """OpenAI-compatible chat completions through dsco's provider routing."""
+    name = "/v1/chat/completions"
+    started = time.perf_counter()
+    try:
+        body = await request.json()
+    except Exception:
+        _record_metric(name, (time.perf_counter() - started) * 1000.0, ok=False)
+        return _openai_error_response(400, "Request body must be valid JSON.")
+
+    try:
+        ctx = _gateway_resolve(body)
+    except _GatewayHttp as e:
+        _record_metric(name, (time.perf_counter() - started) * 1000.0, ok=False)
+        return _openai_error_response(e.status_code, e.message, e.err_type, e.code)
+
+    if _bool_flag(body.get("stream", False)) == 1:
+        return StreamingResponse(_gateway_stream(ctx), media_type="text/event-stream")
+
+    try:
+        payload = await _gateway_complete(ctx)
+    except Exception as exc:
+        log.error(f"gateway completion error: {exc}\n{traceback.format_exc()}")
+        _record_metric(name, (time.perf_counter() - started) * 1000.0, ok=False)
+        return _openai_error_response(502, f"Upstream provider error: {exc}", "api_error", "upstream_error")
+
+    _record_metric(name, (time.perf_counter() - started) * 1000.0, ok=True)
+    return payload
+
+
+@app.get("/v1/models")
+async def gateway_list_models():
+    """List models known to dsco in the OpenAI /v1/models shape."""
+    _record_metric("/v1/models", 0.0)
+    data: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    now = int(time.time())
+    for m in MODEL_REGISTRY:
+        for mid in (m.get("model_id"), m.get("alias")):
+            if mid and mid not in seen:
+                seen.add(mid)
+                data.append({"id": mid, "object": "model", "created": now, "owned_by": "dsco"})
+    return {"object": "list", "data": data}
+
+
 @app.get("/api/dashboard/meta")
 async def dashboard_meta():
     """Return metadata used by the UI for badges, limits, and exports."""
@@ -2530,15 +2913,18 @@ async def list_models():
 @app.get("/api/files")
 async def list_files(path: str = ".", limit: int = MAX_LIST_LIMIT, offset: int = 0):
     """Return directory listing for file explorer."""
-    target = (WORK_DIR / path).resolve()
-    if not str(target).startswith(str(WORK_DIR)):
+    try:
+        target = _resolve_path(path)
+    except Exception:
         return JSONResponse({"error": "access denied"}, status_code=403)
     if not target.exists():
         return JSONResponse({"error": "not found"}, status_code=404)
     entries = []
     try:
         for item in sorted(target.iterdir(), key=lambda x: (not x.is_dir(), x.name.lower())):
-            if item.name.startswith(".") and item.name not in (".env", ".gitignore"):
+            if item.name.startswith(".") and item.name != ".gitignore":
+                continue
+            if _is_secret_path(item):
                 continue
             if item.name in ("node_modules", "__pycache__", "build", ".git"):
                 continue
@@ -2566,8 +2952,9 @@ async def list_files(path: str = ".", limit: int = MAX_LIST_LIMIT, offset: int =
 @app.get("/api/file")
 async def get_file(path: str):
     """Return file content for file viewer."""
-    target = (WORK_DIR / path).resolve()
-    if not str(target).startswith(str(WORK_DIR)):
+    try:
+        target = _resolve_path(path)
+    except Exception:
         return JSONResponse({"error": "access denied"}, status_code=403)
     if not target.is_file():
         return JSONResponse({"error": "not a file"}, status_code=404)
@@ -2845,6 +3232,8 @@ async def kalshi_orderbook(ticker: str):
 @app.post("/api/trading/kalshi/order")
 async def kalshi_create_order(request: Request):
     body = await request.json()
+    if not WEB_TRADING_LIVE:
+        return JSONResponse({"error": "live trading disabled; set DSCO_TRADING_LIVE=1"}, status_code=403)
     if _risk["dry_run"]:
         return {"dry_run": True, "would_place": body, "message": "Dry run mode — order not placed"}
     amount = body.get("count", 1) * body.get("yes_price", body.get("no_price", 50)) / 100.0
@@ -2858,6 +3247,8 @@ async def kalshi_create_order(request: Request):
 
 @app.delete("/api/trading/kalshi/order/{order_id}")
 async def kalshi_cancel_order(order_id: str):
+    if not WEB_TRADING_LIVE:
+        return JSONResponse({"error": "live trading disabled; set DSCO_TRADING_LIVE=1"}, status_code=403)
     data = await _kalshi_delete(f"/portfolio/orders/{order_id}")
     if "error" in data:
         return JSONResponse(data, status_code=502)
@@ -3519,6 +3910,15 @@ async def list_topologies(limit: int = MAX_LIST_LIMIT):
 
 @app.websocket("/ws")
 async def websocket_endpoint(ws: WebSocket):
+    origin = (ws.headers.get("origin") or "").rstrip("/")
+    allowed = _allowed_origins(ws.url.hostname or "127.0.0.1", ws.url.port or DEFAULT_PORT)
+    token = (ws.query_params.get("token") or "").strip()
+    if WEB_REQUIRE_TOKEN and not _token_ok(token):
+        await ws.close(code=1008)
+        return
+    if origin and origin not in allowed:
+        await ws.close(code=1008)
+        return
     await ws.accept()
     session = Session()
     sessions[session.id] = session
