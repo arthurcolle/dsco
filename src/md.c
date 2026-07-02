@@ -3195,9 +3195,13 @@ static void erase_partial_echo(md_renderer_t *r) {
     int tw = r->term_width > 0 ? r->term_width : term_width();
     int extra_lines = (vw > 0 && tw > 0) ? (vw - 1) / tw : 0;
 
-    /* Move up through wrapped lines, clearing each */
+    /* Clear the current (bottom-most) wrapped row first, then move up
+     * through the remaining wrapped rows clearing each. The previous
+     * order (\033[A then \033[2K) never cleared the bottom row, leaving
+     * a stale raw-echo tail (e.g. "quarter." -> "quarter.ter") when the
+     * rendered line is narrower than the raw markdown echo. */
     for (int i = 0; i < extra_lines; i++) {
-        fprintf(r->out, "\033[A\033[2K");
+        fprintf(r->out, "\033[2K\033[A");
     }
     fprintf(r->out, "\r\033[K");
 

@@ -105,6 +105,7 @@ static const dsco_integration_profile_t *profile_for_folded(const char *folded) 
         has_token(folded, "close_agent") || has_token(folded, "send_input"))
         return profile_by_id("multi_agent");
     if (has_token(folded, "dsco_jina") || has_token(folded, "jina") ||
+        has_token(folded, "parallel_ai") || has_token(folded, "parallelai") ||
         has_token(folded, "web_search") || has_token(folded, "fetch_url") ||
         has_token(folded, "screenshot_url"))
         return profile_by_id("web_search");
@@ -151,7 +152,10 @@ unsigned dsco_integration_actions_for_tool(const char *tool_name) {
         action_word(folded, "transcript") || action_word(folded, "availability") ||
         action_word(folded, "profile") || action_word(folded, "colors") ||
         action_word(folded, "dashboard") || action_word(folded, "classify") ||
-        action_word(folded, "observations") || action_word(folded, "slow_queries"))
+        action_word(folded, "observations") || action_word(folded, "slow_queries") ||
+        (profile && strcmp(profile->id, "web_search") == 0 &&
+         (action_word(folded, "wait") || action_word(folded, "research") ||
+          action_word(folded, "live_kb"))))
         actions |= DSCO_INTEGRATION_ACTION_READ;
 
     if (action_word(folded, "create") || action_word(folded, "update") ||
@@ -159,7 +163,15 @@ unsigned dsco_integration_actions_for_tool(const char *tool_name) {
         action_word(folded, "apply") || action_word(folded, "archive") ||
         action_word(folded, "respond") || action_word(folded, "reply") ||
         action_word(folded, "add") || action_word(folded, "complete") ||
-        action_word(folded, "manage") || action_word(folded, "prepare"))
+        action_word(folded, "manage") || action_word(folded, "prepare") ||
+        action_word(folded, "submit") || action_word(folded, "train") ||
+        action_word(folded, "cancel") || action_word(folded, "ingest") ||
+        action_word(folded, "trigger") || action_word(folded, "extend") ||
+        action_word(folded, "enrich") ||
+        (profile && strcmp(profile->id, "web_search") == 0 &&
+         (strcmp(folded, "parallel_ai_research") == 0 ||
+          strcmp(folded, "parallel_ai_live_kb") == 0 ||
+          strcmp(folded, "parallel_ai_constellation") == 0)))
         actions |= DSCO_INTEGRATION_ACTION_WRITE;
 
     if (action_word(folded, "send") || action_word(folded, "forward"))
@@ -188,6 +200,10 @@ unsigned dsco_integration_actions_for_tool(const char *tool_name) {
             actions |= DSCO_INTEGRATION_ACTION_UNTRUSTED_CONTENT;
 
         if (strcmp(profile->id, "google_calendar") == 0 &&
+            (actions & (DSCO_INTEGRATION_ACTION_WRITE | DSCO_INTEGRATION_ACTION_DELETE)))
+            actions |= DSCO_INTEGRATION_ACTION_REQUIRES_CONFIRMATION;
+
+        if (strcmp(profile->id, "web_search") == 0 &&
             (actions & (DSCO_INTEGRATION_ACTION_WRITE | DSCO_INTEGRATION_ACTION_DELETE)))
             actions |= DSCO_INTEGRATION_ACTION_REQUIRES_CONFIRMATION;
 
