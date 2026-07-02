@@ -442,10 +442,8 @@ static char *rpc_read_response(int fd, int timeout_ms) {
             jbuf_free(&line);
             return NULL;
         }
-        if (rc == 0) {
-            jbuf_free(&line);
-            return NULL;
-        }
+        if (rc == 0)
+            continue; /* slice expired — loop re-checks deadline + cancel */
 
         char buf[4096];
         ssize_t n = read(fd, buf, sizeof(buf));

@@ -1,5 +1,6 @@
 #include "peer_bootstrap.h"
 #include "audit_log.h"
+#include "waiter.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -19,6 +20,8 @@ static mesh_node_t *s_node = NULL;
 static uint16_t s_port = 0;
 static pthread_t s_thread;
 static atomic_int s_running = 0;
+static dsco_waiter_t s_waiter;
+static atomic_int s_waiter_init = 0;
 
 /* ── flat-file seed list ────────────────────────────────────────────────── */
 
@@ -254,15 +257,14 @@ static void *discovery_thread(void *arg) {
     read_seed_file();
     read_bridge_fleet();
 
-    /* re-read every 60 seconds */
-    int tick = 0;
+    /* Re-read every 60s. Interruptible: stop() wakes instantly, and the
+     * thread makes exactly one wakeup per minute instead of 60. */
     while (atomic_load(&s_running)) {
-        sleep(1);
-        if (++tick >= 60) {
-            tick = 0;
-            read_seed_file();
-            read_bridge_fleet();
-        }
+        dsco_waiter_wait_ms(&s_waiter, 60000);
+        if (!atomic_load(&s_running))
+            break;
+        read_seed_file();
+        read_bridge_fleet();
     }
     return NULL;
 }
@@ -272,6 +274,10 @@ static void *discovery_thread(void *arg) {
 void peer_bootstrap_init(void *mesh_node, uint16_t port) {
     s_node = (mesh_node_t *)mesh_node;
     s_port = port;
+    if (!atomic_exchange(&s_waiter_init, 1))
+        dsco_waiter_init(&s_waiter);
+    else
+        dsco_waiter_reset(&s_waiter);
     atomic_store(&s_running, 1);
 
     audit_log("peer_bootstrap", "starting peer discovery");
@@ -287,6 +293,7 @@ void peer_bootstrap_stop(void) {
     if (!atomic_load(&s_running))
         return;
     atomic_store(&s_running, 0);
+    dsco_waiter_stop(&s_waiter); /* instant wakeup instead of ≤1s lag */
     pthread_join(s_thread, NULL);
 #ifdef __APPLE__
     pthread_join(s_mdns_thread, NULL);
@@ -296,6 +303,8 @@ void peer_bootstrap_stop(void) {
 void peer_bootstrap_reseed(void) {
     if (s_node)
         read_seed_file();
+    if (atomic_load(&s_waiter_init))
+        dsco_waiter_signal(&s_waiter); /* also refresh bridge fleet promptly */
 }
 
 #else /* !HAVE_LIBSODIUM — stubs */
