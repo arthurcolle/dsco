@@ -2141,6 +2141,27 @@ static double tui_now_sec(void) {
     return tv.tv_sec + tv.tv_usec / 1e6;
 }
 
+/* Interruptible frame delay: waits up to ms, returns early when *running_flag
+ * flips false (signaled via cond). Replaces usleep() frame pacing so stop()
+ * joins instantly instead of paying up to a full frame of latency. */
+static void spinner_frame_wait(pthread_mutex_t *mu, pthread_cond_t *cv,
+                               volatile bool *running_flag, int ms) {
+    struct timespec ts;
+    clock_gettime(CLOCK_REALTIME, &ts);
+    ts.tv_sec += ms / 1000;
+    ts.tv_nsec += (long)(ms % 1000) * 1000000L;
+    if (ts.tv_nsec >= 1000000000L) {
+        ts.tv_sec++;
+        ts.tv_nsec -= 1000000000L;
+    }
+    pthread_mutex_lock(mu);
+    while (*running_flag) {
+        if (pthread_cond_timedwait(cv, mu, &ts) == ETIMEDOUT)
+            break;
+    }
+    pthread_mutex_unlock(mu);
+}
+
 static void *async_spinner_thread(void *arg) {
     tui_async_spinner_t *s = (tui_async_spinner_t *)arg;
     int frame = 0;
@@ -2198,7 +2219,7 @@ static void *async_spinner_thread(void *arg) {
         fflush(stderr);
 
         frame++;
-        usleep(80000); /* 12.5fps for smoother animation */
+        spinner_frame_wait(&s->mutex, &s->cond, &s->running, 80); /* 12.5fps */
     }
     return NULL;
 }
@@ -2206,6 +2227,7 @@ static void *async_spinner_thread(void *arg) {
 void tui_async_spinner_start(tui_async_spinner_t *s, const char *label, tui_tool_type_t tool_type) {
     memset(s, 0, sizeof(*s));
     pthread_mutex_init(&s->mutex, NULL);
+    pthread_cond_init(&s->cond, NULL);
     s->running = true;
     s->label = label;
     s->start_time = tui_now_sec();
@@ -2251,9 +2273,11 @@ void tui_async_spinner_stop(tui_async_spinner_t *s, bool ok, const char *result_
                             double elapsed_ms, const char *suffix) {
     pthread_mutex_lock(&s->mutex);
     s->running = false;
+    pthread_cond_broadcast(&s->cond); /* instant frame-wait interrupt */
     pthread_mutex_unlock(&s->mutex);
 
     pthread_join(s->thread, NULL);
+    pthread_cond_destroy(&s->cond);
     pthread_mutex_destroy(&s->mutex);
 
     tui_clear_line();
@@ -2442,7 +2466,7 @@ static void *batch_spinner_thread(void *arg) {
         fwrite(buf, 1, pos, stderr);
         fflush(stderr);
         frame++;
-        usleep(100000); /* 10fps */
+        spinner_frame_wait(&bs->mutex, &bs->cond, &bs->running, 100); /* 10fps */
     }
     return NULL;
 }
@@ -2450,6 +2474,7 @@ static void *batch_spinner_thread(void *arg) {
 void tui_batch_spinner_start(tui_batch_spinner_t *bs, const char **names, int count) {
     memset(bs, 0, sizeof(*bs));
     pthread_mutex_init(&bs->mutex, NULL);
+    pthread_cond_init(&bs->cond, NULL);
     bs->running = true;
     bs->start_time = tui_now_sec();
     bs->count = count < TUI_BATCH_MAX ? count : TUI_BATCH_MAX;
@@ -2496,9 +2521,11 @@ void tui_batch_spinner_stop(tui_batch_spinner_t *bs) {
         return;
     pthread_mutex_lock(&bs->mutex);
     bs->running = false;
+    pthread_cond_broadcast(&bs->cond); /* instant frame-wait interrupt */
     pthread_mutex_unlock(&bs->mutex);
 
     pthread_join(bs->thread, NULL);
+    pthread_cond_destroy(&bs->cond);
     pthread_mutex_destroy(&bs->mutex);
 
     tui_cursor_show();
@@ -8320,8 +8347,9 @@ static void *stream_heartbeat_thread(void *arg) {
     int frame = 0;
 
     while (1) {
-        struct timespec ts = {.tv_sec = 0, .tv_nsec = 200000000}; /* 200ms */
-        nanosleep(&ts, NULL);
+        /* Interruptible 200ms tick — stop() wakes us instantly instead of
+         * paying up to 200ms of join latency per LLM stream. */
+        spinner_frame_wait(&hb->mutex, &hb->cond, &hb->running, 200);
 
         pthread_mutex_lock(&hb->mutex);
         bool running = hb->running;
@@ -8404,6 +8432,7 @@ static void *stream_heartbeat_thread(void *arg) {
 void tui_stream_heartbeat_start(tui_stream_heartbeat_t *hb) {
     memset(hb, 0, sizeof(*hb));
     pthread_mutex_init(&hb->mutex, NULL);
+    pthread_cond_init(&hb->cond, NULL);
     hb->running = true;
     hb->visible = false;
     double now = tui_now_sec();
@@ -8448,9 +8477,11 @@ void tui_stream_heartbeat_recv(tui_stream_heartbeat_t *hb, size_t bytes) {
 void tui_stream_heartbeat_stop(tui_stream_heartbeat_t *hb) {
     pthread_mutex_lock(&hb->mutex);
     hb->running = false;
+    pthread_cond_broadcast(&hb->cond); /* instant wakeup */
     pthread_mutex_unlock(&hb->mutex);
 
     pthread_join(hb->thread, NULL);
+    pthread_cond_destroy(&hb->cond);
     pthread_mutex_destroy(&hb->mutex);
     hb->visible = false;
 }
@@ -8492,22 +8523,28 @@ static void *outq_render_thread(void *arg) {
         /* Drain all entries under lock */
         double flush_start = tui_now_sec();
         int flushed = 0;
-        bool output_invalidated_composer = false;
+        bool composer_clear_attempted = false;
 
         while (q->count > 0) {
             tui_out_entry_t *e = &q->ring[q->tail];
 
             /* Lock hierarchy: we hold q->mutex (LOCK_HIERARCHY_OUTQ) and need
              * g_term_mutex (LOCK_HIERARCHY_TERM). Since TERM has lower precedence,
-             * we must release q->mutex first to avoid deadlock. */
-            if (!output_invalidated_composer && e->type != TUI_OUT_FLUSH) {
+             * we must release q->mutex first to avoid deadlock.
+             *
+             * Attempt the clear at most once per drain, tracked separately from
+             * whether anything was actually cleared: keying the retry on the
+             * clear's *result* spins this loop forever whenever no composer is
+             * open (the common case — the clear returns false), pinning a core
+             * on every idle session. */
+            if (!composer_clear_attempted && e->type != TUI_OUT_FLUSH) {
+                composer_clear_attempted = true;
                 pthread_mutex_unlock(&q->mutex);  /* Release OUTQ lock first */
                 tui_term_lock();                   /* Then acquire TERM lock */
-                output_invalidated_composer =
-                    tui_clear_tracked_composer_area_for_output(fileno(q->out));
+                (void)tui_clear_tracked_composer_area_for_output(fileno(q->out));
                 tui_term_unlock();                 /* Release TERM lock */
                 pthread_mutex_lock(&q->mutex);     /* Re-acquire OUTQ lock */
-                continue;  /* Retry with proper lock order */
+                continue;  /* Re-examine queue state under fresh lock */
             }
 
             switch (e->type) {
@@ -8548,6 +8585,10 @@ static void *outq_render_thread(void *arg) {
             if (flush_ms > q->max_flush_ms)
                 q->max_flush_ms = flush_ms;
         }
+
+        /* Wake any tui_outq_flush_sync() waiters — queue is drained. */
+        if (q->count == 0)
+            pthread_cond_broadcast(&q->cond);
 
         pthread_mutex_unlock(&q->mutex);
     }
@@ -8667,15 +8708,21 @@ void tui_outq_flush_sync(tui_output_queue_t *q) {
     if (!q)
         return;
     outq_enqueue(q, TUI_OUT_FLUSH, 100, NULL, 0);
-    /* Spin until drained (simple busy-wait, typically <1ms) */
-    for (int i = 0; i < 1000; i++) {
-        pthread_mutex_lock(&q->mutex);
-        int cnt = q->count;
-        pthread_mutex_unlock(&q->mutex);
-        if (cnt == 0)
-            break;
-        usleep(100);
+    /* Block on the drain condvar (render thread broadcasts at count==0).
+     * Bounded at 250ms so a wedged render thread can never hang callers. */
+    struct timespec deadline;
+    clock_gettime(CLOCK_REALTIME, &deadline);
+    deadline.tv_nsec += 250 * 1000000L;
+    if (deadline.tv_nsec >= 1000000000L) {
+        deadline.tv_sec++;
+        deadline.tv_nsec -= 1000000000L;
     }
+    pthread_mutex_lock(&q->mutex);
+    while (q->count > 0 && q->running) {
+        if (pthread_cond_timedwait(&q->cond, &q->mutex, &deadline) == ETIMEDOUT)
+            break;
+    }
+    pthread_mutex_unlock(&q->mutex);
 }
 
 void tui_outq_stats(const tui_output_queue_t *q, int *total_writes, int *total_flushes,
@@ -8762,16 +8809,29 @@ void tui_streaming_fsm_create(tui_fsm_t *fsm, void *ctx) {
 
 /* ── Animation Clock ────────────────────────────────────────────────── */
 
+/* Condvar wait helper: returns when signaled or timeout_ms elapses.
+ * Caller must hold clk->mutex. timeout_ms < 0 waits indefinitely. */
+static void anim_clock_wait_locked(tui_anim_clock_t *clk, int timeout_ms) {
+    if (timeout_ms < 0) {
+        pthread_cond_wait(&clk->cond, &clk->mutex);
+        return;
+    }
+    struct timespec ts;
+    clock_gettime(CLOCK_REALTIME, &ts);
+    ts.tv_sec += timeout_ms / 1000;
+    ts.tv_nsec += (long)(timeout_ms % 1000) * 1000000L;
+    if (ts.tv_nsec >= 1000000000L) {
+        ts.tv_sec++;
+        ts.tv_nsec -= 1000000000L;
+    }
+    pthread_cond_timedwait(&clk->cond, &clk->mutex, &ts);
+}
+
 static void *anim_clock_thread(void *arg) {
     tui_anim_clock_t *clk = (tui_anim_clock_t *)arg;
 
-    while (1) {
-        pthread_mutex_lock(&clk->mutex);
-        if (!clk->running) {
-            pthread_mutex_unlock(&clk->mutex);
-            break;
-        }
-
+    pthread_mutex_lock(&clk->mutex);
+    while (clk->running) {
         /* Count active keep_alive subscribers */
         int active = 0;
         for (int i = 0; i < clk->sub_count; i++) {
@@ -8781,9 +8841,9 @@ static void *anim_clock_thread(void *arg) {
         clk->active_count = active;
 
         if (active == 0) {
-            /* No active subscribers — sleep longer to save CPU */
-            pthread_mutex_unlock(&clk->mutex);
-            usleep(100000); /* 100ms when idle */
+            /* No active subscribers — block until one subscribes/activates
+             * or the clock is destroyed. Zero CPU while idle. */
+            anim_clock_wait_locked(clk, -1);
             continue;
         }
 
@@ -8804,14 +8864,13 @@ static void *anim_clock_thread(void *arg) {
             clk->max_tick_ms = tick_ms;
         clk->total_ticks++;
 
-        pthread_mutex_unlock(&clk->mutex);
-
-        /* Sleep for interval, subtracting tick duration */
-        int sleep_us = clk->interval_ms * 1000 - (int)(tick_ms * 1000);
-        if (sleep_us < 1000)
-            sleep_us = 1000; /* min 1ms */
-        usleep(sleep_us);
+        /* Wait for next tick (interruptible: destroy wakes us instantly). */
+        int wait_ms = clk->interval_ms - (int)tick_ms;
+        if (wait_ms < 1)
+            wait_ms = 1;
+        anim_clock_wait_locked(clk, wait_ms);
     }
+    pthread_mutex_unlock(&clk->mutex);
     return NULL;
 }
 
@@ -8821,14 +8880,17 @@ void tui_anim_clock_init(tui_anim_clock_t *clk, int interval_ms) {
     clk->start_time = tui_now_sec();
     clk->running = true;
     pthread_mutex_init(&clk->mutex, NULL);
+    pthread_cond_init(&clk->cond, NULL);
     pthread_create(&clk->thread, NULL, anim_clock_thread, clk);
 }
 
 void tui_anim_clock_destroy(tui_anim_clock_t *clk) {
     pthread_mutex_lock(&clk->mutex);
     clk->running = false;
+    pthread_cond_broadcast(&clk->cond); /* instant wakeup — no sleep-poll lag */
     pthread_mutex_unlock(&clk->mutex);
     pthread_join(clk->thread, NULL);
+    pthread_cond_destroy(&clk->cond);
     pthread_mutex_destroy(&clk->mutex);
 }
 
@@ -8845,6 +8907,7 @@ int tui_anim_subscribe(tui_anim_clock_t *clk, tui_anim_cb callback, void *ctx, b
     clk->subs[id].keep_alive = keep_alive;
     if (keep_alive)
         clk->active_count++;
+    pthread_cond_broadcast(&clk->cond); /* wake idle clock immediately */
     pthread_mutex_unlock(&clk->mutex);
     return id;
 }
@@ -8872,6 +8935,8 @@ void tui_anim_set_active(tui_anim_clock_t *clk, int sub_id, bool active) {
             else if (was_active && !active)
                 clk->active_count--;
         }
+        if (active)
+            pthread_cond_broadcast(&clk->cond); /* resume ticking now */
     }
     pthread_mutex_unlock(&clk->mutex);
 }
@@ -9424,7 +9489,7 @@ static void *shimmer_thread_fn(void *arg) {
         fprintf(stderr, "%s\033[K", TUI_RESET); /* clear to end of line */
         fflush(stderr);
 
-        usleep(80000); /* ~12.5 fps */
+        spinner_frame_wait(&sh->mutex, &sh->cond, &sh->running, 80); /* ~12.5fps */
     }
     return NULL;
 }
@@ -9437,14 +9502,17 @@ void tui_shimmer_start(tui_shimmer_t *sh, const char *label, tui_rgb_t color_a, 
     sh->start_time = tui_now_sec();
     sh->running = true;
     pthread_mutex_init(&sh->mutex, NULL);
+    pthread_cond_init(&sh->cond, NULL);
     pthread_create(&sh->thread, NULL, shimmer_thread_fn, sh);
 }
 
 void tui_shimmer_stop(tui_shimmer_t *sh) {
     pthread_mutex_lock(&sh->mutex);
     sh->running = false;
+    pthread_cond_broadcast(&sh->cond); /* instant frame-wait interrupt */
     pthread_mutex_unlock(&sh->mutex);
     pthread_join(sh->thread, NULL);
+    pthread_cond_destroy(&sh->cond);
     pthread_mutex_destroy(&sh->mutex);
     /* Clear shimmer line */
     fprintf(stderr, "\r\033[K");

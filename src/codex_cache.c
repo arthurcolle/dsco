@@ -37,6 +37,9 @@ typedef struct {
 
 static _Atomic(codex_catalog_t *) g_catalog = NULL;
 static pthread_once_t g_once = PTHREAD_ONCE_INIT;
+/* Publish notification: wait_ready blocks here instead of sleep-polling. */
+static pthread_mutex_t g_pub_mu = PTHREAD_MUTEX_INITIALIZER;
+static pthread_cond_t g_pub_cv = PTHREAD_COND_INITIALIZER;
 
 static const char *strip_openai_prefix(const char *model) {
     if (!model)
@@ -194,8 +197,12 @@ static codex_catalog_t *catalog_from_json(const char *json) {
 }
 
 static void publish(codex_catalog_t *cat) {
-    if (cat)
+    if (cat) {
         atomic_store_explicit(&g_catalog, cat, memory_order_release);
+        pthread_mutex_lock(&g_pub_mu);
+        pthread_cond_broadcast(&g_pub_cv);
+        pthread_mutex_unlock(&g_pub_mu);
+    }
 }
 
 static char *read_codex_debug_models(size_t *len_out) {
@@ -280,18 +287,26 @@ int codex_cache_load_sync(void) {
 }
 
 int codex_cache_wait_ready(int timeout_ms) {
-    const int step_ms = 25;
-    int waited = 0;
-    for (;;) {
-        int n = codex_cache_count();
-        if (n > 0)
-            return n;
-        if (waited >= timeout_ms)
-            return 0;
-        struct timespec ts = {step_ms / 1000, (long)(step_ms % 1000) * 1000000L};
-        nanosleep(&ts, NULL);
-        waited += step_ms;
+    /* Condvar wait on publish() — wakes the instant the catalog lands
+     * instead of 25ms-granularity sleep-polling. */
+    int n = codex_cache_count();
+    if (n > 0 || timeout_ms <= 0)
+        return n;
+    struct timespec deadline;
+    clock_gettime(CLOCK_REALTIME, &deadline);
+    deadline.tv_sec += timeout_ms / 1000;
+    deadline.tv_nsec += (long)(timeout_ms % 1000) * 1000000L;
+    if (deadline.tv_nsec >= 1000000000L) {
+        deadline.tv_sec++;
+        deadline.tv_nsec -= 1000000000L;
     }
+    pthread_mutex_lock(&g_pub_mu);
+    while ((n = codex_cache_count()) == 0) {
+        if (pthread_cond_timedwait(&g_pub_cv, &g_pub_mu, &deadline) != 0)
+            break;
+    }
+    pthread_mutex_unlock(&g_pub_mu);
+    return codex_cache_count();
 }
 
 int codex_cache_count(void) {
