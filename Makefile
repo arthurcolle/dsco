@@ -2,6 +2,7 @@ CC ?= cc
 GIT_HASH := $(shell git rev-parse --short HEAD 2>/dev/null || echo "unknown")
 BUILD_DATE := $(shell date -u +%Y-%m-%dT%H:%M:%SZ)
 UNAME_S := $(shell uname -s)
+UNAME_M := $(shell uname -m)
 CC_IS_CLANG := $(shell $(CC) --version 2>/dev/null | grep -qi clang && echo yes)
 ifeq ($(CC_IS_CLANG),yes)
 C2Y_WARNING_FLAGS := -Wno-deprecated-octal-literals
@@ -13,8 +14,11 @@ INC_DIR = include
 TEST_DIR = tests
 BUILD_DIR ?= build
 
-# CI-safe defaults: allow override via env for reproducible builds
-DSCO_STD ?= c2y
+# CI-safe defaults: allow override via env for reproducible builds.
+# Newest C standard the toolchain accepts: recent Apple clang knows c2y, but
+# CI's gcc-13/clang-18 only know c23/c2x — probe once at parse time.
+DSCO_STD ?= $(shell for s in c2y c23 c2x c11; do \
+	if $(CC) -std=$$s -x c -c /dev/null -o /dev/null 2>/dev/null; then echo $$s; break; fi; done)
 DSCO_ARCH ?= native
 BASE_CFLAGS = -Wall -Wextra -O3 -std=$(DSCO_STD) $(C2Y_WARNING_FLAGS) -D_POSIX_C_SOURCE=200809L \
 	-I$(INC_DIR) \
@@ -140,7 +144,11 @@ ASAN_RUNTIME_OPTIONS = detect_leaks=0
 # Cosmopolitan lane: cosmocc targets the APE portable ABI, not Darwin
 # Objective-C frameworks / Metal / LocalAuthentication.
 ifneq ($(COSMO_BUILD),1)
-BASE_CFLAGS += -DHAVE_SECURE_ENCLAVE -DHAVE_TOUCHID -mbranch-protection=standard
+BASE_CFLAGS += -DHAVE_SECURE_ENCLAVE -DHAVE_TOUCHID
+# PAC/BTI branch protection is arm64-only; Intel Macs reject the flag
+ifeq ($(UNAME_M),arm64)
+BASE_CFLAGS += -mbranch-protection=standard
+endif
 LDLIBS      += -framework Security -framework CoreFoundation -framework IOKit \
                -framework CoreGraphics -framework LocalAuthentication \
                -framework Foundation -framework Metal -framework MetalKit \
