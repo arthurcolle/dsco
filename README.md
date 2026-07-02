@@ -21,7 +21,7 @@
 
 ---
 
-**DSCO** — Distributed Systems Corporation Operator — is a tool-first agentic CLI
+**Dsco** is a tool-first agentic CLI
 that lives where serious work already happens: your terminal, your filesystem,
 your git repos, your local state.
 
