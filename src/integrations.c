@@ -3923,7 +3923,8 @@ bool tool_parallel_ai_wait(const char *input, char *result, size_t rlen) {
         return ok;
     }
 
-    while (true) {
+    extern volatile int g_interrupted;
+    while (!g_interrupted) {
         polls++;
         jbuf_t in;
         jbuf_init(&in, 192 + strlen(id));
@@ -3972,7 +3973,27 @@ bool tool_parallel_ai_wait(const char *input, char *result, size_t rlen) {
         }
         if ((int)(time(NULL) - start) >= timeout)
             break;
-        usleep((useconds_t)interval_ms * 1000U);
+        /* Interruptible wait: sleep in ≤250ms slices so Ctrl-C aborts the
+         * poll loop promptly instead of blocking up to 30s per interval.
+         * Gentle backoff (×1.5, capped at 4× initial or 30s) cuts remote
+         * API pressure on long-running jobs. */
+        long wait_left = interval_ms;
+        while (wait_left > 0 && !g_interrupted) {
+            long slice = wait_left < 250 ? wait_left : 250;
+            usleep((useconds_t)slice * 1000U);
+            wait_left -= slice;
+        }
+        {
+            long next = (long)interval_ms + interval_ms / 2;
+            long cap = (long)json_get_int(input, "interval_ms", 1000) * 4;
+            if (cap > 30000)
+                cap = 30000;
+            if (cap < 1000)
+                cap = 1000;
+            if (next > cap)
+                next = cap;
+            interval_ms = (int)next;
+        }
     }
 
     bool result_ok = false;

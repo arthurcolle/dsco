@@ -3,6 +3,7 @@
 #include "baseline.h"
 #include "self_improve.h"
 #include "tools.h"
+#include "waiter.h"
 #include "workspace.h"
 
 #include <ctype.h>
@@ -15,6 +16,8 @@
 
 static pthread_mutex_t g_bg_mu = PTHREAD_MUTEX_INITIALIZER;
 static pthread_t g_bg_thread;
+static dsco_waiter_t g_bg_waiter;
+static bool g_bg_waiter_init = false;
 static bool g_bg_thread_started = false;
 static bool g_bg_running = false;
 static bool g_bg_enabled = false;
@@ -157,14 +160,11 @@ static void *bg_thread_main(void *arg) {
             break;
         if (enabled)
             bg_learn_run_once();
-        for (unsigned i = 0; i < interval; i++) {
-            pthread_mutex_lock(&g_bg_mu);
-            running = g_bg_running;
-            pthread_mutex_unlock(&g_bg_mu);
-            if (!running)
-                break;
-            sleep(1);
-        }
+        /* Interruptible interval wait: bg_learn_stop() wakes us instantly
+         * instead of the old 1s-granularity sleep-poll loop. */
+        dsco_waiter_wait_ms(&g_bg_waiter, (long)interval * 1000L);
+        if (dsco_waiter_stopped(&g_bg_waiter))
+            break;
     }
     return NULL;
 }
@@ -180,6 +180,12 @@ bool bg_learn_start(void) {
     }
     g_bg_running = true;
     g_bg_stats.running = true;
+    if (!g_bg_waiter_init) {
+        dsco_waiter_init(&g_bg_waiter);
+        g_bg_waiter_init = true;
+    } else {
+        dsco_waiter_reset(&g_bg_waiter);
+    }
     int rc = pthread_create(&g_bg_thread, NULL, bg_thread_main, NULL);
     if (rc == 0) {
         g_bg_thread_started = true;
@@ -198,7 +204,11 @@ void bg_learn_stop(void) {
     g_bg_running = false;
     g_bg_stats.running = false;
     pthread_t thread = g_bg_thread;
+    bool wake = g_bg_waiter_init;
     pthread_mutex_unlock(&g_bg_mu);
+
+    if (wake)
+        dsco_waiter_stop(&g_bg_waiter); /* instant join instead of ≤1s lag */
 
     if (join) {
         pthread_join(thread, NULL);
