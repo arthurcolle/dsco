@@ -12,6 +12,360 @@
     ],
     "scheme": "bearer"
   },
+  "api_coverage": {
+    "endpoint_groups": [
+      {
+        "cost_hooks": [
+          "token_usage",
+          "prompt_caching",
+          "input_token_counting",
+          "flex_processing",
+          "batch_api"
+        ],
+        "dsco_status": "chat_compat_implemented_native_responses_pending",
+        "endpoints": [
+          "/responses",
+          "/responses/{response_id}",
+          "/responses/{response_id}/cancel",
+          "/responses/{response_id}/input_items",
+          "/responses/input_tokens"
+        ],
+        "name": "responses",
+        "notes": "Primary OpenAI generation API; includes hosted tools, multimodal input, streaming, compaction, and input-token counting.",
+        "status": "covered_preferred"
+      },
+      {
+        "cost_hooks": [
+          "token_usage",
+          "prompt_caching",
+          "flex_processing",
+          "batch_api"
+        ],
+        "dsco_status": "implemented",
+        "endpoints": [
+          "/chat/completions"
+        ],
+        "name": "chat_completions",
+        "notes": "Current DSCO OpenAI-compatible transport path.",
+        "status": "covered_supported"
+      },
+      {
+        "cost_hooks": [
+          "token_usage"
+        ],
+        "dsco_status": "legacy_metadata_only",
+        "endpoints": [
+          "/completions"
+        ],
+        "name": "completions",
+        "notes": "Legacy completion endpoint group retained for catalog coverage and migration checks.",
+        "status": "covered_legacy"
+      },
+      {
+        "cost_hooks": [
+          "response_done_usage",
+          "audio_token_usage",
+          "transcription_usage",
+          "prompt_caching",
+          "reasoning_effort"
+        ],
+        "dsco_status": "partial_voice_transport",
+        "endpoints": [
+          "/realtime/client_secrets",
+          "/realtime/calls"
+        ],
+        "name": "realtime",
+        "notes": "Realtime conversational, call, translation, and transcription surfaces need token and duration accounting.",
+        "status": "covered_partial"
+      },
+      {
+        "cost_hooks": [
+          "batch_discount",
+          "separate_rate_limits",
+          "expiry_accounting"
+        ],
+        "dsco_status": "planned",
+        "endpoints": [
+          "/batches",
+          "/batches/{batch_id}",
+          "/batches/{batch_id}/cancel"
+        ],
+        "name": "batch",
+        "notes": "Async processing path for offline requests with lower cost and separate rate-limit pools.",
+        "status": "covered_planned"
+      },
+      {
+        "cost_hooks": [
+          "audio_token_usage",
+          "duration_estimates"
+        ],
+        "dsco_status": "metadata_only",
+        "endpoints": [
+          "/audio/speech",
+          "/audio/transcriptions",
+          "/audio/translations",
+          "/audio/voice_consents"
+        ],
+        "name": "audio",
+        "notes": "Speech, transcription, translation, and voice consent endpoint groups.",
+        "status": "covered_metadata"
+      },
+      {
+        "cost_hooks": [
+          "image_input_tokens",
+          "image_output_price",
+          "batch_video_image_price"
+        ],
+        "dsco_status": "metadata_only",
+        "endpoints": [
+          "/images/generations",
+          "/images/edits",
+          "/images/variations"
+        ],
+        "name": "images",
+        "notes": "Image generation/edit/variation surfaces require modality-specific price accounting.",
+        "status": "covered_metadata"
+      },
+      {
+        "cost_hooks": [
+          "per_second_price",
+          "batch_discount"
+        ],
+        "dsco_status": "metadata_only",
+        "endpoints": [
+          "/videos"
+        ],
+        "name": "videos",
+        "notes": "Video generation is billed by model, size, orientation, seconds, and standard vs batch tier.",
+        "status": "covered_metadata"
+      },
+      {
+        "cost_hooks": [
+          "input_tokens",
+          "batch_api"
+        ],
+        "dsco_status": "metadata_only",
+        "endpoints": [
+          "/embeddings"
+        ],
+        "name": "embeddings",
+        "notes": "Embedding runs are good Batch API candidates for repositories and offline datasets.",
+        "status": "covered_metadata"
+      },
+      {
+        "cost_hooks": [
+          "input_tokens"
+        ],
+        "dsco_status": "metadata_only",
+        "endpoints": [
+          "/moderations"
+        ],
+        "name": "moderations",
+        "notes": "Moderation requests should be tracked as safety traffic, not general chat traffic.",
+        "status": "covered_metadata"
+      },
+      {
+        "cost_hooks": [
+          "storage_gb_day",
+          "file_search_tool_calls",
+          "model_tokens"
+        ],
+        "dsco_status": "metadata_only",
+        "endpoints": [
+          "/vector_stores",
+          "/vector_stores/{vector_store_id}/files",
+          "/vector_stores/{vector_store_id}/file_batches",
+          "/vector_stores/{vector_store_id}/search"
+        ],
+        "name": "vector_stores",
+        "notes": "File search storage and tool-call costs need separate ledger lines from model tokens.",
+        "status": "covered_metadata"
+      },
+      {
+        "cost_hooks": [
+          "storage",
+          "input_token_counting"
+        ],
+        "dsco_status": "metadata_only",
+        "endpoints": [
+          "/files"
+        ],
+        "name": "files",
+        "notes": "Files feed Responses, Batch, fine-tuning, assistants, and vector-store workflows.",
+        "status": "covered_metadata"
+      },
+      {
+        "cost_hooks": [
+          "storage",
+          "multipart_upload_state"
+        ],
+        "dsco_status": "metadata_only",
+        "endpoints": [
+          "/uploads",
+          "/uploads/{upload_id}/parts"
+        ],
+        "name": "uploads",
+        "notes": "Multipart upload lifecycle should be tracked separately from completed file objects.",
+        "status": "covered_metadata"
+      },
+      {
+        "cost_hooks": [
+          "container_session_minutes",
+          "container_storage"
+        ],
+        "dsco_status": "metadata_only",
+        "endpoints": [
+          "/containers",
+          "/containers/{container_id}/files"
+        ],
+        "name": "containers",
+        "notes": "Hosted Shell and Code Interpreter sessions have container-session pricing in addition to model tokens.",
+        "status": "covered_metadata"
+      },
+      {
+        "cost_hooks": [
+          "grader_model_tokens",
+          "batch_api",
+          "experiment_costs"
+        ],
+        "dsco_status": "metadata_only",
+        "endpoints": [
+          "/evals",
+          "/evals/{eval_id}/runs",
+          "/graders"
+        ],
+        "name": "evals_graders",
+        "notes": "Evaluation and grader workloads are cost-sensitive and often batchable.",
+        "status": "covered_metadata"
+      },
+      {
+        "cost_hooks": [
+          "training_tokens",
+          "validation_tokens",
+          "checkpoint_storage"
+        ],
+        "dsco_status": "metadata_only",
+        "endpoints": [
+          "/fine_tuning/jobs",
+          "/fine_tuning/jobs/{fine_tuning_job_id}/checkpoints",
+          "/fine_tuning/checkpoints/{checkpoint_id}/permissions"
+        ],
+        "name": "fine_tuning",
+        "notes": "Training jobs and checkpoints need distinct usage and lifecycle accounting.",
+        "status": "covered_metadata"
+      },
+      {
+        "cost_hooks": [
+          "model_availability",
+          "pricing_lookup"
+        ],
+        "dsco_status": "metadata_only",
+        "endpoints": [
+          "/models"
+        ],
+        "name": "models",
+        "notes": "Model list/retrieve/delete endpoints drive availability checks and pricing refreshes.",
+        "status": "covered_metadata"
+      },
+      {
+        "cost_hooks": [
+          "conversation_storage",
+          "compaction"
+        ],
+        "dsco_status": "metadata_only",
+        "endpoints": [
+          "/conversations",
+          "/conversations/{conversation_id}/items"
+        ],
+        "name": "conversations",
+        "notes": "Persistent conversation state is a separate lifecycle surface from stateless chat requests.",
+        "status": "covered_metadata"
+      },
+      {
+        "cost_hooks": [
+          "assistant_tool_costs",
+          "thread_storage"
+        ],
+        "dsco_status": "migration_metadata_only",
+        "endpoints": [
+          "/assistants",
+          "/threads",
+          "/threads/{thread_id}/runs"
+        ],
+        "name": "assistants_beta",
+        "notes": "Assistants API remains tracked for migration and tool-cost compatibility.",
+        "status": "covered_metadata"
+      },
+      {
+        "cost_hooks": [
+          "usage_dashboard",
+          "rate_limits",
+          "budget_governance"
+        ],
+        "dsco_status": "metadata_only",
+        "endpoints": [
+          "/organization",
+          "/organization/projects",
+          "/organization/projects/{project_id}/rate_limits",
+          "/organization/audit_logs"
+        ],
+        "name": "administration",
+        "notes": "Admin, project, audit-log, usage, service-account, group, role, invite, and project-key surfaces support governance and budget controls.",
+        "status": "covered_metadata"
+      },
+      {
+        "cost_hooks": [
+          "event_reconciliation",
+          "short_lived_credentials"
+        ],
+        "dsco_status": "metadata_only",
+        "endpoints": [
+          "/webhooks",
+          "/workload_identity"
+        ],
+        "name": "webhooks_workload_identity",
+        "notes": "Webhook event reconciliation and workload identity federation support operational usage tracking without durable API keys.",
+        "status": "covered_metadata"
+      }
+    ],
+    "hosted_tools": [
+      {
+        "cost_hooks": [
+          "per_call_price",
+          "search_content_tokens",
+          "model_tokens"
+        ],
+        "name": "web_search",
+        "status": "tracked_cost"
+      },
+      {
+        "cost_hooks": [
+          "storage_gb_day",
+          "per_call_price",
+          "model_tokens"
+        ],
+        "name": "file_search",
+        "status": "tracked_cost"
+      },
+      {
+        "cost_hooks": [
+          "container_session_minutes",
+          "model_tokens"
+        ],
+        "name": "code_interpreter_hosted_shell",
+        "status": "tracked_cost"
+      },
+      {
+        "cost_hooks": [
+          "model_tokens",
+          "remote_action_side_effects"
+        ],
+        "name": "computer_use",
+        "status": "tracked_behavior"
+      }
+    ],
+    "review_scope": "OpenAI public API reference endpoint groups and current API guides reviewed 2026-07-02"
+  },
   "client_side_mechanics": {
     "codex_config": {},
     "headers_optional": [],
@@ -22,40 +376,203 @@
     ],
     "unsupported_fields": []
   },
-  "confidence": 0.82,
+  "confidence": 0.9,
+  "cost_management": {
+    "levers": [
+      {
+        "dsco_support": "planned",
+        "name": "batch_api",
+        "policy": "Route offline evaluations, classifications, embeddings, enrichments, and video jobs through /batches when a 24h SLA is acceptable.",
+        "savings": "50_percent_vs_synchronous",
+        "tracking_fields": [
+          "batch_id",
+          "completion_window",
+          "status",
+          "request_count",
+          "expired_request_count"
+        ]
+      },
+      {
+        "dsco_support": "available_via_DSCO_OPENAI_PARAMS",
+        "name": "flex_processing",
+        "policy": "Set service_tier=flex for latency-tolerant Responses or Chat Completions workloads.",
+        "savings": "batch_rate_tokens_plus_prompt_cache_discounts",
+        "tracking_fields": [
+          "service_tier",
+          "timeout_ms",
+          "retry_class"
+        ]
+      },
+      {
+        "dsco_support": "implemented",
+        "name": "prompt_caching",
+        "policy": "Keep static instructions, tools, schemas, images, and examples at the front of requests; use stable prompt_cache_key values for shared long prefixes.",
+        "savings": "cached_input_discount",
+        "tracking_fields": [
+          "usage.prompt_tokens_details.cached_tokens",
+          "usage.input_tokens_details.cached_tokens",
+          "cache_hit_rate"
+        ]
+      },
+      {
+        "dsco_support": "planned",
+        "name": "responses_input_token_counting",
+        "policy": "Preflight expensive Responses requests through /responses/input_tokens, including tools and files, before dispatch.",
+        "savings": "avoids_oversized_or_unbudgeted_requests",
+        "tracking_fields": [
+          "input_tokens",
+          "model",
+          "tool_schema_tokens",
+          "file_tokens"
+        ]
+      },
+      {
+        "dsco_support": "partial_voice_transport",
+        "name": "realtime_budgeting",
+        "policy": "Import response.done usage, transcription usage, audio/image token details, cached token details, and reasoning effort into the session ledger.",
+        "savings": "controls_voice_session_growth",
+        "tracking_fields": [
+          "usage.input_token_details.text_tokens",
+          "usage.input_token_details.audio_tokens",
+          "usage.input_token_details.image_tokens",
+          "usage.input_token_details.cached_tokens",
+          "usage.output_token_details.text_tokens",
+          "usage.output_token_details.audio_tokens",
+          "transcription_usage",
+          "reasoning.effort"
+        ]
+      },
+      {
+        "dsco_support": "metadata_only",
+        "name": "hosted_tool_metering",
+        "policy": "Track tool-call, storage, and container-session charges separately from model token charges.",
+        "savings": "prevents_hidden_tool_spend",
+        "tracking_fields": [
+          "web_search_calls",
+          "file_search_calls",
+          "vector_store_gb_days",
+          "container_gb_minutes",
+          "chatkit_storage_gb_days"
+        ]
+      },
+      {
+        "dsco_support": "metadata_only",
+        "name": "media_endpoint_metering",
+        "policy": "Track image, video, speech, transcription, and translation usage using modality-specific meters instead of chat token assumptions.",
+        "savings": "prevents_media_rate_mispricing",
+        "tracking_fields": [
+          "image_input_tokens",
+          "image_output_units",
+          "video_seconds",
+          "video_resolution",
+          "audio_minutes",
+          "transcription_tokens"
+        ]
+      },
+      {
+        "dsco_support": "metadata_only",
+        "name": "admin_usage_reconciliation",
+        "policy": "Use organization/project usage and audit-log APIs to reconcile DSCO's token ledger against OpenAI billing data.",
+        "savings": "detects_ledger_drift_and_provider_side_tool_costs",
+        "tracking_fields": [
+          "project_id",
+          "api_key_id",
+          "rate_limit_bucket",
+          "usage_window",
+          "invoice_meter"
+        ]
+      }
+    ],
+    "pricing_basis": [
+      "Responses, Chat Completions, Realtime, Batch, and Assistants are not separately priced; token charges follow the chosen model.",
+      "Built-in tools, file/vector storage, hosted containers, image/video/audio media, and transcription may carry separate meters.",
+      "Cost accounting should store raw usage quantities first and apply pricing tables separately."
+    ],
+    "status": "docs_backed_cost_map"
+  },
   "display_name": "OpenAI",
   "docs": [
     {
       "confidence": 0.93,
-      "retrieved": "2026-06-24",
+      "retrieved": "2026-07-02",
+      "title": "OpenAI API reference",
+      "url": "https://developers.openai.com/api/reference/llms.txt"
+    },
+    {
+      "confidence": 0.93,
+      "retrieved": "2026-07-02",
       "title": "Prompt caching",
       "url": "https://developers.openai.com/api/docs/guides/prompt-caching"
     },
     {
       "confidence": 0.9,
-      "retrieved": "2026-06-24",
+      "retrieved": "2026-07-02",
       "title": "Responses API",
-      "url": "https://platform.openai.com/docs/api-reference/responses"
+      "url": "https://developers.openai.com/api/reference/resources/responses.md"
+    },
+    {
+      "confidence": 0.92,
+      "retrieved": "2026-07-02",
+      "title": "Batch API",
+      "url": "https://developers.openai.com/api/docs/guides/batch"
+    },
+    {
+      "confidence": 0.92,
+      "retrieved": "2026-07-02",
+      "title": "Cost optimization",
+      "url": "https://developers.openai.com/api/docs/guides/cost-optimization"
+    },
+    {
+      "confidence": 0.92,
+      "retrieved": "2026-07-02",
+      "title": "Flex processing",
+      "url": "https://developers.openai.com/api/docs/guides/flex-processing"
+    },
+    {
+      "confidence": 0.92,
+      "retrieved": "2026-07-02",
+      "title": "Counting tokens",
+      "url": "https://developers.openai.com/api/docs/guides/token-counting"
+    },
+    {
+      "confidence": 0.91,
+      "retrieved": "2026-07-02",
+      "title": "Realtime costs",
+      "url": "https://developers.openai.com/api/docs/guides/realtime-costs"
+    },
+    {
+      "confidence": 0.91,
+      "retrieved": "2026-07-02",
+      "title": "Pricing",
+      "url": "https://developers.openai.com/api/docs/pricing"
     }
   ],
   "dsco": {
     "implemented_features": [
+      "openai_api_coverage_map",
+      "openai_cost_management_map",
       "automatic_prompt_cache",
       "prompt_cache_key",
       "prompt_cache_retention",
       "cached_token_usage_parse"
     ],
     "missing_features": [
-      "Responses transport default migration"
+      "Responses transport default migration",
+      "Batch API JSONL planner and result ingester",
+      "Responses input-token preflight estimator",
+      "OpenAI built-in tool/session/storage cost ledger",
+      "Realtime response.done usage import",
+      "OpenAI admin usage reconciliation"
     ],
     "provider_profile": "openai",
-    "risk": "low",
+    "risk": "medium",
     "tests": [
       "test_prompt_cache_openai_request_shape",
-      "test_prompt_cache_provider_policy_matrix"
+      "test_prompt_cache_provider_policy_matrix",
+      "test_openai_metadata_covers_current_api_and_cost_controls"
     ]
   },
-  "last_reviewed": "2026-06-24",
+  "last_reviewed": "2026-07-02",
   "prompt_caching": {
     "invalidates_on": [
       "prefix_change",
@@ -116,11 +633,16 @@
   },
   "provider": "openai",
   "reasoning": {
-    "aliases": {},
+    "aliases": {
+      "max": "xhigh"
+    },
     "efforts": [
+      "none",
+      "minimal",
       "low",
       "medium",
-      "high"
+      "high",
+      "xhigh"
     ],
     "field": "reasoning.effort",
     "supported": true,
@@ -138,9 +660,21 @@
     "stream_max_retries": 2
   },
   "usage_accounting": {
+    "audio_tokens": [
+      "usage.input_token_details.audio_tokens",
+      "usage.output_token_details.audio_tokens",
+      "usage.input_tokens_details.audio_tokens",
+      "usage.output_tokens_details.audio_tokens"
+    ],
     "cached_tokens": [
       "usage.prompt_tokens_details.cached_tokens",
-      "usage.input_tokens_details.cached_tokens"
+      "usage.input_tokens_details.cached_tokens",
+      "usage.input_token_details.cached_tokens",
+      "usage.input_token_details.cached_tokens_details.*"
+    ],
+    "image_tokens": [
+      "usage.input_token_details.image_tokens",
+      "usage.input_tokens_details.image_tokens"
     ],
     "input_tokens": [
       "usage.prompt_tokens",
@@ -150,7 +684,15 @@
       "usage.completion_tokens",
       "usage.output_tokens"
     ],
-    "provider_specific": [],
+    "provider_specific": [
+      "web_search_calls",
+      "file_search_calls",
+      "container_gb_minutes",
+      "vector_store_gb_days",
+      "video_seconds",
+      "audio_minutes",
+      "batch_request_count"
+    ],
     "reasoning_tokens": [
       "usage.completion_tokens_details.reasoning_tokens",
       "usage.output_tokens_details.reasoning_tokens"

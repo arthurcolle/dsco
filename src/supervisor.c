@@ -1093,9 +1093,10 @@ int supervisor_run(int child_argc, char **child_argv) {
              * without killing the current session. */
             {
                 const char *hotswap_env = getenv("DSCO_HOTSWAP_BIN");
+                bool hotswap_explicit = hotswap_env && hotswap_env[0];
                 char hotswap_path[PATH_MAX] = {0};
 
-                if (hotswap_env && hotswap_env[0]) {
+                if (hotswap_explicit) {
                     snprintf(hotswap_path, sizeof(hotswap_path), "%s", hotswap_env);
                 } else {
                     /* Derive <dir>/dsco-new from child_argv[0] */
@@ -1118,14 +1119,24 @@ int supervisor_run(int child_argc, char **child_argv) {
                             hotswap_path, child_argv[0]);
                         supervisor_log("event=hotswap staged=%s target=%s",
                                        hotswap_path, child_argv[0]);
-                    } else {
-                        /* rename failed (cross-device?) — exec staged binary directly */
+                    } else if (hotswap_explicit) {
+                        /* Explicit hotswaps may live on another device; run them directly. */
                         fprintf(stderr,
                             "[supervisor] hotswap: exec staged %s (rename failed: %s)\n",
                             hotswap_path, strerror(errno));
                         child_argv[0] = hotswap_path;
+                    } else {
+                        /* A sibling dsco-new must only win after an atomic install.
+                         * If replacement fails, keep the current binary; otherwise a
+                         * stale staged file can shadow a freshly rebuilt dsco forever. */
+                        fprintf(stderr,
+                            "[supervisor] hotswap: ignoring staged %s (rename failed: %s)\n",
+                            hotswap_path, strerror(errno));
+                        supervisor_log("event=hotswap_ignored staged=%s target=%s error=%s",
+                                       hotswap_path, child_argv[0], strerror(errno));
                     }
-                    unsetenv("DSCO_HOTSWAP_BIN");
+                    if (hotswap_explicit)
+                        unsetenv("DSCO_HOTSWAP_BIN");
                 }
             }
 

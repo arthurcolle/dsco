@@ -3,6 +3,7 @@
 #include <pthread.h>
 #include <sys/socket.h>
 #include <netinet/in.h>
+#include <netinet/tcp.h>
 #include <arpa/inet.h>
 #include <netdb.h>
 #include <unistd.h>
@@ -12,6 +13,38 @@
 #include <stdlib.h>
 #include <string.h>
 #include <stdint.h>
+
+#ifndef MSG_NOSIGNAL
+#define MSG_NOSIGNAL 0
+#endif
+
+static void mesh_tune_socket(int fd, bool listener) {
+    if (fd < 0)
+        return;
+
+    int fl = fcntl(fd, F_GETFD);
+    if (fl >= 0)
+        (void)fcntl(fd, F_SETFD, fl | FD_CLOEXEC);
+
+    int one = 1;
+#ifdef SO_NOSIGPIPE
+    (void)setsockopt(fd, SOL_SOCKET, SO_NOSIGPIPE, &one, sizeof(one));
+#endif
+    if (!listener) {
+        (void)setsockopt(fd, SOL_SOCKET, SO_KEEPALIVE, &one, sizeof(one));
+#ifdef TCP_NODELAY
+        (void)setsockopt(fd, IPPROTO_TCP, TCP_NODELAY, &one, sizeof(one));
+#endif
+    }
+}
+
+static int mesh_listen_backlog(void) {
+#ifdef SOMAXCONN
+    return SOMAXCONN > 128 ? SOMAXCONN : 128;
+#else
+    return 128;
+#endif
+}
 
 /* ── Wire constants ───────────────────────────────────────────────────── */
 #define NONCE_LEN 24      /* crypto_box_NONCEBYTES */
@@ -361,6 +394,7 @@ static void *accept_loop(void *arg) {
                 continue;
             break;
         }
+        mesh_tune_socket(fd, false);
 
         pthread_mutex_lock(&n->lock);
         bool full = n->conn_count >= MESH_MAX_PEERS;
@@ -454,6 +488,7 @@ bool mesh_node_start(mesh_node_t *n) {
     }
 
     int one = 1;
+    mesh_tune_socket(s, true);
     setsockopt(s, SOL_SOCKET, SO_REUSEADDR, &one, sizeof(one));
 
     struct sockaddr_in6 addr6 = {0};
@@ -467,6 +502,7 @@ bool mesh_node_start(mesh_node_t *n) {
         s = socket(AF_INET, SOCK_STREAM, 0);
         if (s < 0)
             return false;
+        mesh_tune_socket(s, true);
         setsockopt(s, SOL_SOCKET, SO_REUSEADDR, &one, sizeof(one));
         struct sockaddr_in addr4 = {0};
         addr4.sin_family = AF_INET;
@@ -478,17 +514,12 @@ bool mesh_node_start(mesh_node_t *n) {
         }
     }
 
-    if (listen(s, 32) < 0) {
+    if (listen(s, mesh_listen_backlog()) < 0) {
         close(s);
         return false;
     }
-    /* Don't leak the listen socket into fork+exec'd MCP subprocesses, or the
-     * mesh port stays held by orphaned children after this process exits. */
-    {
-        int fl = fcntl(s, F_GETFD);
-        if (fl >= 0)
-            fcntl(s, F_SETFD, fl | FD_CLOEXEC);
-    }
+    /* mesh_tune_socket() marked the listener close-on-exec so fork+exec'd
+     * MCP subprocesses cannot keep the mesh port pinned after exit. */
     n->server_sock = s;
     n->running = true;
 
@@ -541,6 +572,7 @@ bool mesh_node_connect(mesh_node_t *n, const char *host, uint16_t port) {
         freeaddrinfo(res);
         return false;
     }
+    mesh_tune_socket(fd, false);
     if (connect(fd, res->ai_addr, res->ai_addrlen) < 0) {
         close(fd);
         freeaddrinfo(res);

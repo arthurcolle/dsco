@@ -49,6 +49,10 @@ venv/
 # IDE
 .vscode/
 .idea/
+# Language server (clangd/emacs) — generated, contains absolute paths
+compile_commands.json
+.cache/
+.clangd/index/
 
 # Private notes / scratch / personal files
 research_notes/

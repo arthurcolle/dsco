@@ -75,6 +75,260 @@ static volatile sig_atomic_t g_composer_external_redraw_requested = 0;
 static tui_composer_escape_hook_t g_composer_escape_hook = NULL;
 static void *g_composer_escape_hook_ctx = NULL;
 
+/* ── Lock Hierarchy Enforcement ─────────────────────────────────────────────
+ * Prevents deadlocks by defining a strict acquisition order. Higher numbers
+ * = higher precedence. Always acquire locks in increasing order.
+ *
+ * Hierarchy:
+ *   1. Term mutex (g_term_mutex) - lowest precedence
+ *   2. Output queue mutex (q->mutex) - medium precedence
+ *   3. Notification queue mutex (nq->mutex) - highest precedence
+ *
+ * CRITICAL: Never acquire a lower-precedence lock while holding a higher one.
+ * This prevents circular wait conditions that cause deadlocks. */
+#define LOCK_HIERARCHY_TERM 1
+#define LOCK_HIERARCHY_OUTQ 2
+#define LOCK_HIERARCHY_NOTIF 3
+
+/* Event subscriber compaction threshold - trigger cleanup after this many
+ * inactive subscribers accumulate. Prevents unbounded array growth. */
+#define EVENT_SUBS_COMPACT_THRESHOLD 32
+
+/* ── Terminal State Manager ─────────────────────────────────────────────────
+ * Centralized terminal mode management prevents corruption when multiple
+ * subsystems (composer, dropdown, etc.) manipulate terminal state independently.
+ * Uses reference counting to handle nested state requests safely. */
+typedef enum {
+    TUI_TERM_STATE_NORMAL,      /* Cooked mode, default */
+    TUI_TERM_STATE_COMPOSER,    /* Raw mode for text input composer */
+    TUI_TERM_STATE_DROPDOWN,    /* Raw mode for dropdown menus */
+    TUI_TERM_STATE_EXTERNAL     /* Temporarily released for external programs */
+} tui_term_state_t;
+
+typedef struct {
+    tui_term_state_t current;
+    tui_term_state_t previous;
+    struct termios saved_termios;
+    int refcount;
+    bool termios_saved;
+    pthread_mutex_t mutex;
+} tui_term_mgr_t;
+
+static tui_term_mgr_t g_term_mgr = {
+    .current = TUI_TERM_STATE_NORMAL,
+    .previous = TUI_TERM_STATE_NORMAL,
+    .refcount = 0,
+    .termios_saved = false,
+    .mutex = PTHREAD_MUTEX_INITIALIZER
+};
+
+/* ── Error Recovery Framework ─────────────────────────────────────────────
+ * Graceful error handling with retry mechanisms and degradation paths. */
+
+/* Allocation with retry and exponential backoff */
+static void *tui_alloc_with_retry(size_t size, int max_retries, tui_error_t *err) {
+    void *ptr = NULL;
+
+    for (int attempt = 0; attempt <= max_retries; attempt++) {
+        ptr = calloc(1, size);
+        if (ptr) {
+            if (err) err->severity = TUI_ERR_NONE;
+            return ptr;
+        }
+
+        /* Exponential backoff before retry */
+        if (attempt < max_retries) {
+            usleep((useconds_t)((1 << attempt) * 10000)); /* 10ms, 20ms, 40ms... */
+        }
+    }
+
+    /* All retries failed - try emergency fallback */
+    if (size >= 4096) {
+        /* Try allocating smaller chunk */
+        ptr = calloc(1, 1024);
+        if (ptr) {
+            if (err) {
+                err->severity = TUI_ERR_DEGRADED;
+                err->message = "Allocated reduced buffer";
+            }
+            return ptr;
+        }
+    }
+
+    if (err) {
+        err->severity = TUI_ERR_FATAL;
+        err->message = "Allocation failed after retries";
+        err->error_code = ENOMEM;
+    }
+    return NULL;
+}
+
+/* Error reporter for consistent error messaging */
+static void tui_error_report(const tui_error_t *err) {
+    switch (err->severity) {
+        case TUI_ERR_WARNING:
+            fprintf(stderr, "[WARN] %s", err->message);
+            break;
+        case TUI_ERR_DEGRADED:
+            fprintf(stderr, "[DEGRADED] %s - continuing with reduced functionality",
+                    err->message);
+            break;
+        case TUI_ERR_FATAL:
+            fprintf(stderr, "[FATAL] %s - attempting graceful shutdown", err->message);
+            tui_cleanup();
+            exit(1);
+            break;
+        default:
+            break;
+    }
+
+    if (err->context) {
+        fprintf(stderr, " (context: %s)", err->context);
+    }
+    if (err->error_code != 0) {
+        fprintf(stderr, " (code: %d)", err->error_code);
+    }
+    fprintf(stderr, "\n");
+}
+
+/* Emergency cleanup function for fatal errors */
+void tui_cleanup(void) {
+    /* Restore terminal state */
+    if (g_term_mgr.termios_saved) {
+        tcsetattr(STDIN_FILENO, TCSAFLUSH, &g_term_mgr.saved_termios);
+    }
+
+    /* Show cursor */
+    fprintf(stderr, "\033[?25h");
+
+    /* Reset terminal */
+    tui_terminal_restore_sane();
+
+    fflush(stderr);
+}
+
+/* Enter a terminal state with reference counting. Returns true on success. */
+static bool tui_term_state_enter(tui_term_state_t new_state) {
+    pthread_mutex_lock(&g_term_mgr.mutex);
+
+    /* Save current terminal state on first entry */
+    if (g_term_mgr.refcount == 0 && !g_term_mgr.termios_saved) {
+        if (tcgetattr(STDIN_FILENO, &g_term_mgr.saved_termios) != 0) {
+            pthread_mutex_unlock(&g_term_mgr.mutex);
+            return false;
+        }
+        g_term_mgr.termios_saved = true;
+    }
+
+    g_term_mgr.previous = g_term_mgr.current;
+    g_term_mgr.current = new_state;
+    g_term_mgr.refcount++;
+
+    /* Apply terminal settings for state */
+    struct termios raw = g_term_mgr.saved_termios;
+    switch (new_state) {
+        case TUI_TERM_STATE_COMPOSER:
+        case TUI_TERM_STATE_DROPDOWN:
+            /* Raw mode for input: no echo, no canonical processing */
+            raw.c_lflag &= ~(ECHO | ECHONL | ICANON | IEXTEN | ISIG);
+            raw.c_iflag &= ~(IXON | ICRNL | BRKINT | INPCK | ISTRIP);
+            raw.c_cc[VMIN] = 1;
+            raw.c_cc[VTIME] = 0;
+            break;
+        case TUI_TERM_STATE_EXTERNAL:
+            /* Restore cooked mode */
+            raw = g_term_mgr.saved_termios;
+            break;
+        default:
+            pthread_mutex_unlock(&g_term_mgr.mutex);
+            return true;
+    }
+
+    bool ok = tcsetattr(STDIN_FILENO, TCSANOW, &raw) == 0;
+    pthread_mutex_unlock(&g_term_mgr.mutex);
+    return ok;
+}
+
+/* Exit a terminal state with reference counting. Returns true on success. */
+static bool tui_term_state_exit(tui_term_state_t expected_state) {
+    pthread_mutex_lock(&g_term_mgr.mutex);
+
+    if (g_term_mgr.current != expected_state) {
+        pthread_mutex_unlock(&g_term_mgr.mutex);
+        return false;
+    }
+
+    g_term_mgr.refcount--;
+    if (g_term_mgr.refcount <= 0) {
+        /* Restore saved terminal state */
+        g_term_mgr.current = TUI_TERM_STATE_NORMAL;
+        g_term_mgr.refcount = 0;
+        bool ok = tcsetattr(STDIN_FILENO, TCSAFLUSH, &g_term_mgr.saved_termios) == 0;
+        pthread_mutex_unlock(&g_term_mgr.mutex);
+        return ok;
+    }
+
+    pthread_mutex_unlock(&g_term_mgr.mutex);
+    return true;
+}
+
+/* Crash recovery signal handler - restores terminal state on fatal signals */
+static void tui_sig_abort_handler(int signo) {
+    /* Restore terminal state on crash */
+    if (g_term_mgr.termios_saved) {
+        tcsetattr(STDIN_FILENO, TCSAFLUSH, &g_term_mgr.saved_termios);
+    }
+
+    /* Show cursor */
+    fprintf(stderr, "\033[?25h");
+    fflush(stderr);
+
+    /* Default handler */
+    signal(signo, SIG_DFL);
+    raise(signo);
+}
+
+/* Install crash recovery signal handlers for common fatal signals */
+void tui_install_crash_handlers(void) {
+    struct sigaction sa = {0};
+    sa.sa_handler = tui_sig_abort_handler;
+    sigemptyset(&sa.sa_mask);
+    sa.sa_flags = SA_RESETHAND;
+
+    sigaction(SIGABRT, &sa, NULL);
+    sigaction(SIGSEGV, &sa, NULL);
+    sigaction(SIGBUS, &sa, NULL);
+    sigaction(SIGFPE, &sa, NULL);
+    sigaction(SIGILL, &sa, NULL);
+}
+
+/* Lock validation for debugging (enabled with -DDEBUG_LOCKS) */
+#ifdef DEBUG_LOCKS
+static __thread int lock_depth = 0;
+static __thread int held_locks[4] = {0}; /* index by hierarchy level */
+
+#define LOCK_ACQUIRE(lock_id) \
+    do { \
+        for (int i = 1; i < (lock_id); i++) { \
+            if (held_locks[i]) { \
+                fprintf(stderr, "LOCK VIOLATION: acquiring %d while holding %d\n", (lock_id), i); \
+                abort(); \
+            } \
+        } \
+        held_locks[(lock_id)] = 1; \
+        lock_depth++; \
+    } while(0)
+
+#define LOCK_RELEASE(lock_id) \
+    do { \
+        held_locks[(lock_id)] = 0; \
+        lock_depth--; \
+    } while(0)
+#else
+#define LOCK_ACQUIRE(lock_id) do {} while(0)
+#define LOCK_RELEASE(lock_id) do {} while(0)
+#endif
+
 void tui_composer_set_escape_hook(tui_composer_escape_hook_t hook, void *ctx) {
     g_composer_escape_hook = hook;
     g_composer_escape_hook_ctx = ctx;
@@ -224,10 +478,12 @@ bool tui_prepare_external_output(void) {
 }
 
 void tui_term_lock(void) {
+    LOCK_ACQUIRE(LOCK_HIERARCHY_TERM);
     pthread_mutex_lock(&g_term_mutex);
 }
 void tui_term_unlock(void) {
     pthread_mutex_unlock(&g_term_mutex);
+    LOCK_RELEASE(LOCK_HIERARCHY_TERM);
 }
 
 void tui_cursor_hide(void) {
@@ -294,18 +550,18 @@ const char *tui_motion_activity_frame(int frame, bool unicode) {
     return ascii_frames[((frame % n) + n) % n];
 }
 
-/* Full reset for a clean first paint: reset SGR, show cursor, clear the
- * visible screen *and* the scrollback buffer (\033[3J), then home. This wipes
- * any content left by the previous program so the banner doesn't bleed
- * through a stale screen. No-op when stderr isn't a tty, or when the caller
- * sets DSCO_NO_CLEAR=1 (useful when piping/embedding). */
+/* Full reset for a clean first paint: reset SGR, show cursor, clear any
+ * scroll margins, clear the visible screen *and* the scrollback buffer
+ * (\033[3J), then home. This wipes any content left by the previous program
+ * so the banner doesn't bleed through a stale screen. No-op when stderr isn't
+ * a tty, or when the caller sets DSCO_NO_CLEAR=1 (useful when piping/embedding). */
 void tui_screen_reset_full(void) {
     if (!isatty(STDERR_FILENO))
         return;
     const char *no_clear = getenv("DSCO_NO_CLEAR");
     if (no_clear && no_clear[0] == '1')
         return;
-    fputs("\033[0m\033[?25h\033[3J\033[2J\033[H", stderr);
+    fputs("\033[0m\033[?25h\033[r\033[?6l\033[3J\033[2J\033[H", stderr);
     fflush(stderr);
 }
 void tui_save_cursor(void) {
@@ -2772,6 +3028,23 @@ void tui_status_bar_update(tui_status_bar_t *sb, int in_tok, int out_tok, double
     /* No paint here — status bar paints only when the panel is shown. */
 }
 
+void tui_status_bar_set_budget(tui_status_bar_t *sb, double budget_limit,
+                               double burn_rate, double percent, double runway) {
+    if (!sb)
+        return;
+    pthread_mutex_lock(&sb->mutex);
+    sb->budget_limit = budget_limit > 0.0 ? budget_limit : 0.0;
+    sb->burn_rate = burn_rate > 0.0 ? burn_rate : 0.0;
+    if (percent < 0.0)
+        percent = 0.0;
+    if (percent > 999.0)
+        percent = 999.0;
+    sb->percent = percent;
+    sb->runway = runway;
+    pthread_mutex_unlock(&sb->mutex);
+    /* No paint here — status bar paints only when the panel is shown. */
+}
+
 void tui_status_bar_enable(tui_status_bar_t *sb) {
     pthread_mutex_lock(&sb->mutex);
     sb->enabled = true;
@@ -2890,6 +3163,10 @@ void tui_status_bar_render(tui_status_bar_t *sb) {
     int in_tok = sb->input_tokens;
     int out_tok = sb->output_tokens;
     double cost = sb->cost;
+    double budget_limit = sb->budget_limit;
+    double burn_rate = sb->burn_rate;
+    double budget_percent = sb->percent;
+    double runway = sb->runway;
     int turn = sb->turn;
     int tools = sb->tools_used;
     bool show_clock = sb->show_clock;
@@ -2909,6 +3186,25 @@ void tui_status_bar_render(tui_status_bar_t *sb) {
         snprintf(out_str, sizeof(out_str), "%.1fk", out_tok / 1000.0);
     else
         snprintf(out_str, sizeof(out_str), "%d", out_tok);
+
+    char runway_str[24];
+    if (runway < 0.0) {
+        snprintf(runway_str, sizeof(runway_str), "∞");
+    } else if (runway >= 3600.0) {
+        snprintf(runway_str, sizeof(runway_str), "%.1fh", runway / 3600.0);
+    } else if (runway >= 60.0) {
+        snprintf(runway_str, sizeof(runway_str), "%.0fm", runway / 60.0);
+    } else {
+        snprintf(runway_str, sizeof(runway_str), "%.0fs", runway);
+    }
+
+    int budget_color = 120;
+    if (budget_percent >= 95.0)
+        budget_color = 196;
+    else if (budget_percent >= 80.0)
+        budget_color = 203;
+    else if (budget_percent >= 50.0)
+        budget_color = 220;
 
     /* Shorten model alias for display */
     char short_model[40];
@@ -2974,10 +3270,17 @@ void tui_status_bar_render(tui_status_bar_t *sb) {
     }
     li += snprintf(left_buf + li, sizeof(left_buf) - li,
                    "\033[48;5;236m\033[38;5;252m"
-                   " in:%s out:%s "
-                   "\033[38;5;120m$%.2f\033[38;5;252m "
-                   "│ t%d │ %d⚙ ",
-                   in_str, out_str, cost, turn, tools);
+                   " in:%s out:%s ",
+                   in_str, out_str);
+    if (budget_limit > 0.0) {
+        li += snprintf(left_buf + li, sizeof(left_buf) - li,
+                       "\033[38;5;%dm$%.2f/$%.2f %.0f%% ⌛%s ↑$%.2f/h\033[38;5;252m ",
+                       budget_color, cost, budget_limit, budget_percent, runway_str, burn_rate);
+    } else {
+        li += snprintf(left_buf + li, sizeof(left_buf) - li,
+                       "\033[38;5;120m$%.2f\033[38;5;252m ", cost);
+    }
+    li += snprintf(left_buf + li, sizeof(left_buf) - li, "│ t%d │ %d⚙ ", turn, tools);
     fputs(left_buf, stderr);
 
     /* Compute visible width of left segment (rough — count printable runs).
@@ -3070,6 +3373,10 @@ static double panel_now_s(void) {
 }
 
 #define TUI_MOTION_FRAME_MS 80
+/* Seconds of keyboard inactivity after which the composer border shimmer
+ * parks. A composer left at the prompt otherwise repaints at 12.5fps forever
+ * (~a full core per idle session). */
+#define TUI_MOTION_IDLE_S 10.0
 
 static int tui_motion_frame_from_elapsed(double start_s, double now_s) {
     if (now_s <= start_s)
@@ -3783,6 +4090,18 @@ static ssize_t composer_read_byte(int fd, int timeout_ms, unsigned char *out) {
     return read(fd, out, 1);
 }
 
+static void composer_consume_csi_tail(unsigned char ch) {
+    if (ch >= 0x40 && ch <= 0x7e)
+        return;
+    for (int i = 0; i < 64; i++) {
+        unsigned char next = 0;
+        if (composer_read_byte(STDIN_FILENO, 5, &next) <= 0)
+            return;
+        if (next >= 0x40 && next <= 0x7e)
+            return;
+    }
+}
+
 /* Insert `s` (len bytes) at buf[cur], shifting the rest. Grows cursor. */
 static void composer_insert(char *buf, size_t cap, size_t *len, size_t *cur, const char *s,
                             size_t slen) {
@@ -4143,24 +4462,20 @@ char *tui_composer_read(tui_status_bar_t *sb, const char *prompt, char *out, siz
         return out;
     }
 
-    /* Save + switch to raw mode */
-    struct termios saved, raw;
-    if (tcgetattr(STDIN_FILENO, &saved) != 0) {
+    /* Switch to raw mode using terminal state manager */
+    g_composer_interrupt_requested = 0;
+    g_composer_reading = 1;
+
+    if (!tui_term_state_enter(TUI_TERM_STATE_COMPOSER)) {
+        /* Fallback to cooked mode if state manager fails */
         if (!fgets(out, (int)out_sz, stdin))
             return NULL;
         size_t l = strlen(out);
         while (l > 0 && (out[l - 1] == '\n' || out[l - 1] == '\r'))
             out[--l] = '\0';
+        g_composer_reading = 0;
         return out;
     }
-    raw = saved;
-    g_composer_interrupt_requested = 0;
-    g_composer_reading = 1;
-    raw.c_lflag &= (tcflag_t) ~(ECHO | ECHONL | ICANON | IEXTEN | ISIG);
-    raw.c_iflag &= (tcflag_t) ~(IXON | ICRNL | BRKINT | INPCK | ISTRIP);
-    raw.c_cc[VMIN] = 1;
-    raw.c_cc[VTIME] = 0;
-    tcsetattr(STDIN_FILENO, TCSANOW, &raw);
 
     /* Enable bracketed paste */
     fprintf(stderr, "\033[?2004h");
@@ -4172,7 +4487,7 @@ char *tui_composer_read(tui_status_bar_t *sb, const char *prompt, char *out, siz
         fflush(stderr);
         g_composer_reading = 0;
         g_composer_interrupt_requested = 0;
-        tcsetattr(STDIN_FILENO, TCSAFLUSH, &saved);
+        tui_term_state_exit(TUI_TERM_STATE_COMPOSER);
         return NULL;
     }
     char *paste_buf = (char *)calloc(1, TUI_COMPOSER_BUF_CAP);
@@ -4182,7 +4497,7 @@ char *tui_composer_read(tui_status_bar_t *sb, const char *prompt, char *out, siz
         fflush(stderr);
         g_composer_reading = 0;
         g_composer_interrupt_requested = 0;
-        tcsetattr(STDIN_FILENO, TCSAFLUSH, &saved);
+        tui_term_state_exit(TUI_TERM_STATE_COMPOSER);
         return NULL;
     }
     size_t len = 0, cur = 0;
@@ -4234,23 +4549,23 @@ char *tui_composer_read(tui_status_bar_t *sb, const char *prompt, char *out, siz
      * extend past the bottom of the terminal, scroll up first so it fits.
      * We track r_top across keystrokes so resize/growth can re-anchor. */
     int needed = inbox_total_rows(buf, len);
-    int r_top = tui_query_cursor_row(rows - needed);
+    /* Pin the composer to the bottom of the terminal. Open `needed` rows at the
+     * bottom by scrolling existing output up, then anchor the box so its last
+     * row sits on the final terminal row. This keeps the input field fixed at
+     * the bottom instead of floating wherever the previous turn left the
+     * cursor. */
+    int r_top = rows - needed + 1;
     if (r_top < 1)
         r_top = 1;
-    if (r_top + needed - 1 > rows) {
-        int overflow = (r_top + needed - 1) - rows;
-        tui_term_lock();
-        tui_cursor_move(rows, 1);
-        for (int i = 0; i < overflow; i++)
-            fputc('\n', stderr);
-        fflush(stderr);
-        tui_term_unlock();
-        r_top -= overflow;
-        if (r_top < 1)
-            r_top = 1;
-    }
+    tui_term_lock();
+    tui_cursor_move(rows, 1);
+    for (int i = 0; i < needed; i++)
+        fputc('\n', stderr);
+    fflush(stderr);
+    tui_term_unlock();
     tui_composer_restore_track(r_top, rows);
     int prev_height = 0;
+    int prev_r_top = r_top;
 
     tui_term_lock();
     fprintf(stderr, "\033[?25l");
@@ -4274,6 +4589,8 @@ char *tui_composer_read(tui_status_bar_t *sb, const char *prompt, char *out, siz
     (void)paste_match_buf;
 
     bool was_locked = false;
+    bool io_dead = false; /* stdin transport died (EOF/EIO) — not a user cancel */
+    double last_activity_s = panel_now_s();
     while (!done) {
         if (g_composer_interrupt_requested) {
             cancelled = true;
@@ -4302,19 +4619,23 @@ char *tui_composer_read(tui_status_bar_t *sb, const char *prompt, char *out, siz
         }
 
         unsigned char c;
-        /* Use a short select while motion is enabled so the composer can
-         * schedule smooth frames without waiting for keystrokes. */
+        /* Short select while the shimmer is live so frames stay smooth; once
+         * the user has been idle past TUI_MOTION_IDLE_S the shimmer parks and
+         * we drop to a slow poll that does no repaint work. Any keystroke
+         * brings the animation back. */
         fd_set rfd;
         FD_ZERO(&rfd);
         FD_SET(STDIN_FILENO, &rfd);
-        int wait_ms = animations_enabled ? TUI_MOTION_FRAME_MS : 200;
+        bool motion_live =
+            animations_enabled && (panel_now_s() - last_activity_s) < TUI_MOTION_IDLE_S;
+        int wait_ms = motion_live ? TUI_MOTION_FRAME_MS : 200;
         struct timeval tv = {.tv_sec = 0, .tv_usec = wait_ms * 1000};
         int sr = select(STDIN_FILENO + 1, &rfd, NULL, NULL, &tv);
         if (sr == 0) {
             if (g_composer_external_redraw_requested) {
                 goto redraw;
             }
-            if (animations_enabled) {
+            if (motion_live) {
                 int next_frame = tui_motion_frame_from_elapsed(motion_started_at, panel_now_s());
                 if (next_frame != motion_frame) {
                     motion_frame = next_frame;
@@ -4334,6 +4655,11 @@ char *tui_composer_read(tui_status_bar_t *sb, const char *prompt, char *out, siz
                 }
                 continue;
             }
+            /* stdin fd is gone (EBADF etc). Returning an empty string here
+             * makes the REPL re-enter the composer and spin hot on the dead
+             * fd forever — report EOF instead so the session exits. */
+            cancelled = true;
+            io_dead = true;
             break;
         }
         ssize_t n = read(STDIN_FILENO, &c, 1);
@@ -4345,12 +4671,19 @@ char *tui_composer_read(tui_status_bar_t *sb, const char *prompt, char *out, siz
                 }
                 continue;
             }
+            /* EIO: controlling terminal vanished (ssh drop, window closed). */
+            cancelled = true;
+            io_dead = true;
             break;
         }
         if (n == 0) {
+            /* True EOF — in raw mode Ctrl+D arrives as byte 0x04, so a zero
+             * read always means the input source itself is closed. */
             cancelled = true;
+            io_dead = true;
             break;
         }
+        last_activity_s = panel_now_s();
 
         /* Bracketed paste: bytes are queued raw until "\e[201~" */
         if (in_paste) {
@@ -4590,8 +4923,11 @@ char *tui_composer_read(tui_status_bar_t *sb, const char *prompt, char *out, siz
                 goto redraw;
             if (n2 == '2') {
                 unsigned char n3 = 0, n4 = 0;
+                bool saw_n3 = false, saw_n4 = false;
                 if (composer_read_byte(STDIN_FILENO, 30, &n3) > 0 &&
                     composer_read_byte(STDIN_FILENO, 30, &n4) > 0) {
+                    saw_n3 = true;
+                    saw_n4 = true;
                     if (n3 == '0' && n4 == '0') {
                         /* Start bracketed paste: consume trailing '~' */
                         unsigned char tilde = 0;
@@ -4604,6 +4940,7 @@ char *tui_composer_read(tui_status_bar_t *sb, const char *prompt, char *out, siz
                         continue;
                     }
                 }
+                composer_consume_csi_tail(saw_n4 ? n4 : (saw_n3 ? n3 : n2));
                 goto redraw;
             }
             /* When the dropdown is open, ↑/↓ move the highlight rather than the
@@ -4711,6 +5048,8 @@ char *tui_composer_read(tui_status_bar_t *sb, const char *prompt, char *out, siz
                     goto redraw;
                 }
                 default:
+                    if (n1 == '[')
+                        composer_consume_csi_tail(n2);
                     goto redraw;
             }
         }
@@ -4769,40 +5108,50 @@ char *tui_composer_read(tui_status_bar_t *sb, const char *prompt, char *out, siz
               if (imgpick_sel < 0) imgpick_sel = 0; }
             int need = inbox_total_rows(buf, len) + slashmenu_rows(sug_count)
                        + (imgpick_count < TUI_IMGPICK_MAX ? imgpick_count : TUI_IMGPICK_MAX);
-            if (g_composer_external_redraw_requested) {
-                g_composer_external_redraw_requested = 0;
-                r_top = nrows - need + 1;
-                if (r_top < 1)
-                    r_top = 1;
-                prev_height = 0;
-            }
-            if (r_top + need - 1 > nrows) {
-                int overflow = (r_top + need - 1) - nrows;
-                tui_term_lock();
-                fprintf(stderr, "\033[?25l");
-                tui_cursor_move(nrows, 1);
-                for (int i = 0; i < overflow; i++)
-                    fputc('\n', stderr);
-                fflush(stderr);
-                tui_term_unlock();
-                r_top -= overflow;
-                if (r_top < 1)
-                    r_top = 1;
+            (void)g_composer_external_redraw_requested;
+            g_composer_external_redraw_requested = 0;
+            /* Always pin to the bottom: anchor the box so its last row is the
+             * final terminal row. When the box grew (more lines) or the
+             * terminal shrank, open room by scrolling existing output up so the
+             * box never spills off-screen and never floats mid-window. */
+            int new_r_top = nrows - need + 1;
+            if (new_r_top < 1)
+                new_r_top = 1;
+            int prev_bottom = prev_r_top + prev_height - 1;
+            if (new_r_top < prev_r_top || prev_height == 0) {
+                /* Need more rows than before (or first paint after re-anchor):
+                 * scroll the terminal up to make space at the bottom. */
+                int grow = (prev_height == 0) ? need : (prev_r_top - new_r_top);
+                if (grow > 0) {
+                    tui_term_lock();
+                    fprintf(stderr, "\033[?25l");
+                    tui_cursor_move(nrows, 1);
+                    for (int i = 0; i < grow; i++)
+                        fputc('\n', stderr);
+                    fflush(stderr);
+                    tui_term_unlock();
+                }
             }
             if (nrows != rows)
                 rows = nrows;
-            tui_composer_restore_track(r_top, rows);
+            tui_composer_restore_track(new_r_top, rows);
 
             tui_term_lock();
             fprintf(stderr, "\033[?25l");
-            /* Clear any rows from the previous render that the new one won't
-             * overwrite (shrinking buffer). */
-            if (prev_height > need) {
-                for (int i = need; i < prev_height; i++) {
-                    tui_cursor_move(r_top + i, 1);
-                    fprintf(stderr, "\033[2K");
+            /* Erase the entire previous footprint when the box moved or shrank,
+             * so no stale border rows linger above/below (the "shadow"). */
+            if (prev_height > 0) {
+                int old_top = prev_r_top;
+                int old_bot = prev_bottom;
+                for (int r = old_top; r <= old_bot; r++) {
+                    if (r < new_r_top || r > new_r_top + need - 1) {
+                        tui_cursor_move(r, 1);
+                        fprintf(stderr, "\033[2K");
+                    }
                 }
             }
+            r_top = new_r_top;
+            prev_r_top = r_top;
             int cr = r_top + 1, cc = 5;
             prev_height =
                 composer_paint(r_top, buf, len, cur, sug_idx, sug_count, sug_sel, &cr, &cc,
@@ -4817,31 +5166,31 @@ char *tui_composer_read(tui_status_bar_t *sb, const char *prompt, char *out, siz
     /* Cleanup — disable bracketed paste, restore termios */
     fprintf(stderr, "\033[?2004l");
     fflush(stderr);
-    tcsetattr(STDIN_FILENO, TCSAFLUSH, &saved);
+    tui_term_state_exit(TUI_TERM_STATE_COMPOSER);
 
     /* Panel is no longer reading keystrokes — caret returns to idle grey
      * on the next repaint. */
     tui_panel_set_active(sb, false);
 
     /* Erase the inline box so the echoed input + streamed text can flow
-     * naturally below. Cursor lands at row r_top, col 1 — the next text
-     * emit overwrites where the box used to be. */
+     * naturally below. Reset scroll margins before the final cursor move:
+     * DECSTBM reset moves the cursor to home on common terminals. */
     tui_term_lock();
     fprintf(stderr, "\033[?25l");
     inbox_clear(r_top, prev_height);
+    tui_composer_restore_untrack();
     tui_cursor_move(r_top, 1);
     fprintf(stderr, "\033[?25h");
     fflush(stderr);
     tui_term_unlock();
-    tui_composer_restore_untrack();
     g_composer_reading = 0;
     g_composer_interrupt_requested = 0;
 
     if (cancelled) {
         free(paste_buf);
         free(buf);
-        if (len == 0) {
-            /* Treat Ctrl+C / Ctrl+D-on-empty as EOF */
+        if (io_dead || len == 0) {
+            /* Treat transport death and Ctrl+C / Ctrl+D-on-empty as EOF */
             return NULL;
         }
         /* Return empty string to let caller skip this cycle */
@@ -7736,10 +8085,33 @@ int tui_event_subscribe(tui_event_bus_t *bus, tui_event_type_t type, tui_event_h
     return idx;
 }
 
+/* Compact event subscriber array by removing inactive entries.
+ * Should be called when removed_count exceeds EVENT_SUBS_COMPACT_THRESHOLD. */
+static void event_subscribers_compact(tui_event_bus_t *bus) {
+    int dst = 0;
+    for (int i = 0; i < bus->sub_count; i++) {
+        if (bus->subs[i].active) {
+            if (dst != i) {
+                /* Move active subscriber to compact position */
+                bus->subs[dst] = bus->subs[i];
+            }
+            dst++;
+        }
+    }
+    bus->sub_count = dst;
+    bus->removed_count = 0; /* Reset counter after successful compaction */
+}
+
 void tui_event_unsubscribe(tui_event_bus_t *bus, int sub_id) {
     pthread_mutex_lock(&bus->mutex);
     if (sub_id >= 0 && sub_id < bus->sub_count) {
         bus->subs[sub_id].active = false;
+        bus->removed_count++;
+
+        /* Trigger compaction if threshold exceeded */
+        if (bus->removed_count >= EVENT_SUBS_COMPACT_THRESHOLD) {
+            event_subscribers_compact(bus);
+        }
     }
     pthread_mutex_unlock(&bus->mutex);
 }
@@ -8125,11 +8497,17 @@ static void *outq_render_thread(void *arg) {
         while (q->count > 0) {
             tui_out_entry_t *e = &q->ring[q->tail];
 
+            /* Lock hierarchy: we hold q->mutex (LOCK_HIERARCHY_OUTQ) and need
+             * g_term_mutex (LOCK_HIERARCHY_TERM). Since TERM has lower precedence,
+             * we must release q->mutex first to avoid deadlock. */
             if (!output_invalidated_composer && e->type != TUI_OUT_FLUSH) {
-                tui_term_lock();
+                pthread_mutex_unlock(&q->mutex);  /* Release OUTQ lock first */
+                tui_term_lock();                   /* Then acquire TERM lock */
                 output_invalidated_composer =
                     tui_clear_tracked_composer_area_for_output(fileno(q->out));
-                tui_term_unlock();
+                tui_term_unlock();                 /* Release TERM lock */
+                pthread_mutex_lock(&q->mutex);     /* Re-acquire OUTQ lock */
+                continue;  /* Retry with proper lock order */
             }
 
             switch (e->type) {
@@ -8178,8 +8556,26 @@ static void *outq_render_thread(void *arg) {
 
 void tui_outq_init(tui_output_queue_t *q, FILE *out) {
     memset(q, 0, sizeof(*q));
+
+    /* Try primary allocation (TUI_OUTQ_SIZE = 4096 entries ≈ 8MB) */
     q->capacity = TUI_OUTQ_SIZE;
     q->ring = calloc(q->capacity, sizeof(tui_out_entry_t));
+
+    /* Fallback to smaller allocation if primary fails (graceful degradation) */
+    if (!q->ring) {
+        q->capacity = 1024;  /* 2MB instead of 8MB */
+        q->ring = calloc(q->capacity, sizeof(tui_out_entry_t));
+        if (!q->ring) {
+            q->capacity = 512;  /* 1MB as last resort */
+            q->ring = calloc(q->capacity, sizeof(tui_out_entry_t));
+            if (!q->ring) {
+                fprintf(stderr, "TUI: Failed to allocate output queue (critical error)\n");
+                return;  /* Critical failure - cannot proceed */
+            }
+        }
+        fprintf(stderr, "TUI: Using reduced output queue (%d entries for graceful degradation)\n", q->capacity);
+    }
+
     q->out = out ? out : stderr;
     q->running = true;
     pthread_mutex_init(&q->mutex, NULL);
@@ -9662,7 +10058,13 @@ void tui_diff_free(tui_diff_t *d) {
 static void diff_add_line(tui_diff_t *d, char type, int old_l, int new_l, const char *text) {
     if (d->count >= d->cap) {
         d->cap *= 2;
-        d->lines = realloc(d->lines, d->cap * sizeof(tui_diff_line_t));
+        /* Use temporary pointer to preserve original on realloc failure */
+        tui_diff_line_t *new_lines = realloc(d->lines, d->cap * sizeof(tui_diff_line_t));
+        if (!new_lines) {
+            /* Allocation failed - preserve original and stop growing */
+            return;
+        }
+        d->lines = new_lines;
     }
     tui_diff_line_t *l = &d->lines[d->count++];
     l->type = type;
@@ -10714,6 +11116,16 @@ static void menu_erase_block(int n) {
         fprintf(stderr, "\033[1A\033[2K\r");
 }
 
+static void menu_reserve_redraw_space(int n) {
+    if (n <= 0)
+        return;
+    for (int i = 0; i <= n; i++)
+        fputc('\n', stderr);
+    for (int i = 0; i < n; i++)
+        fprintf(stderr, "\033[1A");
+    fputc('\r', stderr);
+}
+
 int tui_menu_run(tui_menu_t *m, tui_menu_item_t **out_item) {
     if (out_item)
         *out_item = NULL;
@@ -10781,6 +11193,12 @@ int tui_menu_run(tui_menu_t *m, tui_menu_item_t **out_item) {
             if (top > nrows - vis)
                 top = nrows - vis;
         }
+
+        int planned_lines = (m->title[0] ? 1 : 0) + (m->subtitle[0] ? 1 : 0) +
+                            (top > 0 ? 1 : 0) + vis +
+                            (top + vis < nrows ? 1 : 0) + 1;
+        if (first && tty)
+            menu_reserve_redraw_space(planned_lines);
 
         /* Redraw in place: erase the previous frame first. */
         if (!first)

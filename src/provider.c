@@ -19,6 +19,7 @@
 #include "openai_oauth.h"
 #include "codex_cache.h"
 #include "dcr.h"
+#include "env_config.h"
 #include <stdlib.h>
 #include <string.h>
 #include <strings.h>
@@ -409,29 +410,30 @@ static bool provider_codex_exec_ready(void) {
 }
 
 /* Native ChatGPT-subscription path: dsco resolves the OAuth token itself and
- * talks to the backend Responses API directly (no codex binary). Keep this as
- * a fallback for machines without Codex CLI; the CLI path is the supported
- * subscription executor boundary and tracks Codex auth/request changes. */
+ * talks to the backend Responses API directly (no codex binary). This is the
+ * interactive provider path; the external Codex CLI remains available as a
+ * prompt/executor fallback when native auth is unavailable or disabled. */
 static bool provider_chatgpt_native_ready(void) {
     if (provider_env_truthy(getenv("DSCO_DISABLE_CHATGPT_NATIVE")))
         return false;
     return openai_oauth_available();
 }
 
-/* True if any ChatGPT-subscription path works. Prefer the official Codex CLI
- * executor when available, mirroring the Claude Code subscription boundary. */
+/* True if any ChatGPT-subscription path works. Prefer native streaming when
+ * available; the subprocess executor is not suitable for interactive TUI
+ * streaming because it owns a separate prompt/stdio lifecycle. */
 static bool provider_chatgpt_subscription_ready(void) {
-    return provider_codex_exec_ready() || provider_chatgpt_native_ready();
+    return provider_chatgpt_native_ready() || provider_codex_exec_ready();
 }
 
 static const char *provider_codex_subscription_credential(void) {
-    if (provider_codex_exec_ready())
-        return "chatgpt-subscription";
     if (provider_chatgpt_native_ready()) {
         const char *tok = openai_oauth_access_token(true);
         if (tok && tok[0])
             return tok;
     }
+    if (provider_codex_exec_ready())
+        return "chatgpt-subscription";
     return NULL;
 }
 
@@ -758,19 +760,63 @@ static char *provider_shell_quote(const char *s) {
     return b.data;
 }
 
+/* Claude Code 2.x stores the macOS keychain credential as a *hex-encoded* JSON
+ * string (the stored password bytes are the ASCII hex of the JSON, e.g.
+ * "7b22636c6175646541694f61757468..." == {"claudeAiOauth"...). Older versions
+ * stored raw JSON. Detect a pure-hex even-length buffer that begins with "7b22"
+ * ('{"') and decode it back to JSON so the parser below works for both layouts. */
+static char *provider_maybe_hex_decode_oauth_json(const char *s) {
+    if (!s)
+        return NULL;
+    size_t len = strlen(s);
+    /* trim trailing whitespace/newline that `security -w` may append */
+    while (len > 0 && (s[len - 1] == '\n' || s[len - 1] == '\r' || s[len - 1] == ' ' ||
+                       s[len - 1] == '\t'))
+        len--;
+    if (len < 8 || (len % 2) != 0)
+        return NULL;
+    /* Require a JSON-object hex prefix: '{' '"' == 7b 22 (case-insensitive). */
+    if (!((s[0] == '7' && s[1] == 'b') && (s[2] == '2' && s[3] == '2')))
+        return NULL;
+    for (size_t i = 0; i < len; i++) {
+        char c = s[i];
+        if (!((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f') || (c >= 'A' && c <= 'F')))
+            return NULL;
+    }
+    char *out = safe_malloc(len / 2 + 1);
+    if (!out)
+        return NULL;
+    for (size_t i = 0; i < len; i += 2) {
+        int hi = s[i], lo = s[i + 1];
+        hi = (hi <= '9') ? hi - '0' : (hi | 0x20) - 'a' + 10;
+        lo = (lo <= '9') ? lo - '0' : (lo | 0x20) - 'a' + 10;
+        out[i / 2] = (char)((hi << 4) | lo);
+    }
+    out[len / 2] = '\0';
+    return out;
+}
+
 static bool provider_extract_claude_code_oauth_bundle(const char *json,
                                                       claude_code_oauth_bundle_t *bundle) {
     if (!json || !bundle)
         return false;
 
+    /* Transparently handle hex-encoded keychain payloads (Claude Code 2.x). */
+    char *hex_decoded = provider_maybe_hex_decode_oauth_json(json);
+    if (hex_decoded)
+        json = hex_decoded;
+
     char *oauth = json_get_raw(json, "claudeAiOauth");
-    if (!oauth)
+    if (!oauth) {
+        free(hex_decoded);
         return false;
+    }
 
     char *access = json_get_str(oauth, "accessToken");
     if (!access || !access[0]) {
         free(access);
         free(oauth);
+        free(hex_decoded);
         return false;
     }
 
@@ -787,6 +833,7 @@ static bool provider_extract_claude_code_oauth_bundle(const char *json,
     free(access);
     free(refresh);
     free(expires_raw);
+    free(hex_decoded);
     return true;
 }
 
@@ -1833,6 +1880,22 @@ static void openai_append_tool_choice_json(jbuf_t *b, session_state_t *session, 
 /* moonshot_should_disable_thinking excised */
 
 /* Emit text+image content array (skipping tool_use and tool_result blocks) */
+static bool openai_msg_has_text_content(message_t *m) {
+    if (!m)
+        return false;
+    for (int j = 0; j < m->content_count; j++) {
+        msg_content_t *mc = &m->content[j];
+        if (mc->type && strcmp(mc->type, "text") == 0 && mc->text && mc->text[0])
+            return true;
+    }
+    return false;
+}
+
+static bool openai_msg_cacheable_history_tail(message_t *m) {
+    return m && m->role == ROLE_USER &&
+           (openai_msg_has_text_content(m) || msg_has_tool_result(m));
+}
+
 static void openai_append_text_content(jbuf_t *b, message_t *m) {
     jbuf_t text;
     jbuf_init(&text, 1024);
@@ -1917,7 +1980,15 @@ static void openai_append_assistant_msg(jbuf_t *b, message_t *m) {
 }
 
 /* Emit tool_result blocks as separate {"role":"tool"} messages (OpenAI format) */
-static void openai_append_tool_results(jbuf_t *b, message_t *m) {
+static void openai_append_tool_results(jbuf_t *b, message_t *m, bool cache_mark_last) {
+    int remaining_results = 0;
+    if (cache_mark_last) {
+        for (int j = 0; j < m->content_count; j++) {
+            msg_content_t *mc = &m->content[j];
+            if (mc->type && strcmp(mc->type, "tool_result") == 0)
+                remaining_results++;
+        }
+    }
     for (int j = 0; j < m->content_count; j++) {
         msg_content_t *mc = &m->content[j];
         if (!mc->type || strcmp(mc->type, "tool_result") != 0)
@@ -1926,12 +1997,15 @@ static void openai_append_tool_results(jbuf_t *b, message_t *m) {
         jbuf_append_json_str(b, mc->tool_id ? mc->tool_id : "call_0");
         jbuf_append(b, ",\"content\":");
         jbuf_append_json_str(b, mc->text ? mc->text : "");
+        remaining_results--;
+        if (cache_mark_last && remaining_results == 0)
+            jbuf_append(b, ",\"cache_control\":{\"type\":\"ephemeral\"}");
         jbuf_append(b, "}");
     }
 }
 
 /* Emit a regular user message (text + images, no tool_results) */
-static void openai_append_user_msg(jbuf_t *b, message_t *m) {
+static void openai_append_user_msg(jbuf_t *b, message_t *m, bool cache_mark) {
     jbuf_append(b, ",{\"role\":\"user\",\"content\":");
 
     /* Check if we have images */
@@ -1944,8 +2018,30 @@ static void openai_append_user_msg(jbuf_t *b, message_t *m) {
     }
 
     if (!has_images) {
-        /* Simple string content */
-        openai_append_text_content(b, m);
+        /* Claude-compatible OpenRouter routes honor Anthropic-style
+         * cache_control on content blocks.  Use an explicit block for the
+         * moving history breakpoint instead of relying only on OR's top-level
+         * automatic cache hint; this is the R4 fix for tool-continuation
+         * rereads. */
+        if (cache_mark) {
+            jbuf_t text;
+            jbuf_init(&text, 1024);
+            for (int j = 0; j < m->content_count; j++) {
+                msg_content_t *mc = &m->content[j];
+                if (mc->type && strcmp(mc->type, "text") == 0 && mc->text) {
+                    if (text.len > 0)
+                        jbuf_append(&text, "\n");
+                    jbuf_append(&text, mc->text);
+                }
+            }
+            jbuf_append(b, "[{\"type\":\"text\",\"text\":");
+            jbuf_append_json_str(b, text.len > 0 ? text.data : "");
+            jbuf_append(b, ",\"cache_control\":{\"type\":\"ephemeral\"}}]");
+            jbuf_free(&text);
+        } else {
+            /* Simple string content */
+            openai_append_text_content(b, m);
+        }
     } else {
         /* Array content with text + images */
         jbuf_append(b, "[");
@@ -1965,6 +2061,8 @@ static void openai_append_user_msg(jbuf_t *b, message_t *m) {
         if (text.len > 0) {
             jbuf_append(b, "{\"type\":\"text\",\"text\":");
             jbuf_append_json_str(b, text.data);
+            if (cache_mark)
+                jbuf_append(b, ",\"cache_control\":{\"type\":\"ephemeral\"}");
             jbuf_append(b, "}");
             wrote_any = true;
         }
@@ -2397,11 +2495,17 @@ static char *openai_build_request(provider_t *p, conversation_t *conv, session_s
             !(extra_params && openai_extra_has_param(extra_params, "top_p"))) {
             jbuf_appendf(&b, ",\"top_p\":%.6g", session->top_p);
         }
-        if (!modal_endpoint && session && session->effort[0] && strcmp(session->effort, "high") != 0 &&
+        if (!modal_endpoint && session && session->effort[0] &&
             !(extra_params && (openai_extra_has_param(extra_params, "reasoning_effort") ||
                                openai_extra_has_param(extra_params, "reasoning")))) {
-            jbuf_append(&b, ",\"reasoning_effort\":");
-            jbuf_append_json_str(&b, session->effort);
+            char effort_buf[32];
+            const char *effort = dcr_reasoning_effort_normalize(
+                p ? p->name : NULL, session->model, session->effort, effort_buf,
+                sizeof(effort_buf));
+            if (effort && effort[0] && strcmp(effort, EFFORT_HIGH) != 0) {
+                jbuf_append(&b, ",\"reasoning_effort\":");
+                jbuf_append_json_str(&b, effort);
+            }
         }
         openai_append_extra_request_params(&b, extra_params);
     }
@@ -2443,6 +2547,14 @@ static char *openai_build_request(provider_t *p, conversation_t *conv, session_s
      *                             followed by any remaining user text as {"role":"user",...}
      *   - plain user/assistant  → {"role":"user/assistant","content":"..."}
      */
+    int last_cache_history_index = -1;
+    if (cache_ctrl) {
+        for (int i = 0; i < conv->count; i++) {
+            if (openai_msg_cacheable_history_tail(&conv->msgs[i]))
+                last_cache_history_index = i;
+        }
+    }
+
     for (int i = 0; i < conv->count; i++) {
         message_t *m = &conv->msgs[i];
 
@@ -2451,7 +2563,9 @@ static char *openai_build_request(provider_t *p, conversation_t *conv, session_s
         } else {
             /* User message: emit tool_results first, then remaining user content */
             if (msg_has_tool_result(m)) {
-                openai_append_tool_results(&b, m);
+                bool mark_tool_tail = cache_ctrl && i == last_cache_history_index &&
+                                      !openai_msg_has_text_content(m);
+                openai_append_tool_results(&b, m, mark_tool_tail);
                 /* If there's also text content beyond tool results, emit a user msg */
                 bool has_text = false;
                 for (int j = 0; j < m->content_count; j++) {
@@ -2462,10 +2576,11 @@ static char *openai_build_request(provider_t *p, conversation_t *conv, session_s
                     }
                 }
                 if (has_text) {
-                    openai_append_user_msg(&b, m);
+                    openai_append_user_msg(&b, m,
+                                           cache_ctrl && i == last_cache_history_index);
                 }
             } else {
-                openai_append_user_msg(&b, m);
+                openai_append_user_msg(&b, m, cache_ctrl && i == last_cache_history_index);
             }
         }
     }
@@ -2479,7 +2594,7 @@ static char *openai_build_request(provider_t *p, conversation_t *conv, session_s
      * cacheable block, advancing the breakpoint each turn — covers growing
      * conversation history without per-block markers. OR routes only to
      * Anthropic direct when this field is present (Bedrock/Vertex excluded). */
-    if (provider_model_supports_cache_control(session ? session->model : NULL))
+    if (cache_ctrl)
         jbuf_append(&b, ",\"cache_control\":{\"type\":\"ephemeral\"}");
 
     jbuf_append(&b, "}");
@@ -2892,6 +3007,7 @@ bool provider_msg_is_credit_too_low(const char *msg) {
         return false;
     /* case-insensitive substring match against known phrases */
     static const char *needles[] = {
+        "credit_too_low",             /* internal sentinel propagated as stop_reason */
         "credit balance is too low",   "credit balance too low", "insufficient_quota",
         "insufficient funds",          "insufficient credit",    "billing_hard_limit_reached",
         "exceeded your current quota", "payment required",       "quota_exceeded",
@@ -3812,7 +3928,14 @@ static stream_result_t openai_stream(provider_t *p, const char *api_key, const c
                     p->name ? p->name : "provider", (int)http_code,
                     state.error_msg ? state.error_msg : "(no message)");
             if (provider_is_sakana(p)) {
-                if (provider_sakana_has_payg_key()) {
+                const char *payg = provider_sakana_payg_key();
+                const char *sub = provider_sakana_subscription_key();
+                bool using_payg = payg && api_key && strcmp(api_key, payg) == 0;
+                if (using_payg && sub && sub[0]) {
+                    fprintf(stderr,
+                            "  \033[2mhint: Sakana subscription key is configured; retrying "
+                            "that path before cross-provider fallback.\033[0m\n");
+                } else if (!using_payg && payg && payg[0]) {
                     fprintf(stderr,
                             "  \033[2mhint: Fugu PAYG key is configured; retrying metered "
                             "Sakana before cross-provider fallback.\033[0m\n");
@@ -3891,10 +4014,16 @@ static stream_result_t openai_stream(provider_t *p, const char *api_key, const c
  * ════════════════════════════════════════════════════════════════════════ */
 
 #define CHATGPT_RESPONSES_URL "https://chatgpt.com/backend-api/codex/responses"
+#define CHATGPT_DEFAULT_STREAM_IDLE_TIMEOUT_S 300L
 
 static const char *chatgpt_backend_url(void) {
     const char *override = getenv("DSCO_CHATGPT_BASE_URL");
     return (override && override[0]) ? override : CHATGPT_RESPONSES_URL;
+}
+
+static long chatgpt_stream_idle_timeout_s(void) {
+    return dsco_env_long("DSCO_CHATGPT_STREAM_IDLE_TIMEOUT_S",
+                         CHATGPT_DEFAULT_STREAM_IDLE_TIMEOUT_S, 30L, 7200L);
 }
 
 /* Strip a leading "openai/" or "chatgpt/" route prefix from a model id so the
@@ -4108,9 +4237,16 @@ static char *chatgpt_native_build_request(provider_t *p, conversation_t *conv,
     }
 
     /* Reasoning effort from the session. gpt-5.x reasoning models honor this. */
-    const char *effort = (session && session->effort[0])
+    char effort_buf[32];
+    const char *raw_effort = (session && session->effort[0])
         ? session->effort
         : codex_cache_default_effort(chatgpt_model_id(session));
+    const char *effort = (session && session->effort[0])
+        ? dcr_reasoning_effort_normalize("openai", chatgpt_model_id(session),
+                                         raw_effort, effort_buf, sizeof(effort_buf))
+        : raw_effort;
+    if (!effort || !effort[0])
+        effort = codex_cache_default_effort(chatgpt_model_id(session));
     jbuf_append(&b, ",\"reasoning\":{\"effort\":");
     jbuf_append_json_str(&b, effort);
     jbuf_append(&b, "}");
@@ -4317,8 +4453,9 @@ static stream_result_t chatgpt_native_stream(provider_t *p, const char *api_key,
     curl_easy_setopt(curl, CURLOPT_HEADERFUNCTION, provider_credit_header_cb);
     curl_easy_setopt(curl, CURLOPT_HEADERDATA, &state.credit_reset_at);
     curl_easy_setopt(curl, CURLOPT_CONNECTTIMEOUT, 30L);
+    long idle_s = chatgpt_stream_idle_timeout_s();
     curl_easy_setopt(curl, CURLOPT_LOW_SPEED_LIMIT, 1L);
-    curl_easy_setopt(curl, CURLOPT_LOW_SPEED_TIME, 120L);
+    curl_easy_setopt(curl, CURLOPT_LOW_SPEED_TIME, idle_s);
     curl_easy_setopt(curl, CURLOPT_HTTP_VERSION, CURL_HTTP_VERSION_2TLS);
 
     CURLcode res = curl_easy_perform(curl);
@@ -4364,8 +4501,15 @@ static stream_result_t chatgpt_native_stream(provider_t *p, const char *api_key,
                     "\033[2mRun\033[0m \033[36m/login chatgpt\033[0m\n",
                     http_code);
         } else if (res != CURLE_OK) {
-            fprintf(stderr, "dsco: ChatGPT request error: %s (HTTP %ld)\n",
-                    curl_easy_strerror(res), http_code);
+            if (res == CURLE_OPERATION_TIMEDOUT && http_code == 200) {
+                fprintf(stderr,
+                        "dsco: ChatGPT stream idle timeout after %lds (HTTP %ld); "
+                        "set DSCO_CHATGPT_STREAM_IDLE_TIMEOUT_S to raise it\n",
+                        idle_s, http_code);
+            } else {
+                fprintf(stderr, "dsco: ChatGPT request error: %s (HTTP %ld)\n",
+                        curl_easy_strerror(res), http_code);
+            }
         } else if (state.error_msg) {
             fprintf(stderr, "dsco: ChatGPT HTTP %ld: %s\n", http_code, state.error_msg);
         } else if (state.line_buf.len > 0) {
@@ -4599,8 +4743,7 @@ static bool provider_sakana_prefer_payg(void) {
         return true;
     if (provider_env_matches(cls, "subscription", "sub"))
         return false;
-    return provider_env_truthy(getenv("DSCO_PREFER_METERED_API")) ||
-           provider_env_truthy(getenv("DSCO_API_BILLING_FALLBACK"));
+    return false;
 }
 
 static const char *provider_sakana_resolve_key(void) {
@@ -4619,6 +4762,10 @@ bool provider_sakana_current_key_is_subscription(void) {
     if (!resolved)
         return true;
     return resolved && sub && strcmp(resolved, sub) == 0;
+}
+
+const char *provider_sakana_subscription_request_key(void) {
+    return provider_sakana_subscription_key();
 }
 
 bool provider_sakana_has_payg_key(void) {
@@ -4900,16 +5047,11 @@ provider_t *provider_create(const char *name) {
         provider_t *p = safe_malloc(sizeof(provider_t));
         memset(p, 0, sizeof(*p));
         p->name = "openai-codex";
-        /* Prefer the official Codex CLI executor when it is available. It owns
-         * the subscription/session contract, like Claude Code does for Claude.
-         * Native OAuth remains a fallback for environments without Codex CLI. */
-        if (provider_codex_exec_ready()) {
-            p->api_url = "codex://exec";
-            p->data = safe_strdup("codex_exec");
-            p->build_request = codex_exec_build_request;
-            p->build_headers = unsupported_build_headers;
-            p->stream = codex_exec_stream;
-        } else if (provider_chatgpt_native_ready()) {
+        /* Prefer the native Responses-API stream for interactive dsco. The
+         * external `codex` subprocess is a prompt-mode executor boundary; using
+         * it here turns the request into a legacy prompt body and breaks the
+         * TUI's streaming lifecycle. */
+        if (provider_chatgpt_native_ready()) {
             p->api_url = CHATGPT_RESPONSES_URL;
             p->data = safe_strdup("chatgpt_native");
             p->build_request = chatgpt_native_build_request;
@@ -5177,6 +5319,21 @@ const char *provider_model_family(const char *model) {
     if (namespaced)
         return namespaced;
 
+    {
+        const char *colon = strchr(model, ':');
+        if (colon && colon > model) {
+            size_t plen = (size_t)(colon - model);
+            char pfx[32];
+            if (plen < sizeof(pfx)) {
+                memcpy(pfx, model, plen);
+                pfx[plen] = '\0';
+                const provider_endpoint_t *ep = find_endpoint(pfx);
+                if (ep && provider_is_local_endpoint(ep->name))
+                    return ep->name;
+            }
+        }
+    }
+
     if (strstr(model, "claude") || strstr(model, "opus") || strstr(model, "sonnet") ||
         strstr(model, "haiku"))
         return "anthropic";
@@ -5234,7 +5391,7 @@ static const char *provider_openai_primary_model(bool prefer_code) {
         provider_has_usable_key("openai-codex", NULL)) {
         (void)prefer_code;
         static char model[128];
-        snprintf(model, sizeof(model), "openai/%s", codex_cache_default_model());
+        snprintf(model, sizeof(model), "%s", codex_cache_default_model());
         return model;
     }
     if (provider_has_usable_key("openrouter", NULL))
@@ -5383,11 +5540,23 @@ static void provider_append_unique_model(char out_models[][128], int *count, int
 
 static const char *provider_openai_fallback_model(bool prefer_code) {
     const char *subscription = provider_openai_primary_model(prefer_code);
+    if (subscription && subscription[0] &&
+        !provider_model_has_explicit_openrouter_prefix(subscription) &&
+        !provider_env_truthy(getenv("DSCO_DISABLE_CODEX_OAUTH_DISCOVERY")) &&
+        provider_has_usable_key("openai-codex", NULL))
+        return subscription;
     if (subscription && strstr(subscription, "openai/"))
         return subscription;
     if (provider_has_usable_key("openrouter", NULL))
         return prefer_code ? "openrouter/openai/gpt-5.3-codex" : "openrouter/openai/gpt-5.4";
     return subscription;
+}
+
+static const char *provider_openai_subscription_fallback_model(bool prefer_code) {
+    if (provider_env_truthy(getenv("DSCO_DISABLE_CODEX_OAUTH_DISCOVERY")) ||
+        !provider_has_usable_key("openai-codex", NULL))
+        return NULL;
+    return provider_openai_primary_model(prefer_code);
 }
 
 int provider_build_default_fallback_models(const char *model, char out_models[][128],
@@ -5410,9 +5579,11 @@ int provider_build_default_fallback_models(const char *model, char out_models[][
         provider_append_unique_model(out_models, &count, max_models, requested_model,
                                      provider_family_primary_model("anthropic", false));
         provider_append_unique_model(out_models, &count, max_models, requested_model,
-                                     provider_xai_primary_model(prefer_code));
+                                     provider_openai_subscription_fallback_model(prefer_code));
         provider_append_unique_model(out_models, &count, max_models, requested_model,
                                      provider_family_primary_model("sakana", prefer_code));
+        provider_append_unique_model(out_models, &count, max_models, requested_model,
+                                     provider_xai_primary_model(prefer_code));
         provider_append_unique_model(out_models, &count, max_models, requested_model,
                                      provider_openai_fallback_model(prefer_code));
         provider_append_unique_model(out_models, &count, max_models, requested_model,

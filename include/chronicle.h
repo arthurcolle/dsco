@@ -41,6 +41,23 @@ const char *chronicle_session_id(void);
 const char *chronicle_root(void);
 const char *chronicle_db_path(void);
 
+/* Budget ledger summaries derived from llm.response.completed events. */
+typedef struct {
+    double cost_usd;
+    long long input_tokens;
+    long long output_tokens;
+    long long cache_read_tokens;
+    long long cache_write_tokens;
+    long long reasoning_tokens;
+    int response_count;
+} chronicle_cost_totals_t;
+
+/* session_id may be NULL/empty to query the active Chronicle session. */
+bool chronicle_cost_totals_for_session(const char *session_id, chronicle_cost_totals_t *out);
+
+/* Query all Chronicle LLM response cost recorded since local midnight. */
+bool chronicle_cost_totals_today(chronicle_cost_totals_t *out);
+
 /* IDs are UUID-ish v4 strings; buffers must be >= 37 bytes. */
 void chronicle_new_id(char *out, size_t out_len);
 
