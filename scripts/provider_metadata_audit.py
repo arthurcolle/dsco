@@ -73,6 +73,18 @@ def validate(name, r):
     impl = d.get("implemented_features", [])
     if impl and not d.get("tests"):
         errs.append("implemented_features present but no tests listed")
+    ac = r.get("api_coverage")
+    if ac is not None:
+        if not isinstance(ac, dict):
+            errs.append("api_coverage must be an object")
+        elif not isinstance(ac.get("endpoint_groups"), list) or not ac.get("endpoint_groups"):
+            errs.append("api_coverage.endpoint_groups must be a non-empty list")
+    cm = r.get("cost_management")
+    if cm is not None:
+        if not isinstance(cm, dict):
+            errs.append("cost_management must be an object")
+        elif not isinstance(cm.get("levers"), list) or not cm.get("levers"):
+            errs.append("cost_management.levers must be a non-empty list")
     return errs
 
 
@@ -107,6 +119,8 @@ def main():
         impl = ",".join(r.get("dsco", {}).get("implemented_features", [])) if "__error__" not in r else "-"
         missing = r.get("dsco", {}).get("missing_features", []) if "__error__" not in r else []
         risk = r.get("dsco", {}).get("risk", "?") if "__error__" not in r else "error"
+        coverage_groups = len(r.get("api_coverage", {}).get("endpoint_groups", [])) if "__error__" not in r else 0
+        cost_levers = len(r.get("cost_management", {}).get("levers", [])) if "__error__" not in r else 0
         report["providers"][name] = {
             "valid": not errs,
             "errors": errs,
@@ -114,11 +128,14 @@ def main():
             "mechanisms": mech,
             "implemented": impl or "-",
             "missing": missing,
+            "api_coverage_groups": coverage_groups,
+            "cost_levers": cost_levers,
             "risk": risk,
             "confidence": r.get("confidence"),
             "last_reviewed": r.get("last_reviewed"),
         }
-        rows.append((name, pc.get("status", "?"), risk, len(errs), len(missing), mech))
+        rows.append((name, pc.get("status", "?"), risk, len(errs), len(missing),
+                     coverage_groups, cost_levers, mech))
 
     report["summary"] = {
         "providers": len(recs),
@@ -141,14 +158,14 @@ def main():
         print()
 
     show_gaps = "--gaps" in args
-    print(f"{'provider':14} {'cache':10} {'risk':6} {'err':>3} {'miss':>4}  mechanisms")
-    print("-" * 80)
-    for name, status, risk, ne, nm, mech in rows:
+    print(f"{'provider':14} {'cache':10} {'risk':6} {'err':>3} {'miss':>4} {'api':>3} {'cost':>4}  mechanisms")
+    print("-" * 92)
+    for name, status, risk, ne, nm, api_n, cost_n, mech in rows:
         if show_gaps and risk != "high" and ne == 0 and nm == 0:
             continue
         flag = "FAIL" if ne else ""
-        print(f"{name:14} {status:10} {risk:6} {ne:>3} {nm:>4}  {mech} {flag}")
-    print("-" * 80)
+        print(f"{name:14} {status:10} {risk:6} {ne:>3} {nm:>4} {api_n:>3} {cost_n:>4}  {mech} {flag}")
+    print("-" * 92)
     s = report["summary"]
     print(f"providers={s['providers']} errors={s['errors']} high_risk={s['high_risk']} needs_review={s['needs_review']}")
     print(f"report -> {os.path.relpath(REPORT, ROOT)}")

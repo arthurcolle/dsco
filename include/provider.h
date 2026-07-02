@@ -116,8 +116,9 @@ const char *provider_claude_code_oauth_source(void);
 
 /* Sakana/Fugu supports both flat-rate subscription keys and metered PAYG keys.
  * The subscription key remains the default when both are present; set
- * DSCO_SAKANA_KEY_CLASS=payg or DSCO_PREFER_METERED_API=1 to prefer PAYG. */
+ * DSCO_SAKANA_KEY_CLASS=payg or DSCO_FUGU_KEY_CLASS=payg for explicit PAYG. */
 bool provider_sakana_current_key_is_subscription(void);
+const char *provider_sakana_subscription_request_key(void);
 bool provider_sakana_has_payg_key(void);
 const char *provider_sakana_payg_request_key(void);
 

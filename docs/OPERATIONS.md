@@ -66,7 +66,7 @@ From `agent.c`, key commands include:
 
 - `/clear`
 - `/model [name]`
-- `/effort [low|medium|high]`
+- `/effort [auto|none|minimal|low|medium|high|xhigh|max]`
 - `/cost`
 - `/context`
 - `/goal [objective|edit <objective>|pause|resume|blocked|complete|clear]`
@@ -250,7 +250,7 @@ debug files can contain prompts, documents, tool results, and provider payloads.
 | `DSCO_MAX_TOKENS` | Max output token reserve. Raise for long-form generation; lower for tight budget runs. |
 | `DSCO_MAX_AGENT_TURNS` | Checkpoint cadence for long agent loops, not the primary stop condition. Lower it for more frequent progress surfacing. |
 | `DSCO_HARD_TURN_CEILING` | Emergency runaway backstop. Leave at default outside stress testing. |
-| `DSCO_EFFORT` | Reasoning effort default. Common values are `low`, `medium`, `high`, `max`, or provider-specific equivalents. |
+| `DSCO_EFFORT` | Reasoning effort default. Common values are `auto`, `none`, `minimal`, `low`, `medium`, `high`, `xhigh`, `max`, or provider-specific equivalents. |
 | `DSCO_TEMPERATURE`, `DSCO_TOP_P`, `DSCO_TOP_K` | Sampling controls. Prefer unset for provider defaults; set only for repeatable experiments or creative generation. |
 | `DSCO_THINKING_BUDGET` | Provider reasoning-token budget. Use only with providers/models that support it. |
 | `DSCO_TOOL_CHOICE` | Default tool-choice policy. Use sparingly; interactive `/force` is safer for ad hoc control. |
@@ -269,6 +269,7 @@ debug files can contain prompts, documents, tool results, and provider payloads.
 | `OPENAI_API_KEY`, `OPENAI_KEY`, `CHATGPT_API_KEY` | OpenAI API key aliases. Use `OPENAI_API_KEY` as canonical. |
 | `DSCO_CHATGPT_OAUTH_TOKEN`, `CHATGPT_OAUTH_TOKEN`, `DSCO_CHATGPT_ACCOUNT_ID` | ChatGPT/Codex subscription auth overrides. Treat as secrets; prefer `dsco login`/Codex auth discovery. |
 | `DSCO_DISABLE_CODEX_OAUTH_DISCOVERY`, `DSCO_DISABLE_CHATGPT_NATIVE` | Truthy disables subscription/native ChatGPT routes. Use to force direct OpenAI API-key routing. |
+| `DSCO_CHATGPT_STREAM_IDLE_TIMEOUT_S` | ChatGPT/Codex native streaming idle timeout. Default is `300`; raise for long silent reasoning/tool phases, lower only for fast-fail debugging. |
 | `OPENROUTER_API_KEY` | OpenRouter fallback/routing credential. Use for namespaced `org/model` IDs and cross-provider fallbacks. |
 | `FUGU_API_KEY` | Canonical Sakana/Fugu credential. Required for `DSCO_EXEC=fugu`, `DSCO_EXEC=sakana`, `-e fugu`, or `--provider sakana`. |
 | `SAKANA_API_KEY`, `FISH_API_KEY`, `SAKANA_TOKEN` | Accepted aliases for `FUGU_API_KEY`. Prefer migrating durable config to `FUGU_API_KEY`. |

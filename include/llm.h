@@ -113,7 +113,7 @@ typedef struct {
     char   model[128];        /* current model ID */
     char   active_skill[128];
     char   active_topology[48];
-    char   effort[16];        /* "low", "medium", "high" */
+    char   effort[16];        /* empty=auto/provider default; otherwise effort value */
     dsco_trust_tier_t trust_tier; /* tool permission tier */
     bool   web_search;        /* enable server-side web search */
     bool   code_execution;    /* enable server-side code execution */
@@ -146,6 +146,9 @@ typedef struct {
     bool   compact_enabled;
     /* Tool choice: "" = auto, "any" = any, "tool:name" = force specific */
     char   tool_choice[128];
+    /* Per-prompt direct-answer gate: omit tool schemas and force answer-only behavior
+     * for conceptual/explanatory prompts that do not require local/world state. */
+    bool   direct_answer_mode;
     /* Prefill: pre-seed assistant response (legacy lightweight format control) */
     char   prefill[1024];
     /* Structured output contract: first-class JSON/schema mode for workflows. */

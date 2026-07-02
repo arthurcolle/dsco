@@ -242,6 +242,10 @@ OPENROUTER_API_KEY=... ./dsco -m openrouter/anthropic/claude-sonnet-4 "review sr
 FUGU_API_KEY=... ./dsco -e fugu "write a release checklist"
 ```
 
+For project-local secrets, DSCO also loads `.env` from the current directory
+without overriding live environment variables or the saved setup env file. Use
+`--env-file PATH` when you want a specific env file for one run.
+
 Common entry points:
 
 ```bash
@@ -376,6 +380,31 @@ DSCO can load external tools from:
 - MCP servers configured in `~/.dsco/mcp.json`
 - dynamic plugins under `~/.dsco/plugins`
 - compatibility aliases such as `Read`, `Write`, `Edit`, `Bash`, `Task`, and `Agent`
+
+Pin a single MCP server for one run with `--mcp-server NAME` or
+`DSCO_MCP_SERVER=NAME`. For example, this project includes `.mcp.json` with an
+OpenRouter remote MCP server named `openrouter`:
+
+```bash
+printf 'OPENROUTER_API_KEY=sk-or-...\n' > .env
+./dsco --mcp-server openrouter -m openrouter/anthropic/claude-sonnet-4 -i
+```
+
+The MCP config can keep secrets out of JSON by referencing environment variables:
+
+```json
+{
+  "mcpServers": {
+    "openrouter": {
+      "url": "https://mcp.openrouter.ai/mcp",
+      "transport": "http",
+      "headers": {
+        "Authorization": "Bearer $OPENROUTER_API_KEY"
+      }
+    }
+  }
+}
+```
 
 External tools can carry integration metadata: connector ID, display name,
 distribution channel, categories, labels, scope, catalog status, and action flags.
@@ -717,6 +746,7 @@ provider configuration.
 |---|---|
 | `~/.dsco` | Default local DSCO state root. |
 | `DSCO_ENV_FILE` | Overrides the setup env file used for saved provider/config values. |
+| `DSCO_MCP_SERVER` | Comma-separated MCP server names to load; `*` or `all` loads all. |
 | `DSCO_BASELINE_DB` | Overrides the Baseline SQLite timeline path. |
 | `DSCO_CHRONICLE_DIR` | Overrides Chronicle ledger/blob storage. |
 | `~/.dsco/mcp.json` | MCP server configuration. |

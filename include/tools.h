@@ -40,6 +40,10 @@ void             tools_set_runtime_api_key(const char *api_key);
 void             tools_set_runtime_model(const char *model);
 const char      *tools_runtime_api_key(void);
 const char      *tools_runtime_model(void);
+/* self_exit is disabled during normal conversational turns. It may be enabled
+ * only for explicit autonomous goal/supervisor runs. */
+void             tools_set_self_exit_allowed(bool allowed);
+bool             tools_self_exit_allowed(void);
 /* Context-aware offload: set the model's context window so offload threshold
  * is computed as a ratio of available context, not a fixed byte count. */
 void             tools_set_context_window(int tokens);
@@ -50,6 +54,12 @@ void             tools_set_context_usage(int input_tokens, int output_tokens);
 void             tools_set_tool_schema_usage(int active_tools, int schema_tokens);
 /* Toggle inline tool-result truncation. Off = full output (human/raw dumps). */
 void             tools_set_inline_truncation(bool enabled);
+/* Per-thread trace context for tool internals that emit mechanism events. */
+void             tools_set_trace_context(const char *trace_id,
+                                         const char *chronicle_parent_span_id,
+                                         const char *chronicle_tool_span_id,
+                                         const char *tool_name);
+void             tools_clear_trace_context(void);
 void             tools_context_turn_begin(void);
 swarm_t         *tools_swarm_instance(void);
 const tool_def_t *tools_get_all(int *count);

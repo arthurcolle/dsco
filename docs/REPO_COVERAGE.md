@@ -6,22 +6,23 @@ This manifest is generated from `git ls-files` plus the coverage generator/outpu
 
 ## Summary
 
-- Total covered files: 534
+- Total covered files: 598
 
 | Category | Files |
 |---|---:|
-| Root project files | 17 |
+| Root project files | 20 |
 | Repository policy and CI | 15 |
-| Documentation | 31 |
-| Runtime source and headers | 239 |
-| Tests | 22 |
-| Scripts and tooling | 29 |
-| Generated data assets | 2 |
+| Documentation | 46 |
+| Runtime source and headers | 244 |
+| Tests | 26 |
+| Scripts and tooling | 44 |
+| Generated data assets | 8 |
 | Provider metadata | 17 |
-| Web surface | 3 |
+| Web surface | 11 |
 | Packaging and distribution | 12 |
 | Demos | 3 |
 | Vendored and compatibility code | 144 |
+| Other tracked files | 8 |
 
 ## Generated Coverage
 
@@ -40,13 +41,16 @@ This manifest is generated from `git ls-files` plus the coverage generator/outpu
 - `.gitattributes`
 - `.gitignore`
 - `.markdownlint-cli2.yaml`
+- `.mcp.json`
 - `.pre-commit-config.yaml`
 - `CHANGELOG.md`
 - `CODEOWNERS`
 - `CODE_OF_CONDUCT.md`
 - `CONTRIBUTING.md`
+- `GOVERNANCE_HOLD.md`
 - `LICENSE`
 - `Makefile`
+- `PRAXIS_ARCHITECTURE.md`
 - `README.md`
 - `SECURITY.md`
 - `dsc.c`
@@ -75,12 +79,18 @@ This manifest is generated from `git ls-files` plus the coverage generator/outpu
 - `docs/API_REFERENCE.md`
 - `docs/ARCHITECTURE.md`
 - `docs/AVIAN_MECHANISMS.md`
+- `docs/BLOG_MODAL_TOOL_CALLING.html`
+- `docs/BLOG_MODAL_TOOL_CALLING.md`
 - `docs/CHRONICLE_TOKENLEDGER.md`
+- `docs/CLOUD_ENDPOINTS_MODAL_COMPATIBILITY.html`
 - `docs/CONSTANTS_ENV_INDEX.md`
 - `docs/COSMOPOLITAN.md`
 - `docs/C_MODULE_REFERENCE.md`
 - `docs/DIAGRAMS.md`
+- `docs/DISTRIBUTED_AGENT_PERFORMANCE.md`
 - `docs/DOCS_CONTRIBUTING.md`
+- `docs/EXAMPLES.md`
+- `docs/EXECUTION_PROFILING.md`
 - `docs/EXTERNAL_TOOL_CATALOG.md`
 - `docs/HOW_TO.md`
 - `docs/INDEX.md`
@@ -93,7 +103,16 @@ This manifest is generated from `git ls-files` plus the coverage generator/outpu
 - `docs/RUNBOOKS.md`
 - `docs/RUNBOOK_INDEX.md`
 - `docs/SAKANA_FUGU_PROVIDER.md`
+- `docs/STRUCTURED_PROCESS.md`
+- `docs/SWARM_PARALLELISM_PROOF.md`
 - `docs/TOOL_CATALOG.md`
+- `docs/WASM.md`
+- `docs/consumer_profile_ontology/ARCHITECTURE.md`
+- `docs/consumer_profile_ontology/EXTENDED_50K.md`
+- `docs/consumer_profile_ontology/EXTENDED_50K_WITH_BOUNDARIES.md`
+- `docs/consumer_profile_ontology/HYPER_PRIVATE_BOUNDARIES.md`
+- `docs/consumer_profile_ontology/POLICY.md`
+- `docs/consumer_profile_ontology/README.md`
 - `docs/topologies/01_chains.md`
 - `docs/topologies/02_fanout.md`
 - `docs/topologies/03_hierarchy.md`
@@ -205,6 +224,7 @@ This manifest is generated from `git ls-files` plus the coverage generator/outpu
 - `include/simd.h`
 - `include/startup.h`
 - `include/stateful_atoms.h`
+- `include/structured_process.h`
 - `include/supervisor.h`
 - `include/swarm.h`
 - `include/talons.h`
@@ -224,6 +244,7 @@ This manifest is generated from `git ls-files` plus the coverage generator/outpu
 - `include/vecstore_metal.h`
 - `include/vfs.h`
 - `include/vm.h`
+- `include/wasm_core.h`
 - `include/watchdog.h`
 - `include/workspace.h`
 - `src/agent.c`
@@ -271,6 +292,7 @@ This manifest is generated from `git ls-files` plus the coverage generator/outpu
 - `src/hlc.c`
 - `src/http_pool.c`
 - `src/img_util.c`
+- `src/instrumenter.c`
 - `src/integration_fabric.c`
 - `src/integrations.c`
 - `src/introspect.c`
@@ -325,6 +347,7 @@ This manifest is generated from `git ls-files` plus the coverage generator/outpu
 - `src/shadeexpr.c`
 - `src/startup.c`
 - `src/stateful_atoms.c`
+- `src/structured_process.c`
 - `src/supervisor.c`
 - `src/swarm.c`
 - `src/talons.c`
@@ -343,6 +366,7 @@ This manifest is generated from `git ls-files` plus the coverage generator/outpu
 - `src/vecstore_metal.metal`
 - `src/vfs.c`
 - `src/vm.c`
+- `src/wasm_core.c`
 - `src/watchdog.c`
 - `src/workspace.c`
 
@@ -352,6 +376,8 @@ This manifest is generated from `git ls-files` plus the coverage generator/outpu
 - `tests/__init__.py`
 - `tests/gen_math_corpus.py`
 - `tests/math_corpus.tsv`
+- `tests/mcp_openrouter_smoke.c`
+- `tests/scratchpad_test.c`
 - `tests/test.c`
 - `tests/test_17_layers.sh`
 - `tests/test_avian.c`
@@ -360,6 +386,7 @@ This manifest is generated from `git ls-files` plus the coverage generator/outpu
 - `tests/test_hlc.c`
 - `tests/test_learned_cost.c`
 - `tests/test_math_corpus.c`
+- `tests/test_memory_keep_score.c`
 - `tests/test_nwp_pipeline.py`
 - `tests/test_openrouter.c`
 - `tests/test_plan_cache.c`
@@ -369,6 +396,7 @@ This manifest is generated from `git ls-files` plus the coverage generator/outpu
 - `tests/test_stateful_atoms.c`
 - `tests/test_tui_snapshot.c`
 - `tests/test_tui_theme_snapshot.c`
+- `tests/test_wasm_core.c`
 - `tests/test_web_server.py`
 
 ### Scripts and tooling
@@ -385,12 +413,18 @@ This manifest is generated from `git ls-files` plus the coverage generator/outpu
 - `scripts/check_version_consistency.sh`
 - `scripts/clang_format_apply.sh`
 - `scripts/clang_format_check.sh`
+- `scripts/consumer_profile_ontology/generate_extended_ontology.py`
+- `scripts/consumer_profile_ontology/generate_extended_with_boundaries.py`
+- `scripts/consumer_profile_ontology/generate_hyper_private_boundaries.py`
+- `scripts/consumer_profile_ontology/generate_ontology.py`
 - `scripts/cosmo_bootstrap.sh`
 - `scripts/cosmo_build.sh`
 - `scripts/dev_fast.sh`
 - `scripts/dsco.gdbinit`
 - `scripts/dsco.lldbinit`
+- `scripts/dsco_profile.py`
 - `scripts/dsco_run_watch.py`
+- `scripts/elf_symbol_graph_audit.py`
 - `scripts/fast_touch.sh`
 - `scripts/gen_api_reference.sh`
 - `scripts/gen_compile_commands.py`
@@ -398,14 +432,29 @@ This manifest is generated from `git ls-files` plus the coverage generator/outpu
 - `scripts/gen_ninja.py`
 - `scripts/gen_repo_coverage.py`
 - `scripts/gen_tool_catalog.sh`
+- `scripts/generate_agency_graph_ui.py`
 - `scripts/index_constants_env.py`
 - `scripts/live_face_avatar.sh`
+- `scripts/mine_book_pages.py`
 - `scripts/provider_metadata_audit.py`
+- `scripts/qualify_provisioned_dsco.sh`
+- `scripts/release_hardened.py`
 - `scripts/setup_homebrew_tap.sh`
+- `scripts/slot_inventory.py`
+- `scripts/test_modal_dsco_live.sh`
+- `scripts/test_modal_openai_params.sh`
+- `scripts/test_modal_tool_calling.sh`
+- `scripts/verifiable_agency_capsule.py`
 
 ### Generated data assets
 
 - `data/constants_env_index.json`
+- `data/consumer_profile_ontology/example_user_profile.json`
+- `data/consumer_profile_ontology/prohibited_patterns.json`
+- `data/consumer_profile_ontology/summary.json`
+- `data/consumer_profile_ontology/summary_base_with_boundaries.json`
+- `data/consumer_profile_ontology/summary_extended_50k.json`
+- `data/consumer_profile_ontology/summary_extended_50k_with_boundaries.json`
 - `data/tool_embeddings.bin`
 
 ### Provider metadata
@@ -432,7 +481,15 @@ This manifest is generated from `git ls-files` plus the coverage generator/outpu
 
 - `web/requirements.txt`
 - `web/server.py`
+- `web/static/admin.html`
+- `web/static/agency_graph.html`
+- `web/static/dsco_wasm.js`
+- `web/static/dsco_wasm.wasm`
+- `web/static/dsco_wasm_demo.html`
+- `web/static/elf_symbols.html`
+- `web/static/engine.html`
 - `web/static/index.html`
+- `web/static/management.html`
 
 ### Packaging and distribution
 
@@ -601,3 +658,14 @@ This manifest is generated from `git ls-files` plus the coverage generator/outpu
 - `vendor/vec.h`
 - `vendor/yyjson.c`
 - `vendor/yyjson.h`
+
+### Other tracked files
+
+- `doctrine/MEMORY.md`
+- `doctrine/MEMORY_UPGRADE_2026-06-28.md`
+- `proposals/PRAXIS-v1/GATE.md`
+- `proposals/PRAXIS-v1/PROPOSAL.md`
+- `schemas/consumer_profile_ontology/activation_request.schema.json`
+- `schemas/consumer_profile_ontology/evidence_event.schema.json`
+- `schemas/consumer_profile_ontology/facet_definition.schema.json`
+- `schemas/consumer_profile_ontology/user_facet_value.schema.json`

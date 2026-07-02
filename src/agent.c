@@ -8,6 +8,7 @@
 #include "self_improve.h"
 #include "error.h"
 #include "config.h"
+#include "cost_budget.h"
 #include "json_util.h"
 #include "ipc.h"
 #include "tui.h"
@@ -99,62 +100,6 @@ static void agent_request_pause(void) {
         g_interrupted = 1;
         mcp_cancel();
     }
-}
-
-/* Follow-up composer: while a turn is running, keep stdin owned by a real
- * composer and enqueue submitted messages for the next user turns. */
-#define FOLLOWUP_QUEUE_CAP 8
-typedef struct {
-    pthread_mutex_t mutex;
-    char messages[FOLLOWUP_QUEUE_CAP][MAX_INPUT_LINE];
-    int head;
-    int tail;
-    int count;
-} followup_queue_t;
-
-typedef struct {
-    tui_status_bar_t *sb;
-    followup_queue_t *queue;
-    volatile bool stop;
-    volatile bool running;
-    pthread_t thread;
-} followup_reader_t;
-
-static void followup_queue_init(followup_queue_t *q) {
-    memset(q, 0, sizeof(*q));
-    pthread_mutex_init(&q->mutex, NULL);
-}
-
-static void followup_queue_destroy(followup_queue_t *q) {
-    pthread_mutex_destroy(&q->mutex);
-}
-
-static bool followup_queue_push(followup_queue_t *q, const char *msg) {
-    if (!q || !msg || !msg[0])
-        return false;
-    pthread_mutex_lock(&q->mutex);
-    bool ok = q->count < FOLLOWUP_QUEUE_CAP;
-    if (ok) {
-        snprintf(q->messages[q->tail], sizeof(q->messages[q->tail]), "%s", msg);
-        q->tail = (q->tail + 1) % FOLLOWUP_QUEUE_CAP;
-        q->count++;
-    }
-    pthread_mutex_unlock(&q->mutex);
-    return ok;
-}
-
-static bool followup_queue_pop(followup_queue_t *q, char *out, size_t out_sz) {
-    if (!q || !out || out_sz == 0)
-        return false;
-    pthread_mutex_lock(&q->mutex);
-    bool ok = q->count > 0;
-    if (ok) {
-        snprintf(out, out_sz, "%s", q->messages[q->head]);
-        q->head = (q->head + 1) % FOLLOWUP_QUEUE_CAP;
-        q->count--;
-    }
-    pthread_mutex_unlock(&q->mutex);
-    return ok;
 }
 
 /* Timestamp when current agent turn started (for pause display) */
@@ -659,18 +604,81 @@ static void init_cost_budgets(void) {
 }
 
 static double session_cost(const session_state_t *session) {
-    /* Prefer the accumulated authoritative cost (provider-reported when
-     * available, else per-turn token math). Falls back to recomputing from
-     * cumulative tokens only before any turn has been accounted. */
-    if (session->total_reported_cost_usd > 0)
-        return session->total_reported_cost_usd;
-    const model_info_t *mi = model_lookup(session->model);
-    if (!mi)
+    return cost_budget_session_spent_usd(session);
+}
+
+static int usage_cache_denominator(const usage_t *u) {
+    if (!u)
         return 0;
-    return session->total_input_tokens * mi->input_price / 1e6 +
-           session->total_output_tokens * mi->output_price / 1e6 +
-           session->total_cache_read_tokens * mi->cache_read_price / 1e6 +
-           session->total_cache_write_tokens * mi->cache_write_price / 1e6;
+    return u->input_tokens + u->cache_read_input_tokens + u->cache_creation_input_tokens;
+}
+
+static double usage_cache_hit_ratio(const usage_t *u) {
+    int denom = usage_cache_denominator(u);
+    if (denom <= 0 || !u)
+        return 0.0;
+    return (double)u->cache_read_input_tokens / (double)denom;
+}
+
+static int session_cache_denominator(const session_state_t *session) {
+    if (!session)
+        return 0;
+    return session->total_input_tokens + session->total_cache_read_tokens +
+           session->total_cache_write_tokens;
+}
+
+static double session_cache_hit_ratio(const session_state_t *session) {
+    int denom = session_cache_denominator(session);
+    if (denom <= 0 || !session)
+        return 0.0;
+    return (double)session->total_cache_read_tokens / (double)denom;
+}
+
+typedef enum {
+    CACHE_EXPECT_NONE = 0,
+    CACHE_EXPECT_EXPLICIT_BREAKPOINTS,
+    CACHE_EXPECT_AUTOMATIC_PROVIDER,
+} cache_expectation_t;
+
+static cache_expectation_t model_cache_expectation(const char *model) {
+    if (provider_model_supports_cache_control(model))
+        return CACHE_EXPECT_EXPLICIT_BREAKPOINTS;
+    if (provider_model_supports_automatic_prompt_cache(model))
+        return CACHE_EXPECT_AUTOMATIC_PROVIDER;
+    return CACHE_EXPECT_NONE;
+}
+
+static bool usage_has_cache_telemetry(const usage_t *u) {
+    return u && (u->cache_read_input_tokens > 0 || u->cache_creation_input_tokens > 0);
+}
+
+static bool session_has_cache_telemetry(const session_state_t *session) {
+    return session && (session->total_cache_read_tokens > 0 || session->total_cache_write_tokens > 0);
+}
+
+static const char *cache_expectation_label(cache_expectation_t expectation) {
+    switch (expectation) {
+    case CACHE_EXPECT_EXPLICIT_BREAKPOINTS:
+        return "explicit-breakpoint";
+    case CACHE_EXPECT_AUTOMATIC_PROVIDER:
+        return "automatic-provider";
+    case CACHE_EXPECT_NONE:
+    default:
+        return "none";
+    }
+}
+
+static const char *cache_status_label(const char *model, const usage_t *u, const session_state_t *session) {
+    cache_expectation_t expectation = model_cache_expectation(model);
+    if (usage_has_cache_telemetry(u))
+        return "observed";
+    if (session_has_cache_telemetry(session))
+        return "warm-session";
+    if (expectation == CACHE_EXPECT_AUTOMATIC_PROVIDER)
+        return "telemetry-pending";
+    if (expectation == CACHE_EXPECT_EXPLICIT_BREAKPOINTS)
+        return "cold";
+    return "n/a";
 }
 
 static bool check_cost_budget(session_state_t *session) {
@@ -711,6 +719,30 @@ static bool check_cost_budget(session_state_t *session) {
     return true;
 }
 
+static void update_budget_hud(tui_status_bar_t *sb, const session_state_t *session,
+                              double session_started_at) {
+    if (!sb || !session || g_cost_budget <= 0.0) {
+        tui_status_bar_set_budget(sb, 0.0, 0.0, 0.0, -1.0);
+        return;
+    }
+
+    double cost = session_cost(session);
+    double elapsed_seconds = now_ms() - session_started_at;
+    double burn_rate = 0.0;
+    if (elapsed_seconds > 1.0 && cost > 0.0)
+        burn_rate = cost / (elapsed_seconds / 3600.0);
+
+    double percent = (cost / g_cost_budget) * 100.0;
+    double runway = -1.0;
+    if (cost >= g_cost_budget) {
+        runway = 0.0;
+    } else if (burn_rate > 0.0) {
+        runway = ((g_cost_budget - cost) / burn_rate) * 3600.0;
+    }
+
+    tui_status_bar_set_budget(sb, g_cost_budget, burn_rate, percent, runway);
+}
+
 /* ── Provider management ───────────────────────────────────────────────── */
 
 static provider_t *g_provider = NULL;
@@ -719,6 +751,49 @@ static const char *g_provider_override_name = NULL;
 static bool env_truthy(const char *value) {
     return value &&
            (value[0] == '1' || strcasecmp(value, "true") == 0 || strcasecmp(value, "yes") == 0);
+}
+
+static bool str_contains_ci_local(const char *haystack, const char *needle) {
+    if (!haystack || !needle || !needle[0])
+        return false;
+    size_t nl = strlen(needle);
+    for (const char *p = haystack; *p; p++) {
+        size_t i = 0;
+        while (i < nl && p[i] && tolower((unsigned char)p[i]) ==
+                              tolower((unsigned char)needle[i]))
+            i++;
+        if (i == nl)
+            return true;
+    }
+    return false;
+}
+
+static bool user_prompt_should_direct_answer(const char *input) {
+    if (!input || !input[0])
+        return false;
+    if (env_truthy(getenv("DSCO_DISABLE_DIRECT_ANSWER_GATE")))
+        return false;
+
+    /* Explicit local/world/code/data actions need tools. */
+    static const char *tool_markers[] = {
+        "fix", "patch", "edit", "modify", "write file", "create file", "repo", "codebase",
+        "run ", "test", "compile", "build", "grep", "search the web", "look up",
+        "inspect", "analyze logs", "csv", "json file", "database", "git ", "commit",
+        "deploy", "install", "download", "scrape", "browse", "open ", "read file", NULL};
+    for (int i = 0; tool_markers[i]; i++)
+        if (str_contains_ci_local(input, tool_markers[i]))
+            return false;
+
+    /* Self-contained conceptual/explanatory prompts should not pay tool tax. */
+    static const char *direct_markers[] = {
+        "what is", "who is", "explain", "define", "why", "how does", "how do", "compare",
+        "summarize the concept", "mathematical theory", "math theory", "model how",
+        "derive", "intuition", "overview", "teach me", "give me theory", "what are", NULL};
+    for (int i = 0; direct_markers[i]; i++)
+        if (str_contains_ci_local(input, direct_markers[i]))
+            return true;
+
+    return false;
 }
 
 typedef struct {
@@ -763,27 +838,30 @@ static bool provider_failover_available(const char *provider, const char *api_ke
     return true;
 }
 
-static bool g_sakana_payg_overflow_active = false;
+#define DSCO_UNKNOWN_SUBSCRIPTION_RESET_SECS 300
 
-static bool provider_should_force_sakana_payg(const char *provider) {
-    if (!provider || strcmp(provider, "sakana") != 0)
-        return false;
-    if (!provider_sakana_has_payg_key())
-        return false;
-    /* Once subscription exhaustion has been observed and PAYG succeeds, keep
-     * Sakana on the metered overflow key for the rest of the process.  Do not
-     * depend solely on the provider-pool slot's is_subscription bit: PAYG
-     * retries temporarily mark the slot metered so provider_pool_report()
-     * doesn't clear the persisted subscription reset timestamp. */
-    if (g_sakana_payg_overflow_active)
-        return true;
-    return provider_pool_subscription_exhausted_until("sakana") > time(NULL);
+static time_t subscription_exhausted_until_for_retry(const char *provider,
+                                                     const stream_result_t *sr) {
+    time_t now = time(NULL);
+    if (sr && sr->credit_reset_at > now)
+        return sr->credit_reset_at;
+    time_t existing = provider_pool_subscription_exhausted_until(provider);
+    if (existing > now)
+        return existing;
+    return now + DSCO_UNKNOWN_SUBSCRIPTION_RESET_SECS;
 }
 
 static bool stream_result_is_credit_exhausted(const stream_result_t *sr) {
     if (!sr || sr->ok)
         return false;
     if (sr->http_status == 402 || sr->http_status == 429)
+        return true;
+    /* Recognize the internal credit_too_low sentinel that llm.c / provider.c
+     * propagate as stop_reason for billing failures that surface as HTTP 400
+     * (e.g. Anthropic "credit balance is too low"). Without this, a depleted
+     * key hard-stops instead of failing over — see agent.c dynamic-failover. */
+    if (sr->parsed.stop_reason &&
+        strcmp(sr->parsed.stop_reason, "credit_too_low") == 0)
         return true;
     return provider_msg_is_credit_too_low(sr->parsed.stop_reason);
 }
@@ -932,18 +1010,38 @@ static bool ensure_provider(session_state_t *session, const char *api_key) {
     return ensure_provider_with_override(session, api_key, g_provider_override_name);
 }
 
+static void refresh_default_fallbacks_for_model(session_state_t *session) {
+    if (!session)
+        return;
+    memset(session->fallback_models, 0, sizeof(session->fallback_models));
+    session->fallback_count = 0;
+    if (env_truthy(getenv("DSCO_DISABLE_DEFAULT_FALLBACKS")))
+        return;
+    session->fallback_count = provider_build_default_fallback_models(
+        session->model, session->fallback_models,
+        (int)(sizeof(session->fallback_models) / sizeof(session->fallback_models[0])));
+}
+
+static void apply_interactive_model_switch(session_state_t *session, const char *api_key,
+                                           bool fallback_user_configured) {
+    if (!session)
+        return;
+    const char *auto_provider = provider_route_for_model(session->model, api_key, NULL);
+    if (g_provider_override_name && auto_provider && auto_provider[0] &&
+        strcmp(g_provider_override_name, auto_provider) != 0) {
+        g_provider_override_name = NULL;
+    }
+    if (!fallback_user_configured)
+        refresh_default_fallbacks_for_model(session);
+    ensure_provider(session, api_key);
+    tui_set_title_fmt("dsco · %s", session->model);
+}
+
 /* Resolve the API key for the current provider, falling back to the session
  * key (typically the Anthropic key) if the provider has no key of its own. */
 static const char *resolve_provider_key(const char *session_key) {
     if (!g_provider)
         return session_key;
-    if (provider_should_force_sakana_payg(g_provider->name)) {
-        const char *payg = provider_sakana_payg_request_key();
-        if (payg && payg[0]) {
-            setenv("DSCO_SAKANA_KEY_CLASS", "payg", 1);
-            return payg;
-        }
-    }
     const char *k = provider_resolve_request_api_key(g_provider->name, session_key);
     return (k && k[0]) ? k : session_key;
 }
@@ -2259,6 +2357,10 @@ static void print_cost(session_state_t *session) {
     if (session->total_cache_write_tokens > 0)
         fprintf(stderr, "  %sCache write:%s %d tokens  ($%.4f)\n", TUI_DIM, TUI_RESET,
                 session->total_cache_write_tokens, cw_cost);
+    if (session_cache_denominator(session) > 0)
+        fprintf(stderr, "  %sCache hit:%s   %.1f%%  (%d read / %d input-side tokens)\n",
+                TUI_DIM, TUI_RESET, session_cache_hit_ratio(session) * 100.0,
+                session->total_cache_read_tokens, session_cache_denominator(session));
     fprintf(stderr, "  %s%s──────────────────────%s\n", TUI_BOLD, TUI_CYAN, TUI_RESET);
     fprintf(stderr, "  %sTotal:%s       %s$%.4f%s\n\n", TUI_BOLD, TUI_RESET, TUI_BGREEN, total,
             TUI_RESET);
@@ -2813,7 +2915,7 @@ static const slash_command_t s_slash_commands[] = {
     {"/route", "show/update model routing policy"},
     {"/cost", "show session cost"},
     {"/context", "show context usage"},
-    {"/effort", "set effort: low/medium/high"},
+    {"/effort", "set reasoning effort"},
     {"/goal", "show or set active session goal"},
     {"/goal pause", "pause active session goal"},
     {"/goal resume", "resume paused/blocked session goal"},
@@ -3075,7 +3177,8 @@ static char *command_generator(const char *text, int state) {
              4=/exec, 5=/temp, 6=/thinking, 7=/route */
     static int idx, len, model_idx, arg_idx, mode;
 
-    static const char *effort_args[] = {"low", "medium", "high", NULL};
+    static const char *effort_args[] = {"auto", "none", "minimal", "low",
+                                        "medium", "high", "xhigh", "max", NULL};
     static const char *trust_args[] = {"trusted", "standard", "untrusted", NULL};
     static const char *exec_args[] = {"claude", "codex", "list", NULL};
     static const char *route_args[] = {"status",    "policy", "budget", "history",
@@ -3283,7 +3386,6 @@ static tui_latency_breakdown_t s_last_latency;
 static tui_stream_heartbeat_t s_heartbeat;
 static void terminal_input_echo_suspend(void);
 static void terminal_input_echo_restore(void);
-static void terminal_input_echo_restore_preserve_input(void);
 static struct termios s_saved_termios;
 static bool s_saved_termios_valid = false;
 static bool s_input_echo_suspended = false;
@@ -3347,15 +3449,6 @@ static void terminal_input_echo_restore(void) {
     s_input_echo_suspended = false;
 }
 
-static void terminal_input_echo_restore_preserve_input(void) {
-    if (!s_input_echo_suspended || !isatty(STDIN_FILENO))
-        return;
-    if (s_saved_termios_valid) {
-        tcsetattr(STDIN_FILENO, TCSANOW, &s_saved_termios);
-    }
-    s_input_echo_suspended = false;
-}
-
 /* ── ESC key poller thread ─────────────────────────────────────────────── */
 /* Runs during LLM streaming (stdin is in raw non-blocking mode).
    Detects a standalone ESC (0x1b) and triggers the pause state machine.
@@ -3412,71 +3505,6 @@ static void esc_poller_stop(void) {
         return;
     g_esc_poller_active = 0;
     pthread_join(g_esc_poller_tid, NULL);
-}
-
-static bool followup_escape_hook(void *ctx) {
-    followup_reader_t *r = (followup_reader_t *)ctx;
-    if (r)
-        r->stop = true;
-    agent_request_pause();
-    return true;
-}
-
-static void *followup_reader_thread_fn(void *arg) {
-    followup_reader_t *r = (followup_reader_t *)arg;
-    char buf[MAX_INPUT_LINE];
-    r->running = true;
-    tui_composer_set_escape_hook(followup_escape_hook, r);
-    while (!r->stop) {
-        char *line = tui_composer_read(r->sb, NULL, buf, sizeof(buf));
-        if (r->stop)
-            break;
-        if (!line)
-            break;
-        dsco_strip_terminal_controls_inplace(buf);
-        if (buf[0]) {
-            if (followup_queue_push(r->queue, buf))
-                tui_panel_notify(r->sb, TUI_PANEL_NOTE_OK, "queued follow-up");
-            else
-                tui_panel_notify(r->sb, TUI_PANEL_NOTE_WARN, "follow-up queue full");
-        }
-    }
-    tui_composer_set_escape_hook(NULL, NULL);
-    r->running = false;
-    return NULL;
-}
-
-static bool followup_reader_start(followup_reader_t *r, tui_status_bar_t *sb,
-                                  followup_queue_t *queue) {
-    if (!r)
-        return false;
-    memset(r, 0, sizeof(*r));
-    const char *enabled = getenv("DSCO_FOLLOWUP_COMPOSER");
-    if (enabled && (enabled[0] == '0' || strcasecmp(enabled, "false") == 0 ||
-                    strcasecmp(enabled, "no") == 0 || strcasecmp(enabled, "off") == 0))
-        return false;
-    if (!sb || !sb->visible || !isatty(STDIN_FILENO))
-        return false;
-    r->sb = sb;
-    r->queue = queue;
-    if (pthread_create(&r->thread, NULL, followup_reader_thread_fn, r) != 0) {
-        memset(r, 0, sizeof(*r));
-        return false;
-    }
-    for (int i = 0; i < 100 && !tui_composer_is_reading(); i++) {
-        struct timespec ts = {.tv_sec = 0, .tv_nsec = 2 * 1000 * 1000};
-        nanosleep(&ts, NULL);
-    }
-    return true;
-}
-
-static void followup_reader_stop(followup_reader_t *r) {
-    if (!r || !r->sb)
-        return;
-    r->stop = true;
-    tui_composer_signal_interrupt();
-    pthread_join(r->thread, NULL);
-    memset(r, 0, sizeof(*r));
 }
 
 /* ── Pause menu ────────────────────────────────────────────────────────── */
@@ -3773,7 +3801,6 @@ static void extract_tool_preview(const char *name, const char *input_json, char 
  *   ok    — only meaningful for tool_response; selects green vs red bar
  *   trail — extra text appended on the header line after the role (may be NULL) */
 static void print_role_header(const char *role, bool ok, const char *trail) {
-    tui_prepare_external_output();
     bool rgb = tui_detect_color_level() >= TUI_COLOR_256;
     /* Bar color per role: cyan user, mauve assistant, orange tool_call,
      * green/red tool_response based on `ok`. */
@@ -3961,6 +3988,10 @@ static void print_local_usage_answer(const session_state_t *session, const usage
         fprintf(stderr, " cache-read=%d", last_usage->cache_read_input_tokens);
     if (last_usage && last_usage->cache_creation_input_tokens > 0)
         fprintf(stderr, " cache-write=%d", last_usage->cache_creation_input_tokens);
+    if (usage_cache_denominator(last_usage) > 0) {
+        fprintf(stderr, " cache-hit=%.1f%%", usage_cache_hit_ratio(last_usage) * 100.0);
+        fprintf(stderr, " cache-status=%s", cache_status_label(last_model, last_usage, session));
+    }
     fprintf(stderr, "\n");
 
     if (!last_cost_known)
@@ -3993,6 +4024,13 @@ static void print_usage_ex(usage_t *u, const char *model, session_state_t *sessi
             fprintf(stderr, " \033[38;2;%d;%d;%dmcache-write:%d", cw.r, cw.g, cw.b,
                     u->cache_creation_input_tokens);
         }
+        if (usage_cache_denominator(u) > 0) {
+            tui_rgb_t hit_c = tui_hsv_to_rgb(180.0f, 0.22f, 0.62f);
+            fprintf(stderr, " \033[38;2;%d;%d;%dmhit:%.0f%%", hit_c.r, hit_c.g, hit_c.b,
+                    usage_cache_hit_ratio(u) * 100.0);
+            fprintf(stderr, " \033[38;2;%d;%d;%dmcache:%s", hit_c.r, hit_c.g, hit_c.b,
+                    cache_status_label(model, u, session));
+        }
 
         const model_info_t *mi = model_lookup(model);
         if (mi) {
@@ -4023,6 +4061,10 @@ static void print_usage_ex(usage_t *u, const char *model, session_state_t *sessi
             fprintf(stderr, " cache-read:%d", u->cache_read_input_tokens);
         if (u->cache_creation_input_tokens > 0)
             fprintf(stderr, " cache-write:%d", u->cache_creation_input_tokens);
+        if (usage_cache_denominator(u) > 0) {
+            fprintf(stderr, " hit:%.0f%%", usage_cache_hit_ratio(u) * 100.0);
+            fprintf(stderr, " cache:%s", cache_status_label(model, u, session));
+        }
         const model_info_t *mi = model_lookup(model);
         if (mi) {
             double turn_cost = u->input_tokens * mi->input_price / 1e6 +
@@ -4142,11 +4184,6 @@ bool agent_run(const char *api_key, const char *model, const char *topology_name
     /* Register terminal reset FIRST — ensures scroll region, bracketed paste,
        and SGR attrs are cleaned up on ANY exit path through exit(). */
     atexit(terminal_reset_atexit);
-    bool startup_input_suppressed = false;
-    if (isatty(STDIN_FILENO) && isatty(STDERR_FILENO)) {
-        terminal_input_echo_suspend();
-        startup_input_suppressed = s_input_echo_suspended;
-    }
 
     struct sigaction sa_int;
     memset(&sa_int, 0, sizeof(sa_int));
@@ -4313,6 +4350,7 @@ bool agent_run(const char *api_key, const char *model, const char *topology_name
     char last_turn_provider[64] = "";
     bool have_last_turn_usage = false;
     int consecutive_tool_failures = 0; /* for router failure escalation */
+    bool fallback_user_configured = false;
 
     /* Command aliases: /alias <name> <expansion> */
 #define MAX_ALIASES 32
@@ -4359,6 +4397,7 @@ bool agent_run(const char *api_key, const char *model, const char *topology_name
 
     /* Initialize cost budgets from env vars */
     init_cost_budgets();
+    double session_budget_started_at = now_ms();
 
     /* Welcome banner */
     tui_welcome(session.model, display_core, tool_count, DSCO_VERSION);
@@ -4411,6 +4450,7 @@ bool agent_run(const char *api_key, const char *model, const char *topology_name
     /* Initialize status bar */
     tui_status_bar_t status_bar;
     tui_status_bar_init(&status_bar, session.model);
+    update_budget_hud(&status_bar, &session, session_budget_started_at);
     /* Always show clock in the persistent pane (it's the right-cluster anchor). */
     tui_status_bar_set_clock(&status_bar, true);
 
@@ -4426,8 +4466,6 @@ bool agent_run(const char *api_key, const char *model, const char *topology_name
          * itself just-in-time inside tui_composer_read. Welcome banner
          * and startup notes print normally above the eventual panel. */
     }
-    followup_queue_t followup_queue;
-    followup_queue_init(&followup_queue);
 
     /* SIGWINCH handler for terminal resize */
     g_winch_sb = &status_bar;
@@ -4481,13 +4519,7 @@ bool agent_run(const char *api_key, const char *model, const char *topology_name
         g_interrupted = 0;
         g_escape_state = ESC_RUNNING;
         output_guard_reset();
-        if (startup_input_suppressed) {
-            if (!(interactive_composer_enabled() && g_winch_sb && g_winch_sb->visible))
-                terminal_input_echo_restore_preserve_input();
-            startup_input_suppressed = false;
-        } else {
-            terminal_input_echo_restore();
-        }
+        terminal_input_echo_restore();
 
         /* Build dynamic prompt: [turn N] model · $cost · context% ▸ */
         char dyn_prompt[256];
@@ -4564,9 +4596,7 @@ bool agent_run(const char *api_key, const char *model, const char *topology_name
             startup_consumed = true;
             have_startup_cmd = startup_command_consume(input_buf, sizeof(input_buf));
         }
-        if (!have_startup_cmd && followup_queue_pop(&followup_queue, input_buf, sizeof(input_buf))) {
-            fprintf(stderr, "  %squeued:%s %s\n", TUI_DIM, TUI_RESET, input_buf);
-        } else if (!have_startup_cmd) {
+        if (!have_startup_cmd) {
             if (goal_autorun_pending && goal_is_active(&session)) {
                 goal_autorun_pending = false;
                 goal_make_autorun_prompt(&session, input_buf, sizeof(input_buf));
@@ -4779,6 +4809,7 @@ bool agent_run(const char *api_key, const char *model, const char *topology_name
                 tools_set_context_window(session.context_window);
                 session.model_locked = true;
                 tools_set_runtime_model(session.model);
+                apply_interactive_model_switch(&session, api_key, fallback_user_configured);
                 char msg[256];
                 snprintf(msg, sizeof(msg), "model switched to %s (local %s, ctx: %dk)", arg, server,
                          session.context_window / 1000);
@@ -4790,6 +4821,7 @@ bool agent_run(const char *api_key, const char *model, const char *topology_name
                 tools_set_context_window(session.context_window);
                 session.model_locked = true; /* user explicitly chose; block auto-switching */
                 tools_set_runtime_model(session.model);
+                apply_interactive_model_switch(&session, api_key, fallback_user_configured);
                 const model_info_t *mi = model_lookup(resolved);
                 char msg[256];
                 snprintf(msg, sizeof(msg), "model switched to %s (ctx: %dk)", resolved,
@@ -4863,18 +4895,19 @@ bool agent_run(const char *api_key, const char *model, const char *topology_name
             while (*arg == ' ')
                 arg++;
             if (*arg == '\0') {
-                fprintf(stderr, "  %seffort:%s %s  (options: low, medium, high)\n", TUI_DIM,
-                        TUI_RESET, session.effort);
-            } else if (strcmp(arg, "low") == 0 || strcmp(arg, "medium") == 0 ||
-                       strcmp(arg, "high") == 0) {
-                snprintf(session.effort, sizeof(session.effort), "%s", arg);
+                fprintf(stderr, "  %seffort:%s %s  (options: %s)\n", TUI_DIM,
+                        TUI_RESET, dsco_effort_display(session.effort), dsco_effort_options());
+            } else if (dsco_effort_store(session.effort, sizeof(session.effort), arg)) {
                 char msg[64];
-                snprintf(msg, sizeof(msg), "effort set to %s", arg);
+                snprintf(msg, sizeof(msg), "effort set to %s",
+                         dsco_effort_display(session.effort));
                 tui_success(msg);
             } else {
-                tui_error("effort must be: low, medium, or high");
+                char msg[160];
+                snprintf(msg, sizeof(msg), "effort must be: %s", dsco_effort_options());
+                tui_error(msg);
             }
-            baseline_log("command", "/effort", session.effort, NULL);
+            baseline_log("command", "/effort", dsco_effort_display(session.effort), NULL);
             continue;
         }
         if (strcmp(input_buf, "/cheap") == 0) {
@@ -6792,8 +6825,8 @@ bool agent_run(const char *api_key, const char *model, const char *topology_name
             fprintf(stderr, "  %s/clear%s       reset conversation\n", TUI_CYAN, TUI_RESET);
             fprintf(stderr, "  %s/model [name]%s switch model (glm52/kimi/opus/sonnet/haiku)\n",
                     TUI_CYAN, TUI_RESET);
-            fprintf(stderr, "  %s/effort [lvl]%s set effort (low/medium/high)\n", TUI_CYAN,
-                    TUI_RESET);
+            fprintf(stderr, "  %s/effort [lvl]%s set effort (%s)\n", TUI_CYAN,
+                    TUI_RESET, dsco_effort_options());
             fprintf(stderr, "  %s/cost%s        show session cost\n", TUI_CYAN, TUI_RESET);
             fprintf(stderr, "  %s/context%s     show token usage\n", TUI_CYAN, TUI_RESET);
             fprintf(stderr, "  %s/goal [cmd]%s   show/set goal, pause/resume/complete/clear\n",
@@ -7034,8 +7067,13 @@ bool agent_run(const char *api_key, const char *model, const char *topology_name
             if (pdefault && pdefault[0] &&
                 strcmp(provider_route_for_model(session.model, api_key, NULL), pinned_provider) != 0) {
                 snprintf(session.model, sizeof(session.model), "%s", pdefault);
+                session.context_window = model_context_window(session.model);
                 session.model_locked = true;
                 tools_set_runtime_model(session.model);
+                tools_set_context_window(session.context_window);
+                if (!fallback_user_configured)
+                    refresh_default_fallbacks_for_model(&session);
+                tui_set_title_fmt("dsco · %s", session.model);
             }
             ensure_provider(&session, api_key);
             const char *pk = resolve_provider_key(api_key);
@@ -7080,11 +7118,13 @@ bool agent_run(const char *api_key, const char *model, const char *topology_name
             } else if (strcmp(arg, "off") == 0 || strcmp(arg, "none") == 0) {
                 g_cost_budget = 0;
                 g_daily_budget = 0;
+                update_budget_hud(&status_bar, &session, session_budget_started_at);
                 tui_success("all cost budgets disabled");
             } else if (strncmp(arg, "daily ", 6) == 0) {
                 double db = atof(arg + 6);
                 if (db > 0) {
                     g_daily_budget = db;
+                    update_budget_hud(&status_bar, &session, session_budget_started_at);
                     char msg[128];
                     snprintf(msg, sizeof(msg), "daily budget set to $%.2f", db);
                     tui_success(msg);
@@ -7098,6 +7138,7 @@ bool agent_run(const char *api_key, const char *model, const char *topology_name
                 double budget = atof(arg);
                 if (budget > 0) {
                     g_cost_budget = budget;
+                    update_budget_hud(&status_bar, &session, session_budget_started_at);
                     char msg[160];
                     /* The daily cap is a separate, cross-session gate. A bare
                      * `/budget <n>` that leaves the daily cap below the new
@@ -7303,7 +7344,8 @@ bool agent_run(const char *api_key, const char *model, const char *topology_name
             fprintf(stderr, "  %sModel:%s       %s\n", TUI_DIM, TUI_RESET, session.model);
             fprintf(stderr, "  %sProvider:%s    %s\n", TUI_DIM, TUI_RESET,
                     g_provider ? g_provider->name : "none");
-            fprintf(stderr, "  %sEffort:%s      %s\n", TUI_DIM, TUI_RESET, session.effort);
+            fprintf(stderr, "  %sEffort:%s      %s\n", TUI_DIM, TUI_RESET,
+                    dsco_effort_display(session.effort));
             fprintf(stderr, "  %sTrust tier:%s  %s\n", TUI_DIM, TUI_RESET,
                     session_trust_tier_to_string(session.trust_tier));
             fprintf(stderr, "  %sActive skill:%s %s\n", TUI_DIM, TUI_RESET,
@@ -7442,9 +7484,11 @@ bool agent_run(const char *api_key, const char *model, const char *topology_name
                         TUI_RESET);
             } else if (strcmp(arg, "off") == 0 || strcmp(arg, "none") == 0) {
                 session.fallback_count = 0;
+                fallback_user_configured = true;
                 tui_success("fallback chain disabled");
             } else {
                 session.fallback_count = 0;
+                fallback_user_configured = true;
                 char *copy = safe_strdup(arg);
                 char *tok = strtok(copy, ",");
                 while (tok && session.fallback_count < 4) {
@@ -7983,13 +8027,25 @@ bool agent_run(const char *api_key, const char *model, const char *topology_name
             snprintf(last_user_input, sizeof(last_user_input), "%s", input_buf);
         }
 
+        /* Per-prompt routing: conceptual/self-contained requests should answer
+         * directly with no tool schemas. This prevents pointless tool chatter for
+         * prompts like "what is..." or "give me mathematical theory". */
+        session.direct_answer_mode = user_prompt_should_direct_answer(input_buf) &&
+                                     !goal_is_active(&session) &&
+                                     !session.tool_choice[0];
+        tools_set_self_exit_allowed(goal_is_active(&session) ||
+                                    env_truthy(getenv("DSCO_ALLOW_SELF_EXIT")));
+
         /* Extract tool hints from user input */
-        tools_hint_add_user(input_buf);
+        if (!session.direct_answer_mode)
+            tools_hint_add_user(input_buf);
 
         int turns = 0;
-        int total_input = 0, total_output = 0, total_cache_read = 0;
+        int total_input = 0, total_output = 0, total_cache_read = 0, total_cache_write = 0;
         int total_tools_used = 0;
         int pause_turn_streak = 0;
+        int cache_zero_telemetry_streak = 0;
+        bool cache_notice_emitted = false;
 
         /* Loop breaker: detect repeated identical cached tool failures */
         uint32_t last_fail_hash = 0;
@@ -8012,12 +8068,8 @@ bool agent_run(const char *api_key, const char *model, const char *topology_name
         /* Per-turn arena allocator */
         arena_t turn_arena;
         arena_init(&turn_arena);
-        followup_reader_t followup_reader;
-        bool followup_active = followup_reader_start(&followup_reader, &status_bar, &followup_queue);
-        if (!followup_active) {
-            terminal_input_echo_suspend();
-            esc_poller_start();
-        }
+        terminal_input_echo_suspend();
+        esc_poller_start();
         g_turn_start_time = now_ms();
         bool prompt_done = false;
         /* Agentic loop: run to the goal, not to an arbitrary turn count. The
@@ -8339,11 +8391,58 @@ bool agent_run(const char *api_key, const char *model, const char *topology_name
                      (strcmp(g_provider->name, "sakana") == 0 &&
                       provider_sakana_current_key_is_subscription()));
                 if (primary_subscription_exhausted) {
-                    time_t exhausted_until = sr.credit_reset_at > 0
-                                               ? sr.credit_reset_at
-                                               : provider_pool_subscription_exhausted_until(g_provider->name);
-                    provider_pool_mark_subscription_exhausted(g_provider->name,
-                                                              exhausted_until);
+                    if (strcmp(g_provider->name, "sakana") == 0 && !g_interrupted) {
+                        const char *sub_key = provider_sakana_subscription_request_key();
+                        if (sub_key && sub_key[0] && cur_key && strcmp(sub_key, cur_key) == 0) {
+                            if (g_outq)
+                                tui_outq_writef(
+                                    g_outq,
+                                    "  %sfallback: verifying Fugu subscription before marking "
+                                    "allocation exhausted%s\n",
+                                    TUI_YELLOW, TUI_RESET);
+                            else
+                                fprintf(stderr,
+                                        "  %sfallback: verifying Fugu subscription before "
+                                        "marking allocation exhausted%s\n",
+                                        TUI_YELLOW, TUI_RESET);
+                            tui_stream_heartbeat_poke(&s_heartbeat, "fugu subscription retry...");
+                            json_free_response(&sr.parsed);
+                            provider_reset_connection(g_provider);
+                            provider_debug_log_request(g_provider->name, session.model, sub_key);
+                            gettimeofday(&pool_t0, NULL);
+                            sr = g_provider->stream(g_provider, sub_key, req, on_stream_text,
+                                                    on_stream_tool_start, on_stream_thinking,
+                                                    NULL);
+                            gettimeofday(&pool_t1, NULL);
+                            provider_pool_report(g_provider->name, sr.ok,
+                                                 (pool_t1.tv_sec - pool_t0.tv_sec) * 1000.0 +
+                                                     (pool_t1.tv_usec - pool_t0.tv_usec) / 1000.0);
+                            primary_credit_exhausted = stream_result_is_credit_exhausted(&sr);
+                            if (sr.ok) {
+                                primary_subscription_exhausted = false;
+                                if (g_outq)
+                                    tui_outq_writef(
+                                        g_outq,
+                                        "  %sfallback recovered on Fugu subscription; allocation "
+                                        "not marked exhausted%s\n",
+                                        TUI_GREEN, TUI_RESET);
+                                else
+                                    fprintf(stderr,
+                                            "  %sfallback recovered on Fugu subscription; "
+                                            "allocation not marked exhausted%s\n",
+                                            TUI_GREEN, TUI_RESET);
+                            }
+                        }
+                    }
+                }
+                if (!sr.ok && primary_subscription_exhausted && primary_credit_exhausted) {
+                    time_t exhausted_until = 0;
+                    if (sr.credit_reset_at > time(NULL) || strcmp(g_provider->name, "sakana") != 0)
+                        exhausted_until =
+                            subscription_exhausted_until_for_retry(g_provider->name, &sr);
+                    if (exhausted_until > 0)
+                        provider_pool_mark_subscription_exhausted(g_provider->name,
+                                                                  exhausted_until);
                     if (sr.credit_reset_at > 0) {
                         char when[64];
                         format_reset_time(sr.credit_reset_at, when, sizeof(when));
@@ -8354,10 +8453,61 @@ bool agent_run(const char *api_key, const char *model, const char *topology_name
                         else
                             fprintf(stderr, "  %ssubscription allocation reopens: %s%s\n",
                                     TUI_DIM, when, TUI_RESET);
+                    } else if (strcmp(g_provider->name, "sakana") == 0) {
+                        if (g_outq)
+                            tui_outq_writef(
+                                g_outq,
+                                "  %sSakana did not report a reset time; not caching it as "
+                                "exhausted%s\n",
+                                TUI_DIM, TUI_RESET);
+                        else
+                            fprintf(stderr,
+                                    "  %sSakana did not report a reset time; not caching it as "
+                                    "exhausted%s\n",
+                                    TUI_DIM, TUI_RESET);
                     }
                     fallback_decision = prompt_subscription_fallback_choice(
                         &session, g_provider->name, api_key, sr.credit_reset_at,
                         chosen_fallback_model, sizeof(chosen_fallback_model));
+                }
+            }
+            if (!sr.ok && g_provider && strcmp(g_provider->name, "sakana") == 0 &&
+                stream_result_is_credit_exhausted(&sr) && current_request_is_sakana_payg &&
+                !g_interrupted) {
+                const char *sub_key = provider_sakana_subscription_request_key();
+                if (sub_key && sub_key[0] && (!cur_key || strcmp(sub_key, cur_key) != 0)) {
+                    if (g_outq)
+                        tui_outq_writef(g_outq,
+                                        "  %sfallback: Fugu PAYG credits failed; retrying "
+                                        "Sakana subscription%s\n",
+                                        TUI_YELLOW, TUI_RESET);
+                    else
+                        fprintf(stderr,
+                                "  %sfallback: Fugu PAYG credits failed; retrying Sakana "
+                                "subscription%s\n",
+                                TUI_YELLOW, TUI_RESET);
+                    tui_stream_heartbeat_poke(&s_heartbeat, "fugu subscription fallback...");
+                    json_free_response(&sr.parsed);
+                    provider_reset_connection(g_provider);
+                    provider_debug_log_request(g_provider->name, session.model, sub_key);
+                    gettimeofday(&pool_t0, NULL);
+                    sr = g_provider->stream(g_provider, sub_key, req, on_stream_text,
+                                            on_stream_tool_start, on_stream_thinking, NULL);
+                    gettimeofday(&pool_t1, NULL);
+                    provider_pool_report(g_provider->name, sr.ok,
+                                         (pool_t1.tv_sec - pool_t0.tv_sec) * 1000.0 +
+                                             (pool_t1.tv_usec - pool_t0.tv_usec) / 1000.0);
+                    if (sr.ok) {
+                        current_request_is_sakana_payg = false;
+                        if (g_outq)
+                            tui_outq_writef(g_outq,
+                                            "  %sfallback succeeded with Sakana subscription%s\n",
+                                            TUI_GREEN, TUI_RESET);
+                        else
+                            fprintf(stderr,
+                                    "  %sfallback succeeded with Sakana subscription%s\n",
+                                    TUI_GREEN, TUI_RESET);
+                    }
                 }
             }
             if (!sr.ok && g_provider && strcmp(g_provider->name, "sakana") == 0 &&
@@ -8397,8 +8547,6 @@ bool agent_run(const char *api_key, const char *model, const char *topology_name
                     if (sr.ok) {
                         if (payg_slot)
                             payg_slot->is_subscription = saved_is_subscription;
-                        g_sakana_payg_overflow_active = true;
-                        setenv("DSCO_SAKANA_KEY_CLASS", "payg", 1);
                         if (g_outq)
                             tui_outq_writef(g_outq,
                                             "  %sfallback succeeded with Fugu PAYG%s\n",
@@ -8697,6 +8845,8 @@ bool agent_run(const char *api_key, const char *model, const char *topology_name
                     fprintf(stderr, "$%.6f ", sr.cost_usd);
                 if (sr.usage.cache_read_input_tokens > 0)
                     fprintf(stderr, "cached=%d ", sr.usage.cache_read_input_tokens);
+                if (usage_cache_denominator(&sr.usage) > 0)
+                    fprintf(stderr, "hit=%.0f%% ", usage_cache_hit_ratio(&sr.usage) * 100.0);
                 if (sr.reasoning_tokens > 0)
                     fprintf(stderr, "reasoning=%d ", sr.reasoning_tokens);
                 if (sr.generation_id)
@@ -8706,9 +8856,10 @@ bool agent_run(const char *api_key, const char *model, const char *topology_name
             free(sr.actual_model);   sr.actual_model = NULL;
             free(sr.generation_id);  sr.generation_id = NULL;
 
-                        total_input += sr.usage.input_tokens;
+            total_input += sr.usage.input_tokens;
             total_output += sr.usage.output_tokens;
             total_cache_read += sr.usage.cache_read_input_tokens;
+            total_cache_write += sr.usage.cache_creation_input_tokens;
             last_input_tokens = sr.usage.input_tokens;
 
             /* Feed token usage to tools layer for inline budget calculation */
@@ -8743,6 +8894,77 @@ bool agent_run(const char *api_key, const char *model, const char *topology_name
             snprintf(last_turn_provider, sizeof(last_turn_provider), "%s",
                      g_provider ? g_provider->name : "?");
             have_last_turn_usage = true;
+
+            cache_expectation_t cache_expectation = model_cache_expectation(session.model);
+            int cache_denominator = usage_cache_denominator(&sr.usage);
+            double cache_hit_ratio = usage_cache_hit_ratio(&sr.usage);
+            bool cache_telemetry_seen = usage_has_cache_telemetry(&sr.usage);
+            if (cache_telemetry_seen)
+                cache_zero_telemetry_streak = 0;
+            else if (cache_expectation != CACHE_EXPECT_NONE && cache_denominator > 0)
+                cache_zero_telemetry_streak++;
+
+            if (cache_expectation != CACHE_EXPECT_NONE && cache_denominator > 0 && turns >= 3) {
+                bool should_warn = false;
+                const char *event_kind = NULL;
+                const char *human_status = NULL;
+
+                if (cache_telemetry_seen && cache_hit_ratio < 0.50 &&
+                    cache_expectation == CACHE_EXPECT_EXPLICIT_BREAKPOINTS) {
+                    should_warn = true;
+                    event_kind = "low_hit_ratio";
+                    human_status = "cache hit ratio low";
+                } else if (!cache_telemetry_seen && !cache_notice_emitted &&
+                           cache_zero_telemetry_streak >= 3 && turns >= 5) {
+                    should_warn = true;
+                    cache_notice_emitted = true;
+                    event_kind = "telemetry_absent";
+                    human_status = cache_expectation == CACHE_EXPECT_AUTOMATIC_PROVIDER
+                                       ? "provider cache telemetry not observed yet"
+                                       : "cache telemetry not observed yet";
+                }
+
+                if (should_warn) {
+                    char warn[384];
+                    snprintf(warn, sizeof(warn),
+                             "turn=%d expectation=%s hit=%.1f%% input=%d cache_read=%d "
+                             "cache_write=%d zero_telemetry_streak=%d",
+                             turns, cache_expectation_label(cache_expectation),
+                             cache_hit_ratio * 100.0, sr.usage.input_tokens,
+                             sr.usage.cache_read_input_tokens,
+                             sr.usage.cache_creation_input_tokens,
+                             cache_zero_telemetry_streak);
+                    fprintf(stderr,
+                            "  %s⚠ %s after turn %d: %.1f%% "
+                            "(read %d / %d input-side tokens; mode=%s)%s\n",
+                            TUI_BYELLOW, human_status, turns, cache_hit_ratio * 100.0,
+                            sr.usage.cache_read_input_tokens, cache_denominator,
+                            cache_expectation_label(cache_expectation), TUI_RESET);
+                    baseline_log("cache", event_kind, warn, NULL);
+                    jbuf_t cp;
+                    jbuf_init(&cp, 384);
+                    jbuf_append(&cp, "{\"turn\":");
+                    jbuf_append_int(&cp, turns);
+                    jbuf_append(&cp, ",\"cache_expectation\":");
+                    jbuf_append_json_str(&cp, cache_expectation_label(cache_expectation));
+                    jbuf_append(&cp, ",\"cache_event\":");
+                    jbuf_append_json_str(&cp, event_kind);
+                    jbuf_append(&cp, ",\"cache_hit_ratio\":");
+                    jbuf_appendf(&cp, "%.6f", cache_hit_ratio);
+                    jbuf_append(&cp, ",\"input_tokens\":");
+                    jbuf_append_int(&cp, sr.usage.input_tokens);
+                    jbuf_append(&cp, ",\"cache_read_tokens\":");
+                    jbuf_append_int(&cp, sr.usage.cache_read_input_tokens);
+                    jbuf_append(&cp, ",\"cache_write_tokens\":");
+                    jbuf_append_int(&cp, sr.usage.cache_creation_input_tokens);
+                    jbuf_append(&cp, ",\"zero_telemetry_streak\":");
+                    jbuf_append_int(&cp, cache_zero_telemetry_streak);
+                    jbuf_append(&cp, "}");
+                    chronicle_event("llm.cache.warn", trace_id, chron_prompt_span, NULL,
+                                    "agent", "dsco", cp.data, "product_telemetry");
+                    jbuf_free(&cp);
+                }
+            }
 
             /* Calibrate non-conv overhead from this response's input usage.
              * The API counted (system_prompt + tool_schemas + cache_prefix + conv).
@@ -8845,6 +9067,7 @@ bool agent_run(const char *api_key, const char *model, const char *topology_name
                 tui_status_bar_update(&status_bar, session.total_input_tokens,
                                       session.total_output_tokens, cost, session.turn_count,
                                       total_tools_used);
+                update_budget_hud(&status_bar, &session, session_budget_started_at);
             }
 
             /* Streaming telemetry — suppress for tool turns */
@@ -9028,12 +9251,6 @@ bool agent_run(const char *api_key, const char *model, const char *topology_name
                         bool interactive_tool = dsco_tool_is_interactive(blk->tool_name);
 
                         if (interactive_tool) {
-                            if (followup_active) {
-                                followup_reader_stop(&followup_reader);
-                                followup_active = false;
-                                terminal_input_echo_suspend();
-                                esc_poller_start();
-                            }
                             /* Interactive tools own the terminal/user turn. Never run them under
                              * spinner, watchdog, cache, or parallel orchestration: the UI must be
                              * live and repeat calls must re-ask rather than replay stale answers. */
@@ -9044,8 +9261,11 @@ bool agent_run(const char *api_key, const char *model, const char *topology_name
                                                       blk->tool_id, blk->tool_input,
                                                       chron_tool_span);
                             double t0 = now_ms();
+                            tools_set_trace_context(trace_id, chron_prompt_span, chron_tool_span,
+                                                    blk->tool_name);
                             ok = tools_execute_for_tier(blk->tool_name, blk->tool_input, exec_tier,
                                                         tool_result, MAX_TOOL_RESULT);
+                            tools_clear_trace_context();
                             double elapsed = (now_ms() - t0) * 1000.0;
                             size_t result_len = strlen(tool_result);
                             if (result_len >= MAX_TOOL_RESULT - 256) {
@@ -9162,8 +9382,11 @@ bool agent_run(const char *api_key, const char *model, const char *topology_name
                             tl_tool_cancelled = 0;
 
                             double t0 = now_ms();
+                            tools_set_trace_context(trace_id, chron_prompt_span, chron_tool_span,
+                                                    blk->tool_name);
                             ok = tools_execute_for_tier(blk->tool_name, blk->tool_input, exec_tier,
                                                         tool_result, MAX_TOOL_RESULT);
+                            tools_clear_trace_context();
                             dsco_strip_terminal_controls_inplace(tool_result);
 
                             /* Warn model if output was truncated */
@@ -9492,12 +9715,6 @@ bool agent_run(const char *api_key, const char *model, const char *topology_name
                     bool ok = false;
 
                     if (dsco_tool_is_interactive(blk->tool_name)) {
-                        if (followup_active) {
-                            followup_reader_stop(&followup_reader);
-                            followup_active = false;
-                            terminal_input_echo_suspend();
-                            esc_poller_start();
-                        }
                         char tool_span[37] = "";
                         char chron_tool_span[37] = "";
                         trace_span_begin(trace_id, blk->tool_name, prompt_span, tool_span);
@@ -9505,8 +9722,11 @@ bool agent_run(const char *api_key, const char *model, const char *topology_name
                                                   blk->tool_id, blk->tool_input,
                                                   chron_tool_span);
                         double t0 = now_ms();
+                        tools_set_trace_context(trace_id, chron_prompt_span, chron_tool_span,
+                                                blk->tool_name);
                         ok = tools_execute_for_tier(blk->tool_name, blk->tool_input, batch_tiers[bi],
                                                     tool_result, MAX_TOOL_RESULT);
+                        tools_clear_trace_context();
                         double elapsed = (now_ms() - t0) * 1000.0;
                         size_t result_len2 = strlen(tool_result);
                         if (result_len2 >= MAX_TOOL_RESULT - 256) {
@@ -9541,8 +9761,11 @@ bool agent_run(const char *api_key, const char *model, const char *topology_name
                     tl_tool_cancelled = 0;
 
                     double t0 = now_ms();
+                    tools_set_trace_context(trace_id, chron_prompt_span, chron_tool_span,
+                                            blk->tool_name);
                     ok = tools_execute_for_tier(blk->tool_name, blk->tool_input, batch_tiers[bi],
                                                 tool_result, MAX_TOOL_RESULT);
+                    tools_clear_trace_context();
                     dsco_strip_terminal_controls_inplace(tool_result);
                     double elapsed = (now_ms() - t0) * 1000.0;
 
@@ -10060,10 +10283,7 @@ bool agent_run(const char *api_key, const char *model, const char *topology_name
         /* End prompt-level trace span */
         trace_span_end(prompt_span, g_interrupted ? "interrupted" : "ok", NULL);
         chronicle_span_end(chron_prompt_span, g_interrupted ? "interrupted" : "ok", NULL);
-        if (followup_active)
-            followup_reader_stop(&followup_reader);
-        else
-            esc_poller_stop();
+        esc_poller_stop();
         arena_free(&turn_arena);
         terminal_input_echo_restore();
 
@@ -10079,14 +10299,12 @@ bool agent_run(const char *api_key, const char *model, const char *topology_name
                 /* Re-enter raw mode and restart the turns loop from where we paused */
                 terminal_input_echo_suspend();
                 esc_poller_start();
-                followup_active = false;
                 goto resume_turn_loop;
             }
             if (pause_decision == PAUSE_PROMPT) {
                 g_interrupted = 0;
                 g_escape_state = ESC_RUNNING;
                 mcp_cancel_reset();
-                followup_active = false;
                 prompt_done = true;
             } else {
                 /* User chose to cancel — fall through to normal post-loop handling */
@@ -10114,8 +10332,22 @@ bool agent_run(const char *api_key, const char *model, const char *topology_name
         }
         if (turns > 1) {
             double multi_turn_cost = session_cost(&session);
-            fprintf(stderr, "%s  [%d turns | in:%d out:%d cache-read:%d | $%.4f]%s\n", TUI_DIM,
-                    turns, total_input, total_output, total_cache_read, multi_turn_cost, TUI_RESET);
+            int cache_side = total_input + total_cache_read + total_cache_write;
+            double hit_ratio = cache_side > 0 ? (double)total_cache_read / (double)cache_side : 0.0;
+            const char *cache_summary_status =
+                total_cache_read > 0 || total_cache_write > 0
+                    ? "observed"
+                    : (model_cache_expectation(session.model) == CACHE_EXPECT_AUTOMATIC_PROVIDER
+                           ? "telemetry-pending"
+                           : (model_cache_expectation(session.model) == CACHE_EXPECT_EXPLICIT_BREAKPOINTS
+                                  ? "cold"
+                                  : "n/a"));
+            fprintf(stderr,
+                    "%s  [%d turns | in:%d out:%d cache-read:%d cache-write:%d hit:%.0f%% "
+                    "cache:%s | $%.4f]%s\n",
+                    TUI_DIM, turns, total_input, total_output, total_cache_read,
+                    total_cache_write, hit_ratio * 100.0, cache_summary_status,
+                    multi_turn_cost, TUI_RESET);
         }
         if (goal_is_active(&session) && prompt_done && !g_agent_exit_requested && !g_interrupted) {
             goal_autorun_pending = !env_truthy(getenv("DSCO_GOAL_NO_AUTORUN"));
@@ -10128,11 +10360,17 @@ bool agent_run(const char *api_key, const char *model, const char *topology_name
         fprintf(stderr, "\n");
         fflush(stderr);
 
-        /* Agent self-exit: break outer REPL loop after delivering final message */
+        /* Agent self-exit stops only the current autonomous goal loop by default.
+         * It must not kill the interactive REPL after ordinary conversation. */
         if (g_agent_exit_requested) {
-            user_exit_requested = true;
-            break;
+            if (env_truthy(getenv("DSCO_SELF_EXIT_QUITS"))) {
+                user_exit_requested = true;
+                break;
+            }
+            g_agent_exit_requested = 0;
+            tools_set_self_exit_allowed(false);
         }
+        session.direct_answer_mode = false;
 
         /* Periodic auto-save every 5 turns */
         if (session.turn_count % 5 == 0 && conv.count > 0) {
@@ -10151,7 +10389,6 @@ bool agent_run(const char *api_key, const char *model, const char *topology_name
     g_autosave_conv = NULL;
     g_autosave_session = NULL;
     autosave(&conv, &session);
-    followup_queue_destroy(&followup_queue);
     conv_free(&conv);
 #ifdef HAVE_READLINE
     {

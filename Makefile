@@ -83,6 +83,7 @@ SRC_NAMES = main.c agent.c llm.c tools.c execution_layer.c json_util.c ast.c swa
 	provider_pool.c \
 	math_fastpath.c \
 	http_pool.c \
+	realtime.c \
 	$(OPTIONAL_SRCS)
 TEST_SRC_NAMES = test.c
 
@@ -143,7 +144,7 @@ BASE_CFLAGS += -DHAVE_SECURE_ENCLAVE -DHAVE_TOUCHID -mbranch-protection=standard
 LDLIBS      += -framework Security -framework CoreFoundation -framework IOKit \
                -framework CoreGraphics -framework LocalAuthentication \
                -framework Foundation -framework Metal -framework MetalKit \
-               -framework Accelerate
+               -framework Accelerate -framework AudioToolbox
 
 # Objective-C sources (Touch ID + Metal vecstore)
 OBJC_NAMES  = touchid.m vecstore_metal.m
@@ -358,7 +359,13 @@ fast-doctor:
 changed-tests:
 	./scripts/changed_tests.sh
 compile-commands:
-	python3 scripts/gen_compile_commands.py
+	@if command -v compiledb >/dev/null 2>&1; then \
+		echo "compiledb: capturing real build flags -> compile_commands.json"; \
+		compiledb -n make -B; \
+	else \
+		echo "gen: compiledb not found; using dependency-light generator"; \
+		python3 scripts/gen_compile_commands.py; \
+	fi
 build-report:
 	python3 scripts/build_report.py
 build-cache-doctor:
@@ -555,6 +562,9 @@ $(UBSAN_TEST_OBJ_DIR)/%.o: $(SRC_DIR)/%.c | $(UBSAN_TEST_OBJ_DIR)
 $(UBSAN_TEST_OBJ_DIR)/%.o: $(SRC_DIR)/%.m | $(UBSAN_TEST_OBJ_DIR)
 	@mkdir -p $(@D)
 	$(CC) $(UBSAN_CFLAGS) -fobjc-arc -x objective-c -c -o $@ $<
+
+$(BUILD_DIR):
+	mkdir -p $@
 
 $(OBJ_DIR) $(DEBUG_OBJ_DIR) $(TEST_OBJ_DIR) $(TEST_COVERAGE_OBJ_DIR) $(ASAN_OBJ_DIR) $(UBSAN_OBJ_DIR) $(ASAN_TEST_OBJ_DIR) $(UBSAN_TEST_OBJ_DIR):
 	mkdir -p $@
