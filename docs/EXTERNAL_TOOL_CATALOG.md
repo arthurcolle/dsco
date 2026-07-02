@@ -17,7 +17,7 @@ This catalog is a map of cached external app/integration entries, not a guarante
 | Label | Entries |
 |---|---:|
 | `interactive` | 1278 |
-| `consequential` | 929 |
+| `consequential` | 930 |
 | `retrievable` | 71 |
 | `sync` | 22 |
 
@@ -508,7 +508,7 @@ This catalog is a map of cached external app/integration entries, not a guarante
 | Coupler.io | `asdk_app_6939ea66e1588191af5f9d2a52964d19` | BUSINESS |  | yes |  | UNSET |
 | Coupler.io | `asdk_app_69e5ec002aa881919a02ec4aee74fe25` | PRODUCTIVITY | consequential | yes |  | UNSET |
 | Course Studio | `asdk_app_695e8966b1c88191b4c12531e765e476` | EDUCATION | consequential, interactive | yes |  | UNSET |
-| Coursera | `connector_68e01e8c1c2081918b4567a0b959d3ff` | EDUCATION | interactive | yes |  | UNSET |
+| Coursera | `connector_68e01e8c1c2081918b4567a0b959d3ff` | EDUCATION | consequential, interactive | yes |  | UNSET |
 | Coveo | `asdk_app_693251083bf48191a69098fd0ba36f17` | BUSINESS | retrievable | yes |  | UNSET |
 | Cowboy Model Finder | `asdk_app_69e091c072c0819180eaf0b4c28819d5` | LIFESTYLE | consequential, interactive | yes |  | UNSET |
 | Craime | `asdk_app_69566ff97a508191bff1adc91d6d4ccf` | EDUCATION |  | yes |  | UNSET |
