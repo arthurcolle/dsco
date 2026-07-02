@@ -8,6 +8,8 @@
 #include <mbedtls/pk.h>
 #include <mbedtls/ecp.h>
 #include <mbedtls/error.h>
+#include <sys/socket.h>
+#include <netinet/tcp.h>
 
 #include <pthread.h>
 #include <stdio.h>
@@ -20,6 +22,26 @@
 #include <ctype.h>
 #include <time.h>
 #include <errno.h>
+
+static void netsrv_tune_socket(int fd, bool listener) {
+    if (fd < 0)
+        return;
+
+    int fl = fcntl(fd, F_GETFD);
+    if (fl >= 0)
+        (void)fcntl(fd, F_SETFD, fl | FD_CLOEXEC);
+
+    int one = 1;
+#ifdef SO_NOSIGPIPE
+    (void)setsockopt(fd, SOL_SOCKET, SO_NOSIGPIPE, &one, sizeof(one));
+#endif
+    if (!listener) {
+        (void)setsockopt(fd, SOL_SOCKET, SO_KEEPALIVE, &one, sizeof(one));
+#ifdef TCP_NODELAY
+        (void)setsockopt(fd, IPPROTO_TCP, TCP_NODELAY, &one, sizeof(one));
+#endif
+    }
+}
 
 /* ── Route table ──────────────────────────────────────────────────────── */
 typedef struct {
@@ -120,6 +142,19 @@ static bool write_all(dsco_net_server_t *srv, mbedtls_ssl_context *ssl, mbedtls_
             ret = mbedtls_ssl_write(ssl, p, len);
         else
             ret = mbedtls_net_send(fd, p, len);
+        if (ret <= 0)
+            return false;
+        p += ret;
+        len -= (size_t)ret;
+    }
+    return true;
+}
+
+static bool client_write_all(bool use_tls, mbedtls_ssl_context *ssl, mbedtls_net_context *fd,
+                             const void *buf, size_t len) {
+    const uint8_t *p = buf;
+    while (len > 0) {
+        int ret = use_tls ? mbedtls_ssl_write(ssl, p, len) : mbedtls_net_send(fd, p, len);
         if (ret <= 0)
             return false;
         p += ret;
@@ -286,6 +321,7 @@ static void *accept_loop(void *arg) {
             free(ca);
             break;
         }
+        netsrv_tune_socket(ca->client_fd.fd, false);
 
         if (srv->tls_ready) {
             mbedtls_ssl_init(&ca->ssl);
@@ -433,15 +469,9 @@ bind_plain:;
     if (s->port != want)
         fprintf(stderr, "[netsrv] :%u in use; HTTP API on :%u\n", want, s->port);
 
-    /* Mark the listen socket close-on-exec so the dozens of MCP subprocesses
-     * we fork+exec don't inherit it. Without this the port stays bound (held
-     * by orphaned children) long after this process exits, and the next launch
-     * fails with "bind :%u failed". mbedtls_net_bind does not set this. */
-    if (s->listen_fd.fd >= 0) {
-        int fl = fcntl(s->listen_fd.fd, F_GETFD);
-        if (fl >= 0)
-            fcntl(s->listen_fd.fd, F_SETFD, fl | FD_CLOEXEC);
-    }
+    /* Keep the listener out of fork+exec'd MCP subprocesses and apply
+     * platform TCP hygiene in one place. */
+    netsrv_tune_socket(s->listen_fd.fd, true);
 
     s->running = true;
     pthread_attr_t attr;
@@ -578,6 +608,7 @@ char *netsrv_client_post(const char *host, uint16_t port, const char *path, cons
     snprintf(port_str, sizeof(port_str), "%u", port);
     if (mbedtls_net_connect(&fd, host, port_str, MBEDTLS_NET_PROTO_TCP) != 0)
         goto done;
+    netsrv_tune_socket(fd.fd, false);
 
     if (use_tls) {
         if (mbedtls_ssl_config_defaults(&conf, MBEDTLS_SSL_IS_CLIENT, MBEDTLS_SSL_TRANSPORT_STREAM,
@@ -636,16 +667,8 @@ char *netsrv_client_post(const char *host, uint16_t port, const char *path, cons
              path, host, body_len, auth_hdr);
 
     /* Send */
-    bool wok;
-    if (use_tls) {
-        wok = mbedtls_ssl_write(&ssl, (const unsigned char *)req_hdr, strlen(req_hdr)) > 0;
-        wok &= body_len == 0 ||
-               mbedtls_ssl_write(&ssl, (const unsigned char *)json_body, body_len) > 0;
-    } else {
-        wok = mbedtls_net_send(&fd, (const unsigned char *)req_hdr, strlen(req_hdr)) > 0;
-        wok &=
-            body_len == 0 || mbedtls_net_send(&fd, (const unsigned char *)json_body, body_len) > 0;
-    }
+    bool wok = client_write_all(use_tls, &ssl, &fd, req_hdr, strlen(req_hdr));
+    wok &= body_len == 0 || client_write_all(use_tls, &ssl, &fd, json_body, body_len);
     if (!wok)
         goto done;
 

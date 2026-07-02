@@ -8,8 +8,10 @@
   },
   "providers": {
     "anthropic": {
+      "api_coverage_groups": 0,
       "cache_status": "explicit",
       "confidence": 0.82,
+      "cost_levers": 0,
       "errors": [],
       "implemented": "cache_control_ephemeral,cache_read_usage_parse",
       "last_reviewed": "2026-06-24",
@@ -21,8 +23,10 @@
       "valid": true
     },
     "cerebras": {
+      "api_coverage_groups": 0,
       "cache_status": "explicit",
       "confidence": 0.82,
+      "cost_levers": 0,
       "errors": [],
       "implemented": "prompt_cache_key",
       "last_reviewed": "2026-06-24",
@@ -34,8 +38,10 @@
       "valid": true
     },
     "cohere": {
+      "api_coverage_groups": 0,
       "cache_status": "unknown",
       "confidence": 0.45,
+      "cost_levers": 0,
       "errors": [],
       "implemented": "-",
       "last_reviewed": "2026-06-24",
@@ -48,8 +54,10 @@
       "valid": true
     },
     "deepseek": {
+      "api_coverage_groups": 0,
       "cache_status": "automatic",
       "confidence": 0.82,
+      "cost_levers": 0,
       "errors": [],
       "implemented": "automatic_prompt_cache_policy",
       "last_reviewed": "2026-06-24",
@@ -61,8 +69,10 @@
       "valid": true
     },
     "google": {
+      "api_coverage_groups": 0,
       "cache_status": "resource",
       "confidence": 0.82,
+      "cost_levers": 0,
       "errors": [],
       "implemented": "openai_compat_chat",
       "last_reviewed": "2026-06-24",
@@ -75,8 +85,10 @@
       "valid": true
     },
     "groq": {
+      "api_coverage_groups": 0,
       "cache_status": "automatic",
       "confidence": 0.82,
+      "cost_levers": 0,
       "errors": [],
       "implemented": "automatic_prompt_cache_policy",
       "last_reviewed": "2026-06-24",
@@ -88,8 +100,10 @@
       "valid": true
     },
     "mistral": {
+      "api_coverage_groups": 0,
       "cache_status": "explicit",
       "confidence": 0.82,
+      "cost_levers": 0,
       "errors": [],
       "implemented": "prompt_cache_key",
       "last_reviewed": "2026-06-24",
@@ -101,8 +115,10 @@
       "valid": true
     },
     "moonshot": {
+      "api_coverage_groups": 0,
       "cache_status": "unknown",
       "confidence": 0.45,
+      "cost_levers": 0,
       "errors": [],
       "implemented": "-",
       "last_reviewed": "2026-06-24",
@@ -115,21 +131,30 @@
       "valid": true
     },
     "openai": {
+      "api_coverage_groups": 21,
       "cache_status": "explicit",
-      "confidence": 0.82,
+      "confidence": 0.9,
+      "cost_levers": 8,
       "errors": [],
-      "implemented": "automatic_prompt_cache,prompt_cache_key,prompt_cache_retention,cached_token_usage_parse",
-      "last_reviewed": "2026-06-24",
+      "implemented": "openai_api_coverage_map,openai_cost_management_map,automatic_prompt_cache,prompt_cache_key,prompt_cache_retention,cached_token_usage_parse",
+      "last_reviewed": "2026-07-02",
       "mechanisms": "automatic_prefix_cache,prompt_cache_key,prompt_cache_retention",
       "missing": [
-        "Responses transport default migration"
+        "Responses transport default migration",
+        "Batch API JSONL planner and result ingester",
+        "Responses input-token preflight estimator",
+        "OpenAI built-in tool/session/storage cost ledger",
+        "Realtime response.done usage import",
+        "OpenAI admin usage reconciliation"
       ],
-      "risk": "low",
+      "risk": "medium",
       "valid": true
     },
     "openrouter": {
+      "api_coverage_groups": 0,
       "cache_status": "explicit",
       "confidence": 0.82,
+      "cost_levers": 0,
       "errors": [],
       "implemented": "cache_control_for_claude_qwen,model_catalog_cache",
       "last_reviewed": "2026-06-24",
@@ -141,8 +166,10 @@
       "valid": true
     },
     "perplexity": {
+      "api_coverage_groups": 0,
       "cache_status": "unknown",
       "confidence": 0.45,
+      "cost_levers": 0,
       "errors": [],
       "implemented": "-",
       "last_reviewed": "2026-06-24",
@@ -155,8 +182,10 @@
       "valid": true
     },
     "sakana": {
+      "api_coverage_groups": 0,
       "cache_status": "unknown",
       "confidence": 0.82,
+      "cost_levers": 0,
       "errors": [],
       "implemented": "effort_normalization,long_stream_idle,responses_codex_profile_metadata",
       "last_reviewed": "2026-06-24",
@@ -169,8 +198,10 @@
       "valid": true
     },
     "together": {
+      "api_coverage_groups": 0,
       "cache_status": "unknown",
       "confidence": 0.45,
+      "cost_levers": 0,
       "errors": [],
       "implemented": "-",
       "last_reviewed": "2026-06-24",
@@ -183,8 +214,10 @@
       "valid": true
     },
     "xai": {
+      "api_coverage_groups": 0,
       "cache_status": "automatic",
       "confidence": 0.82,
+      "cost_levers": 0,
       "errors": [],
       "implemented": "x-grok-conv-id_header,automatic_prompt_cache_policy",
       "last_reviewed": "2026-06-24",

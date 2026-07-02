@@ -1,4 +1,5 @@
 #include "dcr.h"
+#include "config.h"
 #include "json_util.h"
 #include <ctype.h>
 #include <dirent.h>
@@ -563,7 +564,11 @@ const char *dcr_reasoning_effort_normalize(const char *provider, const char *mod
                                            char *out, size_t out_len) {
     if (!out || out_len == 0)
         return NULL;
-    const char *e = effort && effort[0] ? effort : "high";
+    const char *e = effort && effort[0] ? effort : EFFORT_HIGH;
+    if (dsco_effort_is_auto(e)) {
+        out[0] = '\0';
+        return out;
+    }
     const dcr_model_t *m = dcr_model_find(model);
     if (m) {
         for (size_t i = 0; i < m->effort_alias_count; i++) {
@@ -574,12 +579,14 @@ const char *dcr_reasoning_effort_normalize(const char *provider, const char *mod
         }
     }
     if (provider && strcmp(provider, "sakana") == 0) {
-        if (strcmp(e, "max") == 0 || strcmp(e, "xhigh") == 0)
-            dcr_copy(out, out_len, "xhigh");
+        if (strcmp(e, EFFORT_MAX) == 0 || strcmp(e, EFFORT_XHIGH) == 0)
+            dcr_copy(out, out_len, EFFORT_XHIGH);
         else
-            dcr_copy(out, out_len, "high");
+            dcr_copy(out, out_len, EFFORT_HIGH);
         return out;
     }
+    if (strcmp(e, EFFORT_MAX) == 0)
+        e = EFFORT_XHIGH;
     dcr_copy(out, out_len, e);
     return out;
 }
@@ -744,7 +751,8 @@ int dcr_cli(int argc, char **argv) {
             buf[n] = '\0';
             char *prov = json_get_str(buf, "provider");
             /* status is nested under prompt_caching; cheap surface extraction */
-            char *status = strstr(buf, "\"status\"");
+            char *prompt_caching = strstr(buf, "\"prompt_caching\":");
+            char *status = prompt_caching ? strstr(prompt_caching, "\"status\"") : NULL;
             char status_val[32] = "unknown";
             if (status) {
                 char *q = strchr(status + 8, '"');
@@ -757,8 +765,13 @@ int dcr_cli(int argc, char **argv) {
                     }
                 }
             }
-            printf("%s{\"provider\":\"%s\",\"prompt_cache_status\":\"%s\"}",
-                   first ? "" : ",", prov ? prov : de->d_name, status_val);
+            bool has_api_coverage = strstr(buf, "\"api_coverage\"") != NULL;
+            bool has_cost_management = strstr(buf, "\"cost_management\"") != NULL;
+            printf("%s{\"provider\":\"%s\",\"prompt_cache_status\":\"%s\","
+                   "\"api_coverage\":%s,\"cost_management\":%s}",
+                   first ? "" : ",", prov ? prov : de->d_name, status_val,
+                   has_api_coverage ? "true" : "false",
+                   has_cost_management ? "true" : "false");
             first = 0;
             free(prov);
             free(buf);
