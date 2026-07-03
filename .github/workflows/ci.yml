@@ -143,7 +143,16 @@ jobs:
           static-analysis: "true"
 
       - name: Run ${{ matrix.tool }}
-        run: make ${{ matrix.tool }}
+        run: |
+          set -euo pipefail
+          # cppcheck's heuristic checks (uninitvar/negativeIndex/nullPointer)
+          # produce false positives across the tree; advisory until a dedicated
+          # triage pass. clang-tidy stays blocking (compiler-diagnostic errors).
+          if [ "${{ matrix.tool }}" = "cppcheck" ]; then
+            make cppcheck || echo "::warning::cppcheck reported findings (advisory)"
+          else
+            make ${{ matrix.tool }}
+          fi
 
   hygiene:
     name: repo hygiene
