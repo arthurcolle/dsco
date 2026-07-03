@@ -49,7 +49,9 @@
 #include <termios.h>
 #include <time.h>
 #include <curl/curl.h>
+#if defined(__APPLE__)
 #include <mach-o/dyld.h>
+#endif
 #include "crypto.h"
 #include "output_guard.h"
 #include "agent_profile.h"
@@ -1861,8 +1863,16 @@ static bool current_executable_path(char *out, size_t out_len) {
     if (!out || out_len == 0)
         return false;
     out[0] = '\0';
+#if defined(__APPLE__)
     uint32_t sz = (uint32_t)out_len;
     return _NSGetExecutablePath(out, &sz) == 0 && out[0] != '\0';
+#else
+    ssize_t n = readlink("/proc/self/exe", out, out_len - 1);
+    if (n <= 0)
+        return false;
+    out[n] = '\0';
+    return true;
+#endif
 }
 
 static bool resolve_restart_binary(char *target, size_t target_len, bool *hotswap) {

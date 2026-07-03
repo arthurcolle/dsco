@@ -20,7 +20,7 @@ BUILD_DIR ?= build
 DSCO_STD ?= $(shell for s in c2y c23 c2x c11; do \
 	if $(CC) -std=$$s -x c -c /dev/null -o /dev/null 2>/dev/null; then echo $$s; break; fi; done)
 DSCO_ARCH ?= native
-BASE_CFLAGS = -Wall -Wextra -O3 -std=$(DSCO_STD) $(C2Y_WARNING_FLAGS) -D_POSIX_C_SOURCE=200809L \
+BASE_CFLAGS = -Wall -Wextra -O3 -std=$(DSCO_STD) $(C2Y_WARNING_FLAGS) -D_POSIX_C_SOURCE=200809L -D_DEFAULT_SOURCE \
 	-I$(INC_DIR) \
 	-march=$(DSCO_ARCH) -mtune=$(DSCO_ARCH) -funroll-loops -fvisibility=hidden \
 	-funwind-tables -fno-omit-frame-pointer -g \
@@ -133,7 +133,7 @@ PROFILE_CFLAGS = $(BASE_CFLAGS) -O1 -g -fno-omit-frame-pointer -fno-inline \
 ifeq ($(PROFILE_BUILD),1)
 override CFLAGS = $(PROFILE_CFLAGS)
 endif
-LITE_CFLAGS ?= -Oz -std=$(DSCO_STD) $(C2Y_WARNING_FLAGS) -D_POSIX_C_SOURCE=200809L \
+LITE_CFLAGS ?= -Oz -std=$(DSCO_STD) $(C2Y_WARNING_FLAGS) -D_POSIX_C_SOURCE=200809L -D_DEFAULT_SOURCE \
 	-I$(INC_DIR) -DBUILD_DATE='"$(BUILD_DATE)"' -DGIT_HASH='"$(GIT_HASH)"'
 COVERAGE_CFLAGS = $(BASE_CFLAGS) -O0 -g -fno-omit-frame-pointer -fno-inline --coverage
 COVERAGE_LDFLAGS = --coverage
@@ -398,7 +398,7 @@ endif
 endif
 
 dsc: dsc.c
-	$(CC) -O2 -std=$(DSCO_STD) $(C2Y_WARNING_FLAGS) -D_POSIX_C_SOURCE=200809L -o $@ $< -lcurl -lreadline
+	$(CC) -O2 -std=$(DSCO_STD) $(C2Y_WARNING_FLAGS) -D_POSIX_C_SOURCE=200809L -D_DEFAULT_SOURCE -o $@ $< -lcurl -lreadline
 
 $(DEBUG_TARGET): $(DEBUG_OBJS) $(GSL_DEBUG_OBJS)
 	$(CC) $(DEBUG_CFLAGS) -o $@ $^ $(LDFLAGS) $(LDLIBS)
@@ -774,7 +774,7 @@ clang-tidy:
 		echo "clang-tidy not found" >&2; \
 		exit 1; \
 	fi
-	clang-tidy $(SRCS) -- -I$(INC_DIR) -std=c11 -D_POSIX_C_SOURCE=200809L -DHAVE_MBEDTLS -DHAVE_LIBSODIUM -DHAVE_LIBUV
+	clang-tidy $(SRCS) -- -I$(INC_DIR) -std=c11 -D_POSIX_C_SOURCE=200809L -D_DEFAULT_SOURCE -DHAVE_MBEDTLS -DHAVE_LIBSODIUM -DHAVE_LIBUV
 
 cppcheck:
 	@if ! command -v cppcheck >/dev/null 2>&1; then \

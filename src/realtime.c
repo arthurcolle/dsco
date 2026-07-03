@@ -274,6 +274,7 @@ int realtime_voice_run(const realtime_opts_t *opts) {
 #include <mbedtls/net_sockets.h>
 #include <mbedtls/sha1.h>
 #include <mbedtls/ssl.h>
+#include <mbedtls/version.h>
 #include <mbedtls/x509_crt.h>
 
 #if defined(__APPLE__)
@@ -652,7 +653,12 @@ static bool rt_ws_connect(rt_ws_t *ws, const char *host, const char *port, const
         return false;
     }
     mbedtls_ssl_conf_rng(&ws->conf, mbedtls_ctr_drbg_random, &ws->drbg);
+#if MBEDTLS_VERSION_NUMBER >= 0x03000000
     mbedtls_ssl_conf_min_tls_version(&ws->conf, MBEDTLS_SSL_VERSION_TLS1_2);
+#else
+    mbedtls_ssl_conf_min_version(&ws->conf, MBEDTLS_SSL_MAJOR_VERSION_3,
+                                 MBEDTLS_SSL_MINOR_VERSION_3); /* TLS 1.2 */
+#endif
     if (getenv("DSCO_TLS_INSECURE")) {
         mbedtls_ssl_conf_authmode(&ws->conf, MBEDTLS_SSL_VERIFY_NONE);
     } else if (rt_load_ca(ws)) {
@@ -746,7 +752,11 @@ static bool rt_ws_connect(rt_ws_t *ws, const char *host, const char *port, const
         snprintf(joined, sizeof(joined), "%s258EAFA5-E914-47DA-95CA-C5AB0DC85B11", key);
         unsigned char sha[20];
         char expect[32] = {0};
+#if MBEDTLS_VERSION_NUMBER >= 0x03000000
         if (mbedtls_sha1((const unsigned char *)joined, strlen(joined), sha) == 0)
+#else
+        if (mbedtls_sha1_ret((const unsigned char *)joined, strlen(joined), sha) == 0)
+#endif
             base64_encode(sha, sizeof(sha), expect, sizeof(expect));
         if (strcmp(accept_hdr, expect) != 0) {
             snprintf(err, errlen, "Sec-WebSocket-Accept mismatch");
