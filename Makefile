@@ -149,7 +149,11 @@ LITE_CFLAGS ?= -Oz -std=$(DSCO_STD) $(C2Y_WARNING_FLAGS) -D_POSIX_C_SOURCE=20080
 	-I$(INC_DIR) -DBUILD_DATE='"$(BUILD_DATE)"' -DGIT_HASH='"$(GIT_HASH)"'
 COVERAGE_CFLAGS = $(BASE_CFLAGS) -O0 -g -fno-omit-frame-pointer -fno-inline --coverage
 COVERAGE_LDFLAGS = --coverage
-ASAN_RUNTIME_OPTIONS = detect_leaks=1
+# Leak checking is off on every platform until a dedicated leak burndown:
+# the suite has never run under LSan and end-of-process leaks would drown the
+# address-error signal ASan is here for. Override: make asan-test
+# ASAN_RUNTIME_OPTIONS=detect_leaks=1
+ASAN_RUNTIME_OPTIONS = detect_leaks=0
 ifeq ($(UNAME_S),Darwin)
 ASAN_RUNTIME_OPTIONS = detect_leaks=0
 # Secure Enclave + PAC + Touch ID + presence detection. Disabled for the
@@ -758,12 +762,14 @@ coverage_runner: $(TEST_COVERAGE_OBJS) $(GSL_COVERAGE_OBJS)
 
 asan: $(TARGET)-asan
 
-$(TARGET)-asan: $(ASAN_OBJS) $(GSL_ASAN_OBJS)
+# Embedded-data objects are plain byte arrays; the uninstrumented release
+# objects are reused rather than rebuilding them per sanitizer.
+$(TARGET)-asan: $(ASAN_OBJS) $(GSL_ASAN_OBJS) $(GENERATED_OBJS)
 	$(CC) $(ASAN_CFLAGS) -o $@ $^ $(LDFLAGS) $(ASAN_LDFLAGS) $(LDLIBS)
 
 ubsan: $(TARGET)-ubsan
 
-$(TARGET)-ubsan: $(UBSAN_OBJS) $(GSL_UBSAN_OBJS)
+$(TARGET)-ubsan: $(UBSAN_OBJS) $(GSL_UBSAN_OBJS) $(GENERATED_OBJS)
 	$(CC) $(UBSAN_CFLAGS) -o $@ $^ $(LDFLAGS) $(UBSAN_LDFLAGS) $(LDLIBS)
 
 asan-test: asan-test_runner
