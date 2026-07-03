@@ -8,6 +8,31 @@
 #include <mbedtls/pk.h>
 #include <mbedtls/ecp.h>
 #include <mbedtls/error.h>
+#include <mbedtls/version.h>
+#include <sys/socket.h>
+#include <netinet/in.h>
+#include <netinet/tcp.h>
+
+/* mbedTLS 2.x compatibility (ubuntu 24.04 ships 2.28): map the 3.x-only
+ * spellings onto their 2.x equivalents. */
+#if MBEDTLS_VERSION_NUMBER < 0x03000000
+#include <mbedtls/bignum.h>
+#define mbedtls_ssl_conf_min_tls_version(conf, ver)                                                \
+    mbedtls_ssl_conf_min_version((conf), MBEDTLS_SSL_MAJOR_VERSION_3, MBEDTLS_SSL_MINOR_VERSION_3)
+#define mbedtls_pk_parse_keyfile(ctx, path, pwd, f_rng, p_rng)                                     \
+    mbedtls_pk_parse_keyfile((ctx), (path), (pwd))
+static int netsrv_compat_set_serial_raw(mbedtls_x509write_cert *ctx, unsigned char *serial,
+                                        size_t len) {
+    mbedtls_mpi mpi;
+    mbedtls_mpi_init(&mpi);
+    int r = mbedtls_mpi_read_binary(&mpi, serial, len);
+    if (r == 0)
+        r = mbedtls_x509write_crt_set_serial(ctx, &mpi);
+    mbedtls_mpi_free(&mpi);
+    return r;
+}
+#define mbedtls_x509write_crt_set_serial_raw netsrv_compat_set_serial_raw
+#endif
 
 #include <pthread.h>
 #include <stdio.h>
@@ -21,11 +46,32 @@
 #include <time.h>
 #include <errno.h>
 
+static void netsrv_tune_socket(int fd, bool listener) {
+    if (fd < 0)
+        return;
+
+    int fl = fcntl(fd, F_GETFD);
+    if (fl >= 0)
+        (void)fcntl(fd, F_SETFD, fl | FD_CLOEXEC);
+
+    int one = 1;
+#ifdef SO_NOSIGPIPE
+    (void)setsockopt(fd, SOL_SOCKET, SO_NOSIGPIPE, &one, sizeof(one));
+#endif
+    if (!listener) {
+        (void)setsockopt(fd, SOL_SOCKET, SO_KEEPALIVE, &one, sizeof(one));
+#ifdef TCP_NODELAY
+        (void)setsockopt(fd, IPPROTO_TCP, TCP_NODELAY, &one, sizeof(one));
+#endif
+    }
+}
+
 /* ── Route table ──────────────────────────────────────────────────────── */
 typedef struct {
     char method[8];
     char path[128];
-    netsrv_handler_fn fn;
+    netsrv_handler_fn fn;       /* buffered handler (NULL if streaming) */
+    netsrv_stream_fn stream_fn; /* streaming handler (NULL if buffered) */
     void *ctx;
 } route_t;
 
@@ -120,6 +166,34 @@ static bool write_all(dsco_net_server_t *srv, mbedtls_ssl_context *ssl, mbedtls_
             ret = mbedtls_ssl_write(ssl, p, len);
         else
             ret = mbedtls_net_send(fd, p, len);
+        if (ret <= 0)
+            return false;
+        p += ret;
+        len -= (size_t)ret;
+    }
+    return true;
+}
+
+/* ── Streaming responder ──────────────────────────────────────────────────
+ * Handed to a streaming route so it can write the response incrementally over
+ * the live connection.  ssl is NULL in plaintext mode. */
+struct netsrv_stream {
+    dsco_net_server_t *srv;
+    mbedtls_ssl_context *ssl;
+    mbedtls_net_context *fd;
+};
+
+int netsrv_stream_send(netsrv_stream_t *s, const char *buf, size_t len) {
+    if (!s || !buf)
+        return -1;
+    return write_all(s->srv, s->ssl, s->fd, buf, len) ? 0 : -1;
+}
+
+static bool client_write_all(bool use_tls, mbedtls_ssl_context *ssl, mbedtls_net_context *fd,
+                             const void *buf, size_t len) {
+    const uint8_t *p = buf;
+    while (len > 0) {
+        int ret = use_tls ? mbedtls_ssl_write(ssl, p, len) : mbedtls_net_send(fd, p, len);
         if (ret <= 0)
             return false;
         p += ret;
@@ -228,6 +302,15 @@ static void *handle_conn(void *arg) {
                 .body_len = (size_t)(body ? content_length : 0),
                 .auth_token = tok,
             };
+            if (r->stream_fn) {
+                /* Streaming route owns the socket: it writes status + headers +
+                 * body itself.  Skip the buffered response writer entirely. */
+                netsrv_stream_t st = {
+                    .srv = srv, .ssl = srv->tls_ready ? &ca->ssl : NULL, .fd = &ca->client_fd};
+                r->stream_fn(&req, &st, r->ctx);
+                free(body);
+                goto cleanup;
+            }
             result = r->fn(&req, r->ctx);
             break;
         }
@@ -286,6 +369,7 @@ static void *accept_loop(void *arg) {
             free(ca);
             break;
         }
+        netsrv_tune_socket(ca->client_fd.fd, false);
 
         if (srv->tls_ready) {
             mbedtls_ssl_init(&ca->ssl);
@@ -355,6 +439,20 @@ bool netsrv_route(dsco_net_server_t *s, const char *method, const char *path, ne
     snprintf(r->method, sizeof(r->method), "%s", method);
     snprintf(r->path, sizeof(r->path), "%s", path);
     r->fn = fn;
+    r->stream_fn = NULL;
+    r->ctx = ctx;
+    return true;
+}
+
+bool netsrv_route_stream(dsco_net_server_t *s, const char *method, const char *path,
+                         netsrv_stream_fn fn, void *ctx) {
+    if (!s || s->route_count >= NETSRV_MAX_HANDLERS)
+        return false;
+    route_t *r = &s->routes[s->route_count++];
+    snprintf(r->method, sizeof(r->method), "%s", method);
+    snprintf(r->path, sizeof(r->path), "%s", path);
+    r->fn = NULL;
+    r->stream_fn = fn;
     r->ctx = ctx;
     return true;
 }
@@ -433,15 +531,9 @@ bind_plain:;
     if (s->port != want)
         fprintf(stderr, "[netsrv] :%u in use; HTTP API on :%u\n", want, s->port);
 
-    /* Mark the listen socket close-on-exec so the dozens of MCP subprocesses
-     * we fork+exec don't inherit it. Without this the port stays bound (held
-     * by orphaned children) long after this process exits, and the next launch
-     * fails with "bind :%u failed". mbedtls_net_bind does not set this. */
-    if (s->listen_fd.fd >= 0) {
-        int fl = fcntl(s->listen_fd.fd, F_GETFD);
-        if (fl >= 0)
-            fcntl(s->listen_fd.fd, F_SETFD, fl | FD_CLOEXEC);
-    }
+    /* Keep the listener out of fork+exec'd MCP subprocesses and apply
+     * platform TCP hygiene in one place. */
+    netsrv_tune_socket(s->listen_fd.fd, true);
 
     s->running = true;
     pthread_attr_t attr;
@@ -578,6 +670,7 @@ char *netsrv_client_post(const char *host, uint16_t port, const char *path, cons
     snprintf(port_str, sizeof(port_str), "%u", port);
     if (mbedtls_net_connect(&fd, host, port_str, MBEDTLS_NET_PROTO_TCP) != 0)
         goto done;
+    netsrv_tune_socket(fd.fd, false);
 
     if (use_tls) {
         if (mbedtls_ssl_config_defaults(&conf, MBEDTLS_SSL_IS_CLIENT, MBEDTLS_SSL_TRANSPORT_STREAM,
@@ -636,16 +729,8 @@ char *netsrv_client_post(const char *host, uint16_t port, const char *path, cons
              path, host, body_len, auth_hdr);
 
     /* Send */
-    bool wok;
-    if (use_tls) {
-        wok = mbedtls_ssl_write(&ssl, (const unsigned char *)req_hdr, strlen(req_hdr)) > 0;
-        wok &= body_len == 0 ||
-               mbedtls_ssl_write(&ssl, (const unsigned char *)json_body, body_len) > 0;
-    } else {
-        wok = mbedtls_net_send(&fd, (const unsigned char *)req_hdr, strlen(req_hdr)) > 0;
-        wok &=
-            body_len == 0 || mbedtls_net_send(&fd, (const unsigned char *)json_body, body_len) > 0;
-    }
+    bool wok = client_write_all(use_tls, &ssl, &fd, req_hdr, strlen(req_hdr));
+    wok &= body_len == 0 || client_write_all(use_tls, &ssl, &fd, json_body, body_len);
     if (!wok)
         goto done;
 

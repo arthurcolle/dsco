@@ -18,6 +18,7 @@
 #include <stdio.h>
 #include <math.h>
 #include <unistd.h>
+#include <fcntl.h>
 #include <time.h>
 #include <stdlib.h>
 #include <string.h>
@@ -25,6 +26,7 @@
 #include <poll.h>
 #include <sys/wait.h>
 #include <signal.h>
+#include <sys/stat.h>
 
 /* ── Shared HTTP helper ────────────────────────────────────────────────── */
 
@@ -243,6 +245,47 @@ static long http_get_authed(const char *url, const char *auth_header, http_buf_t
     long http_code = 0;
     if (res == CURLE_OK)
         curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, &http_code);
+
+    curl_slist_free_all(hdrs);
+    curl_easy_cleanup(curl);
+    return res == CURLE_OK ? http_code : -1;
+}
+
+static long http_get_authed_timeout(const char *url, const char *auth_header, long timeout_secs,
+                                    http_buf_t *out_buf) {
+    CURL *curl = curl_easy_init();
+    dsco_http_pool_apply(curl);
+    if (!curl)
+        return -1;
+
+    out_buf->data = malloc(8192);
+    out_buf->len = 0;
+    out_buf->cap = 8192;
+    out_buf->data[0] = '\0';
+
+    struct curl_slist *hdrs = NULL;
+    hdrs = curl_slist_append(hdrs, "Accept: application/json");
+    if (auth_header)
+        hdrs = curl_slist_append(hdrs, auth_header);
+
+    if (timeout_secs < 1)
+        timeout_secs = 30;
+
+    curl_easy_setopt(curl, CURLOPT_URL, url);
+    curl_easy_setopt(curl, CURLOPT_HTTPHEADER, hdrs);
+    curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, http_write_cb);
+    curl_easy_setopt(curl, CURLOPT_WRITEDATA, out_buf);
+    curl_easy_setopt(curl, CURLOPT_CONNECTTIMEOUT, 10L);
+    curl_easy_setopt(curl, CURLOPT_TIMEOUT, timeout_secs);
+    curl_easy_setopt(curl, CURLOPT_FOLLOWLOCATION, 1L);
+    curl_easy_setopt(curl, CURLOPT_USERAGENT, "dsco/" DSCO_VERSION);
+
+    CURLcode res = curl_easy_perform(curl);
+    long http_code = 0;
+    if (res == CURLE_OK)
+        curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, &http_code);
+    else
+        snprintf(out_buf->data, out_buf->cap, "curl error: %s", curl_easy_strerror(res));
 
     curl_slist_free_all(hdrs);
     curl_easy_cleanup(curl);
@@ -1436,6 +1479,4197 @@ bool tool_jina_embed(const char *input, char *result, size_t rlen) {
 }
 
 /* ══════════════════════════════════════════════════════════════════════════
+ *  PARALLEL.AI — Native Search, Extract, Task, FindAll, Chat, Monitor APIs
+ * ══════════════════════════════════════════════════════════════════════════ */
+
+#define PARALLEL_AI_BASE_URL "https://api.parallel.ai"
+
+static const char *skip_space_local(const char *s) {
+    while (s && *s && isspace((unsigned char)*s))
+        s++;
+    return s ? s : "";
+}
+
+static bool raw_starts_with(const char *raw, char c) {
+    const char *p = skip_space_local(raw);
+    return *p == c;
+}
+
+static bool raw_is_json_array(const char *raw) {
+    return raw_starts_with(raw, '[');
+}
+
+static bool raw_is_null(const char *raw) {
+    const char *p = skip_space_local(raw);
+    return strncmp(p, "null", 4) == 0;
+}
+
+static void append_field_sep(jbuf_t *body, bool *need_comma) {
+    if (*need_comma)
+        jbuf_append(body, ",");
+    *need_comma = true;
+}
+
+static bool append_string_field_if_present(jbuf_t *body, const char *input, const char *key,
+                                           const char *wire_key, bool *need_comma) {
+    char *value = json_get_str(input, key);
+    if (!value || !value[0]) {
+        free(value);
+        return false;
+    }
+    append_field_sep(body, need_comma);
+    jbuf_append(body, "\"");
+    jbuf_append(body, wire_key ? wire_key : key);
+    jbuf_append(body, "\":");
+    jbuf_append_json_str(body, value);
+    free(value);
+    return true;
+}
+
+static bool append_raw_field_if_present(jbuf_t *body, const char *input, const char *key,
+                                        const char *wire_key, bool *need_comma) {
+    char *raw = json_get_raw(input, key);
+    if (!raw || raw_is_null(raw)) {
+        free(raw);
+        return false;
+    }
+    append_field_sep(body, need_comma);
+    jbuf_append(body, "\"");
+    jbuf_append(body, wire_key ? wire_key : key);
+    jbuf_append(body, "\":");
+    jbuf_append(body, raw);
+    free(raw);
+    return true;
+}
+
+static bool append_int_field_if_present(jbuf_t *body, const char *input, const char *key,
+                                        const char *wire_key, int min_v, int max_v,
+                                        bool *need_comma) {
+    char *raw = json_get_raw(input, key);
+    if (!raw || raw_is_null(raw)) {
+        free(raw);
+        return false;
+    }
+    int v = atoi(raw);
+    free(raw);
+    if (min_v != max_v) {
+        if (v < min_v)
+            v = min_v;
+        if (v > max_v)
+            v = max_v;
+    }
+    append_field_sep(body, need_comma);
+    jbuf_append(body, "\"");
+    jbuf_append(body, wire_key ? wire_key : key);
+    jbuf_appendf(body, "\":%d", v);
+    return true;
+}
+
+static bool append_bool_field_if_present(jbuf_t *body, const char *input, const char *key,
+                                         const char *wire_key, bool *need_comma) {
+    char *raw = json_get_raw(input, key);
+    if (!raw || raw_is_null(raw)) {
+        free(raw);
+        return false;
+    }
+    bool v = strncmp(skip_space_local(raw), "true", 4) == 0;
+    free(raw);
+    append_field_sep(body, need_comma);
+    jbuf_append(body, "\"");
+    jbuf_append(body, wire_key ? wire_key : key);
+    jbuf_append(body, v ? "\":true" : "\":false");
+    return true;
+}
+
+static bool append_query_param_int(jbuf_t *path, const char *input, const char *key, int min_v,
+                                   int max_v, bool *has_query) {
+    char *raw = json_get_raw(input, key);
+    if (!raw || raw_is_null(raw)) {
+        free(raw);
+        return false;
+    }
+    int v = atoi(raw);
+    free(raw);
+    if (v < min_v)
+        v = min_v;
+    if (v > max_v)
+        v = max_v;
+    jbuf_append(path, *has_query ? "&" : "?");
+    *has_query = true;
+    jbuf_append(path, key);
+    jbuf_appendf(path, "=%d", v);
+    return true;
+}
+
+static bool append_query_param_bool(jbuf_t *path, const char *input, const char *key,
+                                    bool *has_query) {
+    char *raw = json_get_raw(input, key);
+    if (!raw || raw_is_null(raw)) {
+        free(raw);
+        return false;
+    }
+    bool v = strncmp(skip_space_local(raw), "true", 4) == 0;
+    free(raw);
+    jbuf_append(path, *has_query ? "&" : "?");
+    *has_query = true;
+    jbuf_append(path, key);
+    jbuf_append(path, v ? "=true" : "=false");
+    return true;
+}
+
+static bool parallel_id_is_safe(const char *id) {
+    return identifier_token_is_safe(id);
+}
+
+static bool append_query_param_string(jbuf_t *path, const char *input, const char *key,
+                                      const char *wire_key, bool *has_query) {
+    char *value = json_get_str(input, key);
+    if (!value || !value[0]) {
+        free(value);
+        return false;
+    }
+    CURL *curl = curl_easy_init();
+    char *escaped = curl ? curl_easy_escape(curl, value, 0) : NULL;
+    free(value);
+    if (!escaped) {
+        if (curl)
+            curl_easy_cleanup(curl);
+        return false;
+    }
+    jbuf_append(path, *has_query ? "&" : "?");
+    *has_query = true;
+    jbuf_append(path, wire_key ? wire_key : key);
+    jbuf_append(path, "=");
+    jbuf_append(path, escaped);
+    curl_free(escaped);
+    curl_easy_cleanup(curl);
+    return true;
+}
+
+static char *parallel_ai_passthrough_body(const char *input) {
+    char *body = json_get_raw(input, "body");
+    if (!body || !raw_starts_with(body, '{')) {
+        free(body);
+        body = json_get_raw(input, "request");
+    }
+    if (body && raw_starts_with(body, '{'))
+        return body;
+    free(body);
+    return NULL;
+}
+
+static bool parallel_ai_state_path(char *path, size_t path_len) {
+    const char *home = getenv("HOME");
+    if (!home || !home[0])
+        return false;
+    char dir[512];
+    snprintf(dir, sizeof(dir), "%s/.dsco", home);
+    mkdir(dir, 0755);
+    snprintf(path, path_len, "%s/.dsco/parallel_ai_jobs.jsonl", home);
+    return true;
+}
+
+static char *parallel_ai_response_id(const char *resp, const char *primary_key) {
+    char *id = primary_key ? json_get_str(resp, primary_key) : NULL;
+    if (!id && primary_key && strcmp(primary_key, "taskgroup_id") == 0)
+        id = json_get_str(resp, "task_group_id");
+    if (!id && primary_key && strcmp(primary_key, "task_group_id") == 0)
+        id = json_get_str(resp, "taskgroup_id");
+    if (!id && primary_key && strcmp(primary_key, "findall_id") == 0)
+        id = json_get_str(resp, "id");
+    if (!id && primary_key && strcmp(primary_key, "monitor_id") == 0)
+        id = json_get_str(resp, "id");
+    if (!id)
+        id = json_get_str(resp, "run_id");
+    if (!id)
+        id = json_get_str(resp, "taskgroup_id");
+    if (!id)
+        id = json_get_str(resp, "findall_id");
+    if (!id)
+        id = json_get_str(resp, "monitor_id");
+    if (!id || !parallel_id_is_safe(id)) {
+        free(id);
+        return NULL;
+    }
+    return id;
+}
+
+static char *parallel_ai_response_first_array_id(const char *resp, const char *key) {
+    char *raw = json_get_raw(resp, key);
+    if (!raw || !raw_is_json_array(raw)) {
+        free(raw);
+        return NULL;
+    }
+    const char *p = skip_space_local(raw);
+    p++;
+    p = skip_space_local(p);
+    if (*p != '"') {
+        free(raw);
+        return NULL;
+    }
+    p++;
+    jbuf_t id;
+    jbuf_init(&id, 64);
+    while (*p && *p != '"') {
+        if (*p == '\\' && p[1])
+            p++;
+        jbuf_append_char(&id, *p++);
+    }
+    free(raw);
+    if (!id.data || !parallel_id_is_safe(id.data)) {
+        jbuf_free(&id);
+        return NULL;
+    }
+    return id.data;
+}
+
+static void parallel_ai_record_job(const char *kind, const char *id, const char *resp) {
+    if (!kind || !kind[0] || !id || !parallel_id_is_safe(id))
+        return;
+    char path[1024];
+    if (!parallel_ai_state_path(path, sizeof(path)))
+        return;
+    /* 0600: internal job ledger — owner-only. */
+    int afd = open(path, O_WRONLY | O_CREAT | O_APPEND, 0600);
+    FILE *f = afd >= 0 ? fdopen(afd, "a") : NULL;
+    if (!f) {
+        if (afd >= 0)
+            close(afd);
+        return;
+    }
+    char *status = resp ? json_get_str(resp, "status") : NULL;
+    fprintf(f, "{\"ts\":%ld,\"kind\":", (long)time(NULL));
+    jbuf_t line;
+    jbuf_init(&line, 256 + (resp ? strlen(resp) / 8 : 0));
+    jbuf_append_json_str(&line, kind);
+    jbuf_append(&line, ",\"id\":");
+    jbuf_append_json_str(&line, id);
+    if (status && status[0]) {
+        jbuf_append(&line, ",\"status\":");
+        jbuf_append_json_str(&line, status);
+    }
+    jbuf_append(&line, ",\"response\":");
+    if (resp && raw_starts_with(resp, '{'))
+        jbuf_append(&line, resp);
+    else
+        jbuf_append_json_str(&line, resp ? resp : "");
+    jbuf_append(&line, "}\n");
+    fputs(line.data ? line.data : "\n", f);
+    jbuf_free(&line);
+    free(status);
+    fclose(f);
+}
+
+static void parallel_ai_record_response(const char *kind, const char *id_key, const char *resp) {
+    char *id = parallel_ai_response_id(resp, id_key);
+    if (id) {
+        parallel_ai_record_job(kind, id, resp);
+        free(id);
+    }
+}
+
+static char *parallel_ai_last_job_id(const char *kind) {
+    char path[1024];
+    if (!parallel_ai_state_path(path, sizeof(path)))
+        return NULL;
+    FILE *f = fopen(path, "r");
+    if (!f)
+        return NULL;
+    char *last = NULL;
+    char line[65536];
+    while (fgets(line, sizeof(line), f)) {
+        char *k = json_get_str(line, "kind");
+        if (k && strcmp(k, kind) == 0) {
+            char *id = json_get_str(line, "id");
+            if (id && parallel_id_is_safe(id)) {
+                free(last);
+                last = id;
+                id = NULL;
+            }
+            free(id);
+        }
+        free(k);
+    }
+    fclose(f);
+    return last;
+}
+
+static char *parallel_ai_input_or_last_id(const char *input, const char *key, const char *kind,
+                                          char *result, size_t rlen) {
+    char *id = json_get_str(input, key);
+    if ((!id || !id[0]) && kind)
+        id = parallel_ai_last_job_id(kind);
+    if (!id || !parallel_id_is_safe(id)) {
+        free(id);
+        snprintf(result, rlen, "missing or unsafe required parameter: %s", key);
+        return NULL;
+    }
+    return id;
+}
+
+static bool parallel_ai_request_timeout(const char *method, const char *path, const char *body,
+                                        long get_timeout_secs, char *result, size_t rlen) {
+    const char *api_key;
+    if (!require_key("PARALLEL_API_KEY", "Parallel.ai", result, rlen, &api_key))
+        return false;
+
+    jbuf_t url;
+    jbuf_init(&url, strlen(PARALLEL_AI_BASE_URL) + strlen(path) + 8);
+    jbuf_append(&url, PARALLEL_AI_BASE_URL);
+    jbuf_append(&url, path);
+
+    char auth[512];
+    snprintf(auth, sizeof(auth), "x-api-key: %s", api_key);
+
+    http_buf_t resp = {0};
+    long status;
+    if (strcmp(method, "GET") == 0) {
+        if (get_timeout_secs > 30)
+            status = http_get_authed_timeout(url.data, auth, get_timeout_secs, &resp);
+        else
+            status = http_get_authed(url.data, auth, &resp);
+    } else {
+        const char *headers[] = {auth};
+        status = http_json_request(method, url.data, body ? body : "{}", headers, 1, &resp);
+    }
+    jbuf_free(&url);
+
+    if (status != 200 && status != 201 && status != 202 && status != 204) {
+        snprintf(result, rlen, "Parallel.ai error (HTTP %ld): %.900s", status,
+                 resp.data ? resp.data : "");
+        free(resp.data);
+        return false;
+    }
+
+    if (status == 204 || !resp.data || !resp.data[0]) {
+        snprintf(result, rlen, "{\"ok\":true}");
+    } else {
+        result[0] = '\0';
+        truncate_response(resp.data, result, rlen, 32);
+    }
+    free(resp.data);
+    return true;
+}
+
+static bool parallel_ai_request(const char *method, const char *path, const char *body,
+                                char *result, size_t rlen) {
+    return parallel_ai_request_timeout(method, path, body, 30, result, rlen);
+}
+
+bool tool_parallel_ai_search(const char *input, char *result, size_t rlen) {
+    char *queries_raw = json_get_raw(input, "search_queries");
+    char *query = NULL;
+    if (queries_raw && !raw_is_json_array(queries_raw)) {
+        free(queries_raw);
+        queries_raw = NULL;
+    }
+    if (!queries_raw)
+        query = json_get_str(input, "query");
+    if ((!queries_raw || raw_is_null(queries_raw)) && (!query || !query[0])) {
+        free(queries_raw);
+        free(query);
+        snprintf(result, rlen, "missing required parameter: search_queries or query");
+        return false;
+    }
+
+    jbuf_t body;
+    jbuf_init(&body, 512);
+    bool comma = false;
+    jbuf_append(&body, "{");
+
+    append_string_field_if_present(&body, input, "objective", "objective", &comma);
+    append_field_sep(&body, &comma);
+    jbuf_append(&body, "\"search_queries\":");
+    if (queries_raw) {
+        jbuf_append(&body, queries_raw);
+    } else {
+        jbuf_append(&body, "[");
+        jbuf_append_json_str(&body, query);
+        jbuf_append(&body, "]");
+    }
+    if (!append_string_field_if_present(&body, input, "mode", "mode", &comma)) {
+        append_field_sep(&body, &comma);
+        jbuf_append(&body, "\"mode\":\"turbo\"");
+    }
+    append_int_field_if_present(&body, input, "max_chars_total", "max_chars_total", 1, 200000,
+                                &comma);
+    append_string_field_if_present(&body, input, "session_id", "session_id", &comma);
+    append_string_field_if_present(&body, input, "client_model", "client_model", &comma);
+    append_raw_field_if_present(&body, input, "advanced_settings", "advanced_settings", &comma);
+    jbuf_append(&body, "}");
+
+    free(queries_raw);
+    free(query);
+    bool ok = parallel_ai_request("POST", "/v1/search", body.data, result, rlen);
+    jbuf_free(&body);
+    return ok;
+}
+
+bool tool_parallel_ai_extract(const char *input, char *result, size_t rlen) {
+    char *urls_raw = json_get_raw(input, "urls");
+    char *url = NULL;
+    if (urls_raw && !raw_is_json_array(urls_raw)) {
+        free(urls_raw);
+        urls_raw = NULL;
+    }
+    if (!urls_raw)
+        url = json_get_str(input, "url");
+    if ((!urls_raw || raw_is_null(urls_raw)) && (!url || !url[0])) {
+        free(urls_raw);
+        free(url);
+        snprintf(result, rlen, "missing required parameter: urls or url");
+        return false;
+    }
+    if (url && !external_http_url_is_public(url)) {
+        free(urls_raw);
+        free(url);
+        snprintf(result, rlen, "url must be a public http(s) target");
+        return false;
+    }
+
+    jbuf_t body;
+    jbuf_init(&body, 512);
+    bool comma = false;
+    jbuf_append(&body, "{");
+    append_field_sep(&body, &comma);
+    jbuf_append(&body, "\"urls\":");
+    if (urls_raw) {
+        jbuf_append(&body, urls_raw);
+    } else {
+        jbuf_append(&body, "[");
+        jbuf_append_json_str(&body, url);
+        jbuf_append(&body, "]");
+    }
+    append_string_field_if_present(&body, input, "objective", "objective", &comma);
+    append_raw_field_if_present(&body, input, "search_queries", "search_queries", &comma);
+    append_int_field_if_present(&body, input, "max_chars_total", "max_chars_total", 1, 200000,
+                                &comma);
+    append_string_field_if_present(&body, input, "session_id", "session_id", &comma);
+    append_string_field_if_present(&body, input, "client_model", "client_model", &comma);
+    append_raw_field_if_present(&body, input, "advanced_settings", "advanced_settings", &comma);
+    jbuf_append(&body, "}");
+
+    free(urls_raw);
+    free(url);
+    bool ok = parallel_ai_request("POST", "/v1/extract", body.data, result, rlen);
+    jbuf_free(&body);
+    return ok;
+}
+
+bool tool_parallel_ai_task_create(const char *input, char *result, size_t rlen) {
+    char *body_raw = parallel_ai_passthrough_body(input);
+    if (body_raw) {
+        bool ok = parallel_ai_request("POST", "/v1/tasks/runs", body_raw, result, rlen);
+        if (ok)
+            parallel_ai_record_response("task_run", "run_id", result);
+        free(body_raw);
+        return ok;
+    }
+
+    char *task_input = json_get_raw(input, "input");
+    if (!task_input || raw_is_null(task_input)) {
+        free(task_input);
+        snprintf(result, rlen, "missing required parameter: input");
+        return false;
+    }
+
+    char *processor = json_get_str(input, "processor");
+    if (!processor || !processor[0]) {
+        free(processor);
+        processor = strdup("base");
+    }
+
+    jbuf_t body;
+    jbuf_init(&body, 1024 + strlen(task_input));
+    bool comma = false;
+    jbuf_append(&body, "{");
+    append_field_sep(&body, &comma);
+    jbuf_append(&body, "\"processor\":");
+    jbuf_append_json_str(&body, processor);
+    append_field_sep(&body, &comma);
+    jbuf_append(&body, "\"input\":");
+    jbuf_append(&body, task_input);
+    append_raw_field_if_present(&body, input, "metadata", "metadata", &comma);
+    append_raw_field_if_present(&body, input, "source_policy", "source_policy", &comma);
+    append_raw_field_if_present(&body, input, "advanced_settings", "advanced_settings", &comma);
+    append_raw_field_if_present(&body, input, "task_spec", "task_spec", &comma);
+    append_string_field_if_present(&body, input, "previous_interaction_id",
+                                   "previous_interaction_id", &comma);
+    append_raw_field_if_present(&body, input, "mcp_servers", "mcp_servers", &comma);
+    append_bool_field_if_present(&body, input, "enable_events", "enable_events", &comma);
+    append_raw_field_if_present(&body, input, "webhook", "webhook", &comma);
+    jbuf_append(&body, "}");
+
+    free(task_input);
+    free(processor);
+    bool ok = parallel_ai_request("POST", "/v1/tasks/runs", body.data, result, rlen);
+    if (ok)
+        parallel_ai_record_response("task_run", "run_id", result);
+    jbuf_free(&body);
+    return ok;
+}
+
+bool tool_parallel_ai_task_status(const char *input, char *result, size_t rlen) {
+    char *run_id = parallel_ai_input_or_last_id(input, "run_id", "task_run", result, rlen);
+    if (!run_id)
+        return false;
+    jbuf_t path;
+    jbuf_init(&path, 64 + strlen(run_id));
+    jbuf_append(&path, "/v1/tasks/runs/");
+    jbuf_append(&path, run_id);
+    bool ok = parallel_ai_request("GET", path.data, NULL, result, rlen);
+    if (ok)
+        parallel_ai_record_job("task_run", run_id, result);
+    free(run_id);
+    jbuf_free(&path);
+    return ok;
+}
+
+bool tool_parallel_ai_task_result(const char *input, char *result, size_t rlen) {
+    char *run_id = parallel_ai_input_or_last_id(input, "run_id", "task_run", result, rlen);
+    if (!run_id)
+        return false;
+    int timeout = json_get_int(input, "timeout", 600);
+    if (timeout < 1)
+        timeout = 1;
+    if (timeout > 3600)
+        timeout = 3600;
+    jbuf_t path;
+    jbuf_init(&path, 96 + strlen(run_id));
+    jbuf_append(&path, "/v1/tasks/runs/");
+    jbuf_append(&path, run_id);
+    jbuf_appendf(&path, "/result?timeout=%d", timeout);
+    bool ok = parallel_ai_request_timeout("GET", path.data, NULL, timeout + 15, result, rlen);
+    if (ok)
+        parallel_ai_record_job("task_run", run_id, result);
+    free(run_id);
+    jbuf_free(&path);
+    return ok;
+}
+
+bool tool_parallel_ai_task_events(const char *input, char *result, size_t rlen) {
+    char *run_id = parallel_ai_input_or_last_id(input, "run_id", "task_run", result, rlen);
+    if (!run_id)
+        return false;
+    bool beta = false;
+    char *beta_raw = json_get_raw(input, "beta");
+    if (beta_raw) {
+        beta = strncmp(skip_space_local(beta_raw), "true", 4) == 0;
+        free(beta_raw);
+    }
+    jbuf_t path;
+    jbuf_init(&path, 96 + strlen(run_id));
+    jbuf_append(&path, beta ? "/v1beta/tasks/runs/" : "/v1/tasks/runs/");
+    jbuf_append(&path, run_id);
+    jbuf_append(&path, "/events");
+    free(run_id);
+    bool ok = parallel_ai_request("GET", path.data, NULL, result, rlen);
+    jbuf_free(&path);
+    return ok;
+}
+
+bool tool_parallel_ai_task_input(const char *input, char *result, size_t rlen) {
+    char *run_id = parallel_ai_input_or_last_id(input, "run_id", "task_run", result, rlen);
+    if (!run_id)
+        return false;
+    jbuf_t path;
+    jbuf_init(&path, 96 + strlen(run_id));
+    jbuf_append(&path, "/v1/tasks/runs/");
+    jbuf_append(&path, run_id);
+    jbuf_append(&path, "/input");
+    free(run_id);
+    bool ok = parallel_ai_request("GET", path.data, NULL, result, rlen);
+    jbuf_free(&path);
+    return ok;
+}
+
+bool tool_parallel_ai_task_group_create(const char *input, char *result, size_t rlen) {
+    char *body_raw = parallel_ai_passthrough_body(input);
+    bool owned_body = true;
+    if (!body_raw) {
+        jbuf_t body;
+        jbuf_init(&body, 256);
+        jbuf_append(&body, "{");
+        bool comma = false;
+        append_raw_field_if_present(&body, input, "metadata", "metadata", &comma);
+        jbuf_append(&body, "}");
+        body_raw = body.data;
+        owned_body = false;
+    }
+    bool ok = parallel_ai_request("POST", "/v1/tasks/groups", body_raw, result, rlen);
+    if (ok)
+        parallel_ai_record_response("task_group", "taskgroup_id", result);
+    if (owned_body)
+        free(body_raw);
+    else {
+        jbuf_t tmp = {.data = body_raw};
+        jbuf_free(&tmp);
+    }
+    return ok;
+}
+
+bool tool_parallel_ai_task_group_get(const char *input, char *result, size_t rlen) {
+    char *taskgroup_id =
+        parallel_ai_input_or_last_id(input, "taskgroup_id", "task_group", result, rlen);
+    if (!taskgroup_id)
+        return false;
+    jbuf_t path;
+    jbuf_init(&path, 80 + strlen(taskgroup_id));
+    jbuf_append(&path, "/v1/tasks/groups/");
+    jbuf_append(&path, taskgroup_id);
+    bool ok = parallel_ai_request("GET", path.data, NULL, result, rlen);
+    if (ok)
+        parallel_ai_record_job("task_group", taskgroup_id, result);
+    free(taskgroup_id);
+    jbuf_free(&path);
+    return ok;
+}
+
+bool tool_parallel_ai_task_group_events(const char *input, char *result, size_t rlen) {
+    char *taskgroup_id =
+        parallel_ai_input_or_last_id(input, "taskgroup_id", "task_group", result, rlen);
+    if (!taskgroup_id)
+        return false;
+    jbuf_t path;
+    jbuf_init(&path, 128 + strlen(taskgroup_id));
+    jbuf_append(&path, "/v1/tasks/groups/");
+    jbuf_append(&path, taskgroup_id);
+    jbuf_append(&path, "/events");
+    bool q = false;
+    append_query_param_string(&path, input, "last_event_id", "last_event_id", &q);
+    append_query_param_int(&path, input, "timeout", 1, 3600, &q);
+    free(taskgroup_id);
+    bool ok = parallel_ai_request("GET", path.data, NULL, result, rlen);
+    jbuf_free(&path);
+    return ok;
+}
+
+bool tool_parallel_ai_task_group_add_runs(const char *input, char *result, size_t rlen) {
+    char *taskgroup_id =
+        parallel_ai_input_or_last_id(input, "taskgroup_id", "task_group", result, rlen);
+    if (!taskgroup_id)
+        return false;
+    char *body_raw = parallel_ai_passthrough_body(input);
+    bool free_body = true;
+    if (!body_raw) {
+        char *inputs = json_get_raw(input, "inputs");
+        char *single = NULL;
+        if (inputs && !raw_is_json_array(inputs)) {
+            free(inputs);
+            inputs = NULL;
+        }
+        if (!inputs)
+            single = json_get_raw(input, "input");
+        if ((!inputs || raw_is_null(inputs)) && (!single || raw_is_null(single))) {
+            free(taskgroup_id);
+            free(inputs);
+            free(single);
+            snprintf(result, rlen, "missing required parameter: inputs array or input");
+            return false;
+        }
+        jbuf_t body;
+        jbuf_init(&body, 1024 + (inputs ? strlen(inputs) : strlen(single)));
+        jbuf_append(&body, "{");
+        bool comma = false;
+        append_raw_field_if_present(&body, input, "default_task_spec", "default_task_spec",
+                                    &comma);
+        append_field_sep(&body, &comma);
+        jbuf_append(&body, "\"inputs\":");
+        if (inputs) {
+            jbuf_append(&body, inputs);
+        } else {
+            char *processor = json_get_str(input, "processor");
+            if (!processor || !processor[0]) {
+                free(processor);
+                processor = strdup("base");
+            }
+            jbuf_append(&body, "[{\"processor\":");
+            jbuf_append_json_str(&body, processor);
+            jbuf_append(&body, ",\"input\":");
+            jbuf_append(&body, single);
+            append_raw_field_if_present(&body, input, "metadata", "metadata", &comma);
+            append_raw_field_if_present(&body, input, "source_policy", "source_policy", &comma);
+            append_raw_field_if_present(&body, input, "advanced_settings", "advanced_settings",
+                                        &comma);
+            append_raw_field_if_present(&body, input, "task_spec", "task_spec", &comma);
+            append_string_field_if_present(&body, input, "previous_interaction_id",
+                                           "previous_interaction_id", &comma);
+            append_raw_field_if_present(&body, input, "mcp_servers", "mcp_servers", &comma);
+            append_bool_field_if_present(&body, input, "enable_events", "enable_events", &comma);
+            append_raw_field_if_present(&body, input, "webhook", "webhook", &comma);
+            jbuf_append(&body, "}]");
+            free(processor);
+        }
+        jbuf_append(&body, "}");
+        free(inputs);
+        free(single);
+        body_raw = body.data;
+        free_body = false;
+    }
+
+    jbuf_t path;
+    jbuf_init(&path, 128 + strlen(taskgroup_id));
+    jbuf_append(&path, "/v1/tasks/groups/");
+    jbuf_append(&path, taskgroup_id);
+    jbuf_append(&path, "/runs");
+    bool q = false;
+    append_query_param_bool(&path, input, "refresh_status", &q);
+    bool ok = parallel_ai_request("POST", path.data, body_raw, result, rlen);
+    if (ok) {
+        parallel_ai_record_job("task_group", taskgroup_id, result);
+        char *run_id = parallel_ai_response_first_array_id(result, "run_ids");
+        if (run_id) {
+            parallel_ai_record_job("task_run", run_id, result);
+            free(run_id);
+        }
+    }
+    free(taskgroup_id);
+    if (free_body)
+        free(body_raw);
+    else {
+        jbuf_t tmp = {.data = body_raw};
+        jbuf_free(&tmp);
+    }
+    jbuf_free(&path);
+    return ok;
+}
+
+bool tool_parallel_ai_task_group_runs(const char *input, char *result, size_t rlen) {
+    char *taskgroup_id =
+        parallel_ai_input_or_last_id(input, "taskgroup_id", "task_group", result, rlen);
+    if (!taskgroup_id)
+        return false;
+    jbuf_t path;
+    jbuf_init(&path, 128 + strlen(taskgroup_id));
+    jbuf_append(&path, "/v1/tasks/groups/");
+    jbuf_append(&path, taskgroup_id);
+    jbuf_append(&path, "/runs");
+    bool q = false;
+    append_query_param_string(&path, input, "last_event_id", "last_event_id", &q);
+    append_query_param_string(&path, input, "status", "status", &q);
+    append_query_param_bool(&path, input, "include_input", &q);
+    append_query_param_bool(&path, input, "include_output", &q);
+    free(taskgroup_id);
+    bool ok = parallel_ai_request("GET", path.data, NULL, result, rlen);
+    jbuf_free(&path);
+    return ok;
+}
+
+bool tool_parallel_ai_task_group_run_get(const char *input, char *result, size_t rlen) {
+    char *taskgroup_id =
+        parallel_ai_input_or_last_id(input, "taskgroup_id", "task_group", result, rlen);
+    if (!taskgroup_id)
+        return false;
+    char *run_id = parallel_ai_input_or_last_id(input, "run_id", "task_run", result, rlen);
+    if (!run_id) {
+        free(taskgroup_id);
+        return false;
+    }
+    jbuf_t path;
+    jbuf_init(&path, 128 + strlen(taskgroup_id) + strlen(run_id));
+    jbuf_append(&path, "/v1/tasks/groups/");
+    jbuf_append(&path, taskgroup_id);
+    jbuf_append(&path, "/runs/");
+    jbuf_append(&path, run_id);
+    bool ok = parallel_ai_request("GET", path.data, NULL, result, rlen);
+    if (ok)
+        parallel_ai_record_job("task_run", run_id, result);
+    free(taskgroup_id);
+    free(run_id);
+    jbuf_free(&path);
+    return ok;
+}
+
+bool tool_parallel_ai_findall_entity_search(const char *input, char *result, size_t rlen) {
+    char *entity_type = json_get_str(input, "entity_type");
+    char *objective = json_get_str(input, "objective");
+    if (!entity_type || !entity_type[0] || !objective || !objective[0]) {
+        free(entity_type);
+        free(objective);
+        snprintf(result, rlen, "missing required parameters: entity_type and objective");
+        return false;
+    }
+
+    jbuf_t body;
+    jbuf_init(&body, 512 + strlen(objective));
+    bool comma = false;
+    jbuf_append(&body, "{");
+    append_field_sep(&body, &comma);
+    jbuf_append(&body, "\"entity_type\":");
+    jbuf_append_json_str(&body, entity_type);
+    append_field_sep(&body, &comma);
+    jbuf_append(&body, "\"objective\":");
+    jbuf_append_json_str(&body, objective);
+    append_int_field_if_present(&body, input, "match_limit", "match_limit", 5, 1000, &comma);
+    jbuf_append(&body, "}");
+
+    free(entity_type);
+    free(objective);
+    bool ok =
+        parallel_ai_request("POST", "/v1beta/findall/entity-search", body.data, result, rlen);
+    jbuf_free(&body);
+    return ok;
+}
+
+bool tool_parallel_ai_findall_ingest(const char *input, char *result, size_t rlen) {
+    char *body_raw = parallel_ai_passthrough_body(input);
+    if (body_raw) {
+        bool ok = parallel_ai_request("POST", "/v1beta/findall/ingest", body_raw, result, rlen);
+        free(body_raw);
+        return ok;
+    }
+
+    char *objective = json_get_str(input, "objective");
+    if (!objective || !objective[0]) {
+        free(objective);
+        snprintf(result, rlen, "missing required parameter: objective");
+        return false;
+    }
+    jbuf_t body;
+    jbuf_init(&body, 256 + strlen(objective));
+    jbuf_append(&body, "{\"objective\":");
+    jbuf_append_json_str(&body, objective);
+    jbuf_append(&body, "}");
+    free(objective);
+    bool ok = parallel_ai_request("POST", "/v1beta/findall/ingest", body.data, result, rlen);
+    jbuf_free(&body);
+    return ok;
+}
+
+bool tool_parallel_ai_findall_create(const char *input, char *result, size_t rlen) {
+    char *body_raw = parallel_ai_passthrough_body(input);
+    if (body_raw) {
+        bool ok = parallel_ai_request("POST", "/v1beta/findall/runs", body_raw, result, rlen);
+        if (ok)
+            parallel_ai_record_response("findall", "findall_id", result);
+        free(body_raw);
+        return ok;
+    }
+
+    char *objective = json_get_str(input, "objective");
+    char *entity_type = json_get_str(input, "entity_type");
+    char *match_conditions = json_get_raw(input, "match_conditions");
+    if (!objective || !objective[0] || !entity_type || !entity_type[0] || !match_conditions ||
+        !raw_is_json_array(match_conditions)) {
+        free(objective);
+        free(entity_type);
+        free(match_conditions);
+        snprintf(result, rlen,
+                 "missing required parameters: objective, entity_type, match_conditions array");
+        return false;
+    }
+    char *generator = json_get_str(input, "generator");
+    if (!generator || !generator[0]) {
+        free(generator);
+        generator = strdup("base");
+    }
+    int match_limit = json_get_int(input, "match_limit", 100);
+    if (match_limit < 5)
+        match_limit = 5;
+    if (match_limit > 1000)
+        match_limit = 1000;
+
+    jbuf_t body;
+    jbuf_init(&body, 1024 + strlen(objective) + strlen(match_conditions));
+    bool comma = false;
+    jbuf_append(&body, "{");
+    append_field_sep(&body, &comma);
+    jbuf_append(&body, "\"objective\":");
+    jbuf_append_json_str(&body, objective);
+    append_field_sep(&body, &comma);
+    jbuf_append(&body, "\"entity_type\":");
+    jbuf_append_json_str(&body, entity_type);
+    append_field_sep(&body, &comma);
+    jbuf_append(&body, "\"match_conditions\":");
+    jbuf_append(&body, match_conditions);
+    append_field_sep(&body, &comma);
+    jbuf_append(&body, "\"generator\":");
+    jbuf_append_json_str(&body, generator);
+    append_field_sep(&body, &comma);
+    jbuf_appendf(&body, "\"match_limit\":%d", match_limit);
+    append_raw_field_if_present(&body, input, "exclude_list", "exclude_list", &comma);
+    append_raw_field_if_present(&body, input, "metadata", "metadata", &comma);
+    append_raw_field_if_present(&body, input, "webhook", "webhook", &comma);
+    jbuf_append(&body, "}");
+
+    free(objective);
+    free(entity_type);
+    free(match_conditions);
+    free(generator);
+    bool ok = parallel_ai_request("POST", "/v1beta/findall/runs", body.data, result, rlen);
+    if (ok)
+        parallel_ai_record_response("findall", "findall_id", result);
+    jbuf_free(&body);
+    return ok;
+}
+
+bool tool_parallel_ai_findall_status(const char *input, char *result, size_t rlen) {
+    char *findall_id = parallel_ai_input_or_last_id(input, "findall_id", "findall", result, rlen);
+    if (!findall_id)
+        return false;
+    jbuf_t path;
+    jbuf_init(&path, 80 + strlen(findall_id));
+    jbuf_append(&path, "/v1beta/findall/runs/");
+    jbuf_append(&path, findall_id);
+    bool ok = parallel_ai_request("GET", path.data, NULL, result, rlen);
+    if (ok)
+        parallel_ai_record_job("findall", findall_id, result);
+    free(findall_id);
+    jbuf_free(&path);
+    return ok;
+}
+
+bool tool_parallel_ai_findall_result(const char *input, char *result, size_t rlen) {
+    char *findall_id = parallel_ai_input_or_last_id(input, "findall_id", "findall", result, rlen);
+    if (!findall_id)
+        return false;
+    jbuf_t path;
+    jbuf_init(&path, 96 + strlen(findall_id));
+    jbuf_append(&path, "/v1beta/findall/runs/");
+    jbuf_append(&path, findall_id);
+    jbuf_append(&path, "/result");
+    bool ok = parallel_ai_request("GET", path.data, NULL, result, rlen);
+    if (ok)
+        parallel_ai_record_job("findall", findall_id, result);
+    free(findall_id);
+    jbuf_free(&path);
+    return ok;
+}
+
+bool tool_parallel_ai_findall_cancel(const char *input, char *result, size_t rlen) {
+    char *findall_id = parallel_ai_input_or_last_id(input, "findall_id", "findall", result, rlen);
+    if (!findall_id)
+        return false;
+    jbuf_t path;
+    jbuf_init(&path, 96 + strlen(findall_id));
+    jbuf_append(&path, "/v1beta/findall/runs/");
+    jbuf_append(&path, findall_id);
+    jbuf_append(&path, "/cancel");
+    bool ok = parallel_ai_request("POST", path.data, "{}", result, rlen);
+    if (ok)
+        parallel_ai_record_job("findall", findall_id, result);
+    free(findall_id);
+    jbuf_free(&path);
+    return ok;
+}
+
+bool tool_parallel_ai_findall_events(const char *input, char *result, size_t rlen) {
+    char *findall_id = parallel_ai_input_or_last_id(input, "findall_id", "findall", result, rlen);
+    if (!findall_id)
+        return false;
+    jbuf_t path;
+    jbuf_init(&path, 128 + strlen(findall_id));
+    jbuf_append(&path, "/v1beta/findall/runs/");
+    jbuf_append(&path, findall_id);
+    jbuf_append(&path, "/events");
+    bool q = false;
+    append_query_param_string(&path, input, "last_event_id", "last_event_id", &q);
+    append_query_param_int(&path, input, "timeout", 1, 3600, &q);
+    free(findall_id);
+    bool ok = parallel_ai_request("GET", path.data, NULL, result, rlen);
+    jbuf_free(&path);
+    return ok;
+}
+
+bool tool_parallel_ai_findall_extend(const char *input, char *result, size_t rlen) {
+    char *findall_id = parallel_ai_input_or_last_id(input, "findall_id", "findall", result, rlen);
+    if (!findall_id)
+        return false;
+    char *body_raw = parallel_ai_passthrough_body(input);
+    bool free_body = true;
+    if (!body_raw) {
+        int additional = json_get_int(input, "additional_match_limit", 0);
+        if (additional <= 0) {
+            free(findall_id);
+            snprintf(result, rlen, "missing required parameter: additional_match_limit > 0");
+            return false;
+        }
+        jbuf_t body;
+        jbuf_init(&body, 64);
+        jbuf_appendf(&body, "{\"additional_match_limit\":%d}", additional);
+        body_raw = body.data;
+        free_body = false;
+    }
+    jbuf_t path;
+    jbuf_init(&path, 96 + strlen(findall_id));
+    jbuf_append(&path, "/v1beta/findall/runs/");
+    jbuf_append(&path, findall_id);
+    jbuf_append(&path, "/extend");
+    bool ok = parallel_ai_request("POST", path.data, body_raw, result, rlen);
+    if (ok)
+        parallel_ai_record_job("findall", findall_id, result);
+    free(findall_id);
+    if (free_body)
+        free(body_raw);
+    else {
+        jbuf_t tmp = {.data = body_raw};
+        jbuf_free(&tmp);
+    }
+    jbuf_free(&path);
+    return ok;
+}
+
+bool tool_parallel_ai_findall_enrich(const char *input, char *result, size_t rlen) {
+    char *findall_id = parallel_ai_input_or_last_id(input, "findall_id", "findall", result, rlen);
+    if (!findall_id)
+        return false;
+    char *body_raw = parallel_ai_passthrough_body(input);
+    bool free_body = true;
+    if (!body_raw) {
+        char *output_schema = json_get_raw(input, "output_schema");
+        if (!output_schema || !raw_starts_with(output_schema, '{')) {
+            free(findall_id);
+            free(output_schema);
+            snprintf(result, rlen, "missing required parameter: output_schema object");
+            return false;
+        }
+        char *processor = json_get_str(input, "processor");
+        if (!processor || !processor[0]) {
+            free(processor);
+            processor = strdup("core");
+        }
+        jbuf_t body;
+        jbuf_init(&body, 512 + strlen(output_schema));
+        jbuf_append(&body, "{\"processor\":");
+        jbuf_append_json_str(&body, processor);
+        jbuf_append(&body, ",\"output_schema\":");
+        jbuf_append(&body, output_schema);
+        bool comma = true;
+        append_raw_field_if_present(&body, input, "mcp_servers", "mcp_servers", &comma);
+        jbuf_append(&body, "}");
+        free(processor);
+        free(output_schema);
+        body_raw = body.data;
+        free_body = false;
+    }
+    jbuf_t path;
+    jbuf_init(&path, 96 + strlen(findall_id));
+    jbuf_append(&path, "/v1beta/findall/runs/");
+    jbuf_append(&path, findall_id);
+    jbuf_append(&path, "/enrich");
+    bool ok = parallel_ai_request("POST", path.data, body_raw, result, rlen);
+    if (ok)
+        parallel_ai_record_job("findall", findall_id, result);
+    free(findall_id);
+    if (free_body)
+        free(body_raw);
+    else {
+        jbuf_t tmp = {.data = body_raw};
+        jbuf_free(&tmp);
+    }
+    jbuf_free(&path);
+    return ok;
+}
+
+bool tool_parallel_ai_findall_schema(const char *input, char *result, size_t rlen) {
+    char *findall_id = parallel_ai_input_or_last_id(input, "findall_id", "findall", result, rlen);
+    if (!findall_id)
+        return false;
+    jbuf_t path;
+    jbuf_init(&path, 96 + strlen(findall_id));
+    jbuf_append(&path, "/v1beta/findall/runs/");
+    jbuf_append(&path, findall_id);
+    jbuf_append(&path, "/schema");
+    free(findall_id);
+    bool ok = parallel_ai_request("GET", path.data, NULL, result, rlen);
+    jbuf_free(&path);
+    return ok;
+}
+
+bool tool_parallel_ai_chat(const char *input, char *result, size_t rlen) {
+    char *messages = json_get_raw(input, "messages");
+    char *prompt = NULL;
+    if (messages && !raw_is_json_array(messages)) {
+        free(messages);
+        messages = NULL;
+    }
+    if (!messages)
+        prompt = json_get_str(input, "prompt");
+    if ((!messages || raw_is_null(messages)) && (!prompt || !prompt[0])) {
+        free(messages);
+        free(prompt);
+        snprintf(result, rlen, "missing required parameter: messages or prompt");
+        return false;
+    }
+    char *model = json_get_str(input, "model");
+    if (!model || !model[0]) {
+        free(model);
+        model = strdup("speed");
+    }
+
+    jbuf_t body;
+    jbuf_init(&body, 1024);
+    bool comma = false;
+    jbuf_append(&body, "{");
+    append_field_sep(&body, &comma);
+    jbuf_append(&body, "\"model\":");
+    jbuf_append_json_str(&body, model);
+    append_field_sep(&body, &comma);
+    jbuf_append(&body, "\"messages\":");
+    if (messages) {
+        jbuf_append(&body, messages);
+    } else {
+        jbuf_append(&body, "[{\"role\":\"user\",\"content\":");
+        jbuf_append_json_str(&body, prompt);
+        jbuf_append(&body, "}]");
+    }
+    append_bool_field_if_present(&body, input, "stream", "stream", &comma);
+    append_raw_field_if_present(&body, input, "response_format", "response_format", &comma);
+    append_string_field_if_present(&body, input, "previous_interaction_id",
+                                   "previous_interaction_id", &comma);
+    jbuf_append(&body, "}");
+
+    free(messages);
+    free(prompt);
+    free(model);
+
+    bool ok = parallel_ai_request("POST", "/v1beta/chat/completions", body.data, result, rlen);
+    jbuf_free(&body);
+    return ok;
+}
+
+bool tool_parallel_ai_monitor_create(const char *input, char *result, size_t rlen) {
+    char *type = json_get_str(input, "type");
+    char *frequency = json_get_str(input, "frequency");
+    if (!type || !type[0]) {
+        free(type);
+        type = strdup("event_stream");
+    }
+    if (!frequency || !frequency[0]) {
+        free(type);
+        free(frequency);
+        snprintf(result, rlen, "missing required parameter: frequency");
+        return false;
+    }
+
+    char *query = json_get_str(input, "query");
+    char *task_run_id = json_get_str(input, "task_run_id");
+    bool snapshot = strcmp(type, "snapshot") == 0;
+    if ((snapshot && (!task_run_id || !task_run_id[0])) ||
+        (!snapshot && (!query || !query[0]))) {
+        free(type);
+        free(frequency);
+        free(query);
+        free(task_run_id);
+        snprintf(result, rlen,
+                 snapshot ? "missing required parameter: task_run_id"
+                          : "missing required parameter: query");
+        return false;
+    }
+
+    char *processor = json_get_str(input, "processor");
+    if (!processor || !processor[0]) {
+        free(processor);
+        processor = strdup("lite");
+    }
+
+    jbuf_t body;
+    jbuf_init(&body, 1024);
+    bool comma = false;
+    jbuf_append(&body, "{");
+    append_field_sep(&body, &comma);
+    jbuf_append(&body, "\"type\":");
+    jbuf_append_json_str(&body, type);
+    append_field_sep(&body, &comma);
+    jbuf_append(&body, "\"frequency\":");
+    jbuf_append_json_str(&body, frequency);
+    append_field_sep(&body, &comma);
+    jbuf_append(&body, "\"processor\":");
+    jbuf_append_json_str(&body, processor);
+    append_raw_field_if_present(&body, input, "metadata", "metadata", &comma);
+    append_raw_field_if_present(&body, input, "webhook", "webhook", &comma);
+    append_field_sep(&body, &comma);
+    jbuf_append(&body, "\"settings\":{");
+    bool scomma = false;
+    if (snapshot) {
+        append_field_sep(&body, &scomma);
+        jbuf_append(&body, "\"task_run_id\":");
+        jbuf_append_json_str(&body, task_run_id);
+    } else {
+        append_field_sep(&body, &scomma);
+        jbuf_append(&body, "\"query\":");
+        jbuf_append_json_str(&body, query);
+        append_bool_field_if_present(&body, input, "include_backfill", "include_backfill",
+                                     &scomma);
+        append_raw_field_if_present(&body, input, "output_schema", "output_schema", &scomma);
+        append_raw_field_if_present(&body, input, "advanced_settings", "advanced_settings",
+                                    &scomma);
+    }
+    jbuf_append(&body, "}}");
+
+    free(type);
+    free(frequency);
+    free(query);
+    free(task_run_id);
+    free(processor);
+    bool ok = parallel_ai_request("POST", "/v1/monitors", body.data, result, rlen);
+    if (ok)
+        parallel_ai_record_response("monitor", "monitor_id", result);
+    jbuf_free(&body);
+    return ok;
+}
+
+bool tool_parallel_ai_monitor_list(const char *input, char *result, size_t rlen) {
+    jbuf_t path;
+    jbuf_init(&path, 64);
+    jbuf_append(&path, "/v1/monitors");
+    bool q = false;
+    append_query_param_int(&path, input, "limit", 1, 10000, &q);
+    bool ok = parallel_ai_request("GET", path.data, NULL, result, rlen);
+    jbuf_free(&path);
+    return ok;
+}
+
+bool tool_parallel_ai_monitor_get(const char *input, char *result, size_t rlen) {
+    char *monitor_id = parallel_ai_input_or_last_id(input, "monitor_id", "monitor", result, rlen);
+    if (!monitor_id)
+        return false;
+    jbuf_t path;
+    jbuf_init(&path, 64 + strlen(monitor_id));
+    jbuf_append(&path, "/v1/monitors/");
+    jbuf_append(&path, monitor_id);
+    bool ok = parallel_ai_request("GET", path.data, NULL, result, rlen);
+    if (ok)
+        parallel_ai_record_job("monitor", monitor_id, result);
+    free(monitor_id);
+    jbuf_free(&path);
+    return ok;
+}
+
+bool tool_parallel_ai_monitor_events(const char *input, char *result, size_t rlen) {
+    char *monitor_id = parallel_ai_input_or_last_id(input, "monitor_id", "monitor", result, rlen);
+    if (!monitor_id)
+        return false;
+    jbuf_t path;
+    jbuf_init(&path, 96 + strlen(monitor_id));
+    jbuf_append(&path, "/v1/monitors/");
+    jbuf_append(&path, monitor_id);
+    jbuf_append(&path, "/events");
+    bool q = false;
+    append_query_param_string(&path, input, "event_group_id", "event_group_id", &q);
+    append_query_param_string(&path, input, "cursor", "cursor", &q);
+    append_query_param_int(&path, input, "limit", 1, 100, &q);
+    append_query_param_bool(&path, input, "include_completions", &q);
+    free(monitor_id);
+    bool ok = parallel_ai_request("GET", path.data, NULL, result, rlen);
+    jbuf_free(&path);
+    return ok;
+}
+
+bool tool_parallel_ai_monitor_update(const char *input, char *result, size_t rlen) {
+    char *monitor_id = parallel_ai_input_or_last_id(input, "monitor_id", "monitor", result, rlen);
+    if (!monitor_id)
+        return false;
+    char *body_raw = parallel_ai_passthrough_body(input);
+    bool free_body = true;
+    if (!body_raw) {
+        jbuf_t body;
+        jbuf_init(&body, 1024);
+        jbuf_append(&body, "{");
+        bool comma = false;
+        append_string_field_if_present(&body, input, "type", "type", &comma);
+        append_string_field_if_present(&body, input, "frequency", "frequency", &comma);
+        append_raw_field_if_present(&body, input, "webhook", "webhook", &comma);
+        append_raw_field_if_present(&body, input, "metadata", "metadata", &comma);
+        char *settings = json_get_raw(input, "settings");
+        if (settings && raw_starts_with(settings, '{')) {
+            append_field_sep(&body, &comma);
+            jbuf_append(&body, "\"settings\":");
+            jbuf_append(&body, settings);
+        } else {
+            char *query = json_get_str(input, "query");
+            char *advanced = json_get_raw(input, "advanced_settings");
+            if ((query && query[0]) || (advanced && !raw_is_null(advanced))) {
+                char *type = json_get_str(input, "type");
+                if (!type || !type[0]) {
+                    append_field_sep(&body, &comma);
+                    jbuf_append(&body, "\"type\":\"event_stream\"");
+                }
+                append_field_sep(&body, &comma);
+                jbuf_append(&body, "\"settings\":{");
+                bool scomma = false;
+                if (query && query[0]) {
+                    append_field_sep(&body, &scomma);
+                    jbuf_append(&body, "\"query\":");
+                    jbuf_append_json_str(&body, query);
+                }
+                if (advanced && !raw_is_null(advanced)) {
+                    append_field_sep(&body, &scomma);
+                    jbuf_append(&body, "\"advanced_settings\":");
+                    jbuf_append(&body, advanced);
+                }
+                jbuf_append(&body, "}");
+                free(type);
+            }
+            free(query);
+            free(advanced);
+        }
+        free(settings);
+        jbuf_append(&body, "}");
+        body_raw = body.data;
+        free_body = false;
+    }
+    jbuf_t path;
+    jbuf_init(&path, 96 + strlen(monitor_id));
+    jbuf_append(&path, "/v1/monitors/");
+    jbuf_append(&path, monitor_id);
+    jbuf_append(&path, "/update");
+    bool ok = parallel_ai_request("POST", path.data, body_raw, result, rlen);
+    if (ok)
+        parallel_ai_record_job("monitor", monitor_id, result);
+    free(monitor_id);
+    if (free_body)
+        free(body_raw);
+    else {
+        jbuf_t tmp = {.data = body_raw};
+        jbuf_free(&tmp);
+    }
+    jbuf_free(&path);
+    return ok;
+}
+
+bool tool_parallel_ai_monitor_trigger(const char *input, char *result, size_t rlen) {
+    char *monitor_id = parallel_ai_input_or_last_id(input, "monitor_id", "monitor", result, rlen);
+    if (!monitor_id)
+        return false;
+    jbuf_t path;
+    jbuf_init(&path, 96 + strlen(monitor_id));
+    jbuf_append(&path, "/v1/monitors/");
+    jbuf_append(&path, monitor_id);
+    jbuf_append(&path, "/trigger");
+    bool ok = parallel_ai_request("POST", path.data, "{}", result, rlen);
+    if (ok)
+        parallel_ai_record_job("monitor", monitor_id, result);
+    free(monitor_id);
+    jbuf_free(&path);
+    return ok;
+}
+
+bool tool_parallel_ai_monitor_cancel(const char *input, char *result, size_t rlen) {
+    char *monitor_id = parallel_ai_input_or_last_id(input, "monitor_id", "monitor", result, rlen);
+    if (!monitor_id)
+        return false;
+    jbuf_t path;
+    jbuf_init(&path, 72 + strlen(monitor_id));
+    jbuf_append(&path, "/v1/monitors/");
+    jbuf_append(&path, monitor_id);
+    jbuf_append(&path, "/cancel");
+    bool ok = parallel_ai_request("POST", path.data, "{}", result, rlen);
+    if (ok)
+        parallel_ai_record_job("monitor", monitor_id, result);
+    free(monitor_id);
+    jbuf_free(&path);
+    return ok;
+}
+
+bool tool_parallel_ai_jobs(const char *input, char *result, size_t rlen) {
+    char path[1024];
+    if (!parallel_ai_state_path(path, sizeof(path))) {
+        snprintf(result, rlen, "failed to resolve Parallel.ai job ledger path");
+        return false;
+    }
+    char *kind_filter = json_get_str(input, "kind");
+    int limit = json_get_int(input, "limit", 20);
+    if (limit < 1)
+        limit = 1;
+    if (limit > 200)
+        limit = 200;
+
+    FILE *f = fopen(path, "r");
+    if (!f) {
+        snprintf(result, rlen, "{\"jobs\":[],\"count\":0,\"path\":");
+        size_t cur = strlen(result);
+        jbuf_t tmp;
+        jbuf_init(&tmp, 256);
+        jbuf_append_json_str(&tmp, path);
+        snprintf(result + cur, rlen > cur ? rlen - cur : 0, "%s}", tmp.data ? tmp.data : "\"\"");
+        jbuf_free(&tmp);
+        free(kind_filter);
+        return true;
+    }
+
+    char **rows = calloc((size_t)limit, sizeof(char *));
+    int count = 0;
+    char line[65536];
+    while (fgets(line, sizeof(line), f)) {
+        if (kind_filter && kind_filter[0]) {
+            char *k = json_get_str(line, "kind");
+            bool match = k && strcmp(k, kind_filter) == 0;
+            free(k);
+            if (!match)
+                continue;
+        }
+        char *copy = strdup(line);
+        if (!copy)
+            continue;
+        size_t n = strlen(copy);
+        while (n > 0 && (copy[n - 1] == '\n' || copy[n - 1] == '\r'))
+            copy[--n] = '\0';
+        if (count < limit) {
+            rows[count++] = copy;
+        } else {
+            free(rows[0]);
+            memmove(rows, rows + 1, (size_t)(limit - 1) * sizeof(char *));
+            rows[limit - 1] = copy;
+        }
+    }
+    fclose(f);
+
+    jbuf_t out;
+    jbuf_init(&out, 4096);
+    jbuf_append(&out, "{\"jobs\":[");
+    for (int i = 0; i < count; i++) {
+        if (i)
+            jbuf_append(&out, ",");
+        if (rows[i] && raw_starts_with(rows[i], '{'))
+            jbuf_append(&out, rows[i]);
+        else
+            jbuf_append_json_str(&out, rows[i] ? rows[i] : "");
+    }
+    jbuf_appendf(&out, "],\"count\":%d,\"path\":", count);
+    jbuf_append_json_str(&out, path);
+    jbuf_append(&out, "}");
+    result[0] = '\0';
+    truncate_response(out.data ? out.data : "{}", result, rlen, 32);
+    for (int i = 0; i < count; i++)
+        free(rows[i]);
+    free(rows);
+    free(kind_filter);
+    jbuf_free(&out);
+    return true;
+}
+
+/* ══════════════════════════════════════════════════════════════════════════
+ *  JINA AI — Native Search Foundation APIs
+ * ══════════════════════════════════════════════════════════════════════════ */
+
+#define JINA_AI_API_BASE_URL "https://api.jina.ai/v1"
+#define JINA_EXTRA_HEADER_CAP 48
+#define JINA_EXTRA_HEADER_SIZE 768
+
+typedef struct {
+    const char *key;
+    const char *header;
+} jina_header_map_t;
+
+static bool jina_batch_id_is_safe(const char *id) {
+    return identifier_token_is_safe(id);
+}
+
+static bool jina_ai_request_with_headers(const char *method, const char *url, const char *body,
+                                         const char *extra_headers[], int extra_count,
+                                         char *result, size_t rlen) {
+    const char *api_key;
+    if (!require_key("JINA_API_KEY", "Jina AI", result, rlen, &api_key))
+        return false;
+
+    /* Get your Jina AI API key for free: https://jina.ai/?sui=apikey */
+    char auth[512];
+    snprintf(auth, sizeof(auth), "Authorization: Bearer %s", api_key);
+
+    const char *headers[JINA_EXTRA_HEADER_CAP + 1];
+    int hcount = 0;
+    headers[hcount++] = auth;
+    for (int i = 0; i < extra_count && hcount < (int)(sizeof(headers) / sizeof(headers[0])); i++) {
+        if (extra_headers[i] && extra_headers[i][0])
+            headers[hcount++] = extra_headers[i];
+    }
+
+    http_buf_t resp = {0};
+    long status = -1;
+    int max_attempts = dsco_env_int("DSCO_JINA_RETRIES", 2, 0, 5) + 1;
+    for (int attempt = 0; attempt < max_attempts; attempt++) {
+        free(resp.data);
+        memset(&resp, 0, sizeof(resp));
+        status = http_json_request(method, url, body ? body : "{}", headers, hcount, &resp);
+        if (status != -1 && status != 429 && (status < 500 || status > 599))
+            break;
+        if (attempt + 1 < max_attempts)
+            usleep((useconds_t)(150000L * (attempt + 1)));
+    }
+    if (status != 200 && status != 201 && status != 202 && status != 204) {
+        snprintf(result, rlen, "Jina AI error (HTTP %ld): %.900s", status,
+                 resp.data ? resp.data : "");
+        free(resp.data);
+        return false;
+    }
+
+    if (status == 204 || !resp.data || !resp.data[0]) {
+        snprintf(result, rlen, "{\"ok\":true}");
+    } else {
+        result[0] = '\0';
+        truncate_response(resp.data, result, rlen, 32);
+    }
+    free(resp.data);
+    return true;
+}
+
+static bool jina_ai_request(const char *method, const char *url, const char *body, char *result,
+                            size_t rlen) {
+    return jina_ai_request_with_headers(method, url, body, NULL, 0, result, rlen);
+}
+
+static char *jina_url_escape(const char *value) {
+    if (!value || !value[0])
+        return NULL;
+    CURL *curl = curl_easy_init();
+    if (!curl)
+        return NULL;
+    char *escaped = curl_easy_escape(curl, value, 0);
+    char *out = escaped ? strdup(escaped) : NULL;
+    if (escaped)
+        curl_free(escaped);
+    curl_easy_cleanup(curl);
+    return out;
+}
+
+static void jina_add_header_literal(const char *value, const char *header_name,
+                                    char header_bufs[][JINA_EXTRA_HEADER_SIZE], int *buf_count,
+                                    const char *headers[], int *header_count) {
+    if (!value || !value[0] || *buf_count >= JINA_EXTRA_HEADER_CAP ||
+        *header_count >= JINA_EXTRA_HEADER_CAP)
+        return;
+    snprintf(header_bufs[*buf_count], JINA_EXTRA_HEADER_SIZE, "%s: %s", header_name, value);
+    headers[(*header_count)++] = header_bufs[*buf_count];
+    (*buf_count)++;
+}
+
+static void jina_add_header_field(const char *input, const char *key, const char *header_name,
+                                  char header_bufs[][JINA_EXTRA_HEADER_SIZE], int *buf_count,
+                                  const char *headers[], int *header_count) {
+    char *value = json_get_str(input, key);
+    if (!value) {
+        char *raw = json_get_raw(input, key);
+        if (raw && !raw_is_null(raw)) {
+            const char *p = skip_space_local(raw);
+            if (*p == 't' || *p == 'f' || *p == '-' || isdigit((unsigned char)*p))
+                value = strdup(p);
+        }
+        free(raw);
+    }
+    if (value && value[0])
+        jina_add_header_literal(value, header_name, header_bufs, buf_count, headers,
+                                header_count);
+    free(value);
+}
+
+static void jina_add_header_fields(const char *input, const jina_header_map_t *maps, size_t n,
+                                   char header_bufs[][JINA_EXTRA_HEADER_SIZE], int *buf_count,
+                                   const char *headers[], int *header_count) {
+    for (size_t i = 0; i < n; i++)
+        jina_add_header_field(input, maps[i].key, maps[i].header, header_bufs, buf_count, headers,
+                              header_count);
+}
+
+bool tool_jina_ai_reader(const char *input, char *result, size_t rlen) {
+    char *url = json_get_str(input, "url");
+    if (!url || !url[0]) {
+        free(url);
+        snprintf(result, rlen, "missing required parameter: url");
+        return false;
+    }
+    if (!external_http_url_is_public(url)) {
+        free(url);
+        snprintf(result, rlen, "url must be a public http(s) target");
+        return false;
+    }
+
+    char *eu_raw = json_get_raw(input, "eu");
+    bool eu = eu_raw && strncmp(skip_space_local(eu_raw), "true", 4) == 0;
+    free(eu_raw);
+
+    jbuf_t body;
+    jbuf_init(&body, 512 + strlen(url));
+    bool comma = false;
+    jbuf_append(&body, "{");
+    append_field_sep(&body, &comma);
+    jbuf_append(&body, "\"url\":");
+    jbuf_append_json_str(&body, url);
+    free(url);
+
+    char *viewport = json_get_raw(input, "viewport");
+    if (viewport && raw_starts_with(viewport, '{')) {
+        append_field_sep(&body, &comma);
+        jbuf_append(&body, "\"viewport\":");
+        jbuf_append(&body, viewport);
+    }
+    free(viewport);
+    bool injected =
+        append_string_field_if_present(&body, input, "injectPageScript", "injectPageScript",
+                                       &comma);
+    if (!injected)
+        append_string_field_if_present(&body, input, "inject_page_script", "injectPageScript",
+                                       &comma);
+    jbuf_append(&body, "}");
+
+    static const jina_header_map_t reader_headers[] = {
+        {"engine", "X-Engine"},
+        {"timeout", "X-Timeout"},
+        {"target_selector", "X-Target-Selector"},
+        {"wait_for_selector", "X-Wait-For-Selector"},
+        {"remove_selector", "X-Remove-Selector"},
+        {"with_links_summary", "X-With-Links-Summary"},
+        {"with_images_summary", "X-With-Images-Summary"},
+        {"with_generated_alt", "X-With-Generated-Alt"},
+        {"no_cache", "X-No-Cache"},
+        {"with_iframe", "X-With-Iframe"},
+        {"return_format", "X-Return-Format"},
+        {"token_budget", "X-Token-Budget"},
+        {"retain_images", "X-Retain-Images"},
+        {"respond_with", "X-Respond-With"},
+        {"set_cookie", "X-Set-Cookie"},
+        {"proxy_url", "X-Proxy-Url"},
+        {"proxy", "X-Proxy"},
+        {"dnt", "DNT"},
+        {"no_gfm", "X-No-Gfm"},
+        {"locale", "X-Locale"},
+        {"robots_txt", "X-Robots-Txt"},
+        {"with_shadow_dom", "X-With-Shadow-Dom"},
+        {"base", "X-Base"},
+        {"md_heading_style", "X-Md-Heading-Style"},
+        {"md_hr", "X-Md-Hr"},
+        {"md_bullet_list_marker", "X-Md-Bullet-List-Marker"},
+        {"md_em_delimiter", "X-Md-Em-Delimiter"},
+        {"md_strong_delimiter", "X-Md-Strong-Delimiter"},
+        {"md_link_style", "X-Md-Link-Style"},
+        {"md_link_reference_style", "X-Md-Link-Reference-Style"},
+    };
+    char header_bufs[JINA_EXTRA_HEADER_CAP][JINA_EXTRA_HEADER_SIZE];
+    const char *headers[JINA_EXTRA_HEADER_CAP];
+    int buf_count = 0, header_count = 0;
+    jina_add_header_fields(input, reader_headers,
+                           sizeof(reader_headers) / sizeof(reader_headers[0]), header_bufs,
+                           &buf_count, headers, &header_count);
+
+    bool ok = jina_ai_request_with_headers(
+        "POST", eu ? "https://eu.r.jina.ai/" : "https://r.jina.ai/", body.data, headers,
+        header_count, result, rlen);
+    jbuf_free(&body);
+    return ok;
+}
+
+bool tool_jina_ai_search(const char *input, char *result, size_t rlen) {
+    char *query = json_get_str(input, "query");
+    if (!query || !query[0]) {
+        free(query);
+        query = json_get_str(input, "q");
+    }
+    if (!query || !query[0]) {
+        free(query);
+        snprintf(result, rlen, "missing required parameter: query");
+        return false;
+    }
+
+    char *eu_raw = json_get_raw(input, "eu");
+    bool eu = eu_raw && strncmp(skip_space_local(eu_raw), "true", 4) == 0;
+    free(eu_raw);
+
+    jbuf_t body;
+    jbuf_init(&body, 512 + strlen(query));
+    bool comma = false;
+    jbuf_append(&body, "{");
+    append_field_sep(&body, &comma);
+    jbuf_append(&body, "\"q\":");
+    jbuf_append_json_str(&body, query);
+    free(query);
+    append_string_field_if_present(&body, input, "gl", "gl", &comma);
+    append_string_field_if_present(&body, input, "location", "location", &comma);
+    append_string_field_if_present(&body, input, "hl", "hl", &comma);
+    append_int_field_if_present(&body, input, "num", "num", 1, 100, &comma);
+    append_int_field_if_present(&body, input, "page", "page", 0, 1000, &comma);
+    jbuf_append(&body, "}");
+
+    static const jina_header_map_t search_headers[] = {
+        {"site", "X-Site"},
+        {"with_links_summary", "X-With-Links-Summary"},
+        {"with_images_summary", "X-With-Images-Summary"},
+        {"retain_images", "X-Retain-Images"},
+        {"no_cache", "X-No-Cache"},
+        {"with_generated_alt", "X-With-Generated-Alt"},
+        {"respond_with", "X-Respond-With"},
+        {"with_favicon", "X-With-Favicon"},
+        {"return_format", "X-Return-Format"},
+        {"engine", "X-Engine"},
+        {"with_favicons", "X-With-Favicons"},
+        {"timeout", "X-Timeout"},
+        {"set_cookie", "X-Set-Cookie"},
+        {"proxy_url", "X-Proxy-Url"},
+        {"locale", "X-Locale"},
+    };
+    char header_bufs[JINA_EXTRA_HEADER_CAP][JINA_EXTRA_HEADER_SIZE];
+    const char *headers[JINA_EXTRA_HEADER_CAP];
+    int buf_count = 0, header_count = 0;
+    jina_add_header_fields(input, search_headers,
+                           sizeof(search_headers) / sizeof(search_headers[0]), header_bufs,
+                           &buf_count, headers, &header_count);
+
+    bool ok = jina_ai_request_with_headers(
+        "POST", eu ? "https://eu.s.jina.ai/" : "https://s.jina.ai/", body.data, headers,
+        header_count, result, rlen);
+    jbuf_free(&body);
+    return ok;
+}
+
+bool tool_jina_ai_embed(const char *input, char *result, size_t rlen) {
+    char *items = json_get_raw(input, "input");
+    if (items && !raw_is_json_array(items)) {
+        free(items);
+        items = NULL;
+    }
+    if (!items) {
+        items = json_get_raw(input, "texts");
+        if (items && !raw_is_json_array(items)) {
+            free(items);
+            items = NULL;
+        }
+    }
+    char *text = NULL;
+    if (!items)
+        text = json_get_str(input, "text");
+    if ((!items || raw_is_null(items)) && (!text || !text[0])) {
+        free(items);
+        free(text);
+        snprintf(result, rlen, "missing required parameter: input array, texts array, or text");
+        return false;
+    }
+
+    char *model = json_get_str(input, "model");
+    if (!model || !model[0]) {
+        free(model);
+        model = strdup("jina-embeddings-v5-text-small");
+    }
+
+    jbuf_t body;
+    jbuf_init(&body, 1024 + (items ? strlen(items) : strlen(text)));
+    bool comma = false;
+    jbuf_append(&body, "{");
+    append_field_sep(&body, &comma);
+    jbuf_append(&body, "\"model\":");
+    jbuf_append_json_str(&body, model);
+    append_field_sep(&body, &comma);
+    jbuf_append(&body, "\"input\":");
+    if (items) {
+        jbuf_append(&body, items);
+    } else {
+        jbuf_append(&body, "[");
+        jbuf_append_json_str(&body, text);
+        jbuf_append(&body, "]");
+    }
+    append_raw_field_if_present(&body, input, "embedding_type", "embedding_type", &comma);
+    append_string_field_if_present(&body, input, "task", "task", &comma);
+    append_int_field_if_present(&body, input, "dimensions", "dimensions", 1, 4096, &comma);
+    append_bool_field_if_present(&body, input, "normalized", "normalized", &comma);
+    append_bool_field_if_present(&body, input, "late_chunking", "late_chunking", &comma);
+    append_bool_field_if_present(&body, input, "truncate", "truncate", &comma);
+    append_bool_field_if_present(&body, input, "return_multivector", "return_multivector",
+                                 &comma);
+    jbuf_append(&body, "}");
+
+    free(items);
+    free(text);
+    free(model);
+    bool ok = jina_ai_request("POST", JINA_AI_API_BASE_URL "/embeddings", body.data, result, rlen);
+    jbuf_free(&body);
+    return ok;
+}
+
+bool tool_jina_ai_models_list(const char *input, char *result, size_t rlen) {
+    (void)input;
+    return jina_ai_request("GET", JINA_AI_API_BASE_URL "/models", NULL, result, rlen);
+}
+
+bool tool_jina_ai_model_get(const char *input, char *result, size_t rlen) {
+    char *model_id = json_get_str(input, "model_id");
+    if (!model_id || !slash_identifier_is_safe(model_id)) {
+        free(model_id);
+        snprintf(result, rlen, "missing or unsafe required parameter: model_id");
+        return false;
+    }
+    char *escaped = jina_url_escape(model_id);
+    free(model_id);
+    if (!escaped) {
+        snprintf(result, rlen, "failed to encode model_id");
+        return false;
+    }
+    jbuf_t url;
+    jbuf_init(&url, strlen(JINA_AI_API_BASE_URL) + strlen(escaped) + 16);
+    jbuf_append(&url, JINA_AI_API_BASE_URL "/models/");
+    jbuf_append(&url, escaped);
+    free(escaped);
+    bool ok = jina_ai_request("GET", url.data, NULL, result, rlen);
+    jbuf_free(&url);
+    return ok;
+}
+
+static char *jina_json_raw_string_to_c(const char *raw) {
+    const char *p = skip_space_local(raw);
+    if (*p != '"')
+        return NULL;
+    p++;
+    jbuf_t b;
+    jbuf_init(&b, 64);
+    while (*p && *p != '"') {
+        if (*p == '\\' && p[1]) {
+            p++;
+            switch (*p) {
+                case '"':
+                    jbuf_append_char(&b, '"');
+                    break;
+                case '\\':
+                    jbuf_append_char(&b, '\\');
+                    break;
+                case '/':
+                    jbuf_append_char(&b, '/');
+                    break;
+                case 'b':
+                    jbuf_append_char(&b, '\b');
+                    break;
+                case 'f':
+                    jbuf_append_char(&b, '\f');
+                    break;
+                case 'n':
+                    jbuf_append_char(&b, '\n');
+                    break;
+                case 'r':
+                    jbuf_append_char(&b, '\r');
+                    break;
+                case 't':
+                    jbuf_append_char(&b, '\t');
+                    break;
+                default:
+                    jbuf_append_char(&b, *p);
+                    break;
+            }
+            p++;
+            continue;
+        }
+        jbuf_append_char(&b, *p++);
+    }
+    return b.data;
+}
+
+static char *jina_json_find_next_raw_string_field(const char **cursor, const char *key) {
+    if (!cursor || !*cursor || !key || !key[0])
+        return NULL;
+    jbuf_t needle;
+    jbuf_init(&needle, strlen(key) + 8);
+    jbuf_append(&needle, "\"");
+    jbuf_append(&needle, key);
+    jbuf_append(&needle, "\"");
+
+    const char *p = *cursor;
+    while ((p = strstr(p, needle.data)) != NULL) {
+        const char *q = skip_space_local(p + strlen(needle.data));
+        if (*q != ':') {
+            p++;
+            continue;
+        }
+        q = skip_space_local(q + 1);
+        if (*q != '"') {
+            p++;
+            continue;
+        }
+        const char *start = q;
+        q++;
+        while (*q) {
+            if (*q == '\\' && q[1]) {
+                q += 2;
+                continue;
+            }
+            if (*q == '"') {
+                q++;
+                size_t len = (size_t)(q - start);
+                char *out = malloc(len + 1);
+                if (out) {
+                    memcpy(out, start, len);
+                    out[len] = '\0';
+                }
+                *cursor = q;
+                jbuf_free(&needle);
+                return out;
+            }
+            q++;
+        }
+        break;
+    }
+    jbuf_free(&needle);
+    return NULL;
+}
+
+static char *jina_json_find_raw_string_field(const char *json, const char *key) {
+    const char *cursor = json;
+    return jina_json_find_next_raw_string_field(&cursor, key);
+}
+
+static int jina_parse_json_string_array(const char *raw, char **out, int max_items) {
+    const char *p = skip_space_local(raw);
+    if (*p != '[' || max_items <= 0)
+        return -1;
+    p++;
+    int count = 0;
+    while (*p) {
+        p = skip_space_local(p);
+        if (*p == ']')
+            return count;
+        if (*p != '"' || count >= max_items)
+            return -1;
+        const char *start = p;
+        p++;
+        while (*p) {
+            if (*p == '\\' && p[1]) {
+                p += 2;
+                continue;
+            }
+            if (*p == '"') {
+                p++;
+                size_t len = (size_t)(p - start);
+                char *quoted = malloc(len + 1);
+                if (!quoted)
+                    return -1;
+                memcpy(quoted, start, len);
+                quoted[len] = '\0';
+                out[count] = jina_json_raw_string_to_c(quoted);
+                free(quoted);
+                if (!out[count])
+                    return -1;
+                count++;
+                break;
+            }
+            p++;
+        }
+        p = skip_space_local(p);
+        if (*p == ',') {
+            p++;
+            continue;
+        }
+        if (*p == ']')
+            return count;
+        return -1;
+    }
+    return -1;
+}
+
+static void jina_free_strings(char **items, int count) {
+    for (int i = 0; i < count; i++)
+        free(items[i]);
+}
+
+static char *jina_normalize_batch_input_array(const char *raw) {
+    const char *p = skip_space_local(raw);
+    if (*p != '[')
+        return NULL;
+    p++;
+    p = skip_space_local(p);
+    if (*p == '{' || *p == ']')
+        return strdup(raw);
+    if (*p != '"')
+        return NULL;
+
+    jbuf_t out;
+    jbuf_init(&out, strlen(raw) + 64);
+    jbuf_append(&out, "[");
+    bool first = true;
+    int index = 0;
+    while (true) {
+        p = skip_space_local(p);
+        if (*p == ']') {
+            jbuf_append(&out, "]");
+            return out.data;
+        }
+        if (*p != '"') {
+            jbuf_free(&out);
+            return NULL;
+        }
+        const char *start = p;
+        p++;
+        while (*p) {
+            if (*p == '\\' && p[1]) {
+                p += 2;
+            } else if (*p == '"') {
+                p++;
+                break;
+            } else {
+                p++;
+            }
+        }
+        if (p[-1] != '"') {
+            jbuf_free(&out);
+            return NULL;
+        }
+        if (!first)
+            jbuf_append(&out, ",");
+        first = false;
+        jbuf_appendf(&out, "{\"custom_id\":\"request-%d\",\"body\":{\"input\":", index++);
+        jbuf_append_len(&out, start, (size_t)(p - start));
+        jbuf_append(&out, "}}");
+
+        p = skip_space_local(p);
+        if (*p == ',') {
+            p++;
+            continue;
+        }
+        if (*p == ']') {
+            jbuf_append(&out, "]");
+            return out.data;
+        }
+        jbuf_free(&out);
+        return NULL;
+    }
+}
+
+static int jina_parse_embedding_vectors(const char *json, double **vectors, int *dims,
+                                        int max_vectors, int max_dims) {
+    int count = 0;
+    const char *p = json;
+    while (count < max_vectors && (p = strstr(p, "\"embedding\"")) != NULL) {
+        p = strchr(p, '[');
+        if (!p)
+            break;
+        p++;
+        double *vec = calloc((size_t)max_dims, sizeof(double));
+        if (!vec)
+            break;
+        int d = 0;
+        while (*p && *p != ']' && d < max_dims) {
+            p = skip_space_local(p);
+            char *end = NULL;
+            double v = strtod(p, &end);
+            if (end == p)
+                break;
+            vec[d++] = v;
+            p = skip_space_local(end);
+            if (*p == ',')
+                p++;
+        }
+        while (*p && *p != ']')
+            p++;
+        if (*p == ']')
+            p++;
+        vectors[count] = vec;
+        dims[count] = d;
+        count++;
+    }
+    return count;
+}
+
+static double jina_dot_product(const double *a, int adim, const double *b, int bdim) {
+    int n = adim < bdim ? adim : bdim;
+    double s = 0.0;
+    for (int i = 0; i < n; i++)
+        s += a[i] * b[i];
+    return s;
+}
+
+typedef struct {
+    int index;
+    double score;
+} jina_score_t;
+
+static int jina_score_cmp_desc(const void *a, const void *b) {
+    const jina_score_t *sa = (const jina_score_t *)a;
+    const jina_score_t *sb = (const jina_score_t *)b;
+    if (sa->score < sb->score)
+        return 1;
+    if (sa->score > sb->score)
+        return -1;
+    return sa->index - sb->index;
+}
+
+static bool jina_input_bool(const char *input, const char *key, bool def) {
+    char *raw = json_get_raw(input, key);
+    if (!raw || raw_is_null(raw)) {
+        free(raw);
+        return def;
+    }
+    bool v = strncmp(skip_space_local(raw), "true", 4) == 0;
+    free(raw);
+    return v;
+}
+
+static int jina_count_words_local(const char *text) {
+    if (!text)
+        return 0;
+    int count = 0;
+    bool in_word = false;
+    for (const char *p = text; *p; p++) {
+        if (isspace((unsigned char)*p)) {
+            in_word = false;
+        } else if (!in_word) {
+            in_word = true;
+            count++;
+        }
+    }
+    return count;
+}
+
+static char *jina_clip_text(const char *text, size_t max_chars) {
+    if (!text)
+        return strdup("");
+    size_t len = strlen(text);
+    if (len > max_chars)
+        len = max_chars;
+    char *out = malloc(len + 1);
+    if (!out)
+        return NULL;
+    memcpy(out, text, len);
+    out[len] = '\0';
+    return out;
+}
+
+static char *jina_extract_reader_text(const char *read_resp) {
+    char *raw = jina_json_find_raw_string_field(read_resp, "text");
+    if (!raw)
+        raw = jina_json_find_raw_string_field(read_resp, "content");
+    if (!raw)
+        return NULL;
+    char *text = jina_json_raw_string_to_c(raw);
+    free(raw);
+    return text;
+}
+
+static int jina_append_live_chunks(jbuf_t *doc_out, const char *text, const char *source_id,
+                                   int chunk_words, int max_chunks, jbuf_t *rerank_docs,
+                                   bool *rerank_comma, jbuf_t *embed_docs, bool *embed_comma,
+                                   int *global_chunk_count, int embed_limit) {
+    if (chunk_words < 40)
+        chunk_words = 40;
+    if (chunk_words > 800)
+        chunk_words = 800;
+    if (max_chunks < 1)
+        max_chunks = 1;
+    if (max_chunks > 32)
+        max_chunks = 32;
+
+    int local_count = 0;
+    const char *p = text ? text : "";
+    jbuf_append(doc_out, "\"chunks\":[");
+    while (*p && local_count < max_chunks) {
+        while (*p && isspace((unsigned char)*p))
+            p++;
+        if (!*p)
+            break;
+        const char *start = p;
+        const char *end = p;
+        int words = 0;
+        while (*end && words < chunk_words) {
+            while (*end && isspace((unsigned char)*end))
+                end++;
+            if (!*end)
+                break;
+            while (*end && !isspace((unsigned char)*end))
+                end++;
+            words++;
+        }
+        if (end <= start)
+            break;
+
+        size_t len = (size_t)(end - start);
+        size_t snippet_len = len > 1600 ? 1600 : len;
+        char *snippet = malloc(snippet_len + 1);
+        if (!snippet)
+            break;
+        memcpy(snippet, start, snippet_len);
+        snippet[snippet_len] = '\0';
+
+        if (local_count)
+            jbuf_append(doc_out, ",");
+        char chunk_id[64];
+        snprintf(chunk_id, sizeof(chunk_id), "%s-%d", source_id, local_count + 1);
+        jbuf_append(doc_out, "{\"chunk_id\":");
+        jbuf_append_json_str(doc_out, chunk_id);
+        jbuf_append(doc_out, ",\"source_id\":");
+        jbuf_append_json_str(doc_out, source_id);
+        jbuf_appendf(doc_out, ",\"chunk_index\":%d,\"words\":%d,\"text\":", local_count + 1,
+                     words);
+        jbuf_append_json_str(doc_out, snippet);
+        jbuf_append(doc_out, "}");
+
+        if (rerank_docs) {
+            if (*rerank_comma)
+                jbuf_append(rerank_docs, ",");
+            *rerank_comma = true;
+            jbuf_append_json_str(rerank_docs, snippet);
+        }
+        if (embed_docs && *global_chunk_count < embed_limit) {
+            if (*embed_comma)
+                jbuf_append(embed_docs, ",");
+            *embed_comma = true;
+            jbuf_append_json_str(embed_docs, snippet);
+        }
+        (*global_chunk_count)++;
+        local_count++;
+        free(snippet);
+        p = end;
+    }
+    jbuf_append(doc_out, "]");
+    return local_count;
+}
+
+static bool parallel_ai_status_is_success(const char *status) {
+    return status && (!strcmp(status, "completed") || !strcmp(status, "complete") ||
+                      !strcmp(status, "succeeded") || !strcmp(status, "success") ||
+                      !strcmp(status, "done"));
+}
+
+static bool parallel_ai_status_is_terminal(const char *status) {
+    return parallel_ai_status_is_success(status) ||
+           (status && (!strcmp(status, "failed") || !strcmp(status, "error") ||
+                       !strcmp(status, "errored") || !strcmp(status, "cancelled") ||
+                       !strcmp(status, "canceled") || !strcmp(status, "expired")));
+}
+
+static char *parallel_ai_extract_text_from_response(const char *resp) {
+    const char *scan = resp ? resp : "";
+    jbuf_t excerpts;
+    jbuf_init(&excerpts, 4096);
+    bool have_excerpt = false;
+    while ((scan = strstr(scan, "\"excerpts\"")) != NULL) {
+        const char *p = skip_space_local(scan + strlen("\"excerpts\""));
+        if (*p++ != ':') {
+            scan++;
+            continue;
+        }
+        p = skip_space_local(p);
+        if (*p++ != '[') {
+            scan++;
+            continue;
+        }
+        while (*p && *p != ']') {
+            p = skip_space_local(p);
+            if (*p == ',') {
+                p++;
+                continue;
+            }
+            if (*p != '"') {
+                p++;
+                continue;
+            }
+            const char *start = p;
+            p++;
+            while (*p) {
+                if (*p == '\\' && p[1]) {
+                    p += 2;
+                    continue;
+                }
+                if (*p == '"') {
+                    p++;
+                    size_t len = (size_t)(p - start);
+                    char *quoted = malloc(len + 1);
+                    if (quoted) {
+                        memcpy(quoted, start, len);
+                        quoted[len] = '\0';
+                        char *text = jina_json_raw_string_to_c(quoted);
+                        if (text && text[0]) {
+                            if (have_excerpt)
+                                jbuf_append(&excerpts, "\n\n");
+                            jbuf_append(&excerpts, text);
+                            have_excerpt = true;
+                        }
+                        free(text);
+                        free(quoted);
+                    }
+                    break;
+                }
+                p++;
+            }
+        }
+        scan = p;
+    }
+    if (have_excerpt)
+        return excerpts.data;
+    jbuf_free(&excerpts);
+
+    static const char *keys[] = {"text", "content", "markdown", "excerpt", "summary", "output",
+                                 NULL};
+    for (int i = 0; keys[i]; i++) {
+        char *raw = jina_json_find_raw_string_field(resp, keys[i]);
+        if (!raw)
+            continue;
+        char *text = jina_json_raw_string_to_c(raw);
+        free(raw);
+        if (text && text[0])
+            return text;
+        free(text);
+    }
+    return jina_clip_text(resp ? resp : "", 12000);
+}
+
+static int parallel_ai_collect_urls(const char *search_resp, char **urls, char **titles,
+                                    int max_urls) {
+    const char *cursor = search_resp ? search_resp : "";
+    int count = 0;
+    while (count < max_urls) {
+        char *raw_url = jina_json_find_next_raw_string_field(&cursor, "url");
+        if (!raw_url)
+            break;
+        char *url = jina_json_raw_string_to_c(raw_url);
+        free(raw_url);
+        if (url && external_http_url_is_public(url)) {
+            bool dup = false;
+            for (int i = 0; i < count; i++) {
+                if (strcmp(urls[i], url) == 0) {
+                    dup = true;
+                    break;
+                }
+            }
+            if (!dup) {
+                urls[count] = url;
+                const char *title_cursor = cursor;
+                char *raw_title = jina_json_find_next_raw_string_field(&title_cursor, "title");
+                titles[count] = raw_title ? jina_json_raw_string_to_c(raw_title) : NULL;
+                free(raw_title);
+                count++;
+            } else {
+                free(url);
+            }
+        } else {
+            free(url);
+        }
+    }
+    return count;
+}
+
+static char *parallel_ai_kind_id_from_input(const char *input, const char *kind, char *result,
+                                            size_t rlen) {
+    if (!strcmp(kind, "task_run") || !strcmp(kind, "task"))
+        return parallel_ai_input_or_last_id(input, "run_id", "task_run", result, rlen);
+    if (!strcmp(kind, "task_group") || !strcmp(kind, "group"))
+        return parallel_ai_input_or_last_id(input, "taskgroup_id", "task_group", result, rlen);
+    if (!strcmp(kind, "findall"))
+        return parallel_ai_input_or_last_id(input, "findall_id", "findall", result, rlen);
+    if (!strcmp(kind, "monitor"))
+        return parallel_ai_input_or_last_id(input, "monitor_id", "monitor", result, rlen);
+    snprintf(result, rlen, "unknown Parallel.ai job kind: %s", kind);
+    return NULL;
+}
+
+bool tool_parallel_ai_wait(const char *input, char *result, size_t rlen) {
+    char *kind = json_get_str(input, "kind");
+    if (!kind || !kind[0]) {
+        free(kind);
+        char *findall_probe = json_get_raw(input, "findall_id");
+        char *group_probe = json_get_raw(input, "taskgroup_id");
+        char *monitor_probe = json_get_raw(input, "monitor_id");
+        if (findall_probe)
+            kind = strdup("findall");
+        else if (group_probe)
+            kind = strdup("task_group");
+        else if (monitor_probe)
+            kind = strdup("monitor");
+        else
+            kind = strdup("task_run");
+        free(findall_probe);
+        free(group_probe);
+        free(monitor_probe);
+    }
+
+    char *id = parallel_ai_kind_id_from_input(input, kind, result, rlen);
+    if (!id) {
+        free(kind);
+        return false;
+    }
+
+    int timeout = json_get_int(input, "timeout", 120);
+    if (timeout < 1)
+        timeout = 1;
+    if (timeout > 3600)
+        timeout = 3600;
+    int interval_ms = json_get_int(input, "interval_ms", 1000);
+    if (interval_ms < 250)
+        interval_ms = 250;
+    if (interval_ms > 30000)
+        interval_ms = 30000;
+
+    char status_resp[524288] = "{}";
+    char result_resp[524288] = "{}";
+    char *status = NULL;
+    bool terminal = false;
+    bool success = false;
+    time_t start = time(NULL);
+    int polls = 0;
+
+    if (!strcmp(kind, "monitor")) {
+        if (jina_input_bool(input, "trigger", false)) {
+            jbuf_t trig;
+            jbuf_init(&trig, 128 + strlen(id));
+            jbuf_append(&trig, "{\"monitor_id\":");
+            jbuf_append_json_str(&trig, id);
+            jbuf_append(&trig, "}");
+            (void)tool_parallel_ai_monitor_trigger(trig.data, result_resp, sizeof(result_resp));
+            jbuf_free(&trig);
+        }
+        jbuf_t mon;
+        jbuf_init(&mon, 192 + strlen(id));
+        jbuf_append(&mon, "{\"monitor_id\":");
+        jbuf_append_json_str(&mon, id);
+        jbuf_append(&mon, ",\"limit\":");
+        jbuf_appendf(&mon, "%d", json_get_int(input, "limit", 20));
+        if (jina_input_bool(input, "include_completions", true))
+            jbuf_append(&mon, ",\"include_completions\":true");
+        jbuf_append(&mon, "}");
+        bool ok = tool_parallel_ai_monitor_events(mon.data, status_resp, sizeof(status_resp));
+        jbuf_free(&mon);
+        jbuf_t out;
+        jbuf_init(&out, 4096);
+        jbuf_append(&out, "{\"kind\":\"monitor\",\"id\":");
+        jbuf_append_json_str(&out, id);
+        jbuf_append(&out, ",\"events_ok\":");
+        jbuf_append(&out, ok ? "true" : "false");
+        jbuf_append(&out, ",\"events\":");
+        if (ok && raw_starts_with(status_resp, '{'))
+            jbuf_append(&out, status_resp);
+        else
+            jbuf_append_json_str(&out, status_resp);
+        jbuf_append(&out, "}");
+        result[0] = '\0';
+        truncate_response(out.data ? out.data : "{}", result, rlen, 64);
+        jbuf_free(&out);
+        free(kind);
+        free(id);
+        return ok;
+    }
+
+    extern volatile int g_interrupted;
+    while (!g_interrupted) {
+        polls++;
+        jbuf_t in;
+        jbuf_init(&in, 192 + strlen(id));
+        if (!strcmp(kind, "findall")) {
+            jbuf_append(&in, "{\"findall_id\":");
+            jbuf_append_json_str(&in, id);
+            jbuf_append(&in, "}");
+            if (!tool_parallel_ai_findall_status(in.data, status_resp, sizeof(status_resp))) {
+                snprintf(result, rlen, "%s", status_resp);
+                jbuf_free(&in);
+                free(kind);
+                free(id);
+                return false;
+            }
+        } else if (!strcmp(kind, "task_group") || !strcmp(kind, "group")) {
+            jbuf_append(&in, "{\"taskgroup_id\":");
+            jbuf_append_json_str(&in, id);
+            jbuf_append(&in, "}");
+            if (!tool_parallel_ai_task_group_get(in.data, status_resp, sizeof(status_resp))) {
+                snprintf(result, rlen, "%s", status_resp);
+                jbuf_free(&in);
+                free(kind);
+                free(id);
+                return false;
+            }
+        } else {
+            jbuf_append(&in, "{\"run_id\":");
+            jbuf_append_json_str(&in, id);
+            jbuf_append(&in, "}");
+            if (!tool_parallel_ai_task_status(in.data, status_resp, sizeof(status_resp))) {
+                snprintf(result, rlen, "%s", status_resp);
+                jbuf_free(&in);
+                free(kind);
+                free(id);
+                return false;
+            }
+        }
+        jbuf_free(&in);
+
+        free(status);
+        status = json_get_str(status_resp, "status");
+        if (status && parallel_ai_status_is_terminal(status)) {
+            terminal = true;
+            success = parallel_ai_status_is_success(status);
+            break;
+        }
+        if ((int)(time(NULL) - start) >= timeout)
+            break;
+        /* Interruptible wait: sleep in ≤250ms slices so Ctrl-C aborts the
+         * poll loop promptly instead of blocking up to 30s per interval.
+         * Gentle backoff (×1.5, capped at 4× initial or 30s) cuts remote
+         * API pressure on long-running jobs. */
+        long wait_left = interval_ms;
+        while (wait_left > 0 && !g_interrupted) {
+            long slice = wait_left < 250 ? wait_left : 250;
+            usleep((useconds_t)slice * 1000U);
+            wait_left -= slice;
+        }
+        {
+            long next = (long)interval_ms + interval_ms / 2;
+            long cap = (long)json_get_int(input, "interval_ms", 1000) * 4;
+            if (cap > 30000)
+                cap = 30000;
+            if (cap < 1000)
+                cap = 1000;
+            if (next > cap)
+                next = cap;
+            interval_ms = (int)next;
+        }
+    }
+
+    bool result_ok = false;
+    if (success) {
+        jbuf_t rin;
+        jbuf_init(&rin, 256 + strlen(id));
+        if (!strcmp(kind, "findall")) {
+            jbuf_append(&rin, "{\"findall_id\":");
+            jbuf_append_json_str(&rin, id);
+            jbuf_append(&rin, "}");
+            result_ok = tool_parallel_ai_findall_result(rin.data, result_resp, sizeof(result_resp));
+        } else if (!strcmp(kind, "task_group") || !strcmp(kind, "group")) {
+            jbuf_append(&rin, "{\"taskgroup_id\":");
+            jbuf_append_json_str(&rin, id);
+            jbuf_append(&rin, ",\"include_input\":");
+            jbuf_append(&rin, jina_input_bool(input, "include_input", false) ? "true" : "false");
+            jbuf_append(&rin, ",\"include_output\":true}");
+            result_ok =
+                tool_parallel_ai_task_group_runs(rin.data, result_resp, sizeof(result_resp));
+        } else {
+            int result_timeout = json_get_int(input, "result_timeout", 60);
+            if (result_timeout < 1)
+                result_timeout = 1;
+            if (result_timeout > 3600)
+                result_timeout = 3600;
+            jbuf_append(&rin, "{\"run_id\":");
+            jbuf_append_json_str(&rin, id);
+            jbuf_appendf(&rin, ",\"timeout\":%d}", result_timeout);
+            result_ok = tool_parallel_ai_task_result(rin.data, result_resp, sizeof(result_resp));
+        }
+        jbuf_free(&rin);
+    }
+
+    jbuf_t out;
+    jbuf_init(&out, 8192);
+    jbuf_append(&out, "{\"kind\":");
+    jbuf_append_json_str(&out, kind);
+    jbuf_append(&out, ",\"id\":");
+    jbuf_append_json_str(&out, id);
+    jbuf_appendf(&out, ",\"polls\":%d,\"elapsed_seconds\":%ld", polls,
+                 (long)(time(NULL) - start));
+    jbuf_append(&out, ",\"status\":");
+    jbuf_append_json_str(&out, status ? status : "");
+    jbuf_append(&out, ",\"terminal\":");
+    jbuf_append(&out, terminal ? "true" : "false");
+    jbuf_append(&out, ",\"success\":");
+    jbuf_append(&out, success ? "true" : "false");
+    jbuf_append(&out, ",\"timed_out\":");
+    jbuf_append(&out, terminal ? "false" : "true");
+    jbuf_append(&out, ",\"status_response\":");
+    if (raw_starts_with(status_resp, '{'))
+        jbuf_append(&out, status_resp);
+    else
+        jbuf_append_json_str(&out, status_resp);
+    if (success || result_ok) {
+        jbuf_append(&out, ",\"result_ok\":");
+        jbuf_append(&out, result_ok ? "true" : "false");
+        jbuf_append(&out, ",\"result\":");
+        if (result_ok && raw_starts_with(result_resp, '{'))
+            jbuf_append(&out, result_resp);
+        else
+            jbuf_append_json_str(&out, result_resp);
+    }
+    jbuf_append(&out, "}");
+
+    result[0] = '\0';
+    truncate_response(out.data ? out.data : "{}", result, rlen, 64);
+    jbuf_free(&out);
+    free(status);
+    free(kind);
+    free(id);
+    return true;
+}
+
+bool tool_parallel_ai_research(const char *input, char *result, size_t rlen) {
+    char *query = json_get_str(input, "query");
+    if (!query || !query[0]) {
+        free(query);
+        snprintf(result, rlen, "missing required parameter: query");
+        return false;
+    }
+
+    int extract_top_n = json_get_int(input, "extract_top_n", 3);
+    if (extract_top_n < 0)
+        extract_top_n = 0;
+    if (extract_top_n > 8)
+        extract_top_n = 8;
+    int extract_max_chars = json_get_int(input, "extract_max_chars_total", 6000);
+    if (extract_max_chars < 500)
+        extract_max_chars = 500;
+    if (extract_max_chars > 200000)
+        extract_max_chars = 200000;
+
+    char *objective = json_get_str(input, "objective");
+    if (!objective || !objective[0]) {
+        free(objective);
+        jbuf_t obj;
+        jbuf_init(&obj, strlen(query) + 96);
+        jbuf_append(&obj, "Find authoritative, current evidence for: ");
+        jbuf_append(&obj, query);
+        objective = obj.data;
+    }
+
+    jbuf_t search_in;
+    jbuf_init(&search_in, strlen(query) + strlen(objective) + 256);
+    jbuf_append(&search_in, "{\"query\":");
+    jbuf_append_json_str(&search_in, query);
+    jbuf_append(&search_in, ",\"objective\":");
+    jbuf_append_json_str(&search_in, objective);
+    append_string_field_if_present(&search_in, input, "mode", "mode", &(bool){true});
+    append_int_field_if_present(&search_in, input, "max_chars_total", "max_chars_total", 1,
+                                200000, &(bool){true});
+    append_string_field_if_present(&search_in, input, "session_id", "session_id", &(bool){true});
+    append_string_field_if_present(&search_in, input, "client_model", "client_model",
+                                   &(bool){true});
+    jbuf_append(&search_in, "}");
+
+    char search_resp[524288];
+    bool search_ok = tool_parallel_ai_search(search_in.data, search_resp, sizeof(search_resp));
+    jbuf_free(&search_in);
+    if (!search_ok) {
+        snprintf(result, rlen, "%s", search_resp);
+        free(query);
+        free(objective);
+        return false;
+    }
+
+    char *urls[16] = {0};
+    char *titles[16] = {0};
+    int url_count = parallel_ai_collect_urls(search_resp, urls, titles, 16);
+
+    jbuf_t extracts;
+    jbuf_init(&extracts, 32768);
+    jbuf_append(&extracts, "[");
+    jbuf_t corpus;
+    jbuf_init(&corpus, 32768);
+    int extract_count = 0;
+    for (int i = 0; i < extract_top_n && i < url_count; i++) {
+        jbuf_t ex_in;
+        jbuf_init(&ex_in, strlen(urls[i]) + strlen(objective) + 256);
+        jbuf_append(&ex_in, "{\"url\":");
+        jbuf_append_json_str(&ex_in, urls[i]);
+        jbuf_append(&ex_in, ",\"objective\":");
+        jbuf_append_json_str(&ex_in, objective);
+        jbuf_appendf(&ex_in, ",\"max_chars_total\":%d", extract_max_chars);
+        append_string_field_if_present(&ex_in, input, "session_id", "session_id",
+                                       &(bool){true});
+        append_string_field_if_present(&ex_in, input, "client_model", "client_model",
+                                       &(bool){true});
+        jbuf_append(&ex_in, "}");
+
+        char extract_resp[524288];
+        bool extract_ok = tool_parallel_ai_extract(ex_in.data, extract_resp, sizeof(extract_resp));
+        jbuf_free(&ex_in);
+        if (extract_count)
+            jbuf_append(&extracts, ",");
+        char source_id[32];
+        snprintf(source_id, sizeof(source_id), "S%d", i + 1);
+        jbuf_append(&extracts, "{\"source_id\":");
+        jbuf_append_json_str(&extracts, source_id);
+        jbuf_append(&extracts, ",\"url\":");
+        jbuf_append_json_str(&extracts, urls[i]);
+        jbuf_append(&extracts, ",\"title\":");
+        jbuf_append_json_str(&extracts, titles[i] && titles[i][0] ? titles[i] : urls[i]);
+        jbuf_append(&extracts, ",\"ok\":");
+        jbuf_append(&extracts, extract_ok ? "true" : "false");
+        jbuf_append(&extracts, ",\"response\":");
+        if (extract_ok && raw_starts_with(extract_resp, '{'))
+            jbuf_append(&extracts, extract_resp);
+        else
+            jbuf_append_json_str(&extracts, extract_resp);
+        jbuf_append(&extracts, "}");
+
+        if (extract_ok) {
+            char *text = parallel_ai_extract_text_from_response(extract_resp);
+            if (text && text[0] && corpus.len < 120000) {
+                char *clip = jina_clip_text(text, 16000);
+                if (clip) {
+                    jbuf_append(&corpus, "\n\n[");
+                    jbuf_append(&corpus, source_id);
+                    jbuf_append(&corpus, "] ");
+                    jbuf_append(&corpus, urls[i]);
+                    jbuf_append(&corpus, "\n");
+                    jbuf_append(&corpus, clip);
+                    free(clip);
+                }
+            }
+            free(text);
+        }
+        extract_count++;
+    }
+    jbuf_append(&extracts, "]");
+
+    char task_create_resp[524288] = "{}";
+    char synthesis_resp[524288] = "{}";
+    bool synthesize = jina_input_bool(input, "synthesize", false);
+    bool task_ok = false;
+    bool wait_ok = false;
+    char *run_id = NULL;
+    if (synthesize && corpus.len > 0) {
+        char *processor = json_get_str(input, "processor");
+        if (!processor || !processor[0]) {
+            free(processor);
+            processor = strdup("base");
+        }
+        char *task_instruction = json_get_str(input, "task_instruction");
+        if (!task_instruction || !task_instruction[0]) {
+            free(task_instruction);
+            task_instruction =
+                strdup("Answer the query using only the provided evidence. Cite sources by source "
+                       "id and URL. Be concise and identify uncertainty.");
+        }
+        jbuf_t prompt;
+        jbuf_init(&prompt, strlen(query) + corpus.len + strlen(task_instruction) + 512);
+        jbuf_append(&prompt, task_instruction);
+        jbuf_append(&prompt, "\n\nQuery: ");
+        jbuf_append(&prompt, query);
+        jbuf_append(&prompt, "\n\nEvidence:\n");
+        jbuf_append(&prompt, corpus.data);
+
+        jbuf_t task_in;
+        jbuf_init(&task_in, prompt.len + strlen(processor) + 512);
+        jbuf_append(&task_in, "{\"processor\":");
+        jbuf_append_json_str(&task_in, processor);
+        jbuf_append(&task_in, ",\"input\":");
+        jbuf_append_json_str(&task_in, prompt.data);
+        jbuf_append(&task_in, ",\"enable_events\":true,\"metadata\":{\"dsco\":\"parallel_ai_research\"}}");
+        task_ok = tool_parallel_ai_task_create(task_in.data, task_create_resp,
+                                               sizeof(task_create_resp));
+        if (task_ok)
+            run_id = parallel_ai_response_id(task_create_resp, "run_id");
+        if (task_ok && run_id && jina_input_bool(input, "wait", true)) {
+            int task_timeout = json_get_int(input, "task_timeout", 180);
+            jbuf_t wait_in;
+            jbuf_init(&wait_in, strlen(run_id) + 128);
+            jbuf_append(&wait_in, "{\"kind\":\"task_run\",\"run_id\":");
+            jbuf_append_json_str(&wait_in, run_id);
+            jbuf_appendf(&wait_in, ",\"timeout\":%d,\"interval_ms\":1000}", task_timeout);
+            wait_ok = tool_parallel_ai_wait(wait_in.data, synthesis_resp, sizeof(synthesis_resp));
+            jbuf_free(&wait_in);
+        }
+        jbuf_free(&task_in);
+        jbuf_free(&prompt);
+        free(processor);
+        free(task_instruction);
+    }
+
+    jbuf_t out;
+    jbuf_init(&out, 65536);
+    jbuf_append(&out, "{\"type\":\"parallel_ai_research\",\"query\":");
+    jbuf_append_json_str(&out, query);
+    jbuf_appendf(&out, ",\"generated_at_unix\":%ld,\"url_count\":%d,\"extract_count\":%d",
+                 (long)time(NULL), url_count, extract_count);
+    jbuf_append(&out, ",\"search\":");
+    jbuf_append(&out, raw_starts_with(search_resp, '{') ? search_resp : "{}");
+    jbuf_append(&out, ",\"extracts\":");
+    jbuf_append(&out, extracts.data);
+    jbuf_append(&out, ",\"synthesis_requested\":");
+    jbuf_append(&out, synthesize ? "true" : "false");
+    if (synthesize) {
+        jbuf_append(&out, ",\"task_ok\":");
+        jbuf_append(&out, task_ok ? "true" : "false");
+        if (run_id) {
+            jbuf_append(&out, ",\"run_id\":");
+            jbuf_append_json_str(&out, run_id);
+        }
+        jbuf_append(&out, ",\"task_create\":");
+        if (task_ok && raw_starts_with(task_create_resp, '{'))
+            jbuf_append(&out, task_create_resp);
+        else
+            jbuf_append_json_str(&out, task_create_resp);
+        jbuf_append(&out, ",\"wait_ok\":");
+        jbuf_append(&out, wait_ok ? "true" : "false");
+        jbuf_append(&out, ",\"synthesis\":");
+        if (wait_ok && raw_starts_with(synthesis_resp, '{'))
+            jbuf_append(&out, synthesis_resp);
+        else
+            jbuf_append_json_str(&out, synthesis_resp);
+    }
+    jbuf_append(&out, "}");
+
+    result[0] = '\0';
+    truncate_response(out.data ? out.data : "{}", result, rlen, 64);
+    jbuf_free(&out);
+    jbuf_free(&extracts);
+    jbuf_free(&corpus);
+    for (int i = 0; i < url_count; i++) {
+        free(urls[i]);
+        free(titles[i]);
+    }
+    free(run_id);
+    free(query);
+    free(objective);
+    return true;
+}
+
+bool tool_parallel_ai_live_kb(const char *input, char *result, size_t rlen) {
+    char *query = json_get_str(input, "query");
+    if (!query || !query[0]) {
+        free(query);
+        snprintf(result, rlen, "missing required parameter: query");
+        return false;
+    }
+
+    int read_top_n = json_get_int(input, "read_top_n", 4);
+    if (read_top_n < 1)
+        read_top_n = 1;
+    if (read_top_n > 10)
+        read_top_n = 10;
+    int chunk_words = json_get_int(input, "chunk_words", 140);
+    if (chunk_words < 40)
+        chunk_words = 40;
+    if (chunk_words > 800)
+        chunk_words = 800;
+    int chunks_per_source = json_get_int(input, "chunks_per_source", 5);
+    if (chunks_per_source < 1)
+        chunks_per_source = 1;
+    if (chunks_per_source > 32)
+        chunks_per_source = 32;
+    int extract_max_chars = json_get_int(input, "extract_max_chars_total", 8000);
+    if (extract_max_chars < 500)
+        extract_max_chars = 500;
+    if (extract_max_chars > 200000)
+        extract_max_chars = 200000;
+
+    bool persist = jina_input_bool(input, "persist", false);
+    bool include_raw = jina_input_bool(input, "include_raw", false);
+
+    char *objective = json_get_str(input, "objective");
+    if (!objective || !objective[0]) {
+        free(objective);
+        jbuf_t obj;
+        jbuf_init(&obj, strlen(query) + 96);
+        jbuf_append(&obj, "Build a cited live knowledge base about: ");
+        jbuf_append(&obj, query);
+        objective = obj.data;
+    }
+
+    jbuf_t search_in;
+    jbuf_init(&search_in, strlen(query) + strlen(objective) + 256);
+    jbuf_append(&search_in, "{\"query\":");
+    jbuf_append_json_str(&search_in, query);
+    jbuf_append(&search_in, ",\"objective\":");
+    jbuf_append_json_str(&search_in, objective);
+    append_string_field_if_present(&search_in, input, "mode", "mode", &(bool){true});
+    append_int_field_if_present(&search_in, input, "max_chars_total", "max_chars_total", 1,
+                                200000, &(bool){true});
+    jbuf_append(&search_in, "}");
+    char search_resp[524288];
+    bool search_ok = tool_parallel_ai_search(search_in.data, search_resp, sizeof(search_resp));
+    jbuf_free(&search_in);
+    if (!search_ok) {
+        snprintf(result, rlen, "%s", search_resp);
+        free(query);
+        free(objective);
+        return false;
+    }
+
+    char *urls[16] = {0};
+    char *titles[16] = {0};
+    int url_count = parallel_ai_collect_urls(search_resp, urls, titles, 16);
+
+    jbuf_t docs_out;
+    jbuf_init(&docs_out, 32768);
+    jbuf_append(&docs_out, "[");
+    int read_count = 0;
+    int persisted_count = 0;
+    int global_chunk_count = 0;
+    for (int i = 0; i < read_top_n && i < url_count; i++) {
+        char source_id[32];
+        snprintf(source_id, sizeof(source_id), "P%d", i + 1);
+
+        jbuf_t ex_in;
+        jbuf_init(&ex_in, strlen(urls[i]) + strlen(objective) + 256);
+        jbuf_append(&ex_in, "{\"url\":");
+        jbuf_append_json_str(&ex_in, urls[i]);
+        jbuf_append(&ex_in, ",\"objective\":");
+        jbuf_append_json_str(&ex_in, objective);
+        jbuf_appendf(&ex_in, ",\"max_chars_total\":%d}", extract_max_chars);
+        char extract_resp[524288];
+        bool extract_ok = tool_parallel_ai_extract(ex_in.data, extract_resp, sizeof(extract_resp));
+        jbuf_free(&ex_in);
+
+        char *doc_text = extract_ok ? parallel_ai_extract_text_from_response(extract_resp) : NULL;
+        int words = jina_count_words_local(doc_text ? doc_text : "");
+        int local_doc_id = 0;
+        bool persist_ok = false;
+        char ingest_resp[8192] = "{}";
+        if (persist && extract_ok && doc_text && doc_text[0]) {
+            jbuf_t ingest_in;
+            jbuf_init(&ingest_in, strlen(doc_text) + 1024);
+            jbuf_append(&ingest_in, "{\"text\":");
+            jbuf_append_json_str(&ingest_in, doc_text);
+            jbuf_append(&ingest_in, ",\"title\":");
+            jbuf_append_json_str(&ingest_in, titles[i] && titles[i][0] ? titles[i] : urls[i]);
+            jbuf_append(&ingest_in, "}");
+            persist_ok = tool_kb_ingest(ingest_in.data, ingest_resp, sizeof(ingest_resp));
+            if (persist_ok) {
+                local_doc_id = json_get_int(ingest_resp, "doc_id", 0);
+                if (local_doc_id > 0)
+                    persisted_count++;
+            }
+            jbuf_free(&ingest_in);
+        }
+
+        if (read_count)
+            jbuf_append(&docs_out, ",");
+        jbuf_append(&docs_out, "{\"source_id\":");
+        jbuf_append_json_str(&docs_out, source_id);
+        jbuf_append(&docs_out, ",\"url\":");
+        jbuf_append_json_str(&docs_out, urls[i]);
+        jbuf_append(&docs_out, ",\"title\":");
+        jbuf_append_json_str(&docs_out, titles[i] && titles[i][0] ? titles[i] : urls[i]);
+        jbuf_append(&docs_out, ",\"extract_ok\":");
+        jbuf_append(&docs_out, extract_ok ? "true" : "false");
+        jbuf_appendf(&docs_out, ",\"words\":%d", words);
+        if (persist) {
+            jbuf_append(&docs_out, ",\"persist_ok\":");
+            jbuf_append(&docs_out, persist_ok ? "true" : "false");
+            if (local_doc_id > 0)
+                jbuf_appendf(&docs_out, ",\"local_doc_id\":%d", local_doc_id);
+            if (!persist_ok) {
+                jbuf_append(&docs_out, ",\"persist_error\":");
+                jbuf_append_json_str(&docs_out, ingest_resp);
+            }
+        }
+        jbuf_append(&docs_out, ",");
+        if (doc_text && doc_text[0]) {
+            jina_append_live_chunks(&docs_out, doc_text, source_id, chunk_words, chunks_per_source,
+                                    NULL, NULL, NULL, NULL, &global_chunk_count, 0);
+        } else {
+            jbuf_append(&docs_out, "\"chunks\":[]");
+            if (!extract_ok) {
+                jbuf_append(&docs_out, ",\"error\":");
+                jbuf_append_json_str(&docs_out, extract_resp);
+            }
+        }
+        if (include_raw) {
+            jbuf_append(&docs_out, ",\"extract\":");
+            if (extract_ok && raw_starts_with(extract_resp, '{'))
+                jbuf_append(&docs_out, extract_resp);
+            else
+                jbuf_append_json_str(&docs_out, extract_resp);
+        }
+        jbuf_append(&docs_out, "}");
+        free(doc_text);
+        read_count++;
+    }
+    jbuf_append(&docs_out, "]");
+
+    jbuf_t out;
+    jbuf_init(&out, 65536);
+    jbuf_append(&out, "{\"type\":\"parallel_ai_live_knowledge_base\",\"query\":");
+    jbuf_append_json_str(&out, query);
+    jbuf_appendf(&out, ",\"generated_at_unix\":%ld", (long)time(NULL));
+    jbuf_appendf(&out,
+                 ",\"source_count\":%d,\"read_count\":%d,\"chunk_count\":%d,"
+                 "\"persisted_count\":%d,\"persisted\":%s",
+                 url_count, read_count, global_chunk_count, persisted_count,
+                 persist ? "true" : "false");
+    jbuf_append(&out, ",\"documents\":");
+    jbuf_append(&out, docs_out.data);
+    if (include_raw) {
+        jbuf_append(&out, ",\"search\":");
+        if (raw_starts_with(search_resp, '{'))
+            jbuf_append(&out, search_resp);
+        else
+            jbuf_append_json_str(&out, search_resp);
+    }
+    jbuf_append(&out, "}");
+
+    result[0] = '\0';
+    truncate_response(out.data ? out.data : "{}", result, rlen, 64);
+    jbuf_free(&out);
+    jbuf_free(&docs_out);
+    for (int i = 0; i < url_count; i++) {
+        free(urls[i]);
+        free(titles[i]);
+    }
+    free(query);
+    free(objective);
+    return true;
+}
+
+bool tool_parallel_ai_constellation(const char *input, char *result, size_t rlen) {
+    char *action = json_get_str(input, "action");
+    if (!action || !action[0]) {
+        free(action);
+        char *q = json_get_str(input, "query");
+        action = strdup(q && q[0] ? "research" : "capabilities");
+        free(q);
+    }
+
+    bool ok = false;
+    if (strcmp(action, "capabilities") == 0) {
+        snprintf(result, rlen,
+                 "{\"actions\":[\"research\",\"live_kb\",\"wait\",\"jobs\",\"search\","
+                 "\"extract\",\"task_create\",\"task_status\",\"task_result\",\"task_events\","
+                 "\"task_input\",\"task_group_create\",\"task_group_get\",\"task_group_events\","
+                 "\"task_group_add_runs\",\"task_group_runs\",\"task_group_run_get\","
+                 "\"findall_entity_search\",\"findall_ingest\",\"findall_create\","
+                 "\"findall_status\",\"findall_result\",\"findall_events\",\"findall_schema\","
+                 "\"findall_cancel\",\"findall_extend\",\"findall_enrich\",\"monitor_create\","
+                 "\"monitor_list\",\"monitor_get\",\"monitor_events\",\"monitor_update\","
+                 "\"monitor_trigger\",\"monitor_cancel\",\"chat\"],\"default\":\"research\","
+                 "\"state\":\"~/.dsco/parallel_ai_jobs.jsonl\","
+                 "\"note\":\"Async jobs are tracked locally; wait can poll the latest tracked "
+                 "task_run, task_group, FindAll run, or monitor.\"}");
+        ok = true;
+    } else if (strcmp(action, "research") == 0) {
+        ok = tool_parallel_ai_research(input, result, rlen);
+    } else if (strcmp(action, "live_kb") == 0 || strcmp(action, "kb") == 0 ||
+               strcmp(action, "generate_kb") == 0) {
+        ok = tool_parallel_ai_live_kb(input, result, rlen);
+    } else if (strcmp(action, "wait") == 0 || strcmp(action, "poll") == 0) {
+        ok = tool_parallel_ai_wait(input, result, rlen);
+    } else if (strcmp(action, "jobs") == 0) {
+        ok = tool_parallel_ai_jobs(input, result, rlen);
+    } else if (strcmp(action, "search") == 0) {
+        ok = tool_parallel_ai_search(input, result, rlen);
+    } else if (strcmp(action, "extract") == 0) {
+        ok = tool_parallel_ai_extract(input, result, rlen);
+    } else if (strcmp(action, "task_create") == 0) {
+        ok = tool_parallel_ai_task_create(input, result, rlen);
+    } else if (strcmp(action, "task_status") == 0) {
+        ok = tool_parallel_ai_task_status(input, result, rlen);
+    } else if (strcmp(action, "task_result") == 0) {
+        ok = tool_parallel_ai_task_result(input, result, rlen);
+    } else if (strcmp(action, "task_events") == 0) {
+        ok = tool_parallel_ai_task_events(input, result, rlen);
+    } else if (strcmp(action, "task_input") == 0) {
+        ok = tool_parallel_ai_task_input(input, result, rlen);
+    } else if (strcmp(action, "task_group_create") == 0) {
+        ok = tool_parallel_ai_task_group_create(input, result, rlen);
+    } else if (strcmp(action, "task_group_get") == 0) {
+        ok = tool_parallel_ai_task_group_get(input, result, rlen);
+    } else if (strcmp(action, "task_group_events") == 0) {
+        ok = tool_parallel_ai_task_group_events(input, result, rlen);
+    } else if (strcmp(action, "task_group_add_runs") == 0) {
+        ok = tool_parallel_ai_task_group_add_runs(input, result, rlen);
+    } else if (strcmp(action, "task_group_runs") == 0) {
+        ok = tool_parallel_ai_task_group_runs(input, result, rlen);
+    } else if (strcmp(action, "task_group_run_get") == 0) {
+        ok = tool_parallel_ai_task_group_run_get(input, result, rlen);
+    } else if (strcmp(action, "findall_entity_search") == 0) {
+        ok = tool_parallel_ai_findall_entity_search(input, result, rlen);
+    } else if (strcmp(action, "findall_ingest") == 0) {
+        ok = tool_parallel_ai_findall_ingest(input, result, rlen);
+    } else if (strcmp(action, "findall_create") == 0) {
+        ok = tool_parallel_ai_findall_create(input, result, rlen);
+    } else if (strcmp(action, "findall_status") == 0) {
+        ok = tool_parallel_ai_findall_status(input, result, rlen);
+    } else if (strcmp(action, "findall_result") == 0) {
+        ok = tool_parallel_ai_findall_result(input, result, rlen);
+    } else if (strcmp(action, "findall_events") == 0) {
+        ok = tool_parallel_ai_findall_events(input, result, rlen);
+    } else if (strcmp(action, "findall_schema") == 0) {
+        ok = tool_parallel_ai_findall_schema(input, result, rlen);
+    } else if (strcmp(action, "findall_cancel") == 0) {
+        ok = tool_parallel_ai_findall_cancel(input, result, rlen);
+    } else if (strcmp(action, "findall_extend") == 0) {
+        ok = tool_parallel_ai_findall_extend(input, result, rlen);
+    } else if (strcmp(action, "findall_enrich") == 0) {
+        ok = tool_parallel_ai_findall_enrich(input, result, rlen);
+    } else if (strcmp(action, "monitor_create") == 0) {
+        ok = tool_parallel_ai_monitor_create(input, result, rlen);
+    } else if (strcmp(action, "monitor_list") == 0) {
+        ok = tool_parallel_ai_monitor_list(input, result, rlen);
+    } else if (strcmp(action, "monitor_get") == 0) {
+        ok = tool_parallel_ai_monitor_get(input, result, rlen);
+    } else if (strcmp(action, "monitor_events") == 0) {
+        ok = tool_parallel_ai_monitor_events(input, result, rlen);
+    } else if (strcmp(action, "monitor_update") == 0) {
+        ok = tool_parallel_ai_monitor_update(input, result, rlen);
+    } else if (strcmp(action, "monitor_trigger") == 0) {
+        ok = tool_parallel_ai_monitor_trigger(input, result, rlen);
+    } else if (strcmp(action, "monitor_cancel") == 0) {
+        ok = tool_parallel_ai_monitor_cancel(input, result, rlen);
+    } else if (strcmp(action, "chat") == 0) {
+        ok = tool_parallel_ai_chat(input, result, rlen);
+    } else {
+        snprintf(result, rlen, "unknown Parallel.ai constellation action: %s", action);
+    }
+    free(action);
+    return ok;
+}
+
+bool tool_jina_ai_batch_embed_submit(const char *input, char *result, size_t rlen) {
+    char *items = json_get_raw(input, "input");
+    if (items && !raw_is_json_array(items)) {
+        free(items);
+        items = NULL;
+    }
+    if (!items) {
+        items = json_get_raw(input, "texts");
+        if (items && !raw_is_json_array(items)) {
+            free(items);
+            items = NULL;
+        }
+    }
+    if (items) {
+        char *normalized = jina_normalize_batch_input_array(items);
+        free(items);
+        items = normalized;
+    }
+    char *input_file = json_get_str(input, "input_file");
+    if ((!items || raw_is_null(items)) && (!input_file || !input_file[0])) {
+        free(items);
+        free(input_file);
+        snprintf(result, rlen,
+                 "missing required parameter: input array, texts array, or input_file");
+        return false;
+    }
+
+    char *model = json_get_str(input, "model");
+    if (!model || !model[0]) {
+        free(model);
+        model = strdup("jina-embeddings-v5-text-small");
+    }
+
+    jbuf_t body;
+    jbuf_init(&body, 1024 + (items ? strlen(items) : strlen(input_file)));
+    bool comma = false;
+    jbuf_append(&body, "{");
+    append_field_sep(&body, &comma);
+    jbuf_append(&body, "\"model\":");
+    jbuf_append_json_str(&body, model);
+    append_field_sep(&body, &comma);
+    if (items) {
+        jbuf_append(&body, "\"input\":");
+        jbuf_append(&body, items);
+    } else {
+        jbuf_append(&body, "\"input_file\":");
+        jbuf_append_json_str(&body, input_file);
+    }
+    append_string_field_if_present(&body, input, "task", "task", &comma);
+    append_int_field_if_present(&body, input, "dimensions", "dimensions", 1, 4096, &comma);
+    append_bool_field_if_present(&body, input, "normalized", "normalized", &comma);
+    jbuf_append(&body, "}");
+
+    free(items);
+    free(input_file);
+    free(model);
+    bool ok =
+        jina_ai_request("POST", JINA_AI_API_BASE_URL "/batch/embeddings", body.data, result, rlen);
+    jbuf_free(&body);
+    return ok;
+}
+
+static bool jina_batch_endpoint(const char *input, const char *suffix, const char *method,
+                                char *result, size_t rlen) {
+    char *batch_id = json_get_str(input, "batch_id");
+    if (!batch_id || !jina_batch_id_is_safe(batch_id)) {
+        free(batch_id);
+        snprintf(result, rlen, "missing or unsafe required parameter: batch_id");
+        return false;
+    }
+    jbuf_t url;
+    jbuf_init(&url, strlen(JINA_AI_API_BASE_URL) + strlen(batch_id) + strlen(suffix) + 16);
+    jbuf_append(&url, JINA_AI_API_BASE_URL "/batch/");
+    jbuf_append(&url, batch_id);
+    jbuf_append(&url, suffix);
+    free(batch_id);
+    bool ok = jina_ai_request(method, url.data, NULL, result, rlen);
+    jbuf_free(&url);
+    return ok;
+}
+
+bool tool_jina_ai_batch_status(const char *input, char *result, size_t rlen) {
+    return jina_batch_endpoint(input, "", "GET", result, rlen);
+}
+
+bool tool_jina_ai_batch_output(const char *input, char *result, size_t rlen) {
+    return jina_batch_endpoint(input, "/output", "GET", result, rlen);
+}
+
+bool tool_jina_ai_batch_errors(const char *input, char *result, size_t rlen) {
+    return jina_batch_endpoint(input, "/errors", "GET", result, rlen);
+}
+
+bool tool_jina_ai_batch_cancel(const char *input, char *result, size_t rlen) {
+    return jina_batch_endpoint(input, "", "DELETE", result, rlen);
+}
+
+bool tool_jina_ai_batches_list(const char *input, char *result, size_t rlen) {
+    int limit = json_get_int(input, "limit", 20);
+    if (limit < 1)
+        limit = 1;
+    if (limit > 1000)
+        limit = 1000;
+    char url[256];
+    snprintf(url, sizeof(url), JINA_AI_API_BASE_URL "/batches?limit=%d", limit);
+    return jina_ai_request("GET", url, NULL, result, rlen);
+}
+
+bool tool_jina_ai_rerank(const char *input, char *result, size_t rlen) {
+    char *query = json_get_raw(input, "query");
+    char *documents = json_get_raw(input, "documents");
+    if (documents && !raw_is_json_array(documents)) {
+        free(documents);
+        documents = NULL;
+    }
+    char *document = NULL;
+    if (!documents)
+        document = json_get_str(input, "document");
+    if (!query || raw_is_null(query) || ((!documents || raw_is_null(documents)) &&
+                                         (!document || !document[0]))) {
+        free(query);
+        free(documents);
+        free(document);
+        snprintf(result, rlen, "missing required parameters: query and documents array");
+        return false;
+    }
+
+    char *model = json_get_str(input, "model");
+    if (!model || !model[0]) {
+        free(model);
+        model = strdup("jina-reranker-v3");
+    }
+
+    jbuf_t body;
+    jbuf_init(&body, 1024 + strlen(query) + (documents ? strlen(documents) : strlen(document)));
+    bool comma = false;
+    jbuf_append(&body, "{");
+    append_field_sep(&body, &comma);
+    jbuf_append(&body, "\"model\":");
+    jbuf_append_json_str(&body, model);
+    append_field_sep(&body, &comma);
+    jbuf_append(&body, "\"query\":");
+    jbuf_append(&body, query);
+    append_field_sep(&body, &comma);
+    jbuf_append(&body, "\"documents\":");
+    if (documents) {
+        jbuf_append(&body, documents);
+    } else {
+        jbuf_append(&body, "[");
+        jbuf_append_json_str(&body, document);
+        jbuf_append(&body, "]");
+    }
+    append_int_field_if_present(&body, input, "top_n", "top_n", 1, 10000, &comma);
+    append_bool_field_if_present(&body, input, "return_documents", "return_documents", &comma);
+    jbuf_append(&body, "}");
+
+    free(query);
+    free(documents);
+    free(document);
+    free(model);
+    bool ok = jina_ai_request("POST", JINA_AI_API_BASE_URL "/rerank", body.data, result, rlen);
+    jbuf_free(&body);
+    return ok;
+}
+
+bool tool_jina_ai_classify(const char *input, char *result, size_t rlen) {
+    char *body_raw = json_get_raw(input, "body");
+    if (!body_raw || !raw_starts_with(body_raw, '{')) {
+        free(body_raw);
+        body_raw = json_get_raw(input, "request");
+    }
+    if (body_raw && raw_starts_with(body_raw, '{')) {
+        bool ok = jina_ai_request("POST", JINA_AI_API_BASE_URL "/classify", body_raw, result, rlen);
+        free(body_raw);
+        return ok;
+    }
+    free(body_raw);
+
+    char *classifier_id = json_get_str(input, "classifier_id");
+    if (classifier_id && !identifier_token_is_safe(classifier_id)) {
+        free(classifier_id);
+        snprintf(result, rlen, "unsafe classifier_id");
+        return false;
+    }
+
+    char *input_raw = json_get_raw(input, "input");
+    char *text = NULL;
+    if (!input_raw || raw_is_null(input_raw)) {
+        free(input_raw);
+        input_raw = NULL;
+        text = json_get_str(input, "text");
+    }
+    bool input_raw_supported = input_raw && (raw_starts_with(input_raw, '[') ||
+                                             raw_starts_with(input_raw, '{') ||
+                                             raw_starts_with(input_raw, '"'));
+    if ((!input_raw_supported) &&
+        (!text || !text[0])) {
+        free(classifier_id);
+        free(input_raw);
+        free(text);
+        snprintf(result, rlen, "missing required parameter: input or text");
+        return false;
+    }
+
+    char *labels_raw = json_get_raw(input, "labels");
+    if ((!classifier_id || !classifier_id[0]) &&
+        (!labels_raw || (!raw_starts_with(labels_raw, '[') && !raw_starts_with(labels_raw, '{')))) {
+        free(classifier_id);
+        free(input_raw);
+        free(text);
+        free(labels_raw);
+        snprintf(result, rlen, "missing required parameter: labels or classifier_id");
+        return false;
+    }
+
+    char *model = json_get_str(input, "model");
+    if ((!classifier_id || !classifier_id[0]) && (!model || !model[0])) {
+        free(model);
+        model = strdup("jina-embeddings-v5-text-small");
+    }
+
+    jbuf_t body;
+    jbuf_init(&body, 1024 + (input_raw ? strlen(input_raw) : strlen(text)) +
+                         (labels_raw ? strlen(labels_raw) : 0));
+    bool comma = false;
+    jbuf_append(&body, "{");
+    if (classifier_id && classifier_id[0]) {
+        append_field_sep(&body, &comma);
+        jbuf_append(&body, "\"classifier_id\":");
+        jbuf_append_json_str(&body, classifier_id);
+    } else {
+        append_field_sep(&body, &comma);
+        jbuf_append(&body, "\"model\":");
+        jbuf_append_json_str(&body, model);
+        append_field_sep(&body, &comma);
+        jbuf_append(&body, "\"labels\":");
+        jbuf_append(&body, labels_raw);
+    }
+    append_field_sep(&body, &comma);
+    jbuf_append(&body, "\"input\":");
+    if (input_raw)
+        jbuf_append(&body, input_raw);
+    else
+        jbuf_append_json_str(&body, text);
+    jbuf_append(&body, "}");
+
+    free(classifier_id);
+    free(input_raw);
+    free(text);
+    free(labels_raw);
+    free(model);
+    bool ok = jina_ai_request("POST", JINA_AI_API_BASE_URL "/classify", body.data, result, rlen);
+    jbuf_free(&body);
+    return ok;
+}
+
+bool tool_jina_ai_train(const char *input, char *result, size_t rlen) {
+    char *body_raw = json_get_raw(input, "body");
+    if (!body_raw || !raw_starts_with(body_raw, '{')) {
+        free(body_raw);
+        body_raw = json_get_raw(input, "request");
+    }
+    if (body_raw && raw_starts_with(body_raw, '{')) {
+        bool ok = jina_ai_request("POST", JINA_AI_API_BASE_URL "/train", body_raw, result, rlen);
+        free(body_raw);
+        return ok;
+    }
+    free(body_raw);
+
+    char *input_raw = json_get_raw(input, "input");
+    if (!input_raw || raw_is_null(input_raw) ||
+        (!raw_starts_with(input_raw, '[') && !raw_starts_with(input_raw, '{'))) {
+        free(input_raw);
+        snprintf(result, rlen, "missing required parameter: input training item or array");
+        return false;
+    }
+
+    char *classifier_id = json_get_str(input, "classifier_id");
+    if (classifier_id && classifier_id[0] && !identifier_token_is_safe(classifier_id)) {
+        free(classifier_id);
+        free(input_raw);
+        snprintf(result, rlen, "unsafe classifier_id");
+        return false;
+    }
+
+    char *model = json_get_str(input, "model");
+    if ((!classifier_id || !classifier_id[0]) && (!model || !model[0])) {
+        free(model);
+        model = strdup("jina-embeddings-v5-text-small");
+    }
+
+    jbuf_t body;
+    jbuf_init(&body, 1024 + strlen(input_raw));
+    bool comma = false;
+    jbuf_append(&body, "{");
+    if (classifier_id && classifier_id[0]) {
+        append_field_sep(&body, &comma);
+        jbuf_append(&body, "\"classifier_id\":");
+        jbuf_append_json_str(&body, classifier_id);
+    } else {
+        append_field_sep(&body, &comma);
+        jbuf_append(&body, "\"model\":");
+        jbuf_append_json_str(&body, model);
+        append_string_field_if_present(&body, input, "access", "access", &comma);
+    }
+    append_field_sep(&body, &comma);
+    jbuf_append(&body, "\"input\":");
+    jbuf_append(&body, input_raw);
+    append_int_field_if_present(&body, input, "num_iters", "num_iters", 1, 100000, &comma);
+    jbuf_append(&body, "}");
+
+    free(input_raw);
+    free(classifier_id);
+    free(model);
+    bool ok = jina_ai_request("POST", JINA_AI_API_BASE_URL "/train", body.data, result, rlen);
+    jbuf_free(&body);
+    return ok;
+}
+
+bool tool_jina_ai_classifiers_list(const char *input, char *result, size_t rlen) {
+    (void)input;
+    return jina_ai_request("GET", JINA_AI_API_BASE_URL "/classifiers", NULL, result, rlen);
+}
+
+bool tool_jina_ai_classifier_delete(const char *input, char *result, size_t rlen) {
+    char *classifier_id = json_get_str(input, "classifier_id");
+    if (!classifier_id || !identifier_token_is_safe(classifier_id)) {
+        free(classifier_id);
+        snprintf(result, rlen, "missing or unsafe required parameter: classifier_id");
+        return false;
+    }
+    char *escaped = jina_url_escape(classifier_id);
+    free(classifier_id);
+    if (!escaped) {
+        snprintf(result, rlen, "failed to encode classifier_id");
+        return false;
+    }
+    jbuf_t url;
+    jbuf_init(&url, strlen(JINA_AI_API_BASE_URL) + strlen(escaped) + 24);
+    jbuf_append(&url, JINA_AI_API_BASE_URL "/classifiers/");
+    jbuf_append(&url, escaped);
+    free(escaped);
+    bool ok = jina_ai_request("DELETE", url.data, NULL, result, rlen);
+    jbuf_free(&url);
+    return ok;
+}
+
+bool tool_jina_ai_chat(const char *input, char *result, size_t rlen) {
+    char *body_raw = json_get_raw(input, "body");
+    if (!body_raw || !raw_starts_with(body_raw, '{')) {
+        free(body_raw);
+        body_raw = json_get_raw(input, "request");
+    }
+    if (body_raw && raw_starts_with(body_raw, '{')) {
+        bool ok =
+            jina_ai_request("POST", JINA_AI_API_BASE_URL "/chat/completions", body_raw, result, rlen);
+        free(body_raw);
+        return ok;
+    }
+    free(body_raw);
+
+    char *messages = json_get_raw(input, "messages");
+    if (messages && !raw_is_json_array(messages)) {
+        free(messages);
+        messages = NULL;
+    }
+    char *prompt = NULL;
+    if (!messages)
+        prompt = json_get_str(input, "prompt");
+    if ((!messages || raw_is_null(messages)) && (!prompt || !prompt[0])) {
+        free(messages);
+        free(prompt);
+        snprintf(result, rlen, "missing required parameter: messages array or prompt");
+        return false;
+    }
+
+    char *model = json_get_str(input, "model");
+    if (!model || !model[0]) {
+        free(model);
+        model = strdup("jina-vlm");
+    }
+
+    jbuf_t body;
+    jbuf_init(&body, 1024 + (messages ? strlen(messages) : strlen(prompt)));
+    bool comma = false;
+    jbuf_append(&body, "{");
+    append_field_sep(&body, &comma);
+    jbuf_append(&body, "\"model\":");
+    jbuf_append_json_str(&body, model);
+    append_field_sep(&body, &comma);
+    jbuf_append(&body, "\"messages\":");
+    if (messages) {
+        jbuf_append(&body, messages);
+    } else {
+        jbuf_append(&body, "[{\"role\":\"user\",\"content\":");
+        jbuf_append_json_str(&body, prompt);
+        jbuf_append(&body, "}]");
+    }
+    append_int_field_if_present(&body, input, "max_tokens", "max_tokens", 1, 100000, &comma);
+    append_raw_field_if_present(&body, input, "temperature", "temperature", &comma);
+    append_raw_field_if_present(&body, input, "top_p", "top_p", &comma);
+    append_bool_field_if_present(&body, input, "stream", "stream", &comma);
+    append_raw_field_if_present(&body, input, "response_format", "response_format", &comma);
+    jbuf_append(&body, "}");
+
+    free(messages);
+    free(prompt);
+    free(model);
+    bool ok = jina_ai_request("POST", JINA_AI_API_BASE_URL "/chat/completions", body.data, result,
+                              rlen);
+    jbuf_free(&body);
+    return ok;
+}
+
+bool tool_jina_ai_match(const char *input, char *result, size_t rlen) {
+    char *query = json_get_str(input, "query");
+    char *documents_raw = json_get_raw(input, "documents");
+    if (!query || !query[0] || !documents_raw || !raw_is_json_array(documents_raw)) {
+        free(query);
+        free(documents_raw);
+        snprintf(result, rlen, "missing required parameters: query and documents array");
+        return false;
+    }
+
+    char *docs[128] = {0};
+    int doc_count = jina_parse_json_string_array(documents_raw, docs, 128);
+    free(documents_raw);
+    if (doc_count <= 0) {
+        free(query);
+        snprintf(result, rlen, "documents must be a non-empty array of strings");
+        return false;
+    }
+
+    char *model = json_get_str(input, "model");
+    if (!model || !model[0]) {
+        free(model);
+        model = strdup("jina-embeddings-v5-text-small");
+    }
+    int dimensions = json_get_int(input, "dimensions", 128);
+    if (dimensions < 32)
+        dimensions = 32;
+    if (dimensions > 512)
+        dimensions = 512;
+    int top_n = json_get_int(input, "top_n", doc_count);
+    if (top_n < 1)
+        top_n = 1;
+    if (top_n > doc_count)
+        top_n = doc_count;
+
+    jbuf_t body;
+    jbuf_init(&body, 1024 + strlen(query) + (size_t)doc_count * 96);
+    jbuf_append(&body, "{\"model\":");
+    jbuf_append_json_str(&body, model);
+    jbuf_append(&body, ",\"task\":\"text-matching\",\"normalized\":true,\"dimensions\":");
+    jbuf_appendf(&body, "%d", dimensions);
+    jbuf_append(&body, ",\"input\":[");
+    jbuf_append_json_str(&body, query);
+    for (int i = 0; i < doc_count; i++) {
+        jbuf_append(&body, ",");
+        jbuf_append_json_str(&body, docs[i]);
+    }
+    jbuf_append(&body, "]}");
+
+    char resp[524288];
+    bool ok = jina_ai_request("POST", JINA_AI_API_BASE_URL "/embeddings", body.data, resp,
+                              sizeof(resp));
+    jbuf_free(&body);
+    if (!ok) {
+        free(model);
+        free(query);
+        jina_free_strings(docs, doc_count);
+        snprintf(result, rlen, "%s", resp);
+        return false;
+    }
+
+    double *vectors[129] = {0};
+    int dims[129] = {0};
+    int vec_count = jina_parse_embedding_vectors(resp, vectors, dims, doc_count + 1, dimensions);
+    if (vec_count < doc_count + 1 || dims[0] <= 0) {
+        for (int i = 0; i < vec_count; i++)
+            free(vectors[i]);
+        free(query);
+        jina_free_strings(docs, doc_count);
+        snprintf(result, rlen, "Jina embeddings response did not contain expected vectors");
+        return false;
+    }
+
+    jina_score_t scores[128];
+    for (int i = 0; i < doc_count; i++) {
+        scores[i].index = i;
+        scores[i].score = jina_dot_product(vectors[0], dims[0], vectors[i + 1], dims[i + 1]);
+    }
+    qsort(scores, (size_t)doc_count, sizeof(scores[0]), jina_score_cmp_desc);
+
+    jbuf_t out;
+    jbuf_init(&out, 4096);
+    jbuf_append(&out, "{\"query\":");
+    jbuf_append_json_str(&out, query);
+    jbuf_append(&out, ",\"matches\":[");
+    for (int i = 0; i < top_n; i++) {
+        if (i)
+            jbuf_append(&out, ",");
+        int idx = scores[i].index;
+        jbuf_appendf(&out, "{\"index\":%d,\"score\":%.8f,\"document\":", idx, scores[i].score);
+        jbuf_append_json_str(&out, docs[idx]);
+        jbuf_append(&out, "}");
+    }
+    jbuf_append(&out, "],\"model\":");
+    jbuf_append_json_str(&out, model);
+    jbuf_appendf(&out, ",\"dimensions\":%d}", dims[0]);
+
+    result[0] = '\0';
+    truncate_response(out.data ? out.data : "{}", result, rlen, 32);
+    jbuf_free(&out);
+    for (int i = 0; i < vec_count; i++)
+        free(vectors[i]);
+    free(model);
+    free(query);
+    jina_free_strings(docs, doc_count);
+    return true;
+}
+
+bool tool_jina_ai_research(const char *input, char *result, size_t rlen) {
+    char *query = json_get_str(input, "query");
+    if (!query || !query[0]) {
+        free(query);
+        snprintf(result, rlen, "missing required parameter: query");
+        return false;
+    }
+    int read_top_n = json_get_int(input, "read_top_n", 3);
+    if (read_top_n < 0)
+        read_top_n = 0;
+    if (read_top_n > 8)
+        read_top_n = 8;
+    int rerank_top_n = json_get_int(input, "rerank_top_n", read_top_n > 0 ? read_top_n : 5);
+    if (rerank_top_n < 0)
+        rerank_top_n = 0;
+    if (rerank_top_n > 16)
+        rerank_top_n = 16;
+
+    char search_resp[262144];
+    if (!tool_jina_ai_search(input, search_resp, sizeof(search_resp))) {
+        snprintf(result, rlen, "%s", search_resp);
+        free(query);
+        return false;
+    }
+
+    char *urls[16] = {0};
+    const char *cursor = search_resp;
+    int url_count = 0;
+    while (url_count < 16) {
+        char *raw_url = jina_json_find_next_raw_string_field(&cursor, "url");
+        if (!raw_url)
+            break;
+        char *url = jina_json_raw_string_to_c(raw_url);
+        free(raw_url);
+        if (url && external_http_url_is_public(url)) {
+            bool dup = false;
+            for (int i = 0; i < url_count; i++) {
+                if (strcmp(urls[i], url) == 0) {
+                    dup = true;
+                    break;
+                }
+            }
+            if (!dup)
+                urls[url_count++] = url;
+            else
+                free(url);
+        } else {
+            free(url);
+        }
+    }
+
+    char *reader_format = json_get_str(input, "reader_return_format");
+    if (!reader_format || !reader_format[0]) {
+        free(reader_format);
+        reader_format = strdup("text");
+    }
+    char *reader_engine = json_get_str(input, "reader_engine");
+    if (!reader_engine || !reader_engine[0]) {
+        free(reader_engine);
+        reader_engine = strdup("direct");
+    }
+
+    jbuf_t reads;
+    jbuf_init(&reads, 16384);
+    jbuf_append(&reads, "[");
+    jbuf_t docs;
+    jbuf_init(&docs, 8192);
+    jbuf_append(&docs, "[");
+    int docs_count = 0;
+    for (int i = 0; i < read_top_n && i < url_count; i++) {
+        jbuf_t tmp;
+        jbuf_init(&tmp, 1024 + strlen(urls[i]));
+        jbuf_append(&tmp, "{\"url\":");
+        jbuf_append_json_str(&tmp, urls[i]);
+        jbuf_append(&tmp, ",\"return_format\":");
+        jbuf_append_json_str(&tmp, reader_format);
+        jbuf_append(&tmp, ",\"engine\":");
+        jbuf_append_json_str(&tmp, reader_engine);
+        append_int_field_if_present(&tmp, input, "token_budget", "token_budget", 1, 200000,
+                                    &(bool){true});
+        jbuf_append(&tmp, "}");
+
+        char read_resp[131072];
+        bool ok = tool_jina_ai_reader(tmp.data, read_resp, sizeof(read_resp));
+        jbuf_free(&tmp);
+        if (i)
+            jbuf_append(&reads, ",");
+        jbuf_append(&reads, "{\"url\":");
+        jbuf_append_json_str(&reads, urls[i]);
+        jbuf_append(&reads, ",\"ok\":");
+        jbuf_append(&reads, ok ? "true" : "false");
+        jbuf_append(&reads, ",\"response\":");
+        if (ok && raw_starts_with(read_resp, '{'))
+            jbuf_append(&reads, read_resp);
+        else
+            jbuf_append_json_str(&reads, read_resp);
+        jbuf_append(&reads, "}");
+
+        char *doc_raw = ok ? jina_json_find_raw_string_field(read_resp, "text") : NULL;
+        if (!doc_raw && ok)
+            doc_raw = jina_json_find_raw_string_field(read_resp, "content");
+        if (doc_raw) {
+            if (docs_count)
+                jbuf_append(&docs, ",");
+            jbuf_append(&docs, doc_raw);
+            docs_count++;
+            free(doc_raw);
+        }
+    }
+    jbuf_append(&reads, "]");
+    jbuf_append(&docs, "]");
+
+    char rerank_resp[262144] = "{}";
+    bool rerank_ok = false;
+    if (rerank_top_n > 0 && docs_count > 0) {
+        jbuf_t rerank_in;
+        jbuf_init(&rerank_in, strlen(docs.data) + strlen(query) + 256);
+        jbuf_append(&rerank_in, "{\"query\":");
+        jbuf_append_json_str(&rerank_in, query);
+        jbuf_append(&rerank_in, ",\"documents\":");
+        jbuf_append(&rerank_in, docs.data);
+        jbuf_appendf(&rerank_in, ",\"top_n\":%d,\"return_documents\":false}", rerank_top_n);
+        rerank_ok = tool_jina_ai_rerank(rerank_in.data, rerank_resp, sizeof(rerank_resp));
+        jbuf_free(&rerank_in);
+    }
+
+    jbuf_t out;
+    jbuf_init(&out, 32768);
+    jbuf_append(&out, "{\"query\":");
+    jbuf_append_json_str(&out, query);
+    jbuf_appendf(&out, ",\"url_count\":%d,\"read_count\":%d,", url_count,
+                 read_top_n < url_count ? read_top_n : url_count);
+    jbuf_append(&out, "\"search\":");
+    jbuf_append(&out, raw_starts_with(search_resp, '{') ? search_resp : "{}");
+    jbuf_append(&out, ",\"reads\":");
+    jbuf_append(&out, reads.data);
+    jbuf_append(&out, ",\"rerank_ok\":");
+    jbuf_append(&out, rerank_ok ? "true" : "false");
+    jbuf_append(&out, ",\"rerank\":");
+    if (rerank_ok && raw_starts_with(rerank_resp, '{'))
+        jbuf_append(&out, rerank_resp);
+    else
+        jbuf_append_json_str(&out, rerank_resp);
+    jbuf_append(&out, "}");
+
+    result[0] = '\0';
+    truncate_response(out.data ? out.data : "{}", result, rlen, 32);
+    jbuf_free(&out);
+    jbuf_free(&reads);
+    jbuf_free(&docs);
+    free(reader_format);
+    free(reader_engine);
+    for (int i = 0; i < url_count; i++)
+        free(urls[i]);
+    free(query);
+    return true;
+}
+
+bool tool_jina_ai_live_kb(const char *input, char *result, size_t rlen) {
+    char *query = json_get_str(input, "query");
+    if (!query || !query[0]) {
+        free(query);
+        snprintf(result, rlen, "missing required parameter: query");
+        return false;
+    }
+
+    int read_top_n = json_get_int(input, "read_top_n", 4);
+    if (read_top_n < 1)
+        read_top_n = 1;
+    if (read_top_n > 10)
+        read_top_n = 10;
+    int chunk_words = json_get_int(input, "chunk_words", 140);
+    if (chunk_words < 40)
+        chunk_words = 40;
+    if (chunk_words > 800)
+        chunk_words = 800;
+    int chunks_per_source = json_get_int(input, "chunks_per_source", 5);
+    if (chunks_per_source < 1)
+        chunks_per_source = 1;
+    if (chunks_per_source > 32)
+        chunks_per_source = 32;
+    int rerank_top_n = json_get_int(input, "rerank_top_n", 8);
+    if (rerank_top_n < 0)
+        rerank_top_n = 0;
+    if (rerank_top_n > 64)
+        rerank_top_n = 64;
+    int embed_limit = json_get_int(input, "embed_limit", 12);
+    if (embed_limit < 1)
+        embed_limit = 1;
+    if (embed_limit > 64)
+        embed_limit = 64;
+    int embed_dimensions = json_get_int(input, "dimensions", 64);
+    if (embed_dimensions < 32)
+        embed_dimensions = 32;
+    if (embed_dimensions > 1024)
+        embed_dimensions = 1024;
+
+    bool persist = jina_input_bool(input, "persist", false);
+    bool include_raw = jina_input_bool(input, "include_raw", false);
+    bool include_embeddings = jina_input_bool(input, "embed", false);
+    bool do_rerank = jina_input_bool(input, "rerank", true);
+
+    char search_resp[262144];
+    if (!tool_jina_ai_search(input, search_resp, sizeof(search_resp))) {
+        snprintf(result, rlen, "%s", search_resp);
+        free(query);
+        return false;
+    }
+
+    char *urls[16] = {0};
+    char *titles[16] = {0};
+    const char *cursor = search_resp;
+    int url_count = 0;
+    while (url_count < 16) {
+        char *raw_url = jina_json_find_next_raw_string_field(&cursor, "url");
+        if (!raw_url)
+            break;
+        char *url = jina_json_raw_string_to_c(raw_url);
+        free(raw_url);
+        if (url && external_http_url_is_public(url)) {
+            bool dup = false;
+            for (int i = 0; i < url_count; i++) {
+                if (strcmp(urls[i], url) == 0) {
+                    dup = true;
+                    break;
+                }
+            }
+            if (!dup) {
+                urls[url_count] = url;
+                const char *title_cursor = cursor;
+                char *raw_title = jina_json_find_next_raw_string_field(&title_cursor, "title");
+                titles[url_count] = raw_title ? jina_json_raw_string_to_c(raw_title) : NULL;
+                free(raw_title);
+                url_count++;
+            } else {
+                free(url);
+            }
+        } else {
+            free(url);
+        }
+    }
+
+    char *reader_format = json_get_str(input, "reader_return_format");
+    if (!reader_format || !reader_format[0]) {
+        free(reader_format);
+        reader_format = strdup("text");
+    }
+    char *reader_engine = json_get_str(input, "reader_engine");
+    if (!reader_engine || !reader_engine[0]) {
+        free(reader_engine);
+        reader_engine = strdup("direct");
+    }
+    int token_budget = json_get_int(input, "token_budget", 12000);
+    if (token_budget < 1)
+        token_budget = 12000;
+    if (token_budget > 200000)
+        token_budget = 200000;
+
+    jbuf_t docs_out;
+    jbuf_init(&docs_out, 32768);
+    jbuf_append(&docs_out, "[");
+    jbuf_t rerank_docs;
+    jbuf_init(&rerank_docs, 16384);
+    jbuf_append(&rerank_docs, "[");
+    bool rerank_comma = false;
+    jbuf_t embed_docs;
+    jbuf_init(&embed_docs, 16384);
+    jbuf_append(&embed_docs, "[");
+    bool embed_comma = false;
+    jbuf_t corpus_text;
+    jbuf_init(&corpus_text, 16384);
+
+    int read_count = 0;
+    int persisted_count = 0;
+    int global_chunk_count = 0;
+    for (int i = 0; i < read_top_n && i < url_count; i++) {
+        char source_id[32];
+        snprintf(source_id, sizeof(source_id), "S%d", i + 1);
+
+        jbuf_t reader_in;
+        jbuf_init(&reader_in, 1024 + strlen(urls[i]));
+        jbuf_append(&reader_in, "{\"url\":");
+        jbuf_append_json_str(&reader_in, urls[i]);
+        jbuf_append(&reader_in, ",\"return_format\":");
+        jbuf_append_json_str(&reader_in, reader_format);
+        jbuf_append(&reader_in, ",\"engine\":");
+        jbuf_append_json_str(&reader_in, reader_engine);
+        jbuf_appendf(&reader_in, ",\"token_budget\":%d", token_budget);
+        append_bool_field_if_present(&reader_in, input, "no_cache", "no_cache", &(bool){true});
+        append_string_field_if_present(&reader_in, input, "respond_with", "respond_with",
+                                       &(bool){true});
+        jbuf_append(&reader_in, "}");
+
+        char read_resp[262144];
+        bool read_ok = tool_jina_ai_reader(reader_in.data, read_resp, sizeof(read_resp));
+        jbuf_free(&reader_in);
+        char *doc_text = read_ok ? jina_extract_reader_text(read_resp) : NULL;
+        int words = jina_count_words_local(doc_text ? doc_text : "");
+
+        int local_doc_id = 0;
+        char ingest_resp[8192] = "{}";
+        bool persist_ok = false;
+        if (persist && read_ok && doc_text && doc_text[0]) {
+            jbuf_t ingest_in;
+            jbuf_init(&ingest_in, strlen(doc_text) + 1024);
+            jbuf_append(&ingest_in, "{\"text\":");
+            jbuf_append_json_str(&ingest_in, doc_text);
+            jbuf_append(&ingest_in, ",\"title\":");
+            if (titles[i] && titles[i][0])
+                jbuf_append_json_str(&ingest_in, titles[i]);
+            else
+                jbuf_append_json_str(&ingest_in, urls[i]);
+            jbuf_append(&ingest_in, "}");
+            persist_ok = tool_kb_ingest(ingest_in.data, ingest_resp, sizeof(ingest_resp));
+            if (persist_ok) {
+                local_doc_id = json_get_int(ingest_resp, "doc_id", 0);
+                if (local_doc_id > 0)
+                    persisted_count++;
+            }
+            jbuf_free(&ingest_in);
+        }
+
+        if (read_count)
+            jbuf_append(&docs_out, ",");
+        jbuf_append(&docs_out, "{\"source_id\":");
+        jbuf_append_json_str(&docs_out, source_id);
+        jbuf_append(&docs_out, ",\"url\":");
+        jbuf_append_json_str(&docs_out, urls[i]);
+        jbuf_append(&docs_out, ",\"title\":");
+        jbuf_append_json_str(&docs_out, titles[i] && titles[i][0] ? titles[i] : urls[i]);
+        jbuf_append(&docs_out, ",\"read_ok\":");
+        jbuf_append(&docs_out, read_ok ? "true" : "false");
+        jbuf_appendf(&docs_out, ",\"words\":%d", words);
+        if (persist) {
+            jbuf_append(&docs_out, ",\"persist_ok\":");
+            jbuf_append(&docs_out, persist_ok ? "true" : "false");
+            if (local_doc_id > 0)
+                jbuf_appendf(&docs_out, ",\"local_doc_id\":%d", local_doc_id);
+            if (!persist_ok) {
+                jbuf_append(&docs_out, ",\"persist_error\":");
+                jbuf_append_json_str(&docs_out, ingest_resp);
+            }
+        }
+        jbuf_append(&docs_out, ",");
+        if (doc_text && doc_text[0]) {
+            if (corpus_text.len < 120000) {
+                char *clip = jina_clip_text(doc_text, 12000);
+                if (clip) {
+                    jbuf_append(&corpus_text, "\n\n");
+                    jbuf_append(&corpus_text, clip);
+                    free(clip);
+                }
+            }
+            jina_append_live_chunks(&docs_out, doc_text, source_id, chunk_words, chunks_per_source,
+                                    &rerank_docs, &rerank_comma, &embed_docs, &embed_comma,
+                                    &global_chunk_count, embed_limit);
+        } else {
+            jbuf_append(&docs_out, "\"chunks\":[]");
+            if (!read_ok) {
+                jbuf_append(&docs_out, ",\"error\":");
+                jbuf_append_json_str(&docs_out, read_resp);
+            }
+        }
+        jbuf_append(&docs_out, "}");
+        free(doc_text);
+        read_count++;
+    }
+    jbuf_append(&docs_out, "]");
+    jbuf_append(&rerank_docs, "]");
+    jbuf_append(&embed_docs, "]");
+
+    char rerank_resp[262144] = "{}";
+    bool rerank_ok = false;
+    if (do_rerank && rerank_top_n > 0 && global_chunk_count > 0) {
+        jbuf_t rr;
+        jbuf_init(&rr, strlen(rerank_docs.data) + strlen(query) + 256);
+        jbuf_append(&rr, "{\"query\":");
+        jbuf_append_json_str(&rr, query);
+        jbuf_append(&rr, ",\"documents\":");
+        jbuf_append(&rr, rerank_docs.data);
+        jbuf_appendf(&rr, ",\"top_n\":%d,\"return_documents\":false}", rerank_top_n);
+        rerank_ok = tool_jina_ai_rerank(rr.data, rerank_resp, sizeof(rerank_resp));
+        jbuf_free(&rr);
+    }
+
+    char classify_resp[262144] = "{}";
+    bool classify_ok = false;
+    char *labels_raw = json_get_raw(input, "labels");
+    if (labels_raw && (raw_starts_with(labels_raw, '[') || raw_starts_with(labels_raw, '{')) &&
+        corpus_text.len > 0) {
+        char *class_text = jina_clip_text(corpus_text.data, 12000);
+        if (class_text) {
+            jbuf_t ci;
+            jbuf_init(&ci, strlen(class_text) + strlen(labels_raw) + 256);
+            jbuf_append(&ci, "{\"text\":");
+            jbuf_append_json_str(&ci, class_text);
+            jbuf_append(&ci, ",\"labels\":");
+            jbuf_append(&ci, labels_raw);
+            append_string_field_if_present(&ci, input, "classification_model", "model",
+                                           &(bool){true});
+            jbuf_append(&ci, "}");
+            classify_ok = tool_jina_ai_classify(ci.data, classify_resp, sizeof(classify_resp));
+            jbuf_free(&ci);
+            free(class_text);
+        }
+    }
+    free(labels_raw);
+
+    char embed_resp[524288] = "{}";
+    bool embed_ok = false;
+    if (include_embeddings && global_chunk_count > 0) {
+        char *embed_model = json_get_str(input, "embedding_model");
+        if (!embed_model || !embed_model[0]) {
+            free(embed_model);
+            embed_model = strdup("jina-embeddings-v5-text-small");
+        }
+        jbuf_t ei;
+        jbuf_init(&ei, strlen(embed_docs.data) + strlen(embed_model) + 256);
+        jbuf_append(&ei, "{\"model\":");
+        jbuf_append_json_str(&ei, embed_model);
+        jbuf_append(&ei, ",\"input\":");
+        jbuf_append(&ei, embed_docs.data);
+        jbuf_appendf(&ei,
+                     ",\"task\":\"retrieval.passage\",\"normalized\":true,\"dimensions\":%d}",
+                     embed_dimensions);
+        embed_ok = tool_jina_ai_embed(ei.data, embed_resp, sizeof(embed_resp));
+        jbuf_free(&ei);
+        free(embed_model);
+    }
+
+    jbuf_t out;
+    jbuf_init(&out, 65536);
+    jbuf_append(&out, "{\"type\":\"jina_live_knowledge_base\",\"query\":");
+    jbuf_append_json_str(&out, query);
+    jbuf_appendf(&out, ",\"generated_at_unix\":%ld", (long)time(NULL));
+    jbuf_appendf(&out,
+                 ",\"source_count\":%d,\"read_count\":%d,\"chunk_count\":%d,"
+                 "\"persisted_count\":%d,\"persisted\":%s",
+                 url_count, read_count, global_chunk_count, persisted_count,
+                 persist ? "true" : "false");
+    jbuf_append(&out, ",\"documents\":");
+    jbuf_append(&out, docs_out.data);
+    jbuf_append(&out, ",\"chunk_rerank_ok\":");
+    jbuf_append(&out, rerank_ok ? "true" : "false");
+    jbuf_append(&out, ",\"chunk_rerank\":");
+    if (rerank_ok && raw_starts_with(rerank_resp, '{'))
+        jbuf_append(&out, rerank_resp);
+    else
+        jbuf_append_json_str(&out, rerank_resp);
+    jbuf_append(&out, ",\"classification_ok\":");
+    jbuf_append(&out, classify_ok ? "true" : "false");
+    jbuf_append(&out, ",\"classification\":");
+    if (classify_ok && raw_starts_with(classify_resp, '{'))
+        jbuf_append(&out, classify_resp);
+    else
+        jbuf_append_json_str(&out, classify_resp);
+    jbuf_append(&out, ",\"embedding_ok\":");
+    jbuf_append(&out, embed_ok ? "true" : "false");
+    if (include_embeddings) {
+        jbuf_append(&out, ",\"embeddings\":");
+        if (embed_ok && raw_starts_with(embed_resp, '{'))
+            jbuf_append(&out, embed_resp);
+        else
+            jbuf_append_json_str(&out, embed_resp);
+    }
+    if (include_raw) {
+        jbuf_append(&out, ",\"search\":");
+        if (raw_starts_with(search_resp, '{'))
+            jbuf_append(&out, search_resp);
+        else
+            jbuf_append_json_str(&out, search_resp);
+    }
+    jbuf_append(&out, "}");
+
+    result[0] = '\0';
+    truncate_response(out.data ? out.data : "{}", result, rlen, 64);
+    jbuf_free(&out);
+    jbuf_free(&docs_out);
+    jbuf_free(&rerank_docs);
+    jbuf_free(&embed_docs);
+    jbuf_free(&corpus_text);
+    free(reader_format);
+    free(reader_engine);
+    for (int i = 0; i < url_count; i++) {
+        free(urls[i]);
+        free(titles[i]);
+    }
+    free(query);
+    return true;
+}
+
+bool tool_jina_ai_constellation(const char *input, char *result, size_t rlen) {
+    char *action = json_get_str(input, "action");
+    if (!action || !action[0]) {
+        free(action);
+        char *q = json_get_str(input, "query");
+        action = strdup(q && q[0] ? "live_kb" : "capabilities");
+        free(q);
+    }
+
+    bool ok = false;
+    if (strcmp(action, "capabilities") == 0) {
+        snprintf(result, rlen,
+                 "{\"actions\":[\"live_kb\",\"research\",\"search\",\"reader\",\"embed\","
+                 "\"rerank\",\"classify\",\"train\",\"match\",\"models\",\"model\","
+                 "\"batch_embed_submit\",\"batch_status\",\"batch_output\",\"batch_errors\","
+                 "\"batch_cancel\",\"batches\",\"classifiers\",\"classifier_delete\",\"chat\"],"
+                 "\"default\":\"live_kb\","
+                 "\"note\":\"Use action plus native tool parameters; live_kb can persist into the "
+                 "local knowledge_base with persist=true.\"}");
+        ok = true;
+    } else if (strcmp(action, "live_kb") == 0 || strcmp(action, "kb") == 0 ||
+               strcmp(action, "generate_kb") == 0) {
+        ok = tool_jina_ai_live_kb(input, result, rlen);
+    } else if (strcmp(action, "research") == 0) {
+        ok = tool_jina_ai_research(input, result, rlen);
+    } else if (strcmp(action, "search") == 0) {
+        ok = tool_jina_ai_search(input, result, rlen);
+    } else if (strcmp(action, "reader") == 0 || strcmp(action, "read") == 0) {
+        ok = tool_jina_ai_reader(input, result, rlen);
+    } else if (strcmp(action, "embed") == 0 || strcmp(action, "embeddings") == 0) {
+        ok = tool_jina_ai_embed(input, result, rlen);
+    } else if (strcmp(action, "rerank") == 0) {
+        ok = tool_jina_ai_rerank(input, result, rlen);
+    } else if (strcmp(action, "classify") == 0) {
+        ok = tool_jina_ai_classify(input, result, rlen);
+    } else if (strcmp(action, "train") == 0) {
+        ok = tool_jina_ai_train(input, result, rlen);
+    } else if (strcmp(action, "match") == 0) {
+        ok = tool_jina_ai_match(input, result, rlen);
+    } else if (strcmp(action, "models") == 0) {
+        ok = tool_jina_ai_models_list(input, result, rlen);
+    } else if (strcmp(action, "model") == 0) {
+        ok = tool_jina_ai_model_get(input, result, rlen);
+    } else if (strcmp(action, "batch_embed_submit") == 0 ||
+               strcmp(action, "batch_submit") == 0) {
+        ok = tool_jina_ai_batch_embed_submit(input, result, rlen);
+    } else if (strcmp(action, "batch_status") == 0) {
+        ok = tool_jina_ai_batch_status(input, result, rlen);
+    } else if (strcmp(action, "batch_output") == 0) {
+        ok = tool_jina_ai_batch_output(input, result, rlen);
+    } else if (strcmp(action, "batch_errors") == 0) {
+        ok = tool_jina_ai_batch_errors(input, result, rlen);
+    } else if (strcmp(action, "batch_cancel") == 0) {
+        ok = tool_jina_ai_batch_cancel(input, result, rlen);
+    } else if (strcmp(action, "batches") == 0) {
+        ok = tool_jina_ai_batches_list(input, result, rlen);
+    } else if (strcmp(action, "classifiers") == 0) {
+        ok = tool_jina_ai_classifiers_list(input, result, rlen);
+    } else if (strcmp(action, "classifier_delete") == 0) {
+        ok = tool_jina_ai_classifier_delete(input, result, rlen);
+    } else if (strcmp(action, "chat") == 0) {
+        ok = tool_jina_ai_chat(input, result, rlen);
+    } else {
+        snprintf(result, rlen, "unknown Jina constellation action: %s", action);
+    }
+    free(action);
+    return ok;
+}
+
+/* ══════════════════════════════════════════════════════════════════════════
  *  PARALLEL SEARCH — Fan out to multiple search providers concurrently
  * ══════════════════════════════════════════════════════════════════════════ */
 
@@ -1803,7 +6037,11 @@ bool tool_elevenlabs_tts(const char *input, char *result, size_t rlen) {
 
     CURL *curl = curl_easy_init();
     dsco_http_pool_apply(curl);
-    FILE *fp = fopen(out, "wb");
+    /* 0600: TTS audio artifact — owner-only by default. */
+    int ofd = open(out, O_WRONLY | O_CREAT | O_TRUNC, 0600);
+    FILE *fp = ofd >= 0 ? fdopen(ofd, "wb") : NULL;
+    if (fp == NULL && ofd >= 0)
+        close(ofd);
     if (!curl || !fp) {
         if (fp)
             fclose(fp);
@@ -2236,8 +6474,30 @@ static sqlite3 *kb_db(void) {
                          "  word_count INTEGER DEFAULT 0,"
                          "  UNIQUE(doc_id, page_num)"
                          ");"
+                         "CREATE TABLE IF NOT EXISTS chunks("
+                         "  id INTEGER PRIMARY KEY AUTOINCREMENT,"
+                         "  doc_id INTEGER NOT NULL REFERENCES documents(id) ON DELETE CASCADE,"
+                         "  page_num INTEGER NOT NULL,"
+                         "  chunk_idx INTEGER NOT NULL,"
+                         "  content TEXT NOT NULL,"
+                         "  word_count INTEGER DEFAULT 0,"
+                         "  UNIQUE(doc_id, page_num, chunk_idx)"
+                         ");"
+                         "CREATE TABLE IF NOT EXISTS doc_summaries("
+                         "  doc_id INTEGER PRIMARY KEY REFERENCES documents(id) ON DELETE CASCADE,"
+                         "  summary TEXT DEFAULT '',"
+                         "  keywords TEXT DEFAULT '',"
+                         "  category TEXT DEFAULT ''"
+                         ");"
                          "CREATE INDEX IF NOT EXISTS idx_pages_doc ON pages(doc_id);"
-                         "CREATE INDEX IF NOT EXISTS idx_docs_hash ON documents(hash);";
+                         "CREATE INDEX IF NOT EXISTS idx_chunks_doc ON chunks(doc_id);"
+                         "CREATE INDEX IF NOT EXISTS idx_docs_hash ON documents(hash);"
+                         "CREATE VIRTUAL TABLE IF NOT EXISTS pages_fts USING fts5("
+                         "  content, content='pages', content_rowid='id'"
+                         ");"
+                         "CREATE VIRTUAL TABLE IF NOT EXISTS chunks_fts USING fts5("
+                         "  content, content='chunks', content_rowid='id'"
+                         ");";
 
     char *err = NULL;
     sqlite3_exec(db, schema, NULL, NULL, &err);
@@ -2279,6 +6539,155 @@ static int count_words(const char *text) {
     return count;
 }
 
+static bool kb_rebuild_fts(sqlite3 *db) {
+    if (!db)
+        return false;
+    char *err = NULL;
+    sqlite3_exec(db, "INSERT INTO pages_fts(pages_fts) VALUES('rebuild');", NULL, NULL, &err);
+    sqlite3_free(err);
+    err = NULL;
+    sqlite3_exec(db, "INSERT INTO chunks_fts(chunks_fts) VALUES('rebuild');", NULL, NULL, &err);
+    sqlite3_free(err);
+    return true;
+}
+
+static bool kb_insert_chunks_for_page(sqlite3 *db, int doc_id, int page_num, const char *content,
+                                      int chunk_words, int overlap_words) {
+    if (!db || doc_id <= 0 || page_num <= 0 || !content || !content[0])
+        return false;
+    if (chunk_words < 64)
+        chunk_words = 64;
+    if (chunk_words > 1024)
+        chunk_words = 1024;
+    if (overlap_words < 0)
+        overlap_words = 0;
+    if (overlap_words >= chunk_words)
+        overlap_words = chunk_words / 4;
+
+    sqlite3_stmt *del = NULL;
+    sqlite3_prepare_v2(db, "DELETE FROM chunks WHERE doc_id=? AND page_num=?", -1, &del, NULL);
+    sqlite3_bind_int(del, 1, doc_id);
+    sqlite3_bind_int(del, 2, page_num);
+    sqlite3_step(del);
+    sqlite3_finalize(del);
+
+    sqlite3_stmt *ins = NULL;
+    sqlite3_prepare_v2(
+        db,
+        "INSERT OR REPLACE INTO chunks(doc_id,page_num,chunk_idx,content,word_count)"
+        " VALUES(?,?,?,?,?)",
+        -1, &ins, NULL);
+    if (!ins)
+        return false;
+
+    const char *p = content;
+    int chunk_idx = 0;
+    while (*p && chunk_idx < 10000) {
+        while (*p && isspace((unsigned char)*p))
+            p++;
+        if (!*p)
+            break;
+
+        const char *start = p;
+        const char *end = p;
+        const char *overlap_start = NULL;
+        int words = 0;
+        while (*end && words < chunk_words) {
+            while (*end && isspace((unsigned char)*end))
+                end++;
+            if (!*end)
+                break;
+            if (overlap_words > 0 && words == chunk_words - overlap_words)
+                overlap_start = end;
+            while (*end && !isspace((unsigned char)*end))
+                end++;
+            words++;
+        }
+        if (end <= start)
+            break;
+
+        size_t len = (size_t)(end - start);
+        char *chunk = malloc(len + 1);
+        if (!chunk)
+            break;
+        memcpy(chunk, start, len);
+        chunk[len] = '\0';
+
+        sqlite3_reset(ins);
+        sqlite3_clear_bindings(ins);
+        sqlite3_bind_int(ins, 1, doc_id);
+        sqlite3_bind_int(ins, 2, page_num);
+        sqlite3_bind_int(ins, 3, chunk_idx++);
+        sqlite3_bind_text(ins, 4, chunk, -1, SQLITE_TRANSIENT);
+        sqlite3_bind_int(ins, 5, count_words(chunk));
+        sqlite3_step(ins);
+        free(chunk);
+
+        if (overlap_start && overlap_start > start && overlap_start < end)
+            p = overlap_start;
+        else
+            p = end;
+    }
+    sqlite3_finalize(ins);
+    return chunk_idx > 0;
+}
+
+static void kb_update_doc_summary(sqlite3 *db, int doc_id, const char *content) {
+    if (!db || doc_id <= 0 || !content)
+        return;
+    char summary[512];
+    snprintf(summary, sizeof(summary), "%.480s", content);
+
+    jbuf_t keywords;
+    jbuf_init(&keywords, 256);
+    char seen[16][48];
+    int seen_count = 0;
+    const char *p = content;
+    while (*p && seen_count < 16) {
+        while (*p && !isalnum((unsigned char)*p))
+            p++;
+        const char *start = p;
+        while (*p && (isalnum((unsigned char)*p) || *p == '-' || *p == '_'))
+            p++;
+        size_t len = (size_t)(p - start);
+        if (len < 4 || len >= sizeof(seen[0]))
+            continue;
+        char word[48];
+        for (size_t i = 0; i < len; i++)
+            word[i] = (char)tolower((unsigned char)start[i]);
+        word[len] = '\0';
+        bool dup = false;
+        for (int i = 0; i < seen_count; i++) {
+            if (strcmp(seen[i], word) == 0) {
+                dup = true;
+                break;
+            }
+        }
+        if (dup)
+            continue;
+        snprintf(seen[seen_count++], sizeof(seen[0]), "%s", word);
+        if (keywords.len > 0)
+            jbuf_append(&keywords, " ");
+        jbuf_append(&keywords, word);
+    }
+
+    sqlite3_stmt *st = NULL;
+    sqlite3_prepare_v2(db,
+                       "INSERT OR REPLACE INTO doc_summaries(doc_id,summary,keywords,category)"
+                       " VALUES(?,?,?,COALESCE((SELECT category FROM doc_summaries WHERE doc_id=?),"
+                       " 'live'))",
+                       -1, &st, NULL);
+    if (st) {
+        sqlite3_bind_int(st, 1, doc_id);
+        sqlite3_bind_text(st, 2, summary, -1, SQLITE_TRANSIENT);
+        sqlite3_bind_text(st, 3, keywords.data ? keywords.data : "", -1, SQLITE_TRANSIENT);
+        sqlite3_bind_int(st, 4, doc_id);
+        sqlite3_step(st);
+        sqlite3_finalize(st);
+    }
+    jbuf_free(&keywords);
+}
+
 /* Ingest a PDF or text file into the knowledge base */
 bool tool_kb_ingest(const char *input, char *result, size_t rlen) {
     sqlite3 *db = kb_db();
@@ -2309,13 +6718,28 @@ bool tool_kb_ingest(const char *input, char *result, size_t rlen) {
         sqlite3_prepare_v2(db,
                            "INSERT INTO documents(filename,hash,title,page_count) VALUES(?,?,?,1)",
                            -1, &stmt, NULL);
-        char hash[32];
-        snprintf(hash, sizeof(hash), "text_%ld", (long)time(NULL));
+        unsigned long h = 5381;
+        for (const unsigned char *p = (const unsigned char *)text; *p; p++)
+            h = ((h << 5) + h) + *p;
+        for (const unsigned char *p = (const unsigned char *)t; *p; p++)
+            h = ((h << 5) + h) + *p;
+        struct timespec ts;
+        clock_gettime(CLOCK_REALTIME, &ts);
+        char hash[64];
+        snprintf(hash, sizeof(hash), "text_%016lx_%09ld", h, (long)ts.tv_nsec);
         sqlite3_bind_text(stmt, 1, t, -1, SQLITE_TRANSIENT);
         sqlite3_bind_text(stmt, 2, hash, -1, SQLITE_TRANSIENT);
         sqlite3_bind_text(stmt, 3, t, -1, SQLITE_TRANSIENT);
-        sqlite3_step(stmt);
+        int rc = sqlite3_step(stmt);
         sqlite3_finalize(stmt);
+        if (rc != SQLITE_DONE) {
+            snprintf(result, rlen, "failed to insert knowledge base document");
+            free(path);
+            free(url);
+            free(title);
+            free(text);
+            return false;
+        }
         int doc_id = (int)sqlite3_last_insert_rowid(db);
 
         sqlite3_prepare_v2(db,
@@ -2326,9 +6750,18 @@ bool tool_kb_ingest(const char *input, char *result, size_t rlen) {
         sqlite3_bind_int(stmt, 3, count_words(text));
         sqlite3_step(stmt);
         sqlite3_finalize(stmt);
+        kb_insert_chunks_for_page(db, doc_id, 1, text, 256, 64);
+        kb_update_doc_summary(db, doc_id, text);
+        kb_rebuild_fts(db);
 
-        snprintf(result, rlen, "{\"doc_id\":%d,\"title\":\"%s\",\"pages\":1,\"words\":%d}", doc_id,
-                 t, count_words(text));
+        jbuf_t out;
+        jbuf_init(&out, 256 + strlen(t));
+        jbuf_appendf(&out, "{\"doc_id\":%d,\"title\":", doc_id);
+        jbuf_append_json_str(&out, t);
+        jbuf_appendf(&out, ",\"pages\":1,\"words\":%d,\"chunked\":true}",
+                     count_words(text));
+        snprintf(result, rlen, "%s", out.data ? out.data : "{}");
+        jbuf_free(&out);
         free(path);
         free(url);
         free(title);
@@ -2477,6 +6910,7 @@ bool tool_kb_ingest(const char *input, char *result, size_t rlen) {
             sqlite3_bind_int(ps, 4, wc);
             sqlite3_step(ps);
             sqlite3_finalize(ps);
+            kb_insert_chunks_for_page(db, doc_id, page_count, page_start, 256, 64);
 
             page_start[plen] = saved;
         }
@@ -2485,6 +6919,7 @@ bool tool_kb_ingest(const char *input, char *result, size_t rlen) {
         else
             break;
     }
+    kb_update_doc_summary(db, doc_id, content);
     free(content);
 
     /* Update page count */
@@ -2499,10 +6934,17 @@ bool tool_kb_ingest(const char *input, char *result, size_t rlen) {
 
     if (url && url[0])
         unlink(resolved);
+    kb_rebuild_fts(db);
 
-    snprintf(result, rlen,
-             "{\"doc_id\":%d,\"title\":\"%s\",\"pages\":%d,\"words\":%d,\"hash\":\"%s\"}", doc_id,
-             t, page_count, total_words, hash);
+    jbuf_t out;
+    jbuf_init(&out, 256 + strlen(t));
+    jbuf_appendf(&out, "{\"doc_id\":%d,\"title\":", doc_id);
+    jbuf_append_json_str(&out, t);
+    jbuf_appendf(&out, ",\"pages\":%d,\"words\":%d,\"hash\":", page_count, total_words);
+    jbuf_append_json_str(&out, hash);
+    jbuf_append(&out, ",\"chunked\":true}");
+    snprintf(result, rlen, "%s", out.data ? out.data : "{}");
+    jbuf_free(&out);
     free(path);
     free(url);
     free(title);
@@ -2818,7 +7260,7 @@ bool tool_arxiv_search(const char *input, char *result, size_t rlen) {
     char url[2048];
     snprintf(
         url, sizeof(url),
-        "http://export.arxiv.org/api/"
+        "https://export.arxiv.org/api/"
         "query?search_query=all:%s&start=0&max_results=%d&sortBy=relevance&sortOrder=descending",
         enc, limit);
     curl_free(enc);

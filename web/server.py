@@ -14,6 +14,8 @@ import hmac
 import json
 import logging
 import os
+import secrets
+import sqlite3
 import subprocess
 import time
 import traceback
@@ -21,7 +23,7 @@ import uuid
 from collections import defaultdict, deque
 from contextlib import redirect_stderr, redirect_stdout
 from io import StringIO
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Optional
 
@@ -31,7 +33,7 @@ import openai
 import uvicorn
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect, Request
 from fastapi.encoders import jsonable_encoder
-from fastapi.responses import HTMLResponse, FileResponse, JSONResponse, PlainTextResponse
+from fastapi.responses import HTMLResponse, FileResponse, JSONResponse, PlainTextResponse, StreamingResponse
 
 # Optional WebRTC
 try:
@@ -89,6 +91,27 @@ DEFAULT_PORT = int(os.getenv("DSCO_UI_PORT", "3141"))
 MAX_TOKENS = 16384
 MAX_TOOL_OUTPUT = 64 * 1024
 MAX_TURNS = 200
+CONTROL_PLANE_DIR = WEB_DIR.parent / ".workspace" / "control_plane"
+CONTROL_PLANE_DB = Path(os.getenv("DSCO_CONTROL_PLANE_DB", str(CONTROL_PLANE_DIR / "control_plane.db")))
+CONTROL_PLANE_SCHEMA_VERSION = 1
+_control_plane_ready = False
+
+# Security defaults: this server is a privileged local agent control plane.
+# Keep dangerous capability behind explicit operator opt-in even on localhost.
+WEB_AUTH_TOKEN = os.getenv("DSCO_WEB_TOKEN") or secrets.token_urlsafe(32)
+WEB_REQUIRE_TOKEN = os.getenv("DSCO_WEB_REQUIRE_TOKEN", "1").strip().lower() not in ("0", "false", "off", "no")
+WEB_ALLOW_DANGEROUS_TOOLS = os.getenv("DSCO_WEB_ALLOW_DANGEROUS_TOOLS", "0").strip().lower() in ("1", "true", "on", "yes")
+WEB_ALLOW_ABSOLUTE_PATHS = os.getenv("DSCO_WEB_ALLOW_ABSOLUTE_PATHS", "0").strip().lower() in ("1", "true", "on", "yes")
+WEB_ALLOW_CUSTOM_BASE_URL = os.getenv("DSCO_WEB_ALLOW_CUSTOM_BASE_URL", "0").strip().lower() in ("1", "true", "on", "yes")
+WEB_TRADING_LIVE = os.getenv("DSCO_TRADING_LIVE", "0").strip().lower() in ("1", "true", "on", "yes")
+WEB_ALLOWED_ORIGINS = {o.strip().rstrip("/") for o in os.getenv("DSCO_WEB_ALLOWED_ORIGINS", "").split(",") if o.strip()}
+WEB_AUTH_COOKIE = "dsco_web_token"
+WEB_SECRET_DENY_NAMES = {
+    ".env", ".env.local", ".envrc", "id_rsa", "id_dsa", "id_ecdsa", "id_ed25519",
+    "known_hosts", "credentials", "credentials.json", "secrets.json",
+}
+WEB_SECRET_DENY_SUFFIXES = {".pem", ".key", ".p12", ".pfx"}
+WEB_SAFE_TOOL_NAMES = {"read_file", "glob", "grep"}
 
 SYSTEM_PROMPT = """You are dsco, an AI software engineering agent running in a web interface.
 
@@ -268,6 +291,633 @@ def _metrics_snapshot() -> dict[str, Any]:
         },
         "endpoints": endpoints,
     }
+
+
+# ── Control Plane Store ──────────────────────────────────────────────────────
+
+def _now_iso() -> str:
+    return datetime.now(timezone.utc).isoformat(timespec="seconds")
+
+
+def _bool_flag(value: Any) -> int:
+    if isinstance(value, str):
+        return 0 if value.strip().lower() in ("", "0", "false", "off", "no") else 1
+    return 1 if value else 0
+
+
+def _json_text(value: Any) -> str:
+    return json.dumps(value if value is not None else {}, sort_keys=True, separators=(",", ":"))
+
+
+def _json_value(value: str, default: Any) -> Any:
+    try:
+        return json.loads(value) if value else default
+    except Exception:
+        return default
+
+
+def _provider_env_name(provider: str) -> str:
+    if provider == "anthropic":
+        return "ANTHROPIC_API_KEY"
+    ep = PROVIDER_ENDPOINTS.get(provider)
+    return ep["env"] if ep else ""
+
+
+def _provider_base_url(provider: str) -> str:
+    ep = PROVIDER_ENDPOINTS.get(provider)
+    return ep["base_url"] if ep else ""
+
+
+def _mask_secret(secret: str) -> str:
+    secret = (secret or "").strip()
+    if not secret:
+        return ""
+    if len(secret) <= 8:
+        return f"{secret[:2]}…{secret[-2:]}"
+    return f"{secret[:4]}…{secret[-4:]}"
+
+
+def _secret_fingerprint(secret: str) -> str:
+    secret = (secret or "").strip()
+    if not secret:
+        return ""
+    return hashlib.sha256(secret.encode("utf-8")).hexdigest()[:12]
+
+
+def _estimate_request_cost(model_id: str, input_tokens: int, output_tokens: int, cache_read_tokens: int = 0) -> float:
+    info = model_info(model_id)
+    if not info:
+        return 0.0
+    input_price = float(info.get("input_price") or 0.0)
+    output_price = float(info.get("output_price") or 0.0)
+    cache_price = float(info.get("cache_read_price") or 0.0)
+    cost = (
+        (max(0, input_tokens) / 1_000_000.0) * input_price +
+        (max(0, output_tokens) / 1_000_000.0) * output_price +
+        (max(0, cache_read_tokens) / 1_000_000.0) * cache_price
+    )
+    return round(cost, 6)
+
+
+def _seed_control_plane(conn: sqlite3.Connection) -> None:
+    now = _now_iso()
+    if conn.execute("SELECT COUNT(*) FROM plans").fetchone()[0] == 0:
+        conn.executemany(
+            """
+            INSERT INTO plans (
+                id, name, price_monthly, included_input_tokens, included_output_tokens,
+                overage_rate_input, overage_rate_output, seats, byok_allowed,
+                managed_allowed, hosted_models_allowed, is_active, notes, created_at, updated_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            [
+                (
+                    "starter-byok", "Starter BYOK", 0.0, 750_000, 250_000,
+                    0.0, 0.0, 1, 1, 0, 0, 1,
+                    "Request-scoped BYOK lane for local tenants that want DSCO routing without shared provider spend.",
+                    now, now,
+                ),
+                (
+                    "team-managed", "Team Managed", 49.0, 5_000_000, 2_000_000,
+                    3.0, 15.0, 5, 0, 1, 1, 1,
+                    "Managed credentials, shared budgets, and DSCO-routed hosted backends when available.",
+                    now, now,
+                ),
+                (
+                    "hybrid-scale", "Hybrid Scale", 249.0, 30_000_000, 12_000_000,
+                    2.5, 12.0, 25, 1, 1, 1, 1,
+                    "Hybrid tenant lane with BYOK fallback, managed routing, and DSCO-hosted model eligibility.",
+                    now, now,
+                ),
+            ],
+        )
+
+    if conn.execute("SELECT COUNT(*) FROM engine_backends").fetchone()[0] == 0:
+        modal_env = os.getenv("DSCO_MODAL_API_ENV", "DSCO_MODAL_API_KEY")
+        modal_base = os.getenv("DSCO_MODAL_BASE_URL", "https://modal.distributed.systems/openai/v1")
+        conn.executemany(
+            """
+            INSERT INTO engine_backends (
+                id, name, provider, transport, base_url, api_key_env, hosted_by_dsco,
+                status, enabled, priority, notes, created_at, updated_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            [
+                (
+                    "managed-anthropic", "Managed Anthropic", "anthropic", "anthropic", "",
+                    "ANTHROPIC_API_KEY", 0, "live" if os.getenv("ANTHROPIC_API_KEY") else "planned",
+                    1, 40, "Direct DSCO-managed Anthropic credentials.", now, now,
+                ),
+                (
+                    "managed-openai", "Managed OpenAI", "openai", "openai_compat",
+                    _provider_base_url("openai"), "OPENAI_API_KEY", 0,
+                    "live" if os.getenv("OPENAI_API_KEY") else "planned",
+                    1, 50, "Direct DSCO-managed OpenAI credentials.", now, now,
+                ),
+                (
+                    "managed-openrouter", "Managed OpenRouter", "openrouter", "openai_compat",
+                    _provider_base_url("openrouter"), "OPENROUTER_API_KEY", 0,
+                    "live" if os.getenv("OPENROUTER_API_KEY") else "planned",
+                    1, 60, "Cross-provider DSCO routing lane backed by OpenRouter.", now, now,
+                ),
+                (
+                    "modal-openai", "DSCO Modal Gateway", "openai", "openai_compat",
+                    modal_base, modal_env, 1,
+                    "live" if os.getenv(modal_env) else "planned",
+                    1, 10, "Reserved DSCO-hosted inference gateway for managed plans and private serving.", now, now,
+                ),
+            ],
+        )
+
+    if conn.execute("SELECT COUNT(*) FROM people").fetchone()[0] == 0:
+        conn.executemany(
+            """
+            INSERT INTO people (
+                id, name, email, organization, plan_id, status, auth_policy,
+                monthly_spend_limit, metadata_json, created_at, updated_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            [
+                (
+                    "founder-operator", "Founder Operator", "operator@distributed.systems", "Distributed Systems",
+                    "hybrid-scale", "active", "managed_or_byok", 500.0,
+                    _json_text({"seed": True, "role": "operator"}), now, now,
+                ),
+                (
+                    "ops-team", "Operations Team", "ops@alpha.local", "Alpha Labs",
+                    "team-managed", "active", "managed_only", 150.0,
+                    _json_text({"seed": True, "role": "ops"}), now, now,
+                ),
+                (
+                    "builder-studio", "Builder Studio", "builder@studio.local", "Studio Zero",
+                    "starter-byok", "active", "byok_only", 75.0,
+                    _json_text({"seed": True, "role": "builder"}), now, now,
+                ),
+            ],
+        )
+
+
+def _ensure_control_plane() -> None:
+    global _control_plane_ready
+    if _control_plane_ready and CONTROL_PLANE_DB.exists():
+        return
+    CONTROL_PLANE_DIR.mkdir(parents=True, exist_ok=True)
+    conn = sqlite3.connect(CONTROL_PLANE_DB, timeout=30)
+    try:
+        conn.executescript(
+            """
+            PRAGMA journal_mode=WAL;
+            PRAGMA foreign_keys=ON;
+
+            CREATE TABLE IF NOT EXISTS cp_meta (
+                key TEXT PRIMARY KEY,
+                value TEXT NOT NULL
+            );
+
+            CREATE TABLE IF NOT EXISTS plans (
+                id TEXT PRIMARY KEY,
+                name TEXT NOT NULL UNIQUE,
+                price_monthly REAL NOT NULL DEFAULT 0,
+                included_input_tokens INTEGER NOT NULL DEFAULT 0,
+                included_output_tokens INTEGER NOT NULL DEFAULT 0,
+                overage_rate_input REAL NOT NULL DEFAULT 0,
+                overage_rate_output REAL NOT NULL DEFAULT 0,
+                seats INTEGER NOT NULL DEFAULT 1,
+                byok_allowed INTEGER NOT NULL DEFAULT 1,
+                managed_allowed INTEGER NOT NULL DEFAULT 1,
+                hosted_models_allowed INTEGER NOT NULL DEFAULT 0,
+                is_active INTEGER NOT NULL DEFAULT 1,
+                notes TEXT NOT NULL DEFAULT '',
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            );
+
+            CREATE TABLE IF NOT EXISTS people (
+                id TEXT PRIMARY KEY,
+                name TEXT NOT NULL,
+                email TEXT NOT NULL UNIQUE,
+                organization TEXT NOT NULL DEFAULT '',
+                plan_id TEXT NOT NULL REFERENCES plans(id),
+                status TEXT NOT NULL DEFAULT 'active',
+                auth_policy TEXT NOT NULL DEFAULT 'managed_or_byok',
+                monthly_spend_limit REAL NOT NULL DEFAULT 0,
+                metadata_json TEXT NOT NULL DEFAULT '{}',
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            );
+
+            CREATE TABLE IF NOT EXISTS engine_backends (
+                id TEXT PRIMARY KEY,
+                name TEXT NOT NULL UNIQUE,
+                provider TEXT NOT NULL,
+                transport TEXT NOT NULL,
+                base_url TEXT NOT NULL DEFAULT '',
+                api_key_env TEXT NOT NULL DEFAULT '',
+                hosted_by_dsco INTEGER NOT NULL DEFAULT 0,
+                status TEXT NOT NULL DEFAULT 'planned',
+                enabled INTEGER NOT NULL DEFAULT 1,
+                priority INTEGER NOT NULL DEFAULT 100,
+                notes TEXT NOT NULL DEFAULT '',
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            );
+
+            CREATE TABLE IF NOT EXISTS request_logs (
+                id TEXT PRIMARY KEY,
+                person_id TEXT,
+                person_email TEXT NOT NULL DEFAULT '',
+                person_name TEXT NOT NULL DEFAULT '',
+                organization TEXT NOT NULL DEFAULT '',
+                plan_id TEXT NOT NULL DEFAULT '',
+                model TEXT NOT NULL,
+                provider TEXT NOT NULL,
+                backend_id TEXT NOT NULL DEFAULT '',
+                auth_mode TEXT NOT NULL,
+                route_source TEXT NOT NULL,
+                status TEXT NOT NULL,
+                input_tokens INTEGER NOT NULL DEFAULT 0,
+                output_tokens INTEGER NOT NULL DEFAULT 0,
+                cache_read_tokens INTEGER NOT NULL DEFAULT 0,
+                latency_ms REAL NOT NULL DEFAULT 0,
+                estimated_cost_usd REAL NOT NULL DEFAULT 0,
+                error TEXT NOT NULL DEFAULT '',
+                metadata_json TEXT NOT NULL DEFAULT '{}',
+                created_at TEXT NOT NULL
+            );
+
+            CREATE TABLE IF NOT EXISTS credential_bindings (
+                id TEXT PRIMARY KEY,
+                person_id TEXT NOT NULL DEFAULT '',
+                provider TEXT NOT NULL,
+                label TEXT NOT NULL DEFAULT '',
+                source TEXT NOT NULL,
+                secret_ref TEXT NOT NULL DEFAULT '',
+                masked_key TEXT NOT NULL DEFAULT '',
+                fingerprint TEXT NOT NULL DEFAULT '',
+                last_used_at TEXT,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                UNIQUE (person_id, provider, source, secret_ref, fingerprint)
+            );
+
+            CREATE INDEX IF NOT EXISTS idx_people_plan_id ON people(plan_id);
+            CREATE INDEX IF NOT EXISTS idx_request_logs_person_created ON request_logs(person_id, created_at DESC);
+            CREATE INDEX IF NOT EXISTS idx_request_logs_status_created ON request_logs(status, created_at DESC);
+            CREATE INDEX IF NOT EXISTS idx_request_logs_backend_created ON request_logs(backend_id, created_at DESC);
+            CREATE INDEX IF NOT EXISTS idx_credentials_person_provider ON credential_bindings(person_id, provider);
+            """
+        )
+        conn.execute(
+            "INSERT INTO cp_meta(key, value) VALUES(?, ?) ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+            ("schema_version", str(CONTROL_PLANE_SCHEMA_VERSION)),
+        )
+        _seed_control_plane(conn)
+        conn.commit()
+        _control_plane_ready = True
+    finally:
+        conn.close()
+
+
+def _control_plane_conn() -> sqlite3.Connection:
+    _ensure_control_plane()
+    conn = sqlite3.connect(CONTROL_PLANE_DB, timeout=30)
+    conn.row_factory = sqlite3.Row
+    conn.execute("PRAGMA foreign_keys=ON")
+    return conn
+
+
+def _serialize_plan(row: sqlite3.Row) -> dict[str, Any]:
+    return {
+        "id": row["id"],
+        "name": row["name"],
+        "price_monthly": float(row["price_monthly"] or 0.0),
+        "included_input_tokens": int(row["included_input_tokens"] or 0),
+        "included_output_tokens": int(row["included_output_tokens"] or 0),
+        "overage_rate_input": float(row["overage_rate_input"] or 0.0),
+        "overage_rate_output": float(row["overage_rate_output"] or 0.0),
+        "seats": int(row["seats"] or 0),
+        "byok_allowed": bool(row["byok_allowed"]),
+        "managed_allowed": bool(row["managed_allowed"]),
+        "hosted_models_allowed": bool(row["hosted_models_allowed"]),
+        "is_active": bool(row["is_active"]),
+        "notes": row["notes"] or "",
+        "member_count": int(row["member_count"] or 0) if "member_count" in row.keys() else 0,
+        "request_count": int(row["request_count"] or 0) if "request_count" in row.keys() else 0,
+        "estimated_cost_usd": round(float(row["estimated_cost_usd"] or 0.0), 6) if "estimated_cost_usd" in row.keys() else 0.0,
+        "created_at": row["created_at"],
+        "updated_at": row["updated_at"],
+    }
+
+
+def _serialize_person(row: sqlite3.Row) -> dict[str, Any]:
+    return {
+        "id": row["id"],
+        "name": row["name"],
+        "email": row["email"],
+        "organization": row["organization"] or "",
+        "plan_id": row["plan_id"],
+        "plan_name": row["plan_name"] if "plan_name" in row.keys() else row["plan_id"],
+        "status": row["status"],
+        "auth_policy": row["auth_policy"],
+        "monthly_spend_limit": float(row["monthly_spend_limit"] or 0.0),
+        "metadata": _json_value(row["metadata_json"], {}),
+        "request_count": int(row["request_count"] or 0) if "request_count" in row.keys() else 0,
+        "input_tokens": int(row["input_tokens"] or 0) if "input_tokens" in row.keys() else 0,
+        "output_tokens": int(row["output_tokens"] or 0) if "output_tokens" in row.keys() else 0,
+        "cache_read_tokens": int(row["cache_read_tokens"] or 0) if "cache_read_tokens" in row.keys() else 0,
+        "estimated_cost_usd": round(float(row["estimated_cost_usd"] or 0.0), 6) if "estimated_cost_usd" in row.keys() else 0.0,
+        "last_seen_at": row["last_seen_at"] if "last_seen_at" in row.keys() else None,
+        "created_at": row["created_at"],
+        "updated_at": row["updated_at"],
+    }
+
+
+def _serialize_backend(row: sqlite3.Row) -> dict[str, Any]:
+    env_name = (row["api_key_env"] or "").strip()
+    has_key = bool(env_name and os.getenv(env_name))
+    ready = bool(row["enabled"]) and (not env_name or has_key) and row["status"] != "disabled"
+    return {
+        "id": row["id"],
+        "name": row["name"],
+        "provider": row["provider"],
+        "transport": row["transport"],
+        "base_url": row["base_url"] or _provider_base_url(row["provider"]),
+        "api_key_env": env_name,
+        "hosted_by_dsco": bool(row["hosted_by_dsco"]),
+        "status": row["status"],
+        "enabled": bool(row["enabled"]),
+        "priority": int(row["priority"] or 0),
+        "notes": row["notes"] or "",
+        "has_managed_key": has_key,
+        "ready": ready,
+        "created_at": row["created_at"],
+        "updated_at": row["updated_at"],
+    }
+
+
+def _serialize_credential(row: sqlite3.Row) -> dict[str, Any]:
+    return {
+        "id": row["id"],
+        "person_id": row["person_id"] or "",
+        "person_name": row["person_name"] if "person_name" in row.keys() else "",
+        "provider": row["provider"],
+        "label": row["label"] or "",
+        "source": row["source"],
+        "secret_ref": row["secret_ref"] or "",
+        "masked_key": row["masked_key"] or "",
+        "fingerprint": row["fingerprint"] or "",
+        "last_used_at": row["last_used_at"],
+        "created_at": row["created_at"],
+        "updated_at": row["updated_at"],
+    }
+
+
+def _serialize_request(row: sqlite3.Row) -> dict[str, Any]:
+    return {
+        "id": row["id"],
+        "person_id": row["person_id"] or "",
+        "person_email": row["person_email"] or "",
+        "person_name": row["person_name"] or "",
+        "organization": row["organization"] or "",
+        "plan_id": row["plan_id"] or "",
+        "model": row["model"],
+        "provider": row["provider"],
+        "backend_id": row["backend_id"] or "",
+        "auth_mode": row["auth_mode"],
+        "route_source": row["route_source"],
+        "status": row["status"],
+        "input_tokens": int(row["input_tokens"] or 0),
+        "output_tokens": int(row["output_tokens"] or 0),
+        "cache_read_tokens": int(row["cache_read_tokens"] or 0),
+        "latency_ms": round(float(row["latency_ms"] or 0.0), 2),
+        "estimated_cost_usd": round(float(row["estimated_cost_usd"] or 0.0), 6),
+        "error": row["error"] or "",
+        "metadata": _json_value(row["metadata_json"], {}),
+        "created_at": row["created_at"],
+    }
+
+
+def _lookup_person(conn: sqlite3.Connection, person_id: str = "", email: str = "") -> Optional[sqlite3.Row]:
+    pid = (person_id or "").strip()
+    em = (email or "").strip().lower()
+    if pid:
+        return conn.execute("SELECT * FROM people WHERE id = ?", (pid,)).fetchone()
+    if em:
+        return conn.execute("SELECT * FROM people WHERE lower(email) = ?", (em,)).fetchone()
+    return None
+
+
+def _lookup_plan(conn: sqlite3.Connection, plan_id: str) -> Optional[sqlite3.Row]:
+    return conn.execute("SELECT * FROM plans WHERE id = ?", (plan_id,)).fetchone()
+
+
+def _lookup_backend(conn: sqlite3.Connection, backend_id: str) -> Optional[sqlite3.Row]:
+    return conn.execute("SELECT * FROM engine_backends WHERE id = ?", (backend_id,)).fetchone()
+
+
+def _backend_candidates(conn: sqlite3.Connection, provider: str) -> list[sqlite3.Row]:
+    return conn.execute(
+        """
+        SELECT * FROM engine_backends
+        WHERE provider = ? AND enabled = 1
+        ORDER BY priority ASC, created_at ASC
+        """,
+        (provider,),
+    ).fetchall()
+
+
+def _month_start_iso() -> str:
+    now = datetime.now(timezone.utc)
+    return now.replace(day=1, hour=0, minute=0, second=0, microsecond=0).isoformat(timespec="seconds")
+
+
+def _person_month_usage(conn: sqlite3.Connection, person_id: str) -> dict[str, Any]:
+    row = conn.execute(
+        """
+        SELECT
+            COUNT(*) AS request_count,
+            COALESCE(SUM(estimated_cost_usd), 0) AS spend_usd,
+            COALESCE(SUM(input_tokens), 0) AS input_tokens,
+            COALESCE(SUM(output_tokens), 0) AS output_tokens
+        FROM request_logs
+        WHERE person_id = ? AND created_at >= ?
+        """,
+        (person_id, _month_start_iso()),
+    ).fetchone()
+    return {
+        "request_count": int(row["request_count"] or 0),
+        "spend_usd": float(row["spend_usd"] or 0.0),
+        "input_tokens": int(row["input_tokens"] or 0),
+        "output_tokens": int(row["output_tokens"] or 0),
+    }
+
+
+def _auth_policy_error(person: sqlite3.Row, plan: sqlite3.Row, wants_byok: bool, backend: Optional[sqlite3.Row]) -> Optional[str]:
+    if person["status"] != "active":
+        return f"person status is {person['status']}"
+    policy = person["auth_policy"]
+    if wants_byok:
+        if policy == "managed_only":
+            return "person policy requires managed routing"
+        if not bool(plan["byok_allowed"]):
+            return "plan does not allow BYOK credentials"
+    else:
+        if policy == "byok_only":
+            return "person policy requires BYOK credentials"
+        if not bool(plan["managed_allowed"]):
+            return "plan does not allow managed credentials"
+    if backend and bool(backend["hosted_by_dsco"]) and not bool(plan["hosted_models_allowed"]):
+        return "plan is not allowed to use DSCO-hosted backends"
+    return None
+
+
+def _select_backend(conn: sqlite3.Connection, provider: str, wants_byok: bool, backend_id: str = "") -> Optional[sqlite3.Row]:
+    if backend_id:
+        return _lookup_backend(conn, backend_id)
+    for row in _backend_candidates(conn, provider):
+        env_name = (row["api_key_env"] or "").strip()
+        if wants_byok or not env_name or os.getenv(env_name):
+            return row
+    return None
+
+
+def _implicit_backend(provider: str) -> dict[str, Any]:
+    return {
+        "id": f"implicit-{provider}",
+        "name": f"Implicit {provider}",
+        "provider": provider,
+        "transport": "anthropic" if provider == "anthropic" else "openai_compat",
+        "base_url": _provider_base_url(provider),
+        "api_key_env": _provider_env_name(provider),
+        "hosted_by_dsco": False,
+        "status": "live" if get_provider_key(provider) else "planned",
+        "enabled": True,
+        "priority": 999,
+        "notes": "Implicit provider route derived from DSCO provider registry.",
+        "has_managed_key": bool(get_provider_key(provider)),
+        "ready": bool(get_provider_key(provider)),
+        "created_at": "",
+        "updated_at": "",
+    }
+
+
+def _record_request_log(conn: sqlite3.Connection, payload: dict[str, Any]) -> None:
+    conn.execute(
+        """
+        INSERT INTO request_logs (
+            id, person_id, person_email, person_name, organization, plan_id, model, provider,
+            backend_id, auth_mode, route_source, status, input_tokens, output_tokens,
+            cache_read_tokens, latency_ms, estimated_cost_usd, error, metadata_json, created_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            payload["id"], payload.get("person_id", ""), payload.get("person_email", ""),
+            payload.get("person_name", ""), payload.get("organization", ""), payload.get("plan_id", ""),
+            payload["model"], payload["provider"], payload.get("backend_id", ""), payload["auth_mode"],
+            payload["route_source"], payload["status"], int(payload.get("input_tokens", 0) or 0),
+            int(payload.get("output_tokens", 0) or 0), int(payload.get("cache_read_tokens", 0) or 0),
+            float(payload.get("latency_ms", 0.0) or 0.0), float(payload.get("estimated_cost_usd", 0.0) or 0.0),
+            payload.get("error", ""), _json_text(payload.get("metadata", {})), payload["created_at"],
+        ),
+    )
+
+
+def _upsert_credential_binding(
+    conn: sqlite3.Connection,
+    person_id: str,
+    person_name: str,
+    provider: str,
+    source: str,
+    secret_ref: str = "",
+    api_key: str = "",
+    label: str = "",
+) -> None:
+    now = _now_iso()
+    person_key = person_id or ""
+    secret_ref = secret_ref or ""
+    fingerprint = _secret_fingerprint(api_key)
+    masked = _mask_secret(api_key)
+    row = conn.execute(
+        """
+        SELECT id FROM credential_bindings
+        WHERE person_id = ? AND provider = ? AND source = ? AND secret_ref = ? AND fingerprint = ?
+        """,
+        (person_key, provider, source, secret_ref, fingerprint),
+    ).fetchone()
+    if row:
+        conn.execute(
+            """
+            UPDATE credential_bindings
+            SET label = ?, masked_key = ?, last_used_at = ?, updated_at = ?
+            WHERE id = ?
+            """,
+            (label or person_name or "", masked, now, now, row["id"]),
+        )
+        return
+    conn.execute(
+        """
+        INSERT INTO credential_bindings (
+            id, person_id, provider, label, source, secret_ref, masked_key,
+            fingerprint, last_used_at, created_at, updated_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            str(uuid.uuid4())[:12], person_key, provider, label or person_name or "", source,
+            secret_ref, masked, fingerprint, now, now, now,
+        ),
+    )
+
+
+def _normalize_engine_messages(body: dict[str, Any]) -> tuple[str, list[dict[str, str]], list[dict[str, str]]]:
+    raw_messages = body.get("messages")
+    if not isinstance(raw_messages, list) or not raw_messages:
+        prompt = str(body.get("prompt", "")).strip()
+        if not prompt:
+            raise ValueError("prompt or messages is required")
+        raw_messages = [{"role": "user", "content": prompt}]
+
+    system_parts: list[str] = []
+    openai_messages: list[dict[str, str]] = []
+    anthropic_messages: list[dict[str, str]] = []
+    for msg in raw_messages:
+        if not isinstance(msg, dict):
+            continue
+        role = str(msg.get("role", "user")).strip().lower() or "user"
+        content = msg.get("content", "")
+        if isinstance(content, (dict, list)):
+            content = json.dumps(content, ensure_ascii=False)
+        content = str(content).strip()
+        if not content:
+            continue
+        if role == "system":
+            system_parts.append(content)
+            continue
+        if role not in ("user", "assistant"):
+            role = "user"
+        openai_messages.append({"role": role, "content": content})
+        anthropic_messages.append({"role": role, "content": content})
+
+    if not openai_messages:
+        raise ValueError("at least one user or assistant message is required")
+
+    system_text = "\n\n".join(system_parts).strip()
+    if system_text:
+        openai_messages = [{"role": "system", "content": system_text}] + openai_messages
+    return system_text, openai_messages, anthropic_messages
+
+
+def _openai_message_text(content: Any) -> str:
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        parts = []
+        for item in content:
+            if isinstance(item, dict) and item.get("type") == "text":
+                parts.append(str(item.get("text", "")))
+            elif hasattr(item, "text"):
+                parts.append(str(getattr(item, "text", "")))
+        return "\n".join(part for part in parts if part)
+    return str(content or "")
 
 
 def _json_response_size(payload: Any) -> int:
@@ -464,6 +1114,8 @@ def load_tool_registry():
             log.warning(f"Could not load tools from dsco: {e}")
 
     TOOLS_ANTHROPIC = _TOOLS_ANTHROPIC_FALLBACK
+    if not WEB_ALLOW_DANGEROUS_TOOLS:
+        TOOLS_ANTHROPIC = [t for t in TOOLS_ANTHROPIC if t.get("name") in WEB_SAFE_TOOL_NAMES]
     log.info(f"Using {len(TOOLS_ANTHROPIC)} fallback tools")
 
 
@@ -491,14 +1143,45 @@ TOOLS_OPENAI: list[dict] = []
 
 # ── Tool Execution ───────────────────────────────────────────────────────────
 
-def _resolve_path(p: str) -> Path:
+def _is_secret_path(path: Path) -> bool:
+    parts = {p.lower() for p in path.parts}
+    name = path.name.lower()
+    if name in WEB_SECRET_DENY_NAMES or path.suffix.lower() in WEB_SECRET_DENY_SUFFIXES:
+        return True
+    if ".ssh" in parts or ".gnupg" in parts or ".aws" in parts or ".config" in parts and "gh" in parts:
+        return True
+    return False
+
+
+def _resolve_path(p: str, *, write: bool = False) -> Path:
     path = Path(p)
-    if not path.is_absolute():
-        path = WORK_DIR / path
-    return path.resolve()
+    if path.is_absolute():
+        if not WEB_ALLOW_ABSOLUTE_PATHS:
+            raise PermissionError("absolute paths are disabled in web mode")
+        resolved = path.resolve()
+    else:
+        resolved = (WORK_DIR / path).resolve()
+    if not WEB_ALLOW_ABSOLUTE_PATHS:
+        resolved.relative_to(WORK_DIR.resolve())
+    if _is_secret_path(resolved):
+        raise PermissionError("secret-like paths are denied in web mode")
+    if write and not WEB_ALLOW_DANGEROUS_TOOLS:
+        raise PermissionError("write/edit tools are disabled; set DSCO_WEB_ALLOW_DANGEROUS_TOOLS=1")
+    return resolved
+
+
+def _safe_subprocess_env(extra: Optional[dict[str, str]] = None) -> dict[str, str]:
+    allowed = {"PATH", "HOME", "USER", "TMPDIR", "LANG", "LC_ALL", "SHELL"}
+    env = {k: v for k, v in os.environ.items() if k in allowed}
+    env.update({"TERM": "dumb", "NO_COLOR": "1"})
+    if extra:
+        env.update(extra)
+    return env
 
 
 async def tool_bash(command: str, timeout: int = 120) -> str:
+    if not WEB_ALLOW_DANGEROUS_TOOLS:
+        return "[blocked: bash is disabled in web mode; set DSCO_WEB_ALLOW_DANGEROUS_TOOLS=1]"
     proc = None
     try:
         proc = await asyncio.create_subprocess_shell(
@@ -506,7 +1189,7 @@ async def tool_bash(command: str, timeout: int = 120) -> str:
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.STDOUT,
             cwd=str(WORK_DIR),
-            env={**os.environ, "TERM": "dumb", "NO_COLOR": "1"},
+            env=_safe_subprocess_env(),
         )
         stdout, _ = await asyncio.wait_for(proc.communicate(), timeout=timeout)
         out = stdout.decode("utf-8", errors="replace")
@@ -545,7 +1228,7 @@ def tool_read_file(path: str, offset: Optional[int] = None, limit: Optional[int]
 
 
 def tool_write_file(path: str, content: str) -> str:
-    fp = _resolve_path(path)
+    fp = _resolve_path(path, write=True)
     try:
         fp.parent.mkdir(parents=True, exist_ok=True)
         fp.write_text(content)
@@ -555,7 +1238,7 @@ def tool_write_file(path: str, content: str) -> str:
 
 
 def tool_edit_file(path: str, old_string: str, new_string: str) -> str:
-    fp = _resolve_path(path)
+    fp = _resolve_path(path, write=True)
     if not fp.exists():
         return f"[error: file not found: {fp}]"
     try:
@@ -605,6 +1288,8 @@ async def tool_grep(pattern: str, path: Optional[str] = None, include: Optional[
 
 async def tool_dsco_exec(name: str, input_data: dict) -> str:
     """Proxy any tool through `dsco --tool-exec <name> <json>`."""
+    if not WEB_ALLOW_DANGEROUS_TOOLS:
+        return "[blocked: dsco tool proxy is disabled in web mode; set DSCO_WEB_ALLOW_DANGEROUS_TOOLS=1]"
     if not DSCO_BIN.exists():
         return f"[dsco binary not found — cannot execute tool: {name}]"
     input_json = json.dumps(input_data)
@@ -614,7 +1299,7 @@ async def tool_dsco_exec(name: str, input_data: dict) -> str:
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
             cwd=str(WORK_DIR),
-            env={**os.environ},
+            env=_safe_subprocess_env(),
         )
         stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=60)
         out = stdout.decode("utf-8", errors="replace").strip()
@@ -1119,12 +1804,53 @@ async def agent_loop(ws: WebSocket, session: Session):
         await agent_loop_openai(ws, session)
 
 
-# ── FastAPI App ──────────────────────────────────────────────────────────────
+# ── FastAPI App / Security Gate ──────────────────────────────────────────────
+
+def _is_loopback_host(host: str) -> bool:
+    host = (host or "").split(":", 1)[0].strip().lower()
+    return host in ("127.0.0.1", "localhost", "::1", "[::1]")
+
+
+def _allowed_origins(host: str, port: int) -> set[str]:
+    origins = set(WEB_ALLOWED_ORIGINS)
+    for h in ("127.0.0.1", "localhost"):
+        origins.add(f"http://{h}:{port}")
+        origins.add(f"https://{h}:{port}")
+    return origins
+
+
+def _token_from_request(request: Request) -> str:
+    auth = request.headers.get("authorization", "")
+    if auth.lower().startswith("bearer "):
+        return auth[7:].strip()
+    cookie_token = request.cookies.get(WEB_AUTH_COOKIE, "")
+    return (request.query_params.get("token", "") or cookie_token).strip()
+
+
+def _token_ok(token: str) -> bool:
+    return bool(token) and secrets.compare_digest(token, WEB_AUTH_TOKEN)
+
+
+def _auth_error() -> JSONResponse:
+    return JSONResponse({"error": "authentication required"}, status_code=401)
+
+
+def _is_public_http_path(path: str) -> bool:
+    return path in ("/", "/health", "/auth") or path.startswith("/static/")
+
 
 app = FastAPI(title="dsco", docs_url=None, redoc_url=None)
 sessions: dict[str, Session] = {}
 pcs: set = set()
 relay = MediaRelay() if HAS_WEBRTC else None
+
+
+@app.middleware("http")
+async def enforce_http_auth(request: Request, call_next):
+    if WEB_REQUIRE_TOKEN and not _is_public_http_path(request.url.path):
+        if not _token_ok(_token_from_request(request)):
+            return _auth_error()
+    return await call_next(request)
 
 
 @app.middleware("http")
@@ -1151,9 +1877,962 @@ async def index():
     return FileResponse(STATIC_DIR / "index.html")
 
 
+@app.get("/auth")
+async def auth(token: str = ""):
+    if WEB_REQUIRE_TOKEN and not _token_ok(token):
+        return _auth_error()
+    response = JSONResponse({"status": "ok"})
+    response.set_cookie(WEB_AUTH_COOKIE, WEB_AUTH_TOKEN, httponly=True, samesite="strict")
+    return response
+
+
+@app.get("/admin", response_class=HTMLResponse)
+async def admin_panel():
+    return FileResponse(STATIC_DIR / "admin.html")
+
+
+@app.get("/management", response_class=HTMLResponse)
+async def management_panel():
+    return FileResponse(STATIC_DIR / "management.html")
+
+
+@app.get("/engine", response_class=HTMLResponse)
+async def engine_panel():
+    return FileResponse(STATIC_DIR / "engine.html")
+
+
+def _ontology_data_dir() -> Path:
+    return WEB_DIR.parent / "data" / "consumer_profile_ontology"
+
+
+def _ontology_registry_path() -> Path:
+    data_dir = _ontology_data_dir()
+    candidates = [
+        data_dir / "facet_definitions_extended_50k_with_boundaries.jsonl",
+        data_dir / "facet_definitions_base_with_boundaries.jsonl",
+        data_dir / "facet_definitions_extended_50k.jsonl",
+        data_dir / "facet_definitions.jsonl",
+    ]
+    for path in candidates:
+        if path.exists():
+            return path
+    return candidates[-1]
+
+
+def _ontology_summary_path() -> Path:
+    data_dir = _ontology_data_dir()
+    candidates = [
+        data_dir / "summary_extended_50k_with_boundaries.json",
+        data_dir / "summary_base_with_boundaries.json",
+        data_dir / "summary_extended_50k.json",
+        data_dir / "summary.json",
+    ]
+    for path in candidates:
+        if path.exists():
+            return path
+    return candidates[-1]
+
+
+@app.get("/api/ontology/summary")
+async def ontology_summary():
+    path = _ontology_summary_path()
+    if not path.exists():
+        return JSONResponse({"error": "ontology summary not found", "path": str(path)}, status_code=404)
+    data = json.loads(path.read_text())
+    data["registry_path"] = str(_ontology_registry_path())
+    data["summary_path"] = str(path)
+    return data
+
+
+@app.get("/api/ontology/facets")
+async def ontology_facets(
+    q: str = "",
+    domain: str = "",
+    sensitivity: str = "",
+    boundary: int = 0,
+    limit: int = 100,
+    offset: int = 0,
+):
+    path = _ontology_registry_path()
+    if not path.exists():
+        return JSONResponse({"error": "ontology registry not found", "path": str(path)}, status_code=404)
+    limit = max(1, min(int(limit or 100), 5000))
+    offset = max(0, int(offset or 0))
+    q_l = (q or "").strip().lower()
+    domain_l = (domain or "").strip().lower()
+    sensitivity_l = (sensitivity or "").strip().lower()
+    rows = []
+    matched = 0
+    with path.open() as f:
+        for line in f:
+            try:
+                facet = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if boundary and not str(facet.get("sensitivity_class", "")).startswith("S4"):
+                continue
+            if domain_l and str(facet.get("domain", "")).lower() != domain_l:
+                continue
+            if sensitivity_l and str(facet.get("sensitivity_class", "")).lower() != sensitivity_l:
+                continue
+            if q_l:
+                haystack = " ".join(str(facet.get(k, "")) for k in (
+                    "facet_id", "display_name", "description", "domain", "subdomain", "topic",
+                    "context", "boundary_class", "relationship_type", "facet_kind", "sensitivity_class",
+                )).lower()
+                if q_l not in haystack:
+                    continue
+            if matched >= offset and len(rows) < limit:
+                rows.append(facet)
+            matched += 1
+    return {"facets": rows, "total_matched": matched, "limit": limit, "offset": offset, "registry_path": str(path)}
+
+
 @app.get("/health")
 async def health():
     return {"status": "ok", "work_dir": str(WORK_DIR), "model": DEFAULT_MODEL, "webrtc": HAS_WEBRTC}
+
+
+@app.get("/api/control/overview")
+async def control_overview():
+    with _control_plane_conn() as conn:
+        window_24h = (datetime.now(timezone.utc) - timedelta(hours=24)).isoformat(timespec="seconds")
+        window_30d = (datetime.now(timezone.utc) - timedelta(days=30)).isoformat(timespec="seconds")
+        people_total = conn.execute("SELECT COUNT(*) FROM people").fetchone()[0]
+        active_people = conn.execute("SELECT COUNT(*) FROM people WHERE status = 'active'").fetchone()[0]
+        plans_total = conn.execute("SELECT COUNT(*) FROM plans WHERE is_active = 1").fetchone()[0]
+        requests_24h = conn.execute("SELECT COUNT(*) FROM request_logs WHERE created_at >= ?", (window_24h,)).fetchone()[0]
+        usage_30d = conn.execute(
+            """
+            SELECT
+                COUNT(*) AS request_count,
+                COALESCE(SUM(input_tokens), 0) AS input_tokens,
+                COALESCE(SUM(output_tokens), 0) AS output_tokens,
+                COALESCE(SUM(estimated_cost_usd), 0) AS spend_usd
+            FROM request_logs
+            WHERE created_at >= ?
+            """,
+            (window_30d,),
+        ).fetchone()
+        auth_mix = conn.execute(
+            """
+            SELECT auth_mode, COUNT(*) AS n
+            FROM request_logs
+            WHERE created_at >= ?
+            GROUP BY auth_mode
+            ORDER BY n DESC
+            """,
+            (window_30d,),
+        ).fetchall()
+        top_models = conn.execute(
+            """
+            SELECT model, COUNT(*) AS n
+            FROM request_logs
+            WHERE created_at >= ?
+            GROUP BY model
+            ORDER BY n DESC, model ASC
+            LIMIT 5
+            """,
+            (window_30d,),
+        ).fetchall()
+        recent_errors = conn.execute(
+            """
+            SELECT * FROM request_logs
+            WHERE status != 'ok'
+            ORDER BY created_at DESC
+            LIMIT 8
+            """
+        ).fetchall()
+        backend_rows = conn.execute("SELECT * FROM engine_backends ORDER BY priority ASC, name ASC").fetchall()
+    backends = [_serialize_backend(row) for row in backend_rows]
+    live_backends = [row for row in backends if row["ready"]]
+    return {
+        "generated_at": _now_iso(),
+        "db_path": str(CONTROL_PLANE_DB),
+        "people": {"total": int(people_total or 0), "active": int(active_people or 0)},
+        "plans": {"active": int(plans_total or 0)},
+        "traffic": {
+            "requests_24h": int(requests_24h or 0),
+            "requests_30d": int(usage_30d["request_count"] or 0),
+            "input_tokens_30d": int(usage_30d["input_tokens"] or 0),
+            "output_tokens_30d": int(usage_30d["output_tokens"] or 0),
+            "estimated_spend_30d": round(float(usage_30d["spend_usd"] or 0.0), 6),
+        },
+        "routing": {
+            "ready_backends": len(live_backends),
+            "configured_backends": len(backends),
+            "auth_mix_30d": [{"auth_mode": row["auth_mode"], "count": int(row["n"] or 0)} for row in auth_mix],
+            "top_models_30d": [{"model": row["model"], "count": int(row["n"] or 0)} for row in top_models],
+        },
+        "recent_errors": [_serialize_request(row) for row in recent_errors],
+    }
+
+
+@app.get("/api/control/plans")
+async def control_plans():
+    with _control_plane_conn() as conn:
+        rows = conn.execute(
+            """
+            SELECT
+                pl.*,
+                COALESCE((SELECT COUNT(*) FROM people p WHERE p.plan_id = pl.id), 0) AS member_count,
+                COALESCE((SELECT COUNT(*) FROM request_logs r WHERE r.plan_id = pl.id), 0) AS request_count,
+                COALESCE((SELECT SUM(r.estimated_cost_usd) FROM request_logs r WHERE r.plan_id = pl.id), 0) AS estimated_cost_usd
+            FROM plans pl
+            ORDER BY pl.price_monthly ASC, pl.name ASC
+            """
+        ).fetchall()
+    return {"plans": [_serialize_plan(row) for row in rows]}
+
+
+@app.post("/api/control/plans")
+async def control_save_plan(request: Request):
+    body = await request.json()
+    name = str(body.get("name", "")).strip()
+    if not name:
+        return JSONResponse({"error": "name is required"}, status_code=400)
+    plan_id = str(body.get("id", "")).strip() or name.lower().replace(" ", "-")
+    now = _now_iso()
+    with _control_plane_conn() as conn:
+        conn.execute(
+            """
+            INSERT INTO plans (
+                id, name, price_monthly, included_input_tokens, included_output_tokens,
+                overage_rate_input, overage_rate_output, seats, byok_allowed,
+                managed_allowed, hosted_models_allowed, is_active, notes, created_at, updated_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(id) DO UPDATE SET
+                name = excluded.name,
+                price_monthly = excluded.price_monthly,
+                included_input_tokens = excluded.included_input_tokens,
+                included_output_tokens = excluded.included_output_tokens,
+                overage_rate_input = excluded.overage_rate_input,
+                overage_rate_output = excluded.overage_rate_output,
+                seats = excluded.seats,
+                byok_allowed = excluded.byok_allowed,
+                managed_allowed = excluded.managed_allowed,
+                hosted_models_allowed = excluded.hosted_models_allowed,
+                is_active = excluded.is_active,
+                notes = excluded.notes,
+                updated_at = excluded.updated_at
+            """,
+            (
+                plan_id,
+                name,
+                float(body.get("price_monthly", 0.0) or 0.0),
+                int(body.get("included_input_tokens", 0) or 0),
+                int(body.get("included_output_tokens", 0) or 0),
+                float(body.get("overage_rate_input", 0.0) or 0.0),
+                float(body.get("overage_rate_output", 0.0) or 0.0),
+                int(body.get("seats", 1) or 1),
+                _bool_flag(body.get("byok_allowed", True)),
+                _bool_flag(body.get("managed_allowed", True)),
+                _bool_flag(body.get("hosted_models_allowed", False)),
+                _bool_flag(body.get("is_active", True)),
+                str(body.get("notes", "")).strip(),
+                now,
+                now,
+            ),
+        )
+    return {"ok": True, "id": plan_id}
+
+
+@app.get("/api/control/people")
+async def control_people():
+    with _control_plane_conn() as conn:
+        rows = conn.execute(
+            """
+            SELECT
+                p.*,
+                pl.name AS plan_name,
+                COALESCE(COUNT(r.id), 0) AS request_count,
+                COALESCE(SUM(r.input_tokens), 0) AS input_tokens,
+                COALESCE(SUM(r.output_tokens), 0) AS output_tokens,
+                COALESCE(SUM(r.cache_read_tokens), 0) AS cache_read_tokens,
+                COALESCE(SUM(r.estimated_cost_usd), 0) AS estimated_cost_usd,
+                MAX(r.created_at) AS last_seen_at
+            FROM people p
+            LEFT JOIN plans pl ON pl.id = p.plan_id
+            LEFT JOIN request_logs r ON r.person_id = p.id
+            GROUP BY p.id
+            ORDER BY (MAX(r.created_at) IS NULL) ASC, MAX(r.created_at) DESC, p.created_at ASC
+            """
+        ).fetchall()
+    return {"people": [_serialize_person(row) for row in rows]}
+
+
+@app.post("/api/control/people")
+async def control_save_person(request: Request):
+    body = await request.json()
+    name = str(body.get("name", "")).strip()
+    email = str(body.get("email", "")).strip().lower()
+    if not name or not email:
+        return JSONResponse({"error": "name and email are required"}, status_code=400)
+    with _control_plane_conn() as conn:
+        plan_id = str(body.get("plan_id", "")).strip()
+        if not plan_id:
+            row = conn.execute("SELECT id FROM plans WHERE is_active = 1 ORDER BY price_monthly ASC, name ASC LIMIT 1").fetchone()
+            plan_id = row["id"] if row else ""
+        if not plan_id or not _lookup_plan(conn, plan_id):
+            return JSONResponse({"error": "valid plan_id is required"}, status_code=400)
+        person_id = str(body.get("id", "")).strip() or email.split("@", 1)[0].replace(".", "-")
+        now = _now_iso()
+        conn.execute(
+            """
+            INSERT INTO people (
+                id, name, email, organization, plan_id, status, auth_policy,
+                monthly_spend_limit, metadata_json, created_at, updated_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(id) DO UPDATE SET
+                name = excluded.name,
+                email = excluded.email,
+                organization = excluded.organization,
+                plan_id = excluded.plan_id,
+                status = excluded.status,
+                auth_policy = excluded.auth_policy,
+                monthly_spend_limit = excluded.monthly_spend_limit,
+                metadata_json = excluded.metadata_json,
+                updated_at = excluded.updated_at
+            """,
+            (
+                person_id,
+                name,
+                email,
+                str(body.get("organization", "")).strip(),
+                plan_id,
+                str(body.get("status", "active")).strip() or "active",
+                str(body.get("auth_policy", "managed_or_byok")).strip() or "managed_or_byok",
+                float(body.get("monthly_spend_limit", 0.0) or 0.0),
+                _json_text(body.get("metadata", {})),
+                now,
+                now,
+            ),
+        )
+    return {"ok": True, "id": person_id}
+
+
+@app.get("/api/control/backends")
+async def control_backends():
+    with _control_plane_conn() as conn:
+        rows = conn.execute(
+            "SELECT * FROM engine_backends ORDER BY priority ASC, hosted_by_dsco DESC, name ASC"
+        ).fetchall()
+    return {"backends": [_serialize_backend(row) for row in rows]}
+
+
+@app.post("/api/control/backends")
+async def control_save_backend(request: Request):
+    body = await request.json()
+    name = str(body.get("name", "")).strip()
+    provider = str(body.get("provider", "")).strip().lower()
+    transport = str(body.get("transport", "")).strip().lower()
+    if not name or not provider or not transport:
+        return JSONResponse({"error": "name, provider, and transport are required"}, status_code=400)
+    backend_id = str(body.get("id", "")).strip() or name.lower().replace(" ", "-")
+    now = _now_iso()
+    with _control_plane_conn() as conn:
+        conn.execute(
+            """
+            INSERT INTO engine_backends (
+                id, name, provider, transport, base_url, api_key_env, hosted_by_dsco,
+                status, enabled, priority, notes, created_at, updated_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(id) DO UPDATE SET
+                name = excluded.name,
+                provider = excluded.provider,
+                transport = excluded.transport,
+                base_url = excluded.base_url,
+                api_key_env = excluded.api_key_env,
+                hosted_by_dsco = excluded.hosted_by_dsco,
+                status = excluded.status,
+                enabled = excluded.enabled,
+                priority = excluded.priority,
+                notes = excluded.notes,
+                updated_at = excluded.updated_at
+            """,
+            (
+                backend_id,
+                name,
+                provider,
+                transport,
+                str(body.get("base_url", "")).strip() or _provider_base_url(provider),
+                str(body.get("api_key_env", "")).strip() or _provider_env_name(provider),
+                _bool_flag(body.get("hosted_by_dsco", False)),
+                str(body.get("status", "planned")).strip() or "planned",
+                _bool_flag(body.get("enabled", True)),
+                int(body.get("priority", 100) or 100),
+                str(body.get("notes", "")).strip(),
+                now,
+                now,
+            ),
+        )
+    return {"ok": True, "id": backend_id}
+
+
+@app.get("/api/control/credentials")
+async def control_credentials(limit: int = 100):
+    safe_limit = _clamp_int(limit, 50, 1, 500)
+    with _control_plane_conn() as conn:
+        rows = conn.execute(
+            """
+            SELECT c.*, p.name AS person_name
+            FROM credential_bindings c
+            LEFT JOIN people p ON p.id = c.person_id
+            ORDER BY (c.last_used_at IS NULL) ASC, c.last_used_at DESC, c.created_at DESC
+            LIMIT ?
+            """,
+            (safe_limit,),
+        ).fetchall()
+    return {"credentials": [_serialize_credential(row) for row in rows], "limit": safe_limit}
+
+
+@app.get("/api/control/requests")
+async def control_requests(limit: int = 100, person_id: str = "", status: str = ""):
+    safe_limit = _clamp_int(limit, 100, 1, 500)
+    clauses = []
+    params: list[Any] = []
+    if person_id:
+        clauses.append("person_id = ?")
+        params.append(person_id)
+    if status:
+        clauses.append("status = ?")
+        params.append(status)
+    where = f"WHERE {' AND '.join(clauses)}" if clauses else ""
+    query = f"""
+        SELECT * FROM request_logs
+        {where}
+        ORDER BY created_at DESC
+        LIMIT ?
+    """
+    params.append(safe_limit)
+    with _control_plane_conn() as conn:
+        rows = conn.execute(query, params).fetchall()
+    return {"requests": [_serialize_request(row) for row in rows], "limit": safe_limit}
+
+
+@app.get("/api/engine/catalog")
+async def engine_catalog():
+    with _control_plane_conn() as conn:
+        people_rows = conn.execute("SELECT p.*, pl.name AS plan_name FROM people p LEFT JOIN plans pl ON pl.id = p.plan_id ORDER BY p.name ASC").fetchall()
+        backend_rows = conn.execute("SELECT * FROM engine_backends WHERE enabled = 1 ORDER BY priority ASC, name ASC").fetchall()
+        plan_rows = conn.execute("SELECT * FROM plans WHERE is_active = 1 ORDER BY price_monthly ASC, name ASC").fetchall()
+    models = []
+    for model in MODEL_REGISTRY:
+        provider = detect_provider(model["model_id"])
+        models.append({
+            "alias": model["alias"],
+            "model_id": model["model_id"],
+            "provider": provider,
+            "context_window": model["context_window"],
+            "max_output": model["max_output"],
+            "supports_thinking": bool(model.get("supports_thinking")),
+        })
+    return {
+        "default_model": DEFAULT_MODEL,
+        "people": [_serialize_person(row) for row in people_rows],
+        "plans": [_serialize_plan(row) for row in plan_rows],
+        "backends": [_serialize_backend(row) for row in backend_rows],
+        "models": models,
+    }
+
+
+@app.get("/api/engine/health")
+async def engine_health():
+    provider_rows = [{"provider": "anthropic", "env": "ANTHROPIC_API_KEY", "has_key": bool(os.getenv("ANTHROPIC_API_KEY"))}]
+    for provider, meta in PROVIDER_ENDPOINTS.items():
+        provider_rows.append({"provider": provider, "env": meta["env"], "has_key": bool(os.getenv(meta["env"]))})
+    with _control_plane_conn() as conn:
+        backend_rows = conn.execute("SELECT * FROM engine_backends ORDER BY priority ASC, name ASC").fetchall()
+    backends = [_serialize_backend(row) for row in backend_rows]
+    return {
+        "status": "ok",
+        "default_model": DEFAULT_MODEL,
+        "providers": provider_rows,
+        "backends": backends,
+        "db_path": str(CONTROL_PLANE_DB),
+    }
+
+
+@app.post("/api/engine/chat")
+async def engine_chat(request: Request):
+    started = time.perf_counter()
+    body = await request.json()
+    request_id = str(body.get("request_id", "")).strip() or str(uuid.uuid4())[:12]
+    person_id = str(body.get("person_id", "")).strip()
+    email = str(body.get("email", "")).strip().lower()
+    if not person_id and not email:
+        return JSONResponse({"error": "person_id or email is required"}, status_code=400)
+
+    model_id = resolve_model(str(body.get("model", DEFAULT_MODEL)).strip() or DEFAULT_MODEL)
+    provider = str(body.get("provider", "")).strip().lower() or detect_provider(model_id)
+    requested_backend_id = str(body.get("backend_id", "")).strip()
+    provided_key = str(body.get("api_key", "")).strip()
+    wants_byok = bool(provided_key)
+    dry_run = _bool_flag(body.get("dry_run", False)) == 1
+
+    try:
+        system_text, openai_messages, anthropic_messages = _normalize_engine_messages(body)
+    except ValueError as exc:
+        return JSONResponse({"error": str(exc)}, status_code=400)
+
+    with _control_plane_conn() as conn:
+        person = _lookup_person(conn, person_id=person_id, email=email)
+        if not person:
+            return JSONResponse({"error": "person not found"}, status_code=404)
+        plan = _lookup_plan(conn, person["plan_id"])
+        if not plan:
+            return JSONResponse({"error": "plan not found for person"}, status_code=500)
+        backend_row = _select_backend(conn, provider, wants_byok, backend_id=requested_backend_id)
+        if requested_backend_id and not backend_row:
+            return JSONResponse({"error": "backend not found"}, status_code=404)
+        policy_error = _auth_policy_error(person, plan, wants_byok, backend_row)
+        if policy_error:
+            return JSONResponse({"error": policy_error}, status_code=403)
+        month_usage = _person_month_usage(conn, person["id"])
+
+    spend_limit = float(person["monthly_spend_limit"] or 0.0)
+    if spend_limit > 0 and month_usage["spend_usd"] >= spend_limit:
+        return JSONResponse(
+            {
+                "error": "monthly spend limit reached",
+                "limit_usd": spend_limit,
+                "current_spend_usd": round(month_usage["spend_usd"], 6),
+            },
+            status_code=402,
+        )
+
+    backend = _serialize_backend(backend_row) if backend_row else _implicit_backend(provider)
+    route_source = "backend_override" if requested_backend_id else ("backend_catalog" if backend_row else "implicit_provider")
+    auth_mode = "byok_request" if wants_byok else "managed_env"
+    api_key = provided_key
+    if not api_key:
+        env_name = backend.get("api_key_env", "") or _provider_env_name(provider)
+        api_key = os.getenv(env_name, "").strip() if env_name else ""
+    if not api_key and not dry_run:
+        return JSONResponse(
+            {
+                "error": "no routed credential available",
+                "provider": provider,
+                "backend_id": backend["id"],
+                "expected_env": backend.get("api_key_env") or _provider_env_name(provider),
+            },
+            status_code=400,
+        )
+
+    route = {
+        "provider": provider,
+        "model": model_id,
+        "backend_id": backend["id"],
+        "backend_name": backend["name"],
+        "transport": backend["transport"],
+        "base_url": backend.get("base_url") or _provider_base_url(provider),
+        "auth_mode": auth_mode,
+        "route_source": route_source,
+        "hosted_by_dsco": bool(backend.get("hosted_by_dsco")),
+    }
+
+    input_tokens = 0
+    output_tokens = 0
+    cache_read_tokens = 0
+    response_text = ""
+    status = "dry_run" if dry_run else "ok"
+    error = ""
+
+    if not dry_run:
+        max_tokens = int(body.get("max_tokens", 4096) or 4096)
+        info = model_info(model_id)
+        if info and info.get("max_output"):
+            max_tokens = max(1, min(max_tokens, int(info["max_output"])))
+        try:
+            if backend["transport"] == "anthropic":
+                client = anthropic.AsyncAnthropic(api_key=api_key)
+                kwargs: dict[str, Any] = {
+                    "model": model_id,
+                    "max_tokens": max_tokens,
+                    "messages": anthropic_messages,
+                }
+                if system_text:
+                    kwargs["system"] = system_text
+                response = await client.messages.create(**kwargs)
+                response_text = "\n".join(
+                    block.text for block in response.content
+                    if getattr(block, "type", "") == "text" and getattr(block, "text", "")
+                ).strip()
+                usage = getattr(response, "usage", None)
+                input_tokens = int(getattr(usage, "input_tokens", 0) or 0)
+                output_tokens = int(getattr(usage, "output_tokens", 0) or 0)
+                cache_read_tokens = int(getattr(usage, "cache_read_input_tokens", 0) or 0)
+            else:
+                client = openai.AsyncOpenAI(api_key=api_key, base_url=route["base_url"])
+                response = await client.chat.completions.create(
+                    model=model_id,
+                    messages=openai_messages,
+                    max_tokens=max_tokens,
+                    stream=False,
+                )
+                message = response.choices[0].message if response.choices else None
+                response_text = _openai_message_text(message.content if message else "")
+                usage = getattr(response, "usage", None)
+                input_tokens = int(getattr(usage, "prompt_tokens", 0) or 0)
+                output_tokens = int(getattr(usage, "completion_tokens", 0) or 0)
+        except Exception as exc:
+            log.error(f"engine chat error: {exc}\n{traceback.format_exc()}")
+            status = "error"
+            error = str(exc)
+
+    latency_ms = round((time.perf_counter() - started) * 1000.0, 2)
+    estimated_cost = _estimate_request_cost(model_id, input_tokens, output_tokens, cache_read_tokens)
+    record = {
+        "id": request_id,
+        "person_id": person["id"],
+        "person_email": person["email"],
+        "person_name": person["name"],
+        "organization": person["organization"],
+        "plan_id": person["plan_id"],
+        "model": model_id,
+        "provider": provider,
+        "backend_id": backend["id"],
+        "auth_mode": auth_mode,
+        "route_source": route_source,
+        "status": status,
+        "input_tokens": input_tokens,
+        "output_tokens": output_tokens,
+        "cache_read_tokens": cache_read_tokens,
+        "latency_ms": latency_ms,
+        "estimated_cost_usd": estimated_cost,
+        "error": error,
+        "metadata": body.get("metadata", {}),
+        "created_at": _now_iso(),
+    }
+    with _control_plane_conn() as conn:
+        _record_request_log(conn, record)
+        if wants_byok and provided_key:
+            _upsert_credential_binding(
+                conn,
+                person_id=person["id"],
+                person_name=person["name"],
+                provider=provider,
+                source="byok_request",
+                api_key=provided_key,
+                label=str(body.get("credential_label", "")).strip(),
+            )
+        elif api_key:
+            _upsert_credential_binding(
+                conn,
+                person_id=person["id"],
+                person_name=person["name"],
+                provider=provider,
+                source="managed_env",
+                secret_ref=backend.get("api_key_env", "") or _provider_env_name(provider),
+                api_key=api_key,
+                label=backend["name"],
+            )
+
+    payload = {
+        "request_id": request_id,
+        "person": {
+            "id": person["id"],
+            "name": person["name"],
+            "email": person["email"],
+            "organization": person["organization"],
+            "plan_id": person["plan_id"],
+        },
+        "route": route,
+        "status": status,
+        "dry_run": dry_run,
+        "usage": {
+            "input_tokens": input_tokens,
+            "output_tokens": output_tokens,
+            "cache_read_tokens": cache_read_tokens,
+            "estimated_cost_usd": estimated_cost,
+        },
+        "latency_ms": latency_ms,
+        "content": response_text,
+        "error": error,
+    }
+    if status == "error":
+        return JSONResponse(payload, status_code=502)
+    return payload
+
+
+# ── OpenAI-compatible gateway (raw provider routing; no control plane) ───────
+#
+# Exposes dsco as a standard OpenAI /v1/chat/completions endpoint so any
+# OpenAI-compatible client — DSPy included — can run LM calls through dsco's
+# provider routing and credential resolution. DSPy usage is a one-liner:
+#
+#     import dspy
+#     lm = dspy.LM("openai/<model>", api_base="http://localhost:PORT/v1", api_key="dsco")
+#     dspy.configure(lm=lm)
+#     dspy.Predict("question -> answer")(question="...")
+#
+# Unlike /api/engine/chat this BYPASSES the person/plan/billing control plane:
+#   - provider is derived from the model id via detect_provider() (or forced with
+#     a top-level "provider" field),
+#   - the credential is read from the provider's env var (PROVIDER_ENDPOINTS) or
+#     supplied per-call via "api_key",
+#   - responses come back in the OpenAI chat.completion shape (with SSE streaming
+#     when stream=true).
+# Set dry_run=true to validate the full wiring end-to-end with no credentials.
+
+
+class _GatewayHttp(Exception):
+    """Carry an OpenAI-shaped error out of the gateway routing layer."""
+
+    def __init__(self, status_code: int, message: str, err_type: str = "invalid_request_error", code: Optional[str] = None):
+        super().__init__(message)
+        self.status_code = status_code
+        self.message = message
+        self.err_type = err_type
+        self.code = code
+
+
+def _openai_error_response(status_code: int, message: str, err_type: str = "invalid_request_error", code: Optional[str] = None) -> JSONResponse:
+    return JSONResponse(
+        {"error": {"message": message, "type": err_type, "code": code, "param": None}},
+        status_code=status_code,
+    )
+
+
+def _completion_envelope(model: str, content: str, *, input_tokens: int = 0, output_tokens: int = 0, finish_reason: str = "stop") -> dict[str, Any]:
+    """Build an OpenAI chat.completion response object."""
+    return {
+        "id": f"chatcmpl-{uuid.uuid4().hex[:24]}",
+        "object": "chat.completion",
+        "created": int(time.time()),
+        "model": model,
+        "choices": [
+            {"index": 0, "message": {"role": "assistant", "content": content}, "logprobs": None, "finish_reason": finish_reason}
+        ],
+        "usage": {
+            "prompt_tokens": input_tokens,
+            "completion_tokens": output_tokens,
+            "total_tokens": input_tokens + output_tokens,
+        },
+    }
+
+
+# OpenAI chat params forwarded verbatim to the upstream provider when present.
+_GATEWAY_PASSTHROUGH = ("temperature", "top_p", "stop", "seed", "tools", "tool_choice", "response_format", "n")
+
+
+def _gateway_resolve(body: dict[str, Any]) -> dict[str, Any]:
+    """Resolve model/provider/credential/messages for a gateway request.
+
+    Raises _GatewayHttp on a malformed request or a missing credential.
+    """
+    requested = str(body.get("model", "") or DEFAULT_MODEL).strip() or DEFAULT_MODEL
+    model_id = resolve_model(requested)
+    provider = str(body.get("provider", "") or "").strip().lower() or detect_provider(model_id)
+    backend = _implicit_backend(provider)
+
+    provided_key = str(body.get("api_key", "") or "").strip()
+    env_name = backend.get("api_key_env") or _provider_env_name(provider) or ""
+    api_key = provided_key or (os.getenv(env_name, "").strip() if env_name else "")
+    dry_run = _bool_flag(body.get("dry_run", False)) == 1
+
+    try:
+        system_text, openai_messages, anthropic_messages = _normalize_engine_messages(body)
+    except ValueError as exc:
+        raise _GatewayHttp(400, str(exc)) from None
+
+    if not api_key and not dry_run:
+        raise _GatewayHttp(
+            401,
+            f"No routed credential for provider '{provider}' (expected env {env_name or '<none>'}). "
+            "Set it, pass api_key in the request body, or use dry_run=true for a credential-free echo.",
+            code="no_credentials",
+        )
+
+    max_tokens = int(body.get("max_tokens") or 1024)
+    info = model_info(model_id)
+    if info and info.get("max_output"):
+        max_tokens = max(1, min(max_tokens, int(info["max_output"])))
+
+    requested_base_url = str(body.get("base_url", "") or "").strip()
+    using_env_key = bool(api_key) and not provided_key
+    if requested_base_url and (using_env_key or not WEB_ALLOW_CUSTOM_BASE_URL):
+        raise _GatewayHttp(
+            403,
+            "custom base_url is disabled for env-managed credentials; pass a request-scoped api_key and set DSCO_WEB_ALLOW_CUSTOM_BASE_URL=1",
+            code="custom_base_url_blocked",
+        )
+    base_url = requested_base_url or backend.get("base_url") or None
+
+    return {
+        "model_id": model_id,
+        "provider": provider,
+        "backend": backend,
+        "api_key": api_key,
+        "dry_run": dry_run,
+        "system_text": system_text,
+        "openai_messages": openai_messages,
+        "anthropic_messages": anthropic_messages,
+        "max_tokens": max_tokens,
+        "base_url": base_url,
+        "passthrough": {k: body[k] for k in _GATEWAY_PASSTHROUGH if k in body and body[k] is not None},
+    }
+
+
+async def _gateway_complete(ctx: dict[str, Any]) -> dict[str, Any]:
+    """Call the provider (or synthesize a dry-run) and return a chat.completion envelope."""
+    model_id, provider, backend = ctx["model_id"], ctx["provider"], ctx["backend"]
+    dry_run, api_key, passthrough = ctx["dry_run"], ctx["api_key"], ctx["passthrough"]
+
+    if dry_run:
+        last_user = ""
+        for m in reversed(ctx["openai_messages"]):
+            if m.get("role") == "user":
+                last_user = m.get("content", "")
+                break
+        content = f"[dsco dry-run · {provider}/{model_id}] {last_user}".strip()
+        return _completion_envelope(model_id, content)
+
+    if backend["transport"] == "anthropic":
+        client = anthropic.AsyncAnthropic(api_key=api_key)
+        kwargs: dict[str, Any] = {"model": model_id, "max_tokens": ctx["max_tokens"], "messages": ctx["anthropic_messages"]}
+        if ctx["system_text"]:
+            kwargs["system"] = ctx["system_text"]
+        if "temperature" in passthrough:
+            kwargs["temperature"] = float(passthrough["temperature"])
+        if "top_p" in passthrough:
+            kwargs["top_p"] = float(passthrough["top_p"])
+        if "stop" in passthrough:
+            kwargs["stop_sequences"] = passthrough["stop"]
+        resp = await client.messages.create(**kwargs)
+        content = "\n".join(b.text for b in resp.content if getattr(b, "type", "") == "text" and getattr(b, "text", "")).strip()
+        usage = getattr(resp, "usage", None)
+        return _completion_envelope(
+            model_id, content,
+            input_tokens=int(getattr(usage, "input_tokens", 0) or 0),
+            output_tokens=int(getattr(usage, "output_tokens", 0) or 0),
+        )
+
+    # openai-compat transport (openai / openrouter / groq / deepseek / mistral / together / xai / local ollama …)
+    client = openai.AsyncOpenAI(api_key=api_key, base_url=ctx["base_url"])
+    create_kwargs: dict[str, Any] = {"model": model_id, "messages": ctx["openai_messages"], "max_tokens": ctx["max_tokens"]}
+    for k in _GATEWAY_PASSTHROUGH:
+        if k in passthrough:
+            create_kwargs[k] = passthrough[k]
+    resp = await client.chat.completions.create(**create_kwargs)
+    message = resp.choices[0].message if resp.choices else None
+    content = _openai_message_text(message.content if message else "")
+    usage = getattr(resp, "usage", None)
+    return _completion_envelope(
+        model_id, content,
+        input_tokens=int(getattr(usage, "prompt_tokens", 0) or 0),
+        output_tokens=int(getattr(usage, "completion_tokens", 0) or 0),
+    )
+
+
+async def _gateway_stream(ctx: dict[str, Any]):
+    """Async generator emitting OpenAI SSE chat.completion.chunk bytes."""
+    model_id, provider, backend = ctx["model_id"], ctx["provider"], ctx["backend"]
+    dry_run, api_key, passthrough = ctx["dry_run"], ctx["api_key"], ctx["passthrough"]
+    cid = f"chatcmpl-{uuid.uuid4().hex[:24]}"
+    created = int(time.time())
+
+    def emit(delta: dict[str, Any], finish_reason: Optional[str] = None) -> bytes:
+        payload = {
+            "id": cid,
+            "object": "chat.completion.chunk",
+            "created": created,
+            "model": model_id,
+            "choices": [{"index": 0, "delta": delta, "finish_reason": finish_reason}],
+        }
+        return ("data: " + json.dumps(payload, ensure_ascii=False) + "\n\n").encode("utf-8")
+
+    yield emit({"role": "assistant"})
+    try:
+        if dry_run:
+            last_user = ""
+            for m in reversed(ctx["openai_messages"]):
+                if m.get("role") == "user":
+                    last_user = m.get("content", "")
+                    break
+            text = f"[dsco dry-run · {provider}/{model_id}] {last_user}".strip()
+            for i in range(0, len(text), 8):
+                yield emit({"content": text[i:i + 8]})
+        elif backend["transport"] == "anthropic":
+            client = anthropic.AsyncAnthropic(api_key=api_key)
+            kwargs: dict[str, Any] = {"model": model_id, "max_tokens": ctx["max_tokens"], "messages": ctx["anthropic_messages"]}
+            if ctx["system_text"]:
+                kwargs["system"] = ctx["system_text"]
+            if "temperature" in passthrough:
+                kwargs["temperature"] = float(passthrough["temperature"])
+            async with client.messages.stream(**kwargs) as stream:
+                async for piece in stream.text_stream:
+                    if piece:
+                        yield emit({"content": piece})
+        else:
+            client = openai.AsyncOpenAI(api_key=api_key, base_url=ctx["base_url"])
+            create_kwargs: dict[str, Any] = {"model": model_id, "messages": ctx["openai_messages"], "max_tokens": ctx["max_tokens"]}
+            for k in _GATEWAY_PASSTHROUGH:
+                if k in passthrough:
+                    create_kwargs[k] = passthrough[k]
+            stream = await client.chat.completions.create(stream=True, **create_kwargs)
+            async for ev in stream:
+                if not ev.choices:
+                    continue
+                choice = ev.choices[0]
+                piece = getattr(getattr(choice, "delta", None), "content", None)
+                if piece:
+                    yield emit({"content": piece})
+                if getattr(choice, "finish_reason", None):
+                    yield emit({}, finish_reason=choice.finish_reason)
+                    break
+    except Exception as exc:
+        log.error(f"gateway stream error: {exc}\n{traceback.format_exc()}")
+        err = ("data: " + json.dumps({"error": {"message": f"Upstream provider error: {exc}", "type": "api_error"}}, ensure_ascii=False) + "\n\n").encode("utf-8")
+        yield err
+    yield emit({}, finish_reason="stop")
+    yield b"data: [DONE]\n\n"
+
+
+@app.post("/v1/chat/completions")
+async def gateway_chat_completions(request: Request):
+    """OpenAI-compatible chat completions through dsco's provider routing."""
+    name = "/v1/chat/completions"
+    started = time.perf_counter()
+    try:
+        body = await request.json()
+    except Exception:
+        _record_metric(name, (time.perf_counter() - started) * 1000.0, ok=False)
+        return _openai_error_response(400, "Request body must be valid JSON.")
+
+    try:
+        ctx = _gateway_resolve(body)
+    except _GatewayHttp as e:
+        _record_metric(name, (time.perf_counter() - started) * 1000.0, ok=False)
+        return _openai_error_response(e.status_code, e.message, e.err_type, e.code)
+
+    if _bool_flag(body.get("stream", False)) == 1:
+        return StreamingResponse(_gateway_stream(ctx), media_type="text/event-stream")
+
+    try:
+        payload = await _gateway_complete(ctx)
+    except Exception as exc:
+        log.error(f"gateway completion error: {exc}\n{traceback.format_exc()}")
+        _record_metric(name, (time.perf_counter() - started) * 1000.0, ok=False)
+        return _openai_error_response(502, f"Upstream provider error: {exc}", "api_error", "upstream_error")
+
+    _record_metric(name, (time.perf_counter() - started) * 1000.0, ok=True)
+    return payload
+
+
+@app.get("/v1/models")
+async def gateway_list_models():
+    """List models known to dsco in the OpenAI /v1/models shape."""
+    _record_metric("/v1/models", 0.0)
+    data: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    now = int(time.time())
+    for m in MODEL_REGISTRY:
+        for mid in (m.get("model_id"), m.get("alias")):
+            if mid and mid not in seen:
+                seen.add(mid)
+                data.append({"id": mid, "object": "model", "created": now, "owned_by": "dsco"})
+    return {"object": "list", "data": data}
 
 
 @app.get("/api/dashboard/meta")
@@ -1234,15 +2913,18 @@ async def list_models():
 @app.get("/api/files")
 async def list_files(path: str = ".", limit: int = MAX_LIST_LIMIT, offset: int = 0):
     """Return directory listing for file explorer."""
-    target = (WORK_DIR / path).resolve()
-    if not str(target).startswith(str(WORK_DIR)):
+    try:
+        target = _resolve_path(path)
+    except Exception:
         return JSONResponse({"error": "access denied"}, status_code=403)
     if not target.exists():
         return JSONResponse({"error": "not found"}, status_code=404)
     entries = []
     try:
         for item in sorted(target.iterdir(), key=lambda x: (not x.is_dir(), x.name.lower())):
-            if item.name.startswith(".") and item.name not in (".env", ".gitignore"):
+            if item.name.startswith(".") and item.name != ".gitignore":
+                continue
+            if _is_secret_path(item):
                 continue
             if item.name in ("node_modules", "__pycache__", "build", ".git"):
                 continue
@@ -1270,8 +2952,9 @@ async def list_files(path: str = ".", limit: int = MAX_LIST_LIMIT, offset: int =
 @app.get("/api/file")
 async def get_file(path: str):
     """Return file content for file viewer."""
-    target = (WORK_DIR / path).resolve()
-    if not str(target).startswith(str(WORK_DIR)):
+    try:
+        target = _resolve_path(path)
+    except Exception:
         return JSONResponse({"error": "access denied"}, status_code=403)
     if not target.is_file():
         return JSONResponse({"error": "not a file"}, status_code=404)
@@ -1549,6 +3232,8 @@ async def kalshi_orderbook(ticker: str):
 @app.post("/api/trading/kalshi/order")
 async def kalshi_create_order(request: Request):
     body = await request.json()
+    if not WEB_TRADING_LIVE:
+        return JSONResponse({"error": "live trading disabled; set DSCO_TRADING_LIVE=1"}, status_code=403)
     if _risk["dry_run"]:
         return {"dry_run": True, "would_place": body, "message": "Dry run mode — order not placed"}
     amount = body.get("count", 1) * body.get("yes_price", body.get("no_price", 50)) / 100.0
@@ -1562,6 +3247,8 @@ async def kalshi_create_order(request: Request):
 
 @app.delete("/api/trading/kalshi/order/{order_id}")
 async def kalshi_cancel_order(order_id: str):
+    if not WEB_TRADING_LIVE:
+        return JSONResponse({"error": "live trading disabled; set DSCO_TRADING_LIVE=1"}, status_code=403)
     data = await _kalshi_delete(f"/portfolio/orders/{order_id}")
     if "error" in data:
         return JSONResponse(data, status_code=502)
@@ -2223,6 +3910,15 @@ async def list_topologies(limit: int = MAX_LIST_LIMIT):
 
 @app.websocket("/ws")
 async def websocket_endpoint(ws: WebSocket):
+    origin = (ws.headers.get("origin") or "").rstrip("/")
+    allowed = _allowed_origins(ws.url.hostname or "127.0.0.1", ws.url.port or DEFAULT_PORT)
+    token = (ws.query_params.get("token") or "").strip()
+    if WEB_REQUIRE_TOKEN and not _token_ok(token):
+        await ws.close(code=1008)
+        return
+    if origin and origin not in allowed:
+        await ws.close(code=1008)
+        return
     await ws.accept()
     session = Session()
     sessions[session.id] = session
@@ -2677,6 +4373,7 @@ def main():
     # Load model and tool registries from dsco binary
     load_model_registry()
     load_tool_registry()
+    _ensure_control_plane()
     global TOOLS_OPENAI, DSCO_VERSION_CACHE
     TOOLS_OPENAI = get_tools_openai()
     if DSCO_BIN.exists():

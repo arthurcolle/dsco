@@ -66,9 +66,11 @@ From `agent.c`, key commands include:
 
 - `/clear`
 - `/model [name]`
-- `/effort [low|medium|high]`
+- `/effort [auto|none|minimal|low|medium|high|xhigh|max]`
 - `/cost`
 - `/context`
+- `/goal [objective|edit <objective>|pause|resume|blocked|complete|clear]`
+- `/goal budget <tokens|off>`
 - `/compact`
 - `/save [name]`
 - `/load [name]`
@@ -179,7 +181,7 @@ DSCO_ENV_FILE="$PWD/.dsco.env.ci" DSCO_NO_AUTO_INTERACTIVE=1 ./dsco --version
 | Runtime internal | `DSCO_SUPERVISED`, `DSCO_RESUME_AFTER_CRASH`, `DSCO_MEM_PRESSURE`, `DSCO_SUBAGENT`, `DSCO_SWARM_DEPTH`. | Never persist. Clear before manual repros. |
 | Diagnostics | `DSCO_DEBUG_AUTH`, `DSCO_DEBUG_REQUEST`, `DSCO_TRACE`, `DSCO_PERF`, `DSCO_TEST_CRASH`. | Use narrowly. Remove after the repro. Treat generated logs as potentially sensitive. |
 | Resource policy | `DSCO_SUPERVISE_*`, `DSCO_MAX_TOKENS`, `DSCO_TOOL_DEFAULT_TIMEOUT`, swarm limits. | Tune per host or test suite. Do not globally raise limits without load testing. |
-| UI/local preference | `DSCO_GLYPH`, `DSCO_NO_CLEAR`, `DSCO_HYPERLINKS`, local host overrides. | Safe to persist if non-secret and machine-specific. |
+| UI/local preference | `DSCO_GLYPH`, `DSCO_TUI_ANIM`, `DSCO_REDUCED_MOTION`, `DSCO_NO_CLEAR`, `DSCO_HYPERLINKS`, local host overrides. | Safe to persist if non-secret and machine-specific. |
 
 ### Chronicle Activity Ledger
 
@@ -248,7 +250,7 @@ debug files can contain prompts, documents, tool results, and provider payloads.
 | `DSCO_MAX_TOKENS` | Max output token reserve. Raise for long-form generation; lower for tight budget runs. |
 | `DSCO_MAX_AGENT_TURNS` | Checkpoint cadence for long agent loops, not the primary stop condition. Lower it for more frequent progress surfacing. |
 | `DSCO_HARD_TURN_CEILING` | Emergency runaway backstop. Leave at default outside stress testing. |
-| `DSCO_EFFORT` | Reasoning effort default. Common values are `low`, `medium`, `high`, `max`, or provider-specific equivalents. |
+| `DSCO_EFFORT` | Reasoning effort default. Common values are `auto`, `none`, `minimal`, `low`, `medium`, `high`, `xhigh`, `max`, or provider-specific equivalents. |
 | `DSCO_TEMPERATURE`, `DSCO_TOP_P`, `DSCO_TOP_K` | Sampling controls. Prefer unset for provider defaults; set only for repeatable experiments or creative generation. |
 | `DSCO_THINKING_BUDGET` | Provider reasoning-token budget. Use only with providers/models that support it. |
 | `DSCO_TOOL_CHOICE` | Default tool-choice policy. Use sparingly; interactive `/force` is safer for ad hoc control. |
@@ -267,6 +269,7 @@ debug files can contain prompts, documents, tool results, and provider payloads.
 | `OPENAI_API_KEY`, `OPENAI_KEY`, `CHATGPT_API_KEY` | OpenAI API key aliases. Use `OPENAI_API_KEY` as canonical. |
 | `DSCO_CHATGPT_OAUTH_TOKEN`, `CHATGPT_OAUTH_TOKEN`, `DSCO_CHATGPT_ACCOUNT_ID` | ChatGPT/Codex subscription auth overrides. Treat as secrets; prefer `dsco login`/Codex auth discovery. |
 | `DSCO_DISABLE_CODEX_OAUTH_DISCOVERY`, `DSCO_DISABLE_CHATGPT_NATIVE` | Truthy disables subscription/native ChatGPT routes. Use to force direct OpenAI API-key routing. |
+| `DSCO_CHATGPT_STREAM_IDLE_TIMEOUT_S` | ChatGPT/Codex native streaming idle timeout. Default is `300`; raise for long silent reasoning/tool phases, lower only for fast-fail debugging. |
 | `OPENROUTER_API_KEY` | OpenRouter fallback/routing credential. Use for namespaced `org/model` IDs and cross-provider fallbacks. |
 | `FUGU_API_KEY` | Canonical Sakana/Fugu credential. Required for `DSCO_EXEC=fugu`, `DSCO_EXEC=sakana`, `-e fugu`, or `--provider sakana`. |
 | `SAKANA_API_KEY`, `FISH_API_KEY`, `SAKANA_TOKEN` | Accepted aliases for `FUGU_API_KEY`. Prefer migrating durable config to `FUGU_API_KEY`. |
@@ -320,6 +323,8 @@ debug files can contain prompts, documents, tool results, and provider payloads.
 | `DSCO_ENV_FILE` | Override the setup env file. Use for profiles, tests, and temporary sandboxes. |
 | `DSCO_BASELINE_DB` | Override sqlite baseline path. Use for isolated test runs or shared timeline storage. |
 | `DSCO_SESSION_PATH` | Override session-memory storage path. Use in tests; keep default for normal use. |
+| `DSCO_SESSION_TTL_EXPIRY` | Opt-in legacy TTL deletion for session memory. Default is retention: TTL classifies working/episodic/semantic but does not erase context after a timeout. |
+| `DSCO_AUTO_COMPACT` | Opt-in automatic context compaction. Default is retention; manual `/compact` and reactive provider-overflow recovery remain available. |
 | `DSCO_COST_HISTORY` | Override learned-cost history file. Use when benchmarking separately from personal history. |
 | `DSCO_INSTANCE_ID` | Baseline instance id set by dsco. Do not persist manually. |
 | `DSCO_TRACE`, `DSCO_TRACE_STDERR` | Enable trace logging. Use for repros; disable for normal interactive sessions. |

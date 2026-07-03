@@ -1,0 +1,339 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>DSCO Engine</title>
+<style>
+:root{
+  --bg:#0f1311;
+  --bg-2:#151a17;
+  --panel:#171d19;
+  --panel-2:#1d2520;
+  --line:#2a342d;
+  --line-2:#39453d;
+  --ink:#eef3ee;
+  --muted:#98a39b;
+  --soft:#6f7a72;
+  --green:#86d989;
+  --amber:#edc56a;
+  --cyan:#73d0c4;
+  --red:#ea8b81;
+  --blue:#88b4ff;
+  --mono:ui-monospace,SFMono-Regular,Menlo,Monaco,Consolas,"Liberation Mono",monospace;
+  --sans:-apple-system,BlinkMacSystemFont,"Segoe UI",Inter,Arial,sans-serif;
+}
+*{box-sizing:border-box}
+html,body{margin:0;background:var(--bg);color:var(--ink);font:13px/1.45 var(--sans)}
+header{position:sticky;top:0;z-index:20;background:rgba(15,19,17,.96);backdrop-filter:blur(10px);border-bottom:1px solid var(--line)}
+.bar{max-width:1480px;margin:0 auto;padding:16px 24px;display:flex;justify-content:space-between;gap:24px;align-items:flex-end}
+.title h1{margin:0;font-size:24px}
+.title p{margin:4px 0 0;color:var(--muted);font-family:var(--mono);font-size:12px}
+.nav{display:flex;gap:10px;flex-wrap:wrap}
+.nav a,.nav button{padding:9px 12px;border:1px solid var(--line);background:var(--bg-2);border-radius:8px;color:var(--ink);text-decoration:none;cursor:pointer}
+.nav a:hover,.nav button:hover{border-color:var(--line-2)}
+main{max-width:1480px;margin:0 auto;padding:22px 24px 52px}
+.status{margin-bottom:16px;color:var(--muted);font-family:var(--mono)}
+.grid{display:grid;grid-template-columns:minmax(340px,.95fr) minmax(0,1.35fr);gap:14px}
+.panel{border:1px solid var(--line);background:var(--panel);border-radius:8px;overflow:hidden;min-width:0}
+.panel-head{display:flex;justify-content:space-between;align-items:center;gap:12px;padding:12px 14px;border-bottom:1px solid var(--line)}
+.panel-head h2,.panel-head h3{margin:0;font-size:14px}
+.panel-head .sub{color:var(--muted);font-family:var(--mono);font-size:11px}
+.panel-body{padding:14px}
+.form-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:10px}
+.full{grid-column:1/-1}
+label{display:flex;flex-direction:column;gap:5px;color:var(--muted);font-family:var(--mono);font-size:11px;text-transform:uppercase}
+input,select,textarea{width:100%;border:1px solid var(--line);background:var(--panel-2);color:var(--ink);border-radius:6px;padding:10px 11px;outline:none}
+input:focus,select:focus,textarea:focus{border-color:var(--cyan)}
+textarea{min-height:108px;resize:vertical}
+.checks{display:flex;gap:14px;flex-wrap:wrap;padding-top:6px}
+.check{display:flex;align-items:center;gap:8px;color:var(--ink);font-size:12px;text-transform:none;font-family:var(--sans)}
+.check input{width:auto;margin:0}
+.actions{display:flex;justify-content:flex-end;gap:10px;margin-top:12px}
+.btn{padding:10px 12px;border:1px solid var(--line);background:var(--panel-2);color:var(--ink);border-radius:6px;cursor:pointer}
+.btn.primary{background:#203326;border-color:#33513d;color:#dff4e1}
+.btn:hover{border-color:var(--line-2)}
+.response{min-height:420px;display:flex;flex-direction:column}
+.summary{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:10px;margin-bottom:14px}
+.stat{border:1px solid var(--line);background:var(--panel-2);border-radius:6px;padding:11px 12px}
+.stat .k{color:var(--muted);font:11px var(--mono);text-transform:uppercase}
+.stat .v{margin-top:8px;font-size:19px}
+.route-box,.output-box{border:1px solid var(--line);background:#101512;border-radius:6px;padding:12px}
+.route-box{font-family:var(--mono);font-size:12px;color:#d6dfd7}
+.output-box{flex:1;min-height:220px;white-space:pre-wrap;overflow:auto;font-family:var(--mono);font-size:12px}
+.band{padding-top:26px;margin-top:26px;border-top:1px solid var(--line)}
+.grid-2{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:14px}
+.list{display:flex;flex-direction:column;gap:10px}
+.item{border:1px solid var(--line);background:var(--panel-2);border-radius:6px;padding:12px}
+.item h4{margin:0 0 6px;font-size:13px}
+.item p{margin:0;color:var(--muted);font-size:12px}
+.pill{display:inline-flex;align-items:center;border:1px solid var(--line);border-radius:999px;padding:3px 8px;font:11px var(--mono);white-space:nowrap}
+.mono{font-family:var(--mono)}
+.ok{color:var(--green)}
+.warn{color:var(--amber)}
+.bad{color:var(--red)}
+.table-wrap{overflow:auto}
+table{width:100%;border-collapse:collapse;min-width:760px}
+th,td{padding:10px 12px;border-bottom:1px solid var(--line);text-align:left;vertical-align:top}
+th{position:sticky;top:0;background:var(--panel);color:var(--muted);font:11px var(--mono);text-transform:uppercase}
+.empty{padding:18px 14px;color:var(--soft);font-family:var(--mono)}
+@media (max-width:1180px){
+  .grid,.grid-2{grid-template-columns:1fr}
+  .summary{grid-template-columns:repeat(2,minmax(0,1fr))}
+}
+@media (max-width:760px){
+  .bar,main{padding-left:14px;padding-right:14px}
+  .form-grid{grid-template-columns:1fr}
+  .summary{grid-template-columns:1fr}
+}
+</style>
+</head>
+<body>
+<header>
+  <div class="bar">
+    <div class="title">
+      <h1>DSCO Engine</h1>
+      <p>all client traffic terminates here before it ever reaches a provider</p>
+    </div>
+    <nav class="nav">
+      <a href="/">Agent UI</a>
+      <a href="/management">Management</a>
+      <a href="/admin">Ontology</a>
+      <button id="refreshBtn" type="button">Refresh</button>
+    </nav>
+  </div>
+</header>
+
+<main>
+  <div class="status" id="status">loading engine catalog</div>
+
+  <section class="grid">
+    <section class="panel">
+      <div class="panel-head"><h2>Routed Request</h2><div class="sub">select tenant, model, backend, auth mode</div></div>
+      <div class="panel-body">
+        <form id="engineForm">
+          <div class="form-grid">
+            <label>Person<select name="person_id" id="personSelect"></select></label>
+            <label>Backend<select name="backend_id" id="backendSelect"><option value="">auto route</option></select></label>
+            <label class="full">Model<input name="model" id="modelInput" list="modelList" autocomplete="off"></label>
+            <datalist id="modelList"></datalist>
+            <label class="full">Prompt<textarea name="prompt" placeholder="Ask through the routed engine..."></textarea></label>
+            <label class="full">Metadata JSON<textarea name="metadata_text" placeholder='{"team":"ops","ticket":"demo"}'></textarea></label>
+            <label class="full">BYOK API Key<input name="api_key" type="password" placeholder="optional request-scoped key"></label>
+          </div>
+          <div class="checks">
+            <label class="check"><input type="checkbox" name="dry_run" checked>Dry run only</label>
+          </div>
+          <div class="actions">
+            <button class="btn" type="button" id="seedPromptBtn">Seed Prompt</button>
+            <button class="btn primary" type="submit">Route Request</button>
+          </div>
+        </form>
+      </div>
+    </section>
+
+    <section class="panel response">
+      <div class="panel-head"><h2>Route Result</h2><div class="sub" id="responseMeta">idle</div></div>
+      <div class="panel-body">
+        <div class="summary" id="summary">
+          <div class="stat"><div class="k">Status</div><div class="v">idle</div></div>
+          <div class="stat"><div class="k">Provider</div><div class="v">-</div></div>
+          <div class="stat"><div class="k">Cost</div><div class="v">-</div></div>
+          <div class="stat"><div class="k">Latency</div><div class="v">-</div></div>
+        </div>
+        <div class="route-box" id="routeBox">No route executed yet.</div>
+        <div style="height:12px"></div>
+        <div class="output-box" id="outputBox">The response body from the engine will appear here.</div>
+      </div>
+    </section>
+  </section>
+
+  <section class="band">
+    <div class="grid-2">
+      <section class="panel">
+        <div class="panel-head"><h3>Inventory</h3><div class="sub">ready people, models, and backends</div></div>
+        <div class="panel-body">
+          <div class="list" id="inventoryList"></div>
+        </div>
+      </section>
+
+      <section class="panel">
+        <div class="panel-head"><h3>Recent Requests</h3><div class="sub" id="requestMeta">0 rows</div></div>
+        <div class="table-wrap"><table>
+          <thead><tr><th>Time</th><th>Tenant</th><th>Route</th><th>Status</th><th>Cost</th></tr></thead>
+          <tbody id="requestRows"></tbody>
+        </table></div>
+      </section>
+    </div>
+  </section>
+</main>
+
+<script>
+const $ = (s) => document.querySelector(s);
+const fmt = (n) => Number(n || 0).toLocaleString();
+const usd = (n) => Number(n || 0).toLocaleString(undefined, {style:'currency', currency:'USD', maximumFractionDigits:3});
+const when = (v) => v ? new Date(v).toLocaleString() : 'never';
+const short = (v) => v && v.length > 96 ? `${v.slice(0, 96)}…` : (v || '');
+const state = {catalog:null, health:null, requests:[]};
+
+async function getJSON(url){
+  const r = await fetch(url);
+  if(!r.ok) throw new Error(`${r.status} ${url}`);
+  return r.json();
+}
+
+async function postJSON(url, body){
+  const r = await fetch(url, {
+    method:'POST',
+    headers:{'Content-Type':'application/json'},
+    body:JSON.stringify(body)
+  });
+  const data = await r.json().catch(() => ({}));
+  if(!r.ok) throw new Error(data.error || `${r.status} ${url}`);
+  return data;
+}
+
+function setStatus(text){ $('#status').textContent = text; }
+
+function renderCatalog(){
+  const catalog = state.catalog || {};
+  const people = catalog.people || [];
+  const backends = catalog.backends || [];
+  const models = catalog.models || [];
+
+  $('#personSelect').innerHTML = people.map(person =>
+    `<option value="${person.id}">${person.name} • ${person.plan_name}</option>`
+  ).join('');
+
+  $('#backendSelect').innerHTML = '<option value="">auto route</option>' + backends.map(backend =>
+    `<option value="${backend.id}">${backend.name} • ${backend.provider}</option>`
+  ).join('');
+
+  $('#modelList').innerHTML = models.map(model =>
+    `<option value="${model.model_id}">${model.alias} • ${model.provider}</option>`
+  ).join('');
+
+  $('#modelInput').value = catalog.default_model || '';
+
+  const inventory = [];
+  inventory.push(`
+    <div class="item">
+      <h4>People</h4>
+      <p>${fmt(people.length)} selectable tenants currently registered in the control plane.</p>
+    </div>`);
+  inventory.push(`
+    <div class="item">
+      <h4>Backends</h4>
+      <p>${fmt(backends.filter(b => b.ready).length)} ready and ${fmt(backends.length)} configured. DSCO-hosted lanes stay inside this routing layer.</p>
+    </div>`);
+  inventory.push(`
+    <div class="item">
+      <h4>Models</h4>
+      <p>${fmt(models.length)} models visible from the DSCO registry. Provider inference happens before network traffic leaves the engine.</p>
+    </div>`);
+  const ready = (state.health?.backends || []).filter(row => row.ready).slice(0, 5);
+  ready.forEach(row => {
+    inventory.push(`
+      <div class="item">
+        <h4>${row.name}</h4>
+        <p><span class="pill">${row.provider}</span> <span class="pill">${row.transport}</span> <span class="${row.ready ? 'ok' : 'warn'}">${row.ready ? 'ready' : 'not ready'}</span></p>
+        <p class="mono">${short(row.base_url)}</p>
+      </div>`);
+  });
+  $('#inventoryList').innerHTML = inventory.join('');
+}
+
+function renderRequests(){
+  $('#requestMeta').textContent = `${fmt(state.requests.length)} rows`;
+  $('#requestRows').innerHTML = state.requests.length ? state.requests.map(req => `
+    <tr>
+      <td class="mono">${when(req.created_at)}</td>
+      <td>
+        <div>${req.person_name || req.person_email || req.person_id || 'unknown'}</div>
+        <div class="mono" style="font-size:11px;color:var(--muted)">${req.plan_id || ''}</div>
+      </td>
+      <td>
+        <div>${req.model}</div>
+        <div class="mono" style="font-size:11px;color:var(--muted)">${req.provider} via ${req.backend_id || req.route_source}</div>
+      </td>
+      <td class="${req.status === 'ok' ? 'ok' : req.status === 'dry_run' ? 'warn' : 'bad'}">${req.status}</td>
+      <td class="mono">${usd(req.estimated_cost_usd)}</td>
+    </tr>
+  `).join('') : '<tr><td colspan="5" class="empty">No routed requests yet.</td></tr>';
+}
+
+function renderResult(result){
+  $('#responseMeta').textContent = `${result.status} • ${result.request_id}`;
+  $('#summary').innerHTML = [
+    `<div class="stat"><div class="k">Status</div><div class="v ${result.status === 'ok' ? 'ok' : result.status === 'dry_run' ? 'warn' : 'bad'}">${result.status}</div></div>`,
+    `<div class="stat"><div class="k">Provider</div><div class="v">${result.route?.provider || '-'}</div></div>`,
+    `<div class="stat"><div class="k">Cost</div><div class="v">${usd(result.usage?.estimated_cost_usd || 0)}</div></div>`,
+    `<div class="stat"><div class="k">Latency</div><div class="v">${result.latency_ms || 0} ms</div></div>`
+  ].join('');
+  $('#routeBox').textContent = JSON.stringify(result.route || {}, null, 2);
+  $('#outputBox').textContent = result.error ? `ERROR\n${result.error}` : (result.content || '(no content)');
+}
+
+async function loadAll(){
+  setStatus('loading engine catalog');
+  const [catalog, health, requests] = await Promise.all([
+    getJSON('/api/engine/catalog'),
+    getJSON('/api/engine/health'),
+    getJSON('/api/control/requests?limit=40')
+  ]);
+  state.catalog = catalog;
+  state.health = health;
+  state.requests = requests.requests || [];
+  renderCatalog();
+  renderRequests();
+  setStatus(`default ${catalog.default_model} • ${fmt((health.backends || []).filter(b => b.ready).length)} ready backends • db ${health.db_path}`);
+}
+
+function parseMetadata(text){
+  const raw = (text || '').trim();
+  if(!raw) return {};
+  return JSON.parse(raw);
+}
+
+async function handleSubmit(event){
+  event.preventDefault();
+  const form = event.currentTarget;
+  let metadata = {};
+  try {
+    metadata = parseMetadata(form.metadata_text.value);
+  } catch (err) {
+    setStatus(`metadata parse error: ${err.message}`);
+    return;
+  }
+  const payload = {
+    person_id: form.person_id.value,
+    backend_id: form.backend_id.value,
+    model: form.model.value || state.catalog?.default_model,
+    prompt: form.prompt.value,
+    metadata,
+    dry_run: form.dry_run.checked
+  };
+  if(form.api_key.value.trim()) payload.api_key = form.api_key.value.trim();
+  setStatus('routing request');
+  try {
+    const result = await postJSON('/api/engine/chat', payload);
+    renderResult(result);
+    await loadAll();
+    setStatus(`request ${result.request_id} completed`);
+  } catch (err) {
+    renderResult({status:'error', request_id:'failed', route:{}, usage:{estimated_cost_usd:0}, latency_ms:0, error:err.message, content:''});
+    setStatus(err.message);
+    await loadAll();
+  }
+}
+
+$('#engineForm').addEventListener('submit', handleSubmit);
+$('#refreshBtn').addEventListener('click', () => loadAll().catch(err => setStatus(err.message)));
+$('#seedPromptBtn').addEventListener('click', () => {
+  $('#engineForm').prompt.value = 'Summarize the architecture boundary between BYOK tenants, managed plans, and DSCO-hosted backends in four bullets.';
+});
+
+loadAll().catch(err => setStatus(err.message));
+</script>
+</body>
+</html>

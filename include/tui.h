@@ -8,134 +8,134 @@
 #include <stdint.h>
 
 /* ── ANSI Colors & Styles ─────────────────────────────────────────────── */
-#define TUI_RESET     "\033[0m"
-#define TUI_BOLD      "\033[1m"
-#define TUI_DIM       "\033[2m"
-#define TUI_ITALIC    "\033[3m"
+#define TUI_RESET "\033[0m"
+#define TUI_BOLD "\033[1m"
+#define TUI_DIM "\033[2m"
+#define TUI_ITALIC "\033[3m"
 #define TUI_UNDERLINE "\033[4m"
-#define TUI_BLINK     "\033[5m"
-#define TUI_REVERSE   "\033[7m"
-#define TUI_STRIKE    "\033[9m"
+#define TUI_BLINK "\033[5m"
+#define TUI_REVERSE "\033[7m"
+#define TUI_STRIKE "\033[9m"
 
 /* Foreground */
-#define TUI_BLACK     "\033[30m"
-#define TUI_RED       "\033[31m"
-#define TUI_GREEN     "\033[32m"
-#define TUI_YELLOW    "\033[33m"
-#define TUI_BLUE      "\033[34m"
-#define TUI_MAGENTA   "\033[35m"
-#define TUI_CYAN      "\033[36m"
-#define TUI_WHITE     "\033[37m"
+#define TUI_BLACK "\033[30m"
+#define TUI_RED "\033[31m"
+#define TUI_GREEN "\033[32m"
+#define TUI_YELLOW "\033[33m"
+#define TUI_BLUE "\033[34m"
+#define TUI_MAGENTA "\033[35m"
+#define TUI_CYAN "\033[36m"
+#define TUI_WHITE "\033[37m"
 
 /* Bright foreground */
-#define TUI_BRED      "\033[91m"
-#define TUI_BGREEN    "\033[92m"
-#define TUI_BYELLOW   "\033[93m"
-#define TUI_BBLUE     "\033[94m"
-#define TUI_BMAGENTA  "\033[95m"
-#define TUI_BCYAN     "\033[96m"
-#define TUI_BWHITE    "\033[97m"
+#define TUI_BRED "\033[91m"
+#define TUI_BGREEN "\033[92m"
+#define TUI_BYELLOW "\033[93m"
+#define TUI_BBLUE "\033[94m"
+#define TUI_BMAGENTA "\033[95m"
+#define TUI_BCYAN "\033[96m"
+#define TUI_BWHITE "\033[97m"
 
 /* Background */
-#define TUI_BG_BLACK    "\033[40m"
-#define TUI_BG_RED      "\033[41m"
-#define TUI_BG_GREEN    "\033[42m"
-#define TUI_BG_YELLOW   "\033[43m"
-#define TUI_BG_BLUE     "\033[44m"
-#define TUI_BG_MAGENTA  "\033[45m"
-#define TUI_BG_CYAN     "\033[46m"
-#define TUI_BG_WHITE    "\033[47m"
+#define TUI_BG_BLACK "\033[40m"
+#define TUI_BG_RED "\033[41m"
+#define TUI_BG_GREEN "\033[42m"
+#define TUI_BG_YELLOW "\033[43m"
+#define TUI_BG_BLUE "\033[44m"
+#define TUI_BG_MAGENTA "\033[45m"
+#define TUI_BG_CYAN "\033[46m"
+#define TUI_BG_WHITE "\033[47m"
 
 /* 256 color */
-#define TUI_FG256(n)  "\033[38;5;" #n "m"
-#define TUI_BG256(n)  "\033[48;5;" #n "m"
+#define TUI_FG256(n) "\033[38;5;" #n "m"
+#define TUI_BG256(n) "\033[48;5;" #n "m"
 
 /* Extended 256-color palette */
-#define TUI_SKY           TUI_FG256(75)
-#define TUI_TEAL          TUI_FG256(37)
-#define TUI_MINT          TUI_FG256(121)
-#define TUI_LIME          TUI_FG256(154)
-#define TUI_GOLD          TUI_FG256(220)
-#define TUI_AMBER         TUI_FG256(214)
-#define TUI_CORAL         TUI_FG256(203)
-#define TUI_PINK          TUI_FG256(205)
-#define TUI_VIOLET        TUI_FG256(141)
-#define TUI_LAVENDER      TUI_FG256(183)
-#define TUI_SLATE         TUI_FG256(244)
-#define TUI_STEEL         TUI_FG256(67)
+#define TUI_SKY TUI_FG256(75)
+#define TUI_TEAL TUI_FG256(37)
+#define TUI_MINT TUI_FG256(121)
+#define TUI_LIME TUI_FG256(154)
+#define TUI_GOLD TUI_FG256(220)
+#define TUI_AMBER TUI_FG256(214)
+#define TUI_CORAL TUI_FG256(203)
+#define TUI_PINK TUI_FG256(205)
+#define TUI_VIOLET TUI_FG256(141)
+#define TUI_LAVENDER TUI_FG256(183)
+#define TUI_SLATE TUI_FG256(244)
+#define TUI_STEEL TUI_FG256(67)
 
 /* Semantic UI roles */
-#define TUI_ACCENT_PRIMARY   TUI_SKY
+#define TUI_ACCENT_PRIMARY TUI_SKY
 #define TUI_ACCENT_SECONDARY TUI_VIOLET
-#define TUI_ACCENT_SUCCESS   TUI_MINT
-#define TUI_ACCENT_WARN      TUI_GOLD
-#define TUI_ACCENT_DANGER    TUI_CORAL
-#define TUI_ACCENT_MUTED     TUI_SLATE
+#define TUI_ACCENT_SUCCESS TUI_MINT
+#define TUI_ACCENT_WARN TUI_GOLD
+#define TUI_ACCENT_DANGER TUI_CORAL
+#define TUI_ACCENT_MUTED TUI_SLATE
 
 /* ── Status roles (Integument: meaning-coded surface) ─────────────────────
  * These name the SEMANTIC INTENT of the classic 8-color status palette so
  * call sites express meaning ("this is a failure") rather than appearance
  * ("this is red"). They alias the literal ANSI colors to preserve the exact
  * current rendering while making the surface migratable to a theme later. */
-#define TUI_ROLE_OK       TUI_GREEN    /* success / healthy / pass        */
-#define TUI_ROLE_FAIL     TUI_RED      /* failure / error / danger        */
-#define TUI_ROLE_WARN     TUI_YELLOW   /* warning / degraded / retry      */
-#define TUI_ROLE_INFO     TUI_CYAN     /* informational accent / model    */
-#define TUI_ROLE_MUTED    TUI_DIM      /* secondary / de-emphasized       */
+#define TUI_ROLE_OK TUI_GREEN    /* success / healthy / pass        */
+#define TUI_ROLE_FAIL TUI_RED    /* failure / error / danger        */
+#define TUI_ROLE_WARN TUI_YELLOW /* warning / degraded / retry      */
+#define TUI_ROLE_INFO TUI_CYAN   /* informational accent / model    */
+#define TUI_ROLE_MUTED TUI_DIM   /* secondary / de-emphasized       */
 
 /* Semantic syntax roles */
-#define TUI_SYN_COMMENT   TUI_SLATE
-#define TUI_SYN_STRING    TUI_MINT
-#define TUI_SYN_ESCAPE    TUI_GOLD
-#define TUI_SYN_NUMBER    TUI_AMBER
-#define TUI_SYN_KEYWORD   TUI_VIOLET
-#define TUI_SYN_DECL      TUI_PINK
-#define TUI_SYN_TYPE      TUI_GOLD
-#define TUI_SYN_FUNCTION  TUI_SKY
-#define TUI_SYN_CONSTANT  TUI_CORAL
-#define TUI_SYN_PROPERTY  TUI_TEAL
-#define TUI_SYN_TAG       TUI_SKY
-#define TUI_SYN_OPERATOR  TUI_LAVENDER
-#define TUI_SYN_PUNCT     TUI_STEEL
-#define TUI_SYN_PREPROC   TUI_PINK
+#define TUI_SYN_COMMENT TUI_SLATE
+#define TUI_SYN_STRING TUI_MINT
+#define TUI_SYN_ESCAPE TUI_GOLD
+#define TUI_SYN_NUMBER TUI_AMBER
+#define TUI_SYN_KEYWORD TUI_VIOLET
+#define TUI_SYN_DECL TUI_PINK
+#define TUI_SYN_TYPE TUI_GOLD
+#define TUI_SYN_FUNCTION TUI_SKY
+#define TUI_SYN_CONSTANT TUI_CORAL
+#define TUI_SYN_PROPERTY TUI_TEAL
+#define TUI_SYN_TAG TUI_SKY
+#define TUI_SYN_OPERATOR TUI_LAVENDER
+#define TUI_SYN_PUNCT TUI_STEEL
+#define TUI_SYN_PREPROC TUI_PINK
 
 /* ── Activity indicator (Claude Code aesthetic) ───────────────────────── */
 /* ⏺  U+23FA — the primary action bullet */
-#define TUI_RECORD        "\xe2\x8f\xba"
+#define TUI_RECORD "\xe2\x8f\xba"
 /* ⎿  U+23BF — indent/result line leader */
-#define TUI_INDENT_LEAD   "\xe2\x8e\xbf"
+#define TUI_INDENT_LEAD "\xe2\x8e\xbf"
 /* 256-color orange (approx #FF5F00) */
-#define TUI_ORANGE        "\033[38;5;202m"
+#define TUI_ORANGE "\033[38;5;202m"
 /* Truecolor orange used for the record glyph */
-#define TUI_ORANGE_RGB    "\033[38;2;255;95;0m"
+#define TUI_ORANGE_RGB "\033[38;2;255;95;0m"
 /* Middle dot separator · */
-#define TUI_SEP           "\xc2\xb7"
+#define TUI_SEP "\xc2\xb7"
 
 /* ── Box styles ───────────────────────────────────────────────────────── */
 typedef enum {
-    BOX_ROUND,      /* ╭─╮│╰─╯ */
-    BOX_SINGLE,     /* ┌─┐│└─┘ */
-    BOX_DOUBLE,     /* ╔═╗║╚═╝ */
-    BOX_HEAVY,      /* ┏━┓┃┗━┛ */
-    BOX_ASCII,      /* +-+|+-+ */
+    BOX_ROUND,  /* ╭─╮│╰─╯ */
+    BOX_SINGLE, /* ┌─┐│└─┘ */
+    BOX_DOUBLE, /* ╔═╗║╚═╝ */
+    BOX_HEAVY,  /* ┏━┓┃┗━┛ */
+    BOX_ASCII,  /* +-+|+-+ */
 } tui_box_style_t;
 
 typedef struct {
     const char *tl, *tr, *bl, *br;
     const char *h, *v;
-    const char *lj, *rj;  /* left/right junction for dividers */
+    const char *lj, *rj; /* left/right junction for dividers */
 } tui_box_chars_t;
 
 const tui_box_chars_t *tui_box_chars(tui_box_style_t style);
 
 /* ── Terminal utilities ───────────────────────────────────────────────── */
-int  tui_term_width(void);
-int  tui_term_height(void);
+int tui_term_width(void);
+int tui_term_height(void);
 void tui_cursor_hide(void);
 void tui_cursor_show(void);
 void tui_cursor_move(int row, int col);
 void tui_clear_screen(void);
-void tui_screen_reset_full(void);  /* full reset + scrollback wipe for clean first paint */
+void tui_screen_reset_full(void); /* full reset + scrollback wipe for clean first paint */
 void tui_clear_line(void);
 void tui_save_cursor(void);
 void tui_restore_cursor(void);
@@ -146,11 +146,32 @@ bool tui_cursor_report_queries_enabled(void);
 void tui_term_lock(void);
 void tui_term_unlock(void);
 
+/* Terminal state management — crash recovery and centralized mode control */
+void tui_install_crash_handlers(void);
+
+/* ── Error Recovery Framework ─────────────────────────────────────────── */
+typedef enum {
+    TUI_ERR_NONE,     /* No error */
+    TUI_ERR_WARNING,  /* Non-fatal, continue */
+    TUI_ERR_DEGRADED, /* Reduced functionality */
+    TUI_ERR_FATAL     /* Must exit */
+} tui_error_severity_t;
+
+typedef struct {
+    tui_error_severity_t severity;
+    const char *message;
+    const char *context;
+    int error_code;
+} tui_error_t;
+
+/* Emergency cleanup for fatal errors */
+void tui_cleanup(void);
+
 /* ── Box drawing ──────────────────────────────────────────────────────── */
 
 /* Draw a box with optional title, width auto-detected from terminal */
-void tui_box(const char *title, const char *body, tui_box_style_t style,
-             const char *border_color, int width);
+void tui_box(const char *title, const char *body, tui_box_style_t style, const char *border_color,
+             int width);
 
 /* Draw a horizontal divider */
 void tui_divider(tui_box_style_t style, const char *color, int width);
@@ -162,20 +183,20 @@ typedef struct {
     const char *color;       /* border color */
     const char *title_color; /* title color (NULL = same as border) */
     tui_box_style_t style;
-    int width;               /* 0 = auto */
-    int padding;             /* internal horizontal padding */
+    int width;   /* 0 = auto */
+    int padding; /* internal horizontal padding */
 } tui_panel_t;
 
 void tui_panel(const tui_panel_t *p);
 
 /* ── Spinners ─────────────────────────────────────────────────────────── */
 typedef enum {
-    SPINNER_DOTS,       /* ⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏ */
-    SPINNER_BRAILLE,    /* ⣾⣽⣻⢿⡿⣟⣯⣷ */
-    SPINNER_LINE,       /* -\|/ */
-    SPINNER_ARROW,      /* ←↖↑↗→↘↓↙ */
-    SPINNER_STAR,       /* ✶✸✹✺✹✷ */
-    SPINNER_PULSE,      /* ◐◓◑◒ */
+    SPINNER_DOTS,    /* ⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏ */
+    SPINNER_BRAILLE, /* ⣾⣽⣻⢿⡿⣟⣯⣷ */
+    SPINNER_LINE,    /* -\|/ */
+    SPINNER_ARROW,   /* ←↖↑↗→↘↓↙ */
+    SPINNER_STAR,    /* ✶✸✹✺✹✷ */
+    SPINNER_PULSE,   /* ◐◓◑◒ */
 } tui_spinner_type_t;
 
 typedef struct {
@@ -186,14 +207,14 @@ typedef struct {
     bool active;
 } tui_spinner_t;
 
-void tui_spinner_init(tui_spinner_t *s, tui_spinner_type_t type,
-                      const char *label, const char *color);
+void tui_spinner_init(tui_spinner_t *s, tui_spinner_type_t type, const char *label,
+                      const char *color);
 void tui_spinner_tick(tui_spinner_t *s);
 void tui_spinner_done(tui_spinner_t *s, const char *final_label);
 
 /* ── Progress bar ─────────────────────────────────────────────────────── */
-void tui_progress(const char *label, double pct, int width,
-                  const char *fill_color, const char *empty_color);
+void tui_progress(const char *label, double pct, int width, const char *fill_color,
+                  const char *empty_color);
 
 /* ── Table rendering ──────────────────────────────────────────────────── */
 #define TUI_TABLE_MAX_COLS 16
@@ -254,108 +275,108 @@ void tui_stream_end(void);
  */
 
 typedef enum {
-    TUI_GLYPH_ASCII,    /* pure ASCII — works everywhere */
-    TUI_GLYPH_UNICODE,  /* BMP Unicode — box drawing, braille, symbols */
-    TUI_GLYPH_FULL,     /* full Unicode — emoji, supplementary planes */
-    TUI_GLYPH_NERD,     /* Nerd Font v3+ — devicons, powerline, FA, etc. */
+    TUI_GLYPH_ASCII,   /* pure ASCII — works everywhere */
+    TUI_GLYPH_UNICODE, /* BMP Unicode — box drawing, braille, symbols */
+    TUI_GLYPH_FULL,    /* full Unicode — emoji, supplementary planes */
+    TUI_GLYPH_NERD,    /* Nerd Font v3+ — devicons, powerline, FA, etc. */
 } tui_glyph_tier_t;
 
 typedef struct {
     /* ── Status indicators ──────────────────────────────────────────── */
-    const char *ok;              /* nf:  / full: ✓  / uni: ✓  / ascii: + */
-    const char *fail;            /* nf:  / full: ✗  / uni: ✗  / ascii: x */
-    const char *warn;            /* nf:  / full: ⚠  / uni: (!) / ascii: ! */
-    const char *info;            /* nf:  / full: ℹ  / uni: (i) / ascii: i */
+    const char *ok;   /* nf:  / full: ✓  / uni: ✓  / ascii: + */
+    const char *fail; /* nf:  / full: ✗  / uni: ✗  / ascii: x */
+    const char *warn; /* nf:  / full: ⚠  / uni: (!) / ascii: ! */
+    const char *info; /* nf:  / full: ℹ  / uni: (i) / ascii: i */
 
     /* ── Bullets & markers ──────────────────────────────────────────── */
-    const char *bullet;          /* nf:  / full: ●  / ascii: * */
-    const char *circle_open;     /* nf:  / full: ○  / ascii: o */
-    const char *circle_dot;      /* nf:  / full: ◉  / ascii: @ */
-    const char *circle_ring;     /* nf:  / full: ◎  / ascii: O */
-    const char *diamond;         /* nf:  / full: ◆  / ascii: * */
-    const char *diamond_open;    /* nf:  / full: ◇  / ascii: <> */
-    const char *sparkle;         /* nf:  / full: ✦  / ascii: * */
-    const char *florette;        /* nf:  / full: ✿  / ascii: * */
+    const char *bullet;       /* nf:  / full: ●  / ascii: * */
+    const char *circle_open;  /* nf:  / full: ○  / ascii: o */
+    const char *circle_dot;   /* nf:  / full: ◉  / ascii: @ */
+    const char *circle_ring;  /* nf:  / full: ◎  / ascii: O */
+    const char *diamond;      /* nf:  / full: ◆  / ascii: * */
+    const char *diamond_open; /* nf:  / full: ◇  / ascii: <> */
+    const char *sparkle;      /* nf:  / full: ✦  / ascii: * */
+    const char *florette;     /* nf:  / full: ✿  / ascii: * */
 
     /* ── Arrows & motion ────────────────────────────────────────────── */
-    const char *arrow_right;     /* nf:  / full: →  / ascii: -> */
-    const char *arrow_left;      /* nf:  / full: ←  / ascii: <- */
-    const char *arrow_up;        /* nf:  / full: ▲  / ascii: ^ */
-    const char *arrow_down;      /* nf:  / full: ▼  / ascii: v */
-    const char *arrow_cycle;     /* nf:  / full: ↻  / ascii: ~ */
+    const char *arrow_right; /* nf:  / full: →  / ascii: -> */
+    const char *arrow_left;  /* nf:  / full: ←  / ascii: <- */
+    const char *arrow_up;    /* nf:  / full: ▲  / ascii: ^ */
+    const char *arrow_down;  /* nf:  / full: ▼  / ascii: v */
+    const char *arrow_cycle; /* nf:  / full: ↻  / ascii: ~ */
 
     /* ── Progress blocks ────────────────────────────────────────────── */
     const char *block_full;
     const char *block_med;
     const char *block_light;
     const char *block_dark;
-    const char *vblock[9];       /* [0]=space [1]=▁ .. [8]=█ */
+    const char *vblock[9]; /* [0]=space [1]=▁ .. [8]=█ */
 
     /* ── Spinners ───────────────────────────────────────────────────── */
     const char *spin_dots[10];
-    int         spin_dots_n;
+    int spin_dots_n;
     const char *spin_thick[8];
-    int         spin_thick_n;
+    int spin_thick_n;
     const char *spin_orbit[4];
-    int         spin_orbit_n;
+    int spin_orbit_n;
     const char *spin_orbit_inner[2];
-    int         spin_orbit_inner_n;
+    int spin_orbit_inner_n;
     const char *spin_pulse[4];
-    int         spin_pulse_n;
+    int spin_pulse_n;
     const char *spin_line[4];
-    int         spin_line_n;
+    int spin_line_n;
     const char *spin_arrow[8];
-    int         spin_arrow_n;
+    int spin_arrow_n;
     const char *spin_star[6];
-    int         spin_star_n;
+    int spin_star_n;
 
     /* ── Contextual icons ───────────────────────────────────────────── */
-    const char *icon_think;      /* nf:  brain/lightbulb */
-    const char *icon_lightning;  /* nf:  */
-    const char *icon_gear;       /* nf:  */
-    const char *icon_timer;      /* nf:  */
-    const char *icon_lock;       /* nf:  */
-    const char *icon_money;      /* nf:  */
-    const char *icon_globe;      /* nf:  */
-    const char *icon_rocket;     /* nf:  */
-    const char *icon_fire;       /* nf:  */
-    const char *icon_link;       /* nf:  */
-    const char *icon_eyes;       /* nf:  */
+    const char *icon_think;     /* nf:  brain/lightbulb */
+    const char *icon_lightning; /* nf:  */
+    const char *icon_gear;      /* nf:  */
+    const char *icon_timer;     /* nf:  */
+    const char *icon_lock;      /* nf:  */
+    const char *icon_money;     /* nf:  */
+    const char *icon_globe;     /* nf:  */
+    const char *icon_rocket;    /* nf:  */
+    const char *icon_fire;      /* nf:  */
+    const char *icon_link;      /* nf:  */
+    const char *icon_eyes;      /* nf:  */
 
     /* ── Nerd Font extras (NULL on lower tiers) ─────────────────────── */
-    const char *icon_folder;     /* nf:  */
-    const char *icon_file;       /* nf:  */
-    const char *icon_code;       /* nf:  */
-    const char *icon_terminal;   /* nf:  */
-    const char *icon_git;        /* nf:  */
-    const char *icon_database;   /* nf:  */
-    const char *icon_cloud;      /* nf:  */
-    const char *icon_bug;        /* nf:  */
-    const char *icon_cpu;        /* nf:  */
-    const char *icon_network;    /* nf: 󰛳  */
-    const char *icon_key;        /* nf:  */
-    const char *icon_shield;     /* nf: 󰒃  */
-    const char *icon_search;     /* nf:  */
-    const char *icon_download;   /* nf:  */
-    const char *icon_upload;     /* nf:  */
-    const char *icon_sync;       /* nf:  */
-    const char *icon_play;       /* nf:  */
-    const char *icon_pause;      /* nf:  */
-    const char *icon_stop;       /* nf:  */
-    const char *icon_skip;       /* nf:  */
-    const char *icon_chat;       /* nf:  */
-    const char *icon_robot;      /* nf: 󰚩  */
-    const char *icon_brain;      /* nf: 󰧑  */
-    const char *icon_wand;       /* nf:  */
-    const char *icon_graph;      /* nf:  */
+    const char *icon_folder;   /* nf:  */
+    const char *icon_file;     /* nf:  */
+    const char *icon_code;     /* nf:  */
+    const char *icon_terminal; /* nf:  */
+    const char *icon_git;      /* nf:  */
+    const char *icon_database; /* nf:  */
+    const char *icon_cloud;    /* nf:  */
+    const char *icon_bug;      /* nf:  */
+    const char *icon_cpu;      /* nf:  */
+    const char *icon_network;  /* nf: 󰛳  */
+    const char *icon_key;      /* nf:  */
+    const char *icon_shield;   /* nf: 󰒃  */
+    const char *icon_search;   /* nf:  */
+    const char *icon_download; /* nf:  */
+    const char *icon_upload;   /* nf:  */
+    const char *icon_sync;     /* nf:  */
+    const char *icon_play;     /* nf:  */
+    const char *icon_pause;    /* nf:  */
+    const char *icon_stop;     /* nf:  */
+    const char *icon_skip;     /* nf:  */
+    const char *icon_chat;     /* nf:  */
+    const char *icon_robot;    /* nf: 󰚩  */
+    const char *icon_brain;    /* nf: 󰧑  */
+    const char *icon_wand;     /* nf:  */
+    const char *icon_graph;    /* nf:  */
 
     /* ── Powerline separators ───────────────────────────────────────── */
-    const char *pl_right;        /* nf:  U+E0B0 */
-    const char *pl_right_thin;   /* nf:  U+E0B1 */
-    const char *pl_left;         /* nf:  U+E0B2 */
-    const char *pl_left_thin;    /* nf:  U+E0B3 */
-    const char *pl_round_right;  /* nf:  U+E0B4 */
-    const char *pl_round_left;   /* nf:  U+E0B6 */
+    const char *pl_right;       /* nf:  U+E0B0 */
+    const char *pl_right_thin;  /* nf:  U+E0B1 */
+    const char *pl_left;        /* nf:  U+E0B2 */
+    const char *pl_left_thin;   /* nf:  U+E0B3 */
+    const char *pl_round_right; /* nf:  U+E0B4 */
+    const char *pl_round_left;  /* nf:  U+E0B6 */
 
     /* ── Box-drawing ────────────────────────────────────────────────── */
     const char *hline;
@@ -373,7 +394,7 @@ typedef struct {
 } tui_glyphs_t;
 
 /* Detect glyph tier and cache */
-tui_glyph_tier_t  tui_detect_glyph_tier(void);
+tui_glyph_tier_t tui_detect_glyph_tier(void);
 
 /* Get the active glyph set (singleton, initialized on first call) */
 const tui_glyphs_t *tui_glyph(void);
@@ -383,13 +404,15 @@ void tui_set_glyph_tier(tui_glyph_tier_t tier);
 
 /* ── True Color Foundation ─────────────────────────────────────────────── */
 
-typedef struct { unsigned char r, g, b; } tui_rgb_t;
+typedef struct {
+    unsigned char r, g, b;
+} tui_rgb_t;
 
 typedef struct {
-    char     name[160];
-    char     hex[8];
+    char name[160];
+    char hex[8];
     tui_rgb_t rgb;
-    int      ansi256;
+    int ansi256;
     uint64_t hash;
 } tui_named_color_t;
 
@@ -403,20 +426,19 @@ typedef enum {
 
 /* Detect and cache terminal color capabilities */
 tui_color_level_t tui_detect_color_level(void);
-bool              tui_supports_truecolor(void);
+bool tui_supports_truecolor(void);
 
 /* HSV (h=0-360, s/v=0-1) → RGB conversion */
 tui_rgb_t tui_hsv_to_rgb(float h, float s, float v);
 
 /* Deterministic named-color sampler. Names are unbounded; truecolor terminals
  * expose up to 16,777,216 RGB colors, with automatic fallback elsewhere. */
-uint64_t  tui_color_name_hash(const char *name);
-int       tui_rgb_to_256(tui_rgb_t c);
+uint64_t tui_color_name_hash(const char *name);
+int tui_rgb_to_256(tui_rgb_t c);
 tui_rgb_t tui_named_color_rgb(const char *name);
-void      tui_named_color_sample(const char *name, tui_named_color_t *out);
-void      tui_construct_color_sample(const char *kind, const char *name,
-                                     const char *state, double weight,
-                                     tui_named_color_t *out);
+void tui_named_color_sample(const char *name, tui_named_color_t *out);
+void tui_construct_color_sample(const char *kind, const char *name, const char *state,
+                                double weight, tui_named_color_t *out);
 
 /* Write a foreground truecolor escape to stderr */
 void tui_fg_rgb(tui_rgb_t c);
@@ -439,71 +461,71 @@ void tui_transition_divider(void);
 /* ── Tool Type Colors ─────────────────────────────────────────────────── */
 
 typedef enum {
-    TUI_TOOL_READ,    /* blue — file reading */
-    TUI_TOOL_WRITE,   /* gold/yellow — file writing */
-    TUI_TOOL_EXEC,    /* purple — command execution */
-    TUI_TOOL_WEB,     /* green — web/network */
-    TUI_TOOL_CRYPTO,  /* pink/magenta — crypto/hash operations */
-    TUI_TOOL_MATH,    /* orange — math/eval/compute */
-    TUI_TOOL_DATA,    /* teal — search/query/database */
-    TUI_TOOL_OTHER,   /* cyan — default */
+    TUI_TOOL_READ,   /* blue — file reading */
+    TUI_TOOL_WRITE,  /* gold/yellow — file writing */
+    TUI_TOOL_EXEC,   /* purple — command execution */
+    TUI_TOOL_WEB,    /* green — web/network */
+    TUI_TOOL_CRYPTO, /* pink/magenta — crypto/hash operations */
+    TUI_TOOL_MATH,   /* orange — math/eval/compute */
+    TUI_TOOL_DATA,   /* teal — search/query/database */
+    TUI_TOOL_OTHER,  /* cyan — default */
 } tui_tool_type_t;
 
 tui_tool_type_t tui_classify_tool(const char *name);
-const char     *tui_tool_color(tui_tool_type_t type);
-tui_rgb_t       tui_tool_rgb(tui_tool_type_t type);
+const char *tui_tool_color(tui_tool_type_t type);
+tui_rgb_t tui_tool_rgb(tui_tool_type_t type);
 
 /* ── Async Spinner (single tool) ──────────────────────────────────────── */
 
 typedef struct {
-    pthread_t       thread;
+    pthread_t thread;
     pthread_mutex_t mutex;
-    volatile bool   running;
-    const char     *label;
-    const char     *color;
-    tui_rgb_t       rgb;
-    bool            use_rgb;
-    double          start_time;
+    pthread_cond_t cond; /* wakes spinner thread instantly on stop */
+    volatile bool running;
+    const char *label;
+    const char *color;
+    tui_rgb_t rgb;
+    bool use_rgb;
+    double start_time;
 } tui_async_spinner_t;
 
-void tui_async_spinner_start(tui_async_spinner_t *s, const char *label,
-                             tui_tool_type_t tool_type);
+void tui_async_spinner_start(tui_async_spinner_t *s, const char *label, tui_tool_type_t tool_type);
 /* Display-art tools (e.g. `plot`) — their result is shown in full color rather
  * than a dim one-line preview. tui_print_tool_art prints the full result and
  * returns true for such tools; false otherwise (caller does its dim preview). */
 bool tui_tool_is_display_art(const char *name);
 bool tui_print_tool_art(const char *name, const char *result);
 
-void tui_async_spinner_stop(tui_async_spinner_t *s, bool ok,
-                            const char *result_preview, double elapsed_ms,
-                            const char *suffix);
+void tui_async_spinner_stop(tui_async_spinner_t *s, bool ok, const char *result_preview,
+                            double elapsed_ms, const char *suffix);
 
 /* ── Batch Spinner (multi-tool) ───────────────────────────────────────── */
 
 #define TUI_BATCH_MAX 32
 
 typedef struct {
-    char     name[64];
-    char     args_preview[128];   /* tool args shown inline while spinning */
-    bool     done;
-    bool     ok;
-    char     preview[128];
-    double   elapsed_ms;
+    char name[64];
+    char args_preview[128]; /* tool args shown inline while spinning */
+    bool done;
+    bool ok;
+    char preview[128];
+    double elapsed_ms;
     tui_tool_type_t type;
 } tui_batch_entry_t;
 
 typedef struct {
-    pthread_t        thread;
-    pthread_mutex_t  mutex;
-    volatile bool    running;
+    pthread_t thread;
+    pthread_mutex_t mutex;
+    pthread_cond_t cond; /* wakes spinner thread instantly on stop */
+    volatile bool running;
     tui_batch_entry_t entries[TUI_BATCH_MAX];
-    int              count;
-    double           start_time;
+    int count;
+    double start_time;
 } tui_batch_spinner_t;
 
 void tui_batch_spinner_start(tui_batch_spinner_t *bs, const char **names, int count);
-void tui_batch_spinner_complete(tui_batch_spinner_t *bs, int idx, bool ok,
-                                const char *preview, double elapsed_ms);
+void tui_batch_spinner_complete(tui_batch_spinner_t *bs, int idx, bool ok, const char *preview,
+                                double elapsed_ms);
 void tui_batch_spinner_stop(tui_batch_spinner_t *bs);
 
 /* Aggregate summary line after batch completion */
@@ -513,29 +535,40 @@ void tui_batch_summary(const tui_batch_spinner_t *bs, const char *cost_suffix);
 
 typedef struct {
     pthread_mutex_t mutex;
-    bool     enabled;
-    bool     visible;
-    bool     show_clock;
-    bool     panel_active;  /* true while tui_composer_read is actively reading
-                             * keystrokes — drives dual-state caret color */
-    char     model[64];
-    char     slot_name[64]; /* active workspace slot, empty = default */
-    int      input_tokens;
-    int      output_tokens;
-    double   cost;
-    int      turn;
-    int      tools_used;
-    int      panel_rows;    /* bottom panel rows: top rule + input + status (3) */
-    double   splash_started_at;
+    bool enabled;
+    bool visible;
+    bool show_clock;
+    bool animations_enabled;
+    bool panel_active; /* true while tui_composer_read is actively reading
+                        * keystrokes — drives dual-state caret color */
+    char model[64];
+    char slot_name[64]; /* active workspace slot, empty = default */
+    int input_tokens;
+    int output_tokens;
+    double cost;
+    double budget_limit; /* session cap; <=0 disables budget HUD */
+    double burn_rate;    /* USD/hour EWMA/simple rate supplied by agent */
+    double percent;      /* 0-100 budget consumed */
+    double runway;       /* seconds until exhaustion at burn_rate; <0 unknown */
+    int turn;
+    int tools_used;
+    int panel_rows; /* bottom panel rows: top rule + input + status (3) */
+    double splash_started_at;
+    double motion_started_at;
+    int motion_frame;
 } tui_status_bar_t;
 
 void tui_status_bar_init(tui_status_bar_t *sb, const char *model);
 void tui_status_bar_set_model(tui_status_bar_t *sb, const char *model, const char *slot_name);
-void tui_status_bar_update(tui_status_bar_t *sb, int in_tok, int out_tok,
-                           double cost, int turn, int tools);
+void tui_status_bar_update(tui_status_bar_t *sb, int in_tok, int out_tok, double cost, int turn,
+                           int tools);
+void tui_status_bar_set_budget(tui_status_bar_t *sb, double budget_limit, double burn_rate,
+                               double percent, double runway);
 void tui_status_bar_enable(tui_status_bar_t *sb);
 void tui_status_bar_disable(tui_status_bar_t *sb);
 void tui_status_bar_render(tui_status_bar_t *sb);
+bool tui_motion_enabled(void);
+const char *tui_motion_activity_frame(int frame, bool unicode);
 
 /* ── Input Panel (ephemeral bottom panel) ─────────────────────────────── */
 /* The bottom panel is 3 rows, painted only when reading user input:
@@ -548,10 +581,10 @@ void tui_status_bar_render(tui_status_bar_t *sb);
  * The panel re-renders before the next read. No DECSTBM scroll region:
  * text rendering uses the whole terminal during streaming.
  */
-#define TUI_COMPOSER_PANEL_ROWS   3
-#define TUI_COMPOSER_BUF_CAP      16384
-#define TUI_PANEL_NOTIFY_SLOTS    2
-#define TUI_PANEL_NOTIFY_TTL_S    8.0
+#define TUI_COMPOSER_PANEL_ROWS 3
+#define TUI_COMPOSER_BUF_CAP 16384
+#define TUI_PANEL_NOTIFY_SLOTS 2
+#define TUI_PANEL_NOTIFY_TTL_S 8.0
 
 /* Severity levels for panel notifications. Drives the color. */
 typedef enum {
@@ -567,8 +600,7 @@ typedef enum {
  * thread. text is copied. Auto-expires after TUI_PANEL_NOTIFY_TTL_S seconds.
  * Triggers a repaint of the notification rows.
  */
-void tui_panel_notify(tui_status_bar_t *sb, tui_panel_note_level_t level,
-                      const char *text);
+void tui_panel_notify(tui_status_bar_t *sb, tui_panel_note_level_t level, const char *text);
 
 /* Clear all panel notifications. */
 void tui_panel_notify_clear(tui_status_bar_t *sb);
@@ -579,6 +611,7 @@ void tui_panel_set_active(tui_status_bar_t *sb, bool active);
 void tui_input_panel_render(tui_status_bar_t *sb, const char *prompt_hint);
 void tui_input_panel_clear(tui_status_bar_t *sb);
 void tui_bottom_panel_refresh(tui_status_bar_t *sb, const char *prompt_hint);
+bool tui_prepare_external_output(void);
 
 /* Push cursor down with newlines until it sits just above the input panel
  * area (row `rows - 3`). No-op if cursor already at/past that row. By default
@@ -598,18 +631,25 @@ void tui_pad_to_panel_anchor(void);
  * Returns `out` on success, NULL on EOF/quit.
  * `prompt` is drawn on the first input row before the text; pass NULL for "❯ ".
  */
-char *tui_composer_read(tui_status_bar_t *sb, const char *prompt,
-                        char *out, size_t out_sz);
+char *tui_composer_read(tui_status_bar_t *sb, const char *prompt, char *out, size_t out_sz);
+/* Optional bare-ESC hook. Return true to consume ESC and make the composer
+ * return promptly; return false to keep the normal composer behavior
+ * (dismiss picker/menu, then cancel the input). Used by the agent loop so ESC
+ * can pause an in-flight stream/tool even when the follow-up composer owns
+ * stdin. */
+typedef bool (*tui_composer_escape_hook_t)(void *ctx);
+void tui_composer_set_escape_hook(tui_composer_escape_hook_t hook, void *ctx);
 /* Signal handler hook for Ctrl+C while the composer owns stdin.
  * Returns 0 when no composer is reading, 1 when cancellation was requested,
  * and 2 when an interrupt was already pending. */
 int tui_composer_signal_interrupt(void);
+bool tui_composer_is_reading(void);
 
 /* ── Swarm UI ─────────────────────────────────────────────────────────── */
 typedef struct {
     int id;
     const char *task;
-    const char *status;     /* "running", "done", "error" */
+    const char *status; /* "running", "done", "error" */
     double progress;
     const char *last_output;
 } tui_swarm_entry_t;
@@ -620,7 +660,7 @@ void tui_swarm_panel(tui_swarm_entry_t *entries, int count, int width);
  * 40 Strategic UI Features — New structs, enums, and function signatures
  * ══════════════════════════════════════════════════════════════════════════ */
 
-#include "config.h"  /* tui_features_t */
+#include "config.h" /* tui_features_t */
 
 /* Global feature flags pointer (set by agent.c) */
 extern tui_features_t *g_tui_features;
@@ -639,15 +679,14 @@ void tui_retry_pulse(const char *label, int attempt, int max, double wait_sec);
 /* Append the eighth-block bar of `frac` (0..1) over `cells` columns to a FILE,
  * resolving the partial leading edge to 1/8 of a cell. `empty_glyph` fills the
  * remainder (e.g. "░" or " "). Returns the column count (== cells). */
-int  tui_subpixel_hbar(FILE *out, double frac, int cells,
-                        const char *fill_color, const char *empty_glyph,
-                        const char *empty_color);
+int tui_subpixel_hbar(FILE *out, double frac, int cells, const char *fill_color,
+                      const char *empty_glyph, const char *empty_color);
 
 /* Braille framebuffer: a (px_w × px_h) dot grid backed by
  * ceil(px_w/2) × ceil(px_h/4) character cells. Each set dot lights one of the
  * 8 sub-cell positions. The origin (0,0) is top-left. */
 typedef struct {
-    unsigned char *cells;   /* w_cells * h_cells braille bitmasks */
+    unsigned char *cells; /* w_cells * h_cells braille bitmasks */
     int w_cells, h_cells;
     int px_w, px_h;
 } tui_braille_t;
@@ -655,7 +694,7 @@ typedef struct {
 void tui_braille_init(tui_braille_t *b, int px_w, int px_h);
 void tui_braille_free(tui_braille_t *b);
 void tui_braille_clear(tui_braille_t *b);
-void tui_braille_set(tui_braille_t *b, int x, int y);     /* light dot (x,y) */
+void tui_braille_set(tui_braille_t *b, int x, int y); /* light dot (x,y) */
 void tui_braille_line(tui_braille_t *b, int x0, int y0, int x1, int y1);
 /* Plot `n` values as a connected line auto-scaled to fill the canvas. */
 void tui_braille_plot(tui_braille_t *b, const double *values, int n);
@@ -668,8 +707,7 @@ bool tui_try_sparkline(const char *text);
 /* Maximal-subpixel sparkline: a `rows`-tall Braille line plot (8*rows
  * vertical dots, 2 samples per column). Falls back to tui_sparkline on
  * ASCII-only terminals. rows<=0 defaults to 1. */
-void tui_sparkline_braille(const double *values, int count, int rows,
-                           const char *color);
+void tui_sparkline_braille(const double *values, int count, int rows, const char *color);
 
 /* ── F14: Cached Badge ────────────────────────────────────────────────── */
 void tui_cached_badge(const char *tool_name);
@@ -681,12 +719,11 @@ void tui_context_gauge(int used, int max_tok, int width);
 void tui_compact_flash(int before, int after);
 
 /* ── F22: Prompt Token Counter ────────────────────────────────────────── */
-int  tui_estimate_tokens(const char *text);
+int tui_estimate_tokens(const char *text);
 void tui_prompt_token_display(int est, int remaining);
 
 /* ── F26: IPC Message Line ────────────────────────────────────────────── */
-void tui_ipc_message_line(const char *from, const char *to,
-                           const char *topic, const char *preview);
+void tui_ipc_message_line(const char *from, const char *to, const char *topic, const char *preview);
 
 /* ── F27: Agent Progress Roll-up ──────────────────────────────────────── */
 void tui_agent_rollup(int total, int done, int running, int errored);
@@ -698,7 +735,7 @@ typedef enum {
 } tui_theme_t;
 
 tui_theme_t tui_detect_theme(void);
-void        tui_apply_theme(tui_theme_t theme);
+void tui_apply_theme(tui_theme_t theme);
 
 /* Theme-aware color accessors */
 const char *tui_theme_dim(void);
@@ -706,12 +743,10 @@ const char *tui_theme_bright(void);
 const char *tui_theme_accent(void);
 
 /* ── F30: Section Dividers with Context ───────────────────────────────── */
-void tui_section_divider(int turn, int tools, double cost, const char *model,
-                         double tok_per_sec);
+void tui_section_divider(int turn, int tools, double cost, const char *model, double tok_per_sec);
 /* Enhanced section divider with success/fail/cache/context stats */
-void tui_section_divider_ex(int turn, int tools_ok, int tools_fail,
-                            int cache_hits, double cost, const char *model,
-                            double tok_per_sec, double ctx_pct,
+void tui_section_divider_ex(int turn, int tools_ok, int tools_fail, int cache_hits, double cost,
+                            const char *model, double tok_per_sec, double ctx_pct,
                             const char *git_branch);
 
 /* ── F31: Status Bar Clock ────────────────────────────────────────────── */
@@ -738,28 +773,28 @@ void tui_notify(const char *title, const char *body);
 typedef void (*tui_cadence_flush_cb)(const char *buf, int len, void *ctx);
 
 typedef struct {
-    char   buf[TUI_CADENCE_BUF_SIZE];
-    int    len;
-    double last_flush;     /* timestamp of last flush */
-    double interval;       /* flush interval in seconds (default 0.016) */
+    char buf[TUI_CADENCE_BUF_SIZE];
+    int len;
+    double last_flush; /* timestamp of last flush */
+    double interval;   /* flush interval in seconds (default 0.016) */
     tui_cadence_flush_cb flush_cb;
-    void  *flush_ctx;
+    void *flush_ctx;
 } tui_cadence_t;
 
 void tui_cadence_init(tui_cadence_t *c, tui_cadence_flush_cb cb, void *ctx);
 void tui_cadence_feed(tui_cadence_t *c, const char *text);
-void tui_cadence_flush(tui_cadence_t *c);  /* throttled — holds trailing partial UTF-8 */
-void tui_cadence_drain(tui_cadence_t *c);  /* unconditional — emits all buffered bytes */
+void tui_cadence_flush(tui_cadence_t *c); /* throttled — holds trailing partial UTF-8 */
+void tui_cadence_drain(tui_cadence_t *c); /* unconditional — emits all buffered bytes */
 
 /* ── F4: Collapsible Thinking ─────────────────────────────────────────── */
 #define TUI_THINKING_SUMMARY_MAX 120
 typedef struct {
-    int    char_count;
+    int char_count;
     double start_time;
-    bool   active;
-    char   summary[TUI_THINKING_SUMMARY_MAX]; /* first sentence excerpt */
-    int    summary_len;
-    bool   summary_done;  /* stop capturing after first sentence */
+    bool active;
+    char summary[TUI_THINKING_SUMMARY_MAX]; /* first sentence excerpt */
+    int summary_len;
+    bool summary_done; /* stop capturing after first sentence */
 } tui_thinking_state_t;
 
 void tui_thinking_init(tui_thinking_state_t *t);
@@ -768,8 +803,8 @@ void tui_thinking_end(tui_thinking_state_t *t);
 
 /* ── F5: Live Word Count ──────────────────────────────────────────────── */
 typedef struct {
-    int    words;
-    int    chars;
+    int words;
+    int chars;
     double start_time;
     double last_render;
 } tui_word_counter_t;
@@ -784,10 +819,10 @@ void tui_word_counter_end(tui_word_counter_t *w);
 
 typedef struct {
     double samples[TUI_THROUGHPUT_SAMPLES];
-    int    count;
-    int    head;
+    int count;
+    int head;
     double last_sample_time;
-    int    tokens_since_last;
+    int tokens_since_last;
 } tui_throughput_t;
 
 void tui_throughput_init(tui_throughput_t *t);
@@ -798,22 +833,22 @@ void tui_throughput_render(tui_throughput_t *t);
 #define TUI_FLAME_MAX 32
 
 typedef struct {
-    char   name[64];
+    char name[64];
     double start_ms;
     double end_ms;
-    bool   ok;
+    bool ok;
     tui_tool_type_t type;
 } tui_flame_entry_t;
 
 typedef struct {
     tui_flame_entry_t entries[TUI_FLAME_MAX];
     int count;
-    double epoch_ms;  /* reference start time */
+    double epoch_ms; /* reference start time */
 } tui_flame_t;
 
 void tui_flame_init(tui_flame_t *f);
-void tui_flame_add(tui_flame_t *f, const char *name, double start_ms,
-                    double end_ms, bool ok, tui_tool_type_t type);
+void tui_flame_add(tui_flame_t *f, const char *name, double start_ms, double end_ms, bool ok,
+                   tui_tool_type_t type);
 void tui_flame_render(tui_flame_t *f);
 
 /* ── F10: Tool Dependency Graph ───────────────────────────────────────── */
@@ -822,13 +857,16 @@ void tui_flame_render(tui_flame_t *f);
 
 typedef struct {
     char nodes[TUI_DAG_MAX_NODES][64];
-    int  node_count;
-    struct { int from; int to; } edges[TUI_DAG_MAX_EDGES];
-    int  edge_count;
+    int node_count;
+    struct {
+        int from;
+        int to;
+    } edges[TUI_DAG_MAX_EDGES];
+    int edge_count;
 } tui_dag_t;
 
 void tui_dag_init(tui_dag_t *d);
-int  tui_dag_add_node(tui_dag_t *d, const char *name);
+int tui_dag_add_node(tui_dag_t *d, const char *name);
 void tui_dag_add_edge(tui_dag_t *d, int from, int to);
 void tui_dag_render(tui_dag_t *d);
 
@@ -905,8 +943,8 @@ typedef enum {
     TUI_CHART_HEAT_SQRT,
 } tui_chart_type_t;
 
-void tui_chart(tui_chart_type_t type, const char **labels, const double *values,
-               int count, int width, int height);
+void tui_chart(tui_chart_type_t type, const char **labels, const double *values, int count,
+               int width, int height);
 
 /* ── F7: Citation Footnotes ───────────────────────────────────────────── */
 #define TUI_CITATION_MAX 32
@@ -916,7 +954,7 @@ typedef struct {
     char tool_id[64];
     char preview[128];
     double elapsed_ms;
-    int  index;   /* footnote number */
+    int index; /* footnote number */
 } tui_citation_entry_t;
 
 typedef struct {
@@ -925,8 +963,8 @@ typedef struct {
 } tui_citation_t;
 
 void tui_citation_init(tui_citation_t *c);
-int  tui_citation_add(tui_citation_t *c, const char *tool_name,
-                       const char *tool_id, const char *preview, double elapsed_ms);
+int tui_citation_add(tui_citation_t *c, const char *tool_name, const char *tool_id,
+                     const char *preview, double elapsed_ms);
 void tui_citation_render(tui_citation_t *c);
 
 /* ── F3: Inline Diff Rendering ────────────────────────────────────────── */
@@ -941,8 +979,8 @@ void tui_json_tree(const char *json, int max_depth, bool color);
 
 /* ── F16: Conversation Minimap ────────────────────────────────────────── */
 typedef struct {
-    char type;    /* 'u'=user, 'a'=assistant, 't'=tool */
-    int  tokens;  /* estimated tokens */
+    char type;  /* 'u'=user, 'a'=assistant, 't'=tool */
+    int tokens; /* estimated tokens */
 } tui_minimap_entry_t;
 
 void tui_minimap_render(const tui_minimap_entry_t *entries, int count, int height);
@@ -952,8 +990,8 @@ void tui_minimap_render(const tui_minimap_entry_t *entries, int count, int heigh
 
 typedef struct {
     char prompts[TUI_BRANCH_HISTORY][256];
-    int  count;
-    int  head;
+    int count;
+    int head;
 } tui_branch_t;
 
 void tui_branch_init(tui_branch_t *b);
@@ -965,11 +1003,11 @@ bool tui_branch_detect(tui_branch_t *b, const char *prompt);
 
 typedef struct {
     char history[TUI_GHOST_MAX][256];
-    int  count;
+    int count;
 } tui_ghost_t;
 
-void        tui_ghost_init(tui_ghost_t *g);
-void        tui_ghost_push(tui_ghost_t *g, const char *cmd);
+void tui_ghost_init(tui_ghost_t *g);
+void tui_ghost_push(tui_ghost_t *g, const char *cmd);
 const char *tui_ghost_match(tui_ghost_t *g, const char *prefix);
 
 /* ── F20: Multi-line Input Syntax Highlighting ────────────────────────── */
@@ -977,8 +1015,7 @@ bool tui_is_code_paste(const char *text);
 void tui_highlight_input(const char *text, FILE *out);
 
 /* ── F23: Drag-Drop Preview ───────────────────────────────────────────── */
-void tui_image_preview_badge(const char *path, const char *media_type,
-                              long size, int w, int h);
+void tui_image_preview_badge(const char *path, const char *media_type, long size, int w, int h);
 
 /* ── F24: Slash Command Palette ───────────────────────────────────────── */
 typedef struct {
@@ -999,8 +1036,8 @@ void tui_composer_set_slash_commands(const tui_cmd_entry_t *cmds, int count);
 
 /* ── F25: Agent Topology ──────────────────────────────────────────────── */
 typedef struct {
-    int         id;
-    int         parent_id;
+    int id;
+    int parent_id;
     const char *task;
     const char *status;
 } tui_agent_node_t;
@@ -1010,9 +1047,9 @@ void tui_agent_topology(const tui_agent_node_t *agents, int count);
 /* ── F28: Swarm Cost Aggregation ──────────────────────────────────────── */
 typedef struct {
     const char *name;
-    double      cost;
-    int         in_tok;
-    int         out_tok;
+    double cost;
+    int in_tok;
+    int out_tok;
 } tui_swarm_cost_entry_t;
 
 void tui_swarm_cost(const tui_swarm_cost_entry_t *agents, int count, double total);
@@ -1020,9 +1057,9 @@ void tui_swarm_cost(const tui_swarm_cost_entry_t *agents, int count, double tota
 /* ── F33: Smooth Scroll ───────────────────────────────────────────────── */
 typedef struct {
     const char **lines;
-    int  line_count;
-    int  offset;      /* current scroll position */
-    int  page_size;   /* lines per page */
+    int line_count;
+    int offset;    /* current scroll position */
+    int page_size; /* lines per page */
 } tui_scroller_t;
 
 void tui_scroller_init(tui_scroller_t *s, const char **lines, int count);
@@ -1031,18 +1068,17 @@ bool tui_scroller_handle_key(tui_scroller_t *s, int ch);
 
 /* ── F40: Latency Budget Breakdown ────────────────────────────────────── */
 typedef struct {
-    double dns_ms;          /* CURLINFO_NAMELOOKUP_TIME */
-    double connect_ms;      /* CURLINFO_CONNECT_TIME */
-    double tls_ms;          /* CURLINFO_APPCONNECT_TIME */
-    double ttfb_ms;         /* CURLINFO_STARTTRANSFER_TIME */
-    double total_ms;        /* CURLINFO_TOTAL_TIME */
+    double dns_ms;     /* CURLINFO_NAMELOOKUP_TIME */
+    double connect_ms; /* CURLINFO_CONNECT_TIME */
+    double tls_ms;     /* CURLINFO_APPCONNECT_TIME */
+    double ttfb_ms;    /* CURLINFO_STARTTRANSFER_TIME */
+    double total_ms;   /* CURLINFO_TOTAL_TIME */
 } tui_latency_breakdown_t;
 
 void tui_latency_waterfall(const tui_latency_breakdown_t *b);
 
 /* ── F18: Session Diff on Load ────────────────────────────────────────── */
-void tui_session_diff(int msg_count, int tool_calls, int est_tokens,
-                       const char *model);
+void tui_session_diff(int msg_count, int tool_calls, int est_tokens, const char *model);
 
 /* ── F1: Token Heatmap ────────────────────────────────────────────────── */
 void tui_heatmap_word(const char *word, int len, FILE *out);
@@ -1064,46 +1100,46 @@ void tui_status_bar_set_clock(tui_status_bar_t *sb, bool show);
  * Notifications can persist across turns or auto-dismiss after TTL. */
 
 typedef enum {
-    TUI_NOTIF_DEBUG,       /* dim, auto-dismiss fast */
-    TUI_NOTIF_INFO,        /* cyan, standard TTL */
-    TUI_NOTIF_SUCCESS,     /* green, standard TTL */
-    TUI_NOTIF_WARNING,     /* yellow, longer TTL */
-    TUI_NOTIF_ERROR,       /* red, persists until dismissed */
-    TUI_NOTIF_CRITICAL,    /* bold red + bell, persists */
+    TUI_NOTIF_DEBUG,    /* dim, auto-dismiss fast */
+    TUI_NOTIF_INFO,     /* cyan, standard TTL */
+    TUI_NOTIF_SUCCESS,  /* green, standard TTL */
+    TUI_NOTIF_WARNING,  /* yellow, longer TTL */
+    TUI_NOTIF_ERROR,    /* red, persists until dismissed */
+    TUI_NOTIF_CRITICAL, /* bold red + bell, persists */
 } tui_notif_level_t;
 
-#define TUI_NOTIF_QUEUE_MAX  32
-#define TUI_NOTIF_MSG_MAX    256
-#define TUI_NOTIF_TAG_MAX    32
+#define TUI_NOTIF_QUEUE_MAX 32
+#define TUI_NOTIF_MSG_MAX 256
+#define TUI_NOTIF_TAG_MAX 32
 
 typedef struct {
-    int               id;
+    int id;
     tui_notif_level_t level;
-    char              msg[TUI_NOTIF_MSG_MAX];
-    char              tag[TUI_NOTIF_TAG_MAX];     /* grouping tag (e.g. "api", "tool") */
-    double            created_at;                  /* epoch seconds */
-    double            ttl_sec;                     /* 0 = persist forever */
-    bool              dismissed;
-    bool              seen;                        /* rendered at least once */
-    int               count;                       /* coalesced duplicate count */
+    char msg[TUI_NOTIF_MSG_MAX];
+    char tag[TUI_NOTIF_TAG_MAX]; /* grouping tag (e.g. "api", "tool") */
+    double created_at;           /* epoch seconds */
+    double ttl_sec;              /* 0 = persist forever */
+    bool dismissed;
+    bool seen; /* rendered at least once */
+    int count; /* coalesced duplicate count */
 } tui_notif_t;
 
 typedef struct {
-    pthread_mutex_t  mutex;
-    tui_notif_t      queue[TUI_NOTIF_QUEUE_MAX];
-    int              count;
-    int              next_id;
-    int              unread;
+    pthread_mutex_t mutex;
+    tui_notif_t queue[TUI_NOTIF_QUEUE_MAX];
+    int count;
+    int next_id;
+    int unread;
 } tui_notif_queue_t;
 
 void tui_notif_queue_init(tui_notif_queue_t *q);
-int  tui_notif_push(tui_notif_queue_t *q, tui_notif_level_t level,
-                     const char *tag, const char *fmt, ...);
+int tui_notif_push(tui_notif_queue_t *q, tui_notif_level_t level, const char *tag, const char *fmt,
+                   ...);
 void tui_notif_dismiss(tui_notif_queue_t *q, int id);
 void tui_notif_dismiss_tag(tui_notif_queue_t *q, const char *tag);
-void tui_notif_gc(tui_notif_queue_t *q);           /* expire TTL'd entries */
-void tui_notif_render(tui_notif_queue_t *q);        /* render visible stack */
-int  tui_notif_unread(tui_notif_queue_t *q);
+void tui_notif_gc(tui_notif_queue_t *q);     /* expire TTL'd entries */
+void tui_notif_render(tui_notif_queue_t *q); /* render visible stack */
+int tui_notif_unread(tui_notif_queue_t *q);
 void tui_notif_clear_all(tui_notif_queue_t *q);
 
 /* ── Toast System ────────────────────────────────────────────────────── */
@@ -1114,78 +1150,77 @@ void tui_notif_clear_all(tui_notif_queue_t *q);
 #define TUI_TOAST_MSG_MAX 128
 
 typedef struct {
-    char   msg[TUI_TOAST_MSG_MAX];
-    char   icon[8];             /* emoji/unicode prefix */
-    double expire_at;           /* epoch seconds */
-    bool   active;
+    char msg[TUI_TOAST_MSG_MAX];
+    char icon[8];     /* emoji/unicode prefix */
+    double expire_at; /* epoch seconds */
+    bool active;
     tui_notif_level_t level;
 } tui_toast_entry_t;
 
 typedef struct {
-    pthread_mutex_t   mutex;
+    pthread_mutex_t mutex;
     tui_toast_entry_t toasts[TUI_TOAST_MAX];
-    int               count;
-    pthread_t         thread;
-    volatile bool     running;
+    int count;
+    pthread_t thread;
+    volatile bool running;
 } tui_toast_t;
 
 void tui_toast_init(tui_toast_t *t);
-void tui_toast_show(tui_toast_t *t, tui_notif_level_t level,
-                     double duration_sec, const char *fmt, ...);
-void tui_toast_tick(tui_toast_t *t);   /* expire old toasts, render active */
+void tui_toast_show(tui_toast_t *t, tui_notif_level_t level, double duration_sec, const char *fmt,
+                    ...);
+void tui_toast_tick(tui_toast_t *t); /* expire old toasts, render active */
 void tui_toast_destroy(tui_toast_t *t);
 
 /* ── State Machine Framework ─────────────────────────────────────────── */
 /* Generic finite state machine for UI components.
  * Supports enter/exit callbacks, guarded transitions, and state history. */
 
-#define TUI_FSM_MAX_STATES    16
-#define TUI_FSM_MAX_TRANS     64
-#define TUI_FSM_HISTORY_SIZE  32
-#define TUI_FSM_NAME_MAX      32
+#define TUI_FSM_MAX_STATES 16
+#define TUI_FSM_MAX_TRANS 64
+#define TUI_FSM_HISTORY_SIZE 32
+#define TUI_FSM_NAME_MAX 32
 
 typedef void (*tui_fsm_action_fn)(void *ctx);
 typedef bool (*tui_fsm_guard_fn)(void *ctx);
 
 typedef struct {
-    char              name[TUI_FSM_NAME_MAX];
+    char name[TUI_FSM_NAME_MAX];
     tui_fsm_action_fn on_enter;
     tui_fsm_action_fn on_exit;
-    tui_fsm_action_fn on_tick;   /* called every render cycle while in this state */
+    tui_fsm_action_fn on_tick; /* called every render cycle while in this state */
 } tui_fsm_state_t;
 
 typedef struct {
-    int               from;       /* state index */
-    int               to;         /* state index */
-    int               event;      /* event ID */
-    tui_fsm_guard_fn  guard;      /* NULL = always allowed */
-    tui_fsm_action_fn action;     /* transition action */
+    int from;                 /* state index */
+    int to;                   /* state index */
+    int event;                /* event ID */
+    tui_fsm_guard_fn guard;   /* NULL = always allowed */
+    tui_fsm_action_fn action; /* transition action */
 } tui_fsm_trans_t;
 
 typedef struct {
-    char              name[TUI_FSM_NAME_MAX];   /* FSM name for debugging */
-    tui_fsm_state_t   states[TUI_FSM_MAX_STATES];
-    int               state_count;
-    tui_fsm_trans_t   transitions[TUI_FSM_MAX_TRANS];
-    int               trans_count;
-    int               current;                    /* current state index */
-    int               history[TUI_FSM_HISTORY_SIZE];
-    int               history_len;
-    void             *ctx;                        /* user context */
-    double            state_entered_at;           /* for time-in-state queries */
+    char name[TUI_FSM_NAME_MAX]; /* FSM name for debugging */
+    tui_fsm_state_t states[TUI_FSM_MAX_STATES];
+    int state_count;
+    tui_fsm_trans_t transitions[TUI_FSM_MAX_TRANS];
+    int trans_count;
+    int current; /* current state index */
+    int history[TUI_FSM_HISTORY_SIZE];
+    int history_len;
+    void *ctx;               /* user context */
+    double state_entered_at; /* for time-in-state queries */
 } tui_fsm_t;
 
 void tui_fsm_init(tui_fsm_t *fsm, const char *name, void *ctx);
-int  tui_fsm_add_state(tui_fsm_t *fsm, const char *name,
-                        tui_fsm_action_fn on_enter, tui_fsm_action_fn on_exit,
-                        tui_fsm_action_fn on_tick);
-void tui_fsm_add_transition(tui_fsm_t *fsm, int from, int to, int event,
-                             tui_fsm_guard_fn guard, tui_fsm_action_fn action);
-bool tui_fsm_send(tui_fsm_t *fsm, int event);   /* returns true if transition occurred */
-void tui_fsm_tick(tui_fsm_t *fsm);               /* calls current state's on_tick */
+int tui_fsm_add_state(tui_fsm_t *fsm, const char *name, tui_fsm_action_fn on_enter,
+                      tui_fsm_action_fn on_exit, tui_fsm_action_fn on_tick);
+void tui_fsm_add_transition(tui_fsm_t *fsm, int from, int to, int event, tui_fsm_guard_fn guard,
+                            tui_fsm_action_fn action);
+bool tui_fsm_send(tui_fsm_t *fsm, int event); /* returns true if transition occurred */
+void tui_fsm_tick(tui_fsm_t *fsm);            /* calls current state's on_tick */
 const char *tui_fsm_current_name(const tui_fsm_t *fsm);
 double tui_fsm_time_in_state(const tui_fsm_t *fsm);
-void tui_fsm_debug(const tui_fsm_t *fsm);        /* print state + history */
+void tui_fsm_debug(const tui_fsm_t *fsm); /* print state + history */
 
 /* ── Render Context ──────────────────────────────────────────────────── */
 /* Tracks what's currently displayed on the terminal for smart redraws.
@@ -1207,25 +1242,25 @@ typedef enum {
 
 typedef struct {
     tui_slot_type_t type;
-    int             row;          /* terminal row (-1 = floating) */
-    int             height;       /* lines occupied */
-    char            content[TUI_RENDER_CONTENT_MAX]; /* last rendered snapshot */
-    bool            dirty;        /* needs redraw */
-    double          last_render;  /* timestamp */
-    int             z_order;      /* stacking priority */
+    int row;                              /* terminal row (-1 = floating) */
+    int height;                           /* lines occupied */
+    char content[TUI_RENDER_CONTENT_MAX]; /* last rendered snapshot */
+    bool dirty;                           /* needs redraw */
+    double last_render;                   /* timestamp */
+    int z_order;                          /* stacking priority */
 } tui_render_slot_t;
 
 typedef struct {
     tui_render_slot_t slots[TUI_RENDER_SLOTS_MAX];
-    int               slot_count;
-    int               term_width;
-    int               term_height;
-    bool              layout_dirty;
-    pthread_mutex_t   mutex;
+    int slot_count;
+    int term_width;
+    int term_height;
+    bool layout_dirty;
+    pthread_mutex_t mutex;
 } tui_render_ctx_t;
 
 void tui_render_ctx_init(tui_render_ctx_t *rc);
-int  tui_render_slot_alloc(tui_render_ctx_t *rc, tui_slot_type_t type, int z_order);
+int tui_render_slot_alloc(tui_render_ctx_t *rc, tui_slot_type_t type, int z_order);
 void tui_render_slot_update(tui_render_ctx_t *rc, int slot_id, const char *content);
 void tui_render_slot_free(tui_render_ctx_t *rc, int slot_id);
 void tui_render_slot_dirty(tui_render_ctx_t *rc, int slot_id);
@@ -1236,40 +1271,40 @@ void tui_render_ctx_destroy(tui_render_ctx_t *rc);
 /* Named phases with ETA estimation, throughput tracking, and phase transitions. */
 
 #define TUI_PROGRESS_PHASES_MAX 8
-#define TUI_PROGRESS_NAME_MAX   48
+#define TUI_PROGRESS_NAME_MAX 48
 
 typedef struct {
-    char   name[TUI_PROGRESS_NAME_MAX];
-    double weight;     /* relative weight for total progress */
-    double progress;   /* 0.0 - 1.0 within this phase */
+    char name[TUI_PROGRESS_NAME_MAX];
+    double weight;   /* relative weight for total progress */
+    double progress; /* 0.0 - 1.0 within this phase */
     double start_time;
-    double end_time;   /* 0 = not finished */
-    bool   active;
-    bool   complete;
+    double end_time; /* 0 = not finished */
+    bool active;
+    bool complete;
 } tui_progress_phase_t;
 
 typedef struct {
-    char                  title[TUI_PROGRESS_NAME_MAX];
-    tui_progress_phase_t  phases[TUI_PROGRESS_PHASES_MAX];
-    int                   phase_count;
-    int                   current_phase;
-    double                start_time;
-    double                last_render;
+    char title[TUI_PROGRESS_NAME_MAX];
+    tui_progress_phase_t phases[TUI_PROGRESS_PHASES_MAX];
+    int phase_count;
+    int current_phase;
+    double start_time;
+    double last_render;
     /* ETA estimation via exponential moving average */
-    double                ema_rate;     /* units per second */
-    double                ema_alpha;    /* smoothing factor */
-    pthread_mutex_t       mutex;
+    double ema_rate;  /* units per second */
+    double ema_alpha; /* smoothing factor */
+    pthread_mutex_t mutex;
 } tui_multi_progress_t;
 
-void   tui_multi_progress_init(tui_multi_progress_t *mp, const char *title);
-int    tui_multi_progress_add_phase(tui_multi_progress_t *mp, const char *name, double weight);
-void   tui_multi_progress_start_phase(tui_multi_progress_t *mp, int phase_idx);
-void   tui_multi_progress_update(tui_multi_progress_t *mp, double progress);
-void   tui_multi_progress_complete_phase(tui_multi_progress_t *mp);
-void   tui_multi_progress_render(tui_multi_progress_t *mp);
+void tui_multi_progress_init(tui_multi_progress_t *mp, const char *title);
+int tui_multi_progress_add_phase(tui_multi_progress_t *mp, const char *name, double weight);
+void tui_multi_progress_start_phase(tui_multi_progress_t *mp, int phase_idx);
+void tui_multi_progress_update(tui_multi_progress_t *mp, double progress);
+void tui_multi_progress_complete_phase(tui_multi_progress_t *mp);
+void tui_multi_progress_render(tui_multi_progress_t *mp);
 double tui_multi_progress_total(tui_multi_progress_t *mp);   /* 0.0 - 1.0 */
 double tui_multi_progress_eta_sec(tui_multi_progress_t *mp); /* estimated seconds remaining */
-void   tui_multi_progress_destroy(tui_multi_progress_t *mp);
+void tui_multi_progress_destroy(tui_multi_progress_t *mp);
 
 /* ── Event Bus ───────────────────────────────────────────────────────── */
 /* Lightweight pub/sub for decoupled UI updates. Components subscribe
@@ -1300,16 +1335,37 @@ typedef enum {
 
 typedef struct {
     tui_event_type_t type;
-    const char      *source;     /* component name */
-    double           timestamp;
+    const char *source; /* component name */
+    double timestamp;
     union {
-        struct { const char *text; int len; }        text;
-        struct { const char *name; const char *id; } tool;
-        struct { double pct; const char *label; }    progress;
-        struct { int used; int max; }                context;
-        struct { double total; double delta; }       cost;
-        struct { int code; const char *msg; }        error;
-        struct { int key; void *data; }              custom;
+        struct {
+            const char *text;
+            int len;
+        } text;
+        struct {
+            const char *name;
+            const char *id;
+        } tool;
+        struct {
+            double pct;
+            const char *label;
+        } progress;
+        struct {
+            int used;
+            int max;
+        } context;
+        struct {
+            double total;
+            double delta;
+        } cost;
+        struct {
+            int code;
+            const char *msg;
+        } error;
+        struct {
+            int key;
+            void *data;
+        } custom;
     } data;
 } tui_event_t;
 
@@ -1318,29 +1374,29 @@ typedef void (*tui_event_handler_fn)(const tui_event_t *event, void *ctx);
 #define TUI_EVT_SUBS_MAX 64
 
 typedef struct {
-    tui_event_type_t      type;
-    tui_event_handler_fn  handler;
-    void                 *ctx;
-    bool                  active;
+    tui_event_type_t type;
+    tui_event_handler_fn handler;
+    void *ctx;
+    bool active;
 } tui_evt_sub_t;
 
 typedef struct {
-    tui_evt_sub_t   subs[TUI_EVT_SUBS_MAX];
-    int             sub_count;
+    tui_evt_sub_t subs[TUI_EVT_SUBS_MAX];
+    int sub_count;
+    int removed_count; /* Track removed subs for compaction triggering */
     pthread_mutex_t mutex;
     /* Ring buffer for recent events (debugging/replay) */
-    tui_event_t     history[64];
-    int             history_head;
-    int             history_count;
+    tui_event_t history[64];
+    int history_head;
+    int history_count;
 } tui_event_bus_t;
 
 void tui_event_bus_init(tui_event_bus_t *bus);
-int  tui_event_subscribe(tui_event_bus_t *bus, tui_event_type_t type,
-                          tui_event_handler_fn handler, void *ctx);
+int tui_event_subscribe(tui_event_bus_t *bus, tui_event_type_t type, tui_event_handler_fn handler,
+                        void *ctx);
 void tui_event_unsubscribe(tui_event_bus_t *bus, int sub_id);
 void tui_event_emit(tui_event_bus_t *bus, const tui_event_t *event);
-void tui_event_emit_simple(tui_event_bus_t *bus, tui_event_type_t type,
-                            const char *source);
+void tui_event_emit_simple(tui_event_bus_t *bus, tui_event_type_t type, const char *source);
 void tui_event_bus_dump(const tui_event_bus_t *bus, int max_events);
 void tui_event_bus_destroy(tui_event_bus_t *bus);
 
@@ -1352,8 +1408,8 @@ typedef enum {
     TUI_STREAM_IDLE,
     TUI_STREAM_THINKING,
     TUI_STREAM_TEXT,
-    TUI_STREAM_TOOL_PENDING,    /* tool announced, input accumulating */
-    TUI_STREAM_TOOL_RUNNING,    /* tool executing */
+    TUI_STREAM_TOOL_PENDING, /* tool announced, input accumulating */
+    TUI_STREAM_TOOL_RUNNING, /* tool executing */
     TUI_STREAM_TOOL_COMPLETE,
     TUI_STREAM_DONE,
     TUI_STREAM_ERROR,
@@ -1361,27 +1417,26 @@ typedef enum {
 
 typedef struct {
     tui_stream_phase_t phase;
-    double             phase_start;
-    int                thinking_tokens;
-    int                text_tokens;
-    int                tool_count;
-    int                tool_errors;
-    double             total_tool_ms;
-    char               current_tool[64];
+    double phase_start;
+    int thinking_tokens;
+    int text_tokens;
+    int tool_count;
+    int tool_errors;
+    double total_tool_ms;
+    char current_tool[64];
     /* Throughput tracking */
-    int                tokens_this_second;
-    double             last_second;
-    double             peak_tok_per_sec;
-    double             avg_tok_per_sec;
-    int                sample_count;
+    int tokens_this_second;
+    double last_second;
+    double peak_tok_per_sec;
+    double avg_tok_per_sec;
+    int sample_count;
 } tui_stream_state_t;
 
-void              tui_stream_state_init(tui_stream_state_t *ss);
-void              tui_stream_state_transition(tui_stream_state_t *ss,
-                                              tui_stream_phase_t new_phase);
-void              tui_stream_state_token(tui_stream_state_t *ss, int count);
-void              tui_stream_state_render_badge(const tui_stream_state_t *ss);
-const char       *tui_stream_phase_name(tui_stream_phase_t phase);
+void tui_stream_state_init(tui_stream_state_t *ss);
+void tui_stream_state_transition(tui_stream_state_t *ss, tui_stream_phase_t new_phase);
+void tui_stream_state_token(tui_stream_state_t *ss, int count);
+void tui_stream_state_render_badge(const tui_stream_state_t *ss);
+const char *tui_stream_phase_name(tui_stream_phase_t phase);
 tui_stream_phase_t tui_stream_state_phase(const tui_stream_state_t *ss);
 
 /* ── Stream Heartbeat (anti-hang visual feedback) ─────────────────────── */
@@ -1392,17 +1447,18 @@ tui_stream_phase_t tui_stream_state_phase(const tui_stream_state_t *ss);
  * any visible output fires (text, thinking, tool start). */
 
 typedef struct {
-    pthread_t       thread;
+    pthread_t thread;
     pthread_mutex_t mutex;
-    volatile bool   running;        /* false → thread should exit */
-    volatile bool   visible;        /* heartbeat indicator currently on screen */
-    double          last_poke;      /* timestamp of last visible output */
-    double          start_time;     /* when stream started */
-    double          silence_thresh; /* seconds before showing indicator (def 2.0) */
-    unsigned long   bytes_recv;     /* total bytes received from curl */
-    const char     *phase_label;    /* current phase hint (nullable) */
-    int             poke_count;     /* total pokes received */
-    int             phase_changes;  /* number of phase transitions */
+    pthread_cond_t cond;      /* wakes indicator thread instantly on stop */
+    volatile bool running;    /* false → thread should exit */
+    volatile bool visible;    /* heartbeat indicator currently on screen */
+    double last_poke;         /* timestamp of last visible output */
+    double start_time;        /* when stream started */
+    double silence_thresh;    /* seconds before showing indicator (def 2.0) */
+    unsigned long bytes_recv; /* total bytes received from curl */
+    const char *phase_label;  /* current phase hint (nullable) */
+    int poke_count;           /* total pokes received */
+    int phase_changes;        /* number of phase transitions */
 } tui_stream_heartbeat_t;
 
 void tui_stream_heartbeat_start(tui_stream_heartbeat_t *hb);
@@ -1430,47 +1486,47 @@ void tui_stream_heartbeat_stop(tui_stream_heartbeat_t *hb);
  * Inspired by Claude Code's "throttled render" pattern:
  * leading: true (react immediately), trailing: true (coalesce). */
 
-#define TUI_OUTQ_SIZE        4096  /* ring buffer entries */
-#define TUI_OUTQ_MSG_MAX     2048  /* max bytes per queued message */
-#define TUI_OUTQ_TICK_MS     16    /* render tick interval (~60 fps) */
+#define TUI_OUTQ_SIZE 4096    /* ring buffer entries */
+#define TUI_OUTQ_MSG_MAX 2048 /* max bytes per queued message */
+#define TUI_OUTQ_TICK_MS 16   /* render tick interval (~60 fps) */
 
 typedef enum {
-    TUI_OUT_TEXT,          /* raw text to stderr */
-    TUI_OUT_CLEAR_LINE,    /* \r\033[K */
-    TUI_OUT_CURSOR_MOVE,   /* ESC[row;colH */
-    TUI_OUT_STYLE,         /* ESC[...m */
-    TUI_OUT_TITLE,         /* OSC 2 title */
-    TUI_OUT_BELL,          /* \a */
-    TUI_OUT_FLUSH,         /* force immediate flush */
+    TUI_OUT_TEXT,        /* raw text to stderr */
+    TUI_OUT_CLEAR_LINE,  /* \r\033[K */
+    TUI_OUT_CURSOR_MOVE, /* ESC[row;colH */
+    TUI_OUT_STYLE,       /* ESC[...m */
+    TUI_OUT_TITLE,       /* OSC 2 title */
+    TUI_OUT_BELL,        /* \a */
+    TUI_OUT_FLUSH,       /* force immediate flush */
 } tui_out_type_t;
 
 typedef struct {
     tui_out_type_t type;
-    int            priority;     /* higher = rendered first within tick */
-    int            len;
-    char           data[TUI_OUTQ_MSG_MAX];
+    int priority; /* higher = rendered first within tick */
+    int len;
+    char data[TUI_OUTQ_MSG_MAX];
 } tui_out_entry_t;
 
 typedef struct {
-    tui_out_entry_t *ring;         /* ring buffer */
-    int              head;         /* write position */
-    int              tail;         /* read position */
-    int              capacity;
-    int              count;        /* current entries */
-    int              dropped;      /* overflow drops (diagnostic) */
+    tui_out_entry_t *ring; /* ring buffer */
+    int head;              /* write position */
+    int tail;              /* read position */
+    int capacity;
+    int count;   /* current entries */
+    int dropped; /* overflow drops (diagnostic) */
 
-    pthread_mutex_t  mutex;
-    pthread_cond_t   cond;         /* signal render thread */
-    pthread_t        render_thread;
-    volatile bool    running;
+    pthread_mutex_t mutex;
+    pthread_cond_t cond; /* signal render thread */
+    pthread_t render_thread;
+    volatile bool running;
 
-    FILE            *out;          /* output target (stderr) */
+    FILE *out; /* output target (stderr) */
 
     /* Statistics */
-    int              total_writes;
-    int              total_flushes;
-    double           total_flush_ms;
-    double           max_flush_ms;
+    int total_writes;
+    int total_flushes;
+    double total_flush_ms;
+    double max_flush_ms;
 } tui_output_queue_t;
 
 /* Initialize the output queue and start the render thread */
@@ -1495,9 +1551,8 @@ void tui_outq_clear_line(tui_output_queue_t *q);
 void tui_outq_flush_sync(tui_output_queue_t *q);
 
 /* Get queue statistics */
-void tui_outq_stats(const tui_output_queue_t *q,
-                     int *total_writes, int *total_flushes,
-                     int *dropped, double *avg_flush_ms);
+void tui_outq_stats(const tui_output_queue_t *q, int *total_writes, int *total_flushes,
+                    int *dropped, double *avg_flush_ms);
 
 /* Global output queue (initialized in agent_run, available everywhere) */
 extern tui_output_queue_t *g_outq;
@@ -1508,26 +1563,26 @@ extern tui_output_queue_t *g_outq;
  * proper state transitions and callbacks. */
 
 /* FSM event IDs for streaming */
-#define TUI_FSM_EVT_STREAM_START    1
-#define TUI_FSM_EVT_THINKING_START  2
-#define TUI_FSM_EVT_THINKING_END    3
-#define TUI_FSM_EVT_TEXT_START      4
-#define TUI_FSM_EVT_TOOL_START      5
-#define TUI_FSM_EVT_TOOL_COMPLETE   6
-#define TUI_FSM_EVT_STREAM_END      7
-#define TUI_FSM_EVT_ERROR           8
-#define TUI_FSM_EVT_INTERRUPT       9
-#define TUI_FSM_EVT_RESUME          10
+#define TUI_FSM_EVT_STREAM_START 1
+#define TUI_FSM_EVT_THINKING_START 2
+#define TUI_FSM_EVT_THINKING_END 3
+#define TUI_FSM_EVT_TEXT_START 4
+#define TUI_FSM_EVT_TOOL_START 5
+#define TUI_FSM_EVT_TOOL_COMPLETE 6
+#define TUI_FSM_EVT_STREAM_END 7
+#define TUI_FSM_EVT_ERROR 8
+#define TUI_FSM_EVT_INTERRUPT 9
+#define TUI_FSM_EVT_RESUME 10
 
 /* State indices — match tui_streaming_fsm_create() order */
-#define TUI_STREAM_ST_IDLE          0
-#define TUI_STREAM_ST_THINKING      1
-#define TUI_STREAM_ST_TEXT          2
-#define TUI_STREAM_ST_TOOL_PENDING  3
-#define TUI_STREAM_ST_TOOL_RUNNING  4
+#define TUI_STREAM_ST_IDLE 0
+#define TUI_STREAM_ST_THINKING 1
+#define TUI_STREAM_ST_TEXT 2
+#define TUI_STREAM_ST_TOOL_PENDING 3
+#define TUI_STREAM_ST_TOOL_RUNNING 4
 #define TUI_STREAM_ST_TOOL_COMPLETE 5
-#define TUI_STREAM_ST_DONE          6
-#define TUI_STREAM_ST_ERROR         7
+#define TUI_STREAM_ST_DONE 6
+#define TUI_STREAM_ST_ERROR 7
 
 /* Create a pre-wired streaming FSM with all states and transitions.
  * ctx is passed to all callbacks (typically agent's callback context). */
@@ -1548,36 +1603,36 @@ void tui_streaming_fsm_create(tui_fsm_t *fsm, void *ctx);
 typedef void (*tui_anim_cb)(double elapsed_ms, void *ctx);
 
 typedef struct {
-    tui_anim_cb  callback;
-    void        *ctx;
-    bool         active;
-    bool         keep_alive;  /* false = pause when offscreen */
+    tui_anim_cb callback;
+    void *ctx;
+    bool active;
+    bool keep_alive; /* false = pause when offscreen */
 } tui_anim_sub_t;
 
 typedef struct {
-    pthread_t        thread;
-    pthread_mutex_t  mutex;
-    volatile bool    running;
+    pthread_t thread;
+    pthread_mutex_t mutex;
+    pthread_cond_t cond; /* wakes clock thread on subscribe/activate/stop */
+    volatile bool running;
 
-    tui_anim_sub_t   subs[TUI_ANIM_MAX_SUBS];
-    int              sub_count;
-    int              active_count;   /* subs with keep_alive=true */
+    tui_anim_sub_t subs[TUI_ANIM_MAX_SUBS];
+    int sub_count;
+    int active_count; /* subs with keep_alive=true */
 
-    double           start_time;     /* epoch of clock start */
-    double           tick_time;      /* current synchronized tick time */
-    int              interval_ms;    /* tick interval (default 16ms) */
+    double start_time; /* epoch of clock start */
+    double tick_time;  /* current synchronized tick time */
+    int interval_ms;   /* tick interval (default 16ms) */
 
     /* Diagnostics */
-    int              total_ticks;
-    double           max_tick_ms;
+    int total_ticks;
+    double max_tick_ms;
 } tui_anim_clock_t;
 
 void tui_anim_clock_init(tui_anim_clock_t *clk, int interval_ms);
 void tui_anim_clock_destroy(tui_anim_clock_t *clk);
 
 /* Subscribe a callback. Returns subscriber ID. */
-int  tui_anim_subscribe(tui_anim_clock_t *clk, tui_anim_cb callback,
-                          void *ctx, bool keep_alive);
+int tui_anim_subscribe(tui_anim_clock_t *clk, tui_anim_cb callback, void *ctx, bool keep_alive);
 void tui_anim_unsubscribe(tui_anim_clock_t *clk, int sub_id);
 
 /* Pause/resume a subscriber (e.g., when offscreen) */
@@ -1594,46 +1649,45 @@ extern tui_anim_clock_t *g_anim_clock;
 /* Avoids full redraws. Only writes cells that changed since last frame.
  * Inspired by Claude Code's output.ts screen buffer system. */
 
-#define SCRBUF_MAX_WIDTH   512
-#define SCRBUF_MAX_HEIGHT  128
+#define SCRBUF_MAX_WIDTH 512
+#define SCRBUF_MAX_HEIGHT 128
 
 typedef struct {
-    char     ch[8];       /* UTF-8 character (up to 4 bytes + null) */
-    int      style_id;    /* interned style index (0 = default) */
-    unsigned char width;  /* display width: 1 = narrow, 2 = wide, 0 = continuation */
+    char ch[8];          /* UTF-8 character (up to 4 bytes + null) */
+    int style_id;        /* interned style index (0 = default) */
+    unsigned char width; /* display width: 1 = narrow, 2 = wide, 0 = continuation */
 } tui_cell_t;
 
 typedef struct {
-    tui_cell_t *cells;        /* current frame: width × height */
-    tui_cell_t *prev;         /* previous frame for diff */
-    bool       *dirty;        /* per-cell dirty flags */
-    int         width;
-    int         height;
-    int         cursor_x;     /* logical cursor position */
-    int         cursor_y;
-    FILE       *out;
+    tui_cell_t *cells; /* current frame: width × height */
+    tui_cell_t *prev;  /* previous frame for diff */
+    bool *dirty;       /* per-cell dirty flags */
+    int width;
+    int height;
+    int cursor_x; /* logical cursor position */
+    int cursor_y;
+    FILE *out;
 } tui_screenbuf_t;
 
 void tui_screenbuf_init(tui_screenbuf_t *sb, int width, int height, FILE *out);
 void tui_screenbuf_free(tui_screenbuf_t *sb);
 void tui_screenbuf_resize(tui_screenbuf_t *sb, int width, int height);
 void tui_screenbuf_clear(tui_screenbuf_t *sb);
-void tui_screenbuf_put(tui_screenbuf_t *sb, int x, int y,
-                        const char *ch, int style_id, int char_width);
-void tui_screenbuf_write(tui_screenbuf_t *sb, int x, int y,
-                          const char *text, int style_id);
-void tui_screenbuf_flush(tui_screenbuf_t *sb);  /* diff & output only changed cells */
+void tui_screenbuf_put(tui_screenbuf_t *sb, int x, int y, const char *ch, int style_id,
+                       int char_width);
+void tui_screenbuf_write(tui_screenbuf_t *sb, int x, int y, const char *text, int style_id);
+void tui_screenbuf_flush(tui_screenbuf_t *sb); /* diff & output only changed cells */
 
 /* Style intern table: maps style_id ↔ ANSI sequence */
 #define TUI_MAX_STYLES 64
 
 typedef struct {
-    char ansi[64];   /* full ANSI SGR sequence */
-    int  len;
+    char ansi[64]; /* full ANSI SGR sequence */
+    int len;
 } tui_style_entry_t;
 
-int  tui_style_intern(const char *ansi_seq); /* returns style_id */
-const char *tui_style_get(int style_id);     /* returns ANSI sequence */
+int tui_style_intern(const char *ansi_seq); /* returns style_id */
+const char *tui_style_get(int style_id);    /* returns ANSI sequence */
 
 /* ── OSC 8 Hyperlinks ────────────────────────────────────────────────── */
 /* Clickable file paths and URLs in terminals that support OSC 8.
@@ -1648,26 +1702,24 @@ void tui_hyperlink(FILE *out, const char *url, const char *display_text);
 void tui_file_link(FILE *out, const char *path, const char *display);
 
 /* Format a clickable file path with line number */
-void tui_file_line_link(FILE *out, const char *path, int line,
-                         const char *display);
+void tui_file_line_link(FILE *out, const char *path, int line, const char *display);
 
 /* ── Wide Character Width Detection ──────────────────────────────────── */
 /* Handles emoji, CJK, combining marks, and other multi-width characters.
  * Inspired by Claude Code's grapheme cluster detection. */
 
 /* Returns display width of a Unicode codepoint (0, 1, or 2) */
-int  tui_char_width(unsigned int codepoint);
+int tui_char_width(unsigned int codepoint);
 
 /* Returns display width of a UTF-8 string */
-int  tui_str_display_width(const char *s);
+int tui_str_display_width(const char *s);
 
 /* Decode one UTF-8 codepoint from string. Returns bytes consumed. */
-int  tui_utf8_decode(const char *s, unsigned int *codepoint);
+int tui_utf8_decode(const char *s, unsigned int *codepoint);
 
 /* Truncate UTF-8 string to fit within max_width display columns.
  * Writes to dst. Returns actual display width used. */
-int  tui_utf8_truncate(const char *src, char *dst, size_t dst_len,
-                        int max_width);
+int tui_utf8_truncate(const char *src, char *dst, size_t dst_len, int max_width);
 
 /* ── Terminal Title (OSC 0/2) ────────────────────────────────────────── */
 
@@ -1680,23 +1732,22 @@ void tui_reset_title(void);
  * shimmer effect using block characters and color interpolation. */
 
 typedef struct {
-    pthread_t       thread;
+    pthread_t thread;
     pthread_mutex_t mutex;
-    volatile bool   running;
-    const char     *label;
-    double          start_time;
-    int             hue_offset;  /* current hue offset for animation */
-    tui_rgb_t       color_a;     /* gradient start */
-    tui_rgb_t       color_b;     /* gradient end */
+    pthread_cond_t cond; /* wakes shimmer thread instantly on stop */
+    volatile bool running;
+    const char *label;
+    double start_time;
+    int hue_offset;    /* current hue offset for animation */
+    tui_rgb_t color_a; /* gradient start */
+    tui_rgb_t color_b; /* gradient end */
 } tui_shimmer_t;
 
-void tui_shimmer_start(tui_shimmer_t *sh, const char *label,
-                        tui_rgb_t color_a, tui_rgb_t color_b);
+void tui_shimmer_start(tui_shimmer_t *sh, const char *label, tui_rgb_t color_a, tui_rgb_t color_b);
 void tui_shimmer_stop(tui_shimmer_t *sh);
 
 /* One-shot shimmer text (non-animated) */
-void tui_shimmer_text(FILE *out, const char *text,
-                       tui_rgb_t color_a, tui_rgb_t color_b);
+void tui_shimmer_text(FILE *out, const char *text, tui_rgb_t color_a, tui_rgb_t color_b);
 
 /* ── Permission Prompt Dialog ────────────────────────────────────────── */
 /* Styled interactive Y/N dialog with box drawing, similar to Claude Code's
@@ -1711,9 +1762,8 @@ typedef enum {
 
 /* Show a permission prompt and wait for user input.
  * Returns the user's choice. */
-tui_perm_result_t tui_permission_prompt(const char *tool_name,
-                                         const char *description,
-                                         const char *detail);
+tui_perm_result_t tui_permission_prompt(const char *tool_name, const char *description,
+                                        const char *detail);
 
 /* Lightweight yes/no prompt with styled box */
 bool tui_confirm(const char *question);
@@ -1728,42 +1778,42 @@ bool tui_confirm(const char *question);
  * merits structured clarification. */
 
 #define TUI_ASK_MAX_QUESTIONS 16
-#define TUI_ASK_MAX_OPTIONS   16
-#define TUI_ASK_MAX_GATEVALS  8
+#define TUI_ASK_MAX_OPTIONS 16
+#define TUI_ASK_MAX_GATEVALS 8
 
 typedef struct {
-    char value[128];        /* machine value returned (defaults to label) */
-    char label[256];        /* option display text */
-    char description[512];  /* sub-line description (may be empty) */
+    char value[128];       /* machine value returned (defaults to label) */
+    char label[256];       /* option display text */
+    char description[512]; /* sub-line description (may be empty) */
 } tui_ask_option_t;
 
 typedef struct {
-    char id[48];            /* stable id used by branching gates */
-    char question[1024];    /* full question text */
-    char header[32];        /* short tab label */
-    bool multi_select;      /* allow toggling multiple options */
-    bool allow_custom;      /* offer "Type something" free-text */
-    bool allow_chat;        /* offer "Chat about this" deferral */
+    char id[48];         /* stable id used by branching gates */
+    char question[1024]; /* full question text */
+    char header[32];     /* short tab label */
+    bool multi_select;   /* allow toggling multiple options */
+    bool allow_custom;   /* offer "Type something" free-text */
+    bool allow_chat;     /* offer "Chat about this" deferral */
     tui_ask_option_t options[TUI_ASK_MAX_OPTIONS];
-    int  n_options;
+    int n_options;
 
     /* ── branching gate: show this question only if question index `gate_q`
      *    resolved to one of gate_vals[]. gate_q < 0 ⇒ always shown. ── */
-    int  gate_q;
-    char gate_id[64];       /* unresolved gate id; preserved across session reopen */
+    int gate_q;
+    char gate_id[64]; /* unresolved gate id; preserved across session reopen */
     char gate_vals[TUI_ASK_MAX_GATEVALS][128];
-    int  n_gate_vals;
+    int n_gate_vals;
 
     /* ── filled in by tui_ask_questions() ── */
     bool selected[TUI_ASK_MAX_OPTIONS]; /* which options the user chose */
-    char custom[1024];      /* free-text answer if "Type something" used */
+    char custom[1024];                  /* free-text answer if "Type something" used */
     bool answered;
 } tui_ask_question_t;
 
 typedef enum {
-    TUI_ASK_SUBMIT,   /* user confirmed answers */
-    TUI_ASK_CANCEL,   /* user pressed Esc / chose Cancel */
-    TUI_ASK_CHAT,     /* user chose "Chat about this" — defer to conversation */
+    TUI_ASK_SUBMIT, /* user confirmed answers */
+    TUI_ASK_CANCEL, /* user pressed Esc / chose Cancel */
+    TUI_ASK_CHAT,   /* user chose "Chat about this" — defer to conversation */
 } tui_ask_status_t;
 
 /* Show the dialog and collect answers. Mutates qs[] in place with the user's
@@ -1771,14 +1821,35 @@ typedef enum {
  * hidden and skipped during navigation. On TUI_ASK_CHAT, chat_out receives the
  * free-form note (or the active question text). Requires an interactive TTY.
  * `intro` (optional) is shown above the tab strip. */
-tui_ask_status_t tui_ask_questions(tui_ask_question_t *qs, int n_questions,
-                                   const char *intro,
+tui_ask_status_t tui_ask_questions(tui_ask_question_t *qs, int n_questions, const char *intro,
                                    char *chat_out, size_t chat_len);
+
+#ifdef DSCO_INTERNAL_TESTS
+typedef enum {
+    TUI_TEST_KEY_UP = 1000,
+    TUI_TEST_KEY_DOWN,
+    TUI_TEST_KEY_LEFT,
+    TUI_TEST_KEY_RIGHT,
+    TUI_TEST_KEY_TAB,
+    TUI_TEST_KEY_BACKTAB,
+    TUI_TEST_KEY_ENTER,
+    TUI_TEST_KEY_ESC,
+    TUI_TEST_KEY_SPACE,
+    TUI_TEST_KEY_PAGE_UP,
+    TUI_TEST_KEY_PAGE_DOWN,
+    TUI_TEST_KEY_HOME,
+    TUI_TEST_KEY_END,
+    TUI_TEST_KEY_UNKNOWN,
+} tui_test_key_t;
+
+int tui_test_decode_key_sequence(const char *bytes);
+int tui_test_dialog_move_row(int row, int maxrow, int key);
+int tui_test_menu_move_selection(const bool *selectable, int nrows, int sel, int delta);
+#endif
 
 /* Resolve the chosen machine value(s) of a question into `out` (comma-joined
  * for multi-select; the custom text if free-text was used). Returns out. */
-const char *tui_ask_answer_value(const tui_ask_question_t *q,
-                                 char *out, size_t out_len);
+const char *tui_ask_answer_value(const tui_ask_question_t *q, char *out, size_t out_len);
 
 /* Live branching predicate: is question index `qi` currently visible given the
  * answers in qs[]? Exposed so callers can serialize only-visible answers. */
@@ -1789,18 +1860,18 @@ bool tui_ask_question_visible(const tui_ask_question_t *qs, int n, int qi);
  * and side-by-side support. Inspired by Claude Code's StructuredDiff. */
 
 typedef struct {
-    char   type;         /* ' ' = context, '+' = add, '-' = remove, '@' = hunk header */
-    int    old_line;     /* original line number (-1 if added) */
-    int    new_line;     /* new line number (-1 if removed) */
-    char  *text;         /* line content (no newline) */
+    char type;    /* ' ' = context, '+' = add, '-' = remove, '@' = hunk header */
+    int old_line; /* original line number (-1 if added) */
+    int new_line; /* new line number (-1 if removed) */
+    char *text;   /* line content (no newline) */
 } tui_diff_line_t;
 
 typedef struct {
     tui_diff_line_t *lines;
-    int              count;
-    int              cap;
-    char             old_file[256];
-    char             new_file[256];
+    int count;
+    int cap;
+    char old_file[256];
+    char new_file[256];
 } tui_diff_t;
 
 void tui_diff_init(tui_diff_t *d);
@@ -1815,27 +1886,26 @@ void tui_diff_render_inline(const tui_diff_t *d, FILE *out); /* word-level chang
 
 typedef struct {
     const char **lines;
-    int          line_count;
-    int          offset;         /* first visible line */
-    int          page_size;      /* terminal height - chrome */
-    int          term_width;
-    bool         show_line_numbers;
-    bool         wrap_lines;
-    char         search[128];    /* active search query */
-    int          search_hit;     /* current match line (-1 = none) */
-    const char  *title;
+    int line_count;
+    int offset;    /* first visible line */
+    int page_size; /* terminal height - chrome */
+    int term_width;
+    bool show_line_numbers;
+    bool wrap_lines;
+    char search[128]; /* active search query */
+    int search_hit;   /* current match line (-1 = none) */
+    const char *title;
 } tui_pager_t;
 
-void tui_pager_init(tui_pager_t *p, const char **lines, int count,
-                     const char *title);
-void tui_pager_run(tui_pager_t *p);  /* blocks until user quits */
+void tui_pager_init(tui_pager_t *p, const char **lines, int count, const char *title);
+void tui_pager_run(tui_pager_t *p); /* blocks until user quits */
 
 /* ── Inline Code Block ───────────────────────────────────────────────── */
 /* Renders a code block with border, language tag, and line numbers.
  * Similar to Claude Code's fenced code block component. */
 
-void tui_code_block(FILE *out, const char *code, const char *language,
-                     int start_line, bool show_line_numbers);
+void tui_code_block(FILE *out, const char *code, const char *language, int start_line,
+                    bool show_line_numbers);
 
 /* ── Breadcrumb Path Display ─────────────────────────────────────────── */
 /* Renders file paths with directory separators styled, truncated to fit.
@@ -1863,49 +1933,49 @@ void tui_breadcrumb(FILE *out, const char *path, int max_width);
  *   tui_menu_free(&m);
  */
 
-#define TUI_MENU_MAX_NODES   64    /* items per level (top-level or children) */
-#define TUI_MENU_CANCELLED   (-1)  /* tui_menu_run return when user aborts */
+#define TUI_MENU_MAX_NODES 64   /* items per level (top-level or children) */
+#define TUI_MENU_CANCELLED (-1) /* tui_menu_run return when user aborts */
 
 typedef enum {
-    TUI_MENU_ITEM,        /* selectable leaf — Enter returns its id */
-    TUI_MENU_SUBMENU,     /* expandable parent — Enter/→ toggles children */
-    TUI_MENU_GROUP,       /* bold section header — not selectable */
-    TUI_MENU_SEPARATOR,   /* blank spacer row */
-    TUI_MENU_ACTION,      /* leaf rendered with an → arrow (e.g. "Show more") */
+    TUI_MENU_ITEM,      /* selectable leaf — Enter returns its id */
+    TUI_MENU_SUBMENU,   /* expandable parent — Enter/→ toggles children */
+    TUI_MENU_GROUP,     /* bold section header — not selectable */
+    TUI_MENU_SEPARATOR, /* blank spacer row */
+    TUI_MENU_ACTION,    /* leaf rendered with an → arrow (e.g. "Show more") */
 } tui_menu_kind_t;
 
 typedef enum {
     TUI_MENU_BADGE_NONE,
-    TUI_MENU_BADGE_OK,        /* ✓ blue  — connected/ready */
-    TUI_MENU_BADGE_FAIL,      /* ✗ red   — failed */
-    TUI_MENU_BADGE_WARN,      /* ⚠ yellow */
-    TUI_MENU_BADGE_DISABLED,  /* ○ grey  — disabled/hidden */
-    TUI_MENU_BADGE_ACTIVE,    /* ● green — running/selected */
+    TUI_MENU_BADGE_OK,       /* ✓ blue  — connected/ready */
+    TUI_MENU_BADGE_FAIL,     /* ✗ red   — failed */
+    TUI_MENU_BADGE_WARN,     /* ⚠ yellow */
+    TUI_MENU_BADGE_DISABLED, /* ○ grey  — disabled/hidden */
+    TUI_MENU_BADGE_ACTIVE,   /* ● green — running/selected */
 } tui_menu_badge_t;
 
 typedef struct tui_menu_item {
-    char  label[128];
-    char  detail[128];        /* trailing dim text, e.g. "132 tools" */
-    char  hint[192];          /* dim sub-line under the item (optional) */
-    char  badge_text[32];     /* word after the badge glyph (optional) */
-    tui_menu_kind_t  kind;
+    char label[128];
+    char detail[128];    /* trailing dim text, e.g. "132 tools" */
+    char hint[192];      /* dim sub-line under the item (optional) */
+    char badge_text[32]; /* word after the badge glyph (optional) */
+    tui_menu_kind_t kind;
     tui_menu_badge_t badge;
-    int   id;                 /* value returned by tui_menu_run on select */
-    void *user;               /* opaque caller pointer */
-    bool  expanded;           /* submenu open? */
-    bool  disabled;           /* dimmed, non-selectable */
-    struct tui_menu_item *children;   /* malloc'd, cap TUI_MENU_MAX_NODES */
-    int   child_count;
+    int id;                         /* value returned by tui_menu_run on select */
+    void *user;                     /* opaque caller pointer */
+    bool expanded;                  /* submenu open? */
+    bool disabled;                  /* dimmed, non-selectable */
+    struct tui_menu_item *children; /* malloc'd, cap TUI_MENU_MAX_NODES */
+    int child_count;
 } tui_menu_item_t;
 
 typedef struct {
-    char  title[128];
-    char  subtitle[128];      /* e.g. "16 servers" */
-    tui_menu_item_t *items;   /* malloc'd top-level array */
-    int   item_count;
-    const char *accent;       /* selection accent color (NULL = cyan) */
-    int   max_visible;        /* viewport rows (0 = auto from terminal) */
-    int   selected;           /* index into the flattened selectable rows */
+    char title[128];
+    char subtitle[128];     /* e.g. "16 servers" */
+    tui_menu_item_t *items; /* malloc'd top-level array */
+    int item_count;
+    const char *accent; /* selection accent color (NULL = cyan) */
+    int max_visible;    /* viewport rows (0 = auto from terminal) */
+    int selected;       /* index into the flattened selectable rows */
 } tui_menu_t;
 
 void tui_menu_init(tui_menu_t *m, const char *title, const char *subtitle);

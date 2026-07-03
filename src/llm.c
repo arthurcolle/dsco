@@ -73,6 +73,49 @@ dsco_trust_tier_t session_trust_tier_from_string(const char *s, bool *ok) {
     return DSCO_TRUST_STANDARD;
 }
 
+const char *session_goal_status_to_string(dsco_goal_status_t status) {
+    switch (status) {
+        case DSCO_GOAL_NONE:
+            return "none";
+        case DSCO_GOAL_ACTIVE:
+            return "active";
+        case DSCO_GOAL_PAUSED:
+            return "paused";
+        case DSCO_GOAL_BLOCKED:
+            return "blocked";
+        case DSCO_GOAL_COMPLETE:
+            return "complete";
+        case DSCO_GOAL_BUDGET_LIMITED:
+            return "budget_limited";
+    }
+    return "none";
+}
+
+dsco_goal_status_t session_goal_status_from_string(const char *s, bool *ok) {
+    if (ok)
+        *ok = true;
+    if (!s || !s[0]) {
+        if (ok)
+            *ok = false;
+        return DSCO_GOAL_NONE;
+    }
+    if (strcmp(s, "active") == 0)
+        return DSCO_GOAL_ACTIVE;
+    if (strcmp(s, "paused") == 0)
+        return DSCO_GOAL_PAUSED;
+    if (strcmp(s, "blocked") == 0)
+        return DSCO_GOAL_BLOCKED;
+    if (strcmp(s, "complete") == 0)
+        return DSCO_GOAL_COMPLETE;
+    if (strcmp(s, "budget_limited") == 0 || strcmp(s, "limited by budget") == 0)
+        return DSCO_GOAL_BUDGET_LIMITED;
+    if (strcmp(s, "none") == 0)
+        return DSCO_GOAL_NONE;
+    if (ok)
+        *ok = false;
+    return DSCO_GOAL_NONE;
+}
+
 static bool llm_env_truthy(const char *val) {
     return val && (val[0] == '1' || strcasecmp(val, "true") == 0 || strcasecmp(val, "yes") == 0);
 }
@@ -81,7 +124,7 @@ void session_state_init(session_state_t *s, const char *model) {
     memset(s, 0, sizeof(*s));
     const char *resolved = model_resolve_alias(model);
     snprintf(s->model, sizeof(s->model), "%s", resolved);
-    snprintf(s->effort, sizeof(s->effort), "%s", EFFORT_HIGH);
+    s->effort[0] = '\0';
     s->trust_tier = DSCO_TRUST_STANDARD;
     {
         bool trust_ok = false;
@@ -93,7 +136,7 @@ void session_state_init(session_state_t *s, const char *model) {
     s->web_search = true;
     s->code_execution = true;
     s->context_window = model_context_window(resolved);
-    s->compact_enabled = true;
+    s->compact_enabled = llm_env_truthy(getenv("DSCO_AUTO_COMPACT"));
     s->temperature = -1.0;
     s->top_p = -1.0;
     s->top_k = -1;
@@ -101,6 +144,7 @@ void session_state_init(session_state_t *s, const char *model) {
     s->active_topology[0] = '\0';
     s->topology_auto = false;
     s->tool_budget_ratio = 1.0f;
+    s->structured_output_max_repairs = 1;
 
     if (!llm_env_truthy(getenv("DSCO_DISABLE_DEFAULT_FALLBACKS"))) {
         s->fallback_count = provider_build_default_fallback_models(
@@ -115,8 +159,8 @@ void session_state_init(session_state_t *s, const char *model) {
      * llm_get_custom_system_prompt() via DSCO_SYSTEM_PROMPT. */
     {
         const char *e = getenv("DSCO_EFFORT");
-        if (e && (!strcmp(e, EFFORT_LOW) || !strcmp(e, EFFORT_MEDIUM) || !strcmp(e, EFFORT_HIGH)))
-            snprintf(s->effort, sizeof(s->effort), "%s", e);
+        if (e)
+            dsco_effort_store(s->effort, sizeof(s->effort), e);
 
         const char *temp = getenv("DSCO_TEMPERATURE");
         if (temp && *temp) {
@@ -145,6 +189,30 @@ void session_state_init(session_state_t *s, const char *model) {
         const char *tc = getenv("DSCO_TOOL_CHOICE");
         if (tc && *tc)
             snprintf(s->tool_choice, sizeof(s->tool_choice), "%s", tc);
+        const char *so = getenv("DSCO_STRUCTURED_OUTPUT");
+        if (llm_env_truthy(so)) {
+            s->structured_output = true;
+            s->structured_output_strict = true;
+            snprintf(s->structured_output_name, sizeof(s->structured_output_name), "%s",
+                     "dsco_structured_output");
+        }
+        const char *son = getenv("DSCO_STRUCTURED_OUTPUT_NAME");
+        if (son && *son)
+            snprintf(s->structured_output_name, sizeof(s->structured_output_name), "%s", son);
+        const char *sos = getenv("DSCO_STRUCTURED_OUTPUT_SCHEMA");
+        if (sos && *sos && json_is_valid_container(sos)) {
+            s->structured_output = true;
+            snprintf(s->structured_output_schema, sizeof(s->structured_output_schema), "%s", sos);
+        }
+        const char *sostrict = getenv("DSCO_STRUCTURED_OUTPUT_STRICT");
+        if (sostrict && *sostrict)
+            s->structured_output_strict = llm_env_truthy(sostrict);
+        const char *sorepairs = getenv("DSCO_STRUCTURED_OUTPUT_REPAIRS");
+        if (sorepairs && *sorepairs) {
+            int v = atoi(sorepairs);
+            if (v >= 0 && v <= 5)
+                s->structured_output_max_repairs = v;
+        }
         const char *pck = getenv("DSCO_PROMPT_CACHE_KEY");
         if (pck && *pck)
             snprintf(s->prompt_cache_key, sizeof(s->prompt_cache_key), "%s", pck);
@@ -471,6 +539,7 @@ static bool message_has_tool_use_local(const message_t *m);
 static bool message_has_tool_result_local(const message_t *m);
 static bool message_is_tool_result_only(const message_t *m);
 static int message_sendable_count(const message_t *m);
+static void append_cache_control_to_last_block(jbuf_t *b);
 
 void conv_pop_last(conversation_t *c) {
     if (c->count <= 0)
@@ -1205,6 +1274,14 @@ compact_result_t conv_auto_compact(conversation_t *c, session_state_t *s, compac
     compact_result_t result;
     memset(&result, 0, sizeof(result));
 
+    if (s && !s->compact_enabled) {
+        int current_tokens = conv_token_estimate(c, s);
+        result.pre_token_count = current_tokens;
+        result.post_token_count = current_tokens;
+        result.messages_kept = c ? c->count : 0;
+        return result;
+    }
+
     double start = cache_now_sec();
     int threshold = auto_compact_threshold(s);
     int current_tokens = conv_token_estimate(c, s);
@@ -1421,6 +1498,22 @@ bool conv_save_ex(conversation_t *c, const session_state_t *session, const char 
             jbuf_append(&sb, ",\"pin_text\":");
             jbuf_append_json_str(&sb, session->pin_text);
         }
+        if (session->structured_output) {
+            jbuf_append(&sb, ",\"structured_output\":true");
+            jbuf_append(&sb, ",\"structured_output_strict\":");
+            jbuf_append(&sb, session->structured_output_strict ? "true" : "false");
+            if (session->structured_output_max_repairs > 0)
+                jbuf_appendf(&sb, ",\"structured_output_max_repairs\":%d",
+                             session->structured_output_max_repairs);
+            if (session->structured_output_name[0]) {
+                jbuf_append(&sb, ",\"structured_output_name\":");
+                jbuf_append_json_str(&sb, session->structured_output_name);
+            }
+            if (session->structured_output_schema[0]) {
+                jbuf_append(&sb, ",\"structured_output_schema\":");
+                jbuf_append_json_str(&sb, session->structured_output_schema);
+            }
+        }
         if (session->model[0]) {
             jbuf_append(&sb, ",\"model\":");
             jbuf_append_json_str(&sb, session->model);
@@ -1428,6 +1521,25 @@ bool conv_save_ex(conversation_t *c, const session_state_t *session, const char 
         if (session->slot_name[0]) {
             jbuf_append(&sb, ",\"slot_name\":");
             jbuf_append_json_str(&sb, session->slot_name);
+        }
+        if (session->goal_objective[0]) {
+            jbuf_append(&sb, ",\"goal_objective\":");
+            jbuf_append_json_str(&sb, session->goal_objective);
+            jbuf_append(&sb, ",\"goal_status\":");
+            jbuf_append_json_str(&sb, session_goal_status_to_string(session->goal_status));
+            if (session->goal_token_budget > 0)
+                jbuf_appendf(&sb, ",\"goal_token_budget\":%d", session->goal_token_budget);
+            if (session->goal_tokens_at_start >= 0)
+                jbuf_appendf(&sb, ",\"goal_tokens_at_start\":%d",
+                             session->goal_tokens_at_start);
+            if (session->goal_turns_at_start >= 0)
+                jbuf_appendf(&sb, ",\"goal_turns_at_start\":%d", session->goal_turns_at_start);
+            if (session->goal_started_at > 0)
+                jbuf_appendf(&sb, ",\"goal_started_at\":%lld",
+                             (long long)session->goal_started_at);
+            if (session->goal_updated_at > 0)
+                jbuf_appendf(&sb, ",\"goal_updated_at\":%lld",
+                             (long long)session->goal_updated_at);
         }
         jbuf_append(&sb, "},");
         fwrite(sb.data, 1, sb.len, f);
@@ -1535,6 +1647,24 @@ bool conv_load_ex(conversation_t *c, session_state_t *session, const char *path)
                 snprintf(session->pin_text, sizeof(session->pin_text), "%s", pin_text);
                 free(pin_text);
             }
+            session->structured_output = json_get_bool(session_raw, "structured_output",
+                                                       session->structured_output);
+            session->structured_output_strict = json_get_bool(
+                session_raw, "structured_output_strict", session->structured_output_strict);
+            int so_repairs = json_get_int(session_raw, "structured_output_max_repairs",
+                                          session->structured_output_max_repairs);
+            if (so_repairs >= 0 && so_repairs <= 5)
+                session->structured_output_max_repairs = so_repairs;
+            char *so_name = json_get_str(session_raw, "structured_output_name");
+            if (so_name && so_name[0])
+                snprintf(session->structured_output_name, sizeof(session->structured_output_name),
+                         "%s", so_name);
+            free(so_name);
+            char *so_schema = json_get_str(session_raw, "structured_output_schema");
+            if (so_schema && json_is_valid_container(so_schema))
+                snprintf(session->structured_output_schema,
+                         sizeof(session->structured_output_schema), "%s", so_schema);
+            free(so_schema);
             char *saved_model = json_get_str(session_raw, "model");
             if (saved_model && saved_model[0])
                 snprintf(session->model, sizeof(session->model), "%s", saved_model);
@@ -1543,6 +1673,31 @@ bool conv_load_ex(conversation_t *c, session_state_t *session, const char *path)
             if (saved_slot && saved_slot[0])
                 snprintf(session->slot_name, sizeof(session->slot_name), "%s", saved_slot);
             free(saved_slot);
+            char *goal_objective = json_get_str(session_raw, "goal_objective");
+            if (goal_objective && goal_objective[0]) {
+                snprintf(session->goal_objective, sizeof(session->goal_objective), "%s",
+                         goal_objective);
+                char *goal_status = json_get_str(session_raw, "goal_status");
+                bool goal_ok = false;
+                dsco_goal_status_t parsed_goal =
+                    session_goal_status_from_string(goal_status, &goal_ok);
+                session->goal_status = goal_ok ? parsed_goal : DSCO_GOAL_ACTIVE;
+                free(goal_status);
+                session->goal_token_budget =
+                    json_get_int(session_raw, "goal_token_budget", session->goal_token_budget);
+                session->goal_tokens_at_start =
+                    json_get_int(session_raw, "goal_tokens_at_start",
+                                 session->goal_tokens_at_start);
+                session->goal_turns_at_start =
+                    json_get_int(session_raw, "goal_turns_at_start", session->goal_turns_at_start);
+                session->goal_started_at =
+                    (time_t)json_get_int(session_raw, "goal_started_at",
+                                         (int)session->goal_started_at);
+                session->goal_updated_at =
+                    (time_t)json_get_int(session_raw, "goal_updated_at",
+                                         (int)session->goal_updated_at);
+            }
+            free(goal_objective);
             free(session_raw);
         }
     }
@@ -2199,9 +2354,23 @@ static const char *anthropic_oauth_wire_tool_name(const char *name, char *buf, s
     return name;
 }
 
+static bool content_block_allows_cache_control(const msg_content_t *mc) {
+    if (!mc || !mc->type)
+        return false;
+    return strcmp(mc->type, "text") == 0 || strcmp(mc->type, "tool_result") == 0;
+}
+
 static void append_message_sendable_content(jbuf_t *b, message_t *m, bool force_leading_comma,
-                                            bool claude_code_oauth) {
+                                            bool claude_code_oauth, bool cache_mark_last) {
     int written = 0;
+    int remaining_cacheable = 0;
+    if (cache_mark_last) {
+        for (int i = 0; i < m->content_count; i++) {
+            msg_content_t *mc = &m->content[i];
+            if (content_block_is_sendable(mc) && content_block_allows_cache_control(mc))
+                remaining_cacheable++;
+        }
+    }
     for (int i = 0; i < m->content_count; i++) {
         msg_content_t *mc = &m->content[i];
         if (!content_block_is_sendable(mc))
@@ -2209,6 +2378,11 @@ static void append_message_sendable_content(jbuf_t *b, message_t *m, bool force_
         if (force_leading_comma || written > 0)
             jbuf_append(b, ",");
         append_content_block(b, mc, claude_code_oauth);
+        if (content_block_allows_cache_control(mc))
+            remaining_cacheable--;
+        if (cache_mark_last && content_block_allows_cache_control(mc) &&
+            remaining_cacheable == 0)
+            append_cache_control_to_last_block(b);
         written++;
     }
 }
@@ -2407,6 +2581,70 @@ static const char *get_compact_catalog(void) {
     return s_compact_catalog;
 }
 
+/* Session-frozen Anthropic tool register file.  Anthropic caches in fixed
+ * request order (tools → system → messages), so per-turn tool paging ahead of
+ * the system/messages prefix destroys downstream cache hits.  Default: freeze
+ * the selected register page after the first request and reuse it verbatim;
+ * re-page only when the external loaded-tool set changes.  Set
+ * DSCO_TOOL_FREEZE=0 to restore volatile per-turn paging for A/B tests.
+ *
+ * These process statics intentionally make concurrent in-process agents share
+ * one prefix. That is cache-favorable; if a future sub-agent needs a disjoint
+ * register file, key this frozen page per session instead of disabling it. */
+static tool_page_result_t s_frozen_tool_page = {0};
+static bool s_frozen_tool_page_valid = false;
+static unsigned long long s_frozen_tool_ext_sig = 0;
+
+static bool anthropic_tool_freeze_enabled(void) {
+    const char *v = getenv("DSCO_TOOL_FREEZE");
+    return !(v && v[0] && strcmp(v, "0") == 0);
+}
+
+static unsigned long long anthropic_external_tool_signature(void) {
+    unsigned long long h = 1469598103934665603ULL;
+    h ^= (unsigned long long)g_external_tool_count;
+    h *= 1099511628211ULL;
+    for (int i = 0; i < g_external_tool_count; i++) {
+        const unsigned char *p = (const unsigned char *)g_external_tools[i].name;
+        while (p && *p) {
+            h ^= (unsigned long long)*p++;
+            h *= 1099511628211ULL;
+        }
+        h ^= g_external_tools[i].loaded ? 0xa5ULL : 0x5aULL;
+        h *= 1099511628211ULL;
+    }
+    return h;
+}
+
+static tool_page_result_t anthropic_get_paged_tools(const char *ctx, int max_tools,
+                                                    float budget_ratio, bool *owned) {
+    if (owned)
+        *owned = true;
+    if (!anthropic_tool_freeze_enabled())
+        return tools_get_paged(ctx, max_tools, budget_ratio);
+
+    unsigned long long sig = anthropic_external_tool_signature();
+    if (!s_frozen_tool_page_valid || sig != s_frozen_tool_ext_sig) {
+        if (s_frozen_tool_page_valid)
+            tool_page_result_free(&s_frozen_tool_page);
+        s_frozen_tool_page = tools_get_paged(ctx, max_tools, budget_ratio);
+        s_frozen_tool_ext_sig = sig;
+        s_frozen_tool_page_valid = true;
+    }
+    if (owned)
+        *owned = false;
+    return s_frozen_tool_page;
+}
+
+/* Append a cache_control breakpoint to the content block just emitted. */
+static void append_cache_control_to_last_block(jbuf_t *b) {
+    if (!b || b->len == 0 || !b->data || b->data[b->len - 1] != '}')
+        return;
+    b->len--;
+    b->data[b->len] = '\0';
+    jbuf_append(b, ",\"cache_control\":{\"type\":\"ephemeral\"}}");
+}
+
 /* Append a single tool definition to the JSON buffer */
 static void append_one_tool(jbuf_t *b, const tool_def_t *t, bool cache_mark,
                             bool claude_code_oauth) {
@@ -2474,7 +2712,8 @@ static void append_tools_json_filtered(jbuf_t *b, session_state_t *session, conv
     }
 
     float budget_ratio = session ? session->tool_budget_ratio : 1.0f;
-    tool_page_result_t paged = tools_get_paged(ctx, max_tools, budget_ratio);
+    bool paged_owned = false;
+    tool_page_result_t paged = anthropic_get_paged_tools(ctx, max_tools, budget_ratio, &paged_owned);
 
     bool has_server_tools = session && (session->web_search || session->code_execution);
     bool has_after_working =
@@ -2519,7 +2758,8 @@ static void append_tools_json_filtered(jbuf_t *b, session_state_t *session, conv
         written++;
     }
 
-    tool_page_result_free(&paged);
+    if (paged_owned)
+        tool_page_result_free(&paged);
 
     /* External tools (MCP, etc.) — loaded tools win first.  The old behavior
      * serialized the first N MCP tools by discovery order, which made
@@ -2591,6 +2831,14 @@ static void build_messages_json(jbuf_t *b, conversation_t *c, session_state_t *s
     jbuf_append(b, ",\"messages\":[");
     int msg_written = 0;
     int last_written_role = -1;
+    int last_user_msg_index = -1;
+    for (int i = 0; i < c->count; i++) {
+        message_t *m = &c->msgs[i];
+        if (message_sendable_count(m) == 0)
+            continue;
+        if (message_effective_role(m) == ROLE_USER)
+            last_user_msg_index = i;
+    }
     for (int i = 0; i < c->count; i++) {
         message_t *m = &c->msgs[i];
         if (message_sendable_count(m) == 0)
@@ -2605,7 +2853,7 @@ static void build_messages_json(jbuf_t *b, conversation_t *c, session_state_t *s
             if (b->len >= 2 && b->data[b->len - 1] == '}' && b->data[b->len - 2] == ']') {
                 b->len -= 2;
                 b->data[b->len] = '\0';
-                append_message_sendable_content(b, m, true, claude_code_oauth);
+                append_message_sendable_content(b, m, true, claude_code_oauth, i == last_user_msg_index);
                 jbuf_append(b, "]}");
             } else {
                 /* Fallback: emit as separate message (may cause API error
@@ -2614,7 +2862,7 @@ static void build_messages_json(jbuf_t *b, conversation_t *c, session_state_t *s
                 jbuf_append(b, "{\"role\":");
                 jbuf_append_json_str(b, role == ROLE_USER ? "user" : "assistant");
                 jbuf_append(b, ",\"content\":[");
-                append_message_sendable_content(b, m, false, claude_code_oauth);
+                append_message_sendable_content(b, m, false, claude_code_oauth, i == last_user_msg_index);
                 jbuf_append(b, "]}");
                 msg_written++;
             }
@@ -2624,7 +2872,7 @@ static void build_messages_json(jbuf_t *b, conversation_t *c, session_state_t *s
             jbuf_append(b, "{\"role\":");
             jbuf_append_json_str(b, role == ROLE_USER ? "user" : "assistant");
             jbuf_append(b, ",\"content\":[");
-            append_message_sendable_content(b, m, false, claude_code_oauth);
+            append_message_sendable_content(b, m, false, claude_code_oauth, i == last_user_msg_index);
             jbuf_append(b, "]}");
             msg_written++;
         }
@@ -2639,7 +2887,8 @@ static void build_messages_json(jbuf_t *b, conversation_t *c, session_state_t *s
         if (bmi) {
             double cost = session->total_input_tokens * bmi->input_price / 1e6 +
                           session->total_output_tokens * bmi->output_price / 1e6 +
-                          session->total_cache_read_tokens * bmi->cache_read_price / 1e6;
+                          session->total_cache_read_tokens * bmi->cache_read_price / 1e6 +
+                          session->total_cache_write_tokens * bmi->cache_write_price / 1e6;
             extern double g_cost_budget;
             if (g_cost_budget > 0 && cost > g_cost_budget * 0.6) {
                 double pct = 100.0 * cost / g_cost_budget;
@@ -2810,6 +3059,15 @@ static bool append_claude_code_billing_system_block(jbuf_t *b, conversation_t *c
     return true;
 }
 
+/* Anthropic's native API takes bare model ids ("claude-fable-5"); an
+ * OpenRouter-style "anthropic/" namespace in the session model 404s here,
+ * so strip it — mirrors provider_request_model_id() for the other backends. */
+static const char *llm_anthropic_wire_model(const char *model) {
+    if (model && strncmp(model, "anthropic/", 10) == 0 && model[10])
+        return model + 10;
+    return model;
+}
+
 char *llm_build_request_for_credential(conversation_t *c, const char *model, int max_tokens,
                                        const char *credential) {
     jbuf_t b;
@@ -2817,7 +3075,7 @@ char *llm_build_request_for_credential(conversation_t *c, const char *model, int
     bool claude_code_oauth = llm_anthropic_uses_claude_code_auth(credential);
 
     jbuf_append(&b, "{\"model\":");
-    jbuf_append_json_str(&b, model);
+    jbuf_append_json_str(&b, llm_anthropic_wire_model(model));
     jbuf_append(&b, ",\"max_tokens\":");
     jbuf_append_int(&b, max_tokens);
     jbuf_append(&b, ",\"stream\":true");
@@ -2872,7 +3130,7 @@ char *llm_build_request_ex_for_credential(conversation_t *c, session_state_t *se
     bool claude_code_oauth = llm_anthropic_uses_claude_code_auth(credential);
 
     jbuf_append(&b, "{\"model\":");
-    jbuf_append_json_str(&b, session->model);
+    jbuf_append_json_str(&b, llm_anthropic_wire_model(session->model));
     jbuf_append(&b, ",\"max_tokens\":");
     /* Phase 4: auto-escalation — use override if set, else default */
     int effective_max_tokens =
@@ -2944,6 +3202,50 @@ char *llm_build_request_ex_for_credential(conversation_t *c, session_state_t *se
         jbuf_append_json_str(&b, session->memory_context);
         jbuf_append(&b, "}");
     }
+    if (session->structured_output) {
+        jbuf_append(&b, ",{\"type\":\"text\",\"text\":");
+        jbuf_t sop;
+        jbuf_init(&sop, 1024);
+        jbuf_append(&sop, "[Structured Output Contract]\nFor the final assistant answer, emit exactly one valid JSON object and no markdown, prose, code fences, comments, or trailing text. Preserve numeric/boolean/null types exactly. ");
+        if (session->structured_output_schema[0]) {
+            jbuf_append(&sop, "The JSON must conform to this schema: ");
+            jbuf_append(&sop, session->structured_output_schema);
+        } else {
+            jbuf_append(&sop, "Use a stable object shape with explicit keys appropriate to the task.");
+        }
+        jbuf_append_json_str(&b, sop.data ? sop.data : "");
+        jbuf_append(&b, "}");
+        jbuf_free(&sop);
+    }
+    if (session->direct_answer_mode) {
+        jbuf_append(&b, ",{\"type\":\"text\",\"text\":");
+        jbuf_append_json_str(&b,
+                             "[Direct Answer Mode] The current user request is classified as self-contained/conceptual. Do not call tools, do not gather context, and do not use loop/self-exit controls. Answer directly and then stop.");
+        jbuf_append(&b, "}");
+    }
+    if (session->goal_objective[0] && session->goal_status == DSCO_GOAL_ACTIVE) {
+        char goal_prompt[2600];
+        int used = session->total_input_tokens + session->total_output_tokens -
+                   session->goal_tokens_at_start;
+        if (used < 0)
+            used = 0;
+        if (session->goal_token_budget > 0) {
+            snprintf(goal_prompt, sizeof(goal_prompt),
+                     "[Active Goal]\nObjective: %s\nStatus: active\nTokens used on goal: %d / %d\n"
+                     "Keep working toward this objective until the user changes it with /goal. "
+                     "If the objective is complete, call self_exit with a concise completion reason.",
+                     session->goal_objective, used, session->goal_token_budget);
+        } else {
+            snprintf(goal_prompt, sizeof(goal_prompt),
+                     "[Active Goal]\nObjective: %s\nStatus: active\nTokens used on goal: %d\n"
+                     "Keep working toward this objective until the user changes it with /goal. "
+                     "If the objective is complete, call self_exit with a concise completion reason.",
+                     session->goal_objective, used);
+        }
+        jbuf_append(&b, ",{\"type\":\"text\",\"text\":");
+        jbuf_append_json_str(&b, goal_prompt);
+        jbuf_append(&b, "}");
+    }
 
     jbuf_append(&b, "]");
 
@@ -2976,9 +3278,10 @@ char *llm_build_request_ex_for_credential(conversation_t *c, session_state_t *se
     }
 
     /* Effort parameter */
-    if (session->effort[0] && strcmp(session->effort, "high") != 0) {
+    const char *effort = strcmp(session->effort, EFFORT_MAX) == 0 ? EFFORT_XHIGH : session->effort;
+    if (effort[0] && strcmp(effort, EFFORT_HIGH) != 0) {
         jbuf_append(&b, ",\"output_config\":{\"effort\":");
-        jbuf_append_json_str(&b, session->effort);
+        jbuf_append_json_str(&b, effort);
         jbuf_append(&b, "}");
     }
 
@@ -2989,10 +3292,11 @@ char *llm_build_request_ex_for_credential(conversation_t *c, session_state_t *se
         jbuf_append(&b, "]");
     }
 
-    append_tools_json_filtered(&b, session, c, claude_code_oauth);
+    if (!session->direct_answer_mode)
+        append_tools_json_filtered(&b, session, c, claude_code_oauth);
 
     /* Tool choice control */
-    if (session->tool_choice[0]) {
+    if (!session->direct_answer_mode && session->tool_choice[0]) {
         if (strcmp(session->tool_choice, "any") == 0) {
             jbuf_append(&b, ",\"tool_choice\":{\"type\":\"any\"}");
         } else if (strncmp(session->tool_choice, "tool:", 5) == 0) {

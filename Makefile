@@ -2,6 +2,7 @@ CC ?= cc
 GIT_HASH := $(shell git rev-parse --short HEAD 2>/dev/null || echo "unknown")
 BUILD_DATE := $(shell date -u +%Y-%m-%dT%H:%M:%SZ)
 UNAME_S := $(shell uname -s)
+UNAME_M := $(shell uname -m)
 CC_IS_CLANG := $(shell $(CC) --version 2>/dev/null | grep -qi clang && echo yes)
 ifeq ($(CC_IS_CLANG),yes)
 C2Y_WARNING_FLAGS := -Wno-deprecated-octal-literals
@@ -13,12 +14,22 @@ INC_DIR = include
 TEST_DIR = tests
 BUILD_DIR ?= build
 
-# CI-safe defaults: allow override via env for reproducible builds
-DSCO_STD ?= c2y
+# CI-safe defaults: allow override via env for reproducible builds.
+# Newest C standard the toolchain accepts: recent Apple clang knows c2y, but
+# CI's gcc-13/clang-18 only know c23/c2x — probe once at parse time.
+DSCO_STD ?= $(shell for s in c2y c23 c2x c11; do \
+	if $(CC) -std=$$s -x c -c /dev/null -o /dev/null 2>/dev/null; then echo $$s; break; fi; done)
 DSCO_ARCH ?= native
-BASE_CFLAGS = -Wall -Wextra -O3 -std=$(DSCO_STD) $(C2Y_WARNING_FLAGS) -D_POSIX_C_SOURCE=200809L \
+# clang/gcc reject -march=arm64 (the CI matrix passes arch names, not ISA
+# levels); arm64 targets get default codegen instead.
+ifneq (,$(filter $(DSCO_ARCH),arm64 aarch64))
+DSCO_ARCH_FLAGS :=
+else
+DSCO_ARCH_FLAGS := -march=$(DSCO_ARCH) -mtune=$(DSCO_ARCH)
+endif
+BASE_CFLAGS = -Wall -Wextra -O3 -std=$(DSCO_STD) $(C2Y_WARNING_FLAGS) -D_POSIX_C_SOURCE=200809L -D_GNU_SOURCE \
 	-I$(INC_DIR) \
-	-march=$(DSCO_ARCH) -mtune=$(DSCO_ARCH) -funroll-loops -fvisibility=hidden \
+	$(DSCO_ARCH_FLAGS) -funroll-loops -fvisibility=hidden \
 	-funwind-tables -fno-omit-frame-pointer -g \
 	-MMD -MP \
 	-DBUILD_DATE='"$(BUILD_DATE)"' -DGIT_HASH='"$(GIT_HASH)"' \
@@ -26,13 +37,19 @@ BASE_CFLAGS = -Wall -Wextra -O3 -std=$(DSCO_STD) $(C2Y_WARNING_FLAGS) -D_POSIX_C
 	-Wno-error=format-security
 CFLAGS ?= $(BASE_CFLAGS)
 TEST_CFLAGS ?= $(BASE_CFLAGS) -O0 -g -fno-omit-frame-pointer -fno-inline
+override TEST_CFLAGS += -DDSCO_INTERNAL_TESTS
 # Release link-time optimizations:
 #  -dead_strip          : drop unreferenced functions/data (smaller binary, better I-cache)
 #  -dead_strip_dylibs   : drop dylibs no symbol references (gsl, gslcblas, libuv were
 #                         linked-but-unused, eagerly loaded at launch; removing them
 #                         cut `dsco --version` startup ~1.4ms / 1.35x — measured M4 Max).
 # Applied only to the release $(TARGET) link; test/asan/ubsan keep full symbols.
+ifeq ($(UNAME_S),Darwin)
 RELEASE_LDFLAGS ?= -Wl,-dead_strip -Wl,-dead_strip_dylibs
+else
+# GNU ld has no -dead_strip; --gc-sections is the closest equivalent
+RELEASE_LDFLAGS ?= -Wl,--gc-sections
+endif
 # Opt-in ThinLTO: `make LTO=1`. Cross-module inlining boosts long-running
 # throughput (agent loops, JSON, pipelines). Does NOT help the dyld-bound
 # startup path and ~8x the link time, so it is off by default. (M4 Max:
@@ -46,7 +63,12 @@ LDLIBS ?= -lcurl -lsqlite3 -ldl -lm
 
 TARGET = dsco
 LITE_TARGET = dsco-lite
+WASM_TARGET = web/static/dsco_wasm.js
+WASM_EXPORTS = '["_dsco_wasm_version","_dsco_wasm_exports_json","_dsco_wasm_models_json","_dsco_wasm_tools_json","_dsco_wasm_route_explain","_dsco_wasm_tool_exec","_dsco_wasm_session_reset","_dsco_wasm_session_add","_dsco_wasm_session_state"]'
+WASM_CACHE_DIR ?= $(BUILD_DIR)/emscripten-cache
+WASM_CACHE_ABS := $(abspath $(WASM_CACHE_DIR))
 DEBUG_TARGET = $(TARGET)-debug
+PROFILE_TARGET ?= dsco-instrumented
 
 # Cosmopolitan / APE portable build lane. The default target is the hosted
 # binary artifact name and is intentionally separate from $(TARGET): native DSCO
@@ -57,10 +79,10 @@ COSMOCC_VERSION ?= 4.0.2
 
 SRC_NAMES = main.c agent.c llm.c tools.c execution_layer.c json_util.c ast.c swarm.c tui.c env_config.c \
 	md.c baseline.c chronicle.c setup.c crypto.c eval.c pipeline.c plugin.c \
-			semantic.c hlc.c ipc.c mcp.c mcp_names.c provider_profiles.c provider.c integrations.c error.c trace.c task_profile.c \
+			semantic.c hlc.c ipc.c mcp.c mcp_names.c provider_profiles.c provider.c integrations.c error.c trace.c instrumenter.c structured_process.c task_profile.c \
 	output_guard.c topology.c workspace.c plan.c stateful_atoms.c recovery.c router.c \
 	pheromone.c ooda.c killswitch.c governance.c memory_tier.c talons.c avian.c \
-	arena_alloc.c event_loop.c vm.c scheduler.c vfs.c trading.c legion.c \
+	arena_alloc.c event_loop.c vm.c scheduler.c waiter.c vfs.c trading.c legion.c \
 	agent_profile.c orchestrator.c vecstore.c tamper.c sealed_store.c \
 	se_store.c watchdog.c audit_log.c heartbeat.c env_guard.c peer_bootstrap.c presence.c \
 	project.c project_mux.c project_grid.c \
@@ -78,6 +100,9 @@ SRC_NAMES = main.c agent.c llm.c tools.c execution_layer.c json_util.c ast.c swa
 	provider_pool.c \
 	math_fastpath.c \
 	http_pool.c \
+	realtime.c \
+	remote_cli.c \
+	cluster.c \
 	$(OPTIONAL_SRCS)
 TEST_SRC_NAMES = test.c
 
@@ -113,26 +138,43 @@ ASAN_TEST_OBJS = $(TEST_SRC_NAMES:%.c=$(ASAN_TEST_OBJ_DIR)/%.o) $(LIB_OBJS:$(OBJ
 UBSAN_TEST_OBJS = $(TEST_SRC_NAMES:%.c=$(UBSAN_TEST_OBJ_DIR)/%.o) $(LIB_OBJS:$(OBJ_DIR)/%=$(UBSAN_TEST_OBJ_DIR)/%)
 
 ASAN_CFLAGS = $(BASE_CFLAGS) -O0 -g -fno-omit-frame-pointer -fno-inline -fsanitize=address
+override ASAN_CFLAGS += -DDSCO_INTERNAL_TESTS
 ASAN_LDFLAGS = -fsanitize=address
 UBSAN_CFLAGS = $(BASE_CFLAGS) -O0 -g -fno-omit-frame-pointer -fno-inline -fsanitize=undefined -fno-sanitize-recover=all
+override UBSAN_CFLAGS += -DDSCO_INTERNAL_TESTS
 UBSAN_LDFLAGS = -fsanitize=undefined -fno-sanitize-recover=all
 DEBUG_CFLAGS = $(BASE_CFLAGS) -O0 -g -fno-omit-frame-pointer -fno-inline -DDSCO_DEV_BINARY
-LITE_CFLAGS ?= -Oz -std=$(DSCO_STD) $(C2Y_WARNING_FLAGS) -D_POSIX_C_SOURCE=200809L \
+PROFILE_COVERAGE_FLAGS = -finstrument-functions -fsanitize-coverage=trace-pc-guard,trace-cmp,indirect-calls,trace-div,trace-gep
+PROFILE_CFLAGS = $(BASE_CFLAGS) -O1 -g -fno-omit-frame-pointer -fno-inline \
+	-fno-optimize-sibling-calls -DDSCO_OBJECT_INSTRUMENTATION $(PROFILE_COVERAGE_FLAGS)
+ifeq ($(PROFILE_BUILD),1)
+override CFLAGS = $(PROFILE_CFLAGS)
+endif
+LITE_CFLAGS ?= -Oz -std=$(DSCO_STD) $(C2Y_WARNING_FLAGS) -D_POSIX_C_SOURCE=200809L -D_GNU_SOURCE \
 	-I$(INC_DIR) -DBUILD_DATE='"$(BUILD_DATE)"' -DGIT_HASH='"$(GIT_HASH)"'
 COVERAGE_CFLAGS = $(BASE_CFLAGS) -O0 -g -fno-omit-frame-pointer -fno-inline --coverage
+override COVERAGE_CFLAGS += -DDSCO_INTERNAL_TESTS
 COVERAGE_LDFLAGS = --coverage
-ASAN_RUNTIME_OPTIONS = detect_leaks=1
+# Leak checking is off on every platform until a dedicated leak burndown:
+# the suite has never run under LSan and end-of-process leaks would drown the
+# address-error signal ASan is here for. Override: make asan-test
+# ASAN_RUNTIME_OPTIONS=detect_leaks=1
+ASAN_RUNTIME_OPTIONS = detect_leaks=0
 ifeq ($(UNAME_S),Darwin)
 ASAN_RUNTIME_OPTIONS = detect_leaks=0
 # Secure Enclave + PAC + Touch ID + presence detection. Disabled for the
 # Cosmopolitan lane: cosmocc targets the APE portable ABI, not Darwin
 # Objective-C frameworks / Metal / LocalAuthentication.
 ifneq ($(COSMO_BUILD),1)
-BASE_CFLAGS += -DHAVE_SECURE_ENCLAVE -DHAVE_TOUCHID -mbranch-protection=standard
+BASE_CFLAGS += -DHAVE_SECURE_ENCLAVE -DHAVE_TOUCHID
+# PAC/BTI branch protection is arm64-only; Intel Macs reject the flag
+ifeq ($(UNAME_M),arm64)
+BASE_CFLAGS += -mbranch-protection=standard
+endif
 LDLIBS      += -framework Security -framework CoreFoundation -framework IOKit \
                -framework CoreGraphics -framework LocalAuthentication \
                -framework Foundation -framework Metal -framework MetalKit \
-               -framework Accelerate
+               -framework Accelerate -framework AudioToolbox
 
 # Objective-C sources (Touch ID + Metal vecstore)
 OBJC_NAMES  = touchid.m vecstore_metal.m
@@ -201,18 +243,21 @@ $(info Using system GSL via pkg-config)
 endif
 endif
 
-# libsodium (crypto for mesh)
+# libsodium (crypto for mesh). Detect via --exists: --cflags is empty when
+# headers live in the default include path (e.g. apt), which is not "absent".
+SODIUM_FOUND  := $(shell pkg-config --exists libsodium 2>/dev/null && echo yes)
 SODIUM_CFLAGS := $(shell pkg-config --cflags libsodium 2>/dev/null)
 SODIUM_LIBS   := $(shell pkg-config --libs   libsodium 2>/dev/null)
-ifneq ($(SODIUM_CFLAGS),)
+ifeq ($(SODIUM_FOUND),yes)
 BASE_CFLAGS += $(SODIUM_CFLAGS) -DHAVE_LIBSODIUM
 LDLIBS      += $(SODIUM_LIBS)
 endif
 
 # libuv (async I/O event loop)
+UV_FOUND  := $(shell pkg-config --exists libuv 2>/dev/null && echo yes)
 UV_CFLAGS := $(shell pkg-config --cflags libuv 2>/dev/null)
 UV_LIBS   := $(shell pkg-config --libs   libuv 2>/dev/null)
-ifneq ($(UV_CFLAGS),)
+ifeq ($(UV_FOUND),yes)
 BASE_CFLAGS += $(UV_CFLAGS) -DHAVE_LIBUV
 LDLIBS      += $(UV_LIBS)
 endif
@@ -247,7 +292,7 @@ GENERATED_OBJS   := $(patsubst src/generated/%.c,$(OBJ_DIR)/generated_%.o,$(GENE
 
 # Conditionally add mesh + net_server when libsodium is available
 OPTIONAL_SRCS =
-ifneq ($(SODIUM_CFLAGS),)
+ifeq ($(SODIUM_FOUND),yes)
 OPTIONAL_SRCS += mesh.c
 OPTIONAL_SRCS += net_tool.c
 OPTIONAL_SRCS += plan_optimizer.c
@@ -267,6 +312,33 @@ LDLIBS := $(filter-out -lm,$(LDLIBS)) -lm
 all: $(TARGET) dsc dsco-new $(LITE_TARGET)
 debug: $(DEBUG_TARGET)
 dev: $(DEBUG_TARGET)
+
+profile-instrumented:
+	$(MAKE) BUILD_DIR=build/instrumented TARGET=$(PROFILE_TARGET) PROFILE_BUILD=1 $(PROFILE_TARGET)
+
+profile:
+	python3 scripts/dsco_profile.py -- ./$(PROFILE_TARGET) --version
+
+.PHONY: wasm wasm-check wasm-smoke-native test_wasm_core
+wasm: $(WASM_TARGET)
+
+wasm-check:
+	@command -v emcc >/dev/null 2>&1 || { \
+		echo "emcc not found; install Emscripten to build $(WASM_TARGET)"; \
+		exit 1; \
+	}
+
+$(WASM_TARGET): $(SRC_DIR)/wasm_core.c $(INC_DIR)/wasm_core.h $(INC_DIR)/config.h | wasm-check $(BUILD_DIR)
+	EM_CACHE=$(WASM_CACHE_ABS) emcc -Oz -std=$(DSCO_STD) $(C2Y_WARNING_FLAGS) -I$(INC_DIR) \
+		-DBUILD_DATE='"$(BUILD_DATE)"' -DGIT_HASH='"$(GIT_HASH)"' \
+		--no-entry \
+		-sMODULARIZE=1 -sEXPORT_NAME=DscoWasm -sENVIRONMENT=web,node \
+		-sALLOW_MEMORY_GROWTH=1 -sFILESYSTEM=0 \
+		-sEXPORTED_RUNTIME_METHODS='["ccall","cwrap"]' \
+		-sEXPORTED_FUNCTIONS=$(WASM_EXPORTS) \
+		-o $@ $<
+
+wasm-smoke-native: test_wasm_core
 
 .PHONY: cosmo-bootstrap cosmo cosmo-run cosmo-selftest cosmo-clean cosmo-info
 cosmo-bootstrap:
@@ -320,7 +392,13 @@ fast-doctor:
 changed-tests:
 	./scripts/changed_tests.sh
 compile-commands:
-	python3 scripts/gen_compile_commands.py
+	@if command -v compiledb >/dev/null 2>&1; then \
+		echo "compiledb: capturing real build flags -> compile_commands.json"; \
+		compiledb -n make -B; \
+	else \
+		echo "gen: compiledb not found; using dependency-light generator"; \
+		python3 scripts/gen_compile_commands.py; \
+	fi
 build-report:
 	python3 scripts/build_report.py
 build-cache-doctor:
@@ -345,7 +423,7 @@ endif
 endif
 
 dsc: dsc.c
-	$(CC) -O2 -std=$(DSCO_STD) $(C2Y_WARNING_FLAGS) -D_POSIX_C_SOURCE=200809L -o $@ $< -lcurl -lreadline
+	$(CC) -O2 -std=$(DSCO_STD) $(C2Y_WARNING_FLAGS) -D_POSIX_C_SOURCE=200809L -D_GNU_SOURCE -o $@ $< -lcurl -lreadline
 
 $(DEBUG_TARGET): $(DEBUG_OBJS) $(GSL_DEBUG_OBJS)
 	$(CC) $(DEBUG_CFLAGS) -o $@ $^ $(LDFLAGS) $(LDLIBS)
@@ -401,6 +479,10 @@ $(UBSAN_TEST_OBJ_DIR)/generated_%.o: src/generated/%.c | bake_data $(UBSAN_TEST_
 $(OBJ_DIR)/%.o: $(SRC_DIR)/%.c | $(OBJ_DIR)
 	@mkdir -p $(@D)
 	$(CC) $(CFLAGS) -c -o $@ $<
+
+ifeq ($(PROFILE_BUILD),1)
+$(OBJ_DIR)/instrumenter.o: CFLAGS := $(filter-out $(PROFILE_COVERAGE_FLAGS),$(CFLAGS)) -fsanitize-coverage=0
+endif
 
 # ── Memory-bounded compilation of large translation units ──────────────────
 # tools.c (>1MB of source), agent.c, tui.c, integrations.c, trading.c, llm.c,
@@ -514,6 +596,9 @@ $(UBSAN_TEST_OBJ_DIR)/%.o: $(SRC_DIR)/%.m | $(UBSAN_TEST_OBJ_DIR)
 	@mkdir -p $(@D)
 	$(CC) $(UBSAN_CFLAGS) -fobjc-arc -x objective-c -c -o $@ $<
 
+$(BUILD_DIR):
+	mkdir -p $@
+
 $(OBJ_DIR) $(DEBUG_OBJ_DIR) $(TEST_OBJ_DIR) $(TEST_COVERAGE_OBJ_DIR) $(ASAN_OBJ_DIR) $(UBSAN_OBJ_DIR) $(ASAN_TEST_OBJ_DIR) $(UBSAN_TEST_OBJ_DIR):
 	mkdir -p $@
 	mkdir -p $@/extension
@@ -602,6 +687,21 @@ test_session_memory: $(TEST_OBJ_DIR)/test_session_memory.o \
 	$(LIB_OBJS:$(OBJ_DIR)/%=$(TEST_OBJ_DIR)/%) $(GSL_TEST_OBJS)
 	$(CC) $(TEST_CFLAGS) -o $@ $^ $(LDFLAGS) $(LDLIBS)
 
+$(TEST_OBJ_DIR)/test_memory_keep_score.o: $(TEST_DIR)/test_memory_keep_score.c | $(TEST_OBJ_DIR)
+	$(CC) $(TEST_CFLAGS) -c -o $@ $<
+# memory_keep_score pulls in vecstore + tools_embed_text via memory_tier.c; link full lib set.
+test_memory_keep_score: $(TEST_OBJ_DIR)/test_memory_keep_score.o \
+	$(LIB_OBJS:$(OBJ_DIR)/%=$(TEST_OBJ_DIR)/%) $(GSL_TEST_OBJS)
+	$(CC) $(TEST_CFLAGS) -o $@ $^ $(LDFLAGS) $(LDLIBS)
+
+$(TEST_OBJ_DIR)/test_wasm_core.o: $(TEST_DIR)/test_wasm_core.c | $(TEST_OBJ_DIR)
+	$(CC) $(TEST_CFLAGS) -c -o $@ $<
+$(TEST_OBJ_DIR)/wasm_core.o: $(SRC_DIR)/wasm_core.c | $(TEST_OBJ_DIR)
+	$(CC) $(TEST_CFLAGS) -c -o $@ $<
+test_wasm_core: $(TEST_OBJ_DIR)/test_wasm_core.o $(TEST_OBJ_DIR)/wasm_core.o
+	$(CC) $(TEST_CFLAGS) -o $@ $^ $(LDFLAGS) -lm
+	./$@
+
 $(TEST_OBJ_DIR)/test_control_flow.o: $(TEST_DIR)/test_control_flow.c | $(TEST_OBJ_DIR)
 	$(CC) $(TEST_CFLAGS) -c -o $@ $<
 test_control_flow: $(TEST_OBJ_DIR)/test_control_flow.o \
@@ -613,6 +713,23 @@ $(TEST_OBJ_DIR)/test_avian.o: $(TEST_DIR)/test_avian.c | $(TEST_OBJ_DIR)
 	$(CC) $(TEST_CFLAGS) -c -o $@ $<
 test_avian: $(TEST_OBJ_DIR)/test_avian.o $(TEST_OBJ_DIR)/avian.o
 	$(CC) $(TEST_CFLAGS) -o $@ $^ $(LDFLAGS) -lm
+
+# Interruptible-waiter primitive (replaces sleep-poll loops in bg threads).
+$(TEST_OBJ_DIR)/test_waiter.o: $(TEST_DIR)/test_waiter.c | $(TEST_OBJ_DIR)
+	$(CC) $(TEST_CFLAGS) -c -o $@ $<
+test_waiter: $(TEST_OBJ_DIR)/test_waiter.o $(TEST_OBJ_DIR)/waiter.o
+	$(CC) $(TEST_CFLAGS) -o $@ $^ $(LDFLAGS) -lpthread
+
+# Live MCP integration smoke test (not part of test_priorities — needs network +
+# OPENROUTER_API_KEY). Loads dsco's full MCP config (incl. ./.mcp.json), proves the
+# OpenRouter remote MCP server authenticates via the env-expanded Bearer header,
+# discovers its tools, and fires one live models-list call. Links LIB_OBJS
+# (mcp.o + its deps; excludes main/agent/orchestrator).
+$(TEST_OBJ_DIR)/mcp_openrouter_smoke.o: $(TEST_DIR)/mcp_openrouter_smoke.c | $(TEST_OBJ_DIR)
+	$(CC) $(TEST_CFLAGS) -c -o $@ $<
+mcp_smoke: $(TEST_OBJ_DIR)/mcp_openrouter_smoke.o $(filter-out $(OBJ_DIR)/main.o, $(OBJS)) $(GSL_OBJS)
+	$(CC) $(TEST_CFLAGS) -fcommon -o $(BUILD_DIR)/$@ $^ $(LDFLAGS) $(RELEASE_LDFLAGS) $(LDLIBS)
+	$(BUILD_DIR)/$@
 
 # Math fast-path corpus test. Links the REAL production logic (math_fastpath.c
 # + eval.c) and validates routing + value over thousands of generated cases.
@@ -629,15 +746,18 @@ test_math_corpus: $(TEST_OBJ_DIR)/test_math_corpus.o \
 # Build + run every standalone priority test in sequence.
 .PHONY: test_priorities
 test_priorities: test_recovery test_stateful_atoms test_plan_optimizer test_plan_cache \
-	test_learned_cost test_session_memory test_control_flow test_avian test_math_corpus
+	test_learned_cost test_session_memory test_memory_keep_score test_wasm_core test_control_flow test_avian test_waiter test_math_corpus
 	./test_recovery
 	./test_stateful_atoms
 	./test_plan_optimizer
 	./test_plan_cache
 	./test_learned_cost
 	./test_session_memory
+	./test_memory_keep_score
+	./test_wasm_core
 	./test_control_flow
 	./test_avian
+	./test_waiter
 	./test_math_corpus $(TEST_DIR)/math_corpus.tsv
 
 coverage: coverage_runner
@@ -648,12 +768,14 @@ coverage_runner: $(TEST_COVERAGE_OBJS) $(GSL_COVERAGE_OBJS)
 
 asan: $(TARGET)-asan
 
-$(TARGET)-asan: $(ASAN_OBJS) $(GSL_ASAN_OBJS)
+# Embedded-data objects are plain byte arrays; the uninstrumented release
+# objects are reused rather than rebuilding them per sanitizer.
+$(TARGET)-asan: $(ASAN_OBJS) $(GSL_ASAN_OBJS) $(GENERATED_OBJS)
 	$(CC) $(ASAN_CFLAGS) -o $@ $^ $(LDFLAGS) $(ASAN_LDFLAGS) $(LDLIBS)
 
 ubsan: $(TARGET)-ubsan
 
-$(TARGET)-ubsan: $(UBSAN_OBJS) $(GSL_UBSAN_OBJS)
+$(TARGET)-ubsan: $(UBSAN_OBJS) $(GSL_UBSAN_OBJS) $(GENERATED_OBJS)
 	$(CC) $(UBSAN_CFLAGS) -o $@ $^ $(LDFLAGS) $(UBSAN_LDFLAGS) $(LDLIBS)
 
 asan-test: asan-test_runner
@@ -679,7 +801,12 @@ clang-tidy:
 		echo "clang-tidy not found" >&2; \
 		exit 1; \
 	fi
-	clang-tidy $(SRCS) -- -I$(INC_DIR) -std=c11 -D_POSIX_C_SOURCE=200809L -DHAVE_MBEDTLS -DHAVE_LIBSODIUM -DHAVE_LIBUV
+	@# Analyze with the SAME include/feature flags the real build uses, so
+	@# clang-tidy resolves vendored GSL, hiredis and readline headers and sees
+	@# the HAVE_* guarded declarations. Otherwise it reports spurious
+	@# clang-diagnostic errors (undeclared time/dialog_*, missing gsl headers)
+	@# and exits non-zero regardless of the (advisory) style warnings.
+	clang-tidy $(SRCS) -- $(filter-out -MMD -MP,$(BASE_CFLAGS))
 
 cppcheck:
 	@if ! command -v cppcheck >/dev/null 2>&1; then \
@@ -751,19 +878,25 @@ bench-size: $(TARGET) $(LITE_TARGET)
 	@printf '{"bench":"size","binary":"%s","bytes":%s}\n' "$(TARGET)" "$$(wc -c < ./$(TARGET))"
 	@printf '{"bench":"size","binary":"%s","bytes":%s}\n' "$(LITE_TARGET)" "$$(wc -c < ./$(LITE_TARGET))"
 
+release-hardened:
+	python3 scripts/release_hardened.py $${DSCO_RELEASE_BINARY:-$(COSMO_TARGET).aarch64.elf}
+
+release-hardened-native: $(TARGET)
+	python3 scripts/release_hardened.py ./$(TARGET)
+
 lint: format-check docs-check check-version
 
 clean:
-	rm -rf $(BUILD_DIR) $(TARGET) $(LITE_TARGET) $(DEBUG_TARGET) dsc test_runner coverage_runner $(TARGET)-asan $(TARGET)-ubsan asan-test_runner ubsan-test_runner
+	rm -rf $(BUILD_DIR) $(TARGET) $(LITE_TARGET) $(DEBUG_TARGET) $(PROFILE_TARGET) dsc test_runner coverage_runner $(TARGET)-asan $(TARGET)-ubsan asan-test_runner ubsan-test_runner
 
-install: $(TARGET) $(LITE_TARGET) dsc
+install: $(TARGET) dsco-new $(LITE_TARGET) dsc
 	install -d $(PREFIX)/bin
 	install -d $(DSCO_SHARE_DIR)
 	install -m 755 $(TARGET) $(PREFIX)/bin/
 	install -m 755 $(LITE_TARGET) $(PREFIX)/bin/
 	install -m 755 dsc $(PREFIX)/bin/
 	install -m 755 scripts/live_face_avatar.sh $(PREFIX)/bin/dsco-live-face-avatar
-	test -f dsco-new && install -m 755 dsco-new $(PREFIX)/bin/ || true
+	install -m 755 dsco-new $(PREFIX)/bin/
 	install -m 644 $(INC_DIR)/tool_embeddings.bin $(DSCO_SHARE_DIR)/
 	install -m 755 face_capture.py $(DSCO_SHARE_DIR)/
 	install -d $(DSCO_DIR)/sessions $(DSCO_DIR)/plugins $(DSCO_DIR)/debug
@@ -790,9 +923,10 @@ ui: $(TARGET) ui-deps
 	./$(TARGET) --ui
 
 .PHONY: all debug dev clean install uninstall test coverage docs docs-check \
+	profile profile-instrumented \
 	asan ubsan asan-test ubsan-test format format-check \
 	fast fast-build fast-test fast-quick fast-syntax fast-changed fast-bench fast-doctor \
 	changed-tests compile-commands build-report build-cache-doctor fast-objects time-trace ninja-file ninja-build \
 	lint clang-tidy cppcheck static-analysis check-version \
 	ui ui-deps bench-startup bench-tool bench-agent-loop bench-local \
-	bench-sota bench-ttft bench-worker bench-size
+	bench-sota bench-ttft bench-worker bench-size release-hardened release-hardened-native

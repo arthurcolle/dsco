@@ -88,6 +88,9 @@ bool provider_has_custom_api_base(const char *provider_name);
 /* Whether a provider can be used with its env key or the current session key */
 bool provider_has_usable_key(const char *provider_name, const char *fallback_api_key);
 
+/* Whether a provider name is a local/self-hosted loopback endpoint. */
+bool provider_is_local_endpoint(const char *provider_name);
+
 /* Select the provider that should service a model for the current session */
 const char *provider_route_for_model(const char *model,
                                      const char *fallback_api_key,
@@ -113,8 +116,9 @@ const char *provider_claude_code_oauth_source(void);
 
 /* Sakana/Fugu supports both flat-rate subscription keys and metered PAYG keys.
  * The subscription key remains the default when both are present; set
- * DSCO_SAKANA_KEY_CLASS=payg or DSCO_PREFER_METERED_API=1 to prefer PAYG. */
+ * DSCO_SAKANA_KEY_CLASS=payg or DSCO_FUGU_KEY_CLASS=payg for explicit PAYG. */
 bool provider_sakana_current_key_is_subscription(void);
+const char *provider_sakana_subscription_request_key(void);
 bool provider_sakana_has_payg_key(void);
 const char *provider_sakana_payg_request_key(void);
 
@@ -127,6 +131,12 @@ bool provider_claude_code_get_account_info(char *subscription_type_out, size_t s
  * Anthropic and OpenAI-compat streaming paths so both can mark the stream
  * result as "credit_too_low" and trigger the fallback chain. */
 bool provider_msg_is_credit_too_low(const char *msg);
+
+/* Classify an error as a policy/gating rejection (HTTP 403, model not
+ * available, access not granted, regulatory gating). Distinct from
+ * credit_too_low: gating is not fixed by paying, so callers should route to
+ * a different model rather than retry or top up credit. */
+bool provider_msg_is_gated(const char *msg);
 time_t provider_credit_reset_at_from_value(const char *value, time_t now);
 time_t provider_credit_reset_at_from_text(const char *text, time_t now);
 bool provider_credit_reset_at_from_header_line(const char *line, time_t now,

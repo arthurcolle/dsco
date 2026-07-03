@@ -1,4 +1,5 @@
 #include "swarm.h"
+#include "openrouter_cache.h"
 #include "config.h"
 #include "provider.h"
 #include "router.h"
@@ -50,7 +51,10 @@ static bool swarm_provider_cli_pin_supported(const char *provider) {
     static const char *supported[] = {
         "anthropic", "openai", "openai-codex", "openrouter", "google", "groq",
         "deepseek", "mistral", "xai", "together", "perplexity", "cerebras",
-        "cohere", "moonshot", "sakana", NULL
+        "cohere", "moonshot", "sakana", "zai", "alibaba", "alibaba-coding-plan",
+        "qwen-oauth", "ollama", "lmstudio", "mlx", "vllm", "llamacpp", "localai",
+        "jan", "gpt4all", "koboldcpp", "textgen", "tgi", "sglang", "llamafile",
+        "local", NULL
     };
     if (!provider || !provider[0])
         return false;
@@ -387,10 +391,27 @@ int swarm_spawn_in_group(swarm_t *s, int group_id, const char *task, const char 
         /* New process group for clean kill */
         setpgid(0, 0);
 
+        /* Sub-agent cost routing: when the caller did not pin a model and
+           DSCO_SWARM_FREE_SUBAGENTS is set, route swarm workers to the free
+           agentic meta-model (openrouter/owl-alpha — 1M ctx, native tools) so
+           parallel exploration costs $0. Requires an OpenRouter key. The
+           explicit-model and unknown-model paths below still apply. */
+        const char *m = model ? model : s->default_model;
+        if (!model) {
+            const char *free_sub = getenv("DSCO_SWARM_FREE_SUBAGENTS");
+            if (free_sub && free_sub[0] && free_sub[0] != '0' &&
+                provider_has_usable_key("openrouter", s->api_key)) {
+                const char *routed = dsco_route_by_task(DSCO_TASK_SUBAGENT);
+                if (routed && routed[0]) {
+                    m = routed;
+                    fprintf(stdout, "swarm: free sub-agent routing -> %s\n", m);
+                }
+            }
+        }
+
         /* Validate model against registry — LLMs sometimes hallucinate
            model names (e.g. "claude-3-5-sonnet-20241022" which is gone).
            Fall back to parent's model if the requested one is unknown. */
-        const char *m = model ? model : s->default_model;
         if (m && m[0]) {
             const char *resolved = model_resolve_alias(m);
             if (resolved == m && !model_lookup(m)) {
@@ -634,12 +655,22 @@ int swarm_spawn_provider(swarm_t *s, int group_id, const char *task, const char 
         }
         swarm_export_child_credential_for_provider(provider, resolved_credential);
 
-        /* Key: --exec <provider> forces the child to use that provider's API */
+        /* Key: --provider <provider> keeps the child on dsco's native provider
+         * router. Fall back to --exec only for generic custom providers that
+         * are not accepted by the explicit provider-pin surface. */
         setenv("DSCO_PROFILE", "worker", 1);
         setenv("DSCO_WORKER", "1", 1);
-        execl(bin, bin, "--profile", "worker", "--exec", provider, "-m", m, task, NULL);
-        fprintf(stdout, "swarm: exec failed for '%s --exec %s': %s\n", bin, provider,
-                strerror(errno));
+        const char *child_provider_cli = swarm_provider_cli_name(provider);
+        if (swarm_provider_cli_pin_supported(child_provider_cli)) {
+            execl(bin, bin, "--profile", "worker", "--provider", child_provider_cli,
+                  "-m", m, task, NULL);
+            fprintf(stdout, "swarm: exec failed for '%s --provider %s': %s\n", bin,
+                    child_provider_cli, strerror(errno));
+        } else {
+            execl(bin, bin, "--profile", "worker", "--exec", provider, "-m", m, task, NULL);
+            fprintf(stdout, "swarm: exec failed for '%s --exec %s': %s\n", bin, provider,
+                    strerror(errno));
+        }
         _exit(127);
     }
 
@@ -1113,7 +1144,23 @@ static bool detect_binary(const char *name, char *out_path, size_t out_len) {
 static bool check_claude_auth(void) {
     /* Claude executor is usable with either Anthropic API key or Claude Code OAuth. */
     const char *key = provider_resolve_request_api_key("anthropic", NULL);
-    return (key && key[0]);
+    if (key && key[0])
+        return true;
+
+    /* Claude Code can be logged in via its own local store without exporting a
+     * token into dsco's provider layer. We only use this as an executor
+     * availability marker; request/auth handling remains inside the Claude CLI. */
+    const char *home = getenv("HOME");
+    if (home && home[0]) {
+        char path[1024];
+        snprintf(path, sizeof(path), "%s/.claude.json", home);
+        if (access(path, R_OK) == 0)
+            return true;
+        snprintf(path, sizeof(path), "%s/.claude/.credentials.json", home);
+        if (access(path, R_OK) == 0)
+            return true;
+    }
+    return false;
 }
 
 static bool check_codex_auth(void) {
@@ -1148,7 +1195,21 @@ void swarm_detect_executors(swarm_t *s) {
 }
 
 void swarm_prepare_executor_env(swarm_t *s, executor_type_t executor) {
-    if (!s || executor != EXECUTOR_CLAUDE)
+    if (!s)
+        return;
+
+    if (executor == EXECUTOR_CODEX) {
+        const char *dsco_oauth = getenv("DSCO_CHATGPT_OAUTH_TOKEN");
+        const char *chatgpt_oauth = getenv("CHATGPT_OAUTH_TOKEN");
+        if (dsco_oauth && dsco_oauth[0]) {
+            setenv("CHATGPT_OAUTH_TOKEN", dsco_oauth, 1);
+        } else if (chatgpt_oauth && chatgpt_oauth[0]) {
+            setenv("DSCO_CHATGPT_OAUTH_TOKEN", chatgpt_oauth, 1);
+        }
+        return;
+    }
+
+    if (executor != EXECUTOR_CLAUDE)
         return;
 
     /* Claude Code prefers ANTHROPIC_API_KEY over the logged-in subscription
@@ -1462,6 +1523,8 @@ int swarm_status_json(swarm_t *s, char *buf, size_t len) {
         jbuf_append_int(&b, c->id);
         jbuf_append(&b, ",\"pid\":");
         jbuf_append_int(&b, (int)c->pid);
+        jbuf_append(&b, ",\"process_group_id\":");
+        jbuf_append_int(&b, (int)c->pid);
         jbuf_append(&b, ",\"status\":");
         jbuf_append_json_str(&b, swarm_status_str(c->status));
         jbuf_append(&b, ",\"task\":");
@@ -1479,6 +1542,8 @@ int swarm_status_json(swarm_t *s, char *buf, size_t len) {
         jbuf_append_int(&b, (int)c->output_len);
         jbuf_append(&b, ",\"executor\":");
         jbuf_append_json_str(&b, executor_type_name(c->executor));
+        jbuf_append(&b, ",\"model\":");
+        jbuf_append_json_str(&b, c->model);
         jbuf_append(&b, ",\"subsidized\":");
         jbuf_append(&b, swarm_child_is_subsidized(c) ? "true" : "false");
         if (c->budget_usd > 0) {
@@ -1613,8 +1678,16 @@ int swarm_group_status_json(swarm_t *s, int group_id, char *buf, size_t len) {
         swarm_child_t *c = &s->children[g->child_ids[i]];
         jbuf_append(&b, "{\"id\":");
         jbuf_append_int(&b, c->id);
+        jbuf_append(&b, ",\"pid\":");
+        jbuf_append_int(&b, (int)c->pid);
+        jbuf_append(&b, ",\"process_group_id\":");
+        jbuf_append_int(&b, (int)c->pid);
         jbuf_append(&b, ",\"status\":");
         jbuf_append_json_str(&b, swarm_status_str(c->status));
+        jbuf_append(&b, ",\"executor\":");
+        jbuf_append_json_str(&b, executor_type_name(c->executor));
+        jbuf_append(&b, ",\"model\":");
+        jbuf_append_json_str(&b, c->model);
         jbuf_append(&b, ",\"task\":");
         jbuf_append_json_str(&b, c->task);
 

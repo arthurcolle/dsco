@@ -52,6 +52,7 @@ and no mandatory hosted control plane.
 - [Architecture](#architecture)
 - [Agent orchestration](#agent-orchestration)
 - [Topology catalog](#topology-catalog)
+- [The billion-node horizon](#the-billion-node-horizon)
 - [Chronicle and local observability](#chronicle-and-local-observability)
 - [Integrations universe](#integrations-universe)
 - [Configuration and storage](#configuration-and-storage)
@@ -146,7 +147,7 @@ new operator should know first.
 | MCP servers | 64 | Upper bound for configured MCP server processes. |
 | MCP tools | 2,048 | Upper bound for MCP-discovered tools before profile/dynamic loading. |
 | MCP line size | 256 KiB | JSON-RPC stdio line bound for MCP transport. |
-| Default model alias | `fugu` | Local default in `include/config.h`; can be overridden with `-m` or `DSCO_MODEL`. |
+| Default model alias | `zai/glm-5.2` | Native Z.AI GLM Coding Plan default in `include/config.h`; can be overridden with `-m` or `DSCO_MODEL`. |
 | Max output reserve | 16,384 tokens | Default output token reserve; `DSCO_MAX_TOKENS` can override. |
 | Agent checkpoint cadence | 40 turns | `MAX_AGENT_TURNS` is a progress checkpoint cadence, not the primary stop wall. |
 | Hard turn ceiling | 100,000 | Emergency runaway backstop; normal stops are budget/context/interrupt/no-progress. |
@@ -241,6 +242,10 @@ ANTHROPIC_API_KEY=... ./dsco "summarize this repository"
 OPENROUTER_API_KEY=... ./dsco -m openrouter/anthropic/claude-sonnet-4 "review src/tools.c"
 FUGU_API_KEY=... ./dsco -e fugu "write a release checklist"
 ```
+
+For project-local secrets, DSCO also loads `.env` from the current directory
+without overriding live environment variables or the saved setup env file. Use
+`--env-file PATH` when you want a specific env file for one run.
 
 Common entry points:
 
@@ -376,6 +381,31 @@ DSCO can load external tools from:
 - MCP servers configured in `~/.dsco/mcp.json`
 - dynamic plugins under `~/.dsco/plugins`
 - compatibility aliases such as `Read`, `Write`, `Edit`, `Bash`, `Task`, and `Agent`
+
+Pin a single MCP server for one run with `--mcp-server NAME` or
+`DSCO_MCP_SERVER=NAME`. For example, this project includes `.mcp.json` with an
+OpenRouter remote MCP server named `openrouter`:
+
+```bash
+printf 'OPENROUTER_API_KEY=sk-or-...\n' > .env
+./dsco --mcp-server openrouter -m openrouter/anthropic/claude-sonnet-4 -i
+```
+
+The MCP config can keep secrets out of JSON by referencing environment variables:
+
+```json
+{
+  "mcpServers": {
+    "openrouter": {
+      "url": "https://mcp.openrouter.ai/mcp",
+      "transport": "http",
+      "headers": {
+        "Authorization": "Bearer $OPENROUTER_API_KEY"
+      }
+    }
+  }
+}
+```
 
 External tools can carry integration metadata: connector ID, display name,
 distribution channel, categories, labels, scope, catalog status, and action flags.
@@ -598,6 +628,114 @@ Useful facts from the topology docs:
 
 See [`docs/topologies/INDEX.md`](docs/topologies/INDEX.md).
 
+## The billion-node horizon
+
+What happens if nodes like this run on every Apple Silicon device? The winning
+framing is not "one giant decentralized GPU." It is closer to a planet-scale
+edge-agent substrate: billions of sovereign local runtimes that can reason,
+execute tools, run local models, evaluate work, cache private context, and
+occasionally coordinate through a thin distributed control layer. DSCO already
+has the right node shape for this: a local-first, self-introspecting agent
+runtime with local execution, explicit tools, auditable traces, provider
+routing, hierarchical swarms, topology selection, governance primitives, and no
+mandatory hosted control plane.
+
+The brutal reality check: 1 billion literal Mac users is far beyond today's Mac
+base. Apple reports more than 2.5 billion active Apple devices overall — but
+that includes iPhone, iPad, Watch, and the rest; Gartner estimated roughly 24.8
+million Macs shipped in 2025, around 9.2% of worldwide PC shipments. So the
+billion-node version means Apple Silicon devices broadly, not just Macs. As a
+thought experiment, though: 1 billion M4-class nodes at 38 TOPS each is 38
+zetta-ops/sec peak — on raw INT8 intuition alone, about 9.6 million H100s worth
+of TOPS (H100 SXM ≈ 3,958 INT8 TOPS). The comparison is wildly imperfect (HBM,
+NVLink, CUDA, and datacenter fabrics all live on the other side of it), but
+even at 1% useful availability that is roughly 96,000 H100-equivalents of INT8
+throughput; at 5%, roughly 480,000.
+
+The catch: this fleet would be terrible for synchronous dense training and
+amazing for distributed inference, search, evaluation, tool execution,
+synthetic data generation, and agent work. Training a frontier model across
+consumer internet links is where the dream dies — a 70B FP16 model is ~140 GB
+of weights before optimizer state, and gradient synchronization across NATs,
+sleeping laptops, Wi-Fi, batteries, thermal throttling, and malicious nodes is
+dominated by everything except math. Full mesh is impossible anyway: 1 billion
+nodes imply ~5e17 pairwise links. You want small-world graphs, gossip, regional
+relays, task markets, and hierarchical map/reduce — which is exactly what the
+[topology catalog](#topology-catalog) encodes as distributed execution patterns
+rather than local metaphors.
+
+The design that works:
+
+- **Node.** Each user runs a DSCO node: local models via MLX/Core ML/Metal
+  (MLX is built around Apple Silicon's unified memory; Core ML dispatches
+  across CPU/GPU/ANE), local tools, a sandbox, a capability profile, an audit
+  ledger, a policy engine, and an opt-in compute budget.
+- **Coordination.** Not one central brain — a distributed scheduler moving
+  signed task capsules: task hash, model hash, input hash, budget, deadline,
+  privacy class, expected output schema, validation method, kill conditions.
+  Nodes advertise capabilities: chip, RAM, available models, uptime, bandwidth
+  class, thermal/battery policy, jurisdiction, tool permissions, credit rate.
+- **Trust.** Open public compute is adversarial by default: redundant
+  execution, spot checks, canary tasks, reputation, result consensus,
+  cryptographic signing, deterministic replay where possible, and judge nodes
+  for uncertain outputs. Code is validated by running tests; labeling by
+  agreement plus gold labels; reasoning by tournament judging; tool execution
+  by local user consent and hard permissions. DSCO's governance, killswitch,
+  and audit orientation is what makes this tractable.
+
+Where a fleet like this becomes genuinely powerful:
+
+- A global inference mesh where small/medium local models answer local tasks
+  and only distilled summaries move.
+- A massive eval swarm where every proposed model/prompt/agent/tool change is
+  tested across millions of environments, repos, tasks, and devices.
+- A synthetic data foundry where nodes generate, critique, mutate, verify, and
+  rank examples in parallel.
+- A federated personal AI network where data stays local but encrypted or
+  differentially private learning signals are contributed.
+- A distributed coding/research organism where agents fan out — one node
+  fuzzes, another writes tests, another benchmarks, another reviews, another
+  attempts proof repair — and a higher-level topology synthesizes.
+- A local-first agent economy where users rent out narrow, permissioned
+  capabilities: "run this test suite," "benchmark this model on M3 Max,"
+  "rank these generated plans."
+
+The core architectural insight: the intelligence lives in selection, routing,
+verification, and memory — not in one giant model. A billion-node swarm is
+evolutionary search at planetary scale: generate thousands of candidates, test
+locally, attack them with adversarial reviewers, route winners upward, and let
+the global system learn which topologies, prompts, tools, models, and node
+types win for which task classes.
+
+The path there is incremental:
+
+1. **DSCO Mesh** — 10–100 trusted Macs on a local network or private overlay.
+   Signed task capsules, capability registry, result validation, small-world
+   gossip. No payments, no public adversaries.
+2. **DSCO Swarm Cloud** — 1,000–10,000 opt-in nodes. First workloads must be
+   verifiable: code tests, fuzzing, benchmarks, LLM evals, dataset filtering,
+   synthetic-data judging. No arbitrary shell execution on public nodes.
+3. **The consumer app** — private local AI, local RAG, repo assistant,
+   automation, with an opt-in "contribute spare compute, earn credits" switch.
+   Contribution is visible, capped, paused on battery and heat, never hidden —
+   the product must be useful before the network effect. (Apple's review
+   guidelines explicitly prohibit excessive device strain and unrelated
+   background processing; the wedge is SETI@home meets private Copilot, not
+   mining.)
+4. **Regional schedulers and trust domains** — home cell, org cell,
+   city/region cell, public cell, high-trust cell, each with its own policies.
+   No single global coordinator.
+
+At planetary scale the system stops resembling Kubernetes and starts resembling
+a biological immune system plus a market plus a research lab: nodes appear and
+disappear, work is replicated and selected, bad actors are quarantined, local
+memory stays local, and global knowledge is compressed into models, adapters,
+routing tables, eval statistics, and signed artifacts. Not one decentralized
+LLM — a distributed agentic civilization layer.
+
+> DSCO turns every Apple Silicon device into a sovereign agent node — and the
+> network into a living compute organism.
+
 ## Chronicle and local observability
 
 Chronicle is DSCO's local activity ledger. It records process/session metadata,
@@ -717,6 +855,7 @@ provider configuration.
 |---|---|
 | `~/.dsco` | Default local DSCO state root. |
 | `DSCO_ENV_FILE` | Overrides the setup env file used for saved provider/config values. |
+| `DSCO_MCP_SERVER` | Comma-separated MCP server names to load; `*` or `all` loads all. |
 | `DSCO_BASELINE_DB` | Overrides the Baseline SQLite timeline path. |
 | `DSCO_CHRONICLE_DIR` | Overrides Chronicle ledger/blob storage. |
 | `~/.dsco/mcp.json` | MCP server configuration. |

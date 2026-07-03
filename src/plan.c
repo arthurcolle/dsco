@@ -966,6 +966,18 @@ bool atom_run(int atom_id, char *result_buf, size_t rlen) {
 
 /* ── Execution helpers ───────────────────────────────────────────────────── */
 
+bool atom_inputs_ready(int atom_id) {
+    atom_t *a = atom_find(atom_id);
+    if (!a)
+        return false;
+    for (int i = 0; i < a->input_from_count; i++) {
+        atom_t *up = atom_find(a->input_from_ids[i]);
+        if (!up || up->status != PLAN_DONE)
+            return false;
+    }
+    return true;
+}
+
 static int collect_ready_atoms(int step_id, int *out, int max_out, int count) {
     step_t *s = step_find(step_id);
     if (!s)
@@ -974,7 +986,10 @@ static int collect_ready_atoms(int step_id, int *out, int max_out, int count) {
     if (step_can_run(step_id)) {
         for (int i = 0; i < s->atom_count && count < max_out; i++) {
             atom_t *a = atom_find(s->atom_ids[i]);
-            if (a && a->status == PLAN_PENDING)
+            /* An atom is ready only when it is pending AND every upstream
+             * wired-input atom has completed. This makes stateful wiring
+             * (Priority 2) actually gate execution order, not just data flow. */
+            if (a && a->status == PLAN_PENDING && atom_inputs_ready(a->id))
                 out[count++] = a->id;
         }
     }
@@ -1002,6 +1017,128 @@ int plan_run_next(int plan_id) {
     char buf[4096];
     atom_run(ids[0], buf, sizeof(buf));
     return ids[0];
+}
+
+/* Derive a step's status from its atoms and child steps.
+ *   any FAILED      -> FAILED
+ *   any BLOCKED     -> BLOCKED
+ *   any IN_PROGRESS -> IN_PROGRESS
+ *   all DONE/SKIPPED (and at least one unit) -> DONE
+ *   some DONE       -> IN_PROGRESS
+ *   else            -> PENDING
+ * Milestones with no units stay PENDING until deps complete. */
+static plan_status_t rollup_step(int step_id, int depth) {
+    step_t *s = step_find(step_id);
+    if (!s || depth > 16)
+        return PLAN_PENDING;
+
+    /* Terminal statuses set explicitly (skip/cancel) are preserved. */
+    if (s->status == PLAN_SKIPPED || s->status == PLAN_CANCELLED)
+        return s->status;
+
+    int units = 0, done = 0, failed = 0, blocked = 0, in_prog = 0;
+
+    for (int i = 0; i < s->atom_count; i++) {
+        atom_t *a = atom_find(s->atom_ids[i]);
+        if (!a)
+            continue;
+        units++;
+        switch (a->status) {
+            case PLAN_DONE:        done++; break;
+            case PLAN_SKIPPED:     done++; break;
+            case PLAN_FAILED:      failed++; break;
+            case PLAN_BLOCKED:     blocked++; break;
+            case PLAN_IN_PROGRESS: in_prog++; break;
+            default: break;
+        }
+    }
+
+    for (int i = 0; i < s->child_step_count; i++) {
+        plan_status_t cs = rollup_step(s->child_step_ids[i], depth + 1);
+        units++;
+        switch (cs) {
+            case PLAN_DONE:        done++; break;
+            case PLAN_SKIPPED:     done++; break;
+            case PLAN_FAILED:      failed++; break;
+            case PLAN_BLOCKED:     blocked++; break;
+            case PLAN_IN_PROGRESS: in_prog++; break;
+            default: break;
+        }
+    }
+
+    plan_status_t st;
+    if (failed > 0)
+        st = PLAN_FAILED;
+    else if (blocked > 0)
+        st = PLAN_BLOCKED;
+    else if (in_prog > 0)
+        st = PLAN_IN_PROGRESS;
+    else if (units > 0 && done == units)
+        st = PLAN_DONE;
+    else if (done > 0)
+        st = PLAN_IN_PROGRESS;
+    else
+        st = PLAN_PENDING;
+
+    s->status = st;
+    return st;
+}
+
+void plan_rollup_status(int plan_id) {
+    plan_t *p = plan_find(plan_id);
+    if (!p)
+        return;
+
+    int units = 0, done = 0, failed = 0, blocked = 0, in_prog = 0;
+    for (int i = 0; i < p->root_step_count; i++) {
+        plan_status_t cs = rollup_step(p->root_step_ids[i], 0);
+        units++;
+        switch (cs) {
+            case PLAN_DONE:        done++; break;
+            case PLAN_SKIPPED:     done++; break;
+            case PLAN_FAILED:      failed++; break;
+            case PLAN_BLOCKED:     blocked++; break;
+            case PLAN_IN_PROGRESS: in_prog++; break;
+            default: break;
+        }
+    }
+
+    if (failed > 0)
+        p->status = PLAN_FAILED;
+    else if (blocked > 0)
+        p->status = PLAN_BLOCKED;
+    else if (units > 0 && done == units)
+        p->status = PLAN_DONE;
+    else if (in_prog > 0 || done > 0)
+        p->status = PLAN_IN_PROGRESS;
+    else
+        p->status = PLAN_PENDING;
+}
+
+int plan_run_all(int plan_id, int max_atoms) {
+    plan_t *p = plan_find(plan_id);
+    if (!p)
+        return 0;
+
+    /* Hard ceiling guards against pathological plans / wiring cycles. */
+    int ceiling = (max_atoms > 0 && max_atoms < ATOM_MAX) ? max_atoms : ATOM_MAX;
+    int executed = 0;
+
+    p->status = PLAN_IN_PROGRESS;
+    while (executed < ceiling) {
+        int ids[16];
+        int n = plan_ready_atoms(plan_id, ids, 16);
+        if (n < 1)
+            break;
+        for (int i = 0; i < n && executed < ceiling; i++) {
+            char buf[8192];
+            atom_run(ids[i], buf, sizeof(buf));
+            executed++;
+        }
+        plan_rollup_status(plan_id);
+    }
+    plan_rollup_status(plan_id);
+    return executed;
 }
 
 /* ── Top-down decomposition ──────────────────────────────────────────────── */
@@ -1309,6 +1446,40 @@ static void render_step(step_t *s, jbuf_t *b, const char *prefix, bool is_last, 
         snprintf(line, sizeof(line), "%s atom[%s/%s] %s\n", status_glyph(a->status),
                  atom_type_name(a->type), plan_status_name(a->status), a->title ? a->title : "");
         jbuf_append(b, line);
+
+        /* Show a one-line preview of real execution output when present, so a
+         * run renders evidence (not just status glyphs). Collapses whitespace
+         * and truncates to keep the tree scannable. */
+        if (a->result && a->result[0] &&
+            (a->status == PLAN_DONE || a->status == PLAN_FAILED)) {
+            char preview[160];
+            size_t w = 0;
+            bool prev_space = false;
+            for (const char *p = a->result; *p && w < sizeof(preview) - 1; p++) {
+                char c = *p;
+                if (c == '\n' || c == '\r' || c == '\t' || c == ' ') {
+                    if (prev_space || w == 0)
+                        continue;
+                    preview[w++] = ' ';
+                    prev_space = true;
+                } else {
+                    preview[w++] = c;
+                    prev_space = false;
+                }
+            }
+            while (w > 0 && preview[w - 1] == ' ')
+                w--;
+            preview[w] = '\0';
+            if (w > 0) {
+                bool truncated = strlen(a->result) > w;
+                char leaf_prefix[336];
+                snprintf(leaf_prefix, sizeof(leaf_prefix), "%s%s", child_prefix,
+                         last_leaf ? "   " : "\xe2\x94\x82  ");
+                snprintf(line, sizeof(line), "%s\xe2\x86\xb3 %s%s\n", leaf_prefix,
+                         preview, truncated ? " \xe2\x80\xa6" : "");
+                jbuf_append(b, line);
+            }
+        }
     }
 
     /* child steps */

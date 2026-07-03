@@ -1,5 +1,14 @@
 # Architecture Diagrams
 
+## 0. Fugu-Weighted Provider Fabric
+
+![DSCO provider fabric](assets/provider_fabric.svg)
+
+`provider_fabric` fans one task across independent provider-pinned `dsco`
+worker processes. Sakana Fugu is weighted first for subscription saturation,
+while Anthropic, OpenAI-Codex, and Z.AI lanes provide parallel capacity and
+health-driven fallback.
+
 ## 1. Interactive Turn Sequence
 
 ```mermaid

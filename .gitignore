@@ -49,6 +49,10 @@ venv/
 # IDE
 .vscode/
 .idea/
+# Language server (clangd/emacs) — generated, contains absolute paths
+compile_commands.json
+.cache/
+.clangd/index/
 
 # Private notes / scratch / personal files
 research_notes/
@@ -121,3 +125,16 @@ src/*.bak*
 src/*.gov_patch_backup
 src/topology_novel.c
 src/generated/
+
+# ── Session-local logs & smoke artifacts ──────────────────────────────────
+logs/
+smoke.out
+smoke.err
+mcp_smoke
+/tests/*.log
+
+# ── Generated ontology data (large; regenerable via scripts/) ──────────────
+# Source generators + schemas + docs ARE tracked; the multi-hundred-MB CSV/JSONL
+# outputs are not. Regenerate with scripts/consumer_profile_ontology/.
+data/consumer_profile_ontology/*.csv
+data/consumer_profile_ontology/*.jsonl

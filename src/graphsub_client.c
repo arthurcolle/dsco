@@ -142,10 +142,10 @@ char *graphsub_post(const char *path, const char *json_body) {
     snprintf(cmd, sizeof(cmd),
              "curl -sk --max-time 10 -X POST http://%s:%u%s -H 'Content-Type: application/json' -d "
              "@%s 2>/dev/null",
-             s_host, s_port, path, mtmpl);
+             s_host, s_port, path, tmpl);
     FILE *fp = popen(cmd, "r");
     if (!fp) {
-        unlink(mtmpl);
+        unlink(tmpl);
         return NULL;
     }
 
@@ -154,7 +154,7 @@ char *graphsub_post(const char *path, const char *json_body) {
     char *buf = malloc(cap);
     if (!buf) {
         pclose(fp);
-        unlink(mtmpl);
+        unlink(tmpl);
         return NULL;
     }
     size_t n;
@@ -166,7 +166,7 @@ char *graphsub_post(const char *path, const char *json_body) {
             if (!nb) {
                 free(buf);
                 pclose(fp);
-                unlink(mtmpl);
+                unlink(tmpl);
                 return NULL;
             }
             buf = nb;
@@ -174,7 +174,7 @@ char *graphsub_post(const char *path, const char *json_body) {
     }
     buf[len] = '\0';
     pclose(fp);
-    unlink(mtmpl);
+    unlink(tmpl);
 
     if (len == 0) {
         free(buf);

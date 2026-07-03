@@ -311,6 +311,66 @@ typedef struct {
     bool headers;
 } kv_map_ctx_t;
 
+/* Expand $VAR / ${VAR} references in buf (NUL-terminated) using getenv().
+ * Applied to MCP header and env values so configs can reference secrets
+ * without hardcoding them (e.g. "Authorization": "Bearer $OPENROUTER_API_KEY").
+ * A reference to an UNSET variable is left as-is (the literal $VAR/${VAR}) so
+ * ordinary strings that happen to contain '$' are not silently mangled; only
+ * references that resolve to a set environment variable are substituted.
+ * Output is truncated to cap-1 and always NUL-terminated. */
+static void expand_env_inplace(char *buf, size_t cap) {
+    if (!buf || cap == 0)
+        return;
+    char *out = (char *)malloc(cap);
+    if (!out)
+        return;
+    size_t oi = 0;
+    const char *p = buf;
+    while (*p && oi < cap - 1) {
+        if (*p != '$') {
+            out[oi++] = *p++;
+            continue;
+        }
+        const char *name = NULL;
+        size_t namelen = 0;
+        const char *after = p + 1; /* where the token ends */
+        if (p[1] == '{') {
+            const char *end = strchr(p + 2, '}');
+            if (end) {
+                name = p + 2;
+                namelen = (size_t)(end - name);
+                after = end + 1;
+            }
+        } else if ((p[1] >= 'A' && p[1] <= 'Z') || (p[1] >= 'a' && p[1] <= 'z') || p[1] == '_') {
+            name = p + 1;
+            const char *q = p + 1;
+            while ((*q >= 'A' && *q <= 'Z') || (*q >= 'a' && *q <= 'z') ||
+                   (*q >= '0' && *q <= '9') || *q == '_')
+                q++;
+            namelen = (size_t)(q - name);
+            after = q;
+        }
+        char varbuf[128];
+        const char *val = NULL;
+        if (name && namelen > 0 && namelen < sizeof(varbuf)) {
+            memcpy(varbuf, name, namelen);
+            varbuf[namelen] = '\0';
+            val = getenv(varbuf);
+        }
+        if (val) {
+            while (*val && oi < cap - 1)
+                out[oi++] = *val++;
+            p = after;
+        } else {
+            /* no valid/expandable reference: copy the '$' literally and advance */
+            out[oi++] = *p++;
+        }
+    }
+    out[oi] = '\0';
+    memcpy(buf, out, oi + 1);
+    free(out);
+}
+
 static void add_server_kv(mcp_server_t *srv, bool header, const char *key, const char *val) {
     if (!key || !val)
         return;
@@ -319,12 +379,14 @@ static void add_server_kv(mcp_server_t *srv, bool header, const char *key, const
             return;
         copy_str(srv->header_keys[srv->headerc], sizeof(srv->header_keys[0]), key);
         copy_str(srv->header_vals[srv->headerc], sizeof(srv->header_vals[0]), val);
+        expand_env_inplace(srv->header_vals[srv->headerc], sizeof(srv->header_vals[0]));
         srv->headerc++;
     } else {
         if (srv->envc >= MCP_MAX_ENV)
             return;
         copy_str(srv->env_keys[srv->envc], sizeof(srv->env_keys[0]), key);
         copy_str(srv->env_vals[srv->envc], sizeof(srv->env_vals[0]), val);
+        expand_env_inplace(srv->env_vals[srv->envc], sizeof(srv->env_vals[0]));
         srv->envc++;
     }
 }
@@ -380,10 +442,8 @@ static char *rpc_read_response(int fd, int timeout_ms) {
             jbuf_free(&line);
             return NULL;
         }
-        if (rc == 0) {
-            jbuf_free(&line);
-            return NULL;
-        }
+        if (rc == 0)
+            continue; /* slice expired — loop re-checks deadline + cancel */
 
         char buf[4096];
         ssize_t n = read(fd, buf, sizeof(buf));
@@ -918,6 +978,43 @@ static void pending_uniquify(const pending_list_t *pl, mcp_server_t *srv) {
     }
 }
 
+static bool mcp_server_filter_allows(const char *server_name) {
+    const char *filter = getenv("DSCO_MCP_SERVER");
+    if (!filter || !filter[0])
+        filter = getenv("DSCO_MCP_SERVERS");
+    if (!filter || !filter[0])
+        return true;
+
+    const char *p = filter;
+    while (*p) {
+        while (*p == ',' || isspace((unsigned char)*p))
+            p++;
+        const char *start = p;
+        while (*p && *p != ',')
+            p++;
+        const char *end = p;
+        while (end > start && isspace((unsigned char)end[-1]))
+            end--;
+        size_t n = (size_t)(end - start);
+        if (n > 0) {
+            if (n == 1 && start[0] == '*')
+                return true;
+            if (n == 3 && strncasecmp(start, "all", 3) == 0)
+                return true;
+            char raw[256];
+            char normalized[256];
+            if (n >= sizeof(raw))
+                n = sizeof(raw) - 1;
+            memcpy(raw, start, n);
+            raw[n] = '\0';
+            sanitize_name(raw, normalized, sizeof(normalized));
+            if (strcmp(raw, server_name) == 0 || strcmp(normalized, server_name) == 0)
+                return true;
+        }
+    }
+    return false;
+}
+
 static void start_configured_server(mcp_registry_t *reg, const mcp_server_t *cfg) {
     if (!cfg->command[0] && !cfg->url[0])
         return;
@@ -935,6 +1032,9 @@ static void start_configured_server(mcp_registry_t *reg, const mcp_server_t *cfg
         if (!srv.command[0])
             copy_str(srv.command, sizeof(srv.command), srv.url);
     }
+
+    if (!mcp_server_filter_allows(srv.name))
+        return;
 
     /* Collection phase: stash for the parallel connect pool and return. */
     if (g_collect) {

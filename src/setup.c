@@ -34,6 +34,26 @@ extern char **environ;
 static char s_env_path[PATH_MAX] = {0};
 static char s_profile[128] = {0};
 
+static bool setup_ascii_eq_ci(const char *a, const char *b) {
+    if (!a || !b)
+        return false;
+    while (*a && *b) {
+        if (tolower((unsigned char)*a) != tolower((unsigned char)*b))
+            return false;
+        a++;
+        b++;
+    }
+    return *a == '\0' && *b == '\0';
+}
+
+static bool setup_env_truthy(const char *value) {
+    if (!value || !value[0])
+        return false;
+    return strcmp(value, "1") == 0 || setup_ascii_eq_ci(value, "true") ||
+           setup_ascii_eq_ci(value, "yes") || setup_ascii_eq_ci(value, "on") ||
+           setup_ascii_eq_ci(value, "y") || setup_ascii_eq_ci(value, "t");
+}
+
 static const char *k_known_env_keys[] = {
     "ANTHROPIC_API_KEY", "OPENAI_API_KEY", "JINA_API_KEY", "PARALLEL_API_KEY", "OPENROUTER_API_KEY",
     "TOGETHER_API_KEY", "GROQ_API_KEY", "DEEPSEEK_API_KEY", "MISTRAL_API_KEY", "KIMI_API_KEY",
@@ -49,6 +69,8 @@ static const char *k_known_env_keys[] = {
     "DISCORD_TOKEN", "TWILIO_AUTH_TOKEN", "STRIPE_API_KEY", "MAPBOX_API_KEY",
     "OPENWEATHERMAP_API_KEY", "ALPHA_VANTAGE_API_KEY", "FRED_API_KEY",
     "FUGU_API_KEY", "FUGU_PAYG_API_KEY", "FUGU_BASE_URL",
+    "GLM_API_KEY", "ZAI_API_KEY", "Z_AI_API_KEY", "ZAI_CODING_PLAN_API_KEY",
+    "Z_AI_CODING_PLAN_API_KEY", "ZHIPU_API_KEY",
     /* Trading / Prediction Markets */
     "KALSHI_API_KEY", "KALSHI_RSA_PRIVATE_KEY_PATH", "POLYMARKET_ADDRESS", "POLYMARKET_API_KEY",
     "POLYMARKET_API_SECRET", "POLYMARKET_PASSPHRASE", "POLYMARKET_PRIVATE_KEY",
@@ -59,6 +81,12 @@ typedef struct {
     const char *canonical;
     const char *aliases[8];
 } alias_map_t;
+
+typedef struct {
+    const char *name;
+    const char *reason;
+    bool report_live;
+} blocked_setup_env_t;
 
 static const alias_map_t k_aliases[] = {
     {"ANTHROPIC_API_KEY", {"CLAUDE_API_KEY", NULL}},
@@ -74,10 +102,64 @@ static const alias_map_t k_aliases[] = {
     {"TOGETHER_API_KEY", {"TOGETHER_TOKEN", NULL}},
     {"XAI_API_KEY", {"GROK_API_KEY", "X_AI_API_KEY", NULL}},
     {"KIMI_API_KEY", {"KIMI_CODING_API_KEY", "MOONSHOT_API_KEY", "MOONSHOTAI_API_KEY", NULL}},
+    {"GLM_API_KEY",
+     {"ZAI_API_KEY", "Z_AI_API_KEY", "ZAI_CODING_PLAN_API_KEY", "Z_AI_CODING_PLAN_API_KEY",
+      "ZHIPU_API_KEY", NULL}},
     {"FUGU_API_KEY", {"SAKANA_API_KEY", "FISH_API_KEY", "SAKANA_TOKEN", NULL}},
     {"FUGU_PAYG_API_KEY", {"SAKANA_PAYG_API_KEY", "FISH_PAYG_API_KEY", "SAKANA_PAYG_TOKEN", NULL}},
     {"FUGU_BASE_URL", {"FUGU_API_BASE", "SAKANA_API_BASE", "SAKANA_BASE_URL", NULL}},
     {NULL, {NULL}}};
+
+/* These are process protocol, child/supervisor state, or process-local secrets.
+ * They may be present during a run, but loading or writing them from a durable
+ * setup env file makes later invocations non-reproducible and hard to debug. */
+static const blocked_setup_env_t k_blocked_setup_env[] = {
+    {"DSCO_INTERACTIVE", "runtime session marker", true},
+    {"DSCO_SUPERVISED", "supervisor child state", true},
+    {"DSCO_NO_SUPERVISE", "supervisor recursion guard", true},
+    {"DSCO_SUPERVISE_RESTART", "supervisor restart state", true},
+    {"DSCO_MEM_PRESSURE", "supervisor restart state", true},
+    {"DSCO_RESUME_AFTER_CRASH", "supervisor crash-resume state", true},
+    {"DSCO_CRASH_DEBUGGER", "supervisor crash handler state", true},
+    {"DSCO_SUBAGENT", "worker process state", true},
+    {"DSCO_WORKER", "worker process state", true},
+    {"DSCO_SWARM_DEPTH", "worker process state", true},
+    {"DSCO_SWARM_INHERIT_TOOLS", "worker process state", true},
+    {"DSCO_PARENT_INSTANCE_ID", "worker process state", true},
+    {"DSCO_CHILD_BUDGET", "worker process state", true},
+    {"DSCO_IPC_DB", "worker IPC state", true},
+    {"DSCO_PROJECT_ID", "project worker state", true},
+    {"DSCO_PROJECT_NAME", "project worker state", true},
+    {"DSCO_INSTANCE_ID", "runtime instance id", true},
+    {"DSCO_SESSION_ID", "runtime session id", true},
+    {"DSCO_CHRONICLE_SESSION_ID", "runtime chronicle id", true},
+    {"DSCO_IN_SELVES", "nested introspection guard", true},
+    {"DSCO_TEST_CRASH", "fault injection", true},
+    {"DSCO_HOTSWAP_BIN", "upgrade handoff state", true},
+    {"DSCO_KEEP_TERMINAL_ON_EXIT", "test harness state", true},
+    {"DSCO_DEBUG_SPAWN", "debug trace state", true},
+    {"DSCO_NET_AUTH_KEY", "process-local mesh secret", true},
+    {"DSCO_MESH_SECRET", "process-local mesh secret", true},
+    {"DSCO_TRUST_KEY", "process-local trust secret", true},
+    {"DSCO_SETUP_NO_AUTO_BOOTSTRAP", "startup probe guard", false},
+    {"DSCO_NO_SETUP_BOOTSTRAP", "startup probe guard", false},
+    {"DSCO_CREDENTIAL_DISCOVERY_NO_PROMPT", "startup probe guard", false},
+    {NULL, NULL, false},
+};
+
+static const blocked_setup_env_t *blocked_setup_env_entry(const char *name) {
+    if (!name || !name[0])
+        return NULL;
+    for (int i = 0; k_blocked_setup_env[i].name; i++) {
+        if (strcmp(k_blocked_setup_env[i].name, name) == 0)
+            return &k_blocked_setup_env[i];
+    }
+    return NULL;
+}
+
+static bool setup_env_key_is_blocked(const char *name) {
+    return blocked_setup_env_entry(name) != NULL;
+}
 
 static bool has_suffix(const char *s, const char *suffix) {
     if (!s || !suffix)
@@ -199,16 +281,9 @@ static void mask_value(const char *val, char *out, size_t out_len) {
         snprintf(out, out_len, "(unset)");
         return;
     }
-    size_t n = strlen(val);
-    if (n <= 6) {
-        snprintf(out, out_len, "**** (%zu chars)", n);
-        return;
-    }
-    char prefix[5] = {0};
-    char suffix[5] = {0};
-    memcpy(prefix, val, 3);
-    memcpy(suffix, val + n - 3, 3);
-    snprintf(out, out_len, "%s...%s (%zu chars)", prefix, suffix, n);
+    /* Do not leak token prefixes/suffixes in reports or artifacts. Length is
+     * enough to diagnose presence/shape without creating reusable fragments. */
+    snprintf(out, out_len, "[redacted] (%zu chars)", strlen(val));
 }
 
 static void kv_list_init(kv_list_t *l) {
@@ -228,6 +303,31 @@ static void kv_list_free(kv_list_t *l) {
     l->items = NULL;
     l->count = 0;
     l->cap = 0;
+}
+
+static void kv_list_remove_at(kv_list_t *l, int idx) {
+    if (!l || idx < 0 || idx >= l->count)
+        return;
+    free(l->items[idx].key);
+    free(l->items[idx].value);
+    for (int j = idx; j + 1 < l->count; j++)
+        l->items[j] = l->items[j + 1];
+    l->count--;
+}
+
+static int kv_list_drop_blocked_setup_keys(kv_list_t *l) {
+    if (!l)
+        return 0;
+    int dropped = 0;
+    for (int i = 0; i < l->count;) {
+        if (setup_env_key_is_blocked(l->items[i].key)) {
+            kv_list_remove_at(l, i);
+            dropped++;
+        } else {
+            i++;
+        }
+    }
+    return dropped;
 }
 
 static int kv_list_find(const kv_list_t *l, const char *key) {
@@ -608,6 +708,8 @@ static int load_env_from_path(const char *path) {
 
     int loaded = 0;
     for (int i = 0; i < l.count; i++) {
+        if (setup_env_key_is_blocked(l.items[i].key))
+            continue;
         if (!getenv(l.items[i].key)) {
             setenv(l.items[i].key, l.items[i].value, 1);
             loaded++;
@@ -663,10 +765,17 @@ int dsco_setup_autopopulate(bool overwrite, bool include_generic, char *summary,
     }
 
     int discovered = 0;
-    int added = 0, updated = 0, unchanged = 0, alias_mapped = 0;
+    int added = 0, updated = 0, unchanged = 0, alias_mapped = 0, ignored = 0;
+
+    int dropped_blocked = kv_list_drop_blocked_setup_keys(&l);
+    ignored += dropped_blocked;
 
     for (int i = 0; k_known_env_keys[i]; i++) {
         const char *name = k_known_env_keys[i];
+        if (setup_env_key_is_blocked(name)) {
+            ignored++;
+            continue;
+        }
         const char *val = getenv(name);
         const char *alias_used = NULL;
         if (!val || !val[0]) {
@@ -719,6 +828,10 @@ int dsco_setup_autopopulate(bool overwrite, bool include_generic, char *summary,
                 continue;
             if (canonical_from_alias(key))
                 continue;
+            if (setup_env_key_is_blocked(key)) {
+                ignored++;
+                continue;
+            }
 
             const char *val = eq + 1;
             if (!val || !*val)
@@ -753,7 +866,7 @@ int dsco_setup_autopopulate(bool overwrite, bool include_generic, char *summary,
         }
     }
 
-    bool should_write = (!had_file) || added > 0 || updated > 0;
+    bool should_write = (!had_file) || added > 0 || updated > 0 || dropped_blocked > 0;
     if (should_write) {
         if (!write_kv_file(path, &l)) {
             if (summary && summary_len > 0)
@@ -767,9 +880,9 @@ int dsco_setup_autopopulate(bool overwrite, bool include_generic, char *summary,
     if (summary && summary_len > 0) {
         snprintf(summary, summary_len,
                  "setup complete: profile=%s discovered=%d aliases=%d added=%d updated=%d "
-                 "unchanged=%d file=%s",
+                 "unchanged=%d ignored_runtime=%d file=%s",
                  dsco_setup_profile_name(), discovered, alias_mapped, added, updated, unchanged,
-                 path);
+                 ignored, path);
     }
 
     kv_list_free(&l);
@@ -778,6 +891,13 @@ int dsco_setup_autopopulate(bool overwrite, bool include_generic, char *summary,
 }
 
 int dsco_setup_bootstrap_from_env(char *summary, size_t summary_len) {
+    if (setup_env_truthy(getenv("DSCO_SETUP_NO_AUTO_BOOTSTRAP")) ||
+        setup_env_truthy(getenv("DSCO_NO_SETUP_BOOTSTRAP"))) {
+        if (summary && summary_len > 0) {
+            snprintf(summary, summary_len, "bootstrap skipped: disabled by env");
+        }
+        return 0;
+    }
     const char *path = resolve_env_path();
     if (access(path, F_OK) == 0) {
         if (summary && summary_len > 0) {
@@ -826,6 +946,49 @@ int dsco_setup_report(char *out, size_t out_len) {
     sbuf_appendf(out, out_len, &pos, "profile: %s\n", dsco_setup_profile_name());
     sbuf_appendf(out, out_len, &pos, "env file: %s (%s)\n", path,
                  has_saved_file ? "present" : "missing");
+
+    int live_blocked = 0;
+    for (int i = 0; k_blocked_setup_env[i].name; i++) {
+        if (!k_blocked_setup_env[i].report_live)
+            continue;
+        const char *v = getenv(k_blocked_setup_env[i].name);
+        if (v && v[0])
+            live_blocked++;
+    }
+    int saved_blocked = 0;
+    for (int i = 0; i < saved.count; i++) {
+        if (setup_env_key_is_blocked(saved.items[i].key))
+            saved_blocked++;
+    }
+    if (live_blocked > 0 || saved_blocked > 0) {
+        sbuf_appendf(out, out_len, &pos, "env hygiene: %d live transient, %d saved ignored\n",
+                     live_blocked, saved_blocked);
+        if (live_blocked > 0) {
+            sbuf_appendf(out, out_len, &pos, "  live transient vars:\n");
+            for (int i = 0; k_blocked_setup_env[i].name; i++) {
+                if (!k_blocked_setup_env[i].report_live)
+                    continue;
+                const char *v = getenv(k_blocked_setup_env[i].name);
+                if (v && v[0]) {
+                    sbuf_appendf(out, out_len, &pos, "    %-28s : %s\n",
+                                 k_blocked_setup_env[i].name,
+                                 k_blocked_setup_env[i].reason);
+                }
+            }
+        }
+        if (saved_blocked > 0) {
+            sbuf_appendf(out, out_len, &pos,
+                         "  saved transient vars ignored during setup load:\n");
+            for (int i = 0; i < saved.count; i++) {
+                const blocked_setup_env_t *blocked = blocked_setup_env_entry(saved.items[i].key);
+                if (blocked) {
+                    sbuf_appendf(out, out_len, &pos, "    %-28s : %s\n",
+                                 saved.items[i].key, blocked->reason);
+                }
+            }
+        }
+    }
+
     {
         const char *anthropic_key = provider_resolve_api_key("anthropic");
         const char *anthropic_mode = provider_auth_mode("anthropic", anthropic_key);
@@ -989,6 +1152,8 @@ int dsco_setup_report(char *out, size_t out_len) {
 bool dsco_setup_set_key(const char *key, const char *value) {
     if (!key || !key[0] || !is_valid_env_name(key))
         return false;
+    if (setup_env_key_is_blocked(key))
+        return false;
     if (!value)
         value = "";
 
@@ -1002,6 +1167,7 @@ bool dsco_setup_set_key(const char *key, const char *value) {
             return false;
         }
     }
+    (void)kv_list_drop_blocked_setup_keys(&l);
 
     bool was_update = false;
     if (!kv_list_set(&l, key, value, &was_update)) {
