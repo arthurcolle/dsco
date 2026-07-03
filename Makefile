@@ -37,6 +37,7 @@ BASE_CFLAGS = -Wall -Wextra -O3 -std=$(DSCO_STD) $(C2Y_WARNING_FLAGS) -D_POSIX_C
 	-Wno-error=format-security
 CFLAGS ?= $(BASE_CFLAGS)
 TEST_CFLAGS ?= $(BASE_CFLAGS) -O0 -g -fno-omit-frame-pointer -fno-inline
+override TEST_CFLAGS += -DDSCO_INTERNAL_TESTS
 # Release link-time optimizations:
 #  -dead_strip          : drop unreferenced functions/data (smaller binary, better I-cache)
 #  -dead_strip_dylibs   : drop dylibs no symbol references (gsl, gslcblas, libuv were
@@ -100,6 +101,8 @@ SRC_NAMES = main.c agent.c llm.c tools.c execution_layer.c json_util.c ast.c swa
 	math_fastpath.c \
 	http_pool.c \
 	realtime.c \
+	remote_cli.c \
+	cluster.c \
 	$(OPTIONAL_SRCS)
 TEST_SRC_NAMES = test.c
 
@@ -135,8 +138,10 @@ ASAN_TEST_OBJS = $(TEST_SRC_NAMES:%.c=$(ASAN_TEST_OBJ_DIR)/%.o) $(LIB_OBJS:$(OBJ
 UBSAN_TEST_OBJS = $(TEST_SRC_NAMES:%.c=$(UBSAN_TEST_OBJ_DIR)/%.o) $(LIB_OBJS:$(OBJ_DIR)/%=$(UBSAN_TEST_OBJ_DIR)/%)
 
 ASAN_CFLAGS = $(BASE_CFLAGS) -O0 -g -fno-omit-frame-pointer -fno-inline -fsanitize=address
+override ASAN_CFLAGS += -DDSCO_INTERNAL_TESTS
 ASAN_LDFLAGS = -fsanitize=address
 UBSAN_CFLAGS = $(BASE_CFLAGS) -O0 -g -fno-omit-frame-pointer -fno-inline -fsanitize=undefined -fno-sanitize-recover=all
+override UBSAN_CFLAGS += -DDSCO_INTERNAL_TESTS
 UBSAN_LDFLAGS = -fsanitize=undefined -fno-sanitize-recover=all
 DEBUG_CFLAGS = $(BASE_CFLAGS) -O0 -g -fno-omit-frame-pointer -fno-inline -DDSCO_DEV_BINARY
 PROFILE_COVERAGE_FLAGS = -finstrument-functions -fsanitize-coverage=trace-pc-guard,trace-cmp,indirect-calls,trace-div,trace-gep
@@ -148,6 +153,7 @@ endif
 LITE_CFLAGS ?= -Oz -std=$(DSCO_STD) $(C2Y_WARNING_FLAGS) -D_POSIX_C_SOURCE=200809L -D_GNU_SOURCE \
 	-I$(INC_DIR) -DBUILD_DATE='"$(BUILD_DATE)"' -DGIT_HASH='"$(GIT_HASH)"'
 COVERAGE_CFLAGS = $(BASE_CFLAGS) -O0 -g -fno-omit-frame-pointer -fno-inline --coverage
+override COVERAGE_CFLAGS += -DDSCO_INTERNAL_TESTS
 COVERAGE_LDFLAGS = --coverage
 # Leak checking is off on every platform until a dedicated leak burndown:
 # the suite has never run under LSan and end-of-process leaks would drown the
