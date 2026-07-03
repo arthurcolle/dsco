@@ -22,6 +22,7 @@
 #include "chronicle.h"
 #include "router.h"
 #include "realtime.h"
+#include "executive.h"
 #include "frontier.h"
 #include "setup.h"
 #include "spend_governor.h"
@@ -632,6 +633,204 @@ static void test_build_request_ex_strips_anthropic_namespace(void) {
     free(model);
     free(req);
     conv_free(&conv);
+    PASS();
+}
+
+/* ── Executive decisions: model-invocable session control ────────────── */
+
+static bool s_exec_exit_called = false;
+static char s_exec_exit_reason[256];
+static double s_exec_budget = 20.0;
+static double s_exec_spent = 5.0;
+static bool s_exec_red_forced = false;
+static char s_exec_escalated[256];
+static bool s_exec_frontier_on = true;
+static double s_exec_frontier_score = 0.95;
+static int s_exec_audits = 0;
+
+static void t_exec_exit(const char *reason) {
+    s_exec_exit_called = true;
+    snprintf(s_exec_exit_reason, sizeof(s_exec_exit_reason), "%s", reason ? reason : "");
+}
+static double t_exec_get_budget(void) { return s_exec_budget; }
+static void t_exec_set_budget(double usd) { s_exec_budget = usd; }
+static double t_exec_get_spent(void) { return s_exec_spent; }
+static void t_exec_force_red(bool on) { s_exec_red_forced = on; }
+static void t_exec_downshift(const char *reason) { (void)reason; }
+static void t_exec_escalate(const char *q) {
+    snprintf(s_exec_escalated, sizeof(s_exec_escalated), "%s", q ? q : "");
+}
+static bool t_exec_frontier(double *score, bool *on, char *sum, size_t n) {
+    if (score)
+        *score = s_exec_frontier_score;
+    if (on)
+        *on = s_exec_frontier_on;
+    if (sum && n)
+        snprintf(sum, n, "test frontier summary");
+    return true;
+}
+static void t_exec_audit(const char *c, const char *t2, const char *d) {
+    (void)c;
+    (void)t2;
+    (void)d;
+    s_exec_audits++;
+}
+
+static void test_exec_install_hooks(void) {
+    executive_hooks_t h = {0};
+    h.request_exit = t_exec_exit;
+    h.get_session_budget = t_exec_get_budget;
+    h.set_session_budget = t_exec_set_budget;
+    h.get_session_spent = t_exec_get_spent;
+    h.force_phase_red = t_exec_force_red;
+    h.request_model_downshift = t_exec_downshift;
+    h.escalate = t_exec_escalate;
+    h.frontier_snapshot = t_exec_frontier;
+    h.audit = t_exec_audit;
+    executive_set_hooks(&h);
+    s_exec_exit_called = false;
+    s_exec_exit_reason[0] = '\0';
+    s_exec_budget = 20.0;
+    s_exec_spent = 5.0;
+    s_exec_red_forced = false;
+    s_exec_escalated[0] = '\0';
+    s_exec_frontier_on = true;
+    s_exec_frontier_score = 0.95;
+    s_exec_audits = 0;
+}
+
+static void test_executive_end_conversation(void) {
+    TEST("executive: end_conversation schedules exit with reason");
+    test_exec_install_hooks();
+    char out[1024];
+    bool ok = executive_decide(
+        "{\"decision\":\"end conversation now\",\"reason\":\"gap budget at $48\"}", out,
+        sizeof(out));
+    ASSERT(ok, "decision should be accepted");
+    ASSERT(s_exec_exit_called, "exit hook fired");
+    ASSERT(strstr(s_exec_exit_reason, "$48") != NULL, "reason propagated");
+    ASSERT(strstr(out, "\"accepted\"") != NULL, "result reports accepted");
+    ASSERT(s_exec_audits == 1, "decision audited");
+    PASS();
+}
+
+static void test_executive_requires_reason(void) {
+    TEST("executive: decisions without substantive reasons are rejected");
+    test_exec_install_hooks();
+    char out[1024];
+    bool ok = executive_decide("{\"decision\":\"end_conversation\"}", out, sizeof(out));
+    ASSERT(!ok, "missing reason rejected");
+    ASSERT(!s_exec_exit_called, "exit hook NOT fired");
+    ok = executive_decide("{\"decision\":\"end_conversation\",\"reason\":\"eh\"}", out,
+                          sizeof(out));
+    ASSERT(!ok, "trivial reason rejected");
+    ASSERT(strstr(out, "rejected") != NULL, "result reports rejection");
+    PASS();
+}
+
+static void test_executive_unknown_decision(void) {
+    TEST("executive: unknown decisions rejected with valid list");
+    test_exec_install_hooks();
+    char out[1024];
+    bool ok = executive_decide(
+        "{\"decision\":\"launch_missiles\",\"reason\":\"testing bounds\"}", out,
+        sizeof(out));
+    ASSERT(!ok, "unknown decision rejected");
+    ASSERT(strstr(out, "end_conversation") != NULL, "valid decisions listed");
+    PASS();
+}
+
+static void test_executive_budget_bounds(void) {
+    TEST("executive: raise_budget bounded to 2x and hard ceiling");
+    test_exec_install_hooks();
+    char out[1024];
+    /* > 2x current ($20 → $50) must be rejected. */
+    bool ok = executive_decide(
+        "{\"decision\":\"raise_budget\",\"reason\":\"long task, evidence attached\","
+        "\"amount_usd\":50}",
+        out, sizeof(out));
+    ASSERT(!ok, ">2x raise rejected");
+    ASSERT(s_exec_budget == 20.0, "budget unchanged");
+    /* Within 2x: accepted. */
+    ok = executive_decide(
+        "{\"decision\":\"raise_budget\",\"reason\":\"long task, evidence attached\","
+        "\"amount_usd\":35}",
+        out, sizeof(out));
+    ASSERT(ok, "raise within 2x accepted");
+    ASSERT(s_exec_budget == 35.0, "budget updated");
+    /* Hard ceiling. */
+    s_exec_budget = 150.0;
+    ok = executive_decide(
+        "{\"decision\":\"raise_budget\",\"reason\":\"very long task indeed\","
+        "\"amount_usd\":250}",
+        out, sizeof(out));
+    ASSERT(!ok, "raise above hard ceiling rejected");
+    PASS();
+}
+
+static void test_executive_frontier_gates_raise(void) {
+    TEST("executive: off-frontier sessions cannot buy more budget");
+    test_exec_install_hooks();
+    s_exec_frontier_on = false;
+    s_exec_frontier_score = 0.31;
+    char out[1024];
+    bool ok = executive_decide(
+        "{\"decision\":\"raise_budget\",\"reason\":\"we need more money\","
+        "\"amount_usd\":30}",
+        out, sizeof(out));
+    ASSERT(!ok, "off-frontier raise rejected");
+    ASSERT(strstr(out, "frontier") != NULL, "rejection cites the frontier");
+    ASSERT(s_exec_budget == 20.0, "budget unchanged");
+    PASS();
+}
+
+static void test_executive_lower_budget_floor(void) {
+    TEST("executive: lower_budget below spend redirects to end_conversation");
+    test_exec_install_hooks();
+    s_exec_spent = 12.0;
+    char out[1024];
+    bool ok = executive_decide(
+        "{\"decision\":\"lower_budget\",\"reason\":\"tightening the envelope\","
+        "\"amount_usd\":8}",
+        out, sizeof(out));
+    ASSERT(!ok, "lowering below spend rejected");
+    ASSERT(strstr(out, "end_conversation") != NULL, "suggests explicit stop");
+    ok = executive_decide(
+        "{\"decision\":\"lower_budget\",\"reason\":\"tightening the envelope\","
+        "\"amount_usd\":15}",
+        out, sizeof(out));
+    ASSERT(ok, "lowering above spend accepted");
+    ASSERT(s_exec_budget == 15.0, "budget lowered");
+    PASS();
+}
+
+static void test_executive_pause_resume(void) {
+    TEST("executive: pause/resume spending toggles governor state");
+    test_exec_install_hooks();
+    char out[1024];
+    bool ok = executive_decide(
+        "{\"decision\":\"pause_spending\",\"reason\":\"frontier score dropped to 0.4\"}",
+        out, sizeof(out));
+    ASSERT(ok, "pause accepted");
+    ASSERT(executive_spending_paused(), "paused state visible");
+    ok = executive_decide(
+        "{\"decision\":\"resume_spending\",\"reason\":\"cache hit ratio recovered\"}",
+        out, sizeof(out));
+    ASSERT(ok, "resume accepted");
+    ASSERT(!executive_spending_paused(), "pause lifted");
+    PASS();
+}
+
+static void test_executive_escalate(void) {
+    TEST("executive: escalate_to_user surfaces the question");
+    test_exec_install_hooks();
+    char out[1024];
+    bool ok = executive_decide(
+        "{\"decision\":\"escalate_to_user\",\"reason\":\"two viable architectures; "
+        "need a cost/latency preference\"}",
+        out, sizeof(out));
+    ASSERT(ok, "escalation accepted");
+    ASSERT(strstr(s_exec_escalated, "architectures") != NULL, "question delivered");
     PASS();
 }
 
@@ -18340,6 +18539,14 @@ int main(void) {
     test_build_request_ex_strips_anthropic_namespace();
     test_anthropic_cache_breakpoint_layout();
     test_anthropic_cache_ttl_1h_env();
+    test_executive_end_conversation();
+    test_executive_requires_reason();
+    test_executive_unknown_decision();
+    test_executive_budget_bounds();
+    test_executive_frontier_gates_raise();
+    test_executive_lower_budget_floor();
+    test_executive_pause_resume();
+    test_executive_escalate();
     test_frontier_clean_turns_on_frontier();
     test_frontier_cache_miss_waste();
     test_frontier_retry_and_duplicate_waste();
