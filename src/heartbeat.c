@@ -6,6 +6,7 @@
 #include "watchdog.h"
 #include "sealed_store.h"
 #include "audit_log.h"
+#include "waiter.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -39,6 +40,8 @@
 static pthread_t s_thread;
 static atomic_int s_running = 0;
 static atomic_int s_poke = 0;
+static dsco_waiter_t s_waiter;
+static atomic_int s_waiter_init = 0;
 static uint64_t s_seq = 0;
 static time_t s_start_ts = 0;
 static pthread_mutex_t s_emit_lock = PTHREAD_MUTEX_INITIALIZER;
@@ -466,12 +469,10 @@ static void *beacon_thread(void *arg) {
     (void)arg;
     while (atomic_load(&s_running)) {
         emit_beacon();
-        int secs = get_interval();
-        for (int i = 0; i < secs && atomic_load(&s_running); i++) {
-            if (atomic_exchange(&s_poke, 0))
-                break;
-            sleep(1);
-        }
+        /* Interruptible wait: heartbeat_poke()/heartbeat_stop() wake us
+         * immediately — no 1s sleep-poll granularity, zero idle wakeups. */
+        dsco_waiter_wait_ms(&s_waiter, (long)get_interval() * 1000L);
+        atomic_store(&s_poke, 0);
     }
     return NULL;
 }
@@ -485,6 +486,10 @@ void heartbeat_start(void) {
     s_seq = 0;
     s_last_rss_mb = -1;
     s_peak_rss_mb = -1;
+    if (!atomic_exchange(&s_waiter_init, 1))
+        dsco_waiter_init(&s_waiter);
+    else
+        dsco_waiter_reset(&s_waiter);
     atomic_store(&s_running, 1);
     emit_beacon_event("start", "");
     pthread_create(&s_thread, NULL, beacon_thread, NULL);
@@ -522,6 +527,7 @@ void heartbeat_stop(void) {
     emit_beacon_event("clean_exit", "heartbeat_stop");
     atomic_store(&s_running, 0);
     atomic_store(&s_poke, 1);
+    dsco_waiter_stop(&s_waiter); /* instant wakeup for join */
     pthread_join(s_thread, NULL);
 }
 
@@ -531,6 +537,8 @@ bool heartbeat_running(void) {
 
 void heartbeat_poke(void) {
     atomic_store(&s_poke, 1);
+    if (atomic_load(&s_waiter_init))
+        dsco_waiter_signal(&s_waiter);
 }
 
 void heartbeat_note_event(const char *event, const char *detail) {

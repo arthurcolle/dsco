@@ -89,6 +89,31 @@ Checklist:
 3. Use `/mcp reload` after config updates.
 4. Verify tools appear in `/tools` under MCP section.
 
+For a one-run pin, use `--mcp-server NAME` or `DSCO_MCP_SERVER=NAME`.
+DSCO expands `$VAR` and `${VAR}` references in MCP headers/env after loading the
+saved setup env and the current directory `.env`; use `--env-file PATH` to point
+at a specific env file.
+
+Project-local OpenRouter MCP example:
+
+```json
+{
+  "mcpServers": {
+    "openrouter": {
+      "url": "https://mcp.openrouter.ai/mcp",
+      "transport": "http",
+      "headers": {
+        "Authorization": "Bearer $OPENROUTER_API_KEY"
+      }
+    }
+  }
+}
+```
+
+```bash
+./dsco --mcp-server openrouter -m openrouter/anthropic/claude-sonnet-4 -i
+```
+
 Hermes Agent is a direct stdio MCP bridge:
 
 ```bash

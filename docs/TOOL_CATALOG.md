@@ -3,10 +3,10 @@
 This catalog is generated from the static `src/tools.c` built-in tool registry.
 
 - Source: `src/tools.c`
-- Total built-in tools: 172
+- Total built-in tools: 229
 - Core tools: 39
-- Read-only tools: 100
-- Concurrent tools: 98
+- Read-only tools: 137
+- Concurrent tools: 143
 - Interactive tools: 1
 
 Regeneration:
@@ -98,6 +98,27 @@ Flags:
 | <code>http_request</code> | yes | yes | yes |  | Make HTTP requests (GET/POST/PUT/DELETE). |
 | <code>inspect_file</code> |  | yes | yes |  | AST summary for one C/C header source file. |
 | <code>ipc</code> |  |  |  |  | Inter-process communication: send, recv, agents, scratch_put, scratch_get, task_submit, task_list, set_role. |
+| <code>jina_ai_batch_cancel</code> |  |  | yes |  | Cancel a native Jina Batch Embeddings job by batch_id. |
+| <code>jina_ai_batch_embed_submit</code> |  |  | yes |  | Submit a native Jina Batch Embeddings job for inline arrays or a GCS JSONL input_file. String arrays are auto-wrapped into Jina custom_id/body batch request objects. |
+| <code>jina_ai_batch_errors</code> |  | yes | yes |  | Download native Jina Batch Embeddings error JSONL by batch_id. |
+| <code>jina_ai_batch_output</code> |  | yes | yes |  | Download native Jina Batch Embeddings output JSONL by batch_id. |
+| <code>jina_ai_batch_status</code> |  | yes | yes |  | Retrieve native Jina Batch Embeddings job status by batch_id. |
+| <code>jina_ai_batches_list</code> |  | yes | yes |  | List recent native Jina Batch Embeddings jobs for the authenticated user. |
+| <code>jina_ai_chat</code> |  | yes | yes |  | Native Jina experimental Chat Completions API call using OpenAI-compatible messages. Defaults to jina-vlm. |
+| <code>jina_ai_classifier_delete</code> |  |  | yes |  | Delete a native Jina few-shot classifier by classifier_id. |
+| <code>jina_ai_classifiers_list</code> |  | yes | yes |  | List native Jina few-shot classifiers owned by the authenticated user. |
+| <code>jina_ai_classify</code> |  | yes | yes |  | Native Jina Classify API call. Supports zero-shot labels with text/image inputs and few-shot classifier_id classification; accepts body/request for full passthrough. |
+| <code>jina_ai_constellation</code> |  |  |  |  | High-level native Jina capability router over live_kb, research, search, reader, embed, rerank, classify, train, match, models, batches, classifiers, and chat. |
+| <code>jina_ai_embed</code> |  | yes | yes |  | Native Jina Embeddings API call for text, code, image, PDF, and multimodal input arrays. Defaults to jina-embeddings-v5-text-small. |
+| <code>jina_ai_live_kb</code> |  |  |  |  | Realtime Jina web-to-knowledge-base generator. Searches live web, reads sources, chunks cited evidence, optionally reranks/classifies/embeds chunks, and can persist results into the local knowledge_base with persist=true. |
+| <code>jina_ai_match</code> |  | yes |  |  | Embedding similarity matcher using Jina embeddings. Embeds query and documents with task=text-matching, then returns documents ranked by cosine similarity. |
+| <code>jina_ai_model_get</code> |  | yes | yes |  | Get a native Jina AI model catalog entry by short or full model_id, such as jina-embeddings-v5-text-small or jina-ai/jina-vlm. |
+| <code>jina_ai_models_list</code> |  | yes | yes |  | List native Jina AI model catalog entries, including modalities, context lengths, and pricing metadata. |
+| <code>jina_ai_reader</code> |  | yes | yes |  | Native Jina Reader API call. Reads one public URL into LLM-ready content with browser, selector, cache, locale, proxy, markdown, and return-format controls. |
+| <code>jina_ai_rerank</code> |  | yes | yes |  | Native Jina Reranker API call. Reranks string/object/multimodal documents for a query; defaults to jina-reranker-v3. |
+| <code>jina_ai_research</code> |  | yes |  |  | Compound native Jina research pipeline: search the web, read top result URLs, and rerank the extracted page text for the query. |
+| <code>jina_ai_search</code> |  | yes | yes |  | Native Jina Search API call. Searches the web through s.jina.ai with SERP, site, engine, cache, locale, proxy, return-format, links, images, and favicon controls. |
+| <code>jina_ai_train</code> |  |  | yes |  | Native Jina Train API call. Creates or updates a few-shot classifier from labeled text/image training items; accepts body/request for full passthrough. |
 | <code>jina_embed</code> |  | yes | yes |  | Compute embeddings via Jina v4 API. Returns 1024d float vectors for semantic similarity. |
 | <code>jina_search</code> |  | yes | yes |  | AI-powered web search via Jina AI. Returns structured results with titles, URLs, and descriptions. |
 | <code>jq</code> | yes | yes | yes |  | Process JSON with jq expressions. |
@@ -123,6 +144,42 @@ Flags:
 | <code>ooda</code> |  |  |  |  | OODA loop discipline (Talons): begin, observe, orient, decide, complete, status. |
 | <code>openrouter_models</code> |  | yes | yes |  | Fetch and filter OpenRouter model metadata by search, context, price, and free/chat-only constraints. |
 | <code>page_file</code> |  | yes | yes |  | Page through a large file. |
+| <code>parallel_ai_chat</code> |  | yes | yes |  | Native Parallel.ai Chat Completions API call for low-latency web research chat. Accepts OpenAI-style messages or a prompt. |
+| <code>parallel_ai_constellation</code> |  |  | yes |  | High-level Parallel.ai capability router over research, live_kb, wait, jobs, Search, Extract, Task, Task Group, FindAll, Monitor, and Chat APIs. |
+| <code>parallel_ai_extract</code> |  | yes | yes |  | Native Parallel.ai Extract API call. Extracts relevant LLM-ready content from public URLs. |
+| <code>parallel_ai_findall_cancel</code> |  |  |  |  | Cancel a Parallel.ai FindAll run by findall_id, or the tracked latest FindAll run when omitted. |
+| <code>parallel_ai_findall_create</code> |  |  | yes |  | Create and track an async Parallel.ai FindAll run with match_conditions. Defaults to generator=base and minimum match_limit=5. |
+| <code>parallel_ai_findall_enrich</code> |  |  |  |  | Add an enrichment to a Parallel.ai FindAll run. Defaults to the tracked latest FindAll run and processor=core. |
+| <code>parallel_ai_findall_entity_search</code> |  | yes | yes |  | Run Parallel.ai FindAll fast entity search for people or companies. |
+| <code>parallel_ai_findall_events</code> |  | yes | yes |  | Retrieve Parallel.ai FindAll events with optional last_event_id and timeout. Uses the tracked latest FindAll run when findall_id is omitted. |
+| <code>parallel_ai_findall_extend</code> |  |  |  |  | Extend a Parallel.ai FindAll run with additional_match_limit. Defaults to the tracked latest FindAll run when findall_id is omitted. |
+| <code>parallel_ai_findall_ingest</code> |  | yes | yes |  | Ingest a natural-language objective into a structured Parallel.ai FindAll schema without starting a run. |
+| <code>parallel_ai_findall_result</code> |  | yes | yes |  | Retrieve a Parallel.ai FindAll run result snapshot by findall_id, or the tracked latest FindAll run when omitted. |
+| <code>parallel_ai_findall_schema</code> |  | yes | yes |  | Retrieve the schema for a Parallel.ai FindAll run, defaulting to the tracked latest FindAll run. |
+| <code>parallel_ai_findall_status</code> |  | yes | yes |  | Retrieve a Parallel.ai FindAll run status by findall_id, or the tracked latest FindAll run when omitted. |
+| <code>parallel_ai_jobs</code> |  | yes | yes |  | List locally tracked Parallel.ai job ids from create/status/result calls. Kinds include task_run, task_group, findall, and monitor. |
+| <code>parallel_ai_live_kb</code> |  |  | yes |  | Realtime Parallel.ai knowledge-base generator: Search, Extract sources, chunk cited evidence, and optionally persist extracted documents into the local knowledge_base. |
+| <code>parallel_ai_monitor_cancel</code> |  |  |  |  | Cancel a Parallel.ai monitor, stopping future executions. Uses the tracked latest monitor when monitor_id is omitted. |
+| <code>parallel_ai_monitor_create</code> |  |  |  |  | Create a Parallel.ai Monitor API event_stream or snapshot monitor. This creates a recurring web monitor. |
+| <code>parallel_ai_monitor_events</code> |  | yes | yes |  | List detected events for a Parallel.ai monitor, including cursor and event_group_id filters. Uses the tracked latest monitor when omitted. |
+| <code>parallel_ai_monitor_get</code> |  | yes | yes |  | Retrieve a Parallel.ai monitor by monitor_id, or the tracked latest monitor when monitor_id is omitted. |
+| <code>parallel_ai_monitor_list</code> |  | yes | yes |  | List Parallel.ai monitors for the current API key. |
+| <code>parallel_ai_monitor_trigger</code> |  |  |  |  | Trigger an immediate Parallel.ai monitor run. Uses the tracked latest monitor when monitor_id is omitted. |
+| <code>parallel_ai_monitor_update</code> |  |  |  |  | Update a Parallel.ai monitor. Uses the tracked latest monitor when monitor_id is omitted. |
+| <code>parallel_ai_research</code> |  |  | yes |  | Composed Parallel.ai research pipeline: Search, Extract top URLs, and optionally create/poll a Task API synthesis with locally tracked job ids. |
+| <code>parallel_ai_search</code> |  | yes | yes |  | Native Parallel.ai Search API call. Searches the web with objective, search_queries, mode, session_id, and advanced_settings support. Defaults to mode=turbo when omitted. |
+| <code>parallel_ai_task_create</code> |  |  | yes |  | Create and track a Parallel.ai Task API run for web research or enrichment. Defaults to the lowest task processor, base. Use parallel_ai_task_result to long-poll for output; later task tools can omit run_id and use the tracked latest run. |
+| <code>parallel_ai_task_events</code> |  | yes | yes |  | Retrieve Parallel.ai Task run progress events by run_id, or the tracked latest task run when run_id is omitted. Set beta=true for the v1beta events route. |
+| <code>parallel_ai_task_group_add_runs</code> |  |  | yes |  | Add one or many Task runs to a tracked Parallel.ai Task Group. Single-input convenience defaults to processor=base. |
+| <code>parallel_ai_task_group_create</code> |  |  | yes |  | Create and track a Parallel.ai Task Group for coordinating many Task runs. |
+| <code>parallel_ai_task_group_events</code> |  | yes | yes |  | Retrieve Parallel.ai Task Group events with optional last_event_id and timeout. Uses the tracked latest group when taskgroup_id is omitted. |
+| <code>parallel_ai_task_group_get</code> |  | yes | yes |  | Retrieve a Parallel.ai Task Group by taskgroup_id, or the tracked latest group when omitted. |
+| <code>parallel_ai_task_group_run_get</code> |  | yes | yes |  | Retrieve one run inside a Parallel.ai Task Group. Falls back to the tracked latest task_group and task_run ids when omitted. |
+| <code>parallel_ai_task_group_runs</code> |  | yes | yes |  | Fetch Task runs in a Parallel.ai Task Group, optionally including inputs and outputs. Uses the tracked latest group when taskgroup_id is omitted. |
+| <code>parallel_ai_task_input</code> |  | yes | yes |  | Retrieve the original input for a Parallel.ai Task run by run_id, or the tracked latest task run when run_id is omitted. |
+| <code>parallel_ai_task_result</code> |  | yes | yes |  | Long-poll a Parallel.ai Task API run result by run_id, or the tracked latest task run when run_id is omitted. |
+| <code>parallel_ai_task_status</code> |  | yes | yes |  | Retrieve a Parallel.ai Task API run status by run_id, or the tracked latest task run when run_id is omitted. |
+| <code>parallel_ai_wait</code> |  | yes |  |  | Poll a tracked Parallel.ai async job until terminal status, then fetch the result/runs when available. Supports task_run, task_group, findall, and monitor; ids default to the locally tracked latest job for the kind. |
 | <code>parallel_search</code> | yes | yes | yes |  | Fan out web search to multiple providers (Jina, Tavily, Brave) concurrently. Returns merged results from all available providers. |
 | <code>pets</code> |  | yes | yes |  | Companion sprites for background agents. action=roster shows live background-agent pets (face, status, cost, activity sparkline); gallery shows a species sampler; roll shows a single deterministic pet for a seed string. Each agent deterministically hatches the same pet from its id/task. |
 | <code>pheromone</code> |  |  |  |  | Pheromone coordination (Wings): deposit, sense, status. |
@@ -167,7 +224,7 @@ Flags:
 | <code>StartOfLoopConstruct</code> | yes |  |  |  | Start a live recursive agent loop construct. Accepts a bounded MetaConstruct/OORL DSL: continue/break expressions, max controls, DEFINE/GOAL/TASK/BELIEF/INFER/DECIDE/LEARN metadata, mutable ontology graph nodes/edges, dyad object interactions, reward objects, valence/intensity, causal/message links, stochastic exploration, pruning, credit assignment, attractors, prompt games, basin hopping, effect weights, traversal/find/balance operations, MapReduce map/shuffle/reduce job state, SRM catalog/store search, availability/orderability, licensed distributors, order policies, shipping restrictions, standard reference material records, certificates/reports/SDS, metrological traceability, calibration measurements, uncertainty budgets, one-shot REFINE rules, and bounded schema_rewrite rules. Example: define(sensor,state); reward_object success valence 0.8 intensity 0.5 target state; causal_link state -> action weight 0.7; schema_rewrite add_edge state -> policy relation optimized weight 0.9 when credit >= 0.8; continue when rewrites_applied >= 1. Expressions support loop variables plus meta_count, belief_count, goal_count, task_count, dyad_count, reward_object_count, causal_link_count, message_count, node_count, edge_count, graph_density, traverse_hits, mapreduce_count, map_count, shuffle_count, reduce_count, partition_count, rewrite_count, rewrites_applied, srm_count, current_certificate_count, sds_count, traceability_count, measurement_count, calibration_count, uncertainty_budget_count, mean_uncertainty, max_uncertainty, available_count, orderable_count, product_search_count, catalog_count, annual_catalog_count, licensed_distributor_count, order_policy_count, paper_checks_blocked, shipping_block_count, price_total, effect.tool, effect.world, effect.meta, reward, valence, intensity, exploration_rate, credit, curiosity, empowerment, confidence, uncertainty, learning_rate, pruning_threshold, basin_temperature. |
 | <code>strategy</code> |  | yes | yes |  | Trading strategies: completeness, binary_fade, stale_snipe, kelly, spread_scan. |
 | <code>string_transform</code> |  | yes | yes |  | String transformations: upper, lower, trim, reverse, slugify, capitalize. |
-| <code>swarm</code> | yes |  |  |  | Swarm orchestration: create, map_reduce, status, collect, budget, spawn_executor, spawn_provider, create_executor_swarm, executor_status, topology_list, topology_run, task_profile. map_reduce fans out 'tasks' as parallel workers then spawns a 'coordinator' sub-agent that synthesizes their outputs into one result (hierarchical map→reduce; workers may recurse). Each spawned agent is an INDEPENDENT OS process wrapping a model instance; action=create accepts per-agent effort/temperature/system_prompt/tool_choice so workers can run as distinct instances in parallel, interoperating via IPC. |
+| <code>swarm</code> | yes |  |  |  | Swarm orchestration: create, map_reduce, status, collect, inspect, budget, spawn_executor, spawn_provider, provider_fabric, create_executor_swarm, executor_status, topology_list, topology_run, task_profile. provider_fabric saturates available subscription/provider lanes (Fugu weighted first) by spawning independent provider-pinned dsco worker processes; it defaults to race/speculative execution, returning the first successful lane and killing slower losers; mode=collect waits for all, and mode=spawn returns the live group. map_reduce fans out 'tasks' as parallel workers then spawns a 'coordinator' sub-agent that synthesizes their outputs into one result. Each spawned agent is an INDEPENDENT OS process wrapping a model instance; action=create accepts per-agent effort/temperature/system_prompt/tool_choice so workers can run as distinct instances in parallel, interoperating via IPC. |
 | <code>synoptic</code> |  | yes | yes |  | Synoptic Data real-time weather station observations (ASOS/METAR). Actions: latest (current obs), timeseries (historical), nearesttime, metadata, precip, kalshi_stations (all 29 Kalshi cities). Requires SYNOPTIC_API_TOKEN. |
 | <code>sysinfo</code> |  | yes | yes |  | System info: CPU, memory, OS. |
 | <code>system_profiler</code> |  | yes | yes |  | Summarize local CPU, disk, network, or load information. |

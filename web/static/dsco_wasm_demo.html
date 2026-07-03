@@ -1,0 +1,150 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>dsco wasm</title>
+<style>
+*,*::before,*::after{box-sizing:border-box}
+body{margin:0;min-height:100vh;background:#0a0d10;color:#e8edf2;font:13px/1.5 -apple-system,BlinkMacSystemFont,"Inter",sans-serif}
+main{display:grid;grid-template-columns:minmax(260px,340px) 1fr;min-height:100vh}
+aside{border-right:1px solid #27313a;background:#10151a;padding:18px;overflow:auto}
+section{padding:18px;display:flex;flex-direction:column;gap:14px;min-width:0}
+h1{font-size:18px;margin:0 0 14px;font-weight:650;letter-spacing:0}
+h2{font-size:12px;margin:18px 0 8px;color:#94a3ad;text-transform:uppercase;letter-spacing:.08em}
+button,select,textarea,input{font:inherit}
+button{border:1px solid #2f3b45;background:#182028;color:#e8edf2;border-radius:6px;padding:8px 10px;cursor:pointer}
+button:hover{border-color:#4d6372;background:#1f2a33}
+select,input,textarea{width:100%;border:1px solid #2f3b45;background:#0d1217;color:#e8edf2;border-radius:6px;padding:8px}
+textarea{min-height:120px;resize:vertical}
+.row{display:flex;gap:8px;align-items:center}
+.row>*{flex:1}
+.status{border:1px solid #2f3b45;border-radius:6px;padding:10px;background:#0d1217;color:#aab6c0;white-space:pre-wrap;word-break:break-word}
+.chat{flex:1;border:1px solid #2f3b45;border-radius:6px;background:#0d1217;overflow:auto;padding:12px;min-height:320px}
+.msg{border-bottom:1px solid #202a32;padding:10px 0}
+.msg:first-child{padding-top:0}
+.msg:last-child{border-bottom:0}
+.role{font-size:11px;color:#67e8c9;text-transform:uppercase;letter-spacing:.08em;margin-bottom:4px}
+pre{margin:0;white-space:pre-wrap;word-break:break-word;font:12px/1.5 "SFMono-Regular","Menlo",monospace;color:#d7dee5}
+.warn{color:#fbbf24}
+.ok{color:#67e8c9}
+@media(max-width:760px){main{grid-template-columns:1fr}aside{border-right:0;border-bottom:1px solid #27313a}}
+</style>
+</head>
+<body>
+<main>
+  <aside>
+    <h1>dsco wasm</h1>
+    <div id="status" class="status">Loading web/static/dsco_wasm.js...</div>
+
+    <h2>Route</h2>
+    <select id="model"></select>
+    <div class="row" style="margin-top:8px">
+      <button id="route">Explain</button>
+      <button id="reset">Reset</button>
+    </div>
+
+    <h2>Tool</h2>
+    <input id="tool-name" value="echo" aria-label="Tool name">
+    <textarea id="tool-input" aria-label="Tool input">{"text":"hello from browser-local dsco"}</textarea>
+    <button id="run-tool" style="width:100%;margin-top:8px">Run Tool</button>
+  </aside>
+
+  <section>
+    <div class="chat" id="chat"></div>
+    <textarea id="prompt" placeholder="Type a browser-local turn"></textarea>
+    <div class="row">
+      <button id="send">Append Turn</button>
+      <button id="state">Show State</button>
+    </div>
+  </section>
+</main>
+
+<script src="dsco_wasm.js"></script>
+<script>
+const statusEl = document.getElementById('status');
+const modelEl = document.getElementById('model');
+const chatEl = document.getElementById('chat');
+let api = null;
+
+function addMessage(role, value) {
+  const wrap = document.createElement('div');
+  wrap.className = 'msg';
+  const r = document.createElement('div');
+  r.className = 'role';
+  r.textContent = role;
+  const pre = document.createElement('pre');
+  pre.textContent = typeof value === 'string' ? value : JSON.stringify(value, null, 2);
+  wrap.append(r, pre);
+  chatEl.append(wrap);
+  chatEl.scrollTop = chatEl.scrollHeight;
+}
+
+function parseJson(text) {
+  try { return JSON.parse(text); } catch { return text; }
+}
+
+function call(name, ...args) {
+  return api[name](...args);
+}
+
+function populateModels() {
+  const models = JSON.parse(call('models'));
+  modelEl.textContent = '';
+  for (const m of models.slice(0, 80)) {
+    const opt = document.createElement('option');
+    opt.value = m.model_id;
+    opt.textContent = `${m.alias} · ${m.model_id}`;
+    if (m.model_id === JSON.parse(call('version')).default_model) opt.selected = true;
+    modelEl.append(opt);
+  }
+}
+
+async function boot() {
+  if (typeof DscoWasm !== 'function') {
+    statusEl.innerHTML = '<span class="warn">Build missing.</span> Run make wasm, then serve web/static over HTTP.';
+    return;
+  }
+  const mod = await DscoWasm();
+  api = {
+    version: mod.cwrap('dsco_wasm_version', 'string', []),
+    exports: mod.cwrap('dsco_wasm_exports_json', 'string', []),
+    models: mod.cwrap('dsco_wasm_models_json', 'string', []),
+    tools: mod.cwrap('dsco_wasm_tools_json', 'string', []),
+    route: mod.cwrap('dsco_wasm_route_explain', 'string', ['string']),
+    tool: mod.cwrap('dsco_wasm_tool_exec', 'string', ['string', 'string']),
+    reset: mod.cwrap('dsco_wasm_session_reset', 'string', []),
+    add: mod.cwrap('dsco_wasm_session_add', 'string', ['string', 'string']),
+    state: mod.cwrap('dsco_wasm_session_state', 'string', [])
+  };
+  const exports = JSON.parse(call('exports'));
+  for (const fn of ['dsco_wasm_version','dsco_wasm_models_json','dsco_wasm_tool_exec','dsco_wasm_session_state']) {
+    if (!exports.includes(fn)) throw new Error(`WASM export missing: ${fn}`);
+  }
+  populateModels();
+  statusEl.innerHTML = '<span class="ok">Running in browser WASM.</span>\n' + JSON.stringify(JSON.parse(call('version')), null, 2);
+  addMessage('system', JSON.parse(call('route', modelEl.value)));
+}
+
+document.getElementById('route').onclick = () => addMessage('route', parseJson(call('route', modelEl.value)));
+document.getElementById('reset').onclick = () => addMessage('reset', parseJson(call('reset')));
+document.getElementById('run-tool').onclick = () => {
+  const name = document.getElementById('tool-name').value;
+  const input = document.getElementById('tool-input').value;
+  addMessage(`tool:${name}`, parseJson(call('tool', name, input)));
+};
+document.getElementById('send').onclick = () => {
+  const prompt = document.getElementById('prompt');
+  if (!prompt.value.trim()) return;
+  addMessage('user', prompt.value);
+  addMessage('wasm', parseJson(call('add', 'user', prompt.value)));
+  prompt.value = '';
+};
+document.getElementById('state').onclick = () => addMessage('state', parseJson(call('state')));
+
+boot().catch(err => {
+  statusEl.innerHTML = '<span class="warn">Failed to load WASM.</span>\n' + String(err && err.stack || err);
+});
+</script>
+</body>
+</html>

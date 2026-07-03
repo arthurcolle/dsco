@@ -1,0 +1,48 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://distributed.systems/schemas/consumer_profile_ontology/activation_request.schema.json",
+  "title": "Facet Activation Request",
+  "type": "object",
+  "required": [
+    "request_id",
+    "user_id",
+    "purpose",
+    "surface",
+    "facet_ids",
+    "jurisdiction",
+    "request_time"
+  ],
+  "properties": {
+    "request_id": {
+      "type": "string"
+    },
+    "user_id": {
+      "type": "string"
+    },
+    "purpose": {
+      "type": "string"
+    },
+    "surface": {
+      "type": "string"
+    },
+    "facet_ids": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "advertiser_category": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "jurisdiction": {
+      "type": "string"
+    },
+    "request_time": {
+      "type": "string"
+    }
+  },
+  "additionalProperties": true
+}

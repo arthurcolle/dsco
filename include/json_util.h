@@ -90,6 +90,11 @@ int   json_get_int(const char *json, const char *key, int def);
 bool  json_get_bool(const char *json, const char *key, bool def);
 double json_get_double(const char *json, const char *key, double def);
 
+/* Strictly validate that the whole string is one balanced JSON object/array.
+ * This is intentionally container-only because dsco structured outputs are
+ * machine contracts, not scalar completions. */
+bool json_is_valid_container(const char *json);
+
 /* JSON array iteration helpers */
 typedef void (*json_array_cb)(const char *element_start, void *ctx);
 int json_array_foreach(const char *json, const char *key, json_array_cb cb, void *ctx);

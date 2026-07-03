@@ -239,9 +239,29 @@ static void test_ttl_zero_infers_semantic(void) {
     PASS();
 }
 
-static void test_ttl_expiry_on_recall(void) {
-    TEST("recall returns NULL after TTL expires");
+static void test_ttl_retained_by_default_on_recall(void) {
+    TEST("recall retains TTL entries by default");
     reset_test_db();
+    unsetenv("DSCO_SESSION_TTL_EXPIRY");
+
+    ALLOC_DB(db);
+    ASSERT(session_init(db, NULL) == 0, "init failed");
+
+    ASSERT(session_remember(db, "ephemeral", "retain", 5) == 0, "store failed");
+    backdate_kv(db, "ephemeral", 10.0); /* past 5s TTL, but TTL GC is opt-in */
+
+    const char *v = session_recall(db, "ephemeral");
+    ASSERT(v != NULL, "TTL entry should be retained by default");
+    ASSERT(strcmp(v, "retain") == 0, "wrong retained value");
+
+    FREE_DB(db);
+    PASS();
+}
+
+static void test_ttl_expiry_on_recall_when_enabled(void) {
+    TEST("recall returns NULL after TTL expires when enabled");
+    reset_test_db();
+    setenv("DSCO_SESSION_TTL_EXPIRY", "1", 1);
 
     ALLOC_DB(db);
     ASSERT(session_init(db, NULL) == 0, "init failed");
@@ -253,12 +273,14 @@ static void test_ttl_expiry_on_recall(void) {
     ASSERT(v == NULL, "expected NULL — TTL expired");
 
     FREE_DB(db);
+    unsetenv("DSCO_SESSION_TTL_EXPIRY");
     PASS();
 }
 
-static void test_evict_expired(void) {
-    TEST("session_evict_expired removes expired entries");
+static void test_evict_expired_when_enabled(void) {
+    TEST("session_evict_expired removes expired entries when enabled");
     reset_test_db();
+    setenv("DSCO_SESSION_TTL_EXPIRY", "1", 1);
 
     ALLOC_DB(db);
     ASSERT(session_init(db, NULL) == 0, "init failed");
@@ -273,6 +295,7 @@ static void test_evict_expired(void) {
     ASSERT(session_recall(db, "dead_key") == NULL, "dead key should be gone");
 
     FREE_DB(db);
+    unsetenv("DSCO_SESSION_TTL_EXPIRY");
     PASS();
 }
 
@@ -336,9 +359,10 @@ static void test_cross_session_episodic_survives(void) {
     PASS();
 }
 
-static void test_cross_session_working_expired(void) {
-    TEST("cross-session: working entry evicted after TTL expires");
+static void test_cross_session_working_expired_when_enabled(void) {
+    TEST("cross-session: working entry evicted after TTL expires when enabled");
     reset_test_db();
+    setenv("DSCO_SESSION_TTL_EXPIRY", "1", 1);
 
     {
         ALLOC_DB(db);
@@ -360,6 +384,7 @@ static void test_cross_session_working_expired(void) {
         FREE_DB(db);
     }
 
+    unsetenv("DSCO_SESSION_TTL_EXPIRY");
     PASS();
 }
 
@@ -744,13 +769,14 @@ int main(void) {
     test_ttl_zero_infers_semantic();
 
     /* TTL / eviction */
-    test_ttl_expiry_on_recall();
-    test_evict_expired();
+    test_ttl_retained_by_default_on_recall();
+    test_ttl_expiry_on_recall_when_enabled();
+    test_evict_expired_when_enabled();
 
     /* Cross-session persistence */
     test_cross_session_persistence();
     test_cross_session_episodic_survives();
-    test_cross_session_working_expired();
+    test_cross_session_working_expired_when_enabled();
     test_multiple_kv_entries_serialized();
     test_special_chars_in_value();
 

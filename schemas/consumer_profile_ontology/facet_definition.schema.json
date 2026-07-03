@@ -1,0 +1,151 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://distributed.systems/schemas/consumer_profile_ontology/facet_definition.schema.json",
+  "title": "Governed Profile Facet Definition",
+  "type": "object",
+  "required": [
+    "facet_id",
+    "display_name",
+    "domain",
+    "subdomain",
+    "relationship_type",
+    "value_type",
+    "sensitivity_class",
+    "allowed_uses",
+    "disallowed_uses",
+    "version"
+  ],
+  "properties": {
+    "facet_id": {
+      "type": "string",
+      "pattern": "^u\\.[a-z0-9_]+(\\.[a-z0-9_]+)+$"
+    },
+    "display_name": {
+      "type": "string"
+    },
+    "description": {
+      "type": "string"
+    },
+    "path": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "domain": {
+      "type": "string"
+    },
+    "subdomain": {
+      "type": "string"
+    },
+    "topic": {
+      "type": "string"
+    },
+    "relationship_type": {
+      "type": "string"
+    },
+    "value_type": {
+      "enum": [
+        "float",
+        "boolean",
+        "enum",
+        "integer",
+        "timestamp",
+        "distribution",
+        "vector_ref"
+      ]
+    },
+    "value_range": {
+      "type": [
+        "array",
+        "null"
+      ],
+      "items": {
+        "type": "number"
+      }
+    },
+    "source_classes": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "half_life_days": {
+      "type": [
+        "integer",
+        "null"
+      ]
+    },
+    "ttl_days": {
+      "type": [
+        "integer",
+        "null"
+      ]
+    },
+    "minimum_confidence_for_activation": {
+      "type": "number",
+      "minimum": 0,
+      "maximum": 1
+    },
+    "sensitivity_class": {
+      "enum": [
+        "S0_OPERATIONAL",
+        "S1_STANDARD",
+        "S2_PRIVATE",
+        "S3_RESTRICTED",
+        "S4_PROHIBITED_FOR_INFERENCE_OR_ACTIVATION"
+      ]
+    },
+    "proxy_risk_class": {
+      "enum": [
+        "P0_LOW",
+        "P1_MONITOR",
+        "P2_REVIEW_REQUIRED",
+        "P3_RESTRICTED"
+      ]
+    },
+    "user_visible": {
+      "type": "boolean"
+    },
+    "user_editable": {
+      "type": "boolean"
+    },
+    "user_deletable": {
+      "type": "boolean"
+    },
+    "allowed_uses": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "disallowed_uses": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "explanation_template": {
+      "type": "string"
+    },
+    "policy_notes": {
+      "type": "string"
+    },
+    "owner_team": {
+      "type": "string"
+    },
+    "review_status": {
+      "type": "string"
+    },
+    "version": {
+      "type": "string"
+    },
+    "created_at": {
+      "type": "string"
+    },
+    "updated_at": {
+      "type": "string"
+    }
+  },
+  "additionalProperties": true
+}
