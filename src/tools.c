@@ -12966,6 +12966,48 @@ static const char *ast_node_type_label(ast_node_type_t t) {
     }
 }
 
+/* Emit structured fields (file/line/name/type/complexity) for a search hit,
+ * parsed from its id ("file:line:name") and card ("[type] ... cx=N"). Turns a
+ * flat card string into machine-usable structure. */
+static void ast_hit_fields(const char *id, const char *card, jbuf_t *out) {
+    char file[512] = "", name[256] = "";
+    int line = 0;
+    if (id && id[0]) {
+        const char *c2 = strrchr(id, ':');
+        if (c2) {
+            snprintf(name, sizeof(name), "%s", c2 + 1);
+            char tmp[640];
+            snprintf(tmp, sizeof(tmp), "%.*s", (int)(c2 - id), id);
+            char *c1 = strrchr(tmp, ':');
+            if (c1) {
+                line = atoi(c1 + 1);
+                *c1 = '\0';
+            }
+            snprintf(file, sizeof(file), "%s", tmp);
+        }
+    }
+    char type[24] = "";
+    if (card) {
+        const char *lb = strchr(card, '[');
+        const char *rb = lb ? strchr(lb, ']') : NULL;
+        if (lb && rb && rb - lb < 24)
+            snprintf(type, sizeof(type), "%.*s", (int)(rb - lb - 1), lb + 1);
+    }
+    int cx = 0;
+    if (card) {
+        const char *p = strstr(card, "cx=");
+        if (p)
+            cx = atoi(p + 3);
+    }
+    jbuf_append(out, ",\"file\":");
+    jbuf_append_json_str(out, file);
+    jbuf_appendf(out, ",\"line\":%d,\"name\":", line);
+    jbuf_append_json_str(out, name);
+    jbuf_append(out, ",\"type\":");
+    jbuf_append_json_str(out, type);
+    jbuf_appendf(out, ",\"complexity\":%d", cx);
+}
+
 static void ast_idx_card(const char *relpath, const ast_node_t *n, char *out, size_t out_len) {
     const char *rt = n->return_type ? n->return_type : "";
     const char *nm = n->name ? n->name : "?";
@@ -13334,6 +13376,7 @@ static bool tool_ast_search(const char *input, char *result, size_t rlen) {
         jbuf_append_int(&out, i + 1);
         jbuf_appendf(&out, ",\"cosine\":%.4f,\"id\":", (double)cands[ci].score);
         jbuf_append_json_str(&out, cands[ci].id ? cands[ci].id : "");
+        ast_hit_fields(cands[ci].id, cands[ci].metadata, &out);
         jbuf_append(&out, ",\"card\":");
         jbuf_append_json_str(&out, cands[ci].metadata ? cands[ci].metadata : "");
         jbuf_append(&out, "}");
@@ -13351,6 +13394,243 @@ static bool tool_ast_search(const char *input, char *result, size_t rlen) {
     result[n] = '\0';
     jbuf_free(&out);
     return true;
+}
+
+/* ── ast_insights: structured aggregate analysis over the source tree ─────
+ * Pure-local (no API): node-type histogram, complexity hotspots, per-directory
+ * rollup. The "what isn't right" lens — high-complexity functions surface. */
+typedef struct {
+    char name[160];
+    char file[288];
+    int line;
+    int cx;
+} ast_hot_t;
+typedef struct {
+    char dir[256];
+    int blocks;
+    long total_cx;
+} ast_dir_t;
+typedef struct {
+    int type_count[8];
+    int fn_count;
+    long fn_cx_sum;
+    int fn_cx_max;
+    ast_hot_t hot[16];
+    int nhot;
+    ast_dir_t dirs[192];
+    int ndir;
+    int files;
+} ast_insights_t;
+
+static void ast_ins_hot(ast_insights_t *s, const char *name, const char *file, int line, int cx) {
+    int slot = -1;
+    if (s->nhot < 16) {
+        slot = s->nhot++;
+    } else {
+        int mini = 0;
+        for (int i = 1; i < 16; i++)
+            if (s->hot[i].cx < s->hot[mini].cx)
+                mini = i;
+        if (cx > s->hot[mini].cx)
+            slot = mini;
+    }
+    if (slot < 0)
+        return;
+    snprintf(s->hot[slot].name, sizeof(s->hot[slot].name), "%s", name ? name : "");
+    snprintf(s->hot[slot].file, sizeof(s->hot[slot].file), "%s", file ? file : "");
+    s->hot[slot].line = line;
+    s->hot[slot].cx = cx;
+}
+
+static void ast_ins_dir(ast_insights_t *s, const char *dir, int cx) {
+    for (int i = 0; i < s->ndir; i++)
+        if (strcmp(s->dirs[i].dir, dir) == 0) {
+            s->dirs[i].blocks++;
+            s->dirs[i].total_cx += cx;
+            return;
+        }
+    if (s->ndir < 192) {
+        snprintf(s->dirs[s->ndir].dir, sizeof(s->dirs[0].dir), "%s", dir);
+        s->dirs[s->ndir].blocks = 1;
+        s->dirs[s->ndir].total_cx = cx;
+        s->ndir++;
+    }
+}
+
+static void ast_insights_walk(const char *root, const char *rel, ast_insights_t *s) {
+    char path[2048];
+    snprintf(path, sizeof(path), "%s/%s", root, rel[0] ? rel : ".");
+    DIR *d = opendir(path);
+    if (!d)
+        return;
+    struct dirent *e;
+    while ((e = readdir(d)) != NULL) {
+        if (e->d_name[0] == '.')
+            continue;
+        char childrel[1024];
+        if (rel[0])
+            snprintf(childrel, sizeof(childrel), "%s/%s", rel, e->d_name);
+        else
+            snprintf(childrel, sizeof(childrel), "%s", e->d_name);
+        char childpath[2400];
+        snprintf(childpath, sizeof(childpath), "%s/%s", root, childrel);
+        struct stat st;
+        if (stat(childpath, &st) != 0)
+            continue;
+        if (S_ISDIR(st.st_mode)) {
+            if (strcmp(e->d_name, "build") == 0 || strcmp(e->d_name, "gsl") == 0 ||
+                strcmp(e->d_name, "vendor") == 0)
+                continue;
+            ast_insights_walk(root, childrel, s);
+            continue;
+        }
+        size_t len = strlen(e->d_name);
+        if (len < 3)
+            continue;
+        const char *ext = e->d_name + len - 2;
+        if (strcmp(ext, ".c") != 0 && strcmp(ext, ".h") != 0)
+            continue;
+        ast_file_t *f = ast_parse_file(childpath);
+        if (!f)
+            continue;
+        s->files++;
+        char dir[256];
+        const char *slash = strrchr(childrel, '/');
+        if (slash)
+            snprintf(dir, sizeof(dir), "%.*s", (int)(slash - childrel), childrel);
+        else
+            snprintf(dir, sizeof(dir), ".");
+        for (int i = 0; i < f->count; i++) {
+            ast_node_t *n = &f->nodes[i];
+            if (!n->name || !n->name[0] || n->line_start <= 0 || n->type == AST_INCLUDE)
+                continue;
+            if (n->type >= 0 && n->type < 8)
+                s->type_count[n->type]++;
+            ast_ins_dir(s, dir, n->complexity);
+            if (n->type == AST_FUNCTION) {
+                s->fn_count++;
+                s->fn_cx_sum += n->complexity;
+                if (n->complexity > s->fn_cx_max)
+                    s->fn_cx_max = n->complexity;
+                ast_ins_hot(s, n->name, childrel, n->line_start, n->complexity);
+            }
+        }
+        ast_free_file(f);
+    }
+    closedir(d);
+}
+
+static int ast_hot_cmp(const void *a, const void *b) {
+    return ((const ast_hot_t *)b)->cx - ((const ast_hot_t *)a)->cx;
+}
+static int ast_dir_cmp(const void *a, const void *b) {
+    long d = ((const ast_dir_t *)b)->total_cx - ((const ast_dir_t *)a)->total_cx;
+    return d < 0 ? -1 : d > 0 ? 1 : 0;
+}
+
+static bool tool_ast_insights(const char *input, char *result, size_t rlen) {
+    const char *root = getenv("DSCO_AST_ROOT");
+    char cwd[1024];
+    if (!root || !root[0])
+        root = getcwd(cwd, sizeof(cwd)) ? cwd : ".";
+    char *paths = json_get_str(input, "paths");
+    ast_insights_t s = {0};
+    double t0 = now_ms();
+    if (paths && paths[0]) {
+        char *copy = strdup(paths);
+        char *save = NULL;
+        for (char *tok = strtok_r(copy, ",", &save); tok; tok = strtok_r(NULL, ",", &save)) {
+            while (*tok == ' ')
+                tok++;
+            ast_insights_walk(root, tok, &s);
+        }
+        free(copy);
+    } else {
+        ast_insights_walk(root, "src", &s);
+        ast_insights_walk(root, "include", &s);
+    }
+    free(paths);
+
+    qsort(s.hot, (size_t)s.nhot, sizeof(ast_hot_t), ast_hot_cmp);
+    qsort(s.dirs, (size_t)s.ndir, sizeof(ast_dir_t), ast_dir_cmp);
+
+    static const char *tn[8] = {"function", "struct",   "typedef",    "enum",
+                                "include",  "define", "global_var", "tool_def"};
+    int total = 0;
+    for (int i = 0; i < 8; i++)
+        total += s.type_count[i];
+
+    jbuf_t out;
+    jbuf_init(&out, 8192);
+    jbuf_appendf(&out, "{\"files\":%d,\"blocks\":%d,\"by_type\":{", s.files, total);
+    bool first = true;
+    for (int i = 0; i < 8; i++) {
+        if (s.type_count[i] == 0)
+            continue;
+        jbuf_appendf(&out, "%s\"%s\":%d", first ? "" : ",", tn[i], s.type_count[i]);
+        first = false;
+    }
+    double mean = s.fn_count ? (double)s.fn_cx_sum / (double)s.fn_count : 0.0;
+    jbuf_appendf(&out,
+                 "},\"functions\":{\"count\":%d,\"mean_complexity\":%.1f,\"max_complexity\":%d},"
+                 "\"complexity_hotspots\":[",
+                 s.fn_count, mean, s.fn_cx_max);
+    for (int i = 0; i < s.nhot; i++) {
+        jbuf_appendf(&out, "%s{\"complexity\":%d,\"name\":", i ? "," : "", s.hot[i].cx);
+        jbuf_append_json_str(&out, s.hot[i].name);
+        jbuf_appendf(&out, ",\"at\":\"%s:%d\"}", s.hot[i].file, s.hot[i].line);
+    }
+    jbuf_append(&out, "],\"top_dirs\":[");
+    int ndir = s.ndir < 15 ? s.ndir : 15;
+    for (int i = 0; i < ndir; i++) {
+        jbuf_appendf(&out, "%s{\"dir\":", i ? "," : "");
+        jbuf_append_json_str(&out, s.dirs[i].dir);
+        jbuf_appendf(&out, ",\"blocks\":%d,\"total_complexity\":%ld}", s.dirs[i].blocks,
+                     s.dirs[i].total_cx);
+    }
+    jbuf_appendf(&out, "],\"ms\":%.0f}", now_ms() - t0);
+
+    size_t n = out.len < rlen - 1 ? out.len : rlen - 1;
+    memcpy(result, out.data, n);
+    result[n] = '\0';
+    jbuf_free(&out);
+    return true;
+}
+
+/* ── ast_classify: zero-shot classify a code block against caller labels ───
+ * Thin, code-scoped wrapper over Jina classify (jina-embeddings-v5-text-small).
+ * Feed it a card from ast_search plus labels like ["networking","crypto",...]. */
+static bool tool_ast_classify(const char *input, char *result, size_t rlen) {
+    char *text = json_get_str(input, "text");
+    char *labels = json_get_raw(input, "labels");
+    if (!text || !text[0]) {
+        free(text);
+        free(labels);
+        snprintf(result, rlen, "missing required parameter: text");
+        return false;
+    }
+    if (!labels || !(labels[0] == '[' || labels[0] == '{')) {
+        free(text);
+        free(labels);
+        snprintf(result, rlen, "missing required parameter: labels (array)");
+        return false;
+    }
+    char *model = json_get_str(input, "model");
+    jbuf_t ci;
+    jbuf_init(&ci, 512 + strlen(text) + strlen(labels));
+    jbuf_append(&ci, "{\"model\":");
+    jbuf_append_json_str(&ci, model && model[0] ? model : "jina-embeddings-v5-text-small");
+    jbuf_append(&ci, ",\"labels\":");
+    jbuf_append(&ci, labels);
+    jbuf_append(&ci, ",\"input\":[");
+    jbuf_append_json_str(&ci, text);
+    jbuf_append(&ci, "]}");
+    bool ok = tool_jina_ai_classify(ci.data, result, rlen);
+    jbuf_free(&ci);
+    free(text);
+    free(labels);
+    free(model);
+    return ok;
 }
 
 static bool tool_context_search(const char *input, char *result, size_t rlen) {
@@ -28714,6 +28994,28 @@ static const tool_def_t s_tools[] = {
          "\"rerank\":{\"type\":\"boolean\",\"description\":\"use jina-reranker-v3 (default "
          "true)\"}},\"required\":[\"query\"]}",
      .execute = tool_ast_search,
+     .is_read_only = true,
+     .is_concurrent = true},
+    {.name = "ast_insights",
+     .description = "Structured aggregate analysis over dsco's source (no API, no index needed): "
+                    "node-type histogram, function complexity stats, complexity hotspots (the "
+                    "'what needs attention' list), and per-directory rollups. Defaults to "
+                    "src/+include/; pass comma-separated paths to narrow.",
+     .input_schema_json = "{\"type\":\"object\",\"properties\":{\"paths\":{\"type\":\"string\","
+                          "\"description\":\"comma-separated dirs; default src,include\"}},"
+                          "\"required\":[]}",
+     .execute = tool_ast_insights,
+     .is_read_only = true,
+     .is_concurrent = true},
+    {.name = "ast_classify",
+     .description = "Zero-shot classify a code block against your own labels via Jina "
+                    "(jina-embeddings-v5-text-small). Feed a card from ast_search plus labels "
+                    "like [\"networking\",\"crypto\",\"ui\",\"governance\"] to categorize it.",
+     .input_schema_json =
+         "{\"type\":\"object\",\"properties\":{\"text\":{\"type\":\"string\"},\"labels\":{\"type\":"
+         "\"array\",\"items\":{\"type\":\"string\"}},\"model\":{\"type\":\"string\"}},"
+         "\"required\":[\"text\",\"labels\"]}",
+     .execute = tool_ast_classify,
      .is_read_only = true,
      .is_concurrent = true},
     {.name = "jina_embed",
