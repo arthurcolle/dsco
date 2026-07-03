@@ -96,6 +96,7 @@ SRC_NAMES = main.c agent.c llm.c tools.c execution_layer.c json_util.c ast.c swa
 	control_flow.c \
 	introspect.c \
 	learned_cost.c \
+	spend_governor.c \
 	session_memory.c \
 	provider_pool.c \
 	math_fastpath.c \
