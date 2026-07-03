@@ -1408,6 +1408,96 @@ bool tool_jina_search(const char *input, char *result, size_t rlen) {
  *  JINA EMBED — Compute embeddings via Jina v4 API
  * ══════════════════════════════════════════════════════════════════════════ */
 
+/* Batch-embed n texts via the Jina embeddings API. Fills vecs (row-major,
+ * n * stride floats) and *out_dim with the model's dimension. task is
+ * retrieval.passage (documents) or retrieval.query (queries). Returns the
+ * number of vectors parsed (n on success, 0 on transport/HTTP failure).
+ * Used by ast_index/ast_search for large code-specialized embeddings. */
+int jina_embed_batch(char **texts, int n, const char *task, const char *model, int want_dim,
+                     float *vecs, int stride, int *out_dim) {
+    const char *key = getenv("JINA_API_KEY");
+    if (!key || !key[0] || n <= 0 || !vecs || stride <= 0)
+        return 0;
+
+    jbuf_t body;
+    jbuf_init(&body, 4096);
+    jbuf_append(&body, "{\"model\":");
+    jbuf_append_json_str(&body, model && model[0] ? model : "jina-code-embeddings-1.5b");
+    jbuf_append(&body, ",\"task\":");
+    jbuf_append_json_str(&body, task && task[0] ? task : "retrieval.passage");
+    if (want_dim > 0)
+        jbuf_appendf(&body, ",\"dimensions\":%d", want_dim);
+    jbuf_append(&body, ",\"embedding_type\":\"float\",\"input\":[");
+    for (int i = 0; i < n; i++) {
+        if (i)
+            jbuf_append(&body, ",");
+        jbuf_append_json_str(&body, texts[i] ? texts[i] : "");
+    }
+    jbuf_append(&body, "]}");
+
+    CURL *curl = curl_easy_init();
+    if (!curl) {
+        jbuf_free(&body);
+        return 0;
+    }
+    dsco_http_pool_apply(curl);
+    struct curl_slist *hdrs = NULL;
+    char auth[600];
+    snprintf(auth, sizeof(auth), "Authorization: Bearer %s", key);
+    hdrs = curl_slist_append(hdrs, auth);
+    hdrs = curl_slist_append(hdrs, "Content-Type: application/json");
+    hdrs = curl_slist_append(hdrs, "Accept: application/json");
+    http_buf_t resp = {0};
+    curl_easy_setopt(curl, CURLOPT_URL, "https://api.jina.ai/v1/embeddings");
+    curl_easy_setopt(curl, CURLOPT_HTTPHEADER, hdrs);
+    curl_easy_setopt(curl, CURLOPT_POSTFIELDS, body.data);
+    curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, http_write_cb);
+    curl_easy_setopt(curl, CURLOPT_WRITEDATA, &resp);
+    curl_easy_setopt(curl, CURLOPT_CONNECTTIMEOUT, 10L);
+    curl_easy_setopt(curl, CURLOPT_TIMEOUT, 90L);
+    CURLcode rc = curl_easy_perform(curl);
+    long code = 0;
+    curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, &code);
+    curl_slist_free_all(hdrs);
+    curl_easy_cleanup(curl);
+    jbuf_free(&body);
+    if (rc != CURLE_OK || code != 200) {
+        free(resp.data);
+        return 0;
+    }
+
+    /* Parse data[i].embedding[] float arrays in order. */
+    const char *p = resp.data ? resp.data : "";
+    int got = 0;
+    for (int i = 0; i < n; i++) {
+        const char *e = strstr(p, "\"embedding\":[");
+        if (!e)
+            break;
+        e += 13; /* strlen("\"embedding\":[") */
+        int d = 0;
+        float *row = vecs + (size_t)i * (size_t)stride;
+        while (*e && *e != ']') {
+            char *end;
+            double v = strtod(e, &end);
+            if (end == e)
+                break;
+            if (d < stride)
+                row[d] = (float)v;
+            d++;
+            e = end;
+            while (*e == ',' || *e == ' ' || *e == '\n')
+                e++;
+        }
+        if (i == 0 && out_dim)
+            *out_dim = d < stride ? d : stride;
+        if (d > 0)
+            got++;
+        p = (*e == ']') ? e + 1 : e;
+    }
+    free(resp.data);
+    return got;
+}
+
 bool tool_jina_embed(const char *input, char *result, size_t rlen) {
     char *text = json_get_str(input, "text");
     if (!text || !text[0]) {

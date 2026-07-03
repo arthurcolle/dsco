@@ -12976,16 +12976,64 @@ static void ast_idx_card(const char *relpath, const ast_node_t *n, char *out, si
              n->complexity, bp);
 }
 
-/* Recursive walk of .c/.h under root/rel; embed + upsert each named node. */
-static int ast_idx_walk(vecstore_t *vs, const char *root, const char *rel, int *count) {
+#define AST_EMBED_MAXDIM 2048
+/* Jina embeddings cap inputs per request; 16 clears the limit with margin for
+ * ~1KB code cards ("Failed to encode text" appears above ~32). */
+#define AST_EMBED_BATCH 16
+
+/* Jina's code-embedding models take nl2code.{query,passage} tasks (natural
+ * language ↔ code — exactly NL-query → code-block retrieval); the general
+ * text models take retrieval.{query,passage}. DSCO_AST_EMBED_TASK overrides. */
+static const char *ast_embed_task(const char *model, bool is_query) {
+    const char *ovr = getenv("DSCO_AST_EMBED_TASK");
+    if (ovr && ovr[0])
+        return ovr;
+    if (model && strstr(model, "code"))
+        return is_query ? "nl2code.query" : "nl2code.passage";
+    return is_query ? "retrieval.query" : "retrieval.passage";
+}
+
+/* Collected (id, card) pairs — embedding is batched after the walk so the
+ * dense path can send many cards per Jina request instead of one-per-call. */
+typedef struct {
+    char **ids;
+    char **cards;
+    int n;
+    int cap;
+} ast_collect_t;
+
+static void ast_collect_push(ast_collect_t *c, const char *id, const char *card) {
+    if (c->n >= c->cap) {
+        int nc = c->cap ? c->cap * 2 : 1024;
+        c->ids = safe_realloc(c->ids, (size_t)nc * sizeof(char *));
+        c->cards = safe_realloc(c->cards, (size_t)nc * sizeof(char *));
+        c->cap = nc;
+    }
+    c->ids[c->n] = safe_strdup(id);
+    c->cards[c->n] = safe_strdup(card);
+    c->n++;
+}
+
+static void ast_collect_free(ast_collect_t *c) {
+    for (int i = 0; i < c->n; i++) {
+        free(c->ids[i]);
+        free(c->cards[i]);
+    }
+    free(c->ids);
+    free(c->cards);
+}
+
+/* Recursive walk of .c/.h under root/rel; collect one card per named node. */
+static void ast_idx_collect(const char *root, const char *rel, ast_collect_t *c) {
+    if (c->n >= AST_IDX_MAX_BLOCKS)
+        return;
     char path[2048];
     snprintf(path, sizeof(path), "%s/%s", root, rel[0] ? rel : ".");
     DIR *d = opendir(path);
     if (!d)
-        return 0;
-    int indexed = 0;
+        return;
     struct dirent *e;
-    while ((e = readdir(d)) != NULL && *count < AST_IDX_MAX_BLOCKS) {
+    while ((e = readdir(d)) != NULL && c->n < AST_IDX_MAX_BLOCKS) {
         if (e->d_name[0] == '.')
             continue;
         char childrel[1024];
@@ -13002,7 +13050,7 @@ static int ast_idx_walk(vecstore_t *vs, const char *root, const char *rel, int *
             if (strcmp(e->d_name, "build") == 0 || strcmp(e->d_name, "gsl") == 0 ||
                 strcmp(e->d_name, "vendor") == 0)
                 continue;
-            indexed += ast_idx_walk(vs, root, childrel, count);
+            ast_idx_collect(root, childrel, c);
             continue;
         }
         size_t len = strlen(e->d_name);
@@ -13014,7 +13062,7 @@ static int ast_idx_walk(vecstore_t *vs, const char *root, const char *rel, int *
         ast_file_t *f = ast_parse_file(childpath);
         if (!f)
             continue;
-        for (int i = 0; i < f->count && *count < AST_IDX_MAX_BLOCKS; i++) {
+        for (int i = 0; i < f->count && c->n < AST_IDX_MAX_BLOCKS; i++) {
             ast_node_t *n = &f->nodes[i];
             if (!n->name || !n->name[0] || n->line_start <= 0)
                 continue;
@@ -13024,18 +13072,11 @@ static int ast_idx_walk(vecstore_t *vs, const char *root, const char *rel, int *
             ast_idx_card(childrel, n, card, sizeof(card));
             char id[600];
             snprintf(id, sizeof(id), "%s:%d:%s", childrel, n->line_start, n->name);
-            float vec[CTX_EMBED_DIM];
-            float norm = 0.0f;
-            ctx_build_embedding(card, vec, NULL, &norm);
-            if (vecstore_insert(vs, id, vec, CTX_EMBED_DIM, card)) {
-                indexed++;
-                (*count)++;
-            }
+            ast_collect_push(c, id, card);
         }
         ast_free_file(f);
     }
     closedir(d);
-    return indexed;
 }
 
 static bool tool_ast_index(const char *input, char *result, size_t rlen) {
@@ -13056,29 +13097,101 @@ static bool tool_ast_index(const char *input, char *result, size_t rlen) {
         root = getcwd(cwd, sizeof(cwd)) ? cwd : ".";
     }
     char *paths = json_get_str(input, "paths");
-    int count = 0, indexed = 0;
     double t0 = now_ms();
+
+    /* Walk → collect all cards, then embed in batches. */
+    ast_collect_t col = {0};
     if (paths && paths[0]) {
         char *copy = strdup(paths);
         char *save = NULL;
         for (char *tok = strtok_r(copy, ",", &save); tok; tok = strtok_r(NULL, ",", &save)) {
             while (*tok == ' ')
                 tok++;
-            indexed += ast_idx_walk(vs, root, tok, &count);
+            ast_idx_collect(root, tok, &col);
         }
         free(copy);
     } else {
-        indexed += ast_idx_walk(vs, root, "src", &count);
-        indexed += ast_idx_walk(vs, root, "include", &count);
+        ast_idx_collect(root, "src", &col);
+        ast_idx_collect(root, "include", &col);
     }
+    free(paths);
+
+    /* Embedder: dense Jina code embeddings by default (best recall for code);
+     * DSCO_AST_EMBED=local forces the free 256-dim path; DSCO_AST_EMBED_MODEL
+     * overrides the Jina model (default jina-code-embeddings-1.5b, 1536-dim). */
+    const char *force = getenv("DSCO_AST_EMBED");
+    const char *model = getenv("DSCO_AST_EMBED_MODEL");
+    if (!model || !model[0])
+        model = "jina-code-embeddings-1.5b";
+    bool use_jina =
+        !(force && strcmp(force, "local") == 0) && getenv("JINA_API_KEY") && getenv("JINA_API_KEY")[0];
+
+    int indexed = 0, dim = 0;
+    if (use_jina) {
+        float *buf = malloc((size_t)AST_EMBED_BATCH * AST_EMBED_MAXDIM * sizeof(float));
+        bool aborted = false;
+        for (int off = 0; off < col.n && buf; off += AST_EMBED_BATCH) {
+            int bn = col.n - off < AST_EMBED_BATCH ? col.n - off : AST_EMBED_BATCH;
+            int bd = 0;
+            int got = jina_embed_batch(&col.cards[off], bn, ast_embed_task(model, false), model, 0,
+                                       buf, AST_EMBED_MAXDIM, &bd);
+            if (got < bn || bd <= 0) {
+                if (off == 0)
+                    use_jina = false; /* nothing inserted yet — fall to local */
+                else
+                    aborted = true; /* partial index at consistent dim; user re-runs */
+                break;
+            }
+            dim = bd;
+            for (int i = 0; i < bn; i++)
+                if (vecstore_insert(vs, col.ids[off + i], buf + (size_t)i * AST_EMBED_MAXDIM, dim,
+                                    col.cards[off + i]))
+                    indexed++;
+        }
+        free(buf);
+        if (aborted) {
+            snprintf(result, rlen,
+                     "{\"error\":\"jina embed failed mid-run; %d/%d indexed at dim %d — re-run "
+                     "ast_index\",\"embedder\":\"%s\"}",
+                     indexed, col.n, dim, model);
+            vfs_kv_put_str(vfs, "ast_meta", "embed_model", model);
+            char dbuf[16];
+            snprintf(dbuf, sizeof(dbuf), "%d", dim);
+            vfs_kv_put_str(vfs, "ast_meta", "embed_dim", dbuf);
+            vecstore_close(vs);
+            vfs_close(vfs);
+            ast_collect_free(&col);
+            return false;
+        }
+    }
+    if (!use_jina) {
+        dim = CTX_EMBED_DIM;
+        model = "local-256";
+        for (int i = 0; i < col.n; i++) {
+            float v[CTX_EMBED_DIM];
+            float nr = 0.0f;
+            ctx_build_embedding(col.cards[i], v, NULL, &nr);
+            if (vecstore_insert(vs, col.ids[i], v, dim, col.cards[i]))
+                indexed++;
+        }
+    }
+
+    /* Record which embedder built the index so ast_search embeds queries the
+     * same way (mismatched dims would make cosine meaningless). */
+    vfs_kv_put_str(vfs, "ast_meta", "embed_model", model);
+    char dbuf[16];
+    snprintf(dbuf, sizeof(dbuf), "%d", dim);
+    vfs_kv_put_str(vfs, "ast_meta", "embed_dim", dbuf);
+
     int total = vecstore_count(vs);
     vecstore_close(vs);
     vfs_close(vfs);
-    free(paths);
+    int collected = col.n;
+    ast_collect_free(&col);
     snprintf(result, rlen,
-             "{\"indexed\":%d,\"collection_total\":%d,\"root\":\"%s\",\"ms\":%.0f,"
-             "\"embedder\":\"local-256\"}",
-             indexed, total, root, now_ms() - t0);
+             "{\"indexed\":%d,\"collected\":%d,\"collection_total\":%d,\"dim\":%d,"
+             "\"embedder\":\"%s\",\"ms\":%.0f}",
+             indexed, collected, total, dim, model, now_ms() - t0);
     return true;
 }
 
@@ -13128,11 +13241,47 @@ static bool tool_ast_search(const char *input, char *result, size_t rlen) {
         return false;
     }
 
-    float qvec[CTX_EMBED_DIM];
-    float qnorm = 0.0f;
-    ctx_build_embedding(query, qvec, NULL, &qnorm);
+    /* Embed the query with the same model the index was built with. */
+    char *emb_model = vfs_kv_get_str(vfs, "ast_meta", "embed_model");
+    char *emb_dim_s = vfs_kv_get_str(vfs, "ast_meta", "embed_dim");
+    bool local = !emb_model || strcmp(emb_model, "local-256") == 0;
+    int emb_dim = emb_dim_s ? atoi(emb_dim_s) : CTX_EMBED_DIM;
+    if (emb_dim <= 0 || emb_dim > AST_EMBED_MAXDIM)
+        emb_dim = CTX_EMBED_DIM;
+
+    float *qvec = calloc((size_t)(emb_dim > CTX_EMBED_DIM ? emb_dim : CTX_EMBED_DIM), sizeof(float));
+    bool qok = true;
+    if (local) {
+        float v[CTX_EMBED_DIM];
+        float qnorm = 0.0f;
+        ctx_build_embedding(query, v, NULL, &qnorm);
+        memcpy(qvec, v, sizeof(float) * CTX_EMBED_DIM);
+        emb_dim = CTX_EMBED_DIM;
+    } else {
+        char *q = query;
+        int d = 0;
+        int got =
+            jina_embed_batch(&q, 1, ast_embed_task(emb_model, true), emb_model, 0, qvec, emb_dim, &d);
+        qok = (got >= 1 && d > 0);
+    }
+    if (!qok) {
+        free(qvec);
+        free(emb_model);
+        free(emb_dim_s);
+        vecstore_close(vs);
+        vfs_close(vfs);
+        free(query);
+        snprintf(result, rlen,
+                 "{\"error\":\"query embedding failed (index uses a Jina model; check "
+                 "JINA_API_KEY / connectivity)\"}");
+        return false;
+    }
+
     vecstore_result_t *cands = calloc((size_t)k, sizeof(*cands));
-    int ncand = cands ? vecstore_query(vs, qvec, CTX_EMBED_DIM, cands, k) : 0;
+    int ncand = cands ? vecstore_query(vs, qvec, emb_dim, cands, k) : 0;
+    free(qvec);
+    free(emb_model);
+    free(emb_dim_s);
 
     int order[200];
     int nout = 0;
