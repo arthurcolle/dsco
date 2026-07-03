@@ -3178,9 +3178,35 @@ static void dsc_exec_dsco_new(int argc, char **argv, const char *reason) {
 
 /* ── Main ──────────────────────────────────────────────────────────────── */
 
+static void dsc_print_usage(void) {
+    fprintf(stderr,
+        "dsc — streaming Claude agent with markdown rendering\n"
+        "usage: dsc [-m|--model MODEL] [--system PROMPT] [--thinking [BUDGET]]\n"
+        "           [--max-tokens N]\n"
+        "note:  non-Anthropic models (e.g. grok-4.20, gpt-5.4, x-ai/…) and\n"
+        "       credit-exhausted sessions hand off to ./dsco-new automatically\n\n"
+        "commands:\n"
+        "  /model NAME     set model        /system PROMPT  set system prompt\n"
+        "  /thinking [N]   toggle thinking   /clear          clear conversation\n"
+        "  /compact        drop old context  /cost           token usage & cost\n"
+        "  /help           show commands     quit            exit\n\n"
+        "auth:\n"
+        "  prefers Claude Code OAuth from macOS Keychain or ~/.claude/.credentials.json\n"
+        "  auto-refreshes stored OAuth tokens when possible\n"
+        "  falls back to ANTHROPIC_API_KEY when OAuth is unavailable\n");
+}
+
 int main(int argc, char **argv) {
     g_main_argc = argc;
     g_main_argv = argv;
+    /* Help must not require credentials (CI smoke-tests `dsc --help` on
+     * runners with no keychain or API keys). */
+    for (int i = 1; i < argc; i++) {
+        if (strcmp(argv[i], "-h") == 0 || strcmp(argv[i], "--help") == 0) {
+            dsc_print_usage();
+            return 0;
+        }
+    }
     /* First pass: parse --model / -m so we can short-circuit into dsco-new
      * for non-Anthropic models before touching the Anthropic OAuth flow. */
     for (int i = 1; i < argc; i++) {
@@ -3225,21 +3251,7 @@ int main(int argc, char **argv) {
             if (g_max_tokens <= 0) g_max_tokens = 16384;
         }
         else if (strcmp(argv[i], "-h") == 0 || strcmp(argv[i], "--help") == 0) {
-            fprintf(stderr,
-                "dsc — streaming Claude agent with markdown rendering\n"
-                "usage: dsc [-m|--model MODEL] [--system PROMPT] [--thinking [BUDGET]]\n"
-                "           [--max-tokens N]\n"
-                "note:  non-Anthropic models (e.g. grok-4.20, gpt-5.4, x-ai/…) and\n"
-                "       credit-exhausted sessions hand off to ./dsco-new automatically\n\n"
-                "commands:\n"
-                "  /model NAME     set model        /system PROMPT  set system prompt\n"
-                "  /thinking [N]   toggle thinking   /clear          clear conversation\n"
-                "  /compact        drop old context  /cost           token usage & cost\n"
-                "  /help           show commands     quit            exit\n\n"
-                "auth:\n"
-                "  prefers Claude Code OAuth from macOS Keychain or ~/.claude/.credentials.json\n"
-                "  auto-refreshes stored OAuth tokens when possible\n"
-                "  falls back to ANTHROPIC_API_KEY when OAuth is unavailable\n");
+            dsc_print_usage();
             return 0;
         }
     }
