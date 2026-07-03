@@ -2070,6 +2070,7 @@ static size_t ctx_truncate_json(const char *json, size_t json_len, char *out, si
     size_t wr = 0;
     int depth = 0;
     int array_elem_count[32] = {0}; /* track per nesting level */
+    bool is_array[32] = {false};    /* container type per nesting level */
     bool in_string = false;
     bool skip_value = false;
     int skip_depth = 0;
@@ -2110,14 +2111,18 @@ static size_t ctx_truncate_json(const char *json, size_t json_len, char *out, si
         /* Track array element counts for truncation */
         if (c == '[') {
             depth++;
-            if (depth < 32)
+            if (depth < 32) {
                 array_elem_count[depth] = 0;
+                is_array[depth] = true;
+            }
             if (!skip_value && wr < budget)
                 out[wr++] = c;
             continue;
         }
         if (c == '{') {
             depth++;
+            if (depth < 32)
+                is_array[depth] = false;
             if (!skip_value && wr < budget)
                 out[wr++] = c;
             continue;
@@ -2132,8 +2137,11 @@ static size_t ctx_truncate_json(const char *json, size_t json_len, char *out, si
             continue;
         }
         if (c == ',') {
-            /* Check if we're in an array and past 2 elements */
-            if (depth > 0 && depth < 32) {
+            /* Only ARRAY elements are capped. Object-member commas must not
+             * count: they made {"code":200,"status":200,"data":[...]} lose
+             * its entire data payload after two scalar members (the search
+             * tools' results collapsed to ~31 bytes of mangled JSON). */
+            if (depth > 0 && depth < 32 && is_array[depth]) {
                 array_elem_count[depth]++;
                 if (array_elem_count[depth] >= 2) {
                     /* Skip remaining array elements */
@@ -2173,6 +2181,12 @@ static size_t ctx_truncate_json(const char *json, size_t json_len, char *out, si
     out[wr] = '\0';
     return wr;
 }
+
+#ifdef DSCO_INTERNAL_TESTS
+size_t tools_test_truncate_json(const char *json, size_t json_len, char *out, size_t out_len) {
+    return ctx_truncate_json(json, json_len, out, out_len);
+}
+#endif
 
 /* Generic truncation: first 40% + truncation marker + last 20% */
 static size_t ctx_truncate_generic(const char *text, size_t text_len, const char *vfs_key,
@@ -28227,12 +28241,23 @@ static const tool_def_t s_tools[] = {
      .is_read_only = true,
      .is_concurrent = true},
     {.name = "jina_search",
-     .description = "AI-powered web search via Jina AI. Returns structured results with titles, "
-                    "URLs, and descriptions.",
+     .description = "AI-powered web search via Jina AI. Returns titles, URLs, and descriptions; "
+                    "pass content=true for full page content per result (large — prefer "
+                    "jina_read on chosen URLs).",
      .input_schema_json = "{\"type\":\"object\",\"properties\":{\"query\":{\"type\":\"string\"},"
                           "\"num\":{\"type\":\"integer\",\"description\":\"Number of results "
-                          "(1-10, default 5)\"}},\"required\":[\"query\"]}",
+                          "(1-10, default 5)\"},\"content\":{\"type\":\"boolean\","
+                          "\"description\":\"Include full page content per result (default "
+                          "false)\"}},\"required\":[\"query\"]}",
      .execute = tool_jina_search,
+     .is_read_only = true,
+     .is_concurrent = true},
+    {.name = "jina_read",
+     .description = "Fetch a URL as LLM-ready markdown via Jina Reader (r.jina.ai). The natural "
+                    "follow-up to jina_search: search picks URLs, jina_read fetches one.",
+     .input_schema_json = "{\"type\":\"object\",\"properties\":{\"url\":{\"type\":\"string\"}},"
+                          "\"required\":[\"url\"]}",
+     .execute = tool_jina_read,
      .is_read_only = true,
      .is_concurrent = true},
     {.name = "jina_embed",
@@ -34276,6 +34301,36 @@ static double watchdog_now(void) {
    Checked in run_cmd_ex poll loop alongside g_interrupted. */
 volatile int g_tool_timed_out = 0;
 
+/* ── Active-watchdog registry ─────────────────────────────────────────────
+   Lets the process-lifecycle supervisor (Construct) reach in-flight tool
+   watchdogs to renew or inspect their deadlines. Each watchdog registers on
+   start and unregisters (under lock, before join) on stop, so a pointer held
+   while the registry lock is taken is always valid. */
+#define WATCHDOG_REGISTRY_MAX 128
+static tool_watchdog_t *s_wd_registry[WATCHDOG_REGISTRY_MAX];
+static int s_wd_registry_count = 0;
+static unsigned long s_wd_next_call_id = 1;
+static pthread_mutex_t s_wd_registry_lock = PTHREAD_MUTEX_INITIALIZER;
+
+static void watchdog_registry_add(tool_watchdog_t *wd) {
+    pthread_mutex_lock(&s_wd_registry_lock);
+    wd->call_id = s_wd_next_call_id++;
+    if (s_wd_registry_count < WATCHDOG_REGISTRY_MAX)
+        s_wd_registry[s_wd_registry_count++] = wd;
+    pthread_mutex_unlock(&s_wd_registry_lock);
+}
+
+static void watchdog_registry_remove(tool_watchdog_t *wd) {
+    pthread_mutex_lock(&s_wd_registry_lock);
+    for (int i = 0; i < s_wd_registry_count; i++) {
+        if (s_wd_registry[i] == wd) {
+            s_wd_registry[i] = s_wd_registry[--s_wd_registry_count];
+            break;
+        }
+    }
+    pthread_mutex_unlock(&s_wd_registry_lock);
+}
+
 static void *watchdog_thread(void *arg) {
     tool_watchdog_t *wd = (tool_watchdog_t *)arg;
     while (!wd->cancelled) {
@@ -34312,13 +34367,79 @@ void watchdog_start(tool_watchdog_t *wd, pthread_t target, const char *name, int
     wd->grace_end = wd->deadline + dsco_tool_grace_period_s();
     wd->cancelled = 0;
     wd->timed_out = 0;
+    wd->started_at = now;
+    wd->max_lifetime_s = 0; /* unlimited unless the supervisor imposes a cap */
+    wd->renew_count = 0;
 
+    watchdog_registry_add(wd);
     pthread_create(&wd->thread, NULL, watchdog_thread, wd);
 }
 
 void watchdog_stop(tool_watchdog_t *wd) {
+    watchdog_registry_remove(wd);
     wd->cancelled = 1;
     pthread_join(wd->thread, NULL);
+}
+
+int watchdog_renew(tool_watchdog_t *wd, int extra_s) {
+    if (!wd || extra_s <= 0 || wd->cancelled)
+        return 0;
+    double now = watchdog_now();
+    /* Once the grace window has fully elapsed the watcher has already fired
+       g_interrupted and exited; renewal can no longer save the call. */
+    if (wd->timed_out && now >= wd->grace_end)
+        return 0;
+    double base = wd->deadline > now ? wd->deadline : now;
+    double new_deadline = base + extra_s;
+    if (wd->max_lifetime_s > 0) {
+        double cap = wd->started_at + wd->max_lifetime_s;
+        if (new_deadline > cap)
+            new_deadline = cap;
+        if (new_deadline <= now)
+            return 0; /* cannot extend past the absolute lifetime cap */
+    }
+    wd->deadline = new_deadline;
+    wd->grace_end = new_deadline + dsco_tool_grace_period_s();
+    if (wd->timed_out) {
+        /* Un-fire the soft timeout — still inside the grace window. */
+        wd->timed_out = 0;
+        g_tool_timed_out = 0;
+    }
+    wd->renew_count++;
+    return 1;
+}
+
+int watchdog_renew_by_name(const char *name, int extra_s) {
+    if (!name)
+        return 0;
+    int renewed = 0;
+    pthread_mutex_lock(&s_wd_registry_lock);
+    for (int i = 0; i < s_wd_registry_count; i++) {
+        if (strcmp(s_wd_registry[i]->tool_name, name) == 0)
+            renewed += watchdog_renew(s_wd_registry[i], extra_s);
+    }
+    pthread_mutex_unlock(&s_wd_registry_lock);
+    return renewed;
+}
+
+int watchdog_active_snapshot(watchdog_info_t *out, int max) {
+    if (!out || max <= 0)
+        return 0;
+    double now = watchdog_now();
+    int n = 0;
+    pthread_mutex_lock(&s_wd_registry_lock);
+    for (int i = 0; i < s_wd_registry_count && n < max; i++) {
+        tool_watchdog_t *wd = s_wd_registry[i];
+        out[n].call_id = wd->call_id;
+        snprintf(out[n].tool_name, sizeof(out[n].tool_name), "%s", wd->tool_name);
+        out[n].remaining_s = wd->deadline - now;
+        out[n].timeout_s = wd->timeout_s;
+        out[n].renew_count = wd->renew_count;
+        out[n].timed_out = wd->timed_out;
+        n++;
+    }
+    pthread_mutex_unlock(&s_wd_registry_lock);
+    return n;
 }
 
 /* Per-tool timeout overrides (tools that naturally take longer) */
@@ -34336,6 +34457,14 @@ static const tool_timeout_cfg_t s_timeout_overrides[] = {
     {"spawn_agent", 300},
     {"agent_wait", 3660},
     {"agent_race", 300},
+    /* The consolidated `swarm` tool dispatches long-blocking actions (create,
+     * map_reduce, collect, provider_fabric, topology_run/solve) that run whole
+     * model instances to completion. Without an entry it inherited the 30s
+     * default (+5s grace) and real swarms were killed at ~35s. Give it the same
+     * ceiling as swarm_collect/agent_wait; fast sub-actions (status/inspect/
+     * budget) return early, and Esc/Ctrl-C + swarm budget still bound runaways.
+     * Runtime override: DSCO_TOOL_TIMEOUT_SWARM. */
+    {"swarm", 3660},
     {"create_swarm", 300},
     {"swarm_collect", 3660},
     {"spawn_executor", 300},
