@@ -41,6 +41,13 @@ void router_init(router_t *r, router_policy_t policy) {
     r->weight_cost = 0.4f;
     r->weight_latency = 0.3f;
     r->weight_quality = 0.3f;
+    r->max_escalations = 8;
+    const char *cap = getenv("DSCO_ROUTER_MAX_ESCALATIONS");
+    if (cap && cap[0]) {
+        long v = strtol(cap, NULL, 10);
+        if (v >= 0 && v <= 10000)
+            r->max_escalations = (int)v;
+    }
     pthread_mutex_init(&r->lock, NULL);
 }
 
@@ -618,10 +625,20 @@ router_decision_t router_decide(router_t *r, const char *current_model,
         }
     }
 
-    /* Override: consecutive failures → escalate */
+    /* Override: consecutive failures → escalate (bounded per session) */
     if (consecutive_failures >= 2) {
         const char *stronger = router_stronger_model(current_model);
         if (stronger && strcmp(stronger, current_model) != 0) {
+            if (r->max_escalations > 0 && r->escalations >= r->max_escalations) {
+                snprintf(d.rationale, sizeof(d.rationale),
+                         "%d consecutive failures on %s, but escalation cap reached "
+                         "(%d/%d this session); staying put",
+                         consecutive_failures, current_model ? current_model : "?",
+                         r->escalations, r->max_escalations);
+                pthread_mutex_unlock(&r->lock);
+                return d;
+            }
+            r->escalations++;
             snprintf(d.model_id, sizeof(d.model_id), "%s", stronger);
             d.reason = SWITCH_REASON_FAILURE;
             d.should_switch = true;
@@ -675,10 +692,21 @@ router_decision_t router_decide(router_t *r, const char *current_model,
 
     if (differs) {
         int best_tier = model_tier(best_id);
+        if (best_tier > current_tier && r->max_escalations > 0 &&
+            r->escalations >= r->max_escalations) {
+            snprintf(d.rationale, sizeof(d.rationale),
+                     "task=%s wants tier %d but escalation cap reached (%d/%d this "
+                     "session); staying on %s",
+                     task_complexity_name(complexity), min_tier, r->escalations,
+                     r->max_escalations, current_model);
+            pthread_mutex_unlock(&r->lock);
+            return d;
+        }
         d.should_switch = true;
         snprintf(d.model_id, sizeof(d.model_id), "%s", best_id);
 
         if (best_tier > current_tier) {
+            r->escalations++;
             d.reason = SWITCH_REASON_COMPLEXITY_UP;
             d.confidence = 0.70f;
             snprintf(d.rationale, sizeof(d.rationale),
