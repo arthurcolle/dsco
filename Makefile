@@ -103,6 +103,7 @@ SRC_NAMES = main.c agent.c llm.c tools.c execution_layer.c json_util.c ast.c swa
 	realtime.c \
 	remote_cli.c \
 	cluster.c \
+	json_fast.c \
 	$(OPTIONAL_SRCS)
 TEST_SRC_NAMES = test.c
 
