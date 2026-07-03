@@ -4416,11 +4416,22 @@ static void test_public_tools_execute_uses_governance_approval_gate(void) {
     ASSERT(ok, "autonomous trusted mode should skip routine write approval");
     unlink("/tmp/dsco_approval_never_ok");
 
+    /* Secret substrings are no longer critical by default: matching
+     * "api_key"/"password"/"secret" anywhere in tool input flagged most
+     * legitimate work in this codebase.  The legacy tripwire is opt-in. */
     result[0] = '\0';
     ok = tools_execute("run_command", "{\"command\":\"echo api_key\"}", result, sizeof(result));
-    ASSERT(!ok, "autonomous mode should not bypass critical input patterns");
+    ASSERT(ok, "benign mention of api_key must not hard-stop work");
+    ASSERT(strstr(result, "governance_block") == NULL,
+           "no governance block for benign secret-substring mention");
+
+    setenv("DSCO_PARANOID_SECRETS", "1", 1);
+    result[0] = '\0';
+    ok = tools_execute("run_command", "{\"command\":\"echo api_key\"}", result, sizeof(result));
+    ASSERT(!ok, "opt-in paranoid mode should keep the legacy secret tripwire");
     ASSERT(strstr(result, "critical_pattern_in_tool_input") != NULL,
            "critical block should name the hard-stop reason");
+    unsetenv("DSCO_PARANOID_SECRETS");
 
     result[0] = '\0';
     ok = tools_execute("run_command", "{\"command\":\"rm /tmp/dsco_caption_batch/*.png\"}", result,
@@ -4461,6 +4472,110 @@ static void test_public_tools_execute_uses_governance_approval_gate(void) {
     ASSERT(strstr(result, "governance_block") != NULL, "untrusted block should be structural");
     ASSERT(strstr(result, "blocked_by_trust_tier") != NULL,
            "untrusted block should identify trust tier policy");
+    PASS();
+}
+
+static void test_governance_gate_reads_free_immune_mutation_only(void) {
+    TEST("governance gate: reads are free; immune gate blocks mutation, not mention");
+    tools_init();
+
+    char saved_trust[64], saved_mode[64], saved_never[64], saved_no_prompts[64], saved_auth[64];
+    bool had_trust = false, had_mode = false, had_never = false, had_no_prompts = false,
+         had_auth = false;
+    test_capture_env("DSCO_TRUST_TIER", saved_trust, sizeof(saved_trust), &had_trust);
+    test_capture_env("DSCO_APPROVAL_MODE", saved_mode, sizeof(saved_mode), &had_mode);
+    test_capture_env("DSCO_APPROVAL_NEVER", saved_never, sizeof(saved_never), &had_never);
+    test_capture_env("DSCO_NO_APPROVAL_PROMPTS", saved_no_prompts, sizeof(saved_no_prompts),
+                     &had_no_prompts);
+    test_capture_env("DSCO_IMMUNE_SURGERY_AUTH", saved_auth, sizeof(saved_auth), &had_auth);
+    setenv("DSCO_TRUST_TIER", "trusted", 1);
+    setenv("DSCO_APPROVAL_MODE", "never", 1);
+    setenv("DSCO_APPROVAL_NEVER", "1", 1);
+    setenv("DSCO_NO_APPROVAL_PROMPTS", "1", 1);
+    unsetenv("DSCO_IMMUNE_SURGERY_AUTH");
+
+    char result[4096];
+
+    /* 1. Read-only shell command MENTIONING immune surfaces must run.
+     * This was the dominant false positive: grep/awk/cat on src/tools.c
+     * blocked as "self-surgery" even though C5 mandates readability. */
+    result[0] = '\0';
+    bool ok = tools_execute_for_tier(
+        "bash", "{\"command\":\"echo src/tools.c include/killswitch.h\"}", "trusted", result,
+        sizeof(result));
+    ASSERT(ok, "read-only command mentioning immune files must execute");
+    ASSERT(strstr(result, "governance_block") == NULL, "reads of immune surfaces never block");
+
+    result[0] = '\0';
+    ok = tools_execute_for_tier("bash",
+                                "{\"command\":\"grep -c immune_self_surgery src/tools.c "
+                                "2>/dev/null; true\"}",
+                                "trusted", result, sizeof(result));
+    ASSERT(strstr(result, "governance_block") == NULL, "grep of the gate itself never blocks");
+
+    /* 2. Shell WRITE toward an immune-named path is still surgery. */
+    result[0] = '\0';
+    ok = tools_execute_for_tier(
+        "bash", "{\"command\":\"echo x > /tmp/dsco_gate_zz/src/tools.c\"}", "trusted", result,
+        sizeof(result));
+    ASSERT(!ok, "shell redirect onto an immune surface must be blocked");
+    ASSERT(strstr(result, "G2b_immune_self_surgery") != NULL,
+           "shell write block should identify the immune stage");
+
+    result[0] = '\0';
+    ok = tools_execute_for_tier("bash", "{\"command\":\"touch include/killswitch.h\"}", "trusted",
+                                result, sizeof(result));
+    ASSERT(!ok, "non-read-only command touching an immune surface must be blocked");
+    ASSERT(strstr(result, "G2b_immune_self_surgery") != NULL,
+           "mutation-capable command should identify the immune stage");
+
+    /* 3. File mutator with an immune path is blocked... */
+    result[0] = '\0';
+    ok = tools_execute_for_tier(
+        "write_file", "{\"path\":\"/tmp/dsco_gate_zz/src/killswitch.c\",\"content\":\"x\"}",
+        "trusted", result, sizeof(result));
+    ASSERT(!ok, "write_file onto an immune-named path must be blocked");
+    ASSERT(strstr(result, "G2b_immune_self_surgery") != NULL,
+           "write_file block should identify the immune stage");
+
+    /* ...but file CONTENT may mention immune files (tests, notes). */
+    result[0] = '\0';
+    ok = tools_execute_for_tier("write_file",
+                                "{\"path\":\"/tmp/dsco_immune_mention.txt\",\"content\":\"notes "
+                                "about src/tools.c and api_key handling\"}",
+                                "trusted", result, sizeof(result));
+    ASSERT(ok, "content mentioning immune files is not surgery");
+    ASSERT(strstr(result, "governance_block") == NULL, "no block for content-only mention");
+    unlink("/tmp/dsco_immune_mention.txt");
+
+    /* 4. git recording of immune files is the sanctioned path. */
+    result[0] = '\0';
+    ok = tools_execute_for_tier("bash", "{\"command\":\"git add -n src/tools.c\"}", "trusted",
+                                result, sizeof(result));
+    ASSERT(strstr(result, "governance_block") == NULL,
+           "git add/commit of immune files is recording, not surgery");
+
+    /* 5. Self-preservation matches words, not substrings: "system_halted"
+     * in a non-read-only command is not a halt request... */
+    result[0] = '\0';
+    ok = tools_execute_for_tier("bash", "{\"command\":\"make --version # system_halted\"}",
+                                "trusted", result, sizeof(result));
+    ASSERT(strstr(result, "governance_block") == NULL,
+           "substring 'halted' must not trip the halt self-preservation block");
+
+    /* ...but a real force-kill / halt still is. */
+    result[0] = '\0';
+    ok = tools_execute_for_tier("bash", "{\"command\":\"kill -9 999999\"}", "trusted", result,
+                                sizeof(result));
+    ASSERT(!ok, "raw force-kill must still be blocked");
+    ASSERT(strstr(result, "G2b_self_preservation") != NULL,
+           "force-kill block should identify the self-preservation stage");
+
+    test_restore_env("DSCO_TRUST_TIER", saved_trust, had_trust);
+    test_restore_env("DSCO_APPROVAL_MODE", saved_mode, had_mode);
+    test_restore_env("DSCO_APPROVAL_NEVER", saved_never, had_never);
+    test_restore_env("DSCO_NO_APPROVAL_PROMPTS", saved_no_prompts, had_no_prompts);
+    test_restore_env("DSCO_IMMUNE_SURGERY_AUTH", saved_auth, had_auth);
     PASS();
 }
 
@@ -18653,6 +18768,7 @@ int main(void) {
     test_untrusted_python_routes_to_sandbox();
     test_untrusted_node_requires_code_or_file();
     test_public_tools_execute_uses_governance_approval_gate();
+    test_governance_gate_reads_free_immune_mutation_only();
     test_plugin_manifest_lock_validation();
     test_plugin_manifest_invalid_hash();
     test_plugin_manifest_empty_capabilities();
