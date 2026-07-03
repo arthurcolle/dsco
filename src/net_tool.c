@@ -938,6 +938,200 @@ static int sse_send(netsrv_stream_t *s, const char *json) {
     return netsrv_stream_send(s, "\n\n", 2);
 }
 
+/* ── Persistent inference backend (llama-server proxy) ──────────────────
+ *
+ * The legacy path forks a fresh llama-completion per request: full model
+ * reload + full prefill every call — that is the measured 68s "black box".
+ * When llama-server is available we instead keep ONE supervised server
+ * process (continuous batching, parallel slots, automatic prefix/KV cache
+ * reuse) and pass /v1/chat/completions through to it verbatim, streaming
+ * bytes back as they arrive. Fallback: legacy per-request fork.
+ *
+ * Env: DSCO_SERVE_PERSIST=0 disables; DSCO_SERVE_BACKEND_PORT (default 7549);
+ *      DSCO_SERVE_SLOTS (default 4). Model comes from DSCO_SERVE_MODEL. */
+
+#include <sys/socket.h>
+#include <netinet/in.h>
+#include <netinet/tcp.h>
+#include <arpa/inet.h>
+
+static pid_t s_llsrv_pid = -1;
+static char s_llsrv_model[512] = "";
+
+static int llsrv_backend_port(void) {
+    const char *v = getenv("DSCO_SERVE_BACKEND_PORT");
+    int p = v && v[0] ? atoi(v) : 0;
+    return (p > 0 && p < 65536) ? p : 7549;
+}
+
+static int llsrv_connect(int port, int timeout_ms) {
+    int fd = socket(AF_INET, SOCK_STREAM, 0);
+    if (fd < 0)
+        return -1;
+    struct timeval tv = {.tv_sec = timeout_ms / 1000, .tv_usec = (timeout_ms % 1000) * 1000};
+    setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
+    setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof(tv));
+    int one = 1;
+    setsockopt(fd, IPPROTO_TCP, TCP_NODELAY, &one, sizeof(one));
+    struct sockaddr_in sa = {0};
+    sa.sin_family = AF_INET;
+    sa.sin_port = htons((uint16_t)port);
+    sa.sin_addr.s_addr = htonl(0x7f000001u); /* 127.0.0.1 (INADDR_LOOPBACK
+                                              * hidden behind _DARWIN_C_SOURCE
+                                              * under strict POSIX flags) */
+    if (connect(fd, (struct sockaddr *)&sa, sizeof(sa)) != 0) {
+        close(fd);
+        return -1;
+    }
+    return fd;
+}
+
+static bool llsrv_healthy(int port) {
+    int fd = llsrv_connect(port, 1500);
+    if (fd < 0)
+        return false;
+    const char *req = "GET /health HTTP/1.0\r\nHost: 127.0.0.1\r\n\r\n";
+    bool ok = write(fd, req, strlen(req)) == (ssize_t)strlen(req);
+    char buf[256] = "";
+    if (ok) {
+        ssize_t r = read(fd, buf, sizeof(buf) - 1);
+        ok = r > 0 && strstr(buf, " 200 ") != NULL;
+    }
+    close(fd);
+    return ok;
+}
+
+/* Ensure a llama-server for `model` is up. Returns port, or -1 (errjson set).
+ * Restarts the backend when DSCO_SERVE_MODEL changed since launch. */
+static int llsrv_ensure(const char *model, const char **errjson) {
+    int port = llsrv_backend_port();
+
+    if (s_llsrv_pid > 0 && strcmp(s_llsrv_model, model) != 0) {
+        kill(-s_llsrv_pid, SIGTERM); /* model swap: stop old backend */
+        waitpid(s_llsrv_pid, NULL, 0);
+        s_llsrv_pid = -1;
+    }
+    if (llsrv_healthy(port))
+        return port;
+
+    const char *lb = getenv("DSCO_LLAMACPP_DIR");
+    char lbdef[512];
+    if (!lb || !lb[0]) {
+        const char *home = getenv("HOME");
+        snprintf(lbdef, sizeof(lbdef), "%s/native_tools/llama.cpp/build/bin", home ? home : ".");
+        lb = lbdef;
+    }
+    char srv_bin[600];
+    snprintf(srv_bin, sizeof(srv_bin), "%s/llama-server", lb);
+    if (access(srv_bin, X_OK) != 0) {
+        *errjson = "{\"error\":\"llama-server binary not found; legacy path only\"}";
+        return -1;
+    }
+
+    const char *slots_env = getenv("DSCO_SERVE_SLOTS");
+    int slots = slots_env && slots_env[0] ? atoi(slots_env) : 4;
+    if (slots < 1 || slots > 32)
+        slots = 4;
+
+    char rpc_arg[1200] = "";
+    const char *serve_rpc = getenv("DSCO_SERVE_RPC");
+    if (serve_rpc && serve_rpc[0]) {
+        char eps[1024] = "";
+        if (dsco_cluster_rpc_endpoints(serve_rpc, eps, sizeof(eps), 1) > 0)
+            snprintf(rpc_arg, sizeof(rpc_arg), "--rpc %s ", eps);
+    }
+
+    pid_t pid = fork();
+    if (pid == 0) {
+        setsid();
+        char logp[600];
+        const char *home = getenv("HOME");
+        snprintf(logp, sizeof(logp), "%s/.dsco/llama-server.log", home ? home : "/tmp");
+        char cmd[3200];
+        /* -ngl 99: full Metal offload. --no-warmup: health up sooner.
+         * Prefix/KV cache reuse and continuous batching are server defaults. */
+        snprintf(cmd, sizeof(cmd),
+                 "exec env DYLD_LIBRARY_PATH='%s' LD_LIBRARY_PATH='%s' '%s' -m '%s' "
+                 "--host 127.0.0.1 --port %d -np %d -ngl 99 %s--no-warmup "
+                 ">> '%s' 2>&1",
+                 lb, lb, srv_bin, model, port, slots, rpc_arg, logp);
+        execl("/bin/sh", "sh", "-c", cmd, (char *)NULL);
+        _exit(127);
+    }
+    if (pid < 0) {
+        *errjson = "{\"error\":\"fork failed for llama-server\"}";
+        return -1;
+    }
+    s_llsrv_pid = pid;
+    snprintf(s_llsrv_model, sizeof(s_llsrv_model), "%s", model);
+
+    /* Wait for model load (gpt-oss-20b on Metal ≈ 10-30s; budget 120s). */
+    for (int i = 0; i < 240; i++) {
+        if (llsrv_healthy(port))
+            return port;
+        struct timespec ts = {0, 500 * 1000 * 1000};
+        nanosleep(&ts, NULL);
+        int st;
+        if (waitpid(pid, &st, WNOHANG) == pid) { /* died during load */
+            s_llsrv_pid = -1;
+            break;
+        }
+    }
+    *errjson = "{\"error\":\"llama-server failed to become healthy; see ~/.dsco/llama-server.log\"}";
+    return -1;
+}
+
+/* Pass a /v1/chat/completions request through to the persistent backend and
+ * stream the raw response bytes back. Works for both stream and buffered
+ * bodies because the handler owns the socket end-to-end. Returns false if the
+ * backend connection failed BEFORE any byte was forwarded (safe to fall back). */
+static bool llsrv_proxy_chat(const netsrv_request_t *req, netsrv_stream_t *s, int port) {
+    int fd = llsrv_connect(port, 300000); /* generous read timeout for long gens */
+    if (fd < 0)
+        return false;
+
+    /* Inject "cache_prompt":true (prefix/KV reuse across requests) unless the
+     * client already chose. Body is JSON: splice after the opening brace. */
+    const char *body = req->body ? req->body : "{}";
+    size_t blen = req->body_len ? req->body_len : strlen(body);
+    char *patched = NULL;
+    if (body[0] == '{' && !strstr(body, "\"cache_prompt\"")) {
+        patched = malloc(blen + 32);
+        if (patched) {
+            memcpy(patched, "{\"cache_prompt\":true,", 21);
+            memcpy(patched + 21, body + 1, blen - 1);
+            patched[21 + blen - 1] = '\0';
+            body = patched;
+            blen = 21 + blen - 1;
+        }
+    }
+
+    char hdr[512];
+    int hn = snprintf(hdr, sizeof(hdr),
+                      "POST /v1/chat/completions HTTP/1.0\r\nHost: 127.0.0.1\r\n"
+                      "Content-Type: application/json\r\nContent-Length: %zu\r\n\r\n",
+                      blen);
+    bool sent = write(fd, hdr, (size_t)hn) == (ssize_t)hn &&
+                write(fd, body, blen) == (ssize_t)blen;
+    free(patched);
+    if (!sent) {
+        close(fd);
+        return false;
+    }
+
+    /* Relay response bytes verbatim (status line + headers + SSE/JSON body). */
+    char buf[8192];
+    ssize_t r;
+    bool forwarded_any = false;
+    while ((r = read(fd, buf, sizeof(buf))) > 0) {
+        if (netsrv_stream_send(s, buf, (size_t)r) != 0)
+            break; /* client gone; drop backend conn, slot frees on its EOF */
+        forwarded_any = true;
+    }
+    close(fd);
+    return forwarded_any;
+}
+
 /* Send a chat.completion.chunk content delta for `len` bytes of `text`.
  * Returns 0 on success, -1 if the client connection is gone. */
 static int sse_content(netsrv_stream_t *s, const char *model, const char *text, size_t len) {
@@ -960,6 +1154,23 @@ static int sse_content(netsrv_stream_t *s, const char *model, const char *text, 
  * buffered JSON response.  This handler owns the socket (writes status+headers). */
 static void route_chat_stream(const netsrv_request_t *req, netsrv_stream_t *s, void *ctx) {
     (void)ctx;
+
+    /* Persistent backend first: one llama-server with parallel slots +
+     * KV/prefix cache reuse beats a cold fork+reload per request by the
+     * entire model-load + prefill time. Fall through to the legacy fork
+     * path if the server can't start or refuses the connection. */
+    const char *persist = getenv("DSCO_SERVE_PERSIST");
+    if (!(persist && strcmp(persist, "0") == 0)) {
+        const char *pm = getenv("DSCO_SERVE_MODEL");
+        if (pm && pm[0]) {
+            const char *perr = NULL;
+            int bport = llsrv_ensure(pm, &perr);
+            if (bport > 0 && llsrv_proxy_chat(req, s, bport))
+                return;
+            /* proxy failed pre-byte → legacy path below */
+        }
+    }
+
     char cmd[1700], pf[64];
     const char *model = NULL, *errjson = NULL;
     int ptoks = 0;
