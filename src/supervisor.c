@@ -34,7 +34,9 @@
 #include <sys/wait.h>
 #include <sys/time.h>
 #include <sys/resource.h>
+#if defined(__APPLE__)
 #include <sys/sysctl.h>
+#endif
 #include <sys/stat.h>
 #include <sys/file.h>
 #include <time.h>

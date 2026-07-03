@@ -97,9 +97,9 @@
 #  else
 #    include <cpuid.h>
 #    define dsco_cpuid(leaf, a, b, c, d) \
-         __cpuid((unsigned)(leaf),(unsigned&)(a),(unsigned&)(b),(unsigned&)(c),(unsigned&)(d))
+         __cpuid((unsigned)(leaf), (a), (b), (c), (d))
 #    define dsco_cpuidex(leaf, subleaf, a, b, c, d) \
-         __cpuid_count((unsigned)(leaf),(unsigned)(subleaf),(unsigned&)(a),(unsigned&)(b),(unsigned&)(c),(unsigned&)(d))
+         __cpuid_count((unsigned)(leaf), (unsigned)(subleaf), (a), (b), (c), (d))
 #  endif
 #endif
 
