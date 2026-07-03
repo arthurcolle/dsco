@@ -23,6 +23,7 @@
 #include "router.h"
 #include "realtime.h"
 #include "setup.h"
+#include "spend_governor.h"
 #include "supervisor.h"
 #include "swarm.h"
 #include "structured_process.h"
@@ -630,6 +631,153 @@ static void test_build_request_ex_strips_anthropic_namespace(void) {
     free(model);
     free(req);
     conv_free(&conv);
+    PASS();
+}
+
+/* ── Spend governor: graduated cost/context control plane ────────────── */
+
+static void test_spend_governor_phases(void) {
+    TEST("spend governor: graduated phases from budget pressure");
+    spend_signals_t sig = {0};
+    sig.session_budget_usd = 10.0;
+    sig.turns = 5;
+
+    sig.session_spent_usd = 2.0; /* 20% */
+    spend_plan_t p = spend_governor_plan(&sig);
+    ASSERT(p.phase == SPEND_GREEN, "20%% should be green");
+    ASSERT(p.tool_budget_ratio == 1.0f, "green keeps full tool budget");
+    ASSERT(!p.block_turn && !p.trim_old_results, "green is untouched");
+    ASSERT(p.effort_ceiling[0] == '\0', "green sets no effort ceiling");
+
+    sig.session_spent_usd = 6.0; /* 60% */
+    p = spend_governor_plan(&sig);
+    ASSERT(p.phase == SPEND_YELLOW, "60%% should be yellow");
+    ASSERT(p.trim_old_results, "yellow trims stale results");
+    ASSERT(p.effort_ceiling[0] == '\0', "yellow leaves effort alone");
+
+    sig.session_spent_usd = 8.0; /* 80% */
+    p = spend_governor_plan(&sig);
+    ASSERT(p.phase == SPEND_ORANGE, "80%% should be orange");
+    ASSERT(strcmp(p.effort_ceiling, EFFORT_MEDIUM) == 0, "orange caps effort at medium");
+    ASSERT(p.max_output_tokens > 0, "orange caps output tokens");
+    ASSERT(p.suggest_model_downshift, "orange suggests downshift");
+
+    sig.session_spent_usd = 9.5; /* 95% */
+    p = spend_governor_plan(&sig);
+    ASSERT(p.phase == SPEND_RED, "95%% should be red");
+    ASSERT(strcmp(p.effort_ceiling, EFFORT_LOW) == 0, "red caps effort at low");
+    ASSERT(p.strip_binaries, "red strips binaries");
+    ASSERT(!p.block_turn, "red still allows the turn");
+
+    sig.session_spent_usd = 10.5; /* 105% */
+    p = spend_governor_plan(&sig);
+    ASSERT(p.phase == SPEND_EXHAUSTED, "over budget is exhausted");
+    ASSERT(p.block_turn, "exhausted blocks the turn");
+    PASS();
+}
+
+static void test_spend_governor_runway_escalation(void) {
+    TEST("spend governor: short runway escalates phase early");
+    spend_signals_t sig = {0};
+    sig.session_budget_usd = 100.0;
+    sig.session_spent_usd = 10.0;  /* only 10% spent... */
+    sig.avg_turn_cost_usd = 45.0;  /* ...but each turn costs $45 */
+    sig.turns = 2;
+    spend_plan_t p = spend_governor_plan(&sig);
+    ASSERT(p.runway_turns >= 0 && p.runway_turns < 3.0, "runway estimated");
+    ASSERT(p.phase == SPEND_RED, "2-turn runway is red regardless of ratio");
+
+    sig.avg_turn_cost_usd = 0.05; /* cheap turns → long runway */
+    p = spend_governor_plan(&sig);
+    ASSERT(p.phase == SPEND_GREEN, "cheap turns at 10%% stay green");
+    PASS();
+}
+
+static void test_spend_governor_context_pressure(void) {
+    TEST("spend governor: context pressure joins the same scale");
+    spend_signals_t sig = {0}; /* NO dollar budget at all */
+    sig.context_window_tokens = 100000;
+    sig.context_used_tokens = 95000; /* 95% full → 0.8075 pressure */
+    sig.turns = 4;
+    spend_plan_t p = spend_governor_plan(&sig);
+    ASSERT(p.phase >= SPEND_ORANGE, "nearly-full context forces hygiene");
+    ASSERT(p.trim_old_results, "context pressure trims results");
+    sig.context_used_tokens = 20000;
+    p = spend_governor_plan(&sig);
+    ASSERT(p.phase == SPEND_GREEN, "roomy context, no budget: green");
+    PASS();
+}
+
+static void test_spend_governor_cache_ttl_recommendation(void) {
+    TEST("spend governor: slow cadence + poor hits recommends 1h TTL");
+    spend_signals_t sig = {0};
+    sig.turns = 5;
+    sig.avg_turn_interval_sec = 300.0; /* 5 min between turns */
+    sig.cache_telemetry_seen = true;
+    sig.cache_hit_ratio = 0.05; /* writes expiring before reads */
+    spend_plan_t p = spend_governor_plan(&sig);
+    ASSERT(p.recommend_1h_cache, "should recommend 1h cache");
+
+    sig.cache_hit_ratio = 0.85; /* healthy hits → leave TTL alone */
+    p = spend_governor_plan(&sig);
+    ASSERT(!p.recommend_1h_cache, "healthy hit ratio keeps 5m TTL");
+
+    sig.cache_hit_ratio = 0.05;
+    sig.avg_turn_interval_sec = 20.0; /* fast cadence → 5m refreshes free */
+    p = spend_governor_plan(&sig);
+    ASSERT(!p.recommend_1h_cache, "fast cadence keeps 5m TTL");
+    PASS();
+}
+
+static void test_spend_governor_effort_ranking(void) {
+    TEST("spend governor: effort ranking and downshift-only comparisons");
+    ASSERT(spend_effort_rank(EFFORT_LOW) < spend_effort_rank(EFFORT_MEDIUM),
+           "low < medium");
+    ASSERT(spend_effort_rank(EFFORT_MEDIUM) < spend_effort_rank(EFFORT_HIGH),
+           "medium < high");
+    ASSERT(spend_effort_rank("") == spend_effort_rank(EFFORT_HIGH),
+           "auto ranks as high");
+    ASSERT(spend_effort_is_downshift(EFFORT_HIGH, EFFORT_MEDIUM),
+           "high→medium is a downshift");
+    ASSERT(spend_effort_is_downshift("", EFFORT_LOW), "auto→low is a downshift");
+    ASSERT(!spend_effort_is_downshift(EFFORT_LOW, EFFORT_MEDIUM),
+           "low→medium must never happen (no upshift)");
+    ASSERT(!spend_effort_is_downshift(EFFORT_LOW, EFFORT_LOW),
+           "same tier is not a downshift");
+    PASS();
+}
+
+static void test_spend_governor_default_budgets(void) {
+    TEST("spend governor: default budgets protect unconfigured sessions");
+    char saved_no[32], saved_s[32], saved_d[32];
+    bool had_no = false, had_s = false, had_d = false;
+    test_capture_env("DSCO_NO_DEFAULT_BUDGET", saved_no, sizeof(saved_no), &had_no);
+    test_capture_env("DSCO_DEFAULT_SESSION_BUDGET", saved_s, sizeof(saved_s), &had_s);
+    test_capture_env("DSCO_DEFAULT_DAILY_BUDGET", saved_d, sizeof(saved_d), &had_d);
+    unsetenv("DSCO_NO_DEFAULT_BUDGET");
+    unsetenv("DSCO_DEFAULT_SESSION_BUDGET");
+    unsetenv("DSCO_DEFAULT_DAILY_BUDGET");
+
+    double s = -1, d = -1;
+    spend_governor_default_budgets(false, &s, &d);
+    ASSERT(s > 0 && d > 0, "unconfigured session gets safety defaults");
+    ASSERT(s <= 100.0 && d <= 500.0, "defaults are modest");
+
+    spend_governor_default_budgets(true, &s, &d);
+    ASSERT(s == 0.0 && d == 0.0, "explicit configuration is respected");
+
+    setenv("DSCO_DEFAULT_SESSION_BUDGET", "7.5", 1);
+    setenv("DSCO_DEFAULT_DAILY_BUDGET", "42", 1);
+    spend_governor_default_budgets(false, &s, &d);
+    ASSERT(s == 7.5 && d == 42.0, "env overrides default values");
+
+    setenv("DSCO_NO_DEFAULT_BUDGET", "1", 1);
+    spend_governor_default_budgets(false, &s, &d);
+    ASSERT(s == 0.0 && d == 0.0, "opt-out disables defaults");
+
+    test_restore_env("DSCO_NO_DEFAULT_BUDGET", saved_no, had_no);
+    test_restore_env("DSCO_DEFAULT_SESSION_BUDGET", saved_s, had_s);
+    test_restore_env("DSCO_DEFAULT_DAILY_BUDGET", saved_d, had_d);
     PASS();
 }
 
@@ -18023,6 +18171,12 @@ int main(void) {
     test_build_request_ex_strips_anthropic_namespace();
     test_anthropic_cache_breakpoint_layout();
     test_anthropic_cache_ttl_1h_env();
+    test_spend_governor_phases();
+    test_spend_governor_runway_escalation();
+    test_spend_governor_context_pressure();
+    test_spend_governor_cache_ttl_recommendation();
+    test_spend_governor_effort_ranking();
+    test_spend_governor_default_budgets();
     test_build_request_ex_for_credential_includes_billing_header();
     test_build_request_oauth_promotes_legacy_mcp_wire_names();
     test_build_request_oauth_keeps_builtin_tool_names_bare();
