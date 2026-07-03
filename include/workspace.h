@@ -22,6 +22,9 @@ bool dsco_workspace_skill_exists(const char *name);
 int dsco_workspace_create_skill(const char *name, const char *body, bool overwrite);
 int dsco_workspace_delete_skill(const char *name, bool force);
 int dsco_workspace_count_auto_skills(void);
+/* Fill `names` with the directory names of marker-verified auto-generated
+ * skills (max entries of 128 bytes each). Returns the count filled. */
+int dsco_workspace_list_auto_skills(char (*names)[128], int max);
 int dsco_workspace_read_doc(const char *name, char *out, size_t out_len);
 void dsco_workspace_doc_path(const char *name, char *out, size_t out_len);
 const char *dsco_workspace_prompt(void);

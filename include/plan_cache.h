@@ -39,49 +39,49 @@
 #include <stdint.h>
 #include <time.h>
 
-#define PLAN_CACHE_MAX      100    /* LRU ring buffer capacity */
-#define PLAN_CACHE_MIN_SIM  0.80f  /* minimum Jaccard similarity for a hit */
+#define PLAN_CACHE_MAX 100       /* LRU ring buffer capacity */
+#define PLAN_CACHE_MIN_SIM 0.80f /* minimum Jaccard similarity for a hit */
 
 /* ── Public entry ────────────────────────────────────────────────────────── */
 
 typedef struct {
-    uint64_t task_hash;          /* FNV-64 of normalized task text */
-    char     task_text[256];     /* first 255 chars of task */
-    char    *plan_json;          /* heap-alloc full plan JSON (NULL if not stored) */
-    int      hit_count;
-    time_t   last_used;
-    time_t   created;
+    uint64_t task_hash;  /* FNV-64 of normalized task text */
+    char task_text[256]; /* first 255 chars of task */
+    char *plan_json;     /* heap-alloc full plan JSON (NULL if not stored) */
+    int hit_count;
+    time_t last_used;
+    time_t created;
     /* Topology shortcut — populated by plan_cache_store() */
-    char     topology_name[48];
-    char     rationale[128];
-    float    fit_score;
-    bool     occupied;
+    char topology_name[48];
+    char rationale[128];
+    float fit_score;
+    bool occupied;
 } plan_cache_entry_t;
 
 /* ── LRU ring buffer ─────────────────────────────────────────────────────── */
 
 typedef struct {
     plan_cache_entry_t entries[PLAN_CACHE_MAX];
-    int                head;    /* eviction cursor */
-    int                count;   /* occupied slots */
+    int head;  /* eviction cursor */
+    int count; /* occupied slots */
 } plan_cache_t;
 
 /* ── Lookup result (backward compatible with callers in tools.c / topology.c) */
 
 typedef struct {
-    char  topology_name[48];
-    char  rationale[128];
+    char topology_name[48];
+    char rationale[128];
     float similarity;
-    int   hits_before;
+    int hits_before;
 } plan_cache_result_t;
 
 /* ── Singleton lifecycle ─────────────────────────────────────────────────── */
 
-void plan_cache_init(void);          /* load from disk; idempotent */
-void plan_cache_free(void);          /* free all plan_json heap strings */
-void plan_cache_load(void);          /* explicit (re)load from disk */
-void plan_cache_save(void);          /* explicit flush to disk */
-void plan_cache_flush(void);         /* alias for plan_cache_save (compat) */
+void plan_cache_init(void);  /* load from disk; idempotent */
+void plan_cache_free(void);  /* free all plan_json heap strings */
+void plan_cache_load(void);  /* explicit (re)load from disk */
+void plan_cache_save(void);  /* explicit flush to disk */
+void plan_cache_flush(void); /* alias for plan_cache_save (compat) */
 
 /* ── Lookup / store ──────────────────────────────────────────────────────── */
 
@@ -89,11 +89,18 @@ void plan_cache_flush(void);         /* alias for plan_cache_save (compat) */
 bool plan_cache_lookup(const char *task, plan_cache_result_t *result);
 
 /* Store topology shortcut (used by topology.c / tools.c). */
-void plan_cache_store(const char *task, const char *topology_name,
-                      const char *rationale, float fit_score);
+void plan_cache_store(const char *task, const char *topology_name, const char *rationale,
+                      float fit_score);
 
 /* Store full plan JSON alongside the topology shortcut. */
 void plan_cache_store_json(const char *task, const char *plan_json);
+
+/* Outcome feedback for the entry matching `task` (>=80% similarity).
+ * success → small fit reinforcement (capped 0.99); failure → fit −0.15,
+ * evicting below 0.5 so a plan that stops working stops being served.
+ * Entries were previously stored with a hard-coded fit on any success and
+ * never invalidated — a stale selection was served forever. No-op on miss. */
+void plan_cache_feedback(const char *task, bool success);
 
 /* Return pointer into the ring buffer (NULL on miss). Read-only; lock not held. */
 const plan_cache_entry_t *plan_cache_find_entry(const char *task);
