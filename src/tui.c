@@ -99,10 +99,10 @@ static void *g_composer_escape_hook_ctx = NULL;
  * subsystems (composer, dropdown, etc.) manipulate terminal state independently.
  * Uses reference counting to handle nested state requests safely. */
 typedef enum {
-    TUI_TERM_STATE_NORMAL,      /* Cooked mode, default */
-    TUI_TERM_STATE_COMPOSER,    /* Raw mode for text input composer */
-    TUI_TERM_STATE_DROPDOWN,    /* Raw mode for dropdown menus */
-    TUI_TERM_STATE_EXTERNAL     /* Temporarily released for external programs */
+    TUI_TERM_STATE_NORMAL,   /* Cooked mode, default */
+    TUI_TERM_STATE_COMPOSER, /* Raw mode for text input composer */
+    TUI_TERM_STATE_DROPDOWN, /* Raw mode for dropdown menus */
+    TUI_TERM_STATE_EXTERNAL  /* Temporarily released for external programs */
 } tui_term_state_t;
 
 typedef struct {
@@ -114,13 +114,11 @@ typedef struct {
     pthread_mutex_t mutex;
 } tui_term_mgr_t;
 
-static tui_term_mgr_t g_term_mgr = {
-    .current = TUI_TERM_STATE_NORMAL,
-    .previous = TUI_TERM_STATE_NORMAL,
-    .refcount = 0,
-    .termios_saved = false,
-    .mutex = PTHREAD_MUTEX_INITIALIZER
-};
+static tui_term_mgr_t g_term_mgr = {.current = TUI_TERM_STATE_NORMAL,
+                                    .previous = TUI_TERM_STATE_NORMAL,
+                                    .refcount = 0,
+                                    .termios_saved = false,
+                                    .mutex = PTHREAD_MUTEX_INITIALIZER};
 
 /* ── Error Recovery Framework ─────────────────────────────────────────────
  * Graceful error handling with retry mechanisms and degradation paths. */
@@ -132,7 +130,8 @@ static void *tui_alloc_with_retry(size_t size, int max_retries, tui_error_t *err
     for (int attempt = 0; attempt <= max_retries; attempt++) {
         ptr = calloc(1, size);
         if (ptr) {
-            if (err) err->severity = TUI_ERR_NONE;
+            if (err)
+                err->severity = TUI_ERR_NONE;
             return ptr;
         }
 
@@ -170,8 +169,7 @@ static void tui_error_report(const tui_error_t *err) {
             fprintf(stderr, "[WARN] %s", err->message);
             break;
         case TUI_ERR_DEGRADED:
-            fprintf(stderr, "[DEGRADED] %s - continuing with reduced functionality",
-                    err->message);
+            fprintf(stderr, "[DEGRADED] %s - continuing with reduced functionality", err->message);
             break;
         case TUI_ERR_FATAL:
             fprintf(stderr, "[FATAL] %s - attempting graceful shutdown", err->message);
@@ -307,26 +305,30 @@ void tui_install_crash_handlers(void) {
 static __thread int lock_depth = 0;
 static __thread int held_locks[4] = {0}; /* index by hierarchy level */
 
-#define LOCK_ACQUIRE(lock_id) \
-    do { \
-        for (int i = 1; i < (lock_id); i++) { \
-            if (held_locks[i]) { \
-                fprintf(stderr, "LOCK VIOLATION: acquiring %d while holding %d\n", (lock_id), i); \
-                abort(); \
-            } \
-        } \
-        held_locks[(lock_id)] = 1; \
-        lock_depth++; \
-    } while(0)
+#define LOCK_ACQUIRE(lock_id)                                                                      \
+    do {                                                                                           \
+        for (int i = 1; i < (lock_id); i++) {                                                      \
+            if (held_locks[i]) {                                                                   \
+                fprintf(stderr, "LOCK VIOLATION: acquiring %d while holding %d\n", (lock_id), i);  \
+                abort();                                                                           \
+            }                                                                                      \
+        }                                                                                          \
+        held_locks[(lock_id)] = 1;                                                                 \
+        lock_depth++;                                                                              \
+    } while (0)
 
-#define LOCK_RELEASE(lock_id) \
-    do { \
-        held_locks[(lock_id)] = 0; \
-        lock_depth--; \
-    } while(0)
+#define LOCK_RELEASE(lock_id)                                                                      \
+    do {                                                                                           \
+        held_locks[(lock_id)] = 0;                                                                 \
+        lock_depth--;                                                                              \
+    } while (0)
 #else
-#define LOCK_ACQUIRE(lock_id) do {} while(0)
-#define LOCK_RELEASE(lock_id) do {} while(0)
+#define LOCK_ACQUIRE(lock_id)                                                                      \
+    do {                                                                                           \
+    } while (0)
+#define LOCK_RELEASE(lock_id)                                                                      \
+    do {                                                                                           \
+    } while (0)
 #endif
 
 void tui_composer_set_escape_hook(tui_composer_escape_hook_t hook, void *ctx) {
@@ -506,18 +508,20 @@ bool tui_cursor_report_queries_enabled(void) {
     const char *v = getenv("DSCO_TUI_DSR");
     if (!v || !v[0])
         return false;
-    return v[0] == '1' || strcasecmp(v, "true") == 0 ||
-           strcasecmp(v, "yes") == 0 || strcasecmp(v, "on") == 0;
+    return v[0] == '1' || strcasecmp(v, "true") == 0 || strcasecmp(v, "yes") == 0 ||
+           strcasecmp(v, "on") == 0;
 }
 
 static bool tui_env_truthy(const char *v) {
-    return v && v[0] && (v[0] == '1' || strcasecmp(v, "true") == 0 ||
-                         strcasecmp(v, "yes") == 0 || strcasecmp(v, "on") == 0);
+    return v && v[0] &&
+           (v[0] == '1' || strcasecmp(v, "true") == 0 || strcasecmp(v, "yes") == 0 ||
+            strcasecmp(v, "on") == 0);
 }
 
 static bool tui_env_falsey(const char *v) {
-    return v && v[0] && (v[0] == '0' || strcasecmp(v, "false") == 0 ||
-                         strcasecmp(v, "no") == 0 || strcasecmp(v, "off") == 0);
+    return v && v[0] &&
+           (v[0] == '0' || strcasecmp(v, "false") == 0 || strcasecmp(v, "no") == 0 ||
+            strcasecmp(v, "off") == 0);
 }
 
 bool tui_motion_enabled(void) {
@@ -529,8 +533,7 @@ bool tui_motion_enabled(void) {
         return false;
     if (tui_env_falsey(anim))
         return false;
-    if (tui_env_truthy(getenv("DSCO_REDUCED_MOTION")) ||
-        tui_env_truthy(getenv("NO_MOTION")) ||
+    if (tui_env_truthy(getenv("DSCO_REDUCED_MOTION")) || tui_env_truthy(getenv("NO_MOTION")) ||
         tui_env_truthy(getenv("ACCESSIBILITY_REDUCE_MOTION"))) {
         return false;
     }
@@ -994,14 +997,11 @@ void tui_welcome(const char *model, int core_count, int total_count, const char 
     if (splash_env && strcasecmp(splash_env, "compact") == 0) {
         /* One-line compact header: dsco version · model · N tools (M loadable) */
         const tui_glyphs_t *gl = tui_glyph();
-        fprintf(stderr, "%s%s%s dsco %sv%s%s  %s·%s  %s%s%s  %s·%s  %s%d tools%s %s(%d loadable)%s\n",
-                TUI_BMAGENTA, gl->diamond, TUI_RESET,
-                TUI_BOLD, version, TUI_RESET,
-                TUI_DIM, TUI_RESET,
-                TUI_CYAN, model, TUI_RESET,
-                TUI_DIM, TUI_RESET,
-                TUI_GREEN, core_count, TUI_RESET,
-                TUI_DIM, total_count - core_count, TUI_RESET);
+        fprintf(stderr,
+                "%s%s%s dsco %sv%s%s  %s·%s  %s%s%s  %s·%s  %s%d tools%s %s(%d loadable)%s\n",
+                TUI_BMAGENTA, gl->diamond, TUI_RESET, TUI_BOLD, version, TUI_RESET, TUI_DIM,
+                TUI_RESET, TUI_CYAN, model, TUI_RESET, TUI_DIM, TUI_RESET, TUI_GREEN, core_count,
+                TUI_RESET, TUI_DIM, total_count - core_count, TUI_RESET);
         return;
     }
 
@@ -2144,8 +2144,8 @@ static double tui_now_sec(void) {
 /* Interruptible frame delay: waits up to ms, returns early when *running_flag
  * flips false (signaled via cond). Replaces usleep() frame pacing so stop()
  * joins instantly instead of paying up to a full frame of latency. */
-static void spinner_frame_wait(pthread_mutex_t *mu, pthread_cond_t *cv,
-                               volatile bool *running_flag, int ms) {
+static void spinner_frame_wait(pthread_mutex_t *mu, pthread_cond_t *cv, volatile bool *running_flag,
+                               int ms) {
     struct timespec ts;
     clock_gettime(CLOCK_REALTIME, &ts);
     ts.tv_sec += ms / 1000;
@@ -3055,8 +3055,8 @@ void tui_status_bar_update(tui_status_bar_t *sb, int in_tok, int out_tok, double
     /* No paint here — status bar paints only when the panel is shown. */
 }
 
-void tui_status_bar_set_budget(tui_status_bar_t *sb, double budget_limit,
-                               double burn_rate, double percent, double runway) {
+void tui_status_bar_set_budget(tui_status_bar_t *sb, double budget_limit, double burn_rate,
+                               double percent, double runway) {
     if (!sb)
         return;
     pthread_mutex_lock(&sb->mutex);
@@ -3289,11 +3289,12 @@ void tui_status_bar_render(tui_status_bar_t *sb) {
                        slot_name);
     }
     if (panel_active) {
-        const char *activity =
-            animations_enabled ? tui_motion_activity_frame(motion_frame, tui_motion_unicode()) : "·";
+        const char *activity = animations_enabled
+                                   ? tui_motion_activity_frame(motion_frame, tui_motion_unicode())
+                                   : "·";
         int accent = animations_enabled ? tui_motion_accent_color(motion_frame, 0) : 213;
-        li += snprintf(left_buf + li, sizeof(left_buf) - li,
-                       "\033[48;5;236m\033[38;5;%dm %s live ", accent, activity);
+        li += snprintf(left_buf + li, sizeof(left_buf) - li, "\033[48;5;236m\033[38;5;%dm %s live ",
+                       accent, activity);
     }
     li += snprintf(left_buf + li, sizeof(left_buf) - li,
                    "\033[48;5;236m\033[38;5;252m"
@@ -3301,11 +3302,11 @@ void tui_status_bar_render(tui_status_bar_t *sb) {
                    in_str, out_str);
     if (budget_limit > 0.0) {
         li += snprintf(left_buf + li, sizeof(left_buf) - li,
-                       "\033[38;5;%dm$%.2f/$%.2f %.0f%% ⌛%s ↑$%.2f/h\033[38;5;252m ",
-                       budget_color, cost, budget_limit, budget_percent, runway_str, burn_rate);
+                       "\033[38;5;%dm$%.2f/$%.2f %.0f%% ⌛%s ↑$%.2f/h\033[38;5;252m ", budget_color,
+                       cost, budget_limit, budget_percent, runway_str, burn_rate);
     } else {
-        li += snprintf(left_buf + li, sizeof(left_buf) - li,
-                       "\033[38;5;120m$%.2f\033[38;5;252m ", cost);
+        li += snprintf(left_buf + li, sizeof(left_buf) - li, "\033[38;5;120m$%.2f\033[38;5;252m ",
+                       cost);
     }
     li += snprintf(left_buf + li, sizeof(left_buf) - li, "│ t%d │ %d⚙ ", turn, tools);
     fputs(left_buf, stderr);
@@ -4283,77 +4284,133 @@ static bool composer_clipboard_grab_image(char *out_path, size_t out_sz) {
 #define TUI_SLASHMENU_CAP 128 /* max matches tracked per keystroke */
 
 /* ═══ @ Image-picker ═══════════════════════════════════════════════════ */
-#define TUI_IMGPICK_MAX   10
-#define TUI_IMGPICK_CAP  256  /* picker scan; actual send cap is IMG_MAX_PER_MSG=100 */
+#define TUI_IMGPICK_MAX 10
+#define TUI_IMGPICK_CAP 256 /* picker scan; actual send cap is IMG_MAX_PER_MSG=100 */
 #define TUI_IMGPICK_NAMEW 38
-static const char *s_imgpick_exts[]={
-    ".png",".jpg",".jpeg",".gif",".webp",
-    ".bmp",".tif",".tiff",".heic",".heif",".avif",
-    ".PNG",".JPG",".JPEG",".GIF",".WEBP",
-    ".BMP",".TIF",".TIFF",".HEIC",".HEIF",".AVIF",NULL};
-static bool imgpick_has_ext(const char *n){
-    size_t nl=strlen(n);
-    for(int i=0;s_imgpick_exts[i];i++){size_t el=strlen(s_imgpick_exts[i]);
-        if(nl>=el&&strcasecmp(n+nl-el,s_imgpick_exts[i])==0)return true;}
-    return false;}
+static const char *s_imgpick_exts[] = {".png",  ".jpg",  ".jpeg", ".gif",  ".webp", ".bmp",
+                                       ".tif",  ".tiff", ".heic", ".heif", ".avif", ".PNG",
+                                       ".JPG",  ".JPEG", ".GIF",  ".WEBP", ".BMP",  ".TIF",
+                                       ".TIFF", ".HEIC", ".HEIF", ".AVIF", NULL};
+static bool imgpick_has_ext(const char *n) {
+    size_t nl = strlen(n);
+    for (int i = 0; s_imgpick_exts[i]; i++) {
+        size_t el = strlen(s_imgpick_exts[i]);
+        if (nl >= el && strcasecmp(n + nl - el, s_imgpick_exts[i]) == 0)
+            return true;
+    }
+    return false;
+}
 static char s_imgpick_paths[TUI_IMGPICK_CAP][4096];
-static int  s_imgpick_count=0;
-static void imgpick_scan(const char *dir,const char *pfx){
-    s_imgpick_count=0;
-    DIR *dp=opendir((dir&&*dir)?dir:".");if(!dp)return;
-    struct dirent *de;size_t pl=pfx?strlen(pfx):0;
-    char cwd[4096];if(getcwd(cwd,sizeof(cwd))==NULL)strcpy(cwd,".");
-    const char *base=(dir&&*dir)?dir:cwd;
-    while((de=readdir(dp))!=NULL&&s_imgpick_count<TUI_IMGPICK_CAP){
-        const char *nm=de->d_name;if(nm[0]=='.')continue;
-        if(!imgpick_has_ext(nm))continue;
-        if(pl>0&&strncasecmp(nm,pfx,pl)!=0)continue;
-        snprintf(s_imgpick_paths[s_imgpick_count],sizeof(s_imgpick_paths[0]),
-                 "%s/%s",base,nm);s_imgpick_count++;}
-    closedir(dp);}
-static int imgpick_render(int r_first,int count,int sel){
-    int shown=count<TUI_IMGPICK_MAX?count:TUI_IMGPICK_MAX;if(shown==0)return 0;
-    int cols=tui_term_width();if(cols<30)cols=30;
-    int top=0;if(sel>=shown)top=sel-shown+1;
-    if(top>count-shown)top=count-shown;if(top<0)top=0;
-    for(int r=0;r<shown;r++){
-        int gi=top+r;bool on=(gi==sel);
-        const char *path=s_imgpick_paths[gi];
-        const char *fname=strrchr(path,'/');fname=fname?fname+1:path;
-        tui_cursor_move(r_first+r,1);fprintf(stderr,"\033[2K");
-        const char *mark=on?"\033[38;5;45m\xe2\x96\xb8\033[0m":" ";
-        const char *nc=on?"\033[1;38;5;45m":"\033[38;5;250m";
-        char nbuf[TUI_IMGPICK_NAMEW+4];snprintf(nbuf,sizeof(nbuf),"%s",fname);
-        char tmp[4096];snprintf(tmp,sizeof(tmp),"%s",path);
-        char *sl=strrchr(tmp,'/');if(sl)*sl='\0';
-        int used=2+1+1+3+1+TUI_IMGPICK_NAMEW+2;int dbud=cols-used-1;if(dbud<0)dbud=0;
-        char dbuf[4100];snprintf(dbuf,sizeof(dbuf),"%s",tmp);
-        if((int)strlen(dbuf)>dbud&&dbud>4){char el[4100];
-            snprintf(el,sizeof(el),"\xe2\x80\xa6%s",dbuf+(int)strlen(dbuf)-(dbud-1));
-            snprintf(dbuf,sizeof(dbuf),"%s",el);}
-        else if((int)strlen(dbuf)>dbud)dbuf[dbud]='\0';
-        fprintf(stderr,"  %s \xf0\x9f\x96\xbc %s%-*s\033[0m  \033[2;38;5;245m%s\033[0m",
-                mark,nc,TUI_IMGPICK_NAMEW,nbuf,dbuf);}
-    return shown;}
-static bool imgpick_parse_at(const char *buf,size_t cur,
-                              char *dir_out,size_t dir_sz,
-                              char *pfx_out,size_t pfx_sz){
-    if(cur==0)return false;size_t p=cur;
-    while(p>0&&buf[p-1]!=' '&&buf[p-1]!='\n')p--;
-    if(p>=cur||buf[p]!='@')return false;
-    const char *after=buf+p+1;size_t alen=cur-p-1;
-    const char *sl=NULL;
-    for(size_t i=0;i<alen;i++)if(after[i]=='/')sl=after+i;
-    if(sl){size_t dlen=(size_t)(sl-after);if(dlen>=dir_sz)dlen=dir_sz-1;
-        memcpy(dir_out,after,dlen);dir_out[dlen]='\0';
-        snprintf(pfx_out,pfx_sz,"%s",sl+1);
-    }else{char _cwd[4096];if(getcwd(_cwd,sizeof(_cwd))==NULL)strcpy(_cwd,".");
-        size_t dlen2=strlen(_cwd);if(dlen2>=dir_sz)dlen2=dir_sz-1;
-        memcpy(dir_out,_cwd,dlen2);dir_out[dlen2]='\0';
-        size_t plen=alen<pfx_sz-1?alen:pfx_sz-1;
-        memcpy(pfx_out,after,plen);pfx_out[plen]='\0';}
-    return true;}
-
+static int s_imgpick_count = 0;
+static void imgpick_scan(const char *dir, const char *pfx) {
+    s_imgpick_count = 0;
+    DIR *dp = opendir((dir && *dir) ? dir : ".");
+    if (!dp)
+        return;
+    struct dirent *de;
+    size_t pl = pfx ? strlen(pfx) : 0;
+    char cwd[4096];
+    if (getcwd(cwd, sizeof(cwd)) == NULL)
+        strcpy(cwd, ".");
+    const char *base = (dir && *dir) ? dir : cwd;
+    while ((de = readdir(dp)) != NULL && s_imgpick_count < TUI_IMGPICK_CAP) {
+        const char *nm = de->d_name;
+        if (nm[0] == '.')
+            continue;
+        if (!imgpick_has_ext(nm))
+            continue;
+        if (pl > 0 && strncasecmp(nm, pfx, pl) != 0)
+            continue;
+        snprintf(s_imgpick_paths[s_imgpick_count], sizeof(s_imgpick_paths[0]), "%s/%s", base, nm);
+        s_imgpick_count++;
+    }
+    closedir(dp);
+}
+static int imgpick_render(int r_first, int count, int sel) {
+    int shown = count < TUI_IMGPICK_MAX ? count : TUI_IMGPICK_MAX;
+    if (shown == 0)
+        return 0;
+    int cols = tui_term_width();
+    if (cols < 30)
+        cols = 30;
+    int top = 0;
+    if (sel >= shown)
+        top = sel - shown + 1;
+    if (top > count - shown)
+        top = count - shown;
+    if (top < 0)
+        top = 0;
+    for (int r = 0; r < shown; r++) {
+        int gi = top + r;
+        bool on = (gi == sel);
+        const char *path = s_imgpick_paths[gi];
+        const char *fname = strrchr(path, '/');
+        fname = fname ? fname + 1 : path;
+        tui_cursor_move(r_first + r, 1);
+        fprintf(stderr, "\033[2K");
+        const char *mark = on ? "\033[38;5;45m\xe2\x96\xb8\033[0m" : " ";
+        const char *nc = on ? "\033[1;38;5;45m" : "\033[38;5;250m";
+        char nbuf[TUI_IMGPICK_NAMEW + 4];
+        snprintf(nbuf, sizeof(nbuf), "%s", fname);
+        char tmp[4096];
+        snprintf(tmp, sizeof(tmp), "%s", path);
+        char *sl = strrchr(tmp, '/');
+        if (sl)
+            *sl = '\0';
+        int used = 2 + 1 + 1 + 3 + 1 + TUI_IMGPICK_NAMEW + 2;
+        int dbud = cols - used - 1;
+        if (dbud < 0)
+            dbud = 0;
+        char dbuf[4100];
+        snprintf(dbuf, sizeof(dbuf), "%s", tmp);
+        if ((int)strlen(dbuf) > dbud && dbud > 4) {
+            char el[4100];
+            snprintf(el, sizeof(el), "\xe2\x80\xa6%s", dbuf + (int)strlen(dbuf) - (dbud - 1));
+            snprintf(dbuf, sizeof(dbuf), "%s", el);
+        } else if ((int)strlen(dbuf) > dbud)
+            dbuf[dbud] = '\0';
+        fprintf(stderr, "  %s \xf0\x9f\x96\xbc %s%-*s\033[0m  \033[2;38;5;245m%s\033[0m", mark, nc,
+                TUI_IMGPICK_NAMEW, nbuf, dbuf);
+    }
+    return shown;
+}
+static bool imgpick_parse_at(const char *buf, size_t cur, char *dir_out, size_t dir_sz,
+                             char *pfx_out, size_t pfx_sz) {
+    if (cur == 0)
+        return false;
+    size_t p = cur;
+    while (p > 0 && buf[p - 1] != ' ' && buf[p - 1] != '\n')
+        p--;
+    if (p >= cur || buf[p] != '@')
+        return false;
+    const char *after = buf + p + 1;
+    size_t alen = cur - p - 1;
+    const char *sl = NULL;
+    for (size_t i = 0; i < alen; i++)
+        if (after[i] == '/')
+            sl = after + i;
+    if (sl) {
+        size_t dlen = (size_t)(sl - after);
+        if (dlen >= dir_sz)
+            dlen = dir_sz - 1;
+        memcpy(dir_out, after, dlen);
+        dir_out[dlen] = '\0';
+        snprintf(pfx_out, pfx_sz, "%s", sl + 1);
+    } else {
+        char _cwd[4096];
+        if (getcwd(_cwd, sizeof(_cwd)) == NULL)
+            strcpy(_cwd, ".");
+        size_t dlen2 = strlen(_cwd);
+        if (dlen2 >= dir_sz)
+            dlen2 = dir_sz - 1;
+        memcpy(dir_out, _cwd, dlen2);
+        dir_out[dlen2] = '\0';
+        size_t plen = alen < pfx_sz - 1 ? alen : pfx_sz - 1;
+        memcpy(pfx_out, after, plen);
+        pfx_out[plen] = '\0';
+    }
+    return true;
+}
 
 static const tui_cmd_entry_t *s_slash_cmds = NULL;
 static int s_slash_cmds_n = 0;
@@ -4395,8 +4452,8 @@ static int slashmenu_rows(int count) {
 
 /* Draw the dropdown starting at screen row r_first. Returns rows drawn.
  * `idx`/`count` come from composer_slash_match; `sel` is the highlighted row. */
-static int slashmenu_render(int r_first, const int *idx, int count, int sel,
-                            int motion_frame, bool animations_enabled) {
+static int slashmenu_render(int r_first, const int *idx, int count, int sel, int motion_frame,
+                            bool animations_enabled) {
     int shown = slashmenu_rows(count);
     if (shown == 0)
         return 0;
@@ -4436,8 +4493,9 @@ static int slashmenu_render(int r_first, const int *idx, int count, int sel,
         int accent = tui_motion_accent_color(motion_frame, r);
         const char *mark = " ";
         if (on)
-            mark = animations_enabled ? tui_motion_activity_frame(motion_frame, tui_motion_unicode())
-                                      : "\xe2\x96\xb8";
+            mark = animations_enabled
+                       ? tui_motion_activity_frame(motion_frame, tui_motion_unicode())
+                       : "\xe2\x96\xb8";
 
         /* Truncate description to the remaining cells. */
         int used = 2 /*indent*/ + 1 /*mark*/ + 1 /*sp*/ + namew + 2 /*gap*/;
@@ -4450,12 +4508,13 @@ static int slashmenu_render(int r_first, const int *idx, int count, int sel,
             dbuf[dbudget] = '\0';
 
         if (on) {
-            fprintf(stderr, "  \033[38;5;%dm%s\033[0m \033[1;38;5;%dm%-*s\033[0m  "
-                            "\033[2;38;5;245m%s\033[0m",
+            fprintf(stderr,
+                    "  \033[38;5;%dm%s\033[0m \033[1;38;5;%dm%-*s\033[0m  "
+                    "\033[2;38;5;245m%s\033[0m",
                     accent, mark, accent, namew, name, dbuf);
         } else {
-            fprintf(stderr, "    \033[38;5;250m%-*s\033[0m  \033[2;38;5;245m%s\033[0m",
-                    namew, name, dbuf);
+            fprintf(stderr, "    \033[38;5;250m%-*s\033[0m  \033[2;38;5;245m%s\033[0m", namew, name,
+                    dbuf);
         }
     }
     return shown;
@@ -4465,13 +4524,12 @@ static int slashmenu_render(int r_first, const int *idx, int count, int sel,
  * coordinates (always inside the box) are returned via cur_r/cur_c. Returns
  * the combined row count so the caller can anchor/scroll/clear correctly. */
 static int composer_paint(int r_top, const char *buf, size_t len, size_t cur, const int *sug_idx,
-                          int sug_count, int sug_sel, int *cur_r, int *cur_c,
-                          int imgpick_cnt, int imgpick_s,
-                          int motion_frame, bool animations_enabled) {
-    int h = inbox_render(r_top, buf, len, cur, true, motion_frame, animations_enabled,
-                         cur_r, cur_c);
-    int m = slashmenu_render(r_top + h, sug_idx, sug_count, sug_sel,
-                             motion_frame, animations_enabled);
+                          int sug_count, int sug_sel, int *cur_r, int *cur_c, int imgpick_cnt,
+                          int imgpick_s, int motion_frame, bool animations_enabled) {
+    int h =
+        inbox_render(r_top, buf, len, cur, true, motion_frame, animations_enabled, cur_r, cur_c);
+    int m =
+        slashmenu_render(r_top + h, sug_idx, sug_count, sug_sel, motion_frame, animations_enabled);
     int q = imgpick_render(r_top + h + m, imgpick_cnt, imgpick_s);
     return h + m + q;
 }
@@ -4539,9 +4597,9 @@ char *tui_composer_read(tui_status_bar_t *sb, const char *prompt, char *out, siz
     bool sug_suppress = false;
 
     /* @-image-picker state */
-    bool imgpick_open  = false;
-    int  imgpick_count = 0;
-    int  imgpick_sel   = 0;
+    bool imgpick_open = false;
+    int imgpick_count = 0;
+    int imgpick_sel = 0;
 
     /* History snapshot pointer for up/down */
     /* (We don't integrate with readline history here — keep composer
@@ -4598,9 +4656,8 @@ char *tui_composer_read(tui_status_bar_t *sb, const char *prompt, char *out, siz
     fprintf(stderr, "\033[?25l");
     int cur_r = r_top + 1, cur_c = 5;
     int motion_frame = 0;
-    prev_height = composer_paint(r_top, buf, len, cur, sug_idx, sug_count, sug_sel,
-                                 &cur_r, &cur_c, imgpick_count, imgpick_sel,
-                                 motion_frame, animations_enabled);
+    prev_height = composer_paint(r_top, buf, len, cur, sug_idx, sug_count, sug_sel, &cur_r, &cur_c,
+                                 imgpick_count, imgpick_sel, motion_frame, animations_enabled);
     tui_cursor_move(cur_r, cur_c);
     fprintf(stderr, "\033[?25h");
     fflush(stderr);
@@ -4819,13 +4876,17 @@ char *tui_composer_read(tui_status_bar_t *sb, const char *prompt, char *out, siz
             if (imgpick_open && imgpick_count > 0) {
                 const char *sel_path = s_imgpick_paths[imgpick_sel];
                 size_t p2 = cur;
-                while (p2 > 0 && buf[p2-1] != ' ' && buf[p2-1] != '\n') p2--;
+                while (p2 > 0 && buf[p2 - 1] != ' ' && buf[p2 - 1] != '\n')
+                    p2--;
                 memmove(buf + p2, buf + cur, len - cur + 1);
-                len -= (cur - p2); cur = p2;
+                len -= (cur - p2);
+                cur = p2;
                 char ins2[4098];
                 snprintf(ins2, sizeof(ins2), "%s ", sel_path);
                 composer_insert(buf, TUI_COMPOSER_BUF_CAP, &len, &cur, ins2, strlen(ins2));
-                imgpick_open = false; imgpick_count = 0; imgpick_sel = 0;
+                imgpick_open = false;
+                imgpick_count = 0;
+                imgpick_sel = 0;
                 goto redraw;
             }
             /* Enter with the dropdown open → complete the highlighted command,
@@ -4864,13 +4925,17 @@ char *tui_composer_read(tui_status_bar_t *sb, const char *prompt, char *out, siz
             if (imgpick_open && imgpick_count > 0) {
                 const char *sel_path = s_imgpick_paths[imgpick_sel];
                 size_t p = cur;
-                while (p > 0 && buf[p-1] != ' ' && buf[p-1] != '\n') p--;
+                while (p > 0 && buf[p - 1] != ' ' && buf[p - 1] != '\n')
+                    p--;
                 memmove(buf + p, buf + cur, len - cur + 1);
-                len -= (cur - p); cur = p;
+                len -= (cur - p);
+                cur = p;
                 char ins[4098];
                 snprintf(ins, sizeof(ins), "%s ", sel_path);
                 composer_insert(buf, TUI_COMPOSER_BUF_CAP, &len, &cur, ins, strlen(ins));
-                imgpick_open = false; imgpick_count = 0; imgpick_sel = 0;
+                imgpick_open = false;
+                imgpick_count = 0;
+                imgpick_sel = 0;
                 goto redraw;
             }
             /* With the dropdown open, Tab completes the highlighted command into
@@ -4903,7 +4968,9 @@ char *tui_composer_read(tui_status_bar_t *sb, const char *prompt, char *out, siz
                     break;
                 }
                 if (imgpick_open) {
-                    imgpick_open = false; imgpick_count = 0; imgpick_sel = 0;
+                    imgpick_open = false;
+                    imgpick_count = 0;
+                    imgpick_sel = 0;
                     goto redraw;
                 }
                 if (sug_count > 0) {
@@ -5124,17 +5191,23 @@ char *tui_composer_read(tui_status_bar_t *sb, const char *prompt, char *out, siz
             if (sug_sel < 0)
                 sug_sel = 0;
             /* Refresh @-image-picker */
-            { char ip_dir[4096], ip_pfx[256];
-              imgpick_open = imgpick_parse_at(buf, cur, ip_dir, sizeof(ip_dir), ip_pfx, sizeof(ip_pfx));
-              if (imgpick_open) {
-                  imgpick_scan(ip_dir, ip_pfx);
-                  imgpick_count = s_imgpick_count;
-              } else { imgpick_count = 0; }
-              if (imgpick_sel >= imgpick_count)
-                  imgpick_sel = imgpick_count > 0 ? imgpick_count - 1 : 0;
-              if (imgpick_sel < 0) imgpick_sel = 0; }
-            int need = inbox_total_rows(buf, len) + slashmenu_rows(sug_count)
-                       + (imgpick_count < TUI_IMGPICK_MAX ? imgpick_count : TUI_IMGPICK_MAX);
+            {
+                char ip_dir[4096], ip_pfx[256];
+                imgpick_open =
+                    imgpick_parse_at(buf, cur, ip_dir, sizeof(ip_dir), ip_pfx, sizeof(ip_pfx));
+                if (imgpick_open) {
+                    imgpick_scan(ip_dir, ip_pfx);
+                    imgpick_count = s_imgpick_count;
+                } else {
+                    imgpick_count = 0;
+                }
+                if (imgpick_sel >= imgpick_count)
+                    imgpick_sel = imgpick_count > 0 ? imgpick_count - 1 : 0;
+                if (imgpick_sel < 0)
+                    imgpick_sel = 0;
+            }
+            int need = inbox_total_rows(buf, len) + slashmenu_rows(sug_count) +
+                       (imgpick_count < TUI_IMGPICK_MAX ? imgpick_count : TUI_IMGPICK_MAX);
             (void)g_composer_external_redraw_requested;
             g_composer_external_redraw_requested = 0;
             /* Always pin to the bottom: anchor the box so its last row is the
@@ -8372,7 +8445,7 @@ static void *stream_heartbeat_thread(void *arg) {
             break;
         }
 
-	    if (silence >= thresh) {
+        if (silence >= thresh) {
             if (tui_composer_is_reading()) {
                 pthread_mutex_lock(&hb->mutex);
                 hb->visible = false;
@@ -8380,8 +8453,8 @@ static void *stream_heartbeat_thread(void *arg) {
                 continue;
             }
 
-	        /* Resolve label */
-	        const char *icon = hb_phase_icon(phase);
+            /* Resolve label */
+            const char *icon = hb_phase_icon(phase);
             const char *label;
             if (phase && *phase)
                 label = phase;
@@ -8539,12 +8612,12 @@ static void *outq_render_thread(void *arg) {
              * on every idle session. */
             if (!composer_clear_attempted && e->type != TUI_OUT_FLUSH) {
                 composer_clear_attempted = true;
-                pthread_mutex_unlock(&q->mutex);  /* Release OUTQ lock first */
-                tui_term_lock();                   /* Then acquire TERM lock */
+                pthread_mutex_unlock(&q->mutex); /* Release OUTQ lock first */
+                tui_term_lock();                 /* Then acquire TERM lock */
                 (void)tui_clear_tracked_composer_area_for_output(fileno(q->out));
-                tui_term_unlock();                 /* Release TERM lock */
-                pthread_mutex_lock(&q->mutex);     /* Re-acquire OUTQ lock */
-                continue;  /* Re-examine queue state under fresh lock */
+                tui_term_unlock();             /* Release TERM lock */
+                pthread_mutex_lock(&q->mutex); /* Re-acquire OUTQ lock */
+                continue;                      /* Re-examine queue state under fresh lock */
             }
 
             switch (e->type) {
@@ -8604,17 +8677,18 @@ void tui_outq_init(tui_output_queue_t *q, FILE *out) {
 
     /* Fallback to smaller allocation if primary fails (graceful degradation) */
     if (!q->ring) {
-        q->capacity = 1024;  /* 2MB instead of 8MB */
+        q->capacity = 1024; /* 2MB instead of 8MB */
         q->ring = calloc(q->capacity, sizeof(tui_out_entry_t));
         if (!q->ring) {
-            q->capacity = 512;  /* 1MB as last resort */
+            q->capacity = 512; /* 1MB as last resort */
             q->ring = calloc(q->capacity, sizeof(tui_out_entry_t));
             if (!q->ring) {
                 fprintf(stderr, "TUI: Failed to allocate output queue (critical error)\n");
-                return;  /* Critical failure - cannot proceed */
+                return; /* Critical failure - cannot proceed */
             }
         }
-        fprintf(stderr, "TUI: Using reduced output queue (%d entries for graceful degradation)\n", q->capacity);
+        fprintf(stderr, "TUI: Using reduced output queue (%d entries for graceful degradation)\n",
+                q->capacity);
     }
 
     q->out = out ? out : stderr;
@@ -9712,7 +9786,156 @@ enum {
     DLG_K_ENTER,
     DLG_K_ESC,
     DLG_K_SPACE,
+    DLG_K_PAGE_UP,
+    DLG_K_PAGE_DOWN,
+    DLG_K_HOME,
+    DLG_K_END,
+    DLG_K_UNKNOWN,
 };
+
+typedef int (*dlg_next_key_fn)(void *ctx);
+
+static int dlg_getchar_next(void *ctx) {
+    (void)ctx;
+    return getchar();
+}
+
+static int dlg_decode_escape_sequence(int c2, dlg_next_key_fn next, void *ctx) {
+    if (c2 == '[' || c2 == 'O') {
+        int c3 = next(ctx);
+        if (c3 == EOF)
+            return DLG_K_UNKNOWN;
+        if (c3 >= '0' && c3 <= '9') {
+            int first_digit = c3;
+            int final = 0;
+            for (int i = 0; i < 8; i++) {
+                int cx = next(ctx);
+                if (cx == EOF)
+                    break;
+                if (cx == '~' || (cx >= 'A' && cx <= 'Z')) {
+                    final = cx;
+                    break;
+                }
+            }
+            if (final == '~') {
+                switch (first_digit) {
+                    case '1':
+                    case '7':
+                        return DLG_K_HOME;
+                    case '4':
+                    case '8':
+                        return DLG_K_END;
+                    case '5':
+                        return DLG_K_PAGE_UP;
+                    case '6':
+                        return DLG_K_PAGE_DOWN;
+                    default:
+                        return DLG_K_UNKNOWN;
+                }
+            }
+            switch (final) {
+                case 'A':
+                    return DLG_K_UP;
+                case 'B':
+                    return DLG_K_DOWN;
+                case 'C':
+                    return DLG_K_RIGHT;
+                case 'D':
+                    return DLG_K_LEFT;
+                default:
+                    return DLG_K_UNKNOWN;
+            }
+        }
+        switch (c3) {
+            case 'A':
+                return DLG_K_UP;
+            case 'B':
+                return DLG_K_DOWN;
+            case 'C':
+                return DLG_K_RIGHT;
+            case 'D':
+                return DLG_K_LEFT;
+            case 'H':
+                return DLG_K_HOME;
+            case 'F':
+                return DLG_K_END;
+            case 'Z':
+                return DLG_K_BTAB;
+            default:
+                return DLG_K_UNKNOWN;
+        }
+    }
+    return DLG_K_ESC;
+}
+
+static int dlg_decode_key_from_first(int c, dlg_next_key_fn next, void *ctx) {
+    if (c == EOF)
+        return DLG_K_UNKNOWN;
+    if (c == '\r' || c == '\n')
+        return DLG_K_ENTER;
+    if (c == '\t')
+        return DLG_K_TAB;
+    if (c == ' ')
+        return DLG_K_SPACE;
+    if (c == 27)
+        return dlg_decode_escape_sequence(next(ctx), next, ctx);
+    return c;
+}
+
+static bool dlg_apply_row_key(int key, int maxrow, int *row) {
+    if (!row)
+        return false;
+    if (maxrow < 0)
+        maxrow = 0;
+    if (*row > maxrow)
+        *row = maxrow;
+    if (*row < 0)
+        *row = 0;
+    if (key == DLG_K_UP) {
+        *row = (*row > 0) ? *row - 1 : maxrow;
+        return true;
+    }
+    if (key == DLG_K_DOWN) {
+        *row = (*row < maxrow) ? *row + 1 : 0;
+        return true;
+    }
+    if (key == DLG_K_PAGE_UP || key == DLG_K_HOME) {
+        *row = 0;
+        return true;
+    }
+    if (key == DLG_K_PAGE_DOWN || key == DLG_K_END) {
+        *row = maxrow;
+        return true;
+    }
+    return key == DLG_K_UNKNOWN;
+}
+
+#ifdef DSCO_INTERNAL_TESTS
+typedef struct {
+    const unsigned char *bytes;
+    size_t len;
+    size_t pos;
+} dlg_test_stream_t;
+
+static int dlg_test_next(void *ctx) {
+    dlg_test_stream_t *s = (dlg_test_stream_t *)ctx;
+    if (!s || s->pos >= s->len)
+        return EOF;
+    return s->bytes[s->pos++];
+}
+
+int tui_test_decode_key_sequence(const char *bytes) {
+    if (!bytes)
+        return DLG_K_UNKNOWN;
+    dlg_test_stream_t s = {(const unsigned char *)bytes, strlen(bytes), 0};
+    return dlg_decode_key_from_first(dlg_test_next(&s), dlg_test_next, &s);
+}
+
+int tui_test_dialog_move_row(int row, int maxrow, int key) {
+    dlg_apply_row_key(key, maxrow, &row);
+    return row;
+}
+#endif
 
 /* Raw key reader with escape-sequence + lone-ESC handling (VTIME timeout so a
  * bare ESC doesn't block waiting for a sequence tail). */
@@ -9726,47 +9949,13 @@ static int dlg_read_key(void) {
     tcsetattr(STDIN_FILENO, TCSANOW, &newt);
 
     int c = getchar();
-    int ret;
-    if (c == '\r' || c == '\n')
-        ret = DLG_K_ENTER;
-    else if (c == '\t')
-        ret = DLG_K_TAB;
-    else if (c == ' ')
-        ret = DLG_K_SPACE;
-    else if (c == 27) {
+    if (c == 27) {
         /* possible escape sequence; read tail with a short timeout */
         newt.c_cc[VMIN] = 0;
         newt.c_cc[VTIME] = 1; /* 0.1s */
         tcsetattr(STDIN_FILENO, TCSANOW, &newt);
-        int c2 = getchar();
-        if (c2 == '[' || c2 == 'O') {
-            int c3 = getchar();
-            switch (c3) {
-                case 'A':
-                    ret = DLG_K_UP;
-                    break;
-                case 'B':
-                    ret = DLG_K_DOWN;
-                    break;
-                case 'C':
-                    ret = DLG_K_RIGHT;
-                    break;
-                case 'D':
-                    ret = DLG_K_LEFT;
-                    break;
-                case 'Z':
-                    ret = DLG_K_BTAB;
-                    break;
-                default:
-                    ret = DLG_K_ESC;
-                    break;
-            }
-        } else {
-            ret = DLG_K_ESC;
-        }
-    } else {
-        ret = c;
     }
+    int ret = dlg_decode_key_from_first(c, dlg_getchar_next, NULL);
     tcsetattr(STDIN_FILENO, TCSANOW, &oldt);
     return ret;
 }
@@ -11061,6 +11250,74 @@ typedef struct {
 
 #define MENU_ROWS_MAX 512
 
+static int menu_find_selectable(const menu_row_t *rows, int nrows, int start, int dir) {
+    if (!rows || nrows <= 0)
+        return -1;
+    if (dir == 0)
+        dir = 1;
+    if (start < 0) {
+        if (dir < 0)
+            return -1;
+        start = 0;
+    }
+    if (start >= nrows) {
+        if (dir > 0)
+            return -1;
+        start = nrows - 1;
+    }
+    for (int i = start; i >= 0 && i < nrows; i += dir) {
+        if (rows[i].selectable)
+            return i;
+    }
+    return -1;
+}
+
+static int menu_clamp_selectable(const menu_row_t *rows, int nrows, int sel) {
+    if (!rows || nrows <= 0)
+        return -1;
+    if (sel < 0)
+        sel = 0;
+    if (sel >= nrows)
+        sel = nrows - 1;
+    if (rows[sel].selectable)
+        return sel;
+
+    int next = menu_find_selectable(rows, nrows, sel, 1);
+    if (next >= 0)
+        return next;
+    return menu_find_selectable(rows, nrows, sel, -1);
+}
+
+static int menu_move_selectable(const menu_row_t *rows, int nrows, int sel, int delta) {
+    if (!rows || nrows <= 0 || delta == 0)
+        return menu_clamp_selectable(rows, nrows, sel);
+    int cur = menu_clamp_selectable(rows, nrows, sel);
+    if (cur < 0)
+        return cur;
+
+    int dir = delta > 0 ? 1 : -1;
+    int steps = delta > 0 ? delta : -delta;
+    for (int i = 0; i < steps; i++) {
+        int next = menu_find_selectable(rows, nrows, cur + dir, dir);
+        if (next < 0)
+            break;
+        cur = next;
+    }
+    return cur;
+}
+
+#ifdef DSCO_INTERNAL_TESTS
+int tui_test_menu_move_selection(const bool *selectable, int nrows, int sel, int delta) {
+    if (!selectable || nrows <= 0 || nrows > MENU_ROWS_MAX)
+        return -1;
+    menu_row_t rows[MENU_ROWS_MAX];
+    memset(rows, 0, sizeof rows);
+    for (int i = 0; i < nrows; i++)
+        rows[i].selectable = selectable[i];
+    return menu_move_selectable(rows, nrows, sel, delta);
+}
+#endif
+
 static void menu_flatten_level(tui_menu_item_t *arr, int count, int depth, menu_row_t *rows,
                                int *nrows) {
     for (int i = 0; i < count && *nrows < MENU_ROWS_MAX; i++) {
@@ -11223,26 +11480,7 @@ int tui_menu_run(tui_menu_t *m, tui_menu_item_t **out_item) {
         menu_flatten_level(m->items, m->item_count, 0, rows, &nrows);
 
         /* Clamp / snap selection to a selectable row. */
-        if (sel < 0)
-            sel = 0;
-        if (sel >= nrows)
-            sel = nrows - 1;
-        if (!rows[sel].selectable) {
-            int s = -1;
-            for (int i = sel; i < nrows; i++)
-                if (rows[i].selectable) {
-                    s = i;
-                    break;
-                }
-            if (s < 0)
-                for (int i = sel; i >= 0; i--)
-                    if (rows[i].selectable) {
-                        s = i;
-                        break;
-                    }
-            if (s >= 0)
-                sel = s;
-        }
+        sel = menu_clamp_selectable(rows, nrows, sel);
 
         /* Viewport: header + rows + footer must fit; scroll around selection. */
         int term_h = tui_term_height();
@@ -11254,7 +11492,7 @@ int tui_menu_run(tui_menu_t *m, tui_menu_item_t **out_item) {
             vis = nrows;
 
         int top = 0;
-        if (nrows > vis) {
+        if (nrows > vis && sel >= 0) {
             top = sel - vis / 2;
             if (top < 0)
                 top = 0;
@@ -11262,9 +11500,8 @@ int tui_menu_run(tui_menu_t *m, tui_menu_item_t **out_item) {
                 top = nrows - vis;
         }
 
-        int planned_lines = (m->title[0] ? 1 : 0) + (m->subtitle[0] ? 1 : 0) +
-                            (top > 0 ? 1 : 0) + vis +
-                            (top + vis < nrows ? 1 : 0) + 1;
+        int planned_lines = (m->title[0] ? 1 : 0) + (m->subtitle[0] ? 1 : 0) + (top > 0 ? 1 : 0) +
+                            vis + (top + vis < nrows ? 1 : 0) + 1;
         if (first && tty)
             menu_reserve_redraw_space(planned_lines);
 
@@ -11287,7 +11524,7 @@ int tui_menu_run(tui_menu_t *m, tui_menu_item_t **out_item) {
             lines++;
         }
         for (int i = top; i < top + vis && i < nrows; i++) {
-            menu_render_row(&rows[i], i == sel, accent, g);
+            menu_render_row(&rows[i], sel >= 0 && i == sel, accent, g);
             fprintf(stderr, "\r\n");
             lines++;
         }
@@ -11309,61 +11546,32 @@ int tui_menu_run(tui_menu_t *m, tui_menu_item_t **out_item) {
         }
 
         /* ── Input ── */
-        int ch = read_single_char();
-        if (ch == 27) {
-            int c2 = read_single_char();
-            if (c2 == '[') {
-                int c3 = read_single_char();
-                if (c3 == 'A')
-                    ch = 'k'; /* up */
-                else if (c3 == 'B')
-                    ch = 'j'; /* down */
-                else if (c3 == 'C')
-                    ch = 'l'; /* right */
-                else if (c3 == 'D')
-                    ch = 'h'; /* left */
-                else
-                    continue;
-            } else {
-                result = TUI_MENU_CANCELLED;
-                break;
-            } /* bare ESC */
-        }
+        int ch = dlg_read_key();
 
-        if (ch == 'q' || ch == 'Q') {
+        if (ch == DLG_K_ESC || ch == 'q' || ch == 'Q') {
             result = TUI_MENU_CANCELLED;
             break;
         }
+        if (ch == DLG_K_UNKNOWN)
+            continue;
 
-        if (ch == 'k') { /* prev selectable */
-            for (int i = sel - 1; i >= 0; i--)
-                if (rows[i].selectable) {
-                    sel = i;
-                    break;
-                }
-        } else if (ch == 'j') { /* next selectable */
-            for (int i = sel + 1; i < nrows; i++)
-                if (rows[i].selectable) {
-                    sel = i;
-                    break;
-                }
-        } else if (ch == 'g') {
-            for (int i = 0; i < nrows; i++)
-                if (rows[i].selectable) {
-                    sel = i;
-                    break;
-                }
-        } else if (ch == 'G') {
-            for (int i = nrows - 1; i >= 0; i--)
-                if (rows[i].selectable) {
-                    sel = i;
-                    break;
-                }
-        } else if (ch == 'l') { /* expand submenu / right */
+        if (ch == 'k' || ch == DLG_K_UP) { /* prev selectable */
+            sel = menu_move_selectable(rows, nrows, sel, -1);
+        } else if (ch == 'j' || ch == DLG_K_DOWN) { /* next selectable */
+            sel = menu_move_selectable(rows, nrows, sel, 1);
+        } else if (ch == DLG_K_PAGE_UP) {
+            sel = menu_move_selectable(rows, nrows, sel, -vis);
+        } else if (ch == DLG_K_PAGE_DOWN) {
+            sel = menu_move_selectable(rows, nrows, sel, vis);
+        } else if (ch == 'g' || ch == DLG_K_HOME) {
+            sel = menu_find_selectable(rows, nrows, 0, 1);
+        } else if (ch == 'G' || ch == DLG_K_END) {
+            sel = menu_find_selectable(rows, nrows, nrows - 1, -1);
+        } else if ((ch == 'l' || ch == DLG_K_RIGHT) && sel >= 0) { /* expand submenu / right */
             tui_menu_item_t *it = rows[sel].item;
             if (it->kind == TUI_MENU_SUBMENU)
                 it->expanded = true;
-        } else if (ch == 'h') { /* collapse / jump to parent */
+        } else if ((ch == 'h' || ch == DLG_K_LEFT) && sel >= 0) { /* collapse / jump to parent */
             tui_menu_item_t *it = rows[sel].item;
             if (it->kind == TUI_MENU_SUBMENU && it->expanded) {
                 it->expanded = false;
@@ -11375,7 +11583,7 @@ int tui_menu_run(tui_menu_t *m, tui_menu_item_t **out_item) {
                         break;
                     }
             }
-        } else if (ch == '\r' || ch == '\n' || ch == ' ') {
+        } else if ((ch == DLG_K_ENTER || ch == DLG_K_SPACE) && sel >= 0) {
             tui_menu_item_t *it = rows[sel].item;
             if (it->kind == TUI_MENU_SUBMENU) {
                 it->expanded = !it->expanded; /* toggle */
