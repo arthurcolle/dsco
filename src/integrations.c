@@ -18,6 +18,7 @@
 #include <stdio.h>
 #include <math.h>
 #include <unistd.h>
+#include <fcntl.h>
 #include <time.h>
 #include <stdlib.h>
 #include <string.h>
@@ -1728,9 +1729,14 @@ static void parallel_ai_record_job(const char *kind, const char *id, const char 
     char path[1024];
     if (!parallel_ai_state_path(path, sizeof(path)))
         return;
-    FILE *f = fopen(path, "a");
-    if (!f)
+    /* 0600: internal job ledger — owner-only. */
+    int afd = open(path, O_WRONLY | O_CREAT | O_APPEND, 0600);
+    FILE *f = afd >= 0 ? fdopen(afd, "a") : NULL;
+    if (!f) {
+        if (afd >= 0)
+            close(afd);
         return;
+    }
     char *status = resp ? json_get_str(resp, "status") : NULL;
     fprintf(f, "{\"ts\":%ld,\"kind\":", (long)time(NULL));
     jbuf_t line;
@@ -6031,7 +6037,11 @@ bool tool_elevenlabs_tts(const char *input, char *result, size_t rlen) {
 
     CURL *curl = curl_easy_init();
     dsco_http_pool_apply(curl);
-    FILE *fp = fopen(out, "wb");
+    /* 0600: TTS audio artifact — owner-only by default. */
+    int ofd = open(out, O_WRONLY | O_CREAT | O_TRUNC, 0600);
+    FILE *fp = ofd >= 0 ? fdopen(ofd, "wb") : NULL;
+    if (fp == NULL && ofd >= 0)
+        close(ofd);
     if (!curl || !fp) {
         if (fp)
             fclose(fp);
@@ -7250,7 +7260,7 @@ bool tool_arxiv_search(const char *input, char *result, size_t rlen) {
     char url[2048];
     snprintf(
         url, sizeof(url),
-        "http://export.arxiv.org/api/"
+        "https://export.arxiv.org/api/"
         "query?search_query=all:%s&start=0&max_results=%d&sortBy=relevance&sortOrder=descending",
         enc, limit);
     curl_free(enc);
