@@ -1530,16 +1530,13 @@ bool conv_save_ex(conversation_t *c, const session_state_t *session, const char 
             if (session->goal_token_budget > 0)
                 jbuf_appendf(&sb, ",\"goal_token_budget\":%d", session->goal_token_budget);
             if (session->goal_tokens_at_start >= 0)
-                jbuf_appendf(&sb, ",\"goal_tokens_at_start\":%d",
-                             session->goal_tokens_at_start);
+                jbuf_appendf(&sb, ",\"goal_tokens_at_start\":%d", session->goal_tokens_at_start);
             if (session->goal_turns_at_start >= 0)
                 jbuf_appendf(&sb, ",\"goal_turns_at_start\":%d", session->goal_turns_at_start);
             if (session->goal_started_at > 0)
-                jbuf_appendf(&sb, ",\"goal_started_at\":%lld",
-                             (long long)session->goal_started_at);
+                jbuf_appendf(&sb, ",\"goal_started_at\":%lld", (long long)session->goal_started_at);
             if (session->goal_updated_at > 0)
-                jbuf_appendf(&sb, ",\"goal_updated_at\":%lld",
-                             (long long)session->goal_updated_at);
+                jbuf_appendf(&sb, ",\"goal_updated_at\":%lld", (long long)session->goal_updated_at);
         }
         jbuf_append(&sb, "},");
         fwrite(sb.data, 1, sb.len, f);
@@ -1647,8 +1644,8 @@ bool conv_load_ex(conversation_t *c, session_state_t *session, const char *path)
                 snprintf(session->pin_text, sizeof(session->pin_text), "%s", pin_text);
                 free(pin_text);
             }
-            session->structured_output = json_get_bool(session_raw, "structured_output",
-                                                       session->structured_output);
+            session->structured_output =
+                json_get_bool(session_raw, "structured_output", session->structured_output);
             session->structured_output_strict = json_get_bool(
                 session_raw, "structured_output_strict", session->structured_output_strict);
             int so_repairs = json_get_int(session_raw, "structured_output_max_repairs",
@@ -1685,17 +1682,14 @@ bool conv_load_ex(conversation_t *c, session_state_t *session, const char *path)
                 free(goal_status);
                 session->goal_token_budget =
                     json_get_int(session_raw, "goal_token_budget", session->goal_token_budget);
-                session->goal_tokens_at_start =
-                    json_get_int(session_raw, "goal_tokens_at_start",
-                                 session->goal_tokens_at_start);
+                session->goal_tokens_at_start = json_get_int(session_raw, "goal_tokens_at_start",
+                                                             session->goal_tokens_at_start);
                 session->goal_turns_at_start =
                     json_get_int(session_raw, "goal_turns_at_start", session->goal_turns_at_start);
-                session->goal_started_at =
-                    (time_t)json_get_int(session_raw, "goal_started_at",
-                                         (int)session->goal_started_at);
-                session->goal_updated_at =
-                    (time_t)json_get_int(session_raw, "goal_updated_at",
-                                         (int)session->goal_updated_at);
+                session->goal_started_at = (time_t)json_get_int(session_raw, "goal_started_at",
+                                                                (int)session->goal_started_at);
+                session->goal_updated_at = (time_t)json_get_int(session_raw, "goal_updated_at",
+                                                                (int)session->goal_updated_at);
             }
             free(goal_objective);
             free(session_raw);
@@ -2357,7 +2351,10 @@ static const char *anthropic_oauth_wire_tool_name(const char *name, char *buf, s
 static bool content_block_allows_cache_control(const msg_content_t *mc) {
     if (!mc || !mc->type)
         return false;
-    return strcmp(mc->type, "text") == 0 || strcmp(mc->type, "tool_result") == 0;
+    /* Empty text blocks cannot carry cache_control (API rejects them). */
+    if (strcmp(mc->type, "text") == 0)
+        return mc->text && mc->text[0];
+    return strcmp(mc->type, "tool_result") == 0;
 }
 
 static void append_message_sendable_content(jbuf_t *b, message_t *m, bool force_leading_comma,
@@ -2380,8 +2377,7 @@ static void append_message_sendable_content(jbuf_t *b, message_t *m, bool force_
         append_content_block(b, mc, claude_code_oauth);
         if (content_block_allows_cache_control(mc))
             remaining_cacheable--;
-        if (cache_mark_last && content_block_allows_cache_control(mc) &&
-            remaining_cacheable == 0)
+        if (cache_mark_last && content_block_allows_cache_control(mc) && remaining_cacheable == 0)
             append_cache_control_to_last_block(b);
         written++;
     }
@@ -2636,13 +2632,31 @@ static tool_page_result_t anthropic_get_paged_tools(const char *ctx, int max_too
     return s_frozen_tool_page;
 }
 
+/* ── Cache TTL policy ──────────────────────────────────────────────────────
+ * DSCO_CACHE_TTL=1h opts every breakpoint into the 1-hour cache (2x write
+ * cost, same 0.1x read cost). Default is the 5-minute cache (no ttl field).
+ * We use a single uniform TTL for all breakpoints, which trivially satisfies
+ * the API constraint that longer-TTL entries must precede shorter ones. */
+static bool anthropic_cache_ttl_1h(void) {
+    const char *v = getenv("DSCO_CACHE_TTL");
+    return v && strcmp(v, "1h") == 0;
+}
+
+/* The cache_control JSON fragment (no leading/trailing separator). */
+static const char *cache_control_json(void) {
+    return anthropic_cache_ttl_1h() ? "\"cache_control\":{\"type\":\"ephemeral\",\"ttl\":\"1h\"}"
+                                    : "\"cache_control\":{\"type\":\"ephemeral\"}";
+}
+
 /* Append a cache_control breakpoint to the content block just emitted. */
 static void append_cache_control_to_last_block(jbuf_t *b) {
     if (!b || b->len == 0 || !b->data || b->data[b->len - 1] != '}')
         return;
     b->len--;
     b->data[b->len] = '\0';
-    jbuf_append(b, ",\"cache_control\":{\"type\":\"ephemeral\"}}");
+    jbuf_append(b, ",");
+    jbuf_append(b, cache_control_json());
+    jbuf_append(b, "}");
 }
 
 /* Append a single tool definition to the JSON buffer */
@@ -2656,8 +2670,10 @@ static void append_one_tool(jbuf_t *b, const tool_def_t *t, bool cache_mark,
     jbuf_append_json_str(b, t->description);
     jbuf_append(b, ",\"input_schema\":");
     jbuf_append(b, t->input_schema_json);
-    if (cache_mark)
-        jbuf_append(b, ",\"cache_control\":{\"type\":\"ephemeral\"}");
+    if (cache_mark) {
+        jbuf_append(b, ",");
+        jbuf_append(b, cache_control_json());
+    }
     jbuf_append(b, "}");
 }
 
@@ -2667,7 +2683,19 @@ static void append_one_tool(jbuf_t *b, const tool_def_t *t, bool cache_mark,
  *
  * Tier 0+1 are stable across turns → prompt-cached (78% savings).
  * Tier 2 is volatile each turn → cheap to recompute.
- * Cache breakpoint (ephemeral marker) goes on the last Tier 1 tool. */
+ *
+ * Breakpoint budget (Anthropic allows 4 per request, and each level of the
+ * tools → system → messages hierarchy is covered cumulatively by any later
+ * breakpoint):
+ *   1. tools    — ONE mark at the stable/volatile boundary (last working-set
+ *                 tool, or last pinned tool if no working set), emitted only
+ *                 when volatile content (discovery/external/server tools)
+ *                 follows. End-of-tools marks are redundant: the system-block
+ *                 breakpoint already caches the entire tools+system prefix.
+ *   2. system   — one mark on the last static system block.
+ *   3+4. messages — marks on the last TWO user messages so a turn that adds
+ *                 many blocks (heavy parallel tool use) stays inside the
+ *                 20-block cache lookback window. */
 static void append_tools_json_filtered(jbuf_t *b, session_state_t *session, conversation_t *conv,
                                        bool claude_code_oauth) {
     int max_tools = ANTHROPIC_DEFAULT_MAX_TOOLS;
@@ -2713,7 +2741,8 @@ static void append_tools_json_filtered(jbuf_t *b, session_state_t *session, conv
 
     float budget_ratio = session ? session->tool_budget_ratio : 1.0f;
     bool paged_owned = false;
-    tool_page_result_t paged = anthropic_get_paged_tools(ctx, max_tools, budget_ratio, &paged_owned);
+    tool_page_result_t paged =
+        anthropic_get_paged_tools(ctx, max_tools, budget_ratio, &paged_owned);
 
     bool has_server_tools = session && (session->web_search || session->code_execution);
     bool has_after_working =
@@ -2724,24 +2753,29 @@ static void append_tools_json_filtered(jbuf_t *b, session_state_t *session, conv
     size_t tools_json_start = b->len;
     int written = 0;
 
-    /* Tier 0: Pinned — stable core tools (first position = high attention) */
+    /* Tier 0: Pinned — stable core tools (first position = high attention).
+     * Mark the boundary here only when there is no working set and volatile
+     * content follows. End-of-tools marks are intentionally omitted: the
+     * system-block breakpoint caches the full tools+system prefix, so a mark
+     * on the final tool would waste one of the 4 breakpoint slots. */
     for (int i = 0; i < paged.pinned_count; i++) {
         if (written > 0)
             jbuf_append(b, ",");
         bool mark =
-            (i == paged.pinned_count - 1) && (paged.working_count == 0) && !has_after_working;
+            (i == paged.pinned_count - 1) && (paged.working_count == 0) && has_after_working;
         append_one_tool(b, paged.pinned[i], mark, claude_code_oauth);
         written++;
     }
 
-    /* Tier 1: Working set — slow-evolving (hot + cooc + centroid) */
+    /* Tier 1: Working set — slow-evolving (hot + cooc + centroid).
+     * Cache breakpoint at the stable/volatile boundary: if the volatile tier
+     * (discovery/external/server tools) changes, this mark preserves a cache
+     * hit for the stable tool prefix that the downstream system breakpoint
+     * would otherwise lose. */
     for (int i = 0; i < paged.working_count; i++) {
         if (written > 0)
             jbuf_append(b, ",");
-        /* Cache breakpoint: mark last working-set tool if volatile content follows */
-        bool mark = (i == paged.working_count - 1) &&
-                    (has_after_working ? true /* cache break before volatile tier */
-                                       : true /* end of tools → final ephemeral */);
+        bool mark = (i == paged.working_count - 1) && has_after_working;
         append_one_tool(b, paged.working[i], mark, claude_code_oauth);
         written++;
     }
@@ -2749,14 +2783,16 @@ static void append_tools_json_filtered(jbuf_t *b, session_state_t *session, conv
     /* Tier 2: Discovery — now sends REAL schemas (not progressive stubs).
      * The ~200 tokens/tool cost (8 tools × 200 = 1600 tokens) is negligible
      * compared to the cost of failed tool calls from missing schemas.
-     * The compact catalog in the system prompt provides full tool awareness. */
+     * The compact catalog in the system prompt provides full tool awareness.
+     * No cache mark: this tier is volatile per turn (unless frozen), and an
+     * end-of-tools mark is redundant with the system breakpoint. */
     for (int i = 0; i < paged.discovery_count; i++) {
         if (written > 0)
             jbuf_append(b, ",");
-        bool mark = (i == paged.discovery_count - 1) && !has_after_discovery;
-        append_one_tool(b, paged.discovery[i], mark, claude_code_oauth);
+        append_one_tool(b, paged.discovery[i], false, claude_code_oauth);
         written++;
     }
+    (void)has_after_discovery;
 
     if (paged_owned)
         tool_page_result_free(&paged);
@@ -2792,9 +2828,8 @@ static void append_tools_json_filtered(jbuf_t *b, session_state_t *session, conv
             jbuf_append_json_str(b, g_external_tools[i].description);
             jbuf_append(b, ",\"input_schema\":");
             jbuf_append(b, g_external_tools[i].input_schema_json);
-            if (ext_written == ext_budget - 1 && !has_server_tools) {
-                jbuf_append(b, ",\"cache_control\":{\"type\":\"ephemeral\"}");
-            }
+            /* No end-of-tools cache mark: the system breakpoint already
+             * covers the entire tools+system prefix cumulatively. */
             jbuf_append(b, "}");
             written++;
             ext_written++;
@@ -2831,13 +2866,22 @@ static void build_messages_json(jbuf_t *b, conversation_t *c, session_state_t *s
     jbuf_append(b, ",\"messages\":[");
     int msg_written = 0;
     int last_written_role = -1;
+    /* Incremental conversation caching: mark the last TWO user messages with
+     * cache_control. The final mark advances the cache each turn; the
+     * penultimate mark guarantees a lookback anchor when a single turn adds
+     * 20+ blocks (e.g. wide parallel tool use), which would otherwise push
+     * the previous write outside the 20-block lookback window.
+     * Budget: 2 message breakpoints + 1 system + 1 tools boundary = 4 max. */
     int last_user_msg_index = -1;
+    int prev_user_msg_index = -1;
     for (int i = 0; i < c->count; i++) {
         message_t *m = &c->msgs[i];
         if (message_sendable_count(m) == 0)
             continue;
-        if (message_effective_role(m) == ROLE_USER)
+        if (message_effective_role(m) == ROLE_USER) {
+            prev_user_msg_index = last_user_msg_index;
             last_user_msg_index = i;
+        }
     }
     for (int i = 0; i < c->count; i++) {
         message_t *m = &c->msgs[i];
@@ -2853,7 +2897,9 @@ static void build_messages_json(jbuf_t *b, conversation_t *c, session_state_t *s
             if (b->len >= 2 && b->data[b->len - 1] == '}' && b->data[b->len - 2] == ']') {
                 b->len -= 2;
                 b->data[b->len] = '\0';
-                append_message_sendable_content(b, m, true, claude_code_oauth, i == last_user_msg_index);
+                append_message_sendable_content(
+                    b, m, true, claude_code_oauth,
+                    i == last_user_msg_index || i == prev_user_msg_index);
                 jbuf_append(b, "]}");
             } else {
                 /* Fallback: emit as separate message (may cause API error
@@ -2862,7 +2908,9 @@ static void build_messages_json(jbuf_t *b, conversation_t *c, session_state_t *s
                 jbuf_append(b, "{\"role\":");
                 jbuf_append_json_str(b, role == ROLE_USER ? "user" : "assistant");
                 jbuf_append(b, ",\"content\":[");
-                append_message_sendable_content(b, m, false, claude_code_oauth, i == last_user_msg_index);
+                append_message_sendable_content(
+                    b, m, false, claude_code_oauth,
+                    i == last_user_msg_index || i == prev_user_msg_index);
                 jbuf_append(b, "]}");
                 msg_written++;
             }
@@ -2872,7 +2920,9 @@ static void build_messages_json(jbuf_t *b, conversation_t *c, session_state_t *s
             jbuf_append(b, "{\"role\":");
             jbuf_append_json_str(b, role == ROLE_USER ? "user" : "assistant");
             jbuf_append(b, ",\"content\":[");
-            append_message_sendable_content(b, m, false, claude_code_oauth, i == last_user_msg_index);
+            append_message_sendable_content(
+                b, m, false, claude_code_oauth,
+                i == last_user_msg_index || i == prev_user_msg_index);
             jbuf_append(b, "]}");
             msg_written++;
         }
@@ -3098,9 +3148,13 @@ char *llm_build_request_for_credential(conversation_t *c, const char *model, int
         jbuf_append(&b, "},");
         jbuf_append(&b, "{\"type\":\"text\",\"text\":");
         jbuf_append_json_str(&b, catalog);
-        jbuf_append(&b, ",\"cache_control\":{\"type\":\"ephemeral\"}}");
+        jbuf_append(&b, ",");
+        jbuf_append(&b, cache_control_json());
+        jbuf_append(&b, "}");
     } else {
-        jbuf_append(&b, ",\"cache_control\":{\"type\":\"ephemeral\"}}");
+        jbuf_append(&b, ",");
+        jbuf_append(&b, cache_control_json());
+        jbuf_append(&b, "}");
     }
     jbuf_append(&b, "]");
 
@@ -3169,11 +3223,9 @@ char *llm_build_request_ex_for_credential(conversation_t *c, session_state_t *se
      * that were previously wasted on redundant name+description lines. */
 
     /* Cache breakpoint on last static block */
-    if (!has_dynamic) {
-        jbuf_append(&b, ",\"cache_control\":{\"type\":\"ephemeral\"}}");
-    } else {
-        jbuf_append(&b, ",\"cache_control\":{\"type\":\"ephemeral\"}},");
-    }
+    jbuf_append(&b, ",");
+    jbuf_append(&b, cache_control_json());
+    jbuf_append(&b, has_dynamic ? "}," : "}");
 
     /* Block 3+: Dynamic content (workspace prompt, skills) — after cache break */
     if (custom) {
@@ -3206,12 +3258,16 @@ char *llm_build_request_ex_for_credential(conversation_t *c, session_state_t *se
         jbuf_append(&b, ",{\"type\":\"text\",\"text\":");
         jbuf_t sop;
         jbuf_init(&sop, 1024);
-        jbuf_append(&sop, "[Structured Output Contract]\nFor the final assistant answer, emit exactly one valid JSON object and no markdown, prose, code fences, comments, or trailing text. Preserve numeric/boolean/null types exactly. ");
+        jbuf_append(&sop,
+                    "[Structured Output Contract]\nFor the final assistant answer, emit exactly "
+                    "one valid JSON object and no markdown, prose, code fences, comments, or "
+                    "trailing text. Preserve numeric/boolean/null types exactly. ");
         if (session->structured_output_schema[0]) {
             jbuf_append(&sop, "The JSON must conform to this schema: ");
             jbuf_append(&sop, session->structured_output_schema);
         } else {
-            jbuf_append(&sop, "Use a stable object shape with explicit keys appropriate to the task.");
+            jbuf_append(&sop,
+                        "Use a stable object shape with explicit keys appropriate to the task.");
         }
         jbuf_append_json_str(&b, sop.data ? sop.data : "");
         jbuf_append(&b, "}");
@@ -3219,8 +3275,10 @@ char *llm_build_request_ex_for_credential(conversation_t *c, session_state_t *se
     }
     if (session->direct_answer_mode) {
         jbuf_append(&b, ",{\"type\":\"text\",\"text\":");
-        jbuf_append_json_str(&b,
-                             "[Direct Answer Mode] The current user request is classified as self-contained/conceptual. Do not call tools, do not gather context, and do not use loop/self-exit controls. Answer directly and then stop.");
+        jbuf_append_json_str(
+            &b, "[Direct Answer Mode] The current user request is classified as "
+                "self-contained/conceptual. Do not call tools, do not gather context, and do not "
+                "use loop/self-exit controls. Answer directly and then stop.");
         jbuf_append(&b, "}");
     }
     if (session->goal_objective[0] && session->goal_status == DSCO_GOAL_ACTIVE) {
@@ -3230,17 +3288,19 @@ char *llm_build_request_ex_for_credential(conversation_t *c, session_state_t *se
         if (used < 0)
             used = 0;
         if (session->goal_token_budget > 0) {
-            snprintf(goal_prompt, sizeof(goal_prompt),
-                     "[Active Goal]\nObjective: %s\nStatus: active\nTokens used on goal: %d / %d\n"
-                     "Keep working toward this objective until the user changes it with /goal. "
-                     "If the objective is complete, call self_exit with a concise completion reason.",
-                     session->goal_objective, used, session->goal_token_budget);
+            snprintf(
+                goal_prompt, sizeof(goal_prompt),
+                "[Active Goal]\nObjective: %s\nStatus: active\nTokens used on goal: %d / %d\n"
+                "Keep working toward this objective until the user changes it with /goal. "
+                "If the objective is complete, call self_exit with a concise completion reason.",
+                session->goal_objective, used, session->goal_token_budget);
         } else {
-            snprintf(goal_prompt, sizeof(goal_prompt),
-                     "[Active Goal]\nObjective: %s\nStatus: active\nTokens used on goal: %d\n"
-                     "Keep working toward this objective until the user changes it with /goal. "
-                     "If the objective is complete, call self_exit with a concise completion reason.",
-                     session->goal_objective, used);
+            snprintf(
+                goal_prompt, sizeof(goal_prompt),
+                "[Active Goal]\nObjective: %s\nStatus: active\nTokens used on goal: %d\n"
+                "Keep working toward this objective until the user changes it with /goal. "
+                "If the objective is complete, call self_exit with a concise completion reason.",
+                session->goal_objective, used);
         }
         jbuf_append(&b, ",{\"type\":\"text\",\"text\":");
         jbuf_append_json_str(&b, goal_prompt);
@@ -4162,6 +4222,15 @@ static void sse_handle_event(sse_state_t *s, const char *data) {
         char *usage_raw = json_get_raw(data, "usage");
         if (usage_raw) {
             s->usage.output_tokens = json_get_int(usage_raw, "output_tokens", 0);
+            /* Final usage may revise cache accounting (e.g. server-tool loops
+             * add per-iteration cache writes). Take the larger value so cost
+             * tracking never under-counts. */
+            int cw = json_get_int(usage_raw, "cache_creation_input_tokens", 0);
+            if (cw > s->usage.cache_creation_input_tokens)
+                s->usage.cache_creation_input_tokens = cw;
+            int cr = json_get_int(usage_raw, "cache_read_input_tokens", 0);
+            if (cr > s->usage.cache_read_input_tokens)
+                s->usage.cache_read_input_tokens = cr;
             free(usage_raw);
         }
     } else if (strcmp(event_type, "error") == 0) {
@@ -4517,8 +4586,7 @@ stream_result_t llm_stream(const char *api_key, const char *request_json, stream
                     state.credit_reset_at = reset_at;
                 char *msg = json_get_str(body_err, "message");
                 char *typ = json_get_str(body_err, "type");
-                if (http_code == 402 || http_code == 429 ||
-                    provider_msg_is_credit_too_low(msg) ||
+                if (http_code == 402 || http_code == 429 || provider_msg_is_credit_too_low(msg) ||
                     provider_msg_is_credit_too_low(typ) ||
                     provider_msg_is_credit_too_low(state.line_buf.data))
                     state.credit_too_low = true;

@@ -23,10 +23,12 @@
 #include "router.h"
 #include "realtime.h"
 #include "setup.h"
+#include "supervisor.h"
 #include "swarm.h"
 #include "structured_process.h"
 #include "task_profile.h"
 #include "agent_profile.h"
+#include "tui.h"
 #include "self_improve.h"
 #include "arena_alloc.h"
 #include "event_loop.h"
@@ -122,14 +124,13 @@ static void test_restore_env(const char *name, const char *saved, bool had_value
 
 typedef struct {
     const char *name;
-    char        value[256];
-    bool        had_value;
+    char value[256];
+    bool had_value;
 } test_env_snapshot_t;
 
 static void test_capture_env_list(test_env_snapshot_t vars[], size_t count) {
     for (size_t i = 0; i < count; i++) {
-        test_capture_env(vars[i].name, vars[i].value, sizeof(vars[i].value),
-                         &vars[i].had_value);
+        test_capture_env(vars[i].name, vars[i].value, sizeof(vars[i].value), &vars[i].had_value);
     }
 }
 
@@ -168,7 +169,6 @@ static void test_rm_rf(const char *path) {
     }
     (void)unlink(path);
 }
-
 
 static bool test_write_temp_script(char *path, size_t path_len, const char *body) {
     char tmpl[] = "/tmp/dsco_swarm_XXXXXX";
@@ -629,6 +629,99 @@ static void test_build_request_ex_strips_anthropic_namespace(void) {
            "non-ex builder must strip the anthropic/ namespace too");
     free(model);
     free(req);
+    conv_free(&conv);
+    PASS();
+}
+
+/* Prompt caching: native Anthropic requests must stay within the 4-breakpoint
+ * budget, mark the system prefix, and mark the last two user messages so a
+ * turn adding 20+ blocks keeps a lookback anchor. */
+static void test_anthropic_cache_breakpoint_layout(void) {
+    TEST("anthropic cache breakpoints: budget, system, last two user msgs");
+    tools_init();
+    conversation_t conv;
+    conv_init(&conv);
+    conv_add_user_text(&conv, "first user turn");
+    conv_add_assistant_text(&conv, "assistant reply");
+    conv_add_user_text(&conv, "second user turn");
+    conv_add_assistant_tool_use(&conv, "call_cache_bp", "bash", "{\"command\":\"echo hi\"}");
+    conv_add_tool_result_named(&conv, "call_cache_bp", "bash", "tool result tail", false);
+
+    session_state_t session;
+    session_state_init(&session, "claude-fable-5");
+
+    char *req = llm_build_request_ex(&conv, &session, 1024);
+    ASSERT(req != NULL, "request should not be NULL");
+    ASSERT(json_is_valid_container(req), "cache-marked request must be valid JSON");
+
+    int marks = test_count_substr(req, "\"cache_control\"");
+    ASSERT(marks >= 2, "should have at least system + conversation breakpoints");
+    ASSERT(marks <= 4, "must stay within the 4-breakpoint budget");
+
+    /* System prefix must carry a breakpoint (before the messages array). */
+    const char *msgs = strstr(req, "\"messages\":[");
+    ASSERT(msgs != NULL, "request must contain messages");
+    char *prefix = strndup(req, (size_t)(msgs - req));
+    ASSERT(test_count_substr(prefix, "\"cache_control\"") >= 1,
+           "tools+system prefix must contain a cache breakpoint");
+    free(prefix);
+
+    /* The last user message (tool_result tail) must carry a breakpoint. */
+    const char *tail = strstr(req, "tool result tail");
+    ASSERT(tail != NULL, "tool result should be serialized");
+    ASSERT(strstr(tail, "\"cache_control\":{\"type\":\"ephemeral\"") != NULL,
+           "final user message must carry a cache breakpoint");
+
+    /* The second-to-last user message must also carry one (lookback anchor). */
+    const char *second = strstr(req, "second user turn");
+    ASSERT(second != NULL, "second user turn should be serialized");
+    ASSERT(second < tail, "message ordering sanity");
+    char *between = strndup(second, (size_t)(tail - second));
+    ASSERT(test_count_substr(between, "\"cache_control\"") >= 1,
+           "penultimate user message must carry a lookback-anchor breakpoint");
+    free(between);
+
+    free(req);
+    conv_free(&conv);
+    PASS();
+}
+
+/* DSCO_CACHE_TTL=1h must switch every breakpoint to the 1-hour cache and
+ * never mix TTLs (mixed TTLs require longer-before-shorter ordering). */
+static void test_anthropic_cache_ttl_1h_env(void) {
+    TEST("anthropic cache TTL: DSCO_CACHE_TTL=1h uniform across breakpoints");
+    tools_init();
+    conversation_t conv;
+    conv_init(&conv);
+    conv_add_user_text(&conv, "ttl check");
+
+    char saved_ttl[32];
+    bool had_ttl = false;
+    test_capture_env("DSCO_CACHE_TTL", saved_ttl, sizeof(saved_ttl), &had_ttl);
+    setenv("DSCO_CACHE_TTL", "1h", 1);
+
+    session_state_t session;
+    session_state_init(&session, "claude-fable-5");
+    char *req = llm_build_request_ex(&conv, &session, 1024);
+    ASSERT(req != NULL, "request should not be NULL");
+    ASSERT(json_is_valid_container(req), "1h-TTL request must be valid JSON");
+    int total = test_count_substr(req, "\"cache_control\"");
+    int one_hour = test_count_substr(req, "{\"type\":\"ephemeral\",\"ttl\":\"1h\"}");
+    ASSERT(total >= 1, "1h request should still emit breakpoints");
+    ASSERT(one_hour == total, "all breakpoints must uniformly carry ttl=1h");
+    free(req);
+
+    if (had_ttl)
+        setenv("DSCO_CACHE_TTL", saved_ttl, 1);
+    else
+        unsetenv("DSCO_CACHE_TTL");
+
+    /* Default (5m) request must not emit any ttl field. */
+    char *req5 = llm_build_request_ex(&conv, &session, 1024);
+    ASSERT(req5 != NULL, "request should not be NULL");
+    ASSERT(strstr(req5, "\"ttl\":\"1h\"") == NULL, "default requests must use the 5m cache");
+    free(req5);
+
     conv_free(&conv);
     PASS();
 }
@@ -1539,7 +1632,8 @@ static void test_openrouter_claude_cache_control_valid_and_marks_history(void) {
 
     char *req = p->build_request(p, &conv, &session, 1024, NULL);
     ASSERT(req != NULL, "request should not be NULL");
-    ASSERT(json_is_valid_container(req), "OpenRouter Claude cache request should remain valid JSON");
+    ASSERT(json_is_valid_container(req),
+           "OpenRouter Claude cache request should remain valid JSON");
     const char *tail = strstr(req, "cache this openrouter tail");
     ASSERT(tail != NULL, "last user text should be serialized");
     ASSERT(strstr(tail, "\"cache_control\":{\"type\":\"ephemeral\"}") != NULL,
@@ -1577,7 +1671,8 @@ static void test_openrouter_claude_cache_control_marks_tool_result_tail(void) {
 
     char *req = p->build_request(p, &conv, &session, 1024, NULL);
     ASSERT(req != NULL, "request should not be NULL");
-    ASSERT(json_is_valid_container(req), "OpenRouter tool-result cache request should be valid JSON");
+    ASSERT(json_is_valid_container(req),
+           "OpenRouter tool-result cache request should be valid JSON");
     const char *tail = strstr(req, "openrouter tool result tail");
     ASSERT(tail != NULL, "tool result should be serialized");
     ASSERT(strstr(tail, "\"cache_control\":{\"type\":\"ephemeral\"}") != NULL,
@@ -1631,7 +1726,8 @@ static void test_provider_request_model_prefix_routing(void) {
     session_state_init(&openrouter_session, "openrouter/moonshotai/kimi-k2.7-code");
     provider_t *openrouter = provider_create("openrouter");
     ASSERT(openrouter != NULL, "openrouter provider should be created");
-    char *openrouter_req = openrouter->build_request(openrouter, &conv, &openrouter_session, 1024, NULL);
+    char *openrouter_req =
+        openrouter->build_request(openrouter, &conv, &openrouter_session, 1024, NULL);
     ASSERT(openrouter_req != NULL, "openrouter request should not be NULL");
     ASSERT(strstr(openrouter_req, "\"model\":\"moonshotai/kimi-k2.7-code\"") != NULL,
            "OpenRouter should receive slug after explicit openrouter prefix");
@@ -1809,7 +1905,8 @@ static void test_openai_request_structured_output_schema(void) {
     snprintf(session.structured_output_name, sizeof(session.structured_output_name), "%s",
              "deep_research_plan");
     snprintf(session.structured_output_schema, sizeof(session.structured_output_schema), "%s",
-             "{\"type\":\"object\",\"properties\":{\"phases\":{\"type\":\"array\"}},\"required\":[\"phases\"]}");
+             "{\"type\":\"object\",\"properties\":{\"phases\":{\"type\":\"array\"}},\"required\":["
+             "\"phases\"]}");
 
     provider_t *p = provider_create("openai");
     ASSERT(p != NULL, "provider should be created");
@@ -2470,7 +2567,8 @@ static void test_session_state_init_inherits_effort_env(void) {
     setenv("DSCO_EFFORT", "max", 1);
     session_state_t s2;
     session_state_init(&s2, "sonnet");
-    ASSERT(strcmp(s2.effort, "max") == 0, "max alias should be preserved until provider normalization");
+    ASSERT(strcmp(s2.effort, "max") == 0,
+           "max alias should be preserved until provider normalization");
 
     setenv("DSCO_EFFORT", "auto", 1);
     session_state_t s3;
@@ -2547,8 +2645,7 @@ static void test_session_state_init_populates_fallbacks_without_changing_model(v
     char saved_disable_fallbacks[64], saved_disable_codex[64], saved_or[256], saved_anth[256];
     char saved_openai[256], saved_xai[256], saved_grok[256], saved_x_ai[256];
     char saved_fugu[256], saved_sakana[256], saved_fish[256], saved_sakana_token[256];
-    bool had_disable_fallbacks = false, had_disable_codex = false, had_or = false,
-         had_anth = false;
+    bool had_disable_fallbacks = false, had_disable_codex = false, had_or = false, had_anth = false;
     bool had_openai = false, had_xai = false, had_grok = false, had_x_ai = false;
     bool had_fugu = false, had_sakana = false, had_fish = false, had_sakana_token = false;
 
@@ -2595,8 +2692,7 @@ static void test_session_state_init_populates_fallbacks_without_changing_model(v
 
     test_restore_env("DSCO_DISABLE_DEFAULT_FALLBACKS", saved_disable_fallbacks,
                      had_disable_fallbacks);
-    test_restore_env("DSCO_DISABLE_CODEX_OAUTH_DISCOVERY", saved_disable_codex,
-                     had_disable_codex);
+    test_restore_env("DSCO_DISABLE_CODEX_OAUTH_DISCOVERY", saved_disable_codex, had_disable_codex);
     test_restore_env("OPENROUTER_API_KEY", saved_or, had_or);
     test_restore_env("ANTHROPIC_API_KEY", saved_anth, had_anth);
     test_restore_env("OPENAI_API_KEY", saved_openai, had_openai);
@@ -2683,9 +2779,8 @@ static void test_expanded_text_tools_json_serializers(void) {
     tools_init();
     char result[8192] = {0};
 
-    bool ok = tools_execute("csv_parse",
-                            "{\"text\":\"a,b\\n1,2\\n\",\"headers\":true}",
-                            result, sizeof(result));
+    bool ok = tools_execute("csv_parse", "{\"text\":\"a,b\\n1,2\\n\",\"headers\":true}", result,
+                            sizeof(result));
     ASSERT(ok, "csv_parse should succeed");
     ASSERT(strstr(result, "\"rows\":[[\"1\",\"2\"]]") != NULL,
            "csv_parse rows should be valid JSON strings");
@@ -2694,8 +2789,7 @@ static void test_expanded_text_tools_json_serializers(void) {
     ASSERT(strstr(result, "\"\"1\"\"") == NULL, "csv_parse must not double-quote values");
 
     result[0] = '\0';
-    ok = tools_execute("regex_match",
-                       "{\"text\":\"ab xx ab\",\"pattern\":\"ab\",\"global\":true}",
+    ok = tools_execute("regex_match", "{\"text\":\"ab xx ab\",\"pattern\":\"ab\",\"global\":true}",
                        result, sizeof(result));
     ASSERT(ok, "regex_match should succeed");
     ASSERT(strstr(result, "\"matches\":[\"ab\",\"ab\"]") != NULL,
@@ -2703,8 +2797,7 @@ static void test_expanded_text_tools_json_serializers(void) {
     ASSERT(strstr(result, "\"\"ab\"\"") == NULL, "regex_match must not double-quote matches");
 
     result[0] = '\0';
-    ok = tools_execute("text_diff",
-                       "{\"text_a\":\"one\\ntwo\\n\",\"text_b\":\"one\\nthree\\n\"}",
+    ok = tools_execute("text_diff", "{\"text_a\":\"one\\ntwo\\n\",\"text_b\":\"one\\nthree\\n\"}",
                        result, sizeof(result));
     ASSERT(ok, "text_diff should succeed");
     ASSERT(strstr(result, "{\"diff\":\"") == result, "text_diff should return a JSON object");
@@ -2717,8 +2810,8 @@ static void test_discover_tools_grouped_json_has_no_leading_commas(void) {
     tools_init();
     char result[32768] = {0};
 
-    bool ok = tools_execute("discover_tools", "{\"category\":\"pipeline\",\"limit\":10}",
-                            result, sizeof(result));
+    bool ok = tools_execute("discover_tools", "{\"category\":\"pipeline\",\"limit\":10}", result,
+                            sizeof(result));
     ASSERT(ok, "discover_tools category listing should succeed");
     ASSERT(strstr(result, "\"tools\":[,") == NULL,
            "discover_tools grouped listing must not emit a leading comma");
@@ -2726,8 +2819,8 @@ static void test_discover_tools_grouped_json_has_no_leading_commas(void) {
            "discover_tools category listing should start with a category object");
 
     result[0] = '\0';
-    ok = tools_execute("discover_tools", "{\"category\":\"mcp\",\"limit\":10}",
-                       result, sizeof(result));
+    ok = tools_execute("discover_tools", "{\"category\":\"mcp\",\"limit\":10}", result,
+                       sizeof(result));
     ASSERT(ok, "discover_tools empty/mcp listing should succeed");
     ASSERT(strstr(result, "\"tools\":[,") == NULL,
            "discover_tools filtered listing must not emit a leading comma");
@@ -3525,7 +3618,8 @@ static void test_hermes_agent_capability_showcase(void) {
 
     char result[32768];
     result[0] = '\0';
-    bool ok = tools_execute("hermes_agent", "{\"action\":\"capabilities\"}", result, sizeof(result));
+    bool ok =
+        tools_execute("hermes_agent", "{\"action\":\"capabilities\"}", result, sizeof(result));
     ASSERT(ok, result);
     ASSERT(strstr(result, "\"capability_count\":") != NULL,
            "capability showcase should count surfaced capabilities");
@@ -3539,7 +3633,8 @@ static void test_hermes_agent_capability_showcase(void) {
     ASSERT(strstr(result, "provider_routing") != NULL, "showcase should include provider routing");
     ASSERT(strstr(result, "terminal_backends") != NULL,
            "showcase should include terminal backends");
-    ASSERT(strstr(result, "approval_security") != NULL, "showcase should include approval/security");
+    ASSERT(strstr(result, "approval_security") != NULL,
+           "showcase should include approval/security");
     PASS();
 }
 
@@ -3785,8 +3880,9 @@ static void test_public_tools_execute_uses_governance_approval_gate(void) {
 
     char result[4096];
     result[0] = '\0';
-    bool ok = tools_execute("write_file", "{\"path\":\"/tmp/dsco_approval_gate_test\",\"content\":\"x\"}",
-                            result, sizeof(result));
+    bool ok =
+        tools_execute("write_file", "{\"path\":\"/tmp/dsco_approval_gate_test\",\"content\":\"x\"}",
+                      result, sizeof(result));
 
     ASSERT(!ok, "standard public write_file should require approval in strict headless mode");
     ASSERT(strstr(result, "governance_block") != NULL, "result should be a governance block");
@@ -3811,9 +3907,8 @@ static void test_public_tools_execute_uses_governance_approval_gate(void) {
            "critical block should name the hard-stop reason");
 
     result[0] = '\0';
-    ok = tools_execute("run_command",
-                       "{\"command\":\"rm /tmp/dsco_caption_batch/*.png\"}",
-                       result, sizeof(result));
+    ok = tools_execute("run_command", "{\"command\":\"rm /tmp/dsco_caption_batch/*.png\"}", result,
+                       sizeof(result));
     ASSERT(!ok, "autonomous mode should not bypass destructive shell deletion");
     ASSERT(strstr(result, "critical_destructive_shell_pattern") != NULL,
            "destructive shell block should name the hard-stop reason");
@@ -3827,9 +3922,8 @@ static void test_public_tools_execute_uses_governance_approval_gate(void) {
            "find -delete block should name the hard-stop reason");
 
     result[0] = '\0';
-    ok = tools_execute("delete_file",
-                       "{\"path\":\"/tmp/dsco_caption_batch/example.png\"}",
-                       result, sizeof(result));
+    ok = tools_execute("delete_file", "{\"path\":\"/tmp/dsco_caption_batch/example.png\"}", result,
+                       sizeof(result));
     ASSERT(!ok, "autonomous mode should not bypass delete_file");
     ASSERT(strstr(result, "destructive_or_external_mutation_tool") != NULL,
            "delete_file block should name the destructive tool reason");
@@ -3838,8 +3932,9 @@ static void test_public_tools_execute_uses_governance_approval_gate(void) {
     setenv("DSCO_APPROVAL_MODE", "never", 1);
     setenv("DSCO_APPROVAL_NEVER", "1", 1);
     result[0] = '\0';
-    ok = tools_execute("write_file", "{\"path\":\"/tmp/dsco_approval_gate_untrusted\",\"content\":\"x\"}",
-                       result, sizeof(result));
+    ok = tools_execute("write_file",
+                       "{\"path\":\"/tmp/dsco_approval_gate_untrusted\",\"content\":\"x\"}", result,
+                       sizeof(result));
 
     test_restore_env("DSCO_TRUST_TIER", saved_trust, had_trust);
     test_restore_env("DSCO_APPROVAL_MODE", saved_mode, had_mode);
@@ -5002,8 +5097,8 @@ static void test_structured_process_synthesize_import(void) {
     TEST("structured_process synthesize/import");
     char json[65536];
     int n = structured_process_synthesize_json(
-        "profile the agentic CLI with flamegraphs and structured background work",
-        json, sizeof(json));
+        "profile the agentic CLI with flamegraphs and structured background work", json,
+        sizeof(json));
     ASSERT(n > 0, "synthesis writes JSON");
     ASSERT(json_is_valid_container(json), "synthesis is valid JSON");
     ASSERT(strstr(json, "\"model_budget_pct\":20") != NULL, "keeps 20 pct model lane");
@@ -6809,15 +6904,14 @@ static void test_codex_app_directory_importer_variants(void) {
     snprintf(path, sizeof(path), "/tmp/dsco_codex_apps_variants_%d.json", (int)getpid());
     FILE *f = fopen(path, "w");
     ASSERT(f != NULL, "open variant codex app directory");
-    fprintf(f,
-            "["
-            "{\"connectorId\":\"toolcheck\",\"displayName\":\"ToolCheck\","
-            "\"distributionChannel\":\"ecosystem-directory\",\"category\":\"Governance\","
-            "\"interactive\":true,\"consequential\":true,\"is_enabled\":true,"
-            "\"is_accessible\":false,\"catalogStatus\":\"stale\"},"
-            "{\"slug\":\"common-room\",\"title\":\"Common Room\","
-            "\"categories\":[\"Business\",\"GTM\"],\"retrievable\":true,\"sync\":true,"
-            "\"isEnabled\":true,\"isAccessible\":true}]\n");
+    fprintf(f, "["
+               "{\"connectorId\":\"toolcheck\",\"displayName\":\"ToolCheck\","
+               "\"distributionChannel\":\"ecosystem-directory\",\"category\":\"Governance\","
+               "\"interactive\":true,\"consequential\":true,\"is_enabled\":true,"
+               "\"is_accessible\":false,\"catalogStatus\":\"stale\"},"
+               "{\"slug\":\"common-room\",\"title\":\"Common Room\","
+               "\"categories\":[\"Business\",\"GTM\"],\"retrievable\":true,\"sync\":true,"
+               "\"isEnabled\":true,\"isAccessible\":true}]\n");
     fclose(f);
     setenv("DSCO_CODEX_APP_DIRECTORY", path, 1);
 
@@ -6842,8 +6936,8 @@ static void test_codex_app_directory_importer_variants(void) {
            "retrievable/sync connector marks untrusted content");
     codex_app_directory_free(&dir);
 
-    ASSERT(!codex_app_directory_load_file(&dir, "/tmp/dsco_missing_catalog_does_not_exist.json", err,
-                                          sizeof(err)),
+    ASSERT(!codex_app_directory_load_file(&dir, "/tmp/dsco_missing_catalog_does_not_exist.json",
+                                          err, sizeof(err)),
            "missing catalog fails closed");
     codex_app_directory_free(&dir);
     unlink(path);
@@ -6857,14 +6951,15 @@ static void test_codex_app_directory_importer_and_integration_discovery(void) {
     snprintf(path, sizeof(path), "/tmp/dsco_codex_apps_%d.json", (int)getpid());
     FILE *f = fopen(path, "w");
     ASSERT(f != NULL, "open temp codex app directory");
-    fprintf(f,
-            "{\"apps\":["
-            "{\"id\":\"github\",\"connector_id\":\"github\",\"display_name\":\"GitHub\","
-            "\"distribution_channel\":\"ecosystem-directory\",\"categories\":[\"Developer Tools\"],"
-            "\"labels\":[\"retrievable\",\"interactive\"],\"isEnabled\":true,\"isAccessible\":false},"
-            "{\"id\":\"stripe\",\"connector_id\":\"stripe\",\"display_name\":\"Stripe\","
-            "\"categories\":[\"Finance\"],\"labels\":[\"consequential\",\"sync\"],"
-            "\"isEnabled\":true,\"isAccessible\":true}]}\n");
+    fprintf(
+        f,
+        "{\"apps\":["
+        "{\"id\":\"github\",\"connector_id\":\"github\",\"display_name\":\"GitHub\","
+        "\"distribution_channel\":\"ecosystem-directory\",\"categories\":[\"Developer Tools\"],"
+        "\"labels\":[\"retrievable\",\"interactive\"],\"isEnabled\":true,\"isAccessible\":false},"
+        "{\"id\":\"stripe\",\"connector_id\":\"stripe\",\"display_name\":\"Stripe\","
+        "\"categories\":[\"Finance\"],\"labels\":[\"consequential\",\"sync\"],"
+        "\"isEnabled\":true,\"isAccessible\":true}]}\n");
     fclose(f);
 
     codex_app_directory_t dir;
@@ -6883,18 +6978,18 @@ static void test_codex_app_directory_importer_and_integration_discovery(void) {
     tools_init();
     tools_reset_external();
     tools_register_external("mcp__github__get_issue", "Read GitHub issue",
-                            "{\"type\":\"object\",\"properties\":{}}",
-                            test_external_tool_stub, NULL);
-    tools_register_external_metadata("mcp__github__get_issue", "github", "GitHub",
-                                     "ecosystem-directory", "Developer Tools",
-                                     "retrievable,interactive", "public_app",
-                                     DSCO_INTEGRATION_ACTION_READ |
-                                         DSCO_INTEGRATION_ACTION_UNTRUSTED_CONTENT |
-                                         DSCO_INTEGRATION_ACTION_INTERACTIVE,
-                                     "cached");
+                            "{\"type\":\"object\",\"properties\":{}}", test_external_tool_stub,
+                            NULL);
+    tools_register_external_metadata(
+        "mcp__github__get_issue", "github", "GitHub", "ecosystem-directory", "Developer Tools",
+        "retrievable,interactive", "public_app",
+        DSCO_INTEGRATION_ACTION_READ | DSCO_INTEGRATION_ACTION_UNTRUSTED_CONTENT |
+            DSCO_INTEGRATION_ACTION_INTERACTIVE,
+        "cached");
 
     char input[512];
-    snprintf(input, sizeof(input), "{\"path\":\"%s\",\"query\":\"GitHub\",\"profile\":\"engineering\"}", path);
+    snprintf(input, sizeof(input),
+             "{\"path\":\"%s\",\"query\":\"GitHub\",\"profile\":\"engineering\"}", path);
     char result[16384];
     bool ok = tools_execute("discover_integrations", input, result, sizeof(result));
     ASSERT(ok, "discover_integrations succeeds");
@@ -6938,19 +7033,17 @@ static void test_integration_discovery_profiles_pagination_and_doctor_flags(void
     tools_init();
     tools_reset_external();
     tools_register_external("mcp__toolcheck__scan", "Run ToolCheck scan",
-                            "{\"type\":\"object\",\"properties\":{}}",
-                            test_external_tool_stub, NULL);
-    tools_register_external_metadata("mcp__toolcheck__scan", "toolcheck", "ToolCheck",
-                                     "ecosystem-directory", "Governance,Agent Runtime",
-                                     "interactive,consequential", "control_plane",
-                                     DSCO_INTEGRATION_ACTION_WRITE |
-                                         DSCO_INTEGRATION_ACTION_ADMIN |
-                                         DSCO_INTEGRATION_ACTION_REQUIRES_CONFIRMATION |
-                                         DSCO_INTEGRATION_ACTION_INTERACTIVE,
-                                     "stale");
+                            "{\"type\":\"object\",\"properties\":{}}", test_external_tool_stub,
+                            NULL);
+    tools_register_external_metadata(
+        "mcp__toolcheck__scan", "toolcheck", "ToolCheck", "ecosystem-directory",
+        "Governance,Agent Runtime", "interactive,consequential", "control_plane",
+        DSCO_INTEGRATION_ACTION_WRITE | DSCO_INTEGRATION_ACTION_ADMIN |
+            DSCO_INTEGRATION_ACTION_REQUIRES_CONFIRMATION | DSCO_INTEGRATION_ACTION_INTERACTIVE,
+        "stale");
     tools_register_external("mcp__unmapped__delete_record", "Delete an unmapped record",
-                            "{\"type\":\"object\",\"properties\":{}}",
-                            test_external_tool_stub, NULL);
+                            "{\"type\":\"object\",\"properties\":{}}", test_external_tool_stub,
+                            NULL);
 
     char input[512];
     char result[32768];
@@ -7032,15 +7125,14 @@ static void test_chronicle_local_event_blob_roundtrip(void) {
     ASSERT(chronicle_llm_request(trace_id, llm_span, "test-provider", "test-model",
                                  "{\"input\":\"hello\"}", 8),
            "llm request recorded");
-    ASSERT(chronicle_tool_call_start(trace_id, turn_span, "test_tool", "toolu_test",
-                                     "{\"x\":1}", tool_span),
+    ASSERT(chronicle_tool_call_start(trace_id, turn_span, "test_tool", "toolu_test", "{\"x\":1}",
+                                     tool_span),
            "tool call start recorded");
-    ASSERT(chronicle_tool_call_end(trace_id, tool_span, "test_tool", "tool result", true, false,
-                                   12.5),
-           "tool call end recorded");
+    ASSERT(
+        chronicle_tool_call_end(trace_id, tool_span, "test_tool", "tool result", true, false, 12.5),
+        "tool call end recorded");
     ASSERT(chronicle_llm_response(trace_id, llm_span, "test-provider", "test-model", "answer",
-                                  "{\"raw\":true}", 8, 2, 1, 0, 0, 0.001, 23.0, "stop",
-                                  "gen-test"),
+                                  "{\"raw\":true}", 8, 2, 1, 0, 0, 0.001, 23.0, "stop", "gen-test"),
            "llm response recorded");
     ASSERT(chronicle_blob_put_text("blob payload", "test.blob", "test", sha, sizeof(sha)),
            "blob stored");
@@ -7310,8 +7402,7 @@ static void test_mcp_server_filter_env_selects_one(void) {
     char old_cwd[1024];
     bool have_old_cwd = getcwd(old_cwd, sizeof(old_cwd)) != NULL;
     char root[1024];
-    snprintf(root, sizeof(root), "/tmp/dsco_mcp_filter_%d_%ld", (int)getpid(),
-             (long)time(NULL));
+    snprintf(root, sizeof(root), "/tmp/dsco_mcp_filter_%d_%ld", (int)getpid(), (long)time(NULL));
     char cfg_path[1100];
     snprintf(cfg_path, sizeof(cfg_path), "%s/.mcp.json", root);
 
@@ -7402,6 +7493,17 @@ static void test_tools_get_all(void) {
     PASS();
 }
 
+static void test_tools_offload_safe_allowlist(void) {
+    TEST("remote tool offload allowlist is read-only and concurrent");
+    tools_init();
+    ASSERT(tools_is_offload_safe("Read"), "read-only concurrent tool should be offload safe");
+    ASSERT(tools_is_offload_safe("Grep"), "search tool should be offload safe");
+    ASSERT(!tools_is_offload_safe("Write"), "write tool should not be offload safe");
+    ASSERT(!tools_is_offload_safe("Bash"), "shell tool should not be offload safe");
+    ASSERT(!tools_is_offload_safe("definitely_missing_tool"), "unknown tool should not be safe");
+    PASS();
+}
+
 static void test_agent_and_swarm_tool_schemas_expose_spawn_fields(void) {
     TEST("agent and swarm schemas expose spawn fields");
     tools_init();
@@ -7464,10 +7566,8 @@ static void test_swarm_group_status_json_includes_executor_metadata(void) {
 
     char json[2048];
     swarm_group_status_json(&sw, gid, json, sizeof(json));
-    ASSERT(strstr(json, "\"executor\":\"codex\"") != NULL,
-           "group status should include executor");
-    ASSERT(strstr(json, "\"model\":\"gpt-5.5\"") != NULL,
-           "group status should include model");
+    ASSERT(strstr(json, "\"executor\":\"codex\"") != NULL, "group status should include executor");
+    ASSERT(strstr(json, "\"model\":\"gpt-5.5\"") != NULL, "group status should include model");
     swarm_destroy(&sw);
     PASS();
 }
@@ -7643,6 +7743,123 @@ static void test_ask_dialog_branching(void) {
     qs[0].selected[0] = false;
     qs[0].selected[1] = true;
     ASSERT(tui_ask_question_visible(qs, 2, 1), "gated visible when value matches");
+    PASS();
+}
+
+static void test_tui_key_decode_page_navigation_sequences(void) {
+    TEST("tui key decode: paging/navigation sequences");
+    ASSERT(tui_test_decode_key_sequence("\033[A") == TUI_TEST_KEY_UP, "CSI A decodes up");
+    ASSERT(tui_test_decode_key_sequence("\033[B") == TUI_TEST_KEY_DOWN, "CSI B decodes down");
+    ASSERT(tui_test_decode_key_sequence("\033[C") == TUI_TEST_KEY_RIGHT, "CSI C decodes right");
+    ASSERT(tui_test_decode_key_sequence("\033[D") == TUI_TEST_KEY_LEFT, "CSI D decodes left");
+    ASSERT(tui_test_decode_key_sequence("\033[5~") == TUI_TEST_KEY_PAGE_UP,
+           "CSI 5~ decodes PageUp");
+    ASSERT(tui_test_decode_key_sequence("\033[6~") == TUI_TEST_KEY_PAGE_DOWN,
+           "CSI 6~ decodes PageDown");
+    ASSERT(tui_test_decode_key_sequence("\033[H") == TUI_TEST_KEY_HOME, "CSI H decodes Home");
+    ASSERT(tui_test_decode_key_sequence("\033[F") == TUI_TEST_KEY_END, "CSI F decodes End");
+    ASSERT(tui_test_decode_key_sequence("\033[1~") == TUI_TEST_KEY_HOME, "CSI 1~ decodes Home");
+    ASSERT(tui_test_decode_key_sequence("\033[4~") == TUI_TEST_KEY_END, "CSI 4~ decodes End");
+    ASSERT(tui_test_decode_key_sequence("\033[1;5B") == TUI_TEST_KEY_DOWN,
+           "modified CSI down decodes as down");
+    ASSERT(tui_test_decode_key_sequence("\033[Z") == TUI_TEST_KEY_BACKTAB,
+           "CSI Z decodes back-tab");
+    PASS();
+}
+
+static void test_tui_key_decode_unknown_sequences_do_not_cancel(void) {
+    TEST("tui key decode: unknown CSI does not cancel");
+    ASSERT(tui_test_decode_key_sequence("\033") == TUI_TEST_KEY_ESC, "bare ESC still cancels");
+    ASSERT(tui_test_decode_key_sequence("\033[") == TUI_TEST_KEY_UNKNOWN, "short CSI is ignored");
+    ASSERT(tui_test_decode_key_sequence("\033[200~") == TUI_TEST_KEY_UNKNOWN,
+           "paste CSI is ignored");
+    ASSERT(tui_test_decode_key_sequence("\033[?25h") == TUI_TEST_KEY_UNKNOWN,
+           "private CSI is ignored");
+    ASSERT(tui_test_decode_key_sequence("\033[9~") == TUI_TEST_KEY_UNKNOWN,
+           "unsupported tilde CSI is ignored");
+    PASS();
+}
+
+static void test_ask_dialog_page_keys_clamp_rows(void) {
+    TEST("ask dialog: page keys clamp rows");
+    ASSERT(tui_test_dialog_move_row(2, 4, TUI_TEST_KEY_PAGE_UP) == 0, "PageUp moves first");
+    ASSERT(tui_test_dialog_move_row(2, 4, TUI_TEST_KEY_HOME) == 0, "Home moves first");
+    ASSERT(tui_test_dialog_move_row(1, 4, TUI_TEST_KEY_PAGE_DOWN) == 4, "PageDown moves last");
+    ASSERT(tui_test_dialog_move_row(1, 4, TUI_TEST_KEY_END) == 4, "End moves last");
+    ASSERT(tui_test_dialog_move_row(0, 4, TUI_TEST_KEY_UP) == 4, "Up wraps to last row");
+    ASSERT(tui_test_dialog_move_row(4, 4, TUI_TEST_KEY_DOWN) == 0, "Down wraps first");
+    ASSERT(tui_test_dialog_move_row(9, 4, TUI_TEST_KEY_UNKNOWN) == 4,
+           "unknown clamps without action");
+    ASSERT(tui_test_dialog_move_row(-2, 4, TUI_TEST_KEY_UNKNOWN) == 0,
+           "negative row clamps without action");
+    PASS();
+}
+
+static void test_tui_menu_page_movement_skips_nonselectable_rows(void) {
+    TEST("tui menu: paging skips nonselectable rows");
+    const bool selectable[] = {false, true, false, true, true, false, true};
+    const int nrows = (int)(sizeof selectable / sizeof selectable[0]);
+
+    ASSERT(tui_test_menu_move_selection(selectable, nrows, 1, 1) == 3, "next skips headers");
+    ASSERT(tui_test_menu_move_selection(selectable, nrows, 1, 3) == 6,
+           "page down advances selectable rows");
+    ASSERT(tui_test_menu_move_selection(selectable, nrows, 6, 10) == 6, "page down clamps at end");
+    ASSERT(tui_test_menu_move_selection(selectable, nrows, 6, -2) == 3,
+           "page up advances selectable rows");
+    ASSERT(tui_test_menu_move_selection(selectable, nrows, -3, 0) == 1,
+           "offscreen low selection clamps forward");
+    ASSERT(tui_test_menu_move_selection(selectable, nrows, nrows + 4, 0) == 6,
+           "offscreen high selection clamps backward");
+
+    const bool none[] = {false, false, false};
+    ASSERT(tui_test_menu_move_selection(none, 3, 0, 1) == -1, "empty selectable set is safe");
+    ASSERT(tui_test_menu_move_selection(NULL, 3, 0, 1) == -1, "null selectable set is safe");
+    PASS();
+}
+
+static void test_supervisor_hotswap_exec_is_non_mutating(void) {
+    TEST("supervisor hotswap exec is non-mutating");
+    char dir_template[] = "/tmp/dsco_supervisor_hot_XXXXXX";
+    int unique_fd = mkstemp(dir_template);
+    ASSERT(unique_fd >= 0, "mkstemp supervisor hotswap path");
+    close(unique_fd);
+    unlink(dir_template);
+    ASSERT(mkdir(dir_template, 0700) == 0, "mkdir supervisor hotswap dir");
+
+    char current_path[512];
+    char staged_path[512];
+    snprintf(current_path, sizeof current_path, "%s/dsco", dir_template);
+    snprintf(staged_path, sizeof staged_path, "%s/dsco-new", dir_template);
+
+    FILE *cur = fopen(current_path, "w");
+    ASSERT(cur != NULL, "write current executable placeholder");
+    fputs("current", cur);
+    fclose(cur);
+    chmod(current_path, 0700);
+
+    FILE *staged = fopen(staged_path, "w");
+    ASSERT(staged != NULL, "write staged executable placeholder");
+    fputs("staged", staged);
+    fclose(staged);
+    chmod(staged_path, 0700);
+
+    char resolved[512];
+    ASSERT(supervisor_resolve_hotswap_exec(current_path, NULL, resolved, sizeof resolved),
+           "resolve sibling dsco-new");
+    ASSERT(strcmp(resolved, staged_path) == 0, "resolver returns staged executable");
+    ASSERT(access(current_path, F_OK) == 0, "current executable still exists");
+    ASSERT(access(staged_path, X_OK) == 0, "staged executable remains executable");
+
+    char buf[32] = {0};
+    FILE *verify = fopen(current_path, "r");
+    ASSERT(verify != NULL, "reopen current executable placeholder");
+    fread(buf, 1, sizeof(buf) - 1, verify);
+    fclose(verify);
+    ASSERT(strcmp(buf, "current") == 0, "current executable content unchanged");
+
+    unlink(current_path);
+    unlink(staged_path);
+    rmdir(dir_template);
     PASS();
 }
 
@@ -8604,10 +8821,8 @@ static void test_provider_msg_is_credit_too_low_classifies_exhaustion(void) {
     ASSERT(provider_msg_is_credit_too_low(
                "Subscription window is exhausted. Try again after 2026-06-24T04:03:31+00:00"),
            "subscription window exhaustion detected");
-    ASSERT(provider_msg_is_credit_too_low("rate_limit_exceeded"),
-           "rate-limit error code detected");
-    ASSERT(provider_msg_is_credit_too_low("too many requests"),
-           "too-many-requests detected");
+    ASSERT(provider_msg_is_credit_too_low("rate_limit_exceeded"), "rate-limit error code detected");
+    ASSERT(provider_msg_is_credit_too_low("too many requests"), "too-many-requests detected");
     ASSERT(provider_msg_is_credit_too_low("usage limit reached"),
            "usage-limit exhaustion detected");
     ASSERT(!provider_msg_is_credit_too_low("invalid authentication credentials"),
@@ -8677,17 +8892,16 @@ static void test_provider_detect_namespaced_models(void) {
            "moonshotai namespaced model should route to native Moonshot");
     ASSERT(strcmp(provider_detect("sakana/fugu-ultra", NULL), "sakana") == 0,
            "sakana namespaced model should route to native Sakana");
-    ASSERT(strcmp(provider_detect("cerebras/qwen-3-235b-a22b-instruct-2507", NULL),
-                  "cerebras") == 0,
+    ASSERT(strcmp(provider_detect("cerebras/qwen-3-235b-a22b-instruct-2507", NULL), "cerebras") ==
+               0,
            "cerebras namespaced model should route to native Cerebras");
     ASSERT(strcmp(provider_detect("huggingface/meta-llama/Llama-3.3-70B-Instruct", NULL),
                   "huggingface") == 0,
            "huggingface namespaced model should route to native Hugging Face");
-    ASSERT(strcmp(provider_detect("hf/meta-llama/Llama-3.3-70B-Instruct", NULL),
-                  "huggingface") == 0,
+    ASSERT(strcmp(provider_detect("hf/meta-llama/Llama-3.3-70B-Instruct", NULL), "huggingface") ==
+               0,
            "hf alias namespace should route to native Hugging Face");
-    ASSERT(strcmp(provider_detect("nvidia/meta/llama-3.1-70b-instruct", NULL),
-                  "nvidia") == 0,
+    ASSERT(strcmp(provider_detect("nvidia/meta/llama-3.1-70b-instruct", NULL), "nvidia") == 0,
            "nvidia namespaced model should route to native NVIDIA");
     ASSERT(strcmp(provider_detect("dashscope/qwen3-coder-plus", NULL), "alibaba") == 0,
            "dashscope namespace should route to native Alibaba");
@@ -8861,8 +9075,7 @@ static void test_provider_create_uses_profile_alias_transport(void) {
 
     provider_t *nvidia = provider_create("nvidia-nim");
     ASSERT(nvidia != NULL, "nvidia-nim alias should create a provider");
-    ASSERT(strcmp(nvidia->name, "nvidia") == 0,
-           "nvidia-nim alias should canonicalize to nvidia");
+    ASSERT(strcmp(nvidia->name, "nvidia") == 0, "nvidia-nim alias should canonicalize to nvidia");
     ASSERT(strstr(nvidia->api_url, "integrate.api.nvidia.com/v1/chat/completions") != NULL,
            "nvidia provider should use NIM OpenAI-compatible base");
     provider_free(nvidia);
@@ -8960,8 +9173,7 @@ static void test_provider_configurable_base_requires_explicit_base(void) {
     char saved_foundry_base[512], saved_foundry_api_base[512];
     bool had_azure_base = false, had_azure_api_base = false;
     bool had_foundry_base = false, had_foundry_api_base = false;
-    test_capture_env("AZURE_BASE_URL", saved_azure_base, sizeof(saved_azure_base),
-                     &had_azure_base);
+    test_capture_env("AZURE_BASE_URL", saved_azure_base, sizeof(saved_azure_base), &had_azure_base);
     test_capture_env("AZURE_API_BASE", saved_azure_api_base, sizeof(saved_azure_api_base),
                      &had_azure_api_base);
     test_capture_env("AZURE_FOUNDRY_BASE_URL", saved_foundry_base, sizeof(saved_foundry_base),
@@ -9009,7 +9221,7 @@ static void test_provider_resolve_api_key_supports_aliases(void) {
     char saved_kimi[256], saved_grok[256], saved_moonshot[256], saved_xai[256],
         saved_kimi_coding[256], saved_moonshotai[256];
     bool had_kimi = false, had_grok = false, had_moonshot = false, had_xai = false,
-        had_kimi_coding = false, had_moonshotai = false;
+         had_kimi_coding = false, had_moonshotai = false;
     test_capture_env("KIMI_API_KEY", saved_kimi, sizeof(saved_kimi), &had_kimi);
     test_capture_env("GROK_API_KEY", saved_grok, sizeof(saved_grok), &had_grok);
     test_capture_env("MOONSHOT_API_KEY", saved_moonshot, sizeof(saved_moonshot), &had_moonshot);
@@ -9064,15 +9276,13 @@ static void test_provider_sakana_payg_key_is_additive(void) {
     test_capture_env("FUGU_PAYG_API_KEY", saved_payg, sizeof(saved_payg), &had_payg);
     test_capture_env("SAKANA_PAYG_API_KEY", saved_sakana_payg, sizeof(saved_sakana_payg),
                      &had_sakana_payg);
-    test_capture_env("FISH_PAYG_API_KEY", saved_fish_payg, sizeof(saved_fish_payg),
-                     &had_fish_payg);
+    test_capture_env("FISH_PAYG_API_KEY", saved_fish_payg, sizeof(saved_fish_payg), &had_fish_payg);
     test_capture_env("SAKANA_PAYG_TOKEN", saved_payg_token, sizeof(saved_payg_token),
                      &had_payg_token);
     test_capture_env("DSCO_SAKANA_KEY_CLASS", saved_class, sizeof(saved_class), &had_class);
     test_capture_env("DSCO_FUGU_KEY_CLASS", saved_fugu_class, sizeof(saved_fugu_class),
                      &had_fugu_class);
-    test_capture_env("DSCO_PREFER_METERED_API", saved_metered, sizeof(saved_metered),
-                     &had_metered);
+    test_capture_env("DSCO_PREFER_METERED_API", saved_metered, sizeof(saved_metered), &had_metered);
     test_capture_env("DSCO_API_BILLING_FALLBACK", saved_billing_fb, sizeof(saved_billing_fb),
                      &had_billing_fb);
 
@@ -9118,8 +9328,7 @@ static void test_provider_sakana_payg_key_is_additive(void) {
     unsetenv("DSCO_SAKANA_KEY_CLASS");
     setenv("DSCO_FUGU_KEY_CLASS", "payg", 1);
     key = provider_resolve_api_key("sakana");
-    ASSERT(key && strcmp(key, "fish_payg") == 0,
-           "explicit Fugu payg key class should select PAYG");
+    ASSERT(key && strcmp(key, "fish_payg") == 0, "explicit Fugu payg key class should select PAYG");
 
     unsetenv("DSCO_FUGU_KEY_CLASS");
     setenv("DSCO_PREFER_METERED_API", "1", 1);
@@ -9400,8 +9609,7 @@ static void test_provider_build_default_fallback_models_cross_lab(void) {
     test_restore_env("OPENROUTER_API_KEY", saved_or, had_or);
     test_restore_env("ANTHROPIC_API_KEY", saved_anth, had_anth);
     test_restore_env("OPENAI_API_KEY", saved_openai, had_openai);
-    test_restore_env("DSCO_DISABLE_CODEX_OAUTH_DISCOVERY", saved_disable_codex,
-                     had_disable_codex);
+    test_restore_env("DSCO_DISABLE_CODEX_OAUTH_DISCOVERY", saved_disable_codex, had_disable_codex);
     test_restore_env("FUGU_API_KEY", saved_fugu, had_fugu);
     test_restore_env("SAKANA_API_KEY", saved_sakana, had_sakana);
     test_restore_env("FISH_API_KEY", saved_fish, had_fish);
@@ -9455,8 +9663,7 @@ static void test_provider_build_default_fallback_models_prefers_codex_subscripti
     test_restore_env("OPENAI_API_KEY", saved_openai, had_openai);
     test_restore_env("XAI_API_KEY", saved_xai, had_xai);
     test_restore_env("GROK_API_KEY", saved_grok, had_grok);
-    test_restore_env("DSCO_DISABLE_CODEX_OAUTH_DISCOVERY", saved_disable_codex,
-                     had_disable_codex);
+    test_restore_env("DSCO_DISABLE_CODEX_OAUTH_DISCOVERY", saved_disable_codex, had_disable_codex);
     PASS();
 }
 
@@ -9490,8 +9697,7 @@ static void test_provider_build_default_fallback_models_never_includes_primary_d
     setenv("DSCO_DISABLE_CODEX_OAUTH_DISCOVERY", "1", 1);
 
     char models[4][128];
-    int count = provider_build_default_fallback_models("openrouter/x-ai/grok-4.20-beta",
-                                                       models, 4);
+    int count = provider_build_default_fallback_models("openrouter/x-ai/grok-4.20-beta", models, 4);
     ASSERT(count >= 2, "fallback chain should still include other labs");
     ASSERT(!test_model_list_contains(models, count, "openrouter/x-ai/grok-4.20-beta"),
            "fallback chain must not retry the already-failed primary model");
@@ -9505,8 +9711,7 @@ static void test_provider_build_default_fallback_models_never_includes_primary_d
     test_restore_env("OPENAI_API_KEY", saved_openai, had_openai);
     test_restore_env("XAI_API_KEY", saved_xai, had_xai);
     test_restore_env("GROK_API_KEY", saved_grok, had_grok);
-    test_restore_env("DSCO_DISABLE_CODEX_OAUTH_DISCOVERY", saved_disable_codex,
-                     had_disable_codex);
+    test_restore_env("DSCO_DISABLE_CODEX_OAUTH_DISCOVERY", saved_disable_codex, had_disable_codex);
     PASS();
 }
 
@@ -9544,8 +9749,7 @@ static void test_provider_build_default_fallback_models_respects_capacity(void) 
     test_restore_env("ANTHROPIC_API_KEY", saved_anth, had_anth);
     test_restore_env("OPENAI_API_KEY", saved_openai, had_openai);
     test_restore_env("XAI_API_KEY", saved_xai, had_xai);
-    test_restore_env("DSCO_DISABLE_CODEX_OAUTH_DISCOVERY", saved_disable_codex,
-                     had_disable_codex);
+    test_restore_env("DSCO_DISABLE_CODEX_OAUTH_DISCOVERY", saved_disable_codex, had_disable_codex);
     PASS();
 }
 
@@ -9619,8 +9823,7 @@ static void test_provider_build_default_fallback_models_empty_without_credential
     test_restore_env("SAKANA_TOKEN", saved_sakana_token, had_sakana_token);
     test_restore_env("DSCO_DISABLE_CLAUDE_CODE_OAUTH_DISCOVERY", saved_disable_claude,
                      had_disable_claude);
-    test_restore_env("DSCO_DISABLE_CODEX_OAUTH_DISCOVERY", saved_disable_codex,
-                     had_disable_codex);
+    test_restore_env("DSCO_DISABLE_CODEX_OAUTH_DISCOVERY", saved_disable_codex, had_disable_codex);
     PASS();
 }
 
@@ -9655,8 +9858,7 @@ static void test_provider_build_default_fallback_models_native_primary_duplicate
     test_restore_env("OPENROUTER_API_KEY", saved_or, had_or);
     test_restore_env("ANTHROPIC_API_KEY", saved_anth, had_anth);
     test_restore_env("OPENAI_API_KEY", saved_openai, had_openai);
-    test_restore_env("DSCO_DISABLE_CODEX_OAUTH_DISCOVERY", saved_disable_codex,
-                     had_disable_codex);
+    test_restore_env("DSCO_DISABLE_CODEX_OAUTH_DISCOVERY", saved_disable_codex, had_disable_codex);
     PASS();
 }
 
@@ -9700,8 +9902,9 @@ static void test_provider_build_default_fallback_models_for_fugu_cross_provider(
     ASSERT(count >= 2, "Fugu fallback chain should include other keyed providers");
     ASSERT(strcmp(provider_route_for_model(models[0], NULL, NULL), "anthropic") == 0,
            "first non-Fugu fallback should use Anthropic");
-    ASSERT(strcmp(provider_route_for_model(models[1], NULL, NULL), "openai") == 0,
-           "second non-Fugu fallback should use OpenAI direct API when Codex discovery is disabled");
+    ASSERT(
+        strcmp(provider_route_for_model(models[1], NULL, NULL), "openai") == 0,
+        "second non-Fugu fallback should use OpenAI direct API when Codex discovery is disabled");
 
     test_restore_env("XAI_API_KEY", saved_xai, had_xai);
     test_restore_env("GROK_API_KEY", saved_grok, had_grok);
@@ -9709,8 +9912,7 @@ static void test_provider_build_default_fallback_models_for_fugu_cross_provider(
     test_restore_env("OPENROUTER_API_KEY", saved_or, had_or);
     test_restore_env("ANTHROPIC_API_KEY", saved_anth, had_anth);
     test_restore_env("OPENAI_API_KEY", saved_openai, had_openai);
-    test_restore_env("DSCO_DISABLE_CODEX_OAUTH_DISCOVERY", saved_disable_codex,
-                     had_disable_codex);
+    test_restore_env("DSCO_DISABLE_CODEX_OAUTH_DISCOVERY", saved_disable_codex, had_disable_codex);
     test_restore_env("FUGU_API_KEY", saved_fugu, had_fugu);
     test_restore_env("SAKANA_API_KEY", saved_sakana, had_sakana);
     test_restore_env("FISH_API_KEY", saved_fish, had_fish);
@@ -9743,8 +9945,7 @@ static void test_provider_build_default_fallback_models_empty_for_local_endpoint
     setenv("DSCO_DISABLE_CODEX_OAUTH_DISCOVERY", "1", 1);
 
     char models[4][128];
-    int count = provider_build_default_fallback_models("lmstudio:liquid/lfm2.5-1.2b",
-                                                       models, 4);
+    int count = provider_build_default_fallback_models("lmstudio:liquid/lfm2.5-1.2b", models, 4);
     ASSERT(count == 0, "local LM Studio model should not get remote fallback models");
 
     session_state_t s;
@@ -9761,8 +9962,7 @@ static void test_provider_build_default_fallback_models_empty_for_local_endpoint
     test_restore_env("OPENROUTER_API_KEY", saved_or, had_or);
     test_restore_env("ANTHROPIC_API_KEY", saved_anth, had_anth);
     test_restore_env("OPENAI_API_KEY", saved_openai, had_openai);
-    test_restore_env("DSCO_DISABLE_CODEX_OAUTH_DISCOVERY", saved_disable_codex,
-                     had_disable_codex);
+    test_restore_env("DSCO_DISABLE_CODEX_OAUTH_DISCOVERY", saved_disable_codex, had_disable_codex);
     PASS();
 }
 
@@ -9780,12 +9980,10 @@ static void test_provider_route_explicit_openrouter_overrides_native_namespace(v
     setenv("MOONSHOT_API_KEY", "sk-moonshot-native", 1);
     setenv("KIMI_API_KEY", "sk-kimi-native", 1);
 
-    ASSERT(strcmp(provider_route_for_model("openrouter/anthropic/claude-sonnet-4.6",
-                                           NULL, NULL),
+    ASSERT(strcmp(provider_route_for_model("openrouter/anthropic/claude-sonnet-4.6", NULL, NULL),
                   "openrouter") == 0,
            "explicit openrouter/anthropic slug must route via OpenRouter, not native Anthropic");
-    ASSERT(strcmp(provider_route_for_model("openrouter/moonshotai/kimi-k2.7-code",
-                                           NULL, NULL),
+    ASSERT(strcmp(provider_route_for_model("openrouter/moonshotai/kimi-k2.7-code", NULL, NULL),
                   "openrouter") == 0,
            "explicit openrouter/moonshot slug must route via OpenRouter, not native Moonshot");
 
@@ -9813,8 +10011,8 @@ static void test_provider_route_native_namespace_does_not_silently_fallback_to_o
     ASSERT(strcmp(provider_route_for_model("anthropic/claude-sonnet-4.6", NULL, NULL),
                   "anthropic") == 0,
            "native Anthropic namespace should not be hijacked to OpenRouter");
-    ASSERT(strcmp(provider_route_for_model("moonshotai/kimi-k2.7-code", NULL, NULL),
-                  "moonshot") == 0,
+    ASSERT(strcmp(provider_route_for_model("moonshotai/kimi-k2.7-code", NULL, NULL), "moonshot") ==
+               0,
            "native Moonshot namespace should not be hijacked to OpenRouter");
 
     test_restore_env("OPENROUTER_API_KEY", saved_or, had_or);
@@ -9837,8 +10035,8 @@ static void test_provider_model_is_routable_respects_native_namespace_without_ke
     unsetenv("MOONSHOT_API_KEY");
 
     const char *provider_name = NULL;
-    bool routable = provider_model_is_routable("moonshotai/kimi-k2.7-code", NULL, NULL,
-                                               &provider_name);
+    bool routable =
+        provider_model_is_routable("moonshotai/kimi-k2.7-code", NULL, NULL, &provider_name);
     ASSERT(!routable, "native Moonshot namespace should not be routable without Moonshot key");
     ASSERT(provider_name && strcmp(provider_name, "moonshot") == 0,
            "routability should report the intended native provider, not OpenRouter");
@@ -9888,12 +10086,13 @@ static void test_provider_route_override_does_not_rewrite_request_key_family(voi
     unsetenv("OPENROUTER_API_KEY");
     unsetenv("ANTHROPIC_API_KEY");
 
-    const char *routed = provider_route_for_model("claude-sonnet-4-6", "sk-ant-session",
-                                                  "openrouter");
+    const char *routed =
+        provider_route_for_model("claude-sonnet-4-6", "sk-ant-session", "openrouter");
     const char *key = provider_resolve_request_api_key(routed, "sk-ant-session");
     ASSERT(strcmp(routed, "openrouter") == 0, "override should choose requested provider");
-    ASSERT(key == NULL,
-           "OpenRouter override should not reuse a mismatched Anthropic session key as request key");
+    ASSERT(
+        key == NULL,
+        "OpenRouter override should not reuse a mismatched Anthropic session key as request key");
 
     test_restore_env("OPENROUTER_API_KEY", saved_or, had_or);
     test_restore_env("ANTHROPIC_API_KEY", saved_anth, had_anth);
@@ -10046,8 +10245,7 @@ static void test_provider_route_glm_aliases_split_native_and_openrouter(void) {
            "glm52 should route direct to Z.AI coding-plan endpoint");
     ASSERT(strcmp(or_model, "openrouter/z-ai/glm-5.2") == 0,
            "or-glm52 should resolve to explicit OpenRouter Z.AI catalog slug");
-    ASSERT(strcmp(or_route, "openrouter") == 0,
-           "or-glm52 should route through OpenRouter");
+    ASSERT(strcmp(or_route, "openrouter") == 0, "or-glm52 should route through OpenRouter");
 
     test_restore_env("GLM_API_KEY", saved_glm, had_glm);
     test_restore_env("ZAI_API_KEY", saved_zai, had_zai);
@@ -10239,8 +10437,7 @@ static void test_provider_route_prefers_codex_subscription_for_openai_models(voi
     test_capture_env("CHATGPT_OAUTH_TOKEN", saved_oauth, sizeof(saved_oauth), &had_oauth);
     test_capture_env("XAI_API_KEY", saved_xai, sizeof(saved_xai), &had_xai);
     test_capture_env("GROK_API_KEY", saved_grok, sizeof(saved_grok), &had_grok);
-    test_capture_env("ANTHROPIC_API_KEY", saved_anthropic, sizeof(saved_anthropic),
-                     &had_anthropic);
+    test_capture_env("ANTHROPIC_API_KEY", saved_anthropic, sizeof(saved_anthropic), &had_anthropic);
 
     char root[512];
     snprintf(root, sizeof(root), "/tmp/dsco_codex_route_%d_%ld", (int)getpid(), (long)time(NULL));
@@ -10286,18 +10483,16 @@ static void test_provider_route_prefers_codex_subscription_for_openai_models(voi
     const char *openai_default = provider_primary_model_for("openai", true);
     const char *legacy_route = provider_route_for_model("openai/gpt-4.1", NULL, NULL);
     char fallback_models[4][128];
-    int fallback_count =
-        provider_build_default_fallback_models("zai/glm-5.2", fallback_models, 4);
+    int fallback_count = provider_build_default_fallback_models("zai/glm-5.2", fallback_models, 4);
     provider_t *codex_provider = provider_create("openai-codex");
     conversation_t codex_conv;
     conv_init(&codex_conv);
     conv_add_user_text(&codex_conv, "hello");
     session_state_t codex_session;
     session_state_init(&codex_session, "codex");
-    char *codex_req = codex_provider
-                          ? codex_provider->build_request(codex_provider, &codex_conv,
-                                                           &codex_session, 1024, req_key)
-                          : NULL;
+    char *codex_req = codex_provider ? codex_provider->build_request(codex_provider, &codex_conv,
+                                                                     &codex_session, 1024, req_key)
+                                     : NULL;
     char *codex_req_model = codex_req ? json_get_str(codex_req, "model") : NULL;
     char *codex_req_instructions = codex_req ? json_get_str(codex_req, "instructions") : NULL;
 
@@ -10439,8 +10634,7 @@ static void test_provider_exports_openai_codex_oauth_for_children(void) {
     unsetenv("DSCO_CHATGPT_OAUTH_TOKEN");
     unsetenv("CHATGPT_OAUTH_TOKEN");
 
-    provider_export_child_process_credentials_for_provider("openai-codex",
-                                                           "chatgpt-oauth-child");
+    provider_export_child_process_credentials_for_provider("openai-codex", "chatgpt-oauth-child");
 
     ASSERT(getenv("DSCO_CHATGPT_OAUTH_TOKEN") &&
                strcmp(getenv("DSCO_CHATGPT_OAUTH_TOKEN"), "chatgpt-oauth-child") == 0,
@@ -10464,8 +10658,7 @@ static void test_provider_openai_codex_marker_does_not_fake_oauth_env(void) {
     setenv("DSCO_CHATGPT_OAUTH_TOKEN", "existing-dsco-oauth", 1);
     setenv("CHATGPT_OAUTH_TOKEN", "existing-alias-oauth", 1);
 
-    provider_export_child_process_credentials_for_provider("openai-codex",
-                                                           "chatgpt-subscription");
+    provider_export_child_process_credentials_for_provider("openai-codex", "chatgpt-subscription");
 
     ASSERT(getenv("DSCO_CHATGPT_OAUTH_TOKEN") &&
                strcmp(getenv("DSCO_CHATGPT_OAUTH_TOKEN"), "existing-dsco-oauth") == 0,
@@ -10920,8 +11113,7 @@ static void test_swarm_detects_claude_code_local_auth_marker(void) {
          had_dsco_claude_oauth = false;
     test_capture_env("HOME", saved_home, sizeof(saved_home), &had_home);
     test_capture_env("PATH", saved_path, sizeof(saved_path), &had_path);
-    test_capture_env("ANTHROPIC_API_KEY", saved_anthropic, sizeof(saved_anthropic),
-                     &had_anthropic);
+    test_capture_env("ANTHROPIC_API_KEY", saved_anthropic, sizeof(saved_anthropic), &had_anthropic);
     test_capture_env("CLAUDE_CODE_OAUTH_TOKEN", saved_claude_oauth, sizeof(saved_claude_oauth),
                      &had_claude_oauth);
     test_capture_env("DSCO_CLAUDE_CODE_OAUTH_TOKEN", saved_dsco_claude_oauth,
@@ -11017,13 +11209,13 @@ static void test_swarm_create_accepts_per_task_providers(void) {
     sw->dsco_path = safe_strdup(script_path);
 
     char result[4096];
-    bool ok = tools_execute(
-        "swarm",
-        "{\"action\":\"create\",\"name\":\"cross-provider-test\",\"tasks\":["
-        "{\"task\":\"probe xai\",\"provider\":\"xai\",\"model\":\"grok-4-fast\"},"
-        "{\"task\":\"probe anthropic\",\"provider\":\"anthropic\","
-        "\"model\":\"claude-sonnet-4-6\"}]}",
-        result, sizeof(result));
+    bool ok =
+        tools_execute("swarm",
+                      "{\"action\":\"create\",\"name\":\"cross-provider-test\",\"tasks\":["
+                      "{\"task\":\"probe xai\",\"provider\":\"xai\",\"model\":\"grok-4-fast\"},"
+                      "{\"task\":\"probe anthropic\",\"provider\":\"anthropic\","
+                      "\"model\":\"claude-sonnet-4-6\"}]}",
+                      result, sizeof(result));
     ASSERT(ok, "cross-provider swarm create should succeed");
     ASSERT(strstr(result, "\"agents_spawned\":2") != NULL,
            "cross-provider swarm should spawn both task agents");
@@ -11227,8 +11419,7 @@ static void test_swarm_provider_fabric_saturates_subscription_lanes(void) {
            "provider fabric should default Fugu to fugu-ultra");
     ASSERT(strstr(buf, "-m\ngpt-5.5\n") != NULL,
            "provider fabric should pass bare OpenAI subscription model");
-    ASSERT(strstr(buf, "-m\nglm-5.2\n") != NULL,
-           "provider fabric should use native GLM model");
+    ASSERT(strstr(buf, "-m\nglm-5.2\n") != NULL, "provider fabric should use native GLM model");
 
     free((void *)sw->dsco_path);
     sw->dsco_path = saved_path ? safe_strdup(saved_path) : NULL;
@@ -11543,14 +11734,14 @@ static void test_swarm_provider_fabric_scopes_cache_hint_to_provider(void) {
     sw->dsco_path = safe_strdup(script_path);
 
     char result[8192];
-    bool ok = tools_execute(
-        "swarm",
-        "{\"action\":\"provider_fabric\",\"name\":\"fabric-scoped-cache-test\","
-        "\"task\":\"reuse the warm provider-local prefix\","
-        "\"replicas\":1,\"fugu_replicas\":1,\"max_agents\":5,\"timeout\":3,"
-        "\"expected_cache_hit_tokens\":6000,"
-        "\"cache_provider\":\"anthropic\",\"cache_model\":\"claude-sonnet-4-6\"}",
-        result, sizeof(result));
+    bool ok =
+        tools_execute("swarm",
+                      "{\"action\":\"provider_fabric\",\"name\":\"fabric-scoped-cache-test\","
+                      "\"task\":\"reuse the warm provider-local prefix\","
+                      "\"replicas\":1,\"fugu_replicas\":1,\"max_agents\":5,\"timeout\":3,"
+                      "\"expected_cache_hit_tokens\":6000,"
+                      "\"cache_provider\":\"anthropic\",\"cache_model\":\"claude-sonnet-4-6\"}",
+                      result, sizeof(result));
     ASSERT(ok, "provider_fabric scoped cache race should complete");
     ASSERT(strstr(result, "\"cache_scope\":\"provider_local\"") != NULL,
            "provider_fabric should declare provider-local cache scope");
@@ -11679,36 +11870,39 @@ static void test_swarm_provider_fabric_uses_configured_local_lane(void) {
     PASS();
 }
 
-
 static void test_cross_provider_durable_agent_matrix_generated(void) {
-    static const char *providers[] = {
-        "anthropic", "openai", "openai-codex", "openrouter", "google", "groq",
-        "deepseek", "mistral", "xai", "together", "perplexity", "cerebras",
-        "cohere", "moonshot", "sakana"
-    };
-    static const char *models[] = {
-        "claude-sonnet-4-6", "gpt-5.5", "openai/gpt-5.5", "openrouter/anthropic/claude-sonnet-4",
-        "gemini-2.5-pro", "llama-3.3-70b", "deepseek-chat", "mistral-large-latest",
-        "grok-4-fast", "qwen3-coder", "sonar-pro", "qwen-3-coder-480b",
-        "command-a", "kimi-k2-0711-preview", "fugu-ultra", "fugu"
-    };
-    static const char *tools[] = {"bash", "run_command", "read_file", "write_file", "grep_files", "agent", "swarm"};
+    static const char *providers[] = {"anthropic", "openai",   "openai-codex", "openrouter",
+                                      "google",    "groq",     "deepseek",     "mistral",
+                                      "xai",       "together", "perplexity",   "cerebras",
+                                      "cohere",    "moonshot", "sakana"};
+    static const char *models[] = {"claude-sonnet-4-6", "gpt-5.5",
+                                   "openai/gpt-5.5",    "openrouter/anthropic/claude-sonnet-4",
+                                   "gemini-2.5-pro",    "llama-3.3-70b",
+                                   "deepseek-chat",     "mistral-large-latest",
+                                   "grok-4-fast",       "qwen3-coder",
+                                   "sonar-pro",         "qwen-3-coder-480b",
+                                   "command-a",         "kimi-k2-0711-preview",
+                                   "fugu-ultra",        "fugu"};
+    static const char *tools[] = {"bash",       "run_command", "read_file", "write_file",
+                                  "grep_files", "agent",       "swarm"};
     const int target = 2500;
     const int batch = 32;
 
     char script_path[128];
-    ASSERT(test_write_temp_script(script_path, sizeof(script_path),
-                                  "#!/bin/sh\n"
-                                  "profile=0; worker=0; provider=0; model=0; prev=''\n"
-                                  "for a in \"$@\"; do\n"
-                                  "  [ \"$prev\" = '--profile' ] && [ \"$a\" = 'worker' ] && worker=1\n"
-                                  "  [ \"$prev\" = '--provider' ] && provider=1\n"
-                                  "  [ \"$prev\" = '-m' ] && model=1\n"
-                                  "  [ \"$a\" = '--profile' ] && profile=1\n"
-                                  "  prev=\"$a\"\n"
-                                  "done\n"
-                                  "[ $profile -eq 1 ] && [ $worker -eq 1 ] && [ $provider -eq 1 ] && [ $model -eq 1 ]\n"),
-           "failed to create durable-agent spawn probe script");
+    ASSERT(
+        test_write_temp_script(
+            script_path, sizeof(script_path),
+            "#!/bin/sh\n"
+            "profile=0; worker=0; provider=0; model=0; prev=''\n"
+            "for a in \"$@\"; do\n"
+            "  [ \"$prev\" = '--profile' ] && [ \"$a\" = 'worker' ] && worker=1\n"
+            "  [ \"$prev\" = '--provider' ] && provider=1\n"
+            "  [ \"$prev\" = '-m' ] && model=1\n"
+            "  [ \"$a\" = '--profile' ] && profile=1\n"
+            "  prev=\"$a\"\n"
+            "done\n"
+            "[ $profile -eq 1 ] && [ $worker -eq 1 ] && [ $provider -eq 1 ] && [ $model -eq 1 ]\n"),
+        "failed to create durable-agent spawn probe script");
 
     int completed = 0;
     while (completed < target) {
@@ -11731,7 +11925,10 @@ static void test_cross_provider_durable_agent_matrix_generated(void) {
             int cid = swarm_spawn_provider(&sw, gid, "durable spawn probe", model, provider);
             if (cid < 0) {
                 tests_failed++;
-                fprintf(stderr, "  generated durable cross-provider agent %04d FAIL: spawn_provider returned <0\n", i);
+                fprintf(stderr,
+                        "  generated durable cross-provider agent %04d FAIL: spawn_provider "
+                        "returned <0\n",
+                        i);
                 swarm_destroy(&sw);
                 unlink(script_path);
                 return;
@@ -11739,15 +11936,18 @@ static void test_cross_provider_durable_agent_matrix_generated(void) {
             ids[spawned] = cid;
             swarm_child_t *c = swarm_get(&sw, cid);
             ASSERT(c != NULL, "spawned child should be addressable immediately");
-            ASSERT(strcmp(c->provider, provider) == 0, "provider pin should be durable on child record");
+            ASSERT(strcmp(c->provider, provider) == 0,
+                   "provider pin should be durable on child record");
             ASSERT(strcmp(c->model, model) == 0, "model pin should be durable on child record");
-            ASSERT(c->executor == EXECUTOR_DSCO, "provider-spawned durable child should use dsco executor");
+            ASSERT(c->executor == EXECUTOR_DSCO,
+                   "provider-spawned durable child should use dsco executor");
             ASSERT(c->group_id == gid, "group membership should be durable on child record");
             ASSERT(provider_profile_canonical_name(provider) != NULL,
                    "provider canonicalization should return a stable string");
             ASSERT(provider_route_for_model(model, NULL, provider) != NULL,
                    "provider route should be resolvable for pinned provider/model");
-            ASSERT(dsco_swarm_max_depth() <= SWARM_MAX_DEPTH, "runtime max depth should respect structural cap");
+            ASSERT(dsco_swarm_max_depth() <= SWARM_MAX_DEPTH,
+                   "runtime max depth should respect structural cap");
             ASSERT(dsco_swarm_max_children() <= SWARM_MAX_CHILDREN,
                    "runtime max children should respect structural cap");
             for (size_t t = 0; t < sizeof(tools) / sizeof(tools[0]); t++) {
@@ -11765,7 +11965,10 @@ static void test_cross_provider_durable_agent_matrix_generated(void) {
             swarm_child_t *c = swarm_get(&sw, ids[j]);
             if (!c || c->status != SWARM_DONE || c->exit_code != 0) {
                 tests_failed++;
-                fprintf(stderr, "  generated durable cross-provider agent %04d FAIL: child did not complete cleanly\n", i);
+                fprintf(stderr,
+                        "  generated durable cross-provider agent %04d FAIL: child did not "
+                        "complete cleanly\n",
+                        i);
                 swarm_destroy(&sw);
                 unlink(script_path);
                 return;
@@ -11775,7 +11978,8 @@ static void test_cross_provider_durable_agent_matrix_generated(void) {
         completed += spawned;
         swarm_destroy(&sw);
     }
-    fprintf(stderr, "  generated durable cross-provider spawned agents x2500 \\033[32mPASS\\033[0m\n");
+    fprintf(stderr,
+            "  generated durable cross-provider spawned agents x2500 \\033[32mPASS\\033[0m\n");
     unlink(script_path);
 }
 
@@ -11888,7 +12092,8 @@ static void test_provider_metadata_catalog_validates(void) {
              dir[0] ? dir : ".");
     int rc = system(cmd);
     int code = WIFEXITED(rc) ? WEXITSTATUS(rc) : 0;
-    ASSERT(code == 0 || code == 127, "provider metadata audit must validate (exit 0) or be skipped (127)");
+    ASSERT(code == 0 || code == 127,
+           "provider metadata audit must validate (exit 0) or be skipped (127)");
     PASS();
 }
 
@@ -11908,7 +12113,8 @@ static void test_openai_metadata_covers_current_api_and_cost_controls(void) {
     char path[1200];
     snprintf(path, sizeof(path), "%s/provider_metadata/providers/openai.json", dir[0] ? dir : ".");
     char buf[196608];
-    ASSERT(test_read_file_small(path, buf, sizeof(buf)), "OpenAI provider metadata should be readable");
+    ASSERT(test_read_file_small(path, buf, sizeof(buf)),
+           "OpenAI provider metadata should be readable");
     static const char *required[] = {
         "\"api_coverage\"",
         "\"cost_management\"",
@@ -11981,9 +12187,11 @@ static void test_provider_metadata_impl_matches_code(void) {
                "cache_control binding must match catalog");
         ASSERT(provider_model_supports_prompt_cache_key(probes[i].model) == probes[i].key,
                "prompt_cache_key binding must match catalog");
-        ASSERT(provider_model_supports_prompt_cache_retention(probes[i].model) == probes[i].retention,
+        ASSERT(provider_model_supports_prompt_cache_retention(probes[i].model) ==
+                   probes[i].retention,
                "prompt_cache_retention binding must match catalog");
-        ASSERT(provider_model_supports_automatic_prompt_cache(probes[i].model) == probes[i].automatic,
+        ASSERT(provider_model_supports_automatic_prompt_cache(probes[i].model) ==
+                   probes[i].automatic,
                "automatic prompt cache binding must match catalog");
         PASS();
     }
@@ -11993,13 +12201,15 @@ static void test_prompt_cache_provider_profile_cap_audit(void) {
     for (size_t i = 0; i < provider_profile_count(); i++) {
         const provider_profile_t *p = provider_profile_at(i);
         char name[128];
-        snprintf(name, sizeof(name), "prompt cache profile cap %s", p && p->name ? p->name : "null");
+        snprintf(name, sizeof(name), "prompt cache profile cap %s",
+                 p && p->name ? p->name : "null");
         TEST(name);
         ASSERT(p != NULL && p->name != NULL, "provider profile should exist");
         if (p->caps & PROVIDER_CAP_PROMPT_CACHE) {
             ASSERT(p->transport == PROVIDER_TRANSPORT_ANTHROPIC_MESSAGES ||
                        strcmp(p->name, "anthropic") == 0,
-                   "native prompt-cache cap should only be set where DSCO emits supported cache markers");
+                   "native prompt-cache cap should only be set where DSCO emits supported cache "
+                   "markers");
         }
         PASS();
     }
@@ -12145,7 +12355,8 @@ static void test_setup_set_key_rejects_runtime_state(void) {
     TEST("setup rejects durable runtime state");
     char saved_supervised[64];
     bool had_supervised = false;
-    test_capture_env("DSCO_SUPERVISED", saved_supervised, sizeof(saved_supervised), &had_supervised);
+    test_capture_env("DSCO_SUPERVISED", saved_supervised, sizeof(saved_supervised),
+                     &had_supervised);
     unsetenv("DSCO_SUPERVISED");
 
     bool ok = dsco_setup_set_key("DSCO_SUPERVISED", "7");
@@ -12161,7 +12372,8 @@ static void test_setup_report_flags_live_runtime_state(void) {
     TEST("setup report flags live runtime state");
     char saved_supervised[64];
     bool had_supervised = false;
-    test_capture_env("DSCO_SUPERVISED", saved_supervised, sizeof(saved_supervised), &had_supervised);
+    test_capture_env("DSCO_SUPERVISED", saved_supervised, sizeof(saved_supervised),
+                     &had_supervised);
     setenv("DSCO_SUPERVISED", "7", 1);
 
     char report[32768];
@@ -12169,8 +12381,7 @@ static void test_setup_report_flags_live_runtime_state(void) {
     ASSERT(n > 0, "setup report should return content");
     ASSERT(strstr(report, "env hygiene:") != NULL,
            "report should include environment hygiene summary");
-    ASSERT(strstr(report, "DSCO_SUPERVISED") != NULL,
-           "report should name live supervisor state");
+    ASSERT(strstr(report, "DSCO_SUPERVISED") != NULL, "report should name live supervisor state");
     ASSERT(strstr(report, "supervisor child state") != NULL,
            "report should explain why the env var is transient");
     ASSERT(strstr(report, "DSCO_SUPERVISED=7") == NULL,
@@ -13753,7 +13964,8 @@ static void test_llm_build_request_marks_tool_result_history_cache_tail(void) {
 
     char *req = llm_build_request(&conv, "claude-haiku-4-5-20251001", 1024);
     ASSERT(req != NULL, "request built");
-    ASSERT(json_is_valid_container(req), "request JSON remains valid with tool_result cache marker");
+    ASSERT(json_is_valid_container(req),
+           "request JSON remains valid with tool_result cache marker");
     const char *tool_result = strstr(req, "\"type\":\"tool_result\"");
     ASSERT(tool_result != NULL, "tool_result present");
     const char *marker = strstr(tool_result, "\"cache_control\":{\"type\":\"ephemeral\"}");
@@ -13824,12 +14036,14 @@ static void test_json_validate_schema_wrong_type(void) {
 static void test_json_validate_schema_nested_items(void) {
     TEST("json_validate_schema nested array items");
     const char *schema =
-        "{\"type\":\"object\",\"properties\":{\"claims\":{\"type\":\"array\",\"items\":{\"type\":\"object\",\"properties\":{\"claim\":{\"type\":\"string\"},\"confidence\":{\"type\":\"number\"}},\"required\":[\"claim\",\"confidence\"]}}},\"required\":[\"claims\"]}";
-    json_validation_t ok = json_validate_schema(
-        "{\"claims\":[{\"claim\":\"x\",\"confidence\":0.7}]}", schema);
+        "{\"type\":\"object\",\"properties\":{\"claims\":{\"type\":\"array\",\"items\":{\"type\":"
+        "\"object\",\"properties\":{\"claim\":{\"type\":\"string\"},\"confidence\":{\"type\":"
+        "\"number\"}},\"required\":[\"claim\",\"confidence\"]}}},\"required\":[\"claims\"]}";
+    json_validation_t ok =
+        json_validate_schema("{\"claims\":[{\"claim\":\"x\",\"confidence\":0.7}]}", schema);
     ASSERT(ok.valid, "valid nested item should pass");
-    json_validation_t bad = json_validate_schema(
-        "{\"claims\":[{\"claim\":\"x\",\"confidence\":\"high\"}]}", schema);
+    json_validation_t bad =
+        json_validate_schema("{\"claims\":[{\"claim\":\"x\",\"confidence\":\"high\"}]}", schema);
     ASSERT(!bad.valid, "nested wrong type should fail");
     ASSERT(strstr(bad.field, "claims[0].confidence") != NULL,
            "field path should identify nested array item");
@@ -14572,8 +14786,7 @@ static void test_self_improve_learns_ccusage_cache_output_shape(void) {
 
     char summary[2048];
     self_improve_summary(&si, summary, sizeof(summary));
-    ASSERT(strstr(summary, "cache-read 1000000") != NULL,
-           "summary should expose cache-read usage");
+    ASSERT(strstr(summary, "cache-read 1000000") != NULL, "summary should expose cache-read usage");
     ASSERT(strstr(summary, "out 60000") != NULL, "summary should expose output usage");
     PASS();
 }
@@ -15797,7 +16010,8 @@ static void test_tools_execute_hmac(void) {
     char result[4096] = {0};
     const char *k = "k";
     const char *message = "hello";
-    bool ok = tools_execute("hmac", "{\"key\":\"k\",\"message\":\"hello\"}", result, sizeof(result));
+    bool ok =
+        tools_execute("hmac", "{\"key\":\"k\",\"message\":\"hello\"}", result, sizeof(result));
     char expected[65];
     hmac_sha256_hex((const uint8_t *)k, strlen(k), (const uint8_t *)message, strlen(message),
                     expected);
@@ -16199,8 +16413,8 @@ static void test_history_dedup_logic(void) {
 /* Test: arg completion effort table */
 static void test_arg_completion_effort(void) {
     TEST("arg completion effort table correct");
-    static const char *effort_args[] = {"auto", "none", "minimal", "low",
-                                        "medium", "high", "xhigh", "max", NULL};
+    static const char *effort_args[] = {"auto", "none",  "minimal", "low", "medium",
+                                        "high", "xhigh", "max",     NULL};
     ASSERT(strcmp(effort_args[0], "auto") == 0, "effort[0] = auto");
     ASSERT(strcmp(effort_args[1], "none") == 0, "effort[1] = none");
     ASSERT(strcmp(effort_args[2], "minimal") == 0, "effort[2] = minimal");
@@ -17807,6 +18021,8 @@ int main(void) {
     test_build_request_valid_json();
     test_build_request_ex_effort();
     test_build_request_ex_strips_anthropic_namespace();
+    test_anthropic_cache_breakpoint_layout();
+    test_anthropic_cache_ttl_1h_env();
     test_build_request_ex_for_credential_includes_billing_header();
     test_build_request_oauth_promotes_legacy_mcp_wire_names();
     test_build_request_oauth_keeps_builtin_tool_names_bare();
@@ -18113,6 +18329,7 @@ int main(void) {
     test_mcp_server_filter_env_selects_one();
     test_tools_builtin_count();
     test_tools_get_all();
+    test_tools_offload_safe_allowlist();
     test_agent_and_swarm_tool_schemas_expose_spawn_fields();
     test_swarm_group_status_json_includes_executor_metadata();
     test_tool_allowlist_filters_visible_tools();
@@ -18123,6 +18340,11 @@ int main(void) {
     /* Dynamic AskUserQuestion dialog logic */
     test_ask_dialog_answer_value();
     test_ask_dialog_branching();
+    test_tui_key_decode_page_navigation_sequences();
+    test_tui_key_decode_unknown_sequences_do_not_cancel();
+    test_ask_dialog_page_keys_clamp_rows();
+    test_tui_menu_page_movement_skips_nonselectable_rows();
+    test_supervisor_hotswap_exec_is_non_mutating();
 
     /* Register-file model + quorum tests */
     test_register_cap_enforced();
