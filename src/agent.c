@@ -11,6 +11,7 @@
 #include "cost_budget.h"
 #include "spend_governor.h"
 #include "frontier.h"
+#include "executive.h"
 #include "json_util.h"
 #include "ipc.h"
 #include "tui.h"
@@ -768,6 +769,109 @@ static void update_budget_hud(tui_status_bar_t *sb, const session_state_t *sessi
     }
 
     tui_status_bar_set_budget(sb, g_cost_budget, burn_rate, percent, runway);
+}
+
+/* ── Executive decision hooks ──────────────────────────────────────────────
+ * executive_decision is a model-invocable tool ("end conversation now,
+ * gap budget at $48"). The pure decision engine lives in executive.c; these
+ * file-scope hooks give it bounded access to the live session. */
+
+static session_state_t *g_exec_session = NULL;
+static frontier_ledger_t *g_exec_frontier = NULL;
+static char g_exec_downshift_reason[256] = "";
+static char g_exec_escalation[512] = "";
+
+static void exec_hook_request_exit(const char *reason) {
+    g_agent_exit_requested = 1;
+    fprintf(stderr, "  %s◆ executive: ending conversation — %s%s\n", TUI_YELLOW,
+            reason ? reason : "", TUI_RESET);
+}
+static double exec_hook_get_budget(void) {
+    extern double g_cost_budget;
+    return g_cost_budget;
+}
+static void exec_hook_set_budget(double usd) {
+    extern double g_cost_budget;
+    g_cost_budget = usd;
+}
+static double exec_hook_get_spent(void) {
+    return g_exec_session ? session_cost(g_exec_session) : 0.0;
+}
+static void exec_hook_force_red(bool on) {
+    (void)on; /* state lives in executive.c (executive_spending_paused) */
+}
+static void exec_hook_downshift(const char *reason) {
+    snprintf(g_exec_downshift_reason, sizeof(g_exec_downshift_reason), "%s",
+             reason ? reason : "");
+    fprintf(stderr, "  %s◆ executive: model downshift advised — %s%s\n", TUI_DIM,
+            g_exec_downshift_reason, TUI_RESET);
+}
+static void exec_hook_escalate(const char *question) {
+    snprintf(g_exec_escalation, sizeof(g_exec_escalation), "%s",
+             question ? question : "");
+    fprintf(stderr, "\n  %s%s◆ DECISION NEEDED ◆%s\n  %s%s%s\n\n", TUI_BOLD, TUI_YELLOW,
+            TUI_RESET, TUI_BOLD, g_exec_escalation, TUI_RESET);
+}
+static bool exec_hook_frontier(double *score, bool *on_frontier, char *summary,
+                               size_t summary_len) {
+    if (!g_exec_frontier || g_exec_frontier->win_fill < 4)
+        return false; /* not enough evidence to gate on */
+    frontier_verdict_t v = frontier_verdict(g_exec_frontier);
+    if (score)
+        *score = v.score;
+    if (on_frontier)
+        *on_frontier = v.on_frontier;
+    if (summary && summary_len)
+        snprintf(summary, summary_len, "%s", v.summary);
+    return true;
+}
+static void exec_hook_audit(const char *category, const char *title,
+                            const char *detail) {
+    baseline_log(category, title, detail, NULL);
+}
+
+/* External-tool adapter: returns malloc'd JSON result. */
+static char *exec_tool_adapter(const char *name, const char *input_json, void *ctx) {
+    (void)name;
+    (void)ctx;
+    char result[2048];
+    executive_decide(input_json, result, sizeof(result));
+    return safe_strdup(result);
+}
+
+static void executive_wire_session(session_state_t *session,
+                                   frontier_ledger_t *frontier) {
+    g_exec_session = session;
+    g_exec_frontier = frontier;
+    executive_hooks_t hooks = {0};
+    hooks.request_exit = exec_hook_request_exit;
+    hooks.get_session_budget = exec_hook_get_budget;
+    hooks.set_session_budget = exec_hook_set_budget;
+    hooks.get_session_spent = exec_hook_get_spent;
+    hooks.force_phase_red = exec_hook_force_red;
+    hooks.request_model_downshift = exec_hook_downshift;
+    hooks.escalate = exec_hook_escalate;
+    hooks.frontier_snapshot = exec_hook_frontier;
+    hooks.audit = exec_hook_audit;
+    executive_set_hooks(&hooks);
+    tools_register_external(
+        "executive_decision",
+        "Make a bounded executive decision about this session: end_conversation, "
+        "pause_spending, resume_spending, downshift_model, raise_budget, "
+        "lower_budget, escalate_to_user. Requires a substantive reason citing "
+        "evidence (e.g. \"gap budget at $48\", \"frontier score 0.31, cache waste "
+        "dominant\"). Budget raises are bounded (<=2x, hard ceiling) and rejected "
+        "while off the efficiency frontier.",
+        "{\"type\":\"object\",\"properties\":{"
+        "\"decision\":{\"type\":\"string\",\"enum\":[\"end_conversation\","
+        "\"pause_spending\",\"resume_spending\",\"downshift_model\","
+        "\"raise_budget\",\"lower_budget\",\"escalate_to_user\"]},"
+        "\"reason\":{\"type\":\"string\",\"description\":\"Evidence driving the "
+        "decision\"},"
+        "\"amount_usd\":{\"type\":\"number\",\"description\":\"New budget for "
+        "raise_budget/lower_budget\"}},"
+        "\"required\":[\"decision\",\"reason\"]}",
+        exec_tool_adapter, NULL);
 }
 
 /* ── Provider management ───────────────────────────────────────────────── */
@@ -4422,6 +4526,8 @@ bool agent_run(const char *api_key, const char *model, const char *topology_name
      * falls — i.e. when more spend stops buying more progress. */
     frontier_ledger_t frontier;
     frontier_init(&frontier);
+    /* Register executive_decision with live hooks into this session. */
+    executive_wire_session(&session, &frontier);
     /* Duplicate tool-call detector: FNV signature of tool+input per call. */
 #define FRONTIER_SIG_MAX 512
     unsigned long long frontier_sigs[FRONTIER_SIG_MAX];
@@ -8285,6 +8391,22 @@ bool agent_run(const char *api_key, const char *model, const char *topology_name
                 sig.turns = turns;
 
                 spend_plan_t plan = spend_governor_plan(&sig);
+
+                /* Executive pause: force RED-tier parameters regardless of
+                 * the signal-driven phase (executive_decision tool). */
+                if (executive_spending_paused() && plan.phase < SPEND_RED) {
+                    plan.phase = SPEND_RED;
+                    plan.tool_budget_ratio = 0.25f;
+                    snprintf(plan.effort_ceiling, sizeof(plan.effort_ceiling), "%s",
+                             EFFORT_LOW);
+                    plan.max_output_tokens = dsco_max_tokens() / 4;
+                    plan.trim_old_results = true;
+                    plan.trim_keep_recent = 4;
+                    plan.trim_max_chars = 256;
+                    plan.strip_binaries = true;
+                    snprintf(plan.reason, sizeof(plan.reason),
+                             "executive pause_spending in force");
+                }
 
                 /* Tool paging pressure */
                 session.tool_budget_ratio = plan.tool_budget_ratio;
