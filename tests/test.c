@@ -22,6 +22,7 @@
 #include "chronicle.h"
 #include "router.h"
 #include "realtime.h"
+#include "frontier.h"
 #include "setup.h"
 #include "spend_governor.h"
 #include "supervisor.h"
@@ -631,6 +632,174 @@ static void test_build_request_ex_strips_anthropic_namespace(void) {
     free(model);
     free(req);
     conv_free(&conv);
+    PASS();
+}
+
+/* ── Frontier ledger: Pareto-efficiency decomposition ────────────────── */
+
+static frontier_prices_t test_frontier_prices(void) {
+    frontier_prices_t p;
+    p.in_usd = 3.0;
+    p.out_usd = 15.0;
+    p.cache_read_usd = 0.30;
+    p.cache_write_usd = 3.75;
+    return p;
+}
+
+static void test_frontier_clean_turns_on_frontier(void) {
+    TEST("frontier: clean turns score ~1.0 and stay on the frontier");
+    frontier_ledger_t l;
+    frontier_init(&l);
+    frontier_prices_t p = test_frontier_prices();
+
+    for (int i = 0; i < 8; i++) {
+        frontier_turn_t t = {0};
+        t.input_tokens = 500;
+        t.output_tokens = 800;
+        t.cache_read_tokens = 40000; /* healthy cache */
+        t.cache_write_tokens = 1200; /* ≈ prev output + fresh input */
+        t.tool_calls = 3;
+        t.tool_failures = 0;
+        t.produced_text = true;
+        frontier_decomp_t d = frontier_record(&l, &t, &p);
+        /* Turn 0 legitimately writes the initial prefix (no prior output to
+         * expect), so only steady-state turns must be ~fully productive. */
+        if (i > 0)
+            ASSERT(d.score > 0.95, "steady-state clean turn ~fully productive");
+    }
+    frontier_verdict_t v = frontier_verdict(&l);
+    ASSERT(v.on_frontier, "clean session is on the frontier");
+    ASSERT(v.tool_success_rate == 1.0, "no failures recorded");
+    ASSERT(frontier_waste_ratio(&l) < 0.05, "waste ratio near zero");
+    PASS();
+}
+
+static void test_frontier_cache_miss_waste(void) {
+    TEST("frontier: cache-miss rewrites are charged as waste");
+    frontier_ledger_t l;
+    frontier_init(&l);
+    frontier_prices_t p = test_frontier_prices();
+
+    /* Warm up baseline. */
+    frontier_turn_t t = {0};
+    t.input_tokens = 500;
+    t.output_tokens = 800;
+    t.produced_text = true;
+    frontier_record(&l, &t, &p);
+
+    /* Turn that re-writes a 150k prefix (expired cache): expected write
+     * ≈ 800 + 500 = 1300, actual 150k → ~148.7k tokens of pure waste. */
+    frontier_turn_t miss = {0};
+    miss.input_tokens = 500;
+    miss.output_tokens = 800;
+    miss.cache_write_tokens = 150000;
+    miss.produced_text = true;
+    frontier_decomp_t d = frontier_record(&l, &miss, &p);
+    ASSERT(d.cache_waste > 0.4, "150k rewrite at $3.45/M delta ≈ $0.51 waste");
+    ASSERT(d.score < 0.5, "cache-miss turn is mostly waste");
+    ASSERT(l.cache_waste_usd > 0.4, "ledger accumulates cache waste");
+    PASS();
+}
+
+static void test_frontier_retry_and_duplicate_waste(void) {
+    TEST("frontier: failed and duplicate tool calls are charged");
+    frontier_ledger_t l;
+    frontier_init(&l);
+    frontier_prices_t p = test_frontier_prices();
+
+    frontier_turn_t t = {0};
+    t.input_tokens = 20000;
+    t.output_tokens = 1000;
+    t.tool_calls = 4;
+    t.tool_failures = 2; /* half the calls failed */
+    t.produced_text = true;
+    frontier_decomp_t d = frontier_record(&l, &t, &p);
+    ASSERT(d.retry_waste > 0.03, "half-failed turn charges retry waste");
+
+    frontier_turn_t dup = {0};
+    dup.input_tokens = 1000;
+    dup.output_tokens = 500;
+    dup.tool_calls = 2;
+    dup.duplicate_tool_calls = 2;
+    dup.duplicate_result_tokens = 3000;
+    dup.produced_text = true;
+    d = frontier_record(&l, &dup, &p);
+    ASSERT(d.redundancy_waste > 0.0, "duplicates charge redundancy waste");
+    PASS();
+}
+
+static void test_frontier_effort_waste(void) {
+    TEST("frontier: reasoning with no output and no tools is waste");
+    frontier_ledger_t l;
+    frontier_init(&l);
+    frontier_prices_t p = test_frontier_prices();
+
+    frontier_turn_t t = {0};
+    t.input_tokens = 200;
+    t.output_tokens = 4000;
+    t.reasoning_tokens = 3900; /* thought hard... */
+    t.tool_calls = 0;          /* ...did nothing */
+    t.produced_text = false;
+    frontier_decomp_t d = frontier_record(&l, &t, &p);
+    ASSERT(d.effort_waste > 0.05, "unproductive reasoning charged");
+
+    /* Same reasoning but WITH tool calls: productive. */
+    frontier_turn_t t2 = t;
+    t2.tool_calls = 2;
+    d = frontier_record(&l, &t2, &p);
+    ASSERT(d.effort_waste == 0.0, "reasoning that drives tools is free");
+    PASS();
+}
+
+static void test_frontier_verdict_marginal_trend(void) {
+    TEST("frontier: rising marginal cost + failing tools leaves frontier");
+    frontier_ledger_t l;
+    frontier_init(&l);
+    frontier_prices_t p = test_frontier_prices();
+
+    /* Older half: cheap productive turns. */
+    for (int i = 0; i < 6; i++) {
+        frontier_turn_t t = {0};
+        t.input_tokens = 500;
+        t.output_tokens = 2000;
+        t.tool_calls = 3;
+        t.produced_text = true;
+        frontier_record(&l, &t, &p);
+    }
+    /* Newer half: expensive turns, little output, tools failing —
+     * grinding without progress. */
+    for (int i = 0; i < 6; i++) {
+        frontier_turn_t t = {0};
+        t.input_tokens = 60000; /* huge fresh input (drag) */
+        t.output_tokens = 300;  /* tiny output */
+        t.tool_calls = 4;
+        t.tool_failures = 2;
+        t.produced_text = true;
+        frontier_record(&l, &t, &p);
+    }
+    frontier_verdict_t v = frontier_verdict(&l);
+    ASSERT(v.marginal_trend > 0.25, "marginal $/1k out is rising");
+    ASSERT(v.tool_success_rate < 0.90, "tool success degraded");
+    ASSERT(!v.on_frontier, "grinding session is off the frontier");
+    ASSERT(v.summary[0] != '\0', "verdict carries a human summary");
+    PASS();
+}
+
+static void test_frontier_report_renders(void) {
+    TEST("frontier: report renders decomposition");
+    frontier_ledger_t l;
+    frontier_init(&l);
+    frontier_prices_t p = test_frontier_prices();
+    frontier_turn_t t = {0};
+    t.input_tokens = 500;
+    t.output_tokens = 800;
+    t.produced_text = true;
+    frontier_record(&l, &t, &p);
+    char buf[1024];
+    const char *r = frontier_report(&l, buf, sizeof(buf));
+    ASSERT(strstr(r, "spend:") != NULL, "report shows spend line");
+    ASSERT(strstr(r, "marginal:") != NULL, "report shows marginal cost");
+    ASSERT(strstr(r, "cache $") != NULL, "report shows waste channels");
     PASS();
 }
 
@@ -18171,6 +18340,12 @@ int main(void) {
     test_build_request_ex_strips_anthropic_namespace();
     test_anthropic_cache_breakpoint_layout();
     test_anthropic_cache_ttl_1h_env();
+    test_frontier_clean_turns_on_frontier();
+    test_frontier_cache_miss_waste();
+    test_frontier_retry_and_duplicate_waste();
+    test_frontier_effort_waste();
+    test_frontier_verdict_marginal_trend();
+    test_frontier_report_renders();
     test_spend_governor_phases();
     test_spend_governor_runway_escalation();
     test_spend_governor_context_pressure();

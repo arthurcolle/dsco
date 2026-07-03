@@ -10,6 +10,7 @@
 #include "config.h"
 #include "cost_budget.h"
 #include "spend_governor.h"
+#include "frontier.h"
 #include "json_util.h"
 #include "ipc.h"
 #include "tui.h"
@@ -2999,6 +3000,7 @@ static const slash_command_t s_slash_commands[] = {
     {"/cheap", "switch to cheap mode (5 core tools, no catalog)"},
     {"/full", "switch to full mode (all tools + catalog)"},
     {"/budget", "set session cost budget"},
+    {"/pareto", "cost-efficiency frontier: productive vs wasted spend"},
     {"/exec", "run prompt via external CLI (claude, codex, list)"},
     {"/claude", "shorthand for /exec claude <prompt>"},
     {"/codex", "shorthand for /exec codex <prompt>"},
@@ -4412,6 +4414,19 @@ bool agent_run(const char *api_key, const char *model, const char *topology_name
     bool have_last_turn_usage = false;
     int consecutive_tool_failures = 0; /* for router failure escalation */
     bool fallback_user_configured = false;
+
+    /* Pareto-frontier efficiency ledger: decomposes each turn's spend into
+     * productive cost + waste channels (cache misses, retries, duplicates,
+     * unproductive reasoning, context drag). /pareto renders it; the verdict
+     * fires a one-line warning when marginal cost rises while tool success
+     * falls — i.e. when more spend stops buying more progress. */
+    frontier_ledger_t frontier;
+    frontier_init(&frontier);
+    /* Duplicate tool-call detector: FNV signature of tool+input per call. */
+#define FRONTIER_SIG_MAX 512
+    unsigned long long frontier_sigs[FRONTIER_SIG_MAX];
+    int frontier_sig_count = 0;
+    int prev_metric_calls = 0, prev_metric_failures = 0;
 
     /* Command aliases: /alias <name> <expansion> */
 #define MAX_ALIASES 32
@@ -7157,6 +7172,12 @@ bool agent_run(const char *api_key, const char *model, const char *topology_name
             }
             continue;
         }
+        if (strcmp(input_buf, "/pareto") == 0) {
+            char report[1024];
+            fputs(frontier_report(&frontier, report, sizeof(report)), stderr);
+            baseline_log("command", "/pareto", NULL, NULL);
+            continue;
+        }
         if (strncmp(input_buf, "/budget", 7) == 0) {
             const char *arg = input_buf + 7;
             while (*arg == ' ')
@@ -9030,6 +9051,99 @@ bool agent_run(const char *api_key, const char *model, const char *topology_name
             snprintf(last_turn_provider, sizeof(last_turn_provider), "%s",
                      g_provider ? g_provider->name : "?");
             have_last_turn_usage = true;
+
+            /* ── Frontier ledger: decompose this turn's spend ───────────── */
+            {
+                /* Tool call/failure deltas from the cumulative metrics. */
+                int m_calls = 0, m_failures = 0;
+                pthread_mutex_lock(&g_locks.metrics_lock);
+                for (int mi2 = 0; mi2 < tool_metrics.count; mi2++) {
+                    m_calls += tool_metrics.entries[mi2].calls;
+                    m_failures += tool_metrics.entries[mi2].failures;
+                }
+                pthread_mutex_unlock(&g_locks.metrics_lock);
+                int turn_calls = m_calls - prev_metric_calls;
+                int turn_failures = m_failures - prev_metric_failures;
+                prev_metric_calls = m_calls;
+                prev_metric_failures = m_failures;
+                if (turn_calls < 0)
+                    turn_calls = 0;
+                if (turn_failures < 0)
+                    turn_failures = 0;
+
+                /* Duplicate detection: signature = FNV1a(tool_name+input). */
+                int dup_calls = 0, dup_result_tokens = 0;
+                bool produced_text = false;
+                for (int bi2 = 0; bi2 < sr.parsed.count; bi2++) {
+                    content_block_t *b2 = &sr.parsed.blocks[bi2];
+                    if (b2->type && strcmp(b2->type, "text") == 0 && b2->text &&
+                        strlen(b2->text) > 32)
+                        produced_text = true;
+                    if (!b2->type || strcmp(b2->type, "tool_use") != 0 || !b2->tool_name)
+                        continue;
+                    unsigned long long h = 1469598103934665603ULL;
+                    for (const unsigned char *pc = (const unsigned char *)b2->tool_name;
+                         *pc; pc++) {
+                        h ^= *pc;
+                        h *= 1099511628211ULL;
+                    }
+                    if (b2->tool_input)
+                        for (const unsigned char *pc =
+                                 (const unsigned char *)b2->tool_input;
+                             *pc; pc++) {
+                            h ^= *pc;
+                            h *= 1099511628211ULL;
+                        }
+                    bool seen = false;
+                    for (int si2 = 0; si2 < frontier_sig_count; si2++)
+                        if (frontier_sigs[si2] == h) {
+                            seen = true;
+                            break;
+                        }
+                    if (seen) {
+                        dup_calls++;
+                        dup_result_tokens += 400; /* est. resent result size */
+                    } else if (frontier_sig_count < FRONTIER_SIG_MAX) {
+                        frontier_sigs[frontier_sig_count++] = h;
+                    }
+                }
+
+                const model_info_t *fmi = model_lookup(session.model);
+                frontier_prices_t fp = {0};
+                if (fmi) {
+                    fp.in_usd = fmi->input_price;
+                    fp.out_usd = fmi->output_price;
+                    fp.cache_read_usd = fmi->cache_read_price;
+                    fp.cache_write_usd = fmi->cache_write_price;
+                }
+                frontier_turn_t ft = {0};
+                ft.input_tokens = sr.usage.input_tokens;
+                ft.output_tokens = sr.usage.output_tokens;
+                ft.cache_read_tokens = sr.usage.cache_read_input_tokens;
+                ft.cache_write_tokens = sr.usage.cache_creation_input_tokens;
+                ft.reasoning_tokens = sr.reasoning_tokens;
+                ft.tool_calls = turn_calls;
+                ft.tool_failures = turn_failures;
+                ft.duplicate_tool_calls = dup_calls;
+                ft.duplicate_result_tokens = dup_result_tokens;
+                ft.produced_text = produced_text;
+                ft.reported_cost_usd = accounted_turn_cost;
+                frontier_record(&frontier, &ft, &fp);
+
+                /* Verdict check: warn once per departure from the frontier. */
+                static bool s_was_on_frontier = true;
+                if (frontier.win_fill >= 6) {
+                    frontier_verdict_t fv = frontier_verdict(&frontier);
+                    if (!fv.on_frontier && s_was_on_frontier) {
+                        fprintf(stderr, "  %s◇ %s%s\n", TUI_YELLOW, fv.summary,
+                                TUI_RESET);
+                        baseline_log("frontier", "departed", fv.summary, NULL);
+                    } else if (fv.on_frontier && !s_was_on_frontier) {
+                        baseline_log("frontier", "recovered", fv.summary, NULL);
+                    }
+                    s_was_on_frontier = fv.on_frontier;
+                }
+            }
 
             cache_expectation_t cache_expectation = model_cache_expectation(session.model);
             int cache_denominator = usage_cache_denominator(&sr.usage);
