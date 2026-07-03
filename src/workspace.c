@@ -495,6 +495,32 @@ int dsco_workspace_count_auto_skills(void) {
     return count;
 }
 
+int dsco_workspace_list_auto_skills(char (*names)[128], int max) {
+    if (!names || max <= 0)
+        return 0;
+    char skills_dir[PATH_MAX];
+    workspace_path(skills_dir, sizeof(skills_dir), "skills");
+    DIR *d = opendir(skills_dir);
+    if (!d)
+        return 0;
+    int count = 0;
+    struct dirent *ent;
+    while ((ent = readdir(d)) != NULL && count < max) {
+        if (ent->d_name[0] == '.')
+            continue;
+        char path[PATH_MAX];
+        snprintf(path, sizeof(path), "%s/%s/SKILL.md", skills_dir, ent->d_name);
+        char *text = NULL;
+        if (read_file_limit(path, WORKSPACE_FILE_LIMIT, &text)) {
+            if (strstr(text, "<!-- dsco:auto-generated -->") != NULL)
+                snprintf(names[count++], 128, "%.127s", ent->d_name);
+            free(text);
+        }
+    }
+    closedir(d);
+    return count;
+}
+
 static int qsort_strcmp(const void *a, const void *b) {
     return strcmp(*(const char *const *)a, *(const char *const *)b);
 }
