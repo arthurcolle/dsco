@@ -7313,6 +7313,16 @@ bool agent_run(const char *api_key, const char *model, const char *topology_name
                     sig.context_window_tokens = effective_context_window(&session);
                     sig.turns = session.turn_count;
                     spend_plan_t plan = spend_governor_plan(&sig);
+                    /* Mirror the per-turn learned adjustment so /status shows
+                     * the plan the next turn will actually run under. */
+                    const char *lt = getenv("DSCO_LEARNED_TUNING");
+                    if ((!lt || strcmp(lt, "0") != 0) && g_self_improve.initialized) {
+                        const si_strategy_weights_t *w = self_improve_weights(&g_self_improve);
+                        spend_learned_t lw = {w->cache_aggressiveness,
+                                              w->model_cost_sensitivity,
+                                              w->context_compaction_thresh};
+                        spend_plan_apply_learned(&plan, &lw, &sig);
+                    }
                     fprintf(stderr, "  %sphase:%s   %s — %s\n", TUI_DIM, TUI_RESET,
                             spend_phase_label(plan.phase), plan.reason);
                     if (plan.runway_turns >= 0)
@@ -8397,6 +8407,20 @@ bool agent_run(const char *api_key, const char *model, const char *topology_name
                 sig.turns = turns;
 
                 spend_plan_t plan = spend_governor_plan(&sig);
+
+                /* Learned tuning: usage-stats strategy weights tighten the
+                 * plan (earlier trim / downshift / 1h-cache) once the session
+                 * has evidence. Tighten-only; DSCO_LEARNED_TUNING=0 disables. */
+                {
+                    const char *lt = getenv("DSCO_LEARNED_TUNING");
+                    if ((!lt || strcmp(lt, "0") != 0) && g_self_improve.initialized) {
+                        const si_strategy_weights_t *w = self_improve_weights(&g_self_improve);
+                        spend_learned_t lw = {w->cache_aggressiveness,
+                                              w->model_cost_sensitivity,
+                                              w->context_compaction_thresh};
+                        spend_plan_apply_learned(&plan, &lw, &sig);
+                    }
+                }
 
                 /* Executive pause: force RED-tier parameters regardless of
                  * the signal-driven phase (executive_decision tool). */

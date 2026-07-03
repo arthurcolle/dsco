@@ -577,6 +577,56 @@ void plan_cache_store(const char *task, const char *topology_name, const char *r
     pthread_mutex_unlock(&s_mu);
 }
 
+void plan_cache_feedback(const char *task, bool success) {
+    if (!task || !task[0])
+        return;
+
+    uint32_t *grams = NULL;
+    int ng = build_ngrams(task, &grams);
+    uint64_t th = fnv64(task);
+
+    pthread_mutex_lock(&s_mu);
+    load_locked();
+
+    float best = 0.0f;
+    int bidx = -1;
+    for (int i = 0; i < PLAN_CACHE_MAX; i++) {
+        plan_cache_entry_t *e = &s_cache.entries[i];
+        if (!e->occupied)
+            continue;
+        float sim;
+        if (th == e->task_hash) {
+            sim = 1.0f;
+        } else if (ng > 0) {
+            uint32_t *eg = NULL;
+            int en = build_ngrams(e->task_text, &eg);
+            sim = jaccard(grams, ng, eg, en);
+            free(eg);
+        } else {
+            sim = 0.0f;
+        }
+        if (sim >= PLAN_CACHE_MIN_SIM && sim > best) {
+            best = sim;
+            bidx = i;
+        }
+    }
+
+    if (bidx >= 0) {
+        plan_cache_entry_t *e = &s_cache.entries[bidx];
+        if (success) {
+            e->fit_score = e->fit_score + 0.03f > 0.99f ? 0.99f : e->fit_score + 0.03f;
+        } else {
+            e->fit_score -= 0.15f;
+            if (e->fit_score < 0.5f)
+                evict_entry(bidx);
+        }
+        persist_locked();
+    }
+
+    pthread_mutex_unlock(&s_mu);
+    free(grams);
+}
+
 void plan_cache_store_json(const char *task, const char *plan_json) {
     if (!task || !plan_json)
         return;

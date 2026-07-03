@@ -26,6 +26,7 @@
 #include "frontier.h"
 #include "setup.h"
 #include "spend_governor.h"
+#include "plan_cache.h"
 #include "supervisor.h"
 #include "swarm.h"
 #include "structured_process.h"
@@ -1146,6 +1147,96 @@ static void test_spend_governor_default_budgets(void) {
     test_restore_env("DSCO_NO_DEFAULT_BUDGET", saved_no, had_no);
     test_restore_env("DSCO_DEFAULT_SESSION_BUDGET", saved_s, had_s);
     test_restore_env("DSCO_DEFAULT_DAILY_BUDGET", saved_d, had_d);
+    PASS();
+}
+
+static void test_spend_governor_learned_adjustment(void) {
+    TEST("spend governor: learned weights tighten plans, neutral is a no-op");
+    spend_signals_t sig = {0};
+    sig.session_spent_usd = 1.0;
+    sig.session_budget_usd = 10.0; /* 10% of budget */
+    sig.turns = 5;
+    sig.cache_hit_ratio = 0.2;
+    sig.cache_telemetry_seen = true;
+    sig.context_used_tokens = 55000;
+    sig.context_window_tokens = 100000; /* 55% context → still GREEN */
+    spend_plan_t base = spend_governor_plan(&sig);
+    ASSERT(base.phase == SPEND_GREEN, "baseline is GREEN");
+    ASSERT(!base.trim_old_results, "GREEN does not trim by default");
+    ASSERT(!base.recommend_1h_cache, "fast cadence keeps 5m TTL by default");
+
+    spend_plan_t p = base;
+    spend_learned_t neutral = {0.5, 0.3, 0.80}; /* self_improve init defaults */
+    spend_plan_apply_learned(&p, &neutral, &sig);
+    ASSERT(memcmp(&p, &base, sizeof(p)) == 0, "unlearned weights change nothing");
+
+    spend_learned_t learned = {0.9, 0.9, 0.50};
+    spend_plan_apply_learned(&p, &learned, &sig);
+    ASSERT(p.recommend_1h_cache, "learned cache aggressiveness recommends 1h TTL");
+    ASSERT(p.trim_old_results, "learned compaction point trims at 55% context");
+    ASSERT(!p.suggest_model_downshift, "downshift still needs YELLOW+");
+
+    sig.session_spent_usd = 6.0; /* 60% → YELLOW */
+    spend_plan_t y = spend_governor_plan(&sig);
+    ASSERT(y.phase == SPEND_YELLOW, "60% of budget is YELLOW");
+    ASSERT(!y.suggest_model_downshift, "YELLOW default has no downshift");
+    spend_plan_apply_learned(&y, &learned, &sig);
+    ASSERT(y.suggest_model_downshift, "learned cost sensitivity downshifts from YELLOW");
+    PASS();
+}
+
+static void test_router_escalation_cap(void) {
+    TEST("router: escalation cap bounds costlier-tier switches");
+    char saved_cap[32];
+    bool had_cap = false;
+    test_capture_env("DSCO_ROUTER_MAX_ESCALATIONS", saved_cap, sizeof(saved_cap), &had_cap);
+    unsetenv("DSCO_ROUTER_MAX_ESCALATIONS");
+
+    router_t r;
+    router_init(&r, ROUTER_POLICY_BALANCED);
+    ASSERT(r.max_escalations == 8, "default escalation cap is 8");
+    ASSERT(r.weight_cost > 0.0f, "router_init seeds scoring weights");
+
+    r.max_escalations = 1;
+    router_decision_t d = router_decide(&r, "claude-haiku-4-5", TASK_SIMPLE, 0.0, 0.0, 2);
+    ASSERT(d.should_switch, "first failure escalation switches to a stronger model");
+    ASSERT(r.escalations == 1, "escalation budget consumed");
+
+    d = router_decide(&r, "claude-haiku-4-5", TASK_SIMPLE, 0.0, 0.0, 2);
+    ASSERT(!d.should_switch, "capped session must not escalate again");
+    ASSERT(strstr(d.rationale, "cap") != NULL, "rationale explains the cap");
+
+    router_destroy(&r);
+    test_restore_env("DSCO_ROUTER_MAX_ESCALATIONS", saved_cap, had_cap);
+    PASS();
+}
+
+static void test_plan_cache_outcome_feedback(void) {
+    TEST("plan cache: failure feedback decays and evicts, success reinforces");
+    char saved_home[256];
+    bool had_home = false;
+    test_capture_env("HOME", saved_home, sizeof(saved_home), &had_home);
+    setenv("HOME", "/tmp/dsco_test_plan_fb_home", 1);
+    plan_cache_free(); /* drop state loaded from the real HOME */
+
+    plan_cache_store("unit feedback gamma zeta quest", "pipeline", "test", 0.85f);
+    plan_cache_result_t hit;
+    ASSERT(plan_cache_lookup("unit feedback gamma zeta quest", &hit), "stored plan hits");
+
+    plan_cache_store("totally different alpha omega probe", "debate", "test", 0.85f);
+    plan_cache_feedback("totally different alpha omega probe", true);
+    const plan_cache_entry_t *e = plan_cache_find_entry("totally different alpha omega probe");
+    ASSERT(e && e->fit_score > 0.86f, "success feedback reinforces fit");
+
+    plan_cache_feedback("unit feedback gamma zeta quest", false);
+    plan_cache_feedback("unit feedback gamma zeta quest", false);
+    plan_cache_feedback("unit feedback gamma zeta quest", false);
+    ASSERT(!plan_cache_lookup("unit feedback gamma zeta quest", &hit),
+           "three failures evict the plan (0.85 - 3*0.15 < 0.5)");
+
+    plan_cache_free();
+    test_restore_env("HOME", saved_home, had_home);
+    plan_cache_free(); /* next user reloads from the real HOME */
     PASS();
 }
 
@@ -18674,6 +18765,9 @@ int main(void) {
     test_spend_governor_cache_ttl_recommendation();
     test_spend_governor_effort_ranking();
     test_spend_governor_default_budgets();
+    test_spend_governor_learned_adjustment();
+    test_router_escalation_cap();
+    test_plan_cache_outcome_feedback();
     test_build_request_ex_for_credential_includes_billing_header();
     test_build_request_oauth_promotes_legacy_mcp_wire_names();
     test_build_request_oauth_keeps_builtin_tool_names_bare();

@@ -1533,8 +1533,8 @@ static bool topology_provider_is_local_lane(const char *provider) {
     if (!provider || !provider[0])
         return false;
     const char *p = provider_profile_canonical_name(provider);
-    return strcmp(p, "ollama") == 0 || strcmp(p, "lmstudio") == 0 ||
-           strcmp(p, "mlx") == 0 || strcmp(p, "local") == 0;
+    return strcmp(p, "ollama") == 0 || strcmp(p, "lmstudio") == 0 || strcmp(p, "mlx") == 0 ||
+           strcmp(p, "local") == 0;
 }
 
 static bool topology_provider_supported_for_lane(const char *provider) {
@@ -1596,15 +1596,13 @@ static const char *topology_native_lane_model(const provider_profile_t *profile,
     if (strcmp(p, "sakana") == 0)
         return tier == TIER_OPUS ? "fugu-ultra" : "fugu";
     if (strcmp(p, "anthropic") == 0)
-        return tier == TIER_HAIKU   ? "claude-haiku-4-5-20251001"
+        return tier == TIER_HAIKU  ? "claude-haiku-4-5-20251001"
                : tier == TIER_OPUS ? "claude-opus-4-8"
-                                    : "claude-sonnet-4-6";
+                                   : "claude-sonnet-4-6";
     if (strcmp(p, "openai-codex") == 0)
         return "gpt-5.5";
     if (strcmp(p, "openai") == 0)
-        return tier == TIER_HAIKU   ? "gpt-4.1-mini"
-               : tier == TIER_OPUS ? "gpt-5.4"
-                                    : "gpt-4.1";
+        return tier == TIER_HAIKU ? "gpt-4.1-mini" : tier == TIER_OPUS ? "gpt-5.4" : "gpt-4.1";
     if (strcmp(p, "xai") == 0)
         return tier == TIER_OPUS ? "grok-4" : "grok-4-fast";
     if (strcmp(p, "moonshot") == 0)
@@ -1616,9 +1614,9 @@ static const char *topology_native_lane_model(const provider_profile_t *profile,
     if (strcmp(p, "deepseek") == 0)
         return tier == TIER_OPUS ? "deepseek-reasoner" : "deepseek-chat";
     if (strcmp(p, "mistral") == 0)
-        return tier == TIER_HAIKU   ? "mistral-small-latest"
+        return tier == TIER_HAIKU  ? "mistral-small-latest"
                : tier == TIER_OPUS ? "mistral-large-latest"
-                                    : "codestral-latest";
+                                   : "codestral-latest";
     if (strcmp(p, "perplexity") == 0)
         return tier == TIER_HAIKU ? "sonar" : "sonar-pro";
     if (strcmp(p, "cerebras") == 0)
@@ -1671,11 +1669,11 @@ static int topology_collect_throughput_lanes(const char *api_key, model_tier_t t
                                              topo_throughput_lane_t lanes[], int max) {
     int count = 0;
     static const char *preferred[] = {
-        "sakana",       "anthropic", "openai-codex", "openai",   "xai",
-        "moonshot",     "google",    "groq",         "cerebras", "deepseek",
-        "mistral",      "together",  "cohere",       "perplexity",
-        "alibaba",      "alibaba-coding-plan",       "qwen-oauth",
-        "zai",          NULL,
+        "sakana",     "anthropic",  "openai-codex", "openai",
+        "xai",        "moonshot",   "google",       "groq",
+        "cerebras",   "deepseek",   "mistral",      "together",
+        "cohere",     "perplexity", "alibaba",      "alibaba-coding-plan",
+        "qwen-oauth", "zai",        NULL,
     };
 
     for (int i = 0; preferred[i] && count < max; i++) {
@@ -1830,8 +1828,7 @@ static bool strcasestr_simple(const char *haystack, const char *needle) {
 }
 
 static bool task_mentions_self_improvement(const char *task) {
-    return strcasestr_simple(task, "self-improvement") ||
-           strcasestr_simple(task, "self_improve") ||
+    return strcasestr_simple(task, "self-improvement") || strcasestr_simple(task, "self_improve") ||
            (strcasestr_simple(task, "self") && strcasestr_simple(task, "improvement")) ||
            (strcasestr_simple(task, "learn") && strcasestr_simple(task, "patterns"));
 }
@@ -1839,12 +1836,9 @@ static bool task_mentions_self_improvement(const char *task) {
 static bool task_mentions_large_scale_ai_work(const char *task) {
     bool scale = strcasestr_simple(task, "large-scale") ||
                  (strcasestr_simple(task, "large") && strcasestr_simple(task, "scale")) ||
-                 strcasestr_simple(task, "broad") ||
-                 strcasestr_simple(task, "wide");
-    bool ai = strcasestr_simple(task, "ai") ||
-              strcasestr_simple(task, "agent") ||
-              strcasestr_simple(task, "model") ||
-              strcasestr_simple(task, "dsco-cli");
+                 strcasestr_simple(task, "broad") || strcasestr_simple(task, "wide");
+    bool ai = strcasestr_simple(task, "ai") || strcasestr_simple(task, "agent") ||
+              strcasestr_simple(task, "model") || strcasestr_simple(task, "dsco-cli");
     return scale && (ai || task_mentions_self_improvement(task));
 }
 
@@ -1964,18 +1958,15 @@ static bool task_mentions_provider_throughput(const char *task) {
     if (!task || !task[0])
         return false;
 
-    bool provider_scope = strcasestr_simple(task, "all providers") ||
-                          strcasestr_simple(task, "across providers") ||
-                          strcasestr_simple(task, "across all providers") ||
-                          strcasestr_simple(task, "provider") ||
-                          strcasestr_simple(task, "providers");
-    bool throughput_goal = strcasestr_simple(task, "throughput") ||
-                           strcasestr_simple(task, "fanout") ||
-                           strcasestr_simple(task, "fan-out") ||
-                           strcasestr_simple(task, "parallel") ||
-                           strcasestr_simple(task, "concurrency") ||
-                           strcasestr_simple(task, "maximize") ||
-                           strcasestr_simple(task, "maximise");
+    bool provider_scope =
+        strcasestr_simple(task, "all providers") || strcasestr_simple(task, "across providers") ||
+        strcasestr_simple(task, "across all providers") || strcasestr_simple(task, "provider") ||
+        strcasestr_simple(task, "providers");
+    bool throughput_goal =
+        strcasestr_simple(task, "throughput") || strcasestr_simple(task, "fanout") ||
+        strcasestr_simple(task, "fan-out") || strcasestr_simple(task, "parallel") ||
+        strcasestr_simple(task, "concurrency") || strcasestr_simple(task, "maximize") ||
+        strcasestr_simple(task, "maximise");
 
     return provider_scope && throughput_goal;
 }
@@ -2420,17 +2411,16 @@ static bool run_stage(const topology_t *t, const int ready_nodes[], int ready_co
             char lane_model[128];
             const char *node_model = default_node_model;
             const char *node_provider = NULL;
-            if (throughput_mode &&
-                topology_resolve_throughput_lane_for_tier(api_key, node->tier, child_count,
-                                                          lane_provider, sizeof(lane_provider),
-                                                          lane_model, sizeof(lane_model))) {
+            if (throughput_mode && topology_resolve_throughput_lane_for_tier(
+                                       api_key, node->tier, child_count, lane_provider,
+                                       sizeof(lane_provider), lane_model, sizeof(lane_model))) {
                 node_provider = lane_provider;
                 node_model = lane_model;
             }
 
-            int child_id = node_provider ? swarm_spawn_provider(&sw, -1, prompt, node_model,
-                                                                node_provider)
-                                         : swarm_spawn(&sw, prompt, node_model);
+            int child_id = node_provider
+                               ? swarm_spawn_provider(&sw, -1, prompt, node_model, node_provider)
+                               : swarm_spawn(&sw, prompt, node_model);
             free(prompt);
             if (child_id < 0) {
                 swarm_destroy(&sw);
@@ -2624,6 +2614,8 @@ bool topology_run(const topology_t *t, const char *api_key, const char *coordina
 
         jbuf_free(&out);
     } else {
+        /* A cached selection that fails must stop being served. */
+        plan_cache_feedback(task, false);
         snprintf(result, rlen, "error: topology execution failed");
     }
 
@@ -2914,6 +2906,8 @@ bool topology_run_scheduled(const topology_t *t, const char *api_key, const char
 
         jbuf_free(&out);
     } else {
+        /* A cached selection that fails must stop being served. */
+        plan_cache_feedback(task, false);
         snprintf(result, rlen, "error: topology execution failed");
     }
 
