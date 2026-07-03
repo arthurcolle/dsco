@@ -157,8 +157,7 @@ void tools_set_trace_context(const char *trace_id, const char *chronicle_parent_
         snprintf(g_tool_trace_ctx.trace_id, sizeof(g_tool_trace_ctx.trace_id), "%s", trace_id);
     if (chronicle_parent_span_id && chronicle_parent_span_id[0]) {
         snprintf(g_tool_trace_ctx.chronicle_parent_span_id,
-                 sizeof(g_tool_trace_ctx.chronicle_parent_span_id), "%s",
-                 chronicle_parent_span_id);
+                 sizeof(g_tool_trace_ctx.chronicle_parent_span_id), "%s", chronicle_parent_span_id);
     }
     if (chronicle_tool_span_id && chronicle_tool_span_id[0]) {
         snprintf(g_tool_trace_ctx.chronicle_tool_span_id,
@@ -177,9 +176,8 @@ static const char *tool_trace_id_or_null(void) {
 }
 
 static const char *tool_chronicle_parent_or_null(void) {
-    return g_tool_trace_ctx.chronicle_parent_span_id[0]
-               ? g_tool_trace_ctx.chronicle_parent_span_id
-               : NULL;
+    return g_tool_trace_ctx.chronicle_parent_span_id[0] ? g_tool_trace_ctx.chronicle_parent_span_id
+                                                        : NULL;
 }
 
 static const char *tool_chronicle_span_or_null(void) {
@@ -195,9 +193,8 @@ static void tool_mechanism_event(const char *event_type, const char *component,
     TRACE_KV(event_type, "component", component ? component : "tool", "payload", payload,
              "trace_id", trace_id ? trace_id : "", "span_id", span_id ? span_id : "", NULL);
     if (chronicle_ready()) {
-        chronicle_event(event_type, trace_id, span_id, tool_chronicle_parent_or_null(),
-                        "mechanism", component ? component : "tool", payload,
-                        "product_telemetry");
+        chronicle_event(event_type, trace_id, span_id, tool_chronicle_parent_or_null(), "mechanism",
+                        component ? component : "tool", payload, "product_telemetry");
     }
 }
 
@@ -410,12 +407,12 @@ static void append_trace_jsonl_path(jbuf_t *b) {
         jbuf_append(b, "null");
         return;
     }
-    if (strcmp(trace, "1") == 0 || strcmp(trace, "true") == 0 ||
-        strcmp(trace, "debug") == 0 || strcmp(trace, "info") == 0) {
+    if (strcmp(trace, "1") == 0 || strcmp(trace, "true") == 0 || strcmp(trace, "debug") == 0 ||
+        strcmp(trace, "info") == 0) {
         const char *home = getenv("HOME");
         char path[PATH_MAX];
-        snprintf(path, sizeof(path), "%s/.dsco/debug/trace-%d.jsonl",
-                 home && home[0] ? home : ".", (int)getpid());
+        snprintf(path, sizeof(path), "%s/.dsco/debug/trace-%d.jsonl", home && home[0] ? home : ".",
+                 (int)getpid());
         jbuf_append_json_str(b, path);
         return;
     }
@@ -551,12 +548,12 @@ static bool tool_swarm_inspect(const char *input, char *result, size_t rlen) {
  * ──────────────────────────────────────────────────────────────────────── */
 
 typedef struct {
-    int wall_timeout_s; /* hard wall-clock limit (0 = 120s default)    */
-    int idle_timeout_s; /* kill after N seconds with no output (0=30)  */
-    bool stream_to_tty; /* echo deltas to stderr in real time          */
-    bool dim_output;    /* wrap streamed output in TUI_DIM             */
-    const char *label;  /* label for event logging (tool name)         */
-    const char *cwd;    /* chdir here in child (no shell embedding)    */
+    int wall_timeout_s;         /* hard wall-clock limit (0 = 120s default)    */
+    int idle_timeout_s;         /* kill after N seconds with no output (0=30)  */
+    bool stream_to_tty;         /* echo deltas to stderr in real time          */
+    bool dim_output;            /* wrap streamed output in TUI_DIM             */
+    const char *label;          /* label for event logging (tool name)         */
+    const char *cwd;            /* chdir here in child (no shell embedding)    */
     const char *highlight_lang; /* optional syntax highlighting for stdout */
 } run_opts_t;
 
@@ -603,8 +600,8 @@ static const char *infer_code_lang_from_command(const char *command) {
     return NULL;
 }
 
-static void stream_code_chunk(FILE *out, const char *buf, size_t len, const char *lang,
-                              char *line, size_t *line_len, size_t line_cap) {
+static void stream_code_chunk(FILE *out, const char *buf, size_t len, const char *lang, char *line,
+                              size_t *line_len, size_t line_cap) {
     if (!out || !buf || !lang || !line || !line_len || line_cap == 0)
         return;
     for (size_t i = 0; i < len; i++) {
@@ -3070,16 +3067,16 @@ static __attribute__((unused)) bool tool_soul_replace(const char *input, char *r
  * concurrent read path (read_file is is_read_only && is_concurrent). */
 #define RD_DEDUP_SLOTS 64
 typedef struct {
-    char   path[512];
-    int    offset;
-    int    limit;
-    long   size;
+    char path[512];
+    int offset;
+    int limit;
+    long size;
     time_t mtime;
-    bool   used;
+    bool used;
 } rd_dedup_entry_t;
-static rd_dedup_entry_t  s_rd_dedup[RD_DEDUP_SLOTS];
-static int               s_rd_dedup_next = 0;
-static pthread_mutex_t   s_rd_dedup_lock = PTHREAD_MUTEX_INITIALIZER;
+static rd_dedup_entry_t s_rd_dedup[RD_DEDUP_SLOTS];
+static int s_rd_dedup_next = 0;
+static pthread_mutex_t s_rd_dedup_lock = PTHREAD_MUTEX_INITIALIZER;
 
 static bool rd_dedup_enabled(void) {
     const char *e = getenv("DSCO_READ_DEDUP");
@@ -5307,12 +5304,32 @@ static bool tool_ol_call(const char *input, char *result, size_t rlen) {
         jbuf_appendf(&req, "%.6g", temperature);
     }
     if (extra_object) {
-        static const char *const pass_keys[] = {
-            "audio", "frequency_penalty", "function_call", "functions", "logit_bias", "logprobs",
-            "metadata", "modalities", "n", "parallel_tool_calls", "prediction", "presence_penalty",
-            "reasoning", "reasoning_effort", "response_format", "seed", "service_tier", "stop",
-            "store", "stream_options", "top_logprobs", "top_p", "user", "verbosity",
-            "web_search_options", NULL};
+        static const char *const pass_keys[] = {"audio",
+                                                "frequency_penalty",
+                                                "function_call",
+                                                "functions",
+                                                "logit_bias",
+                                                "logprobs",
+                                                "metadata",
+                                                "modalities",
+                                                "n",
+                                                "parallel_tool_calls",
+                                                "prediction",
+                                                "presence_penalty",
+                                                "reasoning",
+                                                "reasoning_effort",
+                                                "response_format",
+                                                "seed",
+                                                "service_tier",
+                                                "stop",
+                                                "store",
+                                                "stream_options",
+                                                "top_logprobs",
+                                                "top_p",
+                                                "user",
+                                                "verbosity",
+                                                "web_search_options",
+                                                NULL};
         for (int i = 0; pass_keys[i]; i++) {
             char *raw = json_get_raw(extra_object, pass_keys[i]);
             if (!raw)
@@ -5385,9 +5402,9 @@ static bool tool_ol_call(const char *input, char *result, size_t rlen) {
         } else if (msg) {
             snprintf(result, rlen, "ol_call failed: HTTP %ld: %s", http_code, msg);
         } else {
-            snprintf(result, rlen, "ol_call failed: %s (HTTP %ld)%s%.*s",
-                     curl_easy_strerror(res), http_code, resp.len ? ": " : "",
-                     resp.len > 800 ? 800 : (int)resp.len, resp.data ? resp.data : "");
+            snprintf(result, rlen, "ol_call failed: %s (HTTP %ld)%s%.*s", curl_easy_strerror(res),
+                     http_code, resp.len ? ": " : "", resp.len > 800 ? 800 : (int)resp.len,
+                     resp.data ? resp.data : "");
         }
         free(err_obj);
         free(msg);
@@ -8149,11 +8166,9 @@ static int current_swarm_depth(void) {
 
 static void swarm_emit_child_event(const char *event_type, const swarm_child_t *c,
                                    const char *reason, const char *signal_name);
-static void swarm_emit_group_event(const char *event_type, swarm_t *sw, int gid,
-                                   const char *reason, int requested, int forced,
-                                   int grace_ms);
-static int swarm_child_abort_and_drain(swarm_t *sw, int cid, int grace_ms,
-                                       const char *reason);
+static void swarm_emit_group_event(const char *event_type, swarm_t *sw, int gid, const char *reason,
+                                   int requested, int forced, int grace_ms);
+static int swarm_child_abort_and_drain(swarm_t *sw, int cid, int grace_ms, const char *reason);
 
 static bool tool_spawn_agent(const char *input, char *result, size_t rlen) {
     ensure_swarm();
@@ -8409,8 +8424,8 @@ static bool tool_agent_race(const char *input, char *result, size_t rlen) {
         if (cid >= 0) {
             ids[n] = cid;
             n++;
-            swarm_emit_child_event("swarm.child.spawned", swarm_get(&g_swarm, cid),
-                                   "agent.race", NULL);
+            swarm_emit_child_event("swarm.child.spawned", swarm_get(&g_swarm, cid), "agent.race",
+                                   NULL);
             fprintf(stderr, "  \033[2m🏁 racer #%d: %s/%s\033[0m\n", n, providers[n - 1],
                     models[n - 1] ? models[n - 1] : "default");
         }
@@ -9792,19 +9807,17 @@ static bool tool_create_swarm(const char *input, char *result, size_t rlen) {
         const char *task_model = (parse_ctx.specs[i].model && parse_ctx.specs[i].model[0])
                                      ? parse_ctx.specs[i].model
                                      : model;
-        const char *task_provider =
-            (parse_ctx.specs[i].provider && parse_ctx.specs[i].provider[0])
-                ? parse_ctx.specs[i].provider
-                : NULL;
+        const char *task_provider = (parse_ctx.specs[i].provider && parse_ctx.specs[i].provider[0])
+                                        ? parse_ctx.specs[i].provider
+                                        : NULL;
         int cid = task_provider
-                      ? swarm_spawn_provider(&g_swarm, gid, parse_ctx.specs[i].task,
-                                             task_model, task_provider)
-                      : swarm_spawn_in_group(&g_swarm, gid, parse_ctx.specs[i].task,
-                                             task_model);
+                      ? swarm_spawn_provider(&g_swarm, gid, parse_ctx.specs[i].task, task_model,
+                                             task_provider)
+                      : swarm_spawn_in_group(&g_swarm, gid, parse_ctx.specs[i].task, task_model);
         if (cid >= 0) {
             spawned++;
-            swarm_emit_child_event("swarm.child.spawned", swarm_get(&g_swarm, cid),
-                                   "swarm.create", NULL);
+            swarm_emit_child_event("swarm.child.spawned", swarm_get(&g_swarm, cid), "swarm.create",
+                                   NULL);
         }
     }
 
@@ -9812,8 +9825,7 @@ static bool tool_create_swarm(const char *input, char *result, size_t rlen) {
     snprintf(swarm_detail, sizeof(swarm_detail), "group_id=%d name=%s tasks=%d spawned=%d", gid,
              name, parse_ctx.count, spawned);
     baseline_log("swarm", "create_swarm", swarm_detail, NULL);
-    swarm_emit_group_event("swarm.group.created", &g_swarm, gid, "swarm.create", spawned, -1,
-                           -1);
+    swarm_emit_group_event("swarm.group.created", &g_swarm, gid, "swarm.create", spawned, -1, -1);
 
     /* TUI feedback */
     fprintf(stderr, "\n  %s⚡%s Swarm %s\"%s\"%s created: %d agents launched\n", TUI_BYELLOW,
@@ -10065,9 +10077,8 @@ static void swarm_emit_child_event(const char *event_type, const swarm_child_t *
     jbuf_free(&p);
 }
 
-static void swarm_emit_group_event(const char *event_type, swarm_t *sw, int gid,
-                                   const char *reason, int requested, int forced,
-                                   int grace_ms) {
+static void swarm_emit_group_event(const char *event_type, swarm_t *sw, int gid, const char *reason,
+                                   int requested, int forced, int grace_ms) {
     if (!sw || gid < 0 || gid >= sw->group_count)
         return;
     swarm_group_t *g = &sw->groups[gid];
@@ -10249,7 +10260,8 @@ static bool tool_swarm_collect(const char *input, char *result, size_t rlen) {
 
     fprintf(stderr, "\n  %s┌─ swarm \"%s\" ─ %d agents ─ streaming live%s\n", TUI_BYELLOW,
             grp->name, grp->child_count, TUI_RESET);
-    swarm_emit_group_event("swarm.collect.started", &g_swarm, gid, "collect", -1, -1, timeout * 1000);
+    swarm_emit_group_event("swarm.collect.started", &g_swarm, gid, "collect", -1, -1,
+                           timeout * 1000);
 
     /* Poll with short timeout for responsive streaming + Ctrl+C support */
     while (!swarm_group_complete(&g_swarm, gid)) {
@@ -10259,14 +10271,14 @@ static bool tool_swarm_collect(const char *input, char *result, size_t rlen) {
         /* Ctrl+C: abort swarm gracefully */
         if (g_interrupted) {
             const char *reason = g_tool_timed_out ? "tool_timeout" : "interrupted";
-            fprintf(stderr, "  %s⚠ %s — killing swarm \"%s\"%s\n", TUI_BRED, reason,
-                    grp->name, TUI_RESET);
+            fprintf(stderr, "  %s⚠ %s — killing swarm \"%s\"%s\n", TUI_BRED, reason, grp->name,
+                    TUI_RESET);
             int killed = swarm_group_abort_and_drain(&g_swarm, gid, &live_ctx, 1500, reason);
             swarm_collect_results(&g_swarm, gid, result, rlen, false, reason);
             swarm_emit_group_event("swarm.collect.completed", &g_swarm, gid, reason, killed, -1,
                                    1500);
-            fprintf(stderr, "  %s└─ swarm stopped (%d kill request%s)%s\n\n", TUI_BRED,
-                    killed, killed == 1 ? "" : "s", TUI_RESET);
+            fprintf(stderr, "  %s└─ swarm stopped (%d kill request%s)%s\n\n", TUI_BRED, killed,
+                    killed == 1 ? "" : "s", TUI_RESET);
             return false;
         }
 
@@ -10293,9 +10305,10 @@ static bool tool_swarm_collect(const char *input, char *result, size_t rlen) {
                     TUI_BYELLOW, grp->name, elapsed, TUI_RESET);
             int killed = swarm_group_abort_and_drain(&g_swarm, gid, &live_ctx, 1500, "timeout");
             swarm_collect_results(&g_swarm, gid, result, rlen, false, "timeout");
-            swarm_emit_group_event("swarm.collect.completed", &g_swarm, gid, "timeout", killed,
-                                   -1, 1500);
-            fprintf(stderr, "  %s└─ partial results returned; swarm stopped (%d kill request%s)%s\n\n",
+            swarm_emit_group_event("swarm.collect.completed", &g_swarm, gid, "timeout", killed, -1,
+                                   1500);
+            fprintf(stderr,
+                    "  %s└─ partial results returned; swarm stopped (%d kill request%s)%s\n\n",
                     TUI_BYELLOW, killed, killed == 1 ? "" : "s", TUI_RESET);
             return true;
         }
@@ -10471,8 +10484,8 @@ static bool tool_swarm_map_reduce(const char *input, char *result, size_t rlen) 
                                    "swarm.map_reduce.map", NULL);
         }
     }
-    swarm_emit_group_event("swarm.group.created", &g_swarm, gid, "swarm.map_reduce.map",
-                           spawned, -1, -1);
+    swarm_emit_group_event("swarm.group.created", &g_swarm, gid, "swarm.map_reduce.map", spawned,
+                           -1, -1);
 
     fprintf(stderr,
             "\n  %s⚡%s map-reduce \"%s\": %d workers (depth %d) → "
@@ -10492,8 +10505,8 @@ static bool tool_swarm_map_reduce(const char *input, char *result, size_t rlen) 
         int killed = swarm_group_abort_and_drain(&g_swarm, gid, &live_ctx, 1500, reason);
         swarm_collect_results(&g_swarm, gid, result, rlen, false, reason);
         fprintf(stderr, "  %s└─ map %s — workers stopped (%d kill request%s)%s\n\n",
-                wait_st < 0 ? TUI_BRED : TUI_BYELLOW, reason, killed,
-                killed == 1 ? "" : "s", TUI_RESET);
+                wait_st < 0 ? TUI_BRED : TUI_BYELLOW, reason, killed, killed == 1 ? "" : "s",
+                TUI_RESET);
         free_swarm_task_specs(&parse_ctx);
         free(name);
         free(model);
@@ -10982,7 +10995,8 @@ static bool tool_spawn_executor(const char *input, char *result, size_t rlen) {
 
     int depth = current_swarm_depth();
     if (depth >= dsco_swarm_max_depth()) {
-        snprintf(result, rlen, "{\"error\":\"max swarm depth %d reached\"}", dsco_swarm_max_depth());
+        snprintf(result, rlen, "{\"error\":\"max swarm depth %d reached\"}",
+                 dsco_swarm_max_depth());
         return false;
     }
 
@@ -11101,16 +11115,16 @@ static bool tool_spawn_executor(const char *input, char *result, size_t rlen) {
                                                         : g_swarm.executors.codex_model));
     swarm_emit_child_event("swarm.child.spawned", c, "swarm.spawn_executor", NULL);
     if (owns_group)
-        swarm_emit_group_event("swarm.group.created", &g_swarm, group_id,
-                               "swarm.spawn_executor", 1, -1, -1);
+        swarm_emit_group_event("swarm.group.created", &g_swarm, group_id, "swarm.spawn_executor", 1,
+                               -1, -1);
 
     fprintf(stderr, "  %s⚡%s spawned %s%s%s agent #%d: %s%.60s%s\n", TUI_BCYAN, TUI_RESET,
             TUI_BOLD, executor_type_name(exec_type), TUI_RESET, id, TUI_DIM, task, TUI_RESET);
 
     if (wait && group_id >= 0) {
         char collect_input[128];
-        snprintf(collect_input, sizeof(collect_input), "{\"group_id\":%d,\"timeout\":%d}",
-                 group_id, wait_timeout);
+        snprintf(collect_input, sizeof(collect_input), "{\"group_id\":%d,\"timeout\":%d}", group_id,
+                 wait_timeout);
         bool ok = tool_swarm_collect(collect_input, result, rlen);
         free(task);
         free(model);
@@ -11162,7 +11176,8 @@ static bool tool_spawn_provider(const char *input, char *result, size_t rlen) {
 
     int depth = current_swarm_depth();
     if (depth >= dsco_swarm_max_depth()) {
-        snprintf(result, rlen, "{\"error\":\"max swarm depth %d reached\"}", dsco_swarm_max_depth());
+        snprintf(result, rlen, "{\"error\":\"max swarm depth %d reached\"}",
+                 dsco_swarm_max_depth());
         return false;
     }
 
@@ -11182,8 +11197,7 @@ static bool tool_spawn_provider(const char *input, char *result, size_t rlen) {
     /* Validate the provider can be used. This accepts direct API keys,
      * local endpoints, and subscription/OAuth lanes such as openai-codex. */
     if (!provider_has_usable_key(provider, NULL)) {
-        snprintf(result, rlen, "{\"error\":\"no usable credential for provider '%s'\"}",
-                 provider);
+        snprintf(result, rlen, "{\"error\":\"no usable credential for provider '%s'\"}", provider);
         free(task);
         free(model);
         free(provider);
@@ -11239,14 +11253,14 @@ static bool tool_spawn_provider(const char *input, char *result, size_t rlen) {
 typedef struct {
     char provider[64];
     char model[128];
-    int  replicas;
+    int replicas;
     bool subscription;
     bool local;
     bool metered;
-    int  score;
-    int  prompt_tokens;
-    int  expected_hit_tokens;
-    int  residual_prefill_tokens;
+    int score;
+    int prompt_tokens;
+    int expected_hit_tokens;
+    int residual_prefill_tokens;
     char reason[96];
 } provider_fabric_lane_t;
 
@@ -11255,11 +11269,11 @@ typedef struct {
     bool cache_hint_scoped;
     bool cache_affinity_matched;
     bool allow_cold_cache_hedge;
-    int  prompt_tokens;
-    int  requested_hit_tokens;
-    int  effective_hit_tokens;
-    int  original_max_agents;
-    int  max_agents;
+    int prompt_tokens;
+    int requested_hit_tokens;
+    int effective_hit_tokens;
+    int original_max_agents;
+    int max_agents;
     char cache_key[128];
     char affinity_provider[64];
     char affinity_model[128];
@@ -11296,8 +11310,7 @@ static void fabric_append_policy_json(jbuf_t *b, const provider_fabric_policy_t 
     jbuf_append_json_str(b, p && p->affinity_model[0] ? p->affinity_model : "");
 }
 
-static void fabric_append_lanes_json(jbuf_t *b, provider_fabric_lane_t lanes[],
-                                     int lane_count) {
+static void fabric_append_lanes_json(jbuf_t *b, provider_fabric_lane_t lanes[], int lane_count) {
     jbuf_append(b, "\"lanes\":[");
     for (int li = 0; li < lane_count; li++) {
         if (li > 0)
@@ -11329,8 +11342,8 @@ static void fabric_append_lanes_json(jbuf_t *b, provider_fabric_lane_t lanes[],
     jbuf_append(b, "]");
 }
 
-static bool fabric_lane_exists(provider_fabric_lane_t lanes[], int count,
-                               const char *provider, const char *model) {
+static bool fabric_lane_exists(provider_fabric_lane_t lanes[], int count, const char *provider,
+                               const char *model) {
     for (int i = 0; i < count; i++) {
         if (strcmp(lanes[i].provider, provider) == 0 && strcmp(lanes[i].model, model) == 0)
             return true;
@@ -11341,8 +11354,8 @@ static bool fabric_lane_exists(provider_fabric_lane_t lanes[], int count,
 static bool fabric_add_lane(provider_fabric_lane_t lanes[], int *count, int max_lanes,
                             const char *provider, const char *model, int replicas,
                             bool subscription, bool metered, const char *api_key) {
-    if (!lanes || !count || *count >= max_lanes || !provider || !provider[0] ||
-        !model || !model[0] || replicas <= 0)
+    if (!lanes || !count || *count >= max_lanes || !provider || !provider[0] || !model ||
+        !model[0] || replicas <= 0)
         return false;
     if (fabric_lane_exists(lanes, *count, provider, model))
         return false;
@@ -11371,8 +11384,8 @@ static bool fabric_env_truthy(const char *name) {
 
 static bool fabric_env_falsey(const char *name) {
     const char *v = getenv(name);
-    return v && (strcmp(v, "0") == 0 || strcasecmp(v, "false") == 0 ||
-                 strcasecmp(v, "no") == 0 || strcasecmp(v, "off") == 0);
+    return v && (strcmp(v, "0") == 0 || strcasecmp(v, "false") == 0 || strcasecmp(v, "no") == 0 ||
+                 strcasecmp(v, "off") == 0);
 }
 
 static int fabric_rough_tokens(const char *s) {
@@ -11396,8 +11409,7 @@ static void fabric_make_cache_key(const char *task, char out[128]) {
 }
 
 static bool fabric_lane_matches_cache_affinity(const provider_fabric_lane_t *lane,
-                                               const char *provider,
-                                               const char *model) {
+                                               const char *provider, const char *model) {
     if (!lane)
         return false;
     bool has_provider = provider && provider[0];
@@ -11424,12 +11436,12 @@ static bool fabric_has_cache_affinity_lane(provider_fabric_lane_t lanes[], int l
 }
 
 typedef struct {
-    bool  active;
-    bool  had_key;
-    bool  had_retention;
+    bool active;
+    bool had_key;
+    bool had_retention;
     char *old_key;
     char *old_retention;
-    char  key[128];
+    char key[128];
 } fabric_cache_env_guard_t;
 
 static void fabric_cache_env_begin(fabric_cache_env_guard_t *g, const char *task,
@@ -11469,15 +11481,13 @@ static void fabric_cache_env_restore(fabric_cache_env_guard_t *g) {
     memset(g, 0, sizeof(*g));
 }
 
-static void fabric_score_lanes(provider_fabric_lane_t lanes[], int lane_count,
-                               int prompt_tokens, int expected_hit_tokens,
-                               const char *cache_affinity_provider,
-                               const char *cache_affinity_model,
-                               bool cache_hint_scoped) {
+static void fabric_score_lanes(provider_fabric_lane_t lanes[], int lane_count, int prompt_tokens,
+                               int expected_hit_tokens, const char *cache_affinity_provider,
+                               const char *cache_affinity_model, bool cache_hint_scoped) {
     for (int i = 0; i < lane_count; i++) {
         provider_fabric_lane_t *l = &lanes[i];
-        bool affinity_match = fabric_lane_matches_cache_affinity(
-            l, cache_affinity_provider, cache_affinity_model);
+        bool affinity_match =
+            fabric_lane_matches_cache_affinity(l, cache_affinity_provider, cache_affinity_model);
         int hit = cache_hint_scoped && affinity_match ? expected_hit_tokens : 0;
         if (hit < 0)
             hit = 0;
@@ -11575,13 +11585,11 @@ static void fabric_add_local_lane_spec(provider_fabric_lane_t lanes[], int *lane
         return;
     char model[192];
     snprintf(model, sizeof(model), "%s:%s", provider, model_tail);
-    fabric_add_lane(lanes, lane_count, max_lanes, provider, model, replicas,
-                    false, false, api_key);
+    fabric_add_lane(lanes, lane_count, max_lanes, provider, model, replicas, false, false, api_key);
 }
 
 static void fabric_add_configured_local_lanes(provider_fabric_lane_t lanes[], int *lane_count,
-                                              int max_lanes, int replicas,
-                                              const char *api_key) {
+                                              int max_lanes, int replicas, const char *api_key) {
     const char *specs = getenv("DSCO_FABRIC_LOCAL_LANES");
     if (!specs || !specs[0])
         specs = getenv("DSCO_LOCAL_FABRIC_LANES");
@@ -11612,9 +11620,8 @@ static void fabric_add_auto_local_lanes(provider_fabric_lane_t lanes[], int *lan
     }
 }
 
-static bool tool_provider_fabric_race(int gid, provider_fabric_lane_t lanes[],
-                                      int lane_count, int timeout,
-                                      const provider_fabric_policy_t *policy,
+static bool tool_provider_fabric_race(int gid, provider_fabric_lane_t lanes[], int lane_count,
+                                      int timeout, const provider_fabric_policy_t *policy,
                                       char *result, size_t rlen) {
     swarm_group_t *grp = &g_swarm.groups[gid];
     swarm_live_ctx_t live_ctx;
@@ -11627,8 +11634,8 @@ static bool tool_provider_fabric_race(int gid, provider_fabric_lane_t lanes[],
     int terminal = 0;
     int errors = 0;
 
-    fprintf(stderr, "\n  %sfabric race%s \"%s\": waiting for first successful lane\n",
-            TUI_BYELLOW, TUI_RESET, grp->name);
+    fprintf(stderr, "\n  %sfabric race%s \"%s\": waiting for first successful lane\n", TUI_BYELLOW,
+            TUI_RESET, grp->name);
 
     while (winner_id < 0) {
         swarm_poll_stream(&g_swarm, 100, swarm_live_stream_cb, &live_ctx);
@@ -11669,10 +11676,10 @@ static bool tool_provider_fabric_race(int gid, provider_fabric_lane_t lanes[],
 
     if (winner_id < 0) {
         int killed = swarm_group_active_count(&g_swarm, gid);
-        int kill_requests = swarm_group_abort_and_drain(&g_swarm, gid, &live_ctx, 1500,
-                                                        terminal >= grp->child_count
-                                                            ? "provider_fabric_all_failed"
-                                                            : "provider_fabric_timeout");
+        int kill_requests =
+            swarm_group_abort_and_drain(&g_swarm, gid, &live_ctx, 1500,
+                                        terminal >= grp->child_count ? "provider_fabric_all_failed"
+                                                                     : "provider_fabric_timeout");
         jbuf_t b;
         jbuf_init(&b, 1024);
         jbuf_append(&b, "{\"error\":");
@@ -11711,18 +11718,15 @@ static bool tool_provider_fabric_race(int gid, provider_fabric_lane_t lanes[],
         swarm_child_t *loser = swarm_get(&g_swarm, cid);
         if (loser && (loser->status == SWARM_RUNNING || loser->status == SWARM_STREAMING))
             killed++;
-        kill_requests += swarm_child_abort_and_drain(&g_swarm, cid, 1500,
-                                                     "provider_fabric_loser");
+        kill_requests += swarm_child_abort_and_drain(&g_swarm, cid, 1500, "provider_fabric_loser");
     }
-    swarm_emit_group_event("swarm.group.abort.completed", &g_swarm, gid,
-                           "provider_fabric_losers", kill_requests, -1, 1500);
+    swarm_emit_group_event("swarm.group.abort.completed", &g_swarm, gid, "provider_fabric_losers",
+                           kill_requests, -1, 1500);
 
     double elapsed = winner ? swarm_child_elapsed_sec(winner) : 0.0;
-    fprintf(stderr, "  %sfabric winner%s #%d %s/%s in %.2fs; killed %d slower lanes\n",
-            TUI_GREEN, TUI_RESET, winner_id,
-            winner && winner->provider[0] ? winner->provider : "unknown",
-            winner && winner->model[0] ? winner->model : "default",
-            elapsed, killed);
+    fprintf(stderr, "  %sfabric winner%s #%d %s/%s in %.2fs; killed %d slower lanes\n", TUI_GREEN,
+            TUI_RESET, winner_id, winner && winner->provider[0] ? winner->provider : "unknown",
+            winner && winner->model[0] ? winner->model : "default", elapsed, killed);
 
     jbuf_t b;
     jbuf_init(&b, 4096);
@@ -11771,7 +11775,8 @@ static bool tool_provider_fabric(const char *input, char *result, size_t rlen) {
 
     int depth = current_swarm_depth();
     if (depth >= dsco_swarm_max_depth()) {
-        snprintf(result, rlen, "{\"error\":\"max swarm depth %d reached\"}", dsco_swarm_max_depth());
+        snprintf(result, rlen, "{\"error\":\"max swarm depth %d reached\"}",
+                 dsco_swarm_max_depth());
         return false;
     }
 
@@ -11798,8 +11803,8 @@ static bool tool_provider_fabric(const char *input, char *result, size_t rlen) {
 
     bool include_metered = json_get_bool(input, "include_metered", false);
     bool race = json_get_bool(input, "race", true);
-    if (mode && (strcmp(mode, "race") == 0 || strcmp(mode, "first") == 0 ||
-                 strcmp(mode, "fastest") == 0))
+    if (mode &&
+        (strcmp(mode, "race") == 0 || strcmp(mode, "first") == 0 || strcmp(mode, "fastest") == 0))
         race = true;
     if (mode && (strcmp(mode, "spawn") == 0 || strcmp(mode, "async") == 0))
         race = false;
@@ -11807,17 +11812,16 @@ static bool tool_provider_fabric(const char *input, char *result, size_t rlen) {
                 (mode && (strcmp(mode, "collect") == 0 || strcmp(mode, "all") == 0));
     if (wait)
         race = false;
-    int timeout_default = race
-                              ? fabric_env_int("DSCO_PROVIDER_FABRIC_RACE_TIMEOUT_S", 12, 5, 7200)
-                              : 600;
+    int timeout_default =
+        race ? fabric_env_int("DSCO_PROVIDER_FABRIC_RACE_TIMEOUT_S", 12, 5, 7200) : 600;
     int timeout = clamp_timeout_seconds(json_get_int(input, "timeout", timeout_default),
                                         timeout_default, 5, 7200);
     int max_available = dsco_swarm_max_children() - g_swarm.child_count;
     if (max_available < 1)
         max_available = 1;
-    int max_agents_default = fabric_env_int("DSCO_PROVIDER_FABRIC_MAX_AGENTS",
-                                            max_available < 16 ? max_available : 16,
-                                            1, SWARM_MAX_CHILDREN);
+    int max_agents_default =
+        fabric_env_int("DSCO_PROVIDER_FABRIC_MAX_AGENTS", max_available < 16 ? max_available : 16,
+                       1, SWARM_MAX_CHILDREN);
     if (max_agents_default > max_available)
         max_agents_default = max_available;
     int max_agents = json_get_int(input, "max_agents", max_agents_default);
@@ -11825,15 +11829,14 @@ static bool tool_provider_fabric(const char *input, char *result, size_t rlen) {
         max_agents = 1;
     if (max_agents > max_available)
         max_agents = max_available;
-    int replicas = json_get_int(input, "replicas",
-                                fabric_env_int("DSCO_PROVIDER_FABRIC_REPLICAS", 2, 1, 16));
+    int replicas =
+        json_get_int(input, "replicas", fabric_env_int("DSCO_PROVIDER_FABRIC_REPLICAS", 2, 1, 16));
     if (replicas < 1)
         replicas = 1;
     if (replicas > 16)
         replicas = 16;
-    int fugu_replicas =
-        json_get_int(input, "fugu_replicas",
-                     fabric_env_int("DSCO_FUGU_FABRIC_REPLICAS", replicas * 2, 1, 32));
+    int fugu_replicas = json_get_int(
+        input, "fugu_replicas", fabric_env_int("DSCO_FUGU_FABRIC_REPLICAS", replicas * 2, 1, 32));
     if (fugu_replicas < 1)
         fugu_replicas = 1;
     if (fugu_replicas > 32)
@@ -11852,35 +11855,33 @@ static bool tool_provider_fabric(const char *input, char *result, size_t rlen) {
 
     bool fugu_is_subscription = provider_sakana_current_key_is_subscription();
     if (fugu_is_subscription || include_metered) {
-        fabric_add_lane(lanes, &lane_count, (int)(sizeof(lanes) / sizeof(lanes[0])),
-                        "sakana", fugu_model, fugu_replicas, fugu_is_subscription,
-                        !fugu_is_subscription, api_key);
+        fabric_add_lane(lanes, &lane_count, (int)(sizeof(lanes) / sizeof(lanes[0])), "sakana",
+                        fugu_model, fugu_replicas, fugu_is_subscription, !fugu_is_subscription,
+                        api_key);
     }
-    fabric_add_lane(lanes, &lane_count, (int)(sizeof(lanes) / sizeof(lanes[0])),
-                    "anthropic", "claude-sonnet-4-6", replicas, true, false, api_key);
-    fabric_add_lane(lanes, &lane_count, (int)(sizeof(lanes) / sizeof(lanes[0])),
-                    "openai-codex", "gpt-5.5", replicas, true, false, api_key);
-    fabric_add_lane(lanes, &lane_count, (int)(sizeof(lanes) / sizeof(lanes[0])),
-                    "zai", "glm-5.2", replicas, true, false, api_key);
+    fabric_add_lane(lanes, &lane_count, (int)(sizeof(lanes) / sizeof(lanes[0])), "anthropic",
+                    "claude-sonnet-4-6", replicas, true, false, api_key);
+    fabric_add_lane(lanes, &lane_count, (int)(sizeof(lanes) / sizeof(lanes[0])), "openai-codex",
+                    "gpt-5.5", replicas, true, false, api_key);
+    fabric_add_lane(lanes, &lane_count, (int)(sizeof(lanes) / sizeof(lanes[0])), "zai", "glm-5.2",
+                    replicas, true, false, api_key);
 
-    fabric_add_configured_local_lanes(lanes, &lane_count,
-                                      (int)(sizeof(lanes) / sizeof(lanes[0])),
+    fabric_add_configured_local_lanes(lanes, &lane_count, (int)(sizeof(lanes) / sizeof(lanes[0])),
                                       local_replicas, api_key);
-    fabric_add_auto_local_lanes(lanes, &lane_count,
-                                (int)(sizeof(lanes) / sizeof(lanes[0])),
+    fabric_add_auto_local_lanes(lanes, &lane_count, (int)(sizeof(lanes) / sizeof(lanes[0])),
                                 local_replicas, api_key);
 
     if (include_metered) {
-        fabric_add_lane(lanes, &lane_count, (int)(sizeof(lanes) / sizeof(lanes[0])),
-                        "openai", "gpt-4.1", replicas, false, true, api_key);
-        fabric_add_lane(lanes, &lane_count, (int)(sizeof(lanes) / sizeof(lanes[0])),
-                        "xai", "grok-4-fast", replicas, false, true, api_key);
-        fabric_add_lane(lanes, &lane_count, (int)(sizeof(lanes) / sizeof(lanes[0])),
-                        "moonshot", "kimi-k2.7-code-highspeed", replicas, false, true, api_key);
-        fabric_add_lane(lanes, &lane_count, (int)(sizeof(lanes) / sizeof(lanes[0])),
-                        "google", "gemini-2.5-pro", replicas, false, true, api_key);
-        fabric_add_lane(lanes, &lane_count, (int)(sizeof(lanes) / sizeof(lanes[0])),
-                        "openrouter", "z-ai/glm-5.2", replicas, false, true, api_key);
+        fabric_add_lane(lanes, &lane_count, (int)(sizeof(lanes) / sizeof(lanes[0])), "openai",
+                        "gpt-4.1", replicas, false, true, api_key);
+        fabric_add_lane(lanes, &lane_count, (int)(sizeof(lanes) / sizeof(lanes[0])), "xai",
+                        "grok-4-fast", replicas, false, true, api_key);
+        fabric_add_lane(lanes, &lane_count, (int)(sizeof(lanes) / sizeof(lanes[0])), "moonshot",
+                        "kimi-k2.7-code-highspeed", replicas, false, true, api_key);
+        fabric_add_lane(lanes, &lane_count, (int)(sizeof(lanes) / sizeof(lanes[0])), "google",
+                        "gemini-2.5-pro", replicas, false, true, api_key);
+        fabric_add_lane(lanes, &lane_count, (int)(sizeof(lanes) / sizeof(lanes[0])), "openrouter",
+                        "z-ai/glm-5.2", replicas, false, true, api_key);
     }
 
     if (lane_count == 0) {
@@ -11895,14 +11896,13 @@ static bool tool_provider_fabric(const char *input, char *result, size_t rlen) {
         return false;
     }
 
-    bool cache_aware = json_get_bool(input, "cache_aware",
-                                     !fabric_env_falsey("DSCO_FABRIC_CACHE_AWARE"));
+    bool cache_aware =
+        json_get_bool(input, "cache_aware", !fabric_env_falsey("DSCO_FABRIC_CACHE_AWARE"));
     int prompt_tokens = fabric_rough_tokens(task);
     int expected_hit_tokens =
         json_get_int(input, "cache_hit_tokens",
                      json_get_int(input, "expected_cache_hit_tokens",
-                                  fabric_env_int("DSCO_FABRIC_CACHE_HIT_TOKENS", 0, 0,
-                                                 2000000)));
+                                  fabric_env_int("DSCO_FABRIC_CACHE_HIT_TOKENS", 0, 0, 2000000)));
     char *cache_affinity_provider = json_get_str(input, "cache_affinity_provider");
     if (!cache_affinity_provider || !cache_affinity_provider[0]) {
         free(cache_affinity_provider);
@@ -11911,7 +11911,8 @@ static bool tool_provider_fabric(const char *input, char *result, size_t rlen) {
     if (!cache_affinity_provider || !cache_affinity_provider[0]) {
         free(cache_affinity_provider);
         const char *env_provider = getenv("DSCO_FABRIC_CACHE_AFFINITY_PROVIDER");
-        cache_affinity_provider = env_provider && env_provider[0] ? safe_strdup(env_provider) : NULL;
+        cache_affinity_provider =
+            env_provider && env_provider[0] ? safe_strdup(env_provider) : NULL;
     }
     char *cache_affinity_model = json_get_str(input, "cache_affinity_model");
     if (!cache_affinity_model || !cache_affinity_model[0]) {
@@ -11928,37 +11929,37 @@ static bool tool_provider_fabric(const char *input, char *result, size_t rlen) {
     bool cache_affinity_set = affinity_provider[0] || affinity_model[0];
     bool cache_hint_scoped = expected_hit_tokens > 0 && cache_affinity_set;
     bool cache_affinity_matched =
-        cache_affinity_set && fabric_has_cache_affinity_lane(lanes, lane_count,
-                                                             affinity_provider, affinity_model);
-    int effective_hit_tokens = cache_hint_scoped && cache_affinity_matched ? expected_hit_tokens : 0;
+        cache_affinity_set &&
+        fabric_has_cache_affinity_lane(lanes, lane_count, affinity_provider, affinity_model);
+    int effective_hit_tokens =
+        cache_hint_scoped && cache_affinity_matched ? expected_hit_tokens : 0;
     bool allow_cold_cache_hedge =
         json_get_bool(input, "allow_cold_cache_hedge",
                       fabric_env_truthy("DSCO_FABRIC_ALLOW_COLD_CACHE_HEDGE") ||
                           fabric_env_truthy("DSCO_FABRIC_CROSS_PROVIDER_CACHE_HEDGE"));
     int original_max_agents = max_agents;
-    int long_prompt_tokens =
-        fabric_env_int("DSCO_FABRIC_LONG_PROMPT_TOKENS", 8192, 512, 2000000);
+    int long_prompt_tokens = fabric_env_int("DSCO_FABRIC_LONG_PROMPT_TOKENS", 8192, 512, 2000000);
     int medium_prompt_tokens =
         fabric_env_int("DSCO_FABRIC_MEDIUM_PROMPT_TOKENS", 2048, 256, 2000000);
-    int high_cache_tokens =
-        fabric_env_int("DSCO_FABRIC_HIGH_CACHE_HIT_TOKENS", 4096, 0, 2000000);
+    int high_cache_tokens = fabric_env_int("DSCO_FABRIC_HIGH_CACHE_HIT_TOKENS", 4096, 0, 2000000);
 
-    fabric_score_lanes(lanes, lane_count, prompt_tokens, expected_hit_tokens,
-                       affinity_provider, affinity_model, cache_hint_scoped);
+    fabric_score_lanes(lanes, lane_count, prompt_tokens, expected_hit_tokens, affinity_provider,
+                       affinity_model, cache_hint_scoped);
     fabric_sort_lanes(lanes, lane_count);
 
     bool diverse_hedge = false;
     int local_lane_count = fabric_count_local_lanes(lanes, lane_count);
     if (cache_aware && race) {
         int cap = max_agents;
-        bool high_scoped_hit = effective_hit_tokens >= high_cache_tokens && effective_hit_tokens > 0;
+        bool high_scoped_hit =
+            effective_hit_tokens >= high_cache_tokens && effective_hit_tokens > 0;
         bool cache_sensitive = cache_hint_scoped || high_scoped_hit;
         if ((cache_sensitive || prompt_tokens >= long_prompt_tokens) && !allow_cold_cache_hedge) {
             cap = 1;
             diverse_hedge = true;
         } else if (prompt_tokens >= long_prompt_tokens || high_scoped_hit) {
-            cap = fabric_env_int("DSCO_FABRIC_LONG_HEDGE_LANES",
-                                 local_lane_count > 0 ? 2 : 1, 1, 8);
+            cap =
+                fabric_env_int("DSCO_FABRIC_LONG_HEDGE_LANES", local_lane_count > 0 ? 2 : 1, 1, 8);
             diverse_hedge = true;
         } else if (prompt_tokens >= medium_prompt_tokens) {
             cap = fabric_env_int("DSCO_FABRIC_MEDIUM_HEDGE_LANES", 2, 1, 8);
@@ -12022,7 +12023,7 @@ static bool tool_provider_fabric(const char *input, char *result, size_t rlen) {
             jbuf_append(&prompt, " of ");
             jbuf_append_int(&prompt, lane->replicas);
             jbuf_append(&prompt, "\nReturn a complete result for this lane; the parent may race, "
-                                "compare, or synthesize outputs.");
+                                 "compare, or synthesize outputs.");
             int cid = swarm_spawn_provider(&g_swarm, gid, prompt.data ? prompt.data : task,
                                            lane->model, lane->provider);
             jbuf_free(&prompt);
@@ -12032,8 +12033,7 @@ static bool tool_provider_fabric(const char *input, char *result, size_t rlen) {
                     c->est_cost_usd = swarm_estimate_task_cost(&g_swarm, lane->model);
                     snprintf(c->provider, sizeof(c->provider), "%s", lane->provider);
                     snprintf(c->model, sizeof(c->model), "%s", lane->model);
-                    swarm_emit_child_event("swarm.child.spawned", c, "swarm.provider_fabric",
-                                           NULL);
+                    swarm_emit_child_event("swarm.child.spawned", c, "swarm.provider_fabric", NULL);
                 }
                 spawned++;
             } else {
@@ -12055,17 +12055,17 @@ static bool tool_provider_fabric(const char *input, char *result, size_t rlen) {
         return false;
     }
     fabric_cache_env_restore(&cache_env);
-    swarm_emit_group_event("swarm.group.created", &g_swarm, gid, "swarm.provider_fabric",
-                           spawned, -1, -1);
+    swarm_emit_group_event("swarm.group.created", &g_swarm, gid, "swarm.provider_fabric", spawned,
+                           -1, -1);
 
-    fprintf(stderr, "\n  %sprovider fabric%s \"%s\": %d workers across %d lanes",
-            TUI_BYELLOW, TUI_RESET, name, spawned, lane_count);
+    fprintf(stderr, "\n  %sprovider fabric%s \"%s\": %d workers across %d lanes", TUI_BYELLOW,
+            TUI_RESET, name, spawned, lane_count);
     if (skipped > 0)
         fprintf(stderr, " (%d skipped)", skipped);
     fprintf(stderr, " policy=%s scope=%s tokens=%d cache_hit=%d/%d max=%d->%d cache_key=%s",
-            cache_aware ? "cache-aware" : "raw",
-            cache_aware ? "provider-local" : "off", prompt_tokens, effective_hit_tokens,
-            expected_hit_tokens, original_max_agents, max_agents, cache_key_used);
+            cache_aware ? "cache-aware" : "raw", cache_aware ? "provider-local" : "off",
+            prompt_tokens, effective_hit_tokens, expected_hit_tokens, original_max_agents,
+            max_agents, cache_key_used);
     if (cache_affinity_set) {
         fprintf(stderr, " affinity=%s/%s%s", affinity_provider[0] ? affinity_provider : "*",
                 affinity_model[0] ? affinity_model : "*",
@@ -12075,20 +12075,20 @@ static bool tool_provider_fabric(const char *input, char *result, size_t rlen) {
         fprintf(stderr, " cold-hedge=on");
     fprintf(stderr, "\n");
     for (int li = 0; li < lane_count; li++) {
-        const char *lane_kind = lanes[li].local ? " local"
-                              : lanes[li].subscription ? " subscription"
-                              : lanes[li].metered ? " metered"
-                                                   : "";
+        const char *lane_kind = lanes[li].local          ? " local"
+                                : lanes[li].subscription ? " subscription"
+                                : lanes[li].metered      ? " metered"
+                                                         : "";
         fprintf(stderr, "    %s%-14s%s %-20s x%d%s score=%d hit=%d residual=%d\n",
-                lanes[li].local ? TUI_BCYAN : lanes[li].subscription ? TUI_GREEN : TUI_YELLOW,
-                lanes[li].provider, TUI_RESET, lanes[li].model, lanes[li].replicas,
-                lane_kind, lanes[li].score, lanes[li].expected_hit_tokens,
-                lanes[li].residual_prefill_tokens);
+                lanes[li].local          ? TUI_BCYAN
+                : lanes[li].subscription ? TUI_GREEN
+                                         : TUI_YELLOW,
+                lanes[li].provider, TUI_RESET, lanes[li].model, lanes[li].replicas, lane_kind,
+                lanes[li].score, lanes[li].expected_hit_tokens, lanes[li].residual_prefill_tokens);
     }
 
     if (race) {
-        bool ok = tool_provider_fabric_race(gid, lanes, lane_count, timeout, &policy,
-                                            result, rlen);
+        bool ok = tool_provider_fabric_race(gid, lanes, lane_count, timeout, &policy, result, rlen);
         free(cache_affinity_provider);
         free(cache_affinity_model);
         free(task);
@@ -12100,8 +12100,8 @@ static bool tool_provider_fabric(const char *input, char *result, size_t rlen) {
 
     if (wait) {
         char collect_input[128];
-        snprintf(collect_input, sizeof(collect_input), "{\"group_id\":%d,\"timeout\":%d}",
-                 gid, timeout);
+        snprintf(collect_input, sizeof(collect_input), "{\"group_id\":%d,\"timeout\":%d}", gid,
+                 timeout);
         bool ok = tool_swarm_collect(collect_input, result, rlen);
         free(cache_affinity_provider);
         free(cache_affinity_model);
@@ -12241,8 +12241,7 @@ static bool tool_create_executor_swarm(const char *input, char *result, size_t r
                 c->budget_usd = per_child_budget;
             c->est_cost_usd =
                 swarm_estimate_task_cost(&g_swarm, task_model ? task_model : g_swarm.default_model);
-            swarm_emit_child_event("swarm.child.spawned", c, "swarm.create_executor_swarm",
-                                   NULL);
+            swarm_emit_child_event("swarm.child.spawned", c, "swarm.create_executor_swarm", NULL);
             spawned++;
         } else {
             failed++;
@@ -12260,12 +12259,12 @@ static bool tool_create_executor_swarm(const char *input, char *result, size_t r
         free(default_model);
         return false;
     }
-    swarm_emit_group_event("swarm.group.created", &g_swarm, gid,
-                           "swarm.create_executor_swarm", spawned, -1, -1);
+    swarm_emit_group_event("swarm.group.created", &g_swarm, gid, "swarm.create_executor_swarm",
+                           spawned, -1, -1);
 
     /* TUI feedback */
-    fprintf(stderr, "\n  %s⚡%s Swarm %s\"%s\"%s: %d agents", TUI_BYELLOW, TUI_RESET,
-            TUI_BOLD, name, TUI_RESET, spawned);
+    fprintf(stderr, "\n  %s⚡%s Swarm %s\"%s\"%s: %d agents", TUI_BYELLOW, TUI_RESET, TUI_BOLD,
+            name, TUI_RESET, spawned);
     if (failed > 0)
         fprintf(stderr, " (%d failed)", failed);
     fprintf(stderr, "\n");
@@ -17353,14 +17352,18 @@ static bool tool_avian_brood(const char *input, char *result, size_t rlen) {
         char *lineage = json_get_str(input, "lineage");
         double risk = json_get_double(input, "risk", 0.45);
         int required = (int)json_get_double(input, "required_cycles", 3);
-        int id = avian_brood_lay(&g_governance.avian, nest_id, name ? name : "candidate",
-                                 kind ? kind : "proposal", lineage ? lineage : "local", risk, required);
-        snprintf(result, rlen,
-                 "{\"ok\":%s,\"egg_id\":%d,\"nest_id\":%d,\"mechanism\":\"brooding\",\"state\":\"%s\"}",
-                 id >= 0 ? "true" : "false", id, nest_id,
-                 id >= 0 ? avian_egg_state_name(avian_egg_get(&g_governance.avian, id)->state)
-                         : "failed");
-        free(name); free(kind); free(lineage);
+        int id =
+            avian_brood_lay(&g_governance.avian, nest_id, name ? name : "candidate",
+                            kind ? kind : "proposal", lineage ? lineage : "local", risk, required);
+        snprintf(
+            result, rlen,
+            "{\"ok\":%s,\"egg_id\":%d,\"nest_id\":%d,\"mechanism\":\"brooding\",\"state\":\"%s\"}",
+            id >= 0 ? "true" : "false", id, nest_id,
+            id >= 0 ? avian_egg_state_name(avian_egg_get(&g_governance.avian, id)->state)
+                    : "failed");
+        free(name);
+        free(kind);
+        free(lineage);
     } else if (strcmp(op, "tend") == 0 || strcmp(op, "incubate") == 0) {
         int egg_id = (int)json_get_double(input, "egg_id", 0);
         double warmth = json_get_double(input, "warmth", 0.55);
@@ -18283,26 +18286,27 @@ static bool tool_context_status(const char *input, char *result, size_t rlen) {
     int remaining = window - used;
     float pct = 100.0f * (float)used / (float)window;
 
-    off +=
-        snprintf(result + off, rlen - off,
-                 "{\"context_window\":{\"total_tokens\":%d,\"used_tokens\":%d,"
-                 "\"remaining_tokens\":%d,\"usage_pct\":%.1f,"
-                 "\"input_tokens\":%d,\"output_tokens\":%d,\"billed_turn_tokens\":%d},",
-                 window, used, remaining, pct, g_ctx_used_input_tokens, g_ctx_used_output_tokens,
-                 billed_turn_tokens);
+    off += snprintf(result + off, rlen - off,
+                    "{\"context_window\":{\"total_tokens\":%d,\"used_tokens\":%d,"
+                    "\"remaining_tokens\":%d,\"usage_pct\":%.1f,"
+                    "\"input_tokens\":%d,\"output_tokens\":%d,\"billed_turn_tokens\":%d},",
+                    window, used, remaining, pct, g_ctx_used_input_tokens, g_ctx_used_output_tokens,
+                    billed_turn_tokens);
 
     /* Tool schema overhead: prefer actual serialized request telemetry, fall back to estimate. */
     int tool_count;
     tools_get_all(&tool_count);
     int active_estimate = TOOL_REGISTER_CAP < tool_count ? TOOL_REGISTER_CAP : tool_count;
     int schema_tokens = g_tool_schema_tokens > 0 ? g_tool_schema_tokens : active_estimate * 200;
-    int schema_active = g_tool_schema_active_count > 0 ? g_tool_schema_active_count : active_estimate;
+    int schema_active =
+        g_tool_schema_active_count > 0 ? g_tool_schema_active_count : active_estimate;
 
-    off += snprintf(result + off, rlen - off,
-                    "\"tool_overhead\":{\"active_tools\":%d,\"schema_tokens\":%d,"
-                    "\"source\":\"%s\"},",
-                    schema_active, schema_tokens,
-                    g_tool_schema_tokens > 0 ? "measured_serialized_json" : "estimate_200_per_tool");
+    off +=
+        snprintf(result + off, rlen - off,
+                 "\"tool_overhead\":{\"active_tools\":%d,\"schema_tokens\":%d,"
+                 "\"source\":\"%s\"},",
+                 schema_active, schema_tokens,
+                 g_tool_schema_tokens > 0 ? "measured_serialized_json" : "estimate_200_per_tool");
 
     /* Playbook stats */
     int pb_helpful = 0, pb_harmful = 0;
@@ -18939,11 +18943,16 @@ static bool tool_scratchpad(const char *input, char *result, size_t rlen) {
                 while (*c && ci < (int)sizeof(buf) - 1) {
                     if (*c == '\\' && *(c + 1)) {
                         c++;
-                        if (*c == 'n') buf[ci++] = '\n';
-                        else if (*c == 't') buf[ci++] = '\t';
-                        else if (*c == '"') buf[ci++] = '"';
-                        else if (*c == '\\') buf[ci++] = '\\';
-                        else buf[ci++] = *c;
+                        if (*c == 'n')
+                            buf[ci++] = '\n';
+                        else if (*c == 't')
+                            buf[ci++] = '\t';
+                        else if (*c == '"')
+                            buf[ci++] = '"';
+                        else if (*c == '\\')
+                            buf[ci++] = '\\';
+                        else
+                            buf[ci++] = *c;
                     } else if (*c == '"')
                         break;
                     else
@@ -18964,7 +18973,8 @@ static bool tool_scratchpad(const char *input, char *result, size_t rlen) {
                             memcpy(key, buf, klen);
                             key[klen] = '\0';
                             sep++;
-                            if (*sep == ' ' || *sep == '\t') sep++;
+                            if (*sep == ' ' || *sep == '\t')
+                                sep++;
                             snprintf(value, SP_VALUE_LEN, "%s", sep);
                         }
                     }
@@ -18984,11 +18994,16 @@ static bool tool_scratchpad(const char *input, char *result, size_t rlen) {
                 while (*c && ci < SP_VALUE_LEN - 1) {
                     if (*c == '\\' && *(c + 1)) {
                         c++;
-                        if (*c == 'n') value[ci++] = '\n';
-                        else if (*c == 't') value[ci++] = '\t';
-                        else if (*c == '"') value[ci++] = '"';
-                        else if (*c == '\\') value[ci++] = '\\';
-                        else value[ci++] = *c;
+                        if (*c == 'n')
+                            value[ci++] = '\n';
+                        else if (*c == 't')
+                            value[ci++] = '\t';
+                        else if (*c == '"')
+                            value[ci++] = '"';
+                        else if (*c == '\\')
+                            value[ci++] = '\\';
+                        else
+                            value[ci++] = *c;
                     } else if (*c == '"')
                         break;
                     else
@@ -19334,12 +19349,14 @@ static bool tool_self_exit(const char *input, char *result, size_t rlen) {
     (void)input;
     if (!g_self_exit_allowed) {
         snprintf(result, rlen,
-                 "{\"status\":\"blocked\",\"error\":\"self_exit is disabled during normal conversation; finish with a final answer instead.\"}");
+                 "{\"status\":\"blocked\",\"error\":\"self_exit is disabled during normal "
+                 "conversation; finish with a final answer instead.\"}");
         return false;
     }
     g_agent_exit_requested = 1;
     snprintf(result, rlen,
-             "{\"status\":\"exit_scheduled\",\"message\":\"Agent loop will stop after this autonomous goal turn completes; the REPL remains alive unless explicitly quit.\"}");
+             "{\"status\":\"exit_scheduled\",\"message\":\"Agent loop will stop after this "
+             "autonomous goal turn completes; the REPL remains alive unless explicitly quit.\"}");
     return true;
 }
 
@@ -22643,8 +22660,7 @@ static const char *loop_active_state(double v) {
 
 static void append_color_sample_json(jbuf_t *out, const char *path, const char *kind,
                                      const char *name, const char *state, double weight,
-                                     bool include_ansi, int *count, int limit,
-                                     bool *truncated) {
+                                     bool include_ansi, int *count, int limit, bool *truncated) {
     if (!out || !count)
         return;
     if (limit > 0 && *count >= limit) {
@@ -22695,8 +22711,8 @@ static void append_named_color_sample_json(jbuf_t *out, const char *name, bool i
     jbuf_appendf(out,
                  ",\"hex\":\"%s\",\"rgb\":[%u,%u,%u],\"ansi256\":%d,"
                  "\"hash\":%" PRIu64,
-                 color.hex, (unsigned)color.rgb.r, (unsigned)color.rgb.g,
-                 (unsigned)color.rgb.b, color.ansi256, color.hash);
+                 color.hex, (unsigned)color.rgb.r, (unsigned)color.rgb.g, (unsigned)color.rgb.b,
+                 color.ansi256, color.hash);
     if (include_ansi) {
         char fg[40], bg[40];
         snprintf(fg, sizeof(fg), "\033[38;2;%u;%u;%um", (unsigned)color.rgb.r,
@@ -22713,8 +22729,8 @@ static void append_named_color_sample_json(jbuf_t *out, const char *name, bool i
 }
 
 static void append_construct_field_colors(jbuf_t *out, const loop_construct_t *c,
-                                          const char *base_path, bool include_ansi,
-                                          int *count, int limit, bool *truncated) {
+                                          const char *base_path, bool include_ansi, int *count,
+                                          int limit, bool *truncated) {
     char path[192], name[160], state[160];
     append_color_sample_json(out, base_path, "loop", c->label, c->active ? "active" : "done",
                              c->iterations, include_ansi, count, limit, truncated);
@@ -22759,8 +22775,8 @@ static void append_construct_field_colors(jbuf_t *out, const loop_construct_t *c
         loop_meta_entry_t *e = (loop_meta_entry_t *)&c->meta[m];
         snprintf(path, sizeof(path), "%s.meta.%d.%s", base_path, m, e->name);
         snprintf(state, sizeof(state), "%s:%s", e->kind, e->value);
-        append_color_sample_json(out, path, "meta", e->name, state, e->weight, include_ansi,
-                                 count, limit, truncated);
+        append_color_sample_json(out, path, "meta", e->name, state, e->weight, include_ansi, count,
+                                 limit, truncated);
     }
     for (int n = 0; n < c->graph_node_count; n++) {
         loop_graph_node_t *node = (loop_graph_node_t *)&c->graph_nodes[n];
@@ -22781,29 +22797,27 @@ static void append_construct_field_colors(jbuf_t *out, const loop_construct_t *c
         loop_dyad_t *dy = (loop_dyad_t *)&c->dyads[d];
         snprintf(name, sizeof(name), "%s->%s", dy->from, dy->to);
         snprintf(path, sizeof(path), "%s.dyads.%d", base_path, d);
-        append_color_sample_json(out, path, "dyad", name, dy->relation, 0.0, include_ansi,
-                                 count, limit, truncated);
+        append_color_sample_json(out, path, "dyad", name, dy->relation, 0.0, include_ansi, count,
+                                 limit, truncated);
     }
     for (int j = 0; j < c->mapreduce_job_count; j++) {
         loop_mapreduce_job_t *job = (loop_mapreduce_job_t *)&c->mapreduce_jobs[j];
         snprintf(state, sizeof(state), "%s%s%s", job->mapped ? "mapped" : "pending-map",
                  job->shuffled ? ":shuffled" : "", job->reduced ? ":reduced" : "");
         snprintf(path, sizeof(path), "%s.mapreduce.%s", base_path, job->name);
-        append_color_sample_json(out, path, "mapreduce.job", job->name, state,
-                                 job->partitions, include_ansi, count, limit, truncated);
+        append_color_sample_json(out, path, "mapreduce.job", job->name, state, job->partitions,
+                                 include_ansi, count, limit, truncated);
     }
     for (int s = 0; s < c->srm_count; s++) {
         loop_srm_entry_t *e = (loop_srm_entry_t *)&c->srm_entries[s];
         snprintf(name, sizeof(name), "%s%s%s", e->id, e->name[0] ? ":" : "", e->name);
-        snprintf(state, sizeof(state), "%s%s%s%s%s%s",
-                 e->available ? "available" : "unavailable",
+        snprintf(state, sizeof(state), "%s%s%s%s%s%s", e->available ? "available" : "unavailable",
                  e->orderable ? ":orderable" : "", e->traceable ? ":traceable" : "",
-                 e->certificate_current ? ":current" : "",
-                 e->shipping_blocked ? ":blocked" : "",
+                 e->certificate_current ? ":current" : "", e->shipping_blocked ? ":blocked" : "",
                  e->archived_certificate ? ":archived" : "");
         snprintf(path, sizeof(path), "%s.srm.%s", base_path, e->id);
-        append_color_sample_json(out, path, "srm.entry", name, state, e->uncertainty,
-                                 include_ansi, count, limit, truncated);
+        append_color_sample_json(out, path, "srm.entry", name, state, e->uncertainty, include_ansi,
+                                 count, limit, truncated);
     }
     for (int m = 0; m < c->measurement_count; m++) {
         loop_measurement_entry_t *me = (loop_measurement_entry_t *)&c->measurements[m];
@@ -22817,22 +22831,22 @@ static void append_construct_field_colors(jbuf_t *out, const loop_construct_t *c
         loop_srm_operation_t *op = (loop_srm_operation_t *)&c->srm_operations[o];
         snprintf(state, sizeof(state), "%s:%s", op->flag ? "enabled" : "recorded", op->value);
         snprintf(path, sizeof(path), "%s.srm.operations.%d", base_path, o);
-        append_color_sample_json(out, path, op->kind, op->name, state, op->amount,
-                                 include_ansi, count, limit, truncated);
+        append_color_sample_json(out, path, op->kind, op->name, state, op->amount, include_ansi,
+                                 count, limit, truncated);
     }
     for (int r = 0; r < c->refine_count; r++) {
         loop_refine_rule_t *rr = (loop_refine_rule_t *)&c->refine_rules[r];
         snprintf(state, sizeof(state), "%s:%s", rr->fired ? "done" : "pending", rr->when);
         snprintf(path, sizeof(path), "%s.refine.%d", base_path, r);
-        append_color_sample_json(out, path, "refine", rr->target, state, rr->value,
-                                 include_ansi, count, limit, truncated);
+        append_color_sample_json(out, path, "refine", rr->target, state, rr->value, include_ansi,
+                                 count, limit, truncated);
     }
     for (int r = 0; r < c->rewrite_count; r++) {
         loop_rewrite_rule_t *rw = (loop_rewrite_rule_t *)&c->rewrite_rules[r];
         snprintf(path, sizeof(path), "%s.rewrite.%d", base_path, r);
         append_color_sample_json(out, path, "schema_rewrite", rw->action,
-                                 rw->fired ? "done" : rw->when, rw->fired ? 1.0 : 0.0,
-                                 include_ansi, count, limit, truncated);
+                                 rw->fired ? "done" : rw->when, rw->fired ? 1.0 : 0.0, include_ansi,
+                                 count, limit, truncated);
     }
     if (c->policy[0]) {
         snprintf(path, sizeof(path), "%s.policy", base_path);
@@ -22841,8 +22855,8 @@ static void append_construct_field_colors(jbuf_t *out, const loop_construct_t *c
     }
     if (c->decision[0]) {
         snprintf(path, sizeof(path), "%s.decision", base_path);
-        append_color_sample_json(out, path, "decision", c->decision, "selected", 1.0,
-                                 include_ansi, count, limit, truncated);
+        append_color_sample_json(out, path, "decision", c->decision, "selected", 1.0, include_ansi,
+                                 count, limit, truncated);
     }
     if (c->attractor[0]) {
         snprintf(path, sizeof(path), "%s.attractor", base_path);
@@ -22904,8 +22918,7 @@ static bool tool_construct_color_sample(const char *input, char *result, size_t 
             append_construct_field_colors(&out, c, base_path, include_ansi, &count, limit,
                                           &truncated);
         }
-        jbuf_appendf(&out, "],\"count\":%d,\"truncated\":%s}", count,
-                     truncated ? "true" : "false");
+        jbuf_appendf(&out, "],\"count\":%d,\"truncated\":%s}", count, truncated ? "true" : "false");
         pthread_mutex_unlock(&g_loop_lock);
     }
 
@@ -23509,7 +23522,7 @@ static void integration_action_flags_json(jbuf_t *b, unsigned actions) {
     do {                                                                                           \
         if (actions & (flag)) {                                                                    \
             if (!first)                                                                            \
-                jbuf_append(b, ",");                                                              \
+                jbuf_append(b, ",");                                                               \
             first = false;                                                                         \
             jbuf_append_json_str(b, (name));                                                       \
         }                                                                                          \
@@ -23553,8 +23566,8 @@ static void discover_append_tool_detail(jbuf_t *b, const char *name, const char 
         jbuf_append(b, ",\"action_flags\":[");
         integration_action_flags_json(b, actions);
         jbuf_append(b, "],\"requires_confirmation\":");
-        jbuf_append(b, (actions & DSCO_INTEGRATION_ACTION_REQUIRES_CONFIRMATION) ? "true"
-                                                                                 : "false");
+        jbuf_append(b,
+                    (actions & DSCO_INTEGRATION_ACTION_REQUIRES_CONFIRMATION) ? "true" : "false");
         jbuf_append(b, "}");
     }
     jbuf_append(b, "}");
@@ -23768,7 +23781,8 @@ static bool tool_discover_tools(const char *input, char *result, size_t rlen) {
         off += snprintf(result + off, rlen - off, "{\"category\":\"mcp\",\"tools\":[");
         int shown = 0;
         int skipped = 0;
-        for (int i = 0; i < g_external_tool_count && shown < limit && (size_t)off < rlen - 300; i++) {
+        for (int i = 0; i < g_external_tool_count && shown < limit && (size_t)off < rlen - 300;
+             i++) {
             if (skipped < offset) {
                 skipped++;
                 continue;
@@ -23782,7 +23796,8 @@ static bool tool_discover_tools(const char *input, char *result, size_t rlen) {
         }
         off += snprintf(result + off, rlen - off,
                         "],\"offset\":%d,\"limit\":%d,\"showing\":%d,\"total\":%d,"
-                        "\"has_more\":%s,\"hint\":\"Call discover_tools with query for full schemas, or page category=mcp with offset/limit.\"}",
+                        "\"has_more\":%s,\"hint\":\"Call discover_tools with query for full "
+                        "schemas, or page category=mcp with offset/limit.\"}",
                         offset, limit, shown, g_external_tool_count,
                         g_external_tool_count > offset + shown ? "true" : "false");
     }
@@ -23797,7 +23812,8 @@ static bool integration_query_matches(const char *query, const char *a, const ch
                                       const char *c, const char *d) {
     if (!query || !query[0])
         return true;
-    return tools_ci_contains_local(a ? a : "", query) || tools_ci_contains_local(b ? b : "", query) ||
+    return tools_ci_contains_local(a ? a : "", query) ||
+           tools_ci_contains_local(b ? b : "", query) ||
            tools_ci_contains_local(c ? c : "", query) || tools_ci_contains_local(d ? d : "", query);
 }
 
@@ -23807,20 +23823,20 @@ static bool integration_profile_matches(const char *profile, const char *name,
         return true;
     if (integration_query_matches(profile, name, categories, labels, NULL))
         return true;
-#define PROFILE_KEY(p, k1, k2, k3, k4, k5, k6, k7, k8)                                            \
+#define PROFILE_KEY(p, k1, k2, k3, k4, k5, k6, k7, k8)                                             \
     do {                                                                                           \
         if (strcasecmp(profile, (p)) == 0) {                                                       \
-            const char *keys[] = {(k1), (k2), (k3), (k4), (k5), (k6), (k7), (k8), NULL};            \
+            const char *keys[] = {(k1), (k2), (k3), (k4), (k5), (k6), (k7), (k8), NULL};           \
             for (int i = 0; keys[i]; i++)                                                          \
-                if (integration_query_matches(keys[i], name, categories, labels, NULL))             \
+                if (integration_query_matches(keys[i], name, categories, labels, NULL))            \
                     return true;                                                                   \
             return false;                                                                          \
         }                                                                                          \
     } while (0)
     PROFILE_KEY("engineering", "github", "linear", "atlassian", "slack", "notion", "datadog",
                 "posthog", "developer");
-    PROFILE_KEY("gtm", "hubspot", "pipedrive", "close", "intercom", "apollo", "clay",
-                "demandbase", "sales");
+    PROFILE_KEY("gtm", "hubspot", "pipedrive", "close", "intercom", "apollo", "clay", "demandbase",
+                "sales");
     PROFILE_KEY("finance", "bigquery", "motherduck", "quickbooks", "brex", "alpaca", "factset",
                 "finance", "");
     PROFILE_KEY("enterprise_knowledge", "glean", "box", "sharepoint", "alation", "atlan", "coveo",
@@ -23838,10 +23854,9 @@ static void append_integration_status_flags(jbuf_t *b, bool cached, bool live, b
                  "\"cached\":%s,\"installed\":%s,\"connected\":%s,\"live\":%s,"
                  "\"inaccessible\":%s,\"stale\":%s,\"requires_oauth\":%s,"
                  "\"mutating\":%s,\"sync_capable\":%s}",
-                 cached ? "true" : "false", live ? "true" : "false",
-                 accessible ? "true" : "false", live ? "true" : "false",
-                 (!accessible && cached) ? "true" : "false", stale ? "true" : "false",
-                 (!accessible && cached) ? "true" : "false",
+                 cached ? "true" : "false", live ? "true" : "false", accessible ? "true" : "false",
+                 live ? "true" : "false", (!accessible && cached) ? "true" : "false",
+                 stale ? "true" : "false", (!accessible && cached) ? "true" : "false",
                  (actions & (DSCO_INTEGRATION_ACTION_WRITE | DSCO_INTEGRATION_ACTION_SEND |
                              DSCO_INTEGRATION_ACTION_DELETE | DSCO_INTEGRATION_ACTION_ADMIN))
                      ? "true"
@@ -23869,12 +23884,14 @@ static void append_catalog_integration_json(jbuf_t *b, const codex_app_directory
     jbuf_append(b, ",\"action_flags\":[");
     integration_action_flags_json(b, e->action_flags);
     jbuf_append(b, "],");
-    append_integration_status_flags(b, true, live, e->is_accessible, e->stale, e->action_flags, e->sync);
+    append_integration_status_flags(b, true, live, e->is_accessible, e->stale, e->action_flags,
+                                    e->sync);
     jbuf_append(b, "}");
 }
 
 static void append_external_integration_json(jbuf_t *b, const external_tool_t *t) {
-    unsigned actions = t->action_flags ? t->action_flags : dsco_integration_actions_for_tool(t->name);
+    unsigned actions =
+        t->action_flags ? t->action_flags : dsco_integration_actions_for_tool(t->name);
     jbuf_append(b, "{");
     jbuf_append(b, "\"tool_name\":");
     jbuf_append_json_str(b, t->name);
@@ -23923,8 +23940,7 @@ static bool tool_discover_integrations(const char *input, char *result, size_t r
     jbuf_init(&b, 4096);
     jbuf_append(&b, "{\"subsystem\":\"Chronicle-adjacent IntegrationCatalog\",");
     jbuf_append(&b, "\"catalog\":{");
-    jbuf_appendf(&b,
-                 "\"loaded\":%s,\"source_path\":", have_catalog ? "true" : "false");
+    jbuf_appendf(&b, "\"loaded\":%s,\"source_path\":", have_catalog ? "true" : "false");
     jbuf_append_json_str(&b, have_catalog ? dir.source_path : (path ? path : ""));
     jbuf_appendf(&b,
                  ",\"total\":%zu,\"enabled\":%zu,\"accessible\":%zu,"
@@ -23937,12 +23953,16 @@ static bool tool_discover_integrations(const char *input, char *result, size_t r
         jbuf_append_json_str(&b, err);
     }
     jbuf_append(&b, "},\"profiles\":{");
-    jbuf_append(&b,
-                "\"engineering\":[\"GitHub\",\"Linear\",\"Atlassian\",\"Slack\",\"Notion\",\"Datadog\",\"PostHog\",\"Stripe\"],"
-                "\"gtm\":[\"HubSpot\",\"Pipedrive\",\"Close\",\"Intercom\",\"Apollo\",\"Clay\",\"Demandbase\",\"Attio\"],"
-                "\"finance\":[\"BigQuery\",\"MotherDuck\",\"QuickBooks\",\"Brex\",\"Alpaca\",\"FactSet\",\"PitchBook\"],"
-                "\"enterprise_knowledge\":[\"Glean\",\"Box\",\"SharePoint\",\"Alation\",\"Atlan\",\"Coveo\"],"
-                "\"governed_agent_runtime\":[\"ToolCheck\",\"Agent Ready\",\"HAPI MCP Registry\",\"AccessOwl\",\"Vantage\"]");
+    jbuf_append(&b, "\"engineering\":[\"GitHub\",\"Linear\",\"Atlassian\",\"Slack\",\"Notion\","
+                    "\"Datadog\",\"PostHog\",\"Stripe\"],"
+                    "\"gtm\":[\"HubSpot\",\"Pipedrive\",\"Close\",\"Intercom\",\"Apollo\",\"Clay\","
+                    "\"Demandbase\",\"Attio\"],"
+                    "\"finance\":[\"BigQuery\",\"MotherDuck\",\"QuickBooks\",\"Brex\",\"Alpaca\","
+                    "\"FactSet\",\"PitchBook\"],"
+                    "\"enterprise_knowledge\":[\"Glean\",\"Box\",\"SharePoint\",\"Alation\","
+                    "\"Atlan\",\"Coveo\"],"
+                    "\"governed_agent_runtime\":[\"ToolCheck\",\"Agent Ready\",\"HAPI MCP "
+                    "Registry\",\"AccessOwl\",\"Vantage\"]");
     jbuf_append(&b, "},\"integrations\":[");
 
     int matched = 0, skipped = 0, emitted = 0;
@@ -23951,7 +23971,8 @@ static bool tool_discover_integrations(const char *input, char *result, size_t r
         for (size_t i = 0; i < dir.count; i++) {
             const codex_app_directory_entry_t *e = &dir.entries[i];
             if (query && query[0] &&
-                !integration_query_matches(query, e->id, e->connector_id, e->display_name, e->categories))
+                !integration_query_matches(query, e->id, e->connector_id, e->display_name,
+                                           e->categories))
                 continue;
             if (!integration_profile_matches(profile, e->display_name, e->categories, e->labels))
                 continue;
@@ -23979,7 +24000,8 @@ static bool tool_discover_integrations(const char *input, char *result, size_t r
     }
     for (int i = 0; i < g_external_tool_count; i++) {
         const external_tool_t *t = &g_external_tools[i];
-        if (!integration_query_matches(query, t->name, t->integration_id, t->display_name, t->categories))
+        if (!integration_query_matches(query, t->name, t->integration_id, t->display_name,
+                                       t->categories))
             continue;
         if (!integration_profile_matches(profile, t->display_name[0] ? t->display_name : t->name,
                                          t->categories, t->labels))
@@ -24022,14 +24044,17 @@ static bool tool_dsco_doctor_integrations(const char *input, char *result, size_
     int control_plane = 0;
     for (int i = 0; i < g_external_tool_count; i++) {
         external_tool_t *t = &g_external_tools[i];
-        unsigned actions = t->action_flags ? t->action_flags : dsco_integration_actions_for_tool(t->name);
+        unsigned actions =
+            t->action_flags ? t->action_flags : dsco_integration_actions_for_tool(t->name);
         if (actions & (DSCO_INTEGRATION_ACTION_WRITE | DSCO_INTEGRATION_ACTION_SEND |
                        DSCO_INTEGRATION_ACTION_DELETE | DSCO_INTEGRATION_ACTION_ADMIN))
             mutating_live++;
         if (!t->integration_id[0])
             live_without_catalog++;
-        if (tools_ci_contains_local(t->name, "registry") || tools_ci_contains_local(t->name, "toolcheck") ||
-            tools_ci_contains_local(t->name, "agent_ready") || tools_ci_contains_local(t->name, "monitor"))
+        if (tools_ci_contains_local(t->name, "registry") ||
+            tools_ci_contains_local(t->name, "toolcheck") ||
+            tools_ci_contains_local(t->name, "agent_ready") ||
+            tools_ci_contains_local(t->name, "monitor"))
             control_plane++;
     }
     if (have_catalog) {
@@ -24054,16 +24079,18 @@ static bool tool_dsco_doctor_integrations(const char *input, char *result, size_
         jbuf_append(&b, ",\"catalog_error\":");
         jbuf_append_json_str(&b, err);
     }
-    jbuf_appendf(&b,
-                 ",\"counts\":{\"catalog\":%zu,\"live_mcp\":%d,"
-                 "\"live_without_catalog_metadata\":%d,\"stale_catalog\":%d,"
-                 "\"inaccessible_catalog\":%d,\"mutating_live\":%d,\"control_plane_candidates\":%d}",
-                 dir.count, live_total, live_without_catalog, stale_catalog,
-                 inaccessible_catalog, mutating_live, control_plane);
+    jbuf_appendf(
+        &b,
+        ",\"counts\":{\"catalog\":%zu,\"live_mcp\":%d,"
+        "\"live_without_catalog_metadata\":%d,\"stale_catalog\":%d,"
+        "\"inaccessible_catalog\":%d,\"mutating_live\":%d,\"control_plane_candidates\":%d}",
+        dir.count, live_total, live_without_catalog, stale_catalog, inaccessible_catalog,
+        mutating_live, control_plane);
     jbuf_append(&b, ",\"release_blockers\":[");
     bool first = true;
     if (!have_catalog) {
-        jbuf_append_json_str(&b, "codex app directory cache missing; set DSCO_CODEX_APP_DIRECTORY or create ~/.dsco/codex_app_directory.json");
+        jbuf_append_json_str(&b, "codex app directory cache missing; set DSCO_CODEX_APP_DIRECTORY "
+                                 "or create ~/.dsco/codex_app_directory.json");
         first = false;
     }
     if (stale_catalog > 0) {
@@ -24087,7 +24114,8 @@ static bool tool_dsco_doctor_integrations(const char *input, char *result, size_
     if (control_plane > 0) {
         if (!first)
             jbuf_append(&b, ",");
-        jbuf_append_json_str(&b, "governance/meta integrations detected; treat as control-plane tools");
+        jbuf_append_json_str(&b,
+                             "governance/meta integrations detected; treat as control-plane tools");
     }
     jbuf_append(&b, "]}");
 
@@ -24260,7 +24288,8 @@ static bool tool_load_tools(const char *input, char *result, size_t rlen) {
         for (int i = 0; i < this_batch; i++) {
             int idx = tool_map_lookup(&g_tool_map, names[batch + i]);
             if (idx >= 0 && idx < total) {
-                snprintf(hint.tools[hint.tool_count], sizeof(hint.tools[hint.tool_count]), "%s", names[batch + i]);
+                snprintf(hint.tools[hint.tool_count], sizeof(hint.tools[hint.tool_count]), "%s",
+                         names[batch + i]);
                 hint.tool_count++;
                 /* Also mark in hot cache so it auto-admits to working set */
                 tools_mark_hot(idx);
@@ -24270,7 +24299,8 @@ static bool tool_load_tools(const char *input, char *result, size_t rlen) {
                 if (ei >= 0 && ei < g_external_tool_count) {
                     g_external_tools[ei].loaded = true;
                     if (hint.tool_count < HINT_MAX_TOOLS) {
-                        snprintf(hint.tools[hint.tool_count], sizeof(hint.tools[hint.tool_count]), "%s", names[batch + i]);
+                        snprintf(hint.tools[hint.tool_count], sizeof(hint.tools[hint.tool_count]),
+                                 "%s", names[batch + i]);
                         hint.tool_count++;
                     }
                     loaded++;
@@ -25471,11 +25501,10 @@ static bool tool_swarm_dispatch(const char *input, char *result, size_t rlen) {
     char *action = json_get_str(input, "action");
     if (!action || !action[0]) {
         free(action);
-        snprintf(
-            result, rlen,
-            "missing: action (create, map_reduce, status, collect, budget, spawn_executor, "
-            "spawn_provider, provider_fabric, create_executor_swarm, executor_status, "
-            "topology_list, topology_run, inspect)");
+        snprintf(result, rlen,
+                 "missing: action (create, map_reduce, status, collect, budget, spawn_executor, "
+                 "spawn_provider, provider_fabric, create_executor_swarm, executor_status, "
+                 "topology_list, topology_run, inspect)");
         return false;
     }
     bool ok = false;
@@ -25905,8 +25934,8 @@ static bool tool_bg_learn(const char *input, char *result, size_t rlen) {
                  "\"skills_pruned\":%u,\"auto_skill_count\":%d,\"last_run_epoch\":%.0f,"
                  "\"last_skill_write\":",
                  ok ? "true" : "false", act, st.enabled ? "true" : "false",
-                 st.running ? "true" : "false", st.interval_sec, st.cycles,
-                 st.skills_created, st.skills_pruned, st.auto_skill_count, st.last_run_epoch);
+                 st.running ? "true" : "false", st.interval_sec, st.cycles, st.skills_created,
+                 st.skills_pruned, st.auto_skill_count, st.last_run_epoch);
     jbuf_append_json_str(&b, st.last_skill_write);
     if (created >= 0)
         jbuf_appendf(&b, ",\"created\":%d", created);
@@ -26178,11 +26207,17 @@ static bool tool_trading_dispatch(const char *input, char *result, size_t rlen) 
  *  HERMES AGENT COMPATIBILITY — MCP + Agent Client Protocol
  * ══════════════════════════════════════════════════════════════════════════ */
 
-static const char *s_hermes_mcp_tools[] = {
-    "conversations_list", "conversation_get",       "messages_read",
-    "attachments_fetch",  "events_poll",            "events_wait",
-    "messages_send",      "channels_list",          "permissions_list_open",
-    "permissions_respond", NULL};
+static const char *s_hermes_mcp_tools[] = {"conversations_list",
+                                           "conversation_get",
+                                           "messages_read",
+                                           "attachments_fetch",
+                                           "events_poll",
+                                           "events_wait",
+                                           "messages_send",
+                                           "channels_list",
+                                           "permissions_list_open",
+                                           "permissions_respond",
+                                           NULL};
 
 typedef struct {
     const char *id;
@@ -26234,8 +26269,8 @@ static const hermes_capability_t s_hermes_capabilities[] = {
      "https://hermes-agent.nousresearch.com/docs/user-guide/messaging",
      "Targets Telegram, Discord, Slack, WhatsApp, Signal, and related platform bridges."},
     {"skills_system", "memory", "Skills and procedural memory", "/skills and skill files",
-     "Hermes-owned reusable procedures can complement dsco tools and workflows",
-     "~/.hermes/skills", "agent-created skill writes should remain reviewed",
+     "Hermes-owned reusable procedures can complement dsco tools and workflows", "~/.hermes/skills",
+     "agent-created skill writes should remain reviewed",
      "https://hermes-agent.nousresearch.com/docs/user-guide/features/skills",
      "Compatible with the agentskills.io-style skill ecosystem."},
     {"persistent_memory", "memory", "Persistent memory, profile, and session recall",
@@ -26343,9 +26378,8 @@ static void hermes_append_sources(jbuf_t *b) {
 
 static void hermes_append_install(jbuf_t *b) {
     jbuf_append(b, "\"install\":{");
-    hermes_json_field(
-        b, "macos_linux_wsl",
-        "curl -fsSL https://hermes-agent.nousresearch.com/install.sh | bash");
+    hermes_json_field(b, "macos_linux_wsl",
+                      "curl -fsSL https://hermes-agent.nousresearch.com/install.sh | bash");
     jbuf_append(b, ",");
     hermes_json_field(b, "post_install", "source ~/.zshrc || source ~/.bashrc; hermes doctor");
     jbuf_append(b, ",");
@@ -26439,9 +26473,9 @@ static void hermes_append_capabilities(jbuf_t *b) {
     jbuf_append(b, "\"capability_count\":");
     jbuf_append_int(b, count);
     jbuf_append(b, ",\"capability_surfaces\":[");
-    const char *surfaces[] = {"mcp",   "acp",      "operator", "models", "providers",
+    const char *surfaces[] = {"mcp",       "acp",    "operator",   "models",    "providers",
                               "messaging", "memory", "automation", "execution", "agents",
-                              "context", "safety",   "research",  NULL};
+                              "context",   "safety", "research",   NULL};
     for (int i = 0; surfaces[i]; i++) {
         if (i > 0)
             jbuf_append(b, ",");
@@ -26454,12 +26488,12 @@ static void hermes_append_capabilities(jbuf_t *b) {
         hermes_append_capability(b, &s_hermes_capabilities[i]);
     }
     jbuf_append(b, "],\"showcase_commands\":[");
-    const char *cmds[] = {
-        "./dsco --tool-exec hermes_agent '{\"action\":\"status\"}'",
-        "./dsco --tool-exec hermes_agent '{\"action\":\"capabilities\"}'",
-        "./dsco --tool-exec hermes_agent '{\"action\":\"mcp_preset\"}'",
-        "./dsco --tool-exec hermes_agent '{\"action\":\"acp_preset\"}'",
-        "./dsco --tool-exec hermes_agent '{\"action\":\"tools\"}'", NULL};
+    const char *cmds[] = {"./dsco --tool-exec hermes_agent '{\"action\":\"status\"}'",
+                          "./dsco --tool-exec hermes_agent '{\"action\":\"capabilities\"}'",
+                          "./dsco --tool-exec hermes_agent '{\"action\":\"mcp_preset\"}'",
+                          "./dsco --tool-exec hermes_agent '{\"action\":\"acp_preset\"}'",
+                          "./dsco --tool-exec hermes_agent '{\"action\":\"tools\"}'",
+                          NULL};
     for (int i = 0; cmds[i]; i++) {
         if (i > 0)
             jbuf_append(b, ",");
@@ -26492,13 +26526,14 @@ static void hermes_append_status(jbuf_t *b) {
 
 static void hermes_append_notes(jbuf_t *b) {
     jbuf_append(b, "\"notes\":[");
-    jbuf_append_json_str(b, "Use MCP when dsco should call Hermes' messaging/channel bridge tools.");
+    jbuf_append_json_str(b,
+                         "Use MCP when dsco should call Hermes' messaging/channel bridge tools.");
     jbuf_append(b, ",");
-    jbuf_append_json_str(
-        b, "Use Hermes ACP only for Agent Client Protocol editor integrations; it is not the same ACP as agentic commerce.");
+    jbuf_append_json_str(b, "Use Hermes ACP only for Agent Client Protocol editor integrations; it "
+                            "is not the same ACP as agentic commerce.");
     jbuf_append(b, ",");
-    jbuf_append_json_str(
-        b, "Hermes MCP server mode is stdio-first; keep the command as hermes with args [mcp, serve].");
+    jbuf_append_json_str(b, "Hermes MCP server mode is stdio-first; keep the command as hermes "
+                            "with args [mcp, serve].");
     jbuf_append(b, "]");
 }
 
@@ -26518,8 +26553,8 @@ static bool tool_hermes_agent(const char *input, char *result, size_t rlen) {
                   strcmp(action, "config_snippet") == 0 || full;
     bool acp = strcmp(action, "acp_preset") == 0 || strcmp(action, "acp") == 0 || full;
     bool tools = strcmp(action, "tools") == 0 || full;
-    bool capabilities = strcmp(action, "capabilities") == 0 ||
-                        strcmp(action, "showcase") == 0 || full;
+    bool capabilities =
+        strcmp(action, "capabilities") == 0 || strcmp(action, "showcase") == 0 || full;
 
     if (!full && !preset && !acp && !tools && !capabilities && strcmp(action, "plan") != 0) {
         snprintf(result, rlen,
@@ -28172,10 +28207,11 @@ static const tool_def_t s_tools[] = {
      .is_concurrent = true},
     {.name = "calc",
      .description = "Evaluate math expressions.",
-     .input_schema_json = "{\"type\":\"object\",\"properties\":{"
-                          "\"expression\":{\"type\":\"string\"},"
-                          "\"expr\":{\"type\":\"string\",\"description\":\"Deprecated alias for expression\"}},"
-                          "\"required\":[\"expression\"]}",
+     .input_schema_json =
+         "{\"type\":\"object\",\"properties\":{"
+         "\"expression\":{\"type\":\"string\"},"
+         "\"expr\":{\"type\":\"string\",\"description\":\"Deprecated alias for expression\"}},"
+         "\"required\":[\"expression\"]}",
      .execute = tool_calc,
      .is_read_only = true,
      .is_concurrent = true},
@@ -28218,7 +28254,8 @@ static const tool_def_t s_tools[] = {
          "{\"type\":\"object\",\"properties\":{\"url\":{\"type\":\"string\"},\"eu\":{\"type\":"
          "\"boolean\",\"description\":\"Use EU endpoint\"},\"viewport\":{\"type\":\"object\"},"
          "\"inject_page_script\":{\"type\":\"string\"},\"engine\":{\"type\":\"string\","
-         "\"description\":\"browser|direct|cf-browser-rendering\"},\"timeout\":{\"type\":\"integer\"},"
+         "\"description\":\"browser|direct|cf-browser-rendering\"},\"timeout\":{\"type\":"
+         "\"integer\"},"
          "\"target_selector\":{\"type\":\"string\"},\"wait_for_selector\":{\"type\":\"string\"},"
          "\"remove_selector\":{\"type\":\"string\"},\"with_links_summary\":{\"description\":"
          "\"true or all\"},\"with_images_summary\":{\"description\":\"true or all\"},"
@@ -28233,7 +28270,8 @@ static const tool_def_t s_tools[] = {
          "\"base\":{\"type\":\"string\"},\"md_heading_style\":{\"type\":\"string\"},\"md_hr\":{"
          "\"type\":\"string\"},\"md_bullet_list_marker\":{\"type\":\"string\"},"
          "\"md_em_delimiter\":{\"type\":\"string\"},\"md_strong_delimiter\":{\"type\":\"string\"},"
-         "\"md_link_style\":{\"type\":\"string\"},\"md_link_reference_style\":{\"type\":\"string\"}},"
+         "\"md_link_style\":{\"type\":\"string\"},\"md_link_reference_style\":{\"type\":\"string\"}"
+         "},"
          "\"required\":[\"url\"]}",
      .execute = tool_jina_ai_reader,
      .is_read_only = true,
@@ -28252,7 +28290,8 @@ static const tool_def_t s_tools[] = {
          "\"string\"},\"no_cache\":{\"type\":\"boolean\"},\"with_generated_alt\":{\"type\":"
          "\"boolean\"},\"respond_with\":{\"type\":\"string\"},\"with_favicon\":{\"type\":"
          "\"boolean\"},\"return_format\":{\"type\":\"string\",\"description\":\"markdown|html|text|"
-         "screenshot|pageshot\"},\"engine\":{\"type\":\"string\",\"description\":\"browser|direct\"},"
+         "screenshot|pageshot\"},\"engine\":{\"type\":\"string\",\"description\":\"browser|"
+         "direct\"},"
          "\"with_favicons\":{\"type\":\"boolean\"},\"timeout\":{\"type\":\"integer\"},"
          "\"set_cookie\":{\"type\":\"string\"},\"proxy_url\":{\"type\":\"string\"},\"locale\":{"
          "\"type\":\"string\"}},\"required\":[]}",
@@ -28267,7 +28306,8 @@ static const tool_def_t s_tools[] = {
          "{\"type\":\"object\",\"properties\":{\"text\":{\"type\":\"string\",\"description\":"
          "\"Convenience single text input\"},\"texts\":{\"type\":\"array\"},\"input\":{\"type\":"
          "\"array\",\"description\":\"Official Jina input array; may contain strings or objects\"},"
-         "\"model\":{\"type\":\"string\",\"description\":\"Default jina-embeddings-v5-text-small\"},"
+         "\"model\":{\"type\":\"string\",\"description\":\"Default "
+         "jina-embeddings-v5-text-small\"},"
          "\"embedding_type\":{\"description\":\"float|base64|binary|ubinary or array\"},"
          "\"task\":{\"type\":\"string\",\"description\":\"retrieval.query|retrieval.passage|"
          "text-matching|classification|clustering|code.*\"},\"dimensions\":{\"type\":\"integer\"},"
@@ -28286,9 +28326,8 @@ static const tool_def_t s_tools[] = {
      .is_read_only = true,
      .is_concurrent = true},
     {.name = "jina_ai_model_get",
-     .description =
-         "Get a native Jina AI model catalog entry by short or full model_id, such as "
-         "jina-embeddings-v5-text-small or jina-ai/jina-vlm.",
+     .description = "Get a native Jina AI model catalog entry by short or full model_id, such as "
+                    "jina-embeddings-v5-text-small or jina-ai/jina-vlm.",
      .input_schema_json =
          "{\"type\":\"object\",\"properties\":{\"model_id\":{\"type\":\"string\"}},\"required\":["
          "\"model_id\"]}",
@@ -28301,38 +28340,44 @@ static const tool_def_t s_tools[] = {
          "String arrays are auto-wrapped into Jina custom_id/body batch request objects.",
      .input_schema_json =
          "{\"type\":\"object\",\"properties\":{\"input\":{\"type\":\"array\"},\"texts\":{\"type\":"
-         "\"array\",\"description\":\"Convenience string array auto-wrapped as batch request objects\"},"
+         "\"array\",\"description\":\"Convenience string array auto-wrapped as batch request "
+         "objects\"},"
          "\"input_file\":{\"type\":\"string\",\"description\":\"gs://... JSONL\"},"
-         "\"model\":{\"type\":\"string\",\"description\":\"Default jina-embeddings-v5-text-small\"},"
+         "\"model\":{\"type\":\"string\",\"description\":\"Default "
+         "jina-embeddings-v5-text-small\"},"
          "\"task\":{\"type\":\"string\"},\"dimensions\":{\"type\":\"integer\"},\"normalized\":{"
          "\"type\":\"boolean\"}},\"required\":[]}",
      .execute = tool_jina_ai_batch_embed_submit,
      .is_concurrent = true},
     {.name = "jina_ai_batch_status",
      .description = "Retrieve native Jina Batch Embeddings job status by batch_id.",
-     .input_schema_json = "{\"type\":\"object\",\"properties\":{\"batch_id\":{\"type\":\"string\"}},"
-                          "\"required\":[\"batch_id\"]}",
+     .input_schema_json =
+         "{\"type\":\"object\",\"properties\":{\"batch_id\":{\"type\":\"string\"}},"
+         "\"required\":[\"batch_id\"]}",
      .execute = tool_jina_ai_batch_status,
      .is_read_only = true,
      .is_concurrent = true},
     {.name = "jina_ai_batch_output",
      .description = "Download native Jina Batch Embeddings output JSONL by batch_id.",
-     .input_schema_json = "{\"type\":\"object\",\"properties\":{\"batch_id\":{\"type\":\"string\"}},"
-                          "\"required\":[\"batch_id\"]}",
+     .input_schema_json =
+         "{\"type\":\"object\",\"properties\":{\"batch_id\":{\"type\":\"string\"}},"
+         "\"required\":[\"batch_id\"]}",
      .execute = tool_jina_ai_batch_output,
      .is_read_only = true,
      .is_concurrent = true},
     {.name = "jina_ai_batch_errors",
      .description = "Download native Jina Batch Embeddings error JSONL by batch_id.",
-     .input_schema_json = "{\"type\":\"object\",\"properties\":{\"batch_id\":{\"type\":\"string\"}},"
-                          "\"required\":[\"batch_id\"]}",
+     .input_schema_json =
+         "{\"type\":\"object\",\"properties\":{\"batch_id\":{\"type\":\"string\"}},"
+         "\"required\":[\"batch_id\"]}",
      .execute = tool_jina_ai_batch_errors,
      .is_read_only = true,
      .is_concurrent = true},
     {.name = "jina_ai_batch_cancel",
      .description = "Cancel a native Jina Batch Embeddings job by batch_id.",
-     .input_schema_json = "{\"type\":\"object\",\"properties\":{\"batch_id\":{\"type\":\"string\"}},"
-                          "\"required\":[\"batch_id\"]}",
+     .input_schema_json =
+         "{\"type\":\"object\",\"properties\":{\"batch_id\":{\"type\":\"string\"}},"
+         "\"required\":[\"batch_id\"]}",
      .execute = tool_jina_ai_batch_cancel,
      .is_concurrent = true},
     {.name = "jina_ai_batches_list",
@@ -28348,7 +28393,8 @@ static const tool_def_t s_tools[] = {
          "Native Jina Reranker API call. Reranks string/object/multimodal documents for a query; "
          "defaults to jina-reranker-v3.",
      .input_schema_json =
-         "{\"type\":\"object\",\"properties\":{\"query\":{\"description\":\"String or query object\"},"
+         "{\"type\":\"object\",\"properties\":{\"query\":{\"description\":\"String or query "
+         "object\"},"
          "\"documents\":{\"type\":\"array\",\"description\":\"Strings or document objects\"},"
          "\"document\":{\"type\":\"string\",\"description\":\"Convenience single document\"},"
          "\"model\":{\"type\":\"string\",\"description\":\"Default jina-reranker-v3\"},\"top_n\":{"
@@ -28363,7 +28409,8 @@ static const tool_def_t s_tools[] = {
          "the extracted page text for the query.",
      .input_schema_json =
          "{\"type\":\"object\",\"properties\":{\"query\":{\"type\":\"string\"},\"num\":{\"type\":"
-         "\"integer\",\"description\":\"Search result count\"},\"read_top_n\":{\"type\":\"integer\","
+         "\"integer\",\"description\":\"Search result "
+         "count\"},\"read_top_n\":{\"type\":\"integer\","
          "\"description\":\"How many result URLs to read, 0-8, default 3\"},\"rerank_top_n\":{"
          "\"type\":\"integer\",\"description\":\"How many read documents to rerank\"},\"site\":{"
          "\"type\":\"string\"},\"gl\":{\"type\":\"string\"},\"location\":{\"type\":\"string\"},"
@@ -28379,18 +28426,22 @@ static const tool_def_t s_tools[] = {
     {.name = "jina_ai_live_kb",
      .description =
          "Realtime Jina web-to-knowledge-base generator. Searches live web, reads sources, chunks "
-         "cited evidence, optionally reranks/classifies/embeds chunks, and can persist results into "
+         "cited evidence, optionally reranks/classifies/embeds chunks, and can persist results "
+         "into "
          "the local knowledge_base with persist=true.",
      .input_schema_json =
          "{\"type\":\"object\",\"properties\":{\"query\":{\"type\":\"string\"},\"num\":{\"type\":"
-         "\"integer\",\"description\":\"Search result count\"},\"read_top_n\":{\"type\":\"integer\","
+         "\"integer\",\"description\":\"Search result "
+         "count\"},\"read_top_n\":{\"type\":\"integer\","
          "\"description\":\"How many result URLs to read, 1-10, default 4\"},\"chunk_words\":{"
          "\"type\":\"integer\",\"description\":\"Words per emitted chunk, 40-800, default 140\"},"
          "\"chunks_per_source\":{\"type\":\"integer\",\"description\":\"Max chunks per source, "
-         "1-32, default 5\"},\"rerank\":{\"type\":\"boolean\"},\"rerank_top_n\":{\"type\":\"integer\"},"
+         "1-32, default "
+         "5\"},\"rerank\":{\"type\":\"boolean\"},\"rerank_top_n\":{\"type\":\"integer\"},"
          "\"labels\":{\"description\":\"Optional classification labels array or grouped label "
          "object\"},\"embed\":{\"type\":\"boolean\",\"description\":\"Include Jina embeddings for "
-         "top chunks\"},\"embed_limit\":{\"type\":\"integer\"},\"dimensions\":{\"type\":\"integer\"},"
+         "top "
+         "chunks\"},\"embed_limit\":{\"type\":\"integer\"},\"dimensions\":{\"type\":\"integer\"},"
          "\"embedding_model\":{\"type\":\"string\"},\"classification_model\":{\"type\":\"string\"},"
          "\"persist\":{\"type\":\"boolean\",\"description\":\"Persist read documents into local "
          "knowledge_base\"},\"include_raw\":{\"type\":\"boolean\"},\"site\":{\"type\":\"string\"},"
@@ -28406,8 +28457,10 @@ static const tool_def_t s_tools[] = {
      .input_schema_json =
          "{\"type\":\"object\",\"properties\":{\"text\":{\"type\":\"string\",\"description\":"
          "\"Convenience single text input\"},\"input\":{\"description\":\"Official Jina input: "
-         "string, TextDoc/ImageDoc object, or array\"},\"labels\":{\"description\":\"Array of labels "
-         "or grouped label object\"},\"classifier_id\":{\"type\":\"string\",\"description\":\"Use a "
+         "string, TextDoc/ImageDoc object, or array\"},\"labels\":{\"description\":\"Array of "
+         "labels "
+         "or grouped label object\"},\"classifier_id\":{\"type\":\"string\",\"description\":\"Use "
+         "a "
          "trained few-shot classifier\"},\"model\":{\"type\":\"string\",\"description\":\"Default "
          "jina-embeddings-v5-text-small for zero-shot\"},\"body\":{\"type\":\"object\"},"
          "\"request\":{\"type\":\"object\"}},\"required\":[]}",
@@ -28420,11 +28473,13 @@ static const tool_def_t s_tools[] = {
          "text/image training items; accepts body/request for full passthrough.",
      .input_schema_json =
          "{\"type\":\"object\",\"properties\":{\"input\":{\"description\":\"Training item or array "
-         "with text/image and label\"},\"classifier_id\":{\"type\":\"string\",\"description\":\"Set "
+         "with text/image and "
+         "label\"},\"classifier_id\":{\"type\":\"string\",\"description\":\"Set "
          "to update an existing classifier\"},\"model\":{\"type\":\"string\",\"description\":"
          "\"Default jina-embeddings-v5-text-small for new classifiers\"},\"access\":{\"type\":"
          "\"string\",\"description\":\"public|private\"},\"num_iters\":{\"type\":\"integer\"},"
-         "\"body\":{\"type\":\"object\"},\"request\":{\"type\":\"object\"}},\"required\":[\"input\"]}",
+         "\"body\":{\"type\":\"object\"},\"request\":{\"type\":\"object\"}},\"required\":["
+         "\"input\"]}",
      .execute = tool_jina_ai_train,
      .is_concurrent = true},
     {.name = "jina_ai_classifiers_list",
@@ -28509,7 +28564,8 @@ static const tool_def_t s_tools[] = {
                     "from public URLs.",
      .input_schema_json =
          "{\"type\":\"object\",\"properties\":{\"url\":{\"type\":\"string\",\"description\":"
-         "\"Convenience single URL\"},\"urls\":{\"type\":\"array\",\"items\":{\"type\":\"string\"}},"
+         "\"Convenience single "
+         "URL\"},\"urls\":{\"type\":\"array\",\"items\":{\"type\":\"string\"}},"
          "\"objective\":{\"type\":\"string\"},\"search_queries\":{\"type\":\"array\",\"items\":{"
          "\"type\":\"string\"}},\"max_chars_total\":{\"type\":\"integer\"},\"session_id\":{"
          "\"type\":\"string\"},\"client_model\":{\"type\":\"string\"},\"advanced_settings\":{"
@@ -28550,8 +28606,9 @@ static const tool_def_t s_tools[] = {
      .is_read_only = true,
      .is_concurrent = true},
     {.name = "parallel_ai_task_events",
-     .description = "Retrieve Parallel.ai Task run progress events by run_id, or the tracked latest "
-                    "task run when run_id is omitted. Set beta=true for the v1beta events route.",
+     .description =
+         "Retrieve Parallel.ai Task run progress events by run_id, or the tracked latest "
+         "task run when run_id is omitted. Set beta=true for the v1beta events route.",
      .input_schema_json = "{\"type\":\"object\",\"properties\":{\"run_id\":{\"type\":\"string\"},"
                           "\"beta\":{\"type\":\"boolean\"}},\"required\":[]}",
      .execute = tool_parallel_ai_task_events,
@@ -28567,25 +28624,29 @@ static const tool_def_t s_tools[] = {
      .is_concurrent = true},
     {.name = "parallel_ai_task_group_create",
      .description = "Create and track a Parallel.ai Task Group for coordinating many Task runs.",
-     .input_schema_json =
-         "{\"type\":\"object\",\"properties\":{\"metadata\":{\"type\":\"object\"},\"body\":{\"type\":"
-         "\"object\"},\"request\":{\"type\":\"object\"}},\"required\":[]}",
+     .input_schema_json = "{\"type\":\"object\",\"properties\":{\"metadata\":{\"type\":\"object\"},"
+                          "\"body\":{\"type\":"
+                          "\"object\"},\"request\":{\"type\":\"object\"}},\"required\":[]}",
      .execute = tool_parallel_ai_task_group_create,
      .is_concurrent = true},
     {.name = "parallel_ai_task_group_get",
-     .description = "Retrieve a Parallel.ai Task Group by taskgroup_id, or the tracked latest group "
-                    "when omitted.",
-     .input_schema_json = "{\"type\":\"object\",\"properties\":{\"taskgroup_id\":{\"type\":\"string\""
-                          "}},\"required\":[]}",
+     .description =
+         "Retrieve a Parallel.ai Task Group by taskgroup_id, or the tracked latest group "
+         "when omitted.",
+     .input_schema_json =
+         "{\"type\":\"object\",\"properties\":{\"taskgroup_id\":{\"type\":\"string\""
+         "}},\"required\":[]}",
      .execute = tool_parallel_ai_task_group_get,
      .is_read_only = true,
      .is_concurrent = true},
     {.name = "parallel_ai_task_group_events",
-     .description = "Retrieve Parallel.ai Task Group events with optional last_event_id and timeout. "
-                    "Uses the tracked latest group when taskgroup_id is omitted.",
+     .description =
+         "Retrieve Parallel.ai Task Group events with optional last_event_id and timeout. "
+         "Uses the tracked latest group when taskgroup_id is omitted.",
      .input_schema_json =
          "{\"type\":\"object\",\"properties\":{\"taskgroup_id\":{\"type\":\"string\"},"
-         "\"last_event_id\":{\"type\":\"string\"},\"timeout\":{\"type\":\"integer\"}},\"required\":[]}",
+         "\"last_event_id\":{\"type\":\"string\"},\"timeout\":{\"type\":\"integer\"}},\"required\":"
+         "[]}",
      .execute = tool_parallel_ai_task_group_events,
      .is_read_only = true,
      .is_concurrent = true},
@@ -28625,7 +28686,8 @@ static const tool_def_t s_tools[] = {
     {.name = "parallel_ai_findall_entity_search",
      .description = "Run Parallel.ai FindAll fast entity search for people or companies.",
      .input_schema_json =
-         "{\"type\":\"object\",\"properties\":{\"entity_type\":{\"type\":\"string\",\"description\":"
+         "{\"type\":\"object\",\"properties\":{\"entity_type\":{\"type\":\"string\","
+         "\"description\":"
          "\"people|companies\"},\"objective\":{\"type\":\"string\"},\"match_limit\":{\"type\":"
          "\"integer\",\"description\":\"5-1000, API default 100\"}},\"required\":[\"entity_type\","
          "\"objective\"]}",
@@ -28636,7 +28698,8 @@ static const tool_def_t s_tools[] = {
      .description = "Ingest a natural-language objective into a structured Parallel.ai FindAll "
                     "schema without starting a run.",
      .input_schema_json =
-         "{\"type\":\"object\",\"properties\":{\"objective\":{\"type\":\"string\"},\"body\":{\"type\":"
+         "{\"type\":\"object\",\"properties\":{\"objective\":{\"type\":\"string\"},\"body\":{"
+         "\"type\":"
          "\"object\"},\"request\":{\"type\":\"object\"}},\"required\":[\"objective\"]}",
      .execute = tool_parallel_ai_findall_ingest,
      .is_read_only = true,
@@ -28645,7 +28708,8 @@ static const tool_def_t s_tools[] = {
      .description = "Create and track an async Parallel.ai FindAll run with match_conditions. "
                     "Defaults to generator=base and minimum match_limit=5.",
      .input_schema_json =
-         "{\"type\":\"object\",\"properties\":{\"objective\":{\"type\":\"string\"},\"entity_type\":{"
+         "{\"type\":\"object\",\"properties\":{\"objective\":{\"type\":\"string\"},\"entity_type\":"
+         "{"
          "\"type\":\"string\"},\"match_conditions\":{\"type\":\"array\"},\"generator\":{\"type\":"
          "\"string\",\"description\":\"base|core|pro|preview; default base\"},\"match_limit\":{"
          "\"type\":\"integer\",\"description\":\"5-1000, default 100\"},\"exclude_list\":{\"type\":"
@@ -28654,8 +28718,9 @@ static const tool_def_t s_tools[] = {
      .execute = tool_parallel_ai_findall_create,
      .is_concurrent = true},
     {.name = "parallel_ai_findall_status",
-     .description = "Retrieve a Parallel.ai FindAll run status by findall_id, or the tracked latest "
-                    "FindAll run when omitted.",
+     .description =
+         "Retrieve a Parallel.ai FindAll run status by findall_id, or the tracked latest "
+         "FindAll run when omitted.",
      .input_schema_json = "{\"type\":\"object\",\"properties\":{\"findall_id\":{\"type\":\"string\""
                           "}},\"required\":[]}",
      .execute = tool_parallel_ai_findall_status,
@@ -28674,7 +28739,8 @@ static const tool_def_t s_tools[] = {
                     "Uses the tracked latest FindAll run when findall_id is omitted.",
      .input_schema_json =
          "{\"type\":\"object\",\"properties\":{\"findall_id\":{\"type\":\"string\"},"
-         "\"last_event_id\":{\"type\":\"string\"},\"timeout\":{\"type\":\"integer\"}},\"required\":[]}",
+         "\"last_event_id\":{\"type\":\"string\"},\"timeout\":{\"type\":\"integer\"}},\"required\":"
+         "[]}",
      .execute = tool_parallel_ai_findall_events,
      .is_read_only = true,
      .is_concurrent = true},
@@ -28701,8 +28767,9 @@ static const tool_def_t s_tools[] = {
          "\"request\":{\"type\":\"object\"}},\"required\":[]}",
      .execute = tool_parallel_ai_findall_extend},
     {.name = "parallel_ai_findall_enrich",
-     .description = "Add an enrichment to a Parallel.ai FindAll run. Defaults to the tracked latest "
-                    "FindAll run and processor=core.",
+     .description =
+         "Add an enrichment to a Parallel.ai FindAll run. Defaults to the tracked latest "
+         "FindAll run and processor=core.",
      .input_schema_json =
          "{\"type\":\"object\",\"properties\":{\"findall_id\":{\"type\":\"string\"},\"processor\":{"
          "\"type\":\"string\"},\"output_schema\":{\"type\":\"object\"},\"mcp_servers\":{"
@@ -28826,7 +28893,8 @@ static const tool_def_t s_tools[] = {
      .input_schema_json =
          "{\"type\":\"object\",\"properties\":{\"query\":{\"type\":\"string\"},\"objective\":{"
          "\"type\":\"string\"},\"mode\":{\"type\":\"string\"},\"max_chars_total\":{\"type\":"
-         "\"integer\"},\"read_top_n\":{\"type\":\"integer\"},\"chunk_words\":{\"type\":\"integer\"},"
+         "\"integer\"},\"read_top_n\":{\"type\":\"integer\"},\"chunk_words\":{\"type\":\"integer\"}"
+         ","
          "\"chunks_per_source\":{\"type\":\"integer\"},\"extract_max_chars_total\":{\"type\":"
          "\"integer\"},\"persist\":{\"type\":\"boolean\"},\"include_raw\":{\"type\":\"boolean\"}},"
          "\"required\":[\"query\"]}",
@@ -29220,7 +29288,8 @@ static const tool_def_t s_tools[] = {
          "create|map_reduce|spawn_executor\"},\"group_id\":{\"type\":\"integer\","
          "\"description\":\"Group ID for status|collect, or existing group for "
          "spawn_executor\"},\"task\":{\"type\":\"string\",\"description\":\"Single task for "
-         "spawn_executor|spawn_provider|provider_fabric\"},\"tasks\":{\"type\":\"array\",\"description\":\"Task "
+         "spawn_executor|spawn_provider|provider_fabric\"},\"tasks\":{\"type\":\"array\","
+         "\"description\":\"Task "
          "array (strings or {task,model,provider,executor}) for "
          "create|map_reduce|create_executor_swarm\"},\"coordinator\":{\"type\":\"string\","
          "\"description\":\"map_reduce: synthesis instruction for the coordinator sub-agent that "
@@ -29229,7 +29298,8 @@ static const tool_def_t s_tools[] = {
          "model for the coordinator (defaults to "
          "'model')\"},\"model\":{\"type\":\"string\",\"description\":\"Default model for spawned "
          "workers or topology\"},\"effort\":{\"type\":\"string\",\"description\":\"create: "
-         "per-agent reasoning effort auto|none|minimal|low|medium|high|xhigh|max — the spawned process wraps this model "
+         "per-agent reasoning effort auto|none|minimal|low|medium|high|xhigh|max — the spawned "
+         "process wraps this model "
          "instance\"},\"temperature\":{\"type\":\"number\",\"description\":\"create: per-agent "
          "sampling temperature 0-2 for the spawned "
          "process\"},\"top_p\":{\"type\":\"number\"},\"top_k\":{\"type\":\"integer\"},\"thinking_"
@@ -29252,7 +29322,8 @@ static const tool_def_t s_tools[] = {
          "for collect|map_reduce|provider_fabric\"},\"mode\":{\"type\":\"string\","
          "\"description\":\"provider_fabric execution mode: race/first/fastest "
          "(default: speculative race, return first successful lane and kill slower lanes), spawn "
-         "(return group immediately), or collect/all (wait for all lane outputs)\"},\"race\":{\"type\":"
+         "(return group immediately), or collect/all (wait for all lane "
+         "outputs)\"},\"race\":{\"type\":"
          "\"boolean\",\"description\":\"provider_fabric toggle; defaults true unless mode=spawn or "
          "mode=collect\"},"
          "\"max_agents\":{\"type\":\"integer\","
@@ -29291,13 +29362,18 @@ static const tool_def_t s_tools[] = {
          "\"number\"}},\"required\":[\"action\"]}",
      .execute = tool_pheromone_dispatch},
     {.name = "avian",
-     .description = "Bird-inspired Wings mechanisms: nesting workspaces, brooding incubation, fledging promotion, roosting cooldown, molting refresh.",
-     .input_schema_json =
-         "{\"type\":\"object\",\"properties\":{\"action\":{\"type\":\"string\",\"description\":\"nest|brood|status\"},"
-         "\"op\":{\"type\":\"string\",\"description\":\"nest:create|material|roost|molt|get; brood:lay|tend|fledge|abandon|get\"},"
-         "\"nest_id\":{\"type\":\"integer\"},\"egg_id\":{\"type\":\"integer\"},\"name\":{\"type\":\"string\"},"
-         "\"purpose\":{\"type\":\"string\"},\"material\":{\"type\":\"string\"},\"evidence\":{\"type\":\"string\"},"
-         "\"warmth\":{\"type\":\"number\"},\"stability\":{\"type\":\"number\"},\"risk\":{\"type\":\"number\"}},\"required\":[\"action\"]}",
+     .description = "Bird-inspired Wings mechanisms: nesting workspaces, brooding incubation, "
+                    "fledging promotion, roosting cooldown, molting refresh.",
+     .input_schema_json = "{\"type\":\"object\",\"properties\":{\"action\":{\"type\":\"string\","
+                          "\"description\":\"nest|brood|status\"},"
+                          "\"op\":{\"type\":\"string\",\"description\":\"nest:create|material|"
+                          "roost|molt|get; brood:lay|tend|fledge|abandon|get\"},"
+                          "\"nest_id\":{\"type\":\"integer\"},\"egg_id\":{\"type\":\"integer\"},"
+                          "\"name\":{\"type\":\"string\"},"
+                          "\"purpose\":{\"type\":\"string\"},\"material\":{\"type\":\"string\"},"
+                          "\"evidence\":{\"type\":\"string\"},"
+                          "\"warmth\":{\"type\":\"number\"},\"stability\":{\"type\":\"number\"},"
+                          "\"risk\":{\"type\":\"number\"}},\"required\":[\"action\"]}",
      .execute = tool_avian_dispatch},
     {.name = "ooda",
      .description =
@@ -29441,7 +29517,8 @@ static const tool_def_t s_tools[] = {
          "{\"type\":\"object\",\"properties\":{\"action\":{\"type\":\"string\",\"description\":"
          "\"read|write|clear|list|delete\"},\"key\":{\"type\":\"string\",\"description\":"
          "\"Key for the entry (required for read/write/delete)\"},\"value\":{\"type\":\"string\","
-         "\"description\":\"Value to store (required for write)\"},\"content\":{\"type\":\"string\","
+         "\"description\":\"Value to store (required for "
+         "write)\"},\"content\":{\"type\":\"string\","
          "\"description\":\"Fallback: for read, treated as key; for write, parsed as key=value\"}},"
          "\"required\":[\"action\"]}",
      .execute = tool_scratchpad,
@@ -29487,9 +29564,8 @@ static const tool_def_t s_tools[] = {
                     "self-improvement patterns and mines tool co-occurrence into "
                     "auto-generated skills. action=status (default) | on | off | run "
                     "(force one cycle now).",
-     .input_schema_json =
-         "{\"type\":\"object\",\"properties\":{\"action\":{\"type\":\"string\","
-         "\"description\":\"status|on|off|run\"}}}",
+     .input_schema_json = "{\"type\":\"object\",\"properties\":{\"action\":{\"type\":\"string\","
+                          "\"description\":\"status|on|off|run\"}}}",
      .execute = tool_bg_learn,
      .is_read_only = false,
      .is_concurrent = false},
@@ -29630,15 +29706,27 @@ static const tool_def_t s_tools[] = {
      .is_read_only = true,
      .is_concurrent = true},
     {.name = "discover_integrations",
-     .description = "Discover cached, installed, connected, live, inaccessible, stale, OAuth-gated, mutating, and sync-capable external integrations from the Codex app directory plus live MCP tools.",
-     .input_schema_json = "{\"type\":\"object\",\"properties\":{\"query\":{\"type\":\"string\"},\"profile\":{\"type\":\"string\",\"description\":\"engineering|gtm|finance|enterprise_knowledge|governed_agent_runtime or free-text category\"},\"path\":{\"type\":\"string\",\"description\":\"Optional catalog JSON path; defaults to DSCO_CODEX_APP_DIRECTORY or ~/.dsco/codex_app_directory.json\"},\"offset\":{\"type\":\"integer\"},\"limit\":{\"type\":\"integer\"}}}",
+     .description =
+         "Discover cached, installed, connected, live, inaccessible, stale, OAuth-gated, mutating, "
+         "and sync-capable external integrations from the Codex app directory plus live MCP tools.",
+     .input_schema_json = "{\"type\":\"object\",\"properties\":{\"query\":{\"type\":\"string\"},"
+                          "\"profile\":{\"type\":\"string\",\"description\":\"engineering|gtm|"
+                          "finance|enterprise_knowledge|governed_agent_runtime or free-text "
+                          "category\"},\"path\":{\"type\":\"string\",\"description\":\"Optional "
+                          "catalog JSON path; defaults to DSCO_CODEX_APP_DIRECTORY or "
+                          "~/.dsco/"
+                          "codex_app_directory.json\"},\"offset\":{\"type\":\"integer\"},\"limit\":"
+                          "{\"type\":\"integer\"}}}",
      .execute = tool_discover_integrations,
      .core = true,
      .is_read_only = true,
      .is_concurrent = true},
     {.name = "dsco_doctor_integrations",
-     .description = "Diagnose integration catalog/cache health: stale connector IDs, missing auth/install state, dangerous mutating connectors, and control-plane governance tools.",
-     .input_schema_json = "{\"type\":\"object\",\"properties\":{\"path\":{\"type\":\"string\",\"description\":\"Optional catalog JSON path\"}}}",
+     .description =
+         "Diagnose integration catalog/cache health: stale connector IDs, missing auth/install "
+         "state, dangerous mutating connectors, and control-plane governance tools.",
+     .input_schema_json = "{\"type\":\"object\",\"properties\":{\"path\":{\"type\":\"string\","
+                          "\"description\":\"Optional catalog JSON path\"}}}",
      .execute = tool_dsco_doctor_integrations,
      .core = true,
      .is_read_only = true,
@@ -29904,7 +29992,8 @@ static const tool_def_t s_tools[] = {
      .is_read_only = true,
      .is_concurrent = true},
     {.name = "risk_gate",
-     .description = "Score an action/content pair for destructive, privileged, secret, or PII risk.",
+     .description =
+         "Score an action/content pair for destructive, privileged, secret, or PII risk.",
      .input_schema_json =
          "{\"type\":\"object\",\"properties\":{\"action\":{\"type\":\"string\"},\"content\":{"
          "\"type\":\"string\"}},\"required\":[\"action\"]}",
@@ -29951,7 +30040,8 @@ static const tool_def_t s_tools[] = {
      .description = "Render a simple {{name}} template from a JSON-object string of variables.",
      .input_schema_json =
          "{\"type\":\"object\",\"properties\":{\"template\":{\"type\":\"string\"},\"variables\":{"
-         "\"type\":\"string\",\"description\":\"JSON object string\"}},\"required\":[\"template\"]}",
+         "\"type\":\"string\",\"description\":\"JSON object "
+         "string\"}},\"required\":[\"template\"]}",
      .execute = tool_template_render,
      .is_read_only = true,
      .is_concurrent = true},
@@ -29965,8 +30055,7 @@ static const tool_def_t s_tools[] = {
      .is_concurrent = true},
     {.name = "process_tree",
      .description = "Show process parent/child rows, optionally filtered.",
-     .input_schema_json =
-         "{\"type\":\"object\",\"properties\":{\"filter\":{\"type\":\"string\"}}}",
+     .input_schema_json = "{\"type\":\"object\",\"properties\":{\"filter\":{\"type\":\"string\"}}}",
      .execute = tool_process_tree,
      .is_read_only = true,
      .is_concurrent = true},
@@ -30118,6 +30207,17 @@ bool tools_invoke_by_name(const char *name, const char *input, char *result, siz
         }
     }
     snprintf(result, rlen, "{\"error\":\"unknown tool: %s\"}", name);
+    return false;
+}
+
+bool tools_is_offload_safe(const char *name) {
+    if (!name || !name[0])
+        return false;
+    for (int i = 0; i < s_tool_count; i++) {
+        if (!s_tools[i].name || strcmp(s_tools[i].name, name) != 0)
+            continue;
+        return s_tools[i].is_read_only && s_tools[i].is_concurrent;
+    }
     return false;
 }
 
@@ -30375,35 +30475,36 @@ static void ensure_embeddings_loaded(void) {
         const unsigned char *blob = embedded_data_get("tool_embeddings.bin", &blob_len);
         if (blob && blob_len > 8) {
             uint32_t hdr0, hdr1;
-            memcpy(&hdr0, blob,     sizeof(uint32_t));
+            memcpy(&hdr0, blob, sizeof(uint32_t));
             memcpy(&hdr1, blob + 4, sizeof(uint32_t));
             int emb_cnt = (int)hdr0;
             int emb_dim = (int)hdr1;
-            if (emb_dim > 1024) emb_dim = 1024;
+            if (emb_dim > 1024)
+                emb_dim = 1024;
             size_t total_f = (size_t)emb_cnt * (size_t)emb_dim;
             size_t expected = 8 + total_f * sizeof(float);
             if (expected <= blob_len && total_f > 0) {
                 g_emb_vectors = safe_malloc(total_f * sizeof(float));
-	                memcpy(g_emb_vectors, blob + 8, total_f * sizeof(float));
-	                g_emb_count = emb_cnt;
-	                g_emb_dim   = emb_dim;
-	                if (tools_lazy_load_status_enabled()) {
-	                    tui_prepare_external_output();
-	                    fprintf(stderr, "  \033[2memb: %d tools \xc3\x97 %dd (built-in)\033[0m\n",
-	                            g_emb_count, g_emb_dim);
-	                }
-	                return;
+                memcpy(g_emb_vectors, blob + 8, total_f * sizeof(float));
+                g_emb_count = emb_cnt;
+                g_emb_dim = emb_dim;
+                if (tools_lazy_load_status_enabled()) {
+                    tui_prepare_external_output();
+                    fprintf(stderr, "  \033[2memb: %d tools \xc3\x97 %dd (built-in)\033[0m\n",
+                            g_emb_count, g_emb_dim);
+                }
+                return;
             }
         }
     }
 
-	    if (!fp) {
-	        if (tools_lazy_load_status_enabled()) {
-	            tui_prepare_external_output();
-	            fprintf(stderr, "  \033[33mno tool_embeddings.bin found\033[0m\n");
-	        }
-	        return;
-	    }
+    if (!fp) {
+        if (tools_lazy_load_status_enabled()) {
+            tui_prepare_external_output();
+            fprintf(stderr, "  \033[33mno tool_embeddings.bin found\033[0m\n");
+        }
+        return;
+    }
 
     uint32_t header[2];
     if (fread(header, sizeof(uint32_t), 2, fp) != 2) {
@@ -30420,25 +30521,25 @@ static void ensure_embeddings_loaded(void) {
     size_t read_n = fread(g_emb_vectors, sizeof(float), total_floats, fp);
     fclose(fp);
 
-	    if ((int)read_n != (int)total_floats) {
-	        free(g_emb_vectors);
-	        g_emb_vectors = NULL;
-	        g_emb_count = 0;
-	        if (tools_lazy_load_status_enabled()) {
-	            tui_prepare_external_output();
-	            fprintf(stderr, "  \033[31mtool_embeddings.bin truncated\033[0m\n");
-	        }
-	        return;
-	    }
+    if ((int)read_n != (int)total_floats) {
+        free(g_emb_vectors);
+        g_emb_vectors = NULL;
+        g_emb_count = 0;
+        if (tools_lazy_load_status_enabled()) {
+            tui_prepare_external_output();
+            fprintf(stderr, "  \033[31mtool_embeddings.bin truncated\033[0m\n");
+        }
+        return;
+    }
 
-	    if (tools_lazy_load_status_enabled()) {
-	        tui_prepare_external_output();
-	        fprintf(stderr, "  \033[2memb: %d tools × %dd loaded\033[0m\n", g_emb_count, g_emb_dim);
-	    }
-	    if (provider_debug_auth_enabled() && loaded_path[0]) {
-	        tui_prepare_external_output();
-	        fprintf(stderr, "  \033[2m[emb] path=%s\033[0m\n", loaded_path);
-	    }
+    if (tools_lazy_load_status_enabled()) {
+        tui_prepare_external_output();
+        fprintf(stderr, "  \033[2memb: %d tools × %dd loaded\033[0m\n", g_emb_count, g_emb_dim);
+    }
+    if (provider_debug_auth_enabled() && loaded_path[0]) {
+        tui_prepare_external_output();
+        fprintf(stderr, "  \033[2m[emb] path=%s\033[0m\n", loaded_path);
+    }
 }
 
 /* Embed a query via Jina v4. Returns malloc'd float[g_emb_dim] or NULL. */
@@ -30631,12 +30732,7 @@ void tools_mark_hot(int tool_idx) {
  * can shrink the warm bank under cost pressure. */
 
 static const char *CORE_ALWAYS[] = {
-    "bash",
-    "python",
-    "discover_tools",
-    "load_tools",
-    "StartOfLoopConstruct",
-    "EndOfLoopConstruct",
+    "bash", "python", "discover_tools", "load_tools", "StartOfLoopConstruct", "EndOfLoopConstruct",
     NULL /* minimal core: execution + dynamic loading + loop control.
           * NOTE: must stay <= TOOL_REG_ALWAYS (config.h) entries or the
           * critical-budget pin loop will evict required tools.
@@ -30965,11 +31061,11 @@ static void ensure_groups(void) {
         }
     }
 
-	    g_groups_built = true;
-	    if (!tools_lazy_load_status_enabled())
-	        return;
-	    tui_prepare_external_output();
-	    fprintf(stderr, "  \033[2mgroups:");
+    g_groups_built = true;
+    if (!tools_lazy_load_status_enabled())
+        return;
+    tui_prepare_external_output();
+    fprintf(stderr, "  \033[2mgroups:");
     for (int g = 0; g < g_group_count; g++)
         if (g_tool_groups[g].count > 0)
             fprintf(stderr, " %s=%d", g_tool_groups[g].name, g_tool_groups[g].count);
@@ -31632,13 +31728,13 @@ void tools_cooc_load(void) {
     for (uint32_t i = 0; i < nc; i++) {
         if (fread(g_cooc->matrix[i], 2, nc, f) != nc)
             break;
-	    }
-	    fclose(f);
-	    if (tools_lazy_load_status_enabled()) {
-	        tui_prepare_external_output();
-	        fprintf(stderr, "  \033[2mcooc: loaded %d tool pairs\033[0m\n", (int)nc);
-	    }
-	}
+    }
+    fclose(f);
+    if (tools_lazy_load_status_enabled()) {
+        tui_prepare_external_output();
+        fprintf(stderr, "  \033[2mcooc: loaded %d tool pairs\033[0m\n", (int)nc);
+    }
+}
 
 /* ── Tiered retrieval: register-file model with multi-signal quorum ──── */
 
@@ -32358,8 +32454,7 @@ int g_external_tool_count = 0;
 static pthread_mutex_t g_external_tools_mu = PTHREAD_MUTEX_INITIALIZER;
 
 static void external_tool_copy_metadata(external_tool_t *t, const char *integration_id,
-                                        const char *display_name,
-                                        const char *distribution_channel,
+                                        const char *display_name, const char *distribution_channel,
                                         const char *categories, const char *labels,
                                         const char *scope, unsigned action_flags,
                                         const char *catalog_status) {
@@ -32370,7 +32465,8 @@ static void external_tool_copy_metadata(external_tool_t *t, const char *integrat
     if (display_name)
         snprintf(t->display_name, sizeof(t->display_name), "%s", display_name);
     if (distribution_channel)
-        snprintf(t->distribution_channel, sizeof(t->distribution_channel), "%s", distribution_channel);
+        snprintf(t->distribution_channel, sizeof(t->distribution_channel), "%s",
+                 distribution_channel);
     if (categories)
         snprintf(t->categories, sizeof(t->categories), "%s", categories);
     if (labels)
@@ -32384,11 +32480,9 @@ static void external_tool_copy_metadata(external_tool_t *t, const char *integrat
 }
 
 void tools_register_external_metadata(const char *name, const char *integration_id,
-                                      const char *display_name,
-                                      const char *distribution_channel,
-                                      const char *categories, const char *labels,
-                                      const char *scope, unsigned action_flags,
-                                      const char *catalog_status) {
+                                      const char *display_name, const char *distribution_channel,
+                                      const char *categories, const char *labels, const char *scope,
+                                      unsigned action_flags, const char *catalog_status) {
     if (!name || !name[0])
         return;
     pthread_mutex_lock(&g_external_tools_mu);
@@ -32989,8 +33083,8 @@ bool tools_execute(const char *name, const char *input_json, char *result, size_
  *   G9  EXECUTION           — Tool runs; timing recorded
  *   G10 FEEDBACK LOOP       — Post-exec: breaker update, pheromone emit, self_improve
  *
- * Contracts enforced: C1 (veto), C2 (budget), C3 (propose/dispose), C5 (no self-surgery), C6 (audit)
- * ═══════════════════════════════════════════════════════════════════════════ */
+ * Contracts enforced: C1 (veto), C2 (budget), C3 (propose/dispose), C5 (no self-surgery), C6
+ * (audit) ═══════════════════════════════════════════════════════════════════════════ */
 
 /* ── G1: Exempt set ───────────────────────────────────────────────────── */
 
@@ -33063,13 +33157,14 @@ static bool tool_is_high_risk(const char *n, tool_class_t cls) {
         return false;
     if (cls == TOOL_CLASS_EXEC || cls == TOOL_CLASS_SPAWN)
         return true;
-    return strcmp(n, "write_file") == 0 || strcmp(n, "Write") == 0 || strcmp(n, "append_file") == 0 ||
-           strcmp(n, "edit_file") == 0 || strcmp(n, "Edit") == 0 || strcmp(n, "delete_file") == 0 ||
-           strcmp(n, "move_file") == 0 || strcmp(n, "copy_file") == 0 || strcmp(n, "chmod_tool") == 0 ||
-           strcmp(n, "git") == 0 || strcmp(n, "patch_file") == 0 || strcmp(n, "http_request") == 0 ||
-           strcmp(n, "curl_raw") == 0 || strcmp(n, "download_file") == 0 || strcmp(n, "ssh_command") == 0 ||
-           strcmp(n, "docker") == 0 || strcmp(n, "trading") == 0 || strcmp(n, "kalshi") == 0 ||
-           strcmp(n, "polymarket") == 0 || strcmp(n, "slack_post") == 0;
+    return strcmp(n, "write_file") == 0 || strcmp(n, "Write") == 0 ||
+           strcmp(n, "append_file") == 0 || strcmp(n, "edit_file") == 0 || strcmp(n, "Edit") == 0 ||
+           strcmp(n, "delete_file") == 0 || strcmp(n, "move_file") == 0 ||
+           strcmp(n, "copy_file") == 0 || strcmp(n, "chmod_tool") == 0 || strcmp(n, "git") == 0 ||
+           strcmp(n, "patch_file") == 0 || strcmp(n, "http_request") == 0 ||
+           strcmp(n, "curl_raw") == 0 || strcmp(n, "download_file") == 0 ||
+           strcmp(n, "ssh_command") == 0 || strcmp(n, "docker") == 0 || strcmp(n, "trading") == 0 ||
+           strcmp(n, "kalshi") == 0 || strcmp(n, "polymarket") == 0 || strcmp(n, "slack_post") == 0;
 }
 
 static bool tool_env_truthy(const char *name) {
@@ -33160,13 +33255,13 @@ static void tool_input_fingerprint(const char *name, const char *input_json, cha
 }
 
 static bool tool_shell_word_boundary_before(char c) {
-    return c == '\0' || isspace((unsigned char)c) || c == ';' || c == '&' || c == '|' ||
-           c == '(' || c == '{' || c == '`' || c == '$' || c == '/';
+    return c == '\0' || isspace((unsigned char)c) || c == ';' || c == '&' || c == '|' || c == '(' ||
+           c == '{' || c == '`' || c == '$' || c == '/';
 }
 
 static bool tool_shell_word_boundary_after(char c) {
-    return c == '\0' || isspace((unsigned char)c) || c == ';' || c == '&' || c == '|' ||
-           c == ')' || c == '}' || c == '<' || c == '>';
+    return c == '\0' || isspace((unsigned char)c) || c == ';' || c == '&' || c == '|' || c == ')' ||
+           c == '}' || c == '<' || c == '>';
 }
 
 static bool tool_shell_command_has_word(const char *cmd, const char *word) {
@@ -33203,16 +33298,13 @@ static bool tool_exec_input_has_destructive_shell_pattern(const char *input_json
     }
 
     bool blocked =
-        tool_shell_command_has_word(cmd, "rm") ||
-        tool_shell_command_has_word(cmd, "unlink") ||
+        tool_shell_command_has_word(cmd, "rm") || tool_shell_command_has_word(cmd, "unlink") ||
         tool_shell_command_has_word(cmd, "trash") ||
         tool_shell_command_has_word(cmd, "trash-put") ||
         (tool_shell_command_has_word(cmd, "find") &&
-         (tool_ascii_contains_ci(cmd, " -delete") ||
-          tool_ascii_contains_ci(cmd, "\t-delete") ||
+         (tool_ascii_contains_ci(cmd, " -delete") || tool_ascii_contains_ci(cmd, "\t-delete") ||
           tool_ascii_contains_ci(cmd, "\n-delete"))) ||
-        tool_ascii_contains_ci(cmd, "os.remove(") ||
-        tool_ascii_contains_ci(cmd, "os.unlink(") ||
+        tool_ascii_contains_ci(cmd, "os.remove(") || tool_ascii_contains_ci(cmd, "os.unlink(") ||
         tool_ascii_contains_ci(cmd, "shutil.rmtree(");
 
     free(cmd);
@@ -33264,7 +33356,8 @@ static void tool_approval_assess(const char *name, const char *input_json, tool_
         out->strict_no_tty = true;
         out->allow_always = false;
         out->level = TOOL_RISK_HIGH;
-        snprintf(out->reason, sizeof(out->reason), "%s", trust_reason[0] ? trust_reason : "blocked_by_trust_tier");
+        snprintf(out->reason, sizeof(out->reason), "%s",
+                 trust_reason[0] ? trust_reason : "blocked_by_trust_tier");
     } else if (high_risk) {
         out->requires_approval = true;
         out->level = TOOL_RISK_MEDIUM;
@@ -33288,10 +33381,14 @@ static void tool_approval_assess(const char *name, const char *input_json, tool_
         if ((cls == TOOL_CLASS_EXEC &&
              (destructive_shell || tool_ascii_contains_ci(input_json, "sudo") ||
               tool_ascii_contains_ci(input_json, " rm -rf") ||
-              tool_ascii_contains_ci(input_json, "mkfs") || tool_ascii_contains_ci(input_json, "dd if=") ||
-              tool_ascii_contains_ci(input_json, "launchctl") || tool_ascii_contains_ci(input_json, "systemctl"))) ||
-            tool_ascii_contains_ci(input_json, "private_key") || tool_ascii_contains_ci(input_json, "api_key") ||
-            tool_ascii_contains_ci(input_json, "password") || tool_ascii_contains_ci(input_json, "secret")) {
+              tool_ascii_contains_ci(input_json, "mkfs") ||
+              tool_ascii_contains_ci(input_json, "dd if=") ||
+              tool_ascii_contains_ci(input_json, "launchctl") ||
+              tool_ascii_contains_ci(input_json, "systemctl"))) ||
+            tool_ascii_contains_ci(input_json, "private_key") ||
+            tool_ascii_contains_ci(input_json, "api_key") ||
+            tool_ascii_contains_ci(input_json, "password") ||
+            tool_ascii_contains_ci(input_json, "secret")) {
             out->requires_approval = true;
             out->strict_no_tty = true;
             out->allow_always = false;
@@ -33302,9 +33399,9 @@ static void tool_approval_assess(const char *name, const char *input_json, tool_
         }
     }
 
-    if (strcmp(name ? name : "", "delete_file") == 0 || strcmp(name ? name : "", "ssh_command") == 0 ||
-        strcmp(name ? name : "", "trading") == 0 || strcmp(name ? name : "", "kalshi") == 0 ||
-        strcmp(name ? name : "", "polymarket") == 0) {
+    if (strcmp(name ? name : "", "delete_file") == 0 ||
+        strcmp(name ? name : "", "ssh_command") == 0 || strcmp(name ? name : "", "trading") == 0 ||
+        strcmp(name ? name : "", "kalshi") == 0 || strcmp(name ? name : "", "polymarket") == 0) {
         out->requires_approval = true;
         if (strcmp(name ? name : "", "delete_file") == 0) {
             out->strict_no_tty = true;
@@ -33345,8 +33442,9 @@ static bool tool_request_approval(const char *name, const char *input_json, tool
         return true;
     }
 
-    bool strict_headless = a.strict_no_tty || (mode && (strcasecmp(mode, "strict") == 0 ||
-                                                       strcasecmp(mode, "require") == 0));
+    bool strict_headless =
+        a.strict_no_tty ||
+        (mode && (strcasecmp(mode, "strict") == 0 || strcasecmp(mode, "require") == 0));
     if (a.blocked_by_tier) {
         char deny_reason[256];
         snprintf(deny_reason, sizeof(deny_reason), "blocked_by_trust_tier risk=%s reason=%s",
@@ -33382,7 +33480,8 @@ static bool tool_request_approval(const char *name, const char *input_json, tool
     if (choice == TUI_PERM_ALLOW || choice == TUI_PERM_ALWAYS) {
         if (choice == TUI_PERM_ALWAYS && a.allow_always)
             tool_approval_cache_add(name, a.fingerprint);
-        baseline_log("security", choice == TUI_PERM_ALWAYS ? "tool_approval_always" : "tool_approval_granted",
+        baseline_log("security",
+                     choice == TUI_PERM_ALWAYS ? "tool_approval_always" : "tool_approval_granted",
                      name, a.reason);
         return true;
     }
@@ -33471,7 +33570,6 @@ static bool tool_exec_command_blocked_by_self_preservation(const char *name, con
     return blocked;
 }
 
-
 /* ── C5: No self-surgery on the Immune System ────────────────────────────
  *
  * Wings and Talons may propose self-improvements, but agent-routed high-risk
@@ -33529,8 +33627,8 @@ static bool tool_input_touches_immune_surface(const char *input_json, char *matc
 }
 
 static bool tool_blocks_immune_self_surgery(const char *name, tool_class_t cls,
-                                            const char *input_json, const char *tier,
-                                            char *reason, size_t reason_len) {
+                                            const char *input_json, const char *tier, char *reason,
+                                            size_t reason_len) {
     if (!tool_is_high_risk(name, cls))
         return false;
 
@@ -33544,7 +33642,8 @@ static bool tool_blocks_immune_self_surgery(const char *name, tool_class_t cls,
 
     if (reason && reason_len > 0) {
         snprintf(reason, reason_len,
-                 "immune_self_surgery_blocked target=%s; requires DSCO_IMMUNE_SURGERY_AUTH=external and trusted/operator tier",
+                 "immune_self_surgery_blocked target=%s; requires "
+                 "DSCO_IMMUNE_SURGERY_AUTH=external and trusted/operator tier",
                  matched[0] ? matched : "immune_surface");
     }
     return true;
@@ -33620,7 +33719,8 @@ bool tools_execute_for_tier(const char *name, const char *input_json, const char
         if (!governance_check_breakers(&g_governance, "dsco")) {
             pheromone_deposit(&g_governance.pheromones, PHERO_WARNING, 0.8, phero_region, "immune",
                               "{\"reason\":\"circuit_breaker\"}");
-            tool_gov_deny(result, result_len, name, "G2a_circuit_breaker", "active_breaker", remaining);
+            tool_gov_deny(result, result_len, name, "G2a_circuit_breaker", "active_breaker",
+                          remaining);
             return false;
         }
 
@@ -33640,8 +33740,8 @@ bool tools_execute_for_tier(const char *name, const char *input_json, const char
 
         /* ── G2c: Human approval for risky/blocked tools ──────────────── */
         if (!tool_request_approval(name, input_json, cls, tier, result, result_len)) {
-            pheromone_deposit(&g_governance.pheromones, PHERO_WARNING, 0.8, phero_region,
-                              "immune", "{\"reason\":\"approval_denied\"}");
+            pheromone_deposit(&g_governance.pheromones, PHERO_WARNING, 0.8, phero_region, "immune",
+                              "{\"reason\":\"approval_denied\"}");
             self_improve_record_tool(&g_self_improve, name, false, 0.0, 0);
             return false;
         }

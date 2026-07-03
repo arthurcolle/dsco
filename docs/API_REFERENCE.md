@@ -3,7 +3,7 @@
 This file is auto-generated from header declarations in `include/`.
 
 - Generator: `./scripts/gen_api_reference.sh`
-- Headers scanned: 124
+- Headers scanned: 126
 
 ## Regeneration
 
@@ -225,6 +225,15 @@ Function-like declarations: 28
 - `char *chronicle_build_activity_html(int limit, const char *session_filter);`
 - `char *chronicle_build_activity_html_ex(int limit, const char *session_filter, const char *type_filter, const char *search_filter);`
 - `char *chronicle_read_blob_hex(const char *sha256, size_t max_bytes, const char **content_type_out);`
+
+## `cluster.h`
+
+Function-like declarations: 2
+
+### Declarations
+
+- `int dsco_cluster_cli(int argc, char **argv);`
+- `int dsco_cluster_rpc_endpoints(const char *peers_csv, char *out, size_t outlen, int ensure);`
 
 ## `codex_app_directory.h`
 
@@ -1442,14 +1451,17 @@ Function-like declarations: 16
 
 ## `net_server.h`
 
-Function-like declarations: 10
+Function-like declarations: 13
 
 ### Declarations
 
 - `typedef netsrv_response_t (*netsrv_handler_fn)(const netsrv_request_t *req, void *ctx);`
+- `int netsrv_stream_send(netsrv_stream_t *s, const char *buf, size_t len);`
+- `typedef void (*netsrv_stream_fn)(const netsrv_request_t *req, netsrv_stream_t *s, void *ctx);`
 - `dsco_net_server_t *netsrv_create(uint16_t port, bool use_tls, const char *cert_pem_path, const char *key_pem_path);`
 - `void netsrv_destroy(dsco_net_server_t *s);`
 - `bool netsrv_route(dsco_net_server_t *s, const char *method, const char *path, netsrv_handler_fn fn, void *ctx);`
+- `bool netsrv_route_stream(dsco_net_server_t *s, const char *method, const char *path, netsrv_stream_fn fn, void *ctx);`
 - `void netsrv_set_auth_key(dsco_net_server_t *s, const uint8_t *key, size_t key_len);`
 - `bool netsrv_start(dsco_net_server_t *s);`
 - `void netsrv_stop(dsco_net_server_t *s);`
@@ -1957,6 +1969,16 @@ Function-like declarations: 10
 - `int recovery_log_dump(const recovery_log_t *log, const char *path);`
 - `const char *recovery_action_name(recovery_action_t a);`
 
+## `remote_cli.h`
+
+Function-like declarations: 3
+
+### Declarations
+
+- `int dsco_remote_cli(int argc, char **argv);`
+- `int dsco_fleet_cli(int argc, char **argv);`
+- `bool dsco_fleet_resolve(const char *peer, char *user, size_t ul, char *addr, size_t al);`
+
 ## `router.h`
 
 Function-like declarations: 17
@@ -2227,11 +2249,12 @@ Function-like declarations: 5
 
 ## `supervisor.h`
 
-Function-like declarations: 3
+Function-like declarations: 4
 
 ### Declarations
 
 - `int supervisor_run(int child_argc, char **child_argv);`
+- `bool supervisor_resolve_hotswap_exec(const char *current_exec, const char *explicit_hotswap, char *out_exec, size_t out_exec_len);`
 - `void dsco_maybe_exec_shell_to_keep_terminal(void);`
 - `void main_install_crash_handlers(void);`
 
@@ -2383,7 +2406,7 @@ Function-like declarations: 14
 
 ## `tools.h`
 
-Function-like declarations: 84
+Function-like declarations: 85
 
 ### Declarations
 
@@ -2411,6 +2434,7 @@ Function-like declarations: 84
 - `swarm_t *tools_swarm_instance(void);`
 - `const tool_def_t *tools_get_all(int *count);`
 - `bool tools_invoke_by_name(const char *name, const char *input, char *result, size_t rlen);`
+- `bool tools_is_offload_safe(const char *name);`
 - `int tools_get_core_count(void);`
 - `int tools_builtin_count(void);`
 - `bool tools_execute(const char *name, const char *input_json, char *result, size_t result_len);`
@@ -2580,7 +2604,7 @@ Function-like declarations: 9
 
 ## `tui.h`
 
-Function-like declarations: 300
+Function-like declarations: 303
 
 ### Declarations
 
@@ -2859,6 +2883,9 @@ Function-like declarations: 300
 - `tui_perm_result_t tui_permission_prompt(const char *tool_name, const char *description, const char *detail);`
 - `bool tui_confirm(const char *question);`
 - `tui_ask_status_t tui_ask_questions(tui_ask_question_t *qs, int n_questions, const char *intro, char *chat_out, size_t chat_len);`
+- `int tui_test_decode_key_sequence(const char *bytes);`
+- `int tui_test_dialog_move_row(int row, int maxrow, int key);`
+- `int tui_test_menu_move_selection(const bool *selectable, int nrows, int sel, int delta);`
 - `const char *tui_ask_answer_value(const tui_ask_question_t *q, char *out, size_t out_len);`
 - `bool tui_ask_question_visible(const tui_ask_question_t *qs, int n, int qi);`
 - `void tui_diff_init(tui_diff_t *d);`
