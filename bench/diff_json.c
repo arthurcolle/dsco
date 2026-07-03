@@ -40,11 +40,11 @@ static void check_key(const char *json, yyjson_val *root, const char *key) {
     /* int */
     yyjson_val *v = yyjson_obj_get(root, key);
     if (v && yyjson_is_int(v)) {
-        int di = json_get_int(json, key, -999999);
+        long long di = json_get_i64(json, key, -999999);
         long long yi = yyjson_get_sint(v);
         checks++;
-        if ((long long)di != yi && di != -999999) {
-            printf("  INT MISMATCH key=%s dsco=%d yy=%lld\n", key, di, yi);
+        if (di != yi && di != -999999) {
+            printf("  INT MISMATCH key=%s dsco=%lld yy=%lld\n", key, di, yi);
             mismatches++;
         }
     }
