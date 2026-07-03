@@ -1211,6 +1211,31 @@ static void test_router_escalation_cap(void) {
     PASS();
 }
 
+static void test_ctx_truncate_json_preserves_object_payload(void) {
+    TEST("json truncation: object commas must not evict the data payload");
+    /* The shape of every search-tool response: a few scalar members, then
+     * the payload array. The old truncator counted object commas as array
+     * elements, so it dropped everything after two scalars — search results
+     * reached the model as ~31 bytes of mangled JSON. */
+    char src[8192];
+    size_t n = (size_t)snprintf(src, sizeof(src), "{\"code\":200,\"status\":200,\"data\":[");
+    for (int i = 0; i < 40; i++)
+        n += (size_t)snprintf(src + n, sizeof(src) - n,
+                              "%s{\"title\":\"result %d\",\"url\":\"https://example.com/%d\"}",
+                              i ? "," : "", i, i);
+    n += (size_t)snprintf(src + n, sizeof(src) - n, "],\"tail\":\"end\"}");
+
+    char out[1024];
+    size_t wr = tools_test_truncate_json(src, n, out, sizeof(out));
+    ASSERT(wr > 64, "truncation keeps a useful amount of content");
+    ASSERT(strstr(out, "\"data\"") != NULL, "payload key survives");
+    ASSERT(strstr(out, "result 0") != NULL, "first array element survives");
+    ASSERT(strstr(out, "result 1") != NULL, "second array element survives");
+    ASSERT(strstr(out, "result 9") == NULL, "later array elements are elided");
+    ASSERT(strstr(out, "\"tail\"") != NULL, "members after the array survive");
+    PASS();
+}
+
 static void test_plan_cache_outcome_feedback(void) {
     TEST("plan cache: failure feedback decays and evicts, success reinforces");
     char saved_home[256];
@@ -18768,6 +18793,7 @@ int main(void) {
     test_spend_governor_learned_adjustment();
     test_router_escalation_cap();
     test_plan_cache_outcome_feedback();
+    test_ctx_truncate_json_preserves_object_payload();
     test_build_request_ex_for_credential_includes_billing_header();
     test_build_request_oauth_promotes_legacy_mcp_wire_names();
     test_build_request_oauth_keeps_builtin_tool_names_bare();
