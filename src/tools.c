@@ -17,6 +17,7 @@
 #include "integrations.h"
 #include "trading.h"
 #include "json_util.h"
+#include "vecstore.h"
 #include "config.h"
 #include "ast.h"
 #include "swarm.h"
@@ -12917,6 +12918,289 @@ static __attribute__((unused)) bool tool_big_factorial(const char *input, char *
     bigint_t r;
     bigint_factorial(n, &r);
     bigint_to_str(&r, result, rlen);
+    return true;
+}
+
+/* ═══════════════════════════════════════════════════════════════════════
+ * AST RETRIEVAL — index dsco's own source; retrieve + rerank over it.
+ *
+ * The read-half of the Construct: "where does <symptom> live?" answered
+ * over the whole binary in one call. Three stages:
+ *   0. chunk    — ast_parse_file → one card per named node (fn/struct/def)
+ *   1. recall   — ctx_build_embedding (256-dim local, free) → vecstore top-K
+ *   2. rerank   — jina-reranker-v3 cross-encoder over the K cards → top-N
+ * The intelligence is the reranker; recall is deliberately cheap. Best dense
+ * embedder for code is jina-code-embeddings-1.5b — swap-in path noted below;
+ * v1 ships on the free local embedder + SOTA rerank.
+ * ═══════════════════════════════════════════════════════════════════════ */
+
+#define AST_IDX_COLLECTION "ast_blocks"
+#define AST_IDX_MAX_BLOCKS 20000
+#define AST_IDX_CARD_MAX 1024
+
+/* The AST index is a dedicated persistent artifact (not the session vfs), so
+ * `ast_index` in one process and `ast_search` in another agree on the store. */
+static vfs_db_t *ast_idx_open_vfs(void) {
+    const char *ovr = getenv("DSCO_AST_DB");
+    if (ovr && ovr[0])
+        return vfs_open(ovr);
+    const char *home = getenv("HOME");
+    char path[1024];
+    if (home && home[0])
+        snprintf(path, sizeof(path), "%s/.dsco/ast_index.db", home);
+    else
+        snprintf(path, sizeof(path), "/tmp/dsco_ast_index.db");
+    return vfs_open(path);
+}
+
+static const char *ast_node_type_label(ast_node_type_t t) {
+    switch (t) {
+        case AST_FUNCTION: return "fn";
+        case AST_STRUCT: return "struct";
+        case AST_TYPEDEF: return "typedef";
+        case AST_ENUM: return "enum";
+        case AST_DEFINE: return "define";
+        case AST_GLOBAL_VAR: return "var";
+        case AST_TOOL_DEF: return "tool";
+        default: return "node";
+    }
+}
+
+static void ast_idx_card(const char *relpath, const ast_node_t *n, char *out, size_t out_len) {
+    const char *rt = n->return_type ? n->return_type : "";
+    const char *nm = n->name ? n->name : "?";
+    const char *pm = n->params ? n->params : "";
+    const char *bp = n->body_preview ? n->body_preview : (n->value ? n->value : "");
+    snprintf(out, out_len, "%s:%d [%s] %s%s %s(%s) cx=%d %.400s", relpath, n->line_start,
+             ast_node_type_label(n->type), n->is_static ? "static " : "", rt, nm, pm,
+             n->complexity, bp);
+}
+
+/* Recursive walk of .c/.h under root/rel; embed + upsert each named node. */
+static int ast_idx_walk(vecstore_t *vs, const char *root, const char *rel, int *count) {
+    char path[2048];
+    snprintf(path, sizeof(path), "%s/%s", root, rel[0] ? rel : ".");
+    DIR *d = opendir(path);
+    if (!d)
+        return 0;
+    int indexed = 0;
+    struct dirent *e;
+    while ((e = readdir(d)) != NULL && *count < AST_IDX_MAX_BLOCKS) {
+        if (e->d_name[0] == '.')
+            continue;
+        char childrel[1024];
+        if (rel[0])
+            snprintf(childrel, sizeof(childrel), "%s/%s", rel, e->d_name);
+        else
+            snprintf(childrel, sizeof(childrel), "%s", e->d_name);
+        char childpath[2400];
+        snprintf(childpath, sizeof(childpath), "%s/%s", root, childrel);
+        struct stat st;
+        if (stat(childpath, &st) != 0)
+            continue;
+        if (S_ISDIR(st.st_mode)) {
+            if (strcmp(e->d_name, "build") == 0 || strcmp(e->d_name, "gsl") == 0 ||
+                strcmp(e->d_name, "vendor") == 0)
+                continue;
+            indexed += ast_idx_walk(vs, root, childrel, count);
+            continue;
+        }
+        size_t len = strlen(e->d_name);
+        if (len < 3)
+            continue;
+        const char *ext = e->d_name + len - 2;
+        if (strcmp(ext, ".c") != 0 && strcmp(ext, ".h") != 0)
+            continue;
+        ast_file_t *f = ast_parse_file(childpath);
+        if (!f)
+            continue;
+        for (int i = 0; i < f->count && *count < AST_IDX_MAX_BLOCKS; i++) {
+            ast_node_t *n = &f->nodes[i];
+            if (!n->name || !n->name[0] || n->line_start <= 0)
+                continue;
+            if (n->type == AST_INCLUDE)
+                continue;
+            char card[AST_IDX_CARD_MAX];
+            ast_idx_card(childrel, n, card, sizeof(card));
+            char id[600];
+            snprintf(id, sizeof(id), "%s:%d:%s", childrel, n->line_start, n->name);
+            float vec[CTX_EMBED_DIM];
+            float norm = 0.0f;
+            ctx_build_embedding(card, vec, NULL, &norm);
+            if (vecstore_insert(vs, id, vec, CTX_EMBED_DIM, card)) {
+                indexed++;
+                (*count)++;
+            }
+        }
+        ast_free_file(f);
+    }
+    closedir(d);
+    return indexed;
+}
+
+static bool tool_ast_index(const char *input, char *result, size_t rlen) {
+    vfs_db_t *vfs = ast_idx_open_vfs();
+    if (!vfs) {
+        snprintf(result, rlen, "error: could not open AST index db");
+        return false;
+    }
+    vecstore_t *vs = vecstore_open(vfs, AST_IDX_COLLECTION);
+    if (!vs) {
+        vfs_close(vfs);
+        snprintf(result, rlen, "error: vecstore_open failed");
+        return false;
+    }
+    const char *root = getenv("DSCO_AST_ROOT");
+    char cwd[1024];
+    if (!root || !root[0]) {
+        root = getcwd(cwd, sizeof(cwd)) ? cwd : ".";
+    }
+    char *paths = json_get_str(input, "paths");
+    int count = 0, indexed = 0;
+    double t0 = now_ms();
+    if (paths && paths[0]) {
+        char *copy = strdup(paths);
+        char *save = NULL;
+        for (char *tok = strtok_r(copy, ",", &save); tok; tok = strtok_r(NULL, ",", &save)) {
+            while (*tok == ' ')
+                tok++;
+            indexed += ast_idx_walk(vs, root, tok, &count);
+        }
+        free(copy);
+    } else {
+        indexed += ast_idx_walk(vs, root, "src", &count);
+        indexed += ast_idx_walk(vs, root, "include", &count);
+    }
+    int total = vecstore_count(vs);
+    vecstore_close(vs);
+    vfs_close(vfs);
+    free(paths);
+    snprintf(result, rlen,
+             "{\"indexed\":%d,\"collection_total\":%d,\"root\":\"%s\",\"ms\":%.0f,"
+             "\"embedder\":\"local-256\"}",
+             indexed, total, root, now_ms() - t0);
+    return true;
+}
+
+typedef struct {
+    int *idx;
+    int cap;
+    int n;
+} ast_rank_ctx_t;
+
+static void ast_rank_cb(const char *element_start, void *ud) {
+    ast_rank_ctx_t *c = (ast_rank_ctx_t *)ud;
+    if (c->n >= c->cap)
+        return;
+    int i = json_get_int(element_start, "index", -1);
+    if (i >= 0)
+        c->idx[c->n++] = i;
+}
+
+static bool tool_ast_search(const char *input, char *result, size_t rlen) {
+    char *query = json_get_str(input, "query");
+    if (!query || !query[0]) {
+        free(query);
+        snprintf(result, rlen, "missing required parameter: query");
+        return false;
+    }
+    int k = json_get_int(input, "k", 60);
+    if (k < 1)
+        k = 1;
+    if (k > 200)
+        k = 200;
+    int top_n = json_get_int(input, "top_n", 8);
+    if (top_n < 1)
+        top_n = 1;
+    if (top_n > 40)
+        top_n = 40;
+    bool do_rerank = json_get_bool(input, "rerank", true);
+
+    vfs_db_t *vfs = ast_idx_open_vfs();
+    vecstore_t *vs = vfs ? vecstore_open(vfs, AST_IDX_COLLECTION) : NULL;
+    if (!vs || vecstore_count(vs) == 0) {
+        if (vs)
+            vecstore_close(vs);
+        if (vfs)
+            vfs_close(vfs);
+        free(query);
+        snprintf(result, rlen, "{\"error\":\"AST index empty — run ast_index first\"}");
+        return false;
+    }
+
+    float qvec[CTX_EMBED_DIM];
+    float qnorm = 0.0f;
+    ctx_build_embedding(query, qvec, NULL, &qnorm);
+    vecstore_result_t *cands = calloc((size_t)k, sizeof(*cands));
+    int ncand = cands ? vecstore_query(vs, qvec, CTX_EMBED_DIM, cands, k) : 0;
+
+    int order[200];
+    int nout = 0;
+    bool reranked = false;
+
+    if (do_rerank && ncand > 1 && getenv("JINA_API_KEY")) {
+        jbuf_t rin;
+        jbuf_init(&rin, 8192);
+        jbuf_append(&rin, "{\"query\":");
+        jbuf_append_json_str(&rin, query);
+        jbuf_append(&rin, ",\"model\":\"jina-reranker-v3\",\"top_n\":");
+        jbuf_append_int(&rin, top_n);
+        jbuf_append(&rin, ",\"documents\":[");
+        for (int i = 0; i < ncand; i++) {
+            if (i)
+                jbuf_append(&rin, ",");
+            jbuf_append_json_str(&rin, cands[i].metadata ? cands[i].metadata : cands[i].id);
+        }
+        jbuf_append(&rin, "]}");
+        char *rout = malloc(65536);
+        if (rout && tool_jina_ai_rerank(rin.data, rout, 65536)) {
+            ast_rank_ctx_t rc = {order, 200, 0};
+            json_array_foreach(rout, "results", ast_rank_cb, &rc);
+            nout = rc.n;
+            reranked = nout > 0;
+        }
+        free(rout);
+        jbuf_free(&rin);
+    }
+    if (!reranked) {
+        for (int i = 0; i < ncand && i < top_n; i++)
+            order[nout++] = i;
+    }
+    if (nout > top_n)
+        nout = top_n;
+
+    jbuf_t out;
+    jbuf_init(&out, 16384);
+    jbuf_append(&out, "{\"query\":");
+    jbuf_append_json_str(&out, query);
+    jbuf_appendf(&out, ",\"reranked\":%s,\"model\":\"%s\",\"candidates\":%d,\"results\":[",
+                 reranked ? "true" : "false", reranked ? "jina-reranker-v3" : "cosine", ncand);
+    for (int i = 0; i < nout; i++) {
+        int ci = order[i];
+        if (ci < 0 || ci >= ncand)
+            continue;
+        if (i)
+            jbuf_append(&out, ",");
+        jbuf_append(&out, "{\"rank\":");
+        jbuf_append_int(&out, i + 1);
+        jbuf_appendf(&out, ",\"cosine\":%.4f,\"id\":", (double)cands[ci].score);
+        jbuf_append_json_str(&out, cands[ci].id ? cands[ci].id : "");
+        jbuf_append(&out, ",\"card\":");
+        jbuf_append_json_str(&out, cands[ci].metadata ? cands[ci].metadata : "");
+        jbuf_append(&out, "}");
+    }
+    jbuf_append(&out, "]}");
+
+    vecstore_result_free(cands, ncand);
+    free(cands);
+    vecstore_close(vs);
+    vfs_close(vfs);
+    free(query);
+
+    size_t n = out.len < rlen - 1 ? out.len : rlen - 1;
+    memcpy(result, out.data, n);
+    result[n] = '\0';
+    jbuf_free(&out);
     return true;
 }
 
@@ -28258,6 +28542,29 @@ static const tool_def_t s_tools[] = {
      .input_schema_json = "{\"type\":\"object\",\"properties\":{\"url\":{\"type\":\"string\"}},"
                           "\"required\":[\"url\"]}",
      .execute = tool_jina_read,
+     .is_read_only = true,
+     .is_concurrent = true},
+    {.name = "ast_index",
+     .description = "Index dsco's own source into an AST-block vector store (one card per "
+                    "function/struct/typedef). Run once before ast_search; re-run to refresh. "
+                    "Defaults to src/ + include/; pass comma-separated paths to narrow.",
+     .input_schema_json = "{\"type\":\"object\",\"properties\":{\"paths\":{\"type\":\"string\","
+                          "\"description\":\"comma-separated dirs relative to repo root; default "
+                          "src,include\"}},\"required\":[]}",
+     .execute = tool_ast_index,
+     .is_read_only = true},
+    {.name = "ast_search",
+     .description = "Semantic retrieval over the indexed AST: describe a symptom or capability in "
+                    "natural language and get the source blocks where it lives, file:line "
+                    "anchored. Local recall + jina-reranker-v3 cross-encoder precision. Run "
+                    "ast_index first.",
+     .input_schema_json =
+         "{\"type\":\"object\",\"properties\":{\"query\":{\"type\":\"string\"},\"k\":{\"type\":"
+         "\"integer\",\"description\":\"coarse candidates to rerank (1-200, default 60)\"},"
+         "\"top_n\":{\"type\":\"integer\",\"description\":\"results returned (1-40, default 8)\"},"
+         "\"rerank\":{\"type\":\"boolean\",\"description\":\"use jina-reranker-v3 (default "
+         "true)\"}},\"required\":[\"query\"]}",
+     .execute = tool_ast_search,
      .is_read_only = true,
      .is_concurrent = true},
     {.name = "jina_embed",
