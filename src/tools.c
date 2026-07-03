@@ -14027,6 +14027,169 @@ static bool tool_test_run(const char *input, char *result, size_t rlen) {
     return ec == 0;
 }
 
+/* ── diagnostics: single-file syntax check with the project's real flags ──
+ * All .c share one flag set in compile_commands.json (only source/-o differ),
+ * so we lift the first entry's arguments, drop compile/output/dep flags and
+ * the source, and run `cc <flags> -fsyntax-only <file>`. ~200ms vs a full make. */
+static int diag_build_argv(const char *target_file, char **argv, int max) {
+    long len = 0;
+    char *cc = cw_read_file("compile_commands.json", &len);
+    if (!cc)
+        return -1;
+    char *args = strstr(cc, "\"arguments\"");
+    char *lb = args ? strchr(args, '[') : NULL;
+    if (!lb) {
+        free(cc);
+        return -1;
+    }
+    int argc = 0;
+    argv[argc++] = strdup("cc");
+    char *p = lb + 1;
+    bool skip_next = false;
+    bool first = true;
+    while (*p && *p != ']' && argc < max - 3) {
+        while (*p && *p != '"' && *p != ']')
+            p++;
+        if (*p != '"')
+            break;
+        p++;
+        char tok[1024];
+        int t = 0;
+        while (*p && *p != '"' && t < 1023) {
+            if (*p == '\\' && p[1])
+                p++;
+            tok[t++] = *p++;
+        }
+        tok[t] = '\0';
+        if (*p == '"')
+            p++;
+        bool was_first = first;
+        first = false;
+        if (skip_next) {
+            skip_next = false;
+            continue;
+        }
+        if (was_first &&
+            (strcmp(tok, "cc") == 0 || strstr(tok, "clang") || strstr(tok, "gcc")))
+            continue;
+        if (strcmp(tok, "-c") == 0 || strcmp(tok, "-MMD") == 0 || strcmp(tok, "-MP") == 0 ||
+            strcmp(tok, "-MD") == 0)
+            continue;
+        if (strcmp(tok, "-o") == 0 || strcmp(tok, "-MF") == 0 || strcmp(tok, "-MT") == 0 ||
+            strcmp(tok, "-MQ") == 0) {
+            skip_next = true;
+            continue;
+        }
+        size_t tl = strlen(tok);
+        if (tl > 2 && (strcmp(tok + tl - 2, ".c") == 0 || strcmp(tok + tl - 2, ".o") == 0))
+            continue;
+        argv[argc++] = strdup(tok);
+    }
+    free(cc);
+    argv[argc++] = strdup("-fsyntax-only");
+    argv[argc++] = strdup(target_file);
+    argv[argc] = NULL;
+    return argc;
+}
+
+static bool tool_diagnostics(const char *input, char *result, size_t rlen) {
+    char *file = json_get_str(input, "file");
+    if (!file || !file[0]) {
+        free(file);
+        file = json_get_path_or_file_path(input);
+    }
+    if (!file || !file[0]) {
+        free(file);
+        snprintf(result, rlen, "{\"error\":\"file required\"}");
+        return false;
+    }
+    char *argv_s[256];
+    int argc = diag_build_argv(file, argv_s, 256);
+    if (argc < 0) {
+        free(file);
+        snprintf(result, rlen, "{\"error\":\"could not read compile_commands.json\"}");
+        return false;
+    }
+    char *out = malloc(65536);
+    if (!out) {
+        for (int i = 0; i < argc; i++)
+            free(argv_s[i]);
+        free(file);
+        snprintf(result, rlen, "{\"error\":\"oom\"}");
+        return false;
+    }
+    out[0] = '\0';
+    double t0 = now_ms();
+    int rc = safe_exec_argv((const char *const *)argv_s, out, 65536);
+    double ms = now_ms() - t0;
+    for (int i = 0; i < argc; i++)
+        free(argv_s[i]);
+
+    jbuf_t j;
+    jbuf_init(&j, 4096);
+    jbuf_append(&j, "{\"file\":");
+    jbuf_append_json_str(&j, file);
+    jbuf_appendf(&j, ",\"ok\":%s,\"ms\":%.0f,\"diagnostics\":[", rc == 0 ? "true" : "false", ms);
+    int nd = 0, nerr = 0;
+    char *lsave = NULL;
+    char *oc = strdup(out);
+    for (char *ln = strtok_r(oc, "\n", &lsave); ln && nd < 40; ln = strtok_r(NULL, "\n", &lsave)) {
+        const char *sev = NULL, *sevpos = NULL;
+        if ((sevpos = strstr(ln, " error:")))
+            sev = "error";
+        else if ((sevpos = strstr(ln, " warning:")))
+            sev = "warning";
+        else if ((sevpos = strstr(ln, " note:")))
+            sev = "note";
+        else
+            continue;
+        char pref[1024];
+        snprintf(pref, sizeof(pref), "%.*s", (int)(sevpos - ln), ln);
+        size_t pl = strlen(pref);
+        while (pl && (pref[pl - 1] == ' ' || pref[pl - 1] == ':'))
+            pref[--pl] = '\0';
+        int line = 0, col = 0;
+        char *c1 = strrchr(pref, ':');
+        if (c1 && isdigit((unsigned char)c1[1])) {
+            col = atoi(c1 + 1);
+            *c1 = '\0';
+            char *c2 = strrchr(pref, ':');
+            if (c2 && isdigit((unsigned char)c2[1]))
+                line = atoi(c2 + 1);
+            else {
+                line = col;
+                col = 0;
+            }
+        }
+        const char *msg = sevpos;
+        while (*msg && *msg != ':')
+            msg++;
+        if (*msg == ':')
+            msg++;
+        while (*msg == ' ')
+            msg++;
+        if (nd)
+            jbuf_append(&j, ",");
+        jbuf_append(&j, "{\"severity\":");
+        jbuf_append_json_str(&j, sev);
+        jbuf_appendf(&j, ",\"line\":%d,\"col\":%d,\"message\":", line, col);
+        jbuf_append_json_str(&j, msg);
+        jbuf_append(&j, "}");
+        nd++;
+        if (strcmp(sev, "error") == 0)
+            nerr++;
+    }
+    free(oc);
+    jbuf_appendf(&j, "],\"count\":%d,\"errors\":%d}", nd, nerr);
+    free(out);
+    free(file);
+    size_t n = j.len < rlen - 1 ? j.len : rlen - 1;
+    memcpy(result, j.data, n);
+    result[n] = '\0';
+    jbuf_free(&j);
+    return rc == 0;
+}
+
 static bool tool_context_search(const char *input, char *result, size_t rlen) {
     char *query = json_get_str(input, "query");
     char *tool_filter = json_get_str(input, "tool");
@@ -29429,6 +29592,16 @@ static const tool_def_t s_tools[] = {
                           "\"description\":\"make target (default 'test')\"}},\"required\":[]}",
      .execute = tool_test_run,
      .is_read_only = true},
+    {.name = "diagnostics",
+     .description = "Fast single-file syntax check with the project's real compile flags (from "
+                    "compile_commands.json). Returns structured {severity,line,col,message} "
+                    "diagnostics in ~200ms — the tight edit→verify loop, no full make needed. "
+                    "Run after editing a .c/.h file.",
+     .input_schema_json = "{\"type\":\"object\",\"properties\":{\"file\":{\"type\":\"string\","
+                          "\"description\":\"path to a .c/.h file\"}},\"required\":[\"file\"]}",
+     .execute = tool_diagnostics,
+     .is_read_only = true,
+     .is_concurrent = true},
     {.name = "jina_embed",
      .description =
          "Compute embeddings via Jina v4 API. Returns 1024d float vectors for semantic similarity.",
