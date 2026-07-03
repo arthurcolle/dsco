@@ -1330,6 +1330,10 @@ bool tool_jina_search(const char *input, char *result, size_t rlen) {
         num = 1;
     if (num > 10)
         num = 10;
+    /* Default to lean results (title/url/description). Full page content per
+     * result is 20-100KB each — it blew past the inline context budget and
+     * arrived truncated. Fetch chosen URLs with jina_read instead. */
+    bool with_content = json_get_bool(input, "content", false);
 
     const char *jina_key = getenv("JINA_API_KEY");
     if (!jina_key || !jina_key[0]) {
@@ -1361,6 +1365,8 @@ bool tool_jina_search(const char *input, char *result, size_t rlen) {
     hdrs = curl_slist_append(hdrs, auth);
     hdrs = curl_slist_append(hdrs, "Content-Type: application/json");
     hdrs = curl_slist_append(hdrs, "Accept: application/json");
+    if (!with_content)
+        hdrs = curl_slist_append(hdrs, "X-Respond-With: no-content");
 
     http_buf_t resp = {0};
     curl_easy_setopt(curl, CURLOPT_URL, "https://s.jina.ai/");
@@ -1368,8 +1374,10 @@ bool tool_jina_search(const char *input, char *result, size_t rlen) {
     curl_easy_setopt(curl, CURLOPT_POSTFIELDS, body.data);
     curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, http_write_cb);
     curl_easy_setopt(curl, CURLOPT_WRITEDATA, &resp);
-    curl_easy_setopt(curl, CURLOPT_CONNECTTIMEOUT, 5L);
-    curl_easy_setopt(curl, CURLOPT_TIMEOUT, 15L);
+    /* Jina fetches pages server-side; heavy queries routinely exceed 15s.
+     * The old 15s cap surfaced as an unexplained "HTTP 0". */
+    curl_easy_setopt(curl, CURLOPT_CONNECTTIMEOUT, 10L);
+    curl_easy_setopt(curl, CURLOPT_TIMEOUT, with_content ? 60L : 45L);
 
     CURLcode res = curl_easy_perform(curl);
     long http_code = 0;
@@ -1378,8 +1386,14 @@ bool tool_jina_search(const char *input, char *result, size_t rlen) {
     curl_easy_cleanup(curl);
     jbuf_free(&body);
 
-    if (res != CURLE_OK || http_code != 200) {
-        snprintf(result, rlen, "Jina Search error (HTTP %ld)", http_code);
+    if (res != CURLE_OK) {
+        snprintf(result, rlen, "Jina Search transport error: %s", curl_easy_strerror(res));
+        free(resp.data);
+        return false;
+    }
+    if (http_code != 200) {
+        snprintf(result, rlen, "Jina Search error (HTTP %ld): %.300s", http_code,
+                 resp.data ? resp.data : "");
         free(resp.data);
         return false;
     }
@@ -2171,8 +2185,7 @@ bool tool_parallel_ai_task_group_add_runs(const char *input, char *result, size_
         jbuf_init(&body, 1024 + (inputs ? strlen(inputs) : strlen(single)));
         jbuf_append(&body, "{");
         bool comma = false;
-        append_raw_field_if_present(&body, input, "default_task_spec", "default_task_spec",
-                                    &comma);
+        append_raw_field_if_present(&body, input, "default_task_spec", "default_task_spec", &comma);
         append_field_sep(&body, &comma);
         jbuf_append(&body, "\"inputs\":");
         if (inputs) {
@@ -2305,8 +2318,7 @@ bool tool_parallel_ai_findall_entity_search(const char *input, char *result, siz
 
     free(entity_type);
     free(objective);
-    bool ok =
-        parallel_ai_request("POST", "/v1beta/findall/entity-search", body.data, result, rlen);
+    bool ok = parallel_ai_request("POST", "/v1beta/findall/entity-search", body.data, result, rlen);
     jbuf_free(&body);
     return ok;
 }
@@ -2645,8 +2657,7 @@ bool tool_parallel_ai_monitor_create(const char *input, char *result, size_t rle
     char *query = json_get_str(input, "query");
     char *task_run_id = json_get_str(input, "task_run_id");
     bool snapshot = strcmp(type, "snapshot") == 0;
-    if ((snapshot && (!task_run_id || !task_run_id[0])) ||
-        (!snapshot && (!query || !query[0]))) {
+    if ((snapshot && (!task_run_id || !task_run_id[0])) || (!snapshot && (!query || !query[0]))) {
         free(type);
         free(frequency);
         free(query);
@@ -2689,8 +2700,7 @@ bool tool_parallel_ai_monitor_create(const char *input, char *result, size_t rle
         append_field_sep(&body, &scomma);
         jbuf_append(&body, "\"query\":");
         jbuf_append_json_str(&body, query);
-        append_bool_field_if_present(&body, input, "include_backfill", "include_backfill",
-                                     &scomma);
+        append_bool_field_if_present(&body, input, "include_backfill", "include_backfill", &scomma);
         append_raw_field_if_present(&body, input, "output_schema", "output_schema", &scomma);
         append_raw_field_if_present(&body, input, "advanced_settings", "advanced_settings",
                                     &scomma);
@@ -2957,8 +2967,8 @@ static bool jina_batch_id_is_safe(const char *id) {
 }
 
 static bool jina_ai_request_with_headers(const char *method, const char *url, const char *body,
-                                         const char *extra_headers[], int extra_count,
-                                         char *result, size_t rlen) {
+                                         const char *extra_headers[], int extra_count, char *result,
+                                         size_t rlen) {
     const char *api_key;
     if (!require_key("JINA_API_KEY", "Jina AI", result, rlen, &api_key))
         return false;
@@ -3048,8 +3058,7 @@ static void jina_add_header_field(const char *input, const char *key, const char
         free(raw);
     }
     if (value && value[0])
-        jina_add_header_literal(value, header_name, header_bufs, buf_count, headers,
-                                header_count);
+        jina_add_header_literal(value, header_name, header_bufs, buf_count, headers, header_count);
     free(value);
 }
 
@@ -3094,9 +3103,8 @@ bool tool_jina_ai_reader(const char *input, char *result, size_t rlen) {
         jbuf_append(&body, viewport);
     }
     free(viewport);
-    bool injected =
-        append_string_field_if_present(&body, input, "injectPageScript", "injectPageScript",
-                                       &comma);
+    bool injected = append_string_field_if_present(&body, input, "injectPageScript",
+                                                   "injectPageScript", &comma);
     if (!injected)
         append_string_field_if_present(&body, input, "inject_page_script", "injectPageScript",
                                        &comma);
@@ -3141,9 +3149,9 @@ bool tool_jina_ai_reader(const char *input, char *result, size_t rlen) {
                            sizeof(reader_headers) / sizeof(reader_headers[0]), header_bufs,
                            &buf_count, headers, &header_count);
 
-    bool ok = jina_ai_request_with_headers(
-        "POST", eu ? "https://eu.r.jina.ai/" : "https://r.jina.ai/", body.data, headers,
-        header_count, result, rlen);
+    bool ok =
+        jina_ai_request_with_headers("POST", eu ? "https://eu.r.jina.ai/" : "https://r.jina.ai/",
+                                     body.data, headers, header_count, result, rlen);
     jbuf_free(&body);
     return ok;
 }
@@ -3203,9 +3211,9 @@ bool tool_jina_ai_search(const char *input, char *result, size_t rlen) {
                            sizeof(search_headers) / sizeof(search_headers[0]), header_bufs,
                            &buf_count, headers, &header_count);
 
-    bool ok = jina_ai_request_with_headers(
-        "POST", eu ? "https://eu.s.jina.ai/" : "https://s.jina.ai/", body.data, headers,
-        header_count, result, rlen);
+    bool ok =
+        jina_ai_request_with_headers("POST", eu ? "https://eu.s.jina.ai/" : "https://s.jina.ai/",
+                                     body.data, headers, header_count, result, rlen);
     jbuf_free(&body);
     return ok;
 }
@@ -3261,8 +3269,7 @@ bool tool_jina_ai_embed(const char *input, char *result, size_t rlen) {
     append_bool_field_if_present(&body, input, "normalized", "normalized", &comma);
     append_bool_field_if_present(&body, input, "late_chunking", "late_chunking", &comma);
     append_bool_field_if_present(&body, input, "truncate", "truncate", &comma);
-    append_bool_field_if_present(&body, input, "return_multivector", "return_multivector",
-                                 &comma);
+    append_bool_field_if_present(&body, input, "return_multivector", "return_multivector", &comma);
     jbuf_append(&body, "}");
 
     free(items);
@@ -3679,8 +3686,7 @@ static int jina_append_live_chunks(jbuf_t *doc_out, const char *text, const char
         jbuf_append_json_str(doc_out, chunk_id);
         jbuf_append(doc_out, ",\"source_id\":");
         jbuf_append_json_str(doc_out, source_id);
-        jbuf_appendf(doc_out, ",\"chunk_index\":%d,\"words\":%d,\"text\":", local_count + 1,
-                     words);
+        jbuf_appendf(doc_out, ",\"chunk_index\":%d,\"words\":%d,\"text\":", local_count + 1, words);
         jbuf_append_json_str(doc_out, snippet);
         jbuf_append(doc_out, "}");
 
@@ -3706,9 +3712,9 @@ static int jina_append_live_chunks(jbuf_t *doc_out, const char *text, const char
 }
 
 static bool parallel_ai_status_is_success(const char *status) {
-    return status && (!strcmp(status, "completed") || !strcmp(status, "complete") ||
-                      !strcmp(status, "succeeded") || !strcmp(status, "success") ||
-                      !strcmp(status, "done"));
+    return status &&
+           (!strcmp(status, "completed") || !strcmp(status, "complete") ||
+            !strcmp(status, "succeeded") || !strcmp(status, "success") || !strcmp(status, "done"));
 }
 
 static bool parallel_ai_status_is_terminal(const char *status) {
@@ -3779,8 +3785,8 @@ static char *parallel_ai_extract_text_from_response(const char *resp) {
         return excerpts.data;
     jbuf_free(&excerpts);
 
-    static const char *keys[] = {"text", "content", "markdown", "excerpt", "summary", "output",
-                                 NULL};
+    static const char *keys[] = {"text",    "content", "markdown", "excerpt",
+                                 "summary", "output",  NULL};
     for (int i = 0; keys[i]; i++) {
         char *raw = jina_json_find_raw_string_field(resp, keys[i]);
         if (!raw)
@@ -4039,8 +4045,7 @@ bool tool_parallel_ai_wait(const char *input, char *result, size_t rlen) {
     jbuf_append_json_str(&out, kind);
     jbuf_append(&out, ",\"id\":");
     jbuf_append_json_str(&out, id);
-    jbuf_appendf(&out, ",\"polls\":%d,\"elapsed_seconds\":%ld", polls,
-                 (long)(time(NULL) - start));
+    jbuf_appendf(&out, ",\"polls\":%d,\"elapsed_seconds\":%ld", polls, (long)(time(NULL) - start));
     jbuf_append(&out, ",\"status\":");
     jbuf_append_json_str(&out, status ? status : "");
     jbuf_append(&out, ",\"terminal\":");
@@ -4110,8 +4115,8 @@ bool tool_parallel_ai_research(const char *input, char *result, size_t rlen) {
     jbuf_append(&search_in, ",\"objective\":");
     jbuf_append_json_str(&search_in, objective);
     append_string_field_if_present(&search_in, input, "mode", "mode", &(bool){true});
-    append_int_field_if_present(&search_in, input, "max_chars_total", "max_chars_total", 1,
-                                200000, &(bool){true});
+    append_int_field_if_present(&search_in, input, "max_chars_total", "max_chars_total", 1, 200000,
+                                &(bool){true});
     append_string_field_if_present(&search_in, input, "session_id", "session_id", &(bool){true});
     append_string_field_if_present(&search_in, input, "client_model", "client_model",
                                    &(bool){true});
@@ -4145,8 +4150,7 @@ bool tool_parallel_ai_research(const char *input, char *result, size_t rlen) {
         jbuf_append(&ex_in, ",\"objective\":");
         jbuf_append_json_str(&ex_in, objective);
         jbuf_appendf(&ex_in, ",\"max_chars_total\":%d", extract_max_chars);
-        append_string_field_if_present(&ex_in, input, "session_id", "session_id",
-                                       &(bool){true});
+        append_string_field_if_present(&ex_in, input, "session_id", "session_id", &(bool){true});
         append_string_field_if_present(&ex_in, input, "client_model", "client_model",
                                        &(bool){true});
         jbuf_append(&ex_in, "}");
@@ -4226,9 +4230,10 @@ bool tool_parallel_ai_research(const char *input, char *result, size_t rlen) {
         jbuf_append_json_str(&task_in, processor);
         jbuf_append(&task_in, ",\"input\":");
         jbuf_append_json_str(&task_in, prompt.data);
-        jbuf_append(&task_in, ",\"enable_events\":true,\"metadata\":{\"dsco\":\"parallel_ai_research\"}}");
-        task_ok = tool_parallel_ai_task_create(task_in.data, task_create_resp,
-                                               sizeof(task_create_resp));
+        jbuf_append(&task_in,
+                    ",\"enable_events\":true,\"metadata\":{\"dsco\":\"parallel_ai_research\"}}");
+        task_ok =
+            tool_parallel_ai_task_create(task_in.data, task_create_resp, sizeof(task_create_resp));
         if (task_ok)
             run_id = parallel_ai_response_id(task_create_resp, "run_id");
         if (task_ok && run_id && jina_input_bool(input, "wait", true)) {
@@ -4345,8 +4350,8 @@ bool tool_parallel_ai_live_kb(const char *input, char *result, size_t rlen) {
     jbuf_append(&search_in, ",\"objective\":");
     jbuf_append_json_str(&search_in, objective);
     append_string_field_if_present(&search_in, input, "mode", "mode", &(bool){true});
-    append_int_field_if_present(&search_in, input, "max_chars_total", "max_chars_total", 1,
-                                200000, &(bool){true});
+    append_int_field_if_present(&search_in, input, "max_chars_total", "max_chars_total", 1, 200000,
+                                &(bool){true});
     jbuf_append(&search_in, "}");
     char search_resp[524288];
     bool search_ok = tool_parallel_ai_search(search_in.data, search_resp, sizeof(search_resp));
@@ -4705,8 +4710,8 @@ bool tool_jina_ai_rerank(const char *input, char *result, size_t rlen) {
     char *document = NULL;
     if (!documents)
         document = json_get_str(input, "document");
-    if (!query || raw_is_null(query) || ((!documents || raw_is_null(documents)) &&
-                                         (!document || !document[0]))) {
+    if (!query || raw_is_null(query) ||
+        ((!documents || raw_is_null(documents)) && (!document || !document[0]))) {
         free(query);
         free(documents);
         free(document);
@@ -4779,11 +4784,10 @@ bool tool_jina_ai_classify(const char *input, char *result, size_t rlen) {
         input_raw = NULL;
         text = json_get_str(input, "text");
     }
-    bool input_raw_supported = input_raw && (raw_starts_with(input_raw, '[') ||
-                                             raw_starts_with(input_raw, '{') ||
-                                             raw_starts_with(input_raw, '"'));
-    if ((!input_raw_supported) &&
-        (!text || !text[0])) {
+    bool input_raw_supported =
+        input_raw && (raw_starts_with(input_raw, '[') || raw_starts_with(input_raw, '{') ||
+                      raw_starts_with(input_raw, '"'));
+    if ((!input_raw_supported) && (!text || !text[0])) {
         free(classifier_id);
         free(input_raw);
         free(text);
@@ -4941,8 +4945,8 @@ bool tool_jina_ai_chat(const char *input, char *result, size_t rlen) {
         body_raw = json_get_raw(input, "request");
     }
     if (body_raw && raw_starts_with(body_raw, '{')) {
-        bool ok =
-            jina_ai_request("POST", JINA_AI_API_BASE_URL "/chat/completions", body_raw, result, rlen);
+        bool ok = jina_ai_request("POST", JINA_AI_API_BASE_URL "/chat/completions", body_raw,
+                                  result, rlen);
         free(body_raw);
         return ok;
     }
@@ -4995,8 +4999,8 @@ bool tool_jina_ai_chat(const char *input, char *result, size_t rlen) {
     free(messages);
     free(prompt);
     free(model);
-    bool ok = jina_ai_request("POST", JINA_AI_API_BASE_URL "/chat/completions", body.data, result,
-                              rlen);
+    bool ok =
+        jina_ai_request("POST", JINA_AI_API_BASE_URL "/chat/completions", body.data, result, rlen);
     jbuf_free(&body);
     return ok;
 }
@@ -5051,8 +5055,8 @@ bool tool_jina_ai_match(const char *input, char *result, size_t rlen) {
     jbuf_append(&body, "]}");
 
     char resp[524288];
-    bool ok = jina_ai_request("POST", JINA_AI_API_BASE_URL "/embeddings", body.data, resp,
-                              sizeof(resp));
+    bool ok =
+        jina_ai_request("POST", JINA_AI_API_BASE_URL "/embeddings", body.data, resp, sizeof(resp));
     jbuf_free(&body);
     if (!ok) {
         free(model);
@@ -5531,8 +5535,7 @@ bool tool_jina_ai_live_kb(const char *input, char *result, size_t rlen) {
         jbuf_append_json_str(&ei, embed_model);
         jbuf_append(&ei, ",\"input\":");
         jbuf_append(&ei, embed_docs.data);
-        jbuf_appendf(&ei,
-                     ",\"task\":\"retrieval.passage\",\"normalized\":true,\"dimensions\":%d}",
+        jbuf_appendf(&ei, ",\"task\":\"retrieval.passage\",\"normalized\":true,\"dimensions\":%d}",
                      embed_dimensions);
         embed_ok = tool_jina_ai_embed(ei.data, embed_resp, sizeof(embed_resp));
         jbuf_free(&ei);
@@ -5643,8 +5646,7 @@ bool tool_jina_ai_constellation(const char *input, char *result, size_t rlen) {
         ok = tool_jina_ai_models_list(input, result, rlen);
     } else if (strcmp(action, "model") == 0) {
         ok = tool_jina_ai_model_get(input, result, rlen);
-    } else if (strcmp(action, "batch_embed_submit") == 0 ||
-               strcmp(action, "batch_submit") == 0) {
+    } else if (strcmp(action, "batch_embed_submit") == 0 || strcmp(action, "batch_submit") == 0) {
         ok = tool_jina_ai_batch_embed_submit(input, result, rlen);
     } else if (strcmp(action, "batch_status") == 0) {
         ok = tool_jina_ai_batch_status(input, result, rlen);
@@ -5673,6 +5675,27 @@ bool tool_jina_ai_constellation(const char *input, char *result, size_t rlen) {
  *  PARALLEL SEARCH — Fan out to multiple search providers concurrently
  * ══════════════════════════════════════════════════════════════════════════ */
 
+/* Provider fan-out worker: each provider runs on its own thread into its
+ * own buffer. The previous implementation fork()ed without exec — in a
+ * process with live background threads and Foundation/Security linked,
+ * curl/TLS in a forked child deadlocks on inherited mutexes or aborts in
+ * the ObjC runtime on macOS. That was the flaky half of "parallel search". */
+typedef struct {
+    bool (*fn)(const char *, char *, size_t);
+    const char *name;
+    const char *input;
+    char *buf;
+    size_t buf_len;
+    bool ok;
+} search_worker_t;
+
+static void *search_worker_main(void *arg) {
+    search_worker_t *w = (search_worker_t *)arg;
+    w->buf[0] = '\0';
+    w->ok = w->fn(w->input, w->buf, w->buf_len);
+    return NULL;
+}
+
 bool tool_parallel_search(const char *input, char *result, size_t rlen) {
     char *query = json_get_str(input, "query");
     if (!query || !query[0]) {
@@ -5687,15 +5710,6 @@ bool tool_parallel_search(const char *input, char *result, size_t rlen) {
     if (num > 10)
         num = 10;
 
-    /* We'll run up to 3 search providers in parallel using fork+pipe */
-    typedef struct {
-        int fd;
-        pid_t pid;
-        const char *name;
-    } search_child_t;
-    search_child_t children[3];
-    int nchildren = 0;
-
     /* Build search input JSON once */
     jbuf_t search_input;
     jbuf_init(&search_input, 256);
@@ -5708,9 +5722,8 @@ bool tool_parallel_search(const char *input, char *result, size_t rlen) {
     const char *tavily_key = getenv("TAVILY_API_KEY");
     const char *brave_key = getenv("BRAVE_API_KEY");
 
-    typedef bool (*search_fn)(const char *, char *, size_t);
     struct {
-        search_fn fn;
+        bool (*fn)(const char *, char *, size_t);
         const char *name;
         bool avail;
     } providers[] = {
@@ -5719,46 +5732,32 @@ bool tool_parallel_search(const char *input, char *result, size_t rlen) {
         {tool_brave_search, "brave", brave_key && brave_key[0]},
     };
 
+    search_worker_t workers[3];
+    pthread_t tids[3];
+    int nworkers = 0;
+
     for (int i = 0; i < 3; i++) {
         if (!providers[i].avail)
             continue;
-
-        int pipefd[2];
-        if (pipe(pipefd) < 0)
+        search_worker_t *w = &workers[nworkers];
+        w->fn = providers[i].fn;
+        w->name = providers[i].name;
+        w->input = search_input.data;
+        w->buf_len = 65536;
+        w->buf = malloc(w->buf_len);
+        w->ok = false;
+        if (!w->buf)
             continue;
-
-        pid_t pid = fork();
-        if (pid < 0) {
-            close(pipefd[0]);
-            close(pipefd[1]);
+        if (pthread_create(&tids[nworkers], NULL, search_worker_main, w) != 0) {
+            free(w->buf);
             continue;
         }
-
-        if (pid == 0) {
-            /* Child: run search, write result to pipe, exit */
-            close(pipefd[0]);
-            char child_result[65536];
-            child_result[0] = '\0';
-            bool ok = providers[i].fn(search_input.data, child_result, sizeof(child_result));
-            (void)ok;
-            size_t wlen = strlen(child_result);
-            ssize_t w = write(pipefd[1], child_result, wlen);
-            (void)w;
-            close(pipefd[1]);
-            _exit(0);
-        }
-
-        /* Parent */
-        close(pipefd[1]);
-        children[nchildren].fd = pipefd[0];
-        children[nchildren].pid = pid;
-        children[nchildren].name = providers[i].name;
-        nchildren++;
+        nworkers++;
     }
 
     free(query);
 
-    if (nchildren == 0) {
+    if (nworkers == 0) {
         jbuf_free(&search_input);
         snprintf(
             result, rlen,
@@ -5766,37 +5765,27 @@ bool tool_parallel_search(const char *input, char *result, size_t rlen) {
         return false;
     }
 
-    /* Collect results with timeout */
+    /* Join and merge. Each provider bounds its own runtime via curl
+     * timeouts, so the join is bounded by the slowest provider. */
     jbuf_t merged;
     jbuf_init(&merged, 8192);
     jbuf_append(&merged, "{\"results\":{");
 
-    for (int i = 0; i < nchildren; i++) {
-        /* Read with poll timeout */
-        struct pollfd pfd = {.fd = children[i].fd, .events = POLLIN};
-        char buf[65536];
-        int total_read = 0;
-
-        int timeout_ms = 12000; /* 12s total timeout */
-        while (poll(&pfd, 1, timeout_ms) > 0 && total_read < (int)sizeof(buf) - 1) {
-            ssize_t n = read(children[i].fd, buf + total_read, sizeof(buf) - 1 - total_read);
-            if (n <= 0)
-                break;
-            total_read += n;
-            timeout_ms = 2000; /* subsequent reads: 2s */
-        }
-        buf[total_read] = '\0';
-        close(children[i].fd);
-        waitpid(children[i].pid, NULL, 0);
-
+    for (int i = 0; i < nworkers; i++) {
+        pthread_join(tids[i], NULL);
         if (i > 0)
             jbuf_append(&merged, ",");
-        jbuf_appendf(&merged, "\"%s\":", children[i].name);
-        if (total_read > 0) {
-            jbuf_append(&merged, buf);
+        jbuf_appendf(&merged, "\"%s\":", workers[i].name);
+        const char *b = workers[i].buf;
+        if (workers[i].ok && (b[0] == '{' || b[0] == '[')) {
+            jbuf_append(&merged, b);
+        } else if (b[0]) {
+            /* Provider errors are plain text — keep the merge valid JSON. */
+            jbuf_append_json_str(&merged, b);
         } else {
             jbuf_append(&merged, "null");
         }
+        free(workers[i].buf);
     }
 
     jbuf_append(&merged, "}}");
@@ -6572,11 +6561,10 @@ static bool kb_insert_chunks_for_page(sqlite3 *db, int doc_id, int page_num, con
     sqlite3_finalize(del);
 
     sqlite3_stmt *ins = NULL;
-    sqlite3_prepare_v2(
-        db,
-        "INSERT OR REPLACE INTO chunks(doc_id,page_num,chunk_idx,content,word_count)"
-        " VALUES(?,?,?,?,?)",
-        -1, &ins, NULL);
+    sqlite3_prepare_v2(db,
+                       "INSERT OR REPLACE INTO chunks(doc_id,page_num,chunk_idx,content,word_count)"
+                       " VALUES(?,?,?,?,?)",
+                       -1, &ins, NULL);
     if (!ins)
         return false;
 
@@ -6758,8 +6746,7 @@ bool tool_kb_ingest(const char *input, char *result, size_t rlen) {
         jbuf_init(&out, 256 + strlen(t));
         jbuf_appendf(&out, "{\"doc_id\":%d,\"title\":", doc_id);
         jbuf_append_json_str(&out, t);
-        jbuf_appendf(&out, ",\"pages\":1,\"words\":%d,\"chunked\":true}",
-                     count_words(text));
+        jbuf_appendf(&out, ",\"pages\":1,\"words\":%d,\"chunked\":true}", count_words(text));
         snprintf(result, rlen, "%s", out.data ? out.data : "{}");
         jbuf_free(&out);
         free(path);
