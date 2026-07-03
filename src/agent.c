@@ -41,6 +41,7 @@
 #include <errno.h>
 #include <sys/stat.h>
 #include <unistd.h>
+#include <fcntl.h>
 #include <dirent.h>
 #include <strings.h>
 #include <pthread.h>
@@ -1824,9 +1825,15 @@ static bool startup_command_write(const char *cmd) {
     mkdir(dir_path, 0755);
     snprintf(startup_path, sizeof(startup_path), "%s/_startup_cmd", dir_path);
 
-    FILE *sf = fopen(startup_path, "w");
-    if (!sf)
+    /* 0600: the startup-command file is consumed by the next REPL turn and has
+     * no reason to be group/world readable. */
+    int sfd = open(startup_path, O_WRONLY | O_CREAT | O_TRUNC, 0600);
+    FILE *sf = sfd >= 0 ? fdopen(sfd, "w") : NULL;
+    if (!sf) {
+        if (sfd >= 0)
+            close(sfd);
         return false;
+    }
     fputs(cmd, sf);
     fclose(sf);
     return true;
@@ -4394,8 +4401,10 @@ bool agent_run(const char *api_key, const char *model, const char *topology_name
                 if (h2) {
                     snprintf(startup_f, sizeof(startup_f),
                              "%s/.dsco/sessions/_startup_cmd", h2);
-                    FILE *sf = fopen(startup_f, "w");
+                    int sfd = open(startup_f, O_WRONLY | O_CREAT | O_TRUNC, 0600);
+                    FILE *sf = sfd >= 0 ? fdopen(sfd, "w") : NULL;
                     if (sf) { fputs("/load _autosave", sf); fclose(sf); }
+                    else if (sfd >= 0) close(sfd);
                 }
             }
             unsetenv("DSCO_RESUME_AFTER_CRASH");
@@ -5818,7 +5827,8 @@ bool agent_run(const char *api_key, const char *model, const char *topology_name
                 }
             } else {
                 time_t now = time(NULL);
-                struct tm *tm = localtime(&now);
+                struct tm tmbuf;
+                struct tm *tm = localtime_r(&now, &tmbuf);
                 if (tm)
                     strftime(raw_name, sizeof(raw_name), "session-%Y%m%d-%H%M%S", tm);
                 else
@@ -8739,6 +8749,7 @@ bool agent_run(const char *api_key, const char *model, const char *topology_name
                 session.fallback_count = 0;
             }
             free(req);
+            req = NULL; /* avoid double-free on the reactive-compaction retry path below */
 
             /* Stop heartbeat — stream is done */
             g_stream_heartbeat = NULL;
