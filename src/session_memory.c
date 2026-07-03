@@ -92,11 +92,11 @@ static void ensure_parent_dirs(const char *file_path) {
     for (char *p = tmp + 1; *p; p++) {
         if (*p == '/') {
             *p = '\0';
-            mkdir(tmp, 0o700);
+            mkdir(tmp, 0700);
             *p = '/';
         }
     }
-    mkdir(tmp, 0o700);
+    mkdir(tmp, 0700);
 }
 
 /* ── JSON serialization ────────────────────────────────────────────────── */

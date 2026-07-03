@@ -1,3 +1,8 @@
+/* Must precede all includes: SA_ONSTACK/sigaltstack are XSI extensions that
+ * glibc hides when only _POSIX_C_SOURCE is defined. */
+#define _GNU_SOURCE 1
+#define _DARWIN_C_SOURCE 1
+
 #include "agent.h"
 #include "orchestrator.h"
 #include "config.h"
