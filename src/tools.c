@@ -1,3 +1,10 @@
+/* Must precede all includes: expose posix_spawn_file_actions_addchdir_np,
+ * which glibc hides without _GNU_SOURCE and Darwin hides when
+ * _POSIX_C_SOURCE is set without _DARWIN_C_SOURCE. The POSIX-2024 name
+ * (no _np) is missing from Xcode 16 SDKs and glibc <= 2.39. */
+#define _GNU_SOURCE 1
+#define _DARWIN_C_SOURCE 1
+
 #include "tools.h"
 #include "http_pool.h"
 #include "net_server.h"
@@ -668,11 +675,7 @@ static int run_cmd_ex(const char *cmd, char *out, size_t out_len, const run_opts
     posix_spawnattr_setflags(&attr, POSIX_SPAWN_SETPGROUP);
     posix_spawnattr_setpgroup(&attr, 0);
 
-#if defined(__APPLE__)
-    posix_spawn_file_actions_addchdir(&fa, opts->cwd ? opts->cwd : ".");
-#else
     posix_spawn_file_actions_addchdir_np(&fa, opts->cwd ? opts->cwd : ".");
-#endif
 
     char *spawn_argv[] = {"sh", "-c", (char *)cmd, NULL};
     pid_t pid = -1;
