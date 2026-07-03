@@ -17,12 +17,12 @@
  * spellings onto their 2.x equivalents. */
 #if MBEDTLS_VERSION_NUMBER < 0x03000000
 #include <mbedtls/bignum.h>
-#define mbedtls_ssl_conf_min_tls_version(conf, ver) \
+#define mbedtls_ssl_conf_min_tls_version(conf, ver)                                                \
     mbedtls_ssl_conf_min_version((conf), MBEDTLS_SSL_MAJOR_VERSION_3, MBEDTLS_SSL_MINOR_VERSION_3)
-#define mbedtls_pk_parse_keyfile(ctx, path, pwd, f_rng, p_rng) \
+#define mbedtls_pk_parse_keyfile(ctx, path, pwd, f_rng, p_rng)                                     \
     mbedtls_pk_parse_keyfile((ctx), (path), (pwd))
-static int netsrv_compat_set_serial_raw(mbedtls_x509write_cert *ctx,
-                                        unsigned char *serial, size_t len) {
+static int netsrv_compat_set_serial_raw(mbedtls_x509write_cert *ctx, unsigned char *serial,
+                                        size_t len) {
     mbedtls_mpi mpi;
     mbedtls_mpi_init(&mpi);
     int r = mbedtls_mpi_read_binary(&mpi, serial, len);
@@ -70,7 +70,8 @@ static void netsrv_tune_socket(int fd, bool listener) {
 typedef struct {
     char method[8];
     char path[128];
-    netsrv_handler_fn fn;
+    netsrv_handler_fn fn;       /* buffered handler (NULL if streaming) */
+    netsrv_stream_fn stream_fn; /* streaming handler (NULL if buffered) */
     void *ctx;
 } route_t;
 
@@ -171,6 +172,21 @@ static bool write_all(dsco_net_server_t *srv, mbedtls_ssl_context *ssl, mbedtls_
         len -= (size_t)ret;
     }
     return true;
+}
+
+/* ── Streaming responder ──────────────────────────────────────────────────
+ * Handed to a streaming route so it can write the response incrementally over
+ * the live connection.  ssl is NULL in plaintext mode. */
+struct netsrv_stream {
+    dsco_net_server_t *srv;
+    mbedtls_ssl_context *ssl;
+    mbedtls_net_context *fd;
+};
+
+int netsrv_stream_send(netsrv_stream_t *s, const char *buf, size_t len) {
+    if (!s || !buf)
+        return -1;
+    return write_all(s->srv, s->ssl, s->fd, buf, len) ? 0 : -1;
 }
 
 static bool client_write_all(bool use_tls, mbedtls_ssl_context *ssl, mbedtls_net_context *fd,
@@ -286,6 +302,15 @@ static void *handle_conn(void *arg) {
                 .body_len = (size_t)(body ? content_length : 0),
                 .auth_token = tok,
             };
+            if (r->stream_fn) {
+                /* Streaming route owns the socket: it writes status + headers +
+                 * body itself.  Skip the buffered response writer entirely. */
+                netsrv_stream_t st = {
+                    .srv = srv, .ssl = srv->tls_ready ? &ca->ssl : NULL, .fd = &ca->client_fd};
+                r->stream_fn(&req, &st, r->ctx);
+                free(body);
+                goto cleanup;
+            }
             result = r->fn(&req, r->ctx);
             break;
         }
@@ -414,6 +439,20 @@ bool netsrv_route(dsco_net_server_t *s, const char *method, const char *path, ne
     snprintf(r->method, sizeof(r->method), "%s", method);
     snprintf(r->path, sizeof(r->path), "%s", path);
     r->fn = fn;
+    r->stream_fn = NULL;
+    r->ctx = ctx;
+    return true;
+}
+
+bool netsrv_route_stream(dsco_net_server_t *s, const char *method, const char *path,
+                         netsrv_stream_fn fn, void *ctx) {
+    if (!s || s->route_count >= NETSRV_MAX_HANDLERS)
+        return false;
+    route_t *r = &s->routes[s->route_count++];
+    snprintf(r->method, sizeof(r->method), "%s", method);
+    snprintf(r->path, sizeof(r->path), "%s", path);
+    r->fn = NULL;
+    r->stream_fn = fn;
     r->ctx = ctx;
     return true;
 }
