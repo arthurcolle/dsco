@@ -43,6 +43,7 @@ typedef struct {
     char *norm;        /* normalised key for fuzzy match (owned) */
     long created;
     int multimodal;
+    int tool_capable;
 } or_model_t;
 
 /* Open-addressing hash index entry. kind: 0 = exact slug, 1 = normalised. */
@@ -64,6 +65,9 @@ typedef struct {
  * refreshes happen at most ~once per TTL per process, so the leak is tiny. */
 static _Atomic(or_catalog_t *) g_catalog = NULL;
 static pthread_once_t g_once = PTHREAD_ONCE_INIT;
+/* Publish notification: wait_ready blocks here instead of sleep-polling. */
+static pthread_mutex_t g_pub_mu = PTHREAD_MUTEX_INITIALIZER;
+static pthread_cond_t g_pub_cv = PTHREAD_COND_INITIALIZER;
 
 /* ── hash index ────────────────────────────────────────────────────────── */
 
@@ -166,6 +170,7 @@ int openrouter_cache_foreach(or_model_cb cb, void *ud) {
             .cache_write_price = m->info.cache_write_price,
             .supports_thinking = m->info.supports_thinking,
             .multimodal = m->multimodal,
+            .tool_capable = m->tool_capable,
             .created = m->created,
         };
         cb(&v, ud);
@@ -244,10 +249,13 @@ static void on_model(const char *elem, void *ctx) {
     }
 
     int thinking = 0;
+    int tool_capable = 0;
     char *sp = json_get_raw(elem, "supported_parameters");
     if (sp) {
         if (strstr(sp, "\"reasoning\""))
             thinking = 1;
+        if (strstr(sp, "\"tools\""))
+            tool_capable = 1;
         free(sp);
     }
 
@@ -306,6 +314,7 @@ static void on_model(const char *elem, void *ctx) {
     m->norm = norm[0] ? strdup(norm) : NULL;
     m->created = created;
     m->multimodal = multimodal;
+    m->tool_capable = tool_capable;
     b->count++;
 }
 
@@ -348,8 +357,12 @@ static or_catalog_t *catalog_from_json(const char *json) {
 }
 
 static void publish(or_catalog_t *cat) {
-    if (cat)
+    if (cat) {
         atomic_store_explicit(&g_catalog, cat, memory_order_release);
+        pthread_mutex_lock(&g_pub_mu);
+        pthread_cond_broadcast(&g_pub_cv);
+        pthread_mutex_unlock(&g_pub_mu);
+    }
 }
 
 /* ── disk cache ────────────────────────────────────────────────────────── */
@@ -513,16 +526,293 @@ int openrouter_cache_load_sync(void) {
 }
 
 int openrouter_cache_wait_ready(int timeout_ms) {
-    const int step_ms = 25;
-    int waited = 0;
-    for (;;) {
-        int n = openrouter_cache_count();
-        if (n > 0)
-            return n;
-        if (waited >= timeout_ms)
-            return 0;
-        struct timespec ts = {step_ms / 1000, (long)(step_ms % 1000) * 1000000L};
-        nanosleep(&ts, NULL);
-        waited += step_ms;
+    /* Condvar wait on publish() — wakes the instant the catalog lands
+     * instead of 25ms-granularity sleep-polling. */
+    int n = openrouter_cache_count();
+    if (n > 0 || timeout_ms <= 0)
+        return n;
+    struct timespec deadline;
+    clock_gettime(CLOCK_REALTIME, &deadline);
+    deadline.tv_sec += timeout_ms / 1000;
+    deadline.tv_nsec += (long)(timeout_ms % 1000) * 1000000L;
+    if (deadline.tv_nsec >= 1000000000L) {
+        deadline.tv_sec++;
+        deadline.tv_nsec -= 1000000000L;
     }
+    pthread_mutex_lock(&g_pub_mu);
+    while ((n = openrouter_cache_count()) == 0) {
+        if (pthread_cond_timedwait(&g_pub_cv, &g_pub_mu, &deadline) != 0)
+            break;
+    }
+    pthread_mutex_unlock(&g_pub_mu);
+    return openrouter_cache_count();
+}
+
+/* ──────────────────────────────────────────────────────────────────────────
+ * Task-based routing intelligence
+ *
+ * Connects the live model catalog to routing decisions. The OpenRouter
+ * meta-models (auto, fusion, pareto-code, owl-alpha, free) provide dynamic
+ * routing without dsco hardcoding model choices; the catalog-driven helpers
+ * select concrete models by capability + budget so the 3000x price spread
+ * across tool-capable models becomes an automatic optimization rather than a
+ * manual one.
+ *
+ * Env overrides (all optional, point at any slug):
+ *   DSCO_ROUTE_GENERAL   default "openrouter/auto"
+ *   DSCO_ROUTE_CODE      default "openrouter/pareto-code"
+ *   DSCO_ROUTE_COMPLEX   default "openrouter/fusion"
+ *   DSCO_ROUTE_SUBAGENT  default "openrouter/owl-alpha"  (free, 1M ctx, tools)
+ *   DSCO_ROUTE_FREE      default "openrouter/free"
+ * ────────────────────────────────────────────────────────────────────────── */
+
+static const char *route_env_or(const char *env, const char *fallback) {
+    const char *v = getenv(env);
+    return (v && v[0]) ? v : fallback;
+}
+
+const char *dsco_route_by_task(dsco_task_type_t task) {
+    switch (task) {
+        case DSCO_TASK_GENERAL:
+            return route_env_or("DSCO_ROUTE_GENERAL", "openrouter/auto");
+        case DSCO_TASK_CODE:
+            return route_env_or("DSCO_ROUTE_CODE", "openrouter/pareto-code");
+        case DSCO_TASK_COMPLEX:
+            return route_env_or("DSCO_ROUTE_COMPLEX", "openrouter/fusion");
+        case DSCO_TASK_SUBAGENT: {
+            /* Prefer the free agentic meta-model; fall back to a free
+             * tool-capable catalog model, then to the general router. */
+            const char *e = getenv("DSCO_ROUTE_SUBAGENT");
+            if (e && e[0])
+                return e;
+            return "openrouter/owl-alpha";
+        }
+        case DSCO_TASK_FREE: {
+            const char *e = getenv("DSCO_ROUTE_FREE");
+            if (e && e[0])
+                return e;
+            const char *fc = dsco_route_free_tool();
+            return fc ? fc : "openrouter/free";
+        }
+        case DSCO_TASK_CHEAP:
+            return dsco_route_cheapest_tool();
+        case DSCO_TASK_LONG_CTX:
+            return dsco_route_largest_ctx_tool();
+        case DSCO_TASK_PREMIUM:
+            return dsco_route_optimal(0.0, 0);
+        default:
+            return route_env_or("DSCO_ROUTE_GENERAL", "openrouter/auto");
+    }
+}
+
+/* Shared scan state for catalog selection passes. */
+typedef struct {
+    const char *best_id;   /* points into catalog (process-lifetime stable) */
+    double      best_price;
+    int         best_ctx;
+    double      budget;    /* max $/1M input (0 = no cap) */
+    int         min_ctx;   /* min context window (0 = any) */
+    const char *exclude;   /* slug to skip (failover) */
+} route_scan_t;
+
+/* Build the "openrouter/" prefixed form of a slug into a static ring buffer so
+ * callers can use it directly as a model id. The catalog stores bare slugs
+ * (e.g. "qwen/qwen3-coder") but dsco routes them through OpenRouter. */
+static const char *route_prefix_or(const char *slug) {
+    if (!slug || !slug[0])
+        return NULL;
+    if (strncmp(slug, "openrouter/", 11) == 0 || strncmp(slug, "openrouter:", 11) == 0)
+        return slug;
+    static char ring[4][192];
+    static _Atomic unsigned ring_idx = 0;
+    unsigned i = atomic_fetch_add_explicit(&ring_idx, 1, memory_order_relaxed) & 3u;
+    snprintf(ring[i], sizeof(ring[i]), "openrouter/%s", slug);
+    return ring[i];
+}
+
+/* cheapest tool-capable, honoring budget + min_ctx constraints */
+static void scan_cheapest_tool(const or_model_view_t *m, void *ud) {
+    route_scan_t *s = ud;
+    if (!m->tool_capable)
+        return;
+    if (m->input_price <= 0.0) /* skip free (handled separately) and unpriced */
+        return;
+    if (s->budget > 0.0 && m->input_price > s->budget)
+        return;
+    if (s->min_ctx > 0 && m->context_window < s->min_ctx)
+        return;
+    if (s->exclude && strcmp(m->id, s->exclude) == 0)
+        return;
+    if (!s->best_id || m->input_price < s->best_price) {
+        s->best_id = m->id;
+        s->best_price = m->input_price;
+        s->best_ctx = m->context_window;
+    }
+}
+
+/* free tool-capable, prefer largest context. Excludes variable-priced
+ * meta-routers (pricing == -1), which are not genuinely free. */
+static void scan_free_tool(const or_model_view_t *m, void *ud) {
+    route_scan_t *s = ud;
+    if (!m->tool_capable)
+        return;
+    if (m->input_price != 0.0) /* skip both priced and variable (-1) */
+        return;
+    if (s->exclude && strcmp(m->id, s->exclude) == 0)
+        return;
+    if (!s->best_id || m->context_window > s->best_ctx) {
+        s->best_id = m->id;
+        s->best_ctx = m->context_window;
+    }
+}
+
+/* largest-context tool-capable */
+static void scan_largest_ctx(const or_model_view_t *m, void *ud) {
+    route_scan_t *s = ud;
+    if (!m->tool_capable)
+        return;
+    if (s->min_ctx > 0 && m->context_window < s->min_ctx)
+        return;
+    if (s->exclude && strcmp(m->id, s->exclude) == 0)
+        return;
+    if (!s->best_id || m->context_window > s->best_ctx) {
+        s->best_id = m->id;
+        s->best_ctx = m->context_window;
+    }
+}
+
+/* highest-priced tool-capable (proxy for premium quality) */
+static void scan_premium(const or_model_view_t *m, void *ud) {
+    route_scan_t *s = ud;
+    if (!m->tool_capable)
+        return;
+    if (m->input_price <= 0.0)
+        return;
+    if (s->exclude && strcmp(m->id, s->exclude) == 0)
+        return;
+    if (!s->best_id || m->input_price > s->best_price) {
+        s->best_id = m->id;
+        s->best_price = m->input_price;
+    }
+}
+
+const char *dsco_route_cheapest_tool(void) {
+    route_scan_t s = {0};
+    openrouter_cache_foreach(scan_cheapest_tool, &s);
+    return route_prefix_or(s.best_id);
+}
+
+const char *dsco_route_free_tool(void) {
+    route_scan_t s = {0};
+    openrouter_cache_foreach(scan_free_tool, &s);
+    return route_prefix_or(s.best_id);
+}
+
+const char *dsco_route_largest_ctx_tool(void) {
+    route_scan_t s = {0};
+    openrouter_cache_foreach(scan_largest_ctx, &s);
+    return route_prefix_or(s.best_id);
+}
+
+const char *dsco_route_optimal(double budget_per_1m, int min_ctx) {
+    route_scan_t s = {0};
+    s.budget = budget_per_1m;
+    s.min_ctx = min_ctx;
+    if (budget_per_1m > 0.0) {
+        /* With a budget cap, pick the cheapest model that still clears the
+         * floor — leaves headroom and respects the cap. */
+        openrouter_cache_foreach(scan_cheapest_tool, &s);
+    } else {
+        /* No budget => premium: most expensive tool-capable model as a
+         * quality proxy. */
+        openrouter_cache_foreach(scan_premium, &s);
+    }
+    return route_prefix_or(s.best_id);
+}
+
+/* Failover candidate accumulator: collect tool-capable models with at least
+ * the failed model's context window, sorted by price ascending. */
+typedef struct {
+    char (*out)[128];
+    int    max;
+    int    count;
+    int    min_ctx;          /* require >= this context window */
+    const char *exclude;     /* the failed model */
+    /* parallel price array for insertion sort */
+    double prices[32];
+} failover_acc_t;
+
+static void scan_failover(const or_model_view_t *m, void *ud) {
+    failover_acc_t *a = ud;
+    if (!m->tool_capable)
+        return;
+    if (a->min_ctx > 0 && m->context_window < a->min_ctx)
+        return;
+    if (a->exclude && strcmp(m->id, a->exclude) == 0)
+        return;
+    /* Skip variable-priced meta-routers (pricing == -1): a failover chain
+     * should be made of concrete, deterministically-priced models. Free
+     * models (price == 0) are kept — they are valid zero-cost fallbacks. */
+    if (m->input_price < 0.0)
+        return;
+    double price = m->input_price;
+
+    /* Insertion sort into the bounded chain by price ascending. */
+    int cap = a->max < 32 ? a->max : 32;
+    int pos = a->count < cap ? a->count : cap;
+    /* find insertion index */
+    int idx = a->count;
+    for (int i = 0; i < a->count && i < cap; i++) {
+        if (price < a->prices[i]) {
+            idx = i;
+            break;
+        }
+    }
+    if (idx >= cap)
+        return; /* worse than everything we keep */
+    /* shift down */
+    int last = (a->count < cap) ? a->count : (cap - 1);
+    for (int i = last; i > idx; i--) {
+        a->prices[i] = a->prices[i - 1];
+        snprintf(a->out[i], 128, "%s", a->out[i - 1]);
+    }
+    a->prices[idx] = price;
+    /* store with openrouter/ prefix for direct use */
+    if (strncmp(m->id, "openrouter/", 11) == 0)
+        snprintf(a->out[idx], 128, "%s", m->id);
+    else
+        snprintf(a->out[idx], 128, "openrouter/%s", m->id);
+    if (a->count < cap)
+        a->count++;
+    (void)pos;
+}
+
+int dsco_route_failover_dynamic(const char *failed_model, char out_models[][128],
+                                int max_models) {
+    if (!out_models || max_models <= 0)
+        return 0;
+    for (int i = 0; i < max_models; i++)
+        out_models[i][0] = '\0';
+
+    /* Look up the failed model's context window so we keep capability parity. */
+    int min_ctx = 0;
+    const char *bare = failed_model;
+    if (bare && strncmp(bare, "openrouter/", 11) == 0)
+        bare += 11;
+    if (bare) {
+        const model_info_t *mi = openrouter_cache_lookup(bare);
+        if (mi && mi->context_window > 0) {
+            /* Require at least half the failed model's context so we don't
+             * silently downgrade long-context workloads too far. */
+            min_ctx = mi->context_window / 2;
+        }
+    }
+
+    failover_acc_t acc = {0};
+    acc.out = out_models;
+    acc.max = max_models;
+    acc.min_ctx = min_ctx;
+    acc.exclude = bare;
+    openrouter_cache_foreach(scan_failover, &acc);
+    return acc.count;
 }
