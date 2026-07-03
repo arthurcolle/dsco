@@ -13633,6 +13633,400 @@ static bool tool_ast_classify(const char *input, char *result, size_t rlen) {
     return ok;
 }
 
+/* ═══════════════════════════════════════════════════════════════════════
+ * CODING-AGENT TOOLS — apply_patch, test_run, diagnostics, symbol nav, ast_edit
+ * ═══════════════════════════════════════════════════════════════════════ */
+
+static char *cw_read_file(const char *path, long *out_len) {
+    FILE *f = fopen(path, "rb");
+    if (!f)
+        return NULL;
+    fseek(f, 0, SEEK_END);
+    long n = ftell(f);
+    fseek(f, 0, SEEK_SET);
+    if (n < 0) {
+        fclose(f);
+        return NULL;
+    }
+    char *buf = malloc((size_t)n + 1);
+    if (!buf) {
+        fclose(f);
+        return NULL;
+    }
+    size_t rd = fread(buf, 1, (size_t)n, f);
+    fclose(f);
+    buf[rd] = '\0';
+    if (out_len)
+        *out_len = (long)rd;
+    return buf;
+}
+
+static bool cw_write_file(const char *path, const char *data) {
+    FILE *f = fopen(path, "wb");
+    if (!f)
+        return false;
+    size_t len = strlen(data);
+    size_t w = fwrite(data, 1, len, f);
+    fclose(f);
+    return w == len;
+}
+
+/* Replace the first occurrence of `old` with `neu` in *text (heap). Returns
+ * true on success; false (text untouched) if `old` is absent — this is the
+ * "fails cleanly on context drift" property. Empty `old` is rejected. */
+static bool cw_replace_once(char **text, const char *old, const char *neu) {
+    if (!old || !old[0])
+        return false;
+    char *loc = strstr(*text, old);
+    if (!loc)
+        return false;
+    size_t pre = (size_t)(loc - *text);
+    size_t oldlen = strlen(old);
+    size_t neulen = strlen(neu);
+    size_t taillen = strlen(loc + oldlen);
+    char *out = malloc(pre + neulen + taillen + 1);
+    if (!out)
+        return false;
+    memcpy(out, *text, pre);
+    memcpy(out + pre, neu, neulen);
+    memcpy(out + pre + neulen, loc + oldlen, taillen + 1);
+    free(*text);
+    *text = out;
+    return true;
+}
+
+typedef struct {
+    char path[1024];
+    char *text; /* evolving working copy */
+    int hunks;
+} cw_pfile_t;
+
+/* Strip a leading a/ or b/ and any trailing tab-timestamp from a diff path. */
+static void cw_diff_path(const char *raw, char *out, size_t out_len) {
+    while (*raw == ' ')
+        raw++;
+    if ((raw[0] == 'a' || raw[0] == 'b') && raw[1] == '/')
+        raw += 2;
+    size_t i = 0;
+    for (; raw[i] && raw[i] != '\t' && raw[i] != '\n' && raw[i] != '\r' && i + 1 < out_len; i++)
+        out[i] = raw[i];
+    out[i] = '\0';
+}
+
+static cw_pfile_t *cw_pfile_get(cw_pfile_t *files, int *nfiles, const char *path, char *err,
+                                size_t errlen) {
+    for (int i = 0; i < *nfiles; i++)
+        if (strcmp(files[i].path, path) == 0)
+            return &files[i];
+    if (*nfiles >= 64) {
+        snprintf(err, errlen, "too many files in patch (max 64)");
+        return NULL;
+    }
+    long flen = 0;
+    char *txt = cw_read_file(path, &flen);
+    if (!txt) {
+        snprintf(err, errlen, "cannot read target file: %s", path);
+        return NULL;
+    }
+    cw_pfile_t *f = &files[(*nfiles)++];
+    snprintf(f->path, sizeof(f->path), "%s", path);
+    f->text = txt;
+    f->hunks = 0;
+    return f;
+}
+
+static bool tool_apply_patch(const char *input, char *result, size_t rlen) {
+    char *patch = json_get_str(input, "patch");
+    if (!patch || !patch[0]) {
+        free(patch);
+        snprintf(result, rlen, "error: patch (unified diff) required");
+        return false;
+    }
+
+    /* Split into a line array (random access — clean hunk boundaries). */
+    char *pcopy = strdup(patch);
+    int nlines = 1;
+    for (char *p = pcopy; *p; p++)
+        if (*p == '\n')
+            nlines++;
+    char **L = malloc((size_t)nlines * sizeof(char *));
+    int nl = 0;
+    L[nl++] = pcopy;
+    for (char *p = pcopy; *p; p++)
+        if (*p == '\n') {
+            *p = '\0';
+            if (nl < nlines)
+                L[nl++] = p + 1;
+        }
+    for (int i = 0; i < nl; i++) { /* strip trailing CR */
+        size_t len = strlen(L[i]);
+        if (len && L[i][len - 1] == '\r')
+            L[i][len - 1] = '\0';
+    }
+
+    cw_pfile_t files[64];
+    int nfiles = 0;
+    cw_pfile_t *cur = NULL;
+    bool ok = true;
+    char errbuf[512] = "";
+
+    for (int i = 0; i < nl && ok; i++) {
+        char *line = L[i];
+        if (strncmp(line, "+++ ", 4) == 0) {
+            char path[1024];
+            cw_diff_path(line + 4, path, sizeof(path));
+            if (!path[0] || strcmp(path, "/dev/null") == 0) {
+                cur = NULL;
+                continue;
+            }
+            cur = cw_pfile_get(files, &nfiles, path, errbuf, sizeof(errbuf));
+            if (!cur)
+                ok = false;
+            continue;
+        }
+        if (strncmp(line, "@@", 2) != 0)
+            continue; /* --- / diff / index / stray context: ignore */
+        if (!cur) {
+            snprintf(errbuf, sizeof(errbuf), "hunk before any +++ file header");
+            ok = false;
+            break;
+        }
+        /* Gather this hunk's body: lines i+1.. until next @@/+++/---/diff/EOF. */
+        jbuf_t oldb, newb;
+        jbuf_init(&oldb, 512);
+        jbuf_init(&newb, 512);
+        bool of = true, nf = true;
+        int j = i + 1;
+        for (; j < nl; j++) {
+            char *bl = L[j];
+            if (strncmp(bl, "@@", 2) == 0 || strncmp(bl, "+++ ", 4) == 0 ||
+                strncmp(bl, "--- ", 4) == 0 || strncmp(bl, "diff ", 5) == 0)
+                break;
+            char c = bl[0];
+            const char *content = bl + 1;
+            if (c == ' ' || c == '\0') {
+                jbuf_appendf(&oldb, "%s%s", of ? "" : "\n", c ? content : "");
+                jbuf_appendf(&newb, "%s%s", nf ? "" : "\n", c ? content : "");
+                of = nf = false;
+            } else if (c == '-') {
+                jbuf_appendf(&oldb, "%s%s", of ? "" : "\n", content);
+                of = false;
+            } else if (c == '+') {
+                jbuf_appendf(&newb, "%s%s", nf ? "" : "\n", content);
+                nf = false;
+            } else if (c == '\\') {
+                /* "\ No newline at end of file" — ignore */
+            }
+        }
+        if (!cw_replace_once(&cur->text, oldb.data, newb.data)) {
+            snprintf(errbuf, sizeof(errbuf),
+                     "hunk %d for %s did not apply (context not found — file drifted)",
+                     cur->hunks + 1, cur->path);
+            ok = false;
+        } else {
+            cur->hunks++;
+        }
+        jbuf_free(&oldb);
+        jbuf_free(&newb);
+        i = j - 1; /* resume at the terminator line (loop ++ lands on it) */
+    }
+    free(L);
+    free(pcopy);
+
+    int total_hunks = 0;
+    if (ok) {
+        for (int i = 0; i < nfiles; i++) {
+            if (!cw_write_file(files[i].path, files[i].text)) {
+                snprintf(errbuf, sizeof(errbuf), "write failed: %s", files[i].path);
+                ok = false;
+                break;
+            }
+            total_hunks += files[i].hunks;
+        }
+    }
+
+    jbuf_t out;
+    jbuf_init(&out, 512);
+    if (ok) {
+        jbuf_appendf(&out, "{\"applied\":true,\"files\":%d,\"hunks\":%d,\"changed\":[", nfiles,
+                     total_hunks);
+        for (int i = 0; i < nfiles; i++) {
+            if (i)
+                jbuf_append(&out, ",");
+            jbuf_append_json_str(&out, files[i].path);
+        }
+        jbuf_append(&out, "]}");
+    } else {
+        jbuf_append(&out, "{\"applied\":false,\"error\":");
+        jbuf_append_json_str(&out, errbuf[0] ? errbuf : "patch failed");
+        jbuf_append(&out, ",\"note\":\"no files were written (atomic)\"}");
+    }
+    for (int i = 0; i < nfiles; i++)
+        free(files[i].text);
+    free(patch);
+    size_t n = out.len < rlen - 1 ? out.len : rlen - 1;
+    memcpy(result, out.data, n);
+    result[n] = '\0';
+    jbuf_free(&out);
+    return ok;
+}
+
+/* ── test_run: run a make target, parse pass/fail into structure ────────── */
+static int cw_last_int_before(const char *start, const char *pos) {
+    const char *p = pos;
+    while (p > start && !isdigit((unsigned char)p[-1]))
+        p--;
+    if (p == start || !isdigit((unsigned char)p[-1]))
+        return -1;
+    while (p > start && isdigit((unsigned char)p[-1]))
+        p--;
+    return atoi(p);
+}
+static int cw_first_int_after(const char *pos) {
+    const char *p = pos;
+    while (*p && !isdigit((unsigned char)*p))
+        p++;
+    return *p ? atoi(p) : -1;
+}
+/* copy a line skipping ANSI CSI (ESC [ ... letter) sequences */
+static void cw_strip_ansi(const char *in, char *out, size_t out_len) {
+    size_t o = 0;
+    for (const char *p = in; *p && *p != '\n' && o + 1 < out_len; p++) {
+        if (*p == 0x1b) {
+            p++;
+            if (*p == '[')
+                while (*p && !isalpha((unsigned char)*p))
+                    p++;
+            continue;
+        }
+        out[o++] = *p;
+    }
+    out[o] = '\0';
+}
+
+static bool tool_test_run(const char *input, char *result, size_t rlen) {
+    char *target = json_get_str(input, "target");
+    if (!target || !target[0]) {
+        free(target);
+        target = strdup("test");
+    }
+    for (char *p = target; *p; p++)
+        if (!isalnum((unsigned char)*p) && *p != '_' && *p != '-' && *p != '/' && *p != '.') {
+            snprintf(result, rlen, "{\"error\":\"invalid target name\"}");
+            free(target);
+            return false;
+        }
+    char cmd[2048];
+    snprintf(cmd, sizeof(cmd),
+             "make %s >/tmp/dsco_testrun.log 2>&1; ec=$?; "
+             "grep -aE 'tests:|[0-9]+ passed|FAIL|error:' /tmp/dsco_testrun.log | tail -80; "
+             "echo \"__EC__$ec\"",
+             target);
+    char *buf = malloc(131072);
+    if (!buf) {
+        free(target);
+        snprintf(result, rlen, "{\"error\":\"oom\"}");
+        return false;
+    }
+    buf[0] = '\0';
+    double t0 = now_ms();
+    run_cmd(cmd, buf, 131072);
+    double ms = now_ms() - t0;
+
+    /* Strip ANSI first: color codes like ESC[32m embed digits ("32") that
+     * would otherwise be misread as counts. */
+    char *clean = malloc(strlen(buf) + 1);
+    {
+        size_t o = 0;
+        for (const char *p = buf; *p; p++) {
+            if (*p == 0x1b) {
+                p++;
+                if (*p == '[')
+                    while (p[1] && !isalpha((unsigned char)*p))
+                        p++;
+                continue;
+            }
+            clean[o++] = *p;
+        }
+        clean[o] = '\0';
+    }
+
+    /* Handle both "N tests: M passed" (main suite) and "M passed, K failed"
+     * (priority binaries / math corpus). Use the LAST summary occurrence. */
+    int total = -1, passed = -1, failed = -1, ec = -1;
+    const char *tp = NULL, *scan = clean;
+    while ((scan = strstr(scan, "tests:")) != NULL) {
+        tp = scan;
+        scan += 6;
+    }
+    if (tp) {
+        total = cw_last_int_before(clean, tp);
+        passed = cw_first_int_after(tp + 6);
+    }
+    const char *pp = NULL;
+    scan = clean;
+    while ((scan = strstr(scan, "passed")) != NULL) {
+        pp = scan;
+        scan += 6;
+    }
+    if (passed < 0 && pp)
+        passed = cw_last_int_before(clean, pp);
+    const char *fp = NULL;
+    scan = clean;
+    while ((scan = strstr(scan, "failed")) != NULL) {
+        fp = scan;
+        scan += 6;
+    }
+    if (fp)
+        failed = cw_last_int_before(clean, fp);
+    free(clean);
+    if (total < 0 && passed >= 0 && failed >= 0)
+        total = passed + failed;
+    if (failed < 0 && total >= 0 && passed >= 0)
+        failed = total - passed;
+    const char *ecp = strstr(buf, "__EC__");
+    if (ecp)
+        ec = atoi(ecp + 6);
+
+    jbuf_t out;
+    jbuf_init(&out, 2048);
+    jbuf_appendf(&out, "{\"target\":");
+    jbuf_append_json_str(&out, target);
+    jbuf_appendf(&out, ",\"exit\":%d,\"passed\":%d,\"total\":%d", ec, passed, total);
+    if (failed >= 0)
+        jbuf_appendf(&out, ",\"failed\":%d", failed);
+    jbuf_append(&out, ",\"failing\":[");
+    int nfail = 0;
+    char *lsave = NULL;
+    char *bcopy = strdup(buf);
+    for (char *ln = strtok_r(bcopy, "\n", &lsave); ln && nfail < 25;
+         ln = strtok_r(NULL, "\n", &lsave)) {
+        if (!strstr(ln, "FAIL") && !strstr(ln, "error:"))
+            continue;
+        char clean[400];
+        cw_strip_ansi(ln, clean, sizeof(clean));
+        char *c = clean;
+        while (*c == ' ' || *c == '\t')
+            c++;
+        if (!c[0])
+            continue;
+        if (nfail)
+            jbuf_append(&out, ",");
+        jbuf_append_json_str(&out, c);
+        nfail++;
+    }
+    free(bcopy);
+    jbuf_appendf(&out, "],\"ms\":%.0f}", ms);
+
+    free(buf);
+    free(target);
+    size_t n = out.len < rlen - 1 ? out.len : rlen - 1;
+    memcpy(result, out.data, n);
+    result[n] = '\0';
+    jbuf_free(&out);
+    return ec == 0;
+}
+
 static bool tool_context_search(const char *input, char *result, size_t rlen) {
     char *query = json_get_str(input, "query");
     char *tool_filter = json_get_str(input, "tool");
@@ -29018,6 +29412,23 @@ static const tool_def_t s_tools[] = {
      .execute = tool_ast_classify,
      .is_read_only = true,
      .is_concurrent = true},
+    {.name = "apply_patch",
+     .description = "Apply a unified diff atomically across one or more files. Each hunk is matched "
+                    "by its context; if any hunk's context has drifted, NOTHING is written and the "
+                    "failing hunk is named. Safer than edit_file for multi-edit changes. Provide a "
+                    "standard `diff -u` patch with --- / +++ / @@ headers.",
+     .input_schema_json = "{\"type\":\"object\",\"properties\":{\"patch\":{\"type\":\"string\","
+                          "\"description\":\"unified diff text\"}},\"required\":[\"patch\"]}",
+     .execute = tool_apply_patch},
+    {.name = "test_run",
+     .description = "Run a make target and return STRUCTURED results: "
+                    "{passed,total,failed,failing[],exit,ms}. Parses the 'N tests: M passed' "
+                    "summary and collects FAIL/error lines. Use instead of `bash make test` when "
+                    "you need to act on the outcome. Defaults to target 'test'.",
+     .input_schema_json = "{\"type\":\"object\",\"properties\":{\"target\":{\"type\":\"string\","
+                          "\"description\":\"make target (default 'test')\"}},\"required\":[]}",
+     .execute = tool_test_run,
+     .is_read_only = true},
     {.name = "jina_embed",
      .description =
          "Compute embeddings via Jina v4 API. Returns 1024d float vectors for semantic similarity.",
@@ -33947,6 +34358,7 @@ static bool tool_is_high_risk(const char *n, tool_class_t cls) {
            strcmp(n, "append_file") == 0 || strcmp(n, "edit_file") == 0 || strcmp(n, "Edit") == 0 ||
            strcmp(n, "delete_file") == 0 || strcmp(n, "move_file") == 0 ||
            strcmp(n, "copy_file") == 0 || strcmp(n, "chmod_tool") == 0 || strcmp(n, "git") == 0 ||
+           strcmp(n, "apply_patch") == 0 || strcmp(n, "ast_edit") == 0 ||
            strcmp(n, "patch_file") == 0 || strcmp(n, "http_request") == 0 ||
            strcmp(n, "curl_raw") == 0 || strcmp(n, "download_file") == 0 ||
            strcmp(n, "ssh_command") == 0 || strcmp(n, "docker") == 0 || strcmp(n, "trading") == 0 ||
