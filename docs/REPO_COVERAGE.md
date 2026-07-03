@@ -6,14 +6,14 @@ This manifest is generated from `git ls-files` plus the coverage generator/outpu
 
 ## Summary
 
-- Total covered files: 615
+- Total covered files: 619
 
 | Category | Files |
 |---|---:|
 | Root project files | 24 |
 | Repository policy and CI | 15 |
 | Documentation | 47 |
-| Runtime source and headers | 249 |
+| Runtime source and headers | 253 |
 | Tests | 27 |
 | Scripts and tooling | 48 |
 | Generated data assets | 8 |
@@ -141,6 +141,7 @@ This manifest is generated from `git ls-files` plus the coverage generator/outpu
 - `include/baseline.h`
 - `include/bg_learn.h`
 - `include/chronicle.h`
+- `include/cluster.h`
 - `include/codex_app_directory.h`
 - `include/codex_cache.h`
 - `include/config.h`
@@ -218,6 +219,7 @@ This manifest is generated from `git ls-files` plus the coverage generator/outpu
 - `include/provider_profiles.h`
 - `include/realtime.h`
 - `include/recovery.h`
+- `include/remote_cli.h`
 - `include/router.h`
 - `include/rsi_curriculum.h`
 - `include/scheduler.h`
@@ -266,6 +268,7 @@ This manifest is generated from `git ls-files` plus the coverage generator/outpu
 - `src/baseline.c`
 - `src/bg_learn.c`
 - `src/chronicle.c`
+- `src/cluster.c`
 - `src/codex_app_directory.c`
 - `src/codex_cache.c`
 - `src/connector.c`
@@ -344,6 +347,7 @@ This manifest is generated from `git ls-files` plus the coverage generator/outpu
 - `src/provider_profiles.c`
 - `src/realtime.c`
 - `src/recovery.c`
+- `src/remote_cli.c`
 - `src/router.c`
 - `src/rsi_curriculum.c`
 - `src/scheduler.c`
