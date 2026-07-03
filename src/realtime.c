@@ -29,22 +29,23 @@
 #include "config.h"
 #include "crypto.h"
 #include "json_util.h"
+#include "plugin.h"
 #include "provider.h"
 #include "setup.h"
 #include "tools.h"
 
 #define RT_DEFAULT_MODEL "gpt-realtime-2"
 #define RT_DEFAULT_VOICE "marin"
-#define RT_DEFAULT_VAD   "semantic_vad"
+#define RT_DEFAULT_VAD "semantic_vad"
 #define RT_DEFAULT_REASONING_EFFORT "low"
-#define RT_HOST          "api.openai.com"
-#define RT_PORT          "443"
-#define RT_PATH_FMT      "/v1/realtime?model=%s"
-#define RT_SAMPLE_RATE   24000
-#define RT_CHUNK_BYTES   4800 /* 100ms of PCM16 mono @ 24kHz */
-#define RT_MAX_TOOLS     TOOL_REGISTER_CAP
-#define RT_MAX_TOOL_OUT  12000 /* chars of tool output surfaced to the model */
-#define RT_MAX_WS_MSG    (32u * 1024 * 1024)
+#define RT_HOST "api.openai.com"
+#define RT_PORT "443"
+#define RT_PATH_FMT "/v1/realtime?model=%s"
+#define RT_SAMPLE_RATE 24000
+#define RT_CHUNK_BYTES 4800 /* 100ms of PCM16 mono @ 24kHz */
+#define RT_MAX_TOOLS MAX_TOOLS
+#define RT_MAX_TOOL_OUT 12000 /* chars of tool output surfaced to the model */
+#define RT_MAX_WS_MSG (32u * 1024 * 1024)
 #define RT_TOOL_CONTEXT_MAX 8192
 
 #define RT_DEFAULT_ECHO_GUARD_MS 2000
@@ -58,7 +59,10 @@ static const char RT_DEFAULT_INSTRUCTIONS[] =
     "generic web fetches: for weather, use `weather` first when the user gives "
     "a place name, and use `nws` for US latitude/longitude, station, or state "
     "lookups once those values are known. Do not use WebFetch, WebSearch, or "
-    "parallel_search for weather unless the specific weather tools fail. Never "
+    "parallel_search for weather unless the specific weather tools fail. "
+    "For web and news requests, use the web, search, browser, and HTTP tools "
+    "opportunistically; if one site blocks extraction, try another source or "
+    "a more direct fetch instead of giving up after the first failed page. Never "
     "invent placeholder API keys or place fake credentials in URLs/tool inputs, "
     "and do not ask the user for permission to call read-only tools. Never read "
     "raw JSON, IDs, or base64 aloud.";
@@ -79,34 +83,14 @@ int realtime_voice_default_max_tools(void) {
 }
 
 static const char *RT_PREFERRED_TOOLS[] = {
-    "calc",
-    "eval",
-    "date",
-    "weather",
-    "nws",
-    "synoptic",
-    "WebSearch",
-    "parallel_search",
-    "WebFetch",
-    "Read",
-    "Grep",
-    "Glob",
-    "TaskList",
+    "calc",     "eval", "date", "weather", "nws",      "synoptic", "WebSearch", "parallel_search",
+    "WebFetch", "Read", "Grep", "Glob",    "TaskList",
 };
 
-static int rt_preferred_rank(const char *name) {
-    if (!name)
-        return -1;
-    for (size_t i = 0; i < sizeof(RT_PREFERRED_TOOLS) / sizeof(RT_PREFERRED_TOOLS[0]); i++)
-        if (strcmp(name, RT_PREFERRED_TOOLS[i]) == 0)
-            return (int)i;
-    return -1;
-}
-
-static bool rt_tool_voice_safe(const tool_def_t *t) {
+static bool rt_tool_realtime_eligible(const tool_def_t *t) {
     if (!t || !t->name || strlen(t->name) > 64 || t->is_interactive)
         return false;
-    return t->is_read_only || rt_preferred_rank(t->name) >= 0;
+    return true;
 }
 
 static bool rt_selected_has(const tool_def_t **out, int count, const char *name) {
@@ -120,27 +104,33 @@ static bool rt_selected_has(const tool_def_t **out, int count, const char *name)
 
 static bool rt_add_tool_ptr(const tool_def_t **out, int *count, int max_tools,
                             const tool_def_t *tool) {
-    if (!out || !count || *count >= max_tools || !rt_tool_voice_safe(tool) ||
+    if (!out || !count || *count >= max_tools || !rt_tool_realtime_eligible(tool) ||
         rt_selected_has(out, *count, tool->name))
         return false;
     out[(*count)++] = tool;
     return true;
 }
 
-static void rt_add_named_tool(const tool_def_t **out, int *count, int max_tools,
-                              const char *name) {
-    int total = 0;
-    const tool_def_t *all = tools_get_all(&total);
+static void rt_add_named_tool(const tool_def_t **out, int *count, int max_tools, const char *name) {
+    int ignored = 0;
+    int total = tools_builtin_count();
+    const tool_def_t *all = tools_get_all(&ignored);
     for (int i = 0; i < total && *count < max_tools; i++) {
         if (all[i].name && strcmp(all[i].name, name) == 0) {
             rt_add_tool_ptr(out, count, max_tools, &all[i]);
             return;
         }
     }
+    for (int i = 0; i < g_plugins.extra_tool_count && *count < max_tools; i++) {
+        if (g_plugins.extra_tools[i].name && strcmp(g_plugins.extra_tools[i].name, name) == 0) {
+            rt_add_tool_ptr(out, count, max_tools, &g_plugins.extra_tools[i]);
+            return;
+        }
+    }
 }
 
-static int rt_pack_tool_page(const tool_page_result_t *paged, const tool_def_t **out,
-                             int count, int max_tools) {
+static int rt_pack_tool_page(const tool_page_result_t *paged, const tool_def_t **out, int count,
+                             int max_tools) {
     if (!paged || !out || max_tools <= 0)
         return count;
 
@@ -159,9 +149,11 @@ static int rt_select_paged_tools(const char *context, const tool_def_t **out, in
 
     int count = 0;
     for (size_t i = 0;
-         i < sizeof(RT_PREFERRED_TOOLS) / sizeof(RT_PREFERRED_TOOLS[0]) && count < max_tools;
-         i++)
+         i < sizeof(RT_PREFERRED_TOOLS) / sizeof(RT_PREFERRED_TOOLS[0]) && count < max_tools; i++)
         rt_add_named_tool(out, &count, max_tools, RT_PREFERRED_TOOLS[i]);
+
+    if (g_plugins.extra_tool_count > 0)
+        return count;
 
     tool_page_result_t paged = tools_get_paged(context, max_tools, 1.0f);
     count = rt_pack_tool_page(&paged, out, count, max_tools);
@@ -169,10 +161,30 @@ static int rt_select_paged_tools(const char *context, const tool_def_t **out, in
     return count;
 }
 
-int realtime_voice_select_tool_names_for_context(
-    const char *context,
-    char names[][DSCO_REALTIME_TOOL_NAME_MAX],
-    int max_tools) {
+static int rt_select_all_builtin_tools(const char *context, const tool_def_t **out, int max_tools) {
+    if (!out || max_tools <= 0)
+        return 0;
+
+    int count = rt_select_paged_tools(context, out, max_tools);
+
+    int builtin_total = tools_builtin_count();
+    int ignored = 0;
+    const tool_def_t *builtins = tools_get_all(&ignored);
+    for (int i = 0; i < builtin_total && count < max_tools; i++) {
+        if (!tools_profile_allows_index(i))
+            continue;
+        rt_add_tool_ptr(out, &count, max_tools, &builtins[i]);
+    }
+
+    for (int i = 0; i < g_plugins.extra_tool_count && count < max_tools; i++)
+        rt_add_tool_ptr(out, &count, max_tools, &g_plugins.extra_tools[i]);
+
+    return count;
+}
+
+int realtime_voice_select_tool_names_for_context(const char *context,
+                                                 char names[][DSCO_REALTIME_TOOL_NAME_MAX],
+                                                 int max_tools) {
     if (!names || max_tools <= 0)
         return 0;
 
@@ -180,7 +192,7 @@ int realtime_voice_select_tool_names_for_context(
     if (!selected)
         return 0;
 
-    int count = rt_select_paged_tools(context, selected, max_tools);
+    int count = rt_select_all_builtin_tools(context, selected, max_tools);
     for (int i = 0; i < count; i++)
         snprintf(names[i], DSCO_REALTIME_TOOL_NAME_MAX, "%s",
                  selected[i] && selected[i]->name ? selected[i]->name : "");
@@ -206,17 +218,72 @@ static void rt_usage(FILE *out) {
             "  --half-duplex         mute mic while DSCO is speaking (default speaker mode)\n"
             "  --full-duplex         keep mic live while DSCO speaks (headphones/barge-in)\n"
             "  --no-tools            do not expose DSCO tools to the session\n"
+            "  --autonomous          trusted tier, no routine approval prompts\n"
+            "  --sandboxed           untrusted tier; route exec tools through sandbox_run\n"
+            "  --approval-mode MODE  ask|strict|never\n"
+            "  --trust-tier TIER     standard|trusted|untrusted\n"
             "  -h, --help            show this help\n\n"
             "environment:\n"
             "  OPENAI_API_KEY            API key (also resolved via provider config)\n"
             "  DSCO_REALTIME_MODEL       default model override\n"
             "  DSCO_REALTIME_REASONING_EFFORT  Realtime 2 effort (default low; none to omit)\n"
             "  DSCO_REALTIME_TRANSCRIBE  input transcription model (default whisper-1)\n"
-            "  DSCO_REALTIME_MAX_TOOLS   tool count cap in session.update (default %d)\n"
+            "  DSCO_REALTIME_MAX_TOOLS   tool count cap in session.update (default all, max %d)\n"
             "  DSCO_REALTIME_ECHO_GUARD_MS  mic mute duration in half-duplex mode (default %d)\n"
             "  DSCO_REALTIME_HALF_DUPLEX    1 to force mic mute while DSCO speaks\n"
             "  DSCO_CA_BUNDLE            PEM bundle for TLS verification\n",
             RT_DEFAULT_MODEL, RT_DEFAULT_VOICE, RT_MAX_TOOLS, RT_DEFAULT_ECHO_GUARD_MS);
+}
+
+static bool rt_apply_runtime_mode_arg(const char *arg, const char *value) {
+    if (!arg)
+        return false;
+    if (strcmp(arg, "--autonomous") == 0 || strcmp(arg, "--auto-approve") == 0 ||
+        strcmp(arg, "--no-approval-prompts") == 0) {
+        setenv("DSCO_TRUST_TIER", "trusted", 1);
+        setenv("DSCO_APPROVAL_MODE", "never", 1);
+        setenv("DSCO_APPROVAL_NEVER", "1", 1);
+        setenv("DSCO_NO_APPROVAL_PROMPTS", "1", 1);
+        return true;
+    }
+    if (strcmp(arg, "--sandboxed") == 0 || strcmp(arg, "--sandbox-mode") == 0) {
+        setenv("DSCO_TRUST_TIER", "untrusted", 1);
+        setenv("DSCO_APPROVAL_MODE", "never", 1);
+        setenv("DSCO_APPROVAL_NEVER", "1", 1);
+        setenv("DSCO_NO_APPROVAL_PROMPTS", "1", 1);
+        return true;
+    }
+    if (strcmp(arg, "--approval-mode") == 0 && value) {
+        if (strcasecmp(value, "never") == 0 || strcasecmp(value, "auto") == 0 ||
+            strcasecmp(value, "autonomous") == 0) {
+            setenv("DSCO_APPROVAL_MODE", "never", 1);
+            setenv("DSCO_APPROVAL_NEVER", "1", 1);
+            setenv("DSCO_NO_APPROVAL_PROMPTS", "1", 1);
+            return true;
+        }
+        if (strcasecmp(value, "strict") == 0 || strcasecmp(value, "require") == 0) {
+            setenv("DSCO_APPROVAL_MODE", "strict", 1);
+            setenv("DSCO_APPROVAL_NEVER", "0", 1);
+            return true;
+        }
+        if (strcasecmp(value, "ask") == 0 || strcasecmp(value, "prompt") == 0 ||
+            strcasecmp(value, "default") == 0) {
+            setenv("DSCO_APPROVAL_MODE", "ask", 1);
+            setenv("DSCO_APPROVAL_NEVER", "0", 1);
+            setenv("DSCO_NO_APPROVAL_PROMPTS", "0", 1);
+            return true;
+        }
+        return false;
+    }
+    if (strcmp(arg, "--trust-tier") == 0 && value) {
+        if (strcasecmp(value, "standard") == 0 || strcasecmp(value, "trusted") == 0 ||
+            strcasecmp(value, "untrusted") == 0) {
+            setenv("DSCO_TRUST_TIER", value, 1);
+            return true;
+        }
+        return false;
+    }
+    return false;
 }
 
 int realtime_voice_cli(int argc, char **argv) {
@@ -234,6 +301,18 @@ int realtime_voice_cli(int argc, char **argv) {
             o.half_duplex = false;
         } else if (strcmp(a, "--no-tools") == 0) {
             o.no_tools = true;
+        } else if (strcmp(a, "--autonomous") == 0 || strcmp(a, "--auto-approve") == 0 ||
+                   strcmp(a, "--no-approval-prompts") == 0 || strcmp(a, "--sandboxed") == 0 ||
+                   strcmp(a, "--sandbox-mode") == 0) {
+            rt_apply_runtime_mode_arg(a, NULL);
+        } else if ((strcmp(a, "--approval-mode") == 0 || strcmp(a, "--trust-tier") == 0) &&
+                   i + 1 < argc) {
+            const char *v = argv[++i];
+            if (!rt_apply_runtime_mode_arg(a, v)) {
+                fprintf(stderr, "dsco voice: invalid %s '%s'\n\n", a, v);
+                rt_usage(stderr);
+                return 2;
+            }
         } else if (strcmp(a, "--model") == 0 && i + 1 < argc) {
             o.model = argv[++i];
         } else if (strcmp(a, "--voice") == 0 && i + 1 < argc) {
@@ -256,10 +335,9 @@ int realtime_voice_cli(int argc, char **argv) {
 
 int realtime_voice_run(const realtime_opts_t *opts) {
     (void)opts;
-    fprintf(stderr,
-            "dsco voice: this build lacks mbedTLS (HAVE_MBEDTLS), which the "
-            "realtime WebSocket transport requires.\n"
-            "Rebuild with mbedTLS available (brew install mbedtls@3).\n");
+    fprintf(stderr, "dsco voice: this build lacks mbedTLS (HAVE_MBEDTLS), which the "
+                    "realtime WebSocket transport requires.\n"
+                    "Rebuild with mbedTLS available (brew install mbedtls@3).\n");
     return 1;
 }
 
@@ -285,8 +363,8 @@ int realtime_voice_run(const realtime_opts_t *opts) {
 
 typedef struct {
     pthread_mutex_t mu;
-    uint8_t        *data;
-    size_t          len, cap;
+    uint8_t *data;
+    size_t len, cap;
 } rt_ring_t;
 
 static void rt_ring_init(rt_ring_t *r) {
@@ -353,18 +431,18 @@ static void rt_ring_clear(rt_ring_t *r) {
 /* ── WebSocket client (RFC 6455) over mbedTLS ─────────────────────────── */
 
 typedef struct {
-    mbedtls_net_context     net;
-    mbedtls_ssl_context     ssl;
-    mbedtls_ssl_config      conf;
+    mbedtls_net_context net;
+    mbedtls_ssl_context ssl;
+    mbedtls_ssl_config conf;
     mbedtls_entropy_context entropy;
     mbedtls_ctr_drbg_context drbg;
-    mbedtls_x509_crt        cacert;
-    bool                    connected;
-    bool                    closed;
-    uint8_t                *rbuf; /* raw frame accumulation */
-    size_t                  rlen, rcap;
-    jbuf_t                  frag; /* fragmented-message assembly */
-    bool                    frag_active;
+    mbedtls_x509_crt cacert;
+    bool connected;
+    bool closed;
+    uint8_t *rbuf; /* raw frame accumulation */
+    size_t rlen, rcap;
+    jbuf_t frag; /* fragmented-message assembly */
+    bool frag_active;
 } rt_ws_t;
 
 static void rt_ws_init(rt_ws_t *ws) {
@@ -393,8 +471,10 @@ static void rt_ws_free(rt_ws_t *ws) {
 }
 
 static bool rt_load_ca(rt_ws_t *ws) {
-    const char *cands[] = {getenv("DSCO_CA_BUNDLE"), "/etc/ssl/cert.pem",
-                           "/private/etc/ssl/cert.pem", "/etc/ssl/certs/ca-certificates.crt",
+    const char *cands[] = {getenv("DSCO_CA_BUNDLE"),
+                           "/etc/ssl/cert.pem",
+                           "/private/etc/ssl/cert.pem",
+                           "/etc/ssl/certs/ca-certificates.crt",
                            "/opt/homebrew/etc/ca-certificates/cert.pem",
                            "/usr/local/etc/ca-certificates/cert.pem"};
     for (size_t i = 0; i < sizeof(cands) / sizeof(cands[0]); i++) {
@@ -659,9 +739,8 @@ static bool rt_ws_connect(rt_ws_t *ws, const char *host, const char *port, const
         mbedtls_ssl_conf_ca_chain(&ws->conf, &ws->cacert, NULL);
         mbedtls_ssl_conf_authmode(&ws->conf, MBEDTLS_SSL_VERIFY_REQUIRED);
     } else {
-        fprintf(stderr,
-                "dsco voice: warning: no CA bundle found (set DSCO_CA_BUNDLE); "
-                "TLS certificate NOT verified\n");
+        fprintf(stderr, "dsco voice: warning: no CA bundle found (set DSCO_CA_BUNDLE); "
+                        "TLS certificate NOT verified\n");
         mbedtls_ssl_conf_authmode(&ws->conf, MBEDTLS_SSL_VERIFY_NONE);
     }
     mbedtls_ssl_conf_read_timeout(&ws->conf, 15000); /* handshake+upgrade phase */
@@ -768,32 +847,32 @@ static bool rt_ws_connect(rt_ws_t *ws, const char *host, const char *port, const
 /* ── session state ────────────────────────────────────────────────────── */
 
 typedef struct rt_session {
-    rt_ws_t   ws;
+    rt_ws_t ws;
     rt_ring_t mic, spk;
-    bool      text_only;
-    bool      stdin_text;
-    bool      stdin_closed;
-    bool      no_tools;
-    bool      audio_started;
-    bool      ready;          /* session.updated seen */
-    bool      response_active;
-    bool      pending_audio_response;
-    bool      assistant_audio_active;
-    bool      full_duplex;
-    bool      assistant_open; /* streaming transcript line in progress */
-    bool      color;
-    bool      tool_context_dirty;
-    int       echo_guard_ms;
+    bool text_only;
+    bool stdin_text;
+    bool stdin_closed;
+    bool no_tools;
+    bool audio_started;
+    bool ready; /* session.updated seen */
+    bool response_active;
+    bool pending_audio_response;
+    bool assistant_audio_active;
+    bool full_duplex;
+    bool assistant_open; /* streaming transcript line in progress */
+    bool color;
+    bool tool_context_dirty;
+    int echo_guard_ms;
     long long echo_guard_until_ms;
     const realtime_opts_t *opts;
-    const char            *model;
-    char      tool_context[RT_TOOL_CONTEXT_MAX];
+    const char *model;
+    char tool_context[RT_TOOL_CONTEXT_MAX];
 
     /* outbox: tool worker threads → session thread (sole socket writer) */
     pthread_mutex_t outbox_mu;
-    char          **outbox;
-    size_t          outbox_n, outbox_cap;
-    int             tools_inflight;
+    char **outbox;
+    size_t outbox_n, outbox_cap;
+    int tools_inflight;
 
     /* call_id → tool name (from response.output_item.added) */
     struct {
@@ -815,8 +894,8 @@ static long long rt_now_ms(void) {
 
 static bool rt_env_truthy(const char *name) {
     const char *v = getenv(name);
-    return v && (strcmp(v, "1") == 0 || strcasecmp(v, "true") == 0 ||
-                 strcasecmp(v, "yes") == 0 || strcasecmp(v, "on") == 0);
+    return v && (strcmp(v, "1") == 0 || strcasecmp(v, "true") == 0 || strcasecmp(v, "yes") == 0 ||
+                 strcasecmp(v, "on") == 0);
 }
 
 static int rt_env_int_clamped(const char *name, int def, int min, int max) {
@@ -835,8 +914,8 @@ static int rt_env_int_clamped(const char *name, int def, int min, int max) {
 }
 
 static bool rt_model_supports_reasoning(const char *model) {
-    return model && (strcmp(model, "gpt-realtime-2") == 0 ||
-                     strncmp(model, "gpt-realtime-2-", 15) == 0);
+    return model &&
+           (strcmp(model, "gpt-realtime-2") == 0 || strncmp(model, "gpt-realtime-2-", 15) == 0);
 }
 
 static void rt_status(rt_session_t *s, const char *fmt, ...) {
@@ -903,9 +982,9 @@ static void rt_outbox_flush(rt_session_t *s) {
 
 typedef struct {
     rt_session_t *s;
-    char          name[128];
-    char          call_id[80];
-    char         *args; /* owned */
+    char name[128];
+    char call_id[80];
+    char *args; /* owned */
 } rt_toolcall_t;
 
 static void *rt_tool_thread(void *arg) {
@@ -1121,7 +1200,7 @@ static void rt_audio_stop(rt_session_t *s) {
 /* ── session.update / event handling ──────────────────────────────────── */
 
 static int rt_select_tools(rt_session_t *s, const tool_def_t **out, int max_tools) {
-    return rt_select_paged_tools(s ? s->tool_context : NULL, out, max_tools);
+    return rt_select_all_builtin_tools(s ? s->tool_context : NULL, out, max_tools);
 }
 
 static void rt_tool_context_append(rt_session_t *s, const char *text) {
@@ -1196,15 +1275,6 @@ static void rt_append_external_tools(jbuf_t *b, int *count, int max_tools) {
         return;
 
     int ext_budget = max_tools - *count;
-    int loaded_ext_count = 0;
-    for (int i = 0; i < g_external_tool_count; i++)
-        if (g_external_tools[i].loaded)
-            loaded_ext_count++;
-
-    if (loaded_ext_count > ext_budget)
-        ext_budget = loaded_ext_count;
-    if (ext_budget > 24)
-        ext_budget = 24;
     if (ext_budget < 0)
         ext_budget = 0;
 
@@ -1223,10 +1293,14 @@ static void rt_append_external_tools(jbuf_t *b, int *count, int max_tools) {
 static int rt_append_tools(rt_session_t *s, jbuf_t *b) {
     int max_tools = RT_MAX_TOOLS;
     const char *cap_env = getenv("DSCO_REALTIME_MAX_TOOLS");
-    if (cap_env && atoi(cap_env) > 0)
+    if (cap_env && cap_env[0] && strcasecmp(cap_env, "all") != 0 &&
+        strcasecmp(cap_env, "full") != 0) {
         max_tools = atoi(cap_env);
-    if (max_tools > 64)
-        max_tools = 64;
+    }
+    if (max_tools <= 0)
+        max_tools = RT_MAX_TOOLS;
+    if (max_tools > MAX_TOOLS)
+        max_tools = MAX_TOOLS;
 
     const tool_def_t **selected = calloc((size_t)max_tools, sizeof(*selected));
     if (!selected)
@@ -1283,9 +1357,8 @@ static int rt_send_session_update(rt_session_t *s) {
         transcribe = "whisper-1";
     const char *reasoning_effort = getenv("DSCO_REALTIME_REASONING_EFFORT");
     if (!reasoning_effort || !reasoning_effort[0])
-        reasoning_effort = rt_model_supports_reasoning(s->model)
-                               ? realtime_default_reasoning_effort()
-                               : NULL;
+        reasoning_effort =
+            rt_model_supports_reasoning(s->model) ? realtime_default_reasoning_effort() : NULL;
 
     jbuf_t b;
     jbuf_init(&b, 8192);
@@ -1437,10 +1510,9 @@ static void rt_dispatch(rt_session_t *s, const char *evt) {
     } else if (strcmp(type, "session.updated") == 0) {
         if (!s->ready) {
             s->ready = true;
-            const char *mode = s->text_only ? " (text mode)"
-                               : s->stdin_text
-                                   ? " (voice output, stdin text input)"
-                                   : ", speak when ready";
+            const char *mode = s->text_only    ? " (text mode)"
+                               : s->stdin_text ? " (voice output, stdin text input)"
+                                               : ", speak when ready";
             rt_status(s, "· ready — %s%s. Ctrl-C to hang up.", s->model, mode);
 #ifdef RT_HAVE_AUDIO
             if (!s->text_only && !s->audio_started) {
@@ -1476,8 +1548,8 @@ static void rt_dispatch(rt_session_t *s, const char *evt) {
             free(item_id);
         } else if (tr && tr[0]) {
             rt_close_assistant_line(s);
-            fprintf(stdout, "%syou ▸%s %s\n", s->color ? "\x1b[32m" : "",
-                    s->color ? "\x1b[0m" : "", tr);
+            fprintf(stdout, "%syou ▸%s %s\n", s->color ? "\x1b[32m" : "", s->color ? "\x1b[0m" : "",
+                    tr);
             fflush(stdout);
             rt_tool_context_append(s, tr);
             if (s->response_active) {
@@ -1581,8 +1653,8 @@ static void rt_poll_stdin(rt_session_t *s) {
     }
     if (s->stdin_text) {
         rt_close_assistant_line(s);
-        fprintf(stdout, "%syou ▸%s %s\n", s->color ? "\x1b[32m" : "",
-                s->color ? "\x1b[0m" : "", line);
+        fprintf(stdout, "%syou ▸%s %s\n", s->color ? "\x1b[32m" : "", s->color ? "\x1b[0m" : "",
+                line);
         fflush(stdout);
     }
     rt_tool_context_append(s, line);
@@ -1649,8 +1721,8 @@ int realtime_voice_run(const realtime_opts_t *opts) {
     s->no_tools = local.no_tools;
     s->color = isatty(STDOUT_FILENO);
     s->full_duplex = !(local.half_duplex || rt_env_truthy("DSCO_REALTIME_HALF_DUPLEX"));
-    s->echo_guard_ms = rt_env_int_clamped("DSCO_REALTIME_ECHO_GUARD_MS",
-                                          RT_DEFAULT_ECHO_GUARD_MS, 0, 5000);
+    s->echo_guard_ms =
+        rt_env_int_clamped("DSCO_REALTIME_ECHO_GUARD_MS", RT_DEFAULT_ECHO_GUARD_MS, 0, 5000);
     rt_ws_init(&s->ws);
     rt_ring_init(&s->mic);
     rt_ring_init(&s->spk);

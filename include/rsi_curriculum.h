@@ -60,13 +60,11 @@ const rsi_skill_t *rsi_curriculum_skills(int *count);
 const rsi_category_t *rsi_curriculum_categories(int *count);
 const rsi_skill_t *rsi_curriculum_find_skill(const char *id);
 
-bool rsi_curriculum_validate_promotion(const rsi_eval_summary_t *candidate,
-                                       char *reason,
+bool rsi_curriculum_validate_promotion(const rsi_eval_summary_t *candidate, char *reason,
                                        size_t reason_len);
 
 int rsi_curriculum_summary_json(char *buf, size_t len);
 int rsi_curriculum_skill_json(const char *skill_id, char *buf, size_t len);
-int rsi_curriculum_gate_json(const rsi_eval_summary_t *candidate,
-                             char *buf, size_t len);
+int rsi_curriculum_gate_json(const rsi_eval_summary_t *candidate, char *buf, size_t len);
 
 #endif

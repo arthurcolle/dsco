@@ -62,59 +62,51 @@ bool chronicle_cost_totals_today(chronicle_cost_totals_t *out);
 void chronicle_new_id(char *out, size_t out_len);
 
 /* Span lifecycle. payload_json may be NULL or a JSON object string. */
-bool chronicle_span_begin(const char *trace_id, const char *parent_span_id,
-                          const char *span_type, const char *name,
-                          const char *payload_json, char *span_id_out);
-bool chronicle_span_end(const char *span_id, const char *status,
-                        const char *payload_json);
+bool chronicle_span_begin(const char *trace_id, const char *parent_span_id, const char *span_type,
+                          const char *name, const char *payload_json, char *span_id_out);
+bool chronicle_span_end(const char *span_id, const char *status, const char *payload_json);
 
 /* Append a typed event. payload_json may be NULL or a JSON object string. */
-bool chronicle_event(const char *event_type, const char *trace_id,
-                     const char *span_id, const char *parent_span_id,
-                     const char *actor_type, const char *actor_id,
+bool chronicle_event(const char *event_type, const char *trace_id, const char *span_id,
+                     const char *parent_span_id, const char *actor_type, const char *actor_id,
                      const char *payload_json, const char *sensitivity);
 
 /* Store an immutable content-addressed blob. sha_out must be >= 65 bytes if non-NULL. */
-bool chronicle_blob_put(const void *data, size_t len,
-                        const char *logical_type, const char *content_type,
-                        const char *sensitivity, char *sha_out, size_t sha_out_len);
-bool chronicle_blob_put_text(const char *text, const char *logical_type,
-                             const char *sensitivity, char *sha_out, size_t sha_out_len);
+bool chronicle_blob_put(const void *data, size_t len, const char *logical_type,
+                        const char *content_type, const char *sensitivity, char *sha_out,
+                        size_t sha_out_len);
+bool chronicle_blob_put_text(const char *text, const char *logical_type, const char *sensitivity,
+                             char *sha_out, size_t sha_out_len);
 
 /* Provenance graph edge. */
-bool chronicle_edge(const char *from_id, const char *to_id, const char *relation,
-                    double confidence, const char *metadata_json);
+bool chronicle_edge(const char *from_id, const char *to_id, const char *relation, double confidence,
+                    const char *metadata_json);
 
 /* High-level capture helpers used by agent/provider/tool paths. */
 bool chronicle_user_message(const char *trace_id, const char *span_id, const char *text);
 bool chronicle_context_materialized(const char *trace_id, const char *span_id,
                                     const char *request_json, int estimated_tokens);
-bool chronicle_llm_request(const char *trace_id, const char *span_id,
-                           const char *provider, const char *model,
-                           const char *request_json, int estimated_tokens);
-bool chronicle_llm_delta(const char *trace_id, const char *span_id,
-                         const char *kind, const char *text);
-bool chronicle_llm_response(const char *trace_id, const char *span_id,
-                            const char *provider, const char *model,
-                            const char *output_text, const char *raw_response_json,
-                            int input_tokens, int output_tokens,
-                            int cache_read_tokens, int cache_write_tokens,
-                            int reasoning_tokens, double cost_usd,
-                            double latency_ms, const char *finish_reason,
+bool chronicle_llm_request(const char *trace_id, const char *span_id, const char *provider,
+                           const char *model, const char *request_json, int estimated_tokens);
+bool chronicle_llm_delta(const char *trace_id, const char *span_id, const char *kind,
+                         const char *text);
+bool chronicle_llm_response(const char *trace_id, const char *span_id, const char *provider,
+                            const char *model, const char *output_text,
+                            const char *raw_response_json, int input_tokens, int output_tokens,
+                            int cache_read_tokens, int cache_write_tokens, int reasoning_tokens,
+                            double cost_usd, double latency_ms, const char *finish_reason,
                             const char *generation_id);
 bool chronicle_tool_call_start(const char *trace_id, const char *parent_span_id,
-                               const char *tool_name, const char *tool_id,
-                               const char *args_json, char *tool_span_id_out);
-bool chronicle_tool_call_end(const char *trace_id, const char *tool_span_id,
-                             const char *tool_name, const char *result_text,
-                             bool ok, bool timeout, double latency_ms);
+                               const char *tool_name, const char *tool_id, const char *args_json,
+                               char *tool_span_id_out);
+bool chronicle_tool_call_end(const char *trace_id, const char *tool_span_id, const char *tool_name,
+                             const char *result_text, bool ok, bool timeout, double latency_ms);
 
 /* HTTP/server support. */
 char *chronicle_build_activity_json(int limit, const char *session_filter);
 char *chronicle_build_activity_html(int limit, const char *session_filter);
 char *chronicle_build_activity_html_ex(int limit, const char *session_filter,
-                                       const char *type_filter,
-                                       const char *search_filter);
+                                       const char *type_filter, const char *search_filter);
 char *chronicle_read_blob_hex(const char *sha256, size_t max_bytes, const char **content_type_out);
 
 #endif

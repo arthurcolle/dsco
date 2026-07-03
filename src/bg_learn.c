@@ -34,8 +34,8 @@ static bool env_truthy(const char *s) {
     for (size_t i = 0; i < n; i++)
         buf[i] = (char)tolower((unsigned char)s[i]);
     buf[n] = '\0';
-    return strcmp(buf, "1") == 0 || strcmp(buf, "true") == 0 ||
-           strcmp(buf, "yes") == 0 || strcmp(buf, "on") == 0;
+    return strcmp(buf, "1") == 0 || strcmp(buf, "true") == 0 || strcmp(buf, "yes") == 0 ||
+           strcmp(buf, "on") == 0;
 }
 
 static void refresh_env_locked(void) {

@@ -14,12 +14,14 @@ double gsl_sf_gamma(double x) {
 
 /* Regularized lower incomplete gamma P(a,x) */
 double gsl_sf_gamma_inc_P(double a, double x) {
-    (void)a; (void)x;
+    (void)a;
+    (void)x;
     return 0.0; /* stub */
 }
 
 /* Regularized upper incomplete gamma Q(a,x) */
 double gsl_sf_gamma_inc_Q(double a, double x) {
-    (void)a; (void)x;
+    (void)a;
+    (void)x;
     return 1.0; /* stub */
 }

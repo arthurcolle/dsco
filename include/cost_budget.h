@@ -20,9 +20,9 @@ typedef struct {
     double daily_budget_usd;        /* 0 = unlimited */
     double daily_remaining_usd;     /* large sentinel when unlimited */
     double effective_remaining_usd; /* min(session_remaining, daily_remaining) */
-    bool   session_limited;
-    bool   daily_limited;
-    bool   exhausted;
+    bool session_limited;
+    bool daily_limited;
+    bool exhausted;
 } cost_budget_snapshot_t;
 
 static inline double cost_budget_session_spent_usd(const session_state_t *session) {
@@ -39,9 +39,10 @@ static inline double cost_budget_session_spent_usd(const session_state_t *sessio
            session->total_cache_write_tokens * mi->cache_write_price / 1e6;
 }
 
-static inline cost_budget_snapshot_t
-cost_budget_snapshot(const session_state_t *session, double session_budget_usd,
-                     double daily_spent_usd, double daily_budget_usd) {
+static inline cost_budget_snapshot_t cost_budget_snapshot(const session_state_t *session,
+                                                          double session_budget_usd,
+                                                          double daily_spent_usd,
+                                                          double daily_budget_usd) {
     const double unlimited = 1.0e12;
     cost_budget_snapshot_t s;
     s.session_spent_usd = cost_budget_session_spent_usd(session);
@@ -50,10 +51,9 @@ cost_budget_snapshot(const session_state_t *session, double session_budget_usd,
     s.daily_budget_usd = daily_budget_usd > 0.0 ? daily_budget_usd : 0.0;
     s.session_limited = s.session_budget_usd > 0.0;
     s.daily_limited = s.daily_budget_usd > 0.0;
-    s.session_remaining_usd = s.session_limited ? s.session_budget_usd - s.session_spent_usd
-                                                : unlimited;
-    s.daily_remaining_usd = s.daily_limited ? s.daily_budget_usd - s.daily_spent_usd
-                                            : unlimited;
+    s.session_remaining_usd =
+        s.session_limited ? s.session_budget_usd - s.session_spent_usd : unlimited;
+    s.daily_remaining_usd = s.daily_limited ? s.daily_budget_usd - s.daily_spent_usd : unlimited;
     s.effective_remaining_usd = s.session_remaining_usd < s.daily_remaining_usd
                                     ? s.session_remaining_usd
                                     : s.daily_remaining_usd;

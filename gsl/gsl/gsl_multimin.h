@@ -16,10 +16,10 @@ typedef struct {
     const char *name;
     size_t size;
     int (*alloc)(void *state, size_t n);
-    int (*set)(void *state, gsl_multimin_function *f,
-               const gsl_vector *x, double *size, const gsl_vector *step_size);
-    int (*iterate)(void *state, gsl_multimin_function *f,
-                   gsl_vector *x, double *size, double *fval);
+    int (*set)(void *state, gsl_multimin_function *f, const gsl_vector *x, double *size,
+               const gsl_vector *step_size);
+    int (*iterate)(void *state, gsl_multimin_function *f, gsl_vector *x, double *size,
+                   double *fval);
     void (*free)(void *state);
 } gsl_multimin_fminimizer_type;
 
@@ -27,7 +27,8 @@ extern const gsl_multimin_fminimizer_type *gsl_multimin_fminimizer_nmsimplex;
 extern const gsl_multimin_fminimizer_type *gsl_multimin_fminimizer_nmsimplex2;
 extern const gsl_multimin_fminimizer_type *gsl_multimin_fminimizer_nmsimplex2rand;
 
-gsl_multimin_fminimizer *gsl_multimin_fminimizer_alloc(const gsl_multimin_fminimizer_type *T, size_t n);
+gsl_multimin_fminimizer *gsl_multimin_fminimizer_alloc(const gsl_multimin_fminimizer_type *T,
+                                                       size_t n);
 int gsl_multimin_fminimizer_set(gsl_multimin_fminimizer *s, gsl_multimin_function *f,
                                 const gsl_vector *x, const gsl_vector *step_size);
 void gsl_multimin_fminimizer_free(gsl_multimin_fminimizer *s);
@@ -50,10 +51,10 @@ typedef struct {
     const char *name;
     size_t size;
     int (*alloc)(void *state, size_t n);
-    int (*set)(void *state, gsl_multimin_function_fdf *fdf,
-               const gsl_vector *x, double *f, gsl_vector *gradient, double step_size, double tol);
-    int (*iterate)(void *state, gsl_multimin_function_fdf *fdf,
-                   gsl_vector *x, double *f, gsl_vector *gradient);
+    int (*set)(void *state, gsl_multimin_function_fdf *fdf, const gsl_vector *x, double *f,
+               gsl_vector *gradient, double step_size, double tol);
+    int (*iterate)(void *state, gsl_multimin_function_fdf *fdf, gsl_vector *x, double *f,
+                   gsl_vector *gradient);
     int (*restart)(void *state);
     void (*free)(void *state);
 } gsl_multimin_fdfminimizer_type;
@@ -65,7 +66,8 @@ extern const gsl_multimin_fdfminimizer_type *gsl_multimin_fdfminimizer_vector_bf
 extern const gsl_multimin_fdfminimizer_type *gsl_multimin_fdfminimizer_vector_bfgs2;
 extern const gsl_multimin_fdfminimizer_type *gsl_multimin_fdfminimizer_lbfgs;
 
-gsl_multimin_fdfminimizer *gsl_multimin_fdfminimizer_alloc(const gsl_multimin_fdfminimizer_type *T, size_t n);
+gsl_multimin_fdfminimizer *gsl_multimin_fdfminimizer_alloc(const gsl_multimin_fdfminimizer_type *T,
+                                                           size_t n);
 int gsl_multimin_fdfminimizer_set(gsl_multimin_fdfminimizer *s, gsl_multimin_function_fdf *fdf,
                                   const gsl_vector *x, double step_size, double tol);
 void gsl_multimin_fdfminimizer_free(gsl_multimin_fdfminimizer *s);

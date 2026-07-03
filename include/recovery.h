@@ -29,10 +29,10 @@ typedef bool (*recovery_fn_t)(void *arg, char *errbuf, size_t errlen);
 /* ── Retry configuration ─────────────────────────────────────────────────── */
 
 typedef struct {
-    int    max_retries;    /* number of retries after first failure (0 = none) */
-    int    base_delay_ms;  /* delay before first retry in milliseconds         */
-    double backoff_mult;   /* multiplier applied each retry (2.0 = exponential)*/
-    bool   jitter;         /* add ±25 % random jitter to each delay            */
+    int max_retries;     /* number of retries after first failure (0 = none) */
+    int base_delay_ms;   /* delay before first retry in milliseconds         */
+    double backoff_mult; /* multiplier applied each retry (2.0 = exponential)*/
+    bool jitter;         /* add ±25 % random jitter to each delay            */
 } retry_config_t;
 
 /* ── Fallback route ──────────────────────────────────────────────────────── */
@@ -48,11 +48,11 @@ typedef struct {
 /* ── Recovery action (for log entries) ──────────────────────────────────── */
 
 typedef enum {
-    RECOVERY_ACTION_NONE      = 0,
-    RECOVERY_ACTION_RETRY     = 1,
-    RECOVERY_ACTION_FALLBACK  = 2,
+    RECOVERY_ACTION_NONE = 0,
+    RECOVERY_ACTION_RETRY = 1,
+    RECOVERY_ACTION_FALLBACK = 2,
     RECOVERY_ACTION_BACKTRACK = 3,
-    RECOVERY_ACTION_GIVE_UP   = 4,
+    RECOVERY_ACTION_GIVE_UP = 4,
 } recovery_action_t;
 
 /* ── Recovery log entry ──────────────────────────────────────────────────── */
@@ -60,10 +60,10 @@ typedef enum {
 #define RECOVERY_ERR_LEN 256
 
 typedef struct {
-    int               step_id;
-    int               attempt;
-    char              error_str[RECOVERY_ERR_LEN];
-    time_t            timestamp;
+    int step_id;
+    int attempt;
+    char error_str[RECOVERY_ERR_LEN];
+    time_t timestamp;
     recovery_action_t action_taken;
 } recovery_log_entry_t;
 
@@ -73,8 +73,8 @@ typedef struct {
 
 typedef struct {
     recovery_log_entry_t entries[RECOVERY_LOG_CAP];
-    int                  head;   /* index of next write slot (0..CAP-1)  */
-    int                  count;  /* total records ever written (may > CAP)*/
+    int head;  /* index of next write slot (0..CAP-1)  */
+    int count; /* total records ever written (may > CAP)*/
 } recovery_log_t;
 
 /* ── Execution with recovery ─────────────────────────────────────────────── */
@@ -82,16 +82,13 @@ typedef struct {
 /* Call fn(arg) up to (1 + cfg->max_retries) times.
  * Sleeps between attempts using exponential backoff + optional jitter.
  * Returns true on first success; on total failure errbuf holds last error. */
-bool execute_with_retry(recovery_fn_t fn, void *arg,
-                        const retry_config_t *cfg,
-                        char *errbuf, size_t errlen);
+bool execute_with_retry(recovery_fn_t fn, void *arg, const retry_config_t *cfg, char *errbuf,
+                        size_t errlen);
 
 /* Call primary_fn(arg); if it fails try each fallback_fns[i](arg) in order.
  * Returns true on first success; errbuf holds last error on total failure.  */
-bool execute_with_fallback(recovery_fn_t primary_fn,
-                           recovery_fn_t *fallback_fns, int n_fallbacks,
-                           void *arg,
-                           char *errbuf, size_t errlen);
+bool execute_with_fallback(recovery_fn_t primary_fn, recovery_fn_t *fallback_fns, int n_fallbacks,
+                           void *arg, char *errbuf, size_t errlen);
 
 /* Reset the last `distance` DONE/FAILED atoms in plan_id back to PENDING,
  * clearing their results and wired inputs so plan_run_next re-executes them.
@@ -104,15 +101,13 @@ int backtrack_and_replay(int plan_id, int distance);
 void recovery_log_init(recovery_log_t *log);
 
 /* Append entry to the ring buffer (overwrites oldest when full). */
-void recovery_log_record(recovery_log_t *log,
-                         const recovery_log_entry_t *entry);
+void recovery_log_record(recovery_log_t *log, const recovery_log_entry_t *entry);
 
 /* Number of entries accessible (min of total count, RECOVERY_LOG_CAP). */
 int recovery_log_count(const recovery_log_t *log);
 
 /* Return entry at position idx (0 = newest).  NULL if idx out of range. */
-const recovery_log_entry_t *recovery_log_get(const recovery_log_t *log,
-                                              int idx);
+const recovery_log_entry_t *recovery_log_get(const recovery_log_t *log, int idx);
 
 /* Write a CSV of all accessible entries to path.
  * Returns number of rows written, or -1 on error.                          */

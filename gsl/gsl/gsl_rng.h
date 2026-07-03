@@ -7,9 +7,9 @@
 
 typedef struct {
     const char *name;
-    size_t     max;
-    size_t     min;
-    size_t     size;
+    size_t max;
+    size_t min;
+    size_t size;
     void (*set)(void *state, unsigned long int seed);
     unsigned long int (*get)(void *state);
     double (*get_double)(void *state);

@@ -27,18 +27,18 @@
 /* Fixed variable slots the caller fills before each eval. Keep in sync with the
  * name table in shadeexpr.c. SE_SLOT_COUNT is the array length to allocate. */
 enum {
-    SE_X = 0,  /* current sample point x (object space)            */
-    SE_Y,      /* y                                                */
-    SE_Z,      /* z                                                */
-    SE_R,      /* radius = length(x,y,z) (precomputed convenience) */
-    SE_T,      /* time / animation phase                           */
-    SE_P,      /* "power" / primary user knob                      */
-    SE_Q,      /* secondary user knob                              */
-    SE_S,      /* tertiary user knob                               */
-    SE_I,      /* iteration index when used inside a fold          */
-    SE_U,      /* spare / screen-space u                           */
-    SE_V,      /* spare / screen-space v                           */
-    SE_W,      /* spare / 4th-dim slice                            */
+    SE_X = 0, /* current sample point x (object space)            */
+    SE_Y,     /* y                                                */
+    SE_Z,     /* z                                                */
+    SE_R,     /* radius = length(x,y,z) (precomputed convenience) */
+    SE_T,     /* time / animation phase                           */
+    SE_P,     /* "power" / primary user knob                      */
+    SE_Q,     /* secondary user knob                              */
+    SE_S,     /* tertiary user knob                               */
+    SE_I,     /* iteration index when used inside a fold          */
+    SE_U,     /* spare / screen-space u                           */
+    SE_V,     /* spare / screen-space v                           */
+    SE_W,     /* spare / 4th-dim slice                            */
     SE_SLOT_COUNT
 };
 

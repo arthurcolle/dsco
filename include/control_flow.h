@@ -26,7 +26,7 @@
 /* ── Control flow type ────────────────────────────────────────────────── */
 
 typedef enum {
-    CF_NONE   = 0,
+    CF_NONE = 0,
     CF_IF,
     CF_WHILE,
     CF_FOR,
@@ -37,15 +37,15 @@ typedef enum {
 /* ── Condition operators ───────────────────────────────────────────────── */
 
 typedef enum {
-    COP_TRUTHY  = 0,  /* lhs is truthy (non-zero, non-"false", non-empty) */
-    COP_EXISTS,       /* JSON field is present in context */
-    COP_EQ,           /* == */
-    COP_NEQ,          /* != */
-    COP_LT,           /* <  */
-    COP_LE,           /* <= */
-    COP_GT,           /* >  */
-    COP_GE,           /* >= */
-    COP_CONTAINS,     /* substring match */
+    COP_TRUTHY = 0, /* lhs is truthy (non-zero, non-"false", non-empty) */
+    COP_EXISTS,     /* JSON field is present in context */
+    COP_EQ,         /* == */
+    COP_NEQ,        /* != */
+    COP_LT,         /* <  */
+    COP_LE,         /* <= */
+    COP_GT,         /* >  */
+    COP_GE,         /* >= */
+    COP_CONTAINS,   /* substring match */
 } cond_op_t;
 
 #define COND_OPERAND_LEN 128
@@ -53,39 +53,39 @@ typedef enum {
 /* ── condition_t ──────────────────────────────────────────────────────── */
 
 typedef struct {
-    char      lhs[COND_OPERAND_LEN];  /* JSON field name to look up, or literal */
+    char lhs[COND_OPERAND_LEN]; /* JSON field name to look up, or literal */
     cond_op_t op;
-    char      rhs[COND_OPERAND_LEN];  /* comparison target (literal) */
-    bool      negate;                  /* if true, invert the result */
+    char rhs[COND_OPERAND_LEN]; /* comparison target (literal) */
+    bool negate;                /* if true, invert the result */
 } condition_t;
 
 /* ── control_flow_t ───────────────────────────────────────────────────── */
 
-#define CF_MAX_BODY_STEPS  16
-#define CF_MAX_ELSE_STEPS  16
+#define CF_MAX_BODY_STEPS 16
+#define CF_MAX_ELSE_STEPS 16
 #define CF_MAX_CATCH_STEPS 16
 
 typedef struct {
     control_type_t type;
-    condition_t    condition;
+    condition_t condition;
 
     /* WHILE / FOR: maximum number of iterations; 0 → CF_DEFAULT_LOOP_MAX */
-    int            loop_max;
+    int loop_max;
 
     /* Steps executed when condition is true (IF body, WHILE/FOR body) */
-    int            body_step_ids[CF_MAX_BODY_STEPS];
-    int            body_step_count;
+    int body_step_ids[CF_MAX_BODY_STEPS];
+    int body_step_count;
 
     /* IF-else branch steps (run when condition is false) */
-    int            else_step_ids[CF_MAX_ELSE_STEPS];
-    int            else_step_count;
+    int else_step_ids[CF_MAX_ELSE_STEPS];
+    int else_step_count;
 
     /* TRY-catch branch steps (run when body fails) */
-    int            catch_step_ids[CF_MAX_CATCH_STEPS];
-    int            catch_step_count;
+    int catch_step_ids[CF_MAX_CATCH_STEPS];
+    int catch_step_count;
 
     /* Populated by TRY on failure: the error message from the failing atom */
-    char           exception_buf[256];
+    char exception_buf[256];
 } control_flow_t;
 
 /* ── Parsing ──────────────────────────────────────────────────────────── */
@@ -140,10 +140,8 @@ plan_status_t step_execute_atoms(int step_id);
  *   CF_SWITCH: like CF_IF (one condition → body or else).
  *   CF_TRY:    run body_step_ids; on PLAN_FAILED, run catch_step_ids and recover.
  */
-plan_status_t execute_step_with_control(
-    int step_id,
-    const control_flow_t *cf,
-    const char *state_json);
+plan_status_t execute_step_with_control(int step_id, const control_flow_t *cf,
+                                        const char *state_json);
 
 /* ── Registry ─────────────────────────────────────────────────────────── */
 

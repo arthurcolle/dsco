@@ -16,15 +16,13 @@ static mcp_registry_t reg;
 int main(void) {
 
     int n = mcp_init(&reg);
-    fprintf(stderr, "mcp_init: configured=%d servers=%d tools=%d (failed=%d)\n",
-            n, reg.server_count, reg.tool_count, reg.failed_count);
+    fprintf(stderr, "mcp_init: configured=%d servers=%d tools=%d (failed=%d)\n", n,
+            reg.server_count, reg.tool_count, reg.failed_count);
 
     for (int i = 0; i < reg.server_count; i++) {
         mcp_server_t *s = &reg.servers[i];
-        fprintf(stderr, "  server[%d] %-16s transport=%-4s initialized=%d headers=%d\n",
-                i, s->name,
-                s->transport == MCP_TRANSPORT_HTTP ? "http" : "stdio",
-                s->initialized, s->headerc);
+        fprintf(stderr, "  server[%d] %-16s transport=%-4s initialized=%d headers=%d\n", i, s->name,
+                s->transport == MCP_TRANSPORT_HTTP ? "http" : "stdio", s->initialized, s->headerc);
     }
 
     int tc = 0;

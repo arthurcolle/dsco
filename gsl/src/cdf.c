@@ -5,8 +5,10 @@
 /* erfinv — rational approximation (Winitzki, 2008)
    Sufficient precision for CDF inverse computations. */
 static double erfinv(double x) {
-    if (x >= 1.0) return HUGE_VAL;
-    if (x <= -1.0) return -HUGE_VAL;
+    if (x >= 1.0)
+        return HUGE_VAL;
+    if (x <= -1.0)
+        return -HUGE_VAL;
     double a = 0.147;
     double ln1x = log(1.0 - x * x);
     double t = 2.0 / (M_PI * a) + ln1x * 0.5;
@@ -31,18 +33,22 @@ double gsl_cdf_gaussian_Qinv(double Q, double sigma) {
 }
 
 double gsl_cdf_exponential_P(double x, double mu) {
-    if (x <= 0.0) return 0.0;
+    if (x <= 0.0)
+        return 0.0;
     return 1.0 - exp(-x / mu);
 }
 
 double gsl_cdf_exponential_Q(double x, double mu) {
-    if (x <= 0.0) return 1.0;
+    if (x <= 0.0)
+        return 1.0;
     return exp(-x / mu);
 }
 
 double gsl_cdf_exponential_Pinv(double P, double mu) {
-    if (P <= 0.0) return 0.0;
-    if (P >= 1.0) return HUGE_VAL;
+    if (P <= 0.0)
+        return 0.0;
+    if (P >= 1.0)
+        return HUGE_VAL;
     return -mu * log(1.0 - P);
 }
 
@@ -52,7 +58,8 @@ double gsl_cdf_exponential_Qinv(double Q, double mu) {
 
 double gsl_cdf_gamma_P(double x, double a, double b) {
     /* Incomplete gamma (simplified for a integer) */
-    if (x <= 0.0) return 0.0;
+    if (x <= 0.0)
+        return 0.0;
     double sum = 0.0;
     double term = exp(-x / b) * pow(x / b, a) / tgamma(a);
     for (int k = 0; k < 20; k++) {

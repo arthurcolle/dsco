@@ -26,8 +26,8 @@
 #include <stdbool.h>
 #include <stddef.h>
 
-#define WATCHDOG_DEFAULT_LABEL  "systems.distributed.dsco"
-#define WATCHDOG_PING_INTERVAL  30   /* seconds between heartbeat pings */
+#define WATCHDOG_DEFAULT_LABEL "systems.distributed.dsco"
+#define WATCHDOG_PING_INTERVAL 30 /* seconds between heartbeat pings */
 
 /* Install service with the calling binary's path.
  * args: additional argv to pass to the daemon (may be NULL).

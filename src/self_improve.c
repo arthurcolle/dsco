@@ -54,8 +54,8 @@ static double clampd(double v, double lo, double hi) {
  *   ~/.dsco/workspace/memory/traces/<session>/tools.jsonl
  * Fail-closed: any error silently disables tracing for the process (a trace
  * sink must never break the agent). Disable with DSCO_TRACE=0. */
-static int   s_trace_state = 0; /* 0=unknown 1=enabled 2=disabled */
-static char  s_trace_path[640];
+static int s_trace_state = 0; /* 0=unknown 1=enabled 2=disabled */
+static char s_trace_path[640];
 
 static void si_mkdir_p(const char *path) {
     char tmp[640];
@@ -134,8 +134,8 @@ static void si_trace_tool(const char *tool_name, bool success, double latency_ms
         s_trace_state = 2; /* fail-closed: stop trying */
         return;
     }
-    fprintf(f, "{\"ts\":%.3f,\"tool\":\"%s\",\"ok\":%s,\"ms\":%.1f,\"tok\":%d}\n",
-            si_now(), esc, success ? "true" : "false", latency_ms, estimated_tokens);
+    fprintf(f, "{\"ts\":%.3f,\"tool\":\"%s\",\"ok\":%s,\"ms\":%.1f,\"tok\":%d}\n", si_now(), esc,
+            success ? "true" : "false", latency_ms, estimated_tokens);
     fclose(f);
 }
 
@@ -347,9 +347,9 @@ void self_improve_record_turn(self_improve_t *si, int turn_number, double turn_c
 }
 
 void self_improve_record_turn_usage(self_improve_t *si, int turn_number, double turn_cost,
-                                    int input_tokens, int output_tokens,
-                                    int cache_read_tokens, int cache_write_tokens,
-                                    int context_usage_pct, double budget_used_pct) {
+                                    int input_tokens, int output_tokens, int cache_read_tokens,
+                                    int cache_write_tokens, int context_usage_pct,
+                                    double budget_used_pct) {
     if (!si->initialized)
         return;
 
@@ -439,15 +439,13 @@ void self_improve_record_turn_usage(self_improve_t *si, int turn_number, double 
     long long cache_read = cache_read_tokens > 0 ? (long long)cache_read_tokens : 0;
     long long output = output_tokens > 0 ? (long long)output_tokens : 0;
 
-    if (cache_read >= 100000 &&
-        cache_read >= (fresh_input > 0 ? fresh_input * 3 : 100000)) {
+    if (cache_read >= 100000 && cache_read >= (fresh_input > 0 ? fresh_input * 3 : 100000)) {
         bool found = false;
         for (int i = 0; i < si->pattern_count; i++) {
             if (si->patterns[i].type == SI_PATTERN_CACHE_LEVERAGED) {
                 si->patterns[i].occurrences++;
                 si->patterns[i].last_seen = si_now();
-                si->patterns[i].severity =
-                    clampd((double)cache_read_tokens / 1000000.0, 0.2, 1.0);
+                si->patterns[i].severity = clampd((double)cache_read_tokens / 1000000.0, 0.2, 1.0);
                 found = true;
                 break;
             }
@@ -466,8 +464,7 @@ void self_improve_record_turn_usage(self_improve_t *si, int turn_number, double 
 
     /* Detect output-heavy synthesis. Large-scale exploration should fan out
      * cheaply, then spend premium output on a bounded reducer. */
-    if (output >= 12000 &&
-        output >= (fresh_input > 0 ? fresh_input * 2 : 12000)) {
+    if (output >= 12000 && output >= (fresh_input > 0 ? fresh_input * 2 : 12000)) {
         bool found = false;
         for (int i = 0; i < si->pattern_count; i++) {
             if (si->patterns[i].type == SI_PATTERN_OUTPUT_HEAVY_TURN) {
@@ -752,8 +749,7 @@ int self_improve_consolidate(self_improve_t *si) {
             new_count++;
     }
 
-    if (si->total_output_tokens >= 50000 &&
-        si->total_output_tokens >= si->total_input_tokens) {
+    if (si->total_output_tokens >= 50000 && si->total_output_tokens >= si->total_input_tokens) {
         char desc[SI_MAX_SUGGESTION_LEN];
         snprintf(desc, sizeof(desc),
                  "Output tokens dominate this session (%lld out vs %lld fresh input). "
@@ -960,10 +956,9 @@ const char *self_improve_summary(const self_improve_t *si, char *buf, size_t buf
                     "Suggestions: %d (new)\n\n",
                     si->total_turns, si->total_tool_calls, si->total_failures, si->total_cost,
                     si->total_turns > 0 ? si->total_cost / si->total_turns : 0,
-                    si->total_input_tokens, si->total_output_tokens,
-                    si->total_cache_read_tokens, si->total_cache_write_tokens,
-                    si->total_redundant_calls, si->total_retries, si->pattern_count,
-                    si->suggestion_count);
+                    si->total_input_tokens, si->total_output_tokens, si->total_cache_read_tokens,
+                    si->total_cache_write_tokens, si->total_redundant_calls, si->total_retries,
+                    si->pattern_count, si->suggestion_count);
 
     if (si->pattern_count > 0) {
         off += snprintf(buf + off, buf_len - off, "Patterns:\n");

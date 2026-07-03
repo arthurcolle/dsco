@@ -19,23 +19,23 @@
 
 /* ── Capacities ──────────────────────────────────────────────────────────── */
 
-#define PLAN_MAX             64
-#define STEP_MAX            512
-#define ATOM_MAX            512
-#define DIALOG_MAX          256
+#define PLAN_MAX 64
+#define STEP_MAX 512
+#define ATOM_MAX 512
+#define DIALOG_MAX 256
 
-#define PLAN_MAX_ROOT_STEPS  32   /* ordered root steps per plan */
-#define STEP_MAX_CHILDREN    32   /* child steps per step */
-#define STEP_MAX_DEPS        16   /* dependency step ids per step */
-#define STEP_MAX_ATOMS       64   /* atoms per step */
-#define ATOM_MAX_DEPS        16   /* max input-from / output-to wires */
+#define PLAN_MAX_ROOT_STEPS 32 /* ordered root steps per plan */
+#define STEP_MAX_CHILDREN 32   /* child steps per step */
+#define STEP_MAX_DEPS 16       /* dependency step ids per step */
+#define STEP_MAX_ATOMS 64      /* atoms per step */
+#define ATOM_MAX_DEPS 16       /* max input-from / output-to wires */
 
-#define PLAN_TAG_MAX         16
-#define PLAN_TAG_LEN         48
-#define PLAN_NOTE_MAX         8
-#define PLAN_NOTE_LEN       256
-#define PLAN_CHOICE_MAX      16
-#define PLAN_CHOICE_LEN     128
+#define PLAN_TAG_MAX 16
+#define PLAN_TAG_LEN 48
+#define PLAN_NOTE_MAX 8
+#define PLAN_NOTE_LEN 256
+#define PLAN_CHOICE_MAX 16
+#define PLAN_CHOICE_LEN 128
 
 /* ── Status ──────────────────────────────────────────────────────────────── */
 
@@ -52,19 +52,19 @@ typedef enum {
 /* ── Mode ────────────────────────────────────────────────────────────────── */
 
 typedef enum {
-    PLAN_MODE_TOP_DOWN = 0,   /* decompose goal → steps → atoms */
-    PLAN_MODE_BOTTOM_UP,      /* aggregate atoms → steps → goal */
-    PLAN_MODE_HYBRID,         /* mixed; default */
+    PLAN_MODE_TOP_DOWN = 0, /* decompose goal → steps → atoms */
+    PLAN_MODE_BOTTOM_UP,    /* aggregate atoms → steps → goal */
+    PLAN_MODE_HYBRID,       /* mixed; default */
 } plan_mode_t;
 
 /* ── Step type ───────────────────────────────────────────────────────────── */
 
 typedef enum {
-    STEP_COMPOSITE = 0,   /* container of child steps */
-    STEP_ATOMIC,          /* leaf; contains atoms */
-    STEP_GATE,            /* decision / branching */
-    STEP_DIALOG,          /* requires user input */
-    STEP_MILESTONE,       /* named checkpoint; no execution */
+    STEP_COMPOSITE = 0, /* container of child steps */
+    STEP_ATOMIC,        /* leaf; contains atoms */
+    STEP_GATE,          /* decision / branching */
+    STEP_DIALOG,        /* requires user input */
+    STEP_MILESTONE,     /* named checkpoint; no execution */
 } step_type_t;
 
 /* ── Atom type ───────────────────────────────────────────────────────────── */
@@ -75,95 +75,95 @@ typedef enum {
     ATOM_DIALOG,
     ATOM_ASSERT,
     ATOM_NOOP,
-    ATOM_CONDITIONAL_IF,    /* if condition_slot is true → run true_step_id */
-    ATOM_CONDITIONAL_ELSE,  /* else → run false_step_id */
-    ATOM_LOOP_WHILE,        /* repeat child atoms while condition_slot is true */
-    ATOM_BREAK,             /* exit enclosing loop */
+    ATOM_CONDITIONAL_IF,   /* if condition_slot is true → run true_step_id */
+    ATOM_CONDITIONAL_ELSE, /* else → run false_step_id */
+    ATOM_LOOP_WHILE,       /* repeat child atoms while condition_slot is true */
+    ATOM_BREAK,            /* exit enclosing loop */
 } atom_type_t;
 
 /* ── Data structures ─────────────────────────────────────────────────────── */
 
 typedef struct {
-    int           id;
-    bool          active;
-    char         *title;              /* heap */
-    char         *goal;               /* heap */
-    plan_mode_t   mode;
+    int id;
+    bool active;
+    char *title; /* heap */
+    char *goal;  /* heap */
+    plan_mode_t mode;
     plan_status_t status;
-    int           root_step_ids[PLAN_MAX_ROOT_STEPS];
-    int           root_step_count;
+    int root_step_ids[PLAN_MAX_ROOT_STEPS];
+    int root_step_count;
 } plan_t;
 
 typedef struct {
-    int           id;
-    bool          active;
-    int           plan_id;
-    int           parent_step_id;     /* 0 = root step */
-    char         *title;              /* heap */
-    char         *desc;               /* heap */
-    step_type_t   type;
+    int id;
+    bool active;
+    int plan_id;
+    int parent_step_id; /* 0 = root step */
+    char *title;        /* heap */
+    char *desc;         /* heap */
+    step_type_t type;
     plan_status_t status;
-    int           child_step_ids[STEP_MAX_CHILDREN];
-    int           child_step_count;
-    int           atom_ids[STEP_MAX_ATOMS];
-    int           atom_count;
-    int           dep_ids[STEP_MAX_DEPS];
-    int           dep_count;
-    int           priority;
-    char          tags[PLAN_TAG_MAX][PLAN_TAG_LEN];
-    int           tag_count;
-    char          notes[PLAN_NOTE_MAX][PLAN_NOTE_LEN];
-    int           note_count;
+    int child_step_ids[STEP_MAX_CHILDREN];
+    int child_step_count;
+    int atom_ids[STEP_MAX_ATOMS];
+    int atom_count;
+    int dep_ids[STEP_MAX_DEPS];
+    int dep_count;
+    int priority;
+    char tags[PLAN_TAG_MAX][PLAN_TAG_LEN];
+    int tag_count;
+    char notes[PLAN_NOTE_MAX][PLAN_NOTE_LEN];
+    int note_count;
 } step_t;
 
 typedef struct {
-    int           id;
-    bool          active;
-    int           step_id;
-    char         *title;              /* heap */
-    atom_type_t   type;
+    int id;
+    bool active;
+    int step_id;
+    char *title; /* heap */
+    atom_type_t type;
     plan_status_t status;
-    int           exit_code;
+    int exit_code;
     /* TOOL_CALL */
-    char         *tool_name;          /* heap */
-    char         *input_json;         /* heap; also used as shell command */
-    char         *result;             /* heap; filled after atom_run */
+    char *tool_name;  /* heap */
+    char *input_json; /* heap; also used as shell command */
+    char *result;     /* heap; filled after atom_run */
     /* DIALOG */
-    char         *prompt;             /* heap */
-    char         *response;           /* heap */
+    char *prompt;   /* heap */
+    char *response; /* heap */
     /* ASSERT */
-    char         *condition;          /* heap */
+    char *condition; /* heap */
     /* ── Stateful wiring (Priority 2) ───────────────────────────────────
      * input_from_ids : atom IDs whose result this atom reads as input
      * input_keys     : optional JSON key to extract from each input
      * output_to_ids  : atom IDs to push this atom's result to
      * After atom_run() completes, the runtime resolves wired_input from
      * upstream atom results before calling the tool / shell.            */
-    int           input_from_ids[ATOM_MAX_DEPS];
-    char          input_keys[ATOM_MAX_DEPS][64];
-    int           input_from_count;
-    int           output_to_ids[ATOM_MAX_DEPS];
-    int           output_to_count;
-    char         *wired_input;        /* heap; resolved upstream data */
+    int input_from_ids[ATOM_MAX_DEPS];
+    char input_keys[ATOM_MAX_DEPS][64];
+    int input_from_count;
+    int output_to_ids[ATOM_MAX_DEPS];
+    int output_to_count;
+    char *wired_input; /* heap; resolved upstream data */
     /* ── Conditional branching (Priority 6) ─────────────────────────── */
-    char          condition_slot[64];  /* read this slot, evaluate as boolean */
-    int           true_step_id;        /* step to execute if condition true */
-    int           false_step_id;       /* step to execute if condition false */
-    int           loop_max_iterations; /* max iterations for LOOP_WHILE (0=unlimited) */
-    int           loop_current_iter;   /* current iteration count */
+    char condition_slot[64]; /* read this slot, evaluate as boolean */
+    int true_step_id;        /* step to execute if condition true */
+    int false_step_id;       /* step to execute if condition false */
+    int loop_max_iterations; /* max iterations for LOOP_WHILE (0=unlimited) */
+    int loop_current_iter;   /* current iteration count */
 } atom_t;
 
 typedef struct {
-    int   id;
-    bool  active;
-    int   plan_id;
-    int   step_id;                    /* -1 = plan-level */
-    char *prompt;                     /* heap */
-    char  choices[PLAN_CHOICE_MAX][PLAN_CHOICE_LEN];
-    int   choice_count;
-    char *response;                   /* heap; set when answered */
-    int   chosen;                     /* index into choices[], -1 = freeform */
-    bool  answered;
+    int id;
+    bool active;
+    int plan_id;
+    int step_id;  /* -1 = plan-level */
+    char *prompt; /* heap */
+    char choices[PLAN_CHOICE_MAX][PLAN_CHOICE_LEN];
+    int choice_count;
+    char *response; /* heap; set when answered */
+    int chosen;     /* index into choices[], -1 = freeform */
+    bool answered;
 } dialog_t;
 
 /* ── Engine lifecycle ────────────────────────────────────────────────────── */
@@ -172,66 +172,65 @@ void plan_engine_init(void);
 
 /* ── Plan CRUD ───────────────────────────────────────────────────────────── */
 
-int     plan_create(const char *title, const char *goal, plan_mode_t mode);
-bool    plan_delete(int plan_id);
+int plan_create(const char *title, const char *goal, plan_mode_t mode);
+bool plan_delete(int plan_id);
 plan_t *plan_get(int plan_id);
-int     plan_list(int *ids_out, int max_out);
-bool    plan_set_description(int plan_id, const char *goal);
+int plan_list(int *ids_out, int max_out);
+bool plan_set_description(int plan_id, const char *goal);
 
 /* ── Step management ─────────────────────────────────────────────────────── */
 
 /* parent_step_id = 0 → root step of the plan */
-int     plan_add_step(int plan_id, int parent_step_id,
-                      const char *title, step_type_t type);
-bool    plan_remove_step(int plan_id, int step_id);
+int plan_add_step(int plan_id, int parent_step_id, const char *title, step_type_t type);
+bool plan_remove_step(int plan_id, int step_id);
 step_t *step_get(int step_id);
 
-bool    step_set_title(int step_id, const char *title);
-bool    step_set_description(int step_id, const char *desc);
-bool    step_set_priority(int step_id, int priority);
-bool    step_set_status(int step_id, plan_status_t status);
-bool    step_add_tag(int step_id, const char *tag);
-bool    step_add_note(int step_id, const char *note);
+bool step_set_title(int step_id, const char *title);
+bool step_set_description(int step_id, const char *desc);
+bool step_set_priority(int step_id, int priority);
+bool step_set_status(int step_id, plan_status_t status);
+bool step_add_tag(int step_id, const char *tag);
+bool step_add_note(int step_id, const char *note);
 
-bool    step_add_dep(int step_id, int dep_step_id);
-bool    step_remove_dep(int step_id, int dep_step_id);
-bool    step_deps_satisfied(int step_id);
-bool    step_can_run(int step_id);
+bool step_add_dep(int step_id, int dep_step_id);
+bool step_remove_dep(int step_id, int dep_step_id);
+bool step_deps_satisfied(int step_id);
+bool step_can_run(int step_id);
 
 /* ── Atom management ─────────────────────────────────────────────────────── */
 
-int     step_add_atom(int step_id, const char *title, atom_type_t type);
-bool    atom_remove(int step_id, int atom_id);
+int step_add_atom(int step_id, const char *title, atom_type_t type);
+bool atom_remove(int step_id, int atom_id);
 atom_t *atom_get(int atom_id);
 
-bool    atom_set_tool(int atom_id, const char *tool_name, const char *input_json);
-bool    atom_set_shell(int atom_id, const char *command);
-bool    atom_set_dialog_prompt(int atom_id, const char *prompt);
-bool    atom_set_assert(int atom_id, const char *condition);
-bool    atom_set_result(int atom_id, const char *result);
+bool atom_set_tool(int atom_id, const char *tool_name, const char *input_json);
+bool atom_set_shell(int atom_id, const char *command);
+bool atom_set_dialog_prompt(int atom_id, const char *prompt);
+bool atom_set_assert(int atom_id, const char *condition);
+bool atom_set_result(int atom_id, const char *result);
 
 /* Execute one atom; fills result_buf; updates atom status. */
-bool    atom_run(int atom_id, char *result_buf, size_t rlen);
+bool atom_run(int atom_id, char *result_buf, size_t rlen);
 
 /* ── Stateful wiring API ─────────────────────────────────────────────────── */
 
 /* Wire src_atom_id's result into dst_atom_id's input.
  * key: if non-NULL, extract this JSON field from upstream result.
  * Also registers the reverse edge (output_to) on src_atom_id. */
-bool    atom_wire(int src_atom_id, int dst_atom_id, const char *key);
+bool atom_wire(int src_atom_id, int dst_atom_id, const char *key);
 
 /* Remove a wiring edge. */
-bool    atom_unwire(int src_atom_id, int dst_atom_id);
+bool atom_unwire(int src_atom_id, int dst_atom_id);
 
 /* Resolve wired_input for atom_id from all upstream atom results.
  * Called automatically by atom_run, but can be called manually.
  * Returns heap-allocated JSON object; caller must free. */
-char   *atom_resolve_inputs(int atom_id);
+char *atom_resolve_inputs(int atom_id);
 
 /* ── Execution helpers ───────────────────────────────────────────────────── */
 
-int  plan_ready_atoms(int plan_id, int *atom_ids_out, int max_out);
-int  plan_run_next(int plan_id);    /* returns atom_id run, or -1 */
+int plan_ready_atoms(int plan_id, int *atom_ids_out, int max_out);
+int plan_run_next(int plan_id); /* returns atom_id run, or -1 */
 
 /* True when every upstream wired-input atom for atom_id is PLAN_DONE. */
 bool atom_inputs_ready(int atom_id);
@@ -243,36 +242,33 @@ void plan_rollup_status(int plan_id);
 /* Drive the plan to quiescence: repeatedly run ready atoms until none remain
  * runnable (all done/failed/blocked) or max_atoms executed (0 = unbounded,
  * capped internally). Rolls up status as it goes. Returns atoms executed. */
-int  plan_run_all(int plan_id, int max_atoms);
+int plan_run_all(int plan_id, int max_atoms);
 
 /* ── Top-down decomposition ──────────────────────────────────────────────── */
 
 /* Bulk-add child steps under focus_step_id (0 = root).
    Returns number of steps added. */
-int  plan_decompose(int plan_id, int focus_step_id,
-                    const char **subtitles, int count);
+int plan_decompose(int plan_id, int focus_step_id, const char **subtitles, int count);
 
 /* ── Bottom-up aggregation ───────────────────────────────────────────────── */
 
 /* Wrap existing atoms into a new named step.  Returns new step_id or -1. */
-int  plan_aggregate_atoms(int plan_id, int parent_step_id,
-                           const char *step_title,
-                           const int *atom_ids, int count);
+int plan_aggregate_atoms(int plan_id, int parent_step_id, const char *step_title,
+                         const int *atom_ids, int count);
 
 /* ── Dialog system ───────────────────────────────────────────────────────── */
 
-int       plan_dialog_ask(int plan_id, int step_id,
-                          const char *prompt,
-                          const char **choices, int choice_count);
-bool      plan_dialog_answer(int dialog_id, const char *response, int chosen);
+int plan_dialog_ask(int plan_id, int step_id, const char *prompt, const char **choices,
+                    int choice_count);
+bool plan_dialog_answer(int dialog_id, const char *response, int chosen);
 dialog_t *dialog_get(int dialog_id);
-int       plan_pending_dialogs(int plan_id, int *dialog_ids_out, int max_out);
+int plan_pending_dialogs(int plan_id, int *dialog_ids_out, int max_out);
 
 /* ── Serialisation & display ─────────────────────────────────────────────── */
 
-int  plan_to_json(int plan_id, char *buf, size_t len);
-int  plan_summary(int plan_id, char *buf, size_t len);
-int  plan_tree_render(int plan_id, char *buf, size_t len);
+int plan_to_json(int plan_id, char *buf, size_t len);
+int plan_summary(int plan_id, char *buf, size_t len);
+int plan_tree_render(int plan_id, char *buf, size_t len);
 
 /* ── Name helpers ────────────────────────────────────────────────────────── */
 

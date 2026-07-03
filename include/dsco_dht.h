@@ -29,15 +29,15 @@
 typedef struct dsco_dht dsco_dht_t;
 
 typedef struct {
-    uint16_t    udp_port;    /* DHT UDP port to bind (0 → default 7600) */
-    uint16_t    mesh_port;   /* mesh TCP port to announce (what peers dial) */
-    const char *swarm_key;   /* shared secret string → rendezvous infohash */
+    uint16_t udp_port;     /* DHT UDP port to bind (0 → default 7600) */
+    uint16_t mesh_port;    /* mesh TCP port to announce (what peers dial) */
+    const char *swarm_key; /* shared secret string → rendezvous infohash */
 } dsco_dht_config_t;
 
 typedef struct {
-    int  good, dubious, cached, incoming;  /* routing-table node counts */
-    int  peers_found;                       /* distinct peers discovered */
-    int  searches;                          /* searches launched */
+    int good, dubious, cached, incoming; /* routing-table node counts */
+    int peers_found;                     /* distinct peers discovered */
+    int searches;                        /* searches launched */
     bool running;
 } dsco_dht_stats_t;
 

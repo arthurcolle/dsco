@@ -4,8 +4,8 @@
 #include <stdbool.h>
 #include <stddef.h>
 
-#define PROVIDER_PROFILE_MAX_ALIASES   8
-#define PROVIDER_PROFILE_MAX_ENV_VARS  8
+#define PROVIDER_PROFILE_MAX_ALIASES 8
+#define PROVIDER_PROFILE_MAX_ENV_VARS 8
 
 typedef enum {
     PROVIDER_API_CHAT_COMPLETIONS = 0,
@@ -37,15 +37,15 @@ typedef enum {
 } provider_transport_kind_t;
 
 enum {
-    PROVIDER_CAP_TOOLS                = 1u << 0,
-    PROVIDER_CAP_MULTITURN            = 1u << 1,
-    PROVIDER_CAP_STREAMING            = 1u << 2,
-    PROVIDER_CAP_VISION               = 1u << 3,
+    PROVIDER_CAP_TOOLS = 1u << 0,
+    PROVIDER_CAP_MULTITURN = 1u << 1,
+    PROVIDER_CAP_STREAMING = 1u << 2,
+    PROVIDER_CAP_VISION = 1u << 3,
     PROVIDER_CAP_VISION_TOOL_MESSAGES = 1u << 4,
-    PROVIDER_CAP_REASONING            = 1u << 5,
-    PROVIDER_CAP_JSON                 = 1u << 6,
-    PROVIDER_CAP_PROMPT_CACHE         = 1u << 7,
-    PROVIDER_CAP_HEALTH_CHECK         = 1u << 8,
+    PROVIDER_CAP_REASONING = 1u << 5,
+    PROVIDER_CAP_JSON = 1u << 6,
+    PROVIDER_CAP_PROMPT_CACHE = 1u << 7,
+    PROVIDER_CAP_HEALTH_CHECK = 1u << 8,
 };
 
 typedef struct {
@@ -70,7 +70,7 @@ typedef struct {
 
     const char *default_model;
     const char *default_aux_model;
-    unsigned    caps;
+    unsigned caps;
 } provider_profile_t;
 
 size_t provider_profile_count(void);
@@ -83,10 +83,8 @@ const char *provider_auth_type_name(provider_auth_type_t auth_type);
 const char *provider_transport_kind_name(provider_transport_kind_t transport);
 
 const char *provider_profile_primary_env_var(const provider_profile_t *profile);
-bool provider_profile_has_env_var(const provider_profile_t *profile,
-                                  const char *env_var);
-bool provider_profile_has_alias(const provider_profile_t *profile,
-                                const char *alias);
+bool provider_profile_has_env_var(const provider_profile_t *profile, const char *env_var);
+bool provider_profile_has_alias(const provider_profile_t *profile, const char *alias);
 bool provider_profile_transport_supported(const provider_profile_t *profile);
 
 #endif /* DSCO_PROVIDER_PROFILES_H */

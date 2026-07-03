@@ -369,8 +369,8 @@ static INST_NOHOOK void write_outputs(void) {
         fputs("pc\tcalls\ttotal_ns\tself_ns\n", fp);
         for (size_t b = 0; b < INST_FUNC_BUCKETS; b++) {
             for (inst_func_agg_t *cur = s_func_buckets[b]; cur; cur = cur->next) {
-                fprintf(fp, "0x%" PRIxPTR "\t%" PRIu64 "\t%" PRIu64 "\t%" PRIu64 "\n",
-                        cur->pc, cur->calls, cur->total_ns, cur->self_ns);
+                fprintf(fp, "0x%" PRIxPTR "\t%" PRIu64 "\t%" PRIu64 "\t%" PRIu64 "\n", cur->pc,
+                        cur->calls, cur->total_ns, cur->self_ns);
             }
         }
         fclose(fp);
@@ -523,7 +523,8 @@ INST_NOHOOK void __cyg_profile_func_exit(void *func, void *caller) {
             }
             if (tls_frames[idx].func == (uintptr_t)func) {
                 uint64_t now = inst_now_ns();
-                uint64_t total = now > tls_frames[idx].enter_ns ? now - tls_frames[idx].enter_ns : 0;
+                uint64_t total =
+                    now > tls_frames[idx].enter_ns ? now - tls_frames[idx].enter_ns : 0;
                 uint64_t child = tls_frames[idx].child_ns;
                 uint64_t self = total > child ? total - child : 0;
                 if (idx > 0)

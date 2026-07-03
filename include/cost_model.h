@@ -19,29 +19,26 @@
 #include <stdbool.h>
 #include <stddef.h>
 
-void   cost_model_init(void);
-void   cost_model_learn(const char *topology_name, int total_tokens,
-                        double actual_cost_usd, double actual_latency_s);
-double cost_model_predict(const char *topology_name,
-                          int input_tokens, int output_tokens);
+void cost_model_init(void);
+void cost_model_learn(const char *topology_name, int total_tokens, double actual_cost_usd,
+                      double actual_latency_s);
+double cost_model_predict(const char *topology_name, int input_tokens, int output_tokens);
 double cost_model_predict_latency(const char *topology_name);
-int    cost_model_stats_json(char *buf, size_t buflen);
-void   cost_model_flush(void);
+int cost_model_stats_json(char *buf, size_t buflen);
+void cost_model_flush(void);
 
 /* ── Prediction with confidence interval ──────────────────────────────── */
 
 typedef struct {
-    double cost_usd;           /* point estimate */
-    double cost_lo;            /* 10th-percentile lower bound */
-    double cost_hi;            /* 90th-percentile upper bound */
-    double latency_s;          /* estimated latency */
-    double confidence;         /* 0.0-1.0 (0=no data, 1=well-calibrated) */
-    int    observations;
+    double cost_usd;   /* point estimate */
+    double cost_lo;    /* 10th-percentile lower bound */
+    double cost_hi;    /* 90th-percentile upper bound */
+    double latency_s;  /* estimated latency */
+    double confidence; /* 0.0-1.0 (0=no data, 1=well-calibrated) */
+    int observations;
 } cost_prediction_t;
 
-bool   cost_model_predict_full(const char *topology_name,
-                               int input_tokens, int output_tokens,
-                               cost_prediction_t *out);
-
+bool cost_model_predict_full(const char *topology_name, int input_tokens, int output_tokens,
+                             cost_prediction_t *out);
 
 #endif /* DSCO_COST_MODEL_H */

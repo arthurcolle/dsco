@@ -40,8 +40,8 @@ static const char *pattern_keywords[PATTERN_COUNT][16] = {
     [PATTERN_CONSENSUS] = {"consensus", "agreement", "debate", "discussion", "converge", "agree",
                            "vote", "majority", "conflict", NULL},
     [PATTERN_SPECIALIST] = {"expert", "specialist", "domain", "specific", "technical",
-                            "specialized", "advanced", "deep", "nuanced", "ai", "agent",
-                            "agents", "model", "models", NULL}};
+                            "specialized", "advanced", "deep", "nuanced", "ai", "agent", "agents",
+                            "model", "models", NULL}};
 
 /* ── Case-insensitive keyword search ───────────────────────────────────── */
 
@@ -73,8 +73,7 @@ static bool contains_keyword(const char *text, const char *keyword) {
 static bool mentions_self_improvement(const char *task) {
     if (!task)
         return false;
-    return contains_keyword(task, "self-improvement") ||
-           contains_keyword(task, "self_improve") ||
+    return contains_keyword(task, "self-improvement") || contains_keyword(task, "self_improve") ||
            (contains_keyword(task, "self") && contains_keyword(task, "improvement")) ||
            (contains_keyword(task, "learn") && contains_keyword(task, "patterns"));
 }
@@ -84,19 +83,15 @@ static bool mentions_large_scale(const char *task) {
         return false;
     return contains_keyword(task, "large-scale") ||
            (contains_keyword(task, "large") && contains_keyword(task, "scale")) ||
-           contains_keyword(task, "broad") ||
-           contains_keyword(task, "wide");
+           contains_keyword(task, "broad") || contains_keyword(task, "wide");
 }
 
 static bool mentions_ai_agent_system(const char *task) {
     if (!task)
         return false;
-    return contains_keyword(task, "ai") ||
-           contains_keyword(task, "agent") ||
-           contains_keyword(task, "agents") ||
-           contains_keyword(task, "model") ||
-           contains_keyword(task, "models") ||
-           contains_keyword(task, "dsco-cli") ||
+    return contains_keyword(task, "ai") || contains_keyword(task, "agent") ||
+           contains_keyword(task, "agents") || contains_keyword(task, "model") ||
+           contains_keyword(task, "models") || contains_keyword(task, "dsco-cli") ||
            contains_keyword(task, "cli");
 }
 

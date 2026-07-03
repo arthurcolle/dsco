@@ -16,9 +16,7 @@ typedef struct skill_requirements {
 } skill_requirements_t;
 
 int skill_requirements_init(skill_requirements_t *req);
-int skill_requirements_add(skill_requirements_t *req,
-                           backend_category_t cat,
-                           const char *name,
+int skill_requirements_add(skill_requirements_t *req, backend_category_t cat, const char *name,
                            int mandatory);
 int skill_requirements_satisfy(const skill_requirements_t *req);
 

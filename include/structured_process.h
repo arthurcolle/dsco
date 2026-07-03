@@ -16,15 +16,15 @@ typedef enum {
 
 typedef struct {
     sp_intent_t intent;
-    char        intent_name[24];
-    char        risk[16];
-    int         confidence;
-    int         model_budget_pct;
-    int         background_budget_pct;
-    int         max_concurrency;
-    int         max_iterations;
-    bool        needs_model_gate;
-    bool        can_background;
+    char intent_name[24];
+    char risk[16];
+    int confidence;
+    int model_budget_pct;
+    int background_budget_pct;
+    int max_concurrency;
+    int max_iterations;
+    bool needs_model_gate;
+    bool can_background;
 } sp_classification_t;
 
 const char *structured_process_schema_json(void);

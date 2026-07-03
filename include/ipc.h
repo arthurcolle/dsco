@@ -22,12 +22,12 @@ typedef struct ev_loop ev_loop_t;
  * concurrent read/write). Path propagated via DSCO_IPC_DB env var.
  * ═══════════════════════════════════════════════════════════════════════════ */
 
-#define IPC_MAX_AGENT_ID     64
-#define IPC_MAX_TOPIC        64
-#define IPC_MAX_BODY         (64 * 1024)
-#define IPC_MAX_KEY          128
-#define IPC_HEARTBEAT_SEC    5
-#define IPC_STALE_SEC        30      /* agent considered dead after this */
+#define IPC_MAX_AGENT_ID 64
+#define IPC_MAX_TOPIC 64
+#define IPC_MAX_BODY (64 * 1024)
+#define IPC_MAX_KEY 128
+#define IPC_HEARTBEAT_SEC 5
+#define IPC_STALE_SEC 30 /* agent considered dead after this */
 
 static inline int dsco_ipc_heartbeat_sec(void) {
     return dsco_env_int("DSCO_IPC_HEARTBEAT_SEC", IPC_HEARTBEAT_SEC, 1, 3600);
@@ -51,28 +51,28 @@ typedef enum {
 } ipc_agent_status_t;
 
 typedef struct {
-    char   id[IPC_MAX_AGENT_ID];
-    char   parent_id[IPC_MAX_AGENT_ID];
-    int    pid;
-    int    depth;
+    char id[IPC_MAX_AGENT_ID];
+    char parent_id[IPC_MAX_AGENT_ID];
+    int pid;
+    int depth;
     ipc_agent_status_t status;
-    char   role[64];             /* e.g., "researcher", "coder", "reviewer" */
-    char   current_task[256];
+    char role[64]; /* e.g., "researcher", "coder", "reviewer" */
+    char current_task[256];
     double started_at;
     double last_heartbeat;
-    char   toolkit[2048];        /* JSON array of tool names, or "*" for all */
+    char toolkit[2048]; /* JSON array of tool names, or "*" for all */
 } ipc_agent_info_t;
 
 /* ── Message ───────────────────────────────────────────────────────────── */
 
 typedef struct {
-    int    id;
-    char   from_agent[IPC_MAX_AGENT_ID];
-    char   to_agent[IPC_MAX_AGENT_ID];  /* empty = broadcast */
-    char   topic[IPC_MAX_TOPIC];
-    char  *body;                         /* caller frees */
+    int id;
+    char from_agent[IPC_MAX_AGENT_ID];
+    char to_agent[IPC_MAX_AGENT_ID]; /* empty = broadcast */
+    char topic[IPC_MAX_TOPIC];
+    char *body; /* caller frees */
     double created_at;
-    bool   read;
+    bool read;
 } ipc_message_t;
 
 /* ── Task ──────────────────────────────────────────────────────────────── */
@@ -86,14 +86,14 @@ typedef enum {
 } ipc_task_status_t;
 
 typedef struct {
-    int    id;
-    char   assigned_to[IPC_MAX_AGENT_ID]; /* empty = unassigned */
-    char   created_by[IPC_MAX_AGENT_ID];
-    int    parent_task_id;                 /* for sub-tasks */
-    int    priority;                       /* higher = more urgent */
+    int id;
+    char assigned_to[IPC_MAX_AGENT_ID]; /* empty = unassigned */
+    char created_by[IPC_MAX_AGENT_ID];
+    int parent_task_id; /* for sub-tasks */
+    int priority;       /* higher = more urgent */
     ipc_task_status_t status;
-    char   description[2048];
-    char  *result;                         /* caller frees */
+    char description[2048];
+    char *result; /* caller frees */
     double created_at;
     double started_at;
     double completed_at;
@@ -124,8 +124,7 @@ void ipc_set_event_loop(ev_loop_t *loop);
 /* ── Agent Registry ────────────────────────────────────────────────────── */
 
 /* Register this agent in the shared registry */
-bool ipc_register(const char *parent_id, int depth, const char *role,
-                  const char *toolkit);
+bool ipc_register(const char *parent_id, int depth, const char *role, const char *toolkit);
 
 /* Update own status */
 bool ipc_set_status(ipc_agent_status_t status, const char *current_task);
@@ -214,25 +213,19 @@ int ipc_status_json(char *buf, size_t len);
 
 /* Save agent state (memory, conversation, plan) to checkpoint table.
  * Returns true on success. Multiple generations per agent supported. */
-bool ipc_checkpoint_save(const char *agent_id, int generation,
-                          const char *memory_json,
-                          const char *conv_json,
-                          const char *plan_json,
-                          const char *task_json);
+bool ipc_checkpoint_save(const char *agent_id, int generation, const char *memory_json,
+                         const char *conv_json, const char *plan_json, const char *task_json);
 
 /* Restore agent state from latest (or specific generation) checkpoint.
  * Returns malloc'd strings (caller frees each non-NULL output).
  * If generation < 0, uses the latest checkpoint for agent_id.
  * Returns true on success. */
-bool ipc_checkpoint_restore(const char *agent_id, int generation,
-                             char **memory_json_out,
-                             char **conv_json_out,
-                             char **plan_json_out,
-                             char **task_json_out);
+bool ipc_checkpoint_restore(const char *agent_id, int generation, char **memory_json_out,
+                            char **conv_json_out, char **plan_json_out, char **task_json_out);
 
 /* List checkpoints for an agent. Returns count. */
-int ipc_checkpoint_list(const char *agent_id, int *generations_out,
-                         double *timestamps_out, int max);
+int ipc_checkpoint_list(const char *agent_id, int *generations_out, double *timestamps_out,
+                        int max);
 
 /* Delete old checkpoints, keeping only the latest N. */
 int ipc_checkpoint_prune(const char *agent_id, int keep_generations);

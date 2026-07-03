@@ -1,6 +1,9 @@
 #ifndef DSCO_SUPERVISOR_H
 #define DSCO_SUPERVISOR_H
 
+#include <stdbool.h>
+#include <stddef.h>
+
 /* ── Higher-order process supervisor ──────────────────────────────────────
  *
  * A foreground watcher that runs the real dsco as a managed child and keeps
@@ -60,6 +63,12 @@
  * or the circuit breaker trips. Returns the child's final exit status (or a
  * nonzero code if supervision gave up). */
 int supervisor_run(int child_argc, char **child_argv);
+
+/* Resolve the staged executable a supervised restart should exec. This is
+ * deliberately non-mutating: it must never rename dsco-new over current_bin,
+ * because sibling sessions can have tamper watchers on the current binary. */
+bool supervisor_resolve_hotswap_exec(const char *current_bin, const char *env_bin, char *exec_path,
+                                     size_t exec_path_len, bool *explicit_hotswap);
 
 /* If dsco is the top-level command in an iTerm session, a voluntary exit would
  * otherwise end the pty and close the tab. This helper execs the user's shell

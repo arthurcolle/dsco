@@ -13,14 +13,17 @@ typedef double gsl_complex_packed;
 int gsl_fft_complex_radix2_forward(gsl_complex_packed_array data, size_t stride, size_t n);
 int gsl_fft_complex_radix2_backward(gsl_complex_packed_array data, size_t stride, size_t n);
 int gsl_fft_complex_radix2_inverse(gsl_complex_packed_array data, size_t stride, size_t n);
-int gsl_fft_complex_radix2_transform(gsl_complex_packed_array data, size_t stride, size_t n, int sign);
+int gsl_fft_complex_radix2_transform(gsl_complex_packed_array data, size_t stride, size_t n,
+                                     int sign);
 
 int gsl_fft_complex_radix2_dif_forward(gsl_complex_packed_array data, size_t stride, size_t n);
 int gsl_fft_complex_radix2_dif_backward(gsl_complex_packed_array data, size_t stride, size_t n);
 int gsl_fft_complex_radix2_dif_inverse(gsl_complex_packed_array data, size_t stride, size_t n);
-int gsl_fft_complex_radix2_dif_transform(gsl_complex_packed_array data, size_t stride, size_t n, int sign);
+int gsl_fft_complex_radix2_dif_transform(gsl_complex_packed_array data, size_t stride, size_t n,
+                                         int sign);
 
-int gsl_fft_complex_bitreverse_order(gsl_complex_packed_array data, size_t stride, size_t n, size_t n_used);
+int gsl_fft_complex_bitreverse_order(gsl_complex_packed_array data, size_t stride, size_t n,
+                                     size_t n_used);
 
 typedef struct {
     size_t n;
@@ -58,10 +61,11 @@ int gsl_fft_halfcomplex_radix2_inverse(double data[], size_t stride, size_t n);
 int gsl_fft_halfcomplex_radix2_backward(double data[], size_t stride, size_t n);
 int gsl_fft_halfcomplex_radix2_transform(double data[], size_t stride, size_t n);
 
-int gsl_fft_real_radix2_pack(const double real_float[], gsl_complex_packed_array complex_packed_float,
-                             size_t float_stride, size_t n);
-int gsl_fft_real_radix2_unpack(const gsl_complex_packed_array complex_packed_float, double real_float[],
-                               size_t float_stride, size_t n);
+int gsl_fft_real_radix2_pack(const double real_float[],
+                             gsl_complex_packed_array complex_packed_float, size_t float_stride,
+                             size_t n);
+int gsl_fft_real_radix2_unpack(const gsl_complex_packed_array complex_packed_float,
+                               double real_float[], size_t float_stride, size_t n);
 
 typedef struct {
     size_t n;
@@ -85,8 +89,7 @@ gsl_fft_real_workspace *gsl_fft_real_workspace_alloc(size_t n);
 void gsl_fft_real_workspace_free(gsl_fft_real_workspace *workspace);
 
 int gsl_fft_real_transform(double data[], size_t stride, size_t n,
-                           const gsl_fft_real_wavetable *wavetable,
-                           gsl_fft_real_workspace *work);
+                           const gsl_fft_real_wavetable *wavetable, gsl_fft_real_workspace *work);
 int gsl_fft_halfcomplex_transform(double data[], size_t stride, size_t n,
                                   const gsl_fft_halfcomplex_wavetable *wavetable,
                                   gsl_fft_real_workspace *work);
@@ -98,7 +101,8 @@ int gsl_fft_halfcomplex_inverse(double data[], size_t stride, size_t n,
                                 gsl_fft_real_workspace *work);
 int gsl_fft_real_unpack(const double real_float[], gsl_complex_packed_array complex_packed_float,
                         size_t float_stride, size_t n);
-int gsl_fft_halfcomplex_unpack(const double halfcomplex_float[], gsl_complex_packed_array complex_packed_float,
-                               size_t float_stride, size_t n);
+int gsl_fft_halfcomplex_unpack(const double halfcomplex_float[],
+                               gsl_complex_packed_array complex_packed_float, size_t float_stride,
+                               size_t n);
 
 #endif /* __GSL_FFT_H__ */

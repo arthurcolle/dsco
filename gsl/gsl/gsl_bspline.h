@@ -26,6 +26,7 @@ double gsl_bspline_breakpoint(const size_t i, const gsl_bspline_workspace *w);
 int gsl_bspline_knots(const gsl_vector *breakpts, gsl_bspline_workspace *w);
 int gsl_bspline_knots_uniform(const double a, const double b, gsl_bspline_workspace *w);
 int gsl_bspline_eval(const double x, gsl_vector *B, gsl_bspline_workspace *w);
-int gsl_bspline_eval_deriv(const double x, const size_t nderiv, gsl_matrix *dB, gsl_bspline_workspace *w);
+int gsl_bspline_eval_deriv(const double x, const size_t nderiv, gsl_matrix *dB,
+                           gsl_bspline_workspace *w);
 
 #endif /* __GSL_BSPLINE_H__ */

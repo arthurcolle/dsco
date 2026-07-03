@@ -4,20 +4,17 @@
 #include <string.h>
 
 static const gsl_rng_type mt19937_type = {
-    "mt19937",
-    0xffffffffUL,
-    0,
-    sizeof(uint32_t) * 624,
-    NULL, /* set */
-    NULL, /* get */
-    NULL  /* get_double */
+    "mt19937", 0xffffffffUL, 0, sizeof(uint32_t) * 624, NULL, /* set */
+    NULL,                                                     /* get */
+    NULL                                                      /* get_double */
 };
 
 const gsl_rng_type *gsl_rng_mt19937 = &mt19937_type;
 
 gsl_rng *gsl_rng_alloc(const gsl_rng_type *T) {
     gsl_rng *r = malloc(sizeof(gsl_rng));
-    if (!r) return NULL;
+    if (!r)
+        return NULL;
     r->type = T;
     r->state = calloc(1, T->size);
     return r;
@@ -31,7 +28,8 @@ void gsl_rng_free(gsl_rng *r) {
 }
 
 void gsl_rng_set(const gsl_rng *r, unsigned long int seed) {
-    (void)r; (void)seed;
+    (void)r;
+    (void)seed;
     /* Stub: real implementation would seed MT19937 */
 }
 

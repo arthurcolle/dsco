@@ -35,4 +35,11 @@ void peer_bootstrap_stop(void);
  * Called internally on a timer; also safe to call from the main loop. */
 void peer_bootstrap_reseed(void);
 
+/* Register the mesh receive/presence callbacks on the global mesh node
+ * (defined in net_tool.c). Inbound encrypted frames are decoded and
+ * delivered into the local durable ipc message bus, making cross-agent
+ * mesh messaging actually reach a consumer. Call once, after
+ * mesh_node_start() succeeds. No-op without HAVE_LIBSODIUM. */
+void dsco_net_node(void);
+
 #endif /* DSCO_PEER_BOOTSTRAP_H */

@@ -32,21 +32,46 @@
 
 /* ── Static coroutines (non-reentrant) ────────────────────────────────── */
 
-#define scr_begin      static int scr_state_ = 0; switch (scr_state_) { case 0:
-#define scr_end        } scr_state_ = 0;
-#define scr_yield(val) do { scr_state_ = __LINE__; return (val); case __LINE__:; } while (0)
-#define scr_reset      do { scr_state_ = 0; } while (0)
+#define scr_begin                                                                                  \
+    static int scr_state_ = 0;                                                                     \
+    switch (scr_state_) {                                                                          \
+        case 0:
+#define scr_end                                                                                    \
+    }                                                                                              \
+    scr_state_ = 0;
+#define scr_yield(val)                                                                             \
+    do {                                                                                           \
+        scr_state_ = __LINE__;                                                                     \
+        return (val);                                                                              \
+        case __LINE__:;                                                                            \
+    } while (0)
+#define scr_reset                                                                                  \
+    do {                                                                                           \
+        scr_state_ = 0;                                                                            \
+    } while (0)
 
 /* ── Context-based coroutines (reentrant) ─────────────────────────────── */
 
 typedef int ccr_state_t;
 
-#define ccr_init(ctx)          do { (ctx)->ccr = 0; } while (0)
-#define ccr_start(ctx)         switch ((ctx)->ccr) { case 0:
-#define ccr_end(ctx)           } (ctx)->ccr = -1;
-#define ccr_yield(ctx, val)    do { (ctx)->ccr = __LINE__; return (val); case __LINE__:; } while (0)
-#define ccr_finished(ctx)      ((ctx)->ccr == -1)
-#define ccr_running(ctx)       ((ctx)->ccr >= 0)
+#define ccr_init(ctx)                                                                              \
+    do {                                                                                           \
+        (ctx)->ccr = 0;                                                                            \
+    } while (0)
+#define ccr_start(ctx)                                                                             \
+    switch ((ctx)->ccr) {                                                                          \
+        case 0:
+#define ccr_end(ctx)                                                                               \
+    }                                                                                              \
+    (ctx)->ccr = -1;
+#define ccr_yield(ctx, val)                                                                        \
+    do {                                                                                           \
+        (ctx)->ccr = __LINE__;                                                                     \
+        return (val);                                                                              \
+        case __LINE__:;                                                                            \
+    } while (0)
+#define ccr_finished(ctx) ((ctx)->ccr == -1)
+#define ccr_running(ctx) ((ctx)->ccr >= 0)
 
 /* ── Generator pattern ────────────────────────────────────────────────── */
 
@@ -77,9 +102,9 @@ typedef int ccr_state_t;
  *   }
  */
 
-#define gen_start(ctx)        ccr_start(ctx)
-#define gen_end(ctx)          ccr_end(ctx)
-#define gen_yield(ctx, val)   ccr_yield(ctx, val)
+#define gen_start(ctx) ccr_start(ctx)
+#define gen_end(ctx) ccr_end(ctx)
+#define gen_yield(ctx, val) ccr_yield(ctx, val)
 
 /* ── Async/await pattern for cooperative multitasking ─────────────────── */
 
@@ -165,18 +190,18 @@ typedef enum {
 typedef int (*coro_func_t)(void *ctx);
 
 typedef struct {
-    void         *ctx;
-    coro_func_t   func;
+    void *ctx;
+    coro_func_t func;
     coro_status_t status;
-    int           priority;
-    const char   *label;
+    int priority;
+    const char *label;
 } coro_slot_t;
 
 typedef struct {
     coro_slot_t slots[CORO_SCHED_MAX];
-    int         count;
-    int         active;
-    int         round;
+    int count;
+    int active;
+    int round;
 } coro_scheduler_t;
 
 static inline void coro_sched_init(coro_scheduler_t *s) {
@@ -185,9 +210,10 @@ static inline void coro_sched_init(coro_scheduler_t *s) {
     s->round = 0;
 }
 
-static inline int coro_sched_add(coro_scheduler_t *s, coro_func_t func,
-                                  void *ctx, const char *label, int priority) {
-    if (s->count >= CORO_SCHED_MAX) return -1;
+static inline int coro_sched_add(coro_scheduler_t *s, coro_func_t func, void *ctx,
+                                 const char *label, int priority) {
+    if (s->count >= CORO_SCHED_MAX)
+        return -1;
     int id = s->count++;
     s->slots[id].func = func;
     s->slots[id].ctx = ctx;
@@ -204,7 +230,8 @@ static inline int coro_sched_tick(coro_scheduler_t *s) {
     int still_active = 0;
     for (int i = 0; i < s->count; i++) {
         coro_slot_t *slot = &s->slots[i];
-        if (slot->status == CORO_STATUS_DONE) continue;
+        if (slot->status == CORO_STATUS_DONE)
+            continue;
 
         slot->status = CORO_STATUS_RUNNING;
         int ret = slot->func(slot->ctx);

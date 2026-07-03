@@ -76,8 +76,8 @@ int dcr_provider_request_max_retries(const char *provider, int fallback);
 size_t dcr_model_count(void);
 const dcr_model_t *dcr_model_at(size_t idx);
 const dcr_model_t *dcr_model_find(const char *id_or_alias);
-const char *dcr_reasoning_effort_normalize(const char *provider, const char *model, const char *effort,
-                                           char *out, size_t out_len);
+const char *dcr_reasoning_effort_normalize(const char *provider, const char *model,
+                                           const char *effort, char *out, size_t out_len);
 
 int dcr_cli(int argc, char **argv);
 

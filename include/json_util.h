@@ -6,39 +6,39 @@
 
 /* Dynamic string buffer */
 typedef struct {
-    char  *data;
+    char *data;
     size_t len;
     size_t cap;
 } jbuf_t;
 
 /* ── Arena allocator ──────────────────────────────────────────────────── */
 
-#define ARENA_CHUNK_SIZE (64 * 1024)  /* 64KB per chunk */
-#define ARENA_OVERSIZE   (32 * 1024)  /* allocs > this go to separate chain */
+#define ARENA_CHUNK_SIZE (64 * 1024) /* 64KB per chunk */
+#define ARENA_OVERSIZE (32 * 1024)   /* allocs > this go to separate chain */
 
 typedef struct arena_chunk {
     struct arena_chunk *next;
-    size_t              cap;
-    size_t              used;
-    char                data[];  /* flexible array member */
+    size_t cap;
+    size_t used;
+    char data[]; /* flexible array member */
 } arena_chunk_t;
 
 typedef struct arena_oversize {
     struct arena_oversize *next;
-    void                  *ptr;
+    void *ptr;
 } arena_oversize_t;
 
 typedef struct {
-    arena_chunk_t    *head;       /* linked list of chunks */
-    arena_oversize_t *oversized;  /* separate malloc chain for big allocs */
-    size_t            total_allocated;
+    arena_chunk_t *head;         /* linked list of chunks */
+    arena_oversize_t *oversized; /* separate malloc chain for big allocs */
+    size_t total_allocated;
 } arena_t;
 
-void   arena_init(arena_t *a);
-void  *arena_alloc(arena_t *a, size_t size);   /* 8-byte aligned bump */
-char  *arena_strdup(arena_t *a, const char *s);
-void   arena_reset(arena_t *a);                /* rewind all chunks */
-void   arena_free(arena_t *a);                 /* release all memory */
+void arena_init(arena_t *a);
+void *arena_alloc(arena_t *a, size_t size); /* 8-byte aligned bump */
+char *arena_strdup(arena_t *a, const char *s);
+void arena_reset(arena_t *a); /* rewind all chunks */
+void arena_free(arena_t *a);  /* release all memory */
 
 /* ── JSON schema validation ───────────────────────────────────────────── */
 
@@ -51,33 +51,33 @@ typedef struct {
 json_validation_t json_validate_schema(const char *json, const char *schema_json);
 
 /* Safe allocation helpers — abort on OOM rather than corrupt state */
-void  *safe_malloc(size_t size);
-void  *safe_realloc(void *ptr, size_t size);
-char  *safe_strdup(const char *s);
+void *safe_malloc(size_t size);
+void *safe_realloc(void *ptr, size_t size);
+char *safe_strdup(const char *s);
 
-void   jbuf_init(jbuf_t *b, size_t initial_cap);
-void   jbuf_free(jbuf_t *b);
-void   jbuf_reset(jbuf_t *b);
-void   jbuf_append(jbuf_t *b, const char *s);
-void   jbuf_append_len(jbuf_t *b, const char *s, size_t n);
-void   jbuf_appendf(jbuf_t *b, const char *fmt, ...) __attribute__((format(printf, 2, 3)));
-void   jbuf_append_char(jbuf_t *b, char c);
-void   jbuf_append_json_str(jbuf_t *b, const char *s);
-void   jbuf_append_int(jbuf_t *b, int v);
+void jbuf_init(jbuf_t *b, size_t initial_cap);
+void jbuf_free(jbuf_t *b);
+void jbuf_reset(jbuf_t *b);
+void jbuf_append(jbuf_t *b, const char *s);
+void jbuf_append_len(jbuf_t *b, const char *s, size_t n);
+void jbuf_appendf(jbuf_t *b, const char *fmt, ...) __attribute__((format(printf, 2, 3)));
+void jbuf_append_char(jbuf_t *b, char c);
+void jbuf_append_json_str(jbuf_t *b, const char *s);
+void jbuf_append_int(jbuf_t *b, int v);
 
 /* Parsed content block */
 typedef struct {
-    char *type;          /* "text", "tool_use", or "thinking" */
-    char *text;          /* if type == "text" or "thinking" */
-    char *tool_name;     /* if type == "tool_use" */
-    char *tool_id;       /* if type == "tool_use" */
-    char *tool_input;    /* raw JSON string of input object */
+    char *type;       /* "text", "tool_use", or "thinking" */
+    char *text;       /* if type == "text" or "thinking" */
+    char *tool_name;  /* if type == "tool_use" */
+    char *tool_id;    /* if type == "tool_use" */
+    char *tool_input; /* raw JSON string of input object */
 } content_block_t;
 
 typedef struct {
     content_block_t *blocks;
-    int              count;
-    char            *stop_reason;
+    int count;
+    char *stop_reason;
 } parsed_response_t;
 
 bool json_parse_response(const char *json, parsed_response_t *out);
@@ -86,8 +86,8 @@ void json_free_response(parsed_response_t *r);
 
 char *json_get_str(const char *json, const char *key);
 char *json_get_raw(const char *json, const char *key);
-int   json_get_int(const char *json, const char *key, int def);
-bool  json_get_bool(const char *json, const char *key, bool def);
+int json_get_int(const char *json, const char *key, int def);
+bool json_get_bool(const char *json, const char *key, bool def);
 double json_get_double(const char *json, const char *key, double def);
 
 /* Strictly validate that the whole string is one balanced JSON object/array.

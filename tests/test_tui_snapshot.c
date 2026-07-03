@@ -19,32 +19,32 @@
 
 /* Normally defined in main.c (the CLI entry, excluded from this headless test
  * binary). Provide them here so the TUI/agent object graph links standalone. */
-int  g_cheap_mode = 0;
+int g_cheap_mode = 0;
 vm_t g_vm;
 volatile int g_interrupted = 0;
 double g_cost_budget = 0.0;
 
 static int g_pass = 0, g_fail = 0;
 
-#define SNAP(name, got, want)                                                          \
-    do {                                                                               \
-        if (strcmp((got), (want)) == 0) {                                              \
-            g_pass++;                                                                  \
-        } else {                                                                       \
-            g_fail++;                                                                  \
-            fprintf(stderr, "SNAPSHOT FAIL [%s]\n  got : '%s'\n  want: '%s'\n", name,  \
-                    (got), (want));                                                    \
-        }                                                                              \
+#define SNAP(name, got, want)                                                                      \
+    do {                                                                                           \
+        if (strcmp((got), (want)) == 0) {                                                          \
+            g_pass++;                                                                              \
+        } else {                                                                                   \
+            g_fail++;                                                                              \
+            fprintf(stderr, "SNAPSHOT FAIL [%s]\n  got : '%s'\n  want: '%s'\n", name, (got),       \
+                    (want));                                                                       \
+        }                                                                                          \
     } while (0)
 
-#define CHECK(name, cond)                                                              \
-    do {                                                                               \
-        if (cond) {                                                                    \
-            g_pass++;                                                                  \
-        } else {                                                                       \
-            g_fail++;                                                                  \
-            fprintf(stderr, "CHECK FAIL [%s]\n", name);                                \
-        }                                                                              \
+#define CHECK(name, cond)                                                                          \
+    do {                                                                                           \
+        if (cond) {                                                                                \
+            g_pass++;                                                                              \
+        } else {                                                                                   \
+            g_fail++;                                                                              \
+            fprintf(stderr, "CHECK FAIL [%s]\n", name);                                            \
+        }                                                                                          \
     } while (0)
 
 /* Golden: the rounded box corner set is stable and is what the panel UI draws. */
@@ -97,7 +97,8 @@ static void test_theme_accessors_nonnull(void) {
 /* Golden: semantic status roles are non-empty ANSI escapes (the Integument
  * meaning-coded palette). They must each begin with ESC '[' . */
 static void test_status_roles_are_ansi(void) {
-    const char *roles[] = {TUI_ROLE_OK, TUI_ROLE_FAIL, TUI_ROLE_WARN, TUI_ROLE_INFO, TUI_ROLE_MUTED};
+    const char *roles[] = {TUI_ROLE_OK, TUI_ROLE_FAIL, TUI_ROLE_WARN, TUI_ROLE_INFO,
+                           TUI_ROLE_MUTED};
     const char *names[] = {"OK", "FAIL", "WARN", "INFO", "MUTED"};
     for (int i = 0; i < 5; i++) {
         CHECK(names[i], roles[i] != NULL && roles[i][0] == '\033' && roles[i][1] == '[');

@@ -29,13 +29,13 @@
 
 typedef struct dsco_waiter {
     pthread_mutex_t mu;
-    pthread_cond_t  cv;
-    int             signaled; /* consumable one-shot wake */
-    int             stopped;  /* sticky: all waits return immediately */
+    pthread_cond_t cv;
+    int signaled; /* consumable one-shot wake */
+    int stopped;  /* sticky: all waits return immediately */
 } dsco_waiter_t;
 
 /* Initialize. Returns 0 on success. Uses CLOCK_MONOTONIC where supported. */
-int  dsco_waiter_init(dsco_waiter_t *w);
+int dsco_waiter_init(dsco_waiter_t *w);
 void dsco_waiter_destroy(dsco_waiter_t *w);
 
 /* Sleep up to timeout_ms (<0 = wait forever until signal/stop).

@@ -27,10 +27,10 @@
 #include <stdbool.h>
 #include <stdint.h>
 
-#define ENVG_PRELOAD_FOUND    (1u << 0)
-#define ENVG_SUSPICIOUS_VAR   (1u << 1)
-#define ENVG_INJECTED_DYLIB   (1u << 2)
-#define ENVG_PTRACE_DETECTED  (1u << 3)
+#define ENVG_PRELOAD_FOUND (1u << 0)
+#define ENVG_SUSPICIOUS_VAR (1u << 1)
+#define ENVG_INJECTED_DYLIB (1u << 2)
+#define ENVG_PTRACE_DETECTED (1u << 3)
 
 /* Run all checks.  Strips dangerous env vars.  Returns bitmask (0 = clean).
  * If any flag is set the event is written to the audit log and to stderr.

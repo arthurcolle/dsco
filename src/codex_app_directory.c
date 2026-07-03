@@ -55,7 +55,8 @@ static void cad_copy_str_key(const char *obj, const char *key, char *dst, size_t
     free(s);
 }
 
-static void cad_copy_first_str(const char *obj, const char *const *keys, char *dst, size_t dst_len) {
+static void cad_copy_first_str(const char *obj, const char *const *keys, char *dst,
+                               size_t dst_len) {
     for (int i = 0; keys[i]; i++) {
         char *s = json_get_str(obj, keys[i]);
         if (s && s[0]) {
@@ -198,8 +199,8 @@ static void cad_extract_labels(codex_app_directory_entry_t *e, const char *obj) 
         cad_append_token(e->labels, sizeof(e->labels), "sync");
 }
 
-unsigned codex_app_directory_actions_for_labels(bool retrievable, bool sync,
-                                                bool consequential, bool interactive) {
+unsigned codex_app_directory_actions_for_labels(bool retrievable, bool sync, bool consequential,
+                                                bool interactive) {
     unsigned actions = DSCO_INTEGRATION_ACTION_NONE;
     if (retrievable || sync)
         actions |= DSCO_INTEGRATION_ACTION_READ | DSCO_INTEGRATION_ACTION_UNTRUSTED_CONTENT;
@@ -218,7 +219,8 @@ static void cad_finalize_entry(codex_app_directory_entry_t *e) {
     if (!e->display_name[0])
         cad_strlcpy(e->display_name, sizeof(e->display_name), e->id);
     if (!e->distribution_channel[0])
-        cad_strlcpy(e->distribution_channel, sizeof(e->distribution_channel), "codex_app_directory");
+        cad_strlcpy(e->distribution_channel, sizeof(e->distribution_channel),
+                    "codex_app_directory");
     if (!e->catalog_status[0])
         cad_strlcpy(e->catalog_status, sizeof(e->catalog_status), e->stale ? "stale" : "cached");
     e->action_flags = codex_app_directory_actions_for_labels(e->retrievable, e->sync,
@@ -339,14 +341,16 @@ static void cad_parse_entry_cb(const char *element_start, void *ctx) {
     static const char *id_keys[] = {"id", "app_id", "name", NULL};
     static const char *connector_keys[] = {"connector_id", "connectorId", "slug", "id", NULL};
     static const char *display_keys[] = {"display_name", "displayName", "title", "name", NULL};
-    static const char *channel_keys[] = {"distribution_channel", "distributionChannel", "distribution", "source", NULL};
+    static const char *channel_keys[] = {"distribution_channel", "distributionChannel",
+                                         "distribution", "source", NULL};
     static const char *scope_keys[] = {"scope", "auth_scope", "authScope", NULL};
     static const char *status_keys[] = {"catalog_status", "catalogStatus", "status", NULL};
 
     cad_copy_first_str(element_start, id_keys, e.id, sizeof(e.id));
     cad_copy_first_str(element_start, connector_keys, e.connector_id, sizeof(e.connector_id));
     cad_copy_first_str(element_start, display_keys, e.display_name, sizeof(e.display_name));
-    cad_copy_first_str(element_start, channel_keys, e.distribution_channel, sizeof(e.distribution_channel));
+    cad_copy_first_str(element_start, channel_keys, e.distribution_channel,
+                       sizeof(e.distribution_channel));
     cad_copy_first_str(element_start, scope_keys, e.scope, sizeof(e.scope));
     cad_copy_first_str(element_start, status_keys, e.catalog_status, sizeof(e.catalog_status));
     cad_copy_array_strings(element_start, "categories", e.categories, sizeof(e.categories));
@@ -360,9 +364,12 @@ static void cad_parse_entry_cb(const char *element_start, void *ctx) {
         }
     }
 
-    e.is_enabled = cad_raw_bool(element_start, "isEnabled", cad_raw_bool(element_start, "is_enabled", false));
-    e.is_accessible = cad_raw_bool(element_start, "isAccessible", cad_raw_bool(element_start, "is_accessible", false));
-    e.stale = cad_raw_bool(element_start, "stale", false) || cad_ci_contains(e.catalog_status, "stale");
+    e.is_enabled =
+        cad_raw_bool(element_start, "isEnabled", cad_raw_bool(element_start, "is_enabled", false));
+    e.is_accessible = cad_raw_bool(element_start, "isAccessible",
+                                   cad_raw_bool(element_start, "is_accessible", false));
+    e.stale =
+        cad_raw_bool(element_start, "stale", false) || cad_ci_contains(e.catalog_status, "stale");
     cad_extract_labels(&e, element_start);
     cad_finalize_entry(&e);
 
@@ -370,7 +377,8 @@ static void cad_parse_entry_cb(const char *element_start, void *ctx) {
         (void)cad_add(dir, &e);
 }
 
-bool codex_app_directory_load_file(codex_app_directory_t *dir, const char *path, char *err, size_t err_len) {
+bool codex_app_directory_load_file(codex_app_directory_t *dir, const char *path, char *err,
+                                   size_t err_len) {
     if (!dir) {
         if (err && err_len)
             snprintf(err, err_len, "directory output is NULL");

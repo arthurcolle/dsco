@@ -32,7 +32,7 @@ typedef void (*dsco_pool_iter_fn)(size_t i, void *ctx);
 typedef void (*dsco_pool_work_fn)(void *ctx);
 
 /* Global pool used by apply()/submit() when no explicit pool is passed. */
-int  dsco_pool_global_init(int nthreads);   /* 0 → use cpu_count */
+int dsco_pool_global_init(int nthreads); /* 0 → use cpu_count */
 void dsco_pool_global_shutdown(void);
 
 /* Parallel-for. n iterations, divided across worker threads. */
@@ -40,7 +40,7 @@ void dsco_pool_apply(size_t n, void *ctx, dsco_pool_iter_fn fn);
 
 /* Fire-and-forget. Returns a handle suitable for dsco_pool_join. */
 dsco_task_t *dsco_pool_submit(dsco_pool_work_fn fn, void *ctx);
-void         dsco_pool_join(dsco_task_t *t);
+void dsco_pool_join(dsco_task_t *t);
 
 /* Number of worker threads in the global pool. */
 int dsco_pool_worker_count(void);

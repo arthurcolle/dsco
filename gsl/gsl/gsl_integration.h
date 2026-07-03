@@ -26,25 +26,20 @@ typedef struct {
     size_t limit;
 } gsl_integration_workspace_params;
 
-int gsl_integration_qag(double (*f)(double x, void *params), void *params,
-                        double a, double b,
+int gsl_integration_qag(double (*f)(double x, void *params), void *params, double a, double b,
                         double epsabs, double epsrel, size_t limit,
-                        gsl_integration_workspace *workspace,
-                        double *result, double *abserr);
+                        gsl_integration_workspace *workspace, double *result, double *abserr);
 
-int gsl_integration_qagi(double (*f)(double x, void *params), void *params,
-                         double epsabs, double epsrel, size_t limit,
-                         gsl_integration_workspace *workspace,
+int gsl_integration_qagi(double (*f)(double x, void *params), void *params, double epsabs,
+                         double epsrel, size_t limit, gsl_integration_workspace *workspace,
                          double *result, double *abserr);
 
-int gsl_integration_qagiu(double (*f)(double x, void *params), void *params,
-                          double a, double epsabs, double epsrel, size_t limit,
-                          gsl_integration_workspace *workspace,
-                          double *result, double *abserr);
+int gsl_integration_qagiu(double (*f)(double x, void *params), void *params, double a,
+                          double epsabs, double epsrel, size_t limit,
+                          gsl_integration_workspace *workspace, double *result, double *abserr);
 
-int gsl_integration_qagil(double (*f)(double x, void *params), void *params,
-                          double b, double epsabs, double epsrel, size_t limit,
-                          gsl_integration_workspace *workspace,
-                          double *result, double *abserr);
+int gsl_integration_qagil(double (*f)(double x, void *params), void *params, double b,
+                          double epsabs, double epsrel, size_t limit,
+                          gsl_integration_workspace *workspace, double *result, double *abserr);
 
 #endif /* __GSL_INTEGRATION_H__ */

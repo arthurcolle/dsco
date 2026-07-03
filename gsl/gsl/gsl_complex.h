@@ -9,9 +9,19 @@ typedef struct {
 
 #define GSL_REAL(z) ((z).dat[0])
 #define GSL_IMAG(z) ((z).dat[1])
-#define GSL_SET_COMPLEX(zp,x,y) do { (zp)->dat[0]=(x); (zp)->dat[1]=(y); } while(0)
-#define GSL_SET_REAL(zp,x) do { (zp)->dat[0]=(x); } while(0)
-#define GSL_SET_IMAG(zp,y) do { (zp)->dat[1]=(y); } while(0)
+#define GSL_SET_COMPLEX(zp, x, y)                                                                  \
+    do {                                                                                           \
+        (zp)->dat[0] = (x);                                                                        \
+        (zp)->dat[1] = (y);                                                                        \
+    } while (0)
+#define GSL_SET_REAL(zp, x)                                                                        \
+    do {                                                                                           \
+        (zp)->dat[0] = (x);                                                                        \
+    } while (0)
+#define GSL_SET_IMAG(zp, y)                                                                        \
+    do {                                                                                           \
+        (zp)->dat[1] = (y);                                                                        \
+    } while (0)
 
 gsl_complex gsl_complex_rect(double x, double y);
 gsl_complex gsl_complex_polar(double r, double theta);

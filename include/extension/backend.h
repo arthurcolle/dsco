@@ -32,7 +32,7 @@ typedef struct backend_interface {
     const char *name;
     backend_category_t category;
     backend_status_t status;
-    void *impl;                    /* Opaque implementation pointer */
+    void *impl; /* Opaque implementation pointer */
     int (*init)(void *impl);
     void (*shutdown)(void *impl);
     const char *(*version)(void *impl);
@@ -47,7 +47,7 @@ int backend_unload(const char *name, backend_category_t cat);
 /* Skill requirement declaration */
 typedef struct {
     backend_category_t category;
-    const char *required_name;     /* NULL = any in category */
+    const char *required_name; /* NULL = any in category */
     int mandatory;
 } backend_requirement_t;
 

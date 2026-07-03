@@ -14,7 +14,7 @@ typedef struct {
     const char *name;
     const char *host;        /* scheme+host:port, no trailing slash */
     const char *models_path; /* listing endpoint */
-    int ollama_style;        /* 1: /api/tags {"models":[{"name"}]}; 0: /v1/models {"data":[{"id"}]} */
+    int ollama_style; /* 1: /api/tags {"models":[{"name"}]}; 0: /v1/models {"data":[{"id"}]} */
 } local_server_def_t;
 
 static const local_server_def_t LOCAL_SERVERS[] = {
@@ -30,8 +30,7 @@ static const local_server_def_t LOCAL_SERVERS[] = {
     {"tgi", "http://localhost:3000", "/v1/models", 0},
     {"sglang", "http://localhost:30000", "/v1/models", 0},
 };
-static const int LOCAL_SERVER_COUNT =
-    (int)(sizeof(LOCAL_SERVERS) / sizeof(LOCAL_SERVERS[0]));
+static const int LOCAL_SERVER_COUNT = (int)(sizeof(LOCAL_SERVERS) / sizeof(LOCAL_SERVERS[0]));
 
 static const local_server_def_t *local_find(const char *server) {
     if (!server)

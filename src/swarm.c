@@ -48,14 +48,18 @@ static const char *swarm_provider_cli_name(const char *provider) {
 
 static bool swarm_provider_cli_pin_supported(const char *provider) {
     provider = swarm_provider_cli_name(provider);
-    static const char *supported[] = {
-        "anthropic", "openai", "openai-codex", "openrouter", "google", "groq",
-        "deepseek", "mistral", "xai", "together", "perplexity", "cerebras",
-        "cohere", "moonshot", "sakana", "zai", "alibaba", "alibaba-coding-plan",
-        "qwen-oauth", "ollama", "lmstudio", "mlx", "vllm", "llamacpp", "localai",
-        "jan", "gpt4all", "koboldcpp", "textgen", "tgi", "sglang", "llamafile",
-        "local", NULL
-    };
+    static const char *supported[] = {"anthropic",  "openai",     "openai-codex",
+                                      "openrouter", "google",     "groq",
+                                      "deepseek",   "mistral",    "xai",
+                                      "together",   "perplexity", "cerebras",
+                                      "cohere",     "moonshot",   "sakana",
+                                      "zai",        "alibaba",    "alibaba-coding-plan",
+                                      "qwen-oauth", "ollama",     "lmstudio",
+                                      "mlx",        "vllm",       "llamacpp",
+                                      "localai",    "jan",        "gpt4all",
+                                      "koboldcpp",  "textgen",    "tgi",
+                                      "sglang",     "llamafile",  "local",
+                                      NULL};
     if (!provider || !provider[0])
         return false;
     for (int i = 0; supported[i]; i++)
@@ -427,8 +431,7 @@ int swarm_spawn_in_group(swarm_t *s, int group_id, const char *task, const char 
         const char *bin = s->dsco_path;
 
         const char *child_provider = provider_route_for_model(m, s->api_key, NULL);
-        const char *child_key =
-            provider_resolve_request_api_key(child_provider, s->api_key);
+        const char *child_key = provider_resolve_request_api_key(child_provider, s->api_key);
         if ((!child_key || !child_key[0]) && s->default_model && s->default_model[0] &&
             strcmp(m, s->default_model) != 0) {
             fprintf(stdout,
@@ -511,8 +514,8 @@ int swarm_spawn_in_group(swarm_t *s, int group_id, const char *task, const char 
         }
         const char *child_provider_cli = swarm_provider_cli_name(child_provider);
         if (swarm_provider_cli_pin_supported(child_provider_cli)) {
-            execl(bin, bin, "--profile", "worker", "--provider", child_provider_cli,
-                  "-m", m, task, NULL);
+            execl(bin, bin, "--profile", "worker", "--provider", child_provider_cli, "-m", m, task,
+                  NULL);
         } else {
             execl(bin, bin, "--profile", "worker", "-m", m, task, NULL);
         }
@@ -662,8 +665,8 @@ int swarm_spawn_provider(swarm_t *s, int group_id, const char *task, const char 
         setenv("DSCO_WORKER", "1", 1);
         const char *child_provider_cli = swarm_provider_cli_name(provider);
         if (swarm_provider_cli_pin_supported(child_provider_cli)) {
-            execl(bin, bin, "--profile", "worker", "--provider", child_provider_cli,
-                  "-m", m, task, NULL);
+            execl(bin, bin, "--profile", "worker", "--provider", child_provider_cli, "-m", m, task,
+                  NULL);
             fprintf(stdout, "swarm: exec failed for '%s --provider %s': %s\n", bin,
                     child_provider_cli, strerror(errno));
         } else {
@@ -932,8 +935,9 @@ int swarm_poll_stream(swarm_t *s, int timeout_ms, swarm_stream_cb cb, void *ctx)
             bool already_killed = (c->status == SWARM_KILLED);
             if (WIFEXITED(wstatus)) {
                 c->exit_code = WEXITSTATUS(wstatus);
-                c->status = already_killed ? SWARM_KILLED
-                          : (c->exit_code == 0) ? SWARM_DONE : SWARM_ERROR;
+                c->status = already_killed        ? SWARM_KILLED
+                            : (c->exit_code == 0) ? SWARM_DONE
+                                                  : SWARM_ERROR;
             } else {
                 c->status = SWARM_KILLED;
                 c->exit_code = -1;

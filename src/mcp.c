@@ -523,8 +523,8 @@ static size_t http_header_cb(char *buffer, size_t size, size_t nitems, void *use
     return total;
 }
 
-static int http_cancel_cb(void *clientp, curl_off_t dltotal, curl_off_t dlnow,
-                          curl_off_t ultotal, curl_off_t ulnow) {
+static int http_cancel_cb(void *clientp, curl_off_t dltotal, curl_off_t dlnow, curl_off_t ultotal,
+                          curl_off_t ulnow) {
     (void)clientp;
     (void)dltotal;
     (void)dlnow;
@@ -767,8 +767,14 @@ static bool initialize_server(mcp_server_t *srv) {
 
 static void stop_server(mcp_server_t *srv) {
     /* Close pipes first so the child sees EOF on stdin */
-    if (srv->stdin_fd >= 0)  { close(srv->stdin_fd);  srv->stdin_fd  = -1; }
-    if (srv->stdout_fd >= 0) { close(srv->stdout_fd); srv->stdout_fd = -1; }
+    if (srv->stdin_fd >= 0) {
+        close(srv->stdin_fd);
+        srv->stdin_fd = -1;
+    }
+    if (srv->stdout_fd >= 0) {
+        close(srv->stdout_fd);
+        srv->stdout_fd = -1;
+    }
     if (srv->pid > 0) {
         /* SIGTERM then wait up to 2s for graceful exit, then SIGKILL */
         kill(srv->pid, SIGTERM);
@@ -778,7 +784,8 @@ static void stop_server(mcp_server_t *srv) {
         for (;;) {
             int status = 0;
             pid_t r = waitpid(srv->pid, &status, WNOHANG);
-            if (r == srv->pid || r < 0) break;  /* exited or error */
+            if (r == srv->pid || r < 0)
+                break; /* exited or error */
             struct timespec now;
             clock_gettime(CLOCK_MONOTONIC, &now);
             if (now.tv_sec > ts_end.tv_sec ||
@@ -1842,10 +1849,9 @@ static bool yaml_split_key_value(char *s, char **key_out, char **val_out) {
 static bool yaml_common_server_key(const char *key) {
     return strcmp(key, "command") == 0 || strcmp(key, "cmd") == 0 || strcmp(key, "args") == 0 ||
            strcmp(key, "env") == 0 || strcmp(key, "headers") == 0 ||
-           strcmp(key, "http_headers") == 0 || strcmp(key, "url") == 0 ||
-           strcmp(key, "cwd") == 0 || strcmp(key, "type") == 0 ||
-           strcmp(key, "transport") == 0 || strcmp(key, "disabled") == 0 ||
-           strcmp(key, "enabled") == 0;
+           strcmp(key, "http_headers") == 0 || strcmp(key, "url") == 0 || strcmp(key, "cwd") == 0 ||
+           strcmp(key, "type") == 0 || strcmp(key, "transport") == 0 ||
+           strcmp(key, "disabled") == 0 || strcmp(key, "enabled") == 0;
 }
 
 static void yaml_apply_server_field(mcp_server_t *srv, const char *key, const char *val,
@@ -1954,8 +1960,7 @@ static void load_hermes_yaml_config(mcp_registry_t *reg, const char *path, const
             continue;
 
         bool server_decl = indent > root_indent && !val[0] &&
-                           (current < 0 || indent <= server_indent) &&
-                           !yaml_common_server_key(key);
+                           (current < 0 || indent <= server_indent) && !yaml_common_server_key(key);
         if (server_decl) {
             current = find_or_add_toml_server(parsed, &parsed_count, key, source);
             server_indent = indent;
@@ -2050,8 +2055,8 @@ int mcp_init(mcp_registry_t *reg) {
      * opt-in (DSCO_MCP_IMPORT_CLAUDE_DESKTOP=1) so the default never reaches into
      * another app's container. */
     if (getenv("DSCO_MCP_IMPORT_CLAUDE_DESKTOP")) {
-        snprintf(path, sizeof(path), "%s/Library/Application Support/Claude/claude_desktop_config.json",
-                 home);
+        snprintf(path, sizeof(path),
+                 "%s/Library/Application Support/Claude/claude_desktop_config.json", home);
         load_json_config(reg, path, "claude:desktop", false, false);
         snprintf(path, sizeof(path), "%s/Library/Application Support/Claude/config.json", home);
         load_json_config(reg, path, "claude:desktop-config", false, false);
