@@ -15525,6 +15525,576 @@ static bool tool_review_diff(const char *input, char *result, size_t rlen) {
     return true;
 }
 
+typedef struct {
+    char path[PATH_MAX];
+    time_t mtime;
+    off_t size;
+} cw_fs_snap_t;
+
+typedef struct {
+    cw_fs_snap_t *items;
+    int count;
+    int cap;
+    int limit;
+    bool truncated;
+} cw_fs_snap_set_t;
+
+static int cw_clamp_int(int v, int lo, int hi) {
+    if (v < lo)
+        return lo;
+    if (v > hi)
+        return hi;
+    return v;
+}
+
+static bool cw_contains_ci(const char *haystack, const char *needle) {
+    if (!haystack || !needle || !needle[0])
+        return false;
+    size_t nl = strlen(needle);
+    for (const char *p = haystack; *p; p++) {
+        size_t i = 0;
+        while (i < nl && p[i] && tolower((unsigned char)p[i]) == tolower((unsigned char)needle[i]))
+            i++;
+        if (i == nl)
+            return true;
+    }
+    return false;
+}
+
+static bool cw_archive_files_safe(const char *s) {
+    if (!s || !s[0])
+        return false;
+    for (const char *p = s; *p; p++) {
+        if (isalnum((unsigned char)*p) || strchr("_-./, ", *p))
+            continue;
+        return false;
+    }
+    return true;
+}
+
+static bool cw_valid_host_token(const char *s) {
+    if (!s || !s[0])
+        return false;
+    for (const char *p = s; *p; p++) {
+        if (isalnum((unsigned char)*p) || strchr(".-_:[]", *p))
+            continue;
+        return false;
+    }
+    return true;
+}
+
+static bool cw_valid_signal_name(const char *s) {
+    if (!s || !s[0])
+        return false;
+    for (const char *p = s; *p; p++) {
+        if (isalnum((unsigned char)*p) || *p == '_')
+            continue;
+        return false;
+    }
+    return true;
+}
+
+static bool cw_snap_add(cw_fs_snap_set_t *set, const char *path, const struct stat *st) {
+    if (!set || !path || !st)
+        return false;
+    if (set->count >= set->limit) {
+        set->truncated = true;
+        return false;
+    }
+    if (set->count == set->cap) {
+        int ncap = set->cap ? set->cap * 2 : 128;
+        if (ncap > set->limit)
+            ncap = set->limit;
+        cw_fs_snap_t *next = realloc(set->items, sizeof(*next) * (size_t)ncap);
+        if (!next) {
+            set->truncated = true;
+            return false;
+        }
+        set->items = next;
+        set->cap = ncap;
+    }
+    cw_fs_snap_t *it = &set->items[set->count++];
+    snprintf(it->path, sizeof(it->path), "%s", path);
+    it->mtime = st->st_mtime;
+    it->size = st->st_size;
+    return true;
+}
+
+static void cw_snapshot_walk(const char *path, int depth, int max_depth, cw_fs_snap_set_t *set) {
+    if (!path || !set || set->truncated)
+        return;
+    struct stat st;
+    if (lstat(path, &st) != 0)
+        return;
+    if (S_ISREG(st.st_mode)) {
+        cw_snap_add(set, path, &st);
+        return;
+    }
+    if (!S_ISDIR(st.st_mode) || depth >= max_depth)
+        return;
+    DIR *d = opendir(path);
+    if (!d)
+        return;
+    struct dirent *e;
+    while ((e = readdir(d)) != NULL) {
+        if (strcmp(e->d_name, ".") == 0 || strcmp(e->d_name, "..") == 0)
+            continue;
+        if (strcmp(e->d_name, ".git") == 0 || strcmp(e->d_name, "node_modules") == 0)
+            continue;
+        char child[PATH_MAX];
+        int n = snprintf(child, sizeof(child), "%s/%s", path, e->d_name);
+        if (n < 0 || (size_t)n >= sizeof(child)) {
+            set->truncated = true;
+            continue;
+        }
+        cw_snapshot_walk(child, depth + 1, max_depth, set);
+        if (set->truncated)
+            break;
+    }
+    closedir(d);
+}
+
+static int cw_snap_find(const cw_fs_snap_set_t *set, const char *path) {
+    if (!set || !path)
+        return -1;
+    for (int i = 0; i < set->count; i++)
+        if (strcmp(set->items[i].path, path) == 0)
+            return i;
+    return -1;
+}
+
+static void cw_snap_free(cw_fs_snap_set_t *set) {
+    if (!set)
+        return;
+    free(set->items);
+    memset(set, 0, sizeof(*set));
+}
+
+static void cw_append_snap_event(jbuf_t *j, const cw_fs_snap_t *it) {
+    jbuf_append(j, "{\"path\":");
+    jbuf_append_json_str(j, it->path);
+    jbuf_appendf(j, ",\"size\":%lld,\"mtime\":%lld}", (long long)it->size, (long long)it->mtime);
+}
+
+static void cw_applescript_json_string(jbuf_t *b, const char *s) {
+    jbuf_append(b, "\"");
+    for (const char *p = s ? s : ""; *p; p++) {
+        if (*p == '\\' || *p == '"')
+            jbuf_appendf(b, "\\%c", *p);
+        else if (*p == '\n' || *p == '\r' || *p == '\t')
+            jbuf_append(b, " ");
+        else
+            jbuf_appendf(b, "%c", *p);
+    }
+    jbuf_append(b, "\"");
+}
+
+/* ── 21. fs_watch — bounded filesystem change snapshot ─────────────────── */
+static bool tool_fs_watch(const char *input, char *result, size_t rlen) {
+    char *path = json_get_str(input, "path");
+    if (!path || !path[0]) {
+        free(path);
+        path = strdup(".");
+    }
+    int seconds = cw_clamp_int(json_get_int(input, "seconds", 2), 0, 30);
+    int depth = cw_clamp_int(json_get_int(input, "depth", 4), 0, 12);
+    int limit = cw_clamp_int(json_get_int(input, "limit", 1000), 1, 5000);
+    struct stat st;
+    if (lstat(path, &st) != 0) {
+        snprintf(result, rlen, "{\"error\":\"path not found\"}");
+        free(path);
+        return false;
+    }
+    cw_fs_snap_set_t before = {.limit = limit};
+    cw_fs_snap_set_t after = {.limit = limit};
+    cw_snapshot_walk(path, 0, depth, &before);
+    if (seconds > 0)
+        sleep((unsigned int)seconds);
+    cw_snapshot_walk(path, 0, depth, &after);
+
+    jbuf_t j;
+    jbuf_init(&j, 8192);
+    jbuf_append(&j, "{\"path\":");
+    jbuf_append_json_str(&j, path);
+    jbuf_appendf(&j, ",\"seconds\":%d,\"depth\":%d,\"truncated\":%s,\"created\":[", seconds, depth,
+                 (before.truncated || after.truncated) ? "true" : "false");
+    int created = 0, changed = 0, deleted = 0;
+    for (int i = 0; i < after.count; i++) {
+        int bi = cw_snap_find(&before, after.items[i].path);
+        if (bi >= 0)
+            continue;
+        if (created++)
+            jbuf_append(&j, ",");
+        cw_append_snap_event(&j, &after.items[i]);
+    }
+    jbuf_append(&j, "],\"changed\":[");
+    for (int i = 0; i < after.count; i++) {
+        int bi = cw_snap_find(&before, after.items[i].path);
+        if (bi < 0)
+            continue;
+        if (before.items[bi].mtime == after.items[i].mtime &&
+            before.items[bi].size == after.items[i].size)
+            continue;
+        if (changed++)
+            jbuf_append(&j, ",");
+        cw_append_snap_event(&j, &after.items[i]);
+    }
+    jbuf_append(&j, "],\"deleted\":[");
+    for (int i = 0; i < before.count; i++) {
+        if (cw_snap_find(&after, before.items[i].path) >= 0)
+            continue;
+        if (deleted++)
+            jbuf_append(&j, ",");
+        cw_append_snap_event(&j, &before.items[i]);
+    }
+    jbuf_appendf(&j, "],\"created_count\":%d,\"changed_count\":%d,\"deleted_count\":%d}", created,
+                 changed, deleted);
+    size_t n = j.len < rlen - 1 ? j.len : rlen - 1;
+    memcpy(result, j.data, n);
+    result[n] = '\0';
+    jbuf_free(&j);
+    cw_snap_free(&before);
+    cw_snap_free(&after);
+    free(path);
+    return true;
+}
+
+/* ── 22. tail_follow — bounded tail -f wrapper ─────────────────────────── */
+static bool tool_tail_follow(const char *input, char *result, size_t rlen) {
+    char *file = json_get_str(input, "file");
+    int lines = cw_clamp_int(json_get_int(input, "lines", 40), 1, 1000);
+    int seconds = cw_clamp_int(json_get_int(input, "seconds", 0), 0, 30);
+    if (!file || !file[0]) {
+        free(file);
+        snprintf(result, rlen, "{\"error\":\"file required\"}");
+        return false;
+    }
+    jbuf_t cmd;
+    jbuf_init(&cmd, 256);
+    if (seconds > 0) {
+        jbuf_appendf(&cmd, "{ tail -n %d -f ", lines);
+        shell_quote(&cmd, file);
+        jbuf_appendf(&cmd,
+                     " & pid=$!; sleep %d; kill $pid 2>/dev/null; wait $pid 2>/dev/null; "
+                     "true; } 2>&1",
+                     seconds);
+    } else {
+        jbuf_appendf(&cmd, "tail -n %d ", lines);
+        shell_quote(&cmd, file);
+        jbuf_append(&cmd, " 2>&1");
+    }
+    bool ok = cw_run_json(cmd.data, "tail", result, rlen);
+    jbuf_free(&cmd);
+    free(file);
+    return ok;
+}
+
+/* ── 23. lsof — open files/sockets by pid, path, or port ───────────────── */
+static bool tool_lsof(const char *input, char *result, size_t rlen) {
+    char *path = json_get_str(input, "path");
+    int pid = json_get_int(input, "pid", 0);
+    int port = json_get_int(input, "port", 0);
+    jbuf_t cmd;
+    jbuf_init(&cmd, 256);
+    if (pid > 0) {
+        jbuf_appendf(&cmd, "lsof -nP -p %d 2>&1 | head -200", pid);
+    } else if (port > 0 && port <= 65535) {
+        jbuf_appendf(&cmd, "lsof -nP -iTCP:%d -sTCP:LISTEN 2>&1 | head -200", port);
+    } else if (path && path[0]) {
+        jbuf_append(&cmd, "lsof -nP -- ");
+        shell_quote(&cmd, path);
+        jbuf_append(&cmd, " 2>&1 | head -200");
+    } else {
+        jbuf_append(&cmd, "lsof -nP 2>&1 | head -200");
+    }
+    bool ok = cw_run_json(cmd.data, "lsof", result, rlen);
+    jbuf_free(&cmd);
+    free(path);
+    return ok;
+}
+
+/* ── 24. clipboard — read/write system clipboard ──────────────────────── */
+static bool tool_clipboard_deep(const char *input, char *result, size_t rlen) {
+    char *action = json_get_str(input, "action");
+    char *text = json_get_str(input, "text");
+    if (!action || !action[0]) {
+        free(action);
+        action = strdup("read");
+    }
+    jbuf_t cmd;
+    jbuf_init(&cmd, 256 + (text ? strlen(text) : 0));
+    bool ok;
+    if (strcmp(action, "read") == 0 || strcmp(action, "paste") == 0) {
+        jbuf_append(&cmd, "{ pbpaste 2>/dev/null || xclip -selection clipboard -o 2>/dev/null || "
+                          "wl-paste 2>/dev/null; }");
+        ok = cw_run_json(cmd.data, "text", result, rlen);
+    } else if (strcmp(action, "write") == 0 || strcmp(action, "copy") == 0) {
+        if (!text) {
+            snprintf(result, rlen, "{\"error\":\"text required for write\"}");
+            ok = false;
+        } else {
+            jbuf_append(&cmd, "printf %s ");
+            shell_quote(&cmd, text);
+            jbuf_append(&cmd,
+                        " | { pbcopy 2>/dev/null || xclip -selection clipboard 2>/dev/null || "
+                        "wl-copy 2>/dev/null; }");
+            ok = cw_run_json(cmd.data, "output", result, rlen);
+        }
+    } else {
+        snprintf(result, rlen, "{\"error\":\"action must be read or write\"}");
+        ok = false;
+    }
+    jbuf_free(&cmd);
+    free(action);
+    free(text);
+    return ok;
+}
+
+/* ── 25. archive — create/list/extract tar.gz archives ─────────────────── */
+static bool tool_archive(const char *input, char *result, size_t rlen) {
+    char *action = json_get_str(input, "action");
+    char *archive = json_get_str(input, "archive");
+    char *files = json_get_str(input, "files");
+    char *dest = json_get_str(input, "dest");
+    if (!dest)
+        dest = json_get_str(input, "destination");
+    if (!action || !archive || !archive[0]) {
+        snprintf(result, rlen, "{\"error\":\"action and archive required\"}");
+        free(action);
+        free(archive);
+        free(files);
+        free(dest);
+        return false;
+    }
+    jbuf_t cmd;
+    jbuf_init(&cmd, 512 + (files ? strlen(files) : 0));
+    if (strcmp(action, "create") == 0) {
+        if (!cw_archive_files_safe(files)) {
+            snprintf(result, rlen, "{\"error\":\"safe files string required for create\"}");
+            jbuf_free(&cmd);
+            free(action);
+            free(archive);
+            free(files);
+            free(dest);
+            return false;
+        }
+        jbuf_append(&cmd, "tar -czf ");
+        shell_quote(&cmd, archive);
+        jbuf_append(&cmd, " ");
+        jbuf_append(&cmd, files);
+        jbuf_append(&cmd, " 2>&1");
+    } else if (strcmp(action, "list") == 0) {
+        jbuf_append(&cmd, "tar -tzf ");
+        shell_quote(&cmd, archive);
+        jbuf_append(&cmd, " 2>&1 | head -200");
+    } else if (strcmp(action, "extract") == 0) {
+        jbuf_append(&cmd, "mkdir -p ");
+        shell_quote(&cmd, (dest && dest[0]) ? dest : ".");
+        jbuf_append(&cmd, " && tar -xzf ");
+        shell_quote(&cmd, archive);
+        jbuf_append(&cmd, " -C ");
+        shell_quote(&cmd, (dest && dest[0]) ? dest : ".");
+        jbuf_append(&cmd, " 2>&1");
+    } else {
+        snprintf(result, rlen, "{\"error\":\"action must be create, list, or extract\"}");
+        jbuf_free(&cmd);
+        free(action);
+        free(archive);
+        free(files);
+        free(dest);
+        return false;
+    }
+    bool ok = cw_run_json(cmd.data, "output", result, rlen);
+    jbuf_free(&cmd);
+    free(action);
+    free(archive);
+    free(files);
+    free(dest);
+    return ok;
+}
+
+/* ── 26. spawn_bg — launch a background command and return its pid ─────── */
+static bool tool_spawn_bg(const char *input, char *result, size_t rlen) {
+    char *command = json_get_str(input, "command");
+    char *log = json_get_str(input, "log");
+    if (!command || !command[0]) {
+        free(command);
+        free(log);
+        snprintf(result, rlen, "{\"error\":\"command required\"}");
+        return false;
+    }
+    if (!log || !log[0]) {
+        free(log);
+        log = strdup("/tmp/dsco_spawn_bg.log");
+    }
+    jbuf_t cmd;
+    jbuf_init(&cmd, 256 + strlen(command) + strlen(log));
+    jbuf_append(&cmd, "nohup sh -c ");
+    shell_quote(&cmd, command);
+    jbuf_append(&cmd, " > ");
+    shell_quote(&cmd, log);
+    jbuf_append(&cmd, " 2>&1 < /dev/null & echo $!");
+    char out[256];
+    out[0] = '\0';
+    int rc = run_cmd(cmd.data, out, sizeof(out));
+    long pid = strtol(out, NULL, 10);
+    jbuf_t j;
+    jbuf_init(&j, 256);
+    jbuf_appendf(&j, "{\"ok\":%s,\"pid\":%ld,\"log\":", (rc == 0 && pid > 0) ? "true" : "false",
+                 pid);
+    jbuf_append_json_str(&j, log);
+    jbuf_append(&j, "}");
+    size_t n = j.len < rlen - 1 ? j.len : rlen - 1;
+    memcpy(result, j.data, n);
+    result[n] = '\0';
+    jbuf_free(&j);
+    jbuf_free(&cmd);
+    free(command);
+    free(log);
+    return rc == 0 && pid > 0;
+}
+
+/* ── 27. signal_process — send a signal to a process ───────────────────── */
+static bool tool_signal_process(const char *input, char *result, size_t rlen) {
+    int pid = json_get_int(input, "pid", 0);
+    char *sig = json_get_str(input, "signal");
+    if (!sig || !sig[0]) {
+        free(sig);
+        sig = strdup("TERM");
+    }
+    if (pid <= 0 || !cw_valid_signal_name(sig)) {
+        snprintf(result, rlen, "{\"error\":\"valid pid and signal required\"}");
+        free(sig);
+        return false;
+    }
+    jbuf_t cmd;
+    jbuf_init(&cmd, 128);
+    jbuf_appendf(&cmd, "kill -%s %d 2>&1 && echo signaled", sig, pid);
+    bool ok = cw_run_json(cmd.data, "output", result, rlen);
+    jbuf_free(&cmd);
+    free(sig);
+    return ok;
+}
+
+/* ── 28. net_probe — ping or TCP connect probe ─────────────────────────── */
+static bool tool_net_probe(const char *input, char *result, size_t rlen) {
+    char *host = json_get_str(input, "host");
+    int port = json_get_int(input, "port", 0);
+    int timeout = cw_clamp_int(json_get_int(input, "timeout", 3), 1, 15);
+    if (!cw_valid_host_token(host)) {
+        free(host);
+        snprintf(result, rlen, "{\"error\":\"valid host required\"}");
+        return false;
+    }
+    jbuf_t cmd;
+    jbuf_init(&cmd, 256);
+    if (port > 0 && port <= 65535) {
+        jbuf_append(&cmd, "(nc -vz -G ");
+        jbuf_appendf(&cmd, "%d ", timeout);
+        shell_quote(&cmd, host);
+        jbuf_appendf(&cmd, " %d 2>&1 || nc -vz -w %d ", port, timeout);
+        shell_quote(&cmd, host);
+        jbuf_appendf(&cmd, " %d 2>&1)", port);
+    } else {
+        jbuf_append(&cmd, "ping -c 3 ");
+        shell_quote(&cmd, host);
+        jbuf_append(&cmd, " 2>&1");
+    }
+    bool ok = cw_run_json(cmd.data, "probe", result, rlen);
+    jbuf_free(&cmd);
+    free(host);
+    return ok;
+}
+
+/* ── 29. env_scan — searchable, redacted environment inventory ─────────── */
+static bool tool_env_scan(const char *input, char *result, size_t rlen) {
+    char *pattern = json_get_str(input, "pattern");
+    bool reveal = json_get_bool(input, "reveal", false);
+    jbuf_t j;
+    jbuf_init(&j, 8192);
+    jbuf_append(&j, "{\"vars\":[");
+    int n = 0;
+    for (char **ep = environ; ep && *ep && n < 200; ep++) {
+        const char *eq = strchr(*ep, '=');
+        if (!eq)
+            continue;
+        size_t name_len = (size_t)(eq - *ep);
+        char name[256];
+        if (name_len >= sizeof(name))
+            name_len = sizeof(name) - 1;
+        memcpy(name, *ep, name_len);
+        name[name_len] = '\0';
+        const char *val = eq + 1;
+        if (pattern && pattern[0] && !cw_contains_ci(name, pattern) &&
+            !cw_contains_ci(val, pattern))
+            continue;
+        bool sensitive = cw_contains_ci(name, "key") || cw_contains_ci(name, "token") ||
+                         cw_contains_ci(name, "secret") || cw_contains_ci(name, "password") ||
+                         cw_contains_ci(name, "credential");
+        if (n)
+            jbuf_append(&j, ",");
+        jbuf_append(&j, "{\"name\":");
+        jbuf_append_json_str(&j, name);
+        jbuf_append(&j, ",\"sensitive\":");
+        jbuf_append(&j, sensitive ? "true" : "false");
+        jbuf_append(&j, ",\"value\":");
+        if (sensitive && !reveal) {
+            char red[64];
+            snprintf(red, sizeof(red), "<redacted:%zu>", strlen(val));
+            jbuf_append_json_str(&j, red);
+        } else {
+            jbuf_append_json_str(&j, val);
+        }
+        jbuf_append(&j, "}");
+        n++;
+    }
+    jbuf_appendf(&j, "],\"count\":%d,\"truncated\":%s}", n, n >= 200 ? "true" : "false");
+    size_t nn = j.len < rlen - 1 ? j.len : rlen - 1;
+    memcpy(result, j.data, nn);
+    result[nn] = '\0';
+    jbuf_free(&j);
+    free(pattern);
+    return true;
+}
+
+/* ── 30. notify — desktop/user notification ────────────────────────────── */
+static bool tool_notify(const char *input, char *result, size_t rlen) {
+    char *title = json_get_str(input, "title");
+    char *message = json_get_str(input, "message");
+    if (!message || !message[0]) {
+        free(title);
+        free(message);
+        snprintf(result, rlen, "{\"error\":\"message required\"}");
+        return false;
+    }
+    if (!title || !title[0]) {
+        free(title);
+        title = strdup("dsco");
+    }
+    jbuf_t script;
+    jbuf_init(&script, 256 + strlen(message) + strlen(title));
+    jbuf_append(&script, "display notification ");
+    cw_applescript_json_string(&script, message);
+    jbuf_append(&script, " with title ");
+    cw_applescript_json_string(&script, title);
+    jbuf_t cmd;
+    jbuf_init(&cmd, script.len + 64);
+#ifdef __APPLE__
+    jbuf_append(&cmd, "osascript -e ");
+    shell_quote(&cmd, script.data);
+    jbuf_append(&cmd, " 2>&1");
+#else
+    jbuf_append(&cmd, "printf %s ");
+    shell_quote(&cmd, message);
+#endif
+    bool ok = cw_run_json(cmd.data, "output", result, rlen);
+    jbuf_free(&cmd);
+    jbuf_free(&script);
+    free(title);
+    free(message);
+    return ok;
+}
+
 static bool tool_context_search(const char *input, char *result, size_t rlen) {
     char *query = json_get_str(input, "query");
     char *tool_filter = json_get_str(input, "tool");
@@ -30911,10 +31481,11 @@ static const tool_def_t s_tools[] = {
      .is_read_only = true,
      .is_concurrent = true},
     {.name = "apply_patch",
-     .description = "Apply a unified diff atomically across one or more files. Each hunk is matched "
-                    "by its context; if any hunk's context has drifted, NOTHING is written and the "
-                    "failing hunk is named. Safer than edit_file for multi-edit changes. Provide a "
-                    "standard `diff -u` patch with --- / +++ / @@ headers.",
+     .description =
+         "Apply a unified diff atomically across one or more files. Each hunk is matched "
+         "by its context; if any hunk's context has drifted, NOTHING is written and the "
+         "failing hunk is named. Safer than edit_file for multi-edit changes. Provide a "
+         "standard `diff -u` patch with --- / +++ / @@ headers.",
      .input_schema_json = "{\"type\":\"object\",\"properties\":{\"patch\":{\"type\":\"string\","
                           "\"description\":\"unified diff text\"}},\"required\":[\"patch\"]}",
      .execute = tool_apply_patch},
@@ -30952,7 +31523,8 @@ static const tool_def_t s_tools[] = {
                     "impact.",
      .input_schema_json =
          "{\"type\":\"object\",\"properties\":{\"name\":{\"type\":\"string\"},\"max\":{\"type\":"
-         "\"integer\",\"description\":\"cap (1-500, default 100)\"},\"paths\":{\"type\":\"string\"}},"
+         "\"integer\",\"description\":\"cap (1-500, default "
+         "100)\"},\"paths\":{\"type\":\"string\"}},"
          "\"required\":[\"name\"]}",
      .execute = tool_symbol_refs,
      .is_read_only = true,
@@ -31096,7 +31668,8 @@ static const tool_def_t s_tools[] = {
                     "breaking commit. NOTE: moves HEAD across commits during the run, then resets.",
      .input_schema_json =
          "{\"type\":\"object\",\"properties\":{\"good\":{\"type\":\"string\"},\"bad\":{\"type\":"
-         "\"string\"},\"command\":{\"type\":\"string\"}},\"required\":[\"good\",\"bad\",\"command\"]}",
+         "\"string\"},\"command\":{\"type\":\"string\"}},\"required\":[\"good\",\"bad\","
+         "\"command\"]}",
      .execute = tool_git_bisect},
     {.name = "stage_hunk",
      .description = "Stage a patch to the git index (git apply --cached) without touching the "
@@ -31112,6 +31685,86 @@ static const tool_def_t s_tools[] = {
      .execute = tool_review_diff,
      .is_read_only = true,
      .is_concurrent = true},
+    {.name = "fs_watch",
+     .description = "Bounded filesystem watcher: snapshot a path, wait briefly, and report "
+                    "created/changed/deleted files. Defaults to path=. seconds=2.",
+     .input_schema_json =
+         "{\"type\":\"object\",\"properties\":{\"path\":{\"type\":\"string\"},\"seconds\":{"
+         "\"type\":"
+         "\"integer\"},\"depth\":{\"type\":\"integer\"},\"limit\":{\"type\":\"integer\"}},"
+         "\"required\":[]}",
+     .execute = tool_fs_watch,
+     .is_read_only = true,
+     .is_concurrent = true},
+    {.name = "tail_follow",
+     .description = "Tail a file, optionally following for a bounded number of seconds. Use for "
+                    "logs without hanging the agent.",
+     .input_schema_json =
+         "{\"type\":\"object\",\"properties\":{\"file\":{\"type\":\"string\"},\"lines\":{\"type\":"
+         "\"integer\"},\"seconds\":{\"type\":\"integer\"}},\"required\":[\"file\"]}",
+     .execute = tool_tail_follow,
+     .is_read_only = true,
+     .is_concurrent = true},
+    {.name = "lsof",
+     .description = "List open files/sockets by pid, port, path, or a short global sample.",
+     .input_schema_json =
+         "{\"type\":\"object\",\"properties\":{\"pid\":{\"type\":\"integer\"},\"port\":{\"type\":"
+         "\"integer\"},\"path\":{\"type\":\"string\"}},\"required\":[]}",
+     .execute = tool_lsof,
+     .is_read_only = true,
+     .is_concurrent = true},
+    {.name = "clipboard",
+     .description = "Read or write the system clipboard via pbpaste/pbcopy with Linux fallbacks.",
+     .input_schema_json = "{\"type\":\"object\",\"properties\":{\"action\":{\"type\":\"string\","
+                          "\"description\":\"read|write\"},\"text\":{\"type\":\"string\"}},"
+                          "\"required\":[]}",
+     .execute = tool_clipboard_deep},
+    {.name = "archive",
+     .description = "Create, list, or extract tar.gz archives with quoted archive/destination "
+                    "paths and a constrained files list for create.",
+     .input_schema_json =
+         "{\"type\":\"object\",\"properties\":{\"action\":{\"type\":\"string\",\"description\":"
+         "\"create|list|extract\"},\"archive\":{\"type\":\"string\"},\"files\":{\"type\":"
+         "\"string\"},"
+         "\"dest\":{\"type\":\"string\"}},\"required\":[\"action\",\"archive\"]}",
+     .execute = tool_archive},
+    {.name = "spawn_bg",
+     .description = "Start a background shell command with nohup, returning {pid,log}. "
+                    "Exec-gated because it launches arbitrary work.",
+     .input_schema_json =
+         "{\"type\":\"object\",\"properties\":{\"command\":{\"type\":\"string\"},\"log\":{\"type\":"
+         "\"string\"}},\"required\":[\"command\"]}",
+     .execute = tool_spawn_bg},
+    {.name = "signal_process",
+     .description = "Send a signal to a process by pid (default TERM). Process mutation is "
+                    "governance-gated.",
+     .input_schema_json =
+         "{\"type\":\"object\",\"properties\":{\"pid\":{\"type\":\"integer\"},\"signal\":{\"type\":"
+         "\"string\"}},\"required\":[\"pid\"]}",
+     .execute = tool_signal_process},
+    {.name = "net_probe",
+     .description = "Active network probe: ping a host or TCP-connect to host:port with a short "
+                    "timeout.",
+     .input_schema_json =
+         "{\"type\":\"object\",\"properties\":{\"host\":{\"type\":\"string\"},\"port\":{\"type\":"
+         "\"integer\"},\"timeout\":{\"type\":\"integer\"}},\"required\":[\"host\"]}",
+     .execute = tool_net_probe,
+     .is_concurrent = true},
+    {.name = "env_scan",
+     .description = "Search environment variables with sensitive values redacted by default. Set "
+                    "reveal=true only when intentionally inspecting secrets.",
+     .input_schema_json = "{\"type\":\"object\",\"properties\":{\"pattern\":{\"type\":\"string\"},"
+                          "\"reveal\":{\"type\":"
+                          "\"boolean\"}},\"required\":[]}",
+     .execute = tool_env_scan,
+     .is_read_only = true,
+     .is_concurrent = true},
+    {.name = "notify",
+     .description = "Send a desktop notification (osascript on macOS, printf fallback elsewhere).",
+     .input_schema_json = "{\"type\":\"object\",\"properties\":{\"title\":{\"type\":\"string\"},"
+                          "\"message\":{\"type\":"
+                          "\"string\"}},\"required\":[\"message\"]}",
+     .execute = tool_notify},
     {.name = "jina_embed",
      .description =
          "Compute embeddings via Jina v4 API. Returns 1024d float vectors for semantic similarity.",
@@ -35997,15 +36650,15 @@ static tool_class_t tool_classify(const char *n, bool is_read_only) {
         return TOOL_CLASS_EXEC;
     /* Deep-access tools that run an arbitrary command/program → exec-gated. */
     if (strcmp(n, "debugger") == 0 || strcmp(n, "syscall_trace") == 0 ||
-        strcmp(n, "watch_run") == 0 || strcmp(n, "memcheck") == 0 ||
-        strcmp(n, "make_build") == 0 || strcmp(n, "lint") == 0 ||
-        strcmp(n, "spawn_bg") == 0 || strcmp(n, "git_bisect") == 0)
+        strcmp(n, "watch_run") == 0 || strcmp(n, "memcheck") == 0 || strcmp(n, "make_build") == 0 ||
+        strcmp(n, "lint") == 0 || strcmp(n, "spawn_bg") == 0 || strcmp(n, "signal_process") == 0 ||
+        strcmp(n, "git_bisect") == 0)
         return TOOL_CLASS_EXEC;
     if (strcmp(n, "agent") == 0 || strcmp(n, "swarm") == 0 || strcmp(n, "legion") == 0)
         return TOOL_CLASS_SPAWN;
     if (strcmp(n, "web_search") == 0 || strcmp(n, "WebSearch") == 0 || strcmp(n, "WebFetch") == 0 ||
         strcmp(n, "http_request") == 0 || strcmp(n, "download_file") == 0 ||
-        strcmp(n, "curl_raw") == 0)
+        strcmp(n, "curl_raw") == 0 || strcmp(n, "net_probe") == 0)
         return TOOL_CLASS_NET;
     if (strcmp(n, "sha256") == 0 || strcmp(n, "md5") == 0 || strcmp(n, "hmac") == 0 ||
         strcmp(n, "uuid") == 0 || strcmp(n, "random_bytes") == 0)
@@ -36049,10 +36702,11 @@ static bool tool_is_high_risk(const char *n, tool_class_t cls) {
            strcmp(n, "copy_file") == 0 || strcmp(n, "chmod_tool") == 0 || strcmp(n, "git") == 0 ||
            strcmp(n, "apply_patch") == 0 || strcmp(n, "ast_edit") == 0 ||
            strcmp(n, "format_code") == 0 || strcmp(n, "stage_hunk") == 0 ||
-           strcmp(n, "patch_file") == 0 || strcmp(n, "http_request") == 0 ||
-           strcmp(n, "curl_raw") == 0 || strcmp(n, "download_file") == 0 ||
-           strcmp(n, "ssh_command") == 0 || strcmp(n, "docker") == 0 || strcmp(n, "trading") == 0 ||
-           strcmp(n, "kalshi") == 0 || strcmp(n, "polymarket") == 0 || strcmp(n, "slack_post") == 0;
+           strcmp(n, "archive") == 0 || strcmp(n, "patch_file") == 0 ||
+           strcmp(n, "http_request") == 0 || strcmp(n, "curl_raw") == 0 ||
+           strcmp(n, "download_file") == 0 || strcmp(n, "ssh_command") == 0 ||
+           strcmp(n, "docker") == 0 || strcmp(n, "trading") == 0 || strcmp(n, "kalshi") == 0 ||
+           strcmp(n, "polymarket") == 0 || strcmp(n, "slack_post") == 0;
 }
 
 static bool tool_env_truthy(const char *name) {
