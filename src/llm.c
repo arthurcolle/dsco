@@ -2619,12 +2619,17 @@ static tool_page_result_t anthropic_get_paged_tools(const char *ctx, int max_too
     if (!anthropic_tool_freeze_enabled())
         return tools_get_paged(ctx, max_tools, budget_ratio);
 
-    unsigned long long sig = anthropic_external_tool_signature();
-    if (!s_frozen_tool_page_valid || sig != s_frozen_tool_ext_sig) {
-        if (s_frozen_tool_page_valid)
-            tool_page_result_free(&s_frozen_tool_page);
+    /* Freeze the builtin page for the whole session. External (MCP) tools are
+     * serialized separately after the paged tiers, so a load_tools call does
+     * NOT require re-paging builtins. The previous signature-based re-page
+     * recomputed the working set from a *different* rolling context, which
+     * reshuffled the stable tool tier and busted the tools-boundary cache
+     * breakpoint on top of the unavoidable system-suffix rewrite (observed:
+     * one mid-session load_tools rewrote ~28K tokens at cache-write price). */
+    (void)anthropic_external_tool_signature; /* kept for A/B diagnostics */
+    if (!s_frozen_tool_page_valid) {
         s_frozen_tool_page = tools_get_paged(ctx, max_tools, budget_ratio);
-        s_frozen_tool_ext_sig = sig;
+        s_frozen_tool_ext_sig = anthropic_external_tool_signature();
         s_frozen_tool_page_valid = true;
     }
     if (owned)
@@ -3130,33 +3135,32 @@ char *llm_build_request_for_credential(conversation_t *c, const char *model, int
     jbuf_append_int(&b, max_tokens);
     jbuf_append(&b, ",\"stream\":true");
 
-    /* System prompt with compact tool catalog + cache breakpoint */
+    /* System prompt with compact tool catalog + cache breakpoint.
+     * Block order MUST match llm_build_request_ex_for_credential():
+     * SYSTEM_PROMPT → catalog → workspace/custom → [cache breakpoint].
+     * A divergent order between the two builders produces two distinct
+     * cache prefixes and a cold miss whenever the request path switches. */
     const char *custom = llm_get_custom_system_prompt();
     const char *catalog = g_cheap_mode ? NULL : get_compact_catalog();
     jbuf_append(&b, ",\"system\":[");
     if (append_claude_code_billing_system_block(&b, c, credential))
         jbuf_append(&b, ",");
-    if (custom) {
-        jbuf_append(&b, "{\"type\":\"text\",\"text\":");
-        jbuf_append_json_str(&b, custom);
-        jbuf_append(&b, "},");
-    }
     jbuf_append(&b, "{\"type\":\"text\",\"text\":");
     jbuf_append_json_str(&b, g_cheap_mode ? SYSTEM_PROMPT_CHEAP : SYSTEM_PROMPT);
     if (catalog) {
         /* Catalog is stable → include in cached prefix */
-        jbuf_append(&b, "},");
-        jbuf_append(&b, "{\"type\":\"text\",\"text\":");
+        jbuf_append(&b, "},{\"type\":\"text\",\"text\":");
         jbuf_append_json_str(&b, catalog);
-        jbuf_append(&b, ",");
-        jbuf_append(&b, cache_control_json());
-        jbuf_append(&b, "}");
-    } else {
-        jbuf_append(&b, ",");
-        jbuf_append(&b, cache_control_json());
-        jbuf_append(&b, "}");
     }
-    jbuf_append(&b, "]");
+    if (custom) {
+        /* Workspace prompt is stable (invalidated only on explicit edits)
+         * → include in cached prefix */
+        jbuf_append(&b, "},{\"type\":\"text\",\"text\":");
+        jbuf_append_json_str(&b, custom);
+    }
+    jbuf_append(&b, ",");
+    jbuf_append(&b, cache_control_json());
+    jbuf_append(&b, "}]");
 
     /* Adaptive thinking — only on Opus 4.6 and Sonnet 4.6 */
     if (strstr(model, "opus-4-6") || strstr(model, "sonnet-4-6")) {
@@ -3192,13 +3196,19 @@ char *llm_build_request_ex_for_credential(conversation_t *c, session_state_t *se
     jbuf_append_int(&b, effective_max_tokens);
     jbuf_append(&b, ",\"stream\":true");
 
-    /* System prompt — cache-aware ordering (Anthropic prompt caching
+    /* System prompt — cache-aware tiered ordering (Anthropic prompt caching
        requires static prefix before dynamic content for cache hits).
-       Order: SYSTEM_PROMPT (static) → TOOL CATALOG (static, cache break) → dynamic */
+       STATIC:   SYSTEM_PROMPT, tool catalog (embedded, change on rebuild)
+       STABLE:   workspace prompt (changes only on explicit workspace edits —
+                 dsco_workspace_prompt_invalidate) → cached prefix ends here.
+       SESSION+VOLATILE (after breakpoint): active skill, memory recall,
+                 structured-output contract, direct-answer flag, goal status.
+       Any turn-varying text above the breakpoint would invalidate the whole
+       suffix at cache-write price every turn; keep counters out of the prefix. */
     const char *custom = llm_get_custom_system_prompt();
     const char *catalog = g_cheap_mode ? NULL : get_compact_catalog();
     char *active_skill_prompt = NULL;
-    bool has_dynamic = (custom != NULL) || session->active_skill[0];
+    bool has_dynamic = session->active_skill[0] != '\0';
 
     jbuf_append(&b, ",\"system\":[");
     if (append_claude_code_billing_system_block(&b, c, credential))
@@ -3222,19 +3232,22 @@ char *llm_build_request_ex_for_credential(conversation_t *c, session_state_t *se
      * to page in full schemas on demand. This saves ~5-15k tokens/request
      * that were previously wasted on redundant name+description lines. */
 
-    /* Cache breakpoint on last static block */
+    /* Block 3: Workspace prompt (identity/soul/user/skills, ~24K tokens).
+     * STABLE tier: this is the largest block in the request and changes only
+     * on explicit workspace edits, so it belongs INSIDE the cached prefix.
+     * It previously sat after the breakpoint as "dynamic", which re-billed
+     * it at full input price behind every volatile-block change. */
+    if (custom) {
+        jbuf_append(&b, "},{\"type\":\"text\",\"text\":");
+        jbuf_append_json_str(&b, custom);
+    }
+
+    /* Cache breakpoint on last stable block — end of cached prefix */
     jbuf_append(&b, ",");
     jbuf_append(&b, cache_control_json());
     jbuf_append(&b, has_dynamic ? "}," : "}");
 
-    /* Block 3+: Dynamic content (workspace prompt, skills) — after cache break */
-    if (custom) {
-        jbuf_append(&b, "{\"type\":\"text\",\"text\":");
-        jbuf_append_json_str(&b, custom);
-        jbuf_append(&b, "}");
-        if (session->active_skill[0])
-            jbuf_append(&b, ",");
-    }
+    /* Block 4+: SESSION/VOLATILE content (skills, memory, goal) — after break */
     if (session->active_skill[0]) {
         const char *skill = dsco_workspace_skill_prompt(session->active_skill);
         if (skill && *skill) {
@@ -3288,19 +3301,29 @@ char *llm_build_request_ex_for_credential(conversation_t *c, session_state_t *se
         if (used < 0)
             used = 0;
         if (session->goal_token_budget > 0) {
+            /* Bucket budget usage to nearest 10% so this block's text only
+             * changes at meaningful thresholds. A raw per-turn counter here
+             * mutates the request prefix every turn, invalidating the
+             * message-anchor cache for the entire goal run. */
+            int pct_bucket = (int)(((long long)used * 100) / session->goal_token_budget);
+            if (pct_bucket > 100)
+                pct_bucket = 100;
+            pct_bucket -= pct_bucket % 10;
             snprintf(
                 goal_prompt, sizeof(goal_prompt),
-                "[Active Goal]\nObjective: %s\nStatus: active\nTokens used on goal: %d / %d\n"
+                "[Active Goal]\nObjective: %s\nStatus: active\nBudget used: ~%d%% of %d tokens\n"
                 "Keep working toward this objective until the user changes it with /goal. "
                 "If the objective is complete, call self_exit with a concise completion reason.",
-                session->goal_objective, used, session->goal_token_budget);
+                session->goal_objective, pct_bucket, session->goal_token_budget);
         } else {
+            /* No budget → no counter at all: usage without a limit carries no
+             * decision signal for the model, but rewrites the prefix hourly. */
             snprintf(
                 goal_prompt, sizeof(goal_prompt),
-                "[Active Goal]\nObjective: %s\nStatus: active\nTokens used on goal: %d\n"
+                "[Active Goal]\nObjective: %s\nStatus: active\n"
                 "Keep working toward this objective until the user changes it with /goal. "
                 "If the objective is complete, call self_exit with a concise completion reason.",
-                session->goal_objective, used);
+                session->goal_objective);
         }
         jbuf_append(&b, ",{\"type\":\"text\",\"text\":");
         jbuf_append_json_str(&b, goal_prompt);
