@@ -20,9 +20,16 @@ BUILD_DIR ?= build
 DSCO_STD ?= $(shell for s in c2y c23 c2x c11; do \
 	if $(CC) -std=$$s -x c -c /dev/null -o /dev/null 2>/dev/null; then echo $$s; break; fi; done)
 DSCO_ARCH ?= native
-BASE_CFLAGS = -Wall -Wextra -O3 -std=$(DSCO_STD) $(C2Y_WARNING_FLAGS) -D_POSIX_C_SOURCE=200809L -D_DEFAULT_SOURCE \
+# clang/gcc reject -march=arm64 (the CI matrix passes arch names, not ISA
+# levels); arm64 targets get default codegen instead.
+ifneq (,$(filter $(DSCO_ARCH),arm64 aarch64))
+DSCO_ARCH_FLAGS :=
+else
+DSCO_ARCH_FLAGS := -march=$(DSCO_ARCH) -mtune=$(DSCO_ARCH)
+endif
+BASE_CFLAGS = -Wall -Wextra -O3 -std=$(DSCO_STD) $(C2Y_WARNING_FLAGS) -D_POSIX_C_SOURCE=200809L -D_GNU_SOURCE \
 	-I$(INC_DIR) \
-	-march=$(DSCO_ARCH) -mtune=$(DSCO_ARCH) -funroll-loops -fvisibility=hidden \
+	$(DSCO_ARCH_FLAGS) -funroll-loops -fvisibility=hidden \
 	-funwind-tables -fno-omit-frame-pointer -g \
 	-MMD -MP \
 	-DBUILD_DATE='"$(BUILD_DATE)"' -DGIT_HASH='"$(GIT_HASH)"' \
@@ -36,7 +43,12 @@ TEST_CFLAGS ?= $(BASE_CFLAGS) -O0 -g -fno-omit-frame-pointer -fno-inline
 #                         linked-but-unused, eagerly loaded at launch; removing them
 #                         cut `dsco --version` startup ~1.4ms / 1.35x — measured M4 Max).
 # Applied only to the release $(TARGET) link; test/asan/ubsan keep full symbols.
+ifeq ($(UNAME_S),Darwin)
 RELEASE_LDFLAGS ?= -Wl,-dead_strip -Wl,-dead_strip_dylibs
+else
+# GNU ld has no -dead_strip; --gc-sections is the closest equivalent
+RELEASE_LDFLAGS ?= -Wl,--gc-sections
+endif
 # Opt-in ThinLTO: `make LTO=1`. Cross-module inlining boosts long-running
 # throughput (agent loops, JSON, pipelines). Does NOT help the dyld-bound
 # startup path and ~8x the link time, so it is off by default. (M4 Max:
@@ -133,7 +145,7 @@ PROFILE_CFLAGS = $(BASE_CFLAGS) -O1 -g -fno-omit-frame-pointer -fno-inline \
 ifeq ($(PROFILE_BUILD),1)
 override CFLAGS = $(PROFILE_CFLAGS)
 endif
-LITE_CFLAGS ?= -Oz -std=$(DSCO_STD) $(C2Y_WARNING_FLAGS) -D_POSIX_C_SOURCE=200809L -D_DEFAULT_SOURCE \
+LITE_CFLAGS ?= -Oz -std=$(DSCO_STD) $(C2Y_WARNING_FLAGS) -D_POSIX_C_SOURCE=200809L -D_GNU_SOURCE \
 	-I$(INC_DIR) -DBUILD_DATE='"$(BUILD_DATE)"' -DGIT_HASH='"$(GIT_HASH)"'
 COVERAGE_CFLAGS = $(BASE_CFLAGS) -O0 -g -fno-omit-frame-pointer -fno-inline --coverage
 COVERAGE_LDFLAGS = --coverage
@@ -221,18 +233,21 @@ $(info Using system GSL via pkg-config)
 endif
 endif
 
-# libsodium (crypto for mesh)
+# libsodium (crypto for mesh). Detect via --exists: --cflags is empty when
+# headers live in the default include path (e.g. apt), which is not "absent".
+SODIUM_FOUND  := $(shell pkg-config --exists libsodium 2>/dev/null && echo yes)
 SODIUM_CFLAGS := $(shell pkg-config --cflags libsodium 2>/dev/null)
 SODIUM_LIBS   := $(shell pkg-config --libs   libsodium 2>/dev/null)
-ifneq ($(SODIUM_CFLAGS),)
+ifeq ($(SODIUM_FOUND),yes)
 BASE_CFLAGS += $(SODIUM_CFLAGS) -DHAVE_LIBSODIUM
 LDLIBS      += $(SODIUM_LIBS)
 endif
 
 # libuv (async I/O event loop)
+UV_FOUND  := $(shell pkg-config --exists libuv 2>/dev/null && echo yes)
 UV_CFLAGS := $(shell pkg-config --cflags libuv 2>/dev/null)
 UV_LIBS   := $(shell pkg-config --libs   libuv 2>/dev/null)
-ifneq ($(UV_CFLAGS),)
+ifeq ($(UV_FOUND),yes)
 BASE_CFLAGS += $(UV_CFLAGS) -DHAVE_LIBUV
 LDLIBS      += $(UV_LIBS)
 endif
@@ -267,7 +282,7 @@ GENERATED_OBJS   := $(patsubst src/generated/%.c,$(OBJ_DIR)/generated_%.o,$(GENE
 
 # Conditionally add mesh + net_server when libsodium is available
 OPTIONAL_SRCS =
-ifneq ($(SODIUM_CFLAGS),)
+ifeq ($(SODIUM_FOUND),yes)
 OPTIONAL_SRCS += mesh.c
 OPTIONAL_SRCS += net_tool.c
 OPTIONAL_SRCS += plan_optimizer.c
@@ -398,7 +413,7 @@ endif
 endif
 
 dsc: dsc.c
-	$(CC) -O2 -std=$(DSCO_STD) $(C2Y_WARNING_FLAGS) -D_POSIX_C_SOURCE=200809L -D_DEFAULT_SOURCE -o $@ $< -lcurl -lreadline
+	$(CC) -O2 -std=$(DSCO_STD) $(C2Y_WARNING_FLAGS) -D_POSIX_C_SOURCE=200809L -D_GNU_SOURCE -o $@ $< -lcurl -lreadline
 
 $(DEBUG_TARGET): $(DEBUG_OBJS) $(GSL_DEBUG_OBJS)
 	$(CC) $(DEBUG_CFLAGS) -o $@ $^ $(LDFLAGS) $(LDLIBS)
@@ -774,7 +789,7 @@ clang-tidy:
 		echo "clang-tidy not found" >&2; \
 		exit 1; \
 	fi
-	clang-tidy $(SRCS) -- -I$(INC_DIR) -std=c11 -D_POSIX_C_SOURCE=200809L -D_DEFAULT_SOURCE -DHAVE_MBEDTLS -DHAVE_LIBSODIUM -DHAVE_LIBUV
+	clang-tidy $(SRCS) -- -I$(INC_DIR) -std=c11 -D_POSIX_C_SOURCE=200809L -D_GNU_SOURCE -DHAVE_MBEDTLS -DHAVE_LIBSODIUM -DHAVE_LIBUV
 
 cppcheck:
 	@if ! command -v cppcheck >/dev/null 2>&1; then \
