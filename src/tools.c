@@ -15145,6 +15145,386 @@ static bool tool_abi_diff(const char *input, char *result, size_t rlen) {
     return ok;
 }
 
+/* insert nf flags at index `at` into a NULL-capable argv of length argc. */
+static int cw_argv_insert(char **argv, int argc, int at, const char *const *flags, int nf) {
+    for (int i = argc + nf - 1; i >= at + nf; i--)
+        argv[i] = argv[i - nf];
+    for (int i = 0; i < nf; i++)
+        argv[at + i] = strdup(flags[i]);
+    return argc + nf;
+}
+
+/* ── 11. lint — clang-tidy findings ─────────────────────────────────────── */
+static bool tool_lint(const char *input, char *result, size_t rlen) {
+    char *file = json_get_str(input, "file");
+    if (!file || !file[0]) {
+        free(file);
+        snprintf(result, rlen, "{\"error\":\"file required\"}");
+        return false;
+    }
+    jbuf_t cmd;
+    jbuf_init(&cmd, 256);
+    jbuf_append(&cmd, "clang-tidy ");
+    shell_quote(&cmd, file);
+    jbuf_append(&cmd, " 2>&1 | grep -aE 'warning:|error:' | head -100");
+    bool ok = cw_run_json(cmd.data, "findings", result, rlen);
+    jbuf_free(&cmd);
+    free(file);
+    return ok;
+}
+
+/* ── 12. format_code — clang-format in place ────────────────────────────── */
+static bool tool_format_code(const char *input, char *result, size_t rlen) {
+    char *file = json_get_str(input, "file");
+    char *lines = json_get_str(input, "lines");
+    if (!file || !file[0]) {
+        free(file);
+        free(lines);
+        snprintf(result, rlen, "{\"error\":\"file required\"}");
+        return false;
+    }
+    jbuf_t cmd;
+    jbuf_init(&cmd, 256);
+    jbuf_append(&cmd, "clang-format -i ");
+    if (lines && lines[0]) {
+        bool okl = true;
+        for (char *p = lines; *p; p++)
+            if (!isdigit((unsigned char)*p) && *p != ':')
+                okl = false;
+        if (okl) {
+            jbuf_append(&cmd, "--lines=");
+            jbuf_append(&cmd, lines);
+            jbuf_append(&cmd, " ");
+        }
+    }
+    shell_quote(&cmd, file);
+    jbuf_append(&cmd, " 2>&1");
+    bool ok = cw_run_json(cmd.data, "output", result, rlen);
+    jbuf_free(&cmd);
+    free(file);
+    free(lines);
+    return ok;
+}
+
+/* ── 13. type_at — clang AST nodes on a line (type info) ────────────────── */
+static bool tool_type_at(const char *input, char *result, size_t rlen) {
+    char *file = json_get_str(input, "file");
+    int line = json_get_int(input, "line", 0);
+    if (!file || !file[0] || line < 1) {
+        free(file);
+        snprintf(result, rlen, "{\"error\":\"file and line required\"}");
+        return false;
+    }
+    char *argv_s[256];
+    int argc = diag_build_argv(file, argv_s, 250);
+    if (argc < 0) {
+        free(file);
+        snprintf(result, rlen, "{\"error\":\"no compile_commands.json\"}");
+        return false;
+    }
+    int idx = argc - 1;
+    for (int i = 0; i < argc; i++)
+        if (strcmp(argv_s[i], "-fsyntax-only") == 0) {
+            idx = i;
+            break;
+        }
+    const char *extra[] = {"-Xclang", "-ast-dump", "-ferror-limit=0"};
+    argc = cw_argv_insert(argv_s, argc, idx, extra, 3);
+    argv_s[argc] = NULL;
+    char *out = malloc(1048576);
+    out[0] = '\0';
+    safe_exec_argv((const char *const *)argv_s, out, 1048576);
+    for (int i = 0; i < argc; i++)
+        free(argv_s[i]);
+    char pat[32];
+    snprintf(pat, sizeof(pat), ":%d:", line);
+    jbuf_t j;
+    jbuf_init(&j, 8192);
+    jbuf_append(&j, "{\"file\":");
+    jbuf_append_json_str(&j, file);
+    jbuf_appendf(&j, ",\"line\":%d,\"ast_nodes\":[", line);
+    int nn = 0;
+    char *ls = NULL;
+    char *oc = strdup(out);
+    for (char *l = strtok_r(oc, "\n", &ls); l && nn < 40; l = strtok_r(NULL, "\n", &ls)) {
+        if (!strstr(l, pat))
+            continue;
+        char clean[400];
+        cw_strip_ansi(l, clean, sizeof(clean));
+        char *s = clean;
+        while (*s && (*s == '|' || *s == '`' || *s == '-' || *s == ' '))
+            s++;
+        if (nn)
+            jbuf_append(&j, ",");
+        jbuf_append_json_str(&j, s);
+        nn++;
+    }
+    free(oc);
+    free(out);
+    jbuf_appendf(&j, "],\"count\":%d}", nn);
+    free(file);
+    size_t n = j.len < rlen - 1 ? j.len : rlen - 1;
+    memcpy(result, j.data, n);
+    result[n] = '\0';
+    jbuf_free(&j);
+    return true;
+}
+
+/* ── 14. include_graph — header include tree (cc -H) ────────────────────── */
+static bool tool_include_graph(const char *input, char *result, size_t rlen) {
+    char *file = json_get_str(input, "file");
+    if (!file || !file[0]) {
+        free(file);
+        snprintf(result, rlen, "{\"error\":\"file required\"}");
+        return false;
+    }
+    char *argv_s[256];
+    int argc = diag_build_argv(file, argv_s, 252);
+    if (argc < 0) {
+        free(file);
+        snprintf(result, rlen, "{\"error\":\"no compile_commands.json\"}");
+        return false;
+    }
+    int idx = argc - 1;
+    for (int i = 0; i < argc; i++)
+        if (strcmp(argv_s[i], "-fsyntax-only") == 0) {
+            idx = i;
+            break;
+        }
+    const char *extra[] = {"-H"};
+    argc = cw_argv_insert(argv_s, argc, idx, extra, 1);
+    argv_s[argc] = NULL;
+    char *out = malloc(262144);
+    out[0] = '\0';
+    safe_exec_argv((const char *const *)argv_s, out, 262144);
+    for (int i = 0; i < argc; i++)
+        free(argv_s[i]);
+    jbuf_t j;
+    jbuf_init(&j, 8192);
+    jbuf_append(&j, "{\"file\":");
+    jbuf_append_json_str(&j, file);
+    jbuf_append(&j, ",\"includes\":[");
+    int nn = 0;
+    char *ls = NULL;
+    char *oc = strdup(out);
+    for (char *l = strtok_r(oc, "\n", &ls); l && nn < 300; l = strtok_r(NULL, "\n", &ls)) {
+        if (l[0] != '.')
+            continue; /* -H prefixes include lines with dots (depth) */
+        if (nn)
+            jbuf_append(&j, ",");
+        jbuf_append_json_str(&j, l);
+        nn++;
+    }
+    free(oc);
+    free(out);
+    jbuf_appendf(&j, "],\"count\":%d}", nn);
+    free(file);
+    size_t n = j.len < rlen - 1 ? j.len : rlen - 1;
+    memcpy(result, j.data, n);
+    result[n] = '\0';
+    jbuf_free(&j);
+    return true;
+}
+
+/* ── 15. api_outline — public signatures from a file (AST) ──────────────── */
+static bool tool_api_outline(const char *input, char *result, size_t rlen) {
+    char *file = json_get_str(input, "file");
+    if (!file || !file[0]) {
+        free(file);
+        snprintf(result, rlen, "{\"error\":\"file required\"}");
+        return false;
+    }
+    ast_file_t *f = ast_parse_file(file);
+    if (!f) {
+        free(file);
+        snprintf(result, rlen, "{\"error\":\"parse failed\"}");
+        return false;
+    }
+    jbuf_t j;
+    jbuf_init(&j, 8192);
+    jbuf_append(&j, "{\"file\":");
+    jbuf_append_json_str(&j, file);
+    jbuf_append(&j, ",\"api\":[");
+    int nn = 0;
+    for (int i = 0; i < f->count; i++) {
+        ast_node_t *nd = &f->nodes[i];
+        if (!nd->name || nd->type == AST_INCLUDE)
+            continue;
+        if (nd->type == AST_FUNCTION && nd->is_static)
+            continue;
+        if (nn)
+            jbuf_append(&j, ",");
+        jbuf_appendf(&j, "{\"type\":\"%s\",\"line\":%d,\"name\":", ast_node_type_label(nd->type),
+                     nd->line_start);
+        jbuf_append_json_str(&j, nd->name);
+        if (nd->type == AST_FUNCTION) {
+            char sig[640];
+            snprintf(sig, sizeof(sig), "%s %s(%s)", nd->return_type ? nd->return_type : "",
+                     nd->name, nd->params ? nd->params : "");
+            jbuf_append(&j, ",\"signature\":");
+            jbuf_append_json_str(&j, sig);
+        }
+        jbuf_append(&j, "}");
+        nn++;
+    }
+    ast_free_file(f);
+    jbuf_appendf(&j, "],\"count\":%d}", nn);
+    free(file);
+    size_t n = j.len < rlen - 1 ? j.len : rlen - 1;
+    memcpy(result, j.data, n);
+    result[n] = '\0';
+    jbuf_free(&j);
+    return true;
+}
+
+/* ── 16. git_blame ──────────────────────────────────────────────────────── */
+static bool tool_git_blame(const char *input, char *result, size_t rlen) {
+    char *file = json_get_str(input, "file");
+    int start = json_get_int(input, "start", 0);
+    int end = json_get_int(input, "end", 0);
+    if (!file || !file[0]) {
+        free(file);
+        snprintf(result, rlen, "{\"error\":\"file required\"}");
+        return false;
+    }
+    jbuf_t cmd;
+    jbuf_init(&cmd, 256);
+    jbuf_append(&cmd, "git blame ");
+    if (start > 0 && end >= start)
+        jbuf_appendf(&cmd, "-L %d,%d ", start, end);
+    shell_quote(&cmd, file);
+    jbuf_append(&cmd, (start > 0) ? " 2>&1" : " 2>&1 | head -200");
+    bool ok = cw_run_json(cmd.data, "blame", result, rlen);
+    jbuf_free(&cmd);
+    free(file);
+    return ok;
+}
+
+/* ── 17. git_log_symbol — pickaxe history of a symbol ───────────────────── */
+static bool tool_git_log_symbol(const char *input, char *result, size_t rlen) {
+    char *sym = json_get_str(input, "symbol");
+    char *file = json_get_str(input, "file");
+    if (!cw_valid_ident(sym)) {
+        free(sym);
+        free(file);
+        snprintf(result, rlen, "{\"error\":\"valid symbol required\"}");
+        return false;
+    }
+    jbuf_t cmd;
+    jbuf_init(&cmd, 256);
+    jbuf_append(&cmd, "git log -S");
+    jbuf_append(&cmd, sym); /* validated identifier */
+    jbuf_append(&cmd, " --oneline -30");
+    if (file && file[0]) {
+        jbuf_append(&cmd, " -- ");
+        shell_quote(&cmd, file);
+    }
+    jbuf_append(&cmd, " 2>&1");
+    bool ok = cw_run_json(cmd.data, "commits", result, rlen);
+    jbuf_free(&cmd);
+    free(sym);
+    free(file);
+    return ok;
+}
+
+/* ── 18. git_bisect — automated bisect over a test command ──────────────── */
+static bool tool_git_bisect(const char *input, char *result, size_t rlen) {
+    char *good = json_get_str(input, "good");
+    char *bad = json_get_str(input, "bad");
+    char *command = json_get_str(input, "command");
+    if (!good || !good[0] || !bad || !bad[0] || !command || !command[0]) {
+        free(good);
+        free(bad);
+        free(command);
+        snprintf(result, rlen, "{\"error\":\"good, bad, command required\"}");
+        return false;
+    }
+    jbuf_t cmd;
+    jbuf_init(&cmd, 512 + strlen(command));
+    jbuf_append(&cmd, "git bisect start ");
+    shell_quote(&cmd, bad);
+    jbuf_append(&cmd, " ");
+    shell_quote(&cmd, good);
+    jbuf_append(&cmd, " && git bisect run sh -c ");
+    shell_quote(&cmd, command);
+    jbuf_append(&cmd, "; git bisect reset 2>&1");
+    bool ok = cw_run_json(cmd.data, "bisect", result, rlen);
+    jbuf_free(&cmd);
+    free(good);
+    free(bad);
+    free(command);
+    return ok;
+}
+
+/* ── 19. stage_hunk — stage a patch to the index (git apply --cached) ───── */
+static bool tool_stage_hunk(const char *input, char *result, size_t rlen) {
+    char *patch = json_get_str(input, "patch");
+    if (!patch || !patch[0]) {
+        free(patch);
+        snprintf(result, rlen, "{\"error\":\"patch required\"}");
+        return false;
+    }
+    FILE *pf = fopen("/tmp/dsco_stage.patch", "w");
+    if (pf) {
+        fputs(patch, pf);
+        fclose(pf);
+    }
+    bool ok = cw_run_json("git apply --cached /tmp/dsco_stage.patch 2>&1 && echo staged", "output",
+                          result, rlen);
+    free(patch);
+    return ok;
+}
+
+/* ── 20. review_diff — structured working diff ──────────────────────────── */
+static bool tool_review_diff(const char *input, char *result, size_t rlen) {
+    bool staged = json_get_bool(input, "staged", false);
+    char *pathf = json_get_str(input, "path");
+    jbuf_t cmd;
+    jbuf_init(&cmd, 256);
+    jbuf_append(&cmd, "git diff");
+    if (staged)
+        jbuf_append(&cmd, " --staged");
+    jbuf_append(&cmd, " --numstat");
+    if (pathf && pathf[0]) {
+        jbuf_append(&cmd, " -- ");
+        shell_quote(&cmd, pathf);
+    }
+    jbuf_append(&cmd, " 2>&1");
+    char *buf = malloc(131072);
+    buf[0] = '\0';
+    run_cmd(cmd.data, buf, 131072);
+    jbuf_free(&cmd);
+    jbuf_t j;
+    jbuf_init(&j, 8192);
+    jbuf_appendf(&j, "{\"staged\":%s,\"files\":[", staged ? "true" : "false");
+    int nf = 0, add_tot = 0, del_tot = 0;
+    char *ls = NULL;
+    char *bc = strdup(buf);
+    for (char *l = strtok_r(bc, "\n", &ls); l && nf < 300; l = strtok_r(NULL, "\n", &ls)) {
+        int a = 0, del = 0;
+        char pth[1024];
+        if (sscanf(l, "%d\t%d\t%1023[^\n]", &a, &del, pth) == 3) {
+            if (nf)
+                jbuf_append(&j, ",");
+            jbuf_appendf(&j, "{\"added\":%d,\"removed\":%d,\"path\":", a, del);
+            jbuf_append_json_str(&j, pth);
+            jbuf_append(&j, "}");
+            add_tot += a;
+            del_tot += del;
+            nf++;
+        }
+    }
+    free(bc);
+    jbuf_appendf(&j, "],\"file_count\":%d,\"added\":%d,\"removed\":%d}", nf, add_tot, del_tot);
+    free(buf);
+    free(pathf);
+    size_t n = j.len < rlen - 1 ? j.len : rlen - 1;
+    memcpy(result, j.data, n);
+    result[n] = '\0';
+    jbuf_free(&j);
+    return true;
+}
+
 static bool tool_context_search(const char *input, char *result, size_t rlen) {
     char *query = json_get_str(input, "query");
     char *tool_filter = json_get_str(input, "tool");
@@ -30657,6 +31037,81 @@ static const tool_def_t s_tools[] = {
                           "\"type\":\"string\"}},\"required\":[\"a\",\"b\"]}",
      .execute = tool_abi_diff,
      .is_read_only = true},
+    {.name = "lint",
+     .description = "Run clang-tidy on a file and return its warnings/errors. Uses "
+                    "compile_commands.json automatically.",
+     .input_schema_json = "{\"type\":\"object\",\"properties\":{\"file\":{\"type\":\"string\"}},"
+                          "\"required\":[\"file\"]}",
+     .execute = tool_lint},
+    {.name = "format_code",
+     .description = "Run clang-format in place on a file (optionally --lines=A:B). Keeps edits "
+                    "style-consistent with the codebase.",
+     .input_schema_json = "{\"type\":\"object\",\"properties\":{\"file\":{\"type\":\"string\"},"
+                          "\"lines\":{\"type\":\"string\",\"description\":\"A:B range\"}},"
+                          "\"required\":[\"file\"]}",
+     .execute = tool_format_code},
+    {.name = "type_at",
+     .description = "Clang AST nodes at file:line — the resolved types of what appears on that "
+                    "line. Precise type info the semantic search can't give.",
+     .input_schema_json = "{\"type\":\"object\",\"properties\":{\"file\":{\"type\":\"string\"},"
+                          "\"line\":{\"type\":\"integer\"}},\"required\":[\"file\",\"line\"]}",
+     .execute = tool_type_at,
+     .is_read_only = true,
+     .is_concurrent = true},
+    {.name = "include_graph",
+     .description = "Header include tree for a translation unit (cc -H) — what a file pulls in and "
+                    "why edits trigger big rebuilds.",
+     .input_schema_json = "{\"type\":\"object\",\"properties\":{\"file\":{\"type\":\"string\"}},"
+                          "\"required\":[\"file\"]}",
+     .execute = tool_include_graph,
+     .is_read_only = true,
+     .is_concurrent = true},
+    {.name = "api_outline",
+     .description = "Public API of a file from the AST: non-static function signatures, structs, "
+                    "typedefs, defines. Faster than reading the whole file.",
+     .input_schema_json = "{\"type\":\"object\",\"properties\":{\"file\":{\"type\":\"string\"}},"
+                          "\"required\":[\"file\"]}",
+     .execute = tool_api_outline,
+     .is_read_only = true,
+     .is_concurrent = true},
+    {.name = "git_blame",
+     .description = "Line-level authorship: commit, author, when for a file (optionally a "
+                    "start..end line range).",
+     .input_schema_json =
+         "{\"type\":\"object\",\"properties\":{\"file\":{\"type\":\"string\"},\"start\":{\"type\":"
+         "\"integer\"},\"end\":{\"type\":\"integer\"}},\"required\":[\"file\"]}",
+     .execute = tool_git_blame,
+     .is_read_only = true,
+     .is_concurrent = true},
+    {.name = "git_log_symbol",
+     .description = "Pickaxe history: every commit that changed the count of a symbol/identifier "
+                    "(git log -S). The history of a function.",
+     .input_schema_json = "{\"type\":\"object\",\"properties\":{\"symbol\":{\"type\":\"string\"},"
+                          "\"file\":{\"type\":\"string\"}},\"required\":[\"symbol\"]}",
+     .execute = tool_git_log_symbol,
+     .is_read_only = true,
+     .is_concurrent = true},
+    {.name = "git_bisect",
+     .description = "Automated git bisect: given good and bad refs and a test command, find the "
+                    "breaking commit. NOTE: moves HEAD across commits during the run, then resets.",
+     .input_schema_json =
+         "{\"type\":\"object\",\"properties\":{\"good\":{\"type\":\"string\"},\"bad\":{\"type\":"
+         "\"string\"},\"command\":{\"type\":\"string\"}},\"required\":[\"good\",\"bad\",\"command\"]}",
+     .execute = tool_git_bisect},
+    {.name = "stage_hunk",
+     .description = "Stage a patch to the git index (git apply --cached) without touching the "
+                    "working tree — build tight, single-concern commits.",
+     .input_schema_json = "{\"type\":\"object\",\"properties\":{\"patch\":{\"type\":\"string\"}},"
+                          "\"required\":[\"patch\"]}",
+     .execute = tool_stage_hunk},
+    {.name = "review_diff",
+     .description = "Structured working diff: {files:[{path,added,removed}], file_count, added, "
+                    "removed}. Reason over your own changes before committing.",
+     .input_schema_json = "{\"type\":\"object\",\"properties\":{\"staged\":{\"type\":\"boolean\"},"
+                          "\"path\":{\"type\":\"string\"}},\"required\":[]}",
+     .execute = tool_review_diff,
+     .is_read_only = true,
+     .is_concurrent = true},
     {.name = "jina_embed",
      .description =
          "Compute embeddings via Jina v4 API. Returns 1024d float vectors for semantic similarity.",
@@ -35593,6 +36048,7 @@ static bool tool_is_high_risk(const char *n, tool_class_t cls) {
            strcmp(n, "delete_file") == 0 || strcmp(n, "move_file") == 0 ||
            strcmp(n, "copy_file") == 0 || strcmp(n, "chmod_tool") == 0 || strcmp(n, "git") == 0 ||
            strcmp(n, "apply_patch") == 0 || strcmp(n, "ast_edit") == 0 ||
+           strcmp(n, "format_code") == 0 || strcmp(n, "stage_hunk") == 0 ||
            strcmp(n, "patch_file") == 0 || strcmp(n, "http_request") == 0 ||
            strcmp(n, "curl_raw") == 0 || strcmp(n, "download_file") == 0 ||
            strcmp(n, "ssh_command") == 0 || strcmp(n, "docker") == 0 || strcmp(n, "trading") == 0 ||
