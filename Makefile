@@ -795,7 +795,12 @@ clang-tidy:
 		echo "clang-tidy not found" >&2; \
 		exit 1; \
 	fi
-	clang-tidy $(SRCS) -- -I$(INC_DIR) -std=c11 -D_POSIX_C_SOURCE=200809L -D_GNU_SOURCE -DHAVE_MBEDTLS -DHAVE_LIBSODIUM -DHAVE_LIBUV
+	@# Analyze with the SAME include/feature flags the real build uses, so
+	@# clang-tidy resolves vendored GSL, hiredis and readline headers and sees
+	@# the HAVE_* guarded declarations. Otherwise it reports spurious
+	@# clang-diagnostic errors (undeclared time/dialog_*, missing gsl headers)
+	@# and exits non-zero regardless of the (advisory) style warnings.
+	clang-tidy $(SRCS) -- $(filter-out -MMD -MP,$(BASE_CFLAGS))
 
 cppcheck:
 	@if ! command -v cppcheck >/dev/null 2>&1; then \
