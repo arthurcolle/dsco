@@ -807,7 +807,10 @@ static int chat_prepare(const netsrv_request_t *req, char *cmd, size_t cmdsz, ch
         *errjson = "{\"error\":\"no prompt or messages[].content\"}";
         return 400;
     }
-    int nmax = json_get_int(req->body, "max_tokens", 128);
+    /* Parse the body once, then pull every scalar field via hash lookup instead
+     * of re-scanning the document per key (json_view; see json_util.h). */
+    json_view_t *jv = json_view_open(req->body);
+    int nmax = (int)json_view_i64(jv, "max_tokens", 128);
     if (nmax < 1)
         nmax = 1;
     else if (nmax > 2048)
@@ -817,10 +820,11 @@ static int chat_prepare(const netsrv_request_t *req, char *cmd, size_t cmdsz, ch
      * so llama.cpp's own defaults apply otherwise). */
     char samp[256] = "";
     size_t sl = 0;
-    double temp = json_get_double(req->body, "temperature", -1);
-    double top_p = json_get_double(req->body, "top_p", -1);
-    int top_k = json_get_int(req->body, "top_k", -1);
-    int seed = json_get_int(req->body, "seed", -1);
+    double temp = json_view_f64(jv, "temperature", -1);
+    double top_p = json_view_f64(jv, "top_p", -1);
+    int top_k = (int)json_view_i64(jv, "top_k", -1);
+    int seed = (int)json_view_i64(jv, "seed", -1);
+    json_view_close(jv);
     if (temp >= 0)
         sl += (size_t)snprintf(samp + sl, sizeof(samp) - sl, "--temp %g ", temp);
     if (top_p >= 0)
