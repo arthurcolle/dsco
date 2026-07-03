@@ -14190,6 +14190,516 @@ static bool tool_diagnostics(const char *input, char *result, size_t rlen) {
     return rc == 0;
 }
 
+/* ── symbol_def / symbol_refs + ast_edit ─────────────────────────────────── */
+static bool cw_ident_char(char c) {
+    return isalnum((unsigned char)c) || c == '_';
+}
+
+/* Immune surfaces ast_edit's whole-tree rename must never silently modify;
+ * mirrors the governance protected list (defense in depth — the gate also
+ * blocks when the input names one). */
+static bool cw_is_protected_path(const char *path) {
+    static const char *const prot[] = {"governance.c",     "governance.h", "killswitch.c",
+                                       "killswitch.h",     "ooda.c",       "ooda.h",
+                                       "tools.c",          "tools.h",      "audit_log.c",
+                                       "audit_log.h",      "tamper.c",     "tamper.h",
+                                       "rsi_curriculum.c", "rsi_curriculum.h", NULL};
+    for (int i = 0; prot[i]; i++)
+        if (strstr(path, prot[i]))
+            return true;
+    return false;
+}
+
+/* Whole-word replace old→new in text; returns count, sets *out (heap). */
+static int cw_word_replace(const char *text, const char *old, const char *neu, char **out) {
+    size_t ol = strlen(old);
+    jbuf_t b;
+    jbuf_init(&b, strlen(text) + 64);
+    int cnt = 0;
+    const char *p = text;
+    while (*p) {
+        const char *m = strstr(p, old);
+        if (!m) {
+            jbuf_append(&b, p);
+            break;
+        }
+        char before = (m == text) ? '\0' : m[-1];
+        char after = m[ol];
+        jbuf_appendf(&b, "%.*s", (int)(m - p), p);
+        if (!cw_ident_char(before) && !cw_ident_char(after)) {
+            jbuf_append(&b, neu);
+            cnt++;
+        } else {
+            jbuf_appendf(&b, "%.*s", (int)ol, m);
+        }
+        p = m + ol;
+    }
+    *out = strdup(b.data);
+    jbuf_free(&b);
+    return cnt;
+}
+
+static bool cw_is_c_source(const char *nm) {
+    size_t len = strlen(nm);
+    return len >= 3 && (strcmp(nm + len - 2, ".c") == 0 || strcmp(nm + len - 2, ".h") == 0);
+}
+
+static void sym_def_walk(const char *root, const char *rel, const char *name, jbuf_t *out, int *n) {
+    char path[2048];
+    snprintf(path, sizeof(path), "%s/%s", root, rel[0] ? rel : ".");
+    DIR *d = opendir(path);
+    if (!d)
+        return;
+    struct dirent *e;
+    while ((e = readdir(d)) != NULL) {
+        if (e->d_name[0] == '.')
+            continue;
+        char childrel[1024];
+        if (rel[0])
+            snprintf(childrel, sizeof(childrel), "%s/%s", rel, e->d_name);
+        else
+            snprintf(childrel, sizeof(childrel), "%s", e->d_name);
+        char childpath[2400];
+        snprintf(childpath, sizeof(childpath), "%s/%s", root, childrel);
+        struct stat st;
+        if (stat(childpath, &st) != 0)
+            continue;
+        if (S_ISDIR(st.st_mode)) {
+            if (strcmp(e->d_name, "build") == 0 || strcmp(e->d_name, "gsl") == 0 ||
+                strcmp(e->d_name, "vendor") == 0)
+                continue;
+            sym_def_walk(root, childrel, name, out, n);
+            continue;
+        }
+        if (!cw_is_c_source(e->d_name))
+            continue;
+        ast_file_t *f = ast_parse_file(childpath);
+        if (!f)
+            continue;
+        for (int i = 0; i < f->count; i++) {
+            ast_node_t *nd = &f->nodes[i];
+            if (!nd->name || strcmp(nd->name, name) != 0 || nd->type == AST_INCLUDE)
+                continue;
+            if (*n)
+                jbuf_append(out, ",");
+            jbuf_append(out, "{\"file\":");
+            jbuf_append_json_str(out, childrel);
+            jbuf_appendf(out, ",\"line\":%d,\"type\":\"%s\",\"signature\":", nd->line_start,
+                         ast_node_type_label(nd->type));
+            char sig[640];
+            snprintf(sig, sizeof(sig), "%s%s %s(%s)", nd->is_static ? "static " : "",
+                     nd->return_type ? nd->return_type : "", nd->name,
+                     nd->params ? nd->params : "");
+            jbuf_append_json_str(out, sig);
+            jbuf_append(out, "}");
+            (*n)++;
+        }
+        ast_free_file(f);
+    }
+    closedir(d);
+}
+
+static void sym_refs_walk(const char *root, const char *rel, const char *name, jbuf_t *out, int *n,
+                          int max) {
+    if (*n >= max)
+        return;
+    char path[2048];
+    snprintf(path, sizeof(path), "%s/%s", root, rel[0] ? rel : ".");
+    DIR *d = opendir(path);
+    if (!d)
+        return;
+    struct dirent *e;
+    size_t nlen = strlen(name);
+    while ((e = readdir(d)) != NULL && *n < max) {
+        if (e->d_name[0] == '.')
+            continue;
+        char childrel[1024];
+        if (rel[0])
+            snprintf(childrel, sizeof(childrel), "%s/%s", rel, e->d_name);
+        else
+            snprintf(childrel, sizeof(childrel), "%s", e->d_name);
+        char childpath[2400];
+        snprintf(childpath, sizeof(childpath), "%s/%s", root, childrel);
+        struct stat st;
+        if (stat(childpath, &st) != 0)
+            continue;
+        if (S_ISDIR(st.st_mode)) {
+            if (strcmp(e->d_name, "build") == 0 || strcmp(e->d_name, "gsl") == 0 ||
+                strcmp(e->d_name, "vendor") == 0)
+                continue;
+            sym_refs_walk(root, childrel, name, out, n, max);
+            continue;
+        }
+        if (!cw_is_c_source(e->d_name))
+            continue;
+        long flen = 0;
+        char *txt = cw_read_file(childpath, &flen);
+        if (!txt)
+            continue;
+        int lineno = 1;
+        char *ls = NULL;
+        for (char *ln = strtok_r(txt, "\n", &ls); ln && *n < max;
+             ln = strtok_r(NULL, "\n", &ls), lineno++) {
+            const char *m = strstr(ln, name);
+            if (!m)
+                continue;
+            char before = (m == ln) ? '\0' : m[-1];
+            char after = m[nlen];
+            if (cw_ident_char(before) || cw_ident_char(after))
+                continue;
+            char clean[200];
+            const char *s = ln;
+            while (*s == ' ' || *s == '\t')
+                s++;
+            snprintf(clean, sizeof(clean), "%s", s);
+            if (*n)
+                jbuf_append(out, ",");
+            jbuf_append(out, "{\"file\":");
+            jbuf_append_json_str(out, childrel);
+            jbuf_appendf(out, ",\"line\":%d,\"text\":", lineno);
+            jbuf_append_json_str(out, clean);
+            jbuf_append(out, "}");
+            (*n)++;
+        }
+        free(txt);
+    }
+    closedir(d);
+}
+
+static void cw_symbol_roots(const char *input, const char *root,
+                            void (*fn)(const char *, const char *, const char *, jbuf_t *, int *),
+                            const char *name, jbuf_t *out, int *n) {
+    char *paths = json_get_str(input, "paths");
+    if (paths && paths[0]) {
+        char *copy = strdup(paths);
+        char *save = NULL;
+        for (char *tok = strtok_r(copy, ",", &save); tok; tok = strtok_r(NULL, ",", &save)) {
+            while (*tok == ' ')
+                tok++;
+            fn(root, tok, name, out, n);
+        }
+        free(copy);
+    } else {
+        fn(root, "src", name, out, n);
+        fn(root, "include", name, out, n);
+    }
+    free(paths);
+}
+
+static const char *cw_repo_root(char *cwd, size_t len) {
+    const char *root = getenv("DSCO_AST_ROOT");
+    if (!root || !root[0])
+        root = getcwd(cwd, len) ? cwd : ".";
+    return root;
+}
+
+static bool tool_symbol_def(const char *input, char *result, size_t rlen) {
+    char *name = json_get_str(input, "name");
+    if (!name || !name[0]) {
+        free(name);
+        snprintf(result, rlen, "{\"error\":\"name required\"}");
+        return false;
+    }
+    char cwd[1024];
+    const char *root = cw_repo_root(cwd, sizeof(cwd));
+    jbuf_t out;
+    jbuf_init(&out, 4096);
+    jbuf_append(&out, "{\"name\":");
+    jbuf_append_json_str(&out, name);
+    jbuf_append(&out, ",\"definitions\":[");
+    int n = 0;
+    cw_symbol_roots(input, root, sym_def_walk, name, &out, &n);
+    jbuf_appendf(&out, "],\"count\":%d}", n);
+    free(name);
+    size_t nn = out.len < rlen - 1 ? out.len : rlen - 1;
+    memcpy(result, out.data, nn);
+    result[nn] = '\0';
+    jbuf_free(&out);
+    return true;
+}
+
+static bool tool_symbol_refs(const char *input, char *result, size_t rlen) {
+    char *name = json_get_str(input, "name");
+    if (!name || !name[0]) {
+        free(name);
+        snprintf(result, rlen, "{\"error\":\"name required\"}");
+        return false;
+    }
+    int max = json_get_int(input, "max", 100);
+    if (max < 1)
+        max = 1;
+    if (max > 500)
+        max = 500;
+    char cwd[1024];
+    const char *root = cw_repo_root(cwd, sizeof(cwd));
+    jbuf_t out;
+    jbuf_init(&out, 8192);
+    jbuf_append(&out, "{\"name\":");
+    jbuf_append_json_str(&out, name);
+    jbuf_append(&out, ",\"references\":[");
+    int n = 0;
+    char *paths = json_get_str(input, "paths");
+    if (paths && paths[0]) {
+        char *copy = strdup(paths);
+        char *save = NULL;
+        for (char *tok = strtok_r(copy, ",", &save); tok; tok = strtok_r(NULL, ",", &save)) {
+            while (*tok == ' ')
+                tok++;
+            sym_refs_walk(root, tok, name, &out, &n, max);
+        }
+        free(copy);
+    } else {
+        sym_refs_walk(root, "src", name, &out, &n, max);
+        sym_refs_walk(root, "include", name, &out, &n, max);
+    }
+    free(paths);
+    jbuf_appendf(&out, "],\"count\":%d,\"truncated\":%s}", n, n >= max ? "true" : "false");
+    free(name);
+    size_t nn = out.len < rlen - 1 ? out.len : rlen - 1;
+    memcpy(result, out.data, nn);
+    result[nn] = '\0';
+    jbuf_free(&out);
+    return true;
+}
+
+typedef struct {
+    char path[1024];
+    char *newtext;
+    int count;
+} cw_rn_file_t;
+
+/* Recursively rewrite whole-word old→new under root/rel, collecting changed
+ * files. Protected (immune) files are counted as skipped, never modified. */
+static void cw_rename_walk(const char *root, const char *rel, const char *oldn, const char *newn,
+                           cw_rn_file_t *chg, int *nchg, int *skipped, int *total, int maxchg) {
+    char path[2048];
+    snprintf(path, sizeof(path), "%s/%s", root, rel[0] ? rel : ".");
+    DIR *d = opendir(path);
+    if (!d)
+        return;
+    struct dirent *e;
+    while ((e = readdir(d)) != NULL && *nchg < maxchg) {
+        if (e->d_name[0] == '.')
+            continue;
+        char childrel[1024];
+        if (rel[0])
+            snprintf(childrel, sizeof(childrel), "%s/%s", rel, e->d_name);
+        else
+            snprintf(childrel, sizeof(childrel), "%s", e->d_name);
+        char childpath[2400];
+        snprintf(childpath, sizeof(childpath), "%s/%s", root, childrel);
+        struct stat st;
+        if (stat(childpath, &st) != 0)
+            continue;
+        if (S_ISDIR(st.st_mode)) {
+            if (strcmp(e->d_name, "build") == 0 || strcmp(e->d_name, "gsl") == 0 ||
+                strcmp(e->d_name, "vendor") == 0)
+                continue;
+            cw_rename_walk(root, childrel, oldn, newn, chg, nchg, skipped, total, maxchg);
+            continue;
+        }
+        if (!cw_is_c_source(e->d_name))
+            continue;
+        long flen = 0;
+        char *txt = cw_read_file(childpath, &flen);
+        if (!txt)
+            continue;
+        char *neu = NULL;
+        int c = cw_word_replace(txt, oldn, newn, &neu);
+        free(txt);
+        if (c <= 0) {
+            free(neu);
+            continue;
+        }
+        if (cw_is_protected_path(childrel)) {
+            (*skipped)++;
+            free(neu);
+            continue;
+        }
+        cw_rn_file_t *cf = &chg[(*nchg)++];
+        snprintf(cf->path, sizeof(cf->path), "%s", childpath);
+        cf->newtext = neu;
+        cf->count = c;
+        *total += c;
+    }
+    closedir(d);
+}
+
+/* rename a symbol across the tree (whole-word), skipping protected files. */
+static bool ast_edit_rename(const char *input, char *result, size_t rlen, const char *root) {
+    char *oldn = json_get_str(input, "old_name");
+    char *newn = json_get_str(input, "new_name");
+    if (!oldn || !oldn[0] || !newn || !newn[0]) {
+        free(oldn);
+        free(newn);
+        snprintf(result, rlen, "{\"error\":\"old_name and new_name required\"}");
+        return false;
+    }
+    bool valid = (isalpha((unsigned char)newn[0]) || newn[0] == '_');
+    for (const char *p = newn; valid && *p; p++)
+        valid = cw_ident_char(*p);
+    if (!valid) {
+        free(oldn);
+        free(newn);
+        snprintf(result, rlen, "{\"error\":\"new_name is not a valid identifier\"}");
+        return false;
+    }
+
+    cw_rn_file_t changes[256];
+    int nchg = 0, skipped = 0, total = 0;
+    char *paths = json_get_str(input, "paths");
+    if (paths && paths[0]) {
+        char *copy = strdup(paths);
+        char *save = NULL;
+        for (char *tok = strtok_r(copy, ",", &save); tok; tok = strtok_r(NULL, ",", &save)) {
+            while (*tok == ' ')
+                tok++;
+            cw_rename_walk(root, tok, oldn, newn, changes, &nchg, &skipped, &total, 256);
+        }
+        free(copy);
+    } else {
+        cw_rename_walk(root, "src", oldn, newn, changes, &nchg, &skipped, &total, 256);
+        cw_rename_walk(root, "include", oldn, newn, changes, &nchg, &skipped, &total, 256);
+    }
+    free(paths);
+
+    bool ok = true;
+    for (int i = 0; i < nchg && ok; i++)
+        if (!cw_write_file(changes[i].path, changes[i].newtext))
+            ok = false;
+
+    jbuf_t out;
+    jbuf_init(&out, 2048);
+    jbuf_appendf(&out,
+                 "{\"action\":\"rename\",\"ok\":%s,\"files_changed\":%d,\"renames\":%d,"
+                 "\"protected_skipped\":%d,\"changed\":[",
+                 ok ? "true" : "false", nchg, total, skipped);
+    for (int i = 0; i < nchg; i++) {
+        if (i)
+            jbuf_append(&out, ",");
+        jbuf_append_json_str(&out, changes[i].path);
+    }
+    jbuf_append(&out, "]}");
+    for (int i = 0; i < nchg; i++)
+        free(changes[i].newtext);
+    free(oldn);
+    free(newn);
+    size_t nn = out.len < rlen - 1 ? out.len : rlen - 1;
+    memcpy(result, out.data, nn);
+    result[nn] = '\0';
+    jbuf_free(&out);
+    return ok;
+}
+
+/* replace a function's body by AST line span. */
+static bool ast_edit_replace_function(const char *input, char *result, size_t rlen) {
+    char *file = json_get_str(input, "file");
+    char *fname = json_get_str(input, "name");
+    char *src = json_get_str(input, "new_source");
+    if (!file || !file[0] || !fname || !fname[0] || !src) {
+        free(file);
+        free(fname);
+        free(src);
+        snprintf(result, rlen, "{\"error\":\"file, name, new_source required\"}");
+        return false;
+    }
+    ast_file_t *f = ast_parse_file(file);
+    if (!f) {
+        free(file);
+        free(fname);
+        free(src);
+        snprintf(result, rlen, "{\"error\":\"cannot parse file\"}");
+        return false;
+    }
+    ast_node_t *fn = ast_find_function(f, fname);
+    if (!fn || fn->line_start <= 0 || fn->line_end < fn->line_start) {
+        ast_free_file(f);
+        free(file);
+        free(fname);
+        free(src);
+        snprintf(result, rlen, "{\"error\":\"function not found or has no line span\"}");
+        return false;
+    }
+    int ls = fn->line_start, le = fn->line_end;
+    ast_free_file(f);
+
+    long flen = 0;
+    char *txt = cw_read_file(file, &flen);
+    if (!txt) {
+        free(file);
+        free(fname);
+        free(src);
+        snprintf(result, rlen, "{\"error\":\"cannot read file\"}");
+        return false;
+    }
+    jbuf_t out;
+    jbuf_init(&out, (size_t)flen + strlen(src) + 256);
+    int lineno = 1;
+    char *ls2 = NULL;
+    bool inserted = false;
+    /* strtok drops empty lines; walk manually to preserve them. */
+    char *p = txt;
+    (void)ls2;
+    while (p) {
+        char *nlp = strchr(p, '\n');
+        int cur = lineno;
+        if (cur < ls || cur > le) {
+            if (nlp) {
+                jbuf_appendf(&out, "%.*s\n", (int)(nlp - p), p);
+            } else {
+                jbuf_append(&out, p);
+            }
+        } else if (!inserted) {
+            jbuf_append(&out, src);
+            size_t sl = strlen(src);
+            if (sl == 0 || src[sl - 1] != '\n')
+                jbuf_append(&out, "\n");
+            inserted = true;
+        }
+        lineno++;
+        if (!nlp)
+            break;
+        p = nlp + 1;
+        if (*p == '\0')
+            break;
+    }
+    free(txt);
+    bool ok = cw_write_file(file, out.data);
+    jbuf_t j;
+    jbuf_init(&j, 512);
+    jbuf_appendf(&j, "{\"action\":\"replace_function\",\"ok\":%s,\"file\":", ok ? "true" : "false");
+    jbuf_append_json_str(&j, file);
+    jbuf_appendf(&j, ",\"name\":");
+    jbuf_append_json_str(&j, fname);
+    jbuf_appendf(&j, ",\"replaced_lines\":\"%d-%d\"}", ls, le);
+    jbuf_free(&out);
+    free(file);
+    free(fname);
+    free(src);
+    size_t nn = j.len < rlen - 1 ? j.len : rlen - 1;
+    memcpy(result, j.data, nn);
+    result[nn] = '\0';
+    jbuf_free(&j);
+    return ok;
+}
+
+static bool tool_ast_edit(const char *input, char *result, size_t rlen) {
+    char *action = json_get_str(input, "action");
+    char cwd[1024];
+    const char *root = cw_repo_root(cwd, sizeof(cwd));
+    bool ok;
+    if (action && strcmp(action, "rename") == 0) {
+        ok = ast_edit_rename(input, result, rlen, root);
+    } else if (action && strcmp(action, "replace_function") == 0) {
+        ok = ast_edit_replace_function(input, result, rlen);
+    } else {
+        snprintf(result, rlen, "{\"error\":\"action must be 'rename' or 'replace_function'\"}");
+        ok = false;
+    }
+    free(action);
+    return ok;
+}
+
 static bool tool_context_search(const char *input, char *result, size_t rlen) {
     char *query = json_get_str(input, "query");
     char *tool_filter = json_get_str(input, "tool");
@@ -29602,6 +30112,37 @@ static const tool_def_t s_tools[] = {
      .execute = tool_diagnostics,
      .is_read_only = true,
      .is_concurrent = true},
+    {.name = "symbol_def",
+     .description = "Exact go-to-definition over the AST: find where a function/struct/typedef/"
+                    "enum named <name> is defined, with file:line and signature. Precise "
+                    "complement to the semantic ast_search.",
+     .input_schema_json = "{\"type\":\"object\",\"properties\":{\"name\":{\"type\":\"string\"},"
+                          "\"paths\":{\"type\":\"string\"}},\"required\":[\"name\"]}",
+     .execute = tool_symbol_def,
+     .is_read_only = true,
+     .is_concurrent = true},
+    {.name = "symbol_refs",
+     .description = "Find-references: every whole-word use of an identifier across the source, "
+                    "file:line anchored with the source line. Use before renaming or to trace "
+                    "impact.",
+     .input_schema_json =
+         "{\"type\":\"object\",\"properties\":{\"name\":{\"type\":\"string\"},\"max\":{\"type\":"
+         "\"integer\",\"description\":\"cap (1-500, default 100)\"},\"paths\":{\"type\":\"string\"}},"
+         "\"required\":[\"name\"]}",
+     .execute = tool_symbol_refs,
+     .is_read_only = true,
+     .is_concurrent = true},
+    {.name = "ast_edit",
+     .description = "AST-aware edits. action='rename': whole-word rename a symbol across the tree "
+                    "(protected immune files are skipped, never modified). "
+                    "action='replace_function': replace a function's whole body by its AST line "
+                    "span. Verify with diagnostics after.",
+     .input_schema_json =
+         "{\"type\":\"object\",\"properties\":{\"action\":{\"type\":\"string\",\"description\":"
+         "\"rename|replace_function\"},\"old_name\":{\"type\":\"string\"},\"new_name\":{\"type\":"
+         "\"string\"},\"file\":{\"type\":\"string\"},\"name\":{\"type\":\"string\"},\"new_source\":"
+         "{\"type\":\"string\"},\"paths\":{\"type\":\"string\"}},\"required\":[\"action\"]}",
+     .execute = tool_ast_edit},
     {.name = "jina_embed",
      .description =
          "Compute embeddings via Jina v4 API. Returns 1024d float vectors for semantic similarity.",
