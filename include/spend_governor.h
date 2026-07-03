@@ -86,6 +86,19 @@ typedef struct {
 /* Pure: signals in, plan out. Never blocks below 100% of any budget. */
 spend_plan_t spend_governor_plan(const spend_signals_t *sig);
 
+/* Learned-behavior adjustment from the usage-stats strategy weights.
+ * Pure and tighten-only: may enable trimming, the 1h-cache recommendation,
+ * or the downshift suggestion earlier than the phase defaults — never
+ * loosens a plan. Default (unlearned) weights leave the plan unchanged. */
+typedef struct {
+    double cache_aggressiveness;      /* >0.6 → recommend 1h TTL on poor hit ratio */
+    double model_cost_sensitivity;    /* >0.7 → downshift suggestion from YELLOW   */
+    double context_compaction_thresh; /* context ratio that triggers early trim    */
+} spend_learned_t;
+
+void spend_plan_apply_learned(spend_plan_t *plan, const spend_learned_t *lw,
+                              const spend_signals_t *sig);
+
 /* Effort tier ranking for downshift-only comparisons.
  * none < minimal < low < medium < high < xhigh < max. Unknown/auto = high. */
 int spend_effort_rank(const char *effort);
