@@ -11,6 +11,8 @@ bool tool_serpapi(const char *input, char *result, size_t rlen);
 bool tool_jina_read(const char *input, char *result, size_t rlen);
 bool tool_jina_search(const char *input, char *result, size_t rlen);
 bool tool_jina_embed(const char *input, char *result, size_t rlen);
+int jina_embed_batch(char **texts, int n, const char *task, const char *model, int want_dim,
+                     float *vecs, int stride, int *out_dim);
 bool tool_jina_ai_reader(const char *input, char *result, size_t rlen);
 bool tool_jina_ai_search(const char *input, char *result, size_t rlen);
 bool tool_jina_ai_embed(const char *input, char *result, size_t rlen);
