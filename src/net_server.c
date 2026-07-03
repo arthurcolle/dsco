@@ -8,8 +8,31 @@
 #include <mbedtls/pk.h>
 #include <mbedtls/ecp.h>
 #include <mbedtls/error.h>
+#include <mbedtls/version.h>
 #include <sys/socket.h>
+#include <netinet/in.h>
 #include <netinet/tcp.h>
+
+/* mbedTLS 2.x compatibility (ubuntu 24.04 ships 2.28): map the 3.x-only
+ * spellings onto their 2.x equivalents. */
+#if MBEDTLS_VERSION_NUMBER < 0x03000000
+#include <mbedtls/bignum.h>
+#define mbedtls_ssl_conf_min_tls_version(conf, ver) \
+    mbedtls_ssl_conf_min_version((conf), MBEDTLS_SSL_MAJOR_VERSION_3, MBEDTLS_SSL_MINOR_VERSION_3)
+#define mbedtls_pk_parse_keyfile(ctx, path, pwd, f_rng, p_rng) \
+    mbedtls_pk_parse_keyfile((ctx), (path), (pwd))
+static int netsrv_compat_set_serial_raw(mbedtls_x509write_cert *ctx,
+                                        unsigned char *serial, size_t len) {
+    mbedtls_mpi mpi;
+    mbedtls_mpi_init(&mpi);
+    int r = mbedtls_mpi_read_binary(&mpi, serial, len);
+    if (r == 0)
+        r = mbedtls_x509write_crt_set_serial(ctx, &mpi);
+    mbedtls_mpi_free(&mpi);
+    return r;
+}
+#define mbedtls_x509write_crt_set_serial_raw netsrv_compat_set_serial_raw
+#endif
 
 #include <pthread.h>
 #include <stdio.h>
