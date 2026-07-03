@@ -97,9 +97,9 @@
 #  else
 #    include <cpuid.h>
 #    define dsco_cpuid(leaf, a, b, c, d) \
-         __cpuid((unsigned)(leaf),(unsigned&)(a),(unsigned&)(b),(unsigned&)(c),(unsigned&)(d))
+         __cpuid((unsigned)(leaf), (a), (b), (c), (d))
 #    define dsco_cpuidex(leaf, subleaf, a, b, c, d) \
-         __cpuid_count((unsigned)(leaf),(unsigned)(subleaf),(unsigned&)(a),(unsigned&)(b),(unsigned&)(c),(unsigned&)(d))
+         __cpuid_count((unsigned)(leaf), (unsigned)(subleaf), (a), (b), (c), (d))
 #  endif
 #endif
 
@@ -459,6 +459,16 @@ static void mac_collect_network(dsco_fingerprint_t *fp) {
 
 /* L3: Storage — via system_profiler JSON */
 static void mac_collect_storage(dsco_fingerprint_t *fp) {
+    /* Fast mode: skip expensive system_profiler call */
+    const char *fast_mode = getenv("DSCO_FAST_FINGERPRINT");
+    const char *interactive_mode = getenv("DSCO_INTERACTIVE");
+    if (fast_mode || interactive_mode) {
+        fp->storage_model[0] = '\0';
+        fp->storage_protocol[0] = '\0';
+        fp->primary_volume_uuid[0] = '\0';
+        return;
+    }
+
     FILE *f = popen("system_profiler SPStorageDataType -json 2>/dev/null", "r");
     if (!f) return;
     char buf[65536];

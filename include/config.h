@@ -31,9 +31,9 @@
  * bash+python always core; everything else loaded via load_tools/hints.
  * Budget-adaptive: full=32, mid=24, low=13, critical=5 */
 #define TOOL_REGISTER_CAP       32
-#define TOOL_REG_ALWAYS          7   /* R0-R6:   bash,python,discover,load,exit,loop */
+#define TOOL_REG_ALWAYS          6   /* R0-R5:   bash,python,discover,load,loop */
 #define TOOL_REG_WARM           11   /* file I/O + run_command, evictable */
-#define TOOL_REG_WORKING        10   /* quorum-scored, turn-volatile */
+#define TOOL_REG_WORKING        11   /* quorum-scored, turn-volatile */
 #define TOOL_REG_DISCOVERY       4   /* R28-R31: progressive schema, ephemeral */
 #define QUORUM_MIN_SIGNALS       2   /* min independent signals to load a tool */
 #define MAX_INPUT_LINE      65536
@@ -44,7 +44,7 @@
 extern int g_cheap_mode;
 
 /* API defaults */
-#define DEFAULT_MODEL       "fugu"
+#define DEFAULT_MODEL       "zai/glm-5.2"
 #define API_URL_ANTHROPIC   "https://api.anthropic.com/v1/messages"
 #define API_URL_COUNT_TOKENS "https://api.anthropic.com/v1/messages/count_tokens"
 #define ANTHROPIC_VERSION   "2023-06-01"
@@ -130,31 +130,33 @@ const model_info_t *codex_cache_lookup(const char *name);
 
 static const model_info_t MODEL_REGISTRY[] = {
     /* ── Anthropic (native API) ──────────────────────────────────────────── */
-    { "fable",        "claude-fable-5",              500000, 64000,  20.0, 100.0,  2.00, 25.00, 1 },
-    { "fable5",       "claude-fable-5",              500000, 64000,  20.0, 100.0,  2.00, 25.00, 1 },
-    { "opus",         "claude-opus-4-8",             200000, 64000,  15.0,  75.0,  1.50, 18.75, 1 },
-    { "opus48",       "claude-opus-4-8",             200000, 64000,  15.0,  75.0,  1.50, 18.75, 1 },
-    { "opus47",       "claude-opus-4-7",             200000, 32000,  15.0,  75.0,  1.50, 18.75, 1 },
-    { "opus46",       "claude-opus-4-6",             200000, 32000,  15.0,  75.0,  1.50, 18.75, 1 },
-    { "sonnet",       "claude-sonnet-4-6",           200000, 16000,   3.0,  15.0,  0.30,  3.75, 1 },
-    { "haiku",        "claude-haiku-4-5-20251001",   200000,  8192,   0.80,  4.0,  0.08,  1.00, 0 },
+    { "fable",        "claude-fable-5",             1000000, 128000, 10.0,  50.0,  1.00, 12.50, 1 },
+    { "fable5",       "claude-fable-5",             1000000, 128000, 10.0,  50.0,  1.00, 12.50, 1 },
+    { "fable-5",      "claude-fable-5",             1000000, 128000, 10.0,  50.0,  1.00, 12.50, 1 },
+    { "opus",         "claude-opus-4-8",            1000000, 128000,  5.0,  25.0,  0.50,  6.25, 1 },
+    { "opus48",       "claude-opus-4-8",            1000000, 128000,  5.0,  25.0,  0.50,  6.25, 1 },
+    { "opus47",       "claude-opus-4-7",            1000000, 128000,  5.0,  25.0,  0.50,  6.25, 1 },
+    { "opus46",       "claude-opus-4-6",            1000000, 128000,  5.0,  25.0,  0.50,  6.25, 1 },
+    { "sonnet",       "claude-sonnet-4-6",          1000000, 128000,  3.0,  15.0,  0.30,  3.75, 1 },
+    { "haiku",        "claude-haiku-4-5-20251001",   200000, 64000,   1.00,  5.0,  0.10,  1.25, 0 },
     /* ── Anthropic (OpenRouter IDs — for cross-provider routing) ─────── */
-    { "or-fable",     "anthropic/claude-fable-5",     1000000, 64000, 20.0, 100.0,  0, 0, 1 },
-    { "or-opus48",    "anthropic/claude-opus-4.8",    1000000, 64000, 15.0,  75.0,  0, 0, 1 },
-    { "or-opus47",    "anthropic/claude-opus-4.7",    1000000, 32000, 15.0,  75.0,  0, 0, 1 },
-    { "or-opus46",    "anthropic/claude-opus-4.6",    1000000, 32000,  5.0,  25.0,  0, 0, 1 },
-    { "or-sonnet46",  "anthropic/claude-sonnet-4.6",  1000000, 16000,  3.0,  15.0,  0, 0, 1 },
+    { "or-fable5",    "anthropic/claude-fable-5",     1000000, 128000, 10.0, 50.0,  1.00, 12.50, 1 },
+    { "or-fable",     "anthropic/claude-sonnet-4.5",  1000000, 128000,  3.0, 15.0,  0.30,  3.75, 1 },
+    { "or-opus48",    "anthropic/claude-opus-4.8",    1000000, 128000,  5.0, 25.0,  0.50,  6.25, 1 },
+    { "or-opus47",    "anthropic/claude-opus-4.7",    1000000, 128000,  5.0, 25.0,  0.50,  6.25, 1 },
+    { "or-opus46",    "anthropic/claude-opus-4.6",    1000000, 128000,  5.0, 25.0,  0.50,  6.25, 1 },
+    { "or-sonnet46",  "anthropic/claude-sonnet-4.6",  1000000, 128000,  3.0, 15.0,  0.30,  3.75, 1 },
     { "or-opus45",    "anthropic/claude-opus-4.5",     200000, 32000,  5.0,  25.0,  0, 0, 1 },
     { "or-sonnet45",  "anthropic/claude-sonnet-4.5",  1000000, 16000,  3.0,  15.0,  0, 0, 1 },
     /* ── OpenAI — GPT-5.x family (2026 frontier) ────────────────────── */
-    { "gpt54-pro",    "openai/gpt-5.4-pro",          1050000, 32768, 30.0, 180.0,  0, 0, 1 },
-    { "gpt54",        "openai/gpt-5.4",              1050000, 32768,  2.50, 15.0,  0, 0, 1 },
-    { "gpt54-mini",   "openai/gpt-5.4-mini",           400000, 32768,  0.75,  4.50, 0, 0, 0 },
-    { "gpt54-nano",   "openai/gpt-5.4-nano",           400000, 32768,  0.20,  1.25, 0, 0, 0 },
-    { "gpt55-pro",    "openai/gpt-5.5-pro",            400000, 32768,  6.0,  24.0,  0, 0, 1 },
-    { "codex",        "openai/gpt-5.5",                272000, 32768,  0.0,   0.0,  0, 0, 1 },
-    { "gpt-5.5",      "openai/gpt-5.5",                272000, 32768,  0.0,   0.0,  0, 0, 1 },
-    { "gpt55",        "openai/gpt-5.5",                400000, 32768,  1.75, 14.0,  0, 0, 1 },
+    { "gpt54-pro",    "openai/gpt-5.4-pro",          1050000, 128000, 30.0, 180.0,  0, 0, 1 },
+    { "gpt54",        "openai/gpt-5.4",              1050000, 128000,  2.50, 15.0,  0.25, 0, 1 },
+    { "gpt54-mini",   "openai/gpt-5.4-mini",           400000, 128000,  0.75,  4.50, 0.075, 0, 0 },
+    { "gpt54-nano",   "openai/gpt-5.4-nano",           400000, 128000,  0.20,  1.25, 0.02, 0, 0 },
+    { "gpt55-pro",    "openai/gpt-5.5-pro",           1050000, 128000, 30.0, 180.0,  0, 0, 1 },
+    { "gpt-5.5",      "gpt-5.5",                      1050000, 128000, 0.0,   0.0,  0, 0, 1 },
+    { "codex",        "gpt-5.5",                      1050000, 128000, 0.0,   0.0,  0, 0, 1 },
+    { "gpt55",        "openai/gpt-5.5",               1050000, 128000,  5.0, 30.0,  0.50, 0, 1 },
     { "gpt53-codex",      "openai/gpt-5.3-codex",           400000, 32768,  1.75, 14.0,  0, 0, 1 },
     { "gpt52-pro",        "openai/gpt-5.2-pro",              400000, 32768, 21.0, 168.0,  0, 0, 1 },
     { "gpt52",            "openai/gpt-5.2",                  400000, 32768,  1.75, 14.0,  0, 0, 1 },
@@ -187,13 +189,13 @@ static const model_info_t MODEL_REGISTRY[] = {
     /* ── OpenAI — open-source models ─────────────────────────────────── */
     { "gpt-oss",      "openai/gpt-oss-120b",           131072, 32768,  0.04,  0.19, 0, 0, 0 },
     /* ── Google Gemini ───────────────────────────────────────────────── */
-    { "gem31-pro",    "google/gemini-3.1-pro-preview", 1048576, 32768,  2.0,  12.0,  0, 0, 1 },
+    { "gem31-pro",    "google/gemini-3.1-pro-preview", 1048576, 65536,  2.0,  12.0,  0, 0, 1 },
     { "gem31-dt",     "google/gemini-3.1-deep-think",  1048576, 65536,  4.0,  24.0,  0, 0, 1 },
-    { "gem31-flash",  "google/gemini-3.1-flash-lite-preview", 1048576, 32768, 0.25, 1.50, 0, 0, 0 },
+    { "gem31-flash",  "google/gemini-3.1-flash-lite-preview", 1048576, 65536, 0.25, 1.50, 0, 0, 0 },
     { "gem3-pro",     "google/gemini-3-pro-preview",   1048576, 32768,  2.0,  12.0,  0, 0, 1 },
     { "gem3-flash",   "google/gemini-3-flash-preview", 1048576, 32768,  0.50,  3.0,  0, 0, 0 },
-    { "gem25-pro",    "google/gemini-2.5-pro",         1048576, 32768,  1.25, 10.0,  0, 0, 1 },
-    { "gem25-flash",  "google/gemini-2.5-flash",       1048576, 32768,  0.30,  2.50, 0, 0, 0 },
+    { "gem25-pro",    "google/gemini-2.5-pro",         1048576, 65536,  1.25, 10.0,  0, 0, 1 },
+    { "gem25-flash",  "google/gemini-2.5-flash",       1048576, 65535,  0.30,  2.50, 0, 0, 0 },
     /* ── xAI Grok (via OpenRouter) ───────────────────────────────────── */
     { "grok4",        "x-ai/grok-4.20-beta",           2000000, 32768,  2.0,   6.0,  0, 0, 1 },
     { "grok4-ma",     "x-ai/grok-4.20-multi-agent-beta", 2000000, 32768, 2.0,  6.0,  0, 0, 1 },
@@ -215,8 +217,8 @@ static const model_info_t MODEL_REGISTRY[] = {
     { "kimi-code",    "moonshotai/kimi-k2.7-code",     262144, 16384,  0.74,  3.50, 0.15, 0, 1 },
     { "or-kimi-code", "moonshotai/kimi-k2.7-code",     262144, 16384,  0.74,  3.50, 0.15, 0, 1 },
     { "kimi-k25",     "moonshotai/kimi-k2.5",           262144, 16384,  0.45,  2.20, 0, 0, 1 },
-    { "kimi-k2",      "moonshotai/kimi-k2",             131000, 16384,  0.55,  2.20, 0, 0, 0 },
-    { "kimi-think",   "moonshotai/kimi-k2-thinking",    131072, 16384,  0.47,  2.00, 0, 0, 1 },
+    { "kimi-k2",      "moonshotai/kimi-k2",             131072, 16384,  0.55,  2.20, 0, 0, 0 },
+    { "kimi-think",   "moonshotai/kimi-k2-thinking",    262144, 100352, 0.60,  2.50, 0.15, 0, 1 },
     /* ── Moonshot Kimi (native platform.moonshot.ai) ─────────────────── */
     { "kimi-k2.7-code", "kimi-k2.7-code",              262144, 32768,  0.60,  3.00, 0.10, 0, 1 },
     { "kimi-k2.7-code-highspeed", "kimi-k2.7-code-highspeed", 262144, 32768, 0.60, 3.00, 0.10, 0, 1 },
@@ -228,36 +230,45 @@ static const model_info_t MODEL_REGISTRY[] = {
     { "mk2-think",    "kimi-k2-thinking",               262144, 32768,  0.60,  3.00, 0.10, 0, 1 },
     { "mk2-think-tb", "kimi-k2-thinking-turbo",         262144, 32768,  0.60,  3.00, 0.10, 0, 1 },
     /* ── Zhipu GLM ───────────────────────────────────────────────────── */
-    { "glm52",        "z-ai/glm-5.2",                  1048576, 262144, 1.40,  4.40, 0, 0, 1 },
-    { "glm51",        "z-ai/glm-5.1",                  202752, 65536,  0.72,  2.30, 0, 0, 1 },
-    { "glm5",         "z-ai/glm-5",                    202752, 65536,  0.72,  2.30, 0, 0, 1 },
-    { "glm5-turbo",   "z-ai/glm-5-turbo",              202752, 65536,  0.96,  3.20, 0, 0, 1 },
-    { "glm47",        "z-ai/glm-4.7",                  202752, 65536,  0.38,  1.98, 0, 0, 1 },
-    { "glm47-flash",  "z-ai/glm-4.7-flash",            202752, 65536,  0.06,  0.40, 0, 0, 0 },
+    { "glm-5.2",      "glm-5.2",                       1048576, 131072, 1.40,  4.40, 0, 0, 1 },
+    { "glm-5.1",      "glm-5.1",                       202752, 65536,  0.72,  2.30, 0, 0, 1 },
+    { "glm-5",        "glm-5",                         202752, 65536,  0.72,  2.30, 0, 0, 1 },
+    { "glm-5-turbo",  "glm-5-turbo",                   202752, 65536,  0.96,  3.20, 0, 0, 1 },
+    { "glm-4.7",      "glm-4.7",                       202752, 65536,  0.38,  1.98, 0, 0, 1 },
+    { "glm-4.7-flash", "glm-4.7-flash",                202752, 65536,  0.06,  0.40, 0, 0, 0 },
+    { "glm52",        "zai/glm-5.2",                   1048576, 131072, 1.40,  4.40, 0, 0, 1 },
+    { "glm51",        "zai/glm-5.1",                   202752, 65536,  0.72,  2.30, 0, 0, 1 },
+    { "glm5",         "zai/glm-5",                     202752, 65536,  0.72,  2.30, 0, 0, 1 },
+    { "glm5-turbo",   "zai/glm-5-turbo",               202752, 65536,  0.96,  3.20, 0, 0, 1 },
+    { "glm47",        "zai/glm-4.7",                   202752, 65536,  0.38,  1.98, 0, 0, 1 },
+    { "glm47-flash",  "zai/glm-4.7-flash",             202752, 65536,  0.06,  0.40, 0, 0, 0 },
+    { "or-glm52",     "openrouter/z-ai/glm-5.2",       1048576, 32768,  1.40,  4.40, 0, 0, 1 },
+    { "or-glm51",     "openrouter/z-ai/glm-5.1",       202752, 65536,  0.72,  2.30, 0, 0, 1 },
+    { "or-glm5",      "openrouter/z-ai/glm-5",         202752, 65536,  0.72,  2.30, 0, 0, 1 },
     /* ── DeepSeek ────────────────────────────────────────────────────── */
     { "ds-v4",        "deepseek/deepseek-v4",          262144, 32768,  0.27,  0.42, 0, 0, 0 },
     { "ds-r2",        "deepseek/deepseek-r2",          262144, 32768,  0.50,  2.18, 0, 0, 1 },
-    { "ds-v32",       "deepseek/deepseek-v3.2",        163840, 32768,  0.26,  0.38, 0, 0, 0 },
+    { "ds-v32",       "deepseek/deepseek-v3.2",        131072, 64000,  0.23,  0.34, 0.02, 0, 0 },
     { "ds-v31",       "deepseek/deepseek-v3.1-terminus", 163840, 32768, 0.21, 0.79, 0, 0, 0 },
-    { "ds-chat",      "deepseek/deepseek-chat",         163840, 32768,  0.32,  0.89, 0, 0, 0 },
+    { "ds-chat",      "deepseek/deepseek-chat",         131072, 16000,  0.20,  0.80, 0, 0, 0 },
     { "ds-r1",        "deepseek/deepseek-r1-0528",      163840, 32768,  0.45,  2.15, 0, 0, 1 },
     /* ── Qwen 3.5 ────────────────────────────────────────────────────── */
     { "qwen-flash",   "qwen/qwen3.5-flash-02-23",     1000000, 32768,  0.10,  0.40, 0, 0, 0 },
     { "qwen-plus",    "qwen/qwen3.5-plus-02-15",      1000000, 32768,  0.26,  1.56, 0, 0, 0 },
-    { "qwen-397b",    "qwen/qwen3.5-397b-a17b",        262144, 32768,  0.39,  2.34, 0, 0, 0 },
+    { "qwen-397b",    "qwen/qwen3.5-397b-a17b",        256000, 32768,  0.39,  2.45, 0, 0, 0 },
     { "qwen-122b",    "qwen/qwen3.5-122b-a10b",        262144, 32768,  0.26,  2.08, 0, 0, 0 },
     { "qwen-coder",   "qwen/qwen3-coder-next",         262144, 32768,  0.12,  0.75, 0, 0, 0 },
     { "qwen-think",   "qwen/qwen3-max-thinking",       262144, 32768,  0.78,  3.90, 0, 0, 1 },
     /* ── Meta Llama ──────────────────────────────────────────────────── */
     { "llama4-mav",   "meta-llama/llama-4-maverick",   1048576, 32768,  0.15,  0.60, 0, 0, 0 },
-    { "llama4-scout", "meta-llama/llama-4-scout",       327680, 32768,  0.08,  0.30, 0, 0, 0 },
+    { "llama4-scout", "meta-llama/llama-4-scout",     10000000, 16384, 0.10,  0.30, 0, 0, 0 },
     { "llama33-70b",  "meta-llama/llama-3.3-70b-instruct", 131072, 32768, 0.10, 0.32, 0, 0, 0 },
     /* ── Mistral (2025/2026) ─────────────────────────────────────────── */
     { "mistral-l3",   "mistralai/mistral-large-2512",   262144, 32768,  0.50,  1.50, 0, 0, 0 },
     { "mixtral",      "mistralai/mixtral-8x7b-instruct-v0.1", 32768, 32768, 0.0, 0.0, 0, 0, 0 },
     { "devstral",     "mistralai/devstral-2512",         262144, 32768,  0.40,  2.00, 0, 0, 0 },
     { "mistral-med",  "mistralai/mistral-medium-3.1",    131072, 32768,  0.40,  2.00, 0, 0, 0 },
-    { "mistral-s32",  "mistralai/mistral-small-3.2-24b-instruct", 131072, 32768, 0.06, 0.18, 0, 0, 0 },
+    { "mistral-s32",  "mistralai/mistral-small-3.2-24b-instruct", 128000, 16384, 0.06, 0.18, 0, 0, 0 },
     { "codestral",    "mistralai/codestral-2508",        256000, 32768,  0.30,  0.90, 0, 0, 0 },
     /* ── ByteDance Seed ──────────────────────────────────────────────── */
     { "seed2",        "bytedance-seed/seed-2.0-lite",    262144, 32768,  0.25,  2.00, 0, 0, 0 },
@@ -266,18 +277,18 @@ static const model_info_t MODEL_REGISTRY[] = {
     { "nova-premier", "amazon/nova-premier-v1",         1000000, 32768,  2.50, 12.50, 0, 0, 1 },
     { "nova2-lite",   "amazon/nova-2-lite-v1",          1000000, 32768,  0.30,  2.50, 0, 0, 0 },
     /* ── MiniMax ─────────────────────────────────────────────────────── */
-    { "minimax",      "minimax/minimax-m2.5",            196608, 32768,  0.25,  1.20, 0, 0, 0 },
+    { "minimax",      "minimax/minimax-m2.5",            204800, 196608, 0.25,  1.20, 0, 0, 0 },
     /* ── Writer ──────────────────────────────────────────────────────── */
     { "palmyra",      "writer/palmyra-x5",              1040000, 32768,  0.60,  6.00, 0, 0, 0 },
     /* ── NVIDIA ──────────────────────────────────────────────────────── */
-    { "nemotron",     "nvidia/nemotron-3-super-120b-a12b:free", 262144, 32768, 0, 0, 0, 0, 0 },
+    { "nemotron",     "nvidia/nemotron-3-super-120b-a12b:free", 1000000, 262144, 0, 0, 0, 0, 0 },
     /* ── Cohere ──────────────────────────────────────────────────────── */
     { "command-a",    "cohere/command-a",                256000, 32768,  2.50, 10.0,  0, 0, 0 },
     /* ── NousResearch ────────────────────────────────────────────────── */
     { "hermes4",      "nousresearch/hermes-4-405b",      131072, 32768,  1.00,  3.00, 0, 0, 0 },
     /* ── StepFun ─────────────────────────────────────────────────────── */
     { "step37-flash", "stepfun/step-3.7-flash",          256000, 32768,  0.10,  0.30, 0, 0, 1 },
-    { "step35",       "stepfun/step-3.5-flash",          256000, 32768,  0.10,  0.30, 0, 0, 0 },
+    { "step35",       "stepfun/step-3.5-flash",          262144, 65536,  0.10,  0.30, 0, 0, 0 },
     /* ── Inception Mercury ───────────────────────────────────────────── */
     { "mercury",      "inception/mercury-2",             128000, 32768,  0.25,  0.75, 0, 0, 0 },
     /* ── Baidu ERNIE ─────────────────────────────────────────────────── */
@@ -330,6 +341,29 @@ static inline void model_normalize_key(const char *src, char *dst, size_t dst_le
     dst[out] = '\0';
 }
 
+/* Local-server model namespaces must remain opaque. After exact registry hits,
+ * do not let fuzzy lookup rewrite names like "ollama/gpt-oss:20b" into a cloud
+ * alias such as "openai/gpt-oss-20b". */
+static inline bool model_name_is_local_namespace(const char *name) {
+    static const char *const local_pfx[] = {
+        "ollama/",    "ollama:",   "lmstudio/", "lmstudio:",
+        "mlx/",       "mlx:",      "local/",    "local:",
+        "vllm/",      "vllm:",     "llamacpp/", "llamacpp:",
+        "localai/",   "localai:",  "jan/",      "jan:",
+        "gpt4all/",   "gpt4all:",  "koboldcpp/", "koboldcpp:",
+        "textgen/",   "textgen:",  "tabby/",    "tabby:",
+        "tgi/",       "tgi:",      "sglang/",   "sglang:",
+        "llamafile/", "llamafile:",
+        NULL
+    };
+    if (!name)
+        return false;
+    for (int i = 0; local_pfx[i]; i++)
+        if (strncmp(name, local_pfx[i], strlen(local_pfx[i])) == 0)
+            return true;
+    return false;
+}
+
 static inline const model_info_t *model_lookup(const char *name) {
     if (!name || !*name) return NULL;
 
@@ -342,6 +376,9 @@ static inline const model_info_t *model_lookup(const char *name) {
             strcmp(name, MODEL_REGISTRY[i].model_id) == 0)
             return &MODEL_REGISTRY[i];
     }
+
+    if (model_name_is_local_namespace(name))
+        return NULL;
 
     /* Pass 2: normalized (case/punctuation-insensitive) match. */
     char want_norm[256];
@@ -399,6 +436,15 @@ static inline const model_info_t *model_lookup(const char *name) {
 }
 
 static inline const char *model_resolve_alias(const char *name) {
+    if (name && *name) {
+        for (int i = 0; MODEL_REGISTRY[i].alias; i++) {
+            if (strcmp(name, MODEL_REGISTRY[i].alias) == 0 ||
+                strcmp(name, MODEL_REGISTRY[i].model_id) == 0)
+                return MODEL_REGISTRY[i].model_id;
+        }
+        if (strchr(name, '/') || strchr(name, ':'))
+            return name;
+    }
     const model_info_t *m = model_lookup(name);
     return m ? m->model_id : name;
 }
@@ -410,9 +456,53 @@ static inline int model_context_window(const char *name) {
 
 /* ── Effort levels ─────────────────────────────────────────────────────── */
 
+#define EFFORT_AUTO   "auto"
+#define EFFORT_NONE   "none"
+#define EFFORT_MINIMAL "minimal"
 #define EFFORT_LOW    "low"
 #define EFFORT_MEDIUM "medium"
 #define EFFORT_HIGH   "high"
+#define EFFORT_XHIGH  "xhigh"
+#define EFFORT_MAX    "max"
+
+static inline const char *dsco_effort_options(void) {
+    return "auto, none, minimal, low, medium, high, xhigh, max";
+}
+
+static inline bool dsco_effort_is_auto(const char *effort) {
+    return !effort || !effort[0] || strcmp(effort, EFFORT_AUTO) == 0 ||
+           strcmp(effort, "default") == 0 || strcmp(effort, "provider") == 0;
+}
+
+static inline bool dsco_effort_is_wire_value(const char *effort) {
+    return effort && (strcmp(effort, EFFORT_NONE) == 0 ||
+                      strcmp(effort, EFFORT_MINIMAL) == 0 ||
+                      strcmp(effort, EFFORT_LOW) == 0 ||
+                      strcmp(effort, EFFORT_MEDIUM) == 0 ||
+                      strcmp(effort, EFFORT_HIGH) == 0 ||
+                      strcmp(effort, EFFORT_XHIGH) == 0);
+}
+
+static inline bool dsco_effort_is_valid(const char *effort) {
+    return dsco_effort_is_auto(effort) || dsco_effort_is_wire_value(effort) ||
+           (effort && strcmp(effort, EFFORT_MAX) == 0);
+}
+
+static inline const char *dsco_effort_display(const char *effort) {
+    return dsco_effort_is_auto(effort) ? EFFORT_AUTO : effort;
+}
+
+static inline bool dsco_effort_store(char *dst, size_t dst_len, const char *effort) {
+    if (!dst || dst_len == 0 || !dsco_effort_is_valid(effort))
+        return false;
+    if (dsco_effort_is_auto(effort)) {
+        dst[0] = '\0';
+    } else {
+        strncpy(dst, effort, dst_len - 1);
+        dst[dst_len - 1] = '\0';
+    }
+    return true;
+}
 
 /* System prompt */
 #define SYSTEM_PROMPT \

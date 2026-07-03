@@ -11,6 +11,7 @@
 #include <sys/types.h>
 #include <ctype.h>
 #include <errno.h>
+#include <time.h>
 
 /* ── Redis fast-path (optional) ─────────────────────────────────────────────
  * When HAVE_REDIS is defined and Redis is reachable, ipc_send() uses Redis

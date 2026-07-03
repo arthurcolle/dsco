@@ -17,6 +17,22 @@ Each provider record is JSON under `provider_metadata/providers/<provider>.json`
   "docs": [
     {"title":"Prompt caching", "url":"https://...", "retrieved":"2026-06-24", "confidence":0.9}
   ],
+  "api_coverage": {
+    "review_scope": "Provider public API reference endpoint groups reviewed YYYY-MM-DD",
+    "endpoint_groups": [
+      {
+        "name": "responses",
+        "endpoints": ["/responses", "/responses/input_tokens"],
+        "status": "covered_preferred|covered_supported|covered_metadata|covered_planned|covered_legacy",
+        "dsco_status": "implemented|partial|planned|metadata_only|legacy_metadata_only",
+        "cost_hooks": ["token_usage", "prompt_caching", "batch_api"],
+        "notes": "Short docs-backed coverage note."
+      }
+    ],
+    "hosted_tools": [
+      {"name": "web_search", "status": "tracked_cost", "cost_hooks": ["per_call_price", "model_tokens"]}
+    ]
+  },
   "wire_apis": [
     {
       "name": "responses",
@@ -60,11 +76,26 @@ Each provider record is JSON under `provider_metadata/providers/<provider>.json`
     "reasoning_tokens": ["usage.completion_tokens_details.reasoning_tokens"],
     "provider_specific": []
   },
+  "cost_management": {
+    "status": "docs_backed_cost_map|unknown",
+    "pricing_basis": [
+      "Store raw usage quantities first; apply pricing tables separately."
+    ],
+    "levers": [
+      {
+        "name": "batch_api",
+        "dsco_support": "implemented|available_via_env|partial|planned|metadata_only",
+        "policy": "When to use this lever.",
+        "savings": "discount_or_budget_effect",
+        "tracking_fields": ["batch_id", "request_count"]
+      }
+    ]
+  },
   "reasoning": {
     "supported": true,
     "field": "reasoning.effort",
-    "efforts": ["low", "medium", "high"],
-    "aliases": {"max":"high"},
+    "efforts": ["none", "minimal", "low", "medium", "high", "xhigh"],
+    "aliases": {"max":"xhigh"},
     "unsupported_values_rejected": true
   },
   "streaming": {
@@ -107,3 +138,5 @@ Each provider record is JSON under `provider_metadata/providers/<provider>.json`
 3. Automatic provider caching still needs metadata so DSCO can parse usage/cost and display cache effectiveness.
 4. Resource-lifecycle caching (Gemini) must be represented separately from request-field caching.
 5. Every metadata fact needs docs/provenance and a review date.
+6. `api_coverage` is for endpoint-family coverage and known lifecycle surfaces; `wire_apis` is still the request transport map DSCO may emit directly.
+7. `cost_management` should describe raw usage meters, routing levers, and reconciliation hooks. Keep live prices in pricing/model catalogs; this schema should avoid hard-coding volatile price tables unless the provider has no separate catalog.

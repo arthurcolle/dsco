@@ -3,7 +3,7 @@
 This file is auto-generated from header declarations in `include/`.
 
 - Generator: `./scripts/gen_api_reference.sh`
-- Headers scanned: 119
+- Headers scanned: 126
 
 ## Regeneration
 
@@ -193,7 +193,7 @@ Function-like declarations: 6
 
 ## `chronicle.h`
 
-Function-like declarations: 26
+Function-like declarations: 28
 
 ### Declarations
 
@@ -205,6 +205,8 @@ Function-like declarations: 26
 - `const char *chronicle_session_id(void);`
 - `const char *chronicle_root(void);`
 - `const char *chronicle_db_path(void);`
+- `bool chronicle_cost_totals_for_session(const char *session_id, chronicle_cost_totals_t *out);`
+- `bool chronicle_cost_totals_today(chronicle_cost_totals_t *out);`
 - `void chronicle_new_id(char *out, size_t out_len);`
 - `bool chronicle_span_begin(const char *trace_id, const char *parent_span_id, const char *span_type, const char *name, const char *payload_json, char *span_id_out);`
 - `bool chronicle_span_end(const char *span_id, const char *status, const char *payload_json);`
@@ -223,6 +225,15 @@ Function-like declarations: 26
 - `char *chronicle_build_activity_html(int limit, const char *session_filter);`
 - `char *chronicle_build_activity_html_ex(int limit, const char *session_filter, const char *type_filter, const char *search_filter);`
 - `char *chronicle_read_blob_hex(const char *sha256, size_t max_bytes, const char **content_type_out);`
+
+## `cluster.h`
+
+Function-like declarations: 2
+
+### Declarations
+
+- `int dsco_cluster_cli(int argc, char **argv);`
+- `int dsco_cluster_rpc_endpoints(const char *peers_csv, char *out, size_t outlen, int ensure);`
 
 ## `codex_app_directory.h`
 
@@ -256,7 +267,7 @@ Function-like declarations: 10
 
 ## `config.h`
 
-Function-like declarations: 21
+Function-like declarations: 24
 
 ### Declarations
 
@@ -278,8 +289,11 @@ Function-like declarations: 21
 - `model_normalize_key(MODEL_REGISTRY[i].model_id, model_norm, sizeof(model_norm));`
 - `} } } } const model_info_t *codex_model = codex_cache_lookup(name);`
 - `return openrouter_cache_lookup(name);`
-- `} static inline const char *model_resolve_alias(const char *name) { const model_info_t *m = model_lookup(name);`
+- `} const model_info_t *m = model_lookup(name);`
 - `} static inline int model_context_window(const char *name) { const model_info_t *m = model_lookup(name);`
+- `} static inline bool dsco_effort_is_wire_value(const char *effort) { return effort && (strcmp(effort, EFFORT_NONE) == 0 || strcmp(effort, EFFORT_MINIMAL) == 0 || strcmp(effort, EFFORT_LOW) == 0 || strcmp(effort, EFFORT_MEDIUM) == 0 || strcmp(effort, EFFORT_HIGH) == 0 || strcmp(effort, EFFORT_XHIGH) == 0);`
+- `} static inline bool dsco_effort_is_valid(const char *effort) { return dsco_effort_is_auto(effort) || dsco_effort_is_wire_value(effort) || (effort && strcmp(effort, EFFORT_MAX) == 0);`
+- `} else { strncpy(dst, effort, dst_len - 1);`
 - `static inline void tui_features_init(tui_features_t *f) { memset(f, 0, sizeof(*f));`
 
 ## `connector.h`
@@ -333,6 +347,16 @@ Function-like declarations: 2
 
 - `typedef int (*coro_func_t)(void *ctx);`
 - `int ret = slot->func(slot->ctx);`
+
+## `cost_budget.h`
+
+Function-like declarations: 3
+
+### Declarations
+
+- `const model_info_t *mi = model_lookup(session->model);`
+- `s.session_spent_usd = cost_budget_session_spent_usd(session);`
+- `s.exhausted = (s.session_limited && s.session_remaining_usd <= 0.0) || (s.daily_limited && s.daily_remaining_usd <= 0.0);`
 
 ## `cost_model.h`
 
@@ -827,7 +851,7 @@ Function-like declarations: 8
 
 ## `integrations.h`
 
-Function-like declarations: 198
+Function-like declarations: 255
 
 ### Declarations
 
@@ -837,7 +861,64 @@ Function-like declarations: 198
 - `bool tool_jina_read(const char *input, char *result, size_t rlen);`
 - `bool tool_jina_search(const char *input, char *result, size_t rlen);`
 - `bool tool_jina_embed(const char *input, char *result, size_t rlen);`
+- `bool tool_jina_ai_reader(const char *input, char *result, size_t rlen);`
+- `bool tool_jina_ai_search(const char *input, char *result, size_t rlen);`
+- `bool tool_jina_ai_embed(const char *input, char *result, size_t rlen);`
+- `bool tool_jina_ai_batch_embed_submit(const char *input, char *result, size_t rlen);`
+- `bool tool_jina_ai_batch_status(const char *input, char *result, size_t rlen);`
+- `bool tool_jina_ai_batch_output(const char *input, char *result, size_t rlen);`
+- `bool tool_jina_ai_batch_errors(const char *input, char *result, size_t rlen);`
+- `bool tool_jina_ai_batch_cancel(const char *input, char *result, size_t rlen);`
+- `bool tool_jina_ai_batches_list(const char *input, char *result, size_t rlen);`
+- `bool tool_jina_ai_rerank(const char *input, char *result, size_t rlen);`
+- `bool tool_jina_ai_research(const char *input, char *result, size_t rlen);`
+- `bool tool_jina_ai_live_kb(const char *input, char *result, size_t rlen);`
+- `bool tool_jina_ai_constellation(const char *input, char *result, size_t rlen);`
+- `bool tool_jina_ai_classify(const char *input, char *result, size_t rlen);`
+- `bool tool_jina_ai_train(const char *input, char *result, size_t rlen);`
+- `bool tool_jina_ai_classifiers_list(const char *input, char *result, size_t rlen);`
+- `bool tool_jina_ai_classifier_delete(const char *input, char *result, size_t rlen);`
+- `bool tool_jina_ai_match(const char *input, char *result, size_t rlen);`
+- `bool tool_jina_ai_models_list(const char *input, char *result, size_t rlen);`
+- `bool tool_jina_ai_model_get(const char *input, char *result, size_t rlen);`
+- `bool tool_jina_ai_chat(const char *input, char *result, size_t rlen);`
 - `bool tool_parallel_search(const char *input, char *result, size_t rlen);`
+- `bool tool_parallel_ai_search(const char *input, char *result, size_t rlen);`
+- `bool tool_parallel_ai_extract(const char *input, char *result, size_t rlen);`
+- `bool tool_parallel_ai_task_create(const char *input, char *result, size_t rlen);`
+- `bool tool_parallel_ai_task_status(const char *input, char *result, size_t rlen);`
+- `bool tool_parallel_ai_task_result(const char *input, char *result, size_t rlen);`
+- `bool tool_parallel_ai_task_events(const char *input, char *result, size_t rlen);`
+- `bool tool_parallel_ai_task_input(const char *input, char *result, size_t rlen);`
+- `bool tool_parallel_ai_task_group_create(const char *input, char *result, size_t rlen);`
+- `bool tool_parallel_ai_task_group_get(const char *input, char *result, size_t rlen);`
+- `bool tool_parallel_ai_task_group_events(const char *input, char *result, size_t rlen);`
+- `bool tool_parallel_ai_task_group_add_runs(const char *input, char *result, size_t rlen);`
+- `bool tool_parallel_ai_task_group_runs(const char *input, char *result, size_t rlen);`
+- `bool tool_parallel_ai_task_group_run_get(const char *input, char *result, size_t rlen);`
+- `bool tool_parallel_ai_findall_entity_search(const char *input, char *result, size_t rlen);`
+- `bool tool_parallel_ai_findall_ingest(const char *input, char *result, size_t rlen);`
+- `bool tool_parallel_ai_findall_create(const char *input, char *result, size_t rlen);`
+- `bool tool_parallel_ai_findall_status(const char *input, char *result, size_t rlen);`
+- `bool tool_parallel_ai_findall_result(const char *input, char *result, size_t rlen);`
+- `bool tool_parallel_ai_findall_cancel(const char *input, char *result, size_t rlen);`
+- `bool tool_parallel_ai_findall_events(const char *input, char *result, size_t rlen);`
+- `bool tool_parallel_ai_findall_extend(const char *input, char *result, size_t rlen);`
+- `bool tool_parallel_ai_findall_enrich(const char *input, char *result, size_t rlen);`
+- `bool tool_parallel_ai_findall_schema(const char *input, char *result, size_t rlen);`
+- `bool tool_parallel_ai_chat(const char *input, char *result, size_t rlen);`
+- `bool tool_parallel_ai_monitor_create(const char *input, char *result, size_t rlen);`
+- `bool tool_parallel_ai_monitor_list(const char *input, char *result, size_t rlen);`
+- `bool tool_parallel_ai_monitor_get(const char *input, char *result, size_t rlen);`
+- `bool tool_parallel_ai_monitor_events(const char *input, char *result, size_t rlen);`
+- `bool tool_parallel_ai_monitor_update(const char *input, char *result, size_t rlen);`
+- `bool tool_parallel_ai_monitor_trigger(const char *input, char *result, size_t rlen);`
+- `bool tool_parallel_ai_monitor_cancel(const char *input, char *result, size_t rlen);`
+- `bool tool_parallel_ai_jobs(const char *input, char *result, size_t rlen);`
+- `bool tool_parallel_ai_wait(const char *input, char *result, size_t rlen);`
+- `bool tool_parallel_ai_research(const char *input, char *result, size_t rlen);`
+- `bool tool_parallel_ai_live_kb(const char *input, char *result, size_t rlen);`
+- `bool tool_parallel_ai_constellation(const char *input, char *result, size_t rlen);`
 - `bool tool_github_search(const char *input, char *result, size_t rlen);`
 - `bool tool_github_issue(const char *input, char *result, size_t rlen);`
 - `bool tool_github_pr(const char *input, char *result, size_t rlen);`
@@ -1085,7 +1166,7 @@ Function-like declarations: 37
 
 ## `json_util.h`
 
-Function-like declarations: 28
+Function-like declarations: 29
 
 ### Declarations
 
@@ -1115,6 +1196,7 @@ Function-like declarations: 28
 - `int json_get_int(const char *json, const char *key, int def);`
 - `bool json_get_bool(const char *json, const char *key, bool def);`
 - `double json_get_double(const char *json, const char *key, double def);`
+- `bool json_is_valid_container(const char *json);`
 - `typedef void (*json_array_cb)(const char *element_start, void *ctx);`
 - `int json_array_foreach(const char *json, const char *key, json_array_cb cb, void *ctx);`
 
@@ -1175,7 +1257,7 @@ Function-like declarations: 12
 
 ## `llm.h`
 
-Function-like declarations: 61
+Function-like declarations: 63
 
 ### Declarations
 
@@ -1185,6 +1267,8 @@ Function-like declarations: 61
 - `void session_state_init(session_state_t *s, const char *model);`
 - `const char *session_trust_tier_to_string(dsco_trust_tier_t tier);`
 - `dsco_trust_tier_t session_trust_tier_from_string(const char *s, bool *ok);`
+- `const char *session_goal_status_to_string(dsco_goal_status_t status);`
+- `dsco_goal_status_t session_goal_status_from_string(const char *s, bool *ok);`
 - `void conv_init(conversation_t *c);`
 - `void conv_free(conversation_t *c);`
 - `void conv_add_user_text(conversation_t *c, const char *text);`
@@ -1308,7 +1392,7 @@ Function-like declarations: 7
 
 ## `memory_tier.h`
 
-Function-like declarations: 28
+Function-like declarations: 29
 
 ### Declarations
 
@@ -1327,6 +1411,7 @@ Function-like declarations: 28
 - `bool memory_promote(memory_store_t *m, const char *key);`
 - `int memory_decay_tick(memory_store_t *m, double threshold);`
 - `int memory_consolidate(memory_store_t *m);`
+- `double memory_keep_score(const memory_entry_t *e, memory_keep_mode_t mode, double relevance, double now);`
 - `int memory_tick(memory_store_t *m);`
 - `int memory_to_json(const memory_store_t *m, char *buf, size_t len);`
 - `int memory_tier_to_json(const memory_store_t *m, memory_tier_t tier, char *buf, size_t len);`
@@ -1366,14 +1451,17 @@ Function-like declarations: 16
 
 ## `net_server.h`
 
-Function-like declarations: 10
+Function-like declarations: 13
 
 ### Declarations
 
 - `typedef netsrv_response_t (*netsrv_handler_fn)(const netsrv_request_t *req, void *ctx);`
+- `int netsrv_stream_send(netsrv_stream_t *s, const char *buf, size_t len);`
+- `typedef void (*netsrv_stream_fn)(const netsrv_request_t *req, netsrv_stream_t *s, void *ctx);`
 - `dsco_net_server_t *netsrv_create(uint16_t port, bool use_tls, const char *cert_pem_path, const char *key_pem_path);`
 - `void netsrv_destroy(dsco_net_server_t *s);`
 - `bool netsrv_route(dsco_net_server_t *s, const char *method, const char *path, netsrv_handler_fn fn, void *ctx);`
+- `bool netsrv_route_stream(dsco_net_server_t *s, const char *method, const char *path, netsrv_stream_fn fn, void *ctx);`
 - `void netsrv_set_auth_key(dsco_net_server_t *s, const uint8_t *key, size_t key_len);`
 - `bool netsrv_start(dsco_net_server_t *s);`
 - `void netsrv_stop(dsco_net_server_t *s);`
@@ -1425,7 +1513,7 @@ Function-like declarations: 8
 
 ## `openrouter_cache.h`
 
-Function-like declarations: 6
+Function-like declarations: 12
 
 ### Declarations
 
@@ -1435,6 +1523,12 @@ Function-like declarations: 6
 - `int openrouter_cache_load_sync(void);`
 - `typedef void (*or_model_cb)(const or_model_view_t *m, void *ud);`
 - `int openrouter_cache_foreach(or_model_cb cb, void *ud);`
+- `const char *dsco_route_by_task(dsco_task_type_t task);`
+- `const char *dsco_route_optimal(double budget_per_1m, int min_ctx);`
+- `int dsco_route_failover_dynamic(const char *failed_model, char out_models[][128], int max_models);`
+- `const char *dsco_route_cheapest_tool(void);`
+- `const char *dsco_route_free_tool(void);`
+- `const char *dsco_route_largest_ctx_tool(void);`
 
 ## `orchestrator.h`
 
@@ -1536,7 +1630,7 @@ Function-like declarations: 7
 
 ## `plan.h`
 
-Function-like declarations: 50
+Function-like declarations: 53
 
 ### Declarations
 
@@ -1573,6 +1667,9 @@ Function-like declarations: 50
 - `char *atom_resolve_inputs(int atom_id);`
 - `int plan_ready_atoms(int plan_id, int *atom_ids_out, int max_out);`
 - `int plan_run_next(int plan_id);`
+- `bool atom_inputs_ready(int atom_id);`
+- `void plan_rollup_status(int plan_id);`
+- `int plan_run_all(int plan_id, int max_atoms);`
 - `int plan_decompose(int plan_id, int focus_step_id, const char **subtitles, int count);`
 - `int plan_aggregate_atoms(int plan_id, int parent_step_id, const char *step_title, const int *atom_ids, int count);`
 - `int plan_dialog_ask(int plan_id, int step_id, const char *prompt, const char **choices, int choice_count);`
@@ -1759,7 +1856,7 @@ Function-like declarations: 3
 
 ## `provider.h`
 
-Function-like declarations: 41
+Function-like declarations: 44
 
 ### Declarations
 
@@ -1780,6 +1877,7 @@ Function-like declarations: 41
 - `const char *provider_resolve_api_key(const char *provider_name);`
 - `bool provider_has_custom_api_base(const char *provider_name);`
 - `bool provider_has_usable_key(const char *provider_name, const char *fallback_api_key);`
+- `bool provider_is_local_endpoint(const char *provider_name);`
 - `const char *provider_route_for_model(const char *model, const char *fallback_api_key, const char *provider_override);`
 - `const char *provider_resolve_request_api_key(const char *provider_name, const char *fallback_api_key);`
 - `void provider_export_child_process_credentials_for_provider(const char *provider_name, const char *resolved_key);`
@@ -1789,10 +1887,12 @@ Function-like declarations: 41
 - `void provider_debug_log_request(const char *provider_name, const char *model, const char *resolved_key);`
 - `const char *provider_claude_code_oauth_source(void);`
 - `bool provider_sakana_current_key_is_subscription(void);`
+- `const char *provider_sakana_subscription_request_key(void);`
 - `bool provider_sakana_has_payg_key(void);`
 - `const char *provider_sakana_payg_request_key(void);`
 - `bool provider_claude_code_get_account_info(char *subscription_type_out, size_t st_len, char *rate_limit_tier_out, size_t rl_len);`
 - `bool provider_msg_is_credit_too_low(const char *msg);`
+- `bool provider_msg_is_gated(const char *msg);`
 - `time_t provider_credit_reset_at_from_value(const char *value, time_t now);`
 - `time_t provider_credit_reset_at_from_text(const char *text, time_t now);`
 - `bool provider_credit_reset_at_from_header_line(const char *line, time_t now, time_t *reset_at);`
@@ -1840,6 +1940,18 @@ Function-like declarations: 11
 - `bool provider_profile_has_alias(const provider_profile_t *profile, const char *alias);`
 - `bool provider_profile_transport_supported(const provider_profile_t *profile);`
 
+## `realtime.h`
+
+Function-like declarations: 5
+
+### Declarations
+
+- `int realtime_voice_run(const realtime_opts_t *opts);`
+- `const char *realtime_default_reasoning_effort(void);`
+- `int realtime_voice_default_max_tools(void);`
+- `int realtime_voice_select_tool_names_for_context( const char *context, char names[][DSCO_REALTIME_TOOL_NAME_MAX], int max_tools);`
+- `int realtime_voice_cli(int argc, char **argv);`
+
 ## `recovery.h`
 
 Function-like declarations: 10
@@ -1856,6 +1968,16 @@ Function-like declarations: 10
 - `const recovery_log_entry_t *recovery_log_get(const recovery_log_t *log, int idx);`
 - `int recovery_log_dump(const recovery_log_t *log, const char *path);`
 - `const char *recovery_action_name(recovery_action_t a);`
+
+## `remote_cli.h`
+
+Function-like declarations: 3
+
+### Declarations
+
+- `int dsco_remote_cli(int argc, char **argv);`
+- `int dsco_fleet_cli(int argc, char **argv);`
+- `bool dsco_fleet_resolve(const char *peer, char *user, size_t ul, char *addr, size_t al);`
 
 ## `router.h`
 
@@ -2113,13 +2235,26 @@ Function-like declarations: 8
 - `bool execute_atom_with_input(plan_state_t *state, int atom_id, char *result_buf, size_t rlen);`
 - `int plan_state_run_all(plan_state_t *state);`
 
+## `structured_process.h`
+
+Function-like declarations: 5
+
+### Declarations
+
+- `const char *structured_process_schema_json(void);`
+- `int structured_process_schema_response_format_json(char *buf, size_t len);`
+- `bool structured_process_classify(const char *input, sp_classification_t *out);`
+- `int structured_process_synthesize_json(const char *input, char *buf, size_t len);`
+- `int structured_process_create_plan_from_json(const char *process_json);`
+
 ## `supervisor.h`
 
-Function-like declarations: 3
+Function-like declarations: 4
 
 ### Declarations
 
 - `int supervisor_run(int child_argc, char **child_argv);`
+- `bool supervisor_resolve_hotswap_exec(const char *current_exec, const char *explicit_hotswap, char *out_exec, size_t out_exec_len);`
 - `void dsco_maybe_exec_shell_to_keep_terminal(void);`
 - `void main_install_crash_handlers(void);`
 
@@ -2271,7 +2406,7 @@ Function-like declarations: 14
 
 ## `tools.h`
 
-Function-like declarations: 80
+Function-like declarations: 85
 
 ### Declarations
 
@@ -2286,15 +2421,20 @@ Function-like declarations: 80
 - `void tools_set_runtime_model(const char *model);`
 - `const char *tools_runtime_api_key(void);`
 - `const char *tools_runtime_model(void);`
+- `void tools_set_self_exit_allowed(bool allowed);`
+- `bool tools_self_exit_allowed(void);`
 - `void tools_set_context_window(int tokens);`
 - `int tools_context_window(void);`
 - `void tools_set_context_usage(int input_tokens, int output_tokens);`
 - `void tools_set_tool_schema_usage(int active_tools, int schema_tokens);`
 - `void tools_set_inline_truncation(bool enabled);`
+- `void tools_set_trace_context(const char *trace_id, const char *chronicle_parent_span_id, const char *chronicle_tool_span_id, const char *tool_name);`
+- `void tools_clear_trace_context(void);`
 - `void tools_context_turn_begin(void);`
 - `swarm_t *tools_swarm_instance(void);`
 - `const tool_def_t *tools_get_all(int *count);`
 - `bool tools_invoke_by_name(const char *name, const char *input, char *result, size_t rlen);`
+- `bool tools_is_offload_safe(const char *name);`
 - `int tools_get_core_count(void);`
 - `int tools_builtin_count(void);`
 - `bool tools_execute(const char *name, const char *input_json, char *result, size_t result_len);`
@@ -2464,7 +2604,7 @@ Function-like declarations: 9
 
 ## `tui.h`
 
-Function-like declarations: 291
+Function-like declarations: 303
 
 ### Declarations
 
@@ -2483,6 +2623,8 @@ Function-like declarations: 291
 - `bool tui_cursor_report_queries_enabled(void);`
 - `void tui_term_lock(void);`
 - `void tui_term_unlock(void);`
+- `void tui_install_crash_handlers(void);`
+- `void tui_cleanup(void);`
 - `void tui_box(const char *title, const char *body, tui_box_style_t style, const char *border_color, int width);`
 - `void tui_divider(tui_box_style_t style, const char *color, int width);`
 - `void tui_panel(const tui_panel_t *p);`
@@ -2543,18 +2685,25 @@ Function-like declarations: 291
 - `void tui_status_bar_init(tui_status_bar_t *sb, const char *model);`
 - `void tui_status_bar_set_model(tui_status_bar_t *sb, const char *model, const char *slot_name);`
 - `void tui_status_bar_update(tui_status_bar_t *sb, int in_tok, int out_tok, double cost, int turn, int tools);`
+- `void tui_status_bar_set_budget(tui_status_bar_t *sb, double budget_limit, double burn_rate, double percent, double runway);`
 - `void tui_status_bar_enable(tui_status_bar_t *sb);`
 - `void tui_status_bar_disable(tui_status_bar_t *sb);`
 - `void tui_status_bar_render(tui_status_bar_t *sb);`
+- `bool tui_motion_enabled(void);`
+- `const char *tui_motion_activity_frame(int frame, bool unicode);`
 - `void tui_panel_notify(tui_status_bar_t *sb, tui_panel_note_level_t level, const char *text);`
 - `void tui_panel_notify_clear(tui_status_bar_t *sb);`
 - `void tui_panel_set_active(tui_status_bar_t *sb, bool active);`
 - `void tui_input_panel_render(tui_status_bar_t *sb, const char *prompt_hint);`
 - `void tui_input_panel_clear(tui_status_bar_t *sb);`
 - `void tui_bottom_panel_refresh(tui_status_bar_t *sb, const char *prompt_hint);`
+- `bool tui_prepare_external_output(void);`
 - `void tui_pad_to_panel_anchor(void);`
 - `char *tui_composer_read(tui_status_bar_t *sb, const char *prompt, char *out, size_t out_sz);`
+- `typedef bool (*tui_composer_escape_hook_t)(void *ctx);`
+- `void tui_composer_set_escape_hook(tui_composer_escape_hook_t hook, void *ctx);`
 - `int tui_composer_signal_interrupt(void);`
+- `bool tui_composer_is_reading(void);`
 - `void tui_swarm_panel(tui_swarm_entry_t *entries, int count, int width);`
 - `void tui_retry_pulse(const char *label, int attempt, int max, double wait_sec);`
 - `int tui_subpixel_hbar(FILE *out, double frac, int cells, const char *fill_color, const char *empty_glyph, const char *empty_color);`
@@ -2734,6 +2883,9 @@ Function-like declarations: 291
 - `tui_perm_result_t tui_permission_prompt(const char *tool_name, const char *description, const char *detail);`
 - `bool tui_confirm(const char *question);`
 - `tui_ask_status_t tui_ask_questions(tui_ask_question_t *qs, int n_questions, const char *intro, char *chat_out, size_t chat_len);`
+- `int tui_test_decode_key_sequence(const char *bytes);`
+- `int tui_test_dialog_move_row(int row, int maxrow, int key);`
+- `int tui_test_menu_move_selection(const bool *selectable, int nrows, int sel, int delta);`
 - `const char *tui_ask_answer_value(const tui_ask_question_t *q, char *out, size_t out_len);`
 - `bool tui_ask_question_visible(const tui_ask_question_t *qs, int n, int qi);`
 - `void tui_diff_init(tui_diff_t *d);`
@@ -2839,6 +2991,36 @@ Function-like declarations: 15
 - `vm_val_t vm_pop(vm_t *vm);`
 - `vm_val_t vm_peek(vm_t *vm);`
 - `vm_stats_t vm_get_stats(vm_t *vm);`
+
+## `waiter.h`
+
+Function-like declarations: 7
+
+### Declarations
+
+- `int dsco_waiter_init(dsco_waiter_t *w);`
+- `void dsco_waiter_destroy(dsco_waiter_t *w);`
+- `bool dsco_waiter_wait_ms(dsco_waiter_t *w, long timeout_ms);`
+- `void dsco_waiter_signal(dsco_waiter_t *w);`
+- `void dsco_waiter_stop(dsco_waiter_t *w);`
+- `void dsco_waiter_reset(dsco_waiter_t *w);`
+- `bool dsco_waiter_stopped(dsco_waiter_t *w);`
+
+## `wasm_core.h`
+
+Function-like declarations: 9
+
+### Declarations
+
+- `const char *dsco_wasm_version(void);`
+- `const char *dsco_wasm_exports_json(void);`
+- `const char *dsco_wasm_models_json(void);`
+- `const char *dsco_wasm_tools_json(void);`
+- `const char *dsco_wasm_route_explain(const char *model);`
+- `const char *dsco_wasm_tool_exec(const char *name, const char *input_json);`
+- `const char *dsco_wasm_session_reset(void);`
+- `const char *dsco_wasm_session_add(const char *role, const char *content);`
+- `const char *dsco_wasm_session_state(void);`
 
 ## `watchdog.h`
 
