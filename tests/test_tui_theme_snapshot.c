@@ -13,21 +13,21 @@
 #include <stdio.h>
 #include <string.h>
 
-int  g_cheap_mode = 0;
+int g_cheap_mode = 0;
 vm_t g_vm;
 volatile int g_interrupted = 0;
 double g_cost_budget = 0.0;
 
 static int g_pass = 0, g_fail = 0;
 
-#define CHECK(name, cond)                                                               \
-    do {                                                                                \
-        if (cond) {                                                                     \
-            g_pass++;                                                                   \
-        } else {                                                                        \
-            g_fail++;                                                                   \
-            fprintf(stderr, "CHECK FAIL [%s]\n", name);                                 \
-        }                                                                               \
+#define CHECK(name, cond)                                                                          \
+    do {                                                                                           \
+        if (cond) {                                                                                \
+            g_pass++;                                                                              \
+        } else {                                                                                   \
+            g_fail++;                                                                              \
+            fprintf(stderr, "CHECK FAIL [%s]\n", name);                                            \
+        }                                                                                          \
     } while (0)
 
 /* Every box style must expose a complete, non-empty 8-char set. A render that

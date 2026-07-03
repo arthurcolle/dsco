@@ -20,33 +20,33 @@
  * ═══════════════════════════════════════════════════════════════════════════ */
 
 /* Limits */
-#define SESSION_ID_LEN         64
-#define SESSION_TASK_LEN       512
-#define SESSION_KEY_LEN        128
-#define SESSION_VALUE_LEN      1024
-#define SESSION_KV_JSON_LEN    8192
-#define SESSION_MAX_RECORDS    256
-#define SESSION_MAX_KV         512
+#define SESSION_ID_LEN 64
+#define SESSION_TASK_LEN 512
+#define SESSION_KEY_LEN 128
+#define SESSION_VALUE_LEN 1024
+#define SESSION_KV_JSON_LEN 8192
+#define SESSION_MAX_RECORDS 256
+#define SESSION_MAX_KV 512
 
 /* TTL presets that map to memory tiers */
-#define SESSION_TTL_WORKING    60       /* seconds */
-#define SESSION_TTL_EPISODIC   3600     /* seconds */
-#define SESSION_TTL_SEMANTIC   0        /* no expiry */
+#define SESSION_TTL_WORKING 60    /* seconds */
+#define SESSION_TTL_EPISODIC 3600 /* seconds */
+#define SESSION_TTL_SEMANTIC 0    /* no expiry */
 
 /* Access count threshold for episodic → semantic promotion */
-#define SESSION_PROMOTE_THRESHOLD  3
+#define SESSION_PROMOTE_THRESHOLD 3
 
 /* ── KV entry ─────────────────────────────────────────────────────────── */
 
 typedef struct {
-    char          key[SESSION_KEY_LEN];
-    char          value[SESSION_VALUE_LEN];
-    double        created_at;
-    double        accessed_at;
-    int           access_count;
-    int           ttl_seconds;    /* 0 = permanent (semantic) */
+    char key[SESSION_KEY_LEN];
+    char value[SESSION_VALUE_LEN];
+    double created_at;
+    double accessed_at;
+    int access_count;
+    int ttl_seconds; /* 0 = permanent (semantic) */
     memory_tier_t tier;
-    bool          active;
+    bool active;
 } session_kv_t;
 
 /* ── Session record ───────────────────────────────────────────────────── */
@@ -54,27 +54,27 @@ typedef struct {
 /* One completed or active session: tracks the task it handled plus a
    snapshot of all KV pairs that were live when the session ended. */
 typedef struct {
-    char          id[SESSION_ID_LEN];
-    char          task_text[SESSION_TASK_LEN];
-    char          key_values[SESSION_KV_JSON_LEN]; /* JSON {"k":"v",...} snapshot */
-    double        created_at;
-    double        accessed_at;
-    int           access_count;
+    char id[SESSION_ID_LEN];
+    char task_text[SESSION_TASK_LEN];
+    char key_values[SESSION_KV_JSON_LEN]; /* JSON {"k":"v",...} snapshot */
+    double created_at;
+    double accessed_at;
+    int access_count;
     memory_tier_t tier;
-    bool          active;
+    bool active;
 } session_record_t;
 
 /* ── Database ─────────────────────────────────────────────────────────── */
 
 typedef struct {
-    session_kv_t     kv[SESSION_MAX_KV];
-    int              kv_count;
+    session_kv_t kv[SESSION_MAX_KV];
+    int kv_count;
     session_record_t records[SESSION_MAX_RECORDS];
-    int              record_count;
-    char             db_path[512];
-    char             current_session_id[SESSION_ID_LEN];
-    bool             dirty;
-    bool             initialized;
+    int record_count;
+    char db_path[512];
+    char current_session_id[SESSION_ID_LEN];
+    bool dirty;
+    bool initialized;
 } session_db_t;
 
 /* ── Lifecycle ────────────────────────────────────────────────────────── */
@@ -82,13 +82,13 @@ typedef struct {
 /* Load (or create) the session DB.  task_text is the current session's
    description; pass NULL if unknown.  Returns 0 on success, -1 on error.
    Respects $DSCO_SESSION_PATH override (useful for testing). */
-int  session_init(session_db_t *db, const char *task_text);
+int session_init(session_db_t *db, const char *task_text);
 
 /* Clear in-memory state.  Does NOT flush — call session_persist() first. */
 void session_free(session_db_t *db);
 
 /* Flush dirty state to disk.  Alias for session_persist(). */
-int  session_flush(session_db_t *db);
+int session_flush(session_db_t *db);
 
 /* ── KV store ─────────────────────────────────────────────────────────── */
 
@@ -96,8 +96,7 @@ int  session_flush(session_db_t *db);
    Tier is inferred from TTL: 0 → semantic, ≤60 → working, else → episodic.
    Updates existing entry if the key already exists.
    Returns 0 on success, -1 on error. */
-int session_remember(session_db_t *db, const char *key,
-                     const char *value, int ttl_seconds);
+int session_remember(session_db_t *db, const char *key, const char *value, int ttl_seconds);
 
 /* Retrieve value for key.  Returns a pointer into db->kv[i].value (valid
    until the next mutating call), or NULL if not found or expired.
@@ -110,8 +109,7 @@ const char *session_recall(session_db_t *db, const char *key);
    Jaccard similarity).  Writes up to k pointers into out[].
    Returns count written (0 if none match).
    Current session is excluded from results. */
-int session_lookup_similar(session_db_t *db, const char *task,
-                           const session_record_t **out, int k);
+int session_lookup_similar(session_db_t *db, const char *task, const session_record_t **out, int k);
 
 /* ── Tier promotion ───────────────────────────────────────────────────── */
 

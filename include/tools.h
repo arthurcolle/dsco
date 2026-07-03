@@ -14,10 +14,13 @@ typedef struct {
     const char *description;
     const char *input_schema_json;
     bool (*execute)(const char *input_json, char *result, size_t result_len);
-    bool core;           /* true = always pageable; false = only via load_tools */
-    bool is_read_only;   /* true = no side effects (safe for streaming exec) */
-    bool is_concurrent;  /* true = no shared state (safe for parallel exec) */
-    bool is_interactive; /* true = owns the terminal/user turn; no cache/spinner/parallel */
+    bool core;            /* true = always pageable; false = only via load_tools */
+    bool is_read_only;    /* true = no side effects (safe for streaming exec) */
+    bool is_concurrent;   /* true = no shared state (safe for parallel exec) */
+    bool is_interactive;  /* true = owns the terminal/user turn; no cache/spinner/parallel */
+    bool is_offload_safe; /* true = location-independent (same result on any host):
+                           * safe to run on a remote fleet peer. Must NOT touch local
+                           * filesystem/process state. Default false. */
 } tool_def_t;
 
 typedef enum {
@@ -26,62 +29,59 @@ typedef enum {
     TOOLS_FULL,
 } tools_init_profile_t;
 
-void             tools_init_profile(tools_init_profile_t profile);
-void             tools_init(void);
+void tools_init_profile(tools_init_profile_t profile);
+void tools_init(void);
 /* Local-only fast init for metadata and direct tool execution paths.
  * Skips plugin, browser profile, IPC, MCP, VFS, and daemon-facing setup. */
-void             tools_init_local_only(void);
+void tools_init_local_only(void);
 tools_init_profile_t tools_current_profile(void);
-bool             tools_profile_allows_index(int index);
+bool tools_profile_allows_index(int index);
 /* §8: VFS-backed tool result cache for deterministic tools */
 struct vfs_db;
-void             tools_set_vfs(struct vfs_db *vfs);
-void             tools_set_runtime_api_key(const char *api_key);
-void             tools_set_runtime_model(const char *model);
-const char      *tools_runtime_api_key(void);
-const char      *tools_runtime_model(void);
+void tools_set_vfs(struct vfs_db *vfs);
+void tools_set_runtime_api_key(const char *api_key);
+void tools_set_runtime_model(const char *model);
+const char *tools_runtime_api_key(void);
+const char *tools_runtime_model(void);
 /* self_exit is disabled during normal conversational turns. It may be enabled
  * only for explicit autonomous goal/supervisor runs. */
-void             tools_set_self_exit_allowed(bool allowed);
-bool             tools_self_exit_allowed(void);
+void tools_set_self_exit_allowed(bool allowed);
+bool tools_self_exit_allowed(void);
 /* Context-aware offload: set the model's context window so offload threshold
  * is computed as a ratio of available context, not a fixed byte count. */
-void             tools_set_context_window(int tokens);
-int              tools_context_window(void);
+void tools_set_context_window(int tokens);
+int tools_context_window(void);
 /* Pass current token usage so inline budget is based on remaining context */
-void             tools_set_context_usage(int input_tokens, int output_tokens);
+void tools_set_context_usage(int input_tokens, int output_tokens);
 /* Pass actual serialized tool-schema overhead from the latest request. */
-void             tools_set_tool_schema_usage(int active_tools, int schema_tokens);
+void tools_set_tool_schema_usage(int active_tools, int schema_tokens);
 /* Toggle inline tool-result truncation. Off = full output (human/raw dumps). */
-void             tools_set_inline_truncation(bool enabled);
+void tools_set_inline_truncation(bool enabled);
 /* Per-thread trace context for tool internals that emit mechanism events. */
-void             tools_set_trace_context(const char *trace_id,
-                                         const char *chronicle_parent_span_id,
-                                         const char *chronicle_tool_span_id,
-                                         const char *tool_name);
-void             tools_clear_trace_context(void);
-void             tools_context_turn_begin(void);
-swarm_t         *tools_swarm_instance(void);
+void tools_set_trace_context(const char *trace_id, const char *chronicle_parent_span_id,
+                             const char *chronicle_tool_span_id, const char *tool_name);
+void tools_clear_trace_context(void);
+void tools_context_turn_begin(void);
+swarm_t *tools_swarm_instance(void);
 const tool_def_t *tools_get_all(int *count);
 bool tools_invoke_by_name(const char *name, const char *input, char *result, size_t rlen);
-int              tools_get_core_count(void);   /* only .core=true tools */
-int              tools_builtin_count(void);
-bool             tools_execute(const char *name, const char *input_json,
-                               char *result, size_t result_len);
-bool             tools_execute_for_tier(const char *name, const char *input_json,
-                                        const char *tier,
-                                        char *result, size_t result_len);
-bool             tools_is_allowed_for_tier(const char *name, const char *tier,
-                                           char *reason, size_t reason_len);
-char            *tools_normalize_input(const char *name, const char *input_json);
+/* Server-side authorization: true only for read-only, concurrency-safe,
+ * location-independent tools that are safe to invoke remotely. */
+bool tools_is_offload_safe(const char *name);
+int tools_get_core_count(void); /* only .core=true tools */
+int tools_builtin_count(void);
+bool tools_execute(const char *name, const char *input_json, char *result, size_t result_len);
+bool tools_execute_for_tier(const char *name, const char *input_json, const char *tier,
+                            char *result, size_t result_len);
+bool tools_is_allowed_for_tier(const char *name, const char *tier, char *reason, size_t reason_len);
+char *tools_normalize_input(const char *name, const char *input_json);
 
 /* Run the interactive AskUserQuestion dialog from a JSON spec. Shared by the
  * AskUserQuestion tool and the /dialog chat command so both paths use one
  * engine + serializer. `result` receives the JSON answer object
  * ({status, answers:[...]}). Returns true on success. */
-bool             dsco_run_ask_dialog(const char *spec_json,
-                                     char *result, size_t result_len);
-bool             dsco_tool_is_interactive(const char *name);
+bool dsco_run_ask_dialog(const char *spec_json, char *result, size_t result_len);
+bool dsco_tool_is_interactive(const char *name);
 
 /* ── Live agent loop constructs ──────────────────────────────────────── */
 
@@ -89,43 +89,42 @@ bool             dsco_tool_is_interactive(const char *name);
 #define DSCO_LOOP_REASON_MAX 256
 
 typedef struct {
-    bool force_continue;      /* inject prompt and keep the agent turn alive */
-    bool force_done;          /* explicit construct break/complete */
-    int  effective_max_turns; /* max-turn override; 0 means unchanged */
+    bool force_continue;     /* inject prompt and keep the agent turn alive */
+    bool force_done;         /* explicit construct break/complete */
+    int effective_max_turns; /* max-turn override; 0 means unchanged */
     char prompt[DSCO_LOOP_PROMPT_MAX];
     char reason[DSCO_LOOP_REASON_MAX];
 } loop_control_decision_t;
 
 void tools_loop_control_reset(void);
 bool tools_loop_control_has_active(void);
-int  tools_loop_control_effective_max_turns(int default_max_turns);
-void tools_loop_control_decide(int current_turn, bool model_done,
-                               bool has_followup,
+int tools_loop_control_effective_max_turns(int default_max_turns);
+void tools_loop_control_decide(int current_turn, bool model_done, bool has_followup,
                                loop_control_decision_t *out);
 
 /* ── VM dispatch registration (§3: bytecode VM) ───────────────────────── */
 
-void             tools_register_vm_dispatch(vm_t *vm);
+void tools_register_vm_dispatch(vm_t *vm);
 
 /* ── Tool hash map for O(1) lookup ─────────────────────────────────────── */
 
 #define TOOL_MAP_BUCKETS 256
 
 typedef struct tool_map_entry {
-    const char             *name;
-    int                     index;    /* index into s_tools[] or negative for MCP/plugin */
-    struct tool_map_entry  *next;
+    const char *name;
+    int index; /* index into s_tools[] or negative for MCP/plugin */
+    struct tool_map_entry *next;
 } tool_map_entry_t;
 
 typedef struct {
     tool_map_entry_t *buckets[TOOL_MAP_BUCKETS];
-    int               count;
+    int count;
 } tool_map_t;
 
-void  tool_map_init(tool_map_t *m);
-void  tool_map_free(tool_map_t *m);
-void  tool_map_insert(tool_map_t *m, const char *name, int index);
-int   tool_map_lookup(tool_map_t *m, const char *name);  /* returns index or -1 */
+void tool_map_init(tool_map_t *m);
+void tool_map_free(tool_map_t *m);
+void tool_map_insert(tool_map_t *m, const char *name, int index);
+int tool_map_lookup(tool_map_t *m, const char *name); /* returns index or -1 */
 
 /* Global tool map — initialized in tools_init() */
 extern tool_map_t g_tool_map;
@@ -137,50 +136,47 @@ extern tool_map_t g_tool_map;
    The callback receives the tool name and input JSON, returns result. */
 typedef char *(*external_tool_cb)(const char *name, const char *input_json, void *ctx);
 
-void  tools_register_external(const char *name, const char *description,
-                                const char *input_schema_json,
-                                external_tool_cb cb, void *ctx);
-void  tools_register_external_metadata(const char *name, const char *integration_id,
-                                       const char *display_name,
-                                       const char *distribution_channel,
-                                       const char *categories, const char *labels,
-                                       const char *scope, unsigned action_flags,
-                                       const char *catalog_status);
-void  tools_reset_external(void);
+void tools_register_external(const char *name, const char *description,
+                             const char *input_schema_json, external_tool_cb cb, void *ctx);
+void tools_register_external_metadata(const char *name, const char *integration_id,
+                                      const char *display_name, const char *distribution_channel,
+                                      const char *categories, const char *labels, const char *scope,
+                                      unsigned action_flags, const char *catalog_status);
+void tools_reset_external(void);
 
 #define MAX_EXTERNAL_TOOLS 4096
 
 typedef struct {
-    char   name[256];
-    char   description[1024];
-    char  *input_schema_json;
+    char name[256];
+    char description[1024];
+    char *input_schema_json;
     external_tool_cb cb;
-    void  *ctx;
-    bool   loaded;
-    char   integration_id[256];
-    char   display_name[256];
-    char   distribution_channel[64];
-    char   categories[256];
-    char   labels[256];
-    char   scope[64];
+    void *ctx;
+    bool loaded;
+    char integration_id[256];
+    char display_name[256];
+    char distribution_channel[64];
+    char categories[256];
+    char labels[256];
+    char scope[64];
     unsigned action_flags;
-    char   catalog_status[64];
+    char catalog_status[64];
 } external_tool_t;
 
 extern external_tool_t g_external_tools[];
-extern int             g_external_tool_count;
+extern int g_external_tool_count;
 
 /* ── Concurrency locks ────────────────────────────────────────────────── */
 
 typedef struct {
-    pthread_rwlock_t  ctx_lock;       /* context store mutations */
-    pthread_rwlock_t  mcp_lock;       /* g_mcp access */
-    pthread_rwlock_t  provider_lock;  /* provider access */
-    pthread_rwlock_t  toolmap_lock;   /* tool map lookups */
-    pthread_mutex_t   metrics_lock;   /* tool_metrics_record */
-    pthread_mutex_t   cache_lock;     /* tool_cache get/put */
-    pthread_mutex_t   budget_lock;    /* cost budget check */
-    pthread_mutex_t   swarm_lock;     /* swarm operations */
+    pthread_rwlock_t ctx_lock;      /* context store mutations */
+    pthread_rwlock_t mcp_lock;      /* g_mcp access */
+    pthread_rwlock_t provider_lock; /* provider access */
+    pthread_rwlock_t toolmap_lock;  /* tool map lookups */
+    pthread_mutex_t metrics_lock;   /* tool_metrics_record */
+    pthread_mutex_t cache_lock;     /* tool_cache get/put */
+    pthread_mutex_t budget_lock;    /* cost budget check */
+    pthread_mutex_t swarm_lock;     /* swarm operations */
 } dsco_locks_t;
 
 void dsco_locks_init(dsco_locks_t *l);
@@ -192,18 +188,17 @@ extern dsco_locks_t g_locks;
 /* ── Tool execution watchdog ──────────────────────────────────────────── */
 
 typedef struct {
-    pthread_t    thread;
-    volatile int cancelled;    /* set by watchdog_stop to terminate watcher */
-    volatile int timed_out;    /* set by watcher when deadline expires */
-    double       deadline;     /* absolute epoch time */
-    double       grace_end;    /* deadline + grace period */
-    pthread_t    target;       /* thread to cancel on hard kill */
-    char         tool_name[64];
-    int          timeout_s;
+    pthread_t thread;
+    volatile int cancelled; /* set by watchdog_stop to terminate watcher */
+    volatile int timed_out; /* set by watcher when deadline expires */
+    double deadline;        /* absolute epoch time */
+    double grace_end;       /* deadline + grace period */
+    pthread_t target;       /* thread to cancel on hard kill */
+    char tool_name[64];
+    int timeout_s;
 } tool_watchdog_t;
 
-void watchdog_start(tool_watchdog_t *wd, pthread_t target,
-                    const char *name, int timeout_s);
+void watchdog_start(tool_watchdog_t *wd, pthread_t target, const char *name, int timeout_s);
 void watchdog_stop(tool_watchdog_t *wd);
 
 /* Cooperative cancel flag for long-running tools (e.g., bash poll loop) */
@@ -212,8 +207,8 @@ extern _Thread_local volatile int tl_tool_cancelled;
 extern volatile int g_tool_timed_out;
 
 /* Default and per-tool timeout configuration */
-#define TOOL_DEFAULT_TIMEOUT_S  30
-#define TOOL_GRACE_PERIOD_S     5
+#define TOOL_DEFAULT_TIMEOUT_S 30
+#define TOOL_GRACE_PERIOD_S 5
 
 static inline int dsco_tool_default_timeout_s(void) {
     return dsco_env_int("DSCO_TOOL_DEFAULT_TIMEOUT", TOOL_DEFAULT_TIMEOUT_S, 1, 7200);
@@ -224,15 +219,15 @@ static inline int dsco_tool_grace_period_s(void) {
 
 typedef struct {
     const char *name;
-    int         timeout_s;
+    int timeout_s;
 } tool_timeout_cfg_t;
 
 /* Lookup per-tool timeout (returns default if not overridden) */
 int tool_timeout_for(const char *name);
 
 /* JSON schema validation before tool dispatch */
-bool tools_validate_input(const char *name, const char *input_json,
-                          char *error_buf, size_t error_len);
+bool tools_validate_input(const char *name, const char *input_json, char *error_buf,
+                          size_t error_len);
 
 /* ── Tool retrieval: context-aware subset selection ─────────────────── */
 
@@ -250,44 +245,44 @@ const tool_def_t **tools_get_filtered(const char *context, int max_tools, int *o
 /* ── Dynamic Tool Paging ─────────────────────────────────────────────── */
 
 typedef enum {
-    HINT_USER   = 0,   /* explicit: /hint trading */
-    HINT_CONV   = 1,   /* extracted from conversation context */
-    HINT_PLAN   = 2,   /* from OODA/plan phase */
-    HINT_TOOL   = 3,   /* co-occurrence: tool X implies tool Y */
-    HINT_SWARM  = 4,   /* subagent broadcasts specialization */
+    HINT_USER = 0,  /* explicit: /hint trading */
+    HINT_CONV = 1,  /* extracted from conversation context */
+    HINT_PLAN = 2,  /* from OODA/plan phase */
+    HINT_TOOL = 3,  /* co-occurrence: tool X implies tool Y */
+    HINT_SWARM = 4, /* subagent broadcasts specialization */
 } hint_source_t;
 
-#define HINT_MAX_TOOLS   8
-#define HINT_MAX_GROUPS  4
-#define MAX_HINTS       32
+#define HINT_MAX_TOOLS 8
+#define HINT_MAX_GROUPS 4
+#define MAX_HINTS 32
 #define HINT_DEFAULT_TTL 5
 
 typedef struct {
-    char          domain[64];
-    char          tools[HINT_MAX_TOOLS][128];
-    int           tool_count;
-    int           groups[HINT_MAX_GROUPS];
-    int           group_count;
-    float         weight;
-    int           ttl_turns;
+    char domain[64];
+    char tools[HINT_MAX_TOOLS][128];
+    int tool_count;
+    int groups[HINT_MAX_GROUPS];
+    int group_count;
+    float weight;
+    int ttl_turns;
     hint_source_t source;
-    int           turn_created;
+    int turn_created;
 } tool_hint_t;
 
 /* Hint accumulator (module-level state in tools.c) */
-void  tools_hint_init(void);
-void  tools_hint_add(const tool_hint_t *h);
-void  tools_hint_add_user(const char *input);
-void  tools_hint_decay(void);
-void  tools_hint_clear(void);
-int   tools_hint_count(void);
+void tools_hint_init(void);
+void tools_hint_add(const tool_hint_t *h);
+void tools_hint_add_user(const char *input);
+void tools_hint_decay(void);
+void tools_hint_clear(void);
+int tools_hint_count(void);
 
 /* Co-occurrence matrix — tracks tool-tool succession patterns */
-void  tools_cooc_init(void);
-void  tools_cooc_update(const char **tool_names, int n);
-void  tools_cooc_persist(void);
-void  tools_cooc_load(void);
-void  tools_cooc_free(void);
+void tools_cooc_init(void);
+void tools_cooc_update(const char **tool_names, int n);
+void tools_cooc_persist(void);
+void tools_cooc_load(void);
+void tools_cooc_free(void);
 
 typedef struct {
     char from[64];
@@ -299,25 +294,25 @@ int tools_cooc_top_edges(tools_cooc_edge_t *out, int max);
 
 /* Tiered retrieval result */
 typedef struct {
-    const tool_def_t **pinned;      /* Tier 0: stable, cacheable */
+    const tool_def_t **pinned; /* Tier 0: stable, cacheable */
     int pinned_count;
-    const tool_def_t **working;     /* Tier 1: slow-evolving */
+    const tool_def_t **working; /* Tier 1: slow-evolving */
     int working_count;
-    const tool_def_t **discovery;   /* Tier 2: volatile per-turn */
+    const tool_def_t **discovery; /* Tier 2: volatile per-turn */
     int discovery_count;
 } tool_page_result_t;
 
 /* Per-turn paging telemetry */
 typedef struct {
-    int    pinned_count;
-    int    working_count;
-    int    discovery_count;
-    int    hint_count;
-    int    cooc_predictions;      /* tools added via co-occurrence */
-    int    centroid_matches;      /* tools added via embedding match */
-    float  budget_ratio;
-    double retrieval_ms;          /* wall-clock time for tools_get_paged */
-    int    schema_tokens_saved;   /* estimated tokens saved by progressive schema */
+    int pinned_count;
+    int working_count;
+    int discovery_count;
+    int hint_count;
+    int cooc_predictions; /* tools added via co-occurrence */
+    int centroid_matches; /* tools added via embedding match */
+    float budget_ratio;
+    double retrieval_ms;     /* wall-clock time for tools_get_paged */
+    int schema_tokens_saved; /* estimated tokens saved by progressive schema */
 } page_telemetry_t;
 
 /* Last paging telemetry (readable after tools_get_paged call) */
@@ -326,8 +321,7 @@ extern page_telemetry_t g_page_telemetry;
 /* Retrieve tools in three tiers for cache-aware serialization.
  * budget_ratio: 0.0–1.0, fraction of budget remaining.
  * Low ratios reduce tool set aggressively. */
-tool_page_result_t tools_get_paged(const char *context, int max_tools,
-                                    float budget_ratio);
+tool_page_result_t tools_get_paged(const char *context, int max_tools, float budget_ratio);
 void tool_page_result_free(tool_page_result_t *r);
 
 /* ── Co-occurrence → Hint bridge ─────────────────────────────────────── */
@@ -345,14 +339,14 @@ void tools_cooc_decay(float factor);
 /* ── Register-file quorum telemetry ───────────────────────────────────── */
 
 typedef struct {
-    int    candidates_scored;   /* total candidates evaluated */
-    int    quorum_admitted;     /* passed quorum (>= QUORUM_MIN_SIGNALS) */
-    int    quorum_vetoed;       /* failed quorum */
-    int    signal_hot;          /* candidates with hot-cache signal */
-    int    signal_cooc;         /* candidates with co-occurrence signal */
-    int    signal_embed;        /* candidates with embedding signal */
-    int    signal_hint;         /* candidates with hint-group signal */
-    double quorum_ms;           /* wall-clock for quorum scoring */
+    int candidates_scored; /* total candidates evaluated */
+    int quorum_admitted;   /* passed quorum (>= QUORUM_MIN_SIGNALS) */
+    int quorum_vetoed;     /* failed quorum */
+    int signal_hot;        /* candidates with hot-cache signal */
+    int signal_cooc;       /* candidates with co-occurrence signal */
+    int signal_embed;      /* candidates with embedding signal */
+    int signal_hint;       /* candidates with hint-group signal */
+    double quorum_ms;      /* wall-clock for quorum scoring */
 } quorum_telemetry_t;
 
 extern quorum_telemetry_t g_quorum_telemetry;
@@ -407,8 +401,7 @@ float *tools_embed_text(const char *text, int *out_dim);
 
 /* Set agent context for context-aware tool retrieval.
  * Both params may be NULL to clear. Strings are copied internally. */
-void tools_set_agent_context(const char *recent_results,
-                             const char *working_memory_summary);
+void tools_set_agent_context(const char *recent_results, const char *working_memory_summary);
 
 /* ── Process execution ─────────────────────────────────────────────────
  * fork()+execvp() without a shell — no argument is ever interpreted by a

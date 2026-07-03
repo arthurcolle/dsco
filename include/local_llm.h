@@ -16,14 +16,14 @@ typedef struct {
     char server[16];     /* "ollama" | "lmstudio" | "mlx" */
     char model[128];     /* model id as served */
     char qualified[160]; /* "<server>:<model>" — use with /model */
-    int  context_window; /* tokens (best-effort; 0 if unknown) */
+    int context_window;  /* tokens (best-effort; 0 if unknown) */
 } local_model_t;
 
 typedef struct {
     char server[16];
     char base_url[64]; /* OpenAI-compatible base, e.g. http://localhost:11434/v1 */
     bool up;
-    int  model_count;
+    int model_count;
 } local_server_t;
 
 /* Probe all known local servers. Fills up to max entries, returns the count. */

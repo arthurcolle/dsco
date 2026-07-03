@@ -4,6 +4,7 @@
 #include "tools.h"
 #include "config.h"
 #include "provider.h"
+#include "provider_pool.h"
 #include "workspace.h"
 #include "mcp_names.h"
 #include "http_pool.h"
@@ -150,6 +151,8 @@ void session_state_init(session_state_t *s, const char *model) {
         s->fallback_count = provider_build_default_fallback_models(
             resolved, s->fallback_models,
             (int)(sizeof(s->fallback_models) / sizeof(s->fallback_models[0])));
+        /* Dynamic fallback ordering by live provider health (no-op cold). */
+        provider_pool_rerank_fallbacks(s->fallback_models, s->fallback_count);
     }
 
     /* Model-instance spec via env — lets a spawned worker process wrap a fully
@@ -630,6 +633,72 @@ void conv_trim_old_results(conversation_t *c, int keep_recent, int max_chars) {
             }
         }
     }
+}
+
+/* FNV-1a — cheap content fingerprint for duplicate elision. */
+static uint64_t content_hash64(const char *s) {
+    uint64_t h = 1469598103934665603ULL;
+    while (*s) {
+        h ^= (unsigned char)*s++;
+        h *= 1099511628211ULL;
+    }
+    return h;
+}
+
+int conv_dedup_tool_results(conversation_t *c, int keep_recent) {
+    if (!c || c->count == 0)
+        return 0;
+    int cutoff = c->count - keep_recent;
+    if (cutoff <= 0)
+        return 0;
+
+    /* Walk newest→oldest so the first sighting of each fingerprint is the
+     * copy the model saw most recently — that one survives; any older
+     * byte-identical result in the old zone collapses to a breadcrumb. */
+    enum { DEDUP_TRACK_MAX = 512, DEDUP_MIN_LEN = 160 };
+    uint64_t seen[DEDUP_TRACK_MAX];
+    int seen_count = 0;
+    int stubbed = 0;
+
+    for (int i = c->count - 1; i >= 0; i--) {
+        message_t *m = &c->msgs[i];
+        if (m->role != ROLE_USER)
+            continue;
+        for (int j = 0; j < m->content_count; j++) {
+            msg_content_t *mc = &m->content[j];
+            if (!mc->type || strcmp(mc->type, "tool_result") != 0 || !mc->text)
+                continue;
+            int len = (int)strlen(mc->text);
+            if (len < DEDUP_MIN_LEN)
+                continue; /* short results cost less than the stub */
+            uint64_t h = content_hash64(mc->text) ^ (uint64_t)len;
+            int k = 0;
+            while (k < seen_count && seen[k] != h)
+                k++;
+            if (k == seen_count) {
+                if (seen_count < DEDUP_TRACK_MAX)
+                    seen[seen_count++] = h;
+                continue; /* newest copy — keep intact */
+            }
+            if (i >= cutoff)
+                continue; /* duplicate, but still in the protected tail */
+
+            /* Keep the first line as a breadcrumb, elide the body. */
+            const char *nl = strchr(mc->text, '\n');
+            int head = nl ? (int)(nl - mc->text) : (len < 120 ? len : 120);
+            if (head > 200)
+                head = 200;
+            size_t alloc = (size_t)head + 96;
+            char *stub = safe_malloc(alloc);
+            snprintf(stub, alloc,
+                     "%.*s\n[duplicate output elided — identical result appears later]", head,
+                     mc->text);
+            free(mc->text);
+            mc->text = stub;
+            stubbed++;
+        }
+    }
+    return stubbed;
 }
 
 static bool message_has_tool_use_local(const message_t *m) {
@@ -1270,6 +1339,38 @@ char *tools_build_deferred_catalog(const char **paged_names, int paged_count,
 
 /* ── Tiered auto-compact pipeline ───────────────────────────────────── */
 
+/* Relative worth of a round when choosing what to evict. Higher = keep.
+ * Recency and genuine user guidance raise value; failed attempts and
+ * already-degraded (trimmed/deduped) results lower it. */
+static int round_value_score(conversation_t *c, const api_round_t *r, int idx, int total) {
+    int v = 100;
+    v += (idx * 100) / (total > 1 ? total - 1 : 1); /* recency gradient */
+    bool has_user_text = false;
+    int penalties = 0;
+    for (int i = r->start_idx; i <= r->end_idx && i < c->count; i++) {
+        message_t *m = &c->msgs[i];
+        for (int j = 0; j < m->content_count; j++) {
+            msg_content_t *mc = &m->content[j];
+            if (!mc->text || !mc->type)
+                continue;
+            if (m->role == ROLE_USER && strcmp(mc->type, "text") == 0 &&
+                !message_has_tool_result_local(m)) {
+                has_user_text = true;
+            } else if (strcmp(mc->type, "tool_result") == 0) {
+                if (strstr(mc->text, "error") || strstr(mc->text, "Error") ||
+                    strstr(mc->text, "failed") || strstr(mc->text, "FAILED"))
+                    penalties += 40; /* failed attempts age poorly */
+                if (strstr(mc->text, "[duplicate output elided") || strstr(mc->text, "[trimmed "))
+                    penalties += 15; /* already degraded */
+            }
+        }
+    }
+    if (has_user_text)
+        v += 150; /* real user prompts are expensive to lose */
+    v -= penalties > 60 ? 60 : penalties;
+    return v < 10 ? 10 : v;
+}
+
 compact_result_t conv_auto_compact(conversation_t *c, session_state_t *s, compact_config_t *cfg) {
     compact_result_t result;
     memset(&result, 0, sizeof(result));
@@ -1306,6 +1407,10 @@ compact_result_t conv_auto_compact(conversation_t *c, session_state_t *s, compac
 
     /* Always strip binaries from old messages first */
     conv_strip_binaries(c, cfg->snip_keep_tail);
+
+    /* Collapse byte-identical repeated tool results (re-reads, status
+     * polls) before trimming — dedup preserves more signal per token. */
+    conv_dedup_tool_results(c, cfg->snip_keep_tail);
 
     /* Trim old tool results */
     conv_trim_old_results(c, cfg->snip_keep_tail, cfg->max_result_chars);
@@ -1344,32 +1449,85 @@ compact_result_t conv_auto_compact(conversation_t *c, session_state_t *s, compac
     }
 
     if (round_count > (keep_head + keep_tail)) {
-        /* How many rounds to drop? Target: get below threshold.
-         * Drop from the middle, keeping head and tail. */
         int droppable = round_count - keep_head - keep_tail;
         int tokens_to_shed = post_micro - (threshold * 3 / 4); /* target 75% */
 
+        /* Value-scored eviction: instead of always shedding the oldest
+         * middle rounds, score every droppable round and evict the
+         * contiguous window that reaches the token target at the lowest
+         * total value. Failed-retry stretches go first; stretches around
+         * real user guidance survive longest. */
+        int lo = keep_head, hi = round_count - keep_tail; /* [lo,hi) droppable */
+        int values[MAX_API_ROUNDS];
+        long total_drop_tokens = 0;
+        for (int i = lo; i < hi; i++) {
+            values[i] = round_value_score(c, &rounds[i], i, round_count);
+            total_drop_tokens += rounds[i].token_estimate;
+        }
+        long target = tokens_to_shed;
+        if (target > total_drop_tokens)
+            target = total_drop_tokens;
+        if (target < 1)
+            target = 1;
+
+        /* Two-pointer sweep: for each window start, the best end is the
+         * first that meets the token target (extending further only adds
+         * value we would rather keep). */
+        int best_a = -1, best_b = -1;
+        long best_value = -1;
+        int b = lo;
+        long win_tokens = 0, win_value = 0;
+        for (int a = lo; a < hi; a++) {
+            if (b < a) {
+                b = a;
+                win_tokens = 0;
+                win_value = 0;
+            }
+            while (b < hi && win_tokens < target) {
+                win_tokens += rounds[b].token_estimate;
+                win_value += values[b];
+                b++;
+            }
+            if (win_tokens >= target && (best_value < 0 || win_value < best_value)) {
+                best_value = win_value;
+                best_a = a;
+                best_b = b;
+            }
+            win_tokens -= rounds[a].token_estimate;
+            win_value -= values[a];
+        }
+
         int to_drop = 0;
         int tokens_dropped = 0;
-        for (int i = keep_head; i < round_count - keep_tail && tokens_dropped < tokens_to_shed;
-             i++) {
-            tokens_dropped += rounds[i].token_estimate;
-            to_drop++;
+        int drop_from = lo;
+        if (best_a >= 0) {
+            drop_from = best_a;
+            to_drop = best_b - best_a;
+            for (int i = best_a; i < best_b; i++)
+                tokens_dropped += rounds[i].token_estimate;
         }
 
         /* Guarantee progress: if we're above threshold we MUST drop at
          * least one round, even if the token-target math comes out to 0
-         * (small rounds, large overhead). */
+         * (small rounds, large overhead). Pick the lowest-value round. */
         if (to_drop == 0 && droppable > 0) {
-            tokens_dropped = rounds[keep_head].token_estimate;
+            int pick = lo;
+            for (int i = lo + 1; i < hi; i++) {
+                if (values[i] < values[pick])
+                    pick = i;
+            }
+            drop_from = pick;
+            tokens_dropped = rounds[pick].token_estimate;
             to_drop = 1;
         }
 
         if (to_drop > 0 && to_drop <= droppable) {
-            /* Rewrite: keep head rounds, skip middle, keep tail rounds.
-             * We do this by freeing middle messages and shifting. */
-            int drop_start = rounds[keep_head].start_idx;
-            int drop_end = rounds[keep_head + to_drop - 1].end_idx;
+            /* Rewrite: keep everything before the window, skip the window,
+             * keep everything after. Window bounds inherit the head/tail
+             * floor guarantees (drop_from>=keep_head>=1, window end within
+             * droppable range) so drop_start>0 and drop_end<c->count-1. */
+            int drop_start = rounds[drop_from].start_idx;
+            int drop_end = rounds[drop_from + to_drop - 1].end_idx;
 
             /* Boundary requirements: keep_head>=1 guarantees drop_start>0
              * (the first user turn is preserved); keep_tail>=2 guarantees
@@ -1530,16 +1688,13 @@ bool conv_save_ex(conversation_t *c, const session_state_t *session, const char 
             if (session->goal_token_budget > 0)
                 jbuf_appendf(&sb, ",\"goal_token_budget\":%d", session->goal_token_budget);
             if (session->goal_tokens_at_start >= 0)
-                jbuf_appendf(&sb, ",\"goal_tokens_at_start\":%d",
-                             session->goal_tokens_at_start);
+                jbuf_appendf(&sb, ",\"goal_tokens_at_start\":%d", session->goal_tokens_at_start);
             if (session->goal_turns_at_start >= 0)
                 jbuf_appendf(&sb, ",\"goal_turns_at_start\":%d", session->goal_turns_at_start);
             if (session->goal_started_at > 0)
-                jbuf_appendf(&sb, ",\"goal_started_at\":%lld",
-                             (long long)session->goal_started_at);
+                jbuf_appendf(&sb, ",\"goal_started_at\":%lld", (long long)session->goal_started_at);
             if (session->goal_updated_at > 0)
-                jbuf_appendf(&sb, ",\"goal_updated_at\":%lld",
-                             (long long)session->goal_updated_at);
+                jbuf_appendf(&sb, ",\"goal_updated_at\":%lld", (long long)session->goal_updated_at);
         }
         jbuf_append(&sb, "},");
         fwrite(sb.data, 1, sb.len, f);
@@ -1647,8 +1802,8 @@ bool conv_load_ex(conversation_t *c, session_state_t *session, const char *path)
                 snprintf(session->pin_text, sizeof(session->pin_text), "%s", pin_text);
                 free(pin_text);
             }
-            session->structured_output = json_get_bool(session_raw, "structured_output",
-                                                       session->structured_output);
+            session->structured_output =
+                json_get_bool(session_raw, "structured_output", session->structured_output);
             session->structured_output_strict = json_get_bool(
                 session_raw, "structured_output_strict", session->structured_output_strict);
             int so_repairs = json_get_int(session_raw, "structured_output_max_repairs",
@@ -1685,17 +1840,14 @@ bool conv_load_ex(conversation_t *c, session_state_t *session, const char *path)
                 free(goal_status);
                 session->goal_token_budget =
                     json_get_int(session_raw, "goal_token_budget", session->goal_token_budget);
-                session->goal_tokens_at_start =
-                    json_get_int(session_raw, "goal_tokens_at_start",
-                                 session->goal_tokens_at_start);
+                session->goal_tokens_at_start = json_get_int(session_raw, "goal_tokens_at_start",
+                                                             session->goal_tokens_at_start);
                 session->goal_turns_at_start =
                     json_get_int(session_raw, "goal_turns_at_start", session->goal_turns_at_start);
-                session->goal_started_at =
-                    (time_t)json_get_int(session_raw, "goal_started_at",
-                                         (int)session->goal_started_at);
-                session->goal_updated_at =
-                    (time_t)json_get_int(session_raw, "goal_updated_at",
-                                         (int)session->goal_updated_at);
+                session->goal_started_at = (time_t)json_get_int(session_raw, "goal_started_at",
+                                                                (int)session->goal_started_at);
+                session->goal_updated_at = (time_t)json_get_int(session_raw, "goal_updated_at",
+                                                                (int)session->goal_updated_at);
             }
             free(goal_objective);
             free(session_raw);
@@ -2380,8 +2532,7 @@ static void append_message_sendable_content(jbuf_t *b, message_t *m, bool force_
         append_content_block(b, mc, claude_code_oauth);
         if (content_block_allows_cache_control(mc))
             remaining_cacheable--;
-        if (cache_mark_last && content_block_allows_cache_control(mc) &&
-            remaining_cacheable == 0)
+        if (cache_mark_last && content_block_allows_cache_control(mc) && remaining_cacheable == 0)
             append_cache_control_to_last_block(b);
         written++;
     }
@@ -2713,7 +2864,8 @@ static void append_tools_json_filtered(jbuf_t *b, session_state_t *session, conv
 
     float budget_ratio = session ? session->tool_budget_ratio : 1.0f;
     bool paged_owned = false;
-    tool_page_result_t paged = anthropic_get_paged_tools(ctx, max_tools, budget_ratio, &paged_owned);
+    tool_page_result_t paged =
+        anthropic_get_paged_tools(ctx, max_tools, budget_ratio, &paged_owned);
 
     bool has_server_tools = session && (session->web_search || session->code_execution);
     bool has_after_working =
@@ -2853,7 +3005,8 @@ static void build_messages_json(jbuf_t *b, conversation_t *c, session_state_t *s
             if (b->len >= 2 && b->data[b->len - 1] == '}' && b->data[b->len - 2] == ']') {
                 b->len -= 2;
                 b->data[b->len] = '\0';
-                append_message_sendable_content(b, m, true, claude_code_oauth, i == last_user_msg_index);
+                append_message_sendable_content(b, m, true, claude_code_oauth,
+                                                i == last_user_msg_index);
                 jbuf_append(b, "]}");
             } else {
                 /* Fallback: emit as separate message (may cause API error
@@ -2862,7 +3015,8 @@ static void build_messages_json(jbuf_t *b, conversation_t *c, session_state_t *s
                 jbuf_append(b, "{\"role\":");
                 jbuf_append_json_str(b, role == ROLE_USER ? "user" : "assistant");
                 jbuf_append(b, ",\"content\":[");
-                append_message_sendable_content(b, m, false, claude_code_oauth, i == last_user_msg_index);
+                append_message_sendable_content(b, m, false, claude_code_oauth,
+                                                i == last_user_msg_index);
                 jbuf_append(b, "]}");
                 msg_written++;
             }
@@ -2872,7 +3026,8 @@ static void build_messages_json(jbuf_t *b, conversation_t *c, session_state_t *s
             jbuf_append(b, "{\"role\":");
             jbuf_append_json_str(b, role == ROLE_USER ? "user" : "assistant");
             jbuf_append(b, ",\"content\":[");
-            append_message_sendable_content(b, m, false, claude_code_oauth, i == last_user_msg_index);
+            append_message_sendable_content(b, m, false, claude_code_oauth,
+                                            i == last_user_msg_index);
             jbuf_append(b, "]}");
             msg_written++;
         }
@@ -3068,6 +3223,20 @@ static const char *llm_anthropic_wire_model(const char *model) {
     return model;
 }
 
+/* Fable 5, Opus 4.7/4.8, and Sonnet 5 removed the legacy request surface:
+ * `temperature`/`top_p`/`top_k` and `thinking:{type:enabled,budget_tokens}`
+ * all return HTTP 400. Opus 4.6, Sonnet 4.6, and older still accept them
+ * (budget_tokens deprecated-but-functional there). Sending a rejected field
+ * hard-400s every request in the session — so gate on the model. Matches both
+ * hyphen (native) and dot (OpenRouter) id spellings. */
+static bool anthropic_model_rejects_legacy_params(const char *model) {
+    if (!model)
+        return false;
+    return strstr(model, "fable") || strstr(model, "mythos") || strstr(model, "opus-4-7") ||
+           strstr(model, "opus-4.7") || strstr(model, "opus-4-8") || strstr(model, "opus-4.8") ||
+           strstr(model, "sonnet-5") || strstr(model, "sonnet5");
+}
+
 char *llm_build_request_for_credential(conversation_t *c, const char *model, int max_tokens,
                                        const char *credential) {
     jbuf_t b;
@@ -3104,8 +3273,11 @@ char *llm_build_request_for_credential(conversation_t *c, const char *model, int
     }
     jbuf_append(&b, "]");
 
-    /* Adaptive thinking — only on Opus 4.6 and Sonnet 4.6 */
-    if (strstr(model, "opus-4-6") || strstr(model, "sonnet-4-6")) {
+    /* Adaptive thinking — on every thinking-capable Anthropic model
+     * (Fable 5, Opus 4.6·4.7·4.8, Sonnet 4.6·5). Previously this only matched
+     * Opus 4.6 / Sonnet 4.6, silently dropping thinking on the newer models. */
+    const model_info_t *mi_nc = model_lookup(model);
+    if (mi_nc && mi_nc->supports_thinking) {
         jbuf_append(&b, ",\"thinking\":{\"type\":\"adaptive\"}");
     }
 
@@ -3206,12 +3378,16 @@ char *llm_build_request_ex_for_credential(conversation_t *c, session_state_t *se
         jbuf_append(&b, ",{\"type\":\"text\",\"text\":");
         jbuf_t sop;
         jbuf_init(&sop, 1024);
-        jbuf_append(&sop, "[Structured Output Contract]\nFor the final assistant answer, emit exactly one valid JSON object and no markdown, prose, code fences, comments, or trailing text. Preserve numeric/boolean/null types exactly. ");
+        jbuf_append(&sop,
+                    "[Structured Output Contract]\nFor the final assistant answer, emit exactly "
+                    "one valid JSON object and no markdown, prose, code fences, comments, or "
+                    "trailing text. Preserve numeric/boolean/null types exactly. ");
         if (session->structured_output_schema[0]) {
             jbuf_append(&sop, "The JSON must conform to this schema: ");
             jbuf_append(&sop, session->structured_output_schema);
         } else {
-            jbuf_append(&sop, "Use a stable object shape with explicit keys appropriate to the task.");
+            jbuf_append(&sop,
+                        "Use a stable object shape with explicit keys appropriate to the task.");
         }
         jbuf_append_json_str(&b, sop.data ? sop.data : "");
         jbuf_append(&b, "}");
@@ -3219,8 +3395,10 @@ char *llm_build_request_ex_for_credential(conversation_t *c, session_state_t *se
     }
     if (session->direct_answer_mode) {
         jbuf_append(&b, ",{\"type\":\"text\",\"text\":");
-        jbuf_append_json_str(&b,
-                             "[Direct Answer Mode] The current user request is classified as self-contained/conceptual. Do not call tools, do not gather context, and do not use loop/self-exit controls. Answer directly and then stop.");
+        jbuf_append_json_str(
+            &b, "[Direct Answer Mode] The current user request is classified as "
+                "self-contained/conceptual. Do not call tools, do not gather context, and do not "
+                "use loop/self-exit controls. Answer directly and then stop.");
         jbuf_append(&b, "}");
     }
     if (session->goal_objective[0] && session->goal_status == DSCO_GOAL_ACTIVE) {
@@ -3230,17 +3408,19 @@ char *llm_build_request_ex_for_credential(conversation_t *c, session_state_t *se
         if (used < 0)
             used = 0;
         if (session->goal_token_budget > 0) {
-            snprintf(goal_prompt, sizeof(goal_prompt),
-                     "[Active Goal]\nObjective: %s\nStatus: active\nTokens used on goal: %d / %d\n"
-                     "Keep working toward this objective until the user changes it with /goal. "
-                     "If the objective is complete, call self_exit with a concise completion reason.",
-                     session->goal_objective, used, session->goal_token_budget);
+            snprintf(
+                goal_prompt, sizeof(goal_prompt),
+                "[Active Goal]\nObjective: %s\nStatus: active\nTokens used on goal: %d / %d\n"
+                "Keep working toward this objective until the user changes it with /goal. "
+                "If the objective is complete, call self_exit with a concise completion reason.",
+                session->goal_objective, used, session->goal_token_budget);
         } else {
-            snprintf(goal_prompt, sizeof(goal_prompt),
-                     "[Active Goal]\nObjective: %s\nStatus: active\nTokens used on goal: %d\n"
-                     "Keep working toward this objective until the user changes it with /goal. "
-                     "If the objective is complete, call self_exit with a concise completion reason.",
-                     session->goal_objective, used);
+            snprintf(
+                goal_prompt, sizeof(goal_prompt),
+                "[Active Goal]\nObjective: %s\nStatus: active\nTokens used on goal: %d\n"
+                "Keep working toward this objective until the user changes it with /goal. "
+                "If the objective is complete, call self_exit with a concise completion reason.",
+                session->goal_objective, used);
         }
         jbuf_append(&b, ",{\"type\":\"text\",\"text\":");
         jbuf_append_json_str(&b, goal_prompt);
@@ -3249,26 +3429,32 @@ char *llm_build_request_ex_for_credential(conversation_t *c, session_state_t *se
 
     jbuf_append(&b, "]");
 
-    /* Sampling parameters */
-    if (session->temperature >= 0) {
-        char tbuf[32];
-        snprintf(tbuf, sizeof(tbuf), ",\"temperature\":%.2f", session->temperature);
-        jbuf_append(&b, tbuf);
-    }
-    if (session->top_p >= 0) {
-        char tbuf[32];
-        snprintf(tbuf, sizeof(tbuf), ",\"top_p\":%.2f", session->top_p);
-        jbuf_append(&b, tbuf);
-    }
-    if (session->top_k > 0) {
-        jbuf_append(&b, ",\"top_k\":");
-        jbuf_append_int(&b, session->top_k);
+    /* Sampling parameters — suppressed on models that 400 on them. */
+    bool rejects_legacy = anthropic_model_rejects_legacy_params(session->model);
+    if (!rejects_legacy) {
+        if (session->temperature >= 0) {
+            char tbuf[32];
+            snprintf(tbuf, sizeof(tbuf), ",\"temperature\":%.2f", session->temperature);
+            jbuf_append(&b, tbuf);
+        }
+        if (session->top_p >= 0) {
+            char tbuf[32];
+            snprintf(tbuf, sizeof(tbuf), ",\"top_p\":%.2f", session->top_p);
+            jbuf_append(&b, tbuf);
+        }
+        if (session->top_k > 0) {
+            jbuf_append(&b, ",\"top_k\":");
+            jbuf_append_int(&b, session->top_k);
+        }
     }
 
-    /* Adaptive thinking — gate on model support */
+    /* Adaptive thinking — gate on model support. A fixed budget_tokens is only
+     * legal on Opus 4.6 / Sonnet 4.6 / older; on Fable 5 / Opus 4.7·4.8 /
+     * Sonnet 5 it 400s, so those always use adaptive regardless of the
+     * configured budget. */
     const model_info_t *mi = model_lookup(session->model);
     if (mi && mi->supports_thinking) {
-        if (session->thinking_budget > 0) {
+        if (session->thinking_budget > 0 && !rejects_legacy) {
             jbuf_append(&b, ",\"thinking\":{\"type\":\"enabled\",\"budget_tokens\":");
             jbuf_append_int(&b, session->thinking_budget);
             jbuf_append(&b, "}");
@@ -3907,6 +4093,13 @@ static int stream_progress_cb(void *clientp, curl_off_t dltotal, curl_off_t dlno
     return 0;
 }
 
+/* Optional speculative-execution hook — fired when a client tool_use block
+ * finalizes mid-stream so the agent can start read-only tools early. */
+static stream_tool_ready_cb s_tool_ready_hook = NULL;
+void llm_set_tool_ready_hook(stream_tool_ready_cb fn) {
+    s_tool_ready_hook = fn;
+}
+
 static void sse_finalize_block(sse_state_t *s) {
     if (s->current_index < 0)
         return;
@@ -3942,6 +4135,10 @@ static void sse_finalize_block(sse_state_t *s) {
         } else {
             blk->tool_input = safe_strdup("{}");
         }
+        /* Speculative pre-execution: the model is still streaming later blocks,
+         * so start this (client) tool now if it's a safe read-only tool. */
+        if (s_tool_ready_hook && blk->tool_name && blk->tool_id)
+            s_tool_ready_hook(blk->tool_name, blk->tool_id, blk->tool_input);
     } else if (s->cur_type && strcmp(s->cur_type, "server_tool_use") == 0) {
         /* Server-side tool — preserve for conversation history */
         blk->tool_name = s->cur_tool_name ? safe_strdup(s->cur_tool_name) : NULL;
@@ -4517,8 +4714,7 @@ stream_result_t llm_stream(const char *api_key, const char *request_json, stream
                     state.credit_reset_at = reset_at;
                 char *msg = json_get_str(body_err, "message");
                 char *typ = json_get_str(body_err, "type");
-                if (http_code == 402 || http_code == 429 ||
-                    provider_msg_is_credit_too_low(msg) ||
+                if (http_code == 402 || http_code == 429 || provider_msg_is_credit_too_low(msg) ||
                     provider_msg_is_credit_too_low(typ) ||
                     provider_msg_is_credit_too_low(state.line_buf.data))
                     state.credit_too_low = true;

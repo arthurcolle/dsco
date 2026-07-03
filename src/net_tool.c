@@ -15,11 +15,15 @@
 #include "tools.h"
 #include "json_util.h"
 #include "audit_log.h"
+#include "ipc.h"
+#include "cluster.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
 #include <sys/stat.h>
+#include <sys/wait.h>
+#include <signal.h>
 #include <dirent.h>
 #include <time.h>
 #include <errno.h>
@@ -69,6 +73,33 @@ static char *shell_capture(const char *cmd) {
     }
     pclose(fp);
     return out ? out : strdup("");
+}
+
+/* Spawn `sh -c cmd` in its OWN process group with stdout on the returned fd.
+ * Fills *pid with the child pid (== pgid), so a caller can kill(-pid, ...) the
+ * whole group to abort an abandoned generation.  Returns the read fd or -1. */
+static int spawn_pipe(const char *cmd, pid_t *pid) {
+    int pfd[2];
+    if (pipe(pfd) != 0)
+        return -1;
+    pid_t c = fork();
+    if (c < 0) {
+        close(pfd[0]);
+        close(pfd[1]);
+        return -1;
+    }
+    if (c == 0) {
+        setpgid(0, 0); /* new process group → group-killable */
+        dup2(pfd[1], STDOUT_FILENO);
+        close(pfd[0]);
+        close(pfd[1]);
+        execl("/bin/sh", "sh", "-c", cmd, (char *)NULL);
+        _exit(127);
+    }
+    setpgid(c, c); /* also set in parent to close the exec/setpgid race */
+    close(pfd[1]);
+    *pid = c;
+    return pfd[0];
 }
 
 /* ══════════════════════════════════════════════════════════════════════════
@@ -510,6 +541,63 @@ static bool net_remote_tool(const char *input, char *result, size_t rlen) {
 }
 
 /* ══════════════════════════════════════════════════════════════════════════
+ * MESH RECEIVE WIRING  (the callback the mesh transport was missing)
+ *
+ * mesh_node_set_on_message() was never called anywhere, so every inbound
+ * encrypted WIRE_DATA frame was decrypted and then silently discarded. This
+ * registers a handler that delivers each frame into the local durable ipc
+ * message bus, so a co-located agent can ipc_recv_topic() it.
+ * ══════════════════════════════════════════════════════════════════════════ */
+
+#ifdef HAVE_LIBSODIUM
+/* Runs on a mesh connection thread — keep it thread-safe and defensive.
+ * Accepts either a JSON envelope {"topic":...,"to":...,"body":...} or a raw
+ * payload (delivered on topic "mesh"). */
+static void net_on_mesh_message(const uint8_t *from_pk, const void *data, size_t len, void *ctx) {
+    (void)ctx;
+    if (!data || len == 0)
+        return;
+
+    char pk_hex[65] = {0};
+    if (from_pk)
+        mesh_pubkey_to_hex(from_pk, pk_hex);
+    char from_id[32];
+    snprintf(from_id, sizeof(from_id), "mesh:%.16s", pk_hex[0] ? pk_hex : "anon");
+
+    /* Bounded, null-terminated copy for JSON parsing. */
+    size_t cap = len < (size_t)IPC_MAX_BODY ? len : (size_t)IPC_MAX_BODY;
+    char *buf = (char *)malloc(cap + 1);
+    if (!buf)
+        return;
+    memcpy(buf, data, cap);
+    buf[cap] = '\0';
+
+    char *topic = json_get_str(buf, "topic");
+    char *to = json_get_str(buf, "to");
+    char *body = json_get_str(buf, "body");
+
+    ipc_send((to && to[0]) ? to : NULL, (topic && topic[0]) ? topic : "mesh", body ? body : buf);
+
+    audit_log("net", from_id); /* provenance: frame arrived + delivered */
+
+    free(topic);
+    free(to);
+    free(body);
+    free(buf);
+}
+#endif /* HAVE_LIBSODIUM */
+
+/* Register the mesh receive callback — the wiring main.c promised at :870. */
+void dsco_net_node(void) {
+#ifdef HAVE_LIBSODIUM
+    if (!g_mesh_node)
+        return;
+    mesh_node_set_on_message(g_mesh_node, net_on_mesh_message, NULL);
+    audit_log("net", "mesh receive callback registered");
+#endif
+}
+
+/* ══════════════════════════════════════════════════════════════════════════
  * TOP-LEVEL TOOL DISPATCH
  * ══════════════════════════════════════════════════════════════════════════ */
 
@@ -604,6 +692,19 @@ static netsrv_response_t route_tool(const netsrv_request_t *req, void *ctx) {
             .status = 400, .body = (char *)"{\"error\":\"tool required\"}", .heap_body = false};
     }
 
+    /* Server-side authorization: only allow read-only, location-independent
+     * tools to run remotely. Without this, a peer with the shared key could
+     * invoke bash/write/edit — remote code execution. Opt out only on a fully
+     * trusted private fleet via DSCO_NET_TOOL_UNSAFE=1. */
+    if (!getenv("DSCO_NET_TOOL_UNSAFE") && !tools_is_offload_safe(tool_name)) {
+        free(tool_name);
+        free(params_raw);
+        return (netsrv_response_t){
+            .status = 403,
+            .body = (char *)"{\"error\":\"tool not permitted for remote invocation\"}",
+            .heap_body = false};
+    }
+
     /* Look up tool in global registry */
     char result_buf[128 * 1024];
     result_buf[0] = '\0';
@@ -626,13 +727,532 @@ static netsrv_response_t route_mesh_peers(const netsrv_request_t *req, void *ctx
     return (netsrv_response_t){.status = 200, .body = strdup(buf), .heap_body = true};
 }
 
+/* Extract a prompt from an OpenAI-style body: prefer "prompt", else the last
+ * message's "content". */
+static char *chat_extract_prompt(const char *body) {
+    char *p = json_get_str(body, "prompt");
+    if (p && p[0])
+        return p;
+    free(p);
+    /* Find the LAST "content": "…" and extract its (escape-decoded) value —
+     * json_get_str doesn't descend into messages[]. */
+    const char *c = NULL, *s = body;
+    while ((s = strstr(s, "\"content\"")) != NULL) {
+        c = s;
+        s += 9;
+    }
+    if (!c)
+        return NULL;
+    c = strchr(c, ':');
+    if (!c)
+        return NULL;
+    c++;
+    while (*c == ' ' || *c == '\t' || *c == '\n' || *c == '\r')
+        c++;
+    if (*c != '"')
+        return NULL;
+    c++;
+    jbuf_t b;
+    jbuf_init(&b, 128);
+    for (; *c && *c != '"'; c++) {
+        if (*c == '\\' && c[1]) {
+            c++;
+            switch (*c) {
+                case 'n':
+                    jbuf_append_char(&b, '\n');
+                    break;
+                case 't':
+                    jbuf_append_char(&b, '\t');
+                    break;
+                case 'r':
+                    jbuf_append_char(&b, '\r');
+                    break;
+                case '"':
+                    jbuf_append_char(&b, '"');
+                    break;
+                case '\\':
+                    jbuf_append_char(&b, '\\');
+                    break;
+                case '/':
+                    jbuf_append_char(&b, '/');
+                    break;
+                default:
+                    jbuf_append_char(&b, *c);
+                    break;
+            }
+        } else {
+            jbuf_append_char(&b, *c);
+        }
+    }
+    return b.data;
+}
+
+/* Rough token estimate (~4 chars/token) — we shell out so exact counts aren't
+ * available; this matches the heuristic most OpenAI-compatible proxies use. */
+static int est_tokens(const char *s) {
+    size_t n = s ? strlen(s) : 0;
+    return (int)((n + 3) / 4);
+}
+
+#define MAX_STOPS 4
+#define STOP_LEN 128
+
+/* Parse the OpenAI `stop` field (a string or array of up to MAX_STOPS strings)
+ * into `stops`, unescaping \n \t \r \" \\.  Returns the count. */
+static int parse_stops(const char *body, char stops[][STOP_LEN]) {
+    char *raw = json_get_raw(body, "stop");
+    if (!raw)
+        return 0;
+    char *p = raw;
+    while (*p == ' ' || *p == '\t')
+        p++;
+    int n = 0;
+    int in_array = (*p == '[');
+    if (in_array)
+        p++;
+    while (n < MAX_STOPS) {
+        while (*p && *p != '"' && *p != ']')
+            p++;
+        if (*p != '"')
+            break;
+        p++; /* opening quote */
+        int k = 0;
+        while (*p && *p != '"' && k < STOP_LEN - 1) {
+            if (*p == '\\' && p[1]) {
+                p++;
+                stops[n][k++] = (*p == 'n') ? '\n' : (*p == 't') ? '\t' : (*p == 'r') ? '\r' : *p;
+            } else {
+                stops[n][k++] = *p;
+            }
+            p++;
+        }
+        stops[n][k] = '\0';
+        if (k > 0)
+            n++;
+        if (*p == '"')
+            p++;
+        if (!in_array)
+            break;
+    }
+    free(raw);
+    return n;
+}
+
+/* Earliest position in buf[from,to) where any stop string fully matches.
+ * Returns 1 and sets *pos, else 0. */
+static int find_stop(const char *buf, size_t from, size_t to, char stops[][STOP_LEN], int nstops,
+                     size_t *pos) {
+    size_t best = to;
+    int found = 0;
+    for (int i = 0; i < nstops; i++) {
+        size_t sl = strlen(stops[i]);
+        if (!sl || sl > to - from)
+            continue;
+        for (size_t q = from; q + sl <= to; q++) {
+            if (memcmp(buf + q, stops[i], sl) == 0) {
+                if (q < best) {
+                    best = q;
+                    found = 1;
+                }
+                break;
+            }
+        }
+    }
+    *pos = best;
+    return found;
+}
+
+/* Build the llama-completion command for a chat request.  On success returns
+ * 200, writes the prompt to tempfile `pf` (caller unlinks after running), fills
+ * `cmd` + `*model_out` (points into env, do not free) + `*prompt_toks`.  On
+ * failure returns an HTTP status and points `*errjson` at a static error body. */
+static int chat_prepare(const netsrv_request_t *req, char *cmd, size_t cmdsz, char *pf, size_t pfsz,
+                        const char **model_out, int *prompt_toks, const char **errjson) {
+    if (!req->body || req->body_len == 0) {
+        *errjson = "{\"error\":\"empty body\"}";
+        return 400;
+    }
+    const char *model = getenv("DSCO_SERVE_MODEL");
+    if (!model || !model[0]) {
+        *errjson = "{\"error\":\"set DSCO_SERVE_MODEL=<path.gguf>\"}";
+        return 503;
+    }
+    char *prompt = chat_extract_prompt(req->body);
+    if (!prompt || !prompt[0]) {
+        free(prompt);
+        *errjson = "{\"error\":\"no prompt or messages[].content\"}";
+        return 400;
+    }
+    int nmax = json_get_int(req->body, "max_tokens", 128);
+    if (nmax < 1)
+        nmax = 1;
+    else if (nmax > 2048)
+        nmax = 2048;
+
+    /* Sampling params → llama-completion flags (only when the client sets them,
+     * so llama.cpp's own defaults apply otherwise). */
+    char samp[256] = "";
+    size_t sl = 0;
+    double temp = json_get_double(req->body, "temperature", -1);
+    double top_p = json_get_double(req->body, "top_p", -1);
+    int top_k = json_get_int(req->body, "top_k", -1);
+    int seed = json_get_int(req->body, "seed", -1);
+    if (temp >= 0)
+        sl += (size_t)snprintf(samp + sl, sizeof(samp) - sl, "--temp %g ", temp);
+    if (top_p >= 0)
+        sl += (size_t)snprintf(samp + sl, sizeof(samp) - sl, "--top-p %g ", top_p);
+    if (top_k >= 0)
+        sl += (size_t)snprintf(samp + sl, sizeof(samp) - sl, "--top-k %d ", top_k);
+    if (seed >= 0)
+        sl += (size_t)snprintf(samp + sl, sizeof(samp) - sl, "--seed %d ", seed);
+
+    if (prompt_toks)
+        *prompt_toks = est_tokens(prompt);
+    snprintf(pf, pfsz, "/tmp/dsco_serve_XXXXXX");
+    int fd = mkstemp(pf);
+    if (fd >= 0) {
+        ssize_t wr = write(fd, prompt, strlen(prompt));
+        (void)wr;
+        close(fd);
+    }
+    free(prompt);
+
+    const char *lb = getenv("DSCO_LLAMACPP_DIR");
+    char lbdef[512];
+    if (!lb || !lb[0]) {
+        const char *home = getenv("HOME");
+        snprintf(lbdef, sizeof(lbdef), "%s/native_tools/llama.cpp/build/bin", home ? home : ".");
+        lb = lbdef;
+    }
+    /* Distributed: if DSCO_SERVE_RPC names peers, front the split across them
+     * (resolve + ensure rpc-server on each, then offload with --rpc + -ngl). */
+    char rpc_arg[1200] = "";
+    const char *serve_rpc = getenv("DSCO_SERVE_RPC");
+    if (serve_rpc && serve_rpc[0]) {
+        char eps[1024] = "";
+        if (dsco_cluster_rpc_endpoints(serve_rpc, eps, sizeof(eps), 1) > 0)
+            snprintf(rpc_arg, sizeof(rpc_arg), "--rpc %s -ngl 99 ", eps);
+    }
+    snprintf(
+        cmd, cmdsz,
+        "DYLD_LIBRARY_PATH='%s' LD_LIBRARY_PATH='%s' '%s/llama-completion' -m '%s' %s%s-f '%s' "
+        "-n %d --no-warmup --no-display-prompt 2>/dev/null",
+        lb, lb, lb, model, rpc_arg, samp, pf, nmax);
+    *model_out = model;
+    return 200;
+}
+
+/* Strip llama.cpp's trailing "> EOF by user" marker + trailing whitespace. */
+static void chat_strip_tail(char *out) {
+    size_t n = strlen(out);
+    /* trim trailing whitespace */
+    while (n &&
+           (out[n - 1] == '\n' || out[n - 1] == '\r' || out[n - 1] == ' ' || out[n - 1] == '\t'))
+        out[--n] = '\0';
+    /* Remove a TRAILING "> EOF by user" marker only.  strstr would truncate at
+     * the FIRST occurrence, mangling content that legitimately contains the
+     * phrase mid-text; the marker is only ever llama.cpp's end-of-stream notice. */
+    static const char MARK[] = "> EOF by user";
+    size_t ml = sizeof(MARK) - 1;
+    if (n >= ml && memcmp(out + n - ml, MARK, ml) == 0) {
+        n -= ml;
+        out[n] = '\0';
+        while (n && (out[n - 1] == '\n' || out[n - 1] == '\r' || out[n - 1] == ' ' ||
+                     out[n - 1] == '\t'))
+            out[--n] = '\0';
+    }
+}
+
+/* Largest k <= len such that buf[0..k) ends on a complete UTF-8 character — so
+ * a streamed delta never splits a multibyte sequence (which would make the
+ * frame's JSON string invalid UTF-8 for strict clients). */
+static size_t utf8_trunc(const char *buf, size_t len) {
+    if (len == 0)
+        return 0;
+    size_t start = len;
+    while (start > 0 && ((unsigned char)buf[start - 1] & 0xC0) == 0x80)
+        start--; /* skip conts */
+    if (start == 0)
+        return len; /* no lead byte in range; nothing to hold back */
+    start--;        /* index of the last character's lead byte */
+    unsigned char lead = (unsigned char)buf[start];
+    size_t need = lead < 0x80             ? 1
+                  : (lead & 0xE0) == 0xC0 ? 2
+                  : (lead & 0xF0) == 0xE0 ? 3
+                  : (lead & 0xF8) == 0xF0 ? 4
+                                          : 1;
+    return (start + need <= len) ? len : start; /* complete → keep all; else cut before it */
+}
+
+/* Build the full non-streaming chat.completion JSON body (with usage). */
+static void chat_build_json(jbuf_t *b, const char *model, const char *content, int prompt_toks) {
+    int ct = est_tokens(content);
+    jbuf_init(b, strlen(content) + 320);
+    jbuf_append(b, "{\"id\":\"chatcmpl-dsco\",\"object\":\"chat.completion\",\"model\":");
+    jbuf_append_json_str(b, model);
+    jbuf_append(b, ",\"choices\":[{\"index\":0,\"message\":{\"role\":\"assistant\",\"content\":");
+    jbuf_append_json_str(b, content);
+    jbuf_append(b, "},\"finish_reason\":\"stop\"}],\"usage\":{\"prompt_tokens\":");
+    jbuf_append_int(b, prompt_toks);
+    jbuf_append(b, ",\"completion_tokens\":");
+    jbuf_append_int(b, ct);
+    jbuf_append(b, ",\"total_tokens\":");
+    jbuf_append_int(b, prompt_toks + ct);
+    jbuf_append(b, "}}");
+}
+
+/* Send one SSE frame: `data: <json>\n\n`. */
+static int sse_send(netsrv_stream_t *s, const char *json) {
+    if (netsrv_stream_send(s, "data: ", 6) != 0)
+        return -1;
+    if (netsrv_stream_send(s, json, strlen(json)) != 0)
+        return -1;
+    return netsrv_stream_send(s, "\n\n", 2);
+}
+
+/* Send a chat.completion.chunk content delta for `len` bytes of `text`.
+ * Returns 0 on success, -1 if the client connection is gone. */
+static int sse_content(netsrv_stream_t *s, const char *model, const char *text, size_t len) {
+    char *tmp = strndup(text, len);
+    jbuf_t b;
+    jbuf_init(&b, len + 160);
+    jbuf_append(&b, "{\"id\":\"chatcmpl-dsco\",\"object\":\"chat.completion.chunk\",\"model\":");
+    jbuf_append_json_str(&b, model);
+    jbuf_append(&b, ",\"choices\":[{\"index\":0,\"delta\":{\"content\":");
+    jbuf_append_json_str(&b, tmp ? tmp : "");
+    jbuf_append(&b, "},\"finish_reason\":null}]}");
+    int rc = sse_send(s, b.data);
+    jbuf_free(&b);
+    free(tmp);
+    return rc;
+}
+
+/* POST /v1/chat/completions — streaming-aware front for route_chat.  If the body
+ * has "stream": true, emit text/event-stream token deltas; else send one
+ * buffered JSON response.  This handler owns the socket (writes status+headers). */
+static void route_chat_stream(const netsrv_request_t *req, netsrv_stream_t *s, void *ctx) {
+    (void)ctx;
+    char cmd[1700], pf[64];
+    const char *model = NULL, *errjson = NULL;
+    int ptoks = 0;
+    int st = chat_prepare(req, cmd, sizeof(cmd), pf, sizeof(pf), &model, &ptoks, &errjson);
+    if (st != 200) {
+        char hdr[256];
+        int n = snprintf(hdr, sizeof(hdr),
+                         "HTTP/1.1 %d %s\r\nContent-Type: application/json\r\n"
+                         "Content-Length: %zu\r\nConnection: close\r\n\r\n",
+                         st, st == 503 ? "Service Unavailable" : "Bad Request", strlen(errjson));
+        netsrv_stream_send(s, hdr, (size_t)n);
+        netsrv_stream_send(s, errjson, strlen(errjson));
+        return;
+    }
+    char stops[MAX_STOPS][STOP_LEN];
+    int nstops = parse_stops(req->body, stops);
+    size_t maxstop = 0;
+    for (int i = 0; i < nstops; i++) {
+        size_t l = strlen(stops[i]);
+        if (l > maxstop)
+            maxstop = l;
+    }
+
+    if (!json_get_bool(req->body, "stream", false)) {
+        /* Buffered: run to completion, send a single JSON response ourselves. */
+        char *out = shell_capture(cmd);
+        unlink(pf);
+        if (!out)
+            out = strdup("");
+        chat_strip_tail(out);
+        size_t sp;
+        if (nstops && find_stop(out, 0, strlen(out), stops, nstops, &sp))
+            out[sp] = '\0';
+        jbuf_t b;
+        chat_build_json(&b, model, out, ptoks);
+        free(out);
+        char hdr[256];
+        int n = snprintf(hdr, sizeof(hdr),
+                         "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n"
+                         "Content-Length: %zu\r\nConnection: close\r\n\r\n",
+                         b.len);
+        netsrv_stream_send(s, hdr, (size_t)n);
+        netsrv_stream_send(s, b.data, b.len);
+        jbuf_free(&b);
+        return;
+    }
+
+    /* SSE: headers, initial role delta, token deltas, stop delta, [DONE]. */
+    const char *sse_hdr = "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\n"
+                          "Cache-Control: no-cache\r\nConnection: close\r\n\r\n";
+    netsrv_stream_send(s, sse_hdr, strlen(sse_hdr));
+    {
+        jbuf_t b;
+        jbuf_init(&b, 160);
+        jbuf_append(&b,
+                    "{\"id\":\"chatcmpl-dsco\",\"object\":\"chat.completion.chunk\",\"model\":");
+        jbuf_append_json_str(&b, model);
+        jbuf_append(&b, ",\"choices\":[{\"index\":0,\"delta\":{\"role\":\"assistant\"},"
+                        "\"finish_reason\":null}]}");
+        sse_send(s, b.data);
+        jbuf_free(&b);
+    }
+
+    /* NB: do NOT unlink(pf) before the child reads it — the child opens the
+     * prompt file after fork/exec; deleting it early feeds an empty prompt. */
+    pid_t child = -1;
+    int cfd = spawn_pipe(cmd, &child);
+    size_t comp_bytes = 0; /* content bytes emitted, for usage accounting */
+    if (cfd >= 0) {
+        /* Accumulate output; emit a growing "safe" prefix as deltas.  Hold back
+         * `guard` bytes so we never (a) split a multibyte UTF-8 char, (b) leak the
+         * trailing "> EOF by user" marker, or (c) emit past a stop sequence that
+         * only completes in a later read.  read() (not fread) flushes per token;
+         * break on client disconnect. */
+        enum { HOLD = 32 };
+        size_t guard = HOLD > maxstop ? HOLD : maxstop;
+        char *acc = NULL;
+        size_t acclen = 0, acccap = 0, sent = 0;
+        char buf[512];
+        ssize_t r;
+        int broken = 0, done = 0;
+        while (!broken && !done && (r = read(cfd, buf, sizeof(buf))) > 0) {
+            if (acclen + (size_t)r + 1 > acccap) {
+                acccap = (acclen + (size_t)r + 1) * 2;
+                char *na = realloc(acc, acccap);
+                if (!na) {
+                    broken = 1;
+                    break;
+                }
+                acc = na;
+            }
+            memcpy(acc + acclen, buf, (size_t)r);
+            acclen += (size_t)r;
+            size_t sp;
+            if (nstops && find_stop(acc, sent, acclen, stops, nstops, &sp)) {
+                if (sp > sent) {
+                    if (sse_content(s, model, acc + sent, sp - sent) != 0)
+                        broken = 1;
+                    else
+                        comp_bytes += sp - sent;
+                }
+                sent = sp;
+                done = 1;
+                break;
+            }
+            if (acclen > sent + guard) {
+                size_t emit = utf8_trunc(acc + sent, acclen - guard - sent);
+                if (emit > 0) {
+                    if (sse_content(s, model, acc + sent, emit) != 0)
+                        broken = 1;
+                    else {
+                        sent += emit;
+                        comp_bytes += emit;
+                    }
+                }
+            }
+        }
+        if (!broken && !done) {
+            /* natural EOF: strip trailing marker, honor a stop in the held tail,
+             * then flush whatever remains. */
+            if (!acc)
+                acc = calloc(1, 1);
+            if (acc) {
+                acc[acclen] = '\0';
+                chat_strip_tail(acc);
+                acclen = strlen(acc);
+                size_t sp;
+                if (nstops && find_stop(acc, sent, acclen, stops, nstops, &sp))
+                    acclen = sp;
+                if (acclen > sent) {
+                    sse_content(s, model, acc + sent, acclen - sent);
+                    comp_bytes += acclen - sent;
+                }
+            }
+        }
+        free(acc);
+        close(cfd);
+        /* client disconnect OR stop-sequence hit → abandon the rest of the
+         * generation now instead of burning compute on output nobody reads. */
+        if (broken || done)
+            kill(-child, SIGKILL);
+        waitpid(child, NULL, 0);
+    }
+    unlink(pf);
+
+    /* final chunk: finish_reason + usage (approx token counts, ~4 chars/token) */
+    {
+        int ctoks = (int)((comp_bytes + 3) / 4);
+        jbuf_t b;
+        jbuf_init(&b, 240);
+        jbuf_append(&b,
+                    "{\"id\":\"chatcmpl-dsco\",\"object\":\"chat.completion.chunk\",\"model\":");
+        jbuf_append_json_str(&b, model);
+        jbuf_append(&b, ",\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"stop\"}],"
+                        "\"usage\":{\"prompt_tokens\":");
+        jbuf_append_int(&b, ptoks);
+        jbuf_append(&b, ",\"completion_tokens\":");
+        jbuf_append_int(&b, ctoks);
+        jbuf_append(&b, ",\"total_tokens\":");
+        jbuf_append_int(&b, ptoks + ctoks);
+        jbuf_append(&b, "}}");
+        sse_send(s, b.data);
+        jbuf_free(&b);
+    }
+    netsrv_stream_send(s, "data: [DONE]\n\n", 14);
+}
+
+/* GET /v1/models — OpenAI model listing.  Reports DSCO_SERVE_MODEL plus any
+ * *.gguf under DSCO_SERVE_MODELS_DIR, so SDKs that probe /v1/models on init
+ * (many do) see a valid catalog. */
+static netsrv_response_t route_models(const netsrv_request_t *req, void *ctx) {
+    (void)req;
+    (void)ctx;
+    jbuf_t b;
+    jbuf_init(&b, 256);
+    jbuf_append(&b, "{\"object\":\"list\",\"data\":[");
+    int n = 0;
+    const char *sm = getenv("DSCO_SERVE_MODEL");
+    if (sm && sm[0]) {
+        const char *base = strrchr(sm, '/');
+        base = base ? base + 1 : sm;
+        jbuf_append(&b, "{\"id\":");
+        jbuf_append_json_str(&b, base);
+        jbuf_append(&b, ",\"object\":\"model\",\"created\":0,\"owned_by\":\"dsco\"}");
+        n++;
+    }
+    const char *md = getenv("DSCO_SERVE_MODELS_DIR");
+    if (md && md[0]) {
+        DIR *d = opendir(md);
+        if (d) {
+            struct dirent *e;
+            while ((e = readdir(d))) {
+                size_t l = strlen(e->d_name);
+                if (l < 6 || strcmp(e->d_name + l - 5, ".gguf") != 0)
+                    continue;
+                if (n)
+                    jbuf_append(&b, ",");
+                jbuf_append(&b, "{\"id\":");
+                jbuf_append_json_str(&b, e->d_name);
+                jbuf_append(&b, ",\"object\":\"model\",\"created\":0,\"owned_by\":\"dsco\"}");
+                n++;
+            }
+            closedir(d);
+        }
+    }
+    jbuf_append(&b, "]}");
+    return (netsrv_response_t){.status = 200, .body = b.data, .heap_body = true};
+}
+
 #endif /* HAVE_MBEDTLS && HAVE_LIBSODIUM */
 
 void dsco_net_routes_register(void *srv_opaque) {
 #if defined(HAVE_MBEDTLS) && defined(HAVE_LIBSODIUM)
     dsco_net_server_t *srv = (dsco_net_server_t *)srv_opaque;
     netsrv_route(srv, "GET", "/health", route_health, NULL);
+    /* POST /health too, so the peer-registry heartbeat (POST-only client) gets
+     * a proper 200 liveness response instead of a reachable-but-404. */
+    netsrv_route(srv, "POST", "/health", route_health, NULL);
     netsrv_route(srv, "POST", "/tool", route_tool, NULL);
+    netsrv_route_stream(srv, "POST", "/v1/chat/completions", route_chat_stream, NULL);
+    netsrv_route(srv, "GET", "/v1/models", route_models, NULL);
     netsrv_route(srv, "GET", "/mesh/peers", route_mesh_peers, NULL);
 #else
     (void)srv_opaque;

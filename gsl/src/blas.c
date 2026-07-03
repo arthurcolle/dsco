@@ -3,7 +3,8 @@
 #include <string.h>
 
 int gsl_blas_ddot(const gsl_vector *X, const gsl_vector *Y, double *result) {
-    if (X->size != Y->size) return -1;
+    if (X->size != Y->size)
+        return -1;
     double sum = 0.0;
     for (size_t i = 0; i < X->size; i++) {
         sum += X->data[i] * Y->data[i];
@@ -12,11 +13,14 @@ int gsl_blas_ddot(const gsl_vector *X, const gsl_vector *Y, double *result) {
     return 0;
 }
 
-int gsl_blas_dgemv(CBLAS_TRANSPOSE_t TransA, double alpha, const gsl_matrix *A,
-                   const gsl_vector *X, double beta, gsl_vector *Y) {
-    (void)TransA; (void)alpha; (void)beta;
+int gsl_blas_dgemv(CBLAS_TRANSPOSE_t TransA, double alpha, const gsl_matrix *A, const gsl_vector *X,
+                   double beta, gsl_vector *Y) {
+    (void)TransA;
+    (void)alpha;
+    (void)beta;
     /* Simplified: Y = A * X */
-    if (A->size2 != X->size || A->size1 != Y->size) return -1;
+    if (A->size2 != X->size || A->size1 != Y->size)
+        return -1;
     for (size_t i = 0; i < A->size1; i++) {
         double sum = 0.0;
         for (size_t j = 0; j < A->size2; j++) {
@@ -27,11 +31,11 @@ int gsl_blas_dgemv(CBLAS_TRANSPOSE_t TransA, double alpha, const gsl_matrix *A,
     return 0;
 }
 
-int gsl_blas_dgemm(CBLAS_TRANSPOSE_t TransA, CBLAS_TRANSPOSE_t TransB,
-                   double alpha, const gsl_matrix *A, const gsl_matrix *B,
-                   double beta, gsl_matrix *C) {
+int gsl_blas_dgemm(CBLAS_TRANSPOSE_t TransA, CBLAS_TRANSPOSE_t TransB, double alpha,
+                   const gsl_matrix *A, const gsl_matrix *B, double beta, gsl_matrix *C) {
     /* Simplified: C = alpha * A * B + beta * C (no transpose) */
-    (void)TransA; (void)TransB;
+    (void)TransA;
+    (void)TransB;
     if (A->size2 != B->size1 || A->size1 != C->size1 || B->size2 != C->size2)
         return -1;
 

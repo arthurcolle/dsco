@@ -14,19 +14,18 @@
 
 static int tests_run = 0;
 
-#define CHECK(cond, msg)                                                                            \
-    do {                                                                                            \
-        tests_run++;                                                                                \
-        if (!(cond)) {                                                                              \
+#define CHECK(cond, msg)                                                                           \
+    do {                                                                                           \
+        tests_run++;                                                                               \
+        if (!(cond)) {                                                                             \
             fprintf(stderr, "FAIL: %s (line %d)\n", msg, __LINE__);                                \
-            assert(cond);                                                                           \
-        }                                                                                           \
+            assert(cond);                                                                          \
+        }                                                                                          \
     } while (0)
 
 static int contains(const char *haystack, const char *needle) {
     return haystack && needle && strstr(haystack, needle) != NULL;
 }
-
 
 static void force_egg_ready(avian_engine_t *a, int egg_id, double readiness, int cycles) {
     for (int i = 0; i < AVIAN_MAX_EGGS; i++) {
@@ -137,7 +136,8 @@ static void test_high_risk_fledging_requires_extra_readiness(void) {
     CHECK(avian_nest_add_material(&a, nest_id, "risk register", 0.20, true), "risk material 1");
     CHECK(avian_nest_add_material(&a, nest_id, "rollback plan", 0.20, true), "risk material 2");
 
-    int egg_id = avian_brood_lay(&a, nest_id, "risky patch", "self-modification", "unit-test", 0.90, 2);
+    int egg_id =
+        avian_brood_lay(&a, nest_id, "risky patch", "self-modification", "unit-test", 0.90, 2);
     CHECK(egg_id > 0, "high risk egg laid");
     /* Force the boundary condition directly: nominally ready by normal threshold,
        but still below the stricter high-risk fledging threshold. */

@@ -1044,12 +1044,23 @@ static plan_status_t rollup_step(int step_id, int depth) {
             continue;
         units++;
         switch (a->status) {
-            case PLAN_DONE:        done++; break;
-            case PLAN_SKIPPED:     done++; break;
-            case PLAN_FAILED:      failed++; break;
-            case PLAN_BLOCKED:     blocked++; break;
-            case PLAN_IN_PROGRESS: in_prog++; break;
-            default: break;
+            case PLAN_DONE:
+                done++;
+                break;
+            case PLAN_SKIPPED:
+                done++;
+                break;
+            case PLAN_FAILED:
+                failed++;
+                break;
+            case PLAN_BLOCKED:
+                blocked++;
+                break;
+            case PLAN_IN_PROGRESS:
+                in_prog++;
+                break;
+            default:
+                break;
         }
     }
 
@@ -1057,12 +1068,23 @@ static plan_status_t rollup_step(int step_id, int depth) {
         plan_status_t cs = rollup_step(s->child_step_ids[i], depth + 1);
         units++;
         switch (cs) {
-            case PLAN_DONE:        done++; break;
-            case PLAN_SKIPPED:     done++; break;
-            case PLAN_FAILED:      failed++; break;
-            case PLAN_BLOCKED:     blocked++; break;
-            case PLAN_IN_PROGRESS: in_prog++; break;
-            default: break;
+            case PLAN_DONE:
+                done++;
+                break;
+            case PLAN_SKIPPED:
+                done++;
+                break;
+            case PLAN_FAILED:
+                failed++;
+                break;
+            case PLAN_BLOCKED:
+                blocked++;
+                break;
+            case PLAN_IN_PROGRESS:
+                in_prog++;
+                break;
+            default:
+                break;
         }
     }
 
@@ -1094,12 +1116,23 @@ void plan_rollup_status(int plan_id) {
         plan_status_t cs = rollup_step(p->root_step_ids[i], 0);
         units++;
         switch (cs) {
-            case PLAN_DONE:        done++; break;
-            case PLAN_SKIPPED:     done++; break;
-            case PLAN_FAILED:      failed++; break;
-            case PLAN_BLOCKED:     blocked++; break;
-            case PLAN_IN_PROGRESS: in_prog++; break;
-            default: break;
+            case PLAN_DONE:
+                done++;
+                break;
+            case PLAN_SKIPPED:
+                done++;
+                break;
+            case PLAN_FAILED:
+                failed++;
+                break;
+            case PLAN_BLOCKED:
+                blocked++;
+                break;
+            case PLAN_IN_PROGRESS:
+                in_prog++;
+                break;
+            default:
+                break;
         }
     }
 
@@ -1450,8 +1483,7 @@ static void render_step(step_t *s, jbuf_t *b, const char *prefix, bool is_last, 
         /* Show a one-line preview of real execution output when present, so a
          * run renders evidence (not just status glyphs). Collapses whitespace
          * and truncates to keep the tree scannable. */
-        if (a->result && a->result[0] &&
-            (a->status == PLAN_DONE || a->status == PLAN_FAILED)) {
+        if (a->result && a->result[0] && (a->status == PLAN_DONE || a->status == PLAN_FAILED)) {
             char preview[160];
             size_t w = 0;
             bool prev_space = false;
@@ -1475,8 +1507,8 @@ static void render_step(step_t *s, jbuf_t *b, const char *prefix, bool is_last, 
                 char leaf_prefix[336];
                 snprintf(leaf_prefix, sizeof(leaf_prefix), "%s%s", child_prefix,
                          last_leaf ? "   " : "\xe2\x94\x82  ");
-                snprintf(line, sizeof(line), "%s\xe2\x86\xb3 %s%s\n", leaf_prefix,
-                         preview, truncated ? " \xe2\x80\xa6" : "");
+                snprintf(line, sizeof(line), "%s\xe2\x86\xb3 %s%s\n", leaf_prefix, preview,
+                         truncated ? " \xe2\x80\xa6" : "");
                 jbuf_append(b, line);
             }
         }

@@ -20,11 +20,11 @@
 #include <string.h>
 
 #if defined(__aarch64__) || defined(__arm64__) || defined(_M_ARM64)
-  #define DSCO_SIMD_NEON 1
-  #include <arm_neon.h>
+#define DSCO_SIMD_NEON 1
+#include <arm_neon.h>
 #elif defined(__x86_64__) || defined(_M_X64) || defined(__i386__)
-  #define DSCO_SIMD_SSE2 1
-  #include <emmintrin.h>
+#define DSCO_SIMD_SSE2 1
+#include <emmintrin.h>
 #endif
 
 #ifdef __cplusplus
@@ -35,7 +35,8 @@ extern "C" {
  *    Returns offset from base, or -1 if not found.
  *    Used by render to walk newlines from the tail. ───────────────────────── */
 static inline ssize_t dsco_simd_rfind_byte(const char *base, size_t len, char needle) {
-    if (!base || len == 0) return -1;
+    if (!base || len == 0)
+        return -1;
     const uint8_t *p = (const uint8_t *)base;
     const uint8_t n = (uint8_t)needle;
 
@@ -43,16 +44,18 @@ static inline ssize_t dsco_simd_rfind_byte(const char *base, size_t len, char ne
     /* tail (unaligned remainder) first — walk back to a 16-byte boundary */
     size_t tail = len & 15;
     for (size_t i = 0; i < tail; i++) {
-        if (p[len - 1 - i] == n) return (ssize_t)(len - 1 - i);
+        if (p[len - 1 - i] == n)
+            return (ssize_t)(len - 1 - i);
     }
-    size_t blocks = len >> 4;   /* 16-byte blocks */
+    size_t blocks = len >> 4; /* 16-byte blocks */
     uint8x16_t needle_v = vdupq_n_u8(n);
     for (size_t b = blocks; b > 0; b--) {
         size_t off = (b - 1) << 4;
         uint8x16_t v = vld1q_u8(p + off);
         uint8x16_t eq = vceqq_u8(v, needle_v);
         /* fast reject */
-        if (vmaxvq_u8(eq) == 0) continue;
+        if (vmaxvq_u8(eq) == 0)
+            continue;
         /* fold to 64-bit lanes and pick highest set bit */
         uint64_t lo = vgetq_lane_u64(vreinterpretq_u64_u8(eq), 0);
         uint64_t hi = vgetq_lane_u64(vreinterpretq_u64_u8(eq), 1);
@@ -69,7 +72,8 @@ static inline ssize_t dsco_simd_rfind_byte(const char *base, size_t len, char ne
 #elif DSCO_SIMD_SSE2
     size_t tail = len & 15;
     for (size_t i = 0; i < tail; i++) {
-        if (p[len - 1 - i] == n) return (ssize_t)(len - 1 - i);
+        if (p[len - 1 - i] == n)
+            return (ssize_t)(len - 1 - i);
     }
     size_t blocks = len >> 4;
     __m128i needle_v = _mm_set1_epi8((char)n);
@@ -78,7 +82,8 @@ static inline ssize_t dsco_simd_rfind_byte(const char *base, size_t len, char ne
         __m128i v = _mm_loadu_si128((const __m128i *)(p + off));
         __m128i eq = _mm_cmpeq_epi8(v, needle_v);
         unsigned m = (unsigned)_mm_movemask_epi8(eq);
-        if (!m) continue;
+        if (!m)
+            continue;
         int bit = 31 - __builtin_clz(m);
         return (ssize_t)(off + bit);
     }
@@ -86,7 +91,8 @@ static inline ssize_t dsco_simd_rfind_byte(const char *base, size_t len, char ne
 
 #else
     for (ssize_t i = (ssize_t)len - 1; i >= 0; i--) {
-        if (p[i] == n) return i;
+        if (p[i] == n)
+            return i;
     }
     return -1;
 #endif
@@ -94,7 +100,8 @@ static inline ssize_t dsco_simd_rfind_byte(const char *base, size_t len, char ne
 
 /* ── Find FIRST occurrence — like memchr but inlined. ──────────────────── */
 static inline ssize_t dsco_simd_find_byte(const char *base, size_t len, char needle) {
-    if (!base || len == 0) return -1;
+    if (!base || len == 0)
+        return -1;
     const uint8_t *p = (const uint8_t *)base;
     const uint8_t n = (uint8_t)needle;
 
@@ -104,7 +111,8 @@ static inline ssize_t dsco_simd_find_byte(const char *base, size_t len, char nee
     for (; i + 16 <= len; i += 16) {
         uint8x16_t v = vld1q_u8(p + i);
         uint8x16_t eq = vceqq_u8(v, needle_v);
-        if (vmaxvq_u8(eq) == 0) continue;
+        if (vmaxvq_u8(eq) == 0)
+            continue;
         uint64_t lo = vgetq_lane_u64(vreinterpretq_u64_u8(eq), 0);
         uint64_t hi = vgetq_lane_u64(vreinterpretq_u64_u8(eq), 1);
         if (lo) {
@@ -114,7 +122,9 @@ static inline ssize_t dsco_simd_find_byte(const char *base, size_t len, char nee
         int bit = __builtin_ctzll(hi);
         return (ssize_t)(i + 8 + (bit >> 3));
     }
-    for (; i < len; i++) if (p[i] == n) return (ssize_t)i;
+    for (; i < len; i++)
+        if (p[i] == n)
+            return (ssize_t)i;
     return -1;
 
 #elif DSCO_SIMD_SSE2
@@ -124,22 +134,28 @@ static inline ssize_t dsco_simd_find_byte(const char *base, size_t len, char nee
         __m128i v = _mm_loadu_si128((const __m128i *)(p + i));
         __m128i eq = _mm_cmpeq_epi8(v, needle_v);
         unsigned m = (unsigned)_mm_movemask_epi8(eq);
-        if (!m) continue;
+        if (!m)
+            continue;
         int bit = __builtin_ctz(m);
         return (ssize_t)(i + bit);
     }
-    for (; i < len; i++) if (p[i] == n) return (ssize_t)i;
+    for (; i < len; i++)
+        if (p[i] == n)
+            return (ssize_t)i;
     return -1;
 
 #else
-    for (size_t i = 0; i < len; i++) if (p[i] == n) return (ssize_t)i;
+    for (size_t i = 0; i < len; i++)
+        if (p[i] == n)
+            return (ssize_t)i;
     return -1;
 #endif
 }
 
 /* ── Count occurrences of `needle`. Used for line-count, token estimation. */
 static inline size_t dsco_simd_count_byte(const char *base, size_t len, char needle) {
-    if (!base || len == 0) return 0;
+    if (!base || len == 0)
+        return 0;
     const uint8_t *p = (const uint8_t *)base;
     const uint8_t n = (uint8_t)needle;
     size_t count = 0;
@@ -149,10 +165,11 @@ static inline size_t dsco_simd_count_byte(const char *base, size_t len, char nee
     uint8x16_t needle_v = vdupq_n_u8(n);
     /* accumulate matches in a per-lane counter; flush every 255 iters
      * to avoid u8 overflow. */
-    for (; i + 16 <= len; ) {
+    for (; i + 16 <= len;) {
         uint8x16_t acc = vdupq_n_u8(0);
         size_t blocks = (len - i) / 16;
-        if (blocks > 255) blocks = 255;
+        if (blocks > 255)
+            blocks = 255;
         for (size_t b = 0; b < blocks; b++) {
             uint8x16_t v = vld1q_u8(p + i + (b << 4));
             uint8x16_t eq = vceqq_u8(v, needle_v);
@@ -163,7 +180,9 @@ static inline size_t dsco_simd_count_byte(const char *base, size_t len, char nee
         count += (size_t)vaddlvq_u8(acc);
         i += blocks << 4;
     }
-    for (; i < len; i++) if (p[i] == n) count++;
+    for (; i < len; i++)
+        if (p[i] == n)
+            count++;
     return count;
 
 #elif DSCO_SIMD_SSE2
@@ -174,11 +193,15 @@ static inline size_t dsco_simd_count_byte(const char *base, size_t len, char nee
         __m128i eq = _mm_cmpeq_epi8(v, needle_v);
         count += (size_t)__builtin_popcount((unsigned)_mm_movemask_epi8(eq));
     }
-    for (; i < len; i++) if (p[i] == n) count++;
+    for (; i < len; i++)
+        if (p[i] == n)
+            count++;
     return count;
 
 #else
-    for (size_t i = 0; i < len; i++) if (p[i] == n) count++;
+    for (size_t i = 0; i < len; i++)
+        if (p[i] == n)
+            count++;
     return count;
 #endif
 }
@@ -189,18 +212,24 @@ static inline size_t dsco_simd_count_byte(const char *base, size_t len, char nee
  *
  *    Use case: render snapshot, "show me the last 24 lines". ─────────────── */
 static inline size_t dsco_simd_rline_start(const char *base, size_t len, size_t n) {
-    if (!base || len == 0 || n == 0) return len;
+    if (!base || len == 0 || n == 0)
+        return len;
     /* Step backward; each newline crossed counts. We want the offset right
      * after the (n+1)th newline from the tail (or 0 if not found). */
     size_t pos = len;
     size_t found = 0;
     while (pos > 0) {
         ssize_t nl = dsco_simd_rfind_byte(base, pos, '\n');
-        if (nl < 0) return 0;
+        if (nl < 0)
+            return 0;
         /* don't count a trailing newline at end of buffer */
-        if ((size_t)nl == len - 1 && found == 0) { pos = (size_t)nl; continue; }
+        if ((size_t)nl == len - 1 && found == 0) {
+            pos = (size_t)nl;
+            continue;
+        }
         found++;
-        if (found >= n) return (size_t)nl + 1;
+        if (found >= n)
+            return (size_t)nl + 1;
         pos = (size_t)nl;
     }
     return 0;

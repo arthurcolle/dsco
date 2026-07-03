@@ -31,25 +31,27 @@ typedef enum {
 } pool_slot_state_t;
 
 typedef struct {
-    char              name[64];          /* canonical provider name */
-    char              default_model[128];/* provider's default model id */
-    provider_t       *provider;          /* live, prepared; pool-owned (NULL until acquired) */
+    char name[64];           /* canonical provider name */
+    char default_model[128]; /* provider's default model id */
+    provider_t *provider;    /* live, prepared; pool-owned (NULL until acquired) */
     pool_slot_state_t state;
-    bool              is_subscription;    /* flat-rate core subscription (zero marginal) */
-    double            last_latency_ms;
-    int               consec_failures;
-    long              total_requests;
-    long              total_failures;
-    time_t            tripped_until;      /* 0 = not tripped */
-    time_t            exhausted_until;    /* subscription allocation reset; 0 = available/unknown */
-    time_t            last_used;
+    bool is_subscription; /* flat-rate core subscription (zero marginal) */
+    double last_latency_ms;
+    double lat_ewma_ms;  /* EWMA of request latency (0 = no data) */
+    double success_ewma; /* EWMA of success rate (1.0 = optimistic) */
+    int consec_failures;
+    long total_requests;
+    long total_failures;
+    time_t tripped_until;   /* 0 = not tripped */
+    time_t exhausted_until; /* subscription allocation reset; 0 = available/unknown */
+    time_t last_used;
 } provider_slot_t;
 
 typedef struct {
     provider_slot_t slots[PROVIDER_POOL_MAX];
-    int             count;
-    char            session_key[512];     /* CLI -k fallback credential (may be empty) */
-    bool            initialized;
+    int count;
+    char session_key[512]; /* CLI -k fallback credential (may be empty) */
+    bool initialized;
 } provider_pool_t;
 
 /* Process-wide singleton. */
@@ -85,5 +87,48 @@ void provider_pool_render(char *out, size_t out_len);
 
 /* Free all pooled providers and reset the pool. */
 void provider_pool_shutdown(void);
+
+/* Fire-and-forget: on a detached background thread, open a TLS connection to
+ * each warm provider's endpoint so the shared DNS + TLS-session cache is
+ * primed before the first real request. The first turn then resumes TLS
+ * instead of paying a full cold handshake (~50-150ms saved per provider).
+ * Snapshots endpoint URLs on the calling thread, so it is safe to invoke
+ * right after provider_pool_init() without racing later pool mutation. */
+void provider_pool_prewarm_async(void);
+
+/* Start the connection keep-warm heartbeat: a detached thread that re-warms
+ * pooled provider connections on an interval (default 45s, override with
+ * DSCO_KEEPWARM_SECS) so a warm socket survives NAT/proxy idle timeouts and
+ * the next turn after a quiet gap doesn't pay a cold handshake. Idempotent;
+ * disabled entirely by DSCO_NO_PREWARM. Warms lowest-scoring (least healthy /
+ * slowest) providers first so the connections most at risk get priority. */
+void provider_pool_keepwarm_start(void);
+
+/* ── Latency-aware scoring ──────────────────────────────────────────────────
+ * Lower is better. A provider's score blends its EWMA latency with a penalty
+ * for its recent failure rate, discounted for zero-marginal-cost subscription
+ * lanes. Unavailable providers (tripped / exhausted / unkeyed) score 1e9. */
+
+/* Pure scoring core — no pool state; exposed for unit testing and reuse.
+ * lat_ewma_ms<=0 is treated as a neutral prior; success_ewma is clamped to
+ * [0,1]; `available` false returns the disqualifying 1e9. */
+double provider_pool_score_components(double lat_ewma_ms, double success_ewma, bool is_subscription,
+                                      bool available);
+
+/* Blended score for a registered provider (1e9 if unknown/unavailable). */
+double provider_pool_score(const char *name);
+
+/* Of the given candidate providers, return the one with the best (lowest)
+ * score that is currently healthy, or NULL if none are usable. Names are
+ * canonicalized. Does not mutate the pool. */
+const char *provider_pool_fastest_healthy(const char *const *names, int n);
+
+/* Reorder a statically-built fallback model chain in place by each model's
+ * provider's live score, best-first — making the fallback order dynamic
+ * instead of a fixed priority list. No-op before the pool is initialized or
+ * when all candidates score equally, so the static default stands until
+ * runtime signal accumulates. Stable across equal scores. `n` is the number
+ * of populated entries (max 16). */
+void provider_pool_rerank_fallbacks(char out_models[][128], int n);
 
 #endif /* DSCO_PROVIDER_POOL_H */

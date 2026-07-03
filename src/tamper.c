@@ -239,7 +239,10 @@ static bool setup_kqueue_watch(void) {
 
 static void *watcher_thread(void *arg) {
     (void)arg;
-    struct timespec timeout = {.tv_sec = 0, .tv_nsec = WATCH_INTERVAL_MS * 1000000};
+    /* tv_nsec must stay < 1e9 or kevent rejects the timespec with EINVAL
+     * immediately and this loop becomes a full-core spin. */
+    struct timespec timeout = {.tv_sec = WATCH_INTERVAL_MS / 1000,
+                               .tv_nsec = (WATCH_INTERVAL_MS % 1000) * 1000000L};
     struct kevent ev[4];
 
     /* Drain any events from our own startup open */

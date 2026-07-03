@@ -49,20 +49,20 @@
  *     Entity decoding: named (&mdash;), decimal (&#123;), hex (&#x1F600;)
  * ────────────────────────────────────────────────────────────────────────── */
 
-#define MD_LINE_MAX      4096
-#define MD_BUF_MAX       65536
-#define MD_TABLE_MAXCOL  16
-#define MD_TABLE_MAXROW  128
+#define MD_LINE_MAX 4096
+#define MD_BUF_MAX 65536
+#define MD_TABLE_MAXCOL 16
+#define MD_TABLE_MAXROW 128
 #define MD_LIST_MAXDEPTH 10
-#define MD_REF_MAX       64
-#define MD_FOOTNOTE_MAX  32
+#define MD_REF_MAX 64
+#define MD_FOOTNOTE_MAX 32
 
 typedef enum {
     MD_STATE_NORMAL,
     MD_STATE_CODE_BLOCK,
     MD_STATE_TABLE,
     MD_STATE_HTML_BLOCK,
-    MD_STATE_LATEX_BLOCK,     /* multi-line $$...$$ */
+    MD_STATE_LATEX_BLOCK, /* multi-line $$...$$ */
 } md_state_t;
 
 /* Table column alignment */
@@ -95,10 +95,10 @@ typedef struct {
 typedef struct {
     /* Line accumulator for streaming */
     char line_buf[MD_LINE_MAX];
-    int  line_len;
+    int line_len;
     char *line_overflow;
-    int  line_overflow_len;
-    int  line_overflow_cap;
+    int line_overflow_len;
+    int line_overflow_cap;
     bool out_is_tty;
 
     /* Block-level state */
@@ -107,26 +107,26 @@ typedef struct {
     /* Code block state */
     char code_lang[64];
     char code_buf[MD_BUF_MAX];
-    int  code_len;
-    bool code_truncated;    /* true when code block exceeded MD_BUF_MAX */
-    char code_fence[8];   /* ``` or ~~~ */
-    int  code_fence_len;
+    int code_len;
+    bool code_truncated; /* true when code block exceeded MD_BUF_MAX */
+    char code_fence[8];  /* ``` or ~~~ */
+    int code_fence_len;
 
     /* Table state */
     char *table_cells[MD_TABLE_MAXROW][MD_TABLE_MAXCOL];
-    int  table_cols;
-    int  table_rows;
+    int table_cols;
+    int table_rows;
     bool table_has_sep;
     md_align_t table_align[MD_TABLE_MAXCOL];
 
     /* HTML block accumulator */
     char html_buf[MD_BUF_MAX];
-    int  html_len;
+    int html_len;
     char html_tag[32];
 
     /* LaTeX display block accumulator */
     char latex_buf[MD_BUF_MAX];
-    int  latex_len;
+    int latex_len;
 
     /* Reference links */
     md_ref_link_t refs[MD_REF_MAX];
@@ -139,30 +139,30 @@ typedef struct {
 
     /* Output target */
     FILE *out;
-    int   term_width;
+    int term_width;
 
     /* List nesting stack */
     md_list_type_t list_stack[MD_LIST_MAXDEPTH];
-    int  list_num[MD_LIST_MAXDEPTH];    /* current number for ordered */
-    int  list_depth;                     /* current nesting depth */
+    int list_num[MD_LIST_MAXDEPTH]; /* current number for ordered */
+    int list_depth;                 /* current nesting depth */
 
     /* Tracking */
     bool in_list;
     bool last_was_blank;
     char prev_line[MD_LINE_MAX]; /* for setext heading detection */
     bool prev_line_valid;
-    int  blockquote_depth;       /* nested > tracking */
+    int blockquote_depth;             /* nested > tracking */
     char last_para_line[MD_LINE_MAX]; /* suppress accidental adjacent duplicates */
     bool last_para_line_valid;
 
     /* Streaming partial-line echo */
-    int  partial_echo_pos;       /* how many buffered chars were partially echoed */
-    bool line_input_truncated;   /* line overflow dropped bytes due allocation failure */
+    int partial_echo_pos;      /* how many buffered chars were partially echoed */
+    bool line_input_truncated; /* line overflow dropped bytes due allocation failure */
 
     /* Feature hooks (set by agent.c) */
-    int  paragraph_char_count;   /* F6: paragraph fade-in char counter */
-    bool heatmap_enabled;        /* F1: token heatmap in render_inline */
-    bool diff_code_enabled;      /* F38: diff-aware code blocks */
+    int paragraph_char_count; /* F6: paragraph fade-in char counter */
+    bool heatmap_enabled;     /* F1: token heatmap in render_inline */
+    bool diff_code_enabled;   /* F38: diff-aware code blocks */
 } md_renderer_t;
 
 /* Initialize renderer. out=stdout typically. */

@@ -14,8 +14,8 @@
 #define DSCO_WASM_EXPORT
 #endif
 
-#define WASM_OUT_CAP      (256 * 1024)
-#define WASM_SESSION_CAP  (128 * 1024)
+#define WASM_OUT_CAP (256 * 1024)
+#define WASM_SESSION_CAP (128 * 1024)
 
 static char g_out[WASM_OUT_CAP];
 static char g_session[WASM_SESSION_CAP];
@@ -23,15 +23,9 @@ static size_t g_session_len;
 static int g_turns;
 
 static const char *const WASM_EXPORTED_FUNCTIONS[] = {
-    "_dsco_wasm_version",
-    "_dsco_wasm_models_json",
-    "_dsco_wasm_tools_json",
-    "_dsco_wasm_route_explain",
-    "_dsco_wasm_tool_exec",
-    "_dsco_wasm_session_reset",
-    "_dsco_wasm_session_add",
-    "_dsco_wasm_session_state",
-    NULL,
+    "_dsco_wasm_version",       "_dsco_wasm_models_json",   "_dsco_wasm_tools_json",
+    "_dsco_wasm_route_explain", "_dsco_wasm_tool_exec",     "_dsco_wasm_session_reset",
+    "_dsco_wasm_session_add",   "_dsco_wasm_session_state", NULL,
 };
 
 static void out_reset(void) {
@@ -54,21 +48,31 @@ static void out_json_str(const char *s) {
         for (const unsigned char *p = (const unsigned char *)s; *p; p++) {
             char tmp[8];
             switch (*p) {
-            case '"': out_append("\\\""); break;
-            case '\\': out_append("\\\\"); break;
-            case '\n': out_append("\\n"); break;
-            case '\r': out_append("\\r"); break;
-            case '\t': out_append("\\t"); break;
-            default:
-                if (*p < 0x20) {
-                    snprintf(tmp, sizeof(tmp), "\\u%04x", *p);
-                    out_append(tmp);
-                } else {
-                    tmp[0] = (char)*p;
-                    tmp[1] = '\0';
-                    out_append(tmp);
-                }
-                break;
+                case '"':
+                    out_append("\\\"");
+                    break;
+                case '\\':
+                    out_append("\\\\");
+                    break;
+                case '\n':
+                    out_append("\\n");
+                    break;
+                case '\r':
+                    out_append("\\r");
+                    break;
+                case '\t':
+                    out_append("\\t");
+                    break;
+                default:
+                    if (*p < 0x20) {
+                        snprintf(tmp, sizeof(tmp), "\\u%04x", *p);
+                        out_append(tmp);
+                    } else {
+                        tmp[0] = (char)*p;
+                        tmp[1] = '\0';
+                        out_append(tmp);
+                    }
+                    break;
             }
         }
     }
@@ -129,10 +133,18 @@ static const char *json_field_string(const char *json, const char *key, char *bu
         char c = *p++;
         if (esc) {
             switch (c) {
-            case 'n': buf[n++] = '\n'; break;
-            case 'r': buf[n++] = '\r'; break;
-            case 't': buf[n++] = '\t'; break;
-            default: buf[n++] = c; break;
+                case 'n':
+                    buf[n++] = '\n';
+                    break;
+                case 'r':
+                    buf[n++] = '\r';
+                    break;
+                case 't':
+                    buf[n++] = '\t';
+                    break;
+                default:
+                    buf[n++] = c;
+                    break;
             }
             esc = false;
             continue;
@@ -202,8 +214,10 @@ DSCO_WASM_EXPORT
 const char *dsco_wasm_tools_json(void) {
     return "["
            "{\"name\":\"route_explain\",\"description\":\"Explain browser-local model routing.\","
-           "\"input_schema\":{\"type\":\"object\",\"properties\":{\"model\":{\"type\":\"string\"}}}},"
-           "{\"name\":\"session_add\",\"description\":\"Append a message to browser-local transcript state.\","
+           "\"input_schema\":{\"type\":\"object\",\"properties\":{\"model\":{\"type\":\"string\"}}}"
+           "},"
+           "{\"name\":\"session_add\",\"description\":\"Append a message to browser-local "
+           "transcript state.\","
            "\"input_schema\":{\"type\":\"object\",\"properties\":{\"role\":{\"type\":\"string\"},"
            "\"content\":{\"type\":\"string\"}}}},"
            "{\"name\":\"session_state\",\"description\":\"Return browser-local transcript state.\","
@@ -230,7 +244,8 @@ const char *dsco_wasm_route_explain(const char *model) {
     out_append(",\"provider\":");
     out_json_str(provider);
     out_append(",\"runtime\":\"browser-wasm\",\"host_tools\":\"permissioned-bridge\","
-               "\"note\":\"agent control plane is local to this browser; native shell/files/MCP require a bridge\"}");
+               "\"note\":\"agent control plane is local to this browser; native shell/files/MCP "
+               "require a bridge\"}");
     return g_out;
 }
 

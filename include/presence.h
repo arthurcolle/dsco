@@ -20,22 +20,22 @@
 typedef void (*presence_lock_fn)(void *ctx);
 
 /* Configure idle threshold and lock callback.  Must be called before start. */
-void   presence_init(int idle_threshold_s, presence_lock_fn cb, void *ctx);
+void presence_init(int idle_threshold_s, presence_lock_fn cb, void *ctx);
 
 /* Start/stop the background kqueue thread. */
-void   presence_start(void);
-void   presence_stop(void);
+void presence_start(void);
+void presence_stop(void);
 
 /* Seconds since last keyboard or mouse event (wraps CoreGraphics HID API). */
 double presence_idle_seconds(void);
 
 /* True if lock callback has fired and unlock hasn't been confirmed. */
-bool   presence_is_locked(void);
+bool presence_is_locked(void);
 
 /* Called by the Touch ID success path to clear the locked flag. */
-void   presence_mark_unlocked(void);
+void presence_mark_unlocked(void);
 
 /* Reset the idle timer (call on any user keystroke to suppress false locks). */
-void   presence_poke(void);
+void presence_poke(void);
 
 #endif /* DSCO_PRESENCE_H */

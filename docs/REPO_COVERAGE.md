@@ -6,23 +6,23 @@ This manifest is generated from `git ls-files` plus the coverage generator/outpu
 
 ## Summary
 
-- Total covered files: 598
+- Total covered files: 629
 
 | Category | Files |
 |---|---:|
-| Root project files | 20 |
+| Root project files | 22 |
 | Repository policy and CI | 15 |
-| Documentation | 46 |
-| Runtime source and headers | 244 |
-| Tests | 26 |
-| Scripts and tooling | 44 |
+| Documentation | 47 |
+| Runtime source and headers | 265 |
+| Tests | 27 |
+| Scripts and tooling | 48 |
 | Generated data assets | 8 |
 | Provider metadata | 17 |
 | Web surface | 11 |
 | Packaging and distribution | 12 |
 | Demos | 3 |
 | Vendored and compatibility code | 144 |
-| Other tracked files | 8 |
+| Other tracked files | 10 |
 
 ## Generated Coverage
 
@@ -37,6 +37,8 @@ This manifest is generated from `git ls-files` plus the coverage generator/outpu
 
 - `.clang-format`
 - `.clang-tidy`
+- `.clangd`
+- `.dir-locals.el`
 - `.editorconfig`
 - `.gitattributes`
 - `.gitignore`
@@ -107,6 +109,7 @@ This manifest is generated from `git ls-files` plus the coverage generator/outpu
 - `docs/SWARM_PARALLELISM_PROOF.md`
 - `docs/TOOL_CATALOG.md`
 - `docs/WASM.md`
+- `docs/assets/provider_fabric.svg`
 - `docs/consumer_profile_ontology/ARCHITECTURE.md`
 - `docs/consumer_profile_ontology/EXTENDED_50K.md`
 - `docs/consumer_profile_ontology/EXTENDED_50K_WITH_BOUNDARIES.md`
@@ -136,12 +139,15 @@ This manifest is generated from `git ls-files` plus the coverage generator/outpu
 - `include/baseline.h`
 - `include/bg_learn.h`
 - `include/chronicle.h`
+- `include/cluster.h`
 - `include/codex_app_directory.h`
 - `include/codex_cache.h`
+- `include/compute.h`
 - `include/config.h`
 - `include/connector.h`
 - `include/control_flow.h`
 - `include/coroutine.h`
+- `include/cost_budget.h`
 - `include/cost_model.h`
 - `include/crypto.h`
 - `include/dcr.h`
@@ -149,8 +155,11 @@ This manifest is generated from `git ls-files` plus the coverage generator/outpu
 - `include/dsco_accel.h`
 - `include/dsco_crypto.h`
 - `include/dsco_dht.h`
+- `include/dsco_ds.h`
 - `include/dsco_mlx.h`
 - `include/dsco_pool.h`
+- `include/dsco_rt.h`
+- `include/dsco_runtime.h`
 - `include/embedded_data_registry.h`
 - `include/env_config.h`
 - `include/env_guard.h`
@@ -195,6 +204,7 @@ This manifest is generated from `git ls-files` plus the coverage generator/outpu
 - `include/orchestrator.h`
 - `include/output_guard.h`
 - `include/peer_bootstrap.h`
+- `include/peer_registry.h`
 - `include/pets.h`
 - `include/pheromone.h`
 - `include/pipeline.h`
@@ -210,7 +220,9 @@ This manifest is generated from `git ls-files` plus the coverage generator/outpu
 - `include/provider.h`
 - `include/provider_pool.h`
 - `include/provider_profiles.h`
+- `include/realtime.h`
 - `include/recovery.h`
+- `include/remote_cli.h`
 - `include/router.h`
 - `include/rsi_curriculum.h`
 - `include/scheduler.h`
@@ -222,6 +234,7 @@ This manifest is generated from `git ls-files` plus the coverage generator/outpu
 - `include/setup.h`
 - `include/shadeexpr.h`
 - `include/simd.h`
+- `include/spec_exec.h`
 - `include/startup.h`
 - `include/stateful_atoms.h`
 - `include/structured_process.h`
@@ -244,6 +257,7 @@ This manifest is generated from `git ls-files` plus the coverage generator/outpu
 - `include/vecstore_metal.h`
 - `include/vfs.h`
 - `include/vm.h`
+- `include/waiter.h`
 - `include/wasm_core.h`
 - `include/watchdog.h`
 - `include/workspace.h`
@@ -257,9 +271,12 @@ This manifest is generated from `git ls-files` plus the coverage generator/outpu
 - `src/avian.c`
 - `src/baseline.c`
 - `src/bg_learn.c`
+- `src/bus_cli.c`
 - `src/chronicle.c`
+- `src/cluster.c`
 - `src/codex_app_directory.c`
 - `src/codex_cache.c`
+- `src/compute.c`
 - `src/connector.c`
 - `src/control_flow.c`
 - `src/cost_model.c`
@@ -268,8 +285,10 @@ This manifest is generated from `git ls-files` plus the coverage generator/outpu
 - `src/dht_impl.c`
 - `src/dsco_accel.c`
 - `src/dsco_dht.c`
+- `src/dsco_ds.c`
 - `src/dsco_mlx.c`
 - `src/dsco_pool.c`
+- `src/dsco_rt.c`
 - `src/env_config.c`
 - `src/env_guard.c`
 - `src/error.c`
@@ -319,6 +338,7 @@ This manifest is generated from `git ls-files` plus the coverage generator/outpu
 - `src/orchestrator.c`
 - `src/output_guard.c`
 - `src/peer_bootstrap.c`
+- `src/peer_registry.c`
 - `src/pets.c`
 - `src/pheromone.c`
 - `src/pipeline.c`
@@ -334,7 +354,9 @@ This manifest is generated from `git ls-files` plus the coverage generator/outpu
 - `src/provider.c`
 - `src/provider_pool.c`
 - `src/provider_profiles.c`
+- `src/realtime.c`
 - `src/recovery.c`
+- `src/remote_cli.c`
 - `src/router.c`
 - `src/rsi_curriculum.c`
 - `src/scheduler.c`
@@ -345,6 +367,7 @@ This manifest is generated from `git ls-files` plus the coverage generator/outpu
 - `src/session_memory.c`
 - `src/setup.c`
 - `src/shadeexpr.c`
+- `src/spec_exec.c`
 - `src/startup.c`
 - `src/stateful_atoms.c`
 - `src/structured_process.c`
@@ -366,6 +389,7 @@ This manifest is generated from `git ls-files` plus the coverage generator/outpu
 - `src/vecstore_metal.metal`
 - `src/vfs.c`
 - `src/vm.c`
+- `src/waiter.c`
 - `src/wasm_core.c`
 - `src/watchdog.c`
 - `src/workspace.c`
@@ -396,11 +420,13 @@ This manifest is generated from `git ls-files` plus the coverage generator/outpu
 - `tests/test_stateful_atoms.c`
 - `tests/test_tui_snapshot.c`
 - `tests/test_tui_theme_snapshot.c`
+- `tests/test_waiter.c`
 - `tests/test_wasm_core.c`
 - `tests/test_web_server.py`
 
 ### Scripts and tooling
 
+- `scripts/analyze_locks.sh`
 - `scripts/bake_data.sh`
 - `scripts/bench_sota.py`
 - `scripts/bootstrap.sh`
@@ -422,6 +448,8 @@ This manifest is generated from `git ls-files` plus the coverage generator/outpu
 - `scripts/dev_fast.sh`
 - `scripts/dsco.gdbinit`
 - `scripts/dsco.lldbinit`
+- `scripts/dsco_perf_multiturn.py`
+- `scripts/dsco_perf_rollout.py`
 - `scripts/dsco_profile.py`
 - `scripts/dsco_run_watch.py`
 - `scripts/elf_symbol_graph_audit.py`
@@ -436,6 +464,7 @@ This manifest is generated from `git ls-files` plus the coverage generator/outpu
 - `scripts/index_constants_env.py`
 - `scripts/live_face_avatar.sh`
 - `scripts/mine_book_pages.py`
+- `scripts/perf_diagram_suite.py`
 - `scripts/provider_metadata_audit.py`
 - `scripts/qualify_provisioned_dsco.sh`
 - `scripts/release_hardened.py`
@@ -663,6 +692,8 @@ This manifest is generated from `git ls-files` plus the coverage generator/outpu
 
 - `doctrine/MEMORY.md`
 - `doctrine/MEMORY_UPGRADE_2026-06-28.md`
+- `examples/dspy_via_dsco.py`
+- `proposals/LOOP-F1-F4/PATCHSET.md`
 - `proposals/PRAXIS-v1/GATE.md`
 - `proposals/PRAXIS-v1/PROPOSAL.md`
 - `schemas/consumer_profile_ontology/activation_request.schema.json`

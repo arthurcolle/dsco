@@ -19,38 +19,38 @@ static double exec_now_ms(void) {
 
 const char *execution_effect_name(execution_effect_t effect) {
     switch (effect) {
-    case EXEC_EFFECT_READ:
-        return "read";
-    case EXEC_EFFECT_WRITE_FILE:
-        return "write_file";
-    case EXEC_EFFECT_SHELL:
-        return "shell";
-    case EXEC_EFFECT_NETWORK:
-        return "network";
-    case EXEC_EFFECT_PROCESS:
-        return "process";
-    case EXEC_EFFECT_EXTERNAL_WRITE:
-        return "external_write";
-    case EXEC_EFFECT_RUNTIME_CONTROL:
-        return "runtime_control";
-    case EXEC_EFFECT_UNKNOWN:
-    default:
-        return "unknown";
+        case EXEC_EFFECT_READ:
+            return "read";
+        case EXEC_EFFECT_WRITE_FILE:
+            return "write_file";
+        case EXEC_EFFECT_SHELL:
+            return "shell";
+        case EXEC_EFFECT_NETWORK:
+            return "network";
+        case EXEC_EFFECT_PROCESS:
+            return "process";
+        case EXEC_EFFECT_EXTERNAL_WRITE:
+            return "external_write";
+        case EXEC_EFFECT_RUNTIME_CONTROL:
+            return "runtime_control";
+        case EXEC_EFFECT_UNKNOWN:
+        default:
+            return "unknown";
     }
 }
 
 const char *execution_status_name(execution_status_t status) {
     switch (status) {
-    case EXEC_STATUS_PENDING:
-        return "pending";
-    case EXEC_STATUS_DENIED:
-        return "denied";
-    case EXEC_STATUS_EXECUTED:
-        return "executed";
-    case EXEC_STATUS_FAILED:
-        return "failed";
-    default:
-        return "unknown";
+        case EXEC_STATUS_PENDING:
+            return "pending";
+        case EXEC_STATUS_DENIED:
+            return "denied";
+        case EXEC_STATUS_EXECUTED:
+            return "executed";
+        case EXEC_STATUS_FAILED:
+            return "failed";
+        default:
+            return "unknown";
     }
 }
 
@@ -59,8 +59,7 @@ static void receipt_init(execution_receipt_t *r, const execution_intent_t *inten
     uuid_v4(r->execution_id);
     snprintf(r->tool_name, sizeof(r->tool_name), "%s",
              intent && intent->tool_name[0] ? intent->tool_name : "");
-    snprintf(r->tier, sizeof(r->tier), "%s",
-             intent && intent->tier[0] ? intent->tier : "standard");
+    snprintf(r->tier, sizeof(r->tier), "%s", intent && intent->tier[0] ? intent->tier : "standard");
     r->effect = intent ? intent->effect : EXEC_EFFECT_UNKNOWN;
     r->status = EXEC_STATUS_PENDING;
 }
@@ -103,9 +102,8 @@ static void receipt_log(const execution_receipt_t *r) {
     jbuf_free(&detail);
 }
 
-static bool deny_receipt(execution_receipt_t *r, execution_receipt_t *out,
-                         char *result, size_t result_len,
-                         const char *pass, const char *reason) {
+static bool deny_receipt(execution_receipt_t *r, execution_receipt_t *out, char *result,
+                         size_t result_len, const char *pass, const char *reason) {
     r->status = EXEC_STATUS_DENIED;
     r->allowed = false;
     snprintf(r->denied_pass, sizeof(r->denied_pass), "%s", pass ? pass : "preflight");
@@ -130,9 +128,7 @@ static bool deny_receipt(execution_receipt_t *r, execution_receipt_t *out,
     return false;
 }
 
-bool execution_submit(const execution_intent_t *intent,
-                      execution_receipt_t *receipt,
-                      char *result,
+bool execution_submit(const execution_intent_t *intent, execution_receipt_t *receipt, char *result,
                       size_t result_len) {
     execution_receipt_t r;
     receipt_init(&r, intent);
@@ -140,8 +136,7 @@ bool execution_submit(const execution_intent_t *intent,
 
     if (!intent || !intent->tool_name[0] || !intent->execute) {
         r.elapsed_ms = exec_now_ms() - t0;
-        return deny_receipt(&r, receipt, result, result_len, "intent",
-                            "invalid execution intent");
+        return deny_receipt(&r, receipt, result, result_len, "intent", "invalid execution intent");
     }
 
     char err[256];
@@ -154,11 +149,8 @@ bool execution_submit(const execution_intent_t *intent,
     r.allowed = true;
     r.charged_gsu = intent->estimated_gsu;
 
-    bool ok = intent->execute(intent->tool_name,
-                              intent->input_json ? intent->input_json : "{}",
-                              intent->tier[0] ? intent->tier : "standard",
-                              result,
-                              result_len);
+    bool ok = intent->execute(intent->tool_name, intent->input_json ? intent->input_json : "{}",
+                              intent->tier[0] ? intent->tier : "standard", result, result_len);
     r.executed = true;
     r.verified = ok;
     r.status = ok ? EXEC_STATUS_EXECUTED : EXEC_STATUS_FAILED;

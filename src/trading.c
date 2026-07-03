@@ -1215,9 +1215,11 @@ static bool session_preflight(const char *ticker, int count, double order_usd,
         g_session_trades.daily_date = today;
     }
 
-    double env_session = dsco_env_double("DSCO_TRADING_SESSION_MAX", SESSION_MAX_USD, 0.0, 1000000000.0);
+    double env_session =
+        dsco_env_double("DSCO_TRADING_SESSION_MAX", SESSION_MAX_USD, 0.0, 1000000000.0);
     double env_daily = dsco_env_double("DSCO_TRADING_DAILY_MAX", DAILY_MAX_USD, 0.0, 1000000000.0);
-    double env_per_event = dsco_env_double("DSCO_TRADING_MAX_PER_EVENT", MAX_USD_PER_EVENT, 0.0, 1000000000.0);
+    double env_per_event =
+        dsco_env_double("DSCO_TRADING_MAX_PER_EVENT", MAX_USD_PER_EVENT, 0.0, 1000000000.0);
     double env_per_event_multi = env_per_event * 2.0;
 
     /* 1. Session cap */

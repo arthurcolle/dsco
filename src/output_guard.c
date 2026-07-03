@@ -430,11 +430,11 @@ bool output_guard_init(void) {
         dsco_env_int("DSCO_OUTPUT_REPEAT_LIMIT", OG_DEFAULT_REPEAT_LIMIT, 1, 1000000);
     g_og.repeat_min_bytes = dsco_env_size("DSCO_OUTPUT_REPEAT_MIN_BYTES",
                                           OG_DEFAULT_REPEAT_MIN_BYTES, 1, (size_t)1 << 30);
-    g_og.motif_min_bytes = dsco_env_size("DSCO_OUTPUT_MOTIF_MIN_BYTES",
-                                         OG_DEFAULT_REPEAT_MIN_BYTES, 256, (size_t)1 << 30);
+    g_og.motif_min_bytes = dsco_env_size("DSCO_OUTPUT_MOTIF_MIN_BYTES", OG_DEFAULT_REPEAT_MIN_BYTES,
+                                         256, (size_t)1 << 30);
     g_og.motif_skip_path_like = dsco_env_bool("DSCO_OUTPUT_MOTIF_SKIP_PATHLIKE", true);
-    g_og.max_total_bytes = dsco_env_size("DSCO_OUTPUT_MAX_BYTES", OG_DEFAULT_MAX_TOTAL_BYTES,
-                                         1024, (size_t)1 << 32);
+    g_og.max_total_bytes =
+        dsco_env_size("DSCO_OUTPUT_MAX_BYTES", OG_DEFAULT_MAX_TOTAL_BYTES, 1024, (size_t)1 << 32);
     g_og.tripped = 0;
 
     bool out_ok = install_stream(&g_og.streams[0], STDOUT_FILENO, "stdout");

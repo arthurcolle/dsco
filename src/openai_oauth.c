@@ -21,13 +21,13 @@
 #include <unistd.h>
 
 /* ── OAuth endpoint configuration (Codex CLI public client) ─────────────── */
-#define OAI_OAUTH_ISSUER       "https://auth.openai.com"
-#define OAI_OAUTH_AUTHORIZE    "https://auth.openai.com/oauth/authorize"
-#define OAI_OAUTH_TOKEN_URL    "https://auth.openai.com/oauth/token"
-#define OAI_OAUTH_CLIENT_ID    "app_EMoamEEZ73f0CkXaXp7hrann"
-#define OAI_OAUTH_REDIRECT     "http://localhost:1455/auth/callback"
-#define OAI_OAUTH_PORT         1455
-#define OAI_OAUTH_SCOPE        "openid profile email offline_access"
+#define OAI_OAUTH_ISSUER "https://auth.openai.com"
+#define OAI_OAUTH_AUTHORIZE "https://auth.openai.com/oauth/authorize"
+#define OAI_OAUTH_TOKEN_URL "https://auth.openai.com/oauth/token"
+#define OAI_OAUTH_CLIENT_ID "app_EMoamEEZ73f0CkXaXp7hrann"
+#define OAI_OAUTH_REDIRECT "http://localhost:1455/auth/callback"
+#define OAI_OAUTH_PORT 1455
+#define OAI_OAUTH_SCOPE "openid profile email offline_access"
 #define OAI_OAUTH_EXPIRY_BUFFER_MS (5LL * 60LL * 1000LL)
 
 static const char *oai_env(const char *name, const char *fallback) {
@@ -110,7 +110,12 @@ static void oai_pkce_challenge(const char *verifier, char out[64]) {
     sha256_final(&ctx, hash);
     base64url_encode(hash, sizeof(hash), out, 64);
     /* RFC 7636 §4.2: code_challenge MUST be BASE64URL with NO padding. */
-    for (char *p = out; *p; p++) { if (*p == '=') { *p = '\0'; break; } }
+    for (char *p = out; *p; p++) {
+        if (*p == '=') {
+            *p = '\0';
+            break;
+        }
+    }
 }
 
 /* ── id_token (JWT) account-id extraction ───────────────────────────────── */
@@ -359,8 +364,7 @@ bool openai_oauth_refresh(openai_oauth_bundle_t *bundle) {
     char *enc_client = esc ? curl_easy_escape(esc, client_id, 0) : NULL;
     char *enc_scope = esc ? curl_easy_escape(esc, OAI_OAUTH_SCOPE, 0) : NULL;
     char form[16384];
-    snprintf(form, sizeof(form),
-             "grant_type=refresh_token&refresh_token=%s&client_id=%s&scope=%s",
+    snprintf(form, sizeof(form), "grant_type=refresh_token&refresh_token=%s&client_id=%s&scope=%s",
              enc_refresh ? enc_refresh : "", enc_client ? enc_client : "",
              enc_scope ? enc_scope : "");
     if (enc_refresh)
@@ -432,14 +436,14 @@ const char *openai_oauth_source_name(void) {
     if (!openai_oauth_load(&b))
         return "missing";
     switch (b.source) {
-    case OPENAI_OAUTH_SOURCE_ENV:
-        return "env";
-    case OPENAI_OAUTH_SOURCE_DSCO_CACHE:
-        return "dsco-cache";
-    case OPENAI_OAUTH_SOURCE_CODEX:
-        return "codex";
-    default:
-        return "missing";
+        case OPENAI_OAUTH_SOURCE_ENV:
+            return "env";
+        case OPENAI_OAUTH_SOURCE_DSCO_CACHE:
+            return "dsco-cache";
+        case OPENAI_OAUTH_SOURCE_CODEX:
+            return "codex";
+        default:
+            return "missing";
     }
 }
 
@@ -501,7 +505,8 @@ static char *oai_wait_for_callback(int listen_fd, char *state_out, size_t state_
         char first_line[8192];
         if (line_end) {
             size_t ll = (size_t)(line_end - req);
-            if (ll >= sizeof(first_line)) ll = sizeof(first_line) - 1;
+            if (ll >= sizeof(first_line))
+                ll = sizeof(first_line) - 1;
             memcpy(first_line, req, ll);
             first_line[ll] = '\0';
         } else {
@@ -563,7 +568,12 @@ int openai_oauth_login(void) {
     base64url_encode(state_raw, sizeof(state_raw), state, sizeof(state));
     /* RFC 7636 / OAuth state: strip base64url padding so the value round-trips
      * through curl_easy_escape() and back without percent-encoding mismatch. */
-    for (char *p = state; *p; p++) { if (*p == '=') { *p = '\0'; break; } }
+    for (char *p = state; *p; p++) {
+        if (*p == '=') {
+            *p = '\0';
+            break;
+        }
+    }
 
     /* 2. loopback listener on 127.0.0.1:1455 */
     int listen_fd = socket(AF_INET, SOCK_STREAM, 0);
@@ -633,18 +643,15 @@ int openai_oauth_login(void) {
          * that first before giving up. */
         openai_oauth_bundle_t existing;
         if (openai_oauth_load(&existing) && existing.access_token[0]) {
-            static const char *src_names[] = {"missing","env","dsco-cache","codex"};
+            static const char *src_names[] = {"missing", "env", "dsco-cache", "codex"};
             const char *sname = (existing.source < 4) ? src_names[existing.source] : "?";
-            fprintf(stderr,
-                    "  \033[32m✓ Signed in\033[0m (token loaded from %s).\n\n",
-                    sname);
+            fprintf(stderr, "  \033[32m✓ Signed in\033[0m (token loaded from %s).\n\n", sname);
             free(code);
             return 0;
         }
         /* No existing token — warn but proceed with the exchange anyway;
          * the PKCE verifier still protects the code. */
-        fprintf(stderr,
-                "dsco: login: state mismatch — proceeding with token exchange.\n");
+        fprintf(stderr, "dsco: login: state mismatch — proceeding with token exchange.\n");
     }
 
     /* 5. exchange code (urldecode the code first) */
@@ -687,8 +694,8 @@ int openai_oauth_login(void) {
     long http_code = 0;
     char *resp = oai_http_post_form(token_url, form, &http_code);
     if (!resp || http_code != 200) {
-        fprintf(stderr, "dsco: token exchange failed (HTTP %ld)%s%s\n", http_code,
-                resp ? ": " : "", resp ? resp : "");
+        fprintf(stderr, "dsco: token exchange failed (HTTP %ld)%s%s\n", http_code, resp ? ": " : "",
+                resp ? resp : "");
         free(resp);
         return -1;
     }

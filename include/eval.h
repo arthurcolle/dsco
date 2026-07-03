@@ -27,19 +27,19 @@
 #define EVAL_MAX_VARS 64
 
 typedef struct {
-    char   name[64];
+    char name[64];
     double value;
 } eval_var_t;
 
 typedef struct {
-    eval_var_t  vars[EVAL_MAX_VARS];
-    int         var_count;
+    eval_var_t vars[EVAL_MAX_VARS];
+    int var_count;
     const char *input;
     const char *pos;
-    char        error[256];
-    bool        has_error;
-    int         base;       /* output base: 10, 16, 8, 2 */
-    int         depth;      /* recursion depth counter */
+    char error[256];
+    bool has_error;
+    int base;  /* output base: 10, 16, 8, 2 */
+    int depth; /* recursion depth counter */
 } eval_ctx_t;
 
 /* Initialize evaluator context */
@@ -66,16 +66,16 @@ double eval_get_var(eval_ctx_t *ctx, const char *name);
 #define BIGINT_MAX_DIGITS 1024
 
 typedef struct {
-    int  digits[BIGINT_MAX_DIGITS]; /* stored little-endian, base 10 */
-    int  len;
+    int digits[BIGINT_MAX_DIGITS]; /* stored little-endian, base 10 */
+    int len;
     bool negative;
 } bigint_t;
 
-void    bigint_from_str(bigint_t *b, const char *s);
-void    bigint_to_str(const bigint_t *b, char *s, size_t len);
-void    bigint_add(const bigint_t *a, const bigint_t *b, bigint_t *result);
-void    bigint_mul(const bigint_t *a, const bigint_t *b, bigint_t *result);
-void    bigint_factorial(int n, bigint_t *result);
-bool    bigint_is_prime(const bigint_t *n);
+void bigint_from_str(bigint_t *b, const char *s);
+void bigint_to_str(const bigint_t *b, char *s, size_t len);
+void bigint_add(const bigint_t *a, const bigint_t *b, bigint_t *result);
+void bigint_mul(const bigint_t *a, const bigint_t *b, bigint_t *result);
+void bigint_factorial(int n, bigint_t *result);
+bool bigint_is_prime(const bigint_t *n);
 
 #endif

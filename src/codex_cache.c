@@ -362,8 +362,7 @@ const char *codex_cache_default_model(void) {
             const codex_model_t *m = &cat->models[i];
             if (!model_visible_by_default(m))
                 continue;
-            if (!best || best->priority <= 0 ||
-                (m->priority > 0 && m->priority < best->priority))
+            if (!best || best->priority <= 0 || (m->priority > 0 && m->priority < best->priority))
                 best = m;
         }
         if (best && best->info.model_id && best->info.model_id[0])
@@ -390,8 +389,7 @@ bool codex_cache_model_supported(const char *model) {
 
     /* Fallback for first-run startup before the detached catalog job has
      * published. These are Codex-catalog models in current CLI builds. */
-    return strcmp(bare, "gpt-5.5") == 0 ||
-           strcmp(bare, "gpt-5.4") == 0 ||
+    return strcmp(bare, "gpt-5.5") == 0 || strcmp(bare, "gpt-5.4") == 0 ||
            strcmp(bare, "gpt-5.4-mini") == 0;
 }
 

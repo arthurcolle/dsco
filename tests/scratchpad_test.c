@@ -12,8 +12,7 @@
 #include <stdbool.h>
 
 /* Forward declarations from tools.c */
-extern bool tools_execute(const char *tool_name, const char *input_json,
-                          char *result, size_t rlen);
+extern bool tools_execute(const char *tool_name, const char *input_json, char *result, size_t rlen);
 
 static int passes = 0, fails = 0;
 
@@ -36,17 +35,19 @@ int main(void) {
     tools_execute("scratchpad", "{\"action\":\"clear\"}", (char[256]){0}, 256);
 
     printf("[1] Write via action+key+value\n");
-    check("write",  "{\"action\":\"write\",\"key\":\"alpha\",\"value\":\"hello\"}", "\"op\":\"created\"");
-    check("update", "{\"action\":\"write\",\"key\":\"alpha\",\"value\":\"world\"}", "\"op\":\"updated\"");
+    check("write", "{\"action\":\"write\",\"key\":\"alpha\",\"value\":\"hello\"}",
+          "\"op\":\"created\"");
+    check("update", "{\"action\":\"write\",\"key\":\"alpha\",\"value\":\"world\"}",
+          "\"op\":\"updated\"");
 
     printf("\n[2] Read via action+key\n");
-    check("read",   "{\"action\":\"read\",\"key\":\"alpha\"}", "\"value\":\"world\"");
+    check("read", "{\"action\":\"read\",\"key\":\"alpha\"}", "\"value\":\"world\"");
 
     printf("\n[3] Write via content=key=value\n");
     check("write_content", "{\"action\":\"write\",\"content\":\"beta=42\"}", "\"op\":\"created\"");
 
     printf("\n[4] Read via content=key\n");
-    check("read_content",  "{\"action\":\"read\",\"content\":\"beta\"}", "\"value\":\"42\"");
+    check("read_content", "{\"action\":\"read\",\"content\":\"beta\"}", "\"value\":\"42\"");
 
     printf("\n[5] List\n");
     check("list", "{\"action\":\"list\"}", "\"entries\":2");
@@ -55,7 +56,8 @@ int main(void) {
     check("delete", "{\"action\":\"delete\",\"key\":\"alpha\"}", "\"op\":\"deleted\"");
 
     printf("\n[7] Legacy op=set/get\n");
-    check("legacy_set", "{\"op\":\"set\",\"key\":\"gamma\",\"value\":\"99\"}", "\"op\":\"created\"");
+    check("legacy_set", "{\"op\":\"set\",\"key\":\"gamma\",\"value\":\"99\"}",
+          "\"op\":\"created\"");
     check("legacy_get", "{\"op\":\"get\",\"key\":\"gamma\"}", "\"value\":\"99\"");
 
     printf("\n[8] Clear\n");

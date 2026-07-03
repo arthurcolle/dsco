@@ -14,9 +14,9 @@ int gsl_cheb_init(gsl_cheb_series *cs, const gsl_function *func, const double a,
 double gsl_cheb_eval(const gsl_cheb_series *cs, const double x);
 int gsl_cheb_eval_err(const gsl_cheb_series *cs, const double x, double *result, double *abserr);
 double gsl_cheb_eval_n(const gsl_cheb_series *cs, const size_t n, const double x);
-int gsl_cheb_eval_n_err(const gsl_cheb_series *cs, const size_t n, const double x,
-                        double *result, double *abserr);
-double gsl_cheb_eval_err_mode(const gsl_cheb_series *cs, const double x,
-                              gsl_mode_t mode, double *result, double *abserr);
+int gsl_cheb_eval_n_err(const gsl_cheb_series *cs, const size_t n, const double x, double *result,
+                        double *abserr);
+double gsl_cheb_eval_err_mode(const gsl_cheb_series *cs, const double x, gsl_mode_t mode,
+                              double *result, double *abserr);
 
 #endif /* __GSL_CHEBYSHEV_H__ */

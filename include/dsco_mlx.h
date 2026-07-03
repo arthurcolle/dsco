@@ -21,28 +21,26 @@
  *  on the MLX source tree.
  * ────────────────────────────────────────────────────────────────────────── */
 
-#define DSCO_MLX_OK            0
-#define DSCO_MLX_UNAVAILABLE  -1
-#define DSCO_MLX_ERR          -2
+#define DSCO_MLX_OK 0
+#define DSCO_MLX_UNAVAILABLE -1
+#define DSCO_MLX_ERR -2
 
 /* ── Lifecycle ─────────────────────────────────────────────────────────── */
-int  dsco_mlx_init(void);            /* dlopen + dlsym; returns 0 on success */
+int dsco_mlx_init(void); /* dlopen + dlsym; returns 0 on success */
 void dsco_mlx_shutdown(void);
 bool dsco_mlx_is_available(void);
-const char *dsco_mlx_library_path(void);  /* path of loaded dylib, or NULL */
-const char *dsco_mlx_version(void);       /* MLX version string, or "unknown" */
+const char *dsco_mlx_library_path(void); /* path of loaded dylib, or NULL */
+const char *dsco_mlx_version(void);      /* MLX version string, or "unknown" */
 
 /* ── Convenience routes — these are what the rest of dsco actually calls.
  *    They fall back to CPU implementations when MLX is absent. ─────────── */
 
 /* Cosine similarity of q[dim] against cands[n*dim]. Returns DSCO_MLX_OK
  * iff MLX path was used. */
-int dsco_mlx_cosine_batch(const float *q, int dim,
-                           const float *cands, int n, float *out);
+int dsco_mlx_cosine_batch(const float *q, int dim, const float *cands, int n, float *out);
 
 /* Matrix multiply: C[m,k] = A[m,n] * B[n,k]. Row-major. */
-int dsco_mlx_matmul(const float *A, int m, int n,
-                     const float *B, int k, float *C);
+int dsco_mlx_matmul(const float *A, int m, int n, const float *B, int k, float *C);
 
 /* In-place softmax over last dim of x[batch, n]. */
 int dsco_mlx_softmax(float *x, int batch, int n);

@@ -58,8 +58,7 @@ bool se_store_available(void);
  * is running on the authentic machine without revealing the private key.
  * sig_buf must be at least 72 bytes (DER-encoded ECDSA sig).
  * Returns actual sig length, or -1 on error. */
-int  se_store_sign(const uint8_t *data, size_t data_len,
-                   uint8_t *sig_buf, size_t sig_buf_len);
+int se_store_sign(const uint8_t *data, size_t data_len, uint8_t *sig_buf, size_t sig_buf_len);
 
 /* Get the SE public key in uncompressed X9.62 form (04 || x || y = 65 bytes).
  * This is the node's hardware identity — can be published to peers. */

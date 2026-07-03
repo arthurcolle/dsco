@@ -72,9 +72,12 @@ static const struct {
                            "rollback readiness, provenance, attestation, and lease evidence"},
     {HARDCODED_MUST_NEVER, "Treat self-generated traces as held-out evidence for promotion"},
     {HARDCODED_MUST_NEVER,
-     "Automatically execute commands that may stop, restart, replace, or terminate the active agent runtime, shell, host, VM, container, service, or session without explicit user-run confirmation and recovery steps"},
+     "Automatically execute commands that may stop, restart, replace, or terminate the active "
+     "agent runtime, shell, host, VM, container, service, or session without explicit user-run "
+     "confirmation and recovery steps"},
     {HARDCODED_MUST_NEVER,
-     "Force-kill arbitrary or unverified PID lists; stop owning services or named tasks first, and require explicit confirmation before targeted force termination"},
+     "Force-kill arbitrary or unverified PID lists; stop owning services or named tasks first, and "
+     "require explicit confirmation before targeted force termination"},
 };
 
 #define DEFAULT_HARDCODED_COUNT (sizeof(DEFAULT_HARDCODED) / sizeof(DEFAULT_HARDCODED[0]))
@@ -349,8 +352,8 @@ bool governance_charge_gsu(governance_engine_t *g, const char *agent_id, double 
     /* INTEGRITY: a charge must never be negative (would be a covert refund) and
      * must be finite — a NaN/inf charge would corrupt the budget invariant. */
     DSCO_REQUIRE(amount >= 0.0);
-    DSCO_REQUIRE(amount == amount);          /* reject NaN */
-    DSCO_REQUIRE(amount < 1e12);             /* reject inf / absurd charge */
+    DSCO_REQUIRE(amount == amount); /* reject NaN */
+    DSCO_REQUIRE(amount < 1e12);    /* reject inf / absurd charge */
     agent_envelope_t *a = find_agent(g, agent_id);
     if (!a)
         return false;

@@ -6,7 +6,8 @@
 
 gsl_histogram *gsl_histogram_alloc(size_t n) {
     gsl_histogram *h = malloc(sizeof(gsl_histogram));
-    if (!h) return NULL;
+    if (!h)
+        return NULL;
     h->n = n;
     h->range = malloc((n + 1) * sizeof(double));
     h->bin = calloc(n, sizeof(double));
@@ -22,7 +23,8 @@ void gsl_histogram_free(gsl_histogram *h) {
 }
 
 int gsl_histogram_set_ranges_uniform(gsl_histogram *h, double xmin, double xmax) {
-    if (xmin >= xmax || h->n == 0) return -1;
+    if (xmin >= xmax || h->n == 0)
+        return -1;
     double dx = (xmax - xmin) / h->n;
     for (size_t i = 0; i <= h->n; i++) {
         h->range[i] = xmin + i * dx;

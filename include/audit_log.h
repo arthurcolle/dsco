@@ -40,15 +40,15 @@ bool audit_log_verify(audit_log_t *al, int64_t *bad_seq);
 
 /* Iterate entries from seq_from to seq_to (inclusive, -1 = end).
  * Calls cb(seq, ts, tag, msg, ctx) for each.  Stops if cb returns false. */
-typedef bool (*audit_log_iter_fn)(int64_t seq, int64_t ts,
-                                  const char *tag, const char *msg, void *ctx);
-void audit_log_iter(audit_log_t *al, int64_t seq_from, int64_t seq_to,
-                    audit_log_iter_fn cb, void *ctx);
+typedef bool (*audit_log_iter_fn)(int64_t seq, int64_t ts, const char *tag, const char *msg,
+                                  void *ctx);
+void audit_log_iter(audit_log_t *al, int64_t seq_from, int64_t seq_to, audit_log_iter_fn cb,
+                    void *ctx);
 
 void audit_log_close(audit_log_t *al);
 
 /* Global convenience instance — init'd by audit_log_global_init(). */
-void    audit_log_global_init(const char *path);
+void audit_log_global_init(const char *path);
 int64_t audit_log(const char *tag, const char *msg);
 
 #endif /* DSCO_AUDIT_LOG_H */

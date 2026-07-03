@@ -607,12 +607,12 @@ const char *dsco_route_by_task(dsco_task_type_t task) {
 
 /* Shared scan state for catalog selection passes. */
 typedef struct {
-    const char *best_id;   /* points into catalog (process-lifetime stable) */
-    double      best_price;
-    int         best_ctx;
-    double      budget;    /* max $/1M input (0 = no cap) */
-    int         min_ctx;   /* min context window (0 = any) */
-    const char *exclude;   /* slug to skip (failover) */
+    const char *best_id; /* points into catalog (process-lifetime stable) */
+    double best_price;
+    int best_ctx;
+    double budget;       /* max $/1M input (0 = no cap) */
+    int min_ctx;         /* min context window (0 = any) */
+    const char *exclude; /* slug to skip (failover) */
 } route_scan_t;
 
 /* Build the "openrouter/" prefixed form of a slug into a static ring buffer so
@@ -734,10 +734,10 @@ const char *dsco_route_optimal(double budget_per_1m, int min_ctx) {
  * the failed model's context window, sorted by price ascending. */
 typedef struct {
     char (*out)[128];
-    int    max;
-    int    count;
-    int    min_ctx;          /* require >= this context window */
-    const char *exclude;     /* the failed model */
+    int max;
+    int count;
+    int min_ctx;         /* require >= this context window */
+    const char *exclude; /* the failed model */
     /* parallel price array for insertion sort */
     double prices[32];
 } failover_acc_t;
@@ -787,8 +787,7 @@ static void scan_failover(const or_model_view_t *m, void *ud) {
     (void)pos;
 }
 
-int dsco_route_failover_dynamic(const char *failed_model, char out_models[][128],
-                                int max_models) {
+int dsco_route_failover_dynamic(const char *failed_model, char out_models[][128], int max_models) {
     if (!out_models || max_models <= 0)
         return 0;
     for (int i = 0; i < max_models; i++)

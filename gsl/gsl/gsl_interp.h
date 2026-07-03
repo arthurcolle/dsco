@@ -26,12 +26,12 @@ typedef struct {
     unsigned int min_size;
     void *(*alloc)(size_t size);
     int (*init)(void *, const double xa[], const double ya[], size_t size);
-    int (*eval)(const void *, const double xa[], const double ya[], size_t size,
-                double x, gsl_interp_accel *a, double *y);
-    int (*eval_deriv)(const void *, const double xa[], const double ya[], size_t size,
-                      double x, gsl_interp_accel *a, double *dydx);
-    int (*eval_deriv2)(const void *, const double xa[], const double ya[], size_t size,
-                       double x, gsl_interp_accel *a, double *d2ydx2);
+    int (*eval)(const void *, const double xa[], const double ya[], size_t size, double x,
+                gsl_interp_accel *a, double *y);
+    int (*eval_deriv)(const void *, const double xa[], const double ya[], size_t size, double x,
+                      gsl_interp_accel *a, double *dydx);
+    int (*eval_deriv2)(const void *, const double xa[], const double ya[], size_t size, double x,
+                       gsl_interp_accel *a, double *d2ydx2);
     int (*eval_integ)(const void *, const double xa[], const double ya[], size_t size,
                       gsl_interp_accel *a, double a, double b, double *result);
     void (*free)(void *);
@@ -49,20 +49,20 @@ int gsl_interp_eval(const gsl_interp *interp, const double xa[], const double ya
                     gsl_interp_accel *a, double *y);
 int gsl_interp_eval_e(const gsl_interp *interp, const double xa[], const double ya[], double x,
                       gsl_interp_accel *a, double *y);
-double gsl_interp_eval_safe(const gsl_interp *interp, const double xa[], const double ya[], double x,
-                            gsl_interp_accel *a);
+double gsl_interp_eval_safe(const gsl_interp *interp, const double xa[], const double ya[],
+                            double x, gsl_interp_accel *a);
 int gsl_interp_eval_deriv(const gsl_interp *interp, const double xa[], const double ya[], double x,
                           gsl_interp_accel *a, double *dydx);
-int gsl_interp_eval_deriv_e(const gsl_interp *interp, const double xa[], const double ya[], double x,
-                            gsl_interp_accel *a, double *dydx);
+int gsl_interp_eval_deriv_e(const gsl_interp *interp, const double xa[], const double ya[],
+                            double x, gsl_interp_accel *a, double *dydx);
 int gsl_interp_eval_deriv2(const gsl_interp *interp, const double xa[], const double ya[], double x,
                            gsl_interp_accel *a, double *d2ydx2);
-int gsl_interp_eval_deriv2_e(const gsl_interp *interp, const double xa[], const double ya[], double x,
-                             gsl_interp_accel *a, double *d2ydx2);
-int gsl_interp_eval_integ(const gsl_interp *interp, const double xa[], const double ya[], double a, double b,
-                          gsl_interp_accel *acc, double *result);
-int gsl_interp_eval_integ_e(const gsl_interp *interp, const double xa[], const double ya[], double a, double b,
-                            gsl_interp_accel *acc, double *result);
+int gsl_interp_eval_deriv2_e(const gsl_interp *interp, const double xa[], const double ya[],
+                             double x, gsl_interp_accel *a, double *d2ydx2);
+int gsl_interp_eval_integ(const gsl_interp *interp, const double xa[], const double ya[], double a,
+                          double b, gsl_interp_accel *acc, double *result);
+int gsl_interp_eval_integ_e(const gsl_interp *interp, const double xa[], const double ya[],
+                            double a, double b, gsl_interp_accel *acc, double *result);
 
 typedef struct {
     size_t cache;

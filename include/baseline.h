@@ -11,13 +11,12 @@ bool baseline_start(const char *model, const char *mode);
 void baseline_stop(void);
 
 /* Record a timeline event for the current instance. */
-bool baseline_log(const char *category, const char *title,
-                  const char *detail, const char *metadata_json);
+bool baseline_log(const char *category, const char *title, const char *detail,
+                  const char *metadata_json);
 
 /* Record a timeline event with token usage and cost attribution. */
-bool baseline_log_usage(const char *category, const char *title,
-                        const char *detail, const char *metadata_json,
-                        int input_tokens, int output_tokens,
+bool baseline_log_usage(const char *category, const char *title, const char *detail,
+                        const char *metadata_json, int input_tokens, int output_tokens,
                         int cache_read_tokens, int cache_write_tokens);
 
 /* Credit report: aggregate token/cost for instance tree rooted at given id.
@@ -37,26 +36,25 @@ int baseline_serve_http(int port, const char *default_instance_filter);
 /* ── Trace span system ────────────────────────────────────────────────── */
 
 typedef struct {
-    char   span_id[37];       /* UUID v4 */
-    char   trace_id[37];      /* UUID v4 per user prompt */
-    char   parent_span[37];   /* empty if root */
-    char   name[128];
+    char span_id[37];     /* UUID v4 */
+    char trace_id[37];    /* UUID v4 per user prompt */
+    char parent_span[37]; /* empty if root */
+    char name[128];
     double start_epoch;
     double end_epoch;
-    char   status[16];        /* "ok", "error", "timeout" */
-    char   metadata_json[512];
+    char status[16]; /* "ok", "error", "timeout" */
+    char metadata_json[512];
 } trace_span_t;
 
 /* Generate a new UUID-based trace ID */
 void trace_new_id(char *out, size_t out_len);
 
 /* Begin a span: writes span_id to span_id_out (must be >= 37 chars) */
-bool trace_span_begin(const char *trace_id, const char *name,
-                      const char *parent_span, char *span_id_out);
+bool trace_span_begin(const char *trace_id, const char *name, const char *parent_span,
+                      char *span_id_out);
 
 /* End a span: records end_epoch, status, and optional metadata */
-bool trace_span_end(const char *span_id, const char *status,
-                    const char *metadata_json);
+bool trace_span_end(const char *span_id, const char *status, const char *metadata_json);
 
 /* Query recent traces (prints formatted output to stderr) */
 void trace_query_recent(int limit);

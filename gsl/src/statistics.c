@@ -4,7 +4,8 @@
 
 double gsl_stats_mean(const double data[], size_t stride, size_t n) {
     double sum = 0.0;
-    for (size_t i = 0; i < n; i++) sum += data[i * stride];
+    for (size_t i = 0; i < n; i++)
+        sum += data[i * stride];
     return sum / n;
 }
 
@@ -22,8 +23,8 @@ double gsl_stats_sd(const double data[], size_t stride, size_t n) {
     return sqrt(gsl_stats_variance(data, stride, n));
 }
 
-double gsl_stats_covariance(const double data1[], size_t stride1,
-                            const double data2[], size_t stride2, size_t n) {
+double gsl_stats_covariance(const double data1[], size_t stride1, const double data2[],
+                            size_t stride2, size_t n) {
     double mean1 = gsl_stats_mean(data1, stride1, n);
     double mean2 = gsl_stats_mean(data2, stride2, n);
     double sum = 0.0;
@@ -33,8 +34,8 @@ double gsl_stats_covariance(const double data1[], size_t stride1,
     return sum / (n - 1);
 }
 
-double gsl_stats_correlation(const double data1[], size_t stride1,
-                             const double data2[], size_t stride2, size_t n) {
+double gsl_stats_correlation(const double data1[], size_t stride1, const double data2[],
+                             size_t stride2, size_t n) {
     double cov = gsl_stats_covariance(data1, stride1, data2, stride2, n);
     double sd1 = gsl_stats_sd(data1, stride1, n);
     double sd2 = gsl_stats_sd(data2, stride2, n);
@@ -71,7 +72,8 @@ double gsl_stats_median_from_sorted_data(const double sorted_data[], size_t stri
     }
 }
 
-double gsl_stats_quantile_from_sorted_data(const double sorted_data[], size_t stride, size_t n, double f) {
+double gsl_stats_quantile_from_sorted_data(const double sorted_data[], size_t stride, size_t n,
+                                           double f) {
     double idx = f * (n - 1);
     size_t i = (size_t)idx;
     double frac = idx - i;

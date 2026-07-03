@@ -5,7 +5,8 @@
 
 gsl_matrix *gsl_matrix_alloc(size_t n1, size_t n2) {
     gsl_matrix *m = malloc(sizeof(gsl_matrix));
-    if (!m) return NULL;
+    if (!m)
+        return NULL;
     m->size1 = n1;
     m->size2 = n2;
     m->tda = n2;

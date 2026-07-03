@@ -23,9 +23,7 @@
  * worker_model:     execution model (default: kimi-k2.7-code)
  *                   Also accepts env DSCO_WORKER_MODEL.
  * provider_override: NULL = auto-detect from model name */
-bool agent_run_orchestrated(const char *api_key,
-                             const char *chat_model,
-                             const char *worker_model,
-                             const char *provider_override);
+bool agent_run_orchestrated(const char *api_key, const char *chat_model, const char *worker_model,
+                            const char *provider_override);
 
 #endif /* DSCO_ORCHESTRATOR_H */

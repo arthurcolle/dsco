@@ -11,7 +11,6 @@
  * the caller fall back to a platform tool (e.g. `sips` on macOS). This replaces
  * the previous unconditional `sips` shell-out so image attachments downscale
  * in-process and portably off macOS. */
-bool dsco_image_downscale_jpeg(const char *in_path, int max_dim,
-                               const char *out_path);
+bool dsco_image_downscale_jpeg(const char *in_path, int max_dim, const char *out_path);
 
 #endif /* DSCO_IMG_UTIL_H */

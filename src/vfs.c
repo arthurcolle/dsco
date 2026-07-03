@@ -147,9 +147,8 @@ vfs_db_t *vfs_open(const char *path) {
         return NULL;
     }
 
-    int rc = sqlite3_open_v2(path, &vdb->db,
-                             SQLITE_OPEN_READWRITE | SQLITE_OPEN_CREATE | SQLITE_OPEN_FULLMUTEX,
-                             NULL);
+    int rc = sqlite3_open_v2(
+        path, &vdb->db, SQLITE_OPEN_READWRITE | SQLITE_OPEN_CREATE | SQLITE_OPEN_FULLMUTEX, NULL);
     if (rc != SQLITE_OK) {
         fprintf(stderr, "vfs_open: %s\n", sqlite3_errmsg(vdb->db));
         sqlite3_close(vdb->db);

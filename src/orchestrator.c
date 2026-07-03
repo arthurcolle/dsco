@@ -52,7 +52,8 @@ static const char *s_domain_desc[ORCH_DOMAIN_COUNT] = {
     "Web requests, HTTP, browser, research, DNS, port scan (~15 tools)",
     "Kalshi/Polymarket order execution and position management (~22 tools)",
     "Market data, prediction prices, arbitrage scanning (~27 tools)",
-    "Wings/Talons: governance, OODA, memory, pheromones, avian nesting/brooding, immune (~23 tools)",
+    "Wings/Talons: governance, OODA, memory, pheromones, avian nesting/brooding, immune (~23 "
+    "tools)",
     "Text processing: sed, awk, jq, CSV, regex, zip, url (~14 tools)",
     "General purpose — all tools via register-file paging (up to 32)",
 };

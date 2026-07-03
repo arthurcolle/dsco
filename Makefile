@@ -25,7 +25,7 @@ BASE_CFLAGS = -Wall -Wextra -O3 -std=$(DSCO_STD) $(C2Y_WARNING_FLAGS) -D_POSIX_C
 	-fstack-protector-strong -D_FORTIFY_SOURCE=2 -Wformat -Wformat-security \
 	-Wno-error=format-security
 CFLAGS ?= $(BASE_CFLAGS)
-TEST_CFLAGS ?= $(BASE_CFLAGS) -O0 -g -fno-omit-frame-pointer -fno-inline
+TEST_CFLAGS ?= $(BASE_CFLAGS) -DDSCO_INTERNAL_TESTS -O0 -g -fno-omit-frame-pointer -fno-inline
 # Release link-time optimizations:
 #  -dead_strip          : drop unreferenced functions/data (smaller binary, better I-cache)
 #  -dead_strip_dylibs   : drop dylibs no symbol references (gsl, gslcblas, libuv were
@@ -81,9 +81,17 @@ SRC_NAMES = main.c agent.c llm.c tools.c execution_layer.c json_util.c ast.c swa
 	learned_cost.c \
 	session_memory.c \
 	provider_pool.c \
+	peer_registry.c \
+	spec_exec.c \
+	dsco_ds.c \
+	dsco_rt.c \
 	math_fastpath.c \
 	http_pool.c \
 	realtime.c \
+	remote_cli.c \
+	compute.c \
+	cluster.c \
+	bus_cli.c \
 	$(OPTIONAL_SRCS)
 TEST_SRC_NAMES = test.c
 
@@ -118,9 +126,9 @@ UBSAN_OBJS = $(SRC_NAMES:%.c=$(UBSAN_OBJ_DIR)/%.o)
 ASAN_TEST_OBJS = $(TEST_SRC_NAMES:%.c=$(ASAN_TEST_OBJ_DIR)/%.o) $(LIB_OBJS:$(OBJ_DIR)/%=$(ASAN_TEST_OBJ_DIR)/%)
 UBSAN_TEST_OBJS = $(TEST_SRC_NAMES:%.c=$(UBSAN_TEST_OBJ_DIR)/%.o) $(LIB_OBJS:$(OBJ_DIR)/%=$(UBSAN_TEST_OBJ_DIR)/%)
 
-ASAN_CFLAGS = $(BASE_CFLAGS) -O0 -g -fno-omit-frame-pointer -fno-inline -fsanitize=address
+ASAN_CFLAGS = $(BASE_CFLAGS) -DDSCO_INTERNAL_TESTS -O0 -g -fno-omit-frame-pointer -fno-inline -fsanitize=address
 ASAN_LDFLAGS = -fsanitize=address
-UBSAN_CFLAGS = $(BASE_CFLAGS) -O0 -g -fno-omit-frame-pointer -fno-inline -fsanitize=undefined -fno-sanitize-recover=all
+UBSAN_CFLAGS = $(BASE_CFLAGS) -DDSCO_INTERNAL_TESTS -O0 -g -fno-omit-frame-pointer -fno-inline -fsanitize=undefined -fno-sanitize-recover=all
 UBSAN_LDFLAGS = -fsanitize=undefined -fno-sanitize-recover=all
 DEBUG_CFLAGS = $(BASE_CFLAGS) -O0 -g -fno-omit-frame-pointer -fno-inline -DDSCO_DEV_BINARY
 PROFILE_COVERAGE_FLAGS = -finstrument-functions -fsanitize-coverage=trace-pc-guard,trace-cmp,indirect-calls,trace-div,trace-gep
@@ -131,7 +139,7 @@ override CFLAGS = $(PROFILE_CFLAGS)
 endif
 LITE_CFLAGS ?= -Oz -std=$(DSCO_STD) $(C2Y_WARNING_FLAGS) -D_POSIX_C_SOURCE=200809L \
 	-I$(INC_DIR) -DBUILD_DATE='"$(BUILD_DATE)"' -DGIT_HASH='"$(GIT_HASH)"'
-COVERAGE_CFLAGS = $(BASE_CFLAGS) -O0 -g -fno-omit-frame-pointer -fno-inline --coverage
+COVERAGE_CFLAGS = $(BASE_CFLAGS) -DDSCO_INTERNAL_TESTS -O0 -g -fno-omit-frame-pointer -fno-inline --coverage
 COVERAGE_LDFLAGS = --coverage
 ASAN_RUNTIME_OPTIONS = detect_leaks=1
 ifeq ($(UNAME_S),Darwin)
@@ -778,6 +786,9 @@ cppcheck:
 		--error-exitcode=1 \
 		--inline-suppr \
 		--suppress=missingIncludeSystem \
+		--max-configs=2 \
+		--check-level=normal \
+		-j $(shell nproc 2>/dev/null || echo 2) \
 		-I$(INC_DIR) \
 		$(SRCS) $(INC_DIR)/*.h
 

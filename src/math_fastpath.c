@@ -7,12 +7,10 @@
 #include <string.h>
 
 static const char *const k_eval_funcs[] = {
-    "sqrt", "cbrt", "ceil", "floor", "round", "trunc", "sign",
-    "asin", "acos", "atan", "atan2", "sinh", "cosh", "tanh",
-    "log", "ln", "log2", "log10", "exp", "exp2", "abs",
-    "sin", "cos", "tan", "pow", "min", "max", "gcd", "lcm", "fib",
-    "factorial", "hypot", "fmod", "clamp", "deg", "rad", "hex",
-    "oct", "bin", "dec",
+    "sqrt",      "cbrt",  "ceil", "floor", "round", "trunc", "sign", "asin",  "acos", "atan",
+    "atan2",     "sinh",  "cosh", "tanh",  "log",   "ln",    "log2", "log10", "exp",  "exp2",
+    "abs",       "sin",   "cos",  "tan",   "pow",   "min",   "max",  "gcd",   "lcm",  "fib",
+    "factorial", "hypot", "fmod", "clamp", "deg",   "rad",   "hex",  "oct",   "bin",  "dec",
 };
 
 static const char *const k_eval_consts[] = {

@@ -17,76 +17,89 @@ static const char *SP_SCHEMA =
     "{"
     "\"type\":\"object\","
     "\"properties\":{"
-      "\"schema_version\":{\"type\":\"string\",\"enum\":[\"dsco.structured_process.v1\"]},"
-      "\"request\":{\"type\":\"object\",\"properties\":{"
-        "\"raw_input\":{\"type\":\"string\"},"
-        "\"intent\":{\"type\":\"string\",\"enum\":[\"chat\",\"code\",\"review\",\"research\",\"operate\",\"profile\",\"plan\"]},"
-        "\"risk\":{\"type\":\"string\",\"enum\":[\"low\",\"medium\",\"high\"]},"
-        "\"confidence\":{\"type\":\"integer\",\"minimum\":0,\"maximum\":100}"
-      "},\"required\":[\"raw_input\",\"intent\",\"risk\",\"confidence\"],\"additionalProperties\":false},"
-      "\"budgets\":{\"type\":\"object\",\"properties\":{"
-        "\"model_budget_pct\":{\"type\":\"integer\",\"minimum\":0,\"maximum\":100},"
-        "\"background_budget_pct\":{\"type\":\"integer\",\"minimum\":0,\"maximum\":100},"
-        "\"max_concurrency\":{\"type\":\"integer\",\"minimum\":1,\"maximum\":64},"
-        "\"max_iterations\":{\"type\":\"integer\",\"minimum\":1,\"maximum\":256}"
-      "},\"required\":[\"model_budget_pct\",\"background_budget_pct\",\"max_concurrency\",\"max_iterations\"],\"additionalProperties\":false},"
-      "\"goals\":{\"type\":\"array\",\"maxItems\":64,\"items\":{\"$ref\":\"#/$defs/goal\"}},"
-      "\"steps\":{\"type\":\"array\",\"maxItems\":64,\"items\":{\"$ref\":\"#/$defs/step\"}},"
-      "\"promotion_rules\":{\"type\":\"array\",\"maxItems\":16,\"items\":{\"$ref\":\"#/$defs/promotion_rule\"}},"
-      "\"acceptance\":{\"type\":\"array\",\"maxItems\":16,\"items\":{\"type\":\"string\"}}"
+    "\"schema_version\":{\"type\":\"string\",\"enum\":[\"dsco.structured_process.v1\"]},"
+    "\"request\":{\"type\":\"object\",\"properties\":{"
+    "\"raw_input\":{\"type\":\"string\"},"
+    "\"intent\":{\"type\":\"string\",\"enum\":[\"chat\",\"code\",\"review\",\"research\","
+    "\"operate\",\"profile\",\"plan\"]},"
+    "\"risk\":{\"type\":\"string\",\"enum\":[\"low\",\"medium\",\"high\"]},"
+    "\"confidence\":{\"type\":\"integer\",\"minimum\":0,\"maximum\":100}"
+    "},\"required\":[\"raw_input\",\"intent\",\"risk\",\"confidence\"],\"additionalProperties\":"
+    "false},"
+    "\"budgets\":{\"type\":\"object\",\"properties\":{"
+    "\"model_budget_pct\":{\"type\":\"integer\",\"minimum\":0,\"maximum\":100},"
+    "\"background_budget_pct\":{\"type\":\"integer\",\"minimum\":0,\"maximum\":100},"
+    "\"max_concurrency\":{\"type\":\"integer\",\"minimum\":1,\"maximum\":64},"
+    "\"max_iterations\":{\"type\":\"integer\",\"minimum\":1,\"maximum\":256}"
+    "},\"required\":[\"model_budget_pct\",\"background_budget_pct\",\"max_concurrency\",\"max_"
+    "iterations\"],\"additionalProperties\":false},"
+    "\"goals\":{\"type\":\"array\",\"maxItems\":64,\"items\":{\"$ref\":\"#/$defs/goal\"}},"
+    "\"steps\":{\"type\":\"array\",\"maxItems\":64,\"items\":{\"$ref\":\"#/$defs/step\"}},"
+    "\"promotion_rules\":{\"type\":\"array\",\"maxItems\":16,\"items\":{\"$ref\":\"#/$defs/"
+    "promotion_rule\"}},"
+    "\"acceptance\":{\"type\":\"array\",\"maxItems\":16,\"items\":{\"type\":\"string\"}}"
     "},"
-    "\"required\":[\"schema_version\",\"request\",\"budgets\",\"goals\",\"steps\",\"promotion_rules\",\"acceptance\"],"
+    "\"required\":[\"schema_version\",\"request\",\"budgets\",\"goals\",\"steps\",\"promotion_"
+    "rules\",\"acceptance\"],"
     "\"additionalProperties\":false,"
     "\"$defs\":{"
-      "\"goal\":{\"type\":\"object\",\"properties\":{"
-        "\"id\":{\"type\":\"string\"},"
-        "\"parent_id\":{\"type\":\"string\"},"
-        "\"title\":{\"type\":\"string\"},"
-        "\"success_criteria\":{\"type\":\"array\",\"maxItems\":8,\"items\":{\"type\":\"string\"}}"
-      "},\"required\":[\"id\",\"parent_id\",\"title\",\"success_criteria\"],\"additionalProperties\":false},"
-      "\"step\":{\"type\":\"object\",\"properties\":{"
-        "\"id\":{\"type\":\"string\"},"
-        "\"parent_id\":{\"type\":\"string\"},"
-        "\"goal_id\":{\"type\":\"string\"},"
-        "\"title\":{\"type\":\"string\"},"
-        "\"objective\":{\"type\":\"string\"},"
-        "\"kind\":{\"type\":\"string\",\"enum\":[\"composite\",\"atomic\",\"gate\",\"dialog\",\"milestone\"]},"
-        "\"priority\":{\"type\":\"integer\",\"minimum\":0,\"maximum\":100},"
-        "\"depends_on\":{\"type\":\"array\",\"maxItems\":16,\"items\":{\"type\":\"string\"}},"
-        "\"max_iterations\":{\"type\":\"integer\",\"minimum\":1,\"maximum\":256},"
-        "\"atoms\":{\"type\":\"array\",\"maxItems\":64,\"items\":{\"$ref\":\"#/$defs/atom\"}}"
-      "},\"required\":[\"id\",\"parent_id\",\"goal_id\",\"title\",\"objective\",\"kind\",\"priority\",\"depends_on\",\"max_iterations\",\"atoms\"],\"additionalProperties\":false},"
-      "\"atom\":{\"type\":\"object\",\"properties\":{"
-        "\"id\":{\"type\":\"string\"},"
-        "\"title\":{\"type\":\"string\"},"
-        "\"kind\":{\"type\":\"string\",\"enum\":[\"tool_call\",\"shell\",\"dialog\",\"assert\",\"noop\"]},"
-        "\"lane\":{\"type\":\"string\",\"enum\":[\"local\",\"background\",\"model\",\"user\"]},"
-        "\"tool_name\":{\"type\":\"string\"},"
-        "\"input_json\":{\"type\":\"string\"},"
-        "\"depends_on\":{\"type\":\"array\",\"maxItems\":16,\"items\":{\"type\":\"string\"}},"
-        "\"timeout_ms\":{\"type\":\"integer\",\"minimum\":1,\"maximum\":600000},"
-        "\"max_attempts\":{\"type\":\"integer\",\"minimum\":1,\"maximum\":8},"
-        "\"promotion_trigger\":{\"type\":\"string\",\"enum\":[\"never\",\"on_fail\",\"low_confidence\",\"blocked\",\"always\"]},"
-        "\"model_tier\":{\"type\":\"string\",\"enum\":[\"none\",\"cheap\",\"smart\"]}"
-      "},\"required\":[\"id\",\"title\",\"kind\",\"lane\",\"tool_name\",\"input_json\",\"depends_on\",\"timeout_ms\",\"max_attempts\",\"promotion_trigger\",\"model_tier\"],\"additionalProperties\":false},"
-      "\"promotion_rule\":{\"type\":\"object\",\"properties\":{"
-        "\"when\":{\"type\":\"string\",\"enum\":[\"on_fail\",\"low_confidence\",\"blocked\",\"budget_exhausted\",\"user_request\"]},"
-        "\"promote_to\":{\"type\":\"string\",\"enum\":[\"smart_model\",\"user_dialog\",\"stop\"]},"
-        "\"reason\":{\"type\":\"string\"}"
-      "},\"required\":[\"when\",\"promote_to\",\"reason\"],\"additionalProperties\":false}"
+    "\"goal\":{\"type\":\"object\",\"properties\":{"
+    "\"id\":{\"type\":\"string\"},"
+    "\"parent_id\":{\"type\":\"string\"},"
+    "\"title\":{\"type\":\"string\"},"
+    "\"success_criteria\":{\"type\":\"array\",\"maxItems\":8,\"items\":{\"type\":\"string\"}}"
+    "},\"required\":[\"id\",\"parent_id\",\"title\",\"success_criteria\"],\"additionalProperties\":"
+    "false},"
+    "\"step\":{\"type\":\"object\",\"properties\":{"
+    "\"id\":{\"type\":\"string\"},"
+    "\"parent_id\":{\"type\":\"string\"},"
+    "\"goal_id\":{\"type\":\"string\"},"
+    "\"title\":{\"type\":\"string\"},"
+    "\"objective\":{\"type\":\"string\"},"
+    "\"kind\":{\"type\":\"string\",\"enum\":[\"composite\",\"atomic\",\"gate\",\"dialog\","
+    "\"milestone\"]},"
+    "\"priority\":{\"type\":\"integer\",\"minimum\":0,\"maximum\":100},"
+    "\"depends_on\":{\"type\":\"array\",\"maxItems\":16,\"items\":{\"type\":\"string\"}},"
+    "\"max_iterations\":{\"type\":\"integer\",\"minimum\":1,\"maximum\":256},"
+    "\"atoms\":{\"type\":\"array\",\"maxItems\":64,\"items\":{\"$ref\":\"#/$defs/atom\"}}"
+    "},\"required\":[\"id\",\"parent_id\",\"goal_id\",\"title\",\"objective\",\"kind\","
+    "\"priority\",\"depends_on\",\"max_iterations\",\"atoms\"],\"additionalProperties\":false},"
+    "\"atom\":{\"type\":\"object\",\"properties\":{"
+    "\"id\":{\"type\":\"string\"},"
+    "\"title\":{\"type\":\"string\"},"
+    "\"kind\":{\"type\":\"string\",\"enum\":[\"tool_call\",\"shell\",\"dialog\",\"assert\","
+    "\"noop\"]},"
+    "\"lane\":{\"type\":\"string\",\"enum\":[\"local\",\"background\",\"model\",\"user\"]},"
+    "\"tool_name\":{\"type\":\"string\"},"
+    "\"input_json\":{\"type\":\"string\"},"
+    "\"depends_on\":{\"type\":\"array\",\"maxItems\":16,\"items\":{\"type\":\"string\"}},"
+    "\"timeout_ms\":{\"type\":\"integer\",\"minimum\":1,\"maximum\":600000},"
+    "\"max_attempts\":{\"type\":\"integer\",\"minimum\":1,\"maximum\":8},"
+    "\"promotion_trigger\":{\"type\":\"string\",\"enum\":[\"never\",\"on_fail\",\"low_confidence\","
+    "\"blocked\",\"always\"]},"
+    "\"model_tier\":{\"type\":\"string\",\"enum\":[\"none\",\"cheap\",\"smart\"]}"
+    "},\"required\":[\"id\",\"title\",\"kind\",\"lane\",\"tool_name\",\"input_json\",\"depends_"
+    "on\",\"timeout_ms\",\"max_attempts\",\"promotion_trigger\",\"model_tier\"],"
+    "\"additionalProperties\":false},"
+    "\"promotion_rule\":{\"type\":\"object\",\"properties\":{"
+    "\"when\":{\"type\":\"string\",\"enum\":[\"on_fail\",\"low_confidence\",\"blocked\",\"budget_"
+    "exhausted\",\"user_request\"]},"
+    "\"promote_to\":{\"type\":\"string\",\"enum\":[\"smart_model\",\"user_dialog\",\"stop\"]},"
+    "\"reason\":{\"type\":\"string\"}"
+    "},\"required\":[\"when\",\"promote_to\",\"reason\"],\"additionalProperties\":false}"
     "}"
     "}";
 
 typedef struct {
     char id[SP_EXT_ID_LEN];
-    int  step_id;
+    int step_id;
 } sp_step_map_t;
 
 typedef struct {
     char id[SP_EXT_ID_LEN];
-    int  atom_id;
+    int atom_id;
     char deps[16][SP_EXT_ID_LEN];
-    int  dep_count;
+    int dep_count;
 } sp_atom_map_t;
 
 typedef struct {
@@ -102,8 +115,7 @@ static bool contains_word(const char *text, const char *needle) {
         return false;
     size_t nlen = strlen(needle);
     for (const char *p = text; *p; p++) {
-        if ((p == text || !isalnum((unsigned char)p[-1])) &&
-            strncasecmp(p, needle, nlen) == 0 &&
+        if ((p == text || !isalnum((unsigned char)p[-1])) && strncasecmp(p, needle, nlen) == 0 &&
             !isalnum((unsigned char)p[nlen])) {
             return true;
         }
@@ -113,14 +125,21 @@ static bool contains_word(const char *text, const char *needle) {
 
 static const char *intent_name(sp_intent_t intent) {
     switch (intent) {
-        case SP_INTENT_CODE: return "code";
-        case SP_INTENT_REVIEW: return "review";
-        case SP_INTENT_RESEARCH: return "research";
-        case SP_INTENT_OPERATE: return "operate";
-        case SP_INTENT_PROFILE: return "profile";
-        case SP_INTENT_PLAN: return "plan";
+        case SP_INTENT_CODE:
+            return "code";
+        case SP_INTENT_REVIEW:
+            return "review";
+        case SP_INTENT_RESEARCH:
+            return "research";
+        case SP_INTENT_OPERATE:
+            return "operate";
+        case SP_INTENT_PROFILE:
+            return "profile";
+        case SP_INTENT_PLAN:
+            return "plan";
         case SP_INTENT_CHAT:
-        default: return "chat";
+        default:
+            return "chat";
     }
 }
 
@@ -259,7 +278,8 @@ static void append_step_open(jbuf_t *b, const char *id, const char *parent_id, c
     jbuf_append_json_str(b, objective);
     jbuf_append(b, ",\"kind\":");
     jbuf_append_json_str(b, kind);
-    jbuf_appendf(b, ",\"priority\":%d,\"depends_on\":[],\"max_iterations\":1,\"atoms\":[", priority);
+    jbuf_appendf(b, ",\"priority\":%d,\"depends_on\":[],\"max_iterations\":1,\"atoms\":[",
+                 priority);
 }
 
 int structured_process_synthesize_json(const char *input, char *buf, size_t len) {
@@ -278,15 +298,15 @@ int structured_process_synthesize_json(const char *input, char *buf, size_t len)
     jbuf_append(&b, ",\"risk\":");
     jbuf_append_json_str(&b, c.risk);
     jbuf_appendf(&b, ",\"confidence\":%d},\"budgets\":{", c.confidence);
-    jbuf_appendf(&b, "\"model_budget_pct\":%d,\"background_budget_pct\":%d,"
-                    "\"max_concurrency\":%d,\"max_iterations\":%d},",
-                 c.model_budget_pct, c.background_budget_pct, c.max_concurrency,
-                 c.max_iterations);
+    jbuf_appendf(&b,
+                 "\"model_budget_pct\":%d,\"background_budget_pct\":%d,"
+                 "\"max_concurrency\":%d,\"max_iterations\":%d},",
+                 c.model_budget_pct, c.background_budget_pct, c.max_concurrency, c.max_iterations);
 
     jbuf_append(&b, "\"goals\":[{\"id\":\"g1\",\"parent_id\":\"\",\"title\":");
     jbuf_append_json_str(&b, input && *input ? input : "Handle request");
     jbuf_append(&b, ",\"success_criteria\":[\"all required atoms are complete\","
-                   "\"no step exceeds its iteration or attempt budget\"]}],\"steps\":[");
+                    "\"no step exceeds its iteration or attempt budget\"]}],\"steps\":[");
 
     append_step_open(&b, "s1", "", "g1", "Classify and bound request",
                      "Produce a typed route, risk level, and execution budget.", "atomic", 100);
@@ -294,17 +314,17 @@ int structured_process_synthesize_json(const char *input, char *buf, size_t len)
     jbuf_append(&b, "]},");
 
     append_step_open(&b, "s2", "", "g1", "Gather local execution context",
-                     "Collect cheap deterministic context before spending model budget.",
-                     "atomic", 80);
-    append_atom(&b, "a2", "Read current working directory", "tool_call", "background",
-                "cwd", "{}", "a1");
+                     "Collect cheap deterministic context before spending model budget.", "atomic",
+                     80);
+    append_atom(&b, "a2", "Read current working directory", "tool_call", "background", "cwd", "{}",
+                "a1");
     jbuf_append(&b, "]},");
 
-    append_step_open(&b, "s3", "", "g1", "Decompose into bounded atoms",
-                     "Create small units that can run in the background and promote only when blocked.",
-                     "atomic", 70);
-    append_atom(&b, "a3", "Build deterministic work queue", "noop", "background", "",
-                "{}", "a2");
+    append_step_open(
+        &b, "s3", "", "g1", "Decompose into bounded atoms",
+        "Create small units that can run in the background and promote only when blocked.",
+        "atomic", 70);
+    append_atom(&b, "a3", "Build deterministic work queue", "noop", "background", "", "{}", "a2");
     jbuf_append_char(&b, ',');
     append_atom(&b, "a4",
                 c.needs_model_gate ? "Review decomposition with smart model"
@@ -312,12 +332,13 @@ int structured_process_synthesize_json(const char *input, char *buf, size_t len)
                 "noop", "model", "", "{}", "a3");
     jbuf_append(&b, "]}],\"promotion_rules\":[");
     jbuf_append(&b, "{\"when\":\"on_fail\",\"promote_to\":\"smart_model\","
-                   "\"reason\":\"failed deterministic atom needs model judgment\"},");
+                    "\"reason\":\"failed deterministic atom needs model judgment\"},");
     jbuf_append(&b, "{\"when\":\"blocked\",\"promote_to\":\"user_dialog\","
-                   "\"reason\":\"missing external decision or unsafe action\"}");
-    jbuf_append(&b, "],\"acceptance\":[\"plan is valid JSON matching the structured process schema\","
-                   "\"background atoms are bounded by max_attempts and max_iterations\","
-                   "\"smart model use is reserved for promotion gates\"]}");
+                    "\"reason\":\"missing external decision or unsafe action\"}");
+    jbuf_append(&b,
+                "],\"acceptance\":[\"plan is valid JSON matching the structured process schema\","
+                "\"background atoms are bounded by max_attempts and max_iterations\","
+                "\"smart model use is reserved for promotion gates\"]}");
 
     size_t copy = b.len < len - 1 ? b.len : len - 1;
     memcpy(buf, b.data, copy);
@@ -456,8 +477,8 @@ static void step_cb(const char *element, void *opaque) {
     char *kind = json_get_str(element, "kind");
     int priority = json_get_int(element, "priority", 0);
     int parent_step_id = find_step_id(ctx, parent_id ? parent_id : "");
-    int step_id = plan_add_step(ctx->plan_id, parent_step_id, title ? title : "step",
-                                parse_step_kind(kind));
+    int step_id =
+        plan_add_step(ctx->plan_id, parent_step_id, title ? title : "step", parse_step_kind(kind));
     if (step_id > 0) {
         step_set_description(step_id, objective ? objective : "");
         step_set_priority(step_id, priority);

@@ -57,20 +57,19 @@ static bool setup_env_truthy(const char *value) {
 static const char *k_known_env_keys[] = {
     "ANTHROPIC_API_KEY", "OPENAI_API_KEY", "JINA_API_KEY", "PARALLEL_API_KEY", "OPENROUTER_API_KEY",
     "TOGETHER_API_KEY", "GROQ_API_KEY", "DEEPSEEK_API_KEY", "MISTRAL_API_KEY", "KIMI_API_KEY",
-    "KIMI_CODING_API_KEY", "MOONSHOT_API_KEY", "MOONSHOTAI_API_KEY",
-    "COHERE_API_KEY", "XAI_API_KEY", "CEREBRAS_API_KEY", "AI21_API_KEY", "DEEPINFRA_API_KEY",
-    "FIREWORKS_API_KEY", "GOOGLE_API_KEY", "GOOGLE_AI_API_KEY", "GOOGLE_AI_STUDIO_API_KEY",
-    "GOOGLE_VERTEX_API_KEY", "GEMINI_API_KEY", "AZURE_OPENAI_API_KEY", "PERPLEXITY_API_KEY",
-    "MINIMAX_API_KEY", "NOVITA_API_KEY", "REPLICATE_API_TOKEN", "SAMBANOVA_API_KEY",
-    "SILICONFLOW_API_KEY", "HF_TOKEN", "GITHUB_TOKEN", "AWS_ACCESS_KEY_ID", "AWS_SECRET_ACCESS_KEY",
-    "TAVILY_API_KEY", "SERPAPI_API_KEY", "FIRECRAWL_API_KEY", "BRAVE_API_KEY", "ELEVENLABS_API_KEY",
+    "KIMI_CODING_API_KEY", "MOONSHOT_API_KEY", "MOONSHOTAI_API_KEY", "COHERE_API_KEY",
+    "XAI_API_KEY", "CEREBRAS_API_KEY", "AI21_API_KEY", "DEEPINFRA_API_KEY", "FIREWORKS_API_KEY",
+    "GOOGLE_API_KEY", "GOOGLE_AI_API_KEY", "GOOGLE_AI_STUDIO_API_KEY", "GOOGLE_VERTEX_API_KEY",
+    "GEMINI_API_KEY", "AZURE_OPENAI_API_KEY", "PERPLEXITY_API_KEY", "MINIMAX_API_KEY",
+    "NOVITA_API_KEY", "REPLICATE_API_TOKEN", "SAMBANOVA_API_KEY", "SILICONFLOW_API_KEY", "HF_TOKEN",
+    "GITHUB_TOKEN", "AWS_ACCESS_KEY_ID", "AWS_SECRET_ACCESS_KEY", "TAVILY_API_KEY",
+    "SERPAPI_API_KEY", "FIRECRAWL_API_KEY", "BRAVE_API_KEY", "ELEVENLABS_API_KEY",
     "ASSEMBLYAI_API_KEY", "PINECONE_API_KEY", "WEAVIATE_API_KEY", "SUPABASE_API_KEY",
     "NEON_API_KEY", "UPSTASH_REDIS_REST_TOKEN", "NOTION_API_KEY", "SLACK_BOT_TOKEN",
     "DISCORD_TOKEN", "TWILIO_AUTH_TOKEN", "STRIPE_API_KEY", "MAPBOX_API_KEY",
-    "OPENWEATHERMAP_API_KEY", "ALPHA_VANTAGE_API_KEY", "FRED_API_KEY",
-    "FUGU_API_KEY", "FUGU_PAYG_API_KEY", "FUGU_BASE_URL",
-    "GLM_API_KEY", "ZAI_API_KEY", "Z_AI_API_KEY", "ZAI_CODING_PLAN_API_KEY",
-    "Z_AI_CODING_PLAN_API_KEY", "ZHIPU_API_KEY",
+    "OPENWEATHERMAP_API_KEY", "ALPHA_VANTAGE_API_KEY", "FRED_API_KEY", "FUGU_API_KEY",
+    "FUGU_PAYG_API_KEY", "FUGU_BASE_URL", "GLM_API_KEY", "ZAI_API_KEY", "Z_AI_API_KEY",
+    "ZAI_CODING_PLAN_API_KEY", "Z_AI_CODING_PLAN_API_KEY", "ZHIPU_API_KEY",
     /* Trading / Prediction Markets */
     "KALSHI_API_KEY", "KALSHI_RSA_PRIVATE_KEY_PATH", "POLYMARKET_ADDRESS", "POLYMARKET_API_KEY",
     "POLYMARKET_API_SECRET", "POLYMARKET_PASSPHRASE", "POLYMARKET_PRIVATE_KEY",
@@ -971,19 +970,17 @@ int dsco_setup_report(char *out, size_t out_len) {
                 const char *v = getenv(k_blocked_setup_env[i].name);
                 if (v && v[0]) {
                     sbuf_appendf(out, out_len, &pos, "    %-28s : %s\n",
-                                 k_blocked_setup_env[i].name,
-                                 k_blocked_setup_env[i].reason);
+                                 k_blocked_setup_env[i].name, k_blocked_setup_env[i].reason);
                 }
             }
         }
         if (saved_blocked > 0) {
-            sbuf_appendf(out, out_len, &pos,
-                         "  saved transient vars ignored during setup load:\n");
+            sbuf_appendf(out, out_len, &pos, "  saved transient vars ignored during setup load:\n");
             for (int i = 0; i < saved.count; i++) {
                 const blocked_setup_env_t *blocked = blocked_setup_env_entry(saved.items[i].key);
                 if (blocked) {
-                    sbuf_appendf(out, out_len, &pos, "    %-28s : %s\n",
-                                 saved.items[i].key, blocked->reason);
+                    sbuf_appendf(out, out_len, &pos, "    %-28s : %s\n", saved.items[i].key,
+                                 blocked->reason);
                 }
             }
         }
@@ -1122,8 +1119,9 @@ int dsco_setup_report(char *out, size_t out_len) {
             sbuf_appendf(out, out_len, &pos, "\nchatgpt subscription: linked via %s%s%s\n", src,
                          acct[0] ? " account " : "", acct);
         } else {
-            sbuf_appendf(out, out_len, &pos,
-                         "\nchatgpt subscription: not linked (run `dsco login` or /login chatgpt)\n");
+            sbuf_appendf(
+                out, out_len, &pos,
+                "\nchatgpt subscription: not linked (run `dsco login` or /login chatgpt)\n");
         }
     }
 

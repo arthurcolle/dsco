@@ -4,12 +4,14 @@
 #include <float.h>
 
 double gsl_log1p(double x) {
-    if (fabs(x) < 1e-4) return x - 0.5 * x * x;
+    if (fabs(x) < 1e-4)
+        return x - 0.5 * x * x;
     return log(1.0 + x);
 }
 
 double gsl_expm1(double x) {
-    if (fabs(x) < 1e-4) return x + 0.5 * x * x;
+    if (fabs(x) < 1e-4)
+        return x + 0.5 * x * x;
     return exp(x) - 1.0;
 }
 

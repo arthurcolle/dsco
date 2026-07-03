@@ -1090,7 +1090,8 @@ int baseline_serve_http(int port, const char *default_instance_filter) {
             extract_query_param(uri, "type", type_filter, sizeof(type_filter));
             extract_query_param(uri, "q", search_filter, sizeof(search_filter));
             int limit = resolve_int_param(uri, "limit", 1000, 50, 5000);
-            char *html = chronicle_build_activity_html_ex(limit, session_filter, type_filter, search_filter);
+            char *html =
+                chronicle_build_activity_html_ex(limit, session_filter, type_filter, search_filter);
             send_response(client_fd, html ? "200 OK" : "500 Internal Server Error", "text/html",
                           html ? html : "chronicle unavailable");
             free(html);
@@ -1099,13 +1100,15 @@ int baseline_serve_http(int port, const char *default_instance_filter) {
             extract_query_param(uri, "session", session_filter, sizeof(session_filter));
             int limit = resolve_int_param(uri, "limit", 1000, 1, 5000);
             char *json = chronicle_build_activity_json(limit, session_filter);
-            send_response(client_fd, json ? "200 OK" : "500 Internal Server Error", "application/json",
+            send_response(client_fd, json ? "200 OK" : "500 Internal Server Error",
+                          "application/json",
                           json ? json : "{\"error\":\"chronicle unavailable\"}");
             free(json);
         } else if (strncmp(path, "/chronicle/blob/", 16) == 0) {
             const char *ctype = "application/octet-stream";
             char *blob = chronicle_read_blob_hex(path + 16, 5 * 1024 * 1024, &ctype);
-            send_response(client_fd, blob ? "200 OK" : "404 Not Found", ctype, blob ? blob : "not found\n");
+            send_response(client_fd, blob ? "200 OK" : "404 Not Found", ctype,
+                          blob ? blob : "not found\n");
             free(blob);
         } else if (strcmp(path, "/health") == 0) {
             send_response(client_fd, "200 OK", "text/plain", "ok\n");

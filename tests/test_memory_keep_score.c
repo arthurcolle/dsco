@@ -19,18 +19,26 @@ int g_cheap_mode = 0;
 vm_t g_vm = {0};
 
 static int fails = 0;
-#define CHECK(c, msg) do { if (!(c)) { printf("FAIL: %s\n", msg); fails++; } \
-                           else printf("ok: %s\n", msg); } while (0)
+#define CHECK(c, msg)                                                                              \
+    do {                                                                                           \
+        if (!(c)) {                                                                                \
+            printf("FAIL: %s\n", msg);                                                             \
+            fails++;                                                                               \
+        } else                                                                                     \
+            printf("ok: %s\n", msg);                                                               \
+    } while (0)
 
 int main(void) {
     const double now = 1000000.0;
 
-    memory_entry_t old_fail;     memset(&old_fail, 0, sizeof old_fail);
-    old_fail.created_at = now - 4 * 86400.0;   /* 4 days old  */
-    old_fail.importance = 0.80;                /* failure-lesson */
+    memory_entry_t old_fail;
+    memset(&old_fail, 0, sizeof old_fail);
+    old_fail.created_at = now - 4 * 86400.0; /* 4 days old  */
+    old_fail.importance = 0.80;              /* failure-lesson */
 
-    memory_entry_t fresh_trivial; memset(&fresh_trivial, 0, sizeof fresh_trivial);
-    fresh_trivial.created_at = now - 5.0;      /* 5s old */
+    memory_entry_t fresh_trivial;
+    memset(&fresh_trivial, 0, sizeof fresh_trivial);
+    fresh_trivial.created_at = now - 5.0; /* 5s old */
     fresh_trivial.importance = 0.10;
 
     double p_old = memory_keep_score(&old_fail, MEM_KEEP_PROMOTION, 0.5, now);
@@ -38,8 +46,8 @@ int main(void) {
     double r_old = memory_keep_score(&old_fail, MEM_KEEP_RETRIEVAL, 0.5, now);
     double r_new = memory_keep_score(&fresh_trivial, MEM_KEEP_RETRIEVAL, 0.5, now);
 
-    printf("PROMOTION old=%.3f new=%.3f | RETRIEVAL old=%.3f new=%.3f\n",
-           p_old, p_new, r_old, r_new);
+    printf("PROMOTION old=%.3f new=%.3f | RETRIEVAL old=%.3f new=%.3f\n", p_old, p_new, r_old,
+           r_new);
 
     CHECK(p_old > p_new, "promotion keeps old failure-lesson over fresh trivial");
     CHECK(r_new > r_old, "retrieval prefers fresh over old");
@@ -48,8 +56,10 @@ int main(void) {
     CHECK(memory_keep_score(NULL, MEM_KEEP_PROMOTION, 0.5, now) == 0.0, "NULL guard");
 
     /* importance clamping: out-of-range importance must not break bounds */
-    memory_entry_t weird; memset(&weird, 0, sizeof weird);
-    weird.created_at = now; weird.importance = 9.9;
+    memory_entry_t weird;
+    memset(&weird, 0, sizeof weird);
+    weird.created_at = now;
+    weird.importance = 9.9;
     double s = memory_keep_score(&weird, MEM_KEEP_PROMOTION, 9.9, now);
     CHECK(s <= 1.0 && s >= 0.0, "clamps out-of-range importance/relevance");
 

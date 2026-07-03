@@ -21,12 +21,12 @@ static pthread_mutex_t g_lock_other = PTHREAD_MUTEX_INITIALIZER;
 
 static pthread_mutex_t *lock_for(curl_lock_data data) {
     switch (data) {
-    case CURL_LOCK_DATA_DNS:
-        return &g_lock_dns;
-    case CURL_LOCK_DATA_SSL_SESSION:
-        return &g_lock_ssl;
-    default:
-        return &g_lock_other;
+        case CURL_LOCK_DATA_DNS:
+            return &g_lock_dns;
+        case CURL_LOCK_DATA_SSL_SESSION:
+            return &g_lock_ssl;
+        default:
+            return &g_lock_other;
     }
 }
 
