@@ -235,3 +235,32 @@ spend_plan_t spend_governor_plan(const spend_signals_t *sig) {
 
     return p;
 }
+
+void spend_plan_apply_learned(spend_plan_t *plan, const spend_learned_t *lw,
+                              const spend_signals_t *sig) {
+    if (!plan || !lw || !sig || plan->block_turn)
+        return;
+
+    /* Sessions that keep missing the 5m TTL push cache_aggressiveness up:
+     * recommend the 1h TTL on a looser trigger than the phase default. */
+    if (lw->cache_aggressiveness > 0.6 && sig->turns >= 3 && sig->cache_telemetry_seen &&
+        sig->cache_hit_ratio < 0.50)
+        plan->recommend_1h_cache = true;
+
+    /* Learned cost sensitivity: suggest the leaf-work downshift one phase
+     * earlier than the ORANGE default. */
+    if (lw->model_cost_sensitivity > 0.7 && plan->phase >= SPEND_YELLOW)
+        plan->suggest_model_downshift = true;
+
+    /* Learned compaction point: start trimming when the context ratio
+     * crosses it, even if budget pressure alone would not trim yet. */
+    if (lw->context_compaction_thresh > 0.0 && lw->context_compaction_thresh < 1.0 &&
+        sig->context_window_tokens > 0 && !plan->trim_old_results) {
+        double ratio = (double)sig->context_used_tokens / (double)sig->context_window_tokens;
+        if (ratio > lw->context_compaction_thresh) {
+            plan->trim_old_results = true;
+            plan->trim_keep_recent = 8; /* YELLOW-tier trim parameters */
+            plan->trim_max_chars = 512;
+        }
+    }
+}
