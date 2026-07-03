@@ -20,7 +20,6 @@ env:
   DSCO_CI: "1"
   DSCO_NO_SUPERVISE: "1"
   DSCO_SECURE_STORE_NO_PROMPT: "1"
-  DSCO_STD: c2y
 
 jobs:
   build-test:
