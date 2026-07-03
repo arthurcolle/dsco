@@ -11,18 +11,22 @@ static double avian_now_sec(void) {
 }
 
 static double clamp01(double x) {
-    if (x < 0.0) return 0.0;
-    if (x > 1.0) return 1.0;
+    if (x < 0.0)
+        return 0.0;
+    if (x > 1.0)
+        return 1.0;
     return x;
 }
 
 static void copy_str(char *dst, size_t n, const char *src) {
-    if (!dst || n == 0) return;
+    if (!dst || n == 0)
+        return;
     snprintf(dst, n, "%s", src ? src : "");
 }
 
 void avian_init(avian_engine_t *a) {
-    if (!a) return;
+    if (!a)
+        return;
     memset(a, 0, sizeof(*a));
     a->next_nest_id = 1;
     a->next_egg_id = 1;
@@ -30,45 +34,64 @@ void avian_init(avian_engine_t *a) {
 }
 
 void avian_destroy(avian_engine_t *a) {
-    if (!a) return;
+    if (!a)
+        return;
     memset(a, 0, sizeof(*a));
 }
 
 const char *avian_nest_state_name(avian_nest_state_t s) {
     switch (s) {
-    case AVIAN_NEST_BUILDING: return "building";
-    case AVIAN_NEST_WARM: return "warm";
-    case AVIAN_NEST_READY: return "ready";
-    case AVIAN_NEST_ROOSTING: return "roosting";
-    case AVIAN_NEST_MOLTING: return "molting";
-    case AVIAN_NEST_ABANDONED: return "abandoned";
-    default: return "unknown";
+        case AVIAN_NEST_BUILDING:
+            return "building";
+        case AVIAN_NEST_WARM:
+            return "warm";
+        case AVIAN_NEST_READY:
+            return "ready";
+        case AVIAN_NEST_ROOSTING:
+            return "roosting";
+        case AVIAN_NEST_MOLTING:
+            return "molting";
+        case AVIAN_NEST_ABANDONED:
+            return "abandoned";
+        default:
+            return "unknown";
     }
 }
 
 const char *avian_egg_state_name(avian_egg_state_t s) {
     switch (s) {
-    case AVIAN_EGG_LAID: return "laid";
-    case AVIAN_EGG_INCUBATING: return "incubating";
-    case AVIAN_EGG_READY: return "ready";
-    case AVIAN_EGG_FLEDGED: return "fledged";
-    case AVIAN_EGG_FAILED: return "failed";
-    case AVIAN_EGG_ABANDONED: return "abandoned";
-    default: return "unknown";
+        case AVIAN_EGG_LAID:
+            return "laid";
+        case AVIAN_EGG_INCUBATING:
+            return "incubating";
+        case AVIAN_EGG_READY:
+            return "ready";
+        case AVIAN_EGG_FLEDGED:
+            return "fledged";
+        case AVIAN_EGG_FAILED:
+            return "failed";
+        case AVIAN_EGG_ABANDONED:
+            return "abandoned";
+        default:
+            return "unknown";
     }
 }
 
 static avian_nest_t *find_nest(avian_engine_t *a, int id) {
-    if (!a) return NULL;
+    if (!a)
+        return NULL;
     for (int i = 0; i < AVIAN_MAX_NESTS; i++)
-        if (a->nests[i].active && a->nests[i].id == id) return &a->nests[i];
+        if (a->nests[i].active && a->nests[i].id == id)
+            return &a->nests[i];
     return NULL;
 }
 
 static avian_egg_t *find_egg(avian_engine_t *a, int id) {
-    if (!a) return NULL;
+    if (!a)
+        return NULL;
     for (int i = 0; i < AVIAN_MAX_EGGS; i++)
-        if (a->eggs[i].active && a->eggs[i].id == id) return &a->eggs[i];
+        if (a->eggs[i].active && a->eggs[i].id == id)
+            return &a->eggs[i];
     return NULL;
 }
 
@@ -81,7 +104,8 @@ const avian_egg_t *avian_egg_get(const avian_engine_t *a, int egg_id) {
 }
 
 static void refresh_nest_state(avian_nest_t *n) {
-    if (!n || !n->active) return;
+    if (!n || !n->active)
+        return;
     if (n->state == AVIAN_NEST_ROOSTING || n->state == AVIAN_NEST_MOLTING ||
         n->state == AVIAN_NEST_ABANDONED)
         return;
@@ -93,14 +117,19 @@ static void refresh_nest_state(avian_nest_t *n) {
         n->state = AVIAN_NEST_BUILDING;
 }
 
-int avian_nest_create(avian_engine_t *a, const char *name, const char *purpose,
-                      double warmth, double stability) {
-    if (!a || !a->initialized) return -1;
+int avian_nest_create(avian_engine_t *a, const char *name, const char *purpose, double warmth,
+                      double stability) {
+    if (!a || !a->initialized)
+        return -1;
     int slot = -1;
     for (int i = 0; i < AVIAN_MAX_NESTS; i++) {
-        if (!a->nests[i].active) { slot = i; break; }
+        if (!a->nests[i].active) {
+            slot = i;
+            break;
+        }
     }
-    if (slot < 0) return -1;
+    if (slot < 0)
+        return -1;
 
     avian_nest_t *n = &a->nests[slot];
     memset(n, 0, sizeof(*n));
@@ -118,11 +147,13 @@ int avian_nest_create(avian_engine_t *a, const char *name, const char *purpose,
     return n->id;
 }
 
-bool avian_nest_add_material(avian_engine_t *a, int nest_id, const char *material,
-                             double quality, bool lining) {
+bool avian_nest_add_material(avian_engine_t *a, int nest_id, const char *material, double quality,
+                             bool lining) {
     avian_nest_t *n = find_nest(a, nest_id);
-    if (!n || n->state == AVIAN_NEST_ABANDONED) return false;
-    if (n->material_count >= AVIAN_MATERIALS_MAX) return false;
+    if (!n || n->state == AVIAN_NEST_ABANDONED)
+        return false;
+    if (n->material_count >= AVIAN_MATERIALS_MAX)
+        return false;
     copy_str(n->materials[n->material_count], sizeof(n->materials[n->material_count]),
              material && *material ? material : "context");
     n->material_count++;
@@ -131,7 +162,8 @@ bool avian_nest_add_material(avian_engine_t *a, int nest_id, const char *materia
     n->warmth = clamp01(n->warmth + q * 0.04);
     n->last_tended_at = avian_now_sec();
     a->total_materials_added++;
-    if (n->state == AVIAN_NEST_MOLTING) n->state = AVIAN_NEST_WARM;
+    if (n->state == AVIAN_NEST_MOLTING)
+        n->state = AVIAN_NEST_WARM;
     refresh_nest_state(n);
     return true;
 }
@@ -139,7 +171,8 @@ bool avian_nest_add_material(avian_engine_t *a, int nest_id, const char *materia
 bool avian_nest_roost(avian_engine_t *a, int nest_id, const char *reason, double cooldown) {
     (void)reason;
     avian_nest_t *n = find_nest(a, nest_id);
-    if (!n || n->state == AVIAN_NEST_ABANDONED) return false;
+    if (!n || n->state == AVIAN_NEST_ABANDONED)
+        return false;
     n->state = AVIAN_NEST_ROOSTING;
     n->warmth = clamp01(n->warmth - (cooldown <= 0.0 ? 0.15 : cooldown));
     n->last_tended_at = avian_now_sec();
@@ -150,7 +183,8 @@ bool avian_nest_roost(avian_engine_t *a, int nest_id, const char *reason, double
 bool avian_nest_molt(avian_engine_t *a, int nest_id, const char *reason) {
     (void)reason;
     avian_nest_t *n = find_nest(a, nest_id);
-    if (!n || n->state == AVIAN_NEST_ABANDONED) return false;
+    if (!n || n->state == AVIAN_NEST_ABANDONED)
+        return false;
     n->state = AVIAN_NEST_MOLTING;
     n->stability = clamp01(n->stability * 0.85);
     n->last_tended_at = avian_now_sec();
@@ -161,12 +195,17 @@ bool avian_nest_molt(avian_engine_t *a, int nest_id, const char *reason) {
 int avian_brood_lay(avian_engine_t *a, int nest_id, const char *name, const char *kind,
                     const char *lineage, double risk, int required_cycles) {
     avian_nest_t *n = find_nest(a, nest_id);
-    if (!a || !a->initialized || !n || n->state == AVIAN_NEST_ABANDONED) return -1;
+    if (!a || !a->initialized || !n || n->state == AVIAN_NEST_ABANDONED)
+        return -1;
     int slot = -1;
     for (int i = 0; i < AVIAN_MAX_EGGS; i++) {
-        if (!a->eggs[i].active) { slot = i; break; }
+        if (!a->eggs[i].active) {
+            slot = i;
+            break;
+        }
     }
-    if (slot < 0) return -1;
+    if (slot < 0)
+        return -1;
 
     avian_egg_t *e = &a->eggs[slot];
     memset(e, 0, sizeof(*e));
@@ -200,7 +239,7 @@ bool avian_brood_tend(avian_engine_t *a, int egg_id, double warmth, const char *
     e->cycles++;
     e->last_tended_at = avian_now_sec();
     e->state = (e->readiness >= 0.80 && e->cycles >= e->required_cycles) ? AVIAN_EGG_READY
-                                                                          : AVIAN_EGG_INCUBATING;
+                                                                         : AVIAN_EGG_INCUBATING;
     if (n) {
         n->warmth = clamp01(n->warmth + 0.03 * w);
         n->last_tended_at = e->last_tended_at;
@@ -215,19 +254,22 @@ bool avian_brood_tend(avian_engine_t *a, int egg_id, double warmth, const char *
 bool avian_brood_fledge(avian_engine_t *a, int egg_id, char *reason, size_t reason_len) {
     avian_egg_t *e = find_egg(a, egg_id);
     if (!e) {
-        if (reason && reason_len) snprintf(reason, reason_len, "egg not found");
+        if (reason && reason_len)
+            snprintf(reason, reason_len, "egg not found");
         return false;
     }
     if (e->state != AVIAN_EGG_READY) {
         if (reason && reason_len)
-            snprintf(reason, reason_len, "not ready: state=%s readiness=%.2f cycles=%d/%d risk=%.2f",
+            snprintf(reason, reason_len,
+                     "not ready: state=%s readiness=%.2f cycles=%d/%d risk=%.2f",
                      avian_egg_state_name(e->state), e->readiness, e->cycles, e->required_cycles,
                      e->risk);
         return false;
     }
     if (e->risk > 0.65 && e->readiness < 0.92) {
         if (reason && reason_len)
-            snprintf(reason, reason_len, "high-risk candidate needs readiness >=0.92 before fledging");
+            snprintf(reason, reason_len,
+                     "high-risk candidate needs readiness >=0.92 before fledging");
         return false;
     }
     e->state = AVIAN_EGG_FLEDGED;
@@ -242,40 +284,47 @@ bool avian_brood_fledge(avian_engine_t *a, int egg_id, char *reason, size_t reas
 bool avian_brood_abandon(avian_engine_t *a, int egg_id, const char *reason) {
     (void)reason;
     avian_egg_t *e = find_egg(a, egg_id);
-    if (!e) return false;
+    if (!e)
+        return false;
     e->state = AVIAN_EGG_ABANDONED;
     e->last_tended_at = avian_now_sec();
     return true;
 }
 
 static int append_json_str(char *buf, size_t len, int n, const char *s) {
-    if (!buf || len == 0 || n < 0 || (size_t)n >= len) return n;
+    if (!buf || len == 0 || n < 0 || (size_t)n >= len)
+        return n;
     n += snprintf(buf + n, len - (size_t)n, "\"");
     for (const char *p = s ? s : ""; *p && (size_t)n < len; p++) {
-        if (*p == '"' || *p == '\\') n += snprintf(buf + n, len - (size_t)n, "\\%c", *p);
-        else if (*p == '\n') n += snprintf(buf + n, len - (size_t)n, "\\n");
-        else n += snprintf(buf + n, len - (size_t)n, "%c", *p);
+        if (*p == '"' || *p == '\\')
+            n += snprintf(buf + n, len - (size_t)n, "\\%c", *p);
+        else if (*p == '\n')
+            n += snprintf(buf + n, len - (size_t)n, "\\n");
+        else
+            n += snprintf(buf + n, len - (size_t)n, "%c", *p);
     }
-    if ((size_t)n < len) n += snprintf(buf + n, len - (size_t)n, "\"");
+    if ((size_t)n < len)
+        n += snprintf(buf + n, len - (size_t)n, "\"");
     return n;
 }
 
 int avian_nest_json(const avian_engine_t *a, int nest_id, char *buf, size_t len) {
     const avian_nest_t *n0 = avian_nest_get(a, nest_id);
-    if (!buf || len == 0) return 0;
-    if (!n0) return snprintf(buf, len, "{\"ok\":false,\"error\":\"nest not found\"}");
-    int n = snprintf(buf, len,
-                     "{\"ok\":true,\"id\":%d,\"name\":", n0->id);
+    if (!buf || len == 0)
+        return 0;
+    if (!n0)
+        return snprintf(buf, len, "{\"ok\":false,\"error\":\"nest not found\"}");
+    int n = snprintf(buf, len, "{\"ok\":true,\"id\":%d,\"name\":", n0->id);
     n = append_json_str(buf, len, n, n0->name);
-    n += snprintf(buf + n, len - (size_t)n,
-                  ",\"purpose\":");
+    n += snprintf(buf + n, len - (size_t)n, ",\"purpose\":");
     n = append_json_str(buf, len, n, n0->purpose);
     n += snprintf(buf + n, len - (size_t)n,
                   ",\"state\":\"%s\",\"warmth\":%.3f,\"stability\":%.3f,"
                   "\"materials\":[",
                   avian_nest_state_name(n0->state), n0->warmth, n0->stability);
     for (int i = 0; i < n0->material_count; i++) {
-        if (i) n += snprintf(buf + n, len - (size_t)n, ",");
+        if (i)
+            n += snprintf(buf + n, len - (size_t)n, ",");
         n = append_json_str(buf, len, n, n0->materials[i]);
     }
     n += snprintf(buf + n, len - (size_t)n, "]}");
@@ -284,14 +333,17 @@ int avian_nest_json(const avian_engine_t *a, int nest_id, char *buf, size_t len)
 
 int avian_egg_json(const avian_engine_t *a, int egg_id, char *buf, size_t len) {
     const avian_egg_t *e = avian_egg_get(a, egg_id);
-    if (!buf || len == 0) return 0;
-    if (!e) return snprintf(buf, len, "{\"ok\":false,\"error\":\"egg not found\"}");
-    int n = snprintf(buf, len, "{\"ok\":true,\"id\":%d,\"nest_id\":%d,\"name\":", e->id,
-                     e->nest_id);
+    if (!buf || len == 0)
+        return 0;
+    if (!e)
+        return snprintf(buf, len, "{\"ok\":false,\"error\":\"egg not found\"}");
+    int n =
+        snprintf(buf, len, "{\"ok\":true,\"id\":%d,\"nest_id\":%d,\"name\":", e->id, e->nest_id);
     n = append_json_str(buf, len, n, e->name);
     n += snprintf(buf + n, len - (size_t)n, ",\"kind\":");
     n = append_json_str(buf, len, n, e->kind);
-    n += snprintf(buf + n, len - (size_t)n, ",\"state\":\"%s\",\"readiness\":%.3f,"
+    n += snprintf(buf + n, len - (size_t)n,
+                  ",\"state\":\"%s\",\"readiness\":%.3f,"
                   "\"risk\":%.3f,\"cycles\":%d,\"required_cycles\":%d,\"lineage\":",
                   avian_egg_state_name(e->state), e->readiness, e->risk, e->cycles,
                   e->required_cycles);
@@ -301,19 +353,26 @@ int avian_egg_json(const avian_engine_t *a, int egg_id, char *buf, size_t len) {
 }
 
 int avian_status_json(const avian_engine_t *a, char *buf, size_t len) {
-    if (!buf || len == 0) return 0;
-    if (!a || !a->initialized) return snprintf(buf, len, "{\"initialized\":false}");
+    if (!buf || len == 0)
+        return 0;
+    if (!a || !a->initialized)
+        return snprintf(buf, len, "{\"initialized\":false}");
     int active_nests = 0, active_eggs = 0, ready_eggs = 0, incubating = 0, roosting = 0;
     for (int i = 0; i < AVIAN_MAX_NESTS; i++) {
-        if (!a->nests[i].active) continue;
+        if (!a->nests[i].active)
+            continue;
         active_nests++;
-        if (a->nests[i].state == AVIAN_NEST_ROOSTING) roosting++;
+        if (a->nests[i].state == AVIAN_NEST_ROOSTING)
+            roosting++;
     }
     for (int i = 0; i < AVIAN_MAX_EGGS; i++) {
-        if (!a->eggs[i].active) continue;
+        if (!a->eggs[i].active)
+            continue;
         active_eggs++;
-        if (a->eggs[i].state == AVIAN_EGG_READY) ready_eggs++;
-        if (a->eggs[i].state == AVIAN_EGG_INCUBATING) incubating++;
+        if (a->eggs[i].state == AVIAN_EGG_READY)
+            ready_eggs++;
+        if (a->eggs[i].state == AVIAN_EGG_INCUBATING)
+            incubating++;
     }
     return snprintf(buf, len,
                     "{\"initialized\":true,\"nests\":%d,\"eggs\":%d,\"ready_eggs\":%d,"

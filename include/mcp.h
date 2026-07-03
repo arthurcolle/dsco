@@ -35,61 +35,58 @@
  * Discovered tools are registered for use by the LLM.
  */
 
-#define MCP_MAX_SERVERS    64
-#define MCP_MAX_TOOLS      2048
-#define MCP_MAX_LINE       (256 * 1024)
-#define MCP_MAX_ARGS       32
-#define MCP_MAX_ENV        32
-#define MCP_MAX_HEADERS    16
+#define MCP_MAX_SERVERS 64
+#define MCP_MAX_TOOLS 2048
+#define MCP_MAX_LINE (256 * 1024)
+#define MCP_MAX_ARGS 32
+#define MCP_MAX_ENV 32
+#define MCP_MAX_HEADERS 16
 
-typedef enum {
-    MCP_TRANSPORT_STDIO = 0,
-    MCP_TRANSPORT_HTTP  = 1
-} mcp_transport_t;
+typedef enum { MCP_TRANSPORT_STDIO = 0, MCP_TRANSPORT_HTTP = 1 } mcp_transport_t;
 
 typedef struct {
-    char  name[256];
-    char  remote_name[256];     /* exact MCP tool name to send in tools/call */
-    char  description[1024];
-    char  input_schema[16384];  /* JSON schema string */
-    int   server_idx;          /* which server owns this tool */
+    char name[256];
+    char remote_name[256]; /* exact MCP tool name to send in tools/call */
+    char description[1024];
+    char input_schema[16384]; /* JSON schema string */
+    int server_idx;           /* which server owns this tool */
 } mcp_tool_t;
 
 typedef struct {
-    char  name[128];
-    char  command[512];
-    char  url[1024];
-    char  cwd[512];
-    char  source[256];
-    char  args[MCP_MAX_ARGS][256];
-    int   argc;
-    char  env_keys[MCP_MAX_ENV][128];
-    char  env_vals[MCP_MAX_ENV][1024];
-    int   envc;
-    char  header_keys[MCP_MAX_HEADERS][128];
-    char  header_vals[MCP_MAX_HEADERS][1024];
-    int   headerc;
-    char  session_id[256];     /* streamable HTTP MCP session id */
-    int   pid;
-    int   stdin_fd;
-    int   stdout_fd;
-    int   rpc_id;              /* monotonic JSON-RPC id */
+    char name[128];
+    char command[512];
+    char url[1024];
+    char cwd[512];
+    char source[256];
+    char args[MCP_MAX_ARGS][256];
+    int argc;
+    char env_keys[MCP_MAX_ENV][128];
+    char env_vals[MCP_MAX_ENV][1024];
+    int envc;
+    char header_keys[MCP_MAX_HEADERS][128];
+    char header_vals[MCP_MAX_HEADERS][1024];
+    int headerc;
+    char session_id[256]; /* streamable HTTP MCP session id */
+    int pid;
+    int stdin_fd;
+    int stdout_fd;
+    int rpc_id; /* monotonic JSON-RPC id */
     mcp_transport_t transport;
-    bool  initialized;
+    bool initialized;
 } mcp_server_t;
 
 typedef struct {
     mcp_server_t servers[MCP_MAX_SERVERS];
-    int          server_count;
-    int          configured_count;
-    int          failed_count;
-    mcp_tool_t   tools[MCP_MAX_TOOLS];
-    int          tool_count;
-    bool         loaded;
+    int server_count;
+    int configured_count;
+    int failed_count;
+    mcp_tool_t tools[MCP_MAX_TOOLS];
+    int tool_count;
+    bool loaded;
 } mcp_registry_t;
 
 /* Load mcp.json config and spawn servers */
-int  mcp_init(mcp_registry_t *reg);
+int mcp_init(mcp_registry_t *reg);
 
 /* Suppress mcp_init's stderr progress lines (useful when init runs in a
  * background thread and would otherwise corrupt the TUI input panel). */
@@ -108,7 +105,6 @@ const mcp_tool_t *mcp_get_tools(mcp_registry_t *reg, int *count);
 
 /* Execute a tool call via its server's JSON-RPC transport.
  * Returns result JSON string (caller owns), or NULL on error. */
-char *mcp_call_tool(mcp_registry_t *reg, const char *tool_name,
-                     const char *arguments_json);
+char *mcp_call_tool(mcp_registry_t *reg, const char *tool_name, const char *arguments_json);
 
 #endif

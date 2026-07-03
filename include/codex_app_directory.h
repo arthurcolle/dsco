@@ -43,11 +43,12 @@ typedef struct {
 
 void codex_app_directory_init(codex_app_directory_t *dir);
 void codex_app_directory_free(codex_app_directory_t *dir);
-bool codex_app_directory_load_file(codex_app_directory_t *dir, const char *path, char *err, size_t err_len);
+bool codex_app_directory_load_file(codex_app_directory_t *dir, const char *path, char *err,
+                                   size_t err_len);
 const codex_app_directory_entry_t *codex_app_directory_find(const codex_app_directory_t *dir,
                                                             const char *id_or_name);
-unsigned codex_app_directory_actions_for_labels(bool retrievable, bool sync,
-                                                bool consequential, bool interactive);
+unsigned codex_app_directory_actions_for_labels(bool retrievable, bool sync, bool consequential,
+                                                bool interactive);
 const char *codex_app_directory_default_path(char *buf, size_t buf_len);
 
 #endif /* DSCO_CODEX_APP_DIRECTORY_H */

@@ -20,7 +20,8 @@ double gsl_ran_exponential(const gsl_rng *r, double mu) {
 }
 
 double gsl_ran_exponential_pdf(double x, double mu) {
-    if (x < 0) return 0.0;
+    if (x < 0)
+        return 0.0;
     return (1.0 / mu) * exp(-x / mu);
 }
 
@@ -34,11 +35,14 @@ double gsl_ran_gamma(const gsl_rng *r, double a, double b) {
     for (;;) {
         double x = gsl_ran_gaussian(r, 1.0);
         double v = 1.0 + c * x;
-        if (v <= 0.0) continue;
+        if (v <= 0.0)
+            continue;
         v = v * v * v;
         double u = gsl_rng_uniform(r);
-        if (u < 1.0 - 0.0331 * x * x * x * x) return b * d * v;
-        if (log(u) < 0.5 * x * x + d * (1.0 - v + log(v))) return b * d * v;
+        if (u < 1.0 - 0.0331 * x * x * x * x)
+            return b * d * v;
+        if (log(u) < 0.5 * x * x + d * (1.0 - v + log(v)))
+            return b * d * v;
     }
 }
 
@@ -61,7 +65,8 @@ double gsl_ran_poisson(const gsl_rng *r, double mu) {
 double gsl_ran_binomial(const gsl_rng *r, double p, unsigned int n) {
     unsigned int k = 0;
     for (unsigned int i = 0; i < n; i++) {
-        if (gsl_rng_uniform(r) < p) k++;
+        if (gsl_rng_uniform(r) < p)
+            k++;
     }
     return k;
 }

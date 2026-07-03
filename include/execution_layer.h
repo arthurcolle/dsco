@@ -22,9 +22,8 @@ typedef enum {
     EXEC_STATUS_FAILED,
 } execution_status_t;
 
-typedef bool (*execution_leaf_fn)(const char *name, const char *input_json,
-                                  const char *tier, char *result,
-                                  size_t result_len);
+typedef bool (*execution_leaf_fn)(const char *name, const char *input_json, const char *tier,
+                                  char *result, size_t result_len);
 
 typedef struct {
     char principal[64];
@@ -58,9 +57,7 @@ typedef struct {
 const char *execution_effect_name(execution_effect_t effect);
 const char *execution_status_name(execution_status_t status);
 
-bool execution_submit(const execution_intent_t *intent,
-                      execution_receipt_t *receipt,
-                      char *result,
+bool execution_submit(const execution_intent_t *intent, execution_receipt_t *receipt, char *result,
                       size_t result_len);
 
 bool execution_last_receipt_json(char *out, size_t out_len);

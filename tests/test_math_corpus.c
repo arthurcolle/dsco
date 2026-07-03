@@ -133,7 +133,7 @@ int main(int argc, char **argv) {
     }
 
     fclose(f);
-    printf("=== math corpus: %d passed, %d failed (route=%d, value=%d) ===\n",
-           passed, failed, route_failures, value_failures);
+    printf("=== math corpus: %d passed, %d failed (route=%d, value=%d) ===\n", passed, failed,
+           route_failures, value_failures);
     return failed == 0 ? 0 : 1;
 }

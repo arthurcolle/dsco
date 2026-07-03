@@ -26,20 +26,16 @@ struct provider {
     const char *api_url;
 
     /* Build API request JSON from conversation + session state */
-    char *(*build_request)(provider_t *p, conversation_t *conv,
-                            session_state_t *session, int max_tokens,
-                            const char *credential);
+    char *(*build_request)(provider_t *p, conversation_t *conv, session_state_t *session,
+                           int max_tokens, const char *credential);
 
     /* Build HTTP headers for API request */
     struct curl_slist *(*build_headers)(provider_t *p, const char *api_key);
 
     /* Stream API call with callbacks */
-    stream_result_t (*stream)(provider_t *p, const char *api_key,
-                               const char *request_json,
-                               stream_text_cb text_cb,
-                               stream_tool_start_cb tool_cb,
-                               stream_thinking_cb thinking_cb,
-                               void *cb_ctx);
+    stream_result_t (*stream)(provider_t *p, const char *api_key, const char *request_json,
+                              stream_text_cb text_cb, stream_tool_start_cb tool_cb,
+                              stream_thinking_cb thinking_cb, void *cb_ctx);
 
     /* Provider-specific data */
     void *data;
@@ -58,12 +54,9 @@ bool provider_prepare(provider_t *p);
 
 /* Stream using prepared transport state when available. Falls back to the
  * provider's legacy stream callback when no reusable transport exists. */
-stream_result_t provider_stream_reuse(provider_t *p, const char *api_key,
-                                      const char *request_json,
-                                      stream_text_cb text_cb,
-                                      stream_tool_start_cb tool_cb,
-                                      stream_thinking_cb thinking_cb,
-                                      void *cb_ctx);
+stream_result_t provider_stream_reuse(provider_t *p, const char *api_key, const char *request_json,
+                                      stream_text_cb text_cb, stream_tool_start_cb tool_cb,
+                                      stream_thinking_cb thinking_cb, void *cb_ctx);
 
 /* Drop reusable transport state and force the next call to reconnect. */
 void provider_reset_connection(provider_t *p);
@@ -92,8 +85,7 @@ bool provider_has_usable_key(const char *provider_name, const char *fallback_api
 bool provider_is_local_endpoint(const char *provider_name);
 
 /* Select the provider that should service a model for the current session */
-const char *provider_route_for_model(const char *model,
-                                     const char *fallback_api_key,
+const char *provider_route_for_model(const char *model, const char *fallback_api_key,
                                      const char *provider_override);
 
 /* Resolve the actual request key for an already-selected provider */
@@ -104,8 +96,7 @@ const char *provider_resolve_request_api_key(const char *provider_name,
  * workers keep the parent's provider/auth mode. */
 void provider_export_child_process_credentials_for_provider(const char *provider_name,
                                                             const char *resolved_key);
-void provider_export_child_process_credentials(const char *model,
-                                               const char *resolved_key);
+void provider_export_child_process_credentials(const char *model, const char *resolved_key);
 
 /* Auth-mode debugging helpers */
 bool provider_debug_auth_enabled(void);
@@ -125,7 +116,7 @@ const char *provider_sakana_payg_request_key(void);
 /* Fill subscription_type_out and rate_limit_tier_out (both at least 64 bytes).
  * Returns true when at least one field was found. */
 bool provider_claude_code_get_account_info(char *subscription_type_out, size_t st_len,
-                                           char *rate_limit_tier_out,   size_t rl_len);
+                                           char *rate_limit_tier_out, size_t rl_len);
 
 /* Classify an error body/message as a credit/billing failure. Shared across
  * Anthropic and OpenAI-compat streaming paths so both can mark the stream
@@ -139,8 +130,7 @@ bool provider_msg_is_credit_too_low(const char *msg);
 bool provider_msg_is_gated(const char *msg);
 time_t provider_credit_reset_at_from_value(const char *value, time_t now);
 time_t provider_credit_reset_at_from_text(const char *text, time_t now);
-bool provider_credit_reset_at_from_header_line(const char *line, time_t now,
-                                               time_t *reset_at);
+bool provider_credit_reset_at_from_header_line(const char *line, time_t now, time_t *reset_at);
 
 /* Classify a provider error body as a context/prompt-length rejection
  * ("prompt is too long", "context_length_exceeded", "maximum context length",
@@ -155,15 +145,12 @@ bool provider_msg_is_context_overflow(const char *msg);
 bool provider_model_supports_cache_control(const char *model);
 
 /* Check whether a model is routable, returning the routed provider when asked */
-bool provider_model_is_routable(const char *model,
-                                const char *fallback_api_key,
-                                const char *provider_override,
-                                const char **out_provider_name);
+bool provider_model_is_routable(const char *model, const char *fallback_api_key,
+                                const char *provider_override, const char **out_provider_name);
 
 /* Build a default cross-lab fallback chain for a primary model. Returns the
  * number of models written into out_models. */
-int provider_build_default_fallback_models(const char *model,
-                                           char out_models[][128],
+int provider_build_default_fallback_models(const char *model, char out_models[][128],
                                            int max_models);
 
 /* Pick a sensible default primary model for dsco-native execution. When

@@ -23,26 +23,26 @@
  * ────────────────────────────────────────────────────────────────────────── */
 
 typedef struct dsco_mux {
-    dsco_project_t  *projects[DSCO_PROJECT_MAX];
-    int              count;
-    int              focused;      /* index into projects[] — mirrors grid focus */
+    dsco_project_t *projects[DSCO_PROJECT_MAX];
+    int count;
+    int focused; /* index into projects[] — mirrors grid focus */
 
-    dsco_grid_t      grid;
-    bool             running;
-    bool             needs_redraw;
+    dsco_grid_t grid;
+    bool running;
+    bool needs_redraw;
 
     /* terminal state */
-    int              term_rows;
-    int              term_cols;
-    char             prefix_pending;   /* != 0 while waiting for second key after Ctrl+B */
+    int term_rows;
+    int term_cols;
+    char prefix_pending; /* != 0 while waiting for second key after Ctrl+B */
 
     /* per-project drain threads write a byte here to wake the render loop;
      * the main loop polls this fd + stdin only. */
-    int              wake_fd_r;
-    int              wake_fd_w;
+    int wake_fd_r;
+    int wake_fd_w;
 
     /* api key forwarded to workers */
-    char             api_key[256];
+    char api_key[256];
 } dsco_mux_t;
 
 /* Top-level entry. Boots the multiplexer with an initial project rooted at

@@ -25,11 +25,11 @@
 #include <stdint.h>
 
 /* Maximum length of a secret key name (e.g. "ANTHROPIC_API_KEY") */
-#define SEALED_KEY_MAX  64
+#define SEALED_KEY_MAX 64
 /* Maximum length of a secret value */
-#define SEALED_VAL_MAX  4096
+#define SEALED_VAL_MAX 4096
 /* Maximum number of entries */
-#define SEALED_ENTRIES  64
+#define SEALED_ENTRIES 64
 
 /* Initialise the store and register the wiper with tamper.c.
  * Loads existing secrets from environment variables into the store. */
@@ -46,12 +46,12 @@ bool sealed_store_master_key_copy(uint8_t out[32]);
 
 /* Store or overwrite a secret.  val_len == 0 means strlen(val).
  * Returns 0 on success, -1 on overflow. */
-int  sealed_store_put(const char *key, const char *val, size_t val_len);
+int sealed_store_put(const char *key, const char *val, size_t val_len);
 
 /* Copy the secret for *key into buf[0..buf_len).
  * Returns the number of bytes written (not including NUL), or -1 if not found
  * or buf too small.  Always NUL-terminates on success. */
-int  sealed_store_get(const char *key, char *buf, size_t buf_len);
+int sealed_store_get(const char *key, char *buf, size_t buf_len);
 
 /* Remove and zero one entry.  No-op if key not found. */
 void sealed_store_wipe(const char *key);

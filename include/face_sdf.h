@@ -14,44 +14,44 @@
 
 typedef struct {
     /* skull / proportions */
-    double skull_r;      /* base head radius                        ~1.00 */
-    double skull_flat;   /* back-of-head flattening (0..1)          ~0.10 */
-    double face_long;    /* vertical elongation of the face         ~1.15 */
-    double jaw_w;        /* jaw width                                ~0.62 */
-    double jaw_len;      /* chin drop                                ~0.55 */
-    double cheek;        /* cheekbone prominence                    ~0.20 */
-    double temple;       /* temple narrowing                        ~0.90 */
+    double skull_r;    /* base head radius                        ~1.00 */
+    double skull_flat; /* back-of-head flattening (0..1)          ~0.10 */
+    double face_long;  /* vertical elongation of the face         ~1.15 */
+    double jaw_w;      /* jaw width                                ~0.62 */
+    double jaw_len;    /* chin drop                                ~0.55 */
+    double cheek;      /* cheekbone prominence                    ~0.20 */
+    double temple;     /* temple narrowing                        ~0.90 */
 
     /* brow + forehead */
-    double brow;         /* brow-ridge prominence                   ~0.10 */
-    double brow_y;       /* brow height                             ~0.18 */
-    double forehead;     /* forehead roundness                      ~0.95 */
+    double brow;     /* brow-ridge prominence                   ~0.10 */
+    double brow_y;   /* brow height                             ~0.18 */
+    double forehead; /* forehead roundness                      ~0.95 */
 
     /* nose */
-    double nose_len;     /* tip projection along +Z                 ~0.34 */
-    double nose_w;       /* nostril width                           ~0.18 */
-    double nose_bridge;  /* bridge height                           ~0.10 */
-    double nose_y;       /* vertical center of nose                 ~0.02 */
+    double nose_len;    /* tip projection along +Z                 ~0.34 */
+    double nose_w;      /* nostril width                           ~0.18 */
+    double nose_bridge; /* bridge height                           ~0.10 */
+    double nose_y;      /* vertical center of nose                 ~0.02 */
 
     /* eyes */
-    double eye_sep;      /* half-distance between eyes              ~0.30 */
-    double eye_y;        /* eye line height                        ~0.06 */
-    double eye_size;     /* eyeball radius                          ~0.14 */
-    double eye_depth;    /* socket recession along -Z               ~0.10 */
-    double lid;          /* upper-lid coverage (0 open .. 1 shut)   ~0.30 */
+    double eye_sep;   /* half-distance between eyes              ~0.30 */
+    double eye_y;     /* eye line height                        ~0.06 */
+    double eye_size;  /* eyeball radius                          ~0.14 */
+    double eye_depth; /* socket recession along -Z               ~0.10 */
+    double lid;       /* upper-lid coverage (0 open .. 1 shut)   ~0.30 */
 
     /* mouth / lips */
-    double mouth_w;      /* mouth half-width                        ~0.26 */
-    double mouth_y;      /* mouth height                           ~-0.40 */
-    double lip;          /* lip fullness                            ~0.06 */
-    double smile;        /* mouth-corner lift (-1..1)               ~0.10 */
+    double mouth_w; /* mouth half-width                        ~0.26 */
+    double mouth_y; /* mouth height                           ~-0.40 */
+    double lip;     /* lip fullness                            ~0.06 */
+    double smile;   /* mouth-corner lift (-1..1)               ~0.10 */
 
     /* ears */
-    double ear;          /* ear size (0 = hidden)                   ~0.16 */
-    double ear_y;        /* ear height                              ~0.00 */
+    double ear;   /* ear size (0 = hidden)                   ~0.16 */
+    double ear_y; /* ear height                              ~0.00 */
 
     /* surface */
-    double blend;        /* global smooth-min radius (softness)     ~0.06 */
+    double blend; /* global smooth-min radius (softness)     ~0.06 */
 } face_params_t;
 
 /* Material ids returned by face_sdf_material. */
@@ -70,7 +70,7 @@ enum {
 void face_params_default(face_params_t *p);
 
 /* A couple of preset variations so the controls can cycle "faces". idx wraps. */
-int  face_preset_count(void);
+int face_preset_count(void);
 void face_preset(int idx, face_params_t *p, const char **name_out);
 
 /* Signed distance to the face surface at object-space (x,y,z). */

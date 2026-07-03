@@ -2,11 +2,8 @@
 #include "gsl/gsl_fit.h"
 #include <math.h>
 
-int gsl_fit_linear(const double x[], size_t xstride,
-                   const double y[], size_t ystride,
-                   size_t n,
-                   double *c0, double *c1,
-                   double *cov00, double *cov01, double *cov11,
+int gsl_fit_linear(const double x[], size_t xstride, const double y[], size_t ystride, size_t n,
+                   double *c0, double *c1, double *cov00, double *cov01, double *cov11,
                    double *chisq) {
     double sum_x = 0.0, sum_y = 0.0, sum_xx = 0.0, sum_xy = 0.0;
     for (size_t i = 0; i < n; i++) {

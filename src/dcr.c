@@ -14,7 +14,7 @@
 #include <unistd.h>
 
 #define DCR_MAX_PROVIDERS 128
-#define DCR_MAX_MODELS    256
+#define DCR_MAX_MODELS 256
 
 static dcr_provider_t g_providers[DCR_MAX_PROVIDERS];
 static size_t g_provider_count;
@@ -236,7 +236,8 @@ static bool dcr_provider_valid(const dcr_provider_t *p, char *err, size_t err_le
         dcr_copy(err, err_len, "missing base_url");
         return false;
     }
-    if (!(strncmp(p->base_url, "https://", 8) == 0 || strncmp(p->base_url, "http://localhost", 16) == 0 ||
+    if (!(strncmp(p->base_url, "https://", 8) == 0 ||
+          strncmp(p->base_url, "http://localhost", 16) == 0 ||
           strncmp(p->base_url, "http://127.0.0.1", 16) == 0)) {
         dcr_copy(err, err_len, "base_url must be https or loopback http");
         return false;
@@ -305,7 +306,8 @@ static bool dcr_load_provider_toml(const char *path, char *err, size_t err_len) 
         char *key = dcr_trim(s);
         char *val = dcr_trim(eq + 1);
         char tmp[512];
-        bool in_provider = strncmp(section, "provider.", 9) == 0 || strcmp(section, "provider") == 0;
+        bool in_provider =
+            strncmp(section, "provider.", 9) == 0 || strcmp(section, "provider") == 0;
         bool in_prov = strstr(section, ".provenance") != NULL || strcmp(section, "provenance") == 0;
         if (!in_provider && !in_prov)
             continue;
@@ -421,13 +423,25 @@ static bool dcr_load_model_json(const char *path, char *err, size_t err_len) {
     memset(&m, 0, sizeof(m));
     char *s;
     s = json_get_str(buf, "id");
-    if (s) { dcr_copy(m.id, sizeof(m.id), s); free(s); }
+    if (s) {
+        dcr_copy(m.id, sizeof(m.id), s);
+        free(s);
+    }
     s = json_get_str(buf, "provider");
-    if (s) { dcr_copy(m.provider, sizeof(m.provider), s); free(s); }
+    if (s) {
+        dcr_copy(m.provider, sizeof(m.provider), s);
+        free(s);
+    }
     s = json_get_str(buf, "display_name");
-    if (s) { dcr_copy(m.display_name, sizeof(m.display_name), s); free(s); }
+    if (s) {
+        dcr_copy(m.display_name, sizeof(m.display_name), s);
+        free(s);
+    }
     s = json_get_str(buf, "wire_model");
-    if (s) { dcr_copy(m.wire_model, sizeof(m.wire_model), s); free(s); }
+    if (s) {
+        dcr_copy(m.wire_model, sizeof(m.wire_model), s);
+        free(s);
+    }
     if (!m.wire_model[0])
         dcr_copy(m.wire_model, sizeof(m.wire_model), m.id);
     m.context_window = json_get_int(buf, "context_window", 0);
@@ -489,10 +503,18 @@ void dcr_reload(void) {
     g_loaded = true;
 }
 
-bool dcr_is_loaded(void) { return g_loaded; }
+bool dcr_is_loaded(void) {
+    return g_loaded;
+}
 
-size_t dcr_provider_count(void) { dcr_init(); return g_provider_count; }
-const dcr_provider_t *dcr_provider_at(size_t idx) { dcr_init(); return idx < g_provider_count ? &g_providers[idx] : NULL; }
+size_t dcr_provider_count(void) {
+    dcr_init();
+    return g_provider_count;
+}
+const dcr_provider_t *dcr_provider_at(size_t idx) {
+    dcr_init();
+    return idx < g_provider_count ? &g_providers[idx] : NULL;
+}
 
 const dcr_provider_t *dcr_provider_find(const char *name_or_alias) {
     dcr_init();
@@ -549,8 +571,14 @@ int dcr_provider_request_max_retries(const char *provider, int fallback) {
     return p && p->request_max_retries > 0 ? p->request_max_retries : fallback;
 }
 
-size_t dcr_model_count(void) { dcr_init(); return g_model_count; }
-const dcr_model_t *dcr_model_at(size_t idx) { dcr_init(); return idx < g_model_count ? &g_models[idx] : NULL; }
+size_t dcr_model_count(void) {
+    dcr_init();
+    return g_model_count;
+}
+const dcr_model_t *dcr_model_at(size_t idx) {
+    dcr_init();
+    return idx < g_model_count ? &g_models[idx] : NULL;
+}
 const dcr_model_t *dcr_model_find(const char *id_or_alias) {
     dcr_init();
     for (size_t i = 0; i < g_model_count; i++) {
@@ -560,8 +588,8 @@ const dcr_model_t *dcr_model_find(const char *id_or_alias) {
     return NULL;
 }
 
-const char *dcr_reasoning_effort_normalize(const char *provider, const char *model, const char *effort,
-                                           char *out, size_t out_len) {
+const char *dcr_reasoning_effort_normalize(const char *provider, const char *model,
+                                           const char *effort, char *out, size_t out_len) {
     if (!out || out_len == 0)
         return NULL;
     const char *e = effort && effort[0] ? effort : EFFORT_HIGH;
@@ -608,24 +636,24 @@ static int dcr_write_default_sakana(void) {
         fprintf(stderr, "dcr: cannot write %s: %s\n", path, strerror(errno));
         return 1;
     }
-    fprintf(f,
-            "[provider.sakana]\n"
-            "id = \"sakana\"\n"
-            "display_name = \"Sakana API\"\n"
-            "description = \"Sakana Fugu multi-agent model provider\"\n"
-            "base_url = \"https://api.sakana.ai/v1\"\n"
-            "wire_api = \"chat_completions\"\n"
-            "env_keys = [\"FUGU_API_KEY\", \"SAKANA_API_KEY\", \"FISH_API_KEY\", \"SAKANA_TOKEN\"]\n"
-            "aliases = [\"fugu\", \"sakana-ai\"]\n"
-            "default_model = \"fugu\"\n"
-            "stream_idle_timeout_ms = 7200000\n"
-            "stream_max_retries = 5\n"
-            "request_max_retries = 4\n"
-            "idempotent_retries = true\n"
-            "\n[provider.sakana.provenance]\n"
-            "source = \"sakana_fugu_docs\"\n"
-            "url = \"https://api.sakana.ai\"\n"
-            "confidence = 0.95\n");
+    fprintf(
+        f, "[provider.sakana]\n"
+           "id = \"sakana\"\n"
+           "display_name = \"Sakana API\"\n"
+           "description = \"Sakana Fugu multi-agent model provider\"\n"
+           "base_url = \"https://api.sakana.ai/v1\"\n"
+           "wire_api = \"chat_completions\"\n"
+           "env_keys = [\"FUGU_API_KEY\", \"SAKANA_API_KEY\", \"FISH_API_KEY\", \"SAKANA_TOKEN\"]\n"
+           "aliases = [\"fugu\", \"sakana-ai\"]\n"
+           "default_model = \"fugu\"\n"
+           "stream_idle_timeout_ms = 7200000\n"
+           "stream_max_retries = 5\n"
+           "request_max_retries = 4\n"
+           "idempotent_retries = true\n"
+           "\n[provider.sakana.provenance]\n"
+           "source = \"sakana_fugu_docs\"\n"
+           "url = \"https://api.sakana.ai\"\n"
+           "confidence = 0.95\n");
     fclose(f);
     return 0;
 }
@@ -637,7 +665,11 @@ static int dcr_ingest_codex(bool dry_run) {
     FILE *f = fopen(path, "r");
     if (!f) {
         printf("{\"ok\":true,\"source\":\"codex\",\"found\":false,\"path\":\"");
-        for (const char *p = path; *p; p++) { if (*p == '"' || *p == '\\') putchar('\\'); putchar(*p); }
+        for (const char *p = path; *p; p++) {
+            if (*p == '"' || *p == '\\')
+                putchar('\\');
+            putchar(*p);
+        }
         printf("\"}\n");
         return 0;
     }
@@ -700,7 +732,8 @@ int dcr_cli(int argc, char **argv) {
     }
     if (strcmp(cmd, "validate") == 0 || strcmp(cmd, "compile") == 0) {
         dcr_reload();
-        printf("{\"ok\":true,\"providers\":%zu,\"models\":%zu}\n", dcr_provider_count(), dcr_model_count());
+        printf("{\"ok\":true,\"providers\":%zu,\"models\":%zu}\n", dcr_provider_count(),
+               dcr_model_count());
         return 0;
     }
     if (strcmp(cmd, "ingest") == 0) {
@@ -725,7 +758,8 @@ int dcr_cli(int argc, char **argv) {
         snprintf(dir, sizeof(dir), "%s/provider_metadata/providers", base);
         DIR *d = opendir(dir);
         if (!d) {
-            printf("{\"ok\":false,\"error\":\"no provider_metadata/providers dir\",\"hint\":\"run from repo root or set DSCO_REPO_ROOT\"}\n");
+            printf("{\"ok\":false,\"error\":\"no provider_metadata/providers dir\",\"hint\":\"run "
+                   "from repo root or set DSCO_REPO_ROOT\"}\n");
             return 1;
         }
         printf("{\"ok\":true,\"providers\":[");
@@ -743,10 +777,20 @@ int dcr_cli(int argc, char **argv) {
             fseek(f, 0, SEEK_END);
             long n = ftell(f);
             fseek(f, 0, SEEK_SET);
-            if (n <= 0 || n > 256 * 1024) { fclose(f); continue; }
+            if (n <= 0 || n > 256 * 1024) {
+                fclose(f);
+                continue;
+            }
             char *buf = malloc((size_t)n + 1);
-            if (!buf) { fclose(f); continue; }
-            if (fread(buf, 1, (size_t)n, f) != (size_t)n) { free(buf); fclose(f); continue; }
+            if (!buf) {
+                fclose(f);
+                continue;
+            }
+            if (fread(buf, 1, (size_t)n, f) != (size_t)n) {
+                free(buf);
+                fclose(f);
+                continue;
+            }
             fclose(f);
             buf[n] = '\0';
             char *prov = json_get_str(buf, "provider");
@@ -770,8 +814,7 @@ int dcr_cli(int argc, char **argv) {
             printf("%s{\"provider\":\"%s\",\"prompt_cache_status\":\"%s\","
                    "\"api_coverage\":%s,\"cost_management\":%s}",
                    first ? "" : ",", prov ? prov : de->d_name, status_val,
-                   has_api_coverage ? "true" : "false",
-                   has_cost_management ? "true" : "false");
+                   has_api_coverage ? "true" : "false", has_cost_management ? "true" : "false");
             first = 0;
             free(prov);
             free(buf);
@@ -785,7 +828,9 @@ int dcr_cli(int argc, char **argv) {
         dcr_reload();
         if (strstr(key, "provider.sakana.stream_idle_timeout_ms")) {
             long v = dcr_provider_stream_idle_timeout_ms("sakana", 7200000L);
-            printf("provider.sakana.stream_idle_timeout_ms = %ld\nsource = DSCO DCR / Sakana Fugu docs\nreason = slow multi-agent streams need long idle tolerance\n", v);
+            printf("provider.sakana.stream_idle_timeout_ms = %ld\nsource = DSCO DCR / Sakana Fugu "
+                   "docs\nreason = slow multi-agent streams need long idle tolerance\n",
+                   v);
             return 0;
         }
         fprintf(stderr, "dcr: no explanation for '%s'\n", key);
@@ -795,7 +840,8 @@ int dcr_cli(int argc, char **argv) {
     printf("{\"ok\":true,\"config_home\":\"%s\",\"providers\":[", dcr_home());
     for (size_t i = 0; i < g_provider_count; i++) {
         const dcr_provider_t *p = &g_providers[i];
-        printf("%s{\"id\":\"%s\",\"base_url\":\"%s\",\"wire_api\":\"%s\",\"stream_idle_timeout_ms\":%ld}",
+        printf("%s{\"id\":\"%s\",\"base_url\":\"%s\",\"wire_api\":\"%s\",\"stream_idle_timeout_"
+               "ms\":%ld}",
                i ? "," : "", p->name, p->base_url, p->wire_api, p->stream_idle_timeout_ms);
     }
     printf("],\"models\":%zu}\n", g_model_count);

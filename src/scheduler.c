@@ -268,8 +268,7 @@ static void sched_idle_wait(scheduler_t *s, int max_wait_ms) {
             long until = t->wake_time_ms > now ? (long)(t->wake_time_ms - now) : 0;
             if (until < wait)
                 wait = until;
-        } else if (t->state == TASK_WAITING_IO && t->wait_fd >= 0 &&
-                   nfds < SCHED_MAX_TASKS) {
+        } else if (t->state == TASK_WAITING_IO && t->wait_fd >= 0 && nfds < SCHED_MAX_TASKS) {
             pfds[nfds].fd = t->wait_fd;
             pfds[nfds].events = POLLIN | POLLOUT;
             pfds[nfds].revents = 0;

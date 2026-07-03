@@ -17,74 +17,76 @@
  *    - border style (none / single / double / heavy unicode)
  * ────────────────────────────────────────────────────────────────────────── */
 
-#define DSCO_GRID_MAX_TILES     128
-#define DSCO_TILE_MAX_CHILDREN  8
+#define DSCO_GRID_MAX_TILES 128
+#define DSCO_TILE_MAX_CHILDREN 8
 
 typedef enum {
-    DSCO_TILE_LEAF = 0,     /* shows a project */
-    DSCO_TILE_HSPLIT,       /* children stacked top→bottom */
-    DSCO_TILE_VSPLIT,       /* children laid left→right */
+    DSCO_TILE_LEAF = 0, /* shows a project */
+    DSCO_TILE_HSPLIT,   /* children stacked top→bottom */
+    DSCO_TILE_VSPLIT,   /* children laid left→right */
 } dsco_tile_kind_t;
 
 typedef enum {
     DSCO_COLOR_MODE_OFF = 0,
-    DSCO_COLOR_MODE_STATE,      /* border tinted by run state */
-    DSCO_COLOR_MODE_IDENTITY,   /* border tinted by stable per-project hue */
-    DSCO_COLOR_MODE_HEATMAP,    /* background tinted by activity rate */
-    DSCO_COLOR_MODE_FULL,       /* identity border + heatmap background + state badge */
+    DSCO_COLOR_MODE_STATE,    /* border tinted by run state */
+    DSCO_COLOR_MODE_IDENTITY, /* border tinted by stable per-project hue */
+    DSCO_COLOR_MODE_HEATMAP,  /* background tinted by activity rate */
+    DSCO_COLOR_MODE_FULL,     /* identity border + heatmap background + state badge */
     DSCO_COLOR_MODE_COUNT,
 } dsco_color_mode_t;
 
 typedef enum {
     DSCO_BORDER_NONE = 0,
-    DSCO_BORDER_SINGLE,         /* ─ │ ┌ ┐ └ ┘ */
-    DSCO_BORDER_DOUBLE,         /* ═ ║ ╔ ╗ ╚ ╝ */
-    DSCO_BORDER_HEAVY,          /* ━ ┃ ┏ ┓ ┗ ┛ */
-    DSCO_BORDER_DASHED,         /* ╌ ╎ ┌ ┐ └ ┘ */
+    DSCO_BORDER_SINGLE, /* ─ │ ┌ ┐ └ ┘ */
+    DSCO_BORDER_DOUBLE, /* ═ ║ ╔ ╗ ╚ ╝ */
+    DSCO_BORDER_HEAVY,  /* ━ ┃ ┏ ┓ ┗ ┛ */
+    DSCO_BORDER_DASHED, /* ╌ ╎ ┌ ┐ └ ┘ */
     DSCO_BORDER_COUNT,
 } dsco_border_t;
 
 typedef enum {
-    DSCO_THEME_TERMINAL = 0,    /* default — natural identity hues */
-    DSCO_THEME_CYBERPUNK,       /* high-sat neon, dark base */
-    DSCO_THEME_PAPER,           /* desaturated, light-on-dark grey */
-    DSCO_THEME_MONO,            /* greyscale only */
+    DSCO_THEME_TERMINAL = 0, /* default — natural identity hues */
+    DSCO_THEME_CYBERPUNK,    /* high-sat neon, dark base */
+    DSCO_THEME_PAPER,        /* desaturated, light-on-dark grey */
+    DSCO_THEME_MONO,         /* greyscale only */
     DSCO_THEME_COUNT,
 } dsco_theme_t;
 
 typedef struct {
-    int    tile_id;             /* parent tile being entered (filled by layout) */
-    int    row0, col0;          /* absolute screen coordinates */
-    int    rows, cols;
+    int tile_id;    /* parent tile being entered (filled by layout) */
+    int row0, col0; /* absolute screen coordinates */
+    int rows, cols;
 } dsco_tile_rect_t;
 
 typedef struct {
     dsco_tile_kind_t kind;
-    int     project_idx;        /* valid iff kind == LEAF; -1 otherwise */
-    int     parent_id;          /* -1 for root */
-    int     child_ids[DSCO_TILE_MAX_CHILDREN];
-    int     child_count;
-    float   weight;             /* proportional size in parent (default 1.0) */
-    bool    in_use;
+    int project_idx; /* valid iff kind == LEAF; -1 otherwise */
+    int parent_id;   /* -1 for root */
+    int child_ids[DSCO_TILE_MAX_CHILDREN];
+    int child_count;
+    float weight; /* proportional size in parent (default 1.0) */
+    bool in_use;
     /* layout cache — populated by render layout pass */
     dsco_tile_rect_t rect;
 } dsco_tile_t;
 
 typedef struct {
-    dsco_tile_t      tiles[DSCO_GRID_MAX_TILES];
-    int              root_id;
-    int              focused_id;
-    int              zoomed_id;         /* -1 if not zoomed */
-    int              preset_idx;        /* current grid-preset cycle position */
+    dsco_tile_t tiles[DSCO_GRID_MAX_TILES];
+    int root_id;
+    int focused_id;
+    int zoomed_id;  /* -1 if not zoomed */
+    int preset_idx; /* current grid-preset cycle position */
 
     dsco_color_mode_t color_mode;
-    dsco_border_t     border;
-    dsco_theme_t      theme;
-    bool              truecolor;        /* emit 24-bit color escapes */
+    dsco_border_t border;
+    dsco_theme_t theme;
+    bool truecolor; /* emit 24-bit color escapes */
 } dsco_grid_t;
 
 /* ── RGB color value used by render helpers ──────────────────────────── */
-typedef struct { uint8_t r, g, b; } dsco_rgb_t;
+typedef struct {
+    uint8_t r, g, b;
+} dsco_rgb_t;
 
 /* ── Lifecycle ─────────────────────────────────────────────────────────── */
 void dsco_grid_init(dsco_grid_t *g);
@@ -103,7 +105,7 @@ void dsco_grid_cycle_preset(dsco_grid_t *g);
 void dsco_grid_assign_projects(dsco_grid_t *g, int project_count);
 
 /* ── Manipulation ──────────────────────────────────────────────────────── */
-int  dsco_grid_split(dsco_grid_t *g, int tile_id, dsco_tile_kind_t dir);
+int dsco_grid_split(dsco_grid_t *g, int tile_id, dsco_tile_kind_t dir);
 void dsco_grid_zoom_toggle(dsco_grid_t *g);
 void dsco_grid_focus(dsco_grid_t *g, int tile_id);
 
@@ -115,7 +117,7 @@ void dsco_grid_focus_dir(dsco_grid_t *g, int dx, int dy);
 void dsco_grid_focus_project(dsco_grid_t *g, int project_idx);
 
 /* Return the leaf tile_id currently showing `project_idx`, or -1. */
-int  dsco_grid_find_leaf(const dsco_grid_t *g, int project_idx);
+int dsco_grid_find_leaf(const dsco_grid_t *g, int project_idx);
 
 /* Iterate leaves in document order (depth-first). Calls cb for each leaf. */
 typedef void (*dsco_grid_leaf_cb)(const dsco_tile_t *t, void *ctx);

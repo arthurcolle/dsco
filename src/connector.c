@@ -8,6 +8,7 @@
 #include "toolmgmt.h"
 #include "json_util.h"
 #include "crypto.h"
+#include "compute.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -1957,6 +1958,7 @@ void connector_register_builtins(void) {
     connector_register(&CHAIN_VT);
     connector_register(&AGENT_VT);
     connector_register(&SQLITE_VT);
+    compute_register_backends(); /* fleet, modal — adaptive compute fabric */
 }
 
 /* ── CLI ──────────────────────────────────────────────────────────────── */

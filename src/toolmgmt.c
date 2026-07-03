@@ -548,8 +548,7 @@ static void tm_make_dsco_name(const char *tool_id, const char *name, char *out, 
     bool last_us = false;
     for (const char *p = src; *p && pos + 1 < sizeof(raw); p++) {
         unsigned char c = (unsigned char)*p;
-        char ch = ((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') ||
-                   (c >= '0' && c <= '9'))
+        char ch = ((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9'))
                       ? (char)c
                       : '_';
         if (ch == '_' && last_us)

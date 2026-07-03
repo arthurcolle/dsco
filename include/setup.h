@@ -12,8 +12,8 @@ int dsco_setup_load_saved_env(void);
 
 /* Autopopulate saved env config from current process env.
  * Returns number of discovered keys (known + generic patterns). */
-int dsco_setup_autopopulate(bool overwrite, bool include_generic,
-                            char *summary, size_t summary_len);
+int dsco_setup_autopopulate(bool overwrite, bool include_generic, char *summary,
+                            size_t summary_len);
 
 /* Bootstrap once: if config file does not exist, create it from current env.
  * Returns 1 if created, 0 if skipped, -1 on error. */

@@ -3,7 +3,7 @@
 This file is auto-generated from header declarations in `include/`.
 
 - Generator: `./scripts/gen_api_reference.sh`
-- Headers scanned: 123
+- Headers scanned: 132
 
 ## Regeneration
 
@@ -226,6 +226,15 @@ Function-like declarations: 28
 - `char *chronicle_build_activity_html_ex(int limit, const char *session_filter, const char *type_filter, const char *search_filter);`
 - `char *chronicle_read_blob_hex(const char *sha256, size_t max_bytes, const char **content_type_out);`
 
+## `cluster.h`
+
+Function-like declarations: 2
+
+### Declarations
+
+- `int dsco_cluster_cli(int argc, char **argv);`
+- `int dsco_cluster_rpc_endpoints(const char *peers_csv, char *out, size_t outlen, int ensure);`
+
 ## `codex_app_directory.h`
 
 Function-like declarations: 6
@@ -256,13 +265,22 @@ Function-like declarations: 10
 - `const char *codex_cache_default_effort(const char *model);`
 - `bool codex_cache_model_supported(const char *model);`
 
+## `compute.h`
+
+Function-like declarations: 2
+
+### Declarations
+
+- `void compute_register_backends(void);`
+- `int dsco_compute_cli(int argc, char **argv);`
+
 ## `config.h`
 
 Function-like declarations: 24
 
 ### Declarations
 
-- `static inline int dsco_max_tokens(void) { return dsco_env_int("DSCO_MAX_TOKENS", MAX_TOKENS, 1, 100000);`
+- `"interleaved-thinking-2025-05-14,code-execution-2025-05-22,advanced-tool-use-2025-11-20" static inline int dsco_max_tokens(void) { return dsco_env_int("DSCO_MAX_TOKENS", MAX_TOKENS, 1, 100000);`
 - `} static inline int dsco_max_agent_turns(void) { return dsco_env_int("DSCO_MAX_AGENT_TURNS", MAX_AGENT_TURNS, 1, 999999);`
 - `} static inline int dsco_hard_turn_ceiling(void) { return dsco_env_int("DSCO_HARD_TURN_CEILING", HARD_TURN_CEILING, 1, 100000000);`
 - `const model_info_t *openrouter_cache_lookup(const char *slug);`
@@ -325,17 +343,19 @@ Function-like declarations: 7
 - `bool condition_parse(const char *expr_str, condition_t *cond_out);`
 - `bool condition_evaluate(const condition_t *cond, const char *ctx_json);`
 - `plan_status_t step_execute_atoms(int step_id);`
-- `plan_status_t execute_step_with_control( int step_id, const control_flow_t *cf, const char *state_json);`
+- `plan_status_t execute_step_with_control(int step_id, const control_flow_t *cf, const char *state_json);`
 - `bool step_set_control_flow(int step_id, const control_flow_t *cf);`
 - `const control_flow_t *step_get_control_flow(int step_id);`
 - `const char *control_type_name(control_type_t t);`
 
 ## `coroutine.h`
 
-Function-like declarations: 2
+Function-like declarations: 4
 
 ### Declarations
 
+- `do { \ scr_state_ = __LINE__; \ return (val); \ case __LINE__:; \ } while (0) do { \ scr_state_ = 0; \ } while (0) typedef int ccr_state_t;`
+- `do { \ (ctx)->ccr = __LINE__; \ return (val); \ case __LINE__:; \ } while (0) typedef enum { CORO_STATUS_IDLE, CORO_STATUS_RUNNING, CORO_STATUS_WAITING, CORO_STATUS_DONE, } coro_status_t;`
 - `typedef int (*coro_func_t)(void *ctx);`
 - `int ret = slot->func(slot->ctx);`
 
@@ -490,6 +510,110 @@ Function-like declarations: 6
 - `void dsco_dht_stop(dsco_dht_t *d);`
 - `dsco_dht_t *dsco_dht_global(void);`
 
+## `dsco_ds.h`
+
+Function-like declarations: 97
+
+### Declarations
+
+- `void dsco_vec_init(dsco_vec *v, size_t elem_size);`
+- `void dsco_vec_free(dsco_vec *v);`
+- `void *dsco_vec_push(dsco_vec *v, const void *elem);`
+- `void *dsco_vec_at(const dsco_vec *v, size_t i);`
+- `size_t dsco_vec_len(const dsco_vec *v);`
+- `void dsco_vec_pop(dsco_vec *v);`
+- `void dsco_vec_clear(dsco_vec *v);`
+- `bool dsco_vec_reserve(dsco_vec *v, size_t min_cap);`
+- `dsco_map *dsco_map_new(void);`
+- `void dsco_map_free(dsco_map *m, void (*free_val)(void *));`
+- `bool dsco_map_put(dsco_map *m, const char *key, void *val, void (*free_val)(void *));`
+- `void *dsco_map_get(const dsco_map *m, const char *key);`
+- `bool dsco_map_has(const dsco_map *m, const char *key);`
+- `bool dsco_map_del(dsco_map *m, const char *key, void (*free_val)(void *));`
+- `size_t dsco_map_size(const dsco_map *m);`
+- `void dsco_map_foreach(const dsco_map *m, int (*fn)(const char *key, void *val, void *ctx), void *ctx);`
+- `dsco_lru *dsco_lru_new(size_t capacity);`
+- `void dsco_lru_free(dsco_lru *c);`
+- `bool dsco_lru_put(dsco_lru *c, const char *key, const void *val, size_t len);`
+- `const void *dsco_lru_get(dsco_lru *c, const char *key, size_t *len);`
+- `bool dsco_lru_del(dsco_lru *c, const char *key);`
+- `size_t dsco_lru_size(const dsco_lru *c);`
+- `dsco_heap *dsco_heap_new(size_t elem_size, int (*cmp)(const void *a, const void *b));`
+- `void dsco_heap_free(dsco_heap *h);`
+- `bool dsco_heap_push(dsco_heap *h, const void *elem);`
+- `bool dsco_heap_pop(dsco_heap *h, void *out);`
+- `bool dsco_heap_peek(const dsco_heap *h, void *out);`
+- `size_t dsco_heap_size(const dsco_heap *h);`
+- `dsco_bitset *dsco_bitset_new(size_t nbits);`
+- `void dsco_bitset_free(dsco_bitset *b);`
+- `void dsco_bitset_set(dsco_bitset *b, size_t i);`
+- `void dsco_bitset_clr(dsco_bitset *b, size_t i);`
+- `bool dsco_bitset_test(const dsco_bitset *b, size_t i);`
+- `void dsco_bitset_set_all(dsco_bitset *b);`
+- `void dsco_bitset_clr_all(dsco_bitset *b);`
+- `size_t dsco_bitset_count(const dsco_bitset *b);`
+- `bool dsco_queue_init(dsco_queue *q, size_t elem_size, size_t capacity);`
+- `void dsco_queue_free(dsco_queue *q);`
+- `bool dsco_queue_push(dsco_queue *q, const void *elem);`
+- `bool dsco_queue_pop(dsco_queue *q, void *out);`
+- `size_t dsco_queue_len(const dsco_queue *q);`
+- `bool dsco_queue_full(const dsco_queue *q);`
+- `bool dsco_queue_empty(const dsco_queue *q);`
+- `dsco_strpool *dsco_strpool_new(void);`
+- `void dsco_strpool_free(dsco_strpool *p);`
+- `int dsco_strpool_intern(dsco_strpool *p, const char *s);`
+- `int dsco_strpool_find(const dsco_strpool *p, const char *s);`
+- `const char *dsco_strpool_str(const dsco_strpool *p, int id);`
+- `size_t dsco_strpool_count(const dsco_strpool *p);`
+- `bool dsco_deque_init(dsco_deque *d, size_t elem_size);`
+- `void dsco_deque_free(dsco_deque *d);`
+- `bool dsco_deque_push_back(dsco_deque *d, const void *elem);`
+- `bool dsco_deque_push_front(dsco_deque *d, const void *elem);`
+- `bool dsco_deque_pop_front(dsco_deque *d, void *out);`
+- `bool dsco_deque_pop_back(dsco_deque *d, void *out);`
+- `void *dsco_deque_at(const dsco_deque *d, size_t i);`
+- `size_t dsco_deque_len(const dsco_deque *d);`
+- `dsco_topk *dsco_topk_new(size_t k);`
+- `void dsco_topk_free(dsco_topk *t);`
+- `void dsco_topk_offer(dsco_topk *t, double score, void *item);`
+- `size_t dsco_topk_count(const dsco_topk *t);`
+- `size_t dsco_topk_get(const dsco_topk *t, void **out, double *scores, size_t cap);`
+- `dsco_bloom *dsco_bloom_new(size_t expected_items, double fp_rate);`
+- `void dsco_bloom_free(dsco_bloom *b);`
+- `void dsco_bloom_add(dsco_bloom *b, const void *data, size_t len);`
+- `bool dsco_bloom_maybe(const dsco_bloom *b, const void *data, size_t len);`
+- `void dsco_bloom_add_str(dsco_bloom *b, const char *s);`
+- `bool dsco_bloom_maybe_str(const dsco_bloom *b, const char *s);`
+- `size_t dsco_bloom_bits(const dsco_bloom *b);`
+- `dsco_intmap *dsco_intmap_new(void);`
+- `void dsco_intmap_free(dsco_intmap *m);`
+- `bool dsco_intmap_put(dsco_intmap *m, uint64_t key, void *val);`
+- `void *dsco_intmap_get(const dsco_intmap *m, uint64_t key);`
+- `bool dsco_intmap_has(const dsco_intmap *m, uint64_t key);`
+- `bool dsco_intmap_del(dsco_intmap *m, uint64_t key);`
+- `size_t dsco_intmap_size(const dsco_intmap *m);`
+- `bool dsco_ringbuf_init(dsco_ringbuf *r, size_t cap);`
+- `void dsco_ringbuf_free(dsco_ringbuf *r);`
+- `size_t dsco_ringbuf_write(dsco_ringbuf *r, const void *data, size_t len);`
+- `size_t dsco_ringbuf_read(dsco_ringbuf *r, void *out, size_t max);`
+- `size_t dsco_ringbuf_peek(const dsco_ringbuf *r, void *out, size_t max);`
+- `size_t dsco_ringbuf_len(const dsco_ringbuf *r);`
+- `size_t dsco_ringbuf_avail(const dsco_ringbuf *r);`
+- `dsco_uf *dsco_uf_new(size_t n);`
+- `void dsco_uf_free(dsco_uf *u);`
+- `size_t dsco_uf_find(dsco_uf *u, size_t x);`
+- `bool dsco_uf_union(dsco_uf *u, size_t a, size_t b);`
+- `bool dsco_uf_connected(dsco_uf *u, size_t a, size_t b);`
+- `size_t dsco_uf_count(const dsco_uf *u);`
+- `dsco_slab *dsco_slab_new(size_t elem_size, size_t capacity);`
+- `void dsco_slab_free(dsco_slab *s);`
+- `long dsco_slab_alloc(dsco_slab *s, void **out);`
+- `void dsco_slab_release(dsco_slab *s, size_t idx);`
+- `void *dsco_slab_at(const dsco_slab *s, size_t idx);`
+- `bool dsco_slab_live(const dsco_slab *s, size_t idx);`
+- `size_t dsco_slab_used(const dsco_slab *s);`
+- `size_t dsco_slab_cap(const dsco_slab *s);`
+
 ## `dsco_mlx.h`
 
 Function-like declarations: 10
@@ -521,6 +645,120 @@ Function-like declarations: 8
 - `dsco_task_t *dsco_pool_submit(dsco_pool_work_fn fn, void *ctx);`
 - `void dsco_pool_join(dsco_task_t *t);`
 - `int dsco_pool_worker_count(void);`
+
+## `dsco_rt.h`
+
+Function-like declarations: 28
+
+### Declarations
+
+- `void dsco_buf_init(dsco_buf *b);`
+- `void dsco_buf_free(dsco_buf *b);`
+- `bool dsco_buf_reserve(dsco_buf *b, size_t extra);`
+- `bool dsco_buf_append(dsco_buf *b, const void *data, size_t n);`
+- `bool dsco_buf_append_u8(dsco_buf *b, unsigned char c);`
+- `void *dsco_buf_reserve_ptr(dsco_buf *b, size_t n);`
+- `void dsco_buf_commit(dsco_buf *b, size_t n);`
+- `void dsco_buf_reset(dsco_buf *b);`
+- `size_t dsco_buf_len(const dsco_buf *b);`
+- `const unsigned char *dsco_buf_data(const dsco_buf *b);`
+- `bool dsco_frame_encode(dsco_buf *out, uint16_t type, uint32_t seq, const void *payload, uint32_t len);`
+- `dsco_frame_status dsco_frame_decode(const void *buf, size_t avail, dsco_frame_header *hdr, const unsigned char **payload, size_t *consumed);`
+- `uint32_t dsco_crc32(const void *data, size_t n);`
+- `dsco_hist *dsco_hist_new(void);`
+- `void dsco_hist_free(dsco_hist *h);`
+- `void dsco_hist_add(dsco_hist *h, double value);`
+- `uint64_t dsco_hist_count(const dsco_hist *h);`
+- `double dsco_hist_min(const dsco_hist *h);`
+- `double dsco_hist_max(const dsco_hist *h);`
+- `double dsco_hist_quantile(const dsco_hist *h, double q);`
+- `void dsco_hist_merge(dsco_hist *dst, const dsco_hist *src);`
+- `void dsco_ratelimit_init(dsco_ratelimit *r, double rate_per_sec, double burst);`
+- `bool dsco_ratelimit_allow(dsco_ratelimit *r, double now_ns, double cost);`
+- `double dsco_ratelimit_tokens(const dsco_ratelimit *r);`
+- `void dsco_credits_init(dsco_credits *c, int64_t initial);`
+- `bool dsco_credits_try_consume(dsco_credits *c, int64_t n);`
+- `void dsco_credits_grant(dsco_credits *c, int64_t n);`
+- `int64_t dsco_credits_available(const dsco_credits *c);`
+
+## `dsco_runtime.h`
+
+Function-like declarations: 72
+
+### Declarations
+
+- `bool dsco_arena_init(dsco_arena *a, size_t page_sz);`
+- `void *dsco_arena_alloc(dsco_arena *a, size_t n, size_t align);`
+- `void *dsco_arena_alloc0(dsco_arena *a, size_t n, size_t align);`
+- `void dsco_arena_reset(dsco_arena *a);`
+- `void dsco_arena_free(dsco_arena *a);`
+- `bool dsco_spsc_init(dsco_spsc *r, size_t cap );`
+- `void dsco_spsc_free(dsco_spsc *r);`
+- `bool dsco_spsc_push(dsco_spsc *r, void *item);`
+- `void *dsco_spsc_pop(dsco_spsc *r);`
+- `size_t dsco_spsc_len(const dsco_spsc *r);`
+- `void dsco_mpsc_init(dsco_mpsc *q);`
+- `void dsco_mpsc_push(dsco_mpsc *q, dsco_mpsc_node *n);`
+- `dsco_mpsc_node *dsco_mpsc_pop(dsco_mpsc *q);`
+- `size_t dsco_tv_dtype_size(uint8_t dtype);`
+- `size_t dsco_tv_nbytes(const dsco_tensorview *t);`
+- `bool dsco_tv_is_contig(const dsco_tensorview *t);`
+- `bool dsco_tv_enc(dsco_buf *out, const dsco_tensorview *t);`
+- `bool dsco_tv_dec(dsco_tensorview *t, const uint8_t *body, size_t len, dsco_arena *a);`
+- `bool dsco_ringplan_enc(dsco_buf *out, const dsco_ringplan *p);`
+- `bool dsco_ringplan_dec(dsco_ringplan *p, const uint8_t *body, size_t len);`
+- `int dsco_ringplan_stage_of(const dsco_ringplan *p, uint32_t node_id);`
+- `uint32_t dsco_ringplan_next(const dsco_ringplan *p, uint32_t node_id);`
+- `bool dsco_tracering_init(dsco_tracering *t, size_t cap );`
+- `void dsco_tracering_free(dsco_tracering *t);`
+- `void dsco_trace(dsco_tracering *t, uint64_t req_id, uint8_t stage, uint8_t node, uint8_t ev);`
+- `size_t dsco_tracering_count(const dsco_tracering *t);`
+- `void dsco_trace_dump(const dsco_tracering *t, int fd);`
+- `bool dsco_chan_init(dsco_chan *c, size_t elem_size, size_t cap);`
+- `void dsco_chan_free(dsco_chan *c);`
+- `bool dsco_chan_send(dsco_chan *c, const void *elem, int64_t timeout_ns);`
+- `int dsco_chan_recv(dsco_chan *c, void *out, int64_t timeout_ns);`
+- `bool dsco_chan_try_send(dsco_chan *c, const void *elem);`
+- `int dsco_chan_try_recv(dsco_chan *c, void *out);`
+- `void dsco_chan_close(dsco_chan *c);`
+- `void dsco_seqlock_init(dsco_seqlock *sl);`
+- `void dsco_seqlock_write_begin(dsco_seqlock *sl);`
+- `void dsco_seqlock_write_end(dsco_seqlock *sl);`
+- `uint32_t dsco_seqlock_read_begin(const dsco_seqlock *sl);`
+- `bool dsco_seqlock_read_retry(const dsco_seqlock *sl, uint32_t s0);`
+- `bool dsco_kvblocks_init(dsco_kvblocks *kv, uint32_t total_blocks, uint32_t block_tokens);`
+- `void dsco_kvblocks_free(dsco_kvblocks *kv);`
+- `uint32_t dsco_kvblocks_alloc(dsco_kvblocks *kv);`
+- `void dsco_kvblocks_release(dsco_kvblocks *kv, uint32_t block);`
+- `void dsco_kvseq_init(dsco_kvseq *s);`
+- `void dsco_kvseq_free_seq(dsco_kvblocks *kv, dsco_kvseq *s);`
+- `bool dsco_kvseq_append(dsco_kvblocks *kv, dsco_kvseq *s, uint32_t pos, uint32_t *block_out, uint32_t *off_out);`
+- `bool dsco_kvseq_translate(const dsco_kvblocks *kv, const dsco_kvseq *s, uint32_t pos, uint32_t *block_out, uint32_t *off_out);`
+- `bool dsco_wal_open(dsco_wal *w, const char *path, size_t seg_max, int fsync_policy);`
+- `bool dsco_wal_append(dsco_wal *w, uint16_t type, const void *payload, uint32_t len);`
+- `void dsco_wal_flush(dsco_wal *w);`
+- `void dsco_wal_close(dsco_wal *w);`
+- `size_t dsco_wal_replay(const char *path, void (*fn)(uint16_t type, const void *payload, uint32_t len, void *ud), void *ud);`
+- `void (*free_fn)(void *);`
+- `bool dsco_cow_init(dsco_cow *c, void *initial, void (*free_fn)(void *));`
+- `const void *dsco_cow_acquire(dsco_cow *c, dsco_cow_node **holder);`
+- `void dsco_cow_release(dsco_cow *c, dsco_cow_node *holder);`
+- `void dsco_cow_publish(dsco_cow *c, void *new_data);`
+- `void dsco_cow_free(dsco_cow *c);`
+- `void (*on_event)(dsco_swim_ev ev, uint32_t node_id, void *ud);`
+- `bool dsco_swim_init(dsco_swim *s, uint32_t self_id, uint64_t ping_timeout_ns, uint64_t suspect_timeout_ns, void (*on_event)(dsco_swim_ev, uint32_t, void *), void *ud);`
+- `void dsco_swim_free(dsco_swim *s);`
+- `bool dsco_swim_add(dsco_swim *s, uint32_t node_id, uint64_t now_ns);`
+- `void dsco_swim_ack(dsco_swim *s, uint32_t node_id, uint64_t now_ns);`
+- `void dsco_swim_tick(dsco_swim *s, uint64_t now_ns);`
+- `void dsco_swim_on_suspect_self(dsco_swim *s, uint32_t incarnation);`
+- `dsco_mstate dsco_swim_state(const dsco_swim *s, uint32_t node_id);`
+- `uint32_t dsco_swim_incarnation(const dsco_swim *s);`
+- `bool dsco_seqrec_init(dsco_seqrec *r, uint64_t req_id, dsco_arena *arena);`
+- `void dsco_seqrec_free(dsco_seqrec *r);`
+- `bool dsco_seqrec_push_prompt(dsco_seqrec *r, uint32_t tok);`
+- `bool dsco_seqrec_emit(dsco_seqrec *r, uint32_t tok);`
+- `void dsco_seqrec_set_state(dsco_seqrec *r, dsco_seqstate st);`
 
 ## `embedded_data_registry.h`
 
@@ -707,7 +945,7 @@ Function-like declarations: 7
 - `size_t dsco_fingerprint_summary(const dsco_fingerprint_t *fp, char *out, size_t out_cap);`
 - `size_t dsco_fingerprint_stability_report(const dsco_fingerprint_t *fp, char *out, size_t out_cap);`
 - `const char *dsco_hv_name(dsco_hv_type_t hv);`
-- `static inline size_t dsco_fingerprint_to_json_compat( const dsco_fingerprint_t *fp, bool include_pii, char *out, size_t out_cap) { return dsco_fingerprint_to_json(fp, include_pii, false, out, out_cap);`
+- `static inline size_t dsco_fingerprint_to_json_compat(const dsco_fingerprint_t *fp, bool include_pii, char *out, size_t out_cap) { return dsco_fingerprint_to_json(fp, include_pii, false, out, out_cap);`
 
 ## `fractal.h`
 
@@ -765,15 +1003,15 @@ Function-like declarations: 18
 - `char *graphsub_agent_register(const char *agent_id, const char *model, const char *capabilities_json, const char *tools_json, const char *hostname, const char *version, const char *bridge_peer);`
 - `char *graphsub_agent_heartbeat(const char *agent_id, const char *status, double load, int memory_used_mb, int active_agents, int uptime_seconds);`
 - `char *graphsub_agent_deregister(const char *agent_id);`
-- `char *graphsub_pheromone_deposit(const char *agent_id, const char *target_type, const char *target_id, const char *signal_type, double intensity, int ttl_seconds, const char *metadata_json);`
+- `char *graphsub_pheromone_deposit( const char *agent_id, const char *target_type, const char *target_id, const char *signal_type, double intensity, int ttl_seconds, const char *metadata_json);`
 - `char *graphsub_pheromone_query(const char *target_id, const char *signal_type, double min_intensity);`
 - `char *graphsub_pheromone_sweep(const char *target_type, const char *signal_type);`
 - `char *graphsub_graph_traverse(const char *start_node, int depth, const char *edge_filter_json, int limit);`
 - `char *graphsub_memory_sync(const char *agent_id, const char *episodes_json, const char *type);`
 - `char *graphsub_memory_consolidate(const char *agent_id, const char *from_ts, const char *to_ts);`
-- `char *graphsub_swarm_register(const char *swarm_id, const char *topology, const char *agents_json, const char *task_desc);`
+- `char *graphsub_swarm_register( const char *swarm_id, const char *topology, const char *agents_json, const char *task_desc);`
 - `char *graphsub_tool_result(const char *agent_id, const char *tool_name, const char *tool_params_json, const char *result_json, int duration_ms, bool success, const char *executed_on, const char *swarm_id);`
-- `char *graphsub_bridge_fleet(const char *peers_json);`
+- `char *graphsub_bridge_fleet( const char *peers_json);`
 - `char *graphsub_post(const char *path, const char *json_body);`
 - `char *graphsub_get(const char *path);`
 
@@ -1248,13 +1486,15 @@ Function-like declarations: 12
 
 ## `llm.h`
 
-Function-like declarations: 63
+Function-like declarations: 66
 
 ### Declarations
 
 - `typedef void (*stream_text_cb)(const char *text, void *ctx);`
 - `typedef void (*stream_tool_start_cb)(const char *name, const char *id, void *ctx);`
 - `typedef void (*stream_thinking_cb)(const char *text, void *ctx);`
+- `typedef void (*stream_tool_ready_cb)(const char *name, const char *id, const char *input);`
+- `void llm_set_tool_ready_hook(stream_tool_ready_cb fn);`
 - `void session_state_init(session_state_t *s, const char *model);`
 - `const char *session_trust_tier_to_string(dsco_trust_tier_t tier);`
 - `dsco_trust_tier_t session_trust_tier_from_string(const char *s, bool *ok);`
@@ -1276,6 +1516,7 @@ Function-like declarations: 63
 - `void conv_ensure_tool_results(conversation_t *c);`
 - `void conv_trim_old_results(conversation_t *c, int keep_recent, int max_chars);`
 - `bool conv_compact_recent_tool_turn(conversation_t *c, int max_chars, int protect_tail);`
+- `int conv_dedup_tool_results(conversation_t *c, int keep_recent);`
 - `void compact_config_init(compact_config_t *cfg);`
 - `int conv_build_rounds(conversation_t *c, api_round_t *rounds, int max_rounds);`
 - `void conv_drop_rounds(conversation_t *c, api_round_t *rounds, int n_drop, int total_rounds);`
@@ -1442,14 +1683,17 @@ Function-like declarations: 16
 
 ## `net_server.h`
 
-Function-like declarations: 10
+Function-like declarations: 13
 
 ### Declarations
 
 - `typedef netsrv_response_t (*netsrv_handler_fn)(const netsrv_request_t *req, void *ctx);`
+- `int netsrv_stream_send(netsrv_stream_t *s, const char *buf, size_t len);`
+- `typedef void (*netsrv_stream_fn)(const netsrv_request_t *req, netsrv_stream_t *s, void *ctx);`
 - `dsco_net_server_t *netsrv_create(uint16_t port, bool use_tls, const char *cert_pem_path, const char *key_pem_path);`
 - `void netsrv_destroy(dsco_net_server_t *s);`
 - `bool netsrv_route(dsco_net_server_t *s, const char *method, const char *path, netsrv_handler_fn fn, void *ctx);`
+- `bool netsrv_route_stream(dsco_net_server_t *s, const char *method, const char *path, netsrv_stream_fn fn, void *ctx);`
 - `void netsrv_set_auth_key(dsco_net_server_t *s, const uint8_t *key, size_t key_len);`
 - `bool netsrv_start(dsco_net_server_t *s);`
 - `void netsrv_stop(dsco_net_server_t *s);`
@@ -1537,13 +1781,32 @@ Function-like declarations: 2
 
 ## `peer_bootstrap.h`
 
-Function-like declarations: 3
+Function-like declarations: 4
 
 ### Declarations
 
 - `void peer_bootstrap_init(void *mesh_node, uint16_t port);`
 - `void peer_bootstrap_stop(void);`
 - `void peer_bootstrap_reseed(void);`
+- `void dsco_net_node(void);`
+
+## `peer_registry.h`
+
+Function-like declarations: 11
+
+### Declarations
+
+- `bool peer_registry_enabled(void);`
+- `void peer_registry_init(void);`
+- `void peer_registry_start_heartbeat(void);`
+- `const char *peer_registry_pick(char *addr, size_t alen, int *port);`
+- `void peer_registry_done(const char *name, bool ok, double rtt_ms);`
+- `double peer_registry_score_components(double rtt_ewma_ms, double success_ewma, int inflight, bool available);`
+- `double bandit_ucb_adjust(double base_score, long arm_pulls, long total_pulls, double explore_c);`
+- `bool peer_result_plausible(const char *result, size_t len);`
+- `int peer_hedge_decide(bool local_done, bool local_ok, bool remote_done, bool remote_ok);`
+- `void peer_registry_render(char *out, size_t out_len);`
+- `int peer_registry_count(void);`
 
 ## `pets.h`
 
@@ -1895,7 +2158,7 @@ Function-like declarations: 44
 
 ## `provider_pool.h`
 
-Function-like declarations: 10
+Function-like declarations: 16
 
 ### Declarations
 
@@ -1909,6 +2172,12 @@ Function-like declarations: 10
 - `bool provider_pool_healthy(const char *name);`
 - `void provider_pool_render(char *out, size_t out_len);`
 - `void provider_pool_shutdown(void);`
+- `void provider_pool_prewarm_async(void);`
+- `void provider_pool_keepwarm_start(void);`
+- `double provider_pool_score_components(double lat_ewma_ms, double success_ewma, bool is_subscription, bool available);`
+- `double provider_pool_score(const char *name);`
+- `const char *provider_pool_fastest_healthy(const char *const *names, int n);`
+- `void provider_pool_rerank_fallbacks(char out_models[][128], int n);`
 
 ## `provider_profiles.h`
 
@@ -1937,7 +2206,7 @@ Function-like declarations: 5
 - `int realtime_voice_run(const realtime_opts_t *opts);`
 - `const char *realtime_default_reasoning_effort(void);`
 - `int realtime_voice_default_max_tools(void);`
-- `int realtime_voice_select_tool_names_for_context( const char *context, char names[][DSCO_REALTIME_TOOL_NAME_MAX], int max_tools);`
+- `int realtime_voice_select_tool_names_for_context(const char *context, char names[][DSCO_REALTIME_TOOL_NAME_MAX], int max_tools);`
 - `int realtime_voice_cli(int argc, char **argv);`
 
 ## `recovery.h`
@@ -1956,6 +2225,16 @@ Function-like declarations: 10
 - `const recovery_log_entry_t *recovery_log_get(const recovery_log_t *log, int idx);`
 - `int recovery_log_dump(const recovery_log_t *log, const char *path);`
 - `const char *recovery_action_name(recovery_action_t a);`
+
+## `remote_cli.h`
+
+Function-like declarations: 3
+
+### Declarations
+
+- `int dsco_remote_cli(int argc, char **argv);`
+- `int dsco_fleet_cli(int argc, char **argv);`
+- `bool dsco_fleet_resolve(const char *peer, char *user, size_t ul, char *addr, size_t al);`
 
 ## `router.h`
 
@@ -2069,7 +2348,7 @@ Function-like declarations: 21
 - `void self_improve_turn_reset(self_improve_t *si);`
 - `bool tool_self_improve(const char *input_json, char *result, size_t result_len);`
 - `bool tool_self_assess(const char *input_json, char *result, size_t result_len);`
-- `self_improve_record_tool(&g_self_improve, (name), (ok), (ms), (tokens)) self_improve_record_turn(&g_self_improve, (n), (cost), (in_tok), \ (out_tok), (ctx_pct), (budget_pct)) self_improve_record_turn_usage(&g_self_improve, (n), (cost), (in_tok), (out_tok), \ (cr_tok), (cw_tok), (ctx_pct), (budget_pct)) self_improve_consolidate(&g_self_improve) self_improve_turn_reset(&g_self_improve) void self_improve_record_goal_state(self_improve_t *si, const char *goal_id, int state, int grip_strength, double elapsed_s);`
+- `self_improve_record_tool(&g_self_improve, (name), (ok), (ms), (tokens)) self_improve_record_turn(&g_self_improve, (n), (cost), (in_tok), (out_tok), (ctx_pct), \ (budget_pct)) self_improve_record_turn_usage(&g_self_improve, (n), (cost), (in_tok), (out_tok), (cr_tok), \ (cw_tok), (ctx_pct), (budget_pct)) void self_improve_record_goal_state( self_improve_t *si, const char *goal_id, int state, int grip_strength, double elapsed_s);`
 - `void self_improve_record_swarm_outcome(self_improve_t *si, const char *topology, int agents, bool success, double quality, double elapsed_s);`
 - `void self_improve_record_strategy_result(self_improve_t *si, const char *strategy, const char *goal_type, bool success, int grip_escalations, double elapsed_s);`
 - `void self_improve_record_tournament_result(self_improve_t *si, const char *winner_strategy, int competitors, double margin, double elapsed_s);`
@@ -2176,7 +2455,7 @@ Function-like declarations: 43
 - `int bit = __builtin_ctz(m);`
 - `return (ssize_t)(i + bit);`
 - `uint8x16_t needle_v = vdupq_n_u8(n);`
-- `for (; i + 16 <= len; ) { uint8x16_t acc = vdupq_n_u8(0);`
+- `for (; i + 16 <= len;) { uint8x16_t acc = vdupq_n_u8(0);`
 - `for (size_t b = 0; b < blocks; b++) { uint8x16_t v = vld1q_u8(p + i + (b << 4));`
 - `uint8x16_t eq = vceqq_u8(v, needle_v);`
 - `acc = vsubq_u8(acc, eq);`
@@ -2187,13 +2466,28 @@ Function-like declarations: 43
 - `count += (size_t)__builtin_popcount((unsigned)_mm_movemask_epi8(eq));`
 - `while (pos > 0) { ssize_t nl = dsco_simd_rfind_byte(base, pos, '\n');`
 
+## `spec_exec.h`
+
+Function-like declarations: 8
+
+### Declarations
+
+- `bool spec_exec_enabled(void);`
+- `void spec_exec_set_tier(const char *tier);`
+- `void spec_exec_hook(const char *tool_name, const char *tool_id, const char *tool_input);`
+- `bool spec_exec_take(const char *tool_id, char *out, size_t outlen, bool *ok);`
+- `void spec_exec_reset(void);`
+- `int spec_exec_active(void);`
+- `bool spec_cache_lookup(const char *tool, const char *input, char *out, size_t outlen, bool *ok);`
+- `void spec_cache_store(const char *tool, const char *input, const char *result, bool ok);`
+
 ## `startup.h`
 
 Function-like declarations: 4
 
 ### Declarations
 
-- `DSCO_CAP_TUI | DSCO_CAP_VOS | DSCO_CAP_IPC | \ DSCO_CAP_MCP | DSCO_CAP_MEMORY | DSCO_CAP_ACCEL | \ DSCO_CAP_TRUST | DSCO_CAP_TRACE) bool dsco_profile_parse(const char *name, dsco_profile_t *out);`
+- `(DSCO_CAP_SECURITY | DSCO_CAP_PROVIDER | DSCO_CAP_TOOLS | DSCO_CAP_TUI | DSCO_CAP_VOS | \ DSCO_CAP_IPC | DSCO_CAP_MCP | DSCO_CAP_MEMORY | DSCO_CAP_ACCEL | DSCO_CAP_TRUST | \ DSCO_CAP_TRACE) bool dsco_profile_parse(const char *name, dsco_profile_t *out);`
 - `const char *dsco_profile_name(dsco_profile_t profile);`
 - `const char *dsco_caps_to_string(dsco_caps_t caps, char *buf, size_t buflen);`
 - `void dsco_startup_init(dsco_profile_t profile, dsco_caps_t caps);`
@@ -2227,11 +2521,12 @@ Function-like declarations: 5
 
 ## `supervisor.h`
 
-Function-like declarations: 3
+Function-like declarations: 4
 
 ### Declarations
 
 - `int supervisor_run(int child_argc, char **child_argv);`
+- `bool supervisor_resolve_hotswap_exec(const char *current_bin, const char *env_bin, char *exec_path, size_t exec_path_len, bool *explicit_hotswap);`
 - `void dsco_maybe_exec_shell_to_keep_terminal(void);`
 - `void main_install_crash_handlers(void);`
 
@@ -2383,7 +2678,7 @@ Function-like declarations: 14
 
 ## `tools.h`
 
-Function-like declarations: 84
+Function-like declarations: 85
 
 ### Declarations
 
@@ -2411,6 +2706,7 @@ Function-like declarations: 84
 - `swarm_t *tools_swarm_instance(void);`
 - `const tool_def_t *tools_get_all(int *count);`
 - `bool tools_invoke_by_name(const char *name, const char *input, char *result, size_t rlen);`
+- `bool tools_is_offload_safe(const char *name);`
 - `int tools_get_core_count(void);`
 - `int tools_builtin_count(void);`
 - `bool tools_execute(const char *name, const char *input_json, char *result, size_t result_len);`
@@ -2580,7 +2876,7 @@ Function-like declarations: 9
 
 ## `tui.h`
 
-Function-like declarations: 300
+Function-like declarations: 303
 
 ### Declarations
 
@@ -2859,6 +3155,9 @@ Function-like declarations: 300
 - `tui_perm_result_t tui_permission_prompt(const char *tool_name, const char *description, const char *detail);`
 - `bool tui_confirm(const char *question);`
 - `tui_ask_status_t tui_ask_questions(tui_ask_question_t *qs, int n_questions, const char *intro, char *chat_out, size_t chat_len);`
+- `int tui_test_decode_key_sequence(const char *bytes);`
+- `int tui_test_dialog_move_row(int row, int maxrow, int key);`
+- `int tui_test_menu_move_selection(const bool *selectable, int nrows, int sel, int delta);`
 - `const char *tui_ask_answer_value(const tui_ask_question_t *q, char *out, size_t out_len);`
 - `bool tui_ask_question_visible(const tui_ask_question_t *qs, int n, int qi);`
 - `void tui_diff_init(tui_diff_t *d);`
@@ -2964,6 +3263,20 @@ Function-like declarations: 15
 - `vm_val_t vm_pop(vm_t *vm);`
 - `vm_val_t vm_peek(vm_t *vm);`
 - `vm_stats_t vm_get_stats(vm_t *vm);`
+
+## `waiter.h`
+
+Function-like declarations: 7
+
+### Declarations
+
+- `int dsco_waiter_init(dsco_waiter_t *w);`
+- `void dsco_waiter_destroy(dsco_waiter_t *w);`
+- `bool dsco_waiter_wait_ms(dsco_waiter_t *w, long timeout_ms);`
+- `void dsco_waiter_signal(dsco_waiter_t *w);`
+- `void dsco_waiter_stop(dsco_waiter_t *w);`
+- `void dsco_waiter_reset(dsco_waiter_t *w);`
+- `bool dsco_waiter_stopped(dsco_waiter_t *w);`
 
 ## `wasm_core.h`
 

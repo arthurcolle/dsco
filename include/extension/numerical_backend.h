@@ -17,8 +17,7 @@ typedef struct numerical_backend {
     /* Linear algebra */
     int (*matrix_alloc)(size_t rows, size_t cols, gsl_matrix **out);
     int (*matrix_free)(gsl_matrix *m);
-    int (*gemm)(const gsl_matrix *A, const gsl_matrix *B, gsl_matrix *C,
-                double alpha, double beta);
+    int (*gemm)(const gsl_matrix *A, const gsl_matrix *B, gsl_matrix *C, double alpha, double beta);
 
     /* FFT */
     int (*fft_complex_forward)(double *data, size_t n);
@@ -34,8 +33,7 @@ typedef struct numerical_backend {
     double (*gaussian_cdf)(double x, double mu, double sigma);
 
     /* Optimization */
-    int (*optimize)(double (*f)(const double *x, size_t n),
-                    double *x, size_t n, int max_iter);
+    int (*optimize)(double (*f)(const double *x, size_t n), double *x, size_t n, int max_iter);
 
     /* Special functions */
     double (*bessel_J0)(double x);

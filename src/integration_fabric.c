@@ -20,12 +20,11 @@ static const dsco_integration_profile_t g_profiles[] = {
     {"web_search", "Web Search", DSCO_INTEGRATION_SCOPE_PUBLIC_APP,
      DSCO_INTEGRATION_ACTION_READ | DSCO_INTEGRATION_ACTION_UNTRUSTED_CONTENT, true, false},
     {"cloudmail_mcp", "Cloudmail MCP", DSCO_INTEGRATION_SCOPE_PRIVATE_SERVICE,
-     DSCO_INTEGRATION_ACTION_READ | DSCO_INTEGRATION_ACTION_WRITE |
-         DSCO_INTEGRATION_ACTION_SEND | DSCO_INTEGRATION_ACTION_UNTRUSTED_CONTENT |
-         DSCO_INTEGRATION_ACTION_REQUIRES_CONFIRMATION,
+     DSCO_INTEGRATION_ACTION_READ | DSCO_INTEGRATION_ACTION_WRITE | DSCO_INTEGRATION_ACTION_SEND |
+         DSCO_INTEGRATION_ACTION_UNTRUSTED_CONTENT | DSCO_INTEGRATION_ACTION_REQUIRES_CONFIRMATION,
      false, true},
-    {"heat_mcp", "HEAT MCP", DSCO_INTEGRATION_SCOPE_PRIVATE_SERVICE,
-     DSCO_INTEGRATION_ACTION_READ, false, true},
+    {"heat_mcp", "HEAT MCP", DSCO_INTEGRATION_SCOPE_PRIVATE_SERVICE, DSCO_INTEGRATION_ACTION_READ,
+     false, true},
     {"email_remote", "Remote Email", DSCO_INTEGRATION_SCOPE_PRIVATE_SERVICE,
      DSCO_INTEGRATION_ACTION_WRITE | DSCO_INTEGRATION_ACTION_SEND |
          DSCO_INTEGRATION_ACTION_REQUIRES_CONFIRMATION,
@@ -135,7 +134,7 @@ static bool action_word(const char *folded, const char *word) {
 }
 
 unsigned dsco_integration_actions_for_catalog_labels(bool retrievable, bool sync,
-                                                    bool consequential, bool interactive) {
+                                                     bool consequential, bool interactive) {
     return codex_app_directory_actions_for_labels(retrievable, sync, consequential, interactive);
 }
 
@@ -236,16 +235,16 @@ bool dsco_integration_action_has(unsigned actions, dsco_integration_action_t act
 
 const char *dsco_integration_scope_name(dsco_integration_scope_t scope) {
     switch (scope) {
-    case DSCO_INTEGRATION_SCOPE_PUBLIC_APP:
-        return "public_app";
-    case DSCO_INTEGRATION_SCOPE_PRIVATE_SERVICE:
-        return "private_service";
-    case DSCO_INTEGRATION_SCOPE_INFRASTRUCTURE:
-        return "infrastructure";
-    case DSCO_INTEGRATION_SCOPE_AGENTIC:
-        return "agentic";
-    case DSCO_INTEGRATION_SCOPE_UNKNOWN:
-    default:
-        return "unknown";
+        case DSCO_INTEGRATION_SCOPE_PUBLIC_APP:
+            return "public_app";
+        case DSCO_INTEGRATION_SCOPE_PRIVATE_SERVICE:
+            return "private_service";
+        case DSCO_INTEGRATION_SCOPE_INFRASTRUCTURE:
+            return "infrastructure";
+        case DSCO_INTEGRATION_SCOPE_AGENTIC:
+            return "agentic";
+        case DSCO_INTEGRATION_SCOPE_UNKNOWN:
+        default:
+            return "unknown";
     }
 }

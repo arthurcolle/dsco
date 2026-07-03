@@ -21,42 +21,42 @@
 /* ── Platforms ─────────────────────────────────────────────────────────── */
 
 typedef enum {
-    PLATFORM_KALSHI     = 0,
+    PLATFORM_KALSHI = 0,
     PLATFORM_POLYMARKET = 1,
 } trading_platform_t;
 
 /* ── Order types ──────────────────────────────────────────────────────── */
 
 typedef enum {
-    ORDER_SIDE_BUY  = 0,
+    ORDER_SIDE_BUY = 0,
     ORDER_SIDE_SELL = 1,
 } order_side_t;
 
 typedef enum {
-    ORDER_TYPE_LIMIT  = 0,
+    ORDER_TYPE_LIMIT = 0,
     ORDER_TYPE_MARKET = 1,
 } order_type_t;
 
 typedef enum {
     OUTCOME_YES = 0,
-    OUTCOME_NO  = 1,
+    OUTCOME_NO = 1,
 } outcome_t;
 
 /* ── Polymarket Order (EIP-712 signed struct) ─────────────────────────── */
 
 typedef struct {
-    char     salt[80];          /* uint256 as decimal string               */
-    char     maker[44];         /* 0x-prefixed Ethereum address            */
-    char     signer[44];        /* signing authority address               */
-    char     taker[44];         /* 0x000...000 for open orders             */
-    char     token_id[80];      /* outcome token ID (decimal string)       */
-    char     maker_amount[32];  /* USDC amount (6 decimals, in wei str)    */
-    char     taker_amount[32];  /* token amount (6 decimals, in wei str)   */
-    char     expiration[20];    /* unix timestamp string                   */
-    char     nonce[20];         /* replay prevention nonce                 */
-    int      fee_rate_bps;      /* fee rate in basis points                */
-    int      side;              /* 0=BUY, 1=SELL                           */
-    int      signature_type;    /* 0=EOA, 1=POLY_PROXY, 2=GNOSIS_SAFE     */
+    char salt[80];         /* uint256 as decimal string               */
+    char maker[44];        /* 0x-prefixed Ethereum address            */
+    char signer[44];       /* signing authority address               */
+    char taker[44];        /* 0x000...000 for open orders             */
+    char token_id[80];     /* outcome token ID (decimal string)       */
+    char maker_amount[32]; /* USDC amount (6 decimals, in wei str)    */
+    char taker_amount[32]; /* token amount (6 decimals, in wei str)   */
+    char expiration[20];   /* unix timestamp string                   */
+    char nonce[20];        /* replay prevention nonce                 */
+    int fee_rate_bps;      /* fee rate in basis points                */
+    int side;              /* 0=BUY, 1=SELL                           */
+    int signature_type;    /* 0=EOA, 1=POLY_PROXY, 2=GNOSIS_SAFE     */
 } poly_order_t;
 
 /* ── Risk limits ──────────────────────────────────────────────────────── */
@@ -66,25 +66,25 @@ typedef struct {
     double max_total_exposure_usd; /* max total USD across all positions   */
     double max_order_usd;          /* max single order size in USD         */
     double min_arb_spread;         /* min spread to execute arb (e.g. 0.02) */
-    int    max_open_orders;        /* max concurrent open orders           */
-    bool   dry_run;                /* if true, simulate but don't execute  */
+    int max_open_orders;           /* max concurrent open orders           */
+    bool dry_run;                  /* if true, simulate but don't execute  */
 } risk_limits_t;
 
 /* Default risk limits — conservative */
-#define TRADING_DEFAULT_MAX_POSITION_USD        500.0
+#define TRADING_DEFAULT_MAX_POSITION_USD 500.0
 #define TRADING_DEFAULT_MAX_TOTAL_EXPOSURE_USD 2000.0
-#define TRADING_DEFAULT_MAX_ORDER_USD           100.0
-#define TRADING_DEFAULT_MIN_ARB_SPREAD            0.03
-#define TRADING_DEFAULT_MAX_OPEN_ORDERS          20
+#define TRADING_DEFAULT_MAX_ORDER_USD 100.0
+#define TRADING_DEFAULT_MIN_ARB_SPREAD 0.03
+#define TRADING_DEFAULT_MAX_OPEN_ORDERS 20
 
 static inline risk_limits_t risk_limits_default(void) {
     return (risk_limits_t){
-        .max_position_usd       = TRADING_DEFAULT_MAX_POSITION_USD,
+        .max_position_usd = TRADING_DEFAULT_MAX_POSITION_USD,
         .max_total_exposure_usd = TRADING_DEFAULT_MAX_TOTAL_EXPOSURE_USD,
-        .max_order_usd          = TRADING_DEFAULT_MAX_ORDER_USD,
-        .min_arb_spread         = TRADING_DEFAULT_MIN_ARB_SPREAD,
-        .max_open_orders        = TRADING_DEFAULT_MAX_OPEN_ORDERS,
-        .dry_run                = true,  /* safe default: dry run */
+        .max_order_usd = TRADING_DEFAULT_MAX_ORDER_USD,
+        .min_arb_spread = TRADING_DEFAULT_MIN_ARB_SPREAD,
+        .max_open_orders = TRADING_DEFAULT_MAX_OPEN_ORDERS,
+        .dry_run = true, /* safe default: dry run */
     };
 }
 
@@ -92,10 +92,12 @@ static inline risk_limits_t risk_limits_from_env(void) {
     risk_limits_t r = risk_limits_default();
     r.dry_run = dsco_env_bool("DSCO_TRADING_DRY_RUN", r.dry_run);
     r.max_order_usd = dsco_env_double("DSCO_TRADING_MAX_ORDER", r.max_order_usd, 0.0, 1000000000.0);
-    r.max_total_exposure_usd = dsco_env_double("DSCO_TRADING_MAX_EXPOSURE", r.max_total_exposure_usd, 0.0, 1000000000.0);
+    r.max_total_exposure_usd =
+        dsco_env_double("DSCO_TRADING_MAX_EXPOSURE", r.max_total_exposure_usd, 0.0, 1000000000.0);
     r.min_arb_spread = dsco_env_double("DSCO_TRADING_MIN_ARB_SPREAD", r.min_arb_spread, 0.0, 1.0);
     r.max_open_orders = dsco_env_int("DSCO_TRADING_MAX_OPEN_ORDERS", r.max_open_orders, 1, 1000000);
-    r.max_position_usd = dsco_env_double("DSCO_TRADING_MAX_POSITION", r.max_position_usd, 0.0, 1000000000.0);
+    r.max_position_usd =
+        dsco_env_double("DSCO_TRADING_MAX_POSITION", r.max_position_usd, 0.0, 1000000000.0);
     return r;
 }
 

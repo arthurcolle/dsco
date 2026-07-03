@@ -3,7 +3,7 @@
 
 #include <stddef.h>
 #include <stdbool.h>
-#include "json_util.h"  /* arena_t lives here */
+#include "json_util.h" /* arena_t lives here */
 
 /* ── Global arenas ─────────────────────────────────────────────────── */
 
@@ -34,11 +34,11 @@ char *session_sprintf(const char *fmt, ...);
    Note: only valid if no oversized allocs happened in the scope
    (oversized allocs are on separate malloc chain and always freed on reset). */
 typedef struct {
-    size_t saved_used;   /* head chunk used offset at snapshot time */
+    size_t saved_used; /* head chunk used offset at snapshot time */
 } arena_temp_t;
 
 arena_temp_t arena_temp_begin(void);
-void         arena_temp_end(arena_temp_t mark);
+void arena_temp_end(arena_temp_t mark);
 
 /* ── Stats ─────────────────────────────────────────────────────────── */
 

@@ -35,8 +35,8 @@ double gsl_histogram_sum(const gsl_histogram *h);
 
 int gsl_histogram_find(const gsl_histogram *h, double x, size_t *i);
 
-int gsl_histogram_fprintf(FILE *stream, const gsl_histogram *h,
-                          const char *range_format, const char *bin_format);
+int gsl_histogram_fprintf(FILE *stream, const gsl_histogram *h, const char *range_format,
+                          const char *bin_format);
 int gsl_histogram_fscanf(FILE *stream, gsl_histogram *h);
 int gsl_histogram_fwrite(FILE *stream, const gsl_histogram *h);
 int gsl_histogram_fread(FILE *stream, gsl_histogram *h);

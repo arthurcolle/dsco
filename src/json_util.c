@@ -1049,8 +1049,8 @@ static bool json_value_type_matches(const char *value, const char *expected_type
     return true; /* unknown schema type: don't fail closed on dialect extensions */
 }
 
-static void json_schema_set_error(json_validation_t *result, const char *field,
-                                  const char *fmt, const char *a, const char *b) {
+static void json_schema_set_error(json_validation_t *result, const char *field, const char *fmt,
+                                  const char *a, const char *b) {
     if (!result)
         return;
     result->valid = false;
@@ -1058,13 +1058,11 @@ static void json_schema_set_error(json_validation_t *result, const char *field,
     snprintf(result->error, sizeof(result->error), fmt, a ? a : "", b ? b : "");
 }
 
-static bool json_schema_validate_value(const char *value, const char *schema,
-                                       const char *path, int depth,
-                                       json_validation_t *result);
+static bool json_schema_validate_value(const char *value, const char *schema, const char *path,
+                                       int depth, json_validation_t *result);
 
-static bool json_schema_validate_required(const char *value, const char *schema,
-                                          const char *path, int depth,
-                                          json_validation_t *result) {
+static bool json_schema_validate_required(const char *value, const char *schema, const char *path,
+                                          int depth, json_validation_t *result) {
     const char *req = find_key(skip_ws(schema) + 1, "required");
     if (!req)
         return true;
@@ -1081,8 +1079,8 @@ static bool json_schema_validate_required(const char *value, const char *schema,
         if (field) {
             if (!json_has_key(value, field)) {
                 char field_path[128];
-                snprintf(field_path, sizeof(field_path), "%s%s%s",
-                         path && path[0] ? path : "$", path && path[0] ? "." : "", field);
+                snprintf(field_path, sizeof(field_path), "%s%s%s", path && path[0] ? path : "$",
+                         path && path[0] ? "." : "", field);
                 json_schema_set_error(result, field_path, "missing required field: %s", field,
                                       NULL);
                 free(field);
@@ -1101,9 +1099,8 @@ static bool json_schema_validate_required(const char *value, const char *schema,
     return true;
 }
 
-static bool json_schema_validate_properties(const char *value, const char *schema,
-                                            const char *path, int depth,
-                                            json_validation_t *result) {
+static bool json_schema_validate_properties(const char *value, const char *schema, const char *path,
+                                            int depth, json_validation_t *result) {
     const char *props = find_key(skip_ws(schema) + 1, "properties");
     if (!props)
         return true;
@@ -1201,9 +1198,8 @@ static bool json_schema_validate_array_items(const char *value, const char *sche
     return true;
 }
 
-static bool json_schema_validate_value(const char *value, const char *schema,
-                                       const char *path, int depth,
-                                       json_validation_t *result) {
+static bool json_schema_validate_value(const char *value, const char *schema, const char *path,
+                                       int depth, json_validation_t *result) {
     if (depth > 32)
         return true; /* recursion guard: schema is advisory, not a parser bomb */
     const char *sp = skip_ws(schema);

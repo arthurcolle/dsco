@@ -10,7 +10,7 @@
 typedef struct {
     uint32_t state[8];
     uint64_t bitcount;
-    uint8_t  buffer[64];
+    uint8_t buffer[64];
 } sha256_ctx_t;
 
 void sha256_init(sha256_ctx_t *ctx);
@@ -23,7 +23,7 @@ void sha256_hex(const uint8_t *data, size_t len, char hex[65]);
 typedef struct {
     uint32_t state[4];
     uint64_t count;
-    uint8_t  buffer[64];
+    uint8_t buffer[64];
 } md5_ctx_t;
 
 void md5_init(md5_ctx_t *ctx);
@@ -33,16 +33,13 @@ void md5_hex(const uint8_t *data, size_t len, char hex[33]);
 
 /* ── HMAC-SHA256 ─────────────────────────────────────────────────────── */
 
-void hmac_sha256(const uint8_t *key, size_t key_len,
-                 const uint8_t *data, size_t data_len,
+void hmac_sha256(const uint8_t *key, size_t key_len, const uint8_t *data, size_t data_len,
                  uint8_t out[32]);
-void hmac_sha256_hex(const uint8_t *key, size_t key_len,
-                     const uint8_t *data, size_t data_len,
+void hmac_sha256_hex(const uint8_t *key, size_t key_len, const uint8_t *data, size_t data_len,
                      char hex[65]);
 
 /* Constant-time HMAC-SHA256 verification (timing-safe) */
-bool hmac_sha256_verify(const uint8_t *key, size_t key_len,
-                        const uint8_t *data, size_t data_len,
+bool hmac_sha256_verify(const uint8_t *key, size_t key_len, const uint8_t *data, size_t data_len,
                         const uint8_t expected_mac[32]);
 
 /* ── Base64 encode/decode ────────────────────────────────────────────── */
@@ -68,15 +65,12 @@ void crypto_random_hex(size_t nbytes, char *hex);
 
 /* ── HKDF-SHA256 (key derivation) ────────────────────────────────────── */
 
-void hkdf_sha256(const uint8_t *ikm, size_t ikm_len,
-                 const uint8_t *salt, size_t salt_len,
-                 const uint8_t *info, size_t info_len,
-                 uint8_t *okm, size_t okm_len);
+void hkdf_sha256(const uint8_t *ikm, size_t ikm_len, const uint8_t *salt, size_t salt_len,
+                 const uint8_t *info, size_t info_len, uint8_t *okm, size_t okm_len);
 
 /* ── JWT decode (no verification, just parse) ────────────────────────── */
 
-bool jwt_decode(const char *token, char *header, size_t h_len,
-                char *payload, size_t p_len);
+bool jwt_decode(const char *token, char *header, size_t h_len, char *payload, size_t p_len);
 
 /* ── Constant-time comparison ────────────────────────────────────────── */
 
@@ -89,8 +83,12 @@ bool crypto_ct_equal(const uint8_t *a, const uint8_t *b, size_t len);
 
 static inline uint32_t fnv1a_32(const char *s) {
     uint32_t h = 2166136261u;
-    if (!s) return h;
-    for (; *s; s++) { h ^= (unsigned char)*s; h *= 16777619u; }
+    if (!s)
+        return h;
+    for (; *s; s++) {
+        h ^= (unsigned char)*s;
+        h *= 16777619u;
+    }
     return h;
 }
 

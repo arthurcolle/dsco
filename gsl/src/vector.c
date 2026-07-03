@@ -5,7 +5,8 @@
 
 gsl_vector *gsl_vector_alloc(size_t n) {
     gsl_vector *v = malloc(sizeof(gsl_vector));
-    if (!v) return NULL;
+    if (!v)
+        return NULL;
     v->size = n;
     v->stride = 1;
     v->data = calloc(n, sizeof(double));
@@ -26,7 +27,8 @@ void gsl_vector_set_zero(gsl_vector *v) {
 }
 
 void gsl_vector_set_all(gsl_vector *v, double x) {
-    for (size_t i = 0; i < v->size; i++) v->data[i] = x;
+    for (size_t i = 0; i < v->size; i++)
+        v->data[i] = x;
 }
 
 double gsl_vector_get(const gsl_vector *v, size_t i) {
@@ -34,5 +36,6 @@ double gsl_vector_get(const gsl_vector *v, size_t i) {
 }
 
 void gsl_vector_set(gsl_vector *v, size_t i, double x) {
-    if (i < v->size) v->data[i * v->stride] = x;
+    if (i < v->size)
+        v->data[i * v->stride] = x;
 }
