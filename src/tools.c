@@ -14700,6 +14700,451 @@ static bool tool_ast_edit(const char *input, char *result, size_t rlen) {
     return ok;
 }
 
+/* ═══════════════════════════════════════════════════════════════════════
+ * DEEP-ACCESS TOOLS — runtime, binary, VCS, filesystem, process, machine
+ * Most are thin structured wrappers over system utilities (lldb, cc, nm,
+ * objdump, clang-tidy/format, git, lsof, tar, osascript). Shared runner
+ * captures combined output into {ok,exit,ms,<key>}.
+ * ═══════════════════════════════════════════════════════════════════════ */
+
+static bool cw_run_json(const char *cmd, const char *outkey, char *result, size_t rlen) {
+    size_t cap = 262144;
+    char *buf = malloc(cap);
+    if (!buf) {
+        snprintf(result, rlen, "{\"error\":\"oom\"}");
+        return false;
+    }
+    buf[0] = '\0';
+    double t0 = now_ms();
+    int rc = run_cmd(cmd, buf, cap);
+    double ms = now_ms() - t0;
+    jbuf_t j;
+    jbuf_init(&j, 4096);
+    jbuf_appendf(&j, "{\"ok\":%s,\"exit\":%d,\"ms\":%.0f,\"%s\":", rc == 0 ? "true" : "false", rc,
+                 ms, outkey);
+    jbuf_append_json_str(&j, buf);
+    jbuf_append(&j, "}");
+    free(buf);
+    size_t n = j.len < rlen - 1 ? j.len : rlen - 1;
+    memcpy(result, j.data, n);
+    result[n] = '\0';
+    jbuf_free(&j);
+    return rc == 0;
+}
+
+static bool cw_valid_ident(const char *s) {
+    if (!s || !s[0] || !(isalpha((unsigned char)s[0]) || s[0] == '_'))
+        return false;
+    for (const char *p = s; *p; p++)
+        if (!cw_ident_char(*p))
+            return false;
+    return true;
+}
+
+static bool cw_valid_target(const char *s) {
+    if (!s)
+        return false;
+    for (const char *p = s; *p; p++)
+        if (!isalnum((unsigned char)*p) && !strchr("_-./", *p))
+            return false;
+    return true;
+}
+
+/* ── 1. debugger — drive lldb in batch mode ─────────────────────────────── */
+static bool tool_debugger(const char *input, char *result, size_t rlen) {
+    char *program = json_get_str(input, "program");
+    char *args = json_get_str(input, "args");
+    char *script = json_get_str(input, "script");
+    if (!program || !program[0]) {
+        free(program);
+        free(args);
+        free(script);
+        snprintf(result, rlen, "{\"error\":\"program required\"}");
+        return false;
+    }
+    const char *sc = (script && script[0]) ? script : "run\nbt\nquit\n";
+    FILE *sf = fopen("/tmp/dsco_lldb.txt", "w");
+    if (sf) {
+        fputs(sc, sf);
+        if (sc[strlen(sc) - 1] != '\n')
+            fputc('\n', sf);
+        fclose(sf);
+    }
+    jbuf_t cmd;
+    jbuf_init(&cmd, 256);
+    jbuf_append(&cmd, "lldb --batch -s /tmp/dsco_lldb.txt -- ");
+    shell_quote(&cmd, program);
+    if (args && args[0]) {
+        jbuf_append(&cmd, " ");
+        jbuf_append(&cmd, args);
+    }
+    jbuf_append(&cmd, " 2>&1");
+    bool ok = cw_run_json(cmd.data, "output", result, rlen);
+    jbuf_free(&cmd);
+    free(program);
+    free(args);
+    free(script);
+    return ok;
+}
+
+/* ── 2. backtrace — stack from a binary (+optional core) ─────────────────── */
+static bool tool_backtrace(const char *input, char *result, size_t rlen) {
+    char *binary = json_get_str(input, "binary");
+    char *core = json_get_str(input, "core");
+    if (!binary || !binary[0]) {
+        free(binary);
+        free(core);
+        snprintf(result, rlen, "{\"error\":\"binary required\"}");
+        return false;
+    }
+    jbuf_t cmd;
+    jbuf_init(&cmd, 256);
+    jbuf_append(&cmd, "lldb --batch ");
+    if (core && core[0]) {
+        jbuf_append(&cmd, "-c ");
+        shell_quote(&cmd, core);
+        jbuf_append(&cmd, " ");
+    }
+    jbuf_append(&cmd, "-o 'thread backtrace all' -o quit ");
+    shell_quote(&cmd, binary);
+    jbuf_append(&cmd, " 2>&1");
+    bool ok = cw_run_json(cmd.data, "backtrace", result, rlen);
+    jbuf_free(&cmd);
+    free(binary);
+    free(core);
+    return ok;
+}
+
+/* ── 3. syscall_trace — dtruss a command (needs privileges) ─────────────── */
+static bool tool_syscall_trace(const char *input, char *result, size_t rlen) {
+    char *command = json_get_str(input, "command");
+    if (!command || !command[0]) {
+        free(command);
+        snprintf(result, rlen, "{\"error\":\"command required\"}");
+        return false;
+    }
+    jbuf_t cmd;
+    jbuf_init(&cmd, 256 + strlen(command));
+    jbuf_append(&cmd, "dtruss -f sh -c ");
+    shell_quote(&cmd, command);
+    jbuf_append(&cmd, " 2>&1 | head -200");
+    bool ok = cw_run_json(cmd.data, "trace", result, rlen);
+    jbuf_free(&cmd);
+    free(command);
+    return ok;
+}
+
+/* ── 4. watch_run — run with /usr/bin/time -l; parse rss + exit ─────────── */
+static bool tool_watch_run(const char *input, char *result, size_t rlen) {
+    char *command = json_get_str(input, "command");
+    if (!command || !command[0]) {
+        free(command);
+        snprintf(result, rlen, "{\"error\":\"command required\"}");
+        return false;
+    }
+    jbuf_t cmd;
+    jbuf_init(&cmd, 256 + strlen(command));
+    jbuf_append(&cmd, "{ /usr/bin/time -l sh -c ");
+    shell_quote(&cmd, command);
+    jbuf_append(&cmd, "; echo \"__EC__$?\"; } 2>&1");
+    char *buf = malloc(131072);
+    buf[0] = '\0';
+    double t0 = now_ms();
+    run_cmd(cmd.data, buf, 131072);
+    double ms = now_ms() - t0;
+    jbuf_free(&cmd);
+    long long rss = -1;
+    int ec = -1;
+    const char *m = strstr(buf, "maximum resident set size");
+    if (m) {
+        const char *p = m;
+        while (p > buf && !isdigit((unsigned char)p[-1]))
+            p--;
+        const char *e2 = p;
+        while (p > buf && isdigit((unsigned char)p[-1]))
+            p--;
+        if (e2 > p)
+            rss = atoll(p);
+    }
+    const char *ep = strstr(buf, "__EC__");
+    if (ep)
+        ec = atoi(ep + 6);
+    free(buf);
+    snprintf(result, rlen, "{\"exit\":%d,\"wall_ms\":%.0f,\"peak_rss_bytes\":%lld}", ec, ms, rss);
+    return ec == 0;
+}
+
+/* ── 5. memcheck — run under macOS `leaks` ──────────────────────────────── */
+static bool tool_memcheck(const char *input, char *result, size_t rlen) {
+    char *command = json_get_str(input, "command");
+    if (!command || !command[0]) {
+        free(command);
+        snprintf(result, rlen, "{\"error\":\"command required\"}");
+        return false;
+    }
+    jbuf_t cmd;
+    jbuf_init(&cmd, 256 + strlen(command));
+    jbuf_append(&cmd, "leaks --atExit -- sh -c ");
+    shell_quote(&cmd, command);
+    jbuf_append(&cmd, " 2>&1 | grep -aE 'leaks for|leaked bytes|Process' | head -40");
+    bool ok = cw_run_json(cmd.data, "report", result, rlen);
+    jbuf_free(&cmd);
+    free(command);
+    return ok;
+}
+
+/* ── 6. make_build — structured build of a target ───────────────────────── */
+static bool tool_make_build(const char *input, char *result, size_t rlen) {
+    char *target = json_get_str(input, "target");
+    if (!target)
+        target = strdup("");
+    if (!cw_valid_target(target)) {
+        free(target);
+        snprintf(result, rlen, "{\"error\":\"invalid target\"}");
+        return false;
+    }
+    char cmd[1024];
+    snprintf(cmd, sizeof(cmd),
+             "make %s >/tmp/dsco_build.log 2>&1; ec=$?; "
+             "grep -aE ' error:| warning:|Undefined|undefined ' /tmp/dsco_build.log | tail -60; "
+             "echo \"__EC__$ec\"",
+             target);
+    char *buf = malloc(131072);
+    buf[0] = '\0';
+    double t0 = now_ms();
+    run_cmd(cmd, buf, 131072);
+    double ms = now_ms() - t0;
+    int ec = -1;
+    const char *ep = strstr(buf, "__EC__");
+    if (ep)
+        ec = atoi(ep + 6);
+    jbuf_t j;
+    jbuf_init(&j, 8192);
+    jbuf_appendf(&j, "{\"target\":");
+    jbuf_append_json_str(&j, target[0] ? target : "(default)");
+    jbuf_appendf(&j, ",\"ok\":%s,\"exit\":%d,\"ms\":%.0f,\"errors\":[", ec == 0 ? "true" : "false",
+                 ec, ms);
+    int ne = 0, nw = 0;
+    jbuf_t warns;
+    jbuf_init(&warns, 4096);
+    char *ls = NULL;
+    char *bc = strdup(buf);
+    for (char *ln = strtok_r(bc, "\n", &ls); ln; ln = strtok_r(NULL, "\n", &ls)) {
+        char clean[400];
+        cw_strip_ansi(ln, clean, sizeof(clean));
+        if (strstr(clean, " error:") || strstr(clean, "Undefined") || strstr(clean, "undefined ")) {
+            if (ne++ < 30) {
+                jbuf_append(&j, ne > 1 ? "," : "");
+                jbuf_append_json_str(&j, clean);
+            }
+        } else if (strstr(clean, " warning:")) {
+            if (nw++ < 30) {
+                jbuf_append(&warns, nw > 1 ? "," : "");
+                jbuf_append_json_str(&warns, clean);
+            }
+        }
+    }
+    free(bc);
+    jbuf_appendf(&j, "],\"error_count\":%d,\"warnings\":[", ne);
+    jbuf_append(&j, warns.data);
+    jbuf_appendf(&j, "],\"warning_count\":%d}", nw);
+    jbuf_free(&warns);
+    free(buf);
+    free(target);
+    size_t n = j.len < rlen - 1 ? j.len : rlen - 1;
+    memcpy(result, j.data, n);
+    result[n] = '\0';
+    jbuf_free(&j);
+    return ec == 0;
+}
+
+/* ── 7. preprocess — cc -E with project flags ───────────────────────────── */
+static bool tool_preprocess(const char *input, char *result, size_t rlen) {
+    char *file = json_get_str(input, "file");
+    if (!file || !file[0]) {
+        free(file);
+        snprintf(result, rlen, "{\"error\":\"file required\"}");
+        return false;
+    }
+    char *argv_s[256];
+    int argc = diag_build_argv(file, argv_s, 256);
+    if (argc < 0) {
+        free(file);
+        snprintf(result, rlen, "{\"error\":\"could not read compile_commands.json\"}");
+        return false;
+    }
+    for (int i = 0; i < argc; i++)
+        if (strcmp(argv_s[i], "-fsyntax-only") == 0) {
+            free(argv_s[i]);
+            argv_s[i] = strdup("-E");
+        }
+    char *out = malloc(262144);
+    out[0] = '\0';
+    safe_exec_argv((const char *const *)argv_s, out, 262144);
+    for (int i = 0; i < argc; i++)
+        free(argv_s[i]);
+    jbuf_t j;
+    jbuf_init(&j, 4096);
+    jbuf_append(&j, "{\"file\":");
+    jbuf_append_json_str(&j, file);
+    jbuf_append(&j, ",\"expanded\":");
+    jbuf_append_json_str(&j, out);
+    jbuf_append(&j, "}");
+    free(out);
+    free(file);
+    size_t n = j.len < rlen - 1 ? j.len : rlen - 1;
+    memcpy(result, j.data, n);
+    result[n] = '\0';
+    jbuf_free(&j);
+    return true;
+}
+
+/* ── 8. disasm — disassemble one symbol from a binary ───────────────────── */
+static bool tool_disasm(const char *input, char *result, size_t rlen) {
+    char *sym = json_get_str(input, "symbol");
+    char *bin = json_get_str(input, "binary");
+    if (!cw_valid_ident(sym)) {
+        free(sym);
+        free(bin);
+        snprintf(result, rlen, "{\"error\":\"valid symbol name required\"}");
+        return false;
+    }
+    jbuf_t cmd;
+    jbuf_init(&cmd, 256);
+    /* mach-o prefixes C symbols with '_'; pass both so main and _main match. */
+    jbuf_append(&cmd, "objdump --disassemble-symbols=");
+    jbuf_append(&cmd, sym);
+    jbuf_append(&cmd, ",_");
+    jbuf_append(&cmd, sym); /* validated identifier */
+    jbuf_append(&cmd, " ");
+    shell_quote(&cmd, (bin && bin[0]) ? bin : "dsco");
+    jbuf_append(&cmd, " 2>&1 | head -400");
+    bool ok = cw_run_json(cmd.data, "disassembly", result, rlen);
+    jbuf_free(&cmd);
+    free(sym);
+    free(bin);
+    return ok;
+}
+
+/* ── 9. unused_symbols — static functions referenced only at their def ──── */
+static void cw_unused_walk(const char *root, const char *rel, jbuf_t *out, int *n) {
+    char path[2048];
+    snprintf(path, sizeof(path), "%s/%s", root, rel[0] ? rel : ".");
+    DIR *d = opendir(path);
+    if (!d)
+        return;
+    struct dirent *e;
+    while ((e = readdir(d)) != NULL && *n < 200) {
+        if (e->d_name[0] == '.')
+            continue;
+        char childrel[1024];
+        if (rel[0])
+            snprintf(childrel, sizeof(childrel), "%s/%s", rel, e->d_name);
+        else
+            snprintf(childrel, sizeof(childrel), "%s", e->d_name);
+        char childpath[2400];
+        snprintf(childpath, sizeof(childpath), "%s/%s", root, childrel);
+        struct stat st;
+        if (stat(childpath, &st) != 0)
+            continue;
+        if (S_ISDIR(st.st_mode)) {
+            if (strcmp(e->d_name, "build") == 0 || strcmp(e->d_name, "gsl") == 0 ||
+                strcmp(e->d_name, "vendor") == 0)
+                continue;
+            cw_unused_walk(root, childrel, out, n);
+            continue;
+        }
+        size_t dl = strlen(e->d_name);
+        if (dl < 3 || strcmp(e->d_name + dl - 2, ".c") != 0)
+            continue;
+        long flen = 0;
+        char *txt = cw_read_file(childpath, &flen);
+        if (!txt)
+            continue;
+        ast_file_t *f = ast_parse_file(childpath);
+        if (f) {
+            for (int i = 0; i < f->count && *n < 200; i++) {
+                ast_node_t *nd = &f->nodes[i];
+                if (nd->type != AST_FUNCTION || !nd->is_static || !nd->name)
+                    continue;
+                /* count whole-word occurrences in the file text */
+                size_t nl = strlen(nd->name);
+                int refs = 0;
+                const char *p = txt;
+                while ((p = strstr(p, nd->name)) != NULL) {
+                    char before = (p == txt) ? '\0' : p[-1];
+                    char after = p[nl];
+                    if (!cw_ident_char(before) && !cw_ident_char(after))
+                        refs++;
+                    p += nl;
+                }
+                if (refs <= 1) {
+                    if (*n)
+                        jbuf_append(out, ",");
+                    jbuf_append(out, "{\"file\":");
+                    jbuf_append_json_str(out, childrel);
+                    jbuf_appendf(out, ",\"line\":%d,\"name\":", nd->line_start);
+                    jbuf_append_json_str(out, nd->name);
+                    jbuf_append(out, "}");
+                    (*n)++;
+                }
+            }
+            ast_free_file(f);
+        }
+        free(txt);
+    }
+    closedir(d);
+}
+
+static bool tool_unused_symbols(const char *input, char *result, size_t rlen) {
+    char cwd[1024];
+    const char *root = cw_repo_root(cwd, sizeof(cwd));
+    jbuf_t out;
+    jbuf_init(&out, 8192);
+    jbuf_append(&out, "{\"unused_static_functions\":[");
+    int n = 0;
+    char *paths = json_get_str(input, "paths");
+    if (paths && paths[0])
+        cw_unused_walk(root, paths, &out, &n);
+    else
+        cw_unused_walk(root, "src", &out, &n);
+    free(paths);
+    jbuf_appendf(&out, "],\"count\":%d,\"note\":\"static fns referenced only at their definition "
+                       "(single-file scope)\"}",
+                 n);
+    size_t nn = out.len < rlen - 1 ? out.len : rlen - 1;
+    memcpy(result, out.data, nn);
+    result[nn] = '\0';
+    jbuf_free(&out);
+    return true;
+}
+
+/* ── 10. abi_diff — exported-symbol diff between two binaries ────────────── */
+static bool tool_abi_diff(const char *input, char *result, size_t rlen) {
+    char *a = json_get_str(input, "a");
+    char *b = json_get_str(input, "b");
+    if (!a || !a[0] || !b || !b[0]) {
+        free(a);
+        free(b);
+        snprintf(result, rlen, "{\"error\":\"a and b (binaries) required\"}");
+        return false;
+    }
+    jbuf_t cmd;
+    jbuf_init(&cmd, 512);
+    jbuf_append(&cmd, "nm -gU ");
+    shell_quote(&cmd, a);
+    jbuf_append(&cmd, " 2>/dev/null | awk '{print $NF}' | sort -u > /tmp/dsco_abi_a; nm -gU ");
+    shell_quote(&cmd, b);
+    jbuf_append(&cmd, " 2>/dev/null | awk '{print $NF}' | sort -u > /tmp/dsco_abi_b; "
+                      "echo '=== removed (only in a) ==='; comm -23 /tmp/dsco_abi_a /tmp/dsco_abi_b;"
+                      " echo '=== added (only in b) ==='; comm -13 /tmp/dsco_abi_a /tmp/dsco_abi_b");
+    bool ok = cw_run_json(cmd.data, "diff", result, rlen);
+    jbuf_free(&cmd);
+    free(a);
+    free(b);
+    return ok;
+}
+
 static bool tool_context_search(const char *input, char *result, size_t rlen) {
     char *query = json_get_str(input, "query");
     char *tool_filter = json_get_str(input, "tool");
@@ -30143,6 +30588,75 @@ static const tool_def_t s_tools[] = {
          "\"string\"},\"file\":{\"type\":\"string\"},\"name\":{\"type\":\"string\"},\"new_source\":"
          "{\"type\":\"string\"},\"paths\":{\"type\":\"string\"}},\"required\":[\"action\"]}",
      .execute = tool_ast_edit},
+    {.name = "debugger",
+     .description = "Drive lldb in batch mode on a program: breakpoints, run, backtrace, inspect. "
+                    "Pass an lldb `script` (newline-separated commands; default run;bt;quit).",
+     .input_schema_json = "{\"type\":\"object\",\"properties\":{\"program\":{\"type\":\"string\"},"
+                          "\"args\":{\"type\":\"string\"},\"script\":{\"type\":\"string\"}},"
+                          "\"required\":[\"program\"]}",
+     .execute = tool_debugger},
+    {.name = "backtrace",
+     .description = "Symbolicate a stack from a binary and optional core dump (lldb 'thread "
+                    "backtrace all'). Turns a crash into a readable stack.",
+     .input_schema_json = "{\"type\":\"object\",\"properties\":{\"binary\":{\"type\":\"string\"},"
+                          "\"core\":{\"type\":\"string\"}},\"required\":[\"binary\"]}",
+     .execute = tool_backtrace,
+     .is_read_only = true},
+    {.name = "syscall_trace",
+     .description = "Trace the syscalls a command makes (dtruss; may require elevated privileges). "
+                    "Ground truth for what a program actually touches.",
+     .input_schema_json = "{\"type\":\"object\",\"properties\":{\"command\":{\"type\":\"string\"}},"
+                          "\"required\":[\"command\"]}",
+     .execute = tool_syscall_trace},
+    {.name = "watch_run",
+     .description = "Run a command and return {exit, wall_ms, peak_rss_bytes} — structured "
+                    "resource accounting via /usr/bin/time -l.",
+     .input_schema_json = "{\"type\":\"object\",\"properties\":{\"command\":{\"type\":\"string\"}},"
+                          "\"required\":[\"command\"]}",
+     .execute = tool_watch_run},
+    {.name = "memcheck",
+     .description = "Run a command under macOS `leaks` and report leaked allocations. Pairs with "
+                    "the C codebase for memory-safety checks.",
+     .input_schema_json = "{\"type\":\"object\",\"properties\":{\"command\":{\"type\":\"string\"}},"
+                          "\"required\":[\"command\"]}",
+     .execute = tool_memcheck},
+    {.name = "make_build",
+     .description = "Build a make target and return STRUCTURED {ok,exit,errors[],warnings[],ms} — "
+                    "the build-side twin of test_run. Defaults to the default target.",
+     .input_schema_json = "{\"type\":\"object\",\"properties\":{\"target\":{\"type\":\"string\"}},"
+                          "\"required\":[]}",
+     .execute = tool_make_build},
+    {.name = "preprocess",
+     .description = "Run the C preprocessor (cc -E) on a file with the project's real flags — see "
+                    "fully expanded macros. Essential in a macro-heavy codebase.",
+     .input_schema_json = "{\"type\":\"object\",\"properties\":{\"file\":{\"type\":\"string\"}},"
+                          "\"required\":[\"file\"]}",
+     .execute = tool_preprocess,
+     .is_read_only = true,
+     .is_concurrent = true},
+    {.name = "disasm",
+     .description = "Disassemble a single symbol from a built binary (objdump). See the actual "
+                    "emitted machine code. Defaults to the dsco binary.",
+     .input_schema_json = "{\"type\":\"object\",\"properties\":{\"symbol\":{\"type\":\"string\"},"
+                          "\"binary\":{\"type\":\"string\"}},\"required\":[\"symbol\"]}",
+     .execute = tool_disasm,
+     .is_read_only = true,
+     .is_concurrent = true},
+    {.name = "unused_symbols",
+     .description = "Find static functions that are referenced only at their own definition — "
+                    "dead code safe to remove. AST-based, file-scope-correct.",
+     .input_schema_json = "{\"type\":\"object\",\"properties\":{\"paths\":{\"type\":\"string\"}},"
+                          "\"required\":[]}",
+     .execute = tool_unused_symbols,
+     .is_read_only = true,
+     .is_concurrent = true},
+    {.name = "abi_diff",
+     .description = "Diff exported symbols between two binaries (nm) — added/removed symbols. "
+                    "Catches accidental ABI breaks.",
+     .input_schema_json = "{\"type\":\"object\",\"properties\":{\"a\":{\"type\":\"string\"},\"b\":{"
+                          "\"type\":\"string\"}},\"required\":[\"a\",\"b\"]}",
+     .execute = tool_abi_diff,
+     .is_read_only = true},
     {.name = "jina_embed",
      .description =
          "Compute embeddings via Jina v4 API. Returns 1024d float vectors for semantic similarity.",
@@ -35025,6 +35539,12 @@ static tool_class_t tool_classify(const char *n, bool is_read_only) {
     if (is_read_only)
         return TOOL_CLASS_READ;
     if (strcmp(n, "bash") == 0 || strcmp(n, "sandbox_run") == 0 || strcmp(n, "run_command") == 0)
+        return TOOL_CLASS_EXEC;
+    /* Deep-access tools that run an arbitrary command/program → exec-gated. */
+    if (strcmp(n, "debugger") == 0 || strcmp(n, "syscall_trace") == 0 ||
+        strcmp(n, "watch_run") == 0 || strcmp(n, "memcheck") == 0 ||
+        strcmp(n, "make_build") == 0 || strcmp(n, "lint") == 0 ||
+        strcmp(n, "spawn_bg") == 0 || strcmp(n, "git_bisect") == 0)
         return TOOL_CLASS_EXEC;
     if (strcmp(n, "agent") == 0 || strcmp(n, "swarm") == 0 || strcmp(n, "legion") == 0)
         return TOOL_CLASS_SPAWN;
