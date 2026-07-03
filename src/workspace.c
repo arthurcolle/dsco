@@ -495,6 +495,10 @@ int dsco_workspace_count_auto_skills(void) {
     return count;
 }
 
+static int qsort_strcmp(const void *a, const void *b) {
+    return strcmp(*(const char *const *)a, *(const char *const *)b);
+}
+
 int dsco_workspace_list_skills(char *out, size_t out_len) {
     if (!out || out_len == 0)
         return -1;
@@ -507,15 +511,31 @@ int dsco_workspace_list_skills(char *out, size_t out_len) {
         return -1;
     }
 
-    size_t pos = 0;
-    sbuf_append(out, out_len, &pos, "Installed skills:\n");
-    int count = 0;
+    /* Collect + sort entries first: readdir() order is filesystem-dependent
+     * and can differ across runs for identical content. The catalog feeds the
+     * cached system-prompt prefix, so serialization must be deterministic —
+     * a reordered listing is a phantom cache bust at write price. */
+    char **names = NULL;
+    int name_count = 0, name_cap = 0;
     struct dirent *ent;
     while ((ent = readdir(d)) != NULL) {
         if (ent->d_name[0] == '.')
             continue;
+        if (name_count >= name_cap) {
+            name_cap = name_cap > 0 ? name_cap * 2 : 64;
+            names = safe_realloc(names, (size_t)name_cap * sizeof(char *));
+        }
+        names[name_count++] = safe_strdup(ent->d_name);
+    }
+    closedir(d);
+    qsort(names, (size_t)name_count, sizeof(char *), qsort_strcmp);
+
+    size_t pos = 0;
+    sbuf_append(out, out_len, &pos, "Installed skills:\n");
+    int count = 0;
+    for (int i = 0; i < name_count; i++) {
         char path[PATH_MAX];
-        snprintf(path, sizeof(path), "%s/%s/SKILL.md", skills_dir, ent->d_name);
+        snprintf(path, sizeof(path), "%s/%s/SKILL.md", skills_dir, names[i]);
         char *text = NULL;
         if (!read_file_limit(path, 8192, &text))
             continue;
@@ -523,11 +543,13 @@ int dsco_workspace_list_skills(char *out, size_t out_len) {
         markdown_summary_line(text, summary, sizeof(summary));
         free(text);
         char line[512];
-        snprintf(line, sizeof(line), "- %s%s%s\n", ent->d_name, summary[0] ? ": " : "", summary);
+        snprintf(line, sizeof(line), "- %s%s%s\n", names[i], summary[0] ? ": " : "", summary);
         sbuf_append(out, out_len, &pos, line);
         count++;
     }
-    closedir(d);
+    for (int i = 0; i < name_count; i++)
+        free(names[i]);
+    free(names);
     if (count == 0) {
         snprintf(out, out_len, "No installed skills in %s", skills_dir);
         return 0;
