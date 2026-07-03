@@ -4376,6 +4376,12 @@ bool agent_run(const char *api_key, const char *model, const char *topology_name
     tools_hint_init();
     tools_cooc_load();
     dsco_locks_init(&g_locks);
+    /* Initialize the model router: scoring weights + mutex. Policy defaults
+     * to fixed (no auto-switching); DSCO_ROUTER_POLICY or /router selects
+     * cost/latency/quality/balanced/adaptive. Without this call the router
+     * ran zero-initialized — unset weights and an uninitialized mutex — so
+     * adaptive routing could never engage. */
+    router_init(&g_router, router_policy_parse(getenv("DSCO_ROUTER_POLICY")));
     /* Load agent profiles and re-apply active filter if set */
     agent_profiles_init();
     if (agent_profile_active_name()) {
