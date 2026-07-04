@@ -1,12 +1,15 @@
 #include "memory_tier.h"
 #include "error.h"
+#include "json_util.h"
 #include "vecstore.h"
 #include "tools.h"
 #include "vfs.h"
+#include <limits.h>
 #include <math.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <strings.h>
 #include <sys/time.h>
 
 /* §8: VFS persistence handle — set by memory_store_set_vfs() */
@@ -28,12 +31,36 @@ static double now_sec(void) {
     return tv.tv_sec + tv.tv_usec / 1e6;
 }
 
+static bool memory_class_valid(memory_class_t level);
+static bool memory_class_allows_manual_promotion(const memory_entry_t *e);
+
 /* ── Name Tables ──────────────────────────────────────────────────────── */
 
 static const char *TIER_NAMES[] = {"working", "episodic", "semantic"};
+static const char *CLASS_NAMES[] = {"open", "held", "sealed", "umbral"};
 
 const char *memory_tier_name(memory_tier_t t) {
     return (t >= 0 && t < MEM_TIER_COUNT) ? TIER_NAMES[t] : "unknown";
+}
+
+const char *memory_class_name(memory_class_t c) {
+    return memory_class_valid(c) ? CLASS_NAMES[c] : "unknown";
+}
+
+bool memory_class_from_name(const char *s, memory_class_t *out) {
+    if (!s || !out)
+        return false;
+    if (strcasecmp(s, "open") == 0 || strcasecmp(s, "l0") == 0 || strcmp(s, "0") == 0)
+        *out = MEM_CLASS_OPEN;
+    else if (strcasecmp(s, "held") == 0 || strcasecmp(s, "l1") == 0 || strcmp(s, "1") == 0)
+        *out = MEM_CLASS_HELD;
+    else if (strcasecmp(s, "sealed") == 0 || strcasecmp(s, "l2") == 0 || strcmp(s, "2") == 0)
+        *out = MEM_CLASS_SEALED;
+    else if (strcasecmp(s, "umbral") == 0 || strcasecmp(s, "l3") == 0 || strcmp(s, "3") == 0)
+        *out = MEM_CLASS_UMBRAL;
+    else
+        return false;
+    return true;
 }
 
 double memory_tier_halflife(memory_tier_t t) {
@@ -85,7 +112,7 @@ static int find_slot(memory_store_t *m) {
     }
     /* If full, evict weakest entry */
     double weakest = 2.0;
-    int weakest_idx = 0;
+    int weakest_idx = -1;
     double t = now_sec();
     for (int i = 0; i < MEMTIER_MAX_ENTRIES; i++) {
         if (m->entries[i].pinned)
@@ -96,6 +123,8 @@ static int find_slot(memory_store_t *m) {
             weakest_idx = i;
         }
     }
+    if (weakest_idx < 0)
+        return -1;
     m->entries[weakest_idx].active = false;
     m->tier_count[m->entries[weakest_idx].tier]--;
     m->count--;
@@ -134,11 +163,14 @@ int memory_store_tagged(memory_store_t *m, memory_tier_t tier, const char *key, 
         existing->importance = importance;
         existing->last_accessed = now_sec();
         existing->access_count++;
+        if (existing->classification >= MEM_CLASS_SEALED)
+            existing->class_reviewed = false;
         return existing->id;
     }
 
     int slot = find_slot(m);
-    /* CONSERVATION: find_slot returns -1 when full; never index with it. */
+    /* CONSERVATION: find_slot returns -1 when full of pinned entries; never
+     * index with it. */
     DSCO_REQUIRE_RET(slot >= 0 && slot < MEMTIER_MAX_ENTRIES, -1);
     memory_entry_t *e = &m->entries[slot];
     memset(e, 0, sizeof(*e));
@@ -292,6 +324,14 @@ bool memory_promote(memory_store_t *m, const char *key) {
         return false;
     if (e->tier >= MEM_SEMANTIC)
         return false; /* already at top */
+    /* CLASSIFICATION gate (doctrine/CLASSIFICATION.md §5): SEALED material may
+     * not cross into semantic memory, and UMBRAL may not leave working memory,
+     * without an explicit review grant. Fail closed. */
+    if (!memory_class_allows_manual_promotion(e))
+        return false;
+    bool consume_review = (e->classification == MEM_CLASS_UMBRAL) ||
+                          (e->classification == MEM_CLASS_SEALED &&
+                           e->tier == MEM_EPISODIC);
     /* CONSERVATION: both the source and destination tier indices must be in
      * range before we mutate the per-tier counters, or we corrupt the histogram
      * that drives consolidation decisions. */
@@ -302,6 +342,8 @@ bool memory_promote(memory_store_t *m, const char *key) {
     m->tier_count[e->tier]++;
     e->created_at = now_sec(); /* reset decay clock */
     e->strength = 1.0;
+    if (consume_review)
+        e->class_reviewed = false; /* review grants exactly one gated promotion */
     m->total_promotions++;
     return true;
 }
@@ -373,6 +415,13 @@ int memory_consolidate(memory_store_t *m) {
         if (rank >= gate)
             should_promote = true;
 
+        /* CLASSIFICATION gate (doctrine/CLASSIFICATION.md §5): the sweep never
+         * auto-promotes SEALED into semantic or UMBRAL out of working. A secret
+         * does not enter permanent memory because it was accessed often —
+         * that is the consolidation-leak failure mode, verbatim. */
+        if (should_promote && !memory_class_promotable(e))
+            should_promote = false;
+
         if (should_promote) {
             m->tier_count[e->tier]--;
             e->tier++;
@@ -425,6 +474,93 @@ int memory_tick(memory_store_t *m) {
     int evicted = memory_decay_tick(m, 0.01);
     int promoted = memory_consolidate(m);
     return evicted + promoted;
+}
+
+/* ── Classification (doctrine/CLASSIFICATION.md §5) ───────────────────── */
+
+bool memory_class_promotable(const memory_entry_t *e) {
+    if (!e)
+        return false;
+    switch (e->classification) {
+    case MEM_CLASS_OPEN:
+    case MEM_CLASS_HELD:
+        return true; /* L0/L1 consolidate freely */
+    case MEM_CLASS_SEALED:
+        /* L2: working->episodic is free; episodic->semantic needs review. */
+        if (e->tier == MEM_WORKING)
+            return true;
+        return e->class_reviewed;
+    case MEM_CLASS_UMBRAL:
+        /* L3: never leaves working memory without explicit (Tier 0) review. */
+        return e->class_reviewed;
+    default:
+        /* Unknown label: fail closed. An unlabeled-but-hot entry must not
+         * consolidate on a default-permit path. */
+        return false;
+    }
+}
+
+bool memory_classify(memory_store_t *m, const char *key, memory_class_t level) {
+    if (!m || !m->initialized || !key)
+        return false;
+    DSCO_REQUIRE_RET(level >= MEM_CLASS_OPEN && level <= MEM_CLASS_UMBRAL, false);
+    memory_entry_t *e = find_by_key(m, key);
+    if (!e)
+        return false;
+    /* No in-band declassification (SECRECY_HARDENING §5): labels only go up
+     * here. Downgrades run through the DECLASSIFY ritual out-of-band, which
+     * rewrites the entry rather than lowering the label in place. */
+    if (level < e->classification)
+        return false;
+    e->classification = level;
+    /* Raising the label revokes any pending review grant: the grant was made
+     * against the old level's rules. */
+    if (level > MEM_CLASS_HELD)
+        e->class_reviewed = false;
+    /* UMBRAL must not sit in episodic/semantic. If material is re-labeled L3
+     * after it already consolidated, that is a live consolidation leak —
+     * demote it back to working immediately and let session-close purge it. */
+    if (level == MEM_CLASS_UMBRAL && e->tier != MEM_WORKING) {
+        m->tier_count[e->tier]--;
+        e->tier = MEM_WORKING;
+        m->tier_count[MEM_WORKING]++;
+        e->created_at = now_sec(); /* working-tier decay clock */
+    }
+    return true;
+}
+
+bool memory_classify_review(memory_store_t *m, const char *key) {
+    if (!m || !m->initialized || !key)
+        return false;
+    memory_entry_t *e = find_by_key(m, key);
+    if (!e)
+        return false;
+    /* Review grants are only meaningful for gated levels. */
+    if (e->classification != MEM_CLASS_SEALED && e->classification != MEM_CLASS_UMBRAL)
+        return false;
+    e->class_reviewed = true;
+    return true;
+}
+
+int memory_purge_umbral(memory_store_t *m) {
+    if (!m || !m->initialized)
+        return 0;
+    int purged = 0;
+    for (int i = 0; i < MEMTIER_MAX_ENTRIES; i++) {
+        memory_entry_t *e = &m->entries[i];
+        if (!e->active || e->classification != MEM_CLASS_UMBRAL)
+            continue;
+        /* Pinning does not save an UMBRAL entry: L3 TTL discipline outranks
+         * decay exemption. Verified deletion = zero the value bytes, not just
+         * the active flag (SECRECY_HARDENING §7: deletion without verification
+         * is superstition). */
+        m->tier_count[e->tier]--;
+        m->count--;
+        m->total_evictions++;
+        memset(e, 0, sizeof(*e));
+        purged++;
+    }
+    return purged;
 }
 
 /* ── Serialization ────────────────────────────────────────────────────── */
