@@ -698,6 +698,13 @@ test_memory_keep_score: $(TEST_OBJ_DIR)/test_memory_keep_score.o \
 	$(LIB_OBJS:$(OBJ_DIR)/%=$(TEST_OBJ_DIR)/%) $(GSL_TEST_OBJS)
 	$(CC) $(TEST_CFLAGS) -o $@ $^ $(LDFLAGS) $(LDLIBS)
 
+$(TEST_OBJ_DIR)/test_memory_classification.o: $(TEST_DIR)/test_memory_classification.c | $(TEST_OBJ_DIR)
+	$(CC) $(TEST_CFLAGS) -c -o $@ $<
+# classification gates live in memory_tier.c; same full lib-set link as keep_score.
+test_memory_classification: $(TEST_OBJ_DIR)/test_memory_classification.o \
+	$(LIB_OBJS:$(OBJ_DIR)/%=$(TEST_OBJ_DIR)/%) $(GSL_TEST_OBJS)
+	$(CC) $(TEST_CFLAGS) -o $@ $^ $(LDFLAGS) $(LDLIBS)
+
 $(TEST_OBJ_DIR)/test_wasm_core.o: $(TEST_DIR)/test_wasm_core.c | $(TEST_OBJ_DIR)
 	$(CC) $(TEST_CFLAGS) -c -o $@ $<
 $(TEST_OBJ_DIR)/wasm_core.o: $(SRC_DIR)/wasm_core.c | $(TEST_OBJ_DIR)
@@ -750,7 +757,7 @@ test_math_corpus: $(TEST_OBJ_DIR)/test_math_corpus.o \
 # Build + run every standalone priority test in sequence.
 .PHONY: test_priorities
 test_priorities: test_recovery test_stateful_atoms test_plan_optimizer test_plan_cache \
-	test_learned_cost test_session_memory test_memory_keep_score test_wasm_core test_control_flow test_avian test_waiter test_math_corpus
+	test_learned_cost test_session_memory test_memory_keep_score test_memory_classification test_wasm_core test_control_flow test_avian test_waiter test_math_corpus
 	./test_recovery
 	./test_stateful_atoms
 	./test_plan_optimizer
@@ -758,6 +765,7 @@ test_priorities: test_recovery test_stateful_atoms test_plan_optimizer test_plan
 	./test_learned_cost
 	./test_session_memory
 	./test_memory_keep_score
+	./test_memory_classification
 	./test_wasm_core
 	./test_control_flow
 	./test_avian
