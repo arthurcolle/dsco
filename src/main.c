@@ -886,7 +886,10 @@ void dsco_startup_init(dsco_profile_t profile, dsco_caps_t caps) {
         }
 
 #if defined(HAVE_LIBSODIUM)
-        if (!is_worker) {
+        /* Systems-agent (DSCO_NET_FORCE) brings the mesh up even in worker mode
+           so fleet workers are addressable peers. */
+        bool net_force = getenv("DSCO_NET_FORCE") != NULL;
+        if (!is_worker || net_force) {
             heartbeat_set_phase("startup_mesh");
             /* ── Mesh P2P layer ─────────────────────────────────────── */
             uint16_t mesh_port = 7337;
@@ -927,7 +930,7 @@ void dsco_startup_init(dsco_profile_t profile, dsco_caps_t caps) {
 #endif /* HAVE_LIBSODIUM */
 
 #if defined(HAVE_MBEDTLS) && defined(HAVE_LIBSODIUM)
-        if (!is_worker) {
+        if (!is_worker || getenv("DSCO_NET_FORCE") != NULL) {
             heartbeat_set_phase("startup_http");
             /* ── HTTP/TLS API server ─────────────────────────────────── */
             uint16_t http_port = NETSRV_DEFAULT_PORT;
@@ -2422,7 +2425,7 @@ static void usage(const char *prog) {
         "  -i, --interactive      Start an interactive REPL (no prompt required)\n"
         "  --autonomous           No routine approval prompts; trusted tier; critical gates still fail closed\n"
         "  --sandboxed            Untrusted tier: route exec tools through sandbox_run, block writes/network/control-plane\n"
-        "  --systems-agent        UNGOVERNED control arm (governance model=none): disable the entire gate for A/B overhead experiments\n"
+        "  --systems-agent        UNGOVERNED control arm (gov model=none) + native networking hooks: mesh P2P/DHT/TLS up, fleet fanout enabled\n"
         "  --gov-model MODEL      Governance model: none|minimal|audit|standard|paranoid (see `governance experiment`)\n"
         "  --approval-mode MODE   ask|strict|never (never skips routine prompts)\n"
         "  --trust-tier TIER      standard|trusted|untrusted tool permission tier\n"
@@ -3196,9 +3199,23 @@ static bool main_apply_runtime_mode_flags(int argc, char **argv) {
             setenv("DSCO_APPROVAL_MODE", "never", 1);
             setenv("DSCO_APPROVAL_NEVER", "1", 1);
             setenv("DSCO_NO_APPROVAL_PROMPTS", "1", 1);
+            /* ── Native networking hooks: a systems agent is a networking-first
+               remote operator. Force the full P2P/DHT/TLS substrate up (unless
+               explicitly overridden) so mesh, remote tool invocation, and fleet
+               fanout are live without extra flags. */
+            setenv("DSCO_SYSTEMS_AGENT", "1", 1);
+            if (!getenv("DSCO_DHT_SWARM"))
+                setenv("DSCO_DHT_SWARM", "dsco-systems", 1); /* opt-in DHT overlay on */
+            setenv("DSCO_NET_FORCE", "1", 1);                /* bring net up even for workers */
+            /* Unbounded fanout for fleet orchestration (thousands of hosts). */
+            if (!getenv("DSCO_FLEET_CONCURRENCY"))
+                setenv("DSCO_FLEET_CONCURRENCY", "64", 1);
             fprintf(stderr,
                     "\x1b[1;31m[systems-agent] GOVERNANCE DISABLED — unbounded "
                     "permissions; ungoverned control arm.\x1b[0m\n");
+            fprintf(stderr,
+                    "\x1b[36m[systems-agent] native networking hooks active: "
+                    "mesh P2P + DHT overlay + TLS server + fleet fanout.\x1b[0m\n");
             saw_mode = true;
             continue;
         }
