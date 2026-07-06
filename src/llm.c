@@ -3907,6 +3907,20 @@ void dsco_strip_terminal_controls_inplace(char *s) {
     if (!s || !*s)
         return;
 
+    /* Hot path: most tool results are clean JSON/text. Avoid dirtying every
+     * cache line by rewriting the buffer when there are no terminal/control
+     * bytes to strip. */
+    bool needs_strip = false;
+    for (const unsigned char *scan = (const unsigned char *)s; *scan; scan++) {
+        unsigned char c = *scan;
+        if (c == 0x1b || c == 0x7f || (c < 0x20 && c != '\n' && c != '\r' && c != '\t')) {
+            needs_strip = true;
+            break;
+        }
+    }
+    if (!needs_strip)
+        return;
+
     unsigned char *r = (unsigned char *)s;
     char *w = s;
 
