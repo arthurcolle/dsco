@@ -35,6 +35,7 @@
 #include "scheduler.h"
 #include "vfs.h"
 #include "semantic.h"
+#include "mcp_server.h"
 #include "memory_tier.h"
 #include "vecstore.h"
 #include "pheromone.h"
@@ -683,6 +684,14 @@ static dsco_caps_t main_plan_startup_caps(int argc, char **argv,
         if (strcmp(argv[i], "--") == 0) break;
         if (strcmp(argv[i], "--local") == 0) {
             local_mode = true;
+            continue;
+        }
+        if (strcmp(argv[i], "--resume-last") == 0 ||
+            strcmp(argv[i], "--resume") == 0) {
+            /* B2: resume the most recent session. B1 autosaves the full
+             * conversation every turn, so _autosave.json is always current;
+             * the existing supervisor crash-resume path loads it on startup. */
+            setenv("DSCO_RESUME_AFTER_CRASH", "1", 1);
             continue;
         }
         if (strcmp(argv[i], "--ollama") == 0) {
@@ -3490,6 +3499,18 @@ int main(int argc, char **argv) {
      * manages its own config + auth and never touches the keychain. */
     if (argc >= 2 && strcmp(argv[1], "tools") == 0)
         return toolmgmt_cli(argc, argv);
+
+    /* `dsco mcp serve [--toolsets core,ast] [--tier untrusted|trusted]` — run dsco as an
+     * MCP server over stdio (Plan 05, harness-parity). Exposes curated
+     * toolsets through the same immune-gated tools_execute_for_tier path. */
+    if (argc >= 3 && strcmp(argv[1], "mcp") == 0 && strcmp(argv[2], "serve") == 0) {
+        const char *ts = NULL, *tier = NULL;
+        for (int i = 3; i < argc - 1; i++) {
+            if (strcmp(argv[i], "--toolsets") == 0) ts = argv[++i];
+            else if (strcmp(argv[i], "--tier") == 0) tier = argv[++i];
+        }
+        return mcp_server_run(ts, tier);
+    }
 
     /* `dsco pets [gallery|roll|roster] [seed]` renders companion sprites
      * straight to the terminal (real newlines + ANSI), unlike `--tool-exec`
