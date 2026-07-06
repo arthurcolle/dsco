@@ -1,0 +1,40 @@
+{
+  "name": "DSCO / OpenClaw",
+  "homepage": "https://distributed.systems",
+  "category": [
+    "Personal agent runtimes",
+    "Coding agent products",
+    "Multi-agent and orchestration",
+    "Progressive disclosure harnesses"
+  ],
+  "tags": [
+    "local-first", "c-native", "mcp", "multi-agent", "memory", "workflow",
+    "tool-discovery", "sovereign", "self-modifying", "durable"
+  ],
+  "license": "TBD",
+  "oss": true,
+  "runtime_language": "C",
+  "loc": 342000,
+  "tools_exposed": 745,
+  "topologies": "60+",
+  "skills": "100,128 active internal; public packs in progress",
+  "swarm": { "max_depth": 6, "max_agents": 64, "executors": ["dsco", "claude", "codex"] },
+  "context_management": {
+    "progressive_tool_disclosure": true,
+    "vfs_eviction": true,
+    "prefix_hash_observability": true,
+    "effective_window_budgeting": "in progress",
+    "subagent_result_envelopes": "in progress"
+  },
+  "durability": {
+    "transcript_checkpointing": "in progress",
+    "resume": "in progress",
+    "target_max_loss": "1 turn"
+  },
+  "governance": {
+    "immune_system": true, "kill_switches": 5, "principal_tiers": 4,
+    "audit_log": true, "reversible_self_modification": true
+  },
+  "benchmarks": { "agentic_bench": "bench/results/context-runtime-baseline.json" },
+  "claims_policy": "All numeric claims must trace to a reproducible bench artifact."
+}

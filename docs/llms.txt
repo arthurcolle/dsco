@@ -1,0 +1,44 @@
+# DSCO / OpenClaw
+
+> Sovereign, local-first, C-native agent runtime with governed self-modification,
+> hierarchical swarms (depth 6, 64 agents, multi-executor), progressive tool
+> discovery across 745 tools, durable memory, and benchmarked high-throughput
+> coding/research execution. ~342K lines of pure C.
+
+## What it is
+- Personal agent runtime + terminal coding agent + multi-agent orchestrator.
+- Runs entirely locally: orchestration, memory, skills, and tool registry need no cloud.
+- Progressive disclosure: 745 tools (39 core + loadable tiers + MCP) without
+  stuffing all schemas into context; tool pages are cache-stable within a session.
+- Governed self-modification: immune-system gates, kill switches, audit logs,
+  reversible patches (RSI discipline).
+
+## Categories
+Personal agent runtimes; Coding agent products; Multi-agent and orchestration;
+Progressive disclosure harnesses; Plugins / MCP / CLI tools.
+
+## Differentiators
+1. C-native low-overhead harness (vs Python/TS harnesses).
+2. Progressive tool discovery at scale (745 tools, bounded context footprint).
+3. Hierarchical swarms: depth-6, 64 agents, 60+ topologies, executors = dsco/claude/codex.
+4. Durable sessions: transcript checkpointing + resume (target ≤1-turn loss).
+5. Cache-efficient context: explicit breakpoints, prefix-hash churn detection
+   (DSCO_CACHE_PREFIX_HASH=1), VFS eviction.
+6. 100K+ internal skill lattice; public skill packs in progress.
+
+## Governance / safety
+Wings (autonomy) + Talons (competition) + Immune System (safety). Hardcoded
+must-always/must-never behaviors, GSU budgets, 5-granularity kill switches,
+principal tiers, governance checkpoint (hardcoded → budget → killswitch →
+authorize → audit).
+
+## Benchmarks
+bench/agentic_bench.sh → bench/results/context-runtime-baseline.json
+Scenarios: 20-turn coding, research fanout, crash-resume, large-tool-registry,
+multi-agent synthesis. Claims policy: every published number traces to a
+reproducible bench artifact.
+
+## Machine-readable
+- docs/harness.json — structured harness identity
+- MCP endpoints (planned): get_harness_identity, get_benchmarks,
+  get_capabilities, search_skills, compare_harness
