@@ -119,6 +119,13 @@ static md_renderer_t s_md;
  * provider) so it can render the answer instead of dropping it. */
 static bool s_turn_streamed_text = false;
 
+#define THINKING_LIVE_PREVIEW_DEFAULT 1200
+#define THINKING_LIVE_PREVIEW_MAX 16000
+static int s_thinking_live_preview_limit = -1;
+static int s_thinking_live_preview_emitted = 0;
+static bool s_thinking_live_preview_open = false;
+static bool s_thinking_live_preview_capped = false;
+
 /* Stream heartbeat global — shared with llm.c write callback */
 extern tui_stream_heartbeat_t *g_stream_heartbeat;
 
@@ -197,7 +204,7 @@ typedef struct {
     bool ok;
     double elapsed_ms;
     bool was_timeout;
-    bool done;
+    volatile bool done;
 
     /* Thread handle */
     pthread_t thread;
@@ -242,6 +249,46 @@ static void tool_permission_always_add(const char *tool_name) {
     snprintf(s_tool_permission_always[s_tool_permission_always_count],
              sizeof(s_tool_permission_always[s_tool_permission_always_count]), "%s", tool_name);
     s_tool_permission_always_count++;
+}
+
+static void tool_failure_hash_update(uint32_t *h, const char *s) {
+    if (!h)
+        return;
+    if (s) {
+        for (const unsigned char *p = (const unsigned char *)s; *p; p++)
+            *h = (*h ^ (uint8_t)*p) * 16777619u;
+    }
+    *h = (*h ^ 0xffu) * 16777619u;
+}
+
+static uint32_t tool_validation_failure_hash(const char *tool_name, const char *tool_input,
+                                             const char *error) {
+    uint32_t h = 2166136261u;
+    tool_failure_hash_update(&h, tool_name);
+    tool_failure_hash_update(&h, tool_input);
+    tool_failure_hash_update(&h, error);
+    return h;
+}
+
+static bool note_tool_validation_failure(tool_metrics_t *tool_metrics, const char *tool_name,
+                                         const char *tool_input, const char *error,
+                                         uint32_t *last_hash, int *streak) {
+    uint32_t h = tool_validation_failure_hash(tool_name, tool_input, error);
+    if (last_hash && streak) {
+        if (h == *last_hash)
+            (*streak)++;
+        else {
+            *last_hash = h;
+            *streak = 1;
+        }
+    }
+
+    pthread_mutex_lock(&g_locks.metrics_lock);
+    tool_metrics_record(tool_metrics, tool_name, false, 0.0);
+    pthread_mutex_unlock(&g_locks.metrics_lock);
+    SI_RECORD_TOOL(tool_name, false, 0.0, 0);
+
+    return streak && *streak >= 2;
 }
 
 static bool maybe_escalate_tool_permission(const char *tool_name, const char *base_tier,
@@ -426,8 +473,9 @@ static void mcp_register_discovered_tools(mcp_registry_t *reg) {
     int mcp_count;
     const mcp_tool_t *mcp_tools = mcp_get_tools(reg, &mcp_count);
     for (int i = 0; i < mcp_count; i++) {
-        tools_register_external(mcp_tools[i].name, mcp_tools[i].description,
-                                mcp_tools[i].input_schema, mcp_tool_execute_cb, reg);
+        tools_register_external_with_output(mcp_tools[i].name, mcp_tools[i].description,
+                                            mcp_tools[i].input_schema,
+                                            mcp_tools[i].output_schema, mcp_tool_execute_cb, reg);
     }
     /* The bg loader (see mcp_bg_init_thread) sets g_mcp_bg_active so the
      * notification routes through tui_panel_notify instead of fprintf,
@@ -882,6 +930,84 @@ static const char *g_provider_override_name = NULL;
 static bool env_truthy(const char *value) {
     return value &&
            (value[0] == '1' || strcasecmp(value, "true") == 0 || strcasecmp(value, "yes") == 0);
+}
+
+static int thinking_live_preview_limit(void) {
+    if (s_thinking_live_preview_limit >= 0)
+        return s_thinking_live_preview_limit;
+
+    const char *env = getenv("DSCO_THINKING_STREAM_PREVIEW");
+    if (!env || !env[0]) {
+        s_thinking_live_preview_limit = THINKING_LIVE_PREVIEW_DEFAULT;
+        return s_thinking_live_preview_limit;
+    }
+    if (strcmp(env, "0") == 0 || strcasecmp(env, "false") == 0 ||
+        strcasecmp(env, "no") == 0 || strcasecmp(env, "off") == 0) {
+        s_thinking_live_preview_limit = 0;
+        return s_thinking_live_preview_limit;
+    }
+
+    char *end = NULL;
+    long n = strtol(env, &end, 10);
+    if (end && *end == '\0' && n >= 0) {
+        if (n > THINKING_LIVE_PREVIEW_MAX)
+            n = THINKING_LIVE_PREVIEW_MAX;
+        s_thinking_live_preview_limit = (int)n;
+    } else {
+        s_thinking_live_preview_limit = THINKING_LIVE_PREVIEW_DEFAULT;
+    }
+    return s_thinking_live_preview_limit;
+}
+
+static void thinking_live_preview_reset(void) {
+    s_thinking_live_preview_emitted = 0;
+    s_thinking_live_preview_open = false;
+    s_thinking_live_preview_capped = false;
+}
+
+static void thinking_live_preview_feed(const char *text) {
+    int limit = thinking_live_preview_limit();
+    if (limit <= 0 || !text || !text[0] || s_thinking_live_preview_emitted >= limit)
+        return;
+
+    if (!s_thinking_live_preview_open) {
+        fprintf(stderr, "  %s[thinking stream]%s ", TUI_DIM, TUI_RESET);
+        s_thinking_live_preview_open = true;
+    }
+
+    int remaining = limit - s_thinking_live_preview_emitted;
+    while (*text && remaining > 0) {
+        char chunk[384];
+        int n = 0;
+        while (text[n] && n < remaining && n < (int)sizeof(chunk) - 1)
+            n++;
+        if (n <= 0)
+            break;
+        memcpy(chunk, text, (size_t)n);
+        chunk[n] = '\0';
+        dsco_strip_terminal_controls_inplace(chunk);
+        fputs(TUI_DIM TUI_ITALIC, stderr);
+        fputs(chunk, stderr);
+        fputs(TUI_RESET, stderr);
+        s_thinking_live_preview_emitted += n;
+        remaining -= n;
+        text += n;
+    }
+
+    if (s_thinking_live_preview_emitted >= limit && !s_thinking_live_preview_capped) {
+        fprintf(stderr, "%s ... [thinking preview capped at %d chars]%s", TUI_DIM, limit,
+                TUI_RESET);
+        s_thinking_live_preview_capped = true;
+    }
+    fflush(stderr);
+}
+
+static void thinking_live_preview_close(void) {
+    if (s_thinking_live_preview_open) {
+        fprintf(stderr, "\n");
+        fflush(stderr);
+    }
+    s_thinking_live_preview_open = false;
 }
 
 static bool str_contains_ci_local(const char *haystack, const char *needle) {
@@ -3761,6 +3887,9 @@ static void print_role_header(const char *role, bool ok, const char *trail);
 static void fsm_thinking_enter(void *ctx) {
     (void)ctx;
     tui_thinking_init(&s_thinking);
+    thinking_live_preview_reset();
+    if (g_features.collapsible_thinking)
+        tui_prepare_external_output();
     if (!g_features.collapsible_thinking) {
         tui_term_lock();
         fprintf(stderr, "  \033[2m\033[3m[thinking]\n");
@@ -3773,6 +3902,7 @@ static void fsm_thinking_exit(void *ctx) {
     (void)ctx;
     tui_term_lock();
     if (g_features.collapsible_thinking) {
+        thinking_live_preview_close();
         tui_thinking_end(&s_thinking);
     } else {
         fprintf(stderr, "\033[0m\n");
@@ -3855,6 +3985,7 @@ static void on_stream_thinking(const char *text, void *ctx) {
     tui_term_lock();
     if (g_features.collapsible_thinking) {
         tui_thinking_feed(&s_thinking, text);
+        thinking_live_preview_feed(text);
     } else {
         fprintf(stderr, " %s", text);
         fflush(stderr);
@@ -4548,8 +4679,9 @@ bool agent_run(const char *api_key, const char *model, const char *topology_name
 
     int tool_count;
     tools_get_all(&tool_count);
-    tool_count += g_external_tool_count; /* include MCP tools */
-    int core_count = tools_get_core_count() + g_external_tool_count;
+    int external_tool_count = tools_external_count();
+    tool_count += external_tool_count; /* include MCP tools */
+    int core_count = tools_get_core_count() + external_tool_count;
     int display_core = g_cheap_mode ? TOOL_REG_ALWAYS : core_count;
 
     /* Auto-resume if supervisor set DSCO_RESUME_AFTER_CRASH=1
@@ -6991,24 +7123,25 @@ bool agent_run(const char *api_key, const char *model, const char *topology_name
                 }
             }
             /* List MCP/external tools grouped by server */
-            if (g_external_tool_count > 0) {
+            external_tool_snapshot_t ext = tools_external_snapshot();
+            if (ext.count > 0) {
                 fprintf(stderr, "  %smcp%s\n", TUI_BYELLOW, TUI_RESET);
-                for (int i = 0; i < g_external_tool_count; i++) {
-                    const tool_metric_t *tm =
-                        tool_metrics_get(&tool_metrics, g_external_tools[i].name);
+                for (int i = 0; i < ext.count; i++) {
+                    const tool_metric_t *tm = tool_metrics_get(&tool_metrics, ext.items[i].name);
                     if (tm && tm->calls > 0) {
                         fprintf(stderr, "    %s%-22s%s %s%3dx%s %s%s%s\n", TUI_CYAN,
-                                g_external_tools[i].name, TUI_RESET, TUI_BWHITE, tm->calls,
-                                TUI_RESET, TUI_DIM, g_external_tools[i].description, TUI_RESET);
+                                ext.items[i].name, TUI_RESET, TUI_BWHITE, tm->calls, TUI_RESET,
+                                TUI_DIM, ext.items[i].description, TUI_RESET);
                     } else {
                         fprintf(stderr, "    %s%-22s%s     %s%s%s\n", TUI_CYAN,
-                                g_external_tools[i].name, TUI_RESET, TUI_DIM,
-                                g_external_tools[i].description, TUI_RESET);
+                                ext.items[i].name, TUI_RESET, TUI_DIM, ext.items[i].description,
+                                TUI_RESET);
                     }
                 }
             }
             fprintf(stderr, "\n  %s%d builtin + %d MCP + web_search + code_execution%s\n\n",
-                    TUI_DIM, count, g_external_tool_count, TUI_RESET);
+                    TUI_DIM, count, ext.count, TUI_RESET);
+            tools_external_snapshot_free(&ext);
             baseline_log("command", "/tools", NULL, NULL);
             continue;
         }
@@ -8282,6 +8415,8 @@ bool agent_run(const char *api_key, const char *model, const char *topology_name
         /* Loop breaker: detect repeated identical cached tool failures */
         uint32_t last_fail_hash = 0;
         int consecutive_cached_fails = 0;
+        uint32_t last_validation_fail_hash = 0;
+        int consecutive_validation_fails = 0;
         tools_context_turn_begin();
         tools_loop_control_reset();
         tools_set_active_conversation(&conv);
@@ -9342,6 +9477,18 @@ bool agent_run(const char *api_key, const char *model, const char *topology_name
                             sr.usage.cache_read_input_tokens, cache_denominator,
                             cache_expectation_label(cache_expectation), TUI_RESET);
                     baseline_log("cache", event_kind, warn, NULL);
+                    /* Autonomy loop (E1): on a low hit ratio with explicit
+                     * breakpoints, self-arm the prefix-hash churn detector so
+                     * the next request pinpoints the divergence byte without
+                     * requiring a user-driven re-run. */
+                    if (event_kind && strcmp(event_kind, "low_hit_ratio") == 0 &&
+                        !getenv("DSCO_CACHE_PREFIX_HASH")) {
+                        setenv("DSCO_CACHE_PREFIX_HASH", "1", 0);
+                        fprintf(stderr,
+                                "  %sⓘ prefix-hash churn detector self-armed; next request "
+                                "will report the first divergent byte%s\n",
+                                TUI_DIM, TUI_RESET);
+                    }
                     jbuf_t cp;
                     jbuf_init(&cp, 384);
                     jbuf_append(&cp, "{\"turn\":");
@@ -9609,6 +9756,7 @@ bool agent_run(const char *api_key, const char *model, const char *topology_name
                Continue the loop only when we created follow-up user input
                (local tool results, tool-generated media, etc.). */
             bool needs_followup_turn = false;
+            bool local_loop_stopped = false;
 
             /* tool_count_this_turn already computed above */
             total_tools_used += tool_count_this_turn;
@@ -9644,10 +9792,33 @@ bool agent_run(const char *api_key, const char *model, const char *topology_name
                         if (!tools_validate_input(blk->tool_name, blk->tool_input, val_err,
                                                   sizeof(val_err))) {
                             fprintf(stderr, "  \033[31m\xe2\x9c\x98 %s\033[0m\n", val_err);
-                            conv_add_tool_result_named(&conv, blk->tool_id, blk->tool_name, val_err,
-                                                       true);
+                            bool repeated_validation = note_tool_validation_failure(
+                                &tool_metrics, blk->tool_name, blk->tool_input, val_err,
+                                &last_validation_fail_hash, &consecutive_validation_fails);
+                            consecutive_tool_failures++;
+                            char validation_result[512];
+                            snprintf(validation_result, sizeof(validation_result), "%s%s", val_err,
+                                     repeated_validation
+                                         ? "\n\n[STOP: identical local input validation failure "
+                                           "repeated. Do not retry this tool call; choose a "
+                                           "different approach or ask the user for help.]"
+                                         : "");
+                            conv_add_tool_result_named(&conv, blk->tool_id, blk->tool_name,
+                                                       validation_result, true);
+                            if (repeated_validation) {
+                                fprintf(stderr,
+                                        "  %s⚠ breaking loop: repeated invalid %s tool input%s\n",
+                                        TUI_BYELLOW, blk->tool_name ? blk->tool_name : "unknown",
+                                        TUI_RESET);
+                                baseline_log("agent", "validation_loop_stop", validation_result,
+                                             NULL);
+                                local_loop_stopped = true;
+                                needs_followup_turn = false;
+                            }
                             break;
                         }
+                        consecutive_validation_fails = 0;
+                        last_validation_fail_hash = 0;
 
                         char *tool_result = safe_malloc(MAX_TOOL_RESULT);
                         tool_result[0] = '\0';
@@ -10022,11 +10193,39 @@ bool agent_run(const char *api_key, const char *model, const char *topology_name
                     char val_err[256];
                     if (!tools_validate_input(blk->tool_name, blk->tool_input, val_err,
                                               sizeof(val_err))) {
+                        bool repeated_validation = note_tool_validation_failure(
+                            &tool_metrics, blk->tool_name, blk->tool_input, val_err,
+                            &last_validation_fail_hash, &consecutive_validation_fails);
+                        consecutive_tool_failures++;
+                        char validation_result[512];
+                        snprintf(validation_result, sizeof(validation_result), "%s%s", val_err,
+                                 repeated_validation
+                                     ? "\n\n[STOP: identical local input validation failure "
+                                       "repeated. Do not retry this tool call; choose a different "
+                                       "approach or ask the user for help.]"
+                                     : "");
                         tui_batch_spinner_complete(&batch_spinner, bi, false, val_err, 0.0);
-                        conv_add_tool_result_named(&conv, blk->tool_id, blk->tool_name, val_err,
-                                                   true);
+                        conv_add_tool_result_named(&conv, blk->tool_id, blk->tool_name,
+                                                   validation_result, true);
+                        if (repeated_validation) {
+                            fprintf(stderr,
+                                    "  %s⚠ breaking loop: repeated invalid %s tool input%s\n",
+                                    TUI_BYELLOW, blk->tool_name ? blk->tool_name : "unknown",
+                                    TUI_RESET);
+                            baseline_log("agent", "validation_loop_stop", validation_result, NULL);
+                            local_loop_stopped = true;
+                            needs_followup_turn = false;
+                            conc_count = 0;
+                            serial_count = 0;
+                            break;
+                        }
                         continue;
                     }
+                    consecutive_validation_fails = 0;
+                    last_validation_fail_hash = 0;
+
+                    if (local_loop_stopped)
+                        continue;
 
                     bool interactive_tool = dsco_tool_is_interactive(blk->tool_name);
                     if (interactive_tool) {
@@ -10242,68 +10441,82 @@ bool agent_run(const char *api_key, const char *model, const char *topology_name
                     free(tool_result);
                 }
 
-                /* ── Join concurrent tools and collect results ── */
-                for (int ci = 0; ci < conc_count; ci++) {
-                    pthread_join(conc_slots[ci].thread, NULL);
-                    concurrent_tool_slot_t *s = &conc_slots[ci];
-                    content_block_t *blk = &sr.parsed.blocks[s->block_index];
-                    char chron_tool_span[37] = "";
-                    chronicle_tool_call_start(trace_id, chron_prompt_span, s->tool_name,
-                                              blk->tool_id, s->tool_input, chron_tool_span);
+                /* ── Join concurrent tools as each completes ── */
+                bool conc_collected[CONCURRENT_TOOL_MAX] = {0};
+                int conc_done = 0;
+                while (conc_done < conc_count) {
+                    bool progressed = false;
+                    for (int ci = 0; ci < conc_count; ci++) {
+                        concurrent_tool_slot_t *s = &conc_slots[ci];
+                        if (conc_collected[ci] || !s->done)
+                            continue;
 
-                    tui_batch_spinner_complete(&batch_spinner, s->batch_index,
-                                               s->ok && !s->was_timeout, s->result, s->elapsed_ms);
+                        pthread_join(s->thread, NULL);
+                        conc_collected[ci] = true;
+                        conc_done++;
+                        progressed = true;
 
-                    pthread_mutex_lock(&g_locks.metrics_lock);
-                    tool_metrics_record(&tool_metrics, s->tool_name, s->ok, s->elapsed_ms);
-                    if (s->was_timeout) {
-                        const tool_metric_t *m = tool_metrics_get(&tool_metrics, s->tool_name);
-                        if (m)
-                            ((tool_metric_t *)m)->timeouts++;
-                    }
-                    pthread_mutex_unlock(&g_locks.metrics_lock);
-                    /* Post-join aggregation loop — single-threaded, safe to record. */
-                    SI_RECORD_TOOL(s->tool_name, s->ok && !s->was_timeout, s->elapsed_ms,
-                                   (int)(strlen(s->result) / 4));
+                        content_block_t *blk = &sr.parsed.blocks[s->block_index];
+                        char chron_tool_span[37] = "";
+                        chronicle_tool_call_start(trace_id, chron_prompt_span, s->tool_name,
+                                                  blk->tool_id, s->tool_input, chron_tool_span);
 
-                    if (!s->was_timeout) {
-                        pthread_mutex_lock(&g_locks.cache_lock);
-                        tool_cache_put(&tool_cache, s->tool_name, s->tool_input, s->result, s->ok,
-                                       60.0);
-                        pthread_mutex_unlock(&g_locks.cache_lock);
-                    }
+                        tui_batch_spinner_complete(&batch_spinner, s->batch_index,
+                                                   s->ok && !s->was_timeout, s->result,
+                                                   s->elapsed_ms);
 
-                    /* Track file reads */
-                    if (s->ok && s->tool_name &&
-                        (strcmp(s->tool_name, "read_file") == 0 ||
-                         strcmp(s->tool_name, "view_file") == 0)) {
-                        const char *path_key = strstr(s->tool_input, "\"path\"");
-                        if (path_key) {
-                            const char *q1 = strchr(path_key + 6, '"');
-                            if (q1) {
-                                const char *q2 = strchr(q1 + 1, '"');
-                                if (q2 && (q2 - q1 - 1) < 500) {
-                                    char fpath[512];
-                                    int plen = (int)(q2 - q1 - 1);
-                                    memcpy(fpath, q1 + 1, plen);
-                                    fpath[plen] = '\0';
-                                    post_compact_restore_track(&file_restore, fpath, s->result);
+                        pthread_mutex_lock(&g_locks.metrics_lock);
+                        tool_metrics_record(&tool_metrics, s->tool_name, s->ok, s->elapsed_ms);
+                        if (s->was_timeout) {
+                            const tool_metric_t *m = tool_metrics_get(&tool_metrics, s->tool_name);
+                            if (m)
+                                ((tool_metric_t *)m)->timeouts++;
+                        }
+                        pthread_mutex_unlock(&g_locks.metrics_lock);
+                        SI_RECORD_TOOL(s->tool_name, s->ok && !s->was_timeout, s->elapsed_ms,
+                                       (int)(strlen(s->result) / 4));
+
+                        if (!s->was_timeout) {
+                            pthread_mutex_lock(&g_locks.cache_lock);
+                            tool_cache_put(&tool_cache, s->tool_name, s->tool_input, s->result,
+                                           s->ok, 60.0);
+                            pthread_mutex_unlock(&g_locks.cache_lock);
+                        }
+
+                        /* Track file reads */
+                        if (s->ok && s->tool_name &&
+                            (strcmp(s->tool_name, "read_file") == 0 ||
+                             strcmp(s->tool_name, "view_file") == 0)) {
+                            const char *path_key = strstr(s->tool_input, "\"path\"");
+                            if (path_key) {
+                                const char *q1 = strchr(path_key + 6, '"');
+                                if (q1) {
+                                    const char *q2 = strchr(q1 + 1, '"');
+                                    if (q2 && (q2 - q1 - 1) < 500) {
+                                        char fpath[512];
+                                        int plen = (int)(q2 - q1 - 1);
+                                        memcpy(fpath, q1 + 1, plen);
+                                        fpath[plen] = '\0';
+                                        post_compact_restore_track(&file_restore, fpath, s->result);
+                                    }
                                 }
                             }
                         }
+
+                        chronicle_tool_call_end(trace_id, chron_tool_span, s->tool_name, s->result,
+                                                s->ok && !s->was_timeout, s->was_timeout,
+                                                s->elapsed_ms);
+                        conv_add_tool_result_named(&conv, blk->tool_id, blk->tool_name, s->result,
+                                                   !s->ok);
+
+                        tui_flame_add(&s_flame, s->tool_name, conc_t0 * 1000.0,
+                                      (conc_t0 + s->elapsed_ms / 1000.0) * 1000.0,
+                                      s->ok && !s->was_timeout, tui_classify_tool(s->tool_name));
+
+                        free(s->result);
                     }
-
-                    chronicle_tool_call_end(trace_id, chron_tool_span, s->tool_name, s->result,
-                                            s->ok && !s->was_timeout, s->was_timeout,
-                                            s->elapsed_ms);
-                    conv_add_tool_result_named(&conv, blk->tool_id, blk->tool_name, s->result,
-                                               !s->ok);
-
-                    tui_flame_add(&s_flame, s->tool_name, conc_t0 * 1000.0,
-                                  (conc_t0 + s->elapsed_ms / 1000.0) * 1000.0,
-                                  s->ok && !s->was_timeout, tui_classify_tool(s->tool_name));
-
-                    free(s->result);
+                    if (!progressed)
+                        usleep(10000);
                 }
 
                 if (conc_count > 0) {
@@ -10388,9 +10601,13 @@ bool agent_run(const char *api_key, const char *model, const char *topology_name
                     else
                         turn_fail++;
                 }
-                /* If no flame data, assume all tools succeeded */
-                if (s_flame.count == 0 && tool_count_this_turn > 0)
+                /* If no flame data and no local stop, assume all tools succeeded. Validation
+                 * failures never enter the flame timeline, so repeated malformed tool calls must
+                 * not render as successful work. */
+                if (s_flame.count == 0 && tool_count_this_turn > 0 && !local_loop_stopped)
                     turn_ok = tool_count_this_turn;
+                if (local_loop_stopped)
+                    turn_fail = tool_count_this_turn > 0 ? tool_count_this_turn : 1;
                 turn_cache = tool_cache.hits; /* session-level cache hits */
 
                 /* Get git branch for divider */
@@ -10426,7 +10643,7 @@ bool agent_run(const char *api_key, const char *model, const char *topology_name
                     long b64_size = ftell(img_f) - (long)(strlen(media_type) + 1);
                     fseek(img_f, (long)(strlen(media_type) + 1), SEEK_SET);
 
-                    if (b64_size > 0 && b64_size < 10 * 1024 * 1024) {
+                    if (!local_loop_stopped && b64_size > 0 && b64_size < 10 * 1024 * 1024) {
                         char *b64_data = safe_malloc((size_t)b64_size + 1);
                         size_t nr = fread(b64_data, 1, (size_t)b64_size, img_f);
                         b64_data[nr] = '\0';
@@ -10456,7 +10673,7 @@ bool agent_run(const char *api_key, const char *model, const char *topology_name
                     long b64_size = ftell(doc_f) - (long)(strlen(media_type) + 1);
                     fseek(doc_f, (long)(strlen(media_type) + 1), SEEK_SET);
 
-                    if (b64_size > 0 && b64_size < 50 * 1024 * 1024) {
+                    if (!local_loop_stopped && b64_size > 0 && b64_size < 50 * 1024 * 1024) {
                         char *b64_data = safe_malloc((size_t)b64_size + 1);
                         size_t nr = fread(b64_data, 1, (size_t)b64_size, doc_f);
                         b64_data[nr] = '\0';
@@ -10474,7 +10691,7 @@ bool agent_run(const char *api_key, const char *model, const char *topology_name
             /* Phase 4: Output token auto-escalation (Claude Code methodology).
                If model hit max_tokens, escalate to 64k and retry. Up to 3 recovery
                attempts with continuation messages after escalation. */
-            if (sr.ok && sr.parsed.stop_reason &&
+            if (!local_loop_stopped && sr.ok && sr.parsed.stop_reason &&
                 strcmp(sr.parsed.stop_reason, "max_tokens") == 0 && !needs_followup_turn) {
                 if (session.max_output_override == 0) {
                     /* First hit: escalate to 64k */
@@ -10508,8 +10725,9 @@ bool agent_run(const char *api_key, const char *model, const char *topology_name
                 pause_turn_streak = 0;
             }
 
-            bool done = !needs_followup_turn && !pause_turn;
-            if (done && structured_repair_prompt[0] && !g_agent_exit_requested) {
+            bool done = local_loop_stopped || (!needs_followup_turn && !pause_turn);
+            if (done && structured_repair_prompt[0] && !g_agent_exit_requested &&
+                !local_loop_stopped) {
                 structured_repair_attempts++;
                 conv_add_user_text(&conv, structured_repair_prompt);
                 needs_followup_turn = true;
@@ -10523,7 +10741,8 @@ bool agent_run(const char *api_key, const char *model, const char *topology_name
             } else if (done && !structured_output_invalid) {
                 structured_repair_attempts = 0;
             }
-            if (done && goal_is_active(&session) && !g_agent_exit_requested) {
+            if (done && goal_is_active(&session) && !g_agent_exit_requested &&
+                !local_loop_stopped) {
                 const char *goal_continue_prompt =
                     "[Goal loop] The active session goal is still marked active. Continue working. "
                     "Use tools as needed. If the objective is now complete, call self_exit with a "
@@ -10587,7 +10806,7 @@ bool agent_run(const char *api_key, const char *model, const char *topology_name
                 }
             }
 
-            if (!g_agent_exit_requested && !g_interrupted) {
+            if (!g_agent_exit_requested && !g_interrupted && !local_loop_stopped) {
                 loop_control_decision_t loop_decision;
                 tools_loop_control_decide(turns, done, needs_followup_turn, &loop_decision);
                 if (loop_decision.force_continue && loop_decision.prompt[0]) {
@@ -10814,7 +11033,7 @@ bool agent_run(const char *api_key, const char *model, const char *topology_name
     free(aliases);
     tools_cooc_persist();
     tools_cooc_free();
-    tool_map_free(&g_tool_map);
+    tools_registry_map_free();
     tool_cache_free(&tool_cache);
     dsco_locks_destroy(&g_locks);
     post_compact_restore_free(&file_restore);
