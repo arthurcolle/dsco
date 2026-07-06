@@ -38438,13 +38438,66 @@ static void tool_gov_deny(char *result, size_t rlen, const char *tool, const cha
  * MAIN ENTRY POINT
  * ═══════════════════════════════════════════════════════════════════════════ */
 
+/* ── Governance-model A/B experiment instrumentation ──────────────────────
+   To measure the *cost* of governance we support running with the entire gate
+   (G2–G8: hardcoded → budget → killswitch → OODA → authorize → audit → shadow)
+   bypassed. This is the ungoverned control arm. It is intentionally unbounded:
+   NO permission checks, NO budget, NO kill switches, NO audit. It exists only
+   so overhead between governance models can be measured empirically.
+
+   Enabled by DSCO_GOV_MODEL=none (or DSCO_GOV_BYPASS=1). Set by --systems-agent.
+   We still time both arms so the experiment produces a real number. */
+static _Atomic unsigned long g_gov_gate_calls = 0;    /* times the gate ran */
+static _Atomic unsigned long g_gov_gate_bypassed = 0; /* times it was skipped */
+static _Atomic double g_gov_gate_ms_total = 0;        /* cumulative gate latency */
+
+static bool tool_governance_bypassed(void) {
+    /* Cache the decision once — this is on the hot path of every tool call. */
+    static int cached = -1; /* -1 unknown, 0 governed, 1 bypassed */
+    if (cached < 0) {
+        const char *model = getenv("DSCO_GOV_MODEL");
+        const char *bypass = getenv("DSCO_GOV_BYPASS");
+        bool off = (model && (strcasecmp(model, "none") == 0 ||
+                              strcasecmp(model, "off") == 0 ||
+                              strcasecmp(model, "bypass") == 0)) ||
+                   (bypass && bypass[0] == '1');
+        cached = off ? 1 : 0;
+    }
+    return cached == 1;
+}
+
+/* Expose experiment counters (used by the `governance capability`/status tools
+   and by benchmark harnesses to read the accumulated overhead). */
+void tools_governance_experiment_stats(unsigned long *gate_calls,
+                                       unsigned long *bypassed,
+                                       double *gate_ms_total) {
+    if (gate_calls)
+        *gate_calls = g_gov_gate_calls;
+    if (bypassed)
+        *bypassed = g_gov_gate_bypassed;
+    if (gate_ms_total)
+        *gate_ms_total = g_gov_gate_ms_total;
+}
+
 bool tools_execute_for_tier(const char *name, const char *input_json, const char *tier,
                             char *result, size_t result_len) {
+
+    /* ── G0: Governance-model bypass (ungoverned control arm) ──────────────
+       When the active governance model is "none", skip the entire gate. This
+       is the whole point of --systems-agent: unbounded permissions so the
+       overhead of governance vs. no-governance can be measured. */
+    if (tool_governance_bypassed()) {
+        g_gov_gate_bypassed++;
+        goto _skip_gate;
+    }
+
+    double _gate_t0 = now_ms();
 
     /* ── G1: Exempt check ─────────────────────────────────────────────── */
     if (!name || tool_is_governance_exempt(name)) {
         goto _skip_gate;
     }
+    g_gov_gate_calls++;
 
     /* ── G2: Initialization guard ─────────────────────────────────────── */
     if (!g_governance.initialized)
@@ -38608,6 +38661,8 @@ bool tools_execute_for_tier(const char *name, const char *input_json, const char
                 baseline_log("shadow", "violation_detected", name, smeta);
             }
         }
+        /* Record cumulative gate latency for the governance-overhead A/B. */
+        g_gov_gate_ms_total += (now_ms() - _gate_t0);
     } /* end gate block */
 
 _skip_gate:;
