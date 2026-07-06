@@ -106,6 +106,20 @@ typedef struct {
     bool            can_modify_soft;  /* can modify softcoded params */
     double          created_at;
     double          last_action_at;
+
+    /* ── Empirical Capability Ledger ──────────────────────────────────────
+       Makes the hardcoded rule "Never claim capability tier higher than
+       empirically measured" structurally enforceable. Capability tier is
+       DERIVED from evidence (Wilson lower-bound of success rate, gated by
+       sample count) — never asserted. Downgrades are instant (safety);
+       upgrades require a cooldown + minimum sample floor (hysteresis). */
+    int             evidence_successes;   /* observed successful outcomes */
+    int             evidence_failures;    /* observed failed outcomes */
+    double          success_lb;           /* Wilson 95% lower bound [0,1] */
+    capability_tier_t claimed_capability; /* tier evidence currently supports */
+    double          last_upgrade_at;      /* timestamp of last tier promotion */
+    double          last_downgrade_at;    /* timestamp of last tier demotion */
+    int             tier_changes;         /* total promotions + demotions */
 } agent_envelope_t;
 
 /* ── Audit Entry ──────────────────────────────────────────────────────── */
@@ -202,6 +216,36 @@ bool governance_deregister_agent(governance_engine_t *g, const char *agent_id);
 /* Get an agent's envelope. Returns NULL if not found. */
 const agent_envelope_t *governance_get_agent(const governance_engine_t *g,
                                               const char *agent_id);
+
+/* ── Empirical Capability (evidence-based tiering) ────────────────────────
+   The capability layer is EARNED, not asserted. Record every outcome and let
+   the engine derive the tier the evidence actually supports. This makes the
+   hardcoded rule "Never claim capability tier higher than empirically
+   measured" a structural invariant rather than a promise. */
+
+/* Record one outcome (success or failure) for an agent. Recomputes the Wilson
+   lower bound and re-derives the claimed capability tier with asymmetric
+   hysteresis (instant downgrade, cooldown-gated upgrade). Returns the tier
+   now supported by evidence, or CAPABILITY_NOVICE if the agent is unknown. */
+capability_tier_t governance_record_outcome(governance_engine_t *g,
+                                            const char *agent_id, bool success);
+
+/* Derive the capability tier that a given evidence ledger supports, using the
+   Wilson score lower bound and a minimum sample floor. Pure function — no
+   side effects — usable for what-if checks. */
+capability_tier_t governance_derive_capability(int successes, int failures,
+                                               double *out_success_lb);
+
+/* True iff the agent may legitimately claim `want` given its evidence. A tier
+   above what evidence supports is denied — the enforcement backbone of the
+   "never claim higher than measured" hardcoded rule. */
+bool governance_can_claim_capability(const governance_engine_t *g,
+                                     const char *agent_id,
+                                     capability_tier_t want);
+
+/* Wilson score lower bound of a Bernoulli success rate at ~95% (z=1.96).
+   Returns 0 when there is no evidence. Exposed for tests/telemetry. */
+double governance_wilson_lower_bound(int successes, int failures);
 
 /* ── Authorization ────────────────────────────────────────────────────── */
 
