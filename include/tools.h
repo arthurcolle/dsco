@@ -18,6 +18,7 @@ typedef struct {
     bool is_read_only;   /* true = no side effects (safe for streaming exec) */
     bool is_concurrent;  /* true = no shared state (safe for parallel exec) */
     bool is_interactive; /* true = owns the terminal/user turn; no cache/spinner/parallel */
+    const char *output_schema_json;
 } tool_def_t;
 
 typedef enum {
@@ -66,8 +67,18 @@ bool tools_is_offload_safe(const char *name);
 int tools_get_core_count(void); /* only .core=true tools */
 int tools_builtin_count(void);
 bool tools_execute(const char *name, const char *input_json, char *result, size_t result_len);
+#ifdef DSCO_INTERNAL_TESTS
+bool tools_execute_raw_for_test(const char *name, const char *input_json, char *result,
+                                size_t result_len);
+#endif
 bool tools_execute_for_tier(const char *name, const char *input_json, const char *tier,
                             char *result, size_t result_len);
+/* Governance-model A/B experiment counters: how many times the governance gate
+   ran, how many times it was bypassed (DSCO_GOV_MODEL=none), and cumulative
+   gate latency in ms. Lets a harness measure governance overhead empirically. */
+void tools_governance_experiment_stats(unsigned long *gate_calls,
+                                       unsigned long *bypassed,
+                                       double *gate_ms_total);
 bool tools_is_allowed_for_tier(const char *name, const char *tier, char *reason, size_t reason_len);
 char *tools_normalize_input(const char *name, const char *input_json);
 
@@ -120,9 +131,14 @@ void tool_map_init(tool_map_t *m);
 void tool_map_free(tool_map_t *m);
 void tool_map_insert(tool_map_t *m, const char *name, int index);
 int tool_map_lookup(tool_map_t *m, const char *name); /* returns index or -1 */
+int tools_lookup_index(const char *name);             /* locked lookup in global tool registry */
 
-/* Global tool map — initialized in tools_init() */
+#ifdef DSCO_INTERNAL_TESTS
+/* Test-only inspection of the global tool map. Production code must use the
+ * locked registry APIs below. */
 extern tool_map_t g_tool_map;
+#endif
+void tools_registry_map_free(void);
 
 /* ── MCP tool registration ─────────────────────────────────────────────── */
 
@@ -133,11 +149,19 @@ typedef char *(*external_tool_cb)(const char *name, const char *input_json, void
 
 void tools_register_external(const char *name, const char *description,
                              const char *input_schema_json, external_tool_cb cb, void *ctx);
+void tools_register_external_with_output(const char *name, const char *description,
+                                         const char *input_schema_json,
+                                         const char *output_schema_json,
+                                         external_tool_cb cb, void *ctx);
 void tools_register_external_metadata(const char *name, const char *integration_id,
                                       const char *display_name, const char *distribution_channel,
                                       const char *categories, const char *labels, const char *scope,
                                       unsigned action_flags, const char *catalog_status);
 void tools_reset_external(void);
+const char *tools_default_input_schema_json(void);
+const char *tools_default_output_schema_json(void);
+const char *tools_output_schema_for_def(const tool_def_t *tool);
+const char *tools_output_schema_for_name(const char *name);
 
 #define MAX_EXTERNAL_TOOLS 4096
 
@@ -145,6 +169,7 @@ typedef struct {
     char name[256];
     char description[1024];
     char *input_schema_json;
+    char *output_schema_json;
     external_tool_cb cb;
     void *ctx;
     bool loaded;
@@ -158,8 +183,21 @@ typedef struct {
     char catalog_status[64];
 } external_tool_t;
 
+#ifdef DSCO_INTERNAL_TESTS
 extern external_tool_t g_external_tools[];
 extern int g_external_tool_count;
+#endif
+
+typedef struct {
+    external_tool_t *items;
+    int count;
+} external_tool_snapshot_t;
+
+int tools_external_count(void);
+external_tool_snapshot_t tools_external_snapshot(void);
+void tools_external_snapshot_free(external_tool_snapshot_t *snapshot);
+int tools_rank_external_snapshot(const external_tool_snapshot_t *snapshot, const char *context,
+                                 int *out_indices, int max_indices);
 
 /* ── Concurrency locks ────────────────────────────────────────────────── */
 
@@ -346,6 +384,14 @@ extern page_telemetry_t g_page_telemetry;
  * Low ratios reduce tool set aggressively. */
 tool_page_result_t tools_get_paged(const char *context, int max_tools, float budget_ratio);
 void tool_page_result_free(tool_page_result_t *r);
+
+/* Explicit dynamic schema bank populated by load_tools and drained by evict_tools.
+ * These are serialized after the frozen core register so the stable prefix stays
+ * cacheable while newly loaded capabilities become callable on the next turn. */
+int tools_loaded_builtin_indices(int *out_indices, int max_indices);
+int tools_loaded_builtin_count(void);
+bool tools_is_builtin_loaded(const char *name);
+void tools_loaded_builtin_clear(void);
 
 /* ── Co-occurrence → Hint bridge ─────────────────────────────────────── */
 
