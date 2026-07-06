@@ -95,4 +95,7 @@ char     *vfs_result_get(vfs_db_t *db, const char *key);
 int       vfs_result_evict(vfs_db_t *db);
 char    **vfs_result_list(vfs_db_t *db, int *out_count);
 
+/* ── Maintenance (Wave 1.1): evict expired rows + size-capped VACUUM ── */
+int       vfs_maintain(vfs_db_t *db, int64_t max_db_bytes);
+
 #endif /* DSCO_VFS_H */

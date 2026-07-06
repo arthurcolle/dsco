@@ -678,6 +678,36 @@ int vfs_result_evict(vfs_db_t *db) {
     return changes;
 }
 
+/* ── Maintenance: eviction + size control (Wave 1.1, R1) ──────────────
+ * Deletes expired cache + tool_results rows (previously prepared but
+ * never called → unbounded DB growth), then reclaims file space via
+ * incremental VACUUM when the DB exceeds the high-water mark.
+ * Cheap when nothing expired (two indexed DELETEs). Call at session
+ * start and shutdown; safe to call on any cadence. */
+int vfs_maintain(vfs_db_t *db, int64_t max_db_bytes) {
+    if (!db)
+        return 0;
+    int evicted = vfs_cache_evict(db) + vfs_result_evict(db);
+
+    if (max_db_bytes > 0) {
+        vfs_stats_t st = vfs_get_stats(db);
+        if (st.db_size_bytes > max_db_bytes) {
+            vfs_lock(db);
+            /* Drop oldest, least-accessed tool results until ~75% of cap.
+             * Expired rows are already gone; this trims live-but-cold data. */
+            sqlite3_exec(db->db,
+                         "DELETE FROM tool_results WHERE key IN ("
+                         "  SELECT key FROM tool_results"
+                         "  ORDER BY access_count ASC, created_at ASC"
+                         "  LIMIT (SELECT COUNT(*)/4 FROM tool_results))",
+                         NULL, NULL, NULL);
+            sqlite3_exec(db->db, "VACUUM;", NULL, NULL, NULL);
+            vfs_unlock(db);
+        }
+    }
+    return evicted;
+}
+
 char **vfs_result_list(vfs_db_t *db, int *out_count) {
     if (out_count)
         *out_count = 0;
