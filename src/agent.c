@@ -2099,6 +2099,66 @@ static void autosave(conversation_t *conv, session_state_t *session) {
     conv_save_ex(conv, session, save_path);
 }
 
+/* B1: per-turn transcript checkpointing. One JSONL line per completed turn,
+ * fsync'd, appended to ~/.dsco/sessions/transcript-<pid>.jsonl. A symlink
+ * ~/.dsco/sessions/transcript-last.jsonl always points at the live session so
+ * `resume --last` (B2) can find it without scanning. Crash-durable: after any
+ * kill, the JSONL holds every completed turn. */
+static void transcript_checkpoint(const session_state_t *session, int turn,
+                                  const usage_t *u, double turn_cost,
+                                  const char *stop_reason) {
+    static int s_fd = -1;
+    static bool s_tried = false;
+    if (s_fd < 0 && !s_tried) {
+        s_tried = true;
+        const char *home = getenv("HOME");
+        if (!home)
+            return;
+        char dir[512], path[600], link_path[600];
+        snprintf(dir, sizeof(dir), "%s/.dsco/sessions", home);
+        mkdir(dir, 0755);
+        snprintf(path, sizeof(path), "%s/transcript-%d.jsonl", dir, (int)getpid());
+        s_fd = open(path, O_WRONLY | O_CREAT | O_APPEND, 0600);
+        if (s_fd >= 0) {
+            snprintf(link_path, sizeof(link_path), "%s/transcript-last.jsonl", dir);
+            unlink(link_path);
+            symlink(path, link_path);
+        }
+    }
+    if (s_fd < 0)
+        return;
+    jbuf_t b;
+    jbuf_init(&b, 512);
+    jbuf_append(&b, "{\"ts\":");
+    jbuf_append_int(&b, (int)time(NULL));
+    jbuf_append(&b, ",\"turn\":");
+    jbuf_append_int(&b, turn);
+    jbuf_append(&b, ",\"model\":");
+    jbuf_append_json_str(&b, session && session->model[0] ? session->model : "");
+    if (u) {
+        jbuf_append(&b, ",\"in\":");
+        jbuf_append_int(&b, u->input_tokens);
+        jbuf_append(&b, ",\"out\":");
+        jbuf_append_int(&b, u->output_tokens);
+        jbuf_append(&b, ",\"cache_read\":");
+        jbuf_append_int(&b, u->cache_read_input_tokens);
+        jbuf_append(&b, ",\"cache_write\":");
+        jbuf_append_int(&b, u->cache_creation_input_tokens);
+    }
+    char costbuf[64];
+    snprintf(costbuf, sizeof(costbuf), ",\"cost\":%.6f", turn_cost);
+    jbuf_append(&b, costbuf);
+    if (stop_reason) {
+        jbuf_append(&b, ",\"stop\":");
+        jbuf_append_json_str(&b, stop_reason);
+    }
+    jbuf_append(&b, "}\n");
+    ssize_t wr = write(s_fd, b.data, b.len);
+    (void)wr;
+    fsync(s_fd);
+    jbuf_free(&b);
+}
+
 static bool startup_command_write(const char *cmd) {
     const char *home = getenv("HOME");
     if (!home || !cmd || !cmd[0])
@@ -9366,6 +9426,12 @@ bool agent_run(const char *api_key, const char *model, const char *topology_name
                 usage_cost_for_model(session.model, &sr.usage, sr.cost_usd);
             session.total_reported_cost_usd += accounted_turn_cost;
             session.turn_count++;
+            /* B1: durable per-turn checkpoint — JSONL line (fsync'd) plus a
+             * full conversation autosave so a crash at any point loses at
+             * most the in-flight turn. */
+            transcript_checkpoint(&session, turns, &sr.usage, accounted_turn_cost,
+                                  sr.parsed.stop_reason);
+            autosave(&conv, &session);
             const char *accounting_key = resolve_provider_key(api_key);
             last_turn_usage = sr.usage;
             last_turn_cost_usd = accounted_turn_cost;
