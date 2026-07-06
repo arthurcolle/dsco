@@ -388,7 +388,7 @@ static void main_atexit_handler(void) {
     }
 
     /* Shutdown Post-LLM OS subsystems */
-    if (g_vfs)     { vfs_close(g_vfs); g_vfs = NULL; }
+    if (g_vfs)     { vfs_maintain(g_vfs, 0); vfs_close(g_vfs); g_vfs = NULL; }
     if (g_ev_loop) { ev_loop_free(g_ev_loop); g_ev_loop = NULL; }
     if (g_scheduler_ready) {
         sched_destroy(&g_scheduler);
@@ -461,6 +461,17 @@ static void init_vos_subsystems(void) {
     if (home) {
         snprintf(vfs_path, sizeof(vfs_path), "%s/.dsco/vfs.db", home);
         g_vfs = vfs_open(vfs_path);
+        if (g_vfs) {
+            /* Wave 1.1 (R1): evict expired cache/tool_results rows and
+             * enforce size cap. Previously vfs_{cache,result}_evict had
+             * zero callers → unbounded DB growth. Cap via env, default
+             * 256MB. */
+            int64_t cap = 256LL * 1024 * 1024;
+            const char *cap_env = getenv("DSCO_VFS_MAX_BYTES");
+            if (cap_env && *cap_env)
+                cap = atoll(cap_env);
+            vfs_maintain(g_vfs, cap);
+        }
     }
 
     /* Cross-module wiring: connect subsystems to each other */
@@ -746,6 +757,7 @@ static dsco_caps_t main_plan_startup_caps(int argc, char **argv,
              strcmp(argv[i], "--env-file") == 0 ||
              strcmp(argv[i], "--approval-mode") == 0 ||
              strcmp(argv[i], "--trust-tier") == 0 ||
+             strcmp(argv[i], "--effort") == 0 ||
              strcmp(argv[i], "--timeline-port") == 0 ||
              strcmp(argv[i], "--timeline-instance") == 0 ||
              strcmp(argv[i], "--topology") == 0) && i + 1 < argc) {
@@ -2368,6 +2380,7 @@ static void usage(const char *prog) {
         "Options:\n"
         "  -m, --model MODEL      Model name (default: %s)\n"
         "  -p, --prompt PROMPT    One-shot prompt (same as positional prompt)\n"
+        "  --effort LEVEL         Reasoning effort: auto|none|minimal|low|medium|high|xhigh|max\n"
         "  -k KEY      API key, or ENV=KEY / ENV KEY (default: provider env for selected model)\n"
         "  --profile full|lite|worker  Runtime startup profile (default: full)\n"
         "  --env-file PATH       Load this DSCO env file before provider/MCP setup\n"
@@ -2427,6 +2440,8 @@ static void usage(const char *prog) {
         "  DSCO_ENV_FILE       Override setup env file path\n"
         "  DSCO_BASELINE_DB    Override sqlite baseline path\n"
         "  DSCO_EXEC           Default executor/provider (claude, codex, auto, zai, moonshot, fugu, sakana)\n"
+        "  DSCO_EFFORT         Reasoning effort default (auto, none, minimal, low, medium, high, xhigh, max)\n"
+        "  DSCO_PARALLEL_TOOL_CALLS  Hosted OpenAI-compatible parallel tool calls (default on; 0 disables)\n"
         "  DSCO_BUDGET         Session cost budget in dollars (0=unlimited)\n"
         "  DSCO_DAILY_BUDGET   Daily cost budget in dollars (0=unlimited)\n",
     DSCO_VERSION, prog, prog, prog, prog, DEFAULT_MODEL, prog, prog, prog);
@@ -3189,6 +3204,14 @@ static bool main_apply_runtime_mode_flags(int argc, char **argv) {
                 setenv("DSCO_NO_APPROVAL_PROMPTS", "0", 1);
                 saw_mode = true;
             }
+            continue;
+        }
+        if (strcmp(argv[i], "--effort") == 0 && i + 1 < argc) {
+            if (dsco_effort_is_valid(argv[i + 1])) {
+                setenv("DSCO_EFFORT", argv[i + 1], 1);
+                saw_mode = true;
+            }
+            i++;
             continue;
         }
     }
@@ -3990,6 +4013,14 @@ int main(int argc, char **argv) {
             setenv("DSCO_MCP_SERVER", argv[++i], 1);
         } else if (strcmp(argv[i], "--env-file") == 0 && i + 1 < argc) {
             setenv("DSCO_ENV_FILE", argv[++i], 1);
+        } else if (strcmp(argv[i], "--effort") == 0 && i + 1 < argc) {
+            const char *effort = argv[++i];
+            if (!dsco_effort_is_valid(effort)) {
+                fprintf(stderr, "error: --effort must be one of: %s\n", dsco_effort_options());
+                free(oneshot_prompt);
+                return 1;
+            }
+            setenv("DSCO_EFFORT", effort, 1);
         } else if (strcmp(argv[i], "--setup") == 0) {
             setup_mode = true;
         } else if (strcmp(argv[i], "--setup-force") == 0) {
