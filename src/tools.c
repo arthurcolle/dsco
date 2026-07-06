@@ -33457,12 +33457,17 @@ static const tool_def_t s_tools[] = {
          "Native networking: mesh P2P (libsodium encrypted), HTTP/TLS server/client (mbedTLS), "
          "bridge fleet ops, remote tool invocation. Actions: mesh/status, mesh/peers, mesh/send, "
          "mesh/broadcast, mesh/connect, http/post, http/status, bridge/fleet, bridge/exec, "
-         "bridge/send, bridge/bus_put, bridge/bus_get, remote.",
+         "bridge/fanout (concurrent command across all fleet hosts with durable per-host "
+         "RESULT.json envelopes; role=<filter>, concurrency=N), bridge/send, bridge/bus_put, "
+         "bridge/bus_get, remote.",
      .input_schema_json =
          "{\"type\":\"object\",\"properties\":{\"action\":{\"type\":\"string\",\"description\":"
          "\"mesh/status|mesh/peers|mesh/send|mesh/broadcast|mesh/connect|http/post|http/"
-         "status|bridge/fleet|bridge/exec|bridge/send|bridge/bus_put|bridge/"
+         "status|bridge/fleet|bridge/exec|bridge/fanout|bridge/send|bridge/bus_put|bridge/"
          "bus_get|remote\"},\"host\":{\"type\":\"string\"},\"port\":{\"type\":\"integer\"},"
+         "\"role\":{\"type\":\"string\",\"description\":\"ROLES filter for bridge/fanout\"},"
+         "\"concurrency\":{\"type\":\"integer\",\"description\":\"parallel workers for "
+         "bridge/fanout\"},"
          "\"peer\":{\"type\":\"string\",\"description\":\"Fleet peer name or IP for bridge/exec "
          "and remote\"},\"peer_pubkey\":{\"type\":\"string\",\"description\":\"Hex pubkey for "
          "mesh/send\"},\"data\":{\"type\":\"string\",\"description\":\"Payload for mesh/send or "
@@ -33474,7 +33479,7 @@ static const tool_def_t s_tools[] = {
          "http/"
          "post\"},\"since\":{\"type\":\"integer\"},\"limit\":{\"type\":\"integer\"},\"tls\":{"
          "\"type\":\"boolean\"},\"cmd\":{\"type\":\"string\",\"description\":\"Shell command for "
-         "bridge/exec\"}},\"required\":[\"action\"]}",
+         "bridge/exec or bridge/fanout\"}},\"required\":[\"action\"]}",
      .execute = tool_net_dispatch},
     {.name = "graphsub",
      .description =
