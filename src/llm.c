@@ -2333,15 +2333,20 @@ static const char *anthropic_oauth_wire_tool_name(const char *name, char *buf, s
     if (dsco_mcp_is_canonical_tool_name(name))
         return name;
     if (strncmp(name, "mcp_", 4) == 0 && buf && buf_len > 0) {
-        for (int i = 0; i < g_external_tool_count; i++) {
-            const char *candidate = g_external_tools[i].name;
+        external_tool_snapshot_t ext = tools_external_snapshot();
+        for (int i = 0; i < ext.count; i++) {
+            const char *candidate = ext.items[i].name;
             if (!dsco_mcp_is_canonical_tool_name(candidate))
                 continue;
             char legacy[128];
             dsco_mcp_legacy_alias_from_canonical(candidate, legacy, sizeof(legacy));
-            if (strcmp(legacy, name) == 0)
-                return candidate;
+            if (strcmp(legacy, name) == 0) {
+                snprintf(buf, buf_len, "%s", candidate);
+                tools_external_snapshot_free(&ext);
+                return buf;
+            }
         }
+        tools_external_snapshot_free(&ext);
         snprintf(buf, buf_len, "mcp__%s", name + 4);
         return buf;
     }
@@ -2598,17 +2603,31 @@ static bool anthropic_tool_freeze_enabled(void) {
 
 static unsigned long long anthropic_external_tool_signature(void) {
     unsigned long long h = 1469598103934665603ULL;
-    h ^= (unsigned long long)g_external_tool_count;
+    external_tool_snapshot_t ext = tools_external_snapshot();
+    h ^= (unsigned long long)ext.count;
     h *= 1099511628211ULL;
-    for (int i = 0; i < g_external_tool_count; i++) {
-        const unsigned char *p = (const unsigned char *)g_external_tools[i].name;
+    for (int i = 0; i < ext.count; i++) {
+        const unsigned char *p = (const unsigned char *)ext.items[i].name;
         while (p && *p) {
             h ^= (unsigned long long)*p++;
             h *= 1099511628211ULL;
         }
-        h ^= g_external_tools[i].loaded ? 0xa5ULL : 0x5aULL;
+        h ^= ext.items[i].loaded ? 0xa5ULL : 0x5aULL;
         h *= 1099511628211ULL;
+        p = (const unsigned char *)(ext.items[i].input_schema_json ? ext.items[i].input_schema_json
+                                                                    : "");
+        while (*p) {
+            h ^= (unsigned long long)*p++;
+            h *= 1099511628211ULL;
+        }
+        p = (const unsigned char *)(ext.items[i].output_schema_json ? ext.items[i].output_schema_json
+                                                                     : "");
+        while (*p) {
+            h ^= (unsigned long long)*p++;
+            h *= 1099511628211ULL;
+        }
     }
+    tools_external_snapshot_free(&ext);
     return h;
 }
 
@@ -2748,11 +2767,14 @@ static void append_tools_json_filtered(jbuf_t *b, session_state_t *session, conv
     bool paged_owned = false;
     tool_page_result_t paged =
         anthropic_get_paged_tools(ctx, max_tools, budget_ratio, &paged_owned);
+    external_tool_snapshot_t ext = tools_external_snapshot();
+    int *ext_order = ext.count > 0 ? safe_malloc((size_t)ext.count * sizeof(*ext_order)) : NULL;
+    int ext_order_count =
+        ext_order ? tools_rank_external_snapshot(&ext, ctx, ext_order, ext.count) : 0;
 
     bool has_server_tools = session && (session->web_search || session->code_execution);
-    bool has_after_working =
-        (paged.discovery_count > 0 || g_external_tool_count > 0 || has_server_tools);
-    bool has_after_discovery = (g_external_tool_count > 0 || has_server_tools);
+    bool has_after_working = (paged.discovery_count > 0 || ext.count > 0 || has_server_tools);
+    bool has_after_discovery = (ext.count > 0 || has_server_tools);
 
     jbuf_append(b, ",\"tools\":[");
     size_t tools_json_start = b->len;
@@ -2807,8 +2829,8 @@ static void append_tools_json_filtered(jbuf_t *b, session_state_t *session, conv
      * load_tools useless for large servers like email/heat. */
     int ext_budget = max_tools - written;
     int loaded_ext_count = 0;
-    for (int i = 0; i < g_external_tool_count; i++)
-        if (g_external_tools[i].loaded)
+    for (int i = 0; i < ext.count; i++)
+        if (ext.items[i].loaded)
             loaded_ext_count++;
     if (loaded_ext_count > ext_budget)
         ext_budget = loaded_ext_count;
@@ -2819,20 +2841,23 @@ static void append_tools_json_filtered(jbuf_t *b, session_state_t *session, conv
     int ext_written = 0;
     for (int pass = 0; pass < 2 && ext_written < ext_budget; pass++) {
         bool want_loaded = (pass == 0);
-        for (int i = 0; i < g_external_tool_count && ext_written < ext_budget; i++) {
-            if ((bool)g_external_tools[i].loaded != want_loaded)
+        for (int oi = 0; oi < ext_order_count && ext_written < ext_budget; oi++) {
+            int i = ext_order[oi];
+            if (i < 0 || i >= ext.count)
+                continue;
+            if ((bool)ext.items[i].loaded != want_loaded)
                 continue;
             if (written > 0)
                 jbuf_append(b, ",");
             char wire_name[256];
             jbuf_append(b, "{\"name\":");
-            jbuf_append_json_str(b, anthropic_oauth_wire_tool_name(g_external_tools[i].name,
+            jbuf_append_json_str(b, anthropic_oauth_wire_tool_name(ext.items[i].name,
                                                                    wire_name, sizeof(wire_name),
                                                                    claude_code_oauth));
             jbuf_append(b, ",\"description\":");
-            jbuf_append_json_str(b, g_external_tools[i].description);
+            jbuf_append_json_str(b, ext.items[i].description);
             jbuf_append(b, ",\"input_schema\":");
-            jbuf_append(b, g_external_tools[i].input_schema_json);
+            jbuf_append(b, ext.items[i].input_schema_json ? ext.items[i].input_schema_json : "{}");
             /* No end-of-tools cache mark: the system breakpoint already
              * covers the entire tools+system prefix cumulatively. */
             jbuf_append(b, "}");
@@ -2862,6 +2887,8 @@ static void append_tools_json_filtered(jbuf_t *b, session_state_t *session, conv
     int schema_tokens = rough_token_estimate_len(b->data + tools_json_start,
                                                  (int)(tools_json_end - tools_json_start));
     tools_set_tool_schema_usage(written, schema_tokens);
+    free(ext_order);
+    tools_external_snapshot_free(&ext);
 }
 
 static void build_messages_json(jbuf_t *b, conversation_t *c, session_state_t *session,
@@ -3178,6 +3205,58 @@ char *llm_build_request(conversation_t *c, const char *model, int max_tokens) {
     return llm_build_request_for_credential(c, model, max_tokens, NULL);
 }
 
+/* ── Prefix-hash observability (Wave 1.4, P3/C1) ─────────────────────────
+ * Invariant: bytes before the messages array (model + tools + system, i.e.
+ * everything covered by the tools/system cache breakpoints) must not change
+ * intra-session. Any change = guaranteed cache-write instead of cache-read.
+ * Enable with DSCO_CACHE_PREFIX_HASH=1; warns on stderr with the byte offset
+ * of the first divergence so the churn source is directly greppable. */
+static uint64_t prefix_fnv1a64(const char *p, size_t n) {
+    uint64_t h = 1469598103934665603ULL;
+    for (size_t i = 0; i < n; i++) {
+        h ^= (unsigned char)p[i];
+        h *= 1099511628211ULL;
+    }
+    return h;
+}
+
+static void cache_prefix_hash_check(const char *req) {
+    static uint64_t s_last_hash;
+    static char *s_last_prefix;
+    static size_t s_last_len;
+    static int s_seq;
+    const char *env = getenv("DSCO_CACHE_PREFIX_HASH");
+    if (!env || !env[0] || strcmp(env, "0") == 0 || !req)
+        return;
+    const char *m = strstr(req, ",\"messages\":[");
+    if (!m)
+        return;
+    size_t n = (size_t)(m - req);
+    uint64_t h = prefix_fnv1a64(req, n);
+    s_seq++;
+    if (s_seq > 1 && h != s_last_hash) {
+        size_t off = 0;
+        if (s_last_prefix) {
+            size_t lim = n < s_last_len ? n : s_last_len;
+            while (off < lim && s_last_prefix[off] == req[off])
+                off++;
+        }
+        fprintf(stderr,
+                "⚠ cache-prefix churn: req#%d pre-messages prefix changed "
+                "(%016llx→%016llx, len %zu→%zu, first divergence at byte %zu: \"%.48s\")\n",
+                s_seq, (unsigned long long)s_last_hash, (unsigned long long)h,
+                s_last_len, n, off, req + (off < n ? off : (n ? n - 1 : 0)));
+    }
+    s_last_hash = h;
+    s_last_len = n;
+    free(s_last_prefix);
+    s_last_prefix = malloc(n + 1);
+    if (s_last_prefix) {
+        memcpy(s_last_prefix, req, n);
+        s_last_prefix[n] = '\0';
+    }
+}
+
 char *llm_build_request_ex_for_credential(conversation_t *c, session_state_t *session,
                                           int max_tokens, const char *credential) {
     if (!session)
@@ -3362,7 +3441,7 @@ char *llm_build_request_ex_for_credential(conversation_t *c, session_state_t *se
 
     /* Effort parameter */
     const char *effort = strcmp(session->effort, EFFORT_MAX) == 0 ? EFFORT_XHIGH : session->effort;
-    if (effort[0] && strcmp(effort, EFFORT_HIGH) != 0) {
+    if (effort[0]) {
         jbuf_append(&b, ",\"output_config\":{\"effort\":");
         jbuf_append_json_str(&b, effort);
         jbuf_append(&b, "}");
@@ -3405,6 +3484,7 @@ char *llm_build_request_ex_for_credential(conversation_t *c, session_state_t *se
         session->stop_seq[0] = '\0';
     free(active_skill_prompt);
 
+    cache_prefix_hash_check(b.data);
     return b.data;
 }
 
