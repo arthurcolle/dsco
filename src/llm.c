@@ -3221,9 +3221,15 @@ static uint64_t prefix_fnv1a64(const char *p, size_t n) {
 }
 
 static void cache_prefix_hash_check(const char *req) {
-    static uint64_t s_last_hash;
+    /* Region-aware: FROZEN = up to the last cache_control breakpoint before
+     * the messages array (model+tools+system-stable). Churn here invalidates
+     * every message anchor => full-transcript cache miss (catastrophic).
+     * VOLATILE = breakpoint..messages (skills/memory/goal blocks). Churn here
+     * is expected but still invalidates message anchors on providers that
+     * hash the full prefix — reported at lower severity. */
+    static uint64_t s_frozen_hash, s_vol_hash;
     static char *s_last_prefix;
-    static size_t s_last_len;
+    static size_t s_last_len, s_last_frozen_len;
     static int s_seq;
     const char *env = getenv("DSCO_CACHE_PREFIX_HASH");
     if (!env || !env[0] || strcmp(env, "0") == 0 || !req)
@@ -3232,23 +3238,36 @@ static void cache_prefix_hash_check(const char *req) {
     if (!m)
         return;
     size_t n = (size_t)(m - req);
-    uint64_t h = prefix_fnv1a64(req, n);
+    /* Last breakpoint before messages marks the end of the frozen region. */
+    size_t fz = n;
+    for (const char *p = req; (p = strstr(p, "\"cache_control\"")) != NULL && p < m; p++)
+        fz = (size_t)(p - req);
+    uint64_t hf = prefix_fnv1a64(req, fz);
+    uint64_t hv = prefix_fnv1a64(req + fz, n - fz);
     s_seq++;
-    if (s_seq > 1 && h != s_last_hash) {
-        size_t off = 0;
-        if (s_last_prefix) {
-            size_t lim = n < s_last_len ? n : s_last_len;
-            while (off < lim && s_last_prefix[off] == req[off])
+    if (s_seq > 1) {
+        if (hf != s_frozen_hash) {
+            size_t off = 0, lim = fz < s_last_frozen_len ? fz : s_last_frozen_len;
+            while (s_last_prefix && off < lim && s_last_prefix[off] == req[off])
                 off++;
+            fprintf(stderr,
+                    "⚠ cache FROZEN-region churn (invalidates ALL message anchors): req#%d "
+                    "%016llx→%016llx len %zu→%zu, first divergence byte %zu: \"%.48s\"\n",
+                    s_seq, (unsigned long long)s_frozen_hash, (unsigned long long)hf,
+                    s_last_frozen_len, fz, off, req + (off < fz ? off : (fz ? fz - 1 : 0)));
+        } else if (hv != s_vol_hash) {
+            fprintf(stderr,
+                    "ℹ cache volatile-block churn (post-breakpoint system blocks changed; "
+                    "message anchors at risk on strict-prefix providers): req#%d "
+                    "%016llx→%016llx len %zu→%zu\n",
+                    s_seq, (unsigned long long)s_vol_hash, (unsigned long long)hv,
+                    s_last_len - s_last_frozen_len, n - fz);
         }
-        fprintf(stderr,
-                "⚠ cache-prefix churn: req#%d pre-messages prefix changed "
-                "(%016llx→%016llx, len %zu→%zu, first divergence at byte %zu: \"%.48s\")\n",
-                s_seq, (unsigned long long)s_last_hash, (unsigned long long)h,
-                s_last_len, n, off, req + (off < n ? off : (n ? n - 1 : 0)));
     }
-    s_last_hash = h;
+    s_frozen_hash = hf;
+    s_vol_hash = hv;
     s_last_len = n;
+    s_last_frozen_len = fz;
     free(s_last_prefix);
     s_last_prefix = malloc(n + 1);
     if (s_last_prefix) {
