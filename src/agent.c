@@ -748,8 +748,21 @@ static const char *cache_status_label(const char *model, const usage_t *u,
     cache_expectation_t expectation = model_cache_expectation(model);
     if (usage_has_cache_telemetry(u))
         return "observed";
-    if (session_has_cache_telemetry(session))
+    /* A3 fix: distinguish "session was warm but this turn reported usage with
+     * zero cache tokens" (a real mid-session cache loss on explicit-breakpoint
+     * providers) from "this turn simply carried no usage telemetry yet". The
+     * old logic collapsed both into "warm-session", hiding prefix
+     * invalidation from exactly the turns where it happened. */
+    bool turn_reported_usage = u && u->input_tokens > 0;
+    if (session_has_cache_telemetry(session)) {
+        if (turn_reported_usage &&
+            expectation == CACHE_EXPECT_EXPLICIT_BREAKPOINTS)
+            return "cache-lost";
         return "warm-session";
+    }
+    if (turn_reported_usage &&
+        expectation == CACHE_EXPECT_EXPLICIT_BREAKPOINTS)
+        return "cold";
     if (expectation == CACHE_EXPECT_AUTOMATIC_PROVIDER)
         return "telemetry-pending";
     if (expectation == CACHE_EXPECT_EXPLICIT_BREAKPOINTS)
@@ -9451,6 +9464,15 @@ bool agent_run(const char *api_key, const char *model, const char *topology_name
                     should_warn = true;
                     event_kind = "low_hit_ratio";
                     human_status = "cache hit ratio low";
+                } else if (!cache_telemetry_seen && sr.usage.input_tokens > 0 &&
+                           session_has_cache_telemetry(&session) &&
+                           cache_expectation == CACHE_EXPECT_EXPLICIT_BREAKPOINTS) {
+                    /* A3: session had cache telemetry earlier but this turn
+                     * reported real usage with zero cache tokens — the prefix
+                     * was invalidated mid-session. */
+                    should_warn = true;
+                    event_kind = "cache_lost";
+                    human_status = "mid-session cache loss (prefix invalidated)";
                 } else if (!cache_telemetry_seen && !cache_notice_emitted &&
                            cache_zero_telemetry_streak >= 3 && turns >= 5) {
                     should_warn = true;
@@ -9481,7 +9503,9 @@ bool agent_run(const char *api_key, const char *model, const char *topology_name
                      * breakpoints, self-arm the prefix-hash churn detector so
                      * the next request pinpoints the divergence byte without
                      * requiring a user-driven re-run. */
-                    if (event_kind && strcmp(event_kind, "low_hit_ratio") == 0 &&
+                    if (event_kind &&
+                        (strcmp(event_kind, "low_hit_ratio") == 0 ||
+                         strcmp(event_kind, "cache_lost") == 0) &&
                         !getenv("DSCO_CACHE_PREFIX_HASH")) {
                         setenv("DSCO_CACHE_PREFIX_HASH", "1", 0);
                         fprintf(stderr,
