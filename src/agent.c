@@ -8670,7 +8670,12 @@ bool agent_run(const char *api_key, const char *model, const char *topology_name
             /* Phase 3: Memory → context injection (Claude Code methodology).
                Every 3 turns, search semantic memory for relevant entries and
                inject top-5 into the system prompt for the next API call. */
-            session.memory_context[0] = '\0';
+            /* A2 (byte-stability): memory_context is STICKY. Previously it was
+             * zeroed every turn and only repopulated on turns %3==1, which
+             * toggled the system block present/absent and invalidated the
+             * provider prefix cache every single turn. Now the previous
+             * context persists verbatim; we only overwrite it when a recall
+             * turn produces *different* content (stable-sorted by key). */
             if (g_agent_memory_inited && turns % 3 == 1) {
                 const char *last_user_text = NULL;
                 for (int ci = conv.count - 1; ci >= 0; ci--) {
@@ -8689,16 +8694,35 @@ bool agent_run(const char *api_key, const char *model, const char *topology_name
                     const memory_entry_t *hits[5];
                     int nhits = memory_search_semantic(&g_agent_memory, last_user_text, hits, 5);
                     if (nhits > 0) {
-                        int pos = snprintf(session.memory_context, sizeof(session.memory_context),
-                                           "[Recalled from memory (%d entries)]\n", nhits);
+                        /* Stable order: sort hits by key so identical result
+                         * sets serialize to identical bytes regardless of
+                         * search-rank jitter. */
+                        for (int si = 1; si < nhits; si++) {
+                            const memory_entry_t *k = hits[si];
+                            int sj = si - 1;
+                            while (sj >= 0 && strcmp(hits[sj]->key, k->key) > 0) {
+                                hits[sj + 1] = hits[sj];
+                                sj--;
+                            }
+                            hits[sj + 1] = k;
+                        }
+                        char fresh[sizeof(session.memory_context)];
+                        /* Header omits the count: a 4->5 hit drift shouldn't
+                         * churn bytes when overlapping entries are stable. */
+                        int pos = snprintf(fresh, sizeof(fresh),
+                                           "[Recalled from memory]\n");
                         for (int mi2 = 0;
-                             mi2 < nhits && pos < (int)sizeof(session.memory_context) - 200;
+                             mi2 < nhits && pos < (int)sizeof(fresh) - 200;
                              mi2++) {
-                            pos += snprintf(session.memory_context + pos,
-                                            sizeof(session.memory_context) - (size_t)pos,
+                            pos += snprintf(fresh + pos, sizeof(fresh) - (size_t)pos,
                                             "- %s: %.*s\n", hits[mi2]->key, 300, hits[mi2]->value);
                         }
+                        if (strcmp(fresh, session.memory_context) != 0)
+                            memcpy(session.memory_context, fresh, (size_t)pos + 1);
+                        /* else: byte-identical — keep old buffer untouched */
                     }
+                    /* nhits == 0: keep previous context (sticky) rather than
+                     * blanking the system block and churning the prefix. */
                 }
             }
 
