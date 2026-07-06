@@ -56,6 +56,16 @@
 #include "control_flow.h"
 #include "recovery.h"
 #include "env_config.h"
+
+extern external_tool_t g_external_tools[MAX_EXTERNAL_TOOLS];
+extern int g_external_tool_count;
+
+static const char *const k_default_input_schema_json = "{\"type\":\"object\",\"properties\":{}}";
+static const char *const k_default_output_schema_json =
+    "{\"type\":[\"object\",\"string\",\"array\",\"number\",\"boolean\",\"null\"],"
+    "\"description\":\"Tool result payload. Tools that return structured JSON should document that "
+    "object here; text tools may return a string.\"}";
+
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -81,6 +91,7 @@
 #include <curl/curl.h>
 #include <regex.h>
 #include <pthread.h>
+#include <stdatomic.h>
 #include <sys/socket.h>
 #include <netdb.h>
 #include <arpa/inet.h>
@@ -1433,6 +1444,36 @@ static size_t g_ctx_offload_events = 0;
 static size_t g_ctx_offloaded_bytes = 0;
 static size_t g_ctx_reference_bytes = 0;
 
+static void dsco_locks_ensure_global(void);
+
+static void ctx_store_rdlock(void) {
+    dsco_locks_ensure_global();
+    pthread_rwlock_rdlock(&g_locks.ctx_lock);
+}
+
+static void ctx_store_wrlock(void) {
+    dsco_locks_ensure_global();
+    pthread_rwlock_wrlock(&g_locks.ctx_lock);
+}
+
+static void ctx_store_unlock(void) {
+    pthread_rwlock_unlock(&g_locks.ctx_lock);
+}
+
+static void tool_registry_rdlock(void) {
+    dsco_locks_ensure_global();
+    pthread_rwlock_rdlock(&g_locks.toolmap_lock);
+}
+
+static void tool_registry_wrlock(void) {
+    dsco_locks_ensure_global();
+    pthread_rwlock_wrlock(&g_locks.toolmap_lock);
+}
+
+static void tool_registry_unlock(void) {
+    pthread_rwlock_unlock(&g_locks.toolmap_lock);
+}
+
 static void ctx_evict_index(int idx);
 static int g_ctx_turn_pins_prev[CTX_TURN_PIN_IDS_MAX];
 static int g_ctx_turn_pins_prev_count = 0;
@@ -1594,7 +1635,7 @@ static void ctx_evict_index(int idx) {
     g_ctx.count--;
 }
 
-static void ctx_store_reset(void) {
+static void ctx_store_reset_unlocked(void) {
     for (int i = 0; i < g_ctx.count; i++) {
         free(g_ctx.chunks[i].text);
     }
@@ -1605,6 +1646,12 @@ static void ctx_store_reset(void) {
     g_ctx_reference_bytes = 0;
     g_ctx_turn_pins_prev_count = 0;
     g_ctx_turn_pins_curr_count = 0;
+}
+
+static void ctx_store_reset(void) {
+    ctx_store_wrlock();
+    ctx_store_reset_unlocked();
+    ctx_store_unlock();
 }
 
 static bool ctx_chunk_exists(uint64_t hash, const char *text, size_t len) {
@@ -1671,7 +1718,8 @@ static bool ctx_store_chunk(const char *tool, const char *text, size_t len,
     return true;
 }
 
-static void ctx_ingest_text(const char *tool, const char *text, ctx_ingest_info_t *info) {
+static void ctx_ingest_text_unlocked(const char *tool, const char *text,
+                                     ctx_ingest_info_t *info) {
     bool auto_pin = info ? info->auto_pin : false;
     if (info) {
         memset(info, 0, sizeof(*info));
@@ -1737,6 +1785,12 @@ static void ctx_ingest_text(const char *tool, const char *text, ctx_ingest_info_
     ctx_recompute_df();
 }
 
+static void ctx_ingest_text(const char *tool, const char *text, ctx_ingest_info_t *info) {
+    ctx_store_wrlock();
+    ctx_ingest_text_unlocked(tool, text, info);
+    ctx_store_unlock();
+}
+
 static int ctx_find_index_by_id(int chunk_id) {
     for (int i = 0; i < g_ctx.count; i++) {
         if (g_ctx.chunks[i].id == chunk_id)
@@ -1746,6 +1800,7 @@ static int ctx_find_index_by_id(int chunk_id) {
 }
 
 void tools_context_turn_begin(void) {
+    ctx_store_wrlock();
     for (int i = 0; i < g_ctx_turn_pins_prev_count; i++) {
         int idx = ctx_find_index_by_id(g_ctx_turn_pins_prev[i]);
         if (idx >= 0)
@@ -1755,6 +1810,7 @@ void tools_context_turn_begin(void) {
     memcpy(g_ctx_turn_pins_prev, g_ctx_turn_pins_curr, sizeof(g_ctx_turn_pins_curr));
     g_ctx_turn_pins_prev_count = g_ctx_turn_pins_curr_count;
     g_ctx_turn_pins_curr_count = 0;
+    ctx_store_unlock();
 }
 
 static void ctx_turn_pin_range(const ctx_ingest_info_t *info) {
@@ -2032,13 +2088,19 @@ static __attribute__((unused)) void ctx_maybe_offload_tool_result(const char *to
     size_t old_len = strlen(copy);
 
     ctx_ingest_info_t info = {.auto_pin = true};
-    ctx_ingest_text(tool_name, copy, &info);
+    ctx_store_wrlock();
+    ctx_ingest_text_unlocked(tool_name, copy, &info);
     if (info.chunks_added > 0) {
         ctx_turn_pin_range(&info);
-        ctx_rewrite_result_as_reference(tool_name, copy, result, result_len, &info);
         g_ctx_offload_events++;
         g_ctx_offloaded_bytes += old_len;
+    }
+    ctx_store_unlock();
+    if (info.chunks_added > 0) {
+        ctx_rewrite_result_as_reference(tool_name, copy, result, result_len, &info);
+        ctx_store_wrlock();
         g_ctx_reference_bytes += strlen(result);
+        ctx_store_unlock();
     }
     free(copy);
 }
@@ -16110,6 +16172,7 @@ static bool tool_context_search(const char *input, char *result, size_t rlen) {
     }
 
     bool ok = true;
+    ctx_store_rdlock();
     if (source_id <= 0 && (!facet || !*facet)) {
         ok = ctx_search_render(query, tool_filter, top_k, result, rlen);
     } else {
@@ -16149,6 +16212,7 @@ static bool tool_context_search(const char *input, char *result, size_t rlen) {
                      "use context_get_batch to retrieve multiple chunks in one call");
         }
     }
+    ctx_store_unlock();
     free(query);
     free(tool_filter);
     free(facet);
@@ -16167,6 +16231,7 @@ static bool tool_context_get(const char *input, char *result, size_t rlen) {
     if (max_chars > 24000)
         max_chars = 24000;
 
+    ctx_store_rdlock();
     int idx = ctx_find_index_by_id(chunk_id);
     if (idx < 0) {
         int oldest = g_ctx.count > 0 ? g_ctx.chunks[0].id : -1;
@@ -16176,6 +16241,7 @@ static bool tool_context_get(const char *input, char *result, size_t rlen) {
                  "active_chunk_range=%d-%d total_chunks=%d\n"
                  "next: rerun context_search with a focused query, or pin important chunks sooner",
                  chunk_id, oldest, newest, g_ctx.count);
+        ctx_store_unlock();
         return false;
     }
 
@@ -16191,6 +16257,7 @@ static bool tool_context_get(const char *input, char *result, size_t rlen) {
         n = 0;
     if ((size_t)n >= rlen - off) {
         result[rlen - 1] = '\0';
+        ctx_store_unlock();
         return true;
     }
     off += (size_t)n;
@@ -16211,6 +16278,7 @@ static bool tool_context_get(const char *input, char *result, size_t rlen) {
         snprintf(result + off, rlen - off, "\n\n... truncated (%zu/%zu chars shown)", copy_len,
                  c->text_len);
     }
+    ctx_store_unlock();
     return true;
 }
 
@@ -16253,6 +16321,7 @@ static bool tool_context_get_batch(const char *input, char *result, size_t rlen)
 
     size_t off = 0;
     int found = 0, missing = 0;
+    ctx_store_rdlock();
     for (int i = 0; i < id_count && off + 128 < rlen; i++) {
         int idx = ctx_find_index_by_id(ids[i]);
         if (idx < 0) {
@@ -16284,6 +16353,7 @@ static bool tool_context_get_batch(const char *input, char *result, size_t rlen)
     }
     if (found == 0) {
         snprintf(result, rlen, "error: none of %d chunk_ids found (likely evicted)", id_count);
+        ctx_store_unlock();
         return false;
     }
     int n =
@@ -16292,11 +16362,13 @@ static bool tool_context_get_batch(const char *input, char *result, size_t rlen)
     if (n > 0 && (size_t)n < rlen - off)
         off += (size_t)n;
     result[off] = '\0';
+    ctx_store_unlock();
     return true;
 }
 
 static bool tool_context_stats(const char *input, char *result, size_t rlen) {
     (void)input;
+    ctx_store_rdlock();
     if (g_ctx.count == 0) {
         snprintf(
             result, rlen,
@@ -16306,6 +16378,7 @@ static bool tool_context_stats(const char *input, char *result, size_t rlen) {
             (g_ctx_offloaded_bytes > g_ctx_reference_bytes)
                 ? (g_ctx_offloaded_bytes - g_ctx_reference_bytes) / 4
                 : 0);
+        ctx_store_unlock();
         return true;
     }
 
@@ -16371,6 +16444,7 @@ static bool tool_context_stats(const char *input, char *result, size_t rlen) {
         n = 0;
     if ((size_t)n >= rlen - off) {
         result[rlen - 1] = '\0';
+        ctx_store_unlock();
         return true;
     }
     off += (size_t)n;
@@ -16382,6 +16456,7 @@ static bool tool_context_stats(const char *input, char *result, size_t rlen) {
             break;
         off += (size_t)n;
     }
+    ctx_store_unlock();
     return true;
 }
 
@@ -16405,12 +16480,14 @@ static bool tool_context_summarize(const char *input, char *result, size_t rlen)
     if (max_chars > 1200)
         max_chars = 1200;
 
+    ctx_store_rdlock();
     ctx_hit_t hits[CTX_SEARCH_MAX_K];
     char mode[64];
     int n_hits = ctx_rank_hits_ladder(query, tool_filter, source_id, facet, top_k, hits,
                                       CTX_SEARCH_MAX_K, mode, sizeof(mode));
     if (n_hits <= 0) {
         snprintf(result, rlen, "no hits for summary query: %s", query);
+        ctx_store_unlock();
         free(query);
         free(tool_filter);
         free(facet);
@@ -16427,6 +16504,7 @@ static bool tool_context_summarize(const char *input, char *result, size_t rlen)
         n = 0;
     if ((size_t)n >= rlen - off) {
         result[rlen - 1] = '\0';
+        ctx_store_unlock();
         free(query);
         free(tool_filter);
         free(facet);
@@ -16447,6 +16525,7 @@ static bool tool_context_summarize(const char *input, char *result, size_t rlen)
 
     snprintf(result + off, rlen - off,
              "\nUse context_get only if you need verbatim details from the cited chunk ids.");
+    ctx_store_unlock();
     free(query);
     free(tool_filter);
     free(facet);
@@ -16460,13 +16539,16 @@ static bool tool_context_pin(const char *input, char *result, size_t rlen) {
         snprintf(result, rlen, "error: chunk_id required");
         return false;
     }
+    ctx_store_wrlock();
     int idx = ctx_find_index_by_id(chunk_id);
     if (idx < 0) {
         snprintf(result, rlen, "error: chunk_id %d not found", chunk_id);
+        ctx_store_unlock();
         return false;
     }
     g_ctx.chunks[idx].pinned = pin;
     snprintf(result, rlen, "chunk %d %s", chunk_id, pin ? "pinned" : "unpinned");
+    ctx_store_unlock();
     return true;
 }
 
@@ -16486,6 +16568,7 @@ static bool tool_context_gc(const char *input, char *result, size_t rlen) {
     if (keep_recent < 0)
         keep_recent = 0;
 
+    ctx_store_wrlock();
     int removed = 0;
     bool changed = true;
     while (changed && (g_ctx.count > max_chunks || (int)g_ctx.total_bytes > max_bytes)) {
@@ -16513,11 +16596,13 @@ static bool tool_context_gc(const char *input, char *result, size_t rlen) {
              "context_gc removed=%d chunks=%d bytes=%zu (targets: max_chunks=%d max_bytes=%d "
              "keep_recent=%d)",
              removed, g_ctx.count, g_ctx.total_bytes, max_chunks, max_bytes, keep_recent);
+    ctx_store_unlock();
     return true;
 }
 
 static bool tool_token_audit(const char *input, char *result, size_t rlen) {
     (void)input;
+    ctx_store_rdlock();
     size_t saved_bytes = (g_ctx_offloaded_bytes > g_ctx_reference_bytes)
                              ? (g_ctx_offloaded_bytes - g_ctx_reference_bytes)
                              : 0;
@@ -16533,6 +16618,7 @@ static bool tool_token_audit(const char *input, char *result, size_t rlen) {
              "context_bytes=%zu\n",
              g_ctx_offload_events, g_ctx_offloaded_bytes, g_ctx_reference_bytes, saved_bytes,
              saved_tokens, g_ctx.count, g_ctx.total_bytes);
+    ctx_store_unlock();
     return true;
 }
 
@@ -16680,12 +16766,14 @@ static bool tool_context_pack(const char *input, char *result, size_t rlen) {
     if (max_per > 4000)
         max_per = 4000;
 
+    ctx_store_rdlock();
     ctx_hit_t hits[CTX_SEARCH_MAX_K];
     char mode[64];
     int n_hits = ctx_rank_hits_ladder(query, tool_filter, source_id, facet, top_k, hits,
                                       CTX_SEARCH_MAX_K, mode, sizeof(mode));
     if (n_hits <= 0) {
         snprintf(result, rlen, "no packable hits for query: %s", query);
+        ctx_store_unlock();
         free(query);
         free(tool_filter);
         free(facet);
@@ -16704,6 +16792,7 @@ static bool tool_context_pack(const char *input, char *result, size_t rlen) {
         n = 0;
     if ((size_t)n >= rlen - off) {
         result[rlen - 1] = '\0';
+        ctx_store_unlock();
         free(query);
         free(tool_filter);
         free(facet);
@@ -16741,6 +16830,7 @@ static bool tool_context_pack(const char *input, char *result, size_t rlen) {
              "\npack_summary packed_chunks=%d packed_chars=%zu budget_chars=%d\n"
              "answer from this evidence. Do not call context_get individually.",
              packed, used, max_total);
+    ctx_store_unlock();
     free(query);
     free(tool_filter);
     free(facet);
@@ -16778,6 +16868,7 @@ static bool tool_context_fuse(const char *input, char *result, size_t rlen) {
     if (final_k > CTX_SEARCH_MAX_K)
         final_k = CTX_SEARCH_MAX_K;
 
+    ctx_store_rdlock();
     float fused[CTX_MAX_CHUNKS];
     float best_final[CTX_MAX_CHUNKS];
     int seen_count[CTX_MAX_CHUNKS];
@@ -16816,6 +16907,7 @@ static bool tool_context_fuse(const char *input, char *result, size_t rlen) {
     }
     if (rcount == 0) {
         snprintf(result, rlen, "no fused hits");
+        ctx_store_unlock();
         free(query);
         free(tool_filter);
         free(facet);
@@ -16835,6 +16927,7 @@ static bool tool_context_fuse(const char *input, char *result, size_t rlen) {
         n = 0;
     if ((size_t)n >= rlen - off) {
         result[rlen - 1] = '\0';
+        ctx_store_unlock();
         free(query);
         free(tool_filter);
         free(facet);
@@ -16857,6 +16950,7 @@ static bool tool_context_fuse(const char *input, char *result, size_t rlen) {
     snprintf(result + off, rlen - off,
              "\nnext: context_pack on the fused hits above; use context_get only for specific "
              "verbatim spans");
+    ctx_store_unlock();
     free(query);
     free(tool_filter);
     free(facet);
@@ -18588,6 +18682,7 @@ static bool tool_browser_extract(const char *input, char *result, size_t rlen) {
         return false;
     }
 
+    ctx_store_rdlock();
     ctx_hit_t hits[CTX_SEARCH_MAX_K];
     char mode[64];
     int emit = ctx_rank_hits_ladder(query, "browser_snapshot", source_id, effective_facet, top_k,
@@ -18626,6 +18721,7 @@ static bool tool_browser_extract(const char *input, char *result, size_t rlen) {
                  "next: prefer context_pack with the same query/filter before calling context_get "
                  "on individual chunk_ids");
     }
+    ctx_store_unlock();
     free(query);
     free(facet);
     return true;
@@ -18833,7 +18929,9 @@ static bool tool_research_probe(const char *input, char *result, size_t rlen) {
     if (query && *query && off < rlen - 64) {
         char sub[MAX_TOOL_RESULT];
         sub[0] = '\0';
+        ctx_store_rdlock();
         ctx_search_render(query, "research_probe", top_k, sub, sizeof(sub));
+        ctx_store_unlock();
         n = snprintf(result + off, rlen - off, "\n%s", sub);
         if (n > 0 && (size_t)n < rlen - off)
             off += (size_t)n;
@@ -18987,7 +19085,9 @@ static __attribute__((unused)) bool tool_code_index(const char *input, char *res
 static bool tool_code_search(const char *input, char *result, size_t rlen) {
     char *query = json_get_str(input, "query");
     int top_k = json_get_int(input, "top_k", 6);
+    ctx_store_rdlock();
     bool ok = ctx_search_render(query, "code_index", top_k, result, rlen);
+    ctx_store_unlock();
     free(query);
     return ok;
 }
@@ -20809,6 +20909,43 @@ static bool tool_governance_budget(const char *input, char *result, size_t rlen)
     return true;
 }
 
+/* Empirical capability: record an outcome and/or report the earned tier.
+   input: {agent_id?, outcome?: "success"|"failure"}. When outcome is present
+   it is recorded against the ledger; either way the current evidence-derived
+   tier is returned. This is the read/write surface for the capability layer
+   that makes "never claim a tier higher than measured" enforceable. */
+static bool tool_governance_capability(const char *input, char *result, size_t rlen) {
+    ensure_wt_init();
+    char *agent_id = json_get_str(input, "agent_id");
+    char *outcome = json_get_str(input, "outcome");
+    const char *aid = agent_id ? agent_id : "root";
+
+    if (outcome && *outcome) {
+        bool success = (strcmp(outcome, "success") == 0 || strcmp(outcome, "ok") == 0 ||
+                        strcmp(outcome, "pass") == 0 || strcmp(outcome, "true") == 0);
+        governance_record_outcome(&g_governance, aid, success);
+    }
+
+    const agent_envelope_t *a = governance_get_agent(&g_governance, aid);
+    if (a) {
+        int n = a->evidence_successes + a->evidence_failures;
+        double raw = n > 0 ? (double)a->evidence_successes / (double)n : 0.0;
+        snprintf(result, rlen,
+                 "{\"agent\":\"%s\",\"capability\":\"%s\","
+                 "\"evidence\":{\"successes\":%d,\"failures\":%d,\"samples\":%d,"
+                 "\"success_rate\":%.4f,\"wilson_lb\":%.4f},"
+                 "\"tier_changes\":%d,\"note\":\"tier is earned from evidence, "
+                 "not asserted\"}",
+                 aid, ooda_capability_name(a->claimed_capability), a->evidence_successes,
+                 a->evidence_failures, n, raw, a->success_lb, a->tier_changes);
+    } else {
+        snprintf(result, rlen, "{\"error\":\"agent not found\",\"agent\":\"%s\"}", aid);
+    }
+    free(agent_id);
+    free(outcome);
+    return true;
+}
+
 static bool tool_governance_audit(const char *input, char *result, size_t rlen) {
     ensure_wt_init();
     int last_n = (int)json_get_double(input, "last_n", 0);
@@ -20858,15 +20995,27 @@ static bool tool_memory_store(const char *input, char *result, size_t rlen) {
     char *key = json_get_str(input, "key");
     char *value = json_get_str(input, "value");
     char *tier_s = json_get_str(input, "tier");
+    char *class_s = json_get_str(input, "classification");
+    if (!class_s)
+        class_s = json_get_str(input, "class");
     double importance = json_get_double(input, "importance", 0);
     if (importance <= 0)
         importance = 0.5;
+    if (importance > 1.0) {
+        snprintf(result, rlen, "{\"error\":\"importance must be between 0 and 1\"}");
+        free(key);
+        free(value);
+        free(tier_s);
+        free(class_s);
+        return false;
+    }
 
     if (!key || !value) {
         snprintf(result, rlen, "{\"error\":\"key and value required\"}");
         free(key);
         free(value);
         free(tier_s);
+        free(class_s);
         return false;
     }
 
@@ -20878,14 +21027,67 @@ static bool tool_memory_store(const char *input, char *result, size_t rlen) {
             tier = MEM_SEMANTIC;
     }
 
+    memory_class_t classification = MEM_CLASS_OPEN;
+    if (class_s && !memory_class_from_name(class_s, &classification)) {
+        jbuf_t b = {0};
+        jbuf_init(&b, 128);
+        jbuf_append(&b, "{\"error\":\"unknown classification\",\"classification\":");
+        jbuf_append_json_str(&b, class_s);
+        jbuf_append_char(&b, '}');
+        snprintf(result, rlen, "%s", b.data ? b.data : "{\"error\":\"unknown classification\"}");
+        jbuf_free(&b);
+        free(key);
+        free(value);
+        free(tier_s);
+        free(class_s);
+        return false;
+    }
+    if (classification == MEM_CLASS_UMBRAL && tier != MEM_WORKING) {
+        snprintf(result, rlen, "{\"error\":\"umbral memories must be stored as working\"}");
+        free(key);
+        free(value);
+        free(tier_s);
+        free(class_s);
+        return false;
+    }
+    if (classification >= MEM_CLASS_SEALED && tier == MEM_SEMANTIC) {
+        snprintf(result, rlen,
+                 "{\"error\":\"sealed/umbral memories require review before semantic promotion\"}");
+        free(key);
+        free(value);
+        free(tier_s);
+        free(class_s);
+        return false;
+    }
+
     int id = memory_store(&g_memory, tier, key, value, importance);
-    snprintf(result, rlen,
-             "{\"ok\":true,\"id\":%d,\"key\":\"%s\",\"tier\":\"%s\","
-             "\"importance\":%.2f,\"halflife\":%.0f}",
-             id, key, memory_tier_name(tier), importance, memory_tier_halflife(tier));
+    if (id < 0) {
+        snprintf(result, rlen, "{\"ok\":false,\"error\":\"memory store failed\"}");
+        free(key);
+        free(value);
+        free(tier_s);
+        free(class_s);
+        return false;
+    }
+    if (class_s)
+        memory_classify(&g_memory, key, classification);
+
+    jbuf_t b = {0};
+    jbuf_init(&b, 256);
+    jbuf_appendf(&b, "{\"ok\":true,\"id\":%d,\"key\":", id);
+    jbuf_append_json_str(&b, key);
+    jbuf_append(&b, ",\"tier\":");
+    jbuf_append_json_str(&b, memory_tier_name(tier));
+    jbuf_appendf(&b, ",\"importance\":%.2f,\"halflife\":%.0f,\"classification\":",
+                 importance, memory_tier_halflife(tier));
+    jbuf_append_json_str(&b, memory_class_name(classification));
+    jbuf_append_char(&b, '}');
+    snprintf(result, rlen, "%s", b.data ? b.data : "{}");
+    jbuf_free(&b);
     free(key);
     free(value);
     free(tier_s);
+    free(class_s);
     return true;
 }
 
@@ -20898,27 +21100,48 @@ static bool tool_memory_recall(const char *input, char *result, size_t rlen) {
     if (key) {
         const memory_entry_t *e = memory_recall(&g_memory, key);
         if (e) {
-            snprintf(result, rlen,
-                     "{\"found\":true,\"key\":\"%s\",\"value\":\"%.*s\","
-                     "\"tier\":\"%s\",\"strength\":%.4f,\"importance\":%.2f,"
-                     "\"accesses\":%d,\"pinned\":%s}",
-                     e->key, (int)(rlen > 512 ? rlen - 512 : 256), e->value,
-                     memory_tier_name(e->tier), e->strength, e->importance, e->access_count,
-                     e->pinned ? "true" : "false");
+            jbuf_t b = {0};
+            jbuf_init(&b, 512);
+            jbuf_append(&b, "{\"found\":true,\"key\":");
+            jbuf_append_json_str(&b, e->key);
+            jbuf_append(&b, ",\"value\":");
+            jbuf_append_json_str(&b, e->value);
+            jbuf_append(&b, ",\"tier\":");
+            jbuf_append_json_str(&b, memory_tier_name(e->tier));
+            jbuf_appendf(&b, ",\"strength\":%.4f,\"importance\":%.2f,"
+                             "\"accesses\":%d,\"pinned\":%s,\"classification\":",
+                         e->strength, e->importance, e->access_count,
+                         e->pinned ? "true" : "false");
+            jbuf_append_json_str(&b, memory_class_name(e->classification));
+            jbuf_appendf(&b, ",\"class_reviewed\":%s}", e->class_reviewed ? "true" : "false");
+            snprintf(result, rlen, "%s", b.data ? b.data : "{}");
+            jbuf_free(&b);
         } else {
-            snprintf(result, rlen, "{\"found\":false,\"key\":\"%s\"}", key);
+            jbuf_t b = {0};
+            jbuf_init(&b, 128);
+            jbuf_append(&b, "{\"found\":false,\"key\":");
+            jbuf_append_json_str(&b, key);
+            jbuf_append_char(&b, '}');
+            snprintf(result, rlen, "%s", b.data ? b.data : "{}");
+            jbuf_free(&b);
         }
     } else if (query) {
         const memory_entry_t *hits[16];
         int n = memory_search(&g_memory, query, hits, 16);
         jbuf_t b = {0};
+        jbuf_init(&b, 512);
         jbuf_appendf(&b, "{\"results\":[");
         for (int i = 0; i < n; i++) {
-            jbuf_appendf(&b,
-                         "%s{\"key\":\"%s\",\"tier\":\"%s\","
-                         "\"strength\":%.4f,\"importance\":%.2f}",
-                         i ? "," : "", hits[i]->key, memory_tier_name(hits[i]->tier),
+            if (i)
+                jbuf_append_char(&b, ',');
+            jbuf_append(&b, "{\"key\":");
+            jbuf_append_json_str(&b, hits[i]->key);
+            jbuf_append(&b, ",\"tier\":");
+            jbuf_append_json_str(&b, memory_tier_name(hits[i]->tier));
+            jbuf_appendf(&b, ",\"strength\":%.4f,\"importance\":%.2f,\"classification\":",
                          hits[i]->strength, hits[i]->importance);
+            jbuf_append_json_str(&b, memory_class_name(hits[i]->classification));
+            jbuf_append_char(&b, '}');
         }
         jbuf_appendf(&b, "],\"count\":%d}", n);
         snprintf(result, rlen, "%s", b.data ? b.data : "{}");
@@ -20927,10 +21150,20 @@ static bool tool_memory_recall(const char *input, char *result, size_t rlen) {
         const memory_entry_t *hits[16];
         int n = memory_recall_by_tag(&g_memory, tag, hits, 16);
         jbuf_t b = {0};
-        jbuf_appendf(&b, "{\"tag\":\"%s\",\"results\":[", tag);
+        jbuf_init(&b, 512);
+        jbuf_append(&b, "{\"tag\":");
+        jbuf_append_json_str(&b, tag);
+        jbuf_append(&b, ",\"results\":[");
         for (int i = 0; i < n; i++) {
-            jbuf_appendf(&b, "%s{\"key\":\"%s\",\"tier\":\"%s\"}", i ? "," : "", hits[i]->key,
-                         memory_tier_name(hits[i]->tier));
+            if (i)
+                jbuf_append_char(&b, ',');
+            jbuf_append(&b, "{\"key\":");
+            jbuf_append_json_str(&b, hits[i]->key);
+            jbuf_append(&b, ",\"tier\":");
+            jbuf_append_json_str(&b, memory_tier_name(hits[i]->tier));
+            jbuf_append(&b, ",\"classification\":");
+            jbuf_append_json_str(&b, memory_class_name(hits[i]->classification));
+            jbuf_append_char(&b, '}');
         }
         jbuf_appendf(&b, "],\"count\":%d}", n);
         snprintf(result, rlen, "%s", b.data ? b.data : "{}");
@@ -20954,12 +21187,91 @@ static bool tool_memory_promote(const char *input, char *result, size_t rlen) {
     bool ok = memory_promote(&g_memory, key);
     if (ok) {
         const memory_entry_t *e = memory_recall(&g_memory, key);
-        snprintf(result, rlen, "{\"ok\":true,\"key\":\"%s\",\"new_tier\":\"%s\"}", key,
-                 e ? memory_tier_name(e->tier) : "unknown");
+        jbuf_t b = {0};
+        jbuf_init(&b, 160);
+        jbuf_append(&b, "{\"ok\":true,\"key\":");
+        jbuf_append_json_str(&b, key);
+        jbuf_append(&b, ",\"new_tier\":");
+        jbuf_append_json_str(&b, e ? memory_tier_name(e->tier) : "unknown");
+        jbuf_append(&b, ",\"classification\":");
+        jbuf_append_json_str(&b, e ? memory_class_name(e->classification) : "unknown");
+        jbuf_append_char(&b, '}');
+        snprintf(result, rlen, "%s", b.data ? b.data : "{}");
+        jbuf_free(&b);
     } else {
-        snprintf(result, rlen,
-                 "{\"ok\":false,\"key\":\"%s\",\"reason\":\"not found or already semantic\"}", key);
+        jbuf_t b = {0};
+        jbuf_init(&b, 192);
+        jbuf_append(&b, "{\"ok\":false,\"key\":");
+        jbuf_append_json_str(&b, key);
+        jbuf_append(&b, ",\"reason\":\"not found, already semantic, or classification-gated\"}");
+        snprintf(result, rlen, "%s", b.data ? b.data : "{}");
+        jbuf_free(&b);
     }
+    free(key);
+    return true;
+}
+
+static bool tool_memory_classify(const char *input, char *result, size_t rlen) {
+    ensure_wt_init();
+    char *key = json_get_str(input, "key");
+    char *class_s = json_get_str(input, "classification");
+    if (!class_s)
+        class_s = json_get_str(input, "class");
+    if (!key || !class_s) {
+        snprintf(result, rlen, "{\"error\":\"key and classification required\"}");
+        free(key);
+        free(class_s);
+        return false;
+    }
+
+    memory_class_t level = MEM_CLASS_OPEN;
+    if (!memory_class_from_name(class_s, &level)) {
+        jbuf_t b = {0};
+        jbuf_init(&b, 128);
+        jbuf_append(&b, "{\"error\":\"unknown classification\",\"classification\":");
+        jbuf_append_json_str(&b, class_s);
+        jbuf_append_char(&b, '}');
+        snprintf(result, rlen, "%s", b.data ? b.data : "{}");
+        jbuf_free(&b);
+        free(key);
+        free(class_s);
+        return false;
+    }
+
+    bool ok = memory_classify(&g_memory, key, level);
+    jbuf_t b = {0};
+    jbuf_init(&b, 160);
+    jbuf_appendf(&b, "{\"ok\":%s,\"key\":", ok ? "true" : "false");
+    jbuf_append_json_str(&b, key);
+    jbuf_append(&b, ",\"classification\":");
+    jbuf_append_json_str(&b, memory_class_name(level));
+    if (!ok)
+        jbuf_append(&b, ",\"reason\":\"not found, invalid, or downgrade refused\"");
+    jbuf_append_char(&b, '}');
+    snprintf(result, rlen, "%s", b.data ? b.data : "{}");
+    jbuf_free(&b);
+    free(key);
+    free(class_s);
+    return true;
+}
+
+static bool tool_memory_review(const char *input, char *result, size_t rlen) {
+    ensure_wt_init();
+    char *key = json_get_str(input, "key");
+    if (!key) {
+        snprintf(result, rlen, "{\"error\":\"key required\"}");
+        return false;
+    }
+    bool ok = memory_classify_review(&g_memory, key);
+    jbuf_t b = {0};
+    jbuf_init(&b, 160);
+    jbuf_appendf(&b, "{\"ok\":%s,\"key\":", ok ? "true" : "false");
+    jbuf_append_json_str(&b, key);
+    if (!ok)
+        jbuf_append(&b, ",\"reason\":\"not found or not classification-gated\"");
+    jbuf_append_char(&b, '}');
+    snprintf(result, rlen, "%s", b.data ? b.data : "{}");
+    jbuf_free(&b);
     free(key);
     return true;
 }
@@ -20972,7 +21284,13 @@ static bool tool_memory_forget(const char *input, char *result, size_t rlen) {
         return false;
     }
     bool ok = memory_forget(&g_memory, key);
-    snprintf(result, rlen, "{\"ok\":%s,\"key\":\"%s\"}", ok ? "true" : "false", key);
+    jbuf_t b = {0};
+    jbuf_init(&b, 96);
+    jbuf_appendf(&b, "{\"ok\":%s,\"key\":", ok ? "true" : "false");
+    jbuf_append_json_str(&b, key);
+    jbuf_append_char(&b, '}');
+    snprintf(result, rlen, "%s", b.data ? b.data : "{}");
+    jbuf_free(&b);
     free(key);
     return true;
 }
@@ -21513,10 +21831,12 @@ static bool tool_context_status(const char *input, char *result, size_t rlen) {
                     g_playbook.count, pb_helpful, pb_harmful, pb_est_tokens);
 
     /* Context store stats */
+    ctx_store_rdlock();
     off += snprintf(result + off, rlen - off,
                     "\"context_store\":{\"chunks\":%d,\"bytes\":%zu,"
                     "\"offloaded_events\":%zu,\"offloaded_bytes\":%zu},",
                     g_ctx.count, g_ctx.total_bytes, g_ctx_offload_events, g_ctx_offloaded_bytes);
+    ctx_store_unlock();
 
     /* Recommendations */
     off += snprintf(result + off, rlen - off, "\"recommendations\":[");
@@ -26672,11 +26992,136 @@ static bool tools_ci_contains_local(const char *haystack, const char *needle) {
     return false;
 }
 
-static bool tool_matches_query_local(const char *name, const char *desc, const char *query) {
+const char *tools_default_input_schema_json(void) {
+    return k_default_input_schema_json;
+}
+
+const char *tools_default_output_schema_json(void) {
+    return k_default_output_schema_json;
+}
+
+const char *tools_output_schema_for_def(const tool_def_t *tool) {
+    return (tool && tool->output_schema_json && tool->output_schema_json[0])
+               ? tool->output_schema_json
+               : k_default_output_schema_json;
+}
+
+static const char *tools_output_schema_for_external(const external_tool_t *tool) {
+    return (tool && tool->output_schema_json && tool->output_schema_json[0])
+               ? tool->output_schema_json
+               : k_default_output_schema_json;
+}
+
+static bool is_default_output_schema_text(const char *schema) {
+    return !schema || !schema[0] || strcmp(schema, k_default_output_schema_json) == 0;
+}
+
+static const char *schema_text_for_semantic_match(const char *schema) {
+    return is_default_output_schema_text(schema) ? "" : schema;
+}
+
+const char *tools_output_schema_for_name(const char *name) {
+    static _Thread_local char external_schema_buf[8192];
+    if (!name || !name[0])
+        return k_default_output_schema_json;
+    int total = 0;
+    const tool_def_t *tools = tools_get_all(&total);
+    for (int i = 0; i < total; i++) {
+        if (tools[i].name && strcmp(tools[i].name, name) == 0)
+            return tools_output_schema_for_def(&tools[i]);
+    }
+    tool_registry_rdlock();
+    for (int i = 0; i < g_external_tool_count; i++) {
+        if (strcmp(g_external_tools[i].name, name) == 0) {
+            const char *schema = tools_output_schema_for_external(&g_external_tools[i]);
+            snprintf(external_schema_buf, sizeof(external_schema_buf), "%s", schema);
+            tool_registry_unlock();
+            return external_schema_buf;
+        }
+    }
+    tool_registry_unlock();
+    return k_default_output_schema_json;
+}
+
+static void append_tool_contract_doc(jbuf_t *b, const char *name, const char *desc,
+                                     const char *input_schema, const char *output_schema,
+                                     const char *metadata) {
+    if (!b)
+        return;
+    jbuf_append(b, "name ");
+    jbuf_append(b, name ? name : "");
+    jbuf_append(b, " description ");
+    jbuf_append(b, desc ? desc : "");
+    jbuf_append(b, " input_schema ");
+    jbuf_append(b, input_schema && input_schema[0] ? input_schema : k_default_input_schema_json);
+    const char *semantic_output = schema_text_for_semantic_match(output_schema);
+    if (semantic_output[0]) {
+        jbuf_append(b, " output_schema ");
+        jbuf_append(b, semantic_output);
+    }
+    if (metadata && metadata[0]) {
+        jbuf_append(b, " metadata ");
+        jbuf_append(b, metadata);
+    }
+}
+
+static char *tool_contract_doc_alloc(const char *name, const char *desc, const char *input_schema,
+                                     const char *output_schema, const char *metadata) {
+    jbuf_t b;
+    jbuf_init(&b, 4096);
+    append_tool_contract_doc(&b, name, desc, input_schema, output_schema, metadata);
+    return b.data ? b.data : safe_strdup("");
+}
+
+static void append_external_contract_metadata(jbuf_t *b, const external_tool_t *t) {
+    if (!b || !t)
+        return;
+    if (t->integration_id[0])
+        jbuf_appendf(b, " integration_id %s", t->integration_id);
+    if (t->display_name[0])
+        jbuf_appendf(b, " display_name %s", t->display_name);
+    if (t->distribution_channel[0])
+        jbuf_appendf(b, " distribution_channel %s", t->distribution_channel);
+    if (t->categories[0])
+        jbuf_appendf(b, " categories %s", t->categories);
+    if (t->labels[0])
+        jbuf_appendf(b, " labels %s", t->labels);
+    if (t->scope[0])
+        jbuf_appendf(b, " scope %s", t->scope);
+    if (t->catalog_status[0])
+        jbuf_appendf(b, " catalog_status %s", t->catalog_status);
+}
+
+static double tool_contract_query_score(const char *name, const char *desc, const char *input_schema,
+                                        const char *output_schema, const char *metadata,
+                                        const char *query, bool strict_full_match) {
     if (!query || !query[0])
-        return true;
-    if (tools_ci_contains_local(name, query) || tools_ci_contains_local(desc ? desc : "", query)) {
-        return true;
+        return 1.0;
+
+    double score = 0.0;
+    bool phrase_match = false;
+    const char *semantic_output = schema_text_for_semantic_match(output_schema);
+    if (name && strcasecmp(name, query) == 0)
+        score += 1000.0;
+    if (tools_ci_contains_local(name, query)) {
+        score += 160.0;
+        phrase_match = true;
+    }
+    if (tools_ci_contains_local(desc ? desc : "", query)) {
+        score += 120.0;
+        phrase_match = true;
+    }
+    if (tools_ci_contains_local(input_schema ? input_schema : "", query)) {
+        score += 80.0;
+        phrase_match = true;
+    }
+    if (tools_ci_contains_local(semantic_output, query)) {
+        score += 100.0;
+        phrase_match = true;
+    }
+    if (tools_ci_contains_local(metadata ? metadata : "", query)) {
+        score += 60.0;
+        phrase_match = true;
     }
 
     char token[64];
@@ -26693,16 +27138,48 @@ static bool tool_matches_query_local(const char *name, const char *desc, const c
         if (tlen > 0) {
             token[tlen] = '\0';
             total++;
-            if (tools_ci_contains_local(name, token) ||
-                tools_ci_contains_local(desc ? desc : "", token)) {
-                matched++;
+            bool token_matched = false;
+            if (tools_ci_contains_local(name, token)) {
+                score += 12.0;
+                token_matched = true;
             }
+            if (tools_ci_contains_local(desc ? desc : "", token)) {
+                score += 8.0;
+                token_matched = true;
+            }
+            if (tools_ci_contains_local(input_schema ? input_schema : "", token)) {
+                score += 5.0;
+                token_matched = true;
+            }
+            if (tools_ci_contains_local(semantic_output, token)) {
+                score += 7.0;
+                token_matched = true;
+            }
+            if (tools_ci_contains_local(metadata ? metadata : "", token)) {
+                score += 4.0;
+                token_matched = true;
+            }
+            if (token_matched)
+                matched++;
             tlen = 0;
         }
         if (!*p)
             break;
     }
-    return total > 0 && matched == total;
+    if (total > 0 && matched > 0)
+        score += 25.0 * ((double)matched / (double)total);
+    if (strict_full_match && total > 0 && matched < total && !phrase_match && score < 1000.0)
+        return 0.0;
+    if (!strict_full_match && total > 0 && matched < total && score < 1000.0)
+        score *= 0.2;
+    return score;
+}
+
+static bool tool_matches_query_local(const char *name, const char *desc, const char *input_schema,
+                                     const char *output_schema, const char *metadata,
+                                     const char *query) {
+    return tool_contract_query_score(name, desc, input_schema, output_schema, metadata, query,
+                                     true) > 0.0;
 }
 
 static void integration_action_flags_json(jbuf_t *b, unsigned actions) {
@@ -26728,9 +27205,10 @@ static void integration_action_flags_json(jbuf_t *b, unsigned actions) {
 }
 
 static void discover_append_tool_detail(jbuf_t *b, const char *name, const char *desc,
-                                        const char *schema, const char *source) {
+                                        const char *input_schema, const char *output_schema,
+                                        const char *source) {
     char params[256];
-    build_compact_params(schema, params, sizeof(params));
+    build_compact_params(input_schema, params, sizeof(params));
     jbuf_append(b, "{\"name\":");
     jbuf_append_json_str(b, name ? name : "");
     jbuf_append(b, ",\"source\":");
@@ -26740,7 +27218,9 @@ static void discover_append_tool_detail(jbuf_t *b, const char *name, const char 
     jbuf_append(b, ",\"description\":");
     jbuf_append_json_str(b, desc ? desc : "");
     jbuf_append(b, ",\"input_schema\":");
-    jbuf_append(b, schema ? schema : "{\"type\":\"object\",\"properties\":{}}");
+    jbuf_append(b, input_schema && input_schema[0] ? input_schema : k_default_input_schema_json);
+    jbuf_append(b, ",\"output_schema\":");
+    jbuf_append(b, output_schema && output_schema[0] ? output_schema : k_default_output_schema_json);
     const dsco_integration_profile_t *profile = dsco_integration_profile_for_tool(name);
     if (profile) {
         unsigned actions = dsco_integration_actions_for_tool(name);
@@ -26816,20 +27296,32 @@ static bool tool_discover_tools(const char *input, char *result, size_t rlen) {
                 bool exact = strcasecmp(t->name, query) == 0;
                 if ((pass == 0) != exact)
                     continue;
-                if (!exact && !tool_matches_query_local(t->name, t->description, query))
+                jbuf_t meta;
+                jbuf_init(&meta, 256);
+                append_external_contract_metadata(&meta, t);
+                const char *out_schema = tools_output_schema_for_external(t);
+                bool match = tool_matches_query_local(t->name, t->description, t->input_schema_json,
+                                                      out_schema, meta.data, query);
+                if (!exact && !match) {
+                    jbuf_free(&meta);
                     continue;
+                }
                 matched++;
                 if (skipped < offset) {
                     skipped++;
+                    jbuf_free(&meta);
                     continue;
                 }
-                if (emitted >= limit)
+                if (emitted >= limit) {
+                    jbuf_free(&meta);
                     continue;
+                }
                 if (!first)
                     jbuf_append(&b, ",");
                 first = false;
                 discover_append_tool_detail(&b, t->name, t->description, t->input_schema_json,
-                                            "mcp");
+                                            out_schema, "mcp");
+                jbuf_free(&meta);
                 emitted++;
             }
         }
@@ -26839,8 +27331,10 @@ static bool tool_discover_tools(const char *input, char *result, size_t rlen) {
                 bool exact = strcasecmp(tools[i].name, query) == 0;
                 if ((pass == 0) != exact)
                     continue;
-                if (!exact &&
-                    !tool_matches_query_local(tools[i].name, tools[i].description, query)) {
+                const char *out_schema = tools_output_schema_for_def(&tools[i]);
+                if (!exact && !tool_matches_query_local(tools[i].name, tools[i].description,
+                                                        tools[i].input_schema_json, out_schema, NULL,
+                                                        query)) {
                     continue;
                 }
                 matched++;
@@ -26854,7 +27348,7 @@ static bool tool_discover_tools(const char *input, char *result, size_t rlen) {
                     jbuf_append(&b, ",");
                 first = false;
                 discover_append_tool_detail(&b, tools[i].name, tools[i].description,
-                                            tools[i].input_schema_json, "builtin");
+                                            tools[i].input_schema_json, out_schema, "builtin");
                 emitted++;
             }
         }
@@ -26862,7 +27356,8 @@ static bool tool_discover_tools(const char *input, char *result, size_t rlen) {
         jbuf_appendf(&b,
                      "],\"matched\":%d,\"offset\":%d,\"limit\":%d,\"showing\":%d,"
                      "\"has_more\":%s,\"truncated\":%s,"
-                     "\"note\":\"Full input_schema returned for matches. Use load_tools with exact "
+                     "\"note\":\"Full input_schema and output_schema returned for matches. Use "
+                     "load_tools with exact "
                      "names to pin MCP tools into the active tool set.\"}",
                      matched, offset, limit, emitted, matched > offset + emitted ? "true" : "false",
                      matched > offset + emitted ? "true" : "false");
@@ -27320,6 +27815,8 @@ static bool tool_dsco_doctor_integrations(const char *input, char *result, size_
 /* Forward declarations — defined later in this file */
 static int assign_group(const char *name, const char *desc);
 void tools_mark_hot(int tool_idx);
+static bool tools_mark_loaded_builtin(int idx);
+static bool tools_evict_loaded_builtin_index(int idx);
 
 static void load_tools_add_name(char names[][256], int *name_count, const char *start, size_t len) {
     while (len > 0 && isspace((unsigned char)*start)) {
@@ -27475,12 +27972,13 @@ static bool tool_load_tools(const char *input, char *result, size_t rlen) {
             this_batch = HINT_MAX_TOOLS;
 
         for (int i = 0; i < this_batch; i++) {
-            int idx = tool_map_lookup(&g_tool_map, names[batch + i]);
+            int idx = tools_lookup_index(names[batch + i]);
             if (idx >= 0 && idx < total) {
                 snprintf(hint.tools[hint.tool_count], sizeof(hint.tools[hint.tool_count]), "%s",
                          names[batch + i]);
                 hint.tool_count++;
                 /* Also mark in hot cache so it auto-admits to working set */
+                tools_mark_loaded_builtin(idx);
                 tools_mark_hot(idx);
                 loaded++;
             } else if (idx <= -10000) {
@@ -27524,20 +28022,23 @@ static bool tool_load_tools(const char *input, char *result, size_t rlen) {
     off += snprintf(result + off, rlen - off, ",\"tools\":[");
     bool first = true;
     for (int i = 0; i < name_count && (size_t)off < rlen - 512; i++) {
-        int idx = tool_map_lookup(&g_tool_map, names[i]);
+        int idx = tools_lookup_index(names[i]);
         const char *tool_name = NULL;
         const char *tool_desc = NULL;
         const char *tool_schema = NULL;
+        const char *tool_output_schema = NULL;
         if (idx >= 0 && idx < total) {
             tool_name = tools[idx].name;
             tool_desc = tools[idx].description;
             tool_schema = tools[idx].input_schema_json;
+            tool_output_schema = tools_output_schema_for_def(&tools[idx]);
         } else if (idx <= -10000) {
             int ei = -(idx + 10000);
             if (ei >= 0 && ei < g_external_tool_count) {
                 tool_name = g_external_tools[ei].name;
                 tool_desc = g_external_tools[ei].description;
                 tool_schema = g_external_tools[ei].input_schema_json;
+                tool_output_schema = tools_output_schema_for_external(&g_external_tools[ei]);
             }
         }
         if (!tool_name || !tool_schema)
@@ -27545,7 +28046,7 @@ static bool tool_load_tools(const char *input, char *result, size_t rlen) {
         if (!first)
             off += snprintf(result + off, rlen - off, ",");
         first = false;
-        /* Return name + description + full input_schema so the model knows the params */
+        /* Return name + description + full schemas so the model knows the contract. */
         off += snprintf(result + off, rlen - off, "{\"name\":\"%s\",\"description\":", tool_name);
         /* JSON-escape description */
         off += snprintf(result + off, rlen - off, "\"");
@@ -27563,14 +28064,185 @@ static bool tool_load_tools(const char *input, char *result, size_t rlen) {
             } else
                 result[off++] = d[j];
         }
-        off += snprintf(result + off, rlen - off, "\",\"input_schema\":%s}", tool_schema);
+        off += snprintf(result + off, rlen - off, "\",\"input_schema\":%s,\"output_schema\":%s}",
+                        tool_schema && tool_schema[0] ? tool_schema : k_default_input_schema_json,
+                        tool_output_schema && tool_output_schema[0] ? tool_output_schema
+                                                                    : k_default_output_schema_json);
     }
     off +=
         snprintf(result + off, rlen - off,
-                 "],\"note\":\"These tools are now pinned in your tool list for the next 20 turns. "
-                 "You can call them directly.\"}");
+                 "],\"active_builtin_loaded\":%d,"
+                 "\"note\":\"These tools are now loaded into the active tool list and can be called "
+                 "directly on the next turn. Use evict_tools to unload names or categories.\"}",
+                 tools_loaded_builtin_count());
 
     return true;
+}
+
+static bool tool_evict_tools(const char *input, char *result, size_t rlen) {
+    int total;
+    const tool_def_t *tools = tools_get_all(&total);
+    char names[64][256];
+    int name_count = 0;
+    char category[64] = "";
+    bool all = input ? json_get_bool(input, "all", false) : false;
+
+    if (input) {
+        const char *cc = strstr(input, "\"category\"");
+        if (cc) {
+            cc = strchr(cc + 10, '"');
+            if (cc) {
+                cc++;
+                const char *end = strchr(cc, '"');
+                if (end && (size_t)(end - cc) < sizeof(category)) {
+                    memcpy(category, cc, end - cc);
+                    category[end - cc] = '\0';
+                }
+            }
+        }
+
+        const char *ns = strstr(input, "\"names\"");
+        if (ns) {
+            ns = strchr(ns + 7, '"');
+            if (ns) {
+                ns++;
+                const char *end = ns;
+                bool esc = false;
+                while (*end) {
+                    if (esc) {
+                        esc = false;
+                        end++;
+                        continue;
+                    }
+                    if (*end == '\\') {
+                        esc = true;
+                        end++;
+                        continue;
+                    }
+                    if (*end == '"')
+                        break;
+                    end++;
+                }
+                const char *part = ns;
+                for (const char *p = ns; p <= end && name_count < 64; p++) {
+                    if (p == end || *p == ',') {
+                        load_tools_add_name(names, &name_count, part, (size_t)(p - part));
+                        part = p + 1;
+                    }
+                }
+            }
+        }
+
+        const char *arr = strstr(input, "\"tools\"");
+        if (arr) {
+            arr = strchr(arr, '[');
+            if (arr) {
+                arr++;
+                while (*arr && *arr != ']' && name_count < 64) {
+                    const char *q1 = strchr(arr, '"');
+                    if (!q1 || *q1 == ']')
+                        break;
+                    q1++;
+                    const char *q2 = strchr(q1, '"');
+                    if (!q2)
+                        break;
+                    load_tools_add_name(names, &name_count, q1, (size_t)(q2 - q1));
+                    arr = q2 + 1;
+                }
+            }
+        }
+    }
+
+    if (all) {
+        int before = tools_loaded_builtin_count();
+        tools_loaded_builtin_clear();
+        for (int i = 0; i < g_external_tool_count; i++)
+            g_external_tools[i].loaded = false;
+        snprintf(result, rlen,
+                 "{\"evicted\":%d,\"not_found\":0,\"active_builtin_loaded\":0,"
+                 "\"note\":\"all dynamically loaded tools evicted\"}",
+                 before);
+        return true;
+    }
+
+    if (category[0] && name_count == 0) {
+        const char *group_names[] = {"file_io", "git",     "network", "shell",      "code",
+                                     "crypto",  "swarm",   "ast",     "pipeline",   "math",
+                                     "search",  "general", "finance", "prediction", "memory"};
+        int target_group = -1;
+        for (int g = 0; g < 15; g++) {
+            if (strcasecmp(category, group_names[g]) == 0) {
+                target_group = g;
+                break;
+            }
+        }
+        if (target_group >= 0) {
+            for (int i = 0; i < total && name_count < 64; i++) {
+                int gid = assign_group(tools[i].name, tools[i].description);
+                if (gid == target_group)
+                    snprintf(names[name_count++], sizeof(names[0]), "%s", tools[i].name);
+            }
+        }
+    }
+
+    if (name_count == 0) {
+        snprintf(result, rlen,
+                 "{\"error\":\"No tools specified. Provide names, tools, category, or all:true.\"}");
+        return false;
+    }
+
+    int evicted = 0;
+    int not_found = 0;
+    char not_found_names[512] = "";
+    int nf_off = 0;
+    jbuf_t evicted_names;
+    jbuf_init(&evicted_names, 512);
+    jbuf_append(&evicted_names, "[");
+    bool first_evicted = true;
+
+    for (int i = 0; i < name_count; i++) {
+        int idx = tools_lookup_index(names[i]);
+        bool removed = false;
+        if (idx >= 0 && idx < total) {
+            removed = tools_evict_loaded_builtin_index(idx);
+        } else if (idx <= -10000) {
+            int ei = -(idx + 10000);
+            if (ei >= 0 && ei < g_external_tool_count && g_external_tools[ei].loaded) {
+                g_external_tools[ei].loaded = false;
+                removed = true;
+            }
+        }
+        if (removed) {
+            if (!first_evicted)
+                jbuf_append(&evicted_names, ",");
+            first_evicted = false;
+            jbuf_append_json_str(&evicted_names, names[i]);
+            evicted++;
+        } else {
+            if (nf_off > 0)
+                nf_off += snprintf(not_found_names + nf_off, sizeof(not_found_names) - nf_off, ",");
+            nf_off += snprintf(not_found_names + nf_off, sizeof(not_found_names) - nf_off, "\"%s\"",
+                               names[i]);
+            not_found++;
+        }
+    }
+    jbuf_append(&evicted_names, "]");
+
+    jbuf_t out;
+    jbuf_init(&out, 512);
+    jbuf_appendf(&out, "{\"evicted\":%d,\"not_found\":%d,\"evicted_tools\":", evicted,
+                 not_found);
+    jbuf_append(&out, evicted_names.data ? evicted_names.data : "[]");
+    if (not_found > 0) {
+        jbuf_append(&out, ",\"unknown_or_not_loaded\":[");
+        jbuf_append(&out, not_found_names);
+        jbuf_append(&out, "]");
+    }
+    jbuf_appendf(&out, ",\"active_builtin_loaded\":%d}", tools_loaded_builtin_count());
+    snprintf(result, rlen, "%s", out.data ? out.data : "{}");
+    jbuf_free(&out);
+    jbuf_free(&evicted_names);
+    return evicted > 0;
 }
 
 /* ── §1-§8: Post-LLM Virtual OS subsystem tools ───────────────────── */
@@ -28842,7 +29514,8 @@ static bool tool_governance_dispatch(const char *input, char *result, size_t rle
         free(action);
         snprintf(
             result, rlen,
-            "missing: action (status, curriculum, authorize, checkpoint, budget, audit, param)");
+            "missing: action (status, curriculum, authorize, checkpoint, budget, "
+            "capability, audit, param)");
         return false;
     }
     bool ok = false;
@@ -28856,6 +29529,8 @@ static bool tool_governance_dispatch(const char *input, char *result, size_t rle
         ok = tool_governance_checkpoint(input, result, rlen);
     else if (strcmp(action, "budget") == 0)
         ok = tool_governance_budget(input, result, rlen);
+    else if (strcmp(action, "capability") == 0)
+        ok = tool_governance_capability(input, result, rlen);
     else if (strcmp(action, "audit") == 0)
         ok = tool_governance_audit(input, result, rlen);
     else if (strcmp(action, "param") == 0)
@@ -28870,7 +29545,8 @@ static bool tool_memory_dispatch(const char *input, char *result, size_t rlen) {
     char *action = json_get_str(input, "action");
     if (!action || !action[0]) {
         free(action);
-        snprintf(result, rlen, "missing: action (store, recall, promote, forget, status)");
+        snprintf(result, rlen,
+                 "missing: action (store, recall, promote, classify, review, forget, status)");
         return false;
     }
     bool ok = false;
@@ -28880,6 +29556,10 @@ static bool tool_memory_dispatch(const char *input, char *result, size_t rlen) {
         ok = tool_memory_recall(input, result, rlen);
     else if (strcmp(action, "promote") == 0)
         ok = tool_memory_promote(input, result, rlen);
+    else if (strcmp(action, "classify") == 0)
+        ok = tool_memory_classify(input, result, rlen);
+    else if (strcmp(action, "review") == 0)
+        ok = tool_memory_review(input, result, rlen);
     else if (strcmp(action, "forget") == 0)
         ok = tool_memory_forget(input, result, rlen);
     else if (strcmp(action, "status") == 0)
@@ -30855,6 +31535,23 @@ static bool tool_hostname(const char *input, char *result, size_t rlen) {
     "{\"type\":\"object\",\"properties\":{\"action\":{\"type\":\"string\",\"description\":"        \
     "\"Action to perform\"}},\"required\":[\"action\"]}"
 
+#define OUT_TEXT                                                                                       \
+    "{\"type\":\"string\",\"description\":\"Plain text stdout/result payload; error text is returned " \
+    "when the tool fails.\"}"
+#define OUT_VERIFIED_WRITE                                                                             \
+    "{\"type\":\"string\",\"description\":\"Verified write status string containing path, bytes, and " \
+    "mode on success.\"}"
+#define OUT_DISCOVER_TOOLS                                                                             \
+    "{\"type\":\"object\",\"properties\":{\"query\":{\"type\":\"string\"},\"total_tools\":{"        \
+    "\"type\":\"integer\"},\"matches\":{\"type\":\"array\"},\"matched\":{\"type\":\"integer\"},"     \
+    "\"tools\":{\"type\":\"array\"},\"note\":{\"type\":\"string\"}}}"
+#define OUT_LOAD_TOOLS                                                                                 \
+    "{\"type\":\"object\",\"properties\":{\"loaded\":{\"type\":\"integer\"},\"not_found\":{"        \
+    "\"type\":\"integer\"},\"unknown_tools\":{\"type\":\"array\",\"items\":{\"type\":\"string\"}},"  \
+    "\"tools\":{\"type\":\"array\",\"items\":{\"type\":\"object\",\"properties\":{\"name\":{"        \
+    "\"type\":\"string\"},\"description\":{\"type\":\"string\"},\"input_schema\":{\"type\":\"object\"}," \
+    "\"output_schema\":{\"type\":[\"object\",\"string\",\"array\",\"number\",\"boolean\",\"null\"]}}}}}}"
+
 static const tool_def_t s_tools[] = {
     /* ══════════════════════════════════════════════════════════════════════
      *  CLAUDE CODE COMPATIBILITY ALIASES
@@ -31004,6 +31701,7 @@ static const tool_def_t s_tools[] = {
                     "Creates parent dirs.",
      .input_schema_json = "{\"type\":\"object\",\"properties\":{\"path\":{\"type\":\"string\"},"
                           "\"content\":{\"type\":\"string\"}},\"required\":[\"path\",\"content\"]}",
+     .output_schema_json = OUT_VERIFIED_WRITE,
      .execute = tool_write_file,
      .core = true},
     {.name = "read_file",
@@ -31012,6 +31710,7 @@ static const tool_def_t s_tools[] = {
                           "\"offset\":{\"type\":\"integer\",\"description\":\"Start line "
                           "(1-based)\"},\"limit\":{\"type\":\"integer\",\"description\":\"Max "
                           "lines\"}},\"required\":[\"path\"]}",
+     .output_schema_json = OUT_TEXT,
      .execute = tool_read_file,
      .core = true,
      .is_read_only = true,
@@ -31132,12 +31831,14 @@ static const tool_def_t s_tools[] = {
          "paths\":{\"type\":\"array\",\"items\":{\"type\":\"string\"}},\"verify_min_bytes\":{"
          "\"type\":\"integer\"},\"verify_contains\":{\"type\":\"string\"},\"verify_sha256\":{"
          "\"type\":\"string\"}},\"required\":[\"command\"]}",
+     .output_schema_json = OUT_TEXT,
      .execute = tool_bash,
      .core = true},
     {.name = "python",
-     .description = "Run Python code.",
+     .description = "Run Python code or a Python file.",
      .input_schema_json = "{\"type\":\"object\",\"properties\":{\"code\":{\"type\":\"string\"},"
-                          "\"args\":{\"type\":\"string\"}},\"required\":[\"code\"]}",
+                          "\"file\":{\"type\":\"string\"},\"args\":{\"type\":\"string\"}}}",
+     .output_schema_json = OUT_TEXT,
      .execute = tool_python,
      .core = true},
 
@@ -32921,20 +33622,24 @@ static const tool_def_t s_tools[] = {
      .execute = tool_killswitch_dispatch},
     {.name = "governance",
      .description =
-         "Governance controls: status, curriculum, authorize, checkpoint, budget, audit, param. "
-         "Curriculum exposes the safety-aware RSI skill gates and top-priority control skills.",
+         "Governance controls: status, curriculum, authorize, checkpoint, budget, capability, "
+         "audit, param. Curriculum exposes the safety-aware RSI skill gates; capability records "
+         "empirical outcome evidence and returns the evidence-earned tier.",
      .input_schema_json =
          "{\"type\":\"object\",\"properties\":{\"action\":{\"type\":\"string\",\"description\":"
-         "\"status|curriculum|authorize|checkpoint|budget|audit|param\"},\"operation\":{\"type\":"
-         "\"string\"},\"amount\":{\"type\":\"number\"},\"param\":{\"type\":\"string\"},\"value\":{"
-         "\"type\":\"string\"}},\"required\":[\"action\"]}",
+         "\"status|curriculum|authorize|checkpoint|budget|capability|audit|param\"},\"operation\":{"
+         "\"type\":\"string\"},\"outcome\":{\"type\":\"string\",\"description\":\"success|failure "
+         "(capability action)\"},\"agent_id\":{\"type\":\"string\"},\"amount\":{\"type\":\"number\"},"
+         "\"param\":{\"type\":\"string\"},\"value\":{\"type\":\"string\"}},\"required\":[\"action\"]}",
      .execute = tool_governance_dispatch},
     {.name = "memory_tier",
-     .description = "Three-tier memory: store, recall, promote, forget, status.",
+     .description = "Three-tier memory: store, recall, promote, classify, review, forget, status.",
      .input_schema_json =
          "{\"type\":\"object\",\"properties\":{\"action\":{\"type\":\"string\",\"description\":"
-         "\"store|recall|promote|forget|status\"},\"key\":{\"type\":\"string\"},\"value\":{"
-         "\"type\":\"string\"},\"query\":{\"type\":\"string\"}},\"required\":[\"action\"]}",
+         "\"store|recall|promote|classify|review|forget|status\"},\"key\":{\"type\":\"string\"},"
+         "\"value\":{\"type\":\"string\"},\"query\":{\"type\":\"string\"},\"classification\":{"
+         "\"type\":\"string\",\"description\":\"open|held|sealed|umbral\"}},"
+         "\"required\":[\"action\"]}",
      .execute = tool_memory_dispatch},
     {.name = "learned_cost",
      .description = "Learned k-NN cost model (Priority 3): predict/record/stats. action=predict "
@@ -33231,6 +33936,7 @@ static const tool_def_t s_tools[] = {
      .input_schema_json = "{\"type\":\"object\",\"properties\":{\"category\":{\"type\":\"string\"},"
                           "\"query\":{\"type\":\"string\"},\"offset\":{\"type\":\"integer\"},"
                           "\"limit\":{\"type\":\"integer\"}}}",
+     .output_schema_json = OUT_DISCOVER_TOOLS,
      .execute = tool_discover_tools,
      .core = true,
      .is_read_only = true,
@@ -33270,7 +33976,19 @@ static const tool_def_t s_tools[] = {
          "load\"},\"tools\":{\"type\":\"array\",\"items\":{\"type\":\"string\"},\"description\":"
          "\"Tool names to load\"},\"category\":{\"type\":\"string\",\"description\":\"Tool "
          "category to bulk load\"}}}",
+     .output_schema_json = OUT_LOAD_TOOLS,
      .execute = tool_load_tools,
+     .core = true},
+    {.name = "evict_tools",
+     .description = "Unload dynamically loaded tools from the active register file. Provide names, "
+                    "tools, category, or all:true.",
+     .input_schema_json =
+         "{\"type\":\"object\",\"properties\":{\"names\":{\"type\":\"string\",\"description\":"
+         "\"Comma-separated tool names to unload\"},\"tools\":{\"type\":\"array\",\"items\":{"
+         "\"type\":\"string\"},\"description\":\"Tool names to unload\"},\"category\":{\"type\":"
+         "\"string\",\"description\":\"Tool category to unload\"},\"all\":{\"type\":\"boolean\","
+         "\"description\":\"Unload every dynamically loaded tool\"}}}",
+     .execute = tool_evict_tools,
      .core = true},
     {.name = "legion",
      .description = "Legion agent system: spawn, status, find.",
@@ -33392,6 +34110,7 @@ static const tool_def_t s_tools[] = {
          "\"items\":{\"type\":\"string\"}},\"verify_min_bytes\":{\"type\":\"integer\"},\"verify_"
          "contains\":{\"type\":\"string\"},\"verify_sha256\":{\"type\":\"string\"}},\"required\":["
          "\"command\"]}",
+     .output_schema_json = OUT_TEXT,
      .execute = tool_run_command,
      .core = true},
     {.name = "sandbox_run",
@@ -34233,6 +34952,12 @@ static bool g_groups_built = false;
 
 static int g_hot_cache[HOT_CACHE_SIZE];
 static int g_hot_count = 0;
+#define LOADED_BUILTIN_MAX 96
+static int g_loaded_builtin[LOADED_BUILTIN_MAX];
+static int g_loaded_builtin_count = 0;
+
+static bool tools_mark_loaded_builtin(int idx);
+static bool tools_evict_loaded_builtin_index(int idx);
 
 void tools_mark_hot(int tool_idx) {
     /* Move to front of LRU */
@@ -34253,6 +34978,17 @@ void tools_mark_hot(int tool_idx) {
     g_hot_cache[0] = tool_idx;
 }
 
+static void tools_unmark_hot(int tool_idx) {
+    for (int i = 0; i < g_hot_count; i++) {
+        if (g_hot_cache[i] != tool_idx)
+            continue;
+        for (int j = i; j + 1 < g_hot_count; j++)
+            g_hot_cache[j] = g_hot_cache[j + 1];
+        g_hot_count--;
+        return;
+    }
+}
+
 /* ── Core tool set: register-file model ─────────────────────────────────
  * ALWAYS:          Hardwired registers, never evicted. Minimum viable set
  *                  for file I/O, search, execution, and context management.
@@ -34262,7 +34998,8 @@ void tools_mark_hot(int tool_idx) {
  * can shrink the warm bank under cost pressure. */
 
 static const char *CORE_ALWAYS[] = {
-    "bash", "python", "discover_tools", "load_tools", "StartOfLoopConstruct", "EndOfLoopConstruct",
+    "bash", "python", "discover_tools", "load_tools", "evict_tools", "StartOfLoopConstruct",
+    "EndOfLoopConstruct",
     NULL /* minimal core: execution + dynamic loading + loop control.
           * NOTE: must stay <= TOOL_REG_ALWAYS (config.h) entries or the
           * critical-budget pin loop will evict required tools.
@@ -34273,7 +35010,7 @@ static const char *CORE_ALWAYS[] = {
 static const char *CORE_WARM[] = {
     "read_file",       "write_file",  "edit_file",      "list_directory", "find_files",
     "grep_files",      "run_command", "context_status", "scratchpad",     "playbook_add",
-    "playbook_search", NULL /* 11 tools → fills R5-R15 when budget allows */
+    "playbook_search", NULL /* 11 eligible tools; TOOL_REG_WARM admits 10 at full budget. */
 };
 
 static bool is_core_always(const char *name) {
@@ -34292,6 +35029,95 @@ static bool is_core_warm(const char *name) {
 
 static bool is_core_tool(const char *name) {
     return is_core_always(name) || is_core_warm(name);
+}
+
+static int loaded_builtin_find_unlocked(int idx) {
+    for (int i = 0; i < g_loaded_builtin_count; i++)
+        if (g_loaded_builtin[i] == idx)
+            return i;
+    return -1;
+}
+
+static bool tools_mark_loaded_builtin(int idx) {
+    if (idx < 0 || idx >= s_tool_count)
+        return false;
+    if (is_core_always(s_tools[idx].name))
+        return true;
+
+    tool_registry_wrlock();
+    int pos = loaded_builtin_find_unlocked(idx);
+    if (pos >= 0) {
+        for (int j = pos; j > 0; j--)
+            g_loaded_builtin[j] = g_loaded_builtin[j - 1];
+        g_loaded_builtin[0] = idx;
+        tool_registry_unlock();
+        return true;
+    }
+    if (g_loaded_builtin_count < LOADED_BUILTIN_MAX)
+        g_loaded_builtin_count++;
+    for (int j = g_loaded_builtin_count - 1; j > 0; j--)
+        g_loaded_builtin[j] = g_loaded_builtin[j - 1];
+    g_loaded_builtin[0] = idx;
+    tool_registry_unlock();
+    return true;
+}
+
+static bool tools_evict_loaded_builtin_index(int idx) {
+    bool removed = false;
+    tool_registry_wrlock();
+    int pos = loaded_builtin_find_unlocked(idx);
+    if (pos >= 0) {
+        for (int j = pos; j + 1 < g_loaded_builtin_count; j++)
+            g_loaded_builtin[j] = g_loaded_builtin[j + 1];
+        g_loaded_builtin_count--;
+        removed = true;
+    }
+    tool_registry_unlock();
+    if (removed)
+        tools_unmark_hot(idx);
+    return removed;
+}
+
+int tools_loaded_builtin_indices(int *out_indices, int max_indices) {
+    if (!out_indices || max_indices <= 0)
+        return 0;
+    tool_registry_rdlock();
+    int n = g_loaded_builtin_count < max_indices ? g_loaded_builtin_count : max_indices;
+    for (int i = 0; i < n; i++)
+        out_indices[i] = g_loaded_builtin[i];
+    tool_registry_unlock();
+    return n;
+}
+
+int tools_loaded_builtin_count(void) {
+    tool_registry_rdlock();
+    int n = g_loaded_builtin_count;
+    tool_registry_unlock();
+    return n;
+}
+
+bool tools_is_builtin_loaded(const char *name) {
+    int idx = tools_lookup_index(name);
+    if (idx < 0 || idx >= s_tool_count)
+        return false;
+    tool_registry_rdlock();
+    bool loaded = loaded_builtin_find_unlocked(idx) >= 0;
+    tool_registry_unlock();
+    return loaded;
+}
+
+void tools_loaded_builtin_clear(void) {
+    tool_registry_wrlock();
+    int loaded[LOADED_BUILTIN_MAX];
+    int n = g_loaded_builtin_count;
+    if (n > LOADED_BUILTIN_MAX)
+        n = LOADED_BUILTIN_MAX;
+    for (int i = 0; i < n; i++)
+        loaded[i] = g_loaded_builtin[i];
+    g_loaded_builtin_count = 0;
+    tool_registry_unlock();
+    for (int i = 0; i < n; i++)
+        tools_unmark_hot(loaded[i]);
 }
 
 /* ── Group assignment (rule-based, fast) ──────────────────────────────── */
@@ -34616,13 +35442,20 @@ static void ensure_tool_index(void) {
     int n = total < SEM_MAX_DOCS ? total : SEM_MAX_DOCS;
     const char **names = safe_malloc(n * sizeof(char *));
     const char **descs = safe_malloc(n * sizeof(char *));
+    char **docs = safe_malloc(n * sizeof(char *));
     for (int i = 0; i < n; i++) {
         names[i] = tools[i].name;
-        descs[i] = tools[i].description;
+        docs[i] = tool_contract_doc_alloc(tools[i].name, tools[i].description,
+                                          tools[i].input_schema_json,
+                                          tools_output_schema_for_def(&tools[i]), NULL);
+        descs[i] = docs[i];
     }
     sem_tools_index_build(&g_tool_index, names, descs, n);
+    for (int i = 0; i < n; i++)
+        free(docs[i]);
     free(names);
     free(descs);
+    free(docs);
     g_tool_index_built = true;
 }
 
@@ -35124,7 +35957,7 @@ static int cooc_predict_internal(const char *tool_name, int *out_tool_indices, i
     /* Map cooc names back to s_tools[] indices */
     int result = 0;
     for (int i = 0; i < nt; i++) {
-        int ti = tool_map_lookup(&g_tool_map, g_cooc->names[top[i].ci]);
+        int ti = tools_lookup_index(g_cooc->names[top[i].ci]);
         if (ti >= 0)
             out_tool_indices[result++] = ti;
     }
@@ -35409,7 +36242,7 @@ tool_page_result_t tools_get_paged(const char *context, int max_tools, float bud
     /* Hint-pinned: specific tools named in active hints */
     for (int hi = 0; hi < g_hint_count && pn < pinned_budget; hi++) {
         for (int t = 0; t < g_hints[hi].tool_count && pn < pinned_budget; t++) {
-            int idx = tool_map_lookup(&g_tool_map, g_hints[hi].tools[t]);
+            int idx = tools_lookup_index(g_hints[hi].tools[t]);
             if (idx >= 0 && idx < total && !included[idx]) {
                 pidx[pn++] = idx;
                 included[idx] = true;
@@ -35913,8 +36746,8 @@ int tool_map_lookup(tool_map_t *m, const char *name) {
     return -1;
 }
 
-/* Build the hash map from all registered tools */
-void tool_map_rebuild(void) {
+/* Build the hash map from all registered tools. Caller holds toolmap write lock. */
+static void tool_map_rebuild_unlocked(void) {
     tool_map_free(&g_tool_map);
     tool_map_init(&g_tool_map);
 
@@ -35936,8 +36769,20 @@ void tool_map_rebuild(void) {
     }
 }
 
-static int tool_map_lookup_with_mcp_alias(const char *name, char *resolved_name,
-                                          size_t resolved_len) {
+static void tool_map_rebuild(void) {
+    tool_registry_wrlock();
+    tool_map_rebuild_unlocked();
+    tool_registry_unlock();
+}
+
+void tools_registry_map_free(void) {
+    tool_registry_wrlock();
+    tool_map_free(&g_tool_map);
+    tool_registry_unlock();
+}
+
+static int tool_map_lookup_with_mcp_alias_unlocked(const char *name, char *resolved_name,
+                                                   size_t resolved_len) {
     if (resolved_name && resolved_len > 0)
         snprintf(resolved_name, resolved_len, "%s", name ? name : "");
 
@@ -35972,16 +36817,150 @@ static int tool_map_lookup_with_mcp_alias(const char *name, char *resolved_name,
     return idx;
 }
 
+static int tool_map_lookup_with_mcp_alias(const char *name, char *resolved_name,
+                                          size_t resolved_len) {
+    tool_registry_rdlock();
+    int idx = tool_map_lookup_with_mcp_alias_unlocked(name, resolved_name, resolved_len);
+    tool_registry_unlock();
+    return idx;
+}
+
+int tools_lookup_index(const char *name) {
+    return tool_map_lookup_with_mcp_alias(name, NULL, 0);
+}
+
 /* ── External tool registry (MCP, etc.) ────────────────────────────────── */
 
 external_tool_t g_external_tools[MAX_EXTERNAL_TOOLS];
 int g_external_tool_count = 0;
 
-/* Serializes writers (tools_register_external, reset_external_tools).
- * Readers iterate g_external_tool_count without locking — the release-store
- * below pairs with a natural acquire-load on aligned ints, so any reader that
- * sees the new count is guaranteed to see a fully-initialized entry. */
-static pthread_mutex_t g_external_tools_mu = PTHREAD_MUTEX_INITIALIZER;
+/* g_locks.toolmap_lock protects the global tool map and external registry. */
+static _Atomic uint32_t g_ext_inflight = 0;
+static _Atomic uint64_t g_ext_generation = 1;
+static pthread_mutex_t g_ext_drain_mu = PTHREAD_MUTEX_INITIALIZER;
+static pthread_cond_t g_ext_drain_cv = PTHREAD_COND_INITIALIZER;
+
+typedef struct {
+    external_tool_cb cb;
+    void *ctx;
+    uint64_t generation;
+} external_tool_call_t;
+
+static void external_tool_generation_bump_unlocked(void) {
+    atomic_fetch_add_explicit(&g_ext_generation, 1, memory_order_acq_rel);
+}
+
+static bool external_tool_call_acquire_unlocked(int ei, external_tool_call_t *out) {
+    if (!out || ei < 0 || ei >= g_external_tool_count || !g_external_tools[ei].cb)
+        return false;
+    out->cb = g_external_tools[ei].cb;
+    out->ctx = g_external_tools[ei].ctx;
+    out->generation = atomic_load_explicit(&g_ext_generation, memory_order_acquire);
+    atomic_fetch_add_explicit(&g_ext_inflight, 1, memory_order_acq_rel);
+    return true;
+}
+
+int tools_external_count(void) {
+    tool_registry_rdlock();
+    int count = g_external_tool_count;
+    tool_registry_unlock();
+    return count;
+}
+
+external_tool_snapshot_t tools_external_snapshot(void) {
+    external_tool_snapshot_t snapshot = {0};
+    tool_registry_rdlock();
+    int count = g_external_tool_count;
+    if (count > 0) {
+        snapshot.items = safe_malloc((size_t)count * sizeof(*snapshot.items));
+        snapshot.count = count;
+        for (int i = 0; i < count; i++) {
+            snapshot.items[i] = g_external_tools[i];
+            snapshot.items[i].cb = NULL;
+            snapshot.items[i].ctx = NULL;
+            snapshot.items[i].input_schema_json =
+                g_external_tools[i].input_schema_json
+                    ? safe_strdup(g_external_tools[i].input_schema_json)
+                    : NULL;
+            snapshot.items[i].output_schema_json =
+                g_external_tools[i].output_schema_json
+                    ? safe_strdup(g_external_tools[i].output_schema_json)
+                    : NULL;
+        }
+    }
+    tool_registry_unlock();
+    return snapshot;
+}
+
+void tools_external_snapshot_free(external_tool_snapshot_t *snapshot) {
+    if (!snapshot)
+        return;
+    for (int i = 0; i < snapshot->count; i++) {
+        free(snapshot->items[i].input_schema_json);
+        free(snapshot->items[i].output_schema_json);
+    }
+    free(snapshot->items);
+    memset(snapshot, 0, sizeof(*snapshot));
+}
+
+typedef struct {
+    int idx;
+    double score;
+} external_rank_t;
+
+static int external_rank_cmp(const void *a, const void *b) {
+    const external_rank_t *ra = (const external_rank_t *)a;
+    const external_rank_t *rb = (const external_rank_t *)b;
+    if (rb->score > ra->score)
+        return 1;
+    if (rb->score < ra->score)
+        return -1;
+    return ra->idx - rb->idx;
+}
+
+int tools_rank_external_snapshot(const external_tool_snapshot_t *snapshot, const char *context,
+                                 int *out_indices, int max_indices) {
+    if (!snapshot || !out_indices || max_indices <= 0 || snapshot->count <= 0)
+        return 0;
+    int n = snapshot->count < max_indices ? snapshot->count : max_indices;
+    external_rank_t *ranked = safe_malloc((size_t)n * sizeof(*ranked));
+    for (int i = 0; i < n; i++) {
+        const external_tool_t *t = &snapshot->items[i];
+        jbuf_t meta;
+        jbuf_init(&meta, 256);
+        append_external_contract_metadata(&meta, t);
+        ranked[i].idx = i;
+        ranked[i].score =
+            tool_contract_query_score(t->name, t->description, t->input_schema_json,
+                                      tools_output_schema_for_external(t), meta.data, context,
+                                      false);
+        if (t->loaded)
+            ranked[i].score += 10000.0;
+        jbuf_free(&meta);
+    }
+    qsort(ranked, (size_t)n, sizeof(*ranked), external_rank_cmp);
+    for (int i = 0; i < n; i++)
+        out_indices[i] = ranked[i].idx;
+    free(ranked);
+    return n;
+}
+
+static void external_tool_call_release(void) {
+    uint32_t prev = atomic_fetch_sub_explicit(&g_ext_inflight, 1, memory_order_release);
+    if (prev == 1) {
+        pthread_mutex_lock(&g_ext_drain_mu);
+        pthread_cond_broadcast(&g_ext_drain_cv);
+        pthread_mutex_unlock(&g_ext_drain_mu);
+    }
+}
+
+static void external_tool_drain_inflight(void) {
+    pthread_mutex_lock(&g_ext_drain_mu);
+    while (atomic_load_explicit(&g_ext_inflight, memory_order_acquire) != 0) {
+        pthread_cond_wait(&g_ext_drain_cv, &g_ext_drain_mu);
+    }
+    pthread_mutex_unlock(&g_ext_drain_mu);
+}
 
 static void external_tool_copy_metadata(external_tool_t *t, const char *integration_id,
                                         const char *display_name, const char *distribution_channel,
@@ -36015,7 +36994,7 @@ void tools_register_external_metadata(const char *name, const char *integration_
                                       unsigned action_flags, const char *catalog_status) {
     if (!name || !name[0])
         return;
-    pthread_mutex_lock(&g_external_tools_mu);
+    tool_registry_wrlock();
     int current = g_external_tool_count;
     for (int i = 0; i < current; i++) {
         if (strcmp(g_external_tools[i].name, name) == 0) {
@@ -36025,68 +37004,132 @@ void tools_register_external_metadata(const char *name, const char *integration_
             break;
         }
     }
-    pthread_mutex_unlock(&g_external_tools_mu);
+    tool_registry_unlock();
 }
 
 void tools_register_external(const char *name, const char *description,
                              const char *input_schema_json, external_tool_cb cb, void *ctx) {
+    tools_register_external_with_output(name, description, input_schema_json, NULL, cb, ctx);
+}
+
+void tools_register_external_with_output(const char *name, const char *description,
+                                         const char *input_schema_json,
+                                         const char *output_schema_json, external_tool_cb cb,
+                                         void *ctx) {
     if (!name || !name[0])
         return;
-    pthread_mutex_lock(&g_external_tools_mu);
+    char *new_schema = safe_strdup(
+        input_schema_json && input_schema_json[0] ? input_schema_json : k_default_input_schema_json);
+    char *new_output_schema =
+        safe_strdup(output_schema_json && output_schema_json[0] ? output_schema_json
+                                                                : k_default_output_schema_json);
+    if (!new_schema || !new_output_schema) {
+        free(new_schema);
+        free(new_output_schema);
+        return;
+    }
+    char *old_schema = NULL;
+    char *old_output_schema = NULL;
+    tool_registry_wrlock();
     int current = g_external_tool_count;
     for (int i = 0; i < current; i++) {
         if (strcmp(g_external_tools[i].name, name) == 0) {
             external_tool_t *existing = &g_external_tools[i];
+            external_tool_generation_bump_unlocked();
+            existing->cb = NULL;
+            existing->ctx = NULL;
+            old_schema = existing->input_schema_json;
+            existing->input_schema_json = NULL;
+            old_output_schema = existing->output_schema_json;
+            existing->output_schema_json = NULL;
+            tool_registry_unlock();
+            external_tool_drain_inflight();
+            free(old_schema);
+            free(old_output_schema);
+            old_schema = NULL;
+            old_output_schema = NULL;
+            tool_registry_wrlock();
+            existing = NULL;
+            int install_index = -1;
+            for (int j = 0; j < g_external_tool_count; j++) {
+                if (strcmp(g_external_tools[j].name, name) == 0) {
+                    existing = &g_external_tools[j];
+                    install_index = j;
+                    break;
+                }
+            }
+            if (!existing) {
+                if (g_external_tool_count >= MAX_EXTERNAL_TOOLS) {
+                    tool_registry_unlock();
+                    free(new_schema);
+                    free(new_output_schema);
+                    return;
+                }
+                install_index = g_external_tool_count++;
+                existing = &g_external_tools[install_index];
+                memset(existing, 0, sizeof(*existing));
+                snprintf(existing->name, sizeof(existing->name), "%s", name);
+            }
             snprintf(existing->description, sizeof(existing->description), "%s",
                      description ? description : "");
-            char *old_schema = existing->input_schema_json;
-            existing->input_schema_json = safe_strdup(
-                input_schema_json ? input_schema_json : "{\"type\":\"object\",\"properties\":{}}");
+            existing->input_schema_json = new_schema;
+            existing->output_schema_json = new_output_schema;
             existing->cb = cb;
             existing->ctx = ctx;
             if (!existing->display_name[0])
                 snprintf(existing->display_name, sizeof(existing->display_name), "%s", name);
             if (!existing->catalog_status[0])
                 snprintf(existing->catalog_status, sizeof(existing->catalog_status), "%s", "live");
-            tool_map_insert(&g_tool_map, existing->name, -(10000 + i));
-            pthread_mutex_unlock(&g_external_tools_mu);
-            free(old_schema);
+            tool_map_insert(&g_tool_map, existing->name, -(10000 + install_index));
+            tool_registry_unlock();
             return;
         }
     }
     if (current >= MAX_EXTERNAL_TOOLS) {
-        pthread_mutex_unlock(&g_external_tools_mu);
+        tool_registry_unlock();
+        free(new_schema);
+        free(new_output_schema);
         return;
     }
-    /* Fully populate entry at slot `current` BEFORE publishing the new count.
-     * Readers loop `for (i = 0; i < g_external_tool_count; i++)`, so we must
-     * not advertise the slot until its contents are valid. */
     external_tool_t *t = &g_external_tools[current];
     memset(t, 0, sizeof(*t));
     snprintf(t->name, sizeof(t->name), "%s", name);
     snprintf(t->description, sizeof(t->description), "%s", description ? description : "");
-    t->input_schema_json = safe_strdup(
-        input_schema_json ? input_schema_json : "{\"type\":\"object\",\"properties\":{}}");
+    t->input_schema_json = new_schema;
+    t->output_schema_json = new_output_schema;
     t->cb = cb;
     t->ctx = ctx;
     t->loaded = false;
     snprintf(t->display_name, sizeof(t->display_name), "%s", name);
     snprintf(t->catalog_status, sizeof(t->catalog_status), "%s", "live");
     tool_map_insert(&g_tool_map, t->name, -(10000 + current));
-    __atomic_store_n(&g_external_tool_count, current + 1, __ATOMIC_RELEASE);
-    pthread_mutex_unlock(&g_external_tools_mu);
+    g_external_tool_count = current + 1;
+    tool_registry_unlock();
 }
 
 void tools_reset_external(void) {
-    pthread_mutex_lock(&g_external_tools_mu);
-    int n = g_external_tool_count;
+    char *schemas[MAX_EXTERNAL_TOOLS];
+    char *output_schemas[MAX_EXTERNAL_TOOLS];
+    int n = 0;
+    tool_registry_wrlock();
+    external_tool_generation_bump_unlocked();
+    n = g_external_tool_count;
     for (int i = 0; i < n; i++) {
-        free(g_external_tools[i].input_schema_json);
+        schemas[i] = g_external_tools[i].input_schema_json;
+        output_schemas[i] = g_external_tools[i].output_schema_json;
         g_external_tools[i].input_schema_json = NULL;
+        g_external_tools[i].output_schema_json = NULL;
+        g_external_tools[i].cb = NULL;
+        g_external_tools[i].ctx = NULL;
     }
-    __atomic_store_n(&g_external_tool_count, 0, __ATOMIC_RELEASE);
-    tool_map_rebuild();
-    pthread_mutex_unlock(&g_external_tools_mu);
+    g_external_tool_count = 0;
+    tool_map_rebuild_unlocked();
+    tool_registry_unlock();
+    external_tool_drain_inflight();
+    for (int i = 0; i < n; i++) {
+        free(schemas[i]);
+        free(output_schemas[i]);
+    }
 }
 
 static bool name_in_list(const char *name, const char *const *list) {
@@ -36129,10 +37172,13 @@ static bool json_has_key_raw(const char *json, const char *key) {
 
 static char *build_sandbox_input_for_tier(const char *input_json, const char *tier, char *reason,
                                           size_t reason_len) {
-    const char *json = input_json ? input_json : "{}";
+    char *normalized_json = tools_normalize_input("sandbox_run", input_json);
+    const char *json = normalized_json ? normalized_json : (input_json ? input_json : "{}");
     char *command = json_get_str(json, "command");
-    if (!command)
+    if (!command) {
+        free(normalized_json);
         return NULL;
+    }
 
     char *image = json_get_str(json, "image");
     int timeout = json_get_int(json, "timeout", 60);
@@ -36159,6 +37205,7 @@ static char *build_sandbox_input_for_tier(const char *input_json, const char *ti
         free(command);
         free(image);
         free(filesystem);
+        free(normalized_json);
         return NULL;
     }
 
@@ -36183,13 +37230,15 @@ static char *build_sandbox_input_for_tier(const char *input_json, const char *ti
     free(command);
     free(image);
     free(filesystem);
+    free(normalized_json);
     return out;
 }
 
 static char *build_untrusted_routed_sandbox_input(const char *tool_name, const char *input_json,
                                                   const char *tier, char *reason,
                                                   size_t reason_len) {
-    const char *json = input_json ? input_json : "{}";
+    char *normalized_json = tools_normalize_input(tool_name, input_json);
+    const char *json = normalized_json ? normalized_json : (input_json ? input_json : "{}");
     char *command = NULL;
     char *image = NULL;
     int timeout = 120;
@@ -36204,6 +37253,7 @@ static char *build_untrusted_routed_sandbox_input(const char *tool_name, const c
             if (reason && reason_len > 0)
                 snprintf(reason, reason_len, "error: command required");
             free(cwd);
+            free(normalized_json);
             return NULL;
         }
         if (cwd && *cwd) {
@@ -36224,6 +37274,7 @@ static char *build_untrusted_routed_sandbox_input(const char *tool_name, const c
         if (!cmd) {
             if (reason && reason_len > 0)
                 snprintf(reason, reason_len, "error: command required");
+            free(normalized_json);
             return NULL;
         }
         command = safe_strdup(cmd);
@@ -36251,6 +37302,7 @@ static char *build_untrusted_routed_sandbox_input(const char *tool_name, const c
                 snprintf(reason, reason_len, "error: code or file required");
             free(file);
             free(code);
+            free(normalized_json);
             return NULL;
         }
         image = safe_strdup("python:3.12-alpine");
@@ -36279,6 +37331,7 @@ static char *build_untrusted_routed_sandbox_input(const char *tool_name, const c
                 snprintf(reason, reason_len, "error: code or file required");
             free(file);
             free(code);
+            free(normalized_json);
             return NULL;
         }
         image = safe_strdup("node:20-alpine");
@@ -36289,6 +37342,7 @@ static char *build_untrusted_routed_sandbox_input(const char *tool_name, const c
         if (reason && reason_len > 0) {
             snprintf(reason, reason_len, "tool '%s' is not routable to sandbox", tool_name);
         }
+        free(normalized_json);
         return NULL;
     }
 
@@ -36321,6 +37375,7 @@ static char *build_untrusted_routed_sandbox_input(const char *tool_name, const c
     jbuf_free(&b);
     free(command);
     free(image);
+    free(normalized_json);
     return out;
 }
 
@@ -36382,7 +37437,7 @@ bool tools_is_allowed_for_tier(const char *name, const char *tier, char *reason,
         if (tool_is_untrusted_sandbox_routed(name))
             return true;
 
-        int idx = tool_map_lookup(&g_tool_map, name);
+        int idx = tools_lookup_index(name);
         if (idx < 0) {
             if (reason && reason_len > 0) {
                 snprintf(reason, reason_len,
@@ -36446,7 +37501,7 @@ static bool tools_execute_internal(const char *name, const char *input_json, cha
                 break;
             if (g_vm.dispatch[di].hash == h && strcmp(g_vm.dispatch[di].name, name) == 0) {
                 /* Mark hot for tool filtering (O(1) hash map lookup) */
-                int hot_idx = tool_map_lookup(&g_tool_map, name);
+                int hot_idx = tools_lookup_index(name);
                 if (hot_idx >= 0)
                     tools_mark_hot(hot_idx);
                 struct timeval t0, t1;
@@ -36521,12 +37576,16 @@ static bool tools_execute_internal(const char *name, const char *input_json, cha
     if (idx <= -10000) {
         /* External tool (MCP): index is -(10000+i) */
         int ei = -(idx + 10000);
-        if (ei >= 0 && ei < g_external_tool_count && g_external_tools[ei].cb) {
+        external_tool_call_t call = {0};
+        tool_registry_rdlock();
+        bool have_call = external_tool_call_acquire_unlocked(ei, &call);
+        tool_registry_unlock();
+        if (have_call) {
             struct timeval t0, t1;
             gettimeofday(&t0, NULL);
-            char *ext_result =
-                g_external_tools[ei].cb(exec_name, input_json, g_external_tools[ei].ctx);
+            char *ext_result = call.cb(exec_name, input_json, call.ctx);
             gettimeofday(&t1, NULL);
+            external_tool_call_release();
             long elapsed_us = (t1.tv_sec - t0.tv_sec) * 1000000L + (t1.tv_usec - t0.tv_usec);
             if (ext_result) {
                 snprintf(result, result_len, "%s", ext_result);
@@ -36593,6 +37652,13 @@ bool tools_execute(const char *name, const char *input_json, char *result, size_
     return tools_execute_for_tier(name, input_json, tier, result, result_len);
 }
 
+#ifdef DSCO_INTERNAL_TESTS
+bool tools_execute_raw_for_test(const char *name, const char *input_json, char *result,
+                                size_t result_len) {
+    return tools_execute_internal(name, input_json, result, result_len);
+}
+#endif
+
 /* ═══════════════════════════════════════════════════════════════════════════
  * IMMUNE SYSTEM GATE — tools_execute_for_tier()
  *
@@ -36603,30 +37669,25 @@ bool tools_execute(const char *name, const char *input_json, char *result, size_
  *   G1  EXEMPT CHECK        — Immune primitives bypass to prevent regress
  *   G2  INITIALIZATION      — Safe no-op if governance not yet initialized
  *   G2a EARLY IMMUNE VETO   — Killswitch / circuit breaker before user approval prompts
- *   G2b C5 SELF-SURGERY     — Block agent-routed MUTATION of Immune surfaces without external
- *                             auth. Reads always pass: judged by effect, not by mention.
- *                             Shell commands proven read-only (grep/cat/git log/…) are
- *                             reclassified READ before any gating: zero GSU, no approval.
- *   G3  KILLSWITCH          — System halt or per-agent kill → hard block
- *   G4  CIRCUIT BREAKER     — Active breakers → block + emit WARNING phero
- *   G5  GSU COST TRIAGE     — Tool-class-aware cost: read < write < exec < spawn
- *   G6  WARNING SENSING     — Pheromone field: high WARNING on this tool → degrade
- *   G7  GOVERNANCE CHECKPOINT — Budget + hardcoded rules + agent envelope
- *   G8  SHADOW CHECK        — Self-reward / reward-hacking detection (high-risk only)
- *   G9  EXECUTION           — Tool runs; timing recorded
- *   G10 FEEDBACK LOOP       — Post-exec: breaker update, pheromone emit, self_improve
+ *   G2b APPROVAL            — Human approval policy for risky/blocked tools
+ *   G2c SELF-PRESERVATION   — Block commands that halt/kill the active runtime
+ *   G3  GSU COST TRIAGE     — Tool-class-aware cost: read < write < exec < spawn
+ *   G4  WARNING SENSING     — Pheromone field: high WARNING on this tool → degrade
+ *   G5  GOVERNANCE CHECKPOINT — Budget + hardcoded rules + agent envelope
+ *   G6  SHADOW CHECK        — Self-reward / reward-hacking detection (high-risk only)
+ *   G7  EXECUTION           — Tool runs; timing recorded
+ *   G8  FEEDBACK LOOP       — Post-exec: breaker update, pheromone emit, self_improve
  *
- * Contracts enforced: C1 (veto), C2 (budget), C3 (propose/dispose), C5 (no self-surgery), C6
- * (audit) ═══════════════════════════════════════════════════════════════════════════ */
+ * Contracts enforced: C1 (veto), C2 (budget), C3 (propose/dispose), C6 (audit)
+ * ═══════════════════════════════════════════════════════════════════════════ */
 
 /* ── G1: Exempt set ───────────────────────────────────────────────────── */
 
 static bool tool_is_governance_exempt(const char *n) {
     if (!n)
         return false;
-    /* The Immune System's own primitives. Gating these causes infinite regress:
-     * governance must be callable to resolve a governance denial.
-     * C5: Immune cannot be modified from outside, but MUST be readable. */
+    /* The governance primitives are exempt so a governance denial can still be
+     * inspected and resolved without recursive gating. */
     return strcmp(n, "governance") == 0 || strcmp(n, "killswitch") == 0 || strcmp(n, "ooda") == 0 ||
            strcmp(n, "pheromone") == 0 || strcmp(n, "avian") == 0 ||
            strcmp(n, "wings_talons_status") == 0;
@@ -37354,146 +38415,6 @@ static bool tool_exec_command_blocked_by_self_preservation(const char *name, con
     return blocked;
 }
 
-/* ── C5: No self-surgery on the Immune System ────────────────────────────
- *
- * Wings and Talons may propose self-improvements, but agent-routed high-risk
- * tools must not directly modify the guard that authorizes them.  Protected
- * Immune surfaces require an external authorization path: set
- * DSCO_IMMUNE_SURGERY_AUTH=external and run under a trusted/operator tier.
- * This is intentionally coarse and fail-closed; exact semantic intent is not
- * trusted when the target is the authorization substrate itself. */
-
-static bool tool_tier_is_external_immune_operator(const char *tier) {
-    if (!tier || !tier[0])
-        return false;
-    return strcasecmp(tier, "trusted") == 0 || strcasecmp(tier, "operator") == 0 ||
-           strcasecmp(tier, "tier0") == 0 || strcasecmp(tier, "founder") == 0;
-}
-
-static bool tool_immune_surgery_authorized(const char *tier) {
-    const char *auth = getenv("DSCO_IMMUNE_SURGERY_AUTH");
-    return auth && strcmp(auth, "external") == 0 && tool_tier_is_external_immune_operator(tier);
-}
-
-static bool tool_input_touches_immune_surface(const char *input_json, char *match,
-                                              size_t match_len) {
-    static const char *const protected_fragments[] = {
-        "src/governance.c",
-        "include/governance.h",
-        "src/killswitch.c",
-        "include/killswitch.h",
-        "src/ooda.c",
-        "include/ooda.h",
-        "src/tools.c",
-        "include/tools.h",
-        "src/audit_log.c",
-        "include/audit_log.h",
-        "src/tamper.c",
-        "include/tamper.h",
-        "src/rsi_curriculum.c",
-        "include/rsi_curriculum.h",
-        "doctrine/OVERMIND_ARCHITECTURE.md",
-        ".dsco/workspace/doctrine/OVERMIND_ARCHITECTURE.md",
-        NULL,
-    };
-
-    if (!input_json || !input_json[0])
-        return false;
-
-    for (int i = 0; protected_fragments[i]; i++) {
-        if (tool_ascii_contains_ci(input_json, protected_fragments[i])) {
-            if (match && match_len > 0)
-                snprintf(match, match_len, "%s", protected_fragments[i]);
-            return true;
-        }
-    }
-    return false;
-}
-
-static bool tool_name_is_file_mutator(const char *n) {
-    if (!n)
-        return false;
-    return strcmp(n, "write_file") == 0 || strcmp(n, "Write") == 0 ||
-           strcmp(n, "append_file") == 0 || strcmp(n, "edit_file") == 0 ||
-           strcmp(n, "Edit") == 0 || strcmp(n, "patch_file") == 0 ||
-           strcmp(n, "delete_file") == 0 || strcmp(n, "move_file") == 0 ||
-           strcmp(n, "copy_file") == 0 || strcmp(n, "chmod_tool") == 0;
-}
-
-/* C5 gates MUTATION of the immune surfaces, never observation ("Immune
- * cannot be modified from outside, but MUST be readable").  The old
- * implementation substring-scanned the whole input JSON of every
- * high-risk tool, so `grep -n G2b src/tools.c` was "self-surgery" — the
- * gate blocked reads of itself, which is both wrong by its own doctrine
- * and a money furnace (each false denial → model retry → WARNING
- * pheromone → doubled exec costs). */
-static bool tool_blocks_immune_self_surgery(const char *name, tool_class_t cls,
-                                            const char *input_json, const char *tier, char *reason,
-                                            size_t reason_len) {
-    char matched[128];
-    matched[0] = '\0';
-
-    if (tool_name_is_shell_exec(name)) {
-        /* Judge effects, not mentions: shell commands may READ immune
-         * surfaces freely; only mutation-capable commands are gated. */
-        char *cmd = json_get_str(input_json ? input_json : "{}", "command");
-        bool block = cmd && cmd[0] &&
-                     tool_input_touches_immune_surface(cmd, matched, sizeof(matched)) &&
-                     !tool_shell_command_is_read_only(cmd, /*strict=*/true) &&
-                     !tool_immune_surgery_authorized(tier);
-        free(cmd);
-        if (!block)
-            return false;
-        if (reason && reason_len > 0)
-            snprintf(reason, reason_len,
-                     "immune_self_surgery_blocked target=%s; reading immune surfaces is always "
-                     "allowed (read_file, grep, cat, git log/diff); mutation requires "
-                     "DSCO_IMMUNE_SURGERY_AUTH=external and trusted/operator tier",
-                     matched[0] ? matched : "immune_surface");
-        return true;
-    }
-
-    if (tool_name_is_file_mutator(name)) {
-        /* Match only path-bearing fields: file CONTENT may mention immune
-         * files (tests, notes, patches elsewhere) without being surgery. */
-        static const char *const path_keys[] = {"path",   "file_path", "filename", "file",
-                                                "source", "destination", "dest",   "target",
-                                                "old_path", "new_path",  NULL};
-        bool touched = false;
-        for (int i = 0; path_keys[i] && !touched; i++) {
-            char *v = json_get_str(input_json ? input_json : "{}", path_keys[i]);
-            if (v && v[0] && tool_input_touches_immune_surface(v, matched, sizeof(matched)))
-                touched = true;
-            free(v);
-        }
-        if (!touched || tool_immune_surgery_authorized(tier))
-            return false;
-        if (reason && reason_len > 0)
-            snprintf(reason, reason_len,
-                     "immune_self_surgery_blocked target=%s; requires "
-                     "DSCO_IMMUNE_SURGERY_AUTH=external and trusted/operator tier",
-                     matched[0] ? matched : "immune_surface");
-        return true;
-    }
-
-    /* Remaining high-risk tools (git, docker, ssh, http_request): rare and
-     * able to smuggle writes — keep the fail-closed whole-input scan. */
-    if (!tool_is_high_risk(name, cls))
-        return false;
-    if (!tool_input_touches_immune_surface(input_json, matched, sizeof(matched)))
-        return false;
-    if (tool_immune_surgery_authorized(tier))
-        return false;
-
-    if (reason && reason_len > 0) {
-        snprintf(reason, reason_len,
-                 "immune_self_surgery_blocked target=%s; requires "
-                 "DSCO_IMMUNE_SURGERY_AUTH=external and trusted/operator tier",
-                 matched[0] ? matched : "immune_surface");
-    }
-    return true;
-}
-
 /* ── Pheromone region key for a tool ─────────────────────────────────── */
 
 static void tool_phero_region(const char *name, char *buf, size_t len) {
@@ -37578,21 +38499,7 @@ bool tools_execute_for_tier(const char *name, const char *input_json, const char
             return false;
         }
 
-        /* ── G2b: C5 no self-surgery on the Immune System ─────────────── */
-        char immune_reason[512];
-        immune_reason[0] = '\0';
-        if (tool_blocks_immune_self_surgery(name, cls, input_json, tier, immune_reason,
-                                            sizeof(immune_reason))) {
-            pheromone_deposit(&g_governance.pheromones, PHERO_WARNING, 1.0, phero_region, "immune",
-                              "{\"reason\":\"immune_self_surgery_blocked\"}");
-            tool_gov_deny(result, result_len, name, "G2b_immune_self_surgery",
-                          immune_reason[0] ? immune_reason : "immune_self_surgery_blocked",
-                          remaining);
-            self_improve_record_tool(&g_self_improve, name, false, 0.0, 0);
-            return false;
-        }
-
-        /* ── G2c: Human approval for risky/blocked tools ──────────────── */
+        /* ── G2b: Human approval for risky/blocked tools ──────────────── */
         if (!tool_request_approval(name, input_json, cls, tier, result, result_len)) {
             pheromone_deposit(&g_governance.pheromones, PHERO_WARNING, 0.8, phero_region, "immune",
                               "{\"reason\":\"approval_denied\"}");
@@ -37600,7 +38507,7 @@ bool tools_execute_for_tier(const char *name, const char *input_json, const char
             return false;
         }
 
-        /* ── G2b: Runtime self-preservation preflight ─────────────────── */
+        /* ── G2c: Runtime self-preservation preflight ─────────────────── */
         if (cls == TOOL_CLASS_EXEC) {
             char preserve_reason[256];
             preserve_reason[0] = '\0';
@@ -37778,8 +38685,13 @@ _skip_gate:;
 /* ── Concurrency locks ────────────────────────────────────────────────── */
 
 dsco_locks_t g_locks;
+static pthread_mutex_t g_locks_state_mu = PTHREAD_MUTEX_INITIALIZER;
+/* agent_main() destroys the global bundle at shutdown and tests also exercise
+ * destroy/re-init semantics on lock bundles. pthread_once cannot express that
+ * lifecycle, so the global instance keeps an explicit initialized flag. */
+static bool g_locks_global_initialized = false;
 
-void dsco_locks_init(dsco_locks_t *l) {
+static void dsco_locks_init_fields(dsco_locks_t *l) {
     pthread_rwlock_init(&l->ctx_lock, NULL);
     pthread_rwlock_init(&l->mcp_lock, NULL);
     pthread_rwlock_init(&l->provider_lock, NULL);
@@ -37790,7 +38702,26 @@ void dsco_locks_init(dsco_locks_t *l) {
     pthread_mutex_init(&l->swarm_lock, NULL);
 }
 
-void dsco_locks_destroy(dsco_locks_t *l) {
+void dsco_locks_init(dsco_locks_t *l) {
+    if (!l)
+        return;
+    if (l == &g_locks) {
+        pthread_mutex_lock(&g_locks_state_mu);
+        if (!g_locks_global_initialized) {
+            dsco_locks_init_fields(l);
+            g_locks_global_initialized = true;
+        }
+        pthread_mutex_unlock(&g_locks_state_mu);
+        return;
+    }
+    dsco_locks_init_fields(l);
+}
+
+static void dsco_locks_ensure_global(void) {
+    dsco_locks_init(&g_locks);
+}
+
+static void dsco_locks_destroy_fields(dsco_locks_t *l) {
     pthread_rwlock_destroy(&l->ctx_lock);
     pthread_rwlock_destroy(&l->mcp_lock);
     pthread_rwlock_destroy(&l->provider_lock);
@@ -37799,6 +38730,21 @@ void dsco_locks_destroy(dsco_locks_t *l) {
     pthread_mutex_destroy(&l->cache_lock);
     pthread_mutex_destroy(&l->budget_lock);
     pthread_mutex_destroy(&l->swarm_lock);
+}
+
+void dsco_locks_destroy(dsco_locks_t *l) {
+    if (!l)
+        return;
+    if (l == &g_locks) {
+        pthread_mutex_lock(&g_locks_state_mu);
+        if (g_locks_global_initialized) {
+            dsco_locks_destroy_fields(l);
+            g_locks_global_initialized = false;
+        }
+        pthread_mutex_unlock(&g_locks_state_mu);
+        return;
+    }
+    dsco_locks_destroy_fields(l);
 }
 
 /* ── Tool execution watchdog ──────────────────────────────────────────── */
@@ -38016,20 +38962,23 @@ int tool_timeout_for(const char *name) {
 
 /* ── JSON schema normalization + validation before tool dispatch ──────── */
 
-static const char *tools_schema_for_name(const char *name) {
+static char *tools_schema_copy_for_name(const char *name) {
     if (!name)
         return NULL;
-    int idx = tool_map_lookup_with_mcp_alias(name, NULL, 0);
+    const char *schema = NULL;
+    tool_registry_rdlock();
+    int idx = tool_map_lookup_with_mcp_alias_unlocked(name, NULL, 0);
     if (idx >= 0 && idx < s_tool_count) {
-        return s_tools[idx].input_schema_json;
-    }
-    if (idx <= -10000) {
+        schema = s_tools[idx].input_schema_json;
+    } else if (idx <= -10000) {
         int ei = -(idx + 10000);
         if (ei >= 0 && ei < g_external_tool_count) {
-            return g_external_tools[ei].input_schema_json;
+            schema = g_external_tools[ei].input_schema_json;
         }
     }
-    return NULL;
+    char *copy = schema ? safe_strdup(schema) : NULL;
+    tool_registry_unlock();
+    return copy;
 }
 
 static const char *tools_json_ws(const char *p) {
@@ -38251,21 +39200,145 @@ static bool tools_string_to_schema_literal(tool_schema_scalar_t kind, const char
     return false;
 }
 
-char *tools_normalize_input(const char *name, const char *input_json) {
-    const char *schema = tools_schema_for_name(name);
-    if (!schema || !input_json)
+static void tools_trim_bounds(const char *s, const char **start, const char **end) {
+    const char *p = s ? s : "";
+    while (*p && isspace((unsigned char)*p))
+        p++;
+    const char *e = p + strlen(p);
+    while (e > p && isspace((unsigned char)e[-1]))
+        e--;
+    if (start)
+        *start = p;
+    if (end)
+        *end = e;
+}
+
+static const char *tools_single_string_field_for_name(const char *name) {
+    if (!name || !name[0])
+        return NULL;
+    if (strcmp(name, "bash") == 0 || strcmp(name, "Bash") == 0 ||
+        strcmp(name, "run_command") == 0 || strcmp(name, "compile") == 0 ||
+        strcmp(name, "sandbox_run") == 0)
+        return "command";
+    if (strcmp(name, "python") == 0 || strcmp(name, "node") == 0)
+        return "code";
+    if (strcmp(name, "eval") == 0)
+        return "expression";
+    return NULL;
+}
+
+static bool tools_fragment_has_key_shape(const char *s) {
+    if (!s || !*s)
+        return false;
+    if (*s == '"') {
+        char *key = NULL;
+        const char *after = tools_json_parse_string(s, &key);
+        free(key);
+        if (!after)
+            return false;
+        after = tools_json_ws(after);
+        return *after == ':';
+    }
+    if (!(isalpha((unsigned char)*s) || *s == '_'))
+        return false;
+    const char *p = s + 1;
+    while (isalnum((unsigned char)*p) || *p == '_' || *p == '-')
+        p++;
+    p = tools_json_ws(p);
+    return *p == ':';
+}
+
+static char *tools_repair_json_object_fragment(const char *input_json) {
+    const char *s = NULL;
+    const char *e = NULL;
+    tools_trim_bounds(input_json, &s, &e);
+    if (!s || e <= s || *s == '{' || *s == '[')
+        return NULL;
+    if (!tools_fragment_has_key_shape(s))
         return NULL;
 
-    const char *p = tools_json_ws(input_json);
-    if (*p != '{')
+    jbuf_t b;
+    jbuf_init(&b, (size_t)(e - s) + 4);
+    jbuf_append_char(&b, '{');
+    jbuf_append_len(&b, s, (size_t)(e - s));
+    jbuf_append_char(&b, '}');
+    if (json_is_valid_container(b.data))
+        return b.data;
+    jbuf_free(&b);
+    return NULL;
+}
+
+static char *tools_repair_single_string_input(const char *name, const char *input_json) {
+    const char *field = tools_single_string_field_for_name(name);
+    if (!field)
         return NULL;
+
+    const char *s = NULL;
+    const char *e = NULL;
+    tools_trim_bounds(input_json, &s, &e);
+    if (!s || e <= s || *s == '{' || *s == '[')
+        return NULL;
+
+    char *decoded = NULL;
+    const char *after = (*s == '"') ? tools_json_parse_string(s, &decoded) : NULL;
+    const char *value = decoded;
+    size_t value_len = decoded ? strlen(decoded) : 0;
+    if (!decoded || !after || *tools_json_ws(after) != '\0') {
+        free(decoded);
+        decoded = NULL;
+        value = s;
+        value_len = (size_t)(e - s);
+    }
+    if (value_len == 0)
+        return NULL;
+
+    jbuf_t b;
+    jbuf_init(&b, value_len + strlen(field) + 16);
+    jbuf_append_char(&b, '{');
+    jbuf_append_json_str(&b, field);
+    jbuf_append_char(&b, ':');
+    if (decoded) {
+        jbuf_append_json_str(&b, decoded);
+    } else {
+        char *tmp = safe_malloc(value_len + 1);
+        memcpy(tmp, value, value_len);
+        tmp[value_len] = '\0';
+        jbuf_append_json_str(&b, tmp);
+        free(tmp);
+    }
+    jbuf_append_char(&b, '}');
+    free(decoded);
+    return b.data;
+}
+
+static char *tools_repair_nonobject_input(const char *name, const char *input_json) {
+    char *fragment = tools_repair_json_object_fragment(input_json);
+    if (fragment)
+        return fragment;
+    return tools_repair_single_string_input(name, input_json);
+}
+
+char *tools_normalize_input(const char *name, const char *input_json) {
+    char *schema = tools_schema_copy_for_name(name);
+    char *repaired_input = NULL;
+    if (!schema || !input_json)
+        goto no_change;
+
+    const char *p = tools_json_ws(input_json);
+    if (*p != '{') {
+        repaired_input = tools_repair_nonobject_input(name, input_json);
+        if (!repaired_input)
+            goto no_change;
+        input_json = repaired_input;
+        p = tools_json_ws(input_json);
+    }
     p++;
 
     jbuf_t out;
     jbuf_init(&out, strlen(input_json) + 32);
     jbuf_append_char(&out, '{');
     bool first = true;
-    bool changed = false;
+    bool changed = repaired_input != NULL;
 
     while (*p) {
         p = tools_json_ws(p);
@@ -38275,6 +39348,8 @@ char *tools_normalize_input(const char *name, const char *input_json) {
         }
         if (*p != '"') {
             jbuf_free(&out);
+            free(repaired_input);
+            free(schema);
             return NULL;
         }
 
@@ -38284,6 +39359,8 @@ char *tools_normalize_input(const char *name, const char *input_json) {
         if (!key_end || !key) {
             free(key);
             jbuf_free(&out);
+            free(repaired_input);
+            free(schema);
             return NULL;
         }
 
@@ -38291,6 +39368,8 @@ char *tools_normalize_input(const char *name, const char *input_json) {
         if (*p != ':') {
             free(key);
             jbuf_free(&out);
+            free(repaired_input);
+            free(schema);
             return NULL;
         }
         p++;
@@ -38299,6 +39378,8 @@ char *tools_normalize_input(const char *name, const char *input_json) {
         if (value_end <= value_start && *value_start) {
             free(key);
             jbuf_free(&out);
+            free(repaired_input);
+            free(schema);
             return NULL;
         }
 
@@ -38341,6 +39422,8 @@ char *tools_normalize_input(const char *name, const char *input_json) {
         }
         if (*p) {
             jbuf_free(&out);
+            free(repaired_input);
+            free(schema);
             return NULL;
         }
     }
@@ -38348,9 +39431,28 @@ char *tools_normalize_input(const char *name, const char *input_json) {
     jbuf_append_char(&out, '}');
     if (!changed) {
         jbuf_free(&out);
-        return NULL;
+        free(repaired_input);
+        goto no_change;
     }
+    free(repaired_input);
+    free(schema);
     return out.data;
+
+no_change:
+    free(repaired_input);
+    free(schema);
+    return NULL;
+}
+
+static bool tools_code_or_file_tool(const char *name) {
+    return name && (strcmp(name, "python") == 0 || strcmp(name, "node") == 0);
+}
+
+static bool tools_input_has_nonempty_string(const char *input_json, const char *key) {
+    char *value = json_get_str(input_json ? input_json : "{}", key);
+    bool ok = value && value[0];
+    free(value);
+    return ok;
 }
 
 bool tools_validate_input(const char *name, const char *input_json, char *error_buf,
@@ -38358,13 +39460,24 @@ bool tools_validate_input(const char *name, const char *input_json, char *error_
     if (!input_json || !name)
         return true; /* no input to validate */
 
-    const char *schema = tools_schema_for_name(name);
+    char *schema = tools_schema_copy_for_name(name);
     if (!schema)
         return true; /* no schema = no validation */
 
     char *normalized = tools_normalize_input(name, input_json);
-    json_validation_t v = json_validate_schema(normalized ? normalized : input_json, schema);
+    const char *effective_input = normalized ? normalized : input_json;
+    if (tools_code_or_file_tool(name) && !tools_input_has_nonempty_string(effective_input, "code") &&
+        !tools_input_has_nonempty_string(effective_input, "file")) {
+        snprintf(error_buf, error_len, "input validation failed for '%s': code or file required", name);
+        DSCO_SET_ERR(DSCO_ERR_TOOL, "%s", error_buf);
+        free(normalized);
+        free(schema);
+        return false;
+    }
+
+    json_validation_t v = json_validate_schema(effective_input, schema);
     free(normalized);
+    free(schema);
     if (!v.valid) {
         snprintf(error_buf, error_len, "input validation failed for '%s': %s", name, v.error);
         DSCO_SET_ERR(DSCO_ERR_TOOL, "%s", error_buf);
