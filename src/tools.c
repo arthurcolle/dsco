@@ -27042,13 +27042,23 @@ const char *tools_output_schema_for_name(const char *name) {
     static _Thread_local char external_schema_buf[8192];
     if (!name || !name[0])
         return k_default_output_schema_json;
+
     int total = 0;
     const tool_def_t *tools = tools_get_all(&total);
-    for (int i = 0; i < total; i++) {
+    int builtin_total = tools_builtin_count();
+    for (int i = 0; i < builtin_total; i++) {
         if (tools[i].name && strcmp(tools[i].name, name) == 0)
             return tools_output_schema_for_def(&tools[i]);
     }
+
     tool_registry_rdlock();
+    for (int i = 0; i < g_plugins.extra_tool_count; i++) {
+        if (g_plugins.extra_tools[i].name && strcmp(g_plugins.extra_tools[i].name, name) == 0) {
+            const char *schema = tools_output_schema_for_def(&g_plugins.extra_tools[i]);
+            tool_registry_unlock();
+            return schema;
+        }
+    }
     for (int i = 0; i < g_external_tool_count; i++) {
         if (strcmp(g_external_tools[i].name, name) == 0) {
             const char *schema = tools_output_schema_for_external(&g_external_tools[i]);
@@ -34476,12 +34486,10 @@ bool tools_invoke_by_name(const char *name, const char *input, char *result, siz
     if (!name || !result || rlen == 0)
         return false;
     result[0] = '\0';
-    for (int i = 0; i < s_tool_count; i++) {
-        if (!s_tools[i].name || !s_tools[i].execute)
-            continue;
-        if (strcmp(s_tools[i].name, name) == 0) {
-            return s_tools[i].execute(input ? input : "{}", result, rlen);
-        }
+    /* O(1) hash-map lookup (falls back to MCP alias resolution). */
+    int idx = tools_lookup_index(name);
+    if (idx >= 0 && idx < s_tool_count && s_tools[idx].execute) {
+        return s_tools[idx].execute(input ? input : "{}", result, rlen);
     }
     snprintf(result, rlen, "{\"error\":\"unknown tool: %s\"}", name);
     return false;
@@ -34490,11 +34498,9 @@ bool tools_invoke_by_name(const char *name, const char *input, char *result, siz
 bool tools_is_offload_safe(const char *name) {
     if (!name || !name[0])
         return false;
-    for (int i = 0; i < s_tool_count; i++) {
-        if (!s_tools[i].name || strcmp(s_tools[i].name, name) != 0)
-            continue;
-        return s_tools[i].is_read_only && s_tools[i].is_concurrent;
-    }
+    int idx = tools_lookup_index(name);
+    if (idx >= 0 && idx < s_tool_count && s_tools[idx].name)
+        return s_tools[idx].is_read_only && s_tools[idx].is_concurrent;
     return false;
 }
 
@@ -34519,10 +34525,9 @@ void tools_clear_profile_filter(void) {
 bool tools_is_parent_specified_core_tool(const char *tool_name) {
     if (!tool_name || !tool_name[0])
         return false;
-    for (int i = 0; i < s_tool_count; i++) {
-        if (s_tools[i].name && strcmp(s_tools[i].name, tool_name) == 0)
-            return s_tools[i].core;
-    }
+    int idx = tools_lookup_index(tool_name);
+    if (idx >= 0 && idx < s_tool_count && s_tools[idx].name)
+        return s_tools[idx].core;
     return false;
 }
 
@@ -34616,20 +34621,23 @@ int tools_builtin_count(void) {
 }
 
 int tools_get_core_count(void) {
+    static int cached_core_count = -1;
+    if (cached_core_count >= 0)
+        return cached_core_count;
     int n = 0;
     for (int i = 0; i < s_tool_count; i++)
         if (s_tools[i].core)
             n++;
+    cached_core_count = n;
     return n;
 }
 
 bool dsco_tool_is_interactive(const char *name) {
     if (!name || !*name)
         return false;
-    for (int i = 0; i < s_tool_count; i++) {
-        if (s_tools[i].name && strcmp(s_tools[i].name, name) == 0)
-            return s_tools[i].is_interactive;
-    }
+    int idx = tools_lookup_index(name);
+    if (idx >= 0 && idx < s_tool_count && s_tools[idx].name)
+        return s_tools[idx].is_interactive;
     return false;
 }
 
