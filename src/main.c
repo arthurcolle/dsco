@@ -762,6 +762,7 @@ static dsco_caps_t main_plan_startup_caps(int argc, char **argv,
              strcmp(argv[i], "-e") == 0 ||
              strcmp(argv[i], "--provider") == 0 ||
              strcmp(argv[i], "--profile") == 0 ||
+             strcmp(argv[i], "--gov-model") == 0 ||
              strcmp(argv[i], "--mcp-server") == 0 ||
              strcmp(argv[i], "--mcp-servers") == 0 ||
              strcmp(argv[i], "--env-file") == 0 ||
@@ -2421,7 +2422,8 @@ static void usage(const char *prog) {
         "  -i, --interactive      Start an interactive REPL (no prompt required)\n"
         "  --autonomous           No routine approval prompts; trusted tier; critical gates still fail closed\n"
         "  --sandboxed            Untrusted tier: route exec tools through sandbox_run, block writes/network/control-plane\n"
-        "  --systems-agent        UNGOVERNED control arm: disable the entire governance gate (unbounded permissions) for A/B overhead experiments\n"
+        "  --systems-agent        UNGOVERNED control arm (governance model=none): disable the entire gate for A/B overhead experiments\n"
+        "  --gov-model MODEL      Governance model: none|minimal|audit|standard|paranoid (see `governance experiment`)\n"
         "  --approval-mode MODE   ask|strict|never (never skips routine prompts)\n"
         "  --trust-tier TIER      standard|trusted|untrusted tool permission tier\n"
         "  --local                Use LM Studio locally (default model: liquid/lfm2.5-1.2b)\n"
@@ -3200,6 +3202,27 @@ static bool main_apply_runtime_mode_flags(int argc, char **argv) {
             saw_mode = true;
             continue;
         }
+        /* --gov-model MODEL: select a governance model for the experiment
+           platform. none=--systems-agent posture; minimal=immune only;
+           audit=measure-but-don't-block; standard=full gate; paranoid=full+
+           shadow-every-tool. Measurable via `governance experiment`. */
+        if (strcmp(argv[i], "--gov-model") == 0 && i + 1 < argc) {
+            const char *mv = argv[i + 1];
+            setenv("DSCO_GOV_MODEL", mv, 1);
+            if (strcasecmp(mv, "none") == 0 || strcasecmp(mv, "off") == 0 ||
+                strcasecmp(mv, "bypass") == 0) {
+                setenv("DSCO_GOV_BYPASS", "1", 1);
+                setenv("DSCO_TRUST_TIER", "trusted", 1);
+                setenv("DSCO_APPROVAL_MODE", "never", 1);
+                fprintf(stderr,
+                        "\x1b[1;31m[gov-model] GOVERNANCE DISABLED (model=none).\x1b[0m\n");
+            } else {
+                fprintf(stderr, "\x1b[36m[gov-model] governance model = %s\x1b[0m\n", mv);
+            }
+            i++;
+            saw_mode = true;
+            continue;
+        }
         if (strcmp(argv[i], "--trust-tier") == 0 && i + 1 < argc) {
             bool ok = false;
             (void)session_trust_tier_from_string(argv[i + 1], &ok);
@@ -3692,6 +3715,7 @@ int main(int argc, char **argv) {
             else if ((strcmp(argv[_k], "-m") == 0 ||
                       strcmp(argv[_k], "--model") == 0 ||
                       strcmp(argv[_k], "--profile") == 0 ||
+                      strcmp(argv[_k], "--gov-model") == 0 ||
                       strcmp(argv[_k], "--mcp-server") == 0 ||
                       strcmp(argv[_k], "--mcp-servers") == 0 ||
                       strcmp(argv[_k], "--env-file") == 0 ||
