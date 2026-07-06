@@ -652,6 +652,101 @@ static bool message_has_tool_result_local(const message_t *m) {
     return false;
 }
 
+static void tool_integrity_fail(tool_integrity_result_t *r, const char *kind,
+                                const char *tool_id, int msg_idx) {
+    if (!r || !r->ok)
+        return;
+    r->ok = false;
+    snprintf(r->first_error, sizeof(r->first_error), "%s: tool_id=%s msg=%d", kind,
+             tool_id ? tool_id : "(null)", msg_idx);
+}
+
+tool_integrity_result_t conv_validate_tool_call_integrity(const conversation_t *c,
+                                                           bool allow_pending_last) {
+    tool_integrity_result_t r;
+    memset(&r, 0, sizeof(r));
+    r.ok = true;
+
+    if (!c)
+        return r;
+
+    for (int i = 0; i < c->count; i++) {
+        const message_t *m = &c->msgs[i];
+        for (int j = 0; j < m->content_count; j++) {
+            const msg_content_t *mc = &m->content[j];
+            if (!mc->type || strcmp(mc->type, "tool_use") != 0 || !mc->tool_id)
+                continue;
+
+            for (int k = i + 1; k < c->count; k++) {
+                const message_t *later = &c->msgs[k];
+                for (int l = 0; l < later->content_count; l++) {
+                    const msg_content_t *lc = &later->content[l];
+                    if (lc->type && strcmp(lc->type, "tool_use") == 0 && lc->tool_id &&
+                        strcmp(lc->tool_id, mc->tool_id) == 0) {
+                        r.duplicate_tool_use++;
+                        tool_integrity_fail(&r, "duplicate_tool_use", mc->tool_id, k);
+                    }
+                }
+            }
+
+            bool found_result = false;
+            for (int k = i + 1; k < c->count && !found_result; k++) {
+                const message_t *um = &c->msgs[k];
+                if (um->role != ROLE_USER)
+                    break;
+                for (int l = 0; l < um->content_count; l++) {
+                    const msg_content_t *rc = &um->content[l];
+                    if (rc->type && strcmp(rc->type, "tool_result") == 0 && rc->tool_id &&
+                        strcmp(rc->tool_id, mc->tool_id) == 0) {
+                        found_result = true;
+                        break;
+                    }
+                }
+            }
+            if (!found_result && !(allow_pending_last && i == c->count - 1)) {
+                r.missing_tool_result++;
+                tool_integrity_fail(&r, "missing_tool_result", mc->tool_id, i);
+            }
+        }
+    }
+
+    for (int i = 0; i < c->count; i++) {
+        const message_t *m = &c->msgs[i];
+        for (int j = 0; j < m->content_count; j++) {
+            const msg_content_t *mc = &m->content[j];
+            if (!mc->type || strcmp(mc->type, "tool_result") != 0 || !mc->tool_id)
+                continue;
+
+            bool found_use = false;
+            bool out_of_order = false;
+            for (int k = 0; k < c->count; k++) {
+                const message_t *am = &c->msgs[k];
+                for (int l = 0; l < am->content_count; l++) {
+                    const msg_content_t *uc = &am->content[l];
+                    if (uc->type && strcmp(uc->type, "tool_use") == 0 && uc->tool_id &&
+                        strcmp(uc->tool_id, mc->tool_id) == 0) {
+                        if (k < i)
+                            found_use = true;
+                        else
+                            out_of_order = true;
+                    }
+                }
+            }
+            if (!found_use) {
+                if (out_of_order) {
+                    r.out_of_order_result++;
+                    tool_integrity_fail(&r, "out_of_order_result", mc->tool_id, i);
+                } else {
+                    r.missing_tool_use++;
+                    tool_integrity_fail(&r, "missing_tool_use", mc->tool_id, i);
+                }
+            }
+        }
+    }
+
+    return r;
+}
+
 static bool message_is_tool_result_only(const message_t *m) {
     if (!m || m->role != ROLE_USER || m->content_count <= 0)
         return false;
@@ -1268,6 +1363,72 @@ char *tools_build_deferred_catalog(const char **paged_names, int paged_count,
     return buf.data;
 }
 
+static void append_excerpt(jbuf_t *buf, const char *label, const char *text, int max_chars) {
+    if (!buf || !label || !text || !*text)
+        return;
+    int len = (int)strlen(text);
+    int n = len < max_chars ? len : max_chars;
+    jbuf_appendf(buf, "- %s: %.*s%s\n", label, n, text, len > n ? "…" : "");
+}
+
+static bool text_has_protected_invariant(const char *text) {
+    if (!text || !*text)
+        return false;
+    return strstr(text, "MUST") || strstr(text, "MUST NOT") || strstr(text, "NEVER") ||
+           strstr(text, "ALWAYS") || strstr(text, "Acceptance") || strstr(text, "acceptance") ||
+           strstr(text, "invariant") || strstr(text, "Invariant") || strstr(text, "SECURITY") ||
+           strstr(text, "security") || strstr(text, "policy") || strstr(text, "Policy");
+}
+
+static char *conv_build_compaction_capsule(conversation_t *c, int drop_start, int drop_end,
+                                           int rounds_dropped, int tokens_dropped) {
+    jbuf_t buf;
+    jbuf_init(&buf, 2048);
+    jbuf_appendf(&buf,
+                 "[compaction summary]\n"
+                 "rounds_compacted: %d\n"
+                 "approx_tokens_freed: %d\n"
+                 "preservation_policy: tool-call graph validated; protected invariants copied verbatim where detected\n",
+                 rounds_dropped, tokens_dropped);
+
+    int user_notes = 0, assistant_notes = 0, tool_uses = 0, tool_results = 0, invariants = 0;
+    jbuf_append(&buf, "\nstate_capsule:\n");
+    for (int i = drop_start; c && i <= drop_end && i < c->count; i++) {
+        message_t *m = &c->msgs[i];
+        for (int j = 0; j < m->content_count; j++) {
+            msg_content_t *mc = &m->content[j];
+            if (!mc->type)
+                continue;
+            if (strcmp(mc->type, "tool_use") == 0) {
+                tool_uses++;
+                if (tool_uses <= 12)
+                    jbuf_appendf(&buf, "- tool_use: %s id=%s\n",
+                                 mc->tool_name ? mc->tool_name : "(unknown)",
+                                 mc->tool_id ? mc->tool_id : "(none)");
+            } else if (strcmp(mc->type, "tool_result") == 0) {
+                tool_results++;
+                if (tool_results <= 12)
+                    append_excerpt(&buf, "tool_result", mc->text, 180);
+            } else if (mc->text && strcmp(mc->type, "text") == 0) {
+                if (text_has_protected_invariant(mc->text) && invariants < 8) {
+                    invariants++;
+                    append_excerpt(&buf, "verbatim_invariant", mc->text, 500);
+                } else if (m->role == ROLE_USER && user_notes < 8) {
+                    user_notes++;
+                    append_excerpt(&buf, "user", mc->text, 220);
+                } else if (m->role == ROLE_ASSISTANT && assistant_notes < 8) {
+                    assistant_notes++;
+                    append_excerpt(&buf, "assistant", mc->text, 220);
+                }
+            }
+        }
+    }
+    jbuf_appendf(&buf,
+                 "\ncounts: user_notes=%d assistant_notes=%d tool_uses=%d tool_results=%d protected_invariants=%d\n",
+                 user_notes, assistant_notes, tool_uses, tool_results, invariants);
+    return buf.data;
+}
+
 /* ── Tiered auto-compact pipeline ───────────────────────────────────── */
 
 compact_result_t conv_auto_compact(conversation_t *c, session_state_t *s, compact_config_t *cfg) {
@@ -1311,6 +1472,20 @@ compact_result_t conv_auto_compact(conversation_t *c, session_state_t *s, compac
     conv_trim_old_results(c, cfg->snip_keep_tail, cfg->max_result_chars);
 
     /* Re-estimate */
+    tool_integrity_result_t micro_integrity = conv_validate_tool_call_integrity(c, true);
+    if (!micro_integrity.ok) {
+        conv_ensure_tool_results(c);
+        micro_integrity = conv_validate_tool_call_integrity(c, true);
+        if (!micro_integrity.ok) {
+            cfg->consecutive_failures++;
+            result.post_token_count = conv_token_estimate(c, s);
+            result.messages_removed = before_count - c->count;
+            result.messages_kept = c->count;
+            result.duration_ms = (cache_now_sec() - start) * 1000.0;
+            return result;
+        }
+    }
+
     int post_micro = conv_token_estimate(c, s);
     if (post_micro < threshold) {
         result.post_token_count = post_micro;
@@ -1447,6 +1622,14 @@ compact_result_t conv_auto_compact(conversation_t *c, session_state_t *s, compac
                 }
             }
         }
+    }
+
+    tool_integrity_result_t snip_integrity = conv_validate_tool_call_integrity(c, true);
+    if (!snip_integrity.ok) {
+        conv_ensure_tool_results(c);
+        snip_integrity = conv_validate_tool_call_integrity(c, true);
+        if (!snip_integrity.ok)
+            cfg->consecutive_failures++;
     }
 
     int post_snip = conv_token_estimate(c, s);
@@ -2701,6 +2884,36 @@ static void append_one_tool(jbuf_t *b, const tool_def_t *t, bool cache_mark,
     jbuf_append(b, "}");
 }
 
+static int loaded_builtin_tail_limit(void) {
+    int limit = 16;
+    const char *env = getenv("DSCO_LOADED_TOOL_MAX");
+    if (env && env[0]) {
+        int v = atoi(env);
+        if (v >= 0)
+            limit = v;
+    }
+    if (limit > 64)
+        limit = 64;
+    return limit;
+}
+
+static bool paged_tools_contains_builtin(const tool_page_result_t *paged, const tool_def_t *all,
+                                         int total, int idx) {
+    if (!paged || !all || idx < 0 || idx >= total)
+        return false;
+    const tool_def_t *target = &all[idx];
+    for (int i = 0; i < paged->pinned_count; i++)
+        if (paged->pinned[i] == target || strcmp(paged->pinned[i]->name, target->name) == 0)
+            return true;
+    for (int i = 0; i < paged->working_count; i++)
+        if (paged->working[i] == target || strcmp(paged->working[i]->name, target->name) == 0)
+            return true;
+    for (int i = 0; i < paged->discovery_count; i++)
+        if (paged->discovery[i] == target || strcmp(paged->discovery[i]->name, target->name) == 0)
+            return true;
+    return false;
+}
+
 /* Append filtered tools — tiered, cache-aware serialization.
  *
  * Layout:  [Tier 0: pinned] [Tier 1: working] [cache break] [Tier 2: discovery]
@@ -2771,10 +2984,24 @@ static void append_tools_json_filtered(jbuf_t *b, session_state_t *session, conv
     int *ext_order = ext.count > 0 ? safe_malloc((size_t)ext.count * sizeof(*ext_order)) : NULL;
     int ext_order_count =
         ext_order ? tools_rank_external_snapshot(&ext, ctx, ext_order, ext.count) : 0;
+    int builtin_total = 0;
+    const tool_def_t *all_builtins = tools_get_all(&builtin_total);
+    int loaded_builtin_indices[64];
+    int loaded_builtin_count =
+        tools_loaded_builtin_indices(loaded_builtin_indices, loaded_builtin_tail_limit());
+    int loaded_builtin_tail_count = 0;
+    for (int i = 0; i < loaded_builtin_count; i++) {
+        int idx = loaded_builtin_indices[i];
+        if (idx >= 0 && idx < builtin_total &&
+            !paged_tools_contains_builtin(&paged, all_builtins, builtin_total, idx))
+            loaded_builtin_tail_count++;
+    }
 
     bool has_server_tools = session && (session->web_search || session->code_execution);
-    bool has_after_working = (paged.discovery_count > 0 || ext.count > 0 || has_server_tools);
-    bool has_after_discovery = (ext.count > 0 || has_server_tools);
+    bool has_after_working =
+        (paged.discovery_count > 0 || loaded_builtin_tail_count > 0 || ext.count > 0 ||
+         has_server_tools);
+    bool has_after_discovery = (loaded_builtin_tail_count > 0 || ext.count > 0 || has_server_tools);
 
     jbuf_append(b, ",\"tools\":[");
     size_t tools_json_start = b->len;
@@ -2817,6 +3044,21 @@ static void append_tools_json_filtered(jbuf_t *b, session_state_t *session, conv
         if (written > 0)
             jbuf_append(b, ",");
         append_one_tool(b, paged.discovery[i], false, claude_code_oauth);
+        written++;
+    }
+
+    /* Explicitly loaded built-ins are a dynamic tail after the frozen register
+     * page. This keeps the stable prefix cacheable while making load_tools take
+     * effect immediately even when DSCO_TOOL_FREEZE is on. */
+    for (int i = 0; i < loaded_builtin_count; i++) {
+        int idx = loaded_builtin_indices[i];
+        if (idx < 0 || idx >= builtin_total)
+            continue;
+        if (paged_tools_contains_builtin(&paged, all_builtins, builtin_total, idx))
+            continue;
+        if (written > 0)
+            jbuf_append(b, ",");
+        append_one_tool(b, &all_builtins[idx], false, claude_code_oauth);
         written++;
     }
     (void)has_after_discovery;
@@ -3244,6 +3486,20 @@ static void cache_prefix_hash_check(const char *req) {
         fz = (size_t)(p - req);
     uint64_t hf = prefix_fnv1a64(req, fz);
     uint64_t hv = prefix_fnv1a64(req + fz, n - fz);
+    if (s_seq == 0) {
+        const char *ph = getenv("DSCO_CACHE_PARENT_FROZEN_HASH");
+        const char *pl = getenv("DSCO_CACHE_PARENT_FROZEN_LEN");
+        if (ph && ph[0] && pl && pl[0]) {
+            char *end = NULL;
+            unsigned long long inh = strtoull(ph, &end, 16);
+            size_t inh_len = (size_t)strtoull(pl, NULL, 10);
+            if (end && *end == '\0' && inh_len > 0) {
+                s_frozen_hash = (uint64_t)inh;
+                s_last_frozen_len = inh_len;
+                s_seq = 1; /* compare this child request against parent */
+            }
+        }
+    }
     s_seq++;
     if (s_seq > 1) {
         if (hf != s_frozen_hash) {
@@ -3268,6 +3524,15 @@ static void cache_prefix_hash_check(const char *req) {
     s_vol_hash = hv;
     s_last_len = n;
     s_last_frozen_len = fz;
+    /* C2: make the parent's frozen prefix baseline inheritable by child
+     * workers. swarm_spawn_child() passes the environment through; children
+     * seed their first prefix-hash check from these values so prompt/tool
+     * drift between parent and child is diagnosed on the child's first turn. */
+    char hb[32], lb[32];
+    snprintf(hb, sizeof(hb), "%016llx", (unsigned long long)hf);
+    snprintf(lb, sizeof(lb), "%zu", fz);
+    setenv("DSCO_CACHE_PARENT_FROZEN_HASH", hb, 1);
+    setenv("DSCO_CACHE_PARENT_FROZEN_LEN", lb, 1);
     free(s_last_prefix);
     s_last_prefix = malloc(n + 1);
     if (s_last_prefix) {
