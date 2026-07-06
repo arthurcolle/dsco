@@ -40,6 +40,7 @@
 #include "cost_model.h"
 #include "mcp_names.h"
 #include "workspace.h"
+#include "gov_experiment.h"
 #include "governance.h"
 #include "rsi_curriculum.h"
 #include "memory_tier.h"
@@ -20946,6 +20947,23 @@ static bool tool_governance_capability(const char *input, char *result, size_t r
     return true;
 }
 
+/* Governance-model experiment: report per-stage overhead + would-block stats,
+   or reset the counters for a fresh window. input: {reset?:true}. */
+static bool tool_governance_experiment(const char *input, char *result, size_t rlen) {
+    ensure_wt_init();
+    char *reset = json_get_str(input, "reset");
+    if (reset && (strcmp(reset, "true") == 0 || strcmp(reset, "1") == 0)) {
+        gov_experiment_reset();
+        snprintf(result, rlen, "{\"reset\":true,\"model\":\"%s\"}",
+                 gov_model_name(gov_experiment_model()));
+        free(reset);
+        return true;
+    }
+    free(reset);
+    gov_experiment_report_json(result, rlen);
+    return true;
+}
+
 static bool tool_governance_audit(const char *input, char *result, size_t rlen) {
     ensure_wt_init();
     int last_n = (int)json_get_double(input, "last_n", 0);
@@ -29515,7 +29533,7 @@ static bool tool_governance_dispatch(const char *input, char *result, size_t rle
         snprintf(
             result, rlen,
             "missing: action (status, curriculum, authorize, checkpoint, budget, "
-            "capability, audit, param)");
+            "capability, experiment, audit, param)");
         return false;
     }
     bool ok = false;
@@ -29531,6 +29549,8 @@ static bool tool_governance_dispatch(const char *input, char *result, size_t rle
         ok = tool_governance_budget(input, result, rlen);
     else if (strcmp(action, "capability") == 0)
         ok = tool_governance_capability(input, result, rlen);
+    else if (strcmp(action, "experiment") == 0)
+        ok = tool_governance_experiment(input, result, rlen);
     else if (strcmp(action, "audit") == 0)
         ok = tool_governance_audit(input, result, rlen);
     else if (strcmp(action, "param") == 0)
@@ -33623,14 +33643,17 @@ static const tool_def_t s_tools[] = {
     {.name = "governance",
      .description =
          "Governance controls: status, curriculum, authorize, checkpoint, budget, capability, "
-         "audit, param. Curriculum exposes the safety-aware RSI skill gates; capability records "
-         "empirical outcome evidence and returns the evidence-earned tier.",
+         "experiment, audit, param. capability records empirical outcome evidence and returns the "
+         "evidence-earned tier; experiment reports per-stage governance overhead + would-block "
+         "stats for the active governance model (reset:true clears counters).",
      .input_schema_json =
          "{\"type\":\"object\",\"properties\":{\"action\":{\"type\":\"string\",\"description\":"
-         "\"status|curriculum|authorize|checkpoint|budget|capability|audit|param\"},\"operation\":{"
-         "\"type\":\"string\"},\"outcome\":{\"type\":\"string\",\"description\":\"success|failure "
-         "(capability action)\"},\"agent_id\":{\"type\":\"string\"},\"amount\":{\"type\":\"number\"},"
-         "\"param\":{\"type\":\"string\"},\"value\":{\"type\":\"string\"}},\"required\":[\"action\"]}",
+         "\"status|curriculum|authorize|checkpoint|budget|capability|experiment|audit|param\"},"
+         "\"operation\":{\"type\":\"string\"},\"outcome\":{\"type\":\"string\",\"description\":"
+         "\"success|failure (capability action)\"},\"reset\":{\"type\":\"boolean\",\"description\":"
+         "\"reset experiment counters\"},\"agent_id\":{\"type\":\"string\"},\"amount\":{\"type\":"
+         "\"number\"},\"param\":{\"type\":\"string\"},\"value\":{\"type\":\"string\"}},"
+         "\"required\":[\"action\"]}",
      .execute = tool_governance_dispatch},
     {.name = "memory_tier",
      .description = "Three-tier memory: store, recall, promote, classify, review, forget, status.",
@@ -38438,56 +38461,28 @@ static void tool_gov_deny(char *result, size_t rlen, const char *tool, const cha
  * MAIN ENTRY POINT
  * ═══════════════════════════════════════════════════════════════════════════ */
 
-/* ── Governance-model A/B experiment instrumentation ──────────────────────
-   To measure the *cost* of governance we support running with the entire gate
-   (G2–G8: hardcoded → budget → killswitch → OODA → authorize → audit → shadow)
-   bypassed. This is the ungoverned control arm. It is intentionally unbounded:
-   NO permission checks, NO budget, NO kill switches, NO audit. It exists only
-   so overhead between governance models can be measured empirically.
+/* ── Governance-model experiment platform ─────────────────────────────────
+   The governance gate is an instrument. DSCO_GOV_MODEL selects among several
+   models (none/minimal/audit_only/standard/paranoid); each gate stage is
+   timed and its would-block decision recorded, so governance overhead can be
+   measured and compared model-by-model. Implementation: gov_experiment.c. */
 
-   Enabled by DSCO_GOV_MODEL=none (or DSCO_GOV_BYPASS=1). Set by --systems-agent.
-   We still time both arms so the experiment produces a real number. */
-static _Atomic unsigned long g_gov_gate_calls = 0;    /* times the gate ran */
-static _Atomic unsigned long g_gov_gate_bypassed = 0; /* times it was skipped */
-static _Atomic double g_gov_gate_ms_total = 0;        /* cumulative gate latency */
-
-static bool tool_governance_bypassed(void) {
-    /* Cache the decision once — this is on the hot path of every tool call. */
-    static int cached = -1; /* -1 unknown, 0 governed, 1 bypassed */
-    if (cached < 0) {
-        const char *model = getenv("DSCO_GOV_MODEL");
-        const char *bypass = getenv("DSCO_GOV_BYPASS");
-        bool off = (model && (strcasecmp(model, "none") == 0 ||
-                              strcasecmp(model, "off") == 0 ||
-                              strcasecmp(model, "bypass") == 0)) ||
-                   (bypass && bypass[0] == '1');
-        cached = off ? 1 : 0;
-    }
-    return cached == 1;
-}
-
-/* Expose experiment counters (used by the `governance capability`/status tools
-   and by benchmark harnesses to read the accumulated overhead). */
+/* Legacy aggregate surface — now backed by the experiment module. */
 void tools_governance_experiment_stats(unsigned long *gate_calls,
                                        unsigned long *bypassed,
                                        double *gate_ms_total) {
-    if (gate_calls)
-        *gate_calls = g_gov_gate_calls;
-    if (bypassed)
-        *bypassed = g_gov_gate_bypassed;
-    if (gate_ms_total)
-        *gate_ms_total = g_gov_gate_ms_total;
+    gov_experiment_totals(gate_calls, bypassed, gate_ms_total);
 }
 
 bool tools_execute_for_tier(const char *name, const char *input_json, const char *tier,
                             char *result, size_t result_len) {
 
-    /* ── G0: Governance-model bypass (ungoverned control arm) ──────────────
-       When the active governance model is "none", skip the entire gate. This
-       is the whole point of --systems-agent: unbounded permissions so the
-       overhead of governance vs. no-governance can be measured. */
-    if (tool_governance_bypassed()) {
-        g_gov_gate_bypassed++;
+    /* ── G0: Governance-model dispatch ─────────────────────────────────────
+       MODEL=none is the ungoverned control arm: skip the entire gate so the
+       overhead of governance vs. no-governance can be measured empirically. */
+    gov_model_t _gov_model = gov_experiment_model();
+    if (_gov_model == GOV_MODEL_NONE) {
+        gov_experiment_note_bypass();
         goto _skip_gate;
     }
 
@@ -38495,9 +38490,10 @@ bool tools_execute_for_tier(const char *name, const char *input_json, const char
 
     /* ── G1: Exempt check ─────────────────────────────────────────────── */
     if (!name || tool_is_governance_exempt(name)) {
+        gov_stage_record(GOV_STAGE_EXEMPT, now_ms() - _gate_t0, false, false);
         goto _skip_gate;
     }
-    g_gov_gate_calls++;
+    gov_experiment_note_gate_run();
 
     /* ── G2: Initialization guard ─────────────────────────────────────── */
     if (!g_governance.initialized)
@@ -38628,26 +38624,42 @@ bool tools_execute_for_tier(const char *name, const char *input_json, const char
             baseline_log("governance", "warning_degrades_exec", name, NULL);
         }
 
-        /* ── G7: Governance checkpoint ────────────────────────────────── */
-        if (!governance_checkpoint(&g_governance, "dsco", name, gsu, tier)) {
-            remaining = governance_remaining_gsu(&g_governance, "dsco");
-            const char *reason = remaining <= 0.0 ? "budget_exhausted" : "hardcoded_rule_violation";
-            char meta[128];
-            snprintf(meta, sizeof(meta), "{\"reason\":\"%s\",\"gsu\":%.2f}", reason, gsu);
-            pheromone_deposit(&g_governance.pheromones, PHERO_WARNING, 0.7, phero_region, "immune",
-                              meta);
-            tool_gov_deny(result, result_len, name, "G7_checkpoint", reason, remaining);
-            self_improve_record_tool(&g_self_improve, name, false, 0.0, 0);
-            return false;
+        /* ── G7: Governance checkpoint ──────────────────────────────────
+           Runs in standard/paranoid/audit_only. In audit_only we measure the
+           would-block decision but do NOT enforce it (shadow-mode governance);
+           in minimal we skip it entirely. */
+        if (gov_stage_active(_gov_model, GOV_STAGE_CHECKPOINT)) {
+            double _cp_t0 = now_ms();
+            bool passed = governance_checkpoint(&g_governance, "dsco", name, gsu, tier);
+            bool enforces = gov_stage_enforces(_gov_model, GOV_STAGE_CHECKPOINT);
+            gov_stage_record(GOV_STAGE_CHECKPOINT, now_ms() - _cp_t0, !passed, enforces && !passed);
+            if (!passed && enforces) {
+                remaining = governance_remaining_gsu(&g_governance, "dsco");
+                const char *reason =
+                    remaining <= 0.0 ? "budget_exhausted" : "hardcoded_rule_violation";
+                char meta[128];
+                snprintf(meta, sizeof(meta), "{\"reason\":\"%s\",\"gsu\":%.2f}", reason, gsu);
+                pheromone_deposit(&g_governance.pheromones, PHERO_WARNING, 0.7, phero_region,
+                                  "immune", meta);
+                tool_gov_deny(result, result_len, name, "G7_checkpoint", reason, remaining);
+                self_improve_record_tool(&g_self_improve, name, false, 0.0, 0);
+                return false;
+            }
         }
 
-        /* ── G8: Shadow check (high-risk tools only) ──────────────────── */
-        if (tool_is_high_risk(name, cls)) {
+        /* ── G8: Shadow check ───────────────────────────────────────────
+           High-risk tools always; in PARANOID every tool is shadow-reviewed. */
+        if (gov_stage_active(_gov_model, GOV_STAGE_SHADOW) &&
+            (tool_is_high_risk(name, cls) || gov_shadow_all_tools(_gov_model))) {
+            double _sh_t0 = now_ms();
             shadow_check_result_t shadow = {0};
             const char *ctx = input_json ? input_json : name;
             governance_shadow_check(&g_governance, "dsco", ctx, &shadow);
-            if (shadow.self_reward_detected || shadow.reward_hacking ||
-                shadow.circular_optimization) {
+            bool violated = shadow.self_reward_detected || shadow.reward_hacking ||
+                            shadow.circular_optimization;
+            gov_stage_record(GOV_STAGE_SHADOW, now_ms() - _sh_t0, violated,
+                             gov_stage_enforces(_gov_model, GOV_STAGE_SHADOW) && violated);
+            if (violated) {
                 char smeta[256];
                 snprintf(smeta, sizeof(smeta),
                          "{\"self_reward\":%s,\"reward_hack\":%s,"
@@ -38661,8 +38673,6 @@ bool tools_execute_for_tier(const char *name, const char *input_json, const char
                 baseline_log("shadow", "violation_detected", name, smeta);
             }
         }
-        /* Record cumulative gate latency for the governance-overhead A/B. */
-        g_gov_gate_ms_total += (now_ms() - _gate_t0);
     } /* end gate block */
 
 _skip_gate:;
