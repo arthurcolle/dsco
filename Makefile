@@ -78,10 +78,10 @@ COSMO_LEGACY_TARGET ?= dsco.com
 COSMOCC_VERSION ?= 4.0.2
 
 SRC_NAMES = main.c agent.c llm.c tools.c execution_layer.c json_util.c ast.c swarm.c tui.c env_config.c \
-	md.c baseline.c chronicle.c setup.c crypto.c eval.c pipeline.c plugin.c \
-			semantic.c hlc.c ipc.c mcp.c mcp_names.c provider_profiles.c provider.c integrations.c error.c trace.c instrumenter.c structured_process.c task_profile.c \
+	md.c baseline.c chronicle.c agent_event.c callbacks.c setup.c crypto.c eval.c pipeline.c plugin.c \
+			semantic.c hlc.c ipc.c mcp.c mcp_server.c mcp_names.c provider_profiles.c provider.c integrations.c error.c trace.c instrumenter.c structured_process.c task_profile.c \
 	output_guard.c topology.c workspace.c plan.c stateful_atoms.c recovery.c router.c \
-	pheromone.c ooda.c killswitch.c governance.c memory_tier.c talons.c avian.c \
+	pheromone.c ooda.c killswitch.c governance.c gov_experiment.c memory_tier.c talons.c avian.c \
 	arena_alloc.c event_loop.c vm.c scheduler.c waiter.c vfs.c trading.c legion.c \
 	agent_profile.c orchestrator.c vecstore.c tamper.c sealed_store.c \
 	se_store.c watchdog.c audit_log.c heartbeat.c env_guard.c peer_bootstrap.c presence.c \
@@ -101,6 +101,7 @@ SRC_NAMES = main.c agent.c llm.c tools.c execution_layer.c json_util.c ast.c swa
 	executive.c \
 	session_memory.c \
 	provider_pool.c \
+	dsco_swim.c sequence_state.c \
 	math_fastpath.c \
 	http_pool.c \
 	realtime.c \
@@ -118,6 +119,8 @@ GSL_TEST_OBJS = $(GSL_SRCS:gsl/src/%.c=$(TEST_OBJ_DIR)/gsl_%.o)
 GSL_COVERAGE_OBJS = $(GSL_SRCS:gsl/src/%.c=$(TEST_COVERAGE_OBJ_DIR)/gsl_%.o)
 GSL_ASAN_OBJS = $(GSL_SRCS:gsl/src/%.c=$(ASAN_OBJ_DIR)/gsl_%.o)
 GSL_UBSAN_OBJS = $(GSL_SRCS:gsl/src/%.c=$(UBSAN_OBJ_DIR)/gsl_%.o)
+GSL_TSAN_TEST_OBJS = $(GSL_SRCS:gsl/src/%.c=$(TSAN_TEST_OBJ_DIR)/gsl_%.o)
+GSL_ASAN_UBSAN_TEST_OBJS = $(GSL_SRCS:gsl/src/%.c=$(ASAN_UBSAN_TEST_OBJ_DIR)/gsl_%.o)
 # Test links against all src objects except main.c and agent.c
 LIB_SRCS = $(filter-out $(SRC_DIR)/main.c $(SRC_DIR)/agent.c $(SRC_DIR)/orchestrator.c, $(SRCS))
 
@@ -129,6 +132,8 @@ ASAN_OBJ_DIR := $(BUILD_DIR)/asan
 UBSAN_OBJ_DIR := $(BUILD_DIR)/ubsan
 ASAN_TEST_OBJ_DIR := $(BUILD_DIR)/asan-test
 UBSAN_TEST_OBJ_DIR := $(BUILD_DIR)/ubsan-test
+TSAN_TEST_OBJ_DIR := $(BUILD_DIR)/tsan-test
+ASAN_UBSAN_TEST_OBJ_DIR := $(BUILD_DIR)/asan-ubsan-test
 
 OBJS = $(SRC_NAMES:%.c=$(OBJ_DIR)/%.o)
 OBJS += $(GENERATED_OBJS)
@@ -140,13 +145,23 @@ ASAN_OBJS = $(SRC_NAMES:%.c=$(ASAN_OBJ_DIR)/%.o)
 UBSAN_OBJS = $(SRC_NAMES:%.c=$(UBSAN_OBJ_DIR)/%.o)
 ASAN_TEST_OBJS = $(TEST_SRC_NAMES:%.c=$(ASAN_TEST_OBJ_DIR)/%.o) $(LIB_OBJS:$(OBJ_DIR)/%=$(ASAN_TEST_OBJ_DIR)/%)
 UBSAN_TEST_OBJS = $(TEST_SRC_NAMES:%.c=$(UBSAN_TEST_OBJ_DIR)/%.o) $(LIB_OBJS:$(OBJ_DIR)/%=$(UBSAN_TEST_OBJ_DIR)/%)
+TSAN_TEST_OBJS = $(TEST_SRC_NAMES:%.c=$(TSAN_TEST_OBJ_DIR)/%.o) $(LIB_OBJS:$(OBJ_DIR)/%=$(TSAN_TEST_OBJ_DIR)/%)
+ASAN_UBSAN_TEST_OBJS = $(TEST_SRC_NAMES:%.c=$(ASAN_UBSAN_TEST_OBJ_DIR)/%.o) $(LIB_OBJS:$(OBJ_DIR)/%=$(ASAN_UBSAN_TEST_OBJ_DIR)/%)
 
-ASAN_CFLAGS = $(BASE_CFLAGS) -O0 -g -fno-omit-frame-pointer -fno-inline -fsanitize=address
+SANITIZER_BASE_CFLAGS = $(filter-out -D_FORTIFY_SOURCE=2,$(BASE_CFLAGS))
+
+ASAN_CFLAGS = $(SANITIZER_BASE_CFLAGS) -O0 -g -fno-omit-frame-pointer -fno-inline -fsanitize=address
 override ASAN_CFLAGS += -DDSCO_INTERNAL_TESTS
 ASAN_LDFLAGS = -fsanitize=address
-UBSAN_CFLAGS = $(BASE_CFLAGS) -O0 -g -fno-omit-frame-pointer -fno-inline -fsanitize=undefined -fno-sanitize-recover=all
+UBSAN_CFLAGS = $(SANITIZER_BASE_CFLAGS) -O0 -g -fno-omit-frame-pointer -fno-inline -fsanitize=undefined -fno-sanitize-recover=all
 override UBSAN_CFLAGS += -DDSCO_INTERNAL_TESTS
 UBSAN_LDFLAGS = -fsanitize=undefined -fno-sanitize-recover=all
+TSAN_CFLAGS = $(SANITIZER_BASE_CFLAGS) -O0 -g -fno-omit-frame-pointer -fno-inline -fsanitize=thread
+override TSAN_CFLAGS += -DDSCO_INTERNAL_TESTS
+TSAN_LDFLAGS = -fsanitize=thread
+ASAN_UBSAN_CFLAGS = $(SANITIZER_BASE_CFLAGS) -O0 -g -fno-omit-frame-pointer -fno-inline -fsanitize=address,undefined -fno-sanitize-recover=all
+override ASAN_UBSAN_CFLAGS += -DDSCO_INTERNAL_TESTS
+ASAN_UBSAN_LDFLAGS = -fsanitize=address,undefined -fno-sanitize-recover=all
 DEBUG_CFLAGS = $(BASE_CFLAGS) -O0 -g -fno-omit-frame-pointer -fno-inline -DDSCO_DEV_BINARY
 PROFILE_COVERAGE_FLAGS = -finstrument-functions -fsanitize-coverage=trace-pc-guard,trace-cmp,indirect-calls,trace-div,trace-gep
 PROFILE_CFLAGS = $(BASE_CFLAGS) -O1 -g -fno-omit-frame-pointer -fno-inline \
@@ -480,6 +495,12 @@ $(ASAN_TEST_OBJ_DIR)/generated_%.o: src/generated/%.c | bake_data $(ASAN_TEST_OB
 $(UBSAN_TEST_OBJ_DIR)/generated_%.o: src/generated/%.c | bake_data $(UBSAN_TEST_OBJ_DIR)
 	$(CC) $(UBSAN_CFLAGS) -c -o $@ $<
 
+$(TSAN_TEST_OBJ_DIR)/generated_%.o: src/generated/%.c | bake_data $(TSAN_TEST_OBJ_DIR)
+	$(CC) $(TSAN_CFLAGS) -c -o $@ $<
+
+$(ASAN_UBSAN_TEST_OBJ_DIR)/generated_%.o: src/generated/%.c | bake_data $(ASAN_UBSAN_TEST_OBJ_DIR)
+	$(CC) $(ASAN_UBSAN_CFLAGS) -c -o $@ $<
+
 $(OBJ_DIR)/%.o: $(SRC_DIR)/%.c | $(OBJ_DIR)
 	@mkdir -p $(@D)
 	$(CC) $(CFLAGS) -c -o $@ $<
@@ -527,6 +548,12 @@ $(ASAN_OBJ_DIR)/gsl_%.o: gsl/src/%.c | $(ASAN_OBJ_DIR)
 
 $(UBSAN_OBJ_DIR)/gsl_%.o: gsl/src/%.c | $(UBSAN_OBJ_DIR)
 	$(CC) $(UBSAN_CFLAGS) -c -o $@ $<
+
+$(TSAN_TEST_OBJ_DIR)/gsl_%.o: gsl/src/%.c | $(TSAN_TEST_OBJ_DIR)
+	$(CC) $(TSAN_CFLAGS) -c -o $@ $<
+
+$(ASAN_UBSAN_TEST_OBJ_DIR)/gsl_%.o: gsl/src/%.c | $(ASAN_UBSAN_TEST_OBJ_DIR)
+	$(CC) $(ASAN_UBSAN_CFLAGS) -c -o $@ $<
 
 $(DEBUG_OBJ_DIR)/%.o: $(SRC_DIR)/%.c | $(DEBUG_OBJ_DIR)
 	@mkdir -p $(@D)
@@ -600,10 +627,35 @@ $(UBSAN_TEST_OBJ_DIR)/%.o: $(SRC_DIR)/%.m | $(UBSAN_TEST_OBJ_DIR)
 	@mkdir -p $(@D)
 	$(CC) $(UBSAN_CFLAGS) -fobjc-arc -x objective-c -c -o $@ $<
 
+$(TSAN_TEST_OBJ_DIR)/test.o: $(TEST_DIR)/test.c | $(TSAN_TEST_OBJ_DIR)
+	$(CC) $(TSAN_CFLAGS) -c -o $@ $<
+
+$(TSAN_TEST_OBJ_DIR)/test_%.o: $(TEST_DIR)/test_%.c | $(TSAN_TEST_OBJ_DIR)
+	$(CC) $(TSAN_CFLAGS) -c -o $@ $<
+
+$(TSAN_TEST_OBJ_DIR)/%.o: $(SRC_DIR)/%.c | $(TSAN_TEST_OBJ_DIR)
+	@mkdir -p $(@D)
+	$(CC) $(TSAN_CFLAGS) -c -o $@ $<
+
+$(TSAN_TEST_OBJ_DIR)/%.o: $(SRC_DIR)/%.m | $(TSAN_TEST_OBJ_DIR)
+	@mkdir -p $(@D)
+	$(CC) $(TSAN_CFLAGS) -fobjc-arc -x objective-c -c -o $@ $<
+
+$(ASAN_UBSAN_TEST_OBJ_DIR)/test.o: $(TEST_DIR)/test.c | $(ASAN_UBSAN_TEST_OBJ_DIR)
+	$(CC) $(ASAN_UBSAN_CFLAGS) -c -o $@ $<
+
+$(ASAN_UBSAN_TEST_OBJ_DIR)/%.o: $(SRC_DIR)/%.c | $(ASAN_UBSAN_TEST_OBJ_DIR)
+	@mkdir -p $(@D)
+	$(CC) $(ASAN_UBSAN_CFLAGS) -c -o $@ $<
+
+$(ASAN_UBSAN_TEST_OBJ_DIR)/%.o: $(SRC_DIR)/%.m | $(ASAN_UBSAN_TEST_OBJ_DIR)
+	@mkdir -p $(@D)
+	$(CC) $(ASAN_UBSAN_CFLAGS) -fobjc-arc -x objective-c -c -o $@ $<
+
 $(BUILD_DIR):
 	mkdir -p $@
 
-$(OBJ_DIR) $(DEBUG_OBJ_DIR) $(TEST_OBJ_DIR) $(TEST_COVERAGE_OBJ_DIR) $(ASAN_OBJ_DIR) $(UBSAN_OBJ_DIR) $(ASAN_TEST_OBJ_DIR) $(UBSAN_TEST_OBJ_DIR):
+$(OBJ_DIR) $(DEBUG_OBJ_DIR) $(TEST_OBJ_DIR) $(TEST_COVERAGE_OBJ_DIR) $(ASAN_OBJ_DIR) $(UBSAN_OBJ_DIR) $(ASAN_TEST_OBJ_DIR) $(UBSAN_TEST_OBJ_DIR) $(TSAN_TEST_OBJ_DIR) $(ASAN_UBSAN_TEST_OBJ_DIR):
 	mkdir -p $@
 	mkdir -p $@/extension
 
@@ -619,6 +671,15 @@ test: test_runner
 
 test_runner: $(TEST_OBJS) $(GSL_TEST_OBJS)
 	$(CC) $(TEST_CFLAGS) -o $@ $^ $(LDFLAGS) $(LDLIBS)
+
+test_runner_tsan: $(TSAN_TEST_OBJS) $(GSL_TSAN_TEST_OBJS)
+	$(CC) $(TSAN_CFLAGS) -o $@ $^ $(LDFLAGS) $(TSAN_LDFLAGS) $(LDLIBS)
+
+test_runner_asan: $(ASAN_UBSAN_TEST_OBJS) $(GSL_ASAN_UBSAN_TEST_OBJS)
+	$(CC) $(ASAN_UBSAN_CFLAGS) -o $@ $^ $(LDFLAGS) $(ASAN_UBSAN_LDFLAGS) $(LDLIBS)
+
+model-resolution-sim: $(TARGET)
+	python3 scripts/model_resolution_sim.py --dsco ./$(TARGET)
 
 # ── TUI snapshot tests (Integument golden tests) ─────────────────────────
 # Headless golden tests for deterministic render primitives. These link the
@@ -677,6 +738,11 @@ test_plan_cache: $(TEST_OBJ_DIR)/test_plan_cache.o \
 	$(TEST_OBJ_DIR)/plan_cache.o $(TEST_OBJ_DIR)/json_util.o \
 	$(TEST_OBJ_DIR)/arena_alloc.o
 	$(CC) $(TEST_CFLAGS) -o $@ $^ $(LDFLAGS) -lm
+
+test_plan_cache_tsan: $(TSAN_TEST_OBJ_DIR)/test_plan_cache.o \
+	$(TSAN_TEST_OBJ_DIR)/plan_cache.o $(TSAN_TEST_OBJ_DIR)/json_util.o \
+	$(TSAN_TEST_OBJ_DIR)/arena_alloc.o
+	$(CC) $(TSAN_CFLAGS) -o $@ $^ $(LDFLAGS) $(TSAN_LDFLAGS) -lm
 
 $(TEST_OBJ_DIR)/test_learned_cost.o: $(TEST_DIR)/test_learned_cost.c | $(TEST_OBJ_DIR)
 	$(CC) $(TEST_CFLAGS) -c -o $@ $<
@@ -936,7 +1002,8 @@ ui: $(TARGET) ui-deps
 
 .PHONY: all debug dev clean install uninstall test coverage docs docs-check \
 	profile profile-instrumented \
-	asan ubsan asan-test ubsan-test format format-check \
+	asan ubsan asan-test ubsan-test test_runner_tsan test_plan_cache_tsan test_runner_asan format format-check \
+	model-resolution-sim \
 	fast fast-build fast-test fast-quick fast-syntax fast-changed fast-bench fast-doctor \
 	changed-tests compile-commands build-report build-cache-doctor fast-objects time-trace ninja-file ninja-build \
 	lint clang-tidy cppcheck static-analysis check-version \
