@@ -17,6 +17,8 @@
 #include <errno.h>
 #include <sys/wait.h>
 #include <sys/time.h>
+#include <sys/types.h>
+#include <sys/stat.h>
 #include <fcntl.h>
 #include <poll.h>
 
@@ -264,8 +266,60 @@ static void post_spawn_register(swarm_t *s, int child_id) {
 
 /* ── Post-completion hook: update bitset, push to completion queue ────── */
 
+/* C1: durable RESULT.json envelope per completed child. Written atomically
+ * (tmp + rename) to ~/.dsco/sessions/swarm/<parent-pid>/child-<id>.RESULT.json
+ * so orchestrators (and resumed parents) can consume worker results without
+ * having held the pipe open. Envelope: id, task, model, executor, status,
+ * exit_code, duration, cost, output. */
+static void swarm_write_result_envelope(const swarm_t *s, int child_id) {
+    const swarm_child_t *c = &s->children[child_id];
+    const char *home = getenv("HOME");
+    if (!home)
+        return;
+    char dir[600];
+    snprintf(dir, sizeof(dir), "%s/.dsco/sessions", home);
+    mkdir(dir, 0755);
+    snprintf(dir, sizeof(dir), "%s/.dsco/sessions/swarm", home);
+    mkdir(dir, 0755);
+    snprintf(dir, sizeof(dir), "%s/.dsco/sessions/swarm/%d", home, (int)getpid());
+    mkdir(dir, 0755);
+    char tmp[700], fin[700];
+    snprintf(fin, sizeof(fin), "%s/child-%d.RESULT.json", dir, child_id);
+    snprintf(tmp, sizeof(tmp), "%s.tmp", fin);
+    FILE *f = fopen(tmp, "w");
+    if (!f)
+        return;
+    jbuf_t b;
+    jbuf_init(&b, 1024 + c->output_len);
+    jbuf_append(&b, "{\"id\":");
+    jbuf_append_int(&b, c->id);
+    jbuf_append(&b, ",\"task\":");
+    jbuf_append_json_str(&b, c->task);
+    jbuf_append(&b, ",\"model\":");
+    jbuf_append_json_str(&b, c->model);
+    jbuf_append(&b, ",\"status\":");
+    jbuf_append_json_str(&b, swarm_status_str(c->status));
+    jbuf_append(&b, ",\"exit_code\":");
+    jbuf_append_int(&b, c->exit_code);
+    char num[96];
+    snprintf(num, sizeof(num), ",\"duration_s\":%.3f,\"cost_usd\":%.6f",
+             c->end_time > c->start_time ? c->end_time - c->start_time : 0.0,
+             c->reported_cost_usd > 0 ? c->reported_cost_usd : c->est_cost_usd);
+    jbuf_append(&b, num);
+    jbuf_append(&b, ",\"output\":");
+    jbuf_append_json_str(&b, c->output ? c->output : "");
+    jbuf_append(&b, "}\n");
+    fwrite(b.data, 1, b.len, f);
+    fflush(f);
+    fsync(fileno(f));
+    fclose(f);
+    rename(tmp, fin);
+    jbuf_free(&b);
+}
+
 static void post_complete(swarm_t *s, int child_id) {
     bitset_clear(&s->active, child_id);
+    swarm_write_result_envelope(s, child_id);
     cq_push(&s->done_q, child_id);
     if (s->first_completion_time == 0)
         s->first_completion_time = now_sec();
