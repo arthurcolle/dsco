@@ -17,6 +17,7 @@
 #include "md.h"
 #include "baseline.h"
 #include "chronicle.h"
+#include "callbacks.h"
 #include "setup.h"
 #include "provider.h"
 #include "provider_pool.h"
@@ -2420,6 +2421,7 @@ static void usage(const char *prog) {
         "  -i, --interactive      Start an interactive REPL (no prompt required)\n"
         "  --autonomous           No routine approval prompts; trusted tier; critical gates still fail closed\n"
         "  --sandboxed            Untrusted tier: route exec tools through sandbox_run, block writes/network/control-plane\n"
+        "  --systems-agent        UNGOVERNED control arm: disable the entire governance gate (unbounded permissions) for A/B overhead experiments\n"
         "  --approval-mode MODE   ask|strict|never (never skips routine prompts)\n"
         "  --trust-tier TIER      standard|trusted|untrusted tool permission tier\n"
         "  --local                Use LM Studio locally (default model: liquid/lfm2.5-1.2b)\n"
@@ -3181,6 +3183,23 @@ static bool main_apply_runtime_mode_flags(int argc, char **argv) {
             saw_mode = true;
             continue;
         }
+        /* --systems-agent: the UNGOVERNED control arm for governance-overhead
+           A/B experiments. Unbounded permissions — the entire governance gate
+           (hardcoded/budget/killswitch/OODA/authorize/audit/shadow) is bypassed.
+           No safety envelope. Use only to measure governance cost empirically. */
+        if (strcmp(argv[i], "--systems-agent") == 0) {
+            setenv("DSCO_GOV_MODEL", "none", 1);
+            setenv("DSCO_GOV_BYPASS", "1", 1);
+            setenv("DSCO_TRUST_TIER", "trusted", 1);
+            setenv("DSCO_APPROVAL_MODE", "never", 1);
+            setenv("DSCO_APPROVAL_NEVER", "1", 1);
+            setenv("DSCO_NO_APPROVAL_PROMPTS", "1", 1);
+            fprintf(stderr,
+                    "\x1b[1;31m[systems-agent] GOVERNANCE DISABLED — unbounded "
+                    "permissions; ungoverned control arm.\x1b[0m\n");
+            saw_mode = true;
+            continue;
+        }
         if (strcmp(argv[i], "--trust-tier") == 0 && i + 1 < argc) {
             bool ok = false;
             (void)session_trust_tier_from_string(argv[i + 1], &ok);
@@ -3499,6 +3518,12 @@ int main(int argc, char **argv) {
      * manages its own config + auth and never touches the keychain. */
     if (argc >= 2 && strcmp(argv[1], "tools") == 0)
         return toolmgmt_cli(argc, argv);
+
+    if (argc >= 2 && strcmp(argv[1], "runs") == 0)
+        return chronicle_runs_cli(argc, argv);
+
+    if (argc >= 2 && strcmp(argv[1], "callbacks") == 0)
+        return callbacks_cli(argc, argv);
 
     /* `dsco mcp serve [--toolsets core,ast] [--tier untrusted|trusted]` — run dsco as an
      * MCP server over stdio (Plan 05, harness-parity). Exposes curated
