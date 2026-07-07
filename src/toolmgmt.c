@@ -646,6 +646,20 @@ static void tm_reg_cb(const char *el, void *ctx) {
     if (!schema_raw)
         schema_raw = json_get_raw(scope, "schema");
 
+    char *output_schema_raw = json_get_raw(scope, "output_schema");
+    if (!output_schema_raw)
+        output_schema_raw = json_get_raw(scope, "outputSchema");
+    if (!output_schema_raw)
+        output_schema_raw = json_get_raw(scope, "result_schema");
+    if (!output_schema_raw)
+        output_schema_raw = json_get_raw(scope, "resultSchema");
+    if (!output_schema_raw)
+        output_schema_raw = json_get_raw(scope, "response_schema");
+    if (!output_schema_raw)
+        output_schema_raw = json_get_raw(scope, "responseSchema");
+    if (!output_schema_raw)
+        output_schema_raw = json_get_raw(scope, "returns");
+
     jbuf_t schema;
     jbuf_init(&schema, 384);
     if (schema_raw && schema_raw[0]) {
@@ -660,6 +674,28 @@ static void tm_reg_cb(const char *el, void *ctx) {
         jbuf_append(&schema, "},\"required\":[");
         jbuf_append(&schema, sc.req.data ? sc.req.data : "");
         jbuf_append(&schema, "]}");
+        jbuf_free(&sc.props);
+        jbuf_free(&sc.req);
+    }
+
+    jbuf_t output_schema;
+    jbuf_init(&output_schema, 384);
+    if (output_schema_raw && output_schema_raw[0]) {
+        jbuf_append(&output_schema, output_schema_raw);
+    } else {
+        tm_schema_ctx_t sc = {0};
+        jbuf_init(&sc.props, 256);
+        jbuf_init(&sc.req, 64);
+        json_array_foreach(scope, "outputs", tm_input_cb, &sc);
+        if (sc.nprops > 0) {
+            jbuf_append(&output_schema, "{\"type\":\"object\",\"properties\":{");
+            jbuf_append(&output_schema, sc.props.data ? sc.props.data : "");
+            jbuf_append(&output_schema, "},\"required\":[");
+            jbuf_append(&output_schema, sc.req.data ? sc.req.data : "");
+            jbuf_append(&output_schema, "]}");
+        } else {
+            jbuf_append(&output_schema, tools_default_output_schema_json());
+        }
         jbuf_free(&sc.props);
         jbuf_free(&sc.req);
     }
@@ -679,13 +715,16 @@ static void tm_reg_cb(const char *el, void *ctx) {
     if (remote_id && remote_id[0])
         jbuf_appendf(&full_desc, " [tool_id:%s]", remote_id);
 
-    tools_register_external(dsco_name, full_desc.data ? full_desc.data : "", schema.data,
-                            tm_external_cb, safe_strdup(remote_id));
+    tools_register_external_with_output(dsco_name, full_desc.data ? full_desc.data : "",
+                                        schema.data, output_schema.data, tm_external_cb,
+                                        safe_strdup(remote_id));
     rc->count++;
 
     jbuf_free(&full_desc);
     jbuf_free(&schema);
+    jbuf_free(&output_schema);
     free(schema_raw);
+    free(output_schema_raw);
     free(tool_id);
     free(tool_obj);
     free(name);

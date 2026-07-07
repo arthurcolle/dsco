@@ -80,6 +80,8 @@ extern void dsco_net_routes_register(void *srv_opaque);
 #include "startup.h"
 #include "local_llm.h"
 #include "structured_process.h"
+#include "command_plane.h"
+#include "gov_experiment.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -102,6 +104,7 @@ extern void dsco_net_routes_register(void *srv_opaque);
 #include <limits.h>
 #include <glob.h>
 #include <sys/stat.h>
+#include <dirent.h>
 #include <execinfo.h>
 #ifdef __APPLE__
 #include <mach-o/dyld.h>
@@ -2382,6 +2385,119 @@ save_active:
     return 0;
 }
 
+static void command_cli_print_record(const command_record_t *rec) {
+    if (!rec) return;
+    printf("id=%s\n", rec->id);
+    printf("kind=%s\n", rec->kind);
+    printf("status=%s\n", command_plane_status_name(rec->status));
+    printf("attempt_count=%d\n", rec->attempt_count);
+    printf("created_at=%lld\n", (long long)rec->created_at_unix);
+    printf("updated_at=%lld\n", (long long)rec->updated_at_unix);
+    if (rec->idempotency_key[0]) printf("idempotency_key=%s\n", rec->idempotency_key);
+    if (rec->request_hash[0]) printf("request_hash=%s\n", rec->request_hash);
+    if (rec->result_json[0]) printf("result_json=%s\n", rec->result_json);
+    if (rec->error[0]) printf("error=%s\n", rec->error);
+}
+
+static void command_cli_usage(FILE *out, const char *prog) {
+    fprintf(out,
+            "Usage:\n"
+            "  %s command begin <kind> [idempotency_key] [request_hash]\n"
+            "  %s command get <command_id>\n"
+            "  %s command get-key <idempotency_key>\n"
+            "  %s command complete <command_id> [result_json]\n"
+            "  %s command fail <command_id> [error]\n",
+            prog, prog, prog, prog, prog);
+}
+
+static int command_cli(int argc, char **argv) {
+    if (argc < 3 || strcmp(argv[2], "-h") == 0 || strcmp(argv[2], "--help") == 0) {
+        command_cli_usage(argc < 3 ? stderr : stdout, argv[0]);
+        return argc < 3 ? 1 : 0;
+    }
+
+    command_plane_t cp;
+    if (command_plane_open(&cp, NULL) != COMMAND_PLANE_OK) {
+        fprintf(stderr, "error: failed to open command plane\n");
+        return 1;
+    }
+
+    int rc = 0;
+    const char *sub = argv[2];
+    if (strcmp(sub, "begin") == 0) {
+        if (argc < 4) {
+            command_cli_usage(stderr, argv[0]);
+            rc = 1;
+            goto out;
+        }
+        command_record_t rec;
+        command_plane_begin_t brc = command_plane_begin(&cp, &rec, argv[3], argc >= 5 ? argv[4] : NULL, argc >= 6 ? argv[5] : NULL);
+        if (brc == COMMAND_PLANE_BEGIN_ERROR) {
+            fprintf(stderr, "error: command begin failed\n");
+            rc = 1;
+            goto out;
+        }
+        if (brc == COMMAND_PLANE_BEGIN_CONFLICT) {
+            fprintf(stderr, "error: idempotency conflict\n");
+            command_cli_print_record(&rec);
+            rc = 2;
+            goto out;
+        }
+        printf("begin=%s\n", brc == COMMAND_PLANE_BEGIN_REPLAY ? "replay" : "new");
+        command_cli_print_record(&rec);
+    } else if (strcmp(sub, "get") == 0 || strcmp(sub, "get-key") == 0) {
+        if (argc < 4) {
+            command_cli_usage(stderr, argv[0]);
+            rc = 1;
+            goto out;
+        }
+        command_record_t rec;
+        int grc = strcmp(sub, "get") == 0 ? command_plane_get_by_id(&cp, argv[3], &rec)
+                                          : command_plane_get_by_idempotency_key(&cp, argv[3], &rec);
+        if (grc == COMMAND_PLANE_NOT_FOUND) {
+            fprintf(stderr, "error: command not found\n");
+            rc = 1;
+            goto out;
+        }
+        if (grc != COMMAND_PLANE_OK) {
+            fprintf(stderr, "error: command lookup failed\n");
+            rc = 1;
+            goto out;
+        }
+        command_cli_print_record(&rec);
+    } else if (strcmp(sub, "complete") == 0 || strcmp(sub, "fail") == 0) {
+        if (argc < 4) {
+            command_cli_usage(stderr, argv[0]);
+            rc = 1;
+            goto out;
+        }
+        int urc = strcmp(sub, "complete") == 0 ? command_plane_complete(&cp, argv[3], argc >= 5 ? argv[4] : "{}")
+                                                : command_plane_fail(&cp, argv[3], argc >= 5 ? argv[4] : "failed");
+        if (urc == COMMAND_PLANE_NOT_FOUND) {
+            fprintf(stderr, "error: command not found\n");
+            rc = 1;
+            goto out;
+        }
+        if (urc != COMMAND_PLANE_OK) {
+            fprintf(stderr, "error: command update failed\n");
+            rc = 1;
+            goto out;
+        }
+        command_record_t rec;
+        if (command_plane_get_by_id(&cp, argv[3], &rec) == COMMAND_PLANE_OK)
+            command_cli_print_record(&rec);
+        else
+            printf("ok\n");
+    } else {
+        command_cli_usage(stderr, argv[0]);
+        rc = 1;
+    }
+
+out:
+    command_plane_close(&cp);
+    return rc;
+}
+
 static void usage(const char *prog) {
     fprintf(stderr,
         "dsco v%s — thin agentic CLI (streaming + prompt caching)\n"
@@ -2390,6 +2506,7 @@ static void usage(const char *prog) {
         "       %s login          Choose Claude Code or ChatGPT Codex backend\n"
         "       %s status         Show auth state and account info for all backends\n"
         "       %s config [show|init|validate|ingest|explain|metadata]  DSCO Config Registry\n"
+        "       %s command <begin|get|get-key|complete|fail> ...  Durable command plane\n"
         "\n"
         "Options:\n"
         "  -m, --model MODEL      Model name (default: %s)\n"
@@ -2426,6 +2543,7 @@ static void usage(const char *prog) {
         "  --autonomous           No routine approval prompts; trusted tier; critical gates still fail closed\n"
         "  --sandboxed            Untrusted tier: route exec tools through sandbox_run, block writes/network/control-plane\n"
         "  --systems-agent        UNGOVERNED control arm (gov model=none) + native networking hooks: mesh P2P/DHT/TLS up, fleet fanout enabled\n"
+        "  runtime status|gov|power|bench  Native runtime control-plane introspection and microbenchmarks\n"
         "  --gov-model MODEL      Governance model: none|minimal|audit|standard|paranoid (see `governance experiment`)\n"
         "  --approval-mode MODE   ask|strict|never (never skips routine prompts)\n"
         "  --trust-tier TIER      standard|trusted|untrusted tool permission tier\n"
@@ -2460,7 +2578,7 @@ static void usage(const char *prog) {
         "  DSCO_PARALLEL_TOOL_CALLS  Hosted OpenAI-compatible parallel tool calls (default on; 0 disables)\n"
         "  DSCO_BUDGET         Session cost budget in dollars (0=unlimited)\n"
         "  DSCO_DAILY_BUDGET   Daily cost budget in dollars (0=unlimited)\n",
-    DSCO_VERSION, prog, prog, prog, prog, DEFAULT_MODEL, prog, prog, prog);
+    DSCO_VERSION, prog, prog, prog, prog, prog, DEFAULT_MODEL, prog, prog, prog);
 }
 
 static void print_topology_list(void) {
@@ -3425,6 +3543,200 @@ static int maybe_run_introspect_fast_path(int argc, char **argv, int i) {
     return -1;
 }
 
+
+/* ── Runtime Control Plane: native operator surface ───────────────────────
+   `dsco runtime ...` makes the runtime more inspectable and benchmarkable
+   without involving an LLM call. It is intentionally pre-agent: status, power,
+   governance-model telemetry, fleet shape, and hot-path microbenchmarks are
+   available as direct process commands for scripts, dashboards, and demos. */
+
+typedef struct {
+    int fleet_hosts;
+    int readable_hosts;
+    int malformed_hosts;
+} runtime_fleet_stats_t;
+
+static runtime_fleet_stats_t runtime_scan_fleet(void) {
+    runtime_fleet_stats_t st = {0};
+    const char *home = getenv("HOME");
+    if (!home || !home[0])
+        return st;
+    char dir[PATH_MAX];
+    snprintf(dir, sizeof(dir), "%s/bridge/fleet", home);
+    DIR *d = opendir(dir);
+    if (!d)
+        return st;
+    struct dirent *ent;
+    while ((ent = readdir(d)) != NULL) {
+        if (ent->d_name[0] == '.')
+            continue;
+        const char *dot = strrchr(ent->d_name, '.');
+        if (!dot || strcmp(dot, ".host") != 0)
+            continue;
+        st.fleet_hosts++;
+        char path[PATH_MAX];
+        snprintf(path, sizeof(path), "%s/%s", dir, ent->d_name);
+        FILE *f = fopen(path, "r");
+        if (!f) {
+            st.malformed_hosts++;
+            continue;
+        }
+        char line[512];
+        bool ok = fgets(line, sizeof(line), f) != NULL &&
+                  (strstr(line, "HOST=") || strstr(line, "ADDR=") || strstr(line, "host="));
+        fclose(f);
+        if (ok)
+            st.readable_hosts++;
+        else
+            st.malformed_hosts++;
+    }
+    closedir(d);
+    return st;
+}
+
+static void runtime_print_json_string(FILE *out, const char *s) {
+    fputc('"', out);
+    if (s) {
+        for (const unsigned char *p = (const unsigned char *)s; *p; p++) {
+            switch (*p) {
+                case '\\': fputs("\\\\", out); break;
+                case '"':  fputs("\\\"", out); break;
+                case '\n': fputs("\\n", out); break;
+                case '\r': fputs("\\r", out); break;
+                case '\t': fputs("\\t", out); break;
+                default:
+                    if (*p < 0x20)
+                        fprintf(out, "\\u%04x", *p);
+                    else
+                        fputc(*p, out);
+            }
+        }
+    }
+    fputc('"', out);
+}
+
+static int runtime_cli_status_json(void) {
+    int builtins = tools_builtin_count();
+    int core = tools_get_core_count();
+    int loaded = tools_loaded_builtin_count();
+    int external = tools_external_count();
+    unsigned long gate_calls = 0, bypassed = 0;
+    double gate_ms = 0;
+    tools_governance_experiment_stats(&gate_calls, &bypassed, &gate_ms);
+    runtime_fleet_stats_t fleet = runtime_scan_fleet();
+
+    printf("{\n");
+    printf("  \"runtime\": \"dsco\",\n");
+    printf("  \"version\": "); runtime_print_json_string(stdout, DSCO_VERSION); printf(",\n");
+    printf("  \"branch\": "); runtime_print_json_string(stdout, getenv("DSCO_GIT_BRANCH")); printf(",\n");
+    printf("  \"governance_model\": "); runtime_print_json_string(stdout, gov_model_name(gov_experiment_model())); printf(",\n");
+    printf("  \"systems_agent\": %s,\n", gov_experiment_model() == GOV_MODEL_NONE ? "true" : "false");
+    printf("  \"tools\": {\"builtin\": %d, \"core\": %d, \"loaded_builtin\": %d, \"external\": %d},\n",
+           builtins, core, loaded, external);
+    printf("  \"governance_telemetry\": {\"gate_calls\": %lu, \"bypassed\": %lu, \"gate_ms_total\": %.4f, \"gate_ms_avg\": %.6f},\n",
+           gate_calls, bypassed, gate_ms, gate_calls ? gate_ms / (double)gate_calls : 0.0);
+    printf("  \"fleet\": {\"configured_hosts\": %d, \"readable_hosts\": %d, \"malformed_hosts\": %d},\n",
+           fleet.fleet_hosts, fleet.readable_hosts, fleet.malformed_hosts);
+    printf("  \"env\": {\"DSCO_GOV_MODEL\": "); runtime_print_json_string(stdout, getenv("DSCO_GOV_MODEL"));
+    printf(", \"DSCO_APPROVAL_MODE\": "); runtime_print_json_string(stdout, getenv("DSCO_APPROVAL_MODE"));
+    printf(", \"DSCO_TRUST_TIER\": "); runtime_print_json_string(stdout, getenv("DSCO_TRUST_TIER"));
+    printf("}\n}\n");
+    return 0;
+}
+
+static int runtime_cli_gov_json(void) {
+    char buf[16384];
+    gov_experiment_report_json(buf, sizeof(buf));
+    puts(buf);
+    return 0;
+}
+
+static int runtime_cli_power(void) {
+    int builtins = tools_builtin_count();
+    int external = tools_external_count();
+    int core = tools_get_core_count();
+    runtime_fleet_stats_t fleet = runtime_scan_fleet();
+    gov_model_t gm = gov_experiment_model();
+
+    int score = 0;
+    score += builtins >= 150 ? 20 : builtins / 8;
+    score += external > 0 ? 15 : 0;
+    score += core >= 5 ? 10 : core;
+    score += gm == GOV_MODEL_NONE ? 18 : (gm == GOV_MODEL_AUDIT_ONLY ? 14 : 10);
+    score += fleet.readable_hosts > 0 ? 15 : 0;
+    score += getenv("DSCO_SYSTEMS_AGENT_NATIVE_NET") ? 10 : 0;
+    if (score > 100) score = 100;
+
+    printf("DSCO runtime power index: %d/100\n", score);
+    printf("  tools: builtin=%d core=%d external=%d loaded=%d\n",
+           builtins, core, external, tools_loaded_builtin_count());
+    printf("  governance: model=%s (%s)\n", gov_model_name(gm),
+           gm == GOV_MODEL_NONE ? "ungoverned control arm" :
+           gm == GOV_MODEL_AUDIT_ONLY ? "shadow/audit model" : "enforcing model");
+    printf("  fleet: hosts=%d readable=%d malformed=%d\n",
+           fleet.fleet_hosts, fleet.readable_hosts, fleet.malformed_hosts);
+    printf("  native net: %s\n", getenv("DSCO_SYSTEMS_AGENT_NATIVE_NET") ? "enabled" : "default/off");
+    printf("\nNext power moves:\n");
+    printf("  1. dsco runtime bench 10000     # measure local hot-path dispatch overhead\n");
+    printf("  2. dsco --systems-agent runtime status --json  # inspect ungoverned control arm\n");
+    printf("  3. dsco fleet                   # inspect configured remote execution surface\n");
+    return 0;
+}
+
+static int runtime_cli_bench(int argc, char **argv) {
+    int n = 10000;
+    if (argc >= 4) {
+        int v = atoi(argv[3]);
+        if (v > 0 && v <= 1000000) n = v;
+    }
+    struct timespec t0, t1;
+    clock_gettime(CLOCK_MONOTONIC, &t0);
+    int sum = 0;
+    for (int i = 0; i < n; i++) {
+        sum += tools_builtin_count();
+        sum += tools_get_core_count();
+        (void)gov_experiment_model();
+    }
+    clock_gettime(CLOCK_MONOTONIC, &t1);
+    double ms = (t1.tv_sec - t0.tv_sec) * 1000.0 + (t1.tv_nsec - t0.tv_nsec) / 1e6;
+    printf("{\"iterations\":%d,\"elapsed_ms\":%.4f,\"ns_per_iter\":%.2f,\"checksum\":%d}\n",
+           n, ms, (ms * 1000000.0) / (double)n, sum);
+    return 0;
+}
+
+static void runtime_cli_usage(FILE *out, const char *argv0) {
+    fprintf(out,
+            "Usage: %s runtime <status|gov|power|bench> [args]\n"
+            "\n"
+            "Native runtime control-plane commands (no LLM call):\n"
+            "  runtime status [--json]   Emit live runtime/tool/governance/fleet status JSON\n"
+            "  runtime gov [--reset]     Emit governance-model experiment telemetry JSON\n"
+            "  runtime power             Human-readable runtime power index + next moves\n"
+            "  runtime bench [N]         Microbenchmark local dispatch/accounting surfaces\n",
+            argv0);
+}
+
+static int runtime_cli(int argc, char **argv) {
+    const char *sub = argc >= 3 ? argv[2] : "status";
+    if (strcmp(sub, "-h") == 0 || strcmp(sub, "--help") == 0 || strcmp(sub, "help") == 0) {
+        runtime_cli_usage(stdout, argv[0]);
+        return 0;
+    }
+    if (strcmp(sub, "status") == 0 || strcmp(sub, "json") == 0)
+        return runtime_cli_status_json();
+    if (strcmp(sub, "gov") == 0 || strcmp(sub, "governance") == 0) {
+        if (argc >= 4 && strcmp(argv[3], "--reset") == 0)
+            gov_experiment_reset();
+        return runtime_cli_gov_json();
+    }
+    if (strcmp(sub, "power") == 0)
+        return runtime_cli_power();
+    if (strcmp(sub, "bench") == 0 || strcmp(sub, "benchmark") == 0)
+        return runtime_cli_bench(argc, argv);
+    runtime_cli_usage(stderr, argv[0]);
+    return 2;
+}
+
 static int maybe_run_pre_chronicle_fast_path(int argc, char **argv,
                                              dsco_profile_t profile) {
     if (profile != DSCO_PROFILE_LITE && profile != DSCO_PROFILE_WORKER)
@@ -3564,6 +3876,24 @@ int main(int argc, char **argv) {
 
     if (argc >= 2 && strcmp(argv[1], "callbacks") == 0)
         return callbacks_cli(argc, argv);
+
+    if (argc >= 2 && strcmp(argv[1], "command") == 0)
+        return command_cli(argc, argv);
+
+    if (argc >= 2 && strcmp(argv[1], "runtime") == 0)
+        return runtime_cli(argc, argv);
+    /* Also support global flags before the subcommand, e.g.
+       `dsco --systems-agent runtime status --json`. */
+    for (int ri = 2; ri < argc; ri++) {
+        if (strcmp(argv[ri], "runtime") == 0) {
+            char *rargv[32];
+            int rargc = 0;
+            rargv[rargc++] = argv[0];
+            for (int j = ri; j < argc && rargc < (int)(sizeof(rargv) / sizeof(rargv[0])); j++)
+                rargv[rargc++] = argv[j];
+            return runtime_cli(rargc, rargv);
+        }
+    }
 
     /* `dsco mcp serve [--toolsets core,ast] [--tier untrusted|trusted]` — run dsco as an
      * MCP server over stdio (Plan 05, harness-parity). Exposes curated

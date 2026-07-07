@@ -9825,6 +9825,9 @@ static bool tool_task_profile(const char *input, char *result, size_t rlen) {
     return true;
 }
 
+static void swarm_v1_default_run_id(swarm_t *sw, int gid, const char *topology, char *buf, size_t n);
+static void swarm_v1_append_artifact_fields(jbuf_t *b, const char *run_id, const char *artifact_dir);
+
 static bool tool_create_swarm(const char *input, char *result, size_t rlen) {
     ensure_swarm();
 
@@ -9943,7 +9946,15 @@ static bool tool_create_swarm(const char *input, char *result, size_t rlen) {
         jbuf_append_json_str(&b, c->model);
         jbuf_append(&b, "}");
     }
-    jbuf_append(&b, "]}");
+    jbuf_append(&b, "]");
+    char run_id[256];
+    char artifact_dir[1024] = {0};
+    swarm_v1_default_run_id(&g_swarm, gid, "create", run_id, sizeof(run_id));
+    if (swarm_group_persist_run(&g_swarm, gid, run_id, "create", g->name, NULL,
+                                artifact_dir, sizeof(artifact_dir)) == 0) {
+        swarm_v1_append_artifact_fields(&b, run_id, artifact_dir);
+    }
+    jbuf_append(&b, "}");
 
     int written = (int)b.len < (int)rlen - 1 ? (int)b.len : (int)rlen - 1;
     memcpy(result, b.data, written);
@@ -9964,9 +9975,65 @@ static bool tool_swarm_status(const char *input, char *result, size_t rlen) {
         snprintf(result, rlen, "error: group_id required");
         return false;
     }
+    if (gid >= g_swarm.group_count) {
+        snprintf(result, rlen, "{\"error\":\"invalid group_id\"}");
+        return false;
+    }
 
-    swarm_group_status_json(&g_swarm, gid, result, rlen);
+    char status_json[16384];
+    char frame[8192];
+    char run_id[256];
+    swarm_v1_default_run_id(&g_swarm, gid, "status", run_id, sizeof(run_id));
+    swarm_group_status_json(&g_swarm, gid, status_json, sizeof(status_json));
+    swarm_group_render_frame(&g_swarm, gid, run_id, "status", frame, sizeof(frame));
+    jbuf_t b;
+    jbuf_init(&b, 16384);
+    jbuf_append(&b, "{\"group_id\":");
+    jbuf_append_int(&b, gid);
+    jbuf_append(&b, ",\"frame\":");
+    jbuf_append_json_str(&b, frame);
+    jbuf_append(&b, ",\"status\":");
+    jbuf_append(&b, status_json);
+    jbuf_append(&b, "}");
+    int written = (int)b.len < (int)rlen - 1 ? (int)b.len : (int)rlen - 1;
+    memcpy(result, b.data, written);
+    result[written] = '\0';
+    jbuf_free(&b);
     return true;
+}
+
+
+static void swarm_v1_default_run_id(swarm_t *sw, int gid, const char *topology, char *buf, size_t n) {
+    if (!buf || n == 0) return;
+    const char *name = "swarm";
+    if (sw && gid >= 0 && gid < sw->group_count && sw->groups[gid].name[0])
+        name = sw->groups[gid].name;
+    char safe[128];
+    size_t j = 0;
+    for (size_t i = 0; name[i] && j + 1 < sizeof(safe); i++) {
+        unsigned char c = (unsigned char)name[i];
+        if ((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') ||
+            (c >= '0' && c <= '9') || c == '-' || c == '_') safe[j++] = (char)c;
+        else safe[j++] = '_';
+    }
+    safe[j] = '\0';
+    snprintf(buf, n, "swarm_%ld_g%d_%s_%s", (long)time(NULL), gid,
+             topology && topology[0] ? topology : "run", safe[0] ? safe : "unnamed");
+}
+
+static void swarm_v1_append_artifact_fields(jbuf_t *b, const char *run_id, const char *artifact_dir) {
+    if (!b || !artifact_dir || !artifact_dir[0]) return;
+    jbuf_append(b, ",\"run_id\":");
+    jbuf_append_json_str(b, run_id ? run_id : "");
+    jbuf_append(b, ",\"artifact_path\":");
+    jbuf_append_json_str(b, artifact_dir);
+    jbuf_append(b, ",\"artifacts\":{");
+    jbuf_append(b, "\"manifest\":"); jbuf_append_json_str(b, "/manifest.json");
+    jbuf_append(b, ",\"transcript\":"); jbuf_append_json_str(b, "/transcript.md");
+    jbuf_append(b, ",\"coordinator\":"); jbuf_append_json_str(b, "/coordinator.md");
+    jbuf_append(b, ",\"claims\":"); jbuf_append_json_str(b, "/claims.json");
+    jbuf_append(b, ",\"metrics\":"); jbuf_append_json_str(b, "/metrics.json");
+    jbuf_append(b, "}");
 }
 
 static void swarm_collect_results(swarm_t *sw, int gid, char *result, size_t rlen, bool complete,
@@ -10051,7 +10118,15 @@ static void swarm_collect_results(swarm_t *sw, int gid, char *result, size_t rle
         }
         jbuf_append(&b, "}");
     }
-    jbuf_append(&b, "]}");
+    jbuf_append(&b, "]");
+    char run_id[256];
+    char artifact_dir[1024] = {0};
+    swarm_v1_default_run_id(sw, gid, "collect", run_id, sizeof(run_id));
+    if (swarm_group_persist_run(sw, gid, run_id, "collect", g->name, NULL,
+                                artifact_dir, sizeof(artifact_dir)) == 0) {
+        swarm_v1_append_artifact_fields(&b, run_id, artifact_dir);
+    }
+    jbuf_append(&b, "}");
 
     int written = (int)b.len < (int)rlen - 1 ? (int)b.len : (int)rlen - 1;
     memcpy(result, b.data, written);
@@ -10714,7 +10789,15 @@ static bool tool_swarm_map_reduce(const char *input, char *result, size_t rlen) 
         jbuf_append_json_str(&b, swarm_status_str(c->status));
         jbuf_append(&b, "}");
     }
-    jbuf_append(&b, "]}");
+    jbuf_append(&b, "]");
+    char run_id[256];
+    char artifact_dir[1024] = {0};
+    swarm_v1_default_run_id(&g_swarm, gid, "map_reduce", run_id, sizeof(run_id));
+    if (swarm_group_persist_run(&g_swarm, gid, run_id, "map_reduce", name, coord_out,
+                                artifact_dir, sizeof(artifact_dir)) == 0) {
+        swarm_v1_append_artifact_fields(&b, run_id, artifact_dir);
+    }
+    jbuf_append(&b, "}");
 
     int written = (int)b.len < (int)rlen - 1 ? (int)b.len : (int)rlen - 1;
     memcpy(result, b.data, written);

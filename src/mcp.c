@@ -3,6 +3,7 @@
 #include "json_util.h"
 #include "config.h"
 #include "mcp_names.h"
+#include "tools.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -822,11 +823,15 @@ static void parse_tool_entry(const char *json, void *ctx) {
     char *name = json_get_str(json, "name");
     char *desc = json_get_str(json, "description");
     char *schema = json_get_raw(json, "inputSchema");
+    char *output_schema = json_get_raw(json, "outputSchema");
+    if (!output_schema)
+        output_schema = json_get_raw(json, "output_schema");
 
     if (!name || !name[0]) {
         free(name);
         free(desc);
         free(schema);
+        free(output_schema);
         return;
     }
 
@@ -854,6 +859,13 @@ static void parse_tool_entry(const char *json, void *ctx) {
     } else {
         snprintf(tool->input_schema, sizeof(tool->input_schema),
                  "{\"type\":\"object\",\"properties\":{}}");
+    }
+    if (output_schema) {
+        snprintf(tool->output_schema, sizeof(tool->output_schema), "%s", output_schema);
+        free(output_schema);
+    } else {
+        snprintf(tool->output_schema, sizeof(tool->output_schema), "%s",
+                 tools_default_output_schema_json());
     }
     tool->server_idx = tlc->server_idx;
     reg->tool_count++;

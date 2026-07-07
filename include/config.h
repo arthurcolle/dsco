@@ -29,18 +29,18 @@
 /* Tool register file: hard cap on tools per API request.
  * Like CPU registers — 32 slots max, tools evicted/loaded dynamically.
  * bash+python always core; everything else loaded via load_tools/hints.
- * Budget-adaptive: full=32, mid=24, low=13, critical=5 */
+ * Budget-adaptive: full=32, mid=24, low=14, critical=7 */
 #define TOOL_REGISTER_CAP       32
-#define TOOL_REG_ALWAYS          6   /* R0-R5:   bash,python,discover,load,loop */
-#define TOOL_REG_WARM           11   /* file I/O + run_command, evictable */
+#define TOOL_REG_ALWAYS          7   /* R0-R6: bash,python,discover,load,evict,loop */
+#define TOOL_REG_WARM           10   /* file I/O + run_command, evictable */
 #define TOOL_REG_WORKING        11   /* quorum-scored, turn-volatile */
 #define TOOL_REG_DISCOVERY       4   /* R28-R31: progressive schema, ephemeral */
 #define QUORUM_MIN_SIGNALS       2   /* min independent signals to load a tool */
 #define MAX_INPUT_LINE      65536
 
-/* --cheap mode: send only ALWAYS-core tools (5) + skip compact catalog.
+/* --cheap mode: send only ALWAYS-core tools + skip compact catalog.
  * Cuts first-prompt cost from ~$0.40 to ~$0.05 by evicting all tools
- * except discover_tools/load_tools (which let the model page them in). */
+ * except discover_tools/load_tools/evict_tools (which let the model page them in/out). */
 extern int g_cheap_mode;
 
 /* API defaults */
@@ -557,16 +557,16 @@ static inline bool dsco_effort_store(char *dst, size_t dst_len, const char *effo
 /* Cheap-mode system prompt: minimal, no catalog reference, teaches discover/load */
 #define SYSTEM_PROMPT_CHEAP \
     "You are dsco, an agentic CLI with 364+ tools.\n" \
-    "You are running in CHEAP MODE — only 5 core tools are loaded to minimize cost.\n\n" \
+    "You are running in CHEAP MODE — only the minimal core tool register is loaded to minimize cost.\n\n" \
     "YOUR ACTIVE TOOLS:\n" \
     "  bash          — run shell commands\n" \
     "  python        — execute Python code\n" \
     "  discover_tools — browse all 364+ tools by category\n" \
     "  load_tools    — page in tools you need (they become callable immediately)\n" \
-    "  self_exit     — end session\n\n" \
+    "  evict_tools   — unload tools you no longer need\n\n" \
     "WORKFLOW: For any task beyond bash/python, call discover_tools to find " \
-    "relevant tools, then load_tools to activate them. Use AskUserQuestion for needed user clarification/follow-up instead of guessing. Loaded tools persist " \
-    "for the session. Categories: file_io, git, network, shell, code, crypto, " \
+    "relevant tools, then load_tools to activate them. Use evict_tools to keep the active set small. Use AskUserQuestion for needed user clarification/follow-up instead of guessing. Loaded tools persist " \
+    "until evicted. Categories: file_io, git, network, shell, code, crypto, " \
     "swarm, ast, pipeline, math, search, general, finance, prediction, memory.\n\n" \
     "EFFICIENCY:\n" \
     "- Only load tools you actually need — each adds ~200 tokens per turn.\n" \
