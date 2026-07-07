@@ -41,6 +41,16 @@ const char *chronicle_session_id(void);
 const char *chronicle_root(void);
 const char *chronicle_db_path(void);
 
+/* Crash-safe run journal (Wave B durable execution).
+ * Records are length-prefixed JSON frames under ~/.dsco/runs/<run_id>/journal.wal.
+ * DSCO_JOURNAL=off disables this sink without disabling Chronicle.
+ */
+const char *chronicle_run_id(void);
+const char *chronicle_journal_path(void);
+const char *chronicle_run_dir(void);
+bool chronicle_journal_append(const char *record_type, const char *payload_json, bool durable);
+int chronicle_runs_cli(int argc, char **argv);
+
 /* Budget ledger summaries derived from llm.response.completed events. */
 typedef struct {
     double cost_usd;

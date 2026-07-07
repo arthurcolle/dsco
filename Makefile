@@ -91,6 +91,7 @@ SRC_NAMES = main.c agent.c llm.c tools.c execution_layer.c json_util.c ast.c swa
 	openai_oauth.c local_llm.c \
 	startup.c plot.c anim.c fractal.c shadeexpr.c face_sdf.c avatar.c self_improve.c bg_learn.c rsi_curriculum.c pets.c img_util.c supervisor.c \
 	graphsub_client.c graphsub_tools.c \
+	webhook_security.c \
 	extension/backend.c extension/numerical_gsl.c extension/skill_requirements.c \
 	extension/eigen_backend.c extension/fftw_backend.c extension/backend_selftest.c \
 	control_flow.c \
@@ -99,6 +100,7 @@ SRC_NAMES = main.c agent.c llm.c tools.c execution_layer.c json_util.c ast.c swa
 	spend_governor.c \
 	frontier.c \
 	executive.c \
+	command_plane.c \
 	session_memory.c \
 	provider_pool.c \
 	dsco_swim.c sequence_state.c \
@@ -107,6 +109,7 @@ SRC_NAMES = main.c agent.c llm.c tools.c execution_layer.c json_util.c ast.c swa
 	realtime.c \
 	remote_cli.c \
 	cluster.c \
+	activation_lease.c \
 	json_fast.c \
 	$(OPTIONAL_SRCS)
 TEST_SRC_NAMES = test.c
@@ -669,6 +672,10 @@ $(OBJ_DIR) $(DEBUG_OBJ_DIR) $(TEST_OBJ_DIR) $(TEST_COVERAGE_OBJ_DIR) $(ASAN_OBJ_
 test: test_runner
 	./test_runner
 
+test-fast: test_runner test_command_plane
+	./test_command_plane
+	DSCO_TEST_QUICK=1 ./test_runner
+
 test_runner: $(TEST_OBJS) $(GSL_TEST_OBJS)
 	$(CC) $(TEST_CFLAGS) -o $@ $^ $(LDFLAGS) $(LDLIBS)
 
@@ -768,6 +775,17 @@ $(TEST_OBJ_DIR)/test_memory_classification.o: $(TEST_DIR)/test_memory_classifica
 	$(CC) $(TEST_CFLAGS) -c -o $@ $<
 # classification gates live in memory_tier.c; same full lib-set link as keep_score.
 test_memory_classification: $(TEST_OBJ_DIR)/test_memory_classification.o \
+	$(LIB_OBJS:$(OBJ_DIR)/%=$(TEST_OBJ_DIR)/%) $(GSL_TEST_OBJS)
+	$(CC) $(TEST_CFLAGS) -o $@ $^ $(LDFLAGS) $(LDLIBS)
+
+$(TEST_OBJ_DIR)/test_command_plane.o: $(TEST_DIR)/test_command_plane.c | $(TEST_OBJ_DIR)
+	$(CC) $(TEST_CFLAGS) -c -o $@ $<
+test_command_plane: $(TEST_OBJ_DIR)/test_command_plane.o $(TEST_OBJ_DIR)/command_plane.o $(TEST_OBJ_DIR)/error.o
+	$(CC) $(TEST_CFLAGS) -o $@ $^ $(LDFLAGS) -lsqlite3 -lm
+
+$(TEST_OBJ_DIR)/test_net_fanout.o: $(TEST_DIR)/test_net_fanout.c | $(TEST_OBJ_DIR)
+	$(CC) $(TEST_CFLAGS) -c -o $@ $<
+test_net_fanout: $(TEST_OBJ_DIR)/test_net_fanout.o \
 	$(LIB_OBJS:$(OBJ_DIR)/%=$(TEST_OBJ_DIR)/%) $(GSL_TEST_OBJS)
 	$(CC) $(TEST_CFLAGS) -o $@ $^ $(LDFLAGS) $(LDLIBS)
 

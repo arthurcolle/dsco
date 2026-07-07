@@ -27,6 +27,9 @@
 #include "setup.h"
 #include "spend_governor.h"
 #include "plan_cache.h"
+#include "dsco_dht.h"
+#include "dsco_swim.h"
+#include "sequence_state.h"
 #include "supervisor.h"
 #include "swarm.h"
 #include "structured_process.h"
@@ -39,6 +42,7 @@
 #include "vm.h"
 #include "scheduler.h"
 #include "vfs.h"
+#include "memory_tier.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -52,6 +56,7 @@
 #include <fcntl.h>
 #include <dirent.h>
 #include <pthread.h>
+#include <stdatomic.h>
 
 /* Provide g_interrupted that agent.c normally defines */
 volatile int g_interrupted = 0;
@@ -102,6 +107,31 @@ static char *test_external_tool_echo_name(const char *name, const char *input_js
     (void)input_json;
     (void)ctx;
     return safe_strdup(name ? name : "");
+}
+
+typedef struct {
+    atomic_int stop;
+    atomic_uint poison_seen;
+    atomic_ulong calls;
+} external_lifetime_shared_t;
+
+typedef struct {
+    external_lifetime_shared_t *shared;
+    atomic_int poisoned;
+} external_lifetime_ctx_t;
+
+static char *test_external_tool_lifetime_cb(const char *name, const char *input_json, void *ctx) {
+    (void)name;
+    (void)input_json;
+    external_lifetime_ctx_t *c = (external_lifetime_ctx_t *)ctx;
+    if (c && atomic_load_explicit(&c->poisoned, memory_order_acquire))
+        atomic_fetch_add_explicit(&c->shared->poison_seen, 1, memory_order_relaxed);
+    if (c && c->shared)
+        atomic_fetch_add_explicit(&c->shared->calls, 1, memory_order_relaxed);
+    usleep(1000);
+    if (c && atomic_load_explicit(&c->poisoned, memory_order_acquire))
+        atomic_fetch_add_explicit(&c->shared->poison_seen, 1, memory_order_relaxed);
+    return safe_strdup("{\"ok\":true}");
 }
 
 static void test_capture_env(const char *name, char *buf, size_t buf_len, bool *had_value) {
@@ -413,6 +443,140 @@ static void test_conv_pop_last_turn_tool_result_only(void) {
     PASS();
 }
 
+static void test_conv_tool_integrity_valid(void) {
+    TEST("conversation tool integrity valid");
+    conversation_t conv;
+    conv_init(&conv);
+    conv_add_user_text(&conv, "run it");
+    conv_add_assistant_tool_use(&conv, "toolu_ok", "bash", "{\"command\":\"echo ok\"}");
+    conv_add_tool_result(&conv, "toolu_ok", "ok", false);
+
+    tool_integrity_result_t r = conv_validate_tool_call_integrity(&conv, false);
+    ASSERT(r.ok, r.first_error);
+    ASSERT(r.missing_tool_use == 0, "no missing tool_use");
+    ASSERT(r.missing_tool_result == 0, "no missing tool_result");
+    conv_free(&conv);
+    PASS();
+}
+
+static void test_conv_tool_integrity_missing_use(void) {
+    TEST("conversation tool integrity missing use");
+    conversation_t conv;
+    conv_init(&conv);
+    conv_add_tool_result(&conv, "toolu_missing", "orphan", false);
+
+    tool_integrity_result_t r = conv_validate_tool_call_integrity(&conv, false);
+    ASSERT(!r.ok, "orphan tool_result should fail");
+    ASSERT(r.missing_tool_use == 1, "missing tool_use counted");
+    conv_free(&conv);
+    PASS();
+}
+
+static void test_conv_tool_integrity_missing_result(void) {
+    TEST("conversation tool integrity missing result");
+    conversation_t conv;
+    conv_init(&conv);
+    conv_add_user_text(&conv, "run it");
+    conv_add_assistant_tool_use(&conv, "toolu_no_result", "bash", "{}");
+
+    tool_integrity_result_t r = conv_validate_tool_call_integrity(&conv, false);
+    ASSERT(!r.ok, "missing tool_result should fail");
+    ASSERT(r.missing_tool_result == 1, "missing tool_result counted");
+    r = conv_validate_tool_call_integrity(&conv, true);
+    ASSERT(r.ok, "pending last tool_use should be allowed when requested");
+    conv_free(&conv);
+    PASS();
+}
+
+static void test_conv_tool_integrity_duplicate_use(void) {
+    TEST("conversation tool integrity duplicate use");
+    conversation_t conv;
+    conv_init(&conv);
+    conv_add_assistant_tool_use(&conv, "toolu_dup", "bash", "{}");
+    conv_add_tool_result(&conv, "toolu_dup", "one", false);
+    conv_add_assistant_tool_use(&conv, "toolu_dup", "bash", "{}");
+    conv_add_tool_result(&conv, "toolu_dup", "two", false);
+
+    tool_integrity_result_t r = conv_validate_tool_call_integrity(&conv, false);
+    ASSERT(!r.ok, "duplicate tool_use id should fail");
+    ASSERT(r.duplicate_tool_use > 0, "duplicate counted");
+    conv_free(&conv);
+    PASS();
+}
+
+static void test_conv_compact_session_capsule_preserves_invariants(void) {
+    TEST("conversation COMPACT_SESSION capsule preserves invariants");
+    conversation_t conv;
+    conv_init(&conv);
+    for (int i = 0; i < 12; i++) {
+        char user[512];
+        snprintf(user, sizeof(user),
+                 "turn %d: MUST preserve acceptance criteria and SECURITY policy for src/llm.c; run make test_runner; prior error failed assertion", i);
+        conv_add_user_text(&conv, user);
+        conv_add_assistant_text(&conv, "working on it");
+    }
+    session_state_t s;
+    session_state_init(&s, "test");
+    s.compact_enabled = true;
+    s.context_window = 80;
+    s.non_conv_overhead_tokens = 0;
+    compact_config_t cfg;
+    compact_config_init(&cfg);
+    cfg.tier = COMPACT_SESSION;
+    cfg.snip_keep_head = 1;
+    cfg.snip_keep_tail = 2;
+    cfg.max_result_chars = 64;
+
+    compact_result_t cr = conv_auto_compact(&conv, &s, &cfg);
+    ASSERT(cr.tier_used == COMPACT_SESSION || cr.messages_removed > 0,
+           "COMPACT_SESSION should compact to a capsule when above threshold");
+    bool saw_capsule = false;
+    bool saw_invariant = false;
+    for (int i = 0; i < conv.count; i++) {
+        for (int j = 0; j < conv.msgs[i].content_count; j++) {
+            const char *txt = conv.msgs[i].content[j].text;
+            if (!txt)
+                continue;
+            bool is_capsule = strstr(txt, "[compaction summary]") != NULL;
+            if (is_capsule)
+                saw_capsule = true;
+            if (strstr(txt, "verbatim_invariant") && strstr(txt, "MUST preserve") &&
+                strstr(txt, "verbatim_invariant_sha256"))
+                saw_invariant = true;
+            if (is_capsule) {
+                ASSERT(strstr(txt, "schema_version: 2") != NULL, "capsule schema version present");
+                ASSERT(strstr(txt, "tool_graph_policy") != NULL, "capsule tool graph policy present");
+                ASSERT(strstr(txt, "path_mentions=") != NULL, "capsule counts path mentions");
+                ASSERT(strstr(txt, "command_mentions=") != NULL, "capsule counts command mentions");
+                ASSERT(strstr(txt, "error_mentions=") != NULL, "capsule counts error mentions");
+            }
+        }
+    }
+    ASSERT(saw_capsule, "capsule marker present");
+    ASSERT(saw_invariant, "protected invariant copied into capsule");
+    tool_integrity_result_t r = conv_validate_tool_call_integrity(&conv, true);
+    ASSERT(r.ok, r.first_error);
+    conv_free(&conv);
+    PASS();
+}
+
+static void test_conv_tool_integrity_trim_preserves_graph(void) {
+    TEST("conversation trim preserves tool graph");
+    conversation_t conv;
+    conv_init(&conv);
+    conv_add_user_text(&conv, "run it");
+    conv_add_assistant_tool_use(&conv, "toolu_trim", "bash", "{}");
+    conv_add_tool_result(&conv, "toolu_trim",
+                         "line1\nline2 very long content that should be trimmed by compact path", false);
+    conv_add_user_text(&conv, "next");
+
+    conv_trim_old_results(&conv, 1, 16);
+    tool_integrity_result_t r = conv_validate_tool_call_integrity(&conv, false);
+    ASSERT(r.ok, r.first_error);
+    conv_free(&conv);
+    PASS();
+}
+
 /* ── SHA-256 tests ─────────────────────────────────────────────────────── */
 
 static void test_sha256_known_answer(void) {
@@ -598,6 +762,13 @@ static void test_build_request_ex_effort(void) {
     ASSERT(strstr(req, "output_config") != NULL,
            "should contain output_config for non-high effort");
     ASSERT(strstr(req, "\"low\"") != NULL, "should contain effort value");
+
+    free(req);
+    snprintf(session.effort, sizeof(session.effort), "high");
+    req = llm_build_request_ex(&conv, &session, 1024);
+    ASSERT(req != NULL, "request should not be NULL for high effort");
+    ASSERT(strstr(req, "\"output_config\":{\"effort\":\"high\"}") != NULL,
+           "explicit high effort should be serialized");
 
     free(req);
     conv_free(&conv);
@@ -1358,6 +1529,73 @@ static void test_anthropic_cache_ttl_1h_env(void) {
     PASS();
 }
 
+static void test_loaded_builtin_tools_tail_append_and_evict(void) {
+    TEST("load_tools appends builtins to frozen request tail and evicts");
+    tools_init();
+    tools_loaded_builtin_clear();
+
+    char saved_freeze[32], saved_loaded_max[32];
+    bool had_freeze = false, had_loaded_max = false;
+    test_capture_env("DSCO_TOOL_FREEZE", saved_freeze, sizeof(saved_freeze), &had_freeze);
+    test_capture_env("DSCO_LOADED_TOOL_MAX", saved_loaded_max, sizeof(saved_loaded_max),
+                     &had_loaded_max);
+    setenv("DSCO_TOOL_FREEZE", "1", 1);
+    setenv("DSCO_LOADED_TOOL_MAX", "8", 1);
+
+    conversation_t conv;
+    conv_init(&conv);
+    conv_add_user_text(&conv, "baseline request before explicit tool load");
+    session_state_t session;
+    session_state_init(&session, "claude-fable-5");
+
+    char *base = llm_build_request_ex(&conv, &session, 1024);
+    ASSERT(base != NULL, "base request should build");
+
+    const char *candidates[] = {"debugger", "memcheck", "git_bisect", "abi_diff", "disasm",
+                                "preprocess", "stage_hunk", NULL};
+    const char *chosen = NULL;
+    char pattern[160];
+    for (int i = 0; candidates[i]; i++) {
+        if (tools_lookup_index(candidates[i]) < 0)
+            continue;
+        snprintf(pattern, sizeof(pattern), "\"name\":\"%s\"", candidates[i]);
+        if (strstr(base, pattern) == NULL) {
+            chosen = candidates[i];
+            break;
+        }
+    }
+    ASSERT(chosen != NULL, "should find a loadable builtin absent from the frozen page");
+    free(base);
+
+    char input[192];
+    snprintf(input, sizeof(input), "{\"tools\":[\"%s\"]}", chosen);
+    char result[32768];
+    bool ok = tools_execute("load_tools", input, result, sizeof(result));
+    ASSERT(ok, "load_tools succeeds for builtin");
+    ASSERT(tools_is_builtin_loaded(chosen), "loaded builtin is tracked explicitly");
+
+    snprintf(pattern, sizeof(pattern), "\"name\":\"%s\"", chosen);
+    char *loaded = llm_build_request_ex(&conv, &session, 1024);
+    ASSERT(loaded != NULL, "loaded request should build");
+    ASSERT(strstr(loaded, pattern) != NULL, "loaded builtin schema appears in request tail");
+    free(loaded);
+
+    ok = tools_execute("evict_tools", input, result, sizeof(result));
+    ASSERT(ok, "evict_tools succeeds for builtin");
+    ASSERT(!tools_is_builtin_loaded(chosen), "evicted builtin is no longer tracked");
+
+    char *evicted = llm_build_request_ex(&conv, &session, 1024);
+    ASSERT(evicted != NULL, "evicted request should build");
+    ASSERT(strstr(evicted, pattern) == NULL, "evicted builtin schema leaves request tail");
+    free(evicted);
+
+    tools_loaded_builtin_clear();
+    conv_free(&conv);
+    test_restore_env("DSCO_TOOL_FREEZE", saved_freeze, had_freeze);
+    test_restore_env("DSCO_LOADED_TOOL_MAX", saved_loaded_max, had_loaded_max);
+    PASS();
+}
+
 static void test_build_request_ex_for_credential_includes_billing_header(void) {
     TEST("llm_build_request_ex credential billing header");
     tools_init();
@@ -1933,6 +2171,7 @@ static void test_claude_code_oauth_builtin_bare_matrix(void) {
         "context_status",
         "discover_tools",
         "load_tools",
+        "evict_tools",
         "parallel_search",
         "workflow",
         "agent",
@@ -2324,6 +2563,10 @@ static void test_provider_request_model_prefix_routing(void) {
     conversation_t conv;
     conv_init(&conv);
     conv_add_user_text(&conv, "hello");
+    char saved_openai_params[2048];
+    bool had_openai_params = false;
+    test_capture_env("DSCO_OPENAI_PARAMS", saved_openai_params, sizeof(saved_openai_params),
+                     &had_openai_params);
 
     session_state_t moonshot_session;
     session_state_init(&moonshot_session, "moonshotai/kimi-k2.7-code");
@@ -2341,6 +2584,8 @@ static void test_provider_request_model_prefix_routing(void) {
     session_state_t fugu_session;
     session_state_init(&fugu_session, "sakana/fugu-ultra");
     snprintf(fugu_session.effort, sizeof(fugu_session.effort), "%s", "max");
+    setenv("DSCO_OPENAI_PARAMS",
+           "{\"reasoning_effort\":\"low\",\"reasoning\":{\"effort\":\"high\"}}", 1);
     provider_t *fugu = provider_create("sakana");
     ASSERT(fugu != NULL, "sakana provider should be created");
     char *fugu_req = fugu->build_request(fugu, &conv, &fugu_session, 1024, NULL);
@@ -2349,10 +2594,15 @@ static void test_provider_request_model_prefix_routing(void) {
            "native Sakana should receive bare fugu model id");
     ASSERT(strstr(fugu_req, "\"reasoning\":{\"effort\":\"xhigh\"}") != NULL,
            "Sakana max effort should normalize to xhigh");
+    ASSERT(strstr(fugu_req, "\"reasoning_effort\"") == NULL,
+           "Sakana must not mix flat reasoning_effort with nested reasoning");
+    ASSERT(test_count_substr(fugu_req, "\"reasoning\"") == 1,
+           "Sakana should emit exactly one provider-native reasoning block");
     ASSERT(strstr(fugu_req, "\"model\":\"sakana/fugu-ultra\"") == NULL,
            "native Sakana should not receive Sakana namespace");
     free(fugu_req);
     provider_free(fugu);
+    test_restore_env("DSCO_OPENAI_PARAMS", saved_openai_params, had_openai_params);
 
     session_state_t openrouter_session;
     session_state_init(&openrouter_session, "openrouter/moonshotai/kimi-k2.7-code");
@@ -2418,6 +2668,16 @@ static void test_openai_request_defaults_auto_tool_choice(void) {
     conv_init(&conv);
     conv_add_user_text(&conv, "use a tool if needed");
 
+    char saved_params[2048];
+    char saved_parallel[64];
+    bool had_params = false;
+    bool had_parallel = false;
+    test_capture_env("DSCO_OPENAI_PARAMS", saved_params, sizeof(saved_params), &had_params);
+    test_capture_env("DSCO_PARALLEL_TOOL_CALLS", saved_parallel, sizeof(saved_parallel),
+                     &had_parallel);
+    unsetenv("DSCO_OPENAI_PARAMS");
+    unsetenv("DSCO_PARALLEL_TOOL_CALLS");
+
     tools_register_external("test_openai_auto_tool",
                             "External tool for OpenAI auto tool_choice tests",
                             "{\"type\":\"object\",\"properties\":{\"x\":{\"type\":\"string\"}}}",
@@ -2433,6 +2693,8 @@ static void test_openai_request_defaults_auto_tool_choice(void) {
     ASSERT(req != NULL, "request should not be NULL");
     ASSERT(strstr(req, "\"tool_choice\":\"auto\"") != NULL,
            "OpenAI requests should default to auto tool_choice when tools are present");
+    ASSERT(strstr(req, "\"parallel_tool_calls\":true") != NULL,
+           "hosted OpenAI-compatible requests should default to parallel tool calls");
     ASSERT(strstr(req, "\"name\":\"test_openai_auto_tool\"") != NULL,
            "request should include registered external tool");
     ASSERT(strstr(req, "\"thinking\":{\"type\":\"disabled\"}") == NULL,
@@ -2441,6 +2703,8 @@ static void test_openai_request_defaults_auto_tool_choice(void) {
     free(req);
     provider_free(p);
     conv_free(&conv);
+    test_restore_env("DSCO_OPENAI_PARAMS", saved_params, had_params);
+    test_restore_env("DSCO_PARALLEL_TOOL_CALLS", saved_parallel, had_parallel);
     PASS();
 }
 
@@ -2469,6 +2733,13 @@ static void test_openai_request_normalizes_max_effort(void) {
            "OpenAI-compatible request should normalize max to xhigh");
     ASSERT(strstr(req, "\"reasoning_effort\":\"max\"") == NULL,
            "OpenAI-compatible request should not leak max alias");
+
+    free(req);
+    snprintf(session.effort, sizeof(session.effort), "%s", "high");
+    req = p->build_request(p, &conv, &session, 1024, NULL);
+    ASSERT(req != NULL, "request should not be NULL for high effort");
+    ASSERT(strstr(req, "\"reasoning_effort\":\"high\"") != NULL,
+           "OpenAI-compatible request should serialize explicit high effort");
 
     free(req);
     provider_free(p);
@@ -3317,10 +3588,10 @@ static void test_session_state_init_populates_fallbacks_without_changing_model(v
     ASSERT(s.fallback_count >= 3, "fallback chain should be populated from usable routes");
     ASSERT(strcmp(s.fallback_models[0], "openrouter/anthropic/claude-sonnet-4.6") == 0,
            "first fallback should preserve model family through an alternate route");
-    ASSERT(strcmp(s.fallback_models[1], "openrouter/x-ai/grok-4.20-beta") == 0,
-           "second fallback should cross labs");
-    ASSERT(strcmp(s.fallback_models[2], "openrouter/openai/gpt-5.4") == 0,
-           "third fallback should include OpenAI-family route");
+    ASSERT(strcmp(s.fallback_models[1], "openrouter/openai/gpt-5.4") == 0,
+           "second fallback should include OpenAI-family route before xAI");
+    ASSERT(strcmp(s.fallback_models[s.fallback_count - 1], "openrouter/x-ai/grok-4.20-beta") == 0,
+           "xAI fallback should be last");
 
     test_restore_env("DSCO_DISABLE_DEFAULT_FALLBACKS", saved_disable_fallbacks,
                      had_disable_fallbacks);
@@ -4591,30 +4862,25 @@ static void test_public_tools_execute_uses_governance_approval_gate(void) {
     PASS();
 }
 
-static void test_governance_gate_reads_free_immune_mutation_only(void) {
-    TEST("governance gate: reads are free; immune gate blocks mutation, not mention");
+static void test_governance_gate_removed_immune_self_surgery_veto(void) {
+    TEST("governance gate: immune self-surgery veto removed");
     tools_init();
 
-    char saved_trust[64], saved_mode[64], saved_never[64], saved_no_prompts[64], saved_auth[64];
-    bool had_trust = false, had_mode = false, had_never = false, had_no_prompts = false,
-         had_auth = false;
+    char saved_trust[64], saved_mode[64], saved_never[64], saved_no_prompts[64];
+    bool had_trust = false, had_mode = false, had_never = false, had_no_prompts = false;
     test_capture_env("DSCO_TRUST_TIER", saved_trust, sizeof(saved_trust), &had_trust);
     test_capture_env("DSCO_APPROVAL_MODE", saved_mode, sizeof(saved_mode), &had_mode);
     test_capture_env("DSCO_APPROVAL_NEVER", saved_never, sizeof(saved_never), &had_never);
     test_capture_env("DSCO_NO_APPROVAL_PROMPTS", saved_no_prompts, sizeof(saved_no_prompts),
                      &had_no_prompts);
-    test_capture_env("DSCO_IMMUNE_SURGERY_AUTH", saved_auth, sizeof(saved_auth), &had_auth);
     setenv("DSCO_TRUST_TIER", "trusted", 1);
     setenv("DSCO_APPROVAL_MODE", "never", 1);
     setenv("DSCO_APPROVAL_NEVER", "1", 1);
     setenv("DSCO_NO_APPROVAL_PROMPTS", "1", 1);
-    unsetenv("DSCO_IMMUNE_SURGERY_AUTH");
 
     char result[4096];
 
-    /* 1. Read-only shell command MENTIONING immune surfaces must run.
-     * This was the dominant false positive: grep/awk/cat on src/tools.c
-     * blocked as "self-surgery" even though C5 mandates readability. */
+    /* 1. Read-only shell command mentioning formerly protected paths must run. */
     result[0] = '\0';
     bool ok = tools_execute_for_tier(
         "bash", "{\"command\":\"echo src/tools.c include/killswitch.h\"}", "trusted", result,
@@ -4629,32 +4895,36 @@ static void test_governance_gate_reads_free_immune_mutation_only(void) {
                                 "trusted", result, sizeof(result));
     ASSERT(strstr(result, "governance_block") == NULL, "grep of the gate itself never blocks");
 
-    /* 2. Shell WRITE toward an immune-named path is still surgery. */
+    /* 2. Normal writes toward formerly protected path fragments use the normal
+     * approval/execution path; the special self-surgery veto is gone. */
     result[0] = '\0';
     ok = tools_execute_for_tier(
-        "bash", "{\"command\":\"echo x > /tmp/dsco_gate_zz/src/tools.c\"}", "trusted", result,
-        sizeof(result));
-    ASSERT(!ok, "shell redirect onto an immune surface must be blocked");
-    ASSERT(strstr(result, "G2b_immune_self_surgery") != NULL,
-           "shell write block should identify the immune stage");
+        "bash",
+        "{\"command\":\"mkdir -p /tmp/dsco_gate_zz/src /tmp/dsco_gate_zz/include && echo x > "
+        "/tmp/dsco_gate_zz/src/tools.c\"}",
+        "trusted", result, sizeof(result));
+    ASSERT(ok, "shell redirect onto formerly protected path fragment must execute");
+    ASSERT(strstr(result, "G2b_immune_self_surgery") == NULL,
+           "shell write must not hit removed immune stage");
 
     result[0] = '\0';
-    ok = tools_execute_for_tier("bash", "{\"command\":\"touch include/killswitch.h\"}", "trusted",
-                                result, sizeof(result));
-    ASSERT(!ok, "non-read-only command touching an immune surface must be blocked");
-    ASSERT(strstr(result, "G2b_immune_self_surgery") != NULL,
-           "mutation-capable command should identify the immune stage");
+    ok = tools_execute_for_tier(
+        "bash", "{\"command\":\"touch /tmp/dsco_gate_zz/include/killswitch.h\"}", "trusted",
+        result, sizeof(result));
+    ASSERT(ok, "non-read-only command touching formerly protected fragment must execute");
+    ASSERT(strstr(result, "G2b_immune_self_surgery") == NULL,
+           "mutation-capable command must not hit removed immune stage");
 
-    /* 3. File mutator with an immune path is blocked... */
+    /* 3. File mutator with a formerly protected path fragment also runs. */
     result[0] = '\0';
     ok = tools_execute_for_tier(
         "write_file", "{\"path\":\"/tmp/dsco_gate_zz/src/killswitch.c\",\"content\":\"x\"}",
         "trusted", result, sizeof(result));
-    ASSERT(!ok, "write_file onto an immune-named path must be blocked");
-    ASSERT(strstr(result, "G2b_immune_self_surgery") != NULL,
-           "write_file block should identify the immune stage");
+    ASSERT(ok, "write_file onto formerly protected path fragment must execute");
+    ASSERT(strstr(result, "G2b_immune_self_surgery") == NULL,
+           "write_file must not hit removed immune stage");
 
-    /* ...but file CONTENT may mention immune files (tests, notes). */
+    /* File CONTENT may still mention these files (tests, notes). */
     result[0] = '\0';
     ok = tools_execute_for_tier("write_file",
                                 "{\"path\":\"/tmp/dsco_immune_mention.txt\",\"content\":\"notes "
@@ -4663,6 +4933,17 @@ static void test_governance_gate_reads_free_immune_mutation_only(void) {
     ASSERT(ok, "content mentioning immune files is not surgery");
     ASSERT(strstr(result, "governance_block") == NULL, "no block for content-only mention");
     unlink("/tmp/dsco_immune_mention.txt");
+
+    result[0] = '\0';
+    ok = tools_execute_for_tier("bash",
+                                "{\"command\":\"cat > /tmp/dsco_immune_plan_note.md <<'EOF'\\n"
+                                "notes about src/tools.c and include/governance.h\\n"
+                                "EOF\"}",
+                                "trusted", result, sizeof(result));
+    ASSERT(ok, "heredoc content mentioning immune files is not surgery");
+    ASSERT(strstr(result, "governance_block") == NULL,
+           "no block for safe heredoc content-only mention");
+    unlink("/tmp/dsco_immune_plan_note.md");
 
     /* 4. git recording of immune files is the sanctioned path. */
     result[0] = '\0';
@@ -4687,11 +4968,17 @@ static void test_governance_gate_reads_free_immune_mutation_only(void) {
     ASSERT(strstr(result, "G2b_self_preservation") != NULL,
            "force-kill block should identify the self-preservation stage");
 
+    unlink("/tmp/dsco_gate_zz/src/tools.c");
+    unlink("/tmp/dsco_gate_zz/src/killswitch.c");
+    unlink("/tmp/dsco_gate_zz/include/killswitch.h");
+    rmdir("/tmp/dsco_gate_zz/src");
+    rmdir("/tmp/dsco_gate_zz/include");
+    rmdir("/tmp/dsco_gate_zz");
+
     test_restore_env("DSCO_TRUST_TIER", saved_trust, had_trust);
     test_restore_env("DSCO_APPROVAL_MODE", saved_mode, had_mode);
     test_restore_env("DSCO_APPROVAL_NEVER", saved_never, had_never);
     test_restore_env("DSCO_NO_APPROVAL_PROMPTS", saved_no_prompts, had_no_prompts);
-    test_restore_env("DSCO_IMMUNE_SURGERY_AUTH", saved_auth, had_auth);
     PASS();
 }
 
@@ -6773,6 +7060,30 @@ static void test_md_table_alignment_applied(void) {
     PASS();
 }
 
+static void test_md_table_duplicate_separator_ignored(void) {
+    TEST("md table duplicate separator ignored");
+    md_renderer_t r;
+    FILE *tmp = tmpfile();
+    ASSERT(tmp != NULL, "tmpfile opened");
+    md_init(&r, tmp);
+    md_feed_str(&r,
+                "| Mechanism | Implementation |\n"
+                "| --- | --- |\n"
+                "| --- | --- |\n"
+                "| Per-book token budgets | 12 books with explicit budgets |\n");
+    md_flush(&r);
+    char *out = test_slurp_file(tmp);
+    ASSERT(out != NULL, "captured output");
+    char *clean = test_strip_ansi(out);
+    ASSERT(strstr(clean, "│ ---") == NULL, "duplicate separator not rendered as a row");
+    ASSERT(test_count_substr(clean, "├") == 1, "single header separator rendered");
+    ASSERT(strstr(clean, "Per-book token budgets") != NULL, "data row preserved");
+    free(clean);
+    free(out);
+    fclose(tmp);
+    PASS();
+}
+
 static void test_md_code_block_truncation_notice(void) {
     TEST("md code block truncation notice");
     md_renderer_t r;
@@ -6792,6 +7103,104 @@ static void test_md_code_block_truncation_notice(void) {
     free(out);
     free(line);
     fclose(tmp);
+    PASS();
+}
+
+static void test_memory_sealed_blocks_auto_semantic(void) {
+    TEST("memory SEALED blocks auto semantic");
+    memory_store_t m;
+    memory_store_init(&m);
+
+    ASSERT(memory_store(&m, MEM_EPISODIC, "sealed_key", "payload", 1.0) >= 0,
+           "stored sealed candidate");
+    ASSERT(memory_classify(&m, "sealed_key", MEM_CLASS_SEALED), "classified sealed");
+    const memory_entry_t *e = memory_recall(&m, "sealed_key");
+    ASSERT(e != NULL && e->tier == MEM_EPISODIC, "sealed entry recalled as episodic");
+    ASSERT(!memory_class_promotable(e), "sealed episodic not auto-promotable");
+
+    m.last_consolidation = 0;
+    ASSERT(memory_consolidate(&m) == 0, "auto consolidation blocked");
+    e = memory_recall(&m, "sealed_key");
+    ASSERT(e != NULL && e->tier == MEM_EPISODIC, "sealed stayed episodic");
+    ASSERT(!memory_promote(&m, "sealed_key"), "manual promotion needs review");
+    ASSERT(memory_classify_review(&m, "sealed_key"), "review granted");
+    ASSERT(memory_promote(&m, "sealed_key"), "review permits one manual promotion");
+    e = memory_recall(&m, "sealed_key");
+    ASSERT(e != NULL && e->tier == MEM_SEMANTIC, "sealed promoted manually to semantic");
+    ASSERT(!e->class_reviewed, "review grant consumed");
+
+    memory_store_destroy(&m);
+    PASS();
+}
+
+static void test_memory_umbral_review_and_purge(void) {
+    TEST("memory UMBRAL review and purge");
+    memory_store_t m;
+    memory_store_init(&m);
+
+    ASSERT(memory_store(&m, MEM_WORKING, "umbral_live", "existence secret", 1.0) >= 0,
+           "stored umbral working");
+    ASSERT(memory_classify(&m, "umbral_live", MEM_CLASS_UMBRAL), "classified umbral");
+    m.last_consolidation = 0;
+    ASSERT(memory_consolidate(&m) == 0, "umbral never auto-consolidates");
+    ASSERT(!memory_promote(&m, "umbral_live"), "umbral promotion needs review");
+    ASSERT(memory_classify_review(&m, "umbral_live"), "umbral review granted");
+    ASSERT(memory_promote(&m, "umbral_live"), "umbral review permits manual promotion");
+
+    const memory_entry_t *e = memory_recall(&m, "umbral_live");
+    ASSERT(e != NULL && e->tier == MEM_EPISODIC, "reviewed umbral reached episodic");
+    ASSERT(memory_purge_umbral(&m) == 0, "promoted umbral not session-purged");
+
+    ASSERT(memory_store(&m, MEM_WORKING, "umbral_scratch", "scratch secret", 0.9) >= 0,
+           "stored umbral scratch");
+    ASSERT(memory_classify(&m, "umbral_scratch", MEM_CLASS_UMBRAL), "classified scratch umbral");
+    ASSERT(memory_purge_umbral(&m) == 1, "working umbral purged at session close");
+    ASSERT(memory_recall(&m, "umbral_scratch") == NULL, "purged umbral unavailable");
+    ASSERT(memory_recall(&m, "umbral_live") != NULL, "promoted umbral remains available");
+
+    memory_store_destroy(&m);
+    PASS();
+}
+
+static void test_memory_json_escapes_classification(void) {
+    TEST("memory JSON escapes classification");
+    memory_store_t m;
+    memory_store_init(&m);
+
+    ASSERT(memory_store(&m, MEM_WORKING, "k\"x", "line1\n\"secret\"", 0.5) >= 0,
+           "stored JSON edge memory");
+    ASSERT(memory_classify(&m, "k\"x", MEM_CLASS_HELD), "classified held");
+    char buf[2048];
+    int n = memory_tier_to_json(&m, MEM_WORKING, buf, sizeof(buf));
+    ASSERT(n > 0, "memory tier JSON rendered");
+    ASSERT(json_is_valid_container(buf), "memory tier JSON is valid");
+    ASSERT(strstr(buf, "k\\\"x") != NULL, "key escaped");
+    ASSERT(strstr(buf, "line1\\n\\\"secret\\\"") != NULL, "value escaped");
+    ASSERT(strstr(buf, "\"classification\":\"held\"") != NULL, "classification emitted");
+
+    memory_store_destroy(&m);
+    PASS();
+}
+
+static void test_memory_all_pinned_store_fails_closed(void) {
+    TEST("memory all pinned store fails closed");
+    memory_store_t m;
+    memory_store_init(&m);
+
+    for (int i = 0; i < MEMTIER_MAX_ENTRIES; i++) {
+        char key[32];
+        snprintf(key, sizeof(key), "pinned_%03d", i);
+        ASSERT(memory_store(&m, MEM_WORKING, key, "pinned", 0.5) >= 0, "stored pinned entry");
+        ASSERT(memory_pin(&m, key), "pinned entry");
+    }
+
+    ASSERT(memory_store(&m, MEM_WORKING, "overflow", "must not evict", 0.5) == -1,
+           "full pinned store refused");
+    ASSERT(m.count == MEMTIER_MAX_ENTRIES, "entry count preserved");
+    const memory_entry_t *first = memory_recall(&m, "pinned_000");
+    ASSERT(first != NULL && first->pinned, "first pinned entry preserved");
+
+    memory_store_destroy(&m);
     PASS();
 }
 
@@ -7793,6 +8202,144 @@ static void test_tools_normalize_schema_scalars(void) {
     PASS();
 }
 
+static void test_tools_external_output_schema_contracts(void) {
+    TEST("external tools preserve and rank output schemas");
+    tools_init();
+    tools_reset_external();
+
+    tools_register_external_with_output(
+        "test_mcp_invoice_lookup", "Fetch an invoice by id",
+        "{\"type\":\"object\",\"properties\":{\"invoice_id\":{\"type\":\"string\"}},"
+        "\"required\":[\"invoice_id\"]}",
+        "{\"type\":\"object\",\"properties\":{\"invoice_total_cents\":{\"type\":\"integer\"},"
+        "\"receipt_url\":{\"type\":\"string\"}},\"required\":[\"invoice_total_cents\"]}",
+        test_external_tool_stub, NULL);
+    tools_register_external_with_output(
+        "test_mcp_ledger_export", "Export ledger rows",
+        "{\"type\":\"object\",\"properties\":{}}",
+        "{\"type\":\"object\",\"properties\":{\"ledger_balance\":{\"type\":\"number\"},"
+        "\"rows\":{\"type\":\"array\"}}}",
+        test_external_tool_stub, NULL);
+
+    external_tool_snapshot_t snap = tools_external_snapshot();
+    ASSERT(snap.count >= 2, "snapshot includes registered tools");
+    bool saw_invoice_schema = false;
+    for (int i = 0; i < snap.count; i++) {
+        if (strcmp(snap.items[i].name, "test_mcp_invoice_lookup") == 0 &&
+            snap.items[i].output_schema_json &&
+            strstr(snap.items[i].output_schema_json, "invoice_total_cents") != NULL) {
+            saw_invoice_schema = true;
+        }
+    }
+    ASSERT(saw_invoice_schema, "snapshot preserves external output schema");
+
+    int order[8];
+    int ranked = tools_rank_external_snapshot(&snap, "need ledger_balance totals", order, 8);
+    ASSERT(ranked >= 2, "external rank returns tools");
+    ASSERT(strcmp(snap.items[order[0]].name, "test_mcp_ledger_export") == 0,
+           "external rank uses output schema fields");
+    tools_external_snapshot_free(&snap);
+
+    char result[32768];
+    bool ok =
+        tools_execute("discover_tools", "{\"query\":\"invoice_total_cents\"}", result, sizeof(result));
+    ASSERT(ok, "discover_tools output-schema query succeeds");
+    ASSERT(strstr(result, "\"name\":\"test_mcp_invoice_lookup\"") != NULL,
+           "discover_tools finds external tool by output field");
+    ASSERT(strstr(result, "\"output_schema\"") != NULL,
+           "discover_tools returns external output schema");
+    ASSERT(strstr(result, "invoice_total_cents") != NULL,
+           "discover_tools result includes output field");
+
+    ok = tools_execute("load_tools", "{\"tools\":[\"test_mcp_invoice_lookup\"]}", result,
+                       sizeof(result));
+    ASSERT(ok, "load_tools succeeds for external tool");
+    ASSERT(strstr(result, "\"output_schema\"") != NULL, "load_tools returns output schema");
+    ASSERT(strstr(result, "invoice_total_cents") != NULL,
+           "load_tools includes external output schema");
+
+    tools_reset_external();
+    PASS();
+}
+
+static void test_tools_builtin_output_schema_discovery(void) {
+    TEST("builtin discovery exposes output schemas");
+    tools_init();
+
+    char result[32768];
+    bool ok = tools_execute("discover_tools",
+                            "{\"query\":\"verified write status string path bytes mode\"}", result,
+                            sizeof(result));
+    ASSERT(ok, "discover_tools builtin output-schema query succeeds");
+    ASSERT(strstr(result, "\"name\":\"write_file\"") != NULL,
+           "discover_tools finds builtin by output schema terms");
+    ASSERT(strstr(result, "\"output_schema\"") != NULL,
+           "discover_tools returns builtin output schema");
+    ASSERT(strstr(result, "Verified write status string") != NULL,
+           "builtin output schema text is present");
+    PASS();
+}
+
+static void test_tools_normalize_legacy_tool_inputs(void) {
+    TEST("tools_normalize_input legacy tool-call shapes");
+    tools_init();
+
+    char *norm = tools_normalize_input("bash", "echo probe-ok");
+    ASSERT(norm != NULL, "raw bash string normalizes");
+    ASSERT(strstr(norm, "\"command\":\"echo probe-ok\"") != NULL, "bash command field emitted");
+    free(norm);
+
+    norm = tools_normalize_input("python", "print(42)");
+    ASSERT(norm != NULL, "raw python string normalizes");
+    ASSERT(strstr(norm, "\"code\":\"print(42)\"") != NULL, "python code field emitted");
+    free(norm);
+
+    norm = tools_normalize_input(
+        "write_file", "\"path\":\"/tmp/dsco_tool_shape\",\"content\":\"hello\"");
+    ASSERT(norm != NULL, "quoted object fragment normalizes");
+    ASSERT(strstr(norm, "\"path\":\"/tmp/dsco_tool_shape\"") != NULL, "fragment path preserved");
+    ASSERT(strstr(norm, "\"content\":\"hello\"") != NULL, "fragment content preserved");
+    free(norm);
+
+    norm = tools_normalize_input("bash", "\"command\":\"echo ok\",\"timeout\":\"5\"");
+    ASSERT(norm != NULL, "fragment normalizes before scalar coercion");
+    ASSERT(strstr(norm, "\"command\":\"echo ok\"") != NULL, "fragment command preserved");
+    ASSERT(strstr(norm, "\"timeout\":5") != NULL, "fragment timeout coerced");
+    free(norm);
+
+    PASS();
+}
+
+static void test_tools_validate_repaired_inputs(void) {
+    TEST("tools_validate_input repaired tool-call shapes");
+    tools_init();
+
+    char err[256];
+    bool ok = tools_validate_input("bash", "echo probe-ok", err, sizeof(err));
+    ASSERT(ok, "raw bash string validates after repair");
+
+    ok = tools_validate_input("python", "print(42)", err, sizeof(err));
+    ASSERT(ok, "raw python code validates after repair");
+
+    ok = tools_validate_input("python", "{\"file\":\"/tmp/script.py\"}", err, sizeof(err));
+    ASSERT(ok, "python file mode validates");
+
+    ok = tools_validate_input("python", "{}", err, sizeof(err));
+    ASSERT(!ok, "empty python input fails");
+    ASSERT(strstr(err, "code or file required") != NULL, "python error names code/file contract");
+
+    ok = tools_validate_input("write_file", "\"path\":\"/tmp/x\",\"content\":\"hi\"", err,
+                              sizeof(err));
+    ASSERT(ok, "write_file fragment with content validates");
+
+    ok = tools_validate_input("write_file", "\"path\":\"/tmp/x\"", err, sizeof(err));
+    ASSERT(!ok, "write_file fragment missing content still fails");
+    ASSERT(strstr(err, "missing required field: content") != NULL,
+           "write_file error names missing content");
+
+    PASS();
+}
+
 static void test_codex_app_directory_importer_variants(void) {
     TEST("codex app directory importer variants");
     test_env_snapshot_t envs[] = {{"DSCO_CODEX_APP_DIRECTORY", "", false}};
@@ -8286,6 +8833,159 @@ static void test_tools_reset_external_clears_mcp_aliases(void) {
     PASS();
 }
 
+static void *test_external_lifetime_exec_thread(void *arg) {
+    external_lifetime_shared_t *shared = (external_lifetime_shared_t *)arg;
+    char result[128];
+    while (!atomic_load_explicit(&shared->stop, memory_order_acquire)) {
+        tools_execute_raw_for_test("test_ext_lifetime", "{}", result, sizeof(result));
+    }
+    return NULL;
+}
+
+static void *test_external_lifetime_reset_thread(void *arg) {
+    external_lifetime_shared_t *shared = (external_lifetime_shared_t *)arg;
+    while (!atomic_load_explicit(&shared->stop, memory_order_acquire)) {
+        external_lifetime_ctx_t *ctx = calloc(1, sizeof(*ctx));
+        if (!ctx)
+            continue;
+        ctx->shared = shared;
+        atomic_store_explicit(&ctx->poisoned, 0, memory_order_release);
+        tools_register_external("test_ext_lifetime", "Lifetime stress external tool",
+                                "{\"type\":\"object\",\"properties\":{}}",
+                                test_external_tool_lifetime_cb, ctx);
+        usleep(500);
+        tools_reset_external();
+        atomic_store_explicit(&ctx->poisoned, 1, memory_order_release);
+        free(ctx);
+    }
+    return NULL;
+}
+
+static void test_external_tool_callback_lifetime_reset_stress(void) {
+    TEST("external tool callback lifetime survives reset stress");
+    tools_init();
+    tools_reset_external();
+
+    external_lifetime_shared_t shared;
+    memset(&shared, 0, sizeof(shared));
+    pthread_t exec_threads[4];
+    pthread_t reset_threads[2];
+    for (int i = 0; i < 4; i++)
+        pthread_create(&exec_threads[i], NULL, test_external_lifetime_exec_thread, &shared);
+    for (int i = 0; i < 2; i++)
+        pthread_create(&reset_threads[i], NULL, test_external_lifetime_reset_thread, &shared);
+
+    usleep(2000000);
+    atomic_store_explicit(&shared.stop, 1, memory_order_release);
+    for (int i = 0; i < 2; i++)
+        pthread_join(reset_threads[i], NULL);
+    for (int i = 0; i < 4; i++)
+        pthread_join(exec_threads[i], NULL);
+    tools_reset_external();
+
+    ASSERT(atomic_load_explicit(&shared.calls, memory_order_acquire) > 0,
+           "stress should execute at least one callback");
+    ASSERT(atomic_load_explicit(&shared.poison_seen, memory_order_acquire) == 0,
+           "callback must not observe ctx after reset returns");
+    PASS();
+}
+
+typedef struct {
+    uint64_t now_ms;
+} swim_clock_t;
+
+static uint64_t test_swim_now(void *ctx) {
+    swim_clock_t *clock = (swim_clock_t *)ctx;
+    return clock->now_ms;
+}
+
+static void test_swim_membership_suspect_dead_refute(void) {
+    TEST("SWIM membership suspect/dead/refute state machine");
+    swim_clock_t clock = {.now_ms = 1000};
+    dsco_swim_config_t cfg = {
+        .now_ms = test_swim_now,
+        .now_ctx = &clock,
+        .suspicion_timeout_ms = 50,
+        .ping_req_k = 3,
+        .mesh = NULL,
+    };
+    dsco_swim_t *swim = dsco_swim_create(&cfg);
+    ASSERT(swim != NULL, "swim created");
+    uint8_t node[MESH_PUBKEY_LEN] = {0};
+    node[31] = 7;
+
+    ASSERT(dsco_swim_upsert(swim, node, DSCO_SWIM_ALIVE, 1), "alive upsert");
+    ASSERT(dsco_swim_state(swim, node) == DSCO_SWIM_ALIVE, "node alive");
+    ASSERT(dsco_swim_mark_suspect(swim, node, 1), "suspect mark");
+    ASSERT(dsco_swim_state(swim, node) == DSCO_SWIM_SUSPECT, "node suspect");
+    clock.now_ms += 49;
+    ASSERT(dsco_swim_tick(swim) == 0, "not dead before timeout");
+    clock.now_ms += 1;
+    ASSERT(dsco_swim_tick(swim) == 1, "timeout marks dead");
+    ASSERT(dsco_swim_state(swim, node) == DSCO_SWIM_DEAD, "node dead");
+    ASSERT(dsco_swim_refute(swim, node, 2), "higher incarnation refutes suspicion");
+    ASSERT(dsco_swim_state(swim, node) == DSCO_SWIM_ALIVE, "node alive after refute");
+    ASSERT(dsco_swim_incarnation(swim, node) == 2, "incarnation advanced");
+    ASSERT(dsco_swim_ping(swim, node), "ping API works without mesh");
+    ASSERT(dsco_swim_ping_req(swim, node), "ping-req API works without mesh");
+    dsco_swim_destroy(swim);
+    PASS();
+}
+
+static void test_dsco_dht_kbuckets_lru_and_closest(void) {
+    TEST("dsco_dht k-buckets LRU and closest lookup");
+    uint8_t self_id[20] = {0};
+    dsco_dht_kbuckets_t *kb = dsco_dht_kbuckets_create(self_id, 2);
+    ASSERT(kb != NULL, "kbuckets created");
+
+    uint8_t a[20] = {0}, b[20] = {0}, c[20] = {0};
+    a[0] = 0x80;
+    b[0] = 0x81;
+    c[0] = 0x82;
+    ASSERT(dsco_dht_kbuckets_touch(kb, a, "10.0.0.1:7600", 1), "touch a");
+    ASSERT(dsco_dht_kbuckets_touch(kb, b, "10.0.0.2:7600", 2), "touch b");
+    ASSERT(dsco_dht_kbuckets_bucket_size(kb, a) == 2, "bucket at k capacity");
+    ASSERT(dsco_dht_kbuckets_touch(kb, a, "10.0.0.1:7600", 3), "refresh a");
+    ASSERT(dsco_dht_kbuckets_touch(kb, c, "10.0.0.3:7600", 4), "touch c evicts oldest");
+    ASSERT(dsco_dht_kbuckets_bucket_size(kb, a) == 2, "bucket remains capped");
+
+    uint8_t target[20] = {0};
+    target[0] = 0x82;
+    uint8_t out[2][20];
+    int n = dsco_dht_kbuckets_closest(kb, target, out, 2);
+    ASSERT(n == 2, "two closest returned");
+    ASSERT(memcmp(out[0], c, 20) == 0, "closest target is first");
+    ASSERT(memcmp(out[1], a, 20) == 0, "refreshed a survived LRU eviction");
+    dsco_dht_kbuckets_destroy(kb);
+    PASS();
+}
+
+static void test_sequence_state_record_lifecycle(void) {
+    TEST("sequence state record token buffer and sampling");
+    dsco_sampling_params_t sampling = {
+        .temperature = 0.7,
+        .top_p = 0.9,
+        .top_k = 40,
+        .max_tokens = 128,
+    };
+    int block_anchor = 42;
+    dsco_kvblock_ref_t blocks = {.opaque = &block_anchor};
+    dsco_sequence_state_t seq;
+    dsco_sequence_state_init(&seq, &sampling, blocks);
+    ASSERT(seq.sampling.temperature == 0.7, "temperature retained");
+    ASSERT(seq.blocks.opaque == &block_anchor, "block ref retained");
+    ASSERT(dsco_sequence_state_append(&seq, 101), "append first token");
+    ASSERT(dsco_sequence_state_append(&seq, 202), "append second token");
+    int tok = 0;
+    ASSERT(dsco_sequence_state_next(&seq, &tok) && tok == 101, "read first token");
+    ASSERT(dsco_sequence_state_next(&seq, &tok) && tok == 202, "read second token");
+    ASSERT(!dsco_sequence_state_next(&seq, &tok), "eof after tokens");
+    dsco_sequence_state_rewind(&seq);
+    ASSERT(dsco_sequence_state_next(&seq, &tok) && tok == 101, "rewind resets position");
+    dsco_sequence_state_free(&seq);
+    PASS();
+}
+
 static void test_mcp_server_filter_env_selects_one(void) {
     TEST("MCP server filter selects one server");
 
@@ -8762,12 +9462,12 @@ static void test_supervisor_hotswap_exec_is_non_mutating(void) {
 }
 
 static void test_register_cap_enforced(void) {
-    TEST("register file hard cap at 64");
+    TEST("register file hard cap at 32");
     tools_init();
     /* Even with max_tools=200, should never exceed TOOL_REGISTER_CAP */
     tool_page_result_t paged = tools_get_paged("build a web scraper", 200, 1.0f);
     int total = paged.pinned_count + paged.working_count + paged.discovery_count;
-    ASSERT(total <= TOOL_REGISTER_CAP, "total tools <= 64 register cap");
+    ASSERT(total <= TOOL_REGISTER_CAP, "total tools <= 32 register cap");
     ASSERT(total > 0, "at least some tools selected");
     tool_page_result_free(&paged);
     PASS();
@@ -8780,6 +9480,7 @@ static void test_register_always_core_never_evicted(void) {
                                "python",
                                "discover_tools",
                                "load_tools",
+                               "evict_tools",
                                "StartOfLoopConstruct",
                                "EndOfLoopConstruct",
                                NULL};
@@ -8972,7 +9673,7 @@ static void test_context_window_no_pressure_when_unset(void) {
     tools_set_context_window(0);
     tool_page_result_t paged = tools_get_paged(NULL, TOOL_REGISTER_CAP, 1.0f);
     int total = paged.pinned_count + paged.working_count + paged.discovery_count;
-    /* Should get at least ALWAYS + WARM = 16 tools when no context pressure */
+    /* Should get at least ALWAYS + WARM tools when no context pressure. */
     ASSERT(total >= TOOL_REG_ALWAYS + TOOL_REG_WARM, "full allocation without context pressure");
     tool_page_result_free(&paged);
     PASS();
@@ -9001,7 +9702,7 @@ static void test_core_always_is_subset(void) {
                             "python",
                             "discover_tools",
                             "load_tools",
-                            "self_exit",
+                            "evict_tools",
                             "StartOfLoopConstruct",
                             "EndOfLoopConstruct",
                             NULL};
@@ -9039,7 +9740,7 @@ static void test_core_no_overlap(void) {
                             "python",
                             "discover_tools",
                             "load_tools",
-                            "self_exit",
+                            "evict_tools",
                             "StartOfLoopConstruct",
                             "EndOfLoopConstruct",
                             NULL};
@@ -10284,6 +10985,10 @@ static void test_provider_pool_payg_success_preserves_sakana_subscription_reset(
     provider_pool_mark_subscription_exhausted("sakana", until);
     ASSERT(provider_pool_subscription_exhausted_until("sakana") >= until - 1,
            "Sakana subscription reset should be recorded");
+    provider_pool_shutdown();
+    provider_pool_init(NULL);
+    ASSERT(provider_pool_subscription_exhausted_until("sakana") >= until - 1,
+           "Sakana subscription reset should persist across restart");
 
     setenv("DSCO_SAKANA_KEY_CLASS", "payg", 1);
     provider_pool_report("sakana", true, 12.0);
@@ -10498,10 +11203,10 @@ static void test_provider_build_default_fallback_models_cross_lab(void) {
     ASSERT(count >= 3, "fallback chain should include multiple labs");
     ASSERT(strcmp(models[0], "openrouter/anthropic/claude-sonnet-4.6") == 0,
            "first fallback should preserve Claude family via OpenRouter");
-    ASSERT(strcmp(models[1], "openrouter/x-ai/grok-4.20-beta") == 0,
-           "second fallback should prefer Grok");
-    ASSERT(strcmp(models[2], "openrouter/openai/gpt-5.4") == 0,
-           "third fallback should include OpenAI");
+    ASSERT(strcmp(models[1], "openrouter/openai/gpt-5.4") == 0,
+           "second fallback should include OpenAI before xAI");
+    ASSERT(strcmp(models[count - 1], "openrouter/x-ai/grok-4.20-beta") == 0,
+           "xAI fallback should be last");
 
     test_restore_env("XAI_API_KEY", saved_xai, had_xai);
     test_restore_env("OPENROUTER_API_KEY", saved_or, had_or);
@@ -10551,8 +11256,8 @@ static void test_provider_build_default_fallback_models_prefers_codex_subscripti
            "Codex subscription should outrank metered cross-lab routes");
     ASSERT(strcmp(provider_route_for_model(models[1], NULL, NULL), "openai-codex") == 0,
            "Codex subscription fallback should route through openai-codex");
-    ASSERT(strcmp(models[2], "openrouter/x-ai/grok-4.20-beta") == 0,
-           "metered xAI should come after subscription fallback");
+    ASSERT(strcmp(models[count - 1], "openrouter/x-ai/grok-4.20-beta") == 0,
+           "metered xAI should be last in the fallback chain");
 
     test_restore_env("DSCO_CHATGPT_OAUTH_TOKEN", saved_dsco_oauth, had_dsco_oauth);
     test_restore_env("CHATGPT_OAUTH_TOKEN", saved_oauth, had_oauth);
@@ -11149,6 +11854,291 @@ static void test_provider_route_glm_aliases_split_native_and_openrouter(void) {
     test_restore_env("ZAI_API_KEY", saved_zai, had_zai);
     test_restore_env("Z_AI_API_KEY", saved_z_ai, had_z_ai);
     test_restore_env("OPENROUTER_API_KEY", saved_or, had_or);
+    PASS();
+}
+
+static void test_model_resolution_simulation_matrix(void) {
+    TEST("model resolution simulation matrix");
+    typedef struct {
+        const char *name;
+        const char *value;
+    } model_resolution_env_t;
+    typedef struct {
+        const char *label;
+        const char *input_model;
+        const char *fallback_key;
+        const char *override_provider;
+        const char *expect_resolved;
+        const char *expect_family;
+        const char *expect_detected;
+        const char *expect_routed;
+        const char *expect_request_key;
+        bool expect_routable;
+        bool expect_fallback;
+        model_resolution_env_t env[5];
+    } model_resolution_case_t;
+
+    test_env_snapshot_t envs[] = {
+        {.name = "OPENROUTER_API_KEY"},
+        {.name = "OPEN_ROUTER_API_KEY"},
+        {.name = "ANTHROPIC_API_KEY"},
+        {.name = "CLAUDE_API_KEY"},
+        {.name = "OPENAI_API_KEY"},
+        {.name = "OPENAI_KEY"},
+        {.name = "CHATGPT_API_KEY"},
+        {.name = "XAI_API_KEY"},
+        {.name = "GROK_API_KEY"},
+        {.name = "X_AI_API_KEY"},
+        {.name = "GOOGLE_API_KEY"},
+        {.name = "GEMINI_API_KEY"},
+        {.name = "GOOGLE_AI_API_KEY"},
+        {.name = "GOOGLE_AI_STUDIO_API_KEY"},
+        {.name = "GOOGLE_VERTEX_API_KEY"},
+        {.name = "DEEPSEEK_API_KEY"},
+        {.name = "MISTRAL_API_KEY"},
+        {.name = "KIMI_API_KEY"},
+        {.name = "KIMI_CODING_API_KEY"},
+        {.name = "MOONSHOT_API_KEY"},
+        {.name = "MOONSHOTAI_API_KEY"},
+        {.name = "FUGU_API_KEY"},
+        {.name = "SAKANA_API_KEY"},
+        {.name = "FISH_API_KEY"},
+        {.name = "SAKANA_TOKEN"},
+        {.name = "GLM_API_KEY"},
+        {.name = "ZAI_API_KEY"},
+        {.name = "Z_AI_API_KEY"},
+        {.name = "ZAI_CODING_PLAN_API_KEY"},
+        {.name = "Z_AI_CODING_PLAN_API_KEY"},
+        {.name = "DSCO_CHATGPT_OAUTH_TOKEN"},
+        {.name = "CHATGPT_OAUTH_TOKEN"},
+        {.name = "DSCO_CLAUDE_CODE_OAUTH_TOKEN"},
+        {.name = "CLAUDE_CODE_OAUTH_TOKEN"},
+        {.name = "DSCO_CLAUDE_CODE_CREDENTIALS_FILE"},
+        {.name = "DSCO_CLAUDE_CODE_KEYCHAIN_SERVICE"},
+        {.name = "DSCO_DISABLE_CODEX_OAUTH_DISCOVERY"},
+        {.name = "DSCO_DISABLE_CLAUDE_CODE_OAUTH_DISCOVERY"},
+        {.name = "DSCO_DISABLE_CHATGPT_NATIVE"},
+    };
+    size_t env_count = sizeof(envs) / sizeof(envs[0]);
+    test_capture_env_list(envs, env_count);
+
+    const model_resolution_case_t cases[] = {
+        {"bare-opus-no-key",
+         "opus",
+         NULL,
+         NULL,
+         "claude-opus-4-8",
+         "anthropic",
+         "anthropic",
+         "anthropic",
+         NULL,
+         false,
+         false,
+         {{NULL, NULL}}},
+        {"openrouter-fallback-for-bare-claude",
+         "claude-sonnet-4-6",
+         NULL,
+         NULL,
+         "claude-sonnet-4-6",
+         "anthropic",
+         "anthropic",
+         "openrouter",
+         "sk-or-router",
+         true,
+         true,
+         {{"OPENROUTER_API_KEY", "sk-or-router"}, {NULL, NULL}}},
+        {"native-anthropic-namespace-refuses-openrouter-fallback",
+         "anthropic/claude-sonnet-4-6",
+         NULL,
+         NULL,
+         "anthropic/claude-sonnet-4-6",
+         "anthropic",
+         "anthropic",
+         "anthropic",
+         NULL,
+         false,
+         false,
+         {{"OPENROUTER_API_KEY", "sk-or-router"}, {NULL, NULL}}},
+        {"explicit-openrouter-anthropic-wrapper",
+         "openrouter/anthropic/claude-sonnet-4-6",
+         NULL,
+         NULL,
+         "openrouter/anthropic/claude-sonnet-4-6",
+         "anthropic",
+         "openrouter",
+         "openrouter",
+         "sk-or-router",
+         true,
+         false,
+         {{"OPENROUTER_API_KEY", "sk-or-router"}, {NULL, NULL}}},
+        {"kimi-native-alias",
+         "kimi",
+         NULL,
+         NULL,
+         "moonshotai/kimi-k2.7-code",
+         "moonshot",
+         "moonshot",
+         "moonshot",
+         "kimi-native",
+         true,
+         false,
+         {{"KIMI_API_KEY", "kimi-native"}, {NULL, NULL}}},
+        {"explicit-openrouter-moonshot-wrapper",
+         "openrouter/moonshotai/kimi-k2.7-code",
+         NULL,
+         NULL,
+         "openrouter/moonshotai/kimi-k2.7-code",
+         "moonshot",
+         "openrouter",
+         "openrouter",
+         "sk-or-router",
+         true,
+         false,
+         {{"OPENROUTER_API_KEY", "sk-or-router"}, {NULL, NULL}}},
+        {"glm-native-alias",
+         "glm52",
+         NULL,
+         NULL,
+         "zai/glm-5.2",
+         "zai",
+         "zai",
+         "zai",
+         "glm-native",
+         true,
+         false,
+         {{"GLM_API_KEY", "glm-native"}, {NULL, NULL}}},
+        {"glm-openrouter-alias",
+         "or-glm52",
+         NULL,
+         NULL,
+         "openrouter/z-ai/glm-5.2",
+         "zai",
+         "openrouter",
+         "openrouter",
+         "sk-or-router",
+         true,
+         false,
+         {{"OPENROUTER_API_KEY", "sk-or-router"}, {NULL, NULL}}},
+        {"z-ai-openrouter-catalog-namespace",
+         "z-ai/glm-5.2",
+         NULL,
+         NULL,
+         "z-ai/glm-5.2",
+         "zai",
+         "openrouter",
+         "openrouter",
+         "sk-or-router",
+         true,
+         false,
+         {{"OPENROUTER_API_KEY", "sk-or-router"}, {NULL, NULL}}},
+        {"local-ollama-no-key",
+         "ollama/gpt-oss:20b",
+         NULL,
+         NULL,
+         "ollama/gpt-oss:20b",
+         "ollama",
+         "ollama",
+         "ollama",
+         "local",
+         true,
+         false,
+         {{NULL, NULL}}},
+        {"openai-direct-key",
+         "openai/gpt-5.5",
+         NULL,
+         NULL,
+         "openai/gpt-5.5",
+         "openai",
+         "openai",
+         "openai",
+         "sk-openai-sim",
+         true,
+         false,
+         {{"OPENAI_API_KEY", "sk-openai-sim"}, {NULL, NULL}}},
+        {"override-mismatched-session-key-refused",
+         "claude-sonnet-4-6",
+         "sk-ant-session",
+         "openrouter",
+         "claude-sonnet-4-6",
+         "anthropic",
+         "anthropic",
+         "openrouter",
+         NULL,
+         false,
+         true,
+         {{NULL, NULL}}},
+        {"unknown-model-fallback-key-infers-openrouter",
+         "future-model-2030",
+         "sk-or-session",
+         NULL,
+         "future-model-2030",
+         "other",
+         "openrouter",
+         "openrouter",
+         "sk-or-session",
+         true,
+         false,
+         {{NULL, NULL}}},
+    };
+    size_t case_count = sizeof(cases) / sizeof(cases[0]);
+
+#define CHECK_MODEL_SIM(cond, text)                                                               \
+    do {                                                                                           \
+        if (!(cond)) {                                                                             \
+            test_restore_env_list(envs, env_count);                                                \
+            FAIL(text);                                                                            \
+            return;                                                                                \
+        }                                                                                          \
+    } while (0)
+
+    for (size_t i = 0; i < case_count; i++) {
+        const model_resolution_case_t *c = &cases[i];
+        for (size_t j = 0; j < env_count; j++)
+            unsetenv(envs[j].name);
+        setenv("DSCO_DISABLE_CODEX_OAUTH_DISCOVERY", "1", 1);
+        setenv("DSCO_DISABLE_CLAUDE_CODE_OAUTH_DISCOVERY", "1", 1);
+        setenv("DSCO_DISABLE_CHATGPT_NATIVE", "1", 1);
+        for (size_t j = 0; j < sizeof(c->env) / sizeof(c->env[0]) && c->env[j].name; j++)
+            setenv(c->env[j].name, c->env[j].value, 1);
+
+        const char *resolved = model_resolve_alias(c->input_model);
+        const char *route_model = (resolved && resolved[0]) ? resolved : c->input_model;
+        const char *family = provider_model_family(route_model);
+        const char *detected = provider_detect(route_model, c->fallback_key);
+        const char *routed =
+            provider_route_for_model(route_model, c->fallback_key, c->override_provider);
+        const char *request_key = provider_resolve_request_api_key(routed, c->fallback_key);
+        const char *routable_provider = NULL;
+        bool routable = provider_model_is_routable(route_model, c->fallback_key,
+                                                   c->override_provider, &routable_provider);
+        bool fallback = detected && routed && strcmp(detected, routed) != 0;
+        char msg[256];
+
+        snprintf(msg, sizeof(msg), "model resolution %s resolved", c->label);
+        CHECK_MODEL_SIM(resolved && strcmp(resolved, c->expect_resolved) == 0, msg);
+        snprintf(msg, sizeof(msg), "model resolution %s family", c->label);
+        CHECK_MODEL_SIM(family && strcmp(family, c->expect_family) == 0, msg);
+        snprintf(msg, sizeof(msg), "model resolution %s detected provider", c->label);
+        CHECK_MODEL_SIM(detected && strcmp(detected, c->expect_detected) == 0, msg);
+        snprintf(msg, sizeof(msg), "model resolution %s routed provider", c->label);
+        CHECK_MODEL_SIM(routed && strcmp(routed, c->expect_routed) == 0, msg);
+        snprintf(msg, sizeof(msg), "model resolution %s routable provider", c->label);
+        CHECK_MODEL_SIM(routable_provider && strcmp(routable_provider, c->expect_routed) == 0,
+                        msg);
+        snprintf(msg, sizeof(msg), "model resolution %s routable", c->label);
+        CHECK_MODEL_SIM(routable == c->expect_routable, msg);
+        snprintf(msg, sizeof(msg), "model resolution %s fallback flag", c->label);
+        CHECK_MODEL_SIM(fallback == c->expect_fallback, msg);
+        snprintf(msg, sizeof(msg), "model resolution %s request key", c->label);
+        if (c->expect_request_key) {
+            CHECK_MODEL_SIM(request_key && strcmp(request_key, c->expect_request_key) == 0, msg);
+        } else {
+            CHECK_MODEL_SIM(request_key == NULL, msg);
+        }
+    }
+
+    test_restore_env_list(envs, env_count);
+#undef CHECK_MODEL_SIM
     PASS();
 }
 
@@ -18159,6 +19149,29 @@ static void test_vos_vfs_result_concurrent(void) {
     PASS();
 }
 
+static void test_vos_vfs_pin_protects_result(void) {
+    TEST("§8 VFS pins protect persisted results");
+    vfs_db_t *db = vfs_open(":memory:");
+    ASSERT(db != NULL, "opened in-memory");
+    ASSERT(vfs_result_put(db, "tool", "abcdef0123456789", "payload", 1), "stored result");
+    const char *key = "tool:abcdef0123456789";
+    ASSERT(vfs_pin_put(db, key, "tool_results", "compaction_summary", "test", 60),
+           "pin stored");
+    ASSERT(vfs_pin_is_active(db, key), "pin active");
+    sleep(2);
+    ASSERT(vfs_maintain(db, 0) >= 0, "maintenance ran");
+    char *got = vfs_result_get(db, key);
+    ASSERT(got != NULL && strcmp(got, "payload") == 0, "pinned expired result preserved");
+    free(got);
+    ASSERT(vfs_pin_delete(db, key), "pin deleted");
+    ASSERT(!vfs_pin_is_active(db, key), "pin inactive after delete");
+    ASSERT(vfs_maintain(db, 0) >= 0, "maintenance ran after unpin");
+    got = vfs_result_get(db, key);
+    ASSERT(got == NULL, "unpinned expired result evicted");
+    vfs_close(db);
+    PASS();
+}
+
 static void test_vos_vfs_null_safety(void) {
     TEST("§8 VFS null-safety on all functions");
     /* None of these should crash */
@@ -18921,6 +19934,7 @@ int main(void) {
     test_build_request_ex_strips_anthropic_namespace();
     test_anthropic_cache_breakpoint_layout();
     test_anthropic_cache_ttl_1h_env();
+    test_loaded_builtin_tools_tail_append_and_evict();
     test_executive_end_conversation();
     test_executive_requires_reason();
     test_executive_unknown_decision();
@@ -19039,7 +20053,7 @@ int main(void) {
     test_untrusted_python_routes_to_sandbox();
     test_untrusted_node_requires_code_or_file();
     test_public_tools_execute_uses_governance_approval_gate();
-    test_governance_gate_reads_free_immune_mutation_only();
+    test_governance_gate_removed_immune_self_surgery_veto();
     test_plugin_manifest_lock_validation();
     test_plugin_manifest_invalid_hash();
     test_plugin_manifest_empty_capabilities();
@@ -19184,7 +20198,12 @@ int main(void) {
     test_md_fence_matching_strict();
     test_md_code_control_bytes_escaped();
     test_md_table_alignment_applied();
+    test_md_table_duplicate_separator_ignored();
     test_md_code_block_truncation_notice();
+    test_memory_sealed_blocks_auto_semantic();
+    test_memory_umbral_review_and_purge();
+    test_memory_json_escapes_classification();
+    test_memory_all_pinned_store_fails_closed();
 
     /* Trace system */
     test_trace_init_shutdown();
@@ -19218,6 +20237,12 @@ int main(void) {
     test_conv_load_ex_preserves_session_when_missing_block();
     test_conv_pop_last_turn();
     test_conv_pop_last_turn_tool_result_only();
+    test_conv_tool_integrity_valid();
+    test_conv_tool_integrity_missing_use();
+    test_conv_tool_integrity_missing_result();
+    test_conv_tool_integrity_duplicate_use();
+    test_conv_compact_session_capsule_preserves_invariants();
+    test_conv_tool_integrity_trim_preserves_graph();
     test_conv_trim_old_results();
     test_conv_trim_preserves_context_batch_breadcrumbs();
 
@@ -19245,6 +20270,10 @@ int main(void) {
     test_tools_shell_schemas_expose_artifact_aliases();
     test_tools_copy_move_accept_dest_alias();
     test_tools_normalize_schema_scalars();
+    test_tools_external_output_schema_contracts();
+    test_tools_builtin_output_schema_discovery();
+    test_tools_normalize_legacy_tool_inputs();
+    test_tools_validate_repaired_inputs();
     test_codex_app_directory_importer_variants();
     test_codex_app_directory_importer_and_integration_discovery();
     test_integration_discovery_profiles_pagination_and_doctor_flags();
@@ -19257,6 +20286,10 @@ int main(void) {
     test_tools_mcp_alias_preserves_underscored_boundaries();
     test_tools_mcp_alias_prefers_exact_match();
     test_tools_reset_external_clears_mcp_aliases();
+    test_external_tool_callback_lifetime_reset_stress();
+    test_swim_membership_suspect_dead_refute();
+    test_dsco_dht_kbuckets_lru_and_closest();
+    test_sequence_state_record_lifecycle();
     test_mcp_server_filter_env_selects_one();
     test_tools_builtin_count();
     test_tools_get_all();
@@ -19382,6 +20415,7 @@ int main(void) {
     test_provider_route_requires_explicit_openrouter_namespace();
     test_provider_route_z_ai_namespace_uses_openrouter();
     test_provider_route_glm_aliases_split_native_and_openrouter();
+    test_model_resolution_simulation_matrix();
     test_provider_route_uses_session_key_when_native_env_missing();
     test_provider_route_uses_claude_code_oauth_when_env_key_missing();
     test_provider_route_uses_claude_code_credentials_file_when_present();
@@ -19769,6 +20803,7 @@ int main(void) {
     test_vos_vfs_cache_evict();
     test_vos_vfs_stats();
     test_vos_vfs_result_concurrent();
+    test_vos_vfs_pin_protects_result();
     test_vos_vfs_null_safety();
 
     /* Cross-module integration */

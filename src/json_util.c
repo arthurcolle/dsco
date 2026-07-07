@@ -462,13 +462,18 @@ char *json_get_raw(const char *json, const char *key) {
 }
 
 int json_get_int(const char *json, const char *key, int def) {
-    char *raw = json_get_raw(json, key);
-    if (!raw)
+    const char *p = skip_ws(json);
+    if (*p != '{')
         return def;
-    /* strtol (not atoi): atoi is UB on overflow and silently wraps; strtol
-     * saturates to LONG_MIN/MAX, then clamp to int range for a defined result. */
-    long v = strtol(raw, NULL, 10);
-    free(raw);
+    p = find_key(p + 1, key);
+    if (!p)
+        return def;
+    p = skip_ws(p);
+    /* Parse in-place. The previous implementation copied the raw numeric span
+     * into a heap string before strtol(); hot tool-argument paths call these
+     * helpers repeatedly, so avoiding malloc/free removes allocator churn while
+     * preserving the same saturating/clamping behavior. */
+    long v = strtol(p, NULL, 10);
     if (v > INT_MAX)
         return INT_MAX;
     if (v < INT_MIN)
@@ -477,30 +482,40 @@ int json_get_int(const char *json, const char *key, int def) {
 }
 
 long long json_get_i64(const char *json, const char *key, long long def) {
-    char *raw = json_get_raw(json, key);
-    if (!raw)
+    const char *p = skip_ws(json);
+    if (*p != '{')
         return def;
-    long long v = strtoll(raw, NULL, 10);
-    free(raw);
-    return v;
+    p = find_key(p + 1, key);
+    if (!p)
+        return def;
+    p = skip_ws(p);
+    return strtoll(p, NULL, 10);
 }
 
 bool json_get_bool(const char *json, const char *key, bool def) {
-    char *raw = json_get_raw(json, key);
-    if (!raw)
+    const char *p = skip_ws(json);
+    if (*p != '{')
         return def;
-    bool v = (strncmp(raw, "true", 4) == 0);
-    free(raw);
-    return v;
+    p = find_key(p + 1, key);
+    if (!p)
+        return def;
+    p = skip_ws(p);
+    if (strncmp(p, "true", 4) == 0)
+        return true;
+    if (strncmp(p, "false", 5) == 0)
+        return false;
+    return def;
 }
 
 double json_get_double(const char *json, const char *key, double def) {
-    char *raw = json_get_raw(json, key);
-    if (!raw)
+    const char *p = skip_ws(json);
+    if (*p != '{')
         return def;
-    double v = strtod(raw, NULL);
-    free(raw);
-    return v;
+    p = find_key(p + 1, key);
+    if (!p)
+        return def;
+    p = skip_ws(p);
+    return strtod(p, NULL);
 }
 
 static bool json_strict_hex4(const char *p) {

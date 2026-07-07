@@ -82,12 +82,37 @@ void sha256_init(sha256_ctx_t *ctx) {
 }
 
 void sha256_update(sha256_ctx_t *ctx, const uint8_t *data, size_t len) {
-    for (size_t i = 0; i < len; i++) {
-        ctx->buffer[ctx->bitcount / 8 % 64] = data[i];
-        ctx->bitcount += 8;
-        if (ctx->bitcount / 8 % 64 == 0)
-            sha256_transform(ctx, ctx->buffer);
+    if (!ctx || !data || len == 0)
+        return;
+
+    /* Fast block-oriented update. The old path copied one byte at a time and
+     * tested the modulo per byte; that dominates cost for cache keys, payload
+     * hashes, and HMAC. Keep bitcount semantics identical: it is the total
+     * number of message bits consumed before final padding. */
+    size_t used = (size_t)((ctx->bitcount / 8) & 63u);
+    ctx->bitcount += (uint64_t)len * 8u;
+
+    if (used) {
+        size_t fill = 64u - used;
+        if (fill > len)
+            fill = len;
+        memcpy(ctx->buffer + used, data, fill);
+        used += fill;
+        data += fill;
+        len -= fill;
+        if (used < 64u)
+            return;
+        sha256_transform(ctx, ctx->buffer);
     }
+
+    while (len >= 64u) {
+        sha256_transform(ctx, data);
+        data += 64u;
+        len -= 64u;
+    }
+
+    if (len)
+        memcpy(ctx->buffer, data, len);
 }
 
 void sha256_final(sha256_ctx_t *ctx, uint8_t hash[32]) {
@@ -202,12 +227,33 @@ void md5_init(md5_ctx_t *ctx) {
 }
 
 void md5_update(md5_ctx_t *ctx, const uint8_t *data, size_t len) {
-    for (size_t i = 0; i < len; i++) {
-        ctx->buffer[ctx->count % 64] = data[i];
-        ctx->count++;
-        if (ctx->count % 64 == 0)
-            md5_transform(ctx, ctx->buffer);
+    if (!ctx || !data || len == 0)
+        return;
+
+    size_t used = (size_t)(ctx->count & 63u);
+    ctx->count += (uint64_t)len;
+
+    if (used) {
+        size_t fill = 64u - used;
+        if (fill > len)
+            fill = len;
+        memcpy(ctx->buffer + used, data, fill);
+        used += fill;
+        data += fill;
+        len -= fill;
+        if (used < 64u)
+            return;
+        md5_transform(ctx, ctx->buffer);
     }
+
+    while (len >= 64u) {
+        md5_transform(ctx, data);
+        data += 64u;
+        len -= 64u;
+    }
+
+    if (len)
+        memcpy(ctx->buffer, data, len);
 }
 
 void md5_final(md5_ctx_t *ctx, uint8_t hash[16]) {
