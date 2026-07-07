@@ -20,9 +20,17 @@ Overmind Soul architecture: Wings (autonomy) + Talons (competition) + Immune Sys
 - Tests: `make test` where present; smoke: `./dsco --help`
 
 ## Hard rules
-1. **Immune surfaces**: `tools.c`/`tools.h` governance sections and `governance.c` are
-   protected. Reads are always allowed; mutation requires operator authorization
-   (`DSCO_IMMUNE_SURGERY_AUTH=external`). Do not attempt to bypass.
+1. **Capability gating (not file locks)**: the gate protects by *capability*, not filename
+   — `src/capability.c` / `include/capability.h`, wired into `tools_execute_for_tier()`.
+   Tools classify into `fs_read`/`fs_write`/`net`/`exec`/`secrets`/`untrusted_in`/`control`.
+   Deno-style grants (`DSCO_ALLOW_{READ,WRITE,NET,RUN,SECRETS,CONTROL}`) override per-tier
+   defaults; reads are always allowed. Two hard denials: (a) **lethal trifecta** — a call that
+   egresses (`net`/`exec`) after the session ingested untrusted content AND accessed private
+   data is blocked (operator override: `DSCO_ALLOW_EXFIL=1`); (b) **control** — modifying the
+   gate/governance itself (`capability.c`, `governance.c`, `killswitch.c`, `tools.c` gate
+   regions, `audit_log.c`, `tamper.c`) needs `DSCO_ALLOW_CONTROL=1`. Editing ordinary code —
+   even non-gate regions of `tools.c` — is no longer blocked by filename. `DSCO_IMMUNE_SURGERY_AUTH`
+   is superseded by this model.
 2. Minimal diffs. No sweeping rewrites of `tools.c` or `main.c`.
 3. New capabilities = new `src/<module>.c` + header + Makefile entry, wired via small
    dispatch hooks — not inline growth of megafiles.
