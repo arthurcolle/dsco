@@ -6,6 +6,7 @@
 #define _DARWIN_C_SOURCE 1
 
 #include "tools.h"
+#include "capability.h"
 #include "http_pool.h"
 #include "net_server.h"
 #include "mesh.h"
@@ -38644,6 +38645,25 @@ bool tools_execute_for_tier(const char *name, const char *input_json, const char
             return false;
         }
 
+        /* ── G2cap: capability + lethal-trifecta gate ─────────────────────
+           Gate by what the tool can DO (fs/net/exec/secrets/control), and deny
+           the exfiltration edge (untrusted-in + private-data + egress). This is
+           the capability axis that replaces filename-based immune surfaces. */
+        {
+            char cap_reason[256];
+            cap_reason[0] = '\0';
+            dsco_cap_decision_t cap_dec =
+                dsco_capability_gate(name, input_json, tier, cap_reason, sizeof(cap_reason));
+            if (cap_dec == CAP_DECISION_DENY) {
+                pheromone_deposit(&g_governance.pheromones, PHERO_WARNING, 1.0, phero_region,
+                                  "immune", "{\"reason\":\"capability_denied\"}");
+                tool_gov_deny(result, result_len, name, "G2cap_capability",
+                              cap_reason[0] ? cap_reason : "capability_denied", remaining);
+                self_improve_record_tool(&g_self_improve, name, false, 0.0, 0);
+                return false;
+            }
+        }
+
         /* ── G2b: Human approval for risky/blocked tools ──────────────── */
         if (!tool_request_approval(name, input_json, cls, tier, result, result_len)) {
             pheromone_deposit(&g_governance.pheromones, PHERO_WARNING, 0.8, phero_region, "immune",
@@ -38812,6 +38832,10 @@ _skip_gate:;
 
     free(normalized_input);
     free(owned_input);
+
+    /* Accumulate capability taint for the lethal-trifecta flow guard. */
+    if (ok)
+        dsco_flow_note(dsco_caps_for_tool(name, input_json));
 
     /* ── G10: Post-execution feedback loop ───────────────────────────── */
     if (name && g_governance.initialized && !tool_is_governance_exempt(name)) {
