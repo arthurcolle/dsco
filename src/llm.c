@@ -120,9 +120,31 @@ static bool llm_env_truthy(const char *val) {
     return val && (val[0] == '1' || strcasecmp(val, "true") == 0 || strcasecmp(val, "yes") == 0);
 }
 
+static bool llm_model_value_is_blank_default(const char *model) {
+    if (!model)
+        return true;
+    while (*model && isspace((unsigned char)*model))
+        model++;
+    if (!*model)
+        return true;
+    if ((model[0] == '"' || model[0] == '\'') && model[1] == model[0]) {
+        const char *tail = model + 2;
+        while (*tail && isspace((unsigned char)*tail))
+            tail++;
+        return *tail == '\0';
+    }
+    return false;
+}
+
+static const char *llm_effective_model(const char *model) {
+    return llm_model_value_is_blank_default(model) ? DEFAULT_MODEL : model;
+}
+
 void session_state_init(session_state_t *s, const char *model) {
     memset(s, 0, sizeof(*s));
-    const char *resolved = model_resolve_alias(model);
+    const char *resolved = model_resolve_alias(llm_effective_model(model));
+    if (!resolved || !resolved[0])
+        resolved = DEFAULT_MODEL;
     snprintf(s->model, sizeof(s->model), "%s", resolved);
     s->effort[0] = '\0';
     s->trust_tier = DSCO_TRUST_STANDARD;
@@ -3462,12 +3484,13 @@ static const char *llm_anthropic_wire_model(const char *model) {
 
 char *llm_build_request_for_credential(conversation_t *c, const char *model, int max_tokens,
                                        const char *credential) {
+    const char *request_model = llm_effective_model(model);
     jbuf_t b;
     jbuf_init(&b, 16384);
     bool claude_code_oauth = llm_anthropic_uses_claude_code_auth(credential);
 
     jbuf_append(&b, "{\"model\":");
-    jbuf_append_json_str(&b, llm_anthropic_wire_model(model));
+    jbuf_append_json_str(&b, llm_anthropic_wire_model(request_model));
     jbuf_append(&b, ",\"max_tokens\":");
     jbuf_append_int(&b, max_tokens);
     jbuf_append(&b, ",\"stream\":true");
@@ -3499,9 +3522,14 @@ char *llm_build_request_for_credential(conversation_t *c, const char *model, int
     jbuf_append(&b, cache_control_json());
     jbuf_append(&b, "}]");
 
-    /* Adaptive thinking — only on Opus 4.6 and Sonnet 4.6 */
-    if (strstr(model, "opus-4-6") || strstr(model, "sonnet-4-6")) {
-        jbuf_append(&b, ",\"thinking\":{\"type\":\"adaptive\"}");
+    /* Adaptive thinking — gated by the model registry's supports_thinking
+     * flag so new thinking-capable models (e.g. claude-sonnet-5) are covered
+     * without editing hardcoded slug lists. */
+    {
+        const model_info_t *tmi = model_lookup(request_model);
+        if (tmi && tmi->supports_thinking) {
+            jbuf_append(&b, ",\"thinking\":{\"type\":\"adaptive\"}");
+        }
     }
 
     append_tools_json_filtered(&b, NULL, c, claude_code_oauth);
@@ -3617,9 +3645,10 @@ char *llm_build_request_ex_for_credential(conversation_t *c, session_state_t *se
     jbuf_t b;
     jbuf_init(&b, 16384);
     bool claude_code_oauth = llm_anthropic_uses_claude_code_auth(credential);
+    const char *request_model = llm_effective_model(session->model);
 
     jbuf_append(&b, "{\"model\":");
-    jbuf_append_json_str(&b, llm_anthropic_wire_model(session->model));
+    jbuf_append_json_str(&b, llm_anthropic_wire_model(request_model));
     jbuf_append(&b, ",\"max_tokens\":");
     /* Phase 4: auto-escalation — use override if set, else default */
     int effective_max_tokens =
@@ -3780,7 +3809,7 @@ char *llm_build_request_ex_for_credential(conversation_t *c, session_state_t *se
     }
 
     /* Adaptive thinking — gate on model support */
-    const model_info_t *mi = model_lookup(session->model);
+    const model_info_t *mi = model_lookup(request_model);
     if (mi && mi->supports_thinking) {
         if (session->thinking_budget > 0) {
             jbuf_append(&b, ",\"thinking\":{\"type\":\"enabled\",\"budget_tokens\":");

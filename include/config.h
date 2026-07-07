@@ -44,7 +44,21 @@
 extern int g_cheap_mode;
 
 /* API defaults */
-#define DEFAULT_MODEL       "zai/glm-5.2"
+#define DEFAULT_MODEL       "openai/gpt-5.5"
+
+/* Default swarm worker model for embarrassingly parallel work. Unpinned
+ * sub-agents (map_reduce / fanout) route here so wide fanouts stay cheap.
+ * gpt-5.4-mini: 400K ctx, $0.75/$4.50 per 1M — ~3x cheaper than the
+ * top-tier default. Structural fanout cap is SWARM_MAX_CHILDREN (64).
+ * Gate off with DSCO_SWARM_DEFAULT_MINI=0 to inherit the parent model. */
+#define DEFAULT_SWARM_MODEL "openai/gpt-5.4-mini"
+static inline const char *dsco_swarm_default_model(const char *api_key_unused) {
+    (void)api_key_unused;
+    const char *v = getenv("DSCO_SWARM_DEFAULT_MINI");
+    if (v && v[0] == '0' && v[1] == '\0')
+        return NULL; /* opt out: inherit parent model */
+    return DEFAULT_SWARM_MODEL;
+}
 #define API_URL_ANTHROPIC   "https://api.anthropic.com/v1/messages"
 #define API_URL_COUNT_TOKENS "https://api.anthropic.com/v1/messages/count_tokens"
 #define ANTHROPIC_VERSION   "2023-06-01"
@@ -137,15 +151,19 @@ static const model_info_t MODEL_REGISTRY[] = {
     { "opus48",       "claude-opus-4-8",            1000000, 128000,  5.0,  25.0,  0.50,  6.25, 1 },
     { "opus47",       "claude-opus-4-7",            1000000, 128000,  5.0,  25.0,  0.50,  6.25, 1 },
     { "opus46",       "claude-opus-4-6",            1000000, 128000,  5.0,  25.0,  0.50,  6.25, 1 },
-    { "sonnet",       "claude-sonnet-4-6",          1000000, 128000,  3.0,  15.0,  0.30,  3.75, 1 },
-    { "haiku",        "claude-haiku-4-5-20251001",   200000, 64000,   1.00,  5.0,  0.10,  1.25, 0 },
+    { "sonnet",       "claude-sonnet-5",            1000000, 128000,  2.0,  10.0,  0.20,  2.50, 1 },
+    { "sonnet5",      "claude-sonnet-5",            1000000, 128000,  2.0,  10.0,  0.20,  2.50, 1 },
+    { "haiku",        "claude-haiku-4-5",            200000,  64000,  1.00,  5.0,  0.10,  1.25, 0 },
+    { "haiku45",      "claude-haiku-4-5",            200000,  64000,  1.00,  5.0,  0.10,  1.25, 0 },
     /* ── Anthropic (OpenRouter IDs — for cross-provider routing) ─────── */
     { "or-fable5",    "anthropic/claude-fable-5",     1000000, 128000, 10.0, 50.0,  1.00, 12.50, 1 },
-    { "or-fable",     "anthropic/claude-sonnet-4.5",  1000000, 128000,  3.0, 15.0,  0.30,  3.75, 1 },
+    { "or-fable",     "anthropic/claude-fable-5",     1000000, 128000, 10.0, 50.0,  1.00, 12.50, 1 },
     { "or-opus48",    "anthropic/claude-opus-4.8",    1000000, 128000,  5.0, 25.0,  0.50,  6.25, 1 },
     { "or-opus47",    "anthropic/claude-opus-4.7",    1000000, 128000,  5.0, 25.0,  0.50,  6.25, 1 },
     { "or-opus46",    "anthropic/claude-opus-4.6",    1000000, 128000,  5.0, 25.0,  0.50,  6.25, 1 },
+    { "or-sonnet5",   "anthropic/claude-sonnet-5",    1000000, 128000,  2.0, 10.0,  0.20,  2.50, 1 },
     { "or-sonnet46",  "anthropic/claude-sonnet-4.6",  1000000, 128000,  3.0, 15.0,  0.30,  3.75, 1 },
+    { "or-haiku45",   "anthropic/claude-haiku-4.5",    200000,  64000,  1.0,  5.0,  0.10,  1.25, 0 },
     { "or-opus45",    "anthropic/claude-opus-4.5",     200000, 32000,  5.0,  25.0,  0, 0, 1 },
     { "or-sonnet45",  "anthropic/claude-sonnet-4.5",  1000000, 16000,  3.0,  15.0,  0, 0, 1 },
     /* ── OpenAI — GPT-5.x family (2026 frontier) ────────────────────── */
@@ -442,6 +460,12 @@ static inline const char *model_resolve_alias(const char *name) {
                 strcmp(name, MODEL_REGISTRY[i].model_id) == 0)
                 return MODEL_REGISTRY[i].model_id;
         }
+        /* Bare native provider model ids are already canonical. Do not let a
+         * runtime OpenRouter catalog entry rewrite e.g. claude-sonnet-4-6 into
+         * anthropic/claude-sonnet-4.6; routing fallback is handled later by
+         * provider_route_for_model based on available credentials. */
+        if (strncmp(name, "claude-", 7) == 0)
+            return name;
         if (strchr(name, '/') || strchr(name, ':'))
             return name;
     }
