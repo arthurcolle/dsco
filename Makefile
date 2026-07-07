@@ -81,6 +81,7 @@ SRC_NAMES = main.c agent.c llm.c tools.c execution_layer.c json_util.c ast.c swa
 	md.c baseline.c chronicle.c agent_event.c callbacks.c setup.c crypto.c eval.c pipeline.c plugin.c \
 			semantic.c hlc.c ipc.c mcp.c mcp_server.c mcp_names.c provider_profiles.c provider.c integrations.c error.c trace.c instrumenter.c structured_process.c task_profile.c \
 	output_guard.c topology.c workspace.c plan.c stateful_atoms.c recovery.c router.c \
+		durable_agents.c bus_cli.c \
 	pheromone.c ooda.c killswitch.c governance.c gov_experiment.c memory_tier.c talons.c avian.c \
 	arena_alloc.c event_loop.c vm.c scheduler.c waiter.c vfs.c trading.c legion.c \
 	agent_profile.c orchestrator.c vecstore.c tamper.c sealed_store.c \
@@ -111,6 +112,7 @@ SRC_NAMES = main.c agent.c llm.c tools.c execution_layer.c json_util.c ast.c swa
 	cluster.c \
 	activation_lease.c \
 	json_fast.c \
+	construct.c prompt_pool.c \
 	$(OPTIONAL_SRCS)
 TEST_SRC_NAMES = test.c
 
@@ -306,7 +308,7 @@ endif
 # Pizza-box: baked data blobs get their own flat obj names. Derive this from
 # data/ rather than src/generated/, because src/generated/ may not exist until
 # the bake step runs.
-BAKED_DATA       := $(shell find data -maxdepth 1 -type f -print 2>/dev/null | sort)
+BAKED_DATA       := $(shell find data -maxdepth 1 -type f ! -name '.*' -print 2>/dev/null | sort)
 BAKED_DATA_SYMS  := $(subst -,_,$(subst .,_,$(notdir $(BAKED_DATA))))
 GENERATED_C      := $(addprefix src/generated/embedded_,$(addsuffix .c,$(BAKED_DATA_SYMS)))
 GENERATED_REGISTRY := $(INC_DIR)/embedded_data_registry.h
@@ -676,6 +678,9 @@ test-fast: test_runner test_command_plane
 	./test_command_plane
 	DSCO_TEST_QUICK=1 ./test_runner
 
+test-cli-flags: $(TARGET)
+	bash tests/test_cli_global_flags.sh ./$(TARGET)
+
 test_runner: $(TEST_OBJS) $(GSL_TEST_OBJS)
 	$(CC) $(TEST_CFLAGS) -o $@ $^ $(LDFLAGS) $(LDLIBS)
 
@@ -1021,6 +1026,7 @@ ui: $(TARGET) ui-deps
 .PHONY: all debug dev clean install uninstall test coverage docs docs-check \
 	profile profile-instrumented \
 	asan ubsan asan-test ubsan-test test_runner_tsan test_plan_cache_tsan test_runner_asan format format-check \
+	test-cli-flags \
 	model-resolution-sim \
 	fast fast-build fast-test fast-quick fast-syntax fast-changed fast-bench fast-doctor \
 	changed-tests compile-commands build-report build-cache-doctor fast-objects time-trace ninja-file ninja-build \
