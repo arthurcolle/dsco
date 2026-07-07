@@ -27,6 +27,7 @@
 #include <stdint.h>
 
 typedef struct dsco_dht dsco_dht_t;
+typedef struct dsco_dht_kbuckets dsco_dht_kbuckets_t;
 
 typedef struct {
     uint16_t    udp_port;    /* DHT UDP port to bind (0 → default 7600) */
@@ -61,5 +62,15 @@ void dsco_dht_stop(dsco_dht_t *d);
 
 /* Process-global handle (set by dsco_dht_start), for tool/slash access. */
 dsco_dht_t *dsco_dht_global(void);
+
+#ifdef DSCO_INTERNAL_TESTS
+dsco_dht_kbuckets_t *dsco_dht_kbuckets_create(const uint8_t self_id[20], int k);
+void dsco_dht_kbuckets_destroy(dsco_dht_kbuckets_t *kb);
+bool dsco_dht_kbuckets_touch(dsco_dht_kbuckets_t *kb, const uint8_t node_id[20],
+                             const char *addr, uint64_t now_tick);
+int dsco_dht_kbuckets_bucket_size(dsco_dht_kbuckets_t *kb, const uint8_t node_id[20]);
+int dsco_dht_kbuckets_closest(dsco_dht_kbuckets_t *kb, const uint8_t target[20],
+                              uint8_t out_ids[][20], int max);
+#endif
 
 #endif /* DSCO_DHT_H */

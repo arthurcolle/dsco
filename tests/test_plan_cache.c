@@ -364,7 +364,8 @@ static void test_adapt_entity_substitution(void) {
     const plan_cache_entry_t *e = plan_cache_find_entry(task);
     REQUIRE(e != NULL, "entry not found");
 
-    char *adapted = plan_cache_adapt(e, "analyze GOOGL and AMZN");
+    uint64_t expected_hash = e->task_hash;
+    char *adapted = plan_cache_adapt(e, expected_hash, "analyze GOOGL and AMZN");
     REQUIRE(adapted != NULL, "adapted plan must be non-NULL");
     CHECK(strstr(adapted, "GOOGL") != NULL, "expected GOOGL");
     CHECK(strstr(adapted, "AMZN") != NULL, "expected AMZN");
@@ -381,7 +382,9 @@ static void test_adapt_multi_entity_positional(void) {
     const plan_cache_entry_t *e = plan_cache_find_entry(task);
     REQUIRE(e != NULL, "entry not found");
 
-    char *adapted = plan_cache_adapt(e, "buy GOOGL then sell AMZN hedge with TSLA");
+    uint64_t expected_hash = e->task_hash;
+    char *adapted =
+        plan_cache_adapt(e, expected_hash, "buy GOOGL then sell AMZN hedge with TSLA");
     REQUIRE(adapted != NULL, "non-NULL");
     CHECK(strstr(adapted, "GOOGL") != NULL, "MSFT→GOOGL");
     CHECK(strstr(adapted, "AMZN") != NULL, "AAPL→AMZN");
@@ -400,7 +403,8 @@ static void test_adapt_identical_entity_is_noop(void) {
     const plan_cache_entry_t *e = plan_cache_find_entry(task);
     REQUIRE(e != NULL, "entry not found");
 
-    char *adapted = plan_cache_adapt(e, "analyze MSFT only");
+    uint64_t expected_hash = e->task_hash;
+    char *adapted = plan_cache_adapt(e, expected_hash, "analyze MSFT only");
     REQUIRE(adapted != NULL, "non-NULL");
     CHECK_STR_EQ(adapted, pj, "same entities → plan unchanged");
     free(adapted);
@@ -414,7 +418,8 @@ static void test_adapt_fewer_entities_no_crash(void) {
     const plan_cache_entry_t *e = plan_cache_find_entry(task);
     REQUIRE(e != NULL, "entry not found");
 
-    char *adapted = plan_cache_adapt(e, "analyze GOOGL");
+    uint64_t expected_hash = e->task_hash;
+    char *adapted = plan_cache_adapt(e, expected_hash, "analyze GOOGL");
     REQUIRE(adapted != NULL, "non-NULL");
     CHECK(strstr(adapted, "GOOGL") != NULL, "first entity substituted");
     /* Only one pair available → AAPL/NVDA remain untouched. */
@@ -427,7 +432,42 @@ static void test_adapt_null_plan_json_returns_null(void) {
     plan_cache_store("analyze ETH price", "specialist_chain", "", 0.85f);
     const plan_cache_entry_t *e = plan_cache_find_entry("analyze ETH price");
     REQUIRE(e != NULL, "entry not found");
-    CHECK(plan_cache_adapt(e, "analyze SOL price") == NULL, "no plan_json → NULL");
+    CHECK(plan_cache_adapt(e, e->task_hash, "analyze SOL price") == NULL, "no plan_json → NULL");
+}
+
+static void test_adapt_rejects_reused_slot_with_stale_hash(void) {
+    const char *task_a = "aba task analyze MSFT original alpha";
+    const char *plan_a = "{\"asset\":\"MSFT\"}";
+    plan_cache_store(task_a, "fanout_balance", "", 0.90f);
+    plan_cache_store_json(task_a, plan_a);
+
+    const plan_cache_entry_t *stale = plan_cache_find_entry(task_a);
+    REQUIRE(stale != NULL, "entry A must exist");
+    uint64_t hash_a = stale->task_hash;
+
+    for (int i = 1; i < PLAN_CACHE_MAX; i++) {
+        char task[80];
+        snprintf(task, sizeof(task), "aba filler unique token %03d qqq zzz", i);
+        plan_cache_store(task, "filler_topology", "", 0.80f);
+    }
+
+    const char *task_b = "aba task analyze NVDA replacement beta";
+    const char *plan_b = "{\"asset\":\"NVDA\"}";
+    plan_cache_store(task_b, "specialist_chain", "", 0.95f);
+    plan_cache_store_json(task_b, plan_b);
+
+    const plan_cache_entry_t *fresh = plan_cache_find_entry(task_b);
+    REQUIRE(fresh != NULL, "entry B must exist");
+    REQUIRE(fresh == stale, "LRU should reuse the held slot for B");
+    REQUIRE(fresh->task_hash != hash_a, "slot must now contain a different task");
+
+    CHECK(plan_cache_adapt(stale, hash_a, "aba task analyze TSLA replacement beta") == NULL,
+          "stale pointer with old hash must not adapt repopulated slot");
+
+    char *adapted = plan_cache_adapt(fresh, fresh->task_hash, "aba task analyze TSLA replacement beta");
+    REQUIRE(adapted != NULL, "fresh pointer/hash should still adapt");
+    CHECK(strstr(adapted, "TSLA") != NULL, "fresh adaptation should substitute entity");
+    free(adapted);
 }
 
 static void test_lru_evicts_lowest_priority(void) {
@@ -582,7 +622,7 @@ static void test_null_safety(void) {
     plan_cache_store_json(NULL, "{}");
     plan_cache_store_json("task", NULL);
     CHECK(plan_cache_find_entry(NULL) == NULL, "NULL find → NULL");
-    CHECK(plan_cache_adapt(NULL, "task") == NULL, "NULL entry → NULL");
+    CHECK(plan_cache_adapt(NULL, 0, "task") == NULL, "NULL entry → NULL");
     CHECK_FLOAT_LE(plan_similarity_score(NULL, "task"), 0.0f, "NULL sim → 0");
     CHECK_FLOAT_LE(plan_similarity_score("task", NULL), 0.0f, "NULL sim → 0");
 }
@@ -733,7 +773,8 @@ static void gen_adapt(void) {
     plan_cache_store_json(task, pj);
     const plan_cache_entry_t *e = plan_cache_find_entry(task);
     REQUIRE(e != NULL, "entry must exist (case %d)", idx);
-    char *adapted = plan_cache_adapt(e, newt);
+    uint64_t expected_hash = e->task_hash;
+    char *adapted = plan_cache_adapt(e, expected_hash, newt);
     REQUIRE(adapted != NULL, "adapt must produce output");
     CHECK(strstr(adapted, n1) != NULL, "expected %s after substitution", n1);
     CHECK(strstr(adapted, n2) != NULL, "expected %s after substitution", n2);
@@ -860,6 +901,8 @@ static const test_case_t BASE_TESTS[] = {
     {"adapt: identical entity is no-op", "adapt", test_adapt_identical_entity_is_noop},
     {"adapt: fewer entities no crash", "adapt", test_adapt_fewer_entities_no_crash},
     {"adapt: no plan_json → NULL", "adapt", test_adapt_null_plan_json_returns_null},
+    {"adapt: stale pointer hash mismatch → NULL", "adapt",
+     test_adapt_rejects_reused_slot_with_stale_hash},
     {"lru: evicts lowest-priority entry", "lru", test_lru_evicts_lowest_priority},
     {"persist: reload across init/free", "persist", test_persist_and_reload},
     {"persist: JSON-escaping round-trip", "persist", test_persist_escaping_round_trip},

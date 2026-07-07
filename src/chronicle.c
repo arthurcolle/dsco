@@ -1,16 +1,20 @@
 #include "chronicle.h"
+#include "agent_event.h"
+#include "callbacks.h"
 #include "json_util.h"
 
 #include <sqlite3.h>
 
 #include <ctype.h>
 #include <errno.h>
+#include <dirent.h>
 #include <fcntl.h>
 #include <stdbool.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <strings.h>
 #include <sys/stat.h>
 #include <sys/time.h>
 #include <time.h>
@@ -74,13 +78,36 @@ static void sha256_init(sha256_ctx_t *ctx) {
 }
 
 static void sha256_update(sha256_ctx_t *ctx, const uint8_t data[], size_t len) {
-    for (size_t i = 0; i < len; ++i) {
-        ctx->data[ctx->datalen++] = data[i];
+    if (!ctx || !data || len == 0) return;
+
+    /* Fast path: hash whole 64-byte blocks directly from caller memory instead
+     * of copying one byte at a time through ctx->data. Chronicle hashes every
+     * event payload/blob, so large tool results and transcript blobs were
+     * paying avoidable per-byte loop overhead here. */
+    if (ctx->datalen != 0) {
+        size_t fill = 64U - (size_t)ctx->datalen;
+        if (fill > len) fill = len;
+        memcpy(ctx->data + ctx->datalen, data, fill);
+        ctx->datalen += (uint32_t)fill;
+        data += fill;
+        len -= fill;
         if (ctx->datalen == 64) {
             sha256_transform(ctx, ctx->data);
             ctx->bitlen += 512;
             ctx->datalen = 0;
         }
+    }
+
+    while (len >= 64U) {
+        sha256_transform(ctx, data);
+        ctx->bitlen += 512;
+        data += 64U;
+        len -= 64U;
+    }
+
+    if (len != 0) {
+        memcpy(ctx->data, data, len);
+        ctx->datalen = (uint32_t)len;
     }
 }
 
@@ -139,9 +166,13 @@ typedef struct {
     char root[PATH_MAX];
     char db_path[PATH_MAX];
     char event_log_path[PATH_MAX];
+    char journal_path[PATH_MAX];
+    int journal_fd;
+    bool journal_enabled;
     char installation_id[37];
     char session_id[37];
     char instance_id[128];
+    time_t started_at;
     unsigned long long seq;
     char prev_event_hash[65];
 } chronicle_state_t;
@@ -149,6 +180,38 @@ typedef struct {
 static chronicle_state_t g_chronicle = {0};
 
 static const char *nz(const char *s) { return s ? s : ""; }
+
+static uint32_t crc32_update(uint32_t crc, const void *data, size_t len) {
+    static uint32_t table[256];
+    static bool ready = false;
+    if (!ready) {
+        for (uint32_t i = 0; i < 256; i++) {
+            uint32_t c = i;
+            for (int j = 0; j < 8; j++) c = (c & 1U) ? (0xEDB88320U ^ (c >> 1)) : (c >> 1);
+            table[i] = c;
+        }
+        ready = true;
+    }
+    crc = ~crc;
+    const unsigned char *p = (const unsigned char *)data;
+    for (size_t i = 0; i < len; i++) crc = table[(crc ^ p[i]) & 0xffU] ^ (crc >> 8);
+    return ~crc;
+}
+
+static bool write_all_fd(int fd, const void *buf, size_t len) {
+    const char *p = (const char *)buf;
+    while (len > 0) {
+        ssize_t n = write(fd, p, len);
+        if (n < 0) {
+            if (errno == EINTR) continue;
+            return false;
+        }
+        if (n == 0) return false;
+        p += n;
+        len -= (size_t)n;
+    }
+    return true;
+}
 
 static bool mkdir_p(const char *path) {
     char tmp[PATH_MAX];
@@ -188,11 +251,71 @@ static bool write_all_file(const char *path, const void *data, size_t len) {
     size_t off = 0;
     while (off < len) {
         ssize_t n = write(fd, p + off, len - off);
+        if (n < 0 && errno == EINTR) continue;
         if (n <= 0) { close(fd); return false; }
         off += (size_t)n;
     }
     fsync(fd);
     close(fd);
+    return true;
+}
+
+static bool path_has_unsafe_component(const char *path) {
+    if (!path || !path[0]) return true;
+    const char *p = path;
+    while (*p) {
+        while (*p == '/') p++;
+        const char *start = p;
+        while (*p && *p != '/') p++;
+        size_t n = (size_t)(p - start);
+        if (n == 2 && start[0] == '.' && start[1] == '.') return true;
+    }
+    return false;
+}
+
+static bool path_is_safe_dir(const char *path) {
+    if (path_has_unsafe_component(path)) return false;
+    struct stat st;
+    if (lstat(path, &st) != 0) return false;
+    if (!S_ISDIR(st.st_mode) || S_ISLNK(st.st_mode)) return false;
+    return true;
+}
+
+static bool write_file_atomic_replace(const char *path, const char *body, mode_t mode) {
+    if (!path || !path[0] || path_has_unsafe_component(path)) return false;
+    if (!ensure_parent_dir(path)) return false;
+
+    char dir[PATH_MAX];
+    snprintf(dir, sizeof(dir), "%s", path);
+    char *slash = strrchr(dir, '/');
+    if (!slash) snprintf(dir, sizeof(dir), ".");
+    else if (slash == dir) slash[1] = '\0';
+    else *slash = '\0';
+    if (!path_is_safe_dir(dir)) return false;
+
+    struct stat st;
+    if (lstat(path, &st) == 0 && (!S_ISREG(st.st_mode) || S_ISLNK(st.st_mode))) return false;
+
+    char tmp[PATH_MAX];
+    snprintf(tmp, sizeof(tmp), "%s.tmp.%ld.XXXXXX", path, (long)getpid());
+    int fd = mkstemp(tmp);
+    if (fd < 0) return false;
+    fchmod(fd, mode);
+    const char *p = body ? body : "";
+    size_t len = strlen(p);
+    while (len > 0) {
+        ssize_t n = write(fd, p, len);
+        if (n < 0 && errno == EINTR) continue;
+        if (n <= 0) { close(fd); unlink(tmp); return false; }
+        p += n;
+        len -= (size_t)n;
+    }
+    if (fsync(fd) != 0) { close(fd); unlink(tmp); return false; }
+    if (close(fd) != 0) { unlink(tmp); return false; }
+    if (rename(tmp, path) != 0) { unlink(tmp); return false; }
+
+    int dfd = open(dir, O_RDONLY);
+    if (dfd >= 0) { fsync(dfd); close(dfd); }
     return true;
 }
 
@@ -272,6 +395,9 @@ static bool exec_sql(const char *sql) {
     return true;
 }
 
+static bool chronicle_journal_open(void);
+static bool chronicle_run_manifest_write(const char *status);
+
 static bool ensure_schema(void) {
     const char *schema =
         "CREATE TABLE IF NOT EXISTS sessions ("
@@ -335,6 +461,7 @@ bool chronicle_start(const chronicle_start_opts_t *opts) {
         return true;
     }
     memset(&g_chronicle, 0, sizeof(g_chronicle));
+    g_chronicle.journal_fd = -1;
     g_chronicle.mode = parse_mode(getenv("DSCO_CHRONICLE_MODE"));
     if (g_chronicle.mode == CHRONICLE_MODE_OFF) return false;
     resolve_root(g_chronicle.root, sizeof(g_chronicle.root));
@@ -357,6 +484,7 @@ bool chronicle_start(const chronicle_start_opts_t *opts) {
     if (!ensure_schema()) { sqlite3_close(g_chronicle.db); g_chronicle.db = NULL; return false; }
 
     time_t now = time(NULL);
+    g_chronicle.started_at = now;
     struct tm tmv;
     localtime_r(&now, &tmv);
     snprintf(g_chronicle.event_log_path, sizeof(g_chronicle.event_log_path),
@@ -395,7 +523,95 @@ bool chronicle_start(const chronicle_start_opts_t *opts) {
     jbuf_append(&b, "}");
     chronicle_event("session.started", NULL, NULL, NULL, "runtime", "dsco", b.data, "product_telemetry");
     jbuf_free(&b);
+    chronicle_journal_open();
     return true;
+}
+
+static bool chronicle_name_has_suffix(const char *s, const char *suffix) {
+    if (!s || !suffix) return false;
+    size_t n = strlen(s), m = strlen(suffix);
+    return n >= m && strcmp(s + n - m, suffix) == 0;
+}
+
+static char *chronicle_read_small_file(const char *path, size_t max_bytes) {
+    if (!path || !path[0]) return NULL;
+    FILE *fp = fopen(path, "rb");
+    if (!fp) return NULL;
+    if (fseek(fp, 0, SEEK_END) != 0) { fclose(fp); return NULL; }
+    long n = ftell(fp);
+    if (n < 0 || (size_t)n > max_bytes) { fclose(fp); return NULL; }
+    rewind(fp);
+    char *buf = (char *)malloc((size_t)n + 1);
+    if (!buf) { fclose(fp); return NULL; }
+    size_t got = fread(buf, 1, (size_t)n, fp);
+    fclose(fp);
+    buf[got] = '\0';
+    return buf;
+}
+
+typedef struct {
+    int enqueued;
+    int pending;
+    int retry_scheduled;
+    int delivered;
+    int dead_lettered;
+    int unknown;
+} chronicle_callback_counts_t;
+
+static void chronicle_callback_counts(chronicle_callback_counts_t *out) {
+    if (!out) return;
+    memset(out, 0, sizeof(*out));
+    const char *run_dir = chronicle_run_dir();
+    if (!run_dir || !run_dir[0]) return;
+    char outbox[PATH_MAX];
+    snprintf(outbox, sizeof(outbox), "%s/outbox", run_dir);
+    DIR *d = opendir(outbox);
+    if (!d) return;
+    struct dirent *ent;
+    while ((ent = readdir(d))) {
+        if (ent->d_name[0] == '.') continue;
+        if (chronicle_name_has_suffix(ent->d_name, ".json")) {
+            out->enqueued++;
+            continue;
+        }
+        if (!chronicle_name_has_suffix(ent->d_name, ".state")) continue;
+        char path[PATH_MAX];
+        snprintf(path, sizeof(path), "%s/%s", outbox, ent->d_name);
+        char *st = chronicle_read_small_file(path, 64 * 1024);
+        if (!st) { out->unknown++; continue; }
+        if (strstr(st, "\"state\":\"pending\"")) out->pending++;
+        else if (strstr(st, "\"state\":\"retry_scheduled\"")) out->retry_scheduled++;
+        else if (strstr(st, "\"state\":\"delivered\"")) out->delivered++;
+        else if (strstr(st, "\"state\":\"dead_lettered\"")) out->dead_lettered++;
+        else out->unknown++;
+        free(st);
+    }
+    closedir(d);
+}
+
+static void chronicle_emit_run_receipt(void) {
+    chronicle_callback_counts_t cb;
+    chronicle_callback_counts(&cb);
+    chronicle_cost_totals_t cost;
+    bool have_cost = chronicle_cost_totals_for_session(g_chronicle.session_id, &cost);
+    if (!have_cost) memset(&cost, 0, sizeof(cost));
+
+    long long ended_at = (long long)time(NULL);
+    jbuf_t p;
+    jbuf_init(&p, 768);
+    jbuf_append(&p, "{\"schema\":\"dsco.run_receipt.v1\",\"status\":\"completed\"");
+    jbuf_append(&p, ",\"run_id\":"); jbuf_append_json_str(&p, g_chronicle.session_id);
+    jbuf_appendf(&p, ",\"started_at\":%lld,\"ended_at\":%lld", (long long)g_chronicle.started_at, ended_at);
+    jbuf_appendf(&p, ",\"duration_ms\":%lld", g_chronicle.started_at ? (ended_at - (long long)g_chronicle.started_at) * 1000LL : 0LL);
+    jbuf_appendf(&p, ",\"journal_records\":%llu", g_chronicle.seq);
+    jbuf_appendf(&p, ",\"callbacks\":{\"enqueued\":%d,\"pending\":%d,\"retry_scheduled\":%d,\"delivered\":%d,\"dead_lettered\":%d,\"unknown\":%d}",
+                 cb.enqueued, cb.pending, cb.retry_scheduled, cb.delivered, cb.dead_lettered, cb.unknown);
+    jbuf_appendf(&p, ",\"cost\":{\"placeholder\":%s,\"usd_total\":%.8f,\"input_tokens\":%lld,\"output_tokens\":%lld,\"cache_read_tokens\":%lld,\"cache_write_tokens\":%lld,\"reasoning_tokens\":%lld,\"response_count\":%d}",
+                 have_cost ? "false" : "true", cost.cost_usd, cost.input_tokens, cost.output_tokens,
+                 cost.cache_read_tokens, cost.cache_write_tokens, cost.reasoning_tokens, cost.response_count);
+    jbuf_append(&p, "}");
+    agent_event_emit_simple("run.receipt", "ok", p.data, AGENT_EVENT_DURABLE | AGENT_EVENT_CALLBACK);
+    jbuf_free(&p);
 }
 
 void chronicle_stop(void) {
@@ -403,6 +619,9 @@ void chronicle_stop(void) {
     static bool stopping = false;
     if (stopping) return;
     stopping = true;
+    agent_event_emit_simple("run.completed", "ok", "{\"status\":\"completed\"}",
+                            AGENT_EVENT_DURABLE | AGENT_EVENT_CALLBACK);
+    chronicle_emit_run_receipt();
     chronicle_event("session.completed", NULL, NULL, NULL, "runtime", "dsco", NULL, "product_telemetry");
     sqlite3_stmt *st = NULL;
     if (sqlite3_prepare_v2(g_chronicle.db, "UPDATE sessions SET ended_at=?1 WHERE session_id=?2;", -1, &st, NULL) == SQLITE_OK) {
@@ -411,6 +630,8 @@ void chronicle_stop(void) {
         sqlite3_step(st); sqlite3_finalize(st);
     }
     if (g_chronicle.events_fp) { fflush(g_chronicle.events_fp); fclose(g_chronicle.events_fp); }
+    chronicle_run_manifest_write("completed");
+    if (g_chronicle.journal_fd >= 0) { fsync(g_chronicle.journal_fd); close(g_chronicle.journal_fd); }
     if (g_chronicle.db) sqlite3_close(g_chronicle.db);
     memset(&g_chronicle, 0, sizeof(g_chronicle));
     stopping = false;
@@ -422,6 +643,205 @@ const char *chronicle_installation_id(void) { return g_chronicle.installation_id
 const char *chronicle_session_id(void) { return g_chronicle.session_id; }
 const char *chronicle_root(void) { return g_chronicle.root; }
 const char *chronicle_db_path(void) { return g_chronicle.db_path; }
+
+const char *chronicle_run_id(void) { return g_chronicle.session_id; }
+const char *chronicle_journal_path(void) { return g_chronicle.journal_path; }
+const char *chronicle_run_dir(void) {
+    static char dir[PATH_MAX];
+    if (g_chronicle.journal_path[0]) {
+        snprintf(dir, sizeof(dir), "%s", g_chronicle.journal_path);
+        char *slash = strrchr(dir, '/');
+        if (slash) *slash = '\0';
+        return dir;
+    }
+    return "";
+}
+
+
+static uint32_t load_le32(const unsigned char b[4]) {
+    return (uint32_t)b[0] | ((uint32_t)b[1] << 8) | ((uint32_t)b[2] << 16) | ((uint32_t)b[3] << 24);
+}
+
+static int journal_print_file(const char *path, FILE *out, bool summary_only) {
+    FILE *fp = fopen(path, "rb");
+    if (!fp) return -1;
+    unsigned long long n = 0, bad = 0;
+    for (;;) {
+        unsigned char hdr[8];
+        size_t got = fread(hdr, 1, sizeof(hdr), fp);
+        if (got == 0) break;
+        if (got != sizeof(hdr)) { bad++; break; }
+        uint32_t len = load_le32(hdr);
+        uint32_t want_crc = load_le32(hdr + 4);
+        if (len == 0 || len > (32U * 1024U * 1024U)) { bad++; break; }
+        char *buf = (char *)malloc((size_t)len + 1);
+        if (!buf) { bad++; break; }
+        got = fread(buf, 1, len, fp);
+        if (got != len) { free(buf); bad++; break; }
+        buf[len] = 0;
+        uint32_t got_crc = crc32_update(0, buf, len);
+        if (got_crc != want_crc) { free(buf); bad++; break; }
+        n++;
+        if (!summary_only) fputs(buf, out);
+        free(buf);
+    }
+    fclose(fp);
+    if (summary_only) fprintf(out, "%llu records%s\n", n, bad ? " (truncated/corrupt tail ignored)" : "");
+    return bad ? 1 : 0;
+}
+
+static void runs_dir_path(char *out, size_t out_len) {
+    const char *override = getenv("DSCO_RUNS_DIR");
+    if (override && override[0]) snprintf(out, out_len, "%s", override);
+    else {
+        const char *home = getenv("HOME");
+        snprintf(out, out_len, "%s/.dsco/runs", home && home[0] ? home : ".");
+    }
+}
+
+int chronicle_runs_cli(int argc, char **argv) {
+    const char *cmd = argc >= 3 ? argv[2] : "list";
+    char runs[PATH_MAX];
+    runs_dir_path(runs, sizeof(runs));
+    if (strcmp(cmd, "list") == 0 || strcmp(cmd, "ls") == 0) {
+        DIR *d = opendir(runs);
+        if (!d) { fprintf(stderr, "no runs directory: %s\n", runs); return 1; }
+        struct dirent *ent;
+        while ((ent = readdir(d))) {
+            if (ent->d_name[0] == '.') continue;
+            char jp[PATH_MAX];
+            snprintf(jp, sizeof(jp), "%s/%s/journal.wal", runs, ent->d_name);
+            struct stat st;
+            if (stat(jp, &st) == 0) printf("%s\t%lld bytes\t%lld\n", ent->d_name, (long long)st.st_size, (long long)st.st_mtime);
+        }
+        closedir(d);
+        return 0;
+    }
+    if (strcmp(cmd, "show") == 0) {
+        if (argc < 4) { fprintf(stderr, "usage: dsco runs show <run-id>\n"); return 2; }
+        char jp[PATH_MAX];
+        snprintf(jp, sizeof(jp), "%s/%s/journal.wal", runs, argv[3]);
+        return journal_print_file(jp, stdout, false) < 0 ? 1 : 0;
+    }
+    if (strcmp(cmd, "check") == 0) {
+        if (argc < 4) { fprintf(stderr, "usage: dsco runs check <run-id>\n"); return 2; }
+        char jp[PATH_MAX];
+        snprintf(jp, sizeof(jp), "%s/%s/journal.wal", runs, argv[3]);
+        int rc = journal_print_file(jp, stdout, true);
+        return rc < 0 ? 1 : rc;
+    }
+    if (strcmp(cmd, "gc") == 0) {
+        fprintf(stderr, "dsco runs gc: not implemented yet (Wave B P1.3)\n");
+        return 2;
+    }
+    fprintf(stderr, "usage: dsco runs [list|show <run-id>|check <run-id>|gc]\n");
+    return 2;
+}
+
+static bool journal_disabled_env(void) {
+    const char *v = getenv("DSCO_JOURNAL");
+    return v && (strcmp(v, "0") == 0 || strcasecmp(v, "off") == 0 || strcasecmp(v, "false") == 0);
+}
+
+static bool chronicle_run_manifest_write(const char *status) {
+    if (!g_chronicle.ready || !g_chronicle.journal_path[0]) return false;
+    const char *run_dir = chronicle_run_dir();
+    if (!run_dir || !run_dir[0] || !path_is_safe_dir(run_dir)) return false;
+
+    char path[PATH_MAX];
+    snprintf(path, sizeof(path), "%s/manifest.json", run_dir);
+    struct stat st;
+    if (lstat(path, &st) == 0 && (!S_ISREG(st.st_mode) || S_ISLNK(st.st_mode))) return false;
+
+    char cwd[PATH_MAX];
+    const char *cwdp = getcwd(cwd, sizeof(cwd)) ? cwd : "";
+    long long ended_at = 0;
+    if (status && strcmp(status, "running") != 0) ended_at = (long long)time(NULL);
+
+    jbuf_t b;
+    jbuf_init(&b, 1024);
+    jbuf_append(&b, "{\n  \"schema\": \"dsco.run_manifest.v1\",");
+    jbuf_append(&b, "\n  \"run_id\": "); jbuf_append_json_str(&b, g_chronicle.session_id);
+    jbuf_append(&b, ",\n  \"session_id\": "); jbuf_append_json_str(&b, g_chronicle.session_id);
+    jbuf_append(&b, ",\n  \"installation_id\": "); jbuf_append_json_str(&b, g_chronicle.installation_id);
+    jbuf_append(&b, ",\n  \"status\": "); jbuf_append_json_str(&b, status && status[0] ? status : "running");
+    jbuf_appendf(&b, ",\n  \"started_at\": %lld", (long long)g_chronicle.started_at);
+    if (ended_at > 0) jbuf_appendf(&b, ",\n  \"ended_at\": %lld", ended_at);
+    else jbuf_append(&b, ",\n  \"ended_at\": null");
+    jbuf_appendf(&b, ",\n  \"updated_at\": %lld", (long long)time(NULL));
+    jbuf_append(&b, ",\n  \"schema_version\": "); jbuf_append_json_str(&b, CHRONICLE_SCHEMA_VERSION);
+    jbuf_append(&b, ",\n  \"capture_mode\": "); jbuf_append_json_str(&b, mode_str(g_chronicle.mode));
+    jbuf_append(&b, ",\n  \"instance_id\": "); jbuf_append_json_str(&b, g_chronicle.instance_id);
+    jbuf_append(&b, ",\n  \"chronicle_root\": "); jbuf_append_json_str(&b, g_chronicle.root);
+    jbuf_append(&b, ",\n  \"db_path\": "); jbuf_append_json_str(&b, g_chronicle.db_path);
+    jbuf_append(&b, ",\n  \"event_log_path\": "); jbuf_append_json_str(&b, g_chronicle.event_log_path);
+    jbuf_append(&b, ",\n  \"journal_path\": "); jbuf_append_json_str(&b, g_chronicle.journal_path);
+    jbuf_append(&b, ",\n  \"cwd\": "); jbuf_append_json_str(&b, cwdp);
+    jbuf_appendf(&b, ",\n  \"seq\": %llu", g_chronicle.seq);
+    jbuf_append(&b, "\n}\n");
+
+    bool ok = write_file_atomic_replace(path, b.data, 0644);
+    jbuf_free(&b);
+    return ok;
+}
+
+static bool chronicle_journal_open(void) {
+    if (!g_chronicle.ready || journal_disabled_env()) return false;
+    const char *home = getenv("HOME");
+    char runs_root[PATH_MAX];
+    const char *override = getenv("DSCO_RUNS_DIR");
+    if (override && override[0]) snprintf(runs_root, sizeof(runs_root), "%s", override);
+    else snprintf(runs_root, sizeof(runs_root), "%s/.dsco/runs", home && home[0] ? home : ".");
+    snprintf(g_chronicle.journal_path, sizeof(g_chronicle.journal_path), "%s/%s/journal.wal", runs_root, g_chronicle.session_id);
+    if (!ensure_parent_dir(g_chronicle.journal_path)) return false;
+    const char *run_dir = chronicle_run_dir();
+    if (!run_dir || !run_dir[0] || !path_is_safe_dir(run_dir)) return false;
+    if (!chronicle_run_manifest_write("running")) return false;
+    g_chronicle.journal_fd = open(g_chronicle.journal_path, O_CREAT | O_APPEND | O_WRONLY, 0644);
+    if (g_chronicle.journal_fd < 0) return false;
+    g_chronicle.journal_enabled = true;
+    jbuf_t p;
+    jbuf_init(&p, 512);
+    jbuf_append(&p, "{\"schema\":\"dsco.run_journal.v1\",\"run_id\":");
+    jbuf_append_json_str(&p, g_chronicle.session_id);
+    jbuf_append(&p, ",\"chronicle_root\":"); jbuf_append_json_str(&p, g_chronicle.root);
+    jbuf_append(&p, ",\"db_path\":"); jbuf_append_json_str(&p, g_chronicle.db_path);
+    jbuf_append(&p, ",\"cwd\":");
+    char cwd[PATH_MAX];
+    jbuf_append_json_str(&p, getcwd(cwd, sizeof(cwd)) ? cwd : "");
+    jbuf_append(&p, "}");
+    bool ok = agent_event_emit_simple("run.started", "ok", p.data,
+                                      AGENT_EVENT_DURABLE | AGENT_EVENT_CALLBACK);
+    jbuf_free(&p);
+    return ok;
+}
+
+bool chronicle_journal_append(const char *record_type, const char *payload_json, bool durable) {
+    if (!g_chronicle.ready || !g_chronicle.journal_enabled || g_chronicle.journal_fd < 0) return false;
+    if (!record_type || !record_type[0]) return false;
+    long long ms = 0;
+    struct timeval tv;
+    if (gettimeofday(&tv, NULL) == 0) ms = (long long)tv.tv_sec * 1000LL + tv.tv_usec / 1000;
+    jbuf_t rec;
+    jbuf_init(&rec, 1024);
+    jbuf_append(&rec, "{\"v\":1,\"type\":"); jbuf_append_json_str(&rec, record_type);
+    jbuf_append(&rec, ",\"run_id\":"); jbuf_append_json_str(&rec, g_chronicle.session_id);
+    jbuf_appendf(&rec, ",\"seq\":%llu,\"wall_ms\":%lld,\"payload\":", ++g_chronicle.seq, ms);
+    if (payload_json && json_is_valid_container(payload_json)) jbuf_append(&rec, payload_json);
+    else { jbuf_append(&rec, "{\"text\":"); jbuf_append_json_str(&rec, nz(payload_json)); jbuf_append(&rec, "}"); }
+    jbuf_append(&rec, "}\n");
+    uint32_t len = (uint32_t)rec.len;
+    uint32_t crc = crc32_update(0, rec.data, rec.len);
+    unsigned char hdr[8];
+    hdr[0] = (unsigned char)(len & 0xff); hdr[1] = (unsigned char)((len >> 8) & 0xff);
+    hdr[2] = (unsigned char)((len >> 16) & 0xff); hdr[3] = (unsigned char)((len >> 24) & 0xff);
+    hdr[4] = (unsigned char)(crc & 0xff); hdr[5] = (unsigned char)((crc >> 8) & 0xff);
+    hdr[6] = (unsigned char)((crc >> 16) & 0xff); hdr[7] = (unsigned char)((crc >> 24) & 0xff);
+    bool ok = write_all_fd(g_chronicle.journal_fd, hdr, sizeof(hdr)) && write_all_fd(g_chronicle.journal_fd, rec.data, rec.len);
+    if (ok && durable) ok = (fsync(g_chronicle.journal_fd) == 0);
+    jbuf_free(&rec);
+    return ok;
+}
 
 static bool append_event_to_sqlite(const char *event_id, const char *trace_id, const char *span_id,
                                    const char *parent_span_id, const char *event_type,

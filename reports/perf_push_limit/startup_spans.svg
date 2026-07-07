@@ -1,0 +1,19 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="190" viewBox="0 0 1200 190">
+<rect width="100%" height="100%" fill="#07111f"/>
+<text x="20" y="28" fill="#f8fafc" font-family="Menlo, monospace" font-size="18">DSCO Startup Span Timeline (iteration 1)</text>
+<text x="20" y="69" fill="#cbd5e1" font-family="Menlo, monospace" font-size="11">version:version exit</text>
+<rect x="260" y="55" width="840.0" height="15" rx="3" fill="#38bdf8"/>
+<text x="1108.0" y="67" fill="#f8fafc" font-family="Menlo, monospace" font-size="10">6.62 ms</text>
+<text x="20" y="91" fill="#cbd5e1" font-family="Menlo, monospace" font-size="11">tools_json:fast tools-json begin</text>
+<rect x="260" y="77" width="593.9" height="15" rx="3" fill="#38bdf8"/>
+<text x="861.9" y="89" fill="#f8fafc" font-family="Menlo, monospace" font-size="10">4.68 ms</text>
+<text x="20" y="113" fill="#cbd5e1" font-family="Menlo, monospace" font-size="11">models_json:fast models-json</text>
+<rect x="260" y="99" width="554.3" height="15" rx="3" fill="#38bdf8"/>
+<text x="822.3" y="111" fill="#f8fafc" font-family="Menlo, monospace" font-size="10">4.37 ms</text>
+<text x="20" y="135" fill="#cbd5e1" font-family="Menlo, monospace" font-size="11">tool_cwd:fast tool-exec begin</text>
+<rect x="260" y="121" width="571.5" height="15" rx="3" fill="#38bdf8"/>
+<text x="839.5" y="133" fill="#f8fafc" font-family="Menlo, monospace" font-size="10">4.50 ms</text>
+<text x="20" y="157" fill="#cbd5e1" font-family="Menlo, monospace" font-size="11">route_explain_sonnet:fast route-explain begin</text>
+<rect x="260" y="143" width="573.0" height="15" rx="3" fill="#38bdf8"/>
+<text x="841.0" y="155" fill="#f8fafc" font-family="Menlo, monospace" font-size="10">4.51 ms</text>
+</svg>
