@@ -109,6 +109,11 @@ typedef struct {
     int   child_count;
     char  coordinator_task[SWARM_LABEL_LEN];
     bool  active;
+
+    /* Durable SwarmRun v2: stable identity for this logical group. */
+    char  durable_run_id[128];
+    char  durable_run_dir[512];
+    char  topology[64];
 } swarm_group_t;
 
 /* ── Completion queue — O(1) push/pop for finished children ───────────── */
@@ -250,5 +255,23 @@ void swarm_group_kill(swarm_t *s, int group_id);
 int  swarm_status_json(swarm_t *s, char *buf, size_t len);
 int  swarm_child_output(swarm_t *s, int child_id, char *buf, size_t len);
 int  swarm_group_status_json(swarm_t *s, int group_id, char *buf, size_t len);
+
+/* ── Swarm Mode v1 observability/persistence ─────────────────────────────
+ * Persist a group as a first-class SwarmRun artifact directory:
+ *   .swarm/runs/<run_id>/{manifest.json,workers/worker_N.json,coordinator.md,
+ *                         claims.json,metrics.json,transcript.md}
+ * Returns 0 on success, -1 on validation/IO failure. */
+int  swarm_group_persist_run(swarm_t *s, int group_id, const char *run_id,
+                             const char *topology, const char *user_prompt,
+                             const char *coordinator_output,
+                             char *out_dir, size_t out_dir_len);
+
+/* Render a compact live-observability frame for a group into buf. */
+int  swarm_group_render_frame(swarm_t *s, int group_id, const char *run_id,
+                              const char *topology, char *buf, size_t len);
+
+/* Ensure a stable durable run id/dir exists for a group. */
+int  swarm_group_ensure_durable_run(swarm_t *s, int group_id, const char *topology,
+                                    const char *suggested_run_id);
 
 #endif

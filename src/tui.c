@@ -3648,13 +3648,6 @@ static int inbox_total_rows(const char *buf, size_t len) {
     return inbox_visible_rows(buf, len) + 3; /* top + content + bottom + hint */
 }
 
-static void inbox_clear(int r_top, int rows) {
-    for (int i = 0; i < rows; i++) {
-        tui_cursor_move(r_top + i, 1);
-        fprintf(stderr, "\033[2K");
-    }
-}
-
 /* Render the inline box at row r_top. Sets cur_row/cur_col (out params) to
  * the screen coordinates where the terminal cursor should sit. Returns box
  * height (borders + visible content + hint row). */
@@ -4155,6 +4148,23 @@ static void composer_backspace(char *buf, size_t *len, size_t *cur) {
     buf[*len] = '\0';
 }
 
+/* ── Composer history (local, readline-independent) ───────────────────── */
+#define TUI_COMPOSER_HISTORY_MAX 200
+#define TUI_COMPOSER_HISTORY_LINE_MAX 4096
+static char s_composer_history[TUI_COMPOSER_HISTORY_MAX][TUI_COMPOSER_HISTORY_LINE_MAX];
+static int s_composer_history_count = 0;
+
+static void composer_history_push(const char *line) {
+    if (!line || !line[0]) return;
+    if (s_composer_history_count > 0 && strcmp(s_composer_history[s_composer_history_count-1], line) == 0) return;
+    if (s_composer_history_count < TUI_COMPOSER_HISTORY_MAX) {
+        snprintf(s_composer_history[s_composer_history_count++], TUI_COMPOSER_HISTORY_LINE_MAX, "%s", line);
+    } else {
+        memmove(s_composer_history, s_composer_history + 1, sizeof(s_composer_history) - sizeof(s_composer_history[0]));
+        snprintf(s_composer_history[TUI_COMPOSER_HISTORY_MAX-1], TUI_COMPOSER_HISTORY_LINE_MAX, "%s", line);
+    }
+}
+
 /* Delete one utf-8 codepoint at cursor. */
 static void composer_delete(char *buf, size_t *len, size_t *cur) {
     if (*cur >= *len)
@@ -4609,6 +4619,7 @@ char *tui_composer_read(tui_status_bar_t *sb, const char *prompt, char *out, siz
     bool done = false;
     bool cancelled = false;
     bool in_paste = false;
+    int hist_pos = s_composer_history_count;
     size_t paste_chars = 0;  /* bytes received during current bracketed paste */
     size_t paste_len = 0;    /* bytes buffered during current bracketed paste */
     int paste_lines = 0;     /* newlines received during current bracketed paste */
@@ -4922,7 +4933,34 @@ char *tui_composer_read(tui_status_bar_t *sb, const char *prompt, char *out, siz
                 composer_kill_word(buf, &len, &cur);
                 goto redraw;
             }
-            if (n1 != '[' && n1 != 'O') {
+            if (n1 == '[') {
+                unsigned char n2 = 0;
+                if (composer_read_byte(STDIN_FILENO, 30, &n2) <= 0) {
+                    cancelled = true; break;
+                }
+                if (n2 == 'A') { /* Up */
+                    if (s_composer_history_count > 0 && hist_pos > 0) {
+                        hist_pos--;
+                        snprintf(buf, TUI_COMPOSER_BUF_CAP, "%s", s_composer_history[hist_pos]);
+                        len = cur = strlen(buf);
+                    }
+                    goto redraw;
+                }
+                if (n2 == 'B') { /* Down */
+                    if (hist_pos + 1 < s_composer_history_count) {
+                        hist_pos++;
+                        snprintf(buf, TUI_COMPOSER_BUF_CAP, "%s", s_composer_history[hist_pos]);
+                        len = cur = strlen(buf);
+                    } else {
+                        hist_pos = s_composer_history_count;
+                        buf[0] = ' '; len = cur = 0;
+                    }
+                    goto redraw;
+                }
+                composer_consume_csi_tail(n2);
+                continue;
+            }
+            if (n1 != 'O') {
                 /* Alt+I / Alt+i — paste image from system clipboard */
                 if (n1 == 'i' || n1 == 'I') {
                     char img_path[512] = {0};
@@ -5199,14 +5237,22 @@ char *tui_composer_read(tui_status_bar_t *sb, const char *prompt, char *out, siz
      * on the next repaint. */
     tui_panel_set_active(sb, false);
 
-    /* Erase the inline box so the echoed input + streamed text can flow
-     * naturally below. Reset scroll margins before the final cursor move:
-     * DECSTBM reset moves the cursor to home on common terminals. */
+    /* Keep the input panel permanently mounted while execution proceeds.
+     *
+     * Historically submit erased the composer and reset DECSTBM so streamed
+     * agent/tool output could flow through the full terminal. That made the
+     * input surface disappear exactly when long-running agents were active.
+     * Instead, repaint the composer in its idle state and keep the scroll
+     * region clamped above it; subsequent output scrolls in the transcript
+     * area while the bottom panel remains persistent. The next
+     * tui_composer_read() call reuses/repaints the same bottom surface. */
     tui_term_lock();
     fprintf(stderr, "\033[?25l");
-    inbox_clear(r_top, prev_height);
-    tui_composer_restore_untrack();
-    tui_cursor_move(r_top, 1);
+    tui_composer_restore_track(r_top, r_top + prev_height - 1);
+    int idle_cr = r_top + 1, idle_cc = 5;
+    (void)composer_paint(r_top, buf, len, cur, sug_idx, sug_count, sug_sel, &idle_cr, &idle_cc,
+                         imgpick_count, imgpick_sel, motion_frame, animations_enabled);
+    tui_cursor_move(r_top > 1 ? r_top - 1 : 1, 1);
     fprintf(stderr, "\033[?25h");
     fflush(stderr);
     tui_term_unlock();
@@ -5224,6 +5270,10 @@ char *tui_composer_read(tui_status_bar_t *sb, const char *prompt, char *out, siz
         out[0] = '\0';
         return out;
     }
+
+    /* Remember submitted line for composer history. */
+    if (len > 0)
+        composer_history_push(buf);
 
     /* Echo the submitted input into scrollback. Truecolor gradient on the
      * chevron, bright text, and a dim continuation glyph for multi-line input.
@@ -8597,6 +8647,7 @@ static void *outq_render_thread(void *arg) {
 
 void tui_outq_init(tui_output_queue_t *q, FILE *out) {
     memset(q, 0, sizeof(*q));
+    q->out = out ? out : stderr;
 
     /* Try primary allocation (TUI_OUTQ_SIZE = 4096 entries ≈ 8MB) */
     q->capacity = TUI_OUTQ_SIZE;
@@ -8611,20 +8662,49 @@ void tui_outq_init(tui_output_queue_t *q, FILE *out) {
             q->ring = calloc(q->capacity, sizeof(tui_out_entry_t));
             if (!q->ring) {
                 fprintf(stderr, "TUI: Failed to allocate output queue (critical error)\n");
+                q->capacity = 0;
                 return;  /* Critical failure - cannot proceed */
             }
         }
         fprintf(stderr, "TUI: Using reduced output queue (%d entries for graceful degradation)\n", q->capacity);
     }
 
-    q->out = out ? out : stderr;
+    if (pthread_mutex_init(&q->mutex, NULL) != 0) {
+        free(q->ring);
+        q->ring = NULL;
+        q->capacity = 0;
+        return;
+    }
+    if (pthread_cond_init(&q->cond, NULL) != 0) {
+        pthread_mutex_destroy(&q->mutex);
+        free(q->ring);
+        q->ring = NULL;
+        q->capacity = 0;
+        return;
+    }
     q->running = true;
-    pthread_mutex_init(&q->mutex, NULL);
-    pthread_cond_init(&q->cond, NULL);
-    pthread_create(&q->render_thread, NULL, outq_render_thread, q);
+    if (pthread_create(&q->render_thread, NULL, outq_render_thread, q) != 0) {
+        q->running = false;
+        pthread_cond_destroy(&q->cond);
+        pthread_mutex_destroy(&q->mutex);
+        free(q->ring);
+        q->ring = NULL;
+        q->capacity = 0;
+        return;
+    }
+    q->initialized = true;
 }
 
 void tui_outq_destroy(tui_output_queue_t *q) {
+    if (!q)
+        return;
+    if (!q->initialized) {
+        if (q->out)
+            fflush(q->out);
+        free(q->ring);
+        memset(q, 0, sizeof(*q));
+        return;
+    }
     pthread_mutex_lock(&q->mutex);
     q->running = false;
     pthread_cond_signal(&q->cond);
@@ -8650,6 +8730,16 @@ void tui_outq_destroy(tui_output_queue_t *q) {
 
 static void outq_enqueue(tui_output_queue_t *q, tui_out_type_t type, int priority, const char *data,
                          int len) {
+    if (!q || !q->initialized || !q->ring || q->capacity <= 0) {
+        FILE *out = (q && q->out) ? q->out : stderr;
+        if (type == TUI_OUT_TEXT && data && len > 0)
+            fwrite(data, 1, (size_t)len, out);
+        else if (type == TUI_OUT_CLEAR_LINE)
+            fputs("\r\033[K", out);
+        if (type == TUI_OUT_FLUSH)
+            fflush(out);
+        return;
+    }
     pthread_mutex_lock(&q->mutex);
     if (q->count >= q->capacity) {
         q->dropped++;
@@ -8708,6 +8798,10 @@ void tui_outq_flush_sync(tui_output_queue_t *q) {
     if (!q)
         return;
     outq_enqueue(q, TUI_OUT_FLUSH, 100, NULL, 0);
+    if (!q->initialized) {
+        fflush(q->out ? q->out : stderr);
+        return;
+    }
     /* Block on the drain condvar (render thread broadcasts at count==0).
      * Bounded at 250ms so a wedged render thread can never hang callers. */
     struct timespec deadline;
@@ -8729,6 +8823,18 @@ void tui_outq_stats(const tui_output_queue_t *q, int *total_writes, int *total_f
                     int *dropped, double *avg_flush_ms) {
     if (!q)
         return;
+    if (!q->initialized) {
+        if (total_writes)
+            *total_writes = 0;
+        if (total_flushes)
+            *total_flushes = 0;
+        if (dropped)
+            *dropped = 0;
+        if (avg_flush_ms)
+            *avg_flush_ms = 0.0;
+        return;
+    }
+    pthread_mutex_lock((pthread_mutex_t *)&q->mutex);
     if (total_writes)
         *total_writes = q->total_writes;
     if (total_flushes)
@@ -8738,6 +8844,7 @@ void tui_outq_stats(const tui_output_queue_t *q, int *total_writes, int *total_f
     if (avg_flush_ms) {
         *avg_flush_ms = q->total_flushes > 0 ? q->total_flush_ms / q->total_flushes : 0.0;
     }
+    pthread_mutex_unlock((pthread_mutex_t *)&q->mutex);
 }
 
 /* ── Streaming FSM Wiring ───────────────────────────────────────────── */
@@ -11396,3 +11503,169 @@ int tui_menu_run(tui_menu_t *m, tui_menu_item_t **out_item) {
     tui_term_unlock();
     return result;
 }
+
+#ifdef DSCO_INTERNAL_TESTS
+static int tui_test_key_from_final_byte(int final) {
+    switch (final) {
+    case 'A':
+        return TUI_TEST_KEY_UP;
+    case 'B':
+        return TUI_TEST_KEY_DOWN;
+    case 'C':
+        return TUI_TEST_KEY_RIGHT;
+    case 'D':
+        return TUI_TEST_KEY_LEFT;
+    case 'H':
+        return TUI_TEST_KEY_HOME;
+    case 'F':
+        return TUI_TEST_KEY_END;
+    case 'Z':
+        return TUI_TEST_KEY_BACKTAB;
+    default:
+        return TUI_TEST_KEY_UNKNOWN;
+    }
+}
+
+int tui_test_decode_key_sequence(const char *seq) {
+    if (!seq || !seq[0])
+        return TUI_TEST_KEY_UNKNOWN;
+    if (seq[0] != '\033') {
+        if (seq[0] == '\r' || seq[0] == '\n')
+            return TUI_TEST_KEY_ENTER;
+        if (seq[0] == '\t')
+            return TUI_TEST_KEY_TAB;
+        if (seq[0] == ' ')
+            return TUI_TEST_KEY_SPACE;
+        return TUI_TEST_KEY_UNKNOWN;
+    }
+    if (seq[1] == '\0')
+        return TUI_TEST_KEY_ESC;
+    if (seq[1] != '[' && seq[1] != 'O')
+        return TUI_TEST_KEY_UNKNOWN;
+
+    const char *p = seq + 2;
+    if (!*p)
+        return TUI_TEST_KEY_UNKNOWN;
+    if (seq[1] == 'O')
+        return tui_test_key_from_final_byte((unsigned char)*p);
+    if (*p == '?')
+        return TUI_TEST_KEY_UNKNOWN;
+
+    char *end = NULL;
+    long n = strtol(p, &end, 10);
+    if (end && *end == '~' && end[1] == '\0') {
+        switch (n) {
+        case 1:
+            return TUI_TEST_KEY_HOME;
+        case 4:
+            return TUI_TEST_KEY_END;
+        case 5:
+            return TUI_TEST_KEY_PAGE_UP;
+        case 6:
+            return TUI_TEST_KEY_PAGE_DOWN;
+        default:
+            return TUI_TEST_KEY_UNKNOWN;
+        }
+    }
+
+    size_t len = strlen(p);
+    if (len == 1)
+        return tui_test_key_from_final_byte((unsigned char)p[0]);
+    char final = p[len - 1];
+    if ((final >= 'A' && final <= 'Z') || (final >= 'a' && final <= 'z'))
+        return tui_test_key_from_final_byte((unsigned char)final);
+    return TUI_TEST_KEY_UNKNOWN;
+}
+
+int tui_test_dialog_move_row(int row, int maxrow, int key) {
+    if (maxrow < 0)
+        return 0;
+    if (row < 0)
+        row = 0;
+    if (row > maxrow)
+        row = maxrow;
+
+    switch (key) {
+    case TUI_TEST_KEY_PAGE_UP:
+    case TUI_TEST_KEY_HOME:
+        return 0;
+    case TUI_TEST_KEY_PAGE_DOWN:
+    case TUI_TEST_KEY_END:
+        return maxrow;
+    case TUI_TEST_KEY_UP:
+        return row > 0 ? row - 1 : maxrow;
+    case TUI_TEST_KEY_DOWN:
+        return row < maxrow ? row + 1 : 0;
+    default:
+        return row;
+    }
+}
+
+static int tui_test_first_selectable(const bool *selectable, int nrows) {
+    for (int i = 0; i < nrows; i++)
+        if (selectable[i])
+            return i;
+    return -1;
+}
+
+static int tui_test_last_selectable(const bool *selectable, int nrows) {
+    for (int i = nrows - 1; i >= 0; i--)
+        if (selectable[i])
+            return i;
+    return -1;
+}
+
+int tui_test_menu_move_selection(const bool *selectable, int nrows, int selected, int delta) {
+    if (!selectable || nrows <= 0)
+        return -1;
+    int first = tui_test_first_selectable(selectable, nrows);
+    if (first < 0)
+        return -1;
+    int last = tui_test_last_selectable(selectable, nrows);
+
+    int cur = selected;
+    if (cur < 0)
+        cur = first;
+    else if (cur >= nrows)
+        cur = last;
+    else if (!selectable[cur]) {
+        int snap = -1;
+        if (delta < 0) {
+            for (int i = cur; i >= 0; i--)
+                if (selectable[i]) {
+                    snap = i;
+                    break;
+                }
+        } else {
+            for (int i = cur; i < nrows; i++)
+                if (selectable[i]) {
+                    snap = i;
+                    break;
+                }
+        }
+        cur = snap >= 0 ? snap : (delta < 0 ? first : last);
+    }
+
+    int steps = delta < 0 ? -delta : delta;
+    for (int s = 0; s < steps; s++) {
+        int next = -1;
+        if (delta > 0) {
+            for (int i = cur + 1; i < nrows; i++)
+                if (selectable[i]) {
+                    next = i;
+                    break;
+                }
+        } else if (delta < 0) {
+            for (int i = cur - 1; i >= 0; i--)
+                if (selectable[i]) {
+                    next = i;
+                    break;
+                }
+        }
+        if (next < 0)
+            break;
+        cur = next;
+    }
+    return cur;
+}
+#endif

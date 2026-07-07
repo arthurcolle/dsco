@@ -478,21 +478,42 @@ int memory_tick(memory_store_t *m) {
 
 /* ── Classification (doctrine/CLASSIFICATION.md §5) ───────────────────── */
 
+static bool memory_class_valid(memory_class_t level) {
+    return level >= MEM_CLASS_OPEN && level <= MEM_CLASS_UMBRAL;
+}
+
+static bool memory_class_allows_manual_promotion(const memory_entry_t *e) {
+    if (!e || !e->active || e->tier >= MEM_SEMANTIC || !memory_class_valid(e->classification))
+        return false;
+
+    switch (e->classification) {
+    case MEM_CLASS_OPEN:
+    case MEM_CLASS_HELD:
+        return true;
+    case MEM_CLASS_SEALED:
+        return e->tier != MEM_EPISODIC || e->class_reviewed;
+    case MEM_CLASS_UMBRAL:
+        return e->class_reviewed;
+    default:
+        return false;
+    }
+}
+
 bool memory_class_promotable(const memory_entry_t *e) {
-    if (!e)
+    if (!e || !e->active || e->tier >= MEM_SEMANTIC || !memory_class_valid(e->classification))
         return false;
     switch (e->classification) {
     case MEM_CLASS_OPEN:
     case MEM_CLASS_HELD:
         return true; /* L0/L1 consolidate freely */
     case MEM_CLASS_SEALED:
-        /* L2: working->episodic is free; episodic->semantic needs review. */
-        if (e->tier == MEM_WORKING)
-            return true;
-        return e->class_reviewed;
+        /* L2: automatic working->episodic is allowed; semantic is review-only
+         * through memory_promote(), never by the sweep. */
+        return e->tier == MEM_WORKING;
     case MEM_CLASS_UMBRAL:
-        /* L3: never leaves working memory without explicit (Tier 0) review. */
-        return e->class_reviewed;
+        /* L3: the consolidation daemon never promotes existence-classified
+         * material. Tier 0 promotion is manual and consumes a review grant. */
+        return false;
     default:
         /* Unknown label: fail closed. An unlabeled-but-hot entry must not
          * consolidate on a default-permit path. */
@@ -503,20 +524,22 @@ bool memory_class_promotable(const memory_entry_t *e) {
 bool memory_classify(memory_store_t *m, const char *key, memory_class_t level) {
     if (!m || !m->initialized || !key)
         return false;
-    DSCO_REQUIRE_RET(level >= MEM_CLASS_OPEN && level <= MEM_CLASS_UMBRAL, false);
+    DSCO_REQUIRE_RET(memory_class_valid(level), false);
     memory_entry_t *e = find_by_key(m, key);
     if (!e)
         return false;
     /* No in-band declassification (SECRECY_HARDENING §5): labels only go up
      * here. Downgrades run through the DECLASSIFY ritual out-of-band, which
      * rewrites the entry rather than lowering the label in place. */
+    if (!memory_class_valid(e->classification))
+        e->classification = MEM_CLASS_OPEN;
     if (level < e->classification)
         return false;
-    e->classification = level;
     /* Raising the label revokes any pending review grant: the grant was made
      * against the old level's rules. */
-    if (level > MEM_CLASS_HELD)
+    if (level != e->classification)
         e->class_reviewed = false;
+    e->classification = level;
     /* UMBRAL must not sit in episodic/semantic. If material is re-labeled L3
      * after it already consolidated, that is a live consolidation leak —
      * demote it back to working immediately and let session-close purge it. */
@@ -548,12 +571,11 @@ int memory_purge_umbral(memory_store_t *m) {
     int purged = 0;
     for (int i = 0; i < MEMTIER_MAX_ENTRIES; i++) {
         memory_entry_t *e = &m->entries[i];
-        if (!e->active || e->classification != MEM_CLASS_UMBRAL)
+        if (!e->active || e->classification != MEM_CLASS_UMBRAL || e->tier != MEM_WORKING)
             continue;
-        /* Pinning does not save an UMBRAL entry: L3 TTL discipline outranks
-         * decay exemption. Verified deletion = zero the value bytes, not just
-         * the active flag (SECRECY_HARDENING §7: deletion without verification
-         * is superstition). */
+        /* Pinning does not save non-promoted UMBRAL working memory: L3 TTL
+         * discipline outranks decay exemption. Verified deletion = zero the
+         * value bytes, not just the active flag. */
         m->tier_count[e->tier]--;
         m->count--;
         m->total_evictions++;
@@ -579,53 +601,93 @@ int memory_status_json(const memory_store_t *m, char *buf, size_t len) {
                     m->total_promotions, m->total_evictions, m->total_consolidations);
 }
 
+static int memory_copy_json_buf(const jbuf_t *b, char *buf, size_t len) {
+    size_t n = (b && b->data) ? b->len : 0;
+    if (buf && len > 0) {
+        size_t copy = n < len - 1 ? n : len - 1;
+        if (copy > 0)
+            memcpy(buf, b->data, copy);
+        buf[copy] = '\0';
+    }
+    return n > (size_t)INT_MAX ? INT_MAX : (int)n;
+}
+
 int memory_to_json(const memory_store_t *m, char *buf, size_t len) {
     if (!m || !buf)
         return 0;
     double t = now_sec();
-    int n = snprintf(buf, len, "{\"entries\":[");
+    jbuf_t b;
+    jbuf_init(&b, 4096);
+    jbuf_append(&b, "{\"entries\":[");
 
     bool first = true;
-    for (int i = 0; i < MEMTIER_MAX_ENTRIES && (size_t)n < len - 512; i++) {
+    for (int i = 0; i < MEMTIER_MAX_ENTRIES; i++) {
         const memory_entry_t *e = &m->entries[i];
         if (!e->active)
             continue;
 
         double strength = memory_calc_strength(e->tier, e->created_at, t);
-        n += snprintf(buf + n, len - n,
-                      "%s{\"id\":%d,\"tier\":\"%s\",\"key\":\"%s\","
-                      "\"importance\":%.2f,\"strength\":%.4f,"
-                      "\"access_count\":%d,\"pinned\":%s}",
-                      first ? "" : ",", e->id, memory_tier_name(e->tier), e->key, e->importance,
-                      strength, e->access_count, e->pinned ? "true" : "false");
+        if (!first)
+            jbuf_append_char(&b, ',');
+        jbuf_appendf(&b, "{\"id\":%d,\"tier\":", e->id);
+        jbuf_append_json_str(&b, memory_tier_name(e->tier));
+        jbuf_append(&b, ",\"key\":");
+        jbuf_append_json_str(&b, e->key);
+        jbuf_appendf(&b, ",\"importance\":%.2f,\"strength\":%.4f,"
+                         "\"access_count\":%d,\"pinned\":%s,\"classification\":",
+                     e->importance, strength, e->access_count, e->pinned ? "true" : "false");
+        jbuf_append_json_str(&b, memory_class_name(e->classification));
+        jbuf_appendf(&b, ",\"classification_level\":%d,\"class_reviewed\":%s}",
+                     memory_class_valid(e->classification) ? (int)e->classification : -1,
+                     e->class_reviewed ? "true" : "false");
         first = false;
     }
-    n += snprintf(buf + n, len - n, "]}");
+    jbuf_append(&b, "]}");
+    int n = memory_copy_json_buf(&b, buf, len);
+    jbuf_free(&b);
     return n;
 }
 
 int memory_tier_to_json(const memory_store_t *m, memory_tier_t tier, char *buf, size_t len) {
     if (!m || !buf)
         return 0;
+    DSCO_REQUIRE_RET(tier >= 0 && tier < MEM_TIER_COUNT, 0);
     double t = now_sec();
-    int n = snprintf(buf, len, "{\"tier\":\"%s\",\"entries\":[", memory_tier_name(tier));
+    jbuf_t b;
+    jbuf_init(&b, 4096);
+    jbuf_append(&b, "{\"tier\":");
+    jbuf_append_json_str(&b, memory_tier_name(tier));
+    jbuf_append(&b, ",\"entries\":[");
 
     bool first = true;
-    for (int i = 0; i < MEMTIER_MAX_ENTRIES && (size_t)n < len - 512; i++) {
+    for (int i = 0; i < MEMTIER_MAX_ENTRIES; i++) {
         const memory_entry_t *e = &m->entries[i];
         if (!e->active || e->tier != tier)
             continue;
 
         double strength = memory_calc_strength(e->tier, e->created_at, t);
-        n +=
-            snprintf(buf + n, len - n,
-                     "%s{\"key\":\"%s\",\"value\":\"%.*s\",\"strength\":%.4f,"
-                     "\"importance\":%.2f,\"accesses\":%d}",
-                     first ? "" : ",", e->key, (int)(strlen(e->value) > 80 ? 80 : strlen(e->value)),
-                     e->value, strength, e->importance, e->access_count);
+        if (!first)
+            jbuf_append_char(&b, ',');
+        jbuf_append(&b, "{\"key\":");
+        jbuf_append_json_str(&b, e->key);
+        jbuf_append(&b, ",\"value\":");
+        size_t value_len = strlen(e->value);
+        char preview[81];
+        size_t preview_len = value_len > 80 ? 80 : value_len;
+        memcpy(preview, e->value, preview_len);
+        preview[preview_len] = '\0';
+        jbuf_append_json_str(&b, preview);
+        jbuf_appendf(&b, ",\"strength\":%.4f,\"importance\":%.2f,\"accesses\":%d,"
+                         "\"classification\":",
+                     strength, e->importance, e->access_count);
+        jbuf_append_json_str(&b, memory_class_name(e->classification));
+        jbuf_appendf(&b, ",\"classification_level\":%d}",
+                     memory_class_valid(e->classification) ? (int)e->classification : -1);
         first = false;
     }
-    n += snprintf(buf + n, len - n, "]}");
+    jbuf_append(&b, "]}");
+    int n = memory_copy_json_buf(&b, buf, len);
+    jbuf_free(&b);
     return n;
 }
 
@@ -642,13 +704,23 @@ void memory_persist_semantic(memory_store_t *m) {
         memory_entry_t *e = &m->entries[i];
         if (!e->active || e->tier != MEM_SEMANTIC)
             continue;
-        char val[2048];
-        snprintf(val, sizeof(val),
-                 "{\"value\":\"%.*s\",\"importance\":%.2f,"
-                 "\"access_count\":%d,\"pinned\":%s}",
-                 (int)(strlen(e->value) > 1500 ? 1500 : strlen(e->value)), e->value, e->importance,
-                 e->access_count, e->pinned ? "true" : "false");
-        vfs_kv_put_str(g_mem_vfs, "semantic_memory", e->key, val);
+        jbuf_t val;
+        jbuf_init(&val, 2048);
+        jbuf_append(&val, "{\"value\":");
+        size_t value_len = strlen(e->value);
+        char preview[1501];
+        size_t preview_len = value_len > 1500 ? 1500 : value_len;
+        memcpy(preview, e->value, preview_len);
+        preview[preview_len] = '\0';
+        jbuf_append_json_str(&val, preview);
+        jbuf_appendf(&val, ",\"importance\":%.2f,\"access_count\":%d,\"pinned\":%s,"
+                          "\"classification\":",
+                     e->importance, e->access_count, e->pinned ? "true" : "false");
+        jbuf_append_json_str(&val, memory_class_name(e->classification));
+        jbuf_appendf(&val, ",\"classification_level\":%d}",
+                     memory_class_valid(e->classification) ? (int)e->classification : -1);
+        vfs_kv_put_str(g_mem_vfs, "semantic_memory", e->key, val.data ? val.data : "{}");
+        jbuf_free(&val);
     }
 }
 
@@ -668,8 +740,24 @@ int memory_restore_semantic(memory_store_t *m) {
         }
         char *val = vfs_kv_get_str(g_mem_vfs, "semantic_memory", keys[i]);
         if (val) {
-            memory_store(m, MEM_SEMANTIC, keys[i], val, 0.8);
-            restored++;
+            char *stored_value = json_get_str(val, "value");
+            const char *value = stored_value ? stored_value : val;
+            double importance = json_get_double(val, "importance", 0.8);
+            int id = memory_store(m, MEM_SEMANTIC, keys[i], value, importance);
+            if (id >= 0) {
+                memory_entry_t *e = find_by_key(m, keys[i]);
+                if (e) {
+                    e->access_count = json_get_int(val, "access_count", e->access_count);
+                    e->pinned = json_get_bool(val, "pinned", e->pinned);
+                    char *class_s = json_get_str(val, "classification");
+                    memory_class_t c = MEM_CLASS_OPEN;
+                    if (class_s && memory_class_from_name(class_s, &c))
+                        e->classification = c;
+                    free(class_s);
+                }
+                restored++;
+            }
+            free(stored_value);
             free(val);
         }
         free(keys[i]);

@@ -301,7 +301,7 @@ static char *run_virtual_tool(const char *task, const char *tool_name) {
      * makes Haiku call exactly this tool, then execute directly. */
 
     /* Look up the tool definition for its schema */
-    int tool_idx = tool_map_lookup(&g_tool_map, tool_name);
+    int tool_idx = tools_lookup_index(tool_name);
     if (tool_idx < 0 && tool_idx > -(10000)) {
         /* Not found — try direct execution with the task as input */
         char *tr = safe_malloc(ORCH_RESULT_BUF);

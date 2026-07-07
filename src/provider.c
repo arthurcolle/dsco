@@ -245,6 +245,11 @@ static bool provider_env_truthy(const char *val) {
     return val && (val[0] == '1' || strcasecmp(val, "true") == 0 || strcasecmp(val, "yes") == 0);
 }
 
+static bool provider_env_falsey(const char *val) {
+    return val && (val[0] == '0' || strcasecmp(val, "false") == 0 ||
+                   strcasecmp(val, "no") == 0 || strcasecmp(val, "off") == 0);
+}
+
 static bool provider_env_matches(const char *val, const char *a, const char *b) {
     return val && ((a && strcasecmp(val, a) == 0) || (b && strcasecmp(val, b) == 0));
 }
@@ -1782,13 +1787,19 @@ static bool openai_append_tools_json(jbuf_t *b, conversation_t *conv, session_st
 
     int filtered_count = 0;
     const tool_def_t **filtered = NULL;
+    const char *tool_ctx = openai_last_user_context(conv);
     if (max_tools_send > 0) {
-        filtered =
-            tools_get_filtered(openai_last_user_context(conv), max_tools_send, &filtered_count);
+        filtered = tools_get_filtered(tool_ctx, max_tools_send, &filtered_count);
     }
+    external_tool_snapshot_t ext = tools_external_snapshot();
+    int *ext_order = ext.count > 0 ? safe_malloc((size_t)ext.count * sizeof(*ext_order)) : NULL;
+    int ext_order_count =
+        ext_order ? tools_rank_external_snapshot(&ext, tool_ctx, ext_order, ext.count) : 0;
 
-    if (filtered_count <= 0 && g_external_tool_count <= 0) {
+    if (filtered_count <= 0 && ext.count <= 0) {
         free((void *)filtered);
+        free(ext_order);
+        tools_external_snapshot_free(&ext);
         return false;
     }
 
@@ -1799,16 +1810,14 @@ static bool openai_append_tools_json(jbuf_t *b, conversation_t *conv, session_st
     /* Pre-count total tools to identify the last one for cache marking. */
     bool allowlist_active = getenv("DSCO_TOOL_ALLOWLIST") && getenv("DSCO_TOOL_ALLOWLIST")[0];
     int loaded_ext_pre = 0;
-    for (int i = 0; !allowlist_active && i < g_external_tool_count; i++)
-        if (g_external_tools[i].loaded)
+    for (int i = 0; !allowlist_active && i < ext.count; i++)
+        if (ext.items[i].loaded)
             loaded_ext_pre++;
     int ext_budget_pre = loaded_ext_pre > 0 ? loaded_ext_pre : 16;
     if (ext_budget_pre > 32)
         ext_budget_pre = 32;
-    int ext_total_pre = allowlist_active
-                            ? 0
-                            : (ext_budget_pre < g_external_tool_count ? ext_budget_pre
-                                                                       : g_external_tool_count);
+    int ext_total_pre =
+        allowlist_active ? 0 : (ext_budget_pre < ext.count ? ext_budget_pre : ext.count);
     int total_tools = filtered_count + ext_total_pre;
 
     jbuf_append(b, ",\"tools\":[");
@@ -1826,8 +1835,8 @@ static bool openai_append_tools_json(jbuf_t *b, conversation_t *conv, session_st
     free((void *)filtered);
 
     int loaded_ext_count = 0;
-    for (int i = 0; !allowlist_active && i < g_external_tool_count; i++)
-        if (g_external_tools[i].loaded)
+    for (int i = 0; !allowlist_active && i < ext.count; i++)
+        if (ext.items[i].loaded)
             loaded_ext_count++;
     int ext_budget = loaded_ext_count > 0 ? loaded_ext_count : 16;
     if (ext_budget > 32)
@@ -1835,21 +1844,25 @@ static bool openai_append_tools_json(jbuf_t *b, conversation_t *conv, session_st
     int ext_written = 0;
     for (int pass = 0; !allowlist_active && pass < 2 && ext_written < ext_budget; pass++) {
         bool want_loaded = (pass == 0);
-        for (int i = 0; i < g_external_tool_count && ext_written < ext_budget; i++) {
-            if ((bool)g_external_tools[i].loaded != want_loaded)
+        for (int oi = 0; oi < ext_order_count && ext_written < ext_budget; oi++) {
+            int i = ext_order[oi];
+            if (i < 0 || i >= ext.count)
+                continue;
+            if ((bool)ext.items[i].loaded != want_loaded)
                 continue;
             if (wrote_any)
                 jbuf_append(b, ",");
             bool is_last = want_cache && (emitted == total_tools - 1);
-            openai_append_function_tool(b, g_external_tools[i].name,
-                                        g_external_tools[i].description,
-                                        g_external_tools[i].input_schema_json, is_last);
+            openai_append_function_tool(b, ext.items[i].name, ext.items[i].description,
+                                        ext.items[i].input_schema_json, is_last);
             wrote_any = true;
             ext_written++;
             emitted++;
         }
     }
     jbuf_append(b, "]");
+    free(ext_order);
+    tools_external_snapshot_free(&ext);
     return wrote_any;
 }
 
@@ -2217,6 +2230,25 @@ static bool openai_extra_has_param(const char *extra, const char *key) {
     return true;
 }
 
+static bool openai_parallel_tool_calls_enabled_for_provider(const char *provider_name) {
+    const char *env = getenv("DSCO_PARALLEL_TOOL_CALLS");
+    if (env && env[0])
+        return !provider_env_falsey(env);
+
+    const char *canonical =
+        provider_name && provider_name[0] ? provider_profile_canonical_name(provider_name) : NULL;
+    if (canonical && provider_is_local_endpoint(canonical))
+        return false;
+    return true;
+}
+
+static bool openai_should_append_parallel_tool_calls(const char *provider_name,
+                                                     const char *extra) {
+    if (extra && openai_extra_has_param(extra, "parallel_tool_calls"))
+        return false;
+    return openai_parallel_tool_calls_enabled_for_provider(provider_name);
+}
+
 static void openai_append_raw_param(jbuf_t *b, const char *key, const char *raw) {
     if (!b || !key || !raw)
         return;
@@ -2278,7 +2310,8 @@ static void openai_append_structured_output_param(jbuf_t *b, session_state_t *se
     }
 }
 
-static void openai_append_extra_request_params(jbuf_t *b, const char *extra) {
+static void openai_append_extra_request_params(jbuf_t *b, const char *extra,
+                                               bool suppress_reasoning_params) {
     if (!extra)
         return;
     /* Chat Completions + current OpenAI-compatible extensions. Ownership fields
@@ -2315,8 +2348,13 @@ static void openai_append_extra_request_params(jbuf_t *b, const char *extra) {
         "web_search_options",
         NULL,
     };
-    for (int i = 0; keys[i]; i++)
+    for (int i = 0; keys[i]; i++) {
+        if (suppress_reasoning_params &&
+            (strcmp(keys[i], "reasoning") == 0 || strcmp(keys[i], "reasoning_effort") == 0)) {
+            continue;
+        }
         openai_append_extra_param_if_present(b, extra, keys[i]);
+    }
 }
 
 static bool provider_strip_slash_namespace(const char *model, const char *ns,
@@ -2434,6 +2472,7 @@ static char *openai_build_request(provider_t *p, conversation_t *conv, session_s
     const char *extra_params = openai_extra_params_json();
     const char *provider_name = p && p->name ? provider_profile_canonical_name(p->name) : NULL;
     bool modal_endpoint = provider_name && strcmp(provider_name, "modal") == 0;
+    bool sakana_endpoint = provider_is_sakana(p);
 
     jbuf_append(&b, "{\"model\":");
     const char *request_model =
@@ -2495,19 +2534,19 @@ static char *openai_build_request(provider_t *p, conversation_t *conv, session_s
             !(extra_params && openai_extra_has_param(extra_params, "top_p"))) {
             jbuf_appendf(&b, ",\"top_p\":%.6g", session->top_p);
         }
-        if (!modal_endpoint && session && session->effort[0] &&
+        if (!modal_endpoint && !sakana_endpoint && session && session->effort[0] &&
             !(extra_params && (openai_extra_has_param(extra_params, "reasoning_effort") ||
                                openai_extra_has_param(extra_params, "reasoning")))) {
             char effort_buf[32];
             const char *effort = dcr_reasoning_effort_normalize(
                 p ? p->name : NULL, session->model, session->effort, effort_buf,
                 sizeof(effort_buf));
-            if (effort && effort[0] && strcmp(effort, EFFORT_HIGH) != 0) {
+            if (effort && effort[0]) {
                 jbuf_append(&b, ",\"reasoning_effort\":");
                 jbuf_append_json_str(&b, effort);
             }
         }
-        openai_append_extra_request_params(&b, extra_params);
+        openai_append_extra_request_params(&b, extra_params, sakana_endpoint);
     }
     openai_append_structured_output_param(&b, session, extra_params);
 
@@ -2588,6 +2627,8 @@ static char *openai_build_request(provider_t *p, conversation_t *conv, session_s
 
     bool has_tools = openai_append_tools_json(&b, conv, session);
     openai_append_tool_choice_json(&b, session, has_tools);
+    if (has_tools && openai_should_append_parallel_tool_calls(provider_name, extra_params))
+        jbuf_append(&b, ",\"parallel_tool_calls\":true");
 
     /* Top-level automatic cache_control for Anthropic/Qwen via OpenRouter.
      * In "automatic" mode OR/Anthropic caches everything up to the last
@@ -3535,7 +3576,6 @@ static void oai_handle_sse_line(oai_sse_state_t *s, const char *line) {
             int v = json_get_int(in_detail, "cached_tokens", 0);
             if (v > s->cached_tokens)
                 s->cached_tokens = v;
-            free(in_detail);
         }
         /* OpenRouter normalisation alias */
         char *pt_detail = json_get_raw(usage_raw, "prompt_tokens_details");
@@ -3552,29 +3592,23 @@ static void oai_handle_sse_line(oai_sse_state_t *s, const char *line) {
                 s->cached_tokens = v;
         }
         char *out_detail = json_get_raw(usage_raw, "output_tokens_details");
-        if (out_detail) {
+        if (out_detail)
             s->reasoning_tokens = json_get_int(out_detail, "reasoning_tokens", 0);
-            free(out_detail);
-        }
         /* Sakana Fugu Ultra: orchestration tokens are real billing tokens
          * outside base input/output counts.  Accumulate them so session
          * cost accounting isn't off by 2-5x on multi-agent turns. */
-        {
-            char *itd2 = json_get_raw(usage_raw, "input_tokens_details");
-            if (itd2) {
-                int orch_in = json_get_int(itd2, "orchestration_input_tokens", 0);
-                int orch_in_cached = json_get_int(itd2, "orchestration_input_cached_tokens", 0);
-                s->usage.input_tokens += orch_in;
-                if (orch_in_cached > 0)
-                    s->usage.cache_read_input_tokens += orch_in_cached;
-                free(itd2);
-            }
-            char *otd2 = json_get_raw(usage_raw, "output_tokens_details");
-            if (otd2) {
-                int orch_out = json_get_int(otd2, "orchestration_output_tokens", 0);
-                s->usage.output_tokens += orch_out;
-                free(otd2);
-            }
+        if (in_detail) {
+            int orch_in = json_get_int(in_detail, "orchestration_input_tokens", 0);
+            int orch_in_cached = json_get_int(in_detail, "orchestration_input_cached_tokens", 0);
+            s->usage.input_tokens += orch_in;
+            if (orch_in_cached > 0)
+                s->usage.cache_read_input_tokens += orch_in_cached;
+            free(in_detail);
+        }
+        if (out_detail) {
+            int orch_out = json_get_int(out_detail, "orchestration_output_tokens", 0);
+            s->usage.output_tokens += orch_out;
+            free(out_detail);
         }
         free(usage_raw);
     }
@@ -4139,10 +4173,16 @@ static bool chatgpt_append_tools(jbuf_t *b, conversation_t *conv, session_state_
         return false;
 
     int filtered_count = 0;
-    const tool_def_t **filtered =
-        tools_get_filtered(openai_last_user_context(conv), 128, &filtered_count);
-    if (filtered_count <= 0 && g_external_tool_count <= 0) {
+    const char *tool_ctx = openai_last_user_context(conv);
+    const tool_def_t **filtered = tools_get_filtered(tool_ctx, 128, &filtered_count);
+    external_tool_snapshot_t ext = tools_external_snapshot();
+    int *ext_order = ext.count > 0 ? safe_malloc((size_t)ext.count * sizeof(*ext_order)) : NULL;
+    int ext_order_count =
+        ext_order ? tools_rank_external_snapshot(&ext, tool_ctx, ext_order, ext.count) : 0;
+    if (filtered_count <= 0 && ext.count <= 0) {
         free((void *)filtered);
+        free(ext_order);
+        tools_external_snapshot_free(&ext);
         return false;
     }
 
@@ -4163,23 +4203,27 @@ static bool chatgpt_append_tools(jbuf_t *b, conversation_t *conv, session_state_
     free((void *)filtered);
 
     int ext_written = 0;
-    for (int i = 0; i < g_external_tool_count && ext_written < 32; i++) {
-        if (!g_external_tools[i].loaded)
+    for (int oi = 0; oi < ext_order_count && ext_written < 32; oi++) {
+        int i = ext_order[oi];
+        if (i < 0 || i >= ext.count)
+            continue;
+        if (!ext.items[i].loaded)
             continue;
         if (wrote)
             jbuf_append(b, ",");
         jbuf_append(b, "{\"type\":\"function\",\"name\":");
-        jbuf_append_json_str(b, g_external_tools[i].name);
+        jbuf_append_json_str(b, ext.items[i].name);
         jbuf_append(b, ",\"description\":");
-        jbuf_append_json_str(b, g_external_tools[i].description);
+        jbuf_append_json_str(b, ext.items[i].description);
         jbuf_append(b, ",\"parameters\":");
-        jbuf_append(b, g_external_tools[i].input_schema_json ? g_external_tools[i].input_schema_json
-                                                             : "{}");
+        jbuf_append(b, ext.items[i].input_schema_json ? ext.items[i].input_schema_json : "{}");
         jbuf_append(b, ",\"strict\":false}");
         wrote = true;
         ext_written++;
     }
     jbuf_append(b, "]");
+    free(ext_order);
+    tools_external_snapshot_free(&ext);
     return wrote;
 }
 
@@ -4233,7 +4277,9 @@ static char *chatgpt_native_build_request(provider_t *p, conversation_t *conv,
             jbuf_append(&b, ",\"tool_choice\":\"required\"");
         else
             jbuf_append(&b, ",\"tool_choice\":\"auto\"");
-        jbuf_append(&b, ",\"parallel_tool_calls\":false");
+        jbuf_append(&b, openai_parallel_tool_calls_enabled_for_provider("openai-codex")
+                            ? ",\"parallel_tool_calls\":true"
+                            : ",\"parallel_tool_calls\":false");
     }
 
     /* Reasoning effort from the session. gpt-5.x reasoning models honor this. */
@@ -4295,7 +4341,35 @@ typedef struct {
     time_t credit_reset_at;
     content_block_t tool_blocks[MAX_CONTENT_BLOCKS];
     int tool_block_count;
+    char announced_tool_ids[MAX_CONTENT_BLOCKS][128];
+    int announced_tool_count;
 } chatgpt_sse_state_t;
+
+static bool chatgpt_tool_announced(chatgpt_sse_state_t *s, const char *id) {
+    if (!s || !id || !id[0])
+        return false;
+    for (int i = 0; i < s->announced_tool_count; i++) {
+        if (strcmp(s->announced_tool_ids[i], id) == 0)
+            return true;
+    }
+    return false;
+}
+
+static void chatgpt_announce_tool(chatgpt_sse_state_t *s, const char *name,
+                                  const char *call_id) {
+    if (!s || !name || !name[0])
+        return;
+    const char *id = (call_id && call_id[0]) ? call_id : name;
+    if (chatgpt_tool_announced(s, id))
+        return;
+    if (s->announced_tool_count < MAX_CONTENT_BLOCKS) {
+        snprintf(s->announced_tool_ids[s->announced_tool_count],
+                 sizeof(s->announced_tool_ids[s->announced_tool_count]), "%s", id);
+        s->announced_tool_count++;
+    }
+    if (s->tool_cb)
+        s->tool_cb(name, id, s->cb_ctx);
+}
 
 static void chatgpt_handle_event(chatgpt_sse_state_t *s, const char *data) {
     if (!data || !data[0] || strcmp(data, "[DONE]") == 0)
@@ -4331,6 +4405,7 @@ static void chatgpt_handle_event(chatgpt_sse_state_t *s, const char *data) {
                 char *name = json_get_str(item, "name");
                 char *args = json_get_str(item, "arguments");
                 char *call_id = json_get_str(item, "call_id");
+                chatgpt_announce_tool(s, name, call_id);
                 /* Only finalize on .done (added may lack arguments). */
                 if (strcmp(type, "response.output_item.done") == 0 && name) {
                     content_block_t *blk = &s->tool_blocks[s->tool_block_count++];
@@ -4339,8 +4414,6 @@ static void chatgpt_handle_event(chatgpt_sse_state_t *s, const char *data) {
                     blk->tool_name = safe_strdup(name);
                     blk->tool_id = safe_strdup((call_id && call_id[0]) ? call_id : name);
                     blk->tool_input = safe_strdup((args && args[0]) ? args : "{}");
-                    if (s->tool_cb)
-                        s->tool_cb(blk->tool_name, blk->tool_id, s->cb_ctx);
                 }
                 free(name);
                 free(args);
@@ -5576,36 +5649,38 @@ int provider_build_default_fallback_models(const char *model, char out_models[][
         return 0;
 
     if (strcmp(family, "anthropic") == 0) {
-        provider_append_unique_model(out_models, &count, max_models, requested_model,
+        const char *xai_last = provider_xai_primary_model(prefer_code);
+        int non_xai_cap = xai_last ? (max_models > 1 ? max_models - 1 : 0) : max_models;
+        provider_append_unique_model(out_models, &count, non_xai_cap, requested_model,
                                      provider_family_primary_model("anthropic", false));
-        provider_append_unique_model(out_models, &count, max_models, requested_model,
+        provider_append_unique_model(out_models, &count, non_xai_cap, requested_model,
                                      provider_openai_subscription_fallback_model(prefer_code));
-        provider_append_unique_model(out_models, &count, max_models, requested_model,
+        provider_append_unique_model(out_models, &count, non_xai_cap, requested_model,
                                      provider_family_primary_model("sakana", prefer_code));
-        provider_append_unique_model(out_models, &count, max_models, requested_model,
-                                     provider_xai_primary_model(prefer_code));
-        provider_append_unique_model(out_models, &count, max_models, requested_model,
+        provider_append_unique_model(out_models, &count, non_xai_cap, requested_model,
                                      provider_openai_fallback_model(prefer_code));
-        provider_append_unique_model(out_models, &count, max_models, requested_model,
+        provider_append_unique_model(out_models, &count, non_xai_cap, requested_model,
                                      provider_family_primary_model("google", false));
-        provider_append_unique_model(out_models, &count, max_models, requested_model,
+        provider_append_unique_model(out_models, &count, non_xai_cap, requested_model,
                                      provider_family_primary_model("deepseek", false));
+        provider_append_unique_model(out_models, &count, max_models, requested_model, xai_last);
         return count;
     }
 
     if (strcmp(family, "openai") == 0) {
-        provider_append_unique_model(out_models, &count, max_models, requested_model,
+        const char *xai_last = provider_xai_primary_model(true);
+        int non_xai_cap = xai_last ? (max_models > 1 ? max_models - 1 : 0) : max_models;
+        provider_append_unique_model(out_models, &count, non_xai_cap, requested_model,
                                      provider_openai_primary_model(prefer_code));
-        provider_append_unique_model(out_models, &count, max_models, requested_model,
-                                     provider_xai_primary_model(true));
-        provider_append_unique_model(out_models, &count, max_models, requested_model,
+        provider_append_unique_model(out_models, &count, non_xai_cap, requested_model,
                                      provider_family_primary_model("sakana", prefer_code));
-        provider_append_unique_model(out_models, &count, max_models, requested_model,
+        provider_append_unique_model(out_models, &count, non_xai_cap, requested_model,
                                      provider_family_primary_model("anthropic", false));
-        provider_append_unique_model(out_models, &count, max_models, requested_model,
+        provider_append_unique_model(out_models, &count, non_xai_cap, requested_model,
                                      provider_family_primary_model("google", false));
-        provider_append_unique_model(out_models, &count, max_models, requested_model,
+        provider_append_unique_model(out_models, &count, non_xai_cap, requested_model,
                                      provider_family_primary_model("deepseek", false));
+        provider_append_unique_model(out_models, &count, max_models, requested_model, xai_last);
         return count;
     }
 
@@ -5625,20 +5700,21 @@ int provider_build_default_fallback_models(const char *model, char out_models[][
         return count;
     }
 
-    provider_append_unique_model(out_models, &count, max_models, requested_model,
-                                 provider_xai_primary_model(prefer_code));
-    provider_append_unique_model(out_models, &count, max_models, requested_model,
+    const char *xai_last = provider_xai_primary_model(prefer_code);
+    int non_xai_cap = xai_last ? (max_models > 1 ? max_models - 1 : 0) : max_models;
+    provider_append_unique_model(out_models, &count, non_xai_cap, requested_model,
                                  provider_family_primary_model("anthropic", false));
-    provider_append_unique_model(out_models, &count, max_models, requested_model,
+    provider_append_unique_model(out_models, &count, non_xai_cap, requested_model,
                                  provider_family_primary_model("sakana", prefer_code));
-    provider_append_unique_model(out_models, &count, max_models, requested_model,
+    provider_append_unique_model(out_models, &count, non_xai_cap, requested_model,
                                  provider_openai_fallback_model(prefer_code));
-    provider_append_unique_model(out_models, &count, max_models, requested_model,
+    provider_append_unique_model(out_models, &count, non_xai_cap, requested_model,
                                  provider_family_primary_model("google", false));
-    provider_append_unique_model(out_models, &count, max_models, requested_model,
+    provider_append_unique_model(out_models, &count, non_xai_cap, requested_model,
                                  provider_family_primary_model("deepseek", false));
-    provider_append_unique_model(out_models, &count, max_models, requested_model,
+    provider_append_unique_model(out_models, &count, non_xai_cap, requested_model,
                                  provider_family_primary_model("qwen", false));
+    provider_append_unique_model(out_models, &count, max_models, requested_model, xai_last);
     return count;
 }
 
