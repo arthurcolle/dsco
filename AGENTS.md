@@ -25,12 +25,13 @@ Overmind Soul architecture: Wings (autonomy) + Talons (competition) + Immune Sys
    Tools classify into `fs_read`/`fs_write`/`net`/`exec`/`secrets`/`untrusted_in`/`control`.
    Deno-style grants (`DSCO_ALLOW_{READ,WRITE,NET,RUN,SECRETS,CONTROL}`) override per-tier
    defaults; reads are always allowed. Two hard denials: (a) **lethal trifecta** — a call that
-   egresses (`net`/`exec`) after the session ingested untrusted content AND accessed private
-   data is blocked (operator override: `DSCO_ALLOW_EXFIL=1`); (b) **control** — modifying the
-   gate/governance itself (`capability.c`, `governance.c`, `killswitch.c`, `tools.c` gate
-   regions, `audit_log.c`, `tamper.c`) needs `DSCO_ALLOW_CONTROL=1`. Editing ordinary code —
-   even non-gate regions of `tools.c` — is no longer blocked by filename. `DSCO_IMMUNE_SURGERY_AUTH`
-   is superseded by this model.
+   egresses (`net`/`exec`) after the session accessed secrets AND ingested untrusted content is
+   blocked (operator override: `DSCO_ALLOW_EXFIL=1`; taint resets at session init); (b) **control**
+   — control-plane *tools* (killswitch, governance, self_exit, tamper) need `DSCO_ALLOW_CONTROL=1`.
+   Editing source files — including the gate's own (`capability.c`, `governance.c`, `tools.c`) — is
+   ordinary `fs_write` under the trust tier: there is NO filename-based lock. `DSCO_IMMUNE_SURGERY_AUTH`
+   and the old immune-surface file list are superseded by this model. Explicit hardening:
+   `DSCO_ALLOW_<CAP>=0` disables that capability entirely (Deno-style opt-out).
 2. Minimal diffs. No sweeping rewrites of `tools.c` or `main.c`.
 3. New capabilities = new `src/<module>.c` + header + Makefile entry, wired via small
    dispatch hooks — not inline growth of megafiles.
