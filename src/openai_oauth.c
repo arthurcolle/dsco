@@ -137,7 +137,20 @@ static void oai_extract_account_id(const char *id_token, char *out, size_t out_l
         return;
     }
     decoded[n] = '\0';
-    char *acct = json_get_str((const char *)decoded, "chatgpt_account_id");
+    /* The chatgpt_account_id claim is nested inside the
+     * "https://api.openai.com/auth" object, e.g.
+     *   { "https://api.openai.com/auth": { "chatgpt_account_id": "..." }, ... }
+     * json_get_str only scans keys at the current object depth, so descend
+     * into the nested claim first, then fall back to a flat lookup for
+     * forward/backward compatibility with other token shapes. */
+    char *acct = NULL;
+    char *auth_scope = json_get_raw((const char *)decoded, "https://api.openai.com/auth");
+    if (auth_scope) {
+        acct = json_get_str(auth_scope, "chatgpt_account_id");
+        free(auth_scope);
+    }
+    if (!acct)
+        acct = json_get_str((const char *)decoded, "chatgpt_account_id");
     if (acct) {
         snprintf(out, out_len, "%s", acct);
         free(acct);
@@ -260,8 +273,19 @@ static bool oai_load_from_dsco_cache(openai_oauth_bundle_t *out) {
         snprintf(out->refresh_token, sizeof(out->refresh_token), "%s", refresh);
     if (idt)
         snprintf(out->id_token, sizeof(out->id_token), "%s", idt);
-    if (acct)
+    bool healed = false;
+    if (acct && acct[0]) {
         snprintf(out->account_id, sizeof(out->account_id), "%s", acct);
+    } else if (out->id_token[0]) {
+        /* Heal caches written before nested-claim extraction existed: a blank
+         * account_id with a present id_token can still yield the id. Persist
+         * the recovered id back to disk once so we never re-derive it on
+         * subsequent loads. */
+        oai_extract_account_id(out->id_token, out->account_id, sizeof(out->account_id));
+        healed = out->account_id[0] != '\0';
+    }
+    if (healed)
+        (void)oai_write_cache(out);
     free(access);
     free(refresh);
     free(idt);
