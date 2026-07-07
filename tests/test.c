@@ -44,6 +44,7 @@
 #include "scheduler.h"
 #include "vfs.h"
 #include "memory_tier.h"
+#include "capability.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -20015,6 +20016,257 @@ static void test_workflow_retry_budget_deadletters(void) {
     PASS();
 }
 
+/* ═══════════════════════════════════════════════════════════════════════
+ * Capability gate (src/capability.c) — classifier, grants, taint-flow,
+ * top-level gate, and diagnostics stringify.
+ * ═══════════════════════════════════════════════════════════════════════ */
+
+static void test_capability_classifier(void) {
+    TEST("capability: dsco_caps_for_tool classification");
+
+    /* Pure reader: exactly CAP_FS_READ, nothing more. */
+    ASSERT(dsco_caps_for_tool("read_file", NULL) == CAP_FS_READ,
+           "read_file should classify to exactly CAP_FS_READ");
+
+    /* Writer implies read too. */
+    unsigned wf = dsco_caps_for_tool("write_file", NULL);
+    ASSERT((wf & (CAP_FS_WRITE | CAP_FS_READ)) == (CAP_FS_WRITE | CAP_FS_READ),
+           "write_file should carry CAP_FS_WRITE and CAP_FS_READ");
+
+    /* Web ingress is both network egress and untrusted-content ingress. */
+    unsigned ws = dsco_caps_for_tool("web_search", NULL);
+    ASSERT((ws & CAP_NET) && (ws & CAP_UNTRUSTED_IN),
+           "web_search should carry CAP_NET and CAP_UNTRUSTED_IN");
+    unsigned ru = dsco_caps_for_tool("read_url", NULL);
+    ASSERT((ru & CAP_NET) && (ru & CAP_UNTRUSTED_IN),
+           "read_url should carry CAP_NET and CAP_UNTRUSTED_IN");
+
+    /* MCP / external tools reach third-party systems: net + untrusted-in. */
+    unsigned mcp = dsco_caps_for_tool("mcp__server__tool", NULL);
+    ASSERT((mcp & (CAP_NET | CAP_UNTRUSTED_IN)) == (CAP_NET | CAP_UNTRUSTED_IN),
+           "mcp__ prefixed tool should carry CAP_NET|CAP_UNTRUSTED_IN");
+
+    /* bash inspecting a network command escalates to CAP_NET. */
+    unsigned bash_net = dsco_caps_for_tool("bash", "{\"command\":\"curl http://x\"}");
+    ASSERT(bash_net & CAP_NET, "bash curl should carry CAP_NET");
+
+    /* bash inspecting a mutating command is exec + fs_write. */
+    unsigned bash_rm = dsco_caps_for_tool("bash", "{\"command\":\"rm -rf x\"}");
+    ASSERT((bash_rm & (CAP_FS_WRITE | CAP_EXEC)) == (CAP_FS_WRITE | CAP_EXEC),
+           "bash rm -rf should carry CAP_FS_WRITE and CAP_EXEC");
+
+    /* Inputs naming secret material raise CAP_SECRETS regardless of tool. */
+    ASSERT(dsco_caps_for_tool("read_file", "{\"path\":\".env\"}") & CAP_SECRETS,
+           ".env input should raise CAP_SECRETS");
+    ASSERT(dsco_caps_for_tool("read_file", "{\"path\":\"/home/u/.ssh/id_rsa\"}") & CAP_SECRETS,
+           "id_rsa input should raise CAP_SECRETS");
+    ASSERT(dsco_caps_for_tool("read_file", "{\"path\":\"credentials\"}") & CAP_SECRETS,
+           "credentials input should raise CAP_SECRETS");
+
+    /* Unknown / empty name is conservative worst-case with egress bits. */
+    ASSERT(dsco_caps_for_tool("", NULL) & CAP_EGRESS,
+           "empty tool name should carry CAP_EGRESS bits");
+    ASSERT(dsco_caps_for_tool(NULL, NULL) & CAP_EGRESS,
+           "NULL tool name should carry CAP_EGRESS bits");
+
+    PASS();
+}
+
+static void test_capability_grants(void) {
+    TEST("capability: dsco_cap_granted tiers + env overrides");
+    test_env_snapshot_t envs[] = {
+        {.name = "DSCO_ALLOW_READ"},    {.name = "DSCO_ALLOW_WRITE"},
+        {.name = "DSCO_ALLOW_NET"},     {.name = "DSCO_ALLOW_RUN"},
+        {.name = "DSCO_ALLOW_SECRETS"}, {.name = "DSCO_ALLOW_CONTROL"},
+    };
+    size_t env_count = sizeof(envs) / sizeof(envs[0]);
+    test_capture_env_list(envs, env_count);
+    for (size_t i = 0; i < env_count; i++)
+        unsetenv(envs[i].name);
+
+#define GCHECK(cond, text)                                                                         \
+    do {                                                                                           \
+        if (!(cond)) {                                                                             \
+            test_restore_env_list(envs, env_count);                                                \
+            FAIL(text);                                                                            \
+            return;                                                                                \
+        }                                                                                          \
+    } while (0)
+
+    /* Reads always granted, every tier. */
+    GCHECK(dsco_cap_granted(CAP_FS_READ, "untrusted"), "read granted in untrusted");
+    GCHECK(dsco_cap_granted(CAP_FS_READ, "standard"), "read granted in standard");
+    GCHECK(dsco_cap_granted(CAP_FS_READ, "trusted"), "read granted in trusted");
+
+    /* net / write / exec: denied in untrusted, granted in standard + trusted. */
+    GCHECK(!dsco_cap_granted(CAP_NET, "untrusted"), "net denied in untrusted");
+    GCHECK(dsco_cap_granted(CAP_NET, "standard"), "net granted in standard");
+    GCHECK(dsco_cap_granted(CAP_NET, "trusted"), "net granted in trusted");
+    GCHECK(!dsco_cap_granted(CAP_FS_WRITE, "untrusted"), "write denied in untrusted");
+    GCHECK(dsco_cap_granted(CAP_FS_WRITE, "standard"), "write granted in standard");
+    GCHECK(dsco_cap_granted(CAP_FS_WRITE, "trusted"), "write granted in trusted");
+    GCHECK(!dsco_cap_granted(CAP_EXEC, "untrusted"), "exec denied in untrusted");
+    GCHECK(dsco_cap_granted(CAP_EXEC, "standard"), "exec granted in standard");
+    GCHECK(dsco_cap_granted(CAP_EXEC, "trusted"), "exec granted in trusted");
+
+    /* secrets: only the trusted tier by default. */
+    GCHECK(!dsco_cap_granted(CAP_SECRETS, "untrusted"), "secrets denied in untrusted");
+    GCHECK(!dsco_cap_granted(CAP_SECRETS, "standard"), "secrets denied in standard");
+    GCHECK(dsco_cap_granted(CAP_SECRETS, "trusted"), "secrets granted in trusted");
+
+    /* control: never by default. */
+    GCHECK(!dsco_cap_granted(CAP_CONTROL, "untrusted"), "control denied in untrusted");
+    GCHECK(!dsco_cap_granted(CAP_CONTROL, "standard"), "control denied in standard");
+    GCHECK(!dsco_cap_granted(CAP_CONTROL, "trusted"), "control denied in trusted");
+
+    /* Env override grants net even in untrusted; explicit 0 denies in standard. */
+    setenv("DSCO_ALLOW_NET", "1", 1);
+    GCHECK(dsco_cap_granted(CAP_NET, "untrusted"), "DSCO_ALLOW_NET=1 grants net in untrusted");
+    setenv("DSCO_ALLOW_NET", "0", 1);
+    GCHECK(!dsco_cap_granted(CAP_NET, "standard"), "DSCO_ALLOW_NET=0 denies net in standard");
+
+#undef GCHECK
+    test_restore_env_list(envs, env_count);
+    PASS();
+}
+
+static void test_capability_flow(void) {
+    TEST("capability: dsco_flow trifecta accumulation");
+
+    /* CAP_FS_READ alone (ordinary source reads) is NOT private access:
+     * a coding agent reads source constantly; only secrets are private. */
+    dsco_flow_reset();
+    dsco_flow_note(CAP_FS_READ);
+    ASSERT(!dsco_flow_accessed_private(),
+           "CAP_FS_READ alone must not mark private access (source != secrets)");
+
+    dsco_flow_reset();
+    ASSERT(!dsco_flow_would_exfiltrate(CAP_NET), "fresh session must not flag exfiltration");
+
+    /* Untrusted ingress alone is benign. */
+    dsco_flow_note(CAP_UNTRUSTED_IN);
+    ASSERT(dsco_flow_tainted_untrusted(), "untrusted taint should be set");
+    ASSERT(!dsco_flow_accessed_private(), "private not yet accessed");
+    ASSERT(!dsco_flow_would_exfiltrate(CAP_NET), "untrusted-in alone must not flag exfiltration");
+
+    /* Touching genuine secrets closes the triad on an egress call. */
+    dsco_flow_note(CAP_SECRETS);
+    ASSERT(dsco_flow_accessed_private(), "secrets access should set private");
+    ASSERT(dsco_flow_would_exfiltrate(CAP_NET),
+           "untrusted + secrets + egress must flag exfiltration");
+    /* A non-egress capability never triggers the guard. */
+    ASSERT(!dsco_flow_would_exfiltrate(CAP_FS_READ),
+           "non-egress capability must not flag exfiltration");
+
+    dsco_flow_reset();
+    PASS();
+}
+
+static void test_capability_gate(void) {
+    TEST("capability: dsco_capability_gate decisions");
+    test_env_snapshot_t envs[] = {
+        {.name = "DSCO_ALLOW_READ"},    {.name = "DSCO_ALLOW_WRITE"},
+        {.name = "DSCO_ALLOW_NET"},     {.name = "DSCO_ALLOW_RUN"},
+        {.name = "DSCO_ALLOW_SECRETS"}, {.name = "DSCO_ALLOW_CONTROL"},
+        {.name = "DSCO_ALLOW_EXFIL"},
+    };
+    size_t env_count = sizeof(envs) / sizeof(envs[0]);
+    test_capture_env_list(envs, env_count);
+    for (size_t i = 0; i < env_count; i++)
+        unsetenv(envs[i].name);
+
+    char reason[256];
+
+#define GATECHECK(cond, text)                                                                      \
+    do {                                                                                           \
+        if (!(cond)) {                                                                             \
+            dsco_flow_reset();                                                                      \
+            test_restore_env_list(envs, env_count);                                                \
+            FAIL(text);                                                                            \
+            return;                                                                                \
+        }                                                                                          \
+    } while (0)
+
+    /* Fresh session: a benign web search in the standard tier is allowed. */
+    dsco_flow_reset();
+    reason[0] = '\0';
+    GATECHECK(dsco_capability_gate("web_search", NULL, "standard", reason, sizeof(reason)) ==
+                  CAP_DECISION_ALLOW,
+              "fresh web_search in standard should ALLOW");
+
+    /* Deno-style operator lockdown: DSCO_ALLOW_NET=0 blocks net regardless of tier. */
+    setenv("DSCO_ALLOW_NET", "0", 1);
+    GATECHECK(dsco_capability_gate("web_search", NULL, "standard", reason, sizeof(reason)) ==
+                  CAP_DECISION_DENY,
+              "DSCO_ALLOW_NET=0 should DENY web_search");
+    unsetenv("DSCO_ALLOW_NET");
+    GATECHECK(dsco_capability_gate("web_search", NULL, "standard", reason, sizeof(reason)) ==
+                  CAP_DECISION_ALLOW,
+              "lifting the net lockdown should ALLOW web_search again");
+
+    /* Taint the session, then an egress call closes the lethal triad -> DENY. */
+    dsco_flow_note(CAP_SECRETS);
+    dsco_flow_note(CAP_UNTRUSTED_IN);
+    reason[0] = '\0';
+    GATECHECK(dsco_capability_gate("send_email", NULL, "trusted", reason, sizeof(reason)) ==
+                  CAP_DECISION_DENY,
+              "tainted send_email should DENY on trifecta");
+    GATECHECK(reason[0] != '\0', "trifecta DENY should populate a reason");
+
+    /* Operator override acknowledges the exfil risk for the run. */
+    setenv("DSCO_ALLOW_EXFIL", "1", 1);
+    GATECHECK(dsco_capability_gate("send_email", NULL, "trusted", reason, sizeof(reason)) ==
+                  CAP_DECISION_ALLOW,
+              "DSCO_ALLOW_EXFIL=1 should override trifecta to ALLOW");
+    unsetenv("DSCO_ALLOW_EXFIL");
+
+    /* Control-plane TOOLS require the control grant: DENY by default. */
+    dsco_flow_reset();
+    reason[0] = '\0';
+    GATECHECK(dsco_capability_gate("self_exit", "{}", "trusted", reason, sizeof(reason)) ==
+                  CAP_DECISION_DENY,
+              "self_exit should DENY (control) by default");
+    GATECHECK(reason[0] != '\0', "control DENY should populate a reason");
+
+    /* ...unless control is explicitly granted. */
+    setenv("DSCO_ALLOW_CONTROL", "1", 1);
+    GATECHECK(dsco_capability_gate("self_exit", "{}", "trusted", reason, sizeof(reason)) ==
+                  CAP_DECISION_ALLOW,
+              "DSCO_ALLOW_CONTROL=1 should allow self_exit");
+    unsetenv("DSCO_ALLOW_CONTROL");
+
+    /* The filename gate-source lock was removed: editing gate source is now an
+     * ordinary fs_write, allowed in the trusted tier. */
+    dsco_flow_reset();
+    reason[0] = '\0';
+    GATECHECK(dsco_capability_gate("write_file", "{\"path\":\"src/governance.c\"}", "trusted",
+                                   reason, sizeof(reason)) == CAP_DECISION_ALLOW,
+              "write to governance.c is ordinary fs_write and should ALLOW");
+
+    /* A non-gate source write is likewise ordinary: allowed in standard. */
+    dsco_flow_reset();
+    reason[0] = '\0';
+    GATECHECK(dsco_capability_gate("write_file", "{\"path\":\"src/output_guard.c\"}", "standard",
+                                   reason, sizeof(reason)) == CAP_DECISION_ALLOW,
+              "write to non-gate source should ALLOW in standard");
+
+#undef GATECHECK
+    dsco_flow_reset();
+    test_restore_env_list(envs, env_count);
+    PASS();
+}
+
+static void test_capability_to_string(void) {
+    TEST("capability: dsco_capability_to_string rendering");
+    char out[64];
+    dsco_capability_to_string(CAP_FS_READ | CAP_NET, out, sizeof(out));
+    ASSERT(strstr(out, "fs_read") != NULL, "should render fs_read");
+    ASSERT(strstr(out, "net") != NULL, "should render net");
+    dsco_capability_to_string(CAP_NONE, out, sizeof(out));
+    ASSERT(strcmp(out, "none") == 0, "CAP_NONE should render 'none'");
+    PASS();
+}
+
 int main(void) {
     fprintf(stderr, "\n\033[1m\033[36mdsco test suite — MAGNUM COQ EDITION\033[0m\n\n");
     setenv("DSCO_DISABLE_CLAUDE_CODE_OAUTH_DISCOVERY", "1", 1);
@@ -20965,6 +21217,13 @@ int main(void) {
     test_workflow_contract_dedupe_deadletter_reprocess();
     test_workflow_contract_validation_failures();
     test_workflow_retry_budget_deadletters();
+
+    /* Capability gate (src/capability.c) */
+    test_capability_classifier();
+    test_capability_grants();
+    test_capability_flow();
+    test_capability_gate();
+    test_capability_to_string();
 
     fprintf(stderr, "\n\033[1m  %d tests: \033[32m%d passed\033[0m", tests_run, tests_passed);
     if (tests_failed > 0)
