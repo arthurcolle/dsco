@@ -138,3 +138,4 @@ mcp_smoke
 # outputs are not. Regenerate with scripts/consumer_profile_ontology/.
 data/consumer_profile_ontology/*.csv
 data/consumer_profile_ontology/*.jsonl
+dsco-instrumented
