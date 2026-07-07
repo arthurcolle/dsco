@@ -226,6 +226,18 @@ void  conv_add_user_document(conversation_t *c, const char *media_type,
 void  conv_pop_last(conversation_t *c);
 bool  conv_pop_last_turn(conversation_t *c);
 void  conv_ensure_tool_results(conversation_t *c);
+
+typedef struct {
+    bool ok;
+    int  missing_tool_use;
+    int  missing_tool_result;
+    int  duplicate_tool_use;
+    int  out_of_order_result;
+    char first_error[256];
+} tool_integrity_result_t;
+
+tool_integrity_result_t conv_validate_tool_call_integrity(const conversation_t *c,
+                                                           bool allow_pending_last);
 void  conv_trim_old_results(conversation_t *c, int keep_recent, int max_chars);
 bool  conv_compact_recent_tool_turn(conversation_t *c, int max_chars, int protect_tail);
 

@@ -4,6 +4,160 @@
 
 #include "dsco_dht.h"
 
+#include <stdlib.h>
+#include <stdio.h>
+#include <string.h>
+
+#define DSCO_DHT_ID_LEN 20
+#define DSCO_DHT_KBUCKET_COUNT (DSCO_DHT_ID_LEN * 8)
+#define DSCO_DHT_DEFAULT_K 8
+
+typedef struct {
+    uint8_t  id[DSCO_DHT_ID_LEN];
+    char     addr[80];
+    uint64_t last_seen;
+} dsco_dht_kbucket_entry_t;
+
+typedef struct {
+    dsco_dht_kbucket_entry_t *items;
+    int count;
+    int cap;
+} dsco_dht_kbucket_vec_t;
+
+struct dsco_dht_kbuckets {
+    uint8_t self_id[DSCO_DHT_ID_LEN];
+    int k;
+    dsco_dht_kbucket_vec_t buckets[DSCO_DHT_KBUCKET_COUNT];
+};
+
+static int dht_bucket_index_for(const uint8_t self_id[DSCO_DHT_ID_LEN],
+                                const uint8_t node_id[DSCO_DHT_ID_LEN]) {
+    for (int byte = 0; byte < DSCO_DHT_ID_LEN; byte++) {
+        uint8_t x = (uint8_t)(self_id[byte] ^ node_id[byte]);
+        if (!x)
+            continue;
+        for (int bit = 7; bit >= 0; bit--) {
+            if (x & (uint8_t)(1u << bit))
+                return byte * 8 + (7 - bit);
+        }
+    }
+    return DSCO_DHT_KBUCKET_COUNT - 1;
+}
+
+dsco_dht_kbuckets_t *dsco_dht_kbuckets_create(const uint8_t self_id[20], int k) {
+    if (!self_id)
+        return NULL;
+    dsco_dht_kbuckets_t *kb = calloc(1, sizeof(*kb));
+    if (!kb)
+        return NULL;
+    memcpy(kb->self_id, self_id, DSCO_DHT_ID_LEN);
+    kb->k = k > 0 ? k : DSCO_DHT_DEFAULT_K;
+    return kb;
+}
+
+void dsco_dht_kbuckets_destroy(dsco_dht_kbuckets_t *kb) {
+    if (!kb)
+        return;
+    for (int i = 0; i < DSCO_DHT_KBUCKET_COUNT; i++)
+        free(kb->buckets[i].items);
+    free(kb);
+}
+
+bool dsco_dht_kbuckets_touch(dsco_dht_kbuckets_t *kb, const uint8_t node_id[20],
+                             const char *addr, uint64_t now_tick) {
+    if (!kb || !node_id)
+        return false;
+    int bi = dht_bucket_index_for(kb->self_id, node_id);
+    dsco_dht_kbucket_vec_t *b = &kb->buckets[bi];
+    for (int i = 0; i < b->count; i++) {
+        if (memcmp(b->items[i].id, node_id, DSCO_DHT_ID_LEN) == 0) {
+            b->items[i].last_seen = now_tick;
+            if (addr)
+                snprintf(b->items[i].addr, sizeof(b->items[i].addr), "%s", addr);
+            return true;
+        }
+    }
+    if (b->count == b->cap) {
+        int next = b->cap ? b->cap * 2 : kb->k;
+        if (next < kb->k)
+            next = kb->k;
+        dsco_dht_kbucket_entry_t *tmp =
+            realloc(b->items, (size_t)next * sizeof(*b->items));
+        if (!tmp)
+            return false;
+        b->items = tmp;
+        b->cap = next;
+    }
+    int pos = b->count;
+    if (b->count >= kb->k) {
+        pos = 0;
+        for (int i = 1; i < b->count; i++) {
+            if (b->items[i].last_seen < b->items[pos].last_seen)
+                pos = i;
+        }
+    } else {
+        b->count++;
+    }
+    memset(&b->items[pos], 0, sizeof(b->items[pos]));
+    memcpy(b->items[pos].id, node_id, DSCO_DHT_ID_LEN);
+    if (addr)
+        snprintf(b->items[pos].addr, sizeof(b->items[pos].addr), "%s", addr);
+    b->items[pos].last_seen = now_tick;
+    return true;
+}
+
+int dsco_dht_kbuckets_bucket_size(dsco_dht_kbuckets_t *kb, const uint8_t node_id[20]) {
+    if (!kb || !node_id)
+        return 0;
+    return kb->buckets[dht_bucket_index_for(kb->self_id, node_id)].count;
+}
+
+static int dht_distance_compare(const uint8_t target[DSCO_DHT_ID_LEN],
+                                const dsco_dht_kbucket_entry_t *a,
+                                const dsco_dht_kbucket_entry_t *b) {
+    for (int i = 0; i < DSCO_DHT_ID_LEN; i++) {
+        uint8_t da = (uint8_t)(a->id[i] ^ target[i]);
+        uint8_t db = (uint8_t)(b->id[i] ^ target[i]);
+        if (da != db)
+            return da < db ? -1 : 1;
+    }
+    return 0;
+}
+
+int dsco_dht_kbuckets_closest(dsco_dht_kbuckets_t *kb, const uint8_t target[20],
+                              uint8_t out_ids[][20], int max) {
+    if (!kb || !target || !out_ids || max <= 0)
+        return 0;
+    int total = 0;
+    for (int i = 0; i < DSCO_DHT_KBUCKET_COUNT; i++)
+        total += kb->buckets[i].count;
+    if (total == 0)
+        return 0;
+    dsco_dht_kbucket_entry_t *all = calloc((size_t)total, sizeof(*all));
+    if (!all)
+        return 0;
+    int n = 0;
+    for (int i = 0; i < DSCO_DHT_KBUCKET_COUNT; i++) {
+        dsco_dht_kbucket_vec_t *b = &kb->buckets[i];
+        for (int j = 0; j < b->count; j++)
+            all[n++] = b->items[j];
+    }
+    for (int i = 0; i < n; i++) {
+        for (int j = i + 1; j < n; j++) {
+            if (dht_distance_compare(target, &all[j], &all[i]) < 0) {
+                dsco_dht_kbucket_entry_t tmp = all[i];
+                all[i] = all[j];
+                all[j] = tmp;
+            }
+        }
+    }
+    int out_n = n < max ? n : max;
+    for (int i = 0; i < out_n; i++)
+        memcpy(out_ids[i], all[i].id, DSCO_DHT_ID_LEN);
+    free(all);
+    return out_n;
+}
+
 #ifdef HAVE_LIBSODIUM
 
 #include "peer_bootstrap.h"
@@ -39,6 +193,8 @@ struct dsco_dht {
     bool dirty; /* new peers written, reseed pending */
     unsigned char id[DHT_ID_LEN];
     unsigned char infohash[DHT_ID_LEN];
+    dsco_dht_kbuckets_t *kbuckets;
+    uint64_t peer_tick;
     uint16_t mesh_port; /* announced port peers dial over the mesh */
     time_t next_search;
     dsco_dht_stats_t stats;
@@ -105,6 +261,11 @@ static void dht_record_peer(dsco_dht_t *d, const char *ip, uint16_t port) {
 
     char line[80];
     snprintf(line, sizeof(line), "%s:%u", ip, (unsigned)port);
+    if (d->kbuckets) {
+        unsigned char digest[crypto_hash_sha256_BYTES];
+        crypto_hash_sha256(digest, (const unsigned char *)line, strlen(line));
+        dsco_dht_kbuckets_touch(d->kbuckets, digest, line, ++d->peer_tick);
+    }
 
     /* Dedup against existing entries. */
     FILE *rf = fopen(path, "r");
@@ -337,6 +498,7 @@ dsco_dht_t *dsco_dht_start(const dsco_dht_config_t *cfg) {
     }
 
     dht_load_or_make_id(d->id);
+    d->kbuckets = dsco_dht_kbuckets_create(d->id, 8);
     crypto_hash_sha256(d->infohash, (const unsigned char *)cfg->swarm_key,
                        strlen(cfg->swarm_key)); /* first 20 bytes used as id */
 
@@ -344,6 +506,7 @@ dsco_dht_t *dsco_dht_start(const dsco_dht_config_t *cfg) {
     int ir = dht_init(d->sock, -1, d->id, NULL);
     pthread_mutex_unlock(&d->lock);
     if (ir < 0) {
+        dsco_dht_kbuckets_destroy(d->kbuckets);
         close(d->sock);
         pthread_mutex_destroy(&d->lock);
         free(d);
@@ -361,6 +524,7 @@ dsco_dht_t *dsco_dht_start(const dsco_dht_config_t *cfg) {
         d->running = false;
         g_dht = NULL;
         dht_uninit();
+        dsco_dht_kbuckets_destroy(d->kbuckets);
         close(d->sock);
         pthread_mutex_destroy(&d->lock);
         free(d);
@@ -395,6 +559,7 @@ void dsco_dht_stop(dsco_dht_t *d) {
     dht_uninit();
     pthread_mutex_unlock(&d->lock);
     close(d->sock);
+    dsco_dht_kbuckets_destroy(d->kbuckets);
     pthread_mutex_destroy(&d->lock);
     if (g_dht == d)
         g_dht = NULL;
