@@ -1377,7 +1377,45 @@ static bool text_has_protected_invariant(const char *text) {
     return strstr(text, "MUST") || strstr(text, "MUST NOT") || strstr(text, "NEVER") ||
            strstr(text, "ALWAYS") || strstr(text, "Acceptance") || strstr(text, "acceptance") ||
            strstr(text, "invariant") || strstr(text, "Invariant") || strstr(text, "SECURITY") ||
-           strstr(text, "security") || strstr(text, "policy") || strstr(text, "Policy");
+           strstr(text, "security") || strstr(text, "policy") || strstr(text, "Policy") ||
+           strstr(text, "forbidden") || strstr(text, "required") || strstr(text, "Do not") ||
+           strstr(text, "DO NOT");
+}
+
+static bool text_mentions_path_like_token(const char *text) {
+    if (!text || !*text)
+        return false;
+    return strstr(text, ".c") || strstr(text, ".h") || strstr(text, ".md") || strstr(text, ".json") ||
+           strstr(text, ".py") || strstr(text, ".sh") || strstr(text, "src/") ||
+           strstr(text, "include/") || strstr(text, "tests/") || strstr(text, "/Users/") ||
+           strstr(text, "~/");
+}
+
+static bool text_mentions_error_like_token(const char *text) {
+    if (!text || !*text)
+        return false;
+    return strstr(text, "FAIL") || strstr(text, "failed") || strstr(text, "error") ||
+           strstr(text, "Error") || strstr(text, "warning") || strstr(text, "timeout") ||
+           strstr(text, "blocked") || strstr(text, "segfault") || strstr(text, "assert");
+}
+
+static bool text_mentions_command_like_token(const char *text) {
+    if (!text || !*text)
+        return false;
+    return strstr(text, "make ") || strstr(text, "git ") || strstr(text, "grep ") ||
+           strstr(text, "sed ") || strstr(text, "python") || strstr(text, "./") ||
+           strstr(text, "curl ") || strstr(text, "clang") || strstr(text, "cc ");
+}
+
+static void append_hash_line(jbuf_t *buf, const char *label, const char *text, int max_chars) {
+    if (!buf || !label || !text || !*text)
+        return;
+    char hex[65];
+    sha256_hex((const uint8_t *)text, strlen(text), hex);
+    int len = (int)strlen(text);
+    int n = len < max_chars ? len : max_chars;
+    jbuf_appendf(buf, "- %s_sha256: %s\n  %s: %.*s%s\n", label, hex, label, n, text,
+                 len > n ? "…" : "");
 }
 
 static char *conv_build_compaction_capsule(conversation_t *c, int drop_start, int drop_end,
@@ -1392,7 +1430,13 @@ static char *conv_build_compaction_capsule(conversation_t *c, int drop_start, in
                  rounds_dropped, tokens_dropped);
 
     int user_notes = 0, assistant_notes = 0, tool_uses = 0, tool_results = 0, invariants = 0;
+    int paths = 0, commands = 0, errors = 0;
     jbuf_append(&buf, "\nstate_capsule:\n");
+    jbuf_append(&buf, "schema_version: 2\n");
+    jbuf_append(&buf, "integrity:\n");
+    jbuf_append(&buf, "- splice_boundary: complete_api_rounds_only\n");
+    jbuf_append(&buf, "- tool_graph_policy: no_orphaned_tool_use_or_tool_result\n");
+    jbuf_append(&buf, "- invariant_policy: hash_and_copy_verbatim_excerpt\n");
     for (int i = drop_start; c && i <= drop_end && i < c->count; i++) {
         message_t *m = &c->msgs[i];
         for (int j = 0; j < m->content_count; j++) {
@@ -1412,8 +1456,21 @@ static char *conv_build_compaction_capsule(conversation_t *c, int drop_start, in
             } else if (mc->text && strcmp(mc->type, "text") == 0) {
                 if (text_has_protected_invariant(mc->text) && invariants < 8) {
                     invariants++;
-                    append_excerpt(&buf, "verbatim_invariant", mc->text, 500);
-                } else if (m->role == ROLE_USER && user_notes < 8) {
+                    append_hash_line(&buf, "verbatim_invariant", mc->text, 500);
+                }
+                if (text_mentions_path_like_token(mc->text) && paths < 12) {
+                    paths++;
+                    append_excerpt(&buf, "path_or_artifact_mention", mc->text, 220);
+                }
+                if (text_mentions_command_like_token(mc->text) && commands < 12) {
+                    commands++;
+                    append_excerpt(&buf, "command_mention", mc->text, 220);
+                }
+                if (text_mentions_error_like_token(mc->text) && errors < 12) {
+                    errors++;
+                    append_excerpt(&buf, "error_or_blocker", mc->text, 260);
+                }
+                if (m->role == ROLE_USER && user_notes < 8) {
                     user_notes++;
                     append_excerpt(&buf, "user", mc->text, 220);
                 } else if (m->role == ROLE_ASSISTANT && assistant_notes < 8) {
@@ -1424,8 +1481,9 @@ static char *conv_build_compaction_capsule(conversation_t *c, int drop_start, in
         }
     }
     jbuf_appendf(&buf,
-                 "\ncounts: user_notes=%d assistant_notes=%d tool_uses=%d tool_results=%d protected_invariants=%d\n",
-                 user_notes, assistant_notes, tool_uses, tool_results, invariants);
+                 "\ncounts: user_notes=%d assistant_notes=%d tool_uses=%d tool_results=%d protected_invariants=%d path_mentions=%d command_mentions=%d error_mentions=%d\n",
+                 user_notes, assistant_notes, tool_uses, tool_results, invariants, paths,
+                 commands, errors);
     return buf.data;
 }
 
@@ -1550,6 +1608,9 @@ compact_result_t conv_auto_compact(conversation_t *c, session_state_t *s, compac
              * (the first user turn is preserved); keep_tail>=2 guarantees
              * the tail extends to c->count-1 so drop_end < c->count-1. */
             if (drop_start > 0 && drop_end < c->count - 1) {
+                char *capsule = conv_build_compaction_capsule(c, drop_start, drop_end, to_drop,
+                                                              tokens_dropped);
+
                 /* Free middle messages */
                 for (int i = drop_start; i <= drop_end; i++) {
                     message_t *m = &c->msgs[i];
@@ -1593,12 +1654,19 @@ compact_result_t conv_auto_compact(conversation_t *c, session_state_t *s, compac
                 memset(marker->content, 0, sizeof(msg_content_t));
                 marker->content[0].type = safe_strdup("text");
 
-                char snip_msg[256];
-                snprintf(snip_msg, sizeof(snip_msg),
-                         "[%d conversation rounds compacted — %dk tokens freed]", to_drop,
-                         tokens_dropped / 1000);
-                marker->content[0].text = safe_strdup(snip_msg);
+                if (cfg->tier >= COMPACT_SESSION && capsule) {
+                    marker->content[0].text = capsule;
+                    capsule = NULL;
+                    result.tier_used = COMPACT_SESSION;
+                } else {
+                    char snip_msg[256];
+                    snprintf(snip_msg, sizeof(snip_msg),
+                             "[%d conversation rounds compacted — %dk tokens freed]", to_drop,
+                             tokens_dropped / 1000);
+                    marker->content[0].text = safe_strdup(snip_msg);
+                }
                 marker->content_count = 1;
+                free(capsule);
 
                 /* Ensure role alternation after marker */
                 if (drop_start + 1 < c->count && c->msgs[drop_start + 1].role == marker->role) {

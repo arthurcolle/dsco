@@ -25,6 +25,8 @@
 #include <dirent.h>
 #include <time.h>
 #include <errno.h>
+#include <ctype.h>
+#include <limits.h>
 #include <stdatomic.h>
 
 #ifdef HAVE_LIBSODIUM
@@ -586,14 +588,86 @@ bool tool_net_dispatch(const char *input, char *result, size_t rlen) {
 
 #define FANOUT_MAX_HOSTS 4096
 
+typedef enum {
+    FANOUT_TRANSPORT_FLEET = 0, /* fleet.sh over SSH */
+    FANOUT_TRANSPORT_MESH,      /* encrypted mesh: remote `bash` tool via netsrv */
+} fanout_transport_t;
+
 typedef struct {
     char host[64];
+    char addr[128]; /* resolved ADDR for mesh transport */
     char cmd[2048];
     char run_dir[512];
+    fanout_transport_t transport;
+    int mesh_port;
     int exit_code;
     double duration_ms;
     int ok; /* 1 = command ran (exit==0), 0 = failed */
 } fanout_job_t;
+
+/* Parse a "__DSCO_EXIT=<n>" trailer emitted by the remote command, strip it
+   from the captured output in place, and return the exit code (or -1 if absent
+   → treated as unknown but non-fatal for back-compat). */
+static int fanout_parse_exit_trailer(char *out) {
+    if (!out)
+        return -1;
+    char *marker = NULL, *p = out;
+    /* find the LAST occurrence so command output can't spoof an earlier one */
+    while ((p = strstr(p, "__DSCO_EXIT=")) != NULL) {
+        marker = p;
+        p += 12;
+    }
+    if (!marker)
+        return -1;
+    char *num = marker + 12;
+    if (!isdigit((unsigned char)*num))
+        return -1;
+    errno = 0;
+    char *end = NULL;
+    long code = strtol(num, &end, 10);
+    if (errno || end == num || code < 0 || code > 255 || (*end && *end != '\n' && *end != '\r'))
+        return -1;
+    /* trim the marker (and a preceding newline if present) from the output */
+    char *cut = marker;
+    if (cut > out && cut[-1] == '\n')
+        cut--;
+    *cut = '\0';
+    return (int)code;
+}
+
+static bool fanout_host_safe(const char *s) {
+    if (!s || !*s)
+        return false;
+    for (const unsigned char *p = (const unsigned char *)s; *p; p++) {
+        if (!(isalnum(*p) || *p == '.' || *p == '_' || *p == '-'))
+            return false;
+    }
+    return true;
+}
+
+static bool fanout_shell_single_quote(const char *src, char *dst, size_t dlen) {
+    if (!src || !dst || dlen < 3)
+        return false;
+    size_t o = 0;
+    dst[o++] = '\'';
+    for (const unsigned char *p = (const unsigned char *)src; *p; p++) {
+        if (*p == '\'') {
+            if (o + 4 >= dlen)
+                return false;
+            memcpy(dst + o, "'\\''", 4);
+            o += 4;
+        } else {
+            if (o + 1 >= dlen)
+                return false;
+            dst[o++] = (char)*p;
+        }
+    }
+    if (o + 1 >= dlen)
+        return false;
+    dst[o++] = '\'';
+    dst[o] = '\0';
+    return true;
+}
 
 static double fanout_now_ms(void) {
     struct timespec ts;
@@ -633,28 +707,56 @@ static int g_fanout_count = 0;
 
 static void fanout_run_one(fanout_job_t *j) {
     double t0 = fanout_now_ms();
-    /* Execute via the same fleet.sh transport bridge/exec uses. */
-    char sh[4096];
-    snprintf(sh, sizeof(sh), "%s/bridge/plugins/fleet.sh on %s %s 2>&1", home_dir(), j->host,
-             j->cmd);
-    char *out = shell_capture(sh);
-    /* fleet.sh exit isn't captured by popen easily here; treat non-empty output
-       without an explicit error marker as success. A dedicated exit path can be
-       added when fleet.sh emits a structured trailer. */
+    char *out = NULL;
+
+    if (j->transport == FANOUT_TRANSPORT_MESH) {
+        /* Mesh-native path: invoke the remote `bash` tool through the native
+           TLS/HTTP server instead of SSH. This uses the same remote tool route
+           as net remote, but with structured exit capture inside the command. */
+        char esc_cmd[4096];
+        fanout_json_escape(j->cmd, esc_cmd, sizeof(esc_cmd));
+        char body[8192];
+        snprintf(body, sizeof(body),
+                 "{\"tool\":\"bash\",\"params\":{\"command\":\"( %s ); "
+                 "_rc=$?; printf '\\n__DSCO_EXIT=%%d\\n' $_rc\"}}",
+                 esc_cmd);
+        uint8_t auth[32] = {0};
+        out = netsrv_client_post(j->addr[0] ? j->addr : j->host, (uint16_t)j->mesh_port,
+                                 "/tool", body, auth, sizeof(auth), false);
+        if (!out)
+            out = strdup("__DSCO_EXIT=255\nmesh remote call failed");
+    } else {
+        /* Fleet/SSH path: append a structured exit trailer to the REMOTE command
+           so popen's lack of child exit status no longer matters. */
+        char sh[8192], quoted_cmd[6144];
+        char remote[4096];
+        snprintf(remote, sizeof(remote), "( %s ); _rc=$?; printf '\\n__DSCO_EXIT=%%d\\n' $_rc", j->cmd);
+        if (!fanout_host_safe(j->host) || !fanout_shell_single_quote(remote, quoted_cmd, sizeof(quoted_cmd))) {
+            out = strdup("__DSCO_EXIT=255\ninvalid fanout host or command too long");
+        } else {
+            snprintf(sh, sizeof(sh), "%s/bridge/plugins/fleet.sh on %s %s 2>&1",
+                     home_dir(), j->host, quoted_cmd);
+            out = shell_capture(sh);
+        }
+    }
+
     j->duration_ms = fanout_now_ms() - t0;
-    j->exit_code = 0;
-    j->ok = (out != NULL);
+    int parsed_exit = fanout_parse_exit_trailer(out);
+    j->exit_code = parsed_exit >= 0 ? parsed_exit : (out ? 0 : 255);
+    j->ok = (j->exit_code == 0);
 
     /* Durable per-host RESULT.json envelope (atomic tmp+rename+fsync). */
-    char esc_cmd[4096], esc_out[8192];
-    fanout_json_escape(j->cmd, esc_cmd, sizeof(esc_cmd));
+    char esc_cmd2[4096], esc_out[8192];
+    fanout_json_escape(j->cmd, esc_cmd2, sizeof(esc_cmd2));
     fanout_json_escape(out ? out : "", esc_out, sizeof(esc_out));
 
     char env[16384];
     int n = snprintf(env, sizeof(env),
-                     "{\"host\":\"%s\",\"cmd\":\"%s\",\"exit\":%d,\"ok\":%s,"
+                     "{\"host\":\"%s\",\"addr\":\"%s\",\"transport\":\"%s\","
+                     "\"cmd\":\"%s\",\"exit\":%d,\"ok\":%s,"
                      "\"duration_ms\":%.1f,\"ts\":%ld,\"output\":\"%s\"}\n",
-                     j->host, esc_cmd, j->exit_code, j->ok ? "true" : "false", j->duration_ms,
+                     j->host, j->addr, j->transport == FANOUT_TRANSPORT_MESH ? "mesh" : "fleet",
+                     esc_cmd2, j->exit_code, j->ok ? "true" : "false", j->duration_ms,
                      (long)time(NULL), esc_out);
     if (n > 0) {
         char tmp[640], final[640];
@@ -664,7 +766,6 @@ static void fanout_run_one(fanout_job_t *j) {
         if (fd >= 0) {
             ssize_t wn = write(fd, env, (size_t)n);
             (void)wn;
-            fsync(fd);
             close(fd);
             rename(tmp, final);
         }
@@ -691,6 +792,11 @@ static bool net_bridge_fanout(const char *input, char *result, size_t rlen) {
         return false;
     }
     char *filter = json_get_str(input, "role"); /* optional ROLES substring filter */
+    char *transport_s = json_get_str(input, "transport"); /* fleet | mesh */
+    fanout_transport_t transport = FANOUT_TRANSPORT_FLEET;
+    if (transport_s && strcmp(transport_s, "mesh") == 0)
+        transport = FANOUT_TRANSPORT_MESH;
+    int mesh_port = json_get_int(input, "mesh_port", 7547);
     int concurrency = json_get_int(input, "concurrency", 0);
     if (concurrency <= 0) {
         const char *ce = getenv("DSCO_FLEET_CONCURRENCY");
@@ -708,6 +814,7 @@ static bool net_bridge_fanout(const char *input, char *result, size_t rlen) {
     if (!d) {
         free(cmd);
         free(filter);
+        free(transport_s);
         snprintf(result, rlen, "{\"error\":\"fleet dir not found: %s\"}", fleet_dir);
         return false;
     }
@@ -728,6 +835,7 @@ static bool net_bridge_fanout(const char *input, char *result, size_t rlen) {
         closedir(d);
         free(cmd);
         free(filter);
+        free(transport_s);
         snprintf(result, rlen, "{\"error\":\"oom\"}");
         return false;
     }
@@ -742,7 +850,7 @@ static bool net_bridge_fanout(const char *input, char *result, size_t rlen) {
         FILE *f = fopen(fpath, "r");
         if (!f)
             continue;
-        char name[64] = "", roles[128] = "";
+        char name[64] = "", roles[128] = "", haddr[128] = "";
         char line[512];
         while (fgets(line, sizeof(line), f)) {
             char *hash = strchr(line, '#');
@@ -754,6 +862,8 @@ static bool net_bridge_fanout(const char *input, char *result, size_t rlen) {
                     snprintf(name, sizeof(name), "%s", val);
                 else if (strcmp(key, "ROLES") == 0)
                     snprintf(roles, sizeof(roles), "%s", val);
+                else if (strcmp(key, "ADDR") == 0)
+                    snprintf(haddr, sizeof(haddr), "%s", val);
             }
         }
         fclose(f);
@@ -762,8 +872,11 @@ static bool net_bridge_fanout(const char *input, char *result, size_t rlen) {
         if (filter && filter[0] && !strstr(roles, filter))
             continue; /* role filter */
         snprintf(jobs[count].host, sizeof(jobs[count].host), "%s", name);
+        snprintf(jobs[count].addr, sizeof(jobs[count].addr), "%s", haddr);
         snprintf(jobs[count].cmd, sizeof(jobs[count].cmd), "%s", cmd);
         snprintf(jobs[count].run_dir, sizeof(jobs[count].run_dir), "%s", run_dir);
+        jobs[count].transport = transport;
+        jobs[count].mesh_port = mesh_port;
         count++;
     }
     closedir(d);
@@ -772,6 +885,7 @@ static bool net_bridge_fanout(const char *input, char *result, size_t rlen) {
         free(jobs);
         free(cmd);
         free(filter);
+        free(transport_s);
         snprintf(result, rlen, "{\"error\":\"no matching fleet hosts\",\"run_dir\":\"%s\"}", run_dir);
         return false;
     }
@@ -801,16 +915,18 @@ static bool net_bridge_fanout(const char *input, char *result, size_t rlen) {
             ok_count++;
 
     snprintf(result, rlen,
-             "{\"fanout\":true,\"hosts\":%d,\"ok\":%d,\"failed\":%d,\"concurrency\":%d,"
-             "\"elapsed_ms\":%.1f,\"run_dir\":\"%s\",\"note\":\"per-host RESULT.json "
-             "envelopes written; replayable\"}",
-             count, ok_count, count - ok_count, concurrency, elapsed, run_dir);
+             "{\"fanout\":true,\"transport\":\"%s\",\"hosts\":%d,\"ok\":%d,\"failed\":%d,"
+             "\"concurrency\":%d,\"elapsed_ms\":%.1f,\"run_dir\":\"%s\",\"note\":\"per-host "
+             "RESULT.json envelopes written; replayable\"}",
+             transport == FANOUT_TRANSPORT_MESH ? "mesh" : "fleet", count, ok_count,
+             count - ok_count, concurrency, elapsed, run_dir);
 
     g_fanout_jobs = NULL;
     g_fanout_count = 0;
     free(jobs);
     free(cmd);
     free(filter);
+    free(transport_s);
     return true;
 }
 

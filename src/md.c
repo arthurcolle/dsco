@@ -2602,6 +2602,10 @@ static void render_line(md_renderer_t *r, char *line) {
                     r->table_align[c] = parsed_align[c];
                 table_free_cells(cells, cols);
                 return;
+            } else if (r->table_has_sep && r->table_rows == 1 && cols == r->table_cols &&
+                       parse_table_separator(cells, cols, parsed_align)) {
+                table_free_cells(cells, cols);
+                return;
             } else if (!r->table_has_sep && r->table_rows == 1) {
                 /* First row had pipes but no separator followed — not a table. */
                 flush_table_or_fallback(out, r);

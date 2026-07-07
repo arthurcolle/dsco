@@ -249,6 +249,35 @@ static void child_metrics_path(pid_t child, char *path, size_t len) {
     snprintf(path, len, "%s/child-metrics-%d.jsonl", dir, (int)child);
 }
 
+bool supervisor_resolve_hotswap_exec(const char *current_path,
+                                     const char *explicit_path,
+                                     char *out, size_t out_len) {
+    if (!out || out_len == 0)
+        return false;
+    out[0] = '\0';
+
+    if (explicit_path && explicit_path[0]) {
+        if (access(explicit_path, X_OK) != 0)
+            return false;
+        snprintf(out, out_len, "%s", explicit_path);
+        return out[0] != '\0';
+    }
+
+    if (!current_path || !current_path[0])
+        return false;
+    const char *slash = strrchr(current_path, '/');
+    if (!slash)
+        return false;
+
+    size_t dir_len = (size_t)(slash - current_path);
+    const char suffix[] = "/dsco-new";
+    if (dir_len + sizeof(suffix) > out_len)
+        return false;
+    memcpy(out, current_path, dir_len);
+    memcpy(out + dir_len, suffix, sizeof(suffix));
+    return access(out, X_OK) == 0;
+}
+
 static void append_child_metric(const char *path, pid_t child, double uptime,
                                 uint64_t rss, uint64_t peak_rss, int pressure) {
     FILE *f = fopen(path, "a");

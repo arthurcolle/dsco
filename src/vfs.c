@@ -90,6 +90,15 @@ static const char *SCHEMA_SQL =
     "  session_id TEXT"
     ");"
     "CREATE INDEX IF NOT EXISTS idx_tool_results_expires ON tool_results(expires_at);"
+    "CREATE TABLE IF NOT EXISTS pins ("
+    "  key TEXT PRIMARY KEY,"
+    "  namespace TEXT NOT NULL,"
+    "  reason TEXT NOT NULL,"
+    "  owner TEXT,"
+    "  created_at INTEGER DEFAULT (strftime('%s','now')),"
+    "  expires_at INTEGER"
+    ");"
+    "CREATE INDEX IF NOT EXISTS idx_pins_expires ON pins(expires_at);"
     "CREATE TABLE IF NOT EXISTS schema_version (version INTEGER);"
     "INSERT OR IGNORE INTO schema_version VALUES (1);";
 
@@ -224,28 +233,44 @@ vfs_db_t *vfs_open(const char *path) {
                  "  created_at INTEGER DEFAULT (strftime('%s','now')),"
                  "  expires_at INTEGER,"
                  "  access_count INTEGER DEFAULT 0,"
-                 "  session_id TEXT"
-                 ");"
-                 "CREATE INDEX IF NOT EXISTS idx_tool_results_expires ON tool_results(expires_at);",
-                 NULL, NULL, NULL);
+	                 "  session_id TEXT"
+	                 ");"
+	                 "CREATE INDEX IF NOT EXISTS idx_tool_results_expires ON tool_results(expires_at);"
+	                 "CREATE TABLE IF NOT EXISTS pins ("
+	                 "  key TEXT PRIMARY KEY,"
+	                 "  namespace TEXT NOT NULL,"
+	                 "  reason TEXT NOT NULL,"
+	                 "  owner TEXT,"
+	                 "  created_at INTEGER DEFAULT (strftime('%s','now')),"
+	                 "  expires_at INTEGER"
+	                 ");"
+	                 "CREATE INDEX IF NOT EXISTS idx_pins_expires ON pins(expires_at);",
+	                 NULL, NULL, NULL);
     sqlite3_prepare_v2(vdb->db,
                        "INSERT OR REPLACE INTO tool_results (key, tool_name, input_hash, result, "
                        "result_len, expires_at) "
                        "VALUES (?, ?, ?, ?, ?, strftime('%s','now') + ?)",
                        -1, &vdb->result_put, NULL);
-    sqlite3_prepare_v2(vdb->db,
-                       "SELECT result FROM tool_results WHERE key=? "
-                       "AND (expires_at IS NULL OR expires_at > strftime('%s','now'))",
-                       -1, &vdb->result_get, NULL);
+	sqlite3_prepare_v2(vdb->db,
+	                       "SELECT result FROM tool_results WHERE key=? "
+	                       "AND ((expires_at IS NULL OR expires_at > strftime('%s','now')) "
+	                       "OR EXISTS (SELECT 1 FROM pins p WHERE p.key = tool_results.key "
+	                       "AND (p.expires_at IS NULL OR p.expires_at > strftime('%s','now'))))",
+	                       -1, &vdb->result_get, NULL);
     sqlite3_prepare_v2(vdb->db,
                        "DELETE FROM tool_results WHERE expires_at IS NOT NULL AND expires_at <= "
-                       "strftime('%s','now')",
+                       "strftime('%s','now') AND NOT EXISTS ("
+                       "  SELECT 1 FROM pins p WHERE p.key = tool_results.key"
+                       "    AND (p.expires_at IS NULL OR p.expires_at > strftime('%s','now'))"
+                       ")",
                        -1, &vdb->result_evict, NULL);
-    sqlite3_prepare_v2(vdb->db,
-                       "SELECT key FROM tool_results WHERE expires_at IS NULL OR expires_at > "
-                       "strftime('%s','now') "
-                       "ORDER BY created_at DESC",
-                       -1, &vdb->result_list, NULL);
+	sqlite3_prepare_v2(vdb->db,
+	                       "SELECT key FROM tool_results WHERE (expires_at IS NULL OR expires_at > "
+	                       "strftime('%s','now')) "
+	                       "OR EXISTS (SELECT 1 FROM pins p WHERE p.key = tool_results.key "
+	                       "AND (p.expires_at IS NULL OR p.expires_at > strftime('%s','now'))) "
+	                       "ORDER BY created_at DESC",
+	                       -1, &vdb->result_list, NULL);
 
     return vdb;
 }
@@ -678,6 +703,87 @@ int vfs_result_evict(vfs_db_t *db) {
     return changes;
 }
 
+bool vfs_pin_put(vfs_db_t *db, const char *key, const char *namespace_,
+                 const char *reason, const char *owner, int ttl_seconds) {
+    if (!db || !key || !*key || !namespace_ || !*namespace_ || !reason || !*reason)
+        return false;
+
+    int expires = ttl_seconds > 0 ? ttl_seconds : 0;
+    vfs_lock(db);
+    sqlite3_stmt *st = NULL;
+    int rc = sqlite3_prepare_v2(
+        db->db,
+        "INSERT OR REPLACE INTO pins (key, namespace, reason, owner, created_at, expires_at) "
+        "VALUES (?, ?, ?, ?, strftime('%s','now'), "
+        "CASE WHEN ? > 0 THEN strftime('%s','now') + ? ELSE NULL END)",
+        -1, &st, NULL);
+    if (rc != SQLITE_OK || !st) {
+        vfs_unlock(db);
+        return false;
+    }
+    sqlite3_bind_text(st, 1, key, -1, SQLITE_TRANSIENT);
+    sqlite3_bind_text(st, 2, namespace_, -1, SQLITE_TRANSIENT);
+    sqlite3_bind_text(st, 3, reason, -1, SQLITE_TRANSIENT);
+    if (owner && *owner)
+        sqlite3_bind_text(st, 4, owner, -1, SQLITE_TRANSIENT);
+    else
+        sqlite3_bind_null(st, 4);
+    sqlite3_bind_int(st, 5, expires);
+    sqlite3_bind_int(st, 6, expires);
+    bool ok = sqlite3_step(st) == SQLITE_DONE;
+    sqlite3_finalize(st);
+    vfs_unlock(db);
+    return ok;
+}
+
+bool vfs_pin_delete(vfs_db_t *db, const char *key) {
+    if (!db || !key || !*key)
+        return false;
+    vfs_lock(db);
+    sqlite3_stmt *st = NULL;
+    sqlite3_prepare_v2(db->db, "DELETE FROM pins WHERE key=?", -1, &st, NULL);
+    if (!st) {
+        vfs_unlock(db);
+        return false;
+    }
+    sqlite3_bind_text(st, 1, key, -1, SQLITE_TRANSIENT);
+    bool ok = sqlite3_step(st) == SQLITE_DONE;
+    sqlite3_finalize(st);
+    vfs_unlock(db);
+    return ok;
+}
+
+bool vfs_pin_is_active(vfs_db_t *db, const char *key) {
+    if (!db || !key || !*key)
+        return false;
+    vfs_lock(db);
+    sqlite3_stmt *st = NULL;
+    sqlite3_prepare_v2(db->db,
+                       "SELECT 1 FROM pins WHERE key=? AND "
+                       "(expires_at IS NULL OR expires_at > strftime('%s','now')) LIMIT 1",
+                       -1, &st, NULL);
+    if (!st) {
+        vfs_unlock(db);
+        return false;
+    }
+    sqlite3_bind_text(st, 1, key, -1, SQLITE_TRANSIENT);
+    bool active = sqlite3_step(st) == SQLITE_ROW;
+    sqlite3_finalize(st);
+    vfs_unlock(db);
+    return active;
+}
+
+int vfs_pin_evict_expired(vfs_db_t *db) {
+    if (!db)
+        return 0;
+    vfs_lock(db);
+    sqlite3_exec(db->db, "DELETE FROM pins WHERE expires_at IS NOT NULL AND expires_at <= strftime('%s','now')",
+                 NULL, NULL, NULL);
+    int changes = sqlite3_changes(db->db);
+    vfs_unlock(db);
+    return changes;
+}
+
 /* ── Maintenance: eviction + size control (Wave 1.1, R1) ──────────────
  * Deletes expired cache + tool_results rows (previously prepared but
  * never called → unbounded DB growth), then reclaims file space via
@@ -687,7 +793,7 @@ int vfs_result_evict(vfs_db_t *db) {
 int vfs_maintain(vfs_db_t *db, int64_t max_db_bytes) {
     if (!db)
         return 0;
-    int evicted = vfs_cache_evict(db) + vfs_result_evict(db);
+    int evicted = vfs_pin_evict_expired(db) + vfs_cache_evict(db) + vfs_result_evict(db);
 
     if (max_db_bytes > 0) {
         vfs_stats_t st = vfs_get_stats(db);
@@ -697,8 +803,11 @@ int vfs_maintain(vfs_db_t *db, int64_t max_db_bytes) {
              * Expired rows are already gone; this trims live-but-cold data. */
             sqlite3_exec(db->db,
                          "DELETE FROM tool_results WHERE key IN ("
-                         "  SELECT key FROM tool_results"
-                         "  ORDER BY access_count ASC, created_at ASC"
+                         "  SELECT tr.key FROM tool_results tr"
+                         "  LEFT JOIN pins p ON p.key = tr.key"
+                         "    AND (p.expires_at IS NULL OR p.expires_at > strftime('%s','now'))"
+                         "  WHERE p.key IS NULL"
+                         "  ORDER BY tr.access_count ASC, tr.created_at ASC"
                          "  LIMIT (SELECT COUNT(*)/4 FROM tool_results))",
                          NULL, NULL, NULL);
             sqlite3_exec(db->db, "VACUUM;", NULL, NULL, NULL);

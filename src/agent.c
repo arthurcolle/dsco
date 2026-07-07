@@ -2,6 +2,7 @@
 #define _DARWIN_C_SOURCE
 #endif
 #include "agent.h"
+#include "agent_event.h"
 #include "http_pool.h"
 #include "llm.h"
 #include "tools.h"
@@ -4012,6 +4013,59 @@ static void fsm_tool_pending_enter(void *ctx) {
 static char g_chronicle_active_trace_id[37] = "";
 static char g_chronicle_active_llm_span_id[37] = "";
 
+static void journal_turn_start(int turn, const char *model, int conv_count) {
+    jbuf_t b;
+    jbuf_init(&b, 256);
+    jbuf_appendf(&b, "{\"turn\":%d,\"conv_count\":%d,\"model\":", turn, conv_count);
+    jbuf_append_json_str(&b, model ? model : "");
+    jbuf_append(&b, "}");
+    agent_event_emit_simple("turn.started", "ok", b.data, AGENT_EVENT_CALLBACK);
+    jbuf_free(&b);
+}
+
+static void journal_turn_checkpoint(int turn, const char *model, const usage_t *u, double cost, const char *stop_reason) {
+    jbuf_t b;
+    jbuf_init(&b, 384);
+    jbuf_appendf(&b, "{\"turn\":%d,\"cost_usd\":%.8f,\"input_tokens\":%d,\"output_tokens\":%d,\"cache_read\":%d,\"cache_write\":%d,\"model\":",
+                 turn, cost, u ? u->input_tokens : 0, u ? u->output_tokens : 0,
+                 u ? u->cache_read_input_tokens : 0, u ? u->cache_creation_input_tokens : 0);
+    jbuf_append_json_str(&b, model ? model : "");
+    if (stop_reason) { jbuf_append(&b, ",\"stop_reason\":"); jbuf_append_json_str(&b, stop_reason); }
+    jbuf_append(&b, "}");
+    agent_event_emit_simple("turn.checkpoint", "ok", b.data, AGENT_EVENT_DURABLE | AGENT_EVENT_CALLBACK);
+    jbuf_free(&b);
+}
+
+static void journal_tool_call_record(const char *tool, const char *tool_id, const char *input_json) {
+    jbuf_t b;
+    jbuf_init(&b, 512);
+    jbuf_append(&b, "{\"tool\":"); jbuf_append_json_str(&b, tool ? tool : "");
+    jbuf_append(&b, ",\"tool_id\":"); jbuf_append_json_str(&b, tool_id ? tool_id : "");
+    jbuf_appendf(&b, ",\"args_bytes\":%d", input_json ? (int)strlen(input_json) : 0);
+    if (input_json && json_is_valid_container(input_json)) { jbuf_append(&b, ",\"args\":"); jbuf_append(&b, input_json); }
+    jbuf_append(&b, "}");
+    agent_event_emit_simple("tool.call", "ok", b.data, AGENT_EVENT_CALLBACK);
+    jbuf_free(&b);
+}
+
+static void journal_tool_result_record(const char *tool, const char *tool_id, bool ok, bool cached, double elapsed_ms, const char *result) {
+    jbuf_t b;
+    jbuf_init(&b, 768);
+    int n = result ? (int)strlen(result) : 0;
+    int preview = n > 512 ? 512 : n;
+    jbuf_append(&b, "{\"tool\":"); jbuf_append_json_str(&b, tool ? tool : "");
+    jbuf_append(&b, ",\"tool_id\":"); jbuf_append_json_str(&b, tool_id ? tool_id : "");
+    jbuf_appendf(&b, ",\"ok\":%s,\"cached\":%s,\"latency_ms\":%.3f,\"result_bytes\":%d,\"result_preview\":",
+                 ok ? "true" : "false", cached ? "true" : "false", elapsed_ms, n);
+    if (result) {
+        char tmp[513]; memcpy(tmp, result, (size_t)preview); tmp[preview] = '\0';
+        jbuf_append_json_str(&b, tmp);
+    } else jbuf_append_json_str(&b, "");
+    jbuf_append(&b, "}");
+    agent_event_emit_simple("tool.result", ok ? "ok" : "error", b.data, AGENT_EVENT_DURABLE | AGENT_EVENT_CALLBACK);
+    jbuf_free(&b);
+}
+
 static void on_stream_text(const char *text, void *ctx) {
     (void)ctx;
     chronicle_llm_delta(g_chronicle_active_trace_id, g_chronicle_active_llm_span_id, "text", text);
@@ -4859,9 +4913,10 @@ bool agent_run(const char *api_key, const char *model, const char *topology_name
         enable_pane = false;
     if (enable_pane) {
         tui_status_bar_enable(&status_bar);
-        /* No DECSTBM, no pre-render — the panel is ephemeral and renders
-         * itself just-in-time inside tui_composer_read. Welcome banner
-         * and startup notes print normally above the eventual panel. */
+        /* Permanent bottom panel: the composer renders just-in-time on first
+         * input, then stays mounted across agent/tool execution with the
+         * transcript scroll region clamped above it. Welcome banner and
+         * startup notes still print normally before first render. */
     }
 
     /* SIGWINCH handler for terminal resize */
@@ -8483,6 +8538,7 @@ bool agent_run(const char *api_key, const char *model, const char *topology_name
         int total_tools_used = 0;
         int pause_turn_streak = 0;
         int cache_zero_telemetry_streak = 0;
+        int cache_low_hit_streak = 0;
         bool cache_notice_emitted = false;
 
         /* Loop breaker: detect repeated identical cached tool failures */
@@ -8527,6 +8583,7 @@ bool agent_run(const char *api_key, const char *model, const char *topology_name
     resume_turn_loop:
         while (turns < hard_ceiling && !g_interrupted) {
             turns++;
+            journal_turn_start(turns, session.model, conv.count);
             md_reset(&s_md);
 
             /* Agentic checkpoint: at each cadence boundary the loop is still
@@ -9431,6 +9488,8 @@ bool agent_run(const char *api_key, const char *model, const char *topology_name
              * most the in-flight turn. */
             transcript_checkpoint(&session, turns, &sr.usage, accounted_turn_cost,
                                   sr.parsed.stop_reason);
+            journal_turn_checkpoint(turns, session.model, &sr.usage, accounted_turn_cost,
+                                    sr.parsed.stop_reason);
             autosave(&conv, &session);
             const char *accounting_key = resolve_provider_key(api_key);
             last_turn_usage = sr.usage;
@@ -9549,11 +9608,22 @@ bool agent_run(const char *api_key, const char *model, const char *topology_name
                 const char *event_kind = NULL;
                 const char *human_status = NULL;
 
-                if (cache_telemetry_seen && cache_hit_ratio < 0.50 &&
+                if (cache_telemetry_seen &&
                     cache_expectation == CACHE_EXPECT_EXPLICIT_BREAKPOINTS) {
-                    should_warn = true;
-                    event_kind = "low_hit_ratio";
-                    human_status = "cache hit ratio low";
+                    if (cache_hit_ratio < 0.50)
+                        cache_low_hit_streak++;
+                    else
+                        cache_low_hit_streak = 0;
+
+                    if (cache_low_hit_streak >= 3) {
+                        bool write_dominated =
+                            sr.usage.cache_creation_input_tokens > sr.usage.cache_read_input_tokens &&
+                            sr.usage.cache_creation_input_tokens >= sr.usage.input_tokens;
+                        should_warn = true;
+                        event_kind = write_dominated ? "cache_prefix_churn" : "low_hit_ratio";
+                        human_status = write_dominated ? "cache prefix churn suspected"
+                                                       : "cache hit ratio low";
+                    }
                 } else if (!cache_telemetry_seen && sr.usage.input_tokens > 0 &&
                            session_has_cache_telemetry(&session) &&
                            cache_expectation == CACHE_EXPECT_EXPLICIT_BREAKPOINTS) {
@@ -9565,6 +9635,7 @@ bool agent_run(const char *api_key, const char *model, const char *topology_name
                     human_status = "mid-session cache loss (prefix invalidated)";
                 } else if (!cache_telemetry_seen && !cache_notice_emitted &&
                            cache_zero_telemetry_streak >= 3 && turns >= 5) {
+                    cache_low_hit_streak = 0;
                     should_warn = true;
                     cache_notice_emitted = true;
                     event_kind = "telemetry_absent";
@@ -9577,11 +9648,11 @@ bool agent_run(const char *api_key, const char *model, const char *topology_name
                     char warn[384];
                     snprintf(warn, sizeof(warn),
                              "turn=%d expectation=%s hit=%.1f%% input=%d cache_read=%d "
-                             "cache_write=%d zero_telemetry_streak=%d",
+                             "cache_write=%d low_hit_streak=%d zero_telemetry_streak=%d",
                              turns, cache_expectation_label(cache_expectation),
                              cache_hit_ratio * 100.0, sr.usage.input_tokens,
                              sr.usage.cache_read_input_tokens, sr.usage.cache_creation_input_tokens,
-                             cache_zero_telemetry_streak);
+                             cache_low_hit_streak, cache_zero_telemetry_streak);
                     fprintf(stderr,
                             "  %s⚠ %s after turn %d: %.1f%% "
                             "(read %d / %d input-side tokens; mode=%s)%s\n",
@@ -9897,6 +9968,9 @@ bool agent_run(const char *api_key, const char *model, const char *topology_name
                                 baseline_log("security", "tool_blocked", deny_reason, NULL);
                                 conv_add_tool_result_named(&conv, blk->tool_id, blk->tool_name,
                                                            deny_reason, true);
+                                journal_tool_call_record(blk->tool_name, blk->tool_id, blk->tool_input);
+                                journal_tool_result_record(blk->tool_name, blk->tool_id, false, false,
+                                                           0.0, deny_reason);
                                 break;
                             }
                         }
@@ -9919,6 +9993,9 @@ bool agent_run(const char *api_key, const char *model, const char *topology_name
                                          : "");
                             conv_add_tool_result_named(&conv, blk->tool_id, blk->tool_name,
                                                        validation_result, true);
+                            journal_tool_call_record(blk->tool_name, blk->tool_id, blk->tool_input);
+                            journal_tool_result_record(blk->tool_name, blk->tool_id, false, false,
+                                                       0.0, validation_result);
                             if (repeated_validation) {
                                 fprintf(stderr,
                                         "  %s⚠ breaking loop: repeated invalid %s tool input%s\n",
@@ -9950,6 +10027,7 @@ bool agent_run(const char *api_key, const char *model, const char *topology_name
                             chronicle_tool_call_start(trace_id, chron_prompt_span, blk->tool_name,
                                                       blk->tool_id, blk->tool_input,
                                                       chron_tool_span);
+                            journal_tool_call_record(blk->tool_name, blk->tool_id, blk->tool_input);
                             double t0 = now_ms();
                             tools_set_trace_context(trace_id, chron_prompt_span, chron_tool_span,
                                                     blk->tool_name);
@@ -9972,6 +10050,8 @@ bool agent_run(const char *api_key, const char *model, const char *topology_name
                             trace_span_end(tool_span, ok ? "ok" : "error", NULL);
                             chronicle_tool_call_end(trace_id, chron_tool_span, blk->tool_name,
                                                     tool_result, ok, false, elapsed);
+                            journal_tool_result_record(blk->tool_name, blk->tool_id, ok, false,
+                                                       elapsed, tool_result);
                             conv_add_tool_result_named(&conv, blk->tool_id, blk->tool_name,
                                                        tool_result, !ok);
                             free(tool_result);
@@ -10059,6 +10139,7 @@ bool agent_run(const char *api_key, const char *model, const char *topology_name
                             chronicle_tool_call_start(trace_id, chron_prompt_span, blk->tool_name,
                                                       blk->tool_id, blk->tool_input,
                                                       chron_tool_span);
+                            journal_tool_call_record(blk->tool_name, blk->tool_id, blk->tool_input);
 
                             /* Start async spinner + watchdog */
                             tui_async_spinner_t spinner;
@@ -10438,6 +10519,7 @@ bool agent_run(const char *api_key, const char *model, const char *topology_name
                         trace_span_begin(trace_id, blk->tool_name, prompt_span, tool_span);
                         chronicle_tool_call_start(trace_id, chron_prompt_span, blk->tool_name,
                                                   blk->tool_id, blk->tool_input, chron_tool_span);
+                        journal_tool_call_record(blk->tool_name, blk->tool_id, blk->tool_input);
                         double t0 = now_ms();
                         tools_set_trace_context(trace_id, chron_prompt_span, chron_tool_span,
                                                 blk->tool_name);
@@ -10470,6 +10552,7 @@ bool agent_run(const char *api_key, const char *model, const char *topology_name
                     trace_span_begin(trace_id, blk->tool_name, prompt_span, tool_span);
                     chronicle_tool_call_start(trace_id, chron_prompt_span, blk->tool_name,
                                               blk->tool_id, blk->tool_input, chron_tool_span);
+                    journal_tool_call_record(blk->tool_name, blk->tool_id, blk->tool_input);
 
                     tool_watchdog_t wd;
                     int timeout = tool_timeout_for(blk->tool_name);
@@ -10574,6 +10657,7 @@ bool agent_run(const char *api_key, const char *model, const char *topology_name
                         char chron_tool_span[37] = "";
                         chronicle_tool_call_start(trace_id, chron_prompt_span, s->tool_name,
                                                   blk->tool_id, s->tool_input, chron_tool_span);
+                        journal_tool_call_record(s->tool_name, blk->tool_id, s->tool_input);
 
                         tui_batch_spinner_complete(&batch_spinner, s->batch_index,
                                                    s->ok && !s->was_timeout, s->result,

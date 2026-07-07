@@ -1,0 +1,11 @@
+{
+  "run_id": "swarm_1783378199_g0_create_dsco-emergency-review",
+  "name": "dsco-emergency-review",
+  "topology": "create",
+  "status": "mapping",
+  "worker_count": 4,
+  "completed_workers": 0,
+  "failed_workers": 0,
+  "estimated_cost_usd": 0.000000,
+  "user_prompt": "dsco-emergency-review"
+}
