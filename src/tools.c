@@ -34627,6 +34627,7 @@ void tools_init(void) {
 }
 
 void tools_init_profile(tools_init_profile_t profile) {
+    dsco_flow_reset(); /* session start: clear lethal-trifecta taint accumulation */
     g_tools_init_profile = profile;
     if (profile == TOOLS_CORE || profile == TOOLS_AGENT) {
         tool_map_rebuild();
