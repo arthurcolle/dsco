@@ -1,0 +1,81 @@
+{
+  "event": "benchmark_summary",
+  "generated_at": "2026-07-02T21:34:32.936912+00:00",
+  "host": "chrysalis",
+  "platform": "macOS-26.5.1-arm64-arm-64bit-Mach-O",
+  "python": "3.14.0",
+  "cases": [
+    {
+      "case": "help",
+      "runs": 5,
+      "ok": 5,
+      "failures": 0,
+      "min_ms": 13.074833,
+      "p50_ms": 14.967583,
+      "p95_ms": 16.6313666,
+      "max_ms": 16.634625,
+      "mean_ms": 14.9416248,
+      "stdout_bytes_median": 0
+    },
+    {
+      "case": "models_json",
+      "runs": 5,
+      "ok": 5,
+      "failures": 0,
+      "min_ms": 13.576833,
+      "p50_ms": 13.8915,
+      "p95_ms": 18.240982799999998,
+      "max_ms": 18.906291,
+      "mean_ms": 15.1583916,
+      "stdout_bytes_median": 31800
+    },
+    {
+      "case": "route_explain_sonnet",
+      "runs": 5,
+      "ok": 5,
+      "failures": 0,
+      "min_ms": 18.109708,
+      "p50_ms": 20.044541,
+      "p95_ms": 23.5969834,
+      "max_ms": 23.7275,
+      "mean_ms": 20.698249999999998,
+      "stdout_bytes_median": 379
+    },
+    {
+      "case": "tool_cwd",
+      "runs": 5,
+      "ok": 5,
+      "failures": 0,
+      "min_ms": 14.438,
+      "p50_ms": 15.612667,
+      "p95_ms": 19.315008799999998,
+      "max_ms": 20.006209,
+      "mean_ms": 16.2873918,
+      "stdout_bytes_median": 66
+    },
+    {
+      "case": "tools_json",
+      "runs": 5,
+      "ok": 5,
+      "failures": 0,
+      "min_ms": 14.424417,
+      "p50_ms": 15.018625,
+      "p95_ms": 15.580100000000002,
+      "max_ms": 15.7185,
+      "mean_ms": 14.999075,
+      "stdout_bytes_median": 97746
+    },
+    {
+      "case": "version",
+      "runs": 5,
+      "ok": 5,
+      "failures": 0,
+      "min_ms": 12.32975,
+      "p50_ms": 14.49475,
+      "p95_ms": 17.0436336,
+      "max_ms": 17.322417,
+      "mean_ms": 14.7387002,
+      "stdout_bytes_median": 50
+    }
+  ]
+}

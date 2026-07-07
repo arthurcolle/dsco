@@ -1205,10 +1205,13 @@ static void rt_append_external_tools(jbuf_t *b, int *count, int max_tools) {
     if (!b || !count || max_tools <= 0)
         return;
 
+    external_tool_snapshot_t ext = tools_external_snapshot();
+    int *ext_order = ext.count > 0 ? safe_malloc((size_t)ext.count * sizeof(*ext_order)) : NULL;
+    int ext_order_count = ext_order ? tools_rank_external_snapshot(&ext, NULL, ext_order, ext.count) : 0;
     int ext_budget = max_tools - *count;
     int loaded_ext_count = 0;
-    for (int i = 0; i < g_external_tool_count; i++)
-        if (g_external_tools[i].loaded)
+    for (int i = 0; i < ext.count; i++)
+        if (ext.items[i].loaded)
             loaded_ext_count++;
 
     if (loaded_ext_count > ext_budget)
@@ -1221,13 +1224,18 @@ static void rt_append_external_tools(jbuf_t *b, int *count, int max_tools) {
     int ext_written = 0;
     for (int pass = 0; pass < 2 && ext_written < ext_budget; pass++) {
         bool want_loaded = (pass == 0);
-        for (int i = 0; i < g_external_tool_count && ext_written < ext_budget; i++) {
-            if ((bool)g_external_tools[i].loaded != want_loaded)
+        for (int oi = 0; oi < ext_order_count && ext_written < ext_budget; oi++) {
+            int i = ext_order[oi];
+            if (i < 0 || i >= ext.count)
                 continue;
-            if (rt_append_one_external_tool(b, &g_external_tools[i], count))
+            if ((bool)ext.items[i].loaded != want_loaded)
+                continue;
+            if (rt_append_one_external_tool(b, &ext.items[i], count))
                 ext_written++;
         }
     }
+    free(ext_order);
+    tools_external_snapshot_free(&ext);
 }
 
 static int rt_append_tools(rt_session_t *s, jbuf_t *b) {

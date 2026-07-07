@@ -1508,6 +1508,7 @@ typedef struct {
     pthread_cond_t   cond;         /* signal render thread */
     pthread_t        render_thread;
     volatile bool    running;
+    bool             initialized;
 
     FILE            *out;          /* output target (stderr) */
 
@@ -1982,5 +1983,28 @@ void tui_menu_set_expanded(tui_menu_item_t *it, bool expanded);
  * or TUI_MENU_CANCELLED on Esc/q. Stores the resolved item pointer in *out_item
  * (may be NULL). Submenus toggle on Enter/→/←; leaves confirm on Enter. */
 int tui_menu_run(tui_menu_t *m, tui_menu_item_t **out_item);
+
+#ifdef DSCO_INTERNAL_TESTS
+typedef enum {
+    TUI_TEST_KEY_UNKNOWN = 0,
+    TUI_TEST_KEY_UP = 1000,
+    TUI_TEST_KEY_DOWN,
+    TUI_TEST_KEY_LEFT,
+    TUI_TEST_KEY_RIGHT,
+    TUI_TEST_KEY_TAB,
+    TUI_TEST_KEY_BACKTAB,
+    TUI_TEST_KEY_ENTER,
+    TUI_TEST_KEY_ESC,
+    TUI_TEST_KEY_SPACE,
+    TUI_TEST_KEY_PAGE_UP,
+    TUI_TEST_KEY_PAGE_DOWN,
+    TUI_TEST_KEY_HOME,
+    TUI_TEST_KEY_END,
+} tui_test_key_t;
+
+int tui_test_decode_key_sequence(const char *seq);
+int tui_test_dialog_move_row(int row, int maxrow, int key);
+int tui_test_menu_move_selection(const bool *selectable, int nrows, int selected, int delta);
+#endif
 
 #endif

@@ -1767,3 +1767,168 @@ int swarm_group_status_json(swarm_t *s, int group_id, char *buf, size_t len) {
     jbuf_free(&b);
     return written;
 }
+
+/* ── Swarm Mode v1 observability/persistence ───────────────────────────── */
+
+static void swarm_v1_json_escape_file(FILE *f, const char *s) {
+    fputc('"', f);
+    if (s) {
+        for (const unsigned char *p = (const unsigned char *)s; *p; p++) {
+            switch (*p) {
+            case '"': fputs("\\\"", f); break;
+            case '\\': fputs("\\\\", f); break;
+            case '\n': fputs("\\n", f); break;
+            case '\r': fputs("\\r", f); break;
+            case '\t': fputs("\\t", f); break;
+            default:
+                if (*p < 32) fprintf(f, "\\u%04x", *p);
+                else fputc(*p, f);
+            }
+        }
+    }
+    fputc('"', f);
+}
+
+static void swarm_v1_safe_component(char *dst, size_t n, const char *src) {
+    if (!dst || n == 0) return;
+    size_t j = 0;
+    if (!src || !src[0]) src = "swarm_run";
+    for (size_t i = 0; src[i] && j + 1 < n; i++) {
+        unsigned char c = (unsigned char)src[i];
+        if ((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') ||
+            (c >= '0' && c <= '9') || c == '-' || c == '_') dst[j++] = (char)c;
+        else if (c == ' ' || c == '/' || c == ':') dst[j++] = '_';
+    }
+    dst[j] = '\0';
+}
+
+static int swarm_v1_mkdir_p(const char *path) {
+    char tmp[1024];
+    if (!path || strlen(path) >= sizeof(tmp)) return -1;
+    snprintf(tmp, sizeof(tmp), "%s", path);
+    for (char *p = tmp + 1; *p; p++) {
+        if (*p == '/') {
+            *p = '\0';
+            if (mkdir(tmp, 0755) != 0 && errno != EEXIST) return -1;
+            *p = '/';
+        }
+    }
+    if (mkdir(tmp, 0755) != 0 && errno != EEXIST) return -1;
+    return 0;
+}
+
+static const char *swarm_v1_status_word(const swarm_child_t *c) {
+    if (!c) return "unknown";
+    if (c->status == SWARM_RUNNING) return "running";
+    if (c->status == SWARM_STREAMING) return "tooling";
+    if (c->status == SWARM_DONE) return "done";
+    if (c->status == SWARM_ERROR) return "failed";
+    if (c->status == SWARM_KILLED) return "cancelled";
+    return "pending";
+}
+
+int swarm_group_render_frame(swarm_t *s, int group_id, const char *run_id,
+                             const char *topology, char *buf, size_t len) {
+    if (!s || group_id < 0 || group_id >= s->group_count || !buf || len == 0) return -1;
+    swarm_poll(s, 0);
+    swarm_group_t *g = &s->groups[group_id];
+    int done = swarm_group_done_count(s, group_id);
+    int err = swarm_group_error_count(s, group_id) + swarm_group_killed_count(s, group_id);
+    int active = swarm_group_active_count(s, group_id);
+    int off = snprintf(buf, len, "┌─ swarm: %s\n├─ topology: %s  run_id: %s\n├─ map %d/%d done, %d running, %d errors\n",
+                       g->name, topology ? topology : "map_reduce", run_id ? run_id : "unpersisted",
+                       done, g->child_count, active, err);
+    if (off < 0) return -1;
+    for (int i = 0; i < g->child_count && (size_t)off < len; i++) {
+        swarm_child_t *c = &s->children[g->child_ids[i]];
+        off += snprintf(buf + off, len - (size_t)off, "│ [%d] %-24.24s %-9s %.1fs\n",
+                        c->id, c->task[0] ? c->task : "worker", swarm_v1_status_word(c),
+                        swarm_child_elapsed_sec(c));
+    }
+    if ((size_t)off < len)
+        snprintf(buf + off, len - (size_t)off, "└─ %s %d/%d done, %d errors, cost≈$%.4f\n",
+                 swarm_group_complete(s, group_id) ? "reduce-ready" : "running",
+                 done, g->child_count, err, swarm_group_est_cost_usd(s, group_id));
+    return 0;
+}
+
+int swarm_group_persist_run(swarm_t *s, int group_id, const char *run_id,
+                            const char *topology, const char *user_prompt,
+                            const char *coordinator_output,
+                            char *out_dir, size_t out_dir_len) {
+    if (!s || group_id < 0 || group_id >= s->group_count) return -1;
+    swarm_poll(s, 0);
+    swarm_group_t *g = &s->groups[group_id];
+    char safe_id[160]; swarm_v1_safe_component(safe_id, sizeof(safe_id), run_id ? run_id : g->name);
+    char dir[1024]; snprintf(dir, sizeof(dir), ".swarm/runs/%s", safe_id);
+    char workers_dir[1100]; snprintf(workers_dir, sizeof(workers_dir), "%s/workers", dir);
+    if (swarm_v1_mkdir_p(workers_dir) != 0) return -1;
+    if (out_dir && out_dir_len) snprintf(out_dir, out_dir_len, "%s", dir);
+
+    int done = swarm_group_done_count(s, group_id);
+    int errors = swarm_group_error_count(s, group_id) + swarm_group_killed_count(s, group_id);
+    const char *status = errors ? (done ? "partial" : "failed") : (swarm_group_complete(s, group_id) ? "done" : "mapping");
+
+    char path[1200];
+    snprintf(path, sizeof(path), "%s/manifest.json", dir);
+    FILE *f = fopen(path, "w"); if (!f) return -1;
+    fprintf(f, "{\n  \"run_id\": "); swarm_v1_json_escape_file(f, safe_id);
+    fprintf(f, ",\n  \"name\": "); swarm_v1_json_escape_file(f, g->name);
+    fprintf(f, ",\n  \"topology\": "); swarm_v1_json_escape_file(f, topology ? topology : "map_reduce");
+    fprintf(f, ",\n  \"status\": \"%s\",\n  \"worker_count\": %d,\n  \"completed_workers\": %d,\n  \"failed_workers\": %d,\n  \"estimated_cost_usd\": %.6f,\n  \"user_prompt\": ", status, g->child_count, done, errors, swarm_group_est_cost_usd(s, group_id));
+    swarm_v1_json_escape_file(f, user_prompt ? user_prompt : "");
+    fprintf(f, "\n}\n"); fclose(f);
+
+    snprintf(path, sizeof(path), "%s/transcript.md", dir);
+    f = fopen(path, "w"); if (!f) return -1;
+    fprintf(f, "# Swarm Run: %s\n\n- topology: %s\n- status: %s\n- workers: %d\n- done: %d\n- errors: %d\n\n## Worker Outputs\n", safe_id, topology ? topology : "map_reduce", status, g->child_count, done, errors);
+    for (int i = 0; i < g->child_count; i++) {
+        swarm_child_t *c = &s->children[g->child_ids[i]];
+        fprintf(f, "\n### W%d — %s\n\n```text\n%.*s\n```\n", c->id, c->task, (int)c->output_len, c->output ? c->output : "");
+    }
+    fprintf(f, "\n## Coordinator\n\n%s\n", coordinator_output ? coordinator_output : ""); fclose(f);
+
+    for (int i = 0; i < g->child_count; i++) {
+        swarm_child_t *c = &s->children[g->child_ids[i]];
+        snprintf(path, sizeof(path), "%s/workers/worker_%d.json", dir, c->id);
+        f = fopen(path, "w"); if (!f) return -1;
+        fprintf(f, "{\n  \"worker_id\": %d,\n  \"role\": ", c->id); swarm_v1_json_escape_file(f, c->task);
+        fprintf(f, ",\n  \"status\": \"%s\",\n  \"elapsed_seconds\": %.3f,\n  \"estimated_cost_usd\": %.6f,\n  \"output\": ", swarm_v1_status_word(c), swarm_child_elapsed_sec(c), c->est_cost_usd);
+        swarm_v1_json_escape_file(f, c->output ? c->output : "");
+        fprintf(f, "\n}\n"); fclose(f);
+    }
+
+    snprintf(path, sizeof(path), "%s/coordinator.md", dir);
+    f = fopen(path, "w"); if (!f) return -1; fprintf(f, "%s\n", coordinator_output ? coordinator_output : ""); fclose(f);
+    snprintf(path, sizeof(path), "%s/claims.json", dir);
+    f = fopen(path, "w"); if (!f) return -1; fprintf(f, "{\"claims\":[],\"note\":\"v1 stores raw worker outputs; structured claim extraction is next.\"}\n"); fclose(f);
+    snprintf(path, sizeof(path), "%s/metrics.json", dir);
+    f = fopen(path, "w"); if (!f) return -1; fprintf(f, "{\"worker_count\":%d,\"completed_workers\":%d,\"failed_workers\":%d,\"estimated_cost_usd\":%.6f}\n", g->child_count, done, errors, swarm_group_est_cost_usd(s, group_id)); fclose(f);
+    return 0;
+}
+
+int swarm_group_ensure_durable_run(swarm_t *s, int group_id, const char *topology,
+                                   const char *suggested_run_id) {
+    if (!s || group_id < 0 || group_id >= s->group_count) return -1;
+    swarm_group_t *g = &s->groups[group_id];
+    if (!g->durable_run_id[0]) {
+        char safe[160];
+        if (suggested_run_id && suggested_run_id[0]) {
+            swarm_v1_safe_component(safe, sizeof(safe), suggested_run_id);
+        } else {
+            char tmp[256];
+            snprintf(tmp, sizeof(tmp), "swarm_%ld_g%d_%s_%s", (long)time(NULL), group_id,
+                     topology && topology[0] ? topology : "run", g->name[0] ? g->name : "unnamed");
+            swarm_v1_safe_component(safe, sizeof(safe), tmp);
+        }
+        snprintf(g->durable_run_id, sizeof(g->durable_run_id), "%s", safe);
+    }
+    if (topology && topology[0] && !g->topology[0])
+        snprintf(g->topology, sizeof(g->topology), "%s", topology);
+    else if (!g->topology[0])
+        snprintf(g->topology, sizeof(g->topology), "swarm");
+    if (!g->durable_run_dir[0])
+        snprintf(g->durable_run_dir, sizeof(g->durable_run_dir), ".swarm/runs/%s", g->durable_run_id);
+    (void)swarm_v1_mkdir_p(g->durable_run_dir);
+    return 0;
+}

@@ -1,0 +1,326 @@
+# runtime-power-hotpath-tests.patch
+# Contains only the intended runtime-power changes from this session:
+# - src/tools.c hot-path lookup + core-count cache + schema bounds fix
+# - src/llm.c terminal-control clean fast path
+# - tests/test.c 8 regression tests + registration
+# Note: src/command_plane.c is untracked prior-session work; not included.
+
+diff --git a/src/tools.c b/src/tools.c
+index e0654ff..1939bb0 100644
+--- a/src/tools.c
++++ b/src/tools.c
+@@ -27042,13 +27042,23 @@ const char *tools_output_schema_for_name(const char *name) {
+     static _Thread_local char external_schema_buf[8192];
+     if (!name || !name[0])
+         return k_default_output_schema_json;
++
+     int total = 0;
+     const tool_def_t *tools = tools_get_all(&total);
+-    for (int i = 0; i < total; i++) {
++    int builtin_total = tools_builtin_count();
++    for (int i = 0; i < builtin_total; i++) {
+         if (tools[i].name && strcmp(tools[i].name, name) == 0)
+             return tools_output_schema_for_def(&tools[i]);
+     }
++
+     tool_registry_rdlock();
++    for (int i = 0; i < g_plugins.extra_tool_count; i++) {
++        if (g_plugins.extra_tools[i].name && strcmp(g_plugins.extra_tools[i].name, name) == 0) {
++            const char *schema = tools_output_schema_for_def(&g_plugins.extra_tools[i]);
++            tool_registry_unlock();
++            return schema;
++        }
++    }
+     for (int i = 0; i < g_external_tool_count; i++) {
+         if (strcmp(g_external_tools[i].name, name) == 0) {
+             const char *schema = tools_output_schema_for_external(&g_external_tools[i]);
+@@ -34476,12 +34486,10 @@ bool tools_invoke_by_name(const char *name, const char *input, char *result, siz
+     if (!name || !result || rlen == 0)
+         return false;
+     result[0] = '\0';
+-    for (int i = 0; i < s_tool_count; i++) {
+-        if (!s_tools[i].name || !s_tools[i].execute)
+-            continue;
+-        if (strcmp(s_tools[i].name, name) == 0) {
+-            return s_tools[i].execute(input ? input : "{}", result, rlen);
+-        }
++    /* O(1) hash-map lookup (falls back to MCP alias resolution). */
++    int idx = tools_lookup_index(name);
++    if (idx >= 0 && idx < s_tool_count && s_tools[idx].execute) {
++        return s_tools[idx].execute(input ? input : "{}", result, rlen);
+     }
+     snprintf(result, rlen, "{\"error\":\"unknown tool: %s\"}", name);
+     return false;
+@@ -34490,11 +34498,9 @@ bool tools_invoke_by_name(const char *name, const char *input, char *result, siz
+ bool tools_is_offload_safe(const char *name) {
+     if (!name || !name[0])
+         return false;
+-    for (int i = 0; i < s_tool_count; i++) {
+-        if (!s_tools[i].name || strcmp(s_tools[i].name, name) != 0)
+-            continue;
+-        return s_tools[i].is_read_only && s_tools[i].is_concurrent;
+-    }
++    int idx = tools_lookup_index(name);
++    if (idx >= 0 && idx < s_tool_count && s_tools[idx].name)
++        return s_tools[idx].is_read_only && s_tools[idx].is_concurrent;
+     return false;
+ }
+ 
+@@ -34519,10 +34525,9 @@ void tools_clear_profile_filter(void) {
+ bool tools_is_parent_specified_core_tool(const char *tool_name) {
+     if (!tool_name || !tool_name[0])
+         return false;
+-    for (int i = 0; i < s_tool_count; i++) {
+-        if (s_tools[i].name && strcmp(s_tools[i].name, tool_name) == 0)
+-            return s_tools[i].core;
+-    }
++    int idx = tools_lookup_index(tool_name);
++    if (idx >= 0 && idx < s_tool_count && s_tools[idx].name)
++        return s_tools[idx].core;
+     return false;
+ }
+ 
+@@ -34616,20 +34621,23 @@ int tools_builtin_count(void) {
+ }
+ 
+ int tools_get_core_count(void) {
++    static int cached_core_count = -1;
++    if (cached_core_count >= 0)
++        return cached_core_count;
+     int n = 0;
+     for (int i = 0; i < s_tool_count; i++)
+         if (s_tools[i].core)
+             n++;
++    cached_core_count = n;
+     return n;
+ }
+ 
+ bool dsco_tool_is_interactive(const char *name) {
+     if (!name || !*name)
+         return false;
+-    for (int i = 0; i < s_tool_count; i++) {
+-        if (s_tools[i].name && strcmp(s_tools[i].name, name) == 0)
+-            return s_tools[i].is_interactive;
+-    }
++    int idx = tools_lookup_index(name);
++    if (idx >= 0 && idx < s_tool_count && s_tools[idx].name)
++        return s_tools[idx].is_interactive;
+     return false;
+ }
+ 
+
+
+@@ -6869,40 +7278,191 @@ static void test_tool_map_collisions(void) {
+     char name[32];
+     for (int i = 0; i < 20; i++) {
+         snprintf(name, sizeof(name), "tool_%d", i);
+         tool_map_insert(&m, name, i);
+     }
+     ASSERT(m.count == 20, "20 entries");
+ 
+     /* Verify all lookups work */
+     bool all_ok = true;
+     for (int i = 0; i < 20; i++) {
+         snprintf(name, sizeof(name), "tool_%d", i);
+         if (tool_map_lookup(&m, name) != i)
+             all_ok = false;
+     }
+     ASSERT(all_ok, "all lookups correct");
+ 
+     tool_map_free(&m);
+     PASS();
+ }
+ 
++/* ── Hot-path lookup tests (O(1) registry conversions) ─────────────── */
++
++static void test_tools_lookup_index_hashmap(void) {
++    TEST("tools_lookup_index resolves builtins O(1)");
++    tools_init();
++    /* Known stable builtins must resolve to their s_tools[] index. */
++    ASSERT(tools_lookup_index("calc") >= 0, "calc resolves");
++    ASSERT(tools_lookup_index("read_file") >= 0, "read_file resolves");
++    ASSERT(tools_lookup_index("write_file") >= 0, "write_file resolves");
++    ASSERT(tools_lookup_index("file_info") >= 0, "file_info resolves");
++    /* The map index must equal the position of the tool in tools_get_all(). */
++    int total = 0;
++    const tool_def_t *all = tools_get_all(&total);
++    int idx = tools_lookup_index("calc");
++    ASSERT(idx >= 0 && idx < total, "calc index in range");
++    ASSERT(all[idx].name && strcmp(all[idx].name, "calc") == 0,
++           "map index points at the calc definition");
++    /* Unknowns must miss. */
++    ASSERT(tools_lookup_index("nonexistent_tool_xyz") < 0, "unknown misses");
++    ASSERT(tools_lookup_index("") < 0, "empty misses");
++    PASS();
++}
++
++static void test_tools_invoke_by_name_hashmap(void) {
++    TEST("tools_invoke_by_name uses O(1) lookup");
++    tools_init();
++    char result[4096];
++    result[0] = '\0';
++    bool ok = tools_invoke_by_name("calc", "{\"expression\":\"6*7\"}", result, sizeof(result));
++    ASSERT(ok, "calc via invoke_by_name succeeds");
++    ASSERT(strstr(result, "42") != NULL, "calc returns 42");
++
++    /* Unknown tool returns a structured error and false. */
++    result[0] = '\0';
++    ok = tools_invoke_by_name("nonexistent_tool_xyz", "{}", result, sizeof(result));
++    ASSERT(!ok, "unknown tool fails");
++    ASSERT(strstr(result, "unknown tool") != NULL, "reports unknown tool");
++
++    /* Defensive: null/empty args must not crash. */
++    ASSERT(!tools_invoke_by_name(NULL, "{}", result, sizeof(result)), "null name rejected");
++    ASSERT(!tools_invoke_by_name("calc", "{}", NULL, sizeof(result)), "null result rejected");
++    ASSERT(!tools_invoke_by_name("calc", "{}", result, 0), "zero rlen rejected");
++    PASS();
++}
++
++static void test_tools_is_offload_safe(void) {
++    TEST("tools_is_offload_safe read-only+concurrent");
++    tools_init();
++    /* calc is read_only + concurrent → offload safe. */
++    ASSERT(tools_is_offload_safe("calc"), "calc is offload safe");
++    ASSERT(tools_is_offload_safe("file_info"), "file_info is offload safe");
++    /* write_file mutates → not offload safe. */
++    ASSERT(!tools_is_offload_safe("write_file"), "write_file not offload safe");
++    /* Unknown / empty must be false, not crash. */
++    ASSERT(!tools_is_offload_safe("nonexistent_tool_xyz"), "unknown not offload safe");
++    ASSERT(!tools_is_offload_safe(""), "empty not offload safe");
++    ASSERT(!tools_is_offload_safe(NULL), "null not offload safe");
++    PASS();
++}
++
++static void test_dsco_tool_is_interactive_hashmap(void) {
++    TEST("dsco_tool_is_interactive O(1) lookup");
++    tools_init();
++    /* AskUserQuestion is the canonical interactive tool. */
++    ASSERT(dsco_tool_is_interactive("AskUserQuestion"), "AskUserQuestion is interactive");
++    /* calc is not interactive. */
++    ASSERT(!dsco_tool_is_interactive("calc"), "calc not interactive");
++    /* Unknown / empty / null must be false, not crash. */
++    ASSERT(!dsco_tool_is_interactive("nonexistent_tool_xyz"), "unknown not interactive");
++    ASSERT(!dsco_tool_is_interactive(""), "empty not interactive");
++    ASSERT(!dsco_tool_is_interactive(NULL), "null not interactive");
++    PASS();
++}
++
++static void test_tools_get_core_count_cached(void) {
++    TEST("tools_get_core_count cached & stable");
++    tools_init();
++    int a = tools_get_core_count();
++    int b = tools_get_core_count();
++    ASSERT(a > 0, "core count positive");
++    ASSERT(a == b, "core count stable across calls (cache)");
++    ASSERT(a <= tools_builtin_count(), "core count <= builtin count");
++    PASS();
++}
++
++static void test_tools_output_schema_for_name(void) {
++    TEST("tools_output_schema_for_name resolves defs");
++    tools_init();
++    const char *def = tools_default_output_schema_json();
++    /* write_file carries a specific verified-write output schema. */
++    const char *wf = tools_output_schema_for_name("write_file");
++    ASSERT(wf != NULL, "write_file schema non-null");
++    ASSERT(wf != def, "write_file has a non-default schema");
++    /* A tool without an explicit output schema returns the default. */
++    const char *dt = tools_output_schema_for_name("date");
++    ASSERT(dt == def, "date returns default schema");
++    /* Unknown / empty / null must return the default, not crash. */
++    ASSERT(tools_output_schema_for_name("nonexistent_tool_xyz") == def, "unknown → default");
++    ASSERT(tools_output_schema_for_name("") == def, "empty → default");
++    ASSERT(tools_output_schema_for_name(NULL) == def, "null → default");
++    PASS();
++}
++
++/* ── Terminal-control stripping (clean fast-path correctness) ──────── */
++
++static void test_strip_terminal_controls_clean_passthrough(void) {
++    TEST("strip_terminal_controls clean passthrough");
++    /* Clean text (incl. allowed whitespace) must be byte-identical after. */
++    char s1[] = "hello world\n\ttab\r\nplain json {\"ok\":true}";
++    dsco_strip_terminal_controls_inplace(s1);
++    ASSERT(strcmp(s1, "hello world\n\ttab\r\nplain json {\"ok\":true}") == 0,
++           "clean text unchanged");
++
++    char empty[] = "";
++    dsco_strip_terminal_controls_inplace(empty);
++    ASSERT(empty[0] == '\0', "empty stays empty");
++
++    /* Null must not crash. */
++    dsco_strip_terminal_controls_inplace(NULL);
++    PASS();
++}
++
++static void test_strip_terminal_controls_removes_escapes(void) {
++    TEST("strip_terminal_controls removes control seqs");
++    /* SGR color (ESC[31m ... ESC[0m) is display-only → preserved. */
++    char sgr[] = "\x1b[31mred\x1b[0m";
++    dsco_strip_terminal_controls_inplace(sgr);
++    ASSERT(strcmp(sgr, "\x1b[31mred\x1b[0m") == 0, "SGR color preserved");
++
++    /* Cursor move (ESC[2J clear screen) is dangerous → stripped. */
++    char clr[] = "before\x1b[2Jafter";
++    dsco_strip_terminal_controls_inplace(clr);
++    ASSERT(strcmp(clr, "beforeafter") == 0, "cursor/erase stripped");
++
++    /* Bare control bytes (BEL, DEL) stripped; text preserved. */
++    char ctl[] = "a\x07" "b\x7f" "c";
++    dsco_strip_terminal_controls_inplace(ctl);
++    ASSERT(strcmp(ctl, "abc") == 0, "bare control bytes stripped");
++
++    /* Trailing ESC as final byte (dirty last char) handled. */
++    char tail[] = "text\x1b";
++    dsco_strip_terminal_controls_inplace(tail);
++    ASSERT(strcmp(tail, "text") == 0, "trailing ESC stripped");
++
++    /* OSC sequence (ESC] ... BEL) stripped entirely. */
++    char osc[] = "x\x1b]0;title\x07" "y";
++    dsco_strip_terminal_controls_inplace(osc);
++    ASSERT(strcmp(osc, "xy") == 0, "OSC title sequence stripped");
++    PASS();
++}
++
+ /* ── Tool cache tests ────────────────────────────────────────────── */
+ 
+ static void test_tool_cache_basic(void) {
+     TEST("tool_cache put/get");
+     tool_cache_t c;
+     tool_cache_init(&c);
+ 
+     tool_cache_put(&c, "bash", "{\"command\":\"ls\"}", "file1.txt\nfile2.txt", true, 60.0);
+ 
+     char result[4096];
+     bool success;
+     bool hit = tool_cache_get(&c, "bash", "{\"command\":\"ls\"}", result, sizeof(result), &success);
+     ASSERT(hit, "cache hit");
+     ASSERT(success == true, "cached success");
+     ASSERT(strstr(result, "file1.txt") != NULL, "cached result");
+ 
+     /* Miss for different input */
+     hit = tool_cache_get(&c, "bash", "{\"command\":\"pwd\"}", result, sizeof(result), &success);
+     ASSERT(!hit, "cache miss for different input");
+ 
+
+     test_tool_map_basic();
+     test_tool_map_collisions();
++    test_tools_lookup_index_hashmap();
++    test_tools_invoke_by_name_hashmap();
++    test_tools_is_offload_safe();
++    test_dsco_tool_is_interactive_hashmap();
++    test_tools_get_core_count_cached();
++    test_tools_output_schema_for_name();
++    test_strip_terminal_controls_clean_passthrough();
++    test_strip_terminal_controls_removes_escapes();
+ 
+     /* Tool cache */
+     test_tool_cache_basic();
+     test_tool_cache_miss_and_overwrite();
+ 
+     /* Prompt injection */
+     test_detect_prompt_injection();
+ 
+     /* Conversation extended */
+     test_conv_add_tool_use_and_result();
+     test_conv_save_load_ex();
