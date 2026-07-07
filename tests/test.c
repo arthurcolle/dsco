@@ -15,6 +15,7 @@
 #include "provider.h"
 #include "provider_pool.h"
 #include "provider_profiles.h"
+#include "openai_oauth.h"
 #include "plan.h"
 #include <curl/curl.h>
 #include "codex_cache.h"
@@ -1628,6 +1629,35 @@ static void test_build_request_ex_for_credential_includes_billing_header(void) {
     free(req);
     conv_free(&conv);
     test_restore_env("DSCO_CLAUDE_CODE_VERSION", saved_ver, had_ver);
+    PASS();
+}
+
+static void test_build_request_empty_model_uses_default(void) {
+    TEST("llm request empty model uses default");
+    tools_init();
+    conversation_t conv;
+    conv_init(&conv);
+    conv_add_user_text(&conv, "hey");
+
+    session_state_t session;
+    memset(&session, 0, sizeof(session));
+    char *req = llm_build_request_ex_for_credential(&conv, &session, 1024, "sk-ant-oat-session");
+    ASSERT(req != NULL, "request should build with empty session model");
+    ASSERT(strstr(req, "\"model\":\"" DEFAULT_MODEL "\"") != NULL,
+           "empty session model should serialize DEFAULT_MODEL");
+    ASSERT(strstr(req, "\"model\":\"\"") == NULL,
+           "empty session model must never reach wire request");
+    free(req);
+
+    req = llm_build_request_for_credential(&conv, "\"\"", 1024, "sk-ant-oat-session");
+    ASSERT(req != NULL, "request should build with quoted empty model");
+    ASSERT(strstr(req, "\"model\":\"" DEFAULT_MODEL "\"") != NULL,
+           "quoted empty model should serialize DEFAULT_MODEL");
+    ASSERT(strstr(req, "\"model\":\"\"") == NULL,
+           "quoted empty model must never reach wire request");
+    free(req);
+
+    conv_free(&conv);
     PASS();
 }
 
@@ -3432,6 +3462,22 @@ static void test_session_state_init(void) {
     ASSERT(s.code_execution == true, "code_execution should default true");
     test_restore_env("DSCO_TRUST_TIER", saved_trust, had_trust);
     test_restore_env("DSCO_EFFORT", saved_effort, had_effort);
+    PASS();
+}
+
+static void test_session_state_init_empty_model_uses_default(void) {
+    TEST("session_state_init empty model uses default");
+    session_state_t s;
+    session_state_init(&s, "");
+    ASSERT(strcmp(s.model, DEFAULT_MODEL) == 0, "empty model should use DEFAULT_MODEL");
+
+    session_state_t s2;
+    session_state_init(&s2, "\"\"");
+    ASSERT(strcmp(s2.model, DEFAULT_MODEL) == 0, "quoted empty model should use DEFAULT_MODEL");
+
+    session_state_t s3;
+    session_state_init(&s3, NULL);
+    ASSERT(strcmp(s3.model, DEFAULT_MODEL) == 0, "NULL model should use DEFAULT_MODEL");
     PASS();
 }
 
@@ -12296,6 +12342,88 @@ static void test_provider_route_prefers_openai_key_over_openrouter(void) {
     PASS();
 }
 
+/* Regression: the ChatGPT id_token nests chatgpt_account_id inside the
+ * "https://api.openai.com/auth" claim. json_get_str is a flat, single-depth
+ * scanner, so the account id must be recovered from the nested object even
+ * when the cache file persisted a blank top-level "account_id". If this
+ * regresses, the chatgpt-account-id request header is silently dropped and
+ * the OpenAI subscription route breaks intermittently. */
+static void test_openai_oauth_account_id_from_nested_jwt_claim(void) {
+    TEST("openai_oauth account id recovers from nested JWT claim");
+    char saved_home[512], saved_env_tok[256], saved_env_alias[256];
+    bool had_home = false, had_env_tok = false, had_env_alias = false;
+    test_capture_env("HOME", saved_home, sizeof(saved_home), &had_home);
+    test_capture_env("DSCO_CHATGPT_OAUTH_TOKEN", saved_env_tok, sizeof(saved_env_tok),
+                     &had_env_tok);
+    test_capture_env("CHATGPT_OAUTH_TOKEN", saved_env_alias, sizeof(saved_env_alias),
+                     &had_env_alias);
+    /* env-sourced tokens short-circuit the loader; make sure they are absent */
+    unsetenv("DSCO_CHATGPT_OAUTH_TOKEN");
+    unsetenv("CHATGPT_OAUTH_TOKEN");
+
+    char root[512];
+    snprintf(root, sizeof(root), "/tmp/dsco_oauth_acct_%d_%ld", (int)getpid(), (long)time(NULL));
+    ASSERT(mkdir(root, 0700) == 0, "mkdir oauth acct root failed");
+    char home[512], dsco_dir[640], cache_path[768];
+    snprintf(home, sizeof(home), "%s/home", root);
+    snprintf(dsco_dir, sizeof(dsco_dir), "%s/.dsco", home);
+    ASSERT(mkdir(home, 0700) == 0, "mkdir fake HOME failed");
+    ASSERT(mkdir(dsco_dir, 0700) == 0, "mkdir fake .dsco failed");
+    snprintf(cache_path, sizeof(cache_path), "%s/chatgpt-oauth.json", dsco_dir);
+
+    /* Build a minimal JWT: header.payload.signature with base64url payload
+     * carrying the nested chatgpt_account_id claim. */
+    const char *payload =
+        "{\"https://api.openai.com/auth\":{\"chatgpt_account_id\":"
+        "\"9fcca426-8f19-4d04-a6fa-1fd757159ddb\"}}";
+    char b64payload[1024];
+    size_t enc = base64url_encode((const uint8_t *)payload, strlen(payload), b64payload,
+                                  sizeof(b64payload));
+    ASSERT(enc > 0, "base64url_encode of JWT payload failed");
+    char id_token[2048];
+    snprintf(id_token, sizeof(id_token), "eyJhbGciOiJSUzI1NiJ9.%s.sig", b64payload);
+
+    FILE *fp = fopen(cache_path, "w");
+    ASSERT(fp != NULL, "open fake dsco oauth cache failed");
+    /* account_id intentionally blank, mirroring the observed corrupted cache */
+    fprintf(fp,
+            "{\"access_token\":\"chatgpt-oauth-access\","
+            "\"refresh_token\":\"rt.blank\",\"id_token\":\"%s\","
+            "\"account_id\":\"\",\"expires_at_ms\":0}",
+            id_token);
+    fclose(fp);
+
+    setenv("HOME", home, 1);
+
+    char acct[128] = {0};
+    bool ok = openai_oauth_account_id(acct, sizeof(acct));
+    ASSERT(ok, "account id should resolve from nested JWT claim despite blank cache field");
+    ASSERT(strcmp(acct, "9fcca426-8f19-4d04-a6fa-1fd757159ddb") == 0,
+           "recovered account id should match nested chatgpt_account_id claim");
+
+    /* The recovered id must be persisted back to disk so it is not
+     * re-derived on every load. */
+    FILE *rf = fopen(cache_path, "r");
+    ASSERT(rf != NULL, "reopen healed cache failed");
+    char healed_json[4096] = {0};
+    size_t rn = fread(healed_json, 1, sizeof(healed_json) - 1, rf);
+    healed_json[rn] = '\0';
+    fclose(rf);
+    char *persisted = json_get_str(healed_json, "account_id");
+    ASSERT(persisted && strcmp(persisted, "9fcca426-8f19-4d04-a6fa-1fd757159ddb") == 0,
+           "healed account id should be written back to the cache file");
+    free(persisted);
+
+    unlink(cache_path);
+    rmdir(dsco_dir);
+    rmdir(home);
+    rmdir(root);
+    test_restore_env("HOME", saved_home, had_home);
+    test_restore_env("DSCO_CHATGPT_OAUTH_TOKEN", saved_env_tok, had_env_tok);
+    test_restore_env("CHATGPT_OAUTH_TOKEN", saved_env_alias, had_env_alias);
+    PASS();
+}
+
 static void test_provider_route_prefers_codex_subscription_for_openai_models(void) {
     TEST("provider routing prefers Codex subscription for OpenAI models");
     char saved_home[512], saved_path[2048], saved_openai[256], saved_openai_alias[256];
@@ -19960,6 +20088,7 @@ int main(void) {
     test_plan_cache_outcome_feedback();
     test_ctx_truncate_json_preserves_object_payload();
     test_build_request_ex_for_credential_includes_billing_header();
+    test_build_request_empty_model_uses_default();
     test_build_request_oauth_promotes_legacy_mcp_wire_names();
     test_build_request_oauth_keeps_builtin_tool_names_bare();
     test_build_request_oauth_preserves_canonical_mcp_wire_names();
@@ -20004,6 +20133,7 @@ int main(void) {
 
     /* Session state */
     test_session_state_init();
+    test_session_state_init_empty_model_uses_default();
     test_session_state_init_inherits_trust_tier_env();
     test_session_state_init_inherits_effort_env();
     test_realtime_voice_default_reasoning_effort();
@@ -20421,6 +20551,7 @@ int main(void) {
     test_provider_route_uses_claude_code_credentials_file_when_present();
     test_provider_route_prefers_claude_code_oauth_over_openrouter();
     test_provider_route_prefers_openai_key_over_openrouter();
+    test_openai_oauth_account_id_from_nested_jwt_claim();
     test_provider_route_prefers_codex_subscription_for_openai_models();
     test_provider_route_prefers_claude_code_oauth_over_anthropic_env_key();
     test_provider_exports_claude_code_oauth_for_children();
