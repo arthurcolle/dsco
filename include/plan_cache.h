@@ -28,7 +28,8 @@
  *
  *   const plan_cache_entry_t *e = plan_cache_find_entry(task);
  *   if (e && e->plan_json) {
- *       char *adapted = plan_cache_adapt(e, new_task);
+ *       uint64_t task_hash = e->task_hash;
+ *       char *adapted = plan_cache_adapt(e, task_hash, new_task);
  *       // replay adapted plan JSON
  *       free(adapted);
  *   }
@@ -102,7 +103,10 @@ void plan_cache_store_json(const char *task, const char *plan_json);
  * never invalidated — a stale selection was served forever. No-op on miss. */
 void plan_cache_feedback(const char *task, bool success);
 
-/* Return pointer into the ring buffer (NULL on miss). Read-only; lock not held. */
+/* Return pointer into the ring buffer (NULL on miss). Read-only; lock not held.
+ * Callers that later adapt must capture task_hash from the returned entry and
+ * pass it to plan_cache_adapt(); the pointer alone is not sufficient because
+ * the fixed-size ring can evict and repopulate the same slot. */
 const plan_cache_entry_t *plan_cache_find_entry(const char *task);
 
 /* ── Stats ───────────────────────────────────────────────────────────────── */
@@ -114,10 +118,15 @@ int plan_cache_stats_json(char *buf, size_t buflen);
 /* Jaccard similarity on 3-grams of two task strings.  Returns [0.0, 1.0]. */
 float plan_similarity_score(const char *task_a, const char *task_b);
 
-/* Return a new heap-allocated copy of entry->plan_json with entity names from
- * entry->task_text substituted by corresponding entities found in new_task.
+/* Return a new heap-allocated copy of the entry plan JSON with entity names from
+ * the matched task substituted by corresponding entities found in new_task.
+ * The entry pointer is validated and snapshotted under the cache mutex.
+ * expected_task_hash must be the hash captured at lookup. If the slot was
+ * evicted and repopulated between lookup and adapt, the hash mismatch returns
+ * NULL instead of adapting the wrong plan.
  * Returns NULL if entry->plan_json is NULL or allocation fails.
  * Caller owns the returned string and must free() it. */
-char *plan_cache_adapt(const plan_cache_entry_t *entry, const char *new_task);
+char *plan_cache_adapt(const plan_cache_entry_t *entry, uint64_t expected_task_hash,
+                       const char *new_task);
 
 #endif /* DSCO_PLAN_CACHE_H */

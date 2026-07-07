@@ -95,6 +95,13 @@ char     *vfs_result_get(vfs_db_t *db, const char *key);
 int       vfs_result_evict(vfs_db_t *db);
 char    **vfs_result_list(vfs_db_t *db, int *out_count);
 
+/* ── Artifact pinning: protect recall keys from maintenance eviction ── */
+bool      vfs_pin_put(vfs_db_t *db, const char *key, const char *namespace_,
+                      const char *reason, const char *owner, int ttl_seconds);
+bool      vfs_pin_delete(vfs_db_t *db, const char *key);
+bool      vfs_pin_is_active(vfs_db_t *db, const char *key);
+int       vfs_pin_evict_expired(vfs_db_t *db);
+
 /* ── Maintenance (Wave 1.1): evict expired rows + size-capped VACUUM ── */
 int       vfs_maintain(vfs_db_t *db, int64_t max_db_bytes);
 
