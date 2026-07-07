@@ -130,19 +130,6 @@ unsigned dsco_caps_for_tool(const char *name, const char *input_json) {
     if (input_json && input_touches_secrets(input_json))
         caps |= CAP_SECRETS;
 
-    /* An editing tool aimed at the gate's own source is a control operation. */
-    if ((caps & CAP_FS_WRITE) && input_json) {
-        static const char *const gate_src[] = {"capability.c", "capability.h", "governance.c",
-                                              "governance.h", "killswitch.c", "tools.c",
-                                              "audit_log.c",  "tamper.c",     NULL};
-        for (int i = 0; gate_src[i]; i++) {
-            if (contains_ci(input_json, gate_src[i])) {
-                caps |= CAP_CONTROL;
-                break;
-            }
-        }
-    }
-
     if (caps == CAP_NONE)
         caps = CAP_FS_READ; /* default: treat unknown builtin as a benign read */
     return caps;
@@ -213,7 +200,11 @@ void dsco_flow_reset(void) {
 void dsco_flow_note(unsigned caps) {
     if (caps & CAP_UNTRUSTED_IN)
         atomic_store(&g_ingested_untrusted, 1);
-    if (caps & CAP_PRIVATE_IN)
+    /* Only genuine secrets/credentials count as "private data accessed" for the
+     * trifecta. A coding agent reads ordinary source files constantly; treating
+     * every CAP_FS_READ as private would taint the session immediately and block
+     * all egress. The exfil concern is secrets, not source. */
+    if (caps & CAP_SECRETS)
         atomic_store(&g_accessed_private, 1);
 }
 
@@ -266,14 +257,26 @@ dsco_cap_decision_t dsco_capability_gate(const char *name, const char *input_jso
         return CAP_DECISION_DENY;
     }
 
-    /* 3. Per-capability grants (reads always pass; untrusted-in is benign alone). */
-    static const dsco_cap_t checked[] = {CAP_FS_WRITE, CAP_NET, CAP_EXEC, CAP_SECRETS};
-    for (size_t i = 0; i < sizeof(checked) / sizeof(checked[0]); i++) {
-        if ((caps & checked[i]) && !dsco_cap_granted(checked[i], tier)) {
+    /* 3. Deno-style explicit hardening. Tier-based allow/deny for these
+     *    capabilities — and untrusted-tier sandbox routing — remains owned by
+     *    the existing tier system (tools_is_allowed_for_tier + sandbox route).
+     *    Here we only enforce an EXPLICIT operator lockdown, e.g.
+     *    DSCO_ALLOW_NET=0 blocks every network tool regardless of tier. */
+    static const struct {
+        dsco_cap_t cap;
+        const char *env;
+    } hardening[] = {
+        {CAP_FS_WRITE, "DSCO_ALLOW_WRITE"},
+        {CAP_NET, "DSCO_ALLOW_NET"},
+        {CAP_EXEC, "DSCO_ALLOW_RUN"},
+        {CAP_SECRETS, "DSCO_ALLOW_SECRETS"},
+    };
+    for (size_t i = 0; i < sizeof(hardening) / sizeof(hardening[0]); i++) {
+        if ((caps & hardening[i].cap) && env_tristate(hardening[i].env) == 0) {
             char capstr[64];
-            dsco_capability_to_string(checked[i], capstr, sizeof(capstr));
-            CAP_REASON("capability '%s' not granted for tool '%s' in tier '%s'", capstr, name,
-                       tier);
+            dsco_capability_to_string(hardening[i].cap, capstr, sizeof(capstr));
+            CAP_REASON("capability '%s' explicitly disabled (%s=0) for tool '%s'", capstr,
+                       hardening[i].env, name);
             return CAP_DECISION_DENY;
         }
     }
