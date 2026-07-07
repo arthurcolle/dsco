@@ -9,6 +9,7 @@
  */
 
 #include "ipc.h"
+#include "durable_agents.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -28,7 +29,9 @@ int dsco_bus_cli(int argc, char **argv) {
     const char *sub = argv[2];
     const char *topic = argv[3];
 
-    if (!ipc_init(getenv("DSCO_IPC_DB"), "bus-cli")) {
+    char db[4096];
+    durable_agents_default_db_path(db, sizeof(db));
+    if (!ipc_init(db, "bus-cli")) {
         fprintf(stderr, "dsco bus: could not open the ipc bus\n");
         return 1;
     }
