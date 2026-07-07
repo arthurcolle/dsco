@@ -38954,9 +38954,9 @@ static void watchdog_registry_remove(tool_watchdog_t *wd) {
 
 static void *watchdog_thread(void *arg) {
     tool_watchdog_t *wd = (tool_watchdog_t *)arg;
-    while (!wd->cancelled) {
+    while (!__atomic_load_n(&wd->cancelled, __ATOMIC_ACQUIRE)) {
         usleep(500000); /* poll every 500ms */
-        if (wd->cancelled)
+        if (__atomic_load_n(&wd->cancelled, __ATOMIC_ACQUIRE))
             break;
 
         double now = watchdog_now();
@@ -38998,12 +38998,12 @@ void watchdog_start(tool_watchdog_t *wd, pthread_t target, const char *name, int
 
 void watchdog_stop(tool_watchdog_t *wd) {
     watchdog_registry_remove(wd);
-    wd->cancelled = 1;
+    __atomic_store_n(&wd->cancelled, 1, __ATOMIC_RELEASE);
     pthread_join(wd->thread, NULL);
 }
 
 int watchdog_renew(tool_watchdog_t *wd, int extra_s) {
-    if (!wd || extra_s <= 0 || wd->cancelled)
+    if (!wd || extra_s <= 0 || __atomic_load_n(&wd->cancelled, __ATOMIC_ACQUIRE))
         return 0;
     double now = watchdog_now();
     /* Once the grace window has fully elapsed the watcher has already fired
