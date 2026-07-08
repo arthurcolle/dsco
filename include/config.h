@@ -153,8 +153,8 @@ static const model_info_t MODEL_REGISTRY[] = {
     { "opus46",       "claude-opus-4-6",            1000000, 128000,  5.0,  25.0,  0.50,  6.25, 1 },
     { "sonnet",       "claude-sonnet-5",            1000000, 128000,  2.0,  10.0,  0.20,  2.50, 1 },
     { "sonnet5",      "claude-sonnet-5",            1000000, 128000,  2.0,  10.0,  0.20,  2.50, 1 },
-    { "haiku",        "claude-haiku-4-5",            200000,  64000,  1.00,  5.0,  0.10,  1.25, 0 },
-    { "haiku45",      "claude-haiku-4-5",            200000,  64000,  1.00,  5.0,  0.10,  1.25, 0 },
+    { "haiku",        "claude-haiku-4-5-20251001",  200000,  64000,  1.00,  5.0,  0.10,  1.25, 0 },
+    { "haiku45",      "claude-haiku-4-5-20251001",  200000,  64000,  1.00,  5.0,  0.10,  1.25, 0 },
     /* ── Anthropic (OpenRouter IDs — for cross-provider routing) ─────── */
     { "or-fable5",    "anthropic/claude-fable-5",     1000000, 128000, 10.0, 50.0,  1.00, 12.50, 1 },
     { "or-fable",     "anthropic/claude-fable-5",     1000000, 128000, 10.0, 50.0,  1.00, 12.50, 1 },
