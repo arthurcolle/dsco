@@ -3460,6 +3460,123 @@ static bool tool_edit_file(const char *input, char *result, size_t rlen) {
     return true;
 }
 
+/* ── MultiEdit: apply an ordered batch of string edits to ONE file atomically.
+ * Each edit sees the previous edit's result; if any old_string is missing,
+ * nothing is written (all-or-nothing). Claude Code-compatible surface. */
+typedef struct {
+    char *content; /* heap working copy of the file */
+    size_t len;    /* byte length of content (excl. NUL) */
+    int applied;   /* total replacements made */
+    bool error;
+    char errmsg[200];
+} multi_edit_ctx_t;
+
+static void multi_edit_apply_cb(const char *element_start, void *vctx) {
+    multi_edit_ctx_t *c = (multi_edit_ctx_t *)vctx;
+    if (!c || c->error || !element_start)
+        return;
+    while (*element_start && isspace((unsigned char)*element_start))
+        element_start++;
+    if (*element_start != '{') {
+        c->error = true;
+        snprintf(c->errmsg, sizeof(c->errmsg), "each edit must be an object");
+        return;
+    }
+    char *olds = json_get_str(element_start, "old_string");
+    char *news = json_get_str(element_start, "new_string");
+    bool all = json_get_bool(element_start, "replace_all", false);
+    if (!olds || !olds[0] || !news) {
+        c->error = true;
+        snprintf(c->errmsg, sizeof(c->errmsg), "edit needs non-empty old_string and new_string");
+        free(olds);
+        free(news);
+        return;
+    }
+    if (!strstr(c->content, olds)) {
+        c->error = true;
+        snprintf(c->errmsg, sizeof(c->errmsg), "old_string not found: \"%.40s\"", olds);
+        free(olds);
+        free(news);
+        return;
+    }
+    size_t oldlen = strlen(olds), newlen = strlen(news);
+    jbuf_t out;
+    jbuf_init(&out, c->len + newlen + 64);
+    char *p = c->content;
+    char *found;
+    int n = 0;
+    while ((found = strstr(p, olds)) != NULL) {
+        jbuf_append_len(&out, p, (size_t)(found - p));
+        jbuf_append_len(&out, news, newlen);
+        p = found + oldlen;
+        n++;
+        if (!all)
+            break;
+    }
+    jbuf_append_len(&out, p, strlen(p));
+    free(c->content);
+    c->len = out.len;
+    c->content = safe_malloc(c->len + 1);
+    memcpy(c->content, out.data ? out.data : "", c->len);
+    c->content[c->len] = '\0';
+    jbuf_free(&out);
+    c->applied += n;
+    free(olds);
+    free(news);
+}
+
+static bool tool_multi_edit(const char *input, char *result, size_t rlen) {
+    char *path = json_get_path_or_file_path(input);
+    if (!path) {
+        snprintf(result, rlen, "error: file_path required");
+        return false;
+    }
+    FILE *f = fopen(path, "r");
+    if (!f) {
+        snprintf(result, rlen, "error: cannot open %s: %s", path, strerror(errno));
+        free(path);
+        return false;
+    }
+    fseek(f, 0, SEEK_END);
+    long fsize = ftell(f);
+    fseek(f, 0, SEEK_SET);
+    if (fsize < 0)
+        fsize = 0;
+    char *content = safe_malloc((size_t)fsize + 1);
+    size_t rd = fread(content, 1, (size_t)fsize, f);
+    content[rd] = '\0';
+    fclose(f);
+
+    multi_edit_ctx_t c = {.content = content, .len = rd, .applied = 0, .error = false};
+    int elems = json_array_foreach(input ? input : "{}", "edits", multi_edit_apply_cb, &c);
+    if (c.error) {
+        snprintf(result, rlen, "error: %s (no changes written to %s)", c.errmsg, path);
+        free(c.content);
+        free(path);
+        return false;
+    }
+    if (elems <= 0) {
+        snprintf(result, rlen, "error: non-empty edits array required");
+        free(c.content);
+        free(path);
+        return false;
+    }
+    f = fopen(path, "w");
+    if (!f) {
+        snprintf(result, rlen, "error: cannot write %s: %s", path, strerror(errno));
+        free(c.content);
+        free(path);
+        return false;
+    }
+    fwrite(c.content, 1, c.len, f);
+    fclose(f);
+    snprintf(result, rlen, "multi-edited %s: %d edit(s), %d replacement(s)", path, elems,
+             c.applied);
+    free(c.content);
+    free(path);
+    return true;
+}
+
 static bool tool_list_dir(const char *input, char *result, size_t rlen) {
     char *path = path_normalize(json_get_str(input, "path"));
     if (!path)
@@ -31722,6 +31839,26 @@ static const tool_def_t s_tools[] = {
                           "\"include\":{\"type\":\"string\"},\"output_mode\":{\"type\":\"string\"},"
                           "\"head_limit\":{\"type\":\"integer\"}},\"required\":[\"pattern\"]}",
      .execute = tool_grep,
+     .core = true,
+     .is_read_only = true,
+     .is_concurrent = true},
+    {.name = "MultiEdit",
+     .description = "Apply an ordered batch of string edits to ONE file atomically. "
+                    "edits=[{old_string,new_string,replace_all?}] applied in order (each sees the "
+                    "prior result); if any old_string is missing NOTHING is written.",
+     .input_schema_json =
+         "{\"type\":\"object\",\"properties\":{\"file_path\":{\"type\":\"string\"},\"edits\":{"
+         "\"type\":\"array\",\"items\":{\"type\":\"object\",\"properties\":{\"old_string\":{"
+         "\"type\":\"string\"},\"new_string\":{\"type\":\"string\"},\"replace_all\":{\"type\":"
+         "\"boolean\"}},\"required\":[\"old_string\",\"new_string\"]}}},\"required\":[\"file_"
+         "path\",\"edits\"]}",
+     .execute = tool_multi_edit,
+     .core = true},
+    {.name = "LS",
+     .description = "Claude-compatible directory listing (alias for list_directory).",
+     .input_schema_json = "{\"type\":\"object\",\"properties\":{\"path\":{\"type\":\"string\"},"
+                          "\"recursive\":{\"type\":\"boolean\"}},\"required\":[\"path\"]}",
+     .execute = tool_list_dir,
      .core = true,
      .is_read_only = true,
      .is_concurrent = true},
