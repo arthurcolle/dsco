@@ -6,6 +6,10 @@
 #include <string.h>
 #include <strings.h>
 
+/* From tools.c (forward-declared to avoid the heavy tools.h include chain):
+ * a builtin tool's declared read-only flag; *found means it is registered. */
+bool tools_meta_is_read_only(const char *name, bool *found);
+
 /* ── name-set helpers ─────────────────────────────────────────────────────── */
 
 static bool name_in(const char *name, const char *const *set) {
@@ -31,22 +35,30 @@ static bool contains_ci(const char *hay, const char *needle) {
 static const char *const k_read_tools[] = {
     "read_file", "grep_files", "grep", "glob", "list_directory", "list_dir", "symbol_def",
     "symbol_refs", "diagnostics", "hover", "definition", "references", "cat", "head", "tail",
-    "stat", "diff", NULL};
+    "stat", "diff",
+    /* Claude-compatible surfaces */
+    "Read", "Grep", "Glob", NULL};
 
 /* Local file mutation. Implies read too. */
 static const char *const k_write_tools[] = {
     "write_file", "edit_file", "apply_patch", "ast_edit", "create_file", "delete_file",
-    "move_file", "rename_file", "patch", NULL};
+    "move_file", "rename_file", "patch",
+    /* Claude-compatible surfaces */
+    "Write", "Edit", NULL};
 
 /* Subprocess / shell execution. Input is inspected for net/secret escalation. */
 static const char *const k_exec_tools[] = {
     "bash", "run_command", "sandbox_run", "run_background", "compile", "pkg", "pip", "npm",
-    "docker", "docker_compose", "kill_process", "crontab", "make", NULL};
+    "docker", "docker_compose", "kill_process", "crontab", "make",
+    /* Claude-compatible surface (input inspected for net/write escalation) */
+    "Bash", NULL};
 
 /* External-content ingress with network egress (both untrusted-in and net). */
 static const char *const k_net_tools[] = {
     "web_search", "read_url", "fetch", "fetch_url", "http", "http_request", "browser",
-    "web_fetch", "curl", "download", NULL};
+    "web_fetch", "curl", "download",
+    /* Claude-compatible surfaces */
+    "WebFetch", "WebSearch", NULL};
 
 /* Direct network egress that carries local data outward. */
 static const char *const k_egress_tools[] = {"ssh_command", "scp", "rsync", "send_email",
@@ -129,6 +141,17 @@ unsigned dsco_caps_for_tool(const char *name, const char *input_json) {
 
     if (input_json && input_touches_secrets(input_json))
         caps |= CAP_SECRETS;
+
+    /* Registry catch-all: any REGISTERED tool the name-lists left benign but that
+     * is NOT declared read-only gets a conservative fs_write floor — so the long
+     * tail of mutating surfaces (Claude aliases, plugins, unlisted builtins) can
+     * never slip through classified as a harmless read. */
+    if (!(caps & (CAP_FS_WRITE | CAP_NET | CAP_EXEC | CAP_CONTROL))) {
+        bool found = false;
+        bool ro = tools_meta_is_read_only(name, &found);
+        if (found && !ro)
+            caps |= CAP_FS_WRITE;
+    }
 
     if (caps == CAP_NONE)
         caps = CAP_FS_READ; /* default: treat unknown builtin as a benign read */
