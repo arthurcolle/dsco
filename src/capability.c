@@ -5,6 +5,9 @@
 #include <stdlib.h>
 #include <string.h>
 #include <strings.h>
+#include <ctype.h>
+#include <unistd.h>
+#include "json_util.h"
 
 /* From tools.c (forward-declared to avoid the heavy tools.h include chain):
  * a builtin tool's declared read-only flag; *found means it is registered. */
@@ -247,6 +250,115 @@ bool dsco_flow_would_exfiltrate(unsigned caps) {
 
 /* ── top-level gate ───────────────────────────────────────────────────────── */
 
+/* ── Resource scoping (Deno --allow-read=/path, --allow-net=host) ──────────── */
+
+/* A grant env value is a boolean toggle rather than a scope list. */
+static bool cap_env_is_boolean(const char *v) {
+    return strcmp(v, "0") == 0 || strcmp(v, "1") == 0 || strcasecmp(v, "true") == 0 ||
+           strcasecmp(v, "false") == 0 || strcasecmp(v, "on") == 0 || strcasecmp(v, "off") == 0 ||
+           strcasecmp(v, "deny") == 0 || strcasecmp(v, "allow") == 0;
+}
+
+/* Make `in` absolute and collapse '.'/'..' lexically (defeats ../ traversal;
+ * does not resolve symlinks — a known residual). */
+static void cap_path_abs(const char *in, char *out, size_t outlen) {
+    char tmp[4096];
+    if (in[0] == '/') {
+        snprintf(tmp, sizeof(tmp), "%s", in);
+    } else {
+        char cwd[2048];
+        if (!getcwd(cwd, sizeof(cwd)))
+            cwd[0] = '\0';
+        snprintf(tmp, sizeof(tmp), "%s/%s", cwd, in);
+    }
+    const char *comps[256];
+    int n = 0;
+    char *save = NULL;
+    for (char *tok = strtok_r(tmp, "/", &save); tok; tok = strtok_r(NULL, "/", &save)) {
+        if (strcmp(tok, ".") == 0)
+            continue;
+        if (strcmp(tok, "..") == 0) {
+            if (n > 0)
+                n--;
+            continue;
+        }
+        if (n < 256)
+            comps[n++] = tok;
+    }
+    size_t off = 0;
+    out[0] = '\0';
+    for (int i = 0; i < n; i++) {
+        int w = snprintf(out + off, outlen - off, "/%s", comps[i]);
+        if (w < 0 || (size_t)w >= outlen - off)
+            break;
+        off += (size_t)w;
+    }
+    if (off == 0)
+        snprintf(out, outlen, "/");
+}
+
+static bool cap_path_in_scope(const char *path, const char *scopelist) {
+    char abspath[4096];
+    cap_path_abs(path, abspath, sizeof(abspath));
+    char list[2048];
+    snprintf(list, sizeof(list), "%s", scopelist);
+    char *save = NULL;
+    for (char *root = strtok_r(list, ",", &save); root; root = strtok_r(NULL, ",", &save)) {
+        while (*root == ' ')
+            root++;
+        if (!*root)
+            continue;
+        char absroot[4096];
+        cap_path_abs(root, absroot, sizeof(absroot));
+        size_t rl = strlen(absroot);
+        if (rl == 0)
+            continue;
+        if (strncmp(abspath, absroot, rl) == 0 && (abspath[rl] == '\0' || abspath[rl] == '/'))
+            return true;
+    }
+    return false;
+}
+
+/* Extract a lowercased hostname from a url or bare host string (IPv6-aware). */
+static bool cap_host_of(const char *val, char *out, size_t outlen) {
+    if (!val || !val[0])
+        return false;
+    const char *p = val;
+    const char *scheme = strstr(val, "://");
+    if (scheme)
+        p = scheme + 3;
+    size_t i = 0;
+    if (*p == '[') {
+        p++;
+        while (*p && *p != ']' && i + 1 < outlen)
+            out[i++] = (char)tolower((unsigned char)*p++);
+    } else {
+        while (*p && *p != '/' && *p != ':' && *p != '?' && *p != '#' && i + 1 < outlen)
+            out[i++] = (char)tolower((unsigned char)*p++);
+    }
+    out[i] = '\0';
+    return i > 0;
+}
+
+static bool cap_host_in_scope(const char *host, const char *scopelist) {
+    char list[2048];
+    snprintf(list, sizeof(list), "%s", scopelist);
+    char *save = NULL;
+    size_t thl = strlen(host);
+    for (char *h = strtok_r(list, ",", &save); h; h = strtok_r(NULL, ",", &save)) {
+        while (*h == ' ')
+            h++;
+        if (!*h)
+            continue;
+        size_t hl = strlen(h);
+        if (strcasecmp(host, h) == 0)
+            return true;
+        if (thl > hl && strcasecmp(host + (thl - hl), h) == 0 && host[thl - hl - 1] == '.')
+            return true;
+    }
+    return false;
+}
+
 dsco_cap_decision_t dsco_capability_gate(const char *name, const char *input_json,
                                          const char *tier, char *reason, size_t reason_len) {
     unsigned caps = dsco_caps_for_tool(name, input_json);
@@ -301,6 +413,49 @@ dsco_cap_decision_t dsco_capability_gate(const char *name, const char *input_jso
             CAP_REASON("capability '%s' explicitly disabled (%s=0) for tool '%s'", capstr,
                        hardening[i].env, name);
             return CAP_DECISION_DENY;
+        }
+    }
+
+    /* 4. Resource scoping: when a grant env holds a path/host list (not a bool),
+     * the tool's target resource must fall within the declared scope. */
+    if (input_json) {
+        const char *ws = getenv("DSCO_ALLOW_WRITE");
+        const char *rs = getenv("DSCO_ALLOW_READ");
+        const char *ns = getenv("DSCO_ALLOW_NET");
+        if ((caps & CAP_FS_WRITE) && ws && ws[0] && !cap_env_is_boolean(ws)) {
+            char *pth = json_get_str(input_json, "file_path");
+            if (!pth)
+                pth = json_get_str(input_json, "path");
+            if (pth && pth[0] && !cap_path_in_scope(pth, ws)) {
+                CAP_REASON("write path outside DSCO_ALLOW_WRITE scope: %.80s", pth);
+                free(pth);
+                return CAP_DECISION_DENY;
+            }
+            free(pth);
+        } else if ((caps & CAP_FS_READ) && rs && rs[0] && !cap_env_is_boolean(rs)) {
+            char *pth = json_get_str(input_json, "file_path");
+            if (!pth)
+                pth = json_get_str(input_json, "path");
+            if (pth && pth[0] && !cap_path_in_scope(pth, rs)) {
+                CAP_REASON("read path outside DSCO_ALLOW_READ scope: %.80s", pth);
+                free(pth);
+                return CAP_DECISION_DENY;
+            }
+            free(pth);
+        }
+        if ((caps & CAP_NET) && ns && ns[0] && !cap_env_is_boolean(ns)) {
+            char *hv = json_get_str(input_json, "url");
+            if (!hv)
+                hv = json_get_str(input_json, "host");
+            if (!hv)
+                hv = json_get_str(input_json, "hostname");
+            char host[256];
+            if (hv && cap_host_of(hv, host, sizeof(host)) && !cap_host_in_scope(host, ns)) {
+                CAP_REASON("host outside DSCO_ALLOW_NET scope: %.80s", host);
+                free(hv);
+                return CAP_DECISION_DENY;
+            }
+            free(hv);
         }
     }
 
