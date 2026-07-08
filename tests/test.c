@@ -1235,6 +1235,25 @@ static void test_spend_governor_runway_escalation(void) {
     PASS();
 }
 
+static void test_spend_governor_quality_critical_preserves_effort(void) {
+    TEST("spend governor: quality-critical work preserves effort");
+    spend_signals_t sig = {0};
+    sig.session_budget_usd = 10.0;
+    sig.session_spent_usd = 9.5;
+    sig.avg_turn_cost_usd = 1.0;
+    sig.turns = 5;
+    sig.quality_critical_work = true;
+
+    spend_plan_t p = spend_governor_plan(&sig);
+    ASSERT(p.phase == SPEND_RED, "critical 95%% budget is still red");
+    ASSERT(p.preserve_quality, "critical red preserves quality");
+    ASSERT(p.require_user_checkpoint, "critical red requires checkpoint");
+    ASSERT(p.effort_ceiling[0] == '\0', "critical red does not force low effort");
+    ASSERT(p.max_output_tokens == 0, "critical red does not quarter output");
+    ASSERT(!p.suggest_model_downshift, "critical red does not suggest leaf downshift");
+    PASS();
+}
+
 static void test_spend_governor_context_pressure(void) {
     TEST("spend governor: context pressure joins the same scale");
     spend_signals_t sig = {0}; /* NO dollar budget at all */
@@ -3645,7 +3664,7 @@ static void test_session_state_init_populates_fallbacks_without_changing_model(v
     ASSERT(strcmp(s.model, "claude-sonnet-5") == 0,
            "fallback construction must not rewrite the canonical session model");
     ASSERT(s.fallback_count >= 3, "fallback chain should be populated from usable routes");
-    ASSERT(strcmp(s.fallback_models[0], "openrouter/anthropic/claude-sonnet-4.6") == 0,
+    ASSERT(strcmp(s.fallback_models[0], "openrouter/anthropic/claude-sonnet-5") == 0,
            "first fallback should preserve model family through an alternate route");
     ASSERT(strcmp(s.fallback_models[1], "openrouter/openai/gpt-5.4") == 0,
            "second fallback should include OpenAI-family route before xAI");
@@ -8261,6 +8280,38 @@ static void test_tools_normalize_schema_scalars(void) {
     PASS();
 }
 
+static void test_tools_normalize_schema_containers(void) {
+    TEST("tools_normalize_input schema containers");
+    tools_init();
+
+    char *norm = tools_normalize_input(
+        "swarm",
+        "{\"action\":\"map_reduce\",\"tasks\":\"[\\\"alpha\\\",\\\"beta\\\"]\"}");
+    ASSERT(norm != NULL, "normalizes quoted JSON array for schema array field");
+    ASSERT(strstr(norm, "\"tasks\":[\"alpha\",\"beta\"]") != NULL,
+           "tasks array unquoted");
+    free(norm);
+
+    char err[256];
+    bool ok = tools_validate_input(
+        "swarm",
+        "{\"action\":\"map_reduce\",\"tasks\":\"[\\\"alpha\\\",\\\"beta\\\"]\"}", err,
+        sizeof(err));
+    ASSERT(ok, "validation accepts repaired swarm tasks array");
+
+    tools_register_external("test_mcp_object_arg", "Object argument",
+                            "{\"type\":\"object\",\"properties\":{\"payload\":{\"type\":\"object\"}},"
+                            "\"required\":[\"payload\"]}",
+                            test_external_tool_stub, NULL);
+    norm = tools_normalize_input("test_mcp_object_arg",
+                                 "{\"payload\":\"{\\\"ok\\\":true}\"}");
+    ASSERT(norm != NULL, "normalizes quoted JSON object for schema object field");
+    ASSERT(strstr(norm, "\"payload\":{\"ok\":true}") != NULL, "payload object unquoted");
+    free(norm);
+    tools_reset_external();
+    PASS();
+}
+
 static void test_tools_external_output_schema_contracts(void) {
     TEST("external tools preserve and rank output schemas");
     tools_init();
@@ -11260,7 +11311,7 @@ static void test_provider_build_default_fallback_models_cross_lab(void) {
     int count = provider_build_default_fallback_models("claude-sonnet-4-6", models, 4);
 
     ASSERT(count >= 3, "fallback chain should include multiple labs");
-    ASSERT(strcmp(models[0], "openrouter/anthropic/claude-sonnet-4.6") == 0,
+    ASSERT(strcmp(models[0], "openrouter/anthropic/claude-sonnet-5") == 0,
            "first fallback should preserve Claude family via OpenRouter");
     ASSERT(strcmp(models[1], "openrouter/openai/gpt-5.4") == 0,
            "second fallback should include OpenAI before xAI");
@@ -11363,7 +11414,7 @@ static void test_provider_build_default_fallback_models_never_includes_primary_d
     ASSERT(count >= 2, "fallback chain should still include other labs");
     ASSERT(!test_model_list_contains(models, count, "openrouter/x-ai/grok-4.20-beta"),
            "fallback chain must not retry the already-failed primary model");
-    ASSERT(test_model_list_contains(models, count, "openrouter/anthropic/claude-sonnet-4.6"),
+    ASSERT(test_model_list_contains(models, count, "openrouter/anthropic/claude-sonnet-5"),
            "fallback chain should include Anthropic family");
     ASSERT(test_model_list_contains(models, count, "openrouter/openai/gpt-5.4"),
            "fallback chain should include OpenAI family");
@@ -11513,7 +11564,7 @@ static void test_provider_build_default_fallback_models_native_primary_duplicate
     ASSERT(!test_model_list_contains(models, count, "grok-4-fast"),
            "native primary should not appear in its own fallback chain");
     ASSERT(test_model_list_contains(models, count, "claude-sonnet-4-6") ||
-               test_model_list_contains(models, count, "openrouter/anthropic/claude-sonnet-4.6"),
+               test_model_list_contains(models, count, "openrouter/anthropic/claude-sonnet-5"),
            "Grok fallback should include Anthropic family");
 
     test_restore_env("XAI_API_KEY", saved_xai, had_xai);
@@ -16912,7 +16963,7 @@ static void test_topology_throughput_lanes_spread_keyed_providers(void) {
                                                      sizeof(provider), model, sizeof(model)),
            "slot 0 should resolve");
     ASSERT(strcmp(provider, "anthropic") == 0, "slot 0 should use Anthropic");
-    ASSERT(strcmp(model, "claude-sonnet-4-6") == 0, "Anthropic slot should use Sonnet");
+    ASSERT(strcmp(model, "claude-sonnet-5") == 0, "Anthropic slot should use Sonnet");
 
     ASSERT(topology_resolve_throughput_lane_for_tier(NULL, TIER_SONNET, 1, provider,
                                                      sizeof(provider), model, sizeof(model)),
@@ -20310,6 +20361,77 @@ static void test_capability_to_string(void) {
     PASS();
 }
 
+static void test_capability_resource_scope(void) {
+    TEST("capability: resource-scoped grants (path/host)");
+    test_env_snapshot_t envs[] = {
+        {.name = "DSCO_ALLOW_READ"},    {.name = "DSCO_ALLOW_WRITE"},
+        {.name = "DSCO_ALLOW_NET"},     {.name = "DSCO_ALLOW_RUN"},
+        {.name = "DSCO_ALLOW_SECRETS"}, {.name = "DSCO_ALLOW_CONTROL"},
+        {.name = "DSCO_ALLOW_EXFIL"},
+    };
+    size_t env_count = sizeof(envs) / sizeof(envs[0]);
+    test_capture_env_list(envs, env_count);
+    for (size_t i = 0; i < env_count; i++)
+        unsetenv(envs[i].name);
+
+    dsco_flow_reset();
+    char r[256];
+
+#define RSCHECK(cond, text)                                                                        \
+    do {                                                                                           \
+        if (!(cond)) {                                                                             \
+            test_restore_env_list(envs, env_count);                                                \
+            FAIL(text);                                                                            \
+            return;                                                                                \
+        }                                                                                          \
+    } while (0)
+
+    /* 1. Path write scope: only targets under /tmp/capscope_test may be written. */
+    setenv("DSCO_ALLOW_WRITE", "/tmp/capscope_test", 1);
+    RSCHECK(dsco_capability_gate("write_file", "{\"file_path\":\"/tmp/capscope_test/ok.txt\"}",
+                                 "trusted", r, sizeof(r)) == CAP_DECISION_ALLOW,
+            "write inside DSCO_ALLOW_WRITE scope should ALLOW");
+    RSCHECK(dsco_capability_gate("write_file", "{\"file_path\":\"/tmp/evilzone/x.txt\"}", "trusted",
+                                 r, sizeof(r)) == CAP_DECISION_DENY,
+            "write outside scope should DENY");
+    RSCHECK(dsco_capability_gate("write_file",
+                                 "{\"file_path\":\"/tmp/capscope_test/../evil.txt\"}", "trusted", r,
+                                 sizeof(r)) == CAP_DECISION_DENY,
+            "traversal escape (../) should DENY after lexical collapse");
+    unsetenv("DSCO_ALLOW_WRITE");
+
+    /* 2. Net host scope: subdomain suffix match allowed, off-scope host denied. */
+    setenv("DSCO_ALLOW_NET", "example.com", 1);
+    RSCHECK(dsco_capability_gate("web_search", "{\"url\":\"https://api.example.com/x\"}", "trusted",
+                                 r, sizeof(r)) == CAP_DECISION_ALLOW,
+            "subdomain of scoped host should ALLOW");
+    RSCHECK(dsco_capability_gate("web_search", "{\"url\":\"https://evil.com/x\"}", "trusted", r,
+                                 sizeof(r)) == CAP_DECISION_DENY,
+            "off-scope host should DENY");
+    unsetenv("DSCO_ALLOW_NET");
+
+    /* 3. Boolean values remain toggles, not scopes. */
+    setenv("DSCO_ALLOW_WRITE", "1", 1);
+    RSCHECK(dsco_capability_gate("write_file", "{\"file_path\":\"/tmp/anything.txt\"}", "standard",
+                                 r, sizeof(r)) == CAP_DECISION_ALLOW,
+            "DSCO_ALLOW_WRITE=1 should ALLOW any path");
+    setenv("DSCO_ALLOW_WRITE", "0", 1);
+    RSCHECK(dsco_capability_gate("write_file", "{\"file_path\":\"/tmp/anything.txt\"}", "standard",
+                                 r, sizeof(r)) == CAP_DECISION_DENY,
+            "DSCO_ALLOW_WRITE=0 should DENY (hardening opt-out)");
+    unsetenv("DSCO_ALLOW_WRITE");
+
+    /* 4. No scope set -> ordinary allow. */
+    RSCHECK(dsco_capability_gate("write_file", "{\"file_path\":\"/tmp/x.txt\"}", "standard", r,
+                                 sizeof(r)) == CAP_DECISION_ALLOW,
+            "no scope set should ALLOW");
+
+#undef RSCHECK
+    dsco_flow_reset();
+    test_restore_env_list(envs, env_count);
+    PASS();
+}
+
 static void test_tool_multi_edit_atomic(void) {
     TEST("tools_execute MultiEdit atomic batch");
     tools_init();
@@ -20507,6 +20629,7 @@ int main(void) {
     test_frontier_report_renders();
     test_spend_governor_phases();
     test_spend_governor_runway_escalation();
+    test_spend_governor_quality_critical_preserves_effort();
     test_spend_governor_context_pressure();
     test_spend_governor_cache_ttl_recommendation();
     test_spend_governor_effort_ranking();
@@ -20828,6 +20951,7 @@ int main(void) {
     test_tools_shell_schemas_expose_artifact_aliases();
     test_tools_copy_move_accept_dest_alias();
     test_tools_normalize_schema_scalars();
+    test_tools_normalize_schema_containers();
     test_tools_external_output_schema_contracts();
     test_tools_builtin_output_schema_discovery();
     test_tools_normalize_legacy_tool_inputs();
@@ -21400,6 +21524,7 @@ int main(void) {
     test_capability_flow();
     test_capability_gate();
     test_capability_to_string();
+    test_capability_resource_scope();
     test_tool_multi_edit_atomic();
     test_tool_bash_background_lifecycle();
 
