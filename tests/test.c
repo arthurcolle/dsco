@@ -4867,7 +4867,7 @@ static void test_public_tools_execute_uses_governance_approval_gate(void) {
 
     ASSERT(!ok, "standard public write_file should require approval in strict headless mode");
     ASSERT(strstr(result, "governance_block") != NULL, "result should be a governance block");
-    ASSERT(strstr(result, "G2c_approval") != NULL, "result should identify approval stage");
+    ASSERT(strstr(result, "\"stage\":\"approval\"") != NULL, "result should identify approval stage");
     ASSERT(strstr(result, "approval_required_no_tty") != NULL,
            "headless strict approval should fail closed");
 
@@ -5043,7 +5043,7 @@ static void test_governance_gate_removed_immune_self_surgery_veto(void) {
     ok = tools_execute_for_tier("bash", "{\"command\":\"kill -9 999999\"}", "trusted", result,
                                 sizeof(result));
     ASSERT(!ok, "raw force-kill must still be blocked");
-    ASSERT(strstr(result, "G2b_self_preservation") != NULL,
+    ASSERT(strstr(result, "\"stage\":\"self_preservation\"") != NULL,
            "force-kill block should identify the self-preservation stage");
 
     unlink("/tmp/dsco_gate_zz/src/tools.c");
@@ -11360,7 +11360,7 @@ static void test_provider_build_default_fallback_models_prefers_codex_subscripti
     int count = provider_build_default_fallback_models("claude-fable-5", models, 4);
 
     ASSERT(count >= 3, "fallback chain should include subscription and metered routes");
-    ASSERT(strcmp(models[0], "claude-sonnet-4-6") == 0,
+    ASSERT(strcmp(models[0], "claude-sonnet-5") == 0,
            "first fallback may stay in Anthropic family for non-exhaustion failures");
     ASSERT(strcmp(models[1], "gpt-5.5") == 0,
            "Codex subscription should outrank metered cross-lab routes");
@@ -11563,7 +11563,7 @@ static void test_provider_build_default_fallback_models_native_primary_duplicate
     ASSERT(count >= 2, "native Grok fallback chain should include other providers");
     ASSERT(!test_model_list_contains(models, count, "grok-4-fast"),
            "native primary should not appear in its own fallback chain");
-    ASSERT(test_model_list_contains(models, count, "claude-sonnet-4-6") ||
+    ASSERT(test_model_list_contains(models, count, "claude-sonnet-5") ||
                test_model_list_contains(models, count, "openrouter/anthropic/claude-sonnet-5"),
            "Grok fallback should include Anthropic family");
 
