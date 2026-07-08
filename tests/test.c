@@ -3570,10 +3570,22 @@ static void test_realtime_voice_tool_selection_routes_domain_tools(void) {
            "voice default tool cap follows baseline register cap");
     ASSERT(test_tool_name_list_has(math_tools, math_count, "calc"),
            "voice calculator context exposes calc");
+    ASSERT(test_tool_name_list_has(math_tools, math_count, "file_tree"),
+           "voice default context keeps sized filesystem inspection available");
     ASSERT(!test_tool_name_list_has(math_tools, math_count, "python"),
            "voice calculator context does not expose generic python execution");
     ASSERT(!test_tool_name_list_has(math_tools, math_count, "bash"),
            "voice calculator context does not expose generic shell execution");
+
+    char operator_tools[TOOL_REGISTER_CAP][DSCO_REALTIME_TOOL_NAME_MAX];
+    int operator_count = realtime_voice_select_tool_names_for_context(
+        "You have access to bash and Python; run a command to find the largest file.",
+        operator_tools, TOOL_REGISTER_CAP);
+
+    ASSERT(test_tool_name_list_has(operator_tools, operator_count, "bash"),
+           "voice explicit shell context exposes bash");
+    ASSERT(test_tool_name_list_has(operator_tools, operator_count, "python"),
+           "voice explicit Python context exposes python");
 
     char weather_tools[TOOL_REGISTER_CAP][DSCO_REALTIME_TOOL_NAME_MAX];
     int weather_count = realtime_voice_select_tool_names_for_context(
@@ -20095,6 +20107,10 @@ static void test_capability_classifier(void) {
            "MultiEdit (registered non-read-only) should get CAP_FS_WRITE floor");
     ASSERT(dsco_caps_for_tool("LS", NULL) == CAP_FS_READ,
            "LS (registered read-only alias) should be exactly CAP_FS_READ");
+    ASSERT(dsco_caps_for_tool("BashOutput", NULL) == CAP_FS_READ,
+           "BashOutput (registered read-only) should be exactly CAP_FS_READ");
+    ASSERT(dsco_caps_for_tool("KillShell", NULL) & CAP_FS_WRITE,
+           "KillShell (registered non-read-only) should get CAP_FS_WRITE floor");
 
     PASS();
 }
@@ -20353,6 +20369,77 @@ static void test_tool_multi_edit_atomic(void) {
     ASSERT(!ok, "MultiEdit with no edits array should fail");
 
     unlink(tmpl);
+    PASS();
+}
+
+/* Extract the "bash_id":"bash_N" token from a background-shell tool result. */
+static bool test_extract_bash_id(const char *r, char *out, size_t out_len) {
+    const char *key = "\"bash_id\":\"";
+    const char *p = r ? strstr(r, key) : NULL;
+    if (!p)
+        return false;
+    p += strlen(key);
+    size_t i = 0;
+    while (*p && *p != '"' && i + 1 < out_len)
+        out[i++] = *p++;
+    out[i] = '\0';
+    return i > 0;
+}
+
+static void test_tool_bash_background_lifecycle(void) {
+    TEST("tools_execute Bash background lifecycle");
+    tools_init();
+
+    char r[4096];
+    char id[32];
+    char input[256];
+
+    /* 1. Launch a background echo and capture its bash_id. */
+    r[0] = '\0';
+    bool ok = tools_execute(
+        "Bash", "{\"command\":\"echo dsco_bg_marker_XYZ\",\"run_in_background\":true}", r,
+        sizeof(r));
+    ASSERT(ok, "Bash run_in_background should succeed");
+    ASSERT(test_extract_bash_id(r, id, sizeof(id)), "launch result should carry a bash_id");
+
+    /* 2. Poll BashOutput for the marker (bounded to ~1.5s). */
+    bool saw_marker = false;
+    for (int i = 0; i < 60; i++) {
+        snprintf(input, sizeof(input), "{\"bash_id\":\"%s\"}", id);
+        r[0] = '\0';
+        tools_execute("BashOutput", input, r, sizeof(r));
+        if (strstr(r, "dsco_bg_marker_XYZ")) {
+            saw_marker = true;
+            break;
+        }
+        usleep(25000);
+    }
+    ASSERT(saw_marker, "BashOutput should surface the echo marker within the poll window");
+
+    /* 3. KillShell a long runner; killed shells are removed from the registry. */
+    r[0] = '\0';
+    ok = tools_execute("Bash", "{\"command\":\"sleep 30\",\"run_in_background\":true}", r,
+                       sizeof(r));
+    ASSERT(ok, "second Bash run_in_background should succeed");
+    char id2[32];
+    ASSERT(test_extract_bash_id(r, id2, sizeof(id2)), "second launch should carry a bash_id");
+
+    snprintf(input, sizeof(input), "{\"shell_id\":\"%s\"}", id2);
+    r[0] = '\0';
+    tools_execute("KillShell", input, r, sizeof(r));
+    ASSERT(strstr(r, "\"ok\":true") != NULL, "KillShell should report ok:true");
+
+    snprintf(input, sizeof(input), "{\"bash_id\":\"%s\"}", id2);
+    r[0] = '\0';
+    tools_execute("BashOutput", input, r, sizeof(r));
+    ASSERT(strstr(r, "unknown bash_id") != NULL || strstr(r, "status") != NULL,
+           "killed shell should be unknown (removed) or report a status");
+
+    /* 4. Unknown id error path. */
+    r[0] = '\0';
+    ok = tools_execute("BashOutput", "{\"bash_id\":\"bash_does_not_exist\"}", r, sizeof(r));
+    ASSERT(!ok || strstr(r, "unknown") != NULL, "unknown bash_id should fail or report unknown");
+
     PASS();
 }
 
@@ -21314,6 +21401,7 @@ int main(void) {
     test_capability_gate();
     test_capability_to_string();
     test_tool_multi_edit_atomic();
+    test_tool_bash_background_lifecycle();
 
     fprintf(stderr, "\n\033[1m  %d tests: \033[32m%d passed\033[0m", tests_run, tests_passed);
     if (tests_failed > 0)
