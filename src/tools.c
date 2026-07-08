@@ -38779,7 +38779,7 @@ static bool tool_request_approval(const char *name, const char *input_json, tool
         char deny_reason[256];
         snprintf(deny_reason, sizeof(deny_reason), "blocked_by_trust_tier risk=%s reason=%s",
                  tool_risk_name(a.level), a.reason[0] ? a.reason : "blocked_by_trust_tier");
-        tool_gov_deny(result, result_len, name, "G2c_approval", deny_reason,
+        tool_gov_deny(result, result_len, name, "approval", deny_reason,
                       g_governance.initialized ? governance_remaining_gsu(&g_governance, "dsco")
                                                : 0.0);
         return false;
@@ -38789,7 +38789,7 @@ static bool tool_request_approval(const char *name, const char *input_json, tool
             char deny_reason[256];
             snprintf(deny_reason, sizeof(deny_reason), "approval_required_no_tty risk=%s reason=%s",
                      tool_risk_name(a.level), a.reason[0] ? a.reason : "approval_required");
-            tool_gov_deny(result, result_len, name, "G2c_approval", deny_reason,
+            tool_gov_deny(result, result_len, name, "approval", deny_reason,
                           g_governance.initialized ? governance_remaining_gsu(&g_governance, "dsco")
                                                    : 0.0);
             return false;
@@ -38816,7 +38816,7 @@ static bool tool_request_approval(const char *name, const char *input_json, tool
         return true;
     }
 
-    tool_gov_deny(result, result_len, name, "G2c_approval",
+    tool_gov_deny(result, result_len, name, "approval",
                   choice == TUI_PERM_CANCEL ? "cancelled_by_user" : "denied_by_user",
                   g_governance.initialized ? governance_remaining_gsu(&g_governance, "dsco") : 0.0);
     baseline_log("security", "tool_approval_denied", name, a.reason);
@@ -38944,7 +38944,7 @@ void tools_governance_experiment_stats(unsigned long *gate_calls,
 bool tools_execute_for_tier(const char *name, const char *input_json, const char *tier,
                             char *result, size_t result_len) {
 
-    /* ── G0: Governance-model dispatch ─────────────────────────────────────
+    /* ── Governance-model dispatch ─────────────────────────────────────────
        MODEL=none is the ungoverned control arm: skip the entire gate so the
        overhead of governance vs. no-governance can be measured empirically. */
     gov_model_t _gov_model = gov_experiment_model();
@@ -38955,18 +38955,18 @@ bool tools_execute_for_tier(const char *name, const char *input_json, const char
 
     double _gate_t0 = now_ms();
 
-    /* ── G1: Exempt check ─────────────────────────────────────────────── */
+    /* ── Exempt check ──────────────────────────────────────────────────── */
     if (!name || tool_is_governance_exempt(name)) {
         gov_stage_record(GOV_STAGE_EXEMPT, now_ms() - _gate_t0, false, false);
         goto _skip_gate;
     }
     gov_experiment_note_gate_run();
 
-    /* ── G2: Initialization guard ─────────────────────────────────────── */
+    /* ── Initialization guard ──────────────────────────────────────────── */
     if (!g_governance.initialized)
         ensure_wt_init();
     if (!g_governance.initialized) {
-        tool_gov_deny(result, result_len, name, "G2_init", "governance_unavailable", 0.0);
+        tool_gov_deny(result, result_len, name, "init", "governance_unavailable", 0.0);
         return false;
     }
     tool_governance_ensure_dsco_agent();
@@ -38996,26 +38996,26 @@ bool tools_execute_for_tier(const char *name, const char *input_json, const char
         char phero_region[PHEROMONE_MAX_REGION_LEN];
         tool_phero_region(name, phero_region, sizeof(phero_region));
 
-        /* ── G2a: Early Immune veto before user approval prompts ───────── */
+        /* ── Immune veto: killswitch + circuit breakers ───────────────────── */
         if (killswitch_system_halted(&g_governance.killswitches)) {
             pheromone_deposit(&g_governance.pheromones, PHERO_WARNING, 1.0, phero_region, "immune",
                               "{\"reason\":\"system_halted\"}");
-            tool_gov_deny(result, result_len, name, "G2a_killswitch", "system_halted", remaining);
+            tool_gov_deny(result, result_len, name, "killswitch", "system_halted", remaining);
             return false;
         }
         if (killswitch_is_killed(&g_governance.killswitches, "dsco")) {
-            tool_gov_deny(result, result_len, name, "G2a_killswitch", "agent_killed", remaining);
+            tool_gov_deny(result, result_len, name, "killswitch", "agent_killed", remaining);
             return false;
         }
         if (!governance_check_breakers(&g_governance, "dsco")) {
             pheromone_deposit(&g_governance.pheromones, PHERO_WARNING, 0.8, phero_region, "immune",
                               "{\"reason\":\"circuit_breaker\"}");
-            tool_gov_deny(result, result_len, name, "G2a_circuit_breaker", "active_breaker",
+            tool_gov_deny(result, result_len, name, "circuit_breaker", "active_breaker",
                           remaining);
             return false;
         }
 
-        /* ── G2cap: capability + lethal-trifecta gate ─────────────────────
+        /* ── Capability + lethal-trifecta gate ─────────────────────────────
            Gate by what the tool can DO (fs/net/exec/secrets/control), and deny
            the exfiltration edge (untrusted-in + private-data + egress). This is
            the capability axis that replaces filename-based immune surfaces. */
@@ -39027,14 +39027,14 @@ bool tools_execute_for_tier(const char *name, const char *input_json, const char
             if (cap_dec == CAP_DECISION_DENY) {
                 pheromone_deposit(&g_governance.pheromones, PHERO_WARNING, 1.0, phero_region,
                                   "immune", "{\"reason\":\"capability_denied\"}");
-                tool_gov_deny(result, result_len, name, "G2cap_capability",
+                tool_gov_deny(result, result_len, name, "capability",
                               cap_reason[0] ? cap_reason : "capability_denied", remaining);
                 self_improve_record_tool(&g_self_improve, name, false, 0.0, 0);
                 return false;
             }
         }
 
-        /* ── G2b: Human approval for risky/blocked tools ──────────────── */
+        /* ── Human approval for risky/blocked tools ──────────────────────── */
         if (!tool_request_approval(name, input_json, cls, tier, result, result_len)) {
             pheromone_deposit(&g_governance.pheromones, PHERO_WARNING, 0.8, phero_region, "immune",
                               "{\"reason\":\"approval_denied\"}");
@@ -39042,7 +39042,7 @@ bool tools_execute_for_tier(const char *name, const char *input_json, const char
             return false;
         }
 
-        /* ── G2c: Runtime self-preservation preflight ─────────────────── */
+        /* ── Runtime self-preservation preflight ─────────────────────────── */
         if (cls == TOOL_CLASS_EXEC) {
             char preserve_reason[256];
             preserve_reason[0] = '\0';
@@ -39050,7 +39050,7 @@ bool tools_execute_for_tier(const char *name, const char *input_json, const char
                                                                sizeof(preserve_reason))) {
                 pheromone_deposit(&g_governance.pheromones, PHERO_WARNING, 1.0, phero_region,
                                   "immune", "{\"reason\":\"runtime_self_preservation\"}");
-                tool_gov_deny(result, result_len, name, "G2b_self_preservation",
+                tool_gov_deny(result, result_len, name, "self_preservation",
                               preserve_reason[0] ? preserve_reason : "runtime_self_preservation",
                               remaining);
                 self_improve_record_tool(&g_self_improve, name, false, 0.0, 0);
@@ -39058,49 +39058,7 @@ bool tools_execute_for_tier(const char *name, const char *input_json, const char
             }
         }
 
-        /* ── G3: Killswitch ───────────────────────────────────────────── */
-        if (killswitch_system_halted(&g_governance.killswitches)) {
-            pheromone_deposit(&g_governance.pheromones, PHERO_WARNING, 1.0, phero_region, "immune",
-                              "{\"reason\":\"system_halted\"}");
-            tool_gov_deny(result, result_len, name, "G3_killswitch", "system_halted", remaining);
-            return false;
-        }
-        if (killswitch_is_killed(&g_governance.killswitches, "dsco")) {
-            tool_gov_deny(result, result_len, name, "G3_killswitch", "agent_killed", remaining);
-            return false;
-        }
-
-        /* ── G4: Circuit breakers ─────────────────────────────────────── */
-        if (!governance_check_breakers(&g_governance, "dsco")) {
-            const char *tripped = "unknown";
-            for (int _b = 0; _b < CB_TYPE_COUNT; _b++) {
-                if (g_governance.breakers[_b].tripped) {
-                    switch (_b) {
-                        case CB_ERROR_RATE:
-                            tripped = "error_rate";
-                            break;
-                        case CB_LATENCY:
-                            tripped = "latency";
-                            break;
-                        case CB_COST_OVERRUN:
-                            tripped = "cost_overrun";
-                            break;
-                        case CB_PHEROMONE_SAT:
-                            tripped = "pheromone_sat";
-                            break;
-                        default:
-                            break;
-                    }
-                    break;
-                }
-            }
-            pheromone_deposit(&g_governance.pheromones, PHERO_WARNING, 0.8, phero_region, "immune",
-                              "{\"reason\":\"circuit_breaker\"}");
-            tool_gov_deny(result, result_len, name, "G4_circuit_breaker", tripped, remaining);
-            return false;
-        }
-
-        /* ── G6: Pheromone WARNING sensing ───────────────────────────── */
+        /* ── Pheromone degradation (warning concentration) ─────────────────── */
         /* High WARNING concentration on this tool's region → exec tools cost double.
          * Does not block alone — it degrades and signals. */
         double warning_level =
@@ -39110,7 +39068,7 @@ bool tools_execute_for_tier(const char *name, const char *input_json, const char
             baseline_log("governance", "warning_degrades_exec", name, NULL);
         }
 
-        /* ── G7: Governance checkpoint ──────────────────────────────────
+        /* ── Budget checkpoint ─────────────────────────────────────────────
            Runs in standard/paranoid/audit_only. In audit_only we measure the
            would-block decision but do NOT enforce it (shadow-mode governance);
            in minimal we skip it entirely. */
@@ -39127,7 +39085,7 @@ bool tools_execute_for_tier(const char *name, const char *input_json, const char
                 snprintf(meta, sizeof(meta), "{\"reason\":\"%s\",\"gsu\":%.2f}", reason, gsu);
                 pheromone_deposit(&g_governance.pheromones, PHERO_WARNING, 0.7, phero_region,
                                   "immune", meta);
-                tool_gov_deny(result, result_len, name, "G7_checkpoint", reason, remaining);
+                tool_gov_deny(result, result_len, name, "checkpoint", reason, remaining);
                 self_improve_record_tool(&g_self_improve, name, false, 0.0, 0);
                 return false;
             }
@@ -39688,6 +39646,36 @@ static tool_schema_scalar_t tools_schema_scalar_for_property(const char *schema,
     return kind;
 }
 
+static bool tools_schema_property_has_type(const char *schema, const char *key,
+                                           const char *expected_type) {
+    if (!schema || !key || !key[0] || !expected_type)
+        return false;
+    char *props = json_get_raw(schema, "properties");
+    if (!props)
+        return false;
+    char *prop = json_get_raw(props, key);
+    free(props);
+    if (!prop)
+        return false;
+
+    bool ok = false;
+    char *type = json_get_str(prop, "type");
+    if (type) {
+        ok = strcmp(type, expected_type) == 0;
+        free(type);
+    } else {
+        char *raw = json_get_raw(prop, "type");
+        if (raw) {
+            char needle[64];
+            snprintf(needle, sizeof(needle), "\"%s\"", expected_type);
+            ok = strstr(raw, needle) != NULL;
+            free(raw);
+        }
+    }
+    free(prop);
+    return ok;
+}
+
 static bool tools_trim_copy(const char *s, char *out, size_t outlen) {
     if (!s || !out || outlen == 0)
         return false;
@@ -39766,6 +39754,30 @@ static void tools_trim_bounds(const char *s, const char **start, const char **en
         *start = p;
     if (end)
         *end = e;
+}
+
+static char *tools_string_to_schema_container_literal(const char *schema, const char *key,
+                                                      const char *decoded) {
+    const char *s = NULL;
+    const char *e = NULL;
+    tools_trim_bounds(decoded, &s, &e);
+    if (!s || e <= s)
+        return NULL;
+
+    bool wants_array = tools_schema_property_has_type(schema, key, "array");
+    bool wants_object = tools_schema_property_has_type(schema, key, "object");
+    if ((!wants_array || *s != '[') && (!wants_object || *s != '{'))
+        return NULL;
+
+    size_t n = (size_t)(e - s);
+    char *literal = safe_malloc(n + 1);
+    memcpy(literal, s, n);
+    literal[n] = '\0';
+    if (!json_is_valid_container(literal)) {
+        free(literal);
+        return NULL;
+    }
+    return literal;
 }
 
 static const char *tools_single_string_field_for_name(const char *name) {
@@ -39946,11 +39958,21 @@ char *tools_normalize_input(const char *name, const char *input_json) {
 
         bool emitted = false;
         if (*value_start == '"') {
-            tool_schema_scalar_t kind = tools_schema_scalar_for_property(schema, key);
-            if (kind != TOOL_SCHEMA_SCALAR_NONE) {
-                char *decoded = NULL;
-                const char *string_end = tools_json_parse_string(value_start, &decoded);
-                if (string_end && string_end == value_end && decoded) {
+            char *decoded = NULL;
+            const char *string_end = tools_json_parse_string(value_start, &decoded);
+            if (string_end && string_end == value_end && decoded) {
+                char *container = tools_string_to_schema_container_literal(schema, key, decoded);
+                if (container) {
+                    jbuf_append(&out, container);
+                    changed = true;
+                    emitted = true;
+                    free(container);
+                }
+
+                tool_schema_scalar_t kind =
+                    emitted ? TOOL_SCHEMA_SCALAR_NONE
+                            : tools_schema_scalar_for_property(schema, key);
+                if (kind != TOOL_SCHEMA_SCALAR_NONE) {
                     char literal[160];
                     if (tools_string_to_schema_literal(kind, decoded, literal, sizeof(literal))) {
                         jbuf_append(&out, literal);
@@ -39958,8 +39980,8 @@ char *tools_normalize_input(const char *name, const char *input_json) {
                         emitted = true;
                     }
                 }
-                free(decoded);
             }
+            free(decoded);
         }
 
         if (!emitted)
