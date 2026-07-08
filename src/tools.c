@@ -28560,11 +28560,209 @@ static void cc_map_optional_string_field(jbuf_t *mapped, const char *input, cons
     free(value);
 }
 
+/* ── Background shell registry: Claude Code Bash(run_in_background) + BashOutput
+ * + KillShell. Each background shell runs under nohup with output captured to a
+ * per-shell log; BashOutput streams only the new bytes since the last read. ─── */
+#define BG_SHELL_MAX 64
+typedef struct {
+    bool active;
+    char id[24];
+    long pid;
+    char log[128];
+    long offset;
+} bg_shell_t;
+static bg_shell_t g_bg_shells[BG_SHELL_MAX];
+static int g_bg_shell_seq = 0;
+static pthread_mutex_t g_bg_shell_lock = PTHREAD_MUTEX_INITIALIZER;
+
+static bool bg_shell_launch(const char *command, const char *cwd, char *result, size_t rlen) {
+    pthread_mutex_lock(&g_bg_shell_lock);
+    int id_num = ++g_bg_shell_seq;
+    pthread_mutex_unlock(&g_bg_shell_lock);
+
+    char logpath[128];
+    snprintf(logpath, sizeof(logpath), "/tmp/dsco_bash_%d_%ld.log", id_num, (long)getpid());
+
+    jbuf_t cmd;
+    jbuf_init(&cmd, 256 + strlen(command) + (cwd ? strlen(cwd) : 0));
+    jbuf_append(&cmd, "nohup sh -c ");
+    if (cwd && cwd[0]) {
+        jbuf_t inner;
+        jbuf_init(&inner, strlen(command) + strlen(cwd) + 16);
+        jbuf_append(&inner, "cd ");
+        shell_quote(&inner, cwd);
+        jbuf_append(&inner, " && ");
+        jbuf_append(&inner, command);
+        shell_quote(&cmd, inner.data ? inner.data : command);
+        jbuf_free(&inner);
+    } else {
+        shell_quote(&cmd, command);
+    }
+    jbuf_append(&cmd, " > ");
+    shell_quote(&cmd, logpath);
+    jbuf_append(&cmd, " 2>&1 < /dev/null & echo $!");
+    char out[64];
+    out[0] = '\0';
+    int rc = run_cmd(cmd.data, out, sizeof(out));
+    jbuf_free(&cmd);
+    long pid = strtol(out, NULL, 10);
+    if (rc != 0 || pid <= 0) {
+        snprintf(result, rlen, "{\"error\":\"failed to launch background shell\"}");
+        return false;
+    }
+
+    pthread_mutex_lock(&g_bg_shell_lock);
+    int slot = -1;
+    for (int i = 0; i < BG_SHELL_MAX; i++)
+        if (!g_bg_shells[i].active) {
+            slot = i;
+            break;
+        }
+    if (slot < 0) {
+        pthread_mutex_unlock(&g_bg_shell_lock);
+        kill((pid_t)pid, SIGTERM);
+        snprintf(result, rlen, "{\"error\":\"too many background shells (max %d)\"}", BG_SHELL_MAX);
+        return false;
+    }
+    bg_shell_t *s = &g_bg_shells[slot];
+    s->active = true;
+    snprintf(s->id, sizeof(s->id), "bash_%d", id_num);
+    s->pid = pid;
+    snprintf(s->log, sizeof(s->log), "%s", logpath);
+    s->offset = 0;
+    pthread_mutex_unlock(&g_bg_shell_lock);
+
+    jbuf_t j;
+    jbuf_init(&j, 160);
+    jbuf_appendf(&j, "{\"ok\":true,\"bash_id\":\"bash_%d\",\"pid\":%ld,\"log\":", id_num, pid);
+    jbuf_append_json_str(&j, logpath);
+    jbuf_append(&j, ",\"status\":\"running\"}");
+    size_t n = j.len < rlen - 1 ? j.len : rlen - 1;
+    memcpy(result, j.data, n);
+    result[n] = '\0';
+    jbuf_free(&j);
+    return true;
+}
+
+static bool tool_bash_output(const char *input, char *result, size_t rlen) {
+    char *bash_id = json_get_str(input, "bash_id");
+    if (!bash_id)
+        bash_id = json_get_str(input, "shell_id");
+    if (!bash_id || !bash_id[0]) {
+        free(bash_id);
+        snprintf(result, rlen, "{\"error\":\"bash_id required\"}");
+        return false;
+    }
+    long pid = 0, offset = 0;
+    char log[128] = {0};
+    bool found = false;
+    pthread_mutex_lock(&g_bg_shell_lock);
+    for (int i = 0; i < BG_SHELL_MAX; i++)
+        if (g_bg_shells[i].active && strcmp(g_bg_shells[i].id, bash_id) == 0) {
+            pid = g_bg_shells[i].pid;
+            offset = g_bg_shells[i].offset;
+            snprintf(log, sizeof(log), "%s", g_bg_shells[i].log);
+            found = true;
+            break;
+        }
+    pthread_mutex_unlock(&g_bg_shell_lock);
+    if (!found) {
+        snprintf(result, rlen, "{\"error\":\"unknown bash_id\"}");
+        free(bash_id);
+        return false;
+    }
+
+    bool running = (kill((pid_t)pid, 0) == 0);
+    jbuf_t chunk;
+    jbuf_init(&chunk, 4096);
+    long newoffset = offset;
+    FILE *lf = fopen(log, "r");
+    if (lf) {
+        fseek(lf, offset, SEEK_SET);
+        char buf[8192];
+        size_t r;
+        while ((r = fread(buf, 1, sizeof(buf), lf)) > 0) {
+            jbuf_append_len(&chunk, buf, r);
+            newoffset += (long)r;
+        }
+        fclose(lf);
+    }
+    pthread_mutex_lock(&g_bg_shell_lock);
+    for (int i = 0; i < BG_SHELL_MAX; i++)
+        if (g_bg_shells[i].active && strcmp(g_bg_shells[i].id, bash_id) == 0) {
+            g_bg_shells[i].offset = newoffset;
+            break;
+        }
+    pthread_mutex_unlock(&g_bg_shell_lock);
+
+    jbuf_t j;
+    jbuf_init(&j, chunk.len + 160);
+    jbuf_append(&j, "{\"bash_id\":");
+    jbuf_append_json_str(&j, bash_id);
+    jbuf_appendf(&j, ",\"status\":\"%s\",\"output\":", running ? "running" : "completed");
+    jbuf_append_json_str(&j, chunk.data ? chunk.data : "");
+    jbuf_append(&j, "}");
+    size_t n = j.len < rlen - 1 ? j.len : rlen - 1;
+    memcpy(result, j.data, n);
+    result[n] = '\0';
+    jbuf_free(&j);
+    jbuf_free(&chunk);
+    free(bash_id);
+    return true;
+}
+
+static bool tool_kill_shell(const char *input, char *result, size_t rlen) {
+    char *shell_id = json_get_str(input, "shell_id");
+    if (!shell_id)
+        shell_id = json_get_str(input, "bash_id");
+    if (!shell_id || !shell_id[0]) {
+        free(shell_id);
+        snprintf(result, rlen, "{\"error\":\"shell_id required\"}");
+        return false;
+    }
+    long pid = 0;
+    bool found = false;
+    pthread_mutex_lock(&g_bg_shell_lock);
+    for (int i = 0; i < BG_SHELL_MAX; i++)
+        if (g_bg_shells[i].active && strcmp(g_bg_shells[i].id, shell_id) == 0) {
+            pid = g_bg_shells[i].pid;
+            g_bg_shells[i].active = false;
+            found = true;
+            break;
+        }
+    pthread_mutex_unlock(&g_bg_shell_lock);
+    if (!found) {
+        snprintf(result, rlen, "{\"error\":\"unknown shell_id\"}");
+        free(shell_id);
+        return false;
+    }
+    int krc = kill((pid_t)pid, SIGTERM);
+    jbuf_t j;
+    jbuf_init(&j, 96);
+    jbuf_appendf(&j, "{\"ok\":%s,\"shell_id\":", krc == 0 ? "true" : "false");
+    jbuf_append_json_str(&j, shell_id);
+    jbuf_appendf(&j, ",\"pid\":%ld,\"signal\":\"SIGTERM\"}", pid);
+    size_t n = j.len < rlen - 1 ? j.len : rlen - 1;
+    memcpy(result, j.data, n);
+    result[n] = '\0';
+    jbuf_free(&j);
+    free(shell_id);
+    return krc == 0;
+}
+
 static bool tool_bash_compat(const char *input, char *result, size_t rlen) {
     char *command = json_get_str(input, "command");
     if (!command) {
         snprintf(result, rlen, "error: command required");
         return false;
+    }
+
+    if (json_get_bool(input, "run_in_background", false)) {
+        char *bg_cwd = json_get_str(input, "cwd");
+        bool bok = bg_shell_launch(command, bg_cwd, result, rlen);
+        free(bg_cwd);
+        free(command);
+        return bok;
     }
 
     int timeout = json_get_int(input, "timeout", 120);
@@ -31862,6 +32060,21 @@ static const tool_def_t s_tools[] = {
      .core = true,
      .is_read_only = true,
      .is_concurrent = true},
+    {.name = "BashOutput",
+     .description = "Retrieve buffered output from a background Bash shell started with "
+                    "run_in_background. Returns {bash_id,status:running|completed,output} with "
+                    "only the new bytes since the last call.",
+     .input_schema_json = "{\"type\":\"object\",\"properties\":{\"bash_id\":{\"type\":\"string\"},"
+                          "\"filter\":{\"type\":\"string\"}},\"required\":[\"bash_id\"]}",
+     .execute = tool_bash_output,
+     .core = true,
+     .is_read_only = true,
+     .is_concurrent = true},
+    {.name = "KillShell",
+     .description = "Terminate a background shell (Bash run_in_background) by shell_id (SIGTERM).",
+     .input_schema_json = "{\"type\":\"object\",\"properties\":{\"shell_id\":{\"type\":\"string\"}},"
+                          "\"required\":[\"shell_id\"]}",
+     .execute = tool_kill_shell},
     {.name = "WebFetch",
      .description = "Claude-compatible URL fetch/extract.",
      .input_schema_json =
