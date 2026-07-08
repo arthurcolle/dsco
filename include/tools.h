@@ -64,6 +64,8 @@ swarm_t *tools_swarm_instance(void);
 const tool_def_t *tools_get_all(int *count);
 bool tools_invoke_by_name(const char *name, const char *input, char *result, size_t rlen);
 bool tools_is_offload_safe(const char *name);
+/* Report a builtin tool's declared read-only flag; *found = registered. */
+bool tools_meta_is_read_only(const char *name, bool *found);
 int tools_get_core_count(void); /* only .core=true tools */
 int tools_builtin_count(void);
 bool tools_execute(const char *name, const char *input_json, char *result, size_t result_len);
