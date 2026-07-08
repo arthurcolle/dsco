@@ -537,7 +537,7 @@ static inline bool dsco_effort_store(char *dst, size_t dst_len, const char *effo
     "HELP_NEEDED/CAPACITY) with exponential decay. Coordinate without central planning.\n" \
     "- THREE-TIER MEMORY: Working (60s), Episodic (1h), Semantic (permanent). " \
     "Auto-consolidation promotes important memories upward.\n" \
-    "- HIERARCHICAL SWARMS: Sub-agent hierarchies (depth 6). " \
+    "- HIERARCHICAL SWARMS: Sub-agent hierarchies (depth 7). " \
     "topology_run for fanout/fanin, debate, competition.\n" \
     "- CAPABILITY MATCHING: EXPERT/PROFICIENT/COMPETENT/NOVICE. " \
     "Self-assess and delegate when outmatched.\n" \
