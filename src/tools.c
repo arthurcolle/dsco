@@ -34701,6 +34701,25 @@ const tool_def_t *tools_get_all(int *count) {
     return s_tools;
 }
 
+/* Capability classifier support: report a builtin tool's declared read-only
+ * flag. `*found` distinguishes "registered and read-write" from "unknown". */
+bool tools_meta_is_read_only(const char *name, bool *found) {
+    if (found)
+        *found = false;
+    if (!name || !name[0])
+        return false;
+    int total = 0;
+    const tool_def_t *all = tools_get_all(&total);
+    for (int i = 0; i < total; i++) {
+        if (all[i].name && strcmp(all[i].name, name) == 0) {
+            if (found)
+                *found = true;
+            return all[i].is_read_only;
+        }
+    }
+    return false;
+}
+
 int tools_builtin_count(void) {
     return s_tool_count;
 }

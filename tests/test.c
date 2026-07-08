@@ -20023,6 +20023,7 @@ static void test_workflow_retry_budget_deadletters(void) {
 
 static void test_capability_classifier(void) {
     TEST("capability: dsco_caps_for_tool classification");
+    tools_init(); /* registry catch-all reads the builtin tool table */
 
     /* Pure reader: exactly CAP_FS_READ, nothing more. */
     ASSERT(dsco_caps_for_tool("read_file", NULL) == CAP_FS_READ,
@@ -20068,6 +20069,28 @@ static void test_capability_classifier(void) {
            "empty tool name should carry CAP_EGRESS bits");
     ASSERT(dsco_caps_for_tool(NULL, NULL) & CAP_EGRESS,
            "NULL tool name should carry CAP_EGRESS bits");
+
+    /* Claude-compatible tool surfaces classify like their snake_case twins. */
+    ASSERT(dsco_caps_for_tool("Read", NULL) == CAP_FS_READ, "Read should be exactly CAP_FS_READ");
+    ASSERT(dsco_caps_for_tool("Grep", NULL) == CAP_FS_READ, "Grep should be exactly CAP_FS_READ");
+    ASSERT(dsco_caps_for_tool("Glob", NULL) == CAP_FS_READ, "Glob should be exactly CAP_FS_READ");
+    ASSERT(dsco_caps_for_tool("Write", NULL) & CAP_FS_WRITE, "Write should carry CAP_FS_WRITE");
+    ASSERT(dsco_caps_for_tool("Edit", NULL) & CAP_FS_WRITE, "Edit should carry CAP_FS_WRITE");
+    ASSERT(dsco_caps_for_tool("Bash", NULL) & CAP_EXEC, "Bash should carry CAP_EXEC");
+    ASSERT(dsco_caps_for_tool("Bash", "{\"command\":\"curl http://x\"}") & CAP_NET,
+           "Bash curl should carry CAP_NET");
+    ASSERT((dsco_caps_for_tool("WebFetch", NULL) & (CAP_NET | CAP_UNTRUSTED_IN)) ==
+               (CAP_NET | CAP_UNTRUSTED_IN),
+           "WebFetch should carry CAP_NET|CAP_UNTRUSTED_IN");
+    ASSERT((dsco_caps_for_tool("WebSearch", NULL) & (CAP_NET | CAP_UNTRUSTED_IN)) ==
+               (CAP_NET | CAP_UNTRUSTED_IN),
+           "WebSearch should carry CAP_NET|CAP_UNTRUSTED_IN");
+
+    /* Registry catch-all: a registered, non-read-only builtin that no capability
+     * name-list covers ('swarm') must not slip through as a benign read — it gets
+     * a conservative fs_write floor. */
+    ASSERT(dsco_caps_for_tool("swarm", NULL) & CAP_FS_WRITE,
+           "unlisted non-read-only builtin 'swarm' should get CAP_FS_WRITE floor");
 
     PASS();
 }
