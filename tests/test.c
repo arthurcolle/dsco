@@ -20091,6 +20091,10 @@ static void test_capability_classifier(void) {
      * a conservative fs_write floor. */
     ASSERT(dsco_caps_for_tool("swarm", NULL) & CAP_FS_WRITE,
            "unlisted non-read-only builtin 'swarm' should get CAP_FS_WRITE floor");
+    ASSERT(dsco_caps_for_tool("MultiEdit", NULL) & CAP_FS_WRITE,
+           "MultiEdit (registered non-read-only) should get CAP_FS_WRITE floor");
+    ASSERT(dsco_caps_for_tool("LS", NULL) == CAP_FS_READ,
+           "LS (registered read-only alias) should be exactly CAP_FS_READ");
 
     PASS();
 }
@@ -20287,6 +20291,68 @@ static void test_capability_to_string(void) {
     ASSERT(strstr(out, "net") != NULL, "should render net");
     dsco_capability_to_string(CAP_NONE, out, sizeof(out));
     ASSERT(strcmp(out, "none") == 0, "CAP_NONE should render 'none'");
+    PASS();
+}
+
+static void test_tool_multi_edit_atomic(void) {
+    TEST("tools_execute MultiEdit atomic batch");
+    tools_init();
+
+    char tmpl[] = "/tmp/dsco_multiedit_XXXXXX";
+    int fd = mkstemp(tmpl);
+    ASSERT(fd >= 0, "mkstemp should create a temp file");
+    const char *initial = "alpha beta gamma\ndelta alpha end\n";
+    ASSERT(write(fd, initial, strlen(initial)) == (ssize_t)strlen(initial),
+           "should write initial content");
+    close(fd);
+
+    char result[4096];
+    char buf[512];
+    char input[1024];
+
+    /* Ordered batch: replace_all on 'alpha', single replace on 'gamma'. */
+    snprintf(input, sizeof(input),
+             "{\"file_path\":\"%s\",\"edits\":[{\"old_string\":\"alpha\",\"new_string\":\"ALPHA\","
+             "\"replace_all\":true},{\"old_string\":\"gamma\",\"new_string\":\"GAMMA\"}]}",
+             tmpl);
+    result[0] = '\0';
+    bool ok = tools_execute("MultiEdit", input, result, sizeof(result));
+    ASSERT(ok, "MultiEdit batch should succeed");
+
+    FILE *rf = fopen(tmpl, "r");
+    ASSERT(rf != NULL, "should reopen temp file");
+    size_t rd = fread(buf, 1, sizeof(buf) - 1, rf);
+    buf[rd] = '\0';
+    fclose(rf);
+    ASSERT(strcmp(buf, "ALPHA beta GAMMA\ndelta ALPHA end\n") == 0,
+           "both alpha replaced (replace_all) and gamma replaced");
+
+    /* Atomicity: first edit matches, second old_string is missing -> nothing written. */
+    snprintf(input, sizeof(input),
+             "{\"file_path\":\"%s\",\"edits\":[{\"old_string\":\"beta\",\"new_string\":\"BETA\"},"
+             "{\"old_string\":\"NOPE_MISSING\",\"new_string\":\"x\"}]}",
+             tmpl);
+    result[0] = '\0';
+    ok = tools_execute("MultiEdit", input, result, sizeof(result));
+    ASSERT(!ok, "MultiEdit with a missing old_string should fail");
+
+    rf = fopen(tmpl, "r");
+    ASSERT(rf != NULL, "should reopen temp file after failed edit");
+    rd = fread(buf, 1, sizeof(buf) - 1, rf);
+    buf[rd] = '\0';
+    fclose(rf);
+    ASSERT(strcmp(buf, "ALPHA beta GAMMA\ndelta ALPHA end\n") == 0,
+           "file must be byte-for-byte unchanged after an atomic failure");
+    ASSERT(strstr(buf, "beta") != NULL && strstr(buf, "BETA") == NULL,
+           "failed batch must not partially write 'BETA'");
+
+    /* A missing edits array is rejected. */
+    snprintf(input, sizeof(input), "{\"file_path\":\"%s\"}", tmpl);
+    result[0] = '\0';
+    ok = tools_execute("MultiEdit", input, result, sizeof(result));
+    ASSERT(!ok, "MultiEdit with no edits array should fail");
+
+    unlink(tmpl);
     PASS();
 }
 
@@ -21247,6 +21313,7 @@ int main(void) {
     test_capability_flow();
     test_capability_gate();
     test_capability_to_string();
+    test_tool_multi_edit_atomic();
 
     fprintf(stderr, "\n\033[1m  %d tests: \033[32m%d passed\033[0m", tests_run, tests_passed);
     if (tests_failed > 0)
