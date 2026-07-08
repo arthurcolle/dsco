@@ -13,7 +13,7 @@
 #define SWARM_MAX_OUTPUT    (512 * 1024)
 #define SWARM_LABEL_LEN     128
 #define SWARM_GROUP_NAME_LEN 64
-#define SWARM_MAX_DEPTH     6
+#define SWARM_MAX_DEPTH     7
 #define SWARM_READ_BUF      (64 * 1024) /* 64KB read buffer (was 4KB) */
 
 /* Runtime caps. These cannot exceed the structural compile-time maxima above
