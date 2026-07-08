@@ -639,7 +639,7 @@ static void test_model_resolve_alias(void) {
     ASSERT(strcmp(r, "claude-opus-4-8") == 0, "opus should resolve to claude-opus-4-8");
 
     r = model_resolve_alias("sonnet");
-    ASSERT(strcmp(r, "claude-sonnet-4-6") == 0, "sonnet should resolve");
+    ASSERT(strcmp(r, "claude-sonnet-5") == 0, "sonnet should resolve");
 
     r = model_resolve_alias("haiku");
     ASSERT(strcmp(r, "claude-haiku-4-5-20251001") == 0, "haiku should resolve");
@@ -3454,7 +3454,7 @@ static void test_session_state_init(void) {
 
     session_state_t s;
     session_state_init(&s, "sonnet");
-    ASSERT(strcmp(s.model, "claude-sonnet-4-6") == 0, "model should be resolved");
+    ASSERT(strcmp(s.model, "claude-sonnet-5") == 0, "model should be resolved");
     ASSERT(s.effort[0] == '\0', "default effort should preserve provider default");
     ASSERT(strcmp(dsco_effort_display(s.effort), "auto") == 0, "default effort displays as auto");
     ASSERT(s.context_window == 1000000, "context window should be 1M");
@@ -3630,7 +3630,7 @@ static void test_session_state_init_populates_fallbacks_without_changing_model(v
 
     session_state_t s;
     session_state_init(&s, "sonnet");
-    ASSERT(strcmp(s.model, "claude-sonnet-4-6") == 0,
+    ASSERT(strcmp(s.model, "claude-sonnet-5") == 0,
            "fallback construction must not rewrite the canonical session model");
     ASSERT(s.fallback_count >= 3, "fallback chain should be populated from usable routes");
     ASSERT(strcmp(s.fallback_models[0], "openrouter/anthropic/claude-sonnet-4.6") == 0,
@@ -3669,7 +3669,7 @@ static void test_session_state_init_can_disable_default_fallbacks(void) {
 
     session_state_t s;
     session_state_init(&s, "sonnet");
-    ASSERT(strcmp(s.model, "claude-sonnet-4-6") == 0,
+    ASSERT(strcmp(s.model, "claude-sonnet-5") == 0,
            "disabled fallbacks should still preserve requested model");
     ASSERT(s.fallback_count == 0, "disabled default fallbacks should leave chain empty");
     ASSERT(s.fallback_models[0][0] == '\0', "fallback storage should remain zeroed");
@@ -5719,7 +5719,7 @@ static void test_model_pricing(void) {
 
     m = model_lookup("sonnet");
     ASSERT(m != NULL, "sonnet found");
-    ASSERT(m->input_price == 3.0, "sonnet input $3/M");
+    ASSERT(m->input_price == 2.0, "sonnet input $2/M");
 
     m = model_lookup("haiku");
     ASSERT(m != NULL, "haiku found");
@@ -5802,8 +5802,8 @@ static void test_session_cost_calculation(void) {
     mi = model_lookup("sonnet");
     ASSERT(mi != NULL, "sonnet model found");
     double sonnet_cost = 10000 * mi->input_price / 1e6 + 1000 * mi->output_price / 1e6;
-    /* $3/M * 10k = $0.03, $15/M * 1k = $0.015 → $0.045 */
-    ASSERT(fabs(sonnet_cost - 0.045) < 0.001, "sonnet cost for 10k/1k = $0.045");
+    /* $2/M * 10k = $0.02, $10/M * 1k = $0.01 → $0.03 */
+    ASSERT(fabs(sonnet_cost - 0.03) < 0.001, "sonnet cost for 10k/1k = $0.03");
 
     PASS();
 }
@@ -10381,7 +10381,7 @@ static void test_model_registry_haiku_cheaper(void) {
 static void test_model_resolve_alias_extended(void) {
     TEST("model_resolve_alias resolves known aliases");
     ASSERT(strcmp(model_resolve_alias("opus"), "claude-opus-4-8") == 0, "opus alias");
-    ASSERT(strcmp(model_resolve_alias("sonnet"), "claude-sonnet-4-6") == 0, "sonnet alias");
+    ASSERT(strcmp(model_resolve_alias("sonnet"), "claude-sonnet-5") == 0, "sonnet alias");
     ASSERT(strcmp(model_resolve_alias("glm52"), "zai/glm-5.2") == 0,
            "glm52 alias should use native Z.AI coding-plan route");
     ASSERT(strcmp(model_resolve_alias("or-glm52"), "openrouter/z-ai/glm-5.2") == 0,
