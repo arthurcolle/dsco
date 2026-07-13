@@ -39326,6 +39326,13 @@ void tools_governance_experiment_stats(unsigned long *gate_calls,
 bool tools_execute_for_tier(const char *name, const char *input_json, const char *tier,
                             char *result, size_t result_len) {
 
+    /* Wire-alias: o-series reserves "python"; provider.c renames it to
+     * "python_exec" on the wire. Resolve the alias back to the canonical
+     * tool BEFORE the governance gate so capability classification applies
+     * to the real tool, not the alias. */
+    if (name && strcmp(name, "python_exec") == 0)
+        name = "python";
+
     /* ── Governance-model dispatch ─────────────────────────────────────────
        MODEL=none is the ungoverned control arm: skip the entire gate so the
        overhead of governance vs. no-governance can be measured empirically. */
