@@ -469,8 +469,43 @@ bool output_guard_init(void) {
         return false;
     }
 
-    pthread_detach(g_og.streams[0].thread);
-    pthread_detach(g_og.streams[1].thread);
+    /* Threads stay joinable so output_guard_shutdown() can drain the pipe
+     * tail before process exit. Detached threads were killed at exit with
+     * bytes still in the pipe, silently truncating final output (observed:
+     * test_runner's summary line never reached the terminal). */
     g_og.initialized = true;
+
+    static bool s_atexit_registered = false;
+    if (!s_atexit_registered) {
+        atexit(output_guard_shutdown);
+        s_atexit_registered = true;
+    }
     return true;
+}
+
+void output_guard_shutdown(void) {
+    if (!g_og.initialized)
+        return;
+    g_og.initialized = false;
+
+    /* Push any stdio-buffered bytes into the guard pipes first. */
+    fflush(stdout);
+    fflush(stderr);
+
+    for (int i = 0; i < 2; i++) {
+        og_stream_t *s = &g_og.streams[i];
+        if (!s->active)
+            continue;
+        /* Restoring the real fd closes the pipe's only writer: the drainer
+         * thread mirrors the remaining bytes, sees EOF, and returns. */
+        (void)dup2(s->mirror_fd, s->out_fd);
+        (void)pthread_join(s->thread, NULL);
+        if (s->read_fd >= 0)
+            close(s->read_fd);
+        if (s->mirror_fd >= 0)
+            close(s->mirror_fd);
+        s->read_fd = -1;
+        s->mirror_fd = -1;
+        s->active = false;
+    }
 }
