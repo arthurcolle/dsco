@@ -33,6 +33,7 @@
 #include "plugin.h"
 #include "trace.h"
 #include "provider.h"
+#include "provider_pool.h"
 #include "topology.h"
 #include "task_profile.h"
 #include "plan_optimizer.h"
@@ -50,6 +51,9 @@
 #include "learned_cost.h"
 #include "session_memory.h"
 #include "toolmgmt.h"
+#include "openai_images.h"
+#include "openrouter_lanes.h"
+#include "weather_batch.h"
 #include "local_llm.h"
 #include "vm.h"
 #include "codex_app_directory.h"
@@ -5338,6 +5342,7 @@ static bool tool_ol_call(const char *input, char *result, size_t rlen) {
     char *system = json_get_str(input, "system");
     char *messages = json_get_raw(input, "messages");
     char *api_key = json_get_str(input, "api_key");
+    char *response_mode = json_get_str(input, "response_mode");
     char *extra_body = json_get_raw(input, "extra_body");
     if (!extra_body)
         extra_body = json_get_raw(input, "extra_params");
@@ -5355,6 +5360,7 @@ static bool tool_ol_call(const char *input, char *result, size_t rlen) {
         free(system);
         free(messages);
         free(api_key);
+        free(response_mode);
         free(extra_body);
         return false;
     }
@@ -5368,6 +5374,7 @@ static bool tool_ol_call(const char *input, char *result, size_t rlen) {
         free(system);
         free(messages);
         free(api_key);
+        free(response_mode);
         free(extra_body);
         return false;
     }
@@ -5437,6 +5444,7 @@ static bool tool_ol_call(const char *input, char *result, size_t rlen) {
         free(system);
         free(messages);
         free(api_key);
+        free(response_mode);
         free(extra_body);
         return false;
     }
@@ -5451,6 +5459,7 @@ static bool tool_ol_call(const char *input, char *result, size_t rlen) {
         free(system);
         free(messages);
         free(api_key);
+        free(response_mode);
         free(extra_body);
         return false;
     }
@@ -5552,6 +5561,7 @@ static bool tool_ol_call(const char *input, char *result, size_t rlen) {
         free(system);
         free(messages);
         free(api_key);
+        free(response_mode);
         free(extra_body);
         return false;
     }
@@ -5605,15 +5615,29 @@ static bool tool_ol_call(const char *input, char *result, size_t rlen) {
         free(err_obj);
         free(msg);
     } else {
-        ol_choice_ctx_t oc = {0};
-        json_array_foreach(resp.data ? resp.data : "{}", "choices", ol_extract_choice_text, &oc);
-        if (oc.text && oc.text[0]) {
-            snprintf(result, rlen, "%s", oc.text);
+        /* Default remains text-only for agent ergonomics.  `response_mode: "raw"`
+         * returns the provider envelope unchanged, including local-server
+         * logprobs, top_logprobs, reasoning_content, usage, and finish_reason.
+         * This is deliberately transport-agnostic: LM Studio, llama.cpp, MLX,
+         * vLLM, and any OpenAI-compatible local server can expose additional
+         * inference telemetry without DSCO discarding it. */
+        if (response_mode && (strcasecmp(response_mode, "raw") == 0 ||
+                              strcasecmp(response_mode, "json") == 0 ||
+                              strcasecmp(response_mode, "full") == 0)) {
+            snprintf(result, rlen, "%s", resp.data ? resp.data : "{}");
             ok = true;
         } else {
-            snprintf(result, rlen, "error: response did not contain choices[0].message.content");
+            ol_choice_ctx_t oc = {0};
+            json_array_foreach(resp.data ? resp.data : "{}", "choices", ol_extract_choice_text, &oc);
+            if (oc.text && oc.text[0]) {
+                snprintf(result, rlen, "%s", oc.text);
+                ok = true;
+            } else {
+                snprintf(result, rlen, "error: response did not contain choices[0].message.content; "
+                         "set response_mode=raw to inspect the full provider response");
+            }
+            free(oc.text);
         }
-        free(oc.text);
     }
 
     jbuf_free(&resp);
@@ -5625,6 +5649,7 @@ static bool tool_ol_call(const char *input, char *result, size_t rlen) {
     free(system);
     free(messages);
     free(api_key);
+    free(response_mode);
     free(extra_body);
     return ok;
 }
@@ -8016,6 +8041,10 @@ static __attribute__((unused)) bool tool_psql(const char *input, char *result, s
 static bool tool_python(const char *input, char *result, size_t rlen) {
     char *code = json_get_str(input, "code");
     char *file = path_normalize(json_get_str(input, "file"));
+    if (file && file[0] == '\0') {
+        free(file);
+        file = NULL;
+    }
     if (!code && !file) {
         snprintf(result, rlen, "error: code or file required");
         return false;
@@ -9395,13 +9424,12 @@ static bool tool_topology_run(const char *input, char *result, size_t rlen) {
     }
 
     const char *api_key = tools_runtime_api_key();
-    if (!api_key || !api_key[0]) {
-        snprintf(result, rlen, "error: no runtime API key configured for topology execution");
-        free(task);
-        free(topology);
-        jbuf_free(&b);
-        return false;
-    }
+    /* OAuth subscriptions and local servers need no generic -k key. Defer
+     * viability to provider-pool lane selection rather than rejecting all
+     * topologies at the control plane. */
+    if (!api_key)
+        api_key = "";
+    provider_pool_init(api_key);
 
     /* ── Present topology options as dialog before execution ─────────── */
     plan_options_t *dial_opts = NULL;
@@ -9592,11 +9620,12 @@ static bool tool_topology_solve(const char *input, char *result, size_t rlen) {
     int timeout = clamp_timeout_seconds(json_get_int(input, "timeout", 300), 300, 30, 3600);
 
     const char *api_key = tools_runtime_api_key();
-    if (!api_key || !api_key[0]) {
-        snprintf(result, rlen, "{\"error\":\"no runtime API key for topology execution\"}");
-        free(task);
-        return false;
-    }
+    /* Topologies may execute entirely through OAuth subscriptions or local
+     * lanes. A missing generic runtime key is not an authority to reject a
+     * runnable topology before lane resolution. */
+    if (!api_key)
+        api_key = "";
+    provider_pool_init(api_key);
 
     /* Topology set: explicit names or a diverse default spanning categories. */
     const char *default_topos[] = {"trident", "debate", "tournament"};
@@ -11532,6 +11561,7 @@ static bool tool_spawn_provider(const char *input, char *result, size_t rlen) {
 typedef struct {
     char provider[64];
     char model[128];
+    char effort[16]; /* empty = model/provider default reasoning effort */
     int replicas;
     bool subscription;
     bool local;
@@ -11598,6 +11628,10 @@ static void fabric_append_lanes_json(jbuf_t *b, provider_fabric_lane_t lanes[], 
         jbuf_append_json_str(b, lanes[li].provider);
         jbuf_append(b, ",\"model\":");
         jbuf_append_json_str(b, lanes[li].model);
+        if (lanes[li].effort[0]) {
+            jbuf_append(b, ",\"effort\":");
+            jbuf_append_json_str(b, lanes[li].effort);
+        }
         jbuf_append(b, ",\"replicas\":");
         jbuf_append_int(b, lanes[li].replicas);
         jbuf_append(b, ",\"subscription\":");
@@ -11622,33 +11656,85 @@ static void fabric_append_lanes_json(jbuf_t *b, provider_fabric_lane_t lanes[], 
 }
 
 static bool fabric_lane_exists(provider_fabric_lane_t lanes[], int count, const char *provider,
-                               const char *model) {
+                               const char *model, const char *effort) {
     for (int i = 0; i < count; i++) {
-        if (strcmp(lanes[i].provider, provider) == 0 && strcmp(lanes[i].model, model) == 0)
+        if (strcmp(lanes[i].provider, provider) == 0 && strcmp(lanes[i].model, model) == 0 &&
+            strcmp(lanes[i].effort, effort ? effort : "") == 0)
             return true;
     }
     return false;
 }
 
+/* Model spec may carry a reasoning-effort sub-lane suffix: "model@effort"
+ * (e.g. "gpt-5.6-sol@xhigh"). '@' is used instead of ':' because ':' is
+ * already the provider-prefix separator ("vllm:model"). Each distinct
+ * model@effort pair is its own lane, so one provider can field several
+ * sub-lanes for an important model at different reasoning efforts. */
 static bool fabric_add_lane(provider_fabric_lane_t lanes[], int *count, int max_lanes,
                             const char *provider, const char *model, int replicas,
                             bool subscription, bool metered, const char *api_key) {
     if (!lanes || !count || *count >= max_lanes || !provider || !provider[0] || !model ||
         !model[0] || replicas <= 0)
         return false;
-    if (fabric_lane_exists(lanes, *count, provider, model))
+
+    char model_buf[128];
+    char effort_buf[16] = "";
+    snprintf(model_buf, sizeof(model_buf), "%s", model);
+    char *at = strrchr(model_buf, '@');
+    if (at && at != model_buf && at[1]) {
+        if (dsco_effort_is_valid(at + 1)) {
+            snprintf(effort_buf, sizeof(effort_buf), "%s", at + 1);
+            *at = '\0';
+        }
+        /* Invalid effort suffix: treat '@' as part of the model id. */
+    }
+
+    if (fabric_lane_exists(lanes, *count, provider, model_buf, effort_buf))
         return false;
     if (!provider_has_usable_key(provider, api_key))
         return false;
+    /* Credentials alone are insufficient: omit lanes that the durable pool has
+     * marked exhausted or breaker-tripped, rather than spending a worker on a
+     * failure we already observed. But the pool only registers its core[]
+     * providers — a keyed provider with NO slot (groq, deepseek, cerebras,
+     * together, ...) is unknown, not unhealthy. Only veto when a slot exists
+     * and reports trouble; source of truth over registry membership. */
+    provider_pool_init(api_key);
+    if (provider_pool_slot(provider) && !provider_pool_healthy(provider))
+        return false;
 
     snprintf(lanes[*count].provider, sizeof(lanes[*count].provider), "%s", provider);
-    snprintf(lanes[*count].model, sizeof(lanes[*count].model), "%s", model);
+    snprintf(lanes[*count].model, sizeof(lanes[*count].model), "%s", model_buf);
+    snprintf(lanes[*count].effort, sizeof(lanes[*count].effort), "%s", effort_buf);
     lanes[*count].replicas = replicas;
     lanes[*count].subscription = subscription;
     lanes[*count].local = provider_is_local_endpoint(provider);
     lanes[*count].metered = metered;
     (*count)++;
     return true;
+}
+
+/* Extra sub-lanes from env: DSCO_FABRIC_SUBLANES="provider:model[@effort],..."
+ * e.g. "openai-codex:gpt-5.6-sol@xhigh,openai-codex:gpt-5.6-luna@low" */
+static void fabric_add_env_sublanes(provider_fabric_lane_t lanes[], int *lane_count, int max_lanes,
+                                    int replicas, const char *api_key) {
+    const char *spec = getenv("DSCO_FABRIC_SUBLANES");
+    if (!spec || !spec[0])
+        return;
+    /* Large enough for a full catalog unroll (64 lanes x ~40 chars). */
+    char buf[4096];
+    snprintf(buf, sizeof(buf), "%s", spec);
+    char *save = NULL;
+    for (char *tok = strtok_r(buf, ",;", &save); tok; tok = strtok_r(NULL, ",;", &save)) {
+        while (*tok == ' ')
+            tok++;
+        char *colon = strchr(tok, ':');
+        if (!colon || colon == tok || !colon[1])
+            continue;
+        *colon = '\0';
+        fabric_add_lane(lanes, lane_count, max_lanes, tok, colon + 1, replicas, true, false,
+                        api_key);
+    }
 }
 
 static int fabric_env_int(const char *name, int fallback, int min_v, int max_v) {
@@ -11912,6 +11998,9 @@ static bool tool_provider_fabric_race(int gid, provider_fabric_lane_t lanes[], i
     int winner_id = -1;
     int terminal = 0;
     int errors = 0;
+    /* Race success means a useful result, not merely an exited child. A worker
+     * that returns an empty payload or a provider error must leave the race
+     * open for another healthy quasi-swimlane. */
 
     fprintf(stderr, "\n  %sfabric race%s \"%s\": waiting for first successful lane\n", TUI_BYELLOW,
             TUI_RESET, grp->name);
@@ -11934,14 +12023,20 @@ static bool tool_provider_fabric_race(int gid, provider_fabric_lane_t lanes[], i
         errors = 0;
         for (int i = 0; i < grp->child_count; i++) {
             swarm_child_t *c = &g_swarm.children[grp->child_ids[i]];
-            if (c->status == SWARM_DONE) {
+            bool usable = c->status == SWARM_DONE && c->output && c->output[0] &&
+                          !strstr(c->output, "credit_too_low") &&
+                          !strstr(c->output, "insufficient credits") &&
+                          !strstr(c->output, "authentication_error");
+            if (usable) {
                 winner_id = c->id;
                 break;
             }
-            if (c->status == SWARM_ERROR || c->status == SWARM_KILLED) {
+            if (c->status == SWARM_DONE || c->status == SWARM_ERROR || c->status == SWARM_KILLED) {
                 terminal++;
-                if (c->status == SWARM_ERROR)
+                if (c->status == SWARM_ERROR || c->status == SWARM_DONE)
                     errors++;
+                if (c->provider[0])
+                    provider_pool_report(c->provider, false, swarm_child_elapsed_sec(c) * 1000.0);
             }
         }
 
@@ -12077,7 +12172,10 @@ static bool tool_provider_fabric(const char *input, char *result, size_t rlen) {
     }
     if (!fugu_model || !fugu_model[0]) {
         free(fugu_model);
-        fugu_model = safe_strdup("fugu-ultra");
+        /* Default to base fugu: ultra is materially more expensive and the
+         * fabric fanout multiplies that cost per replica. Opt up via
+         * fugu_model / --fabric-fugu-model. */
+        fugu_model = safe_strdup("fugu");
     }
 
     bool include_metered = json_get_bool(input, "include_metered", false);
@@ -12127,7 +12225,9 @@ static bool tool_provider_fabric(const char *input, char *result, size_t rlen) {
     if (local_replicas > 8)
         local_replicas = 8;
 
-    provider_fabric_lane_t lanes[16];
+    /* Sized to the swarm's structural child cap: a full catalog unroll can
+     * field one lane per model; max_agents still governs actual fanout. */
+    provider_fabric_lane_t lanes[SWARM_MAX_CHILDREN];
     memset(lanes, 0, sizeof(lanes));
     int lane_count = 0;
     const char *api_key = g_swarm.api_key;
@@ -12139,11 +12239,26 @@ static bool tool_provider_fabric(const char *input, char *result, size_t rlen) {
                         api_key);
     }
     fabric_add_lane(lanes, &lane_count, (int)(sizeof(lanes) / sizeof(lanes[0])), "anthropic",
-                    "claude-sonnet-4-6", replicas, true, false, api_key);
+                    "claude-sonnet-5", replicas, true, false, api_key);
+    /* openai-codex fields sub-lanes for the important gpt-5.6 models (sol,
+     * terra, luna) alongside the gpt-5.5 baseline. Sub-lanes are distinct
+     * lanes per model[@effort]; scoring/max_agents still cap actual fanout. */
+    fabric_add_lane(lanes, &lane_count, (int)(sizeof(lanes) / sizeof(lanes[0])), "openai-codex",
+                    "gpt-5.6-sol", replicas, true, false, api_key);
+    fabric_add_lane(lanes, &lane_count, (int)(sizeof(lanes) / sizeof(lanes[0])), "openai-codex",
+                    "gpt-5.6-terra", replicas, true, false, api_key);
+    /* gpt-5.6-luna: observed HTTP 404 on the ChatGPT subscription backend
+     * (2026-07-12); not a default lane until it resolves. Opt in via
+     * DSCO_FABRIC_SUBLANES=openai-codex:gpt-5.6-luna[@effort]. */
     fabric_add_lane(lanes, &lane_count, (int)(sizeof(lanes) / sizeof(lanes[0])), "openai-codex",
                     "gpt-5.5", replicas, true, false, api_key);
     fabric_add_lane(lanes, &lane_count, (int)(sizeof(lanes) / sizeof(lanes[0])), "zai", "glm-5.2",
                     replicas, true, false, api_key);
+
+    /* Operator-defined effort sub-lanes, e.g.
+     * DSCO_FABRIC_SUBLANES="openai-codex:gpt-5.6-sol@xhigh,anthropic:claude-sonnet-5@high" */
+    fabric_add_env_sublanes(lanes, &lane_count, (int)(sizeof(lanes) / sizeof(lanes[0])), replicas,
+                            api_key);
 
     fabric_add_configured_local_lanes(lanes, &lane_count, (int)(sizeof(lanes) / sizeof(lanes[0])),
                                       local_replicas, api_key);
@@ -12151,6 +12266,25 @@ static bool tool_provider_fabric(const char *input, char *result, size_t rlen) {
                                 local_replicas, api_key);
 
     if (include_metered) {
+        /* Treat concrete OpenRouter models as independent model swimlanes.
+         * The planner supplies the cheapest capability-compatible frontier,
+         * rather than collapsing the entire catalog into one glm lane. */
+        if (provider_has_usable_key("openrouter", api_key)) {
+            openrouter_lane_t or_lanes[16];
+            openrouter_lane_query_t or_query = {
+                .min_context = fabric_rough_tokens(task) + 8192,
+                .min_quality = 20.0,
+                .max_models = 8,
+                .require_tools = true,
+                .diversify_org = true,
+                .task = task,
+            };
+            int or_count = openrouter_lanes_build(&or_query, or_lanes,
+                                                  (int)(sizeof(or_lanes) / sizeof(or_lanes[0])));
+            for (int i = 0; i < or_count; i++)
+                fabric_add_lane(lanes, &lane_count, (int)(sizeof(lanes) / sizeof(lanes[0])),
+                                "openrouter", or_lanes[i].model, replicas, false, true, api_key);
+        }
         fabric_add_lane(lanes, &lane_count, (int)(sizeof(lanes) / sizeof(lanes[0])), "openai",
                         "gpt-4.1", replicas, false, true, api_key);
         fabric_add_lane(lanes, &lane_count, (int)(sizeof(lanes) / sizeof(lanes[0])), "xai",
@@ -12297,14 +12431,32 @@ static bool tool_provider_fabric(const char *input, char *result, size_t rlen) {
             jbuf_append(&prompt, lane->provider);
             jbuf_append(&prompt, "\nModel: ");
             jbuf_append(&prompt, lane->model);
+            if (lane->effort[0]) {
+                jbuf_append(&prompt, "\nReasoning effort: ");
+                jbuf_append(&prompt, lane->effort);
+            }
             jbuf_append(&prompt, "\nReplica: ");
             jbuf_append_int(&prompt, ri + 1);
             jbuf_append(&prompt, " of ");
             jbuf_append_int(&prompt, lane->replicas);
             jbuf_append(&prompt, "\nReturn a complete result for this lane; the parent may race, "
                                  "compare, or synthesize outputs.");
+            /* Per-lane reasoning-effort sub-lane: the child inherits env across
+             * fork/exec, so pin DSCO_EFFORT around the spawn and restore. */
+            const char *prev_effort = getenv("DSCO_EFFORT");
+            char prev_effort_buf[32] = "";
+            if (prev_effort)
+                snprintf(prev_effort_buf, sizeof(prev_effort_buf), "%s", prev_effort);
+            if (lane->effort[0])
+                setenv("DSCO_EFFORT", lane->effort, 1);
             int cid = swarm_spawn_provider(&g_swarm, gid, prompt.data ? prompt.data : task,
                                            lane->model, lane->provider);
+            if (lane->effort[0]) {
+                if (prev_effort)
+                    setenv("DSCO_EFFORT", prev_effort_buf, 1);
+                else
+                    unsetenv("DSCO_EFFORT");
+            }
             jbuf_free(&prompt);
             if (cid >= 0) {
                 swarm_child_t *c = swarm_get(&g_swarm, cid);
@@ -22900,6 +23052,114 @@ void tools_playbook_advance_turn(void) {
     g_playbook.current_turn++;
 }
 
+/* ── conversation_context: agent-visible live transcript mutation ────────
+ *
+ * The agent loop owns g_active_conv and sets it before tool execution.  This
+ * deliberately keeps transcript construction in the same governed tool plane
+ * as every other agent effect rather than hiding it behind a slash command.
+ * Tool-use protocol messages are immutable here: removing or replacing one
+ * would leave unmatched tool calls/results and corrupt the next provider turn.
+ */
+static bool conversation_text_message(const message_t *m) {
+    return m && m->content_count == 1 && m->content && m->content[0].type &&
+           strcmp(m->content[0].type, "text") == 0;
+}
+
+static bool tool_conversation_context(const char *input, char *result, size_t rlen) {
+    char *action = json_get_str(input, "action");
+    char *role = json_get_str(input, "role");
+    char *content = json_get_str(input, "content");
+    bool ok = false;
+
+    if (!g_active_conv) {
+        snprintf(result, rlen,
+                 "{\"error\":\"no active conversation — conversation_context only works during agent loop\"}");
+        goto done;
+    }
+    if (!action || !action[0]) {
+        snprintf(result, rlen, "{\"error\":\"missing action: inspect|append|replace_last|remove_last\"}");
+        goto done;
+    }
+
+    if (strcmp(action, "inspect") == 0) {
+        jbuf_t out;
+        jbuf_init(&out, 256);
+        jbuf_appendf(&out, "{\"messages\":%d", g_active_conv->count);
+        if (g_active_conv->count > 0) {
+            const message_t *last = &g_active_conv->msgs[g_active_conv->count - 1];
+            jbuf_append(&out, ",\"last_role\":");
+            jbuf_append_json_str(&out, last->role == ROLE_USER ? "user" : "assistant");
+            jbuf_appendf(&out, ",\"last_is_plain_text\":%s",
+                         conversation_text_message(last) ? "true" : "false");
+            if (conversation_text_message(last)) {
+                jbuf_append(&out, ",\"last_content\":");
+                jbuf_append_json_str(&out, last->content[0].text ? last->content[0].text : "");
+            }
+        }
+        jbuf_append(&out, "}");
+        snprintf(result, rlen, "%s", out.data ? out.data : "{}");
+        jbuf_free(&out);
+        ok = true;
+    } else if (strcmp(action, "append") == 0) {
+        if (!content) {
+            snprintf(result, rlen, "{\"error\":\"append requires content\"}");
+            goto done;
+        }
+        if (role && strcmp(role, "assistant") == 0)
+            conv_add_assistant_text(g_active_conv, content);
+        else if (!role || strcmp(role, "user") == 0)
+            conv_add_user_text(g_active_conv, content);
+        else {
+            snprintf(result, rlen, "{\"error\":\"role must be user or assistant\"}");
+            goto done;
+        }
+        snprintf(result, rlen, "{\"status\":\"appended\",\"role\":\"%s\",\"messages\":%d}",
+                 role && strcmp(role, "assistant") == 0 ? "assistant" : "user", g_active_conv->count);
+        ok = true;
+    } else if (strcmp(action, "replace_last") == 0) {
+        if (!content) {
+            snprintf(result, rlen, "{\"error\":\"replace_last requires content\"}");
+            goto done;
+        }
+        if (g_active_conv->count == 0 ||
+            !conversation_text_message(&g_active_conv->msgs[g_active_conv->count - 1])) {
+            snprintf(result, rlen,
+                     "{\"error\":\"last message is not replaceable plain text\"}");
+            goto done;
+        }
+        msg_role_t prior_role = g_active_conv->msgs[g_active_conv->count - 1].role;
+        if (role && strcmp(role, "assistant") != 0 && strcmp(role, "user") != 0) {
+            snprintf(result, rlen, "{\"error\":\"role must be user or assistant\"}");
+            goto done;
+        }
+        conv_pop_last(g_active_conv);
+        if ((role && strcmp(role, "assistant") == 0) || (!role && prior_role == ROLE_ASSISTANT))
+            conv_add_assistant_text(g_active_conv, content);
+        else
+            conv_add_user_text(g_active_conv, content);
+        snprintf(result, rlen, "{\"status\":\"replaced\",\"messages\":%d}", g_active_conv->count);
+        ok = true;
+    } else if (strcmp(action, "remove_last") == 0) {
+        if (g_active_conv->count == 0 ||
+            !conversation_text_message(&g_active_conv->msgs[g_active_conv->count - 1])) {
+            snprintf(result, rlen,
+                     "{\"error\":\"last message is not removable plain text\"}");
+            goto done;
+        }
+        conv_pop_last(g_active_conv);
+        snprintf(result, rlen, "{\"status\":\"removed\",\"messages\":%d}", g_active_conv->count);
+        ok = true;
+    } else {
+        snprintf(result, rlen, "{\"error\":\"unknown action '%s'\"}", action);
+    }
+
+done:
+    free(action);
+    free(role);
+    free(content);
+    return ok;
+}
+
 /* ── plot: render data as Unicode charts (inline / tool result / artifact) ── */
 #include "plot.h"
 static bool tool_plot(const char *input, char *result, size_t rlen) {
@@ -28301,11 +28561,50 @@ static bool tool_load_tools(const char *input, char *result, size_t rlen) {
     off +=
         snprintf(result + off, rlen - off,
                  "],\"active_builtin_loaded\":%d,"
-                 "\"note\":\"These tools are now loaded into the active tool list and can be called "
-                 "directly on the next turn. Use evict_tools to unload names or categories.\"}",
+                 "\"note\":\"Schemas are ready. Call a tool directly when it is advertised; "
+                 "otherwise call invoke_tool with its exact name and input object. Use "
+                 "evict_tools to unload names or categories.\"}",
                  tools_loaded_builtin_count());
 
     return true;
+}
+
+/* Stable-schema capability dispatcher. Provider prompt caches place the tool
+ * array before system/messages, so advertising a newly loaded schema rewrites
+ * the whole cache prefix. `invoke_tool` keeps one tiny wire schema stable while
+ * still routing the selected capability through the normal immune/governance
+ * gate. `load_tools` supplies the target schema in-band to the model. */
+static bool tool_invoke_tool(const char *input, char *result, size_t rlen) {
+    char *name = json_get_str(input, "name");
+    if (!name || !name[0]) {
+        free(name);
+        snprintf(result, rlen, "{\"error\":\"name required\"}");
+        return false;
+    }
+    if (strcmp(name, "invoke_tool") == 0) {
+        free(name);
+        snprintf(result, rlen, "{\"error\":\"invoke_tool cannot invoke itself\"}");
+        return false;
+    }
+    char *target_input = json_get_raw(input, "input");
+    if (!target_input)
+        target_input = json_get_raw(input, "arguments");
+    if (!target_input)
+        target_input = safe_strdup("{}");
+    if (!json_is_valid_container(target_input) || target_input[0] != '{') {
+        free(name);
+        free(target_input);
+        snprintf(result, rlen, "{\"error\":\"input must be a JSON object\"}");
+        return false;
+    }
+
+    /* Deliberately use the public entrypoint: the dispatcher itself is not an
+     * authority boundary, and the target must receive its own risk class,
+     * approval, budget, killswitch, and audit checks. */
+    bool ok = tools_execute(name, target_input, result, rlen);
+    free(name);
+    free(target_input);
+    return ok;
 }
 
 static bool tool_evict_tools(const char *input, char *result, size_t rlen) {
@@ -32268,7 +32567,7 @@ static const tool_def_t s_tools[] = {
      .input_schema_json =
          "{\"type\":\"object\",\"properties\":{\"server\":{\"type\":\"string\",\"description\":"
          "\"Local server name: lmstudio, ollama, mlx, vllm, llamacpp, jan, etc. Defaults to "
-         "lmstudio.\"},\"provider\":{\"type\":\"string\",\"description\":\"Alias for server.\"},"
+         "lmstudio.\"},\"response_mode\":{\"type\":\"string\",\"enum\":[\"text\",\"raw\"],\"description\":\"text (default) returns completion text; raw returns the complete provider response including logprobs and reasoning telemetry.\"},\"provider\":{\"type\":\"string\",\"description\":\"Alias for server.\"},"
          "\"base_url\":{\"type\":\"string\",\"description\":\"Loopback OpenAI-compatible base URL, "
          "for example http://localhost:1234/v1.\"},\"model\":{\"type\":\"string\"},\"prompt\":{"
          "\"type\":\"string\"},\"system\":{\"type\":\"string\"},\"messages\":{\"type\":\"array\","
@@ -32336,6 +32635,17 @@ static const tool_def_t s_tools[] = {
      .input_schema_json =
          "{\"type\":\"object\",\"properties\":{\"aggressive\":{\"type\":\"boolean\"}}}",
      .execute = tool_context_compact,
+     .core = true},
+    {.name = "conversation_context",
+     .description = "Inspect or make bounded live-transcript edits during an agent turn. "
+                    "action=inspect|append|replace_last|remove_last. append/replace require content; "
+                    "role=user|assistant. Tool-use protocol messages cannot be altered.",
+     .input_schema_json =
+         "{\"type\":\"object\",\"properties\":{\"action\":{\"type\":\"string\","
+         "\"enum\":[\"inspect\",\"append\",\"replace_last\",\"remove_last\"]},"
+         "\"role\":{\"type\":\"string\",\"enum\":[\"user\",\"assistant\"]},"
+         "\"content\":{\"type\":\"string\"}},\"required\":[\"action\"]}",
+     .execute = tool_conversation_context,
      .core = true},
     {.name = "plot",
      .description = "Render data as a Unicode chart (returns ANSI/Unicode art). Types: line, bar, "
@@ -33620,6 +33930,30 @@ static const tool_def_t s_tools[] = {
      .execute = tool_weather,
      .is_read_only = true,
      .is_concurrent = true},
+    {.name = "openrouter_lanes",
+     .description = "Materialize OpenRouter model swimlanes from the live catalog, optionally "
+                    "fully unrolling each model into concrete OpenRouter upstream providers.",
+     .input_schema_json =
+         "{\"type\":\"object\",\"properties\":{\"task\":{\"type\":\"string\"},"
+         "\"min_context\":{\"type\":\"integer\"},\"min_output\":{\"type\":\"integer\"},"
+         "\"min_quality\":{\"type\":\"number\"},\"max_input_price_per_m\":{\"type\":\"number\"},"
+         "\"max_output_price_per_m\":{\"type\":\"number\"},\"max_models\":{\"type\":\"integer\"},"
+         "\"endpoints_per_model\":{\"type\":\"integer\",\"minimum\":0,\"maximum\":16},"
+         "\"require_tools\":{\"type\":\"boolean\"},\"free_only\":{\"type\":\"boolean\"},"
+         "\"diversify_org\":{\"type\":\"boolean\"},\"limit\":{\"type\":\"integer\"}}}",
+     .execute = tool_openrouter_lanes,
+     .is_read_only = true,
+     .is_concurrent = true},
+    {.name = "weather_batch",
+     .description = "Native bounded-concurrency weather retrieval for up to 1,000 locations. "
+                    "Uses curl multi directly; it does not spawn model/agent workers.",
+     .input_schema_json =
+         "{\"type\":\"object\",\"properties\":{\"locations\":{\"type\":\"array\","
+         "\"items\":{\"type\":\"string\"},\"maxItems\":1000},\"concurrency\":{\"type\":\"integer\","
+         "\"minimum\":1,\"maximum\":32}},\"required\":[\"locations\"]}",
+     .execute = tool_weather_batch,
+     .is_read_only = true,
+     .is_concurrent = true},
     {.name = "slack_post",
      .description = "Post message to Slack.",
      .input_schema_json = "{\"type\":\"object\",\"properties\":{\"channel\":{\"type\":\"string\"},"
@@ -34451,6 +34785,18 @@ static const tool_def_t s_tools[] = {
      .output_schema_json = OUT_LOAD_TOOLS,
      .execute = tool_load_tools,
      .core = true},
+    {.name = "invoke_tool",
+     .description =
+         "Invoke a discovered or loaded capability without changing the provider tool schema. "
+         "Use the exact target name and input schema returned by discover_tools/load_tools. "
+         "The target still passes through normal trust, approval, budget, and audit gates.",
+     .input_schema_json =
+         "{\"type\":\"object\",\"properties\":{\"name\":{\"type\":\"string\","
+         "\"description\":\"Exact tool name\"},\"input\":{\"type\":\"object\","
+         "\"description\":\"Arguments matching the loaded tool schema\"}},"
+         "\"required\":[\"name\",\"input\"]}",
+     .execute = tool_invoke_tool,
+     .core = true},
     {.name = "evict_tools",
      .description = "Unload dynamically loaded tools from the active register file. Provide names, "
                     "tools, category, or all:true.",
@@ -34729,6 +35075,17 @@ static const tool_def_t s_tools[] = {
      .execute = tool_plugin_validate,
      .is_read_only = true,
      .is_concurrent = true},
+    {.name = "openai_image_generate",
+     .description = "Generate one image with the OpenAI Image API and save it to a local file.",
+     .input_schema_json =
+         "{\"type\":\"object\",\"properties\":{\"prompt\":{\"type\":\"string\"},\"output_path\":{"
+         "\"type\":\"string\"},\"model\":{\"type\":\"string\",\"default\":\"gpt-image-2\"},"
+         "\"size\":{\"type\":\"string\",\"default\":\"auto\"},\"quality\":{\"type\":\"string\","
+         "\"default\":\"auto\"},\"output_format\":{\"type\":\"string\",\"enum\":[\"png\","
+         "\"webp\",\"jpeg\"],\"default\":\"png\"},\"background\":{\"type\":\"string\"},"
+         "\"moderation\":{\"type\":\"string\"},\"output_compression\":{\"type\":\"integer\"}},"
+         "\"required\":[\"prompt\"]}",
+     .execute = tool_openai_image_generate},
     {.name = "view_image",
      .description = "Prepare a local image file for model-side vision analysis.",
      .input_schema_json = "{\"type\":\"object\",\"properties\":{\"path\":{\"type\":\"string\"}},"
@@ -34922,7 +35279,7 @@ bool tools_invoke_by_name(const char *name, const char *input, char *result, siz
     result[0] = '\0';
     /* O(1) hash-map lookup (falls back to MCP alias resolution). */
     int idx = tools_lookup_index(name);
-    if (idx >= 0 && idx < s_tool_count && s_tools[idx].execute) {
+    if (idx >= 0 && idx < s_tool_count && tools_profile_allows_index(idx) && s_tools[idx].execute) {
         return s_tools[idx].execute(input ? input : "{}", result, rlen);
     }
     snprintf(result, rlen, "{\"error\":\"unknown tool: %s\"}", name);
@@ -34965,21 +35322,26 @@ bool tools_is_parent_specified_core_tool(const char *tool_name) {
     return false;
 }
 
+static bool tools_restricted_profile_requested(void) {
+    const char *profile = getenv("DSCO_TOOL_PROFILE");
+    return profile && strcmp(profile, "restricted") == 0;
+}
+
 void tools_init_local_only(void) {
     /* Fast path for local metadata/direct-tool commands. Keep this free of
      * subsystem startup: no plugins, browser profiles, IPC, MCP, or VFS. */
-    g_tools_init_profile = TOOLS_AGENT;
+    g_tools_init_profile = tools_restricted_profile_requested() ? TOOLS_RESTRICTED : TOOLS_AGENT;
     tool_map_rebuild();
 }
 
 void tools_init(void) {
-    tools_init_profile(TOOLS_FULL);
+    tools_init_profile(tools_restricted_profile_requested() ? TOOLS_RESTRICTED : TOOLS_FULL);
 }
 
 void tools_init_profile(tools_init_profile_t profile) {
     dsco_flow_reset(); /* session start: clear lethal-trifecta taint accumulation */
     g_tools_init_profile = profile;
-    if (profile == TOOLS_CORE || profile == TOOLS_AGENT) {
+    if (profile != TOOLS_FULL) {
         tool_map_rebuild();
         return;
     }
@@ -35029,6 +35391,11 @@ bool tools_profile_allows_index(int index) {
             }
         }
         return false;
+    }
+    if (g_tools_init_profile == TOOLS_RESTRICTED) {
+        const char *name = s_tools[index].name;
+        return name && (strcmp(name, "Bash") == 0 || strcmp(name, "curl_raw") == 0 ||
+                        strcmp(name, "ssh_command") == 0);
     }
     if (g_tools_init_profile == TOOLS_FULL || g_tools_init_profile == TOOLS_AGENT)
         return true;
@@ -35488,8 +35855,8 @@ static void tools_unmark_hot(int tool_idx) {
  * can shrink the warm bank under cost pressure. */
 
 static const char *CORE_ALWAYS[] = {
-    "bash", "python", "discover_tools", "load_tools", "evict_tools", "StartOfLoopConstruct",
-    "EndOfLoopConstruct",
+    "bash", "python", "discover_tools", "load_tools", "invoke_tool", "evict_tools",
+    "StartOfLoopConstruct", "EndOfLoopConstruct",
     NULL /* minimal core: execution + dynamic loading + loop control.
           * NOTE: must stay <= TOOL_REG_ALWAYS (config.h) entries or the
           * critical-budget pin loop will evict required tools.
@@ -37508,6 +37875,10 @@ void tools_register_external_with_output(const char *name, const char *descripti
                                          void *ctx) {
     if (!name || !name[0])
         return;
+    /* Restricted mode admits only its fixed builtin set. In particular, do not
+     * permit a dynamic/MCP registration to add or shadow a permitted name. */
+    if (g_tools_init_profile == TOOLS_RESTRICTED)
+        return;
     char *new_schema = safe_strdup(
         input_schema_json && input_schema_json[0] ? input_schema_json : k_default_input_schema_json);
     char *new_output_schema =
@@ -37956,6 +38327,17 @@ static bool tools_execute_internal(const char *name, const char *input_json, cha
 
     if (!name) {
         snprintf(result, result_len, "error: null tool name");
+        return false;
+    }
+    /* Keep the execution surface identical to the disclosed surface. This must
+     * precede VM, plugin, and cache paths, each of which can bypass lookup. */
+    int profile_index = tools_lookup_index(name);
+    /* Builtins use non-negative indexes and are subject to the active profile.
+     * Plugin/MCP tools use negative registry indexes; they are only inserted in
+     * the full profile, while restricted mode rejects dynamic registration. */
+    if (profile_index < 0 ? g_tools_init_profile != TOOLS_FULL
+                          : !tools_profile_allows_index(profile_index)) {
+        snprintf(result, result_len, "unknown tool: %s", name);
         return false;
     }
 
@@ -38972,15 +39354,16 @@ bool tools_execute_for_tier(const char *name, const char *input_json, const char
     tool_governance_ensure_dsco_agent();
 
     {
+        /* Resolve immutable tool metadata through the registry hash map rather
+         * than linearly scanning the full catalog on every governed call. */
         bool is_ro = false;
-        int _total = 0;
-        const tool_def_t *_all = tools_get_all(&_total);
-        for (int _i = 0; _i < _total; _i++) {
-            if (strcmp(_all[_i].name, name) == 0) {
-                is_ro = _all[_i].is_read_only;
-                break;
-            }
-        }
+        tool_registry_rdlock();
+        int _tool_idx = tool_map_lookup_with_mcp_alias_unlocked(name, NULL, 0);
+        if (_tool_idx >= 0 && _tool_idx < s_tool_count)
+            is_ro = s_tools[_tool_idx].is_read_only;
+        /* External tools had no read-only metadata in the previous catalog
+         * scan and therefore retain the conservative mutating classification. */
+        tool_registry_unlock();
         if (!is_ro && tool_name_is_shell_exec(name)) {
             /* Command-level read-only detection: a provably non-mutating
              * shell command (grep/cat/git log/…) runs as READ class —
@@ -39025,6 +39408,9 @@ bool tools_execute_for_tier(const char *name, const char *input_json, const char
             dsco_cap_decision_t cap_dec =
                 dsco_capability_gate(name, input_json, tier, cap_reason, sizeof(cap_reason));
             if (cap_dec == CAP_DECISION_DENY) {
+                /* Capability denials are the non-negotiable floor: audit mode
+                 * may remove approval and budget friction, not enable control
+                 * tools or the lethal exfiltration combination. */
                 pheromone_deposit(&g_governance.pheromones, PHERO_WARNING, 1.0, phero_region,
                                   "immune", "{\"reason\":\"capability_denied\"}");
                 tool_gov_deny(result, result_len, name, "capability",
@@ -39034,8 +39420,12 @@ bool tools_execute_for_tier(const char *name, const char *input_json, const char
             }
         }
 
-        /* ── Human approval for risky/blocked tools ──────────────────────── */
-        if (!tool_request_approval(name, input_json, cls, tier, result, result_len)) {
+        /* ── Human approval for risky/blocked tools ────────────────────────
+         * Audit mode retains a record of the assessment but does not turn a
+         * headless development run into an approval dead-end. Immune vetoes
+         * above (killswitch, breakers, self-preservation) stay enforced. */
+        if (gov_stage_enforces(_gov_model, GOV_STAGE_APPROVAL) &&
+            !tool_request_approval(name, input_json, cls, tier, result, result_len)) {
             pheromone_deposit(&g_governance.pheromones, PHERO_WARNING, 0.8, phero_region, "immune",
                               "{\"reason\":\"approval_denied\"}");
             self_improve_record_tool(&g_self_improve, name, false, 0.0, 0);
@@ -39438,6 +39828,9 @@ static const tool_timeout_cfg_t s_timeout_overrides[] = {
      * budget) return early, and Esc/Ctrl-C + swarm budget still bound runaways.
      * Runtime override: DSCO_TOOL_TIMEOUT_SWARM. */
     {"swarm", 3660},
+    /* Direct native HTTP batch work must not inherit the generic 30s tool
+     * deadline; it is bounded by per-request curl timeouts and concurrency. */
+    {"weather_batch", 300},
     {"create_swarm", 300},
     {"swarm_collect", 3660},
     {"spawn_executor", 300},
