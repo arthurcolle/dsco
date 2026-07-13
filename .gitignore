@@ -139,3 +139,39 @@ mcp_smoke
 data/consumer_profile_ontology/*.csv
 data/consumer_profile_ontology/*.jsonl
 dsco-instrumented
+
+# hardening: secret key material + generated encrypted blobs (build artifacts)
+include/embedded_key.gen.h
+build/.embed_key
+src/generated/embedded_*.c
+include/embedded_data_registry.h
+include/cstring_key.gen.h
+build/.cstring_key
+build-harden/
+build-hardenmax/
+
+# ── Phase 0 hygiene: credentials, IDE projects, large generated & run artifacts ──
+# Local credential material — must never be committed.
+data/dsco_secrets.txt
+data/*secrets*.txt
+# GNAT/GPS IDE project scratch
+*.gpr
+*.rep/
+dsco-cli.rep/
+# Slim spine build outputs (binary + depfile; source src/spine_dsco_slim.c is tracked)
+/spine-dsco-slim
+/spine-dsco-slim.d
+# Swarm / perf run outputs (regenerable, large)
+.swarm/
+.dsco-perf-agents/
+# Large generated corpora & vendored scratch trees
+/generated/
+oh-my-pi/
+# DSPy session distillation dumps (regenerable via scripts/)
+reports/*.html
+reports/dspy_session_distill_*
+reports/dspy_deep_enrichment_map.html
+# Personal / brief scratch HTML
+PAT_BOLAND_*.html
+memory_shortage_*.html
+*.png
