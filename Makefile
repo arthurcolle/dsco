@@ -555,6 +555,12 @@ $(ASAN_OBJ_DIR)/gsl_%.o: gsl/src/%.c | $(ASAN_OBJ_DIR)
 $(UBSAN_OBJ_DIR)/gsl_%.o: gsl/src/%.c | $(UBSAN_OBJ_DIR)
 	$(CC) $(UBSAN_CFLAGS) -c -o $@ $<
 
+$(ASAN_TEST_OBJ_DIR)/gsl_%.o: gsl/src/%.c | $(ASAN_TEST_OBJ_DIR)
+	$(CC) $(ASAN_CFLAGS) -c -o $@ $<
+
+$(UBSAN_TEST_OBJ_DIR)/gsl_%.o: gsl/src/%.c | $(UBSAN_TEST_OBJ_DIR)
+	$(CC) $(UBSAN_CFLAGS) -c -o $@ $<
+
 $(TSAN_TEST_OBJ_DIR)/gsl_%.o: gsl/src/%.c | $(TSAN_TEST_OBJ_DIR)
 	$(CC) $(TSAN_CFLAGS) -c -o $@ $<
 
@@ -989,7 +995,7 @@ release-hardened-native: $(TARGET)
 lint: format-check docs-check check-version
 
 clean:
-	rm -rf $(BUILD_DIR) $(TARGET) $(LITE_TARGET) $(DEBUG_TARGET) $(PROFILE_TARGET) dsc test_runner coverage_runner $(TARGET)-asan $(TARGET)-ubsan asan-test_runner ubsan-test_runner
+	rm -rf $(BUILD_DIR) $(TARGET) $(LITE_TARGET) $(DEBUG_TARGET) $(PROFILE_TARGET) dsc test_runner coverage_runner $(TARGET)-asan $(TARGET)-ubsan asan-test_runner ubsan-test_runner test_runner_asan test_runner_ubsan test_runner_asan_ubsan test_runner_tsan
 
 install: $(TARGET) dsco-new $(LITE_TARGET) dsc
 	install -d $(PREFIX)/bin
