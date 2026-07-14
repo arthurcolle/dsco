@@ -53,6 +53,7 @@ typedef struct {
     int context_used_tokens;
     int context_window_tokens; /* effective (output-aware) window */
     int turns;
+    bool quality_critical_work; /* high-stakes self-mod/governance work */
 } spend_signals_t;
 
 /* Parameter plan for the next turn. */
@@ -79,6 +80,8 @@ typedef struct {
     bool recommend_1h_cache; /* slow cadence + poor hit ratio on 5m TTL */
     /* Escalation. */
     bool suggest_model_downshift; /* leaf-work should move to a cheaper model */
+    bool preserve_quality;        /* don't downshift/cap reasoning silently */
+    bool require_user_checkpoint; /* pause before high-stakes spend */
     bool block_turn;              /* EXHAUSTED: refuse to spend */
     char reason[192];             /* one-line human explanation */
 } spend_plan_t;
