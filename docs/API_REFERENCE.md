@@ -3,7 +3,7 @@
 This file is auto-generated from header declarations in `include/`.
 
 - Generator: `./scripts/gen_api_reference.sh`
-- Headers scanned: 134
+- Headers scanned: 126
 
 ## Regeneration
 
@@ -265,15 +265,6 @@ Function-like declarations: 10
 - `const char *codex_cache_default_effort(const char *model);`
 - `bool codex_cache_model_supported(const char *model);`
 
-## `compute.h`
-
-Function-like declarations: 2
-
-### Declarations
-
-- `void compute_register_backends(void);`
-- `int dsco_compute_cli(int argc, char **argv);`
-
 ## `config.h`
 
 Function-like declarations: 24
@@ -333,19 +324,6 @@ Function-like declarations: 22
 - `int connector_validate(connector_t *c, const char *method, const char *params_json, char *err, size_t errlen);`
 - `void connector_set_validate(int on);`
 - `int connector_cli(int argc, char **argv);`
-
-## `construct.h`
-
-Function-like declarations: 6
-
-### Declarations
-
-- `void construct_start(void);`
-- `void construct_stop(void);`
-- `int construct_tick(void);`
-- `void construct_protect(const char *tool_name, construct_priority_t prio, int renew_quantum_s, int low_water_s, int max_lifetime_s);`
-- `void construct_unprotect(const char *tool_name);`
-- `void construct_register_tool(void);`
 
 ## `control_flow.h`
 
@@ -510,7 +488,7 @@ Function-like declarations: 22
 
 ## `dsco_dht.h`
 
-Function-like declarations: 11
+Function-like declarations: 6
 
 ### Declarations
 
@@ -520,11 +498,6 @@ Function-like declarations: 11
 - `void dsco_dht_get_stats(dsco_dht_t *d, dsco_dht_stats_t *out);`
 - `void dsco_dht_stop(dsco_dht_t *d);`
 - `dsco_dht_t *dsco_dht_global(void);`
-- `dsco_dht_kbuckets_t *dsco_dht_kbuckets_create(const uint8_t self_id[20], int k);`
-- `void dsco_dht_kbuckets_destroy(dsco_dht_kbuckets_t *kb);`
-- `bool dsco_dht_kbuckets_touch(dsco_dht_kbuckets_t *kb, const uint8_t node_id[20], const char *addr, uint64_t now_tick);`
-- `int dsco_dht_kbuckets_bucket_size(dsco_dht_kbuckets_t *kb, const uint8_t node_id[20]);`
-- `int dsco_dht_kbuckets_closest(dsco_dht_kbuckets_t *kb, const uint8_t target[20], uint8_t out_ids[][20], int max);`
 
 ## `dsco_mlx.h`
 
@@ -557,27 +530,6 @@ Function-like declarations: 8
 - `dsco_task_t *dsco_pool_submit(dsco_pool_work_fn fn, void *ctx);`
 - `void dsco_pool_join(dsco_task_t *t);`
 - `int dsco_pool_worker_count(void);`
-
-## `dsco_swim.h`
-
-Function-like declarations: 14
-
-### Declarations
-
-- `typedef uint64_t (*dsco_swim_now_fn)(void *ctx);`
-- `dsco_swim_t *dsco_swim_create(const dsco_swim_config_t *cfg);`
-- `void dsco_swim_destroy(dsco_swim_t *swim);`
-- `bool dsco_swim_upsert(dsco_swim_t *swim, const uint8_t node_id[MESH_PUBKEY_LEN], dsco_swim_state_t state, uint64_t incarnation);`
-- `bool dsco_swim_mark_suspect(dsco_swim_t *swim, const uint8_t node_id[MESH_PUBKEY_LEN], uint64_t incarnation);`
-- `bool dsco_swim_refute(dsco_swim_t *swim, const uint8_t node_id[MESH_PUBKEY_LEN], uint64_t higher_incarnation);`
-- `int dsco_swim_tick(dsco_swim_t *swim);`
-- `dsco_swim_state_t dsco_swim_state(dsco_swim_t *swim, const uint8_t node_id[MESH_PUBKEY_LEN]);`
-- `uint64_t dsco_swim_incarnation(dsco_swim_t *swim, const uint8_t node_id[MESH_PUBKEY_LEN]);`
-- `int dsco_swim_count(dsco_swim_t *swim);`
-- `bool dsco_swim_ping(dsco_swim_t *swim, const uint8_t target[MESH_PUBKEY_LEN]);`
-- `bool dsco_swim_ping_req(dsco_swim_t *swim, const uint8_t target[MESH_PUBKEY_LEN]);`
-- `bool dsco_swim_ack(dsco_swim_t *swim, const uint8_t target[MESH_PUBKEY_LEN]);`
-- `bool dsco_swim_handle_message(dsco_swim_t *swim, const uint8_t from[MESH_PUBKEY_LEN], const void *data, size_t len);`
 
 ## `embedded_data_registry.h`
 
@@ -677,28 +629,6 @@ Function-like declarations: 5
 - `bool execution_submit(const execution_intent_t *intent, execution_receipt_t *receipt, char *result, size_t result_len);`
 - `bool execution_last_receipt_json(char *out, size_t out_len);`
 
-## `executive.h`
-
-Function-like declarations: 14
-
-### Declarations
-
-- `typedef struct { void (*request_exit)(const char *reason);`
-- `double (*get_session_budget)(void);`
-- `void (*set_session_budget)(double usd);`
-- `double (*get_session_spent)(void);`
-- `void (*force_phase_red)(bool on);`
-- `void (*request_model_downshift)(const char *reason);`
-- `void (*escalate)(const char *question);`
-- `bool (*frontier_snapshot)(double *score, bool *on_frontier, char *summary, size_t summary_len);`
-- `void (*audit)(const char *category, const char *title, const char *detail);`
-- `void executive_set_hooks(const executive_hooks_t *hooks);`
-- `bool executive_decide(const char *input_json, char *result, size_t rlen);`
-- `bool tool_executive_decision(const char *input, char *result, size_t rlen);`
-- `exec_decision_t executive_parse_decision(const char *name, bool *ok);`
-- `const char *executive_decision_name(exec_decision_t d);`
-- `bool executive_spending_paused(void);`
-
 ## `extension/backend.h`
 
 Function-like declarations: 7
@@ -797,18 +727,6 @@ Function-like declarations: 3
 - `bool fractal_is_kind(const char *kind);`
 - `int fractal_plot(char *out, size_t cap, const char *json);`
 - `int fractal_anim(const char *json);`
-
-## `frontier.h`
-
-Function-like declarations: 5
-
-### Declarations
-
-- `void frontier_init(frontier_ledger_t *l);`
-- `frontier_decomp_t frontier_record(frontier_ledger_t *l, const frontier_turn_t *t, const frontier_prices_t *p);`
-- `frontier_verdict_t frontier_verdict(const frontier_ledger_t *l);`
-- `double frontier_waste_ratio(const frontier_ledger_t *l);`
-- `const char *frontier_report(const frontier_ledger_t *l, char *buf, int buf_len);`
 
 ## `governance.h`
 
@@ -933,7 +851,7 @@ Function-like declarations: 8
 
 ## `integrations.h`
 
-Function-like declarations: 256
+Function-like declarations: 255
 
 ### Declarations
 
@@ -943,7 +861,6 @@ Function-like declarations: 256
 - `bool tool_jina_read(const char *input, char *result, size_t rlen);`
 - `bool tool_jina_search(const char *input, char *result, size_t rlen);`
 - `bool tool_jina_embed(const char *input, char *result, size_t rlen);`
-- `int jina_embed_batch(char **texts, int n, const char *task, const char *model, int want_dim, float *vecs, int stride, int *out_dim);`
 - `bool tool_jina_ai_reader(const char *input, char *result, size_t rlen);`
 - `bool tool_jina_ai_search(const char *input, char *result, size_t rlen);`
 - `bool tool_jina_ai_embed(const char *input, char *result, size_t rlen);`
@@ -1249,7 +1166,7 @@ Function-like declarations: 37
 
 ## `json_util.h`
 
-Function-like declarations: 37
+Function-like declarations: 29
 
 ### Declarations
 
@@ -1277,16 +1194,8 @@ Function-like declarations: 37
 - `char *json_get_str(const char *json, const char *key);`
 - `char *json_get_raw(const char *json, const char *key);`
 - `int json_get_int(const char *json, const char *key, int def);`
-- `long long json_get_i64(const char *json, const char *key, long long def);`
 - `bool json_get_bool(const char *json, const char *key, bool def);`
 - `double json_get_double(const char *json, const char *key, double def);`
-- `json_view_t *json_view_open(const char *json);`
-- `void json_view_close(json_view_t *v);`
-- `const char *json_view_str(json_view_t *v, const char *key);`
-- `long long json_view_i64(json_view_t *v, const char *key, long long def);`
-- `double json_view_f64(json_view_t *v, const char *key, double def);`
-- `bool json_view_bool(json_view_t *v, const char *key, bool def);`
-- `bool json_view_ok(const json_view_t *v);`
 - `bool json_is_valid_container(const char *json);`
 - `typedef void (*json_array_cb)(const char *element_start, void *ctx);`
 - `int json_array_foreach(const char *json, const char *key, json_array_cb cb, void *ctx);`
@@ -1483,7 +1392,7 @@ Function-like declarations: 7
 
 ## `memory_tier.h`
 
-Function-like declarations: 35
+Function-like declarations: 29
 
 ### Declarations
 
@@ -1500,10 +1409,6 @@ Function-like declarations: 35
 - `bool memory_pin(memory_store_t *m, const char *key);`
 - `bool memory_unpin(memory_store_t *m, const char *key);`
 - `bool memory_promote(memory_store_t *m, const char *key);`
-- `bool memory_classify(memory_store_t *m, const char *key, memory_class_t level);`
-- `bool memory_classify_review(memory_store_t *m, const char *key);`
-- `int memory_purge_umbral(memory_store_t *m);`
-- `bool memory_class_promotable(const memory_entry_t *e);`
 - `int memory_decay_tick(memory_store_t *m, double threshold);`
 - `int memory_consolidate(memory_store_t *m);`
 - `double memory_keep_score(const memory_entry_t *e, memory_keep_mode_t mode, double relevance, double now);`
@@ -1513,8 +1418,6 @@ Function-like declarations: 35
 - `int memory_status_json(const memory_store_t *m, char *buf, size_t len);`
 - `const char *memory_tier_name(memory_tier_t t);`
 - `double memory_tier_halflife(memory_tier_t t);`
-- `const char *memory_class_name(memory_class_t c);`
-- `bool memory_class_from_name(const char *s, memory_class_t *out);`
 - `double memory_calc_strength(memory_tier_t tier, double created_at, double now);`
 - `void memory_store_set_vfs(vfs_db_t *vfs);`
 - `void memory_persist_semantic(memory_store_t *m);`
@@ -1787,7 +1690,7 @@ Function-like declarations: 53
 
 ## `plan_cache.h`
 
-Function-like declarations: 13
+Function-like declarations: 12
 
 ### Declarations
 
@@ -1799,11 +1702,10 @@ Function-like declarations: 13
 - `bool plan_cache_lookup(const char *task, plan_cache_result_t *result);`
 - `void plan_cache_store(const char *task, const char *topology_name, const char *rationale, float fit_score);`
 - `void plan_cache_store_json(const char *task, const char *plan_json);`
-- `void plan_cache_feedback(const char *task, bool success);`
 - `const plan_cache_entry_t *plan_cache_find_entry(const char *task);`
 - `int plan_cache_stats_json(char *buf, size_t buflen);`
 - `float plan_similarity_score(const char *task_a, const char *task_b);`
-- `char *plan_cache_adapt(const plan_cache_entry_t *entry, uint64_t expected_task_hash, const char *new_task);`
+- `char *plan_cache_adapt(const plan_cache_entry_t *entry, const char *new_task);`
 
 ## `plan_optimizer.h`
 
@@ -1951,21 +1853,6 @@ Function-like declarations: 3
 - `int dsco_mux_run(const char *api_key, const char *initial_root);`
 - `int dsco_mux_spawn_worker(dsco_project_t *p, const char *api_key);`
 - `int dsco_mux_kill_worker(dsco_project_t *p);`
-
-## `prompt_pool.h`
-
-Function-like declarations: 8
-
-### Declarations
-
-- `void prompt_pool_init(void);`
-- `void prompt_pool_shutdown(void);`
-- `int prompt_pool_count(void);`
-- `bool prompt_pool_suggestion(char *out, size_t out_sz);`
-- `unsigned prompt_pool_bucket(void);`
-- `bool prompt_pool_add(const char *prompt, const char *src);`
-- `int prompt_pool_refresh_now(void);`
-- `void prompt_pool_register_tool(void);`
 
 ## `provider.h`
 
@@ -2229,18 +2116,6 @@ Function-like declarations: 13
 - `void semantic_set_vfs(vfs_db_t *vfs);`
 - `int sem_score_messages(tfidf_index_t *idx, const char *query, const char **msg_texts, int msg_count, msg_score_t *results, int max_results);`
 
-## `sequence_state.h`
-
-Function-like declarations: 5
-
-### Declarations
-
-- `void dsco_sequence_state_init(dsco_sequence_state_t *seq, const dsco_sampling_params_t *sampling, dsco_kvblock_ref_t blocks);`
-- `void dsco_sequence_state_free(dsco_sequence_state_t *seq);`
-- `bool dsco_sequence_state_append(dsco_sequence_state_t *seq, int token);`
-- `bool dsco_sequence_state_next(dsco_sequence_state_t *seq, int *out_token);`
-- `void dsco_sequence_state_rewind(dsco_sequence_state_t *seq);`
-
 ## `session_memory.h`
 
 Function-like declarations: 11
@@ -2334,19 +2209,6 @@ Function-like declarations: 43
 - `count += (size_t)__builtin_popcount((unsigned)_mm_movemask_epi8(eq));`
 - `while (pos > 0) { ssize_t nl = dsco_simd_rfind_byte(base, pos, '\n');`
 
-## `spend_governor.h`
-
-Function-like declarations: 6
-
-### Declarations
-
-- `spend_plan_t spend_governor_plan(const spend_signals_t *sig);`
-- `void spend_plan_apply_learned(spend_plan_t *plan, const spend_learned_t *lw, const spend_signals_t *sig);`
-- `int spend_effort_rank(const char *effort);`
-- `bool spend_effort_is_downshift(const char *current, const char *candidate);`
-- `void spend_governor_default_budgets(bool had_explicit, double *session_usd, double *daily_usd);`
-- `const char *spend_phase_label(spend_phase_t phase);`
-
 ## `startup.h`
 
 Function-like declarations: 4
@@ -2392,7 +2254,7 @@ Function-like declarations: 4
 ### Declarations
 
 - `int supervisor_run(int child_argc, char **child_argv);`
-- `bool supervisor_resolve_hotswap_exec(const char *current_path, const char *explicit_path, char *out, size_t out_len);`
+- `bool supervisor_resolve_hotswap_exec(const char *current_exec, const char *explicit_hotswap, char *out_exec, size_t out_exec_len);`
 - `void dsco_maybe_exec_shell_to_keep_terminal(void);`
 - `void main_install_crash_handlers(void);`
 
@@ -2544,7 +2406,7 @@ Function-like declarations: 14
 
 ## `tools.h`
 
-Function-like declarations: 101
+Function-like declarations: 85
 
 ### Declarations
 
@@ -2576,7 +2438,6 @@ Function-like declarations: 101
 - `int tools_get_core_count(void);`
 - `int tools_builtin_count(void);`
 - `bool tools_execute(const char *name, const char *input_json, char *result, size_t result_len);`
-- `bool tools_execute_raw_for_test(const char *name, const char *input_json, char *result, size_t result_len);`
 - `bool tools_execute_for_tier(const char *name, const char *input_json, const char *tier, char *result, size_t result_len);`
 - `bool tools_is_allowed_for_tier(const char *name, const char *tier, char *reason, size_t reason_len);`
 - `char *tools_normalize_input(const char *name, const char *input_json);`
@@ -2591,28 +2452,14 @@ Function-like declarations: 101
 - `void tool_map_free(tool_map_t *m);`
 - `void tool_map_insert(tool_map_t *m, const char *name, int index);`
 - `int tool_map_lookup(tool_map_t *m, const char *name);`
-- `int tools_lookup_index(const char *name);`
-- `void tools_registry_map_free(void);`
 - `typedef char *(*external_tool_cb)(const char *name, const char *input_json, void *ctx);`
 - `void tools_register_external(const char *name, const char *description, const char *input_schema_json, external_tool_cb cb, void *ctx);`
-- `void tools_register_external_with_output(const char *name, const char *description, const char *input_schema_json, const char *output_schema_json, external_tool_cb cb, void *ctx);`
 - `void tools_register_external_metadata(const char *name, const char *integration_id, const char *display_name, const char *distribution_channel, const char *categories, const char *labels, const char *scope, unsigned action_flags, const char *catalog_status);`
 - `void tools_reset_external(void);`
-- `const char *tools_default_input_schema_json(void);`
-- `const char *tools_default_output_schema_json(void);`
-- `const char *tools_output_schema_for_def(const tool_def_t *tool);`
-- `const char *tools_output_schema_for_name(const char *name);`
-- `int tools_external_count(void);`
-- `external_tool_snapshot_t tools_external_snapshot(void);`
-- `void tools_external_snapshot_free(external_tool_snapshot_t *snapshot);`
-- `int tools_rank_external_snapshot(const external_tool_snapshot_t *snapshot, const char *context, int *out_indices, int max_indices);`
 - `void dsco_locks_init(dsco_locks_t *l);`
 - `void dsco_locks_destroy(dsco_locks_t *l);`
 - `void watchdog_start(tool_watchdog_t *wd, pthread_t target, const char *name, int timeout_s);`
 - `void watchdog_stop(tool_watchdog_t *wd);`
-- `int watchdog_renew(tool_watchdog_t *wd, int extra_s);`
-- `int watchdog_renew_by_name(const char *name, int extra_s);`
-- `int watchdog_active_snapshot(watchdog_info_t *out, int max);`
 - `static inline int dsco_tool_default_timeout_s(void) { return dsco_env_int("DSCO_TOOL_DEFAULT_TIMEOUT", TOOL_DEFAULT_TIMEOUT_S, 1, 7200);`
 - `} static inline int dsco_tool_grace_period_s(void) { return dsco_env_int("DSCO_TOOL_GRACE_PERIOD_S", TOOL_GRACE_PERIOD_S, 0, 300);`
 - `int tool_timeout_for(const char *name);`
@@ -2648,7 +2495,6 @@ Function-like declarations: 101
 - `float *tools_embed_text(const char *text, int *out_dim);`
 - `void tools_set_agent_context(const char *recent_results, const char *working_memory_summary);`
 - `int safe_exec_argv(const char *const argv[], char *out, size_t out_len);`
-- `size_t tools_test_truncate_json(const char *json, size_t json_len, char *out, size_t out_len);`
 
 ## `topology.h`
 
@@ -3037,6 +2883,9 @@ Function-like declarations: 303
 - `tui_perm_result_t tui_permission_prompt(const char *tool_name, const char *description, const char *detail);`
 - `bool tui_confirm(const char *question);`
 - `tui_ask_status_t tui_ask_questions(tui_ask_question_t *qs, int n_questions, const char *intro, char *chat_out, size_t chat_len);`
+- `int tui_test_decode_key_sequence(const char *bytes);`
+- `int tui_test_dialog_move_row(int row, int maxrow, int key);`
+- `int tui_test_menu_move_selection(const bool *selectable, int nrows, int sel, int delta);`
 - `const char *tui_ask_answer_value(const tui_ask_question_t *q, char *out, size_t out_len);`
 - `bool tui_ask_question_visible(const tui_ask_question_t *qs, int n, int qi);`
 - `void tui_diff_init(tui_diff_t *d);`
@@ -3062,9 +2911,6 @@ Function-like declarations: 303
 - `void tui_menu_set_disabled(tui_menu_item_t *it, bool disabled);`
 - `void tui_menu_set_expanded(tui_menu_item_t *it, bool expanded);`
 - `int tui_menu_run(tui_menu_t *m, tui_menu_item_t **out_item);`
-- `int tui_test_decode_key_sequence(const char *seq);`
-- `int tui_test_dialog_move_row(int row, int maxrow, int key);`
-- `int tui_test_menu_move_selection(const bool *selectable, int nrows, int selected, int delta);`
 
 ## `vecstore.h`
 
@@ -3094,7 +2940,7 @@ Function-like declarations: 3
 
 ## `vfs.h`
 
-Function-like declarations: 26
+Function-like declarations: 25
 
 ### Declarations
 
@@ -3123,7 +2969,6 @@ Function-like declarations: 26
 - `char *vfs_result_get(vfs_db_t *db, const char *key);`
 - `int vfs_result_evict(vfs_db_t *db);`
 - `char **vfs_result_list(vfs_db_t *db, int *out_count);`
-- `int vfs_maintain(vfs_db_t *db, int64_t max_db_bytes);`
 
 ## `vm.h`
 
@@ -3190,7 +3035,7 @@ Function-like declarations: 4
 
 ## `workspace.h`
 
-Function-like declarations: 15
+Function-like declarations: 14
 
 ### Declarations
 
@@ -3203,7 +3048,6 @@ Function-like declarations: 15
 - `int dsco_workspace_create_skill(const char *name, const char *body, bool overwrite);`
 - `int dsco_workspace_delete_skill(const char *name, bool force);`
 - `int dsco_workspace_count_auto_skills(void);`
-- `int dsco_workspace_list_auto_skills(char (*names)[128], int max);`
 - `int dsco_workspace_read_doc(const char *name, char *out, size_t out_len);`
 - `void dsco_workspace_doc_path(const char *name, char *out, size_t out_len);`
 - `const char *dsco_workspace_prompt(void);`

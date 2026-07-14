@@ -6,23 +6,23 @@ This manifest is generated from `git ls-files` plus the coverage generator/outpu
 
 ## Summary
 
-- Total covered files: 650
+- Total covered files: 619
 
 | Category | Files |
 |---|---:|
-| Root project files | 25 |
+| Root project files | 24 |
 | Repository policy and CI | 15 |
 | Documentation | 47 |
-| Runtime source and headers | 260 |
-| Tests | 28 |
+| Runtime source and headers | 253 |
+| Tests | 27 |
 | Scripts and tooling | 48 |
 | Generated data assets | 8 |
 | Provider metadata | 17 |
 | Web surface | 11 |
 | Packaging and distribution | 12 |
 | Demos | 3 |
-| Vendored and compatibility code | 155 |
-| Other tracked files | 21 |
+| Vendored and compatibility code | 144 |
+| Other tracked files | 10 |
 
 ## Generated Coverage
 
@@ -51,7 +51,6 @@ This manifest is generated from `git ls-files` plus the coverage generator/outpu
 - `CODEOWNERS`
 - `CODE_OF_CONDUCT.md`
 - `CONTRIBUTING.md`
-- `GLOSSARY.md`
 - `GOVERNANCE_HOLD.md`
 - `LICENSE`
 - `Makefile`
@@ -166,7 +165,6 @@ This manifest is generated from `git ls-files` plus the coverage generator/outpu
 - `include/eval.h`
 - `include/event_loop.h`
 - `include/execution_layer.h`
-- `include/executive.h`
 - `include/extension/backend.h`
 - `include/extension/eigen_backend.h`
 - `include/extension/fftw_backend.h`
@@ -175,7 +173,6 @@ This manifest is generated from `git ls-files` plus the coverage generator/outpu
 - `include/face_sdf.h`
 - `include/fingerprint.h`
 - `include/fractal.h`
-- `include/frontier.h`
 - `include/governance.h`
 - `include/graphsub_client.h`
 - `include/heartbeat.h`
@@ -234,7 +231,6 @@ This manifest is generated from `git ls-files` plus the coverage generator/outpu
 - `include/setup.h`
 - `include/shadeexpr.h`
 - `include/simd.h`
-- `include/spend_governor.h`
 - `include/startup.h`
 - `include/stateful_atoms.h`
 - `include/structured_process.h`
@@ -291,7 +287,6 @@ This manifest is generated from `git ls-files` plus the coverage generator/outpu
 - `src/eval.c`
 - `src/event_loop.c`
 - `src/execution_layer.c`
-- `src/executive.c`
 - `src/extension/backend.c`
 - `src/extension/backend_selftest.c`
 - `src/extension/eigen_backend.c`
@@ -301,7 +296,6 @@ This manifest is generated from `git ls-files` plus the coverage generator/outpu
 - `src/face_sdf.c`
 - `src/fingerprint.c`
 - `src/fractal.c`
-- `src/frontier.c`
 - `src/governance.c`
 - `src/graphsub_client.c`
 - `src/graphsub_tools.c`
@@ -314,7 +308,6 @@ This manifest is generated from `git ls-files` plus the coverage generator/outpu
 - `src/integrations.c`
 - `src/introspect.c`
 - `src/ipc.c`
-- `src/json_fast.c`
 - `src/json_util.c`
 - `src/killswitch.c`
 - `src/learned_cost.c`
@@ -365,7 +358,6 @@ This manifest is generated from `git ls-files` plus the coverage generator/outpu
 - `src/session_memory.c`
 - `src/setup.c`
 - `src/shadeexpr.c`
-- `src/spend_governor.c`
 - `src/startup.c`
 - `src/stateful_atoms.c`
 - `src/structured_process.c`
@@ -408,7 +400,6 @@ This manifest is generated from `git ls-files` plus the coverage generator/outpu
 - `tests/test_hlc.c`
 - `tests/test_learned_cost.c`
 - `tests/test_math_corpus.c`
-- `tests/test_memory_classification.c`
 - `tests/test_memory_keep_score.c`
 - `tests/test_nwp_pipeline.py`
 - `tests/test_openrouter.c`
@@ -611,18 +602,10 @@ This manifest is generated from `git ls-files` plus the coverage generator/outpu
 - `gsl/src/sys.c`
 - `gsl/src/vector.c`
 - `vendor/.gitignore`
-- `vendor/VERSIONS`
 - `vendor/acutest.h`
 - `vendor/arena.h`
 - `vendor/base64.c`
 - `vendor/base64.h`
-- `vendor/blake3/LICENSE`
-- `vendor/blake3/blake3.c`
-- `vendor/blake3/blake3.h`
-- `vendor/blake3/blake3_dispatch.c`
-- `vendor/blake3/blake3_impl.h`
-- `vendor/blake3/blake3_neon.c`
-- `vendor/blake3/blake3_portable.c`
 - `vendor/bloom.c`
 - `vendor/bloom.h`
 - `vendor/btree.c`
@@ -667,8 +650,6 @@ This manifest is generated from `git ls-files` plus the coverage generator/outpu
 - `vendor/parg.h`
 - `vendor/pcg_basic.c`
 - `vendor/pcg_basic.h`
-- `vendor/picohttpparser/picohttpparser.c`
-- `vendor/picohttpparser/picohttpparser.h`
 - `vendor/rax.c`
 - `vendor/rax.h`
 - `vendor/rax_malloc.h`
@@ -679,7 +660,6 @@ This manifest is generated from `git ls-files` plus the coverage generator/outpu
 - `vendor/sdsalloc.h`
 - `vendor/sha256.c`
 - `vendor/sha256.h`
-- `vendor/simsimd/LICENSE`
 - `vendor/skiplist.c`
 - `vendor/skiplist.h`
 - `vendor/stb_ds.h`
@@ -700,23 +680,12 @@ This manifest is generated from `git ls-files` plus the coverage generator/outpu
 
 ### Other tracked files
 
-- `bench/RESULTS.txt`
-- `bench/bench_libs.c`
-- `bench/diff_json.c`
-- `doctrine/CLASSIFICATION.md`
 - `doctrine/MEMORY.md`
 - `doctrine/MEMORY_UPGRADE_2026-06-28.md`
-- `doctrine/SECRECY_HARDENING.md`
 - `examples/dspy_via_dsco.py`
-- `examples/max_swarm/README.md`
-- `examples/max_swarm/swarm.py`
-- `examples/max_swarm/test_swarm.py`
 - `proposals/LOOP-F1-F4/PATCHSET.md`
 - `proposals/PRAXIS-v1/GATE.md`
 - `proposals/PRAXIS-v1/PROPOSAL.md`
-- `rituals/CLASSIFY.md`
-- `rituals/DECLASSIFY.md`
-- `runbooks/incidents/COMPARTMENT_BREACH.md`
 - `schemas/consumer_profile_ontology/activation_request.schema.json`
 - `schemas/consumer_profile_ontology/evidence_event.schema.json`
 - `schemas/consumer_profile_ontology/facet_definition.schema.json`
