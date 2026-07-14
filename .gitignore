@@ -179,7 +179,9 @@ memory_shortage_*.html
 dsco-native-stable*
 dsco-native-test
 dsco-kitty
+dsco-banner
 dsco-cli.lock
 spine-dsco-slim
 # generated facet index data (rebuildable)
 data/consumer_profile_ontology/facet_index/
+dsco-kitty-lab
