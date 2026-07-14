@@ -38,6 +38,7 @@ struct provider {
                                const char *request_json,
                                stream_text_cb text_cb,
                                stream_tool_start_cb tool_cb,
+                               stream_tool_arg_delta_cb tool_delta_cb,
                                stream_thinking_cb thinking_cb,
                                void *cb_ctx);
 
@@ -62,6 +63,7 @@ stream_result_t provider_stream_reuse(provider_t *p, const char *api_key,
                                       const char *request_json,
                                       stream_text_cb text_cb,
                                       stream_tool_start_cb tool_cb,
+                                      stream_tool_arg_delta_cb tool_delta_cb,
                                       stream_thinking_cb thinking_cb,
                                       void *cb_ctx);
 
@@ -110,9 +112,19 @@ void provider_export_child_process_credentials(const char *model,
 /* Auth-mode debugging helpers */
 bool provider_debug_auth_enabled(void);
 const char *provider_auth_mode(const char *provider_name, const char *resolved_key);
+/* True when the request is covered by the user's ChatGPT/Codex subscription
+ * rather than billed as Platform API usage. */
+bool provider_usage_is_included(const char *provider_name, const char *resolved_key);
 void provider_debug_log_request(const char *provider_name, const char *model,
                                 const char *resolved_key);
 const char *provider_claude_code_oauth_source(void);
+/* Explicitly import the user's Claude Code OAuth bundle into DSCO's 0600 cache.
+ * This may invoke the OS credential UI and is therefore only called by login. */
+bool provider_claude_code_import_credentials(void);
+/* Claude Code subscription requests bind the bearer to the local Claude
+ * account/device/session identity via metadata.user_id. */
+const char *provider_claude_code_metadata_user_id(void);
+const char *provider_claude_code_session_id(void);
 
 /* Sakana/Fugu supports both flat-rate subscription keys and metered PAYG keys.
  * The subscription key remains the default when both are present; set
@@ -131,6 +143,15 @@ bool provider_claude_code_get_account_info(char *subscription_type_out, size_t s
  * Anthropic and OpenAI-compat streaming paths so both can mark the stream
  * result as "credit_too_low" and trigger the fallback chain. */
 bool provider_msg_is_credit_too_low(const char *msg);
+
+/* ChatGPT 429s use structured error type/code fields to distinguish exhausted
+ * subscription allocation from a transient edge throttle. */
+bool provider_chatgpt_429_is_quota(const char *error_json_or_message);
+
+/* Provider-aware credit classification. In particular, an openai-codex 429
+ * is transient unless the native stream marked it with credit_too_low. */
+bool provider_stream_result_is_credit_exhausted(const char *provider_name,
+                                                const stream_result_t *result);
 
 /* Classify an error as a policy/gating rejection (HTTP 403, model not
  * available, access not granted, regulatory gating). Distinct from
@@ -160,8 +181,9 @@ bool provider_model_is_routable(const char *model,
                                 const char *provider_override,
                                 const char **out_provider_name);
 
-/* Build a default cross-lab fallback chain for a primary model. Returns the
- * number of models written into out_models. */
+/* Build a default cross-lab fallback chain for a primary model. When
+ * DSCO_LOCAL_FALLBACK_MODEL names a local provider, reserve the final slot for
+ * that always-available lane. Returns the number of models written. */
 int provider_build_default_fallback_models(const char *model,
                                            char out_models[][128],
                                            int max_models);
@@ -186,5 +208,26 @@ const char *provider_publish_api_key_env(const char *api_key);
  * which credentials are actually available. Returns NULL if the family has no
  * usable route. */
 const char *provider_primary_model_for(const char *family, bool prefer_code);
+
+#ifdef DSCO_INTERNAL_TESTS
+typedef struct {
+    parsed_response_t parsed;
+    char *reasoning_stream;
+    char *tool_arg_delta_stream;
+    bool done;
+    bool terminal_success;
+} provider_test_openai_sse_result_t;
+
+/* Feed raw OpenAI-compatible SSE bytes through the production line parser.
+ * Every allocation in the result is released by
+ * provider_test_free_openai_sse_result(). */
+bool provider_test_parse_openai_sse(const char *bytes, size_t len,
+                                    provider_test_openai_sse_result_t *out);
+bool provider_test_parse_openai_sse_for_model(const char *bytes, size_t len,
+                                              const char *source_provider,
+                                              const char *request_model,
+                                              provider_test_openai_sse_result_t *out);
+void provider_test_free_openai_sse_result(provider_test_openai_sse_result_t *result);
+#endif
 
 #endif
