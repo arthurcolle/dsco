@@ -147,9 +147,19 @@ jobs:
           set -euo pipefail
           # cppcheck's heuristic checks (uninitvar/negativeIndex/nullPointer)
           # produce false positives across the tree; advisory until a dedicated
-          # triage pass. clang-tidy stays blocking (compiler-diagnostic errors).
+          # triage pass. Keep the advisory runtime below the job timeout so a
+          # slow cppcheck pass reports a warning instead of a cancelled check.
+          # clang-tidy stays blocking (compiler-diagnostic errors).
           if [ "${{ matrix.tool }}" = "cppcheck" ]; then
-            make cppcheck || echo "::warning::cppcheck reported findings (advisory)"
+            set +e
+            timeout 12m make cppcheck
+            rc=$?
+            set -e
+            if [ "$rc" -eq 124 ]; then
+              echo "::warning::cppcheck timed out after 12m (advisory)"
+            elif [ "$rc" -ne 0 ]; then
+              echo "::warning::cppcheck reported findings (advisory)"
+            fi
           else
             make ${{ matrix.tool }}
           fi
