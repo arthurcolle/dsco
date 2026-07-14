@@ -175,3 +175,11 @@ reports/dspy_deep_enrichment_map.html
 PAT_BOLAND_*.html
 memory_shortage_*.html
 *.png
+# local native-compositor test binaries + runtime lock (never commit)
+dsco-native-stable*
+dsco-native-test
+dsco-kitty
+dsco-cli.lock
+spine-dsco-slim
+# generated facet index data (rebuildable)
+data/consumer_profile_ontology/facet_index/
