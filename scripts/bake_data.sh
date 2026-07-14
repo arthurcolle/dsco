@@ -77,7 +77,7 @@ for entry in "${ENTRIES[@]}"; do
     sym="${entry%%|*}"
     cat >> "$REGISTRY" << EOF
 extern const unsigned char ${sym}[];
-extern const size_t        ${sym}_len;
+extern const size_t ${sym}_len;
 EOF
 done
 
@@ -85,36 +85,40 @@ done
 cat >> "$REGISTRY" << 'FOOTER'
 
 typedef struct {
-    const char          *name;
+    const char *name;
     const unsigned char *data;
-    const size_t        *len;
+    const size_t *len;
 } dsco_embedded_entry_t;
 
-static inline const unsigned char *
-embedded_data_get(const char *name, size_t *out_len) {
+static inline const unsigned char *embedded_data_get(const char *name, size_t *out_len) {
     static const dsco_embedded_entry_t _registry[] = {
 FOOTER
 
 for entry in "${ENTRIES[@]}"; do
     sym="${entry%%|*}"
     name="${entry##*|}"
-    printf '        { "%s", %s, &%s_len },\n' "$name" "$sym" "$sym" >> "$REGISTRY"
+    printf '        {"%s", %s,\n         &%s_len},\n' "$name" "$sym" "$sym" >> "$REGISTRY"
 done
 
 cat >> "$REGISTRY" << 'TAIL'
-        { NULL, NULL, NULL }
-    };
+        {NULL, NULL, NULL}};
     for (int _i = 0; _registry[_i].name; _i++) {
         if (strcmp(_registry[_i].name, name) == 0) {
-            if (out_len) *out_len = *_registry[_i].len;
+            if (out_len)
+                *out_len = *_registry[_i].len;
             return _registry[_i].data;
         }
     }
-    if (out_len) *out_len = 0;
+    if (out_len)
+        *out_len = 0;
     return NULL;
 }
 
 #endif /* DSCO_EMBEDDED_DATA_REGISTRY_H */
 TAIL
+
+if command -v clang-format >/dev/null 2>&1; then
+    clang-format -i "$REGISTRY"
+fi
 
 echo "  [bake] registry -> $REGISTRY (${#ENTRIES[@]} entries)"
