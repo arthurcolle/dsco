@@ -64,7 +64,7 @@ typedef struct {
     double ttft_ms;           /* time to first token (ms) */
     double ttft_tool_ms;      /* time to first tool_use (ms) */
     double total_ms;          /* total streaming duration (ms) */
-    double tokens_per_sec;    /* output token throughput */
+    double tokens_per_sec;    /* output decode throughput after first token */
     int    thinking_tokens;   /* tokens spent on thinking */
     llm_latency_breakdown_t latency;  /* F40: cURL timing phases */
 } stream_telemetry_t;
@@ -73,6 +73,9 @@ typedef struct {
 typedef void (*stream_text_cb)(const char *text, void *ctx);
 /* Called when a tool_use block starts */
 typedef void (*stream_tool_start_cb)(const char *name, const char *id, void *ctx);
+/* Called with raw incremental tool argument JSON fragments as they arrive. */
+typedef void (*stream_tool_arg_delta_cb)(const char *name, const char *id,
+                                         const char *delta, void *ctx);
 /* Called with thinking text deltas (extended thinking / interleaved thinking) */
 typedef void (*stream_thinking_cb)(const char *text, void *ctx);
 
@@ -83,6 +86,8 @@ typedef struct {
     stream_telemetry_t telemetry;
     int                http_status;
     bool               ok;
+    bool               retryable;         /* transient provider failure may be retried */
+    long               retry_after_ms;     /* provider-requested retry delay; 0 = backoff */
     bool               context_overflow;  /* provider rejected prompt as too long → reactive compaction can retry */
     double             cost_usd;           /* authoritative per-turn cost reported by provider (OpenRouter usage.cost); 0 = not reported, fall back to token math */
     time_t             credit_reset_at;    /* provider-supplied epoch seconds when exhausted subscription/rate window reopens */
@@ -125,10 +130,11 @@ typedef struct {
     int    total_cache_read_tokens;
     int    total_cache_write_tokens;
     int    turn_count;
-    /* Authoritative session cost. Accumulates the provider-reported cost
+    /* Accounted session cost. Accumulates the provider-reported cost
      * (OpenRouter usage.cost) when present, else the per-turn token-math
-     * estimate. Used for budget enforcement so caching discounts are
-     * reflected instead of billing every cached token at full input price. */
+     * estimate. Subscription-included turns contribute an authoritative zero.
+     * Used for budget enforcement so caching discounts are reflected instead
+     * of billing every cached token at full input price. */
     double total_reported_cost_usd;
     /* Most recent API response's input usage (single turn, not cumulative).
      * Used by conv_token_estimate to calibrate the rough estimate against
@@ -176,6 +182,11 @@ typedef struct {
     double total_ttft_ms;
     double total_stream_ms;
     int    telemetry_samples;
+    /* Tokens from only turns with a valid streaming timing sample.  Do not
+     * derive rates from session totals: failed/non-streaming turns otherwise
+     * corrupt the denominator. */
+    int    telemetry_input_tokens;
+    int    telemetry_output_tokens;
     bool   topology_auto;
     /* Tool paging: budget ratio for adaptive tool set sizing */
     float  tool_budget_ratio;  /* 0.0–1.0, 1.0 = full budget, updated each turn */
@@ -402,6 +413,7 @@ bool  llm_anthropic_uses_claude_code_auth(const char *credential);
 stream_result_t llm_stream(const char *api_key, const char *request_json,
                            stream_text_cb text_cb,
                            stream_tool_start_cb tool_cb,
+                           stream_tool_arg_delta_cb tool_delta_cb,
                            stream_thinking_cb thinking_cb,
                            void *cb_ctx);
 void dsco_strip_terminal_controls_inplace(char *s);
