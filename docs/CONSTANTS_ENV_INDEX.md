@@ -1358,4 +1358,3 @@ Excludes include guards, function-like macros, large prompt/blob macros, capabil
 | `DSCO_WASM_EXPORT` | `DSCO_WASM_EXPORT` | `macro_constant` | `src/wasm_core.c:14` | `` |
 | `PATH_MAX` | `DSCO_PATH_MAX` | `string_default` | `src/workspace.c:15` | `4096` |
 | `WORKSPACE_FILE_LIMIT` | `DSCO_WORKSPACE_FILE_LIMIT` | `string_default` | `src/workspace.c:18` | `32768` |
-
