@@ -20,9 +20,22 @@
 #include <stdint.h>
 #include <curl/curl.h>
 
+#define CLAUDE_CODE_VERSION_FALLBACK "2.1.207"
+#ifdef DSCO_USE_OBF_SECRETS
+/* Hardened build: resolve the client-impersonation billing salt and OAuth beta
+ * set from the encrypted secrets table so they never appear in __cstring. */
+#define CLAUDE_CODE_BILLING_SALT dsco_secret("CLAUDE_CODE_BILLING_SALT")
+#define CLAUDE_CODE_OAUTH_BETAS  dsco_secret("CLAUDE_CODE_OAUTH_BETAS")
+#else
 #define CLAUDE_CODE_BILLING_SALT "59cf53e54c78"
-#define CLAUDE_CODE_VERSION_FALLBACK "2.1.37"
-#define CLAUDE_CODE_OAUTH_BETA "oauth-2025-04-20"
+#define CLAUDE_CODE_OAUTH_BETAS                                                                 \
+    "claude-code-20250219,interleaved-thinking-2025-05-14,"                                   \
+    "thinking-token-count-2026-05-13,context-management-2025-06-27,"                          \
+    "prompt-caching-scope-2026-01-05,mid-conversation-system-2026-04-07,"                      \
+    "advisor-tool-2026-03-01,effort-2025-11-24,oauth-2025-04-20"
+#endif
+#define CLAUDE_CODE_AGENT_INSTRUCTION "You are a Claude agent, built on Anthropic's Claude Agent SDK."
+#define CLAUDE_FABLE_FALLBACK_CREDIT_BETA "fallback-credit-2026-06-01"
 
 /* Global interrupt flag — set by SIGINT handler in agent.c.
    Declared extern here so the streaming code can check it. */
@@ -238,6 +251,8 @@ void session_state_init(session_state_t *s, const char *model) {
         const char *pck = getenv("DSCO_PROMPT_CACHE_KEY");
         if (pck && *pck)
             snprintf(s->prompt_cache_key, sizeof(s->prompt_cache_key), "%s", pck);
+        else
+            uuid_v4(s->prompt_cache_key);
         const char *pcr = getenv("DSCO_PROMPT_CACHE_RETENTION");
         if (pcr && *pcr)
             snprintf(s->prompt_cache_retention, sizeof(s->prompt_cache_retention), "%s", pcr);
@@ -561,7 +576,7 @@ static bool message_has_tool_use_local(const message_t *m);
 static bool message_has_tool_result_local(const message_t *m);
 static bool message_is_tool_result_only(const message_t *m);
 static int message_sendable_count(const message_t *m);
-static void append_cache_control_to_last_block(jbuf_t *b);
+static void append_cache_control_to_last_block(jbuf_t *b, bool claude_code_oauth);
 
 void conv_pop_last(conversation_t *c) {
     if (c->count <= 0)
@@ -2051,7 +2066,7 @@ bool conv_load_ex(conversation_t *c, session_state_t *session, const char *path)
         free(role_str);
 
         /* Find the "content" array within this message */
-        const char *content_start = json_get_raw(p, "content");
+        char *content_start = json_get_raw(p, "content");
         if (content_start && *content_start == '[') {
             /* Add a new message */
             message_t *m = NULL;
@@ -2119,6 +2134,7 @@ bool conv_load_ex(conversation_t *c, session_state_t *session, const char *path)
                 }
             }
         }
+        free(content_start);
 
         /* Skip to end of this message object */
         int depth = 1;
@@ -2656,9 +2672,94 @@ static void append_message_sendable_content(jbuf_t *b, message_t *m, bool force_
         if (content_block_allows_cache_control(mc))
             remaining_cacheable--;
         if (cache_mark_last && content_block_allows_cache_control(mc) && remaining_cacheable == 0)
-            append_cache_control_to_last_block(b);
+            append_cache_control_to_last_block(b, claude_code_oauth);
         written++;
     }
+}
+
+static void runtime_context_append(jbuf_t *ctx, const char *text) {
+    if (!ctx || !text || !text[0])
+        return;
+    if (ctx->len > 0)
+        jbuf_append(ctx, "\n\n");
+    jbuf_append(ctx, text);
+}
+
+/* Request-scoped guidance must trail the conversation cache anchors. Putting
+ * memory recall, goal counters, or mode flags in `system` changes the prefix
+ * before every message and forces strict-prefix providers to re-create the
+ * whole session cache. Build one synthetic trailing user block instead. */
+static char *build_runtime_context(session_state_t *session) {
+    if (!session)
+        return NULL;
+
+    jbuf_t ctx;
+    jbuf_init(&ctx, 2048);
+
+    if (session->active_skill[0]) {
+        const char *skill = dsco_workspace_skill_prompt(session->active_skill);
+        if (skill && skill[0]) {
+            jbuf_appendf(&ctx, "[Active Skill: %s]\n", session->active_skill);
+            jbuf_append(&ctx, skill);
+        }
+    }
+    runtime_context_append(&ctx, session->memory_context);
+    if (session->structured_output) {
+        jbuf_t contract;
+        jbuf_init(&contract, 1024);
+        jbuf_append(&contract,
+                    "[Structured Output Contract]\nFor the final assistant answer, emit exactly "
+                    "one valid JSON object and no markdown, prose, code fences, comments, or "
+                    "trailing text. Preserve numeric/boolean/null types exactly. ");
+        if (session->structured_output_schema[0]) {
+            jbuf_append(&contract, "The JSON must conform to this schema: ");
+            jbuf_append(&contract, session->structured_output_schema);
+        } else {
+            jbuf_append(&contract,
+                        "Use a stable object shape with explicit keys appropriate to the task.");
+        }
+        runtime_context_append(&ctx, contract.data);
+        jbuf_free(&contract);
+    }
+    if (session->direct_answer_mode) {
+        runtime_context_append(
+            &ctx, "[Direct Answer Mode] The current user request is classified as "
+                  "self-contained/conceptual. Do not call tools, do not gather context, and do not "
+                  "use loop/self-exit controls. Answer directly and then stop.");
+    }
+    if (session->goal_objective[0] && session->goal_status == DSCO_GOAL_ACTIVE) {
+        char goal_prompt[2600];
+        int used = session->total_input_tokens + session->total_output_tokens -
+                   session->goal_tokens_at_start;
+        if (used < 0)
+            used = 0;
+        if (session->goal_token_budget > 0) {
+            int pct_bucket = (int)(((long long)used * 100) / session->goal_token_budget);
+            if (pct_bucket > 100)
+                pct_bucket = 100;
+            pct_bucket -= pct_bucket % 10;
+            snprintf(
+                goal_prompt, sizeof(goal_prompt),
+                "[Active Goal]\nObjective: %s\nStatus: active\nBudget used: ~%d%% of %d tokens\n"
+                "Keep working toward this objective until the user changes it with /goal. "
+                "If the objective is complete, call self_exit with a concise completion reason.",
+                session->goal_objective, pct_bucket, session->goal_token_budget);
+        } else {
+            snprintf(
+                goal_prompt, sizeof(goal_prompt),
+                "[Active Goal]\nObjective: %s\nStatus: active\n"
+                "Keep working toward this objective until the user changes it with /goal. "
+                "If the objective is complete, call self_exit with a concise completion reason.",
+                session->goal_objective);
+        }
+        runtime_context_append(&ctx, goal_prompt);
+    }
+
+    if (ctx.len == 0) {
+        jbuf_free(&ctx);
+        return NULL;
+    }
+    return ctx.data;
 }
 
 static void append_content_block(jbuf_t *b, msg_content_t *mc, bool claude_code_oauth) {
@@ -2868,10 +2969,19 @@ static const char *get_compact_catalog(void) {
 static tool_page_result_t s_frozen_tool_page = {0};
 static bool s_frozen_tool_page_valid = false;
 static unsigned long long s_frozen_tool_ext_sig = 0;
+static int s_frozen_tool_max_tools = 0;
 
 static bool anthropic_tool_freeze_enabled(void) {
     const char *v = getenv("DSCO_TOOL_FREEZE");
     return !(v && v[0] && strcmp(v, "0") == 0);
+}
+
+static bool anthropic_tool_proxy_enabled(bool claude_code_oauth) {
+    if (!claude_code_oauth)
+        return false;
+    const char *v = getenv("DSCO_TOOL_PROXY");
+    return !(v && v[0] && (strcmp(v, "0") == 0 || strcasecmp(v, "false") == 0 ||
+                          strcasecmp(v, "no") == 0 || strcasecmp(v, "off") == 0));
 }
 
 static unsigned long long anthropic_external_tool_signature(void) {
@@ -2919,9 +3029,12 @@ static tool_page_result_t anthropic_get_paged_tools(const char *ctx, int max_too
      * breakpoint on top of the unavoidable system-suffix rewrite (observed:
      * one mid-session load_tools rewrote ~28K tokens at cache-write price). */
     (void)anthropic_external_tool_signature; /* kept for A/B diagnostics */
-    if (!s_frozen_tool_page_valid) {
+    if (!s_frozen_tool_page_valid || s_frozen_tool_max_tools != max_tools) {
+        if (s_frozen_tool_page_valid)
+            tool_page_result_free(&s_frozen_tool_page);
         s_frozen_tool_page = tools_get_paged(ctx, max_tools, budget_ratio);
         s_frozen_tool_ext_sig = anthropic_external_tool_signature();
+        s_frozen_tool_max_tools = max_tools;
         s_frozen_tool_page_valid = true;
     }
     if (owned)
@@ -2945,14 +3058,23 @@ static const char *cache_control_json(void) {
                                     : "\"cache_control\":{\"type\":\"ephemeral\"}";
 }
 
+/* Claude Code subscription traffic currently emits only plain ephemeral
+ * breakpoints. A ttl=1h write costs more and can unexpectedly consume Extra
+ * Usage, so the DSCO_CACHE_TTL operator override applies only to API-key
+ * traffic. */
+static const char *cache_control_json_for_credential(bool claude_code_oauth) {
+    return claude_code_oauth ? "\"cache_control\":{\"type\":\"ephemeral\"}"
+                             : cache_control_json();
+}
+
 /* Append a cache_control breakpoint to the content block just emitted. */
-static void append_cache_control_to_last_block(jbuf_t *b) {
+static void append_cache_control_to_last_block(jbuf_t *b, bool claude_code_oauth) {
     if (!b || b->len == 0 || !b->data || b->data[b->len - 1] != '}')
         return;
     b->len--;
     b->data[b->len] = '\0';
     jbuf_append(b, ",");
-    jbuf_append(b, cache_control_json());
+    jbuf_append(b, cache_control_json_for_credential(claude_code_oauth));
     jbuf_append(b, "}");
 }
 
@@ -3032,6 +3154,9 @@ static void append_tools_json_filtered(jbuf_t *b, session_state_t *session, conv
         if (v > 0)
             max_tools = v;
     }
+    bool stable_tool_proxy = anthropic_tool_proxy_enabled(claude_code_oauth);
+    if (stable_tool_proxy && (!mt_env || !mt_env[0]) && max_tools > 12)
+        max_tools = 12;
 
     /* Rolling context window: concatenate last 3 user messages for richer
      * retrieval signal. More context → better embedding/TF-IDF scores.
@@ -3077,8 +3202,10 @@ static void append_tools_json_filtered(jbuf_t *b, session_state_t *session, conv
     int builtin_total = 0;
     const tool_def_t *all_builtins = tools_get_all(&builtin_total);
     int loaded_builtin_indices[64];
-    int loaded_builtin_count =
-        tools_loaded_builtin_indices(loaded_builtin_indices, loaded_builtin_tail_limit());
+    int loaded_builtin_count = stable_tool_proxy
+                                   ? 0
+                                   : tools_loaded_builtin_indices(loaded_builtin_indices,
+                                                                  loaded_builtin_tail_limit());
     int loaded_builtin_tail_count = 0;
     for (int i = 0; i < loaded_builtin_count; i++) {
         int idx = loaded_builtin_indices[i];
@@ -3105,8 +3232,8 @@ static void append_tools_json_filtered(jbuf_t *b, session_state_t *session, conv
     for (int i = 0; i < paged.pinned_count; i++) {
         if (written > 0)
             jbuf_append(b, ",");
-        bool mark =
-            (i == paged.pinned_count - 1) && (paged.working_count == 0) && has_after_working;
+        bool mark = !claude_code_oauth && (i == paged.pinned_count - 1) &&
+                    (paged.working_count == 0) && has_after_working;
         append_one_tool(b, paged.pinned[i], mark, claude_code_oauth);
         written++;
     }
@@ -3119,7 +3246,7 @@ static void append_tools_json_filtered(jbuf_t *b, session_state_t *session, conv
     for (int i = 0; i < paged.working_count; i++) {
         if (written > 0)
             jbuf_append(b, ",");
-        bool mark = (i == paged.working_count - 1) && has_after_working;
+        bool mark = !claude_code_oauth && (i == paged.working_count - 1) && has_after_working;
         append_one_tool(b, paged.working[i], mark, claude_code_oauth);
         written++;
     }
@@ -3159,7 +3286,7 @@ static void append_tools_json_filtered(jbuf_t *b, session_state_t *session, conv
     /* External tools (MCP, etc.) — loaded tools win first.  The old behavior
      * serialized the first N MCP tools by discovery order, which made
      * load_tools useless for large servers like email/heat. */
-    int ext_budget = max_tools - written;
+    int ext_budget = stable_tool_proxy ? 0 : max_tools - written;
     int loaded_ext_count = 0;
     for (int i = 0; i < ext.count; i++)
         if (ext.items[i].loaded)
@@ -3337,6 +3464,27 @@ static void build_messages_json(jbuf_t *b, conversation_t *c, session_state_t *s
         }
     }
 
+    /* Volatile session guidance belongs after the rolling user breakpoint.
+     * Its bytes may change on every request without invalidating any prefix
+     * already written by the preceding system/message cache anchors. */
+    char *runtime_context = build_runtime_context(session);
+    if (runtime_context) {
+        if (last_written_role == ROLE_USER && b->len >= 2 && b->data[b->len - 1] == '}' &&
+            b->data[b->len - 2] == ']') {
+            b->len -= 2;
+            b->data[b->len] = '\0';
+            jbuf_append(b, ",{\"type\":\"text\",\"text\":");
+            jbuf_append_json_str(b, runtime_context);
+            jbuf_append(b, "}]}");
+        } else {
+            jbuf_append(b, ",{\"role\":\"user\",\"content\":[{\"type\":\"text\",\"text\":");
+            jbuf_append_json_str(b, runtime_context);
+            jbuf_append(b, "}]}");
+        }
+        free(runtime_context);
+        last_written_role = ROLE_USER;
+    }
+
     /* Response prefilling */
     if (session && session->prefill[0]) {
         jbuf_append(b, ",{\"role\":\"assistant\",\"content\":[{\"type\":\"text\",\"text\":");
@@ -3367,7 +3515,7 @@ static const char *claude_code_entrypoint(void) {
     entrypoint = getenv("CLAUDE_CODE_ENTRYPOINT");
     if (entrypoint && entrypoint[0])
         return entrypoint;
-    return "cli";
+    return "sdk-cli";
 }
 
 static const char *claude_code_version(void) {
@@ -3436,7 +3584,6 @@ static void build_claude_code_billing_header(conversation_t *c, char *out, size_
     size_t message_len = strlen(message_text);
     char cch_hex[65];
     sha256_hex((const uint8_t *)message_text, message_len, cch_hex);
-
     char sampled[4];
     const int idxs[3] = {4, 7, 20};
     for (int i = 0; i < 3; i++) {
@@ -3452,9 +3599,18 @@ static void build_claude_code_billing_header(conversation_t *c, char *out, size_
     char version_hex[65];
     sha256_hex((const uint8_t *)fingerprint_input, strlen(fingerprint_input), version_hex);
 
-    snprintf(out, out_len,
-             "x-anthropic-billing-header: cc_version=%s.%.3s; cc_entrypoint=%s; cch=%.5s;", version,
-             version_hex, claude_code_entrypoint(), cch_hex);
+    /* The old 2.1.37 wire shape used SHA-256(first user text)[:5]. Current
+     * Claude Code omits cch entirely; sending a guessed or stale value is
+     * worse than omitting a field the current client no longer sends. */
+    if (strcmp(version, "2.1.37") == 0) {
+        snprintf(out, out_len,
+                 "x-anthropic-billing-header: cc_version=%s.%.3s; cc_entrypoint=%s; cch=%.5s;",
+                 version, version_hex, claude_code_entrypoint(), cch_hex);
+    } else {
+        snprintf(out, out_len,
+                 "x-anthropic-billing-header: cc_version=%s.%.3s; cc_entrypoint=%s;", version,
+                 version_hex, claude_code_entrypoint());
+    }
 }
 
 static bool append_claude_code_billing_system_block(jbuf_t *b, conversation_t *c,
@@ -3469,6 +3625,10 @@ static bool append_claude_code_billing_system_block(jbuf_t *b, conversation_t *c
 
     jbuf_append(b, "{\"type\":\"text\",\"text\":");
     jbuf_append_json_str(b, header);
+    jbuf_append(b, "},{\"type\":\"text\",\"text\":");
+    jbuf_append_json_str(b, CLAUDE_CODE_AGENT_INSTRUCTION);
+    jbuf_append(b, ",");
+    jbuf_append(b, cache_control_json_for_credential(true));
     jbuf_append(b, "}");
     return true;
 }
@@ -3492,7 +3652,7 @@ char *llm_build_request_for_credential(conversation_t *c, const char *model, int
     jbuf_append(&b, "{\"model\":");
     jbuf_append_json_str(&b, llm_anthropic_wire_model(request_model));
     jbuf_append(&b, ",\"max_tokens\":");
-    jbuf_append_int(&b, max_tokens);
+    jbuf_append_int(&b, claude_code_oauth && max_tokens > 64000 ? 64000 : max_tokens);
     jbuf_append(&b, ",\"stream\":true");
 
     /* System prompt with compact tool catalog + cache breakpoint.
@@ -3501,7 +3661,10 @@ char *llm_build_request_for_credential(conversation_t *c, const char *model, int
      * A divergent order between the two builders produces two distinct
      * cache prefixes and a cold miss whenever the request path switches. */
     const char *custom = llm_get_custom_system_prompt();
-    const char *catalog = g_cheap_mode ? NULL : get_compact_catalog();
+    const char *catalog =
+        (g_cheap_mode || anthropic_tool_proxy_enabled(claude_code_oauth))
+            ? NULL
+            : get_compact_catalog();
     jbuf_append(&b, ",\"system\":[");
     if (append_claude_code_billing_system_block(&b, c, credential))
         jbuf_append(&b, ",");
@@ -3519,7 +3682,7 @@ char *llm_build_request_for_credential(conversation_t *c, const char *model, int
         jbuf_append_json_str(&b, custom);
     }
     jbuf_append(&b, ",");
-    jbuf_append(&b, cache_control_json());
+    jbuf_append(&b, cache_control_json_for_credential(claude_code_oauth));
     jbuf_append(&b, "}]");
 
     /* Adaptive thinking — gated by the model registry's supports_thinking
@@ -3534,6 +3697,14 @@ char *llm_build_request_for_credential(conversation_t *c, const char *model, int
 
     append_tools_json_filtered(&b, NULL, c, claude_code_oauth);
     build_messages_json(&b, c, NULL, claude_code_oauth);
+    if (claude_code_oauth) {
+        const char *identity = provider_claude_code_metadata_user_id();
+        if (identity) {
+            jbuf_append(&b, ",\"metadata\":{\"user_id\":");
+            jbuf_append_json_str(&b, identity);
+            jbuf_append(&b, "}");
+        }
+    }
     jbuf_append(&b, "}");
 
     return b.data;
@@ -3646,6 +3817,9 @@ char *llm_build_request_ex_for_credential(conversation_t *c, session_state_t *se
     jbuf_init(&b, 16384);
     bool claude_code_oauth = llm_anthropic_uses_claude_code_auth(credential);
     const char *request_model = llm_effective_model(session->model);
+    /* Fable accepts adaptive thinking only, rejects sampling controls, and
+     * refuses forced tool use. Keep interactive requests within that contract. */
+    bool fable_model = request_model && strstr(request_model, "fable") != NULL;
 
     jbuf_append(&b, "{\"model\":");
     jbuf_append_json_str(&b, llm_anthropic_wire_model(request_model));
@@ -3653,6 +3827,8 @@ char *llm_build_request_ex_for_credential(conversation_t *c, session_state_t *se
     /* Phase 4: auto-escalation — use override if set, else default */
     int effective_max_tokens =
         (session->max_output_override > 0) ? session->max_output_override : max_tokens;
+    if (claude_code_oauth && effective_max_tokens > 64000)
+        effective_max_tokens = 64000;
     jbuf_append_int(&b, effective_max_tokens);
     jbuf_append(&b, ",\"stream\":true");
 
@@ -3666,10 +3842,10 @@ char *llm_build_request_ex_for_credential(conversation_t *c, session_state_t *se
        Any turn-varying text above the breakpoint would invalidate the whole
        suffix at cache-write price every turn; keep counters out of the prefix. */
     const char *custom = llm_get_custom_system_prompt();
-    const char *catalog = g_cheap_mode ? NULL : get_compact_catalog();
-    char *active_skill_prompt = NULL;
-    bool has_dynamic = session->active_skill[0] != '\0';
-
+    const char *catalog =
+        (g_cheap_mode || anthropic_tool_proxy_enabled(claude_code_oauth))
+            ? NULL
+            : get_compact_catalog();
     jbuf_append(&b, ",\"system\":[");
     if (append_claude_code_billing_system_block(&b, c, credential))
         jbuf_append(&b, ",");
@@ -3704,106 +3880,21 @@ char *llm_build_request_ex_for_credential(conversation_t *c, session_state_t *se
 
     /* Cache breakpoint on last stable block — end of cached prefix */
     jbuf_append(&b, ",");
-    jbuf_append(&b, cache_control_json());
-    jbuf_append(&b, has_dynamic ? "}," : "}");
+    jbuf_append(&b, cache_control_json_for_credential(claude_code_oauth));
+    jbuf_append(&b, "}]");
 
-    /* Block 4+: SESSION/VOLATILE content (skills, memory, goal) — after break */
-    if (session->active_skill[0]) {
-        const char *skill = dsco_workspace_skill_prompt(session->active_skill);
-        if (skill && *skill) {
-            size_t n = strlen(skill) + strlen(session->active_skill) + 32;
-            active_skill_prompt = safe_malloc(n);
-            snprintf(active_skill_prompt, n, "[Active Skill: %s]\n%s", session->active_skill,
-                     skill);
-            jbuf_append(&b, "{\"type\":\"text\",\"text\":");
-            jbuf_append_json_str(&b, active_skill_prompt);
-            jbuf_append(&b, "}");
-        }
-    }
-
-    /* Phase 3: Inject recalled memories as system block */
-    if (session->memory_context[0]) {
-        jbuf_append(&b, ",{\"type\":\"text\",\"text\":");
-        jbuf_append_json_str(&b, session->memory_context);
-        jbuf_append(&b, "}");
-    }
-    if (session->structured_output) {
-        jbuf_append(&b, ",{\"type\":\"text\",\"text\":");
-        jbuf_t sop;
-        jbuf_init(&sop, 1024);
-        jbuf_append(&sop,
-                    "[Structured Output Contract]\nFor the final assistant answer, emit exactly "
-                    "one valid JSON object and no markdown, prose, code fences, comments, or "
-                    "trailing text. Preserve numeric/boolean/null types exactly. ");
-        if (session->structured_output_schema[0]) {
-            jbuf_append(&sop, "The JSON must conform to this schema: ");
-            jbuf_append(&sop, session->structured_output_schema);
-        } else {
-            jbuf_append(&sop,
-                        "Use a stable object shape with explicit keys appropriate to the task.");
-        }
-        jbuf_append_json_str(&b, sop.data ? sop.data : "");
-        jbuf_append(&b, "}");
-        jbuf_free(&sop);
-    }
-    if (session->direct_answer_mode) {
-        jbuf_append(&b, ",{\"type\":\"text\",\"text\":");
-        jbuf_append_json_str(
-            &b, "[Direct Answer Mode] The current user request is classified as "
-                "self-contained/conceptual. Do not call tools, do not gather context, and do not "
-                "use loop/self-exit controls. Answer directly and then stop.");
-        jbuf_append(&b, "}");
-    }
-    if (session->goal_objective[0] && session->goal_status == DSCO_GOAL_ACTIVE) {
-        char goal_prompt[2600];
-        int used = session->total_input_tokens + session->total_output_tokens -
-                   session->goal_tokens_at_start;
-        if (used < 0)
-            used = 0;
-        if (session->goal_token_budget > 0) {
-            /* Bucket budget usage to nearest 10% so this block's text only
-             * changes at meaningful thresholds. A raw per-turn counter here
-             * mutates the request prefix every turn, invalidating the
-             * message-anchor cache for the entire goal run. */
-            int pct_bucket = (int)(((long long)used * 100) / session->goal_token_budget);
-            if (pct_bucket > 100)
-                pct_bucket = 100;
-            pct_bucket -= pct_bucket % 10;
-            snprintf(
-                goal_prompt, sizeof(goal_prompt),
-                "[Active Goal]\nObjective: %s\nStatus: active\nBudget used: ~%d%% of %d tokens\n"
-                "Keep working toward this objective until the user changes it with /goal. "
-                "If the objective is complete, call self_exit with a concise completion reason.",
-                session->goal_objective, pct_bucket, session->goal_token_budget);
-        } else {
-            /* No budget → no counter at all: usage without a limit carries no
-             * decision signal for the model, but rewrites the prefix hourly. */
-            snprintf(
-                goal_prompt, sizeof(goal_prompt),
-                "[Active Goal]\nObjective: %s\nStatus: active\n"
-                "Keep working toward this objective until the user changes it with /goal. "
-                "If the objective is complete, call self_exit with a concise completion reason.",
-                session->goal_objective);
-        }
-        jbuf_append(&b, ",{\"type\":\"text\",\"text\":");
-        jbuf_append_json_str(&b, goal_prompt);
-        jbuf_append(&b, "}");
-    }
-
-    jbuf_append(&b, "]");
-
-    /* Sampling parameters */
-    if (session->temperature >= 0) {
+    /* Fable rejects non-default sampling parameters. */
+    if (!fable_model && session->temperature >= 0) {
         char tbuf[32];
         snprintf(tbuf, sizeof(tbuf), ",\"temperature\":%.2f", session->temperature);
         jbuf_append(&b, tbuf);
     }
-    if (session->top_p >= 0) {
+    if (!fable_model && session->top_p >= 0) {
         char tbuf[32];
         snprintf(tbuf, sizeof(tbuf), ",\"top_p\":%.2f", session->top_p);
         jbuf_append(&b, tbuf);
     }
-    if (session->top_k > 0) {
+    if (!fable_model && session->top_k > 0) {
         jbuf_append(&b, ",\"top_k\":");
         jbuf_append_int(&b, session->top_k);
     }
@@ -3811,7 +3902,7 @@ char *llm_build_request_ex_for_credential(conversation_t *c, session_state_t *se
     /* Adaptive thinking — gate on model support */
     const model_info_t *mi = model_lookup(request_model);
     if (mi && mi->supports_thinking) {
-        if (session->thinking_budget > 0) {
+        if (session->thinking_budget > 0 && !fable_model) {
             jbuf_append(&b, ",\"thinking\":{\"type\":\"enabled\",\"budget_tokens\":");
             jbuf_append_int(&b, session->thinking_budget);
             jbuf_append(&b, "}");
@@ -3839,15 +3930,24 @@ char *llm_build_request_ex_for_credential(conversation_t *c, session_state_t *se
         append_tools_json_filtered(&b, session, c, claude_code_oauth);
 
     /* Tool choice control */
-    if (!session->direct_answer_mode && session->tool_choice[0]) {
+    /* Fable rejects forced tool use. Keep tools available with the API default
+     * automatic selection instead. */
+    if (!fable_model && !session->direct_answer_mode && session->tool_choice[0]) {
         if (strcmp(session->tool_choice, "any") == 0) {
             jbuf_append(&b, ",\"tool_choice\":{\"type\":\"any\"}");
         } else if (strncmp(session->tool_choice, "tool:", 5) == 0) {
             char wire_name[256];
             jbuf_append(&b, ",\"tool_choice\":{\"type\":\"tool\",\"name\":");
-            jbuf_append_json_str(&b, anthropic_oauth_wire_tool_name(session->tool_choice + 5,
-                                                                    wire_name, sizeof(wire_name),
-                                                                    claude_code_oauth));
+            const char *choice_name = session->tool_choice + 5;
+            bool choice_is_external = strncmp(choice_name, "mcp_", 4) == 0;
+            if (anthropic_tool_proxy_enabled(claude_code_oauth) && choice_is_external) {
+                choice_name = "invoke_tool";
+            } else {
+                choice_name = anthropic_oauth_wire_tool_name(choice_name, wire_name,
+                                                              sizeof(wire_name),
+                                                              claude_code_oauth);
+            }
+            jbuf_append_json_str(&b, choice_name);
             jbuf_append(&b, "}");
         } else if (strcmp(session->tool_choice, "none") == 0) {
             jbuf_append(&b, ",\"tool_choice\":{\"type\":\"none\"}");
@@ -3856,6 +3956,14 @@ char *llm_build_request_ex_for_credential(conversation_t *c, session_state_t *se
     }
 
     build_messages_json(&b, c, session, claude_code_oauth);
+    if (claude_code_oauth) {
+        const char *identity = provider_claude_code_metadata_user_id();
+        if (identity) {
+            jbuf_append(&b, ",\"metadata\":{\"user_id\":");
+            jbuf_append_json_str(&b, identity);
+            jbuf_append(&b, "}");
+        }
+    }
     jbuf_append(&b, "}");
 
     /* Reset single-shot options after use */
@@ -3863,8 +3971,6 @@ char *llm_build_request_ex_for_credential(conversation_t *c, session_state_t *se
         session->prefill[0] = '\0';
     if (session->stop_seq[0])
         session->stop_seq[0] = '\0';
-    free(active_skill_prompt);
-
     cache_prefix_hash_check(b.data);
     return b.data;
 }
@@ -3879,6 +3985,13 @@ static size_t count_tokens_write_cb(void *ptr, size_t size, size_t nmemb, void *
     size_t total = size * nmemb;
     jbuf_append_len((jbuf_t *)userdata, (const char *)ptr, total);
     return total;
+}
+
+static bool anthropic_request_is_fable(const char *request_json) {
+    char *model = request_json ? json_get_str(request_json, "model") : NULL;
+    bool fable = model && strstr(model, "fable") != NULL;
+    free(model);
+    return fable;
 }
 
 int llm_count_tokens(const char *api_key, const char *request_json) {
@@ -3898,12 +4011,14 @@ int llm_count_tokens(const char *api_key, const char *request_json) {
     char ver[128];
     snprintf(ver, sizeof(ver), "anthropic-version: %s", ANTHROPIC_VERSION);
     hdrs = curl_slist_append(hdrs, ver);
-    char beta[256];
-    if (llm_anthropic_uses_claude_code_auth(api_key))
-        snprintf(beta, sizeof(beta), "anthropic-beta: %s,%s", CLAUDE_CODE_OAUTH_BETA,
-                 ANTHROPIC_BETAS);
-    else
+    char beta[768];
+    if (llm_anthropic_uses_claude_code_auth(api_key)) {
+        bool fable = anthropic_request_is_fable(request_json);
+        snprintf(beta, sizeof(beta), "anthropic-beta: %s%s%s", CLAUDE_CODE_OAUTH_BETAS,
+                 fable ? "," : "", fable ? CLAUDE_FABLE_FALLBACK_CREDIT_BETA : "");
+    } else {
         snprintf(beta, sizeof(beta), "anthropic-beta: %s", ANTHROPIC_BETAS);
+    }
     hdrs = curl_slist_append(hdrs, beta);
 
     jbuf_t resp_buf;
@@ -3957,6 +4072,7 @@ typedef struct {
     /* Callbacks */
     stream_text_cb text_cb;
     stream_tool_start_cb tool_cb;
+    stream_tool_arg_delta_cb tool_delta_cb;
     stream_thinking_cb thinking_cb;
     void *cb_ctx;
 
@@ -4673,6 +4789,9 @@ static void sse_handle_event(sse_state_t *s, const char *data) {
                 char *partial = json_get_str(delta_raw, "partial_json");
                 if (partial) {
                     jbuf_append(&s->input_buf, partial);
+                    if (partial[0] && s->tool_delta_cb) {
+                        s->tool_delta_cb(s->cur_tool_name, s->cur_tool_id, partial, s->cb_ctx);
+                    }
                     free(partial);
                 }
             } else if (delta_type && strcmp(delta_type, "content_delta") == 0) {
@@ -4783,17 +4902,21 @@ static size_t stream_write_cb(void *ptr, size_t size, size_t nmemb, void *userda
     if (g_stream_heartbeat)
         tui_stream_heartbeat_recv(g_stream_heartbeat, total);
 
+    /* Append contiguous payload runs instead of growing the line buffer one
+     * byte at a time. Large SSE deltas otherwise cause thousands of calls. */
     const char *p = (const char *)ptr;
-    for (size_t i = 0; i < total; i++) {
+    size_t start = 0;
+    for (size_t i = 0; i <= total; i++) {
         if (g_interrupted || s->repdet_tripped)
             return 0;
-        if (p[i] == '\n') {
-            if (s->line_buf.len > 0) {
+        if (i == total || p[i] == '\n' || p[i] == '\r') {
+            if (i > start)
+                jbuf_append_len(&s->line_buf, p + start, i - start);
+            if (i < total && p[i] == '\n' && s->line_buf.len > 0) {
                 sse_process_line(s, s->line_buf.data);
                 jbuf_reset(&s->line_buf);
             }
-        } else if (p[i] != '\r') {
-            jbuf_append_char(&s->line_buf, p[i]);
+            start = i + 1;
         }
     }
     return total;
@@ -4813,12 +4936,14 @@ static size_t stream_header_cb(char *buffer, size_t size, size_t nmemb, void *us
 }
 
 /* Helper: build curl headers for API request */
-static struct curl_slist *build_api_headers(const char *api_key) {
+static struct curl_slist *build_api_headers(const char *api_key, const char *request_json) {
     struct curl_slist *hdrs = NULL;
     hdrs = curl_slist_append(hdrs, "Content-Type: application/json");
-    hdrs = curl_slist_append(hdrs, "Accept: text/event-stream");
+    bool claude_code_oauth = llm_anthropic_uses_claude_code_auth(api_key);
+    hdrs = curl_slist_append(hdrs, claude_code_oauth ? "Accept: application/json"
+                                                     : "Accept: text/event-stream");
     char auth[512];
-    if (llm_anthropic_uses_claude_code_auth(api_key))
+    if (claude_code_oauth)
         snprintf(auth, sizeof(auth), "Authorization: Bearer %s", api_key);
     else
         snprintf(auth, sizeof(auth), "x-api-key: %s", api_key);
@@ -4826,13 +4951,48 @@ static struct curl_slist *build_api_headers(const char *api_key) {
     char ver[128];
     snprintf(ver, sizeof(ver), "anthropic-version: %s", ANTHROPIC_VERSION);
     hdrs = curl_slist_append(hdrs, ver);
-    char beta[256];
-    if (llm_anthropic_uses_claude_code_auth(api_key))
-        snprintf(beta, sizeof(beta), "anthropic-beta: %s,%s", CLAUDE_CODE_OAUTH_BETA,
-                 ANTHROPIC_BETAS);
-    else
+    char beta[768];
+    if (claude_code_oauth) {
+        bool fable = anthropic_request_is_fable(request_json);
+        snprintf(beta, sizeof(beta), "anthropic-beta: %s%s%s", CLAUDE_CODE_OAUTH_BETAS,
+                 fable ? "," : "", fable ? CLAUDE_FABLE_FALLBACK_CREDIT_BETA : "");
+    } else {
         snprintf(beta, sizeof(beta), "anthropic-beta: %s", ANTHROPIC_BETAS);
+    }
     hdrs = curl_slist_append(hdrs, beta);
+    if (claude_code_oauth) {
+        char user_agent[256];
+        snprintf(user_agent, sizeof(user_agent),
+                 "User-Agent: claude-cli/%s (external, sdk-cli)",
+                 claude_code_version());
+        hdrs = curl_slist_append(hdrs, user_agent);
+        char session_header[96];
+        snprintf(session_header, sizeof(session_header), "x-claude-code-session-id: %s",
+                 provider_claude_code_session_id());
+        hdrs = curl_slist_append(hdrs, session_header);
+        hdrs = curl_slist_append(hdrs, "anthropic-dangerous-direct-browser-access: true");
+        hdrs = curl_slist_append(hdrs, "x-app: cli");
+        hdrs = curl_slist_append(hdrs, "X-Stainless-Retry-Count: 0");
+        hdrs = curl_slist_append(hdrs, "X-Stainless-Runtime-Version: v26.3.0");
+        hdrs = curl_slist_append(hdrs, "X-Stainless-Package-Version: 0.94.0");
+        hdrs = curl_slist_append(hdrs, "X-Stainless-Runtime: node");
+        hdrs = curl_slist_append(hdrs, "X-Stainless-Lang: js");
+#if defined(__aarch64__) || defined(__arm64__)
+        hdrs = curl_slist_append(hdrs, "X-Stainless-Arch: arm64");
+#elif defined(__x86_64__)
+        hdrs = curl_slist_append(hdrs, "X-Stainless-Arch: x64");
+#else
+        hdrs = curl_slist_append(hdrs, "X-Stainless-Arch: other::unknown");
+#endif
+#if defined(__APPLE__)
+        hdrs = curl_slist_append(hdrs, "X-Stainless-OS: MacOS");
+#elif defined(__linux__)
+        hdrs = curl_slist_append(hdrs, "X-Stainless-OS: Linux");
+#else
+        hdrs = curl_slist_append(hdrs, "X-Stainless-OS: Other::unknown");
+#endif
+        hdrs = curl_slist_append(hdrs, "X-Stainless-Timeout: 600");
+    }
     hdrs = curl_slist_append(hdrs, "Expect:");
     return hdrs;
 }
@@ -4854,6 +5014,9 @@ static void setup_curl_opts(CURL *curl, struct curl_slist *hdrs, const char *req
     curl_easy_setopt(curl, CURLOPT_LOW_SPEED_LIMIT, 100L);
     curl_easy_setopt(curl, CURLOPT_LOW_SPEED_TIME, 120L);
     curl_easy_setopt(curl, CURLOPT_CONNECTTIMEOUT, 30L);
+    curl_easy_setopt(curl, CURLOPT_TCP_NODELAY, 1L);
+    curl_easy_setopt(curl, CURLOPT_NOSIGNAL, 1L);
+    curl_easy_setopt(curl, CURLOPT_BUFFERSIZE, 4096L);
     curl_easy_setopt(curl, CURLOPT_HTTP_VERSION, CURL_HTTP_VERSION_2TLS);
     curl_easy_setopt(curl, CURLOPT_TCP_KEEPALIVE, 1L);
     curl_easy_setopt(curl, CURLOPT_TCP_KEEPIDLE, 30L);
@@ -4896,7 +5059,9 @@ static void sse_state_reset_for_retry(sse_state_t *s) {
 }
 
 stream_result_t llm_stream(const char *api_key, const char *request_json, stream_text_cb text_cb,
-                           stream_tool_start_cb tool_cb, stream_thinking_cb thinking_cb,
+                           stream_tool_start_cb tool_cb,
+                           stream_tool_arg_delta_cb tool_delta_cb,
+                           stream_thinking_cb thinking_cb,
                            void *cb_ctx) {
     stream_result_t result = {0};
 
@@ -4905,6 +5070,7 @@ stream_result_t llm_stream(const char *api_key, const char *request_json, stream
     state.current_index = -1;
     state.text_cb = text_cb;
     state.tool_cb = tool_cb;
+    state.tool_delta_cb = tool_delta_cb;
     state.thinking_cb = thinking_cb;
     state.cb_ctx = cb_ctx;
     jbuf_init(&state.text_buf, 4096);
@@ -4979,7 +5145,7 @@ stream_result_t llm_stream(const char *api_key, const char *request_json, stream
             continue;
         }
 
-        struct curl_slist *headers = build_api_headers(api_key);
+        struct curl_slist *headers = build_api_headers(api_key, request_json);
         setup_curl_opts(curl, headers, request_json, &state);
 
         res = curl_easy_perform(curl);
@@ -5164,9 +5330,11 @@ stream_result_t llm_stream(const char *api_key, const char *request_json, stream
     if (state.telemetry_first_tool > 0)
         result.telemetry.ttft_tool_ms =
             (state.telemetry_first_tool - state.telemetry_start) * 1000.0;
-    if (result.telemetry.total_ms > 0 && result.usage.output_tokens > 0)
+    /* Decode TPS excludes prefill/TTFT so prompt length does not contaminate it. */
+    double decode_ms = result.telemetry.total_ms - result.telemetry.ttft_ms;
+    if (decode_ms > 0 && result.usage.output_tokens > 0)
         result.telemetry.tokens_per_sec =
-            result.usage.output_tokens / (result.telemetry.total_ms / 1000.0);
+            result.usage.output_tokens / (decode_ms / 1000.0);
     result.telemetry.thinking_tokens = state.telemetry_thinking_chars / 4; /* rough estimate */
 
     /* Cleanup */
