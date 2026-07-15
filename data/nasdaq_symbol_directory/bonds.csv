@@ -1,0 +1,180 @@
+symbol,name,financial_status
+AAPL26,Apple Inc. Senior Notes Due 2026,N
+AAPL27,Apple Inc. Senior Notes Due 2017,N
+AAPL29,Apple Inc. Senior Notes 2029,N
+AAPL29A,Apple Inc. Senior Notes Due 29 1.375,N
+AAPL31,Apple Inc. 0.500% Notes due 2031,N
+AAPL42,Apple Inc. Senior Notes Due 2042,N
+AMZN28,"Amazon.com, Inc. Floating Rate Notes due 2028",N
+AMZN28A,"Amazon.com, Inc. 2.800% Notes due 2028",N
+AMZN30,"Amazon.com, Inc. 3.100% Notes due 2030",N
+AMZN32,"Amazon.com, Inc. 3.350% Notes due 2032",N
+AMZN35,"Amazon.com, Inc. 3.700% Notes due 2035",N
+AMZN39,"Amazon.com, Inc. 4.050% Notes due 2039",N
+AMZN45,"Amazon.com, Inc. 4.450% Notes due 2045",N
+AMZN64,"Amazon.com, Inc. 4.850% Notes due 2064",N
+AVY34,Avery Dennison Corporation 3.750% Senior Notes due 2034,N
+AVY35,Avery Dennison Corporation 4.000% Senior Notes due 2035,N
+BKNG26,Booking Holdings Inc. 4.000% Senior Notes due 2026,N
+BKNG27,Booking Holdings Inc. Senior Notes due 2027,N
+BKNG28,Booking Holdings Inc. 0.500% Senior Notes due 2028,N
+BKNG28A,Booking Holdings Inc. 3.625% Senior Unsecured Notes due 2028,N
+BKNG29,Booking Holdings Inc. 4.250% Senior Notes due 2029,N
+BKNG29A,Booking Holdings Inc. 3.500% Senior Unsecured Notes due 2029,N
+BKNG30,Booking Holdings Inc. 3.000% Senior Unsecured Notes due 2030,N
+BKNG30A,Booking Holdings Inc. 3.500% Senior Unsecured Notes due 2030,N
+BKNG31,Booking Holdings Inc. 4.500% Senior Notes due 2031,N
+BKNG31A,Booking Holdings Inc. 3.125% Senior Unsecured Notes Due 2031,N
+BKNG32A,Booking Holdings Inc. 3.250% Senior Notes due 2032,N
+BKNG33,Booking Holdings Inc. 4.125% Senior Unsecured Notes due 2033,N
+BKNG34,Booking Holdings Inc. 4.750% Senior Notes due 2034,N
+BKNG34A,Booking Holdings Inc. 4.000% Senior Unsecured Notes due 2034,N
+BKNG35,Booking Holdings Inc. 3.625% Senior Unsecured Notes due 2035,N
+BKNG36,Booking Holdings Inc. 3.750% Senior Unsecured Notes due 2036,N
+BKNG37,Booking Holdings Inc. 3.750% Senior Notes due 2037,N
+BKNG38,Booking Holdings Inc. 4.125% Senior Unsecured Notes due 2038,N
+BKNG39,Booking Holdings Inc. 4.500% Senior Unsecured Notes due 2039,N
+BKNG44,Booking Holdings Inc. 4.000% Senior Unsecured Notes due 2044,N
+BKNG45,Booking Holdings Inc. 3.875% Senior Notes due 2045,N
+BKNG46,Booking Holdings Inc. 4.500% Senior Unsecured Notes due 2046,N
+BKR30,Baker Hughes Company 3.226% Senior Notes due 2030,N
+BKR34,Baker Hughes Company 3.812% Senior Notes due 2034,N
+BKR38,Baker Hughes Company 4.193% Senior Notes due 2038,N
+BKR40,"Baker Hughes Company Baker Hughes Holdings LLC $1,145,657,000 5.125% Senior Notes Due 2040",N
+BKR46,Baker Hughes Company 4.737% Senior Notes due 2046,N
+BNKG32,Booking Holdings Inc. 3.625% Senior Unsecured Notes due 2032,N
+CMCS26,Comcast Corporation 0.000% Notes due 2026,N
+CMCS27,Comcast Corporation Euro Notes due 2027,N
+CMCS29,Comcast Corporation 1.5 Sterling Notes due 2029,N
+CMCS29A,Comcast Corporation 0.250% Notes due 2029,N
+CMCS32,Comcast Corporation 0.75 Euro Notes due 2032,N
+CMCS32A,Comcast Corporation 3.250% Euro Notes due 2032,N
+CMCS36,Comcast Corporation 1.875 Sterling Notes due 2036,N
+CMCS36A,Comcast Corporation 3.550% Euro Notes due 2036,N
+CMCS40,Comcast Corporation 1.25 Euro Notes due 2040,N
+CMCS40A,Comcast Corporation 5.250% Sterling Notes due 2040,N
+EQIX27,"Equinix, Inc. 0.250% Senior Notes due 2027",N
+EQIX29,"Equinix, Inc. 3.250% Senior Notes due 2029",N
+EQIX31,"Equinix, Inc. 3.250% Senior Notes due 2031",N
+EQIX33,"Equinix, Inc. 1.000% Senior Notes due 2033",N
+EQIX33A,"Equinix, Inc. 3.650% Senior Notes due 2033",N
+EQIX34,"Equinix, Inc. 3.625% Senior Notes due 2034",N
+EQIX34A,"Equinix, Inc. 4.000% Senior Notes due 2034",N
+FISV27,"Fiserv, Inc. 1.125% Senior Notes due 2027",N
+FISV28C,"Fiserv, Inc. 2.875% Senior Notes due 06/15/2028",N
+FISV30,"Fiserv, Inc. 1.625% Senior Notes due 2030",N
+FISV30A,"Fiserv, Inc. 3.750% Senior Notes Due 2030",N
+FISV31,"Fiserv, Inc. 3.000% Senior Notes due 2031",N
+FISV31A,"Fiserv, Inc. 4.500% Senior Notes due 2031",N
+FISV32,"Fiserv, Inc. 3.500% Senior Notes due 06/15/2032",N
+FISV34,"Fiserv, Inc. 4.250% Senior Notes Due 2034",N
+FISV36,"Fiserv, Inc. 4.000% Senior Notes due 06/15/2036",N
+GOOG26,Alphabet Inc. 6.125% Notes due 2126,N
+GOOG28,Alphabet Inc. 2.375% Notes due 2028,N
+GOOG29,Alphabet Inc. 2.500% Notes due 2029,N
+GOOG29A,Alphabet Inc. 4.125% Notes due 2029,N
+GOOG30,Alphabet Inc. 3.200% Notes due 2030,N
+GOOG31,Alphabet Inc. 2.875% Notes due 2031 (the 2031 Notes),N
+GOOG32,Alphabet Inc. 4.625% Notes due 2032,N
+GOOG32A,Alphabet Inc. 3.450% Notes due 2032,N
+GOOG33,Alphabet Inc. 3.000% Notes due 2033,N
+GOOG34,Alphabet Inc. 3.125% Notes due 2034 (the 2034 Notes),N
+GOOG34A,Alphabet Inc. 3.625% Notes due 2034,N
+GOOG37,Alphabet Inc. 3.375% Notes due 2037,N
+GOOG38,Alphabet Inc. 3.500% Notes due 2038 (the 2038 Notes),N
+GOOG39,Alphabet Inc. 4.100% Notes due 2039,N
+GOOG41,Alphabet Inc. 5.500% Notes due 2041,N
+GOOG44,Alphabet Inc. 4.000% Notes due 2044 (the 2044 Notes),N
+GOOG45,Alphabet Inc. 3.875% Notes due 2045,N
+GOOG45A,Alphabet Inc. 4.500% Notes due 2045,N
+GOOG54,Alphabet Inc. 4.000% Notes due 2054,N
+GOOG58,Alphabet Inc. 5.875% Notes due 2058,N
+GOOG63,Alphabet Inc. 4.800% Notes due 2063,N
+GOOG64,Alphabet Inc. 4.375% Notes due 2064,N
+HON30,Honeywell International Inc. 3.375% Senior Notes due 2030,N
+HON32,Honeywell International Inc. 0.750% Senior Notes due 2032,N
+HON32A,Honeywell International Inc. 3.750% Senior Notes due 2032,N
+HON34,Honeywell International Inc. 4.125% Senior Notes due 2034,N
+HON36,Honeywell International Inc. 3.750% Senior Notes due 2036,N
+KHC29,"The Kraft Heinz Company Kraft Heinz Foods Company 550,000,000 3.500% senior notes due 2029",N
+KHC31,The Kraft Heinz Company 3.500% Senior Notes due 2031,N
+KHC33,The Kraft Heinz Company 3.250% Senior Notes Due 2033,N
+KHC34,The Kraft Heinz Company 3.950% Senior Notes due 2034,N
+LINE31,"Lineage, Inc. 4.125% Senior Notes due 2031",N
+LKQ31,LKQ Corporation 4.125% Notes due 2031,N
+MDLZ27,"Mondelez International, Inc. 1.625% Notes due 2027",N
+MDLZ28,"Mondelez International, Inc. 0.250% Notes due 2028",N
+MDLZ33,"Mondelez International, Inc. 0.750% Notes due 2033",N
+MDLZ35,"Mondelez International, Inc. 2.375% Notes due 2035",N
+MDLZ35A,"Mondelez International, Inc. 4.500% Notes due 2035",N
+MDLZ41,"Mondelez International, Inc. 1.375% Notes due 2041",N
+MDLZ45,"Mondelez International, Inc. 3.875% Notes due 2045",N
+MELI31,"MercadoLibre, Inc. 3.125% Notes due 2031",N
+MELI33,"MercadoLibre, Inc. 4.900% Notes due 2033",N
+MSFT28,Microsoft Corporation 3.125% Notes due 2028,N
+MSFT33,Microsoft Corporation 2.625% Notes due 2033,N
+NDAQ29,"Nasdaq, Inc. 1.75% Senior Notes Due 2029",N
+NDAQ30,"Nasdaq, Inc. 0.875% Notes due 2030",N
+NDAQ32,"Nasdaq, Inc. 4.500% Senior Notes due 2032",N
+NDAQ33,"Nasdaq, Inc. 0.900% Senior Notes due 2033",N
+PCAR34,"PACCAR Financial Corp. Medium-Term Notes, Series Q - Fixed Rate due 2034",N
+PEP27,"PepsiCo, Inc. Senior Notes 2027",N
+PEP28,"PepsiCo, Inc. Senior Notes Due 2028",N
+PEP28A,"PepsiCo, Inc. 0.500% Senior Notes due 2028",N
+PEP28B,"PepsiCo, Inc. Floating Rate Notes due 2028",N
+PEP29,"PepsiCo, Inc. 3.200% Senior Notes due 2029",N
+PEP31,"PepsiCo, Inc. Senior Notes 2031",N
+PEP32,"PepsiCo, Inc. 0.400% Senior Notes due 2032",N
+PEP33,"PepsiCo, Inc. 0.750% Senior Notes due 2033",N
+PEP34,"PepsiCo, Inc. 3.550% Senior Notes due 2034",N
+PEP34A,"PepsiCo, Inc. 3.300% Senior Notes due 2034",N
+PEP37,"PepsiCo, Inc. 3.450% Senior Notes due 2037",N
+PEP38,"PepsiCo, Inc. 3.700% Senior Notes due 2038",N
+PEP39,"PepsiCo, Inc. Senior Notes due 2039",N
+PEP47,"PepsiCo, Inc. 4.150% Senior Notes due 2047",N
+PEP50,"PepsiCo, Inc. 1.050% Senior Notes due 2050",N
+PEP55,"PepsiCo, Inc. 4.050% Senior Notes due 2055",N
+TMUS29,"T-Mobile US, Inc. 3.550% Senior Notes due 2029",N
+TMUS32,"T-Mobile US, Inc. 3.700% Senior Notes due 2032",N
+TMUS32A,"T-Mobile US, Inc. 3.150% Senior Notes due 2032",N
+TMUS32B,"T-Mobile US, Inc. 3.200% Senior Notes due 2032",N
+TMUS35,"T-Mobile US, Inc. 3.625% Senior Notes due 2035",N
+TMUS36,"T-Mobile US, Inc. 3.850% Senior Notes due 2036",N
+TMUS37,"T-Mobile US, Inc. 3.50% Senior Notes due 2037",N
+TMUS38,"T-Mobile US, Inc. 3.900% Senior Notes due 2038",N
+TMUS45,"T-Mobile US, Inc. 3.800% Senior Notes due 2045",N
+TRI35,Thomson Reuters Corp 5.500% Debentures Due 2035,N
+TRI40,Thomson Reuters Corp 5.850% Notes Due 2040,N
+TRI43A,Thomson Reuters Corp 4.500% Notes Due 2043,N
+TRI43B,Thomson Reuters Corp 5.650% Notes Due 2043,N
+VOD31,Vodafone Group Plc 4.800% Notes due 2031,N
+VOD32,Vodafone Group Plc 6.250% Notes due November 2032,N
+VOD36,Vodafone Group Plc 5.350% Notes due 2036,N
+VOD37,Vodafone Group Plc 6.150% Notes due February 2037,N
+VOD38,Vodafone Group Plc 5.000% Notes due May 2038,N
+VOD43,Vodafone Group Plc 4.375% Notes due February 2043,N
+VOD48,Vodafone Group Plc 5.25% Notes due May 2048,N
+VOD49,Vodafone Group Plc 4.875% Notes due June 2049,N
+VOD50,Vodafone Group Plc 4.25% Notes due September 2050,N
+VOD53,Vodafone Group Plc 5.625% Notes due 2/10/2053,N
+VOD54,"Vodafone Group Plc U.S.$2,000,000,000 5.750% Notes due 2054",N
+VOD56,Vodafone Group Plc 6.100% Notes due 2056,N
+VOD59,Vodafone Group Plc 5.125%Notes due June 2059,N
+VOD63,Vodafone Group Plc 5.750% Notes due 2/10/2063,N
+VOD64,Vodafone Group Plc 5.875% Notes due 2064,N
+VOD79,Vodafone Group Plc Capital Securities due April 2079,N
+VOD81A,"Vodafone Group Plc U.S.$500,000,000 NC5.25 Capital Securities Due 2081",N
+VOD81B,"Vodafone Group Plc U.S.$1,000,000,000 NC10 Capital Securities Due 2081",N
+VOD81C,"Vodafone Group Plc U.S.$950,000,000 NC30 Capital Securities Due 2081",N
+WBDI30,"Warner Bros. Discovery, Inc. 4.302% Senior Notes due 2030",N
+WBDI30A,"Warner Bros. Discovery, Inc. 4.302% Senior Notes due 2030",N
+WBDI33,"Warner Bros. Discovery, Inc. 4.693% Senior Notes due 2033",N
+WBDI33A,"Warner Bros. Discovery, Inc. 4.693% Senior Notes due 2033",N
+WMT26A,Walmart Inc. 1.050% Notes due 2026,N
+WMT28C,Walmart Inc. 1.500% Notes due 2028,N
+WMT29B,Walmart Inc. 4.875% Notes due 2029,N
+WMT30B,Walmart Inc. 5.750% Notes due 2030,N
+WMT31A,Walmart Inc. 1.800% Notes due 2031,N
+WMT34,Walmart Inc. 5.625% Notes due 2034,N
+WMT35A,Walmart Inc. 5.250% Notes due 2035,N
+WMT39,Walmart Inc. 4.875% Notes due 2039,N

@@ -8,6 +8,7 @@
 #include "config.h"
 #include "crypto.h"
 #include "eval.h"
+#include "rl_hooks.h"
 #include "tools.h"
 #include "mcp.h"
 #include "mcp_names.h"
@@ -20,6 +21,7 @@
 #include <curl/curl.h>
 #include "codex_cache.h"
 #include "codex_app_directory.h"
+#include "codex_usage.h"
 #include "chronicle.h"
 #include "router.h"
 #include "realtime.h"
@@ -27,6 +29,10 @@
 #include "frontier.h"
 #include "setup.h"
 #include "spend_governor.h"
+#include "cost_budget.h"
+#include "gov_experiment.h"
+#include "baseline.h"
+
 #include "plan_cache.h"
 #include "dsco_dht.h"
 #include "dsco_swim.h"
@@ -45,6 +51,12 @@
 #include "vfs.h"
 #include "memory_tier.h"
 #include "capability.h"
+#include "kitty_tools.h"
+#include "native_ui.h"
+#include "pixel_fx.h"
+#include "pixel_tui.h"
+#include "ui_motion.h"
+#include "workspace.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -97,6 +109,292 @@ static mcp_registry_t test_mcp_registry;
             return;                                                                                \
         }                                                                                          \
     } while (0)
+
+typedef struct {
+    int frames;
+    int fills;
+    int texts;
+} native_ui_test_backend_t;
+
+static void native_ui_test_begin(void *context, native_ui_rect_t viewport,
+                                 const native_ui_damage_t *damage) {
+    native_ui_test_backend_t *state = context;
+    if (state && viewport.width > 0 && damage) state->frames++;
+}
+
+static void native_ui_test_fill(void *context, native_ui_rect_t rect,
+                                native_ui_color_token_t color, uint8_t opacity,
+                                uint8_t radius) {
+    (void)color;
+    (void)opacity;
+    (void)radius;
+    native_ui_test_backend_t *state = context;
+    if (state && rect.width > 0 && rect.height > 0) state->fills++;
+}
+
+static void native_ui_test_text(void *context, native_ui_rect_t rect, const char *text,
+                                native_ui_type_token_t type,
+                                native_ui_color_token_t color, uint8_t opacity) {
+    (void)type;
+    (void)color;
+    (void)opacity;
+    native_ui_test_backend_t *state = context;
+    if (state && rect.width > 0 && text && *text) state->texts++;
+}
+
+static void test_native_ui_scene_layout_diff_focus_and_backend(void) {
+    TEST("native UI retained layout, damage, focus, backend");
+    native_ui_scene_t scene;
+    native_ui_scene_init(&scene, 900, 400);
+    native_ui_node_t *root = native_ui_scene_node(&scene, scene.root);
+    ASSERT(root != NULL, "native UI scene should create a root");
+    root->style.padding = (native_ui_insets_t){10, 10, 10, 10};
+    root->style.gap = 6;
+
+    int header = native_ui_scene_add(&scene, scene.root, 10,
+                                     NATIVE_UI_ELEMENT_SURFACE,
+                                     NATIVE_UI_ROLE_HEADER);
+    int transcript = native_ui_scene_add(&scene, scene.root, 20,
+                                         NATIVE_UI_ELEMENT_SCROLL,
+                                         NATIVE_UI_ROLE_TRANSCRIPT);
+    int composer = native_ui_scene_add(&scene, scene.root, 30,
+                                       NATIVE_UI_ELEMENT_INPUT,
+                                       NATIVE_UI_ROLE_COMPOSER);
+    ASSERT(header > 0 && transcript > 0 && composer > 0,
+           "semantic shell nodes should be admitted");
+    scene.nodes[header].constraints.preferred_height = 40;
+    scene.nodes[header].style.background = NATIVE_UI_COLOR_SURFACE;
+    scene.nodes[transcript].constraints.min_height = 100;
+    scene.nodes[transcript].constraints.grow = 1;
+    scene.nodes[composer].constraints.preferred_height = 64;
+    scene.nodes[composer].state |= NATIVE_UI_STATE_FOCUSABLE;
+    native_ui_node_set_accessibility_label(&scene.nodes[composer], "Command composer");
+
+    int title = native_ui_scene_add(&scene, header, 11, NATIVE_UI_ELEMENT_TEXT,
+                                    NATIVE_UI_ROLE_STATUS);
+    ASSERT(title > 0, "header should accept a retained text child");
+    scene.nodes[header].style.flow = NATIVE_UI_FLOW_OVERLAY;
+    native_ui_node_set_text(&scene.nodes[title], "DSCO / AGENT WORKSPACE");
+    native_ui_layout(&scene);
+    ASSERT(scene.nodes[header].frame.y == 10 && scene.nodes[header].frame.height == 40,
+           "column layout should preserve fixed header geometry");
+    ASSERT(scene.nodes[transcript].frame.height == 264,
+           "flex transcript should consume remaining height");
+    ASSERT(scene.nodes[composer].frame.y == 326 && scene.nodes[composer].frame.height == 64,
+           "composer should remain pinned after the flexible transcript");
+    ASSERT(native_ui_hit_test(&scene, 20, 350) == composer,
+           "hit testing should select the deepest visible element");
+    ASSERT(native_ui_focus_move(&scene, false) == composer && scene.focused == composer,
+           "focus traversal should select semantic interactive elements");
+
+    native_ui_scene_t previous = scene;
+    native_ui_node_set_text(&scene.nodes[title], "DSCO / AUTONOMOUS WORKSPACE");
+    native_ui_damage_t damage;
+    native_ui_diff(&previous, &scene, &damage);
+    ASSERT(!damage.full_repaint && damage.count == 1,
+           "a retained text mutation should damage only its region");
+
+    native_ui_test_backend_t backend_state = {0};
+    native_ui_backend_t backend = {
+        .begin_frame = native_ui_test_begin,
+        .fill_rect = native_ui_test_fill,
+        .draw_text = native_ui_test_text,
+    };
+    native_ui_render(&scene, &previous, &backend, &backend_state);
+    ASSERT(backend_state.frames == 1 && backend_state.fills == 1 &&
+           backend_state.texts == 1,
+           "backend traversal should emit semantic paint operations");
+
+    native_ui_agent_shell_layout_t dense = native_ui_agent_shell_layout(1000, 700);
+    native_ui_agent_shell_layout_t expanded = native_ui_agent_shell_layout(1600, 700);
+    ASSERT(dense.density == NATIVE_UI_DENSITY_DENSE && !dense.shows_inspector,
+           "normal windows should preserve a dominant transcript plane");
+    ASSERT(expanded.density == NATIVE_UI_DENSITY_EXPANDED && expanded.shows_inspector &&
+           expanded.inspector.width >= 190,
+           "wide windows should expose the autonomous-agent inspector");
+    ASSERT(strcmp(native_ui_role_name(NATIVE_UI_ROLE_TOOL_ACTIVITY), "tool-activity") == 0 &&
+           strcmp(native_ui_agent_state_name(NATIVE_UI_AGENT_BLOCKED), "blocked") == 0,
+           "semantic roles and agent states should be stable for automation");
+
+    native_ui_viewport_metrics_t one_x =
+        native_ui_terminal_viewport(112, 38, 1120, 608, 0);
+    native_ui_viewport_metrics_t retina =
+        native_ui_terminal_viewport(112, 38, 2240, 1216, 0);
+    /* Terminal cell geometry alone cannot distinguish a large-font 2x panel
+     * from a 3x backing grid; use the explicit DPR when it is available. */
+    native_ui_viewport_metrics_t retina_3x =
+        native_ui_terminal_viewport(112, 38, 3360, 1824, 3);
+    ASSERT(one_x.backing_scale == 1 && one_x.logical_width == 1120,
+           "1x terminal pixels should remain logical layout pixels");
+    ASSERT(retina.backing_scale == 2 && retina.logical_width == 1120 &&
+           retina.logical_height == 608,
+           "Retina backing pixels should normalize before breakpoint selection");
+    ASSERT(retina_3x.backing_scale == 3 && retina_3x.logical_width == 1120,
+           "3x backing grids should preserve the same semantic viewport");
+    native_ui_agent_shell_layout_t retina_shell =
+        native_ui_agent_shell_layout(retina.logical_width, retina.logical_height);
+    ASSERT(!retina_shell.shows_inspector,
+           "physical Retina width must not trigger an expanded inspector rail");
+    PASS();
+}
+
+static void test_pixel_fx_rounded_shadow_clip_blur(void) {
+    TEST("pixel_fx: AA rounded fills, clip stack, blur");
+    enum { FX_W = 64, FX_H = 64 };
+    static uint8_t rgb[FX_W * FX_H * 3];
+    memset(rgb, 0, sizeof(rgb));
+    pixel_fx_surface_t s;
+    pixel_fx_surface_init(&s, rgb, FX_W, FX_H);
+
+    pixel_fx_fill_rounded(&s, 12, 22, 40, 20, 8, (pixel_fx_rgb_t){200, 100, 50},
+                          1.0);
+    size_t center = ((size_t)32 * FX_W + 32) * 3;
+    size_t corner = ((size_t)22 * FX_W + 12) * 3;
+    size_t outside = ((size_t)5 * FX_W + 5) * 3;
+    ASSERT(rgb[center] == 200 && rgb[center + 1] == 100,
+           "rounded fill should paint the interior at full alpha");
+    ASSERT(rgb[corner] == 0,
+           "the square corner of the bounds must stay outside the rounded silhouette");
+    ASSERT(rgb[outside] == 0, "pixels outside the rect must be untouched");
+    /* The corner arc midpoint should carry partial-or-full coverage. */
+    size_t arc = ((size_t)24 * FX_W + 15) * 3;
+    ASSERT(rgb[arc] > 0, "corner arc should receive antialiased coverage");
+
+    /* Clip: a fill pushed against a clip must not escape it. */
+    ASSERT(pixel_fx_clip_push(&s, 0, 0, 16, 16), "clip push should succeed");
+    pixel_fx_fill_rounded(&s, 0, 0, FX_W, FX_H, 0, (pixel_fx_rgb_t){0, 255, 0},
+                          1.0);
+    pixel_fx_clip_pop(&s);
+    size_t inside_clip = ((size_t)8 * FX_W + 8) * 3;
+    size_t past_clip = ((size_t)8 * FX_W + 40) * 3;
+    ASSERT(rgb[inside_clip + 1] == 255, "clipped fill should paint inside the clip");
+    ASSERT(rgb[past_clip + 1] != 255, "clipped fill must not escape the clip rect");
+
+    /* Blur: an impulse spreads energy to its neighbors. */
+    memset(rgb, 0, sizeof(rgb));
+    rgb[center] = 255;
+    ASSERT(pixel_fx_blur(&s, 20, 20, 24, 24, 3), "blur should succeed");
+    ASSERT(rgb[center] < 255 && rgb[center] > 0,
+           "blur should attenuate the impulse without erasing it");
+    size_t neighbor = ((size_t)32 * FX_W + 34) * 3;
+    ASSERT(rgb[neighbor] > 0, "blur should spread energy to neighbors");
+
+    /* Gradient: the first stop owns the top row. */
+    memset(rgb, 0, sizeof(rgb));
+    pixel_fx_stop_t stops[2] = {
+        {0.0f, {10, 20, 30}}, {1.0f, {200, 210, 220}},
+    };
+    pixel_fx_gradient(&s, 0, 0, FX_W, FX_H, stops, 2, false, 1.0);
+    ASSERT(rgb[0] == 10 && rgb[1] == 20 && rgb[2] == 30,
+           "vertical gradient top row should equal the first stop");
+    size_t bottom = ((size_t)(FX_H - 1) * FX_W) * 3;
+    ASSERT(rgb[bottom] == 200, "vertical gradient bottom row should equal the last stop");
+    PASS();
+}
+
+static void test_ui_motion_timeline_retarget_reduced(void) {
+    TEST("ui_motion: tween, retarget, spring, reduced");
+    ui_motion_t motion;
+    ui_motion_init(&motion, false);
+    ui_motion_snap(&motion, 7, 0, 0.0);
+    ui_motion_set(&motion, 7, 0, 1.0, 0.3, UI_MOTION_EASE_OUT, 0.0);
+    ASSERT(ui_motion_value(&motion, 7, 0, 0.0, -1.0) < 0.01,
+           "a seeded tween should start from its snapped origin");
+    double mid = ui_motion_value(&motion, 7, 0, 0.15, -1.0);
+    ASSERT(mid > 0.1 && mid < 1.0, "mid-flight value should be between endpoints");
+    ASSERT(ui_motion_value(&motion, 7, 0, 0.5, -1.0) == 1.0,
+           "a finished tween should rest exactly on its target");
+    ASSERT(ui_motion_active(&motion, 0.15), "timeline should be live mid-flight");
+    ASSERT(!ui_motion_active(&motion, 0.5), "timeline should park when settled");
+
+    /* Retarget mid-flight: the new segment starts where the old one was. */
+    ui_motion_set(&motion, 7, 0, 0.0, 0.3, UI_MOTION_EASE_OUT, 0.15);
+    double rejoin = ui_motion_value(&motion, 7, 0, 0.15, -1.0);
+    ASSERT(rejoin > mid - 0.02 && rejoin < mid + 0.02,
+           "retargeting must be continuous, not a jump");
+
+    /* Spring converges without a fixed endpoint. */
+    ui_motion_snap(&motion, 9, 0, 0.0);
+    ui_motion_set(&motion, 9, 0, 100.0, 0.4, UI_MOTION_SPRING, 0.0);
+    double spring_mid = ui_motion_value(&motion, 9, 0, 0.2, -1.0);
+    ASSERT(spring_mid > 5.0 && spring_mid < 100.0,
+           "spring should be en route at half its response time");
+    double spring_late = ui_motion_value(&motion, 9, 0, 3.0, -1.0);
+    ASSERT(spring_late > 99.0 && spring_late < 101.0,
+           "spring should converge on its target");
+
+    /* Unknown tracks return the caller fallback. */
+    ASSERT(ui_motion_value(&motion, 999, 0, 0.0, 42.0) == 42.0,
+           "missing tracks must resolve to the fallback");
+
+    /* Reduced motion resolves immediately and never reports active. */
+    ui_motion_t reduced;
+    ui_motion_init(&reduced, true);
+    ui_motion_set(&reduced, 7, 0, 1.0, 0.3, UI_MOTION_EASE_OUT, 0.0);
+    ASSERT(ui_motion_value(&reduced, 7, 0, 0.0, -1.0) == 1.0,
+           "reduced motion must apply targets instantly");
+    ASSERT(!ui_motion_active(&reduced, 0.0),
+           "reduced motion timelines never demand animation frames");
+
+    /* Prune drops settled tracks; live ones survive. */
+    ui_motion_prune(&motion, 10.0, 2.0);
+    ASSERT(ui_motion_value(&motion, 9, 0, 10.0, -5.0) == -5.0,
+           "pruned tracks should fall back to caller state");
+    PASS();
+}
+
+static void test_native_ui_scene_from_json_generative(void) {
+    TEST("native_ui: JSON scene compiles, lays out, renders");
+    static native_ui_scene_t scene;
+    const char *spec =
+        "{\"element\":\"stack\",\"role\":\"artifact\",\"style\":{\"bg\":\"surface\","
+        "\"pad\":12,\"gap\":8,\"radius\":8},\"children\":["
+        "{\"element\":\"text\",\"key\":\"title\",\"text\":\"SWARM STATUS\","
+        "\"style\":{\"type\":\"title\",\"fg\":\"accent\"},\"size\":{\"h\":24}},"
+        "{\"element\":\"row\",\"style\":{\"gap\":6},\"size\":{\"h\":18},\"children\":["
+        "{\"element\":\"badge\",\"text\":\"LIVE\",\"style\":{\"fg\":\"success\"}},"
+        "{\"element\":\"meter\",\"value\":0.65,\"style\":{\"fg\":\"warning\"},"
+        "\"size\":{\"grow\":1}}]},"
+        "{\"element\":\"sparkline\",\"text\":\"1 4 2 8 5 7\","
+        "\"style\":{\"fg\":\"accent\"},\"size\":{\"h\":30}}]}";
+    int count = native_ui_scene_from_json(&scene, spec, 600, 200);
+    ASSERT(count == 7, "spec should compile to root + six declared nodes");
+    ASSERT(scene.nodes[1].role == NATIVE_UI_ROLE_ARTIFACT,
+           "roles should survive the JSON round trip");
+    const native_ui_node_t *meter = NULL;
+    for (int i = 0; i < scene.count; i++)
+        if (scene.nodes[i].element == NATIVE_UI_ELEMENT_METER)
+            meter = &scene.nodes[i];
+    ASSERT(meter && meter->value > 0.64f && meter->value < 0.66f,
+           "meter value should parse");
+    ASSERT(meter->frame.width > 0 && meter->frame.height > 0,
+           "layout should assign real frames to leaf nodes");
+    /* grow=1 inside the row should hand the meter the remaining width. */
+    ASSERT(meter->frame.width > 400,
+           "grow weights should distribute row space");
+
+    static native_ui_scene_t dup;
+    ASSERT(native_ui_scene_from_json(&dup, "{\"element\":\"stack\"", 100, 100) < 0,
+           "truncated JSON must be rejected");
+    ASSERT(native_ui_scene_from_json(&dup, "[1,2]", 100, 100) < 0,
+           "non-object specs must be rejected");
+
+    /* Full generative pipeline, headless: JSON → scene → pixel backend → PPM. */
+    char ppm[128];
+    snprintf(ppm, sizeof(ppm), "/tmp/dsco-test-scene-%ld.ppm", (long)getpid());
+    ASSERT(pixel_tui_write_scene_ppm(ppm, spec, 600, 0),
+           "scene should render headlessly through the pixel backend");
+    FILE *f = fopen(ppm, "rb");
+    ASSERT(f, "scene PPM artifact should exist");
+    char magic[3] = {0};
+    int w = 0, h = 0;
+    int scanned = fscanf(f, "%2s %d %d", magic, &w, &h);
+    fclose(f);
+    unlink(ppm);
+    ASSERT(scanned == 3 && strcmp(magic, "P6") == 0 && w == 600 && h >= 160,
+           "scene artifact should be a well-formed RGB image");
+    PASS();
+}
 
 static char *test_external_tool_stub(const char *name, const char *input_json, void *ctx) {
     (void)name;
@@ -1308,6 +1606,107 @@ static void test_spend_governor_effort_ranking(void) {
     PASS();
 }
 
+static void test_baseline_authoritative_costs(void) {
+    TEST("baseline: authoritative provider cost overrides estimate");
+    char saved_home[PATH_MAX] = "";
+    bool had_home = false;
+    test_capture_env("HOME", saved_home, sizeof(saved_home), &had_home);
+
+    char root[PATH_MAX];
+    snprintf(root, sizeof(root), "/tmp/dsco_baseline_cost_%d_%ld", (int)getpid(), (long)time(NULL));
+    bool started = mkdir(root, 0700) == 0;
+    bool logged_actual = false;
+    bool logged_zero = false;
+    bool logged_estimate = false;
+    bool accounted = false;
+    char *report = NULL;
+
+    if (started) {
+        setenv("HOME", root, 1);
+        started = baseline_start("test-model", "test");
+    }
+    if (started) {
+        logged_actual = baseline_log_usage_with_cost(
+            "turn", "authoritative", NULL, NULL, 0, 0, 0, 0, 12.5);
+        logged_zero = baseline_log_usage_with_cost(
+            "turn", "subscription", NULL, NULL, 0, 1000000, 0, 0, 0.0);
+        logged_estimate = baseline_log_usage("turn", "estimated", NULL, NULL, 0, 1000000, 0, 0);
+        report = baseline_credit_report(NULL);
+        accounted = report && strstr(report, "\"total_est_cost_usd\":27.500000") != NULL;
+    }
+
+    free(report);
+    if (started)
+        baseline_stop();
+    char db_dir[PATH_MAX];
+    char db_path[PATH_MAX];
+    snprintf(db_dir, sizeof(db_dir), "%s/.dsco", root);
+    snprintf(db_path, sizeof(db_path), "%s/baseline.db", db_dir);
+    unlink(db_path);
+    rmdir(db_dir);
+    rmdir(root);
+    test_restore_env("HOME", saved_home, had_home);
+
+    ASSERT(started, "baseline must start in an isolated home");
+    ASSERT(logged_actual, "authoritative usage must be recorded");
+    ASSERT(logged_zero, "authoritative zero-cost usage must be recorded");
+    ASSERT(logged_estimate, "unreported usage must retain estimate fallback");
+    ASSERT(accounted, "report must preserve zero-cost subscription usage plus estimate fallback");
+    PASS();
+}
+
+static void test_accounted_zero_cost_stays_zero(void) {
+    TEST("cost budget: accounted zero remains zero");
+    session_state_t session;
+    session_state_init(&session, "claude-opus-4-6");
+    session.total_input_tokens = 1000000;
+    session.total_output_tokens = 1000000;
+    ASSERT(cost_budget_session_spent_usd(&session) > 0.0,
+           "unaccounted usage should retain the local estimate fallback");
+    session.turn_count = 1;
+    session.total_reported_cost_usd = 0.0;
+    ASSERT(cost_budget_session_spent_usd(&session) == 0.0,
+           "an accounted subscription turn must not be repriced as API spend");
+    PASS();
+}
+
+static void test_codex_subscription_usage_parser(void) {
+    TEST("Codex subscription usage parser keeps quota and tokens");
+    const char *jsonl =
+        "{\"id\":1,\"result\":{\"userAgent\":\"dsco\"}}\n"
+        "{\"method\":\"account/rateLimits/updated\",\"params\":{}}\n"
+        "{\"id\":2,\"result\":{\"rateLimits\":{\"limitId\":\"codex\","
+        "\"primary\":{\"usedPercent\":37,\"windowDurationMins\":10080,"
+        "\"resetsAt\":1800000000},\"secondary\":{\"usedPercent\":4,"
+        "\"windowDurationMins\":300,\"resetsAt\":1700000000},"
+        "\"planType\":\"pro\"},\"rateLimitResetCredits\":{\"availableCount\":1}}}\n"
+        "{\"id\":3,\"result\":{\"summary\":{\"lifetimeTokens\":11687637446,"
+        "\"peakDailyTokens\":459829394,\"longestRunningTurnSec\":5058,"
+        "\"currentStreakDays\":26,\"longestStreakDays\":40},"
+        "\"dailyUsageBuckets\":[{\"startDate\":\"2026-07-13\",\"tokens\":252964310},"
+        "{\"startDate\":\"2026-07-14\",\"tokens\":59710038}]}}\n";
+    codex_usage_snapshot_t usage;
+    char error[256];
+    bool ok = codex_usage_parse_jsonl(jsonl, &usage, error, sizeof(error));
+    ASSERT(ok, "valid app-server account responses must parse");
+    ASSERT(usage.have_rate_limits, "rate-limit snapshot should be present");
+    ASSERT(usage.have_account_usage, "account-token snapshot should be present");
+    ASSERT(strcmp(usage.plan_type, "pro") == 0, "plan type should be preserved");
+    ASSERT(usage.primary_used_percent == 37, "primary used percent should parse");
+    ASSERT(usage.primary_window_minutes == 10080, "weekly window should parse");
+    ASSERT(usage.primary_resets_at == (time_t)1800000000, "primary reset should parse");
+    ASSERT(usage.have_secondary && usage.secondary_used_percent == 4,
+           "secondary window should parse");
+    ASSERT(usage.reset_credits_available == 1, "reset-credit count should parse");
+    ASSERT(strcmp(usage.latest_usage_date, "2026-07-14") == 0,
+           "latest account usage date should be selected");
+    ASSERT(usage.latest_daily_tokens == 59710038, "latest daily tokens should parse");
+    ASSERT(usage.lifetime_tokens == 11687637446LL, "64-bit lifetime tokens should not truncate");
+    ASSERT(usage.peak_daily_tokens == 459829394, "peak daily tokens should parse");
+    ASSERT(usage.current_streak_days == 26, "current streak should parse");
+    PASS();
+}
+
 static void test_spend_governor_default_budgets(void) {
     TEST("spend governor: default budgets protect unconfigured sessions");
     char saved_no[32], saved_s[32], saved_d[32];
@@ -1624,7 +2023,7 @@ static void test_build_request_ex_for_credential_includes_billing_header(void) {
     conv_init(&conv);
     conv_add_user_text(&conv, "hey");
     const char *prompt_prefix =
-        "You are dsco, an agentic CLI built on the Overmind Soul architecture.";
+        "You are dsco, Distributed Systems, Inc.'s local-first autonomous agent runtime.";
 
     char saved_ver[64];
     bool had_ver = false;
@@ -1643,6 +2042,8 @@ static void test_build_request_ex_for_credential_includes_billing_header(void) {
            "billing header should include deterministic cc_version");
     ASSERT(strstr(req, "cch=fa690;") != NULL,
            "billing header should include cch from first user message");
+    ASSERT(strstr(req, "You are a Claude agent, built on Anthropic's Claude Agent SDK.") != NULL,
+           "OAuth request should include the Claude Agent SDK identity block");
     ASSERT(prompt != NULL && hdr < prompt,
            "billing header should precede the static system prompt");
 
@@ -1703,15 +2104,15 @@ static void test_build_request_oauth_promotes_legacy_mcp_wire_names(void) {
 
     char *req = llm_build_request_ex_for_credential(&conv, &session, 1024, "sk-ant-oat-session");
     ASSERT(req != NULL, "request should not be NULL");
-    ASSERT(test_count_substr(req, "\"name\":\"mcp__linear__get_issue\"") >= 2,
-           "tool schema and tool_use history should use Claude MCP wire name");
+    ASSERT(test_count_substr(req, "\"name\":\"mcp__linear__get_issue\"") >= 1,
+           "tool_use history should use Claude MCP wire name even when the stable dispatcher "
+           "replaces the external schema");
     ASSERT(strstr(req, "\"name\":\"mcp_linear_get_issue\"") == NULL,
            "OAuth wire request should not contain single-underscore mcp_ tool names");
     ASSERT(strstr(req, "\"name\":\"mcp__linear_get_issue\"") == NULL,
            "OAuth wire request should preserve the server/tool separator when known");
-    ASSERT(strstr(req, "\"tool_choice\":{\"type\":\"tool\",\"name\":\"mcp__linear__get_issue\"}") !=
-               NULL,
-           "OAuth concrete tool_choice should use Claude MCP wire name");
+    ASSERT(strstr(req, "\"tool_choice\":{\"type\":\"tool\",\"name\":\"invoke_tool\"}") != NULL,
+           "OAuth concrete tool_choice should target the stable dispatcher");
 
     free(req);
     conv_free(&conv);
@@ -1771,15 +2172,14 @@ static void test_build_request_oauth_preserves_canonical_mcp_wire_names(void) {
 
     char *req = llm_build_request_ex_for_credential(&conv, &session, 1024, "sk-ant-oat-session");
     ASSERT(req != NULL, "request should not be NULL");
-    ASSERT(test_count_substr(req, "\"name\":\"mcp__linear__get_issue\"") >= 2,
-           "canonical MCP schema and history names should pass through");
+    ASSERT(test_count_substr(req, "\"name\":\"mcp__linear__get_issue\"") >= 1,
+           "canonical MCP history names should pass through");
     ASSERT(strstr(req, "\"name\":\"mcp_linear_get_issue\"") == NULL,
            "canonical OAuth request should not emit legacy mcp_ spelling");
     ASSERT(strstr(req, "\"name\":\"mcp__linear_get_issue\"") == NULL,
            "canonical OAuth request should not collapse server/tool separator");
-    ASSERT(strstr(req, "\"tool_choice\":{\"type\":\"tool\",\"name\":\"mcp__linear__get_issue\"}") !=
-               NULL,
-           "canonical MCP tool_choice should pass through");
+    ASSERT(strstr(req, "\"tool_choice\":{\"type\":\"tool\",\"name\":\"invoke_tool\"}") != NULL,
+           "canonical MCP tool_choice should use the stable dispatcher");
 
     free(req);
     conv_free(&conv);
@@ -1808,13 +2208,12 @@ static void test_build_request_oauth_promotes_legacy_mcp_fallback_names(void) {
 
     char *req = llm_build_request_ex_for_credential(&conv, &session, 1024, "sk-ant-oat-session");
     ASSERT(req != NULL, "request should not be NULL");
-    ASSERT(test_count_substr(req, "\"name\":\"mcp__jira_get_ticket\"") >= 2,
+    ASSERT(test_count_substr(req, "\"name\":\"mcp__jira_get_ticket\"") >= 1,
            "legacy MCP names should be promoted when no canonical registration exists");
     ASSERT(strstr(req, "\"name\":\"mcp_jira_get_ticket\"") == NULL,
            "OAuth wire request should not contain legacy fallback name");
-    ASSERT(strstr(req, "\"tool_choice\":{\"type\":\"tool\",\"name\":\"mcp__jira_get_ticket\"}") !=
-               NULL,
-           "OAuth concrete fallback tool_choice should be promoted");
+    ASSERT(strstr(req, "\"tool_choice\":{\"type\":\"tool\",\"name\":\"invoke_tool\"}") != NULL,
+           "OAuth concrete fallback tool_choice should use the stable dispatcher");
 
     free(req);
     conv_free(&conv);
@@ -1845,18 +2244,14 @@ static void test_build_request_oauth_preserves_underscored_mcp_boundaries(void) 
 
     char *req = llm_build_request_ex_for_credential(&conv, &session, 1024, "sk-ant-oat-session");
     ASSERT(req != NULL, "request should not be NULL");
-    ASSERT(test_count_substr(req, "\"name\":\"mcp__linear_team__get_issue_by_id\"") >= 2,
+    ASSERT(test_count_substr(req, "\"name\":\"mcp__linear_team__get_issue_by_id\"") >= 1,
            "OAuth request should use canonical server/tool double separator");
     ASSERT(strstr(req, "\"name\":\"mcp__linear_team_get_issue_by_id\"") == NULL,
            "OAuth request should not collapse the server/tool boundary");
     ASSERT(!test_has_single_underscore_mcp_name_field(req),
            "OAuth request should not contain single-underscore MCP name fields");
-    ASSERT(
-        strstr(
-            req,
-            "\"tool_choice\":{\"type\":\"tool\",\"name\":\"mcp__linear_team__get_issue_by_id\"}") !=
-            NULL,
-        "OAuth tool_choice should preserve underscored server/tool boundary");
+    ASSERT(strstr(req, "\"tool_choice\":{\"type\":\"tool\",\"name\":\"invoke_tool\"}") != NULL,
+           "OAuth MCP tool_choice should use the stable dispatcher");
 
     free(req);
     conv_free(&conv);
@@ -1891,10 +2286,10 @@ static void test_build_request_oauth_canonicalizes_multiple_mcp_servers(void) {
 
     char *req = llm_build_request_ex_for_credential(&conv, &session, 1024, "sk-ant-oat-session");
     ASSERT(req != NULL, "request should not be NULL");
-    ASSERT(test_count_substr(req, "\"name\":\"mcp__linear__get_issue\"") >= 2,
-           "linear schema and history should use canonical MCP name");
-    ASSERT(test_count_substr(req, "\"name\":\"mcp__github__get_issue\"") >= 2,
-           "github schema and history should use canonical MCP name");
+    ASSERT(test_count_substr(req, "\"name\":\"mcp__linear__get_issue\"") >= 1,
+           "linear history should use canonical MCP name");
+    ASSERT(test_count_substr(req, "\"name\":\"mcp__github__get_issue\"") >= 1,
+           "github history should use canonical MCP name");
     ASSERT(!test_has_single_underscore_mcp_name_field(req),
            "OAuth request should not contain single-underscore MCP name fields");
 
@@ -2171,12 +2566,12 @@ static void test_claude_code_oauth_mcp_wire_matrix(void) {
             llm_build_request_ex_for_credential(&conv, &session, 1024, "sk-ant-oat-session");
         ASSERT(req != NULL, "request should not be NULL");
         snprintf(expected_name, sizeof(expected_name), "\"name\":\"%s\"", cases[i].expected_wire);
-        ASSERT(test_count_substr(req, expected_name) >= 2,
-               "OAuth request should use canonical MCP wire name in schema/history");
+        ASSERT(test_count_substr(req, expected_name) >= 1,
+               "OAuth request should use canonical MCP wire name in history");
         snprintf(expected_choice, sizeof(expected_choice),
-                 "\"tool_choice\":{\"type\":\"tool\",\"name\":\"%s\"}", cases[i].expected_wire);
+                 "\"tool_choice\":{\"type\":\"tool\",\"name\":\"invoke_tool\"}");
         ASSERT(strstr(req, expected_choice) != NULL,
-               "OAuth concrete tool_choice should use canonical MCP wire name");
+               "OAuth concrete MCP tool_choice should use stable dispatcher");
         if (strcmp(cases[i].local_name, cases[i].expected_wire) != 0) {
             snprintf(forbidden_name, sizeof(forbidden_name), "\"name\":\"%s\"",
                      cases[i].local_name);
@@ -2369,19 +2764,35 @@ static void test_claude_code_response_dispatch_matrix(void) {
 
 static void test_claude_code_billing_header_contract_matrix(void) {
     const char *prompt_prefix =
-        "You are dsco, an agentic CLI built on the Overmind Soul architecture.";
+        "You are dsco, Distributed Systems, Inc.'s local-first autonomous agent runtime.";
     char saved_ver[64];
     char saved_entry[64];
     char saved_force[64];
+    char saved_ttl[32];
+    char saved_device[128];
+    char saved_account[128];
+    char saved_session[128];
     bool had_ver = false;
     bool had_entry = false;
     bool had_force = false;
+    bool had_ttl = false;
+    bool had_device = false;
+    bool had_account = false;
+    bool had_session = false;
     test_capture_env("DSCO_CLAUDE_CODE_VERSION", saved_ver, sizeof(saved_ver), &had_ver);
     test_capture_env("DSCO_CLAUDE_CODE_ENTRYPOINT", saved_entry, sizeof(saved_entry), &had_entry);
     test_capture_env("DSCO_FORCE_CLAUDE_CODE_AUTH", saved_force, sizeof(saved_force), &had_force);
+    test_capture_env("DSCO_CACHE_TTL", saved_ttl, sizeof(saved_ttl), &had_ttl);
+    test_capture_env("DSCO_CLAUDE_DEVICE_ID", saved_device, sizeof(saved_device), &had_device);
+    test_capture_env("DSCO_CLAUDE_ACCOUNT_UUID", saved_account, sizeof(saved_account), &had_account);
+    test_capture_env("DSCO_CLAUDE_SESSION_ID", saved_session, sizeof(saved_session), &had_session);
 
     setenv("DSCO_CLAUDE_CODE_VERSION", "9.8.7", 1);
     setenv("DSCO_CLAUDE_CODE_ENTRYPOINT", "ci", 1);
+    setenv("DSCO_CACHE_TTL", "1h", 1);
+    setenv("DSCO_CLAUDE_DEVICE_ID", "test-device", 1);
+    setenv("DSCO_CLAUDE_ACCOUNT_UUID", "test-account", 1);
+    setenv("DSCO_CLAUDE_SESSION_ID", "test-session", 1);
     unsetenv("DSCO_FORCE_CLAUDE_CODE_AUTH");
 
     tools_init();
@@ -2410,10 +2821,33 @@ static void test_claude_code_billing_header_contract_matrix(void) {
            "billing header should include configured entrypoint");
     PASS();
 
-    TEST("Claude billing OAuth cch field");
-    ASSERT(strstr(req, " cch=") != NULL || strstr(req, "; cch=") != NULL ||
-               strstr(req, "cch=") != NULL,
-           "billing header should include request content hash field");
+    TEST("Claude billing current wire omits stale cch");
+    ASSERT(strstr(req, "cch=") == NULL,
+           "uncalibrated current Claude versions must omit the retired cch field");
+    PASS();
+
+    TEST("Claude subscription cache shape matches current client");
+    ASSERT(strstr(req, "\"ttl\":\"1h\"") == NULL,
+           "OAuth requests must ignore the API-key 1h TTL override");
+    const char *tools_json = strstr(req, "\"tools\":[");
+    const char *messages_json = strstr(req, "\"messages\":[");
+    ASSERT(tools_json && messages_json && tools_json < messages_json,
+           "OAuth request should include tools before messages");
+    char *tools_span = strndup(tools_json, (size_t)(messages_json - tools_json));
+    ASSERT(test_count_substr(tools_span, "\"cache_control\"") == 0,
+           "Claude Code OAuth tools must carry no cache breakpoint");
+    free(tools_span);
+    ASSERT(test_count_substr(req, "\"cache_control\"") <= 4,
+           "OAuth request must remain inside Anthropic's four-breakpoint limit");
+    PASS();
+
+    TEST("Claude subscription request includes account binding metadata");
+    ASSERT(strstr(req, "\\\"device_id\\\":\\\"test-device\\\"") != NULL,
+           "metadata.user_id should include Claude's device identity");
+    ASSERT(strstr(req, "\\\"account_uuid\\\":\\\"test-account\\\"") != NULL,
+           "metadata.user_id should bind the bearer to the Claude account");
+    ASSERT(strstr(req, "\\\"session_id\\\":\\\"test-session\\\"") != NULL,
+           "metadata.user_id should carry the Claude Code session id");
     PASS();
 
     TEST("Claude billing system block precedes prompt");
@@ -2455,17 +2889,55 @@ static void test_claude_code_billing_header_contract_matrix(void) {
     test_restore_env("DSCO_CLAUDE_CODE_VERSION", saved_ver, had_ver);
     test_restore_env("DSCO_CLAUDE_CODE_ENTRYPOINT", saved_entry, had_entry);
     test_restore_env("DSCO_FORCE_CLAUDE_CODE_AUTH", saved_force, had_force);
+    test_restore_env("DSCO_CACHE_TTL", saved_ttl, had_ttl);
+    test_restore_env("DSCO_CLAUDE_DEVICE_ID", saved_device, had_device);
+    test_restore_env("DSCO_CLAUDE_ACCOUNT_UUID", saved_account, had_account);
+    test_restore_env("DSCO_CLAUDE_SESSION_ID", saved_session, had_session);
+}
+
+static void test_fable_interactive_request_compatibility(void) {
+    TEST("Fable interactive request compatibility");
+    tools_init();
+    conversation_t conv;
+    conv_init(&conv);
+    conv_add_user_text(&conv, "use the available tools");
+
+    session_state_t session;
+    session_state_init(&session, "claude-fable-5");
+    session.temperature = 0.7;
+    session.top_p = 0.9;
+    session.top_k = 40;
+    session.thinking_budget = 1024;
+    snprintf(session.tool_choice, sizeof(session.tool_choice), "tool:read_file");
+
+    char *req =
+        llm_build_request_ex_for_credential(&conv, &session, 1024, "sk-ant-oat-session");
+    ASSERT(req != NULL, "Fable OAuth request should build");
+    ASSERT(strstr(req, "\"thinking\":{\"type\":\"adaptive\"}") != NULL,
+           "Fable must use adaptive thinking");
+    ASSERT(strstr(req, "\"thinking\":{\"type\":\"enabled\"") == NULL,
+           "Fable must not receive budget thinking");
+    ASSERT(strstr(req, "\"temperature\"") == NULL && strstr(req, "\"top_p\"") == NULL &&
+               strstr(req, "\"top_k\"") == NULL,
+           "Fable must not receive sampling parameters");
+    ASSERT(strstr(req, "\"tool_choice\"") == NULL,
+           "Fable forced tool choice must fall back to automatic selection");
+    free(req);
+    conv_free(&conv);
+    PASS();
 }
 
 static void test_system_prompts_mention_bash_parallel_workers(void) {
-    TEST("system prompts mention bash dsco parallelism");
-    ASSERT(strstr(SYSTEM_PROMPT, "use bash to launch local dsc or dsco worker processes") != NULL,
-           "full system prompt should mention bash-launched dsc/dsco workers");
-    ASSERT(strstr(SYSTEM_PROMPT_CHEAP, "bash may launch local dsc or dsco workers") != NULL,
-           "cheap system prompt should mention bash-launched dsc/dsco workers");
+    TEST("system prompts require autonomous parallel execution");
+    ASSERT(strstr(SYSTEM_PROMPT, "Launch every ready, independent") != NULL,
+           "full system prompt should default independent work to parallel execution");
+    ASSERT(strstr(SYSTEM_PROMPT, "never let workers race on the same mutable artifact") != NULL,
+           "full system prompt should constrain parallel writes");
+    ASSERT(strstr(SYSTEM_PROMPT_CHEAP, "concurrently issue all ready independent tool calls") != NULL,
+           "cheap system prompt should preserve the parallel execution posture");
     ASSERT(strstr(SYSTEM_PROMPT, "Durable artifacts require proof") != NULL,
            "full system prompt should require artifact proof");
-    ASSERT(strstr(SYSTEM_PROMPT_CHEAP, "Durable artifacts require proof") != NULL,
+    ASSERT(strstr(SYSTEM_PROMPT_CHEAP, "verify their paths") != NULL,
            "cheap system prompt should require artifact proof");
     PASS();
 }
@@ -2751,6 +3223,18 @@ static void test_openai_request_defaults_auto_tool_choice(void) {
            "native OpenAI requests should not inject Kimi thinking controls");
 
     free(req);
+    session_state_init(&session, "gpt-5.6-sol");
+    snprintf(session.effort, sizeof(session.effort), "%s", "high");
+    req = p->build_request(p, &conv, &session, 1024, NULL);
+    ASSERT(req != NULL, "request should not be NULL for GPT-5.6 tool compatibility");
+    ASSERT(strstr(req, "\"max_completion_tokens\":1024") != NULL,
+           "GPT-5.6 tool requests should use max_completion_tokens");
+    ASSERT(strstr(req, "\"reasoning_effort\":\"none\"") != NULL,
+           "GPT-5.6 Chat Completions tool requests should force reasoning_effort none");
+    ASSERT(strstr(req, "\"reasoning_effort\":\"high\"") == NULL,
+           "GPT-5.6 Chat Completions tool requests should not send rejected effort");
+
+    free(req);
     provider_free(p);
     conv_free(&conv);
     test_restore_env("DSCO_OPENAI_PARAMS", saved_params, had_params);
@@ -2779,6 +3263,10 @@ static void test_openai_request_normalizes_max_effort(void) {
 
     char *req = p->build_request(p, &conv, &session, 1024, NULL);
     ASSERT(req != NULL, "request should not be NULL");
+    ASSERT(strstr(req, "\"max_completion_tokens\":1024") != NULL,
+           "OpenAI GPT-5-class requests should use max_completion_tokens");
+    ASSERT(strstr(req, "\"max_tokens\":1024") == NULL,
+           "OpenAI GPT-5-class requests should not use rejected max_tokens");
     ASSERT(strstr(req, "\"reasoning_effort\":\"xhigh\"") != NULL,
            "OpenAI-compatible request should normalize max to xhigh");
     ASSERT(strstr(req, "\"reasoning_effort\":\"max\"") == NULL,
@@ -2792,9 +3280,624 @@ static void test_openai_request_normalizes_max_effort(void) {
            "OpenAI-compatible request should serialize explicit high effort");
 
     free(req);
+    setenv("DSCO_OPENAI_PARAMS", "{\"max_tokens\":77}", 1);
+    session_state_init(&session, "gpt-5.6-sol");
+    req = p->build_request(p, &conv, &session, 1024, NULL);
+    ASSERT(req != NULL, "request should not be NULL for gpt-5.6-sol");
+    ASSERT(strstr(req, "\"max_completion_tokens\":77") != NULL,
+           "OpenAI GPT-5-class extra max_tokens should remap to max_completion_tokens");
+    ASSERT(strstr(req, "\"max_tokens\":77") == NULL,
+           "OpenAI GPT-5-class extra max_tokens should not leak rejected field");
+
+    free(req);
+    unsetenv("DSCO_OPENAI_PARAMS");
+    session_state_init(&session, "gpt-4o");
+    req = p->build_request(p, &conv, &session, 1024, NULL);
+    ASSERT(req != NULL, "request should not be NULL for gpt-4o");
+    ASSERT(strstr(req, "\"max_tokens\":1024") != NULL,
+           "non-GPT-5 OpenAI chat requests should keep max_tokens");
+
+    free(req);
     provider_free(p);
     conv_free(&conv);
     test_restore_env("DSCO_OPENAI_PARAMS", saved_params, had_params);
+    PASS();
+}
+
+static void test_openrouter_gpt56_tools_chat_completions_compat(void) {
+    TEST("OpenRouter GPT-5.6 request controls and extra params");
+    tools_init();
+    tools_reset_external();
+    conversation_t conv;
+    conv_init(&conv);
+    conv_add_user_text(&conv, "count these items");
+
+    char saved_params[2048];
+    bool had_params = false;
+    test_capture_env("DSCO_OPENAI_PARAMS", saved_params, sizeof(saved_params), &had_params);
+    unsetenv("DSCO_OPENAI_PARAMS");
+    tools_register_external("test_gpt56_count", "Count items",
+                            "{\"type\":\"object\",\"properties\":{\"count\":{\"type\":\"integer\"}}}",
+                            test_external_tool_stub, NULL);
+
+    session_state_t session;
+    session_state_init(&session, "openrouter/openai/gpt-5.6-sol");
+    snprintf(session.effort, sizeof(session.effort), "%s", "max");
+    provider_t *p = provider_create("openrouter");
+    ASSERT(p != NULL, "OpenRouter provider should be created");
+
+    char *max_req = p->build_request(p, &conv, &session, 777, NULL);
+    ASSERT(max_req != NULL, "OpenRouter GPT-5.6 max-effort request should be built");
+    bool correct_model = strstr(max_req, "\"model\":\"openai/gpt-5.6-sol\"") != NULL;
+    bool includes_tool = strstr(max_req, "\"name\":\"test_gpt56_count\"") != NULL;
+    bool completion_limit = strstr(max_req, "\"max_completion_tokens\":777") != NULL;
+    bool rejected_limit_absent = strstr(max_req, "\"max_tokens\":777") == NULL;
+    bool nested_max = strstr(max_req, "\"reasoning\":{\"effort\":\"max\"}") != NULL;
+    bool top_level_effort_absent = strstr(max_req, "\"reasoning_effort\"") == NULL;
+    free(max_req);
+
+
+    snprintf(session.prompt_cache_key, sizeof(session.prompt_cache_key), "%s",
+             "session-cache-key");
+    snprintf(session.prompt_cache_retention, sizeof(session.prompt_cache_retention), "%s",
+             "session-retention");
+    setenv("DSCO_OPENAI_PARAMS",
+           "{\"prompt_cache_options\":{\"retention\":\"24h\"},"
+           "\"safety_identifier\":\"user_42\",\"moderation\":true,"
+           "\"prompt_cache_key\":\"explicit-cache-key\"}",
+           1);
+    char *extra_req = p->build_request(p, &conv, &session, 777, NULL);
+    ASSERT(extra_req != NULL, "OpenRouter GPT-5.6 extra-parameter request should be built");
+    bool valid_extra_json = json_is_valid_container(extra_req);
+    bool cache_options =
+        strstr(extra_req, "\"prompt_cache_options\":{\"retention\":\"24h\"}") != NULL;
+    bool safety_identifier =
+        strstr(extra_req, "\"safety_identifier\":\"user_42\"") != NULL;
+    bool moderation = strstr(extra_req, "\"moderation\":true") != NULL;
+    bool explicit_cache_key =
+        strstr(extra_req, "\"prompt_cache_key\":\"explicit-cache-key\"") != NULL;
+    bool one_cache_key = test_count_substr(extra_req, "\"prompt_cache_key\"") == 1;
+    bool session_cache_key_absent = strstr(extra_req, "session-cache-key") == NULL;
+    bool legacy_retention_absent = strstr(extra_req, "\"prompt_cache_retention\"") == NULL;
+    free(extra_req);
+
+    provider_free(p);
+    conv_free(&conv);
+    tools_reset_external();
+    test_restore_env("DSCO_OPENAI_PARAMS", saved_params, had_params);
+
+    ASSERT(correct_model, "request should preserve the OpenRouter OpenAI model slug");
+    ASSERT(includes_tool, "request should contain the tool under test");
+    ASSERT(completion_limit, "GPT-5.6 request should use max_completion_tokens");
+    ASSERT(rejected_limit_absent, "GPT-5.6 request should not send max_tokens");
+    ASSERT(nested_max, "OpenRouter GPT-5.6 should nest max effort under reasoning");
+    ASSERT(top_level_effort_absent,
+           "OpenRouter GPT-5.6 should not emit top-level reasoning_effort");
+    ASSERT(valid_extra_json, "extra request parameters should preserve valid request JSON");
+    ASSERT(cache_options, "request should pass through prompt_cache_options");
+    ASSERT(safety_identifier, "request should pass through safety_identifier");
+    ASSERT(moderation, "request should pass through moderation");
+    ASSERT(explicit_cache_key, "explicit prompt_cache_key should win over session policy");
+    ASSERT(one_cache_key, "request should emit prompt_cache_key exactly once");
+    ASSERT(session_cache_key_absent, "overridden session prompt_cache_key should not leak");
+    ASSERT(legacy_retention_absent,
+           "prompt_cache_options should suppress incompatible prompt_cache_retention");
+    PASS();
+}
+
+static void test_openai_sse_data_without_space_streams_reasoning_details(void) {
+    TEST("OpenAI SSE data without space streams reasoning_details");
+    const char *sse =
+        "data:{\"id\":\"gen_details\",\"choices\":[{\"delta\":{\"reasoning_details\":["
+        "{\"type\":\"reasoning.summary\",\"summary\":\"Plan \"},"
+        "{\"type\":\"reasoning.text\",\"text\":\"then act.\"}]}}]}\n"
+        "data:{\"choices\":[{\"delta\":{},\"finish_reason\":\"stop\"}]}\n"
+        "data:[DONE]\n";
+    provider_test_openai_sse_result_t result = {0};
+    bool parsed = provider_test_parse_openai_sse(sse, strlen(sse), &result);
+    bool done = parsed && result.done;
+    bool streamed = parsed && result.reasoning_stream &&
+                    strcmp(result.reasoning_stream, "Plan then act.") == 0;
+    int preserved_reasoning = 0;
+    if (parsed) {
+        for (int i = 0; i < result.parsed.count; i++) {
+            if (result.parsed.blocks[i].text &&
+                strcmp(result.parsed.blocks[i].text, "Plan then act.") == 0)
+                preserved_reasoning++;
+        }
+    }
+    provider_test_free_openai_sse_result(&result);
+
+    ASSERT(parsed, "offline SSE parse should succeed");
+    ASSERT(done, "data:[DONE] without a space should terminate the stream");
+    ASSERT(streamed, "summary and text reasoning details should reach the thinking stream");
+    ASSERT(preserved_reasoning == 1,
+           "reasoning-only details should be preserved exactly once in the parsed response");
+    PASS();
+}
+
+static void test_openai_sse_legacy_reasoning_takes_precedence_over_details(void) {
+    TEST("OpenAI SSE legacy reasoning is not duplicated by details");
+    const char *sse =
+        "data: {\"choices\":[{\"delta\":{\"reasoning\":\"One thought.\","
+        "\"reasoning_details\":[{\"type\":\"reasoning.summary\","
+        "\"summary\":\"One thought.\"}]}}]}\n"
+        "data: {\"choices\":[{\"delta\":{},\"finish_reason\":\"stop\"}]}\n"
+        "data: [DONE]\n";
+    provider_test_openai_sse_result_t result = {0};
+    bool parsed = provider_test_parse_openai_sse(sse, strlen(sse), &result);
+    bool exactly_once = parsed && result.reasoning_stream &&
+                        strcmp(result.reasoning_stream, "One thought.") == 0;
+    int accumulated_once = 0;
+    if (parsed) {
+        for (int i = 0; i < result.parsed.count; i++) {
+            if (result.parsed.blocks[i].text &&
+                strcmp(result.parsed.blocks[i].text, "One thought.") == 0)
+                accumulated_once++;
+        }
+    }
+    provider_test_free_openai_sse_result(&result);
+
+    ASSERT(parsed, "offline SSE parse should succeed");
+    ASSERT(exactly_once, "legacy reasoning should suppress duplicate reasoning_details output");
+    ASSERT(accumulated_once == 1, "parsed reasoning should contain one copy of the delta");
+    PASS();
+}
+
+static void test_openai_sse_tool_call_after_reasoning_accumulates_exactly(void) {
+    TEST("OpenAI SSE tool call after reasoning accumulates exactly");
+    const char *sse =
+        "data:{\"choices\":[{\"delta\":{\"reasoning_details\":[{"
+        "\"type\":\"reasoning.text\",\"text\":\"Need a count.\"}]}}]}\n"
+        "data:{\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,"
+        "\"id\":\"call_count_42\",\"type\":\"function\",\"function\":{"
+        "\"name\":\"count_items\",\"arguments\":\"{\\\"count\\\":\"}}]}}]}\n"
+        "data:{\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,"
+        "\"function\":{\"arguments\":\"2}\"}}]}}]}\n"
+        "data:{\"choices\":[{\"delta\":{},\"finish_reason\":\"tool_calls\"}]}\n"
+        "data:[DONE]\n";
+    provider_test_openai_sse_result_t result = {0};
+    bool parsed = provider_test_parse_openai_sse(sse, strlen(sse), &result);
+    int tool_blocks = 0;
+    content_block_t *tool = NULL;
+    if (parsed) {
+        for (int i = 0; i < result.parsed.count; i++) {
+            if (result.parsed.blocks[i].type &&
+                strcmp(result.parsed.blocks[i].type, "tool_use") == 0) {
+                tool_blocks++;
+                tool = &result.parsed.blocks[i];
+            }
+        }
+    }
+    bool reasoning_first = parsed && result.reasoning_stream &&
+                           strcmp(result.reasoning_stream, "Need a count.") == 0;
+    bool exact_tool = tool_blocks == 1 && tool && tool->tool_name && tool->tool_id &&
+                      tool->tool_input && strcmp(tool->tool_name, "count_items") == 0 &&
+                      strcmp(tool->tool_id, "call_count_42") == 0 &&
+                      strcmp(tool->tool_input, "{\"count\":2}") == 0;
+    bool exact_arg_delta_stream = parsed && result.tool_arg_delta_stream &&
+                                  strcmp(result.tool_arg_delta_stream, "{\"count\":2}") == 0;
+    bool tool_stop = parsed && result.parsed.stop_reason &&
+                     strcmp(result.parsed.stop_reason, "tool_use") == 0;
+    bool done = parsed && result.done;
+    provider_test_free_openai_sse_result(&result);
+
+    ASSERT(parsed, "offline SSE parse should succeed");
+    ASSERT(reasoning_first, "reasoning preceding a tool call should still be streamed");
+    ASSERT(exact_arg_delta_stream, "tool argument deltas should stream through native callback");
+    ASSERT(exact_tool, "streamed tool deltas should preserve exact name, id, and JSON arguments");
+    ASSERT(tool_stop, "tool_calls finish_reason should map to tool_use");
+    ASSERT(done, "terminal data:[DONE] should be observed after the tool call");
+    PASS();
+}
+
+static void test_openai_sse_legacy_function_call_streams_args(void) {
+    TEST("OpenAI SSE legacy function_call streams arguments");
+    const char *sse =
+        "data:{\"choices\":[{\"delta\":{\"function_call\":{\"name\":\"lookup_weather\","
+        "\"arguments\":\"{\\\"city\\\":\"}}}]}\n"
+        "data:{\"choices\":[{\"delta\":{\"function_call\":{"
+        "\"arguments\":\"\\\"DC\\\"}\"}}}]}\n"
+        "data:{\"choices\":[{\"delta\":{},\"finish_reason\":\"function_call\"}]}\n"
+        "data:[DONE]\n";
+    provider_test_openai_sse_result_t result = {0};
+    bool parsed = provider_test_parse_openai_sse(sse, strlen(sse), &result);
+    content_block_t *tool = NULL;
+    int tool_blocks = 0;
+    if (parsed) {
+        for (int i = 0; i < result.parsed.count; i++) {
+            if (result.parsed.blocks[i].type &&
+                strcmp(result.parsed.blocks[i].type, "tool_use") == 0) {
+                tool = &result.parsed.blocks[i];
+                tool_blocks++;
+            }
+        }
+    }
+    bool exact_tool = tool_blocks == 1 && tool && tool->tool_name && tool->tool_id &&
+                      tool->tool_input && strcmp(tool->tool_name, "lookup_weather") == 0 &&
+                      strcmp(tool->tool_id, "call_0") == 0 &&
+                      strcmp(tool->tool_input, "{\"city\":\"DC\"}") == 0;
+    bool exact_arg_delta_stream = parsed && result.tool_arg_delta_stream &&
+                                  strcmp(result.tool_arg_delta_stream,
+                                         "{\"city\":\"DC\"}") == 0;
+    bool terminal_success = parsed && result.terminal_success;
+    bool tool_stop = parsed && result.parsed.stop_reason &&
+                     strcmp(result.parsed.stop_reason, "tool_use") == 0;
+    provider_test_free_openai_sse_result(&result);
+
+    ASSERT(parsed, "offline SSE parse should succeed");
+    ASSERT(exact_arg_delta_stream, "legacy function_call args should stream as native deltas");
+    ASSERT(exact_tool, "legacy function_call should finalize as one tool_use block");
+    ASSERT(tool_stop, "legacy function_call finish_reason should map to tool_use");
+    ASSERT(terminal_success, "legacy function_call stream should validate as terminal success");
+    PASS();
+}
+
+static void test_openai_sse_refusal_delta_streams_as_text(void) {
+    TEST("OpenAI SSE refusal delta streams as text");
+    const char *sse =
+        "data:{\"choices\":[{\"delta\":{\"refusal\":\"I can't help with that.\"}}]}\n"
+        "data:{\"choices\":[{\"delta\":{},\"finish_reason\":\"stop\"}]}\n"
+        "data:[DONE]\n";
+    provider_test_openai_sse_result_t result = {0};
+    bool parsed = provider_test_parse_openai_sse(sse, strlen(sse), &result);
+    content_block_t *text = NULL;
+    int text_blocks = 0;
+    if (parsed) {
+        for (int i = 0; i < result.parsed.count; i++) {
+            if (result.parsed.blocks[i].type &&
+                strcmp(result.parsed.blocks[i].type, "text") == 0) {
+                text = &result.parsed.blocks[i];
+                text_blocks++;
+            }
+        }
+    }
+    bool exact_text = text_blocks == 1 && text && text->text &&
+                      strcmp(text->text, "I can't help with that.") == 0;
+    bool terminal_success = parsed && result.terminal_success;
+    bool end_turn = parsed && result.parsed.stop_reason &&
+                    strcmp(result.parsed.stop_reason, "end_turn") == 0;
+    provider_test_free_openai_sse_result(&result);
+
+    ASSERT(parsed, "offline SSE parse should succeed");
+    ASSERT(exact_text, "refusal deltas should be preserved as text output");
+    ASSERT(end_turn, "stop finish_reason should map to end_turn");
+    ASSERT(terminal_success, "refusal-only stream should validate as terminal success");
+    PASS();
+}
+
+static void test_openrouter_sse_opaque_reasoning_replays_only_for_same_model(void) {
+    TEST("OpenRouter opaque reasoning replays only for same model");
+    static const char wire_model[] = "openai/gpt-5.6-sol";
+    static const char opaque_details[] =
+        "[{\"type\":\"reasoning.encrypted\",\"id\":\"rs_1\","
+        "\"format\":\"openai-responses-v1\",\"index\":0,"
+        "\"data\":\"opaque-ciphertext-fragment+/=\","
+        "\"vendor\":{\"nonce\":\"n-1\",\"version\":7},"
+        "\"unknown\":[true,null,{\"k\":\"v\"}]}]";
+
+    jbuf_t sse;
+    jbuf_init(&sse, 1024);
+    jbuf_append(&sse,
+                "data:{\"id\":\"gen-opaque-56\",\"model\":\"openai/gpt-5.6-sol\","
+                "\"choices\":[{\"index\":0,\"delta\":{\"reasoning\":"
+                "\"Need a count.\",\"reasoning_details\":");
+    jbuf_append(&sse, opaque_details);
+    jbuf_append(&sse,
+                "},\"finish_reason\":null}]}\n"
+                "data:{\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,"
+                "\"id\":\"call_count_56\",\"type\":\"function\",\"function\":{"
+                "\"name\":\"count_items\",\"arguments\":\"{\\\"count\\\":\"}}]}}]}\n"
+                "data:{\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,"
+                "\"function\":{\"arguments\":\"2}\"}}]}}]}\n"
+                "data:{\"choices\":[{\"delta\":{},\"finish_reason\":\"tool_calls\"}]}\n"
+                "data:[DONE]\n");
+
+    provider_test_openai_sse_result_t result = {0};
+    bool parsed = provider_test_parse_openai_sse_for_model(
+        sse.data, sse.len, "openrouter", wire_model, &result);
+    int visible_reasoning_blocks = 0;
+    int opaque_blocks = 0;
+    int tool_blocks = 0;
+    bool opaque_exact = false;
+    bool exact_tool = false;
+    if (parsed) {
+        for (int i = 0; i < result.parsed.count; i++) {
+            content_block_t *block = &result.parsed.blocks[i];
+            if (block->text && strcmp(block->text, "Need a count.") == 0)
+                visible_reasoning_blocks++;
+            if (block->type &&
+                strcmp(block->type,
+                       "openrouter_reasoning_details:openai/gpt-5.6-sol") == 0) {
+                opaque_blocks++;
+                opaque_exact = block->text && strcmp(block->text, opaque_details) == 0;
+            }
+            if (block->type && strcmp(block->type, "tool_use") == 0) {
+                tool_blocks++;
+                exact_tool = block->tool_name && block->tool_id && block->tool_input &&
+                             strcmp(block->tool_name, "count_items") == 0 &&
+                             strcmp(block->tool_id, "call_count_56") == 0 &&
+                             strcmp(block->tool_input, "{\"count\":2}") == 0;
+            }
+        }
+    }
+    bool visible_once = parsed && result.reasoning_stream &&
+                        strcmp(result.reasoning_stream, "Need a count.") == 0 &&
+                        visible_reasoning_blocks == 1;
+    bool terminal_tool_call = parsed && result.done && result.terminal_success &&
+                              result.parsed.stop_reason &&
+                              strcmp(result.parsed.stop_reason, "tool_use") == 0;
+
+    char saved_params[2048];
+    bool had_params = false;
+    test_capture_env("DSCO_OPENAI_PARAMS", saved_params, sizeof(saved_params), &had_params);
+    unsetenv("DSCO_OPENAI_PARAMS");
+
+    conversation_t conv;
+    conv_init(&conv);
+    conv_add_user_text(&conv, "count these items");
+    if (parsed)
+        conv_add_assistant_raw(&conv, &result.parsed);
+    conv_add_tool_result_named(&conv, "call_count_56", "count_items", "2", false);
+
+    provider_t *openrouter = provider_create("openrouter");
+    session_state_t same_session;
+    session_state_init(&same_session, "openrouter/openai/gpt-5.6-sol");
+    char *same_request = openrouter
+                             ? openrouter->build_request(openrouter, &conv, &same_session, 777, NULL)
+                             : NULL;
+
+    jbuf_t exact_field;
+    jbuf_init(&exact_field, strlen(opaque_details) + 32);
+    jbuf_append(&exact_field, "\"reasoning_details\":");
+    jbuf_append(&exact_field, opaque_details);
+    const char *assistant = same_request
+                                ? strstr(same_request, "{\"role\":\"assistant\"")
+                                : NULL;
+    const char *details_pos = assistant ? strstr(assistant, exact_field.data) : NULL;
+    const char *tool_pos = assistant ? strstr(assistant, "\"id\":\"call_count_56\"") : NULL;
+    const char *tool_result_pos = assistant
+                                      ? strstr(assistant, "{\"role\":\"tool\"")
+                                      : NULL;
+    bool replayed_exactly_once = same_request &&
+                                 test_count_substr(same_request, exact_field.data) == 1;
+    bool replayed_alongside_tool = details_pos && tool_pos && details_pos < tool_pos &&
+                                   (!tool_result_pos || tool_pos < tool_result_pos);
+
+    session_state_t changed_model_session;
+    session_state_init(&changed_model_session, "openrouter/openai/gpt-5.6");
+    char *changed_model_request =
+        openrouter ? openrouter->build_request(openrouter, &conv, &changed_model_session, 777, NULL)
+                   : NULL;
+    bool changed_model_omits_detail =
+        changed_model_request && strstr(changed_model_request, "opaque-ciphertext-fragment") == NULL &&
+        strstr(changed_model_request, "\"reasoning_details\"") == NULL &&
+        strstr(changed_model_request, "\"id\":\"call_count_56\"") != NULL;
+
+    provider_t *openai = provider_create("openai");
+    session_state_t changed_provider_session;
+    session_state_init(&changed_provider_session, "openai/gpt-5.6-sol");
+    char *changed_provider_request =
+        openai ? openai->build_request(openai, &conv, &changed_provider_session, 777, NULL) : NULL;
+    bool changed_provider_omits_detail =
+        changed_provider_request &&
+        strstr(changed_provider_request, "opaque-ciphertext-fragment") == NULL &&
+        strstr(changed_provider_request, "\"reasoning_details\"") == NULL &&
+        strstr(changed_provider_request, "\"id\":\"call_count_56\"") != NULL;
+
+    free(same_request);
+    free(changed_model_request);
+    free(changed_provider_request);
+    provider_free(openrouter);
+    provider_free(openai);
+    conv_free(&conv);
+    provider_test_free_openai_sse_result(&result);
+    jbuf_free(&exact_field);
+    jbuf_free(&sse);
+    test_restore_env("DSCO_OPENAI_PARAMS", saved_params, had_params);
+
+    ASSERT(parsed, "offline OpenRouter SSE parse should succeed");
+    ASSERT(visible_once, "scalar reasoning should be streamed and retained exactly once");
+    ASSERT(opaque_blocks == 1 && opaque_exact,
+           "opaque reasoning detail and unknown nested fields should be retained byte-for-byte");
+    ASSERT(tool_blocks == 1 && exact_tool,
+           "tool continuation should retain the exact call id, name, and arguments");
+    ASSERT(terminal_tool_call, "tool_calls finish_reason should be terminal success");
+    ASSERT(replayed_exactly_once,
+           "same OpenRouter model should replay the exact reasoning_details array once");
+    ASSERT(replayed_alongside_tool,
+           "replayed reasoning_details should remain on the assistant message with its tool call");
+    ASSERT(changed_model_omits_detail,
+           "changing the requested model should omit stale opaque detail but keep the tool call");
+    ASSERT(changed_provider_omits_detail,
+           "changing provider should omit OpenRouter opaque detail but keep the tool call");
+    PASS();
+}
+
+static void test_openai_sse_done_without_finish_reason_is_not_terminal_success(void) {
+    TEST("OpenAI SSE [DONE] without finish_reason is incomplete");
+    const char *sse =
+        "data:{\"choices\":[{\"delta\":{\"content\":\"partial\"},"
+        "\"finish_reason\":null}]}\n"
+        "data:[DONE]\n";
+    provider_test_openai_sse_result_t result = {0};
+    bool parsed = provider_test_parse_openai_sse(sse, strlen(sse), &result);
+    bool saw_done_sentinel = parsed && result.done;
+    bool terminal_success = parsed && result.terminal_success;
+    bool incomplete_reason = parsed && result.parsed.stop_reason &&
+                             strcmp(result.parsed.stop_reason, "incomplete_stream") == 0;
+    provider_test_free_openai_sse_result(&result);
+
+    ASSERT(parsed, "offline SSE hook should parse the incomplete stream bytes");
+    ASSERT(saw_done_sentinel, "fixture should exercise a received [DONE] sentinel");
+    ASSERT(!terminal_success,
+           "[DONE] without a non-null finish_reason must not mark the stream successful");
+    ASSERT(incomplete_reason,
+           "terminal validation should map the protocol error to incomplete_stream");
+    PASS();
+}
+
+static void test_openai_sse_tool_call_without_id_is_not_terminal_success(void) {
+    TEST("OpenAI SSE tool call without provider id is rejected");
+    const char *sse =
+        "data:{\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,"
+        "\"type\":\"function\",\"function\":{\"name\":\"count_items\","
+        "\"arguments\":\"{}\"}}]}}]}\n"
+        "data:{\"choices\":[{\"delta\":{},\"finish_reason\":\"tool_calls\"}]}\n"
+        "data:[DONE]\n";
+    provider_test_openai_sse_result_t result = {0};
+    bool parsed = provider_test_parse_openai_sse(sse, strlen(sse), &result);
+    bool saw_done_sentinel = parsed && result.done;
+    bool terminal_success = parsed && result.terminal_success;
+    provider_test_free_openai_sse_result(&result);
+
+    ASSERT(parsed, "offline SSE hook should parse the missing-id stream bytes");
+    ASSERT(saw_done_sentinel, "fixture should contain a complete SSE terminator");
+    ASSERT(!terminal_success,
+           "a completed tool call without its provider-issued id must fail terminal validation");
+    PASS();
+}
+
+static void test_openai_sse_content_block_overflow_is_not_terminal_success(void) {
+    TEST("OpenAI SSE content block overflow is rejected");
+    jbuf_t sse;
+    jbuf_init(&sse, 32768);
+    for (int i = 0; i < MAX_CONTENT_BLOCKS; i++) {
+        jbuf_appendf(&sse,
+                     "data:{\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":%d,"
+                     "\"id\":\"call_%d\",\"type\":\"function\",\"function\":{"
+                     "\"name\":\"count_items\",\"arguments\":\"{}\"}}]}}]}\n",
+                     i, i);
+    }
+    jbuf_append(&sse,
+                "data:{\"choices\":[{\"delta\":{\"content\":\"overflow sentinel\"}}]}\n"
+                "data:{\"choices\":[{\"delta\":{},\"finish_reason\":\"tool_calls\"}]}\n"
+                "data:[DONE]\n");
+
+    provider_test_openai_sse_result_t result = {0};
+    bool parsed = provider_test_parse_openai_sse(sse.data, sse.len, &result);
+    bool saw_done_sentinel = parsed && result.done;
+    bool terminal_success = parsed && result.terminal_success;
+    provider_test_free_openai_sse_result(&result);
+    jbuf_free(&sse);
+
+    ASSERT(parsed, "offline SSE hook should parse the over-capacity stream bytes");
+    ASSERT(saw_done_sentinel, "overflow fixture should contain a complete SSE terminator");
+    ASSERT(!terminal_success,
+           "a turn requiring more than MAX_CONTENT_BLOCKS must be rejected, not truncated");
+    PASS();
+}
+
+static void test_openrouter_sse_reasoning_details_deduplicate_exact_objects_only(void) {
+    TEST("OpenRouter SSE reasoning details deduplicate exact objects only");
+    static const char first_detail[] =
+        "{\"type\":\"reasoning.summary\",\"index\":0,\"summary\":\"First \"}";
+    static const char second_detail[] =
+        "{\"type\":\"reasoning.summary\",\"index\":0,\"summary\":\"second.\"}";
+    static const char expected_details[] =
+        "[{\"type\":\"reasoning.summary\",\"index\":0,\"summary\":\"First \"},"
+        "{\"type\":\"reasoning.summary\",\"index\":0,\"summary\":\"second.\"}]";
+
+    jbuf_t sse;
+    jbuf_init(&sse, 1024);
+    jbuf_append(&sse, "data:{\"choices\":[{\"delta\":{\"reasoning_details\":[");
+    jbuf_append(&sse, first_detail);
+    jbuf_append(&sse, "]}}]}\n");
+    jbuf_append(&sse, "data:{\"choices\":[{\"delta\":{\"reasoning_details\":[");
+    jbuf_append(&sse, first_detail);
+    jbuf_append(&sse, "]}}]}\n");
+    jbuf_append(&sse, "data:{\"choices\":[{\"delta\":{\"reasoning_details\":[");
+    jbuf_append(&sse, second_detail);
+    jbuf_append(&sse,
+                "]}}]}\n"
+                "data:{\"choices\":[{\"delta\":{},\"finish_reason\":\"stop\"}]}\n"
+                "data:[DONE]\n");
+
+    provider_test_openai_sse_result_t result = {0};
+    bool parsed = provider_test_parse_openai_sse_for_model(
+        sse.data, sse.len, "openrouter", "openai/gpt-5.6-sol", &result);
+    int replay_blocks = 0;
+    bool replay_exact = false;
+    if (parsed) {
+        for (int i = 0; i < result.parsed.count; i++) {
+            content_block_t *block = &result.parsed.blocks[i];
+            if (block->type &&
+                strcmp(block->type,
+                       "openrouter_reasoning_details:openai/gpt-5.6-sol") == 0) {
+                replay_blocks++;
+                replay_exact = block->text && strcmp(block->text, expected_details) == 0;
+            }
+        }
+    }
+    bool displayed_once = parsed && result.reasoning_stream &&
+                          strcmp(result.reasoning_stream, "First second.") == 0;
+    bool terminal_success = parsed && result.done && result.terminal_success;
+    provider_test_free_openai_sse_result(&result);
+    jbuf_free(&sse);
+
+    ASSERT(parsed, "offline OpenRouter SSE parse should succeed");
+    ASSERT(terminal_success, "valid distinct reasoning summaries should complete normally");
+    ASSERT(displayed_once,
+           "an exact repeated detail should display once while distinct summaries retain order");
+    ASSERT(replay_blocks == 1 && replay_exact,
+           "replay should retain one exact copy and both distinct same-index summary fragments");
+    PASS();
+}
+
+static void test_openai_sse_reasoning_replay_requires_openrouter_source(void) {
+    TEST("OpenAI SSE reasoning replay requires OpenRouter source");
+    static const char opaque_details[] =
+        "[{\"type\":\"reasoning.encrypted\",\"index\":0,"
+        "\"data\":\"provider-owned-ciphertext\"}]";
+    const char *sse =
+        "data:{\"model\":\"openai/gpt-5.6-sol\",\"choices\":[{\"delta\":{"
+        "\"content\":\"answer\",\"reasoning_details\":[{"
+        "\"type\":\"reasoning.encrypted\",\"index\":0,"
+        "\"data\":\"provider-owned-ciphertext\"}]}}]}\n"
+        "data:{\"choices\":[{\"delta\":{},\"finish_reason\":\"stop\"}]}\n"
+        "data:[DONE]\n";
+
+    provider_test_openai_sse_result_t openai_result = {0};
+    provider_test_openai_sse_result_t openrouter_result = {0};
+    bool parsed_openai = provider_test_parse_openai_sse_for_model(
+        sse, strlen(sse), "openai", "gpt-5.6-sol", &openai_result);
+    bool parsed_openrouter = provider_test_parse_openai_sse_for_model(
+        sse, strlen(sse), "openrouter", "openai/gpt-5.6-sol", &openrouter_result);
+    int openai_replay_blocks = 0;
+    int openrouter_replay_blocks = 0;
+    bool openrouter_replay_exact = false;
+    if (parsed_openai) {
+        for (int i = 0; i < openai_result.parsed.count; i++) {
+            const char *type = openai_result.parsed.blocks[i].type;
+            if (type && strncmp(type, "openrouter_reasoning_details",
+                                strlen("openrouter_reasoning_details")) == 0)
+                openai_replay_blocks++;
+        }
+    }
+    if (parsed_openrouter) {
+        for (int i = 0; i < openrouter_result.parsed.count; i++) {
+            content_block_t *block = &openrouter_result.parsed.blocks[i];
+            if (block->type &&
+                strcmp(block->type,
+                       "openrouter_reasoning_details:openai/gpt-5.6-sol") == 0) {
+                openrouter_replay_blocks++;
+                openrouter_replay_exact =
+                    block->text && strcmp(block->text, opaque_details) == 0;
+            }
+        }
+    }
+    bool both_terminal = parsed_openai && parsed_openrouter && openai_result.done &&
+                         openrouter_result.done && openai_result.terminal_success &&
+                         openrouter_result.terminal_success;
+    provider_test_free_openai_sse_result(&openai_result);
+    provider_test_free_openai_sse_result(&openrouter_result);
+
+    ASSERT(parsed_openai && parsed_openrouter, "both source-provider parses should succeed");
+    ASSERT(both_terminal, "source provenance should not change valid stream completion");
+    ASSERT(openai_replay_blocks == 0,
+           "direct OpenAI reasoning_details must not become an OpenRouter replay block");
+    ASSERT(openrouter_replay_blocks == 1 && openrouter_replay_exact,
+           "OpenRouter reasoning_details should create one exact provider-scoped replay block");
     PASS();
 }
 
@@ -3578,6 +4681,16 @@ static int test_tool_name_list_index(char names[][DSCO_REALTIME_TOOL_NAME_MAX], 
 
 static void test_realtime_voice_tool_selection_routes_domain_tools(void) {
     TEST("realtime voice tool selection routes domain tools");
+    test_env_snapshot_t env[] = {
+        {"DSCO_SYSTEMS_AGENT", "", false},
+        {"DSCO_GOV_BYPASS", "", false},
+        {"DSCO_REALTIME_SYSTEM_TOOLS", "", false},
+        {"DSCO_REALTIME_OPERATOR_TOOLS", "", false},
+    };
+    test_capture_env_list(env, sizeof(env) / sizeof(env[0]));
+    for (size_t i = 0; i < sizeof(env) / sizeof(env[0]); i++)
+        unsetenv(env[i].name);
+
     tools_init();
     tools_set_context_window(0);
 
@@ -3618,6 +4731,7 @@ static void test_realtime_voice_tool_selection_routes_domain_tools(void) {
     ASSERT(fetch_idx < 0 || weather_idx < fetch_idx,
            "voice weather context ranks specific weather tool before generic WebFetch");
 
+    test_restore_env_list(env, sizeof(env) / sizeof(env[0]));
     PASS();
 }
 
@@ -3751,7 +4865,61 @@ static void test_tool_execute_unknown(void) {
 static void test_tool_registry_expanded_builtin_count(void) {
     TEST("tool registry expanded built-in count");
     tools_init();
-    ASSERT(tools_builtin_count() >= 172, "built-in tool registry should expose expanded tools");
+    ASSERT(tools_builtin_count() >= 173, "built-in tool registry should expose expanded tools");
+    PASS();
+}
+
+static void test_openai_image_generate_tool_registered_and_gated(void) {
+    TEST("openai_image_generate tool registered and gated");
+    tools_init();
+
+    int count = 0;
+    const tool_def_t *all = tools_get_all(&count);
+    const tool_def_t *tool = NULL;
+    for (int i = 0; i < count; i++) {
+        if (strcmp(all[i].name, "openai_image_generate") == 0) {
+            tool = &all[i];
+            break;
+        }
+    }
+    ASSERT(tool != NULL, "openai_image_generate should be registered");
+    ASSERT(tool->input_schema_json && strstr(tool->input_schema_json, "gpt-image-2") != NULL,
+           "schema should document gpt-image-2 as default");
+
+    const char *input = "{\"prompt\":\"draw a circuit\",\"output_path\":\"/tmp/dsco_oai.png\"}";
+    unsigned caps = dsco_caps_for_tool("openai_image_generate", input);
+    ASSERT((caps & CAP_NET) != 0, "OpenAI image generation should require net");
+    ASSERT((caps & CAP_FS_WRITE) != 0, "OpenAI image generation should require fs_write");
+    ASSERT((caps & CAP_SECRETS) != 0, "OpenAI image generation should require secrets");
+    ASSERT((caps & CAP_UNTRUSTED_IN) != 0, "OpenAI image generation ingests remote content");
+
+    char saved_net[256], saved_write[256], saved_secrets[256];
+    bool had_net = false, had_write = false, had_secrets = false;
+    test_capture_env("DSCO_ALLOW_NET", saved_net, sizeof(saved_net), &had_net);
+    test_capture_env("DSCO_ALLOW_WRITE", saved_write, sizeof(saved_write), &had_write);
+    test_capture_env("DSCO_ALLOW_SECRETS", saved_secrets, sizeof(saved_secrets), &had_secrets);
+
+    setenv("DSCO_ALLOW_NET", "example.com", 1);
+    setenv("DSCO_ALLOW_WRITE", "/tmp", 1);
+    setenv("DSCO_ALLOW_SECRETS", "1", 1);
+    char reason[256] = "";
+    dsco_cap_decision_t d =
+        dsco_capability_gate("openai_image_generate", input, "trusted", reason, sizeof(reason));
+    ASSERT(d == CAP_DECISION_DENY, "scoped net grant should reject non-OpenAI host");
+    ASSERT(strstr(reason, "host outside DSCO_ALLOW_NET scope") != NULL,
+           "denial should explain host scope");
+
+    setenv("DSCO_ALLOW_NET", "api.openai.com", 1);
+    setenv("DSCO_ALLOW_WRITE", "/var/empty", 1);
+    reason[0] = '\0';
+    d = dsco_capability_gate("openai_image_generate", input, "trusted", reason, sizeof(reason));
+    ASSERT(d == CAP_DECISION_DENY, "scoped write grant should reject output_path");
+    ASSERT(strstr(reason, "write path outside DSCO_ALLOW_WRITE scope") != NULL,
+           "denial should explain write scope");
+
+    test_restore_env("DSCO_ALLOW_NET", saved_net, had_net);
+    test_restore_env("DSCO_ALLOW_WRITE", saved_write, had_write);
+    test_restore_env("DSCO_ALLOW_SECRETS", saved_secrets, had_secrets);
     PASS();
 }
 
@@ -4829,6 +5997,22 @@ static void test_untrusted_python_routes_to_sandbox(void) {
     PASS();
 }
 
+static void test_python_tool_ignores_empty_file_when_code_present(void) {
+    TEST("python tool ignores empty file when code present");
+    tools_init();
+
+    char result[4096];
+    result[0] = '\0';
+    bool ok = tools_execute("python",
+                            "{\"code\":\"print(\\\"PY_EMPTY_FILE_OK\\\")\","
+                            "\"file\":\"\",\"args\":\"\"}",
+                            result, sizeof(result));
+
+    ASSERT(ok, "python code execution should ignore empty file field");
+    ASSERT(strstr(result, "PY_EMPTY_FILE_OK") != NULL, "python code output should be present");
+    PASS();
+}
+
 static void test_untrusted_node_requires_code_or_file(void) {
     TEST("tools_execute_for_tier untrusted node validation");
     tools_init();
@@ -5071,6 +6255,88 @@ static bool test_write_text_file(const char *path, const char *body) {
     return fclose(f) == 0;
 }
 
+static void test_workspace_agents_md_hierarchical_prompt(void) {
+    TEST("workspace prompt loads hierarchical AGENTS.md");
+
+    char saved_home[512];
+    bool had_home = false;
+    test_capture_env("HOME", saved_home, sizeof(saved_home), &had_home);
+
+    char old_cwd[1024];
+    bool have_old_cwd = getcwd(old_cwd, sizeof(old_cwd)) != NULL;
+
+    char root[512];
+    snprintf(root, sizeof(root), "/tmp/dsco_agentsmd_%d_%ld", (int)getpid(), (long)time(NULL));
+    char outside_agents[640], repo[640], git_dir[700], pkg[700], nested[760];
+    snprintf(outside_agents, sizeof(outside_agents), "%s/AGENTS.md", root);
+    snprintf(repo, sizeof(repo), "%s/repo", root);
+    snprintf(git_dir, sizeof(git_dir), "%s/.git", repo);
+    snprintf(pkg, sizeof(pkg), "%s/pkg", repo);
+    snprintf(nested, sizeof(nested), "%s/tool", pkg);
+
+    bool setup_ok = false;
+    int agents_files = -1;
+    bool summary_count_ok = false;
+    bool has_root = false;
+    bool has_pkg = false;
+    bool has_outside = false;
+    bool order_ok = false;
+
+    if (!have_old_cwd)
+        goto cleanup;
+    if (mkdir(root, 0700) != 0)
+        goto cleanup;
+    if (mkdir(repo, 0700) != 0 || mkdir(git_dir, 0700) != 0 ||
+        mkdir(pkg, 0700) != 0 || mkdir(nested, 0700) != 0) {
+        goto cleanup;
+    }
+
+    char repo_agents[760], pkg_agents[820];
+    snprintf(repo_agents, sizeof(repo_agents), "%s/AGENTS.md", repo);
+    snprintf(pkg_agents, sizeof(pkg_agents), "%s/AGENTS.md", pkg);
+    if (!test_write_text_file(outside_agents, "OUTSIDE_AGENT\n") ||
+        !test_write_text_file(repo_agents, "ROOT_AGENT\n") ||
+        !test_write_text_file(pkg_agents, "PKG_AGENT\n")) {
+        goto cleanup;
+    }
+
+    setenv("HOME", root, 1);
+    if (chdir(nested) != 0)
+        goto cleanup;
+    dsco_workspace_prompt_invalidate();
+
+    dsco_workspace_status_t st;
+    char summary[768];
+    dsco_workspace_status(&st, summary, sizeof(summary));
+    const char *prompt = dsco_workspace_prompt();
+    const char *root_pos = prompt ? strstr(prompt, "ROOT_AGENT") : NULL;
+    const char *pkg_pos = prompt ? strstr(prompt, "PKG_AGENT") : NULL;
+
+    agents_files = st.agents_files;
+    summary_count_ok = strstr(summary, "agents_md=2") != NULL;
+    has_root = root_pos != NULL;
+    has_pkg = pkg_pos != NULL;
+    has_outside = prompt && strstr(prompt, "OUTSIDE_AGENT") != NULL;
+    order_ok = root_pos && pkg_pos && root_pos < pkg_pos;
+    setup_ok = true;
+
+cleanup:
+    if (have_old_cwd)
+        chdir(old_cwd);
+    test_restore_env("HOME", saved_home, had_home);
+    dsco_workspace_prompt_invalidate();
+    test_rm_rf(root);
+
+    ASSERT(setup_ok, "temporary AGENTS.md workspace setup should succeed");
+    ASSERT(agents_files == 2, "status should count root and nested AGENTS.md files");
+    ASSERT(summary_count_ok, "workspace status summary should include agents_md count");
+    ASSERT(has_root, "prompt should include repository-root AGENTS.md");
+    ASSERT(has_pkg, "prompt should include nested AGENTS.md");
+    ASSERT(!has_outside, "prompt should stop at repo root and skip parent AGENTS.md");
+    ASSERT(order_ok, "prompt should merge AGENTS.md from root to leaf");
+    PASS();
+}
+
 static void test_temp_plugin_paths(const char *tag, char *dir, size_t dir_len, char *manifest_path,
                                    size_t manifest_len, char *lock_path, size_t lock_len) {
     static int seq = 0;
@@ -5299,6 +6565,17 @@ static void test_base64_roundtrip(void) {
 }
 
 /* ── jbuf tests ────────────────────────────────────────────────────────── */
+
+static void test_safe_reallocarray(void) {
+    TEST("safe_reallocarray grows typed allocation");
+    int *values = NULL;
+    values = safe_reallocarray(values, 4, sizeof(*values));
+    for (size_t i = 0; i < 4; i++)
+        values[i] = (int)(i * 7);
+    ASSERT(values[3] == 21, "reallocated array retains writable elements");
+    free(values);
+    PASS();
+}
 
 static void test_jbuf_grow(void) {
     TEST("jbuf dynamic growth");
@@ -9250,6 +10527,40 @@ static void test_agent_and_swarm_tool_schemas_expose_spawn_fields(void) {
     PASS();
 }
 
+static void test_kitty_tool_registry_contract(void) {
+    TEST("Kitty native tools are canonical governed capabilities");
+    tools_init();
+    int count = 0;
+    const tool_def_t *defs = tools_get_all(&count);
+    const tool_def_t *remote = NULL;
+    const tool_def_t *kitten = NULL;
+    for (int i = 0; i < count; i++) {
+        if (strcmp(defs[i].name, "kitty_remote") == 0)
+            remote = &defs[i];
+        else if (strcmp(defs[i].name, "kitten") == 0)
+            kitten = &defs[i];
+    }
+    ASSERT(remote != NULL, "kitty_remote should be in the builtin registry");
+    ASSERT(kitten != NULL, "kitten should be in the builtin registry");
+    ASSERT(remote->core && kitten->core, "Kitty capabilities should be available to agents");
+    ASSERT(!remote->is_read_only, "remote control must not claim to be read-only");
+    ASSERT(kitten->is_interactive, "first-party kittens must own the terminal while active");
+    ASSERT(strstr(remote->input_schema_json, "\"command\"") != NULL,
+           "kitty_remote schema should expose command");
+    ASSERT(strstr(remote->input_schema_json, "\"args\"") != NULL,
+           "kitty_remote schema should expose argv");
+
+    char result[512];
+    ASSERT(!tool_kitty_remote("{\"command\":\"not-a-kitty-command\"}", result,
+                              sizeof(result)),
+           "kitty_remote should reject commands outside the installed contract");
+    ASSERT(strstr(result, "unknown Kitty remote command") != NULL,
+           "kitty_remote rejection should be explicit");
+    ASSERT(!tool_kitten("{\"command\":\"not-a-kitten\"}", result, sizeof(result)),
+           "kitten should reject commands outside the installed contract");
+    PASS();
+}
+
 static void test_swarm_group_status_json_includes_executor_metadata(void) {
     TEST("swarm group status exposes executor metadata");
     swarm_t sw;
@@ -9311,6 +10622,34 @@ static void test_tool_allowlist_filters_visible_tools(void) {
     free((void *)filtered);
 
     test_restore_env("DSCO_TOOL_ALLOWLIST", saved, had);
+    tools_init();
+    PASS();
+}
+
+static void test_restricted_tool_profile(void) {
+    TEST("restricted tool profile exposes only Bash, curl_raw, and ssh_command");
+    tools_init_profile(TOOLS_RESTRICTED);
+
+    int count = 0;
+    const tool_def_t *defs = tools_get_all(&count);
+    int allowed = 0;
+    for (int i = 0; i < count; i++) {
+        if (!tools_profile_allows_index(i))
+            continue;
+        allowed++;
+        ASSERT(defs[i].name != NULL, "restricted profile entry should have a name");
+        ASSERT(strcmp(defs[i].name, "Bash") == 0 || strcmp(defs[i].name, "curl_raw") == 0 ||
+                   strcmp(defs[i].name, "ssh_command") == 0,
+               "restricted profile must not expose another builtin tool");
+    }
+    ASSERT(allowed == 3, "restricted profile should expose exactly three tools");
+    ASSERT(tools_lookup_index("Bash") >= 0, "restricted profile should expose Bash");
+    ASSERT(tools_lookup_index("curl_raw") >= 0, "restricted profile should expose curl_raw");
+    ASSERT(tools_lookup_index("ssh_command") >= 0,
+           "restricted profile should expose ssh_command");
+    ASSERT(tools_lookup_index("grep_files") < 0,
+           "restricted profile should hide non-allowlisted tools");
+
     tools_init();
     PASS();
 }
@@ -10469,6 +11808,12 @@ static void test_codex_cache_first_run_defaults(void) {
            "Codex default effort should be medium before cache refresh");
     ASSERT(codex_cache_model_supported("openai/gpt-5.5"),
            "Codex should support gpt-5.5 before cache refresh");
+    ASSERT(codex_cache_model_supported("openai/gpt-5.6-sol"),
+           "Codex should support gpt-5.6-sol before cache refresh");
+    ASSERT(codex_cache_model_supported("openai/gpt-5.6-terra"),
+           "Codex should support gpt-5.6-terra before cache refresh");
+    ASSERT(codex_cache_model_supported("openai/gpt-5.6-luna"),
+           "Codex should support gpt-5.6-luna before cache refresh");
     ASSERT(!codex_cache_model_supported("openai/gpt-4.1"),
            "Codex should not treat gpt-4.1 as supported");
     PASS();
@@ -10538,6 +11883,34 @@ static void test_provider_msg_is_credit_too_low_classifies_exhaustion(void) {
            "auth error is not credit/rate-limit exhaustion");
     ASSERT(!provider_msg_is_credit_too_low(NULL) && !provider_msg_is_credit_too_low(""),
            "null/empty are not credit/rate-limit exhaustion");
+    PASS();
+}
+
+static void test_provider_chatgpt_429_classification(void) {
+    TEST("ChatGPT 429 classification separates quota from transient throttles");
+    ASSERT(provider_chatgpt_429_is_quota(
+               "{\"message\":\"No included usage is available\","
+               "\"type\":\"usage_not_included\"}"),
+           "quota type should be classified even when message wording is neutral");
+    ASSERT(provider_chatgpt_429_is_quota(
+               "{\"message\":\"Workspace credits are empty\","
+               "\"code\":\"workspace_owner_credits_depleted\"}"),
+           "workspace credit depletion should be quota exhaustion");
+    ASSERT(!provider_chatgpt_429_is_quota(
+               "{\"message\":\"Please slow down and retry\","
+               "\"code\":\"rate_limit_exceeded\"}"),
+           "rate_limit_exceeded should remain transient");
+
+    stream_result_t result = {0};
+    result.http_status = 429;
+    result.parsed.stop_reason = "error";
+    ASSERT(!provider_stream_result_is_credit_exhausted("openai-codex", &result),
+           "transient ChatGPT 429 must not exhaust the subscription lane");
+    ASSERT(provider_stream_result_is_credit_exhausted("openai", &result),
+           "legacy provider 429 classification should remain unchanged");
+    result.parsed.stop_reason = "credit_too_low";
+    ASSERT(provider_stream_result_is_credit_exhausted("openai-codex", &result),
+           "explicit ChatGPT quota sentinel should exhaust the subscription lane");
     PASS();
 }
 
@@ -10830,7 +12203,7 @@ static void test_provider_create_known_unsupported_does_not_fallback_openai(void
            "unsupported build_request should explain missing transport");
     free(req);
 
-    stream_result_t sr = bedrock->stream(bedrock, NULL, "{}", NULL, NULL, NULL, NULL);
+    stream_result_t sr = bedrock->stream(bedrock, NULL, "{}", NULL, NULL, NULL, NULL, NULL);
     ASSERT(!sr.ok, "unsupported stream should fail clearly");
     ASSERT(sr.http_status == 501, "unsupported stream should report 501");
     ASSERT(sr.parsed.stop_reason && strcmp(sr.parsed.stop_reason, "unsupported_provider") == 0,
@@ -10901,7 +12274,7 @@ static void test_provider_configurable_base_requires_explicit_base(void) {
            "azure alias should canonicalize to azure-foundry");
     ASSERT(missing->api_url && missing->api_url[0] == '\0',
            "azure without base should not inherit the OpenAI base URL");
-    stream_result_t sr = missing->stream(missing, "azure-key", "{}", NULL, NULL, NULL, NULL);
+    stream_result_t sr = missing->stream(missing, "azure-key", "{}", NULL, NULL, NULL, NULL, NULL);
     ASSERT(!sr.ok, "missing Azure base should fail locally");
     ASSERT(sr.parsed.stop_reason && strcmp(sr.parsed.stop_reason, "missing_api_base") == 0,
            "missing Azure base should report missing_api_base");
@@ -11679,6 +13052,26 @@ static void test_provider_build_default_fallback_models_empty_for_local_endpoint
     PASS();
 }
 
+static void test_provider_build_default_fallback_models_appends_configured_local(void) {
+    TEST("provider fallback chain appends configured local last resort");
+    char saved_local[256];
+    bool had_local = false;
+    test_capture_env("DSCO_LOCAL_FALLBACK_MODEL", saved_local, sizeof(saved_local), &had_local);
+    setenv("DSCO_LOCAL_FALLBACK_MODEL", "ollama:qwen3.6:27b-mlx", 1);
+
+    char models[4][128];
+    int count = provider_build_default_fallback_models("claude-sonnet-4-6", models, 4);
+    ASSERT(count > 0, "configured local fallback should produce a fallback lane");
+    ASSERT(strcmp(models[count - 1], "ollama:qwen3.6:27b-mlx") == 0,
+           "configured local fallback should reserve the final slot");
+
+    count = provider_build_default_fallback_models("ollama:qwen3.6:27b-mlx", models, 4);
+    ASSERT(count == 0, "local primary should not fall back to itself or remote providers");
+
+    test_restore_env("DSCO_LOCAL_FALLBACK_MODEL", saved_local, had_local);
+    PASS();
+}
+
 static void test_provider_route_explicit_openrouter_overrides_native_namespace(void) {
     TEST("provider routing explicit OpenRouter overrides native namespace");
     char saved_or[256], saved_anth[256], saved_moonshot[256], saved_kimi[256];
@@ -12295,9 +13688,9 @@ static void test_provider_route_uses_claude_code_oauth_when_env_key_missing(void
 static void test_provider_route_uses_claude_code_credentials_file_when_present(void) {
     TEST("provider routing uses Claude Code credentials file when present");
     char saved_anth[256], saved_oauth[256], saved_dsco_oauth[256];
-    char saved_file[1024], saved_service[256], saved_disable[64];
+    char saved_file[1024], saved_service[256], saved_disable[64], saved_cache[1024];
     bool had_anth = false, had_oauth = false, had_dsco_oauth = false;
-    bool had_file = false, had_service = false, had_disable = false;
+    bool had_file = false, had_service = false, had_disable = false, had_cache = false;
     test_capture_env("ANTHROPIC_API_KEY", saved_anth, sizeof(saved_anth), &had_anth);
     test_capture_env("CLAUDE_CODE_OAUTH_TOKEN", saved_oauth, sizeof(saved_oauth), &had_oauth);
     test_capture_env("DSCO_CLAUDE_CODE_OAUTH_TOKEN", saved_dsco_oauth, sizeof(saved_dsco_oauth),
@@ -12308,12 +13701,18 @@ static void test_provider_route_uses_claude_code_credentials_file_when_present(v
                      &had_service);
     test_capture_env("DSCO_DISABLE_CLAUDE_CODE_OAUTH_DISCOVERY", saved_disable,
                      sizeof(saved_disable), &had_disable);
+    test_capture_env("DSCO_CLAUDE_CODE_OAUTH_CACHE", saved_cache, sizeof(saved_cache),
+                     &had_cache);
 
     unsetenv("ANTHROPIC_API_KEY");
     unsetenv("CLAUDE_CODE_OAUTH_TOKEN");
     unsetenv("DSCO_CLAUDE_CODE_OAUTH_TOKEN");
     unsetenv("DSCO_DISABLE_CLAUDE_CODE_OAUTH_DISCOVERY");
     setenv("DSCO_CLAUDE_CODE_KEYCHAIN_SERVICE", "dsco-tests-missing-keychain-service", 1);
+    char cache_path[160];
+    snprintf(cache_path, sizeof(cache_path), "/tmp/dsco_oauth_file_cache_%d.json", (int)getpid());
+    unlink(cache_path);
+    setenv("DSCO_CLAUDE_CODE_OAUTH_CACHE", cache_path, 1);
 
     char creds_path[128];
     ASSERT(test_write_temp_script(creds_path, sizeof(creds_path),
@@ -12330,16 +13729,19 @@ static void test_provider_route_uses_claude_code_credentials_file_when_present(v
            "credentials file should keep Claude models on anthropic");
     ASSERT(req_key && strcmp(req_key, "sk-ant-oat-file") == 0,
            "credentials file access token should be reused for requests");
-    ASSERT(strcmp(provider_claude_code_oauth_source(), "credentials-file") == 0,
-           "oauth source should report credentials-file");
+    const char *source = provider_claude_code_oauth_source();
+    ASSERT(strcmp(source, "credentials-file") == 0 || strcmp(source, "dsco-cache") == 0,
+           "oauth source should report the credentials file or its persisted DSCO cache");
 
     unlink(creds_path);
+    unlink(cache_path);
     test_restore_env("ANTHROPIC_API_KEY", saved_anth, had_anth);
     test_restore_env("CLAUDE_CODE_OAUTH_TOKEN", saved_oauth, had_oauth);
     test_restore_env("DSCO_CLAUDE_CODE_OAUTH_TOKEN", saved_dsco_oauth, had_dsco_oauth);
     test_restore_env("DSCO_CLAUDE_CODE_CREDENTIALS_FILE", saved_file, had_file);
     test_restore_env("DSCO_CLAUDE_CODE_KEYCHAIN_SERVICE", saved_service, had_service);
     test_restore_env("DSCO_DISABLE_CLAUDE_CODE_OAUTH_DISCOVERY", saved_disable, had_disable);
+    test_restore_env("DSCO_CLAUDE_CODE_OAUTH_CACHE", saved_cache, had_cache);
     PASS();
 }
 
@@ -12559,6 +13961,7 @@ static void test_provider_route_prefers_codex_subscription_for_openai_models(voi
     unsetenv("ANTHROPIC_API_KEY");
 
     const char *routed = provider_route_for_model("openai/gpt-5.5", NULL, NULL);
+    const char *terra_route = provider_route_for_model("openai/gpt-5.6-terra", NULL, NULL);
     const char *req_key = provider_resolve_request_api_key(routed, NULL);
     const char *openai_default = provider_primary_model_for("openai", true);
     const char *legacy_route = provider_route_for_model("openai/gpt-4.1", NULL, NULL);
@@ -12575,11 +13978,23 @@ static void test_provider_route_prefers_codex_subscription_for_openai_models(voi
                                      : NULL;
     char *codex_req_model = codex_req ? json_get_str(codex_req, "model") : NULL;
     char *codex_req_instructions = codex_req ? json_get_str(codex_req, "instructions") : NULL;
+    session_state_t terra_session;
+    session_state_init(&terra_session, "openai/gpt-5.6-terra");
+    char *terra_req = codex_provider ? codex_provider->build_request(codex_provider, &codex_conv,
+                                                                     &terra_session, 1024, req_key)
+                                     : NULL;
+    char *terra_req_model = terra_req ? json_get_str(terra_req, "model") : NULL;
 
     ASSERT(strcmp(routed, "openai-codex") == 0,
            "OpenAI model should use ChatGPT Codex subscription before API keys");
+    ASSERT(strcmp(terra_route, "openai-codex") == 0,
+           "GPT-5.6 OpenAI model should use ChatGPT Codex subscription before API keys");
     ASSERT(req_key && strcmp(req_key, "chatgpt-oauth-route") == 0,
            "Native Codex subscription route should expose the ChatGPT OAuth token");
+    ASSERT(provider_usage_is_included(routed, req_key),
+           "Codex subscription usage should be classified as included, not metered API spend");
+    ASSERT(!provider_usage_is_included("openai", "sk-openai-native"),
+           "direct OpenAI API-key usage must remain metered");
     ASSERT(openai_default && strcmp(openai_default, "gpt-5.5") == 0,
            "OpenAI-family fallback should use Codex gpt-5.5 when ChatGPT auth exists");
     ASSERT(strcmp(legacy_route, "openai") == 0,
@@ -12593,8 +14008,12 @@ static void test_provider_route_prefers_codex_subscription_for_openai_models(voi
            "openai-codex should prefer native ChatGPT streaming when OAuth is available");
     ASSERT(codex_req_model && strcmp(codex_req_model, "gpt-5.5") == 0,
            "Native Codex request should resolve alias to bare Codex model");
+    ASSERT(terra_req_model && strcmp(terra_req_model, "gpt-5.6-terra") == 0,
+           "Native Codex request should preserve bare GPT-5.6 model ids");
     ASSERT(codex_req_instructions && strstr(codex_req, "\"input\"") != NULL,
            "Native Codex request should use Responses instructions/input shape");
+    free(terra_req_model);
+    free(terra_req);
     free(codex_req_instructions);
     free(codex_req_model);
     free(codex_req);
@@ -12787,18 +14206,26 @@ static void test_swarm_prepare_executor_env_prefers_claude_oauth(void) {
 static void test_swarm_prepare_executor_env_keeps_api_key_without_oauth(void) {
     TEST("swarm_prepare_executor_env keeps API key when OAuth is unavailable");
     char saved_anth[256], saved_dsco_oauth[256], saved_oauth[256], saved_disable[64];
+    char saved_cache[1024];
     bool had_anth = false, had_dsco_oauth = false, had_oauth = false, had_disable = false;
+    bool had_cache = false;
     test_capture_env("ANTHROPIC_API_KEY", saved_anth, sizeof(saved_anth), &had_anth);
     test_capture_env("DSCO_CLAUDE_CODE_OAUTH_TOKEN", saved_dsco_oauth, sizeof(saved_dsco_oauth),
                      &had_dsco_oauth);
     test_capture_env("CLAUDE_CODE_OAUTH_TOKEN", saved_oauth, sizeof(saved_oauth), &had_oauth);
     test_capture_env("DSCO_DISABLE_CLAUDE_CODE_OAUTH_DISCOVERY", saved_disable,
                      sizeof(saved_disable), &had_disable);
+    test_capture_env("DSCO_CLAUDE_CODE_OAUTH_CACHE", saved_cache, sizeof(saved_cache),
+                     &had_cache);
 
     setenv("ANTHROPIC_API_KEY", "sk-ant-env", 1);
     unsetenv("DSCO_CLAUDE_CODE_OAUTH_TOKEN");
     unsetenv("CLAUDE_CODE_OAUTH_TOKEN");
     setenv("DSCO_DISABLE_CLAUDE_CODE_OAUTH_DISCOVERY", "1", 1);
+    char cache_path[160];
+    snprintf(cache_path, sizeof(cache_path), "/tmp/dsco_oauth_absent_cache_%d.json", (int)getpid());
+    unlink(cache_path);
+    setenv("DSCO_CLAUDE_CODE_OAUTH_CACHE", cache_path, 1);
 
     swarm_t sw;
     memset(&sw, 0, sizeof(sw));
@@ -12808,9 +14235,126 @@ static void test_swarm_prepare_executor_env_keeps_api_key_without_oauth(void) {
            "Claude executor env should keep ANTHROPIC_API_KEY when OAuth is unavailable");
 
     test_restore_env("DSCO_DISABLE_CLAUDE_CODE_OAUTH_DISCOVERY", saved_disable, had_disable);
+    test_restore_env("DSCO_CLAUDE_CODE_OAUTH_CACHE", saved_cache, had_cache);
     test_restore_env("ANTHROPIC_API_KEY", saved_anth, had_anth);
     test_restore_env("DSCO_CLAUDE_CODE_OAUTH_TOKEN", saved_dsco_oauth, had_dsco_oauth);
     test_restore_env("CLAUDE_CODE_OAUTH_TOKEN", saved_oauth, had_oauth);
+    PASS();
+}
+
+/* Regression: a long-lived session that spawns, collects, and retires many
+ * groups over its lifetime must NOT be permanently wedged once it crosses
+ * SWARM_MAX_CHILDREN lifetime spawns — only currently-active children are a
+ * meaningful cap. This reproduces the exact fault found in a live session
+ * (2026-07-13): child_count/group_count were monotonic allocators with no
+ * slot recycling, so every spawn silently failed forever after 64 lifetime
+ * children even with zero children actually running. */
+static void test_swarm_child_slots_recycle_past_lifetime_cap(void) {
+    TEST("swarm child slots recycle past the lifetime spawn cap");
+
+    char script_path[128];
+    ASSERT(test_write_temp_script(script_path, sizeof(script_path), "#!/bin/sh\nexit 0\n"),
+           "failed to create temp swarm script");
+
+    swarm_t sw;
+    swarm_init(&sw, "xai-test-key", "grok-4-fast");
+    free((void *)sw.dsco_path);
+    sw.dsco_path = safe_strdup(script_path);
+
+    int max_children = dsco_swarm_max_children();
+    int total_spawned = 0;
+
+    /* Spawn, wait-to-completion, and retire (reclaim) groups of 4 children at
+     * a time until we have spawned strictly MORE than max_children lifetime
+     * children. Before the fix this would exhaust child_count and every
+     * spawn after the max_children'th would return -1 forever. */
+    int target = max_children + 8;
+    while (total_spawned < target) {
+        int gid = swarm_group_create(&sw, "recycle-test-group");
+        ASSERT(gid >= 0, "group_create should succeed (recycling keeps group slots available)");
+
+        int ids[4];
+        int n = 0;
+        for (int i = 0; i < 4; i++) {
+            int cid = swarm_spawn_in_group(&sw, gid, "dummy task", "grok-4-fast");
+            ASSERT(cid >= 0, "spawn should succeed via slot recycling, not fail on lifetime cap");
+            ids[n++] = cid;
+        }
+
+        /* Wait for this batch to go terminal (the script exits immediately). */
+        for (int i = 0; i < 100 && !swarm_group_complete(&sw, gid); i++) {
+            swarm_poll(&sw, 20);
+            usleep(20000);
+        }
+        ASSERT(swarm_group_complete(&sw, gid), "spawned batch should reach terminal state");
+
+        /* Drain completion queue so post_complete() bookkeeping is exercised
+         * before reclaiming, mirroring real collect() usage. */
+        while (swarm_completion_pending(&sw) > 0)
+            swarm_completion_pop(&sw);
+
+        ASSERT(swarm_group_reclaim(&sw, gid), "reclaim should succeed once all children are terminal");
+
+        total_spawned += n;
+    }
+
+    ASSERT(total_spawned > max_children,
+           "test must actually exceed the lifetime slot cap to be a real regression check");
+    ASSERT(swarm_reclaimable_count(&sw) >= 0, "reclaimable count should be queryable");
+
+    /* One more spawn after crossing the cap must still succeed. */
+    int gid2 = swarm_group_create(&sw, "post-cap-group");
+    ASSERT(gid2 >= 0, "group_create after crossing lifetime cap should still succeed");
+    int cid2 = swarm_spawn_in_group(&sw, gid2, "dummy task", "grok-4-fast");
+    ASSERT(cid2 >= 0, "spawn after crossing lifetime cap should succeed via recycling");
+
+    for (int i = 0; i < 100 && !swarm_group_complete(&sw, gid2); i++) {
+        swarm_poll(&sw, 20);
+        usleep(20000);
+    }
+    while (swarm_completion_pending(&sw) > 0)
+        swarm_completion_pop(&sw);
+
+    swarm_destroy(&sw);
+    unlink(script_path);
+    PASS();
+}
+
+/* Reclaim must refuse to hand back a slot for a group with a still-running
+ * child — recycling must never race a live process's slot out from under it. */
+static void test_swarm_reclaim_refuses_active_group(void) {
+    TEST("swarm reclaim refuses to reclaim a group with an active child");
+
+    char script_path[128];
+    ASSERT(test_write_temp_script(script_path, sizeof(script_path), "#!/bin/sh\nsleep 5\n"),
+           "failed to create temp swarm script");
+
+    swarm_t sw;
+    swarm_init(&sw, "xai-test-key", "grok-4-fast");
+    free((void *)sw.dsco_path);
+    sw.dsco_path = safe_strdup(script_path);
+
+    int gid = swarm_group_create(&sw, "active-reclaim-test");
+    ASSERT(gid >= 0, "group_create should succeed");
+    int cid = swarm_spawn_in_group(&sw, gid, "dummy task", "grok-4-fast");
+    ASSERT(cid >= 0, "spawn should succeed");
+
+    usleep(200000);
+    ASSERT(!swarm_group_reclaim(&sw, gid),
+           "reclaim must refuse while a child is still running/streaming");
+
+    ASSERT(swarm_kill(&sw, cid), "kill should succeed");
+    for (int i = 0; i < 40 && sw.active.count > 0; i++) {
+        swarm_poll(&sw, 50);
+        usleep(50000);
+    }
+    while (swarm_completion_pending(&sw) > 0)
+        swarm_completion_pop(&sw);
+
+    ASSERT(swarm_group_reclaim(&sw, gid), "reclaim should succeed once the child is terminal");
+
+    swarm_destroy(&sw);
+    unlink(script_path);
     PASS();
 }
 
@@ -12849,6 +14393,42 @@ static void test_swarm_poll_reaps_killed_child_without_readable_fds(void) {
 
     swarm_destroy(&sw);
     unlink(script_path);
+    PASS();
+}
+
+/* Integration contract: a swarm child must be the shipped dsco executable, not
+ * the test runner or a shell stand-in. --version is a credential-free sub-goal
+ * with a deterministic completion signal, so this exercises the real fork/exec,
+ * worker-profile, pipe collection, and reap path without spending provider budget. */
+static void test_dsco_binary_completes_credential_free_subgoal(void) {
+    TEST("dsco binary completes credential-free sub-goal");
+
+    const char *dsco_bin = "./dsco";
+    ASSERT(access(dsco_bin, X_OK) == 0,
+           "./dsco must be built before the dsco-subgoal integration test");
+
+    swarm_t sw;
+    swarm_init(&sw, NULL, "openai/gpt-5.5");
+    free((void *)sw.dsco_path);
+    sw.dsco_path = safe_strdup(dsco_bin);
+
+    int child_id = swarm_spawn(&sw, "--version", "openai/gpt-5.5");
+    ASSERT(child_id >= 0, "failed to spawn dsco sub-goal");
+
+    for (int i = 0; i < 80 && sw.active.count > 0; i++) {
+        swarm_poll(&sw, 50);
+        usleep(25000);
+    }
+
+    swarm_child_t *child = swarm_get(&sw, child_id);
+    ASSERT(child != NULL, "dsco sub-goal should remain addressable after completion");
+    ASSERT(child->status == SWARM_DONE, "dsco sub-goal should exit successfully");
+    ASSERT(strstr(child->output, "dsco v") != NULL,
+           "dsco sub-goal output should contain the runtime version");
+    ASSERT(strstr(child->output, "--profile worker") == NULL,
+           "sub-goal output should be dsco output, not an argv-capture fixture");
+
+    swarm_destroy(&sw);
     PASS();
 }
 
@@ -13462,10 +15042,11 @@ static void test_swarm_provider_fabric_saturates_subscription_lanes(void) {
     bool ok = tools_execute(
         "swarm",
         "{\"action\":\"provider_fabric\",\"name\":\"fabric-test\",\"task\":\"probe fabric\","
-        "\"mode\":\"spawn\",\"replicas\":1,\"fugu_replicas\":2,\"max_agents\":5}",
+        "\"mode\":\"spawn\",\"replicas\":1,\"fugu_replicas\":2,\"max_agents\":7}",
         result, sizeof(result));
     ASSERT(ok, "provider_fabric should spawn subscription workers");
-    ASSERT(strstr(result, "\"agents_spawned\":5") != NULL,
+    /* 7 = codex sub-lanes (sol, terra, 5.5) + fugu x2 + anthropic + zai */
+    ASSERT(strstr(result, "\"agents_spawned\":7") != NULL,
            "provider_fabric should spawn the requested subscription fabric size");
     ASSERT(strstr(result, "\"provider\":\"sakana\"") != NULL,
            "provider_fabric should include Sakana Fugu lane");
@@ -13495,8 +15076,8 @@ static void test_swarm_provider_fabric_saturates_subscription_lanes(void) {
            "provider fabric should launch OpenAI-Codex provider child");
     ASSERT(strstr(buf, "--provider\nzai\n") != NULL,
            "provider fabric should launch Z.AI provider child");
-    ASSERT(strstr(buf, "-m\nfugu-ultra\n") != NULL,
-           "provider fabric should default Fugu to fugu-ultra");
+    ASSERT(strstr(buf, "-m\nfugu\n") != NULL,
+           "provider fabric should default Fugu to base fugu (cost-aware default)");
     ASSERT(strstr(buf, "-m\ngpt-5.5\n") != NULL,
            "provider fabric should pass bare OpenAI subscription model");
     ASSERT(strstr(buf, "-m\nglm-5.2\n") != NULL, "provider fabric should use native GLM model");
@@ -13615,7 +15196,7 @@ static void test_swarm_provider_fabric_race_kills_losers(void) {
     bool ok = tools_execute(
         "swarm",
         "{\"action\":\"provider_fabric\",\"name\":\"fabric-race-test\",\"task\":\"race fabric\","
-        "\"replicas\":1,\"fugu_replicas\":1,\"max_agents\":4,\"timeout\":3}",
+        "\"replicas\":1,\"fugu_replicas\":1,\"max_agents\":6,\"timeout\":3}",
         result, sizeof(result));
     ASSERT(ok, "provider_fabric race should return the first successful lane");
     ASSERT(strstr(result, "\"mode\":\"race\"") != NULL,
@@ -13624,7 +15205,9 @@ static void test_swarm_provider_fabric_race_kills_losers(void) {
            "provider_fabric race should return fastest Z.AI lane");
     ASSERT(strstr(result, "\"model\":\"glm-5.2\"") != NULL,
            "provider_fabric race should preserve winner model");
-    ASSERT(strstr(result, "\"killed\":3") != NULL,
+    /* 6 lanes race (codex sol/terra/5.5 + fugu + anthropic + zai); zai wins,
+     * the other 5 are reaped. */
+    ASSERT(strstr(result, "\"killed\":5") != NULL,
            "provider_fabric race should kill slower provider lanes");
     ASSERT(strstr(result, "winner:zai:glm-5.2") != NULL,
            "provider_fabric race should include winner output");
@@ -13820,7 +15403,7 @@ static void test_swarm_provider_fabric_scopes_cache_hint_to_provider(void) {
                       "\"task\":\"reuse the warm provider-local prefix\","
                       "\"replicas\":1,\"fugu_replicas\":1,\"max_agents\":5,\"timeout\":3,"
                       "\"expected_cache_hit_tokens\":6000,"
-                      "\"cache_provider\":\"anthropic\",\"cache_model\":\"claude-sonnet-4-6\"}",
+                      "\"cache_provider\":\"anthropic\",\"cache_model\":\"claude-sonnet-5\"}",
                       result, sizeof(result));
     ASSERT(ok, "provider_fabric scoped cache race should complete");
     ASSERT(strstr(result, "\"cache_scope\":\"provider_local\"") != NULL,
@@ -14107,6 +15690,34 @@ static void test_prompt_cache_provider_policy_matrix(void) {
     }
 }
 
+static void test_prompt_cache_gpt56_explicit_request_shape(void) {
+    TEST("GPT-5.6 prompt cache uses an explicit breakpoint and supported TTL");
+    conversation_t conv;
+    conv_init(&conv);
+    conv_add_user_text(&conv, "hello");
+    session_state_t session;
+    session_state_init(&session, "gpt-5.6-terra");
+    snprintf(session.prompt_cache_key, sizeof(session.prompt_cache_key), "%s", "dsco-test-cache");
+    /* Verify legacy/default 24h cannot generate an invalid GPT-5.6 request. */
+    snprintf(session.prompt_cache_retention, sizeof(session.prompt_cache_retention), "%s", "24h");
+    provider_t *p = provider_create("openai");
+    ASSERT(p != NULL, "openai provider should be creatable");
+    char *req = p->build_request(p, &conv, &session, 1024, NULL);
+    ASSERT(req != NULL, "GPT-5.6 request should build");
+    ASSERT(strstr(req, "\"prompt_cache_key\":\"dsco-test-cache\"") != NULL,
+           "GPT-5.6 request should include stable cache routing key");
+    ASSERT(strstr(req, "\"prompt_cache_options\":{\"mode\":\"explicit\",\"ttl\":\"30m\"}") != NULL,
+           "GPT-5.6 request should use its only supported explicit-cache TTL");
+    ASSERT(strstr(req, "\"prompt_cache_breakpoint\":{\"mode\":\"explicit\"}") != NULL,
+           "GPT-5.6 request should mark the stable system prefix explicitly");
+    ASSERT(strstr(req, "\"prompt_cache_retention\"") == NULL,
+           "GPT-5.6 request must not send deprecated cache retention");
+    free(req);
+    conv_free(&conv);
+    provider_free(p);
+    PASS();
+}
+
 static void test_prompt_cache_openai_request_shape(void) {
     TEST("prompt cache OpenAI request shape includes key and retention");
     conversation_t conv;
@@ -14205,6 +15816,8 @@ static void test_openai_metadata_covers_current_api_and_cost_controls(void) {
         "\"batch\"",
         "\"audio\"",
         "\"images\"",
+        "\"gpt-image-2\"",
+        "\"image_generation\"",
         "\"videos\"",
         "\"embeddings\"",
         "\"moderations\"",
@@ -16999,16 +18612,25 @@ static void test_topology_throughput_lanes_spread_keyed_providers(void) {
 static void test_topology_openrouter_tiers_keep_explicit_route(void) {
     TEST("topology OpenRouter tiers keep explicit route");
     char saved_haiku[256], saved_sonnet[256], saved_opus[256], saved_hetero[256];
+    char saved_or_key[512];
     bool had_haiku = false, had_sonnet = false, had_opus = false, had_hetero = false;
+    bool had_or_key = false;
     test_capture_env("DSCO_SWARM_HAIKU", saved_haiku, sizeof(saved_haiku), &had_haiku);
     test_capture_env("DSCO_SWARM_SONNET", saved_sonnet, sizeof(saved_sonnet), &had_sonnet);
     test_capture_env("DSCO_SWARM_OPUS", saved_opus, sizeof(saved_opus), &had_opus);
     test_capture_env("DSCO_TOPO_HETERO", saved_hetero, sizeof(saved_hetero), &had_hetero);
+    test_capture_env("OPENROUTER_API_KEY", saved_or_key, sizeof(saved_or_key), &had_or_key);
 
     unsetenv("DSCO_SWARM_HAIKU");
     unsetenv("DSCO_SWARM_SONNET");
     unsetenv("DSCO_SWARM_OPUS");
     unsetenv("DSCO_TOPO_HETERO");
+    /* Hetero defaults now require a *usable, healthy* OpenRouter lane before
+     * short-circuiting (preference, not entitlement). Provide a key and a
+     * freshly initialized pool so the preference path is actually taken. */
+    setenv("OPENROUTER_API_KEY", "sk-or-topo-test", 1);
+    provider_pool_shutdown();
+    provider_pool_init(NULL);
 
     char buf[128];
     const char *resolved =
@@ -17034,6 +18656,8 @@ static void test_topology_openrouter_tiers_keep_explicit_route(void) {
     test_restore_env("DSCO_SWARM_SONNET", saved_sonnet, had_sonnet);
     test_restore_env("DSCO_SWARM_OPUS", saved_opus, had_opus);
     test_restore_env("DSCO_TOPO_HETERO", saved_hetero, had_hetero);
+    test_restore_env("OPENROUTER_API_KEY", saved_or_key, had_or_key);
+    provider_pool_shutdown();
     PASS();
 }
 
@@ -18312,6 +19936,127 @@ static void test_goal_prompt_injection_active_only(void) {
     free(req);
 
     conv_free(&conv);
+    PASS();
+}
+
+static void test_runtime_context_trails_cacheable_prefix(void) {
+    TEST("volatile runtime context trails cacheable prefix");
+    conversation_t conv;
+    conv_init(&conv);
+    conv_add_user_text(&conv, "continue the active work");
+
+    session_state_t session;
+    session_state_init(&session, "sonnet");
+    snprintf(session.memory_context, sizeof(session.memory_context), "[Recall] first state");
+    snprintf(session.goal_objective, sizeof(session.goal_objective), "finish cache repair");
+    session.goal_status = DSCO_GOAL_ACTIVE;
+    session.goal_token_budget = 10000;
+    session.goal_tokens_at_start = 0;
+    session.total_input_tokens = 1000;
+
+    char *first = llm_build_request_ex(&conv, &session, 1024);
+    ASSERT(first != NULL, "first request builds");
+    const char *first_messages = strstr(first, ",\"messages\":[");
+    const char *first_runtime = strstr(first, "[Recall] first state");
+    ASSERT(first_messages != NULL, "request contains messages");
+    ASSERT(first_runtime != NULL && first_runtime > first_messages,
+           "runtime context is serialized in trailing message content");
+    const char *last_mark = NULL;
+    for (const char *p = first_messages;
+         (p = strstr(p, "\"cache_control\"")) != NULL && p < first_runtime; p++)
+        last_mark = p;
+    ASSERT(last_mark != NULL, "a reusable message cache anchor precedes runtime context");
+
+    snprintf(session.memory_context, sizeof(session.memory_context), "[Recall] changed state");
+    session.total_input_tokens = 4200;
+    char *second = llm_build_request_ex(&conv, &session, 1024);
+    ASSERT(second != NULL, "second request builds");
+    const char *second_messages = strstr(second, ",\"messages\":[");
+    ASSERT(second_messages != NULL, "second request contains messages");
+    size_t first_prefix_len = (size_t)(first_messages - first);
+    size_t second_prefix_len = (size_t)(second_messages - second);
+    ASSERT(first_prefix_len == second_prefix_len,
+           "volatile session changes do not resize the system/tools prefix");
+    ASSERT(memcmp(first, second, first_prefix_len) == 0,
+           "volatile session changes preserve the cacheable request prefix byte-for-byte");
+
+    free(first);
+    free(second);
+    conv_free(&conv);
+    PASS();
+}
+
+static void test_oauth_loaded_tools_preserve_request_prefix(void) {
+    TEST("OAuth loaded tools preserve frozen request prefix");
+    conversation_t conv;
+    conv_init(&conv);
+    conv_add_user_text(&conv, "continue the same task");
+    session_state_t session;
+    session_state_init(&session, "claude-fable-5");
+
+    char *first = llm_build_request_ex_for_credential(&conv, &session, 1024, "sk-ant-oat-test");
+    ASSERT(first != NULL, "first OAuth request builds");
+    const char *first_tools = strstr(first, "\"tools\":[");
+    const char *first_messages_initial = strstr(first, ",\"messages\":[");
+    ASSERT(first_tools != NULL && first_messages_initial != NULL &&
+               first_tools < first_messages_initial,
+           "OAuth request contains a tools register before messages");
+    char *tools_slice = strndup(first_tools, (size_t)(first_messages_initial - first_tools));
+    ASSERT(tools_slice != NULL, "tools slice allocates");
+    ASSERT(test_count_substr(tools_slice, "\"input_schema\"") <= 12,
+           "OAuth stable dispatcher register advertises at most twelve schemas");
+    ASSERT(strstr(tools_slice, "\"name\":\"invoke_tool\"") != NULL,
+           "OAuth register advertises stable capability dispatcher");
+    if (getenv("DSCO_COST_ENVELOPE")) {
+        const char *system_start = strstr(first, "\"system\":[");
+        fprintf(stderr,
+                "\n  OAuth envelope: system=%zu chars tools=%zu chars schemas=%d "
+                "prefix-before-messages=%zu chars\n",
+                system_start && first_tools > system_start ? (size_t)(first_tools - system_start)
+                                                           : 0,
+                (size_t)(first_messages_initial - first_tools),
+                test_count_substr(tools_slice, "\"input_schema\""),
+                (size_t)(first_messages_initial - first));
+    }
+    free(tools_slice);
+    char load_result[8192];
+    ASSERT(tools_execute_raw_for_test("load_tools", "{\"names\":\"sha256\"}", load_result,
+                                      sizeof(load_result)),
+           "tool schema loads");
+    ASSERT(strstr(load_result, "invoke_tool") != NULL,
+           "load result explains stable dispatcher invocation");
+
+    char *second =
+        llm_build_request_ex_for_credential(&conv, &session, 1024, "sk-ant-oat-test");
+    ASSERT(second != NULL, "second OAuth request builds");
+    const char *first_messages = strstr(first, ",\"messages\":[");
+    const char *second_messages = strstr(second, ",\"messages\":[");
+    ASSERT(first_messages != NULL && second_messages != NULL, "both requests contain messages");
+    size_t first_prefix_len = (size_t)(first_messages - first);
+    size_t second_prefix_len = (size_t)(second_messages - second);
+    ASSERT(first_prefix_len == second_prefix_len,
+           "loading a capability does not resize OAuth tools/system prefix");
+    ASSERT(memcmp(first, second, first_prefix_len) == 0,
+           "loading a capability preserves OAuth tools/system prefix byte-for-byte");
+
+    char evict_result[1024];
+    tools_execute_raw_for_test("evict_tools", "{\"all\":true}", evict_result,
+                               sizeof(evict_result));
+    free(first);
+    free(second);
+    conv_free(&conv);
+    PASS();
+}
+
+static void test_invoke_tool_dispatches_through_public_gate(void) {
+    TEST("invoke_tool dispatches loaded capability");
+    char result[2048];
+    bool ok = tools_execute_raw_for_test(
+        "invoke_tool", "{\"name\":\"sha256\",\"input\":{\"text\":\"abc\"}}", result,
+        sizeof(result));
+    ASSERT(ok, "invoke_tool executes target");
+    ASSERT(strstr(result, "ba7816bf8f01cfea414140de5dae2223") != NULL,
+           "invoke_tool returns target result");
     PASS();
 }
 
@@ -20140,6 +21885,17 @@ static void test_capability_classifier(void) {
     ASSERT(dsco_caps_for_tool("Write", NULL) & CAP_FS_WRITE, "Write should carry CAP_FS_WRITE");
     ASSERT(dsco_caps_for_tool("Edit", NULL) & CAP_FS_WRITE, "Edit should carry CAP_FS_WRITE");
     ASSERT(dsco_caps_for_tool("Bash", NULL) & CAP_EXEC, "Bash should carry CAP_EXEC");
+    ASSERT((dsco_caps_for_tool("kitty_remote", "{\"command\":\"get-text\"}") &
+            (CAP_EXEC | CAP_SECRETS)) == (CAP_EXEC | CAP_SECRETS),
+           "kitty_remote should carry execution and screen-secret capabilities");
+    ASSERT(dsco_caps_for_tool("kitten", "{\"command\":\"icat\"}") & CAP_EXEC,
+           "kitten should carry CAP_EXEC");
+    ASSERT((dsco_caps_for_tool("kitten", "{\"command\":\"ssh\",\"args\":[\"host\"]}") &
+            (CAP_NET | CAP_UNTRUSTED_IN)) == (CAP_NET | CAP_UNTRUSTED_IN),
+           "kitten ssh should carry CAP_NET|CAP_UNTRUSTED_IN");
+    ASSERT((dsco_caps_for_tool("kitten", "{\"command\":\"transfer\",\"args\":[]}") &
+            (CAP_NET | CAP_UNTRUSTED_IN)) == (CAP_NET | CAP_UNTRUSTED_IN),
+           "kitten transfer should carry CAP_NET|CAP_UNTRUSTED_IN");
     ASSERT(dsco_caps_for_tool("Bash", "{\"command\":\"curl http://x\"}") & CAP_NET,
            "Bash curl should carry CAP_NET");
     ASSERT((dsco_caps_for_tool("WebFetch", NULL) & (CAP_NET | CAP_UNTRUSTED_IN)) ==
@@ -20518,18 +22274,21 @@ static void test_tool_bash_background_lifecycle(void) {
 
     /* 1. Launch a background echo and capture its bash_id. */
     r[0] = '\0';
-    bool ok = tools_execute(
+    bool ok = tools_execute_raw_for_test(
         "Bash", "{\"command\":\"echo dsco_bg_marker_XYZ\",\"run_in_background\":true}", r,
         sizeof(r));
     ASSERT(ok, "Bash run_in_background should succeed");
     ASSERT(test_extract_bash_id(r, id, sizeof(id)), "launch result should carry a bash_id");
+    int first_pid = json_get_int(r, "pid", 0);
+    ASSERT(first_pid > 0 && first_pid != (int)getpid() && first_pid != (int)getppid(),
+           "background shell pid must identify a child, never dsco or its parent shell");
 
     /* 2. Poll BashOutput for the marker (bounded to ~1.5s). */
     bool saw_marker = false;
     for (int i = 0; i < 60; i++) {
         snprintf(input, sizeof(input), "{\"bash_id\":\"%s\"}", id);
         r[0] = '\0';
-        tools_execute("BashOutput", input, r, sizeof(r));
+        tools_execute_raw_for_test("BashOutput", input, r, sizeof(r));
         if (strstr(r, "dsco_bg_marker_XYZ")) {
             saw_marker = true;
             break;
@@ -20540,26 +22299,30 @@ static void test_tool_bash_background_lifecycle(void) {
 
     /* 3. KillShell a long runner; killed shells are removed from the registry. */
     r[0] = '\0';
-    ok = tools_execute("Bash", "{\"command\":\"sleep 30\",\"run_in_background\":true}", r,
-                       sizeof(r));
+    ok = tools_execute_raw_for_test(
+        "Bash", "{\"command\":\"sleep 30\",\"run_in_background\":true}", r, sizeof(r));
     ASSERT(ok, "second Bash run_in_background should succeed");
     char id2[32];
     ASSERT(test_extract_bash_id(r, id2, sizeof(id2)), "second launch should carry a bash_id");
+    int second_pid = json_get_int(r, "pid", 0);
+    ASSERT(second_pid > 0 && second_pid != (int)getpid() && second_pid != (int)getppid(),
+           "long-running shell pid must identify a child, never dsco or its parent shell");
 
     snprintf(input, sizeof(input), "{\"shell_id\":\"%s\"}", id2);
     r[0] = '\0';
-    tools_execute("KillShell", input, r, sizeof(r));
+    tools_execute_raw_for_test("KillShell", input, r, sizeof(r));
     ASSERT(strstr(r, "\"ok\":true") != NULL, "KillShell should report ok:true");
 
     snprintf(input, sizeof(input), "{\"bash_id\":\"%s\"}", id2);
     r[0] = '\0';
-    tools_execute("BashOutput", input, r, sizeof(r));
+    tools_execute_raw_for_test("BashOutput", input, r, sizeof(r));
     ASSERT(strstr(r, "unknown bash_id") != NULL || strstr(r, "status") != NULL,
            "killed shell should be unknown (removed) or report a status");
 
     /* 4. Unknown id error path. */
     r[0] = '\0';
-    ok = tools_execute("BashOutput", "{\"bash_id\":\"bash_does_not_exist\"}", r, sizeof(r));
+    ok = tools_execute_raw_for_test("BashOutput", "{\"bash_id\":\"bash_does_not_exist\"}", r,
+                                    sizeof(r));
     ASSERT(!ok || strstr(r, "unknown") != NULL, "unknown bash_id should fail or report unknown");
 
     PASS();
@@ -20568,11 +22331,81 @@ static void test_tool_bash_background_lifecycle(void) {
 int main(void) {
     fprintf(stderr, "\n\033[1m\033[36mdsco test suite — MAGNUM COQ EDITION\033[0m\n\n");
     setenv("DSCO_DISABLE_CLAUDE_CODE_OAUTH_DISCOVERY", "1", 1);
+    /* Developer-local routing must not make fallback tests order-dependent. */
+    unsetenv("DSCO_LOCAL_FALLBACK_MODEL");
+    /* Governance tests assert real gate behavior. An operator shell running
+     * with DSCO_GOV_BYPASS=1 / DSCO_GOV_MODEL=none would cache GOV_MODEL_NONE
+     * into gov_experiment_model() and make every governance-block assertion
+     * fail for reasons unrelated to the code under test. Pin the model. */
+    unsetenv("DSCO_GOV_BYPASS");
+    unsetenv("DSCO_GOV_MODEL");
+    gov_experiment_reset();
 
     /* Initialize VOS arena subsystem — required by pipeline and other modules */
     arena_subsystem_init();
 
+    const char *test_only = getenv("DSCO_TEST_ONLY");
+    if (test_only && strcmp(test_only, "native-ui") == 0) {
+        test_native_ui_scene_layout_diff_focus_and_backend();
+        test_pixel_fx_rounded_shadow_clip_blur();
+        test_ui_motion_timeline_retarget_reduced();
+        test_native_ui_scene_from_json_generative();
+        fprintf(stderr, "\n  native-ui: %d passed, %d failed\n", tests_passed,
+                tests_failed);
+        return tests_failed ? 1 : 0;
+    }
+    if (test_only && strcmp(test_only, "cost-envelope") == 0) {
+        test_oauth_loaded_tools_preserve_request_prefix();
+        test_runtime_context_trails_cacheable_prefix();
+        fprintf(stderr, "\n  cost-envelope: %d passed, %d failed\n", tests_passed,
+                tests_failed);
+        return tests_failed ? 1 : 0;
+    }
+    if (test_only && strcmp(test_only, "background-shell") == 0) {
+        test_tool_bash_background_lifecycle();
+        fprintf(stderr, "\n  background-shell: %d passed, %d failed\n", tests_passed,
+                tests_failed);
+        return tests_failed ? 1 : 0;
+    }
+    if (test_only && strcmp(test_only, "dsco-subgoal") == 0) {
+        test_dsco_binary_completes_credential_free_subgoal();
+        fprintf(stderr, "\n  dsco-subgoal: %d passed, %d failed\n", tests_passed,
+                tests_failed);
+        return tests_failed ? 1 : 0;
+    }
+    if (test_only && strcmp(test_only, "provider-stream") == 0) {
+        test_openai_request_defaults_auto_tool_choice();
+        test_openrouter_gpt56_tools_chat_completions_compat();
+        test_openai_sse_data_without_space_streams_reasoning_details();
+        test_openai_sse_legacy_reasoning_takes_precedence_over_details();
+        test_openai_sse_tool_call_after_reasoning_accumulates_exactly();
+        test_openai_sse_legacy_function_call_streams_args();
+        test_openai_sse_refusal_delta_streams_as_text();
+        test_openrouter_sse_opaque_reasoning_replays_only_for_same_model();
+        test_openai_sse_done_without_finish_reason_is_not_terminal_success();
+        test_openai_sse_tool_call_without_id_is_not_terminal_success();
+        test_openai_sse_content_block_overflow_is_not_terminal_success();
+        test_openrouter_sse_reasoning_details_deduplicate_exact_objects_only();
+        test_openai_sse_reasoning_replay_requires_openrouter_source();
+
+        fprintf(stderr, "\n\033[1m  %d tests: \033[32m%d passed\033[0m", tests_run,
+                tests_passed);
+        if (tests_failed > 0)
+            fprintf(stderr, ", \033[31m%d failed\033[0m", tests_failed);
+        fprintf(stderr, "\033[0m\n\n");
+        return tests_failed > 0 ? 1 : 0;
+    }
+
+    /* Exercise process lifecycle before stateful governance/signal tests alter
+     * process-wide handlers and registries. The contract itself is isolated
+     * and also has a dedicated DSCO_TEST_ONLY path above. */
+    test_tool_bash_background_lifecycle();
+
     /* JSON */
+    test_native_ui_scene_layout_diff_focus_and_backend();
+    test_pixel_fx_rounded_shadow_clip_blur();
+    test_ui_motion_timeline_retarget_reduced();
+    test_native_ui_scene_from_json_generative();
     test_json_get_str();
     test_json_get_int();
     test_json_get_int_missing();
@@ -20633,6 +22466,9 @@ int main(void) {
     test_spend_governor_context_pressure();
     test_spend_governor_cache_ttl_recommendation();
     test_spend_governor_effort_ranking();
+    test_baseline_authoritative_costs();
+    test_accounted_zero_cost_stays_zero();
+    test_codex_subscription_usage_parser();
     test_spend_governor_default_budgets();
     test_spend_governor_learned_adjustment();
     test_router_escalation_cap();
@@ -20653,6 +22489,7 @@ int main(void) {
     test_claude_code_oauth_mcp_wire_matrix();
     test_claude_code_oauth_builtin_bare_matrix();
     test_claude_code_billing_header_contract_matrix();
+    test_fable_interactive_request_compatibility();
     test_system_prompts_mention_bash_parallel_workers();
     test_openrouter_request_includes_external_tools_and_tool_choice();
     test_openrouter_request_named_tool_choice();
@@ -20661,6 +22498,18 @@ int main(void) {
     test_provider_request_model_prefix_routing();
     test_openai_request_defaults_auto_tool_choice();
     test_openai_request_normalizes_max_effort();
+    test_openrouter_gpt56_tools_chat_completions_compat();
+    test_openai_sse_data_without_space_streams_reasoning_details();
+    test_openai_sse_legacy_reasoning_takes_precedence_over_details();
+    test_openai_sse_tool_call_after_reasoning_accumulates_exactly();
+    test_openai_sse_legacy_function_call_streams_args();
+    test_openai_sse_refusal_delta_streams_as_text();
+    test_openrouter_sse_opaque_reasoning_replays_only_for_same_model();
+    test_openai_sse_done_without_finish_reason_is_not_terminal_success();
+    test_openai_sse_tool_call_without_id_is_not_terminal_success();
+    test_openai_sse_content_block_overflow_is_not_terminal_success();
+    test_openrouter_sse_reasoning_details_deduplicate_exact_objects_only();
+    test_openai_sse_reasoning_replay_requires_openrouter_source();
     test_openai_request_accepts_extra_params_env();
     test_openai_request_structured_output_schema();
     test_openrouter_request_tool_choice_none();
@@ -20700,6 +22549,7 @@ int main(void) {
     test_tool_execute_eval();
     test_tool_execute_unknown();
     test_tool_registry_expanded_builtin_count();
+    test_openai_image_generate_tool_registered_and_gated();
     test_expanded_text_tools_json_serializers();
     test_discover_tools_grouped_json_has_no_leading_commas();
     test_tool_execute_self_exiting_alias();
@@ -20732,6 +22582,7 @@ int main(void) {
     test_sandbox_run_trusted_defaults_fallback();
     test_sandbox_run_rejects_invalid_filesystem();
     test_untrusted_python_routes_to_sandbox();
+    test_python_tool_ignores_empty_file_when_code_present();
     test_untrusted_node_requires_code_or_file();
     test_public_tools_execute_uses_governance_approval_gate();
     test_governance_gate_removed_immune_self_surgery_veto();
@@ -20742,6 +22593,7 @@ int main(void) {
     test_plugin_lock_schema_version_validation();
 
     /* jbuf */
+    test_safe_reallocarray();
     test_jbuf_grow();
     test_jbuf_appendf_large();
     test_jbuf_json_str_special();
@@ -20911,6 +22763,7 @@ int main(void) {
 
     /* Prompt injection */
     test_detect_prompt_injection();
+    test_workspace_agents_md_hierarchical_prompt();
 
     /* Conversation extended */
     test_conv_add_tool_use_and_result();
@@ -20977,8 +22830,10 @@ int main(void) {
     test_tools_get_all();
     test_tools_offload_safe_allowlist();
     test_agent_and_swarm_tool_schemas_expose_spawn_fields();
+    test_kitty_tool_registry_contract();
     test_swarm_group_status_json_includes_executor_metadata();
     test_tool_allowlist_filters_visible_tools();
+    test_restricted_tool_profile();
     test_worker_core_tools_survive_restrictive_agent_profile();
     test_worker_tool_profile_allows_full_builtin_catalog();
     test_tools_get_paged_budget_floor();
@@ -21062,6 +22917,7 @@ int main(void) {
     test_switch_reason_names();
     test_provider_msg_is_context_overflow();
     test_provider_msg_is_credit_too_low_classifies_exhaustion();
+    test_provider_chatgpt_429_classification();
     test_provider_credit_reset_at_parser();
     test_provider_detect_matrix();
     test_provider_detect_namespaced_models();
@@ -21087,6 +22943,7 @@ int main(void) {
     test_provider_build_default_fallback_models_native_primary_duplicate();
     test_provider_build_default_fallback_models_for_fugu_cross_provider();
     test_provider_build_default_fallback_models_empty_for_local_endpoint();
+    test_provider_build_default_fallback_models_appends_configured_local();
     test_provider_route_explicit_openrouter_overrides_native_namespace();
     test_provider_route_native_namespace_does_not_silently_fallback_to_openrouter();
     test_provider_model_is_routable_respects_native_namespace_without_key();
@@ -21113,7 +22970,10 @@ int main(void) {
     test_provider_openai_codex_marker_does_not_fake_oauth_env();
     test_swarm_prepare_executor_env_prefers_claude_oauth();
     test_swarm_prepare_executor_env_keeps_api_key_without_oauth();
+    test_swarm_child_slots_recycle_past_lifetime_cap();
+    test_swarm_reclaim_refuses_active_group();
     test_swarm_poll_reaps_killed_child_without_readable_fds();
+    test_dsco_binary_completes_credential_free_subgoal();
     test_swarm_spawn_uses_worker_profile();
     test_swarm_spawn_pins_openai_codex_provider();
     test_swarm_spawn_exports_chatgpt_oauth_env_to_codex_child();
@@ -21128,6 +22988,7 @@ int main(void) {
     test_swarm_provider_fabric_uses_configured_local_lane();
     test_cross_provider_durable_agent_matrix_generated();
     test_prompt_cache_provider_policy_matrix();
+    test_prompt_cache_gpt56_explicit_request_shape();
     test_prompt_cache_openai_request_shape();
     test_prompt_cache_xai_header_shape();
     test_provider_metadata_catalog_validates();
@@ -21407,6 +23268,9 @@ int main(void) {
     test_goal_status_parse_roundtrip();
     test_goal_session_save_load();
     test_goal_prompt_injection_active_only();
+    test_runtime_context_trails_cacheable_prefix();
+    test_oauth_loaded_tools_preserve_request_prefix();
+    test_invoke_tool_dispatches_through_public_gate();
     test_slash_branch_path();
     test_slash_branch_saves_file();
     test_slash_diff_popen_works();
@@ -21526,7 +23390,6 @@ int main(void) {
     test_capability_to_string();
     test_capability_resource_scope();
     test_tool_multi_edit_atomic();
-    test_tool_bash_background_lifecycle();
 
     fprintf(stderr, "\n\033[1m  %d tests: \033[32m%d passed\033[0m", tests_run, tests_passed);
     if (tests_failed > 0)

@@ -67,9 +67,26 @@ static char *shell_capture(const char *cmd) {
     char buf[4096];
     while (fgets(buf, sizeof(buf), fp)) {
         size_t n = strlen(buf);
+        if (n > SIZE_MAX - len - 1) {
+            free(out);
+            pclose(fp);
+            return strdup("");
+        }
         if (len + n + 1 > cap) {
-            cap = (len + n + 1) * 2 + 1024;
-            out = realloc(out, cap);
+            size_t new_cap = (len + n + 1) * 2 + 1024;
+            if (new_cap < len + n + 1) {
+                free(out);
+                pclose(fp);
+                return strdup("");
+            }
+            char *grown = realloc(out, new_cap);
+            if (!grown) {
+                free(out);
+                pclose(fp);
+                return strdup("");
+            }
+            out = grown;
+            cap = new_cap;
         }
         memcpy(out + len, buf, n);
         len += n;

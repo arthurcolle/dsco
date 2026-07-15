@@ -100,6 +100,12 @@ typedef struct {
 
     /* Group membership */
     int            group_id;       /* -1 if ungrouped */
+
+    /* Slot lifecycle: true once this slot's result has been durably
+     * collected (via a completed collect()/status() call or the
+     * RESULT.json envelope write) AND its process is fully reaped/terminal.
+     * Only reclaimable slots may be handed back out by swarm_spawn*(). */
+    bool           reclaimable;
 } swarm_child_t;
 
 typedef struct {
@@ -137,6 +143,20 @@ typedef struct {
     int            child_count;
     swarm_group_t  groups[SWARM_MAX_GROUPS];
     int            group_count;
+
+    /* ── Slot recycling ────────────────────────────────────────────────
+     * child_count/group_count were historically monotonic allocators: once
+     * a session spawned SWARM_MAX_CHILDREN (64) children over its lifetime,
+     * every subsequent spawn silently failed forever, even though zero
+     * children were actually running (all terminal + already collected).
+     * These free-lists let terminal, already-collected slots be reclaimed
+     * so a long-lived session can spawn far more than 64 children total
+     * without ever exceeding 64 *concurrent* children (the real, meaningful
+     * limit tied to the 64-bit active bitset and OS process-count sanity). */
+    int            free_child_ids[SWARM_MAX_CHILDREN];
+    int            free_child_count;
+    int            free_group_ids[SWARM_MAX_GROUPS];
+    int            free_group_count;
 
     /* Global stream callback */
     swarm_stream_cb stream_cb;
@@ -187,6 +207,11 @@ void swarm_set_next_instance(const char *effort, double temperature,
  * that provider's API directly, completely decoupled from the parent's provider. */
 int  swarm_spawn_provider(swarm_t *s, int group_id, const char *task,
                            const char *model, const char *provider);
+/* OpenRouter specialization: pins a concrete upstream provider/quantization
+ * for one model lane. Empty upstream preserves normal OpenRouter routing. */
+int swarm_spawn_openrouter_lane(swarm_t *s, int group_id, const char *task,
+                                const char *model, const char *upstream,
+                                const char *quantization);
 
 /* ── External executor spawn ─────────────────────────────────────────── */
 int  swarm_spawn_executor(swarm_t *s, int group_id, const char *task,
@@ -210,6 +235,27 @@ int  swarm_group_create(swarm_t *s, const char *name);
 int  swarm_group_dispatch(swarm_t *s, int group_id, const char **tasks, int task_count,
                           const char *model);
 bool swarm_group_complete(swarm_t *s, int group_id);
+
+/* ── Slot recycling ───────────────────────────────────────────────────────
+ * Mark a group's children as reclaimable (their durable RESULT.json envelope
+ * is already on disk, or the caller has captured everything it needs) and
+ * return the group + child slots to the free-lists for reuse by future
+ * spawns. This is what lets a long-lived session (many collect() calls
+ * across many groups) spawn far more than SWARM_MAX_CHILDREN children over
+ * its lifetime — only *concurrently active* children are structurally
+ * capped. Safe to call multiple times; a no-op on an already-reclaimed
+ * group. Refuses to reclaim a group with any RUNNING/STREAMING child. */
+bool swarm_group_reclaim(swarm_t *s, int group_id);
+/* Total children ever spawned (child_count) vs. currently reclaimable slots
+ * available for reuse — exposed for diagnostics/observability. */
+int  swarm_reclaimable_count(swarm_t *s);
+/* Sweep every active group whose children are ALL terminal (done/error/
+ * killed — swarm_group_complete()==true) and reclaim it. Called
+ * automatically by swarm_spawn*() when a spawn would otherwise fail due to
+ * exhausted child capacity, so a long-lived session self-heals instead of
+ * being permanently wedged by groups the caller forgot to retire after
+ * collecting. Returns the number of groups reclaimed. */
+int  swarm_reclaim_all_complete(swarm_t *s);
 
 /* ── Streaming & polling ──────────────────────────────────────────────── */
 /* Poll all children for output. timeout_ms=-1 blocks, 0=nonblock */

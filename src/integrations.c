@@ -39,11 +39,15 @@ typedef struct {
 static size_t http_write_cb(void *ptr, size_t size, size_t nmemb, void *userdata) {
     size_t total = size * nmemb;
     http_buf_t *b = (http_buf_t *)userdata;
-    if (b->len + total >= b->cap) {
-        b->cap = (b->len + total) * 2 + 1;
-        b->data = realloc(b->data, b->cap);
-        if (!b->data)
+    if (total > SIZE_MAX - b->len - 1)
+        return 0;
+    if (b->len + total + 1 > b->cap) {
+        size_t cap = (b->len + total) * 2 + 1;
+        char *data = realloc(b->data, cap);
+        if (!data)
             return 0;
+        b->data = data;
+        b->cap = cap;
     }
     memcpy(b->data + b->len, ptr, total);
     b->len += total;

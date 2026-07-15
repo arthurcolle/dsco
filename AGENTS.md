@@ -3,7 +3,8 @@
 Repo-scoped briefing for coding agents (agents.md v1.1 hierarchical scope).
 
 ## What this is
-dsco: a local-first agentic CLI in pure C (~342K LOC, 133 files in `src/`).
+dsco: a local-first agentic CLI in pure C (current checkout, top-level runtime:
+~199K LOC across 136 `.c` files and 138 headers; 140 files in `src/`).
 Overmind Soul architecture: Wings (autonomy) + Talons (competition) + Immune System (safety).
 
 ## Map (load details on demand — do not bulk-read)

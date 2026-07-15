@@ -189,7 +189,7 @@ static char *run_worker_task(const char *task, const char *model) {
             break;
 
         /* Stream silently — worker output is returned as tool result */
-        stream_result_t sr = llm_stream(key, req, NULL, NULL, NULL, NULL);
+        stream_result_t sr = llm_stream(key, req, NULL, NULL, NULL, NULL, NULL);
         free(req);
 
         if (!sr.ok) {
@@ -340,7 +340,7 @@ static char *run_virtual_tool(const char *task, const char *tool_name) {
         if (!req)
             break;
 
-        stream_result_t sr = llm_stream(key, req, NULL, NULL, NULL, NULL);
+        stream_result_t sr = llm_stream(key, req, NULL, NULL, NULL, NULL, NULL);
         free(req);
 
         if (!sr.ok) {

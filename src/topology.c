@@ -2,7 +2,9 @@
 #include "config.h"
 #include "env_config.h"
 #include "json_util.h"
+#include "openrouter_lanes.h"
 #include "provider.h"
+#include "provider_pool.h"
 #include "provider_profiles.h"
 #include "scheduler.h"
 #include "swarm.h"
@@ -79,6 +81,8 @@ static double tier_unit_cost(model_tier_t tier) {
             return 0.0180;
         case TIER_OPUS:
             return 0.0900;
+        case TIER_FABLE:
+            return 0.1800;
     }
     return 0.0180;
 }
@@ -1422,6 +1426,10 @@ static const char *or_tier_model(model_tier_t tier) {
             const char *e = getenv("DSCO_SWARM_OPUS");
             return (e && e[0]) ? e : "openrouter/z-ai/glm-5.2";
         }
+        case TIER_FABLE: {
+            const char *e = getenv("DSCO_SWARM_FABLE");
+            return (e && e[0]) ? e : "openrouter/z-ai/glm-5.2";
+        }
     }
     return "openrouter/z-ai/glm-5.2";
 }
@@ -1459,6 +1467,10 @@ static const char *hetero_tier_model(model_tier_t tier) {
             const char *e = getenv("DSCO_SWARM_OPUS");
             return (e && e[0]) ? e : "openrouter/z-ai/glm-5.2";
         }
+        case TIER_FABLE: {
+            const char *e = getenv("DSCO_SWARM_FABLE");
+            return (e && e[0]) ? e : "openrouter/z-ai/glm-5.2";
+        }
     }
     return "openrouter/z-ai/glm-5.2";
 }
@@ -1490,7 +1502,15 @@ const char *topology_resolve_model_for_tier(const char *coordinator_model, const
                                             model_tier_t tier, char *buf, size_t buflen) {
     /* Heterogeneous pool short-circuits provider detection entirely. */
     if (topology_hetero_enabled()) {
-        return topology_resolve_openrouter_model(hetero_tier_model(tier), buf, buflen);
+        const char *candidate = topology_resolve_openrouter_model(hetero_tier_model(tier), buf, buflen);
+        /* Heterogeneous defaults are preference, not entitlement. When the
+         * shared OpenRouter lane is exhausted/tripped, continue through the
+         * coordinator/provider-specific resolver below. */
+        if (provider_has_usable_key("openrouter", api_key)) {
+            provider_pool_init(api_key);
+            if (provider_pool_healthy("openrouter"))
+                return candidate;
+        }
     }
 
     const char *model = coordinator_model && coordinator_model[0]
@@ -1575,6 +1595,11 @@ static bool topology_add_throughput_lane(topo_throughput_lane_t lanes[], int *co
         return false;
     if (!provider_has_usable_key(canonical, api_key))
         return false;
+    /* A configured credential is not proof that the lane can execute. Honor
+     * the durable breaker/allocation state before assigning a topology node. */
+    provider_pool_init(api_key);
+    if (!provider_pool_healthy(canonical))
+        return false;
 
     for (int i = 0; i < *count; i++) {
         if (strcmp(lanes[i].provider, canonical) == 0 && strcmp(lanes[i].model, model) == 0)
@@ -1596,9 +1621,10 @@ static const char *topology_native_lane_model(const provider_profile_t *profile,
     if (strcmp(p, "sakana") == 0)
         return tier == TIER_OPUS ? "fugu-ultra" : "fugu";
     if (strcmp(p, "anthropic") == 0)
-        return tier == TIER_HAIKU  ? "claude-haiku-4-5-20251001"
-               : tier == TIER_OPUS ? "claude-opus-4-8"
-                                   : "claude-sonnet-4-6";
+        return tier == TIER_HAIKU   ? "claude-haiku-4-5"
+               : tier == TIER_OPUS  ? "claude-opus-4-8"
+               : tier == TIER_FABLE ? "claude-fable-5"
+                                    : "claude-sonnet-5";
     if (strcmp(p, "openai-codex") == 0)
         return "gpt-5.5";
     if (strcmp(p, "openai") == 0)
@@ -1684,9 +1710,27 @@ static int topology_collect_throughput_lanes(const char *api_key, model_tier_t t
     }
 
     if (provider_has_usable_key("openrouter", api_key)) {
-        for (int i = 0; i < 3 && count < max; i++) {
-            topology_add_throughput_lane(lanes, &count, max, "openrouter",
-                                         topology_openrouter_lane_model(tier, i), api_key);
+        openrouter_lane_t dynamic[32];
+        openrouter_lane_query_t query = {
+            .min_context = 32768,
+            .min_quality = tier == TIER_HAIKU ? 10.0 : tier == TIER_SONNET ? 25.0 : 40.0,
+            .max_models = 16,
+            .require_tools = true,
+            .diversify_org = true,
+            .task = tier == TIER_HAIKU ? "fast tool worker" :
+                    tier == TIER_SONNET ? "agentic coding implementation" :
+                                          "complex reasoning synthesis",
+        };
+        int dynamic_count = openrouter_lanes_build(&query, dynamic,
+                                                   (int)(sizeof(dynamic) / sizeof(dynamic[0])));
+        for (int i = 0; i < dynamic_count && count < max; i++)
+            topology_add_throughput_lane(lanes, &count, max, "openrouter", dynamic[i].model,
+                                         api_key);
+        /* Catalog load failure degrades to the small static bootstrap set. */
+        if (dynamic_count == 0) {
+            for (int i = 0; i < 3 && count < max; i++)
+                topology_add_throughput_lane(lanes, &count, max, "openrouter",
+                                             topology_openrouter_lane_model(tier, i), api_key);
         }
     }
 
@@ -2437,6 +2481,27 @@ static bool run_stage(const topology_t *t, const int ready_nodes[], int ready_co
 
     while (swarm_active_count(&sw) > 0) {
         swarm_poll(&sw, 100);
+    }
+
+    /* A topology stage cannot be called successful when a child failed and
+     * contributed an empty string. Feed the durable health pool so subsequent
+     * lanes/topologies avoid the failed provider instead of rediscovering it. */
+    bool stage_failed = false;
+    for (int c = 0; c < child_count; c++) {
+        swarm_child_t *child = swarm_get(&sw, child_map[c].child_id);
+        if (!child)
+            continue;
+        const char *provider = child->provider[0] ? child->provider
+                                                   : provider_route_for_model(child->model, api_key, NULL);
+        bool child_ok = child->status == SWARM_DONE && child->output && child->output[0];
+        if (provider && provider[0])
+            provider_pool_report(provider, child_ok, swarm_child_elapsed_sec(child) * 1000.0);
+        if (!child_ok)
+            stage_failed = true;
+    }
+    if (stage_failed) {
+        swarm_destroy(&sw);
+        return false;
     }
 
     for (int i = 0; i < ready_count; i++) {
