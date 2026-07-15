@@ -5,6 +5,7 @@
 #include <ctype.h>
 #include <stdarg.h>
 #include <limits.h>
+#include <stdint.h>
 
 /* ── Safe allocation wrappers ──────────────────────────────────────────── */
 
@@ -28,6 +29,14 @@ void *safe_realloc(void *ptr, size_t size) {
         abort();
     }
     return p;
+}
+
+void *safe_reallocarray(void *ptr, size_t count, size_t elem_size) {
+    if (elem_size != 0 && count > SIZE_MAX / elem_size) {
+        fprintf(stderr, "dsco: fatal: reallocarray overflow (%zu x %zu)\n", count, elem_size);
+        abort();
+    }
+    return safe_realloc(ptr, count * elem_size);
 }
 
 char *safe_strdup(const char *s) {

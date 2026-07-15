@@ -13,6 +13,8 @@ static vfs_db_t *g_baseline_vfs = NULL;
 #include <errno.h>
 #include <netinet/in.h>
 #include <stdbool.h>
+#include <math.h>
+
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -359,11 +361,21 @@ static double estimate_cost(const char *model, int in_tok, int out_tok, int cach
 bool baseline_log_usage(const char *category, const char *title, const char *detail,
                         const char *metadata_json, int input_tokens, int output_tokens,
                         int cache_read_tokens, int cache_write_tokens) {
+    return baseline_log_usage_with_cost(category, title, detail, metadata_json, input_tokens,
+                                        output_tokens, cache_read_tokens, cache_write_tokens, NAN);
+}
+
+bool baseline_log_usage_with_cost(const char *category, const char *title, const char *detail,
+                                  const char *metadata_json, int input_tokens, int output_tokens,
+                                  int cache_read_tokens, int cache_write_tokens,
+                                  double reported_cost_usd) {
     if (!g_baseline.ready || !g_baseline.db)
         return false;
 
-    double cost =
-        estimate_cost(NULL, input_tokens, output_tokens, cache_read_tokens, cache_write_tokens);
+    double cost = (isfinite(reported_cost_usd) && reported_cost_usd >= 0.0)
+                      ? reported_cost_usd
+                      : estimate_cost(NULL, input_tokens, output_tokens, cache_read_tokens,
+                                      cache_write_tokens);
 
     sqlite3_stmt *st = NULL;
     const char *ins =
