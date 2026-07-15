@@ -3,11 +3,11 @@
 This catalog is generated from the static `src/tools.c` built-in tool registry.
 
 - Source: `src/tools.c`
-- Total built-in tools: 271
-- Core tools: 40
-- Read-only tools: 161
-- Concurrent tools: 164
-- Interactive tools: 1
+- Total built-in tools: 283
+- Core tools: 48
+- Read-only tools: 165
+- Concurrent tools: 168
+- Interactive tools: 2
 
 Regeneration:
 
@@ -46,6 +46,7 @@ Flags:
 | <code>base64_tool</code> |  | yes | yes |  | Base64 encode/decode. |
 | <code>Bash</code> | yes |  |  |  | Claude-compatible shell runner. Use Write/write_file for durable artifacts; declare verify_path/verify_paths when shell creates files. |
 | <code>bash</code> | yes |  |  |  | Run a shell command. Use write_file/append_file for durable artifacts; declare verify_path/verify_paths when shell creates files. |
+| <code>BashOutput</code> | yes | yes | yes |  | Retrieve buffered output from a background Bash shell started with run_in_background. Returns {bash_id,status:running\|completed,output} with only the new bytes since the last call. |
 | <code>bg_learn</code> |  |  |  |  | Control the realtime background learner that consolidates self-improvement patterns and mines tool co-occurrence into auto-generated skills. action=status (default) \| on \| off \| run (force one cycle now). |
 | <code>big_factorial</code> |  | yes | yes |  | Compute n! for n from 0 through 500 using the bigint engine. |
 | <code>browser</code> |  | yes | yes |  | Browser operations: snapshot, extract, viewport, outline. |
@@ -68,6 +69,7 @@ Flags:
 | <code>contract_new_issues</code> |  | yes | yes |  | Detect NEW contracts not yet in contracts.db. Fetches current open events, diffs against stored contracts, returns only new issues. Run periodically (e.g. every hour) to catch new market listings. |
 | <code>contract_search</code> |  | yes | yes |  | Semantic search over persisted contracts. Natural language queries: 'Bitcoin above 90000', 'Fed rate cut March', 'Chicago temperature'. Uses FTS5 full-text search. |
 | <code>control_flow</code> |  |  |  |  | Conditional branching (Priority 6): if/while/for/switch/try on steps. action=parse\|evaluate\|execute\|set\|get. |
+| <code>conversation_context</code> | yes |  |  |  | Inspect or make bounded live-transcript edits during an agent turn. action=inspect\|append\|replace_last\|remove_last. append/replace require content; role=user\|assistant. Tool-use protocol messages cannot be altered. |
 | <code>copy_file</code> |  |  |  |  | Copy a file or directory. |
 | <code>cron_parse</code> |  | yes | yes |  | Parse a cron expression. |
 | <code>csv_parse</code> |  | yes | yes |  | Parse CSV text or a CSV file, optionally extracting one column. |
@@ -92,8 +94,8 @@ Flags:
 | <code>EnterPlanMode</code> |  |  |  |  | Enter Claude-compatible advisory plan mode. |
 | <code>env_get</code> |  | yes | yes |  | Get environment variable. |
 | <code>env_scan</code> |  | yes | yes |  | Search environment variables with sensitive values redacted by default. Set reveal=true only when intentionally inspecting secrets. |
-| <code>evict_tools</code> | yes |  |  |  | Unload dynamically loaded tools from the active register file. Provide names, tools, category, or all:true. |
 | <code>eval</code> |  | yes | yes |  | Evaluate a math expression. |
+| <code>evict_tools</code> | yes |  |  |  | Unload dynamically loaded tools from the active register file. Provide names, tools, category, or all:true. |
 | <code>ExitPlanMode</code> |  |  |  |  | Exit Claude-compatible advisory plan mode. |
 | <code>file_hash</code> |  | yes | yes |  | Compute SHA-256 hash of a file on disk. Returns hash, path, and file size. |
 | <code>file_info</code> |  | yes | yes |  | Get file metadata (size, permissions, timestamps). |
@@ -107,7 +109,7 @@ Flags:
 | <code>git_log_symbol</code> |  | yes | yes |  | Pickaxe history: every commit that changed the count of a symbol/identifier (git log -S). The history of a function. |
 | <code>github_search</code> |  | yes | yes |  | Search GitHub repos, code, issues. |
 | <code>Glob</code> | yes | yes | yes |  | Claude-compatible file glob search. |
-| <code>governance</code> |  |  |  |  | Governance controls: status, curriculum, authorize, checkpoint, budget, audit, param. Curriculum exposes the safety-aware RSI skill gates and top-priority control skills. |
+| <code>governance</code> |  |  |  |  | Governance controls: status, curriculum, authorize, checkpoint, budget, capability, experiment, audit, param. capability records empirical outcome evidence and returns the evidence-earned tier; experiment reports per-stage governance overhead + would-block stats for the active governance model (reset:true clears counters). |
 | <code>graphsub</code> |  |  | yes |  | GraphSub substrate client: agent registration, pheromone coordination, graph traversal, memory sync, swarm topology, fleet management. Actions: status, register, pheromone (deposit\|query\|sweep), query (traverse), memory_sync, swarm, fleet. |
 | <code>Grep</code> | yes | yes | yes |  | Claude-compatible content search with glob/output_mode/head_limit support. |
 | <code>grep_files</code> | yes | yes | yes |  | Search file contents with regex. |
@@ -119,6 +121,7 @@ Flags:
 | <code>http_request</code> | yes | yes | yes |  | Make HTTP requests (GET/POST/PUT/DELETE). |
 | <code>include_graph</code> |  | yes | yes |  | Header include tree for a translation unit (cc -H) — what a file pulls in and why edits trigger big rebuilds. |
 | <code>inspect_file</code> |  | yes | yes |  | AST summary for one C/C header source file. |
+| <code>invoke_tool</code> | yes |  |  |  | Invoke a discovered or loaded capability without changing the provider tool schema. Use the exact target name and input schema returned by discover_tools/load_tools. The target still passes through normal trust, approval, budget, and audit gates. |
 | <code>ipc</code> |  |  |  |  | Inter-process communication: send, recv, agents, scratch_put, scratch_get, task_submit, task_list, set_role. |
 | <code>jina_ai_batch_cancel</code> |  |  | yes |  | Cancel a native Jina Batch Embeddings job by batch_id. |
 | <code>jina_ai_batch_embed_submit</code> |  |  | yes |  | Submit a native Jina Batch Embeddings job for inline arrays or a GCS JSONL input_file. String arrays are auto-wrapped into Jina custom_id/body batch request objects. |
@@ -148,7 +151,10 @@ Flags:
 | <code>json_format</code> |  | yes | yes |  | Pretty-print or minify JSON. Pass raw JSON string, get formatted output. |
 | <code>jwt_decode</code> |  | yes | yes |  | Decode a JWT header and payload without verifying the signature. |
 | <code>kalshi</code> |  |  |  |  | Kalshi prediction market. Actions: markets, events, search, orderbook, trades, series, candlesticks, weather, snapshot, event_detail, daily (read); positions, balance, portfolio, fills, open_orders (account); create_order, batch_create, cancel_order, cancel_all, amend_order (trade); historical_markets, historical_trades, historical_cutoff (history). |
+| <code>KillShell</code> |  |  |  |  | Terminate a background shell (Bash run_in_background) by shell_id (SIGTERM). |
 | <code>killswitch</code> |  |  |  |  | Kill switch control: trigger, resolve, status. |
+| <code>kitten</code> | yes |  |  | yes | Run any installed first-party kitten as a governed native interactive capability, including icat, clipboard, SSH/transfer, notifications, hints, diff, themes, font/file choosers, command palette, Unicode input, panels, and terminal queries. Arguments are passed directly as argv with no shell. |
+| <code>kitty_remote</code> | yes |  |  |  | Native governed control of every Kitty remote-control capability: windows, tabs, layouts, launch/run, screen text, input, scrolling, colors, fonts, spacing, opacity, background images, logos, markers, environment, child signals, and kittens. Arguments are passed directly as argv with no shell. |
 | <code>knowledge_base</code> |  |  |  |  | KB operations: ingest, search, deep_search, list, get, delete, arxiv_search, arxiv_ingest. |
 | <code>learned_cost</code> |  |  |  |  | Learned k-NN cost model (Priority 3): predict/record/stats. action=predict needs {task,topology}; action=record needs {task,topology,tokens,cost}; action=stats returns DB summary. |
 | <code>legion</code> |  |  |  |  | Legion agent system: spawn, status, find. |
@@ -156,6 +162,7 @@ Flags:
 | <code>list_directory</code> | yes | yes | yes |  | List directory contents with file info. |
 | <code>load_tools</code> | yes |  |  |  | Dynamically load tools into the active register file. Provide at least one of: names (comma-separated), tools (array), or category. |
 | <code>LoopConstructStatus</code> | yes | yes |  |  | Inspect the live recursive MetaConstruct stack, parsed continue/break expressions, counters, override flags, ontology metadata, mutable graph nodes/edges, traversal state, dyads, MapReduce jobs, SRM/metrology and catalog/order state, effects, reward dynamics, learning signals, policies, decisions, attractors, prompt games, refinement rules, and schema rewrite rules. |
+| <code>LS</code> | yes | yes | yes |  | Claude-compatible directory listing (alias for list_directory). |
 | <code>lsof</code> |  | yes | yes |  | List open files/sockets by pid, port, path, or a short global sample. |
 | <code>make_build</code> |  |  |  |  | Build a make target and return STRUCTURED {ok,exit,errors[],warnings[],ms} — the build-side twin of test_run. Defaults to the default target. |
 | <code>md5</code> |  | yes | yes |  | Compute MD5 hash of text. |
@@ -164,13 +171,16 @@ Flags:
 | <code>meta_optimize</code> |  |  |  |  | Meta-optimization of the agent's own execution. action=analyze recommends tuning from observed signals (failure/redundancy/cost) + self-improve suggestions; action=apply auto-tunes strategy weights and publishes the config to the IPC scratchpad (meta.recommended_config) for worker processes; action=tune sets a specific weight (param: parallel\|cache\|cost_sensitivity\|timeout_aggression\|compaction_thresh\|batch, value 0..1). |
 | <code>mkdir</code> |  |  |  |  | Create directory (with parents). |
 | <code>move_file</code> |  |  |  |  | Move or rename a file/directory. |
-| <code>net</code> |  |  |  |  | Native networking: mesh P2P (libsodium encrypted), HTTP/TLS server/client (mbedTLS), bridge fleet ops, remote tool invocation. Actions: mesh/status, mesh/peers, mesh/send, mesh/broadcast, mesh/connect, http/post, http/status, bridge/fleet, bridge/exec, bridge/send, bridge/bus_put, bridge/bus_get, remote. |
+| <code>MultiEdit</code> | yes |  |  |  | Apply an ordered batch of string edits to ONE file atomically. edits=[{old_string,new_string,replace_all?}] applied in order (each sees the prior result); if any old_string is missing NOTHING is written. |
+| <code>net</code> |  |  |  |  | Native networking: mesh P2P (libsodium encrypted), HTTP/TLS server/client (mbedTLS), bridge fleet ops, remote tool invocation. Actions: mesh/status, mesh/peers, mesh/send, mesh/broadcast, mesh/connect, http/post, http/status, bridge/fleet, bridge/exec, bridge/fanout (concurrent command across all fleet hosts with durable per-host RESULT.json envelopes; role=<filter>, concurrency=N), bridge/send, bridge/bus_put, bridge/bus_get, remote. |
 | <code>net_probe</code> |  |  | yes |  | Active network probe: ping a host or TCP-connect to host:port with a short timeout. |
 | <code>network</code> |  | yes | yes |  | Network diagnostics: dns, ping, port_check, port_scan, netstat, cert, traceroute, whois, interfaces, websocket. |
 | <code>notify</code> |  |  |  |  | Send a desktop notification (osascript on macOS, printf fallback elsewhere). |
 | <code>nws</code> |  | yes | yes |  | NWS API: forecast (lat/lon), hourly, station_obs (METAR station), alerts (by state), stations (near lat/lon), discussion (NWS office AFD). Free, no auth. |
 | <code>ol_call</code> | yes | yes | yes |  | Call an already-running local OpenAI-compatible model server (LM Studio/Ollama/MLX) without spawning CLI chat commands. Prefer this over bash lms chat; for LM Studio, start the server with `lms server start`. |
 | <code>ooda</code> |  |  |  |  | OODA loop discipline (Talons): begin, observe, orient, decide, complete, status. |
+| <code>openai_image_generate</code> |  |  |  |  | Generate one image with the OpenAI Image API and save it to a local file. |
+| <code>openrouter_lanes</code> |  | yes | yes |  | Materialize OpenRouter model swimlanes from the live catalog, optionally fully unrolling each model into concrete OpenRouter upstream providers. |
 | <code>openrouter_models</code> |  | yes | yes |  | Fetch and filter OpenRouter model metadata by search, context, price, and free/chat-only constraints. |
 | <code>page_file</code> |  | yes | yes |  | Page through a large file. |
 | <code>parallel_ai_chat</code> |  | yes | yes |  | Native Parallel.ai Chat Completions API call for low-latency web research chat. Accepts OpenAI-style messages or a prompt. |
@@ -279,6 +289,7 @@ Flags:
 | <code>token_audit</code> |  | yes | yes |  | Audit token usage across conversation. |
 | <code>trading</code> |  |  |  |  | Trading ops: arb_execute, arb_monitor, portfolio, risk_check, risk_configure. |
 | <code>type_at</code> |  | yes | yes |  | Clang AST nodes at file:line — the resolved types of what appears on that line. Precise type info the semantic search can't give. |
+| <code>ui_render</code> | yes |  |  |  | Render a declarative native UI scene as a pixel-native overlay in the Kitty workspace (generative UI). The spec is a nested object of elements (surface, stack, row, grid, text, badge, meter, sparkline, icon, rule) with semantic roles, style tokens (fg/bg/border: text\|muted\|accent\|success\|warning\|danger\|surface\|surface-raised; pad/gap/radius/columns; type: body\|label\|title\|code\|metric), size constraints (w/h/min_w/max_w/grow/shrink), and children. Meters use value 0..1; sparklines take numbers in text. Pass ppm_path to also write a deterministic image artifact when no Kitty surface is attached. |
 | <code>unused_symbols</code> |  | yes | yes |  | Find static functions that are referenced only at their own definition — dead code safe to remove. AST-based, file-scope-correct. |
 | <code>url_parse</code> |  | yes | yes |  | Parse a URL into components. |
 | <code>uuid</code> |  | yes | yes |  | Generate a UUID v4. |
@@ -287,6 +298,7 @@ Flags:
 | <code>vos_status</code> |  | yes | yes |  | Virtual OS subsystem status. |
 | <code>watch_run</code> |  |  |  |  | Run a command and return {exit, wall_ms, peak_rss_bytes} — structured resource accounting via /usr/bin/time -l. |
 | <code>weather</code> |  | yes | yes |  | Get weather data for a location. |
+| <code>weather_batch</code> |  | yes | yes |  | Native bounded-concurrency weather retrieval for up to 1,000 locations. Uses curl multi directly; it does not spawn model/agent workers. |
 | <code>WebFetch</code> | yes | yes | yes |  | Claude-compatible URL fetch/extract. |
 | <code>WebSearch</code> | yes | yes | yes |  | Claude-compatible web search alias. |
 | <code>wings_talons_status</code> |  | yes | yes |  | Unified Wings+Talons+Immune system status. |

@@ -11,4 +11,10 @@ bool output_guard_init(void);
  * Clears the tripped state and repeat counters so output flows again. */
 void output_guard_reset(void);
 
+/* Drain and uninstall the guard: restores the real stdout/stderr fds, joins
+ * the drainer threads so every byte written before shutdown reaches the
+ * terminal, and closes guard fds. Registered via atexit() by
+ * output_guard_init(); safe to call multiple times. */
+void output_guard_shutdown(void);
+
 #endif

@@ -53,7 +53,15 @@ json_validation_t json_validate_schema(const char *json, const char *schema_json
 /* Safe allocation helpers — abort on OOM rather than corrupt state */
 void *safe_malloc(size_t size);
 void *safe_realloc(void *ptr, size_t size);
+/* Overflow-checked equivalent of realloc(ptr, count * elem_size). */
+void *safe_reallocarray(void *ptr, size_t count, size_t elem_size);
 char *safe_strdup(const char *s);
+
+/* Use only with an assignable pointer lvalue; preserves its element type. */
+#define DSCO_REALLOC_ARRAY(ptr, count) \
+    ((ptr) = safe_reallocarray((ptr), (count), sizeof *(ptr)))
+
+#define DSCO_ARRAY_LEN(array) (sizeof(array) / sizeof 0[array])
 
 void jbuf_init(jbuf_t *b, size_t initial_cap);
 void jbuf_free(jbuf_t *b);

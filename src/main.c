@@ -6,7 +6,9 @@
 #include "agent.h"
 #include "orchestrator.h"
 #include "config.h"
+#include "harden.h"
 #include "tui.h"
+#include "pixel_tui.h"
 #include "llm.h"
 #include "tools.h"
 #include "pets.h"
@@ -27,6 +29,8 @@
 #include "codex_cache.h"
 #include "topology.h"
 #include "workspace.h"
+#include "durable_agents.h"
+#include "autoresearch.h"
 #include "trace.h"
 #include "output_guard.h"
 #include "router.h"
@@ -78,6 +82,8 @@ extern void dsco_net_routes_register(void *srv_opaque);
 #include "connector.h"
 #include "dcr.h"
 #include "startup.h"
+
+int dsco_bus_cli(int argc, char **argv);
 #include "local_llm.h"
 #include "structured_process.h"
 #include "command_plane.h"
@@ -120,6 +126,22 @@ static bool is_legacy_sonnet_default_model(const char *model) {
     if (!model || !model[0]) return false;
     const char *resolved = model_resolve_alias(model);
     return resolved && strstr(resolved, "claude-sonnet") != NULL;
+}
+
+static bool model_value_is_blank_default(const char *model) {
+    if (!model)
+        return true;
+    while (*model && isspace((unsigned char)*model))
+        model++;
+    if (!*model)
+        return true;
+    if ((model[0] == '"' || model[0] == '\'') && model[1] == model[0]) {
+        const char *tail = model + 2;
+        while (*tail && isspace((unsigned char)*tail))
+            tail++;
+        return *tail == '\0';
+    }
+    return false;
 }
 
 /* Opt-in startup timing. Enable with DSCO_PERF=1. */
@@ -536,6 +558,39 @@ static void main_apply_early_config_flags(int argc, char **argv) {
             continue;
         }
     }
+}
+
+/* Bake the issued binary's default runtime posture: --interactive,
+ * --gov-model none, and --autonomous. These are applied with setenv(..., 0)
+ * (non-overwriting) so that an explicit environment variable or a later CLI
+ * flag (e.g. --gov-model standard, --approval-mode ask, --sandboxed) still
+ * wins — the flag parser and saved-env loader both overwrite these. Toggle
+ * the compile-time posture with -DDSCO_DEFAULT_{INTERACTIVE,AUTONOMOUS,
+ * GOV_NONE}=0 (see include/config.h). */
+static void main_apply_compile_time_defaults(int argc, char **argv) {
+    (void)argc;
+    (void)argv;
+#if DSCO_DEFAULT_GOV_NONE
+    /* --gov-model none: ungoverned control arm posture by default.
+     * Do not default DSCO_GOV_BYPASS=1 here: that legacy hard override wins
+     * over DSCO_GOV_MODEL and would prevent explicit --gov-model standard or
+     * DSCO_GOV_MODEL=paranoid from taking effect. */
+    setenv("DSCO_GOV_MODEL", "none", 0);
+#endif
+#if DSCO_DEFAULT_AUTONOMOUS
+    /* --autonomous: trusted tier, no routine approval prompts. */
+    setenv("DSCO_TRUST_TIER", "trusted", 0);
+    setenv("DSCO_APPROVAL_MODE", "never", 0);
+    setenv("DSCO_APPROVAL_NEVER", "1", 0);
+    setenv("DSCO_NO_APPROVAL_PROMPTS", "1", 0);
+#endif
+#if DSCO_DEFAULT_INTERACTIVE
+    /* --interactive: default to the REPL when no one-shot prompt is given.
+     * The bare-`dsco`-in-a-TTY path already synthesizes -i; this marker keeps
+     * the interactive posture explicit for downstream consumers and does not
+     * force interactivity onto non-TTY / one-shot / subcommand invocations. */
+    setenv("DSCO_INTERACTIVE_DEFAULT", "1", 0);
+#endif
 }
 
 static bool main_is_credential_env_name(const char *name) {
@@ -1086,7 +1141,7 @@ typedef struct {
 static const native_provider_t NATIVE_PROVIDERS[] = {
     { "anthropic",  "Anthropic Claude API",      "ANTHROPIC_API_KEY",   "claude-opus-4-6",
       CAP_TOOLS|CAP_MULTITURN|CAP_STREAMING|CAP_VISION|CAP_THINKING|CAP_JSON|CAP_CACHE, 4 },
-    { "openai",     "OpenAI API",                "OPENAI_API_KEY",      "gpt-4.1",
+    { "openai",     "OpenAI API",                "OPENAI_API_KEY",      "gpt-5.6-luna",
       CAP_TOOLS|CAP_MULTITURN|CAP_STREAMING|CAP_VISION|CAP_JSON, 3 },
     { "openrouter", "OpenRouter (multi-model)",   "OPENROUTER_API_KEY", "moonshotai/kimi-k2.7-code",
       CAP_TOOLS|CAP_MULTITURN|CAP_STREAMING|CAP_VISION|CAP_JSON, 4 },
@@ -1435,7 +1490,7 @@ static const exec_reg_t *select_auto_executor(const char *model,
 
 static const char *default_model_for_executor(const exec_reg_t *e) {
     if (!e) return NULL;
-    if (strcmp(e->name, "claude") == 0) return "claude-sonnet-4-6";
+    if (strcmp(e->name, "claude") == 0) return "claude-sonnet-5";
     if (strcmp(e->name, "codex") == 0) return codex_cache_default_model();
     return NULL;
 }
@@ -2256,7 +2311,7 @@ static int run_login_flow(void) {
     const char *codex_status      = codex_auth  ? "● ready"  : (codex_bin  ? "○ not authenticated" : "○ codex not installed");
 
     fprintf(stderr, "  \033[1m[1]\033[0m %-33s %-22s %s%s\033[0m\n",
-            "Claude Code  (Anthropic)", "claude-sonnet-4-6",
+            "Claude Code  (Anthropic)", "claude-sonnet-5",
             claude_status_col, claude_status);
     fprintf(stderr, "  \033[1m[2]\033[0m %-33s %-22s %s%s\033[0m\n",
             "ChatGPT Codex  (OpenAI)", "auto (gpt-5.5)",
@@ -2371,6 +2426,35 @@ static int run_login_flow(void) {
     }
 
 save_active:
+    /* Prefer DSCO's native subscription transports after the official client
+     * has authenticated. External `claude`/`codex` execution remains the
+     * fallback, but login should not silently force every turn through a
+     * subprocess when DSCO can use the same subscription OAuth directly. */
+    if (pidx == 0) {
+        bool native_ready = provider_has_usable_key("anthropic", NULL);
+        if (!native_ready) {
+            fprintf(stderr, "  Importing Claude Code subscription credentials into DSCO...\n");
+            native_ready = provider_claude_code_import_credentials();
+        }
+        if (native_ready) {
+            pname = "anthropic";
+            pmodel = provider_primary_model_for("anthropic", true);
+            if (!pmodel || !pmodel[0])
+                pmodel = "claude-sonnet-5";
+            fprintf(stderr, "  \033[32m● Native Claude subscription route ready\033[0m (via %s)\n",
+                    provider_claude_code_oauth_source());
+        } else {
+            fprintf(stderr,
+                    "  \033[33m○ Native credential import unavailable; using official Claude executor\033[0m\n");
+        }
+    } else if (provider_has_usable_key("openai-codex", NULL)) {
+        pname = "openai-codex";
+        pmodel = provider_primary_model_for("openai", true);
+        if (!pmodel || !pmodel[0])
+            pmodel = "gpt-5.5";
+        fprintf(stderr, "  \033[32m● Native ChatGPT subscription route ready\033[0m\n");
+    }
+
     setenv("DSCO_EXEC",  pname,  1);
     setenv("DSCO_MODEL", pmodel, 1);
     dsco_setup_set_key("DSCO_EXEC",  pname);
@@ -2500,17 +2584,20 @@ out:
 
 static void usage(const char *prog) {
     fprintf(stderr,
-        "dsco v%s — thin agentic CLI (streaming + prompt caching)\n"
+        "dsco v%s — local-first agentic C runtime (streaming + prompt caching)\n"
         "\n"
         "Usage: %s [options] [prompt]\n"
         "       %s login          Choose Claude Code or ChatGPT Codex backend\n"
         "       %s status         Show auth state and account info for all backends\n"
         "       %s config [show|init|validate|ingest|explain|metadata]  DSCO Config Registry\n"
         "       %s command <begin|get|get-key|complete|fail> ...  Durable command plane\n"
+        "       %s agents <create|list|status|tui|watch|send|inbox|sent|bus|db> ...  Durable agent mailboxes\n"
+        "       %s bus <pub|recv|tail> ...  Durable topic bus\n"
+        "       %s autoresearch <start|status|stop> ...  Bounded background experiment loops\n"
         "\n"
         "Options:\n"
         "  -m, --model MODEL      Model name (default: %s)\n"
-        "  -p, --prompt PROMPT    One-shot prompt (same as positional prompt)\n"
+        "  -p, --prompt PROMPT    One-shot prompt; use for text that starts with '-'\n"
         "  --effort LEVEL         Reasoning effort: auto|none|minimal|low|medium|high|xhigh|max\n"
         "  -k KEY      API key, or ENV=KEY / ENV KEY (default: provider env for selected model)\n"
         "  --profile full|lite|worker  Runtime startup profile (default: full)\n"
@@ -2533,16 +2620,17 @@ static void usage(const char *prog) {
         "  --fabric-replicas N    Replicas per non-Fugu provider lane\n"
         "  --fugu-replicas N      Replicas for Sakana Fugu lane\n"
         "  --fabric-timeout N     Seconds to wait in provider_fabric race/collect mode\n"
-        "  --fabric-fugu-model M  Sakana model for provider_fabric (default: fugu-ultra)\n"
+        "  --fabric-fugu-model M  Sakana model for provider_fabric (default: fugu)\n"
         "  --fabric-include-metered  Include metered overflow lanes in provider_fabric\n"
         "  --topology NAME        Run/select an agent topology\n"
         "  --topology-auto        Auto-pick a topology for the task\n"
         "  --topology-list        List available topologies\n"
         "  --ui [PORT]            Launch web UI (default port: 3141)\n"
-        "  -i, --interactive      Start an interactive REPL (no prompt required)\n"
-        "  --autonomous           No routine approval prompts; trusted tier; critical gates still fail closed\n"
+        "  -i, --interactive      Start an interactive REPL (no prompt required) [baked-in default in a TTY]\n"
+        "  --autonomous           No routine approval prompts; trusted tier; critical gates still fail closed [baked-in default]\n"
         "  --sandboxed            Untrusted tier: route exec tools through sandbox_run, block writes/network/control-plane\n"
         "  --systems-agent        UNGOVERNED control arm (gov model=none) + native networking hooks: mesh P2P/DHT/TLS up, fleet fanout enabled\n"
+        "  --dev                   Development posture: audit governance (record would-blocks; enforce immune vetoes only)\n"
         "  runtime status|gov|power|bench  Native runtime control-plane introspection and microbenchmarks\n"
         "  --gov-model MODEL      Governance model: none|minimal|audit|standard|paranoid (see `governance experiment`)\n"
         "  --approval-mode MODE   ask|strict|never (never skips routine prompts)\n"
@@ -2575,10 +2663,11 @@ static void usage(const char *prog) {
         "  DSCO_BASELINE_DB    Override sqlite baseline path\n"
         "  DSCO_EXEC           Default executor/provider (claude, codex, auto, zai, moonshot, fugu, sakana)\n"
         "  DSCO_EFFORT         Reasoning effort default (auto, none, minimal, low, medium, high, xhigh, max)\n"
+        "  DSCO_OPENAI_PARAMS  JSON object of compatible Chat Completions request parameters\n"
         "  DSCO_PARALLEL_TOOL_CALLS  Hosted OpenAI-compatible parallel tool calls (default on; 0 disables)\n"
         "  DSCO_BUDGET         Session cost budget in dollars (0=unlimited)\n"
         "  DSCO_DAILY_BUDGET   Daily cost budget in dollars (0=unlimited)\n",
-    DSCO_VERSION, prog, prog, prog, prog, prog, DEFAULT_MODEL, prog, prog, prog);
+        DSCO_VERSION, prog, prog, prog, prog, prog, prog, prog, prog, DEFAULT_MODEL, prog, prog, prog);
 }
 
 static void print_topology_list(void) {
@@ -2676,6 +2765,29 @@ static void oneshot_tool_cb(const char *name, const char *id, void *ctx) {
     }
     fflush(stderr);
     baseline_log("tool", tool_name, "tool_use started", NULL);
+}
+
+static void oneshot_tool_arg_delta_cb(const char *name, const char *id,
+                                      const char *delta, void *ctx) {
+    (void)name; (void)id; (void)ctx;
+    if (!delta || !delta[0])
+        return;
+    if (!isatty(STDERR_FILENO) &&
+        !main_env_truthy(getenv("DSCO_STREAM_TOOL_ARG_DELTAS")))
+        return;
+    fprintf(stderr, "\033[2m ⋯ %s\033[0m", delta);
+    fflush(stderr);
+}
+
+static void oneshot_thinking_cb(const char *text, void *ctx) {
+    (void)ctx;
+    if (!text || !text[0])
+        return;
+    if (!isatty(STDERR_FILENO) &&
+        !main_env_truthy(getenv("DSCO_STREAM_THINKING")))
+        return;
+    fprintf(stderr, "\033[2m%s\033[0m", text);
+    fflush(stderr);
 }
 
 static void json_print_escaped(FILE *out, const char *s) {
@@ -3027,7 +3139,8 @@ static int run_structured_process_cli(const char *mode, const char *prompt) {
 
     char tree[32768];
     plan_tree_render(plan_id, tree, sizeof(tree));
-    printf("%s", tree);
+    if (pixel_tui_render_plan(stdout, plan_id) == 0)
+        printf("%s", tree);
     return run && plan_get(plan_id) && plan_get(plan_id)->status == PLAN_FAILED ? 1 : 0;
 }
 
@@ -3101,6 +3214,7 @@ static int run_route_explain_fast(int argc, char **argv) {
     const char *model = NULL;
     if (!main_route_explain_requested(argc, argv, &model))
         return -1;
+    dsco_setup_load_saved_env();
     if (!model || !model[0])
         model = DEFAULT_MODEL;
 
@@ -3215,6 +3329,7 @@ static const char *pets_resolve_ipc_db(int argc, char **argv) {
 static pet_status_t pets_map_ipc(ipc_agent_status_t s) {
     switch (s) {
         case IPC_AGENT_STARTING: return PET_ST_PENDING;
+        case IPC_AGENT_DURABLE:  return PET_ST_IDLE;
         case IPC_AGENT_WORKING:  return PET_ST_WORKING;
         case IPC_AGENT_DONE:     return PET_ST_DONE;
         case IPC_AGENT_ERROR:    return PET_ST_ERROR;
@@ -3283,6 +3398,8 @@ static int run_pets_watch(int argc, char **argv) {
 }
 
 static int maybe_run_introspect_fast_path(int argc, char **argv, int i);
+static int runtime_cli(int argc, char **argv);
+static bool main_is_dispatch_subcommand(const char *arg);
 
 static bool main_apply_runtime_mode_flags(int argc, char **argv) {
     bool saw_mode = false;
@@ -3297,12 +3414,50 @@ static bool main_apply_runtime_mode_flags(int argc, char **argv) {
             saw_mode = true;
             continue;
         }
-        if (strcmp(argv[i], "--sandboxed") == 0 ||
-            strcmp(argv[i], "--sandbox-mode") == 0) {
+        if (strcmp(argv[i], "--dev") == 0) {
+            /* Local development is auditable, not permissionless: retain the
+             * capability and immune floors while removing budget/approval
+             * friction from normal headless edit/build/test loops. */
+            setenv("DSCO_GOV_MODEL", "audit", 1);
+            setenv("DSCO_GOV_BYPASS", "0", 1);
+            setenv("DSCO_TRUST_TIER", "trusted", 1);
+            setenv("DSCO_APPROVAL_MODE", "never", 1);
+            setenv("DSCO_APPROVAL_NEVER", "1", 1);
+            setenv("DSCO_NO_APPROVAL_PROMPTS", "1", 1);
+            saw_mode = true;
+            continue;
+        }
+        if (strcmp(argv[i], "--sandboxed") == 0) {
             setenv("DSCO_TRUST_TIER", "untrusted", 1);
             setenv("DSCO_APPROVAL_MODE", "never", 1);
             setenv("DSCO_APPROVAL_NEVER", "1", 1);
             setenv("DSCO_NO_APPROVAL_PROMPTS", "1", 1);
+            saw_mode = true;
+            continue;
+        }
+        if (strcmp(argv[i], "--sandbox-mode") == 0) {
+            const char *mode = NULL;
+            if (i + 1 < argc && argv[i + 1][0] != '-' &&
+                !main_is_dispatch_subcommand(argv[i + 1]))
+                mode = argv[++i];
+            if (mode && mode[0])
+                setenv("DSCO_SANDBOX_MODE", mode, 1);
+            if (mode &&
+                (strcasecmp(mode, "danger-full-access") == 0 ||
+                 strcasecmp(mode, "danger") == 0 ||
+                 strcasecmp(mode, "none") == 0 ||
+                 strcasecmp(mode, "off") == 0 ||
+                 strcasecmp(mode, "disabled") == 0)) {
+                setenv("DSCO_TRUST_TIER", "trusted", 1);
+                setenv("DSCO_APPROVAL_MODE", "never", 1);
+                setenv("DSCO_APPROVAL_NEVER", "1", 1);
+                setenv("DSCO_NO_APPROVAL_PROMPTS", "1", 1);
+            } else {
+                setenv("DSCO_TRUST_TIER", "untrusted", 1);
+                setenv("DSCO_APPROVAL_MODE", "never", 1);
+                setenv("DSCO_APPROVAL_NEVER", "1", 1);
+                setenv("DSCO_NO_APPROVAL_PROMPTS", "1", 1);
+            }
             saw_mode = true;
             continue;
         }
@@ -3404,6 +3559,187 @@ static bool main_apply_runtime_mode_flags(int argc, char **argv) {
     return saw_mode;
 }
 
+static bool main_is_dispatch_subcommand(const char *arg) {
+    return arg &&
+           (strcmp(arg, "tools") == 0 ||
+            strcmp(arg, "runs") == 0 ||
+            strcmp(arg, "callbacks") == 0 ||
+            strcmp(arg, "command") == 0 ||
+            strcmp(arg, "agents") == 0 ||
+            strcmp(arg, "bus") == 0 ||
+            strcmp(arg, "autoresearch") == 0 ||
+            strcmp(arg, "runtime") == 0 ||
+            strcmp(arg, "mcp") == 0 ||
+            strcmp(arg, "pets") == 0 ||
+            strcmp(arg, "config") == 0 ||
+            strcmp(arg, "connect") == 0 ||
+            strcmp(arg, "voice") == 0 ||
+            strcmp(arg, "--voice") == 0 ||
+            strcmp(arg, "login") == 0 ||
+            strcmp(arg, "status") == 0);
+}
+
+static int main_leading_global_flag_values(int argc, char **argv, int i) {
+    const char *arg = argv[i];
+    if (!arg)
+        return -1;
+    if (strcmp(arg, "-k") == 0) {
+        if (i + 1 >= argc)
+            return -1;
+        if (main_is_credential_env_name(argv[i + 1]) &&
+            i + 2 < argc &&
+            main_cli_token_looks_like_api_key(argv[i + 2])) {
+            return 2;
+        }
+        return 1;
+    }
+    if (strcmp(arg, "--sandbox-mode") == 0) {
+        if (i + 1 < argc && argv[i + 1][0] != '-' &&
+            !main_is_dispatch_subcommand(argv[i + 1]))
+            return 1;
+        return 0;
+    }
+    if (strcmp(arg, "-m") == 0 ||
+        strcmp(arg, "--model") == 0 ||
+        strcmp(arg, "-M") == 0 ||
+        strcmp(arg, "--worker-model") == 0 ||
+        strcmp(arg, "-e") == 0 ||
+        strcmp(arg, "--exec") == 0 ||
+        strcmp(arg, "--provider") == 0 ||
+        strcmp(arg, "--profile") == 0 ||
+        strcmp(arg, "--gov-model") == 0 ||
+        strcmp(arg, "--mcp-server") == 0 ||
+        strcmp(arg, "--mcp-servers") == 0 ||
+        strcmp(arg, "--env-file") == 0 ||
+        strcmp(arg, "--approval-mode") == 0 ||
+        strcmp(arg, "--trust-tier") == 0 ||
+        strcmp(arg, "--effort") == 0 ||
+        strcmp(arg, "--timeline-port") == 0 ||
+        strcmp(arg, "--timeline-instance") == 0 ||
+        strcmp(arg, "--topology") == 0 ||
+        strcmp(arg, "--fabric-mode") == 0 ||
+        strcmp(arg, "--fabric-max-agents") == 0 ||
+        strcmp(arg, "--fabric-replicas") == 0 ||
+        strcmp(arg, "--fugu-replicas") == 0 ||
+        strcmp(arg, "--fabric-timeout") == 0 ||
+        strcmp(arg, "--fabric-fugu-model") == 0 ||
+        strcmp(arg, "--pull-and-use") == 0) {
+        return (i + 1 < argc) ? 1 : -1;
+    }
+    if (strcmp(arg, "--autonomous") == 0 ||
+        strcmp(arg, "--auto-approve") == 0 ||
+        strcmp(arg, "--no-approval-prompts") == 0 ||
+        strcmp(arg, "--sandboxed") == 0 ||
+        strcmp(arg, "--dev") == 0 ||
+        strcmp(arg, "--systems-agent") == 0 ||
+        strcmp(arg, "--resume") == 0 ||
+        strcmp(arg, "--resume-last") == 0 ||
+        strcmp(arg, "--cheap") == 0 ||
+        strcmp(arg, "-C") == 0) {
+        return 0;
+    }
+    return -1;
+}
+
+static int main_find_global_subcommand(int argc, char **argv) {
+    for (int i = 1; i < argc; i++) {
+        if (strcmp(argv[i], "--") == 0)
+            return -1;
+        if (main_is_dispatch_subcommand(argv[i]))
+            return i;
+        if (argv[i][0] != '-')
+            return -1;
+        int values = main_leading_global_flag_values(argc, argv, i);
+        if (values < 0)
+            return -1;
+        i += values;
+    }
+    return -1;
+}
+
+static int main_dispatch_subcommand_normalized(int argc, char **argv,
+                                               int sub_i, bool *handled) {
+    *handled = false;
+    if (sub_i < 1 || sub_i >= argc)
+        return -1;
+
+    int nargc = argc - sub_i + 1;
+    char **nargv = (char **)calloc((size_t)nargc + 1, sizeof(char *));
+    if (!nargv)
+        return -1;
+    nargv[0] = argv[0];
+    for (int i = sub_i; i < argc; i++)
+        nargv[i - sub_i + 1] = argv[i];
+    nargv[nargc] = NULL;
+
+    const char *sub = nargv[1];
+    int rc = -1;
+    *handled = true;
+    if (strcmp(sub, "tools") == 0) {
+        dsco_setup_load_saved_env(); /* resolve TOOLS_API_TOKEN et al. from ~/.dsco/env */
+        rc = toolmgmt_cli(nargc, nargv);
+    }
+    else if (strcmp(sub, "runs") == 0)
+        rc = chronicle_runs_cli(nargc, nargv);
+    else if (strcmp(sub, "callbacks") == 0)
+        rc = callbacks_cli(nargc, nargv);
+    else if (strcmp(sub, "command") == 0)
+        rc = command_cli(nargc, nargv);
+    else if (strcmp(sub, "agents") == 0)
+        rc = durable_agents_cli(nargc, nargv);
+    else if (strcmp(sub, "bus") == 0)
+        rc = dsco_bus_cli(nargc, nargv);
+    else if (strcmp(sub, "autoresearch") == 0)
+        rc = autoresearch_cli(nargc, nargv);
+    else if (strcmp(sub, "runtime") == 0)
+        rc = runtime_cli(nargc, nargv);
+    else if (strcmp(sub, "mcp") == 0 && nargc >= 3 && strcmp(nargv[2], "serve") == 0) {
+        const char *ts = NULL, *tier = NULL;
+        for (int i = 3; i < nargc - 1; i++) {
+            if (strcmp(nargv[i], "--toolsets") == 0) ts = nargv[++i];
+            else if (strcmp(nargv[i], "--tier") == 0) tier = nargv[++i];
+        }
+        rc = mcp_server_run(ts, tier);
+    } else if (strcmp(sub, "pets") == 0) {
+        const char *action = nargc >= 3 ? nargv[2] : "gallery";
+        if (strcmp(action, "watch") == 0) {
+            rc = run_pets_watch(nargc, nargv);
+        } else if (strcmp(action, "roll") == 0) {
+            const char *seed = nargc >= 4 ? nargv[3] : "anon";
+            pet_t p;
+            memset(&p, 0, sizeof(p));
+            pet_roll(seed, &p.bones);
+            snprintf(p.name, sizeof(p.name), "%s", seed);
+            p.status = PET_ST_IDLE;
+            pet_card_print(stdout, &p, 0);
+            rc = 0;
+        } else if (strcmp(action, "roster") == 0) {
+            pet_roster_render(stdout, pet_roster_global(), tui_term_width(), 0);
+            rc = 0;
+        } else {
+            pet_gallery_print(stdout, 0);
+            rc = 0;
+        }
+    } else if (strcmp(sub, "config") == 0) {
+        rc = dcr_cli(nargc, nargv);
+    } else if (strcmp(sub, "connect") == 0) {
+        rc = connector_cli(nargc, nargv);
+    } else if (strcmp(sub, "voice") == 0 || strcmp(sub, "--voice") == 0) {
+        rc = realtime_voice_cli(nargc, nargv);
+    } else if (strcmp(sub, "login") == 0) {
+        dsco_setup_load_saved_env();
+        rc = run_login_flow();
+    } else if (strcmp(sub, "status") == 0) {
+        dsco_setup_load_saved_env();
+        rc = run_status_flow();
+    } else {
+        *handled = false;
+    }
+
+    free(nargv);
+    return rc;
+}
+
 static int maybe_run_early_fast_path(int argc, char **argv,
                                      dsco_profile_t profile) {
     for (int i = 1; i < argc; i++) {
@@ -3452,6 +3788,7 @@ static int maybe_run_early_fast_path(int argc, char **argv,
             return 0;
         }
         if (strcmp(argv[i], "--setup-report") == 0) {
+            dsco_setup_load_saved_env();
             char report[32768];
             if (dsco_setup_report(report, sizeof(report)) < 0) {
                 fprintf(stderr, "setup report failed\n");
@@ -3476,12 +3813,14 @@ static int maybe_run_early_fast_path(int argc, char **argv,
             return 0;
         }
         if ((i == 1 && strcmp(argv[i], "status") == 0) || strcmp(argv[i], "--status") == 0) {
+            dsco_setup_load_saved_env();
             int rc = run_status_flow();
             perf_finish("fast exit");
             return rc;
         }
         if ((strcmp(argv[i], "-e") == 0 || strcmp(argv[i], "--exec") == 0) &&
             i + 1 < argc && strcmp(argv[i + 1], "list") == 0) {
+            dsco_setup_load_saved_env();
             exec_list();
             perf_finish("fast exit");
             return 0;
@@ -3620,6 +3959,8 @@ static int runtime_cli_status_json(void) {
     int core = tools_get_core_count();
     int loaded = tools_loaded_builtin_count();
     int external = tools_external_count();
+    dsco_workspace_status_t ws = {0};
+    dsco_workspace_status(&ws, NULL, 0);
     unsigned long gate_calls = 0, bypassed = 0;
     double gate_ms = 0;
     tools_governance_experiment_stats(&gate_calls, &bypassed, &gate_ms);
@@ -3631,8 +3972,13 @@ static int runtime_cli_status_json(void) {
     printf("  \"branch\": "); runtime_print_json_string(stdout, getenv("DSCO_GIT_BRANCH")); printf(",\n");
     printf("  \"governance_model\": "); runtime_print_json_string(stdout, gov_model_name(gov_experiment_model())); printf(",\n");
     printf("  \"systems_agent\": %s,\n", gov_experiment_model() == GOV_MODEL_NONE ? "true" : "false");
-    printf("  \"tools\": {\"builtin\": %d, \"core\": %d, \"loaded_builtin\": %d, \"external\": %d},\n",
-           builtins, core, loaded, external);
+    printf("  \"tools\": {\"builtin\": %d, \"core\": %d, \"loaded_builtin\": %d, \"external\": %d, \"exposed_total\": %d},\n",
+           builtins, core, loaded, external, core + loaded + external);
+    printf("  \"workspace\": {\"root\": "); runtime_print_json_string(stdout, dsco_workspace_root());
+    printf(", \"skills\": %d, \"doctrines\": %d, \"agents_md\": %d, \"identity\": %s, \"user\": %s, \"soul\": %s, \"memory\": %s},\n",
+           ws.installed_skills, ws.active_doctrines, ws.agents_files,
+           ws.has_identity ? "true" : "false", ws.has_user ? "true" : "false",
+           ws.has_soul ? "true" : "false", ws.has_memory ? "true" : "false");
     printf("  \"governance_telemetry\": {\"gate_calls\": %lu, \"bypassed\": %lu, \"gate_ms_total\": %.4f, \"gate_ms_avg\": %.6f},\n",
            gate_calls, bypassed, gate_ms, gate_calls ? gate_ms / (double)gate_calls : 0.0);
     printf("  \"fleet\": {\"configured_hosts\": %d, \"readable_hosts\": %d, \"malformed_hosts\": %d},\n",
@@ -3800,6 +4146,8 @@ static int maybe_run_pre_chronicle_fast_path(int argc, char **argv,
 }
 
 int main(int argc, char **argv) {
+    dsco_harden_init();
+    main_apply_compile_time_defaults(argc, argv);
     main_apply_early_config_flags(argc, argv);
 
     /* Detect interactive mode immediately for fast-path optimizations */
@@ -3815,6 +4163,29 @@ int main(int argc, char **argv) {
     dsco_profile_t runtime_profile = main_runtime_profile(argc, argv);
     dsco_caps_t startup_caps = main_plan_startup_caps(argc, argv, runtime_profile);
     perf_set_startup_context(runtime_profile, startup_caps);
+
+    /* Absolute trivial info flags should exit before chronicle startup,
+     * subcommand normalization, or any other process-wide initialization.
+     * This preserves the low-latency contract for wrappers, scripts, and
+     * shell completions that call `dsco --version` / `dsco --help`. */
+    for (int i = 1; i < argc; i++) {
+        if (strcmp(argv[i], "--version") == 0 || strcmp(argv[i], "-v") == 0) {
+            printf("dsco v%s (built %s, %s)\n", DSCO_VERSION, BUILD_DATE, GIT_HASH);
+            perf_finish("version exit");
+            return 0;
+        }
+        if (strcmp(argv[i], "-h") == 0 || strcmp(argv[i], "--help") == 0) {
+            /* A help flag belonging to a subcommand must reach that command;
+             * only treat help as global when no leading global-flag sequence
+             * selects a dispatch subcommand. */
+            if (main_find_global_subcommand(argc, argv) < 0) {
+                usage(argv[0]);
+                perf_finish("help exit");
+                return 0;
+            }
+        }
+    }
+
     bool cli_runtime_mode = main_apply_runtime_mode_flags(argc, argv);
 
     int pre_chronicle_fast_rc = maybe_run_pre_chronicle_fast_path(argc, argv,
@@ -3865,88 +4236,13 @@ int main(int argc, char **argv) {
             }
         }
     }
-    /* `dsco tools …` drives the external Tool Management API. Dispatch first so
-     * its own -h/subcommands aren't swallowed by the global flag loop below; it
-     * manages its own config + auth and never touches the keychain. */
-    if (argc >= 2 && strcmp(argv[1], "tools") == 0)
-        return toolmgmt_cli(argc, argv);
-
-    if (argc >= 2 && strcmp(argv[1], "runs") == 0)
-        return chronicle_runs_cli(argc, argv);
-
-    if (argc >= 2 && strcmp(argv[1], "callbacks") == 0)
-        return callbacks_cli(argc, argv);
-
-    if (argc >= 2 && strcmp(argv[1], "command") == 0)
-        return command_cli(argc, argv);
-
-    if (argc >= 2 && strcmp(argv[1], "runtime") == 0)
-        return runtime_cli(argc, argv);
-    /* Also support global flags before the subcommand, e.g.
-       `dsco --systems-agent runtime status --json`. */
-    for (int ri = 2; ri < argc; ri++) {
-        if (strcmp(argv[ri], "runtime") == 0) {
-            char *rargv[32];
-            int rargc = 0;
-            rargv[rargc++] = argv[0];
-            for (int j = ri; j < argc && rargc < (int)(sizeof(rargv) / sizeof(rargv[0])); j++)
-                rargv[rargc++] = argv[j];
-            return runtime_cli(rargc, rargv);
-        }
+    int sub_i = main_find_global_subcommand(argc, argv);
+    if (sub_i >= 1) {
+        bool handled = false;
+        int rc = main_dispatch_subcommand_normalized(argc, argv, sub_i, &handled);
+        if (handled)
+            return rc;
     }
-
-    /* `dsco mcp serve [--toolsets core,ast] [--tier untrusted|trusted]` — run dsco as an
-     * MCP server over stdio (Plan 05, harness-parity). Exposes curated
-     * toolsets through the same immune-gated tools_execute_for_tier path. */
-    if (argc >= 3 && strcmp(argv[1], "mcp") == 0 && strcmp(argv[2], "serve") == 0) {
-        const char *ts = NULL, *tier = NULL;
-        for (int i = 3; i < argc - 1; i++) {
-            if (strcmp(argv[i], "--toolsets") == 0) ts = argv[++i];
-            else if (strcmp(argv[i], "--tier") == 0) tier = argv[++i];
-        }
-        return mcp_server_run(ts, tier);
-    }
-
-    /* `dsco pets [gallery|roll|roster] [seed]` renders companion sprites
-     * straight to the terminal (real newlines + ANSI), unlike `--tool-exec`
-     * which wraps the art in escaped JSON. */
-    if (argc >= 2 && strcmp(argv[1], "pets") == 0) {
-        const char *action = argc >= 3 ? argv[2] : "gallery";
-        if (strcmp(action, "watch") == 0) {
-            return run_pets_watch(argc, argv);
-        } else if (strcmp(action, "roll") == 0) {
-            const char *seed = argc >= 4 ? argv[3] : "anon";
-            pet_t p;
-            memset(&p, 0, sizeof(p));
-            pet_roll(seed, &p.bones);
-            snprintf(p.name, sizeof(p.name), "%s", seed);
-            p.status = PET_ST_IDLE;
-            pet_card_print(stdout, &p, 0);
-        } else if (strcmp(action, "roster") == 0) {
-            pet_roster_render(stdout, pet_roster_global(), tui_term_width(), 0);
-        } else {
-            pet_gallery_print(stdout, 0);
-        }
-        return 0;
-    }
-
-    /* `dsco config …` drives the DSCO Config Registry (DCR): a local-first
-     * canonical config substrate plus import/provenance hooks for external
-     * provider configs (Codex, provider docs, catalogs). */
-    if (argc >= 2 && strcmp(argv[1], "config") == 0)
-        return dcr_cli(argc, argv);
-
-    /* `dsco connect …` drives the future-proof baseline connector: a single
-     * seam every external system plugs into (tools today; chains, credit,
-     * robotics, neural/haptic next). Dispatched first for the same reasons. */
-    if (argc >= 2 && strcmp(argv[1], "connect") == 0)
-        return connector_cli(argc, argv);
-
-    /* `dsco voice …` / `dsco --voice …` opens a realtime speech-to-speech session (OpenAI
-     * Realtime API over WebSocket) with live tool calling bridged into the
-     * DSCO tool registry. `--text` runs the same session keyboard-only. */
-    if (argc >= 2 && (strcmp(argv[1], "voice") == 0 || strcmp(argv[1], "--voice") == 0))
-        return realtime_voice_cli(argc, argv);
 
     /* `dsco supervise [args...]` (or `dsco --supervise [args...]`) runs the
      * real dsco as a managed child: a higher-order watcher that catches every
@@ -3962,22 +4258,6 @@ int main(int argc, char **argv) {
          * terminated because argv[argc] == NULL. */
         argv[1] = argv[0];
         return supervisor_run(argc - 1, argv + 1);
-    }
-
-    /* Trivial info flags must short-circuit BEFORE any keychain / secure-store
-     * touch. Otherwise wrappers (web server, scripts) calling `dsco --version`
-     * trigger a macOS keychain prompt for every invocation. */
-    for (int i = 1; i < argc; i++) {
-        if (strcmp(argv[i], "--version") == 0 || strcmp(argv[i], "-v") == 0) {
-            printf("dsco v%s (built %s, %s)\n", DSCO_VERSION, BUILD_DATE, GIT_HASH);
-            perf_finish("version exit");
-            return 0;
-        }
-        if (strcmp(argv[i], "-h") == 0 || strcmp(argv[i], "--help") == 0) {
-            usage(argv[0]);
-            perf_finish("help exit");
-            return 0;
-        }
     }
 
     if (argc == 1) {
@@ -4209,6 +4489,11 @@ int main(int argc, char **argv) {
 
     const char *api_key = NULL;
     const char *env_model = getenv("DSCO_MODEL");
+    if (model_value_is_blank_default(env_model)) {
+        if (env_model)
+            unsetenv("DSCO_MODEL");
+        env_model = NULL;
+    }
     bool model_from_env = env_model && env_model[0];
     if (model_from_env && !model_preexisted_setup &&
         is_legacy_sonnet_default_model(env_model)) {
@@ -4391,10 +4676,14 @@ int main(int argc, char **argv) {
         if ((strcmp(argv[i], "-m") == 0 || strcmp(argv[i], "--model") == 0) && i + 1 < argc) {
             model = argv[++i];
             user_set_model = true;
-        } else if ((strcmp(argv[i], "-p") == 0 ||
-                    strcmp(argv[i], "--prompt") == 0 ||
-                    strcmp(argv[i], "--p") == 0) &&
-                   i + 1 < argc) {
+        } else if (strcmp(argv[i], "-p") == 0 ||
+                   strcmp(argv[i], "--prompt") == 0 ||
+                   strcmp(argv[i], "--p") == 0) {
+            if (i + 1 >= argc) {
+                fprintf(stderr, "error: %s requires PROMPT\n", argv[i]);
+                free(oneshot_prompt);
+                return 1;
+            }
             main_prompt_append_arg(&oneshot_prompt, argv[++i]);
         } else if (strcmp(argv[i], "-k") == 0 && i + 1 < argc) {
             const char *key_arg = argv[++i];
@@ -4509,13 +4798,19 @@ int main(int argc, char **argv) {
                    strcmp(argv[i], "--auto-approve") == 0 ||
                    strcmp(argv[i], "--no-approval-prompts") == 0 ||
                    strcmp(argv[i], "--sandboxed") == 0 ||
-                   strcmp(argv[i], "--sandbox-mode") == 0) {
+                   strcmp(argv[i], "--dev") == 0 ||
+                   strcmp(argv[i], "--sandbox-mode") == 0 ||
+                   strcmp(argv[i], "--systems-agent") == 0 ||
+                   strcmp(argv[i], "--resume") == 0 ||
+                   strcmp(argv[i], "--resume-last") == 0) {
             /* Applied by main_apply_runtime_mode_flags() before startup and
              * again after saved env is loaded. Keep parser branch so mode flags
              * do not become prompt text. */
         } else if (strcmp(argv[i], "--approval-mode") == 0 && i + 1 < argc) {
             i++;
         } else if (strcmp(argv[i], "--trust-tier") == 0 && i + 1 < argc) {
+            i++;
+        } else if (strcmp(argv[i], "--gov-model") == 0 && i + 1 < argc) {
             i++;
         } else if (strcmp(argv[i], "--orchestrate") == 0 || strcmp(argv[i], "-O") == 0) {
             orchestrate_mode = true;
@@ -4582,6 +4877,13 @@ int main(int argc, char **argv) {
             exec_backend_from_cli = true;
             exec_backend_is_provider_pin = true;
         } else {
+            if (argv[i][0] == '-') {
+                fprintf(stderr, "error: unknown option: %s\n", argv[i]);
+                fprintf(stderr, "hint: use --prompt %s for prompt text that starts with '-'\n",
+                        argv[i]);
+                free(oneshot_prompt);
+                return 1;
+            }
             main_prompt_append_arg(&oneshot_prompt, argv[i]);
         }
     }
@@ -4624,6 +4926,15 @@ int main(int argc, char **argv) {
         native_provider_model_selected = true;
     }
 
+    /* The baked no-argument runtime defaults to the native OpenAI lane. Keep
+     * explicit model/provider/key/DSCO_EXEC choices layerable, but do not let
+     * ambient credential discovery silently replace the issued default. */
+    if (!local_mode && !exec_backend && !api_key && !user_set_model && !model_from_env) {
+        model = DEFAULT_MODEL;
+        g_provider_override = "openai";
+        native_provider_model_selected = true;
+    }
+
     if (!provider_fabric_mode && oneshot_prompt && !user_set_model && !exec_backend &&
         !interactive_mode && !local_mode && !orchestrate_mode && !topology_name &&
         !topology_auto && !topology_list_mode && !topology_show_mode && !setup_mode &&
@@ -4646,6 +4957,19 @@ int main(int argc, char **argv) {
         !workspace_bootstrap_mode && !workspace_status_mode &&
         !timeline_server_mode && !topology_list_mode && !topology_show_mode &&
         !ui_mode && isatty(STDIN_FILENO) && isatty(STDERR_FILENO)) {
+        interactive_mode = true;
+    }
+
+    /* Compile-time --interactive default (DSCO_INTERACTIVE_DEFAULT=1, set by
+     * main_apply_compile_time_defaults). In a TTY with no one-shot prompt and
+     * no competing mode selected, drop into the REPL. Non-TTY, one-shot, and
+     * subcommand paths are unaffected. */
+    if (getenv("DSCO_INTERACTIVE_DEFAULT") && !oneshot_prompt && !interactive_mode &&
+        !exec_backend && !provider_fabric_mode && !local_mode && !orchestrate_mode &&
+        !topology_name && !topology_auto && !topology_list_mode && !topology_show_mode &&
+        !setup_mode && !setup_report_mode && !workspace_bootstrap_mode &&
+        !workspace_status_mode && !timeline_server_mode && !mux_mode && !ui_mode &&
+        isatty(STDIN_FILENO) && isatty(STDERR_FILENO)) {
         interactive_mode = true;
     }
 
@@ -5026,7 +5350,7 @@ int main(int argc, char **argv) {
                 stream_result_t tsr = {0};
                 if (treq) {
                     tsr = provider_stream_reuse(tprov, tkey, treq,
-                                                NULL, NULL, NULL, NULL);
+                                                NULL, NULL, NULL, NULL, NULL);
                     free(treq);
                 }
 
@@ -5071,7 +5395,7 @@ int main(int argc, char **argv) {
                     stream_result_t tsr2 = {0};
                     if (treq2) {
                         tsr2 = provider_stream_reuse(tprov, tkey, treq2,
-                                                     NULL, NULL, NULL, NULL);
+                                                     NULL, NULL, NULL, NULL, NULL);
                         free(treq2);
                     }
                     multi_turn_ok = tsr2.ok;
@@ -5159,7 +5483,7 @@ int main(int argc, char **argv) {
 
                 if (breq) {
                     bsr = provider_stream_reuse(bprov, bkey, breq,
-                                                NULL, NULL, NULL, NULL);
+                                                NULL, NULL, NULL, NULL, NULL);
                     free(breq);
                 }
 
@@ -5433,6 +5757,16 @@ native_path:
     api_key = resolved_api_key;
     provider_debug_log_request(active_provider, model, api_key);
 
+    /* `--interactive "first prompt"` is an interactive session seeded with a
+     * first turn, not a headless one-shot. Keeping the prompt on the one-shot
+     * branch bypasses the native compositor and makes the CLI appear to have
+     * fallen back to its legacy TUI even inside Kitty. */
+    if (interactive_mode && oneshot_prompt) {
+        agent_set_initial_prompt(oneshot_prompt);
+        free(oneshot_prompt);
+        oneshot_prompt = NULL;
+    }
+
     if (!baseline_start(model, oneshot_prompt ? "oneshot" : "interactive")) {
         fprintf(stderr, "warning: baseline disabled (sqlite unavailable)\n");
     }
@@ -5477,6 +5811,7 @@ native_path:
         int turns = 0;
         bool oneshot_had_error = false;
         bool oneshot_failed_over = false;   /* one-shot credit-failover guard */
+        bool oneshot_local_fallback_attempted = false;
         tools_loop_control_reset();
         /* Agentic headless loop: run to the goal, bounded only by the cost
          * budget and the runaway backstop — not an arbitrary turn count. Since
@@ -5516,11 +5851,12 @@ native_path:
             stream_result_t sr = oneshot_provider
                 ? provider_stream_reuse(oneshot_provider, oneshot_key, req,
                                         oneshot_text_cb, oneshot_tool_cb,
-                                        NULL, NULL)
+                                        oneshot_tool_arg_delta_cb, oneshot_thinking_cb, NULL)
                 : llm_stream(oneshot_key, req,
                              oneshot_text_cb,
                              oneshot_tool_cb,
-                             NULL, NULL);
+                             oneshot_tool_arg_delta_cb,
+                             oneshot_thinking_cb, NULL);
             if (!sr.ok && oneshot_provider && active_provider &&
                 strcmp(active_provider, "sakana") == 0 &&
                 (sr.http_status == 402 || sr.http_status == 429 ||
@@ -5538,7 +5874,7 @@ native_path:
                     provider_reset_connection(oneshot_provider);
                     sr = provider_stream_reuse(oneshot_provider, sub_key, req,
                                                oneshot_text_cb, oneshot_tool_cb,
-                                               NULL, NULL);
+                                               oneshot_tool_arg_delta_cb, oneshot_thinking_cb, NULL);
                     current_request_is_payg = false;
                     if (sr.ok) {
                         fprintf(stderr,
@@ -5556,7 +5892,7 @@ native_path:
                     provider_reset_connection(oneshot_provider);
                     sr = provider_stream_reuse(oneshot_provider, sub_key, req,
                                                oneshot_text_cb, oneshot_tool_cb,
-                                               NULL, NULL);
+                                               oneshot_tool_arg_delta_cb, oneshot_thinking_cb, NULL);
                     if (sr.ok) {
                         fprintf(stderr,
                                 "  \033[32mfallback recovered on Fugu subscription; allocation "
@@ -5583,7 +5919,7 @@ native_path:
                         provider_reset_connection(oneshot_provider);
                         sr = provider_stream_reuse(oneshot_provider, payg_key, req,
                                                    oneshot_text_cb, oneshot_tool_cb,
-                                                   NULL, NULL);
+                                                   oneshot_tool_arg_delta_cb, oneshot_thinking_cb, NULL);
                         if (sr.ok) {
                             fprintf(stderr,
                                     "  \033[32mfallback succeeded with Fugu PAYG\033[0m\n");
@@ -5597,15 +5933,51 @@ native_path:
             free(req);
 
             if (!sr.ok) {
+                /* A configured local lane is the deterministic final safety
+                 * net for headless/one-shot runs. Unlike subscription
+                 * failover, it also covers transport and provider outages. */
+                const char *local_fb_model = getenv("DSCO_LOCAL_FALLBACK_MODEL");
+                if (!g_provider_override && !oneshot_local_fallback_attempted && local_fb_model &&
+                    local_fb_model[0]) {
+                    const char *local_fb_resolved = model_resolve_alias(local_fb_model);
+                    const char *local_fb_provider =
+                        provider_route_for_model(local_fb_resolved, NULL, NULL);
+                    if (local_fb_provider && provider_is_local_endpoint(local_fb_provider) &&
+                        (strcmp(local_fb_provider, active_provider) != 0 ||
+                         strcmp(local_fb_resolved, model_resolve_alias(model)) != 0)) {
+                        provider_t *local_provider = provider_create(local_fb_provider);
+                        if (local_provider && provider_prepare(local_provider)) {
+                            fprintf(stderr,
+                                    "  \033[33mfallback: %s/%s unavailable; routing to %s\033[0m\n",
+                                    active_provider, model, local_fb_model);
+                            provider_free(oneshot_provider);
+                            oneshot_provider = local_provider;
+                            oneshot_provider_name = local_fb_provider;
+                            oneshot_key = NULL;
+                            model = local_fb_model;
+                            active_provider = local_fb_provider;
+                            api_key = NULL;
+                            session_state_init(&oneshot_session, local_fb_model);
+                            tools_set_runtime_api_key("");
+                            tools_set_runtime_model(local_fb_model);
+                            oneshot_local_fallback_attempted = true;
+                            json_free_response(&sr.parsed);
+                            turns--; /* the failed provider did not consume an agent turn */
+                            continue;
+                        }
+                        provider_free(local_provider);
+                    }
+                    oneshot_local_fallback_attempted = true;
+                }
                 /* Just-Work failover: if the primary credential died on a
                  * billing / credit / auth error (e.g. Anthropic "credit balance
                  * is too low"), route around it to a working provider instead
                  * of hard-stopping the one-shot. Mirrors the startup recovery
                  * path that uses provider_select_default_primary_model(). */
-                if (!oneshot_failed_over &&
+                if (!g_provider_override && !oneshot_failed_over &&
                     (sr.http_status == 401 || sr.http_status == 402 ||
-                     sr.http_status == 403 || sr.http_status == 429 ||
-                     provider_msg_is_credit_too_low(sr.parsed.stop_reason))) {
+                     sr.http_status == 403 ||
+                     provider_stream_result_is_credit_exhausted(active_provider, &sr))) {
                     const char *fb_model = provider_select_default_primary_model(
                         prompt_looks_code_task(oneshot_prompt));
                     const char *fb_alias = fb_model ? model_resolve_alias(fb_model) : NULL;
@@ -5639,10 +6011,17 @@ native_path:
                         }
                     }
                 }
-                fprintf(stderr, "error: stream failed (HTTP %d)\n", sr.http_status);
-                char err[64];
-                snprintf(err, sizeof(err), "HTTP %d", sr.http_status);
-                baseline_log("error", "stream_failed", err, NULL);
+                /* Surface the actual provider error, not just the HTTP code. */
+                if (sr.parsed.count > 0 && sr.parsed.blocks && sr.parsed.blocks[0].text) {
+                    fprintf(stderr, "error: stream failed (HTTP %d): %s\n", sr.http_status,
+                            sr.parsed.blocks[0].text);
+                    baseline_log("error", "stream_failed", sr.parsed.blocks[0].text, NULL);
+                } else {
+                    fprintf(stderr, "error: stream failed (HTTP %d)\n", sr.http_status);
+                    char err[64];
+                    snprintf(err, sizeof(err), "HTTP %d", sr.http_status);
+                    baseline_log("error", "stream_failed", err, NULL);
+                }
                 json_free_response(&sr.parsed);
                 if (turns == 1) conv_pop_last(&conv);
                 oneshot_had_error = true;
@@ -5777,11 +6156,12 @@ native_path:
                     stream_result_t sr2 = oneshot_provider
                         ? provider_stream_reuse(oneshot_provider, oneshot_key, req2,
                                                 oneshot_text_cb, oneshot_tool_cb,
-                                                NULL, NULL)
+                                                oneshot_tool_arg_delta_cb, oneshot_thinking_cb, NULL)
                         : llm_stream(oneshot_key, req2,
                                      oneshot_text_cb,
                                      oneshot_tool_cb,
-                                     NULL, NULL);
+                                     oneshot_tool_arg_delta_cb,
+                                     oneshot_thinking_cb, NULL);
                     free(req2);
                     if (!sr2.ok) {
                         json_free_response(&sr2.parsed);

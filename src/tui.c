@@ -1,6 +1,8 @@
 #include "tui.h"
 #include "config.h"
 #include "presence.h"
+#include "pixel_tui.h"
+#include "kitty_banner.h"
 #include "touchid.h"
 #include "dist_logo.h"
 #include <stdio.h>
@@ -50,28 +52,38 @@ const tui_box_chars_t *tui_box_chars(tui_box_style_t style) {
 
 /* ── Terminal utilities ───────────────────────────────────────────────── */
 
-int tui_term_width(void) {
+static int tui_term_size(unsigned short *rows, unsigned short *cols) {
     struct winsize w;
-    if (ioctl(STDERR_FILENO, TIOCGWINSZ, &w) == 0 && w.ws_col > 0)
-        return w.ws_col;
-    return 80;
+    const int fds[] = {STDERR_FILENO, STDOUT_FILENO, STDIN_FILENO};
+
+    for (size_t i = 0; i < sizeof(fds) / sizeof(fds[0]); i++) {
+        if (ioctl(fds[i], TIOCGWINSZ, &w) == 0 && w.ws_col > 0 && w.ws_row > 0) {
+            *rows = w.ws_row;
+            *cols = w.ws_col;
+            return 0;
+        }
+    }
+    return -1;
+}
+
+int tui_term_width(void) {
+    unsigned short rows, cols;
+    return tui_term_size(&rows, &cols) == 0 ? cols : 80;
 }
 
 int tui_term_height(void) {
-    struct winsize w;
-    if (ioctl(STDERR_FILENO, TIOCGWINSZ, &w) == 0 && w.ws_row > 0)
-        return w.ws_row;
-    return 24;
+    unsigned short rows, cols;
+    return tui_term_size(&rows, &cols) == 0 ? rows : 24;
 }
 
 /* ── Terminal output mutex — serializes cursor-positioned writes ──────── */
 static pthread_mutex_t g_term_mutex = PTHREAD_MUTEX_INITIALIZER;
 static volatile sig_atomic_t g_composer_reading = 0;
 static volatile sig_atomic_t g_composer_interrupt_requested = 0;
+static volatile sig_atomic_t g_composer_preserve_interrupt = 0;
 static volatile sig_atomic_t g_composer_restore_active = 0;
 static volatile sig_atomic_t g_composer_restore_top = 0;
 static volatile sig_atomic_t g_composer_restore_bottom = 0;
-static volatile sig_atomic_t g_composer_external_redraw_requested = 0;
 static tui_composer_escape_hook_t g_composer_escape_hook = NULL;
 static void *g_composer_escape_hook_ctx = NULL;
 
@@ -433,6 +445,10 @@ bool tui_composer_is_reading(void) {
     return g_composer_reading != 0;
 }
 
+void tui_composer_preserve_on_interrupt(bool preserve) {
+    g_composer_preserve_interrupt = preserve ? 1 : 0;
+}
+
 static void tui_clear_tracked_composer_area(int fd) {
     if (!g_composer_restore_active)
         return;
@@ -448,33 +464,40 @@ static void tui_clear_tracked_composer_area(int fd) {
     tui_composer_restore_untrack();
 }
 
-static bool tui_clear_tracked_composer_area_for_output(int fd) {
-    if (!g_composer_reading || !g_composer_restore_active)
+static bool tui_position_transcript_for_output(int fd) {
+    /* Keep the composer mounted in the rows below `top` and constrain normal
+     * terminal scrolling to the transcript above it. Output written at the
+     * bottom of that scroll region advances naturally one row at a time.
+     *
+     * Do not clear or request a repaint here. Thinking/text/tool transitions
+     * can all prepare output during one turn; the old clear-and-redraw handoff
+     * erased the pane repeatedly, moved the cursor through blank rows, and
+     * raced the composer thread. The scroll region is the isolation boundary:
+     * transcript writes cannot overwrite the fixed bottom pane. */
+    if (!g_composer_restore_active)
         return false;
     int top = (int)g_composer_restore_top;
     int bottom = (int)g_composer_restore_bottom;
     if (top < 1 || bottom < top)
         return false;
-    if (bottom - top > 80)
-        bottom = top + 80;
-    for (int row = top; row <= bottom; row++)
-        tui_write_clear_row(fd, row);
     int output_row = top > 1 ? top - 1 : 1;
     tui_write_scroll_region(fd, output_row);
     tui_write_move_cursor(fd, output_row, 1);
-    tui_write_clear_row(fd, output_row);
-    g_composer_external_redraw_requested = 1;
     return true;
 }
 
 bool tui_prepare_external_output(void) {
+    tui_term_lock();
+    bool cleared = tui_prepare_external_output_locked();
+    tui_term_unlock();
+    return cleared;
+}
+
+bool tui_prepare_external_output_locked(void) {
     int fd = isatty(STDERR_FILENO) ? STDERR_FILENO : STDOUT_FILENO;
     if (!isatty(fd))
         return false;
-    tui_term_lock();
-    bool cleared = tui_clear_tracked_composer_area_for_output(fd);
-    tui_term_unlock();
-    return cleared;
+    return tui_position_transcript_for_output(fd);
 }
 
 void tui_term_lock(void) {
@@ -657,8 +680,11 @@ static void repeat_str(const char *s, int n) {
 
 void tui_box(const char *title, const char *body, tui_box_style_t style, const char *border_color,
              int width) {
-    if (width <= 0)
-        width = tui_term_width();
+    int term_width = tui_term_width();
+    if (width <= 0 || width > term_width)
+        width = term_width;
+    if (width < 2)
+        width = 2;
     const tui_box_chars_t *bc = tui_box_chars(style);
     const char *col = border_color ? border_color : "";
     const char *rst = border_color ? TUI_RESET : "";
@@ -2937,8 +2963,19 @@ static void welcome_animated(const char *model, int core_count, int total_count,
     }
     fprintf(stderr, TUI_RESET "\n\n");
 
-    /* Hyper-dense sub-cell pixel reveal of the DSCO logo. */
-    welcome_pixel_logo();
+    /* Native-pixel animated wordmark in Kitty: frames are handed to the
+     * terminal's animation loop so the banner keeps moving persistently
+     * without a resident painter. Elsewhere the same frames are rasterised
+     * to ANSI half-block cells (one animation loop, then it settles); the
+     * braille reveal remains the last resort and honours an explicit
+     * DSCO_SPLASH palette choice. */
+    const char *splash_env = getenv("DSCO_SPLASH");
+    if (!(kitty_banner_available(stderr) && kitty_banner_render(stderr) > 0) &&
+        ((splash_env && *splash_env) ||
+         dsco_banner_render_cells(stderr, 1) <= 0)) {
+        /* Hyper-dense sub-cell pixel reveal of the DSCO logo. */
+        welcome_pixel_logo();
+    }
 
     fprintf(stderr, "\n");
 
@@ -3356,22 +3393,15 @@ void tui_status_bar_render(tui_status_bar_t *sb) {
     tui_term_unlock();
 }
 
-/* ── Input Panel / Composer (persistent bottom panel) ────────────────── */
+/* ── Input Panel / Composer (inline while awaiting input) ───────────── */
 /*
- * Layout (bottom 7 rows of the terminal, fixed by scroll-region trick):
- *   row N-6: top horizontal rule ─────────────
- *   row N-5: notification row 1 (middle whitespace / realtime notifications)
- *   row N-4: notification row 2 (middle whitespace / realtime notifications)
- *   row N-3: "❯ " + input (dual-state caret: colored when active, grey idle)
- *   row N-2: bottom horizontal rule ─────────────
- *   row N-1: dim hint footer ("↵ send · ⌥↵ newline · esc interrupt · /help")
- *   row N  : powerline status bar (drawn by tui_status_bar_render)
+ * The box is painted at the transcript cursor only while DSCO is waiting for
+ * input. On submit its footprint is cleared and ordinary terminal output
+ * resumes at that row, so thinking, tools, and assistant text enter real
+ * scrollback instead of competing with a fixed bottom pane.
  *
- * Multi-line input: the composer keeps a byte buffer, word-wraps and
- * scrolls internally so the cursor line is always visible on row N-3.
- * (Growing the box requires shrinking the scroll region, so we keep the
- * visible input fixed at 1 row for the persistent layout and scroll
- * the buffer instead.)
+ * Multi-line input keeps a byte buffer and word-wraps inside the temporary
+ * box. If it reaches the terminal bottom, only the missing rows are scrolled.
  *
  * Notifications: tui_panel_notify() pushes a (level, text, timestamp)
  * record into a tiny ring. The two middle rows render newest-first and
@@ -3417,7 +3447,7 @@ static bool tui_motion_unicode(void) {
 }
 
 static int tui_motion_accent_color(int frame, int offset) {
-    static const int colors[] = {213, 207, 201, 165, 129, 99, 63, 69, 75, 81, 117, 153};
+    static const int colors[] = {110, 110, 110, 109, 109, 109};
     int n = (int)(sizeof(colors) / sizeof(colors[0]));
     int idx = (frame + offset) % n;
     if (idx < 0)
@@ -3430,7 +3460,7 @@ static const char *tui_motion_border_color(bool active, bool animations_enabled,
     if (!active)
         return "\033[38;5;240m";
     if (!animations_enabled || tui_detect_color_level() < TUI_COLOR_256)
-        return "\033[38;5;213m";
+        return "\033[38;5;110m";
     snprintf(seq, sizeof(seq), "\033[38;5;%dm", tui_motion_accent_color(frame, 0));
     return seq;
 }
@@ -3685,12 +3715,24 @@ static int inbox_render(int r_top, const char *buf, size_t len, size_t cur, bool
     const char *border_col = tui_motion_border_color(active, animations_enabled, motion_frame);
     const char *reset = "\033[0m";
 
-    /* Top border */
+    /* Top border: a persistent command deck, not a transient prompt. Keep the
+     * chrome cell-addressed so the composer remains safe inside its scroll
+     * region while the agent transcript advances above it. */
     tui_cursor_move(r_top, 1);
-    fprintf(stderr, "\033[2K%s╭", border_col);
-    tui_motion_rule(cols - 2, active, animations_enabled, motion_frame);
-    fputs(border_col, stderr);
-    fprintf(stderr, "╮%s", reset);
+    fprintf(stderr, "\033[2K%s", border_col);
+    if (cols >= 58) {
+        const char *left_label = "input";
+        const char *right_label = "live";
+        int fixed = 7 + (int)strlen(left_label) + (int)strlen(right_label);
+        fprintf(stderr, "┌─ \033[1;38;5;252m%s%s ", left_label, border_col);
+        tui_motion_rule(cols - fixed, active, animations_enabled, motion_frame);
+        fputs(border_col, stderr);
+        fprintf(stderr, "\033[38;5;108m%s%s ─┐%s", right_label, border_col, reset);
+    } else {
+        fputs("╭", stderr);
+        tui_motion_rule(cols - 2, active, animations_enabled, motion_frame);
+        fprintf(stderr, "%s╮%s", border_col, reset);
+    }
 
     /* Content rows */
     size_t line_start = 0;
@@ -3710,10 +3752,10 @@ static int inbox_render(int r_top, const char *buf, size_t len, size_t cur, bool
 
             /* Left border + caret/continuation marker. Visible cells = 4. */
             if (line_idx == 0) {
-                fprintf(stderr, "%s│%s %s", border_col, reset,
-                        active ? "\033[1;38;5;213m❯\033[0m " : "\033[2;38;5;240m❯\033[0m ");
+                fprintf(stderr, "%s│\033[38;5;110m▏%s%s", border_col, reset,
+                        active ? "\033[1;38;5;110m›\033[0m " : "\033[2;38;5;240m›\033[0m ");
             } else {
-                fprintf(stderr, "%s│%s   ", border_col, reset);
+                fprintf(stderr, "%s│\033[2;38;5;110m▏%s  ", border_col, reset);
             }
             int prefix_cells = 4;
 
@@ -3809,10 +3851,10 @@ static int inbox_render(int r_top, const char *buf, size_t len, size_t cur, bool
     /* Bottom border */
     int r_bot = r_top + 1 + visible;
     tui_cursor_move(r_bot, 1);
-    fprintf(stderr, "\033[2K%s╰", border_col);
+    fprintf(stderr, "\033[2K%s└", border_col);
     tui_motion_rule(cols - 2, active, animations_enabled, motion_frame + 4);
     fputs(border_col, stderr);
-    fprintf(stderr, "╯%s", reset);
+    fprintf(stderr, "┘%s", reset);
 
     /* Scroll indicators on borders */
     if (vscroll > 0) {
@@ -3837,7 +3879,10 @@ static int inbox_render(int r_top, const char *buf, size_t len, size_t cur, bool
             fputs("· ", stderr);
         }
     }
-    fprintf(stderr, "↵ send · ⌥↵ newline · ctrl+c interrupt · /help\033[0m");
+    if (cols >= 74)
+        fprintf(stderr, "input stays live  ·  ↵ send  ·  ⌥↵ newline  ·  ctrl+c interrupt  ·  esc pause\033[0m");
+    else
+        fprintf(stderr, "↵ send · ⌥↵ newline · ctrl+c interrupt · /help\033[0m");
 
     return visible + 3;
 }
@@ -3992,11 +4037,15 @@ __attribute__((unused)) static int composer_draw_input(const char *prompt, const
  * disabled, the query fails, or it times out. DSR replies are terminal-generated
  * input; if they arrive after dsco stops reading, shells can execute fragments
  * such as "1R". Keep this opt-in via DSCO_TUI_DSR for known-good terminals. */
-static int tui_query_cursor_row(int fallback) {
+static int tui_query_cursor_row_impl(int fallback, bool composer_owns_raw_input) {
     int fd = STDIN_FILENO;
     if (!isatty(fd) || !isatty(STDERR_FILENO))
         return fallback;
-    if (!tui_cursor_report_queries_enabled())
+    const char *dsr = getenv("DSCO_TUI_DSR");
+    bool explicitly_disabled = dsr && dsr[0] &&
+                               (dsr[0] == '0' || strcasecmp(dsr, "false") == 0 ||
+                                strcasecmp(dsr, "no") == 0 || strcasecmp(dsr, "off") == 0);
+    if ((!composer_owns_raw_input && !tui_cursor_report_queries_enabled()) || explicitly_disabled)
         return fallback;
 
     struct termios saved, raw;
@@ -4060,6 +4109,10 @@ static int tui_query_cursor_row(int fallback) {
     return fallback;
 }
 
+static int tui_query_cursor_row(int fallback) {
+    return tui_query_cursor_row_impl(fallback, false);
+}
+
 void tui_pad_to_panel_anchor(void) {
     int rows = tui_term_height();
     int anchor = rows - 3; /* row just above the 3-row panel area */
@@ -4120,6 +4173,33 @@ static void composer_consume_csi_tail(unsigned char ch) {
         if (next >= 0x40 && next <= 0x7e)
             return;
     }
+}
+
+/* SGR mouse reports are CSI < button ; column ; row M/m.  The native pixel
+ * session owns the full cell grid, so terminal scrollback cannot handle wheel
+ * input there; consume wheel reports and move the retained transcript instead.
+ * Return false for malformed/incomplete reports so the normal CSI path can
+ * discard them without inserting escape bytes into the composer. */
+static bool composer_read_sgr_mouse(int *button, bool *released) {
+    char report[64];
+    size_t len = 0;
+    while (len + 1 < sizeof(report)) {
+        unsigned char ch = 0;
+        if (composer_read_byte(STDIN_FILENO, 30, &ch) <= 0)
+            return false;
+        report[len++] = (char)ch;
+        if (ch == 'M' || ch == 'm') {
+            report[len - 1] = '\0';
+            int b = -1, x = 0, y = 0;
+            if (sscanf(report, "%d;%d;%d", &b, &x, &y) != 3 || b < 0 ||
+                x < 1 || y < 1)
+                return false;
+            if (button) *button = b;
+            if (released) *released = ch == 'm';
+            return true;
+        }
+    }
+    return false;
 }
 
 /* Insert `s` (len bytes) at buf[cur], shifting the rest. Grows cursor. */
@@ -4478,6 +4558,12 @@ static int composer_paint(int r_top, const char *buf, size_t len, size_t cur, co
                           int sug_count, int sug_sel, int *cur_r, int *cur_c,
                           int imgpick_cnt, int imgpick_s,
                           int motion_frame, bool animations_enabled) {
+    if (pixel_tui_session_active()) {
+        pixel_tui_session_set_input(stderr, buf, cur, true);
+        if (cur_r) *cur_r = r_top;
+        if (cur_c) *cur_c = 1;
+        return 1;
+    }
     int h = inbox_render(r_top, buf, len, cur, true, motion_frame, animations_enabled,
                          cur_r, cur_c);
     int m = slashmenu_render(r_top + h, sug_idx, sug_count, sug_sel,
@@ -4515,8 +4601,12 @@ char *tui_composer_read(tui_status_bar_t *sb, const char *prompt, char *out, siz
     }
 
     /* Enable bracketed paste */
-    fprintf(stderr, "\033[?2004h");
-    fflush(stderr);
+    if (pixel_tui_session_active())
+        pixel_tui_session_terminal_control(stderr, "\033[?2004h");
+    else {
+        fprintf(stderr, "\033[?2004h");
+        fflush(stderr);
+    }
 
     char *buf = (char *)calloc(1, TUI_COMPOSER_BUF_CAP);
     if (!buf) {
@@ -4562,7 +4652,7 @@ char *tui_composer_read(tui_status_bar_t *sb, const char *prompt, char *out, siz
     pthread_mutex_lock(&sb->mutex);
     char model_copy[64];
     snprintf(model_copy, sizeof(model_copy), "%s", sb->model);
-    bool animations_enabled = sb->animations_enabled;
+    bool animations_enabled = sb->animations_enabled && !pixel_tui_session_active();
     double motion_started_at = panel_now_s();
     sb->motion_started_at = motion_started_at;
     sb->motion_frame = 0;
@@ -4577,30 +4667,39 @@ char *tui_composer_read(tui_status_bar_t *sb, const char *prompt, char *out, siz
     (void)sm;
     (void)prompt;
     int rows = tui_term_height();
+    int observed_cols = tui_term_width();
 
     /* Mark panel active — caret renders in its colored state while we're
      * reading keystrokes. Cleared on exit below. */
     tui_panel_set_active(sb, true);
 
-    /* Anchor the inline box at the current cursor row. If the box would
-     * extend past the bottom of the terminal, scroll up first so it fits.
-     * We track r_top across keystrokes so resize/growth can re-anchor. */
+    /* Anchor the inline box at the transcript cursor. If the box would extend
+     * past the terminal, scroll only the missing rows. This makes the prompt
+     * appear directly after prior output and lets the terminal advance one
+     * line at a time as the session grows. */
     int needed = inbox_total_rows(buf, len);
-    /* Pin the composer to the bottom of the terminal. Open `needed` rows at the
-     * bottom by scrolling existing output up, then anchor the box so its last
-     * row sits on the final terminal row. This keeps the input field fixed at
-     * the bottom instead of floating wherever the previous turn left the
-     * cursor. */
-    int r_top = rows - needed + 1;
+    /* The composer has already entered raw mode and exclusively owns stdin,
+     * so its CPR exchange cannot race ordinary user input. */
+    int r_top = pixel_tui_session_active() ? rows - needed + 1 :
+                                             tui_query_cursor_row_impl(rows - needed + 1, true);
     if (r_top < 1)
         r_top = 1;
-    tui_term_lock();
-    tui_cursor_move(rows, 1);
-    for (int i = 0; i < needed; i++)
-        fputc('\n', stderr);
-    fflush(stderr);
-    tui_term_unlock();
-    tui_composer_restore_track(r_top, rows);
+    int overflow = r_top + needed - 1 - rows;
+    if (overflow > 0) {
+        tui_term_lock();
+        tui_cursor_move(rows, 1);
+        for (int i = 0; i < overflow; i++)
+            fputc('\n', stderr);
+        fflush(stderr);
+        tui_term_unlock();
+        r_top -= overflow;
+        if (r_top < 1)
+            r_top = 1;
+    }
+    if (pixel_tui_session_active())
+        tui_composer_restore_untrack();
+    else
+        tui_composer_restore_track(r_top, rows);
     int prev_height = 0;
     int prev_r_top = r_top;
 
@@ -4611,8 +4710,10 @@ char *tui_composer_read(tui_status_bar_t *sb, const char *prompt, char *out, siz
     prev_height = composer_paint(r_top, buf, len, cur, sug_idx, sug_count, sug_sel,
                                  &cur_r, &cur_c, imgpick_count, imgpick_sel,
                                  motion_frame, animations_enabled);
-    tui_cursor_move(cur_r, cur_c);
-    fprintf(stderr, "\033[?25h");
+    if (!pixel_tui_session_active()) {
+        tui_cursor_move(cur_r, cur_c);
+        fprintf(stderr, "\033[?25h");
+    }
     fflush(stderr);
     tui_term_unlock();
 
@@ -4634,7 +4735,17 @@ char *tui_composer_read(tui_status_bar_t *sb, const char *prompt, char *out, siz
             cancelled = true;
             break;
         }
-        if (g_composer_external_redraw_requested) {
+        /* Resize is a live rendering event, not something deferred until the
+         * user submits. Rebuild the Kitty framebuffer and repaint this box as
+         * soon as the terminal cell geometry changes. */
+        int live_rows = tui_term_height();
+        int live_cols = tui_term_width();
+        if (live_rows != rows || live_cols != observed_cols) {
+            rows = live_rows;
+            observed_cols = live_cols;
+            tui_term_lock();
+            pixel_tui_session_refresh(stderr);
+            tui_term_unlock();
             goto redraw;
         }
         /* Cheap, non-blocking check first: if presence has engaged the lock
@@ -4670,9 +4781,6 @@ char *tui_composer_read(tui_status_bar_t *sb, const char *prompt, char *out, siz
         struct timeval tv = {.tv_sec = 0, .tv_usec = wait_ms * 1000};
         int sr = select(STDIN_FILENO + 1, &rfd, NULL, NULL, &tv);
         if (sr == 0) {
-            if (g_composer_external_redraw_requested) {
-                goto redraw;
-            }
             if (motion_live) {
                 int next_frame = tui_motion_frame_from_elapsed(motion_started_at, panel_now_s());
                 if (next_frame != motion_frame) {
@@ -4938,6 +5046,32 @@ char *tui_composer_read(tui_status_bar_t *sb, const char *prompt, char *out, siz
                 if (composer_read_byte(STDIN_FILENO, 30, &n2) <= 0) {
                     cancelled = true; break;
                 }
+                if ((n2 == '5' || n2 == '6') && pixel_tui_session_active()) {
+                    composer_consume_csi_tail(n2);
+                    pixel_tui_session_scroll(stderr, n2 == '5' ? 10 : -10);
+                    goto redraw;
+                }
+                if (n2 == '<' && pixel_tui_session_active()) {
+                    int button = -1;
+                    bool released = false;
+                    if (composer_read_sgr_mouse(&button, &released) && !released) {
+                        /* XTerm/Kitty SGR wheel: bit 6 identifies wheel input;
+                         * bit 0 selects up/down. Shift/Alt/Ctrl modifier bits
+                         * may be ORed in, so equality with 64/65 is incorrect. */
+                        if ((button & 0x40) != 0) {
+                            /* Three lines was imperceptible against the native
+                             * compositor's dense transcript. One wheel notch
+                             * advances a useful visual chunk; Shift requests a
+                             * page-scale jump without changing terminal-wide
+                             * scroll settings. */
+                            int step = (button & 0x04) != 0 ? 24 : 8;
+                            pixel_tui_session_scroll(stderr,
+                                (button & 0x01) == 0 ? step : -step);
+                            goto redraw;
+                        }
+                    }
+                    goto redraw;
+                }
                 if (n2 == 'A') { /* Up */
                     if (s_composer_history_count > 0 && hist_pos > 0) {
                         hist_pos--;
@@ -4953,7 +5087,7 @@ char *tui_composer_read(tui_status_bar_t *sb, const char *prompt, char *out, siz
                         len = cur = strlen(buf);
                     } else {
                         hist_pos = s_composer_history_count;
-                        buf[0] = ' '; len = cur = 0;
+                        buf[0] = '\0'; len = cur = 0;
                     }
                     goto redraw;
                 }
@@ -5173,39 +5307,36 @@ char *tui_composer_read(tui_status_bar_t *sb, const char *prompt, char *out, siz
               if (imgpick_sel < 0) imgpick_sel = 0; }
             int need = inbox_total_rows(buf, len) + slashmenu_rows(sug_count)
                        + (imgpick_count < TUI_IMGPICK_MAX ? imgpick_count : TUI_IMGPICK_MAX);
-            (void)g_composer_external_redraw_requested;
-            g_composer_external_redraw_requested = 0;
-            /* Always pin to the bottom: anchor the box so its last row is the
-             * final terminal row. When the box grew (more lines) or the
-             * terminal shrank, open room by scrolling existing output up so the
-             * box never spills off-screen and never floats mid-window. */
-            int new_r_top = nrows - need + 1;
+            int new_r_top = pixel_tui_session_active() ? nrows - need + 1 : prev_r_top;
             if (new_r_top < 1)
                 new_r_top = 1;
-            int prev_bottom = prev_r_top + prev_height - 1;
-            if (new_r_top < prev_r_top || prev_height == 0) {
-                /* Need more rows than before (or first paint after re-anchor):
-                 * scroll the terminal up to make space at the bottom. */
-                int grow = (prev_height == 0) ? need : (prev_r_top - new_r_top);
-                if (grow > 0) {
-                    tui_term_lock();
-                    fprintf(stderr, "\033[?25l");
-                    tui_cursor_move(nrows, 1);
-                    for (int i = 0; i < grow; i++)
-                        fputc('\n', stderr);
-                    fflush(stderr);
-                    tui_term_unlock();
-                }
+            int grow = new_r_top + need - 1 - nrows;
+            if (grow > 0) {
+                tui_term_lock();
+                fprintf(stderr, "\033[?25l");
+                tui_cursor_move(nrows, 1);
+                for (int i = 0; i < grow; i++)
+                    fputc('\n', stderr);
+                fflush(stderr);
+                tui_term_unlock();
+                new_r_top -= grow;
+                prev_r_top -= grow;
+                if (new_r_top < 1)
+                    new_r_top = 1;
+                if (prev_r_top < 1)
+                    prev_r_top = 1;
             }
+            int prev_bottom = prev_r_top + prev_height - 1;
             if (nrows != rows)
                 rows = nrows;
-            tui_composer_restore_track(new_r_top, rows);
+            if (!pixel_tui_session_active())
+                tui_composer_restore_track(new_r_top, rows);
 
             tui_term_lock();
             fprintf(stderr, "\033[?25l");
             /* Erase the entire previous footprint when the box moved or shrank,
              * so no stale border rows linger above/below (the "shadow"). */
-            if (prev_height > 0) {
+            if (!pixel_tui_session_active() && prev_height > 0) {
                 int old_top = prev_r_top;
                 int old_bot = prev_bottom;
                 for (int r = old_top; r <= old_bot; r++) {
@@ -5221,39 +5352,49 @@ char *tui_composer_read(tui_status_bar_t *sb, const char *prompt, char *out, siz
             prev_height =
                 composer_paint(r_top, buf, len, cur, sug_idx, sug_count, sug_sel, &cr, &cc,
                                imgpick_count, imgpick_sel, motion_frame, animations_enabled);
-            tui_cursor_move(cr, cc);
-            fprintf(stderr, "\033[?25h");
+            if (!pixel_tui_session_active()) {
+                tui_cursor_move(cr, cc);
+                fprintf(stderr, "\033[?25h");
+            }
             fflush(stderr);
             tui_term_unlock();
         }
     }
 
     /* Cleanup — disable bracketed paste, restore termios */
-    fprintf(stderr, "\033[?2004l");
-    fflush(stderr);
+    if (pixel_tui_session_active())
+        pixel_tui_session_terminal_control(stderr, "\033[?2004l");
+    else {
+        fprintf(stderr, "\033[?2004l");
+        fflush(stderr);
+    }
     tui_term_state_exit(TUI_TERM_STATE_COMPOSER);
 
     /* Panel is no longer reading keystrokes — caret returns to idle grey
      * on the next repaint. */
     tui_panel_set_active(sb, false);
 
-    /* Keep the input panel permanently mounted while execution proceeds.
-     *
-     * Historically submit erased the composer and reset DECSTBM so streamed
-     * agent/tool output could flow through the full terminal. That made the
-     * input surface disappear exactly when long-running agents were active.
-     * Instead, repaint the composer in its idle state and keep the scroll
-     * region clamped above it; subsequent output scrolls in the transcript
-     * area while the bottom panel remains persistent. The next
-     * tui_composer_read() call reuses/repaints the same bottom surface. */
+    /* In the native workspace, submission is a handoff between composer
+     * readers, not a reason to remove the command deck. Leave an empty pane
+     * mounted and keep the transcript scroll region above it; keystrokes that
+     * arrive before the follow-up reader starts remain buffered by the TTY. */
     tui_term_lock();
     fprintf(stderr, "\033[?25l");
-    tui_composer_restore_track(r_top, r_top + prev_height - 1);
-    int idle_cr = r_top + 1, idle_cc = 5;
-    (void)composer_paint(r_top, buf, len, cur, sug_idx, sug_count, sug_sel, &idle_cr, &idle_cc,
-                         imgpick_count, imgpick_sel, motion_frame, animations_enabled);
-    tui_cursor_move(r_top > 1 ? r_top - 1 : 1, 1);
-    fprintf(stderr, "\033[?25h");
+    if (pixel_tui_session_active()) {
+        pixel_tui_session_set_input(stderr, "", 0, false);
+        tui_composer_restore_untrack();
+    } else {
+        for (int r = r_top; r < r_top + prev_height; r++) {
+            if (r >= 1 && r <= tui_term_height()) {
+                tui_cursor_move(r, 1);
+                fprintf(stderr, "\033[2K");
+            }
+        }
+        tui_composer_restore_untrack();
+        tui_cursor_move(r_top, 1);
+    }
+    if (!pixel_tui_session_active())
+        fprintf(stderr, "\033[?25h");
     fflush(stderr);
     tui_term_unlock();
     g_composer_reading = 0;
@@ -8573,7 +8714,7 @@ static void *outq_render_thread(void *arg) {
         /* Drain all entries under lock */
         double flush_start = tui_now_sec();
         int flushed = 0;
-        bool composer_clear_attempted = false;
+        bool composer_position_attempted = false;
 
         while (q->count > 0) {
             tui_out_entry_t *e = &q->ring[q->tail];
@@ -8582,16 +8723,14 @@ static void *outq_render_thread(void *arg) {
              * g_term_mutex (LOCK_HIERARCHY_TERM). Since TERM has lower precedence,
              * we must release q->mutex first to avoid deadlock.
              *
-             * Attempt the clear at most once per drain, tracked separately from
-             * whether anything was actually cleared: keying the retry on the
-             * clear's *result* spins this loop forever whenever no composer is
-             * open (the common case — the clear returns false), pinning a core
-             * on every idle session. */
-            if (!composer_clear_attempted && e->type != TUI_OUT_FLUSH) {
-                composer_clear_attempted = true;
+             * Position output at most once per drain. Keying the retry on the
+             * helper's result spins forever whenever no composer is open (the
+             * common case), pinning a core on every idle session. */
+            if (!composer_position_attempted && e->type != TUI_OUT_FLUSH) {
+                composer_position_attempted = true;
                 pthread_mutex_unlock(&q->mutex);  /* Release OUTQ lock first */
                 tui_term_lock();                   /* Then acquire TERM lock */
-                (void)tui_clear_tracked_composer_area_for_output(fileno(q->out));
+                (void)tui_position_transcript_for_output(fileno(q->out));
                 tui_term_unlock();                 /* Release TERM lock */
                 pthread_mutex_lock(&q->mutex);     /* Re-acquire OUTQ lock */
                 continue;  /* Re-examine queue state under fresh lock */
@@ -9716,6 +9855,10 @@ static void permission_print_inner_row(const char *text, const char *style, int 
 
 tui_perm_result_t tui_permission_prompt(const char *tool_name, const char *description,
                                         const char *detail) {
+    bool resume_pixel = pixel_tui_session_active() &&
+                        !pixel_tui_session_terminal_suspended();
+    if (resume_pixel)
+        pixel_tui_session_suspend_terminal(stderr);
     tui_prepare_external_output();
     int w = tui_term_width();
     if (w > 80)
@@ -9784,17 +9927,27 @@ tui_perm_result_t tui_permission_prompt(const char *tool_name, const char *descr
     fflush(stderr);
 
     /* Read response */
+    tui_perm_result_t result = TUI_PERM_CANCEL;
     while (1) {
         int ch = read_single_char();
-        if (ch == 'y' || ch == 'Y')
-            return TUI_PERM_ALLOW;
-        if (ch == 'n' || ch == 'N')
-            return TUI_PERM_DENY;
-        if (ch == 'a' || ch == 'A')
-            return TUI_PERM_ALWAYS;
+        if (ch == 'y' || ch == 'Y') {
+            result = TUI_PERM_ALLOW;
+            break;
+        }
+        if (ch == 'n' || ch == 'N') {
+            result = TUI_PERM_DENY;
+            break;
+        }
+        if (ch == 'a' || ch == 'A') {
+            result = TUI_PERM_ALWAYS;
+            break;
+        }
         if (ch == 27 || ch == 'q' || ch == 'Q')
-            return TUI_PERM_CANCEL;
+            break;
     }
+    if (resume_pixel)
+        pixel_tui_session_resume_terminal(stderr);
+    return result;
 }
 
 bool tui_confirm(const char *question) {
@@ -10117,8 +10270,14 @@ tui_ask_status_t tui_ask_questions(tui_ask_question_t *qs, int n_questions, cons
         chat_out[0] = '\0';
     if (n_questions <= 0)
         return TUI_ASK_CANCEL;
-    if (!isatty(STDIN_FILENO) || !isatty(STDERR_FILENO))
+    if (!isatty(STDIN_FILENO) ||
+        (!isatty(STDERR_FILENO) && !pixel_tui_session_active()))
         return TUI_ASK_CANCEL;
+
+    bool resume_pixel = pixel_tui_session_active() &&
+                        !pixel_tui_session_terminal_suspended();
+    if (resume_pixel)
+        pixel_tui_session_suspend_terminal(stderr);
 
     int vis[TUI_ASK_MAX_QUESTIONS];
     int tabpos = 0, row = 0;
@@ -10212,6 +10371,8 @@ tui_ask_status_t tui_ask_questions(tui_ask_question_t *qs, int n_questions, cons
     tui_cursor_show();
     fprintf(stderr, "\033[2J\033[H");
     fflush(stderr);
+    if (resume_pixel)
+        pixel_tui_session_resume_terminal(stderr);
     return status;
 }
 
@@ -11309,7 +11470,12 @@ int tui_menu_run(tui_menu_t *m, tui_menu_item_t **out_item) {
 
     const tui_glyphs_t *g = tui_glyph();
     const char *accent = m->accent ? m->accent : TUI_BCYAN;
-    bool tty = isatty(STDIN_FILENO) && isatty(STDERR_FILENO);
+    bool tty = isatty(STDIN_FILENO) &&
+               (isatty(STDERR_FILENO) || pixel_tui_session_active());
+    bool resume_pixel = pixel_tui_session_active() &&
+                        !pixel_tui_session_terminal_suspended();
+    if (resume_pixel)
+        pixel_tui_session_suspend_terminal(stderr);
 
     static menu_row_t rows[MENU_ROWS_MAX];
     int nrows = 0;
@@ -11501,6 +11667,8 @@ int tui_menu_run(tui_menu_t *m, tui_menu_item_t **out_item) {
     tui_cursor_show();
     fflush(stderr);
     tui_term_unlock();
+    if (resume_pixel)
+        pixel_tui_session_resume_terminal(stderr);
     return result;
 }
 

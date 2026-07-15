@@ -25,6 +25,8 @@ typedef enum {
     TOOLS_CORE = 0,
     TOOLS_AGENT,
     TOOLS_FULL,
+    /* Fixed builtin allowlist: Bash, curl_raw, and ssh_command only. */
+    TOOLS_RESTRICTED,
 } tools_init_profile_t;
 
 void tools_init_profile(tools_init_profile_t profile);

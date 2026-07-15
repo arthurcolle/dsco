@@ -614,6 +614,8 @@ void tui_input_panel_render(tui_status_bar_t *sb, const char *prompt_hint);
 void tui_input_panel_clear(tui_status_bar_t *sb);
 void tui_bottom_panel_refresh(tui_status_bar_t *sb, const char *prompt_hint);
 bool tui_prepare_external_output(void);
+/* Same operation with no internal locking; caller must hold tui_term_lock(). */
+bool tui_prepare_external_output_locked(void);
 
 /* Push cursor down with newlines until it sits just above the input panel
  * area (row `rows - 3`). No-op if cursor already at/past that row. By default
@@ -647,6 +649,10 @@ void tui_composer_set_escape_hook(tui_composer_escape_hook_t hook, void *ctx);
  * and 2 when an interrupt was already pending. */
 int tui_composer_signal_interrupt(void);
 bool tui_composer_is_reading(void);
+/* Keep the native command deck mounted when an internal reader handoff
+ * interrupts the composer. User cancellation and raw-stdin tools leave this
+ * disabled so their terminal ownership remains unambiguous. */
+void tui_composer_preserve_on_interrupt(bool preserve);
 
 /* ── Swarm UI ─────────────────────────────────────────────────────────── */
 typedef struct {
