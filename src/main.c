@@ -8,6 +8,7 @@
 #include "config.h"
 #include "harden.h"
 #include "tui.h"
+#include "pixel_tui.h"
 #include "llm.h"
 #include "tools.h"
 #include "pets.h"
@@ -1140,7 +1141,7 @@ typedef struct {
 static const native_provider_t NATIVE_PROVIDERS[] = {
     { "anthropic",  "Anthropic Claude API",      "ANTHROPIC_API_KEY",   "claude-opus-4-6",
       CAP_TOOLS|CAP_MULTITURN|CAP_STREAMING|CAP_VISION|CAP_THINKING|CAP_JSON|CAP_CACHE, 4 },
-    { "openai",     "OpenAI API",                "OPENAI_API_KEY",      "gpt-4.1",
+    { "openai",     "OpenAI API",                "OPENAI_API_KEY",      "gpt-5.6-luna",
       CAP_TOOLS|CAP_MULTITURN|CAP_STREAMING|CAP_VISION|CAP_JSON, 3 },
     { "openrouter", "OpenRouter (multi-model)",   "OPENROUTER_API_KEY", "moonshotai/kimi-k2.7-code",
       CAP_TOOLS|CAP_MULTITURN|CAP_STREAMING|CAP_VISION|CAP_JSON, 4 },
@@ -3138,7 +3139,8 @@ static int run_structured_process_cli(const char *mode, const char *prompt) {
 
     char tree[32768];
     plan_tree_render(plan_id, tree, sizeof(tree));
-    printf("%s", tree);
+    if (pixel_tui_render_plan(stdout, plan_id) == 0)
+        printf("%s", tree);
     return run && plan_get(plan_id) && plan_get(plan_id)->status == PLAN_FAILED ? 1 : 0;
 }
 
@@ -3673,8 +3675,10 @@ static int main_dispatch_subcommand_normalized(int argc, char **argv,
     const char *sub = nargv[1];
     int rc = -1;
     *handled = true;
-    if (strcmp(sub, "tools") == 0)
+    if (strcmp(sub, "tools") == 0) {
+        dsco_setup_load_saved_env(); /* resolve TOOLS_API_TOKEN et al. from ~/.dsco/env */
         rc = toolmgmt_cli(nargc, nargv);
+    }
     else if (strcmp(sub, "runs") == 0)
         rc = chronicle_runs_cli(nargc, nargv);
     else if (strcmp(sub, "callbacks") == 0)
@@ -4922,6 +4926,15 @@ int main(int argc, char **argv) {
         native_provider_model_selected = true;
     }
 
+    /* The baked no-argument runtime defaults to the native OpenAI lane. Keep
+     * explicit model/provider/key/DSCO_EXEC choices layerable, but do not let
+     * ambient credential discovery silently replace the issued default. */
+    if (!local_mode && !exec_backend && !api_key && !user_set_model && !model_from_env) {
+        model = DEFAULT_MODEL;
+        g_provider_override = "openai";
+        native_provider_model_selected = true;
+    }
+
     if (!provider_fabric_mode && oneshot_prompt && !user_set_model && !exec_backend &&
         !interactive_mode && !local_mode && !orchestrate_mode && !topology_name &&
         !topology_auto && !topology_list_mode && !topology_show_mode && !setup_mode &&
@@ -5744,6 +5757,16 @@ native_path:
     api_key = resolved_api_key;
     provider_debug_log_request(active_provider, model, api_key);
 
+    /* `--interactive "first prompt"` is an interactive session seeded with a
+     * first turn, not a headless one-shot. Keeping the prompt on the one-shot
+     * branch bypasses the native compositor and makes the CLI appear to have
+     * fallen back to its legacy TUI even inside Kitty. */
+    if (interactive_mode && oneshot_prompt) {
+        agent_set_initial_prompt(oneshot_prompt);
+        free(oneshot_prompt);
+        oneshot_prompt = NULL;
+    }
+
     if (!baseline_start(model, oneshot_prompt ? "oneshot" : "interactive")) {
         fprintf(stderr, "warning: baseline disabled (sqlite unavailable)\n");
     }
@@ -5953,8 +5976,8 @@ native_path:
                  * path that uses provider_select_default_primary_model(). */
                 if (!g_provider_override && !oneshot_failed_over &&
                     (sr.http_status == 401 || sr.http_status == 402 ||
-                     sr.http_status == 403 || sr.http_status == 429 ||
-                     provider_msg_is_credit_too_low(sr.parsed.stop_reason))) {
+                     sr.http_status == 403 ||
+                     provider_stream_result_is_credit_exhausted(active_provider, &sr))) {
                     const char *fb_model = provider_select_default_primary_model(
                         prompt_looks_code_task(oneshot_prompt));
                     const char *fb_alias = fb_model ? model_resolve_alias(fb_model) : NULL;

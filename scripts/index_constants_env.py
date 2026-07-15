@@ -468,7 +468,6 @@ def write_markdown(path: Path, constants: list[Constant], envs: list[EnvVar], su
         value = c.value[:120] + ("…" if len(c.value) > 120 else "")
         proposed = f"`{c.proposed_env}`" if c.proposed_env else "—"
         lines.append(f"| `{c.name}` | {proposed} | `{c.category}` | `{c.file}:{c.line}` | `{md_escape(value)}` |")
-    lines.append("")
 
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text("\n".join(lines) + "\n")

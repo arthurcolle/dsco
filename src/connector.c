@@ -2261,11 +2261,17 @@ static int conn_cli_kinds(void) {
     return 0;
 }
 
+static int conn_cli_return(char *owned_config, int rc) {
+    free(owned_config);
+    return rc;
+}
+
 int connector_cli(int argc, char **argv) {
     connector_register_builtins();
 
     /* Pull options from anywhere in the argv tail; keep positionals in rest. */
     const char *config = NULL, *require = NULL, *seed = NULL;
+    char *owned_config = NULL;
     int max = 1, until_stable = 0;
     char *rest[128];
     int nrest = 0;
@@ -2309,61 +2315,63 @@ int connector_cli(int argc, char **argv) {
             fprintf(stderr, "config: cannot read file '%s'\n", config + 1);
             return 1;
         }
-        config = loaded; /* leaked intentionally; process is one-shot */
+        owned_config = loaded;
+        config = owned_config;
     }
 
     if (strcmp(rest[0], "kinds") == 0)
-        return conn_cli_kinds();
+        return conn_cli_return(owned_config, conn_cli_kinds());
 
     if (strcmp(rest[0], "describe") == 0) {
         if (nrest < 2) {
             fprintf(stderr, "describe: need <kind>\n");
-            return 2;
+            return conn_cli_return(owned_config, 2);
         }
         char err[256];
         connector_t *c = connector_open(rest[1], config, err, sizeof(err));
         if (!c) {
             fprintf(stderr, "%s\n", err);
-            return 1;
+            return conn_cli_return(owned_config, 1);
         }
         char *doc = connector_describe(c);
         connector_close(c);
         if (!doc) {
             fprintf(stderr, "%s: no manifest\n", rest[1]);
-            return 1;
+            return conn_cli_return(owned_config, 1);
         }
         printf("%s\n", doc);
         free(doc);
-        return 0;
+        return conn_cli_return(owned_config, 0);
     }
 
     if (strcmp(rest[0], "schema") == 0) {
         if (nrest < 3) {
             fprintf(stderr, "schema: need <kind> <method>\n");
-            return 2;
+            return conn_cli_return(owned_config, 2);
         }
         char err[256];
         connector_t *c = connector_open(rest[1], config, err, sizeof(err));
         if (!c) {
             fprintf(stderr, "%s\n", err);
-            return 1;
+            return conn_cli_return(owned_config, 1);
         }
         char *sc = connector_schema(c, rest[2]);
         connector_close(c);
         if (!sc) {
             fprintf(stderr, "%s/%s: no schema available\n", rest[1], rest[2]);
-            return 1;
+            return conn_cli_return(owned_config, 1);
         }
         printf("%s\n", sc);
         free(sc);
-        return 0;
+        return conn_cli_return(owned_config, 0);
     }
 
     if (strcmp(rest[0], "pipe") == 0)
-        return conn_cli_pipe(&rest[1], nrest - 1, config, require);
+        return conn_cli_return(owned_config, conn_cli_pipe(&rest[1], nrest - 1, config, require));
 
     if (strcmp(rest[0], "loop") == 0)
-        return conn_cli_loop(&rest[1], nrest - 1, config, require, max, until_stable, seed);
+        return conn_cli_return(owned_config, conn_cli_loop(&rest[1], nrest - 1, config, require,
+                                                           max, until_stable, seed));
 
     int streaming = 0, off = 0;
     if (strcmp(rest[0], "stream") == 0) {
@@ -2374,7 +2382,7 @@ int connector_cli(int argc, char **argv) {
     /* [stream] <kind> <method> [k=v ...] */
     if (nrest - off < 2) {
         fprintf(stderr, "need <kind> <method>\n");
-        return 2;
+        return conn_cli_return(owned_config, 2);
     }
     const char *kind = rest[off];
     const char *method = rest[off + 1];
@@ -2388,12 +2396,12 @@ int connector_cli(int argc, char **argv) {
     if (!c) {
         fprintf(stderr, "%s\n", err);
         jbuf_free(&params);
-        return 1;
+        return conn_cli_return(owned_config, 1);
     }
     if (!conn_require_ok(c, require)) {
         connector_close(c);
         jbuf_free(&params);
-        return 1;
+        return conn_cli_return(owned_config, 1);
     }
 
     conn_result_t res;
@@ -2407,11 +2415,11 @@ int connector_cli(int argc, char **argv) {
     if (res.status < 0) {
         fprintf(stderr, "error: %s\n", res.error[0] ? res.error : "transport failure");
         conn_result_free(&res);
-        return 1;
+        return conn_cli_return(owned_config, 1);
     }
     if (res.body)
         printf("%s\n", res.body);
     int rc = (res.status == 0) ? 0 : 1;
     conn_result_free(&res);
-    return rc;
+    return conn_cli_return(owned_config, rc);
 }

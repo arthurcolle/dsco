@@ -3,8 +3,8 @@
  *
  *   dsco-banner                  render into the current Kitty window (falls
  *                                back to ANSI half-block cells elsewhere)
- *   dsco-banner --layers         z-stacked variant: five independent pixel
- *                                planes, each its own terminal-side loop
+ *   dsco-banner --layers [N]     z-stacked variant: five pixel planes flipped
+ *                                client-side at independent tempos, N cycles
  *   dsco-banner --cells [N]      finite renderer, N loops: pixel-native on
  *                                Kitty-protocol terminals, sextant/half-block
  *                                mosaics elsewhere (DSCO_BANNER_CELLS pins)
@@ -19,7 +19,9 @@
 
 int main(int argc, char **argv) {
     if (argc >= 2 && strcmp(argv[1], "--layers") == 0) {
-        if (kitty_banner_available(stdout) && kitty_banner_render_layers(stdout))
+        int loops = argc >= 3 ? atoi(argv[2]) : 3;
+        if (kitty_banner_available(stdout) &&
+            kitty_banner_render_layers(stdout, loops))
             return 0;
         fprintf(stderr,
                 "dsco-banner: layered render needs the Kitty graphics "

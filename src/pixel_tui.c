@@ -2390,9 +2390,12 @@ static bool session_upload_state(FILE *out, const char *model, int width, int he
     if (out_image_id) *out_image_id = image_id;
     px_canvas_t *canvas = render_session_frame(width, height, model, state);
     if (!canvas) return false;
+    /* The canvas is placed over the complete terminal grid below. Its raster
+     * dimensions must therefore already match the terminal's logical surface:
+     * never let Kitty perform a second resize of an undersized upload. */
     snprintf(control, sizeof(control),
              "a=t,t=d,f=24,s=%d,v=%d,i=%u,q=2,o=z",
-             width, height, image_id);
+             canvas->width, canvas->height, image_id);
     bool sent = send_kitty_pixels(out, control, canvas, false);
     const char *snapshot = getenv("DSCO_PIXEL_TUI_SESSION_SNAPSHOT");
     if (snapshot && *snapshot &&
@@ -2621,6 +2624,7 @@ static bool session_repaint(FILE *out, bool force) {
     uint32_t generation = g_session.generation + 1;
     uint32_t next_id = session_image_id(generation, g_session.state);
     char control[256];
+    /* Keep Kitty's declared source size identical to the actual raster. */
     snprintf(control, sizeof(control), "a=t,t=d,f=24,s=%d,v=%d,i=%u,q=2,o=z",
              canvas->width, canvas->height, next_id);
     if (!send_kitty_pixels(out, control, canvas, false)) {
@@ -2772,7 +2776,10 @@ bool pixel_tui_session_begin(FILE *out, const char *model) {
     uint32_t generation = 1;
     uint32_t image_ids[4] = {0};
 
-    fprintf(out, "\033[?1049h\033[2J\033[H\033[?25l");
+    /* SGR mouse mode gives the composer wheel events while the framebuffer
+     * owns the alternate screen. Limit tracking to button events: reporting
+     * every motion event only adds input pressure and has no UI consumer. */
+    fprintf(out, "\033[?1049h\033[2J\033[H\033[?25l\033[?1000h\033[?1006h");
     /* Upload only the visible state. The previous four-frame eager upload made
      * startup encode and transmit four full screens before input became live;
      * other state images are produced lazily on transition. */
@@ -3540,7 +3547,7 @@ void pixel_tui_session_end(FILE *out) {
     out = session_output(out);
     session_clear_overlay(out);
     for (int i = 0; i < 4; i++) session_delete_image(out, g_session.image_ids[i], true);
-    fprintf(out, "\033[?25h\033[0m\033[?1049l");
+    fprintf(out, "\033[?1000l\033[?1006l\033[?25h\033[0m\033[?1049l");
     fflush(out);
     session_restore_stdio();
     g_session.terminal_suspended = true;
@@ -3815,15 +3822,21 @@ static px_canvas_t *render_scene_frame(const char *scene_json, int width,
     }
     int height = requested_height;
     if (height <= 0) {
-        /* Fit the surface to the laid-out content. */
+        /* Fit the surface to the laid-out content. Grown containers fill the
+         * probe viewport, so only leaves measure real content extent; their
+         * ancestors' bottom padding rides on top. */
         int bottom = 0;
         for (int i = 0; i < scene->count; i++) {
             const native_ui_node_t *node = &scene->nodes[i];
-            if (!(node->state & NATIVE_UI_STATE_VISIBLE)) continue;
+            if (!(node->state & NATIVE_UI_STATE_VISIBLE) ||
+                node->first_child >= 0)
+                continue;
             int edge = node->frame.y + node->frame.height;
+            for (int at = node->parent; at >= 0; at = scene->nodes[at].parent)
+                edge += scene->nodes[at].style.padding.bottom;
             if (edge > bottom) bottom = edge;
         }
-        height = bottom + 16;
+        height = bottom + 12;
         if (height < 160) height = 160;
         if (height > 900) height = 900;
         if (height != probe_height &&

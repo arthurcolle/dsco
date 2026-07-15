@@ -4,9 +4,9 @@
  * Everything here exercises the public native_ui API (no tty, no kitty, no
  * statics), so it runs headless and deterministic. Threshold constants match
  * native_ui_terminal_viewport() as of 2026-07-14:
- *   backing 3x when cell_h >= 38 or cell_w >= 27
  *   backing 2x when cell_h >= 24 or cell_w >= 14
  *   otherwise 1x; explicit requested_scale 1..4 always wins.
+ * Font cell size cannot safely distinguish 2x from 3x backing; 3x is explicit.
  */
 
 #include "native_ui.h"
@@ -72,24 +72,24 @@ static void test_heuristic_boundaries(void) {
     /* cell_h boundaries with cell_w held safely at 1x (10px). */
     CHECK(vp(80, 24, 10, 23, 0).backing_scale == 1, "cell_h 23 => 1x");
     CHECK(vp(80, 24, 10, 24, 0).backing_scale == 2, "cell_h 24 => 2x");
-    CHECK(vp(80, 24, 10, 37, 0).backing_scale == 2, "cell_h 37 => 2x");
-    CHECK(vp(80, 24, 10, 38, 0).backing_scale == 3, "cell_h 38 => 3x");
+    CHECK(vp(80, 24, 10, 38, 0).backing_scale == 2,
+          "large font cell must not imply 3x");
 
     /* cell_w boundaries with cell_h held safely at 1x (18px). */
     CHECK(vp(80, 24, 13, 18, 0).backing_scale == 1, "cell_w 13 => 1x");
     CHECK(vp(80, 24, 14, 18, 0).backing_scale == 2, "cell_w 14 => 2x");
-    CHECK(vp(80, 24, 26, 18, 0).backing_scale == 2, "cell_w 26 => 2x");
-    CHECK(vp(80, 24, 27, 18, 0).backing_scale == 3, "cell_w 27 => 3x");
+    CHECK(vp(80, 24, 27, 18, 0).backing_scale == 2,
+          "wide font cell must not imply 3x");
 
-    /* Either axis alone is sufficient to escalate. */
-    CHECK(vp(80, 24, 8, 40, 0).backing_scale == 3, "tall cell alone => 3x");
-    CHECK(vp(80, 24, 30, 16, 0).backing_scale == 3, "wide cell alone => 3x");
+    /* Either axis alone identifies HiDPI, never a guessed 3x panel. */
+    CHECK(vp(80, 24, 8, 40, 0).backing_scale == 2, "tall cell => 2x");
+    CHECK(vp(80, 24, 30, 16, 0).backing_scale == 2, "wide cell => 2x");
 }
 
 static void test_logical_division(void) {
     native_ui_viewport_metrics_t m = vp(100, 50, 20, 40, 0); /* 2000x2000 phys */
-    CHECK(m.backing_scale == 3, "20x40 cell => 3x, got %d", m.backing_scale);
-    CHECK(m.logical_width == 2000 / 3 && m.logical_height == 2000 / 3,
+    CHECK(m.backing_scale == 2, "20x40 cell => conservative 2x, got %d", m.backing_scale);
+    CHECK(m.logical_width == 2000 / 2 && m.logical_height == 2000 / 2,
           "logical = physical/backing, got %dx%d", m.logical_width, m.logical_height);
     CHECK(m.physical_cell_width == 20 && m.physical_cell_height == 40,
           "cell metrics preserved, got %dx%d",
@@ -103,20 +103,19 @@ static void test_logical_division(void) {
 
 static void test_observed_regression_case(void) {
     /* Documented live geometry from the 2026-07-14 primary-monitor-disconnect
-     * incident: kitty on the built-in Retina panel reported 75x29 cells over
-     * 2325x1682 physical px (cell 31x58). The physical backing was 2x with a
-     * large terminal font; the current thresholds classify it as 3x. This
-     * check pins today's behavior so any retune is a conscious decision, and
-     * the comment preserves the tuning question. */
+     * incident: Kitty on the built-in 2x Retina panel reported 75x29 cells
+     * over 2325x1682 physical pixels (cell 31x58). Large cells reflect font
+     * size, not a 3x backing grid; classifying this as 3x made Kitty upscale
+     * the uploaded compositor frame and blur it. */
     native_ui_viewport_metrics_t m =
         native_ui_terminal_viewport(75, 29, 2325, 1682, 0);
     CHECK(m.physical_cell_width == 31 && m.physical_cell_height == 58,
           "incident cell 31x58, got %dx%d",
           m.physical_cell_width, m.physical_cell_height);
-    CHECK(m.backing_scale == 3,
-          "incident geometry currently classifies 3x, got %d (threshold retune?)",
+    CHECK(m.backing_scale == 2,
+          "incident geometry must retain its observed 2x backing, got %d",
           m.backing_scale);
-    CHECK(m.logical_width == 2325 / 3 && m.logical_height == 1682 / 3,
+    CHECK(m.logical_width == 2325 / 2 && m.logical_height == 1682 / 2,
           "incident logical %dx%d", m.logical_width, m.logical_height);
     /* Whatever the scale decision, the outcome must stay in the sane band the
      * session clamps to: never the raw physical size, never microscopic. */

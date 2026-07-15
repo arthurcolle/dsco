@@ -36,6 +36,9 @@ This documentation set is intended as a full-codebase reference for `dsco-cli`, 
 - [Architecture Diagrams](DIAGRAMS.md)
 - [Docs Contributing Guide](DOCS_CONTRIBUTING.md)
 - [Runbooks](RUNBOOKS.md)
+- [Founder-Led Go-to-Market Operating Kit](GO_TO_MARKET.md)
+- [DSCO Governed Workflow Pilot Proposal Template](DSCO_WORKFLOW_PILOT_PROPOSAL.md)
+- [Revenue Pipeline Template](DSCO_REVENUE_PIPELINE.csv)
 
 ## Repository Hygiene
 

@@ -7,6 +7,10 @@
  * invocation without dropping flags such as -m, --profile, or --provider. */
 void agent_set_launch_argv(int argc, char **argv);
 
+/* Seed an interactive session with a first user turn supplied on the command
+ * line. The prompt is copied and consumed exactly once by agent_run(). */
+void agent_set_initial_prompt(const char *prompt);
+
 /* Run the agent loop: read user input, send to Claude with tools,
  * execute tools in a loop until end_turn, print response.
  * provider_override: if non-NULL, forces this provider instead of auto-detect. */

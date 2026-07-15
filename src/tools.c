@@ -24,6 +24,8 @@
 #include "swarm.h"
 #include "ipc.h"
 #include "tui.h"
+#include "pixel_tui.h"
+#include "kitty_tools.h"
 #include "md.h"
 #include "baseline.h"
 #include "chronicle.h"
@@ -9853,6 +9855,12 @@ static bool tool_cost_model_predict(const char *input, char *result, size_t rlen
 static void retire_swarm_group(swarm_t *sw, int gid) {
     if (!sw || gid < 0 || gid >= sw->group_count)
         return;
+    /* Reclaim any spawned children's slots back to the free-list before
+     * clearing the group. swarm_group_reclaim() is a safe no-op when the
+     * group has zero children (the common "spawn failed immediately"
+     * path) and refuses to reclaim while any child is still running, so
+     * this can never silently drop live-process bookkeeping. */
+    swarm_group_reclaim(sw, gid);
     swarm_group_t *g = &sw->groups[gid];
     g->active = false;
     g->child_count = 0;
@@ -10972,12 +10980,17 @@ static bool tool_swarm_map_reduce(const char *input, char *result, size_t rlen) 
 static size_t jbuf_curl_write_cb(void *ptr, size_t size, size_t nmemb, void *userdata) {
     size_t total = size * nmemb;
     jbuf_t *b = (jbuf_t *)userdata;
+    if (total > SIZE_MAX - b->len - 1)
+        return 0;
     size_t need = b->len + total + 1;
     if (need > b->cap) {
-        size_t newcap = b->cap * 2;
-        if (newcap < need)
+        size_t newcap = b->cap ? b->cap * 2 : 64;
+        if (newcap < need || newcap < b->cap)
             newcap = need;
-        b->data = realloc(b->data, newcap);
+        char *data = realloc(b->data, newcap);
+        if (!data)
+            return 0;
+        b->data = data;
         b->cap = newcap;
     }
     memcpy(b->data + b->len, ptr, total);
@@ -29466,7 +29479,8 @@ bool dsco_run_ask_dialog(const char *input, char *result, size_t rlen) {
 
     /* Non-interactive: degrade gracefully — emit the spec so the model can
      * fall back to asking in plain text. */
-    if (!isatty(STDIN_FILENO) || !isatty(STDERR_FILENO)) {
+    if (!isatty(STDIN_FILENO) ||
+        (!isatty(STDERR_FILENO) && !pixel_tui_session_active())) {
         jbuf_t out;
         jbuf_init(&out, 256);
         jbuf_append(&out, "{\"status\":\"no_tty\",\"questions\":[");
@@ -30309,6 +30323,8 @@ static const char *mo_ipc_status_name(ipc_agent_status_t s) {
             return "starting";
         case IPC_AGENT_IDLE:
             return "idle";
+        case IPC_AGENT_DURABLE:
+            return "durable";
         case IPC_AGENT_WORKING:
             return "working";
         case IPC_AGENT_DONE:
@@ -32455,6 +32471,49 @@ static const tool_def_t s_tools[] = {
      .execute = dsco_run_ask_dialog,
      .core = true,
      .is_interactive = true},
+    {.name = "kitty_remote",
+     .description =
+         "Native governed control of every Kitty remote-control capability: windows, tabs, "
+         "layouts, launch/run, screen text, input, scrolling, colors, fonts, spacing, opacity, "
+         "background images, logos, markers, environment, child signals, and kittens. Arguments "
+         "are passed directly as argv with no shell.",
+     .input_schema_json =
+         "{\"type\":\"object\",\"properties\":{\"command\":{\"type\":\"string\"},"
+         "\"args\":{\"type\":\"array\",\"items\":{\"type\":\"string\"}},\"to\":{"
+         "\"type\":\"string\",\"description\":\"Optional Kitty listen address; defaults to "
+         "KITTY_LISTEN_ON or the controlling Kitty terminal.\"},\"timeout_seconds\":{\"type\":"
+         "\"integer\"}},\"required\":[\"command\"]}",
+     .execute = tool_kitty_remote,
+     .core = true},
+    {.name = "kitten",
+     .description =
+         "Run any installed first-party kitten as a governed native interactive capability, "
+         "including icat, clipboard, SSH/transfer, notifications, hints, diff, themes, font/file "
+         "choosers, command palette, Unicode input, panels, and terminal queries. Arguments are "
+         "passed directly as argv with no shell.",
+     .input_schema_json =
+         "{\"type\":\"object\",\"properties\":{\"command\":{\"type\":\"string\"},"
+         "\"args\":{\"type\":\"array\",\"items\":{\"type\":\"string\"}}},"
+         "\"required\":[\"command\"]}",
+     .execute = tool_kitten,
+     .core = true,
+     .is_interactive = true},
+    {.name = "ui_render",
+     .description =
+         "Render a declarative native UI scene as a pixel-native overlay in the Kitty "
+         "workspace (generative UI). The spec is a nested object of elements (surface, stack, "
+         "row, grid, text, badge, meter, sparkline, icon, rule) with semantic roles, style "
+         "tokens (fg/bg/border: text|muted|accent|success|warning|danger|surface|surface-raised; "
+         "pad/gap/radius/columns; type: body|label|title|code|metric), size constraints "
+         "(w/h/min_w/max_w/grow/shrink), and children. Meters use value 0..1; sparklines take "
+         "numbers in text. Pass ppm_path to also write a deterministic image artifact when no "
+         "Kitty surface is attached.",
+     .input_schema_json =
+         "{\"type\":\"object\",\"properties\":{\"spec\":{\"type\":\"object\","
+         "\"description\":\"Root scene element.\"},\"width\":{\"type\":\"integer\"},"
+         "\"ppm_path\":{\"type\":\"string\"}},\"required\":[\"spec\"]}",
+     .execute = tool_ui_render,
+     .core = true},
 
     /* ══════════════════════════════════════════════════════════════════════
      *  CORE FILE TOOLS (13)
@@ -38579,7 +38638,8 @@ typedef enum {
 static tool_class_t tool_classify(const char *n, bool is_read_only) {
     if (is_read_only)
         return TOOL_CLASS_READ;
-    if (strcmp(n, "bash") == 0 || strcmp(n, "sandbox_run") == 0 || strcmp(n, "run_command") == 0)
+    if (strcmp(n, "bash") == 0 || strcmp(n, "sandbox_run") == 0 || strcmp(n, "run_command") == 0 ||
+        strcmp(n, "kitty_remote") == 0 || strcmp(n, "kitten") == 0)
         return TOOL_CLASS_EXEC;
     /* Deep-access tools that run an arbitrary command/program → exec-gated. */
     if (strcmp(n, "debugger") == 0 || strcmp(n, "syscall_trace") == 0 ||
@@ -38653,7 +38713,8 @@ static bool tool_approval_prompt_available(void) {
         return false;
     if (tool_env_truthy("DSCO_NO_APPROVAL_PROMPTS"))
         return false;
-    return isatty(STDIN_FILENO) && isatty(STDERR_FILENO);
+    return isatty(STDIN_FILENO) &&
+           (isatty(STDERR_FILENO) || pixel_tui_session_active());
 }
 
 typedef enum {
@@ -39306,6 +39367,23 @@ static void tool_gov_deny(char *result, size_t rlen, const char *tool, const cha
              tool ? tool : "unknown", stage, reason, gsu_remaining);
 }
 
+/* Capability hardening is the non-bypassable floor. Governance experiment
+ * models may remove policy/approval/budget stages, but they must not disable
+ * explicit Deno-style opt-outs, control authorization, or the lethal-trifecta
+ * guard. Keep this before GOV_MODEL_NONE and governance-exempt dispatch. */
+static bool tool_capability_floor(const char *name, const char *input_json, const char *tier,
+                                  char *result, size_t result_len) {
+    char reason[256];
+    reason[0] = '\0';
+    dsco_cap_decision_t decision =
+        dsco_capability_gate(name, input_json, tier, reason, sizeof(reason));
+    if (decision == CAP_DECISION_ALLOW)
+        return true;
+    tool_gov_deny(result, result_len, name, "capability",
+                  reason[0] ? reason : "capability_denied", 0.0);
+    return false;
+}
+
 /* ═══════════════════════════════════════════════════════════════════════════
  * MAIN ENTRY POINT
  * ═══════════════════════════════════════════════════════════════════════════ */
@@ -39332,6 +39410,10 @@ bool tools_execute_for_tier(const char *name, const char *input_json, const char
      * to the real tool, not the alias. */
     if (name && strcmp(name, "python_exec") == 0)
         name = "python";
+
+    if (name && !tool_is_governance_exempt(name) &&
+        !tool_capability_floor(name, input_json, tier, result, result_len))
+        return false;
 
     /* ── Governance-model dispatch ─────────────────────────────────────────
        MODEL=none is the ungoverned control arm: skip the entire gate so the
@@ -39403,28 +39485,6 @@ bool tools_execute_for_tier(const char *name, const char *input_json, const char
             tool_gov_deny(result, result_len, name, "circuit_breaker", "active_breaker",
                           remaining);
             return false;
-        }
-
-        /* ── Capability + lethal-trifecta gate ─────────────────────────────
-           Gate by what the tool can DO (fs/net/exec/secrets/control), and deny
-           the exfiltration edge (untrusted-in + private-data + egress). This is
-           the capability axis that replaces filename-based immune surfaces. */
-        {
-            char cap_reason[256];
-            cap_reason[0] = '\0';
-            dsco_cap_decision_t cap_dec =
-                dsco_capability_gate(name, input_json, tier, cap_reason, sizeof(cap_reason));
-            if (cap_dec == CAP_DECISION_DENY) {
-                /* Capability denials are the non-negotiable floor: audit mode
-                 * may remove approval and budget friction, not enable control
-                 * tools or the lethal exfiltration combination. */
-                pheromone_deposit(&g_governance.pheromones, PHERO_WARNING, 1.0, phero_region,
-                                  "immune", "{\"reason\":\"capability_denied\"}");
-                tool_gov_deny(result, result_len, name, "capability",
-                              cap_reason[0] ? cap_reason : "capability_denied", remaining);
-                self_improve_record_tool(&g_self_improve, name, false, 0.0, 0);
-                return false;
-            }
         }
 
         /* ── Human approval for risky/blocked tools ────────────────────────
@@ -39553,7 +39613,9 @@ _skip_gate:;
     if (normalized_input)
         dispatch_input = normalized_input;
 
+    uint64_t pixel_operation_id = pixel_tui_session_tool_begin(stderr, name, input_json);
     bool ok = tools_execute_internal(dispatch_name, dispatch_input, result, result_len);
+    pixel_tui_session_tool_end(stderr, pixel_operation_id, name, ok, now_ms() - _t0);
 
     free(normalized_input);
     free(owned_input);
