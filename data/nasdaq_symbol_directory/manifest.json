@@ -1,0 +1,13 @@
+{
+  "source": "https://www.nasdaqtrader.com/dynamic/SymDir",
+  "retrieved_at_utc": "2026-07-15T01:18:57.544890+00:00",
+  "counts": {
+    "equities": 13048,
+    "bonds": 179
+  },
+  "sha256": {
+    "nasdaqlisted.txt": "91daa2d741a8b6cce3f098d1fd872323d95ad8f793098628f463ad7c897de425",
+    "otherlisted.txt": "2b755a39fbedea10c98b63ed5561229c226aead5e7cd6313466a218d20245ff6",
+    "bondslist.txt": "57b55d908bf6c08621189d461cc9212a6a9633d53fa188f919550b8d971f88ab"
+  }
+}

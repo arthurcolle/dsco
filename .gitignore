@@ -185,3 +185,9 @@ spine-dsco-slim
 # generated facet index data (rebuildable)
 data/consumer_profile_ontology/facet_index/
 dsco-kitty-lab
+
+# local Zig/Ghidra/generated review artifacts
+/build-zig/
+/dsco-zig
+/raag.lock
+/examples/dspy_model_enrichment_dossier.html

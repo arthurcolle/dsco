@@ -42,14 +42,32 @@ static const local_server_def_t *local_find(const char *server) {
     return NULL;
 }
 
-/* Resolve the configured host for a server, honoring <SERVER>_HOST overrides. */
+/* Resolve the configured host for a server. Provider routing accepts
+ * <SERVER>_API_BASE and <SERVER>_BASE_URL, while discovery needs the host
+ * without the OpenAI-compatible /v1 suffix. Keep all three override forms in
+ * sync so diagnostics probe the same endpoint used for inference. */
 static const char *local_host(const local_server_def_t *def) {
-    char env[64];
-    snprintf(env, sizeof(env), "%s_HOST", def->name);
-    for (char *p = env; *p; p++)
-        *p = (char)toupper((unsigned char)*p);
-    const char *override = getenv(env);
-    return (override && override[0]) ? override : def->host;
+    static _Thread_local char normalized[1024];
+    static const char *suffixes[] = {"_API_BASE", "_BASE_URL", "_HOST", NULL};
+
+    for (int i = 0; suffixes[i]; i++) {
+        char env[64];
+        snprintf(env, sizeof(env), "%s%s", def->name, suffixes[i]);
+        for (char *p = env; *p; p++)
+            *p = (char)toupper((unsigned char)*p);
+        const char *override = getenv(env);
+        if (!override || !override[0])
+            continue;
+
+        snprintf(normalized, sizeof(normalized), "%s", override);
+        size_t len = strlen(normalized);
+        while (len > 0 && normalized[len - 1] == '/')
+            normalized[--len] = '\0';
+        if (i < 2 && len >= 3 && strcmp(normalized + len - 3, "/v1") == 0)
+            normalized[len - 3] = '\0';
+        return normalized;
+    }
+    return def->host;
 }
 
 bool local_llm_base_url(const char *server, char *out, size_t out_len) {

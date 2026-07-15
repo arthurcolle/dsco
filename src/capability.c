@@ -45,7 +45,7 @@ static const char *const k_read_tools[] = {
 /* Local file mutation. Implies read too. */
 static const char *const k_write_tools[] = {
     "write_file", "edit_file", "apply_patch", "ast_edit", "create_file", "delete_file",
-    "move_file", "rename_file", "patch",
+    "move_file", "rename_file", "patch", "openai_image_generate",
     /* Claude-compatible surfaces */
     "Write", "Edit", NULL};
 
@@ -53,23 +53,38 @@ static const char *const k_write_tools[] = {
 static const char *const k_exec_tools[] = {
     "bash", "run_command", "sandbox_run", "run_background", "compile", "pkg", "pip", "npm",
     "docker", "docker_compose", "kill_process", "crontab", "make",
+    /* Registered spawn/interpreter surfaces (audit 2026-07-12): each starts a
+     * subprocess or interprets arbitrary code, so each is an exec egress leg. */
+    "python", "spawn_bg", "swarm", "signal_process", "test_run", "watch_run", "preprocess",
+    "hermes_agent", "agent", "Task", "Agent", "KillShell", "kitty_remote", "kitten",
     /* Claude-compatible surface (input inspected for net/write escalation) */
     "Bash", NULL};
 
 /* External-content ingress with network egress (both untrusted-in and net). */
 static const char *const k_net_tools[] = {
     "web_search", "read_url", "fetch", "fetch_url", "http", "http_request", "browser",
-    "web_fetch", "curl", "download",
+    "web_fetch", "curl", "download", "openai_image_generate",
+    /* Registered network surfaces (audit 2026-07-12): previously fell to the
+     * read-only/fs_write catch-all and evaded the trifecta flow guard. */
+    "tavily_search", "jina_ai_search", "jina_ai_research", "jina_search", "github_search",
+    "parallel_search", "curl_raw", "download_file", "net_probe", "network", "net",
+    "graphsub", "openrouter_models", "alpha_vantage", "polymarket", "agentic_commerce",
+    "research_probe", "research_compare",
     /* Claude-compatible surfaces */
     "WebFetch", "WebSearch", NULL};
 
 /* Direct network egress that carries local data outward. */
 static const char *const k_egress_tools[] = {"ssh_command", "scp", "rsync", "send_email",
-                                             "upload", "post", NULL};
+                                             "upload", "post", "slack_post", NULL};
 
 /* Control-plane / self-modification: gating the gate. */
 static const char *const k_control_tools[] = {
     "governance", "killswitch", "self_exit", "gate_status", "gov_experiment", "tamper",
+    NULL};
+
+/* Tools that consume credentials even when the input JSON does not name them. */
+static const char *const k_secret_tools[] = {
+    "openai_image_generate", "kitty_remote",
     NULL};
 
 /* Tools whose input can name credentials/secret material. */
@@ -118,6 +133,8 @@ unsigned dsco_caps_for_tool(const char *name, const char *input_json) {
         caps |= CAP_FS_READ | CAP_FS_WRITE;
     if (name_in(name, k_control_tools))
         caps |= CAP_CONTROL;
+    if (name_in(name, k_secret_tools))
+        caps |= CAP_SECRETS;
 
     if (name_in(name, k_net_tools))
         caps |= CAP_NET | CAP_UNTRUSTED_IN; /* remote content is untrusted */
@@ -127,6 +144,11 @@ unsigned dsco_caps_for_tool(const char *name, const char *input_json) {
     /* MCP / external tools (prefixed) reach out to third-party systems: both an
      * egress and an untrusted-content ingress. */
     if (strncmp(name, "mcp_", 4) == 0 || strncmp(name, "mcp__", 5) == 0)
+        caps |= CAP_NET | CAP_UNTRUSTED_IN;
+
+    /* Hosted third-party task/research families (audit 2026-07-12): every
+     * parallel_ai_* tool calls a remote API and returns remote content. */
+    if (strncmp(name, "parallel_ai_", 12) == 0)
         caps |= CAP_NET | CAP_UNTRUSTED_IN;
 
     if (name_in(name, k_exec_tools)) {
@@ -141,6 +163,22 @@ unsigned dsco_caps_for_tool(const char *name, const char *input_json) {
             caps |= CAP_NET | CAP_FS_WRITE | CAP_FS_READ; /* worst case */
         }
     }
+
+    /* Kitty commands arrive as JSON argv, not shell text, so tokens such as
+     * {"command":"ssh"} are followed by a quote rather than the whitespace
+     * expected by shell_has_network(). Classify Kitty's native network lanes
+     * explicitly so DSCO_ALLOW_NET=0 and the trifecta guard remain effective. */
+    if (input_json && strcmp(name, "kitten") == 0) {
+        char *command = json_get_str(input_json, "command");
+        if (command && (!strcmp(command, "ssh") || !strcmp(command, "transfer") ||
+                        !strcmp(command, "update-self")))
+            caps |= CAP_NET | CAP_UNTRUSTED_IN;
+        free(command);
+    }
+    if (input_json && strcmp(name, "kitty_remote") == 0 &&
+        (contains_ci(input_json, "\"ssh\"") || contains_ci(input_json, "\"transfer\"") ||
+         contains_ci(input_json, "http://") || contains_ci(input_json, "https://")))
+        caps |= CAP_NET | CAP_UNTRUSTED_IN;
 
     if (input_json && input_touches_secrets(input_json))
         caps |= CAP_SECRETS;
@@ -426,8 +464,18 @@ dsco_cap_decision_t dsco_capability_gate(const char *name, const char *input_jso
             char *pth = json_get_str(input_json, "file_path");
             if (!pth)
                 pth = json_get_str(input_json, "path");
+            if (!pth)
+                pth = json_get_str(input_json, "output_path");
+            if (!pth)
+                pth = json_get_str(input_json, "output");
             if (pth && pth[0] && !cap_path_in_scope(pth, ws)) {
                 CAP_REASON("write path outside DSCO_ALLOW_WRITE scope: %.80s", pth);
+                free(pth);
+                return CAP_DECISION_DENY;
+            }
+            if ((!pth || !pth[0]) && (caps & CAP_EXEC)) {
+                CAP_REASON("scoped write grant requires explicit structured path for exec-capable tool '%s'",
+                           name);
                 free(pth);
                 return CAP_DECISION_DENY;
             }
@@ -441,6 +489,12 @@ dsco_cap_decision_t dsco_capability_gate(const char *name, const char *input_jso
                 free(pth);
                 return CAP_DECISION_DENY;
             }
+            if ((!pth || !pth[0]) && (caps & CAP_EXEC)) {
+                CAP_REASON("scoped read grant requires explicit structured path for exec-capable tool '%s'",
+                           name);
+                free(pth);
+                return CAP_DECISION_DENY;
+            }
             free(pth);
         }
         if ((caps & CAP_NET) && ns && ns[0] && !cap_env_is_boolean(ns)) {
@@ -449,9 +503,17 @@ dsco_cap_decision_t dsco_capability_gate(const char *name, const char *input_jso
                 hv = json_get_str(input_json, "host");
             if (!hv)
                 hv = json_get_str(input_json, "hostname");
+            if (!hv && strcmp(name, "openai_image_generate") == 0)
+                hv = safe_strdup("api.openai.com");
             char host[256];
             if (hv && cap_host_of(hv, host, sizeof(host)) && !cap_host_in_scope(host, ns)) {
                 CAP_REASON("host outside DSCO_ALLOW_NET scope: %.80s", host);
+                free(hv);
+                return CAP_DECISION_DENY;
+            }
+            if ((!hv || !hv[0]) && (caps & CAP_EXEC)) {
+                CAP_REASON("scoped net grant requires explicit structured host/url for exec-capable tool '%s'",
+                           name);
                 free(hv);
                 return CAP_DECISION_DENY;
             }

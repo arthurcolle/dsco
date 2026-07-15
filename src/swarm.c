@@ -1,4 +1,5 @@
 #include "swarm.h"
+#include "kitty_agent_windows.h"
 #include "openrouter_cache.h"
 #include "config.h"
 #include "provider.h"
@@ -6,6 +7,7 @@
 #include "llm.h"
 #include "json_util.h"
 #include "tui.h"
+#include "pixel_tui.h"
 #include "pets.h"
 #include "scheduler.h"
 #include <stdio.h>
@@ -238,6 +240,7 @@ void swarm_destroy(swarm_t *s) {
     }
     free((void *)s->dsco_path);
     s->dsco_path = NULL;
+    kitty_agent_windows_shutdown();
 #ifdef __APPLE__
     if (s->kq_fd >= 0) {
         close(s->kq_fd);
@@ -255,6 +258,9 @@ static void post_spawn_register(swarm_t *s, int child_id) {
     {
         swarm_child_t *pc = &s->children[child_id];
         pet_roster_upsert(pet_roster_global(), child_id, -1, pc->task, pc->task, PET_ST_WORKING);
+        kitty_agent_window_spawn(child_id, pc->pid, pc->task, pc->model);
+        pixel_tui_session_swarm_update(stderr, child_id, "running", pc->task, pc->model,
+                                       pc->output_len, pc->est_cost_usd);
     }
 #ifdef __APPLE__
     swarm_child_t *c = &s->children[child_id];
@@ -319,6 +325,13 @@ static void swarm_write_result_envelope(const swarm_t *s, int child_id) {
 
 static void post_complete(swarm_t *s, int child_id) {
     bitset_clear(&s->active, child_id);
+    swarm_child_t *completed = &s->children[child_id];
+    pixel_tui_session_swarm_update(
+        stderr, child_id, swarm_status_str(completed->status), completed->task,
+        completed->model, completed->output_len,
+        completed->reported_cost_usd > 0 ? completed->reported_cost_usd : completed->est_cost_usd);
+    kitty_agent_window_complete(child_id, swarm_status_str(s->children[child_id].status),
+                                s->children[child_id].exit_code);
     swarm_write_result_envelope(s, child_id);
     cq_push(&s->done_q, child_id);
     if (s->first_completion_time == 0)
@@ -414,8 +427,19 @@ static void swarm_clear_next_instance(void) {
 }
 
 int swarm_spawn_in_group(swarm_t *s, int group_id, const char *task, const char *model) {
-    if (s->child_count >= dsco_swarm_max_children())
-        return -1;
+    /* Prefer a reclaimed slot (terminal + already-collected child from a
+     * retired group) before growing child_count, so a long-lived session
+     * isn't bounded by lifetime spawns — only concurrently active ones. */
+    bool reuse_slot = s->free_child_count > 0;
+    if (!reuse_slot && s->child_count >= dsco_swarm_max_children()) {
+        /* Self-heal: a long session may have many "active" groups whose
+         * children are all actually terminal but were never explicitly
+         * retired/collected. Sweep them before giving up. */
+        if (swarm_reclaim_all_complete(s) > 0)
+            reuse_slot = s->free_child_count > 0;
+        if (!reuse_slot)
+            return -1;
+    }
 
     int stdout_pipe[2];
     if (pipe(stdout_pipe) < 0)
@@ -428,7 +452,7 @@ int swarm_spawn_in_group(swarm_t *s, int group_id, const char *task, const char 
         return -1;
     }
 
-    int id = s->child_count;
+    int id = reuse_slot ? s->free_child_ids[s->free_child_count - 1] : s->child_count;
 
     /* Compute depth before fork so parent can record it */
     const char *cur_depth_env = getenv("DSCO_SWARM_DEPTH");
@@ -618,7 +642,10 @@ int swarm_spawn_in_group(swarm_t *s, int group_id, const char *task, const char 
     c->stream_buf[0] = '\0';
     c->stream_buf_len = 0;
 
-    s->child_count++;
+    if (reuse_slot)
+        s->free_child_count--;
+    else
+        s->child_count++;
     post_spawn_register(s, id);
 
     /* Add to group if specified */
@@ -642,8 +669,16 @@ int swarm_spawn_provider(swarm_t *s, int group_id, const char *task, const char 
     if (!provider || !provider[0])
         return swarm_spawn_in_group(s, group_id, task, model);
 
-    if (s->child_count >= dsco_swarm_max_children())
-        return -1;
+    bool reuse_slot = s->free_child_count > 0;
+    if (!reuse_slot && s->child_count >= dsco_swarm_max_children()) {
+        /* Self-heal: a long session may have many "active" groups whose
+         * children are all actually terminal but were never explicitly
+         * retired/collected. Sweep them before giving up. */
+        if (swarm_reclaim_all_complete(s) > 0)
+            reuse_slot = s->free_child_count > 0;
+        if (!reuse_slot)
+            return -1;
+    }
 
     int stdout_pipe[2];
     if (pipe(stdout_pipe) < 0)
@@ -656,7 +691,7 @@ int swarm_spawn_provider(swarm_t *s, int group_id, const char *task, const char 
         return -1;
     }
 
-    int id = s->child_count;
+    int id = reuse_slot ? s->free_child_ids[s->free_child_count - 1] : s->child_count;
     const char *cur_depth_env = getenv("DSCO_SWARM_DEPTH");
     int depth = cur_depth_env ? atoi(cur_depth_env) + 1 : 1;
 
@@ -764,7 +799,10 @@ int swarm_spawn_provider(swarm_t *s, int group_id, const char *task, const char 
     c->stream_buf[0] = '\0';
     c->stream_buf_len = 0;
 
-    s->child_count++;
+    if (reuse_slot)
+        s->free_child_count--;
+    else
+        s->child_count++;
     post_spawn_register(s, id);
 
     if (group_id >= 0 && group_id < s->group_count) {
@@ -776,19 +814,116 @@ int swarm_spawn_provider(swarm_t *s, int group_id, const char *task, const char 
     return id;
 }
 
+int swarm_spawn_openrouter_lane(swarm_t *s, int group_id, const char *task,
+                                const char *model, const char *upstream,
+                                const char *quantization) {
+    /* Spawn inherits a private post-fork environment snapshot. Temporarily
+     * install OR routing constraints in the parent, spawn, then restore before
+     * any sibling is created. Swarm spawning is coordinator-thread serialized. */
+    const char *old_only = getenv("DSCO_OR_PROVIDER_ONLY");
+    const char *old_quant = getenv("DSCO_OR_QUANTIZATIONS");
+    const char *old_fb = getenv("DSCO_OR_ALLOW_FALLBACKS");
+    char *save_only = old_only ? safe_strdup(old_only) : NULL;
+    char *save_quant = old_quant ? safe_strdup(old_quant) : NULL;
+    char *save_fb = old_fb ? safe_strdup(old_fb) : NULL;
+    if (upstream && upstream[0]) {
+        setenv("DSCO_OR_PROVIDER_ONLY", upstream, 1);
+        setenv("DSCO_OR_ALLOW_FALLBACKS", "0", 1);
+    }
+    if (quantization && quantization[0] && strcmp(quantization, "unknown") != 0)
+        setenv("DSCO_OR_QUANTIZATIONS", quantization, 1);
+    int id = swarm_spawn_provider(s, group_id, task, model, "openrouter");
+    if (save_only) setenv("DSCO_OR_PROVIDER_ONLY", save_only, 1); else unsetenv("DSCO_OR_PROVIDER_ONLY");
+    if (save_quant) setenv("DSCO_OR_QUANTIZATIONS", save_quant, 1); else unsetenv("DSCO_OR_QUANTIZATIONS");
+    if (save_fb) setenv("DSCO_OR_ALLOW_FALLBACKS", save_fb, 1); else unsetenv("DSCO_OR_ALLOW_FALLBACKS");
+    free(save_only);
+    free(save_quant);
+    free(save_fb);
+    if (id >= 0) {
+        swarm_child_t *c = swarm_get(s, id);
+        if (c && upstream && upstream[0])
+            snprintf(c->provider, sizeof(c->provider), "openrouter:%s", upstream);
+    }
+    return id;
+}
+
 /* ── Groups ───────────────────────────────────────────────────────────── */
 
 int swarm_group_create(swarm_t *s, const char *name) {
-    if (s->group_count >= dsco_swarm_max_groups())
-        return -1;
-    int id = s->group_count;
+    /* Prefer a reclaimed group slot before growing group_count, so a
+     * long-lived session isn't bounded by lifetime group creations. */
+    int id;
+    if (s->free_group_count > 0) {
+        id = s->free_group_ids[--s->free_group_count];
+    } else {
+        if (s->group_count >= dsco_swarm_max_groups())
+            return -1;
+        id = s->group_count++;
+    }
     swarm_group_t *g = &s->groups[id];
     memset(g, 0, sizeof(*g));
     g->id = id;
     g->active = true;
     snprintf(g->name, SWARM_GROUP_NAME_LEN, "%s", name ? name : "unnamed");
-    s->group_count++;
     return id;
+}
+
+int swarm_reclaimable_count(swarm_t *s) {
+    if (!s)
+        return 0;
+    return s->free_child_count;
+}
+
+int swarm_reclaim_all_complete(swarm_t *s) {
+    if (!s)
+        return 0;
+    int reclaimed = 0;
+    for (int gid = 0; gid < s->group_count; gid++) {
+        swarm_group_t *g = &s->groups[gid];
+        if (!g->active || g->child_count == 0)
+            continue;
+        if (swarm_group_complete(s, gid) && swarm_group_reclaim(s, gid))
+            reclaimed++;
+    }
+    return reclaimed;
+}
+
+bool swarm_group_reclaim(swarm_t *s, int group_id) {
+    if (!s || group_id < 0 || group_id >= s->group_count)
+        return false;
+    swarm_group_t *g = &s->groups[group_id];
+    if (!g->active)
+        return true; /* already reclaimed — no-op success */
+
+    /* Refuse to reclaim while any child is still running/streaming; the
+     * caller must collect/abort first. This keeps recycling strictly safe:
+     * a slot only re-enters the free-list once its process is fully
+     * terminal and its result has already been durably written. */
+    for (int i = 0; i < g->child_count; i++) {
+        swarm_child_t *c = &s->children[g->child_ids[i]];
+        if (c->status == SWARM_RUNNING || c->status == SWARM_STREAMING)
+            return false;
+    }
+
+    for (int i = 0; i < g->child_count; i++) {
+        int cid = g->child_ids[i];
+        swarm_child_t *c = &s->children[cid];
+        if (c->reclaimable)
+            continue; /* already recycled (defensive; shouldn't happen) */
+        c->reclaimable = true;
+        free(c->output);
+        c->output = NULL;
+        free(c->stream_buf);
+        c->stream_buf = NULL;
+        if (s->free_child_count < SWARM_MAX_CHILDREN)
+            s->free_child_ids[s->free_child_count++] = cid;
+    }
+
+    g->active = false;
+    g->child_count = 0;
+    if (s->free_group_count < SWARM_MAX_GROUPS)
+        s->free_group_ids[s->free_group_count++] = group_id;
+    return true;
 }
 
 int swarm_group_dispatch(swarm_t *s, int group_id, const char **tasks, int task_count,
@@ -911,6 +1046,11 @@ static void child_read(swarm_child_t *c, int fd, swarm_stream_cb cb, void *ctx) 
         if (cb)
             cb(c->id, buf, n, ctx);
         c->status = SWARM_STREAMING;
+        kitty_agent_window_append(c->id, buf, (size_t)n);
+        pixel_tui_session_swarm_update(stderr, c->id, "streaming", c->task, c->model,
+                                       c->output_len,
+                                       c->reported_cost_usd > 0 ? c->reported_cost_usd
+                                                               : c->est_cost_usd);
     }
     if (n < 0 && errno != EAGAIN && errno != EWOULDBLOCK) {
         c->status = SWARM_ERROR;
@@ -1299,8 +1439,16 @@ int swarm_spawn_executor(swarm_t *s, int group_id, const char *task, const char 
         return swarm_spawn_in_group(s, group_id, task, model);
     }
 
-    if (s->child_count >= dsco_swarm_max_children())
-        return -1;
+    bool reuse_slot = s->free_child_count > 0;
+    if (!reuse_slot && s->child_count >= dsco_swarm_max_children()) {
+        /* Self-heal: a long session may have many "active" groups whose
+         * children are all actually terminal but were never explicitly
+         * retired/collected. Sweep them before giving up. */
+        if (swarm_reclaim_all_complete(s) > 0)
+            reuse_slot = s->free_child_count > 0;
+        if (!reuse_slot)
+            return -1;
+    }
 
     executor_registry_t *e = &s->executors;
     const char *bin = NULL;
@@ -1355,7 +1503,7 @@ int swarm_spawn_executor(swarm_t *s, int group_id, const char *task, const char 
         return -1;
     }
 
-    int id = s->child_count;
+    int id = reuse_slot ? s->free_child_ids[s->free_child_count - 1] : s->child_count;
     int depth = 1; /* external executors are always depth 1 from dsco's perspective */
 
     if (pid == 0) {
@@ -1410,7 +1558,10 @@ int swarm_spawn_executor(swarm_t *s, int group_id, const char *task, const char 
     c->stream_buf[0] = '\0';
     c->stream_buf_len = 0;
 
-    s->child_count++;
+    if (reuse_slot)
+        s->free_child_count--;
+    else
+        s->child_count++;
     post_spawn_register(s, id);
 
     if (group_id >= 0 && group_id < s->group_count) {
