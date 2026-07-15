@@ -680,6 +680,25 @@ static bool underscore_can_close(const char *pos, int marker_len) {
 static void render_inline(FILE *out, const char *text) {
     const char *p = text;
     while (*p) {
+        /* Common model output also uses \(...\) for inline LaTeX. Handle it
+         * before CommonMark backslash escaping so terminal users see actual
+         * math instead of raw delimiters and commands. */
+        if (p[0] == '\\' && p[1] == '(') {
+            const char *end = strstr(p + 2, "\\)");
+            if (end) {
+                char latex[MD_LINE_MAX];
+                int n = (int)(end - p - 2);
+                if (n >= (int)sizeof(latex))
+                    n = (int)sizeof(latex) - 1;
+                memcpy(latex, p + 2, (size_t)n);
+                latex[n] = '\0';
+                latex_replace_symbols(latex, sizeof(latex));
+                fprintf(out, "%s%s%s", TUI_ITALIC, latex, TUI_RESET);
+                p = end + 2;
+                continue;
+            }
+        }
+
         /* Escaped character — CommonMark allows escaping any ASCII punctuation */
         if (*p == '\\' && p[1] && strchr("!\"#$%&'()*+,-./:;<=>?@[\\]^_`{|}~", p[1])) {
             fputc(p[1], out);

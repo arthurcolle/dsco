@@ -219,6 +219,25 @@ spend_plan_t spend_governor_plan(const spend_signals_t *sig) {
             break;
     }
 
+    if (sig->quality_critical_work && phase >= SPEND_ORANGE &&
+        phase < SPEND_EXHAUSTED) {
+        p.preserve_quality = true;
+        p.require_user_checkpoint = true;
+        p.suggest_model_downshift = false;
+        p.effort_ceiling[0] = '\0';
+        p.max_output_tokens = 0;
+        if (p.tool_budget_ratio < 0.75f)
+            p.tool_budget_ratio = 0.75f;
+        if (p.trim_keep_recent < 6)
+            p.trim_keep_recent = 6;
+        if (p.trim_max_chars < 384)
+            p.trim_max_chars = 384;
+        snprintf(p.reason, sizeof(p.reason),
+                 "%s: %.0f%% of budget (runway %.0f turns); "
+                 "quality-critical checkpoint required",
+                 spend_phase_label(phase), pressure * 100.0, p.runway_turns);
+    }
+
     /* Floor the per-turn output cap so a graduated phase never breaks tool
      * calling outright. */
     if (p.max_output_tokens > 0 && p.max_output_tokens < 2048)
@@ -249,7 +268,8 @@ void spend_plan_apply_learned(spend_plan_t *plan, const spend_learned_t *lw,
 
     /* Learned cost sensitivity: suggest the leaf-work downshift one phase
      * earlier than the ORANGE default. */
-    if (lw->model_cost_sensitivity > 0.7 && plan->phase >= SPEND_YELLOW)
+    if (lw->model_cost_sensitivity > 0.7 && plan->phase >= SPEND_YELLOW &&
+        !plan->preserve_quality)
         plan->suggest_model_downshift = true;
 
     /* Learned compaction point: start trimming when the context ratio

@@ -286,9 +286,16 @@ bool ooda_complete(ooda_engine_t *e) {
             break;
     }
 
-    /* Update running average confidence */
+    /* Update confidence calibration against the observed binary outcome.
+     * Confidence without outcome calibration rewards confidence itself; Brier
+     * error makes incorrect certainty expensive and preserves honest doubt. */
     double n = (double)e->total_cycles;
-    e->avg_confidence = ((n - 1) * e->avg_confidence + e->current.decision.confidence) / n;
+    double confidence = e->current.decision.confidence;
+    double outcome = e->current.action_success ? 1.0 : 0.0;
+    double error = confidence - outcome;
+    e->avg_confidence = ((n - 1) * e->avg_confidence + confidence) / n;
+    e->brier_score = ((n - 1) * e->brier_score + error * error) / n;
+    e->calibration_gap = e->avg_confidence - ooda_success_rate(e, e->history_count);
 
     return true;
 }
@@ -334,6 +341,35 @@ double ooda_success_rate(const ooda_engine_t *e, int last_n) {
     return (double)success / count;
 }
 
+double ooda_brier_score(const ooda_engine_t *e, int last_n) {
+    if (!e || e->history_count == 0 || last_n <= 0)
+        return 0.0;
+    int start = e->history_count > last_n ? e->history_count - last_n : 0;
+    int count = e->history_count - start;
+    double total = 0.0;
+    for (int i = start; i < e->history_count; i++) {
+        double outcome = e->history[i].success ? 1.0 : 0.0;
+        double error = e->history[i].confidence - outcome;
+        total += error * error;
+    }
+    return total / count;
+}
+
+double ooda_calibration_gap(const ooda_engine_t *e, int last_n) {
+    if (!e || e->history_count == 0 || last_n <= 0)
+        return 0.0;
+    int start = e->history_count > last_n ? e->history_count - last_n : 0;
+    int count = e->history_count - start;
+    double confidence = 0.0;
+    int success = 0;
+    for (int i = start; i < e->history_count; i++) {
+        confidence += e->history[i].confidence;
+        if (e->history[i].success)
+            success++;
+    }
+    return confidence / count - (double)success / count;
+}
+
 /* ── Serialization ────────────────────────────────────────────────────── */
 
 int ooda_cycle_to_json(const ooda_cycle_t *c, char *buf, size_t len) {
@@ -357,14 +393,18 @@ int ooda_to_json(const ooda_engine_t *e, char *buf, size_t len) {
         return 0;
     int n = snprintf(buf, len,
                      "{\"total_cycles\":%d,\"avg_confidence\":%.3f,"
+                     "\"brier_score\":%.3f,\"calibration_gap\":%.3f,"
                      "\"actions\":{\"execute\":%d,\"delegate\":%d,"
                      "\"wait\":%d,\"rest\":%d,\"escalate\":%d},"
-                     "\"success_rate_10\":%.3f,"
+                     "\"success_rate_10\":%.3f,\"brier_score_10\":%.3f,"
+                     "\"calibration_gap_10\":%.3f,"
                      "\"thresholds\":{\"execute\":%.2f,\"delegate\":%.2f,\"escalate\":%.2f},"
                      "\"current\":",
-                     e->total_cycles, e->avg_confidence, e->execute_count, e->delegate_count,
-                     e->wait_count, e->rest_count, e->escalate_count, ooda_success_rate(e, 10),
-                     e->execute_threshold, e->delegate_threshold, e->escalate_threshold);
+                     e->total_cycles, e->avg_confidence, e->brier_score, e->calibration_gap,
+                     e->execute_count, e->delegate_count, e->wait_count, e->rest_count,
+                     e->escalate_count, ooda_success_rate(e, 10), ooda_brier_score(e, 10),
+                     ooda_calibration_gap(e, 10), e->execute_threshold, e->delegate_threshold,
+                     e->escalate_threshold);
 
     n += ooda_cycle_to_json(&e->current, buf + n, len - n);
     n += snprintf(buf + n, len - n, "}");
