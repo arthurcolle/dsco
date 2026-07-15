@@ -20,6 +20,14 @@ bool baseline_log_usage(const char *category, const char *title,
                         int input_tokens, int output_tokens,
                         int cache_read_tokens, int cache_write_tokens);
 
+/* Record token usage with an authoritative accounted cost. Zero is a valid
+ * value for subscription-included usage. */
+bool baseline_log_usage_with_cost(const char *category, const char *title,
+                                  const char *detail, const char *metadata_json,
+                                  int input_tokens, int output_tokens,
+                                  int cache_read_tokens, int cache_write_tokens,
+                                  double reported_cost_usd);
+
 /* Credit report: aggregate token/cost for instance tree rooted at given id.
    Pass NULL to use current instance. Returns malloc'd JSON string. Caller frees. */
 char *baseline_credit_report(const char *root_instance_id);

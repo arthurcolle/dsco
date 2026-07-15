@@ -303,6 +303,10 @@ const char *provider_auth_mode(const char *provider_name, const char *resolved_k
     return "api-key";
 }
 
+bool provider_usage_is_included(const char *provider_name, const char *resolved_key) {
+    return strcmp(provider_auth_mode(provider_name, resolved_key), "chatgpt-subscription") == 0;
+}
+
 void provider_debug_log_request(const char *provider_name, const char *model,
                                 const char *resolved_key) {
     if (!provider_debug_auth_enabled())
@@ -481,7 +485,11 @@ static void provider_build_claude_code_service_name(char *out, size_t out_len) {
 }
 
 #define CLAUDE_CODE_OAUTH_TOKEN_URL "https://platform.claude.com/v1/oauth/token"
+#ifdef DSCO_USE_OBF_SECRETS
+#define CLAUDE_CODE_OAUTH_CLIENT_ID dsco_secret("CLAUDE_CODE_OAUTH_CLIENT_ID")
+#else
 #define CLAUDE_CODE_OAUTH_CLIENT_ID "9d1c250a-e61b-44d9-88ed-5944d1962f5e"
+#endif
 #define CLAUDE_CODE_OAUTH_SCOPES                                                                   \
     "user:profile user:inference user:sessions:claude_code user:mcp_servers user:file_upload"
 #define CLAUDE_CODE_OAUTH_EXPIRY_BUFFER_MS (5LL * 60LL * 1000LL)
@@ -3460,6 +3468,24 @@ bool provider_msg_is_credit_too_low(const char *msg) {
     return false;
 }
 
+bool provider_stream_result_is_credit_exhausted(const char *provider_name,
+                                                const stream_result_t *result) {
+    if (!result || result->ok)
+        return false;
+    if (result->http_status == 402)
+        return true;
+    if (result->parsed.stop_reason &&
+        strcmp(result->parsed.stop_reason, "credit_too_low") == 0)
+        return true;
+    /* The native ChatGPT stream classifies quota 429s explicitly. Any other
+     * 429 on this lane is a transient throttle, even after retries run out. */
+    if (provider_name && strcmp(provider_name, "openai-codex") == 0)
+        return false;
+    if (result->http_status == 429)
+        return true;
+    return provider_msg_is_credit_too_low(result->parsed.stop_reason);
+}
+
 /* Classify an error body/message as a policy/gating rejection: the model or
  * provider is administratively unavailable to this principal (regulatory
  * gating, region/allowlist restriction, model retired, access not granted).
@@ -4849,6 +4875,7 @@ static stream_result_t openai_stream(provider_t *p, const char *api_key, const c
 
 #define CHATGPT_RESPONSES_URL "https://chatgpt.com/backend-api/codex/responses"
 #define CHATGPT_DEFAULT_STREAM_IDLE_TIMEOUT_S 300L
+#define CHATGPT_MAX_RETRY_DELAY_MS 30000L
 
 static const char *chatgpt_backend_url(void) {
     const char *override = getenv("DSCO_CHATGPT_BASE_URL");
@@ -5168,6 +5195,16 @@ static struct curl_slist *chatgpt_native_build_headers(provider_t *p, const char
     hdrs = curl_slist_append(hdrs, "Content-Type: application/json");
     hdrs = curl_slist_append(hdrs, "OpenAI-Beta: responses=experimental");
     hdrs = curl_slist_append(hdrs, "originator: codex_cli_rs");
+    hdrs = curl_slist_append(hdrs, "version: " DSCO_VERSION);
+    /* Parity with Codex CLI: the ChatGPT backend edge rate-buckets UA-less
+     * clients far more aggressively. libcurl sends NO User-Agent unless told. */
+    {
+        const char *ua = getenv("DSCO_CHATGPT_USER_AGENT");
+        char ua_hdr[256];
+        snprintf(ua_hdr, sizeof(ua_hdr), "User-Agent: %s",
+                 (ua && ua[0]) ? ua : "codex_cli_rs/" DSCO_VERSION " (dsco)");
+        hdrs = curl_slist_append(hdrs, ua_hdr);
+    }
     char auth[8300];
     snprintf(auth, sizeof(auth), "Authorization: Bearer %s", api_key ? api_key : "");
     hdrs = curl_slist_append(hdrs, auth);
@@ -5204,14 +5241,19 @@ typedef struct {
     char *stop_reason;
     bool got_error;
     bool credit_too_low;
+    bool retryable;
     bool stream_done;
     char *error_msg;
     time_t credit_reset_at;
+    long retry_after_ms;
     content_block_t tool_blocks[MAX_CONTENT_BLOCKS];
     int tool_block_count;
     char announced_tool_ids[MAX_CONTENT_BLOCKS][128];
     int announced_tool_count;
 } chatgpt_sse_state_t;
+
+static bool chatgpt_error_is_transient_rate_limit(const char *error_json_or_message);
+static long chatgpt_retry_after_ms_from_text(const char *text);
 
 static bool chatgpt_tool_announced(chatgpt_sse_state_t *s, const char *id) {
     if (!s || !id || !id[0])
@@ -5354,13 +5396,20 @@ static void chatgpt_handle_event(chatgpt_sse_state_t *s, const char *data) {
             s->credit_reset_at = provider_reset_max(
                 s->credit_reset_at, provider_credit_reset_at_from_text(err, time(NULL)));
         }
-        char *msg = json_get_str(err ? err : data, "message");
+        const char *error_payload = err ? err : data;
+        s->got_error = true;
+        if (provider_chatgpt_429_is_quota(error_payload)) {
+            s->credit_too_low = true;
+        } else if (chatgpt_error_is_transient_rate_limit(error_payload) &&
+                   s->text_accum.len == 0 && s->reasoning_accum.len == 0 &&
+                   s->tool_block_count == 0 && s->announced_tool_count == 0) {
+            s->retryable = true;
+            s->retry_after_ms = chatgpt_retry_after_ms_from_text(error_payload);
+        }
+        char *msg = json_get_str(error_payload, "message");
         if (msg) {
-            s->got_error = true;
             free(s->error_msg);
             s->error_msg = msg;
-            if (provider_msg_is_credit_too_low(msg))
-                s->credit_too_low = true;
             fprintf(stderr, "  \033[31mChatGPT backend error: %s\033[0m\n", msg);
         }
         free(err);
@@ -5403,11 +5452,109 @@ static size_t chatgpt_sse_write_cb(void *ptr, size_t size, size_t nmemb, void *u
     return total;
 }
 
-static stream_result_t chatgpt_native_stream(provider_t *p, const char *api_key,
-                                             const char *request_json, stream_text_cb text_cb,
-                                             stream_tool_start_cb tool_cb,
-                                             stream_tool_arg_delta_cb tool_delta_cb,
-                                             stream_thinking_cb thinking_cb, void *cb_ctx) {
+/* Quota-type 429 bodies from the ChatGPT backend: the plan window is
+ * exhausted, so retrying is futile — surface reset time and fail over.
+ * Distinct from transient rate_limit_exceeded, which backs off + retries. */
+bool provider_chatgpt_429_is_quota(const char *error_json_or_message) {
+    if (!error_json_or_message || !error_json_or_message[0])
+        return false;
+    static const char *needles[] = {
+        "usage_limit_reached", "usage_not_included",          "credits_depleted",
+        "insufficient_quota",  "quota_exceeded",              "exceeded your current quota",
+        "usage limit",         "requires a paid plan",        "billing",
+        NULL,
+    };
+    for (int i = 0; needles[i]; i++) {
+        size_t nlen = strlen(needles[i]);
+        for (const char *pos = error_json_or_message; *pos; pos++)
+            if (strncasecmp(pos, needles[i], nlen) == 0)
+                return true;
+    }
+    return false;
+}
+
+static const char *chatgpt_find_ci(const char *text, const char *needle) {
+    if (!text || !needle || !needle[0])
+        return NULL;
+    size_t nlen = strlen(needle);
+    for (const char *p = text; *p; p++)
+        if (strncasecmp(p, needle, nlen) == 0)
+            return p;
+    return NULL;
+}
+
+static bool chatgpt_error_is_transient_rate_limit(const char *error_json_or_message) {
+    return error_json_or_message &&
+           (chatgpt_find_ci(error_json_or_message, "rate_limit_exceeded") ||
+            chatgpt_find_ci(error_json_or_message, "rate limit exceeded") ||
+            chatgpt_find_ci(error_json_or_message, "rate limit reached"));
+}
+
+static long chatgpt_retry_delay_clamp(double delay_ms) {
+    if (delay_ms <= 0.0)
+        return 0;
+    if (delay_ms >= (double)CHATGPT_MAX_RETRY_DELAY_MS)
+        return CHATGPT_MAX_RETRY_DELAY_MS;
+    long rounded = (long)delay_ms;
+    if ((double)rounded < delay_ms)
+        rounded++;
+    return rounded > 0 ? rounded : 1;
+}
+
+static long chatgpt_retry_after_ms_from_text(const char *text) {
+    if (!text || !text[0])
+        return 0;
+
+    static const char *ms_fields[] = {"retry_after_ms", "retryAfterMs", NULL};
+    for (int i = 0; ms_fields[i]; i++) {
+        char *raw = json_get_raw(text, ms_fields[i]);
+        if (!raw)
+            continue;
+        char *end = NULL;
+        double value = strtod(raw, &end);
+        bool parsed = end && end != raw && value > 0.0;
+        free(raw);
+        if (parsed)
+            return chatgpt_retry_delay_clamp(value);
+    }
+    static const char *second_fields[] = {
+        "retry_after", "retryAfter", "retry_after_seconds", "retryAfterSeconds", NULL,
+    };
+    for (int i = 0; second_fields[i]; i++) {
+        char *raw = json_get_raw(text, second_fields[i]);
+        if (!raw)
+            continue;
+        char *end = NULL;
+        double value = strtod(raw, &end);
+        bool parsed = end && end != raw && value > 0.0;
+        free(raw);
+        if (parsed)
+            return chatgpt_retry_delay_clamp(value * 1000.0);
+    }
+
+    const char *p = chatgpt_find_ci(text, "try again in");
+    if (!p)
+        return 0;
+    p += strlen("try again in");
+    while (*p && isspace((unsigned char)*p))
+        p++;
+    char *end = NULL;
+    double value = strtod(p, &end);
+    if (!end || end == p || value <= 0.0)
+        return 0;
+    while (*end && isspace((unsigned char)*end))
+        end++;
+    double multiplier = strncasecmp(end, "ms", 2) == 0 ? 1.0 : 1000.0;
+    if (strncasecmp(end, "min", 3) == 0)
+        multiplier = 60000.0;
+    return chatgpt_retry_delay_clamp(value * multiplier);
+}
+
+static stream_result_t chatgpt_native_stream_once(provider_t *p, const char *api_key,
+                                                  const char *request_json, stream_text_cb text_cb,
+                                                  stream_tool_start_cb tool_cb,
+                                                  stream_tool_arg_delta_cb tool_delta_cb,
+                                                  stream_thinking_cb thinking_cb, void *cb_ctx) {
     stream_result_t result = {0};
     CURL *curl = curl_easy_init();
     dsco_http_pool_apply(curl);
@@ -5499,18 +5646,24 @@ static stream_result_t chatgpt_native_stream(provider_t *p, const char *api_key,
                 state.credit_reset_at = provider_reset_max(
                     state.credit_reset_at,
                     provider_credit_reset_at_from_text(err_obj, time(NULL)));
+                if (http_code == 402 ||
+                    (http_code == 429 && provider_chatgpt_429_is_quota(err_obj)))
+                    state.credit_too_low = true;
                 char *msg = json_get_str(err_obj, "message");
                 if (msg) {
                     state.got_error = true;
                     state.error_msg = msg;
-                    if (provider_msg_is_credit_too_low(msg) || http_code == 402 ||
-                        http_code == 429)
+                    if (http_code == 402 || provider_chatgpt_429_is_quota(err_obj))
                         state.credit_too_low = true;
                 }
                 free(err_obj);
             }
         }
-        if (http_code == 402 || http_code == 429)
+        if (http_code == 429 && !state.credit_too_low) {
+            state.retryable = true;
+            state.retry_after_ms = chatgpt_retry_after_ms_from_text(state.raw_body.data);
+        }
+        if (http_code == 402)
             state.credit_too_low = true;
         if (http_code == 401 || http_code == 403) {
             fprintf(stderr,
@@ -5554,8 +5707,12 @@ static stream_result_t chatgpt_native_stream(provider_t *p, const char *api_key,
     if (state.credit_too_low) {
         free(result.parsed.stop_reason);
         result.parsed.stop_reason = safe_strdup("credit_too_low");
-        result.credit_reset_at = state.credit_reset_at;
     }
+    /* Always propagate the reset hint (Retry-After / rate-limit headers) so
+     * the retry wrapper and agent.c trip-duration logic can use it. */
+    result.credit_reset_at = state.credit_reset_at;
+    result.retryable = state.retryable;
+    result.retry_after_ms = state.retry_after_ms;
 
     free(state.error_msg);
     jbuf_free(&state.raw_body);
@@ -5563,6 +5720,65 @@ static stream_result_t chatgpt_native_stream(provider_t *p, const char *api_key,
     jbuf_free(&state.text_accum);
     jbuf_free(&state.reasoning_accum);
     return result;
+}
+
+/* Set by agent.c's SIGINT handler; llm.c externs it the same way. */
+extern volatile int g_interrupted;
+
+/* Codex-CLI-parity retry: transient 429 (rate_limit_exceeded) and 5xx get
+ * bounded backoff honoring Retry-After. Quota 429s (credit_too_low) and all
+ * other failures return immediately for the caller's failover logic. The
+ * backend can also report a rate_limit_exceeded response.failed event over
+ * HTTP 200; that event is terminal and retryable when no output was emitted. */
+static stream_result_t chatgpt_native_stream(provider_t *p, const char *api_key,
+                                             const char *request_json, stream_text_cb text_cb,
+                                             stream_tool_start_cb tool_cb,
+                                             stream_tool_arg_delta_cb tool_delta_cb,
+                                             stream_thinking_cb thinking_cb, void *cb_ctx) {
+    int max_retries = dcr_provider_request_max_retries(
+        "openai-codex", (int)dsco_env_long("DSCO_CHATGPT_MAX_RETRIES", 3L, 0L, 10L));
+    stream_result_t result = {0};
+    for (int attempt = 0;; attempt++) {
+        result = chatgpt_native_stream_once(p, api_key, request_json, text_cb, tool_cb,
+                                            tool_delta_cb, thinking_cb, cb_ctx);
+        if (result.ok || g_interrupted || attempt >= max_retries)
+            return result;
+        bool quota = result.parsed.stop_reason &&
+                     strcmp(result.parsed.stop_reason, "credit_too_low") == 0;
+        bool transient = !quota && (result.retryable || result.http_status == 429 ||
+                                    (result.http_status >= 500 && result.http_status <= 599));
+        if (!transient)
+            return result;
+
+        long delay_ms = 1000L << attempt; /* 1s, 2s, 4s, ... */
+        time_t now = time(NULL);
+        if (result.retry_after_ms > 0) {
+            delay_ms = result.retry_after_ms;
+        } else if (result.credit_reset_at > now) {
+            delay_ms = (long)(result.credit_reset_at - now) * 1000L;
+        }
+        if (delay_ms > CHATGPT_MAX_RETRY_DELAY_MS)
+            delay_ms = CHATGPT_MAX_RETRY_DELAY_MS;
+
+        if (result.http_status == 200)
+            fprintf(stderr,
+                    "  \033[2mChatGPT stream rate limit — retrying in %.2fs "
+                    "(attempt %d/%d)\033[0m\n",
+                    delay_ms / 1000.0, attempt + 1, max_retries);
+        else
+            fprintf(stderr,
+                    "  \033[2mChatGPT HTTP %d — retrying in %.2fs "
+                    "(attempt %d/%d)\033[0m\n",
+                    result.http_status, delay_ms / 1000.0, attempt + 1, max_retries);
+        /* Free heap members via the owning path before reuse; the error path
+         * stores stop_reason + one text block in result.parsed. */
+        json_free_response(&result.parsed);
+        free(result.actual_model);
+        free(result.generation_id);
+        memset(&result, 0, sizeof(result));
+        if (usleep((useconds_t)delay_ms * 1000) != 0 && errno == EINTR && g_interrupted)
+            return result;
+    }
 }
 
 /* ── Provider endpoint table ───────────────────────────────────────────── */
