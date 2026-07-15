@@ -481,6 +481,12 @@ static bool parse_node(native_ui_scene_t *scene, scene_parser_t *p,
             parse_flat_object(node, p, apply_size_field);
             if (p->failed) return false;
         } else if (!strcmp(field, "children")) {
+            /* A flowless container (surface/scroll/custom) would never lay
+             * out its children; declared children imply a column unless the
+             * spec chose a flow. This keeps "card with contents" the obvious
+             * one-liner it should be. */
+            if (node->style.flow == NATIVE_UI_FLOW_NONE)
+                node->style.flow = NATIVE_UI_FLOW_COLUMN;
             uint64_t base = native_ui_scene_node(scene, index)->key;
             if (!parse_children(scene, p, index, base, depth)) return false;
         } else {

@@ -3,6 +3,7 @@
 #include "chronicle.h"
 #include "callbacks.h"
 #include "json_util.h"
+#include "rl_hooks.h"
 
 #include <stdbool.h>
 #include <stdint.h>
@@ -143,6 +144,23 @@ bool agent_event_emit(const agent_event_ctx_t *ctx,
     jbuf_append(&b, "}");
 
     bool ok = chronicle_journal_append(event_name, b.data, (flags & AGENT_EVENT_DURABLE) != 0);
+    if (ok) {
+        rl_hook_event_t trajectory_event = {
+            .run_id = run_id,
+            .sequence = seq,
+            .timestamp_ms = now_ms(),
+            .event_name = event_name,
+            .category = event_category(event_name),
+            .status = status && status[0] ? status : "ok",
+            .payload_json = payload_json,
+            .usd_delta = ctx ? ctx->usd_delta : 0.0,
+            .input_tokens = ctx ? ctx->input_tokens : 0,
+            .output_tokens = ctx ? ctx->output_tokens : 0,
+        };
+        /* Observability-only: failure to project a learning trajectory must not
+         * affect an authorized agent action or its canonical event journal. */
+        (void)rl_hooks_record_event(&trajectory_event);
+    }
     if (ok && (flags & AGENT_EVENT_CALLBACK)) {
         callback_policy_t policy;
         if (callback_policy_from_env(&policy))

@@ -20,10 +20,13 @@ int kitty_banner_render(FILE *out);
 
 /* Layered variant: the scene decomposed into independent images (deep
  * particles, grid, packet streams, wordmark, specular gloss) stacked with
- * placement z-indexes over one cell anchor. Each layer runs its own
- * server-side animation loop at its own tempo, so the terminal composites
- * five live pixel planes. Same return contract as kitty_banner_render. */
-int kitty_banner_render_layers(FILE *out);
+ * placement z-indexes over one cell anchor, each plane flipping at its own
+ * tempo. Animation is client-driven over base graphics commands (per-tick
+ * a=T retransmission under stable image ids) so it plays on any terminal
+ * with kitty graphics support, independent of the animation extension and
+ * its frame-storage quotas. Plays `loops` wordmark cycles then settles.
+ * Same return contract as kitty_banner_render. */
+int kitty_banner_render_layers(FILE *out, int loops);
 
 /* Artifact dump for the layered variant: every layer alone mid-loop plus
  * software composites of the full stack at several instants, as PPMs. */
