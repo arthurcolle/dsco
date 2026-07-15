@@ -17,6 +17,7 @@
 #include <string.h>
 #include <strings.h>
 #include <sys/ioctl.h>
+#include <time.h>
 #include <unistd.h>
 
 #define BANNER_MARGIN_X 20
@@ -398,12 +399,17 @@ static void banner_layer_gloss(banner_px_t *px, const banner_scene_t *sc,
     }
 }
 
+/* Gaps are tuned for the client-driven flip: aggregate ~47 flips/s, and the
+ * only byte-heavy plane (the noise-textured wordmark) flips at just ~8/s —
+ * the terminal decodes ~15MB/s at a 2260×400 canvas, well inside what kitty
+ * and ghostty parse comfortably. Ratios preserve the depth illusion:
+ * closer planes flip faster. */
 static const banner_layer_t k_banner_layers[] = {
-    {"deep", 36, 110, -3, banner_layer_deep},
-    {"grid", 24, 90, -2, banner_layer_grid},
-    {"streams", 30, 60, -1, banner_layer_streams},
-    {"wordmark", 24, 70, 0, banner_layer_wordmark},
-    {"gloss", 48, 45, 1, banner_layer_gloss},
+    {"deep", 36, 160, -3, banner_layer_deep},
+    {"grid", 24, 150, -2, banner_layer_grid},
+    {"streams", 30, 90, -1, banner_layer_streams},
+    {"wordmark", 24, 120, 0, banner_layer_wordmark},
+    {"gloss", 48, 70, 1, banner_layer_gloss},
 };
 #define BANNER_LAYER_COUNT \
     (sizeof(k_banner_layers) / sizeof(k_banner_layers[0]))
@@ -414,12 +420,13 @@ static inline uint32_t banner_layer_image_id(size_t layer) {
 
 /* ── Kitty transport ─────────────────────────────────────────────────── */
 
-static bool banner_send(FILE *out, const char *control, const banner_px_t *px) {
-    size_t raw_len = (size_t)BANNER_W * BANNER_H * sizeof(*px);
+static bool banner_send(FILE *out, const char *control, const banner_px_t *px,
+                        size_t pixel_count) {
     kitty_graphics_send_options_t options;
     kitty_graphics_send_options_default(&options);
     options.continuation_control = "q=2";
-    return kitty_graphics_send_pixels(out, control, px, raw_len, &options);
+    return kitty_graphics_send_pixels(out, control, px,
+                                      pixel_count * sizeof(*px), &options);
 }
 
 static bool banner_env_false(const char *name) {
@@ -465,7 +472,8 @@ static banner_cells_mode_t banner_cells_mode(void) {
 }
 
 static bool banner_placement_geometry(FILE *out, int *place_cols,
-                                      int *place_rows);
+                                      int *place_rows, int *canvas_w,
+                                      int *canvas_h);
 
 typedef struct {
     uint8_t r, g, b;
@@ -723,16 +731,19 @@ static void banner_emit_sextant_frame(FILE *out, const banner_cell_px_t *grid,
  * and no server-side loop is left running. */
 static int banner_render_cells_pixel(FILE *out, int loops) {
     if (!kitty_graphics_available(out)) return 0;
-    int place_cols, place_rows;
-    if (!banner_placement_geometry(out, &place_cols, &place_rows)) return 0;
+    int place_cols, place_rows, cw, ch;
+    if (!banner_placement_geometry(out, &place_cols, &place_rows, &cw, &ch))
+        return 0;
 
     uint8_t *mask = banner_mask_decode();
     if (!mask) return 0;
-    banner_px_t *px = malloc((size_t)BANNER_W * BANNER_H * sizeof(*px));
+    banner_px_t *px = malloc((size_t)cw * ch * sizeof(*px));
     if (!px) {
         free(mask);
         return 0;
     }
+    banner_scene_t sc;
+    banner_scene_init(&sc, mask, cw, ch);
 
     uint32_t image_id = 0x4350u << 16 | ((uint32_t)getpid() & 0xFFFFu);
     char control[160];
@@ -744,17 +755,17 @@ static int banner_render_cells_pixel(FILE *out, int loops) {
     for (int i = 0; i < place_rows; i++)
         fputc('\n', out);
     fprintf(out, "\033[%dA\r  ", place_rows);
-    banner_render_frame(px, mask, 0, BANNER_FRAMES);
+    banner_scene_frame(px, &sc, 0, BANNER_FRAMES);
     snprintf(control, sizeof(control),
              "a=T,t=d,f=32,o=z,s=%d,v=%d,i=%u,c=%d,r=%d,C=1,q=2",
-             BANNER_W, BANNER_H, image_id, place_cols, place_rows);
-    bool ok = banner_send(out, control, px);
+             cw, ch, image_id, place_cols, place_rows);
+    bool ok = banner_send(out, control, px, (size_t)cw * ch);
     fprintf(out, "\r\033[%dB", place_rows);
     for (int f = 1; f < BANNER_FRAMES && ok; f++) {
-        banner_render_frame(px, mask, f, BANNER_FRAMES);
+        banner_scene_frame(px, &sc, f, BANNER_FRAMES);
         snprintf(control, sizeof(control), "a=f,i=%u,f=32,o=z,s=%d,v=%d,q=2",
-                 image_id, BANNER_W, BANNER_H);
-        ok = banner_send(out, control, px);
+                 image_id, cw, ch);
+        ok = banner_send(out, control, px, (size_t)cw * ch);
     }
     free(px);
     free(mask);
@@ -850,9 +861,17 @@ bool kitty_banner_available(FILE *out) {
 }
 
 /* Cell footprint for the placement: full width minus margins, aspect-scaled
- * to the pixel canvas, capped at BANNER_MAX_ROWS. */
+ * to the pixel canvas, capped at BANNER_MAX_ROWS. `canvas_w`/`canvas_h`
+ * receive the footprint in device pixels (cell metrics from the tty), so a
+ * canvas of exactly that size renders 1:1 — the terminal never resamples.
+ * When the terminal does not report pixel sizes we assume 9×18 cells; the
+ * canvas is then still ≥ the classic raster and only ever downscaled. */
+#define BANNER_CANVAS_MAX_W 4096
+#define BANNER_CANVAS_MAX_H 1024
+
 static bool banner_placement_geometry(FILE *out, int *place_cols,
-                                      int *place_rows) {
+                                      int *place_rows, int *canvas_w,
+                                      int *canvas_h) {
     struct winsize ws;
     memset(&ws, 0, sizeof(ws));
     if (ioctl(fileno(out), TIOCGWINSZ, &ws) != 0 || ws.ws_col < 24 ||
@@ -874,20 +893,31 @@ static bool banner_placement_geometry(FILE *out, int *place_cols,
     if (cols < 20 || rows >= ws.ws_row) return false;
     *place_cols = cols;
     *place_rows = rows;
+    if (canvas_w) {
+        int w = cols * cell_w;
+        *canvas_w = w > BANNER_CANVAS_MAX_W ? BANNER_CANVAS_MAX_W : w;
+    }
+    if (canvas_h) {
+        int h = rows * cell_h;
+        *canvas_h = h > BANNER_CANVAS_MAX_H ? BANNER_CANVAS_MAX_H : h;
+    }
     return true;
 }
 
 int kitty_banner_render(FILE *out) {
-    int place_cols, place_rows;
-    if (!banner_placement_geometry(out, &place_cols, &place_rows)) return 0;
+    int place_cols, place_rows, cw, ch;
+    if (!banner_placement_geometry(out, &place_cols, &place_rows, &cw, &ch))
+        return 0;
 
     uint8_t *mask = banner_mask_decode();
     if (!mask) return 0;
-    banner_px_t *px = malloc((size_t)BANNER_W * BANNER_H * sizeof(*px));
+    banner_px_t *px = malloc((size_t)cw * ch * sizeof(*px));
     if (!px) {
         free(mask);
         return 0;
     }
+    banner_scene_t sc;
+    banner_scene_init(&sc, mask, cw, ch);
 
     uint32_t image_id = 0x4453u << 16 | ((uint32_t)getpid() & 0xFFFFu);
     char control[160];
@@ -901,21 +931,21 @@ int kitty_banner_render(FILE *out) {
     for (int i = 0; i < place_rows; i++)
         fputc('\n', out);
     fprintf(out, "\033[%dA\r  ", place_rows);
-    banner_render_frame(px, mask, 0, BANNER_FRAMES);
+    banner_scene_frame(px, &sc, 0, BANNER_FRAMES);
     snprintf(control, sizeof(control),
-             "a=T,t=d,f=32,o=z,s=%d,v=%d,i=%u,c=%d,r=%d,C=1,q=2",
-             BANNER_W, BANNER_H, image_id, place_cols, place_rows);
-    bool ok = banner_send(out, control, px);
+             "a=T,t=d,f=32,o=z,s=%d,v=%d,i=%u,c=%d,r=%d,C=1,q=2", cw, ch,
+             image_id, place_cols, place_rows);
+    bool ok = banner_send(out, control, px, (size_t)cw * ch);
     fprintf(out, "\r\033[%dB", place_rows);
 
     /* Root-frame gap + loading state while the remaining frames stream in. */
     fprintf(out, "\033_Ga=a,i=%u,s=2,v=1,r=1,z=%d,q=2\033\\", image_id,
             BANNER_FRAME_GAP_MS);
     for (int f = 1; f < BANNER_FRAMES && ok; f++) {
-        banner_render_frame(px, mask, f, BANNER_FRAMES);
+        banner_scene_frame(px, &sc, f, BANNER_FRAMES);
         snprintf(control, sizeof(control), "a=f,i=%u,f=32,o=z,s=%d,v=%d,z=%d,q=2",
-                 image_id, BANNER_W, BANNER_H, BANNER_FRAME_GAP_MS);
-        ok = banner_send(out, control, px);
+                 image_id, cw, ch, BANNER_FRAME_GAP_MS);
+        ok = banner_send(out, control, px, (size_t)cw * ch);
     }
     free(px);
     free(mask);
@@ -929,61 +959,100 @@ int kitty_banner_render(FILE *out) {
     return ferror(out) ? 0 : place_rows;
 }
 
-int kitty_banner_render_layers(FILE *out) {
-    int place_cols, place_rows;
-    if (!banner_placement_geometry(out, &place_cols, &place_rows)) return 0;
+static long banner_now_ms(void) {
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return ts.tv_sec * 1000L + ts.tv_nsec / 1000000L;
+}
+
+int kitty_banner_render_layers(FILE *out, int loops) {
+    int place_cols, place_rows, cw, ch;
+    if (!banner_placement_geometry(out, &place_cols, &place_rows, &cw, &ch))
+        return 0;
 
     uint8_t *mask = banner_mask_decode();
     if (!mask) return 0;
-    banner_px_t *px = malloc((size_t)BANNER_W * BANNER_H * sizeof(*px));
+    banner_px_t *px = malloc((size_t)cw * ch * sizeof(*px));
     if (!px) {
         free(mask);
         return 0;
     }
+    banner_scene_t sc;
+    banner_scene_init(&sc, mask, cw, ch);
 
-    /* One shared cell anchor; every layer's root frame goes out as a=T with
-     * the same c/r footprint and its own z index, so the terminal
-     * alpha-composites the stack in z order. a=T (not a=t + a=p) is
-     * load-bearing: kitty only drives animation timers for the implicit
-     * placement a=T creates — a=p placements stay frozen on frame 1
-     * (verified on kitty 0.47.4). */
+    /* Client-driven flipbook over BASE graphics commands only. The animation
+     * extension (a=f/a=a) is a trap here: ghostty/wezterm/konsole render
+     * kitty images but ignore it, and five native-resolution animations
+     * (~160 frames) overflow even kitty's own frame-storage quota — both
+     * failure modes leave frame 1 frozen on screen. Instead this process
+     * keeps the clock: each tick re-transmits the due layer's next frame
+     * under its stable image id with a=T (same id ⇒ old image and placement
+     * replaced atomically), so at most five images are ever resident and the
+     * pixels change because *we* change them. Ticks batch all due layers
+     * inside a DEC 2026 synchronized update so mid-tick repaints never show
+     * a half-updated stack. Plays `loops` wordmark cycles, settles on the
+     * final stack, and leaves it in the scrollback. */
     for (int i = 0; i < place_rows; i++)
         fputc('\n', out);
-    fprintf(out, "\033[%dA\r  ", place_rows);
+    fputs("\033[?25l", out);
+
+    if (loops < 1) loops = 3;
+    long start = banner_now_ms();
+    long total_ms = (long)loops * 2400;
+    long next_ms[BANNER_LAYER_COUNT];
+    for (size_t l = 0; l < BANNER_LAYER_COUNT; l++)
+        next_ms[l] = 0; /* every layer due on the first tick */
 
     char control[176];
     bool ok = true;
-    for (size_t l = 0; l < BANNER_LAYER_COUNT && ok; l++) {
-        const banner_layer_t *layer = &k_banner_layers[l];
-        uint32_t id = banner_layer_image_id(l);
-        for (int f = 0; f < layer->frames && ok; f++) {
-            float frac = (float)f / (float)layer->frames;
-            float phase = frac * 2.0f * (float)M_PI;
-            memset(px, 0, (size_t)BANNER_W * BANNER_H * sizeof(*px));
-            layer->render(px, mask, frac, phase);
-            if (f == 0)
+    for (;;) {
+        long now = banner_now_ms() - start;
+        bool due = false;
+        for (size_t l = 0; l < BANNER_LAYER_COUNT; l++)
+            if (next_ms[l] <= now) due = true;
+
+        if (due) {
+            fputs("\033[?2026h", out);
+            fprintf(out, "\033[%dA\r  ", place_rows);
+            for (size_t l = 0; l < BANNER_LAYER_COUNT && ok; l++) {
+                if (next_ms[l] > now) continue;
+                const banner_layer_t *layer = &k_banner_layers[l];
+                /* Frame follows the wall clock, so a slow tick (or slow
+                 * terminal) skips frames instead of dilating time — the
+                 * tempos stay honest and the schedule can never spiral into
+                 * permanent catch-up. */
+                long slot = now / layer->gap_ms;
+                int f = (int)(slot % layer->frames);
+                float frac = (float)f / (float)layer->frames;
+                memset(px, 0, (size_t)cw * ch * sizeof(*px));
+                layer->render(px, &sc, frac, frac * 2.0f * (float)M_PI);
                 snprintf(control, sizeof(control),
                          "a=T,t=d,f=32,o=z,s=%d,v=%d,i=%u,c=%d,r=%d,z=%d,C=1,q=2",
-                         BANNER_W, BANNER_H, id, place_cols, place_rows,
-                         layer->z);
-            else
-                snprintf(control, sizeof(control),
-                         "a=f,i=%u,f=32,o=z,s=%d,v=%d,z=%d,X=1,q=2", id,
-                         BANNER_W, BANNER_H, layer->gap_ms);
-            ok = banner_send(out, control, px);
+                         cw, ch, banner_layer_image_id(l), place_cols,
+                         place_rows, layer->z);
+                ok = banner_send(out, control, px, (size_t)cw * ch);
+                next_ms[l] = (slot + 1) * layer->gap_ms;
+            }
+            fprintf(out, "\r\033[%dB", place_rows);
+            fputs("\033[?2026l", out);
+            fflush(out);
         }
+        if (!ok || now >= total_ms) break;
+
+        long next_due = next_ms[0];
+        for (size_t l = 1; l < BANNER_LAYER_COUNT; l++)
+            if (next_ms[l] < next_due) next_due = next_ms[l];
+        long sleep_ms = next_due - (banner_now_ms() - start);
+        if (sleep_ms < 1) sleep_ms = 1;
+        if (sleep_ms > 50) sleep_ms = 50;
+        usleep((useconds_t)(sleep_ms * 1000));
     }
-    fprintf(out, "\r\033[%dB", place_rows);
+
+    fputs("\033[?25h", out);
+    fflush(out);
     free(px);
     free(mask);
-    if (!ok) return 0;
-
-    /* Hand each layer's loop to the terminal. */
-    for (size_t l = 0; l < BANNER_LAYER_COUNT; l++)
-        fprintf(out, "\033_Ga=a,i=%u,s=3,v=1,r=1,z=%d,q=2\033\\",
-                banner_layer_image_id(l), k_banner_layers[l].gap_ms);
-    fflush(out);
-    return ferror(out) ? 0 : place_rows;
+    return ok && !ferror(out) ? place_rows : 0;
 }
 
 /* ── PPM artifacts ───────────────────────────────────────────────────── */
@@ -1022,13 +1091,15 @@ bool kitty_banner_write_layers_ppm(const char *dir) {
 
     bool ok = true;
     char path[1024];
+    banner_scene_t sc;
+    banner_scene_init(&sc, mask, BANNER_W, BANNER_H);
 
     /* Each layer alone, mid-loop so time-dependent features are visible. */
     for (size_t l = 0; l < BANNER_LAYER_COUNT && ok; l++) {
         const banner_layer_t *layer = &k_banner_layers[l];
         float frac = 0.5f;
         memset(px, 0, total * sizeof(*px));
-        layer->render(px, mask, frac, frac * 2.0f * (float)M_PI);
+        layer->render(px, &sc, frac, frac * 2.0f * (float)M_PI);
         snprintf(path, sizeof(path), "%s/layer_%zu_%s.ppm", dir, l,
                  layer->name);
         ok = banner_write_ppm_buf(path, px);
@@ -1045,7 +1116,7 @@ bool kitty_banner_write_layers_ppm(const char *dir) {
             int frame = sample_ms[s] / layer->gap_ms % layer->frames;
             float frac = (float)frame / (float)layer->frames;
             memset(px, 0, total * sizeof(*px));
-            layer->render(px, mask, frac, frac * 2.0f * (float)M_PI);
+            layer->render(px, &sc, frac, frac * 2.0f * (float)M_PI);
             for (size_t i = 0; i < total; i++)
                 banner_blend_over(&comp[i], px[i].r, px[i].g, px[i].b,
                                   px[i].a / 255.0f);

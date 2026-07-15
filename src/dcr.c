@@ -585,6 +585,13 @@ const char *dcr_reasoning_effort_normalize(const char *provider, const char *mod
             dcr_copy(out, out_len, EFFORT_HIGH);
         return out;
     }
+    const char *bare_model = model ? strrchr(model, '/') : NULL;
+    bare_model = bare_model ? bare_model + 1 : model;
+    if (bare_model && strncmp(bare_model, "gpt-5.6", 7) == 0 &&
+        strcmp(e, EFFORT_MAX) == 0) {
+        dcr_copy(out, out_len, EFFORT_MAX);
+        return out;
+    }
     if (strcmp(e, EFFORT_MAX) == 0)
         e = EFFORT_XHIGH;
     dcr_copy(out, out_len, e);

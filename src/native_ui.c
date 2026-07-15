@@ -557,13 +557,14 @@ native_ui_viewport_metrics_t native_ui_terminal_viewport(int columns, int rows,
     if (requested_scale < 1 || requested_scale > 4) {
         int cell_width = metrics.physical_cell_width;
         int cell_height = metrics.physical_cell_height;
-        /* A normal 1x monospace cell is roughly 7-11 by 13-21 pixels. The
-         * paired thresholds deliberately overlap font variation while still
-         * distinguishing Retina 2x and 3x backing grids. Operators with an
-         * unusually large terminal font retain the explicit override. */
-        if (cell_height >= 38 || cell_width >= 27)
-            metrics.backing_scale = 3;
-        else if (cell_height >= 24 || cell_width >= 14)
+        /* Terminal cell dimensions include the user's font size, window zoom,
+         * and padding; they are not a reliable display-DPR API. In particular,
+         * a 2x Retina panel with a large font was previously misclassified as
+         * 3x, causing Kitty to interpolate a too-small framebuffer across the
+         * full cell grid. Auto-detection therefore distinguishes only 1x from
+         * HiDPI 2x. A real 3x backing grid must use the explicit DPR override
+         * until the terminal exposes its backing scale directly. */
+        if (cell_height >= 24 || cell_width >= 14)
             metrics.backing_scale = 2;
     }
     metrics.logical_width = physical_width > 0 ?

@@ -136,14 +136,16 @@
       "confidence": 0.9,
       "cost_levers": 8,
       "errors": [],
-      "implemented": "openai_api_coverage_map,openai_cost_management_map,automatic_prompt_cache,prompt_cache_key,prompt_cache_retention,cached_token_usage_parse",
-      "last_reviewed": "2026-07-02",
+      "implemented": "openai_api_coverage_map,openai_cost_management_map,openai_image_generation_tool,automatic_prompt_cache,prompt_cache_key,prompt_cache_retention,cached_token_usage_parse",
+      "last_reviewed": "2026-07-08",
       "mechanisms": "automatic_prefix_cache,prompt_cache_key,prompt_cache_retention",
       "missing": [
         "Responses transport default migration",
         "Batch API JSONL planner and result ingester",
         "Responses input-token preflight estimator",
         "OpenAI built-in tool/session/storage cost ledger",
+        "OpenAI image edits and variations native tools",
+        "Responses image_generation hosted tool wiring",
         "Realtime response.done usage import",
         "OpenAI admin usage reconciliation"
       ],

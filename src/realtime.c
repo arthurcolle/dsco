@@ -58,10 +58,15 @@ static const char RT_DEFAULT_INSTRUCTIONS[] =
     "generic web fetches: for weather, use `weather` first when the user gives "
     "a place name, and use `nws` for US latitude/longitude, station, or state "
     "lookups once those values are known. Do not use WebFetch, WebSearch, or "
-    "parallel_search for weather unless the specific weather tools fail. Never "
-    "invent placeholder API keys or place fake credentials in URLs/tool inputs, "
-    "and do not ask the user for permission to call read-only tools. Never read "
-    "raw JSON, IDs, or base64 aloud.";
+    "parallel_search for weather unless the specific weather tools fail. For "
+    "local filesystem questions, use cwd, list_directory, file_tree, file_info, "
+    "read_file, grep_files, or find_files; use file_tree/file_info when sizes "
+    "matter. When the user explicitly asks for shell, Python, build, test, or "
+    "systems-agent work and those tools are available, use bash, python, "
+    "run_command, make_build, or test_run instead of claiming you cannot run "
+    "them. Never invent placeholder API keys or place fake credentials in "
+    "URLs/tool inputs, and do not ask the user for permission to call read-only "
+    "tools. Never read raw JSON, IDs, or base64 aloud.";
 
 static volatile sig_atomic_t g_rt_stop = 0;
 
@@ -69,6 +74,8 @@ static void rt_on_sigint(int sig) {
     (void)sig;
     g_rt_stop = 1;
 }
+
+static bool rt_env_truthy(const char *name);
 
 const char *realtime_default_reasoning_effort(void) {
     return RT_DEFAULT_REASONING_EFFORT;
@@ -88,10 +95,38 @@ static const char *RT_PREFERRED_TOOLS[] = {
     "WebSearch",
     "parallel_search",
     "WebFetch",
+    "cwd",
+    "list_directory",
+    "file_tree",
+    "file_info",
+    "find_files",
+    "grep_files",
+    "read_file",
     "Read",
     "Grep",
     "Glob",
     "TaskList",
+};
+
+static const char *RT_CONTEXTUAL_OPERATOR_TOOLS[] = {
+    "bash",
+    "python",
+    "run_command",
+    "make_build",
+    "test_run",
+    "compile",
+    "sandbox_run",
+    "git",
+    "apply_patch",
+    "write_file",
+    "edit_file",
+    "append_file",
+    "Bash",
+    "Write",
+    "Edit",
+    "MultiEdit",
+    "format_code",
+    "lint",
 };
 
 static int rt_preferred_rank(const char *name) {
@@ -103,10 +138,69 @@ static int rt_preferred_rank(const char *name) {
     return -1;
 }
 
-static bool rt_tool_voice_safe(const tool_def_t *t) {
+static bool rt_context_contains_ci(const char *haystack, const char *needle) {
+    if (!haystack || !needle || !needle[0])
+        return false;
+    size_t nlen = strlen(needle);
+    for (const char *p = haystack; *p; p++)
+        if (strncasecmp(p, needle, nlen) == 0)
+            return true;
+    return false;
+}
+
+static bool rt_context_wants_operator_tools(const char *context) {
+    if (rt_env_truthy("DSCO_SYSTEMS_AGENT") || rt_env_truthy("DSCO_REALTIME_SYSTEM_TOOLS") ||
+        rt_env_truthy("DSCO_REALTIME_OPERATOR_TOOLS"))
+        return true;
+
+    static const char *terms[] = {
+        "systems-agent",
+        "system agent",
+        "bash",
+        "shell",
+        "terminal",
+        "run command",
+        "run a command",
+        "run shell",
+        "run bash",
+        "run python",
+        "execute",
+        "exec",
+        "python",
+        "script",
+        "compile",
+        "build",
+        "make ",
+        "test ",
+        "pytest",
+        "apply patch",
+        "patch file",
+        "edit file",
+        "write file",
+    };
+    for (size_t i = 0; i < sizeof(terms) / sizeof(terms[0]); i++)
+        if (rt_context_contains_ci(context, terms[i]))
+            return true;
+    return false;
+}
+
+static bool rt_operator_ranked(const char *name) {
+    if (!name)
+        return false;
+    for (size_t i = 0;
+         i < sizeof(RT_CONTEXTUAL_OPERATOR_TOOLS) / sizeof(RT_CONTEXTUAL_OPERATOR_TOOLS[0]);
+         i++)
+        if (strcmp(name, RT_CONTEXTUAL_OPERATOR_TOOLS[i]) == 0)
+            return true;
+    return false;
+}
+
+static bool rt_tool_voice_safe_for_context(const tool_def_t *t, const char *context) {
     if (!t || !t->name || strlen(t->name) > 64 || t->is_interactive)
         return false;
-    return t->is_read_only || rt_preferred_rank(t->name) >= 0;
+    if (t->is_read_only || rt_preferred_rank(t->name) >= 0)
+        return true;
+    return rt_context_wants_operator_tools(context) && rt_operator_ranked(t->name);
 }
 
 static bool rt_selected_has(const tool_def_t **out, int count, const char *name) {
@@ -119,8 +213,8 @@ static bool rt_selected_has(const tool_def_t **out, int count, const char *name)
 }
 
 static bool rt_add_tool_ptr(const tool_def_t **out, int *count, int max_tools,
-                            const tool_def_t *tool) {
-    if (!out || !count || *count >= max_tools || !rt_tool_voice_safe(tool) ||
+                            const tool_def_t *tool, const char *context) {
+    if (!out || !count || *count >= max_tools || !rt_tool_voice_safe_for_context(tool, context) ||
         rt_selected_has(out, *count, tool->name))
         return false;
     out[(*count)++] = tool;
@@ -128,19 +222,19 @@ static bool rt_add_tool_ptr(const tool_def_t **out, int *count, int max_tools,
 }
 
 static void rt_add_named_tool(const tool_def_t **out, int *count, int max_tools,
-                              const char *name) {
+                              const char *name, const char *context) {
     int total = 0;
     const tool_def_t *all = tools_get_all(&total);
     for (int i = 0; i < total && *count < max_tools; i++) {
         if (all[i].name && strcmp(all[i].name, name) == 0) {
-            rt_add_tool_ptr(out, count, max_tools, &all[i]);
+            rt_add_tool_ptr(out, count, max_tools, &all[i], context);
             return;
         }
     }
 }
 
 static int rt_pack_tool_page(const tool_page_result_t *paged, const tool_def_t **out,
-                             int count, int max_tools) {
+                             int count, int max_tools, const char *context) {
     if (!paged || !out || max_tools <= 0)
         return count;
 
@@ -148,7 +242,7 @@ static int rt_pack_tool_page(const tool_page_result_t *paged, const tool_def_t *
     int tier_counts[] = {paged->pinned_count, paged->working_count, paged->discovery_count};
     for (int t = 0; t < 3 && count < max_tools; t++) {
         for (int i = 0; i < tier_counts[t] && count < max_tools; i++)
-            rt_add_tool_ptr(out, &count, max_tools, tiers[t][i]);
+            rt_add_tool_ptr(out, &count, max_tools, tiers[t][i], context);
     }
     return count;
 }
@@ -161,10 +255,18 @@ static int rt_select_paged_tools(const char *context, const tool_def_t **out, in
     for (size_t i = 0;
          i < sizeof(RT_PREFERRED_TOOLS) / sizeof(RT_PREFERRED_TOOLS[0]) && count < max_tools;
          i++)
-        rt_add_named_tool(out, &count, max_tools, RT_PREFERRED_TOOLS[i]);
+        rt_add_named_tool(out, &count, max_tools, RT_PREFERRED_TOOLS[i], context);
+
+    if (rt_context_wants_operator_tools(context)) {
+        for (size_t i = 0;
+             i < sizeof(RT_CONTEXTUAL_OPERATOR_TOOLS) / sizeof(RT_CONTEXTUAL_OPERATOR_TOOLS[0]) &&
+             count < max_tools;
+             i++)
+            rt_add_named_tool(out, &count, max_tools, RT_CONTEXTUAL_OPERATOR_TOOLS[i], context);
+    }
 
     tool_page_result_t paged = tools_get_paged(context, max_tools, 1.0f);
-    count = rt_pack_tool_page(&paged, out, count, max_tools);
+    count = rt_pack_tool_page(&paged, out, count, max_tools, context);
     tool_page_result_free(&paged);
     return count;
 }
@@ -206,6 +308,7 @@ static void rt_usage(FILE *out) {
             "  --half-duplex         mute mic while DSCO is speaking (default speaker mode)\n"
             "  --full-duplex         keep mic live while DSCO speaks (headphones/barge-in)\n"
             "  --no-tools            do not expose DSCO tools to the session\n"
+            "  --systems-agent       enable systems-agent env posture and operator tools\n"
             "  -h, --help            show this help\n\n"
             "environment:\n"
             "  OPENAI_API_KEY            API key (also resolved via provider config)\n"
@@ -213,10 +316,35 @@ static void rt_usage(FILE *out) {
             "  DSCO_REALTIME_REASONING_EFFORT  Realtime 2 effort (default low; none to omit)\n"
             "  DSCO_REALTIME_TRANSCRIBE  input transcription model (default whisper-1)\n"
             "  DSCO_REALTIME_MAX_TOOLS   tool count cap in session.update (default %d)\n"
+            "  DSCO_REALTIME_SYSTEM_TOOLS  1 to always expose operator tools\n"
             "  DSCO_REALTIME_ECHO_GUARD_MS  mic mute duration in half-duplex mode (default %d)\n"
             "  DSCO_REALTIME_HALF_DUPLEX    1 to force mic mute while DSCO speaks\n"
             "  DSCO_CA_BUNDLE            PEM bundle for TLS verification\n",
             RT_DEFAULT_MODEL, RT_DEFAULT_VOICE, RT_MAX_TOOLS, RT_DEFAULT_ECHO_GUARD_MS);
+}
+
+static void rt_enable_systems_agent_mode(void) {
+    bool already = rt_env_truthy("DSCO_SYSTEMS_AGENT") || rt_env_truthy("DSCO_GOV_BYPASS");
+    setenv("DSCO_GOV_MODEL", "none", 1);
+    setenv("DSCO_GOV_BYPASS", "1", 1);
+    setenv("DSCO_TRUST_TIER", "trusted", 1);
+    setenv("DSCO_APPROVAL_MODE", "never", 1);
+    setenv("DSCO_APPROVAL_NEVER", "1", 1);
+    setenv("DSCO_NO_APPROVAL_PROMPTS", "1", 1);
+    setenv("DSCO_SYSTEMS_AGENT", "1", 1);
+    if (!getenv("DSCO_DHT_SWARM"))
+        setenv("DSCO_DHT_SWARM", "dsco-systems", 1);
+    setenv("DSCO_NET_FORCE", "1", 1);
+    if (!getenv("DSCO_FLEET_CONCURRENCY"))
+        setenv("DSCO_FLEET_CONCURRENCY", "64", 1);
+    if (!already) {
+        fprintf(stderr,
+                "\x1b[1;31m[systems-agent] GOVERNANCE DISABLED - unbounded "
+                "permissions; ungoverned control arm.\x1b[0m\n");
+        fprintf(stderr,
+                "\x1b[36m[systems-agent] native networking hooks active: "
+                "mesh P2P + DHT overlay + TLS server + fleet fanout.\x1b[0m\n");
+    }
 }
 
 int realtime_voice_cli(int argc, char **argv) {
@@ -234,6 +362,8 @@ int realtime_voice_cli(int argc, char **argv) {
             o.half_duplex = false;
         } else if (strcmp(a, "--no-tools") == 0) {
             o.no_tools = true;
+        } else if (strcmp(a, "--systems-agent") == 0) {
+            rt_enable_systems_agent_mode();
         } else if (strcmp(a, "--model") == 0 && i + 1 < argc) {
             o.model = argv[++i];
         } else if (strcmp(a, "--voice") == 0 && i + 1 < argc) {

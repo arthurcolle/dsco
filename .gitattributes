@@ -9,6 +9,10 @@
 *.yml text eol=lf
 *.yaml text eol=lf
 
+# Nasdaq Trader source snapshots and CSV exports use canonical CRLF records.
+data/nasdaq_symbol_directory/*.csv text eol=crlf
+data/nasdaq_symbol_directory/raw/*.txt text eol=crlf
+
 # Binaries
 *.o binary
 *.a binary

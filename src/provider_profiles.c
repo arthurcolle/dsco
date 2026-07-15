@@ -28,8 +28,8 @@ static const provider_profile_t PROVIDER_PROFILES[] = {
         .env_vars = {"ANTHROPIC_API_KEY", "ANTHROPIC_TOKEN", "CLAUDE_CODE_OAUTH_TOKEN",
                      "DSCO_CLAUDE_CODE_OAUTH_TOKEN"},
         .aliases = {"claude", "claude-oauth", "claude-code"},
-        .default_model = "claude-sonnet-4-6",
-        .default_aux_model = "claude-haiku-4-5-20251001",
+        .default_model = "claude-sonnet-5",
+        .default_aux_model = "claude-haiku-4-5",
         .caps = CAP_ANTHROPIC,
     },
     {
@@ -43,7 +43,7 @@ static const provider_profile_t PROVIDER_PROFILES[] = {
         .transport_base_url = "https://api.openai.com/v1",
         .env_vars = {"OPENAI_API_KEY", "OPENAI_KEY", "CHATGPT_API_KEY"},
         .aliases = {"chatgpt"},
-        .default_model = "gpt-4.1",
+        .default_model = "gpt-5.6-luna",
         .caps = CAP_OPENAI_COMPAT_VISION,
     },
     {

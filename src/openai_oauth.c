@@ -24,7 +24,12 @@
 #define OAI_OAUTH_ISSUER       "https://auth.openai.com"
 #define OAI_OAUTH_AUTHORIZE    "https://auth.openai.com/oauth/authorize"
 #define OAI_OAUTH_TOKEN_URL    "https://auth.openai.com/oauth/token"
+#ifdef DSCO_USE_OBF_SECRETS
+const char *dsco_secret(const char *key); /* impl: src/embedded_data.c */
+#define OAI_OAUTH_CLIENT_ID    dsco_secret("OAI_OAUTH_CLIENT_ID")
+#else
 #define OAI_OAUTH_CLIENT_ID    "app_EMoamEEZ73f0CkXaXp7hrann"
+#endif
 #define OAI_OAUTH_REDIRECT     "http://localhost:1455/auth/callback"
 #define OAI_OAUTH_PORT         1455
 #define OAI_OAUTH_SCOPE        "openid profile email offline_access"

@@ -13,14 +13,19 @@
 #include "spend_governor.h"
 #include "frontier.h"
 #include "executive.h"
+#include "strategy.h"
 #include "json_util.h"
 #include "ipc.h"
 #include "tui.h"
+#include "pixel_tui.h"
+#include "plan.h"
+#include "structured_process.h"
 #include "img_util.h"
 #include "dsco_dht.h"
 #include "md.h"
 #include "baseline.h"
 #include "chronicle.h"
+#include "rl_hooks.h"
 #include "plugin.h"
 #include "setup.h"
 #include "workspace.h"
@@ -28,6 +33,7 @@
 #include "toolmgmt.h"
 #include "provider.h"
 #include "openrouter_cache.h"
+#include "codex_usage.h"
 #include "provider_pool.h"
 #include "openai_oauth.h"
 #include "local_llm.h"
@@ -73,6 +79,7 @@ extern volatile int g_agent_exit_requested;
 
 static int g_launch_argc = 0;
 static char **g_launch_argv = NULL;
+static char *g_initial_prompt = NULL;
 
 void agent_set_launch_argv(int argc, char **argv) {
     if (g_launch_argv) {
@@ -93,6 +100,11 @@ void agent_set_launch_argv(int argc, char **argv) {
     g_launch_argc = argc;
 }
 
+void agent_set_initial_prompt(const char *prompt) {
+    free(g_initial_prompt);
+    g_initial_prompt = prompt && prompt[0] ? safe_strdup(prompt) : NULL;
+}
+
 /* Escape key state machine — first ESC pauses, second ESC cancels */
 typedef enum { ESC_RUNNING = 0, ESC_PAUSED = 1 } escape_state_t;
 static volatile sig_atomic_t g_escape_state = ESC_RUNNING;
@@ -109,6 +121,66 @@ static void agent_request_pause(void) {
     }
 }
 
+/* Follow-up composer: while a turn is running, keep stdin owned by a real
+ * composer and enqueue submitted messages for the next user turns. */
+#define FOLLOWUP_QUEUE_CAP 8
+typedef struct {
+    pthread_mutex_t mutex;
+    char messages[FOLLOWUP_QUEUE_CAP][MAX_INPUT_LINE];
+    int head;
+    int tail;
+    int count;
+} followup_queue_t;
+
+typedef struct {
+    tui_status_bar_t *sb;
+    followup_queue_t *queue;
+    volatile bool stop;
+    volatile bool running;
+    pthread_t thread;
+} followup_reader_t;
+
+static void followup_queue_init(followup_queue_t *q) {
+    memset(q, 0, sizeof(*q));
+    pthread_mutex_init(&q->mutex, NULL);
+}
+
+static void followup_queue_destroy(followup_queue_t *q) {
+    pthread_mutex_destroy(&q->mutex);
+}
+
+static bool followup_queue_push(followup_queue_t *q, const char *msg) {
+    if (!q || !msg || !msg[0])
+        return false;
+    pthread_mutex_lock(&q->mutex);
+    bool ok = q->count < FOLLOWUP_QUEUE_CAP;
+    if (ok) {
+        snprintf(q->messages[q->tail], sizeof(q->messages[q->tail]), "%s", msg);
+        q->tail = (q->tail + 1) % FOLLOWUP_QUEUE_CAP;
+        q->count++;
+    }
+    int depth = q->count;
+    pthread_mutex_unlock(&q->mutex);
+    pixel_tui_session_set_queue_depth(stderr, depth, FOLLOWUP_QUEUE_CAP);
+    return ok;
+}
+
+static bool followup_queue_pop(followup_queue_t *q, char *out, size_t out_sz) {
+    if (!q || !out || out_sz == 0)
+        return false;
+    pthread_mutex_lock(&q->mutex);
+    bool ok = q->count > 0;
+    if (ok) {
+        snprintf(out, out_sz, "%s", q->messages[q->head]);
+        q->head = (q->head + 1) % FOLLOWUP_QUEUE_CAP;
+        q->count--;
+    }
+    int depth = q->count;
+    pthread_mutex_unlock(&q->mutex);
+    pixel_tui_session_set_queue_depth(stderr, depth, FOLLOWUP_QUEUE_CAP);
+    return ok;
+}
+
 /* Timestamp when current agent turn started (for pause display) */
 static double g_turn_start_time = 0.0;
 
@@ -119,6 +191,7 @@ static md_renderer_t s_md;
  * never streamed it live (e.g. reasoning-only turns promoted to text in the
  * provider) so it can render the answer instead of dropping it. */
 static bool s_turn_streamed_text = false;
+static bool s_turn_deferred_text = false;
 
 #define THINKING_LIVE_PREVIEW_DEFAULT 1200
 #define THINKING_LIVE_PREVIEW_MAX 16000
@@ -228,7 +301,8 @@ static bool permission_env_truthy(const char *v) {
 static bool tool_permission_prompt_available(void) {
     if (permission_env_truthy(getenv("DSCO_DISABLE_PERMISSION_PROMPTS")))
         return false;
-    return isatty(STDIN_FILENO) && isatty(STDERR_FILENO);
+    return isatty(STDIN_FILENO) &&
+           (isatty(STDERR_FILENO) || pixel_tui_session_active());
 }
 
 static bool tool_permission_always_allowed(const char *tool_name) {
@@ -744,6 +818,25 @@ static const char *cache_expectation_label(cache_expectation_t expectation) {
     }
 }
 
+static bool agent_text_quality_critical(const char *text) {
+    if (!text || !text[0])
+        return false;
+    static const char *needles[] = {
+        "constitution",      "constitutional", "doctrine",
+        "governance",        "governor",       "policy",
+        "system prompt",     "self-modification",
+        "self modification", "recursive repair",
+        "rsi",               "consent",        "verification swarm",
+        "verifier",          "rubric",         "calibration",
+        "blast radius",
+    };
+    for (size_t i = 0; i < sizeof(needles) / sizeof(needles[0]); i++) {
+        if (strcasestr(text, needles[i]))
+            return true;
+    }
+    return false;
+}
+
 static const char *cache_status_label(const char *model, const usage_t *u,
                                       const session_state_t *session) {
     cache_expectation_t expectation = model_cache_expectation(model);
@@ -1138,17 +1231,8 @@ static time_t subscription_exhausted_until_for_retry(const char *provider,
 }
 
 static bool stream_result_is_credit_exhausted(const stream_result_t *sr) {
-    if (!sr || sr->ok)
-        return false;
-    if (sr->http_status == 402 || sr->http_status == 429)
-        return true;
-    /* Recognize the internal credit_too_low sentinel that llm.c / provider.c
-     * propagate as stop_reason for billing failures that surface as HTTP 400
-     * (e.g. Anthropic "credit balance is too low"). Without this, a depleted
-     * key hard-stops instead of failing over — see agent.c dynamic-failover. */
-    if (sr->parsed.stop_reason && strcmp(sr->parsed.stop_reason, "credit_too_low") == 0)
-        return true;
-    return provider_msg_is_credit_too_low(sr->parsed.stop_reason);
+    return provider_stream_result_is_credit_exhausted(
+        g_provider ? g_provider->name : NULL, sr);
 }
 
 typedef enum {
@@ -1178,7 +1262,8 @@ static bool fallback_prompt_enabled(void) {
         return false;
     if (env_truthy(getenv("DSCO_AUTO_FALLBACK")))
         return false;
-    return isatty(STDIN_FILENO) && isatty(STDERR_FILENO);
+    return isatty(STDIN_FILENO) &&
+           (isatty(STDERR_FILENO) || pixel_tui_session_active());
 }
 
 static fallback_decision_t prompt_subscription_fallback_choice(const session_state_t *session,
@@ -2065,10 +2150,19 @@ static void sigwinch_handler(int sig) {
 }
 
 /* Called from main loop to handle deferred SIGWINCH resize */
-static __attribute__((unused)) void handle_pending_winch(void) {
+static void handle_pending_winch(void) {
     if (!g_winch_pending)
         return;
     g_winch_pending = 0;
+    /* The Kitty framebuffer is independent of the legacy status pane. Refresh
+     * it even before the first composer paint (or when that pane is disabled),
+     * otherwise an early OS-window resize leaves a stale image floating in a
+     * larger black terminal. */
+    if (pixel_tui_session_active()) {
+        tui_term_lock();
+        pixel_tui_session_refresh(stderr);
+        tui_term_unlock();
+    }
     /* Ephemeral panel: nothing pinned. The next composer_read repaints
      * the panel at the new dimensions. Just clear the bottom row band
      * to prevent stale chrome from a smaller previous size. */
@@ -2310,6 +2404,10 @@ static bool fast_exec_restart(conversation_t *conv, session_state_t *session,
     mcp_bg_init_join();
     mcp_shutdown(&g_mcp);
 
+    /* An exec must inherit the real terminal, never the native compositor's
+     * capture pipe. The replacement process will create its own Kitty session. */
+    if (pixel_tui_session_active())
+        pixel_tui_session_end(stderr);
     terminal_input_echo_restore();
     fprintf(stderr, "\033[?2004l");
     fflush(stderr);
@@ -2660,6 +2758,8 @@ static void session_reset_usage_for_new(session_state_t *session) {
     session->total_ttft_ms = 0.0;
     session->total_stream_ms = 0.0;
     session->telemetry_samples = 0;
+    session->telemetry_input_tokens = 0;
+    session->telemetry_output_tokens = 0;
     session->max_output_override = 0;
     session->max_output_recovery_count = 0;
     session->tool_choice[0] = '\0';
@@ -2692,9 +2792,47 @@ static bool session_switch_to_file(conversation_t *conv, session_state_t *sessio
     return true;
 }
 
-/* ── Cost tracking ─────────────────────────────────────────────────────── */
+/* ── Cost and subscription-usage tracking ─────────────────────────────── */
 
-static void print_cost(session_state_t *session) {
+static void format_grouped_count(long long value, char *out, size_t out_len) {
+    if (!out || out_len == 0)
+        return;
+    if (value < 0) {
+        snprintf(out, out_len, "unavailable");
+        return;
+    }
+    char raw[64];
+    snprintf(raw, sizeof(raw), "%lld", value);
+    size_t len = strlen(raw);
+    size_t first = len % 3;
+    if (first == 0)
+        first = 3;
+    size_t pos = 0;
+    for (size_t i = 0; i < len && pos + 1 < out_len; i++) {
+        if (i > 0 && i >= first && (i - first) % 3 == 0 && pos + 1 < out_len)
+            out[pos++] = ',';
+        if (pos + 1 < out_len)
+            out[pos++] = raw[i];
+    }
+    out[pos] = '\0';
+}
+
+static void format_usage_window(long long minutes, char *out, size_t out_len) {
+    if (!out || out_len == 0)
+        return;
+    if (minutes <= 0)
+        snprintf(out, out_len, "rolling window");
+    else if (minutes % (7 * 24 * 60) == 0)
+        snprintf(out, out_len, "%lld-week", minutes / (7 * 24 * 60));
+    else if (minutes % (24 * 60) == 0)
+        snprintf(out, out_len, "%lld-day", minutes / (24 * 60));
+    else if (minutes % 60 == 0)
+        snprintf(out, out_len, "%lld-hour", minutes / 60);
+    else
+        snprintf(out, out_len, "%lld-minute", minutes);
+}
+
+static void print_cost(session_state_t *session, const char *api_key) {
     const model_info_t *mi = model_lookup(session->model);
     if (!mi) {
         fprintf(stderr, "  %sunknown model for pricing%s\n", TUI_DIM, TUI_RESET);
@@ -2704,10 +2842,13 @@ static void print_cost(session_state_t *session) {
     double out_cost = session->total_output_tokens * mi->output_price / 1e6;
     double cr_cost = session->total_cache_read_tokens * mi->cache_read_price / 1e6;
     double cw_cost = session->total_cache_write_tokens * mi->cache_write_price / 1e6;
-    double total = in_cost + out_cost + cr_cost + cw_cost;
+    double api_equivalent = in_cost + out_cost + cr_cost + cw_cost;
+    const char *request_key = resolve_provider_key(api_key);
+    bool included = provider_usage_is_included(g_provider ? g_provider->name : NULL, request_key);
+    double billed = session_cost(session);
 
     fprintf(stderr, "\n");
-    tui_header("Session Cost", TUI_BCYAN);
+    tui_header(included ? "Session Subscription Usage" : "Session Cost", TUI_BCYAN);
     fprintf(stderr, "  %sModel:%s       %s\n", TUI_DIM, TUI_RESET, session->model);
     fprintf(stderr, "  %sTurns:%s       %d\n", TUI_DIM, TUI_RESET, session->turn_count);
     fprintf(stderr, "  %sInput:%s       %d tokens  ($%.4f)\n", TUI_DIM, TUI_RESET,
@@ -2725,8 +2866,108 @@ static void print_cost(session_state_t *session) {
                 TUI_RESET, session_cache_hit_ratio(session) * 100.0,
                 session->total_cache_read_tokens, session_cache_denominator(session));
     fprintf(stderr, "  %s%s──────────────────────%s\n", TUI_BOLD, TUI_CYAN, TUI_RESET);
-    fprintf(stderr, "  %sTotal:%s       %s$%.4f%s\n\n", TUI_BOLD, TUI_RESET, TUI_BGREEN, total,
-            TUI_RESET);
+    if (included) {
+        fprintf(stderr, "  %sAPI equivalent:%s %s$%.4f%s  %s(usage signal, not billed)%s\n",
+                TUI_BOLD, TUI_RESET, TUI_CYAN, api_equivalent, TUI_RESET, TUI_DIM, TUI_RESET);
+        fprintf(stderr,
+                "  %sBilled spend:%s   %sincluded with ChatGPT subscription ($%.4f)%s\n"
+                "  %sAccount limits:%s /usage\n\n",
+                TUI_BOLD, TUI_RESET, TUI_BGREEN, billed, TUI_RESET, TUI_DIM, TUI_RESET);
+    } else {
+        fprintf(stderr, "  %sTotal:%s       %s$%.4f%s\n\n", TUI_BOLD, TUI_RESET, TUI_BGREEN,
+                billed > 0.0 ? billed : api_equivalent, TUI_RESET);
+    }
+}
+
+static void print_codex_account_usage(const session_state_t *session, const char *api_key) {
+    codex_usage_snapshot_t usage;
+    char error[256];
+    bool fetched = codex_usage_fetch(&usage, error, sizeof(error));
+    const char *request_key = resolve_provider_key(api_key);
+    bool included = provider_usage_is_included(g_provider ? g_provider->name : NULL, request_key);
+
+    fprintf(stderr, "\n");
+    tui_header("ChatGPT Codex Subscription Usage", TUI_BCYAN);
+    if (fetched && usage.have_rate_limits) {
+        fprintf(stderr, "  %sPlan:%s        %s%s%s\n", TUI_DIM, TUI_RESET, TUI_BOLD,
+                usage.plan_type[0] ? usage.plan_type : "ChatGPT", TUI_RESET);
+        if (usage.primary_used_percent >= 0) {
+            char window[48];
+            char reset[96];
+            format_usage_window(usage.primary_window_minutes, window, sizeof(window));
+            format_reset_time(usage.primary_resets_at, reset, sizeof(reset));
+            int remaining = usage.primary_used_percent <= 100
+                                ? 100 - usage.primary_used_percent
+                                : 0;
+            fprintf(stderr,
+                    "  %sCodex limit:%s %s%d%% used%s · %d%% remaining · %s window\n"
+                    "  %sResets:%s      %s\n",
+                    TUI_DIM, TUI_RESET,
+                    usage.primary_used_percent >= 80 ? TUI_BYELLOW : TUI_BGREEN,
+                    usage.primary_used_percent, TUI_RESET, remaining, window, TUI_DIM, TUI_RESET,
+                    reset);
+        }
+        if (usage.have_secondary && usage.secondary_used_percent >= 0) {
+            char window[48];
+            char reset[96];
+            format_usage_window(usage.secondary_window_minutes, window, sizeof(window));
+            format_reset_time(usage.secondary_resets_at, reset, sizeof(reset));
+            fprintf(stderr, "  %sSecondary:%s   %d%% used · %s window · resets %s\n", TUI_DIM,
+                    TUI_RESET, usage.secondary_used_percent, window, reset);
+        }
+        if (usage.reset_credits_available >= 0)
+            fprintf(stderr, "  %sReset credits:%s %d available\n", TUI_DIM, TUI_RESET,
+                    usage.reset_credits_available);
+    }
+    if (fetched && usage.have_account_usage) {
+        char daily[64], lifetime[64], peak[64];
+        format_grouped_count(usage.latest_daily_tokens, daily, sizeof(daily));
+        format_grouped_count(usage.lifetime_tokens, lifetime, sizeof(lifetime));
+        format_grouped_count(usage.peak_daily_tokens, peak, sizeof(peak));
+        fprintf(stderr, "  %sAccount tokens (%s):%s %s\n", TUI_DIM,
+                usage.latest_usage_date[0] ? usage.latest_usage_date : "latest day", TUI_RESET,
+                daily);
+        fprintf(stderr, "  %sLifetime tokens:%s     %s\n", TUI_DIM, TUI_RESET, lifetime);
+        if (usage.peak_daily_tokens >= 0)
+            fprintf(stderr, "  %sPeak daily tokens:%s   %s\n", TUI_DIM, TUI_RESET, peak);
+        if (usage.current_streak_days >= 0)
+            fprintf(stderr, "  %sCurrent streak:%s      %lld days\n", TUI_DIM, TUI_RESET,
+                    usage.current_streak_days);
+    }
+    if (!fetched)
+        fprintf(stderr, "  %sAccount telemetry unavailable:%s %s\n", TUI_YELLOW, TUI_RESET,
+                error[0] ? error : "unknown error");
+
+    char session_in[64], session_out[64], cache_read[64], cache_write[64];
+    format_grouped_count(session ? session->total_input_tokens : 0, session_in, sizeof(session_in));
+    format_grouped_count(session ? session->total_output_tokens : 0, session_out,
+                         sizeof(session_out));
+    format_grouped_count(session ? session->total_cache_read_tokens : 0, cache_read,
+                         sizeof(cache_read));
+    format_grouped_count(session ? session->total_cache_write_tokens : 0, cache_write,
+                         sizeof(cache_write));
+    fprintf(stderr, "  %s%s──────────────────────%s\n", TUI_BOLD, TUI_CYAN, TUI_RESET);
+    fprintf(stderr, "  %sThis dsco session:%s in %s · out %s · cache-read %s · cache-write %s\n",
+            TUI_DIM, TUI_RESET, session_in, session_out, cache_read, cache_write);
+    fprintf(stderr, "  %sBilled API spend:%s %s$%.4f%s%s\n\n", TUI_DIM, TUI_RESET, TUI_BGREEN,
+            session ? session_cost(session) : 0.0, TUI_RESET,
+            included ? " · included with ChatGPT" : " · current route is not Codex subscription");
+
+    if (fetched) {
+        jbuf_t metadata;
+        jbuf_init(&metadata, 256);
+        jbuf_append(&metadata, "{\"source\":\"codex-app-server\",\"plan_type\":");
+        jbuf_append_json_str(&metadata, usage.plan_type);
+        jbuf_appendf(&metadata,
+                     ",\"used_percent\":%d,\"window_minutes\":%lld,"
+                     "\"resets_at\":%lld,\"daily_tokens\":%lld,\"lifetime_tokens\":%lld}",
+                     usage.primary_used_percent, usage.primary_window_minutes,
+                     (long long)usage.primary_resets_at, usage.latest_daily_tokens,
+                     usage.lifetime_tokens);
+        baseline_log("account", "codex_subscription_usage", usage.latest_usage_date,
+                     metadata.data);
+        jbuf_free(&metadata);
+    }
 }
 
 /* ── Structured output presets ─────────────────────────────────────────── */
@@ -3253,10 +3494,7 @@ static bool run_topology_prompt(session_state_t *session, const char *api_key, c
  * completion (below, under HAVE_READLINE) and the composer's live dropdown
  * (registered with the TUI via tui_composer_set_slash_commands), so it is
  * compiled unconditionally. Layout matches tui_cmd_entry_t {name, desc}. */
-typedef struct {
-    const char *command;
-    const char *description;
-} slash_command_t;
+typedef pixel_tui_command_t slash_command_t;
 
 static const slash_command_t s_slash_commands[] = {
     {"/clear", "reset conversation"},
@@ -3282,7 +3520,8 @@ static const slash_command_t s_slash_commands[] = {
     {"/login", "sign in with ChatGPT subscription (/login [chatgpt|claude|status])"},
     {"/logout", "clear the ChatGPT subscription token cache"},
     {"/route", "show/update model routing policy"},
-    {"/cost", "show session cost"},
+    {"/cost", "show billed cost and API-equivalent session usage"},
+    {"/usage", "show ChatGPT Codex account limits and token usage"},
     {"/context", "show context usage"},
     {"/effort", "set reasoning effort"},
     {"/goal", "show or set active session goal"},
@@ -3301,6 +3540,7 @@ static const slash_command_t s_slash_commands[] = {
     {"/prefill", "set prefill text for the next response"},
     {"/json", "enable structured JSON object output"},
     {"/structured", "show/configure structured output schema"},
+    {"/plan", "build and draw a native hierarchical execution plan"},
     {"/cheap", "switch to cheap mode (5 core tools, no catalog)"},
     {"/full", "switch to full mode (all tools + catalog)"},
     {"/budget", "set session cost budget"},
@@ -3350,6 +3590,8 @@ static const slash_command_t s_slash_commands[] = {
     {"/workspace reload", "reload workspace prompt cache"},
     {"/workspace prompt", "show active workspace prompt"},
     {"/voice", "record voice → transcribe → submit as prompt"},
+    {"/learn", "inspect a run's trajectory learning readiness (/learn inspect [run-id])"},
+    {"/learn inspect", "read-only trajectory, environment, and verifier readiness report"},
     {"/skills", "list active skills"},
     {"/skills show", "show a skill body"},
     {"/skills use", "set active skill"},
@@ -3877,6 +4119,80 @@ static void esc_poller_stop(void) {
     pthread_join(g_esc_poller_tid, NULL);
 }
 
+static bool followup_escape_hook(void *ctx) {
+    followup_reader_t *r = (followup_reader_t *)ctx;
+    if (r)
+        r->stop = true;
+    agent_request_pause();
+    return true;
+}
+
+static void *followup_reader_thread_fn(void *arg) {
+    followup_reader_t *r = (followup_reader_t *)arg;
+    char buf[MAX_INPUT_LINE];
+    r->running = true;
+    tui_composer_set_escape_hook(followup_escape_hook, r);
+    while (!r->stop) {
+        char *line = tui_composer_read(r->sb, NULL, buf, sizeof(buf));
+        if (r->stop)
+            break;
+        if (!line)
+            break;
+        dsco_strip_terminal_controls_inplace(buf);
+        if (buf[0]) {
+            if (followup_queue_push(r->queue, buf))
+                tui_panel_notify(r->sb, TUI_PANEL_NOTE_OK, "queued follow-up");
+            else
+                tui_panel_notify(r->sb, TUI_PANEL_NOTE_WARN, "follow-up queue full");
+        }
+    }
+    tui_composer_set_escape_hook(NULL, NULL);
+    r->running = false;
+    return NULL;
+}
+
+static bool followup_reader_start(followup_reader_t *r, tui_status_bar_t *sb,
+                                  followup_queue_t *queue) {
+    if (!r)
+        return false;
+    memset(r, 0, sizeof(*r));
+    /* Live queued input is the default: submitting a turn must never take the
+     * keyboard away while the agent reasons, calls tools, or responds. Keep an
+     * explicit opt-out for constrained/legacy PTYs. */
+    const char *followup = getenv("DSCO_TUI_FOLLOWUP");
+    if (followup && (followup[0] == '0' || strcasecmp(followup, "false") == 0 ||
+                     strcasecmp(followup, "no") == 0 || strcasecmp(followup, "off") == 0))
+        return false;
+    const char *composer = getenv("DSCO_TUI_COMPOSER");
+    if (composer && (composer[0] == '0' || strcasecmp(composer, "false") == 0 ||
+                     strcasecmp(composer, "no") == 0 || strcasecmp(composer, "off") == 0))
+        return false;
+    if (!sb || !sb->visible || !isatty(STDIN_FILENO))
+        return false;
+    r->sb = sb;
+    r->queue = queue;
+    if (pthread_create(&r->thread, NULL, followup_reader_thread_fn, r) != 0) {
+        memset(r, 0, sizeof(*r));
+        return false;
+    }
+    for (int i = 0; i < 100 && !tui_composer_is_reading(); i++) {
+        struct timespec ts = {.tv_sec = 0, .tv_nsec = 2 * 1000 * 1000};
+        nanosleep(&ts, NULL);
+    }
+    return true;
+}
+
+static void followup_reader_stop(followup_reader_t *r, bool preserve_composer) {
+    if (!r || !r->sb)
+        return;
+    r->stop = true;
+    tui_composer_preserve_on_interrupt(preserve_composer);
+    tui_composer_signal_interrupt();
+    pthread_join(r->thread, NULL);
+    tui_composer_preserve_on_interrupt(false);
+    memset(r, 0, sizeof(*r));
+}
+
 /* ── Pause menu ────────────────────────────────────────────────────────── */
 /* Called when the turns loop exits due to ESC_PAUSED. */
 
@@ -3964,17 +4280,28 @@ static void fsm_thinking_enter(void *ctx) {
     thinking_live_preview_reset();
     if (g_features.collapsible_thinking)
         tui_prepare_external_output();
+    tui_term_lock();
+    pixel_tui_session_set_state(stderr, PIXEL_TUI_REASONING);
+    pixel_tui_session_begin_message(stderr, "THINKING", NULL);
+    if (pixel_tui_session_active()) {
+        tui_term_unlock();
+        return;
+    }
     if (!g_features.collapsible_thinking) {
-        tui_term_lock();
         fprintf(stderr, "  \033[2m\033[3m[thinking]\n");
         fflush(stderr);
-        tui_term_unlock();
     }
+    tui_term_unlock();
 }
 
 static void fsm_thinking_exit(void *ctx) {
     (void)ctx;
     tui_term_lock();
+    pixel_tui_session_end_message(stderr);
+    if (pixel_tui_session_active()) {
+        tui_term_unlock();
+        return;
+    }
     if (g_features.collapsible_thinking) {
         thinking_live_preview_close();
         tui_thinking_end(&s_thinking);
@@ -3988,7 +4315,17 @@ static void fsm_thinking_exit(void *ctx) {
 static void fsm_text_enter(void *ctx) {
     (void)ctx;
     tui_word_counter_init(&s_word_counter);
+    /* The live follow-up composer leaves the cursor inside its bottom pane.
+     * Move direct text responses back into the transcript before emitting the
+     * role header; otherwise the pane's next repaint erases the answer. */
     tui_term_lock();
+    pixel_tui_session_set_state(stderr, PIXEL_TUI_RESPONDING);
+    if (pixel_tui_session_active()) {
+        print_role_header("assistant", true, NULL);
+        tui_term_unlock();
+        return;
+    }
+    tui_prepare_external_output_locked();
     print_role_header("assistant", true, NULL);
     fputs("  ", stderr);
     fflush(stderr);
@@ -3998,8 +4335,12 @@ static void fsm_text_enter(void *ctx) {
 static void fsm_text_exit(void *ctx) {
     (void)ctx;
     tui_term_lock();
-    md_flush(&s_md);
-    fprintf(stderr, "\n");
+    if (pixel_tui_session_active()) {
+        pixel_tui_session_end_message(stderr);
+    } else {
+        md_flush(&s_md);
+        fprintf(stderr, "\n");
+    }
     fflush(stderr);
     tui_term_unlock();
     tui_word_counter_end(&s_word_counter);
@@ -4007,6 +4348,9 @@ static void fsm_text_exit(void *ctx) {
 
 static void fsm_tool_pending_enter(void *ctx) {
     (void)ctx;
+    tui_term_lock();
+    pixel_tui_session_set_state(stderr, PIXEL_TUI_EXECUTING);
+    tui_term_unlock();
     tui_transition_divider();
 }
 
@@ -4071,6 +4415,15 @@ static void on_stream_text(const char *text, void *ctx) {
     chronicle_llm_delta(g_chronicle_active_trace_id, g_chronicle_active_llm_span_id, "text", text);
     tui_stream_heartbeat_poke(&s_heartbeat, NULL);
 
+    /* A live follow-up composer owns the terminal cursor between keystrokes.
+     * Streaming partial Markdown into that same cursor region makes its repaint
+     * split or erase the answer.  Keep consuming the provider stream, but render
+     * the completed text atomically once the response is available. */
+    if (tui_composer_is_reading() && !pixel_tui_session_active()) {
+        s_turn_deferred_text = true;
+        return;
+    }
+
     /* FSM drives all transitions — thinking_exit and text_enter fire
      * automatically if we were in thinking or idle. */
     int cur = s_streaming_fsm.current;
@@ -4083,7 +4436,9 @@ static void on_stream_text(const char *text, void *ctx) {
 
     /* F2: Typing cadence — buffer and flush at steady rate */
     tui_term_lock();
-    if (g_features.typing_cadence) {
+    if (pixel_tui_session_active()) {
+        pixel_tui_session_append_text(stderr, text);
+    } else if (g_features.typing_cadence) {
         tui_cadence_feed(&s_cadence, text);
     } else {
         md_feed_str(&s_md, text);
@@ -4093,7 +4448,8 @@ static void on_stream_text(const char *text, void *ctx) {
 
     /* F5: Live word count */
     tui_word_counter_feed(&s_word_counter, text);
-    tui_word_counter_render(&s_word_counter);
+    if (!pixel_tui_session_active())
+        tui_word_counter_render(&s_word_counter);
     /* F39: Throughput tracking */
     tui_throughput_tick(&s_throughput, tui_estimate_tokens(text));
 }
@@ -4110,7 +4466,9 @@ static void on_stream_thinking(const char *text, void *ctx) {
 
     /* F4: Collapsible thinking — count silently instead of printing */
     tui_term_lock();
-    if (g_features.collapsible_thinking) {
+    if (pixel_tui_session_active()) {
+        pixel_tui_session_note_thinking(stderr, text);
+    } else if (g_features.collapsible_thinking) {
         tui_thinking_feed(&s_thinking, text);
         thinking_live_preview_feed(text);
     } else {
@@ -4154,6 +4512,18 @@ static void on_stream_tool_start(const char *name, const char *id, void *ctx) {
                     g_chronicle_active_llm_span_id, NULL, "model", "provider", NULL,
                     "model_output");
     baseline_log("tool", name, "tool_use started", NULL);
+}
+
+static void on_stream_tool_arg_delta(const char *name, const char *id,
+                                     const char *delta, void *ctx) {
+    (void)name; (void)id; (void)ctx;
+    tui_stream_heartbeat_poke(&s_heartbeat, NULL);
+    if (!delta || !delta[0] || !env_truthy(getenv("DSCO_STREAM_TOOL_ARG_DELTAS")))
+        return;
+    if (g_outq)
+        tui_outq_writef(g_outq, "%s ⋯ %s%s", TUI_DIM, delta, TUI_RESET);
+    else
+        fprintf(stderr, "%s ⋯ %s%s", TUI_DIM, delta, TUI_RESET);
 }
 
 /* Extract tool args into a single-line preview string */
@@ -4230,6 +4600,14 @@ static void extract_tool_preview(const char *name, const char *input_json, char 
  *   ok    — only meaningful for tool_response; selects green vs red bar
  *   trail — extra text appended on the header line after the role (may be NULL) */
 static void print_role_header(const char *role, bool ok, const char *trail) {
+    if (pixel_tui_session_active()) {
+        const char *native_role = role;
+        if (strcmp(role, "tool_call") == 0) native_role = "TOOL CALL";
+        else if (strcmp(role, "tool_response") == 0)
+            native_role = ok ? "TOOL OK" : "TOOL ERROR";
+        pixel_tui_session_begin_message(stderr, native_role, trail);
+        return;
+    }
     bool rgb = tui_detect_color_level() >= TUI_COLOR_256;
     /* Bar color per role: cyan user, mauve assistant, orange tool_call,
      * green/red tool_response based on `ok`. */
@@ -4275,6 +4653,36 @@ static void print_role_header(const char *role, bool ok, const char *trail) {
     fflush(stderr);
 }
 
+static void print_assistant_text_block(const char *text) {
+    if (!text || !text[0])
+        return;
+
+    tui_term_lock();
+    if (!pixel_tui_session_active())
+        tui_prepare_external_output_locked();
+    print_role_header("assistant", true, NULL);
+    if (pixel_tui_session_active()) {
+        pixel_tui_session_append_text(stderr, text);
+        pixel_tui_session_end_message(stderr);
+        tui_term_unlock();
+        return;
+    }
+    fputs("  ", stderr);
+
+    /* This is an atomic completed-message render, not a live partial echo.
+     * Disabling the TTY echo pass prevents md_flush() from returning to column
+     * zero and dropping the assistant content indent. */
+    md_reset(&s_md);
+    bool was_tty = s_md.out_is_tty;
+    s_md.out_is_tty = false;
+    md_feed_str(&s_md, text);
+    md_flush(&s_md);
+    s_md.out_is_tty = was_tty;
+    fprintf(stderr, "\n");
+    fflush(stderr);
+    tui_term_unlock();
+}
+
 /* Print `▌ tool_call  name(args)` block. */
 static void print_tool_start_line(const char *name, const char *input_json) {
     char preview[200];
@@ -4285,7 +4693,14 @@ static void print_tool_start_line(const char *name, const char *input_json) {
         snprintf(trail, sizeof(trail), "%s(%s)", name, preview);
     else
         snprintf(trail, sizeof(trail), "%s", name);
-    print_role_header("tool_call", true, trail);
+    if (pixel_tui_session_active()) {
+        tui_term_lock();
+        print_role_header("tool_call", true, trail);
+        pixel_tui_session_end_message(stderr);
+        tui_term_unlock();
+    } else {
+        print_role_header("tool_call", true, trail);
+    }
 }
 
 static void print_tool_result_ex(const char *name, bool ok, const char *result, double elapsed_ms) {
@@ -4308,6 +4723,16 @@ static void print_tool_result_ex(const char *name, bool ok, const char *result, 
         tpos += snprintf(trail + tpos, sizeof(trail) - tpos, " · %s", elapsed_str);
     if (size_str[0] && tpos < (int)sizeof(trail))
         tpos += snprintf(trail + tpos, sizeof(trail) - tpos, " · %s", size_str);
+    if (pixel_tui_session_active()) {
+        tui_term_lock();
+        print_role_header("tool_response", ok, trail);
+        if (result && result[0])
+            pixel_tui_session_append_text(stderr, result);
+        pixel_tui_session_end_message(stderr);
+        tui_term_unlock();
+        baseline_log(ok ? "tool_result" : "tool_error", name, result, NULL);
+        return;
+    }
     print_role_header("tool_response", ok, trail);
 
     /* Display-art tools (plot) render in full color; otherwise a dim preview
@@ -4341,7 +4766,10 @@ static void print_tool_result(const char *name, bool ok, const char *result) {
     print_tool_result_ex(name, ok, result, 0.0);
 }
 
-static double usage_cost_for_model(const char *model, const usage_t *u, double reported_cost_usd) {
+static double usage_cost_for_model(const char *model, const usage_t *u, double reported_cost_usd,
+                                   bool subscription_included) {
+    if (subscription_included)
+        return 0.0;
     if (reported_cost_usd > 0)
         return reported_cost_usd;
     const model_info_t *mi = model_lookup(model);
@@ -4353,7 +4781,9 @@ static double usage_cost_for_model(const char *model, const usage_t *u, double r
 }
 
 static bool usage_cost_is_known(const char *provider, const char *model, const char *request_key,
-                                double reported_cost_usd) {
+                                double reported_cost_usd, bool subscription_included) {
+    if (subscription_included)
+        return true;
     if (reported_cost_usd > 0)
         return true;
     const model_info_t *mi = model_lookup(model);
@@ -4392,7 +4822,8 @@ static bool input_is_local_usage_question(const char *input) {
 
 static void print_local_usage_answer(const session_state_t *session, const usage_t *last_usage,
                                      bool have_last_usage, double last_cost_usd,
-                                     bool last_cost_known, const char *last_model,
+                                     bool last_cost_known, bool last_cost_included,
+                                     const char *last_model,
                                      const char *last_provider) {
     print_role_header("assistant", true, NULL);
     if (!have_last_usage) {
@@ -4401,7 +4832,9 @@ static void print_local_usage_answer(const session_state_t *session, const usage
     }
 
     fprintf(stderr, "  Last generation: ");
-    if (last_cost_known)
+    if (last_cost_included)
+        fprintf(stderr, "included with ChatGPT subscription");
+    else if (last_cost_known)
         fprintf(stderr, "$%.4f", last_cost_usd);
     else
         fprintf(stderr, "cost unknown locally");
@@ -4421,12 +4854,19 @@ static void print_local_usage_answer(const session_state_t *session, const usage
 
     if (!last_cost_known)
         fprintf(stderr, "  Note: provider did not report cost and local PAYG pricing is unset.\n");
-    if (session)
-        fprintf(stderr, "  Known session total: $%.4f across %d turn%s.\n", session_cost(session),
-                session->turn_count, session->turn_count == 1 ? "" : "s");
+    if (session) {
+        if (last_cost_included && session_cost(session) == 0.0)
+            fprintf(stderr, "  Session usage is included with ChatGPT across %d turn%s.\n",
+                    session->turn_count, session->turn_count == 1 ? "" : "s");
+        else
+            fprintf(stderr, "  Known session total: $%.4f across %d turn%s.\n",
+                    session_cost(session), session->turn_count,
+                    session->turn_count == 1 ? "" : "s");
+    }
 }
 
-static void print_usage_ex(usage_t *u, const char *model, session_state_t *session) {
+static void print_usage_ex(usage_t *u, const char *model, session_state_t *session,
+                           double turn_cost, bool cost_known, bool subscription_included) {
     bool truecolor = tui_supports_truecolor();
     const tui_glyphs_t *gl = tui_glyph();
 
@@ -4457,12 +4897,9 @@ static void print_usage_ex(usage_t *u, const char *model, session_state_t *sessi
                     cache_status_label(model, u, session));
         }
 
-        const model_info_t *mi = model_lookup(model);
-        if (mi) {
-            double turn_cost = u->input_tokens * mi->input_price / 1e6 +
-                               u->output_tokens * mi->output_price / 1e6 +
-                               u->cache_read_input_tokens * mi->cache_read_price / 1e6 +
-                               u->cache_creation_input_tokens * mi->cache_write_price / 1e6;
+        if (subscription_included) {
+            fprintf(stderr, " \033[38;2;90;180;130mincluded");
+        } else if (cost_known) {
             /* Cost color: green cheap → yellow → red expensive */
             float cost_hue = turn_cost < 0.01 ? 120.0f
                              : turn_cost < 0.10
@@ -4490,12 +4927,9 @@ static void print_usage_ex(usage_t *u, const char *model, session_state_t *sessi
             fprintf(stderr, " hit:%.0f%%", usage_cache_hit_ratio(u) * 100.0);
             fprintf(stderr, " cache:%s", cache_status_label(model, u, session));
         }
-        const model_info_t *mi = model_lookup(model);
-        if (mi) {
-            double turn_cost = u->input_tokens * mi->input_price / 1e6 +
-                               u->output_tokens * mi->output_price / 1e6 +
-                               u->cache_read_input_tokens * mi->cache_read_price / 1e6 +
-                               u->cache_creation_input_tokens * mi->cache_write_price / 1e6;
+        if (subscription_included) {
+            fprintf(stderr, " included");
+        } else if (cost_known) {
             fprintf(stderr, " $%.4f", turn_cost);
             if (session) {
                 double total = session_cost(session);
@@ -4631,6 +5065,7 @@ bool agent_run(const char *api_key, const char *model, const char *topology_name
     sigaction(SIGHUP, &sa_term, NULL);
 
     tools_init();
+    plan_engine_init();
     tools_hint_init();
     tools_cooc_load();
     dsco_locks_init(&g_locks);
@@ -4777,6 +5212,7 @@ bool agent_run(const char *api_key, const char *model, const char *topology_name
     usage_t last_turn_usage = {0};
     double last_turn_cost_usd = 0.0;
     bool last_turn_cost_known = false;
+    bool last_turn_cost_included = false;
     char last_turn_model[128] = "";
     char last_turn_provider[64] = "";
     bool have_last_turn_usage = false;
@@ -4792,6 +5228,10 @@ bool agent_run(const char *api_key, const char *model, const char *topology_name
     frontier_init(&frontier);
     /* Register executive_decision with live hooks into this session. */
     executive_wire_session(&session, &frontier);
+    strategy_hooks_t strategy_hooks = { .frontier_snapshot = exec_hook_frontier, .audit = exec_hook_audit };
+    strategy_set_hooks(&strategy_hooks);
+    strategy_reset();
+    strategy_register_tool();
     /* Duplicate tool-call detector: FNV signature of tool+input per call. */
 #define FRONTIER_SIG_MAX 512
     unsigned long long frontier_sigs[FRONTIER_SIG_MAX];
@@ -4850,8 +5290,18 @@ bool agent_run(const char *api_key, const char *model, const char *topology_name
     init_cost_budgets();
     double session_budget_started_at = now_ms();
 
-    /* Welcome banner */
-    tui_welcome(session.model, display_core, tool_count, DSCO_VERSION);
+    /* Kitty gets a full alternate-screen pixel workspace. Other terminals
+     * retain the established animated cell banner and transcript path. */
+    bool pixel_session = pixel_tui_session_begin(stderr, session.model);
+    if (!pixel_session) {
+        tui_welcome(session.model, display_core, tool_count, DSCO_VERSION);
+    } else {
+        char native_ready[320];
+        snprintf(native_ready, sizeof(native_ready),
+                 "NATIVE KITTY WORKSPACE ONLINE / %s / %d TOOLS / TYPE A MESSAGE OR /HELP",
+                 session.model, tool_count);
+        pixel_tui_session_add_message(stderr, "SYSTEM", native_ready);
+    }
 
     if (g_cheap_mode) {
         fprintf(stderr,
@@ -4907,7 +5357,7 @@ bool agent_run(const char *api_key, const char *model, const char *topology_name
 
     /* Enable persistent bottom pane in interactive TTY sessions only.
      * Set DSCO_NO_PANE=1 to disable for plain logging. */
-    bool enable_pane = isatty(STDIN_FILENO) && isatty(STDERR_FILENO);
+    bool enable_pane = isatty(STDIN_FILENO) && (isatty(STDERR_FILENO) || pixel_session);
     const char *no_pane = getenv("DSCO_NO_PANE");
     if (no_pane && (no_pane[0] == '1' || no_pane[0] == 't' || no_pane[0] == 'T'))
         enable_pane = false;
@@ -4918,6 +5368,8 @@ bool agent_run(const char *api_key, const char *model, const char *topology_name
          * transcript scroll region clamped above it. Welcome banner and
          * startup notes still print normally before first render. */
     }
+    followup_queue_t followup_queue;
+    followup_queue_init(&followup_queue);
 
     /* SIGWINCH handler for terminal resize */
     g_winch_sb = &status_bar;
@@ -4936,8 +5388,8 @@ bool agent_run(const char *api_key, const char *model, const char *topology_name
             fprintf(stderr, " · session cap $%.2f", g_cost_budget);
         if (g_daily_budget > 0)
             fprintf(stderr, " · daily cap $%.2f", g_daily_budget);
-        fprintf(stderr, "\n");
-    }
+    fprintf(stderr, "\n");
+}
 
     fprintf(stderr, "  %stype a message, /help for commands, quit to exit%s\n", TUI_DIM, TUI_RESET);
 
@@ -4968,15 +5420,27 @@ bool agent_run(const char *api_key, const char *model, const char *topology_name
     bool goal_autorun_pending =
         goal_is_active(&session) && !env_truthy(getenv("DSCO_GOAL_NO_AUTORUN"));
     while (1) {
+        handle_pending_winch();
         g_interrupted = 0;
         g_escape_state = ESC_RUNNING;
         output_guard_reset();
         terminal_input_echo_restore();
+        tui_term_lock();
+        pixel_tui_session_set_state(stderr, PIXEL_TUI_IDLE);
+        tui_term_unlock();
 
         /* Build dynamic prompt: [turn N] model · $cost · context% ▸ */
         char dyn_prompt[256];
         {
             double cost = session_cost(&session);
+            const char *prompt_key = resolve_provider_key(api_key);
+            bool prompt_cost_included = provider_usage_is_included(
+                g_provider ? g_provider->name : NULL, prompt_key);
+            char cost_label[32];
+            if (prompt_cost_included && cost == 0.0)
+                snprintf(cost_label, sizeof(cost_label), "included");
+            else
+                snprintf(cost_label, sizeof(cost_label), "$%.2f", cost);
             /* Context occupancy = size of the LAST request (the full conversation
              * we just sent), not the cumulative sum of every turn's tokens —
              * otherwise the gauge climbs past 100% as turns accumulate. Matches
@@ -4989,6 +5453,8 @@ bool agent_run(const char *api_key, const char *model, const char *topology_name
             double ctx_pct = ctx_max > 0 ? 100.0 * ctx_used / ctx_max : 0;
             if (ctx_pct > 100.0)
                 ctx_pct = 100.0;
+            if (pixel_session)
+                pixel_tui_session_set_runtime_metrics(stderr, cost, ctx_pct);
             const char *ctx_color =
                 ctx_pct < 60 ? TUI_GREEN : (ctx_pct < 85 ? TUI_YELLOW : TUI_RED);
 
@@ -5014,7 +5480,7 @@ bool agent_run(const char *api_key, const char *model, const char *topology_name
                          " · "
                          "\001" TUI_RESET "\002"
                          "\001" TUI_GREEN "\002"
-                         "$%.2f"
+                         "%s"
                          "\001" TUI_RESET "\002"
                          "\001" TUI_DIM "\002"
                          " · "
@@ -5026,7 +5492,7 @@ bool agent_run(const char *api_key, const char *model, const char *topology_name
                          " ▸"
                          "\001" TUI_RESET "\002"
                          " ",
-                         session.turn_count, short_model, cost, ctx_color, ctx_pct);
+                         session.turn_count, short_model, cost_label, ctx_color, ctx_pct);
             } else {
                 snprintf(dyn_prompt, sizeof(dyn_prompt),
                          "\001" TUI_BOLD "\002"
@@ -5046,9 +5512,18 @@ bool agent_run(const char *api_key, const char *model, const char *topology_name
         bool have_startup_cmd = false;
         if (!startup_consumed) {
             startup_consumed = true;
-            have_startup_cmd = startup_command_consume(input_buf, sizeof(input_buf));
+            if (g_initial_prompt && g_initial_prompt[0]) {
+                snprintf(input_buf, sizeof(input_buf), "%s", g_initial_prompt);
+                free(g_initial_prompt);
+                g_initial_prompt = NULL;
+                have_startup_cmd = true;
+            } else {
+                have_startup_cmd = startup_command_consume(input_buf, sizeof(input_buf));
+            }
         }
-        if (!have_startup_cmd) {
+        if (!have_startup_cmd && followup_queue_pop(&followup_queue, input_buf, sizeof(input_buf))) {
+            fprintf(stderr, "  %squeued:%s %s\n", TUI_DIM, TUI_RESET, input_buf);
+        } else if (!have_startup_cmd) {
             if (goal_autorun_pending && goal_is_active(&session)) {
                 goal_autorun_pending = false;
                 goal_make_autorun_prompt(&session, input_buf, sizeof(input_buf));
@@ -5079,6 +5554,10 @@ bool agent_run(const char *api_key, const char *model, const char *topology_name
         len = strlen(input_buf);
         if (len == 0)
             continue;
+        if (pixel_session) {
+            pixel_tui_session_set_turn(stderr, session.turn_count + 1);
+            pixel_tui_session_add_message(stderr, "USER", input_buf);
+        }
 
         /* Detect multi-line paste (newlines in input) */
         {
@@ -5143,6 +5622,25 @@ bool agent_run(const char *api_key, const char *model, const char *topology_name
 
         /* ── Slash commands ────────────────────────────────────────────── */
 
+        if (strncmp(input_buf, "/learn", 6) == 0 && (input_buf[6] == '\0' || input_buf[6] == ' ')) {
+            const char *arg = input_buf + 6;
+            while (*arg == ' ') arg++;
+            if (strncmp(arg, "inspect", 7) == 0 && (arg[7] == '\0' || arg[7] == ' ')) {
+                arg += 7;
+                while (*arg == ' ') arg++;
+                char report[2048];
+                if (rl_hooks_inspect_run(*arg ? arg : NULL, report, sizeof(report))) {
+                    fprintf(stderr, "  %s\n", report);
+                    baseline_log("learn", "/learn inspect", *arg ? arg : "current", NULL);
+                } else {
+                    fprintf(stderr, "  %sunable to inspect run; use /learn inspect <run-id> or run after Chronicle starts%s\n", TUI_YELLOW, TUI_RESET);
+                }
+            } else {
+                fprintf(stderr, "  %susage:%s /learn inspect [run-id]\n", TUI_DIM, TUI_RESET);
+            }
+            continue;
+        }
+
         if (strcmp(input_buf, "/clear") == 0) {
             conv_free(&conv);
             conv_init(&conv);
@@ -5151,6 +5649,11 @@ bool agent_run(const char *api_key, const char *model, const char *topology_name
             session.total_cache_read_tokens = 0;
             session.total_cache_write_tokens = 0;
             session.total_reported_cost_usd = 0;
+            session.total_ttft_ms = 0.0;
+            session.total_stream_ms = 0.0;
+            session.telemetry_samples = 0;
+            session.telemetry_input_tokens = 0;
+            session.telemetry_output_tokens = 0;
             session.turn_count = 0;
             tui_success("conversation cleared");
             baseline_log("command", "/clear", NULL, NULL);
@@ -5379,8 +5882,13 @@ bool agent_run(const char *api_key, const char *model, const char *topology_name
             continue;
         }
         if (strcmp(input_buf, "/cost") == 0) {
-            print_cost(&session);
+            print_cost(&session, api_key);
             baseline_log("command", "/cost", NULL, NULL);
+            continue;
+        }
+        if (strcmp(input_buf, "/usage") == 0) {
+            print_codex_account_usage(&session, api_key);
+            baseline_log("command", "/usage", NULL, NULL);
             continue;
         }
         if (strcmp(input_buf, "/context") == 0) {
@@ -6027,6 +6535,36 @@ bool agent_run(const char *api_key, const char *model, const char *topology_name
             }
             continue;
         }
+        /* /plan — synthesize through the real plan/step/atom engine and draw
+         * the hierarchy natively when the Kitty backend is active. */
+        if (strncmp(input_buf, "/plan", 5) == 0 &&
+            (input_buf[5] == '\0' || input_buf[5] == ' ')) {
+            const char *goal = input_buf + 5;
+            while (*goal == ' ')
+                goal++;
+            if (!*goal) {
+                fprintf(stderr, "  %susage:%s /plan <goal or task>\n", TUI_DIM, TUI_RESET);
+                continue;
+            }
+            char process_json[65536];
+            structured_process_synthesize_json(goal, process_json, sizeof(process_json));
+            int ui_plan_id = structured_process_create_plan_from_json(process_json);
+            if (ui_plan_id < 0) {
+                tui_error("could not build plan");
+                continue;
+            }
+            tui_prepare_external_output();
+            int plan_rows = pixel_tui_render_plan(stderr, ui_plan_id);
+            if (plan_rows == 0) {
+                char tree[32768];
+                plan_tree_render(ui_plan_id, tree, sizeof(tree));
+                fprintf(stderr, "%s", tree);
+            } else {
+                fprintf(stderr, "  %spixel plan#%d rendered%s · %d terminal rows\n",
+                        TUI_BCYAN, ui_plan_id, TUI_RESET, plan_rows);
+            }
+            continue;
+        }
         /* /json / /structured — first-class structured output contracts */
         if (strcmp(input_buf, "/json") == 0 || strcmp(input_buf, "/json on") == 0) {
             session.structured_output = true;
@@ -6587,6 +7125,10 @@ bool agent_run(const char *api_key, const char *model, const char *topology_name
                         ws.has_memory ? "present" : "missing");
                 fprintf(stderr, "  %sSkills:%s      %d installed\n", TUI_DIM, TUI_RESET,
                         ws.installed_skills);
+                fprintf(stderr, "  %sDoctrines:%s   %d active\n", TUI_DIM, TUI_RESET,
+                        ws.active_doctrines);
+                fprintf(stderr, "  %sAGENTS.md:%s   %d active\n", TUI_DIM, TUI_RESET,
+                        ws.agents_files);
                 fprintf(stderr, "  %sActive skill:%s %s\n", TUI_DIM, TUI_RESET,
                         session.active_skill[0] ? session.active_skill : "(none)");
                 fprintf(stderr, "  %sLegacy prompt:%s %s\n\n", TUI_DIM, TUI_RESET,
@@ -6797,8 +7339,10 @@ bool agent_run(const char *api_key, const char *model, const char *topology_name
                 } else {
                     char in[128];
                     char out[MAX_RESPONSE_SIZE];
-                    snprintf(in, sizeof(in), "{\"group_id\":%d,\"timeout\":%d}", gid, timeout);
-                    if (!tools_execute("swarm_collect", in, out, sizeof(out))) {
+                    snprintf(in, sizeof(in),
+                             "{\"action\":\"collect\",\"group_id\":%d,\"timeout\":%d}",
+                             gid, timeout);
+                    if (!tools_execute("swarm", in, out, sizeof(out))) {
                         tui_error(out);
                     } else {
                         print_swarm_summary(gid, true);
@@ -6872,6 +7416,12 @@ bool agent_run(const char *api_key, const char *model, const char *topology_name
             const char *arg = input_buf + 7;
             while (*arg == ' ')
                 arg++;
+            bool agents_resume_pixel =
+                (strncmp(arg, "new ", 4) == 0 || strncmp(arg, "edit ", 5) == 0) &&
+                pixel_tui_session_active() &&
+                !pixel_tui_session_terminal_suspended();
+            if (agents_resume_pixel)
+                pixel_tui_session_suspend_terminal(stderr);
 
             if (*arg == '\0' || strcmp(arg, "list") == 0) {
                 /* List all profiles */
@@ -7185,6 +7735,8 @@ bool agent_run(const char *api_key, const char *model, const char *topology_name
                           "edit <name> | delete <name> | groups]");
             }
         agents_done:
+            if (agents_resume_pixel)
+                pixel_tui_session_resume_terminal(stderr);
             baseline_log("command", "/agents", arg && *arg ? arg : NULL, NULL);
             continue;
         }
@@ -7274,6 +7826,12 @@ bool agent_run(const char *api_key, const char *model, const char *topology_name
             continue;
         }
         if (strcmp(input_buf, "/help") == 0) {
+            if (pixel_tui_session_active()) {
+                pixel_tui_session_show_commands(stderr, s_slash_commands,
+                                                slash_commands_count());
+                baseline_log("command", "/help", NULL, NULL);
+                continue;
+            }
             fprintf(stderr, "\n");
             tui_header("Commands", TUI_BCYAN);
             fprintf(stderr, "  %s/clear%s       reset conversation\n", TUI_CYAN, TUI_RESET);
@@ -7281,7 +7839,10 @@ bool agent_run(const char *api_key, const char *model, const char *topology_name
                     TUI_CYAN, TUI_RESET);
             fprintf(stderr, "  %s/effort [lvl]%s set effort (%s)\n", TUI_CYAN, TUI_RESET,
                     dsco_effort_options());
-            fprintf(stderr, "  %s/cost%s        show session cost\n", TUI_CYAN, TUI_RESET);
+            fprintf(stderr, "  %s/cost%s        show billed cost + API-equivalent usage\n", TUI_CYAN,
+                    TUI_RESET);
+            fprintf(stderr, "  %s/usage%s       show ChatGPT Codex account usage + limits\n", TUI_CYAN,
+                    TUI_RESET);
             fprintf(stderr, "  %s/context%s     show token usage\n", TUI_CYAN, TUI_RESET);
             fprintf(stderr, "  %s/goal [cmd]%s   show/set goal, pause/resume/complete/clear\n",
                     TUI_CYAN, TUI_RESET);
@@ -8140,14 +8701,17 @@ bool agent_run(const char *api_key, const char *model, const char *topology_name
             double avg_ttft = session.telemetry_samples > 0
                                   ? session.total_ttft_ms / session.telemetry_samples
                                   : 0;
-            double avg_stream = session.telemetry_samples > 0
-                                    ? session.total_stream_ms / session.telemetry_samples
-                                    : 0;
-            double avg_tps =
-                avg_stream > 0 && session.total_output_tokens > 0
-                    ? (session.total_output_tokens / (double)session.telemetry_samples) /
-                          (avg_stream / 1000.0)
-                    : 0;
+            /* Input is measured from request start until first visible token;
+             * output is measured after first token.  Session token totals are
+             * intentionally excluded: they include non-streaming/tool turns. */
+            double ingress_tps = session.total_ttft_ms > 0.0
+                                     ? session.telemetry_input_tokens /
+                                           (session.total_ttft_ms / 1000.0)
+                                     : 0.0;
+            double decode_ms = session.total_stream_ms - session.total_ttft_ms;
+            double egress_tps = decode_ms > 0.0
+                                    ? session.telemetry_output_tokens / (decode_ms / 1000.0)
+                                    : 0.0;
 
             /* Count total tools from metrics */
             int dash_total_tools = 0;
@@ -8244,10 +8808,12 @@ bool agent_run(const char *api_key, const char *model, const char *topology_name
             if (session.telemetry_samples > 0) {
                 fprintf(stderr, "  %s┌─ Streaming ─────────────────────────────────┐%s\n", TUI_DIM,
                         TUI_RESET);
-                fprintf(stderr, "  %s│%s  Avg TTFT:  %s%.0fms%s                          %s│%s\n",
+                fprintf(stderr, "  %s│%s  Avg TTFT:     %s%6.0fms%s                     %s│%s\n",
                         TUI_DIM, TUI_RESET, TUI_BCYAN, avg_ttft, TUI_RESET, TUI_DIM, TUI_RESET);
-                fprintf(stderr, "  %s│%s  Avg tok/s: %s%.0f%s                             %s│%s\n",
-                        TUI_DIM, TUI_RESET, TUI_BCYAN, avg_tps, TUI_RESET, TUI_DIM, TUI_RESET);
+                fprintf(stderr, "  %s│%s  In→first:  %s%7.1f tok/s%s                   %s│%s\n",
+                        TUI_DIM, TUI_RESET, TUI_BCYAN, ingress_tps, TUI_RESET, TUI_DIM, TUI_RESET);
+                fprintf(stderr, "  %s│%s  Out decode: %s%7.1f tok/s%s                  %s│%s\n",
+                        TUI_DIM, TUI_RESET, TUI_BCYAN, egress_tps, TUI_RESET, TUI_DIM, TUI_RESET);
                 fprintf(stderr, "  %s└─────────────────────────────────────────────┘%s\n", TUI_DIM,
                         TUI_RESET);
             }
@@ -8400,8 +8966,8 @@ bool agent_run(const char *api_key, const char *model, const char *topology_name
     send_to_llm:
         if (input_is_local_usage_question(input_buf)) {
             print_local_usage_answer(&session, &last_turn_usage, have_last_turn_usage,
-                                     last_turn_cost_usd, last_turn_cost_known, last_turn_model,
-                                     last_turn_provider);
+                                     last_turn_cost_usd, last_turn_cost_known,
+                                     last_turn_cost_included, last_turn_model, last_turn_provider);
             baseline_log("command", "local_usage_question", input_buf, NULL);
             continue;
         }
@@ -8540,6 +9106,7 @@ bool agent_run(const char *api_key, const char *model, const char *topology_name
         int cache_zero_telemetry_streak = 0;
         int cache_low_hit_streak = 0;
         bool cache_notice_emitted = false;
+        bool cache_churn_tripwire = false;
 
         /* Loop breaker: detect repeated identical cached tool failures */
         uint32_t last_fail_hash = 0;
@@ -8564,10 +9131,15 @@ bool agent_run(const char *api_key, const char *model, const char *topology_name
         /* Per-turn arena allocator */
         arena_t turn_arena;
         arena_init(&turn_arena);
-        terminal_input_echo_suspend();
-        esc_poller_start();
+        followup_reader_t followup_reader;
+        bool followup_active = followup_reader_start(&followup_reader, &status_bar, &followup_queue);
+        if (!followup_active) {
+            terminal_input_echo_suspend();
+            esc_poller_start();
+        }
         g_turn_start_time = now_ms();
         bool prompt_done = false;
+        bool budget_checkpoint_paused = false;
         /* Agentic loop: run to the goal, not to an arbitrary turn count. The
          * checkpoint cadence (base_turn_limit) only governs how often we surface
          * a "still working" status; hard_ceiling is the runaway backstop. Real
@@ -8670,6 +9242,9 @@ bool agent_run(const char *api_key, const char *model, const char *topology_name
                     session.total_input_tokens + session.total_output_tokens;
                 sig.context_window_tokens = effective_context_window(&session);
                 sig.turns = turns;
+                sig.quality_critical_work =
+                    agent_text_quality_critical(input_buf) ||
+                    agent_text_quality_critical(session.goal_objective);
 
                 spend_plan_t plan = spend_governor_plan(&sig);
 
@@ -8723,7 +9298,12 @@ bool agent_run(const char *api_key, const char *model, const char *topology_name
 
                 /* Conversation hygiene: cheap, lossy-last trims of stale tool
                  * results and binary blobs. Recent turns stay verbatim. */
-                if (plan.trim_old_results && conv.count > plan.trim_keep_recent) {
+                bool explicit_prompt_cache =
+                    model_cache_expectation(session.model) == CACHE_EXPECT_EXPLICIT_BREAKPOINTS;
+                bool cache_line_unsent = session.total_cache_read_tokens == 0 &&
+                                         session.total_cache_write_tokens == 0;
+                if (plan.trim_old_results && conv.count > plan.trim_keep_recent &&
+                    (!explicit_prompt_cache || cache_line_unsent)) {
                     if (plan.strip_binaries)
                         conv_strip_binaries(&conv, plan.trim_keep_recent);
                     conv_trim_old_results(&conv, plan.trim_keep_recent,
@@ -8748,6 +9328,18 @@ bool agent_run(const char *api_key, const char *model, const char *topology_name
                     baseline_log("spend", spend_phase_label(plan.phase), plan.reason,
                                  NULL);
                     s_last_phase = plan.phase;
+                }
+
+                if (plan.require_user_checkpoint &&
+                    !env_truthy(getenv("DSCO_ALLOW_CRITICAL_BUDGET_CONTINUE"))) {
+                    fprintf(stderr,
+                            "  %sspend[%s]: pausing quality-critical work before "
+                            "high-budget-pressure execution; raise /budget or set "
+                            "DSCO_ALLOW_CRITICAL_BUDGET_CONTINUE=1 to continue%s\n",
+                            TUI_BYELLOW, spend_phase_label(plan.phase), TUI_RESET);
+                    baseline_log("spend", "quality_critical_checkpoint", plan.reason, NULL);
+                    budget_checkpoint_paused = true;
+                    break;
                 }
             }
 
@@ -8962,7 +9554,14 @@ bool agent_run(const char *api_key, const char *model, const char *topology_name
 
             /* FSM: mark stream start */
             tui_fsm_send(&s_streaming_fsm, TUI_FSM_EVT_STREAM_START);
+            /* Native mode treats dispatch/TTFT as reasoning even when the
+             * provider never emits a dedicated thinking delta. The first
+             * text/tool event closes this phase through the normal FSM. */
+            if (pixel_tui_session_active() &&
+                s_streaming_fsm.current != TUI_STREAM_ST_THINKING)
+                tui_fsm_send(&s_streaming_fsm, TUI_FSM_EVT_THINKING_START);
             s_turn_streamed_text = false;
+            s_turn_deferred_text = false;
 
             /* Update terminal title with turn info */
             tui_set_title_fmt("dsco · %s · turn %d", session.model, turns);
@@ -8970,9 +9569,10 @@ bool agent_run(const char *api_key, const char *model, const char *topology_name
             struct timeval pool_t0, pool_t1;
             gettimeofday(&pool_t0, NULL);
             sr = g_provider ? g_provider->stream(g_provider, cur_key, req, on_stream_text,
-                                                 on_stream_tool_start, on_stream_thinking, NULL)
+                                                 on_stream_tool_start, on_stream_tool_arg_delta,
+                                                 on_stream_thinking, NULL)
                             : llm_stream(api_key, req, on_stream_text, on_stream_tool_start,
-                                         on_stream_thinking, NULL);
+                                         on_stream_tool_arg_delta, on_stream_thinking, NULL);
             gettimeofday(&pool_t1, NULL);
             if (g_provider)
                 provider_pool_report(g_provider->name, sr.ok,
@@ -9015,7 +9615,8 @@ bool agent_run(const char *api_key, const char *model, const char *topology_name
                             provider_debug_log_request(g_provider->name, session.model, sub_key);
                             gettimeofday(&pool_t0, NULL);
                             sr = g_provider->stream(g_provider, sub_key, req, on_stream_text,
-                                                    on_stream_tool_start, on_stream_thinking, NULL);
+                                                    on_stream_tool_start, on_stream_tool_arg_delta,
+                                                    on_stream_thinking, NULL);
                             gettimeofday(&pool_t1, NULL);
                             provider_pool_report(g_provider->name, sr.ok,
                                                  (pool_t1.tv_sec - pool_t0.tv_sec) * 1000.0 +
@@ -9023,17 +9624,6 @@ bool agent_run(const char *api_key, const char *model, const char *topology_name
                             primary_credit_exhausted = stream_result_is_credit_exhausted(&sr);
                             if (sr.ok) {
                                 primary_subscription_exhausted = false;
-                                if (g_outq)
-                                    tui_outq_writef(
-                                        g_outq,
-                                        "  %sfallback recovered on Fugu subscription; allocation "
-                                        "not marked exhausted%s\n",
-                                        TUI_GREEN, TUI_RESET);
-                                else
-                                    fprintf(stderr,
-                                            "  %sfallback recovered on Fugu subscription; "
-                                            "allocation not marked exhausted%s\n",
-                                            TUI_GREEN, TUI_RESET);
                             }
                         }
                     }
@@ -9094,20 +9684,14 @@ bool agent_run(const char *api_key, const char *model, const char *topology_name
                     provider_debug_log_request(g_provider->name, session.model, sub_key);
                     gettimeofday(&pool_t0, NULL);
                     sr = g_provider->stream(g_provider, sub_key, req, on_stream_text,
-                                            on_stream_tool_start, on_stream_thinking, NULL);
+                                            on_stream_tool_start, on_stream_tool_arg_delta,
+                                            on_stream_thinking, NULL);
                     gettimeofday(&pool_t1, NULL);
                     provider_pool_report(g_provider->name, sr.ok,
                                          (pool_t1.tv_sec - pool_t0.tv_sec) * 1000.0 +
                                              (pool_t1.tv_usec - pool_t0.tv_usec) / 1000.0);
                     if (sr.ok) {
                         current_request_is_sakana_payg = false;
-                        if (g_outq)
-                            tui_outq_writef(g_outq,
-                                            "  %sfallback succeeded with Sakana subscription%s\n",
-                                            TUI_GREEN, TUI_RESET);
-                        else
-                            fprintf(stderr, "  %sfallback succeeded with Sakana subscription%s\n",
-                                    TUI_GREEN, TUI_RESET);
                     }
                 }
             }
@@ -9139,7 +9723,8 @@ bool agent_run(const char *api_key, const char *model, const char *topology_name
                         payg_slot->is_subscription = false;
                     gettimeofday(&pool_t0, NULL);
                     sr = g_provider->stream(g_provider, payg_key, req, on_stream_text,
-                                            on_stream_tool_start, on_stream_thinking, NULL);
+                                            on_stream_tool_start, on_stream_tool_arg_delta,
+                                            on_stream_thinking, NULL);
                     gettimeofday(&pool_t1, NULL);
                     provider_pool_report(g_provider->name, sr.ok,
                                          (pool_t1.tv_sec - pool_t0.tv_sec) * 1000.0 +
@@ -9147,12 +9732,6 @@ bool agent_run(const char *api_key, const char *model, const char *topology_name
                     if (sr.ok) {
                         if (payg_slot)
                             payg_slot->is_subscription = saved_is_subscription;
-                        if (g_outq)
-                            tui_outq_writef(g_outq, "  %sfallback succeeded with Fugu PAYG%s\n",
-                                            TUI_GREEN, TUI_RESET);
-                        else
-                            fprintf(stderr, "  %sfallback succeeded with Fugu PAYG%s\n", TUI_GREEN,
-                                    TUI_RESET);
                     } else if (payg_slot) {
                         payg_slot->is_subscription = saved_is_subscription;
                     }
@@ -9160,6 +9739,25 @@ bool agent_run(const char *api_key, const char *model, const char *topology_name
             }
             if (!sr.ok)
                 provider_failover_mark(&failed_providers, g_provider ? g_provider->name : NULL);
+            /* Surface the primary provider's actual error before any fallback
+             * masks it. The error text is stored in sr.parsed by the stream
+             * functions so it survives until here. Without this, the user
+             * only sees "fallback: trying X" and never learns why the
+             * primary failed. */
+            if (!sr.ok && sr.parsed.count > 0 && sr.parsed.blocks &&
+                sr.parsed.blocks[0].text) {
+                const char *pname = g_provider ? g_provider->name : "unknown";
+                if (g_outq)
+                    tui_outq_writef(g_outq,
+                                    "  \033[31m✗ %s/%s failed (HTTP %d): %s\033[0m\n",
+                                    pname, session.model, sr.http_status,
+                                    sr.parsed.blocks[0].text);
+                else
+                    fprintf(stderr,
+                            "  \033[31m✗ %s/%s failed (HTTP %d): %s\033[0m\n",
+                            pname, session.model, sr.http_status,
+                            sr.parsed.blocks[0].text);
+            }
 
             /* Dynamic catalog failover: when the primary failed with a gating
              * or credit/quota rejection and the operator has NOT configured a
@@ -9170,6 +9768,8 @@ bool agent_run(const char *api_key, const char *model, const char *topology_name
              * matters when an OpenRouter key exists (the synthesized chain
              * routes OpenRouter-prefixed models). Disable with DSCO_DYNAMIC_FAILOVER=0. */
             if (!sr.ok && session.fallback_count == 0 &&
+                (!g_provider_override_name ||
+                 strcmp(g_provider_override_name, "openrouter") == 0) &&
                 fallback_decision != FALLBACK_DECISION_STOP && !g_interrupted &&
                 !provider_is_local_endpoint(
                     g_provider ? g_provider->name
@@ -9236,6 +9836,13 @@ bool agent_run(const char *api_key, const char *model, const char *topology_name
                     const char *fb_provider = provider_route_for_model(fb_model, api_key, NULL);
                     if (!fb_provider || !fb_provider[0])
                         continue;
+                    /* A native provider pin constrains recovery to that provider.
+                     * OpenRouter is a deliberate exception: it is itself a gateway
+                     * for multiple upstream providers. */
+                    if (g_provider_override_name &&
+                        strcmp(g_provider_override_name, "openrouter") != 0 &&
+                        strcmp(g_provider_override_name, fb_provider) != 0)
+                        continue;
                     /* OpenRouter is a gateway: multiple fallback model candidates can share
                      * the same provider while targeting different upstream labs. Do not
                      * provider-level-skip the rest of a dynamic OpenRouter chain just
@@ -9247,10 +9854,10 @@ bool agent_run(const char *api_key, const char *model, const char *topology_name
                         continue;
 
                     if (g_outq)
-                        tui_outq_writef(g_outq, "  %sfallback: trying %s via %s%s\n", TUI_YELLOW,
+                        tui_outq_writef(g_outq, "  %s↳ retrying · %s via %s%s\n", TUI_DIM,
                                         fb_model, fb_provider, TUI_RESET);
                     else
-                        fprintf(stderr, "  %sfallback: trying %s via %s%s\n", TUI_YELLOW, fb_model,
+                        fprintf(stderr, "  %s↳ retrying · %s via %s%s\n", TUI_DIM, fb_model,
                                 fb_provider, TUI_RESET);
                     tui_stream_heartbeat_poke(&s_heartbeat, "fallback...");
                     json_free_response(&sr.parsed);
@@ -9284,9 +9891,10 @@ bool agent_run(const char *api_key, const char *model, const char *topology_name
                     gettimeofday(&fb_t0, NULL);
                     sr = g_provider
                              ? g_provider->stream(g_provider, fb_key, req, on_stream_text,
-                                                  on_stream_tool_start, on_stream_thinking, NULL)
+                                                  on_stream_tool_start, on_stream_tool_arg_delta,
+                                                  on_stream_thinking, NULL)
                              : llm_stream(fb_key, req, on_stream_text, on_stream_tool_start,
-                                          on_stream_thinking, NULL);
+                                          on_stream_tool_arg_delta, on_stream_thinking, NULL);
                     gettimeofday(&fb_t1, NULL);
                     if (g_provider)
                         provider_pool_report(g_provider->name, sr.ok,
@@ -9297,14 +9905,11 @@ bool agent_run(const char *api_key, const char *model, const char *topology_name
                         if (g_provider_override_name && g_provider &&
                             strcmp(g_provider_override_name, g_provider->name) != 0)
                             g_provider_override_name = NULL;
-                        if (g_outq)
-                            tui_outq_writef(g_outq, "  %sfallback succeeded with %s via %s%s\n",
-                                            TUI_GREEN, fb_model,
-                                            g_provider ? g_provider->name : fb_provider, TUI_RESET);
-                        else
-                            fprintf(stderr, "  %sfallback succeeded with %s via %s%s\n", TUI_GREEN,
-                                    fb_model, g_provider ? g_provider->name : fb_provider,
-                                    TUI_RESET);
+                        /* Do not print a success status here: the provider may have returned
+                         * while the typing-cadence/Markdown pipeline still owns a partial line.
+                         * Moving the cursor before md_flush() corrupts the assistant block and
+                         * can leave only its streamed prefix visible.  The completed answer is
+                         * the success signal; routing status belongs before the retry. */
                     } else {
                         provider_failover_mark(&failed_providers,
                                                g_provider ? g_provider->name : fb_provider);
@@ -9383,6 +9988,15 @@ bool agent_run(const char *api_key, const char *model, const char *topology_name
                 trace_span_end(llm_span, "error", NULL);
                 chronicle_span_end(chron_llm_span, "error", NULL);
                 g_chronicle_active_llm_span_id[0] = '\0';
+                /* A failed stream must close the semantic stream just like a
+                 * successful one. Otherwise the native compositor remains in
+                 * an empty THINKING message, keeps stderr capture muted, and
+                 * swallows the actual provider error. */
+                int stream_state = s_streaming_fsm.current;
+                if (stream_state != TUI_STREAM_ST_IDLE &&
+                    stream_state != TUI_STREAM_ST_DONE)
+                    tui_fsm_send(&s_streaming_fsm, TUI_FSM_EVT_STREAM_END);
+                pixel_tui_session_set_state(stderr, PIXEL_TUI_IDLE);
                 /* Show structured error if available */
                 if (dsco_err_code() != DSCO_ERR_OK) {
                     if (g_outq)
@@ -9393,7 +10007,10 @@ bool agent_run(const char *api_key, const char *model, const char *topology_name
                                 dsco_err_code_str(dsco_err_code()), dsco_err_msg());
                     dsco_err_clear();
                 }
-                tui_error(err);
+                if (pixel_tui_session_active())
+                    pixel_tui_session_add_message(stderr, "ERROR", err);
+                else
+                    tui_error(err);
                 baseline_log("error", "stream_failed", err, NULL);
                 json_free_response(&sr.parsed);
                 if (turns == 1) {
@@ -9412,8 +10029,6 @@ bool agent_run(const char *api_key, const char *model, const char *topology_name
                 sr.generation_id ? sr.generation_id : "");
             chronicle_span_end(chron_llm_span, "ok", NULL);
             g_chronicle_active_llm_span_id[0] = '\0';
-            free(chron_output_text);
-
             /* Drain any bytes still held by the typing-cadence buffer
                before STREAM_END fires md_flush — otherwise the tail of
                the response would be discarded. */
@@ -9428,6 +10043,12 @@ bool agent_run(const char *api_key, const char *model, const char *topology_name
                 if (st != TUI_STREAM_ST_IDLE && st != TUI_STREAM_ST_DONE)
                     tui_fsm_send(&s_streaming_fsm, TUI_FSM_EVT_STREAM_END);
             }
+
+            if (s_turn_deferred_text && chron_output_text[0]) {
+                print_assistant_text_block(chron_output_text);
+                s_turn_streamed_text = true;
+            }
+            free(chron_output_text);
 
             /* Print OpenRouter/provider metadata AFTER md_flush has completed
              * (STREAM_END above already called md_flush via fsm_text_exit).
@@ -9476,11 +10097,14 @@ bool agent_run(const char *api_key, const char *model, const char *topology_name
                 session.goal_updated_at = time(NULL);
                 tui_warning("goal token budget reached; goal is now budget-limited");
             }
-            /* Accumulate authoritative cost: trust the provider's reported cost
-             * (OpenRouter usage.cost) when present, else fall back to token math.
-             * This is what the budget enforces, so caching discounts count. */
-            double accounted_turn_cost =
-                usage_cost_for_model(session.model, &sr.usage, sr.cost_usd);
+            /* Accumulate authoritative cost: subscription-included turns are zero;
+             * otherwise trust provider-reported cost (OpenRouter usage.cost) when
+             * present, then fall back to token math. This is what the budget enforces. */
+            const char *accounting_key = resolve_provider_key(api_key);
+            bool turn_cost_included = provider_usage_is_included(
+                g_provider ? g_provider->name : NULL, accounting_key);
+            double accounted_turn_cost = usage_cost_for_model(
+                session.model, &sr.usage, sr.cost_usd, turn_cost_included);
             session.total_reported_cost_usd += accounted_turn_cost;
             session.turn_count++;
             /* B1: durable per-turn checkpoint — JSONL line (fsync'd) plus a
@@ -9491,11 +10115,12 @@ bool agent_run(const char *api_key, const char *model, const char *topology_name
             journal_turn_checkpoint(turns, session.model, &sr.usage, accounted_turn_cost,
                                     sr.parsed.stop_reason);
             autosave(&conv, &session);
-            const char *accounting_key = resolve_provider_key(api_key);
             last_turn_usage = sr.usage;
             last_turn_cost_usd = accounted_turn_cost;
             last_turn_cost_known = usage_cost_is_known(g_provider ? g_provider->name : NULL,
-                                                       session.model, accounting_key, sr.cost_usd);
+                                                       session.model, accounting_key, sr.cost_usd,
+                                                       turn_cost_included);
+            last_turn_cost_included = turn_cost_included;
             snprintf(last_turn_model, sizeof(last_turn_model), "%s", session.model);
             snprintf(last_turn_provider, sizeof(last_turn_provider), "%s",
                      g_provider ? g_provider->name : "?");
@@ -9559,7 +10184,7 @@ bool agent_run(const char *api_key, const char *model, const char *topology_name
 
                 const model_info_t *fmi = model_lookup(session.model);
                 frontier_prices_t fp = {0};
-                if (fmi) {
+                if (fmi && !turn_cost_included) {
                     fp.in_usd = fmi->input_price;
                     fp.out_usd = fmi->output_price;
                     fp.cache_read_usd = fmi->cache_read_price;
@@ -9666,13 +10291,26 @@ bool agent_run(const char *api_key, const char *model, const char *topology_name
                      * requiring a user-driven re-run. */
                     if (event_kind &&
                         (strcmp(event_kind, "low_hit_ratio") == 0 ||
-                         strcmp(event_kind, "cache_lost") == 0) &&
+                         strcmp(event_kind, "cache_lost") == 0 ||
+                         strcmp(event_kind, "cache_prefix_churn") == 0) &&
                         !getenv("DSCO_CACHE_PREFIX_HASH")) {
                         setenv("DSCO_CACHE_PREFIX_HASH", "1", 0);
                         fprintf(stderr,
                                 "  %sⓘ prefix-hash churn detector self-armed; next request "
                                 "will report the first divergent byte%s\n",
                                 TUI_DIM, TUI_RESET);
+                    }
+                    if (event_kind && strcmp(event_kind, "cache_prefix_churn") == 0 &&
+                        env_truthy(getenv("DSCO_CACHE_CHURN_STOP")) &&
+                        (sr.usage.cache_creation_input_tokens >= 8192 ||
+                         session.total_cache_write_tokens >= 50000)) {
+                        cache_churn_tripwire = true;
+                        fprintf(stderr,
+                            "  %s⚠ stopping autonomous follow-up after this turn: "
+                                "prompt cache writes dominate reads "
+                                "(DSCO_CACHE_CHURN_STOP=1).%s\n",
+                                TUI_BYELLOW, TUI_RESET);
+                        baseline_log("cache", "cache_prefix_churn_stop", warn, NULL);
                     }
                     jbuf_t cp;
                     jbuf_init(&cp, 384);
@@ -9690,6 +10328,12 @@ bool agent_run(const char *api_key, const char *model, const char *topology_name
                     jbuf_append_int(&cp, sr.usage.cache_read_input_tokens);
                     jbuf_append(&cp, ",\"cache_write_tokens\":");
                     jbuf_append_int(&cp, sr.usage.cache_creation_input_tokens);
+                    jbuf_append(&cp, ",\"session_cache_read_tokens\":");
+                    jbuf_append_int(&cp, session.total_cache_read_tokens);
+                    jbuf_append(&cp, ",\"session_cache_write_tokens\":");
+                    jbuf_append_int(&cp, session.total_cache_write_tokens);
+                    jbuf_append(&cp, ",\"tripwire\":");
+                    jbuf_append(&cp, cache_churn_tripwire ? "true" : "false");
                     jbuf_append(&cp, ",\"zero_telemetry_streak\":");
                     jbuf_append_int(&cp, cache_zero_telemetry_streak);
                     jbuf_append(&cp, "}");
@@ -9732,14 +10376,7 @@ bool agent_run(const char *api_key, const char *model, const char *topology_name
                 for (int ti = 0; ti < sr.parsed.count; ti++) {
                     content_block_t *tb = &sr.parsed.blocks[ti];
                     if (tb->type && strcmp(tb->type, "text") == 0 && tb->text && tb->text[0]) {
-                        tui_term_lock();
-                        print_role_header("assistant", true, NULL);
-                        fputs("  ", stderr);
-                        md_feed_str(&s_md, tb->text);
-                        md_flush(&s_md);
-                        fprintf(stderr, "\n");
-                        fflush(stderr);
-                        tui_term_unlock();
+                        print_assistant_text_block(tb->text);
                         break;
                     }
                 }
@@ -9788,8 +10425,9 @@ bool agent_run(const char *api_key, const char *model, const char *topology_name
             }
 
             /* Only print usage/telemetry for non-tool turns (tool turns fold it inline) */
-            if (tool_count_this_turn == 0)
-                print_usage_ex(&sr.usage, session.model, &session);
+            if (tool_count_this_turn == 0 && !tui_composer_is_reading())
+                print_usage_ex(&sr.usage, session.model, &session, accounted_turn_cost,
+                               last_turn_cost_known, turn_cost_included);
 
             /* Update status bar with full cost (including cache pricing).
              * Don't render here — the panel is ephemeral and not on screen
@@ -9809,12 +10447,14 @@ bool agent_run(const char *api_key, const char *model, const char *topology_name
                 session.total_ttft_ms += sr.telemetry.ttft_ms;
                 session.total_stream_ms += sr.telemetry.total_ms;
                 session.telemetry_samples++;
-                if (tool_count_this_turn == 0)
+                session.telemetry_input_tokens += sr.usage.input_tokens;
+                session.telemetry_output_tokens += sr.usage.output_tokens;
+                if (tool_count_this_turn == 0 && !tui_composer_is_reading())
                     fprintf(stderr, "%s  [ttft:%.0fms total:%.0fms %.0f tok/s]%s\n", TUI_DIM,
                             sr.telemetry.ttft_ms, sr.telemetry.total_ms,
                             sr.telemetry.tokens_per_sec, TUI_RESET);
                 /* Paging telemetry: log tier sizes and retrieval stats */
-                if (g_page_telemetry.retrieval_ms > 0) {
+                if (g_page_telemetry.retrieval_ms > 0 && !tui_composer_is_reading()) {
                     fprintf(stderr,
                             "%s  [paging: P%d W%d D%d hints:%d cooc:%d emb:%d %.1fms -%dtok]%s\n",
                             TUI_DIM, g_page_telemetry.pinned_count, g_page_telemetry.working_count,
@@ -9839,17 +10479,9 @@ bool agent_run(const char *api_key, const char *model, const char *topology_name
 
             /* ── Router: record turn + decide successor model ─────────────── */
             {
-                const model_info_t *cur_mi = model_lookup(session.model);
-                double turn_cost = 0.0;
-                if (cur_mi) {
-                    turn_cost =
-                        sr.usage.input_tokens * cur_mi->input_price / 1e6 +
-                        sr.usage.output_tokens * cur_mi->output_price / 1e6 +
-                        sr.usage.cache_read_input_tokens * cur_mi->cache_read_price / 1e6 +
-                        sr.usage.cache_creation_input_tokens * cur_mi->cache_write_price / 1e6;
-                }
                 router_record_turn(&g_router, session.model, sr.usage.input_tokens,
-                                   sr.usage.output_tokens, sr.telemetry.total_ms, turn_cost,
+                                   sr.usage.output_tokens, sr.telemetry.total_ms,
+                                   accounted_turn_cost,
                                    sr.telemetry.tokens_per_sec, sr.ok);
 
                 if (tool_count_this_turn == 0) {
@@ -10017,6 +10649,12 @@ bool agent_run(const char *api_key, const char *model, const char *topology_name
                         bool interactive_tool = dsco_tool_is_interactive(blk->tool_name);
 
                         if (interactive_tool) {
+                            if (followup_active) {
+                                followup_reader_stop(&followup_reader, false);
+                                followup_active = false;
+                                terminal_input_echo_suspend();
+                                esc_poller_start();
+                            }
                             /* Interactive tools own the terminal/user turn. Never run them under
                              * spinner, watchdog, cache, or parallel orchestration: the UI must be
                              * live and repeat calls must re-ask rather than replay stale answers.
@@ -10031,8 +10669,10 @@ bool agent_run(const char *api_key, const char *model, const char *topology_name
                             double t0 = now_ms();
                             tools_set_trace_context(trace_id, chron_prompt_span, chron_tool_span,
                                                     blk->tool_name);
+                            pixel_tui_session_suspend_terminal(stderr);
                             ok = tools_execute_for_tier(blk->tool_name, blk->tool_input, exec_tier,
                                                         tool_result, MAX_TOOL_RESULT);
+                            pixel_tui_session_resume_terminal(stderr);
                             tools_clear_trace_context();
                             double elapsed = (now_ms() - t0) * 1000.0;
                             size_t result_len = strlen(tool_result);
@@ -10106,7 +10746,11 @@ bool agent_run(const char *api_key, const char *model, const char *topology_name
                             char trail[256];
                             int tpos =
                                 snprintf(trail, sizeof(trail), "%s · cached", blk->tool_name);
-                            {
+                            if (turn_cost_included && tpos < (int)sizeof(trail)) {
+                                snprintf(trail + tpos, sizeof(trail) - tpos,
+                                         "  [in:%d out:%d included]", sr.usage.input_tokens,
+                                         sr.usage.output_tokens);
+                            } else {
                                 const model_info_t *mi = model_lookup(session.model);
                                 if (mi && tpos < (int)sizeof(trail)) {
                                     double tc = sr.usage.input_tokens * mi->input_price / 1e6 +
@@ -10177,7 +10821,11 @@ bool agent_run(const char *api_key, const char *model, const char *topology_name
 
                             /* Build inline usage+cost suffix */
                             char spin_suffix[128] = "";
-                            {
+                            if (turn_cost_included) {
+                                snprintf(spin_suffix, sizeof(spin_suffix),
+                                         "[in:%d out:%d included]", sr.usage.input_tokens,
+                                         sr.usage.output_tokens);
+                            } else {
                                 const model_info_t *mi = model_lookup(session.model);
                                 if (mi) {
                                     double tc2 = sr.usage.input_tokens * mi->input_price / 1e6 +
@@ -10514,6 +11162,12 @@ bool agent_run(const char *api_key, const char *model, const char *topology_name
                     bool ok = false;
 
                     if (dsco_tool_is_interactive(blk->tool_name)) {
+                        if (followup_active) {
+                            followup_reader_stop(&followup_reader, false);
+                            followup_active = false;
+                            terminal_input_echo_suspend();
+                            esc_poller_start();
+                        }
                         char tool_span[37] = "";
                         char chron_tool_span[37] = "";
                         trace_span_begin(trace_id, blk->tool_name, prompt_span, tool_span);
@@ -10523,8 +11177,10 @@ bool agent_run(const char *api_key, const char *model, const char *topology_name
                         double t0 = now_ms();
                         tools_set_trace_context(trace_id, chron_prompt_span, chron_tool_span,
                                                 blk->tool_name);
+                        pixel_tui_session_suspend_terminal(stderr);
                         ok = tools_execute_for_tier(blk->tool_name, blk->tool_input,
                                                     batch_tiers[bi], tool_result, MAX_TOOL_RESULT);
+                        pixel_tui_session_resume_terminal(stderr);
                         tools_clear_trace_context();
                         double elapsed = (now_ms() - t0) * 1000.0;
                         size_t result_len2 = strlen(tool_result);
@@ -10741,7 +11397,11 @@ bool agent_run(const char *api_key, const char *model, const char *topology_name
                 if (!batch_has_interactive && batch_n >= 2) {
                     const model_info_t *mi = model_lookup(session.model);
                     char batch_cost_suffix[128] = "";
-                    if (mi) {
+                    if (turn_cost_included) {
+                        snprintf(batch_cost_suffix, sizeof(batch_cost_suffix),
+                                 "[in:%d out:%d included]", sr.usage.input_tokens,
+                                 sr.usage.output_tokens);
+                    } else if (mi) {
                         double tc2 =
                             sr.usage.input_tokens * mi->input_price / 1e6 +
                             sr.usage.output_tokens * mi->output_price / 1e6 +
@@ -10779,7 +11439,7 @@ bool agent_run(const char *api_key, const char *model, const char *topology_name
             tui_dag_render(&s_dag);
 
             /* F30: Enhanced section divider with success/fail/cache/context */
-            {
+            if (tool_count_this_turn > 0 || !tui_composer_is_reading()) {
                 double turn_cost = session_cost(&session);
                 double tps = sr.telemetry.tokens_per_sec;
                 int ctx_used = session.last_input_tokens > 0
@@ -10957,6 +11617,11 @@ bool agent_run(const char *api_key, const char *model, const char *topology_name
                 tui_warning("provider returned pause_turn repeatedly; ending turn");
                 done = true;
             }
+            if (cache_churn_tripwire && !done && !g_agent_exit_requested) {
+                needs_followup_turn = false;
+                pause_turn_streak = 0;
+                done = true;
+            }
             /* Agent invoked self_exit tool — finish this turn then terminate */
             if (g_agent_exit_requested) {
                 if (goal_is_active(&session)) {
@@ -10983,7 +11648,9 @@ bool agent_run(const char *api_key, const char *model, const char *topology_name
                     stall_cfg_read = true;
                 }
                 const int STALL_TOK_THR = 500; /* tokens/turn below = no progress */
-                bool unattended = !(isatty(STDIN_FILENO) && isatty(STDERR_FILENO));
+                bool unattended = !(isatty(STDIN_FILENO) &&
+                                    (isatty(STDERR_FILENO) ||
+                                     pixel_tui_session_active()));
                 if (stall_enabled && unattended && !done && !needs_followup_turn &&
                     !g_agent_exit_requested && !g_interrupted && turns >= 3) {
                     if (sr.usage.output_tokens > 0 && sr.usage.output_tokens < STALL_TOK_THR)
@@ -11045,11 +11712,29 @@ bool agent_run(const char *api_key, const char *model, const char *topology_name
                 tui_notify("dsco", "response complete");
             }
 
-            baseline_log_usage("turn", done ? "turn_done" : "turn_continue",
-                               sr.parsed.stop_reason ? sr.parsed.stop_reason : "", NULL,
-                               sr.usage.input_tokens, sr.usage.output_tokens,
-                               sr.usage.cache_read_input_tokens,
-                               sr.usage.cache_creation_input_tokens);
+            jbuf_t usage_metadata;
+            jbuf_init(&usage_metadata, 192);
+            jbuf_append(&usage_metadata, "{\"provider\":");
+            jbuf_append_json_str(&usage_metadata,
+                                 g_provider && g_provider->name ? g_provider->name : "unknown");
+            jbuf_append(&usage_metadata, ",\"model\":");
+            jbuf_append_json_str(&usage_metadata, session.model);
+            jbuf_append(&usage_metadata, ",\"auth_mode\":");
+            jbuf_append_json_str(
+                &usage_metadata,
+                provider_auth_mode(g_provider ? g_provider->name : NULL, accounting_key));
+            jbuf_append(&usage_metadata, ",\"billing\":");
+            jbuf_append_json_str(&usage_metadata,
+                                 turn_cost_included ? "subscription-included"
+                                                    : "provider-accounted");
+            jbuf_append(&usage_metadata, "}");
+            baseline_log_usage_with_cost(
+                "turn", done ? "turn_done" : "turn_continue",
+                sr.parsed.stop_reason ? sr.parsed.stop_reason : "", usage_metadata.data,
+                sr.usage.input_tokens, sr.usage.output_tokens,
+                sr.usage.cache_read_input_tokens, sr.usage.cache_creation_input_tokens,
+                accounted_turn_cost);
+            jbuf_free(&usage_metadata);
 
             /* IPC: heartbeat + inject pending messages */
             ipc_heartbeat();
@@ -11103,7 +11788,10 @@ bool agent_run(const char *api_key, const char *model, const char *topology_name
         /* End prompt-level trace span */
         trace_span_end(prompt_span, g_interrupted ? "interrupted" : "ok", NULL);
         chronicle_span_end(chron_prompt_span, g_interrupted ? "interrupted" : "ok", NULL);
-        esc_poller_stop();
+        if (followup_active)
+            followup_reader_stop(&followup_reader, true);
+        else
+            esc_poller_stop();
         arena_free(&turn_arena);
         terminal_input_echo_restore();
 
@@ -11119,12 +11807,14 @@ bool agent_run(const char *api_key, const char *model, const char *topology_name
                 /* Re-enter raw mode and restart the turns loop from where we paused */
                 terminal_input_echo_suspend();
                 esc_poller_start();
+                followup_active = false;
                 goto resume_turn_loop;
             }
             if (pause_decision == PAUSE_PROMPT) {
                 g_interrupted = 0;
                 g_escape_state = ESC_RUNNING;
                 mcp_cancel_reset();
+                followup_active = false;
                 prompt_done = true;
             } else {
                 /* User chose to cancel — fall through to normal post-loop handling */
@@ -11138,7 +11828,8 @@ bool agent_run(const char *api_key, const char *model, const char *topology_name
          * the loop otherwise ends because the model finished (prompt_done),
          * the user interrupted, or cost/context tripped (each with its own
          * message). Hitting the hard ceiling means a likely no-progress spin. */
-        if (!prompt_done && !g_interrupted && turns >= hard_ceiling) {
+        if (!prompt_done && !g_interrupted && !budget_checkpoint_paused &&
+            turns >= hard_ceiling) {
             char msg[160];
             snprintf(msg, sizeof(msg),
                      "hard turn ceiling reached (%d) — %s; raise via DSCO_HARD_TURN_CEILING",
@@ -11163,11 +11854,20 @@ bool agent_run(const char *api_key, const char *model, const char *topology_name
                                       CACHE_EXPECT_EXPLICIT_BREAKPOINTS
                                   ? "cold"
                                   : "n/a"));
-            fprintf(stderr,
-                    "%s  [%d turns | in:%d out:%d cache-read:%d cache-write:%d hit:%.0f%% "
-                    "cache:%s | $%.4f]%s\n",
-                    TUI_DIM, turns, total_input, total_output, total_cache_read, total_cache_write,
-                    hit_ratio * 100.0, cache_summary_status, multi_turn_cost, TUI_RESET);
+            if (last_turn_cost_included && multi_turn_cost == 0.0) {
+                fprintf(stderr,
+                        "%s  [%d turns | in:%d out:%d cache-read:%d cache-write:%d hit:%.0f%% "
+                        "cache:%s | included]%s\n",
+                        TUI_DIM, turns, total_input, total_output, total_cache_read,
+                        total_cache_write, hit_ratio * 100.0, cache_summary_status, TUI_RESET);
+            } else {
+                fprintf(stderr,
+                        "%s  [%d turns | in:%d out:%d cache-read:%d cache-write:%d hit:%.0f%% "
+                        "cache:%s | $%.4f]%s\n",
+                        TUI_DIM, turns, total_input, total_output, total_cache_read,
+                        total_cache_write, hit_ratio * 100.0, cache_summary_status,
+                        multi_turn_cost, TUI_RESET);
+            }
         }
         if (goal_is_active(&session) && prompt_done && !g_agent_exit_requested && !g_interrupted) {
             goal_autorun_pending = !env_truthy(getenv("DSCO_GOAL_NO_AUTORUN"));
@@ -11205,10 +11905,13 @@ bool agent_run(const char *api_key, const char *model, const char *topology_name
 
     g_winch_sb = NULL;
     tui_status_bar_disable(&status_bar);
+    if (pixel_session)
+        pixel_tui_session_end(stderr);
 
     g_autosave_conv = NULL;
     g_autosave_session = NULL;
     autosave(&conv, &session);
+    followup_queue_destroy(&followup_queue);
     conv_free(&conv);
 #ifdef HAVE_READLINE
     {

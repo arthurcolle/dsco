@@ -341,6 +341,17 @@ static const codex_model_t *find_model(const char *name) {
     return NULL;
 }
 
+static bool known_codex_model_fallback(const char *bare) {
+    if (!bare || !bare[0])
+        return false;
+    return strcmp(bare, "gpt-5.6-sol") == 0 ||
+           strcmp(bare, "gpt-5.6-terra") == 0 ||
+           strcmp(bare, "gpt-5.6-luna") == 0 ||
+           strcmp(bare, "gpt-5.5") == 0 ||
+           strcmp(bare, "gpt-5.4") == 0 ||
+           strcmp(bare, "gpt-5.4-mini") == 0;
+}
+
 const model_info_t *codex_cache_lookup(const char *name) {
     const codex_model_t *m = find_model(name);
     return m ? &m->info : NULL;
@@ -390,9 +401,7 @@ bool codex_cache_model_supported(const char *model) {
 
     /* Fallback for first-run startup before the detached catalog job has
      * published. These are Codex-catalog models in current CLI builds. */
-    return strcmp(bare, "gpt-5.5") == 0 ||
-           strcmp(bare, "gpt-5.4") == 0 ||
-           strcmp(bare, "gpt-5.4-mini") == 0;
+    return known_codex_model_fallback(bare);
 }
 
 int codex_cache_foreach(codex_model_cb cb, void *ud) {
