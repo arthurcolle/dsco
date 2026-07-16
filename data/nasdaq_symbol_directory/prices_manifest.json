@@ -1,0 +1,13 @@
+{
+  "retrieved_at_utc": "2026-07-14T19:51:04.073326+00:00",
+  "workers": 24,
+  "equities": {
+    "tracked": 13048,
+    "priced": 6731
+  },
+  "bonds": {
+    "tracked": 179,
+    "priced": 0
+  },
+  "notes": "Blank/unavailable means no current quote was returned; it is not a zero price."
+}

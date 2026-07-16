@@ -653,7 +653,7 @@ void sem_tools_index_build(tfidf_index_t *idx, const char **names, const char **
                            int tool_count) {
     sem_tfidf_init(idx);
 
-    /* Each tool = one document: "name name name description" for emphasis */
+    /* Each tool = one document: "name name name contract_text" for emphasis. */
     for (int i = 0; i < tool_count && i < SEM_MAX_DOCS; i++) {
         char combined[2048];
         /* Repeat name for extra weight, include description */

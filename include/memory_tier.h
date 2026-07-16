@@ -71,6 +71,25 @@ typedef enum {
     MEM_KEEP_RETRIEVAL = 1   /* what to recall now    */
 } memory_keep_mode_t;
 
+/* ── Classification levels (doctrine/CLASSIFICATION.md §1, §5) ─────────────
+ * Sovereign four-level taxonomy. Consolidation gates:
+ *   L0 OPEN   — consolidates freely
+ *   L1 HELD   — consolidates freely, tagged
+ *   L2 SEALED — episodic OK; episodic->semantic promotion requires an explicit
+ *               review flag (memory_classify_review). Never auto-promotes to
+ *               semantic (consolidation-leak counter, SECRECY_HARDENING §7).
+ *   L3 UMBRAL — working memory only. Never promoted by the sweep. Purged by
+ *               memory_purge_umbral() at session close unless explicitly
+ *               promoted by a Tier 0 principal via memory_classify_review +
+ *               memory_promote.
+ * There is no L4 by construction (glass ceiling). */
+typedef enum {
+    MEM_CLASS_OPEN   = 0,  /* L0 */
+    MEM_CLASS_HELD   = 1,  /* L1 — default for operational material */
+    MEM_CLASS_SEALED = 2,  /* L2 — compartmented */
+    MEM_CLASS_UMBRAL = 3   /* L3 — existence-classified, working-only */
+} memory_class_t;
+
 /* ── Memory Entry ─────────────────────────────────────────────────────── */
 
 typedef struct {
@@ -88,6 +107,10 @@ typedef struct {
     bool           pinned;         /* exempt from decay */
     bool           active;
     bool           has_embedding;  /* true if embedding cached in vecstore */
+    memory_class_t classification; /* L0-L3, default MEM_CLASS_OPEN */
+    bool           class_reviewed; /* explicit review flag: permits gated promotion
+                                      (L2 episodic->semantic; L3 any promotion).
+                                      Set only via memory_classify_review(). */
 } memory_entry_t;
 
 /* ── Memory Store ─────────────────────────────────────────────────────── */
@@ -162,6 +185,23 @@ bool memory_unpin(memory_store_t *m, const char *key);
 /* Manually promote entry to next tier. */
 bool memory_promote(memory_store_t *m, const char *key);
 
+/* ── Classification (doctrine/CLASSIFICATION.md §5) ───────────────────── */
+
+/* Set classification level on an entry. Upgrades always allowed; downgrades
+   are out-of-band operations and must go through the DECLASSIFY ritual —
+   this function refuses to lower a label (returns false). */
+bool memory_classify(memory_store_t *m, const char *key, memory_class_t level);
+
+/* Grant one gated promotion review (L2 episodic->semantic, or L3 promotion).
+   Caller is responsible for principal-tier authorization (Tier 0 for L3). */
+bool memory_classify_review(memory_store_t *m, const char *key);
+
+/* Purge non-promoted UMBRAL working entries at session close. Returns count. */
+int memory_purge_umbral(memory_store_t *m);
+
+/* True if the consolidation sweep may promote this entry out of its tier. */
+bool memory_class_promotable(const memory_entry_t *e);
+
 /* ── Decay & Consolidation ────────────────────────────────────────────── */
 
 /* Apply decay to all entries. Evict entries below threshold.
@@ -192,6 +232,8 @@ int memory_status_json(const memory_store_t *m, char *buf, size_t len);
 
 const char *memory_tier_name(memory_tier_t t);
 double memory_tier_halflife(memory_tier_t t);
+const char *memory_class_name(memory_class_t c);
+bool memory_class_from_name(const char *s, memory_class_t *out);
 
 /* Calculate current strength after decay.
    Returns 0.0 if fully decayed, 1.0 if just stored. */

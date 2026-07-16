@@ -36,6 +36,7 @@ typedef struct {
     int repeat_count;
     size_t repeat_bytes;
     size_t total_bytes;
+    unsigned seen_epoch;  /* last reset epoch applied; written only by owner thread */
 } og_stream_t;
 
 typedef struct {
@@ -46,6 +47,7 @@ typedef struct {
     bool motif_skip_path_like;
     size_t max_total_bytes;
     volatile int tripped;
+    unsigned reset_epoch; /* bumped by output_guard_reset(); streams self-clear */
     og_stream_t streams[2];
 } og_state_t;
 
@@ -337,7 +339,7 @@ static void *stream_thread(void *arg) {
 
         s->total_bytes += (size_t)n;
 
-        if (g_og.tripped) {
+        if (__atomic_load_n(&g_og.tripped, __ATOMIC_ACQUIRE)) {
             /* Keep draining pipe to prevent writer deadlock,
              * but don't mirror or process — output is suppressed. */
             continue;
@@ -348,6 +350,15 @@ static void *stream_thread(void *arg) {
             continue;
         }
 
+        unsigned epoch = __atomic_load_n(&g_og.reset_epoch, __ATOMIC_ACQUIRE);
+        if (epoch != s->seen_epoch) {
+            s->seen_epoch = epoch;
+            s->repeat_count = 0;
+            s->repeat_bytes = 0;
+            s->last_norm[0] = '\0';
+            s->last_preview[0] = '\0';
+            s->frame_len = 0;
+        }
         write_all_fd(s->mirror_fd, buf, (size_t)n);
         process_bytes(s, buf, (size_t)n);
     }
@@ -404,16 +415,10 @@ void output_guard_reset(void) {
     if (!g_og.initialized)
         return;
     __sync_lock_release(&g_og.tripped);
-    for (int i = 0; i < 2; i++) {
-        og_stream_t *s = &g_og.streams[i];
-        if (!s->active)
-            continue;
-        s->repeat_count = 0;
-        s->repeat_bytes = 0;
-        s->last_norm[0] = '\0';
-        s->last_preview[0] = '\0';
-        s->frame_len = 0;
-    }
+    /* Signal a reset instead of writing per-stream state from this thread:
+     * each stream clears its own counters on the next chunk, keeping every
+     * per-stream field single-writer (its owning stream_thread). */
+    __atomic_fetch_add(&g_og.reset_epoch, 1, __ATOMIC_RELEASE);
 }
 
 bool output_guard_init(void) {
@@ -464,8 +469,43 @@ bool output_guard_init(void) {
         return false;
     }
 
-    pthread_detach(g_og.streams[0].thread);
-    pthread_detach(g_og.streams[1].thread);
+    /* Threads stay joinable so output_guard_shutdown() can drain the pipe
+     * tail before process exit. Detached threads were killed at exit with
+     * bytes still in the pipe, silently truncating final output (observed:
+     * test_runner's summary line never reached the terminal). */
     g_og.initialized = true;
+
+    static bool s_atexit_registered = false;
+    if (!s_atexit_registered) {
+        atexit(output_guard_shutdown);
+        s_atexit_registered = true;
+    }
     return true;
+}
+
+void output_guard_shutdown(void) {
+    if (!g_og.initialized)
+        return;
+    g_og.initialized = false;
+
+    /* Push any stdio-buffered bytes into the guard pipes first. */
+    fflush(stdout);
+    fflush(stderr);
+
+    for (int i = 0; i < 2; i++) {
+        og_stream_t *s = &g_og.streams[i];
+        if (!s->active)
+            continue;
+        /* Restoring the real fd closes the pipe's only writer: the drainer
+         * thread mirrors the remaining bytes, sees EOF, and returns. */
+        (void)dup2(s->mirror_fd, s->out_fd);
+        (void)pthread_join(s->thread, NULL);
+        if (s->read_fd >= 0)
+            close(s->read_fd);
+        if (s->mirror_fd >= 0)
+            close(s->mirror_fd);
+        s->read_fd = -1;
+        s->mirror_fd = -1;
+        s->active = false;
+    }
 }
