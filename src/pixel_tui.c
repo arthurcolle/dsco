@@ -1395,6 +1395,66 @@ static void format_elapsed(char *dst, size_t cap, double seconds) {
         snprintf(dst, cap, "%02dh %02dm", elapsed / 3600, (elapsed / 60) % 60);
 }
 
+/* Live elapsed readout for the exec ticker: tenths under a minute so motion
+ * is visible ("0.4s", "12.7s"), then the standard coarse form. Reduced
+ * motion drops tenths — the 250ms transient tick would otherwise churn the
+ * strip with sub-second text deltas that carry no information there. */
+static void format_elapsed_live(char *dst, size_t cap, double seconds) {
+    if (!dst || cap == 0) return;
+    if (seconds < 0.0) seconds = 0.0;
+    if (seconds < 60.0 && g_session.animation_enabled) {
+        snprintf(dst, cap, "%.1fs", seconds);
+        return;
+    }
+    format_elapsed(dst, cap, seconds);
+}
+
+/* Compact a tool argument preview into ticker-safe prose: leading JSON
+ * punctuation drops, double quotes vanish (so `{"command": "ls"}` reads
+ * `command: ls`), whitespace runs collapse to one space, and truncation
+ * never splits a UTF-8 sequence (same continuation-byte discipline as
+ * plain_text_copy). Input is already control-stripped at tool_begin. */
+static void tool_preview_compact(char *dst, size_t cap, const char *src) {
+    if (!dst || cap == 0) return;
+    dst[0] = '\0';
+    if (!src) return;
+    while (*src == '{' || *src == '"' || *src == ' ' ||
+           *src == '\n' || *src == '\t')
+        src++;
+    size_t n = 0;
+    bool space = false;
+    for (size_t i = 0; src[i] && n + 1 < cap; i++) {
+        unsigned char ch = (unsigned char)src[i];
+        if (ch == '"') continue;
+        if (ch == ' ' || ch == '\t' || ch == '\n' || ch == '\r') {
+            if (!space && n > 0) dst[n++] = ' ';
+            space = true;
+            continue;
+        }
+        if (ch >= 0x80) {
+            size_t seq = (ch & 0xe0) == 0xc0 ? 2 :
+                         (ch & 0xf0) == 0xe0 ? 3 :
+                         (ch & 0xf8) == 0xf0 ? 4 : 1;
+            size_t valid = 1;
+            while (valid < seq && src[i + valid] &&
+                   ((unsigned char)src[i + valid] & 0xc0) == 0x80) valid++;
+            if (valid != seq) continue;
+            if (n + seq >= cap) break;
+            memcpy(dst + n, src + i, seq);
+            n += seq;
+            i += seq - 1;
+            space = false;
+            continue;
+        }
+        dst[n++] = (char)ch;
+        space = ch == ' ';
+    }
+    while (n > 0 && (dst[n - 1] == ' ' || dst[n - 1] == '}' ||
+                     dst[n - 1] == ','))
+        n--;
+    dst[n] = '\0';
+}
+
 static void format_runway(char *dst, size_t cap, double seconds) {
     if (!dst || cap == 0) return;
     if (seconds < 0.0)
@@ -2807,7 +2867,9 @@ bool pixel_tui_write_fixture_ppm(const char *path, int width, int height,
     if (!path || !*path || width < 320 || height < 180 || !fixture ||
         fixture->state < PIXEL_TUI_IDLE || fixture->state > PIXEL_TUI_RESPONDING ||
         fixture->message_count < 0 ||
-        (fixture->message_count > 0 && !fixture->messages))
+        (fixture->message_count > 0 && !fixture->messages) ||
+        fixture->tool_count < 0 ||
+        (fixture->tool_count > 0 && !fixture->tools))
         return false;
     session_lock();
     if (g_session.active) {
@@ -2858,6 +2920,32 @@ bool pixel_tui_write_fixture_ppm(const char *path, int width, int height,
     g_session.message_count = count;
     g_session.next_sequence = (uint64_t)count + 1U;
     ui_motion_init(&g_session.motion, true);
+
+    /* Live-operation telemetry: running ops drive the exec ticker and the
+     * masthead ring; resolved ops get their flash track snapped to full so
+     * the resolve tint renders deterministically (motion_phase is 0 with
+     * animation disabled, and snapped tracks hold their value). */
+    int tool_count = fixture->tool_count;
+    if (tool_count > PIXEL_TOOL_VIS_CAP) tool_count = PIXEL_TOOL_VIS_CAP;
+    for (int i = 0; i < tool_count; i++) {
+        const pixel_tui_fixture_tool_t *source = &fixture->tools[i];
+        pixel_tool_visual_t *tool = &g_session.tool_visuals[i];
+        tool->used = true;
+        tool->sequence = ++g_session.next_tool_sequence;
+        tool->status = source->status == 1 ? PIXEL_OP_DONE :
+                       source->status == 2 ? PIXEL_OP_ERROR : PIXEL_OP_RUNNING;
+        tool->started_s = g_session.started_s -
+            (source->started_offset_s > 0.0 ? source->started_offset_s : 0.0);
+        tool->elapsed_ms = source->elapsed_ms >= 0.0 ? source->elapsed_ms : 0.0;
+        plain_text_copy(tool->name, sizeof(tool->name),
+                        source->name && *source->name ? source->name : "tool");
+        if (source->preview)
+            plain_text_copy(tool->preview, sizeof(tool->preview),
+                            source->preview);
+        if (tool->status != PIXEL_OP_RUNNING)
+            ui_motion_snap(&g_session.motion, MOTION_KEY_TOOL(tool->sequence),
+                           MOTION_PROP_FLASH, 1.0);
+    }
 
     px_canvas_t *canvas = render_session_frame(
         width, height, 1, width, height, g_session.model, fixture->state);
@@ -3436,16 +3524,86 @@ static bool session_refresh_geometry_locked(FILE *out, bool reanchor_unchanged) 
     return true;
 }
 
-static bool session_animation_fast(void) {
+typedef enum {
+    SESSION_ANIM_PARK = 0,  /* no animation demand; wait for wakeups */
+    SESSION_ANIM_FULL,      /* phase transition / motion tracks: full rate */
+    SESSION_ANIM_TOOL_TICK, /* running tools only: ~15fps exec ticker */
+} session_anim_reason_t;
+
+static session_anim_reason_t session_animation_fast_reason(void) {
     /* Animate the discrete phase transition and any live timeline track,
      * then park. Streaming, tools and swarms already trigger semantic
      * repaints when their data changes; a perpetual full-screen pulse only
-     * burns a core and adds no information. */
+     * burns a core and adds no information. Running tools are the one
+     * standing exception: the composer exec ticker owes the user visible
+     * elapsed time and spinner motion while work is in flight, so it keeps
+     * a reduced ~15fps cadence rather than the full frame budget. */
     if (session_transition_progress() < 1.0)
-        return true;
+        return SESSION_ANIM_FULL;
     if (ui_motion_active(&g_session.motion, monotonic_s()))
+        return SESSION_ANIM_FULL;
+    if (g_session.animation_enabled && session_running_tool_count() > 0)
+        return SESSION_ANIM_TOOL_TICK;
+    return SESSION_ANIM_PARK;
+}
+
+static bool session_animation_fast(void) {
+    return session_animation_fast_reason() != SESSION_ANIM_PARK;
+}
+
+/* Reduced motion still owes a ticking elapsed readout while tools run: the
+ * 250ms transient path repaints text with no glyph motion. */
+static bool session_animation_transient(void) {
+    if (session_has_live_notice())
+        return true;
+    if (!g_session.animation_enabled && session_running_tool_count() > 0)
         return true;
     return false;
+}
+
+/* Pure cadence policy: how long the compositor thread may sleep given the
+ * current animation demand. Tool ticking uses at most ~15fps — half the
+ * 30Hz frame budget and plenty for a status ticker. */
+static int session_animation_delay_for(session_anim_reason_t reason,
+                                       bool transient, int interval_ms) {
+    if (reason == SESSION_ANIM_FULL)
+        return interval_ms;
+    if (reason == SESSION_ANIM_TOOL_TICK)
+        return interval_ms > 66 ? interval_ms : 66;
+    return transient ? 250 : 500;
+}
+
+int pixel_tui_animation_cadence_probe(int running_tools,
+                                      bool animation_enabled,
+                                      bool *fast_out, bool *transient_out) {
+    if (fast_out) *fast_out = false;
+    if (transient_out) *transient_out = false;
+    session_lock();
+    if (g_session.active) {
+        session_unlock();
+        return -1;
+    }
+    memset(&g_session, 0, sizeof(g_session));
+    g_session.animation_enabled = animation_enabled;
+    g_session.animation_interval_ms = 33;
+    ui_motion_init(&g_session.motion, !animation_enabled);
+    if (running_tools < 0) running_tools = 0;
+    if (running_tools > PIXEL_TOOL_VIS_CAP) running_tools = PIXEL_TOOL_VIS_CAP;
+    for (int i = 0; i < running_tools; i++) {
+        g_session.tool_visuals[i].used = true;
+        g_session.tool_visuals[i].status = PIXEL_OP_RUNNING;
+        g_session.tool_visuals[i].sequence = (uint64_t)i + 1U;
+        g_session.tool_visuals[i].started_s = monotonic_s();
+    }
+    session_anim_reason_t reason = session_animation_fast_reason();
+    bool transient = session_animation_transient();
+    int delay_ms = session_animation_delay_for(
+        reason, transient, g_session.animation_interval_ms);
+    if (fast_out) *fast_out = reason != SESSION_ANIM_PARK;
+    if (transient_out) *transient_out = transient;
+    memset(&g_session, 0, sizeof(g_session));
+    session_unlock();
+    return delay_ms;
 }
 
 static void animation_deadline(struct timespec *deadline, int delay_ms) {
@@ -3489,10 +3647,11 @@ static void *session_animation_thread_main(void *arg) {
     (void)arg;
     session_lock();
     while (g_session.active && !g_session.animation_stop) {
-        bool fast_before_wait = session_animation_fast();
-        bool transient_before_wait = session_has_live_notice();
-        int delay_ms = fast_before_wait ? g_session.animation_interval_ms :
-                       (transient_before_wait ? 250 : 500);
+        session_anim_reason_t reason_before_wait = session_animation_fast_reason();
+        bool transient_before_wait = session_animation_transient();
+        int delay_ms = session_animation_delay_for(
+            reason_before_wait, transient_before_wait,
+            g_session.animation_interval_ms);
         if (g_session.terminal_suspended) {
             delay_ms = 500;
         } else if (g_session.stream_repaint_pending) {
@@ -3511,7 +3670,7 @@ static void *session_animation_thread_main(void *arg) {
             continue;
         FILE *out = session_output(stderr);
         bool animate = session_animation_fast();
-        bool transient = session_has_live_notice();
+        bool transient = session_animation_transient();
         bool resized = session_refresh_geometry_locked(out, false);
         double now = monotonic_s();
         bool stream_due = g_session.stream_repaint_pending &&
@@ -4842,6 +5001,38 @@ static void scene_host_draw_custom(void *surface, const native_ui_node_t *node,
         native_ui_rect_t rect = scene_host_rect(host, node->frame);
         draw_session_input(host->canvas, rect.x, rect.y,
                            rect.width, rect.height);
+    } else if (node && node->key == NATIVE_COMPOSER_KEY_EXEC_GLYPH) {
+        /* Miniature of the soul's Immune System ring: a faint full circle
+         * with a bright accent arc orbiting at the ticker's phase while a
+         * tool runs; resolve is a filled dot with an expanding ring whose
+         * alpha tracks the flash decay. */
+        native_ui_rect_t rect = scene_host_rect(host, node->frame);
+        int cx = rect.x + rect.width / 2;
+        int cy = rect.y + rect.height / 2;
+        int radius = (rect.width < rect.height ? rect.width : rect.height)
+                     / 2 - 1;
+        if (radius < 4) radius = 4;
+        if (radius > 5) radius = 5;
+        px_color_t color = scene_host_color(
+            palette && node->style.foreground < NATIVE_UI_COLOR_COUNT
+                ? palette->colors[node->style.foreground]
+                : (px_backend_color_t){255, 255, 255});
+        double alpha = (double)node->style.opacity / 255.0;
+        if (node->style.foreground == NATIVE_UI_COLOR_SUCCESS) {
+            fill_circle(host->canvas, cx, cy, 2, color, 0.55 + 0.45 * alpha);
+            int ring = radius + (int)((1.0 - alpha) * 3.0);
+            draw_circle_ring(host->canvas, cx, cy, ring, 1, color,
+                             alpha * 0.9);
+        } else if (node->style.foreground == NATIVE_UI_COLOR_DANGER) {
+            fill_circle(host->canvas, cx, cy, 3, color, 0.5 + 0.5 * alpha);
+        } else {
+            draw_circle_ring(host->canvas, cx, cy, radius, 1, color,
+                             0.22 * alpha);
+            double a0 = (double)node->value * 6.28318530717958647692 -
+                        1.5707963267948966;
+            draw_ring_arc(host->canvas, cx, cy, radius, a0, a0 + 1.9,
+                          color, 0.92 * alpha);
+        }
     }
 }
 
@@ -4938,6 +5129,81 @@ static bool draw_session_composer(px_canvas_t *canvas,
     }
     if (accent_energy < 0.0) accent_energy = 0.0;
     if (accent_energy > 1.0) accent_energy = 1.0;
+
+    /* ── Exec ticker ─────────────────────────────────────────────────────
+     * The top border strip is the live tool heartbeat: while operations run
+     * it carries "<name> · <compact args> · <elapsed>" (cycling every 2.8s
+     * across concurrent ops), and on completion it resolves through the
+     * MOTION_PROP_FLASH ease-out before reading "COMPOSER" again. All state
+     * here is ephemeral; the durable TOOL row still lands in the transcript
+     * via the message path. */
+    char exec_text[192] = {0};
+    char exec_label[224] = {0};
+    uint8_t exec_kind = 0;
+    float exec_phase = 0.0f;
+    uint8_t exec_flash = 0;
+    {
+        const pixel_tool_visual_t *running[PIXEL_TOOL_VIS_CAP];
+        int n = 0;
+        for (int i = 0; i < PIXEL_TOOL_VIS_CAP; i++) {
+            const pixel_tool_visual_t *tool = &g_session.tool_visuals[i];
+            if (tool->used && tool->status == PIXEL_OP_RUNNING)
+                running[n++] = tool;
+        }
+        for (int i = 1; i < n; i++) { /* order by arrival; n <= 8 */
+            const pixel_tool_visual_t *tool = running[i];
+            int j = i;
+            for (; j > 0 && running[j - 1]->sequence > tool->sequence; j--)
+                running[j] = running[j - 1];
+            running[j] = tool;
+        }
+        double now = monotonic_s();
+        if (n > 0) {
+            const pixel_tool_visual_t *tool =
+                running[n > 1 ? (int)(now / 2.8) % n : 0];
+            char preview[96];
+            tool_preview_compact(preview, sizeof(preview), tool->preview);
+            char elapsed[32];
+            double elapsed_s = now - tool->started_s;
+            format_elapsed_live(elapsed, sizeof(elapsed), elapsed_s);
+            int wrote = snprintf(exec_text, sizeof(exec_text),
+                                 "%s%s%s · %s", tool->name,
+                                 preview[0] ? " · " : "", preview, elapsed);
+            if (n > 1 && wrote > 0 && (size_t)wrote < sizeof(exec_text))
+                snprintf(exec_text + wrote, sizeof(exec_text) - (size_t)wrote,
+                         "  +%d", n - 1);
+            snprintf(exec_label, sizeof(exec_label),
+                     "Tool %s running, %d second%s elapsed", tool->name,
+                     (int)elapsed_s, (int)elapsed_s == 1 ? "" : "s");
+            exec_kind = 1;
+            exec_phase = (float)motion_phase(1.6, 0.0);
+        } else {
+            const pixel_tool_visual_t *latest = session_latest_tool();
+            if (latest && latest->status != PIXEL_OP_RUNNING) {
+                double flash = session_motion_value(
+                    MOTION_KEY_TOOL(latest->sequence), MOTION_PROP_FLASH, 0.0);
+                if (flash > 0.02) {
+                    char took[32];
+                    if (latest->elapsed_ms < 1000.0)
+                        snprintf(took, sizeof(took), "%.0fms",
+                                 latest->elapsed_ms);
+                    else
+                        format_elapsed_live(took, sizeof(took),
+                                            latest->elapsed_ms / 1000.0);
+                    bool done = latest->status == PIXEL_OP_DONE;
+                    snprintf(exec_text, sizeof(exec_text),
+                             done ? "%s · done in %s" : "%s · failed · %s",
+                             latest->name, took);
+                    snprintf(exec_label, sizeof(exec_label),
+                             "Tool %s %s after %s", latest->name,
+                             done ? "completed" : "failed", took);
+                    exec_kind = done ? 2 : 3;
+                    exec_flash = (uint8_t)(clamp01(flash) * 255.0);
+                }
+            }
+        }
+    }
+
     native_composer_model_t composer = {
         .text = g_session.input,
         .cursor = g_session.input_cursor,
@@ -4950,6 +5216,11 @@ static bool draw_session_composer(px_canvas_t *canvas,
         .clock = clock_label,
         .compact = canvas->width < 620,
         .accent_opacity = (uint8_t)(accent_energy * 255.0 + 0.5),
+        .exec_text = exec_text,
+        .exec_label = exec_label,
+        .exec_kind = exec_kind,
+        .exec_phase = exec_phase,
+        .exec_flash = exec_flash,
     };
     if (!native_composer_build(scene, frame.width, frame.height, &composer))
         return false;

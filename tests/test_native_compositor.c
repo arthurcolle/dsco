@@ -174,8 +174,8 @@ static void test_composer_semantics_and_damage(void) {
     native_composer_model_t model = composer_fixture();
     CHECK(native_composer_build(&scene, 1120, 84, &model),
           "dense retained composer should build");
-    CHECK(scene.count == 12,
-          "composer should have 12 stable nodes, got %d", scene.count);
+    CHECK(scene.count == 13,
+          "composer should have 13 stable nodes, got %d", scene.count);
     CHECK(scene.nodes[scene.root].key == NATIVE_COMPOSER_KEY_ROOT &&
           scene.nodes[scene.root].role == NATIVE_UI_ROLE_COMPOSER &&
           (scene.nodes[scene.root].state & NATIVE_UI_STATE_LIVE),
@@ -247,6 +247,134 @@ static void test_composer_semantics_and_damage(void) {
     CHECK(!native_composer_build(&compact, 159, 84, &model) &&
           !native_composer_build(&compact, 420, 55, &model),
           "composer should reject layouts that cannot preserve its regions");
+}
+
+static bool rect_equal(native_ui_rect_t a, native_ui_rect_t b) {
+    return a.x == b.x && a.y == b.y && a.width == b.width &&
+           a.height == b.height;
+}
+
+static bool rect_within_rows(native_ui_rect_t region, native_ui_rect_t band) {
+    return region.y >= band.y &&
+           region.y + region.height <= band.y + band.height;
+}
+
+static void test_composer_exec_ticker(void) {
+    /* (a) idle build: the glyph exists, collapsed and hidden, and the strip
+     * reads COMPOSER — the exec ticker adds no idle footprint. */
+    native_ui_scene_t idle;
+    native_composer_model_t model = composer_fixture();
+    CHECK(native_composer_build(&idle, 1120, 84, &model),
+          "idle composer should build");
+    const native_ui_node_t *glyph =
+        find_key(&idle, NATIVE_COMPOSER_KEY_EXEC_GLYPH);
+    const native_ui_node_t *title = find_key(&idle, NATIVE_COMPOSER_KEY_TITLE);
+    CHECK(glyph && !(glyph->state & NATIVE_UI_STATE_VISIBLE) &&
+          glyph->frame.width == 0,
+          "idle exec glyph should collapse to zero width and hide");
+    CHECK(title && !strcmp(title->text, "COMPOSER"),
+          "idle strip should keep its COMPOSER identity");
+
+    /* (b) exec build: glyph visible at fixed width, title carries the
+     * ticker with running semantics and accessible narration. */
+    native_ui_scene_t exec;
+    model.exec_text = "Bash · sleep 5 · 0.4s";
+    model.exec_label = "Tool Bash running, 0 seconds elapsed";
+    model.exec_kind = 1;
+    model.exec_phase = 0.25f;
+    CHECK(native_composer_build(&exec, 1120, 84, &model),
+          "exec composer should build");
+    glyph = find_key(&exec, NATIVE_COMPOSER_KEY_EXEC_GLYPH);
+    title = find_key(&exec, NATIVE_COMPOSER_KEY_TITLE);
+    CHECK(glyph && (glyph->state & NATIVE_UI_STATE_VISIBLE) &&
+          (glyph->state & NATIVE_UI_STATE_LIVE) &&
+          glyph->frame.width == 14 &&
+          glyph->element == NATIVE_UI_ELEMENT_CUSTOM &&
+          glyph->style.foreground == NATIVE_UI_COLOR_ACCENT &&
+          glyph->style.opacity == 255,
+          "running exec glyph should be a live fixed-width accent custom node");
+    CHECK(glyph && glyph->value > 0.24f && glyph->value < 0.26f,
+          "exec glyph should carry the spinner phase");
+    CHECK(title && !strcmp(title->text, "Bash · sleep 5 · 0.4s") &&
+          title->style.foreground == NATIVE_UI_COLOR_WARNING,
+          "running ticker should own the title with warning semantics");
+    CHECK(title && strstr(title->accessibility_label, "Bash") &&
+          strstr(title->accessibility_label, "running"),
+          "ticker accessibility should narrate the running tool");
+
+    /* Resolve semantics: done and error flashes tint the strip. */
+    native_ui_scene_t done;
+    model.exec_text = "Bash · done in 412ms";
+    model.exec_kind = 2;
+    model.exec_flash = 200;
+    CHECK(native_composer_build(&done, 1120, 84, &model),
+          "done-flash composer should build");
+    glyph = find_key(&done, NATIVE_COMPOSER_KEY_EXEC_GLYPH);
+    title = find_key(&done, NATIVE_COMPOSER_KEY_TITLE);
+    CHECK(glyph && glyph->style.foreground == NATIVE_UI_COLOR_SUCCESS &&
+          glyph->style.opacity == 200 &&
+          title && title->style.foreground == NATIVE_UI_COLOR_SUCCESS &&
+          title->style.opacity == 120 + 200 / 2,
+          "done flash should tint the strip green at flash intensity");
+    model.exec_kind = 3;
+    CHECK(native_composer_build(&done, 1120, 84, &model),
+          "error-flash composer should build");
+    glyph = find_key(&done, NATIVE_COMPOSER_KEY_EXEC_GLYPH);
+    CHECK(glyph && glyph->style.foreground == NATIVE_UI_COLOR_DANGER,
+          "error flash should tint the glyph red");
+
+    /* (c) zero layout shift: everything below the strip is byte-identical
+     * between idle and exec builds. */
+    static const uint64_t stable_keys[] = {
+        NATIVE_COMPOSER_KEY_DIVIDER, NATIVE_COMPOSER_KEY_INPUT_ROW,
+        NATIVE_COMPOSER_KEY_INPUT, NATIVE_COMPOSER_KEY_FOOTER,
+        NATIVE_COMPOSER_KEY_HINT, NATIVE_COMPOSER_KEY_LIVE,
+    };
+    for (size_t i = 0; i < sizeof(stable_keys) / sizeof(stable_keys[0]); i++) {
+        const native_ui_node_t *before = find_key(&idle, stable_keys[i]);
+        const native_ui_node_t *after = find_key(&exec, stable_keys[i]);
+        CHECK(before && after && rect_equal(before->frame, after->frame),
+              "exec ticker must not shift layout (key %zu)", i);
+    }
+
+    /* (d) damage: a ticking elapsed rewrite dirties only the top strip. */
+    native_ui_scene_t later;
+    model = composer_fixture();
+    model.exec_text = "Bash · sleep 5 · 0.4s";
+    model.exec_kind = 1;
+    CHECK(native_composer_build(&exec, 1120, 84, &model),
+          "damage baseline should build");
+    model.exec_text = "Bash · sleep 5 · 0.6s";
+    CHECK(native_composer_build(&later, 1120, 84, &model),
+          "damage mutation should build");
+    native_ui_damage_t damage;
+    native_ui_diff(&exec, &later, &damage);
+    const native_ui_node_t *top = find_key(&later, NATIVE_COMPOSER_KEY_TOP);
+    CHECK(!damage.full_repaint && damage.count >= 1 && top,
+          "elapsed tick should produce bounded semantic damage, got %d",
+          damage.count);
+    for (int i = 0; i < damage.count; i++)
+        CHECK(rect_within_rows(damage.regions[i], top->frame),
+              "ticker damage region %d should stay inside the top strip", i);
+}
+
+static void test_animation_cadence(void) {
+    bool fast = false, transient = false;
+    int delay = pixel_tui_animation_cadence_probe(1, true, &fast, &transient);
+    CHECK(fast && delay == 66,
+          "a running tool should hold the ~15fps ticker cadence (delay %d)",
+          delay);
+    delay = pixel_tui_animation_cadence_probe(3, true, &fast, &transient);
+    CHECK(fast && delay == 66,
+          "concurrent tools should not raise the ticker budget (delay %d)",
+          delay);
+    delay = pixel_tui_animation_cadence_probe(0, true, &fast, &transient);
+    CHECK(!fast && !transient && delay == 500,
+          "no work should park the compositor thread (delay %d)", delay);
+    delay = pixel_tui_animation_cadence_probe(1, false, &fast, &transient);
+    CHECK(!fast && transient && delay == 250,
+          "reduced motion should tick elapsed on the transient path (delay %d)",
+          delay);
 }
 
 typedef struct {
@@ -519,6 +647,145 @@ static void test_populated_fixture_density(void) {
     unlink(path);
 }
 
+static unsigned char *ppm_load(const char *path, int *w, int *h) {
+    FILE *file = fopen(path, "rb");
+    if (!file) return NULL;
+    char magic[3] = {0};
+    int width = 0, height = 0, max_value = 0;
+    if (fscanf(file, "%2s %d %d %d", magic, &width, &height, &max_value) != 4 ||
+        strcmp(magic, "P6") || max_value != 255 || width < 1 || height < 1) {
+        fclose(file);
+        return NULL;
+    }
+    fgetc(file); /* single whitespace after header */
+    size_t count = (size_t)width * (size_t)height * 3;
+    unsigned char *pixels = malloc(count);
+    if (pixels && fread(pixels, 1, count, file) != count) {
+        free(pixels);
+        pixels = NULL;
+    }
+    fclose(file);
+    if (pixels) {
+        *w = width;
+        *h = height;
+    }
+    return pixels;
+}
+
+static void test_exec_ticker_pixels(void) {
+    bool keep = getenv("DSCO_KEEP_NATIVE_ARTIFACTS") != NULL;
+    static const pixel_tui_fixture_message_t messages[] = {
+        {.role = "USER", .text = "Profile the repaint pipeline."},
+        {.role = "ASSISTANT", .text = "Running the benchmark suite now."},
+    };
+    pixel_tui_fixture_t fixture = {
+        .model = "openai/gpt-5.6-luna",
+        .slot_name = "native",
+        .state = PIXEL_TUI_EXECUTING,
+        .messages = messages,
+        .message_count = 2,
+        .input = "",
+        .turn = 3,
+        .input_tokens = 900,
+        .output_tokens = 210,
+        .tools_used = 1,
+        .context_percent = 22.0,
+    };
+    const int width = 1120, height = 700;
+    char idle_path[160], run_path[160], tick_path[160], done_path[160];
+    snprintf(idle_path, sizeof(idle_path),
+             "/tmp/dsco-exec-ticker-idle-%ld.ppm", (long)getpid());
+    snprintf(run_path, sizeof(run_path),
+             "/tmp/dsco-exec-ticker-run-%ld.ppm", (long)getpid());
+    snprintf(tick_path, sizeof(tick_path),
+             "/tmp/dsco-exec-ticker-tick-%ld.ppm", (long)getpid());
+    snprintf(done_path, sizeof(done_path),
+             "/tmp/dsco-exec-ticker-done-%ld.ppm", (long)getpid());
+
+    CHECK(pixel_tui_write_fixture_ppm(idle_path, width, height, &fixture, NULL),
+          "no-tools fixture should render");
+    pixel_tui_fixture_tool_t running = {
+        .name = "Bash",
+        .preview = "{\"command\": \"sleep 5\"}",
+        .status = 0,
+        .started_offset_s = 12.0,
+    };
+    fixture.tools = &running;
+    fixture.tool_count = 1;
+    CHECK(pixel_tui_write_fixture_ppm(run_path, width, height, &fixture, NULL),
+          "running-tool fixture should render");
+    pixel_tui_fixture_tool_t retick = running;
+    retick.preview = "{\"command\": \"make -j8 all\"}";
+    fixture.tools = &retick;
+    CHECK(pixel_tui_write_fixture_ppm(tick_path, width, height, &fixture, NULL),
+          "rewritten-ticker fixture should render");
+    pixel_tui_fixture_tool_t resolved = {
+        .name = "Bash",
+        .preview = "{\"command\": \"sleep 5\"}",
+        .status = 1,
+        .elapsed_ms = 412.0,
+        .started_offset_s = 12.0,
+    };
+    fixture.tools = &resolved;
+    CHECK(pixel_tui_write_fixture_ppm(done_path, width, height, &fixture, NULL),
+          "done-flash fixture should render");
+
+    uint64_t idle_hash = file_hash(idle_path);
+    uint64_t run_hash = file_hash(run_path);
+    uint64_t tick_hash = file_hash(tick_path);
+    uint64_t done_hash = file_hash(done_path);
+    CHECK(idle_hash && run_hash && idle_hash != run_hash,
+          "a running tool must change the rendered surface");
+    CHECK(run_hash != tick_hash,
+          "a ticker rewrite must repaint the strip");
+    CHECK(done_hash && done_hash != idle_hash && done_hash != run_hash,
+          "the resolve flash must tint the surface deterministically");
+
+    /* Isolate the ticker rewrite: with an identical tool identity and only
+     * the argument preview changed, every row above the composer deck is
+     * byte-identical — the ticker owns nothing outside its strip. */
+    int w1 = 0, h1 = 0, w2 = 0, h2 = 0;
+    unsigned char *run_pixels = ppm_load(run_path, &w1, &h1);
+    unsigned char *tick_pixels = ppm_load(tick_path, &w2, &h2);
+    CHECK(run_pixels && tick_pixels && w1 == width && h1 == height &&
+          w2 == width && h2 == height,
+          "ticker pixel fixtures should load");
+    if (run_pixels && tick_pixels && h1 == height && h2 == height) {
+        size_t band = (size_t)width * 3 * (size_t)(height - 200);
+        CHECK(memcmp(run_pixels, tick_pixels, band) == 0,
+              "rows above the composer deck must not change on ticker rewrite");
+        CHECK(memcmp(run_pixels + band, tick_pixels + band,
+                     (size_t)width * 3 * 200) != 0,
+              "the composer deck must carry the rewritten ticker");
+    }
+    free(run_pixels);
+    free(tick_pixels);
+    if (!keep) {
+        unlink(idle_path);
+        unlink(run_path);
+        unlink(tick_path);
+        unlink(done_path);
+    }
+
+    /* Review artifact: three concurrent running operations. */
+    if (keep) {
+        static const pixel_tui_fixture_tool_t swarm_tools[] = {
+            {.name = "Bash", .preview = "{\"command\": \"make -j8 test\"}",
+             .status = 0, .started_offset_s = 14.2},
+            {.name = "WebFetch", .preview = "{\"url\": \"https://distributed.systems/rl\"}",
+             .status = 0, .started_offset_s = 3.6},
+            {.name = "Grep", .preview = "{\"pattern\": \"session_repaint\"}",
+             .status = 0, .started_offset_s = 0.8},
+        };
+        fixture.tools = swarm_tools;
+        fixture.tool_count = 3;
+        fixture.tools_used = 3;
+        CHECK(pixel_tui_write_fixture_ppm("/tmp/dsco-native-exec-ticker.ppm",
+                                          width, height, &fixture, NULL),
+              "multi-op artifact should render");
+    }
+}
+
 static void test_frame_telemetry_aggregation(void) {
     const char *old = getenv("DSCO_PIXEL_TUI_PERF");
     char saved[256];
@@ -704,9 +971,12 @@ int main(void) {
     test_masthead_semantics_and_layout();
     test_masthead_density_and_damage();
     test_composer_semantics_and_damage();
+    test_composer_exec_ticker();
+    test_animation_cadence();
     test_pixel_backend_contract();
     test_headless_session_artifacts();
     test_populated_fixture_density();
+    test_exec_ticker_pixels();
     test_frame_telemetry_aggregation();
     test_dual_compositor_parity_corpus();
     test_capture_parser_overwrite_semantics();

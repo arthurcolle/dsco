@@ -19,6 +19,7 @@
 #define NATIVE_COMPOSER_KEY_FOOTER     UINT64_C(0x434f4d50000a)
 #define NATIVE_COMPOSER_KEY_HINT       UINT64_C(0x434f4d50000b)
 #define NATIVE_COMPOSER_KEY_CLOCK      UINT64_C(0x434f4d50000c)
+#define NATIVE_COMPOSER_KEY_EXEC_GLYPH UINT64_C(0x434f4d50000d)
 
 typedef struct {
     const char *text;
@@ -32,6 +33,13 @@ typedef struct {
     const char *clock;
     bool compact;
     uint8_t accent_opacity;
+    /* Exec ticker: ephemeral tool liveness projected onto the top strip.
+     * The host composes the text; the composer only owns presentation. */
+    const char *exec_text;   /* composed ticker, NULL/empty when idle */
+    const char *exec_label;  /* accessibility narration, optional */
+    uint8_t exec_kind;       /* 0 idle, 1 running, 2 done-flash, 3 error-flash */
+    float   exec_phase;      /* 0..1 spinner phase */
+    uint8_t exec_flash;      /* 0..255 resolve intensity */
 } native_composer_model_t;
 
 /* Builds the retained presentation for the shared cell editor. Editing,
