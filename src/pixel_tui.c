@@ -1739,6 +1739,237 @@ static size_t plain_text_copy(char *dst, size_t cap, const char *src) {
     return n;
 }
 
+/* ── Inline live-operation cards ─────────────────────────────────────────
+ * While tools run, the transcript tail carries animated native cards: a
+ * category-tinted rail, a spinner arc, the salient argument preview, and a
+ * ticking elapsed readout. Every card derives from tool_visuals plus the
+ * retained motion timeline — presence eases in on tool_begin and out on
+ * tool_end while the durable TOOL row arrives, so liveness costs no new
+ * session state and no coordination code. */
+#define LIVE_OP_CARD_H 36
+#define LIVE_OP_CARD_COMPACT_H 20
+#define LIVE_OP_CARD_GAP 4
+#define LIVE_OP_CARD_MAX 3
+#define LIVE_OP_CHIP_H 14
+
+/* Purely cosmetic category classifier for the card rail; keep it dumb. */
+static px_color_t tool_accent_color(const char *name) {
+    char low[64];
+    size_t n = 0;
+    for (; name && name[n] && n + 1 < sizeof(low); n++)
+        low[n] = (char)tolower((unsigned char)name[n]);
+    low[n] = '\0';
+    if (strstr(low, "read") || strstr(low, "grep") || strstr(low, "glob") ||
+        strstr(low, "ls") || strstr(low, "search"))
+        return C_CYAN;
+    if (strstr(low, "write") || strstr(low, "edit") || strstr(low, "apply") ||
+        strstr(low, "patch"))
+        return C_VIOLET;
+    if (strstr(low, "bash") || strstr(low, "shell") || strstr(low, "sandbox") ||
+        strstr(low, "exec"))
+        return C_AMBER;
+    if (strstr(low, "web") || strstr(low, "http") || strstr(low, "fetch") ||
+        strstr(low, "url"))
+        return C_GREEN;
+    return C_CYAN;
+}
+
+/* Pull the most salient argument out of a tool's input JSON — the command,
+ * path, pattern, or query a person actually wants to see — falling back to
+ * the raw JSON when nothing matches. Naive by design: display-only text that
+ * is never parsed back. */
+static void tool_preview_extract(const char *name, const char *input_json,
+                                 char *dst, size_t cap) {
+    (void)name;
+    if (!dst || cap == 0) return;
+    dst[0] = '\0';
+    if (!input_json || !*input_json) return;
+    static const char *const keys[] = {
+        "command", "file_path", "path", "pattern", "query", "url", "prompt",
+    };
+    for (size_t k = 0; k < sizeof(keys) / sizeof(keys[0]); k++) {
+        char needle[24];
+        snprintf(needle, sizeof(needle), "\"%s\"", keys[k]);
+        const char *p = strstr(input_json, needle);
+        if (!p) continue;
+        p += strlen(needle);
+        while (*p == ' ' || *p == '\t' || *p == '\n' || *p == '\r') p++;
+        if (*p != ':') continue;
+        p++;
+        while (*p == ' ' || *p == '\t' || *p == '\n' || *p == '\r') p++;
+        if (*p != '"') continue;
+        p++;
+        char value[192];
+        size_t n = 0;
+        while (*p && *p != '"' && n + 1 < sizeof(value)) {
+            if (*p == '\\' && p[1]) {
+                char esc = p[1];
+                value[n++] = (esc == 'n' || esc == 't' || esc == 'r') ? ' ' : esc;
+                p += 2;
+                continue;
+            }
+            value[n++] = *p++;
+        }
+        value[n] = '\0';
+        if (n > 0) {
+            plain_text_copy(dst, cap, value);
+            if (dst[0]) return;
+        }
+    }
+    plain_text_copy(dst, cap, input_json);
+}
+
+/* Headless seam for the preview classifier (regression-tested directly). */
+void pixel_tui_tool_preview_extract(const char *name, const char *input_json,
+                                    char *dst, size_t cap) {
+    tool_preview_extract(name, input_json, dst, cap);
+}
+
+/* A card is live while its presence exceeds a whisker: running cards enter
+ * over 0.28s (ENTRANCE), finished cards decay their presence (VALUE) to zero
+ * over 0.45s so the durable TOOL row can crossfade in underneath. */
+static double tool_card_presence(const pixel_tool_visual_t *t) {
+    if (!t || !t->used) return 0.0;
+    uint64_t key = MOTION_KEY_TOOL(t->sequence);
+    if (t->status == PIXEL_OP_RUNNING)
+        return clamp01(session_motion_value(key, MOTION_PROP_ENTRANCE, 1.0));
+    return clamp01(session_motion_value(key, MOTION_PROP_VALUE, 0.0));
+}
+
+/* Collect live cards sorted by sequence ascending (oldest first). Returns
+ * the total live count; out/presences carry up to cap entries. */
+static int session_live_op_cards(const pixel_tool_visual_t **out,
+                                 double *presences, int cap) {
+    int count = 0;
+    for (int i = 0; i < PIXEL_TOOL_VIS_CAP && count < cap; i++) {
+        const pixel_tool_visual_t *t = &g_session.tool_visuals[i];
+        double presence = tool_card_presence(t);
+        if (presence <= 0.02) continue;
+        int at = count;
+        while (at > 0 && out[at - 1]->sequence > t->sequence) {
+            out[at] = out[at - 1];
+            presences[at] = presences[at - 1];
+            at--;
+        }
+        out[at] = t;
+        presences[at] = presence;
+        count++;
+    }
+    return count;
+}
+
+static int live_op_card_height(double presence, bool compact) {
+    int full = compact ? LIVE_OP_CARD_COMPACT_H : LIVE_OP_CARD_H;
+    return (int)((double)full * clamp01(presence) + 0.5);
+}
+
+/* Plan the deck pinned at the transcript tail: newest LIVE_OP_CARD_MAX cards,
+ * presence-scaled heights, clamped to a third of the transcript. On a tight
+ * clamp cards drop to compact single-line form before shedding entries, so
+ * live status survives even in short viewports. Returns the deck height. */
+static int live_op_deck_plan(const double *presences, int total, int avail_h,
+                             int *shown_out, bool *compact_out) {
+    int limit = avail_h / 3;
+    for (int shown = total > LIVE_OP_CARD_MAX ? LIVE_OP_CARD_MAX : total;
+         shown > 0; shown--) {
+        for (int pass = 0; pass < 2; pass++) {
+            bool compact = pass == 1;
+            int deck = total > shown ? LIVE_OP_CHIP_H : 0;
+            for (int i = total - shown; i < total; i++) {
+                int card_h = live_op_card_height(presences[i], compact);
+                if (card_h > 0) deck += card_h + LIVE_OP_CARD_GAP;
+            }
+            if (deck <= limit) {
+                *shown_out = shown;
+                *compact_out = compact;
+                return deck;
+            }
+        }
+    }
+    *shown_out = 0;
+    *compact_out = false;
+    return 0;
+}
+
+/* One live-op card. Returns the pixel height consumed (presence-scaled). */
+static int draw_live_op_card(px_canvas_t *c, int x, int y, int w,
+                             const pixel_tool_visual_t *t, double presence,
+                             bool compact) {
+    int card_h = live_op_card_height(presence, compact);
+    if (!c || !t || card_h < 2 || w < 90) return card_h;
+    px_color_t accent = tool_accent_color(t->name);
+    px_color_t status = tool_visual_color(t->status);
+    /* Entrance: running cards slide in from the left like message arrival. */
+    if (t->status == PIXEL_OP_RUNNING)
+        x += (int)((1.0 - presence) * 14.0);
+    draw_panel(c, x, y, w, card_h, 6, C_PANEL_ALT, 0.55 * presence);
+    fill_rect(c, x, y, 3, card_h, accent, 0.80 * presence);
+    if (card_h >= (compact ? 15 : 18)) {
+        int row_y = compact ? y + (card_h - 12) / 2 : y + 4;
+        int mark_y = compact ? y + card_h / 2 : y + 11;
+        if (t->status == PIXEL_OP_RUNNING) {
+            /* Spinner arc; motion_phase returns 0 under reduced motion, so
+             * the arc parks as a static open ring — informational either way. */
+            double phase = motion_phase(1.1, (double)(t->sequence & 7u) * 0.13);
+            double a0 = phase * 6.28318530717958647692;
+            draw_ring_arc(c, x + 14, mark_y, 5, a0, a0 + 4.2, accent,
+                          0.90 * presence);
+        } else {
+            fill_circle(c, x + 14, mark_y, 3, status, 0.90 * presence);
+        }
+        char elapsed[32];
+        double seconds = t->status == PIXEL_OP_RUNNING
+                             ? monotonic_s() - t->started_s
+                             : t->elapsed_ms / 1000.0;
+        if (seconds < 0.0) seconds = 0.0;
+        if (seconds < 60.0)
+            snprintf(elapsed, sizeof(elapsed), "%.1fs", seconds);
+        else
+            format_elapsed(elapsed, sizeof(elapsed), seconds);
+        int elapsed_w = font_compat_measure_utf8(elapsed, text_point_size(1),
+                                                 false);
+        if (elapsed_w < 0) elapsed_w = (int)strlen(elapsed) * 6;
+        int elapsed_x = x + w - 10 - elapsed_w;
+        if (elapsed_x < x + 24) elapsed_x = x + 24;
+        draw_text(c, elapsed_x, row_y, 1, elapsed,
+                  t->status == PIXEL_OP_RUNNING ? C_TEXT : status,
+                  0.84 * presence, x + w - 6 - elapsed_x);
+        int name_w = elapsed_x - 8 - (x + 24);
+        if (name_w > 12)
+            draw_text_ellipsis(c, x + 24, row_y, 1, t->name, accent,
+                               0.92 * presence, name_w);
+        if (!compact && card_h >= LIVE_OP_CARD_H - 4 && t->preview[0])
+            draw_text_ellipsis(c, x + 24, y + 20, 1, t->preview, C_DIM,
+                               0.66 * presence, w - 34);
+    }
+    /* Completion wash: the same one-breath exhale the rail summary uses. */
+    double flash = session_motion_value(MOTION_KEY_TOOL(t->sequence),
+                                        MOTION_PROP_FLASH, 0.0);
+    if (flash > 0.01)
+        fill_rounded(c, x, y, w, card_h, 6, status, 0.16 * flash);
+    if (t->status == PIXEL_OP_RUNNING)
+        draw_motion_sweep(c, x + 3, y + card_h - 2, w - 6, 2, accent, 1.40,
+                          0.50 * presence);
+    return card_h;
+}
+
+static void draw_live_op_deck(px_canvas_t *c, int x, int y, int w,
+                              const pixel_tool_visual_t *const *cards,
+                              const double *presences, int total, int shown,
+                              bool compact) {
+    int yy = y;
+    for (int i = total - shown; i < total; i++) {
+        int card_h = draw_live_op_card(c, x, yy, w, cards[i], presences[i],
+                                       compact);
+        if (card_h > 0) yy += card_h + LIVE_OP_CARD_GAP;
+    }
+    if (total > shown) {
+        char chip[40];
+        snprintf(chip, sizeof(chip), "+%d MORE RUNNING", total - shown);
+        draw_text(c, x + 10, yy, 1, chip, C_DIM, 0.62, w - 20);
+    }
+}
+
 #define PIXEL_VISUAL_RUN_CAP 12
 #define PIXEL_VISUAL_RUN_TEXT 160
 
@@ -2035,7 +2266,8 @@ static int draw_rich_run(px_canvas_t *c, int x, int y, int max_width,
     return advance;
 }
 
-static void draw_session_transcript(px_canvas_t *c, int x, int y, int w, int h) {
+static void draw_session_transcript_lines(px_canvas_t *c, int x, int y,
+                                          int w, int h, int deck_h) {
     if (!c || w < 80 || h < 20 || g_session.message_count <= 0) return;
     /* Keep the native face optically dense and use the font's own leading.
      * Exact backing pixels preserve edge clarity at this size; the previous
@@ -2093,7 +2325,9 @@ static void draw_session_transcript(px_canvas_t *c, int x, int y, int w, int h) 
     s_visual_cached_message_count = g_session.message_count;
     s_visual_cached_line_count = line_count;
     s_visual_cached_last_sequence = last_message->sequence;
-    int visible = (h - 8) / line_h;
+    /* The live-op deck reserves the transcript tail; visible/first/max_scroll
+     * shift accordingly while the wrapped-line cache stays untouched. */
+    int visible = (h - 8 - deck_h) / line_h;
     if (visible < 1) return;
     int max_scroll = line_count > visible ? line_count - visible : 0;
     if (g_session.transcript_scroll > max_scroll)
@@ -2184,6 +2418,28 @@ static void draw_session_transcript(px_canvas_t *c, int x, int y, int w, int h) 
                       role_color, pulse);
         }
     }
+}
+
+static void draw_session_transcript(px_canvas_t *c, int x, int y, int w, int h) {
+    if (!c || w < 80 || h < 20) return;
+    /* Live-operation deck: running (and just-finished, still-easing) tools
+     * stay pinned at the transcript tail — even before any message exists,
+     * and even while the user is scrolled back in history. */
+    const pixel_tool_visual_t *cards[PIXEL_TOOL_VIS_CAP];
+    double presences[PIXEL_TOOL_VIS_CAP];
+    int live_total = session_live_op_cards(cards, presences,
+                                           PIXEL_TOOL_VIS_CAP);
+    int deck_shown = 0;
+    bool deck_compact = false;
+    int deck_h = live_total > 0
+        ? live_op_deck_plan(presences, live_total, h, &deck_shown,
+                            &deck_compact)
+        : 0;
+    if (g_session.message_count <= 0 && deck_h <= 0) return;
+    draw_session_transcript_lines(c, x, y, w, h, deck_h);
+    if (deck_h > 0)
+        draw_live_op_deck(c, x + 2, y + h - deck_h, w - 4, cards, presences,
+                          live_total, deck_shown, deck_compact);
 }
 
 static void draw_session_command_help(px_canvas_t *c, int x, int y, int w, int h) {
@@ -2757,7 +3013,20 @@ static void fixture_density_metrics(int width, int height,
     int content_h = transcript_h - 27;
     int measured_h = font_compat_line_height(SESSION_TRANSCRIPT_BODY_SIZE, false);
     int line_h = measured_h > 0 ? measured_h : 15;
-    int capacity = content_h > 8 ? (content_h - 8) / line_h : 0;
+    /* The live-op deck reserves the transcript tail, exactly as the renderer
+     * computes it in draw_session_transcript. */
+    const pixel_tool_visual_t *cards[PIXEL_TOOL_VIS_CAP];
+    double presences[PIXEL_TOOL_VIS_CAP];
+    int live_total = session_live_op_cards(cards, presences,
+                                           PIXEL_TOOL_VIS_CAP);
+    int live_shown = 0;
+    bool live_compact = false;
+    int live_deck_h = live_total > 0
+        ? live_op_deck_plan(presences, live_total, content_h, &live_shown,
+                            &live_compact)
+        : 0;
+    int capacity = content_h > 8 ? (content_h - 8 - live_deck_h) / line_h : 0;
+    if (capacity < 0) capacity = 0;
     int wrapped = s_visual_cached_line_count;
     int visible = wrapped < capacity ? wrapped : capacity;
     int first = wrapped - visible;
@@ -2807,7 +3076,9 @@ bool pixel_tui_write_fixture_ppm(const char *path, int width, int height,
     if (!path || !*path || width < 320 || height < 180 || !fixture ||
         fixture->state < PIXEL_TUI_IDLE || fixture->state > PIXEL_TUI_RESPONDING ||
         fixture->message_count < 0 ||
-        (fixture->message_count > 0 && !fixture->messages))
+        (fixture->message_count > 0 && !fixture->messages) ||
+        fixture->tool_count < 0 ||
+        (fixture->tool_count > 0 && !fixture->tools))
         return false;
     session_lock();
     if (g_session.active) {
@@ -2857,6 +3128,25 @@ bool pixel_tui_write_fixture_ppm(const char *path, int width, int height,
     }
     g_session.message_count = count;
     g_session.next_sequence = (uint64_t)count + 1U;
+    int tool_count = fixture->tool_count;
+    if (tool_count > PIXEL_TOOL_VIS_CAP) tool_count = PIXEL_TOOL_VIS_CAP;
+    for (int i = 0; i < tool_count; i++) {
+        const pixel_tui_fixture_tool_t *source = &fixture->tools[i];
+        pixel_tool_visual_t *tool = &g_session.tool_visuals[i];
+        tool->used = true;
+        tool->sequence = (uint64_t)i + 1U;
+        tool->status = source->status == 1 ? PIXEL_OP_DONE :
+                       source->status == 2 ? PIXEL_OP_ERROR : PIXEL_OP_RUNNING;
+        plain_text_copy(tool->name, sizeof(tool->name),
+                        source->name && *source->name ? source->name : "tool");
+        if (source->preview)
+            plain_text_copy(tool->preview, sizeof(tool->preview),
+                            source->preview);
+        double elapsed = source->elapsed_s > 0.0 ? source->elapsed_s : 0.0;
+        tool->started_s = monotonic_s() - elapsed;
+        tool->elapsed_ms = elapsed * 1000.0;
+    }
+    g_session.next_tool_sequence = (uint64_t)tool_count;
     ui_motion_init(&g_session.motion, true);
 
     px_canvas_t *canvas = render_session_frame(
@@ -3444,6 +3734,12 @@ static bool session_animation_fast(void) {
     if (session_transition_progress() < 1.0)
         return true;
     if (ui_motion_active(&g_session.motion, monotonic_s()))
+        return true;
+    /* Live-op cards are the liveness guarantee: while any tool runs, keep the
+     * compositor at animation cadence so the spinner arc, bottom sweep, and
+     * tenths-of-a-second elapsed readout actually move. Reduced motion skips
+     * this — cards still update on telemetry and the 500ms park tick. */
+    if (g_session.animation_enabled && session_running_tool_count() > 0)
         return true;
     return false;
 }
@@ -4406,8 +4702,13 @@ uint64_t pixel_tui_session_tool_begin(FILE *out, const char *name, const char *i
     tool->status = PIXEL_OP_RUNNING;
     tool->started_s = monotonic_s();
     plain_text_copy(tool->name, sizeof(tool->name), name);
-    if (input_json && *input_json)
-        plain_text_copy(tool->preview, sizeof(tool->preview), input_json);
+    tool_preview_extract(name, input_json, tool->preview, sizeof(tool->preview));
+    /* Card entrance mirrors message arrival: 0 → 1 over 0.28s. */
+    ui_motion_snap(&g_session.motion, MOTION_KEY_TOOL(tool->sequence),
+                   MOTION_PROP_ENTRANCE, 0.0);
+    ui_motion_set(&g_session.motion, MOTION_KEY_TOOL(tool->sequence),
+                  MOTION_PROP_ENTRANCE, 1.0, 0.28, UI_MOTION_EASE_OUT,
+                  tool->started_s);
     pixel_turn_visual_t *turn_visual = session_current_turn_visual();
     if (turn_visual) {
         turn_visual->tool_count++;
@@ -4449,6 +4750,12 @@ void pixel_tui_session_tool_end(FILE *out, uint64_t operation_id, const char *na
         ui_motion_set(&g_session.motion, MOTION_KEY_TOOL(match->sequence),
                       MOTION_PROP_FLASH, 0.0, ok ? 0.9 : 1.6,
                       UI_MOTION_EASE_OUT, now);
+        /* Presence: hold, then ease the card away while the durable TOOL row
+         * slides in — a crossfade morph with zero coordination code. */
+        ui_motion_snap(&g_session.motion, MOTION_KEY_TOOL(match->sequence),
+                       MOTION_PROP_VALUE, 1.0);
+        ui_motion_set(&g_session.motion, MOTION_KEY_TOOL(match->sequence),
+                      MOTION_PROP_VALUE, 0.0, 0.45, UI_MOTION_EASE_OUT, now);
     }
     session_telemetry_repaint(out);
     session_unlock();
