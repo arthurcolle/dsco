@@ -1,4 +1,6 @@
 import copy
+import os
+
 import tempfile
 import unittest
 from datetime import datetime, timedelta, timezone
@@ -194,8 +196,100 @@ class WebServerTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(any(event["type"] == "thinking_start" for event in ws.events))
         self.assertTrue(any(event["type"] == "thinking_end" for event in ws.events))
 
-    def test_dashboard_meta_exposes_limits_and_runbooks(self):
+    def test_responses_gateway_requires_project_api_key(self):
         client = TestClient(server.app)
+
+        response = client.post(
+            "/v1/responses",
+            headers={"Authorization": f"Bearer {server.WEB_AUTH_TOKEN}"},
+            json={"model": "gpt-4o", "input": "Say hello", "dry_run": True},
+        )
+
+        self.assertEqual(response.status_code, 401)
+        self.assertEqual(response.json()["error"]["code"], "invalid_api_key")
+
+    def test_hosted_api_key_admission_and_credit_settlement(self):
+        client = TestClient(server.app)
+        original_db = server.CONTROL_PLANE_DB
+        original_ready = server._control_plane_ready
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            try:
+                server.CONTROL_PLANE_DB = Path(tmpdir) / "control_plane.db"
+                server._control_plane_ready = False
+                with server._control_plane_conn() as conn:
+                    person = conn.execute(
+                        "SELECT id FROM people WHERE auth_policy != 'byok_only' ORDER BY id LIMIT 1"
+                    ).fetchone()
+                self.assertIsNotNone(person)
+
+                admin_headers = {"Authorization": f"Bearer {server.WEB_AUTH_TOKEN}"}
+                project = client.post(
+                    "/api/control/projects",
+                    headers=admin_headers,
+                    json={"person_id": person["id"], "name": "gateway-test", "initial_credits_usd": 5},
+                )
+                self.assertEqual(project.status_code, 200)
+                project_id = project.json()["id"]
+                issued = client.post(
+                    f"/api/control/projects/{project_id}/keys",
+                    headers=admin_headers,
+                    json={"name": "test"},
+                )
+                self.assertEqual(issued.status_code, 200)
+                api_key = issued.json()["api_key"]
+
+                gateway = client.post(
+                    "/v1/responses",
+                    headers={"Authorization": f"Bearer {api_key}"},
+                    json={"model": "gpt-4o", "input": "Say hello", "dry_run": True,
+                          "api_key": "byok-test"},
+                )
+                self.assertEqual(gateway.status_code, 200)
+
+                completion = {
+                    "model": "gpt-4o",
+                    "choices": [{"message": {"role": "assistant", "content": "managed"}}],
+                    "usage": {"prompt_tokens": 10, "completion_tokens": 20, "total_tokens": 30},
+                }
+                with patch.dict(os.environ, {"OPENAI_API_KEY": "test-managed"}), patch.object(
+                    server, "model_info",
+                    return_value={"model_id": "gpt-4o", "input_price": 1.0, "output_price": 2.0,
+                                  "max_output": 1024},
+                ), patch.object(server, "_gateway_complete", AsyncMock(return_value=completion)):
+                    managed = client.post(
+                        "/v1/responses",
+                        headers={"Authorization": f"Bearer {api_key}"},
+                        json={"model": "gpt-4o", "input": "managed request"},
+                    )
+                self.assertEqual(managed.status_code, 200)
+                self.assertEqual(gateway.json()["object"], "response")
+
+                with server._control_plane_conn() as conn:
+                    reservation_id = server._reserve_project_credits(
+                        conn, project_id, "settlement-test", server._usd_to_microusd(2)
+                    )
+                    self.assertIsNotNone(reservation_id)
+                    server._settle_project_reservation(
+                        conn, reservation_id, server._usd_to_microusd(0.5)
+                    )
+                    balance = conn.execute(
+                        "SELECT credit_balance_microusd FROM api_projects WHERE id = ?",
+                        (project_id,),
+                    ).fetchone()["credit_balance_microusd"]
+                    entries = conn.execute(
+                        "SELECT entry_type FROM credit_ledger WHERE project_id = ? ORDER BY created_at",
+                        (project_id,),
+                    ).fetchall()
+                self.assertLess(balance, server._usd_to_microusd(4.5))
+                self.assertIn("reserve", [entry["entry_type"] for entry in entries])
+                self.assertIn("refund", [entry["entry_type"] for entry in entries])
+            finally:
+                server.CONTROL_PLANE_DB = original_db
+                server._control_plane_ready = original_ready
+
+    def test_dashboard_meta_exposes_limits_and_runbooks(self):
+        client = TestClient(server.app, headers={"Authorization": f"Bearer {server.WEB_AUTH_TOKEN}"})
 
         resp = client.get("/api/dashboard/meta")
 
@@ -207,7 +301,7 @@ class WebServerTests(unittest.IsolatedAsyncioTestCase):
         self.assertGreaterEqual(len(data["runbooks"]), 1)
 
     def test_weather_dashboard_enriches_freshness_and_lineage(self):
-        client = TestClient(server.app)
+        client = TestClient(server.app, headers={"Authorization": f"Bearer {server.WEB_AUTH_TOKEN}"})
         now = datetime.now(timezone.utc)
 
         class FakeRT:
@@ -244,7 +338,7 @@ class WebServerTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(city["source_lineage"]["settlement_station"], "KNYC")
 
     def test_weather_dashboard_export_csv(self):
-        client = TestClient(server.app)
+        client = TestClient(server.app, headers={"Authorization": f"Bearer {server.WEB_AUTH_TOKEN}"})
 
         class FakeRT:
             KALSHI_CITIES = {
@@ -270,7 +364,7 @@ class WebServerTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("nyc", resp.text)
 
     def test_trading_status_includes_market_state(self):
-        client = TestClient(server.app)
+        client = TestClient(server.app, headers={"Authorization": f"Bearer {server.WEB_AUTH_TOKEN}"})
 
         resp = client.get("/api/trading/status")
 
@@ -280,7 +374,7 @@ class WebServerTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("no_market_data", data["market_state"])
 
     def test_files_endpoint_applies_limit_and_offset(self):
-        client = TestClient(server.app)
+        client = TestClient(server.app, headers={"Authorization": f"Bearer {server.WEB_AUTH_TOKEN}"})
 
         with tempfile.TemporaryDirectory() as tmpdir:
             root = server.WORK_DIR
@@ -301,7 +395,7 @@ class WebServerTests(unittest.IsolatedAsyncioTestCase):
         self.assertLessEqual(len(data["entries"]), 2)
 
     def test_metrics_endpoint_tracks_requests(self):
-        client = TestClient(server.app)
+        client = TestClient(server.app, headers={"Authorization": f"Bearer {server.WEB_AUTH_TOKEN}"})
 
         client.get("/health")
         resp = client.get("/api/metrics")

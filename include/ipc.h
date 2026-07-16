@@ -43,6 +43,7 @@ static inline size_t dsco_ipc_max_body(void) {
 
 typedef enum {
     IPC_AGENT_STARTING,
+    IPC_AGENT_DURABLE,
     IPC_AGENT_IDLE,
     IPC_AGENT_WORKING,
     IPC_AGENT_DONE,
@@ -57,6 +58,7 @@ typedef struct {
     int    depth;
     ipc_agent_status_t status;
     char   role[64];             /* e.g., "researcher", "coder", "reviewer" */
+    char   model[128];           /* preferred model for durable agents */
     char   current_task[256];
     double started_at;
     double last_heartbeat;
@@ -127,6 +129,12 @@ void ipc_set_event_loop(ev_loop_t *loop);
 bool ipc_register(const char *parent_id, int depth, const char *role,
                   const char *toolkit);
 
+/* Define or update a durable named agent without requiring a live process.
+ * Durable agents are mailbox identities and hierarchy nodes; long-running
+ * workers can later register with the same ID to become live. */
+bool ipc_agent_define(const char *agent_id, const char *parent_id, int depth,
+                      const char *role, const char *model, const char *toolkit);
+
 /* Update own status */
 bool ipc_set_status(ipc_agent_status_t status, const char *current_task);
 
@@ -156,6 +164,13 @@ int ipc_recv(ipc_message_t *out, int max);
 
 /* Read messages on a specific topic (for this agent + broadcasts). */
 int ipc_recv_topic(const char *topic, ipc_message_t *out, int max);
+
+/* Inspect mailboxes without forcing the current process identity.
+ * inbox marks messages read only when mark_read=true. */
+int ipc_list_inbox(const char *agent_id, bool unread_only, bool mark_read,
+                   ipc_message_t *out, int max);
+int ipc_list_sent(const char *agent_id, ipc_message_t *out, int max);
+int ipc_list_bus(ipc_message_t *out, int max);
 
 /* Get message count (unread) */
 int ipc_unread_count(void);

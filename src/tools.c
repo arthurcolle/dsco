@@ -6,6 +6,7 @@
 #define _DARWIN_C_SOURCE 1
 
 #include "tools.h"
+#include "capability.h"
 #include "http_pool.h"
 #include "net_server.h"
 #include "mesh.h"
@@ -17,11 +18,14 @@
 #include "integrations.h"
 #include "trading.h"
 #include "json_util.h"
+#include "vecstore.h"
 #include "config.h"
 #include "ast.h"
 #include "swarm.h"
 #include "ipc.h"
 #include "tui.h"
+#include "pixel_tui.h"
+#include "kitty_tools.h"
 #include "md.h"
 #include "baseline.h"
 #include "chronicle.h"
@@ -31,6 +35,8 @@
 #include "plugin.h"
 #include "trace.h"
 #include "provider.h"
+#include "provider_pool.h"
+#include "subscription_bench.h"
 #include "topology.h"
 #include "task_profile.h"
 #include "plan_optimizer.h"
@@ -39,6 +45,7 @@
 #include "cost_model.h"
 #include "mcp_names.h"
 #include "workspace.h"
+#include "gov_experiment.h"
 #include "governance.h"
 #include "rsi_curriculum.h"
 #include "memory_tier.h"
@@ -47,6 +54,9 @@
 #include "learned_cost.h"
 #include "session_memory.h"
 #include "toolmgmt.h"
+#include "openai_images.h"
+#include "openrouter_lanes.h"
+#include "weather_batch.h"
 #include "local_llm.h"
 #include "vm.h"
 #include "codex_app_directory.h"
@@ -55,6 +65,16 @@
 #include "control_flow.h"
 #include "recovery.h"
 #include "env_config.h"
+
+extern external_tool_t g_external_tools[MAX_EXTERNAL_TOOLS];
+extern int g_external_tool_count;
+
+static const char *const k_default_input_schema_json = "{\"type\":\"object\",\"properties\":{}}";
+static const char *const k_default_output_schema_json =
+    "{\"type\":[\"object\",\"string\",\"array\",\"number\",\"boolean\",\"null\"],"
+    "\"description\":\"Tool result payload. Tools that return structured JSON should document that "
+    "object here; text tools may return a string.\"}";
+
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -80,6 +100,7 @@
 #include <curl/curl.h>
 #include <regex.h>
 #include <pthread.h>
+#include <stdatomic.h>
 #include <sys/socket.h>
 #include <netdb.h>
 #include <arpa/inet.h>
@@ -1432,6 +1453,36 @@ static size_t g_ctx_offload_events = 0;
 static size_t g_ctx_offloaded_bytes = 0;
 static size_t g_ctx_reference_bytes = 0;
 
+static void dsco_locks_ensure_global(void);
+
+static void ctx_store_rdlock(void) {
+    dsco_locks_ensure_global();
+    pthread_rwlock_rdlock(&g_locks.ctx_lock);
+}
+
+static void ctx_store_wrlock(void) {
+    dsco_locks_ensure_global();
+    pthread_rwlock_wrlock(&g_locks.ctx_lock);
+}
+
+static void ctx_store_unlock(void) {
+    pthread_rwlock_unlock(&g_locks.ctx_lock);
+}
+
+static void tool_registry_rdlock(void) {
+    dsco_locks_ensure_global();
+    pthread_rwlock_rdlock(&g_locks.toolmap_lock);
+}
+
+static void tool_registry_wrlock(void) {
+    dsco_locks_ensure_global();
+    pthread_rwlock_wrlock(&g_locks.toolmap_lock);
+}
+
+static void tool_registry_unlock(void) {
+    pthread_rwlock_unlock(&g_locks.toolmap_lock);
+}
+
 static void ctx_evict_index(int idx);
 static int g_ctx_turn_pins_prev[CTX_TURN_PIN_IDS_MAX];
 static int g_ctx_turn_pins_prev_count = 0;
@@ -1593,7 +1644,7 @@ static void ctx_evict_index(int idx) {
     g_ctx.count--;
 }
 
-static void ctx_store_reset(void) {
+static void ctx_store_reset_unlocked(void) {
     for (int i = 0; i < g_ctx.count; i++) {
         free(g_ctx.chunks[i].text);
     }
@@ -1604,6 +1655,12 @@ static void ctx_store_reset(void) {
     g_ctx_reference_bytes = 0;
     g_ctx_turn_pins_prev_count = 0;
     g_ctx_turn_pins_curr_count = 0;
+}
+
+static void ctx_store_reset(void) {
+    ctx_store_wrlock();
+    ctx_store_reset_unlocked();
+    ctx_store_unlock();
 }
 
 static bool ctx_chunk_exists(uint64_t hash, const char *text, size_t len) {
@@ -1670,7 +1727,8 @@ static bool ctx_store_chunk(const char *tool, const char *text, size_t len,
     return true;
 }
 
-static void ctx_ingest_text(const char *tool, const char *text, ctx_ingest_info_t *info) {
+static void ctx_ingest_text_unlocked(const char *tool, const char *text,
+                                     ctx_ingest_info_t *info) {
     bool auto_pin = info ? info->auto_pin : false;
     if (info) {
         memset(info, 0, sizeof(*info));
@@ -1736,6 +1794,12 @@ static void ctx_ingest_text(const char *tool, const char *text, ctx_ingest_info_
     ctx_recompute_df();
 }
 
+static void ctx_ingest_text(const char *tool, const char *text, ctx_ingest_info_t *info) {
+    ctx_store_wrlock();
+    ctx_ingest_text_unlocked(tool, text, info);
+    ctx_store_unlock();
+}
+
 static int ctx_find_index_by_id(int chunk_id) {
     for (int i = 0; i < g_ctx.count; i++) {
         if (g_ctx.chunks[i].id == chunk_id)
@@ -1745,6 +1809,7 @@ static int ctx_find_index_by_id(int chunk_id) {
 }
 
 void tools_context_turn_begin(void) {
+    ctx_store_wrlock();
     for (int i = 0; i < g_ctx_turn_pins_prev_count; i++) {
         int idx = ctx_find_index_by_id(g_ctx_turn_pins_prev[i]);
         if (idx >= 0)
@@ -1754,6 +1819,7 @@ void tools_context_turn_begin(void) {
     memcpy(g_ctx_turn_pins_prev, g_ctx_turn_pins_curr, sizeof(g_ctx_turn_pins_curr));
     g_ctx_turn_pins_prev_count = g_ctx_turn_pins_curr_count;
     g_ctx_turn_pins_curr_count = 0;
+    ctx_store_unlock();
 }
 
 static void ctx_turn_pin_range(const ctx_ingest_info_t *info) {
@@ -2031,13 +2097,19 @@ static __attribute__((unused)) void ctx_maybe_offload_tool_result(const char *to
     size_t old_len = strlen(copy);
 
     ctx_ingest_info_t info = {.auto_pin = true};
-    ctx_ingest_text(tool_name, copy, &info);
+    ctx_store_wrlock();
+    ctx_ingest_text_unlocked(tool_name, copy, &info);
     if (info.chunks_added > 0) {
         ctx_turn_pin_range(&info);
-        ctx_rewrite_result_as_reference(tool_name, copy, result, result_len, &info);
         g_ctx_offload_events++;
         g_ctx_offloaded_bytes += old_len;
+    }
+    ctx_store_unlock();
+    if (info.chunks_added > 0) {
+        ctx_rewrite_result_as_reference(tool_name, copy, result, result_len, &info);
+        ctx_store_wrlock();
         g_ctx_reference_bytes += strlen(result);
+        ctx_store_unlock();
     }
     free(copy);
 }
@@ -2070,6 +2142,7 @@ static size_t ctx_truncate_json(const char *json, size_t json_len, char *out, si
     size_t wr = 0;
     int depth = 0;
     int array_elem_count[32] = {0}; /* track per nesting level */
+    bool is_array[32] = {false};    /* container type per nesting level */
     bool in_string = false;
     bool skip_value = false;
     int skip_depth = 0;
@@ -2110,14 +2183,18 @@ static size_t ctx_truncate_json(const char *json, size_t json_len, char *out, si
         /* Track array element counts for truncation */
         if (c == '[') {
             depth++;
-            if (depth < 32)
+            if (depth < 32) {
                 array_elem_count[depth] = 0;
+                is_array[depth] = true;
+            }
             if (!skip_value && wr < budget)
                 out[wr++] = c;
             continue;
         }
         if (c == '{') {
             depth++;
+            if (depth < 32)
+                is_array[depth] = false;
             if (!skip_value && wr < budget)
                 out[wr++] = c;
             continue;
@@ -2132,8 +2209,11 @@ static size_t ctx_truncate_json(const char *json, size_t json_len, char *out, si
             continue;
         }
         if (c == ',') {
-            /* Check if we're in an array and past 2 elements */
-            if (depth > 0 && depth < 32) {
+            /* Only ARRAY elements are capped. Object-member commas must not
+             * count: they made {"code":200,"status":200,"data":[...]} lose
+             * its entire data payload after two scalar members (the search
+             * tools' results collapsed to ~31 bytes of mangled JSON). */
+            if (depth > 0 && depth < 32 && is_array[depth]) {
                 array_elem_count[depth]++;
                 if (array_elem_count[depth] >= 2) {
                     /* Skip remaining array elements */
@@ -2173,6 +2253,12 @@ static size_t ctx_truncate_json(const char *json, size_t json_len, char *out, si
     out[wr] = '\0';
     return wr;
 }
+
+#ifdef DSCO_INTERNAL_TESTS
+size_t tools_test_truncate_json(const char *json, size_t json_len, char *out, size_t out_len) {
+    return ctx_truncate_json(json, json_len, out, out_len);
+}
+#endif
 
 /* Generic truncation: first 40% + truncation marker + last 20% */
 static size_t ctx_truncate_generic(const char *text, size_t text_len, const char *vfs_key,
@@ -3378,6 +3464,123 @@ static bool tool_edit_file(const char *input, char *result, size_t rlen) {
     free(path);
     free(old_str);
     free(new_str);
+    return true;
+}
+
+/* ── MultiEdit: apply an ordered batch of string edits to ONE file atomically.
+ * Each edit sees the previous edit's result; if any old_string is missing,
+ * nothing is written (all-or-nothing). Claude Code-compatible surface. */
+typedef struct {
+    char *content; /* heap working copy of the file */
+    size_t len;    /* byte length of content (excl. NUL) */
+    int applied;   /* total replacements made */
+    bool error;
+    char errmsg[200];
+} multi_edit_ctx_t;
+
+static void multi_edit_apply_cb(const char *element_start, void *vctx) {
+    multi_edit_ctx_t *c = (multi_edit_ctx_t *)vctx;
+    if (!c || c->error || !element_start)
+        return;
+    while (*element_start && isspace((unsigned char)*element_start))
+        element_start++;
+    if (*element_start != '{') {
+        c->error = true;
+        snprintf(c->errmsg, sizeof(c->errmsg), "each edit must be an object");
+        return;
+    }
+    char *olds = json_get_str(element_start, "old_string");
+    char *news = json_get_str(element_start, "new_string");
+    bool all = json_get_bool(element_start, "replace_all", false);
+    if (!olds || !olds[0] || !news) {
+        c->error = true;
+        snprintf(c->errmsg, sizeof(c->errmsg), "edit needs non-empty old_string and new_string");
+        free(olds);
+        free(news);
+        return;
+    }
+    if (!strstr(c->content, olds)) {
+        c->error = true;
+        snprintf(c->errmsg, sizeof(c->errmsg), "old_string not found: \"%.40s\"", olds);
+        free(olds);
+        free(news);
+        return;
+    }
+    size_t oldlen = strlen(olds), newlen = strlen(news);
+    jbuf_t out;
+    jbuf_init(&out, c->len + newlen + 64);
+    char *p = c->content;
+    char *found;
+    int n = 0;
+    while ((found = strstr(p, olds)) != NULL) {
+        jbuf_append_len(&out, p, (size_t)(found - p));
+        jbuf_append_len(&out, news, newlen);
+        p = found + oldlen;
+        n++;
+        if (!all)
+            break;
+    }
+    jbuf_append_len(&out, p, strlen(p));
+    free(c->content);
+    c->len = out.len;
+    c->content = safe_malloc(c->len + 1);
+    memcpy(c->content, out.data ? out.data : "", c->len);
+    c->content[c->len] = '\0';
+    jbuf_free(&out);
+    c->applied += n;
+    free(olds);
+    free(news);
+}
+
+static bool tool_multi_edit(const char *input, char *result, size_t rlen) {
+    char *path = json_get_path_or_file_path(input);
+    if (!path) {
+        snprintf(result, rlen, "error: file_path required");
+        return false;
+    }
+    FILE *f = fopen(path, "r");
+    if (!f) {
+        snprintf(result, rlen, "error: cannot open %s: %s", path, strerror(errno));
+        free(path);
+        return false;
+    }
+    fseek(f, 0, SEEK_END);
+    long fsize = ftell(f);
+    fseek(f, 0, SEEK_SET);
+    if (fsize < 0)
+        fsize = 0;
+    char *content = safe_malloc((size_t)fsize + 1);
+    size_t rd = fread(content, 1, (size_t)fsize, f);
+    content[rd] = '\0';
+    fclose(f);
+
+    multi_edit_ctx_t c = {.content = content, .len = rd, .applied = 0, .error = false};
+    int elems = json_array_foreach(input ? input : "{}", "edits", multi_edit_apply_cb, &c);
+    if (c.error) {
+        snprintf(result, rlen, "error: %s (no changes written to %s)", c.errmsg, path);
+        free(c.content);
+        free(path);
+        return false;
+    }
+    if (elems <= 0) {
+        snprintf(result, rlen, "error: non-empty edits array required");
+        free(c.content);
+        free(path);
+        return false;
+    }
+    f = fopen(path, "w");
+    if (!f) {
+        snprintf(result, rlen, "error: cannot write %s: %s", path, strerror(errno));
+        free(c.content);
+        free(path);
+        return false;
+    }
+    fwrite(c.content, 1, c.len, f);
+    fclose(f);
+    snprintf(result, rlen, "multi-edited %s: %d edit(s), %d replacement(s)", path, elems,
+             c.applied);
+    free(c.content);
+    free(path);
     return true;
 }
 
@@ -5142,6 +5345,7 @@ static bool tool_ol_call(const char *input, char *result, size_t rlen) {
     char *system = json_get_str(input, "system");
     char *messages = json_get_raw(input, "messages");
     char *api_key = json_get_str(input, "api_key");
+    char *response_mode = json_get_str(input, "response_mode");
     char *extra_body = json_get_raw(input, "extra_body");
     if (!extra_body)
         extra_body = json_get_raw(input, "extra_params");
@@ -5159,6 +5363,7 @@ static bool tool_ol_call(const char *input, char *result, size_t rlen) {
         free(system);
         free(messages);
         free(api_key);
+        free(response_mode);
         free(extra_body);
         return false;
     }
@@ -5172,6 +5377,7 @@ static bool tool_ol_call(const char *input, char *result, size_t rlen) {
         free(system);
         free(messages);
         free(api_key);
+        free(response_mode);
         free(extra_body);
         return false;
     }
@@ -5241,6 +5447,7 @@ static bool tool_ol_call(const char *input, char *result, size_t rlen) {
         free(system);
         free(messages);
         free(api_key);
+        free(response_mode);
         free(extra_body);
         return false;
     }
@@ -5255,6 +5462,7 @@ static bool tool_ol_call(const char *input, char *result, size_t rlen) {
         free(system);
         free(messages);
         free(api_key);
+        free(response_mode);
         free(extra_body);
         return false;
     }
@@ -5356,6 +5564,7 @@ static bool tool_ol_call(const char *input, char *result, size_t rlen) {
         free(system);
         free(messages);
         free(api_key);
+        free(response_mode);
         free(extra_body);
         return false;
     }
@@ -5409,15 +5618,29 @@ static bool tool_ol_call(const char *input, char *result, size_t rlen) {
         free(err_obj);
         free(msg);
     } else {
-        ol_choice_ctx_t oc = {0};
-        json_array_foreach(resp.data ? resp.data : "{}", "choices", ol_extract_choice_text, &oc);
-        if (oc.text && oc.text[0]) {
-            snprintf(result, rlen, "%s", oc.text);
+        /* Default remains text-only for agent ergonomics.  `response_mode: "raw"`
+         * returns the provider envelope unchanged, including local-server
+         * logprobs, top_logprobs, reasoning_content, usage, and finish_reason.
+         * This is deliberately transport-agnostic: LM Studio, llama.cpp, MLX,
+         * vLLM, and any OpenAI-compatible local server can expose additional
+         * inference telemetry without DSCO discarding it. */
+        if (response_mode && (strcasecmp(response_mode, "raw") == 0 ||
+                              strcasecmp(response_mode, "json") == 0 ||
+                              strcasecmp(response_mode, "full") == 0)) {
+            snprintf(result, rlen, "%s", resp.data ? resp.data : "{}");
             ok = true;
         } else {
-            snprintf(result, rlen, "error: response did not contain choices[0].message.content");
+            ol_choice_ctx_t oc = {0};
+            json_array_foreach(resp.data ? resp.data : "{}", "choices", ol_extract_choice_text, &oc);
+            if (oc.text && oc.text[0]) {
+                snprintf(result, rlen, "%s", oc.text);
+                ok = true;
+            } else {
+                snprintf(result, rlen, "error: response did not contain choices[0].message.content; "
+                         "set response_mode=raw to inspect the full provider response");
+            }
+            free(oc.text);
         }
-        free(oc.text);
     }
 
     jbuf_free(&resp);
@@ -5429,6 +5652,7 @@ static bool tool_ol_call(const char *input, char *result, size_t rlen) {
     free(system);
     free(messages);
     free(api_key);
+    free(response_mode);
     free(extra_body);
     return ok;
 }
@@ -7820,6 +8044,10 @@ static __attribute__((unused)) bool tool_psql(const char *input, char *result, s
 static bool tool_python(const char *input, char *result, size_t rlen) {
     char *code = json_get_str(input, "code");
     char *file = path_normalize(json_get_str(input, "file"));
+    if (file && file[0] == '\0') {
+        free(file);
+        file = NULL;
+    }
     if (!code && !file) {
         snprintf(result, rlen, "error: code or file required");
         return false;
@@ -9199,13 +9427,12 @@ static bool tool_topology_run(const char *input, char *result, size_t rlen) {
     }
 
     const char *api_key = tools_runtime_api_key();
-    if (!api_key || !api_key[0]) {
-        snprintf(result, rlen, "error: no runtime API key configured for topology execution");
-        free(task);
-        free(topology);
-        jbuf_free(&b);
-        return false;
-    }
+    /* OAuth subscriptions and local servers need no generic -k key. Defer
+     * viability to provider-pool lane selection rather than rejecting all
+     * topologies at the control plane. */
+    if (!api_key)
+        api_key = "";
+    provider_pool_init(api_key);
 
     /* ── Present topology options as dialog before execution ─────────── */
     plan_options_t *dial_opts = NULL;
@@ -9396,11 +9623,12 @@ static bool tool_topology_solve(const char *input, char *result, size_t rlen) {
     int timeout = clamp_timeout_seconds(json_get_int(input, "timeout", 300), 300, 30, 3600);
 
     const char *api_key = tools_runtime_api_key();
-    if (!api_key || !api_key[0]) {
-        snprintf(result, rlen, "{\"error\":\"no runtime API key for topology execution\"}");
-        free(task);
-        return false;
-    }
+    /* Topologies may execute entirely through OAuth subscriptions or local
+     * lanes. A missing generic runtime key is not an authority to reject a
+     * runnable topology before lane resolution. */
+    if (!api_key)
+        api_key = "";
+    provider_pool_init(api_key);
 
     /* Topology set: explicit names or a diverse default spanning categories. */
     const char *default_topos[] = {"trident", "debate", "tournament"};
@@ -9628,6 +9856,12 @@ static bool tool_cost_model_predict(const char *input, char *result, size_t rlen
 static void retire_swarm_group(swarm_t *sw, int gid) {
     if (!sw || gid < 0 || gid >= sw->group_count)
         return;
+    /* Reclaim any spawned children's slots back to the free-list before
+     * clearing the group. swarm_group_reclaim() is a safe no-op when the
+     * group has zero children (the common "spawn failed immediately"
+     * path) and refuses to reclaim while any child is still running, so
+     * this can never silently drop live-process bookkeeping. */
+    swarm_group_reclaim(sw, gid);
     swarm_group_t *g = &sw->groups[gid];
     g->active = false;
     g->child_count = 0;
@@ -9747,6 +9981,9 @@ static bool tool_task_profile(const char *input, char *result, size_t rlen) {
     return true;
 }
 
+static void swarm_v1_default_run_id(swarm_t *sw, int gid, const char *topology, char *buf, size_t n);
+static void swarm_v1_append_artifact_fields(jbuf_t *b, const char *run_id, const char *artifact_dir);
+
 static bool tool_create_swarm(const char *input, char *result, size_t rlen) {
     ensure_swarm();
 
@@ -9865,7 +10102,15 @@ static bool tool_create_swarm(const char *input, char *result, size_t rlen) {
         jbuf_append_json_str(&b, c->model);
         jbuf_append(&b, "}");
     }
-    jbuf_append(&b, "]}");
+    jbuf_append(&b, "]");
+    char run_id[256];
+    char artifact_dir[1024] = {0};
+    swarm_v1_default_run_id(&g_swarm, gid, "create", run_id, sizeof(run_id));
+    if (swarm_group_persist_run(&g_swarm, gid, run_id, "create", g->name, NULL,
+                                artifact_dir, sizeof(artifact_dir)) == 0) {
+        swarm_v1_append_artifact_fields(&b, run_id, artifact_dir);
+    }
+    jbuf_append(&b, "}");
 
     int written = (int)b.len < (int)rlen - 1 ? (int)b.len : (int)rlen - 1;
     memcpy(result, b.data, written);
@@ -9886,9 +10131,65 @@ static bool tool_swarm_status(const char *input, char *result, size_t rlen) {
         snprintf(result, rlen, "error: group_id required");
         return false;
     }
+    if (gid >= g_swarm.group_count) {
+        snprintf(result, rlen, "{\"error\":\"invalid group_id\"}");
+        return false;
+    }
 
-    swarm_group_status_json(&g_swarm, gid, result, rlen);
+    char status_json[16384];
+    char frame[8192];
+    char run_id[256];
+    swarm_v1_default_run_id(&g_swarm, gid, "status", run_id, sizeof(run_id));
+    swarm_group_status_json(&g_swarm, gid, status_json, sizeof(status_json));
+    swarm_group_render_frame(&g_swarm, gid, run_id, "status", frame, sizeof(frame));
+    jbuf_t b;
+    jbuf_init(&b, 16384);
+    jbuf_append(&b, "{\"group_id\":");
+    jbuf_append_int(&b, gid);
+    jbuf_append(&b, ",\"frame\":");
+    jbuf_append_json_str(&b, frame);
+    jbuf_append(&b, ",\"status\":");
+    jbuf_append(&b, status_json);
+    jbuf_append(&b, "}");
+    int written = (int)b.len < (int)rlen - 1 ? (int)b.len : (int)rlen - 1;
+    memcpy(result, b.data, written);
+    result[written] = '\0';
+    jbuf_free(&b);
     return true;
+}
+
+
+static void swarm_v1_default_run_id(swarm_t *sw, int gid, const char *topology, char *buf, size_t n) {
+    if (!buf || n == 0) return;
+    const char *name = "swarm";
+    if (sw && gid >= 0 && gid < sw->group_count && sw->groups[gid].name[0])
+        name = sw->groups[gid].name;
+    char safe[128];
+    size_t j = 0;
+    for (size_t i = 0; name[i] && j + 1 < sizeof(safe); i++) {
+        unsigned char c = (unsigned char)name[i];
+        if ((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') ||
+            (c >= '0' && c <= '9') || c == '-' || c == '_') safe[j++] = (char)c;
+        else safe[j++] = '_';
+    }
+    safe[j] = '\0';
+    snprintf(buf, n, "swarm_%ld_g%d_%s_%s", (long)time(NULL), gid,
+             topology && topology[0] ? topology : "run", safe[0] ? safe : "unnamed");
+}
+
+static void swarm_v1_append_artifact_fields(jbuf_t *b, const char *run_id, const char *artifact_dir) {
+    if (!b || !artifact_dir || !artifact_dir[0]) return;
+    jbuf_append(b, ",\"run_id\":");
+    jbuf_append_json_str(b, run_id ? run_id : "");
+    jbuf_append(b, ",\"artifact_path\":");
+    jbuf_append_json_str(b, artifact_dir);
+    jbuf_append(b, ",\"artifacts\":{");
+    jbuf_append(b, "\"manifest\":"); jbuf_append_json_str(b, "/manifest.json");
+    jbuf_append(b, ",\"transcript\":"); jbuf_append_json_str(b, "/transcript.md");
+    jbuf_append(b, ",\"coordinator\":"); jbuf_append_json_str(b, "/coordinator.md");
+    jbuf_append(b, ",\"claims\":"); jbuf_append_json_str(b, "/claims.json");
+    jbuf_append(b, ",\"metrics\":"); jbuf_append_json_str(b, "/metrics.json");
+    jbuf_append(b, "}");
 }
 
 static void swarm_collect_results(swarm_t *sw, int gid, char *result, size_t rlen, bool complete,
@@ -9916,6 +10217,15 @@ static void swarm_collect_results(swarm_t *sw, int gid, char *result, size_t rle
     jbuf_append(&b, ",\"killed\":");
     jbuf_append_int(&b, swarm_group_killed_count(sw, gid));
     jbuf_append(&b, ",\"results\":[");
+
+    /* Reserve response space for metadata and split the remainder across
+     * children. Full output remains in the durable swarm artifact. */
+    size_t inline_output_cap = 256;
+    if (g->child_count > 0 && rlen > 2048) {
+        inline_output_cap = ((size_t)rlen - 2048) / (size_t)g->child_count;
+        if (inline_output_cap > 8192) inline_output_cap = 8192;
+        if (inline_output_cap < 256) inline_output_cap = 256;
+    }
 
     for (int i = 0; i < g->child_count; i++) {
         if (i > 0)
@@ -9962,18 +10272,29 @@ static void swarm_collect_results(swarm_t *sw, int gid, char *result, size_t rle
         /* Truncate very long outputs to keep the result under rlen */
         const char *out = c->output ? c->output : "";
         size_t olen = strlen(out);
-        if (olen > 8192) {
-            /* Last 8k chars for long outputs */
-            char truncated[8256];
-            snprintf(truncated, sizeof(truncated), "[...truncated %zu bytes...]\n%s", olen - 8192,
-                     out + olen - 8192);
-            jbuf_append_json_str(&b, truncated);
+        if (olen > inline_output_cap) {
+            /* Tail is generally where CLI executors place their final answer. */
+            jbuf_t excerpt;
+            jbuf_init(&excerpt, inline_output_cap + 96);
+            jbuf_appendf(&excerpt, "[...truncated %zu bytes; full output in swarm artifact...]\n",
+                         olen - inline_output_cap);
+            jbuf_append(&excerpt, out + olen - inline_output_cap);
+            jbuf_append_json_str(&b, excerpt.data ? excerpt.data : "");
+            jbuf_free(&excerpt);
         } else {
             jbuf_append_json_str(&b, out);
         }
         jbuf_append(&b, "}");
     }
-    jbuf_append(&b, "]}");
+    jbuf_append(&b, "]");
+    char run_id[256];
+    char artifact_dir[1024] = {0};
+    swarm_v1_default_run_id(sw, gid, "collect", run_id, sizeof(run_id));
+    if (swarm_group_persist_run(sw, gid, run_id, "collect", g->name, NULL,
+                                artifact_dir, sizeof(artifact_dir)) == 0) {
+        swarm_v1_append_artifact_fields(&b, run_id, artifact_dir);
+    }
+    jbuf_append(&b, "}");
 
     int written = (int)b.len < (int)rlen - 1 ? (int)b.len : (int)rlen - 1;
     memcpy(result, b.data, written);
@@ -10636,7 +10957,15 @@ static bool tool_swarm_map_reduce(const char *input, char *result, size_t rlen) 
         jbuf_append_json_str(&b, swarm_status_str(c->status));
         jbuf_append(&b, "}");
     }
-    jbuf_append(&b, "]}");
+    jbuf_append(&b, "]");
+    char run_id[256];
+    char artifact_dir[1024] = {0};
+    swarm_v1_default_run_id(&g_swarm, gid, "map_reduce", run_id, sizeof(run_id));
+    if (swarm_group_persist_run(&g_swarm, gid, run_id, "map_reduce", name, coord_out,
+                                artifact_dir, sizeof(artifact_dir)) == 0) {
+        swarm_v1_append_artifact_fields(&b, run_id, artifact_dir);
+    }
+    jbuf_append(&b, "}");
 
     int written = (int)b.len < (int)rlen - 1 ? (int)b.len : (int)rlen - 1;
     memcpy(result, b.data, written);
@@ -10664,12 +10993,17 @@ static bool tool_swarm_map_reduce(const char *input, char *result, size_t rlen) 
 static size_t jbuf_curl_write_cb(void *ptr, size_t size, size_t nmemb, void *userdata) {
     size_t total = size * nmemb;
     jbuf_t *b = (jbuf_t *)userdata;
+    if (total > SIZE_MAX - b->len - 1)
+        return 0;
     size_t need = b->len + total + 1;
     if (need > b->cap) {
-        size_t newcap = b->cap * 2;
-        if (newcap < need)
+        size_t newcap = b->cap ? b->cap * 2 : 64;
+        if (newcap < need || newcap < b->cap)
             newcap = need;
-        b->data = realloc(b->data, newcap);
+        char *data = realloc(b->data, newcap);
+        if (!data)
+            return 0;
+        b->data = data;
         b->cap = newcap;
     }
     memcpy(b->data + b->len, ptr, total);
@@ -10922,6 +11256,10 @@ static executor_type_t parse_executor_type(const char *name) {
     if (strcmp(name, "codex") == 0 || strcmp(name, "openai-codex") == 0 ||
         strcmp(name, "chatgpt-codex") == 0)
         return EXECUTOR_CODEX;
+    if (strcmp(name, "grok") == 0 || strcmp(name, "xai") == 0)
+        return EXECUTOR_GROK;
+    if (strcmp(name, "kimi") == 0 || strcmp(name, "kimi-code") == 0)
+        return EXECUTOR_KIMI;
     return EXECUTOR_DSCO;
 }
 
@@ -10955,6 +11293,15 @@ static bool tool_executor_status(const char *input, char *result, size_t rlen) {
     }
     jbuf_append(&b, "}");
 
+    jbuf_appendf(&b, ",\"grok\":{\"available\":%s", e->grok_available ? "true" : "false");
+    if (e->grok_available) { jbuf_append(&b, ",\"path\":"); jbuf_append_json_str(&b, e->grok_path);
+        jbuf_append(&b, ",\"model\":"); jbuf_append_json_str(&b, e->grok_model); }
+    jbuf_append(&b, "}");
+    jbuf_appendf(&b, ",\"kimi\":{\"available\":%s", e->kimi_available ? "true" : "false");
+    if (e->kimi_available) { jbuf_append(&b, ",\"path\":"); jbuf_append_json_str(&b, e->kimi_path);
+        jbuf_append(&b, ",\"model\":"); jbuf_append_json_str(&b, e->kimi_model); }
+    jbuf_append(&b, "}");
+
     /* Budget info */
     if (g_swarm.swarm_budget_usd > 0) {
         char bud[32], spent[32];
@@ -10985,6 +11332,14 @@ static bool tool_executor_status(const char *input, char *result, size_t rlen) {
         fprintf(stderr, " codex=%s✓%s(%s)", TUI_GREEN, TUI_RESET, e->codex_model);
     else
         fprintf(stderr, " codex=%s✗%s", TUI_RED, TUI_RESET);
+    if (e->grok_available)
+        fprintf(stderr, " grok=%s✓%s(%s)", TUI_GREEN, TUI_RESET, e->grok_model);
+    else
+        fprintf(stderr, " grok=%s✗%s", TUI_RED, TUI_RESET);
+    if (e->kimi_available)
+        fprintf(stderr, " kimi=%s✓%s(%s)", TUI_GREEN, TUI_RESET, e->kimi_model);
+    else
+        fprintf(stderr, " kimi=%s✗%s", TUI_RED, TUI_RESET);
     fprintf(stderr, "\n");
 
     return true;
@@ -11072,6 +11427,17 @@ static bool tool_spawn_executor(const char *input, char *result, size_t rlen) {
         return false;
     }
 
+    if (exec_type == EXECUTOR_GROK && !g_swarm.executors.grok_available) {
+        snprintf(result, rlen, "{\"error\":\"grok CLI not available — install Grok and sign in\"}");
+        if (owns_group) retire_swarm_group(&g_swarm, group_id);
+        free(task); free(model); free(exec_name); free(group_name); return false;
+    }
+    if (exec_type == EXECUTOR_KIMI && !g_swarm.executors.kimi_available) {
+        snprintf(result, rlen, "{\"error\":\"kimi CLI not available — install Kimi Code and run kimi login\"}");
+        if (owns_group) retire_swarm_group(&g_swarm, group_id);
+        free(task); free(model); free(exec_name); free(group_name); return false;
+    }
+
     /* Budget check before spawn */
     if (g_swarm.swarm_budget_usd > 0) {
         double remaining = swarm_budget_remaining(&g_swarm);
@@ -11112,7 +11478,9 @@ static bool tool_spawn_executor(const char *input, char *result, size_t rlen) {
     c->est_cost_usd = swarm_estimate_task_cost(
         &g_swarm, model ? model
                         : (exec_type == EXECUTOR_CLAUDE ? g_swarm.executors.claude_model
-                                                        : g_swarm.executors.codex_model));
+                        : exec_type == EXECUTOR_CODEX ? g_swarm.executors.codex_model
+                        : exec_type == EXECUTOR_GROK ? g_swarm.executors.grok_model
+                                                     : g_swarm.executors.kimi_model));
     swarm_emit_child_event("swarm.child.spawned", c, "swarm.spawn_executor", NULL);
     if (owns_group)
         swarm_emit_group_event("swarm.group.created", &g_swarm, group_id, "swarm.spawn_executor", 1,
@@ -11250,13 +11618,25 @@ static bool tool_spawn_provider(const char *input, char *result, size_t rlen) {
     return true;
 }
 
+#define PROVIDER_FABRIC_MAX_CANDIDATES 512
+
 typedef struct {
     char provider[64];
     char model[128];
+    char effort[16]; /* empty = model/provider default reasoning effort */
+    char auth_class[16]; /* subscription|payg|api|oauth|local */
+    char upstream[64];   /* concrete aggregator upstream, if pinned */
+    char quantization[16];
+    char lane_id[384];
     int replicas;
     bool subscription;
     bool local;
     bool metered;
+    double input_price_per_m;
+    double output_price_per_m;
+    double quality;
+    int context_window;
+    int max_output;
     int score;
     int prompt_tokens;
     int expected_hit_tokens;
@@ -11319,6 +11699,18 @@ static void fabric_append_lanes_json(jbuf_t *b, provider_fabric_lane_t lanes[], 
         jbuf_append_json_str(b, lanes[li].provider);
         jbuf_append(b, ",\"model\":");
         jbuf_append_json_str(b, lanes[li].model);
+        if (lanes[li].effort[0]) {
+            jbuf_append(b, ",\"effort\":");
+            jbuf_append_json_str(b, lanes[li].effort);
+        }
+        jbuf_append(b, ",\"auth_class\":");
+        jbuf_append_json_str(b, lanes[li].auth_class);
+        jbuf_append(b, ",\"upstream\":");
+        jbuf_append_json_str(b, lanes[li].upstream);
+        jbuf_append(b, ",\"quantization\":");
+        jbuf_append_json_str(b, lanes[li].quantization);
+        jbuf_append(b, ",\"lane_id\":");
+        jbuf_append_json_str(b, lanes[li].lane_id);
         jbuf_append(b, ",\"replicas\":");
         jbuf_append_int(b, lanes[li].replicas);
         jbuf_append(b, ",\"subscription\":");
@@ -11327,6 +11719,13 @@ static void fabric_append_lanes_json(jbuf_t *b, provider_fabric_lane_t lanes[], 
         jbuf_append(b, lanes[li].local ? "true" : "false");
         jbuf_append(b, ",\"metered\":");
         jbuf_append(b, lanes[li].metered ? "true" : "false");
+        jbuf_appendf(b, ",\"input_price_per_m\":%.6f", lanes[li].input_price_per_m);
+        jbuf_appendf(b, ",\"output_price_per_m\":%.6f", lanes[li].output_price_per_m);
+        jbuf_appendf(b, ",\"quality\":%.2f", lanes[li].quality);
+        jbuf_append(b, ",\"context_window\":");
+        jbuf_append_int(b, lanes[li].context_window);
+        jbuf_append(b, ",\"max_output\":");
+        jbuf_append_int(b, lanes[li].max_output);
         jbuf_append(b, ",\"score\":");
         jbuf_append_int(b, lanes[li].score);
         jbuf_append(b, ",\"expected_hit_tokens\":");
@@ -11343,33 +11742,141 @@ static void fabric_append_lanes_json(jbuf_t *b, provider_fabric_lane_t lanes[], 
 }
 
 static bool fabric_lane_exists(provider_fabric_lane_t lanes[], int count, const char *provider,
-                               const char *model) {
+                               const char *model, const char *effort, const char *auth_class,
+                               const char *upstream, const char *quantization) {
     for (int i = 0; i < count; i++) {
-        if (strcmp(lanes[i].provider, provider) == 0 && strcmp(lanes[i].model, model) == 0)
+        if (strcmp(lanes[i].provider, provider) == 0 && strcmp(lanes[i].model, model) == 0 &&
+            strcmp(lanes[i].effort, effort ? effort : "") == 0 &&
+            strcmp(lanes[i].auth_class, auth_class ? auth_class : "") == 0 &&
+            strcmp(lanes[i].upstream, upstream ? upstream : "") == 0 &&
+            strcmp(lanes[i].quantization, quantization ? quantization : "") == 0)
             return true;
     }
     return false;
 }
 
+/* Model spec may carry a reasoning-effort sub-lane suffix: "model@effort"
+ * (e.g. "gpt-5.6-sol@xhigh"). '@' is used instead of ':' because ':' is
+ * already the provider-prefix separator ("vllm:model"). Each distinct
+ * model@effort pair is its own lane, so one provider can field several
+ * sub-lanes for an important model at different reasoning efforts. */
 static bool fabric_add_lane(provider_fabric_lane_t lanes[], int *count, int max_lanes,
                             const char *provider, const char *model, int replicas,
                             bool subscription, bool metered, const char *api_key) {
     if (!lanes || !count || *count >= max_lanes || !provider || !provider[0] || !model ||
         !model[0] || replicas <= 0)
         return false;
-    if (fabric_lane_exists(lanes, *count, provider, model))
+
+    char model_buf[128];
+    char effort_buf[16] = "";
+    snprintf(model_buf, sizeof(model_buf), "%s", model);
+    char *at = strrchr(model_buf, '@');
+    if (at && at != model_buf && at[1]) {
+        if (dsco_effort_is_valid(at + 1)) {
+            snprintf(effort_buf, sizeof(effort_buf), "%s", at + 1);
+            *at = '\0';
+        }
+        /* Invalid effort suffix: treat '@' as part of the model id. */
+    }
+
+    const char *auth_class = subscription ? "subscription" : metered ? "payg" :
+                             provider_is_local_endpoint(provider) ? "local" : "api";
+    if (fabric_lane_exists(lanes, *count, provider, model_buf, effort_buf, auth_class, "", ""))
         return false;
     if (!provider_has_usable_key(provider, api_key))
         return false;
+    if (subscription) {
+        const dsco_subscription_lane_spec_t *subscription_lane = NULL;
+        for (size_t i = 0; i < dsco_subscription_lane_count(); i++) {
+            const dsco_subscription_lane_spec_t *candidate = dsco_subscription_lane_at(i);
+            if (candidate && strcmp(candidate->provider, provider) == 0) {
+                subscription_lane = candidate;
+                break;
+            }
+        }
+        if (!subscription_lane ||
+            !dsco_subscription_lane_native_ready(subscription_lane, api_key, NULL, 0, NULL, 0,
+                                                 NULL, 0))
+            return false;
+    }
+    /* Credentials alone are insufficient: omit lanes that the durable pool has
+     * marked exhausted or breaker-tripped, rather than spending a worker on a
+     * failure we already observed. But the pool only registers its core[]
+     * providers — a keyed provider with NO slot (groq, deepseek, cerebras,
+     * together, ...) is unknown, not unhealthy. Only veto when a slot exists
+     * and reports trouble; source of truth over registry membership. */
+    provider_pool_init(api_key);
+    if (provider_pool_slot(provider) && !provider_pool_healthy(provider))
+        return false;
 
     snprintf(lanes[*count].provider, sizeof(lanes[*count].provider), "%s", provider);
-    snprintf(lanes[*count].model, sizeof(lanes[*count].model), "%s", model);
+    snprintf(lanes[*count].model, sizeof(lanes[*count].model), "%s", model_buf);
+    snprintf(lanes[*count].effort, sizeof(lanes[*count].effort), "%s", effort_buf);
+    snprintf(lanes[*count].auth_class, sizeof(lanes[*count].auth_class), "%s", auth_class);
+    snprintf(lanes[*count].lane_id, sizeof(lanes[*count].lane_id), "%s|%s|%s|%s", provider,
+             model_buf, effort_buf[0] ? effort_buf : "default", auth_class);
     lanes[*count].replicas = replicas;
     lanes[*count].subscription = subscription;
     lanes[*count].local = provider_is_local_endpoint(provider);
     lanes[*count].metered = metered;
     (*count)++;
     return true;
+}
+
+/* Add a fully-qualified lane without first collapsing endpoint/auth dimensions.
+ * The base helper remains for ordinary direct-provider lanes. */
+static bool fabric_add_exact_lane(provider_fabric_lane_t lanes[], int *count, int max_lanes,
+                                  const char *provider, const char *model, const char *effort,
+                                  const char *auth_class, const char *upstream,
+                                  const char *quantization, int replicas, bool subscription,
+                                  bool metered, const char *api_key) {
+    if (!lanes || !count || *count >= max_lanes || !provider || !model || replicas < 1)
+        return false;
+    const char *e = effort ? effort : "", *a = auth_class ? auth_class : "api";
+    const char *u = upstream ? upstream : "", *q = quantization ? quantization : "";
+    if (fabric_lane_exists(lanes, *count, provider, model, e, a, u, q))
+        return false;
+    if (!provider_has_usable_key(provider, api_key))
+        return false;
+    provider_fabric_lane_t *l = &lanes[*count];
+    memset(l, 0, sizeof(*l));
+    snprintf(l->provider, sizeof(l->provider), "%s", provider);
+    snprintf(l->model, sizeof(l->model), "%s", model);
+    snprintf(l->effort, sizeof(l->effort), "%s", e);
+    snprintf(l->auth_class, sizeof(l->auth_class), "%s", a);
+    snprintf(l->upstream, sizeof(l->upstream), "%s", u);
+    snprintf(l->quantization, sizeof(l->quantization), "%s", q);
+    snprintf(l->lane_id, sizeof(l->lane_id), "%s|%s|%s|%s|%s|%s", provider, model,
+             u[0] ? u : "direct", q[0] ? q : "default", e[0] ? e : "default", a);
+    l->replicas = replicas;
+    l->subscription = subscription;
+    l->metered = metered;
+    l->local = provider_is_local_endpoint(provider);
+    (*count)++;
+    return true;
+}
+
+/* Extra sub-lanes from env: DSCO_FABRIC_SUBLANES="provider:model[@effort],..."
+ * e.g. "openai-codex:gpt-5.6-sol@xhigh,openai-codex:gpt-5.6-luna@low" */
+static void fabric_add_env_sublanes(provider_fabric_lane_t lanes[], int *lane_count, int max_lanes,
+                                    int replicas, const char *api_key) {
+    const char *spec = getenv("DSCO_FABRIC_SUBLANES");
+    if (!spec || !spec[0])
+        return;
+    /* Large enough for a full catalog unroll (64 lanes x ~40 chars). */
+    char buf[4096];
+    snprintf(buf, sizeof(buf), "%s", spec);
+    char *save = NULL;
+    for (char *tok = strtok_r(buf, ",;", &save); tok; tok = strtok_r(NULL, ",;", &save)) {
+        while (*tok == ' ')
+            tok++;
+        char *colon = strchr(tok, ':');
+        if (!colon || colon == tok || !colon[1])
+            continue;
+        *colon = '\0';
+        fabric_add_lane(lanes, lane_count, max_lanes, tok, colon + 1, replicas, true, false,
+                        api_key);
+    }
 }
 
 static int fabric_env_int(const char *name, int fallback, int min_v, int max_v) {
@@ -11531,6 +12038,12 @@ static void fabric_score_lanes(provider_fabric_lane_t lanes[], int lane_count, i
             score -= prompt_tokens / 64;
         if (l->metered)
             score -= prompt_tokens / 32;
+        if (l->quality > 0)
+            score += (int)(l->quality * 3.0);
+        if (l->input_price_per_m > 0 || l->output_price_per_m > 0) {
+            double blended = l->input_price_per_m + l->output_price_per_m * 0.35;
+            score -= (int)(blended * 8.0);
+        }
 
         l->score = score;
     }
@@ -11633,6 +12146,9 @@ static bool tool_provider_fabric_race(int gid, provider_fabric_lane_t lanes[], i
     int winner_id = -1;
     int terminal = 0;
     int errors = 0;
+    /* Race success means a useful result, not merely an exited child. A worker
+     * that returns an empty payload or a provider error must leave the race
+     * open for another healthy quasi-swimlane. */
 
     fprintf(stderr, "\n  %sfabric race%s \"%s\": waiting for first successful lane\n", TUI_BYELLOW,
             TUI_RESET, grp->name);
@@ -11655,14 +12171,20 @@ static bool tool_provider_fabric_race(int gid, provider_fabric_lane_t lanes[], i
         errors = 0;
         for (int i = 0; i < grp->child_count; i++) {
             swarm_child_t *c = &g_swarm.children[grp->child_ids[i]];
-            if (c->status == SWARM_DONE) {
+            bool usable = c->status == SWARM_DONE && c->output && c->output[0] &&
+                          !strstr(c->output, "credit_too_low") &&
+                          !strstr(c->output, "insufficient credits") &&
+                          !strstr(c->output, "authentication_error");
+            if (usable) {
                 winner_id = c->id;
                 break;
             }
-            if (c->status == SWARM_ERROR || c->status == SWARM_KILLED) {
+            if (c->status == SWARM_DONE || c->status == SWARM_ERROR || c->status == SWARM_KILLED) {
                 terminal++;
-                if (c->status == SWARM_ERROR)
+                if (c->status == SWARM_ERROR || c->status == SWARM_DONE)
                     errors++;
+                if (c->provider[0])
+                    provider_pool_report(c->provider, false, swarm_child_elapsed_sec(c) * 1000.0);
             }
         }
 
@@ -11710,18 +12232,16 @@ static bool tool_provider_fabric_race(int gid, provider_fabric_lane_t lanes[], i
 
     swarm_child_t *winner = swarm_get(&g_swarm, winner_id);
     int killed = 0;
-    int kill_requests = 0;
     for (int i = 0; i < grp->child_count; i++) {
-        int cid = grp->child_ids[i];
-        if (cid == winner_id)
-            continue;
-        swarm_child_t *loser = swarm_get(&g_swarm, cid);
-        if (loser && (loser->status == SWARM_RUNNING || loser->status == SWARM_STREAMING))
+        swarm_child_t *loser = swarm_get(&g_swarm, grp->child_ids[i]);
+        if (loser && loser->id != winner_id &&
+            (loser->status == SWARM_RUNNING || loser->status == SWARM_STREAMING))
             killed++;
-        kill_requests += swarm_child_abort_and_drain(&g_swarm, cid, 1500, "provider_fabric_loser");
     }
-    swarm_emit_group_event("swarm.group.abort.completed", &g_swarm, gid, "provider_fabric_losers",
-                           kill_requests, -1, 1500);
+    /* Signal all losers first, then drain under one shared grace window.
+     * The winner is terminal, so swarm_group_abort_and_drain skips it. */
+    int kill_requests = swarm_group_abort_and_drain(&g_swarm, gid, &live_ctx, 1500,
+                                                     "provider_fabric_losers");
 
     double elapsed = winner ? swarm_child_elapsed_sec(winner) : 0.0;
     fprintf(stderr, "  %sfabric winner%s #%d %s/%s in %.2fs; killed %d slower lanes\n", TUI_GREEN,
@@ -11798,7 +12318,10 @@ static bool tool_provider_fabric(const char *input, char *result, size_t rlen) {
     }
     if (!fugu_model || !fugu_model[0]) {
         free(fugu_model);
-        fugu_model = safe_strdup("fugu-ultra");
+        /* Default to base fugu: ultra is materially more expensive and the
+         * fabric fanout multiplies that cost per replica. Opt up via
+         * fugu_model / --fabric-fugu-model. */
+        fugu_model = safe_strdup("fugu");
     }
 
     bool include_metered = json_get_bool(input, "include_metered", false);
@@ -11848,23 +12371,46 @@ static bool tool_provider_fabric(const char *input, char *result, size_t rlen) {
     if (local_replicas > 8)
         local_replicas = 8;
 
-    provider_fabric_lane_t lanes[16];
+    /* Sized to the swarm's structural child cap: a full catalog unroll can
+     * field one lane per model; max_agents still governs actual fanout. */
+    provider_fabric_lane_t lanes[PROVIDER_FABRIC_MAX_CANDIDATES];
     memset(lanes, 0, sizeof(lanes));
     int lane_count = 0;
     const char *api_key = g_swarm.api_key;
 
-    bool fugu_is_subscription = provider_sakana_current_key_is_subscription();
-    if (fugu_is_subscription || include_metered) {
+    /* Sakana exposes two independent quota/billing pools on one endpoint.
+     * Materialize both; auth_class is part of lane identity and each child is
+     * pinned to the corresponding credential rather than relying on fallback. */
+    if (provider_sakana_subscription_request_key())
         fabric_add_lane(lanes, &lane_count, (int)(sizeof(lanes) / sizeof(lanes[0])), "sakana",
-                        fugu_model, fugu_replicas, fugu_is_subscription, !fugu_is_subscription,
-                        api_key);
-    }
+                        fugu_model, fugu_replicas, true, false, api_key);
+    if (include_metered && provider_sakana_payg_request_key())
+        fabric_add_lane(lanes, &lane_count, (int)(sizeof(lanes) / sizeof(lanes[0])), "sakana",
+                        fugu_model, fugu_replicas, false, true, api_key);
     fabric_add_lane(lanes, &lane_count, (int)(sizeof(lanes) / sizeof(lanes[0])), "anthropic",
-                    "claude-sonnet-4-6", replicas, true, false, api_key);
+                    "claude-sonnet-5", replicas, true, false, api_key);
+    fabric_add_lane(lanes, &lane_count, (int)(sizeof(lanes) / sizeof(lanes[0])), "kimi-code",
+                    "k3", replicas, true, false, api_key);
+    /* openai-codex fields sub-lanes for the important gpt-5.6 models (sol,
+     * terra, luna) alongside the gpt-5.5 baseline. Sub-lanes are distinct
+     * lanes per model[@effort]; scoring/max_agents still cap actual fanout. */
+    fabric_add_lane(lanes, &lane_count, (int)(sizeof(lanes) / sizeof(lanes[0])), "openai-codex",
+                    "gpt-5.6-sol", replicas, true, false, api_key);
+    fabric_add_lane(lanes, &lane_count, (int)(sizeof(lanes) / sizeof(lanes[0])), "openai-codex",
+                    "gpt-5.6-terra", replicas, true, false, api_key);
+    /* Luna is the issued default and was live-verified on the subscription
+     * Responses endpoint on 2026-07-16. Keep it in the ordinary fabric. */
+    fabric_add_lane(lanes, &lane_count, (int)(sizeof(lanes) / sizeof(lanes[0])), "openai-codex",
+                    DEFAULT_MODEL, replicas, true, false, api_key);
     fabric_add_lane(lanes, &lane_count, (int)(sizeof(lanes) / sizeof(lanes[0])), "openai-codex",
                     "gpt-5.5", replicas, true, false, api_key);
     fabric_add_lane(lanes, &lane_count, (int)(sizeof(lanes) / sizeof(lanes[0])), "zai", "glm-5.2",
                     replicas, true, false, api_key);
+
+    /* Operator-defined effort sub-lanes, e.g.
+     * DSCO_FABRIC_SUBLANES="openai-codex:gpt-5.6-sol@xhigh,anthropic:claude-sonnet-5@high" */
+    fabric_add_env_sublanes(lanes, &lane_count, (int)(sizeof(lanes) / sizeof(lanes[0])), replicas,
+                            api_key);
 
     fabric_add_configured_local_lanes(lanes, &lane_count, (int)(sizeof(lanes) / sizeof(lanes[0])),
                                       local_replicas, api_key);
@@ -11872,6 +12418,36 @@ static bool tool_provider_fabric(const char *input, char *result, size_t rlen) {
                                 local_replicas, api_key);
 
     if (include_metered) {
+        /* Treat concrete OpenRouter models as independent model swimlanes.
+         * The planner supplies the cheapest capability-compatible frontier,
+         * rather than collapsing the entire catalog into one glm lane. */
+        if (provider_has_usable_key("openrouter", api_key)) {
+            openrouter_lane_t or_lanes[PROVIDER_FABRIC_MAX_CANDIDATES];
+            openrouter_lane_query_t or_query = {
+                .min_context = fabric_rough_tokens(task) + 8192,
+                .min_quality = 20.0,
+                .max_models = fabric_env_int("DSCO_FABRIC_OR_MAX_MODELS", 64, 1, 512),
+                .require_tools = true,
+                .diversify_org = !fabric_env_falsey("DSCO_FABRIC_OR_DIVERSIFY_ORGS"),
+                .task = task,
+            };
+            or_query.endpoints_per_model = fabric_env_int("DSCO_FABRIC_OR_ENDPOINTS_PER_MODEL", 4, 0, 16);
+            int or_count = openrouter_lanes_build(&or_query, or_lanes,
+                                                  (int)(sizeof(or_lanes) / sizeof(or_lanes[0])));
+            for (int i = 0; i < or_count; i++) {
+                int slot = lane_count;
+                if (fabric_add_exact_lane(lanes, &lane_count,
+                                          (int)(sizeof(lanes) / sizeof(lanes[0])), "openrouter",
+                                          or_lanes[i].model, "", "api", or_lanes[i].upstream,
+                                          or_lanes[i].quantization, replicas, false, true, api_key)) {
+                    lanes[slot].input_price_per_m = or_lanes[i].input_price_per_m;
+                    lanes[slot].output_price_per_m = or_lanes[i].output_price_per_m;
+                    lanes[slot].quality = or_lanes[i].quality;
+                    lanes[slot].context_window = or_lanes[i].context_window;
+                    lanes[slot].max_output = or_lanes[i].max_output;
+                }
+            }
+        }
         fabric_add_lane(lanes, &lane_count, (int)(sizeof(lanes) / sizeof(lanes[0])), "openai",
                         "gpt-4.1", replicas, false, true, api_key);
         fabric_add_lane(lanes, &lane_count, (int)(sizeof(lanes) / sizeof(lanes[0])), "xai",
@@ -12018,14 +12594,42 @@ static bool tool_provider_fabric(const char *input, char *result, size_t rlen) {
             jbuf_append(&prompt, lane->provider);
             jbuf_append(&prompt, "\nModel: ");
             jbuf_append(&prompt, lane->model);
+            if (lane->effort[0]) {
+                jbuf_append(&prompt, "\nReasoning effort: ");
+                jbuf_append(&prompt, lane->effort);
+            }
             jbuf_append(&prompt, "\nReplica: ");
             jbuf_append_int(&prompt, ri + 1);
             jbuf_append(&prompt, " of ");
             jbuf_append_int(&prompt, lane->replicas);
             jbuf_append(&prompt, "\nReturn a complete result for this lane; the parent may race, "
                                  "compare, or synthesize outputs.");
-            int cid = swarm_spawn_provider(&g_swarm, gid, prompt.data ? prompt.data : task,
+            /* Per-lane reasoning-effort sub-lane: the child inherits env across
+             * fork/exec, so pin DSCO_EFFORT around the spawn and restore. */
+            const char *prev_effort = getenv("DSCO_EFFORT");
+            char prev_effort_buf[32] = "";
+            if (prev_effort)
+                snprintf(prev_effort_buf, sizeof(prev_effort_buf), "%s", prev_effort);
+            if (lane->effort[0])
+                setenv("DSCO_EFFORT", lane->effort, 1);
+            int cid;
+            if (strcmp(lane->provider, "openrouter") == 0 && lane->upstream[0])
+                cid = swarm_spawn_openrouter_lane(&g_swarm, gid,
+                                                  prompt.data ? prompt.data : task, lane->model,
+                                                  lane->upstream, lane->quantization);
+            else if (strcmp(lane->provider, "sakana") == 0 && lane->auth_class[0])
+                cid = swarm_spawn_provider_auth_lane(&g_swarm, gid,
+                                                      prompt.data ? prompt.data : task, lane->model,
+                                                      lane->provider, lane->auth_class);
+            else
+                cid = swarm_spawn_provider(&g_swarm, gid, prompt.data ? prompt.data : task,
                                            lane->model, lane->provider);
+            if (lane->effort[0]) {
+                if (prev_effort)
+                    setenv("DSCO_EFFORT", prev_effort_buf, 1);
+                else
+                    unsetenv("DSCO_EFFORT");
+            }
             jbuf_free(&prompt);
             if (cid >= 0) {
                 swarm_child_t *c = swarm_get(&g_swarm, cid);
@@ -12119,6 +12723,8 @@ static bool tool_provider_fabric(const char *input, char *result, size_t rlen) {
     jbuf_append(&b, ",\"name\":");
     jbuf_append_json_str(&b, name);
     jbuf_append(&b, ",\"mode\":\"spawn\"");
+    jbuf_append(&b, ",\"candidate_lanes\":");
+    jbuf_append_int(&b, lane_count);
     jbuf_append(&b, ",\"agents_spawned\":");
     jbuf_append_int(&b, spawned);
     jbuf_append(&b, ",");
@@ -12906,6 +13512,3180 @@ static __attribute__((unused)) bool tool_big_factorial(const char *input, char *
     return true;
 }
 
+/* ═══════════════════════════════════════════════════════════════════════
+ * AST RETRIEVAL — index dsco's own source; retrieve + rerank over it.
+ *
+ * The read-half of the Construct: "where does <symptom> live?" answered
+ * over the whole binary in one call. Three stages:
+ *   0. chunk    — ast_parse_file → one card per named node (fn/struct/def)
+ *   1. recall   — ctx_build_embedding (256-dim local, free) → vecstore top-K
+ *   2. rerank   — jina-reranker-v3 cross-encoder over the K cards → top-N
+ * The intelligence is the reranker; recall is deliberately cheap. Best dense
+ * embedder for code is jina-code-embeddings-1.5b — swap-in path noted below;
+ * v1 ships on the free local embedder + SOTA rerank.
+ * ═══════════════════════════════════════════════════════════════════════ */
+
+#define AST_IDX_COLLECTION "ast_blocks"
+#define AST_IDX_MAX_BLOCKS 20000
+#define AST_IDX_CARD_MAX 1024
+
+/* The AST index is a dedicated persistent artifact (not the session vfs), so
+ * `ast_index` in one process and `ast_search` in another agree on the store. */
+static vfs_db_t *ast_idx_open_vfs(void) {
+    const char *ovr = getenv("DSCO_AST_DB");
+    if (ovr && ovr[0])
+        return vfs_open(ovr);
+    const char *home = getenv("HOME");
+    char path[1024];
+    if (home && home[0])
+        snprintf(path, sizeof(path), "%s/.dsco/ast_index.db", home);
+    else
+        snprintf(path, sizeof(path), "/tmp/dsco_ast_index.db");
+    return vfs_open(path);
+}
+
+static const char *ast_node_type_label(ast_node_type_t t) {
+    switch (t) {
+        case AST_FUNCTION: return "fn";
+        case AST_STRUCT: return "struct";
+        case AST_TYPEDEF: return "typedef";
+        case AST_ENUM: return "enum";
+        case AST_DEFINE: return "define";
+        case AST_GLOBAL_VAR: return "var";
+        case AST_TOOL_DEF: return "tool";
+        default: return "node";
+    }
+}
+
+/* Emit structured fields (file/line/name/type/complexity) for a search hit,
+ * parsed from its id ("file:line:name") and card ("[type] ... cx=N"). Turns a
+ * flat card string into machine-usable structure. */
+static void ast_hit_fields(const char *id, const char *card, jbuf_t *out) {
+    char file[512] = "", name[256] = "";
+    int line = 0;
+    if (id && id[0]) {
+        const char *c2 = strrchr(id, ':');
+        if (c2) {
+            snprintf(name, sizeof(name), "%s", c2 + 1);
+            char tmp[640];
+            snprintf(tmp, sizeof(tmp), "%.*s", (int)(c2 - id), id);
+            char *c1 = strrchr(tmp, ':');
+            if (c1) {
+                line = atoi(c1 + 1);
+                *c1 = '\0';
+            }
+            snprintf(file, sizeof(file), "%s", tmp);
+        }
+    }
+    char type[24] = "";
+    if (card) {
+        const char *lb = strchr(card, '[');
+        const char *rb = lb ? strchr(lb, ']') : NULL;
+        if (lb && rb && rb - lb < 24)
+            snprintf(type, sizeof(type), "%.*s", (int)(rb - lb - 1), lb + 1);
+    }
+    int cx = 0;
+    if (card) {
+        const char *p = strstr(card, "cx=");
+        if (p)
+            cx = atoi(p + 3);
+    }
+    jbuf_append(out, ",\"file\":");
+    jbuf_append_json_str(out, file);
+    jbuf_appendf(out, ",\"line\":%d,\"name\":", line);
+    jbuf_append_json_str(out, name);
+    jbuf_append(out, ",\"type\":");
+    jbuf_append_json_str(out, type);
+    jbuf_appendf(out, ",\"complexity\":%d", cx);
+}
+
+static void ast_idx_card(const char *relpath, const ast_node_t *n, char *out, size_t out_len) {
+    const char *rt = n->return_type ? n->return_type : "";
+    const char *nm = n->name ? n->name : "?";
+    const char *pm = n->params ? n->params : "";
+    const char *bp = n->body_preview ? n->body_preview : (n->value ? n->value : "");
+    snprintf(out, out_len, "%s:%d [%s] %s%s %s(%s) cx=%d %.400s", relpath, n->line_start,
+             ast_node_type_label(n->type), n->is_static ? "static " : "", rt, nm, pm,
+             n->complexity, bp);
+}
+
+#define AST_EMBED_MAXDIM 2048
+/* Jina embeddings cap inputs per request; 16 clears the limit with margin for
+ * ~1KB code cards ("Failed to encode text" appears above ~32). */
+#define AST_EMBED_BATCH 16
+
+/* Jina's code-embedding models take nl2code.{query,passage} tasks (natural
+ * language ↔ code — exactly NL-query → code-block retrieval); the general
+ * text models take retrieval.{query,passage}. DSCO_AST_EMBED_TASK overrides. */
+static const char *ast_embed_task(const char *model, bool is_query) {
+    const char *ovr = getenv("DSCO_AST_EMBED_TASK");
+    if (ovr && ovr[0])
+        return ovr;
+    if (model && strstr(model, "code"))
+        return is_query ? "nl2code.query" : "nl2code.passage";
+    return is_query ? "retrieval.query" : "retrieval.passage";
+}
+
+/* Collected (id, card) pairs — embedding is batched after the walk so the
+ * dense path can send many cards per Jina request instead of one-per-call. */
+typedef struct {
+    char **ids;
+    char **cards;
+    int n;
+    int cap;
+} ast_collect_t;
+
+static void ast_collect_push(ast_collect_t *c, const char *id, const char *card) {
+    if (c->n >= c->cap) {
+        int nc = c->cap ? c->cap * 2 : 1024;
+        c->ids = safe_realloc(c->ids, (size_t)nc * sizeof(char *));
+        c->cards = safe_realloc(c->cards, (size_t)nc * sizeof(char *));
+        c->cap = nc;
+    }
+    c->ids[c->n] = safe_strdup(id);
+    c->cards[c->n] = safe_strdup(card);
+    c->n++;
+}
+
+static void ast_collect_free(ast_collect_t *c) {
+    for (int i = 0; i < c->n; i++) {
+        free(c->ids[i]);
+        free(c->cards[i]);
+    }
+    free(c->ids);
+    free(c->cards);
+}
+
+/* Recursive walk of .c/.h under root/rel; collect one card per named node. */
+static void ast_idx_collect(const char *root, const char *rel, ast_collect_t *c) {
+    if (c->n >= AST_IDX_MAX_BLOCKS)
+        return;
+    char path[2048];
+    snprintf(path, sizeof(path), "%s/%s", root, rel[0] ? rel : ".");
+    DIR *d = opendir(path);
+    if (!d)
+        return;
+    struct dirent *e;
+    while ((e = readdir(d)) != NULL && c->n < AST_IDX_MAX_BLOCKS) {
+        if (e->d_name[0] == '.')
+            continue;
+        char childrel[1024];
+        if (rel[0])
+            snprintf(childrel, sizeof(childrel), "%s/%s", rel, e->d_name);
+        else
+            snprintf(childrel, sizeof(childrel), "%s", e->d_name);
+        char childpath[2400];
+        snprintf(childpath, sizeof(childpath), "%s/%s", root, childrel);
+        struct stat st;
+        if (stat(childpath, &st) != 0)
+            continue;
+        if (S_ISDIR(st.st_mode)) {
+            if (strcmp(e->d_name, "build") == 0 || strcmp(e->d_name, "gsl") == 0 ||
+                strcmp(e->d_name, "vendor") == 0)
+                continue;
+            ast_idx_collect(root, childrel, c);
+            continue;
+        }
+        size_t len = strlen(e->d_name);
+        if (len < 3)
+            continue;
+        const char *ext = e->d_name + len - 2;
+        if (strcmp(ext, ".c") != 0 && strcmp(ext, ".h") != 0)
+            continue;
+        ast_file_t *f = ast_parse_file(childpath);
+        if (!f)
+            continue;
+        for (int i = 0; i < f->count && c->n < AST_IDX_MAX_BLOCKS; i++) {
+            ast_node_t *n = &f->nodes[i];
+            if (!n->name || !n->name[0] || n->line_start <= 0)
+                continue;
+            if (n->type == AST_INCLUDE)
+                continue;
+            char card[AST_IDX_CARD_MAX];
+            ast_idx_card(childrel, n, card, sizeof(card));
+            char id[600];
+            snprintf(id, sizeof(id), "%s:%d:%s", childrel, n->line_start, n->name);
+            ast_collect_push(c, id, card);
+        }
+        ast_free_file(f);
+    }
+    closedir(d);
+}
+
+static bool tool_ast_index(const char *input, char *result, size_t rlen) {
+    vfs_db_t *vfs = ast_idx_open_vfs();
+    if (!vfs) {
+        snprintf(result, rlen, "error: could not open AST index db");
+        return false;
+    }
+    vecstore_t *vs = vecstore_open(vfs, AST_IDX_COLLECTION);
+    if (!vs) {
+        vfs_close(vfs);
+        snprintf(result, rlen, "error: vecstore_open failed");
+        return false;
+    }
+    const char *root = getenv("DSCO_AST_ROOT");
+    char cwd[1024];
+    if (!root || !root[0]) {
+        root = getcwd(cwd, sizeof(cwd)) ? cwd : ".";
+    }
+    char *paths = json_get_str(input, "paths");
+    double t0 = now_ms();
+
+    /* Walk → collect all cards, then embed in batches. */
+    ast_collect_t col = {0};
+    if (paths && paths[0]) {
+        char *copy = strdup(paths);
+        char *save = NULL;
+        for (char *tok = strtok_r(copy, ",", &save); tok; tok = strtok_r(NULL, ",", &save)) {
+            while (*tok == ' ')
+                tok++;
+            ast_idx_collect(root, tok, &col);
+        }
+        free(copy);
+    } else {
+        ast_idx_collect(root, "src", &col);
+        ast_idx_collect(root, "include", &col);
+    }
+    free(paths);
+
+    /* Embedder: dense Jina code embeddings by default (best recall for code);
+     * DSCO_AST_EMBED=local forces the free 256-dim path; DSCO_AST_EMBED_MODEL
+     * overrides the Jina model (default jina-code-embeddings-1.5b, 1536-dim). */
+    const char *force = getenv("DSCO_AST_EMBED");
+    const char *model = getenv("DSCO_AST_EMBED_MODEL");
+    if (!model || !model[0])
+        model = "jina-code-embeddings-1.5b";
+    bool use_jina =
+        !(force && strcmp(force, "local") == 0) && getenv("JINA_API_KEY") && getenv("JINA_API_KEY")[0];
+
+    int indexed = 0, dim = 0;
+    if (use_jina) {
+        float *buf = malloc((size_t)AST_EMBED_BATCH * AST_EMBED_MAXDIM * sizeof(float));
+        bool aborted = false;
+        for (int off = 0; off < col.n && buf; off += AST_EMBED_BATCH) {
+            int bn = col.n - off < AST_EMBED_BATCH ? col.n - off : AST_EMBED_BATCH;
+            int bd = 0;
+            int got = jina_embed_batch(&col.cards[off], bn, ast_embed_task(model, false), model, 0,
+                                       buf, AST_EMBED_MAXDIM, &bd);
+            if (got < bn || bd <= 0) {
+                if (off == 0)
+                    use_jina = false; /* nothing inserted yet — fall to local */
+                else
+                    aborted = true; /* partial index at consistent dim; user re-runs */
+                break;
+            }
+            dim = bd;
+            for (int i = 0; i < bn; i++)
+                if (vecstore_insert(vs, col.ids[off + i], buf + (size_t)i * AST_EMBED_MAXDIM, dim,
+                                    col.cards[off + i]))
+                    indexed++;
+        }
+        free(buf);
+        if (aborted) {
+            snprintf(result, rlen,
+                     "{\"error\":\"jina embed failed mid-run; %d/%d indexed at dim %d — re-run "
+                     "ast_index\",\"embedder\":\"%s\"}",
+                     indexed, col.n, dim, model);
+            vfs_kv_put_str(vfs, "ast_meta", "embed_model", model);
+            char dbuf[16];
+            snprintf(dbuf, sizeof(dbuf), "%d", dim);
+            vfs_kv_put_str(vfs, "ast_meta", "embed_dim", dbuf);
+            vecstore_close(vs);
+            vfs_close(vfs);
+            ast_collect_free(&col);
+            return false;
+        }
+    }
+    if (!use_jina) {
+        dim = CTX_EMBED_DIM;
+        model = "local-256";
+        for (int i = 0; i < col.n; i++) {
+            float v[CTX_EMBED_DIM];
+            float nr = 0.0f;
+            ctx_build_embedding(col.cards[i], v, NULL, &nr);
+            if (vecstore_insert(vs, col.ids[i], v, dim, col.cards[i]))
+                indexed++;
+        }
+    }
+
+    /* Record which embedder built the index so ast_search embeds queries the
+     * same way (mismatched dims would make cosine meaningless). */
+    vfs_kv_put_str(vfs, "ast_meta", "embed_model", model);
+    char dbuf[16];
+    snprintf(dbuf, sizeof(dbuf), "%d", dim);
+    vfs_kv_put_str(vfs, "ast_meta", "embed_dim", dbuf);
+
+    int total = vecstore_count(vs);
+    vecstore_close(vs);
+    vfs_close(vfs);
+    int collected = col.n;
+    ast_collect_free(&col);
+    snprintf(result, rlen,
+             "{\"indexed\":%d,\"collected\":%d,\"collection_total\":%d,\"dim\":%d,"
+             "\"embedder\":\"%s\",\"ms\":%.0f}",
+             indexed, collected, total, dim, model, now_ms() - t0);
+    return true;
+}
+
+typedef struct {
+    int *idx;
+    int cap;
+    int n;
+} ast_rank_ctx_t;
+
+static void ast_rank_cb(const char *element_start, void *ud) {
+    ast_rank_ctx_t *c = (ast_rank_ctx_t *)ud;
+    if (c->n >= c->cap)
+        return;
+    int i = json_get_int(element_start, "index", -1);
+    if (i >= 0)
+        c->idx[c->n++] = i;
+}
+
+static bool tool_ast_search(const char *input, char *result, size_t rlen) {
+    char *query = json_get_str(input, "query");
+    if (!query || !query[0]) {
+        free(query);
+        snprintf(result, rlen, "missing required parameter: query");
+        return false;
+    }
+    int k = json_get_int(input, "k", 60);
+    if (k < 1)
+        k = 1;
+    if (k > 200)
+        k = 200;
+    int top_n = json_get_int(input, "top_n", 8);
+    if (top_n < 1)
+        top_n = 1;
+    if (top_n > 40)
+        top_n = 40;
+    bool do_rerank = json_get_bool(input, "rerank", true);
+
+    vfs_db_t *vfs = ast_idx_open_vfs();
+    vecstore_t *vs = vfs ? vecstore_open(vfs, AST_IDX_COLLECTION) : NULL;
+    if (!vs || vecstore_count(vs) == 0) {
+        if (vs)
+            vecstore_close(vs);
+        if (vfs)
+            vfs_close(vfs);
+        free(query);
+        snprintf(result, rlen, "{\"error\":\"AST index empty — run ast_index first\"}");
+        return false;
+    }
+
+    /* Embed the query with the same model the index was built with. */
+    char *emb_model = vfs_kv_get_str(vfs, "ast_meta", "embed_model");
+    char *emb_dim_s = vfs_kv_get_str(vfs, "ast_meta", "embed_dim");
+    bool local = !emb_model || strcmp(emb_model, "local-256") == 0;
+    int emb_dim = emb_dim_s ? atoi(emb_dim_s) : CTX_EMBED_DIM;
+    if (emb_dim <= 0 || emb_dim > AST_EMBED_MAXDIM)
+        emb_dim = CTX_EMBED_DIM;
+
+    float *qvec = calloc((size_t)(emb_dim > CTX_EMBED_DIM ? emb_dim : CTX_EMBED_DIM), sizeof(float));
+    bool qok = true;
+    if (local) {
+        float v[CTX_EMBED_DIM];
+        float qnorm = 0.0f;
+        ctx_build_embedding(query, v, NULL, &qnorm);
+        memcpy(qvec, v, sizeof(float) * CTX_EMBED_DIM);
+        emb_dim = CTX_EMBED_DIM;
+    } else {
+        char *q = query;
+        int d = 0;
+        int got =
+            jina_embed_batch(&q, 1, ast_embed_task(emb_model, true), emb_model, 0, qvec, emb_dim, &d);
+        qok = (got >= 1 && d > 0);
+    }
+    if (!qok) {
+        free(qvec);
+        free(emb_model);
+        free(emb_dim_s);
+        vecstore_close(vs);
+        vfs_close(vfs);
+        free(query);
+        snprintf(result, rlen,
+                 "{\"error\":\"query embedding failed (index uses a Jina model; check "
+                 "JINA_API_KEY / connectivity)\"}");
+        return false;
+    }
+
+    vecstore_result_t *cands = calloc((size_t)k, sizeof(*cands));
+    int ncand = cands ? vecstore_query(vs, qvec, emb_dim, cands, k) : 0;
+    free(qvec);
+    free(emb_model);
+    free(emb_dim_s);
+
+    int order[200];
+    int nout = 0;
+    bool reranked = false;
+
+    if (do_rerank && ncand > 1 && getenv("JINA_API_KEY")) {
+        jbuf_t rin;
+        jbuf_init(&rin, 8192);
+        jbuf_append(&rin, "{\"query\":");
+        jbuf_append_json_str(&rin, query);
+        jbuf_append(&rin, ",\"model\":\"jina-reranker-v3\",\"top_n\":");
+        jbuf_append_int(&rin, top_n);
+        jbuf_append(&rin, ",\"documents\":[");
+        for (int i = 0; i < ncand; i++) {
+            if (i)
+                jbuf_append(&rin, ",");
+            jbuf_append_json_str(&rin, cands[i].metadata ? cands[i].metadata : cands[i].id);
+        }
+        jbuf_append(&rin, "]}");
+        char *rout = malloc(65536);
+        if (rout && tool_jina_ai_rerank(rin.data, rout, 65536)) {
+            ast_rank_ctx_t rc = {order, 200, 0};
+            json_array_foreach(rout, "results", ast_rank_cb, &rc);
+            nout = rc.n;
+            reranked = nout > 0;
+        }
+        free(rout);
+        jbuf_free(&rin);
+    }
+    if (!reranked) {
+        for (int i = 0; i < ncand && i < top_n; i++)
+            order[nout++] = i;
+    }
+    if (nout > top_n)
+        nout = top_n;
+
+    jbuf_t out;
+    jbuf_init(&out, 16384);
+    jbuf_append(&out, "{\"query\":");
+    jbuf_append_json_str(&out, query);
+    jbuf_appendf(&out, ",\"reranked\":%s,\"model\":\"%s\",\"candidates\":%d,\"results\":[",
+                 reranked ? "true" : "false", reranked ? "jina-reranker-v3" : "cosine", ncand);
+    for (int i = 0; i < nout; i++) {
+        int ci = order[i];
+        if (ci < 0 || ci >= ncand)
+            continue;
+        if (i)
+            jbuf_append(&out, ",");
+        jbuf_append(&out, "{\"rank\":");
+        jbuf_append_int(&out, i + 1);
+        jbuf_appendf(&out, ",\"cosine\":%.4f,\"id\":", (double)cands[ci].score);
+        jbuf_append_json_str(&out, cands[ci].id ? cands[ci].id : "");
+        ast_hit_fields(cands[ci].id, cands[ci].metadata, &out);
+        jbuf_append(&out, ",\"card\":");
+        jbuf_append_json_str(&out, cands[ci].metadata ? cands[ci].metadata : "");
+        jbuf_append(&out, "}");
+    }
+    jbuf_append(&out, "]}");
+
+    vecstore_result_free(cands, ncand);
+    free(cands);
+    vecstore_close(vs);
+    vfs_close(vfs);
+    free(query);
+
+    size_t n = out.len < rlen - 1 ? out.len : rlen - 1;
+    memcpy(result, out.data, n);
+    result[n] = '\0';
+    jbuf_free(&out);
+    return true;
+}
+
+/* ── ast_insights: structured aggregate analysis over the source tree ─────
+ * Pure-local (no API): node-type histogram, complexity hotspots, per-directory
+ * rollup. The "what isn't right" lens — high-complexity functions surface. */
+typedef struct {
+    char name[160];
+    char file[288];
+    int line;
+    int cx;
+} ast_hot_t;
+typedef struct {
+    char dir[256];
+    int blocks;
+    long total_cx;
+} ast_dir_t;
+typedef struct {
+    int type_count[8];
+    int fn_count;
+    long fn_cx_sum;
+    int fn_cx_max;
+    ast_hot_t hot[16];
+    int nhot;
+    ast_dir_t dirs[192];
+    int ndir;
+    int files;
+} ast_insights_t;
+
+static void ast_ins_hot(ast_insights_t *s, const char *name, const char *file, int line, int cx) {
+    int slot = -1;
+    if (s->nhot < 16) {
+        slot = s->nhot++;
+    } else {
+        int mini = 0;
+        for (int i = 1; i < 16; i++)
+            if (s->hot[i].cx < s->hot[mini].cx)
+                mini = i;
+        if (cx > s->hot[mini].cx)
+            slot = mini;
+    }
+    if (slot < 0)
+        return;
+    snprintf(s->hot[slot].name, sizeof(s->hot[slot].name), "%s", name ? name : "");
+    snprintf(s->hot[slot].file, sizeof(s->hot[slot].file), "%s", file ? file : "");
+    s->hot[slot].line = line;
+    s->hot[slot].cx = cx;
+}
+
+static void ast_ins_dir(ast_insights_t *s, const char *dir, int cx) {
+    for (int i = 0; i < s->ndir; i++)
+        if (strcmp(s->dirs[i].dir, dir) == 0) {
+            s->dirs[i].blocks++;
+            s->dirs[i].total_cx += cx;
+            return;
+        }
+    if (s->ndir < 192) {
+        snprintf(s->dirs[s->ndir].dir, sizeof(s->dirs[0].dir), "%s", dir);
+        s->dirs[s->ndir].blocks = 1;
+        s->dirs[s->ndir].total_cx = cx;
+        s->ndir++;
+    }
+}
+
+static void ast_insights_walk(const char *root, const char *rel, ast_insights_t *s) {
+    char path[2048];
+    snprintf(path, sizeof(path), "%s/%s", root, rel[0] ? rel : ".");
+    DIR *d = opendir(path);
+    if (!d)
+        return;
+    struct dirent *e;
+    while ((e = readdir(d)) != NULL) {
+        if (e->d_name[0] == '.')
+            continue;
+        char childrel[1024];
+        if (rel[0])
+            snprintf(childrel, sizeof(childrel), "%s/%s", rel, e->d_name);
+        else
+            snprintf(childrel, sizeof(childrel), "%s", e->d_name);
+        char childpath[2400];
+        snprintf(childpath, sizeof(childpath), "%s/%s", root, childrel);
+        struct stat st;
+        if (stat(childpath, &st) != 0)
+            continue;
+        if (S_ISDIR(st.st_mode)) {
+            if (strcmp(e->d_name, "build") == 0 || strcmp(e->d_name, "gsl") == 0 ||
+                strcmp(e->d_name, "vendor") == 0)
+                continue;
+            ast_insights_walk(root, childrel, s);
+            continue;
+        }
+        size_t len = strlen(e->d_name);
+        if (len < 3)
+            continue;
+        const char *ext = e->d_name + len - 2;
+        if (strcmp(ext, ".c") != 0 && strcmp(ext, ".h") != 0)
+            continue;
+        ast_file_t *f = ast_parse_file(childpath);
+        if (!f)
+            continue;
+        s->files++;
+        char dir[256];
+        const char *slash = strrchr(childrel, '/');
+        if (slash)
+            snprintf(dir, sizeof(dir), "%.*s", (int)(slash - childrel), childrel);
+        else
+            snprintf(dir, sizeof(dir), ".");
+        for (int i = 0; i < f->count; i++) {
+            ast_node_t *n = &f->nodes[i];
+            if (!n->name || !n->name[0] || n->line_start <= 0 || n->type == AST_INCLUDE)
+                continue;
+            if (n->type >= 0 && n->type < 8)
+                s->type_count[n->type]++;
+            ast_ins_dir(s, dir, n->complexity);
+            if (n->type == AST_FUNCTION) {
+                s->fn_count++;
+                s->fn_cx_sum += n->complexity;
+                if (n->complexity > s->fn_cx_max)
+                    s->fn_cx_max = n->complexity;
+                ast_ins_hot(s, n->name, childrel, n->line_start, n->complexity);
+            }
+        }
+        ast_free_file(f);
+    }
+    closedir(d);
+}
+
+static int ast_hot_cmp(const void *a, const void *b) {
+    return ((const ast_hot_t *)b)->cx - ((const ast_hot_t *)a)->cx;
+}
+static int ast_dir_cmp(const void *a, const void *b) {
+    long d = ((const ast_dir_t *)b)->total_cx - ((const ast_dir_t *)a)->total_cx;
+    return d < 0 ? -1 : d > 0 ? 1 : 0;
+}
+
+static bool tool_ast_insights(const char *input, char *result, size_t rlen) {
+    const char *root = getenv("DSCO_AST_ROOT");
+    char cwd[1024];
+    if (!root || !root[0])
+        root = getcwd(cwd, sizeof(cwd)) ? cwd : ".";
+    char *paths = json_get_str(input, "paths");
+    ast_insights_t s = {0};
+    double t0 = now_ms();
+    if (paths && paths[0]) {
+        char *copy = strdup(paths);
+        char *save = NULL;
+        for (char *tok = strtok_r(copy, ",", &save); tok; tok = strtok_r(NULL, ",", &save)) {
+            while (*tok == ' ')
+                tok++;
+            ast_insights_walk(root, tok, &s);
+        }
+        free(copy);
+    } else {
+        ast_insights_walk(root, "src", &s);
+        ast_insights_walk(root, "include", &s);
+    }
+    free(paths);
+
+    qsort(s.hot, (size_t)s.nhot, sizeof(ast_hot_t), ast_hot_cmp);
+    qsort(s.dirs, (size_t)s.ndir, sizeof(ast_dir_t), ast_dir_cmp);
+
+    static const char *tn[8] = {"function", "struct",   "typedef",    "enum",
+                                "include",  "define", "global_var", "tool_def"};
+    int total = 0;
+    for (int i = 0; i < 8; i++)
+        total += s.type_count[i];
+
+    jbuf_t out;
+    jbuf_init(&out, 8192);
+    jbuf_appendf(&out, "{\"files\":%d,\"blocks\":%d,\"by_type\":{", s.files, total);
+    bool first = true;
+    for (int i = 0; i < 8; i++) {
+        if (s.type_count[i] == 0)
+            continue;
+        jbuf_appendf(&out, "%s\"%s\":%d", first ? "" : ",", tn[i], s.type_count[i]);
+        first = false;
+    }
+    double mean = s.fn_count ? (double)s.fn_cx_sum / (double)s.fn_count : 0.0;
+    jbuf_appendf(&out,
+                 "},\"functions\":{\"count\":%d,\"mean_complexity\":%.1f,\"max_complexity\":%d},"
+                 "\"complexity_hotspots\":[",
+                 s.fn_count, mean, s.fn_cx_max);
+    for (int i = 0; i < s.nhot; i++) {
+        jbuf_appendf(&out, "%s{\"complexity\":%d,\"name\":", i ? "," : "", s.hot[i].cx);
+        jbuf_append_json_str(&out, s.hot[i].name);
+        jbuf_appendf(&out, ",\"at\":\"%s:%d\"}", s.hot[i].file, s.hot[i].line);
+    }
+    jbuf_append(&out, "],\"top_dirs\":[");
+    int ndir = s.ndir < 15 ? s.ndir : 15;
+    for (int i = 0; i < ndir; i++) {
+        jbuf_appendf(&out, "%s{\"dir\":", i ? "," : "");
+        jbuf_append_json_str(&out, s.dirs[i].dir);
+        jbuf_appendf(&out, ",\"blocks\":%d,\"total_complexity\":%ld}", s.dirs[i].blocks,
+                     s.dirs[i].total_cx);
+    }
+    jbuf_appendf(&out, "],\"ms\":%.0f}", now_ms() - t0);
+
+    size_t n = out.len < rlen - 1 ? out.len : rlen - 1;
+    memcpy(result, out.data, n);
+    result[n] = '\0';
+    jbuf_free(&out);
+    return true;
+}
+
+/* ── ast_classify: zero-shot classify a code block against caller labels ───
+ * Thin, code-scoped wrapper over Jina classify (jina-embeddings-v5-text-small).
+ * Feed it a card from ast_search plus labels like ["networking","crypto",...]. */
+static bool tool_ast_classify(const char *input, char *result, size_t rlen) {
+    char *text = json_get_str(input, "text");
+    char *labels = json_get_raw(input, "labels");
+    if (!text || !text[0]) {
+        free(text);
+        free(labels);
+        snprintf(result, rlen, "missing required parameter: text");
+        return false;
+    }
+    if (!labels || !(labels[0] == '[' || labels[0] == '{')) {
+        free(text);
+        free(labels);
+        snprintf(result, rlen, "missing required parameter: labels (array)");
+        return false;
+    }
+    char *model = json_get_str(input, "model");
+    jbuf_t ci;
+    jbuf_init(&ci, 512 + strlen(text) + strlen(labels));
+    jbuf_append(&ci, "{\"model\":");
+    jbuf_append_json_str(&ci, model && model[0] ? model : "jina-embeddings-v5-text-small");
+    jbuf_append(&ci, ",\"labels\":");
+    jbuf_append(&ci, labels);
+    jbuf_append(&ci, ",\"input\":[");
+    jbuf_append_json_str(&ci, text);
+    jbuf_append(&ci, "]}");
+    bool ok = tool_jina_ai_classify(ci.data, result, rlen);
+    jbuf_free(&ci);
+    free(text);
+    free(labels);
+    free(model);
+    return ok;
+}
+
+/* ═══════════════════════════════════════════════════════════════════════
+ * CODING-AGENT TOOLS — apply_patch, test_run, diagnostics, symbol nav, ast_edit
+ * ═══════════════════════════════════════════════════════════════════════ */
+
+static char *cw_read_file(const char *path, long *out_len) {
+    FILE *f = fopen(path, "rb");
+    if (!f)
+        return NULL;
+    fseek(f, 0, SEEK_END);
+    long n = ftell(f);
+    fseek(f, 0, SEEK_SET);
+    if (n < 0) {
+        fclose(f);
+        return NULL;
+    }
+    char *buf = malloc((size_t)n + 1);
+    if (!buf) {
+        fclose(f);
+        return NULL;
+    }
+    size_t rd = fread(buf, 1, (size_t)n, f);
+    fclose(f);
+    buf[rd] = '\0';
+    if (out_len)
+        *out_len = (long)rd;
+    return buf;
+}
+
+static bool cw_write_file(const char *path, const char *data) {
+    FILE *f = fopen(path, "wb");
+    if (!f)
+        return false;
+    size_t len = strlen(data);
+    size_t w = fwrite(data, 1, len, f);
+    fclose(f);
+    return w == len;
+}
+
+/* Replace the first occurrence of `old` with `neu` in *text (heap). Returns
+ * true on success; false (text untouched) if `old` is absent — this is the
+ * "fails cleanly on context drift" property. Empty `old` is rejected. */
+static bool cw_replace_once(char **text, const char *old, const char *neu) {
+    if (!old || !old[0])
+        return false;
+    char *loc = strstr(*text, old);
+    if (!loc)
+        return false;
+    size_t pre = (size_t)(loc - *text);
+    size_t oldlen = strlen(old);
+    size_t neulen = strlen(neu);
+    size_t taillen = strlen(loc + oldlen);
+    char *out = malloc(pre + neulen + taillen + 1);
+    if (!out)
+        return false;
+    memcpy(out, *text, pre);
+    memcpy(out + pre, neu, neulen);
+    memcpy(out + pre + neulen, loc + oldlen, taillen + 1);
+    free(*text);
+    *text = out;
+    return true;
+}
+
+typedef struct {
+    char path[1024];
+    char *text; /* evolving working copy */
+    int hunks;
+} cw_pfile_t;
+
+/* Strip a leading a/ or b/ and any trailing tab-timestamp from a diff path. */
+static void cw_diff_path(const char *raw, char *out, size_t out_len) {
+    while (*raw == ' ')
+        raw++;
+    if ((raw[0] == 'a' || raw[0] == 'b') && raw[1] == '/')
+        raw += 2;
+    size_t i = 0;
+    for (; raw[i] && raw[i] != '\t' && raw[i] != '\n' && raw[i] != '\r' && i + 1 < out_len; i++)
+        out[i] = raw[i];
+    out[i] = '\0';
+}
+
+static cw_pfile_t *cw_pfile_get(cw_pfile_t *files, int *nfiles, const char *path, char *err,
+                                size_t errlen) {
+    for (int i = 0; i < *nfiles; i++)
+        if (strcmp(files[i].path, path) == 0)
+            return &files[i];
+    if (*nfiles >= 64) {
+        snprintf(err, errlen, "too many files in patch (max 64)");
+        return NULL;
+    }
+    long flen = 0;
+    char *txt = cw_read_file(path, &flen);
+    if (!txt) {
+        snprintf(err, errlen, "cannot read target file: %s", path);
+        return NULL;
+    }
+    cw_pfile_t *f = &files[(*nfiles)++];
+    snprintf(f->path, sizeof(f->path), "%s", path);
+    f->text = txt;
+    f->hunks = 0;
+    return f;
+}
+
+static bool tool_apply_patch(const char *input, char *result, size_t rlen) {
+    char *patch = json_get_str(input, "patch");
+    if (!patch || !patch[0]) {
+        free(patch);
+        snprintf(result, rlen, "error: patch (unified diff) required");
+        return false;
+    }
+
+    /* Split into a line array (random access — clean hunk boundaries). */
+    char *pcopy = strdup(patch);
+    int nlines = 1;
+    for (char *p = pcopy; *p; p++)
+        if (*p == '\n')
+            nlines++;
+    char **L = malloc((size_t)nlines * sizeof(char *));
+    int nl = 0;
+    L[nl++] = pcopy;
+    for (char *p = pcopy; *p; p++)
+        if (*p == '\n') {
+            *p = '\0';
+            if (nl < nlines)
+                L[nl++] = p + 1;
+        }
+    for (int i = 0; i < nl; i++) { /* strip trailing CR */
+        size_t len = strlen(L[i]);
+        if (len && L[i][len - 1] == '\r')
+            L[i][len - 1] = '\0';
+    }
+
+    cw_pfile_t files[64];
+    int nfiles = 0;
+    cw_pfile_t *cur = NULL;
+    bool ok = true;
+    char errbuf[512] = "";
+
+    for (int i = 0; i < nl && ok; i++) {
+        char *line = L[i];
+        if (strncmp(line, "+++ ", 4) == 0) {
+            char path[1024];
+            cw_diff_path(line + 4, path, sizeof(path));
+            if (!path[0] || strcmp(path, "/dev/null") == 0) {
+                cur = NULL;
+                continue;
+            }
+            cur = cw_pfile_get(files, &nfiles, path, errbuf, sizeof(errbuf));
+            if (!cur)
+                ok = false;
+            continue;
+        }
+        if (strncmp(line, "@@", 2) != 0)
+            continue; /* --- / diff / index / stray context: ignore */
+        if (!cur) {
+            snprintf(errbuf, sizeof(errbuf), "hunk before any +++ file header");
+            ok = false;
+            break;
+        }
+        /* Gather this hunk's body: lines i+1.. until next @@/+++/---/diff/EOF. */
+        jbuf_t oldb, newb;
+        jbuf_init(&oldb, 512);
+        jbuf_init(&newb, 512);
+        bool of = true, nf = true;
+        int j = i + 1;
+        for (; j < nl; j++) {
+            char *bl = L[j];
+            if (strncmp(bl, "@@", 2) == 0 || strncmp(bl, "+++ ", 4) == 0 ||
+                strncmp(bl, "--- ", 4) == 0 || strncmp(bl, "diff ", 5) == 0)
+                break;
+            char c = bl[0];
+            const char *content = bl + 1;
+            if (c == ' ' || c == '\0') {
+                jbuf_appendf(&oldb, "%s%s", of ? "" : "\n", c ? content : "");
+                jbuf_appendf(&newb, "%s%s", nf ? "" : "\n", c ? content : "");
+                of = nf = false;
+            } else if (c == '-') {
+                jbuf_appendf(&oldb, "%s%s", of ? "" : "\n", content);
+                of = false;
+            } else if (c == '+') {
+                jbuf_appendf(&newb, "%s%s", nf ? "" : "\n", content);
+                nf = false;
+            } else if (c == '\\') {
+                /* "\ No newline at end of file" — ignore */
+            }
+        }
+        if (!cw_replace_once(&cur->text, oldb.data, newb.data)) {
+            snprintf(errbuf, sizeof(errbuf),
+                     "hunk %d for %s did not apply (context not found — file drifted)",
+                     cur->hunks + 1, cur->path);
+            ok = false;
+        } else {
+            cur->hunks++;
+        }
+        jbuf_free(&oldb);
+        jbuf_free(&newb);
+        i = j - 1; /* resume at the terminator line (loop ++ lands on it) */
+    }
+    free(L);
+    free(pcopy);
+
+    int total_hunks = 0;
+    if (ok) {
+        for (int i = 0; i < nfiles; i++) {
+            if (!cw_write_file(files[i].path, files[i].text)) {
+                snprintf(errbuf, sizeof(errbuf), "write failed: %s", files[i].path);
+                ok = false;
+                break;
+            }
+            total_hunks += files[i].hunks;
+        }
+    }
+
+    jbuf_t out;
+    jbuf_init(&out, 512);
+    if (ok) {
+        jbuf_appendf(&out, "{\"applied\":true,\"files\":%d,\"hunks\":%d,\"changed\":[", nfiles,
+                     total_hunks);
+        for (int i = 0; i < nfiles; i++) {
+            if (i)
+                jbuf_append(&out, ",");
+            jbuf_append_json_str(&out, files[i].path);
+        }
+        jbuf_append(&out, "]}");
+    } else {
+        jbuf_append(&out, "{\"applied\":false,\"error\":");
+        jbuf_append_json_str(&out, errbuf[0] ? errbuf : "patch failed");
+        jbuf_append(&out, ",\"note\":\"no files were written (atomic)\"}");
+    }
+    for (int i = 0; i < nfiles; i++)
+        free(files[i].text);
+    free(patch);
+    size_t n = out.len < rlen - 1 ? out.len : rlen - 1;
+    memcpy(result, out.data, n);
+    result[n] = '\0';
+    jbuf_free(&out);
+    return ok;
+}
+
+/* ── test_run: run a make target, parse pass/fail into structure ────────── */
+static int cw_last_int_before(const char *start, const char *pos) {
+    const char *p = pos;
+    while (p > start && !isdigit((unsigned char)p[-1]))
+        p--;
+    if (p == start || !isdigit((unsigned char)p[-1]))
+        return -1;
+    while (p > start && isdigit((unsigned char)p[-1]))
+        p--;
+    return atoi(p);
+}
+static int cw_first_int_after(const char *pos) {
+    const char *p = pos;
+    while (*p && !isdigit((unsigned char)*p))
+        p++;
+    return *p ? atoi(p) : -1;
+}
+/* copy a line skipping ANSI CSI (ESC [ ... letter) sequences */
+static void cw_strip_ansi(const char *in, char *out, size_t out_len) {
+    size_t o = 0;
+    for (const char *p = in; *p && *p != '\n' && o + 1 < out_len; p++) {
+        if (*p == 0x1b) {
+            p++;
+            if (*p == '[')
+                while (*p && !isalpha((unsigned char)*p))
+                    p++;
+            continue;
+        }
+        out[o++] = *p;
+    }
+    out[o] = '\0';
+}
+
+static bool tool_test_run(const char *input, char *result, size_t rlen) {
+    char *target = json_get_str(input, "target");
+    if (!target || !target[0]) {
+        free(target);
+        target = strdup("test");
+    }
+    for (char *p = target; *p; p++)
+        if (!isalnum((unsigned char)*p) && *p != '_' && *p != '-' && *p != '/' && *p != '.') {
+            snprintf(result, rlen, "{\"error\":\"invalid target name\"}");
+            free(target);
+            return false;
+        }
+    char cmd[2048];
+    snprintf(cmd, sizeof(cmd),
+             "make %s >/tmp/dsco_testrun.log 2>&1; ec=$?; "
+             "grep -aE 'tests:|[0-9]+ passed|FAIL|error:' /tmp/dsco_testrun.log | tail -80; "
+             "echo \"__EC__$ec\"",
+             target);
+    char *buf = malloc(131072);
+    if (!buf) {
+        free(target);
+        snprintf(result, rlen, "{\"error\":\"oom\"}");
+        return false;
+    }
+    buf[0] = '\0';
+    double t0 = now_ms();
+    run_cmd(cmd, buf, 131072);
+    double ms = now_ms() - t0;
+
+    /* Strip ANSI first: color codes like ESC[32m embed digits ("32") that
+     * would otherwise be misread as counts. */
+    char *clean = malloc(strlen(buf) + 1);
+    {
+        size_t o = 0;
+        for (const char *p = buf; *p; p++) {
+            if (*p == 0x1b) {
+                p++;
+                if (*p == '[')
+                    while (p[1] && !isalpha((unsigned char)*p))
+                        p++;
+                continue;
+            }
+            clean[o++] = *p;
+        }
+        clean[o] = '\0';
+    }
+
+    /* Handle both "N tests: M passed" (main suite) and "M passed, K failed"
+     * (priority binaries / math corpus). Use the LAST summary occurrence. */
+    int total = -1, passed = -1, failed = -1, ec = -1;
+    const char *tp = NULL, *scan = clean;
+    while ((scan = strstr(scan, "tests:")) != NULL) {
+        tp = scan;
+        scan += 6;
+    }
+    if (tp) {
+        total = cw_last_int_before(clean, tp);
+        passed = cw_first_int_after(tp + 6);
+    }
+    const char *pp = NULL;
+    scan = clean;
+    while ((scan = strstr(scan, "passed")) != NULL) {
+        pp = scan;
+        scan += 6;
+    }
+    if (passed < 0 && pp)
+        passed = cw_last_int_before(clean, pp);
+    const char *fp = NULL;
+    scan = clean;
+    while ((scan = strstr(scan, "failed")) != NULL) {
+        fp = scan;
+        scan += 6;
+    }
+    if (fp)
+        failed = cw_last_int_before(clean, fp);
+    free(clean);
+    if (total < 0 && passed >= 0 && failed >= 0)
+        total = passed + failed;
+    if (failed < 0 && total >= 0 && passed >= 0)
+        failed = total - passed;
+    const char *ecp = strstr(buf, "__EC__");
+    if (ecp)
+        ec = atoi(ecp + 6);
+
+    jbuf_t out;
+    jbuf_init(&out, 2048);
+    jbuf_appendf(&out, "{\"target\":");
+    jbuf_append_json_str(&out, target);
+    jbuf_appendf(&out, ",\"exit\":%d,\"passed\":%d,\"total\":%d", ec, passed, total);
+    if (failed >= 0)
+        jbuf_appendf(&out, ",\"failed\":%d", failed);
+    jbuf_append(&out, ",\"failing\":[");
+    int nfail = 0;
+    char *lsave = NULL;
+    char *bcopy = strdup(buf);
+    for (char *ln = strtok_r(bcopy, "\n", &lsave); ln && nfail < 25;
+         ln = strtok_r(NULL, "\n", &lsave)) {
+        if (!strstr(ln, "FAIL") && !strstr(ln, "error:"))
+            continue;
+        char clean[400];
+        cw_strip_ansi(ln, clean, sizeof(clean));
+        char *c = clean;
+        while (*c == ' ' || *c == '\t')
+            c++;
+        if (!c[0])
+            continue;
+        if (nfail)
+            jbuf_append(&out, ",");
+        jbuf_append_json_str(&out, c);
+        nfail++;
+    }
+    free(bcopy);
+    jbuf_appendf(&out, "],\"ms\":%.0f}", ms);
+
+    free(buf);
+    free(target);
+    size_t n = out.len < rlen - 1 ? out.len : rlen - 1;
+    memcpy(result, out.data, n);
+    result[n] = '\0';
+    jbuf_free(&out);
+    return ec == 0;
+}
+
+/* ── diagnostics: single-file syntax check with the project's real flags ──
+ * All .c share one flag set in compile_commands.json (only source/-o differ),
+ * so we lift the first entry's arguments, drop compile/output/dep flags and
+ * the source, and run `cc <flags> -fsyntax-only <file>`. ~200ms vs a full make. */
+static int diag_build_argv(const char *target_file, char **argv, int max) {
+    long len = 0;
+    char *cc = cw_read_file("compile_commands.json", &len);
+    if (!cc)
+        return -1;
+    char *args = strstr(cc, "\"arguments\"");
+    char *lb = args ? strchr(args, '[') : NULL;
+    if (!lb) {
+        free(cc);
+        return -1;
+    }
+    int argc = 0;
+    argv[argc++] = strdup("cc");
+    char *p = lb + 1;
+    bool skip_next = false;
+    bool first = true;
+    while (*p && *p != ']' && argc < max - 3) {
+        while (*p && *p != '"' && *p != ']')
+            p++;
+        if (*p != '"')
+            break;
+        p++;
+        char tok[1024];
+        int t = 0;
+        while (*p && *p != '"' && t < 1023) {
+            if (*p == '\\' && p[1])
+                p++;
+            tok[t++] = *p++;
+        }
+        tok[t] = '\0';
+        if (*p == '"')
+            p++;
+        bool was_first = first;
+        first = false;
+        if (skip_next) {
+            skip_next = false;
+            continue;
+        }
+        if (was_first &&
+            (strcmp(tok, "cc") == 0 || strstr(tok, "clang") || strstr(tok, "gcc")))
+            continue;
+        if (strcmp(tok, "-c") == 0 || strcmp(tok, "-MMD") == 0 || strcmp(tok, "-MP") == 0 ||
+            strcmp(tok, "-MD") == 0)
+            continue;
+        if (strcmp(tok, "-o") == 0 || strcmp(tok, "-MF") == 0 || strcmp(tok, "-MT") == 0 ||
+            strcmp(tok, "-MQ") == 0) {
+            skip_next = true;
+            continue;
+        }
+        size_t tl = strlen(tok);
+        if (tl > 2 && (strcmp(tok + tl - 2, ".c") == 0 || strcmp(tok + tl - 2, ".o") == 0))
+            continue;
+        argv[argc++] = strdup(tok);
+    }
+    free(cc);
+    argv[argc++] = strdup("-fsyntax-only");
+    argv[argc++] = strdup(target_file);
+    argv[argc] = NULL;
+    return argc;
+}
+
+static bool tool_diagnostics(const char *input, char *result, size_t rlen) {
+    char *file = json_get_str(input, "file");
+    if (!file || !file[0]) {
+        free(file);
+        file = json_get_path_or_file_path(input);
+    }
+    if (!file || !file[0]) {
+        free(file);
+        snprintf(result, rlen, "{\"error\":\"file required\"}");
+        return false;
+    }
+    char *argv_s[256];
+    int argc = diag_build_argv(file, argv_s, 256);
+    if (argc < 0) {
+        free(file);
+        snprintf(result, rlen, "{\"error\":\"could not read compile_commands.json\"}");
+        return false;
+    }
+    char *out = malloc(65536);
+    if (!out) {
+        for (int i = 0; i < argc; i++)
+            free(argv_s[i]);
+        free(file);
+        snprintf(result, rlen, "{\"error\":\"oom\"}");
+        return false;
+    }
+    out[0] = '\0';
+    double t0 = now_ms();
+    int rc = safe_exec_argv((const char *const *)argv_s, out, 65536);
+    double ms = now_ms() - t0;
+    for (int i = 0; i < argc; i++)
+        free(argv_s[i]);
+
+    jbuf_t j;
+    jbuf_init(&j, 4096);
+    jbuf_append(&j, "{\"file\":");
+    jbuf_append_json_str(&j, file);
+    jbuf_appendf(&j, ",\"ok\":%s,\"ms\":%.0f,\"diagnostics\":[", rc == 0 ? "true" : "false", ms);
+    int nd = 0, nerr = 0;
+    char *lsave = NULL;
+    char *oc = strdup(out);
+    for (char *ln = strtok_r(oc, "\n", &lsave); ln && nd < 40; ln = strtok_r(NULL, "\n", &lsave)) {
+        const char *sev = NULL, *sevpos = NULL;
+        if ((sevpos = strstr(ln, " error:")))
+            sev = "error";
+        else if ((sevpos = strstr(ln, " warning:")))
+            sev = "warning";
+        else if ((sevpos = strstr(ln, " note:")))
+            sev = "note";
+        else
+            continue;
+        char pref[1024];
+        snprintf(pref, sizeof(pref), "%.*s", (int)(sevpos - ln), ln);
+        size_t pl = strlen(pref);
+        while (pl && (pref[pl - 1] == ' ' || pref[pl - 1] == ':'))
+            pref[--pl] = '\0';
+        int line = 0, col = 0;
+        char *c1 = strrchr(pref, ':');
+        if (c1 && isdigit((unsigned char)c1[1])) {
+            col = atoi(c1 + 1);
+            *c1 = '\0';
+            char *c2 = strrchr(pref, ':');
+            if (c2 && isdigit((unsigned char)c2[1]))
+                line = atoi(c2 + 1);
+            else {
+                line = col;
+                col = 0;
+            }
+        }
+        const char *msg = sevpos;
+        while (*msg && *msg != ':')
+            msg++;
+        if (*msg == ':')
+            msg++;
+        while (*msg == ' ')
+            msg++;
+        if (nd)
+            jbuf_append(&j, ",");
+        jbuf_append(&j, "{\"severity\":");
+        jbuf_append_json_str(&j, sev);
+        jbuf_appendf(&j, ",\"line\":%d,\"col\":%d,\"message\":", line, col);
+        jbuf_append_json_str(&j, msg);
+        jbuf_append(&j, "}");
+        nd++;
+        if (strcmp(sev, "error") == 0)
+            nerr++;
+    }
+    free(oc);
+    jbuf_appendf(&j, "],\"count\":%d,\"errors\":%d}", nd, nerr);
+    free(out);
+    free(file);
+    size_t n = j.len < rlen - 1 ? j.len : rlen - 1;
+    memcpy(result, j.data, n);
+    result[n] = '\0';
+    jbuf_free(&j);
+    return rc == 0;
+}
+
+/* ── symbol_def / symbol_refs + ast_edit ─────────────────────────────────── */
+static bool cw_ident_char(char c) {
+    return isalnum((unsigned char)c) || c == '_';
+}
+
+/* Immune surfaces ast_edit's whole-tree rename must never silently modify;
+ * mirrors the governance protected list (defense in depth — the gate also
+ * blocks when the input names one). */
+static bool cw_is_protected_path(const char *path) {
+    static const char *const prot[] = {"governance.c",     "governance.h", "killswitch.c",
+                                       "killswitch.h",     "ooda.c",       "ooda.h",
+                                       "tools.c",          "tools.h",      "audit_log.c",
+                                       "audit_log.h",      "tamper.c",     "tamper.h",
+                                       "rsi_curriculum.c", "rsi_curriculum.h", NULL};
+    for (int i = 0; prot[i]; i++)
+        if (strstr(path, prot[i]))
+            return true;
+    return false;
+}
+
+/* Whole-word replace old→new in text; returns count, sets *out (heap). */
+static int cw_word_replace(const char *text, const char *old, const char *neu, char **out) {
+    size_t ol = strlen(old);
+    jbuf_t b;
+    jbuf_init(&b, strlen(text) + 64);
+    int cnt = 0;
+    const char *p = text;
+    while (*p) {
+        const char *m = strstr(p, old);
+        if (!m) {
+            jbuf_append(&b, p);
+            break;
+        }
+        char before = (m == text) ? '\0' : m[-1];
+        char after = m[ol];
+        jbuf_appendf(&b, "%.*s", (int)(m - p), p);
+        if (!cw_ident_char(before) && !cw_ident_char(after)) {
+            jbuf_append(&b, neu);
+            cnt++;
+        } else {
+            jbuf_appendf(&b, "%.*s", (int)ol, m);
+        }
+        p = m + ol;
+    }
+    *out = strdup(b.data);
+    jbuf_free(&b);
+    return cnt;
+}
+
+static bool cw_is_c_source(const char *nm) {
+    size_t len = strlen(nm);
+    return len >= 3 && (strcmp(nm + len - 2, ".c") == 0 || strcmp(nm + len - 2, ".h") == 0);
+}
+
+static void sym_def_walk(const char *root, const char *rel, const char *name, jbuf_t *out, int *n) {
+    char path[2048];
+    snprintf(path, sizeof(path), "%s/%s", root, rel[0] ? rel : ".");
+    DIR *d = opendir(path);
+    if (!d)
+        return;
+    struct dirent *e;
+    while ((e = readdir(d)) != NULL) {
+        if (e->d_name[0] == '.')
+            continue;
+        char childrel[1024];
+        if (rel[0])
+            snprintf(childrel, sizeof(childrel), "%s/%s", rel, e->d_name);
+        else
+            snprintf(childrel, sizeof(childrel), "%s", e->d_name);
+        char childpath[2400];
+        snprintf(childpath, sizeof(childpath), "%s/%s", root, childrel);
+        struct stat st;
+        if (stat(childpath, &st) != 0)
+            continue;
+        if (S_ISDIR(st.st_mode)) {
+            if (strcmp(e->d_name, "build") == 0 || strcmp(e->d_name, "gsl") == 0 ||
+                strcmp(e->d_name, "vendor") == 0)
+                continue;
+            sym_def_walk(root, childrel, name, out, n);
+            continue;
+        }
+        if (!cw_is_c_source(e->d_name))
+            continue;
+        ast_file_t *f = ast_parse_file(childpath);
+        if (!f)
+            continue;
+        for (int i = 0; i < f->count; i++) {
+            ast_node_t *nd = &f->nodes[i];
+            if (!nd->name || strcmp(nd->name, name) != 0 || nd->type == AST_INCLUDE)
+                continue;
+            if (*n)
+                jbuf_append(out, ",");
+            jbuf_append(out, "{\"file\":");
+            jbuf_append_json_str(out, childrel);
+            jbuf_appendf(out, ",\"line\":%d,\"type\":\"%s\",\"signature\":", nd->line_start,
+                         ast_node_type_label(nd->type));
+            char sig[640];
+            snprintf(sig, sizeof(sig), "%s%s %s(%s)", nd->is_static ? "static " : "",
+                     nd->return_type ? nd->return_type : "", nd->name,
+                     nd->params ? nd->params : "");
+            jbuf_append_json_str(out, sig);
+            jbuf_append(out, "}");
+            (*n)++;
+        }
+        ast_free_file(f);
+    }
+    closedir(d);
+}
+
+static void sym_refs_walk(const char *root, const char *rel, const char *name, jbuf_t *out, int *n,
+                          int max) {
+    if (*n >= max)
+        return;
+    char path[2048];
+    snprintf(path, sizeof(path), "%s/%s", root, rel[0] ? rel : ".");
+    DIR *d = opendir(path);
+    if (!d)
+        return;
+    struct dirent *e;
+    size_t nlen = strlen(name);
+    while ((e = readdir(d)) != NULL && *n < max) {
+        if (e->d_name[0] == '.')
+            continue;
+        char childrel[1024];
+        if (rel[0])
+            snprintf(childrel, sizeof(childrel), "%s/%s", rel, e->d_name);
+        else
+            snprintf(childrel, sizeof(childrel), "%s", e->d_name);
+        char childpath[2400];
+        snprintf(childpath, sizeof(childpath), "%s/%s", root, childrel);
+        struct stat st;
+        if (stat(childpath, &st) != 0)
+            continue;
+        if (S_ISDIR(st.st_mode)) {
+            if (strcmp(e->d_name, "build") == 0 || strcmp(e->d_name, "gsl") == 0 ||
+                strcmp(e->d_name, "vendor") == 0)
+                continue;
+            sym_refs_walk(root, childrel, name, out, n, max);
+            continue;
+        }
+        if (!cw_is_c_source(e->d_name))
+            continue;
+        long flen = 0;
+        char *txt = cw_read_file(childpath, &flen);
+        if (!txt)
+            continue;
+        int lineno = 1;
+        char *ls = NULL;
+        for (char *ln = strtok_r(txt, "\n", &ls); ln && *n < max;
+             ln = strtok_r(NULL, "\n", &ls), lineno++) {
+            const char *m = strstr(ln, name);
+            if (!m)
+                continue;
+            char before = (m == ln) ? '\0' : m[-1];
+            char after = m[nlen];
+            if (cw_ident_char(before) || cw_ident_char(after))
+                continue;
+            char clean[200];
+            const char *s = ln;
+            while (*s == ' ' || *s == '\t')
+                s++;
+            snprintf(clean, sizeof(clean), "%s", s);
+            if (*n)
+                jbuf_append(out, ",");
+            jbuf_append(out, "{\"file\":");
+            jbuf_append_json_str(out, childrel);
+            jbuf_appendf(out, ",\"line\":%d,\"text\":", lineno);
+            jbuf_append_json_str(out, clean);
+            jbuf_append(out, "}");
+            (*n)++;
+        }
+        free(txt);
+    }
+    closedir(d);
+}
+
+static void cw_symbol_roots(const char *input, const char *root,
+                            void (*fn)(const char *, const char *, const char *, jbuf_t *, int *),
+                            const char *name, jbuf_t *out, int *n) {
+    char *paths = json_get_str(input, "paths");
+    if (paths && paths[0]) {
+        char *copy = strdup(paths);
+        char *save = NULL;
+        for (char *tok = strtok_r(copy, ",", &save); tok; tok = strtok_r(NULL, ",", &save)) {
+            while (*tok == ' ')
+                tok++;
+            fn(root, tok, name, out, n);
+        }
+        free(copy);
+    } else {
+        fn(root, "src", name, out, n);
+        fn(root, "include", name, out, n);
+    }
+    free(paths);
+}
+
+static const char *cw_repo_root(char *cwd, size_t len) {
+    const char *root = getenv("DSCO_AST_ROOT");
+    if (!root || !root[0])
+        root = getcwd(cwd, len) ? cwd : ".";
+    return root;
+}
+
+static bool tool_symbol_def(const char *input, char *result, size_t rlen) {
+    char *name = json_get_str(input, "name");
+    if (!name || !name[0]) {
+        free(name);
+        snprintf(result, rlen, "{\"error\":\"name required\"}");
+        return false;
+    }
+    char cwd[1024];
+    const char *root = cw_repo_root(cwd, sizeof(cwd));
+    jbuf_t out;
+    jbuf_init(&out, 4096);
+    jbuf_append(&out, "{\"name\":");
+    jbuf_append_json_str(&out, name);
+    jbuf_append(&out, ",\"definitions\":[");
+    int n = 0;
+    cw_symbol_roots(input, root, sym_def_walk, name, &out, &n);
+    jbuf_appendf(&out, "],\"count\":%d}", n);
+    free(name);
+    size_t nn = out.len < rlen - 1 ? out.len : rlen - 1;
+    memcpy(result, out.data, nn);
+    result[nn] = '\0';
+    jbuf_free(&out);
+    return true;
+}
+
+static bool tool_symbol_refs(const char *input, char *result, size_t rlen) {
+    char *name = json_get_str(input, "name");
+    if (!name || !name[0]) {
+        free(name);
+        snprintf(result, rlen, "{\"error\":\"name required\"}");
+        return false;
+    }
+    int max = json_get_int(input, "max", 100);
+    if (max < 1)
+        max = 1;
+    if (max > 500)
+        max = 500;
+    char cwd[1024];
+    const char *root = cw_repo_root(cwd, sizeof(cwd));
+    jbuf_t out;
+    jbuf_init(&out, 8192);
+    jbuf_append(&out, "{\"name\":");
+    jbuf_append_json_str(&out, name);
+    jbuf_append(&out, ",\"references\":[");
+    int n = 0;
+    char *paths = json_get_str(input, "paths");
+    if (paths && paths[0]) {
+        char *copy = strdup(paths);
+        char *save = NULL;
+        for (char *tok = strtok_r(copy, ",", &save); tok; tok = strtok_r(NULL, ",", &save)) {
+            while (*tok == ' ')
+                tok++;
+            sym_refs_walk(root, tok, name, &out, &n, max);
+        }
+        free(copy);
+    } else {
+        sym_refs_walk(root, "src", name, &out, &n, max);
+        sym_refs_walk(root, "include", name, &out, &n, max);
+    }
+    free(paths);
+    jbuf_appendf(&out, "],\"count\":%d,\"truncated\":%s}", n, n >= max ? "true" : "false");
+    free(name);
+    size_t nn = out.len < rlen - 1 ? out.len : rlen - 1;
+    memcpy(result, out.data, nn);
+    result[nn] = '\0';
+    jbuf_free(&out);
+    return true;
+}
+
+typedef struct {
+    char path[1024];
+    char *newtext;
+    int count;
+} cw_rn_file_t;
+
+/* Recursively rewrite whole-word old→new under root/rel, collecting changed
+ * files. Protected (immune) files are counted as skipped, never modified. */
+static void cw_rename_walk(const char *root, const char *rel, const char *oldn, const char *newn,
+                           cw_rn_file_t *chg, int *nchg, int *skipped, int *total, int maxchg) {
+    char path[2048];
+    snprintf(path, sizeof(path), "%s/%s", root, rel[0] ? rel : ".");
+    DIR *d = opendir(path);
+    if (!d)
+        return;
+    struct dirent *e;
+    while ((e = readdir(d)) != NULL && *nchg < maxchg) {
+        if (e->d_name[0] == '.')
+            continue;
+        char childrel[1024];
+        if (rel[0])
+            snprintf(childrel, sizeof(childrel), "%s/%s", rel, e->d_name);
+        else
+            snprintf(childrel, sizeof(childrel), "%s", e->d_name);
+        char childpath[2400];
+        snprintf(childpath, sizeof(childpath), "%s/%s", root, childrel);
+        struct stat st;
+        if (stat(childpath, &st) != 0)
+            continue;
+        if (S_ISDIR(st.st_mode)) {
+            if (strcmp(e->d_name, "build") == 0 || strcmp(e->d_name, "gsl") == 0 ||
+                strcmp(e->d_name, "vendor") == 0)
+                continue;
+            cw_rename_walk(root, childrel, oldn, newn, chg, nchg, skipped, total, maxchg);
+            continue;
+        }
+        if (!cw_is_c_source(e->d_name))
+            continue;
+        long flen = 0;
+        char *txt = cw_read_file(childpath, &flen);
+        if (!txt)
+            continue;
+        char *neu = NULL;
+        int c = cw_word_replace(txt, oldn, newn, &neu);
+        free(txt);
+        if (c <= 0) {
+            free(neu);
+            continue;
+        }
+        if (cw_is_protected_path(childrel)) {
+            (*skipped)++;
+            free(neu);
+            continue;
+        }
+        cw_rn_file_t *cf = &chg[(*nchg)++];
+        snprintf(cf->path, sizeof(cf->path), "%s", childpath);
+        cf->newtext = neu;
+        cf->count = c;
+        *total += c;
+    }
+    closedir(d);
+}
+
+/* rename a symbol across the tree (whole-word), skipping protected files. */
+static bool ast_edit_rename(const char *input, char *result, size_t rlen, const char *root) {
+    char *oldn = json_get_str(input, "old_name");
+    char *newn = json_get_str(input, "new_name");
+    if (!oldn || !oldn[0] || !newn || !newn[0]) {
+        free(oldn);
+        free(newn);
+        snprintf(result, rlen, "{\"error\":\"old_name and new_name required\"}");
+        return false;
+    }
+    bool valid = (isalpha((unsigned char)newn[0]) || newn[0] == '_');
+    for (const char *p = newn; valid && *p; p++)
+        valid = cw_ident_char(*p);
+    if (!valid) {
+        free(oldn);
+        free(newn);
+        snprintf(result, rlen, "{\"error\":\"new_name is not a valid identifier\"}");
+        return false;
+    }
+
+    cw_rn_file_t changes[256];
+    int nchg = 0, skipped = 0, total = 0;
+    char *paths = json_get_str(input, "paths");
+    if (paths && paths[0]) {
+        char *copy = strdup(paths);
+        char *save = NULL;
+        for (char *tok = strtok_r(copy, ",", &save); tok; tok = strtok_r(NULL, ",", &save)) {
+            while (*tok == ' ')
+                tok++;
+            cw_rename_walk(root, tok, oldn, newn, changes, &nchg, &skipped, &total, 256);
+        }
+        free(copy);
+    } else {
+        cw_rename_walk(root, "src", oldn, newn, changes, &nchg, &skipped, &total, 256);
+        cw_rename_walk(root, "include", oldn, newn, changes, &nchg, &skipped, &total, 256);
+    }
+    free(paths);
+
+    bool ok = true;
+    for (int i = 0; i < nchg && ok; i++)
+        if (!cw_write_file(changes[i].path, changes[i].newtext))
+            ok = false;
+
+    jbuf_t out;
+    jbuf_init(&out, 2048);
+    jbuf_appendf(&out,
+                 "{\"action\":\"rename\",\"ok\":%s,\"files_changed\":%d,\"renames\":%d,"
+                 "\"protected_skipped\":%d,\"changed\":[",
+                 ok ? "true" : "false", nchg, total, skipped);
+    for (int i = 0; i < nchg; i++) {
+        if (i)
+            jbuf_append(&out, ",");
+        jbuf_append_json_str(&out, changes[i].path);
+    }
+    jbuf_append(&out, "]}");
+    for (int i = 0; i < nchg; i++)
+        free(changes[i].newtext);
+    free(oldn);
+    free(newn);
+    size_t nn = out.len < rlen - 1 ? out.len : rlen - 1;
+    memcpy(result, out.data, nn);
+    result[nn] = '\0';
+    jbuf_free(&out);
+    return ok;
+}
+
+/* replace a function's body by AST line span. */
+static bool ast_edit_replace_function(const char *input, char *result, size_t rlen) {
+    char *file = json_get_str(input, "file");
+    char *fname = json_get_str(input, "name");
+    char *src = json_get_str(input, "new_source");
+    if (!file || !file[0] || !fname || !fname[0] || !src) {
+        free(file);
+        free(fname);
+        free(src);
+        snprintf(result, rlen, "{\"error\":\"file, name, new_source required\"}");
+        return false;
+    }
+    ast_file_t *f = ast_parse_file(file);
+    if (!f) {
+        free(file);
+        free(fname);
+        free(src);
+        snprintf(result, rlen, "{\"error\":\"cannot parse file\"}");
+        return false;
+    }
+    ast_node_t *fn = ast_find_function(f, fname);
+    if (!fn || fn->line_start <= 0 || fn->line_end < fn->line_start) {
+        ast_free_file(f);
+        free(file);
+        free(fname);
+        free(src);
+        snprintf(result, rlen, "{\"error\":\"function not found or has no line span\"}");
+        return false;
+    }
+    int ls = fn->line_start, le = fn->line_end;
+    ast_free_file(f);
+
+    long flen = 0;
+    char *txt = cw_read_file(file, &flen);
+    if (!txt) {
+        free(file);
+        free(fname);
+        free(src);
+        snprintf(result, rlen, "{\"error\":\"cannot read file\"}");
+        return false;
+    }
+    jbuf_t out;
+    jbuf_init(&out, (size_t)flen + strlen(src) + 256);
+    int lineno = 1;
+    char *ls2 = NULL;
+    bool inserted = false;
+    /* strtok drops empty lines; walk manually to preserve them. */
+    char *p = txt;
+    (void)ls2;
+    while (p) {
+        char *nlp = strchr(p, '\n');
+        int cur = lineno;
+        if (cur < ls || cur > le) {
+            if (nlp) {
+                jbuf_appendf(&out, "%.*s\n", (int)(nlp - p), p);
+            } else {
+                jbuf_append(&out, p);
+            }
+        } else if (!inserted) {
+            jbuf_append(&out, src);
+            size_t sl = strlen(src);
+            if (sl == 0 || src[sl - 1] != '\n')
+                jbuf_append(&out, "\n");
+            inserted = true;
+        }
+        lineno++;
+        if (!nlp)
+            break;
+        p = nlp + 1;
+        if (*p == '\0')
+            break;
+    }
+    free(txt);
+    bool ok = cw_write_file(file, out.data);
+    jbuf_t j;
+    jbuf_init(&j, 512);
+    jbuf_appendf(&j, "{\"action\":\"replace_function\",\"ok\":%s,\"file\":", ok ? "true" : "false");
+    jbuf_append_json_str(&j, file);
+    jbuf_appendf(&j, ",\"name\":");
+    jbuf_append_json_str(&j, fname);
+    jbuf_appendf(&j, ",\"replaced_lines\":\"%d-%d\"}", ls, le);
+    jbuf_free(&out);
+    free(file);
+    free(fname);
+    free(src);
+    size_t nn = j.len < rlen - 1 ? j.len : rlen - 1;
+    memcpy(result, j.data, nn);
+    result[nn] = '\0';
+    jbuf_free(&j);
+    return ok;
+}
+
+static bool tool_ast_edit(const char *input, char *result, size_t rlen) {
+    char *action = json_get_str(input, "action");
+    char cwd[1024];
+    const char *root = cw_repo_root(cwd, sizeof(cwd));
+    bool ok;
+    if (action && strcmp(action, "rename") == 0) {
+        ok = ast_edit_rename(input, result, rlen, root);
+    } else if (action && strcmp(action, "replace_function") == 0) {
+        ok = ast_edit_replace_function(input, result, rlen);
+    } else {
+        snprintf(result, rlen, "{\"error\":\"action must be 'rename' or 'replace_function'\"}");
+        ok = false;
+    }
+    free(action);
+    return ok;
+}
+
+/* ═══════════════════════════════════════════════════════════════════════
+ * DEEP-ACCESS TOOLS — runtime, binary, VCS, filesystem, process, machine
+ * Most are thin structured wrappers over system utilities (lldb, cc, nm,
+ * objdump, clang-tidy/format, git, lsof, tar, osascript). Shared runner
+ * captures combined output into {ok,exit,ms,<key>}.
+ * ═══════════════════════════════════════════════════════════════════════ */
+
+static bool cw_run_json(const char *cmd, const char *outkey, char *result, size_t rlen) {
+    size_t cap = 262144;
+    char *buf = malloc(cap);
+    if (!buf) {
+        snprintf(result, rlen, "{\"error\":\"oom\"}");
+        return false;
+    }
+    buf[0] = '\0';
+    double t0 = now_ms();
+    int rc = run_cmd(cmd, buf, cap);
+    double ms = now_ms() - t0;
+    jbuf_t j;
+    jbuf_init(&j, 4096);
+    jbuf_appendf(&j, "{\"ok\":%s,\"exit\":%d,\"ms\":%.0f,\"%s\":", rc == 0 ? "true" : "false", rc,
+                 ms, outkey);
+    jbuf_append_json_str(&j, buf);
+    jbuf_append(&j, "}");
+    free(buf);
+    size_t n = j.len < rlen - 1 ? j.len : rlen - 1;
+    memcpy(result, j.data, n);
+    result[n] = '\0';
+    jbuf_free(&j);
+    return rc == 0;
+}
+
+static bool cw_valid_ident(const char *s) {
+    if (!s || !s[0] || !(isalpha((unsigned char)s[0]) || s[0] == '_'))
+        return false;
+    for (const char *p = s; *p; p++)
+        if (!cw_ident_char(*p))
+            return false;
+    return true;
+}
+
+static bool cw_valid_target(const char *s) {
+    if (!s)
+        return false;
+    for (const char *p = s; *p; p++)
+        if (!isalnum((unsigned char)*p) && !strchr("_-./", *p))
+            return false;
+    return true;
+}
+
+/* ── 1. debugger — drive lldb in batch mode ─────────────────────────────── */
+static bool tool_debugger(const char *input, char *result, size_t rlen) {
+    char *program = json_get_str(input, "program");
+    char *args = json_get_str(input, "args");
+    char *script = json_get_str(input, "script");
+    if (!program || !program[0]) {
+        free(program);
+        free(args);
+        free(script);
+        snprintf(result, rlen, "{\"error\":\"program required\"}");
+        return false;
+    }
+    const char *sc = (script && script[0]) ? script : "run\nbt\nquit\n";
+    FILE *sf = fopen("/tmp/dsco_lldb.txt", "w");
+    if (sf) {
+        fputs(sc, sf);
+        if (sc[strlen(sc) - 1] != '\n')
+            fputc('\n', sf);
+        fclose(sf);
+    }
+    jbuf_t cmd;
+    jbuf_init(&cmd, 256);
+    jbuf_append(&cmd, "lldb --batch -s /tmp/dsco_lldb.txt -- ");
+    shell_quote(&cmd, program);
+    if (args && args[0]) {
+        jbuf_append(&cmd, " ");
+        jbuf_append(&cmd, args);
+    }
+    jbuf_append(&cmd, " 2>&1");
+    bool ok = cw_run_json(cmd.data, "output", result, rlen);
+    jbuf_free(&cmd);
+    free(program);
+    free(args);
+    free(script);
+    return ok;
+}
+
+/* ── 2. backtrace — stack from a binary (+optional core) ─────────────────── */
+static bool tool_backtrace(const char *input, char *result, size_t rlen) {
+    char *binary = json_get_str(input, "binary");
+    char *core = json_get_str(input, "core");
+    if (!binary || !binary[0]) {
+        free(binary);
+        free(core);
+        snprintf(result, rlen, "{\"error\":\"binary required\"}");
+        return false;
+    }
+    jbuf_t cmd;
+    jbuf_init(&cmd, 256);
+    jbuf_append(&cmd, "lldb --batch ");
+    if (core && core[0]) {
+        jbuf_append(&cmd, "-c ");
+        shell_quote(&cmd, core);
+        jbuf_append(&cmd, " ");
+    }
+    jbuf_append(&cmd, "-o 'thread backtrace all' -o quit ");
+    shell_quote(&cmd, binary);
+    jbuf_append(&cmd, " 2>&1");
+    bool ok = cw_run_json(cmd.data, "backtrace", result, rlen);
+    jbuf_free(&cmd);
+    free(binary);
+    free(core);
+    return ok;
+}
+
+/* ── 3. syscall_trace — dtruss a command (needs privileges) ─────────────── */
+static bool tool_syscall_trace(const char *input, char *result, size_t rlen) {
+    char *command = json_get_str(input, "command");
+    if (!command || !command[0]) {
+        free(command);
+        snprintf(result, rlen, "{\"error\":\"command required\"}");
+        return false;
+    }
+    jbuf_t cmd;
+    jbuf_init(&cmd, 256 + strlen(command));
+    jbuf_append(&cmd, "dtruss -f sh -c ");
+    shell_quote(&cmd, command);
+    jbuf_append(&cmd, " 2>&1 | head -200");
+    bool ok = cw_run_json(cmd.data, "trace", result, rlen);
+    jbuf_free(&cmd);
+    free(command);
+    return ok;
+}
+
+/* ── 4. watch_run — run with /usr/bin/time -l; parse rss + exit ─────────── */
+static bool tool_watch_run(const char *input, char *result, size_t rlen) {
+    char *command = json_get_str(input, "command");
+    if (!command || !command[0]) {
+        free(command);
+        snprintf(result, rlen, "{\"error\":\"command required\"}");
+        return false;
+    }
+    jbuf_t cmd;
+    jbuf_init(&cmd, 256 + strlen(command));
+    jbuf_append(&cmd, "{ /usr/bin/time -l sh -c ");
+    shell_quote(&cmd, command);
+    jbuf_append(&cmd, "; echo \"__EC__$?\"; } 2>&1");
+    char *buf = malloc(131072);
+    buf[0] = '\0';
+    double t0 = now_ms();
+    run_cmd(cmd.data, buf, 131072);
+    double ms = now_ms() - t0;
+    jbuf_free(&cmd);
+    long long rss = -1;
+    int ec = -1;
+    const char *m = strstr(buf, "maximum resident set size");
+    if (m) {
+        const char *p = m;
+        while (p > buf && !isdigit((unsigned char)p[-1]))
+            p--;
+        const char *e2 = p;
+        while (p > buf && isdigit((unsigned char)p[-1]))
+            p--;
+        if (e2 > p)
+            rss = atoll(p);
+    }
+    const char *ep = strstr(buf, "__EC__");
+    if (ep)
+        ec = atoi(ep + 6);
+    free(buf);
+    snprintf(result, rlen, "{\"exit\":%d,\"wall_ms\":%.0f,\"peak_rss_bytes\":%lld}", ec, ms, rss);
+    return ec == 0;
+}
+
+/* ── 5. memcheck — run under macOS `leaks` ──────────────────────────────── */
+static bool tool_memcheck(const char *input, char *result, size_t rlen) {
+    char *command = json_get_str(input, "command");
+    if (!command || !command[0]) {
+        free(command);
+        snprintf(result, rlen, "{\"error\":\"command required\"}");
+        return false;
+    }
+    jbuf_t cmd;
+    jbuf_init(&cmd, 256 + strlen(command));
+    jbuf_append(&cmd, "leaks --atExit -- sh -c ");
+    shell_quote(&cmd, command);
+    jbuf_append(&cmd, " 2>&1 | grep -aE 'leaks for|leaked bytes|Process' | head -40");
+    bool ok = cw_run_json(cmd.data, "report", result, rlen);
+    jbuf_free(&cmd);
+    free(command);
+    return ok;
+}
+
+/* ── 6. make_build — structured build of a target ───────────────────────── */
+static bool tool_make_build(const char *input, char *result, size_t rlen) {
+    char *target = json_get_str(input, "target");
+    if (!target)
+        target = strdup("");
+    if (!cw_valid_target(target)) {
+        free(target);
+        snprintf(result, rlen, "{\"error\":\"invalid target\"}");
+        return false;
+    }
+    char cmd[1024];
+    snprintf(cmd, sizeof(cmd),
+             "make %s >/tmp/dsco_build.log 2>&1; ec=$?; "
+             "grep -aE ' error:| warning:|Undefined|undefined ' /tmp/dsco_build.log | tail -60; "
+             "echo \"__EC__$ec\"",
+             target);
+    char *buf = malloc(131072);
+    buf[0] = '\0';
+    double t0 = now_ms();
+    run_cmd(cmd, buf, 131072);
+    double ms = now_ms() - t0;
+    int ec = -1;
+    const char *ep = strstr(buf, "__EC__");
+    if (ep)
+        ec = atoi(ep + 6);
+    jbuf_t j;
+    jbuf_init(&j, 8192);
+    jbuf_appendf(&j, "{\"target\":");
+    jbuf_append_json_str(&j, target[0] ? target : "(default)");
+    jbuf_appendf(&j, ",\"ok\":%s,\"exit\":%d,\"ms\":%.0f,\"errors\":[", ec == 0 ? "true" : "false",
+                 ec, ms);
+    int ne = 0, nw = 0;
+    jbuf_t warns;
+    jbuf_init(&warns, 4096);
+    char *ls = NULL;
+    char *bc = strdup(buf);
+    for (char *ln = strtok_r(bc, "\n", &ls); ln; ln = strtok_r(NULL, "\n", &ls)) {
+        char clean[400];
+        cw_strip_ansi(ln, clean, sizeof(clean));
+        if (strstr(clean, " error:") || strstr(clean, "Undefined") || strstr(clean, "undefined ")) {
+            if (ne++ < 30) {
+                jbuf_append(&j, ne > 1 ? "," : "");
+                jbuf_append_json_str(&j, clean);
+            }
+        } else if (strstr(clean, " warning:")) {
+            if (nw++ < 30) {
+                jbuf_append(&warns, nw > 1 ? "," : "");
+                jbuf_append_json_str(&warns, clean);
+            }
+        }
+    }
+    free(bc);
+    jbuf_appendf(&j, "],\"error_count\":%d,\"warnings\":[", ne);
+    jbuf_append(&j, warns.data);
+    jbuf_appendf(&j, "],\"warning_count\":%d}", nw);
+    jbuf_free(&warns);
+    free(buf);
+    free(target);
+    size_t n = j.len < rlen - 1 ? j.len : rlen - 1;
+    memcpy(result, j.data, n);
+    result[n] = '\0';
+    jbuf_free(&j);
+    return ec == 0;
+}
+
+/* ── 7. preprocess — cc -E with project flags ───────────────────────────── */
+static bool tool_preprocess(const char *input, char *result, size_t rlen) {
+    char *file = json_get_str(input, "file");
+    if (!file || !file[0]) {
+        free(file);
+        snprintf(result, rlen, "{\"error\":\"file required\"}");
+        return false;
+    }
+    char *argv_s[256];
+    int argc = diag_build_argv(file, argv_s, 256);
+    if (argc < 0) {
+        free(file);
+        snprintf(result, rlen, "{\"error\":\"could not read compile_commands.json\"}");
+        return false;
+    }
+    for (int i = 0; i < argc; i++)
+        if (strcmp(argv_s[i], "-fsyntax-only") == 0) {
+            free(argv_s[i]);
+            argv_s[i] = strdup("-E");
+        }
+    char *out = malloc(262144);
+    out[0] = '\0';
+    safe_exec_argv((const char *const *)argv_s, out, 262144);
+    for (int i = 0; i < argc; i++)
+        free(argv_s[i]);
+    jbuf_t j;
+    jbuf_init(&j, 4096);
+    jbuf_append(&j, "{\"file\":");
+    jbuf_append_json_str(&j, file);
+    jbuf_append(&j, ",\"expanded\":");
+    jbuf_append_json_str(&j, out);
+    jbuf_append(&j, "}");
+    free(out);
+    free(file);
+    size_t n = j.len < rlen - 1 ? j.len : rlen - 1;
+    memcpy(result, j.data, n);
+    result[n] = '\0';
+    jbuf_free(&j);
+    return true;
+}
+
+/* ── 8. disasm — disassemble one symbol from a binary ───────────────────── */
+static bool tool_disasm(const char *input, char *result, size_t rlen) {
+    char *sym = json_get_str(input, "symbol");
+    char *bin = json_get_str(input, "binary");
+    if (!cw_valid_ident(sym)) {
+        free(sym);
+        free(bin);
+        snprintf(result, rlen, "{\"error\":\"valid symbol name required\"}");
+        return false;
+    }
+    jbuf_t cmd;
+    jbuf_init(&cmd, 256);
+    /* mach-o prefixes C symbols with '_'; pass both so main and _main match. */
+    jbuf_append(&cmd, "objdump --disassemble-symbols=");
+    jbuf_append(&cmd, sym);
+    jbuf_append(&cmd, ",_");
+    jbuf_append(&cmd, sym); /* validated identifier */
+    jbuf_append(&cmd, " ");
+    shell_quote(&cmd, (bin && bin[0]) ? bin : "dsco");
+    jbuf_append(&cmd, " 2>&1 | head -400");
+    bool ok = cw_run_json(cmd.data, "disassembly", result, rlen);
+    jbuf_free(&cmd);
+    free(sym);
+    free(bin);
+    return ok;
+}
+
+/* ── 9. unused_symbols — static functions referenced only at their def ──── */
+static void cw_unused_walk(const char *root, const char *rel, jbuf_t *out, int *n) {
+    char path[2048];
+    snprintf(path, sizeof(path), "%s/%s", root, rel[0] ? rel : ".");
+    DIR *d = opendir(path);
+    if (!d)
+        return;
+    struct dirent *e;
+    while ((e = readdir(d)) != NULL && *n < 200) {
+        if (e->d_name[0] == '.')
+            continue;
+        char childrel[1024];
+        if (rel[0])
+            snprintf(childrel, sizeof(childrel), "%s/%s", rel, e->d_name);
+        else
+            snprintf(childrel, sizeof(childrel), "%s", e->d_name);
+        char childpath[2400];
+        snprintf(childpath, sizeof(childpath), "%s/%s", root, childrel);
+        struct stat st;
+        if (stat(childpath, &st) != 0)
+            continue;
+        if (S_ISDIR(st.st_mode)) {
+            if (strcmp(e->d_name, "build") == 0 || strcmp(e->d_name, "gsl") == 0 ||
+                strcmp(e->d_name, "vendor") == 0)
+                continue;
+            cw_unused_walk(root, childrel, out, n);
+            continue;
+        }
+        size_t dl = strlen(e->d_name);
+        if (dl < 3 || strcmp(e->d_name + dl - 2, ".c") != 0)
+            continue;
+        long flen = 0;
+        char *txt = cw_read_file(childpath, &flen);
+        if (!txt)
+            continue;
+        ast_file_t *f = ast_parse_file(childpath);
+        if (f) {
+            for (int i = 0; i < f->count && *n < 200; i++) {
+                ast_node_t *nd = &f->nodes[i];
+                if (nd->type != AST_FUNCTION || !nd->is_static || !nd->name)
+                    continue;
+                /* count whole-word occurrences in the file text */
+                size_t nl = strlen(nd->name);
+                int refs = 0;
+                const char *p = txt;
+                while ((p = strstr(p, nd->name)) != NULL) {
+                    char before = (p == txt) ? '\0' : p[-1];
+                    char after = p[nl];
+                    if (!cw_ident_char(before) && !cw_ident_char(after))
+                        refs++;
+                    p += nl;
+                }
+                if (refs <= 1) {
+                    if (*n)
+                        jbuf_append(out, ",");
+                    jbuf_append(out, "{\"file\":");
+                    jbuf_append_json_str(out, childrel);
+                    jbuf_appendf(out, ",\"line\":%d,\"name\":", nd->line_start);
+                    jbuf_append_json_str(out, nd->name);
+                    jbuf_append(out, "}");
+                    (*n)++;
+                }
+            }
+            ast_free_file(f);
+        }
+        free(txt);
+    }
+    closedir(d);
+}
+
+static bool tool_unused_symbols(const char *input, char *result, size_t rlen) {
+    char cwd[1024];
+    const char *root = cw_repo_root(cwd, sizeof(cwd));
+    jbuf_t out;
+    jbuf_init(&out, 8192);
+    jbuf_append(&out, "{\"unused_static_functions\":[");
+    int n = 0;
+    char *paths = json_get_str(input, "paths");
+    if (paths && paths[0])
+        cw_unused_walk(root, paths, &out, &n);
+    else
+        cw_unused_walk(root, "src", &out, &n);
+    free(paths);
+    jbuf_appendf(&out, "],\"count\":%d,\"note\":\"static fns referenced only at their definition "
+                       "(single-file scope)\"}",
+                 n);
+    size_t nn = out.len < rlen - 1 ? out.len : rlen - 1;
+    memcpy(result, out.data, nn);
+    result[nn] = '\0';
+    jbuf_free(&out);
+    return true;
+}
+
+/* ── 10. abi_diff — exported-symbol diff between two binaries ────────────── */
+static bool tool_abi_diff(const char *input, char *result, size_t rlen) {
+    char *a = json_get_str(input, "a");
+    char *b = json_get_str(input, "b");
+    if (!a || !a[0] || !b || !b[0]) {
+        free(a);
+        free(b);
+        snprintf(result, rlen, "{\"error\":\"a and b (binaries) required\"}");
+        return false;
+    }
+    jbuf_t cmd;
+    jbuf_init(&cmd, 512);
+    jbuf_append(&cmd, "nm -gU ");
+    shell_quote(&cmd, a);
+    jbuf_append(&cmd, " 2>/dev/null | awk '{print $NF}' | sort -u > /tmp/dsco_abi_a; nm -gU ");
+    shell_quote(&cmd, b);
+    jbuf_append(&cmd, " 2>/dev/null | awk '{print $NF}' | sort -u > /tmp/dsco_abi_b; "
+                      "echo '=== removed (only in a) ==='; comm -23 /tmp/dsco_abi_a /tmp/dsco_abi_b;"
+                      " echo '=== added (only in b) ==='; comm -13 /tmp/dsco_abi_a /tmp/dsco_abi_b");
+    bool ok = cw_run_json(cmd.data, "diff", result, rlen);
+    jbuf_free(&cmd);
+    free(a);
+    free(b);
+    return ok;
+}
+
+/* insert nf flags at index `at` into a NULL-capable argv of length argc. */
+static int cw_argv_insert(char **argv, int argc, int at, const char *const *flags, int nf) {
+    for (int i = argc + nf - 1; i >= at + nf; i--)
+        argv[i] = argv[i - nf];
+    for (int i = 0; i < nf; i++)
+        argv[at + i] = strdup(flags[i]);
+    return argc + nf;
+}
+
+/* ── 11. lint — clang-tidy findings ─────────────────────────────────────── */
+static bool tool_lint(const char *input, char *result, size_t rlen) {
+    char *file = json_get_str(input, "file");
+    if (!file || !file[0]) {
+        free(file);
+        snprintf(result, rlen, "{\"error\":\"file required\"}");
+        return false;
+    }
+    jbuf_t cmd;
+    jbuf_init(&cmd, 256);
+    jbuf_append(&cmd, "clang-tidy ");
+    shell_quote(&cmd, file);
+    jbuf_append(&cmd, " 2>&1 | grep -aE 'warning:|error:' | head -100");
+    bool ok = cw_run_json(cmd.data, "findings", result, rlen);
+    jbuf_free(&cmd);
+    free(file);
+    return ok;
+}
+
+/* ── 12. format_code — clang-format in place ────────────────────────────── */
+static bool tool_format_code(const char *input, char *result, size_t rlen) {
+    char *file = json_get_str(input, "file");
+    char *lines = json_get_str(input, "lines");
+    if (!file || !file[0]) {
+        free(file);
+        free(lines);
+        snprintf(result, rlen, "{\"error\":\"file required\"}");
+        return false;
+    }
+    jbuf_t cmd;
+    jbuf_init(&cmd, 256);
+    jbuf_append(&cmd, "clang-format -i ");
+    if (lines && lines[0]) {
+        bool okl = true;
+        for (char *p = lines; *p; p++)
+            if (!isdigit((unsigned char)*p) && *p != ':')
+                okl = false;
+        if (okl) {
+            jbuf_append(&cmd, "--lines=");
+            jbuf_append(&cmd, lines);
+            jbuf_append(&cmd, " ");
+        }
+    }
+    shell_quote(&cmd, file);
+    jbuf_append(&cmd, " 2>&1");
+    bool ok = cw_run_json(cmd.data, "output", result, rlen);
+    jbuf_free(&cmd);
+    free(file);
+    free(lines);
+    return ok;
+}
+
+/* ── 13. type_at — clang AST nodes on a line (type info) ────────────────── */
+static bool tool_type_at(const char *input, char *result, size_t rlen) {
+    char *file = json_get_str(input, "file");
+    int line = json_get_int(input, "line", 0);
+    if (!file || !file[0] || line < 1) {
+        free(file);
+        snprintf(result, rlen, "{\"error\":\"file and line required\"}");
+        return false;
+    }
+    char *argv_s[256];
+    int argc = diag_build_argv(file, argv_s, 250);
+    if (argc < 0) {
+        free(file);
+        snprintf(result, rlen, "{\"error\":\"no compile_commands.json\"}");
+        return false;
+    }
+    int idx = argc - 1;
+    for (int i = 0; i < argc; i++)
+        if (strcmp(argv_s[i], "-fsyntax-only") == 0) {
+            idx = i;
+            break;
+        }
+    const char *extra[] = {"-Xclang", "-ast-dump", "-ferror-limit=0"};
+    argc = cw_argv_insert(argv_s, argc, idx, extra, 3);
+    argv_s[argc] = NULL;
+    char *out = malloc(1048576);
+    out[0] = '\0';
+    safe_exec_argv((const char *const *)argv_s, out, 1048576);
+    for (int i = 0; i < argc; i++)
+        free(argv_s[i]);
+    char pat[32];
+    snprintf(pat, sizeof(pat), ":%d:", line);
+    jbuf_t j;
+    jbuf_init(&j, 8192);
+    jbuf_append(&j, "{\"file\":");
+    jbuf_append_json_str(&j, file);
+    jbuf_appendf(&j, ",\"line\":%d,\"ast_nodes\":[", line);
+    int nn = 0;
+    char *ls = NULL;
+    char *oc = strdup(out);
+    for (char *l = strtok_r(oc, "\n", &ls); l && nn < 40; l = strtok_r(NULL, "\n", &ls)) {
+        if (!strstr(l, pat))
+            continue;
+        char clean[400];
+        cw_strip_ansi(l, clean, sizeof(clean));
+        char *s = clean;
+        while (*s && (*s == '|' || *s == '`' || *s == '-' || *s == ' '))
+            s++;
+        if (nn)
+            jbuf_append(&j, ",");
+        jbuf_append_json_str(&j, s);
+        nn++;
+    }
+    free(oc);
+    free(out);
+    jbuf_appendf(&j, "],\"count\":%d}", nn);
+    free(file);
+    size_t n = j.len < rlen - 1 ? j.len : rlen - 1;
+    memcpy(result, j.data, n);
+    result[n] = '\0';
+    jbuf_free(&j);
+    return true;
+}
+
+/* ── 14. include_graph — header include tree (cc -H) ────────────────────── */
+static bool tool_include_graph(const char *input, char *result, size_t rlen) {
+    char *file = json_get_str(input, "file");
+    if (!file || !file[0]) {
+        free(file);
+        snprintf(result, rlen, "{\"error\":\"file required\"}");
+        return false;
+    }
+    char *argv_s[256];
+    int argc = diag_build_argv(file, argv_s, 252);
+    if (argc < 0) {
+        free(file);
+        snprintf(result, rlen, "{\"error\":\"no compile_commands.json\"}");
+        return false;
+    }
+    int idx = argc - 1;
+    for (int i = 0; i < argc; i++)
+        if (strcmp(argv_s[i], "-fsyntax-only") == 0) {
+            idx = i;
+            break;
+        }
+    const char *extra[] = {"-H"};
+    argc = cw_argv_insert(argv_s, argc, idx, extra, 1);
+    argv_s[argc] = NULL;
+    char *out = malloc(262144);
+    out[0] = '\0';
+    safe_exec_argv((const char *const *)argv_s, out, 262144);
+    for (int i = 0; i < argc; i++)
+        free(argv_s[i]);
+    jbuf_t j;
+    jbuf_init(&j, 8192);
+    jbuf_append(&j, "{\"file\":");
+    jbuf_append_json_str(&j, file);
+    jbuf_append(&j, ",\"includes\":[");
+    int nn = 0;
+    char *ls = NULL;
+    char *oc = strdup(out);
+    for (char *l = strtok_r(oc, "\n", &ls); l && nn < 300; l = strtok_r(NULL, "\n", &ls)) {
+        if (l[0] != '.')
+            continue; /* -H prefixes include lines with dots (depth) */
+        if (nn)
+            jbuf_append(&j, ",");
+        jbuf_append_json_str(&j, l);
+        nn++;
+    }
+    free(oc);
+    free(out);
+    jbuf_appendf(&j, "],\"count\":%d}", nn);
+    free(file);
+    size_t n = j.len < rlen - 1 ? j.len : rlen - 1;
+    memcpy(result, j.data, n);
+    result[n] = '\0';
+    jbuf_free(&j);
+    return true;
+}
+
+/* ── 15. api_outline — public signatures from a file (AST) ──────────────── */
+static bool tool_api_outline(const char *input, char *result, size_t rlen) {
+    char *file = json_get_str(input, "file");
+    if (!file || !file[0]) {
+        free(file);
+        snprintf(result, rlen, "{\"error\":\"file required\"}");
+        return false;
+    }
+    ast_file_t *f = ast_parse_file(file);
+    if (!f) {
+        free(file);
+        snprintf(result, rlen, "{\"error\":\"parse failed\"}");
+        return false;
+    }
+    jbuf_t j;
+    jbuf_init(&j, 8192);
+    jbuf_append(&j, "{\"file\":");
+    jbuf_append_json_str(&j, file);
+    jbuf_append(&j, ",\"api\":[");
+    int nn = 0;
+    for (int i = 0; i < f->count; i++) {
+        ast_node_t *nd = &f->nodes[i];
+        if (!nd->name || nd->type == AST_INCLUDE)
+            continue;
+        if (nd->type == AST_FUNCTION && nd->is_static)
+            continue;
+        if (nn)
+            jbuf_append(&j, ",");
+        jbuf_appendf(&j, "{\"type\":\"%s\",\"line\":%d,\"name\":", ast_node_type_label(nd->type),
+                     nd->line_start);
+        jbuf_append_json_str(&j, nd->name);
+        if (nd->type == AST_FUNCTION) {
+            char sig[640];
+            snprintf(sig, sizeof(sig), "%s %s(%s)", nd->return_type ? nd->return_type : "",
+                     nd->name, nd->params ? nd->params : "");
+            jbuf_append(&j, ",\"signature\":");
+            jbuf_append_json_str(&j, sig);
+        }
+        jbuf_append(&j, "}");
+        nn++;
+    }
+    ast_free_file(f);
+    jbuf_appendf(&j, "],\"count\":%d}", nn);
+    free(file);
+    size_t n = j.len < rlen - 1 ? j.len : rlen - 1;
+    memcpy(result, j.data, n);
+    result[n] = '\0';
+    jbuf_free(&j);
+    return true;
+}
+
+/* ── 16. git_blame ──────────────────────────────────────────────────────── */
+static bool tool_git_blame(const char *input, char *result, size_t rlen) {
+    char *file = json_get_str(input, "file");
+    int start = json_get_int(input, "start", 0);
+    int end = json_get_int(input, "end", 0);
+    if (!file || !file[0]) {
+        free(file);
+        snprintf(result, rlen, "{\"error\":\"file required\"}");
+        return false;
+    }
+    jbuf_t cmd;
+    jbuf_init(&cmd, 256);
+    jbuf_append(&cmd, "git blame ");
+    if (start > 0 && end >= start)
+        jbuf_appendf(&cmd, "-L %d,%d ", start, end);
+    shell_quote(&cmd, file);
+    jbuf_append(&cmd, (start > 0) ? " 2>&1" : " 2>&1 | head -200");
+    bool ok = cw_run_json(cmd.data, "blame", result, rlen);
+    jbuf_free(&cmd);
+    free(file);
+    return ok;
+}
+
+/* ── 17. git_log_symbol — pickaxe history of a symbol ───────────────────── */
+static bool tool_git_log_symbol(const char *input, char *result, size_t rlen) {
+    char *sym = json_get_str(input, "symbol");
+    char *file = json_get_str(input, "file");
+    if (!cw_valid_ident(sym)) {
+        free(sym);
+        free(file);
+        snprintf(result, rlen, "{\"error\":\"valid symbol required\"}");
+        return false;
+    }
+    jbuf_t cmd;
+    jbuf_init(&cmd, 256);
+    jbuf_append(&cmd, "git log -S");
+    jbuf_append(&cmd, sym); /* validated identifier */
+    jbuf_append(&cmd, " --oneline -30");
+    if (file && file[0]) {
+        jbuf_append(&cmd, " -- ");
+        shell_quote(&cmd, file);
+    }
+    jbuf_append(&cmd, " 2>&1");
+    bool ok = cw_run_json(cmd.data, "commits", result, rlen);
+    jbuf_free(&cmd);
+    free(sym);
+    free(file);
+    return ok;
+}
+
+/* ── 18. git_bisect — automated bisect over a test command ──────────────── */
+static bool tool_git_bisect(const char *input, char *result, size_t rlen) {
+    char *good = json_get_str(input, "good");
+    char *bad = json_get_str(input, "bad");
+    char *command = json_get_str(input, "command");
+    if (!good || !good[0] || !bad || !bad[0] || !command || !command[0]) {
+        free(good);
+        free(bad);
+        free(command);
+        snprintf(result, rlen, "{\"error\":\"good, bad, command required\"}");
+        return false;
+    }
+    jbuf_t cmd;
+    jbuf_init(&cmd, 512 + strlen(command));
+    jbuf_append(&cmd, "git bisect start ");
+    shell_quote(&cmd, bad);
+    jbuf_append(&cmd, " ");
+    shell_quote(&cmd, good);
+    jbuf_append(&cmd, " && git bisect run sh -c ");
+    shell_quote(&cmd, command);
+    jbuf_append(&cmd, "; git bisect reset 2>&1");
+    bool ok = cw_run_json(cmd.data, "bisect", result, rlen);
+    jbuf_free(&cmd);
+    free(good);
+    free(bad);
+    free(command);
+    return ok;
+}
+
+/* ── 19. stage_hunk — stage a patch to the index (git apply --cached) ───── */
+static bool tool_stage_hunk(const char *input, char *result, size_t rlen) {
+    char *patch = json_get_str(input, "patch");
+    if (!patch || !patch[0]) {
+        free(patch);
+        snprintf(result, rlen, "{\"error\":\"patch required\"}");
+        return false;
+    }
+    FILE *pf = fopen("/tmp/dsco_stage.patch", "w");
+    if (pf) {
+        fputs(patch, pf);
+        fclose(pf);
+    }
+    bool ok = cw_run_json("git apply --cached /tmp/dsco_stage.patch 2>&1 && echo staged", "output",
+                          result, rlen);
+    free(patch);
+    return ok;
+}
+
+/* ── 20. review_diff — structured working diff ──────────────────────────── */
+static bool tool_review_diff(const char *input, char *result, size_t rlen) {
+    bool staged = json_get_bool(input, "staged", false);
+    char *pathf = json_get_str(input, "path");
+    jbuf_t cmd;
+    jbuf_init(&cmd, 256);
+    jbuf_append(&cmd, "git diff");
+    if (staged)
+        jbuf_append(&cmd, " --staged");
+    jbuf_append(&cmd, " --numstat");
+    if (pathf && pathf[0]) {
+        jbuf_append(&cmd, " -- ");
+        shell_quote(&cmd, pathf);
+    }
+    jbuf_append(&cmd, " 2>&1");
+    char *buf = malloc(131072);
+    buf[0] = '\0';
+    run_cmd(cmd.data, buf, 131072);
+    jbuf_free(&cmd);
+    jbuf_t j;
+    jbuf_init(&j, 8192);
+    jbuf_appendf(&j, "{\"staged\":%s,\"files\":[", staged ? "true" : "false");
+    int nf = 0, add_tot = 0, del_tot = 0;
+    char *ls = NULL;
+    char *bc = strdup(buf);
+    for (char *l = strtok_r(bc, "\n", &ls); l && nf < 300; l = strtok_r(NULL, "\n", &ls)) {
+        int a = 0, del = 0;
+        char pth[1024];
+        if (sscanf(l, "%d\t%d\t%1023[^\n]", &a, &del, pth) == 3) {
+            if (nf)
+                jbuf_append(&j, ",");
+            jbuf_appendf(&j, "{\"added\":%d,\"removed\":%d,\"path\":", a, del);
+            jbuf_append_json_str(&j, pth);
+            jbuf_append(&j, "}");
+            add_tot += a;
+            del_tot += del;
+            nf++;
+        }
+    }
+    free(bc);
+    jbuf_appendf(&j, "],\"file_count\":%d,\"added\":%d,\"removed\":%d}", nf, add_tot, del_tot);
+    free(buf);
+    free(pathf);
+    size_t n = j.len < rlen - 1 ? j.len : rlen - 1;
+    memcpy(result, j.data, n);
+    result[n] = '\0';
+    jbuf_free(&j);
+    return true;
+}
+
+typedef struct {
+    char path[PATH_MAX];
+    time_t mtime;
+    off_t size;
+} cw_fs_snap_t;
+
+typedef struct {
+    cw_fs_snap_t *items;
+    int count;
+    int cap;
+    int limit;
+    bool truncated;
+} cw_fs_snap_set_t;
+
+static int cw_clamp_int(int v, int lo, int hi) {
+    if (v < lo)
+        return lo;
+    if (v > hi)
+        return hi;
+    return v;
+}
+
+static bool cw_contains_ci(const char *haystack, const char *needle) {
+    if (!haystack || !needle || !needle[0])
+        return false;
+    size_t nl = strlen(needle);
+    for (const char *p = haystack; *p; p++) {
+        size_t i = 0;
+        while (i < nl && p[i] && tolower((unsigned char)p[i]) == tolower((unsigned char)needle[i]))
+            i++;
+        if (i == nl)
+            return true;
+    }
+    return false;
+}
+
+static bool cw_archive_files_safe(const char *s) {
+    if (!s || !s[0])
+        return false;
+    for (const char *p = s; *p; p++) {
+        if (isalnum((unsigned char)*p) || strchr("_-./, ", *p))
+            continue;
+        return false;
+    }
+    return true;
+}
+
+static bool cw_valid_host_token(const char *s) {
+    if (!s || !s[0])
+        return false;
+    for (const char *p = s; *p; p++) {
+        if (isalnum((unsigned char)*p) || strchr(".-_:[]", *p))
+            continue;
+        return false;
+    }
+    return true;
+}
+
+static bool cw_valid_signal_name(const char *s) {
+    if (!s || !s[0])
+        return false;
+    for (const char *p = s; *p; p++) {
+        if (isalnum((unsigned char)*p) || *p == '_')
+            continue;
+        return false;
+    }
+    return true;
+}
+
+static bool cw_snap_add(cw_fs_snap_set_t *set, const char *path, const struct stat *st) {
+    if (!set || !path || !st)
+        return false;
+    if (set->count >= set->limit) {
+        set->truncated = true;
+        return false;
+    }
+    if (set->count == set->cap) {
+        int ncap = set->cap ? set->cap * 2 : 128;
+        if (ncap > set->limit)
+            ncap = set->limit;
+        cw_fs_snap_t *next = realloc(set->items, sizeof(*next) * (size_t)ncap);
+        if (!next) {
+            set->truncated = true;
+            return false;
+        }
+        set->items = next;
+        set->cap = ncap;
+    }
+    cw_fs_snap_t *it = &set->items[set->count++];
+    snprintf(it->path, sizeof(it->path), "%s", path);
+    it->mtime = st->st_mtime;
+    it->size = st->st_size;
+    return true;
+}
+
+static void cw_snapshot_walk(const char *path, int depth, int max_depth, cw_fs_snap_set_t *set) {
+    if (!path || !set || set->truncated)
+        return;
+    struct stat st;
+    if (lstat(path, &st) != 0)
+        return;
+    if (S_ISREG(st.st_mode)) {
+        cw_snap_add(set, path, &st);
+        return;
+    }
+    if (!S_ISDIR(st.st_mode) || depth >= max_depth)
+        return;
+    DIR *d = opendir(path);
+    if (!d)
+        return;
+    struct dirent *e;
+    while ((e = readdir(d)) != NULL) {
+        if (strcmp(e->d_name, ".") == 0 || strcmp(e->d_name, "..") == 0)
+            continue;
+        if (strcmp(e->d_name, ".git") == 0 || strcmp(e->d_name, "node_modules") == 0)
+            continue;
+        char child[PATH_MAX];
+        int n = snprintf(child, sizeof(child), "%s/%s", path, e->d_name);
+        if (n < 0 || (size_t)n >= sizeof(child)) {
+            set->truncated = true;
+            continue;
+        }
+        cw_snapshot_walk(child, depth + 1, max_depth, set);
+        if (set->truncated)
+            break;
+    }
+    closedir(d);
+}
+
+static int cw_snap_find(const cw_fs_snap_set_t *set, const char *path) {
+    if (!set || !path)
+        return -1;
+    for (int i = 0; i < set->count; i++)
+        if (strcmp(set->items[i].path, path) == 0)
+            return i;
+    return -1;
+}
+
+static void cw_snap_free(cw_fs_snap_set_t *set) {
+    if (!set)
+        return;
+    free(set->items);
+    memset(set, 0, sizeof(*set));
+}
+
+static void cw_append_snap_event(jbuf_t *j, const cw_fs_snap_t *it) {
+    jbuf_append(j, "{\"path\":");
+    jbuf_append_json_str(j, it->path);
+    jbuf_appendf(j, ",\"size\":%lld,\"mtime\":%lld}", (long long)it->size, (long long)it->mtime);
+}
+
+static void cw_applescript_json_string(jbuf_t *b, const char *s) {
+    jbuf_append(b, "\"");
+    for (const char *p = s ? s : ""; *p; p++) {
+        if (*p == '\\' || *p == '"')
+            jbuf_appendf(b, "\\%c", *p);
+        else if (*p == '\n' || *p == '\r' || *p == '\t')
+            jbuf_append(b, " ");
+        else
+            jbuf_appendf(b, "%c", *p);
+    }
+    jbuf_append(b, "\"");
+}
+
+/* ── 21. fs_watch — bounded filesystem change snapshot ─────────────────── */
+static bool tool_fs_watch(const char *input, char *result, size_t rlen) {
+    char *path = json_get_str(input, "path");
+    if (!path || !path[0]) {
+        free(path);
+        path = strdup(".");
+    }
+    int seconds = cw_clamp_int(json_get_int(input, "seconds", 2), 0, 30);
+    int depth = cw_clamp_int(json_get_int(input, "depth", 4), 0, 12);
+    int limit = cw_clamp_int(json_get_int(input, "limit", 1000), 1, 5000);
+    struct stat st;
+    if (lstat(path, &st) != 0) {
+        snprintf(result, rlen, "{\"error\":\"path not found\"}");
+        free(path);
+        return false;
+    }
+    cw_fs_snap_set_t before = {.limit = limit};
+    cw_fs_snap_set_t after = {.limit = limit};
+    cw_snapshot_walk(path, 0, depth, &before);
+    if (seconds > 0)
+        sleep((unsigned int)seconds);
+    cw_snapshot_walk(path, 0, depth, &after);
+
+    jbuf_t j;
+    jbuf_init(&j, 8192);
+    jbuf_append(&j, "{\"path\":");
+    jbuf_append_json_str(&j, path);
+    jbuf_appendf(&j, ",\"seconds\":%d,\"depth\":%d,\"truncated\":%s,\"created\":[", seconds, depth,
+                 (before.truncated || after.truncated) ? "true" : "false");
+    int created = 0, changed = 0, deleted = 0;
+    for (int i = 0; i < after.count; i++) {
+        int bi = cw_snap_find(&before, after.items[i].path);
+        if (bi >= 0)
+            continue;
+        if (created++)
+            jbuf_append(&j, ",");
+        cw_append_snap_event(&j, &after.items[i]);
+    }
+    jbuf_append(&j, "],\"changed\":[");
+    for (int i = 0; i < after.count; i++) {
+        int bi = cw_snap_find(&before, after.items[i].path);
+        if (bi < 0)
+            continue;
+        if (before.items[bi].mtime == after.items[i].mtime &&
+            before.items[bi].size == after.items[i].size)
+            continue;
+        if (changed++)
+            jbuf_append(&j, ",");
+        cw_append_snap_event(&j, &after.items[i]);
+    }
+    jbuf_append(&j, "],\"deleted\":[");
+    for (int i = 0; i < before.count; i++) {
+        if (cw_snap_find(&after, before.items[i].path) >= 0)
+            continue;
+        if (deleted++)
+            jbuf_append(&j, ",");
+        cw_append_snap_event(&j, &before.items[i]);
+    }
+    jbuf_appendf(&j, "],\"created_count\":%d,\"changed_count\":%d,\"deleted_count\":%d}", created,
+                 changed, deleted);
+    size_t n = j.len < rlen - 1 ? j.len : rlen - 1;
+    memcpy(result, j.data, n);
+    result[n] = '\0';
+    jbuf_free(&j);
+    cw_snap_free(&before);
+    cw_snap_free(&after);
+    free(path);
+    return true;
+}
+
+/* ── 22. tail_follow — bounded tail -f wrapper ─────────────────────────── */
+static bool tool_tail_follow(const char *input, char *result, size_t rlen) {
+    char *file = json_get_str(input, "file");
+    int lines = cw_clamp_int(json_get_int(input, "lines", 40), 1, 1000);
+    int seconds = cw_clamp_int(json_get_int(input, "seconds", 0), 0, 30);
+    if (!file || !file[0]) {
+        free(file);
+        snprintf(result, rlen, "{\"error\":\"file required\"}");
+        return false;
+    }
+    jbuf_t cmd;
+    jbuf_init(&cmd, 256);
+    if (seconds > 0) {
+        jbuf_appendf(&cmd, "{ tail -n %d -f ", lines);
+        shell_quote(&cmd, file);
+        jbuf_appendf(&cmd,
+                     " & pid=$!; sleep %d; kill $pid 2>/dev/null; wait $pid 2>/dev/null; "
+                     "true; } 2>&1",
+                     seconds);
+    } else {
+        jbuf_appendf(&cmd, "tail -n %d ", lines);
+        shell_quote(&cmd, file);
+        jbuf_append(&cmd, " 2>&1");
+    }
+    bool ok = cw_run_json(cmd.data, "tail", result, rlen);
+    jbuf_free(&cmd);
+    free(file);
+    return ok;
+}
+
+/* ── 23. lsof — open files/sockets by pid, path, or port ───────────────── */
+static bool tool_lsof(const char *input, char *result, size_t rlen) {
+    char *path = json_get_str(input, "path");
+    int pid = json_get_int(input, "pid", 0);
+    int port = json_get_int(input, "port", 0);
+    jbuf_t cmd;
+    jbuf_init(&cmd, 256);
+    if (pid > 0) {
+        jbuf_appendf(&cmd, "lsof -nP -p %d 2>&1 | head -200", pid);
+    } else if (port > 0 && port <= 65535) {
+        jbuf_appendf(&cmd, "lsof -nP -iTCP:%d -sTCP:LISTEN 2>&1 | head -200", port);
+    } else if (path && path[0]) {
+        jbuf_append(&cmd, "lsof -nP -- ");
+        shell_quote(&cmd, path);
+        jbuf_append(&cmd, " 2>&1 | head -200");
+    } else {
+        jbuf_append(&cmd, "lsof -nP 2>&1 | head -200");
+    }
+    bool ok = cw_run_json(cmd.data, "lsof", result, rlen);
+    jbuf_free(&cmd);
+    free(path);
+    return ok;
+}
+
+/* ── 24. clipboard — read/write system clipboard ──────────────────────── */
+static bool tool_clipboard_deep(const char *input, char *result, size_t rlen) {
+    char *action = json_get_str(input, "action");
+    char *text = json_get_str(input, "text");
+    if (!action || !action[0]) {
+        free(action);
+        action = strdup("read");
+    }
+    jbuf_t cmd;
+    jbuf_init(&cmd, 256 + (text ? strlen(text) : 0));
+    bool ok;
+    if (strcmp(action, "read") == 0 || strcmp(action, "paste") == 0) {
+        jbuf_append(&cmd, "{ pbpaste 2>/dev/null || xclip -selection clipboard -o 2>/dev/null || "
+                          "wl-paste 2>/dev/null; }");
+        ok = cw_run_json(cmd.data, "text", result, rlen);
+    } else if (strcmp(action, "write") == 0 || strcmp(action, "copy") == 0) {
+        if (!text) {
+            snprintf(result, rlen, "{\"error\":\"text required for write\"}");
+            ok = false;
+        } else {
+            jbuf_append(&cmd, "printf %s ");
+            shell_quote(&cmd, text);
+            jbuf_append(&cmd,
+                        " | { pbcopy 2>/dev/null || xclip -selection clipboard 2>/dev/null || "
+                        "wl-copy 2>/dev/null; }");
+            ok = cw_run_json(cmd.data, "output", result, rlen);
+        }
+    } else {
+        snprintf(result, rlen, "{\"error\":\"action must be read or write\"}");
+        ok = false;
+    }
+    jbuf_free(&cmd);
+    free(action);
+    free(text);
+    return ok;
+}
+
+/* ── 25. archive — create/list/extract tar.gz archives ─────────────────── */
+static bool tool_archive(const char *input, char *result, size_t rlen) {
+    char *action = json_get_str(input, "action");
+    char *archive = json_get_str(input, "archive");
+    char *files = json_get_str(input, "files");
+    char *dest = json_get_str(input, "dest");
+    if (!dest)
+        dest = json_get_str(input, "destination");
+    if (!action || !archive || !archive[0]) {
+        snprintf(result, rlen, "{\"error\":\"action and archive required\"}");
+        free(action);
+        free(archive);
+        free(files);
+        free(dest);
+        return false;
+    }
+    jbuf_t cmd;
+    jbuf_init(&cmd, 512 + (files ? strlen(files) : 0));
+    if (strcmp(action, "create") == 0) {
+        if (!cw_archive_files_safe(files)) {
+            snprintf(result, rlen, "{\"error\":\"safe files string required for create\"}");
+            jbuf_free(&cmd);
+            free(action);
+            free(archive);
+            free(files);
+            free(dest);
+            return false;
+        }
+        jbuf_append(&cmd, "tar -czf ");
+        shell_quote(&cmd, archive);
+        jbuf_append(&cmd, " ");
+        jbuf_append(&cmd, files);
+        jbuf_append(&cmd, " 2>&1");
+    } else if (strcmp(action, "list") == 0) {
+        jbuf_append(&cmd, "tar -tzf ");
+        shell_quote(&cmd, archive);
+        jbuf_append(&cmd, " 2>&1 | head -200");
+    } else if (strcmp(action, "extract") == 0) {
+        jbuf_append(&cmd, "mkdir -p ");
+        shell_quote(&cmd, (dest && dest[0]) ? dest : ".");
+        jbuf_append(&cmd, " && tar -xzf ");
+        shell_quote(&cmd, archive);
+        jbuf_append(&cmd, " -C ");
+        shell_quote(&cmd, (dest && dest[0]) ? dest : ".");
+        jbuf_append(&cmd, " 2>&1");
+    } else {
+        snprintf(result, rlen, "{\"error\":\"action must be create, list, or extract\"}");
+        jbuf_free(&cmd);
+        free(action);
+        free(archive);
+        free(files);
+        free(dest);
+        return false;
+    }
+    bool ok = cw_run_json(cmd.data, "output", result, rlen);
+    jbuf_free(&cmd);
+    free(action);
+    free(archive);
+    free(files);
+    free(dest);
+    return ok;
+}
+
+/* ── 26. spawn_bg — launch a background command and return its pid ─────── */
+static bool tool_spawn_bg(const char *input, char *result, size_t rlen) {
+    char *command = json_get_str(input, "command");
+    char *log = json_get_str(input, "log");
+    if (!command || !command[0]) {
+        free(command);
+        free(log);
+        snprintf(result, rlen, "{\"error\":\"command required\"}");
+        return false;
+    }
+    if (!log || !log[0]) {
+        free(log);
+        log = strdup("/tmp/dsco_spawn_bg.log");
+    }
+    jbuf_t cmd;
+    jbuf_init(&cmd, 256 + strlen(command) + strlen(log));
+    jbuf_append(&cmd, "nohup sh -c ");
+    shell_quote(&cmd, command);
+    jbuf_append(&cmd, " > ");
+    shell_quote(&cmd, log);
+    jbuf_append(&cmd, " 2>&1 < /dev/null & echo $!");
+    char out[256];
+    out[0] = '\0';
+    int rc = run_cmd(cmd.data, out, sizeof(out));
+    long pid = strtol(out, NULL, 10);
+    jbuf_t j;
+    jbuf_init(&j, 256);
+    jbuf_appendf(&j, "{\"ok\":%s,\"pid\":%ld,\"log\":", (rc == 0 && pid > 0) ? "true" : "false",
+                 pid);
+    jbuf_append_json_str(&j, log);
+    jbuf_append(&j, "}");
+    size_t n = j.len < rlen - 1 ? j.len : rlen - 1;
+    memcpy(result, j.data, n);
+    result[n] = '\0';
+    jbuf_free(&j);
+    jbuf_free(&cmd);
+    free(command);
+    free(log);
+    return rc == 0 && pid > 0;
+}
+
+/* ── 27. signal_process — send a signal to a process ───────────────────── */
+static bool tool_signal_process(const char *input, char *result, size_t rlen) {
+    int pid = json_get_int(input, "pid", 0);
+    char *sig = json_get_str(input, "signal");
+    if (!sig || !sig[0]) {
+        free(sig);
+        sig = strdup("TERM");
+    }
+    if (pid <= 0 || !cw_valid_signal_name(sig)) {
+        snprintf(result, rlen, "{\"error\":\"valid pid and signal required\"}");
+        free(sig);
+        return false;
+    }
+    jbuf_t cmd;
+    jbuf_init(&cmd, 128);
+    jbuf_appendf(&cmd, "kill -%s %d 2>&1 && echo signaled", sig, pid);
+    bool ok = cw_run_json(cmd.data, "output", result, rlen);
+    jbuf_free(&cmd);
+    free(sig);
+    return ok;
+}
+
+/* ── 28. net_probe — ping or TCP connect probe ─────────────────────────── */
+static bool tool_net_probe(const char *input, char *result, size_t rlen) {
+    char *host = json_get_str(input, "host");
+    int port = json_get_int(input, "port", 0);
+    int timeout = cw_clamp_int(json_get_int(input, "timeout", 3), 1, 15);
+    if (!cw_valid_host_token(host)) {
+        free(host);
+        snprintf(result, rlen, "{\"error\":\"valid host required\"}");
+        return false;
+    }
+    jbuf_t cmd;
+    jbuf_init(&cmd, 256);
+    if (port > 0 && port <= 65535) {
+        jbuf_append(&cmd, "(nc -vz -G ");
+        jbuf_appendf(&cmd, "%d ", timeout);
+        shell_quote(&cmd, host);
+        jbuf_appendf(&cmd, " %d 2>&1 || nc -vz -w %d ", port, timeout);
+        shell_quote(&cmd, host);
+        jbuf_appendf(&cmd, " %d 2>&1)", port);
+    } else {
+        jbuf_append(&cmd, "ping -c 3 ");
+        shell_quote(&cmd, host);
+        jbuf_append(&cmd, " 2>&1");
+    }
+    bool ok = cw_run_json(cmd.data, "probe", result, rlen);
+    jbuf_free(&cmd);
+    free(host);
+    return ok;
+}
+
+/* ── 29. env_scan — searchable, redacted environment inventory ─────────── */
+static bool tool_env_scan(const char *input, char *result, size_t rlen) {
+    char *pattern = json_get_str(input, "pattern");
+    bool reveal = json_get_bool(input, "reveal", false);
+    jbuf_t j;
+    jbuf_init(&j, 8192);
+    jbuf_append(&j, "{\"vars\":[");
+    int n = 0;
+    for (char **ep = environ; ep && *ep && n < 200; ep++) {
+        const char *eq = strchr(*ep, '=');
+        if (!eq)
+            continue;
+        size_t name_len = (size_t)(eq - *ep);
+        char name[256];
+        if (name_len >= sizeof(name))
+            name_len = sizeof(name) - 1;
+        memcpy(name, *ep, name_len);
+        name[name_len] = '\0';
+        const char *val = eq + 1;
+        if (pattern && pattern[0] && !cw_contains_ci(name, pattern) &&
+            !cw_contains_ci(val, pattern))
+            continue;
+        bool sensitive = cw_contains_ci(name, "key") || cw_contains_ci(name, "token") ||
+                         cw_contains_ci(name, "secret") || cw_contains_ci(name, "password") ||
+                         cw_contains_ci(name, "credential");
+        if (n)
+            jbuf_append(&j, ",");
+        jbuf_append(&j, "{\"name\":");
+        jbuf_append_json_str(&j, name);
+        jbuf_append(&j, ",\"sensitive\":");
+        jbuf_append(&j, sensitive ? "true" : "false");
+        jbuf_append(&j, ",\"value\":");
+        if (sensitive && !reveal) {
+            char red[64];
+            snprintf(red, sizeof(red), "<redacted:%zu>", strlen(val));
+            jbuf_append_json_str(&j, red);
+        } else {
+            jbuf_append_json_str(&j, val);
+        }
+        jbuf_append(&j, "}");
+        n++;
+    }
+    jbuf_appendf(&j, "],\"count\":%d,\"truncated\":%s}", n, n >= 200 ? "true" : "false");
+    size_t nn = j.len < rlen - 1 ? j.len : rlen - 1;
+    memcpy(result, j.data, nn);
+    result[nn] = '\0';
+    jbuf_free(&j);
+    free(pattern);
+    return true;
+}
+
+/* ── 30. notify — desktop/user notification ────────────────────────────── */
+static bool tool_notify(const char *input, char *result, size_t rlen) {
+    char *title = json_get_str(input, "title");
+    char *message = json_get_str(input, "message");
+    if (!message || !message[0]) {
+        free(title);
+        free(message);
+        snprintf(result, rlen, "{\"error\":\"message required\"}");
+        return false;
+    }
+    if (!title || !title[0]) {
+        free(title);
+        title = strdup("dsco");
+    }
+    jbuf_t script;
+    jbuf_init(&script, 256 + strlen(message) + strlen(title));
+    jbuf_append(&script, "display notification ");
+    cw_applescript_json_string(&script, message);
+    jbuf_append(&script, " with title ");
+    cw_applescript_json_string(&script, title);
+    jbuf_t cmd;
+    jbuf_init(&cmd, script.len + 64);
+#ifdef __APPLE__
+    jbuf_append(&cmd, "osascript -e ");
+    shell_quote(&cmd, script.data);
+    jbuf_append(&cmd, " 2>&1");
+#else
+    jbuf_append(&cmd, "printf %s ");
+    shell_quote(&cmd, message);
+#endif
+    bool ok = cw_run_json(cmd.data, "output", result, rlen);
+    jbuf_free(&cmd);
+    jbuf_free(&script);
+    free(title);
+    free(message);
+    return ok;
+}
+
 static bool tool_context_search(const char *input, char *result, size_t rlen) {
     char *query = json_get_str(input, "query");
     char *tool_filter = json_get_str(input, "tool");
@@ -12921,6 +16701,7 @@ static bool tool_context_search(const char *input, char *result, size_t rlen) {
     }
 
     bool ok = true;
+    ctx_store_rdlock();
     if (source_id <= 0 && (!facet || !*facet)) {
         ok = ctx_search_render(query, tool_filter, top_k, result, rlen);
     } else {
@@ -12960,6 +16741,7 @@ static bool tool_context_search(const char *input, char *result, size_t rlen) {
                      "use context_get_batch to retrieve multiple chunks in one call");
         }
     }
+    ctx_store_unlock();
     free(query);
     free(tool_filter);
     free(facet);
@@ -12978,6 +16760,7 @@ static bool tool_context_get(const char *input, char *result, size_t rlen) {
     if (max_chars > 24000)
         max_chars = 24000;
 
+    ctx_store_rdlock();
     int idx = ctx_find_index_by_id(chunk_id);
     if (idx < 0) {
         int oldest = g_ctx.count > 0 ? g_ctx.chunks[0].id : -1;
@@ -12987,6 +16770,7 @@ static bool tool_context_get(const char *input, char *result, size_t rlen) {
                  "active_chunk_range=%d-%d total_chunks=%d\n"
                  "next: rerun context_search with a focused query, or pin important chunks sooner",
                  chunk_id, oldest, newest, g_ctx.count);
+        ctx_store_unlock();
         return false;
     }
 
@@ -13002,6 +16786,7 @@ static bool tool_context_get(const char *input, char *result, size_t rlen) {
         n = 0;
     if ((size_t)n >= rlen - off) {
         result[rlen - 1] = '\0';
+        ctx_store_unlock();
         return true;
     }
     off += (size_t)n;
@@ -13022,6 +16807,7 @@ static bool tool_context_get(const char *input, char *result, size_t rlen) {
         snprintf(result + off, rlen - off, "\n\n... truncated (%zu/%zu chars shown)", copy_len,
                  c->text_len);
     }
+    ctx_store_unlock();
     return true;
 }
 
@@ -13064,6 +16850,7 @@ static bool tool_context_get_batch(const char *input, char *result, size_t rlen)
 
     size_t off = 0;
     int found = 0, missing = 0;
+    ctx_store_rdlock();
     for (int i = 0; i < id_count && off + 128 < rlen; i++) {
         int idx = ctx_find_index_by_id(ids[i]);
         if (idx < 0) {
@@ -13095,6 +16882,7 @@ static bool tool_context_get_batch(const char *input, char *result, size_t rlen)
     }
     if (found == 0) {
         snprintf(result, rlen, "error: none of %d chunk_ids found (likely evicted)", id_count);
+        ctx_store_unlock();
         return false;
     }
     int n =
@@ -13103,11 +16891,13 @@ static bool tool_context_get_batch(const char *input, char *result, size_t rlen)
     if (n > 0 && (size_t)n < rlen - off)
         off += (size_t)n;
     result[off] = '\0';
+    ctx_store_unlock();
     return true;
 }
 
 static bool tool_context_stats(const char *input, char *result, size_t rlen) {
     (void)input;
+    ctx_store_rdlock();
     if (g_ctx.count == 0) {
         snprintf(
             result, rlen,
@@ -13117,6 +16907,7 @@ static bool tool_context_stats(const char *input, char *result, size_t rlen) {
             (g_ctx_offloaded_bytes > g_ctx_reference_bytes)
                 ? (g_ctx_offloaded_bytes - g_ctx_reference_bytes) / 4
                 : 0);
+        ctx_store_unlock();
         return true;
     }
 
@@ -13182,6 +16973,7 @@ static bool tool_context_stats(const char *input, char *result, size_t rlen) {
         n = 0;
     if ((size_t)n >= rlen - off) {
         result[rlen - 1] = '\0';
+        ctx_store_unlock();
         return true;
     }
     off += (size_t)n;
@@ -13193,6 +16985,7 @@ static bool tool_context_stats(const char *input, char *result, size_t rlen) {
             break;
         off += (size_t)n;
     }
+    ctx_store_unlock();
     return true;
 }
 
@@ -13216,12 +17009,14 @@ static bool tool_context_summarize(const char *input, char *result, size_t rlen)
     if (max_chars > 1200)
         max_chars = 1200;
 
+    ctx_store_rdlock();
     ctx_hit_t hits[CTX_SEARCH_MAX_K];
     char mode[64];
     int n_hits = ctx_rank_hits_ladder(query, tool_filter, source_id, facet, top_k, hits,
                                       CTX_SEARCH_MAX_K, mode, sizeof(mode));
     if (n_hits <= 0) {
         snprintf(result, rlen, "no hits for summary query: %s", query);
+        ctx_store_unlock();
         free(query);
         free(tool_filter);
         free(facet);
@@ -13238,6 +17033,7 @@ static bool tool_context_summarize(const char *input, char *result, size_t rlen)
         n = 0;
     if ((size_t)n >= rlen - off) {
         result[rlen - 1] = '\0';
+        ctx_store_unlock();
         free(query);
         free(tool_filter);
         free(facet);
@@ -13258,6 +17054,7 @@ static bool tool_context_summarize(const char *input, char *result, size_t rlen)
 
     snprintf(result + off, rlen - off,
              "\nUse context_get only if you need verbatim details from the cited chunk ids.");
+    ctx_store_unlock();
     free(query);
     free(tool_filter);
     free(facet);
@@ -13271,13 +17068,16 @@ static bool tool_context_pin(const char *input, char *result, size_t rlen) {
         snprintf(result, rlen, "error: chunk_id required");
         return false;
     }
+    ctx_store_wrlock();
     int idx = ctx_find_index_by_id(chunk_id);
     if (idx < 0) {
         snprintf(result, rlen, "error: chunk_id %d not found", chunk_id);
+        ctx_store_unlock();
         return false;
     }
     g_ctx.chunks[idx].pinned = pin;
     snprintf(result, rlen, "chunk %d %s", chunk_id, pin ? "pinned" : "unpinned");
+    ctx_store_unlock();
     return true;
 }
 
@@ -13297,6 +17097,7 @@ static bool tool_context_gc(const char *input, char *result, size_t rlen) {
     if (keep_recent < 0)
         keep_recent = 0;
 
+    ctx_store_wrlock();
     int removed = 0;
     bool changed = true;
     while (changed && (g_ctx.count > max_chunks || (int)g_ctx.total_bytes > max_bytes)) {
@@ -13324,11 +17125,13 @@ static bool tool_context_gc(const char *input, char *result, size_t rlen) {
              "context_gc removed=%d chunks=%d bytes=%zu (targets: max_chunks=%d max_bytes=%d "
              "keep_recent=%d)",
              removed, g_ctx.count, g_ctx.total_bytes, max_chunks, max_bytes, keep_recent);
+    ctx_store_unlock();
     return true;
 }
 
 static bool tool_token_audit(const char *input, char *result, size_t rlen) {
     (void)input;
+    ctx_store_rdlock();
     size_t saved_bytes = (g_ctx_offloaded_bytes > g_ctx_reference_bytes)
                              ? (g_ctx_offloaded_bytes - g_ctx_reference_bytes)
                              : 0;
@@ -13344,6 +17147,7 @@ static bool tool_token_audit(const char *input, char *result, size_t rlen) {
              "context_bytes=%zu\n",
              g_ctx_offload_events, g_ctx_offloaded_bytes, g_ctx_reference_bytes, saved_bytes,
              saved_tokens, g_ctx.count, g_ctx.total_bytes);
+    ctx_store_unlock();
     return true;
 }
 
@@ -13491,12 +17295,14 @@ static bool tool_context_pack(const char *input, char *result, size_t rlen) {
     if (max_per > 4000)
         max_per = 4000;
 
+    ctx_store_rdlock();
     ctx_hit_t hits[CTX_SEARCH_MAX_K];
     char mode[64];
     int n_hits = ctx_rank_hits_ladder(query, tool_filter, source_id, facet, top_k, hits,
                                       CTX_SEARCH_MAX_K, mode, sizeof(mode));
     if (n_hits <= 0) {
         snprintf(result, rlen, "no packable hits for query: %s", query);
+        ctx_store_unlock();
         free(query);
         free(tool_filter);
         free(facet);
@@ -13515,6 +17321,7 @@ static bool tool_context_pack(const char *input, char *result, size_t rlen) {
         n = 0;
     if ((size_t)n >= rlen - off) {
         result[rlen - 1] = '\0';
+        ctx_store_unlock();
         free(query);
         free(tool_filter);
         free(facet);
@@ -13552,6 +17359,7 @@ static bool tool_context_pack(const char *input, char *result, size_t rlen) {
              "\npack_summary packed_chunks=%d packed_chars=%zu budget_chars=%d\n"
              "answer from this evidence. Do not call context_get individually.",
              packed, used, max_total);
+    ctx_store_unlock();
     free(query);
     free(tool_filter);
     free(facet);
@@ -13589,6 +17397,7 @@ static bool tool_context_fuse(const char *input, char *result, size_t rlen) {
     if (final_k > CTX_SEARCH_MAX_K)
         final_k = CTX_SEARCH_MAX_K;
 
+    ctx_store_rdlock();
     float fused[CTX_MAX_CHUNKS];
     float best_final[CTX_MAX_CHUNKS];
     int seen_count[CTX_MAX_CHUNKS];
@@ -13627,6 +17436,7 @@ static bool tool_context_fuse(const char *input, char *result, size_t rlen) {
     }
     if (rcount == 0) {
         snprintf(result, rlen, "no fused hits");
+        ctx_store_unlock();
         free(query);
         free(tool_filter);
         free(facet);
@@ -13646,6 +17456,7 @@ static bool tool_context_fuse(const char *input, char *result, size_t rlen) {
         n = 0;
     if ((size_t)n >= rlen - off) {
         result[rlen - 1] = '\0';
+        ctx_store_unlock();
         free(query);
         free(tool_filter);
         free(facet);
@@ -13668,6 +17479,7 @@ static bool tool_context_fuse(const char *input, char *result, size_t rlen) {
     snprintf(result + off, rlen - off,
              "\nnext: context_pack on the fused hits above; use context_get only for specific "
              "verbatim spans");
+    ctx_store_unlock();
     free(query);
     free(tool_filter);
     free(facet);
@@ -15399,6 +19211,7 @@ static bool tool_browser_extract(const char *input, char *result, size_t rlen) {
         return false;
     }
 
+    ctx_store_rdlock();
     ctx_hit_t hits[CTX_SEARCH_MAX_K];
     char mode[64];
     int emit = ctx_rank_hits_ladder(query, "browser_snapshot", source_id, effective_facet, top_k,
@@ -15437,6 +19250,7 @@ static bool tool_browser_extract(const char *input, char *result, size_t rlen) {
                  "next: prefer context_pack with the same query/filter before calling context_get "
                  "on individual chunk_ids");
     }
+    ctx_store_unlock();
     free(query);
     free(facet);
     return true;
@@ -15644,7 +19458,9 @@ static bool tool_research_probe(const char *input, char *result, size_t rlen) {
     if (query && *query && off < rlen - 64) {
         char sub[MAX_TOOL_RESULT];
         sub[0] = '\0';
+        ctx_store_rdlock();
         ctx_search_render(query, "research_probe", top_k, sub, sizeof(sub));
+        ctx_store_unlock();
         n = snprintf(result + off, rlen - off, "\n%s", sub);
         if (n > 0 && (size_t)n < rlen - off)
             off += (size_t)n;
@@ -15798,7 +19614,9 @@ static __attribute__((unused)) bool tool_code_index(const char *input, char *res
 static bool tool_code_search(const char *input, char *result, size_t rlen) {
     char *query = json_get_str(input, "query");
     int top_k = json_get_int(input, "top_k", 6);
+    ctx_store_rdlock();
     bool ok = ctx_search_render(query, "code_index", top_k, result, rlen);
+    ctx_store_unlock();
     free(query);
     return ok;
 }
@@ -17620,6 +21438,60 @@ static bool tool_governance_budget(const char *input, char *result, size_t rlen)
     return true;
 }
 
+/* Empirical capability: record an outcome and/or report the earned tier.
+   input: {agent_id?, outcome?: "success"|"failure"}. When outcome is present
+   it is recorded against the ledger; either way the current evidence-derived
+   tier is returned. This is the read/write surface for the capability layer
+   that makes "never claim a tier higher than measured" enforceable. */
+static bool tool_governance_capability(const char *input, char *result, size_t rlen) {
+    ensure_wt_init();
+    char *agent_id = json_get_str(input, "agent_id");
+    char *outcome = json_get_str(input, "outcome");
+    const char *aid = agent_id ? agent_id : "root";
+
+    if (outcome && *outcome) {
+        bool success = (strcmp(outcome, "success") == 0 || strcmp(outcome, "ok") == 0 ||
+                        strcmp(outcome, "pass") == 0 || strcmp(outcome, "true") == 0);
+        governance_record_outcome(&g_governance, aid, success);
+    }
+
+    const agent_envelope_t *a = governance_get_agent(&g_governance, aid);
+    if (a) {
+        int n = a->evidence_successes + a->evidence_failures;
+        double raw = n > 0 ? (double)a->evidence_successes / (double)n : 0.0;
+        snprintf(result, rlen,
+                 "{\"agent\":\"%s\",\"capability\":\"%s\","
+                 "\"evidence\":{\"successes\":%d,\"failures\":%d,\"samples\":%d,"
+                 "\"success_rate\":%.4f,\"wilson_lb\":%.4f},"
+                 "\"tier_changes\":%d,\"note\":\"tier is earned from evidence, "
+                 "not asserted\"}",
+                 aid, ooda_capability_name(a->claimed_capability), a->evidence_successes,
+                 a->evidence_failures, n, raw, a->success_lb, a->tier_changes);
+    } else {
+        snprintf(result, rlen, "{\"error\":\"agent not found\",\"agent\":\"%s\"}", aid);
+    }
+    free(agent_id);
+    free(outcome);
+    return true;
+}
+
+/* Governance-model experiment: report per-stage overhead + would-block stats,
+   or reset the counters for a fresh window. input: {reset?:true}. */
+static bool tool_governance_experiment(const char *input, char *result, size_t rlen) {
+    ensure_wt_init();
+    char *reset = json_get_str(input, "reset");
+    if (reset && (strcmp(reset, "true") == 0 || strcmp(reset, "1") == 0)) {
+        gov_experiment_reset();
+        snprintf(result, rlen, "{\"reset\":true,\"model\":\"%s\"}",
+                 gov_model_name(gov_experiment_model()));
+        free(reset);
+        return true;
+    }
+    free(reset);
+    gov_experiment_report_json(result, rlen);
+    return true;
+}
+
 static bool tool_governance_audit(const char *input, char *result, size_t rlen) {
     ensure_wt_init();
     int last_n = (int)json_get_double(input, "last_n", 0);
@@ -17669,15 +21541,27 @@ static bool tool_memory_store(const char *input, char *result, size_t rlen) {
     char *key = json_get_str(input, "key");
     char *value = json_get_str(input, "value");
     char *tier_s = json_get_str(input, "tier");
+    char *class_s = json_get_str(input, "classification");
+    if (!class_s)
+        class_s = json_get_str(input, "class");
     double importance = json_get_double(input, "importance", 0);
     if (importance <= 0)
         importance = 0.5;
+    if (importance > 1.0) {
+        snprintf(result, rlen, "{\"error\":\"importance must be between 0 and 1\"}");
+        free(key);
+        free(value);
+        free(tier_s);
+        free(class_s);
+        return false;
+    }
 
     if (!key || !value) {
         snprintf(result, rlen, "{\"error\":\"key and value required\"}");
         free(key);
         free(value);
         free(tier_s);
+        free(class_s);
         return false;
     }
 
@@ -17689,14 +21573,67 @@ static bool tool_memory_store(const char *input, char *result, size_t rlen) {
             tier = MEM_SEMANTIC;
     }
 
+    memory_class_t classification = MEM_CLASS_OPEN;
+    if (class_s && !memory_class_from_name(class_s, &classification)) {
+        jbuf_t b = {0};
+        jbuf_init(&b, 128);
+        jbuf_append(&b, "{\"error\":\"unknown classification\",\"classification\":");
+        jbuf_append_json_str(&b, class_s);
+        jbuf_append_char(&b, '}');
+        snprintf(result, rlen, "%s", b.data ? b.data : "{\"error\":\"unknown classification\"}");
+        jbuf_free(&b);
+        free(key);
+        free(value);
+        free(tier_s);
+        free(class_s);
+        return false;
+    }
+    if (classification == MEM_CLASS_UMBRAL && tier != MEM_WORKING) {
+        snprintf(result, rlen, "{\"error\":\"umbral memories must be stored as working\"}");
+        free(key);
+        free(value);
+        free(tier_s);
+        free(class_s);
+        return false;
+    }
+    if (classification >= MEM_CLASS_SEALED && tier == MEM_SEMANTIC) {
+        snprintf(result, rlen,
+                 "{\"error\":\"sealed/umbral memories require review before semantic promotion\"}");
+        free(key);
+        free(value);
+        free(tier_s);
+        free(class_s);
+        return false;
+    }
+
     int id = memory_store(&g_memory, tier, key, value, importance);
-    snprintf(result, rlen,
-             "{\"ok\":true,\"id\":%d,\"key\":\"%s\",\"tier\":\"%s\","
-             "\"importance\":%.2f,\"halflife\":%.0f}",
-             id, key, memory_tier_name(tier), importance, memory_tier_halflife(tier));
+    if (id < 0) {
+        snprintf(result, rlen, "{\"ok\":false,\"error\":\"memory store failed\"}");
+        free(key);
+        free(value);
+        free(tier_s);
+        free(class_s);
+        return false;
+    }
+    if (class_s)
+        memory_classify(&g_memory, key, classification);
+
+    jbuf_t b = {0};
+    jbuf_init(&b, 256);
+    jbuf_appendf(&b, "{\"ok\":true,\"id\":%d,\"key\":", id);
+    jbuf_append_json_str(&b, key);
+    jbuf_append(&b, ",\"tier\":");
+    jbuf_append_json_str(&b, memory_tier_name(tier));
+    jbuf_appendf(&b, ",\"importance\":%.2f,\"halflife\":%.0f,\"classification\":",
+                 importance, memory_tier_halflife(tier));
+    jbuf_append_json_str(&b, memory_class_name(classification));
+    jbuf_append_char(&b, '}');
+    snprintf(result, rlen, "%s", b.data ? b.data : "{}");
+    jbuf_free(&b);
     free(key);
     free(value);
     free(tier_s);
+    free(class_s);
     return true;
 }
 
@@ -17709,27 +21646,48 @@ static bool tool_memory_recall(const char *input, char *result, size_t rlen) {
     if (key) {
         const memory_entry_t *e = memory_recall(&g_memory, key);
         if (e) {
-            snprintf(result, rlen,
-                     "{\"found\":true,\"key\":\"%s\",\"value\":\"%.*s\","
-                     "\"tier\":\"%s\",\"strength\":%.4f,\"importance\":%.2f,"
-                     "\"accesses\":%d,\"pinned\":%s}",
-                     e->key, (int)(rlen > 512 ? rlen - 512 : 256), e->value,
-                     memory_tier_name(e->tier), e->strength, e->importance, e->access_count,
-                     e->pinned ? "true" : "false");
+            jbuf_t b = {0};
+            jbuf_init(&b, 512);
+            jbuf_append(&b, "{\"found\":true,\"key\":");
+            jbuf_append_json_str(&b, e->key);
+            jbuf_append(&b, ",\"value\":");
+            jbuf_append_json_str(&b, e->value);
+            jbuf_append(&b, ",\"tier\":");
+            jbuf_append_json_str(&b, memory_tier_name(e->tier));
+            jbuf_appendf(&b, ",\"strength\":%.4f,\"importance\":%.2f,"
+                             "\"accesses\":%d,\"pinned\":%s,\"classification\":",
+                         e->strength, e->importance, e->access_count,
+                         e->pinned ? "true" : "false");
+            jbuf_append_json_str(&b, memory_class_name(e->classification));
+            jbuf_appendf(&b, ",\"class_reviewed\":%s}", e->class_reviewed ? "true" : "false");
+            snprintf(result, rlen, "%s", b.data ? b.data : "{}");
+            jbuf_free(&b);
         } else {
-            snprintf(result, rlen, "{\"found\":false,\"key\":\"%s\"}", key);
+            jbuf_t b = {0};
+            jbuf_init(&b, 128);
+            jbuf_append(&b, "{\"found\":false,\"key\":");
+            jbuf_append_json_str(&b, key);
+            jbuf_append_char(&b, '}');
+            snprintf(result, rlen, "%s", b.data ? b.data : "{}");
+            jbuf_free(&b);
         }
     } else if (query) {
         const memory_entry_t *hits[16];
         int n = memory_search(&g_memory, query, hits, 16);
         jbuf_t b = {0};
+        jbuf_init(&b, 512);
         jbuf_appendf(&b, "{\"results\":[");
         for (int i = 0; i < n; i++) {
-            jbuf_appendf(&b,
-                         "%s{\"key\":\"%s\",\"tier\":\"%s\","
-                         "\"strength\":%.4f,\"importance\":%.2f}",
-                         i ? "," : "", hits[i]->key, memory_tier_name(hits[i]->tier),
+            if (i)
+                jbuf_append_char(&b, ',');
+            jbuf_append(&b, "{\"key\":");
+            jbuf_append_json_str(&b, hits[i]->key);
+            jbuf_append(&b, ",\"tier\":");
+            jbuf_append_json_str(&b, memory_tier_name(hits[i]->tier));
+            jbuf_appendf(&b, ",\"strength\":%.4f,\"importance\":%.2f,\"classification\":",
                          hits[i]->strength, hits[i]->importance);
+            jbuf_append_json_str(&b, memory_class_name(hits[i]->classification));
+            jbuf_append_char(&b, '}');
         }
         jbuf_appendf(&b, "],\"count\":%d}", n);
         snprintf(result, rlen, "%s", b.data ? b.data : "{}");
@@ -17738,10 +21696,20 @@ static bool tool_memory_recall(const char *input, char *result, size_t rlen) {
         const memory_entry_t *hits[16];
         int n = memory_recall_by_tag(&g_memory, tag, hits, 16);
         jbuf_t b = {0};
-        jbuf_appendf(&b, "{\"tag\":\"%s\",\"results\":[", tag);
+        jbuf_init(&b, 512);
+        jbuf_append(&b, "{\"tag\":");
+        jbuf_append_json_str(&b, tag);
+        jbuf_append(&b, ",\"results\":[");
         for (int i = 0; i < n; i++) {
-            jbuf_appendf(&b, "%s{\"key\":\"%s\",\"tier\":\"%s\"}", i ? "," : "", hits[i]->key,
-                         memory_tier_name(hits[i]->tier));
+            if (i)
+                jbuf_append_char(&b, ',');
+            jbuf_append(&b, "{\"key\":");
+            jbuf_append_json_str(&b, hits[i]->key);
+            jbuf_append(&b, ",\"tier\":");
+            jbuf_append_json_str(&b, memory_tier_name(hits[i]->tier));
+            jbuf_append(&b, ",\"classification\":");
+            jbuf_append_json_str(&b, memory_class_name(hits[i]->classification));
+            jbuf_append_char(&b, '}');
         }
         jbuf_appendf(&b, "],\"count\":%d}", n);
         snprintf(result, rlen, "%s", b.data ? b.data : "{}");
@@ -17765,12 +21733,91 @@ static bool tool_memory_promote(const char *input, char *result, size_t rlen) {
     bool ok = memory_promote(&g_memory, key);
     if (ok) {
         const memory_entry_t *e = memory_recall(&g_memory, key);
-        snprintf(result, rlen, "{\"ok\":true,\"key\":\"%s\",\"new_tier\":\"%s\"}", key,
-                 e ? memory_tier_name(e->tier) : "unknown");
+        jbuf_t b = {0};
+        jbuf_init(&b, 160);
+        jbuf_append(&b, "{\"ok\":true,\"key\":");
+        jbuf_append_json_str(&b, key);
+        jbuf_append(&b, ",\"new_tier\":");
+        jbuf_append_json_str(&b, e ? memory_tier_name(e->tier) : "unknown");
+        jbuf_append(&b, ",\"classification\":");
+        jbuf_append_json_str(&b, e ? memory_class_name(e->classification) : "unknown");
+        jbuf_append_char(&b, '}');
+        snprintf(result, rlen, "%s", b.data ? b.data : "{}");
+        jbuf_free(&b);
     } else {
-        snprintf(result, rlen,
-                 "{\"ok\":false,\"key\":\"%s\",\"reason\":\"not found or already semantic\"}", key);
+        jbuf_t b = {0};
+        jbuf_init(&b, 192);
+        jbuf_append(&b, "{\"ok\":false,\"key\":");
+        jbuf_append_json_str(&b, key);
+        jbuf_append(&b, ",\"reason\":\"not found, already semantic, or classification-gated\"}");
+        snprintf(result, rlen, "%s", b.data ? b.data : "{}");
+        jbuf_free(&b);
     }
+    free(key);
+    return true;
+}
+
+static bool tool_memory_classify(const char *input, char *result, size_t rlen) {
+    ensure_wt_init();
+    char *key = json_get_str(input, "key");
+    char *class_s = json_get_str(input, "classification");
+    if (!class_s)
+        class_s = json_get_str(input, "class");
+    if (!key || !class_s) {
+        snprintf(result, rlen, "{\"error\":\"key and classification required\"}");
+        free(key);
+        free(class_s);
+        return false;
+    }
+
+    memory_class_t level = MEM_CLASS_OPEN;
+    if (!memory_class_from_name(class_s, &level)) {
+        jbuf_t b = {0};
+        jbuf_init(&b, 128);
+        jbuf_append(&b, "{\"error\":\"unknown classification\",\"classification\":");
+        jbuf_append_json_str(&b, class_s);
+        jbuf_append_char(&b, '}');
+        snprintf(result, rlen, "%s", b.data ? b.data : "{}");
+        jbuf_free(&b);
+        free(key);
+        free(class_s);
+        return false;
+    }
+
+    bool ok = memory_classify(&g_memory, key, level);
+    jbuf_t b = {0};
+    jbuf_init(&b, 160);
+    jbuf_appendf(&b, "{\"ok\":%s,\"key\":", ok ? "true" : "false");
+    jbuf_append_json_str(&b, key);
+    jbuf_append(&b, ",\"classification\":");
+    jbuf_append_json_str(&b, memory_class_name(level));
+    if (!ok)
+        jbuf_append(&b, ",\"reason\":\"not found, invalid, or downgrade refused\"");
+    jbuf_append_char(&b, '}');
+    snprintf(result, rlen, "%s", b.data ? b.data : "{}");
+    jbuf_free(&b);
+    free(key);
+    free(class_s);
+    return true;
+}
+
+static bool tool_memory_review(const char *input, char *result, size_t rlen) {
+    ensure_wt_init();
+    char *key = json_get_str(input, "key");
+    if (!key) {
+        snprintf(result, rlen, "{\"error\":\"key required\"}");
+        return false;
+    }
+    bool ok = memory_classify_review(&g_memory, key);
+    jbuf_t b = {0};
+    jbuf_init(&b, 160);
+    jbuf_appendf(&b, "{\"ok\":%s,\"key\":", ok ? "true" : "false");
+    jbuf_append_json_str(&b, key);
+    if (!ok)
+        jbuf_append(&b, ",\"reason\":\"not found or not classification-gated\"");
+    jbuf_append_char(&b, '}');
+    snprintf(result, rlen, "%s", b.data ? b.data : "{}");
+    jbuf_free(&b);
     free(key);
     return true;
 }
@@ -17783,7 +21830,13 @@ static bool tool_memory_forget(const char *input, char *result, size_t rlen) {
         return false;
     }
     bool ok = memory_forget(&g_memory, key);
-    snprintf(result, rlen, "{\"ok\":%s,\"key\":\"%s\"}", ok ? "true" : "false", key);
+    jbuf_t b = {0};
+    jbuf_init(&b, 96);
+    jbuf_appendf(&b, "{\"ok\":%s,\"key\":", ok ? "true" : "false");
+    jbuf_append_json_str(&b, key);
+    jbuf_append_char(&b, '}');
+    snprintf(result, rlen, "%s", b.data ? b.data : "{}");
+    jbuf_free(&b);
     free(key);
     return true;
 }
@@ -18324,10 +22377,12 @@ static bool tool_context_status(const char *input, char *result, size_t rlen) {
                     g_playbook.count, pb_helpful, pb_harmful, pb_est_tokens);
 
     /* Context store stats */
+    ctx_store_rdlock();
     off += snprintf(result + off, rlen - off,
                     "\"context_store\":{\"chunks\":%d,\"bytes\":%zu,"
                     "\"offloaded_events\":%zu,\"offloaded_bytes\":%zu},",
                     g_ctx.count, g_ctx.total_bytes, g_ctx_offload_events, g_ctx_offloaded_bytes);
+    ctx_store_unlock();
 
     /* Recommendations */
     off += snprintf(result + off, rlen - off, "\"recommendations\":[");
@@ -19170,6 +23225,114 @@ void tools_set_active_conversation(void *c) {
 
 void tools_playbook_advance_turn(void) {
     g_playbook.current_turn++;
+}
+
+/* ── conversation_context: agent-visible live transcript mutation ────────
+ *
+ * The agent loop owns g_active_conv and sets it before tool execution.  This
+ * deliberately keeps transcript construction in the same governed tool plane
+ * as every other agent effect rather than hiding it behind a slash command.
+ * Tool-use protocol messages are immutable here: removing or replacing one
+ * would leave unmatched tool calls/results and corrupt the next provider turn.
+ */
+static bool conversation_text_message(const message_t *m) {
+    return m && m->content_count == 1 && m->content && m->content[0].type &&
+           strcmp(m->content[0].type, "text") == 0;
+}
+
+static bool tool_conversation_context(const char *input, char *result, size_t rlen) {
+    char *action = json_get_str(input, "action");
+    char *role = json_get_str(input, "role");
+    char *content = json_get_str(input, "content");
+    bool ok = false;
+
+    if (!g_active_conv) {
+        snprintf(result, rlen,
+                 "{\"error\":\"no active conversation — conversation_context only works during agent loop\"}");
+        goto done;
+    }
+    if (!action || !action[0]) {
+        snprintf(result, rlen, "{\"error\":\"missing action: inspect|append|replace_last|remove_last\"}");
+        goto done;
+    }
+
+    if (strcmp(action, "inspect") == 0) {
+        jbuf_t out;
+        jbuf_init(&out, 256);
+        jbuf_appendf(&out, "{\"messages\":%d", g_active_conv->count);
+        if (g_active_conv->count > 0) {
+            const message_t *last = &g_active_conv->msgs[g_active_conv->count - 1];
+            jbuf_append(&out, ",\"last_role\":");
+            jbuf_append_json_str(&out, last->role == ROLE_USER ? "user" : "assistant");
+            jbuf_appendf(&out, ",\"last_is_plain_text\":%s",
+                         conversation_text_message(last) ? "true" : "false");
+            if (conversation_text_message(last)) {
+                jbuf_append(&out, ",\"last_content\":");
+                jbuf_append_json_str(&out, last->content[0].text ? last->content[0].text : "");
+            }
+        }
+        jbuf_append(&out, "}");
+        snprintf(result, rlen, "%s", out.data ? out.data : "{}");
+        jbuf_free(&out);
+        ok = true;
+    } else if (strcmp(action, "append") == 0) {
+        if (!content) {
+            snprintf(result, rlen, "{\"error\":\"append requires content\"}");
+            goto done;
+        }
+        if (role && strcmp(role, "assistant") == 0)
+            conv_add_assistant_text(g_active_conv, content);
+        else if (!role || strcmp(role, "user") == 0)
+            conv_add_user_text(g_active_conv, content);
+        else {
+            snprintf(result, rlen, "{\"error\":\"role must be user or assistant\"}");
+            goto done;
+        }
+        snprintf(result, rlen, "{\"status\":\"appended\",\"role\":\"%s\",\"messages\":%d}",
+                 role && strcmp(role, "assistant") == 0 ? "assistant" : "user", g_active_conv->count);
+        ok = true;
+    } else if (strcmp(action, "replace_last") == 0) {
+        if (!content) {
+            snprintf(result, rlen, "{\"error\":\"replace_last requires content\"}");
+            goto done;
+        }
+        if (g_active_conv->count == 0 ||
+            !conversation_text_message(&g_active_conv->msgs[g_active_conv->count - 1])) {
+            snprintf(result, rlen,
+                     "{\"error\":\"last message is not replaceable plain text\"}");
+            goto done;
+        }
+        msg_role_t prior_role = g_active_conv->msgs[g_active_conv->count - 1].role;
+        if (role && strcmp(role, "assistant") != 0 && strcmp(role, "user") != 0) {
+            snprintf(result, rlen, "{\"error\":\"role must be user or assistant\"}");
+            goto done;
+        }
+        conv_pop_last(g_active_conv);
+        if ((role && strcmp(role, "assistant") == 0) || (!role && prior_role == ROLE_ASSISTANT))
+            conv_add_assistant_text(g_active_conv, content);
+        else
+            conv_add_user_text(g_active_conv, content);
+        snprintf(result, rlen, "{\"status\":\"replaced\",\"messages\":%d}", g_active_conv->count);
+        ok = true;
+    } else if (strcmp(action, "remove_last") == 0) {
+        if (g_active_conv->count == 0 ||
+            !conversation_text_message(&g_active_conv->msgs[g_active_conv->count - 1])) {
+            snprintf(result, rlen,
+                     "{\"error\":\"last message is not removable plain text\"}");
+            goto done;
+        }
+        conv_pop_last(g_active_conv);
+        snprintf(result, rlen, "{\"status\":\"removed\",\"messages\":%d}", g_active_conv->count);
+        ok = true;
+    } else {
+        snprintf(result, rlen, "{\"error\":\"unknown action '%s'\"}", action);
+    }
+
+done:
+    free(action);
+    free(role);
+    free(content);
+    return ok;
 }
 
 /* ── plot: render data as Unicode charts (inline / tool result / artifact) ── */
@@ -23483,11 +27646,146 @@ static bool tools_ci_contains_local(const char *haystack, const char *needle) {
     return false;
 }
 
-static bool tool_matches_query_local(const char *name, const char *desc, const char *query) {
+const char *tools_default_input_schema_json(void) {
+    return k_default_input_schema_json;
+}
+
+const char *tools_default_output_schema_json(void) {
+    return k_default_output_schema_json;
+}
+
+const char *tools_output_schema_for_def(const tool_def_t *tool) {
+    return (tool && tool->output_schema_json && tool->output_schema_json[0])
+               ? tool->output_schema_json
+               : k_default_output_schema_json;
+}
+
+static const char *tools_output_schema_for_external(const external_tool_t *tool) {
+    return (tool && tool->output_schema_json && tool->output_schema_json[0])
+               ? tool->output_schema_json
+               : k_default_output_schema_json;
+}
+
+static bool is_default_output_schema_text(const char *schema) {
+    return !schema || !schema[0] || strcmp(schema, k_default_output_schema_json) == 0;
+}
+
+static const char *schema_text_for_semantic_match(const char *schema) {
+    return is_default_output_schema_text(schema) ? "" : schema;
+}
+
+const char *tools_output_schema_for_name(const char *name) {
+    static _Thread_local char external_schema_buf[8192];
+    if (!name || !name[0])
+        return k_default_output_schema_json;
+
+    int total = 0;
+    const tool_def_t *tools = tools_get_all(&total);
+    int builtin_total = tools_builtin_count();
+    for (int i = 0; i < builtin_total; i++) {
+        if (tools[i].name && strcmp(tools[i].name, name) == 0)
+            return tools_output_schema_for_def(&tools[i]);
+    }
+
+    tool_registry_rdlock();
+    for (int i = 0; i < g_plugins.extra_tool_count; i++) {
+        if (g_plugins.extra_tools[i].name && strcmp(g_plugins.extra_tools[i].name, name) == 0) {
+            const char *schema = tools_output_schema_for_def(&g_plugins.extra_tools[i]);
+            tool_registry_unlock();
+            return schema;
+        }
+    }
+    for (int i = 0; i < g_external_tool_count; i++) {
+        if (strcmp(g_external_tools[i].name, name) == 0) {
+            const char *schema = tools_output_schema_for_external(&g_external_tools[i]);
+            snprintf(external_schema_buf, sizeof(external_schema_buf), "%s", schema);
+            tool_registry_unlock();
+            return external_schema_buf;
+        }
+    }
+    tool_registry_unlock();
+    return k_default_output_schema_json;
+}
+
+static void append_tool_contract_doc(jbuf_t *b, const char *name, const char *desc,
+                                     const char *input_schema, const char *output_schema,
+                                     const char *metadata) {
+    if (!b)
+        return;
+    jbuf_append(b, "name ");
+    jbuf_append(b, name ? name : "");
+    jbuf_append(b, " description ");
+    jbuf_append(b, desc ? desc : "");
+    jbuf_append(b, " input_schema ");
+    jbuf_append(b, input_schema && input_schema[0] ? input_schema : k_default_input_schema_json);
+    const char *semantic_output = schema_text_for_semantic_match(output_schema);
+    if (semantic_output[0]) {
+        jbuf_append(b, " output_schema ");
+        jbuf_append(b, semantic_output);
+    }
+    if (metadata && metadata[0]) {
+        jbuf_append(b, " metadata ");
+        jbuf_append(b, metadata);
+    }
+}
+
+static char *tool_contract_doc_alloc(const char *name, const char *desc, const char *input_schema,
+                                     const char *output_schema, const char *metadata) {
+    jbuf_t b;
+    jbuf_init(&b, 4096);
+    append_tool_contract_doc(&b, name, desc, input_schema, output_schema, metadata);
+    return b.data ? b.data : safe_strdup("");
+}
+
+static void append_external_contract_metadata(jbuf_t *b, const external_tool_t *t) {
+    if (!b || !t)
+        return;
+    if (t->integration_id[0])
+        jbuf_appendf(b, " integration_id %s", t->integration_id);
+    if (t->display_name[0])
+        jbuf_appendf(b, " display_name %s", t->display_name);
+    if (t->distribution_channel[0])
+        jbuf_appendf(b, " distribution_channel %s", t->distribution_channel);
+    if (t->categories[0])
+        jbuf_appendf(b, " categories %s", t->categories);
+    if (t->labels[0])
+        jbuf_appendf(b, " labels %s", t->labels);
+    if (t->scope[0])
+        jbuf_appendf(b, " scope %s", t->scope);
+    if (t->catalog_status[0])
+        jbuf_appendf(b, " catalog_status %s", t->catalog_status);
+}
+
+static double tool_contract_query_score(const char *name, const char *desc, const char *input_schema,
+                                        const char *output_schema, const char *metadata,
+                                        const char *query, bool strict_full_match) {
     if (!query || !query[0])
-        return true;
-    if (tools_ci_contains_local(name, query) || tools_ci_contains_local(desc ? desc : "", query)) {
-        return true;
+        return 1.0;
+
+    double score = 0.0;
+    bool phrase_match = false;
+    const char *semantic_output = schema_text_for_semantic_match(output_schema);
+    if (name && strcasecmp(name, query) == 0)
+        score += 1000.0;
+    if (tools_ci_contains_local(name, query)) {
+        score += 160.0;
+        phrase_match = true;
+    }
+    if (tools_ci_contains_local(desc ? desc : "", query)) {
+        score += 120.0;
+        phrase_match = true;
+    }
+    if (tools_ci_contains_local(input_schema ? input_schema : "", query)) {
+        score += 80.0;
+        phrase_match = true;
+    }
+    if (tools_ci_contains_local(semantic_output, query)) {
+        score += 100.0;
+        phrase_match = true;
+    }
+    if (tools_ci_contains_local(metadata ? metadata : "", query)) {
+        score += 60.0;
+        phrase_match = true;
     }
 
     char token[64];
@@ -23504,16 +27802,48 @@ static bool tool_matches_query_local(const char *name, const char *desc, const c
         if (tlen > 0) {
             token[tlen] = '\0';
             total++;
-            if (tools_ci_contains_local(name, token) ||
-                tools_ci_contains_local(desc ? desc : "", token)) {
-                matched++;
+            bool token_matched = false;
+            if (tools_ci_contains_local(name, token)) {
+                score += 12.0;
+                token_matched = true;
             }
+            if (tools_ci_contains_local(desc ? desc : "", token)) {
+                score += 8.0;
+                token_matched = true;
+            }
+            if (tools_ci_contains_local(input_schema ? input_schema : "", token)) {
+                score += 5.0;
+                token_matched = true;
+            }
+            if (tools_ci_contains_local(semantic_output, token)) {
+                score += 7.0;
+                token_matched = true;
+            }
+            if (tools_ci_contains_local(metadata ? metadata : "", token)) {
+                score += 4.0;
+                token_matched = true;
+            }
+            if (token_matched)
+                matched++;
             tlen = 0;
         }
         if (!*p)
             break;
     }
-    return total > 0 && matched == total;
+    if (total > 0 && matched > 0)
+        score += 25.0 * ((double)matched / (double)total);
+    if (strict_full_match && total > 0 && matched < total && !phrase_match && score < 1000.0)
+        return 0.0;
+    if (!strict_full_match && total > 0 && matched < total && score < 1000.0)
+        score *= 0.2;
+    return score;
+}
+
+static bool tool_matches_query_local(const char *name, const char *desc, const char *input_schema,
+                                     const char *output_schema, const char *metadata,
+                                     const char *query) {
+    return tool_contract_query_score(name, desc, input_schema, output_schema, metadata, query,
+                                     true) > 0.0;
 }
 
 static void integration_action_flags_json(jbuf_t *b, unsigned actions) {
@@ -23539,9 +27869,10 @@ static void integration_action_flags_json(jbuf_t *b, unsigned actions) {
 }
 
 static void discover_append_tool_detail(jbuf_t *b, const char *name, const char *desc,
-                                        const char *schema, const char *source) {
+                                        const char *input_schema, const char *output_schema,
+                                        const char *source) {
     char params[256];
-    build_compact_params(schema, params, sizeof(params));
+    build_compact_params(input_schema, params, sizeof(params));
     jbuf_append(b, "{\"name\":");
     jbuf_append_json_str(b, name ? name : "");
     jbuf_append(b, ",\"source\":");
@@ -23551,7 +27882,9 @@ static void discover_append_tool_detail(jbuf_t *b, const char *name, const char 
     jbuf_append(b, ",\"description\":");
     jbuf_append_json_str(b, desc ? desc : "");
     jbuf_append(b, ",\"input_schema\":");
-    jbuf_append(b, schema ? schema : "{\"type\":\"object\",\"properties\":{}}");
+    jbuf_append(b, input_schema && input_schema[0] ? input_schema : k_default_input_schema_json);
+    jbuf_append(b, ",\"output_schema\":");
+    jbuf_append(b, output_schema && output_schema[0] ? output_schema : k_default_output_schema_json);
     const dsco_integration_profile_t *profile = dsco_integration_profile_for_tool(name);
     if (profile) {
         unsigned actions = dsco_integration_actions_for_tool(name);
@@ -23571,6 +27904,22 @@ static void discover_append_tool_detail(jbuf_t *b, const char *name, const char 
         jbuf_append(b, "}");
     }
     jbuf_append(b, "}");
+}
+
+typedef struct {
+    double score;
+    int idx;
+    bool external;
+} discover_cand_t;
+
+static int discover_cand_cmp_desc(const void *a, const void *b) {
+    const discover_cand_t *x = (const discover_cand_t *)a;
+    const discover_cand_t *y = (const discover_cand_t *)b;
+    if (x->score > y->score)
+        return -1;
+    if (x->score < y->score)
+        return 1;
+    return 0;
 }
 
 static bool tool_discover_tools(const char *input, char *result, size_t rlen) {
@@ -23627,20 +27976,32 @@ static bool tool_discover_tools(const char *input, char *result, size_t rlen) {
                 bool exact = strcasecmp(t->name, query) == 0;
                 if ((pass == 0) != exact)
                     continue;
-                if (!exact && !tool_matches_query_local(t->name, t->description, query))
+                jbuf_t meta;
+                jbuf_init(&meta, 256);
+                append_external_contract_metadata(&meta, t);
+                const char *out_schema = tools_output_schema_for_external(t);
+                bool match = tool_matches_query_local(t->name, t->description, t->input_schema_json,
+                                                      out_schema, meta.data, query);
+                if (!exact && !match) {
+                    jbuf_free(&meta);
                     continue;
+                }
                 matched++;
                 if (skipped < offset) {
                     skipped++;
+                    jbuf_free(&meta);
                     continue;
                 }
-                if (emitted >= limit)
+                if (emitted >= limit) {
+                    jbuf_free(&meta);
                     continue;
+                }
                 if (!first)
                     jbuf_append(&b, ",");
                 first = false;
                 discover_append_tool_detail(&b, t->name, t->description, t->input_schema_json,
-                                            "mcp");
+                                            out_schema, "mcp");
+                jbuf_free(&meta);
                 emitted++;
             }
         }
@@ -23650,8 +28011,10 @@ static bool tool_discover_tools(const char *input, char *result, size_t rlen) {
                 bool exact = strcasecmp(tools[i].name, query) == 0;
                 if ((pass == 0) != exact)
                     continue;
-                if (!exact &&
-                    !tool_matches_query_local(tools[i].name, tools[i].description, query)) {
+                const char *out_schema = tools_output_schema_for_def(&tools[i]);
+                if (!exact && !tool_matches_query_local(tools[i].name, tools[i].description,
+                                                        tools[i].input_schema_json, out_schema, NULL,
+                                                        query)) {
                     continue;
                 }
                 matched++;
@@ -23665,18 +28028,82 @@ static bool tool_discover_tools(const char *input, char *result, size_t rlen) {
                     jbuf_append(&b, ",");
                 first = false;
                 discover_append_tool_detail(&b, tools[i].name, tools[i].description,
-                                            tools[i].input_schema_json, "builtin");
+                                            tools[i].input_schema_json, out_schema, "builtin");
                 emitted++;
+            }
+        }
+
+        bool fuzzy = false;
+        if (matched == 0) {
+            /* Strict AND-of-all-tokens found nothing.  Natural-language queries
+             * ("current weather forecast by city") must never dead-end: rescore
+             * relaxed (partial token overlap allowed) and emit the closest tools
+             * ranked by score, flagged fuzzy so the caller knows. */
+            fuzzy = true;
+            int ncand = g_external_tool_count + total;
+            discover_cand_t *cands =
+                ncand > 0 ? malloc((size_t)ncand * sizeof(*cands)) : NULL;
+            int nc = 0;
+            if (cands) {
+                for (int i = 0; i < g_external_tool_count; i++) {
+                    external_tool_t *t = &g_external_tools[i];
+                    jbuf_t meta;
+                    jbuf_init(&meta, 256);
+                    append_external_contract_metadata(&meta, t);
+                    double s = tool_contract_query_score(
+                        t->name, t->description, t->input_schema_json,
+                        tools_output_schema_for_external(t), meta.data, query, false);
+                    jbuf_free(&meta);
+                    if (s > 0.0)
+                        cands[nc++] = (discover_cand_t){.score = s, .idx = i, .external = true};
+                }
+                for (int i = 0; i < total; i++) {
+                    double s = tool_contract_query_score(
+                        tools[i].name, tools[i].description, tools[i].input_schema_json,
+                        tools_output_schema_for_def(&tools[i]), NULL, query, false);
+                    if (s > 0.0)
+                        cands[nc++] = (discover_cand_t){.score = s, .idx = i, .external = false};
+                }
+                qsort(cands, (size_t)nc, sizeof(*cands), discover_cand_cmp_desc);
+                matched = nc;
+                for (int i = 0; i < nc; i++) {
+                    if (skipped < offset) {
+                        skipped++;
+                        continue;
+                    }
+                    if (emitted >= limit)
+                        break;
+                    if (!first)
+                        jbuf_append(&b, ",");
+                    first = false;
+                    if (cands[i].external) {
+                        external_tool_t *t = &g_external_tools[cands[i].idx];
+                        discover_append_tool_detail(&b, t->name, t->description,
+                                                    t->input_schema_json,
+                                                    tools_output_schema_for_external(t), "mcp");
+                    } else {
+                        const tool_def_t *t = &tools[cands[i].idx];
+                        discover_append_tool_detail(&b, t->name, t->description,
+                                                    t->input_schema_json,
+                                                    tools_output_schema_for_def(t), "builtin");
+                    }
+                    emitted++;
+                }
+                free(cands);
             }
         }
 
         jbuf_appendf(&b,
                      "],\"matched\":%d,\"offset\":%d,\"limit\":%d,\"showing\":%d,"
-                     "\"has_more\":%s,\"truncated\":%s,"
-                     "\"note\":\"Full input_schema returned for matches. Use load_tools with exact "
-                     "names to pin MCP tools into the active tool set.\"}",
+                     "\"has_more\":%s,\"truncated\":%s,\"fuzzy\":%s,"
+                     "\"note\":\"%s\"}",
                      matched, offset, limit, emitted, matched > offset + emitted ? "true" : "false",
-                     matched > offset + emitted ? "true" : "false");
+                     matched > offset + emitted ? "true" : "false", fuzzy ? "true" : "false",
+                     fuzzy ? "No exact matches; showing closest tools by relaxed relevance. "
+                             "Refine the query or use load_tools with exact names."
+                           : "Full input_schema and output_schema returned for matches. Use "
+                             "load_tools with exact names to pin MCP tools into the active tool "
+                             "set.");
         snprintf(result, rlen, "%s", b.data ? b.data : "{}");
         jbuf_free(&b);
         free(query);
@@ -24131,6 +28558,8 @@ static bool tool_dsco_doctor_integrations(const char *input, char *result, size_
 /* Forward declarations — defined later in this file */
 static int assign_group(const char *name, const char *desc);
 void tools_mark_hot(int tool_idx);
+static bool tools_mark_loaded_builtin(int idx);
+static bool tools_evict_loaded_builtin_index(int idx);
 
 static void load_tools_add_name(char names[][256], int *name_count, const char *start, size_t len) {
     while (len > 0 && isspace((unsigned char)*start)) {
@@ -24286,12 +28715,13 @@ static bool tool_load_tools(const char *input, char *result, size_t rlen) {
             this_batch = HINT_MAX_TOOLS;
 
         for (int i = 0; i < this_batch; i++) {
-            int idx = tool_map_lookup(&g_tool_map, names[batch + i]);
+            int idx = tools_lookup_index(names[batch + i]);
             if (idx >= 0 && idx < total) {
                 snprintf(hint.tools[hint.tool_count], sizeof(hint.tools[hint.tool_count]), "%s",
                          names[batch + i]);
                 hint.tool_count++;
                 /* Also mark in hot cache so it auto-admits to working set */
+                tools_mark_loaded_builtin(idx);
                 tools_mark_hot(idx);
                 loaded++;
             } else if (idx <= -10000) {
@@ -24335,20 +28765,23 @@ static bool tool_load_tools(const char *input, char *result, size_t rlen) {
     off += snprintf(result + off, rlen - off, ",\"tools\":[");
     bool first = true;
     for (int i = 0; i < name_count && (size_t)off < rlen - 512; i++) {
-        int idx = tool_map_lookup(&g_tool_map, names[i]);
+        int idx = tools_lookup_index(names[i]);
         const char *tool_name = NULL;
         const char *tool_desc = NULL;
         const char *tool_schema = NULL;
+        const char *tool_output_schema = NULL;
         if (idx >= 0 && idx < total) {
             tool_name = tools[idx].name;
             tool_desc = tools[idx].description;
             tool_schema = tools[idx].input_schema_json;
+            tool_output_schema = tools_output_schema_for_def(&tools[idx]);
         } else if (idx <= -10000) {
             int ei = -(idx + 10000);
             if (ei >= 0 && ei < g_external_tool_count) {
                 tool_name = g_external_tools[ei].name;
                 tool_desc = g_external_tools[ei].description;
                 tool_schema = g_external_tools[ei].input_schema_json;
+                tool_output_schema = tools_output_schema_for_external(&g_external_tools[ei]);
             }
         }
         if (!tool_name || !tool_schema)
@@ -24356,7 +28789,7 @@ static bool tool_load_tools(const char *input, char *result, size_t rlen) {
         if (!first)
             off += snprintf(result + off, rlen - off, ",");
         first = false;
-        /* Return name + description + full input_schema so the model knows the params */
+        /* Return name + description + full schemas so the model knows the contract. */
         off += snprintf(result + off, rlen - off, "{\"name\":\"%s\",\"description\":", tool_name);
         /* JSON-escape description */
         off += snprintf(result + off, rlen - off, "\"");
@@ -24374,14 +28807,224 @@ static bool tool_load_tools(const char *input, char *result, size_t rlen) {
             } else
                 result[off++] = d[j];
         }
-        off += snprintf(result + off, rlen - off, "\",\"input_schema\":%s}", tool_schema);
+        off += snprintf(result + off, rlen - off, "\",\"input_schema\":%s,\"output_schema\":%s}",
+                        tool_schema && tool_schema[0] ? tool_schema : k_default_input_schema_json,
+                        tool_output_schema && tool_output_schema[0] ? tool_output_schema
+                                                                    : k_default_output_schema_json);
     }
     off +=
         snprintf(result + off, rlen - off,
-                 "],\"note\":\"These tools are now pinned in your tool list for the next 20 turns. "
-                 "You can call them directly.\"}");
+                 "],\"active_builtin_loaded\":%d,"
+                 "\"note\":\"Schemas are ready. Call a tool directly when it is advertised; "
+                 "otherwise call invoke_tool with its exact name and input object. Use "
+                 "evict_tools to unload names or categories.\"}",
+                 tools_loaded_builtin_count());
 
     return true;
+}
+
+/* Stable-schema capability dispatcher. Provider prompt caches place the tool
+ * array before system/messages, so advertising a newly loaded schema rewrites
+ * the whole cache prefix. `invoke_tool` keeps one tiny wire schema stable while
+ * still routing the selected capability through the normal immune/governance
+ * gate. `load_tools` supplies the target schema in-band to the model. */
+static bool tool_invoke_tool(const char *input, char *result, size_t rlen) {
+    char *name = json_get_str(input, "name");
+    if (!name || !name[0]) {
+        free(name);
+        snprintf(result, rlen, "{\"error\":\"name required\"}");
+        return false;
+    }
+    if (strcmp(name, "invoke_tool") == 0) {
+        free(name);
+        snprintf(result, rlen, "{\"error\":\"invoke_tool cannot invoke itself\"}");
+        return false;
+    }
+    char *target_input = json_get_raw(input, "input");
+    if (!target_input)
+        target_input = json_get_raw(input, "arguments");
+    if (!target_input)
+        target_input = safe_strdup("{}");
+    if (!json_is_valid_container(target_input) || target_input[0] != '{') {
+        free(name);
+        free(target_input);
+        snprintf(result, rlen, "{\"error\":\"input must be a JSON object\"}");
+        return false;
+    }
+
+    /* Deliberately use the public entrypoint: the dispatcher itself is not an
+     * authority boundary, and the target must receive its own risk class,
+     * approval, budget, killswitch, and audit checks. */
+    bool ok = tools_execute(name, target_input, result, rlen);
+    free(name);
+    free(target_input);
+    return ok;
+}
+
+static bool tool_evict_tools(const char *input, char *result, size_t rlen) {
+    int total;
+    const tool_def_t *tools = tools_get_all(&total);
+    char names[64][256];
+    int name_count = 0;
+    char category[64] = "";
+    bool all = input ? json_get_bool(input, "all", false) : false;
+
+    if (input) {
+        const char *cc = strstr(input, "\"category\"");
+        if (cc) {
+            cc = strchr(cc + 10, '"');
+            if (cc) {
+                cc++;
+                const char *end = strchr(cc, '"');
+                if (end && (size_t)(end - cc) < sizeof(category)) {
+                    memcpy(category, cc, end - cc);
+                    category[end - cc] = '\0';
+                }
+            }
+        }
+
+        const char *ns = strstr(input, "\"names\"");
+        if (ns) {
+            ns = strchr(ns + 7, '"');
+            if (ns) {
+                ns++;
+                const char *end = ns;
+                bool esc = false;
+                while (*end) {
+                    if (esc) {
+                        esc = false;
+                        end++;
+                        continue;
+                    }
+                    if (*end == '\\') {
+                        esc = true;
+                        end++;
+                        continue;
+                    }
+                    if (*end == '"')
+                        break;
+                    end++;
+                }
+                const char *part = ns;
+                for (const char *p = ns; p <= end && name_count < 64; p++) {
+                    if (p == end || *p == ',') {
+                        load_tools_add_name(names, &name_count, part, (size_t)(p - part));
+                        part = p + 1;
+                    }
+                }
+            }
+        }
+
+        const char *arr = strstr(input, "\"tools\"");
+        if (arr) {
+            arr = strchr(arr, '[');
+            if (arr) {
+                arr++;
+                while (*arr && *arr != ']' && name_count < 64) {
+                    const char *q1 = strchr(arr, '"');
+                    if (!q1 || *q1 == ']')
+                        break;
+                    q1++;
+                    const char *q2 = strchr(q1, '"');
+                    if (!q2)
+                        break;
+                    load_tools_add_name(names, &name_count, q1, (size_t)(q2 - q1));
+                    arr = q2 + 1;
+                }
+            }
+        }
+    }
+
+    if (all) {
+        int before = tools_loaded_builtin_count();
+        tools_loaded_builtin_clear();
+        for (int i = 0; i < g_external_tool_count; i++)
+            g_external_tools[i].loaded = false;
+        snprintf(result, rlen,
+                 "{\"evicted\":%d,\"not_found\":0,\"active_builtin_loaded\":0,"
+                 "\"note\":\"all dynamically loaded tools evicted\"}",
+                 before);
+        return true;
+    }
+
+    if (category[0] && name_count == 0) {
+        const char *group_names[] = {"file_io", "git",     "network", "shell",      "code",
+                                     "crypto",  "swarm",   "ast",     "pipeline",   "math",
+                                     "search",  "general", "finance", "prediction", "memory"};
+        int target_group = -1;
+        for (int g = 0; g < 15; g++) {
+            if (strcasecmp(category, group_names[g]) == 0) {
+                target_group = g;
+                break;
+            }
+        }
+        if (target_group >= 0) {
+            for (int i = 0; i < total && name_count < 64; i++) {
+                int gid = assign_group(tools[i].name, tools[i].description);
+                if (gid == target_group)
+                    snprintf(names[name_count++], sizeof(names[0]), "%s", tools[i].name);
+            }
+        }
+    }
+
+    if (name_count == 0) {
+        snprintf(result, rlen,
+                 "{\"error\":\"No tools specified. Provide names, tools, category, or all:true.\"}");
+        return false;
+    }
+
+    int evicted = 0;
+    int not_found = 0;
+    char not_found_names[512] = "";
+    int nf_off = 0;
+    jbuf_t evicted_names;
+    jbuf_init(&evicted_names, 512);
+    jbuf_append(&evicted_names, "[");
+    bool first_evicted = true;
+
+    for (int i = 0; i < name_count; i++) {
+        int idx = tools_lookup_index(names[i]);
+        bool removed = false;
+        if (idx >= 0 && idx < total) {
+            removed = tools_evict_loaded_builtin_index(idx);
+        } else if (idx <= -10000) {
+            int ei = -(idx + 10000);
+            if (ei >= 0 && ei < g_external_tool_count && g_external_tools[ei].loaded) {
+                g_external_tools[ei].loaded = false;
+                removed = true;
+            }
+        }
+        if (removed) {
+            if (!first_evicted)
+                jbuf_append(&evicted_names, ",");
+            first_evicted = false;
+            jbuf_append_json_str(&evicted_names, names[i]);
+            evicted++;
+        } else {
+            if (nf_off > 0)
+                nf_off += snprintf(not_found_names + nf_off, sizeof(not_found_names) - nf_off, ",");
+            nf_off += snprintf(not_found_names + nf_off, sizeof(not_found_names) - nf_off, "\"%s\"",
+                               names[i]);
+            not_found++;
+        }
+    }
+    jbuf_append(&evicted_names, "]");
+
+    jbuf_t out;
+    jbuf_init(&out, 512);
+    jbuf_appendf(&out, "{\"evicted\":%d,\"not_found\":%d,\"evicted_tools\":", evicted,
+                 not_found);
+    jbuf_append(&out, evicted_names.data ? evicted_names.data : "[]");
+    if (not_found > 0) {
+        jbuf_append(&out, ",\"unknown_or_not_loaded\":[");
+        jbuf_append(&out, not_found_names);
+        jbuf_append(&out, "]");
+    }
+    jbuf_appendf(&out, ",\"active_builtin_loaded\":%d}", tools_loaded_builtin_count());
+    snprintf(result, rlen, "%s", out.data ? out.data : "{}");
+    jbuf_free(&out);
+    jbuf_free(&evicted_names);
+    return evicted > 0;
 }
 
 /* ── §1-§8: Post-LLM Virtual OS subsystem tools ───────────────────── */
@@ -24470,11 +29113,209 @@ static void cc_map_optional_string_field(jbuf_t *mapped, const char *input, cons
     free(value);
 }
 
+/* ── Background shell registry: Claude Code Bash(run_in_background) + BashOutput
+ * + KillShell. Each background shell runs under nohup with output captured to a
+ * per-shell log; BashOutput streams only the new bytes since the last read. ─── */
+#define BG_SHELL_MAX 64
+typedef struct {
+    bool active;
+    char id[24];
+    long pid;
+    char log[128];
+    long offset;
+} bg_shell_t;
+static bg_shell_t g_bg_shells[BG_SHELL_MAX];
+static int g_bg_shell_seq = 0;
+static pthread_mutex_t g_bg_shell_lock = PTHREAD_MUTEX_INITIALIZER;
+
+static bool bg_shell_launch(const char *command, const char *cwd, char *result, size_t rlen) {
+    pthread_mutex_lock(&g_bg_shell_lock);
+    int id_num = ++g_bg_shell_seq;
+    pthread_mutex_unlock(&g_bg_shell_lock);
+
+    char logpath[128];
+    snprintf(logpath, sizeof(logpath), "/tmp/dsco_bash_%d_%ld.log", id_num, (long)getpid());
+
+    jbuf_t cmd;
+    jbuf_init(&cmd, 256 + strlen(command) + (cwd ? strlen(cwd) : 0));
+    jbuf_append(&cmd, "nohup sh -c ");
+    if (cwd && cwd[0]) {
+        jbuf_t inner;
+        jbuf_init(&inner, strlen(command) + strlen(cwd) + 16);
+        jbuf_append(&inner, "cd ");
+        shell_quote(&inner, cwd);
+        jbuf_append(&inner, " && ");
+        jbuf_append(&inner, command);
+        shell_quote(&cmd, inner.data ? inner.data : command);
+        jbuf_free(&inner);
+    } else {
+        shell_quote(&cmd, command);
+    }
+    jbuf_append(&cmd, " > ");
+    shell_quote(&cmd, logpath);
+    jbuf_append(&cmd, " 2>&1 < /dev/null & echo $!");
+    char out[64];
+    out[0] = '\0';
+    int rc = run_cmd(cmd.data, out, sizeof(out));
+    jbuf_free(&cmd);
+    long pid = strtol(out, NULL, 10);
+    if (rc != 0 || pid <= 0) {
+        snprintf(result, rlen, "{\"error\":\"failed to launch background shell\"}");
+        return false;
+    }
+
+    pthread_mutex_lock(&g_bg_shell_lock);
+    int slot = -1;
+    for (int i = 0; i < BG_SHELL_MAX; i++)
+        if (!g_bg_shells[i].active) {
+            slot = i;
+            break;
+        }
+    if (slot < 0) {
+        pthread_mutex_unlock(&g_bg_shell_lock);
+        kill((pid_t)pid, SIGTERM);
+        snprintf(result, rlen, "{\"error\":\"too many background shells (max %d)\"}", BG_SHELL_MAX);
+        return false;
+    }
+    bg_shell_t *s = &g_bg_shells[slot];
+    s->active = true;
+    snprintf(s->id, sizeof(s->id), "bash_%d", id_num);
+    s->pid = pid;
+    snprintf(s->log, sizeof(s->log), "%s", logpath);
+    s->offset = 0;
+    pthread_mutex_unlock(&g_bg_shell_lock);
+
+    jbuf_t j;
+    jbuf_init(&j, 160);
+    jbuf_appendf(&j, "{\"ok\":true,\"bash_id\":\"bash_%d\",\"pid\":%ld,\"log\":", id_num, pid);
+    jbuf_append_json_str(&j, logpath);
+    jbuf_append(&j, ",\"status\":\"running\"}");
+    size_t n = j.len < rlen - 1 ? j.len : rlen - 1;
+    memcpy(result, j.data, n);
+    result[n] = '\0';
+    jbuf_free(&j);
+    return true;
+}
+
+static bool tool_bash_output(const char *input, char *result, size_t rlen) {
+    char *bash_id = json_get_str(input, "bash_id");
+    if (!bash_id)
+        bash_id = json_get_str(input, "shell_id");
+    if (!bash_id || !bash_id[0]) {
+        free(bash_id);
+        snprintf(result, rlen, "{\"error\":\"bash_id required\"}");
+        return false;
+    }
+    long pid = 0, offset = 0;
+    char log[128] = {0};
+    bool found = false;
+    pthread_mutex_lock(&g_bg_shell_lock);
+    for (int i = 0; i < BG_SHELL_MAX; i++)
+        if (g_bg_shells[i].active && strcmp(g_bg_shells[i].id, bash_id) == 0) {
+            pid = g_bg_shells[i].pid;
+            offset = g_bg_shells[i].offset;
+            snprintf(log, sizeof(log), "%s", g_bg_shells[i].log);
+            found = true;
+            break;
+        }
+    pthread_mutex_unlock(&g_bg_shell_lock);
+    if (!found) {
+        snprintf(result, rlen, "{\"error\":\"unknown bash_id\"}");
+        free(bash_id);
+        return false;
+    }
+
+    bool running = (kill((pid_t)pid, 0) == 0);
+    jbuf_t chunk;
+    jbuf_init(&chunk, 4096);
+    long newoffset = offset;
+    FILE *lf = fopen(log, "r");
+    if (lf) {
+        fseek(lf, offset, SEEK_SET);
+        char buf[8192];
+        size_t r;
+        while ((r = fread(buf, 1, sizeof(buf), lf)) > 0) {
+            jbuf_append_len(&chunk, buf, r);
+            newoffset += (long)r;
+        }
+        fclose(lf);
+    }
+    pthread_mutex_lock(&g_bg_shell_lock);
+    for (int i = 0; i < BG_SHELL_MAX; i++)
+        if (g_bg_shells[i].active && strcmp(g_bg_shells[i].id, bash_id) == 0) {
+            g_bg_shells[i].offset = newoffset;
+            break;
+        }
+    pthread_mutex_unlock(&g_bg_shell_lock);
+
+    jbuf_t j;
+    jbuf_init(&j, chunk.len + 160);
+    jbuf_append(&j, "{\"bash_id\":");
+    jbuf_append_json_str(&j, bash_id);
+    jbuf_appendf(&j, ",\"status\":\"%s\",\"output\":", running ? "running" : "completed");
+    jbuf_append_json_str(&j, chunk.data ? chunk.data : "");
+    jbuf_append(&j, "}");
+    size_t n = j.len < rlen - 1 ? j.len : rlen - 1;
+    memcpy(result, j.data, n);
+    result[n] = '\0';
+    jbuf_free(&j);
+    jbuf_free(&chunk);
+    free(bash_id);
+    return true;
+}
+
+static bool tool_kill_shell(const char *input, char *result, size_t rlen) {
+    char *shell_id = json_get_str(input, "shell_id");
+    if (!shell_id)
+        shell_id = json_get_str(input, "bash_id");
+    if (!shell_id || !shell_id[0]) {
+        free(shell_id);
+        snprintf(result, rlen, "{\"error\":\"shell_id required\"}");
+        return false;
+    }
+    long pid = 0;
+    bool found = false;
+    pthread_mutex_lock(&g_bg_shell_lock);
+    for (int i = 0; i < BG_SHELL_MAX; i++)
+        if (g_bg_shells[i].active && strcmp(g_bg_shells[i].id, shell_id) == 0) {
+            pid = g_bg_shells[i].pid;
+            g_bg_shells[i].active = false;
+            found = true;
+            break;
+        }
+    pthread_mutex_unlock(&g_bg_shell_lock);
+    if (!found) {
+        snprintf(result, rlen, "{\"error\":\"unknown shell_id\"}");
+        free(shell_id);
+        return false;
+    }
+    int krc = kill((pid_t)pid, SIGTERM);
+    jbuf_t j;
+    jbuf_init(&j, 96);
+    jbuf_appendf(&j, "{\"ok\":%s,\"shell_id\":", krc == 0 ? "true" : "false");
+    jbuf_append_json_str(&j, shell_id);
+    jbuf_appendf(&j, ",\"pid\":%ld,\"signal\":\"SIGTERM\"}", pid);
+    size_t n = j.len < rlen - 1 ? j.len : rlen - 1;
+    memcpy(result, j.data, n);
+    result[n] = '\0';
+    jbuf_free(&j);
+    free(shell_id);
+    return krc == 0;
+}
+
 static bool tool_bash_compat(const char *input, char *result, size_t rlen) {
     char *command = json_get_str(input, "command");
     if (!command) {
         snprintf(result, rlen, "error: command required");
         return false;
+    }
+
+    if (json_get_bool(input, "run_in_background", false)) {
+        char *bg_cwd = json_get_str(input, "cwd");
+        bool bok = bg_shell_launch(command, bg_cwd, result, rlen);
+        free(bg_cwd);
+        free(command);
+        return bok;
     }
 
     int timeout = json_get_int(input, "timeout", 120);
@@ -24879,7 +29720,8 @@ bool dsco_run_ask_dialog(const char *input, char *result, size_t rlen) {
 
     /* Non-interactive: degrade gracefully — emit the spec so the model can
      * fall back to asking in plain text. */
-    if (!isatty(STDIN_FILENO) || !isatty(STDERR_FILENO)) {
+    if (!isatty(STDIN_FILENO) ||
+        (!isatty(STDERR_FILENO) && !pixel_tui_session_active())) {
         jbuf_t out;
         jbuf_init(&out, 256);
         jbuf_append(&out, "{\"status\":\"no_tty\",\"questions\":[");
@@ -25653,7 +30495,8 @@ static bool tool_governance_dispatch(const char *input, char *result, size_t rle
         free(action);
         snprintf(
             result, rlen,
-            "missing: action (status, curriculum, authorize, checkpoint, budget, audit, param)");
+            "missing: action (status, curriculum, authorize, checkpoint, budget, "
+            "capability, experiment, audit, param)");
         return false;
     }
     bool ok = false;
@@ -25667,6 +30510,10 @@ static bool tool_governance_dispatch(const char *input, char *result, size_t rle
         ok = tool_governance_checkpoint(input, result, rlen);
     else if (strcmp(action, "budget") == 0)
         ok = tool_governance_budget(input, result, rlen);
+    else if (strcmp(action, "capability") == 0)
+        ok = tool_governance_capability(input, result, rlen);
+    else if (strcmp(action, "experiment") == 0)
+        ok = tool_governance_experiment(input, result, rlen);
     else if (strcmp(action, "audit") == 0)
         ok = tool_governance_audit(input, result, rlen);
     else if (strcmp(action, "param") == 0)
@@ -25681,7 +30528,8 @@ static bool tool_memory_dispatch(const char *input, char *result, size_t rlen) {
     char *action = json_get_str(input, "action");
     if (!action || !action[0]) {
         free(action);
-        snprintf(result, rlen, "missing: action (store, recall, promote, forget, status)");
+        snprintf(result, rlen,
+                 "missing: action (store, recall, promote, classify, review, forget, status)");
         return false;
     }
     bool ok = false;
@@ -25691,6 +30539,10 @@ static bool tool_memory_dispatch(const char *input, char *result, size_t rlen) {
         ok = tool_memory_recall(input, result, rlen);
     else if (strcmp(action, "promote") == 0)
         ok = tool_memory_promote(input, result, rlen);
+    else if (strcmp(action, "classify") == 0)
+        ok = tool_memory_classify(input, result, rlen);
+    else if (strcmp(action, "review") == 0)
+        ok = tool_memory_review(input, result, rlen);
     else if (strcmp(action, "forget") == 0)
         ok = tool_memory_forget(input, result, rlen);
     else if (strcmp(action, "status") == 0)
@@ -25712,6 +30564,8 @@ static const char *mo_ipc_status_name(ipc_agent_status_t s) {
             return "starting";
         case IPC_AGENT_IDLE:
             return "idle";
+        case IPC_AGENT_DURABLE:
+            return "durable";
         case IPC_AGENT_WORKING:
             return "working";
         case IPC_AGENT_DONE:
@@ -27666,6 +32520,23 @@ static bool tool_hostname(const char *input, char *result, size_t rlen) {
     "{\"type\":\"object\",\"properties\":{\"action\":{\"type\":\"string\",\"description\":"        \
     "\"Action to perform\"}},\"required\":[\"action\"]}"
 
+#define OUT_TEXT                                                                                       \
+    "{\"type\":\"string\",\"description\":\"Plain text stdout/result payload; error text is returned " \
+    "when the tool fails.\"}"
+#define OUT_VERIFIED_WRITE                                                                             \
+    "{\"type\":\"string\",\"description\":\"Verified write status string containing path, bytes, and " \
+    "mode on success.\"}"
+#define OUT_DISCOVER_TOOLS                                                                             \
+    "{\"type\":\"object\",\"properties\":{\"query\":{\"type\":\"string\"},\"total_tools\":{"        \
+    "\"type\":\"integer\"},\"matches\":{\"type\":\"array\"},\"matched\":{\"type\":\"integer\"},"     \
+    "\"tools\":{\"type\":\"array\"},\"note\":{\"type\":\"string\"}}}"
+#define OUT_LOAD_TOOLS                                                                                 \
+    "{\"type\":\"object\",\"properties\":{\"loaded\":{\"type\":\"integer\"},\"not_found\":{"        \
+    "\"type\":\"integer\"},\"unknown_tools\":{\"type\":\"array\",\"items\":{\"type\":\"string\"}},"  \
+    "\"tools\":{\"type\":\"array\",\"items\":{\"type\":\"object\",\"properties\":{\"name\":{"        \
+    "\"type\":\"string\"},\"description\":{\"type\":\"string\"},\"input_schema\":{\"type\":\"object\"}," \
+    "\"output_schema\":{\"type\":[\"object\",\"string\",\"array\",\"number\",\"boolean\",\"null\"]}}}}}}"
+
 static const tool_def_t s_tools[] = {
     /* ══════════════════════════════════════════════════════════════════════
      *  CLAUDE CODE COMPATIBILITY ALIASES
@@ -27725,6 +32596,41 @@ static const tool_def_t s_tools[] = {
      .core = true,
      .is_read_only = true,
      .is_concurrent = true},
+    {.name = "MultiEdit",
+     .description = "Apply an ordered batch of string edits to ONE file atomically. "
+                    "edits=[{old_string,new_string,replace_all?}] applied in order (each sees the "
+                    "prior result); if any old_string is missing NOTHING is written.",
+     .input_schema_json =
+         "{\"type\":\"object\",\"properties\":{\"file_path\":{\"type\":\"string\"},\"edits\":{"
+         "\"type\":\"array\",\"items\":{\"type\":\"object\",\"properties\":{\"old_string\":{"
+         "\"type\":\"string\"},\"new_string\":{\"type\":\"string\"},\"replace_all\":{\"type\":"
+         "\"boolean\"}},\"required\":[\"old_string\",\"new_string\"]}}},\"required\":[\"file_"
+         "path\",\"edits\"]}",
+     .execute = tool_multi_edit,
+     .core = true},
+    {.name = "LS",
+     .description = "Claude-compatible directory listing (alias for list_directory).",
+     .input_schema_json = "{\"type\":\"object\",\"properties\":{\"path\":{\"type\":\"string\"},"
+                          "\"recursive\":{\"type\":\"boolean\"}},\"required\":[\"path\"]}",
+     .execute = tool_list_dir,
+     .core = true,
+     .is_read_only = true,
+     .is_concurrent = true},
+    {.name = "BashOutput",
+     .description = "Retrieve buffered output from a background Bash shell started with "
+                    "run_in_background. Returns {bash_id,status:running|completed,output} with "
+                    "only the new bytes since the last call.",
+     .input_schema_json = "{\"type\":\"object\",\"properties\":{\"bash_id\":{\"type\":\"string\"},"
+                          "\"filter\":{\"type\":\"string\"}},\"required\":[\"bash_id\"]}",
+     .execute = tool_bash_output,
+     .core = true,
+     .is_read_only = true,
+     .is_concurrent = true},
+    {.name = "KillShell",
+     .description = "Terminate a background shell (Bash run_in_background) by shell_id (SIGTERM).",
+     .input_schema_json = "{\"type\":\"object\",\"properties\":{\"shell_id\":{\"type\":\"string\"}},"
+                          "\"required\":[\"shell_id\"]}",
+     .execute = tool_kill_shell},
     {.name = "WebFetch",
      .description = "Claude-compatible URL fetch/extract.",
      .input_schema_json =
@@ -27806,6 +32712,49 @@ static const tool_def_t s_tools[] = {
      .execute = dsco_run_ask_dialog,
      .core = true,
      .is_interactive = true},
+    {.name = "kitty_remote",
+     .description =
+         "Native governed control of every Kitty remote-control capability: windows, tabs, "
+         "layouts, launch/run, screen text, input, scrolling, colors, fonts, spacing, opacity, "
+         "background images, logos, markers, environment, child signals, and kittens. Arguments "
+         "are passed directly as argv with no shell.",
+     .input_schema_json =
+         "{\"type\":\"object\",\"properties\":{\"command\":{\"type\":\"string\"},"
+         "\"args\":{\"type\":\"array\",\"items\":{\"type\":\"string\"}},\"to\":{"
+         "\"type\":\"string\",\"description\":\"Optional Kitty listen address; defaults to "
+         "KITTY_LISTEN_ON or the controlling Kitty terminal.\"},\"timeout_seconds\":{\"type\":"
+         "\"integer\"}},\"required\":[\"command\"]}",
+     .execute = tool_kitty_remote,
+     .core = true},
+    {.name = "kitten",
+     .description =
+         "Run any installed first-party kitten as a governed native interactive capability, "
+         "including icat, clipboard, SSH/transfer, notifications, hints, diff, themes, font/file "
+         "choosers, command palette, Unicode input, panels, and terminal queries. Arguments are "
+         "passed directly as argv with no shell.",
+     .input_schema_json =
+         "{\"type\":\"object\",\"properties\":{\"command\":{\"type\":\"string\"},"
+         "\"args\":{\"type\":\"array\",\"items\":{\"type\":\"string\"}}},"
+         "\"required\":[\"command\"]}",
+     .execute = tool_kitten,
+     .core = true,
+     .is_interactive = true},
+    {.name = "ui_render",
+     .description =
+         "Render a declarative native UI scene as a pixel-native overlay in the Kitty "
+         "workspace (generative UI). The spec is a nested object of elements (surface, stack, "
+         "row, grid, text, badge, meter, sparkline, icon, rule) with semantic roles, style "
+         "tokens (fg/bg/border: text|muted|accent|success|warning|danger|surface|surface-raised; "
+         "pad/gap/radius/columns; type: body|label|title|code|metric), size constraints "
+         "(w/h/min_w/max_w/grow/shrink), and children. Meters use value 0..1; sparklines take "
+         "numbers in text. Pass ppm_path to also write a deterministic image artifact when no "
+         "Kitty surface is attached.",
+     .input_schema_json =
+         "{\"type\":\"object\",\"properties\":{\"spec\":{\"type\":\"object\","
+         "\"description\":\"Root scene element.\"},\"width\":{\"type\":\"integer\"},"
+         "\"ppm_path\":{\"type\":\"string\"}},\"required\":[\"spec\"]}",
+     .execute = tool_ui_render,
+     .core = true},
 
     /* ══════════════════════════════════════════════════════════════════════
      *  CORE FILE TOOLS (13)
@@ -27815,6 +32764,7 @@ static const tool_def_t s_tools[] = {
                     "Creates parent dirs.",
      .input_schema_json = "{\"type\":\"object\",\"properties\":{\"path\":{\"type\":\"string\"},"
                           "\"content\":{\"type\":\"string\"}},\"required\":[\"path\",\"content\"]}",
+     .output_schema_json = OUT_VERIFIED_WRITE,
      .execute = tool_write_file,
      .core = true},
     {.name = "read_file",
@@ -27823,6 +32773,7 @@ static const tool_def_t s_tools[] = {
                           "\"offset\":{\"type\":\"integer\",\"description\":\"Start line "
                           "(1-based)\"},\"limit\":{\"type\":\"integer\",\"description\":\"Max "
                           "lines\"}},\"required\":[\"path\"]}",
+     .output_schema_json = OUT_TEXT,
      .execute = tool_read_file,
      .core = true,
      .is_read_only = true,
@@ -27916,7 +32867,7 @@ static const tool_def_t s_tools[] = {
      .input_schema_json =
          "{\"type\":\"object\",\"properties\":{\"server\":{\"type\":\"string\",\"description\":"
          "\"Local server name: lmstudio, ollama, mlx, vllm, llamacpp, jan, etc. Defaults to "
-         "lmstudio.\"},\"provider\":{\"type\":\"string\",\"description\":\"Alias for server.\"},"
+         "lmstudio.\"},\"response_mode\":{\"type\":\"string\",\"enum\":[\"text\",\"raw\"],\"description\":\"text (default) returns completion text; raw returns the complete provider response including logprobs and reasoning telemetry.\"},\"provider\":{\"type\":\"string\",\"description\":\"Alias for server.\"},"
          "\"base_url\":{\"type\":\"string\",\"description\":\"Loopback OpenAI-compatible base URL, "
          "for example http://localhost:1234/v1.\"},\"model\":{\"type\":\"string\"},\"prompt\":{"
          "\"type\":\"string\"},\"system\":{\"type\":\"string\"},\"messages\":{\"type\":\"array\","
@@ -27943,12 +32894,14 @@ static const tool_def_t s_tools[] = {
          "paths\":{\"type\":\"array\",\"items\":{\"type\":\"string\"}},\"verify_min_bytes\":{"
          "\"type\":\"integer\"},\"verify_contains\":{\"type\":\"string\"},\"verify_sha256\":{"
          "\"type\":\"string\"}},\"required\":[\"command\"]}",
+     .output_schema_json = OUT_TEXT,
      .execute = tool_bash,
      .core = true},
     {.name = "python",
-     .description = "Run Python code.",
+     .description = "Run Python code or a Python file.",
      .input_schema_json = "{\"type\":\"object\",\"properties\":{\"code\":{\"type\":\"string\"},"
-                          "\"args\":{\"type\":\"string\"}},\"required\":[\"code\"]}",
+                          "\"file\":{\"type\":\"string\"},\"args\":{\"type\":\"string\"}}}",
+     .output_schema_json = OUT_TEXT,
      .execute = tool_python,
      .core = true},
 
@@ -27982,6 +32935,17 @@ static const tool_def_t s_tools[] = {
      .input_schema_json =
          "{\"type\":\"object\",\"properties\":{\"aggressive\":{\"type\":\"boolean\"}}}",
      .execute = tool_context_compact,
+     .core = true},
+    {.name = "conversation_context",
+     .description = "Inspect or make bounded live-transcript edits during an agent turn. "
+                    "action=inspect|append|replace_last|remove_last. append/replace require content; "
+                    "role=user|assistant. Tool-use protocol messages cannot be altered.",
+     .input_schema_json =
+         "{\"type\":\"object\",\"properties\":{\"action\":{\"type\":\"string\","
+         "\"enum\":[\"inspect\",\"append\",\"replace_last\",\"remove_last\"]},"
+         "\"role\":{\"type\":\"string\",\"enum\":[\"user\",\"assistant\"]},"
+         "\"content\":{\"type\":\"string\"}},\"required\":[\"action\"]}",
+     .execute = tool_conversation_context,
      .core = true},
     {.name = "plot",
      .description = "Render data as a Unicode chart (returns ANSI/Unicode art). Types: line, bar, "
@@ -28227,14 +33191,355 @@ static const tool_def_t s_tools[] = {
      .is_read_only = true,
      .is_concurrent = true},
     {.name = "jina_search",
-     .description = "AI-powered web search via Jina AI. Returns structured results with titles, "
-                    "URLs, and descriptions.",
+     .description = "AI-powered web search via Jina AI. Returns titles, URLs, and descriptions; "
+                    "pass content=true for full page content per result (large — prefer "
+                    "jina_read on chosen URLs).",
      .input_schema_json = "{\"type\":\"object\",\"properties\":{\"query\":{\"type\":\"string\"},"
                           "\"num\":{\"type\":\"integer\",\"description\":\"Number of results "
-                          "(1-10, default 5)\"}},\"required\":[\"query\"]}",
+                          "(1-10, default 5)\"},\"content\":{\"type\":\"boolean\","
+                          "\"description\":\"Include full page content per result (default "
+                          "false)\"}},\"required\":[\"query\"]}",
      .execute = tool_jina_search,
      .is_read_only = true,
      .is_concurrent = true},
+    {.name = "jina_read",
+     .description = "Fetch a URL as LLM-ready markdown via Jina Reader (r.jina.ai). The natural "
+                    "follow-up to jina_search: search picks URLs, jina_read fetches one.",
+     .input_schema_json = "{\"type\":\"object\",\"properties\":{\"url\":{\"type\":\"string\"}},"
+                          "\"required\":[\"url\"]}",
+     .execute = tool_jina_read,
+     .is_read_only = true,
+     .is_concurrent = true},
+    {.name = "ast_index",
+     .description = "Index dsco's own source into an AST-block vector store (one card per "
+                    "function/struct/typedef). Run once before ast_search; re-run to refresh. "
+                    "Defaults to src/ + include/; pass comma-separated paths to narrow.",
+     .input_schema_json = "{\"type\":\"object\",\"properties\":{\"paths\":{\"type\":\"string\","
+                          "\"description\":\"comma-separated dirs relative to repo root; default "
+                          "src,include\"}},\"required\":[]}",
+     .execute = tool_ast_index,
+     .is_read_only = true},
+    {.name = "ast_search",
+     .description = "Semantic retrieval over the indexed AST: describe a symptom or capability in "
+                    "natural language and get the source blocks where it lives, file:line "
+                    "anchored. Local recall + jina-reranker-v3 cross-encoder precision. Run "
+                    "ast_index first.",
+     .input_schema_json =
+         "{\"type\":\"object\",\"properties\":{\"query\":{\"type\":\"string\"},\"k\":{\"type\":"
+         "\"integer\",\"description\":\"coarse candidates to rerank (1-200, default 60)\"},"
+         "\"top_n\":{\"type\":\"integer\",\"description\":\"results returned (1-40, default 8)\"},"
+         "\"rerank\":{\"type\":\"boolean\",\"description\":\"use jina-reranker-v3 (default "
+         "true)\"}},\"required\":[\"query\"]}",
+     .execute = tool_ast_search,
+     .is_read_only = true,
+     .is_concurrent = true},
+    {.name = "ast_insights",
+     .description = "Structured aggregate analysis over dsco's source (no API, no index needed): "
+                    "node-type histogram, function complexity stats, complexity hotspots (the "
+                    "'what needs attention' list), and per-directory rollups. Defaults to "
+                    "src/+include/; pass comma-separated paths to narrow.",
+     .input_schema_json = "{\"type\":\"object\",\"properties\":{\"paths\":{\"type\":\"string\","
+                          "\"description\":\"comma-separated dirs; default src,include\"}},"
+                          "\"required\":[]}",
+     .execute = tool_ast_insights,
+     .is_read_only = true,
+     .is_concurrent = true},
+    {.name = "ast_classify",
+     .description = "Zero-shot classify a code block against your own labels via Jina "
+                    "(jina-embeddings-v5-text-small). Feed a card from ast_search plus labels "
+                    "like [\"networking\",\"crypto\",\"ui\",\"governance\"] to categorize it.",
+     .input_schema_json =
+         "{\"type\":\"object\",\"properties\":{\"text\":{\"type\":\"string\"},\"labels\":{\"type\":"
+         "\"array\",\"items\":{\"type\":\"string\"}},\"model\":{\"type\":\"string\"}},"
+         "\"required\":[\"text\",\"labels\"]}",
+     .execute = tool_ast_classify,
+     .is_read_only = true,
+     .is_concurrent = true},
+    {.name = "apply_patch",
+     .description =
+         "Apply a unified diff atomically across one or more files. Each hunk is matched "
+         "by its context; if any hunk's context has drifted, NOTHING is written and the "
+         "failing hunk is named. Safer than edit_file for multi-edit changes. Provide a "
+         "standard `diff -u` patch with --- / +++ / @@ headers.",
+     .input_schema_json = "{\"type\":\"object\",\"properties\":{\"patch\":{\"type\":\"string\","
+                          "\"description\":\"unified diff text\"}},\"required\":[\"patch\"]}",
+     .execute = tool_apply_patch},
+    {.name = "test_run",
+     .description = "Run a make target and return STRUCTURED results: "
+                    "{passed,total,failed,failing[],exit,ms}. Parses the 'N tests: M passed' "
+                    "summary and collects FAIL/error lines. Use instead of `bash make test` when "
+                    "you need to act on the outcome. Defaults to target 'test'.",
+     .input_schema_json = "{\"type\":\"object\",\"properties\":{\"target\":{\"type\":\"string\","
+                          "\"description\":\"make target (default 'test')\"}},\"required\":[]}",
+     .execute = tool_test_run,
+     .is_read_only = true},
+    {.name = "diagnostics",
+     .description = "Fast single-file syntax check with the project's real compile flags (from "
+                    "compile_commands.json). Returns structured {severity,line,col,message} "
+                    "diagnostics in ~200ms — the tight edit→verify loop, no full make needed. "
+                    "Run after editing a .c/.h file.",
+     .input_schema_json = "{\"type\":\"object\",\"properties\":{\"file\":{\"type\":\"string\","
+                          "\"description\":\"path to a .c/.h file\"}},\"required\":[\"file\"]}",
+     .execute = tool_diagnostics,
+     .is_read_only = true,
+     .is_concurrent = true},
+    {.name = "symbol_def",
+     .description = "Exact go-to-definition over the AST: find where a function/struct/typedef/"
+                    "enum named <name> is defined, with file:line and signature. Precise "
+                    "complement to the semantic ast_search.",
+     .input_schema_json = "{\"type\":\"object\",\"properties\":{\"name\":{\"type\":\"string\"},"
+                          "\"paths\":{\"type\":\"string\"}},\"required\":[\"name\"]}",
+     .execute = tool_symbol_def,
+     .is_read_only = true,
+     .is_concurrent = true},
+    {.name = "symbol_refs",
+     .description = "Find-references: every whole-word use of an identifier across the source, "
+                    "file:line anchored with the source line. Use before renaming or to trace "
+                    "impact.",
+     .input_schema_json =
+         "{\"type\":\"object\",\"properties\":{\"name\":{\"type\":\"string\"},\"max\":{\"type\":"
+         "\"integer\",\"description\":\"cap (1-500, default "
+         "100)\"},\"paths\":{\"type\":\"string\"}},"
+         "\"required\":[\"name\"]}",
+     .execute = tool_symbol_refs,
+     .is_read_only = true,
+     .is_concurrent = true},
+    {.name = "ast_edit",
+     .description = "AST-aware edits. action='rename': whole-word rename a symbol across the tree "
+                    "(protected immune files are skipped, never modified). "
+                    "action='replace_function': replace a function's whole body by its AST line "
+                    "span. Verify with diagnostics after.",
+     .input_schema_json =
+         "{\"type\":\"object\",\"properties\":{\"action\":{\"type\":\"string\",\"description\":"
+         "\"rename|replace_function\"},\"old_name\":{\"type\":\"string\"},\"new_name\":{\"type\":"
+         "\"string\"},\"file\":{\"type\":\"string\"},\"name\":{\"type\":\"string\"},\"new_source\":"
+         "{\"type\":\"string\"},\"paths\":{\"type\":\"string\"}},\"required\":[\"action\"]}",
+     .execute = tool_ast_edit},
+    {.name = "debugger",
+     .description = "Drive lldb in batch mode on a program: breakpoints, run, backtrace, inspect. "
+                    "Pass an lldb `script` (newline-separated commands; default run;bt;quit).",
+     .input_schema_json = "{\"type\":\"object\",\"properties\":{\"program\":{\"type\":\"string\"},"
+                          "\"args\":{\"type\":\"string\"},\"script\":{\"type\":\"string\"}},"
+                          "\"required\":[\"program\"]}",
+     .execute = tool_debugger},
+    {.name = "backtrace",
+     .description = "Symbolicate a stack from a binary and optional core dump (lldb 'thread "
+                    "backtrace all'). Turns a crash into a readable stack.",
+     .input_schema_json = "{\"type\":\"object\",\"properties\":{\"binary\":{\"type\":\"string\"},"
+                          "\"core\":{\"type\":\"string\"}},\"required\":[\"binary\"]}",
+     .execute = tool_backtrace,
+     .is_read_only = true},
+    {.name = "syscall_trace",
+     .description = "Trace the syscalls a command makes (dtruss; may require elevated privileges). "
+                    "Ground truth for what a program actually touches.",
+     .input_schema_json = "{\"type\":\"object\",\"properties\":{\"command\":{\"type\":\"string\"}},"
+                          "\"required\":[\"command\"]}",
+     .execute = tool_syscall_trace},
+    {.name = "watch_run",
+     .description = "Run a command and return {exit, wall_ms, peak_rss_bytes} — structured "
+                    "resource accounting via /usr/bin/time -l.",
+     .input_schema_json = "{\"type\":\"object\",\"properties\":{\"command\":{\"type\":\"string\"}},"
+                          "\"required\":[\"command\"]}",
+     .execute = tool_watch_run},
+    {.name = "memcheck",
+     .description = "Run a command under macOS `leaks` and report leaked allocations. Pairs with "
+                    "the C codebase for memory-safety checks.",
+     .input_schema_json = "{\"type\":\"object\",\"properties\":{\"command\":{\"type\":\"string\"}},"
+                          "\"required\":[\"command\"]}",
+     .execute = tool_memcheck},
+    {.name = "make_build",
+     .description = "Build a make target and return STRUCTURED {ok,exit,errors[],warnings[],ms} — "
+                    "the build-side twin of test_run. Defaults to the default target.",
+     .input_schema_json = "{\"type\":\"object\",\"properties\":{\"target\":{\"type\":\"string\"}},"
+                          "\"required\":[]}",
+     .execute = tool_make_build},
+    {.name = "preprocess",
+     .description = "Run the C preprocessor (cc -E) on a file with the project's real flags — see "
+                    "fully expanded macros. Essential in a macro-heavy codebase.",
+     .input_schema_json = "{\"type\":\"object\",\"properties\":{\"file\":{\"type\":\"string\"}},"
+                          "\"required\":[\"file\"]}",
+     .execute = tool_preprocess,
+     .is_read_only = true,
+     .is_concurrent = true},
+    {.name = "disasm",
+     .description = "Disassemble a single symbol from a built binary (objdump). See the actual "
+                    "emitted machine code. Defaults to the dsco binary.",
+     .input_schema_json = "{\"type\":\"object\",\"properties\":{\"symbol\":{\"type\":\"string\"},"
+                          "\"binary\":{\"type\":\"string\"}},\"required\":[\"symbol\"]}",
+     .execute = tool_disasm,
+     .is_read_only = true,
+     .is_concurrent = true},
+    {.name = "unused_symbols",
+     .description = "Find static functions that are referenced only at their own definition — "
+                    "dead code safe to remove. AST-based, file-scope-correct.",
+     .input_schema_json = "{\"type\":\"object\",\"properties\":{\"paths\":{\"type\":\"string\"}},"
+                          "\"required\":[]}",
+     .execute = tool_unused_symbols,
+     .is_read_only = true,
+     .is_concurrent = true},
+    {.name = "abi_diff",
+     .description = "Diff exported symbols between two binaries (nm) — added/removed symbols. "
+                    "Catches accidental ABI breaks.",
+     .input_schema_json = "{\"type\":\"object\",\"properties\":{\"a\":{\"type\":\"string\"},\"b\":{"
+                          "\"type\":\"string\"}},\"required\":[\"a\",\"b\"]}",
+     .execute = tool_abi_diff,
+     .is_read_only = true},
+    {.name = "lint",
+     .description = "Run clang-tidy on a file and return its warnings/errors. Uses "
+                    "compile_commands.json automatically.",
+     .input_schema_json = "{\"type\":\"object\",\"properties\":{\"file\":{\"type\":\"string\"}},"
+                          "\"required\":[\"file\"]}",
+     .execute = tool_lint},
+    {.name = "format_code",
+     .description = "Run clang-format in place on a file (optionally --lines=A:B). Keeps edits "
+                    "style-consistent with the codebase.",
+     .input_schema_json = "{\"type\":\"object\",\"properties\":{\"file\":{\"type\":\"string\"},"
+                          "\"lines\":{\"type\":\"string\",\"description\":\"A:B range\"}},"
+                          "\"required\":[\"file\"]}",
+     .execute = tool_format_code},
+    {.name = "type_at",
+     .description = "Clang AST nodes at file:line — the resolved types of what appears on that "
+                    "line. Precise type info the semantic search can't give.",
+     .input_schema_json = "{\"type\":\"object\",\"properties\":{\"file\":{\"type\":\"string\"},"
+                          "\"line\":{\"type\":\"integer\"}},\"required\":[\"file\",\"line\"]}",
+     .execute = tool_type_at,
+     .is_read_only = true,
+     .is_concurrent = true},
+    {.name = "include_graph",
+     .description = "Header include tree for a translation unit (cc -H) — what a file pulls in and "
+                    "why edits trigger big rebuilds.",
+     .input_schema_json = "{\"type\":\"object\",\"properties\":{\"file\":{\"type\":\"string\"}},"
+                          "\"required\":[\"file\"]}",
+     .execute = tool_include_graph,
+     .is_read_only = true,
+     .is_concurrent = true},
+    {.name = "api_outline",
+     .description = "Public API of a file from the AST: non-static function signatures, structs, "
+                    "typedefs, defines. Faster than reading the whole file.",
+     .input_schema_json = "{\"type\":\"object\",\"properties\":{\"file\":{\"type\":\"string\"}},"
+                          "\"required\":[\"file\"]}",
+     .execute = tool_api_outline,
+     .is_read_only = true,
+     .is_concurrent = true},
+    {.name = "git_blame",
+     .description = "Line-level authorship: commit, author, when for a file (optionally a "
+                    "start..end line range).",
+     .input_schema_json =
+         "{\"type\":\"object\",\"properties\":{\"file\":{\"type\":\"string\"},\"start\":{\"type\":"
+         "\"integer\"},\"end\":{\"type\":\"integer\"}},\"required\":[\"file\"]}",
+     .execute = tool_git_blame,
+     .is_read_only = true,
+     .is_concurrent = true},
+    {.name = "git_log_symbol",
+     .description = "Pickaxe history: every commit that changed the count of a symbol/identifier "
+                    "(git log -S). The history of a function.",
+     .input_schema_json = "{\"type\":\"object\",\"properties\":{\"symbol\":{\"type\":\"string\"},"
+                          "\"file\":{\"type\":\"string\"}},\"required\":[\"symbol\"]}",
+     .execute = tool_git_log_symbol,
+     .is_read_only = true,
+     .is_concurrent = true},
+    {.name = "git_bisect",
+     .description = "Automated git bisect: given good and bad refs and a test command, find the "
+                    "breaking commit. NOTE: moves HEAD across commits during the run, then resets.",
+     .input_schema_json =
+         "{\"type\":\"object\",\"properties\":{\"good\":{\"type\":\"string\"},\"bad\":{\"type\":"
+         "\"string\"},\"command\":{\"type\":\"string\"}},\"required\":[\"good\",\"bad\","
+         "\"command\"]}",
+     .execute = tool_git_bisect},
+    {.name = "stage_hunk",
+     .description = "Stage a patch to the git index (git apply --cached) without touching the "
+                    "working tree — build tight, single-concern commits.",
+     .input_schema_json = "{\"type\":\"object\",\"properties\":{\"patch\":{\"type\":\"string\"}},"
+                          "\"required\":[\"patch\"]}",
+     .execute = tool_stage_hunk},
+    {.name = "review_diff",
+     .description = "Structured working diff: {files:[{path,added,removed}], file_count, added, "
+                    "removed}. Reason over your own changes before committing.",
+     .input_schema_json = "{\"type\":\"object\",\"properties\":{\"staged\":{\"type\":\"boolean\"},"
+                          "\"path\":{\"type\":\"string\"}},\"required\":[]}",
+     .execute = tool_review_diff,
+     .is_read_only = true,
+     .is_concurrent = true},
+    {.name = "fs_watch",
+     .description = "Bounded filesystem watcher: snapshot a path, wait briefly, and report "
+                    "created/changed/deleted files. Defaults to path=. seconds=2.",
+     .input_schema_json =
+         "{\"type\":\"object\",\"properties\":{\"path\":{\"type\":\"string\"},\"seconds\":{"
+         "\"type\":"
+         "\"integer\"},\"depth\":{\"type\":\"integer\"},\"limit\":{\"type\":\"integer\"}},"
+         "\"required\":[]}",
+     .execute = tool_fs_watch,
+     .is_read_only = true,
+     .is_concurrent = true},
+    {.name = "tail_follow",
+     .description = "Tail a file, optionally following for a bounded number of seconds. Use for "
+                    "logs without hanging the agent.",
+     .input_schema_json =
+         "{\"type\":\"object\",\"properties\":{\"file\":{\"type\":\"string\"},\"lines\":{\"type\":"
+         "\"integer\"},\"seconds\":{\"type\":\"integer\"}},\"required\":[\"file\"]}",
+     .execute = tool_tail_follow,
+     .is_read_only = true,
+     .is_concurrent = true},
+    {.name = "lsof",
+     .description = "List open files/sockets by pid, port, path, or a short global sample.",
+     .input_schema_json =
+         "{\"type\":\"object\",\"properties\":{\"pid\":{\"type\":\"integer\"},\"port\":{\"type\":"
+         "\"integer\"},\"path\":{\"type\":\"string\"}},\"required\":[]}",
+     .execute = tool_lsof,
+     .is_read_only = true,
+     .is_concurrent = true},
+    {.name = "clipboard",
+     .description = "Read or write the system clipboard via pbpaste/pbcopy with Linux fallbacks.",
+     .input_schema_json = "{\"type\":\"object\",\"properties\":{\"action\":{\"type\":\"string\","
+                          "\"description\":\"read|write\"},\"text\":{\"type\":\"string\"}},"
+                          "\"required\":[]}",
+     .execute = tool_clipboard_deep},
+    {.name = "archive",
+     .description = "Create, list, or extract tar.gz archives with quoted archive/destination "
+                    "paths and a constrained files list for create.",
+     .input_schema_json =
+         "{\"type\":\"object\",\"properties\":{\"action\":{\"type\":\"string\",\"description\":"
+         "\"create|list|extract\"},\"archive\":{\"type\":\"string\"},\"files\":{\"type\":"
+         "\"string\"},"
+         "\"dest\":{\"type\":\"string\"}},\"required\":[\"action\",\"archive\"]}",
+     .execute = tool_archive},
+    {.name = "spawn_bg",
+     .description = "Start a background shell command with nohup, returning {pid,log}. "
+                    "Exec-gated because it launches arbitrary work.",
+     .input_schema_json =
+         "{\"type\":\"object\",\"properties\":{\"command\":{\"type\":\"string\"},\"log\":{\"type\":"
+         "\"string\"}},\"required\":[\"command\"]}",
+     .execute = tool_spawn_bg},
+    {.name = "signal_process",
+     .description = "Send a signal to a process by pid (default TERM). Process mutation is "
+                    "governance-gated.",
+     .input_schema_json =
+         "{\"type\":\"object\",\"properties\":{\"pid\":{\"type\":\"integer\"},\"signal\":{\"type\":"
+         "\"string\"}},\"required\":[\"pid\"]}",
+     .execute = tool_signal_process},
+    {.name = "net_probe",
+     .description = "Active network probe: ping a host or TCP-connect to host:port with a short "
+                    "timeout.",
+     .input_schema_json =
+         "{\"type\":\"object\",\"properties\":{\"host\":{\"type\":\"string\"},\"port\":{\"type\":"
+         "\"integer\"},\"timeout\":{\"type\":\"integer\"}},\"required\":[\"host\"]}",
+     .execute = tool_net_probe,
+     .is_concurrent = true},
+    {.name = "env_scan",
+     .description = "Search environment variables with sensitive values redacted by default. Set "
+                    "reveal=true only when intentionally inspecting secrets.",
+     .input_schema_json = "{\"type\":\"object\",\"properties\":{\"pattern\":{\"type\":\"string\"},"
+                          "\"reveal\":{\"type\":"
+                          "\"boolean\"}},\"required\":[]}",
+     .execute = tool_env_scan,
+     .is_read_only = true,
+     .is_concurrent = true},
+    {.name = "notify",
+     .description = "Send a desktop notification (osascript on macOS, printf fallback elsewhere).",
+     .input_schema_json = "{\"type\":\"object\",\"properties\":{\"title\":{\"type\":\"string\"},"
+                          "\"message\":{\"type\":"
+                          "\"string\"}},\"required\":[\"message\"]}",
+     .execute = tool_notify},
     {.name = "jina_embed",
      .description =
          "Compute embeddings via Jina v4 API. Returns 1024d float vectors for semantic similarity.",
@@ -28925,6 +34230,30 @@ static const tool_def_t s_tools[] = {
      .execute = tool_weather,
      .is_read_only = true,
      .is_concurrent = true},
+    {.name = "openrouter_lanes",
+     .description = "Materialize OpenRouter model swimlanes from the live catalog, optionally "
+                    "fully unrolling each model into concrete OpenRouter upstream providers.",
+     .input_schema_json =
+         "{\"type\":\"object\",\"properties\":{\"task\":{\"type\":\"string\"},"
+         "\"min_context\":{\"type\":\"integer\"},\"min_output\":{\"type\":\"integer\"},"
+         "\"min_quality\":{\"type\":\"number\"},\"max_input_price_per_m\":{\"type\":\"number\"},"
+         "\"max_output_price_per_m\":{\"type\":\"number\"},\"max_models\":{\"type\":\"integer\"},"
+         "\"endpoints_per_model\":{\"type\":\"integer\",\"minimum\":0,\"maximum\":16},"
+         "\"require_tools\":{\"type\":\"boolean\"},\"free_only\":{\"type\":\"boolean\"},"
+         "\"diversify_org\":{\"type\":\"boolean\"},\"limit\":{\"type\":\"integer\"}}}",
+     .execute = tool_openrouter_lanes,
+     .is_read_only = true,
+     .is_concurrent = true},
+    {.name = "weather_batch",
+     .description = "Native bounded-concurrency weather retrieval for up to 1,000 locations. "
+                    "Uses curl multi directly; it does not spawn model/agent workers.",
+     .input_schema_json =
+         "{\"type\":\"object\",\"properties\":{\"locations\":{\"type\":\"array\","
+         "\"items\":{\"type\":\"string\"},\"maxItems\":1000},\"concurrency\":{\"type\":\"integer\","
+         "\"minimum\":1,\"maximum\":32}},\"required\":[\"locations\"]}",
+     .execute = tool_weather_batch,
+     .is_read_only = true,
+     .is_concurrent = true},
     {.name = "slack_post",
      .description = "Post message to Slack.",
      .input_schema_json = "{\"type\":\"object\",\"properties\":{\"channel\":{\"type\":\"string\"},"
@@ -29206,12 +34535,17 @@ static const tool_def_t s_tools[] = {
          "Native networking: mesh P2P (libsodium encrypted), HTTP/TLS server/client (mbedTLS), "
          "bridge fleet ops, remote tool invocation. Actions: mesh/status, mesh/peers, mesh/send, "
          "mesh/broadcast, mesh/connect, http/post, http/status, bridge/fleet, bridge/exec, "
-         "bridge/send, bridge/bus_put, bridge/bus_get, remote.",
+         "bridge/fanout (concurrent command across all fleet hosts with durable per-host "
+         "RESULT.json envelopes; role=<filter>, concurrency=N), bridge/send, bridge/bus_put, "
+         "bridge/bus_get, remote.",
      .input_schema_json =
          "{\"type\":\"object\",\"properties\":{\"action\":{\"type\":\"string\",\"description\":"
          "\"mesh/status|mesh/peers|mesh/send|mesh/broadcast|mesh/connect|http/post|http/"
-         "status|bridge/fleet|bridge/exec|bridge/send|bridge/bus_put|bridge/"
+         "status|bridge/fleet|bridge/exec|bridge/fanout|bridge/send|bridge/bus_put|bridge/"
          "bus_get|remote\"},\"host\":{\"type\":\"string\"},\"port\":{\"type\":\"integer\"},"
+         "\"role\":{\"type\":\"string\",\"description\":\"ROLES filter for bridge/fanout\"},"
+         "\"concurrency\":{\"type\":\"integer\",\"description\":\"parallel workers for "
+         "bridge/fanout\"},"
          "\"peer\":{\"type\":\"string\",\"description\":\"Fleet peer name or IP for bridge/exec "
          "and remote\"},\"peer_pubkey\":{\"type\":\"string\",\"description\":\"Hex pubkey for "
          "mesh/send\"},\"data\":{\"type\":\"string\",\"description\":\"Payload for mesh/send or "
@@ -29223,7 +34557,7 @@ static const tool_def_t s_tools[] = {
          "http/"
          "post\"},\"since\":{\"type\":\"integer\"},\"limit\":{\"type\":\"integer\"},\"tls\":{"
          "\"type\":\"boolean\"},\"cmd\":{\"type\":\"string\",\"description\":\"Shell command for "
-         "bridge/exec\"}},\"required\":[\"action\"]}",
+         "bridge/exec or bridge/fanout\"}},\"required\":[\"action\"]}",
      .execute = tool_net_dispatch},
     {.name = "graphsub",
      .description =
@@ -29391,20 +34725,27 @@ static const tool_def_t s_tools[] = {
      .execute = tool_killswitch_dispatch},
     {.name = "governance",
      .description =
-         "Governance controls: status, curriculum, authorize, checkpoint, budget, audit, param. "
-         "Curriculum exposes the safety-aware RSI skill gates and top-priority control skills.",
+         "Governance controls: status, curriculum, authorize, checkpoint, budget, capability, "
+         "experiment, audit, param. capability records empirical outcome evidence and returns the "
+         "evidence-earned tier; experiment reports per-stage governance overhead + would-block "
+         "stats for the active governance model (reset:true clears counters).",
      .input_schema_json =
          "{\"type\":\"object\",\"properties\":{\"action\":{\"type\":\"string\",\"description\":"
-         "\"status|curriculum|authorize|checkpoint|budget|audit|param\"},\"operation\":{\"type\":"
-         "\"string\"},\"amount\":{\"type\":\"number\"},\"param\":{\"type\":\"string\"},\"value\":{"
-         "\"type\":\"string\"}},\"required\":[\"action\"]}",
+         "\"status|curriculum|authorize|checkpoint|budget|capability|experiment|audit|param\"},"
+         "\"operation\":{\"type\":\"string\"},\"outcome\":{\"type\":\"string\",\"description\":"
+         "\"success|failure (capability action)\"},\"reset\":{\"type\":\"boolean\",\"description\":"
+         "\"reset experiment counters\"},\"agent_id\":{\"type\":\"string\"},\"amount\":{\"type\":"
+         "\"number\"},\"param\":{\"type\":\"string\"},\"value\":{\"type\":\"string\"}},"
+         "\"required\":[\"action\"]}",
      .execute = tool_governance_dispatch},
     {.name = "memory_tier",
-     .description = "Three-tier memory: store, recall, promote, forget, status.",
+     .description = "Three-tier memory: store, recall, promote, classify, review, forget, status.",
      .input_schema_json =
          "{\"type\":\"object\",\"properties\":{\"action\":{\"type\":\"string\",\"description\":"
-         "\"store|recall|promote|forget|status\"},\"key\":{\"type\":\"string\"},\"value\":{"
-         "\"type\":\"string\"},\"query\":{\"type\":\"string\"}},\"required\":[\"action\"]}",
+         "\"store|recall|promote|classify|review|forget|status\"},\"key\":{\"type\":\"string\"},"
+         "\"value\":{\"type\":\"string\"},\"query\":{\"type\":\"string\"},\"classification\":{"
+         "\"type\":\"string\",\"description\":\"open|held|sealed|umbral\"}},"
+         "\"required\":[\"action\"]}",
      .execute = tool_memory_dispatch},
     {.name = "learned_cost",
      .description = "Learned k-NN cost model (Priority 3): predict/record/stats. action=predict "
@@ -29701,6 +35042,7 @@ static const tool_def_t s_tools[] = {
      .input_schema_json = "{\"type\":\"object\",\"properties\":{\"category\":{\"type\":\"string\"},"
                           "\"query\":{\"type\":\"string\"},\"offset\":{\"type\":\"integer\"},"
                           "\"limit\":{\"type\":\"integer\"}}}",
+     .output_schema_json = OUT_DISCOVER_TOOLS,
      .execute = tool_discover_tools,
      .core = true,
      .is_read_only = true,
@@ -29740,7 +35082,31 @@ static const tool_def_t s_tools[] = {
          "load\"},\"tools\":{\"type\":\"array\",\"items\":{\"type\":\"string\"},\"description\":"
          "\"Tool names to load\"},\"category\":{\"type\":\"string\",\"description\":\"Tool "
          "category to bulk load\"}}}",
+     .output_schema_json = OUT_LOAD_TOOLS,
      .execute = tool_load_tools,
+     .core = true},
+    {.name = "invoke_tool",
+     .description =
+         "Invoke a discovered or loaded capability without changing the provider tool schema. "
+         "Use the exact target name and input schema returned by discover_tools/load_tools. "
+         "The target still passes through normal trust, approval, budget, and audit gates.",
+     .input_schema_json =
+         "{\"type\":\"object\",\"properties\":{\"name\":{\"type\":\"string\","
+         "\"description\":\"Exact tool name\"},\"input\":{\"type\":\"object\","
+         "\"description\":\"Arguments matching the loaded tool schema\"}},"
+         "\"required\":[\"name\",\"input\"]}",
+     .execute = tool_invoke_tool,
+     .core = true},
+    {.name = "evict_tools",
+     .description = "Unload dynamically loaded tools from the active register file. Provide names, "
+                    "tools, category, or all:true.",
+     .input_schema_json =
+         "{\"type\":\"object\",\"properties\":{\"names\":{\"type\":\"string\",\"description\":"
+         "\"Comma-separated tool names to unload\"},\"tools\":{\"type\":\"array\",\"items\":{"
+         "\"type\":\"string\"},\"description\":\"Tool names to unload\"},\"category\":{\"type\":"
+         "\"string\",\"description\":\"Tool category to unload\"},\"all\":{\"type\":\"boolean\","
+         "\"description\":\"Unload every dynamically loaded tool\"}}}",
+     .execute = tool_evict_tools,
      .core = true},
     {.name = "legion",
      .description = "Legion agent system: spawn, status, find.",
@@ -29862,6 +35228,7 @@ static const tool_def_t s_tools[] = {
          "\"items\":{\"type\":\"string\"}},\"verify_min_bytes\":{\"type\":\"integer\"},\"verify_"
          "contains\":{\"type\":\"string\"},\"verify_sha256\":{\"type\":\"string\"}},\"required\":["
          "\"command\"]}",
+     .output_schema_json = OUT_TEXT,
      .execute = tool_run_command,
      .core = true},
     {.name = "sandbox_run",
@@ -30008,6 +35375,17 @@ static const tool_def_t s_tools[] = {
      .execute = tool_plugin_validate,
      .is_read_only = true,
      .is_concurrent = true},
+    {.name = "openai_image_generate",
+     .description = "Generate one image with the OpenAI Image API and save it to a local file.",
+     .input_schema_json =
+         "{\"type\":\"object\",\"properties\":{\"prompt\":{\"type\":\"string\"},\"output_path\":{"
+         "\"type\":\"string\"},\"model\":{\"type\":\"string\",\"default\":\"gpt-image-2\"},"
+         "\"size\":{\"type\":\"string\",\"default\":\"auto\"},\"quality\":{\"type\":\"string\","
+         "\"default\":\"auto\"},\"output_format\":{\"type\":\"string\",\"enum\":[\"png\","
+         "\"webp\",\"jpeg\"],\"default\":\"png\"},\"background\":{\"type\":\"string\"},"
+         "\"moderation\":{\"type\":\"string\"},\"output_compression\":{\"type\":\"integer\"}},"
+         "\"required\":[\"prompt\"]}",
+     .execute = tool_openai_image_generate},
     {.name = "view_image",
      .description = "Prepare a local image file for model-side vision analysis.",
      .input_schema_json = "{\"type\":\"object\",\"properties\":{\"path\":{\"type\":\"string\"}},"
@@ -30199,12 +35577,10 @@ bool tools_invoke_by_name(const char *name, const char *input, char *result, siz
     if (!name || !result || rlen == 0)
         return false;
     result[0] = '\0';
-    for (int i = 0; i < s_tool_count; i++) {
-        if (!s_tools[i].name || !s_tools[i].execute)
-            continue;
-        if (strcmp(s_tools[i].name, name) == 0) {
-            return s_tools[i].execute(input ? input : "{}", result, rlen);
-        }
+    /* O(1) hash-map lookup (falls back to MCP alias resolution). */
+    int idx = tools_lookup_index(name);
+    if (idx >= 0 && idx < s_tool_count && tools_profile_allows_index(idx) && s_tools[idx].execute) {
+        return s_tools[idx].execute(input ? input : "{}", result, rlen);
     }
     snprintf(result, rlen, "{\"error\":\"unknown tool: %s\"}", name);
     return false;
@@ -30213,11 +35589,9 @@ bool tools_invoke_by_name(const char *name, const char *input, char *result, siz
 bool tools_is_offload_safe(const char *name) {
     if (!name || !name[0])
         return false;
-    for (int i = 0; i < s_tool_count; i++) {
-        if (!s_tools[i].name || strcmp(s_tools[i].name, name) != 0)
-            continue;
-        return s_tools[i].is_read_only && s_tools[i].is_concurrent;
-    }
+    int idx = tools_lookup_index(name);
+    if (idx >= 0 && idx < s_tool_count && s_tools[idx].name)
+        return s_tools[idx].is_read_only && s_tools[idx].is_concurrent;
     return false;
 }
 
@@ -30242,27 +35616,32 @@ void tools_clear_profile_filter(void) {
 bool tools_is_parent_specified_core_tool(const char *tool_name) {
     if (!tool_name || !tool_name[0])
         return false;
-    for (int i = 0; i < s_tool_count; i++) {
-        if (s_tools[i].name && strcmp(s_tools[i].name, tool_name) == 0)
-            return s_tools[i].core;
-    }
+    int idx = tools_lookup_index(tool_name);
+    if (idx >= 0 && idx < s_tool_count && s_tools[idx].name)
+        return s_tools[idx].core;
     return false;
+}
+
+static bool tools_restricted_profile_requested(void) {
+    const char *profile = getenv("DSCO_TOOL_PROFILE");
+    return profile && strcmp(profile, "restricted") == 0;
 }
 
 void tools_init_local_only(void) {
     /* Fast path for local metadata/direct-tool commands. Keep this free of
      * subsystem startup: no plugins, browser profiles, IPC, MCP, or VFS. */
-    g_tools_init_profile = TOOLS_AGENT;
+    g_tools_init_profile = tools_restricted_profile_requested() ? TOOLS_RESTRICTED : TOOLS_AGENT;
     tool_map_rebuild();
 }
 
 void tools_init(void) {
-    tools_init_profile(TOOLS_FULL);
+    tools_init_profile(tools_restricted_profile_requested() ? TOOLS_RESTRICTED : TOOLS_FULL);
 }
 
 void tools_init_profile(tools_init_profile_t profile) {
+    dsco_flow_reset(); /* session start: clear lethal-trifecta taint accumulation */
     g_tools_init_profile = profile;
-    if (profile == TOOLS_CORE || profile == TOOLS_AGENT) {
+    if (profile != TOOLS_FULL) {
         tool_map_rebuild();
         return;
     }
@@ -30313,6 +35692,11 @@ bool tools_profile_allows_index(int index) {
         }
         return false;
     }
+    if (g_tools_init_profile == TOOLS_RESTRICTED) {
+        const char *name = s_tools[index].name;
+        return name && (strcmp(name, "Bash") == 0 || strcmp(name, "curl_raw") == 0 ||
+                        strcmp(name, "ssh_command") == 0);
+    }
     if (g_tools_init_profile == TOOLS_FULL || g_tools_init_profile == TOOLS_AGENT)
         return true;
     return s_tools[index].core;
@@ -30334,25 +35718,47 @@ const tool_def_t *tools_get_all(int *count) {
     return s_tools;
 }
 
+/* Capability classifier support: report a builtin tool's declared read-only
+ * flag. `*found` distinguishes "registered and read-write" from "unknown". */
+bool tools_meta_is_read_only(const char *name, bool *found) {
+    if (found)
+        *found = false;
+    if (!name || !name[0])
+        return false;
+    int total = 0;
+    const tool_def_t *all = tools_get_all(&total);
+    for (int i = 0; i < total; i++) {
+        if (all[i].name && strcmp(all[i].name, name) == 0) {
+            if (found)
+                *found = true;
+            return all[i].is_read_only;
+        }
+    }
+    return false;
+}
+
 int tools_builtin_count(void) {
     return s_tool_count;
 }
 
 int tools_get_core_count(void) {
+    static int cached_core_count = -1;
+    if (cached_core_count >= 0)
+        return cached_core_count;
     int n = 0;
     for (int i = 0; i < s_tool_count; i++)
         if (s_tools[i].core)
             n++;
+    cached_core_count = n;
     return n;
 }
 
 bool dsco_tool_is_interactive(const char *name) {
     if (!name || !*name)
         return false;
-    for (int i = 0; i < s_tool_count; i++) {
-        if (s_tools[i].name && strcmp(s_tools[i].name, name) == 0)
-            return s_tools[i].is_interactive;
-    }
+    int idx = tools_lookup_index(name);
+    if (idx >= 0 && idx < s_tool_count && s_tools[idx].name)
+        return s_tools[idx].is_interactive;
     return false;
 }
 
@@ -30703,6 +36109,12 @@ static bool g_groups_built = false;
 
 static int g_hot_cache[HOT_CACHE_SIZE];
 static int g_hot_count = 0;
+#define LOADED_BUILTIN_MAX 96
+static int g_loaded_builtin[LOADED_BUILTIN_MAX];
+static int g_loaded_builtin_count = 0;
+
+static bool tools_mark_loaded_builtin(int idx);
+static bool tools_evict_loaded_builtin_index(int idx);
 
 void tools_mark_hot(int tool_idx) {
     /* Move to front of LRU */
@@ -30723,6 +36135,17 @@ void tools_mark_hot(int tool_idx) {
     g_hot_cache[0] = tool_idx;
 }
 
+static void tools_unmark_hot(int tool_idx) {
+    for (int i = 0; i < g_hot_count; i++) {
+        if (g_hot_cache[i] != tool_idx)
+            continue;
+        for (int j = i; j + 1 < g_hot_count; j++)
+            g_hot_cache[j] = g_hot_cache[j + 1];
+        g_hot_count--;
+        return;
+    }
+}
+
 /* ── Core tool set: register-file model ─────────────────────────────────
  * ALWAYS:          Hardwired registers, never evicted. Minimum viable set
  *                  for file I/O, search, execution, and context management.
@@ -30732,7 +36155,8 @@ void tools_mark_hot(int tool_idx) {
  * can shrink the warm bank under cost pressure. */
 
 static const char *CORE_ALWAYS[] = {
-    "bash", "python", "discover_tools", "load_tools", "StartOfLoopConstruct", "EndOfLoopConstruct",
+    "bash", "python", "discover_tools", "load_tools", "invoke_tool", "evict_tools",
+    "StartOfLoopConstruct", "EndOfLoopConstruct",
     NULL /* minimal core: execution + dynamic loading + loop control.
           * NOTE: must stay <= TOOL_REG_ALWAYS (config.h) entries or the
           * critical-budget pin loop will evict required tools.
@@ -30743,7 +36167,7 @@ static const char *CORE_ALWAYS[] = {
 static const char *CORE_WARM[] = {
     "read_file",       "write_file",  "edit_file",      "list_directory", "find_files",
     "grep_files",      "run_command", "context_status", "scratchpad",     "playbook_add",
-    "playbook_search", NULL /* 11 tools → fills R5-R15 when budget allows */
+    "playbook_search", NULL /* 11 eligible tools; TOOL_REG_WARM admits 10 at full budget. */
 };
 
 static bool is_core_always(const char *name) {
@@ -30762,6 +36186,95 @@ static bool is_core_warm(const char *name) {
 
 static bool is_core_tool(const char *name) {
     return is_core_always(name) || is_core_warm(name);
+}
+
+static int loaded_builtin_find_unlocked(int idx) {
+    for (int i = 0; i < g_loaded_builtin_count; i++)
+        if (g_loaded_builtin[i] == idx)
+            return i;
+    return -1;
+}
+
+static bool tools_mark_loaded_builtin(int idx) {
+    if (idx < 0 || idx >= s_tool_count)
+        return false;
+    if (is_core_always(s_tools[idx].name))
+        return true;
+
+    tool_registry_wrlock();
+    int pos = loaded_builtin_find_unlocked(idx);
+    if (pos >= 0) {
+        for (int j = pos; j > 0; j--)
+            g_loaded_builtin[j] = g_loaded_builtin[j - 1];
+        g_loaded_builtin[0] = idx;
+        tool_registry_unlock();
+        return true;
+    }
+    if (g_loaded_builtin_count < LOADED_BUILTIN_MAX)
+        g_loaded_builtin_count++;
+    for (int j = g_loaded_builtin_count - 1; j > 0; j--)
+        g_loaded_builtin[j] = g_loaded_builtin[j - 1];
+    g_loaded_builtin[0] = idx;
+    tool_registry_unlock();
+    return true;
+}
+
+static bool tools_evict_loaded_builtin_index(int idx) {
+    bool removed = false;
+    tool_registry_wrlock();
+    int pos = loaded_builtin_find_unlocked(idx);
+    if (pos >= 0) {
+        for (int j = pos; j + 1 < g_loaded_builtin_count; j++)
+            g_loaded_builtin[j] = g_loaded_builtin[j + 1];
+        g_loaded_builtin_count--;
+        removed = true;
+    }
+    tool_registry_unlock();
+    if (removed)
+        tools_unmark_hot(idx);
+    return removed;
+}
+
+int tools_loaded_builtin_indices(int *out_indices, int max_indices) {
+    if (!out_indices || max_indices <= 0)
+        return 0;
+    tool_registry_rdlock();
+    int n = g_loaded_builtin_count < max_indices ? g_loaded_builtin_count : max_indices;
+    for (int i = 0; i < n; i++)
+        out_indices[i] = g_loaded_builtin[i];
+    tool_registry_unlock();
+    return n;
+}
+
+int tools_loaded_builtin_count(void) {
+    tool_registry_rdlock();
+    int n = g_loaded_builtin_count;
+    tool_registry_unlock();
+    return n;
+}
+
+bool tools_is_builtin_loaded(const char *name) {
+    int idx = tools_lookup_index(name);
+    if (idx < 0 || idx >= s_tool_count)
+        return false;
+    tool_registry_rdlock();
+    bool loaded = loaded_builtin_find_unlocked(idx) >= 0;
+    tool_registry_unlock();
+    return loaded;
+}
+
+void tools_loaded_builtin_clear(void) {
+    tool_registry_wrlock();
+    int loaded[LOADED_BUILTIN_MAX];
+    int n = g_loaded_builtin_count;
+    if (n > LOADED_BUILTIN_MAX)
+        n = LOADED_BUILTIN_MAX;
+    for (int i = 0; i < n; i++)
+        loaded[i] = g_loaded_builtin[i];
+    g_loaded_builtin_count = 0;
+    tool_registry_unlock();
+    for (int i = 0; i < n; i++)
+        tools_unmark_hot(loaded[i]);
 }
 
 /* ── Group assignment (rule-based, fast) ──────────────────────────────── */
@@ -31086,13 +36599,20 @@ static void ensure_tool_index(void) {
     int n = total < SEM_MAX_DOCS ? total : SEM_MAX_DOCS;
     const char **names = safe_malloc(n * sizeof(char *));
     const char **descs = safe_malloc(n * sizeof(char *));
+    char **docs = safe_malloc(n * sizeof(char *));
     for (int i = 0; i < n; i++) {
         names[i] = tools[i].name;
-        descs[i] = tools[i].description;
+        docs[i] = tool_contract_doc_alloc(tools[i].name, tools[i].description,
+                                          tools[i].input_schema_json,
+                                          tools_output_schema_for_def(&tools[i]), NULL);
+        descs[i] = docs[i];
     }
     sem_tools_index_build(&g_tool_index, names, descs, n);
+    for (int i = 0; i < n; i++)
+        free(docs[i]);
     free(names);
     free(descs);
+    free(docs);
     g_tool_index_built = true;
 }
 
@@ -31594,7 +37114,7 @@ static int cooc_predict_internal(const char *tool_name, int *out_tool_indices, i
     /* Map cooc names back to s_tools[] indices */
     int result = 0;
     for (int i = 0; i < nt; i++) {
-        int ti = tool_map_lookup(&g_tool_map, g_cooc->names[top[i].ci]);
+        int ti = tools_lookup_index(g_cooc->names[top[i].ci]);
         if (ti >= 0)
             out_tool_indices[result++] = ti;
     }
@@ -31879,7 +37399,7 @@ tool_page_result_t tools_get_paged(const char *context, int max_tools, float bud
     /* Hint-pinned: specific tools named in active hints */
     for (int hi = 0; hi < g_hint_count && pn < pinned_budget; hi++) {
         for (int t = 0; t < g_hints[hi].tool_count && pn < pinned_budget; t++) {
-            int idx = tool_map_lookup(&g_tool_map, g_hints[hi].tools[t]);
+            int idx = tools_lookup_index(g_hints[hi].tools[t]);
             if (idx >= 0 && idx < total && !included[idx]) {
                 pidx[pn++] = idx;
                 included[idx] = true;
@@ -32383,8 +37903,8 @@ int tool_map_lookup(tool_map_t *m, const char *name) {
     return -1;
 }
 
-/* Build the hash map from all registered tools */
-void tool_map_rebuild(void) {
+/* Build the hash map from all registered tools. Caller holds toolmap write lock. */
+static void tool_map_rebuild_unlocked(void) {
     tool_map_free(&g_tool_map);
     tool_map_init(&g_tool_map);
 
@@ -32406,8 +37926,20 @@ void tool_map_rebuild(void) {
     }
 }
 
-static int tool_map_lookup_with_mcp_alias(const char *name, char *resolved_name,
-                                          size_t resolved_len) {
+static void tool_map_rebuild(void) {
+    tool_registry_wrlock();
+    tool_map_rebuild_unlocked();
+    tool_registry_unlock();
+}
+
+void tools_registry_map_free(void) {
+    tool_registry_wrlock();
+    tool_map_free(&g_tool_map);
+    tool_registry_unlock();
+}
+
+static int tool_map_lookup_with_mcp_alias_unlocked(const char *name, char *resolved_name,
+                                                   size_t resolved_len) {
     if (resolved_name && resolved_len > 0)
         snprintf(resolved_name, resolved_len, "%s", name ? name : "");
 
@@ -32442,16 +37974,150 @@ static int tool_map_lookup_with_mcp_alias(const char *name, char *resolved_name,
     return idx;
 }
 
+static int tool_map_lookup_with_mcp_alias(const char *name, char *resolved_name,
+                                          size_t resolved_len) {
+    tool_registry_rdlock();
+    int idx = tool_map_lookup_with_mcp_alias_unlocked(name, resolved_name, resolved_len);
+    tool_registry_unlock();
+    return idx;
+}
+
+int tools_lookup_index(const char *name) {
+    return tool_map_lookup_with_mcp_alias(name, NULL, 0);
+}
+
 /* ── External tool registry (MCP, etc.) ────────────────────────────────── */
 
 external_tool_t g_external_tools[MAX_EXTERNAL_TOOLS];
 int g_external_tool_count = 0;
 
-/* Serializes writers (tools_register_external, reset_external_tools).
- * Readers iterate g_external_tool_count without locking — the release-store
- * below pairs with a natural acquire-load on aligned ints, so any reader that
- * sees the new count is guaranteed to see a fully-initialized entry. */
-static pthread_mutex_t g_external_tools_mu = PTHREAD_MUTEX_INITIALIZER;
+/* g_locks.toolmap_lock protects the global tool map and external registry. */
+static _Atomic uint32_t g_ext_inflight = 0;
+static _Atomic uint64_t g_ext_generation = 1;
+static pthread_mutex_t g_ext_drain_mu = PTHREAD_MUTEX_INITIALIZER;
+static pthread_cond_t g_ext_drain_cv = PTHREAD_COND_INITIALIZER;
+
+typedef struct {
+    external_tool_cb cb;
+    void *ctx;
+    uint64_t generation;
+} external_tool_call_t;
+
+static void external_tool_generation_bump_unlocked(void) {
+    atomic_fetch_add_explicit(&g_ext_generation, 1, memory_order_acq_rel);
+}
+
+static bool external_tool_call_acquire_unlocked(int ei, external_tool_call_t *out) {
+    if (!out || ei < 0 || ei >= g_external_tool_count || !g_external_tools[ei].cb)
+        return false;
+    out->cb = g_external_tools[ei].cb;
+    out->ctx = g_external_tools[ei].ctx;
+    out->generation = atomic_load_explicit(&g_ext_generation, memory_order_acquire);
+    atomic_fetch_add_explicit(&g_ext_inflight, 1, memory_order_acq_rel);
+    return true;
+}
+
+int tools_external_count(void) {
+    tool_registry_rdlock();
+    int count = g_external_tool_count;
+    tool_registry_unlock();
+    return count;
+}
+
+external_tool_snapshot_t tools_external_snapshot(void) {
+    external_tool_snapshot_t snapshot = {0};
+    tool_registry_rdlock();
+    int count = g_external_tool_count;
+    if (count > 0) {
+        snapshot.items = safe_malloc((size_t)count * sizeof(*snapshot.items));
+        snapshot.count = count;
+        for (int i = 0; i < count; i++) {
+            snapshot.items[i] = g_external_tools[i];
+            snapshot.items[i].cb = NULL;
+            snapshot.items[i].ctx = NULL;
+            snapshot.items[i].input_schema_json =
+                g_external_tools[i].input_schema_json
+                    ? safe_strdup(g_external_tools[i].input_schema_json)
+                    : NULL;
+            snapshot.items[i].output_schema_json =
+                g_external_tools[i].output_schema_json
+                    ? safe_strdup(g_external_tools[i].output_schema_json)
+                    : NULL;
+        }
+    }
+    tool_registry_unlock();
+    return snapshot;
+}
+
+void tools_external_snapshot_free(external_tool_snapshot_t *snapshot) {
+    if (!snapshot)
+        return;
+    for (int i = 0; i < snapshot->count; i++) {
+        free(snapshot->items[i].input_schema_json);
+        free(snapshot->items[i].output_schema_json);
+    }
+    free(snapshot->items);
+    memset(snapshot, 0, sizeof(*snapshot));
+}
+
+typedef struct {
+    int idx;
+    double score;
+} external_rank_t;
+
+static int external_rank_cmp(const void *a, const void *b) {
+    const external_rank_t *ra = (const external_rank_t *)a;
+    const external_rank_t *rb = (const external_rank_t *)b;
+    if (rb->score > ra->score)
+        return 1;
+    if (rb->score < ra->score)
+        return -1;
+    return ra->idx - rb->idx;
+}
+
+int tools_rank_external_snapshot(const external_tool_snapshot_t *snapshot, const char *context,
+                                 int *out_indices, int max_indices) {
+    if (!snapshot || !out_indices || max_indices <= 0 || snapshot->count <= 0)
+        return 0;
+    int n = snapshot->count < max_indices ? snapshot->count : max_indices;
+    external_rank_t *ranked = safe_malloc((size_t)n * sizeof(*ranked));
+    for (int i = 0; i < n; i++) {
+        const external_tool_t *t = &snapshot->items[i];
+        jbuf_t meta;
+        jbuf_init(&meta, 256);
+        append_external_contract_metadata(&meta, t);
+        ranked[i].idx = i;
+        ranked[i].score =
+            tool_contract_query_score(t->name, t->description, t->input_schema_json,
+                                      tools_output_schema_for_external(t), meta.data, context,
+                                      false);
+        if (t->loaded)
+            ranked[i].score += 10000.0;
+        jbuf_free(&meta);
+    }
+    qsort(ranked, (size_t)n, sizeof(*ranked), external_rank_cmp);
+    for (int i = 0; i < n; i++)
+        out_indices[i] = ranked[i].idx;
+    free(ranked);
+    return n;
+}
+
+static void external_tool_call_release(void) {
+    uint32_t prev = atomic_fetch_sub_explicit(&g_ext_inflight, 1, memory_order_release);
+    if (prev == 1) {
+        pthread_mutex_lock(&g_ext_drain_mu);
+        pthread_cond_broadcast(&g_ext_drain_cv);
+        pthread_mutex_unlock(&g_ext_drain_mu);
+    }
+}
+
+static void external_tool_drain_inflight(void) {
+    pthread_mutex_lock(&g_ext_drain_mu);
+    while (atomic_load_explicit(&g_ext_inflight, memory_order_acquire) != 0) {
+        pthread_cond_wait(&g_ext_drain_cv, &g_ext_drain_mu);
+    }
+    pthread_mutex_unlock(&g_ext_drain_mu);
+}
 
 static void external_tool_copy_metadata(external_tool_t *t, const char *integration_id,
                                         const char *display_name, const char *distribution_channel,
@@ -32485,7 +38151,7 @@ void tools_register_external_metadata(const char *name, const char *integration_
                                       unsigned action_flags, const char *catalog_status) {
     if (!name || !name[0])
         return;
-    pthread_mutex_lock(&g_external_tools_mu);
+    tool_registry_wrlock();
     int current = g_external_tool_count;
     for (int i = 0; i < current; i++) {
         if (strcmp(g_external_tools[i].name, name) == 0) {
@@ -32495,68 +38161,136 @@ void tools_register_external_metadata(const char *name, const char *integration_
             break;
         }
     }
-    pthread_mutex_unlock(&g_external_tools_mu);
+    tool_registry_unlock();
 }
 
 void tools_register_external(const char *name, const char *description,
                              const char *input_schema_json, external_tool_cb cb, void *ctx) {
+    tools_register_external_with_output(name, description, input_schema_json, NULL, cb, ctx);
+}
+
+void tools_register_external_with_output(const char *name, const char *description,
+                                         const char *input_schema_json,
+                                         const char *output_schema_json, external_tool_cb cb,
+                                         void *ctx) {
     if (!name || !name[0])
         return;
-    pthread_mutex_lock(&g_external_tools_mu);
+    /* Restricted mode admits only its fixed builtin set. In particular, do not
+     * permit a dynamic/MCP registration to add or shadow a permitted name. */
+    if (g_tools_init_profile == TOOLS_RESTRICTED)
+        return;
+    char *new_schema = safe_strdup(
+        input_schema_json && input_schema_json[0] ? input_schema_json : k_default_input_schema_json);
+    char *new_output_schema =
+        safe_strdup(output_schema_json && output_schema_json[0] ? output_schema_json
+                                                                : k_default_output_schema_json);
+    if (!new_schema || !new_output_schema) {
+        free(new_schema);
+        free(new_output_schema);
+        return;
+    }
+    char *old_schema = NULL;
+    char *old_output_schema = NULL;
+    tool_registry_wrlock();
     int current = g_external_tool_count;
     for (int i = 0; i < current; i++) {
         if (strcmp(g_external_tools[i].name, name) == 0) {
             external_tool_t *existing = &g_external_tools[i];
+            external_tool_generation_bump_unlocked();
+            existing->cb = NULL;
+            existing->ctx = NULL;
+            old_schema = existing->input_schema_json;
+            existing->input_schema_json = NULL;
+            old_output_schema = existing->output_schema_json;
+            existing->output_schema_json = NULL;
+            tool_registry_unlock();
+            external_tool_drain_inflight();
+            free(old_schema);
+            free(old_output_schema);
+            old_schema = NULL;
+            old_output_schema = NULL;
+            tool_registry_wrlock();
+            existing = NULL;
+            int install_index = -1;
+            for (int j = 0; j < g_external_tool_count; j++) {
+                if (strcmp(g_external_tools[j].name, name) == 0) {
+                    existing = &g_external_tools[j];
+                    install_index = j;
+                    break;
+                }
+            }
+            if (!existing) {
+                if (g_external_tool_count >= MAX_EXTERNAL_TOOLS) {
+                    tool_registry_unlock();
+                    free(new_schema);
+                    free(new_output_schema);
+                    return;
+                }
+                install_index = g_external_tool_count++;
+                existing = &g_external_tools[install_index];
+                memset(existing, 0, sizeof(*existing));
+                snprintf(existing->name, sizeof(existing->name), "%s", name);
+            }
             snprintf(existing->description, sizeof(existing->description), "%s",
                      description ? description : "");
-            char *old_schema = existing->input_schema_json;
-            existing->input_schema_json = safe_strdup(
-                input_schema_json ? input_schema_json : "{\"type\":\"object\",\"properties\":{}}");
+            existing->input_schema_json = new_schema;
+            existing->output_schema_json = new_output_schema;
             existing->cb = cb;
             existing->ctx = ctx;
             if (!existing->display_name[0])
                 snprintf(existing->display_name, sizeof(existing->display_name), "%s", name);
             if (!existing->catalog_status[0])
                 snprintf(existing->catalog_status, sizeof(existing->catalog_status), "%s", "live");
-            tool_map_insert(&g_tool_map, existing->name, -(10000 + i));
-            pthread_mutex_unlock(&g_external_tools_mu);
-            free(old_schema);
+            tool_map_insert(&g_tool_map, existing->name, -(10000 + install_index));
+            tool_registry_unlock();
             return;
         }
     }
     if (current >= MAX_EXTERNAL_TOOLS) {
-        pthread_mutex_unlock(&g_external_tools_mu);
+        tool_registry_unlock();
+        free(new_schema);
+        free(new_output_schema);
         return;
     }
-    /* Fully populate entry at slot `current` BEFORE publishing the new count.
-     * Readers loop `for (i = 0; i < g_external_tool_count; i++)`, so we must
-     * not advertise the slot until its contents are valid. */
     external_tool_t *t = &g_external_tools[current];
     memset(t, 0, sizeof(*t));
     snprintf(t->name, sizeof(t->name), "%s", name);
     snprintf(t->description, sizeof(t->description), "%s", description ? description : "");
-    t->input_schema_json = safe_strdup(
-        input_schema_json ? input_schema_json : "{\"type\":\"object\",\"properties\":{}}");
+    t->input_schema_json = new_schema;
+    t->output_schema_json = new_output_schema;
     t->cb = cb;
     t->ctx = ctx;
     t->loaded = false;
     snprintf(t->display_name, sizeof(t->display_name), "%s", name);
     snprintf(t->catalog_status, sizeof(t->catalog_status), "%s", "live");
     tool_map_insert(&g_tool_map, t->name, -(10000 + current));
-    __atomic_store_n(&g_external_tool_count, current + 1, __ATOMIC_RELEASE);
-    pthread_mutex_unlock(&g_external_tools_mu);
+    g_external_tool_count = current + 1;
+    tool_registry_unlock();
 }
 
 void tools_reset_external(void) {
-    pthread_mutex_lock(&g_external_tools_mu);
-    int n = g_external_tool_count;
+    char *schemas[MAX_EXTERNAL_TOOLS];
+    char *output_schemas[MAX_EXTERNAL_TOOLS];
+    int n = 0;
+    tool_registry_wrlock();
+    external_tool_generation_bump_unlocked();
+    n = g_external_tool_count;
     for (int i = 0; i < n; i++) {
-        free(g_external_tools[i].input_schema_json);
+        schemas[i] = g_external_tools[i].input_schema_json;
+        output_schemas[i] = g_external_tools[i].output_schema_json;
         g_external_tools[i].input_schema_json = NULL;
+        g_external_tools[i].output_schema_json = NULL;
+        g_external_tools[i].cb = NULL;
+        g_external_tools[i].ctx = NULL;
     }
-    __atomic_store_n(&g_external_tool_count, 0, __ATOMIC_RELEASE);
-    tool_map_rebuild();
-    pthread_mutex_unlock(&g_external_tools_mu);
+    g_external_tool_count = 0;
+    tool_map_rebuild_unlocked();
+    tool_registry_unlock();
+    external_tool_drain_inflight();
+    for (int i = 0; i < n; i++) {
+        free(schemas[i]);
+        free(output_schemas[i]);
+    }
 }
 
 static bool name_in_list(const char *name, const char *const *list) {
@@ -32599,10 +38333,13 @@ static bool json_has_key_raw(const char *json, const char *key) {
 
 static char *build_sandbox_input_for_tier(const char *input_json, const char *tier, char *reason,
                                           size_t reason_len) {
-    const char *json = input_json ? input_json : "{}";
+    char *normalized_json = tools_normalize_input("sandbox_run", input_json);
+    const char *json = normalized_json ? normalized_json : (input_json ? input_json : "{}");
     char *command = json_get_str(json, "command");
-    if (!command)
+    if (!command) {
+        free(normalized_json);
         return NULL;
+    }
 
     char *image = json_get_str(json, "image");
     int timeout = json_get_int(json, "timeout", 60);
@@ -32629,6 +38366,7 @@ static char *build_sandbox_input_for_tier(const char *input_json, const char *ti
         free(command);
         free(image);
         free(filesystem);
+        free(normalized_json);
         return NULL;
     }
 
@@ -32653,13 +38391,15 @@ static char *build_sandbox_input_for_tier(const char *input_json, const char *ti
     free(command);
     free(image);
     free(filesystem);
+    free(normalized_json);
     return out;
 }
 
 static char *build_untrusted_routed_sandbox_input(const char *tool_name, const char *input_json,
                                                   const char *tier, char *reason,
                                                   size_t reason_len) {
-    const char *json = input_json ? input_json : "{}";
+    char *normalized_json = tools_normalize_input(tool_name, input_json);
+    const char *json = normalized_json ? normalized_json : (input_json ? input_json : "{}");
     char *command = NULL;
     char *image = NULL;
     int timeout = 120;
@@ -32674,6 +38414,7 @@ static char *build_untrusted_routed_sandbox_input(const char *tool_name, const c
             if (reason && reason_len > 0)
                 snprintf(reason, reason_len, "error: command required");
             free(cwd);
+            free(normalized_json);
             return NULL;
         }
         if (cwd && *cwd) {
@@ -32694,6 +38435,7 @@ static char *build_untrusted_routed_sandbox_input(const char *tool_name, const c
         if (!cmd) {
             if (reason && reason_len > 0)
                 snprintf(reason, reason_len, "error: command required");
+            free(normalized_json);
             return NULL;
         }
         command = safe_strdup(cmd);
@@ -32721,6 +38463,7 @@ static char *build_untrusted_routed_sandbox_input(const char *tool_name, const c
                 snprintf(reason, reason_len, "error: code or file required");
             free(file);
             free(code);
+            free(normalized_json);
             return NULL;
         }
         image = safe_strdup("python:3.12-alpine");
@@ -32749,6 +38492,7 @@ static char *build_untrusted_routed_sandbox_input(const char *tool_name, const c
                 snprintf(reason, reason_len, "error: code or file required");
             free(file);
             free(code);
+            free(normalized_json);
             return NULL;
         }
         image = safe_strdup("node:20-alpine");
@@ -32759,6 +38503,7 @@ static char *build_untrusted_routed_sandbox_input(const char *tool_name, const c
         if (reason && reason_len > 0) {
             snprintf(reason, reason_len, "tool '%s' is not routable to sandbox", tool_name);
         }
+        free(normalized_json);
         return NULL;
     }
 
@@ -32791,6 +38536,7 @@ static char *build_untrusted_routed_sandbox_input(const char *tool_name, const c
     jbuf_free(&b);
     free(command);
     free(image);
+    free(normalized_json);
     return out;
 }
 
@@ -32852,7 +38598,7 @@ bool tools_is_allowed_for_tier(const char *name, const char *tier, char *reason,
         if (tool_is_untrusted_sandbox_routed(name))
             return true;
 
-        int idx = tool_map_lookup(&g_tool_map, name);
+        int idx = tools_lookup_index(name);
         if (idx < 0) {
             if (reason && reason_len > 0) {
                 snprintf(reason, reason_len,
@@ -32881,6 +38627,17 @@ static bool tools_execute_internal(const char *name, const char *input_json, cha
 
     if (!name) {
         snprintf(result, result_len, "error: null tool name");
+        return false;
+    }
+    /* Keep the execution surface identical to the disclosed surface. This must
+     * precede VM, plugin, and cache paths, each of which can bypass lookup. */
+    int profile_index = tools_lookup_index(name);
+    /* Builtins use non-negative indexes and are subject to the active profile.
+     * Plugin/MCP tools use negative registry indexes; they are only inserted in
+     * the full profile, while restricted mode rejects dynamic registration. */
+    if (profile_index < 0 ? g_tools_init_profile != TOOLS_FULL
+                          : !tools_profile_allows_index(profile_index)) {
+        snprintf(result, result_len, "unknown tool: %s", name);
         return false;
     }
 
@@ -32916,7 +38673,7 @@ static bool tools_execute_internal(const char *name, const char *input_json, cha
                 break;
             if (g_vm.dispatch[di].hash == h && strcmp(g_vm.dispatch[di].name, name) == 0) {
                 /* Mark hot for tool filtering (O(1) hash map lookup) */
-                int hot_idx = tool_map_lookup(&g_tool_map, name);
+                int hot_idx = tools_lookup_index(name);
                 if (hot_idx >= 0)
                     tools_mark_hot(hot_idx);
                 struct timeval t0, t1;
@@ -32991,12 +38748,16 @@ static bool tools_execute_internal(const char *name, const char *input_json, cha
     if (idx <= -10000) {
         /* External tool (MCP): index is -(10000+i) */
         int ei = -(idx + 10000);
-        if (ei >= 0 && ei < g_external_tool_count && g_external_tools[ei].cb) {
+        external_tool_call_t call = {0};
+        tool_registry_rdlock();
+        bool have_call = external_tool_call_acquire_unlocked(ei, &call);
+        tool_registry_unlock();
+        if (have_call) {
             struct timeval t0, t1;
             gettimeofday(&t0, NULL);
-            char *ext_result =
-                g_external_tools[ei].cb(exec_name, input_json, g_external_tools[ei].ctx);
+            char *ext_result = call.cb(exec_name, input_json, call.ctx);
             gettimeofday(&t1, NULL);
+            external_tool_call_release();
             long elapsed_us = (t1.tv_sec - t0.tv_sec) * 1000000L + (t1.tv_usec - t0.tv_usec);
             if (ext_result) {
                 snprintf(result, result_len, "%s", ext_result);
@@ -33063,6 +38824,13 @@ bool tools_execute(const char *name, const char *input_json, char *result, size_
     return tools_execute_for_tier(name, input_json, tier, result, result_len);
 }
 
+#ifdef DSCO_INTERNAL_TESTS
+bool tools_execute_raw_for_test(const char *name, const char *input_json, char *result,
+                                size_t result_len) {
+    return tools_execute_internal(name, input_json, result, result_len);
+}
+#endif
+
 /* ═══════════════════════════════════════════════════════════════════════════
  * IMMUNE SYSTEM GATE — tools_execute_for_tier()
  *
@@ -33073,27 +38841,25 @@ bool tools_execute(const char *name, const char *input_json, char *result, size_
  *   G1  EXEMPT CHECK        — Immune primitives bypass to prevent regress
  *   G2  INITIALIZATION      — Safe no-op if governance not yet initialized
  *   G2a EARLY IMMUNE VETO   — Killswitch / circuit breaker before user approval prompts
- *   G2b C5 SELF-SURGERY     — Block agent-routed edits to Immune surfaces without external auth
- *   G3  KILLSWITCH          — System halt or per-agent kill → hard block
- *   G4  CIRCUIT BREAKER     — Active breakers → block + emit WARNING phero
- *   G5  GSU COST TRIAGE     — Tool-class-aware cost: read < write < exec < spawn
- *   G6  WARNING SENSING     — Pheromone field: high WARNING on this tool → degrade
- *   G7  GOVERNANCE CHECKPOINT — Budget + hardcoded rules + agent envelope
- *   G8  SHADOW CHECK        — Self-reward / reward-hacking detection (high-risk only)
- *   G9  EXECUTION           — Tool runs; timing recorded
- *   G10 FEEDBACK LOOP       — Post-exec: breaker update, pheromone emit, self_improve
+ *   G2b APPROVAL            — Human approval policy for risky/blocked tools
+ *   G2c SELF-PRESERVATION   — Block commands that halt/kill the active runtime
+ *   G3  GSU COST TRIAGE     — Tool-class-aware cost: read < write < exec < spawn
+ *   G4  WARNING SENSING     — Pheromone field: high WARNING on this tool → degrade
+ *   G5  GOVERNANCE CHECKPOINT — Budget + hardcoded rules + agent envelope
+ *   G6  SHADOW CHECK        — Self-reward / reward-hacking detection (high-risk only)
+ *   G7  EXECUTION           — Tool runs; timing recorded
+ *   G8  FEEDBACK LOOP       — Post-exec: breaker update, pheromone emit, self_improve
  *
- * Contracts enforced: C1 (veto), C2 (budget), C3 (propose/dispose), C5 (no self-surgery), C6
- * (audit) ═══════════════════════════════════════════════════════════════════════════ */
+ * Contracts enforced: C1 (veto), C2 (budget), C3 (propose/dispose), C6 (audit)
+ * ═══════════════════════════════════════════════════════════════════════════ */
 
 /* ── G1: Exempt set ───────────────────────────────────────────────────── */
 
 static bool tool_is_governance_exempt(const char *n) {
     if (!n)
         return false;
-    /* The Immune System's own primitives. Gating these causes infinite regress:
-     * governance must be callable to resolve a governance denial.
-     * C5: Immune cannot be modified from outside, but MUST be readable. */
+    /* The governance primitives are exempt so a governance denial can still be
+     * inspected and resolved without recursive gating. */
     return strcmp(n, "governance") == 0 || strcmp(n, "killswitch") == 0 || strcmp(n, "ooda") == 0 ||
            strcmp(n, "pheromone") == 0 || strcmp(n, "avian") == 0 ||
            strcmp(n, "wings_talons_status") == 0;
@@ -33113,13 +38879,20 @@ typedef enum {
 static tool_class_t tool_classify(const char *n, bool is_read_only) {
     if (is_read_only)
         return TOOL_CLASS_READ;
-    if (strcmp(n, "bash") == 0 || strcmp(n, "sandbox_run") == 0 || strcmp(n, "run_command") == 0)
+    if (strcmp(n, "bash") == 0 || strcmp(n, "sandbox_run") == 0 || strcmp(n, "run_command") == 0 ||
+        strcmp(n, "kitty_remote") == 0 || strcmp(n, "kitten") == 0)
+        return TOOL_CLASS_EXEC;
+    /* Deep-access tools that run an arbitrary command/program → exec-gated. */
+    if (strcmp(n, "debugger") == 0 || strcmp(n, "syscall_trace") == 0 ||
+        strcmp(n, "watch_run") == 0 || strcmp(n, "memcheck") == 0 || strcmp(n, "make_build") == 0 ||
+        strcmp(n, "lint") == 0 || strcmp(n, "spawn_bg") == 0 || strcmp(n, "signal_process") == 0 ||
+        strcmp(n, "git_bisect") == 0)
         return TOOL_CLASS_EXEC;
     if (strcmp(n, "agent") == 0 || strcmp(n, "swarm") == 0 || strcmp(n, "legion") == 0)
         return TOOL_CLASS_SPAWN;
     if (strcmp(n, "web_search") == 0 || strcmp(n, "WebSearch") == 0 || strcmp(n, "WebFetch") == 0 ||
         strcmp(n, "http_request") == 0 || strcmp(n, "download_file") == 0 ||
-        strcmp(n, "curl_raw") == 0)
+        strcmp(n, "curl_raw") == 0 || strcmp(n, "net_probe") == 0)
         return TOOL_CLASS_NET;
     if (strcmp(n, "sha256") == 0 || strcmp(n, "md5") == 0 || strcmp(n, "hmac") == 0 ||
         strcmp(n, "uuid") == 0 || strcmp(n, "random_bytes") == 0)
@@ -33161,10 +38934,13 @@ static bool tool_is_high_risk(const char *n, tool_class_t cls) {
            strcmp(n, "append_file") == 0 || strcmp(n, "edit_file") == 0 || strcmp(n, "Edit") == 0 ||
            strcmp(n, "delete_file") == 0 || strcmp(n, "move_file") == 0 ||
            strcmp(n, "copy_file") == 0 || strcmp(n, "chmod_tool") == 0 || strcmp(n, "git") == 0 ||
-           strcmp(n, "patch_file") == 0 || strcmp(n, "http_request") == 0 ||
-           strcmp(n, "curl_raw") == 0 || strcmp(n, "download_file") == 0 ||
-           strcmp(n, "ssh_command") == 0 || strcmp(n, "docker") == 0 || strcmp(n, "trading") == 0 ||
-           strcmp(n, "kalshi") == 0 || strcmp(n, "polymarket") == 0 || strcmp(n, "slack_post") == 0;
+           strcmp(n, "apply_patch") == 0 || strcmp(n, "ast_edit") == 0 ||
+           strcmp(n, "format_code") == 0 || strcmp(n, "stage_hunk") == 0 ||
+           strcmp(n, "archive") == 0 || strcmp(n, "patch_file") == 0 ||
+           strcmp(n, "http_request") == 0 || strcmp(n, "curl_raw") == 0 ||
+           strcmp(n, "download_file") == 0 || strcmp(n, "ssh_command") == 0 ||
+           strcmp(n, "docker") == 0 || strcmp(n, "trading") == 0 || strcmp(n, "kalshi") == 0 ||
+           strcmp(n, "polymarket") == 0 || strcmp(n, "slack_post") == 0;
 }
 
 static bool tool_env_truthy(const char *name) {
@@ -33178,7 +38954,8 @@ static bool tool_approval_prompt_available(void) {
         return false;
     if (tool_env_truthy("DSCO_NO_APPROVAL_PROMPTS"))
         return false;
-    return isatty(STDIN_FILENO) && isatty(STDERR_FILENO);
+    return isatty(STDIN_FILENO) &&
+           (isatty(STDERR_FILENO) || pixel_tui_session_active());
 }
 
 typedef enum {
@@ -33290,6 +39067,226 @@ static bool tool_shell_command_has_word(const char *cmd, const char *word) {
     return false;
 }
 
+/* ── Read-only shell command classifier ──────────────────────────────────
+ *
+ * Returns true only when every command-position word is a known
+ * non-mutating utility, stdout is never redirected anywhere but /dev/null
+ * (or fd dups), and no command substitution can execute outside single
+ * quotes.  Fail-closed: any unrecognized construct keeps the EXEC class.
+ *
+ * strict=true additionally drops utilities with obscure write paths
+ * (sed's `w` command) — used by the immune-surface gate where the target
+ * is the authorization substrate itself.
+ *
+ * This exists because classifying every `grep`/`cat`/`git log` as
+ * high-risk EXEC charged 3 GSU, forced approval prompts, and fed the
+ * WARNING-pheromone loop — pure reads must be free. */
+
+static const char *const k_shell_ro_words[] = {
+    "cat",      "head",     "tail",   "wc",      "grep",     "egrep",  "fgrep",    "rg",
+    "ag",       "awk",      "sed",    "cut",     "sort",     "uniq",   "tr",       "ls",
+    "find",     "stat",     "file",   "du",      "df",       "pwd",    "echo",     "printf",
+    "which",    "whereis",  "type",   "date",    "uname",    "hostname", "id",     "whoami",
+    "basename", "dirname",  "readlink", "realpath", "nl",    "od",     "xxd",      "strings",
+    "md5",      "md5sum",   "shasum", "sha256sum", "cksum",  "diff",   "cmp",      "comm",
+    "join",     "paste",    "column", "expand",  "unexpand", "fold",   "rev",      "tac",
+    "less",     "more",     "jq",     "git",     "cd",       "true",   "false",    "test",
+    "seq",      "expr",     "sleep",  "ps",      "pgrep",    "lsof",   "nm",       "otool",
+    "objdump",  "sw_vers",  "arch",   "getconf", "tty",      "uptime", NULL,
+};
+
+/* git subcommands that read or merely record (add/commit mutate repo
+ * metadata, not file contents — they are the sanctioned recording path). */
+static const char *const k_shell_ro_git_subs[] = {
+    "status",   "log",      "diff",     "show",        "blame",    "grep",
+    "rev-parse", "ls-files", "describe", "shortlog",   "reflog",   "ls-tree",
+    "cat-file", "show-ref", "count-objects", "add",    "commit",   NULL,
+};
+
+static bool tool_shell_ro_word_allowed(const char *w, size_t n, bool strict) {
+    for (int i = 0; k_shell_ro_words[i]; i++) {
+        const char *cand = k_shell_ro_words[i];
+        if (strict && strcmp(cand, "sed") == 0)
+            continue;
+        if (strlen(cand) == n && strncmp(w, cand, n) == 0)
+            return true;
+    }
+    return false;
+}
+
+static bool tool_shell_command_is_read_only(const char *cmd, bool strict) {
+    if (!cmd || !cmd[0])
+        return false;
+    bool in_s = false, in_d = false, at_cmd = true;
+    char head[24] = "";        /* current simple-command name */
+    bool git_need_sub = false; /* waiting for git subcommand */
+    const char *p = cmd;
+    while (*p) {
+        char c = *p;
+        if (in_s) {
+            if (c == '\'')
+                in_s = false;
+            p++;
+            continue;
+        }
+        if (in_d) {
+            if (c == '\\' && p[1]) {
+                p += 2;
+                continue;
+            }
+            if (c == '"') {
+                in_d = false;
+                p++;
+                continue;
+            }
+            if (c == '`' || (c == '$' && p[1] == '('))
+                return false;
+            p++;
+            continue;
+        }
+        if (c == '\'') {
+            if (at_cmd)
+                return false;
+            in_s = true;
+            p++;
+            continue;
+        }
+        if (c == '"') {
+            if (at_cmd)
+                return false;
+            in_d = true;
+            p++;
+            continue;
+        }
+        if (c == '`')
+            return false;
+        if (c == '$') {
+            if (p[1] == '(' || at_cmd)
+                return false; /* substitution / $VAR as command */
+            p++;
+            continue;
+        }
+        if (c == '>') {
+            const char *q = p + 1;
+            if (*q == '>')
+                q++;
+            if (*q == '&') { /* fd dup: >&1 >&2 */
+                q++;
+                if (*q == '1' || *q == '2') {
+                    p = q + 1;
+                    continue;
+                }
+                return false;
+            }
+            while (*q == ' ' || *q == '\t')
+                q++;
+            if (strncmp(q, "/dev/null", 9) == 0) {
+                p = q + 9;
+                continue;
+            }
+            return false;
+        }
+        if (c == '<') {
+            if (p[1] == '(')
+                return false; /* process substitution */
+            p++;
+            continue;
+        }
+        if (c == ';' || c == '&' || c == '|' || c == '\n' || c == '(' || c == '{') {
+            at_cmd = true;
+            head[0] = '\0';
+            git_need_sub = false;
+            p++;
+            continue;
+        }
+        if (c == ')' || c == '}') {
+            p++;
+            continue;
+        }
+        if (isspace((unsigned char)c)) {
+            p++;
+            continue;
+        }
+        /* word */
+        const char *w = p;
+        while (*p && !isspace((unsigned char)*p) && !strchr(";&|<>(){}'\"`$", *p))
+            p++;
+        size_t n = (size_t)(p - w);
+        if (at_cmd) {
+            /* env assignment prefix (FOO=bar cmd) keeps command position */
+            if (w[0] == '_' || isalpha((unsigned char)w[0])) {
+                bool assign = false;
+                for (size_t i = 1; i < n; i++) {
+                    if (w[i] == '=') {
+                        assign = true;
+                        break;
+                    }
+                    if (w[i] != '_' && !isalnum((unsigned char)w[i]))
+                        break;
+                }
+                if (assign)
+                    continue;
+            }
+            if ((n == 4 && strncmp(w, "time", 4) == 0) ||
+                (n == 7 && strncmp(w, "command", 7) == 0))
+                continue; /* prefix word — next word is still the command */
+            for (size_t i = n; i > 0; i--) { /* strip leading path */
+                if (w[i - 1] == '/') {
+                    w += i;
+                    n -= i;
+                    break;
+                }
+            }
+            if (n == 0 || n >= sizeof(head))
+                return false;
+            if (!tool_shell_ro_word_allowed(w, n, strict))
+                return false;
+            memcpy(head, w, n);
+            head[n] = '\0';
+            git_need_sub = (strcmp(head, "git") == 0);
+            /* awk can write files / run commands only via `>` or system() */
+            if (strcmp(head, "awk") == 0 &&
+                (strchr(cmd, '>') || tool_ascii_contains_ci(cmd, "system")))
+                return false;
+            at_cmd = false;
+            continue;
+        }
+        /* argument word: per-utility hazards */
+        if (git_need_sub && w[0] != '-') {
+            bool ok = false;
+            for (int i = 0; k_shell_ro_git_subs[i]; i++) {
+                if (strlen(k_shell_ro_git_subs[i]) == n &&
+                    strncmp(w, k_shell_ro_git_subs[i], n) == 0) {
+                    ok = true;
+                    break;
+                }
+            }
+            if (!ok)
+                return false;
+            git_need_sub = false;
+            continue;
+        }
+        if (strcmp(head, "find") == 0 && w[0] == '-') {
+            static const char *const find_bad[] = {"-delete", "-exec", "-execdir", "-ok",
+                                                   "-okdir",  "-fprint", "-fprintf", "-fls",
+                                                   "-fprint0", NULL};
+            for (int i = 0; find_bad[i]; i++)
+                if (strlen(find_bad[i]) == n && strncmp(w, find_bad[i], n) == 0)
+                    return false;
+        }
+        if (strcmp(head, "sed") == 0 && w[0] == '-' && memchr(w, 'i', n))
+            return false; /* sed -i / --in-place */
+    }
+    if (git_need_sub)
+        return false; /* bare "git" — fail closed */
+    return !in_s && !in_d;
+}
+
+static bool tool_name_is_shell_exec(const char *n) {
+    return n && (strcmp(n, "bash") == 0 || strcmp(n, "Bash") == 0 ||
+                 strcmp(n, "run_command") == 0 || strcmp(n, "sandbox_run") == 0);
+}
+
 static bool tool_exec_input_has_destructive_shell_pattern(const char *input_json) {
     char *cmd = json_get_str(input_json ? input_json : "{}", "command");
     if (!cmd || !cmd[0]) {
@@ -33376,19 +39373,36 @@ static void tool_approval_assess(const char *name, const char *input_json, tool_
     }
 
     if (input_json) {
-        bool destructive_shell =
-            cls == TOOL_CLASS_EXEC && tool_exec_input_has_destructive_shell_pattern(input_json);
-        if ((cls == TOOL_CLASS_EXEC &&
-             (destructive_shell || tool_ascii_contains_ci(input_json, "sudo") ||
-              tool_ascii_contains_ci(input_json, " rm -rf") ||
-              tool_ascii_contains_ci(input_json, "mkfs") ||
-              tool_ascii_contains_ci(input_json, "dd if=") ||
-              tool_ascii_contains_ci(input_json, "launchctl") ||
-              tool_ascii_contains_ci(input_json, "systemctl"))) ||
-            tool_ascii_contains_ci(input_json, "private_key") ||
-            tool_ascii_contains_ci(input_json, "api_key") ||
-            tool_ascii_contains_ci(input_json, "password") ||
-            tool_ascii_contains_ci(input_json, "secret")) {
+        bool destructive_shell = false;
+        bool privileged_shell = false;
+        if (cls == TOOL_CLASS_EXEC) {
+            char *cmd = json_get_str(input_json, "command");
+            if (cmd && cmd[0]) {
+                destructive_shell = tool_exec_input_has_destructive_shell_pattern(input_json);
+                /* Word-boundary matches on the extracted command, not
+                 * substring scans of the whole input: `grep sudo src/` is
+                 * not a privileged command. */
+                privileged_shell =
+                    tool_shell_command_has_word(cmd, "sudo") ||
+                    tool_shell_command_has_word(cmd, "doas") ||
+                    tool_ascii_contains_ci(cmd, " rm -rf") ||
+                    tool_ascii_contains_ci(cmd, "mkfs") ||
+                    tool_ascii_contains_ci(cmd, "dd if=") ||
+                    tool_shell_command_has_word(cmd, "launchctl") ||
+                    tool_shell_command_has_word(cmd, "systemctl");
+            }
+            free(cmd);
+        }
+        /* Legacy secret-substring tripwire is opt-in: matching "api_key" /
+         * "password" / "secret" anywhere in any tool input flagged most
+         * legitimate work in an LLM-CLI codebase as CRITICAL and hard-denied
+         * it headless.  Set DSCO_PARANOID_SECRETS=1 to restore. */
+        bool secret_trip = tool_env_truthy("DSCO_PARANOID_SECRETS") &&
+                           (tool_ascii_contains_ci(input_json, "private_key") ||
+                            tool_ascii_contains_ci(input_json, "api_key") ||
+                            tool_ascii_contains_ci(input_json, "password") ||
+                            tool_ascii_contains_ci(input_json, "secret"));
+        if (destructive_shell || privileged_shell || secret_trip) {
             out->requires_approval = true;
             out->strict_no_tty = true;
             out->allow_always = false;
@@ -33449,7 +39463,7 @@ static bool tool_request_approval(const char *name, const char *input_json, tool
         char deny_reason[256];
         snprintf(deny_reason, sizeof(deny_reason), "blocked_by_trust_tier risk=%s reason=%s",
                  tool_risk_name(a.level), a.reason[0] ? a.reason : "blocked_by_trust_tier");
-        tool_gov_deny(result, result_len, name, "G2c_approval", deny_reason,
+        tool_gov_deny(result, result_len, name, "approval", deny_reason,
                       g_governance.initialized ? governance_remaining_gsu(&g_governance, "dsco")
                                                : 0.0);
         return false;
@@ -33459,7 +39473,7 @@ static bool tool_request_approval(const char *name, const char *input_json, tool
             char deny_reason[256];
             snprintf(deny_reason, sizeof(deny_reason), "approval_required_no_tty risk=%s reason=%s",
                      tool_risk_name(a.level), a.reason[0] ? a.reason : "approval_required");
-            tool_gov_deny(result, result_len, name, "G2c_approval", deny_reason,
+            tool_gov_deny(result, result_len, name, "approval", deny_reason,
                           g_governance.initialized ? governance_remaining_gsu(&g_governance, "dsco")
                                                    : 0.0);
             return false;
@@ -33486,7 +39500,7 @@ static bool tool_request_approval(const char *name, const char *input_json, tool
         return true;
     }
 
-    tool_gov_deny(result, result_len, name, "G2c_approval",
+    tool_gov_deny(result, result_len, name, "approval",
                   choice == TUI_PERM_CANCEL ? "cancelled_by_user" : "denied_by_user",
                   g_governance.initialized ? governance_remaining_gsu(&g_governance, "dsco") : 0.0);
     baseline_log("security", "tool_approval_denied", name, a.reason);
@@ -33546,8 +39560,13 @@ static bool tool_exec_command_blocked_by_self_preservation(const char *name, con
                tool_ascii_contains_ci(cmd, "wsl --terminate") ||
                tool_ascii_contains_ci(cmd, "tmux kill-session") ||
                tool_ascii_contains_ci(cmd, "screen -X quit") ||
-               tool_ascii_contains_ci(cmd, "reboot") || tool_ascii_contains_ci(cmd, "shutdown") ||
-               tool_ascii_contains_ci(cmd, "poweroff") || tool_ascii_contains_ci(cmd, "halt")) {
+               /* word-boundary: "halt" must not match "system_halted",
+                * "shutdown" must not match "sock.shutdown(" — substring
+                * matching here blocked greps of this very codebase */
+               tool_shell_command_has_word(cmd, "reboot") ||
+               tool_shell_command_has_word(cmd, "shutdown") ||
+               tool_shell_command_has_word(cmd, "poweroff") ||
+               tool_shell_command_has_word(cmd, "halt")) {
         blocked = true;
         why = "runtime_or_host_termination_requires_manual_user_run";
     } else if ((tool_ascii_contains_ci(cmd, "systemctl restart") ||
@@ -33570,85 +39589,6 @@ static bool tool_exec_command_blocked_by_self_preservation(const char *name, con
     return blocked;
 }
 
-/* ── C5: No self-surgery on the Immune System ────────────────────────────
- *
- * Wings and Talons may propose self-improvements, but agent-routed high-risk
- * tools must not directly modify the guard that authorizes them.  Protected
- * Immune surfaces require an external authorization path: set
- * DSCO_IMMUNE_SURGERY_AUTH=external and run under a trusted/operator tier.
- * This is intentionally coarse and fail-closed; exact semantic intent is not
- * trusted when the target is the authorization substrate itself. */
-
-static bool tool_tier_is_external_immune_operator(const char *tier) {
-    if (!tier || !tier[0])
-        return false;
-    return strcasecmp(tier, "trusted") == 0 || strcasecmp(tier, "operator") == 0 ||
-           strcasecmp(tier, "tier0") == 0 || strcasecmp(tier, "founder") == 0;
-}
-
-static bool tool_immune_surgery_authorized(const char *tier) {
-    const char *auth = getenv("DSCO_IMMUNE_SURGERY_AUTH");
-    return auth && strcmp(auth, "external") == 0 && tool_tier_is_external_immune_operator(tier);
-}
-
-static bool tool_input_touches_immune_surface(const char *input_json, char *match,
-                                              size_t match_len) {
-    static const char *const protected_fragments[] = {
-        "src/governance.c",
-        "include/governance.h",
-        "src/killswitch.c",
-        "include/killswitch.h",
-        "src/ooda.c",
-        "include/ooda.h",
-        "src/tools.c",
-        "include/tools.h",
-        "src/audit_log.c",
-        "include/audit_log.h",
-        "src/tamper.c",
-        "include/tamper.h",
-        "src/rsi_curriculum.c",
-        "include/rsi_curriculum.h",
-        "doctrine/OVERMIND_ARCHITECTURE.md",
-        ".dsco/workspace/doctrine/OVERMIND_ARCHITECTURE.md",
-        NULL,
-    };
-
-    if (!input_json || !input_json[0])
-        return false;
-
-    for (int i = 0; protected_fragments[i]; i++) {
-        if (tool_ascii_contains_ci(input_json, protected_fragments[i])) {
-            if (match && match_len > 0)
-                snprintf(match, match_len, "%s", protected_fragments[i]);
-            return true;
-        }
-    }
-    return false;
-}
-
-static bool tool_blocks_immune_self_surgery(const char *name, tool_class_t cls,
-                                            const char *input_json, const char *tier, char *reason,
-                                            size_t reason_len) {
-    if (!tool_is_high_risk(name, cls))
-        return false;
-
-    char matched[128];
-    matched[0] = '\0';
-    if (!tool_input_touches_immune_surface(input_json, matched, sizeof(matched)))
-        return false;
-
-    if (tool_immune_surgery_authorized(tier))
-        return false;
-
-    if (reason && reason_len > 0) {
-        snprintf(reason, reason_len,
-                 "immune_self_surgery_blocked target=%s; requires "
-                 "DSCO_IMMUNE_SURGERY_AUTH=external and trusted/operator tier",
-                 matched[0] ? matched : "immune_surface");
-    }
-    return true;
-}
-
 /* ── Pheromone region key for a tool ─────────────────────────────────── */
 
 static void tool_phero_region(const char *name, char *buf, size_t len) {
@@ -33668,36 +39608,100 @@ static void tool_gov_deny(char *result, size_t rlen, const char *tool, const cha
              tool ? tool : "unknown", stage, reason, gsu_remaining);
 }
 
+/* Capability hardening is the non-bypassable floor. Governance experiment
+ * models may remove policy/approval/budget stages, but they must not disable
+ * explicit Deno-style opt-outs, control authorization, or the lethal-trifecta
+ * guard. Keep this before GOV_MODEL_NONE and governance-exempt dispatch. */
+static bool tool_capability_floor(const char *name, const char *input_json, const char *tier,
+                                  char *result, size_t result_len) {
+    char reason[256];
+    reason[0] = '\0';
+    dsco_cap_decision_t decision =
+        dsco_capability_gate(name, input_json, tier, reason, sizeof(reason));
+    if (decision == CAP_DECISION_ALLOW)
+        return true;
+    tool_gov_deny(result, result_len, name, "capability",
+                  reason[0] ? reason : "capability_denied", 0.0);
+    return false;
+}
+
 /* ═══════════════════════════════════════════════════════════════════════════
  * MAIN ENTRY POINT
  * ═══════════════════════════════════════════════════════════════════════════ */
 
+/* ── Governance-model experiment platform ─────────────────────────────────
+   The governance gate is an instrument. DSCO_GOV_MODEL selects among several
+   models (none/minimal/audit_only/standard/paranoid); each gate stage is
+   timed and its would-block decision recorded, so governance overhead can be
+   measured and compared model-by-model. Implementation: gov_experiment.c. */
+
+/* Legacy aggregate surface — now backed by the experiment module. */
+void tools_governance_experiment_stats(unsigned long *gate_calls,
+                                       unsigned long *bypassed,
+                                       double *gate_ms_total) {
+    gov_experiment_totals(gate_calls, bypassed, gate_ms_total);
+}
+
 bool tools_execute_for_tier(const char *name, const char *input_json, const char *tier,
                             char *result, size_t result_len) {
 
-    /* ── G1: Exempt check ─────────────────────────────────────────────── */
-    if (!name || tool_is_governance_exempt(name)) {
+    /* Wire-alias: o-series reserves "python"; provider.c renames it to
+     * "python_exec" on the wire. Resolve the alias back to the canonical
+     * tool BEFORE the governance gate so capability classification applies
+     * to the real tool, not the alias. */
+    if (name && strcmp(name, "python_exec") == 0)
+        name = "python";
+
+    if (name && !tool_is_governance_exempt(name) &&
+        !tool_capability_floor(name, input_json, tier, result, result_len))
+        return false;
+
+    /* ── Governance-model dispatch ─────────────────────────────────────────
+       MODEL=none is the ungoverned control arm: skip the entire gate so the
+       overhead of governance vs. no-governance can be measured empirically. */
+    gov_model_t _gov_model = gov_experiment_model();
+    if (_gov_model == GOV_MODEL_NONE) {
+        gov_experiment_note_bypass();
         goto _skip_gate;
     }
 
-    /* ── G2: Initialization guard ─────────────────────────────────────── */
+    double _gate_t0 = now_ms();
+
+    /* ── Exempt check ──────────────────────────────────────────────────── */
+    if (!name || tool_is_governance_exempt(name)) {
+        gov_stage_record(GOV_STAGE_EXEMPT, now_ms() - _gate_t0, false, false);
+        goto _skip_gate;
+    }
+    gov_experiment_note_gate_run();
+
+    /* ── Initialization guard ──────────────────────────────────────────── */
     if (!g_governance.initialized)
         ensure_wt_init();
     if (!g_governance.initialized) {
-        tool_gov_deny(result, result_len, name, "G2_init", "governance_unavailable", 0.0);
+        tool_gov_deny(result, result_len, name, "init", "governance_unavailable", 0.0);
         return false;
     }
     tool_governance_ensure_dsco_agent();
 
     {
+        /* Resolve immutable tool metadata through the registry hash map rather
+         * than linearly scanning the full catalog on every governed call. */
         bool is_ro = false;
-        int _total = 0;
-        const tool_def_t *_all = tools_get_all(&_total);
-        for (int _i = 0; _i < _total; _i++) {
-            if (strcmp(_all[_i].name, name) == 0) {
-                is_ro = _all[_i].is_read_only;
-                break;
-            }
+        tool_registry_rdlock();
+        int _tool_idx = tool_map_lookup_with_mcp_alias_unlocked(name, NULL, 0);
+        if (_tool_idx >= 0 && _tool_idx < s_tool_count)
+            is_ro = s_tools[_tool_idx].is_read_only;
+        /* External tools had no read-only metadata in the previous catalog
+         * scan and therefore retain the conservative mutating classification. */
+        tool_registry_unlock();
+        if (!is_ro && tool_name_is_shell_exec(name)) {
+            /* Command-level read-only detection: a provably non-mutating
+             * shell command (grep/cat/git log/…) runs as READ class —
+             * zero GSU, no approval prompt, no high-risk gating. */
+            char *_cmd = json_get_str(input_json ? input_json : "{}", "command");
+            if (_cmd && _cmd[0] && tool_shell_command_is_read_only(_cmd, false))
+                is_ro = true;
+            free(_cmd);
         }
         tool_class_t cls = tool_classify(name, is_ro);
         double gsu = tool_gsu_cost(cls);
@@ -33705,48 +39709,38 @@ bool tools_execute_for_tier(const char *name, const char *input_json, const char
         char phero_region[PHEROMONE_MAX_REGION_LEN];
         tool_phero_region(name, phero_region, sizeof(phero_region));
 
-        /* ── G2a: Early Immune veto before user approval prompts ───────── */
+        /* ── Immune veto: killswitch + circuit breakers ───────────────────── */
         if (killswitch_system_halted(&g_governance.killswitches)) {
             pheromone_deposit(&g_governance.pheromones, PHERO_WARNING, 1.0, phero_region, "immune",
                               "{\"reason\":\"system_halted\"}");
-            tool_gov_deny(result, result_len, name, "G2a_killswitch", "system_halted", remaining);
+            tool_gov_deny(result, result_len, name, "killswitch", "system_halted", remaining);
             return false;
         }
         if (killswitch_is_killed(&g_governance.killswitches, "dsco")) {
-            tool_gov_deny(result, result_len, name, "G2a_killswitch", "agent_killed", remaining);
+            tool_gov_deny(result, result_len, name, "killswitch", "agent_killed", remaining);
             return false;
         }
         if (!governance_check_breakers(&g_governance, "dsco")) {
             pheromone_deposit(&g_governance.pheromones, PHERO_WARNING, 0.8, phero_region, "immune",
                               "{\"reason\":\"circuit_breaker\"}");
-            tool_gov_deny(result, result_len, name, "G2a_circuit_breaker", "active_breaker",
+            tool_gov_deny(result, result_len, name, "circuit_breaker", "active_breaker",
                           remaining);
             return false;
         }
 
-        /* ── G2b: C5 no self-surgery on the Immune System ─────────────── */
-        char immune_reason[256];
-        immune_reason[0] = '\0';
-        if (tool_blocks_immune_self_surgery(name, cls, input_json, tier, immune_reason,
-                                            sizeof(immune_reason))) {
-            pheromone_deposit(&g_governance.pheromones, PHERO_WARNING, 1.0, phero_region, "immune",
-                              "{\"reason\":\"immune_self_surgery_blocked\"}");
-            tool_gov_deny(result, result_len, name, "G2b_immune_self_surgery",
-                          immune_reason[0] ? immune_reason : "immune_self_surgery_blocked",
-                          remaining);
-            self_improve_record_tool(&g_self_improve, name, false, 0.0, 0);
-            return false;
-        }
-
-        /* ── G2c: Human approval for risky/blocked tools ──────────────── */
-        if (!tool_request_approval(name, input_json, cls, tier, result, result_len)) {
+        /* ── Human approval for risky/blocked tools ────────────────────────
+         * Audit mode retains a record of the assessment but does not turn a
+         * headless development run into an approval dead-end. Immune vetoes
+         * above (killswitch, breakers, self-preservation) stay enforced. */
+        if (gov_stage_enforces(_gov_model, GOV_STAGE_APPROVAL) &&
+            !tool_request_approval(name, input_json, cls, tier, result, result_len)) {
             pheromone_deposit(&g_governance.pheromones, PHERO_WARNING, 0.8, phero_region, "immune",
                               "{\"reason\":\"approval_denied\"}");
             self_improve_record_tool(&g_self_improve, name, false, 0.0, 0);
             return false;
         }
 
-        /* ── G2b: Runtime self-preservation preflight ─────────────────── */
+        /* ── Runtime self-preservation preflight ─────────────────────────── */
         if (cls == TOOL_CLASS_EXEC) {
             char preserve_reason[256];
             preserve_reason[0] = '\0';
@@ -33754,7 +39748,7 @@ bool tools_execute_for_tier(const char *name, const char *input_json, const char
                                                                sizeof(preserve_reason))) {
                 pheromone_deposit(&g_governance.pheromones, PHERO_WARNING, 1.0, phero_region,
                                   "immune", "{\"reason\":\"runtime_self_preservation\"}");
-                tool_gov_deny(result, result_len, name, "G2b_self_preservation",
+                tool_gov_deny(result, result_len, name, "self_preservation",
                               preserve_reason[0] ? preserve_reason : "runtime_self_preservation",
                               remaining);
                 self_improve_record_tool(&g_self_improve, name, false, 0.0, 0);
@@ -33762,49 +39756,7 @@ bool tools_execute_for_tier(const char *name, const char *input_json, const char
             }
         }
 
-        /* ── G3: Killswitch ───────────────────────────────────────────── */
-        if (killswitch_system_halted(&g_governance.killswitches)) {
-            pheromone_deposit(&g_governance.pheromones, PHERO_WARNING, 1.0, phero_region, "immune",
-                              "{\"reason\":\"system_halted\"}");
-            tool_gov_deny(result, result_len, name, "G3_killswitch", "system_halted", remaining);
-            return false;
-        }
-        if (killswitch_is_killed(&g_governance.killswitches, "dsco")) {
-            tool_gov_deny(result, result_len, name, "G3_killswitch", "agent_killed", remaining);
-            return false;
-        }
-
-        /* ── G4: Circuit breakers ─────────────────────────────────────── */
-        if (!governance_check_breakers(&g_governance, "dsco")) {
-            const char *tripped = "unknown";
-            for (int _b = 0; _b < CB_TYPE_COUNT; _b++) {
-                if (g_governance.breakers[_b].tripped) {
-                    switch (_b) {
-                        case CB_ERROR_RATE:
-                            tripped = "error_rate";
-                            break;
-                        case CB_LATENCY:
-                            tripped = "latency";
-                            break;
-                        case CB_COST_OVERRUN:
-                            tripped = "cost_overrun";
-                            break;
-                        case CB_PHEROMONE_SAT:
-                            tripped = "pheromone_sat";
-                            break;
-                        default:
-                            break;
-                    }
-                    break;
-                }
-            }
-            pheromone_deposit(&g_governance.pheromones, PHERO_WARNING, 0.8, phero_region, "immune",
-                              "{\"reason\":\"circuit_breaker\"}");
-            tool_gov_deny(result, result_len, name, "G4_circuit_breaker", tripped, remaining);
-            return false;
-        }
-
-        /* ── G6: Pheromone WARNING sensing ───────────────────────────── */
+        /* ── Pheromone degradation (warning concentration) ─────────────────── */
         /* High WARNING concentration on this tool's region → exec tools cost double.
          * Does not block alone — it degrades and signals. */
         double warning_level =
@@ -33814,26 +39766,42 @@ bool tools_execute_for_tier(const char *name, const char *input_json, const char
             baseline_log("governance", "warning_degrades_exec", name, NULL);
         }
 
-        /* ── G7: Governance checkpoint ────────────────────────────────── */
-        if (!governance_checkpoint(&g_governance, "dsco", name, gsu, tier)) {
-            remaining = governance_remaining_gsu(&g_governance, "dsco");
-            const char *reason = remaining <= 0.0 ? "budget_exhausted" : "hardcoded_rule_violation";
-            char meta[128];
-            snprintf(meta, sizeof(meta), "{\"reason\":\"%s\",\"gsu\":%.2f}", reason, gsu);
-            pheromone_deposit(&g_governance.pheromones, PHERO_WARNING, 0.7, phero_region, "immune",
-                              meta);
-            tool_gov_deny(result, result_len, name, "G7_checkpoint", reason, remaining);
-            self_improve_record_tool(&g_self_improve, name, false, 0.0, 0);
-            return false;
+        /* ── Budget checkpoint ─────────────────────────────────────────────
+           Runs in standard/paranoid/audit_only. In audit_only we measure the
+           would-block decision but do NOT enforce it (shadow-mode governance);
+           in minimal we skip it entirely. */
+        if (gov_stage_active(_gov_model, GOV_STAGE_CHECKPOINT)) {
+            double _cp_t0 = now_ms();
+            bool passed = governance_checkpoint(&g_governance, "dsco", name, gsu, tier);
+            bool enforces = gov_stage_enforces(_gov_model, GOV_STAGE_CHECKPOINT);
+            gov_stage_record(GOV_STAGE_CHECKPOINT, now_ms() - _cp_t0, !passed, enforces && !passed);
+            if (!passed && enforces) {
+                remaining = governance_remaining_gsu(&g_governance, "dsco");
+                const char *reason =
+                    remaining <= 0.0 ? "budget_exhausted" : "hardcoded_rule_violation";
+                char meta[128];
+                snprintf(meta, sizeof(meta), "{\"reason\":\"%s\",\"gsu\":%.2f}", reason, gsu);
+                pheromone_deposit(&g_governance.pheromones, PHERO_WARNING, 0.7, phero_region,
+                                  "immune", meta);
+                tool_gov_deny(result, result_len, name, "checkpoint", reason, remaining);
+                self_improve_record_tool(&g_self_improve, name, false, 0.0, 0);
+                return false;
+            }
         }
 
-        /* ── G8: Shadow check (high-risk tools only) ──────────────────── */
-        if (tool_is_high_risk(name, cls)) {
+        /* ── G8: Shadow check ───────────────────────────────────────────
+           High-risk tools always; in PARANOID every tool is shadow-reviewed. */
+        if (gov_stage_active(_gov_model, GOV_STAGE_SHADOW) &&
+            (tool_is_high_risk(name, cls) || gov_shadow_all_tools(_gov_model))) {
+            double _sh_t0 = now_ms();
             shadow_check_result_t shadow = {0};
             const char *ctx = input_json ? input_json : name;
             governance_shadow_check(&g_governance, "dsco", ctx, &shadow);
-            if (shadow.self_reward_detected || shadow.reward_hacking ||
-                shadow.circular_optimization) {
+            bool violated = shadow.self_reward_detected || shadow.reward_hacking ||
+                            shadow.circular_optimization;
+            gov_stage_record(GOV_STAGE_SHADOW, now_ms() - _sh_t0, violated,
+                             gov_stage_enforces(_gov_model, GOV_STAGE_SHADOW) && violated);
+            if (violated) {
                 char smeta[256];
                 snprintf(smeta, sizeof(smeta),
                          "{\"self_reward\":%s,\"reward_hack\":%s,"
@@ -33886,10 +39854,16 @@ _skip_gate:;
     if (normalized_input)
         dispatch_input = normalized_input;
 
+    uint64_t pixel_operation_id = pixel_tui_session_tool_begin(stderr, name, input_json);
     bool ok = tools_execute_internal(dispatch_name, dispatch_input, result, result_len);
+    pixel_tui_session_tool_end(stderr, pixel_operation_id, name, ok, now_ms() - _t0);
 
     free(normalized_input);
     free(owned_input);
+
+    /* Accumulate capability taint for the lethal-trifecta flow guard. */
+    if (ok)
+        dsco_flow_note(dsco_caps_for_tool(name, input_json));
 
     /* ── G10: Post-execution feedback loop ───────────────────────────── */
     if (name && g_governance.initialized && !tool_is_governance_exempt(name)) {
@@ -33924,8 +39898,13 @@ _skip_gate:;
 /* ── Concurrency locks ────────────────────────────────────────────────── */
 
 dsco_locks_t g_locks;
+static pthread_mutex_t g_locks_state_mu = PTHREAD_MUTEX_INITIALIZER;
+/* agent_main() destroys the global bundle at shutdown and tests also exercise
+ * destroy/re-init semantics on lock bundles. pthread_once cannot express that
+ * lifecycle, so the global instance keeps an explicit initialized flag. */
+static bool g_locks_global_initialized = false;
 
-void dsco_locks_init(dsco_locks_t *l) {
+static void dsco_locks_init_fields(dsco_locks_t *l) {
     pthread_rwlock_init(&l->ctx_lock, NULL);
     pthread_rwlock_init(&l->mcp_lock, NULL);
     pthread_rwlock_init(&l->provider_lock, NULL);
@@ -33936,7 +39915,26 @@ void dsco_locks_init(dsco_locks_t *l) {
     pthread_mutex_init(&l->swarm_lock, NULL);
 }
 
-void dsco_locks_destroy(dsco_locks_t *l) {
+void dsco_locks_init(dsco_locks_t *l) {
+    if (!l)
+        return;
+    if (l == &g_locks) {
+        pthread_mutex_lock(&g_locks_state_mu);
+        if (!g_locks_global_initialized) {
+            dsco_locks_init_fields(l);
+            g_locks_global_initialized = true;
+        }
+        pthread_mutex_unlock(&g_locks_state_mu);
+        return;
+    }
+    dsco_locks_init_fields(l);
+}
+
+static void dsco_locks_ensure_global(void) {
+    dsco_locks_init(&g_locks);
+}
+
+static void dsco_locks_destroy_fields(dsco_locks_t *l) {
     pthread_rwlock_destroy(&l->ctx_lock);
     pthread_rwlock_destroy(&l->mcp_lock);
     pthread_rwlock_destroy(&l->provider_lock);
@@ -33945,6 +39943,21 @@ void dsco_locks_destroy(dsco_locks_t *l) {
     pthread_mutex_destroy(&l->cache_lock);
     pthread_mutex_destroy(&l->budget_lock);
     pthread_mutex_destroy(&l->swarm_lock);
+}
+
+void dsco_locks_destroy(dsco_locks_t *l) {
+    if (!l)
+        return;
+    if (l == &g_locks) {
+        pthread_mutex_lock(&g_locks_state_mu);
+        if (g_locks_global_initialized) {
+            dsco_locks_destroy_fields(l);
+            g_locks_global_initialized = false;
+        }
+        pthread_mutex_unlock(&g_locks_state_mu);
+        return;
+    }
+    dsco_locks_destroy_fields(l);
 }
 
 /* ── Tool execution watchdog ──────────────────────────────────────────── */
@@ -33961,11 +39974,41 @@ static double watchdog_now(void) {
    Checked in run_cmd_ex poll loop alongside g_interrupted. */
 volatile int g_tool_timed_out = 0;
 
+/* ── Active-watchdog registry ─────────────────────────────────────────────
+   Lets the process-lifecycle supervisor (Construct) reach in-flight tool
+   watchdogs to renew or inspect their deadlines. Each watchdog registers on
+   start and unregisters (under lock, before join) on stop, so a pointer held
+   while the registry lock is taken is always valid. */
+#define WATCHDOG_REGISTRY_MAX 128
+static tool_watchdog_t *s_wd_registry[WATCHDOG_REGISTRY_MAX];
+static int s_wd_registry_count = 0;
+static unsigned long s_wd_next_call_id = 1;
+static pthread_mutex_t s_wd_registry_lock = PTHREAD_MUTEX_INITIALIZER;
+
+static void watchdog_registry_add(tool_watchdog_t *wd) {
+    pthread_mutex_lock(&s_wd_registry_lock);
+    wd->call_id = s_wd_next_call_id++;
+    if (s_wd_registry_count < WATCHDOG_REGISTRY_MAX)
+        s_wd_registry[s_wd_registry_count++] = wd;
+    pthread_mutex_unlock(&s_wd_registry_lock);
+}
+
+static void watchdog_registry_remove(tool_watchdog_t *wd) {
+    pthread_mutex_lock(&s_wd_registry_lock);
+    for (int i = 0; i < s_wd_registry_count; i++) {
+        if (s_wd_registry[i] == wd) {
+            s_wd_registry[i] = s_wd_registry[--s_wd_registry_count];
+            break;
+        }
+    }
+    pthread_mutex_unlock(&s_wd_registry_lock);
+}
+
 static void *watchdog_thread(void *arg) {
     tool_watchdog_t *wd = (tool_watchdog_t *)arg;
-    while (!wd->cancelled) {
+    while (!__atomic_load_n(&wd->cancelled, __ATOMIC_ACQUIRE)) {
         usleep(500000); /* poll every 500ms */
-        if (wd->cancelled)
+        if (__atomic_load_n(&wd->cancelled, __ATOMIC_ACQUIRE))
             break;
 
         double now = watchdog_now();
@@ -33997,13 +40040,79 @@ void watchdog_start(tool_watchdog_t *wd, pthread_t target, const char *name, int
     wd->grace_end = wd->deadline + dsco_tool_grace_period_s();
     wd->cancelled = 0;
     wd->timed_out = 0;
+    wd->started_at = now;
+    wd->max_lifetime_s = 0; /* unlimited unless the supervisor imposes a cap */
+    wd->renew_count = 0;
 
+    watchdog_registry_add(wd);
     pthread_create(&wd->thread, NULL, watchdog_thread, wd);
 }
 
 void watchdog_stop(tool_watchdog_t *wd) {
-    wd->cancelled = 1;
+    watchdog_registry_remove(wd);
+    __atomic_store_n(&wd->cancelled, 1, __ATOMIC_RELEASE);
     pthread_join(wd->thread, NULL);
+}
+
+int watchdog_renew(tool_watchdog_t *wd, int extra_s) {
+    if (!wd || extra_s <= 0 || __atomic_load_n(&wd->cancelled, __ATOMIC_ACQUIRE))
+        return 0;
+    double now = watchdog_now();
+    /* Once the grace window has fully elapsed the watcher has already fired
+       g_interrupted and exited; renewal can no longer save the call. */
+    if (wd->timed_out && now >= wd->grace_end)
+        return 0;
+    double base = wd->deadline > now ? wd->deadline : now;
+    double new_deadline = base + extra_s;
+    if (wd->max_lifetime_s > 0) {
+        double cap = wd->started_at + wd->max_lifetime_s;
+        if (new_deadline > cap)
+            new_deadline = cap;
+        if (new_deadline <= now)
+            return 0; /* cannot extend past the absolute lifetime cap */
+    }
+    wd->deadline = new_deadline;
+    wd->grace_end = new_deadline + dsco_tool_grace_period_s();
+    if (wd->timed_out) {
+        /* Un-fire the soft timeout — still inside the grace window. */
+        wd->timed_out = 0;
+        g_tool_timed_out = 0;
+    }
+    wd->renew_count++;
+    return 1;
+}
+
+int watchdog_renew_by_name(const char *name, int extra_s) {
+    if (!name)
+        return 0;
+    int renewed = 0;
+    pthread_mutex_lock(&s_wd_registry_lock);
+    for (int i = 0; i < s_wd_registry_count; i++) {
+        if (strcmp(s_wd_registry[i]->tool_name, name) == 0)
+            renewed += watchdog_renew(s_wd_registry[i], extra_s);
+    }
+    pthread_mutex_unlock(&s_wd_registry_lock);
+    return renewed;
+}
+
+int watchdog_active_snapshot(watchdog_info_t *out, int max) {
+    if (!out || max <= 0)
+        return 0;
+    double now = watchdog_now();
+    int n = 0;
+    pthread_mutex_lock(&s_wd_registry_lock);
+    for (int i = 0; i < s_wd_registry_count && n < max; i++) {
+        tool_watchdog_t *wd = s_wd_registry[i];
+        out[n].call_id = wd->call_id;
+        snprintf(out[n].tool_name, sizeof(out[n].tool_name), "%s", wd->tool_name);
+        out[n].remaining_s = wd->deadline - now;
+        out[n].timeout_s = wd->timeout_s;
+        out[n].renew_count = wd->renew_count;
+        out[n].timed_out = wd->timed_out;
+        n++;
+    }
+    pthread_mutex_unlock(&s_wd_registry_lock);
+    return n;
 }
 
 /* Per-tool timeout overrides (tools that naturally take longer) */
@@ -34021,6 +40130,17 @@ static const tool_timeout_cfg_t s_timeout_overrides[] = {
     {"spawn_agent", 300},
     {"agent_wait", 3660},
     {"agent_race", 300},
+    /* The consolidated `swarm` tool dispatches long-blocking actions (create,
+     * map_reduce, collect, provider_fabric, topology_run/solve) that run whole
+     * model instances to completion. Without an entry it inherited the 30s
+     * default (+5s grace) and real swarms were killed at ~35s. Give it the same
+     * ceiling as swarm_collect/agent_wait; fast sub-actions (status/inspect/
+     * budget) return early, and Esc/Ctrl-C + swarm budget still bound runaways.
+     * Runtime override: DSCO_TOOL_TIMEOUT_SWARM. */
+    {"swarm", 3660},
+    /* Direct native HTTP batch work must not inherit the generic 30s tool
+     * deadline; it is bounded by per-request curl timeouts and concurrency. */
+    {"weather_batch", 300},
     {"create_swarm", 300},
     {"swarm_collect", 3660},
     {"spawn_executor", 300},
@@ -34058,20 +40178,23 @@ int tool_timeout_for(const char *name) {
 
 /* ── JSON schema normalization + validation before tool dispatch ──────── */
 
-static const char *tools_schema_for_name(const char *name) {
+static char *tools_schema_copy_for_name(const char *name) {
     if (!name)
         return NULL;
-    int idx = tool_map_lookup_with_mcp_alias(name, NULL, 0);
+    const char *schema = NULL;
+    tool_registry_rdlock();
+    int idx = tool_map_lookup_with_mcp_alias_unlocked(name, NULL, 0);
     if (idx >= 0 && idx < s_tool_count) {
-        return s_tools[idx].input_schema_json;
-    }
-    if (idx <= -10000) {
+        schema = s_tools[idx].input_schema_json;
+    } else if (idx <= -10000) {
         int ei = -(idx + 10000);
         if (ei >= 0 && ei < g_external_tool_count) {
-            return g_external_tools[ei].input_schema_json;
+            schema = g_external_tools[ei].input_schema_json;
         }
     }
-    return NULL;
+    char *copy = schema ? safe_strdup(schema) : NULL;
+    tool_registry_unlock();
+    return copy;
 }
 
 static const char *tools_json_ws(const char *p) {
@@ -34226,6 +40349,36 @@ static tool_schema_scalar_t tools_schema_scalar_for_property(const char *schema,
     return kind;
 }
 
+static bool tools_schema_property_has_type(const char *schema, const char *key,
+                                           const char *expected_type) {
+    if (!schema || !key || !key[0] || !expected_type)
+        return false;
+    char *props = json_get_raw(schema, "properties");
+    if (!props)
+        return false;
+    char *prop = json_get_raw(props, key);
+    free(props);
+    if (!prop)
+        return false;
+
+    bool ok = false;
+    char *type = json_get_str(prop, "type");
+    if (type) {
+        ok = strcmp(type, expected_type) == 0;
+        free(type);
+    } else {
+        char *raw = json_get_raw(prop, "type");
+        if (raw) {
+            char needle[64];
+            snprintf(needle, sizeof(needle), "\"%s\"", expected_type);
+            ok = strstr(raw, needle) != NULL;
+            free(raw);
+        }
+    }
+    free(prop);
+    return ok;
+}
+
 static bool tools_trim_copy(const char *s, char *out, size_t outlen) {
     if (!s || !out || outlen == 0)
         return false;
@@ -34293,21 +40446,169 @@ static bool tools_string_to_schema_literal(tool_schema_scalar_t kind, const char
     return false;
 }
 
-char *tools_normalize_input(const char *name, const char *input_json) {
-    const char *schema = tools_schema_for_name(name);
-    if (!schema || !input_json)
+static void tools_trim_bounds(const char *s, const char **start, const char **end) {
+    const char *p = s ? s : "";
+    while (*p && isspace((unsigned char)*p))
+        p++;
+    const char *e = p + strlen(p);
+    while (e > p && isspace((unsigned char)e[-1]))
+        e--;
+    if (start)
+        *start = p;
+    if (end)
+        *end = e;
+}
+
+static char *tools_string_to_schema_container_literal(const char *schema, const char *key,
+                                                      const char *decoded) {
+    const char *s = NULL;
+    const char *e = NULL;
+    tools_trim_bounds(decoded, &s, &e);
+    if (!s || e <= s)
         return NULL;
 
-    const char *p = tools_json_ws(input_json);
-    if (*p != '{')
+    bool wants_array = tools_schema_property_has_type(schema, key, "array");
+    bool wants_object = tools_schema_property_has_type(schema, key, "object");
+    if ((!wants_array || *s != '[') && (!wants_object || *s != '{'))
         return NULL;
+
+    size_t n = (size_t)(e - s);
+    char *literal = safe_malloc(n + 1);
+    memcpy(literal, s, n);
+    literal[n] = '\0';
+    if (!json_is_valid_container(literal)) {
+        free(literal);
+        return NULL;
+    }
+    return literal;
+}
+
+static const char *tools_single_string_field_for_name(const char *name) {
+    if (!name || !name[0])
+        return NULL;
+    if (strcmp(name, "bash") == 0 || strcmp(name, "Bash") == 0 ||
+        strcmp(name, "run_command") == 0 || strcmp(name, "compile") == 0 ||
+        strcmp(name, "sandbox_run") == 0)
+        return "command";
+    if (strcmp(name, "python") == 0 || strcmp(name, "node") == 0)
+        return "code";
+    if (strcmp(name, "eval") == 0)
+        return "expression";
+    return NULL;
+}
+
+static bool tools_fragment_has_key_shape(const char *s) {
+    if (!s || !*s)
+        return false;
+    if (*s == '"') {
+        char *key = NULL;
+        const char *after = tools_json_parse_string(s, &key);
+        free(key);
+        if (!after)
+            return false;
+        after = tools_json_ws(after);
+        return *after == ':';
+    }
+    if (!(isalpha((unsigned char)*s) || *s == '_'))
+        return false;
+    const char *p = s + 1;
+    while (isalnum((unsigned char)*p) || *p == '_' || *p == '-')
+        p++;
+    p = tools_json_ws(p);
+    return *p == ':';
+}
+
+static char *tools_repair_json_object_fragment(const char *input_json) {
+    const char *s = NULL;
+    const char *e = NULL;
+    tools_trim_bounds(input_json, &s, &e);
+    if (!s || e <= s || *s == '{' || *s == '[')
+        return NULL;
+    if (!tools_fragment_has_key_shape(s))
+        return NULL;
+
+    jbuf_t b;
+    jbuf_init(&b, (size_t)(e - s) + 4);
+    jbuf_append_char(&b, '{');
+    jbuf_append_len(&b, s, (size_t)(e - s));
+    jbuf_append_char(&b, '}');
+    if (json_is_valid_container(b.data))
+        return b.data;
+    jbuf_free(&b);
+    return NULL;
+}
+
+static char *tools_repair_single_string_input(const char *name, const char *input_json) {
+    const char *field = tools_single_string_field_for_name(name);
+    if (!field)
+        return NULL;
+
+    const char *s = NULL;
+    const char *e = NULL;
+    tools_trim_bounds(input_json, &s, &e);
+    if (!s || e <= s || *s == '{' || *s == '[')
+        return NULL;
+
+    char *decoded = NULL;
+    const char *after = (*s == '"') ? tools_json_parse_string(s, &decoded) : NULL;
+    const char *value = decoded;
+    size_t value_len = decoded ? strlen(decoded) : 0;
+    if (!decoded || !after || *tools_json_ws(after) != '\0') {
+        free(decoded);
+        decoded = NULL;
+        value = s;
+        value_len = (size_t)(e - s);
+    }
+    if (value_len == 0)
+        return NULL;
+
+    jbuf_t b;
+    jbuf_init(&b, value_len + strlen(field) + 16);
+    jbuf_append_char(&b, '{');
+    jbuf_append_json_str(&b, field);
+    jbuf_append_char(&b, ':');
+    if (decoded) {
+        jbuf_append_json_str(&b, decoded);
+    } else {
+        char *tmp = safe_malloc(value_len + 1);
+        memcpy(tmp, value, value_len);
+        tmp[value_len] = '\0';
+        jbuf_append_json_str(&b, tmp);
+        free(tmp);
+    }
+    jbuf_append_char(&b, '}');
+    free(decoded);
+    return b.data;
+}
+
+static char *tools_repair_nonobject_input(const char *name, const char *input_json) {
+    char *fragment = tools_repair_json_object_fragment(input_json);
+    if (fragment)
+        return fragment;
+    return tools_repair_single_string_input(name, input_json);
+}
+
+char *tools_normalize_input(const char *name, const char *input_json) {
+    char *schema = tools_schema_copy_for_name(name);
+    char *repaired_input = NULL;
+    if (!schema || !input_json)
+        goto no_change;
+
+    const char *p = tools_json_ws(input_json);
+    if (*p != '{') {
+        repaired_input = tools_repair_nonobject_input(name, input_json);
+        if (!repaired_input)
+            goto no_change;
+        input_json = repaired_input;
+        p = tools_json_ws(input_json);
+    }
     p++;
 
     jbuf_t out;
     jbuf_init(&out, strlen(input_json) + 32);
     jbuf_append_char(&out, '{');
     bool first = true;
-    bool changed = false;
+    bool changed = repaired_input != NULL;
 
     while (*p) {
         p = tools_json_ws(p);
@@ -34317,6 +40618,8 @@ char *tools_normalize_input(const char *name, const char *input_json) {
         }
         if (*p != '"') {
             jbuf_free(&out);
+            free(repaired_input);
+            free(schema);
             return NULL;
         }
 
@@ -34326,6 +40629,8 @@ char *tools_normalize_input(const char *name, const char *input_json) {
         if (!key_end || !key) {
             free(key);
             jbuf_free(&out);
+            free(repaired_input);
+            free(schema);
             return NULL;
         }
 
@@ -34333,6 +40638,8 @@ char *tools_normalize_input(const char *name, const char *input_json) {
         if (*p != ':') {
             free(key);
             jbuf_free(&out);
+            free(repaired_input);
+            free(schema);
             return NULL;
         }
         p++;
@@ -34341,6 +40648,8 @@ char *tools_normalize_input(const char *name, const char *input_json) {
         if (value_end <= value_start && *value_start) {
             free(key);
             jbuf_free(&out);
+            free(repaired_input);
+            free(schema);
             return NULL;
         }
 
@@ -34352,11 +40661,21 @@ char *tools_normalize_input(const char *name, const char *input_json) {
 
         bool emitted = false;
         if (*value_start == '"') {
-            tool_schema_scalar_t kind = tools_schema_scalar_for_property(schema, key);
-            if (kind != TOOL_SCHEMA_SCALAR_NONE) {
-                char *decoded = NULL;
-                const char *string_end = tools_json_parse_string(value_start, &decoded);
-                if (string_end && string_end == value_end && decoded) {
+            char *decoded = NULL;
+            const char *string_end = tools_json_parse_string(value_start, &decoded);
+            if (string_end && string_end == value_end && decoded) {
+                char *container = tools_string_to_schema_container_literal(schema, key, decoded);
+                if (container) {
+                    jbuf_append(&out, container);
+                    changed = true;
+                    emitted = true;
+                    free(container);
+                }
+
+                tool_schema_scalar_t kind =
+                    emitted ? TOOL_SCHEMA_SCALAR_NONE
+                            : tools_schema_scalar_for_property(schema, key);
+                if (kind != TOOL_SCHEMA_SCALAR_NONE) {
                     char literal[160];
                     if (tools_string_to_schema_literal(kind, decoded, literal, sizeof(literal))) {
                         jbuf_append(&out, literal);
@@ -34364,8 +40683,8 @@ char *tools_normalize_input(const char *name, const char *input_json) {
                         emitted = true;
                     }
                 }
-                free(decoded);
             }
+            free(decoded);
         }
 
         if (!emitted)
@@ -34383,6 +40702,8 @@ char *tools_normalize_input(const char *name, const char *input_json) {
         }
         if (*p) {
             jbuf_free(&out);
+            free(repaired_input);
+            free(schema);
             return NULL;
         }
     }
@@ -34390,9 +40711,28 @@ char *tools_normalize_input(const char *name, const char *input_json) {
     jbuf_append_char(&out, '}');
     if (!changed) {
         jbuf_free(&out);
-        return NULL;
+        free(repaired_input);
+        goto no_change;
     }
+    free(repaired_input);
+    free(schema);
     return out.data;
+
+no_change:
+    free(repaired_input);
+    free(schema);
+    return NULL;
+}
+
+static bool tools_code_or_file_tool(const char *name) {
+    return name && (strcmp(name, "python") == 0 || strcmp(name, "node") == 0);
+}
+
+static bool tools_input_has_nonempty_string(const char *input_json, const char *key) {
+    char *value = json_get_str(input_json ? input_json : "{}", key);
+    bool ok = value && value[0];
+    free(value);
+    return ok;
 }
 
 bool tools_validate_input(const char *name, const char *input_json, char *error_buf,
@@ -34400,13 +40740,24 @@ bool tools_validate_input(const char *name, const char *input_json, char *error_
     if (!input_json || !name)
         return true; /* no input to validate */
 
-    const char *schema = tools_schema_for_name(name);
+    char *schema = tools_schema_copy_for_name(name);
     if (!schema)
         return true; /* no schema = no validation */
 
     char *normalized = tools_normalize_input(name, input_json);
-    json_validation_t v = json_validate_schema(normalized ? normalized : input_json, schema);
+    const char *effective_input = normalized ? normalized : input_json;
+    if (tools_code_or_file_tool(name) && !tools_input_has_nonempty_string(effective_input, "code") &&
+        !tools_input_has_nonempty_string(effective_input, "file")) {
+        snprintf(error_buf, error_len, "input validation failed for '%s': code or file required", name);
+        DSCO_SET_ERR(DSCO_ERR_TOOL, "%s", error_buf);
+        free(normalized);
+        free(schema);
+        return false;
+    }
+
+    json_validation_t v = json_validate_schema(effective_input, schema);
     free(normalized);
+    free(schema);
     if (!v.valid) {
         snprintf(error_buf, error_len, "input validation failed for '%s': %s", name, v.error);
         DSCO_SET_ERR(DSCO_ERR_TOOL, "%s", error_buf);

@@ -265,8 +265,15 @@ void dsco_pool_apply(size_t n, void *ctx, dsco_pool_iter_fn fn) {
     pthread_cond_t cv = PTHREAD_COND_INITIALIZER;
     for (size_t i = 0; i < n; i++) {
         apply_counted_t *c = (apply_counted_t *)calloc(1, sizeof(*c));
-        if (!c)
+        if (!c) {
+            fn(i, ctx);
+            if (atomic_fetch_sub(&remaining, 1) == 1) {
+                pthread_mutex_lock(&mu);
+                pthread_cond_signal(&cv);
+                pthread_mutex_unlock(&mu);
+            }
             continue;
+        }
         c->fn = fn;
         c->ctx = ctx;
         c->i = i;

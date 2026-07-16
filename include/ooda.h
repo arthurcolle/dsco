@@ -151,6 +151,8 @@ typedef struct {
     int                  rest_count;
     int                  escalate_count;
     double               avg_confidence;
+    double               brier_score;          /* mean squared confidence error */
+    double               calibration_gap;      /* avg confidence - success rate */
 } ooda_engine_t;
 
 /* ── Lifecycle ────────────────────────────────────────────────────────── */
@@ -201,6 +203,13 @@ int ooda_recent_history(const ooda_engine_t *e, ooda_history_entry_t *out,
 
 /* Get success rate over last N cycles. */
 double ooda_success_rate(const ooda_engine_t *e, int last_n);
+
+/* Confidence calibration over completed cycles. Brier score is the mean
+ * squared error between decision confidence and the binary outcome (lower is
+ * better). Calibration gap is mean confidence minus empirical success rate:
+ * positive means overconfident, negative means underconfident. */
+double ooda_brier_score(const ooda_engine_t *e, int last_n);
+double ooda_calibration_gap(const ooda_engine_t *e, int last_n);
 
 /* ── Serialization ────────────────────────────────────────────────────── */
 
