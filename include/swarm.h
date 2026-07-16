@@ -13,7 +13,7 @@
 #define SWARM_MAX_OUTPUT    (512 * 1024)
 #define SWARM_LABEL_LEN     128
 #define SWARM_GROUP_NAME_LEN 64
-#define SWARM_MAX_DEPTH     6
+#define SWARM_MAX_DEPTH     7
 #define SWARM_READ_BUF      (64 * 1024) /* 64KB read buffer (was 4KB) */
 
 /* Runtime caps. These cannot exceed the structural compile-time maxima above
@@ -49,16 +49,24 @@ typedef enum {
     EXECUTOR_DSCO   = 0,  /* default: fork dsco binary                  */
     EXECUTOR_CLAUDE = 1,  /* Claude Code CLI: claude -p --output-format json */
     EXECUTOR_CODEX  = 2,  /* OpenAI Codex CLI: codex exec --json        */
+    EXECUTOR_GROK   = 3,  /* xAI Grok subscription CLI                  */
+    EXECUTOR_KIMI   = 4,  /* Moonshot Kimi Code subscription CLI        */
 } executor_type_t;
 
 /* Executor availability (detected at init) */
 typedef struct {
     bool     claude_available;   /* claude CLI found and authenticated     */
     bool     codex_available;    /* codex CLI found and authenticated      */
+    bool     grok_available;     /* Grok CLI found and authenticated       */
+    bool     kimi_available;     /* Kimi Code CLI found and authenticated  */
     char     claude_path[512];   /* resolved path to claude binary         */
     char     codex_path[512];    /* resolved path to codex binary          */
+    char     grok_path[512];     /* resolved path to grok binary           */
+    char     kimi_path[512];     /* resolved path to kimi binary           */
     char     claude_model[128];  /* default claude model (from --version)  */
     char     codex_model[128];   /* default codex model (from config)      */
+    char     grok_model[128];    /* default Grok CLI model                  */
+    char     kimi_model[128];    /* default Kimi Code model                 */
 } executor_registry_t;
 
 typedef void (*swarm_stream_cb)(int child_id, const char *data, size_t len, void *ctx);
@@ -82,6 +90,10 @@ typedef struct {
     char          *stream_buf;     /* partial line buffer */
     size_t         stream_buf_len;
 
+    /* UI emission is rate-limited independently of lossless pipe draining. */
+    size_t         ui_bytes_emitted;
+    double         ui_last_emit_time;
+
     /* Timing */
     double         start_time;
     double         end_time;
@@ -100,6 +112,12 @@ typedef struct {
 
     /* Group membership */
     int            group_id;       /* -1 if ungrouped */
+
+    /* Slot lifecycle: true once this slot's result has been durably
+     * collected (via a completed collect()/status() call or the
+     * RESULT.json envelope write) AND its process is fully reaped/terminal.
+     * Only reclaimable slots may be handed back out by swarm_spawn*(). */
+    bool           reclaimable;
 } swarm_child_t;
 
 typedef struct {
@@ -109,6 +127,11 @@ typedef struct {
     int   child_count;
     char  coordinator_task[SWARM_LABEL_LEN];
     bool  active;
+
+    /* Durable SwarmRun v2: stable identity for this logical group. */
+    char  durable_run_id[128];
+    char  durable_run_dir[512];
+    char  topology[64];
 } swarm_group_t;
 
 /* ── Completion queue — O(1) push/pop for finished children ───────────── */
@@ -132,6 +155,20 @@ typedef struct {
     int            child_count;
     swarm_group_t  groups[SWARM_MAX_GROUPS];
     int            group_count;
+
+    /* ── Slot recycling ────────────────────────────────────────────────
+     * child_count/group_count were historically monotonic allocators: once
+     * a session spawned SWARM_MAX_CHILDREN (64) children over its lifetime,
+     * every subsequent spawn silently failed forever, even though zero
+     * children were actually running (all terminal + already collected).
+     * These free-lists let terminal, already-collected slots be reclaimed
+     * so a long-lived session can spawn far more than 64 children total
+     * without ever exceeding 64 *concurrent* children (the real, meaningful
+     * limit tied to the 64-bit active bitset and OS process-count sanity). */
+    int            free_child_ids[SWARM_MAX_CHILDREN];
+    int            free_child_count;
+    int            free_group_ids[SWARM_MAX_GROUPS];
+    int            free_group_count;
 
     /* Global stream callback */
     swarm_stream_cb stream_cb;
@@ -182,6 +219,16 @@ void swarm_set_next_instance(const char *effort, double temperature,
  * that provider's API directly, completely decoupled from the parent's provider. */
 int  swarm_spawn_provider(swarm_t *s, int group_id, const char *task,
                            const char *model, const char *provider);
+/* Credential-class specialization for providers exposing independent billing
+ * pools through one endpoint (currently Sakana subscription vs PAYG). */
+int swarm_spawn_provider_auth_lane(swarm_t *s, int group_id, const char *task,
+                                   const char *model, const char *provider,
+                                   const char *auth_class);
+/* OpenRouter specialization: pins a concrete upstream provider/quantization
+ * for one model lane. Empty upstream preserves normal OpenRouter routing. */
+int swarm_spawn_openrouter_lane(swarm_t *s, int group_id, const char *task,
+                                const char *model, const char *upstream,
+                                const char *quantization);
 
 /* ── External executor spawn ─────────────────────────────────────────── */
 int  swarm_spawn_executor(swarm_t *s, int group_id, const char *task,
@@ -205,6 +252,27 @@ int  swarm_group_create(swarm_t *s, const char *name);
 int  swarm_group_dispatch(swarm_t *s, int group_id, const char **tasks, int task_count,
                           const char *model);
 bool swarm_group_complete(swarm_t *s, int group_id);
+
+/* ── Slot recycling ───────────────────────────────────────────────────────
+ * Mark a group's children as reclaimable (their durable RESULT.json envelope
+ * is already on disk, or the caller has captured everything it needs) and
+ * return the group + child slots to the free-lists for reuse by future
+ * spawns. This is what lets a long-lived session (many collect() calls
+ * across many groups) spawn far more than SWARM_MAX_CHILDREN children over
+ * its lifetime — only *concurrently active* children are structurally
+ * capped. Safe to call multiple times; a no-op on an already-reclaimed
+ * group. Refuses to reclaim a group with any RUNNING/STREAMING child. */
+bool swarm_group_reclaim(swarm_t *s, int group_id);
+/* Total children ever spawned (child_count) vs. currently reclaimable slots
+ * available for reuse — exposed for diagnostics/observability. */
+int  swarm_reclaimable_count(swarm_t *s);
+/* Sweep every active group whose children are ALL terminal (done/error/
+ * killed — swarm_group_complete()==true) and reclaim it. Called
+ * automatically by swarm_spawn*() when a spawn would otherwise fail due to
+ * exhausted child capacity, so a long-lived session self-heals instead of
+ * being permanently wedged by groups the caller forgot to retire after
+ * collecting. Returns the number of groups reclaimed. */
+int  swarm_reclaim_all_complete(swarm_t *s);
 
 /* ── Streaming & polling ──────────────────────────────────────────────── */
 /* Poll all children for output. timeout_ms=-1 blocks, 0=nonblock */
@@ -250,5 +318,23 @@ void swarm_group_kill(swarm_t *s, int group_id);
 int  swarm_status_json(swarm_t *s, char *buf, size_t len);
 int  swarm_child_output(swarm_t *s, int child_id, char *buf, size_t len);
 int  swarm_group_status_json(swarm_t *s, int group_id, char *buf, size_t len);
+
+/* ── Swarm Mode v1 observability/persistence ─────────────────────────────
+ * Persist a group as a first-class SwarmRun artifact directory:
+ *   .swarm/runs/<run_id>/{manifest.json,workers/worker_N.json,coordinator.md,
+ *                         claims.json,metrics.json,transcript.md}
+ * Returns 0 on success, -1 on validation/IO failure. */
+int  swarm_group_persist_run(swarm_t *s, int group_id, const char *run_id,
+                             const char *topology, const char *user_prompt,
+                             const char *coordinator_output,
+                             char *out_dir, size_t out_dir_len);
+
+/* Render a compact live-observability frame for a group into buf. */
+int  swarm_group_render_frame(swarm_t *s, int group_id, const char *run_id,
+                              const char *topology, char *buf, size_t len);
+
+/* Ensure a stable durable run id/dir exists for a group. */
+int  swarm_group_ensure_durable_run(swarm_t *s, int group_id, const char *topology,
+                                    const char *suggested_run_id);
 
 #endif

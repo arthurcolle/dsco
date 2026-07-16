@@ -28,8 +28,8 @@ static const provider_profile_t PROVIDER_PROFILES[] = {
         .env_vars = {"ANTHROPIC_API_KEY", "ANTHROPIC_TOKEN", "CLAUDE_CODE_OAUTH_TOKEN",
                      "DSCO_CLAUDE_CODE_OAUTH_TOKEN"},
         .aliases = {"claude", "claude-oauth", "claude-code"},
-        .default_model = "claude-sonnet-4-6",
-        .default_aux_model = "claude-haiku-4-5-20251001",
+        .default_model = "claude-sonnet-5",
+        .default_aux_model = "claude-haiku-4-5",
         .caps = CAP_ANTHROPIC,
     },
     {
@@ -43,7 +43,7 @@ static const provider_profile_t PROVIDER_PROFILES[] = {
         .transport_base_url = "https://api.openai.com/v1",
         .env_vars = {"OPENAI_API_KEY", "OPENAI_KEY", "CHATGPT_API_KEY"},
         .aliases = {"chatgpt"},
-        .default_model = "gpt-4.1",
+        .default_model = "gpt-5.6-luna",
         .caps = CAP_OPENAI_COMPAT_VISION,
     },
     {
@@ -181,6 +181,18 @@ static const provider_profile_t PROVIDER_PROFILES[] = {
         .env_vars = {"COHERE_API_KEY"},
         .default_model = "command-a-03-2025",
         .caps = CAP_OPENAI_COMPAT,
+    },
+    {
+        .name = "kimi-code",
+        .display_name = "Kimi Code Subscription",
+        .description = "Kimi Code membership via native OAuth and in-process OpenAI-compatible transport.",
+        .api_mode = PROVIDER_API_CHAT_COMPLETIONS,
+        .auth_type = PROVIDER_AUTH_OAUTH_EXTERNAL,
+        .transport = PROVIDER_TRANSPORT_OPENAI_CHAT,
+        .base_url = "https://api.kimi.com/coding/v1",
+        .transport_base_url = "https://api.kimi.com/coding/v1",
+        .default_model = "k3",
+        .caps = CAP_OPENAI_COMPAT_VISION | PROVIDER_CAP_REASONING,
     },
     {
         .name = "moonshot",
@@ -516,7 +528,7 @@ static const provider_profile_t PROVIDER_PROFILES[] = {
         .transport = PROVIDER_TRANSPORT_CODEX_RESPONSES,
         .base_url = "https://chatgpt.com/backend-api/codex",
         .aliases = {"codex", "openai_codex"},
-        .default_model = "gpt-5.5",
+        .default_model = "gpt-5.6-luna",
         .caps = PROVIDER_CAP_TOOLS | PROVIDER_CAP_MULTITURN | PROVIDER_CAP_STREAMING |
                 PROVIDER_CAP_REASONING | PROVIDER_CAP_JSON,
     },
@@ -700,5 +712,6 @@ bool provider_profile_transport_supported(const provider_profile_t *profile) {
     if (!profile)
         return false;
     return profile->transport == PROVIDER_TRANSPORT_OPENAI_CHAT ||
-           profile->transport == PROVIDER_TRANSPORT_ANTHROPIC_MESSAGES;
+           profile->transport == PROVIDER_TRANSPORT_ANTHROPIC_MESSAGES ||
+           profile->transport == PROVIDER_TRANSPORT_CODEX_RESPONSES;
 }

@@ -29,26 +29,76 @@
 /* Tool register file: hard cap on tools per API request.
  * Like CPU registers — 32 slots max, tools evicted/loaded dynamically.
  * bash+python always core; everything else loaded via load_tools/hints.
- * Budget-adaptive: full=32, mid=24, low=13, critical=5 */
+ * Budget-adaptive: full=32, mid=24, low=14, critical=7 */
 #define TOOL_REGISTER_CAP       32
-#define TOOL_REG_ALWAYS          6   /* R0-R5:   bash,python,discover,load,loop */
-#define TOOL_REG_WARM           11   /* file I/O + run_command, evictable */
-#define TOOL_REG_WORKING        11   /* quorum-scored, turn-volatile */
+#define TOOL_REG_ALWAYS          8   /* bash,python,discover,load,invoke,evict,loop controls */
+#define TOOL_REG_WARM           10   /* file I/O + run_command, evictable */
+#define TOOL_REG_WORKING        10   /* quorum-scored, frozen for cache stability */
 #define TOOL_REG_DISCOVERY       4   /* R28-R31: progressive schema, ephemeral */
 #define QUORUM_MIN_SIGNALS       2   /* min independent signals to load a tool */
 #define MAX_INPUT_LINE      65536
 
-/* --cheap mode: send only ALWAYS-core tools (5) + skip compact catalog.
+/* --cheap mode: send only ALWAYS-core tools + skip compact catalog.
  * Cuts first-prompt cost from ~$0.40 to ~$0.05 by evicting all tools
- * except discover_tools/load_tools (which let the model page them in). */
+ * except discover_tools/load_tools/evict_tools (which let the model page them in/out). */
 extern int g_cheap_mode;
 
-/* API defaults */
-#define DEFAULT_MODEL       "zai/glm-5.2"
+/* API defaults. Explicit CLI, environment, and saved-profile settings remain
+ * layerable overrides; these values define the no-flag native runtime. */
+#define DEFAULT_PROVIDER    "openai-codex"
+#define DEFAULT_MODEL       "gpt-5.6-luna"
+#define DEFAULT_EFFORT      "xhigh"
+
+/* ── Compile-time runtime posture defaults ─────────────────────────────────
+   The issued binary bakes in --interactive, --gov-model none, and --autonomous
+   as its default state. These are *defaults*, not locks: an explicit CLI flag
+   (e.g. --gov-model standard, --approval-mode ask) or a pre-set environment
+   variable still overrides them because they are applied with setenv(...,0)
+   (non-overwriting) and the flag parser runs afterward.
+
+   Override the compile-time posture entirely by defining these to 0 at build
+   time, e.g. `make CFLAGS_EXTRA="-DDSCO_DEFAULT_GOV_NONE=0 \
+   -DDSCO_DEFAULT_AUTONOMOUS=0 -DDSCO_DEFAULT_INTERACTIVE=0"`. */
+#ifndef DSCO_DEFAULT_INTERACTIVE
+#define DSCO_DEFAULT_INTERACTIVE 1
+#endif
+#ifndef DSCO_DEFAULT_AUTONOMOUS
+#define DSCO_DEFAULT_AUTONOMOUS  1
+#endif
+#ifndef DSCO_DEFAULT_GOV_NONE
+#define DSCO_DEFAULT_GOV_NONE    1
+#endif
+
+/* Default swarm worker model for embarrassingly parallel work. Unpinned
+ * sub-agents (map_reduce / fanout) route here so wide fanouts stay cheap.
+ * gpt-5.4-mini: 400K ctx, $0.75/$4.50 per 1M — ~3x cheaper than the
+ * top-tier default. Structural fanout cap is SWARM_MAX_CHILDREN (64).
+ * Gate off with DSCO_SWARM_DEFAULT_MINI=0 to inherit the parent model. */
+#define DEFAULT_SWARM_MODEL "openai/gpt-5.4-mini"
+static inline const char *dsco_swarm_default_model(const char *api_key_unused) {
+    (void)api_key_unused;
+    const char *v = getenv("DSCO_SWARM_DEFAULT_MINI");
+    if (v && v[0] == '0' && v[1] == '\0')
+        return NULL; /* opt out: inherit parent model */
+    return DEFAULT_SWARM_MODEL;
+}
+/* Sensitive endpoint/header constants. In hardened builds (-DDSCO_USE_OBF_SECRETS,
+ * set by `make harden`) these resolve to runtime lookups of encrypted values so
+ * the literals never appear in __cstring; dev builds keep them inline for
+ * debuggability. All use sites are runtime contexts (curl/snprintf/assignment),
+ * so a function call substitutes cleanly. See src/embedded_data.c / data/dsco_secrets.txt. */
+const char *dsco_secret(const char *key);
+#ifdef DSCO_USE_OBF_SECRETS
+#define API_URL_ANTHROPIC    dsco_secret("API_URL_ANTHROPIC")
+#define API_URL_COUNT_TOKENS dsco_secret("API_URL_COUNT_TOKENS")
+#define ANTHROPIC_VERSION    dsco_secret("ANTHROPIC_VERSION")
+#define ANTHROPIC_BETAS      dsco_secret("ANTHROPIC_BETAS")
+#else
 #define API_URL_ANTHROPIC   "https://api.anthropic.com/v1/messages"
 #define API_URL_COUNT_TOKENS "https://api.anthropic.com/v1/messages/count_tokens"
 #define ANTHROPIC_VERSION   "2023-06-01"
 #define ANTHROPIC_BETAS     "interleaved-thinking-2025-05-14,code-execution-2025-05-22,advanced-tool-use-2025-11-20"
+#endif
 #define MAX_TOKENS          16384
 static inline int dsco_max_tokens(void) {
     return dsco_env_int("DSCO_MAX_TOKENS", MAX_TOKENS, 1, 100000);
@@ -137,15 +187,19 @@ static const model_info_t MODEL_REGISTRY[] = {
     { "opus48",       "claude-opus-4-8",            1000000, 128000,  5.0,  25.0,  0.50,  6.25, 1 },
     { "opus47",       "claude-opus-4-7",            1000000, 128000,  5.0,  25.0,  0.50,  6.25, 1 },
     { "opus46",       "claude-opus-4-6",            1000000, 128000,  5.0,  25.0,  0.50,  6.25, 1 },
-    { "sonnet",       "claude-sonnet-4-6",          1000000, 128000,  3.0,  15.0,  0.30,  3.75, 1 },
-    { "haiku",        "claude-haiku-4-5-20251001",   200000, 64000,   1.00,  5.0,  0.10,  1.25, 0 },
+    { "sonnet",       "claude-sonnet-5",            1000000, 128000,  2.0,  10.0,  0.20,  2.50, 1 },
+    { "sonnet5",      "claude-sonnet-5",            1000000, 128000,  2.0,  10.0,  0.20,  2.50, 1 },
+    { "haiku",        "claude-haiku-4-5-20251001",  200000,  64000,  1.00,  5.0,  0.10,  1.25, 0 },
+    { "haiku45",      "claude-haiku-4-5-20251001",  200000,  64000,  1.00,  5.0,  0.10,  1.25, 0 },
     /* ── Anthropic (OpenRouter IDs — for cross-provider routing) ─────── */
     { "or-fable5",    "anthropic/claude-fable-5",     1000000, 128000, 10.0, 50.0,  1.00, 12.50, 1 },
-    { "or-fable",     "anthropic/claude-sonnet-4.5",  1000000, 128000,  3.0, 15.0,  0.30,  3.75, 1 },
+    { "or-fable",     "anthropic/claude-fable-5",     1000000, 128000, 10.0, 50.0,  1.00, 12.50, 1 },
     { "or-opus48",    "anthropic/claude-opus-4.8",    1000000, 128000,  5.0, 25.0,  0.50,  6.25, 1 },
     { "or-opus47",    "anthropic/claude-opus-4.7",    1000000, 128000,  5.0, 25.0,  0.50,  6.25, 1 },
     { "or-opus46",    "anthropic/claude-opus-4.6",    1000000, 128000,  5.0, 25.0,  0.50,  6.25, 1 },
+    { "or-sonnet5",   "anthropic/claude-sonnet-5",    1000000, 128000,  2.0, 10.0,  0.20,  2.50, 1 },
     { "or-sonnet46",  "anthropic/claude-sonnet-4.6",  1000000, 128000,  3.0, 15.0,  0.30,  3.75, 1 },
+    { "or-haiku45",   "anthropic/claude-haiku-4.5",    200000,  64000,  1.0,  5.0,  0.10,  1.25, 0 },
     { "or-opus45",    "anthropic/claude-opus-4.5",     200000, 32000,  5.0,  25.0,  0, 0, 1 },
     { "or-sonnet45",  "anthropic/claude-sonnet-4.5",  1000000, 16000,  3.0,  15.0,  0, 0, 1 },
     /* ── OpenAI — GPT-5.x family (2026 frontier) ────────────────────── */
@@ -442,6 +496,12 @@ static inline const char *model_resolve_alias(const char *name) {
                 strcmp(name, MODEL_REGISTRY[i].model_id) == 0)
                 return MODEL_REGISTRY[i].model_id;
         }
+        /* Bare native provider model ids are already canonical. Do not let a
+         * runtime OpenRouter catalog entry rewrite e.g. claude-sonnet-4-6 into
+         * anthropic/claude-sonnet-4.6; routing fallback is handled later by
+         * provider_route_for_model based on available credentials. */
+        if (strncmp(name, "claude-", 7) == 0)
+            return name;
         if (strchr(name, '/') || strchr(name, ':'))
             return name;
     }
@@ -506,75 +566,38 @@ static inline bool dsco_effort_store(char *dst, size_t dst_len, const char *effo
 
 /* System prompt */
 #define SYSTEM_PROMPT \
-    "You are dsco, an agentic CLI built on the Overmind Soul architecture.\n" \
-    "Three-layer design: Wings (soar) + Talons (win) + Immune System (survive).\n\n" \
-    "WINGS (Autonomy & Emergence):\n" \
-    "- PHEROMONE COORDINATION: Stigmergic signals (PROGRESS/ATTRACTION/WARNING/SUCCESS/" \
-    "HELP_NEEDED/CAPACITY) with exponential decay. Coordinate without central planning.\n" \
-    "- THREE-TIER MEMORY: Working (60s), Episodic (1h), Semantic (permanent). " \
-    "Auto-consolidation promotes important memories upward.\n" \
-    "- HIERARCHICAL SWARMS: Sub-agent hierarchies (depth 6). " \
-    "topology_run for fanout/fanin, debate, competition.\n" \
-    "- CAPABILITY MATCHING: EXPERT/PROFICIENT/COMPETENT/NOVICE. " \
-    "Self-assess and delegate when outmatched.\n" \
-    "- AVIAN MECHANISMS: Use avian nesting to create bounded workspaces, brooding to " \
-    "incubate fragile candidates, fledging to promote mature work, roosting for cooldown, " \
-    "and molting to refresh stale context.\n\n" \
-    "TALONS (Competitive Execution — the ability to WIN):\n" \
-    "- GOAL PURSUIT: Track goals through hunt states: nascent -> stalking -> " \
-    "striking -> gripping -> captured (win) or escaped (fail). " \
-    "Use talons_goal to create, talons_advance to progress.\n" \
-    "- GRIP STRENGTH: tentative (1 retry), holding (3), locked (7), death_grip (20). " \
-    "Failed goals auto-retry based on grip. Escalate grip for critical objectives.\n" \
-    "- TOURNAMENT SELECTION: Race N strategies in parallel, pick the winner. " \
-    "Use talons_tournament to begin/add/result/decide. Scored by quality/speed/cost.\n" \
-    "- STRATEGY ENGINE: direct, flanking, tournament, escalation, divide, ambush. " \
-    "talons_recommend learns from win/loss history to suggest best approach.\n" \
-    "- ADAPTIVE: Strategy success rates updated from every hunt. The system gets " \
-    "better at winning over time.\n\n" \
-    "IMMUNE SYSTEM (Guardrails & Safety):\n" \
-    "- OODA DISCIPLINE: Observe->Orient->Decide->Act for non-trivial decisions.\n" \
-    "- KILL SWITCHES: 5 granularities (agent/workflow/service/pheromone/system).\n" \
-    "- GSU BUDGETS: Resource accounting with hard limits — no overdraft.\n" \
-    "- PRINCIPAL TIERS: Tier 0 (Founder) > Tier 1 (Operator) > Tier 2 (Agent) > Tier 3 (User).\n" \
-    "- HARDCODED BEHAVIORS: Non-bypassable rules (must-always/must-never).\n" \
-    "- GOVERNANCE CHECKPOINT: hardcoded -> budget -> killswitch -> authorize -> audit.\n\n" \
-    "TOOLS: 364+ tools across file I/O, git, network, shell, crypto, pipeline, " \
-    "math, AST, plugins, market data, prediction markets, soul evolution.\n" \
-    "The TOOL CATALOG below lists every tool with its signature (param* = required).\n" \
-    "Call any tool directly — the catalog has all the parameter info you need.\n" \
-    "DYNAMIC CLARIFICATION: When you need user input to proceed, call AskUserQuestion instead of guessing or emitting a plain-text questionnaire. Use stable session_id values; reopen the same session_id for follow-up questions so prior answers are preserved. On status=chat, answer the user's concern and then reopen/continue the dialog if still needed. On status=no_tty, ask the same questions plainly in chat.\n" \
-    "MULTI-EXECUTOR SWARMS: dsco (fork self), claude (Claude Code CLI), codex (OpenAI Codex).\n\n" \
-    "TOKEN EFFICIENCY:\n" \
-    "- Issue 3+ parallel tool calls per step when gathering information (36% cheaper, 41% faster).\n" \
-    "- For external parallelism, you may use bash to launch local dsc or dsco worker processes when swarm/executor tools are not the best fit.\n" \
-    "- Large tool results are truncated inline. Full results persist in VFS — use context_recall to retrieve.\n" \
-    "- Durable artifacts require proof: prefer write_file/append_file; if bash creates files, declare verify_path/verify_paths with optional size/content/hash checks.\n" \
-    "- Do not use context_search/context_get/context_pack — they are deprecated.\n" \
-    "- Be concise. Prefer action over explanation.\n" \
-    "Create goals for complex tasks. Use tournaments when multiple approaches exist."
+    "You are dsco, Distributed Systems, Inc.'s local-first autonomous agent runtime.\n" \
+    "Operate as an outcome-owning agent: inspect reality, form a plan, execute it, verify the result, and continue until the objective is complete or a concrete authority/resource boundary blocks progress. Prefer action over narration and evidence over assertion.\n\n" \
+    "AUTONOMY:\n" \
+    "- Infer safe, reversible intermediate steps from the user's objective; do not ask permission for routine reads, analysis, local edits, or verification already within granted authority.\n" \
+    "- Ask for clarification only when missing information materially changes the result, an irreversible/external action needs destination-aware approval, or the capability gate requires it.\n" \
+    "- For complex work, establish acceptance criteria, track the objective through completion, recover from failures within budget, and report evidence plus residual risk.\n" \
+    "- Keep changes minimal and reversible. Never claim completion without inspecting outputs or running an appropriate verifier.\n\n" \
+    "PARALLEL EXECUTION — DEFAULT FOR INDEPENDENT WORK:\n" \
+    "- Before acting, decompose the objective into a dependency graph. Launch every ready, independent read, search, test, analysis, or research branch concurrently; serialize only true dependencies or conflicting writes.\n" \
+    "- Use parallel tool calls for independent operations in the same turn. Use swarm/map_reduce for decomposable work with synthesis, provider_fabric or tournaments for competing approaches, and agent/executor workers for isolated long-running branches.\n" \
+    "- Match fan-out to useful work, cost, rate limits, and blast radius. Give each worker a bounded task, expected artifact, acceptance criteria, and non-overlapping write scope. Avoid duplicate workers unless deliberate diversity or independent verification adds value.\n" \
+    "- Keep the coordinator on the critical path: while workers run, inspect dependencies or prepare integration. Collect results, reconcile contradictions, integrate centrally, then run end-to-end verification.\n" \
+    "- Parallel reads are encouraged. Parallel writes require isolated files, worktrees, or bounded workspaces; never let workers race on the same mutable artifact.\n\n" \
+    "OVERMIND OPERATING MODEL:\n" \
+    "- WINGS: coordinate through memory, pheromone signals, capability matching, avian workspaces, and hierarchical swarms. Delegate when specialization or concurrency improves the outcome.\n" \
+    "- TALONS: pursue goals to a verified terminal state; retry proportionally, compare materially different strategies, and select on quality, speed, and cost.\n" \
+    "- IMMUNE: obey capability gates, budgets, kill switches, principal authority, and audit requirements. Autonomy never implies ambient authority.\n\n" \
+    "TOOLS AND CONTEXT:\n" \
+    "- Use the most specific available tool. The tool catalog supplies callable signatures; discover/load tools when the active register is insufficient.\n" \
+    "- Multi-executor workers may use dsco, Claude Code, or Codex where available. Do not claim a backend is available until observed.\n" \
+    "- Large results may be truncated inline; retrieve persisted output with the current supported recall/read mechanism. Do not use deprecated context_search/context_get/context_pack.\n" \
+    "- Durable artifacts require proof: prefer write_file/append_file; when shell commands create files, declare and verify artifact paths.\n" \
+    "- When user input is genuinely required, use AskUserQuestion when available; preserve its session_id across follow-ups. If unavailable, ask concisely in chat.\n\n" \
+    "EXECUTION LOOP: Observe -> decompose -> dispatch independent work -> monitor -> synthesize -> verify -> repair or finish. For complex tasks, create a goal. For uncertain approaches, run a bounded tournament."
 
-/* Cheap-mode system prompt: minimal, no catalog reference, teaches discover/load */
+/* Cheap-mode system prompt: minimal register, same autonomous/parallel posture */
 #define SYSTEM_PROMPT_CHEAP \
-    "You are dsco, an agentic CLI with 364+ tools.\n" \
-    "You are running in CHEAP MODE — only 5 core tools are loaded to minimize cost.\n\n" \
-    "YOUR ACTIVE TOOLS:\n" \
-    "  bash          — run shell commands\n" \
-    "  python        — execute Python code\n" \
-    "  discover_tools — browse all 364+ tools by category\n" \
-    "  load_tools    — page in tools you need (they become callable immediately)\n" \
-    "  self_exit     — end session\n\n" \
-    "WORKFLOW: For any task beyond bash/python, call discover_tools to find " \
-    "relevant tools, then load_tools to activate them. Use AskUserQuestion for needed user clarification/follow-up instead of guessing. Loaded tools persist " \
-    "for the session. Categories: file_io, git, network, shell, code, crypto, " \
-    "swarm, ast, pipeline, math, search, general, finance, prediction, memory.\n\n" \
-    "EFFICIENCY:\n" \
-    "- Only load tools you actually need — each adds ~200 tokens per turn.\n" \
-    "- Prefer bash/python for simple tasks over loading specialized tools.\n" \
-    "- Durable artifacts require proof: prefer write_file/append_file; if bash creates files, declare verify_path/verify_paths with optional size/content/hash checks.\n" \
-    "- Issue parallel tool calls when gathering information.\n" \
-    "- For external parallelism, bash may launch local dsc or dsco workers when that is simpler than loading swarm tools.\n" \
-    "- Be concise. Prefer action over explanation."
+    "You are dsco, a local-first autonomous agent operating with a minimal active tool register. Own the user's objective through planning, execution, verification, and concise reporting.\n\n" \
+    "AUTONOMY: Infer safe, reversible intermediate steps and continue without unnecessary confirmation. Ask only when ambiguity is material, authority is missing, or an irreversible/external action requires approval. Never claim success without evidence.\n\n" \
+    "PARALLELISM: Decompose work into dependencies and concurrently issue all ready independent tool calls. For larger fan-out, discover/load swarm, map-reduce, provider-fabric, or agent tools. Serialize dependencies and conflicting writes; isolate worker write scopes; synthesize and verify centrally.\n\n" \
+    "TOOL WORKFLOW: Use bash/python for simple work. Use discover_tools to find missing capabilities and load_tools to retrieve exact schemas. If a loaded capability is not advertised directly, call it through invoke_tool with its exact name and input object. The target still passes every governance gate. Loaded tools persist until evicted. Shell-created durable artifacts must declare and verify their paths.\n\n" \
+    "EXECUTION LOOP: Observe -> decompose -> dispatch -> synthesize -> verify -> repair or finish. Prefer action over narration, evidence over assertion, and concise outcome reports."
 
 /* ── TUI Feature Flags ─────────────────────────────────────────────────── */
 

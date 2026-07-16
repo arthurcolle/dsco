@@ -1,6 +1,8 @@
 #include "tui.h"
 #include "config.h"
 #include "presence.h"
+#include "pixel_tui.h"
+#include "kitty_banner.h"
 #include "touchid.h"
 #include "dist_logo.h"
 #include <stdio.h>
@@ -50,28 +52,38 @@ const tui_box_chars_t *tui_box_chars(tui_box_style_t style) {
 
 /* ── Terminal utilities ───────────────────────────────────────────────── */
 
-int tui_term_width(void) {
+static int tui_term_size(unsigned short *rows, unsigned short *cols) {
     struct winsize w;
-    if (ioctl(STDERR_FILENO, TIOCGWINSZ, &w) == 0 && w.ws_col > 0)
-        return w.ws_col;
-    return 80;
+    const int fds[] = {STDERR_FILENO, STDOUT_FILENO, STDIN_FILENO};
+
+    for (size_t i = 0; i < sizeof(fds) / sizeof(fds[0]); i++) {
+        if (ioctl(fds[i], TIOCGWINSZ, &w) == 0 && w.ws_col > 0 && w.ws_row > 0) {
+            *rows = w.ws_row;
+            *cols = w.ws_col;
+            return 0;
+        }
+    }
+    return -1;
+}
+
+int tui_term_width(void) {
+    unsigned short rows, cols;
+    return tui_term_size(&rows, &cols) == 0 ? cols : 80;
 }
 
 int tui_term_height(void) {
-    struct winsize w;
-    if (ioctl(STDERR_FILENO, TIOCGWINSZ, &w) == 0 && w.ws_row > 0)
-        return w.ws_row;
-    return 24;
+    unsigned short rows, cols;
+    return tui_term_size(&rows, &cols) == 0 ? rows : 24;
 }
 
 /* ── Terminal output mutex — serializes cursor-positioned writes ──────── */
 static pthread_mutex_t g_term_mutex = PTHREAD_MUTEX_INITIALIZER;
 static volatile sig_atomic_t g_composer_reading = 0;
 static volatile sig_atomic_t g_composer_interrupt_requested = 0;
+static volatile sig_atomic_t g_composer_preserve_interrupt = 0;
 static volatile sig_atomic_t g_composer_restore_active = 0;
 static volatile sig_atomic_t g_composer_restore_top = 0;
 static volatile sig_atomic_t g_composer_restore_bottom = 0;
-static volatile sig_atomic_t g_composer_external_redraw_requested = 0;
 static tui_composer_escape_hook_t g_composer_escape_hook = NULL;
 static void *g_composer_escape_hook_ctx = NULL;
 
@@ -99,10 +111,10 @@ static void *g_composer_escape_hook_ctx = NULL;
  * subsystems (composer, dropdown, etc.) manipulate terminal state independently.
  * Uses reference counting to handle nested state requests safely. */
 typedef enum {
-    TUI_TERM_STATE_NORMAL,   /* Cooked mode, default */
-    TUI_TERM_STATE_COMPOSER, /* Raw mode for text input composer */
-    TUI_TERM_STATE_DROPDOWN, /* Raw mode for dropdown menus */
-    TUI_TERM_STATE_EXTERNAL  /* Temporarily released for external programs */
+    TUI_TERM_STATE_NORMAL,      /* Cooked mode, default */
+    TUI_TERM_STATE_COMPOSER,    /* Raw mode for text input composer */
+    TUI_TERM_STATE_DROPDOWN,    /* Raw mode for dropdown menus */
+    TUI_TERM_STATE_EXTERNAL     /* Temporarily released for external programs */
 } tui_term_state_t;
 
 typedef struct {
@@ -114,11 +126,13 @@ typedef struct {
     pthread_mutex_t mutex;
 } tui_term_mgr_t;
 
-static tui_term_mgr_t g_term_mgr = {.current = TUI_TERM_STATE_NORMAL,
-                                    .previous = TUI_TERM_STATE_NORMAL,
-                                    .refcount = 0,
-                                    .termios_saved = false,
-                                    .mutex = PTHREAD_MUTEX_INITIALIZER};
+static tui_term_mgr_t g_term_mgr = {
+    .current = TUI_TERM_STATE_NORMAL,
+    .previous = TUI_TERM_STATE_NORMAL,
+    .refcount = 0,
+    .termios_saved = false,
+    .mutex = PTHREAD_MUTEX_INITIALIZER
+};
 
 /* ── Error Recovery Framework ─────────────────────────────────────────────
  * Graceful error handling with retry mechanisms and degradation paths. */
@@ -130,8 +144,7 @@ static void *tui_alloc_with_retry(size_t size, int max_retries, tui_error_t *err
     for (int attempt = 0; attempt <= max_retries; attempt++) {
         ptr = calloc(1, size);
         if (ptr) {
-            if (err)
-                err->severity = TUI_ERR_NONE;
+            if (err) err->severity = TUI_ERR_NONE;
             return ptr;
         }
 
@@ -169,7 +182,8 @@ static void tui_error_report(const tui_error_t *err) {
             fprintf(stderr, "[WARN] %s", err->message);
             break;
         case TUI_ERR_DEGRADED:
-            fprintf(stderr, "[DEGRADED] %s - continuing with reduced functionality", err->message);
+            fprintf(stderr, "[DEGRADED] %s - continuing with reduced functionality",
+                    err->message);
             break;
         case TUI_ERR_FATAL:
             fprintf(stderr, "[FATAL] %s - attempting graceful shutdown", err->message);
@@ -195,6 +209,10 @@ void tui_cleanup(void) {
     if (g_term_mgr.termios_saved) {
         tcsetattr(STDIN_FILENO, TCSAFLUSH, &g_term_mgr.saved_termios);
     }
+
+    /* Drop any resident banner images so the terminal doesn't keep
+     * animating them after we're gone. */
+    kitty_banner_clear(stderr);
 
     /* Show cursor */
     fprintf(stderr, "\033[?25h");
@@ -305,30 +323,26 @@ void tui_install_crash_handlers(void) {
 static __thread int lock_depth = 0;
 static __thread int held_locks[4] = {0}; /* index by hierarchy level */
 
-#define LOCK_ACQUIRE(lock_id)                                                                      \
-    do {                                                                                           \
-        for (int i = 1; i < (lock_id); i++) {                                                      \
-            if (held_locks[i]) {                                                                   \
-                fprintf(stderr, "LOCK VIOLATION: acquiring %d while holding %d\n", (lock_id), i);  \
-                abort();                                                                           \
-            }                                                                                      \
-        }                                                                                          \
-        held_locks[(lock_id)] = 1;                                                                 \
-        lock_depth++;                                                                              \
-    } while (0)
+#define LOCK_ACQUIRE(lock_id) \
+    do { \
+        for (int i = 1; i < (lock_id); i++) { \
+            if (held_locks[i]) { \
+                fprintf(stderr, "LOCK VIOLATION: acquiring %d while holding %d\n", (lock_id), i); \
+                abort(); \
+            } \
+        } \
+        held_locks[(lock_id)] = 1; \
+        lock_depth++; \
+    } while(0)
 
-#define LOCK_RELEASE(lock_id)                                                                      \
-    do {                                                                                           \
-        held_locks[(lock_id)] = 0;                                                                 \
-        lock_depth--;                                                                              \
-    } while (0)
+#define LOCK_RELEASE(lock_id) \
+    do { \
+        held_locks[(lock_id)] = 0; \
+        lock_depth--; \
+    } while(0)
 #else
-#define LOCK_ACQUIRE(lock_id)                                                                      \
-    do {                                                                                           \
-    } while (0)
-#define LOCK_RELEASE(lock_id)                                                                      \
-    do {                                                                                           \
-    } while (0)
+#define LOCK_ACQUIRE(lock_id) do {} while(0)
+#define LOCK_RELEASE(lock_id) do {} while(0)
 #endif
 
 void tui_composer_set_escape_hook(tui_composer_escape_hook_t hook, void *ctx) {
@@ -435,6 +449,10 @@ bool tui_composer_is_reading(void) {
     return g_composer_reading != 0;
 }
 
+void tui_composer_preserve_on_interrupt(bool preserve) {
+    g_composer_preserve_interrupt = preserve ? 1 : 0;
+}
+
 static void tui_clear_tracked_composer_area(int fd) {
     if (!g_composer_restore_active)
         return;
@@ -450,33 +468,40 @@ static void tui_clear_tracked_composer_area(int fd) {
     tui_composer_restore_untrack();
 }
 
-static bool tui_clear_tracked_composer_area_for_output(int fd) {
-    if (!g_composer_reading || !g_composer_restore_active)
+static bool tui_position_transcript_for_output(int fd) {
+    /* Keep the composer mounted in the rows below `top` and constrain normal
+     * terminal scrolling to the transcript above it. Output written at the
+     * bottom of that scroll region advances naturally one row at a time.
+     *
+     * Do not clear or request a repaint here. Thinking/text/tool transitions
+     * can all prepare output during one turn; the old clear-and-redraw handoff
+     * erased the pane repeatedly, moved the cursor through blank rows, and
+     * raced the composer thread. The scroll region is the isolation boundary:
+     * transcript writes cannot overwrite the fixed bottom pane. */
+    if (!g_composer_restore_active)
         return false;
     int top = (int)g_composer_restore_top;
     int bottom = (int)g_composer_restore_bottom;
     if (top < 1 || bottom < top)
         return false;
-    if (bottom - top > 80)
-        bottom = top + 80;
-    for (int row = top; row <= bottom; row++)
-        tui_write_clear_row(fd, row);
     int output_row = top > 1 ? top - 1 : 1;
     tui_write_scroll_region(fd, output_row);
     tui_write_move_cursor(fd, output_row, 1);
-    tui_write_clear_row(fd, output_row);
-    g_composer_external_redraw_requested = 1;
     return true;
 }
 
 bool tui_prepare_external_output(void) {
+    tui_term_lock();
+    bool cleared = tui_prepare_external_output_locked();
+    tui_term_unlock();
+    return cleared;
+}
+
+bool tui_prepare_external_output_locked(void) {
     int fd = isatty(STDERR_FILENO) ? STDERR_FILENO : STDOUT_FILENO;
     if (!isatty(fd))
         return false;
-    tui_term_lock();
-    bool cleared = tui_clear_tracked_composer_area_for_output(fd);
-    tui_term_unlock();
-    return cleared;
+    return tui_position_transcript_for_output(fd);
 }
 
 void tui_term_lock(void) {
@@ -508,20 +533,18 @@ bool tui_cursor_report_queries_enabled(void) {
     const char *v = getenv("DSCO_TUI_DSR");
     if (!v || !v[0])
         return false;
-    return v[0] == '1' || strcasecmp(v, "true") == 0 || strcasecmp(v, "yes") == 0 ||
-           strcasecmp(v, "on") == 0;
+    return v[0] == '1' || strcasecmp(v, "true") == 0 ||
+           strcasecmp(v, "yes") == 0 || strcasecmp(v, "on") == 0;
 }
 
 static bool tui_env_truthy(const char *v) {
-    return v && v[0] &&
-           (v[0] == '1' || strcasecmp(v, "true") == 0 || strcasecmp(v, "yes") == 0 ||
-            strcasecmp(v, "on") == 0);
+    return v && v[0] && (v[0] == '1' || strcasecmp(v, "true") == 0 ||
+                         strcasecmp(v, "yes") == 0 || strcasecmp(v, "on") == 0);
 }
 
 static bool tui_env_falsey(const char *v) {
-    return v && v[0] &&
-           (v[0] == '0' || strcasecmp(v, "false") == 0 || strcasecmp(v, "no") == 0 ||
-            strcasecmp(v, "off") == 0);
+    return v && v[0] && (v[0] == '0' || strcasecmp(v, "false") == 0 ||
+                         strcasecmp(v, "no") == 0 || strcasecmp(v, "off") == 0);
 }
 
 bool tui_motion_enabled(void) {
@@ -533,7 +556,8 @@ bool tui_motion_enabled(void) {
         return false;
     if (tui_env_falsey(anim))
         return false;
-    if (tui_env_truthy(getenv("DSCO_REDUCED_MOTION")) || tui_env_truthy(getenv("NO_MOTION")) ||
+    if (tui_env_truthy(getenv("DSCO_REDUCED_MOTION")) ||
+        tui_env_truthy(getenv("NO_MOTION")) ||
         tui_env_truthy(getenv("ACCESSIBILITY_REDUCE_MOTION"))) {
         return false;
     }
@@ -660,8 +684,11 @@ static void repeat_str(const char *s, int n) {
 
 void tui_box(const char *title, const char *body, tui_box_style_t style, const char *border_color,
              int width) {
-    if (width <= 0)
-        width = tui_term_width();
+    int term_width = tui_term_width();
+    if (width <= 0 || width > term_width)
+        width = term_width;
+    if (width < 2)
+        width = 2;
     const tui_box_chars_t *bc = tui_box_chars(style);
     const char *col = border_color ? border_color : "";
     const char *rst = border_color ? TUI_RESET : "";
@@ -997,11 +1024,14 @@ void tui_welcome(const char *model, int core_count, int total_count, const char 
     if (splash_env && strcasecmp(splash_env, "compact") == 0) {
         /* One-line compact header: dsco version · model · N tools (M loadable) */
         const tui_glyphs_t *gl = tui_glyph();
-        fprintf(stderr,
-                "%s%s%s dsco %sv%s%s  %s·%s  %s%s%s  %s·%s  %s%d tools%s %s(%d loadable)%s\n",
-                TUI_BMAGENTA, gl->diamond, TUI_RESET, TUI_BOLD, version, TUI_RESET, TUI_DIM,
-                TUI_RESET, TUI_CYAN, model, TUI_RESET, TUI_DIM, TUI_RESET, TUI_GREEN, core_count,
-                TUI_RESET, TUI_DIM, total_count - core_count, TUI_RESET);
+        fprintf(stderr, "%s%s%s dsco %sv%s%s  %s·%s  %s%s%s  %s·%s  %s%d tools%s %s(%d loadable)%s\n",
+                TUI_BMAGENTA, gl->diamond, TUI_RESET,
+                TUI_BOLD, version, TUI_RESET,
+                TUI_DIM, TUI_RESET,
+                TUI_CYAN, model, TUI_RESET,
+                TUI_DIM, TUI_RESET,
+                TUI_GREEN, core_count, TUI_RESET,
+                TUI_DIM, total_count - core_count, TUI_RESET);
         return;
     }
 
@@ -2144,8 +2174,8 @@ static double tui_now_sec(void) {
 /* Interruptible frame delay: waits up to ms, returns early when *running_flag
  * flips false (signaled via cond). Replaces usleep() frame pacing so stop()
  * joins instantly instead of paying up to a full frame of latency. */
-static void spinner_frame_wait(pthread_mutex_t *mu, pthread_cond_t *cv, volatile bool *running_flag,
-                               int ms) {
+static void spinner_frame_wait(pthread_mutex_t *mu, pthread_cond_t *cv,
+                               volatile bool *running_flag, int ms) {
     struct timespec ts;
     clock_gettime(CLOCK_REALTIME, &ts);
     ts.tv_sec += ms / 1000;
@@ -2937,8 +2967,19 @@ static void welcome_animated(const char *model, int core_count, int total_count,
     }
     fprintf(stderr, TUI_RESET "\n\n");
 
-    /* Hyper-dense sub-cell pixel reveal of the DSCO logo. */
-    welcome_pixel_logo();
+    /* Native-pixel animated wordmark in Kitty: frames are handed to the
+     * terminal's animation loop so the banner keeps moving persistently
+     * without a resident painter. Elsewhere the same frames are rasterised
+     * to ANSI half-block cells (one animation loop, then it settles); the
+     * braille reveal remains the last resort and honours an explicit
+     * DSCO_SPLASH palette choice. */
+    const char *splash_env = getenv("DSCO_SPLASH");
+    if (kitty_banner_render_auto(stderr) <= 0 &&
+        ((splash_env && *splash_env) ||
+         dsco_banner_render_cells(stderr, 1) <= 0)) {
+        /* Hyper-dense sub-cell pixel reveal of the DSCO logo. */
+        welcome_pixel_logo();
+    }
 
     fprintf(stderr, "\n");
 
@@ -3029,6 +3070,7 @@ void tui_status_bar_init(tui_status_bar_t *sb, const char *model) {
     sb->motion_started_at = (double)time(NULL);
     sb->motion_frame = 0;
     sb->animations_enabled = tui_motion_enabled();
+    pixel_tui_session_set_model(stderr, model, NULL);
 }
 
 void tui_status_bar_set_model(tui_status_bar_t *sb, const char *model, const char *slot_name) {
@@ -3040,6 +3082,7 @@ void tui_status_bar_set_model(tui_status_bar_t *sb, const char *model, const cha
     if (slot_name)
         snprintf(sb->slot_name, sizeof(sb->slot_name), "%s", slot_name);
     pthread_mutex_unlock(&sb->mutex);
+    pixel_tui_session_set_model(stderr, model, slot_name);
     /* No paint here — status bar paints only when the panel is shown. */
 }
 
@@ -3052,11 +3095,12 @@ void tui_status_bar_update(tui_status_bar_t *sb, int in_tok, int out_tok, double
     sb->turn = turn;
     sb->tools_used = tools;
     pthread_mutex_unlock(&sb->mutex);
+    pixel_tui_session_set_usage(stderr, in_tok, out_tok, cost, turn, tools);
     /* No paint here — status bar paints only when the panel is shown. */
 }
 
-void tui_status_bar_set_budget(tui_status_bar_t *sb, double budget_limit, double burn_rate,
-                               double percent, double runway) {
+void tui_status_bar_set_budget(tui_status_bar_t *sb, double budget_limit,
+                               double burn_rate, double percent, double runway) {
     if (!sb)
         return;
     pthread_mutex_lock(&sb->mutex);
@@ -3069,6 +3113,7 @@ void tui_status_bar_set_budget(tui_status_bar_t *sb, double budget_limit, double
     sb->percent = percent;
     sb->runway = runway;
     pthread_mutex_unlock(&sb->mutex);
+    pixel_tui_session_set_budget(stderr, budget_limit, burn_rate, percent, runway);
     /* No paint here — status bar paints only when the panel is shown. */
 }
 
@@ -3173,6 +3218,8 @@ static int tui_motion_accent_color(int frame, int offset);
  *   [user@cwd][branch][model][in/out][cost][turn][tools]                [clock]
  */
 void tui_status_bar_render(tui_status_bar_t *sb) {
+    if (pixel_tui_session_active())
+        return;
     pthread_mutex_lock(&sb->mutex);
     if (!sb->visible) {
         pthread_mutex_unlock(&sb->mutex);
@@ -3289,12 +3336,11 @@ void tui_status_bar_render(tui_status_bar_t *sb) {
                        slot_name);
     }
     if (panel_active) {
-        const char *activity = animations_enabled
-                                   ? tui_motion_activity_frame(motion_frame, tui_motion_unicode())
-                                   : "·";
+        const char *activity =
+            animations_enabled ? tui_motion_activity_frame(motion_frame, tui_motion_unicode()) : "·";
         int accent = animations_enabled ? tui_motion_accent_color(motion_frame, 0) : 213;
-        li += snprintf(left_buf + li, sizeof(left_buf) - li, "\033[48;5;236m\033[38;5;%dm %s live ",
-                       accent, activity);
+        li += snprintf(left_buf + li, sizeof(left_buf) - li,
+                       "\033[48;5;236m\033[38;5;%dm %s live ", accent, activity);
     }
     li += snprintf(left_buf + li, sizeof(left_buf) - li,
                    "\033[48;5;236m\033[38;5;252m"
@@ -3302,11 +3348,11 @@ void tui_status_bar_render(tui_status_bar_t *sb) {
                    in_str, out_str);
     if (budget_limit > 0.0) {
         li += snprintf(left_buf + li, sizeof(left_buf) - li,
-                       "\033[38;5;%dm$%.2f/$%.2f %.0f%% ⌛%s ↑$%.2f/h\033[38;5;252m ", budget_color,
-                       cost, budget_limit, budget_percent, runway_str, burn_rate);
+                       "\033[38;5;%dm$%.2f/$%.2f %.0f%% ⌛%s ↑$%.2f/h\033[38;5;252m ",
+                       budget_color, cost, budget_limit, budget_percent, runway_str, burn_rate);
     } else {
-        li += snprintf(left_buf + li, sizeof(left_buf) - li, "\033[38;5;120m$%.2f\033[38;5;252m ",
-                       cost);
+        li += snprintf(left_buf + li, sizeof(left_buf) - li,
+                       "\033[38;5;120m$%.2f\033[38;5;252m ", cost);
     }
     li += snprintf(left_buf + li, sizeof(left_buf) - li, "│ t%d │ %d⚙ ", turn, tools);
     fputs(left_buf, stderr);
@@ -3357,22 +3403,15 @@ void tui_status_bar_render(tui_status_bar_t *sb) {
     tui_term_unlock();
 }
 
-/* ── Input Panel / Composer (persistent bottom panel) ────────────────── */
+/* ── Input Panel / Composer (inline while awaiting input) ───────────── */
 /*
- * Layout (bottom 7 rows of the terminal, fixed by scroll-region trick):
- *   row N-6: top horizontal rule ─────────────
- *   row N-5: notification row 1 (middle whitespace / realtime notifications)
- *   row N-4: notification row 2 (middle whitespace / realtime notifications)
- *   row N-3: "❯ " + input (dual-state caret: colored when active, grey idle)
- *   row N-2: bottom horizontal rule ─────────────
- *   row N-1: dim hint footer ("↵ send · ⌥↵ newline · esc interrupt · /help")
- *   row N  : powerline status bar (drawn by tui_status_bar_render)
+ * The box is painted at the transcript cursor only while DSCO is waiting for
+ * input. On submit its footprint is cleared and ordinary terminal output
+ * resumes at that row, so thinking, tools, and assistant text enter real
+ * scrollback instead of competing with a fixed bottom pane.
  *
- * Multi-line input: the composer keeps a byte buffer, word-wraps and
- * scrolls internally so the cursor line is always visible on row N-3.
- * (Growing the box requires shrinking the scroll region, so we keep the
- * visible input fixed at 1 row for the persistent layout and scroll
- * the buffer instead.)
+ * Multi-line input keeps a byte buffer and word-wraps inside the temporary
+ * box. If it reaches the terminal bottom, only the missing rows are scrolled.
  *
  * Notifications: tui_panel_notify() pushes a (level, text, timestamp)
  * record into a tiny ring. The two middle rows render newest-first and
@@ -3418,7 +3457,7 @@ static bool tui_motion_unicode(void) {
 }
 
 static int tui_motion_accent_color(int frame, int offset) {
-    static const int colors[] = {213, 207, 201, 165, 129, 99, 63, 69, 75, 81, 117, 153};
+    static const int colors[] = {110, 110, 110, 109, 109, 109};
     int n = (int)(sizeof(colors) / sizeof(colors[0]));
     int idx = (frame + offset) % n;
     if (idx < 0)
@@ -3431,7 +3470,7 @@ static const char *tui_motion_border_color(bool active, bool animations_enabled,
     if (!active)
         return "\033[38;5;240m";
     if (!animations_enabled || tui_detect_color_level() < TUI_COLOR_256)
-        return "\033[38;5;213m";
+        return "\033[38;5;110m";
     snprintf(seq, sizeof(seq), "\033[38;5;%dm", tui_motion_accent_color(frame, 0));
     return seq;
 }
@@ -3503,6 +3542,16 @@ void tui_panel_notify(tui_status_bar_t *sb, tui_panel_note_level_t level, const 
     snprintf(g_panel_notes[0].text, sizeof(g_panel_notes[0].text), "%s", text);
     pthread_mutex_unlock(&g_panel_note_mu);
 
+    pixel_tui_notice_level_t native_level = PIXEL_TUI_NOTICE_INFO;
+    switch (level) {
+        case TUI_PANEL_NOTE_OK: native_level = PIXEL_TUI_NOTICE_SUCCESS; break;
+        case TUI_PANEL_NOTE_WARN: native_level = PIXEL_TUI_NOTICE_WARNING; break;
+        case TUI_PANEL_NOTE_ERROR: native_level = PIXEL_TUI_NOTICE_ERROR; break;
+        case TUI_PANEL_NOTE_ACTIVITY: native_level = PIXEL_TUI_NOTICE_ACTIVITY; break;
+        case TUI_PANEL_NOTE_INFO: default: break;
+    }
+    pixel_tui_session_notify(stderr, native_level, text);
+
     /* Repaint the middle rows only. Full chrome repaint is cheap enough. */
     if (sb)
         tui_input_panel_render(sb, NULL);
@@ -3512,6 +3561,7 @@ void tui_panel_notify_clear(tui_status_bar_t *sb) {
     pthread_mutex_lock(&g_panel_note_mu);
     memset(g_panel_notes, 0, sizeof(g_panel_notes));
     pthread_mutex_unlock(&g_panel_note_mu);
+    pixel_tui_session_clear_notifications(stderr);
     if (sb)
         tui_input_panel_render(sb, NULL);
 }
@@ -3649,13 +3699,6 @@ static int inbox_total_rows(const char *buf, size_t len) {
     return inbox_visible_rows(buf, len) + 3; /* top + content + bottom + hint */
 }
 
-static void inbox_clear(int r_top, int rows) {
-    for (int i = 0; i < rows; i++) {
-        tui_cursor_move(r_top + i, 1);
-        fprintf(stderr, "\033[2K");
-    }
-}
-
 /* Render the inline box at row r_top. Sets cur_row/cur_col (out params) to
  * the screen coordinates where the terminal cursor should sit. Returns box
  * height (borders + visible content + hint row). */
@@ -3693,12 +3736,24 @@ static int inbox_render(int r_top, const char *buf, size_t len, size_t cur, bool
     const char *border_col = tui_motion_border_color(active, animations_enabled, motion_frame);
     const char *reset = "\033[0m";
 
-    /* Top border */
+    /* Top border: a persistent command deck, not a transient prompt. Keep the
+     * chrome cell-addressed so the composer remains safe inside its scroll
+     * region while the agent transcript advances above it. */
     tui_cursor_move(r_top, 1);
-    fprintf(stderr, "\033[2K%s╭", border_col);
-    tui_motion_rule(cols - 2, active, animations_enabled, motion_frame);
-    fputs(border_col, stderr);
-    fprintf(stderr, "╮%s", reset);
+    fprintf(stderr, "\033[2K%s", border_col);
+    if (cols >= 58) {
+        const char *left_label = "input";
+        const char *right_label = "live";
+        int fixed = 7 + (int)strlen(left_label) + (int)strlen(right_label);
+        fprintf(stderr, "┌─ \033[1;38;5;252m%s%s ", left_label, border_col);
+        tui_motion_rule(cols - fixed, active, animations_enabled, motion_frame);
+        fputs(border_col, stderr);
+        fprintf(stderr, "\033[38;5;108m%s%s ─┐%s", right_label, border_col, reset);
+    } else {
+        fputs("╭", stderr);
+        tui_motion_rule(cols - 2, active, animations_enabled, motion_frame);
+        fprintf(stderr, "%s╮%s", border_col, reset);
+    }
 
     /* Content rows */
     size_t line_start = 0;
@@ -3718,10 +3773,10 @@ static int inbox_render(int r_top, const char *buf, size_t len, size_t cur, bool
 
             /* Left border + caret/continuation marker. Visible cells = 4. */
             if (line_idx == 0) {
-                fprintf(stderr, "%s│%s %s", border_col, reset,
-                        active ? "\033[1;38;5;213m❯\033[0m " : "\033[2;38;5;240m❯\033[0m ");
+                fprintf(stderr, "%s│\033[38;5;110m▏%s%s", border_col, reset,
+                        active ? "\033[1;38;5;110m›\033[0m " : "\033[2;38;5;240m›\033[0m ");
             } else {
-                fprintf(stderr, "%s│%s   ", border_col, reset);
+                fprintf(stderr, "%s│\033[2;38;5;110m▏%s  ", border_col, reset);
             }
             int prefix_cells = 4;
 
@@ -3817,10 +3872,10 @@ static int inbox_render(int r_top, const char *buf, size_t len, size_t cur, bool
     /* Bottom border */
     int r_bot = r_top + 1 + visible;
     tui_cursor_move(r_bot, 1);
-    fprintf(stderr, "\033[2K%s╰", border_col);
+    fprintf(stderr, "\033[2K%s└", border_col);
     tui_motion_rule(cols - 2, active, animations_enabled, motion_frame + 4);
     fputs(border_col, stderr);
-    fprintf(stderr, "╯%s", reset);
+    fprintf(stderr, "┘%s", reset);
 
     /* Scroll indicators on borders */
     if (vscroll > 0) {
@@ -3845,7 +3900,10 @@ static int inbox_render(int r_top, const char *buf, size_t len, size_t cur, bool
             fputs("· ", stderr);
         }
     }
-    fprintf(stderr, "↵ send · ⌥↵ newline · ctrl+c interrupt · /help\033[0m");
+    if (cols >= 74)
+        fprintf(stderr, "input stays live  ·  ↵ send  ·  ⌥↵ newline  ·  ctrl+c interrupt  ·  esc pause\033[0m");
+    else
+        fprintf(stderr, "↵ send · ⌥↵ newline · ctrl+c interrupt · /help\033[0m");
 
     return visible + 3;
 }
@@ -4000,11 +4058,15 @@ __attribute__((unused)) static int composer_draw_input(const char *prompt, const
  * disabled, the query fails, or it times out. DSR replies are terminal-generated
  * input; if they arrive after dsco stops reading, shells can execute fragments
  * such as "1R". Keep this opt-in via DSCO_TUI_DSR for known-good terminals. */
-static int tui_query_cursor_row(int fallback) {
+static int tui_query_cursor_row_impl(int fallback, bool composer_owns_raw_input) {
     int fd = STDIN_FILENO;
     if (!isatty(fd) || !isatty(STDERR_FILENO))
         return fallback;
-    if (!tui_cursor_report_queries_enabled())
+    const char *dsr = getenv("DSCO_TUI_DSR");
+    bool explicitly_disabled = dsr && dsr[0] &&
+                               (dsr[0] == '0' || strcasecmp(dsr, "false") == 0 ||
+                                strcasecmp(dsr, "no") == 0 || strcasecmp(dsr, "off") == 0);
+    if ((!composer_owns_raw_input && !tui_cursor_report_queries_enabled()) || explicitly_disabled)
         return fallback;
 
     struct termios saved, raw;
@@ -4066,6 +4128,10 @@ static int tui_query_cursor_row(int fallback) {
     if (sscanf(p, "\033[%d;%dR", &row, &col) == 2 && row > 0)
         return row;
     return fallback;
+}
+
+static int tui_query_cursor_row(int fallback) {
+    return tui_query_cursor_row_impl(fallback, false);
 }
 
 void tui_pad_to_panel_anchor(void) {
@@ -4130,6 +4196,33 @@ static void composer_consume_csi_tail(unsigned char ch) {
     }
 }
 
+/* SGR mouse reports are CSI < button ; column ; row M/m.  The native pixel
+ * session owns the full cell grid, so terminal scrollback cannot handle wheel
+ * input there; consume wheel reports and move the retained transcript instead.
+ * Return false for malformed/incomplete reports so the normal CSI path can
+ * discard them without inserting escape bytes into the composer. */
+static bool composer_read_sgr_mouse(int *button, bool *released) {
+    char report[64];
+    size_t len = 0;
+    while (len + 1 < sizeof(report)) {
+        unsigned char ch = 0;
+        if (composer_read_byte(STDIN_FILENO, 30, &ch) <= 0)
+            return false;
+        report[len++] = (char)ch;
+        if (ch == 'M' || ch == 'm') {
+            report[len - 1] = '\0';
+            int b = -1, x = 0, y = 0;
+            if (sscanf(report, "%d;%d;%d", &b, &x, &y) != 3 || b < 0 ||
+                x < 1 || y < 1)
+                return false;
+            if (button) *button = b;
+            if (released) *released = ch == 'm';
+            return true;
+        }
+    }
+    return false;
+}
+
 /* Insert `s` (len bytes) at buf[cur], shifting the rest. Grows cursor. */
 static void composer_insert(char *buf, size_t cap, size_t *len, size_t *cur, const char *s,
                             size_t slen) {
@@ -4154,6 +4247,23 @@ static void composer_backspace(char *buf, size_t *len, size_t *cur) {
     *len -= removed;
     *cur = start;
     buf[*len] = '\0';
+}
+
+/* ── Composer history (local, readline-independent) ───────────────────── */
+#define TUI_COMPOSER_HISTORY_MAX 200
+#define TUI_COMPOSER_HISTORY_LINE_MAX 4096
+static char s_composer_history[TUI_COMPOSER_HISTORY_MAX][TUI_COMPOSER_HISTORY_LINE_MAX];
+static int s_composer_history_count = 0;
+
+static void composer_history_push(const char *line) {
+    if (!line || !line[0]) return;
+    if (s_composer_history_count > 0 && strcmp(s_composer_history[s_composer_history_count-1], line) == 0) return;
+    if (s_composer_history_count < TUI_COMPOSER_HISTORY_MAX) {
+        snprintf(s_composer_history[s_composer_history_count++], TUI_COMPOSER_HISTORY_LINE_MAX, "%s", line);
+    } else {
+        memmove(s_composer_history, s_composer_history + 1, sizeof(s_composer_history) - sizeof(s_composer_history[0]));
+        snprintf(s_composer_history[TUI_COMPOSER_HISTORY_MAX-1], TUI_COMPOSER_HISTORY_LINE_MAX, "%s", line);
+    }
 }
 
 /* Delete one utf-8 codepoint at cursor. */
@@ -4284,133 +4394,77 @@ static bool composer_clipboard_grab_image(char *out_path, size_t out_sz) {
 #define TUI_SLASHMENU_CAP 128 /* max matches tracked per keystroke */
 
 /* ═══ @ Image-picker ═══════════════════════════════════════════════════ */
-#define TUI_IMGPICK_MAX 10
-#define TUI_IMGPICK_CAP 256 /* picker scan; actual send cap is IMG_MAX_PER_MSG=100 */
+#define TUI_IMGPICK_MAX   10
+#define TUI_IMGPICK_CAP  256  /* picker scan; actual send cap is IMG_MAX_PER_MSG=100 */
 #define TUI_IMGPICK_NAMEW 38
-static const char *s_imgpick_exts[] = {".png",  ".jpg",  ".jpeg", ".gif",  ".webp", ".bmp",
-                                       ".tif",  ".tiff", ".heic", ".heif", ".avif", ".PNG",
-                                       ".JPG",  ".JPEG", ".GIF",  ".WEBP", ".BMP",  ".TIF",
-                                       ".TIFF", ".HEIC", ".HEIF", ".AVIF", NULL};
-static bool imgpick_has_ext(const char *n) {
-    size_t nl = strlen(n);
-    for (int i = 0; s_imgpick_exts[i]; i++) {
-        size_t el = strlen(s_imgpick_exts[i]);
-        if (nl >= el && strcasecmp(n + nl - el, s_imgpick_exts[i]) == 0)
-            return true;
-    }
-    return false;
-}
+static const char *s_imgpick_exts[]={
+    ".png",".jpg",".jpeg",".gif",".webp",
+    ".bmp",".tif",".tiff",".heic",".heif",".avif",
+    ".PNG",".JPG",".JPEG",".GIF",".WEBP",
+    ".BMP",".TIF",".TIFF",".HEIC",".HEIF",".AVIF",NULL};
+static bool imgpick_has_ext(const char *n){
+    size_t nl=strlen(n);
+    for(int i=0;s_imgpick_exts[i];i++){size_t el=strlen(s_imgpick_exts[i]);
+        if(nl>=el&&strcasecmp(n+nl-el,s_imgpick_exts[i])==0)return true;}
+    return false;}
 static char s_imgpick_paths[TUI_IMGPICK_CAP][4096];
-static int s_imgpick_count = 0;
-static void imgpick_scan(const char *dir, const char *pfx) {
-    s_imgpick_count = 0;
-    DIR *dp = opendir((dir && *dir) ? dir : ".");
-    if (!dp)
-        return;
-    struct dirent *de;
-    size_t pl = pfx ? strlen(pfx) : 0;
-    char cwd[4096];
-    if (getcwd(cwd, sizeof(cwd)) == NULL)
-        strcpy(cwd, ".");
-    const char *base = (dir && *dir) ? dir : cwd;
-    while ((de = readdir(dp)) != NULL && s_imgpick_count < TUI_IMGPICK_CAP) {
-        const char *nm = de->d_name;
-        if (nm[0] == '.')
-            continue;
-        if (!imgpick_has_ext(nm))
-            continue;
-        if (pl > 0 && strncasecmp(nm, pfx, pl) != 0)
-            continue;
-        snprintf(s_imgpick_paths[s_imgpick_count], sizeof(s_imgpick_paths[0]), "%s/%s", base, nm);
-        s_imgpick_count++;
-    }
-    closedir(dp);
-}
-static int imgpick_render(int r_first, int count, int sel) {
-    int shown = count < TUI_IMGPICK_MAX ? count : TUI_IMGPICK_MAX;
-    if (shown == 0)
-        return 0;
-    int cols = tui_term_width();
-    if (cols < 30)
-        cols = 30;
-    int top = 0;
-    if (sel >= shown)
-        top = sel - shown + 1;
-    if (top > count - shown)
-        top = count - shown;
-    if (top < 0)
-        top = 0;
-    for (int r = 0; r < shown; r++) {
-        int gi = top + r;
-        bool on = (gi == sel);
-        const char *path = s_imgpick_paths[gi];
-        const char *fname = strrchr(path, '/');
-        fname = fname ? fname + 1 : path;
-        tui_cursor_move(r_first + r, 1);
-        fprintf(stderr, "\033[2K");
-        const char *mark = on ? "\033[38;5;45m\xe2\x96\xb8\033[0m" : " ";
-        const char *nc = on ? "\033[1;38;5;45m" : "\033[38;5;250m";
-        char nbuf[TUI_IMGPICK_NAMEW + 4];
-        snprintf(nbuf, sizeof(nbuf), "%s", fname);
-        char tmp[4096];
-        snprintf(tmp, sizeof(tmp), "%s", path);
-        char *sl = strrchr(tmp, '/');
-        if (sl)
-            *sl = '\0';
-        int used = 2 + 1 + 1 + 3 + 1 + TUI_IMGPICK_NAMEW + 2;
-        int dbud = cols - used - 1;
-        if (dbud < 0)
-            dbud = 0;
-        char dbuf[4100];
-        snprintf(dbuf, sizeof(dbuf), "%s", tmp);
-        if ((int)strlen(dbuf) > dbud && dbud > 4) {
-            char el[4100];
-            snprintf(el, sizeof(el), "\xe2\x80\xa6%s", dbuf + (int)strlen(dbuf) - (dbud - 1));
-            snprintf(dbuf, sizeof(dbuf), "%s", el);
-        } else if ((int)strlen(dbuf) > dbud)
-            dbuf[dbud] = '\0';
-        fprintf(stderr, "  %s \xf0\x9f\x96\xbc %s%-*s\033[0m  \033[2;38;5;245m%s\033[0m", mark, nc,
-                TUI_IMGPICK_NAMEW, nbuf, dbuf);
-    }
-    return shown;
-}
-static bool imgpick_parse_at(const char *buf, size_t cur, char *dir_out, size_t dir_sz,
-                             char *pfx_out, size_t pfx_sz) {
-    if (cur == 0)
-        return false;
-    size_t p = cur;
-    while (p > 0 && buf[p - 1] != ' ' && buf[p - 1] != '\n')
-        p--;
-    if (p >= cur || buf[p] != '@')
-        return false;
-    const char *after = buf + p + 1;
-    size_t alen = cur - p - 1;
-    const char *sl = NULL;
-    for (size_t i = 0; i < alen; i++)
-        if (after[i] == '/')
-            sl = after + i;
-    if (sl) {
-        size_t dlen = (size_t)(sl - after);
-        if (dlen >= dir_sz)
-            dlen = dir_sz - 1;
-        memcpy(dir_out, after, dlen);
-        dir_out[dlen] = '\0';
-        snprintf(pfx_out, pfx_sz, "%s", sl + 1);
-    } else {
-        char _cwd[4096];
-        if (getcwd(_cwd, sizeof(_cwd)) == NULL)
-            strcpy(_cwd, ".");
-        size_t dlen2 = strlen(_cwd);
-        if (dlen2 >= dir_sz)
-            dlen2 = dir_sz - 1;
-        memcpy(dir_out, _cwd, dlen2);
-        dir_out[dlen2] = '\0';
-        size_t plen = alen < pfx_sz - 1 ? alen : pfx_sz - 1;
-        memcpy(pfx_out, after, plen);
-        pfx_out[plen] = '\0';
-    }
-    return true;
-}
+static int  s_imgpick_count=0;
+static void imgpick_scan(const char *dir,const char *pfx){
+    s_imgpick_count=0;
+    DIR *dp=opendir((dir&&*dir)?dir:".");if(!dp)return;
+    struct dirent *de;size_t pl=pfx?strlen(pfx):0;
+    char cwd[4096];if(getcwd(cwd,sizeof(cwd))==NULL)strcpy(cwd,".");
+    const char *base=(dir&&*dir)?dir:cwd;
+    while((de=readdir(dp))!=NULL&&s_imgpick_count<TUI_IMGPICK_CAP){
+        const char *nm=de->d_name;if(nm[0]=='.')continue;
+        if(!imgpick_has_ext(nm))continue;
+        if(pl>0&&strncasecmp(nm,pfx,pl)!=0)continue;
+        snprintf(s_imgpick_paths[s_imgpick_count],sizeof(s_imgpick_paths[0]),
+                 "%s/%s",base,nm);s_imgpick_count++;}
+    closedir(dp);}
+static int imgpick_render(int r_first,int count,int sel){
+    int shown=count<TUI_IMGPICK_MAX?count:TUI_IMGPICK_MAX;if(shown==0)return 0;
+    int cols=tui_term_width();if(cols<30)cols=30;
+    int top=0;if(sel>=shown)top=sel-shown+1;
+    if(top>count-shown)top=count-shown;if(top<0)top=0;
+    for(int r=0;r<shown;r++){
+        int gi=top+r;bool on=(gi==sel);
+        const char *path=s_imgpick_paths[gi];
+        const char *fname=strrchr(path,'/');fname=fname?fname+1:path;
+        tui_cursor_move(r_first+r,1);fprintf(stderr,"\033[2K");
+        const char *mark=on?"\033[38;5;45m\xe2\x96\xb8\033[0m":" ";
+        const char *nc=on?"\033[1;38;5;45m":"\033[38;5;250m";
+        char nbuf[TUI_IMGPICK_NAMEW+4];snprintf(nbuf,sizeof(nbuf),"%s",fname);
+        char tmp[4096];snprintf(tmp,sizeof(tmp),"%s",path);
+        char *sl=strrchr(tmp,'/');if(sl)*sl='\0';
+        int used=2+1+1+3+1+TUI_IMGPICK_NAMEW+2;int dbud=cols-used-1;if(dbud<0)dbud=0;
+        char dbuf[4100];snprintf(dbuf,sizeof(dbuf),"%s",tmp);
+        if((int)strlen(dbuf)>dbud&&dbud>4){char el[4100];
+            snprintf(el,sizeof(el),"\xe2\x80\xa6%s",dbuf+(int)strlen(dbuf)-(dbud-1));
+            snprintf(dbuf,sizeof(dbuf),"%s",el);}
+        else if((int)strlen(dbuf)>dbud)dbuf[dbud]='\0';
+        fprintf(stderr,"  %s \xf0\x9f\x96\xbc %s%-*s\033[0m  \033[2;38;5;245m%s\033[0m",
+                mark,nc,TUI_IMGPICK_NAMEW,nbuf,dbuf);}
+    return shown;}
+static bool imgpick_parse_at(const char *buf,size_t cur,
+                              char *dir_out,size_t dir_sz,
+                              char *pfx_out,size_t pfx_sz){
+    if(cur==0)return false;size_t p=cur;
+    while(p>0&&buf[p-1]!=' '&&buf[p-1]!='\n')p--;
+    if(p>=cur||buf[p]!='@')return false;
+    const char *after=buf+p+1;size_t alen=cur-p-1;
+    const char *sl=NULL;
+    for(size_t i=0;i<alen;i++)if(after[i]=='/')sl=after+i;
+    if(sl){size_t dlen=(size_t)(sl-after);if(dlen>=dir_sz)dlen=dir_sz-1;
+        memcpy(dir_out,after,dlen);dir_out[dlen]='\0';
+        snprintf(pfx_out,pfx_sz,"%s",sl+1);
+    }else{char _cwd[4096];if(getcwd(_cwd,sizeof(_cwd))==NULL)strcpy(_cwd,".");
+        size_t dlen2=strlen(_cwd);if(dlen2>=dir_sz)dlen2=dir_sz-1;
+        memcpy(dir_out,_cwd,dlen2);dir_out[dlen2]='\0';
+        size_t plen=alen<pfx_sz-1?alen:pfx_sz-1;
+        memcpy(pfx_out,after,plen);pfx_out[plen]='\0';}
+    return true;}
+
 
 static const tui_cmd_entry_t *s_slash_cmds = NULL;
 static int s_slash_cmds_n = 0;
@@ -4452,8 +4506,8 @@ static int slashmenu_rows(int count) {
 
 /* Draw the dropdown starting at screen row r_first. Returns rows drawn.
  * `idx`/`count` come from composer_slash_match; `sel` is the highlighted row. */
-static int slashmenu_render(int r_first, const int *idx, int count, int sel, int motion_frame,
-                            bool animations_enabled) {
+static int slashmenu_render(int r_first, const int *idx, int count, int sel,
+                            int motion_frame, bool animations_enabled) {
     int shown = slashmenu_rows(count);
     if (shown == 0)
         return 0;
@@ -4493,9 +4547,8 @@ static int slashmenu_render(int r_first, const int *idx, int count, int sel, int
         int accent = tui_motion_accent_color(motion_frame, r);
         const char *mark = " ";
         if (on)
-            mark = animations_enabled
-                       ? tui_motion_activity_frame(motion_frame, tui_motion_unicode())
-                       : "\xe2\x96\xb8";
+            mark = animations_enabled ? tui_motion_activity_frame(motion_frame, tui_motion_unicode())
+                                      : "\xe2\x96\xb8";
 
         /* Truncate description to the remaining cells. */
         int used = 2 /*indent*/ + 1 /*mark*/ + 1 /*sp*/ + namew + 2 /*gap*/;
@@ -4508,13 +4561,12 @@ static int slashmenu_render(int r_first, const int *idx, int count, int sel, int
             dbuf[dbudget] = '\0';
 
         if (on) {
-            fprintf(stderr,
-                    "  \033[38;5;%dm%s\033[0m \033[1;38;5;%dm%-*s\033[0m  "
-                    "\033[2;38;5;245m%s\033[0m",
+            fprintf(stderr, "  \033[38;5;%dm%s\033[0m \033[1;38;5;%dm%-*s\033[0m  "
+                            "\033[2;38;5;245m%s\033[0m",
                     accent, mark, accent, namew, name, dbuf);
         } else {
-            fprintf(stderr, "    \033[38;5;250m%-*s\033[0m  \033[2;38;5;245m%s\033[0m", namew, name,
-                    dbuf);
+            fprintf(stderr, "    \033[38;5;250m%-*s\033[0m  \033[2;38;5;245m%s\033[0m",
+                    namew, name, dbuf);
         }
     }
     return shown;
@@ -4524,12 +4576,53 @@ static int slashmenu_render(int r_first, const int *idx, int count, int sel, int
  * coordinates (always inside the box) are returned via cur_r/cur_c. Returns
  * the combined row count so the caller can anchor/scroll/clear correctly. */
 static int composer_paint(int r_top, const char *buf, size_t len, size_t cur, const int *sug_idx,
-                          int sug_count, int sug_sel, int *cur_r, int *cur_c, int imgpick_cnt,
-                          int imgpick_s, int motion_frame, bool animations_enabled) {
-    int h =
-        inbox_render(r_top, buf, len, cur, true, motion_frame, animations_enabled, cur_r, cur_c);
-    int m =
-        slashmenu_render(r_top + h, sug_idx, sug_count, sug_sel, motion_frame, animations_enabled);
+                          int sug_count, int sug_sel, int *cur_r, int *cur_c,
+                          int imgpick_cnt, int imgpick_s,
+                          int motion_frame, bool animations_enabled) {
+    if (pixel_tui_session_active()) {
+        pixel_tui_menu_item_t items[10];
+        memset(items, 0, sizeof(items));
+        pixel_tui_menu_kind_t kind = PIXEL_TUI_MENU_NONE;
+        int item_count = 0;
+        int selected = 0;
+        if (imgpick_cnt > 0) {
+            kind = PIXEL_TUI_MENU_IMAGES;
+            int shown = imgpick_cnt < 10 ? imgpick_cnt : 10;
+            int top = imgpick_s >= shown ? imgpick_s - shown + 1 : 0;
+            if (top > imgpick_cnt - shown) top = imgpick_cnt - shown;
+            if (top < 0) top = 0;
+            for (int i = 0; i < shown; i++) {
+                const char *path = s_imgpick_paths[top + i];
+                const char *name = strrchr(path, '/');
+                items[i].label = name ? name + 1 : path;
+                items[i].detail = path;
+            }
+            item_count = shown;
+            selected = imgpick_s - top;
+        } else if (sug_count > 0) {
+            kind = PIXEL_TUI_MENU_COMMANDS;
+            int shown = slashmenu_rows(sug_count);
+            int top = sug_sel >= shown ? sug_sel - shown + 1 : 0;
+            if (top > sug_count - shown) top = sug_count - shown;
+            if (top < 0) top = 0;
+            for (int i = 0; i < shown; i++) {
+                const tui_cmd_entry_t *cmd = &s_slash_cmds[sug_idx[top + i]];
+                items[i].label = cmd->name;
+                items[i].detail = cmd->desc ? cmd->desc : "";
+            }
+            item_count = shown;
+            selected = sug_sel - top;
+        }
+        pixel_tui_session_set_composer(stderr, buf, cur, true, kind,
+                                       items, item_count, selected);
+        if (cur_r) *cur_r = r_top;
+        if (cur_c) *cur_c = 1;
+        return 1;
+    }
+    int h = inbox_render(r_top, buf, len, cur, true, motion_frame, animations_enabled,
+                         cur_r, cur_c);
+    int m = slashmenu_render(r_top + h, sug_idx, sug_count, sug_sel,
+                             motion_frame, animations_enabled);
     int q = imgpick_render(r_top + h + m, imgpick_cnt, imgpick_s);
     return h + m + q;
 }
@@ -4563,8 +4656,12 @@ char *tui_composer_read(tui_status_bar_t *sb, const char *prompt, char *out, siz
     }
 
     /* Enable bracketed paste */
-    fprintf(stderr, "\033[?2004h");
-    fflush(stderr);
+    if (pixel_tui_session_active())
+        pixel_tui_session_terminal_control(stderr, "\033[?2004h");
+    else {
+        fprintf(stderr, "\033[?2004h");
+        fflush(stderr);
+    }
 
     char *buf = (char *)calloc(1, TUI_COMPOSER_BUF_CAP);
     if (!buf) {
@@ -4597,9 +4694,9 @@ char *tui_composer_read(tui_status_bar_t *sb, const char *prompt, char *out, siz
     bool sug_suppress = false;
 
     /* @-image-picker state */
-    bool imgpick_open = false;
-    int imgpick_count = 0;
-    int imgpick_sel = 0;
+    bool imgpick_open  = false;
+    int  imgpick_count = 0;
+    int  imgpick_sel   = 0;
 
     /* History snapshot pointer for up/down */
     /* (We don't integrate with readline history here — keep composer
@@ -4610,7 +4707,7 @@ char *tui_composer_read(tui_status_bar_t *sb, const char *prompt, char *out, siz
     pthread_mutex_lock(&sb->mutex);
     char model_copy[64];
     snprintf(model_copy, sizeof(model_copy), "%s", sb->model);
-    bool animations_enabled = sb->animations_enabled;
+    bool animations_enabled = sb->animations_enabled && !pixel_tui_session_active();
     double motion_started_at = panel_now_s();
     sb->motion_started_at = motion_started_at;
     sb->motion_frame = 0;
@@ -4625,30 +4722,39 @@ char *tui_composer_read(tui_status_bar_t *sb, const char *prompt, char *out, siz
     (void)sm;
     (void)prompt;
     int rows = tui_term_height();
+    int observed_cols = tui_term_width();
 
     /* Mark panel active — caret renders in its colored state while we're
      * reading keystrokes. Cleared on exit below. */
     tui_panel_set_active(sb, true);
 
-    /* Anchor the inline box at the current cursor row. If the box would
-     * extend past the bottom of the terminal, scroll up first so it fits.
-     * We track r_top across keystrokes so resize/growth can re-anchor. */
+    /* Anchor the inline box at the transcript cursor. If the box would extend
+     * past the terminal, scroll only the missing rows. This makes the prompt
+     * appear directly after prior output and lets the terminal advance one
+     * line at a time as the session grows. */
     int needed = inbox_total_rows(buf, len);
-    /* Pin the composer to the bottom of the terminal. Open `needed` rows at the
-     * bottom by scrolling existing output up, then anchor the box so its last
-     * row sits on the final terminal row. This keeps the input field fixed at
-     * the bottom instead of floating wherever the previous turn left the
-     * cursor. */
-    int r_top = rows - needed + 1;
+    /* The composer has already entered raw mode and exclusively owns stdin,
+     * so its CPR exchange cannot race ordinary user input. */
+    int r_top = pixel_tui_session_active() ? rows - needed + 1 :
+                                             tui_query_cursor_row_impl(rows - needed + 1, true);
     if (r_top < 1)
         r_top = 1;
-    tui_term_lock();
-    tui_cursor_move(rows, 1);
-    for (int i = 0; i < needed; i++)
-        fputc('\n', stderr);
-    fflush(stderr);
-    tui_term_unlock();
-    tui_composer_restore_track(r_top, rows);
+    int overflow = r_top + needed - 1 - rows;
+    if (overflow > 0) {
+        tui_term_lock();
+        tui_cursor_move(rows, 1);
+        for (int i = 0; i < overflow; i++)
+            fputc('\n', stderr);
+        fflush(stderr);
+        tui_term_unlock();
+        r_top -= overflow;
+        if (r_top < 1)
+            r_top = 1;
+    }
+    if (pixel_tui_session_active())
+        tui_composer_restore_untrack();
+    else
+        tui_composer_restore_track(r_top, rows);
     int prev_height = 0;
     int prev_r_top = r_top;
 
@@ -4656,16 +4762,20 @@ char *tui_composer_read(tui_status_bar_t *sb, const char *prompt, char *out, siz
     fprintf(stderr, "\033[?25l");
     int cur_r = r_top + 1, cur_c = 5;
     int motion_frame = 0;
-    prev_height = composer_paint(r_top, buf, len, cur, sug_idx, sug_count, sug_sel, &cur_r, &cur_c,
-                                 imgpick_count, imgpick_sel, motion_frame, animations_enabled);
-    tui_cursor_move(cur_r, cur_c);
-    fprintf(stderr, "\033[?25h");
+    prev_height = composer_paint(r_top, buf, len, cur, sug_idx, sug_count, sug_sel,
+                                 &cur_r, &cur_c, imgpick_count, imgpick_sel,
+                                 motion_frame, animations_enabled);
+    if (!pixel_tui_session_active()) {
+        tui_cursor_move(cur_r, cur_c);
+        fprintf(stderr, "\033[?25h");
+    }
     fflush(stderr);
     tui_term_unlock();
 
     bool done = false;
     bool cancelled = false;
     bool in_paste = false;
+    int hist_pos = s_composer_history_count;
     size_t paste_chars = 0;  /* bytes received during current bracketed paste */
     size_t paste_len = 0;    /* bytes buffered during current bracketed paste */
     int paste_lines = 0;     /* newlines received during current bracketed paste */
@@ -4680,7 +4790,17 @@ char *tui_composer_read(tui_status_bar_t *sb, const char *prompt, char *out, siz
             cancelled = true;
             break;
         }
-        if (g_composer_external_redraw_requested) {
+        /* Resize is a live rendering event, not something deferred until the
+         * user submits. Rebuild the Kitty framebuffer and repaint this box as
+         * soon as the terminal cell geometry changes. */
+        int live_rows = tui_term_height();
+        int live_cols = tui_term_width();
+        if (live_rows != rows || live_cols != observed_cols) {
+            rows = live_rows;
+            observed_cols = live_cols;
+            tui_term_lock();
+            pixel_tui_session_refresh(stderr);
+            tui_term_unlock();
             goto redraw;
         }
         /* Cheap, non-blocking check first: if presence has engaged the lock
@@ -4716,9 +4836,6 @@ char *tui_composer_read(tui_status_bar_t *sb, const char *prompt, char *out, siz
         struct timeval tv = {.tv_sec = 0, .tv_usec = wait_ms * 1000};
         int sr = select(STDIN_FILENO + 1, &rfd, NULL, NULL, &tv);
         if (sr == 0) {
-            if (g_composer_external_redraw_requested) {
-                goto redraw;
-            }
             if (motion_live) {
                 int next_frame = tui_motion_frame_from_elapsed(motion_started_at, panel_now_s());
                 if (next_frame != motion_frame) {
@@ -4876,17 +4993,13 @@ char *tui_composer_read(tui_status_bar_t *sb, const char *prompt, char *out, siz
             if (imgpick_open && imgpick_count > 0) {
                 const char *sel_path = s_imgpick_paths[imgpick_sel];
                 size_t p2 = cur;
-                while (p2 > 0 && buf[p2 - 1] != ' ' && buf[p2 - 1] != '\n')
-                    p2--;
+                while (p2 > 0 && buf[p2-1] != ' ' && buf[p2-1] != '\n') p2--;
                 memmove(buf + p2, buf + cur, len - cur + 1);
-                len -= (cur - p2);
-                cur = p2;
+                len -= (cur - p2); cur = p2;
                 char ins2[4098];
                 snprintf(ins2, sizeof(ins2), "%s ", sel_path);
                 composer_insert(buf, TUI_COMPOSER_BUF_CAP, &len, &cur, ins2, strlen(ins2));
-                imgpick_open = false;
-                imgpick_count = 0;
-                imgpick_sel = 0;
+                imgpick_open = false; imgpick_count = 0; imgpick_sel = 0;
                 goto redraw;
             }
             /* Enter with the dropdown open → complete the highlighted command,
@@ -4925,17 +5038,13 @@ char *tui_composer_read(tui_status_bar_t *sb, const char *prompt, char *out, siz
             if (imgpick_open && imgpick_count > 0) {
                 const char *sel_path = s_imgpick_paths[imgpick_sel];
                 size_t p = cur;
-                while (p > 0 && buf[p - 1] != ' ' && buf[p - 1] != '\n')
-                    p--;
+                while (p > 0 && buf[p-1] != ' ' && buf[p-1] != '\n') p--;
                 memmove(buf + p, buf + cur, len - cur + 1);
-                len -= (cur - p);
-                cur = p;
+                len -= (cur - p); cur = p;
                 char ins[4098];
                 snprintf(ins, sizeof(ins), "%s ", sel_path);
                 composer_insert(buf, TUI_COMPOSER_BUF_CAP, &len, &cur, ins, strlen(ins));
-                imgpick_open = false;
-                imgpick_count = 0;
-                imgpick_sel = 0;
+                imgpick_open = false; imgpick_count = 0; imgpick_sel = 0;
                 goto redraw;
             }
             /* With the dropdown open, Tab completes the highlighted command into
@@ -4968,9 +5077,7 @@ char *tui_composer_read(tui_status_bar_t *sb, const char *prompt, char *out, siz
                     break;
                 }
                 if (imgpick_open) {
-                    imgpick_open = false;
-                    imgpick_count = 0;
-                    imgpick_sel = 0;
+                    imgpick_open = false; imgpick_count = 0; imgpick_sel = 0;
                     goto redraw;
                 }
                 if (sug_count > 0) {
@@ -4989,7 +5096,8 @@ char *tui_composer_read(tui_status_bar_t *sb, const char *prompt, char *out, siz
                 composer_kill_word(buf, &len, &cur);
                 goto redraw;
             }
-            if (n1 != '[' && n1 != 'O') {
+            bool csi_sequence = n1 == '[';
+            if (!csi_sequence && n1 != 'O') {
                 /* Alt+I / Alt+i — paste image from system clipboard */
                 if (n1 == 'i' || n1 == 'I') {
                     char img_path[512] = {0};
@@ -5015,26 +5123,50 @@ char *tui_composer_read(tui_status_bar_t *sb, const char *prompt, char *out, siz
             unsigned char n2 = 0;
             if (composer_read_byte(STDIN_FILENO, 30, &n2) <= 0)
                 goto redraw;
-            if (n2 == '2') {
-                unsigned char n3 = 0, n4 = 0;
-                bool saw_n3 = false, saw_n4 = false;
-                if (composer_read_byte(STDIN_FILENO, 30, &n3) > 0 &&
-                    composer_read_byte(STDIN_FILENO, 30, &n4) > 0) {
-                    saw_n3 = true;
-                    saw_n4 = true;
-                    if (n3 == '0' && n4 == '0') {
-                        /* Start bracketed paste: consume trailing '~' */
-                        unsigned char tilde = 0;
-                        composer_read_byte(STDIN_FILENO, 30, &tilde);
-                        in_paste = true;
-                        paste_chars = 0;
-                        paste_len = 0;
-                        paste_buf[0] = '\0';
-                        paste_lines = 0;
-                        continue;
+            if (csi_sequence && n2 == '2') {
+                unsigned char n3 = 0, n4 = 0, tail = 0;
+                bool have_n3 = composer_read_byte(STDIN_FILENO, 30, &n3) > 0;
+                bool have_n4 = have_n3 && composer_read_byte(STDIN_FILENO, 30, &n4) > 0;
+                bool have_tail = have_n4 && composer_read_byte(STDIN_FILENO, 30, &tail) > 0;
+                if (have_tail && n3 == '0' && n4 == '0' && tail == '~') {
+                    /* Standard bracketed-paste start is CSI 200~. Keeping this
+                     * in the CSI path (rather than the SS3 path) prevents
+                     * pasted newlines from being mistaken for submit. */
+                    in_paste = true;
+                    paste_chars = 0;
+                    paste_len = 0;
+                    paste_buf[0] = '\0';
+                    paste_lines = 0;
+                    continue;
+                }
+                composer_consume_csi_tail(have_tail ? tail :
+                                          (have_n4 ? n4 : (have_n3 ? n3 : n2)));
+                goto redraw;
+            }
+            if (csi_sequence && (n2 == '5' || n2 == '6') &&
+                pixel_tui_session_active()) {
+                composer_consume_csi_tail(n2);
+                pixel_tui_session_scroll(stderr, n2 == '5' ? 10 : -10);
+                goto redraw;
+            }
+            if (csi_sequence && n2 == '<' && pixel_tui_session_active()) {
+                int button = -1;
+                bool released = false;
+                if (composer_read_sgr_mouse(&button, &released) && !released) {
+                    /* XTerm/Kitty SGR wheel: bit 6 identifies wheel input;
+                     * bit 0 selects up/down. Shift/Alt/Ctrl modifier bits
+                     * may be ORed in, so equality with 64/65 is incorrect. */
+                    if ((button & 0x40) != 0) {
+                        /* Three lines was imperceptible against the native
+                         * compositor's dense transcript. One wheel notch
+                         * advances a useful visual chunk; Shift requests a
+                         * page-scale jump without changing terminal-wide
+                         * scroll settings. */
+                        int step = (button & 0x04) != 0 ? 24 : 8;
+                        pixel_tui_session_scroll(stderr,
+                            (button & 0x01) == 0 ? step : -step);
                     }
                 }
-                composer_consume_csi_tail(saw_n4 ? n4 : (saw_n3 ? n3 : n2));
                 goto redraw;
             }
             /* When the dropdown is open, ↑/↓ move the highlight rather than the
@@ -5051,6 +5183,30 @@ char *tui_composer_read(tui_status_bar_t *sb, const char *prompt, char *out, siz
                     sug_sel = (sug_sel - 1 + sug_count) % sug_count;
                 else
                     sug_sel = (sug_sel + 1) % sug_count;
+                goto redraw;
+            }
+            /* Single-line input uses arrows for history. Once the buffer is
+             * multiline, those same keys move vertically within the text. */
+            if (!strchr(buf, '\n') && n2 == 'A') {
+                if (s_composer_history_count > 0 && hist_pos > 0) {
+                    hist_pos--;
+                    snprintf(buf, TUI_COMPOSER_BUF_CAP, "%s",
+                             s_composer_history[hist_pos]);
+                    len = cur = strlen(buf);
+                }
+                goto redraw;
+            }
+            if (!strchr(buf, '\n') && n2 == 'B') {
+                if (hist_pos + 1 < s_composer_history_count) {
+                    hist_pos++;
+                    snprintf(buf, TUI_COMPOSER_BUF_CAP, "%s",
+                             s_composer_history[hist_pos]);
+                    len = cur = strlen(buf);
+                } else {
+                    hist_pos = s_composer_history_count;
+                    buf[0] = '\0';
+                    len = cur = 0;
+                }
                 goto redraw;
             }
             switch (n2) {
@@ -5191,56 +5347,47 @@ char *tui_composer_read(tui_status_bar_t *sb, const char *prompt, char *out, siz
             if (sug_sel < 0)
                 sug_sel = 0;
             /* Refresh @-image-picker */
-            {
-                char ip_dir[4096], ip_pfx[256];
-                imgpick_open =
-                    imgpick_parse_at(buf, cur, ip_dir, sizeof(ip_dir), ip_pfx, sizeof(ip_pfx));
-                if (imgpick_open) {
-                    imgpick_scan(ip_dir, ip_pfx);
-                    imgpick_count = s_imgpick_count;
-                } else {
-                    imgpick_count = 0;
-                }
-                if (imgpick_sel >= imgpick_count)
-                    imgpick_sel = imgpick_count > 0 ? imgpick_count - 1 : 0;
-                if (imgpick_sel < 0)
-                    imgpick_sel = 0;
-            }
-            int need = inbox_total_rows(buf, len) + slashmenu_rows(sug_count) +
-                       (imgpick_count < TUI_IMGPICK_MAX ? imgpick_count : TUI_IMGPICK_MAX);
-            (void)g_composer_external_redraw_requested;
-            g_composer_external_redraw_requested = 0;
-            /* Always pin to the bottom: anchor the box so its last row is the
-             * final terminal row. When the box grew (more lines) or the
-             * terminal shrank, open room by scrolling existing output up so the
-             * box never spills off-screen and never floats mid-window. */
-            int new_r_top = nrows - need + 1;
+            { char ip_dir[4096], ip_pfx[256];
+              imgpick_open = imgpick_parse_at(buf, cur, ip_dir, sizeof(ip_dir), ip_pfx, sizeof(ip_pfx));
+              if (imgpick_open) {
+                  imgpick_scan(ip_dir, ip_pfx);
+                  imgpick_count = s_imgpick_count;
+              } else { imgpick_count = 0; }
+              if (imgpick_sel >= imgpick_count)
+                  imgpick_sel = imgpick_count > 0 ? imgpick_count - 1 : 0;
+              if (imgpick_sel < 0) imgpick_sel = 0; }
+            int need = inbox_total_rows(buf, len) + slashmenu_rows(sug_count)
+                       + (imgpick_count < TUI_IMGPICK_MAX ? imgpick_count : TUI_IMGPICK_MAX);
+            int new_r_top = pixel_tui_session_active() ? nrows - need + 1 : prev_r_top;
             if (new_r_top < 1)
                 new_r_top = 1;
-            int prev_bottom = prev_r_top + prev_height - 1;
-            if (new_r_top < prev_r_top || prev_height == 0) {
-                /* Need more rows than before (or first paint after re-anchor):
-                 * scroll the terminal up to make space at the bottom. */
-                int grow = (prev_height == 0) ? need : (prev_r_top - new_r_top);
-                if (grow > 0) {
-                    tui_term_lock();
-                    fprintf(stderr, "\033[?25l");
-                    tui_cursor_move(nrows, 1);
-                    for (int i = 0; i < grow; i++)
-                        fputc('\n', stderr);
-                    fflush(stderr);
-                    tui_term_unlock();
-                }
+            int grow = new_r_top + need - 1 - nrows;
+            if (grow > 0) {
+                tui_term_lock();
+                fprintf(stderr, "\033[?25l");
+                tui_cursor_move(nrows, 1);
+                for (int i = 0; i < grow; i++)
+                    fputc('\n', stderr);
+                fflush(stderr);
+                tui_term_unlock();
+                new_r_top -= grow;
+                prev_r_top -= grow;
+                if (new_r_top < 1)
+                    new_r_top = 1;
+                if (prev_r_top < 1)
+                    prev_r_top = 1;
             }
+            int prev_bottom = prev_r_top + prev_height - 1;
             if (nrows != rows)
                 rows = nrows;
-            tui_composer_restore_track(new_r_top, rows);
+            if (!pixel_tui_session_active())
+                tui_composer_restore_track(new_r_top, rows);
 
             tui_term_lock();
             fprintf(stderr, "\033[?25l");
             /* Erase the entire previous footprint when the box moved or shrank,
              * so no stale border rows linger above/below (the "shadow"). */
-            if (prev_height > 0) {
+            if (!pixel_tui_session_active() && prev_height > 0) {
                 int old_top = prev_r_top;
                 int old_bot = prev_bottom;
                 for (int r = old_top; r <= old_bot; r++) {
@@ -5256,31 +5403,49 @@ char *tui_composer_read(tui_status_bar_t *sb, const char *prompt, char *out, siz
             prev_height =
                 composer_paint(r_top, buf, len, cur, sug_idx, sug_count, sug_sel, &cr, &cc,
                                imgpick_count, imgpick_sel, motion_frame, animations_enabled);
-            tui_cursor_move(cr, cc);
-            fprintf(stderr, "\033[?25h");
+            if (!pixel_tui_session_active()) {
+                tui_cursor_move(cr, cc);
+                fprintf(stderr, "\033[?25h");
+            }
             fflush(stderr);
             tui_term_unlock();
         }
     }
 
     /* Cleanup — disable bracketed paste, restore termios */
-    fprintf(stderr, "\033[?2004l");
-    fflush(stderr);
+    if (pixel_tui_session_active())
+        pixel_tui_session_terminal_control(stderr, "\033[?2004l");
+    else {
+        fprintf(stderr, "\033[?2004l");
+        fflush(stderr);
+    }
     tui_term_state_exit(TUI_TERM_STATE_COMPOSER);
 
     /* Panel is no longer reading keystrokes — caret returns to idle grey
      * on the next repaint. */
     tui_panel_set_active(sb, false);
 
-    /* Erase the inline box so the echoed input + streamed text can flow
-     * naturally below. Reset scroll margins before the final cursor move:
-     * DECSTBM reset moves the cursor to home on common terminals. */
+    /* In the native workspace, submission is a handoff between composer
+     * readers, not a reason to remove the command deck. Leave an empty pane
+     * mounted and keep the transcript scroll region above it; keystrokes that
+     * arrive before the follow-up reader starts remain buffered by the TTY. */
     tui_term_lock();
     fprintf(stderr, "\033[?25l");
-    inbox_clear(r_top, prev_height);
-    tui_composer_restore_untrack();
-    tui_cursor_move(r_top, 1);
-    fprintf(stderr, "\033[?25h");
+    if (pixel_tui_session_active()) {
+        pixel_tui_session_set_input(stderr, "", 0, false);
+        tui_composer_restore_untrack();
+    } else {
+        for (int r = r_top; r < r_top + prev_height; r++) {
+            if (r >= 1 && r <= tui_term_height()) {
+                tui_cursor_move(r, 1);
+                fprintf(stderr, "\033[2K");
+            }
+        }
+        tui_composer_restore_untrack();
+        tui_cursor_move(r_top, 1);
+    }
+    if (!pixel_tui_session_active())
+        fprintf(stderr, "\033[?25h");
     fflush(stderr);
     tui_term_unlock();
     g_composer_reading = 0;
@@ -5297,6 +5462,10 @@ char *tui_composer_read(tui_status_bar_t *sb, const char *prompt, char *out, siz
         out[0] = '\0';
         return out;
     }
+
+    /* Remember submitted line for composer history. */
+    if (len > 0)
+        composer_history_push(buf);
 
     /* Echo the submitted input into scrollback. Truecolor gradient on the
      * chevron, bright text, and a dim continuation glyph for multi-line input.
@@ -5929,6 +6098,7 @@ void tui_status_bar_set_clock(tui_status_bar_t *sb, bool show) {
     pthread_mutex_lock(&sb->mutex);
     sb->show_clock = show;
     pthread_mutex_unlock(&sb->mutex);
+    pixel_tui_session_set_clock(stderr, show);
 }
 
 /* ── F32: Error Severity Levels ───────────────────────────────────────── */
@@ -5955,6 +6125,27 @@ void tui_error_typed(tui_err_type_t type, const char *msg) {
 void tui_notify(const char *title, const char *body) {
     if (g_tui_features && !g_tui_features->notify_bell)
         return;
+    if (pixel_tui_session_active()) {
+        char notice[512];
+        if (title && body)
+            snprintf(notice, sizeof(notice), "%s — %s", title, body);
+        else
+            snprintf(notice, sizeof(notice), "%s", title ? title : (body ? body : "Notification"));
+        pixel_tui_session_notify(stderr, PIXEL_TUI_NOTICE_INFO, notice);
+
+        char control[1024];
+        size_t used = 0;
+        control[used++] = '\a';
+        control[used] = '\0';
+        if (title)
+            used += (size_t)snprintf(control + used, sizeof(control) - used,
+                                     "\033]9;%s\007", title);
+        if (title && body && used < sizeof(control))
+            (void)snprintf(control + used, sizeof(control) - used,
+                           "\033]777;notify;%s;%s\007", title, body);
+        pixel_tui_session_terminal_control(stderr, control);
+        return;
+    }
     /* BEL character */
     fprintf(stderr, "\a");
     /* OSC 9 (iTerm2 notification) */
@@ -8445,7 +8636,7 @@ static void *stream_heartbeat_thread(void *arg) {
             break;
         }
 
-        if (silence >= thresh) {
+	    if (silence >= thresh) {
             if (tui_composer_is_reading()) {
                 pthread_mutex_lock(&hb->mutex);
                 hb->visible = false;
@@ -8453,8 +8644,8 @@ static void *stream_heartbeat_thread(void *arg) {
                 continue;
             }
 
-            /* Resolve label */
-            const char *icon = hb_phase_icon(phase);
+	        /* Resolve label */
+	        const char *icon = hb_phase_icon(phase);
             const char *label;
             if (phase && *phase)
                 label = phase;
@@ -8596,7 +8787,7 @@ static void *outq_render_thread(void *arg) {
         /* Drain all entries under lock */
         double flush_start = tui_now_sec();
         int flushed = 0;
-        bool composer_clear_attempted = false;
+        bool composer_position_attempted = false;
 
         while (q->count > 0) {
             tui_out_entry_t *e = &q->ring[q->tail];
@@ -8605,19 +8796,17 @@ static void *outq_render_thread(void *arg) {
              * g_term_mutex (LOCK_HIERARCHY_TERM). Since TERM has lower precedence,
              * we must release q->mutex first to avoid deadlock.
              *
-             * Attempt the clear at most once per drain, tracked separately from
-             * whether anything was actually cleared: keying the retry on the
-             * clear's *result* spins this loop forever whenever no composer is
-             * open (the common case — the clear returns false), pinning a core
-             * on every idle session. */
-            if (!composer_clear_attempted && e->type != TUI_OUT_FLUSH) {
-                composer_clear_attempted = true;
-                pthread_mutex_unlock(&q->mutex); /* Release OUTQ lock first */
-                tui_term_lock();                 /* Then acquire TERM lock */
-                (void)tui_clear_tracked_composer_area_for_output(fileno(q->out));
-                tui_term_unlock();             /* Release TERM lock */
-                pthread_mutex_lock(&q->mutex); /* Re-acquire OUTQ lock */
-                continue;                      /* Re-examine queue state under fresh lock */
+             * Position output at most once per drain. Keying the retry on the
+             * helper's result spins forever whenever no composer is open (the
+             * common case), pinning a core on every idle session. */
+            if (!composer_position_attempted && e->type != TUI_OUT_FLUSH) {
+                composer_position_attempted = true;
+                pthread_mutex_unlock(&q->mutex);  /* Release OUTQ lock first */
+                tui_term_lock();                   /* Then acquire TERM lock */
+                (void)tui_position_transcript_for_output(fileno(q->out));
+                tui_term_unlock();                 /* Release TERM lock */
+                pthread_mutex_lock(&q->mutex);     /* Re-acquire OUTQ lock */
+                continue;  /* Re-examine queue state under fresh lock */
             }
 
             switch (e->type) {
@@ -8670,6 +8859,7 @@ static void *outq_render_thread(void *arg) {
 
 void tui_outq_init(tui_output_queue_t *q, FILE *out) {
     memset(q, 0, sizeof(*q));
+    q->out = out ? out : stderr;
 
     /* Try primary allocation (TUI_OUTQ_SIZE = 4096 entries ≈ 8MB) */
     q->capacity = TUI_OUTQ_SIZE;
@@ -8677,28 +8867,56 @@ void tui_outq_init(tui_output_queue_t *q, FILE *out) {
 
     /* Fallback to smaller allocation if primary fails (graceful degradation) */
     if (!q->ring) {
-        q->capacity = 1024; /* 2MB instead of 8MB */
+        q->capacity = 1024;  /* 2MB instead of 8MB */
         q->ring = calloc(q->capacity, sizeof(tui_out_entry_t));
         if (!q->ring) {
-            q->capacity = 512; /* 1MB as last resort */
+            q->capacity = 512;  /* 1MB as last resort */
             q->ring = calloc(q->capacity, sizeof(tui_out_entry_t));
             if (!q->ring) {
                 fprintf(stderr, "TUI: Failed to allocate output queue (critical error)\n");
-                return; /* Critical failure - cannot proceed */
+                q->capacity = 0;
+                return;  /* Critical failure - cannot proceed */
             }
         }
-        fprintf(stderr, "TUI: Using reduced output queue (%d entries for graceful degradation)\n",
-                q->capacity);
+        fprintf(stderr, "TUI: Using reduced output queue (%d entries for graceful degradation)\n", q->capacity);
     }
 
-    q->out = out ? out : stderr;
+    if (pthread_mutex_init(&q->mutex, NULL) != 0) {
+        free(q->ring);
+        q->ring = NULL;
+        q->capacity = 0;
+        return;
+    }
+    if (pthread_cond_init(&q->cond, NULL) != 0) {
+        pthread_mutex_destroy(&q->mutex);
+        free(q->ring);
+        q->ring = NULL;
+        q->capacity = 0;
+        return;
+    }
     q->running = true;
-    pthread_mutex_init(&q->mutex, NULL);
-    pthread_cond_init(&q->cond, NULL);
-    pthread_create(&q->render_thread, NULL, outq_render_thread, q);
+    if (pthread_create(&q->render_thread, NULL, outq_render_thread, q) != 0) {
+        q->running = false;
+        pthread_cond_destroy(&q->cond);
+        pthread_mutex_destroy(&q->mutex);
+        free(q->ring);
+        q->ring = NULL;
+        q->capacity = 0;
+        return;
+    }
+    q->initialized = true;
 }
 
 void tui_outq_destroy(tui_output_queue_t *q) {
+    if (!q)
+        return;
+    if (!q->initialized) {
+        if (q->out)
+            fflush(q->out);
+        free(q->ring);
+        memset(q, 0, sizeof(*q));
+        return;
+    }
     pthread_mutex_lock(&q->mutex);
     q->running = false;
     pthread_cond_signal(&q->cond);
@@ -8724,6 +8942,16 @@ void tui_outq_destroy(tui_output_queue_t *q) {
 
 static void outq_enqueue(tui_output_queue_t *q, tui_out_type_t type, int priority, const char *data,
                          int len) {
+    if (!q || !q->initialized || !q->ring || q->capacity <= 0) {
+        FILE *out = (q && q->out) ? q->out : stderr;
+        if (type == TUI_OUT_TEXT && data && len > 0)
+            fwrite(data, 1, (size_t)len, out);
+        else if (type == TUI_OUT_CLEAR_LINE)
+            fputs("\r\033[K", out);
+        if (type == TUI_OUT_FLUSH)
+            fflush(out);
+        return;
+    }
     pthread_mutex_lock(&q->mutex);
     if (q->count >= q->capacity) {
         q->dropped++;
@@ -8782,6 +9010,10 @@ void tui_outq_flush_sync(tui_output_queue_t *q) {
     if (!q)
         return;
     outq_enqueue(q, TUI_OUT_FLUSH, 100, NULL, 0);
+    if (!q->initialized) {
+        fflush(q->out ? q->out : stderr);
+        return;
+    }
     /* Block on the drain condvar (render thread broadcasts at count==0).
      * Bounded at 250ms so a wedged render thread can never hang callers. */
     struct timespec deadline;
@@ -8803,6 +9035,18 @@ void tui_outq_stats(const tui_output_queue_t *q, int *total_writes, int *total_f
                     int *dropped, double *avg_flush_ms) {
     if (!q)
         return;
+    if (!q->initialized) {
+        if (total_writes)
+            *total_writes = 0;
+        if (total_flushes)
+            *total_flushes = 0;
+        if (dropped)
+            *dropped = 0;
+        if (avg_flush_ms)
+            *avg_flush_ms = 0.0;
+        return;
+    }
+    pthread_mutex_lock((pthread_mutex_t *)&q->mutex);
     if (total_writes)
         *total_writes = q->total_writes;
     if (total_flushes)
@@ -8812,6 +9056,7 @@ void tui_outq_stats(const tui_output_queue_t *q, int *total_writes, int *total_f
     if (avg_flush_ms) {
         *avg_flush_ms = q->total_flushes > 0 ? q->total_flush_ms / q->total_flushes : 0.0;
     }
+    pthread_mutex_unlock((pthread_mutex_t *)&q->mutex);
 }
 
 /* ── Streaming FSM Wiring ───────────────────────────────────────────── */
@@ -9683,6 +9928,36 @@ static void permission_print_inner_row(const char *text, const char *style, int 
 
 tui_perm_result_t tui_permission_prompt(const char *tool_name, const char *description,
                                         const char *detail) {
+    bool resume_pixel = pixel_tui_session_active() &&
+                        !pixel_tui_session_terminal_suspended();
+    if (resume_pixel) {
+        char subtitle[512];
+        if (description && detail && detail[0])
+            snprintf(subtitle, sizeof(subtitle), "%s — %s", description, detail);
+        else
+            snprintf(subtitle, sizeof(subtitle), "%s",
+                     description ? description : (detail ? detail : "Governed tool request"));
+        pixel_tui_menu_item_t items[] = {
+            {.label = "Allow once", .detail = "y"},
+            {.label = "Deny", .detail = "n"},
+            {.label = "Always allow", .detail = "a"},
+            {.label = "Cancel", .detail = "Esc"},
+        };
+        pixel_tui_session_show_modal(stderr, PIXEL_TUI_MODAL_PERMISSION,
+                                     tool_name ? tool_name : "Tool permission",
+                                     subtitle, items, 4, 0,
+                                     "Y allow  /  N deny  /  A always  /  Esc cancel");
+        tui_perm_result_t result = TUI_PERM_CANCEL;
+        for (;;) {
+            int ch = read_single_char();
+            if (ch == 'y' || ch == 'Y') { result = TUI_PERM_ALLOW; break; }
+            if (ch == 'n' || ch == 'N') { result = TUI_PERM_DENY; break; }
+            if (ch == 'a' || ch == 'A') { result = TUI_PERM_ALWAYS; break; }
+            if (ch == 27 || ch == 'q' || ch == 'Q') break;
+        }
+        pixel_tui_session_clear_modal(stderr);
+        return result;
+    }
     tui_prepare_external_output();
     int w = tui_term_width();
     if (w > 80)
@@ -9751,27 +10026,50 @@ tui_perm_result_t tui_permission_prompt(const char *tool_name, const char *descr
     fflush(stderr);
 
     /* Read response */
+    tui_perm_result_t result = TUI_PERM_CANCEL;
     while (1) {
         int ch = read_single_char();
-        if (ch == 'y' || ch == 'Y')
-            return TUI_PERM_ALLOW;
-        if (ch == 'n' || ch == 'N')
-            return TUI_PERM_DENY;
-        if (ch == 'a' || ch == 'A')
-            return TUI_PERM_ALWAYS;
+        if (ch == 'y' || ch == 'Y') {
+            result = TUI_PERM_ALLOW;
+            break;
+        }
+        if (ch == 'n' || ch == 'N') {
+            result = TUI_PERM_DENY;
+            break;
+        }
+        if (ch == 'a' || ch == 'A') {
+            result = TUI_PERM_ALWAYS;
+            break;
+        }
         if (ch == 27 || ch == 'q' || ch == 'Q')
-            return TUI_PERM_CANCEL;
+            break;
     }
+    return result;
 }
 
 bool tui_confirm(const char *question) {
+    bool resume_pixel = pixel_tui_session_active() &&
+                        !pixel_tui_session_terminal_suspended();
+    if (resume_pixel) {
+        pixel_tui_menu_item_t items[] = {
+            {.label = "Yes", .detail = "y"},
+            {.label = "No", .detail = "n"},
+        };
+        pixel_tui_session_show_modal(stderr, PIXEL_TUI_MODAL_PERMISSION,
+                                     "Confirm", question ? question : "Continue?",
+                                     items, 2, 0, "Y confirm  /  N cancel");
+        int ch = read_single_char();
+        pixel_tui_session_clear_modal(stderr);
+        return ch == 'y' || ch == 'Y';
+    }
     const tui_glyphs_t *g = tui_glyph();
     fprintf(stderr, "  %s%s %s%s %s[y/n]%s ", TUI_ROLE_WARN, g->warn, TUI_RESET,
             question ? question : "Continue?", TUI_DIM, TUI_RESET);
     fflush(stderr);
     int ch = read_single_char();
     fprintf(stderr, "%c\n", ch);
-    return (ch == 'y' || ch == 'Y');
+    bool confirmed = ch == 'y' || ch == 'Y';
+    return confirmed;
 }
 
 /* ── Dynamic Question Dialog (AskUserQuestion) ──────────────────────── */
@@ -9786,156 +10084,7 @@ enum {
     DLG_K_ENTER,
     DLG_K_ESC,
     DLG_K_SPACE,
-    DLG_K_PAGE_UP,
-    DLG_K_PAGE_DOWN,
-    DLG_K_HOME,
-    DLG_K_END,
-    DLG_K_UNKNOWN,
 };
-
-typedef int (*dlg_next_key_fn)(void *ctx);
-
-static int dlg_getchar_next(void *ctx) {
-    (void)ctx;
-    return getchar();
-}
-
-static int dlg_decode_escape_sequence(int c2, dlg_next_key_fn next, void *ctx) {
-    if (c2 == '[' || c2 == 'O') {
-        int c3 = next(ctx);
-        if (c3 == EOF)
-            return DLG_K_UNKNOWN;
-        if (c3 >= '0' && c3 <= '9') {
-            int first_digit = c3;
-            int final = 0;
-            for (int i = 0; i < 8; i++) {
-                int cx = next(ctx);
-                if (cx == EOF)
-                    break;
-                if (cx == '~' || (cx >= 'A' && cx <= 'Z')) {
-                    final = cx;
-                    break;
-                }
-            }
-            if (final == '~') {
-                switch (first_digit) {
-                    case '1':
-                    case '7':
-                        return DLG_K_HOME;
-                    case '4':
-                    case '8':
-                        return DLG_K_END;
-                    case '5':
-                        return DLG_K_PAGE_UP;
-                    case '6':
-                        return DLG_K_PAGE_DOWN;
-                    default:
-                        return DLG_K_UNKNOWN;
-                }
-            }
-            switch (final) {
-                case 'A':
-                    return DLG_K_UP;
-                case 'B':
-                    return DLG_K_DOWN;
-                case 'C':
-                    return DLG_K_RIGHT;
-                case 'D':
-                    return DLG_K_LEFT;
-                default:
-                    return DLG_K_UNKNOWN;
-            }
-        }
-        switch (c3) {
-            case 'A':
-                return DLG_K_UP;
-            case 'B':
-                return DLG_K_DOWN;
-            case 'C':
-                return DLG_K_RIGHT;
-            case 'D':
-                return DLG_K_LEFT;
-            case 'H':
-                return DLG_K_HOME;
-            case 'F':
-                return DLG_K_END;
-            case 'Z':
-                return DLG_K_BTAB;
-            default:
-                return DLG_K_UNKNOWN;
-        }
-    }
-    return DLG_K_ESC;
-}
-
-static int dlg_decode_key_from_first(int c, dlg_next_key_fn next, void *ctx) {
-    if (c == EOF)
-        return DLG_K_UNKNOWN;
-    if (c == '\r' || c == '\n')
-        return DLG_K_ENTER;
-    if (c == '\t')
-        return DLG_K_TAB;
-    if (c == ' ')
-        return DLG_K_SPACE;
-    if (c == 27)
-        return dlg_decode_escape_sequence(next(ctx), next, ctx);
-    return c;
-}
-
-static bool dlg_apply_row_key(int key, int maxrow, int *row) {
-    if (!row)
-        return false;
-    if (maxrow < 0)
-        maxrow = 0;
-    if (*row > maxrow)
-        *row = maxrow;
-    if (*row < 0)
-        *row = 0;
-    if (key == DLG_K_UP) {
-        *row = (*row > 0) ? *row - 1 : maxrow;
-        return true;
-    }
-    if (key == DLG_K_DOWN) {
-        *row = (*row < maxrow) ? *row + 1 : 0;
-        return true;
-    }
-    if (key == DLG_K_PAGE_UP || key == DLG_K_HOME) {
-        *row = 0;
-        return true;
-    }
-    if (key == DLG_K_PAGE_DOWN || key == DLG_K_END) {
-        *row = maxrow;
-        return true;
-    }
-    return key == DLG_K_UNKNOWN;
-}
-
-#ifdef DSCO_INTERNAL_TESTS
-typedef struct {
-    const unsigned char *bytes;
-    size_t len;
-    size_t pos;
-} dlg_test_stream_t;
-
-static int dlg_test_next(void *ctx) {
-    dlg_test_stream_t *s = (dlg_test_stream_t *)ctx;
-    if (!s || s->pos >= s->len)
-        return EOF;
-    return s->bytes[s->pos++];
-}
-
-int tui_test_decode_key_sequence(const char *bytes) {
-    if (!bytes)
-        return DLG_K_UNKNOWN;
-    dlg_test_stream_t s = {(const unsigned char *)bytes, strlen(bytes), 0};
-    return dlg_decode_key_from_first(dlg_test_next(&s), dlg_test_next, &s);
-}
-
-int tui_test_dialog_move_row(int row, int maxrow, int key) {
-    dlg_apply_row_key(key, maxrow, &row);
-    return row;
-}
-#endif
 
 /* Raw key reader with escape-sequence + lone-ESC handling (VTIME timeout so a
  * bare ESC doesn't block waiting for a sequence tail). */
@@ -9949,13 +10098,47 @@ static int dlg_read_key(void) {
     tcsetattr(STDIN_FILENO, TCSANOW, &newt);
 
     int c = getchar();
-    if (c == 27) {
+    int ret;
+    if (c == '\r' || c == '\n')
+        ret = DLG_K_ENTER;
+    else if (c == '\t')
+        ret = DLG_K_TAB;
+    else if (c == ' ')
+        ret = DLG_K_SPACE;
+    else if (c == 27) {
         /* possible escape sequence; read tail with a short timeout */
         newt.c_cc[VMIN] = 0;
         newt.c_cc[VTIME] = 1; /* 0.1s */
         tcsetattr(STDIN_FILENO, TCSANOW, &newt);
+        int c2 = getchar();
+        if (c2 == '[' || c2 == 'O') {
+            int c3 = getchar();
+            switch (c3) {
+                case 'A':
+                    ret = DLG_K_UP;
+                    break;
+                case 'B':
+                    ret = DLG_K_DOWN;
+                    break;
+                case 'C':
+                    ret = DLG_K_RIGHT;
+                    break;
+                case 'D':
+                    ret = DLG_K_LEFT;
+                    break;
+                case 'Z':
+                    ret = DLG_K_BTAB;
+                    break;
+                default:
+                    ret = DLG_K_ESC;
+                    break;
+            }
+        } else {
+            ret = DLG_K_ESC;
+        }
+    } else {
+        ret = c;
     }
-    int ret = dlg_decode_key_from_first(c, dlg_getchar_next, NULL);
     tcsetattr(STDIN_FILENO, TCSANOW, &oldt);
     return ret;
 }
@@ -10032,6 +10215,10 @@ static int dlg_chat_row(const tui_ask_question_t *q) {
 
 /* Read a free-text line in canonical mode (for "Type something"). */
 static void dlg_read_line(const char *prompt, char *buf, size_t buflen) {
+    bool resume_pixel = pixel_tui_session_active() &&
+                        !pixel_tui_session_terminal_suspended();
+    if (resume_pixel)
+        pixel_tui_session_suspend_terminal(stderr);
     struct termios oldt, newt;
     tcgetattr(STDIN_FILENO, &oldt);
     newt = oldt;
@@ -10048,11 +10235,76 @@ static void dlg_read_line(const char *prompt, char *buf, size_t buflen) {
     }
     tcsetattr(STDIN_FILENO, TCSANOW, &oldt);
     tui_cursor_hide();
+    if (resume_pixel)
+        pixel_tui_session_resume_terminal(stderr);
 }
 
 static void dlg_render(tui_ask_question_t *qs, int n, const char *intro, const int *vis, int vc,
                        int tabpos, int row) {
     (void)n;
+    if (pixel_tui_session_active() && !pixel_tui_session_terminal_suspended()) {
+        pixel_tui_menu_item_t items[24];
+        char labels[24][256];
+        char details[24][512];
+        memset(items, 0, sizeof(items));
+        int count = 0;
+        int selected = row;
+        char title[256];
+        char subtitle[512];
+        if (tabpos < vc) {
+            tui_ask_question_t *q = &qs[vis[tabpos]];
+            snprintf(title, sizeof(title), "%s",
+                     q->question[0] ? q->question : q->header);
+            snprintf(subtitle, sizeof(subtitle), "%s%sQuestion %d of %d%s",
+                     intro && intro[0] ? intro : "",
+                     intro && intro[0] ? " / " : "", tabpos + 1, vc,
+                     q->multi_select ? " / multi-select" : "");
+            for (int i = 0; i < q->n_options && count < 24; i++, count++) {
+                snprintf(labels[count], sizeof(labels[count]), "%s%s",
+                         q->selected[i] ? "✓ " : "", q->options[i].label);
+                snprintf(details[count], sizeof(details[count]), "%s",
+                         q->options[i].description);
+                items[count] = (pixel_tui_menu_item_t){
+                    .label = labels[count], .detail = details[count], .disabled = false};
+            }
+            if (q->allow_custom && count < 24) {
+                snprintf(labels[count], sizeof(labels[count]), "Type something");
+                items[count] = (pixel_tui_menu_item_t){.label = labels[count],
+                                                       .detail = "Free-text answer"};
+                count++;
+            }
+            if (q->allow_chat && count < 24) {
+                snprintf(labels[count], sizeof(labels[count]), "Chat about this");
+                items[count] = (pixel_tui_menu_item_t){.label = labels[count],
+                                                       .detail = "Return to the conversation"};
+                count++;
+            }
+        } else {
+            snprintf(title, sizeof(title), "Review answers");
+            snprintf(subtitle, sizeof(subtitle), "%s%sReady to submit?",
+                     intro && intro[0] ? intro : "",
+                     intro && intro[0] ? " / " : "");
+            char value[1280];
+            for (int i = 0; i < vc && count < 22; i++, count++) {
+                tui_ask_question_t *q = &qs[vis[i]];
+                snprintf(labels[count], sizeof(labels[count]), "%s",
+                         q->question[0] ? q->question : q->header);
+                tui_ask_answer_value(q, value, sizeof(value));
+                snprintf(details[count], sizeof(details[count]), "%s",
+                         q->answered && value[0] ? value : "(unanswered)");
+                items[count] = (pixel_tui_menu_item_t){
+                    .label = labels[count], .detail = details[count], .disabled = true};
+            }
+            int action_start = count;
+            items[count++] = (pixel_tui_menu_item_t){.label = "Submit answers"};
+            items[count++] = (pixel_tui_menu_item_t){.label = "Cancel"};
+            selected = action_start + row;
+        }
+        pixel_tui_session_show_modal(
+            stderr, PIXEL_TUI_MODAL_QUESTION, title, subtitle, items, count, selected,
+            "Enter/Space select  /  Tab or ← → tabs  /  ↑ ↓ move  /  Esc cancel");
+        return;
+    }
     int w = tui_term_width();
     if (w > 100)
         w = 100;
@@ -10199,8 +10451,12 @@ tui_ask_status_t tui_ask_questions(tui_ask_question_t *qs, int n_questions, cons
         chat_out[0] = '\0';
     if (n_questions <= 0)
         return TUI_ASK_CANCEL;
-    if (!isatty(STDIN_FILENO) || !isatty(STDERR_FILENO))
+    if (!isatty(STDIN_FILENO) ||
+        (!isatty(STDERR_FILENO) && !pixel_tui_session_active()))
         return TUI_ASK_CANCEL;
+
+    bool native_pixel = pixel_tui_session_active() &&
+                        !pixel_tui_session_terminal_suspended();
 
     int vis[TUI_ASK_MAX_QUESTIONS];
     int tabpos = 0, row = 0;
@@ -10291,9 +10547,13 @@ tui_ask_status_t tui_ask_questions(tui_ask_question_t *qs, int n_questions, cons
         }
     }
 
-    tui_cursor_show();
-    fprintf(stderr, "\033[2J\033[H");
-    fflush(stderr);
+    if (native_pixel) {
+        pixel_tui_session_clear_modal(stderr);
+    } else {
+        tui_cursor_show();
+        fprintf(stderr, "\033[2J\033[H");
+        fflush(stderr);
+    }
     return status;
 }
 
@@ -10514,6 +10774,10 @@ static void pager_search_next(tui_pager_t *p) {
 }
 
 void tui_pager_run(tui_pager_t *p) {
+    bool resume_pixel = pixel_tui_session_active() &&
+                        !pixel_tui_session_terminal_suspended();
+    if (resume_pixel)
+        pixel_tui_session_suspend_terminal(stderr);
     tui_cursor_hide();
     pager_render(p);
 
@@ -10605,6 +10869,8 @@ void tui_pager_run(tui_pager_t *p) {
     tui_cursor_show();
     fprintf(stderr, "\033[2J\033[H"); /* clear screen */
     fflush(stderr);
+    if (resume_pixel)
+        pixel_tui_session_resume_terminal(stderr);
 }
 
 /* ── Inline Code Block ──────────────────────────────────────────────── */
@@ -11005,6 +11271,10 @@ static size_t tui_lock_render(char *buf, size_t cap) {
 }
 
 void tui_lock_engage(void) {
+    bool resume_pixel = pixel_tui_session_active() &&
+                        !pixel_tui_session_terminal_suspended();
+    if (resume_pixel)
+        pixel_tui_session_suspend_terminal(stderr);
     /* Hold the global terminal mutex for the entire lock duration so no other
      * thread (status bar, spinner, composer redraw, panel notifier) can punch
      * a hole through the lock overlay. Anything that drew via tui_term_lock()
@@ -11124,6 +11394,8 @@ void tui_lock_engage(void) {
 
     /* Release the global mutex so the composer can resume drawing. */
     tui_term_unlock();
+    if (resume_pixel)
+        pixel_tui_session_resume_terminal(stderr);
 }
 
 /* ── Interactive Hierarchical Menu ──────────────────────────────────────── */
@@ -11249,74 +11521,6 @@ typedef struct {
 } menu_row_t;
 
 #define MENU_ROWS_MAX 512
-
-static int menu_find_selectable(const menu_row_t *rows, int nrows, int start, int dir) {
-    if (!rows || nrows <= 0)
-        return -1;
-    if (dir == 0)
-        dir = 1;
-    if (start < 0) {
-        if (dir < 0)
-            return -1;
-        start = 0;
-    }
-    if (start >= nrows) {
-        if (dir > 0)
-            return -1;
-        start = nrows - 1;
-    }
-    for (int i = start; i >= 0 && i < nrows; i += dir) {
-        if (rows[i].selectable)
-            return i;
-    }
-    return -1;
-}
-
-static int menu_clamp_selectable(const menu_row_t *rows, int nrows, int sel) {
-    if (!rows || nrows <= 0)
-        return -1;
-    if (sel < 0)
-        sel = 0;
-    if (sel >= nrows)
-        sel = nrows - 1;
-    if (rows[sel].selectable)
-        return sel;
-
-    int next = menu_find_selectable(rows, nrows, sel, 1);
-    if (next >= 0)
-        return next;
-    return menu_find_selectable(rows, nrows, sel, -1);
-}
-
-static int menu_move_selectable(const menu_row_t *rows, int nrows, int sel, int delta) {
-    if (!rows || nrows <= 0 || delta == 0)
-        return menu_clamp_selectable(rows, nrows, sel);
-    int cur = menu_clamp_selectable(rows, nrows, sel);
-    if (cur < 0)
-        return cur;
-
-    int dir = delta > 0 ? 1 : -1;
-    int steps = delta > 0 ? delta : -delta;
-    for (int i = 0; i < steps; i++) {
-        int next = menu_find_selectable(rows, nrows, cur + dir, dir);
-        if (next < 0)
-            break;
-        cur = next;
-    }
-    return cur;
-}
-
-#ifdef DSCO_INTERNAL_TESTS
-int tui_test_menu_move_selection(const bool *selectable, int nrows, int sel, int delta) {
-    if (!selectable || nrows <= 0 || nrows > MENU_ROWS_MAX)
-        return -1;
-    menu_row_t rows[MENU_ROWS_MAX];
-    memset(rows, 0, sizeof rows);
-    for (int i = 0; i < nrows; i++)
-        rows[i].selectable = selectable[i];
-    return menu_move_selectable(rows, nrows, sel, delta);
-}
-#endif
 
 static void menu_flatten_level(tui_menu_item_t *arr, int count, int depth, menu_row_t *rows,
                                int *nrows) {
@@ -11459,7 +11663,10 @@ int tui_menu_run(tui_menu_t *m, tui_menu_item_t **out_item) {
 
     const tui_glyphs_t *g = tui_glyph();
     const char *accent = m->accent ? m->accent : TUI_BCYAN;
-    bool tty = isatty(STDIN_FILENO) && isatty(STDERR_FILENO);
+    bool tty = isatty(STDIN_FILENO) &&
+               (isatty(STDERR_FILENO) || pixel_tui_session_active());
+    bool native_pixel = pixel_tui_session_active() &&
+                        !pixel_tui_session_terminal_suspended();
 
     static menu_row_t rows[MENU_ROWS_MAX];
     int nrows = 0;
@@ -11480,7 +11687,26 @@ int tui_menu_run(tui_menu_t *m, tui_menu_item_t **out_item) {
         menu_flatten_level(m->items, m->item_count, 0, rows, &nrows);
 
         /* Clamp / snap selection to a selectable row. */
-        sel = menu_clamp_selectable(rows, nrows, sel);
+        if (sel < 0)
+            sel = 0;
+        if (sel >= nrows)
+            sel = nrows - 1;
+        if (!rows[sel].selectable) {
+            int s = -1;
+            for (int i = sel; i < nrows; i++)
+                if (rows[i].selectable) {
+                    s = i;
+                    break;
+                }
+            if (s < 0)
+                for (int i = sel; i >= 0; i--)
+                    if (rows[i].selectable) {
+                        s = i;
+                        break;
+                    }
+            if (s >= 0)
+                sel = s;
+        }
 
         /* Viewport: header + rows + footer must fit; scroll around selection. */
         int term_h = tui_term_height();
@@ -11488,11 +11714,13 @@ int tui_menu_run(tui_menu_t *m, tui_menu_item_t **out_item) {
         int vis = m->max_visible > 0 ? m->max_visible : (term_h - chrome - 2);
         if (vis < 3)
             vis = 3;
+        if (native_pixel && vis > 24)
+            vis = 24;
         if (vis > nrows)
             vis = nrows;
 
         int top = 0;
-        if (nrows > vis && sel >= 0) {
+        if (nrows > vis) {
             top = sel - vis / 2;
             if (top < 0)
                 top = 0;
@@ -11500,45 +11728,76 @@ int tui_menu_run(tui_menu_t *m, tui_menu_item_t **out_item) {
                 top = nrows - vis;
         }
 
-        int planned_lines = (m->title[0] ? 1 : 0) + (m->subtitle[0] ? 1 : 0) + (top > 0 ? 1 : 0) +
-                            vis + (top + vis < nrows ? 1 : 0) + 1;
-        if (first && tty)
+        int planned_lines = (m->title[0] ? 1 : 0) + (m->subtitle[0] ? 1 : 0) +
+                            (top > 0 ? 1 : 0) + vis +
+                            (top + vis < nrows ? 1 : 0) + 1;
+        if (first && tty && !native_pixel)
             menu_reserve_redraw_space(planned_lines);
 
         /* Redraw in place: erase the previous frame first. */
-        if (!first)
+        if (!first && !native_pixel)
             menu_erase_block(prev_lines);
         first = false;
 
-        int lines = 0;
-        if (m->title[0]) {
-            fprintf(stderr, "%s%s%s%s\r\n", TUI_BOLD, TUI_BWHITE, m->title, TUI_RESET);
+        if (native_pixel) {
+            pixel_tui_menu_item_t native_items[24];
+            char native_labels[24][256];
+            memset(native_items, 0, sizeof(native_items));
+            int native_count = 0;
+            for (int i = top; i < top + vis && i < nrows && native_count < 24;
+                 i++, native_count++) {
+                tui_menu_item_t *it = rows[i].item;
+                int indent = rows[i].depth * 2;
+                if (indent > 20) indent = 20;
+                snprintf(native_labels[native_count], sizeof(native_labels[native_count]),
+                         "%*s%s%s", indent, "",
+                         it->kind == TUI_MENU_SUBMENU ? (it->expanded ? "▾ " : "▸ ") : "",
+                         it->label);
+                native_items[native_count] = (pixel_tui_menu_item_t){
+                    .label = native_labels[native_count],
+                    .detail = it->detail,
+                    .disabled = !rows[i].selectable,
+                };
+            }
+            pixel_tui_session_show_modal(
+                stderr, PIXEL_TUI_MODAL_MENU,
+                m->title[0] ? m->title : "Menu", m->subtitle,
+                native_items, native_count, sel - top,
+                "↑ ↓ navigate  /  ← → expand  /  Enter select  /  Esc cancel");
+            prev_lines = 0;
+        } else {
+
+            int lines = 0;
+            if (m->title[0]) {
+                fprintf(stderr, "%s%s%s%s\r\n", TUI_BOLD, TUI_BWHITE, m->title, TUI_RESET);
+                lines++;
+            }
+            if (m->subtitle[0]) {
+                fprintf(stderr, "%s%s%s\r\n", TUI_DIM, m->subtitle, TUI_RESET);
+                lines++;
+            }
+            if (top > 0) {
+                fprintf(stderr, "  %s\xe2\x96\xb4 %d more%s\r\n", TUI_DIM, top, TUI_RESET);
+                lines++;
+            }
+            for (int i = top; i < top + vis && i < nrows; i++) {
+                menu_render_row(&rows[i], i == sel, accent, g);
+                fprintf(stderr, "\r\n");
+                lines++;
+            }
+            if (top + vis < nrows) {
+                fprintf(stderr, "  %s\xe2\x96\xbe %d more%s\r\n", TUI_DIM,
+                        nrows - (top + vis), TUI_RESET);
+                lines++;
+            }
+            fprintf(stderr,
+                    "%s%s/%s navigate %s %s/%s expand %s Enter select %s Esc cancel%s\r\n",
+                    TUI_DIM, "\xe2\x86\x91", "\xe2\x86\x93", TUI_SEP,
+                    "\xe2\x86\x90", "\xe2\x86\x92", TUI_SEP, TUI_SEP, TUI_RESET);
             lines++;
+            fflush(stderr);
+            prev_lines = lines;
         }
-        if (m->subtitle[0]) {
-            fprintf(stderr, "%s%s%s\r\n", TUI_DIM, m->subtitle, TUI_RESET);
-            lines++;
-        }
-        if (top > 0) {
-            fprintf(stderr, "  %s\xe2\x96\xb4 %d more%s\r\n", TUI_DIM, top, TUI_RESET);
-            lines++;
-        }
-        for (int i = top; i < top + vis && i < nrows; i++) {
-            menu_render_row(&rows[i], sel >= 0 && i == sel, accent, g);
-            fprintf(stderr, "\r\n");
-            lines++;
-        }
-        if (top + vis < nrows) {
-            fprintf(stderr, "  %s\xe2\x96\xbe %d more%s\r\n", TUI_DIM, nrows - (top + vis),
-                    TUI_RESET);
-            lines++;
-        }
-        fprintf(stderr, "%s%s/%s navigate %s %s/%s expand %s Enter select %s Esc cancel%s\r\n",
-                TUI_DIM, "\xe2\x86\x91", "\xe2\x86\x93", TUI_SEP, "\xe2\x86\x90", "\xe2\x86\x92",
-                TUI_SEP, TUI_SEP, TUI_RESET);
-        lines++;
-        fflush(stderr);
-        prev_lines = lines;
 
         if (!tty) {
             result = TUI_MENU_CANCELLED;
@@ -11546,32 +11805,61 @@ int tui_menu_run(tui_menu_t *m, tui_menu_item_t **out_item) {
         }
 
         /* ── Input ── */
-        int ch = dlg_read_key();
+        int ch = read_single_char();
+        if (ch == 27) {
+            int c2 = read_single_char();
+            if (c2 == '[') {
+                int c3 = read_single_char();
+                if (c3 == 'A')
+                    ch = 'k'; /* up */
+                else if (c3 == 'B')
+                    ch = 'j'; /* down */
+                else if (c3 == 'C')
+                    ch = 'l'; /* right */
+                else if (c3 == 'D')
+                    ch = 'h'; /* left */
+                else
+                    continue;
+            } else {
+                result = TUI_MENU_CANCELLED;
+                break;
+            } /* bare ESC */
+        }
 
-        if (ch == DLG_K_ESC || ch == 'q' || ch == 'Q') {
+        if (ch == 'q' || ch == 'Q') {
             result = TUI_MENU_CANCELLED;
             break;
         }
-        if (ch == DLG_K_UNKNOWN)
-            continue;
 
-        if (ch == 'k' || ch == DLG_K_UP) { /* prev selectable */
-            sel = menu_move_selectable(rows, nrows, sel, -1);
-        } else if (ch == 'j' || ch == DLG_K_DOWN) { /* next selectable */
-            sel = menu_move_selectable(rows, nrows, sel, 1);
-        } else if (ch == DLG_K_PAGE_UP) {
-            sel = menu_move_selectable(rows, nrows, sel, -vis);
-        } else if (ch == DLG_K_PAGE_DOWN) {
-            sel = menu_move_selectable(rows, nrows, sel, vis);
-        } else if (ch == 'g' || ch == DLG_K_HOME) {
-            sel = menu_find_selectable(rows, nrows, 0, 1);
-        } else if (ch == 'G' || ch == DLG_K_END) {
-            sel = menu_find_selectable(rows, nrows, nrows - 1, -1);
-        } else if ((ch == 'l' || ch == DLG_K_RIGHT) && sel >= 0) { /* expand submenu / right */
+        if (ch == 'k') { /* prev selectable */
+            for (int i = sel - 1; i >= 0; i--)
+                if (rows[i].selectable) {
+                    sel = i;
+                    break;
+                }
+        } else if (ch == 'j') { /* next selectable */
+            for (int i = sel + 1; i < nrows; i++)
+                if (rows[i].selectable) {
+                    sel = i;
+                    break;
+                }
+        } else if (ch == 'g') {
+            for (int i = 0; i < nrows; i++)
+                if (rows[i].selectable) {
+                    sel = i;
+                    break;
+                }
+        } else if (ch == 'G') {
+            for (int i = nrows - 1; i >= 0; i--)
+                if (rows[i].selectable) {
+                    sel = i;
+                    break;
+                }
+        } else if (ch == 'l') { /* expand submenu / right */
             tui_menu_item_t *it = rows[sel].item;
             if (it->kind == TUI_MENU_SUBMENU)
                 it->expanded = true;
-        } else if ((ch == 'h' || ch == DLG_K_LEFT) && sel >= 0) { /* collapse / jump to parent */
+        } else if (ch == 'h') { /* collapse / jump to parent */
             tui_menu_item_t *it = rows[sel].item;
             if (it->kind == TUI_MENU_SUBMENU && it->expanded) {
                 it->expanded = false;
@@ -11583,7 +11871,7 @@ int tui_menu_run(tui_menu_t *m, tui_menu_item_t **out_item) {
                         break;
                     }
             }
-        } else if ((ch == DLG_K_ENTER || ch == DLG_K_SPACE) && sel >= 0) {
+        } else if (ch == '\r' || ch == '\n' || ch == ' ') {
             tui_menu_item_t *it = rows[sel].item;
             if (it->kind == TUI_MENU_SUBMENU) {
                 it->expanded = !it->expanded; /* toggle */
@@ -11597,10 +11885,179 @@ int tui_menu_run(tui_menu_t *m, tui_menu_item_t **out_item) {
     }
 
     /* Erase the menu block so the surrounding scrollback stays clean. */
-    menu_erase_block(prev_lines);
+    if (native_pixel)
+        pixel_tui_session_clear_modal(stderr);
+    else
+        menu_erase_block(prev_lines);
     m->selected = sel;
     tui_cursor_show();
     fflush(stderr);
     tui_term_unlock();
     return result;
 }
+
+#ifdef DSCO_INTERNAL_TESTS
+static int tui_test_key_from_final_byte(int final) {
+    switch (final) {
+    case 'A':
+        return TUI_TEST_KEY_UP;
+    case 'B':
+        return TUI_TEST_KEY_DOWN;
+    case 'C':
+        return TUI_TEST_KEY_RIGHT;
+    case 'D':
+        return TUI_TEST_KEY_LEFT;
+    case 'H':
+        return TUI_TEST_KEY_HOME;
+    case 'F':
+        return TUI_TEST_KEY_END;
+    case 'Z':
+        return TUI_TEST_KEY_BACKTAB;
+    default:
+        return TUI_TEST_KEY_UNKNOWN;
+    }
+}
+
+int tui_test_decode_key_sequence(const char *seq) {
+    if (!seq || !seq[0])
+        return TUI_TEST_KEY_UNKNOWN;
+    if (seq[0] != '\033') {
+        if (seq[0] == '\r' || seq[0] == '\n')
+            return TUI_TEST_KEY_ENTER;
+        if (seq[0] == '\t')
+            return TUI_TEST_KEY_TAB;
+        if (seq[0] == ' ')
+            return TUI_TEST_KEY_SPACE;
+        return TUI_TEST_KEY_UNKNOWN;
+    }
+    if (seq[1] == '\0')
+        return TUI_TEST_KEY_ESC;
+    if (seq[1] != '[' && seq[1] != 'O')
+        return TUI_TEST_KEY_UNKNOWN;
+
+    const char *p = seq + 2;
+    if (!*p)
+        return TUI_TEST_KEY_UNKNOWN;
+    if (seq[1] == 'O')
+        return tui_test_key_from_final_byte((unsigned char)*p);
+    if (*p == '?')
+        return TUI_TEST_KEY_UNKNOWN;
+
+    char *end = NULL;
+    long n = strtol(p, &end, 10);
+    if (end && *end == '~' && end[1] == '\0') {
+        switch (n) {
+        case 1:
+            return TUI_TEST_KEY_HOME;
+        case 4:
+            return TUI_TEST_KEY_END;
+        case 5:
+            return TUI_TEST_KEY_PAGE_UP;
+        case 6:
+            return TUI_TEST_KEY_PAGE_DOWN;
+        default:
+            return TUI_TEST_KEY_UNKNOWN;
+        }
+    }
+
+    size_t len = strlen(p);
+    if (len == 1)
+        return tui_test_key_from_final_byte((unsigned char)p[0]);
+    char final = p[len - 1];
+    if ((final >= 'A' && final <= 'Z') || (final >= 'a' && final <= 'z'))
+        return tui_test_key_from_final_byte((unsigned char)final);
+    return TUI_TEST_KEY_UNKNOWN;
+}
+
+int tui_test_dialog_move_row(int row, int maxrow, int key) {
+    if (maxrow < 0)
+        return 0;
+    if (row < 0)
+        row = 0;
+    if (row > maxrow)
+        row = maxrow;
+
+    switch (key) {
+    case TUI_TEST_KEY_PAGE_UP:
+    case TUI_TEST_KEY_HOME:
+        return 0;
+    case TUI_TEST_KEY_PAGE_DOWN:
+    case TUI_TEST_KEY_END:
+        return maxrow;
+    case TUI_TEST_KEY_UP:
+        return row > 0 ? row - 1 : maxrow;
+    case TUI_TEST_KEY_DOWN:
+        return row < maxrow ? row + 1 : 0;
+    default:
+        return row;
+    }
+}
+
+static int tui_test_first_selectable(const bool *selectable, int nrows) {
+    for (int i = 0; i < nrows; i++)
+        if (selectable[i])
+            return i;
+    return -1;
+}
+
+static int tui_test_last_selectable(const bool *selectable, int nrows) {
+    for (int i = nrows - 1; i >= 0; i--)
+        if (selectable[i])
+            return i;
+    return -1;
+}
+
+int tui_test_menu_move_selection(const bool *selectable, int nrows, int selected, int delta) {
+    if (!selectable || nrows <= 0)
+        return -1;
+    int first = tui_test_first_selectable(selectable, nrows);
+    if (first < 0)
+        return -1;
+    int last = tui_test_last_selectable(selectable, nrows);
+
+    int cur = selected;
+    if (cur < 0)
+        cur = first;
+    else if (cur >= nrows)
+        cur = last;
+    else if (!selectable[cur]) {
+        int snap = -1;
+        if (delta < 0) {
+            for (int i = cur; i >= 0; i--)
+                if (selectable[i]) {
+                    snap = i;
+                    break;
+                }
+        } else {
+            for (int i = cur; i < nrows; i++)
+                if (selectable[i]) {
+                    snap = i;
+                    break;
+                }
+        }
+        cur = snap >= 0 ? snap : (delta < 0 ? first : last);
+    }
+
+    int steps = delta < 0 ? -delta : delta;
+    for (int s = 0; s < steps; s++) {
+        int next = -1;
+        if (delta > 0) {
+            for (int i = cur + 1; i < nrows; i++)
+                if (selectable[i]) {
+                    next = i;
+                    break;
+                }
+        } else if (delta < 0) {
+            for (int i = cur - 1; i >= 0; i--)
+                if (selectable[i]) {
+                    next = i;
+                    break;
+                }
+        }
+        if (next < 0)
+            break;
+        cur = next;
+    }
+    return cur;
+}
+#endif

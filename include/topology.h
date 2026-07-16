@@ -10,15 +10,17 @@ typedef enum {
     TIER_HAIKU  = 0,   /* fast / cheap / classifier / executor */
     TIER_SONNET = 1,   /* mid-tier / implementer / analyst */
     TIER_OPUS   = 2,   /* strategic / planner / synthesizer */
+    TIER_FABLE  = 3,   /* root / frontier delegator */
 } model_tier_t;
 
 static inline const char *tier_model_id(model_tier_t t) {
     switch (t) {
-        case TIER_HAIKU:  return "claude-haiku-4-5-20251001";
-        case TIER_SONNET: return "claude-sonnet-4-6";
-        case TIER_OPUS:   return "claude-opus-4-6";
+        case TIER_HAIKU:  return "claude-haiku-4-5";
+        case TIER_SONNET: return "claude-sonnet-5";
+        case TIER_OPUS:   return "claude-opus-4-8";
+        case TIER_FABLE:  return "claude-fable-5";
     }
-    return "claude-sonnet-4-6";
+    return "claude-sonnet-5";
 }
 
 static inline const char *tier_label(model_tier_t t) {
@@ -26,6 +28,7 @@ static inline const char *tier_label(model_tier_t t) {
         case TIER_HAIKU:  return "H";
         case TIER_SONNET: return "S";
         case TIER_OPUS:   return "O";
+        case TIER_FABLE:  return "F";
     }
     return "?";
 }

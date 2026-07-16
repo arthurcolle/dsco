@@ -46,6 +46,9 @@ typedef struct {
     int    supports_thinking;       /* 1 = exposes a reasoning parameter */
     int    multimodal;              /* 1 = accepts/produces non-text modalities */
     int    tool_capable;             /* 1 = supports tool/function calling */
+    double intelligence_index;       /* benchmark score; -1 when unavailable */
+    double coding_index;             /* benchmark score; -1 when unavailable */
+    double agentic_index;            /* benchmark score; -1 when unavailable */
     long   created;                 /* unix timestamp, 0 if unknown */
 } or_model_view_t;
 
