@@ -519,6 +519,190 @@ static void test_populated_fixture_density(void) {
     unlink(path);
 }
 
+/* ── Transcript ghost rows: live tool cards at the transcript tail ────── */
+
+typedef struct {
+    int width;
+    int height;
+    unsigned char *rgb;
+} ppm_image_t;
+
+static bool ppm_load(const char *path, ppm_image_t *image) {
+    memset(image, 0, sizeof(*image));
+    FILE *file = fopen(path, "rb");
+    if (!file) return false;
+    char magic[3] = {0};
+    int width = 0, height = 0, max_value = 0;
+    if (fscanf(file, "%2s %d %d %d", magic, &width, &height, &max_value) != 4 ||
+        strcmp(magic, "P6") != 0 || width < 1 || height < 1 || max_value != 255) {
+        fclose(file);
+        return false;
+    }
+    fgetc(file); /* single whitespace after the header */
+    size_t bytes = (size_t)width * (size_t)height * 3U;
+    image->rgb = malloc(bytes);
+    bool ok = image->rgb && fread(image->rgb, 1, bytes, file) == bytes;
+    fclose(file);
+    if (!ok) {
+        free(image->rgb);
+        memset(image, 0, sizeof(*image));
+    }
+    image->width = ok ? width : 0;
+    image->height = ok ? height : 0;
+    return ok;
+}
+
+static const pixel_tui_fixture_message_t k_ghost_messages[] = {
+    {.role = "USER", .text = "Explain the repaint pipeline and preserve both renderers."},
+    {.role = "ASSISTANT", .text =
+        "## Pipeline\n\nRetain layout, raster once, diff bounded tiles, then encode "
+        "only changed rectangles."},
+    {.role = "TOOL", .detail = "make test_pixel",
+     .text = "native compositor tests passed"},
+};
+
+static pixel_tui_fixture_t ghost_fixture(const pixel_tui_fixture_tool_t *tools,
+                                         int tool_count) {
+    return (pixel_tui_fixture_t){
+        .model = "openai-codex/gpt-5.6-luna",
+        .slot_name = "native",
+        .state = PIXEL_TUI_EXECUTING,
+        .messages = k_ghost_messages,
+        .message_count = 3,
+        .turn = 4,
+        .input_tokens = 1200,
+        .output_tokens = 400,
+        .tools_used = 2,
+        .context_percent = 31.0,
+        .tools = tools,
+        .tool_count = tool_count,
+    };
+}
+
+static void test_ghost_row_band(void) {
+    char base_path[160], run_path[160];
+    snprintf(base_path, sizeof(base_path), "/tmp/dsco-ghost-base-%ld.ppm",
+             (long)getpid());
+    snprintf(run_path, sizeof(run_path), "/tmp/dsco-ghost-run-%ld.ppm",
+             (long)getpid());
+    pixel_tui_fixture_t baseline = ghost_fixture(NULL, 0);
+    CHECK(pixel_tui_write_fixture_ppm(base_path, 1120, 700, &baseline, NULL),
+          "ghost baseline fixture should render");
+    static const pixel_tui_fixture_tool_t running_tool[] = {
+        {.name = "bash", .preview = "{\"command\":\"make test\"}",
+         .running_for_s = 3.2, .status = 0},
+    };
+    pixel_tui_fixture_t running = ghost_fixture(running_tool, 1);
+    CHECK(pixel_tui_write_fixture_ppm(run_path, 1120, 700, &running, NULL),
+          "running-tool fixture should render");
+    ppm_image_t base = {0}, run = {0};
+    CHECK(ppm_load(base_path, &base) && ppm_load(run_path, &run) &&
+          base.width == run.width && base.height == run.height,
+          "ghost artifacts should load with matching geometry");
+    if (base.rgb && run.rgb) {
+        /* Calibrated bands at 1120x700: the transcript header status label
+         * ("TOOL bash") lives near y=72-81 and the ghost band near y=592-610.
+         * Everything between must be byte-identical: durable transcript rows
+         * never move while an operation runs. */
+        const int header_lo = 55, header_hi = 110;
+        const int band_lo = 550, band_hi = 645;
+        long total = 0, band = 0, stray = 0;
+        int stray_row = -1;
+        for (int y = 0; y < base.height; y++) {
+            for (int x = 0; x < base.width; x++) {
+                size_t at = ((size_t)y * (size_t)base.width + (size_t)x) * 3U;
+                if (memcmp(base.rgb + at, run.rgb + at, 3) == 0) continue;
+                total++;
+                if (y >= band_lo && y <= band_hi) {
+                    band++;
+                } else if (y < header_lo || y > header_hi) {
+                    stray++;
+                    if (stray_row < 0) stray_row = y;
+                }
+            }
+        }
+        CHECK(band > 400,
+              "a running tool should paint a substantial ghost band "
+              "(band=%ld total=%ld)", band, total);
+        CHECK(stray == 0,
+              "ghost diffs must stay in the tail band and header label "
+              "(stray=%ld first_row=%d)", stray, stray_row);
+    }
+    free(base.rgb);
+    free(run.rgb);
+    unlink(base_path);
+    unlink(run_path);
+}
+
+static void test_ghost_reserves_capacity(void) {
+    char path[160];
+    snprintf(path, sizeof(path), "/tmp/dsco-ghost-capacity-%ld.ppm",
+             (long)getpid());
+    pixel_tui_density_metrics_t base_density = {0}, tool_density = {0};
+    pixel_tui_fixture_t baseline = ghost_fixture(NULL, 0);
+    CHECK(pixel_tui_write_fixture_ppm(path, 1120, 700, &baseline, &base_density),
+          "capacity baseline should render");
+    static const pixel_tui_fixture_tool_t running_tool[] = {
+        {.name = "sandbox_run", .preview = "{\"cmd\":\"sleep 30\"}",
+         .running_for_s = 12.0, .status = 0},
+    };
+    pixel_tui_fixture_t running = ghost_fixture(running_tool, 1);
+    CHECK(pixel_tui_write_fixture_ppm(path, 1120, 700, &running, &tool_density),
+          "capacity running fixture should render");
+    int reserved = base_density.line_capacity - tool_density.line_capacity;
+    CHECK(reserved >= 1 && reserved <= 2,
+          "one running ghost should reserve one row plus hairline "
+          "(base=%d tool=%d)", base_density.line_capacity,
+          tool_density.line_capacity);
+    unlink(path);
+}
+
+static void test_ghost_resolved_invisible(void) {
+    char base_path[160], done_path[160];
+    snprintf(base_path, sizeof(base_path), "/tmp/dsco-ghost-plain-%ld.ppm",
+             (long)getpid());
+    snprintf(done_path, sizeof(done_path), "/tmp/dsco-ghost-done-%ld.ppm",
+             (long)getpid());
+    pixel_tui_fixture_t baseline = ghost_fixture(NULL, 0);
+    CHECK(pixel_tui_write_fixture_ppm(base_path, 1120, 700, &baseline, NULL),
+          "resolved baseline should render");
+    static const pixel_tui_fixture_tool_t done_tool[] = {
+        {.name = "bash", .preview = "{\"command\":\"make test\"}",
+         .running_for_s = 3.2, .status = 1},
+    };
+    pixel_tui_fixture_t resolved = ghost_fixture(done_tool, 1);
+    CHECK(pixel_tui_write_fixture_ppm(done_path, 1120, 700, &resolved, NULL),
+          "resolved-tool fixture should render");
+    uint64_t base_hash = file_hash(base_path);
+    CHECK(base_hash != 0 && file_hash(done_path) == base_hash,
+          "reduced-motion fixtures resolve instantly: a done tool must render "
+          "bit-identical to the no-tool baseline");
+    unlink(base_path);
+    unlink(done_path);
+}
+
+static void test_ghost_artifact_render(void) {
+    /* Deterministic design artifact: three concurrent RUNNING operations at
+     * review scale. Kept in /tmp for visual iteration (never asserted on
+     * hash: elapsed labels tick with the wall clock). */
+    static const pixel_tui_fixture_tool_t tools[] = {
+        {.name = "bash", .preview = "{\"command\":\"make test\"}",
+         .running_for_s = 3.2, .status = 0},
+        {.name = "sandbox_run", .preview = "{\"cmd\":\"sleep 30\",\"timeout\":60}",
+         .running_for_s = 14.6, .status = 0},
+        {.name = "web_fetch", .preview = "{\"url\":\"https://distributed.systems\"}",
+         .running_for_s = 0.8, .status = 0},
+    };
+    pixel_tui_fixture_t fixture = ghost_fixture(tools, 3);
+    pixel_tui_density_metrics_t density = {0};
+    CHECK(pixel_tui_write_fixture_ppm("/tmp/dsco-ghost-rows-artifact.ppm",
+                                      1120, 700, &fixture, &density),
+          "three-ghost artifact should render headlessly");
+    CHECK(density.line_capacity >= 20,
+          "three ghost rows must not exhaust review capacity (%d)",
+          density.line_capacity);
+}
+
 static void test_frame_telemetry_aggregation(void) {
     const char *old = getenv("DSCO_PIXEL_TUI_PERF");
     char saved[256];
@@ -707,6 +891,10 @@ int main(void) {
     test_pixel_backend_contract();
     test_headless_session_artifacts();
     test_populated_fixture_density();
+    test_ghost_row_band();
+    test_ghost_reserves_capacity();
+    test_ghost_resolved_invisible();
+    test_ghost_artifact_render();
     test_frame_telemetry_aggregation();
     test_dual_compositor_parity_corpus();
     test_capture_parser_overwrite_semantics();
