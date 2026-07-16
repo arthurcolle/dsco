@@ -73,19 +73,53 @@ bool native_composer_build(native_ui_scene_t *scene, int width, int height,
     top->style.flow = NATIVE_UI_FLOW_ROW;
     top->style.align = NATIVE_UI_ALIGN_CENTER;
     top->style.gap = 8;
+    bool exec = model->exec_kind != 0 &&
+                model->exec_text && model->exec_text[0];
+    native_ui_node_t *glyph = add_node(
+        scene, node_index(scene, top), NATIVE_COMPOSER_KEY_EXEC_GLYPH,
+        NATIVE_UI_ELEMENT_CUSTOM, NATIVE_UI_ROLE_STATUS);
     native_ui_node_t *title = add_node(
         scene, node_index(scene, top), NATIVE_COMPOSER_KEY_TITLE,
         NATIVE_UI_ELEMENT_TEXT, NATIVE_UI_ROLE_COMPOSER);
     native_ui_node_t *live = add_node(
         scene, node_index(scene, top), NATIVE_COMPOSER_KEY_LIVE,
         NATIVE_UI_ELEMENT_TEXT, NATIVE_UI_ROLE_QUEUE);
-    if (!title || !live) return false;
+    if (!glyph || !title || !live) return false;
+    set_fixed_width(glyph, exec ? 14 : 0);
+    glyph->value = model->exec_phase;
+    glyph->style.foreground = model->exec_kind == 2 ? NATIVE_UI_COLOR_SUCCESS
+        : model->exec_kind == 3 ? NATIVE_UI_COLOR_DANGER
+        : NATIVE_UI_COLOR_ACCENT;
+    glyph->style.opacity = model->exec_kind == 1 ? 255 : model->exec_flash;
+    glyph->state |= NATIVE_UI_STATE_LIVE;
+    if (exec) {
+        native_ui_node_set_accessibility_label(
+            glyph, model->exec_label && model->exec_label[0]
+                ? model->exec_label : model->exec_text);
+    } else {
+        /* Idle collapses the glyph without changing node identity, exactly
+         * like the optional clock below: zero layout shift on resolve. */
+        glyph->state &= ~NATIVE_UI_STATE_VISIBLE;
+    }
     title->constraints.min_width = 40;
     title->constraints.grow = 1;
     title->style.type = NATIVE_UI_TYPE_LABEL;
     title->style.foreground = NATIVE_UI_COLOR_TEXT;
     title->style.opacity = 185;
-    native_ui_node_set_text(title, "COMPOSER");
+    if (exec) {
+        native_ui_node_set_text(title, model->exec_text);
+        title->style.foreground = model->exec_kind == 1 ? NATIVE_UI_COLOR_WARNING
+            : model->exec_kind == 2 ? NATIVE_UI_COLOR_SUCCESS
+            : NATIVE_UI_COLOR_DANGER;
+        title->style.opacity = model->exec_kind == 1
+            ? 235 : (uint8_t)(120 + model->exec_flash / 2);
+        title->state |= NATIVE_UI_STATE_LIVE;
+        native_ui_node_set_accessibility_label(
+            title, model->exec_label && model->exec_label[0]
+                ? model->exec_label : model->exec_text);
+    } else {
+        native_ui_node_set_text(title, "COMPOSER");
+    }
     char live_label[64];
     snprintf(live_label, sizeof(live_label), "LIVE  /  QUEUE %d/%d",
              model->queue_depth,

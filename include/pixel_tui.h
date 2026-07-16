@@ -155,6 +155,17 @@ typedef struct {
     const char *text;
 } pixel_tui_fixture_message_t;
 
+/* Live-operation telemetry for fixtures: mirrors what the governed tool gate
+ * feeds pixel_tui_session_tool_begin/_end, so running/resolved operations
+ * (exec ticker, masthead activity ring) render deterministically headless. */
+typedef struct {
+    const char *name;
+    const char *preview;
+    int status;              /* 0 running, 1 done, 2 error */
+    double elapsed_ms;       /* for resolved ops */
+    double started_offset_s; /* how long ago the op began */
+} pixel_tui_fixture_tool_t;
+
 typedef struct {
     const char *model;
     const char *slot_name;
@@ -170,6 +181,8 @@ typedef struct {
     int tools_used;
     double cost_usd;
     double context_percent;
+    const pixel_tui_fixture_tool_t *tools;
+    int tool_count;
 } pixel_tui_fixture_t;
 
 typedef struct {
@@ -189,6 +202,16 @@ typedef struct {
 bool pixel_tui_write_fixture_ppm(const char *path, int width, int height,
                                  const pixel_tui_fixture_t *fixture,
                                  pixel_tui_density_metrics_t *metrics);
+
+/* Headless cadence probe: evaluates the compositor thread's real wait/repaint
+ * decision for `running_tools` live operations on a scratch session. Returns
+ * the chosen sleep in ms (full rate for motion, ~66ms tool tick, 250ms
+ * reduced-motion transient, 500ms parked), or -1 while a live session owns
+ * the compositor. `fast_out` reports animation-rate frames; `transient_out`
+ * reports the reduced-motion tick path. */
+int pixel_tui_animation_cadence_probe(int running_tools,
+                                      bool animation_enabled,
+                                      bool *fast_out, bool *transient_out);
 
 /* ── Generative UI ───────────────────────────────────────────────────────
  * Render a declarative native_ui JSON scene (see native_ui_scene_from_json)
