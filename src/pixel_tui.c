@@ -107,6 +107,12 @@ typedef struct {
 #define PIXEL_MESSAGE_CAP 512
 #define PIXEL_COMMAND_CAP 160
 #define PIXEL_TOOL_VIS_CAP 8
+/* Ghost rows: ephemeral live tool cards pinned at the transcript tail. The
+ * settle windows match the FLASH decay durations in tool_end so a resolved
+ * card fades exactly as long as its completion wash plays. */
+#define PIXEL_GHOST_ROW_CAP 4
+#define PIXEL_GHOST_SETTLE_OK_S 0.9
+#define PIXEL_GHOST_SETTLE_ERR_S 1.6
 #define PIXEL_SWARM_VIS_CAP 12
 #define PIXEL_TURN_VIS_CAP 10
 #define PIXEL_COMPOSER_MENU_CAP 10
@@ -133,6 +139,9 @@ typedef struct {
     pixel_op_status_t status;
     double started_s;
     double elapsed_ms;
+    /* Compositor-clock resolution instant; 0 while RUNNING. elapsed_ms is
+     * caller wall-clock and cannot anchor the ghost settle window. */
+    double resolved_s;
 } pixel_tool_visual_t;
 
 typedef struct {
@@ -1378,6 +1387,44 @@ static const pixel_tool_visual_t *session_latest_running_tool(void) {
     return latest;
 }
 
+/* Collect the tool slots that earn a ghost row: everything RUNNING, plus
+ * resolved slots still inside their settle window whose completion FLASH is
+ * still visible. Reduced-motion timelines resolve FLASH instantly, so settled
+ * entries drop immediately there (and in headless fixtures), which keeps
+ * deterministic renders free of half-faded cards. Ascending by sequence;
+ * overflow keeps the newest PIXEL_GHOST_ROW_CAP. */
+static int session_collect_ghosts(const pixel_tool_visual_t *ghosts[PIXEL_GHOST_ROW_CAP],
+                                  double now) {
+    const pixel_tool_visual_t *live[PIXEL_TOOL_VIS_CAP];
+    int live_count = 0;
+    for (int i = 0; i < PIXEL_TOOL_VIS_CAP; i++) {
+        const pixel_tool_visual_t *tool = &g_session.tool_visuals[i];
+        if (!tool->used) continue;
+        if (tool->status != PIXEL_OP_RUNNING) {
+            double settle = tool->status == PIXEL_OP_ERROR
+                                ? PIXEL_GHOST_SETTLE_ERR_S
+                                : PIXEL_GHOST_SETTLE_OK_S;
+            if (tool->resolved_s <= 0.0 || now - tool->resolved_s >= settle)
+                continue;
+            if (session_motion_value(MOTION_KEY_TOOL(tool->sequence),
+                                     MOTION_PROP_FLASH, 0.0) <= 0.004)
+                continue;
+        }
+        int at = live_count++;
+        while (at > 0 && live[at - 1]->sequence > tool->sequence) {
+            live[at] = live[at - 1];
+            at--;
+        }
+        live[at] = tool;
+    }
+    int skip = live_count > PIXEL_GHOST_ROW_CAP
+                   ? live_count - PIXEL_GHOST_ROW_CAP : 0;
+    int count = live_count - skip;
+    for (int i = 0; i < count; i++)
+        ghosts[i] = live[skip + i];
+    return count;
+}
+
 static bool swarm_visual_terminal(const char *status) {
     return status && (!strcasecmp(status, "done") || !strcasecmp(status, "error") ||
                       !strcasecmp(status, "killed"));
@@ -2036,7 +2083,9 @@ static int draw_rich_run(px_canvas_t *c, int x, int y, int max_width,
 }
 
 static void draw_session_transcript(px_canvas_t *c, int x, int y, int w, int h) {
-    if (!c || w < 80 || h < 20 || g_session.message_count <= 0) return;
+    /* No message_count guard: a tool that fires before any transcript row
+     * still earns its live ghost card at the tail. */
+    if (!c || w < 80 || h < 20) return;
     /* Keep the native face optically dense and use the font's own leading.
      * Exact backing pixels preserve edge clarity at this size; the previous
      * 12pt/+2 combination still hid several review lines in laptop viewports. */
@@ -2057,43 +2106,55 @@ static void draw_session_transcript(px_canvas_t *c, int x, int y, int w, int h) 
     int avg_advance = alphabet_w > 0 ? (alphabet_w + 25) / 26 : 6;
     int chars = (w - role_w - 16) / (avg_advance > 0 ? avg_advance : 1);
     if (chars < 12) chars = 12;
-    int line_cap = g_session.message_count * 32;
-    if (line_cap < 256) line_cap = 256;
-    if (line_cap > 4096) line_cap = 4096;
-    pixel_visual_line_t *lines = visual_lines_acquire(line_cap);
-    if (!lines) return;
+    pixel_visual_line_t *lines = NULL;
     int line_count = 0;
-    int first_message = 0;
-    int last_at = (g_session.message_start + g_session.message_count - 1) %
-                  PIXEL_MESSAGE_CAP;
-    const pixel_message_t *last_message = &g_session.messages[last_at];
-    if (chars == s_visual_cached_chars &&
-        g_session.message_start == s_visual_cached_message_start &&
-        g_session.message_count == s_visual_cached_message_count &&
-        last_message->sequence == s_visual_cached_last_sequence) {
-        /* The only mutable message in a streaming transcript is the newest.
-         * Preserve every older wrapped line and rebuild just that suffix. */
-        while (line_count < s_visual_cached_line_count &&
-               lines[line_count].sequence != last_message->sequence)
-            line_count++;
-        first_message = g_session.message_count - 1;
-    } else if (chars == s_visual_cached_chars &&
-               g_session.message_start == s_visual_cached_message_start &&
-               g_session.message_count == s_visual_cached_message_count + 1) {
-        line_count = s_visual_cached_line_count;
-        first_message = g_session.message_count - 1;
+    if (g_session.message_count > 0) {
+        int line_cap = g_session.message_count * 32;
+        if (line_cap < 256) line_cap = 256;
+        if (line_cap > 4096) line_cap = 4096;
+        lines = visual_lines_acquire(line_cap);
+        if (!lines) return;
+        int first_message = 0;
+        int last_at = (g_session.message_start + g_session.message_count - 1) %
+                      PIXEL_MESSAGE_CAP;
+        const pixel_message_t *last_message = &g_session.messages[last_at];
+        if (chars == s_visual_cached_chars &&
+            g_session.message_start == s_visual_cached_message_start &&
+            g_session.message_count == s_visual_cached_message_count &&
+            last_message->sequence == s_visual_cached_last_sequence) {
+            /* The only mutable message in a streaming transcript is the newest.
+             * Preserve every older wrapped line and rebuild just that suffix. */
+            while (line_count < s_visual_cached_line_count &&
+                   lines[line_count].sequence != last_message->sequence)
+                line_count++;
+            first_message = g_session.message_count - 1;
+        } else if (chars == s_visual_cached_chars &&
+                   g_session.message_start == s_visual_cached_message_start &&
+                   g_session.message_count == s_visual_cached_message_count + 1) {
+            line_count = s_visual_cached_line_count;
+            first_message = g_session.message_count - 1;
+        }
+        for (int i = first_message; i < g_session.message_count; i++) {
+            int at = (g_session.message_start + i) % PIXEL_MESSAGE_CAP;
+            line_count = wrap_rich_message(&g_session.messages[at], chars, lines,
+                                           line_count, line_cap);
+        }
+        s_visual_cached_chars = chars;
+        s_visual_cached_message_start = g_session.message_start;
+        s_visual_cached_message_count = g_session.message_count;
+        s_visual_cached_line_count = line_count;
+        s_visual_cached_last_sequence = last_message->sequence;
     }
-    for (int i = first_message; i < g_session.message_count; i++) {
-        int at = (g_session.message_start + i) % PIXEL_MESSAGE_CAP;
-        line_count = wrap_rich_message(&g_session.messages[at], chars, lines,
-                                       line_count, line_cap);
-    }
-    s_visual_cached_chars = chars;
-    s_visual_cached_message_start = g_session.message_start;
-    s_visual_cached_message_count = g_session.message_count;
-    s_visual_cached_line_count = line_count;
-    s_visual_cached_last_sequence = last_message->sequence;
-    int visible = (h - 8) / line_h;
+    /* Reserve the tail band for live ghost rows before computing scroll: the
+     * ghosts stay pinned even while the user reviews history. Tiny panes
+     * shed ghosts until at least one durable line keeps its home. */
+    double now = monotonic_s();
+    const pixel_tool_visual_t *ghosts[PIXEL_GHOST_ROW_CAP];
+    int ghost_count = session_collect_ghosts(ghosts, now);
+    while (ghost_count > 0 && ghost_count * line_h + 6 > h - 8 - line_h)
+        ghost_count--;
+    int ghost_h = ghost_count > 0 ? ghost_count * line_h + 6 : 0;
+    int visible = (h - 8 - ghost_h) / line_h;
     if (visible < 1) return;
     int max_scroll = line_count > visible ? line_count - visible : 0;
     if (g_session.transcript_scroll > max_scroll)
@@ -2183,6 +2244,74 @@ static void draw_session_transcript(px_canvas_t *c, int x, int y, int w, int h) 
             fill_rect(c, text_x + advance + 3, yy + 2, 2, line_h - 5,
                       role_color, pulse);
         }
+    }
+    if (ghost_count < 1) return;
+    /* ── Ghost band: live tool cards pinned at the transcript tail ──────
+     * One row per running operation: name, argument preview, and a ticking
+     * elapsed value. Completion flips the accent green/red (FLASH wash) and
+     * the whole card fades with the flash track, dissolving under the
+     * arriving durable TOOL message. */
+    int gy = y + h - ghost_h + 4;
+    draw_line(c, x + 4, gy - 3, x + w - 4, gy - 3, C_DIM, 0.22);
+    for (int gi = 0; gi < ghost_count; gi++) {
+        const pixel_tool_visual_t *tool = ghosts[gi];
+        int ry = gy + gi * line_h;
+        bool running = tool->status == PIXEL_OP_RUNNING;
+        px_color_t color = tool_visual_color(tool->status);
+        double entrance = session_motion_value(MOTION_KEY_TOOL(tool->sequence),
+                                               MOTION_PROP_ENTRANCE, 1.0);
+        int slide = (int)((1.0 - entrance) * 14.0);
+        double flash = session_motion_value(MOTION_KEY_TOOL(tool->sequence),
+                                            MOTION_PROP_FLASH, 0.0);
+        double vis = running ? 1.0 : flash;
+        fill_rounded(c, x + 4 + slide, ry, w - 8, line_h - 2, 4, color,
+                     running ? 0.06 + motion_pulse(1.6, gi * 0.2) * 0.05
+                             : 0.16 * flash);
+        fill_rect(c, x + slide, ry + 2, 2, line_h - 5, color, 0.74 * vis);
+        fill_circle(c, x + 12 + slide, ry + line_h / 2 - 1, 3, color,
+                    running ? 0.50 + motion_pulse(1.1, gi * 0.13) * 0.45
+                            : 0.85 * vis);
+        const char *verb = running ? "RUN"
+                           : tool->status == PIXEL_OP_DONE ? "OK" : "ERR";
+        int backing = c->backing_scale > 0 ? c->backing_scale : 1;
+        font_compat_draw_rgb_styled(
+            (uint8_t *)c->pixels, c->pixel_width, c->pixel_height,
+            c->pixel_width * (int)sizeof(px_color_t),
+            (x + 20 + slide) * backing, ry * backing,
+            (role_w - 22) * backing, verb,
+            body_size * (float)backing, true, false,
+            color.r, color.g, color.b, (float)(0.88 * vis));
+        char elapsed_text[24];
+        double seconds = running ? now - tool->started_s
+                                 : tool->elapsed_ms / 1000.0;
+        if (seconds < 0.0) seconds = 0.0;
+        if (seconds < 10.0)
+            snprintf(elapsed_text, sizeof(elapsed_text), "%.1fs", seconds);
+        else
+            format_elapsed(elapsed_text, sizeof(elapsed_text), seconds);
+        int elapsed_w = font_compat_measure_utf8(elapsed_text,
+                                                 text_point_size(1), false);
+        if (elapsed_w < 0) elapsed_w = (int)strlen(elapsed_text) * 6;
+        int elapsed_x = x + w - 8 - elapsed_w;
+        draw_text(c, elapsed_x, ry, 1, elapsed_text, color, 0.86 * vis,
+                  elapsed_w + 4);
+        int name_x = x + role_w + slide;
+        int name_avail = elapsed_x - name_x - 10;
+        if (name_avail > 8)
+            draw_text_ellipsis(c, name_x, ry, 1, tool->name, color,
+                               0.92 * vis, name_avail);
+        int name_w = font_compat_measure_utf8(tool->name,
+                                              text_point_size(1), false);
+        if (name_w < 0) name_w = (int)strlen(tool->name) * 6;
+        if (name_w > name_avail) name_w = name_avail;
+        int preview_x = name_x + name_w + 10;
+        int preview_avail = elapsed_x - preview_x - 8;
+        if (tool->preview[0] && preview_avail > 24)
+            draw_text_ellipsis(c, preview_x, ry, 1, tool->preview, C_DIM,
+                               0.72 * vis, preview_avail);
+        if (running)
+            draw_motion_sweep(c, x + role_w, ry + line_h - 3,
+                              w - role_w - 8, 2, color, 1.4, 0.50);
     }
 }
 
@@ -2757,7 +2886,16 @@ static void fixture_density_metrics(int width, int height,
     int content_h = transcript_h - 27;
     int measured_h = font_compat_line_height(SESSION_TRANSCRIPT_BODY_SIZE, false);
     int line_h = measured_h > 0 ? measured_h : 15;
-    int capacity = content_h > 8 ? (content_h - 8) / line_h : 0;
+    /* Mirror the transcript's ghost-band reservation so line_capacity and
+     * visible_lines stay honest while operations run. Zero tools keeps the
+     * metrics byte-identical to the pre-ghost behavior. */
+    double now = monotonic_s();
+    const pixel_tool_visual_t *ghosts[PIXEL_GHOST_ROW_CAP];
+    int ghost_count = session_collect_ghosts(ghosts, now);
+    while (ghost_count > 0 && ghost_count * line_h + 6 > content_h - 8 - line_h)
+        ghost_count--;
+    int ghost_h = ghost_count > 0 ? ghost_count * line_h + 6 : 0;
+    int capacity = content_h > 8 ? (content_h - 8 - ghost_h) / line_h : 0;
     int wrapped = s_visual_cached_line_count;
     int visible = wrapped < capacity ? wrapped : capacity;
     int first = wrapped - visible;
@@ -2857,6 +2995,27 @@ bool pixel_tui_write_fixture_ppm(const char *path, int width, int height,
     }
     g_session.message_count = count;
     g_session.next_sequence = (uint64_t)count + 1U;
+    int tool_count = fixture->tool_count;
+    if (tool_count < 0 || !fixture->tools) tool_count = 0;
+    if (tool_count > PIXEL_TOOL_VIS_CAP) tool_count = PIXEL_TOOL_VIS_CAP;
+    for (int i = 0; i < tool_count; i++) {
+        const pixel_tui_fixture_tool_t *source = &fixture->tools[i];
+        pixel_tool_visual_t *tool = &g_session.tool_visuals[i];
+        tool->used = true;
+        tool->sequence = (uint64_t)i + 1U;
+        tool->status = source->status == 1 ? PIXEL_OP_DONE
+                     : source->status == 2 ? PIXEL_OP_ERROR
+                     : PIXEL_OP_RUNNING;
+        double for_s = source->running_for_s > 0.0 ? source->running_for_s : 0.0;
+        tool->started_s = monotonic_s() - for_s;
+        tool->elapsed_ms = for_s * 1000.0;
+        tool->resolved_s = tool->status == PIXEL_OP_RUNNING ? 0.0 : monotonic_s();
+        if (source->name)
+            plain_text_copy(tool->name, sizeof(tool->name), source->name);
+        if (source->preview)
+            plain_text_copy(tool->preview, sizeof(tool->preview), source->preview);
+        g_session.next_tool_sequence = tool->sequence;
+    }
     ui_motion_init(&g_session.motion, true);
 
     px_canvas_t *canvas = render_session_frame(
@@ -3491,7 +3650,13 @@ static void *session_animation_thread_main(void *arg) {
     while (g_session.active && !g_session.animation_stop) {
         bool fast_before_wait = session_animation_fast();
         bool transient_before_wait = session_has_live_notice();
+        /* Middle cadence: a running tool needs its elapsed value and ghost
+         * pulses to tick smoothly (10 fps) without paying the full-rate
+         * animation budget. Begin/resolve moments carry live motion tracks
+         * and therefore run at the fast interval anyway. */
+        bool ticking_before_wait = session_running_tool_count() > 0;
         int delay_ms = fast_before_wait ? g_session.animation_interval_ms :
+                       ticking_before_wait ? 100 :
                        (transient_before_wait ? 250 : 500);
         if (g_session.terminal_suspended) {
             delay_ms = 500;
@@ -3512,13 +3677,15 @@ static void *session_animation_thread_main(void *arg) {
         FILE *out = session_output(stderr);
         bool animate = session_animation_fast();
         bool transient = session_has_live_notice();
+        bool ticking = session_running_tool_count() > 0;
         bool resized = session_refresh_geometry_locked(out, false);
         double now = monotonic_s();
         bool stream_due = g_session.stream_repaint_pending &&
             (g_session.last_paint_s <= 0.0 ||
              now - g_session.last_paint_s >= session_repaint_interval_s());
         if (animate) g_session.animation_frame++;
-        if (!resized && (stream_due || animate || transient || transient_before_wait))
+        if (!resized && (stream_due || animate || transient || ticking ||
+                         transient_before_wait))
             (void)session_repaint(out, stream_due);
         ui_motion_prune(&g_session.motion, monotonic_s(), 2.0);
     }
@@ -4408,6 +4575,13 @@ uint64_t pixel_tui_session_tool_begin(FILE *out, const char *name, const char *i
     plain_text_copy(tool->name, sizeof(tool->name), name);
     if (input_json && *input_json)
         plain_text_copy(tool->preview, sizeof(tool->preview), input_json);
+    /* Arrival track: the ghost row eases in from the left exactly like a new
+     * transcript message. Reduced motion resolves instantly. */
+    ui_motion_snap(&g_session.motion, MOTION_KEY_TOOL(tool->sequence),
+                   MOTION_PROP_ENTRANCE, 0.0);
+    ui_motion_set(&g_session.motion, MOTION_KEY_TOOL(tool->sequence),
+                  MOTION_PROP_ENTRANCE, 1.0, 0.25, UI_MOTION_EASE_OUT,
+                  monotonic_s());
     pixel_turn_visual_t *turn_visual = session_current_turn_visual();
     if (turn_visual) {
         turn_visual->tool_count++;
@@ -4444,6 +4618,7 @@ void pixel_tui_session_tool_end(FILE *out, uint64_t operation_id, const char *na
         match->status = ok ? PIXEL_OP_DONE : PIXEL_OP_ERROR;
         match->elapsed_ms = elapsed_ms >= 0.0 ? elapsed_ms : 0.0;
         double now = monotonic_s();
+        match->resolved_s = now;
         ui_motion_snap(&g_session.motion, MOTION_KEY_TOOL(match->sequence),
                        MOTION_PROP_FLASH, 1.0);
         ui_motion_set(&g_session.motion, MOTION_KEY_TOOL(match->sequence),

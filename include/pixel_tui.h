@@ -155,6 +155,17 @@ typedef struct {
     const char *text;
 } pixel_tui_fixture_message_t;
 
+/* Live-operation telemetry for fixtures: exercises the transcript ghost rows
+ * (running tool cards) headlessly. Fixtures render with reduced motion, so
+ * resolved (done/error) entries settle instantly and draw nothing — only
+ * RUNNING entries are visible, deterministically. */
+typedef struct {
+    const char *name;
+    const char *preview;
+    double running_for_s;
+    int status; /* 0 running, 1 done, 2 error */
+} pixel_tui_fixture_tool_t;
+
 typedef struct {
     const char *model;
     const char *slot_name;
@@ -170,6 +181,10 @@ typedef struct {
     int tools_used;
     double cost_usd;
     double context_percent;
+    /* Appended fields: zero-initialized under existing designated
+     * initializers, so older fixtures render unchanged. */
+    const pixel_tui_fixture_tool_t *tools;
+    int tool_count;
 } pixel_tui_fixture_t;
 
 typedef struct {
