@@ -155,6 +155,16 @@ typedef struct {
     const char *text;
 } pixel_tui_fixture_message_t;
 
+/* Live-operation telemetry for fixtures: renders the inline op-card deck the
+ * governed tool gate drives in a live session. status: 0 running, 1 done,
+ * 2 error. elapsed_s is seconds since start (running) or duration (done). */
+typedef struct {
+    const char *name;
+    const char *preview;
+    int status;
+    double elapsed_s;
+} pixel_tui_fixture_tool_t;
+
 typedef struct {
     const char *model;
     const char *slot_name;
@@ -170,6 +180,9 @@ typedef struct {
     int tools_used;
     double cost_usd;
     double context_percent;
+    /* Trailing additions keep existing designated initializers compiling. */
+    const pixel_tui_fixture_tool_t *tools;
+    int tool_count;
 } pixel_tui_fixture_t;
 
 typedef struct {
@@ -189,6 +202,12 @@ typedef struct {
 bool pixel_tui_write_fixture_ppm(const char *path, int width, int height,
                                  const pixel_tui_fixture_t *fixture,
                                  pixel_tui_density_metrics_t *metrics);
+
+/* Headless seam: the human-salient argument preview a live-op card (and the
+ * masthead soul ring) shows for a tool call — first salient key's string
+ * value from the input JSON, falling back to the raw JSON. */
+void pixel_tui_tool_preview_extract(const char *name, const char *input_json,
+                                    char *dst, size_t cap);
 
 /* ── Generative UI ───────────────────────────────────────────────────────
  * Render a declarative native_ui JSON scene (see native_ui_scene_from_json)
